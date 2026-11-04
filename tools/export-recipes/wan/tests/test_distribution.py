@@ -1,13 +1,17 @@
-"""Wan の配布 recipe（`wan.distribution`）とカード（`wan.card`）— 組み立て 1 周ぶんの単体テスト。
+"""The Wan distribution recipe (`wan.distribution`) and card (`wan.card`) — unit tests of one
+assembly round.
 
-Wan2.1（`--pipeline wan`）と Wan2.2（`--pipeline wan-ti2v` — 同じ計画関数を世代の表 `WAN22` で
-組む）の両方を見る。Wan2.2 の組では、DiT / VAE の容器は Wan2.2 の pin を、テキスト資産 2 本は
-Wan2.1 の pin を名乗る（ADR 0121 決定 9 — 出所の門の分割）。
+Covers both Wan2.1 (`--pipeline wan`) and Wan2.2 (`--pipeline wan-ti2v` — the same plan function
+built with the generation table `WAN22`). In the Wan2.2 set, the DiT / VAE containers claim the
+Wan2.2 pin and the two text assets claim the Wan2.1 pin (ADR 0121 decision 9 — the split of the
+provenance check).
 
-組み立てへ届く入力は数 KB の**正当な最小コンテナ**（`ir_fixtures`・umT5 は `umt5_fixture`）と、
-書き手（`wan.text_embeds` / `wan.umt5_tokenizer`）と同じ形の合成の資産で作る。門に落とされることを
-見るケースも同じ器で作り、**宣言だけを実物とずらす**。`text_encoder` は公開と同じ形（umT5 の配布形を
-先に組み、そこへの越境参照）で組む。
+The inputs that reach the assembly are made of **valid minimal containers** of a few KB
+(`ir_fixtures`, and `umt5_fixture` for umT5) and synthetic assets in the same form as the writers
+(`wan.text_embeds` / `wan.umt5_tokenizer`). The cases that check a rejection by a check are made
+with the same vessels, with **only the declaration shifted from the real thing**. `text_encoder` is
+built in the published form (the umT5 distribution is assembled first, and referenced across
+repositories).
 
 With `KARUME_SERIES=1` on a machine that holds the real series (`outputs/series/`), the plan is
 also built once over them (an implementation-time check — ADR 0139 decision 6; SKIP otherwise).
@@ -148,47 +152,52 @@ from wan.umt5_distribution import (
     umt5_plan,
 )
 
-#: 合成の DiT の文脈入力 `[1, rows, width]`（実物の 512 × 4096 と**違う**数 — 幅を焼き込んでいれば
-#: 落ちる）。
+#: The synthetic DiT context input `[1, rows, width]` (numbers **different** from the real
+#: 512 × 4096 — it fails if the width were baked in).
 _ROWS = 6
 _WIDTH = 8
 
-#: 合成の RoPE 素表（組み立てが見るのは宣言と、transformer の容器どうしのバイト同一だけ）。
+#: The synthetic base RoPE table (the assembly only checks the declaration and the byte identity
+#: between the transformer containers).
 _ROPE_BASE = b"rope-base-table!"
 
-#: 書き手（`wan.export_dit` / `wan.export_vae`）が焼く出所の正常形。
+#: The valid provenance the writers (`wan.export_dit` / `wan.export_vae`) bake.
 _PINNED = Provenance(
     license=SOURCES[DEFAULT_MODEL].license,
     notice=NOTICE_FILENAME,
     upstream_revision=SOURCES[DEFAULT_MODEL].revision,
 )
 
-#: umT5 の書き手（`wan.umt5_export`）が焼く出所の正常形 — umT5 の上流は本家 `google/umt5-xxl` の
-#: pin で、DiT / VAE の Wan の pin とは別の行（ADR 0122 決定 1）。
+#: The valid provenance the umT5 writer (`wan.umt5_export`) bakes — the umT5 upstream is the pin of
+#: the original `google/umt5-xxl`, a different row from the Wan pin of the DiT / VAE (ADR 0122
+#: decision 1).
 _UMT5_PINNED = Provenance(
     license=UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.license,
     notice=NOTICE_FILENAME,
     upstream_revision=UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.revision,
 )
 
-#: `pipelineConfig` の欄（TS 側 `packages/models/src/wan/config.ts` の `ROOT_KEYS` /
-#: `SCHEDULER_KEYS` / `DEFAULTS_KEYS` の写し）。ロード側は未知キーも欠落も parse 時に落とすので、
-#: 焼く側とロード側の欄名は完全一致が要る。
+#: The fields of `pipelineConfig` (a copy of `ROOT_KEYS` / `SCHEDULER_KEYS` / `DEFAULTS_KEYS` of
+#: the TS side's `packages/models/src/wan/config.ts`). The loading side rejects unknown and missing
+#: keys at parse time, so the field names of the baking side and the loading side must match
+#: exactly.
 _CONFIG_KEYS = {"scheduler": ("shift",), "defaults": ("steps", "guidance")}
 
-#: TS 側の受理集合の写し（`packages/models/tests/wan_pipeline_test.ts` が `descriptor.ts` の値と
-#: 同じことを見る）。カードの表とこの fixture を比べるので、カードと TS のどちらか片方だけの
-#: 更新は赤になる。
+#: A copy of the TS side's accepted set (`packages/models/tests/wan_pipeline_test.ts` checks that it
+#: equals the values of `descriptor.ts`). The card's table is compared with this fixture, so
+#: updating only one of the card and the TS side turns red.
 _CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-card-limits.json"
 
-#: 越境参照の先（umT5 の配布リポ）と、その合成の commit SHA。
+#: The target of the cross-repository reference (the umT5 distribution repository) and its
+#: synthetic commit SHA.
 _UMT5_REPO = f"hdae/{UMT5_REPO_NAME}"
 _UMT5_REVISION = FIXTURE_REVISION
 
 
 @pytest.fixture(autouse=True)
 def _pinned_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """フィクスチャ容器に「台本が pin した revision から焼いた」出所を名乗らせる。"""
+    """Make the fixture containers claim the provenance "baked by the scripts from the pinned
+    revision"."""
     stamp_fixture_provenance(monkeypatch, _PINNED)
 
 
@@ -200,7 +209,8 @@ def _graph_container(
     rope: tuple[str, str] | None = (WAN_ROPE_BASE_ASSET, WAN_ROPE_BASE_ROLE),
     rope_payload: bytes = _ROPE_BASE,
 ) -> list[bytes]:
-    """系列に置く部品 1 本（part 列）。transformer だけが文脈入力と RoPE 素表の資産を持つ。"""
+    """One component placed in the series (a list of parts). Only the transformer has the context
+    input and the base RoPE table asset."""
     if role != WAN_TRANSFORMER_ROLE:
         return ir_container(mark=role, named=role, storage=storage, inputs=(("latent", [1, 2]),))
     assets = {} if rope is None else {rope[0]: AssetInput(rope[1], len(rope_payload), rope_payload)}
@@ -214,12 +224,14 @@ def _graph_container(
 
 
 def _vae_container(role: str, inputs: Sequence[tuple[str, list[int]]]) -> list[bytes]:
-    """VAE の chunk グラフ 1 本（潜在 + cache の入力の宣言だけを実物の形にしたもの）。"""
+    """One VAE chunk graph (only the declarations of the latent + cache inputs have the real
+    shapes)."""
     return ir_container(mark=role, named=role, storage="f16", inputs=inputs)
 
 
 def _prompt_rows() -> list[dict[str, Any]]:
-    """書き手（`wan.text_embeds.asset_metadata`）と同じ形のメタの prompts（トークン数は合成）。"""
+    """The metadata prompts in the same form as the writer (`wan.text_embeds.asset_metadata`) (the
+    token counts are synthetic)."""
     return [
         {
             "name": prompt.name,
@@ -243,9 +255,10 @@ def _text_embeds(
     extra_metadata: Mapping[str, str] = {},
     shapes: Mapping[str, Sequence[int]] = {},
 ) -> bytes:
-    """合成の埋め込み資産（`F32 [tokens, width]` + メタのキー 1 つ — 書き手と同じ形）。
+    """A synthetic embedding asset (`F32 [tokens, width]` + one metadata key — the same form as the
+    writer).
 
-    `versions` は書き手が記録する版（固定値）へ上書きする差分。
+    `versions` is a diff that overrides the versions the writer records (fixed values).
     """
     upstream = SOURCES[DEFAULT_MODEL]
     rows = _prompt_rows() if prompts is None else prompts
@@ -266,8 +279,9 @@ def _text_embeds(
 
 
 def _tokenizer_asset(**overrides: Any) -> bytes:
-    """合成のトークナイザ資産（書き手 `wan.umt5_tokenizer.build_asset` と同じ最上位の欄 — 語彙と表は
-    門が読まないので持たない）。`overrides` は欄の上書き。"""
+    """A synthetic tokenizer asset (the same top-level fields as the writer
+    `wan.umt5_tokenizer.build_asset` — the vocabulary and the tables are not read by the checks, so
+    they are absent). `overrides` overrides fields."""
     upstream = SOURCES[DEFAULT_MODEL]
     asset: dict[str, Any] = {
         "format": umt5_tokenizer.ASSET_FORMAT,
@@ -288,7 +302,8 @@ def _tokenizer_asset(**overrides: Any) -> bytes:
     return json.dumps(asset, ensure_ascii=False).encode("utf-8")
 
 
-#: VAE の decoder の i8 の配置の役割 → 容器のグラフ名（ADR 0133 決定 7 — Wan2.2 の i8 系列）。
+#: The placement role of the VAE decoder i8 → the graph name of the container (ADR 0133 decision 7
+#: — the Wan2.2 i8 series).
 _VAE_I8_GRAPHS = {
     WAN_VAE_FIRST_I8_ROLE: WAN_VAE_FIRST_ROLE,
     WAN_VAE_NEXT_I8_ROLE: WAN_VAE_NEXT_ROLE,
@@ -296,10 +311,10 @@ _VAE_I8_GRAPHS = {
 
 
 def _default_container(role: str) -> list[bytes]:
-    """配置の役割ごとの正常形（transformer は格納ラベルごと — f16 系列 / i8 系列・text_encoder は
-    umT5 の i8 系列）。出所は、transformer と VAE が `ir_fixtures` の焼く値（テストの間だけ Wan の
-    pin `_PINNED` に差し替わる）・text_encoder が umT5 の書き手の焼く本家の pin
-    （`_UMT5_PINNED`）。"""
+    """The valid form per placement role (the transformer per storage label — f16 series / i8
+    series; the text_encoder is the umT5 i8 series). The provenance is the value `ir_fixtures` bakes
+    for the transformer and the VAE (swapped to the Wan pin `_PINNED` only during the tests), and
+    the original's pin the umT5 writer bakes for the text_encoder (`_UMT5_PINNED`)."""
     if role == WAN_TEXT_ENCODER_ROLE:
         return umt5_container(provenance=_UMT5_PINNED, width=_WIDTH)
     if role == WAN_TRANSFORMER_F16_ROLE:
@@ -313,7 +328,8 @@ def _default_container(role: str) -> list[bytes]:
     return _graph_container(role)
 
 
-#: 重みを借りる組の配置の役割 → 容器のグラフ名（ADR 0134 — f16 / i8 の役割が同じグラフ名）。
+#: The placement role of a weight-borrowing set → the graph name of the container (ADR 0134 — the
+#: f16 / i8 roles have the same graph name).
 _VAE_SHARED_GRAPHS = {
     WAN_VAE_FIRST_32_ROLE: WAN_VAE_FIRST_32_ROLE,
     WAN_VAE_FIRST_32_I8_ROLE: WAN_VAE_FIRST_32_ROLE,
@@ -323,11 +339,13 @@ _VAE_SHARED_GRAPHS = {
 
 
 def _shared_container(role: str, *, mark: str | None = None) -> list[bytes]:
-    """重みを借りる組の容器（書き手 `wan.export_vae --shared` と同じ形: initializer が全部、貸し手の
-    同じテンソルキーへの共有宣言で、貸し手の格納を宣言し、重みのバイトを持たない）。
+    """The container of a weight-borrowing set (the same form as the writer
+    `wan.export_vae --shared`: every initializer is a shared declaration pointing at the same tensor
+    key of the lender, declares the lender's storage, and holds no weight bytes).
 
-    貸し手は同じラベルの既定タイルの容器（{@link _default_container} — 同じ材料 `fixture_spec`）。
-    `mark` を貸し手のグラフ名と違えると、貸し手に無いテンソルキーを名指す借り手になる（故障注入）。
+    The lender is the default-tile container of the same label ({@link _default_container} — the
+    same material `fixture_spec`). Giving `mark` a different graph name from the lender makes a
+    borrower that names tensor keys the lender does not have (fault injection).
     """
     lender = WAN_VAE_LENDER_ROLES[role]
     storage = "i8" if lender in _VAE_I8_GRAPHS else "f16"
@@ -368,21 +386,24 @@ def _build_sources(
     tokenizer: bytes | None = None,
     generation: WanGeneration = WAN21,
 ) -> WanSources:
-    """系列 5 本を偽資産で再現する（配布しない golden の混入込み）。`containers` の鍵は配置の
-    役割（`text_encoder` / `transformer_f16` / `transformer_i8` / VAE の 2 本 — Wan2.2 は
-    `transformer_f16` を持たない）。容器の出所はその時点で `ir_fixtures` が焼く値（Wan2.2 の組は
-    {@link wan22_provenance} で Wan2.2 の pin にしてから呼ぶ）。"""
+    """Reproduce the 5 series with fake assets (including goldens that must not be distributed).
+    The keys of `containers` are placement roles (`text_encoder` / `transformer_f16` /
+    `transformer_i8` / the 2 of the VAE — Wan2.2 has no `transformer_f16`). The provenance of the
+    containers is whatever `ir_fixtures` bakes at that moment (for the Wan2.2 set, call this after
+    switching to the Wan2.2 pin with {@link wan22_provenance})."""
     sources = wan_sources(root / "outputs" / "series", generation)
     placements = wan_placements(sources, generation)
     for role in generation.container_roles:
         write_component(placements[role], containers.get(role) or _default_container(role))
-    # 配布に入ってはいけない golden（系列には実際にこれらが並んでいる）。
+    # Goldens that must not enter the distribution (the series really holds these).
     for role in generation.transformer_roles:
         (placements[role].parent / "io.band-s00192-t0999.safetensors").write_bytes(b"io")
-    # pipeline_steps は主の DiT の系列の根に並ぶ（実物: 2.1 は f16 系列・2.2 は i8 系列）。
+    # pipeline_steps sit at the root of the main DiT series (for real: the f16 series for 2.1, the
+    # i8 series for 2.2).
     steps_series = placements[generation.transformer_roles[0]].parent.parent
     (steps_series / "pipeline_steps.band-boxing-cats.safetensors").write_bytes(b"steps")
-    # encoder の GPU の門の golden は f16 系列の根に並ぶ（実物: 2.2 の系列だけ）。
+    # The goldens of the encoder GPU check sit at the root of the f16 series (for real: only the
+    # 2.2 series).
     if generation.vae_encoder:
         (sources.series / "vae_encoder.boxing-cats-1280x704.safetensors").write_bytes(b"golden")
     (sources.text_encoder.parent / "reference.band-l0008.safetensors").write_bytes(b"golden")
@@ -394,9 +415,11 @@ def _build_sources(
 
 
 def _assemble_umt5(root: Path, sources: WanSources) -> Path:
-    """越境参照の参照元（umT5 の配布形）を同じ系列から組む（公開の順序 — umT5 が先）。"""
+    """Assemble the source of the cross-repository reference (the umT5 distribution) from the same
+    series (the publication order — umT5 first)."""
     out_dir = root / "models" / UMT5_REPO_NAME
-    # umT5 の配布形の必須の資産（トークナイザ — Wan の配布形は参照しない）を同じ系列の親に置く。
+    # The required asset of the umT5 distribution (the tokenizer — the Wan distribution does not
+    # reference it) is placed in the parent of the same series.
     tokenizer = write_tokenizer_asset(sources.text_encoder.parents[2])
     assemble_family([umt5_plan(sources.text_encoder, tokenizer)], out_dir, UMT5_DEFAULT_MODEL)
     return out_dir
@@ -423,7 +446,8 @@ def _render(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) 
 
 @pytest.fixture
 def assembled(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
-    """公開と同じ形の配布形（text_encoder は umT5 のリポへの越境参照）。"""
+    """A distribution in the published form (text_encoder is a cross-repository reference to the
+    umT5 repository)."""
     sources = _build_sources(tmp_path)
     out_dir = tmp_path / "models" / WAN_REPO_NAME
     manifest = assemble_family(
@@ -438,7 +462,8 @@ def assembled(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
 
 
 def _card(manifest: Mapping[str, Any], repo: str = "hdae/x") -> str:
-    """カードだけを組み直す（略称の対応表は配布 recipe の正本を渡す）。"""
+    """Rebuild only the card (the abbreviation table passed is the source of truth of the
+    distribution recipe)."""
     return render_wan_model_card(manifest, repo, WAN_QUANT_ABBREVIATIONS)
 
 
@@ -451,8 +476,9 @@ def _present(out_dir: Path) -> list[str]:
 
 
 def _overview_names_every_graph(out_dir: Path, manifest: Mapping[str, Any]) -> None:
-    """カードの「What is this」節が、manifest の weights の部品（= 配布形のグラフ）を 1 つ残らず
-    名指しすること（部品を足した日に概要のグラフの列挙だけが古びる形を落とす）。"""
+    """The card's "What is this" section names every component of the manifest's weights (= the
+    graphs of the distribution) (catches the shape where, on the day a component is added, only the
+    graph list of the overview goes stale)."""
     card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
     overview = card.split("## What is this", 1)[1].split("\n## ", 1)[0]
     for model in manifest["models"].values():
@@ -460,8 +486,8 @@ def _overview_names_every_graph(out_dir: Path, manifest: Mapping[str, Any]) -> N
         assert missing == [], missing
 
 
-#: Wan2.2 のモデル名と、その書き手（`wan.ti2v_export_dit` / `wan.export_vae --model ti2v-5b`）が焼く
-#: 出所の正常形（Wan2.2 の pin）。
+#: The Wan2.2 model name, and the valid provenance its writers (`wan.ti2v_export_dit` /
+#: `wan.export_vae --model ti2v-5b`) bake (the Wan2.2 pin).
 _TI2V = "ti2v-5b"
 _PINNED22 = Provenance(
     license=SOURCES[_TI2V].license,
@@ -469,11 +495,11 @@ _PINNED22 = Provenance(
     upstream_revision=SOURCES[_TI2V].revision,
 )
 
-#: Wan2.2 の TS 側の受理集合の写し（`descriptor.ts` の `WAN22_TI2V_GENERATION` — TS 側のテストが同じ
-#: fixture を突き合わせる）。
+#: A copy of the Wan2.2 TS side's accepted set (`WAN22_TI2V_GENERATION` of `descriptor.ts` — the TS
+#: test matches the same fixture).
 _TI2V_CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-ti2v-card-limits.json"
 
-#: Wan2.2 の参照席・実用席。
+#: The Wan2.2 reference preset and practical preset.
 _REFERENCE = "f16+dit8"
 _PRACTICAL = "f16+dit8-a8-attn8-s16"
 #: Wan2.2's online-attention preset (ADR 0132 decision 6 — the default on 2026-10-23 until conv8).
@@ -484,20 +510,21 @@ _CONV8 = "i8-a8-attn8-online-conv8"
 
 
 def _pin(model: str) -> dict[str, str]:
-    """上流の pin をテキスト資産の `source` 欄の形で返す。"""
+    """The upstream pin in the form of the `source` field of the text assets."""
     return {"repo": SOURCES[model].repo, "revision": SOURCES[model].revision}
 
 
 @pytest.fixture
 def wan22_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """フィクスチャ容器に Wan2.2 の pin を名乗らせる（autouse の Wan2.1 の pin を上書き）。"""
+    """Make the fixture containers claim the Wan2.2 pin (overriding the autouse Wan2.1 pin)."""
     stamp_fixture_provenance(monkeypatch, _PINNED22)
 
 
 def _stamped(
     monkeypatch: pytest.MonkeyPatch, provenance: Provenance, make: Callable[[], list[bytes]]
 ) -> list[bytes]:
-    """`provenance` を名乗る容器を 1 本だけ作る（作った後はテストの出所へ戻る）。"""
+    """Make one container that claims `provenance` (afterwards the tests' provenance is
+    restored)."""
     with monkeypatch.context() as scoped:
         stamp_fixture_provenance(scoped, provenance)
         return make()
@@ -510,18 +537,20 @@ def _render22(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]
 
 
 def _card22(manifest: Mapping[str, Any], repo: str = "hdae/x") -> str:
-    """Wan2.2 のカードだけを組み直す。"""
+    """Rebuild only the Wan2.2 card."""
     return render_wan_model_card(manifest, repo, WAN_QUANT_ABBREVIATIONS, card=WAN22_CARD)
 
 
 def _build_sources22(root: Path, **overrides: Any) -> WanSources:
-    """Wan2.2 の系列（i8 の DiT・f16 の VAE・Wan2.1 のテキスト資産・umT5）を偽資産で再現する。"""
+    """Reproduce the Wan2.2 series (i8 DiT, f16 VAE, the Wan2.1 text assets, umT5) with fake
+    assets."""
     return _build_sources(root, generation=WAN22, **overrides)
 
 
 @pytest.fixture
 def assembled22(tmp_path: Path, wan22_provenance: None) -> tuple[Path, dict[str, Any]]:
-    """公開と同じ形の Wan2.2 の配布形（text_encoder は umT5 のリポへの越境参照）。"""
+    """A Wan2.2 distribution in the published form (text_encoder is a cross-repository reference to
+    the umT5 repository)."""
     sources = _build_sources22(tmp_path)
     out_dir = tmp_path / "models" / WAN22_REPO_NAME
     manifest = assemble_family(
@@ -537,10 +566,10 @@ def assembled22(tmp_path: Path, wan22_provenance: None) -> tuple[Path, dict[str,
 
 class TestLayout:
     def test_it_places_the_graphs_and_the_assets_under_the_model_subtree(self, assembled) -> None:
-        """transformer は格納ラベルごとに 2 本（`model.f16.krm` / `model.i8.krm`）・VAE の
-        decoder は 1 本ずつ・資産 2 本。text_encoder は越境参照なので 1 バイトも置かない。VAE の
-        encoder は Wan2.2 だけの部品なので置かない（全世代の表に在っても 2.1 の配布形は
-        変わらない）。"""
+        """The transformer has 2 per storage label (`model.f16.krm` / `model.i8.krm`), the VAE
+        decoder 1 each, and 2 assets. The text_encoder is a cross-repository reference, so not a
+        single byte is placed. The VAE encoder is a Wan2.2-only component, so it is not placed (even
+        though it is in the all-generation table, the 2.1 distribution does not change)."""
         out_dir, _ = assembled
         own = {
             role: WAN_OUTPUT_PATHS[role]
@@ -552,7 +581,7 @@ class TestLayout:
             for rel in placed_paths(
                 own,
                 {name: labels for name, labels in WAN21.weights.items() if name != UMT5_ROLE},
-                # transformer の容器は資産 `rope_base` の専用 part が 1 本増える。
+                # The transformer containers have one more part, dedicated to the `rope_base` asset.
                 {WAN_TRANSFORMER_F16_ROLE: 4, WAN_TRANSFORMER_I8_ROLE: 4},
             )
         ]
@@ -572,9 +601,9 @@ class TestLayout:
         assert list(out_dir.rglob("reference.*")) == []
 
     def test_a_vae_encoder_beside_the_wan21_vae_is_never_carried(self, tmp_path: Path) -> None:
-        """2.1 の f16 系列に encoder の容器が置かれていても、2.1 の計画は拾わない（encoder は
-        Wan2.2 だけの部品 — 全世代の weights の表が 2.1 にも回るので、世代の欄で絞れている
-        こと）。"""
+        """Even with an encoder container in the 2.1 f16 series, the 2.1 plan does not pick it up
+        (the encoder is a Wan2.2-only component — the all-generation weights table reaches 2.1 too,
+        so the generation field must narrow it)."""
         sources = _build_sources(tmp_path)
         for role in WAN_VAE_ENCODER_ROLES:
             write_component(sources.series / role / WAN_MODEL_FILE, _graph_container(role))
@@ -585,15 +614,16 @@ class TestLayout:
             assert not set(WAN_VAE_ENCODER_ROLES) & set(quant["weights"])
 
     def test_the_manifest_declares_the_three_seats_and_the_model_assets(self, assembled) -> None:
-        """quant 席は `f16`・参照席 `f16+dit8`・実用席 `f16+dit8-a8-attn8-s16`（既定）の 3 つ
-        （ADR 0120 決定 1・裁定 2026-10-04 の 4）で、どの席も text_encoder の i8 を選ぶ（weights は
-        完全写像 — ADR 0119 追記 B）。資産はモデル単位の `text_embeds` と `umt5_tokenizer`
-        （quant 非依存 — 同 C）。"""
+        """There are 3 quant presets: `f16`, the reference preset `f16+dit8` and the practical
+        preset `f16+dit8-a8-attn8-s16` (the default) (ADR 0120 decision 1, ruling 4 of 2026-10-04),
+        and every preset selects the text_encoder i8 (weights is a complete mapping — ADR 0119
+        addendum B). The assets are the per-model `text_embeds` and `umt5_tokenizer` (independent of
+        the quant — addendum C)."""
         _, manifest = assembled
         model = _model(manifest)
         assert manifest["defaultModel"] == DEFAULT_MODEL
         assert model["pipeline"] == WAN_PIPELINE
-        # VAE の encoder（Wan2.2 だけ）は 2.1 の weights に無い — 2.1 の manifest は不変。
+        # The VAE encoder (Wan2.2 only) is not in the 2.1 weights — the 2.1 manifest is unchanged.
         assert list(model["weights"]) == [
             WAN_TEXT_ENCODER_ROLE,
             WAN_TRANSFORMER_ROLE,
@@ -602,7 +632,7 @@ class TestLayout:
         ]
         assert list(model["weights"][WAN_TEXT_ENCODER_ROLE]) == ["i8"]
         assert list(model["weights"][WAN_TRANSFORMER_ROLE]) == ["f16", "i8"]
-        # VAE の decoder の i8（Wan2.2 だけ — ADR 0133 決定 7）は 2.1 の weights に無い。
+        # The VAE decoder i8 (Wan2.2 only — ADR 0133 decision 7) is not in the 2.1 weights.
         assert list(model["weights"][WAN_VAE_FIRST_ROLE]) == ["f16"]
         assert list(model["weights"][WAN_VAE_NEXT_ROLE]) == ["f16"]
         assert list(model["assets"]) == [WAN_TEXT_EMBEDS_ROLE, WAN_TOKENIZER_ROLE]
@@ -621,8 +651,8 @@ class TestLayout:
         assert quants["f16+dit8"]["weights"] == {**text, WAN_TRANSFORMER_ROLE: "i8", **vae}
         assert quants["f16+dit8-a8-attn8-s16"]["weights"] == quants["f16+dit8"]["weights"]
         assert quants["f16"]["session"] == {}
-        # 参照席は実用席と同じ i8 の重みで session が空（自機 A/B 門の比較相手 — ADR 0110
-        # 決定 5 ②）。
+        # The reference preset has the same i8 weights as the practical preset and an empty
+        # session (the counterpart of the local A/B check — ADR 0110 decision 5 ②).
         assert quants["f16+dit8"]["session"] == {}
         assert quants["f16+dit8-a8-attn8-s16"]["session"] == {
             "linearCompute": "a8",
@@ -637,7 +667,8 @@ class TestLayout:
         assert config == WAN_PIPELINE_CONFIG
 
     def test_it_reassembles_to_the_same_bytes(self, tmp_path: Path) -> None:
-        """同じ系列から 2 度組むと、manifest も全ファイルも同じバイトになる（決定的）。"""
+        """Assembling twice from the same series gives the same bytes for the manifest and every
+        file (deterministic)."""
         sources = _build_sources(tmp_path)
         out_dir = tmp_path / "models" / WAN_REPO_NAME
 
@@ -655,14 +686,16 @@ class TestLayout:
         assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
         notice = (out_dir / NOTICE_FILENAME).read_text(encoding="utf-8")
         assert "Apache License, Version 2.0" in notice
-        # i8 の席の重みは配布形の改変なので告知に載る（文面は配布形と対応 MUST）。
+        # The weights of the i8 presets are modifications of the distribution, so they are in the
+        # notice (MUST: the text corresponds to the distribution).
         prose = " ".join(notice.split())
         assert "**int8 transformer**" in prose
         assert "keep the source float32 values" in prose
 
     def test_the_notice_says_where_the_text_encoder_comes_from(self, assembled) -> None:
-        """text_encoder は越境参照（umT5 のリポ）・埋め込み資産は precomputed の経路のために残る・
-        トークナイザは前処理の表と束ねた形（ADR 0119 追記 A / C）。「配っていない」とは書かない。"""
+        """The text_encoder is a cross-repository reference (the umT5 repository), the embedding
+        assets stay for the precomputed path, and the tokenizer is bundled with the preprocessing
+        tables (ADR 0119 addenda A / C). It never says "not distributed"."""
         out_dir, _ = assembled
         prose = " ".join((out_dir / NOTICE_FILENAME).read_text(encoding="utf-8").split())
         assert "**The text encoder is referenced, not stored here.**" in prose
@@ -673,8 +706,8 @@ class TestLayout:
 
 
 class TestTheTextEncoderReference:
-    """text_encoder は umT5 の配布形への越境参照として宣言する（ADR 0119 追記 A —
-    ADR 0109 決定 3）。"""
+    """The text_encoder is declared as a cross-repository reference to the umT5 distribution (ADR
+    0119 addendum A — ADR 0109 decision 3)."""
 
     def test_every_part_is_pinned_to_the_umt5_repository(self, assembled) -> None:
         out_dir, manifest = assembled
@@ -694,7 +727,8 @@ class TestTheTextEncoderReference:
         assert entry["descriptor"] == source["descriptor"]
 
     def test_the_referenced_bytes_are_the_series_container(self, tmp_path: Path) -> None:
-        """参照先の part は umT5 の系列の容器そのもの（Wan と umT5 のリポが同じバイト列を指す）。"""
+        """The referenced parts are the umT5 series container itself (the Wan and umT5 repositories
+        point at the same bytes)."""
         sources = _build_sources(tmp_path)
         umt5_dir = _assemble_umt5(tmp_path, sources)
         placed = umt5_dir / UMT5_DEFAULT_MODEL / UMT5_OUTPUT_PATHS[UMT5_ROLE]
@@ -702,8 +736,9 @@ class TestTheTextEncoderReference:
         assert read_component(placed) == read_component(sources.text_encoder)
 
     def test_it_refuses_a_reference_whose_bytes_differ_from_its_own(self, tmp_path: Path) -> None:
-        """参照元が別の umT5（ここでは出力の幅が違う容器）なら組まない（core の突合 — 中身の違う
-        参照は「別のモデルの重み」を自分のものとして配る形になる）。"""
+        """If the source is a different umT5 (here a container with a different output width), it
+        is not assembled (the core cross-check — a reference with different contents would
+        distribute "another model's weights" as its own)."""
         other = _build_sources(
             tmp_path / "other",
             containers={
@@ -722,7 +757,8 @@ class TestTheTextEncoderReference:
             )
 
     def test_the_output_paths_match_the_umt5_repository(self) -> None:
-        """越境参照は参照元が宣言する `<モデル名>/<この path>` を引くので、綴りは 1 つ。"""
+        """A cross-repository reference looks up `<model name>/<this path>` declared by the source,
+        so there is one spelling."""
         assert WAN_OUTPUT_PATHS[WAN_TEXT_ENCODER_ROLE] == UMT5_OUTPUT_PATHS[UMT5_ROLE]
         assert WAN_TEXT_ENCODER_ROLE == UMT5_ROLE
 
@@ -730,7 +766,8 @@ class TestTheTextEncoderReference:
 class TestTheStorageGates:
     @pytest.mark.parametrize("storage", ["f32", "i8"])
     def test_it_refuses_a_series_without_f16_storage(self, tmp_path: Path, storage: str) -> None:
-        """f16 系列のつもりで素の f32 / 別格納の系列を指した取り違え。"""
+        """The mix-up of pointing at a plain f32 / other-storage series while meaning the f16
+        series."""
         sources = _build_sources(
             tmp_path,
             containers={"vae_decoder_next": _graph_container("vae_decoder_next", storage=storage)},
@@ -757,7 +794,8 @@ class TestTheStorageGates:
             wan_plan(sources)
 
     def test_it_refuses_a_mixed_i4_series_in_the_i8_transformer_seat(self, tmp_path: Path) -> None:
-        """i4 の混成系列は既定の格納が i8 なので「i8 を含む」を満たす — 禁止表だけが落とす。"""
+        """A mixed i4 series has i8 as its default storage, so it satisfies "contains i8" — only the
+        forbidden table rejects it."""
         sources = _build_sources(
             tmp_path,
             containers={
@@ -768,7 +806,8 @@ class TestTheStorageGates:
             wan_plan(sources)
 
     def test_it_refuses_an_f16_graph_in_the_text_encoder_seat(self, tmp_path: Path) -> None:
-        """text_encoder の席に i8 でない系列（f16 の DiT 系列の取り違え）を挿した形。"""
+        """A series that is not i8 (a mixed-up f16 DiT series) plugged into the text_encoder
+        preset."""
         sources = _build_sources(
             tmp_path,
             containers={WAN_TEXT_ENCODER_ROLE: _graph_container(WAN_TEXT_ENCODER_ROLE)},
@@ -777,19 +816,20 @@ class TestTheStorageGates:
             wan_plan(sources)
 
     def test_it_refuses_a_text_encoder_whose_tables_were_quantized(self, tmp_path: Path) -> None:
-        """相対位置の表が i8 に丸まった umT5（「i8 を含む」は満たす — 束縛表の門だけが落とす）。"""
+        """A umT5 whose relative-position tables were rounded to i8 (it satisfies "contains i8" —
+        only the binding-table check rejects it)."""
         sources = _build_sources(
             tmp_path,
             containers={
                 WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, table_layout="i8")
             },
         )
-        with pytest.raises(DistError, match="種類ごとの要求と違う"):
+        with pytest.raises(DistError, match="differs from the per-kind requirements"):
             wan_plan(sources)
 
     def test_the_forbidden_table_names_every_other_compressed_layout(self) -> None:
-        """禁止表は役割ごとに、codec 台帳の layout から f32 / i32 と要求する格納を除いた**全部**を
-        持つ。"""
+        """Per role, the forbidden table holds **all** layouts of the codec ledger except f32 / i32
+        and the required storage."""
         compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32"}
         assert set(WAN_STORAGE_FORBIDDEN) == set(WAN_STORAGE_REQUIREMENTS)
         assert set(WAN_STORAGE_REQUIREMENTS) == set(WAN_CONTAINER_ROLES)
@@ -798,7 +838,8 @@ class TestTheStorageGates:
 
 
 class TestTheTextEncoderContract:
-    """umT5 の容器の入出力が Wan の text 段と DiT の文脈に噛み合うこと（ADR 0119 決定 3 / 4）。"""
+    """The inputs and outputs of the umT5 container mesh with Wan's text step and the DiT context
+    (ADR 0119 decisions 3 / 4)."""
 
     def test_it_refuses_an_encoder_whose_width_differs_from_the_dit_context(
         self, tmp_path: Path
@@ -809,7 +850,7 @@ class TestTheTextEncoderContract:
                 WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, width=_WIDTH + 1)
             },
         )
-        with pytest.raises(DistError, match=f"出力の幅 {_WIDTH + 1}"):
+        with pytest.raises(DistError, match=f"output width {_WIDTH + 1}"):
             wan_plan(sources)
 
     def test_it_refuses_an_encoder_with_other_input_names(self, tmp_path: Path) -> None:
@@ -823,7 +864,7 @@ class TestTheTextEncoderContract:
                 WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, inputs=renamed)
             },
         )
-        with pytest.raises(DistError, match="グラフ入力"):
+        with pytest.raises(DistError, match="the graph inputs"):
             wan_plan(sources)
 
     def test_it_refuses_a_missing_encoder(self, tmp_path: Path) -> None:
@@ -835,11 +876,12 @@ class TestTheTextEncoderContract:
 
 
 class TestTheTokenizerAsset:
-    """トークナイザ資産の門（形式・出所・版・最大長 —
-    `wan.distribution.assert_umt5_tokenizer`）。"""
+    """The checks of the tokenizer asset (format, provenance, versions, maximum length —
+    `wan.distribution.assert_umt5_tokenizer`)."""
 
     def test_the_writer_and_the_gate_spell_the_same_format(self) -> None:
-        """合成の資産は書き手の形式の版で作っている（門の受理形が書き手から外れていない）。"""
+        """The synthetic asset is made with the format version of the writer (the form the check
+        accepts has not drifted from the writer)."""
         assert json.loads(_tokenizer_asset())["format"] == umt5_tokenizer.ASSET_FORMAT
 
     def test_it_refuses_another_format(self, tmp_path: Path) -> None:
@@ -856,7 +898,7 @@ class TestTheTokenizerAsset:
         source = json.loads(_tokenizer_asset())["source"]
         source[field] = OTHER_REVISION if field == "revision" else "text_encoder"
         sources = _build_sources(tmp_path, tokenizer=_tokenizer_asset(source=source))
-        with pytest.raises(DistError, match="上流の pin"):
+        with pytest.raises(DistError, match="differs from the upstream pin"):
             wan_plan(sources)
 
     @pytest.mark.parametrize("package", WAN_TOKENIZER_VERSIONS)
@@ -865,7 +907,7 @@ class TestTheTokenizerAsset:
     ) -> None:
         versions = {**json.loads(_tokenizer_asset())["versions"], package: "0.0.1"}
         sources = _build_sources(tmp_path, tokenizer=_tokenizer_asset(versions=versions))
-        with pytest.raises(DistError, match="ピン"):
+        with pytest.raises(DistError, match="group's pins"):
             wan_plan(sources)
 
     @pytest.mark.parametrize("max_length", [_ROWS + 1, 0, "512", True])
@@ -877,7 +919,8 @@ class TestTheTokenizerAsset:
             wan_plan(sources)
 
     def test_a_max_length_equal_to_the_context_rows_is_accepted(self, tmp_path: Path) -> None:
-        """対（境界）: 行数ちょうどは通る（合成の既定がこの形）。"""
+        """The pair (boundary): exactly the row count passes (the synthetic default has this
+        form)."""
         assert json.loads(_tokenizer_asset())["maxLength"] == _ROWS
         assert wan_plan(_build_sources(tmp_path))
 
@@ -894,7 +937,8 @@ class TestTheTokenizerAsset:
 
 
 class TestTheContainerProvenance:
-    """容器が名乗る出所を上流の pin（`wan.sources.SOURCES`）へ突き合わせる。"""
+    """Matches the provenance the containers claim against the upstream pin
+    (`wan.sources.SOURCES`)."""
 
     def test_it_refuses_a_container_baked_from_another_revision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -905,7 +949,7 @@ class TestTheContainerProvenance:
                 license=_PINNED.license, notice=NOTICE_FILENAME, upstream_revision=OTHER_REVISION
             ),
         )
-        with pytest.raises(DistError, match="別の revision"):
+        with pytest.raises(DistError, match="a different revision"):
             wan_plan(_build_sources(tmp_path))
 
     def test_it_refuses_a_container_that_names_another_license(
@@ -919,25 +963,27 @@ class TestTheContainerProvenance:
                 upstream_revision=_PINNED.upstream_revision,
             ),
         )
-        with pytest.raises(DistError, match=r"provenance\.license が 'cc-by-nc-4.0'"):
+        with pytest.raises(DistError, match=r"provenance\.license is 'cc-by-nc-4.0'"):
             wan_plan(_build_sources(tmp_path))
 
     def test_it_refuses_a_model_missing_from_the_source_table(self, tmp_path: Path) -> None:
-        with pytest.raises(DistError, match="知らない"):
+        with pytest.raises(DistError, match="unknown"):
             wan_plan(_build_sources(tmp_path), "t2v-14b")
 
     def test_it_refuses_a_text_encoder_that_names_the_wan_checkpoint(self, tmp_path: Path) -> None:
-        """umT5 の容器は本家 `google/umt5-xxl` の pin を名乗る（ADR 0122 決定 1）— Wan の pin を
-        名乗る容器（出所を切り替える前の形）は、Wan の計画の中でも umT5 の門が落とす。"""
+        """The umT5 container claims the pin of the original `google/umt5-xxl` (ADR 0122 decision
+        1) — a container claiming the Wan pin (the form before the provenance was switched) is
+        rejected by the umT5 check even inside the Wan plan."""
         encoder = umt5_container(provenance=_PINNED, width=_WIDTH)
         sources = _build_sources(tmp_path, containers={WAN_TEXT_ENCODER_ROLE: encoder})
-        with pytest.raises(DistError, match="別の revision"):
+        with pytest.raises(DistError, match="a different revision"):
             wan_plan(sources)
 
     def test_it_refuses_a_wan22_model_of_the_source_table(self, tmp_path: Path) -> None:
-        """取得元の表に載った Wan2.2 のモデルでも、Wan2.1 の配布（`karume-wan2.1`）は組まない。"""
+        """Even a Wan2.2 model in the source table is not assembled into the Wan2.1 distribution
+        (`karume-wan2.1`)."""
         assert "ti2v-5b" in SOURCES
-        with pytest.raises(DistError, match=r"Wan2\.1 のモデル 'ti2v-5b' は知らない"):
+        with pytest.raises(DistError, match=r"unknown Wan2\.1 model 'ti2v-5b'"):
             wan_plan(_build_sources(tmp_path), "ti2v-5b")
 
 
@@ -950,12 +996,13 @@ class TestTheRopeBaseAsset:
     def test_it_refuses_a_transformer_without_the_rope_base_tables(
         self, tmp_path: Path, role: str, storage: str
     ) -> None:
-        """素表を持たない DiT は、利用者の fromPretrained が重みを落とした後で落ちる形になる。"""
+        """A DiT without the base table would fail only after the user's fromPretrained has
+        downloaded the weights."""
         sources = _build_sources(
             tmp_path,
             containers={role: _graph_container(WAN_TRANSFORMER_ROLE, storage=storage, rope=None)},
         )
-        with pytest.raises(DistError, match=r"資産 'rope_base' が無い"):
+        with pytest.raises(DistError, match=r"asset 'rope_base' is missing"):
             wan_plan(sources)
 
     def test_it_refuses_a_rope_base_asset_with_another_role(self, tmp_path: Path) -> None:
@@ -967,13 +1014,14 @@ class TestTheRopeBaseAsset:
                 )
             },
         )
-        with pytest.raises(DistError, match="役割が 'ple-index'"):
+        with pytest.raises(DistError, match="has role 'ple-index'"):
             wan_plan(sources)
 
     def test_it_refuses_rope_base_tables_that_differ_between_the_seats(
         self, tmp_path: Path
     ) -> None:
-        """f16 / i8 の容器は同じ幾何の素表を持つ — 片方だけ別の表なら、その席だけ RoPE が狂う。"""
+        """The f16 / i8 containers hold base tables of the same geometry — if only one had a
+        different table, RoPE would go wrong for that preset alone."""
         sources = _build_sources(
             tmp_path,
             containers={
@@ -982,12 +1030,13 @@ class TestTheRopeBaseAsset:
                 )
             },
         )
-        with pytest.raises(DistError, match="バイト同一でない"):
+        with pytest.raises(DistError, match="is not byte-identical"):
             wan_plan(sources)
 
 
 class TestTheVaeChunkPair:
-    """first / next は同じ組の chunk グラフ（TS の wanVaeChunkLayout と同じ規則）。"""
+    """first / next are chunk graphs of the same set (the same rules as wanVaeChunkLayout on the
+    TS side)."""
 
     LATENT = (WAN_VAE_LATENT_INPUT, [16, 1, 4, 4])
 
@@ -1003,17 +1052,19 @@ class TestTheVaeChunkPair:
     def test_a_first_whose_caches_are_a_subsequence_of_next_is_accepted(
         self, tmp_path: Path
     ) -> None:
-        """実物と同じ形: next は first に無い cache（time_conv の 2 本）を間に持つ。"""
+        """The same form as the real thing: next has caches between that first does not (the 2 of
+        time_conv)."""
         first = [self.LATENT, ("cache_00", [4, 2, 4, 4]), ("cache_02", [8, 2, 4, 4])]
         following = [*first[:2], ("cache_01", [3, 2, 4, 4]), first[2]]
 
         assert wan_plan(self._pair(tmp_path, first, following))
 
     def test_it_refuses_graphs_baked_with_different_tiles(self, tmp_path: Path) -> None:
-        """片方だけ別のタイル辺で焼き直した組（--target の部分更新・途中で落ちた旧版の実走）。"""
+        """A set where only one was rebaked with another tile edge (a partial update with --target,
+        an old real run that failed midway)."""
         first = [self.LATENT, ("cache_00", [4, 2, 4, 4])]
         following = [(WAN_VAE_LATENT_INPUT, [16, 1, 8, 8]), ("cache_00", [4, 2, 8, 8])]
-        with pytest.raises(DistError, match="潜在入力の形"):
+        with pytest.raises(DistError, match="the latent input shape differs"):
             wan_plan(self._pair(tmp_path, first, following))
 
     def test_it_refuses_a_first_cache_that_next_lacks_or_shapes_differently(
@@ -1021,25 +1072,25 @@ class TestTheVaeChunkPair:
     ) -> None:
         first = [self.LATENT, ("cache_00", [4, 2, 4, 4])]
         following = [self.LATENT, ("cache_00", [5, 2, 4, 4])]
-        with pytest.raises(DistError, match=r"'cache_00' .* が next に同じ形で無い"):
+        with pytest.raises(DistError, match=r"'cache_00' .* is not in next with the same shape"):
             wan_plan(self._pair(tmp_path, first, following))
 
     def test_it_refuses_caches_in_another_order(self, tmp_path: Path) -> None:
         first = [self.LATENT, ("cache_00", [4, 2, 4, 4]), ("cache_01", [4, 2, 4, 4])]
         following = [self.LATENT, first[2], first[1]]
-        with pytest.raises(DistError, match="順が next と違う"):
+        with pytest.raises(DistError, match="order of the cache inputs differs from next"):
             wan_plan(self._pair(tmp_path, first, following))
 
     def test_it_refuses_a_graph_whose_first_input_is_not_the_latent(self, tmp_path: Path) -> None:
         first = [("cache_00", [4, 2, 4, 4]), self.LATENT]
-        with pytest.raises(DistError, match="先頭のグラフ入力"):
+        with pytest.raises(DistError, match="the first graph input"):
             wan_plan(self._pair(tmp_path, first, [self.LATENT, first[0]]))
 
 
 class TestTheTextEmbeddingAsset:
     def test_it_refuses_a_second_metadata_key(self, tmp_path: Path) -> None:
         sources = _build_sources(tmp_path, embeds=_text_embeds(extra_metadata={"other": "1"}))
-        with pytest.raises(DistError, match="メタのキー"):
+        with pytest.raises(DistError, match="the metadata keys"):
             wan_plan(sources)
 
     def test_it_refuses_embeddings_made_from_another_revision(self, tmp_path: Path) -> None:
@@ -1048,24 +1099,26 @@ class TestTheTextEmbeddingAsset:
             tmp_path,
             embeds=_text_embeds(source={"repo": upstream.repo, "revision": OTHER_REVISION}),
         )
-        with pytest.raises(DistError, match="上流の pin"):
+        with pytest.raises(DistError, match="differs from the upstream pin"):
             wan_plan(sources)
 
     def test_it_refuses_prompts_that_differ_from_the_fixed_table(self, tmp_path: Path) -> None:
-        """カードは固定プロンプトの表から本文を描くので、資産のメタが違えば配らない。"""
+        """The card draws its text from the fixed-prompt table, so if the asset metadata differs it
+        is not distributed."""
         rows = _prompt_rows()
         rows[0] = {**rows[0], "prompt": rows[0]["prompt"] + " Extra."}
         sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
-        with pytest.raises(DistError, match="固定プロンプトの表"):
+        with pytest.raises(DistError, match="the fixed prompt table"):
             wan_plan(sources)
 
     def test_it_refuses_a_width_that_differs_from_the_dit_context(self, tmp_path: Path) -> None:
         sources = _build_sources(tmp_path, embeds=_text_embeds(width=_WIDTH + 1))
-        with pytest.raises(DistError, match="DiT の文脈入力"):
+        with pytest.raises(DistError, match="the DiT's context input"):
             wan_plan(sources)
 
     def test_it_refuses_an_i8_transformer_whose_context_differs(self, tmp_path: Path) -> None:
-        """埋め込み資産は quant 非依存の 1 本 — i8 の席の DiT の文脈入力とも噛み合う必要がある。"""
+        """The embedding asset is one quant-independent file — it must also mesh with the context
+        input of the DiT of the i8 preset."""
         sources = _build_sources(
             tmp_path,
             containers={
@@ -1074,14 +1127,14 @@ class TestTheTextEmbeddingAsset:
                 )
             },
         )
-        with pytest.raises(DistError, match="DiT の文脈入力"):
+        with pytest.raises(DistError, match="the DiT's context input"):
             wan_plan(sources)
 
     def test_it_refuses_more_valid_rows_than_the_dit_context_holds(self, tmp_path: Path) -> None:
         rows = _prompt_rows()
         rows[1] = {**rows[1], "tokens": _ROWS + 1}
         sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
-        with pytest.raises(DistError, match=f"有効長 1〜{_ROWS}"):
+        with pytest.raises(DistError, match=f"valid length 1 to {_ROWS}"):
             wan_plan(sources)
 
     def test_it_refuses_a_tensor_whose_rows_differ_from_the_token_count(
@@ -1089,7 +1142,7 @@ class TestTheTextEmbeddingAsset:
     ) -> None:
         name = FIXED_PROMPTS[2].name
         sources = _build_sources(tmp_path, embeds=_text_embeds(shapes={name: (5, _WIDTH)}))
-        with pytest.raises(DistError, match=f"'{name}' が F32"):
+        with pytest.raises(DistError, match=f"'{name}' is not F32"):
             wan_plan(sources)
 
     def test_it_refuses_a_missing_asset(self, tmp_path: Path) -> None:
@@ -1099,9 +1152,10 @@ class TestTheTextEmbeddingAsset:
             wan_plan(sources)
 
     def test_it_refuses_embeddings_from_an_encoder_in_another_dtype(self, tmp_path: Path) -> None:
-        """NOTICE とカードは「bfloat16 の上流の encoder」と名乗る — f32 で作った資産は配らない。"""
+        """NOTICE and the card claim "the bfloat16 upstream encoder" — an asset made in f32 is not
+        distributed."""
         sources = _build_sources(tmp_path, embeds=_text_embeds(encoder_dtype="float32"))
-        with pytest.raises(DistError, match="umT5 の dtype 'float32'"):
+        with pytest.raises(DistError, match="the dtype 'float32' of the umT5"):
             wan_plan(sources)
 
     @pytest.mark.parametrize("package", sorted(WAN_TEXT_EMBEDS_VERSIONS))
@@ -1109,7 +1163,7 @@ class TestTheTextEmbeddingAsset:
         self, tmp_path: Path, package: str
     ) -> None:
         sources = _build_sources(tmp_path, embeds=_text_embeds(versions={package: "0.0.1"}))
-        with pytest.raises(DistError, match="決定 4 の固定"):
+        with pytest.raises(DistError, match="decision 4's fixed"):
             wan_plan(sources)
 
     @pytest.mark.parametrize(
@@ -1118,9 +1172,10 @@ class TestTheTextEmbeddingAsset:
     def test_it_refuses_a_row_without_a_normalized_text(
         self, tmp_path: Path, normalized: object
     ) -> None:
-        """TS の parseWanTextEmbeds は normalized の無い行を拒む。
+        """The TS parseWanTextEmbeds rejects a row without normalized.
 
-        利用者がダウンロードの後で落ちるので、配る前の門で同じ行を落とす。
+        The user would fail after the download, so the check before distribution rejects the same
+        rows.
         """
         rows = _prompt_rows()
         if normalized is None:
@@ -1128,27 +1183,29 @@ class TestTheTextEmbeddingAsset:
         else:
             rows[1] = {**rows[1], "normalized": normalized}
         sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
-        with pytest.raises(DistError, match=f"'{rows[1]['name']}' の normalized"):
+        with pytest.raises(DistError, match=f"'{rows[1]['name']}'s normalized"):
             wan_plan(sources)
 
     @pytest.mark.parametrize("field", ["normalized", "prompt"])
     def test_it_refuses_a_normalized_text_that_another_row_owns(
         self, tmp_path: Path, field: str
     ) -> None:
-        """行 1 の正規化後の文字列が行 0 の文字列と同じだと、どちらの埋め込みを使うかが
-        決まらない。"""
+        """If the normalized string of row 1 equals the string of row 0, which embedding to use is
+        undecided."""
         rows = _prompt_rows()
         rows[1] = {**rows[1], "normalized": rows[0][field]}
         sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
-        with pytest.raises(DistError, match=f"'{rows[1]['name']}' の文字列が '{rows[0]['name']}'"):
+        with pytest.raises(
+            DistError, match=f"the string of '{rows[1]['name']}' is the same as '{rows[0]['name']}'"
+        ):
             wan_plan(sources)
 
     def test_a_row_whose_normalized_text_is_its_own_prompt_is_accepted(
         self, tmp_path: Path
     ) -> None:
-        """原文が正規化で変わらない行（実物の boxing-cats）は通る。
+        """A row whose original text is unchanged by normalization (the real boxing-cats) passes.
 
-        同じ行の中の一致は重複でない。
+        A match within the same row is not a duplicate.
         """
         rows = _prompt_rows()
         rows[0] = {**rows[0], "normalized": rows[0]["prompt"]}
@@ -1162,7 +1219,8 @@ class TestTheModelCard:
         assert resolve_card_renderer(PIPELINE, None) is profiles["wan"]
 
     def test_the_quant_table_explains_the_abbreviation_in_the_seat_names(self, assembled) -> None:
-        """略称の対応は**必ず**出す（ADR 0074 決定 4）— `dit8` がどの部品の話か読めるように。"""
+        """The abbreviation mapping is **always** printed (ADR 0074 decision 4) — so that it is
+        readable which component `dit8` refers to."""
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "In a quant name, `dit` is the `transformer` component." in card
@@ -1191,12 +1249,13 @@ class TestTheModelCard:
         )
 
     def test_it_refuses_to_attribute_a_wan22_model(self, assembled) -> None:
-        """取得元の表に有る Wan2.2 のモデルでも、Wan2.1 のカードには出所を書かない。"""
+        """Even for a Wan2.2 model in the source table, the Wan2.1 card does not write its
+        attribution."""
         _, manifest = assembled
         foreign = json.loads(json.dumps(manifest))
         foreign["models"] = {"ti2v-5b": foreign["models"][DEFAULT_MODEL]}
         assert "ti2v-5b" in SOURCES
-        with pytest.raises(ValueError, match=r"'ti2v-5b' は Wan2\.1 のモデル"):
+        with pytest.raises(ValueError, match=r"'ti2v-5b' is not a Wan2\.1 model"):
             _card(foreign)
 
     def test_it_attributes_the_pinned_upstream_revision(self, assembled) -> None:
@@ -1222,7 +1281,8 @@ class TestTheModelCard:
         assert "fromAssets" not in card
 
     def test_the_defaults_come_from_the_manifest(self, assembled) -> None:
-        """既定値は焼き込まず pipelineConfig から描く（実物と違う値で組むと違う値が出る）。"""
+        """The defaults are not baked in but drawn from pipelineConfig (assembling with values that
+        differ from the real thing gives different values)."""
         _, manifest = assembled
         changed = json.loads(json.dumps(manifest))
         changed["models"][DEFAULT_MODEL]["pipelineConfig"] = {
@@ -1239,7 +1299,8 @@ class TestTheModelCard:
         assert _card(manifest) == _card(manifest)
 
     def test_the_accepted_inputs_match_the_typescript_side(self) -> None:
-        """カードの受理集合は TS の受理集合と同じ（反対側は wan_pipeline_test.ts）。"""
+        """The card's accepted set equals the TS accepted set (the other side is
+        wan_pipeline_test.ts)."""
         fixture = json.loads(_CARD_LIMITS_FIXTURE.read_text(encoding="utf-8"))
         assert fixture == {
             "acceptedSizes": [
@@ -1247,7 +1308,10 @@ class TestTheModelCard:
             ],
             "minFrames": WAN_FRAMES[0],
             "maxFrames": WAN_FRAMES[1],
-        }, "card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES を変えたら fixture と descriptor.ts も揃える"
+        }, (
+            "after changing WAN_ACCEPTED_SIZES / WAN_FRAMES in card.py, align the fixture and"
+            " descriptor.ts too"
+        )
 
     def test_it_names_the_measured_resources_with_their_conditions(self, assembled) -> None:
         out_dir, _ = assembled
@@ -1262,8 +1326,8 @@ class TestTheModelCard:
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
     def test_it_names_the_browser_run_and_what_has_not_run_in_a_browser(self, assembled) -> None:
-        """ブラウザは実走した条件だけを名乗り、走らせていない経路と席は未実走と書く
-        （ADR 0118 段 9）。"""
+        """The browser claims only the conditions it actually ran, and says the paths and presets
+        it did not run have not run (ADR 0118 step 9)."""
         out_dir, _ = assembled
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run" in prose
@@ -1276,7 +1340,8 @@ class TestTheModelCard:
         assert "Browsers have not been checked yet" not in prose
 
     def test_it_names_the_measured_figures_of_every_seat(self, assembled) -> None:
-        """席ごとの transformer の行は実測のまま・計測していない欄は推し量らず未計測と名乗る。"""
+        """The per-preset transformer rows stay as measured; fields that were not measured are not
+        guessed and say not measured."""
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "| `f16` | 33 | 17.1 s | 5.15 GiB | ~30 minutes |" in card
@@ -1292,7 +1357,8 @@ class TestTheModelCard:
         assert "the default quant stays" not in prose
 
     def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled) -> None:
-        """表に無い席は数を推し量らず未計測と名乗る（席の並びは manifest のまま）。"""
+        """A preset not in the table does not guess numbers and says not measured (the order of the
+        presets is as in the manifest)."""
         _, manifest = assembled
         changed = json.loads(json.dumps(manifest))
         quants = changed["models"][DEFAULT_MODEL]["quants"]
@@ -1303,7 +1369,8 @@ class TestTheModelCard:
         assert "| `f16+other` |" not in card.split("### Quants")[0]
 
     def test_it_refuses_a_manifest_without_the_measured_quant(self, assembled) -> None:
-        """実測した席が無い配布形では資源の数を名乗らない（推し量った数を出さない）。"""
+        """A distribution without the measured preset does not claim resource numbers (no guessed
+        numbers are printed)."""
         _, manifest = assembled
         changed = json.loads(json.dumps(manifest))
         quants = changed["models"][DEFAULT_MODEL]["quants"]
@@ -1314,8 +1381,8 @@ class TestTheModelCard:
 
 
 class TestTheModelCardOnTheTextEncoder:
-    """カードの text_encoder の記述（どこから取るか・経路の選択・取得量・宣言 limit）は
-    manifest から。"""
+    """The card's text_encoder description (where it comes from, the path choice, the download size,
+    the declared limits) comes from the manifest."""
 
     def test_it_names_the_repository_and_the_commit_it_borrows_from(self, assembled) -> None:
         out_dir, _ = assembled
@@ -1326,7 +1393,8 @@ class TestTheModelCardOnTheTextEncoder:
         assert "stored in this repository" not in card
 
     def test_a_self_contained_build_says_the_encoder_is_stored_here(self, tmp_path: Path) -> None:
-        """越境参照なしで組んだ形（8 GiB の 1 リポ）でも、カードは事実どおりに描く。"""
+        """Even assembled without a cross-repository reference (one repository of 8 GiB), the card
+        describes the facts."""
         manifest = assemble_family([wan_plan(_build_sources(tmp_path))], tmp_path / "x", "t2v-1.3b")
         card = " ".join(_card(manifest).split())
         assert "stored in this repository" in card
@@ -1371,7 +1439,7 @@ class TestTheModelCardOnTheTextEncoder:
             " `maxStorageBufferBindingSize` ≥ 1,050,148,864 bytes" in prose
         )
         _model(changed)["quants"]["f16"]["requiredLimits"]["maxBufferSize"] += 1
-        with pytest.raises(ValueError, match="requiredLimits が違う"):
+        with pytest.raises(ValueError, match="requiredLimits differ"):
             _card(changed)
 
     def test_it_refuses_a_manifest_without_the_text_encoder(self, assembled) -> None:
@@ -1550,7 +1618,8 @@ class TestReferenceRevisionSources:
     def test_an_abbreviated_declaration_is_not_read(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """省略形は門も core も受けない（明示は綴り切る — `build_driver_parser` の doc）。"""
+        """Neither the check nor the core accepts an abbreviated form (explicit means spelled out in
+        full — the doc of `build_driver_parser`)."""
         self._ready(tmp_path, monkeypatch)
 
         with pytest.raises(SystemExit):
@@ -1558,7 +1627,8 @@ class TestReferenceRevisionSources:
         assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
 
     def test_the_placeholder_is_forty_zeros(self) -> None:
-        """hub の parse（40 桁の小文字 hex）を通る形 — だから形の門では止まらない。"""
+        """The form passes hub's parse (40 lowercase hex digits) — which is why the shape check does
+        not stop it."""
         assert dist.PLACEHOLDER_REVISION == "0" * 40
         declared = wan_references(DEFAULT_MODEL)
         pins = partial(dist.reference_pins, resolve=None, get=self._unreachable)
@@ -1578,7 +1648,8 @@ class TestReferenceRevisionSources:
 
 
 class TestTheWritersSpellTheSameNames:
-    """配布 recipe は torch を読まないので綴りを自前で持つ — 書き手（torch を読む）と一致する。"""
+    """The distribution recipe does not import torch, so it holds the spellings itself — they match
+    the writers (which import torch)."""
 
     def test_the_series_names(self) -> None:
         from wan import export_dit, export_vae, text_embeds
@@ -1603,9 +1674,10 @@ class TestTheWritersSpellTheSameNames:
         assert metadata["text_encoder"]["dtype"] == WAN_TEXT_ENCODER_DTYPE
 
     def test_the_pinned_versions_match_the_wan_dependency_group(self) -> None:
-        """門の固定値は pyproject の `wan` グループの `==` ピンと同じ。
+        """The pinned values of the check equal the `==` pins of the `wan` group in pyproject.
 
-        ピンは書き手が記録する版の出所（`uv run --group wan` が入れる版）。
+        The pins are the source of the versions the writers record (the versions
+        `uv run --group wan` installs).
         """
         project = tomllib.loads((REPO_ROOT / "tools/export-recipes/pyproject.toml").read_text())
         pins = dict(
@@ -1633,8 +1705,8 @@ class TestTheWritersSpellTheSameNames:
         assert export_vae.LATENT_INPUT == WAN_VAE_LATENT_INPUT
 
     def test_the_vae_tiles_and_the_32_tile_graph_names(self) -> None:
-        """既定タイルの組は書き手の表のタイル・32 の組のグラフ名は書き手 `--shared` の綴り
-        （ADR 0134）。"""
+        """The default-tile set uses the tiles of the writer's table, and the graph names of the 32
+        set are the spelling of the writer's `--shared` (ADR 0134)."""
         from wan import export_vae
 
         assert WAN21.vae_tiles[0] == export_vae.VAE_SERIES[DEFAULT_MODEL].tile
@@ -1653,8 +1725,8 @@ class TestTheWritersSpellTheSameNames:
         assert WAN_DIT_CONTEXT_INPUT in export_dit.INPUT_NAMES
 
     def test_the_wan22_series_names(self) -> None:
-        """Wan2.2 の DiT の i8 系列と VAE の f16 系列（書き手 `wan.ti2v_export_dit` /
-        `wan.export_vae --model ti2v-5b`）。"""
+        """The i8 series of the Wan2.2 DiT and the f16 series of the VAE (writers
+        `wan.ti2v_export_dit` / `wan.export_vae --model ti2v-5b`)."""
         from wan import export_vae, ti2v_export_dit
 
         assert ti2v_export_dit.SERIES_NAME == WAN22_I8_SERIES
@@ -1665,8 +1737,8 @@ class TestTheWritersSpellTheSameNames:
         assert WAN_DIT_CONTEXT_INPUT in ti2v_export_dit.INPUT_NAMES
 
     def test_the_wan22_vae_encoder_graphs(self) -> None:
-        """VAE の encoder の 3 グラフ（書き手 `wan.export_vae_encoder` — decoder と同じ f16
-        系列）。"""
+        """The 3 graphs of the VAE encoder (writer `wan.export_vae_encoder` — the same f16 series as
+        the decoder)."""
         from wan import export_vae_encoder
 
         assert export_vae_encoder.TARGETS == WAN_VAE_ENCODER_ROLES
@@ -1675,8 +1747,9 @@ class TestTheWritersSpellTheSameNames:
 
 
 class TestTheGenerationTables:
-    """世代の表から導く配置・格納・weights の表（Wan2.1 は全世代の表から Wan2.2 だけの VAE
-    encoder と VAE decoder の i8 と 32 潜在タイルの組を除いたもの — 2.1 の配布形が不変）。"""
+    """The placements, storage and weights tables derived from the generation tables (Wan2.1 is the
+    all-generation table without the Wan2.2-only VAE encoder, VAE decoder i8 and 32-latent-tile set
+    — the 2.1 distribution is unchanged)."""
 
     def test_the_wan21_tables_are_the_full_tables_without_the_wan22_only_roles(self) -> None:
         encoder = {
@@ -1686,7 +1759,8 @@ class TestTheGenerationTables:
             *WAN_VAE_LENDER_ROLES,
         }
         assert WAN21.vae_encoder_roles == ()
-        # Wan2.1 の decoder は重みを持つ既定タイル（32）の組だけ（書き手の表のタイル）。
+        # The Wan2.1 decoder has only the default-tile (32) set with weights (the tile of the
+        # writer's table).
         assert WAN21.vae_tiles == (32,)
         assert WAN21.container_roles == (
             WAN_TEXT_ENCODER_ROLE,
@@ -1743,14 +1817,15 @@ class TestTheGenerationTables:
         )
         assert list(WAN22.weights[WAN_TRANSFORMER_ROLE]) == ["i8"]
         assert set(WAN22.storage_requirements) == set(WAN22.container_roles)
-        # f16 の DiT を i8 の席へ挿す取り違えは、要求と禁止の両側で落ちる。
+        # The mix-up of plugging the f16 DiT into the i8 preset fails on both the required and the
+        # forbidden side.
         assert "f16" in WAN22.storage_forbidden[WAN_TRANSFORMER_I8_ROLE]
         assert "f16" not in WAN22.quants
 
     def test_only_wan22_carries_the_vae_encoder_in_f16(self) -> None:
-        """encoder の 3 グラフは Wan2.2 だけが配り（ADR 0121 決定 11）、decoder と同じ扱い:
-        f16 系列・格納ラベル f16 の 1 本・`<部品>/model.f16.krm`・f16 を要求し他の圧縮格納を
-        禁ずる。"""
+        """Only Wan2.2 distributes the 3 encoder graphs (ADR 0121 decision 11), treated like the
+        decoder: the f16 series, one file with storage label f16, `<component>/model.f16.krm`, f16
+        required and other compressed storage forbidden."""
         assert (WAN21.vae_encoder, WAN22.vae_encoder) == (False, True)
         assert WAN_VAE_ENCODER_ROLES == (
             WAN_VAE_ENCODER_PRE_ROLE,
@@ -1766,19 +1841,21 @@ class TestTheGenerationTables:
             assert WAN22.storage_requirements[role] == "f16"
             assert WAN22.storage_forbidden[role] == WAN_STORAGE_FORBIDDEN[WAN_VAE_FIRST_ROLE]
             assert role not in WAN21.weights
-        # 世代の weights の並びは全世代の表の並び（I2V の段の順 — encoder が先頭）。
+        # The order of a generation's weights is the order of the all-generation table (the order of
+        # the I2V steps — the encoder first).
         assert list(WAN22.weights) == list(WAN_GRAPH_ROLES)
 
     def test_only_wan22_carries_the_vae_decoder_in_int8(self) -> None:
-        """ADR 0133 決定 7: decoder の 2 グラフは Wan2.2 だけ f16 / i8 の 2 本ずつ。i8 は
-        `<グラフ名>/model.i8.krm`・i8 を要求し他の圧縮格納（f16 を含む）を禁ずる。"""
+        """ADR 0133 decision 7: only in Wan2.2 do the 2 decoder graphs come as 2 each, f16 / i8. i8
+        is `<graph name>/model.i8.krm`, with i8 required and other compressed storage (f16
+        included) forbidden."""
         assert WAN22.vae_labels == ("f16", "i8")
         assert WAN22.vae_decoder_roles == (
             WAN_VAE_FIRST_ROLE,
             WAN_VAE_FIRST_I8_ROLE,
             WAN_VAE_NEXT_ROLE,
             WAN_VAE_NEXT_I8_ROLE,
-            # 32 潜在タイルの組（ADR 0134）は既定タイルの組の後ろに同じ並びで。
+            # The 32-latent-tile set (ADR 0134) follows the default-tile set in the same order.
             WAN_VAE_FIRST_32_ROLE,
             WAN_VAE_FIRST_32_I8_ROLE,
             WAN_VAE_NEXT_32_ROLE,
@@ -1799,8 +1876,8 @@ class TestTheGenerationTables:
             assert i8_role not in WAN21.container_roles
 
     def test_the_int8_vae_decoder_comes_from_the_i8_series(self, tmp_path: Path) -> None:
-        """i8 の decoder は DiT の i8 容器と同じ系列の根の `<グラフ名>/model.krm`（書き手
-        `wan.export_vae --model ti2v-5b --dtype i8`）。"""
+        """The i8 decoder is `<graph name>/model.krm` at the same series root as the DiT i8
+        container (writer `wan.export_vae --model ti2v-5b --dtype i8`)."""
         sources = wan_sources(tmp_path, WAN22)
         placements = wan_placements(sources, WAN22)
         assert placements[WAN_VAE_FIRST_I8_ROLE] == (
@@ -1817,9 +1894,10 @@ class TestTheGenerationTables:
         )
 
     def test_only_wan22_carries_the_32_tile_pair_per_storage_label(self, tmp_path: Path) -> None:
-        """ADR 0134 決定 5: 32 潜在タイルの組は Wan2.2 だけ・格納ラベルごとに 1 組で、decoder と
-        同じ規則の役割（f16 はグラフ名・i8 は `_i8` 接尾）・`<グラフ名>/model.<ラベル>.krm`・
-        貸し手（同じラベルの 16 の組）と同じ系列の根の `<グラフ名>/model.krm`。"""
+        """ADR 0134 decision 5: the 32-latent-tile set exists only in Wan2.2, one set per storage
+        label, with roles under the same rules as the decoder (f16 is the graph name, i8 has the
+        `_i8` suffix), `<graph name>/model.<label>.krm`, and `<graph name>/model.krm` at the same
+        series root as the lender (the 16 set of the same label)."""
         assert WAN22.vae_tiles == (16, 32)
         assert (WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE) == (
             "vae_decoder_first_32",
@@ -1861,13 +1939,14 @@ class TestTheGenerationTables:
 
 
 class TestTheWan22Distribution:
-    """`--pipeline wan-ti2v` の配布形（ADR 0121 段 8 — `karume-wan2.2`・モデル `ti2v-5b`）。"""
+    """The distribution of `--pipeline wan-ti2v` (ADR 0121 step 8 — `karume-wan2.2`, model
+    `ti2v-5b`)."""
 
     def test_it_places_the_int8_transformer_the_vae_and_the_assets(self, assembled22) -> None:
-        """transformer は i8 の 1 本だけ・VAE の decoder は f16 / i8 の 2 本ずつ（ADR 0133）と
-        32 潜在タイルの組を f16 / i8 の 2 本ずつ（ADR 0134 — 2 文書の part 0 と空の const 領域
-        だけ）・encoder は 1 本ずつ・資産 2 本。text_encoder は越境参照。encoder の golden
-        （`vae_encoder.*`）は配らない。"""
+        """The transformer is a single i8 file, the VAE decoder 2 each of f16 / i8 (ADR 0133), the
+        32-latent-tile set 2 each of f16 / i8 (ADR 0134 — only the 2-document part 0 and an empty
+        const region), the encoder 1 each, and 2 assets. The text_encoder is a cross-repository
+        reference. The encoder goldens (`vae_encoder.*`) are not distributed."""
         out_dir, _ = assembled22
         own = {
             role: WAN_OUTPUT_PATHS[role]
@@ -2024,8 +2103,8 @@ class TestTheWan22Distribution:
         assert verify_dist(out_dir)
 
     def test_the_text_assets_are_the_wan21_series_files(self, tmp_path: Path, assembled22) -> None:
-        """資産 2 本は Wan2.1 の系列のファイルそのもの（ADR 0121 決定 9 — 配布形でもバイト
-        同一）。"""
+        """The 2 assets are the very files of the Wan2.1 series (ADR 0121 decision 9 —
+        byte-identical in the distribution too)."""
         out_dir, _ = assembled22
         series = tmp_path / "outputs" / "series"
         wan21, wan22 = wan_sources(series, WAN21), wan_sources(series, WAN22)
@@ -2049,9 +2128,9 @@ class TestTheWan22Distribution:
         assert "**int8 transformer**: the transformer is distributed only in this form." in prose
         assert "No float16 or float32 copy of the transformer is distributed." in prose
         assert "**f16 VAE decoder**" in prose
-        # 条件入力の 2 本は T2V と I2V の両方を説明する（ADR 0121 段 9c — I2V が使えるように
-        # なった）: I2V は先頭の潜在フレームのトークンが真で、その時刻は 0（dit-loop.ts の
-        # `wanConditionMask` / `timestepsProj(0)`）。
+        # The 2 condition inputs explain both T2V and I2V (ADR 0121 step 9c — I2V became usable):
+        # for I2V the tokens of the first latent frame are true and their time is 0
+        # (`wanConditionMask` / `timestepsProj(0)` of dit-loop.ts).
         assert (
             "In text-to-video the mask is all false and the second timestep equals the first."
             in prose
@@ -2063,7 +2142,8 @@ class TestTheWan22Distribution:
         )
         assert "the only mode this distribution runs" not in prose
         assert "(`patch_size` 2, 12 channels)" in prose
-        # VAE の encoder は配布形に載る — 改変（3 グラフ・最後の時間スライス・f16 の丸め）を告げる。
+        # The VAE encoder is in the distribution — the modifications (3 graphs, the last time
+        # slice, f16 rounding) are announced.
         assert "**f16 VAE encoder for image-to-video**" in prose
         assert "re-expressed as three graphs" in prose
         assert "so only that slice is stored" in prose
@@ -2071,15 +2151,16 @@ class TestTheWan22Distribution:
         assert "**The text encoder is referenced, not stored here.**" in prose
         assert f"`{UMT5_REPO_NAME}` at a pinned commit" in prose
         assert "umT5-XXL encoder of the Wan2.1 T2V 1.3B checkpoint" in prose
-        # 2.1 の文の写しで、2.2 では事実が違う箇所が残っていない。
+        # A copy of the 2.1 sentences with facts that differ for 2.2 does not remain.
         assert "float16 transformer" not in prose
         assert "second copy of the transformer" not in prose
         assert "Wan2.1 T2V 1.3B checkpoint listed" not in prose
 
 
 class TestTheWan22ProvenanceSplit:
-    """出所の門の分割（ADR 0121 決定 9）: DiT / VAE の容器は Wan2.2 の pin、テキスト資産 2 本は
-    Wan2.1 の pin で見る。取り違えはどちら向きでも落ちる。"""
+    """The split of the provenance check (ADR 0121 decision 9): the DiT / VAE containers are checked
+    against the Wan2.2 pin, the 2 text assets against the Wan2.1 pin. A mix-up fails in either
+    direction."""
 
     def test_the_split_pins_pass(self, tmp_path: Path, wan22_provenance) -> None:
         plan = wan_plan(_build_sources22(tmp_path), generation=WAN22)
@@ -2090,7 +2171,9 @@ class TestTheWan22ProvenanceSplit:
         self, tmp_path: Path, wan22_provenance
     ) -> None:
         sources = _build_sources22(tmp_path, embeds=_text_embeds(source=_pin(_TI2V)))
-        with pytest.raises(DistError, match=r"埋め込みの出所 .* が上流の pin"):
+        with pytest.raises(
+            DistError, match=r"the embeddings' provenance .* differs from the upstream pin"
+        ):
             wan_plan(sources, generation=WAN22)
 
     def test_it_refuses_a_tokenizer_that_names_the_wan22_pin(
@@ -2098,7 +2181,9 @@ class TestTheWan22ProvenanceSplit:
     ) -> None:
         source = {**_pin(_TI2V), "subfolder": WAN_TOKENIZER_SUBFOLDER}
         sources = _build_sources22(tmp_path, tokenizer=_tokenizer_asset(source=source))
-        with pytest.raises(DistError, match=r"トークナイザの出所 .* が上流の pin"):
+        with pytest.raises(
+            DistError, match=r"the tokenizer's provenance .* differs from the upstream pin"
+        ):
             wan_plan(sources, generation=WAN22)
 
     @pytest.mark.parametrize(
@@ -2118,14 +2203,14 @@ class TestTheWan22ProvenanceSplit:
         container = _stamped(monkeypatch, _PINNED, lambda: _default_container(role))
         sources = _build_sources22(tmp_path, containers={role: container})
         injected = re.escape(str(wan_placements(sources, WAN22)[role].parent))
-        with pytest.raises(DistError, match=rf"{injected}.*別の revision"):
+        with pytest.raises(DistError, match=rf"{injected}.*a different revision"):
             wan_plan(sources, generation=WAN22)
 
     def test_the_wan21_plan_still_reads_both_from_the_wan21_pin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """対: Wan2.1 の計画は DiT / VAE もテキスト資産も Wan2.1 の pin で見る（Wan2.2 の pin の
-        DiT は落ちる）。"""
+        """The pair: the Wan2.1 plan checks the DiT / VAE and the text assets against the Wan2.1 pin
+        (a DiT with the Wan2.2 pin fails)."""
         assert WAN21.text_model == DEFAULT_MODEL
         dit = _stamped(
             monkeypatch,
@@ -2133,7 +2218,7 @@ class TestTheWan22ProvenanceSplit:
             lambda: _graph_container(WAN_TRANSFORMER_ROLE, storage="i8"),
         )
         sources = _build_sources(tmp_path, containers={WAN_TRANSFORMER_I8_ROLE: dit})
-        with pytest.raises(DistError, match="別の revision"):
+        with pytest.raises(DistError, match="a different revision"):
             wan_plan(sources)
 
 
@@ -2151,7 +2236,8 @@ class TestTheWan22Gates:
     def test_it_refuses_a_mixed_i4_series_in_the_int8_seat(
         self, tmp_path: Path, wan22_provenance
     ) -> None:
-        """「i8 を含む」は満たす混成系列 — 禁止表だけが落とす（2.1 と同じ門）。"""
+        """A mixed series that satisfies "contains i8" — only the forbidden table rejects it (the
+        same check as 2.1)."""
         sources = _build_sources22(
             tmp_path,
             containers={
@@ -2164,7 +2250,8 @@ class TestTheWan22Gates:
     def test_an_f16_transformer_beside_the_vae_is_never_carried(
         self, tmp_path: Path, wan22_provenance
     ) -> None:
-        """f16 系列に DiT が置かれていても、Wan2.2 の配置表は拾わない（f16 の DiT は配らない）。"""
+        """Even with a DiT in the f16 series, the Wan2.2 placement table does not pick it up (the
+        f16 DiT is not distributed)."""
         sources = _build_sources22(tmp_path)
         write_component(
             sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
@@ -2182,7 +2269,8 @@ class TestTheWan22Gates:
     def test_it_refuses_an_f16_vae_decoder_in_the_int8_seat(
         self, tmp_path: Path, wan22_provenance, role: str
     ) -> None:
-        """f16 系列の decoder を i8 の席へ挿す取り違え（要求の不在で落ちる — ADR 0133 決定 7）。"""
+        """The mix-up of plugging an f16-series decoder into the i8 preset (fails because the
+        requirement is absent — ADR 0133 decision 7)."""
         sources = _build_sources22(
             tmp_path, containers={role: _graph_container(_VAE_I8_GRAPHS[role])}
         )
@@ -2194,7 +2282,8 @@ class TestTheWan22Gates:
     def test_it_refuses_a_vae_encoder_without_f16_storage(
         self, tmp_path: Path, wan22_provenance, role: str, storage: str
     ) -> None:
-        """encoder の席に素の f32 / 別格納の系列を挿した取り違え（decoder と同じ門）。"""
+        """The mix-up of plugging a plain f32 / other-storage series into the encoder preset (the
+        same check as the decoder)."""
         sources = _build_sources22(
             tmp_path, containers={role: _graph_container(role, storage=storage)}
         )
@@ -2205,7 +2294,8 @@ class TestTheWan22Gates:
     def test_it_refuses_a_series_without_one_of_the_vae_encoder_graphs(
         self, tmp_path: Path, wan22_provenance, role: str
     ) -> None:
-        """encoder は T2V だけの利用でも取る部品 — 1 本でも欠けた系列からは組まない。"""
+        """The encoder is a component fetched even for T2V-only use — a series missing even one is
+        not assembled."""
         sources = _build_sources22(tmp_path)
         missing = wan_placements(sources, WAN22)[role]
         for part in missing.parent.iterdir():
@@ -2218,8 +2308,9 @@ class TestTheWan22Gates:
     def test_every_32_tile_container_borrows_everything_from_its_lender(
         self, tmp_path: Path, wan22_provenance, role: str
     ) -> None:
-        """ADR 0134 決定 1: 借り手は part 0 の外に 1 バイトも持たず、initializer が全部共有宣言で、
-        名指すキーを貸し手（同じラベルの 16 の組）が同じ dtype・形の実体として持つ。"""
+        """ADR 0134 decision 1: the borrower holds not a single byte outside part 0, every
+        initializer is a shared declaration, and the lender (the 16 set of the same label) holds
+        the named keys as data with the same dtype and shape."""
         placements = wan_placements(_build_sources22(tmp_path), WAN22)
         borrower = placements[role]
 
@@ -2231,32 +2322,37 @@ class TestTheWan22Gates:
     def test_it_refuses_a_32_tile_container_that_carries_weight_bytes(
         self, tmp_path: Path, wan22_provenance, role: str
     ) -> None:
-        """重みを持つ容器を借りる組の席へ挿した取り違え（格納の門は貸し手を見るので通る —
-        共有の門だけが落とす）。"""
+        """The mix-up of plugging a container that holds weights into the preset of a borrowing set
+        (the storage check looks at the lender, so it passes — only the sharing check rejects
+        it)."""
         storage = "i8" if role.endswith("_i8") else "f16"
         graph = _VAE_SHARED_GRAPHS[role]
         sources = _build_sources22(
             tmp_path, containers={role: _graph_container(graph, storage=storage)}
         )
-        with pytest.raises(DistError, match=rf"{graph}/model.krm: 記述の外に \d+ バイトを持つ"):
+        with pytest.raises(
+            DistError, match=rf"{graph}/model.krm: holds \d+ bytes outside the descriptors"
+        ):
             wan_plan(sources, generation=WAN22)
 
     @pytest.mark.parametrize("role", [WAN_VAE_FIRST_32_I8_ROLE, WAN_VAE_NEXT_32_ROLE])
     def test_it_refuses_a_32_tile_container_naming_a_tensor_its_lender_lacks(
         self, tmp_path: Path, wan22_provenance, role: str
     ) -> None:
-        """貸し手だけを焼き直した系列の形（借り手が名指すキーが貸し手に無い）。"""
+        """The form of a series where only the lender was rebaked (keys the borrower names are
+        absent from the lender)."""
         sources = _build_sources22(
             tmp_path, containers={role: _shared_container(role, mark="vae_decoder_other")}
         )
         with pytest.raises(
             DistError,
-            match=r"共有 initializer '[^']*vae_decoder_other[^']*' の実体が貸し手 .* に無い",
+            match=r"the shared initializer '[^']*vae_decoder_other[^']*'"
+            " has no real entry in the lender",
         ):
             wan_plan(sources, generation=WAN22)
 
     def test_it_refuses_a_wan21_model(self, tmp_path: Path, wan22_provenance) -> None:
-        with pytest.raises(DistError, match=r"Wan2\.2 のモデル 't2v-1\.3b' は知らない"):
+        with pytest.raises(DistError, match=r"unknown Wan2\.2 model 't2v-1\.3b'"):
             wan_plan(_build_sources22(tmp_path), DEFAULT_MODEL, WAN22)
 
     def test_it_refuses_rope_base_without_its_asset(self, tmp_path: Path, wan22_provenance) -> None:
@@ -2269,15 +2365,15 @@ class TestTheWan22Gates:
             },
         )
         with pytest.raises(
-            DistError, match=r"資産 'rope_base' が無い.*`python -m wan\.ti2v_export_dit write`"
+            DistError, match=r"asset 'rope_base' is missing.*`python -m wan\.ti2v_export_dit write`"
         ):
             wan_plan(sources, generation=WAN22)
 
     def test_a_vae_pair_of_different_tiles_points_to_the_wan22_writer(
         self, tmp_path: Path, wan22_provenance
     ) -> None:
-        """共有の門の焼き直しの案内は世代の書き手を名指しする（2.1 の `export_vae` の既定は 2.1 の
-        系列を書くので、2.2 の組には効かない）。"""
+        """The rebake hint of the sharing check names the generation's writer (the default of 2.1's
+        `export_vae` writes the 2.1 series, so it has no effect on the 2.2 set)."""
         latent = (WAN_VAE_LATENT_INPUT, [48, 1, 4, 4])
         sources = _build_sources22(
             tmp_path,
@@ -2289,7 +2385,8 @@ class TestTheWan22Gates:
             },
         )
         with pytest.raises(
-            DistError, match=r"潜在入力の形.*`python -m wan\.export_vae --model ti2v-5b`"
+            DistError,
+            match=r"the latent input shape differs.*`python -m wan\.export_vae --model ti2v-5b`",
         ):
             wan_plan(sources, generation=WAN22)
 
@@ -2301,8 +2398,8 @@ class TestTheWan22ModelCard:
         assert resolve_card_renderer(TI2V_PIPELINE, None) is profiles["wan-ti2v"]
 
     def test_the_accepted_inputs_match_the_typescript_side(self) -> None:
-        """カードの受理集合は TS の受理集合（`WAN22_TI2V_GENERATION`）と同じ fixture を挟んで
-        一致。"""
+        """The card's accepted set equals the TS accepted set (`WAN22_TI2V_GENERATION`) through the
+        same fixture."""
         fixture = json.loads(_TI2V_CARD_LIMITS_FIXTURE.read_text(encoding="utf-8"))
         assert fixture == {
             "acceptedSizes": [
@@ -2310,7 +2407,10 @@ class TestTheWan22ModelCard:
             ],
             "minFrames": WAN22_FRAMES[0],
             "maxFrames": WAN22_FRAMES[1],
-        }, "card.py の WAN22_ACCEPTED_SIZES / WAN22_FRAMES を変えたら fixture と TS 側も揃える"
+        }, (
+            "after changing WAN22_ACCEPTED_SIZES / WAN22_FRAMES in card.py, align the fixture and"
+            " the TS side too"
+        )
 
     def test_it_describes_wan22(self, assembled22) -> None:
         out_dir, _ = assembled22
@@ -2342,7 +2442,7 @@ class TestTheWan22ModelCard:
         assert f'// quant: "{_CONV8}", // default' in card
         assert f"implements `{WAN22_SUPPORTED_PIPELINE}`" in card
         prose = " ".join(card.split())
-        # T2V と I2V の両方を名乗る（ADR 0121 段 9c — I2V が公開 API に出た）。
+        # Claims both T2V and I2V (ADR 0121 step 9c — I2V reached the public API).
         assert "A **text-to-video** and **image-to-video** distribution of Wan2.2 TI2V 5B" in prose
         assert "Text to video by default; image to video when `generate()` is given an `image`" in (
             prose
@@ -2373,8 +2473,8 @@ class TestTheWan22ModelCard:
         assert "33 and 49 frames" not in prose
 
     def test_the_usage_suggests_the_typescript_defaults(self) -> None:
-        """Usage の既定のコメントは世代の既定（`descriptor.ts` の `defaults` の写し）から描き、
-        既定は受理集合の内。"""
+        """The default comment of Usage is drawn from the generation's defaults (a copy of
+        `defaults` of `descriptor.ts`), and the defaults are within the accepted set."""
         for card in (WAN21_CARD, WAN22_CARD):
             assert card.default_size in card.accepted_sizes
             low, high = card.frames
@@ -2387,7 +2487,8 @@ class TestTheWan22ModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         for figure in ("832", "480", "81"):
             assert re.search(rf"\b{figure}\b", card) is None, figure
-        # 2.2 にも Chrome の通しはある（121 フレーム）が、2.1 のブラウザの通しの文は写さない。
+        # 2.2 also has a full Chrome run (121 frames), but the sentence about the 2.1 browser run
+        # is not copied.
         assert "46.1 minutes" not in card
         assert "`f16` quant with the precomputed embeddings" not in " ".join(card.split())
         assert re.search(r"(?<!\w)Pipeline\.fromPretrained\(", card) is None
@@ -2402,7 +2503,8 @@ class TestTheWan22ModelCard:
         relation = "this checkpoint's `text_encoder` holds the same encoder rounded to bfloat16"
         assert relation in prose
         assert "bit-identical in float32" not in prose
-        # 2.1 の改変の要約の写し（f16 の transformer と、その 2 本目の int8 版）が残っていない。
+        # The copy of the 2.1 modification summary (the f16 transformer and its second, int8
+        # version) does not remain.
         assert "float16 transformer" not in prose
         assert "second, int8 copy" not in prose
         assert "the transformer shipped only in int8" in prose
@@ -2434,7 +2536,8 @@ class TestTheWan22ModelCard:
             " 50-step clips at 1280 × 704 with 33 frames (seeds 42 to 45 with the three fixed"
             " prompts), no clear degradation was seen."
         ) in prose
-        # 1 forward は段 2（2026-10-04）・通しは 2026-10-05。49 フレームは製品の class でない。
+        # One forward is from step 2 (2026-10-04), the full run from 2026-10-05. 49 frames is not a
+        # product class.
         assert "timed on its own on 2026-10-04" in prose
         assert "on 2026-10-05, at 1280 × 704 with 50 steps" in prose
         assert "The 33-frame runs went through `Ti2vPipeline`" in prose
@@ -2471,8 +2574,10 @@ class TestTheWan22ModelCard:
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
     def test_it_names_the_121_frame_row_with_its_own_gpu_and_reading(self, assembled22) -> None:
-        """121 フレームの行は実用席だけ・RTX 3080 Ti の開発機の通しで、B570 の行と GPU も測り方
-        （nvidia-smi の GPU 全体）も違い、熱制限込みだと名乗る。参照席の 121 は回していない。"""
+        """The 121-frame row is only for the practical preset — a full run on the RTX 3080 Ti
+        development machine, with a different GPU and a different reading (nvidia-smi, whole GPU)
+        from the B570 rows, and it says thermal limiting is included. The reference preset was not
+        run at 121."""
         out_dir, _ = assembled22
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert (
@@ -2485,7 +2590,8 @@ class TestTheWan22ModelCard:
             "The 33- and 49-frame rows were measured on an Intel Arc B570 in Deno 2.9.6 on"
             " 2026-10-05" in prose
         )
-        # 121 の行は寸法・ステップ・shift・guidance だけが同じ（プロンプトと text の経路は違う）。
+        # The 121 row shares only the size, steps, shift and guidance (the prompt and the text path
+        # differ).
         assert (
             f"the `{_PRACTICAL}` 121-frame row at the same size, steps, shift and guidance on an"
             " NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno 2.9.6 on 2026-10-06; the"
@@ -2514,11 +2620,13 @@ class TestTheWan22ModelCard:
         )
         assert "the memory in use on the whole GPU as read by nvidia-smi, not the driver's" in prose
         assert "its times include thermal throttling" in prose
-        # 2 ステップ × 121 の参照席の sha 行は別にあり得るので、50 ステップに限って名乗る。
+        # There may also be sha rows of the reference preset for 2 steps × 121, so the claim is
+        # limited to 50 steps.
         assert (
             "The 121-frame clip has not been run for 50 steps with the `f16+dit8` quant." in prose
         )
-        # 測り方の定義文は B570 の行に限る（121 の行は nvidia-smi）。
+        # The definition of how it was measured is limited to the B570 rows (the 121 row is
+        # nvidia-smi).
         assert (
             "For the B570 rows, Transformer peak is the total allocation during the transformer"
             " stage (the driver's fdinfo)." in prose
@@ -2530,7 +2638,8 @@ class TestTheWan22ModelCard:
         )
         assert "- **GPU memory**: the peaks are of the total allocation" not in prose
         assert "about 1.46 GiB at 121 frames (S = 27,280)" in prose
-        # 2 GiB の束縛上限に最も近い束縛（スコアの行ブロック）と、Chrome が与えた上限の実数。
+        # The binding closest to the 2 GiB binding limit (a row block of the scores), and the actual
+        # limit Chrome granted.
         assert "the largest binding at 121 frames is about 1.96 GiB" in prose
         assert "bindings of up to 2,147,483,644 bytes" in prose
         assert "2 GiB buffers" not in prose
@@ -2538,12 +2647,14 @@ class TestTheWan22ModelCard:
     def test_it_says_121_frames_fit_12_gib_and_the_b570_is_checked_only_up_to_57_frames(
         self, assembled22
     ) -> None:
-        """受理の上限 121 は開発機（RTX 3080 Ti・12 GiB）と RTX 5070 Ti の Chrome で完走した事実で
-        名乗り、山は nvidia-smi の GPU 全体で Deno の余裕はもっと薄いことがあると限る。B570 で
-        確かめたのは 57 フレームまでで、それより長いクリップは回していないので非対応。入らない
-        見込み（推測）は見積りのある 2 点（81・121）だけで、残りの長さは分からないと書く。121 だけを
-        非対応と書くと 61〜117 が回ると読めるので、範囲で書く。入らなければ admission ではなく
-        実行の途中で落ちると書く。"""
+        """The accepted upper bound of 121 is claimed by the fact that it completed in Chrome on the
+        development machine (RTX 3080 Ti, 12 GiB) and the RTX 5070 Ti, with the caveat that the peak
+        is nvidia-smi's whole GPU and Deno's headroom can be thinner. On the B570 only up to 57
+        frames was confirmed, and longer clips were not run, so they are unsupported. The "not
+        expected to fit" estimate (a guess) covers only the 2 points with estimates (81, 121); for
+        the other lengths it says unknown. Saying only 121 is unsupported would read as 61–117
+        running, so it is written as a range. It says that if it does not fit, it fails in the
+        middle of execution rather than at admission."""
         out_dir, _ = assembled22
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
@@ -2570,9 +2681,11 @@ class TestTheWan22ModelCard:
             " Resources stop at 49 frames). Longer clips are not supported there, because none of"
             " them has been run on the B570." in prose
         )
-        # 121 だけを非対応と書くと 61〜117 が 10 GB 級で回ると読める — 範囲で書く。
+        # Saying only 121 is unsupported would read as 61–117 running on 10 GB-class GPUs — write a
+        # range.
         assert "121 frames are not supported" not in prose
-        # 見積りは 81 と 121 の 2 点だけ — 61〜77 / 85〜117 を「入らない見込み」とは書かない。
+        # Estimates exist only for 81 and 121 — 61–77 / 85–117 are not said to be "not expected to
+        # fit".
         assert "not expected to fit" not in prose
         assert (
             "A memory estimate made before the runs covers only two of those lengths and puts both"
@@ -2581,14 +2694,16 @@ class TestTheWan22ModelCard:
             " transformer stage allocated at 121 frames on the RTX 3080 Ti is above it too). The"
             " other lengths were not estimated, so whether they fit is not known." in prose
         )
-        # 受理集合は機ごとではない — 10 GB 級でも ModelInputError で先に拒まれるとは読ませない。
+        # The accepted set is not per machine — it must not read as if a 10 GB-class GPU were
+        # rejected up front with ModelInputError.
         assert (
             "The accepted set does not depend on the GPU, so such a request is still accepted, and"
             " if it does not fit it fails during the run — with an out-of-memory error"
             " (`GpuOutOfMemoryError`), or a lost device near the limit — rather than with"
             " `ModelInputError`, and the time spent on the stages before it is lost." in prose
         )
-        # ブラウザの通しは別の GPU・runtime の値と名乗り、走っていない組は未実走と書く。
+        # The browser full run is claimed as values from another GPU and runtime, and the
+        # combinations that did not run are said not to have run.
         assert (
             "Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the"
             " `f16+dit8-a8-attn8-s16` quant with the text encoder on the GPU, 1280 × 704, 121"
@@ -2617,7 +2732,7 @@ class TestTheWan22ModelCard:
         model = changed["models"][_TI2V]
         model["quants"] = {"i8": model["quants"][_REFERENCE]}
         model["defaultQuant"] = "i8"
-        with pytest.raises(ValueError, match="1 つも無い"):
+        with pytest.raises(ValueError, match="no quant whose execution resources were measured"):
             _card22(changed)
 
     def test_the_defaults_come_from_the_manifest(self, assembled22) -> None:
@@ -2635,7 +2750,7 @@ class TestTheWan22ModelCard:
         _, manifest = assembled22
         foreign_model = json.loads(json.dumps(manifest))
         foreign_model["models"] = {DEFAULT_MODEL: foreign_model["models"][_TI2V]}
-        with pytest.raises(ValueError, match=r"'t2v-1\.3b' は Wan2\.2 のモデル"):
+        with pytest.raises(ValueError, match=r"'t2v-1\.3b' is not a Wan2\.2 model"):
             _card22(foreign_model)
         foreign_pipeline = json.loads(json.dumps(manifest))
         foreign_pipeline["models"][_TI2V]["pipeline"] = WAN_PIPELINE
@@ -2649,20 +2764,20 @@ class TestTheWan22ModelCard:
 
 
 def _frontmatter(card: str) -> str:
-    """カード先頭の YAML（`---` に挟まれた部分）。"""
+    """The YAML at the top of the card (the part between `---` lines)."""
     return card.split("---\n", 2)[1]
 
 
 class TestTheWan22ImageToVideoCard:
-    """Wan2.2 のカードの I2V の記述（ADR 0121 段 9c）: 入力（`image` / `fit`）・使い方・検証の
-    数値（追記「段 9a の結果」「段 9b の結果」とテストの定数の写し）・品質の数の範囲（T2V で
-    測った）。Wan2.1 のカードには I2V の行が 1 つも出ない（2.1 の `wan.Pipeline` は `image` を
-    拒む）。"""
+    """The I2V description in the Wan2.2 card (ADR 0121 step 9c): the inputs (`image` / `fit`), the
+    usage, the verification figures (copies of the addenda "results of step 9a" and "results of step
+    9b" and of the test constants), and the scope of the quality figures (measured on T2V). The
+    Wan2.1 card has not a single I2V line (`wan.Pipeline` of 2.1 rejects `image`)."""
 
     def test_it_tags_image_to_video_and_keeps_the_single_pipeline_tag(self, assembled22) -> None:
         out_dir, _ = assembled22
         head = _frontmatter((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8"))
-        # HF の pipeline tag は 1 つ — text-to-video のまま、I2V は tags で名乗る。
+        # HF has one pipeline tag — it stays text-to-video, and I2V is claimed with tags.
         assert "pipeline_tag: text-to-video\n" in head
         assert "pipeline_tag: image-to-video" not in head
         assert "tags:\n  - text-to-video\n  - image-to-video\n  - video-generation\n" in head
@@ -2685,7 +2800,7 @@ class TestTheWan22ImageToVideoCard:
             " `{ data, width, height }` (`data` a `Uint8Array` with 3 bytes per pixel" in prose
         )
         assert "used as given (no color-space conversion)" in prose
-        # 寸法の選択（`selectWanI2vSize` — 2 寸法では「幅 ≥ 高さ → 1280×704」）。
+        # The size selection (`selectWanI2vSize` — with 2 sizes, "width ≥ height → 1280×704").
         assert (
             "Without `width` / `height`, the accepted size closest to the image's aspect ratio is"
             " used — 1280 × 704 when the image is at least as wide as it is tall, 704 × 1280"
@@ -2703,12 +2818,15 @@ class TestTheWan22ImageToVideoCard:
         assert "a port of Pillow's LANCZOS filter that gives the same bytes as Pillow 12.3.0" in (
             prose
         )
-        # 綴り違いは素の Error・image 無しの fit は ModelInputError（plan.ts の門）。
+        # A misspelling is a plain Error; fit without image is a ModelInputError (the check of
+        # plan.ts).
         assert "`fit` without `image` throws `ModelInputError`" in prose
         assert "a value other than these two throws a plain `Error`" in prose
-        # 綴り違いの素の Error は、直後の結びの文（受理集合の外は ModelInputError）の例外と名乗る。
+        # The plain Error for a misspelling is named as the exception to the closing sentence right
+        # after it (outside the accepted set is ModelInputError).
         assert "(the one exception to the sentence below)" in prose
-        # I2V の項は seed の項の後・拒否の文の前（受理する入力の列挙の内）。
+        # The I2V item comes after the seed item and before the rejection sentence (within the list
+        # of accepted inputs).
         assert (
             inputs.index("- **seed**")
             < inputs.index("- **image**")
@@ -2722,20 +2840,20 @@ class TestTheWan22ImageToVideoCard:
         assert "  image: { data: rgb, width: imageWidth, height: imageHeight }," in usage
         assert '  // fit: "crop", // default' in usage
         prose = " ".join(usage.split())
-        # 画像の decode は呼び手の仕事（Deno は fast-png / jpeg-js・ブラウザは createImageBitmap と
-        # canvas）。
+        # Decoding the image is the caller's job (fast-png / jpeg-js on Deno, createImageBitmap and
+        # a canvas in the browser).
         assert "Decoding the image file is up to the caller" in prose
         assert "an image decoder such as fast-png and jpeg-js works" in prose
         assert "examples/wan" not in prose
         assert "`createImageBitmap` and a canvas" in prose
-        # jpeg-js の既定は RGBA・example は `formatAsRGBA: false` で RGB を直接受ける
-        # （`examples/wan/decode-image.ts`）。
+        # jpeg-js defaults to RGBA; the example takes RGB directly with `formatAsRGBA: false`
+        # (`examples/wan/decode-image.ts`).
         assert (
             "a canvas gives RGBA, and so does jpeg-js by default (`formatAsRGBA: false` gives RGB)"
             " — drop the alpha channel." in prose
         )
-        # 復号の段の参照との差（EXIF の向き・アルファ・JPEG の復号器）— example / gpu-lab の
-        # README と同じ事実。
+        # Differences from the reference in the decoding step (EXIF orientation, alpha, the JPEG
+        # decoder) — the same facts as the README of the example / gpu-lab.
         assert "does not apply the EXIF orientation" in prose
         assert "`createImageBitmap` applies the orientation by default" in prose
         assert "drops the alpha channel without compositing it over a background" in prose
@@ -2743,19 +2861,20 @@ class TestTheWan22ImageToVideoCard:
             "For PNG, fast-png gives the same pixels as Pillow; JPEG decoders differ slightly"
             in prose
         )
-        # precomputed の経路では text の段が無い — encoder の次は transformer。
+        # The precomputed path has no text step — the transformer comes after the encoder.
         assert (
             "With an `image`, the VAE encoder stage runs first and is disposed before the next"
             " stage (the text encoder, or the transformer with the precomputed embeddings) is"
             " opened." in prose
         )
-        # Deno の I2V は precomputed の経路でだけ回した（GPU の umT5 との組は Chrome でだけ完走）。
+        # I2V on Deno ran only on the precomputed path (the combination with the GPU umT5 completed
+        # only in Chrome).
         assert (
             "In Deno, image to video has so far been run only with the precomputed embeddings;"
             " with the text encoder on the GPU (the default in this example) it has been run only"
             " in Chrome (see What is this)." in prose
         )
-        # 2 つ目のコードブロックも閉じている（``` が偶数）。
+        # The second code block is closed too (an even number of ```).
         assert usage.count("```") == 4
 
     def test_it_explains_the_conditioning_in_the_overview_and_the_attribution(
@@ -2776,9 +2895,10 @@ class TestTheWan22ImageToVideoCard:
             " timestep 0, in text to video the mask is all false" in prose
         )
         assert "that text-to-video leaves inactive" not in prose
-        # 改変の要約に VAE encoder（配布形に載る部品）が入っている。
+        # The modification summary includes the VAE encoder (a component in the distribution).
         assert "the part of the VAE encoder that encodes one conditioning image" in prose
-        # ブラウザの I2V は完走した組として書き、参照と照合していないと名乗る（品質は主張しない）。
+        # The browser I2V is written as a combination that completed, and it says it was not
+        # compared with the reference (no quality claim).
         assert (
             "Image to video finished there with the same quant and the text encoder on the GPU,"
             " from an 896 × 1152 image cropped to 704 × 1280, in 20-step runs with shift 7:"
@@ -2788,9 +2908,10 @@ class TestTheWan22ImageToVideoCard:
         assert "neither has image to video" not in prose
 
     def test_it_copies_the_image_to_video_verification_figures(self, assembled22) -> None:
-        """数は追記「段 9a / 9b の結果」とテストの定数（`WAN_I2V_ENCODER_BAND` 7.8e-5・
-        `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3・`FINAL_RATIO_BAND` 3.9e-3・`FRAME_RATIO_BAND` 8.9e-3・
-        T2V の latents.1 の帯 9.5e-4・故障注入 138〜358 倍）の写し。"""
+        """The figures are copies of the addenda "results of step 9a / 9b" and the test constants
+        (`WAN_I2V_ENCODER_BAND` 7.8e-5, `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3, `FINAL_RATIO_BAND`
+        3.9e-3, `FRAME_RATIO_BAND` 8.9e-3, the T2V latents.1 band 9.5e-4, fault injection 138–358
+        times)."""
         out_dir, _ = assembled22
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         section = card.split("## Determinism and verification", 1)[1].split("\n## ", 1)[0]
@@ -2799,7 +2920,8 @@ class TestTheWan22ImageToVideoCard:
         assert "the largest absolute difference of the normalized latent stays within 7.8e-5" in (
             prose
         )
-        # encoder の照合の 3 つ目の寸法（256×160）は受理集合の外と名乗る。
+        # The third size of the encoder comparison (256×160) is claimed to be outside the accepted
+        # set.
         assert (
             "for three images, each at the two accepted sizes and at a small 256 × 160 size"
             " outside them" in prose
@@ -2808,7 +2930,8 @@ class TestTheWan22ImageToVideoCard:
             "stays within 2.9e-3 for the latent after the first step, 3.5e-3 after the second,"
             " 3.9e-3 for the latent passed to the VAE and 8.9e-3 for the frames" in prose
         )
-        # 帯が広い理由（encoder の出口の差を DiT が条件のトークンで増幅する）。
+        # Why the band is wide (the DiT amplifies the difference at the encoder exit through the
+        # condition tokens).
         assert "(3.5e-3 against 9.5e-4 after the second step)" in prose
         assert "the transformer amplifies that about 250 times on those tokens" in prose
         assert "the difference falls back to the text-to-video size" in prose
@@ -2820,7 +2943,8 @@ class TestTheWan22ImageToVideoCard:
         )
         assert "for one image at 1280 × 704 with 9 frames (2 steps) with both quants" in prose
         assert "for the other two images and for 704 × 1280 with the `f16+dit8` quant" in prose
-        # I2V の 50 ステップは 2 席とも sha 行（RTX 3080 Ti・opt-in・実用席は参照席と違う床）。
+        # The 50-step I2V has sha rows for both presets (RTX 3080 Ti, opt-in; the practical preset
+        # has a different floor from the reference preset).
         assert (
             "In the same opt-in set, 50-step image-to-video runs at 1280 × 704 with 33 frames are"
             " pinned with both quants on the NVIDIA GeForce RTX 3080 Ti, the"
@@ -2828,11 +2952,12 @@ class TestTheWan22ImageToVideoCard:
             in prose
         )
         assert "are not pinned" not in prose
-        # T2V の照合の項は T2V と名乗る。
+        # The T2V comparison item says T2V.
         assert "- **Text to video against the upstream reference**" in prose
 
     def test_the_quality_figures_say_which_task_they_were_measured_on(self, assembled22) -> None:
-        """T2V の数と I2V の数（段 9d の A/B 0.046 と視認 12 対）を同じ文の中で区別して書く。"""
+        """The T2V figures and the I2V figures (the A/B 0.046 of step 9d and the 12 visual pairs)
+        are kept apart within the same sentence."""
         out_dir, _ = assembled22
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
@@ -2877,8 +3002,9 @@ class TestTheWan22ImageToVideoCard:
         assert "Text to video has been checked end to end on the GPU: 17 frames" in prose
 
     def test_the_resources_name_what_was_measured_for_image_to_video(self, assembled22) -> None:
-        """表は全て T2V。I2V は encoder 単独の山（追記「段 9a の結果」）と 50 ステップの壁（段 9b の
-        通しの結果ファイル）だけを書き、1 本の VRAM の山は未計測と名乗る。"""
+        """The table is all T2V. For I2V it writes only the peak of the encoder alone (addendum
+        "results of step 9a") and the 50-step wall time (the result file of the step 9b full run),
+        and says the VRAM peak of one clip has not been measured."""
         out_dir, _ = assembled22
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         section = card.split("## Resources", 1)[1].split("\n## ", 1)[0]
@@ -2892,7 +3018,7 @@ class TestTheWan22ImageToVideoCard:
             " the encoder stage under 1 s of it" in prose
         )
         assert "an image-to-video clip's peak has not been measured" in prose
-        # I2V の行は表に入らない（表の行は T2V の実測だけ）。
+        # I2V rows are not in the table (the table rows are T2V measurements only).
         table = [line for line in section.splitlines() if line.startswith("| `")]
         assert table and all("image" not in line for line in table)
 
@@ -2911,15 +3037,16 @@ _REAL_PRESENT = SERIES_CHECKS and (
 
 @pytest.mark.skipif(
     SERIES_CHECKS and not _REAL_PRESENT,
-    reason=f"実物の系列が無い: {_REAL.series} / {_REAL.i8_series} / {_REAL.text_encoder.parent}",
+    reason=f"no real series: {_REAL.series} / {_REAL.i8_series} / {_REAL.text_encoder.parent}",
 )
 @requires_series
 class TestTheRealSeries:
-    """実物の系列（`wan.export_dit`〈f16 / i8〉/ `wan.export_vae` / `wan.text_embeds` /
-    `wan.umt5_export` / `wan.umt5_tokenizer` の出力）で計画が組める。
+    """The plan can be built from the real series (the outputs of `wan.export_dit` (f16 / i8) /
+    `wan.export_vae` / `wan.text_embeds` / `wan.umt5_export` / `wan.umt5_tokenizer`).
 
-    読むのは容器の 2 文書・束縛表・資産（宣言と RoPE の素表）と、埋め込み資産のヘッダ・トークナイザ
-    資産（約 8 MB）だけ（重みの payload は読まない）。
+    It reads only the 2 documents of the containers, the binding tables, the assets (declarations
+    and the base RoPE table), the header of the embedding asset and the tokenizer asset (about
+    8 MB) (no weight payloads are read).
     """
 
     def test_the_plan_passes_every_gate(self) -> None:
@@ -2938,7 +3065,7 @@ _REAL22_PRESENT = SERIES_CHECKS and (
     (_REAL22.i8_series / WAN_TRANSFORMER_ROLE).is_dir()
     and (_REAL22.series / WAN_VAE_FIRST_ROLE).is_dir()
     and (_REAL22.series / WAN_VAE_NEXT_ROLE).is_dir()
-    # VAE の decoder の i8（ADR 0133 決定 7 — `wan.export_vae --model ti2v-5b --dtype i8`）。
+    # The VAE decoder i8 (ADR 0133 decision 7 — `wan.export_vae --model ti2v-5b --dtype i8`).
     and (_REAL22.i8_series / WAN_VAE_FIRST_ROLE).is_dir()
     and (_REAL22.i8_series / WAN_VAE_NEXT_ROLE).is_dir()
     # The 32-tile pairs (ADR 0134 — `wan.export_vae --model ti2v-5b [--dtype i8] --tile 32
@@ -2956,14 +3083,14 @@ _REAL22_PRESENT = SERIES_CHECKS and (
 
 @pytest.mark.skipif(
     SERIES_CHECKS and not _REAL22_PRESENT,
-    reason=f"Wan2.2 の実物の系列が無い: {_REAL22.series} / {_REAL22.i8_series} /"
+    reason=f"no real Wan2.2 series: {_REAL22.series} / {_REAL22.i8_series} /"
     f" {_REAL22.text_encoder.parent}",
 )
 @requires_series
 class TestTheRealWan22Series:
-    """実物の Wan2.2 の系列（`wan.ti2v_export_dit` / `wan.export_vae --model ti2v-5b`）と、Wan2.1 の
-    テキスト資産・umT5 のミラーで計画が組める（読むのは宣言・束縛表・RoPE の素表・資産のヘッダ
-    だけ）。"""
+    """The plan can be built from the real Wan2.2 series (`wan.ti2v_export_dit` /
+    `wan.export_vae --model ti2v-5b`), the Wan2.1 text assets and the umT5 mirror (it reads only the
+    declarations, the binding tables, the base RoPE table and the asset headers)."""
 
     def test_the_plan_passes_every_gate(self) -> None:
         plan = wan_plan(_REAL22, generation=WAN22)

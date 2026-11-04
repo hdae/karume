@@ -1,29 +1,34 @@
-"""Irodori の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択（ADR 0065 決定 2）。
+"""Irodori's distribution recipe — series layout, output paths, quants, card (ADR 0065 decision 2).
 
-汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **Irodori 固有の事実**だけ: どの系列ディレクトリから何を
-拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+The generic assembly engine (placement, folding of shared slots, sha256, manifest, staging/swap,
+verification) lives in `karume.dist`. This module holds only **Irodori-specific facts**: what to
+pick from which series directory, at which path of the distribution and under which dtype label to
+lay it out, and which quant is the default.
 
-配布するのは**実行に要る 9 グラフ + tokenizer 資産 1 本**だけ。9 のうち 2 本は波形 ↔ latent の
-コーデック（DACVAE — 上流では別リポ・別重みだが、テキストから音声まで 1 リポで完走させるため
-ここへ同梱する）、2 本は DiT を割った対（条件側 K/V 射影の `dit_context` と step ごとの `dit` —
-ADR 0114）。格納形は f32 / f16 / i8 の 3 系列（DiT の 2 本だけ **i4 の 4 本目**を持つ）で、
-quant 席は 5 つ（`f32` / `f16` / `i8` / `i8-a8` / `i8+dit4`）。`i8` と `i8-a8` は**同じ i8 バイト
-を共有**し、違うのは実行形ノブだけ。`i8+dit4` は DiT の 2 本（`dit` / `dit_context`）だけを i4
-系列から採り、他 7 役は `i8` と同じ i8 バイトを共有する（唯一の混成席 —
-{@link IRODORI_QUANT_SEATS} の裁定）。
+Only **the 9 graphs needed at run time + 1 tokenizer asset** are distributed. Two of the 9 are the
+waveform ↔ latent codec (DACVAE — a separate repository with separate weights upstream, bundled
+here so that text-to-speech runs end to end from one repository), and two are the split DiT pair
+(`dit_context` for the condition-side K/V projections and the per-step `dit` — ADR 0114). Storage
+comes in 3 series, f32 / f16 / i8 (only the DiT's two graphs have **a 4th, i4**), and there are 5
+quant presets (`f32` / `f16` / `i8` / `i8-a8` / `i8+dit4`). `i8` and `i8-a8` **share the same i8
+bytes** and differ only in the execution knobs. `i8+dit4` takes only the DiT's two graphs (`dit` /
+`dit_context`) from the i4 series and shares the same i8 bytes as `i8` for the other 7 roles (the
+only mixed preset — the ruling in {@link IRODORI_QUANT_SEATS}).
 
-`pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
-latent 幅・t_embed 幅）はチェックポイントの config から導出し、**実行時ノブ**（step 数・
-CFG の強さと区間・秒数の clamp）は上流 `SamplingRequest` の既定を定数として持つ。前者は
-焼き込むと重みを差し替えたときにホストだけが古い数を持って沈黙誤値になるので、必ず導出する
-（TS 側の正本 `packages/models/src/irodori/config.ts` のモジュール doc と同じ理由）。
+`pipelineConfig` splits into two kinds: **model-specific numbers** (the declared length of the
+condition states, the speaker row count, the latent width, the t_embed width) are derived from the
+checkpoint's config, and **run-time knobs** (step count, CFG strength and interval, the clamp on
+seconds) are kept as constants taken from the defaults of upstream's `SamplingRequest`. The former
+are always derived, because baking them in means that once the weights are swapped only the host
+holds stale numbers and the values come out silently wrong (the same reason as in the module doc of
+the TS source of truth `packages/models/src/irodori/config.ts`).
 
-コーデック 2 グラフの出所は {@link irodori.dacvae.export} が書く**別系列**（`--model` の軸には
-乗らない）。台本としては別だが、配布形は 1 リポに同梱するのでこの表が両方を並べる。
+The two codec graphs come from a **separate series** written by {@link irodori.dacvae.export} (not
+on the `--model` axis). It is a separate script, but the distribution bundles both in one
+repository, so this table lays out both.
 
-公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
-（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+The public surface is one {@link PIPELINE} (`karume.dist.Pipeline`) — the repository's dist driver
+(`tools/export-recipes/dist.py`) merges it into core's PIPELINES.
 """
 
 from __future__ import annotations
@@ -63,26 +68,29 @@ from .card import (
     render_irodori_model_card,
 )
 
-#: 既定のモデル名 — 系列（`outputs/series/irodori-<この名前>/`）と実重みの置き場
-#: （`inputs/irodori/<この名前>/`）を束ねる 1 語。`irodori.tokenizer_ref.default_out_dir` が
-#: `--model-dir` のディレクトリ名から系列名を作るので、読み手のこちらも同じ 1 語から組む。
+#: The default model name — the one word that ties together the series
+#: (`outputs/series/irodori-<this name>/`) and where the real weights live
+#: (`inputs/irodori/<this name>/`). `irodori.tokenizer_ref.default_out_dir` builds the series name
+#: from the directory name of `--model-dir`, so the reader here builds from the same word too.
 IRODORI_DEFAULT_MODEL = "v4-small"
 
-#: 系列名とリポ名の接頭辞（`irodori-<モデル名>`）。
+#: Prefix of the series and repository names (`irodori-<model name>`).
 IRODORI_SERIES_PREFIX = "irodori"
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
-#: `IRODORI_PIPELINE_NAME` / `IRODORI_PIPELINE_MAJOR`。
+#: Pipeline contract (ADR 0041 §2 — per model). The set the TS side accepts is
+#: `IRODORI_PIPELINE_NAME` / `IRODORI_PIPELINE_MAJOR`.
 IRODORI_PIPELINE = "irodori/1"
 
-#: チェックポイント（`inputs/irodori/<モデル名>/`）のファイル名と、`__metadata__` が持つ
-#: config の綴り。どちらも `irodori/export.py`（`CHECKPOINT_FILE` / `MODEL_CONFIG_META_KEY`）と同じ
-#: — 重みが実際に構成されたときの形の正本はチェックポイントの中にある（HF から引き直さない）。
+#: The checkpoint's file name (`inputs/irodori/<model name>/`) and the spelling of the config key in
+#: its `__metadata__`. Both are the same as in `irodori/export.py` (`CHECKPOINT_FILE` /
+#: `MODEL_CONFIG_META_KEY`) — the source of truth for the shape the weights were actually built
+#: with is inside the checkpoint (it is not re-fetched from HF).
 IRODORI_CKPT_FILE = "model.safetensors"
 IRODORI_CONFIG_META_KEY = "config_json"
 
-#: 役割名 → 系列のターゲットディレクトリ名（`irodori.export.TARGETS` の綴り）。役割名は
-#: manifest の weights / assets キーでもあるので、ハイフン綴りの系列名とはここで縁を切る。
+#: Role name → target directory name of the series (spelled as in `irodori.export.TARGETS`). Role
+#: names are also the keys of the manifest's weights / assets, so they are decoupled here from the
+#: hyphenated series names.
 IRODORI_SERIES_DIRS: Mapping[str, str] = {
     "backbone": "backbone",
     "text_proj": "text-proj",
@@ -93,27 +101,29 @@ IRODORI_SERIES_DIRS: Mapping[str, str] = {
     "dit_context": "dit-context",
 }
 
-#: コーデック（DACVAE）の 1 語 — **別リポ・別重み**なので系列も入力素材も専用の名前を持つ
-#: （`outputs/series/<この名前>/` に export 済みグラフ・`inputs/irodori/<この名前>/` に
-#: `irodori/dacvae/convert.py` が書いた `metadata.json`）。Irodori のモデル名（`v4-small`）
-#: とは独立に動くので、`--model` の軸には乗せない。
+#: The one word for the codec (DACVAE) — **a separate repository with separate weights**, so its
+#: series and its input material have their own name (the exported graphs in
+#: `outputs/series/<this name>/`, the `metadata.json` written by `irodori/dacvae/convert.py` in
+#: `inputs/irodori/<this name>/`). It moves independently of Irodori's model name (`v4-small`), so
+#: it is not put on the `--model` axis.
 IRODORI_CODEC_NAME = "dacvae-32dim"
 
-#: 役割名 → コーデック系列のターゲットディレクトリ名（`irodori.dacvae.export.TARGETS` の綴り）。
+#: Role name → target directory name of the codec series (spelled as in
+#: `irodori.dacvae.export.TARGETS`).
 IRODORI_CODEC_DIRS: Mapping[str, str] = {
     "codec_decoder": "decoder",
     "codec_encoder": "encoder",
 }
 
-#: グラフを持つ役割の全体（Irodori 本体 7 + コーデック 2）。
+#: Every role that has a graph (Irodori's own 7 + the codec's 2).
 IRODORI_GRAPH_ROLES: tuple[str, ...] = (*IRODORI_SERIES_DIRS, *IRODORI_CODEC_DIRS)
 
-#: 系列のターゲットディレクトリ名 → 役割名（上の 2 表の逆引き）。**書き手が容器のグラフを
-#: 名乗るための表**で、グラフ名は manifest の weights のキーと一致すること MUST
-#: （container-v1 §2.1 — ランタイムは `prepareContainer(opened, <weights キー>)` で引く）。
-#: Irodori はディレクトリ名（`caption-proj` / コーデックの `decoder`）とキー
-#: （`caption_proj` / `codec_decoder`）が綴りから違うので、書き手がディレクトリ名を
-#: そのまま名乗ると**ランタイムがグラフを引けない容器**が黙って焼ける。
+#: Target directory name of the series → role name (the reverse of the 2 tables above). **The table
+#: a writer uses to name a container's graph**; the graph name MUST match the key in the manifest's
+#: weights (container-v1 §2.1 — the runtime looks it up with `prepareContainer(opened, <weights
+#: key>)`). In Irodori the directory names (`caption-proj` / the codec's `decoder`) are spelled
+#: differently from the keys (`caption_proj` / `codec_decoder`), so a writer that names its graphs
+#: after the directory silently bakes **containers whose graphs the runtime cannot find**.
 IRODORI_SERIES_ROLES: Mapping[str, str] = {
     directory: role for role, directory in IRODORI_SERIES_DIRS.items()
 }
@@ -121,33 +131,36 @@ IRODORI_CODEC_ROLES: Mapping[str, str] = {
     directory: role for role, directory in IRODORI_CODEC_DIRS.items()
 }
 
-#: `irodori/dacvae/convert.py` が書く構成ファイルと、そこから読む 2 つのキー。**sampleRate /
-#: hopLength を直書きしない**ための出どころ（`irodori.dacvae.export.hop_length` と同じ式
-#: — `hop_length = prod(encoder_rates)`）。
+#: The configuration file `irodori/dacvae/convert.py` writes and the 2 keys read from it. The source
+#: that keeps **sampleRate / hopLength from being hard-coded** (the same formula as
+#: `irodori.dacvae.export.hop_length` — `hop_length = prod(encoder_rates)`).
 IRODORI_CODEC_METADATA_FILE = "metadata.json"
 IRODORI_CODEC_SAMPLE_RATE_KEY = "sample_rate"
 IRODORI_CODEC_RATES_KEY = "encoder_rates"
 
-#: tokenizer 資産の出所（`irodori/tokenizer_ref.py` が系列の下へ書く 4 ファイルのうち、配布へ入る
-#: のは資産本体だけ — golden / nfkc 表は検証用で実行に要らない）。
+#: Where the tokenizer asset comes from (of the 4 files `irodori/tokenizer_ref.py` writes under the
+#: series, only the asset itself goes into the distribution — the golden / NFKC tables are for
+#: verification and not needed at run time).
 IRODORI_TOKENIZER_DIR = "tokenizer"
 IRODORI_TOKENIZER_FILE = "tokenizer.json"
 
-#: 配る格納 dtype。役割名は `<グラフ役割>_<dtype>` で、系列 root と 1:1 に対応する。
-#: **quant 席の綴りとは別軸**（`i8` / `i8-a8` はどちらも i8 系列を指す — 対応表は
-#: {@link IRODORI_QUANT_SEATS}）。
+#: The storage dtypes shipped. Role names are `<graph role>_<dtype>` and map 1:1 to series roots.
+#: **An axis separate from the quant preset names** (`i8` / `i8-a8` both point at the i8 series —
+#: the mapping is {@link IRODORI_QUANT_SEATS}).
 IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 
-#: 格納 dtype → その系列が持つ**役割**（`irodori.export.DTYPE_TARGETS` /
-#: `irodori.dacvae.export.WEIGHT_DTYPES` と対）。
+#: Storage dtype → the **roles** its series has (paired with `irodori.export.DTYPE_TARGETS` /
+#: `irodori.dacvae.export.WEIGHT_DTYPES`).
 #:
-#: MUST: i4 は DiT の 2 本（`dit` / `dit_context`）だけ。i4 の実行経路は linear の重みスロット
-#: 限定（ADR 0069 決定 5）で、DiT 以外の 7 役は quant 席 `i8+dit4` でも **i8 系列のバイトを
-#: そのまま共有する**（{@link IRODORI_QUANT_SEATS}）— 他役割の i4 系列は書き出す側も持たない。
-#: `dit_context` を i4 に**含める**のは、割る前はその 72 本（条件側 K/V 射影）が `dit` の中で
-#: i4 格納だったから — i8 へ落とすと席の数値が動く（ADR 0114）。表をここ 1 箇所に置くのは、
-#: 出力 path / 格納 dtype 要求 / weights 宣言 / 配置表の 4 つが「どの (役割, dtype) が実在するか」で
-#: 同じ判断をするため（別々に持つと、席を 1 つ足した日に片方だけ更新される）。
+#: MUST: i4 covers only the DiT's two graphs (`dit` / `dit_context`). The i4 execution path is
+#: limited to linear weight slots (ADR 0069 decision 5), and the 7 non-DiT roles **share the bytes
+#: of the i8 series as is** even in the quant preset `i8+dit4` ({@link IRODORI_QUANT_SEATS}) — the
+#: writer has no i4 series for the other roles either. `dit_context` is **included** in i4 because,
+#: before the split, its 72 linears (the condition-side K/V projections) were stored as i4 inside
+#: `dit` — dropping them to i8 would move the preset's numbers (ADR 0114). The table lives in this
+#: one place because the output paths / storage dtype requirements / weights declarations /
+#: placement table all make the same judgement of "which (role, dtype) exists" (kept separately,
+#: the day a preset is added only one of them gets updated).
 IRODORI_DTYPE_ROLES: Mapping[str, tuple[str, ...]] = {
     "f32": IRODORI_GRAPH_ROLES,
     "f16": IRODORI_GRAPH_ROLES,
@@ -155,33 +168,39 @@ IRODORI_DTYPE_ROLES: Mapping[str, tuple[str, ...]] = {
     "i4": ("dit", "dit_context"),
 }
 
-#: 圧縮していない系列の dtype（系列 root に接尾が付かない唯一の席で、quant に依存しない
-#: 資産〈tokenizer〉の置き場でもある）。
+#: The dtype of the uncompressed series (the only slot whose series root has no suffix, and also
+#: where the quant-independent asset, the tokenizer, lives).
 IRODORI_PLAIN_DTYPE = "f32"
 
-#: i4 系列が記録する校正条件（{@link assert_irodori_calib_provenance}）。校正の有無は**格納形を
-#: 1 バイトも変えない**（格子は RTN i4 g32 のまま — 変わるのは丸め値と scale 台帳だけ）ので、
-#: 資産・manifest・ヘッダのどれからも判別できない。それでいて品質差は裁定を分ける大きさなので、
-#: anima と同じ規律で「書き出した側が事実を書き残す」。系列レイアウトの綴りは読み手（ここ）が
-#: 持ち、書き手（`irodori/export.py`）はここから引く — 2 箇所で独立に動かさない。
+#: The calibration conditions the i4 series records ({@link assert_irodori_calib_provenance}).
+#: Whether calibration happened **does not change a single byte of the storage format** (the grid
+#: stays RTN i4 g32 — only the rounded values and the scale ledger change), so it cannot be told
+#: from the assets, the manifest or the headers. Yet the quality difference is large enough to
+#: decide a ruling, so the same discipline as anima applies: "the side that wrote it records the
+#: fact". The reader (here) owns the spelling of the series layout, and the writer
+#: (`irodori/export.py`) takes it from here — the two places do not move independently.
 CALIB_PROVENANCE_FILE = "calib_provenance.json"
 
-#: 配布して良い丸め方式（{@link CALIB_PROVENANCE_FILE} の `method`）。`--no-calib` の素の RTN は
-#: smoke 用で、配布資産にしない（`irodori/export.py` の該当 MUST）。
+#: The rounding method allowed for distribution (`method` in {@link CALIB_PROVENANCE_FILE}). The
+#: plain RTN of `--no-calib` is for smoke runs and is not shipped as a distribution asset (the
+#: corresponding MUST in `irodori/export.py`).
 CALIB_SHIPPABLE_METHOD = "gptq"
 
 
 def irodori_calib_floor() -> Mapping[str, int]:
-    """配布して良い校正予算の下限（{@link CALIB_PROVENANCE_FILE} の欄が**在るときだけ**要求する）。
+    """The minimum calibration budget allowed for distribution (required only **when the field is
+    present** in {@link CALIB_PROVENANCE_FILE}).
 
-    値は写さず正本から引く — コーパスの件数は {@link irodori.calib_cases.CALIB_CASES}、
-    捕捉 step 数は参照ループ全長（`irodori.pipeline_ref.NUM_STEPS` = `irodori.calib.CALIB_STEPS`
-    の既定）。どちらも聴感裁定 2026-08-23 が採られた条件そのもので、`--calib-steps 1` の
-    smoke 予算で焼いた資産は「裁定より下の構成」を配ることになる（格納形は 1 バイトも
-    変わらないので、資産からは読めない）。
+    The values are not copied but taken from the source of truth — the corpus size from
+    {@link irodori.calib_cases.CALIB_CASES}, the captured step count from the full length of the
+    reference loop (`irodori.pipeline_ref.NUM_STEPS` = the default of `irodori.calib.CALIB_STEPS`).
+    Both are exactly the conditions under which the listening ruling of 2026-08-23 was made, and
+    assets baked with the smoke budget `--calib-steps 1` would ship "a configuration below the
+    ruling" (the storage format does not change by a single byte, so it cannot be read from the
+    assets).
 
-    NOTE（遅延 import）: `irodori.pipeline_ref` はこのモジュールを import し返すので module
-    直下では読めない。`irodori.calib_cases` も pipeline_ref 経由で同じ環を作る。
+    NOTE (deferred import): `irodori.pipeline_ref` imports this module back, so it cannot be read at
+    module level. `irodori.calib_cases` forms the same cycle through pipeline_ref.
     """
     from .calib_cases import CALIB_CASES
     from .pipeline_ref import NUM_STEPS
@@ -190,13 +209,13 @@ def irodori_calib_floor() -> Mapping[str, int]:
 
 
 def irodori_role(role: str, dtype: str) -> str:
-    """役割名（`backbone_f16` — 配置表・出力 path・格納 dtype 要求が共有する 1 語）。"""
+    """Role name (`backbone_f16` — one word shared by placements, output paths, storage checks)."""
     return f"{role}_{dtype}"
 
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
-#: 格納 dtype をファイル名に出すのは Anima / SBV2 と同じ形（`model.f16.krm`）で、
-#: 1 つのディレクトリに系列 2 本が並んでも取り違えようがない綴りにするため。
+#: Relative output paths (**inside the model subtree**) — the one place the placement table and the
+#: manifest share. The storage dtype appears in the file name, the same form as Anima / SBV2
+#: (`model.f16.krm`), so that two series side by side in one directory cannot be mistaken.
 IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
     **{
         irodori_role(role, dtype): f"{role}/model.{dtype}.krm"
@@ -206,32 +225,37 @@ IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
     "tokenizer": f"{IRODORI_TOKENIZER_DIR}/{IRODORI_TOKENIZER_FILE}",
 }
 
-#: 各役割の束縛表に**要求する**格納の語彙（Anima / SBV2 と同じ根拠 — 素の f32 資産が
-#: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。圧縮系列は
-#: fake-quant 対象だけが f16 / i8 / i4 になる（bias / norm / グラフ定数、i8 の per-channel scale と
-#: i4 の group scale は f32 のまま）ので「その語彙を含む」を要求する。tokenizer は JSON なので
-#: 載せない。
+#: The storage vocabulary **required** in each role's binding table (the same grounds as Anima /
+#: SBV2 — a measured incident where a plain f32 asset passed assembly, loading and execution and
+#: stayed silent until the reference-match check). In a compressed series only the fake-quant
+#: targets become f16 / i8 / i4 (bias / norm / graph constants, the i8 per-channel scales and the
+#: i4 group scales stay f32), so "contains that vocabulary" is required. The tokenizer is JSON, so
+#: it is not listed.
 IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     irodori_role(role, dtype): dtype
     for dtype, roles in IRODORI_DTYPE_ROLES.items()
     for role in roles
 }
 
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
-#: f32 席は「f32 を含む」だけでは圧縮系列の資産と区別できない（圧縮系列も適格外の重み
-#: — bias / norm / グラフ定数 / i8 の per-channel scale / i4 の group scale — を f32 で持つ）ので、
-#: **圧縮側の格納の語彙全部**の不在を併せて要求して初めて系列 × 格納が集合として一意に
-#: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求の不在で落とす。
+#: The storage vocabulary that **must not appear** in each role's binding table
+#: ({@link assert_storage_absent}). For the f32 preset, "contains f32" alone cannot tell it apart
+#: from an asset of a compressed series (compressed series also hold the ineligible weights — bias
+#: / norm / graph constants / i8 per-channel scales / i4 group scales — in f32), so only by also
+#: requiring the absence of **every compressed storage vocabulary** does series × storage become
+#: unique as a set. The reverse direction (an f32 asset in a compressed preset) is caught by
+#: {@link assert_storage} through the missing requirement.
 #:
-#: MUST: **i8 席も i4 の不在を要求する**（DiT の 2 本だけが両方の系列を持つ）。`dit` の i4 系列は
-#: **i4 + i8 + f32 の混成**（block 内の adaLN と条件側 K/V 射影を除いた 96 本が i4・block 外
-#: 5 本 + adaLN 144 本が i8・bias / norm / scale が f32 — 聴感裁定 2026-08-23 で block 外と adaLN を
-#: i4 から外した。`irodori.export._fake_quant_i4`）、`dit_context` の i4 系列は条件側 K/V 射影
-#: 72 本が i4・norm が f32 なので、
-#: 「i8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
-#: **この禁止表だけ**で、外すと既定席 `i8-a8` の `linearCompute: "a8"` が i4 常駐で走る w4a8
-#: 経路（ADR 0076）へ黙って化ける。混成になる前も「i4 系列が i8 席を名乗れるかどうかが上流の
-#: 適格率次第」で同じ穴が空いていた — 混成でその穴が常時開いた形になっただけ。
+#: MUST: **the i8 preset also requires the absence of i4** (only the DiT's two graphs have both
+#: series). The i4 series of `dit` is **a mix of i4 + i8 + f32** (the 96 linears inside the blocks,
+#: excluding adaLN and the condition-side K/V projections, are i4; the 5 outside the blocks + the
+#: 144 adaLN linears are i8; bias / norm / scale are f32 — the listening ruling of 2026-08-23 took
+#: the out-of-block linears and adaLN out of i4. `irodori.export._fake_quant_i4`), and the i4
+#: series of `dit_context` has its 72 condition-side K/V projections in i4 and its norms in f32, so
+#: a requirement check of "contains i8" is satisfied by the i4 series too. **This forbidden table
+#: alone** separates the i8 preset from the i4 series; without it, `linearCompute: "a8"` of the
+#: default preset `i8-a8` silently turns into the w4a8 path running on resident i4 (ADR 0076).
+#: Before the mix, the same hole existed as "whether the i4 series can pose as the i8 preset depends
+#: on upstream's eligibility ratio" — the mix only left that hole open all the time.
 IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     **{
         irodori_role(role, IRODORI_PLAIN_DTYPE): tuple(
@@ -242,9 +266,9 @@ IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     **{irodori_role(role, "i8"): ("i4",) for role in IRODORI_DTYPE_ROLES["i4"]},
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。9 グラフとも f32 / f16 / i8 の 3 席を持ち（DiT の
-#: 2 本はさらに i4）、{@link complete_quant_weights} の自動補完は掛からないので quant 表が全役割を
-#: 名指しする。
+#: The weights declarations (dtype label → role name). All 9 graphs have the 3 slots f32 / f16 / i8
+#: (the DiT's two graphs also i4), and the automatic completion of {@link complete_quant_weights}
+#: does not apply, so the quant table names every role.
 IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     role: {
         dtype: WeightFiles(irodori_role(role, dtype))
@@ -254,59 +278,66 @@ IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     for role in IRODORI_GRAPH_ROLES
 }
 
-#: assets の宣言（quant 選択に依存しない無条件ファイル）。
+#: The assets declarations (unconditional files that do not depend on the quant choice).
 IRODORI_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer"}
 
 
 class QuantSeat(NamedTuple):
-    """quant 席 1 つ（既定の格納 dtype・実行形ノブ・役割ごとの例外・表示欄）。
+    """One quant preset (base storage dtype, execution knobs, per-role exceptions, display text).
 
-    **席名と系列 root の対応をここ 1 箇所だけで綴る**（`i8` / `i8-a8` はどちらも `-i8` 系列を
-    指し、バイトは 1 組を共有する — 違うのは `session` だけ）。
+    **The mapping between preset name and series root is spelled in this one place only** (`i8` /
+    `i8-a8` both point at the `-i8` series and share one set of bytes — only `session` differs).
     """
 
-    #: 例外に載らない役割の格納 dtype。
+    #: Storage dtype of the roles not listed in the exceptions.
     dtype: str
-    #: 実行形ノブ（`session` の語彙は manifest 所有）。
+    #: Execution knobs (the manifest owns the vocabulary of `session`).
     session: Mapping[str, str]
-    #: 選択 UI に出す短い表示名（ADR 0075 決定 1 — 64 字上限）。
+    #: Short display name shown in the selection UI (ADR 0075 decision 1 — 64-character limit).
     label: str
-    #: 同・1 行の説明（200 字上限）。既定であることは書かない（`defaultQuant` が指している）。
+    #: Likewise, a one-line description (200-character limit). It does not say that it is the
+    #: default (`defaultQuant` points to it).
     description: str
-    #: 役割ごとの例外（混成席のためだけの口 — 既定が全役割へ効く形は崩さない）。
+    #: Per-role exceptions (an opening for mixed presets only — the default still applies to every
+    #: role).
     roles: Mapping[str, str] = {}
 
 
-#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4）。**Irodori は空** — 混成席
-#: `i8+dit4` のトークン `dit` は weights 名そのもの（略称ではない）なので、対応表を出すと
-#: 「`dit` は `dit` です」という行がカードに生えるだけになる。
+#: Component-override token of a preset name → its weights name (ADR 0074 decision 4). **Empty for
+#: Irodori** — the token `dit` of the mixed preset `i8+dit4` is the weights name itself (not an
+#: abbreviation), so emitting the mapping would only add a "`dit` is `dit`" line to the card.
 #:
-#: NOTE: DiT を 2 グラフに割った後（ADR 0114）も、トークン `dit` は DiT 全体（`dit` と条件側の
-#: `dit_context`）を指す。この表の形（トークン 1 つ → weights 名 1 つ）では 2 本を名指せず、
-#: 席名そのものを変えるのは配布の breaking なので、席の説明文（`description`）が DiT と呼ぶ範囲で
-#: 両方を覆う。
+#: NOTE: even after the DiT was split into 2 graphs (ADR 0114), the token `dit` refers to the whole
+#: DiT (`dit` and the condition-side `dit_context`). The shape of this table (one token → one
+#: weights name) cannot name both, and renaming the preset itself would be a breaking change to the
+#: distribution, so the preset's description (`description`) covers both within what it calls the
+#: DiT.
 IRODORI_QUANT_ABBREVIATIONS: Mapping[str, str] = {}
 
-#: quant 席の綴り → {@link QuantSeat}。席名は ADR 0074 の文法
-#: `<格納>[+<部品><ビット>]…[-<ノブ>]…` で、`<格納>` は**全役割に共通の基底格納**。
+#: Quant preset name → {@link QuantSeat}. Preset names follow ADR 0074's grammar
+#: `<storage>[+<component><bits>]…[-<knob>]…`, where `<storage>` is **the base storage shared by
+#: every role**.
 #:
-#: **8 役一律をやめるのは `i8+dit4` 席だけ**（2026-08-23 ユーザー裁定）。2026-08-12 の裁定は
-#: 「i8 も一律」で、当時の根拠は混成にすると S（発話長）が席ごとにドリフトする実測だったが、
-#: そのドリフトは **GPTQ 校正で消えた**（`docs/research/2026-08-20-gptq-awq-calibrated-rounding.md`
-#: §6 — 校正付き丸めで S は f32 と完全一致）。`i8` / `i8-a8` の 8 役一律は従来どおり。
+#: **Only the `i8+dit4` preset stops being uniform across the 8 roles** (maintainer ruling of
+#: 2026-08-23). The ruling of 2026-08-12 was "i8 uniform too", grounded at the time in a measurement
+#: showing that a mix made S (the utterance length) drift between presets, but that drift
+#: **disappeared with GPTQ calibration** (`docs/research/2026-08-20-gptq-awq-calibrated-rounding.md`
+#: §6 — with calibrated rounding S matches f32 exactly). `i8` / `i8-a8` stay uniform across the 8
+#: roles as before.
 #:
-#: MUST: `i8-a8` の `linearCompute` は **DiT の 2 本（`dit` / `dit_context`）の Session にだけ**
-#: 降りる（models 側 `pipeline.ts` のモジュール doc）— DiT の linear 317 本が唯一の適格集合で、
-#: 条件エンコーダ 5 本は 1 生成に 1 回しか走らない。`dit_context`（条件側 K/V 射影 72 本）も同じ席で
-#: 回すのは、割る前はその 72 本が `dit` の中でこの席の実行形で走っていたから — 別の実行形で
-#: 回すと数値が動く（ADR 0114）。
+#: MUST: `linearCompute` of `i8-a8` reaches **only the Sessions of the DiT's two graphs (`dit` /
+#: `dit_context`)** (the module doc of `pipeline.ts` on the models side) — the DiT's 317 linears
+#: are the only eligible set, and the 5 condition encoders run only once per generation.
+#: `dit_context` (the 72 condition-side K/V projections) also runs in this preset because, before
+#: the split, those 72 ran inside `dit` with this preset's execution form — running them another
+#: way would move the numbers (ADR 0114).
 #:
-#: MUST: `i8+dit4` は **`linearCompute` を宣言しない**。i4 常駐 × i8 活性は w4a8 経路
-#: （ADR 0076・group 部分縮約）に乗るが、その構成は irodori では**一度も測っていない**
-#: （perf-ledger の席は重み側のみ）。anima では同じ構成が実 GPU の画で品質裁定に落ちている
-#: （ADR 0076 決定 6 / `anima/distribution.py` の同 MUST）ので、測る前に宣言だけ足すと
-#: 「速いが荒い」を既定の顔で配ることになる。この席の存在理由は**サイズと VRAM**であって
-#: 速度ではない。
+#: MUST: `i8+dit4` **does not declare `linearCompute`**. Resident i4 × i8 activations go through
+#: the w4a8 path (ADR 0076 — partial group reduction), but that configuration has **never been
+#: measured** for irodori (the perf-ledger entry covers the weight side only). In anima the same
+#: configuration failed a quality ruling on real-GPU images (ADR 0076 decision 6 / the same MUST in
+#: `anima/distribution.py`), so adding only the declaration before measuring would ship "fast but
+#: rough" with the face of a default. This preset exists for **size and VRAM**, not speed.
 IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
     "f32": QuantSeat(
         "f32",
@@ -356,40 +387,48 @@ IRODORI_QUANTS: Mapping[str, Any] = {
     for name, seat in IRODORI_QUANT_SEATS.items()
 }
 
-#: 既定は `i8-a8`（ユーザー聴感裁定 2026-08-12 — DAC + ヘッドホンで 4 席を通しで確認し
-#: 「音質的な劣化という感じはしない」。配布 25.2% / DiT 常駐 0.37GB / wall ×1.12 が
-#: 既定で効き、最も忠実な `f32` 席は残したまま明示で選べる。数値上の帯（sim LSD 5.64・
-#: i8 golden との z maxAbs 2.97）は `e2e_irodori_ab_test.ts` の判別帯が持つ）。
+#: The default is `i8-a8` (the maintainer's listening ruling of 2026-08-12 — the 4 presets were
+#: checked end to end with a DAC + headphones: "it does not feel like a loss of audio quality". The
+#: distribution at 25.2% / DiT resident 0.37GB / wall ×1.12 take effect by default, and the most
+#: faithful `f32` preset stays available to pick explicitly. The numeric band (sim LSD 5.64, z
+#: maxAbs 2.97 against the i8 golden) is held by the discriminating band of
+#: `e2e_irodori_ab_test.ts`).
 IRODORI_DEFAULT_QUANT = "i8-a8"
 
-#: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`irodori.export.CODEC_FRAME_RATE` と
-#: 同値で、コーデックが別リポ・別重みなのでチェックポイントの config には入っていない。
-#: `sampleRate` / `hopLength` はコーデックの `metadata.json` から導出し、3 者の整合
-#: （`sampleRate == frameRate × hopLength`）は {@link irodori_pipeline_config} が見る。
+#: DACVAE frame rate (Hz) — 48kHz / hop 1920 = 25. The same value as
+#: `irodori.export.CODEC_FRAME_RATE`; the codec is a separate repository with separate weights, so
+#: it is not in the checkpoint's config. `sampleRate` / `hopLength` are derived from the codec's
+#: `metadata.json`, and the consistency of the three (`sampleRate == frameRate × hopLength`) is
+#: checked by {@link irodori_pipeline_config}.
 IRODORI_FRAME_RATE = 25
 
-#: codec decoder のタイル分割で採用区間の両側へ足す latent フレーム数。**受容野由来のモデル
-#: 定数**（片側 13,793 サンプル = 7.19 フレーム → 8 フレーム = 15,360 サンプルで覆う）で、
-#: `metadata.json` には入っていないのでここが唯一の出どころ。実測の根拠は decoder 主経路に
-#: 因果層が無く全層が対称 pad か厳密 `L·stride` の convT である（= 平行移動同変）こと。
+#: The latent frames added on both sides of the kept range when the codec decoder is tiled. **A
+#: model constant from the receptive field** (13,793 samples per side = 7.19 frames → covered with
+#: 8 frames = 15,360 samples); it is not in `metadata.json`, so this is its only source. The
+#: measured grounds: the decoder's main path has no causal layer, and every layer is a symmetric pad
+#: or a convT of exactly `L·stride` (= translation equivariant).
 IRODORI_CODEC_HALO_FRAMES = 8
 
-#: 発話長 clamp の秒数（上流 `SamplingRequest.min_seconds` / `max_seconds` の既定）。
-#: `max_seconds` は **`dit` の記号次元 S の上限を決めた値でもある**
-#: （`irodori.export.DIT_MAX_SECONDS` が同じ 30.0 を「実装側の正本は SamplingRequest の既定」
-#: として持つ）。1 つの定数から両方を組むのは、配布形の clamp と焼かれたグラフの上限が
-#: 独立に動くと「S は通るのに RoPE 表が足りない」形で実行時にしか出ないため。
+#: The utterance-length clamp in seconds (the defaults of upstream `SamplingRequest.min_seconds` /
+#: `max_seconds`). `max_seconds` **is also the value that set the upper bound of `dit`'s symbolic
+#: dimension S** (`irodori.export.DIT_MAX_SECONDS` holds the same 30.0 as "the implementation's
+#: source of truth is SamplingRequest's default"). Both are built from one constant because if the
+#: distribution's clamp and the baked graph's upper bound moved independently, the failure would
+#: only show at run time, as "S passes but the RoPE table is too short".
 IRODORI_MIN_SECONDS = 0.5
 IRODORI_MAX_SECONDS = 30.0
 
-#: 実行時ノブの既定（上流 `SamplingRequest` の同名フィールドと `rf.sample_euler_rf_cfg` の
-#: `init_scale`）。**モデル固有ではない**のでチェックポイントの config には無く、ここが唯一の
-#: 出どころになる（Anima の `anima.distribution.ANIMA_PIPELINE_CONFIG` と同じ性格）。
+#: Defaults of the run-time knobs (the same-named fields of upstream `SamplingRequest` and the
+#: `init_scale` of `rf.sample_euler_rf_cfg`). **Not model-specific**, so they are not in the
+#: checkpoint's config and this is their only source (the same nature as Anima's
+#: `anima.distribution.ANIMA_PIPELINE_CONFIG`).
 #:
-#: MUST: `speakerUncondMode` / `cfgGuidanceMode` は分岐用ではなく**宣言**（ADR 0047 決定 1）。
-#: TS 側はこの 2 値以外を parse 時に拒否するので、別のモードで焼いた配布形は読まれる前に落ちる。
-#: full-loop golden（`irodori/pipeline_ref.py` の `meta.json`）も同じ値で焼かれており、golden 再生成
-#: と dist 再生成がずれたら E2E 門（`e2e_irodori_latent_test.ts`）が実効値 drift として落とす。
+#: MUST: `speakerUncondMode` / `cfgGuidanceMode` are **declarations**, not switches (ADR 0047
+#: decision 1). The TS side rejects any other value at parse time, so a distribution baked with
+#: another mode fails before it is read. The full-loop golden (`meta.json` of
+#: `irodori/pipeline_ref.py`) is baked with the same values too, and if golden regeneration and dist
+#: regeneration drift apart, the E2E check (`e2e_irodori_latent_test.ts`) fails it as drift of the
+#: effective values.
 IRODORI_SAMPLING_DEFAULTS: Mapping[str, Any] = {
     "steps": 40,
     "initScale": 0.999,
@@ -402,15 +441,16 @@ IRODORI_SAMPLING_DEFAULTS: Mapping[str, Any] = {
     "cfgGuidanceMode": "independent",
 }
 
-#: 各グラフに要求する `(入力名の並び, 出力の本数)`。**入力の並びは実行時に位置で読まれる形の
-#: 正本**で、出力本数は「検証用の別資産が混ざっていないか」を見る席（SBV2 の
-#: {@link sbv2.distribution.assert_bert_hidden} と同じ機序 — `caption_proj` が 1 出力の資産に
-#: 差し替わると `caption_vec` を第 1 出力から採る別のベクトルで duration が回り、shape は
-#: 合ったまま沈黙する）。
+#: The `(input names in order, number of outputs)` required of each graph. **The input order is the
+#: source of truth for the form read by position at run time**, and the output count is where "a
+#: separate verification asset slipped in" is caught (the same mechanism as SBV2's
+#: {@link sbv2.distribution.assert_bert_hidden} — if `caption_proj` were swapped for a 1-output
+#: asset, duration would run on a different vector taken from the first output as `caption_vec`,
+#: and with the shapes still matching it would stay silent).
 #:
-#: DiT の 2 本（`dit_context` / `dit`）はここに載せない — 境界の本数がブロック数で決まる
-#: （ADR 0114）ので固定の並びでは書けず、2 本の宣言を突き合わせて導く
-#: （{@link _assert_irodori_dit_boundary}）。
+#: The DiT's two graphs (`dit_context` / `dit`) are not listed here — the number of boundary
+#: tensors depends on the block count (ADR 0114), so it cannot be written as a fixed order and is
+#: derived by matching the declarations of the two ({@link _assert_irodori_dit_boundary}).
 IRODORI_GRAPH_SHAPES: Mapping[str, tuple[tuple[str, ...], int]] = {
     "backbone": (("input_ids",), 1),
     "text_proj": (("hidden",), 1),
@@ -420,41 +460,45 @@ IRODORI_GRAPH_SHAPES: Mapping[str, tuple[tuple[str, ...], int]] = {
         ("text_state", "speaker_vec", "has_speaker", "caption_vec", "has_caption"),
         1,
     ),
-    # コーデック 2 本は位置表もマスクも持たない純畳み込み網（入力 1 本 / 出力 1 本）。
+    # The 2 codec graphs are pure convolutional networks with neither position tables nor masks
+    # (1 input / 1 output).
     "codec_decoder": (("latent",), 1),
     "codec_encoder": (("wav",), 1),
 }
 
-#: `dit_context` の入力の並び（条件 state 3 本 — projector の生の出力を Tmax 右 pad したもの。
-#: `text_norm` / `caption_norm` はこのグラフの内側で掛かる）。
+#: The input order of `dit_context` (the 3 condition states — the raw projector outputs right-padded
+#: to Tmax. `text_norm` / `caption_norm` are applied inside this graph).
 IRODORI_CONTEXT_INPUTS: tuple[str, ...] = ("text_state", "speaker_state", "caption_state")
 
-#: `dit` の先頭 3 入力の並び。この後ろに条件側 K/V（{@link irodori_context_kv_names}）が続く。
+#: The first 3 inputs of `dit`. The condition-side K/V ({@link irodori_context_kv_names}) follow.
 IRODORI_DIT_HEAD_INPUTS: tuple[str, ...] = ("x_t", "t_embed", "mask")
 
 
 def irodori_context_kv_names(blocks: int) -> tuple[str, ...]:
-    """条件側 K/V の境界名（`dit_context` の出力 = `dit` の 4 本目以降の入力）。
+    """Boundary names of the condition-side K/V (outputs of `dit_context` = the inputs of `dit`
+    from the 4th on).
 
-    ブロック b ごとに `context_k_<b>` → `context_v_<b>` の順で、b の昇順に並べる。ランタイムは
-    常駐テンソルをこの**名前**で束ねる（`copyOutputs` と `dit` の入力）ので、書き手
-    （`irodori.export` が IR の境界名を付け替える）と読み手（{@link _assert_irodori_dit_boundary}）
-    がここ 1 箇所の綴りから組む。
+    Ordered per block b as `context_k_<b>` → `context_v_<b>`, in ascending b. The runtime binds the
+    resident tensors by these **names** (`copyOutputs` and the inputs of `dit`), so the writer
+    (`irodori.export` renames the IR's boundary names) and the reader
+    ({@link _assert_irodori_dit_boundary}) build them from the spelling in this one place.
 
-    MUST: ブロック数は焼かない — 呼び手が上流の構成（export 側は `len(model.blocks)`）か、
-    焼かれたグラフの宣言（組み立て側は `dit_context` の出力本数）から渡す。
+    MUST: the block count is not baked in — the caller passes it from the upstream configuration
+    (`len(model.blocks)` on the export side) or from the declarations of the baked graph (the
+    output count of `dit_context` on the assembly side).
     """
     if blocks < 1:
-        raise ValueError(f"DiT のブロック数が {blocks}（1 以上）")
+        raise ValueError(f"The DiT block count is {blocks} (must be at least 1)")
     return tuple(
         name for index in range(blocks) for name in (f"context_k_{index}", f"context_v_{index}")
     )
 
 
-#: `(役割, グラフ入力, 軸, pipelineConfig の欄)` — グラフの**静的**次元と宣言の突合表。
-#: TS 側 `irodori.Pipeline.fromAssets` の `assertStaticDim` と同じ組み合わせを**焼く側でも**
-#: 見る（配ってから利用者の手元で初めて落ちる形にしない）。条件 state 3 本は `dit_context` の
-#: 入力（ADR 0114 で `dit` から移った）。
+#: `(role, graph input, axis, pipelineConfig field)` — the table matching the graphs' **static**
+#: dimensions against the declarations. The same combinations as `assertStaticDim` in the TS side's
+#: `irodori.Pipeline.fromAssets` are checked **on the baking side too** (so that the failure does
+#: not first appear on a user's machine after shipping). The 3 condition states are inputs of
+#: `dit_context` (they moved from `dit` in ADR 0114).
 IRODORI_STATIC_DIMS: tuple[tuple[str, str, int, str], ...] = (
     ("dit", "x_t", 2, "latentDim"),
     ("dit", "t_embed", 1, "timestepEmbedDim"),
@@ -467,66 +511,71 @@ IRODORI_STATIC_DIMS: tuple[tuple[str, str, int, str], ...] = (
     ("duration", "text_state", 2, "textDim"),
     ("duration", "speaker_vec", 1, "speakerDim"),
     ("duration", "caption_vec", 1, "captionDim"),
-    # コーデックは**別リポ・別重み**なので、latent の幅と 1 フレームのサンプル数が Irodori 側の
-    # 宣言と噛み合っている保証がここにしか無い（別次元の DACVAE を混ぜると shape は合ったまま
-    # 別の声になる / 波形長だけが静かにずれる）。
+    # The codec is **a separate repository with separate weights**, so this is the only place that
+    # guarantees its latent width and samples per frame mesh with Irodori's declarations (mixing in
+    # a DACVAE of another dimension gives a different voice with the shapes still matching / only
+    # the waveform length silently shifts).
     ("codec_decoder", "latent", 2, "latentDim"),
     ("codec_encoder", "wav", 2, "hopLength"),
 )
 
 
 def irodori_series_name(model: str) -> str:
-    """系列名（`outputs/series/<この名前>/`）— `irodori.tokenizer_ref.default_out_dir`
-    と同じ綴り。
+    """Series name (`outputs/series/<this name>/`) — the same spelling as
+    `irodori.tokenizer_ref.default_out_dir`.
     """
     return f"{IRODORI_SERIES_PREFIX}-{model}"
 
 
 def irodori_repo_name(model: str) -> str:
-    """単一モデルの配布リポ名（`karume-` prefix はリポ名裁定 2026-08-09）。"""
+    """Distribution repository of one model (the `karume-` prefix: repo-name ruling 2026-08-09)."""
     return f"karume-{IRODORI_SERIES_PREFIX}-{model}"
 
 
 @dataclass(frozen=True)
 class IrodoriSources:
-    """組み立ての入力。系列とチェックポイントの置き場（`inputs/` — 生成物ではない）が 2 組。
+    """The assembly inputs. Two sets: the series, and where the checkpoints live (`inputs/` — not
+    generated artifacts).
 
-    チェックポイント側が要るのは `pipelineConfig` の数を**焼き込まずに導出**するため
-    （`__metadata__` / `metadata.json` だけを読むので 2.9GB のペイロードは舐めない）。
-    コーデックが別の 2 本を持つのは**別リポ・別重み**だから — Irodori のモデル名を動かしても
-    コーデックは動かない。
+    The checkpoint side is needed to **derive the `pipelineConfig` numbers instead of baking them
+    in** (only `__metadata__` / `metadata.json` are read, so the 2.9GB payload is not scanned). The
+    codec has its own 2 because it is **a separate repository with separate weights** — moving
+    Irodori's model name does not move the codec.
 
-    系列は**格納 dtype ごとに別ディレクトリ**（`irodori.export.default_out_root` /
-    `irodori.dacvae.export.default_out_root` の dtype 接尾）。tokenizer 資産は quant に
-    依存しないので素の系列（f32）側の 1 本だけを見る。
+    The series are **a separate directory per storage dtype** (the dtype suffix of
+    `irodori.export.default_out_root` / `irodori.dacvae.export.default_out_root`). The tokenizer
+    asset does not depend on the quant, so only the one in the plain series (f32) is looked at.
     """
 
     model: Path
     codec_model: Path
-    #: 格納 dtype → 系列 root（{@link IRODORI_DTYPE_ROLES} が Irodori 側の役割を持つ dtype）。
+    #: Storage dtype → series root (the dtypes for which {@link IRODORI_DTYPE_ROLES} has Irodori
+    #: roles).
     series_by_dtype: Mapping[str, Path]
-    #: 同・コーデック側（コーデックは i4 系列を持たないので f32 / f16 / i8 の 3 本）。
+    #: Likewise for the codec (the codec has no i4 series, so 3: f32 / f16 / i8).
     codec_series_by_dtype: Mapping[str, Path]
 
     @property
     def series(self) -> Path:
-        """素の系列 root（quant に依存しない tokenizer 資産の置き場）。
+        """The plain series root (where the quant-independent tokenizer asset lives).
 
-        写しの欄を持たず毎回引くのは、系列 root が 2 箇所で独立に動く形を作らないため。
+        It is looked up every time instead of kept in a copied field, so that the series root never
+        moves independently in two places.
         """
         return self.series_by_dtype[IRODORI_PLAIN_DTYPE]
 
     @property
     def codec_series(self) -> Path:
-        """素のコーデック系列 root。"""
+        """The plain codec series root."""
         return self.codec_series_by_dtype[IRODORI_PLAIN_DTYPE]
 
 
 def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> IrodoriSources:
-    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。
+    """Look up the inputs from the series' parent directory (`outputs/series/`) and the spellings
+    of `_shared.paths`.
 
-    dtype 接尾の綴りは `irodori.export.default_out_root` /
-    `irodori.dacvae.export.default_out_root` と同一 — 書き手と読み手が同じ 1 語から組む。
+    The dtype suffixes are spelled the same as in `irodori.export.default_out_root` /
+    `irodori.dacvae.export.default_out_root` — writer and reader build from the same word.
     """
     suffix = {
         dtype: "" if dtype == IRODORI_PLAIN_DTYPE else f"-{dtype}"
@@ -538,8 +587,9 @@ def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> Iro
     codec_by_dtype = {
         dtype: series_dir / f"{IRODORI_CODEC_NAME}{tail}"
         for dtype, tail in suffix.items()
-        # コーデックが席を持たない dtype（i4）の root は**作らない** — 使わない path を配って
-        # おくと、i4 の役割が増えた日に「在ることになっている系列」が黙って参照される。
+        # No root is **created** for a dtype in which the codec has no slot (i4) — handing out an
+        # unused path means that, the day an i4 role is added, a series "assumed to exist" is
+        # silently referenced.
         if not set(IRODORI_DTYPE_ROLES[dtype]).isdisjoint(IRODORI_CODEC_DIRS)
     }
     return IrodoriSources(
@@ -551,10 +601,10 @@ def irodori_sources(series_dir: Path, model: str = IRODORI_DEFAULT_MODEL) -> Iro
 
 
 def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link IRODORI_OUTPUT_PATHS} が持つ。
+    """Role name → source file. The output paths are held by {@link IRODORI_OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（`io.*.safetensors` と tokenizer の golden 3 本は
-    これで落ちる）。
+    Anything not in this table does not go into the output (`io.*.safetensors` and the 3 tokenizer
+    golden files are dropped this way).
     """
     placements = {"tokenizer": sources.series / IRODORI_TOKENIZER_DIR / IRODORI_TOKENIZER_FILE}
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
@@ -570,88 +620,95 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
 
 
 def irodori_model_config(model_dir: Path) -> Mapping[str, Any]:
-    """チェックポイントの `__metadata__` から `config_json` を読む（ヘッダだけ読む）。
+    """Read `config_json` from the checkpoint's `__metadata__` (only the header is read).
 
-    `irodori.export.read_configs` と同じ出どころ・同じ理由（HF から config を引き直さない）。
-    こちらが torch を経由しないのは、組み立てが要るのが JSON 1 本だけだから。
+    The same source and the same reason as `irodori.export.read_configs` (the config is not
+    re-fetched from HF). This one does not go through torch because assembly needs only one JSON.
     """
     path = model_dir / IRODORI_CKPT_FILE
     if not path.is_file():
-        raise DistError(f"組み立ての入力が無い: {path}")
+        raise DistError(f"Assembly input missing: {path}")
     with safe_open(str(path), framework="np") as handle:
         metadata = handle.metadata()
     if not isinstance(metadata, dict) or IRODORI_CONFIG_META_KEY not in metadata:
-        raise DistError(f"{path} の __metadata__ に '{IRODORI_CONFIG_META_KEY}' が無い")
+        raise DistError(f"The __metadata__ of {path} has no '{IRODORI_CONFIG_META_KEY}'")
     try:
         config = json.loads(metadata[IRODORI_CONFIG_META_KEY])
     except json.JSONDecodeError as error:
-        raise DistError(f"{path}: {IRODORI_CONFIG_META_KEY} が JSON として読めない") from error
+        raise DistError(f"{path}: {IRODORI_CONFIG_META_KEY} cannot be parsed as JSON") from error
     if not isinstance(config, dict):
-        raise DistError(f"{path}: {IRODORI_CONFIG_META_KEY} が最上位オブジェクトでない")
+        raise DistError(f"{path}: {IRODORI_CONFIG_META_KEY} is not a top-level object")
     return config
 
 
 def _irodori_int(config: Mapping[str, Any], key: str) -> int:
-    """チェックポイント config の整数フィールド（宣言長 / 幅）を検査して読む。"""
+    """Read and check an integer field (declared length / width) of the checkpoint config."""
     value = config.get(key)
-    # bool は int の派生。`"latent_dim": true` を 1 として通すと幅の突合が緩む。
+    # bool is a subclass of int. Letting `"latent_dim": true` through as 1 would loosen the width
+    # check.
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise DistError(f"{IRODORI_CONFIG_META_KEY} の {key} が正の整数でない（{value!r}）")
+        raise DistError(f"{IRODORI_CONFIG_META_KEY}: {key} is not a positive integer ({value!r})")
     return value
 
 
 def _irodori_float(config: Mapping[str, Any], key: str) -> float:
-    """チェックポイント config の実数フィールド（秒数）を検査して読む。"""
+    """Read and check a real-valued field (seconds) of the checkpoint config."""
     value = config.get(key)
-    # NaN は比較が全て False なので `<= 0` を素通りし、下流の秒 → フレーム換算（int()）で
-    # 一般例外として漏れる。Inf も同じ席で落ちる — 有限性をここで要求する。
+    # NaN compares False with everything, so it slips through `<= 0` and leaks out as a generic
+    # exception in the downstream seconds → frames conversion (int()). Inf fails at the same spot —
+    # finiteness is required here.
     if (
         not isinstance(value, int | float)
         or isinstance(value, bool)
         or not math.isfinite(value)
         or value <= 0
     ):
-        raise DistError(f"{IRODORI_CONFIG_META_KEY} の {key} が有限の正の数でない（{value!r}）")
+        raise DistError(
+            f"{IRODORI_CONFIG_META_KEY}: {key} is not a finite positive number ({value!r})"
+        )
     return float(value)
 
 
 class IrodoriCodecNumbers(NamedTuple):
-    """コーデックの `metadata.json` から導く 2 つ（秒 ↔ サンプル ↔ フレームの換算）。"""
+    """Two numbers derived from the codec's `metadata.json` (seconds ↔ samples ↔ frames)."""
 
     sample_rate: int
     hop_length: int
 
 
 def irodori_codec_numbers(codec_model_dir: Path) -> IrodoriCodecNumbers:
-    """`irodori/dacvae/convert.py` が書いた `metadata.json` から `sampleRate` / `hopLength` を導く。
+    """Derive `sampleRate` / `hopLength` from the `metadata.json` that
+    `irodori/dacvae/convert.py` wrote.
 
-    MUST: 写経しない — 別次元・別 hop の DACVAE へ差し替えたときに、ホストだけが古い換算を
-    持ったまま「それらしい長さの音声」を出す（例外は出ない）。`hop_length` は
-    `irodori.dacvae.export.hop_length` と同じ式（`prod(encoder_rates)` —
-    `DACVAE.__init__` の綴り）。
+    MUST: do not copy the values — after swapping in a DACVAE of another dimension or hop, only the
+    host would keep the old conversion and output "audio of a plausible length" (no exception is
+    raised). `hop_length` uses the same formula as `irodori.dacvae.export.hop_length`
+    (`prod(encoder_rates)` — as spelled in `DACVAE.__init__`).
     """
     path = codec_model_dir / IRODORI_CODEC_METADATA_FILE
     if not path.is_file():
         raise DistError(
-            f"組み立ての入力が無い: {path}（`uv run python -m irodori.dacvae.convert` で作る）"
+            f"Assembly input missing: {path} (created by `uv run python -m irodori.dacvae.convert`)"
         )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        raise DistError(f"{path} が JSON として読めない") from error
+        raise DistError(f"{path} cannot be parsed as JSON") from error
     kwargs = raw.get("kwargs") if isinstance(raw, dict) else None
     if not isinstance(kwargs, dict):
-        raise DistError(f"{path} に 'kwargs' が無い")
+        raise DistError(f"{path} has no 'kwargs'")
     sample_rate = kwargs.get(IRODORI_CODEC_SAMPLE_RATE_KEY)
     if not isinstance(sample_rate, int) or isinstance(sample_rate, bool) or sample_rate <= 0:
-        raise DistError(f"{path} の {IRODORI_CODEC_SAMPLE_RATE_KEY} が正の整数でない")
+        raise DistError(f"{path}: {IRODORI_CODEC_SAMPLE_RATE_KEY} is not a positive integer")
     rates = kwargs.get(IRODORI_CODEC_RATES_KEY)
     if not isinstance(rates, list) or not rates:
-        raise DistError(f"{path} の {IRODORI_CODEC_RATES_KEY} が非空のリストでない")
+        raise DistError(f"{path}: {IRODORI_CODEC_RATES_KEY} is not a non-empty list")
     hop_length = 1
     for rate in rates:
         if not isinstance(rate, int) or isinstance(rate, bool) or rate <= 0:
-            raise DistError(f"{path} の {IRODORI_CODEC_RATES_KEY} に正の整数でない要素がある")
+            raise DistError(
+                f"{path}: {IRODORI_CODEC_RATES_KEY} has an element that is not a positive integer"
+            )
         hop_length *= rate
     return IrodoriCodecNumbers(sample_rate=sample_rate, hop_length=hop_length)
 
@@ -659,40 +716,44 @@ def irodori_codec_numbers(codec_model_dir: Path) -> IrodoriCodecNumbers:
 def irodori_pipeline_config(
     config: Mapping[str, Any], codec: IrodoriCodecNumbers
 ) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 23 欄）をチェックポイント config から組む。
+    """Build `pipelineConfig` (the 23 fields of the TS-side schema) from the checkpoint config.
 
-    MUST: モデル固有の数を写経しない — 重みを差し替えたときにホストだけが古い数を持つと、
-    右 pad も行数計算もそのまま通って（shape は合う）**別の位置の条件を読んだ**結果が沈黙で出る。
-    欄名と値域の正本は `packages/models/src/irodori/config.ts`。
+    MUST: do not copy model-specific numbers — if only the host holds stale numbers after the
+    weights are swapped, the right padding and the row counting still pass (the shapes match) and a
+    result that **read the conditions at different positions** comes out silently. The source of
+    truth for the field names and value ranges is `packages/models/src/irodori/config.ts`.
 
-    `latentDim` が 2 つの役割（`dit` の `x_t` の幅 = `latent_dim × latent_patch_size` と、
-    参照 latent の 1 フレームの幅 = `latent_dim`）を兼ねているので、両者が一致する
-    `latent_patch_size == 1` でなければ組めない — 兼ねられなくなったら TS 側の欄を割る話に
-    なるので、黙って片方を選ばずここで落とす。
+    `latentDim` serves two roles (the width of `dit`'s `x_t` = `latent_dim × latent_patch_size`,
+    and the width of one frame of the reference latent = `latent_dim`), so it can only be built at
+    `latent_patch_size == 1`, where the two agree — once it can no longer serve both, the TS field
+    has to be split, so this fails here instead of silently picking one.
     """
     latent_patch = _irodori_int(config, "latent_patch_size")
     if latent_patch != 1:
         raise DistError(
-            f"latent_patch_size が {latent_patch} — pipelineConfig の latentDim は"
-            " `dit` の x_t 幅と参照 latent の 1 フレーム幅を兼ねており、1 でなければ"
-            "両者が一致しない（TS 側の欄を割る変更が要る）"
+            f"latent_patch_size is {latent_patch} — pipelineConfig's latentDim serves as both"
+            " the x_t width of `dit` and the frame width of the reference latent, and the two"
+            " differ unless it is 1 (the TS field would have to be split)"
         )
-    # 秒 → フレーム（`frameRate`）と 秒 → サンプル → フレーム（コーデック由来の 2 値）が
-    # 独立に動く形を作らない。TS 側も parse 時に同じ式を見るが、**配ってから落ちる**のを
-    # 避けるためにここでも見る（別 hop のコーデックを混ぜた瞬間に気づける席）。
+    # Do not let seconds → frames (`frameRate`) and seconds → samples → frames (the 2 values that
+    # come from the codec) move independently. The TS side checks the same formula at parse time,
+    # but it is checked here too to avoid **failing after shipping** (the spot that notices the
+    # moment a codec with another hop is mixed in).
     if codec.sample_rate != IRODORI_FRAME_RATE * codec.hop_length:
         raise DistError(
-            f"コーデックの sample_rate {codec.sample_rate} が frameRate {IRODORI_FRAME_RATE}"
-            f" × hop_length {codec.hop_length} と違う"
+            f"The codec's sample_rate {codec.sample_rate} differs from frameRate"
+            f" {IRODORI_FRAME_RATE} × hop_length {codec.hop_length}"
         )
     frames = int(_irodori_float(config, "ref_max_seconds") * IRODORI_FRAME_RATE)
     speaker_patch = _irodori_int(config, "speaker_patch_size")
     return {
         "maxTextLen": _irodori_int(config, "max_text_len"),
         "maxCaptionLen": _irodori_int(config, "max_caption_len"),
-        # 参照 latent の patch 後の上限（`irodori.export.speaker_sym_max`）+ 平均トークン 1 本。
+        # Upper bound of the reference latent after patching (`irodori.export.speaker_sym_max`)
+        # + 1 mean token.
         "speakerRows": frames // speaker_patch + 1,
-        # 生成できる latent の上限（`irodori.export.dit_sym_max` と同じ式）。
+        # Upper bound of the latent that can be generated (same formula as
+        # `irodori.export.dit_sym_max`).
         "ditSymMax": int(IRODORI_MAX_SECONDS * IRODORI_FRAME_RATE) // latent_patch,
         "frameRate": IRODORI_FRAME_RATE,
         "sampleRate": codec.sample_rate,
@@ -711,17 +772,20 @@ def irodori_pipeline_config(
 def assert_irodori_graphs(
     placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
 ) -> None:
-    """9 グラフが**読み出せて**、入力の並び・出力本数・静的次元が宣言どおりであることを見る。
+    """Check that the 9 graphs **can be read** and that their input order, output count and static
+    dimensions are as declared.
 
-    MUST: ずれても shape は合ったままロードも実行も通る組み合わせがある（`caption_proj` の
-    出力本数・条件 state の宣言長・`speaker` の patch 幅）ので、配布形を並べる前にここで落とす。
-    SBV2 の {@link sbv2.distribution.assert_bert_hidden} と同じ規律 — 別々の台本
-    （`irodori/export.py` のターゲットと、この manifest）が持つ数を突き合わせる席がここしか無い。
+    MUST: some mismatches still load and run with the shapes matching (`caption_proj`'s output
+    count, the declared lengths of the condition states, `speaker`'s patch width), so they fail
+    here before the distribution is laid out. The same discipline as SBV2's
+    {@link sbv2.distribution.assert_bert_hidden} — this is the only place that matches the numbers
+    held by separate scripts (the targets of `irodori/export.py` and this manifest).
 
-    MUST: **格納 dtype の系列を 1 本残らず**掛ける。f16 系列は f32 とは別プロセスの emit なので、
-    片方だけ検査すると「f32 は宣言どおりだが f16 だけ別の版」が素通りする（格納 dtype の一致は
-    {@link assert_storage} が見るが、あちらはグラフ宣言を一切見ない）。i4 系列は DiT の 2 本しか
-    持たない（{@link IRODORI_DTYPE_ROLES}）ので、その系列に**在る役割だけ**を掛ける。
+    MUST: run it over **every storage dtype series, without exception**. The f16 series is emitted
+    by a process separate from f32, so checking only one lets "f32 is as declared but only f16 is
+    another version" through (agreement of the storage dtype is checked by {@link assert_storage},
+    but that one never looks at graph declarations). The i4 series has only the DiT's two graphs
+    ({@link IRODORI_DTYPE_ROLES}), so only **the roles present** in that series are checked.
     """
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
         _assert_irodori_graph_set(
@@ -733,13 +797,15 @@ def assert_irodori_graphs(
 def _assert_irodori_graph_set(
     placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
 ) -> None:
-    """1 系列ぶんのグラフを検査する（`placements` のキーは dtype 接尾の無いグラフ役割名）。
+    """Check the graphs of one series (the keys of `placements` are graph role names without the
+    dtype suffix).
 
-    その系列に**在る役割だけ**を受ける（i4 系列は DiT の 2 本）。役割を跨ぐ突合（`speaker` の
-    patch 幅）は両方が在るときだけ掛ける — 片方しか無い系列で「掛からなかった」ことは
-    {@link assert_irodori_graphs} の全 dtype ループが他系列で埋める。DiT の 2 本は例外で、
-    **対でしか意味を持たない**（`dit` は `dit_context` の出力を入力に取る）ので、どの系列でも
-    揃っていることを要求する（{@link _assert_irodori_dit_boundary}）。
+    Takes **only the roles present** in that series (the i4 series has the DiT's two graphs).
+    Cross-role checks (`speaker`'s patch width) run only when both are present — what "did not run"
+    in a series that has only one of them is covered in the other series by the all-dtype loop of
+    {@link assert_irodori_graphs}. The DiT's two graphs are the exception: they **only make sense
+    as a pair** (`dit` takes the outputs of `dit_context` as inputs), so every series is required to
+    have both ({@link _assert_irodori_dit_boundary}).
     """
     graphs = {role: ir_graph(path) for role, path in placements.items()}
     for role, (expected_inputs, expected_outputs) in IRODORI_GRAPH_SHAPES.items():
@@ -750,16 +816,17 @@ def _assert_irodori_graph_set(
         names = tuple(graph_inputs(graph, path))
         if names != expected_inputs:
             raise DistError(
-                f"{path} のグラフ入力が {list(names)} で、期待の {list(expected_inputs)} と違う"
-                " — 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない"
-                "（並びまで見るのは export 側の宣言順が動いていないことの証跡）"
+                f"The graph inputs of {path} are {list(names)}, not the expected"
+                f" {list(expected_inputs)} — the runtime binds them by name, so if even one"
+                " spelling changes they cannot be bound (the order is checked too, as evidence"
+                " that the export side's declaration order has not moved)"
             )
         outputs = graph.get("outputs")
         count = len(outputs) if isinstance(outputs, list) else outputs
         if count != expected_outputs:
             raise DistError(
-                f"{path} のグラフ出力が {count} 本で、配布形が要求する {expected_outputs} 本で"
-                "ない — 別のターゲットの資産が混ざっている"
+                f"The graph of {path} has {count} outputs, not the {expected_outputs} the"
+                " distribution requires — an asset of another target is mixed in"
             )
     for role, name, axis, field_name in IRODORI_STATIC_DIMS:
         if role not in graphs:
@@ -768,18 +835,19 @@ def _assert_irodori_graph_set(
         expected = pipeline_config[field_name]
         if declared != expected:
             raise DistError(
-                f"{placements[role]} の入力 '{name}' の軸 {axis} が {declared!r}、"
-                f"pipelineConfig の {field_name} は {expected} — チェックポイントの config と"
-                "焼かれたグラフが別の版"
+                f"{placements[role]}: input '{name}', axis {axis}, is {declared!r},"
+                f" while pipelineConfig's {field_name} is {expected} — the checkpoint config and"
+                " the baked graph are different versions"
             )
-    # 参照 latent は patch してから `speaker` へ渡す（ADR 0047 決定 4）ので、入力幅は 2 欄の積。
+    # The reference latent is patched before it goes to `speaker` (ADR 0047 decision 4), so the
+    # input width is the product of the 2 fields.
     if "speaker" in graphs:
         patched = pipeline_config["latentDim"] * pipeline_config["speakerPatchSize"]
         width = graph_inputs(graphs["speaker"], placements["speaker"])["latent"][2]
         if width != patched:
             raise DistError(
-                f"{placements['speaker']} の入力 'latent' の軸 2 が {width!r}、pipelineConfig の"
-                f" latentDim × speakerPatchSize は {patched}"
+                f"Axis 2 of input 'latent' of {placements['speaker']} is {width!r}, while"
+                f" pipelineConfig's latentDim × speakerPatchSize is {patched}"
             )
     _assert_irodori_dit_boundary(graphs, placements, pipeline_config)
 
@@ -789,17 +857,21 @@ def _assert_irodori_dit_boundary(
     placements: Mapping[str, Path],
     pipeline_config: Mapping[str, Any],
 ) -> None:
-    """DiT の 2 本（`dit_context` → `dit`）の境界を、2 本の宣言と pipelineConfig で突き合わせる。
+    """Match the boundary of the DiT's two graphs (`dit_context` → `dit`) against the declarations
+    of both and pipelineConfig.
 
-    MUST: 境界の本数（= 2 × ブロック数）は**焼かれた `dit_context` の出力から導く**（写しの
-    ブロック数を持たない — ADR 0114）。その上で次を見る:
+    MUST: the number of boundary tensors (= 2 × the block count) is **derived from the outputs of
+    the baked `dit_context`** (no copied block count — ADR 0114). Then the following are checked:
 
-    - `dit_context` の入力が {@link IRODORI_CONTEXT_INPUTS}、出力が
-      {@link irodori_context_kv_names} の並び（ランタイムは常駐テンソルを名前で束ねる）
-    - `dit` の入力が {@link IRODORI_DIT_HEAD_INPUTS} + 同じ境界名の並び、出力が 1 本
-    - 境界の各 1 本の形が両側で一致し、条件側の長さ（軸 1）が `mask` の条件 3 区間の合計と
-      一致する — ずれると `dit` の K/V の連結が別の長さのまま、マスクだけが区間を指す
-    - `dit` の `mask` の軸 3 が `S+<条件 3 区間の合計>`（ADR 0046 の派生次元）
+    - the inputs of `dit_context` are {@link IRODORI_CONTEXT_INPUTS} and its outputs are in the
+      order of {@link irodori_context_kv_names} (the runtime binds resident tensors by name)
+    - the inputs of `dit` are {@link IRODORI_DIT_HEAD_INPUTS} + the same boundary names in order,
+      and it has 1 output
+    - each boundary tensor has the same shape on both sides, and the condition-side length (axis 1)
+      equals the sum of the 3 condition segments of `mask` — otherwise the K/V concatenation of
+      `dit` keeps a different length while only the mask points at the segments
+    - axis 3 of `dit`'s `mask` is `S+<sum of the 3 condition segments>` (the derived dimension of
+      ADR 0046)
     """
     present = {role for role in ("dit_context", "dit") if role in graphs}
     if not present:
@@ -807,120 +879,130 @@ def _assert_irodori_dit_boundary(
     if present != {"dit_context", "dit"}:
         missing = sorted({"dit_context", "dit"} - present)
         raise DistError(
-            f"DiT の対の片側 {missing} が系列に無い — `dit` は `dit_context` の出力を入力に取る"
-            "ので、片方だけでは実行できない（ADR 0114）"
+            f"One side of the DiT pair, {missing}, is missing from the series — `dit` takes the"
+            " outputs of `dit_context` as inputs, so one alone cannot run (ADR 0114)"
         )
     context, dit = graphs["dit_context"], graphs["dit"]
     context_path, dit_path = placements["dit_context"], placements["dit"]
     names = tuple(graph_inputs(context, context_path))
     if names != IRODORI_CONTEXT_INPUTS:
         raise DistError(
-            f"{context_path} のグラフ入力が {list(names)} で、期待の {list(IRODORI_CONTEXT_INPUTS)}"
-            " と違う"
+            f"The graph inputs of {context_path} are {list(names)}, not the expected"
+            f" {list(IRODORI_CONTEXT_INPUTS)}"
         )
     outputs = context.get("outputs")
     if not isinstance(outputs, list) or not outputs or len(outputs) % 2:
         raise DistError(
-            f"{context_path} のグラフ出力 {outputs!r} が K / V の対（2 × ブロック数本）でない"
+            f"The graph outputs of {context_path}, {outputs!r}, are not K / V pairs"
+            " (2 × the block count)"
         )
     boundary = irodori_context_kv_names(len(outputs) // 2)
     if tuple(outputs) != boundary:
         raise DistError(
-            f"{context_path} のグラフ出力が {outputs[:4]}… で、境界名 {list(boundary[:4])}… の"
-            "並びでない — ランタイムは常駐テンソルを名前で束ねるので、綴りか順序が違えば別の"
-            "ブロックの K / V を読む"
+            f"The graph outputs of {context_path} are {outputs[:4]}…, not in the order of the"
+            f" boundary names {list(boundary[:4])}… — the runtime binds resident tensors by name,"
+            " so a different spelling or order reads the K / V of another block"
         )
     dit_inputs = graph_inputs(dit, dit_path)
     expected = (*IRODORI_DIT_HEAD_INPUTS, *boundary)
     if tuple(dit_inputs) != expected:
         raise DistError(
-            f"{dit_path} のグラフ入力が {list(dit_inputs)[:5]}…（{len(dit_inputs)} 本）で、"
-            f"{context_path} の出力から導いた並び {list(expected[:5])}…（{len(expected)} 本）と違う"
+            f"The graph inputs of {dit_path} are {list(dit_inputs)[:5]}… ({len(dit_inputs)}),"
+            f" not the order derived from the outputs of {context_path}, {list(expected[:5])}…"
+            f" ({len(expected)})"
         )
     dit_outputs = dit.get("outputs")
     if not isinstance(dit_outputs, list) or len(dit_outputs) != 1:
-        raise DistError(f"{dit_path} のグラフ出力が 1 本でない（{dit_outputs!r}）")
+        raise DistError(f"The graph of {dit_path} does not have exactly 1 output ({dit_outputs!r})")
     total = sum(
         pipeline_config[field_name] for field_name in ("maxTextLen", "speakerRows", "maxCaptionLen")
     )
     values = context.get("values")
     if not isinstance(values, Mapping):
-        raise DistError(f"{context_path}: IR メタデータに values が無い")
+        raise DistError(f"{context_path}: the IR metadata has no values")
     for name in boundary:
         entry = values.get(name)
         produced = entry.get("shape") if isinstance(entry, Mapping) else None
         consumed = dit_inputs[name]
         if produced != consumed:
             raise DistError(
-                f"境界 '{name}' の形が {context_path} の出力 {produced!r} /"
-                f" {dit_path} の入力 {consumed!r} で食い違う"
+                f"The shape of boundary '{name}' disagrees: {context_path} outputs {produced!r} /"
+                f" {dit_path} takes {consumed!r}"
             )
         if len(consumed) < 2 or consumed[1] != total:
             raise DistError(
-                f"{dit_path} の入力 '{name}' の軸 1 が {consumed[1:2]!r}、pipelineConfig の"
-                f" 条件 3 区間の合計は {total} — K / V の連結と mask の区間割りが別の長さになる"
+                f"{dit_path}: axis 1 of input '{name}' is {consumed[1:2]!r}, while the sum of"
+                f" pipelineConfig's 3 condition segments is {total} — the K / V concatenation and"
+                " the mask's segments would have different lengths"
             )
-    # `dit` の `mask` は「latent S + 条件 3 区間」の長さで宣言される（ADR 0046 の派生次元）。
-    # 区間の合計がずれると、マスクの区間割りだけが黙って別の位置を指す。
+    # The `mask` of `dit` is declared with the length "latent S + the 3 condition segments" (the
+    # derived dimension of ADR 0046). If the sum of the segments is off, only the mask's segments
+    # silently point at other positions.
     symbols = dit.get("symbols")
     if not isinstance(symbols, list) or len(symbols) != 1:
-        raise DistError(f"{dit_path}: 記号次元が 1 本でない（{symbols!r}）")
+        raise DistError(f"{dit_path}: there is not exactly 1 symbolic dimension ({symbols!r})")
     declared_mask = dit_inputs["mask"][3]
     if declared_mask != f"{symbols[0]}+{total}":
         raise DistError(
-            f"{dit_path} の入力 'mask' の軸 3 が {declared_mask!r}、pipelineConfig の"
-            f" 条件 3 区間の合計は {total}（期待 '{symbols[0]}+{total}'）"
+            f"Axis 3 of input 'mask' of {dit_path} is {declared_mask!r}, while the sum of"
+            f" pipelineConfig's 3 condition segments is {total} (expected '{symbols[0]}+{total}')"
         )
 
 
 def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
-    """i4 系列が**配布して良い校正**（GPTQ × 下限以上の予算）で丸められたことを、書き出し側の
-    記録で確かめる。
+    """Confirm from the writer's record that the i4 series was rounded with **calibration allowed
+    for distribution** (GPTQ × a budget at or above the floor).
 
-    MUST: 校正の方式も予算も格納形を 1 バイトも変えない（格子は RTN i4 g32 のまま — 変わるのは
-    丸め値と scale 台帳だけ）。したがって `verify_dist` の構造検査もヘッダ dtype 検査も
-    {@link assert_irodori_graphs} も**素通りする**。`--no-calib` も `--calib-steps 1` も smoke 用の
-    opt-out なのに、その生成物が配布へ紛れても資産からは判別できず、出るのは音の劣化だけ —
-    anima の `assert_calib_provenance` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
-    突き合わせる」規律をここにも敷く。判定そのものは `_shared.calib_provenance` が正本
-    （golden 焼き直しの門〈`irodori.pipeline_ref._shippable_calib`〉と同じ 1 実装で決める）。
+    MUST: neither the calibration method nor the budget changes a single byte of the storage format
+    (the grid stays RTN i4 g32 — only the rounded values and the scale ledger change). So the
+    structural checks and header dtype checks of `verify_dist` and {@link assert_irodori_graphs}
+    all **let it through**. `--no-calib` and `--calib-steps 1` are opt-outs for smoke runs, yet if
+    their output slipped into a distribution it could not be told from the assets and the only
+    symptom would be degraded audio — so the same discipline as anima's `assert_calib_provenance`
+    applies here too: "the same fact held by separate scripts is always matched at assembly time".
+    The judgement itself has its source of truth in `_shared.calib_provenance` (decided by the same
+    single implementation as the golden re-bake check, `irodori.pipeline_ref._shippable_calib`).
 
-    i4 系列を持つ役割（DiT の 2 本 — {@link IRODORI_DTYPE_ROLES}）の**全部**を見る。2 本は同じ
-    `TextToLatentRFDiT` を 1 回の GPTQ で丸めた結果を 2 つのラッパで書き分けたもの（ADR 0114）
-    なので、記録は同一でなければならない — 違えば別々の export 実行（別の予算・別の丸め）の
-    系列を 1 つの席に並べている。
+    **Every** role that has an i4 series (the DiT's two graphs — {@link IRODORI_DTYPE_ROLES}) is
+    checked. The two are the result of rounding the same `TextToLatentRFDiT` in one GPTQ run and
+    writing it out through 2 wrappers (ADR 0114), so the records must be identical — if they
+    differ, series from separate export runs (another budget, another rounding) sit side by side in
+    one preset.
     """
     records: dict[str, Any] = {}
     for role in IRODORI_DTYPE_ROLES["i4"]:
         path = sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS[role] / CALIB_PROVENANCE_FILE
         if not path.is_file():
             raise DistError(
-                f"i4 系列の校正条件の記録が無い: {path}"
-                "（`python -m irodori.export --dtype i4` で再エクスポートすると書かれる）"
+                f"The i4 series has no record of its calibration conditions: {path}"
+                " (re-exporting with `python -m irodori.export --dtype i4` writes it)"
             )
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as cause:
-            raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+            raise DistError(
+                f"Cannot parse the record of the calibration conditions: {path} — {cause}"
+            ) from cause
         complaint = calib_complaint(
             record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
         )
         if complaint is not None:
             raise DistError(
-                f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
-                " — `--no-calib` / smoke 予算の生成物は配布に使わない"
+                f"The calibration conditions of the i4 series do not meet the requirement: {path}:"
+                f" {complaint} — output baked with `--no-calib` / a smoke budget is not used for"
+                " distribution"
             )
         records[role] = record
     if len({json.dumps(record, sort_keys=True) for record in records.values()}) > 1:
         raise DistError(
-            f"i4 系列の校正条件の記録が役割ごとに違う（{records}）— DiT の 2 本は 1 回の export で"
-            " 書き分けたものでなければならない（`python -m irodori.export --dtype i4` で両方を"
-            "書き直す）"
+            f"The records of the i4 series' calibration conditions differ per role ({records}) —"
+            " the DiT's two graphs must have been written by one export run (rewrite both with"
+            " `python -m irodori.export --dtype i4`)"
         )
 
 
 def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) -> ModelPlan:
-    """Irodori 1 モデルぶんの計画を組む（検査と config の読み取りをここで全部済ませる）。"""
+    """Build the plan of one Irodori model (every check and the config reading are done here)."""
     assert_model_name(model)
     placements = irodori_placements(sources)
     pipeline_config = irodori_pipeline_config(
@@ -947,7 +1029,8 @@ def irodori_plan(sources: IrodoriSources, model: str = IRODORI_DEFAULT_MODEL) ->
 
 
 def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から Irodori 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    """Build the plan of one Irodori model from the parent of `--series` (the CLI's dispatch
+    target)."""
     return irodori_plan(irodori_sources(series_dir, model), model)
 
 
@@ -991,49 +1074,59 @@ def irodori_references(model: str) -> tuple[CrossRepoReference, ...]:
     return ()
 
 
-#: MIT の著作権行（配布リポ直下の `LICENSE.md`）。上流の HF リポ 3 本（本体 2 版とコーデック）は
-#: `license: mit` を名乗るだけで原文を同梱していないので、原文は共有テンプレートから組む。
+#: The MIT copyright lines (`LICENSE.md` at the root of the distribution repository). The 3 upstream
+#: HF repositories (the 2 versions of the model and the codec) only declare `license: mit` and do
+#: not bundle the license text, so the text is built from the shared template.
 #:
-#: - Aratako の行は上流の実装リポ（GitHub `Aratako/Irodori-TTS`）の `LICENSE` の行を、同じ
-#:   作者の重み（本体・コーデック）にも当てたもの（2026-09-24 ユーザー裁定）。
-#: - SB Intuitions の行は text backbone の素（`sbintuitions/modernbert-ja-310m`）が同梱している
-#:   `LICENSE` の行（2026-09-24 に上流 main で確認）。backbone はその fine-tune なので、MIT の
-#:   「著作権表示を全ての複製に含める」は派生の再配布でも落とせない（lucida の 2 行と同じ向き）。
+#: - The Aratako line is the line of the `LICENSE` in the upstream implementation repository
+#:   (GitHub `Aratako/Irodori-TTS`), applied to the same author's weights (model and codec) too
+#:   (maintainer ruling of 2026-09-24).
+#: - The SB Intuitions line is the `LICENSE` line bundled with the base of the text backbone
+#:   (`sbintuitions/modernbert-ja-310m`) (checked on upstream main on 2026-09-24). The backbone is
+#:   a fine-tune of it, so MIT's "include the copyright notice in all copies" cannot be dropped in a
+#:   redistribution of the derivative either (the same direction as lucida's 2 lines).
 #:
-#: 並びは `mit_license` の規約どおり配布物に近い順。v4 / v4.1 のどちらのリポでも同じ 2 行に
-#: なる（backbone は両版で同一 — `irodori.card.IRODORI_TEXT_BACKBONE_MODEL` の実測・コーデックは
-#: 両版とも同じ別リポの 1 本）。
+#: Ordered closest to the distribution first, per the convention of `mit_license`. Both the v4 and
+#: the v4.1 repository get the same 2 lines (the backbone is identical in both versions — measured
+#: for `irodori.card.IRODORI_TEXT_BACKBONE_MODEL`; both versions use the same single codec from a
+#: separate repository).
 IRODORI_COPYRIGHTS: tuple[str, ...] = (
     "Copyright (c) 2026 Aratako",
     "Copyright (c) 2025 SB Intuitions",
 )
 
-#: Apache 2.0 が掛かる部品（manifest の weights のキー = {@link IRODORI_CODEC_DIRS} のキー）。
-#: NOTICE と `LICENSE.md` の見出しが同じ 1 語から組む — 片方だけが別の部品を指す形にしない。
+#: The components covered by Apache 2.0 (the keys of the manifest's weights = the keys of
+#: {@link IRODORI_CODEC_DIRS}). NOTICE and the heading of `LICENSE.md` build from the same word —
+#: so that neither ends up pointing at other components.
 _IRODORI_CODEC_COMPONENTS = " / ".join(f"`{role}`" for role in IRODORI_CODEC_DIRS)
 
-#: 改変告知。MIT は要求しないが、格納形を変えて量子化した配布形であることは利用者が最初に
-#: 確かめたい事実なので、`LICENSE.md` と同じ席で 1 枚出す。コーデックの重みは上流が
-#: `facebook/dacvae-watermarked`（Apache 2.0）由来と書いており、Apache 2.0 §4(b) は改変した
-#: ファイルに改変の告知を求める。このため MIT の帰属と合わせて、**格納値に及ぶ改変を 1 つ残らず**
-#: 列挙する（コーデックの 3 点の出所は `irodori/dacvae/export.py` の前処理と境界の節 —
-#: weight_norm の焼き込み・encoder の `in_proj` の mean 側への切り詰め・透かし枝のバイパス）。
-#: 「f32 系列は上流の値のまま」とは書かない — コーデックの f32 系列は上の 3 点で上流の格納値と
-#: 違う（出力のビット一致は実測されているが、格納値の同一ではない）。
+#: The modification notice. MIT does not require one, but that this is a quantized distribution
+#: with a changed storage format is the first fact users want to confirm, so one is emitted in the
+#: same slot as `LICENSE.md`. Upstream says the codec weights derive from
+#: `facebook/dacvae-watermarked` (Apache 2.0), and Apache 2.0 §4(b) requires modified files to carry
+#: a notice of the modification. So, together with MIT's attribution, **every modification that
+#: reaches the stored values** is listed (the 3 codec items come from the preprocessing and boundary
+#: sections of `irodori/dacvae/export.py` — folding in weight_norm, trimming the encoder's `in_proj`
+#: to the mean side, bypassing the watermark branch). Do not write "the f32 series keeps upstream's
+#: values" — the codec's f32 series differs from upstream's stored values by the 3 items above (a
+#: bit-exact output has been measured, but the stored values are not identical).
 #:
-#: コーデックの元の重み（{@link irodori.card.IRODORI_CODEC_ORIGIN_MODEL} — Apache 2.0）は
-#: 名指しで帰属する。Apache 2.0 §4(a) は条文の写し（{@link irodori_license_markdown}）を、§4(c) は
-#: 帰属の保持を求める。§4(d) の保持対象（上流の `NOTICE`）は HF 側・GitHub 側とも無い
-#: （2026-09-24 のファイル一覧 — 経緯は `irodori.card` の同定数のコメント）。
+#: The codec's original weights ({@link irodori.card.IRODORI_CODEC_ORIGIN_MODEL} — Apache 2.0) are
+#: attributed by name. Apache 2.0 §4(a) requires a copy of the license text
+#: ({@link irodori_license_markdown}), and §4(c) requires the attributions to be retained. What
+#: §4(d) requires retaining (upstream's `NOTICE`) exists neither on HF nor on GitHub (the file
+#: listings of 2026-09-24 — the history is in the comment on the same constant in `irodori.card`).
 #:
-#: MUST: 本体の上流リポは名指ししない（「`README.md` に載っている checkpoint」と書く）。
-#: `root_files` は Pipeline に固定の 1 組で、この Pipeline は v4 / v4.1 の 2 リポを組むので、
-#: 版を名指しした瞬間にどちらかのリポの告知が中身と食い違う。版はカードが manifest から名乗る。
+#: MUST: do not name the model's upstream repository (write "the checkpoint listed in
+#: `README.md`"). `root_files` is one set fixed per Pipeline, and this Pipeline builds the 2
+#: repositories v4 / v4.1, so naming a version would make one repository's notice disagree with its
+#: contents. The card names the version from the manifest.
 #:
-#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
-#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。部品名は
-#: {@link IRODORI_WEIGHTS} のキー（= manifest の weights）から組み、同梱する上流 2 本は
-#: カードと同じ定数から引く。
+#: MUST: the text must correspond to the distribution's contents — it is valid prose as a value, so
+#: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
+#: shipping. The component names are built from the keys of {@link IRODORI_WEIGHTS} (= the
+#: manifest's weights), and the 2 bundled upstream models are taken from the same constants as the
+#: card.
 
 IRODORI_NOTICE_MARKDOWN = f"""# NOTICE
 
@@ -1074,16 +1167,18 @@ No retraining and no fine-tuning were performed. The original checkpoints are no
 
 
 def irodori_license_markdown() -> str:
-    """`LICENSE.md` — MIT（全部品）と Apache 2.0（コーデック 2 部品）の条文を 1 ファイルに併記。
+    """`LICENSE.md` — the MIT (all components) and Apache 2.0 (the 2 codec components) texts side
+    by side in one file.
 
-    `root_files` の席は `LICENSE.md` 1 つ（`karume.dist.LEGAL_PATHS`）なので、2 つ目の条文は
-    区切り（`---`）と適用範囲を名乗る見出しの後ろへ続ける。先頭は MIT の本文 + 著作権行
-    （{@link IRODORI_COPYRIGHTS}）のままにする — MIT はコーデックも含む全部品に掛かる
-    （`IRODORI_CODEC_MODEL` と親はどちらも `license: mit`）。
+    `root_files` has a single `LICENSE.md` slot (`karume.dist.LEGAL_PATHS`), so the second license
+    text follows a separator (`---`) and a heading that names its scope. The file starts with the
+    MIT text + the copyright lines ({@link IRODORI_COPYRIGHTS}) as is — MIT covers every component,
+    the codec included (`IRODORI_CODEC_MODEL` and its parent both declare `license: mit`).
 
-    MUST: 2 条文とも本文へは触らない（整形した瞬間に許諾表示のコピーではなくなる）。Apache の
-    原文は行頭の字下げで Markdown の段落・リストとして崩れるので、フェンスの中へ逐語で置く
-    （原文に ``` は現れない — `tests/test_licenses.py` の digest 凍結が原文の動きを落とす）。
+    MUST: neither license text is touched (reformatting it would stop it from being a copy of the
+    permission notice). The Apache text breaks into Markdown paragraphs and lists because of its
+    leading indentation, so it goes verbatim inside a fence (``` does not occur in the text — the
+    digest freeze in `tests/test_licenses.py` catches any change to it).
     """
     return (
         mit_license(IRODORI_COPYRIGHTS)
@@ -1101,10 +1196,10 @@ def irodori_license_markdown() -> str:
 
 
 def irodori_root_files() -> dict[str, str]:
-    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+    """Legal texts at the root of the distribution repository (`karume.dist.Pipeline.root_files`).
 
-    `LICENSE.md` は MIT + Apache 2.0 の併記（{@link irodori_license_markdown}）、`NOTICE.md` は
-    帰属と改変告知（{@link IRODORI_NOTICE_MARKDOWN}）。
+    `LICENSE.md` holds MIT + Apache 2.0 side by side ({@link irodori_license_markdown}), and
+    `NOTICE.md` holds the attribution and the modification notice ({@link IRODORI_NOTICE_MARKDOWN}).
     """
     return {
         "LICENSE.md": irodori_license_markdown(),
@@ -1112,17 +1207,19 @@ def irodori_root_files() -> dict[str, str]:
     }
 
 
-#: `--pipeline irodori` の 1 行（ドライバが core の PIPELINES へ合成する）。
+#: The one entry for `--pipeline irodori` (the driver merges it into core's PIPELINES).
 PIPELINE = Pipeline(
     default_model=IRODORI_DEFAULT_MODEL,
     repo_name=irodori_repo_name,
     plan=irodori_dist_plan,
-    # 帰属プロファイルは 1 通りだけ（本体 + text backbone + コーデック〈+ その元の Apache 2.0 の
-    # 重み〉の組はどのモデルでも同じで、変わるのは本体の上流リポだけ）— 選択肢が無いので
-    # 省略で通る。2 つ目のファミリーが生えた瞬間に明示が要求されはじめる。
+    # There is only one attribution profile (the set of model + text backbone + codec (+ its
+    # original Apache 2.0 weights) is the same for every model; only the model's upstream repository
+    # changes) — with no choice to make, it may be omitted. The moment a second family appears, it
+    # must be given explicitly.
     card_profiles={"irodori": render_irodori_model_card},
-    # 上流ライセンス（MIT・コーデックの元の重みの Apache 2.0）の再配布条件は配布リポ 1 つに
-    # 掛かるので、組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
+    # The redistribution terms of the upstream licenses (MIT, and Apache 2.0 of the codec's original
+    # weights) apply to the one distribution repository, so they are set here once regardless of how
+    # many times it is assembled (ADR 0092 decision 7).
     root_files=irodori_root_files(),
     references=irodori_references,
 )

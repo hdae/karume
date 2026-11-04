@@ -1,8 +1,10 @@
-"""変換が**読まなかった**上流テンソルの記録（`gemma4_qat.export.upstream_unused`）。
+"""The record of upstream tensors the conversion **did not read**
+(`gemma4_qat.export.upstream_unused`).
 
-text 専用の変換なので、上流 checkpoint の大半（vision / audio）と KV cache の SRQ scale は
-読まない。未対応を暗黙にしないための記録なので、数えるのは実チェックポイントの綴りに対して
-成立していること — ここでは同じ綴りを持つ合成ヘッダで見る（実物は 2.4GiB で開かない）。
+The conversion is text-only, so most of the upstream checkpoint (vision / audio) and the KV
+cache's SRQ scales are not read. The record exists so that nothing is unsupported implicitly, so
+what counts is that it holds for the real checkpoint's spellings — here it is checked with a
+synthetic header carrying the same spellings (the real one is 2.4GiB and is not opened).
 """
 
 from __future__ import annotations

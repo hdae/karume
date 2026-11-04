@@ -1,14 +1,17 @@
-"""`deberta/export.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contract of `deberta/export.py` (the part that needs no real weights).
 
-実重みの emit は手動（README 参照）。ここで固定するのは、壊れると**偽 PASS** になる側の
-規律だけ:
+The real-weight emit is manual (see the README). What is pinned here is only the discipline that
+turns into a **false PASS** when it breaks:
 
-- 系列が dtype ごとに分かれること（f32 の網が i8 資産へ黙って掛からない）
-- `--act-quant` が `--dtype i8` 無しでは通らないこと（f32 資産の鏡像は再現不能）
-- 鏡像 io の prefix が Deno 側の通常ケース列挙（`io.` の startsWith）に**引っかからない**こと
-- 通常の golden io が**フックなし**で採られること（掛けたままだと w8 E2E の期待値が汚染される）
-- 記号次元の出所記録が読み手（`sbv2.distribution`）と同じ綴り・同じ欄で書かれること
-  （DeBERTa の Tmax は artifact から読めないので、記録が唯一の運び手）
+- the series are separate per dtype (the f32 net does not silently fall on i8 assets)
+- `--act-quant` does not pass without `--dtype i8` (a mirror of f32 assets cannot be reproduced)
+- the prefix of the mirror io is **not caught** by the Deno-side enumeration of plain cases
+  (startsWith `io.`)
+- the plain golden io is taken **without hooks** (with them attached, the expected values of the
+  w8 E2E are contaminated)
+- the provenance record of the symbolic dimension is written with the same spelling and the same
+  fields as the reader (`sbv2.distribution`) (DeBERTa's Tmax cannot be read from the artifact, so
+  the record is its only carrier)
 """
 
 from __future__ import annotations
@@ -25,9 +28,10 @@ from karume.pipeline import export_to_file
 
 
 class TinyText(nn.Module):
-    """`HiddenStatesWrapper` の最小の骨格（`(input_ids, attention_mask) → タプル`）。
+    """The smallest skeleton of `HiddenStatesWrapper` (`(input_ids, attention_mask) → tuple`).
 
-    適格 linear（`in_features % 4 == 0`）を 1 本だけ持つので、活性フックの有無が出力に出る。
+    It has exactly one eligible linear (`in_features % 4 == 0`), so the presence of the activation
+    hooks shows in the output.
     """
 
     def __init__(self) -> None:
@@ -42,12 +46,13 @@ class TinyText(nn.Module):
 
 
 class TinyHybrid(nn.Module):
-    """i4 混成（適格な linear / embedding = i4 group32・残り = i8）の最小の骨格。
+    """The smallest skeleton of mixed i4 (eligible linear / embedding = i4 group32, the rest = i8).
 
-    量子化軸を 64 にするのは i4 が端数 group を作らない MUST（ADR 0069 決定 2）のため。
-    `narrow` は量子化軸 16（< group 32）で**割り切れない**適格外の linear で、i8 側へ落ちる —
-    i8 側の対象が空だと `fake_quant_int8` が fail loudly して「排他に割れているか」を
-    観測できないので、この 1 本が i8 側の住人も兼ねる。
+    The quantization axis is 64 because of the MUST that i4 never creates a partial group (ADR 0069
+    decision 2). `narrow` is an ineligible linear whose quantization axis 16 (< group 32) is **not
+    divisible**, and it falls to the i8 side — with no i8 targets `fake_quant_int8` fails loudly
+    and "is the split exclusive" cannot be observed, so this one also serves as the i8 side's
+    occupant.
     """
 
     def __init__(self) -> None:
@@ -61,8 +66,8 @@ class TinyHybrid(nn.Module):
         return (self.fc(embedded) + self.narrow(embedded[..., :16]),)
 
 
-#: `_write_io` はケースを `(名前, グラフ入力名 → テンソル)` で受ける（実物は 4 入力だが、
-#: 引く順は `graph.inputs` から来るので tiny な 2 入力でも同じ経路が通る）。
+#: `_write_io` receives cases as `(name, graph input name → tensor)` (the real model has 4 inputs,
+#: but the lookup order comes from `graph.inputs`, so a tiny 2-input model takes the same path).
 CASES = (
     (
         "case0",
@@ -76,7 +81,7 @@ CASES = (
 
 @pytest.fixture
 def exported(tmp_path):
-    """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
+    """Export one tiny wrapper and return `(wrapper, graph, out_dir)`."""
     torch.manual_seed(0)
     wrapper = TinyText()
     example = tuple(CASES[0][1].values())
@@ -92,62 +97,72 @@ def exported(tmp_path):
 
 class TestSeries:
     def test_the_default_output_root_is_a_separate_series_per_dtype(self):
-        """MUST: 圧縮系列は別ディレクトリ（ADR 0019）— 同居させると f32 の網が消える。"""
+        """MUST: compressed series get their own directories (ADR 0019) — sharing one would remove
+        the f32 net."""
         roots = export_deberta.DEFAULT_OUT_ROOTS
 
         assert set(roots) == set(export_deberta.WEIGHT_DTYPES) == {"f32", "i8", "i4"}
         assert len(set(roots.values())) == len(roots)
 
     def test_f16_is_not_offered(self):
-        """f16 は SBV2 系列の f16 化と一体で決める（未起票）— ここで先取りしない。"""
+        """f16 is decided together with moving the SBV2 series to f16 (not filed yet) — not
+        anticipated here."""
         assert "f16" not in export_deberta.WEIGHT_DTYPES
 
     def test_the_i4_series_is_stored_as_i8_by_default(self):
-        """i4 は**混成**（適格な linear / embedding だけ i4・残りは i8）— 単一 dtype の i4 系列は
-        作れない。
+        """i4 is **mixed** (only the eligible linear / embedding are i4, the rest i8) — a
+        single-dtype i4 series cannot be built.
 
-        i4 の実行経路が linear / embedding の重みスロット限定（ADR 0069 決定 5）である以上、
-        既定を i4 にすると conv や group 長で割り切れない重みが黙って f32 で残る。既定は i8 で、
-        適格分だけ 1 本単位の override で振るのが唯一の形。
+        Since the i4 execution path is limited to the weight slots of linear / embedding (ADR 0069
+        decision 5), defaulting to i4 would silently leave conv weights and weights the group size
+        does not divide in f32. The default is i8, and assigning only the eligible ones with
+        per-tensor overrides is the only form.
         """
         assert set(export_deberta.BASE_WEIGHT_DTYPES) == set(export_deberta.WEIGHT_DTYPES)
         assert export_deberta.BASE_WEIGHT_DTYPES["i4"] == "i8"
 
 
 class TestExportProvenance:
-    """記号次元の出所記録 — DeBERTa の Tmax は **artifact から読めない**ので記録だけが運ぶ。
+    """The provenance record of the symbolic dimension — DeBERTa's Tmax **cannot be read from the
+    artifact**, so only the record carries it.
 
-    front / voice は上限を `sym_prefix_slice` の焼き込み定数として持つが、DeBERTa は相対位置の
-    添字表を ADR 0045 波 3 でグラフ入力へ昇格させたので、上限を運ぶ定数がグラフに 1 本も残って
-    いない（出荷 4 コンテナの実測 — `sym_prefix_slice` 0 本）。配布側の `maxTokens` は定数で
-    焼かれるため、非既定の `--sym-max` で採った系列は export も配布も緑のまま宣言だけが嘘になる。
+    front / voice hold the bound as a baked constant of `sym_prefix_slice`, but DeBERTa promoted
+    the relative-position index tables to graph inputs in ADR 0045 wave 3, so not one constant
+    carrying the bound remains in the graph (measured on the 4 shipped containers — 0
+    `sym_prefix_slice`). The distribution side's `maxTokens` is baked as a constant, so a series
+    taken with a non-default `--sym-max` keeps export and distribution green while only the
+    declaration becomes a lie.
     """
 
     def test_the_spelling_matches_the_reader(self):
-        """MUST: 読み手（`sbv2.distribution`）と同じ綴り。
+        """MUST: the same spelling as the reader (`sbv2.distribution`).
 
-        `deberta` は SBV2 の消費者ではないので向こうを import しない（配布形の text_encoder 席は
-        資産の共有であって結合ではない）。写しを 2 つ持つ以上、独立に動く形にはしない。
+        `deberta` is not a consumer of SBV2, so it does not import that side (the distribution's
+        text_encoder component is a shared asset, not a coupling). With two copies, they must not
+        be able to move independently.
         """
         from sbv2.distribution import EXPORT_PROVENANCE_FILE
 
         assert export_deberta.EXPORT_PROVENANCE_FILE == EXPORT_PROVENANCE_FILE
 
     def test_the_license_matches_the_card_that_redistributes_this_encoder(self):
-        """MUST: 容器へ焼く出所のライセンス識別子は、この重みを再配布するカードの正本と同じ。
+        """MUST: the license identifier of the provenance baked into the container equals the
+        source of truth on the card that redistributes these weights.
 
-        `deberta` は自分のカードを持たない（SBV2 の `text_encoder` 席を焼くだけ）ので、識別子の
-        正本は消費側にある。写しを 2 つ持つ以上、独立に動く形にはしない。
+        `deberta` has no card of its own (it only bakes SBV2's `text_encoder` component), so the
+        identifier's source of truth is on the consuming side. With two copies, they must not be
+        able to move independently.
         """
         from sbv2.card import SBV2_TEXT_ENCODER_LICENSE
 
         assert export_deberta.PROVENANCE.license == SBV2_TEXT_ENCODER_LICENSE
 
     def test_the_weights_are_fetched_at_the_revision_the_container_names(self, monkeypatch):
-        """MUST: 取得は revision 固定で、容器が名乗る revision と同じ 1 点。
+        """MUST: fetching is pinned to a revision, the same single point the container claims.
 
-        `revision=` が無いと HF の main をその時点で引き、上流の main が動いた日に
-        `text_encoder` 席が黙って別の revision から焼かれる（容器は同じ出所を名乗ったまま）。
+        Without `revision=`, HF's main is pulled as of that moment, and on the day upstream main
+        moves the `text_encoder` component is silently baked from a different revision (while the
+        container keeps claiming the same provenance).
         """
         transformers = pytest.importorskip("transformers")
 
@@ -155,18 +170,18 @@ class TestExportProvenance:
 
         def fetch(model_id, **kwargs):
             seen.update(kwargs)
-            raise RuntimeError("取得はここで止める")
+            raise RuntimeError("the fetch stops here")
 
         monkeypatch.setattr(transformers.DebertaV2Model, "from_pretrained", fetch)
 
-        with pytest.raises(RuntimeError, match="取得はここで止める"):
+        with pytest.raises(RuntimeError, match="the fetch stops here"):
             export_deberta.load_model(export_deberta.MODEL_ID, 1)
 
         assert seen["revision"] == export_deberta.MODEL_REVISION
         assert export_deberta.PROVENANCE.upstream_revision == export_deberta.MODEL_REVISION
 
     def test_it_records_the_variant_and_the_symbolic_maximum(self, tmp_path):
-        """記録の欄は読み手が突き合わせる 2 つ（`target` / `sym_max`）そのもの。"""
+        """The record's fields are exactly the two the reader compares (`target` / `sym_max`)."""
         from sbv2.distribution import SBV2_MAX_TOKENS, SBV2_TEXT_ENCODER_VARIANT
 
         export_deberta._write_export_provenance(
@@ -179,7 +194,8 @@ class TestExportProvenance:
         assert record == {"target": SBV2_TEXT_ENCODER_VARIANT, "sym_max": SBV2_MAX_TOKENS}
 
     def test_it_carries_a_non_default_symbolic_maximum(self, tmp_path):
-        """`--sym-max` の逸脱が記録に残る（配布側の突合はこの値を見る）。"""
+        """A deviating `--sym-max` stays in the record (the distribution side's comparison looks at
+        this value)."""
         export_deberta._write_export_provenance("sbv2-22layer", 256, tmp_path)
 
         record = json.loads(
@@ -188,7 +204,8 @@ class TestExportProvenance:
         assert record["sym_max"] == 256
 
     def test_the_default_symbolic_maximum_agrees_with_the_distribution_declaration(self):
-        """台本の既定と配布形の `maxTokens` は同じ数（記録が既定を名乗れる前提）。"""
+        """The script's default and the distribution's `maxTokens` are the same number (the premise
+        for the record to be able to claim the default)."""
         from sbv2.distribution import SBV2_MAX_TOKENS
 
         assert export_deberta.SYM_MAX == SBV2_MAX_TOKENS
@@ -197,10 +214,10 @@ class TestExportProvenance:
 class TestActQuantCli:
     @pytest.mark.parametrize("dtype", ["f32", "i4"])
     def test_act_quant_requires_i8_weights(self, monkeypatch, dtype):
-        """活性 i8 は i8 常駐重みの linear にしか効かない（ADR 0025 決定 1）。
+        """Activation i8 applies only to linears with i8-resident weights (ADR 0025 decision 1).
 
-        i4 も拒否側 — 混成系列の linear は group32 i4 常駐なので、per-token i8 の鏡像は
-        ランタイムで再現されない期待値になる。
+        i4 is rejected too — the linears of the mixed series are group32 i4 resident, so a
+        per-token i8 mirror would be expected values the runtime never reproduces.
         """
         monkeypatch.setattr(
             "sys.argv", ["export_deberta.py", "--dtype", dtype, "--act-quant", "--layers", "2"]
@@ -210,7 +227,8 @@ class TestActQuantCli:
             export_deberta.main()
 
     def test_act_quant_passes_the_gate_with_i8_weights(self, monkeypatch):
-        """受理側 — 門が「常に落とす」形になっていないことの裏取り（実重みは引かない）。"""
+        """The accepting side — confirms the check is not of the "always fails" form (no real
+        weights are fetched)."""
         calls: list[dict[str, object]] = []
         monkeypatch.setattr(
             export_deberta,
@@ -229,7 +247,8 @@ class TestActQuantCli:
 
 class TestMirrorIoPrefix:
     def test_the_mirror_prefix_does_not_match_the_plain_enumeration(self):
-        """MUST: `io.` 始まりにすると鏡像が w8 の golden として拾われる（Deno 側の列挙規則）。"""
+        """MUST: an `io.` prefix would pick the mirror up as a w8 golden (the Deno-side enumeration
+        rule)."""
         mirror = f"{export_deberta.ACT_IO_PREFIX}case0{export_deberta.IO_SUFFIX}"
 
         assert not mirror.startswith(export_deberta.IO_PREFIX)
@@ -246,58 +265,67 @@ class TestFakeQuant:
         assert torch.equal(wrapper.fc.weight, before)
 
     def test_i8_rounds_to_per_channel_representable_values_keyed_by_fqn(self):
-        """MUST: 台帳のキーは export する module から見た FQN（emit の突合はここで決まる）。"""
+        """MUST: the ledger keys are FQNs as seen from the exported module (emit's matching is
+        decided here)."""
         torch.manual_seed(0)
         wrapper = TinyText()
 
         scales, overrides = export_deberta._fake_quant("i8", wrapper)
 
-        assert overrides == {}, "i8 単一系列に 1 本単位の格納指定は要らない"
-        assert "fc.weight" in scales, "キーが export 対象の FQN 空間に無い"
+        assert overrides == {}, "a single-dtype i8 series needs no per-tensor storage assignments"
+        assert "fc.weight" in scales, "the key is not in the FQN space of the exported module"
         scale = scales["fc.weight"]
         assert list(scale.shape) == [4, 1]
         assert torch.equal(torch.round(wrapper.fc.weight / scale) * scale, wrapper.fc.weight)
 
     def test_i4_splits_the_eligible_modules_and_the_rest_exclusively(self):
-        """MUST: i8 / i4 の対象は排他（`quantize.py` の混成 MUST — 二重丸めは沈黙誤値）。
+        """MUST: the i8 / i4 targets are exclusive (the mixed MUST of `quantize.py` — double
+        rounding is a silent wrong value).
 
-        どちらにも入らない重みが残る穴も同時に見る（合流台帳が全ての重みを覆っていること）。
-        scale の**形**で振り分け先が読める: i4 は group 形 `[チャネル, group 数]`、i8 は
-        重みと同 rank の keepdim 形。
+        It also checks the hole of weights left in neither (the merged ledger covers every
+        weight). The **shape** of a scale tells where it went: i4 has the group shape
+        `[channels, groups]`, i8 the keepdim shape of the same rank as the weight.
         """
         torch.manual_seed(0)
         wrapper = TinyHybrid()
 
         scales, overrides = export_deberta._fake_quant("i4", wrapper)
 
-        # embedding も i4 席（ADR 0069 決定 5 の embedding 追補）— 語彙表 `[V,D]` の D 軸で group。
+        # embedding is i4 too (the embedding supplement to ADR 0069 decision 5) — grouped along the
+        # D axis of the vocabulary table `[V,D]`.
         assert overrides == {"fc.weight": "i4", "embed.weight": "i4"}
         assert set(scales) == {"fc.weight", "embed.weight", "narrow.weight"}
-        # 量子化軸 64 / group 32 なので group 数 2 — keepdim 形（[4, 1]）とは形で区別できる。
+        # Quantization axis 64 / group 32 gives 2 groups — distinguishable from the keepdim shape
+        # ([4, 1]) by shape.
         assert list(scales["fc.weight"].shape) == [4, 2]
         assert list(scales["embed.weight"].shape) == [8, 2]
-        # 割り切れない 1 本は i8 のまま（構成ごと落とさず対象から外す）
+        # The one that is not divisible stays i8 (excluded from the targets rather than failing
+        # the whole configuration)
         assert list(scales["narrow.weight"].shape) == [4, 1]
 
     def test_a_weight_that_the_group_size_does_not_divide_stays_in_the_i8_side(self):
-        """i4 適格の正本は emit 側の規則（型 × 整除）— 綴りではなく実測から引く。"""
+        """The source of truth of i4 eligibility is the emit-side rule (type × divisibility) —
+        derived from measurement, not from a spelling."""
         torch.manual_seed(0)
         wrapper = TinyHybrid()
 
         assert export_deberta._i4_module_names(wrapper) == {"fc", "embed"}
 
     def test_a_table_that_is_never_looked_up_is_excluded_from_the_i4_side(self, monkeypatch):
-        """`nn.Embedding` の器でも表引きされない重みは重みスロットの消費がゼロ = 圧縮の適格外。
+        """A weight in an `nn.Embedding` container that is never looked up is consumed by no
+        weight slot = not eligible for compression.
 
-        i4 に振ると emit の明示指定の門が「適格でない」で落ちるので、対象集合の側で外す
-        （実物は DeBERTa の相対位置表 — `deberta.patch` が切り出して linear に通す）。
+        Assigning it to i4 makes emit's check of explicit assignments fail with "not eligible", so
+        it is excluded on the target-set side (in the real model, DeBERTa's relative-position table
+        — `deberta.patch` slices it and passes it through linears).
         """
         torch.manual_seed(0)
         wrapper = TinyHybrid()
         monkeypatch.setattr(export_deberta, "NON_LOOKUP_EMBEDDINGS", frozenset({"embed"}))
 
         assert export_deberta._i4_module_names(wrapper) == {"fc"}
-        # 外した表は i8 側（丸めの担い手が変わらない = 従来の数値のまま）
+        # The excluded table is on the i8 side (the same side rounds it = the numbers stay as
+        # before)
         scales, overrides = export_deberta._fake_quant("i4", wrapper)
         assert overrides == {"fc.weight": "i4"}
         assert list(scales["embed.weight"].shape) == [8, 1]
@@ -309,11 +337,12 @@ class TestMirrorIo:
 
         written, attached = export_deberta._write_mirror_io(wrapper, graph, CASES, out_dir)
 
-        assert attached == 1, "適格 linear は 1 本（in_features=4）"
+        assert attached == 1, "there is one eligible linear (in_features=4)"
         assert written == [f"{export_deberta.ACT_IO_PREFIX}case0{export_deberta.IO_SUFFIX}"]
 
     def test_mirror_io_differs_from_the_plain_golden(self, exported):
-        """鏡像が通常 io と同じ数なら、フックが空振りしている（0 本でも例外にならない経路）。"""
+        """If the mirror has the same numbers as the plain io, the hooks did nothing (a path that
+        raises nothing even with 0 hooks)."""
         wrapper, graph, out_dir = exported
         export_deberta._write_io(wrapper, graph, CASES, out_dir)
         export_deberta._write_mirror_io(wrapper, graph, CASES, out_dir)
@@ -327,7 +356,8 @@ class TestMirrorIo:
         assert not torch.equal(plain["output.0"], mirror["output.0"])
 
     def test_the_hooks_are_detached_so_the_plain_golden_stays_clean(self, exported):
-        """MUST: 掛けたまま通常 io を採ると w8 E2E の期待値が活性量子化ごと汚染される。"""
+        """MUST: taking the plain io with the hooks attached contaminates the expected values of
+        the w8 E2E with activation quantization."""
         wrapper, graph, out_dir = exported
         export_deberta._write_io(wrapper, graph, CASES, out_dir)
         before = load_file(out_dir / f"{export_deberta.IO_PREFIX}case0{export_deberta.IO_SUFFIX}")
@@ -339,7 +369,8 @@ class TestMirrorIo:
         assert torch.equal(before["output.0"], after["output.0"])
 
     def test_zero_eligible_linears_fails_loudly(self, tmp_path):
-        """0 本のまま鏡像を採ると「w8a8 のつもりで w8 の数」になる（ADR 0006 の診断常設）。"""
+        """Taking the mirror with 0 hooks gives "w8 numbers while meaning w8a8" (ADR 0006's
+        always-on diagnostics)."""
 
         class NoLinear(nn.Module):
             def forward(
@@ -357,5 +388,5 @@ class TestMirrorIo:
             graph_name="tiny",
         )
 
-        with pytest.raises(SystemExit, match="適格 linear が 0 本"):
+        with pytest.raises(SystemExit, match="0 eligible linears"):
             export_deberta._write_mirror_io(wrapper, graph, CASES, tmp_path)

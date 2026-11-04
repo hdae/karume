@@ -1,11 +1,13 @@
-"""Anima の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択（ADR 0065 決定 2）。
+"""Anima's distribution recipe — series layout, output paths, quants, card (ADR 0065 decision 2).
 
-汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **Anima 固有の事実**だけ: どの系列ディレクトリから
-何を拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+The generic assembly engine (placement, folding of shared slots, sha256, manifest, staging/swap,
+verification) lives in `karume.dist`. This module holds only **Anima-specific facts**: what to pick
+from which series directory, at which path of the distribution and under which dtype label to lay
+it out, and which quant is the default.
 
-公開面は Pipeline 2 つ（{@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE} — ADR 0087）—
-リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+The public surface is two Pipelines ({@link OFFICIAL_PIPELINE} / {@link EXTRA_PIPELINE} — ADR
+0087) — the repository's dist driver (`tools/export-recipes/dist.py`) merges them into core's
+PIPELINES.
 """
 
 from __future__ import annotations
@@ -42,47 +44,54 @@ from karume.dist import (
     complete_quant_weights,
 )
 
-#: ホストが rope 表を組むための軸別素表（容器の**資産** — ADR 0109 決定 4）の名前と役割。
-#: 中身は 1 本の safetensors のバイト列そのもの（旧 `rope_base.safetensors` を畳んだ形）で、
-#: 容器はそれを解釈しない。
+#: Name and role of the per-axis raw tables the host builds the rope tables from (an **asset** of
+#: the container — ADR 0109 decision 4). The content is the bytes of one safetensors file as is (the
+#: old `rope_base.safetensors` folded in), and the container does not interpret it.
 #:
-#: MUST: 綴りは移行 CLI の写し表（`karume.migrate.EXTRA_ASSETS`）と一致させる — 「旧リポから
-#: 移した容器」と「直接書いた容器」で資産名が割れると、models 側が引けなくなる。書き手
-#: （`anima/export.py`）もここから引く（torch を要る側から要らない側へは import しない）。
+#: MUST: the spelling matches the copy table of the migration CLI (`karume.migrate.EXTRA_ASSETS`) —
+#: if the asset name differed between "containers migrated from the old repository" and
+#: "containers written directly", the models side could not look it up. The writer
+#: (`anima/export.py`) reads it from here too (the side that needs torch imports from the side that
+#: does not, never the reverse).
 ROPE_BASE_ASSET = "rope_base"
 ROPE_BASE_ROLE = "rope-base"
 
-#: 公式 Turbo 変種のモデル名（= 公式リポの既定モデル — 上流 README が「まず Turbo を」と
-#: 推奨・2026-09-01 裁定）。上流の名乗りをそのまま使う（ADR 0077）。旧 `anima-turbo`
-#: （turbo LoRA v0.2 を焼き込んだ配布物・hdae/karume-anima-turbo）はこの公式 checkpoint 版で
-#: 置き換えられ、受理集合から退役した（2026-09-01 — 焼き込み由来の旧系列
-#: `outputs/series/anima-turbo-*-dyn` は `lora_provenance.json` を持つので、誤って新しい席へ
-#: 挿すと {@link assert_lora_provenance} が落とす）。
+#: Model name of the official Turbo variant (= the default model of the official repository — the
+#: upstream README recommends "Turbo first"; ruling of 2026-09-01). Upstream's naming is used as is
+#: (ADR 0077). The old `anima-turbo` (a distribution with turbo LoRA v0.2 baked in,
+#: hdae/karume-anima-turbo) was replaced by this official checkpoint version and retired from the
+#: accepted set (2026-09-01 — the old baked series `outputs/series/anima-turbo-*-dyn` carry
+#: `lora_provenance.json`, so plugging one into the new slot by mistake fails in
+#: {@link assert_lora_provenance}).
 ANIMA_TURBO_MODEL_NAME = "anima-turbo-v1.1"
 
-#: 素の base 配布物のモデル名。多 step + CFG で使う席で、negative prompt が効くのは
-#: この系（base / aesthetic / extra）だけ（turbo は CFG=1 運用なので uncond 側を計算しない）。
+#: Model name of the plain base distribution. It is used with many steps + CFG, and the negative
+#: prompt takes effect only for this line (base / aesthetic / extra) (turbo runs with CFG=1 and does
+#: not compute the uncond side).
 ANIMA_BASE_MODEL_NAME = "anima-v1.0"
 
-#: 公式 Aesthetic 変種のモデル名（base を高品質画風へ fine-tune した公式版 — 上流の名乗り
-#: そのまま）。text_conditioner は base と f16 丸め後も 64 テンソル差が残る実測
-#: （2026-09-01）から自前で持つ。
+#: Model name of the official Aesthetic variant (the official fine-tune of base toward a
+#: high-quality style — upstream's naming as is). It carries its own text_conditioner, because 64
+#: tensors still differ from base after f16 rounding (measured 2026-09-01).
 ANIMA_AESTHETIC_MODEL_NAME = "anima-aesthetic-v1.1"
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。
+#: Pipeline contract (ADR 0041 §2 — per model).
 ANIMA_PIPELINE = "anima/1"
 
-#: モデル名に依らない系列（base の text 経路 / VAE と、tokenizer を書く台本の出力）。
-#: MUST: `anima-f16` は **LoRA を焼かずに** 焼いた系列である（`lora_provenance.json` が
-#: 無いことがその記録）。turbo の text_conditioner 成分は実測で lora_B が全ゼロ = noop
-#: （`anima/pipeline_ref.py` の同 NOTE）なので、turbo 席もここを共有して差し支えない。
+#: Series that do not depend on the model name (base's text path / VAE, and the output of the
+#: script that writes the tokenizers).
+#: MUST: `anima-f16` is a series baked **without baking in a LoRA** (the absence of
+#: `lora_provenance.json` is the record of that). turbo's text_conditioner component measured
+#: lora_B all zeros = a no-op (the same NOTE in `anima/pipeline_ref.py`), so the turbo slot may
+#: share this too.
 ANIMA_BASE_SERIES = "anima-f16"
 ANIMA_TOKENIZER_SERIES = "anima-demo"
 
-#: text stack（text_encoder / text_conditioner / vae_decoder — DiT の格納に依らない 3 役）の
-#: 格納ラベル → 共有系列。f16 は全モデルが引き、bf16 は忠実プリセット `bf16`（4 役とも bf16 —
-#: ADR 0131 決定 3）を {@link AnimaModel.storages} に持つモデルだけが引く。bf16 系列も LoRA を
-#: 焼かずに焼く（{@link ANIMA_BASE_SERIES} と同じ MUST・同じ網 — {@link assert_lora_provenance}）。
+#: Storage label → shared series of the text stack (text_encoder / text_conditioner / vae_decoder —
+#: the 3 roles that do not depend on the DiT's storage). Every model reads f16; bf16 is read only by
+#: the models that have the original-weights preset `bf16` (all 4 roles bf16 — ADR 0131 decision 3)
+#: in {@link AnimaModel.storages}. The bf16 series is also baked without baking in a LoRA (the same
+#: MUST and the same safety net as {@link ANIMA_BASE_SERIES} — {@link assert_lora_provenance}).
 ANIMA_TEXT_STACK_SERIES: Mapping[str, str] = {"f16": ANIMA_BASE_SERIES, "bf16": "anima-bf16"}
 
 
@@ -97,50 +106,61 @@ def text_stack_role(component: str, storage: str) -> str:
     return component if storage == "f16" else f"{component}_{storage}"
 
 
-#: 焼き込んだ LoRA の帰属を残すファイル（系列のターゲット直下）。系列レイアウトの綴りは
-#: 読み手（ここ）が持ち、書き手（`anima/export.py`）はここから引く — 2 箇所で独立に動かさない。
+#: File that keeps the attribution of a baked-in LoRA (directly under the series target). The
+#: reader (here) owns the spelling of the series layout and the writer (`anima/export.py`) reads it
+#: from here — it does not move independently in two places.
 LORA_PROVENANCE_FILE = "lora_provenance.json"
 
-#: i4 系列が記録する校正条件（{@link assert_calib_provenance}）。校正の有無は**格納形を 1 バイトも
-#: 変えない**ので、資産・manifest・ヘッダのどれからも判別できない。それでいて品質差は視認裁定を
-#: 分ける大きさ（素の RTN =「全体的にぼやけた印象」/ GPTQ =「高品質を維持」— research 2026-08-21
-#: §6）なので、LoRA 帰属と同じ規律で「書き出した側が事実を書き残す」。
+#: Calibration conditions an i4 series records ({@link assert_calib_provenance}). Calibration
+#: **does not change a single byte of the storage form**, so it cannot be told from the assets, the
+#: manifest or the header. Yet the quality difference is large enough to split the visual verdict
+#: (plain RTN = "a blurry impression overall" / GPTQ = "keeps high quality" — research 2026-08-21
+#: §6), so under the same discipline as the LoRA attribution "the side that wrote it records the
+#: facts".
 CALIB_PROVENANCE_FILE = "calib_provenance.json"
 
-#: 配布して良い丸め方式（{@link CALIB_PROVENANCE_FILE} の `method`）。`--no-calib` の素の RTN は
-#: smoke 用で、配布資産にしない（`anima/export.py` の該当 MUST）。
+#: The rounding method allowed for distribution (`method` of {@link CALIB_PROVENANCE_FILE}). The
+#: plain RTN of `--no-calib` is for smoke runs and is not made into distribution assets (the
+#: corresponding MUST in `anima/export.py`).
 CALIB_SHIPPABLE_METHOD = "gptq"
 
-#: i4 の量子化感度実験変種（block 内 adaLN + block 外を i8 格納へ）の綴り。系列ディレクトリの
-#: 接尾辞と {@link CALIB_PROVENANCE_FILE} の `method` 接尾辞を**同じ 1 語**から作る。
-#: 書き手は `anima/export.py` の `--i4-adaln-i8`（綴りは LoRA / 校正の記録と同じ規律で読み手が
-#: 持つ — 2 箇所で独立に動かさない）。
+#: Spelling of the i4 quantization-sensitivity experiment variant (in-block adaLN + outside the
+#: blocks stored as i8). The series directory suffix and the `method` suffix of
+#: {@link CALIB_PROVENANCE_FILE} are built from **the same single word**. The writer is
+#: `--i4-adaln-i8` of `anima/export.py` (the reader owns the spelling under the same discipline as
+#: the LoRA / calibration records — it does not move independently in two places).
 ADALN_I8_TAG = "adaln8"
 
-#: 同・変種が記録する丸め方式。**{@link CALIB_SHIPPABLE_METHOD} と一致しない**綴りであることが
-#: 要（格納形も本数も `verify_dist` もヘッダ検査も素通りする変種なので、配布経路から締め出す
-#: 網は {@link assert_calib_provenance} の方式一致 1 つきり）。これを要求するのは視認評価専用の
-#: 組み立て（`anima.eval_dist`）だけ。
+#: The rounding method the same variant records. The key is that it is spelled **so as not to match
+#: {@link CALIB_SHIPPABLE_METHOD}** (the variant passes the storage form, the counts, `verify_dist`
+#: and the header check alike, so the only net that keeps it out of the distribution path is the
+#: method match of {@link assert_calib_provenance}). Only the assembly for visual evaluation
+#: (`anima.eval_dist`) requires it.
 ADALN_I8_CALIB_METHOD = f"{CALIB_SHIPPABLE_METHOD}-{ADALN_I8_TAG}"
 
-#: GPTQ 校正（捕捉 + 丸め）を回せるデバイス（書き手は `anima/export.py` の `--calib-device`）。
+#: Devices that can run the GPTQ calibration (capture + rounding) (the writer is `--calib-device`
+#: of `anima/export.py`).
 CALIB_DEVICES = ("cpu", "cuda")
 
-#: **配布して良い校正デバイス**。これ以外で焼いた i4 は {@link CALIB_PROVENANCE_FILE} の `method`
-#: へデバイス名が付き（`gptq-cuda`）、{@link assert_calib_provenance} の方式一致に名指しで落ちる。
-#: 綴りを変えるのは {@link ADALN_I8_TAG} と同じ理由 — **GPTQ の丸め解はデバイスで変わる**
-#: （f64 縮約の順序も linalg の実装も違う）のに、格納形も本数も 1 バイト違わないので
-#: `verify_dist` もヘッダ検査も素通りする。配布経路から締め出す網は方式一致 1 つきり。
+#: **The calibration device allowed for distribution**. An i4 baked on any other device gets the
+#: device name in the `method` of {@link CALIB_PROVENANCE_FILE} (`gptq-cuda`) and fails by name in
+#: the method match of {@link assert_calib_provenance}. The spelling changes for the same reason as
+#: {@link ADALN_I8_TAG} — **GPTQ's rounding solution changes with the device** (both the order of
+#: the f64 reductions and the linalg implementation differ), yet the storage form and the counts do
+#: not differ by a byte, so `verify_dist` and the header check pass it. The only net that keeps it
+#: out of the distribution path is the method match.
 CALIB_SHIPPABLE_DEVICE = "cpu"
 
-#: 上流の重みライセンス原文（この recipe の隣に逐語で置いてある）。配布は Derivative の
-#: Distribution なので §3(a) が掛かる。§3(a) の要件は 2 つ — 前段「ライセンスのコピーを
-#: 第三者へ提供する」と、後段「CircleStone Models / Derivatives の使用権は本ライセンスに基づき
-#: Company から受領者へ直接付与されると明示する」。前段は要約や書き換えでは満たさないため、
-#: **1 バイトも変えずに**配布リポ直下の `LICENSE.md` として出す。後段は固定文
-#: {@link RIGHTS_GRANT_STATEMENT}（`anima/card.py` が正本）を `NOTICE.md` とカードの両方に
-#: 載せて満たす（2026-09-25 裁定）。`Path(__file__)` 基準で引くのは、cwd にも系列の置き場にも
-#: 依存しないため。
+#: The original text of the upstream weights licence (placed verbatim next to this recipe). The
+#: distribution is a Distribution of a Derivative, so §3(a) applies. §3(a) has two requirements —
+#: the first half "provide a copy of the licence to third parties" and the latter half "specify
+#: that the rights to use the CircleStone Models / Derivatives are granted to the recipient
+#: directly by the Company under this licence". A summary or a rewrite does not satisfy the first
+#: half, so the text is shipped **without changing a single byte** as `LICENSE.md` at the root of
+#: the distribution repository. The latter half is satisfied by putting the fixed sentence
+#: {@link RIGHTS_GRANT_STATEMENT} (source of truth: `anima/card.py`) in both `NOTICE.md` and the
+#: card (ruling of 2026-09-25). It is resolved from `Path(__file__)` so that it depends neither on
+#: the cwd nor on where the series live.
 LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
 
 #: The NVIDIA Open Model License Agreement, transcribed verbatim into plain text from
@@ -158,15 +178,19 @@ NVIDIA_LICENSE_HEADING = (
     "## NVIDIA Open Model License Agreement — applies in addition to the CircleStone license above"
 )
 
-#: どのリポの告知にも載る改変（コンテナ形式への変換）。
+#: The modification that appears in every repository's notice (conversion into the container
+#: format).
 #:
-#: MUST: 改変の列挙は**リポごと**に持つ（1 本を使い回さない）。turbo リポと base リポでは
-#: 焼き込みの有無も格納系列の数も違うので、共有した瞬間にどちらかの告知が事実と食い違う —
-#: 値としては妥当な散文なので、`verify_dist` も manifest 検査も素通りして配ってから露見する。
-#: MUST: 文面は part 数に依らず正しいものを 1 本だけ持つ（manifest を見て出し分けない）—
-#: `root_files` は Pipeline 構築時に固定で組むので、manifest 依存の分岐はここに置けない。
-#: 容器の説明は他系列の NOTICE とカードの概要文と同じ句にそろえる — §3(d)(i) が求める
-#: 「改変内容の告知」が実際の出力形と食い違うと、改変内容を述べていないのと同じになる。
+#: MUST: the list of modifications is held **per repository** (one list is not reused). The turbo
+#: and base repositories differ in whether anything is baked in and in the number of storage series,
+#: so the moment one list is shared, one of the notices contradicts the facts — and since the value
+#: is plausible prose, it passes `verify_dist` and the manifest checks and only surfaces after
+#: distribution.
+#: MUST: hold only one wording, correct regardless of the part count (no variants chosen by looking
+#: at the manifest) — `root_files` is fixed when the Pipeline is built, so a manifest-dependent
+#: branch cannot live here. The container description uses the same phrase as the other series'
+#: NOTICE and the card's overview — if the "notice of the modifications" that §3(d)(i) requires
+#: contradicts the actual output form, it is as if the modifications were not stated.
 CONTAINER_MODIFICATION = (
     "- The weights were converted into the container format of the WebGPU inference"
     " runtime Karume\n"
@@ -175,14 +199,15 @@ CONTAINER_MODIFICATION = (
 
 
 def notice_markdown(modifications: tuple[str, ...]) -> str:
-    """配布リポ直下の `NOTICE.md`。
+    """`NOTICE.md` at the root of the distribution repository.
 
-    §3(a) 後段（権利は Company から直接付与される旨の明示 — {@link RIGHTS_GRANT_STATEMENT}）+
-    §3(b)（Attribution Notice の掲示）+ §3(d)(i)（改変した旨を **Attribution Notice の中に**
-    含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。逐語ブロックは
-    {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の事実の記述。
-    改変記載を独立節にせず Notice 節の内側へ置くのは §3(d)(i) の文言（"include in the
-    Attribution Notice"）に厳格に合わせるため。
+    One page satisfies the latter half of §3(a) (stating that the rights are granted directly by
+    the Company — {@link RIGHTS_GRANT_STATEMENT}) + §3(b) (display of the Attribution Notice) +
+    §3(d)(i) (stating the modification **inside the Attribution Notice**) + §3(d)(iii) (not to be
+    mistaken for an official product). The verbatim block is {@link ATTRIBUTION_NOTICE} (source of
+    truth: `anima/card.py`); the rest describes facts on the Karume side. The modifications are
+    placed inside the Notice section rather than in a section of their own to match the wording of
+    §3(d)(i) ("include in the Attribution Notice") strictly.
     """
     return (
         "\n".join(
@@ -220,10 +245,11 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
     )
 
 
-#: 公式リポ（karume-anima — CircleStone の 5 変種同居）の告知。
-#: 旧 base 告知の「int4 series を足した」は i4 席の無い現物と食い違っていた（2026-09-01 に
-#: 是正 — 全モデル i4 なしへ揃えた同日裁定で int4 の行自体が消えた。旧 turbo 告知にあった
-#: LoRA 焼き込みの行も公式 checkpoint 化で消えた）。
+#: Notice of the official repository (karume-anima — CircleStone's 5 variants together).
+#: The old base notice's "added an int4 series" contradicted the actual distribution, which had no
+#: i4 preset (corrected on 2026-09-01 — the same-day ruling that removed i4 from every model removed
+#: the int4 line itself; the LoRA baking line of the old turbo notice also went away with the move
+#: to the official checkpoint).
 #: The bf16 line (ADR 0131 decision 3 — the original-weights preset of every model) was added on
 #: 2026-10-29; until then the notice named only the f16 and int8 series. bf16 keeps the upstream
 #: BF16 values unchanged (no rounding, no quantization), so the line does not call it a quantized
@@ -237,8 +263,8 @@ OFFICIAL_NOTICE_MARKDOWN = notice_markdown(
     )
 )
 
-#: 追加学習リポ（karume-anima-extra — 第三者 fine-tune）の告知。出所は README へ委ねる形で
-#: 書く（上の NOTE と同じ理由）。
+#: Notice of the extra repository (karume-anima-extra — third-party fine-tunes). The origins are
+#: left to the README (the same reason as the NOTE above).
 EXTRA_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
@@ -250,12 +276,13 @@ EXTRA_NOTICE_MARKDOWN = notice_markdown(
     )
 )
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
-#: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
+#: Relative output paths (**inside a model subtree**) — the one place the placement table and the
+#: manifest share. They are looked up by role name only, so the spelling cannot move independently
+#: in two places.
 #:
-#: MUST: f16 の text stack の path（`text_encoder/model.krm` 等）は動かさない — 追加学習リポ
-#: （karume-anima-extra）がこの path を越境参照している。bf16 の text stack は `.bf16` を
-#: 名乗る別ファイルとして隣に並ぶ（{@link text_stack_role}）。
+#: MUST: do not move the paths of the f16 text stack (`text_encoder/model.krm` and the like) — the
+#: extra repository (karume-anima-extra) references these paths across repositories. The bf16 text
+#: stack sits next to it as separate files named `.bf16` ({@link text_stack_role}).
 OUTPUT_PATHS: Mapping[str, str] = {
     "text_encoder": "text_encoder/model.krm",
     "text_conditioner": "text_conditioner/model.krm",
@@ -271,21 +298,23 @@ OUTPUT_PATHS: Mapping[str, str] = {
     "vae_decoder_bf16": "vae_decoder/model.bf16.krm",
 }
 
-#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が
-#: 持ち、生成モデルカードの quant 表に対応を必ず出す**）。Anima の基底格納は `f16`（忠実
-#: プリセットだけ 4 役とも `bf16`）で、圧縮が掛かるのは transformer だけなので席名は
-#: `f16+dit<ビット>` になる。
+#: Component-override token of a preset name → its weights name (ADR 0074 decision 4 — **the
+#: recipe owns the abbreviations, and the quant table of the generated model card always shows the
+#: mapping**). Anima's base storage is `f16` (only the original-weights preset uses `bf16` for all 4
+#: roles) and only the transformer is compressed, so the preset names are `f16+dit<bits>`.
 ANIMA_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": "transformer"}
 
-#: quant 表（v1 の `presets` — ADR 0041 §3 で改名）。`session` の語彙は manifest 所有。
-#: 席名は ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…` で、`<格納>` は**全役割に共通の
-#: 基底格納**（Anima は f16 / 忠実プリセットだけ bf16）。**表が名指ししない weights は書かない** —
-#: {@link anima_quants} が席名の `<格納>` で埋める（{@link seat_base_storage} — 写せば済む席を
-#: quant の数だけ複製しない）。
+#: The quant table (`presets` in v1 — renamed in ADR 0041 §3). The manifest owns the vocabulary of
+#: `session`. Preset names follow ADR 0074's grammar `<storage>[+<component><bits>]…[-<knob>]…`,
+#: where `<storage>` is **the base storage shared by every role** (f16 for Anima; bf16 only for the
+#: original-weights preset). **Weights the table does not name are not written** —
+#: {@link anima_quants} fills them with the `<storage>` of the preset name
+#: ({@link seat_base_storage} — a value that can simply be copied is not duplicated once per quant).
 #:
-#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。
-#: 席の実態（格納・ノブ・嬉しさ）から書く: id は機械の都合で、人が読むのはこの 2 欄という
-#: 役割分担を取る。既定であることは書かない（`defaultQuant` が既に指している — ADR 0075 決定 3）。
+#: `label` / `description` are display fields for the selection UI (ADR 0075 decision 1 — English,
+#: 64 / 200 character limits). They are written from what the preset actually is (storage, knobs,
+#: benefit): the id serves the machine, and people read these 2 fields. Being the default is not
+#: mentioned (`defaultQuant` already points at it — ADR 0075 decision 3).
 ANIMA_QUANTS: Mapping[str, Any] = {
     "f16": {
         "weights": {"transformer": "f16"},
@@ -326,17 +355,19 @@ ANIMA_QUANTS: Mapping[str, Any] = {
         "description": "The int8 linear and attention path with attention scores held in f16 —"
         " the fastest of the int8 seats here, at f16-level image quality.",
     },
-    # i4 常駐の 2 席（波 J-4a — 低 VRAM 席）。
+    # The 2 presets with resident i4 (run J-4a — the low-VRAM presets).
     #
-    # MUST: **`linearCompute` を宣言しない**。**理由は 2026-08-21 に入れ替わった**ので注意 —
-    # 以前は「a8 の述語が i8 常駐を必要条件に含むので宣言しても 1 バイトも変わらない嘘の席に
-    # なる」だったが、w4a8 の実装（ADR 0076）で i4 常駐も整数内積の経路に乗るようになった。
-    # 今の理由は**品質**: 宣言すると linear の活性が per-token i8 になり、実 GPU の画で
-    # 「細部に破綻・線がラフ」というユーザー視認裁定が出た（2026-08-21・研究記録
-    # `docs/research/2026-08-21-anima-i4-seat-speed.md` §6）。速度は 1,640 → 955 ms/step と
-    # 大きく戻るが、この席の存在理由は**サイズと VRAM** であって速度ではない（速度が要るなら
-    # 既定の `f16+dit8-a8-attn8-s16` が 823 ms/step で上）。attention 側の 2 つは重みスロットを
-    # 見ないので i4 常駐でもそのまま効き、視認でも劣化は出ていないので宣言する。
+    # MUST: **do not declare `linearCompute`**. Note that **the reason changed on 2026-08-21** —
+    # it used to be "the a8 predicate requires resident i8, so declaring it makes a fake preset
+    # that changes not a single byte", but the w4a8 implementation (ADR 0076) put resident i4 on the
+    # integer dot-product path as well. The reason now is **quality**: declaring it makes the linear
+    # activations per-token i8, and on real-GPU images the maintainer's visual verdict was "broken
+    # details, rough lines" (2026-08-21, research record
+    # `docs/research/2026-08-21-anima-i4-seat-speed.md` §6). Speed recovers a lot, 1,640 → 955
+    # ms/step, but the reason these presets exist is **size and VRAM**, not speed (if speed is
+    # needed, the default `f16+dit8-a8-attn8-s16` is faster at 823 ms/step). The 2 attention knobs
+    # do not look at the weight slots, so they work as is with resident i4, and no degradation was
+    # seen visually, so they are declared.
     "f16+dit4": {
         "weights": {"transformer": "i4"},
         "session": {},
@@ -359,9 +390,9 @@ ANIMA_QUANTS: Mapping[str, Any] = {
         "description": "f16 storage computed in f16 throughout. Needs the shader-f16 GPU feature,"
         " and trades numerical headroom for speed.",
     },
-    # 忠実プリセット（ADR 0131 決定 3 — 上流の checkpoint は 4 部品とも BF16 なので、bf16 格納は
-    # 上流のビット列そのもの）。席は `bf16` を {@link AnimaModel.storages} に持つモデルにだけ
-    # 生える（{@link anima_quants} の導出）。
+    # The original-weights preset (ADR 0131 decision 3 — the upstream checkpoint has all 4
+    # components in BF16, so bf16 storage is upstream's bits as is). The preset appears only for
+    # models that have `bf16` in {@link AnimaModel.storages} (derived by {@link anima_quants}).
     "bf16": {
         "weights": {
             "text_encoder": "bf16",
@@ -378,31 +409,36 @@ ANIMA_QUANTS: Mapping[str, Any] = {
 
 ANIMA_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 
-#: パイプライン所有の設定（hub は素通し — ADR 0041 §2）。値は移行元の実装定数と一致する:
-#: `shift` / `numTrainTimesteps` は sampler の `ANIMA_SHIFT` / `ANIMA_NUM_TRAIN_TIMESTEPS`
-#: （エクスポータ側の `SHIFT` / `NUM_TRAIN_TIMESTEPS` = scheduler_config.json と同値）、
-#: `steps` / `guidanceScale` は turbo 既定（8 step / cfg 1 — ADR 0038 Examples が正。品質目視
-#: ゲート・最終ベンチ・PNG 参照 sha の採取は全て 8 step で行われており、配布既定はそれに揃える。
-#: 移行元 CLI の 10 は検証履歴を持たない値）。`negativePrompt` は既定ネガティブプロンプト。
-#: `resolution` だけは移行元 CLI の既定（512）を採らない — あちらの 512 は「静的資産の最小」
-#: であって推奨値ではなく、配布形は S 形 1 本（ADR 0038 §4）で解像度に依存しない。配布の
-#: 推奨既定は ADR 0038 Examples のとおり 1024²。
-#: `type`（サンプラ種別）は **Euler を配布既定に維持する**（再裁定 2026-08-25 — 上流 Anima の
-#: 推奨サンプラーに合わせる・ユーザー方針「DPM++ 2M は選択肢の一つ」）。0.5.0 で一度
-#: dpmpp-2m を宣言したが同日戻した。視認 A/B の観測（同 step 数で dpmpp-2m が同等以上 —
-#: seed 42 ほぼ互角・seed 7 は構図と中景の解像で優位・破綻の追加なし）は観測として有効なまま
-#: で、既定の裁定だけが上流推奨側に立つ。DPM++ 2M は request 側の `sampler` 席（0.5.1）で
-#: 選ぶ。省略時既定も "euler"（models 側 config.ts）だが、裁定済みであることが読めるよう
-#: 明示宣言する。
+#: Pipeline-owned settings (the hub passes them through — ADR 0041 §2). The values match the
+#: implementation constants of the migration source: `shift` / `numTrainTimesteps` are the
+#: sampler's `ANIMA_SHIFT` / `ANIMA_NUM_TRAIN_TIMESTEPS` (equal to the exporter's `SHIFT` /
+#: `NUM_TRAIN_TIMESTEPS` = scheduler_config.json), and `steps` / `guidanceScale` are the turbo
+#: defaults (8 steps / cfg 1 — ADR 0038 Examples is authoritative; the visual quality check, the
+#: final benchmark and the PNG reference sha were all taken at 8 steps, and the distribution default
+#: matches them; the 10 of the migration source's CLI has no verification history).
+#: `negativePrompt` is the default negative prompt. Only `resolution` does not take the migration
+#: source CLI's default (512) — that 512 is "the minimum of the static assets", not a recommended
+#: value, and the distribution is a single S form (ADR 0038 §4) that does not depend on the
+#: resolution. The recommended distribution default is 1024², as in ADR 0038 Examples.
+#: `type` (the sampler kind) **keeps Euler as the distribution default** (re-ruling of 2026-08-25 —
+#: follow upstream Anima's recommended sampler; the maintainer's policy is "DPM++ 2M is one of the
+#: options"). 0.5.0 once declared dpmpp-2m, reverted the same day. The observations of the visual
+#: A/B (at the same step count dpmpp-2m is as good or better — seed 42 about even, seed 7 better in
+#: composition and mid-ground detail, no added breakage) remain valid as observations; only the
+#: ruling on the default sides with upstream's recommendation. DPM++ 2M is chosen with the
+#: request-side `sampler` option (0.5.1). The default when omitted is also "euler" (config.ts on
+#: the models side), but it is declared explicitly so that the ruling can be read.
 ANIMA_SCHEDULER: Mapping[str, Any] = {"type": "euler", "shift": 3, "numTrainTimesteps": 1000}
 
-#: 既定のネガティブプロンプト。turbo 席では**使われない**（CFG=1 なので uncond 側を 1 度も
-#: 計算しない）が、欄自体は据え置く — 利用者が guidance を上げた瞬間に効く値だから。
-#: CFG 運用の素版では i4 の**校正入力**の uncond 分岐にもこれが通る（`anima.calib`）。
+#: The default negative prompt. **Not used** by the turbo preset (CFG=1 never computes the uncond
+#: side), but the field stays — it is the value that takes effect the moment a user raises the
+#: guidance. On the plain models that run with CFG, it also goes through the uncond branch of the i4
+#: **calibration inputs** (`anima.calib`).
 ANIMA_NEGATIVE_PROMPT = "low quality, worst quality, blurry, bad anatomy, jpeg artifacts"
 
-#: 配布の推奨解像度（ADR 0038 Examples）。移行元 CLI の 512 は「静的資産の最小」であって
-#: 推奨値ではなく、配布形は S 形 1 本（ADR 0038 §4）で解像度に依存しない。
+#: The recommended distribution resolution (ADR 0038 Examples). The migration source CLI's 512 is
+#: "the minimum of the static assets", not a recommended value, and the distribution is a single S
+#: form (ADR 0038 §4) that does not depend on the resolution.
 ANIMA_RESOLUTION: Mapping[str, int] = {"width": 1024, "height": 1024}
 
 ANIMA_TURBO_PIPELINE_CONFIG: Mapping[str, Any] = {
@@ -415,13 +451,16 @@ ANIMA_TURBO_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: 素の base 系の既定。turbo と違い **CFG を使う**（= negative prompt が効く）ので、1 step が
-#: forward 2 本になり、step 数も蒸留前の相場へ戻る。
+#: Defaults of the plain base models. Unlike turbo they **use CFG** (= the negative prompt takes
+#: effect), so one step is 2 forwards, and the step count goes back to the usual range before
+#: distillation.
 #:
-#: step 数は 20〜32 を 3 プロンプト × 4 段で焼いて視認裁定した結果の **20**（2026-08-22）。
-#: 既定は「品質に問題の無い範囲で最速」を採る方針で、20 と 32 の差は題材によらず小さかった
-#: （step 数を変えると sigma 列ごと変わるので**同じ絵が精細になるのではなく別の絵になる** —
-#: 「どこから破綻が減って安定するか」で見る）。上げたい利用者は `steps` を渡せばよい。
+#: The step count is **20**, the visual verdict after rendering 20–32 at 3 prompts × 4 levels
+#: (2026-08-22). The policy for the default is "the fastest within the range without quality
+#: problems", and the difference between 20 and 32 was small regardless of subject (changing the
+#: step count changes the whole sigma sequence, so **it gives a different image rather than a more
+#: detailed version of the same one** — judge by "from where breakage decreases and it
+#: stabilises"). A user who wants more passes `steps`.
 ANIMA_BASE_PIPELINE_CONFIG: Mapping[str, Any] = {
     "scheduler": ANIMA_SCHEDULER,
     "defaults": {
@@ -432,12 +471,13 @@ ANIMA_BASE_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: 公式 Aesthetic 変種の既定。CFG を使う点は base と同じ。
+#: Defaults of the official Aesthetic variant. Uses CFG, like base.
 #:
-#: step 数は 20 / 30 / 50 を seed 42-45 × 4 題材（人物・風景・遠近・全身+街）で焼いて視認
-#: 裁定した **30**（2026-09-01・v1.0 / v1.1 両方で確認）。50 は良くなっている気はするが
-#: 20 からの劇的改善ではない、の中庸 — 上流 README の一般推奨（30-50 step / CFG 4-5）の
-#: 下端でもある。上げたい利用者は `steps` を渡せばよい。
+#: The step count is **30**, the visual verdict after rendering 20 / 30 / 50 at seeds 42-45 × 4
+#: subjects (person, landscape, perspective, full body + street) (2026-09-01, confirmed for both
+#: v1.0 and v1.1). The middle ground between "50 seems better" and "but not a dramatic improvement
+#: over 20" — also the low end of the upstream README's general recommendation (30-50 steps / CFG
+#: 4-5). A user who wants more passes `steps`.
 ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
     "scheduler": ANIMA_SCHEDULER,
     "defaults": {
@@ -448,14 +488,16 @@ ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: 各役割の束縛表に**要求する格納の語彙**（存在検査）。実測の事故が根拠:
-#: f16 系列のつもりで `--dtype` を付け忘れた素の f32 資産は、組み立て・ロード・実行の全てを
-#: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなく束縛表が正。
-#: f16 系列は fake-quant 対象だけが f16 になる（norm/bias 等は f32 のまま）ので「f16 を含む」
-#: を要求する。tokenizer（JSON）はここに載せない。
-#: i4 系列は**混成**（f32 + i8 + i4 が同居する）なので **i4 を要求する** — {@link assert_storage}
-#: は「要求の語彙が束縛表に在る」を見るので、i8 を要求すると i8 系列が i4 席へ入っても素通りし、
-#: 席の取り違えが沈黙する（sbv2 の i4 席と同じ規律）。
+#: The storage vocabulary **required** in each role's binding table (a presence check). An actual
+#: incident is the reason: plain f32 assets, meant as an f16 series but built without `--dtype`,
+#: passed assembly, loading and execution and **were not caught until the PNG reference
+#: comparison**. The binding table, not the series directory name, is authoritative for the
+#: storage form. In an f16 series only the fake-quant targets become f16 (norm / bias and the like
+#: stay f32), so "contains f16" is required. The tokenizers (JSON) are not listed here.
+#: An i4 series is **mixed** (f32 + i8 + i4 together), so **i4 is required** — {@link
+#: assert_storage} checks "the required vocabulary is in the binding table", so requiring i8 would
+#: let an i8 series pass into the i4 slot and the mix-up would stay silent (the same discipline as
+#: sbv2's i4 preset).
 STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "text_encoder": "f16",
     "text_conditioner": "f16",
@@ -469,19 +511,23 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "vae_decoder_bf16": "bf16",
 }
 
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
-#: 存在検査だけでは**圧縮席どうしの取り違え**が素通りする — i4 系列は混成で、既定格納が i8
-#: （`anima/export.py` の `BASE_WEIGHT_DTYPES`）なので **必ず i8 を含む**。したがって i4 系列を
-#: `transformer_i8` へ挿し込む取り違えは「i8 を含む」を満たしてしまい、組み立ても verify_dist も
-#: ロードも通る。実害は既定 quant `f16+dit8-a8-attn8-s16` に出る: 宣言した `linearCompute: "a8"`
-#: の述語は `c285f97` 以降 i4 常駐も受ける（ADR 0076）ので、常駐が i4 だと fail loudly せず
-#: **w4a8 の数値契約**（group 部分縮約）で走る — ADR 0076 決定 6 が「画が荒れるので席に載せない」
-#: と決めた構成が、席名が int8 を名乗ったまま既定席で沈黙して出る。
-#: MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと 4 本目の系列が生えた日に、名指ししなかった
-#: ほうが黙って素通りする — irodori と同じ規律）。f16 席は i8 / i4 の不在で二重に締まる。
-#: MUST: bf16 系列（ADR 0131）と他の系列の取り違えも両向きで落とす — bf16 系列は bf16 + f32、
-#: f16 系列は f16 + f32 で、どちらも相手の要求を満たさないが、要求だけに頼ると「両方を含む混成」
-#: が生えた日に沈黙する。bf16 の役割は f16 / i8 / i4 を、他の役割は bf16 を禁じる。
+#: The storage vocabulary that **must not appear** in each role's binding table ({@link
+#: assert_storage_absent}). A presence check alone lets **a mix-up between compressed slots** pass —
+#: an i4 series is mixed and its default storage is i8 (`BASE_WEIGHT_DTYPES` in `anima/export.py`),
+#: so it **always contains i8**. Plugging an i4 series into `transformer_i8` by mistake therefore
+#: satisfies "contains i8" and passes assembly, verify_dist and loading. The real damage shows up
+#: in the default quant `f16+dit8-a8-attn8-s16`: since `c285f97` the predicate of the declared
+#: `linearCompute: "a8"` accepts resident i4 too (ADR 0076), so with resident i4 it does not fail
+#: loudly and runs on **the numeric contract of w4a8** (partial group reductions) — the
+#: configuration ADR 0076 decision 6 decided "not to put in a preset because the images degrade"
+#: ships silently in the default preset while the preset name still says int8.
+#: MUST: hold the prohibitions **as a set per role** (with only one, the day a 4th series appears
+#: the one not named passes silently — the same discipline as irodori). The f16 slot is closed
+#: twice, by the absence of i8 and of i4.
+#: MUST: mix-ups between the bf16 series (ADR 0131) and the other series fail in both directions
+#: too — a bf16 series is bf16 + f32 and an f16 series f16 + f32, so neither satisfies the other's
+#: requirement, but relying on the requirement alone goes silent the day "a mix containing both"
+#: appears. The bf16 roles forbid f16 / i8 / i4, and the other roles forbid bf16.
 ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "text_encoder": ("bf16",),
     "text_conditioner": ("bf16",),
@@ -495,21 +541,24 @@ ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "vae_decoder_bf16": ("f16", "i8", "i4"),
 }
 
-#: グラフを持つ部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1 —
-#: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。
+#: Names of the components that carry a graph = the keys of the manifest's weights = **the
+#: container's graph names** (container-v1 §2.1 — the runtime looks them up by name with
+#: `prepareContainer(opened, <weights key>)`).
 #:
-#: MUST: 書き手（`anima/export.py` の `TARGET_*`）はここから引く。Anima は系列ディレクトリ名
-#: が同じ綴りになるが、それは**規約であって導出ではない** — 書き手は作業席
-#: （`<部品>.staging/`）へ書くので、ディレクトリから導くと全系列のグラフ名が作業席の名前に
-#: なる（`karume.pipeline._assert_graph_name` の MUST）。
+#: MUST: the writer (`TARGET_*` in `anima/export.py`) reads them from here. For Anima the series
+#: directory names have the same spelling, but that is **a convention, not a derivation** — the
+#: writer writes into a staging directory (`<component>.staging/`), so deriving from the directory
+#: would give every series the staging directory's name as its graph name (the MUST of
+#: `karume.pipeline._assert_graph_name`).
 ANIMA_TEXT_ENCODER_ROLE = "text_encoder"
 ANIMA_TEXT_CONDITIONER_ROLE = "text_conditioner"
 ANIMA_TRANSFORMER_ROLE = "transformer"
 ANIMA_VAE_DECODER_ROLE = "vae_decoder"
 
-#: weights の宣言（dtype ラベル → 役割名）。ラベルは**格納 dtype 語彙**で、
-#: {@link STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`i4` は**混成の系列**を
-#: 指すラベルで、実体は「i4 適格な重みが i4 group32・残りは i8」（`anima/export.py`）。
+#: Declaration of the weights (dtype label → role name). The labels are **storage dtype
+#: vocabulary**, 1:1 with the storage forms {@link STORAGE_REQUIREMENTS} requires (ADR 0041 §3).
+#: `i4` is a label for **a mixed series**: "i4-eligible weights in i4 group32, the rest i8"
+#: (`anima/export.py`).
 ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     ANIMA_TEXT_ENCODER_ROLE: {
         "f16": WeightFiles("text_encoder"),
@@ -531,87 +580,99 @@ ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     },
 }
 
-#: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3）。
+#: Declaration of the assets (unconditional files that do not depend on the quant choice — ADR
+#: 0041 §3).
 ANIMA_ASSETS: Mapping[str, str] = {"tokenizer": "tokenizer", "tokenizer_2": "tokenizer_2"}
 
 
 @dataclass(frozen=True)
 class AnimaModel:
-    """モデル 1 つぶんの Anima 固有の事実（系列の引き方・席の範囲・既定値の違い）。
+    """The Anima-specific facts of one model (how its series are picked, its presets, its defaults).
 
-    MUST: **LoRA の有無を bool ではなく sha256 で持つ**。「焼いていない」と「焼いたが記録が
-    無い」は資産からは区別できないので、期待値を持たない側（`None`）は**記録が無いこと**を
-    積極的に検査する（{@link assert_lora_provenance}）。片方向の検査だけだと、turbo の系列を
-    素モデルの席へ挿し込む取り違えが素通りする。
+    MUST: **hold the LoRA as a sha256, not a bool**. "Not baked" and "baked but not recorded" cannot
+    be told apart from the assets, so the side without an expected value (`None`) actively checks
+    **that there is no record** ({@link assert_lora_provenance}). With a check in one direction
+    only, plugging a turbo series into the slot of a plain model would pass.
     """
 
-    #: 焼き込んだ LoRA の sha256。`None` = 素（焼いていない）。
+    #: sha256 of the baked-in LoRA. `None` = plain (nothing baked in).
     lora_sha256: str | None
-    #: transformer の格納 dtype ラベル。ここに無い格納形の系列は**要求も宣言もしない**
-    #: （2026-08-23・波 J-4 ②: 校正条件を {@link pipeline_config} から導く形にした
-    #: 〈`anima.calib.calib_conditions`〉ので、i4 席は turbo 専用ではなくなった）。
-    #: text stack の格納ラベル（{@link ANIMA_TEXT_STACK_SERIES} のキー）もここから引く — `bf16` を
-    #: 持つモデルは text stack 3 役の bf16 系列も要求・宣言する（忠実プリセットは 4 役とも bf16）。
+    #: The transformer's storage dtype labels. Series of a storage form not listed here are
+    #: **neither required nor declared** (2026-08-23, run J-4 ②: the calibration conditions are now
+    #: derived from {@link pipeline_config} (`anima.calib.calib_conditions`), so the i4 preset is no
+    #: longer turbo-only). The text stack's storage labels (keys of
+    #: {@link ANIMA_TEXT_STACK_SERIES}) are read from here too — a model with `bf16` also requires
+    #: and declares the bf16 series of the 3 text-stack roles (the original-weights preset is bf16
+    #: for all 4 roles).
     storages: tuple[str, ...]
-    #: text_conditioner を自前で持つか（f16 の話 — bf16 は {@link text_conditioner_series} が
-    #: 決める）。
-    #: `False` = 素の共有系列（{@link ANIMA_BASE_SERIES}）。
-    #: 第三者 fine-tune は DiT だけでなく llm_adapter（= text_conditioner）も焼き直している
-    #: ので、共有すると**別のモデルのテキスト条件付け**で走る（絵だけが静かにずれる）。
+    #: Whether the model has its own text_conditioner (for f16 — bf16 is decided by
+    #: {@link text_conditioner_series}).
+    #: `False` = the plain shared series ({@link ANIMA_BASE_SERIES}).
+    #: Third-party fine-tunes retrain not only the DiT but also the llm_adapter (=
+    #: text_conditioner), so sharing would run with **another model's text conditioning** (only the
+    #: images silently drift).
     own_text_conditioner: bool
-    #: manifest の `pipelineConfig`（step / guidance がモデルごとに違う）。**i4 の校正条件も
-    #: ここから導く**（`anima.calib.calib_conditions`）— 校正が見る sigma 列と CFG 分岐を配布
-    #: 実行時の条件そのものにするため、export 側に写しを置かない。ここを動かすと次の i4
-    #: export の丸め先も動く。
+    #: The manifest's `pipelineConfig` (steps / guidance differ per model). **The i4 calibration
+    #: conditions are derived from it too** (`anima.calib.calib_conditions`) — so that the sigma
+    #: sequence and the CFG branches the calibration sees are exactly the distribution's runtime
+    #: conditions, the export side keeps no copy. Moving this also moves the rounding targets of the
+    #: next i4 export.
     pipeline_config: Mapping[str, Any]
-    #: i4 系列に要求する丸め方式（`calib_provenance.json` の `method`）。配布は 1 通りだけ
-    #: （{@link CALIB_SHIPPABLE_METHOD}）で、**動かすのは視認評価専用の席だけ**
-    #: （`anima.eval_dist` — 量子化感度の実験変種を手元で組んで見るための spec）。既定を
-    #: 定数のままにしてあるので、配布経路の 4 モデルはこの欄を 1 度も綴らない。
+    #: The rounding method required of an i4 series (`method` of `calib_provenance.json`). The
+    #: distribution has only one ({@link CALIB_SHIPPABLE_METHOD}), and **only the visual-evaluation
+    #: slot changes it** (`anima.eval_dist` — a spec for assembling and viewing the
+    #: quantization-sensitivity experiment variants locally). The default stays the constant, so the
+    #: 4 models on the distribution path never spell out this field.
     calib_method: str = CALIB_SHIPPABLE_METHOD
 
 
-#: モデル名 → 事実。リポの分かれ目でもある（{@link OFFICIAL_MODELS} / {@link EXTRA_MODELS}）。
+#: Model name → facts. Also where the repositories split ({@link OFFICIAL_MODELS} / {@link
+#: EXTRA_MODELS}).
 #:
-#: NOTE: 全モデルが **"i4" を持たない**（席とファイルが {@link anima_quants} /
-#: {@link anima_weights} の導出で両方消える）— i4 の視認裁定（2026-08-24）で構図分岐が大きく
-#: 配布スキップ、0.5.0 の上げ直し（2026-08-25）でも除外の裁定。旧 fused turbo だけが持って
-#: いた i4 席も公式 checkpoint 化（ADR 0087）の際に持ち越さない裁定（2026-09-01）。復活条件 =
-#: adaLN 関連で出ていた量子化感度の高い部分の特定（旧系列は outputs/series/ の *-i4-dyn に
-#: 温存 — 校正済み退避の series-archive は 2026-08-30 の掃除裁定で削除済み）。
+#: NOTE: **no model has "i4"** (both the presets and the files disappear through the derivation of
+#: {@link anima_quants} / {@link anima_weights}) — the visual verdict on i4 (2026-08-24) found
+#: large composition divergence and skipped distribution, and the re-upload for 0.5.0 (2026-08-25)
+#: ruled it out again. The i4 preset only the old fused turbo had was not carried over to the
+#: official checkpoints either (ADR 0087; ruling of 2026-09-01). Condition for bringing it back =
+#: identifying the quantization-sensitive parts around adaLN (the old series are kept in
+#: outputs/series/ as *-i4-dyn — the calibrated backup series-archive was deleted by the clean-up
+#: ruling of 2026-08-30).
 ANIMA_MODELS: Mapping[str, AnimaModel] = {
-    # 公式 Turbo（蒸留済み checkpoint そのもの — 旧 anima-turbo の LoRA 焼き込みは不要に
-    # なった）。lora_sha256=None は「焼いていない」の積極検査で、lora_provenance.json を持つ
-    # 旧 fused 系列の挿し込みを落とす。text_conditioner は base と f16 丸め後ビット同一の実測
-    # （2026-09-01）で f16 は共有系列を使う（bf16 は上流ビットが 60 / 118 テンソルで違う —
-    # 2026-10-17 実測・最大 2.98e-8 の近ゼロ要素のみ — ので自前の系列:
-    # {@link text_conditioner_series}）。
-    # 旧 fused turbo が持っていた i4 席は**持ち越さない**
-    # （2026-09-01 ユーザー裁定 — 全モデル i4 なしに揃う。復活レバーは素版と同じ
-    # `anima.eval_dist`）。
+    # Official Turbo (the distilled checkpoint itself — the old anima-turbo's LoRA baking is no
+    # longer needed). lora_sha256=None is the active "not baked" check and rejects plugging in an
+    # old fused series that carries lora_provenance.json. The text_conditioner measured
+    # bit-identical to base after f16 rounding (2026-09-01), so f16 uses the shared series (in bf16
+    # the upstream bits differ in 60 / 118 tensors — measured 2026-10-17, only near-zero elements up
+    # to 2.98e-8 — so it has its own series: {@link text_conditioner_series}).
+    # The i4 preset the old fused turbo had is **not carried over** (maintainer ruling of
+    # 2026-09-01 — every model is without i4; the lever to bring it back is `anima.eval_dist`, as
+    # for the plain model).
     ANIMA_TURBO_MODEL_NAME: AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8", "bf16"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
-    # 忠実プリセット `bf16`（ADR 0131 決定 3・追記 2026-10-17）は全モデルが持つ。
+    # Every model has the original-weights preset `bf16` (ADR 0131 decision 3, addendum
+    # 2026-10-17).
     ANIMA_BASE_MODEL_NAME: AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8", "bf16"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
-    # 公式 Aesthetic。i4 席を持たないのは素版と同じ裁定線（上の NOTE — 全モデル i4 なし）。
+    # Official Aesthetic. No i4 preset, on the same ruling as the plain model (the NOTE above — no
+    # model has i4).
     ANIMA_AESTHETIC_MODEL_NAME: AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8", "bf16"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
     ),
-    # v1.0 世代の公式 2 変種も並行配布（2026-09-01 ユーザー裁定 — バージョン間で好みが
-    # 分かれる系なので旧版へ戻る先を残す = ADR 0077 の動機そのもの）。conditioner は
-    # どちらも base と f16 丸め後 64/118 テンソル差の実測（2026-09-01）で自前。
+    # The 2 official variants of the v1.0 generation are distributed alongside (maintainer ruling
+    # of 2026-09-01 — preferences between versions differ for this family, so a way back to the old
+    # version is kept = exactly the motivation of ADR 0077). Both have their own conditioner,
+    # measured to differ from base in 64/118 tensors after f16 rounding (2026-09-01).
     "anima-turbo-v1.0": AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8", "bf16"),
@@ -638,11 +699,13 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
     ),
 }
 
-#: リポごとの受理集合。**Pipeline が違えば直下の法的テキスト（NOTICE）も違う**ので、
-#: 取り違えて組むと「改変告知が中身と食い違うリポ」が黙って出来上がる — 計画段で落とす。
-#: 分割の軸は**公式 / 追加学習**（2026-09-01 裁定 — ADR 0087）: 公式リポ（karume-anima）は
-#: CircleStone の 5 変種同居・既定 = Turbo、追加学習リポ（karume-anima-extra）は第三者
-#: fine-tune で text stack を公式リポへ越境参照する。
+#: The accepted set per repository. **A different Pipeline means a different legal text (NOTICE) at
+#: the root**, so assembling with the wrong one silently yields "a repository whose modification
+#: notice contradicts its contents" — it fails at the planning stage. The split is **official /
+#: extra** (ruling of 2026-09-01 — ADR 0087): the official repository (karume-anima) holds
+#: CircleStone's 5 variants with Turbo as the default, and the extra repository
+#: (karume-anima-extra) holds third-party fine-tunes and references the text stack in the official
+#: repository across repositories.
 OFFICIAL_MODELS: tuple[str, ...] = (
     ANIMA_TURBO_MODEL_NAME,
     ANIMA_BASE_MODEL_NAME,
@@ -655,30 +718,33 @@ EXTRA_MODELS: tuple[str, ...] = ("anima-wai-v1.0", "anima-copycat-20260610")
 
 @dataclass(frozen=True)
 class AnimaSources:
-    """組み立ての入力となる系列ディレクトリ群。
+    """The series directories that are the inputs of the assembly.
 
-    テキスト経路と VAE は DiT の格納 dtype に依らないので、text stack の格納ラベルごとに系列
-    1 本を共有する（ADR 0019 — f16 は全モデル・bf16 は忠実プリセットを持つモデルだけ）。
-    transformer は f16 / i8 / i4 / bf16 の系列に分かれる。
+    The text path and the VAE do not depend on the DiT's storage dtype, so one series is shared per
+    text-stack storage label (ADR 0019 — f16 for every model, bf16 only for the models with the
+    original-weights preset). The transformer splits into f16 / i8 / i4 / bf16 series.
     """
 
-    #: 格納 dtype ラベル → transformer 系列（{@link AnimaModel.storages} の順）。
+    #: Storage dtype label → transformer series (in the order of {@link AnimaModel.storages}).
     transformer: Mapping[str, Path]
-    #: text stack の格納ラベル → text_encoder / VAE を持つ系列（{@link ANIMA_TEXT_STACK_SERIES}）。
+    #: Text-stack storage label → the series holding text_encoder / VAE
+    #: ({@link ANIMA_TEXT_STACK_SERIES}).
     base: Mapping[str, Path]
-    #: 同・text_conditioner を持つ系列（素は {@link base} と同じ・キーも同じ）。
+    #: Likewise, the series holding text_conditioner (for a plain model the same as {@link base},
+    #: with the same keys).
     text_conditioner: Mapping[str, Path]
     tokenizers: Path
 
 
 def text_conditioner_series(model: str, spec: AnimaModel, storage: str) -> str:
-    """text_conditioner の系列名（格納ラベルごと）。
+    """The text_conditioner's series name (per storage label).
 
-    f16 は {@link AnimaModel.own_text_conditioner} が決める（f16 丸め後にビット同一なら共有系列）。
-    bf16 は**上流のビット列を保つ**ので base 以外は常に自前の系列 — turbo-v1.1 の llm_adapter は
-    base と f16 丸め後は同一でも、bf16 では 60 / 118 テンソルが違う（2026-10-17 実測・最大 2.98e-8・
-    近ゼロ要素のみ）。配布の組み立てはバイトが同じ部品だけを `shared/` へ畳むので、共有の最適化は
-    ここで決めなくても失われない。
+    For f16 it is decided by {@link AnimaModel.own_text_conditioner} (the shared series if
+    bit-identical after f16 rounding). bf16 **keeps the upstream bits**, so every model but base has
+    its own series — turbo-v1.1's llm_adapter is identical to base after f16 rounding, but in bf16
+    60 / 118 tensors differ (measured 2026-10-17, max 2.98e-8, only near-zero elements). The
+    distribution assembly folds only byte-identical components into `shared/`, so the sharing
+    optimisation is not lost even though it is not decided here.
     """
     if storage == "bf16":
         if model == ANIMA_BASE_MODEL_NAME:
@@ -688,12 +754,12 @@ def text_conditioner_series(model: str, spec: AnimaModel, storage: str) -> str:
 
 
 def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> AnimaSources:
-    """系列の親ディレクトリ（`outputs/series/`）から 1 モデルぶんの系列を引く。
+    """Picks one model's series from the series parent directory (`outputs/series/`).
 
-    モデル名は transformer の系列と、自前の text_conditioner を持つモデルの系列にだけ掛かる
-    （{@link text_conditioner_series} — bf16 は base 以外のどのモデルでも自前）。text_encoder /
-    VAE / tokenizer は上流の fine-tune が触らない部分なので、どのモデルでも格納ラベルごとの
-    共有系列 1 本から引く。
+    The model name applies only to the transformer series and to the series of models with their own
+    text_conditioner ({@link text_conditioner_series} — in bf16 every model but base has its own).
+    text_encoder / VAE / tokenizers are parts upstream fine-tunes do not touch, so for every model
+    they come from the one shared series per storage label.
     """
     spec = anima_model(model)
     text_storages = [storage for storage in spec.storages if storage in ANIMA_TEXT_STACK_SERIES]
@@ -709,32 +775,35 @@ def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> Anima
 
 
 def anima_model(model: str) -> AnimaModel:
-    """モデル名から事実を引く（知らない名前は選択肢を並べて落とす）。"""
+    """Looks up the facts by model name (an unknown name fails with the choices listed)."""
     spec = ANIMA_MODELS.get(model)
     if spec is None:
         choices = ", ".join(ANIMA_MODELS)
-        raise DistError(f"知らない Anima のモデル名: {model!r}（選択肢: {choices}）")
+        raise DistError(f"Unknown Anima model name: {model!r} (choices: {choices})")
     return spec
 
 
 def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
-    """格納 dtype 別の transformer 系列（**系列横断の突合はこの 1 本から引く** MUST）。
+    """The transformer series per storage dtype (**cross-series comparisons MUST read this list**).
 
-    rope 素表のバイト同一検査と LoRA 帰属の突合はどちらも「全系列を舐める」検査で、列挙を
-    2 箇所に持つと格納席が増えた日に片方だけ更新される — 網から漏れた系列は検査を素通りし、
-    どちらの綻びも実行時には沈黙する（幾何違いは絵だけ壊れ、帰属違いは README だけが嘘になる）。
+    The byte-identity check of the raw rope tables and the LoRA attribution comparison are both
+    checks that "walk every series", and keeping the enumeration in 2 places means that the day a
+    storage slot is added only one gets updated — a series that slipped through the net passes the
+    check, and either flaw is silent at runtime (a geometry mismatch breaks only the images, an
+    attribution mismatch makes only the README false).
     """
     return tuple(sources.transformer.values())
 
 
 def assert_shared_rope_base(sources: AnimaSources) -> None:
-    """全 transformer 系列の rope 素表がバイト同一であることを確かめる。
+    """Checks that the raw rope tables of every transformer series are byte-identical.
 
-    MUST: 素表は容器の**資産** `rope_base`（ADR 0109 決定 4）として f16 / i8 / i4 の各系列に
-    入る。全てのバイト同一を sha256 で確かめる — 食い違ったまま配ると、どれか 1 つの quant が
-    「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
-    `karume/4` では 1 本のファイルへ畳んでいたので「どれを配るか」の選択でもあったが、容器
-    ごとに 1 本入る今は**一致の検査だけ**が残る。
+    MUST: the raw table goes into each of the f16 / i8 / i4 series as the container's **asset**
+    `rope_base` (ADR 0109 decision 4). Byte identity across all of them is checked with sha256 —
+    shipping them mismatched would make one of the quants "run with rope tables of a different
+    geometry", passing loading and execution while only the images silently break. In `karume/4`
+    they were folded into one file, so this was also the choice of "which one to ship"; now that
+    each container holds its own, **only the equality check** remains.
     """
     containers = [series / "transformer" / "model.krm" for series in transformer_series(sources)]
     for path in containers:
@@ -743,18 +812,19 @@ def assert_shared_rope_base(sources: AnimaSources) -> None:
     if len(set(digests.values())) != 1:
         listing = "\n".join(f"  {digest}  {path}" for path, digest in digests.items())
         raise DistError(
-            f"資産 '{ROPE_BASE_ASSET}' が系列間でバイト同一でない — 同じ幾何で配れない。"
-            f"どちらが正かはここでは決められないので組み立てを止める:\n{listing}"
+            f"Asset '{ROPE_BASE_ASSET}' is not byte-identical across the series — they cannot"
+            " ship with the same geometry. Which one is right cannot be decided here, so the"
+            f" assembly stops:\n{listing}"
         )
 
 
 def _rope_base_of(path: Path) -> bytes:
-    """`rope_base` 資産を読む（読み手の例外を**組み立ての語彙**へ翻訳する）。
+    """Reads the `rope_base` asset (translating the reader's exception into **assembly terms**).
 
-    MUST: 診断は `DistError` で出す。`rope_base` を持つのは `--dit-graph dyn` の系列だけなので、
-    静的系列を transformer 席へ指した運用事故がここへ来る — 読み手側の例外をそのまま上げると、
-    組み立ての失敗が「容器読みの不具合」に見える（`assert_storage` が `ContainerFormatError` を
-    翻訳しているのと同じ流儀）。
+    MUST: the diagnostic is a `DistError`. Only `--dit-graph dyn` series carry `rope_base`, so the
+    operational mistake of pointing the transformer slot at a static series ends up here — raising
+    the reader's exception as is would make an assembly failure look like "a bug in container
+    reading" (the same approach as `assert_storage` translating `ContainerFormatError`).
     """
     try:
         return read_asset(path, ROPE_BASE_ASSET)
@@ -763,25 +833,27 @@ def _rope_base_of(path: Path) -> bytes:
 
 
 def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
-    """transformer 系列と text_conditioner 系列が記録した LoRA の sha256 が、モデルの宣言と
-    一致することを確かめる。
+    """Checks that the LoRA sha256 recorded by the transformer and text_conditioner series
+    matches the model's declaration.
 
-    MUST: モデルの宣言（{@link AnimaModel} の `lora_sha256`）が「どの LoRA を焼いた配布物か」の
-    唯一の記録なのに、融合後の重みからは焼いた LoRA を復元できない。突き合わせが無いと、
-    LoRA を差し替えて再エクスポートしても古い / 誤った sha256 のまま組み上がる — 値は 64 桁
-    hex として形式が妥当なので `verify_dist` の構造検査も通り、**沈黙する**。「別々の台本が持つ同じ
-    事実は組み立て時に必ず突き合わせる」（rope_base のバイト同一検査と同じ規律）。
+    MUST: the model's declaration (`lora_sha256` of {@link AnimaModel}) is the only record of
+    "which LoRA this distribution has baked in", yet the baked LoRA cannot be recovered from the
+    fused weights. Without the comparison, re-exporting with a replaced LoRA would still assemble
+    with the old / wrong sha256 — the value is well-formed 64-digit hex, so it passes the structural
+    checks of `verify_dist` and **stays silent**. "The same fact held by separate scripts is always
+    compared at assembly time" (the same discipline as the byte-identity check of rope_base).
 
-    MUST: `expected is None`（素のモデル）では**記録が無いことを検査する**。融合済みの重みと
-    素の重みは資産の形が 1 バイトも変わらないので、turbo の系列を素モデルの席へ挿し込む
-    取り違えは他のどの検査にも掛からない。書き手（`anima/export.py`）は LoRA を焼かなかった
-    ターゲットの記録を消す（全域関数）ので、**記録の不在が「焼いていない」の証跡**になる。
+    MUST: with `expected is None` (a plain model) **check that there is no record**. Fused and
+    plain weights do not differ by a single byte in the form of the assets, so plugging a turbo
+    series into a plain model's slot is caught by no other check. The writer (`anima/export.py`)
+    deletes the record of every target it did not bake a LoRA into (a total function), so **the
+    absence of the record is the evidence of "not baked"**.
 
-    MUST: 書き手は `LORA_PREFIXES` の 2 ターゲット（transformer / text_conditioner）に焼いて
-    記録を残すので、text_conditioner 系列（共有の {@link ANIMA_BASE_SERIES} と自前の
-    `<model>-f16`）の記録も同じ期待値で見る。網が transformer だけだと、LoRA を焼いた
-    conditioner 系列を配布席へ挿す取り違えが素通りし、`anima-f16` の「LoRA 無し」の MUST が
-    誰にも検査されない。
+    MUST: the writer bakes into and records for the 2 targets of `LORA_PREFIXES` (transformer /
+    text_conditioner), so the records of the text_conditioner series (the shared {@link
+    ANIMA_BASE_SERIES} and a model's own `<model>-f16`) are checked against the same expected value.
+    If the net covered only the transformer, plugging a conditioner series with a baked LoRA into a
+    distribution slot would pass, and nobody would check the "no LoRA" MUST of `anima-f16`.
     """
     records = [
         series / "transformer" / LORA_PROVENANCE_FILE for series in transformer_series(sources)
@@ -794,60 +866,67 @@ def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
         if expected is None:
             if path.is_file():
                 raise DistError(
-                    f"LoRA を焼いていないモデルの席に、焼いた記録のある系列が来ている: {path}"
-                    "（`--lora` を付けずに再エクスポートすると記録は消える）"
+                    "The slot of a model without a baked LoRA received a series that carries a"
+                    f" baking record: {path}"
+                    " (re-exporting without `--lora` removes the record)"
                 )
             continue
         if not path.is_file():
             raise DistError(
-                f"焼き込んだ LoRA の記録が無い: {path}"
-                "（`python -m anima.export --lora …` で再エクスポートすると書かれる）"
+                f"No record of the baked-in LoRA: {path}"
+                " (re-exporting with `python -m anima.export --lora …` writes it)"
             )
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as cause:
-            raise DistError(f"LoRA の記録を解析できない: {path} — {cause}") from cause
+            raise DistError(f"Cannot parse the LoRA record: {path} — {cause}") from cause
         digest = record.get("sha256") if isinstance(record, dict) else None
         if digest != expected:
             raise DistError(
-                f"焼き込んだ LoRA がカードの宣言と違う: {path} は {digest!r}、"
-                f"anima/card.py は {expected!r} — どちらが正かはここでは決められない"
+                f"The baked-in LoRA differs from the card's declaration: {path} has {digest!r},"
+                f" anima/card.py has {expected!r} — which one is right cannot be decided here"
             )
 
 
 def assert_calib_provenance(sources: AnimaSources, spec: AnimaModel) -> None:
-    """i4 系列が**このモデルの条件で・配布して良い校正**（GPTQ × 下限以上の予算 × モデル別の
-    step / CFG）で丸められたことを、書き出し側の記録で確かめる。
+    """Checks from the writer's record that the i4 series was rounded **under this model's
+    conditions and with a calibration allowed for distribution** (GPTQ × a budget at or above the
+    floor × the model's steps / CFG).
 
-    MUST: 校正の方式も予算も条件も格納形を 1 バイトも変えない
-    （`research/2026-08-21-anima-i4-seat-speed.md` §6 — ファイルサイズは RTN 版とバイト単位で
-    同じ）。したがって `verify_dist` の構造検査もヘッダ dtype 検査も**素通りする**。`--no-calib`
-    は smoke 用の opt-out なのに、その生成物が配布へ紛れても資産からは判別できず、出るのは
-    「全体的にぼやけた」絵だけ — LoRA 帰属（{@link assert_lora_provenance}）と同じ「別々の台本が
-    持つ同じ事実は組み立て時に必ず突き合わせる」規律をここにも敷く。
+    MUST: neither the calibration method nor its budget nor its conditions change a single byte of
+    the storage form (`research/2026-08-21-anima-i4-seat-speed.md` §6 — the file size is identical
+    to the RTN version byte for byte). The structural checks of `verify_dist` and the header dtype
+    check therefore **pass it**. `--no-calib` is a smoke-run opt-out, yet if its output slipped
+    into a distribution it could not be told from the assets, and all that shows is "blurry overall"
+    images — the same discipline as the LoRA attribution ({@link assert_lora_provenance}), "the
+    same fact held by separate scripts is always compared at assembly time", applies here too.
 
-    MUST: **`spec` を受け取って条件まで突き合わせる**（要求する丸め方式も {@link
-    AnimaModel.calib_method} から引く — 配布は 1 通りで、動くのは視認評価専用の席だけ）。
-    `anima.export` の `--model` は校正条件を
-    引くためだけのノブ（LoRA 焼き込みのような格納バイトへの影響が無い）なので、素版の重みを
-    `--model anima-turbo-v1.1` で焼いた資産は「正しい素版 i4」に見える — 校正だけが turbo の
-    8 step・CFG 1 で回っている。条件はモデルの `pipeline_config` から導かれる
-    （`anima.calib.calib_conditions`）ので、同じ 1 箇所から引き直せば突き合わせられる。
+    MUST: **take `spec` and compare down to the conditions** (the required rounding method is also
+    read from {@link AnimaModel.calib_method} — the distribution has one, and only the
+    visual-evaluation slot changes it). `--model` of `anima.export` is a knob only for looking up
+    the calibration conditions (it does not affect the stored bytes the way LoRA baking does), so
+    assets built from the plain weights with `--model anima-turbo-v1.1` look like "a correct plain
+    i4" — only the calibration ran with turbo's 8 steps, CFG 1. The conditions are derived from the
+    model's `pipeline_config` (`anima.calib.calib_conditions`), so re-reading them from the same
+    single place makes the comparison possible.
 
-    判定そのものは `_shared.calib_provenance` が正本（irodori の 2 つの読み手と同じ 1 実装）。
+    The decision itself lives in `_shared.calib_provenance` (the same single implementation as
+    irodori's 2 readers).
     """
     from .calib_prompts import DEFAULT_CALIB_PROMPTS
 
     path = sources.transformer["i4"] / "transformer" / CALIB_PROVENANCE_FILE
     if not path.is_file():
         raise DistError(
-            f"i4 系列の校正条件の記録が無い: {path}"
-            "（`python -m anima.export --dtype i4` で再エクスポートすると書かれる）"
+            f"The i4 series has no record of its calibration conditions: {path}"
+            " (re-exporting with `python -m anima.export --dtype i4` writes it)"
         )
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as cause:
-        raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+        raise DistError(
+            f"Cannot parse the record of the calibration conditions: {path} — {cause}"
+        ) from cause
     defaults = spec.pipeline_config["defaults"]
     complaint = calib_complaint(
         record,
@@ -857,16 +936,18 @@ def assert_calib_provenance(sources: AnimaSources, spec: AnimaModel) -> None:
     )
     if complaint is not None:
         raise DistError(
-            f"i4 系列の校正条件が要求と食い違う: {path} は{complaint}"
-            " — `--no-calib` / smoke 予算 / 別モデルの条件 / 役割別の実験変種で焼いた生成物は"
-            "配布に使わない"
+            f"The calibration conditions of the i4 series do not meet the requirement: {path}:"
+            f" {complaint}"
+            " — output baked with `--no-calib` / a smoke budget / another model's conditions / a"
+            " per-role experiment variant is not used for distribution"
         )
 
 
 def anima_placements(sources: AnimaSources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link OUTPUT_PATHS} が持つ。
+    """Role name → source file. The output paths are held by {@link OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（`io.*.safetensors` を落とす仕掛けはこれで足りる）。
+    Anything not in this table does not go into the output (this is all it takes to drop
+    `io.*.safetensors`).
     """
     placements: dict[str, Path] = {}
     for storage, series in sources.base.items():
@@ -887,10 +968,10 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
 
 
 def anima_weights(spec: AnimaModel) -> Mapping[str, Mapping[str, WeightFiles]]:
-    """モデルが持つ格納形だけへ絞った weights 宣言（席の無い dtype ラベルは載せない）。
+    """The weights declaration narrowed to the model's storage forms (no labels without a preset).
 
-    絞りは全役割に同じ 1 規則で掛かる — text stack の `f16` は全モデルの storages に在るので
-    残り、`bf16` は忠実プリセットを持つモデルにだけ残る。
+    One rule narrows every role — the text stack's `f16` is in every model's storages and stays,
+    and `bf16` stays only for the models with the original-weights preset.
     """
     return {
         role: {label: files for label, files in labels.items() if label in spec.storages}
@@ -899,20 +980,27 @@ def anima_weights(spec: AnimaModel) -> Mapping[str, Mapping[str, WeightFiles]]:
 
 
 def seat_base_storage(name: str) -> str:
-    """席名の `<格納>` 部（最初の `+` / `-` の前 — ADR 0074 の文法で全役割に共通の基底格納）。"""
+    """The `<storage>` part of a preset name (before the first `+` / `-`).
+
+    In ADR 0074's grammar this is the base storage shared by every role.
+    """
     return re.split(r"[+-]", name, maxsplit=1)[0]
 
 
 def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
-    """モデルが持つ格納形で成立する quant 席だけへ絞り、表が名指ししない役割を埋める。
+    """Narrows to the quant presets the model's storage forms support; fills the unnamed roles.
 
-    MUST: 席の取捨は**宣言した格納形から導く**（席名の直書きリストを別に持たない）。2 箇所に
-    分けて持つと、格納形を増やした日に席だけが増えない / 減らした日に席だけが残る。
+    The roles filled are the ones the table does not name.
 
-    MUST: 名指しの無い役割は**席名の `<格納>`**（{@link seat_base_storage}）で埋める — text stack
-    が f16 / bf16 の 2 ラベルを持つモデルでは、core の {@link complete_quant_weights} が「複数ある
-    のに指定が無い」で落とす（既定を勝手に選ばない）ので、選ぶ根拠を席名の文法に置く。埋めた
-    ラベルが役割に無ければ、core が「dtype が無い」で落とす。
+    MUST: which presets to keep is **derived from the declared storage forms** (no separate
+    hard-coded list of preset names). Holding it in 2 places means that the day a storage form is
+    added the presets do not grow / the day one is removed the presets remain.
+
+    MUST: a role that is not named is filled with **the `<storage>` of the preset name** ({@link
+    seat_base_storage}) — for a model whose text stack has the 2 labels f16 / bf16, core's {@link
+    complete_quant_weights} fails with "several exist but none is specified" (it does not pick a
+    default on its own), so the basis for the choice is the grammar of the preset name. If the
+    filled label does not exist for the role, core fails with "no such dtype".
     """
     weights = anima_weights(spec)
     return {
@@ -933,12 +1021,14 @@ def anima_plan(
     *,
     spec: AnimaModel | None = None,
 ) -> ModelPlan:
-    """Anima 1 モデルぶんの計画を組む（検査はここで全部済ませる — 1 バイトも書かない）。
+    """Builds the plan for one Anima model (all checks are done here — not a byte is written).
 
-    `spec` は**明示で差し替える席**（省略時はモデル名から引く = 配布経路）。差し替えるのは
-    視認評価専用の組み立て（`anima.eval_dist`）だけで、そちらは「素版に i4 席を戻し、要求する
-    丸め方式を実験変種の綴りにした」spec を渡す — 配布の受理集合（{@link ANIMA_MODELS}）を
-    実験のために動かさないための口で、逆向き（配布経路が spec を綴る）には使わない。
+    `spec` is **the slot for an explicit override** (when omitted it is looked up by model name =
+    the distribution path). Only the visual-evaluation assembly (`anima.eval_dist`) overrides it,
+    passing a spec that "puts the i4 preset back on the plain model and spells the required rounding
+    method as the experiment variant" — an entry point that keeps the distribution's accepted set
+    ({@link ANIMA_MODELS}) from moving for experiments, never used the other way round (the
+    distribution path spelling out a spec).
     """
     assert_model_name(model)
     spec = anima_model(model) if spec is None else spec
@@ -966,18 +1056,19 @@ def anima_plan(
 
 
 def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> ModelPlan:
-    """`--series` の親から Anima 1 モデルの計画を組む（CLI のディスパッチ先）。
+    """Builds the plan for one Anima model from the `--series` parent (the CLI dispatches here).
 
-    MUST: `allowed` は**その Pipeline のリポに入ってよいモデル**。Pipeline が違えばリポ直下の
-    NOTICE（改変告知）も違うので、取り違えて組むと「告知が中身と食い違うリポ」が黙って
-    出来上がる — manifest も verify_dist も構造としては正しいままなので、配ってからでないと
-    誰も気づけない。
+    MUST: `allowed` is **the models allowed in that Pipeline's repository**. A different Pipeline
+    means a different NOTICE (modification notice) at the repository root, so assembling with the
+    wrong one silently yields "a repository whose notice contradicts its contents" — the manifest
+    and verify_dist stay structurally correct, so nobody would notice until after distribution.
     """
     if model not in allowed:
         choices = ", ".join(allowed)
         raise DistError(
-            f"モデル {model!r} はこの pipeline のリポに入らない（入るのは: {choices}）— "
-            "リポ直下の改変告知が中身と食い違うので組み立てを止める"
+            f"Model {model!r} does not belong in this pipeline's repository (allowed: {choices})"
+            " — the modification notice at the repository root would contradict its contents, so"
+            " the assembly stops"
         )
     return anima_plan(anima_sources(series_dir, model), model)
 
@@ -1012,11 +1103,12 @@ def license_markdown() -> str:
 
 
 def root_files(notice: str) -> dict[str, str]:
-    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+    """The legal texts at the distribution repository's root (`karume.dist.Pipeline.root_files`).
 
-    ライセンス原文は recipe に置いた現物（{@link LICENSE_SOURCE_PATH}）を**逐語で**読む —
-    ここで整形や差し替えをすると §3(a) の「このライセンスのコピー」ではなくなる。改変告知
-    （`NOTICE.md`）だけがリポごとに違うので、そこだけ引数で受ける。
+    The original licence text is read **verbatim** from the file placed in the recipe ({@link
+    LICENSE_SOURCE_PATH}) — reformatting or replacing it here would make it no longer "a copy of
+    this licence" in the sense of §3(a). Only the modification notice (`NOTICE.md`) differs per
+    repository, so only it is taken as an argument.
     `LICENSE.md` carries the NVIDIA Open Model License Agreement after the CircleStone text
     ({@link license_markdown}).
     """
@@ -1026,25 +1118,29 @@ def root_files(notice: str) -> dict[str, str]:
     }
 
 
-#: 公式リポの配布名（`karume-` prefix はリポ名裁定 2026-08-09 — HF org の代わりの名前空間）。
+#: Distribution name of the official repository (the `karume-` prefix comes from the repository
+#: naming ruling of 2026-08-09 — a namespace in place of an HF org).
 OFFICIAL_REPO_NAME = "karume-anima"
 
-#: 追加学習リポの配布名。
+#: Distribution name of the extra repository.
 EXTRA_REPO_NAME = "karume-anima-extra"
 
 
 def _official_repo_name(_model: str) -> str:
-    """公式リポ名（ADR 0087 で 5 変種が 1 リポへ畳まれたのでモデル名を見ない）。
+    """The official repository name (the model name is ignored).
 
-    `Pipeline.repo_name` はカードの Usage 例に載る repo 名の正本（`karume.dist.resolve_repo`）で、
-    単一モデルを組んだときの既定の出力先も答える席。ここが `karume-<モデル名>` を返すと
-    `--out` 省略時の出力先とカードの Usage 例が実在しないリポ名になる。
+    ADR 0087 folded the 5 variants into one repository.
+
+    `Pipeline.repo_name` is the source of truth for the repository name in the card's Usage example
+    (`karume.dist.resolve_repo`), and it also answers the default output location when a single
+    model is assembled. If this returned `karume-<model name>`, the output location without `--out`
+    and the card's Usage example would name a repository that does not exist.
     """
     return OFFICIAL_REPO_NAME
 
 
 def _extra_repo_name(_model: str) -> str:
-    """追加学習リポ名（公式と同じく 1 リポ複数モデル）。"""
+    """The extra repository name (one repository with several models, like the official one)."""
     return EXTRA_REPO_NAME
 
 
@@ -1075,22 +1171,24 @@ def _extra_references(_model: str) -> tuple[CrossRepoReference, ...]:
     )
 
 
-#: `--pipeline anima` の 1 行（公式リポ karume-anima — CircleStone の 5 変種同居・既定 =
-#: Turbo〈上流 README の推奨・2026-09-01 裁定〉）。
+#: The entry for `--pipeline anima` (the official repository karume-anima — CircleStone's 5
+#: variants together, default = Turbo (upstream README's recommendation; ruling of 2026-09-01)).
 #:
-#: MUST: extra と**別の Pipeline**にする。`root_files` は Pipeline に固定で載る 1 組なので、
-#: 1 つに畳むと改変告知がどちらかのリポで嘘になる（§3(d)(i) の要件を落とす）。
+#: MUST: a **separate Pipeline** from extra. `root_files` is one fixed set per Pipeline, so folding
+#: them into one would make the modification notice false in one of the repositories (failing the
+#: requirement of §3(d)(i)).
 OFFICIAL_PIPELINE = Pipeline(
     default_model=ANIMA_TURBO_MODEL_NAME,
     repo_name=_official_repo_name,
     plan=lambda series_dir, model: anima_dist_plan(series_dir, model, OFFICIAL_MODELS),
     card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
-    # 上流ライセンスの再配布条件（§3）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
-    # よらず**ここで 1 回**。
+    # The upstream licence's redistribution terms (§3) apply per distribution repository, so the
+    # texts are read **once, here**, however many times the assembly runs.
     root_files=root_files(OFFICIAL_NOTICE_MARKDOWN),
 )
 
-#: `--pipeline anima-extra` の 1 行（追加学習リポ karume-anima-extra — 第三者 fine-tune。
+#: The entry for `--pipeline anima-extra` (the extra repository karume-anima-extra — third-party
+#: fine-tunes).
 #: The text stack is referenced in the official repository ({@link _extra_references}; the
 #: publication order is docs/release-runbook.md §0).
 EXTRA_PIPELINE = Pipeline(

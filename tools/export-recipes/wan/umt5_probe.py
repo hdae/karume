@@ -1,28 +1,36 @@
-"""小さな乱数の umT5 で、有効長 `L` の S 形 export と段 10c の前提を CPU で確かめる台本
-（ADR 0119 段 10c の下見 — 決定 3〜5）。実重みは読まない（構成は {@link TINY_CONFIG} の手書き）。
+"""Script that checks, on CPU with a small random umT5, the dynamic-shape export over the valid
+length `L` and the assumptions of step 10c (ADR 0119 step 10c preliminary check — decisions 3 to
+5). No real weights are read (the configuration is hand-written in {@link TINY_CONFIG}).
 
-    uv run --group wan --inexact python -m wan.umt5_probe   # 計測して JSON を出す
+    uv run --group wan --inexact python -m wan.umt5_probe   # measure and print JSON
 
-確かめること（どれも JSON の欄 — pytest `wan/tests/test_umt5_patch.py` が同じ関数で縛る）:
+What it checks (each one a JSON field — pytest `wan/tests/test_umt5_patch.py` pins them with the
+same functions):
 
-- `export`: {@link wan.umt5_patch.Umt5EncoderTokens} が exporter（karume）を通り、i8 の格納の計画と
-  `publish_model` が書き出しの前に掛ける検査（`assert_runtime_support` / `assert_op_contracts`）を
-  通る。IR の op の本数・入力（token id `[1, L]` とバケット表 `[L, L]` の i32）・出力
-  `[1, L, d_model]`・相対位置の表の格納（F32）と、golden（i8 の fake-quant 後の重みで回した
-  ラッパの CPU f32 の出力）の形を返す。容器のファイルを書いて読み直すのは pytest（理由は
-  {@link export_probe}）。
-- `export.emit_without_overrides`: 相対位置の表を i8 の対象から外しただけで F32 の明示を渡さないと
-  emit が落ちること（決定 5 の「F32 のままにする指定の形」）。
-- `quant_targets`: exporter の i8 の既定の対象が相対位置の表（`nn.Embedding [32, heads]`）を含むか。
-- `activation_rounding`: `gelu_new` の手書き式（上流）と `nn.GELU(approximate="tanh")`（差し替え）の
-  要素ごとの差。参考に `pow(x, 3)` を `x·x·x` に書き換えた式（exporter の語彙の mul / add / tanh
-  だけで書ける形）も並べる。
-- `wrapper`: 活性を上流のままにしたラッパが上流の forward とビット一致すること（書き下しの同値）と、
-  差し替えたラッパと上流の差（活性の丸めだけ）。
-- `mask`: 「有効長だけ」と「512 まで詰めてマスク」（上流 `_get_t5_prompt_embeds` の写し方）の一致を
-  f32 と bf16 で（調査 §2.3 の再現 — 実モデルでの一致は段 10c の検収）。
+- `export`: {@link wan.umt5_patch.Umt5EncoderTokens} goes through the exporter (karume) and passes
+  the i8 storage plan and the checks `publish_model` applies before writing
+  (`assert_runtime_support` / `assert_op_contracts`). Returns the IR op counts, the inputs (i32
+  token ids `[1, L]` and bucket table `[L, L]`), the output `[1, L, d_model]`, the storage of the
+  relative-position tables (F32) and the shapes of the golden (the wrapper's CPU f32 output with
+  the weights after i8 fake-quant). Writing the container file and reading it back is done by
+  pytest (the reason is in {@link export_probe}).
+- `export.emit_without_overrides`: excluding the relative-position tables from the i8 targets
+  without also passing F32 explicitly makes emit fail (decision 5's "form of the instruction that
+  keeps them F32").
+- `quant_targets`: whether the exporter's default i8 targets include the relative-position tables
+  (`nn.Embedding [32, heads]`).
+- `activation_rounding`: the per-element difference between the hand-written `gelu_new` formula
+  (upstream) and `nn.GELU(approximate="tanh")` (the replacement). For reference, the formula with
+  `pow(x, 3)` rewritten as `x·x·x` (a form written only with mul / add / tanh from the exporter's
+  vocabulary) is listed alongside.
+- `wrapper`: the wrapper with the upstream activation is bit-exact with the upstream forward (the
+  spelled-out code is equivalent), and the difference between the replaced wrapper and upstream
+  (the activation rounding only).
+- `mask`: agreement of "valid length only" and "padded to 512 and masked" (the upstream
+  `_get_t5_prompt_embeds` way of calling) in f32 and bf16 (reproducing research §2.3 — agreement
+  on the real model is the step 10c acceptance).
 
-MUST: transformers は関数の中で import する（`wan/umt5_patch.py` と同じ理由）。
+MUST: transformers is imported inside functions (the same reason as `wan/umt5_patch.py`).
 """
 
 from __future__ import annotations
@@ -49,9 +57,10 @@ from karume.pipeline import export_module
 from karume.verify import assert_op_contracts, assert_runtime_support
 from wan import umt5_patch
 
-#: 小さな umT5 の構成。実モデル（`text_encoder/config.json`）と**構造の欄**（ゲート付き `gelu_new`・
-#: バケット 32・max_distance 128・eps 1e-6・pad 0 / eos 1）を揃え、大きさだけを縮める。heads と
-#: d_kv は別の値にする（`[L, L, heads]` → `[1, heads, L, L]` の軸の取り違えが形で落ちるように）。
+#: Configuration of the small umT5. The **structural fields** match the real model
+#: (`text_encoder/config.json`: gated `gelu_new`, 32 buckets, max_distance 128, eps 1e-6,
+#: pad 0 / eos 1); only the sizes shrink. heads and d_kv differ (so that mixing up the axes of
+#: `[L, L, heads]` → `[1, heads, L, L]` fails on the shape).
 TINY_CONFIG: Mapping[str, Any] = {
     "vocab_size": 384,
     "d_model": 64,
@@ -69,18 +78,20 @@ TINY_CONFIG: Mapping[str, Any] = {
     "is_encoder_decoder": False,
 }
 
-#: 乱数の初期化の seed（重み・token id）。
+#: Seed of the random initialization (weights, token ids).
 SEED = 20261003
 
-#: 比べる有効長。下限 2・固定 4 プロンプトの長さ（28 / 118 / 50 / 126）・max_distance 128 を
-#: 越える長さ・上限の手前と上限（決定 4）。
+#: Valid lengths compared: the lower bound 2, the lengths of the four fixed prompts
+#: (28 / 118 / 50 / 126), a length beyond max_distance 128, and the upper bound and the one just
+#: below it (decision 4).
 LENGTHS: tuple[int, ...] = (2, 28, 50, 118, 126, 300, 511, 512)
 
-#: 容器と golden を採る有効長（小さい方と大きい方 — 同じ容器が 2 つの L で回ることを golden で
-#: 示す）。
+#: Valid lengths the container and golden are taken at (a small one and a large one — the golden
+#: shows the same container runs at two values of L).
 EXPORT_LENGTHS: tuple[int, ...] = (28, 126)
 
-#: pytest が書く下見の容器のグラフ名（配布形の部品名の候補 — 決定は段 10d）。
+#: Graph name of the preliminary container pytest writes (a candidate for the distribution's
+#: component name — decided in step 10d).
 TARGET = "text_encoder"
 MODEL_FILE = "model.krm"
 INPUT_PREFIX = "input."
@@ -88,16 +99,18 @@ OUTPUT_PREFIX = "output."
 IO_PREFIX = "io."
 CASE_SUFFIX = ".safetensors"
 
-#: 活性の比較に使う標本数（標準正規 × 尺度ごと）と尺度（umT5 の FFN の前活性は O(1)〜O(10)）。
+#: Sample count for the activation comparison (standard normal, per scale) and the scales (umT5's
+#: FFN pre-activations are O(1) to O(10)).
 ACTIVATION_SAMPLES = 1_000_000
 ACTIVATION_SCALES: tuple[float, ...] = (0.1, 1.0, 3.0, 10.0)
 
-#: ULP 差を数える参照の絶対値の下限（{@link _elementwise}）。
+#: Lower bound of the reference's absolute value for counting ULP differences
+#: ({@link _elementwise}).
 ULP_FLOOR = 2.0**-8
 
 
 def tiny_model(seed: int = SEED) -> nn.Module:
-    """{@link TINY_CONFIG} の `UMT5EncoderModel`（上流の初期化の乱数・eval・f32）。"""
+    """`UMT5EncoderModel` of {@link TINY_CONFIG} (upstream random initialization, eval, f32)."""
     from transformers import UMT5Config, UMT5EncoderModel
 
     with torch.random.fork_rng():
@@ -106,7 +119,7 @@ def tiny_model(seed: int = SEED) -> nn.Module:
 
 
 def tiny_ids(length: int, seed: int = SEED) -> torch.Tensor:
-    """有効長 `length` の token id `[1, L]`（本文は特殊トークン以外の乱数・末尾は `</s>`）。"""
+    """Token ids `[1, L]` of valid length `length` (random non-special tokens, ending in `</s>`)."""
     generator = torch.Generator().manual_seed(seed + length)
     body = torch.randint(
         3, int(TINY_CONFIG["vocab_size"]), (1, length - 1), generator=generator, dtype=torch.long
@@ -116,13 +129,14 @@ def tiny_ids(length: int, seed: int = SEED) -> torch.Tensor:
 
 
 def case_inputs(wrapper: umt5_patch.Umt5EncoderTokens, length: int) -> tuple[torch.Tensor, ...]:
-    """ラッパの入力（token id とバケット表 — 表は 0 層目の上流の式で作る）。"""
+    """The wrapper's inputs (token ids and the bucket table — built with layer 0's upstream
+    formula)."""
     attention = wrapper.encoder.block[0].layer[0].SelfAttention
     return tiny_ids(length), umt5_patch.relative_position_buckets(length, attention)
 
 
 def activation_rounding(seed: int = SEED) -> dict[str, Any]:
-    """上流の `gelu_new` と 2 つの書き換えの要素ごとの差（同じ f32 の入力）。"""
+    """Per-element differences between upstream `gelu_new` and the two rewrites (same f32 input)."""
     from transformers.activations import NewGELUActivation
 
     generator = torch.Generator().manual_seed(seed)
@@ -145,11 +159,13 @@ def activation_rounding(seed: int = SEED) -> dict[str, Any]:
 
 
 def _elementwise(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, Any]:
-    """違う要素の割合・最大絶対差・最大の ULP 差（参照の値の ULP で測る）。
+    """Fraction of differing elements, max absolute difference and max ULP difference (measured in
+    ULPs of the reference value).
 
-    ULP 差は参照の絶対値が {@link ULP_FLOOR} 以上の要素だけで見る — 0 の近く（大きな負の入力で
-    GELU が −1e-20 級になる所）では ULP が極端に小さく、絶対差 1e-9 級でも ULP 差が 1e7 になって
-    丸めの大きさを表さない。
+    The ULP difference only looks at elements whose reference absolute value is at least
+    {@link ULP_FLOOR} — near 0 (where GELU is around −1e-20 for large negative inputs) the ULP is
+    extremely small, and even an absolute difference around 1e-9 becomes 1e7 ULPs, which says
+    nothing about the size of the rounding.
     """
     differing = actual != expected
     magnitude = expected.abs()
@@ -163,7 +179,8 @@ def _elementwise(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, Any]
 
 
 def wrapper_comparison(model: nn.Module, lengths: Sequence[int] = LENGTHS) -> list[dict[str, Any]]:
-    """上流の forward に対する、活性を上流のままにしたラッパと差し替えたラッパの一致。"""
+    """Agreement with the upstream forward of the wrapper with the upstream activation and of the
+    wrapper with the replaced one."""
     exact = umt5_patch.Umt5EncoderTokens(model, activation="upstream")
     tanh = umt5_patch.Umt5EncoderTokens(model, activation="tanh")
     rows = []
@@ -184,7 +201,8 @@ def wrapper_comparison(model: nn.Module, lengths: Sequence[int] = LENGTHS) -> li
 def mask_equivalence(
     model: nn.Module, dtype: torch.dtype, lengths: Sequence[int] = LENGTHS
 ) -> list[dict[str, Any]]:
-    """「有効長だけ」と「512 + マスク」の一致（上流の forward 同士 — `dtype` で回す）。"""
+    """Agreement of "valid length only" and "512 + mask" (upstream forward against itself — run in
+    `dtype`)."""
     cast = copy.deepcopy(model).to(dtype)
     rows = []
     for length in lengths:
@@ -196,7 +214,8 @@ def mask_equivalence(
 
 
 def quant_targets(model: nn.Module) -> dict[str, Any]:
-    """exporter の i8 の既定の対象と、相対位置の表を外した対象（どちらも丸めた後の本数）。"""
+    """The exporter's default i8 targets and the targets without the relative-position tables (both
+    as counts after rounding)."""
     from karume.quantize import fake_quant_int8
 
     default = fake_quant_int8(umt5_patch.Umt5EncoderTokens(copy.deepcopy(model)))
@@ -217,12 +236,13 @@ def quant_targets(model: nn.Module) -> dict[str, Any]:
 
 
 def report_targets(scales: Mapping[str, torch.Tensor]) -> dict[str, int]:
-    """丸めた重みの本数をモジュールの種類（FQN の末尾の名前）ごとに数える。"""
+    """Count the rounded weights per module kind (the last name of the FQN)."""
     return dict(sorted(Counter(key.rsplit(".", 2)[-2] for key in scales).items()))
 
 
 def provenance() -> Provenance:
-    """下見の容器の出所（乱数の重み・配布しない — transformers の UMT5 の実装の版を書く）。"""
+    """Provenance of the preliminary container (random weights, not distributed — records the
+    version of the transformers UMT5 implementation)."""
     import transformers
 
     return Provenance(
@@ -232,34 +252,42 @@ def provenance() -> Provenance:
 
 @dataclass(frozen=True)
 class ProbeExport:
-    """下見の export の結果（容器のファイルは書かない — 下の {@link export_probe}）。"""
+    """Result of the preliminary export (no container file is written — {@link export_probe}
+    below)."""
 
-    #: `export_module` の素のグラフと格納テンソル（`publish_model` へそのまま渡せる形）。
+    #: The raw graph and stored tensors of `export_module` (in the form `publish_model` takes as
+    #: is).
     graph: IrGraph
     tensors: Mapping[str, torch.Tensor]
-    #: 格納宣言を commit したグラフ（`publish_model` と同じ 2 つの検査を通したもの）。
+    #: The graph with the storage declarations committed (passed through the same two checks as
+    #: `publish_model`).
     stored: IrGraph
-    #: i8 の scale 台帳と、相対位置の表の F32 の明示（`publish_model` の引数）。
+    #: The i8 scale ledger and the explicit F32 for the relative-position tables (arguments of
+    #: `publish_model`).
     scales: Mapping[str, torch.Tensor]
     overrides: Mapping[str, str]
-    #: golden（ファイル名 `io.lNNN.safetensors` → グラフ入力 `input.*` と出力 `output.0`）。
+    #: golden (file name `io.lNNN.safetensors` → graph inputs `input.*` and output `output.0`).
     golden: Mapping[str, Mapping[str, torch.Tensor]]
-    #: F32 の明示を渡さなかったときの emit の拒否の文言。
+    #: The text of emit's rejection when the explicit F32 is not passed.
     emit_without_overrides: str
 
 
 def export_probe(model: nn.Module) -> ProbeExport:
-    """i8（相対位置の表は F32）の格納まで通し、golden を採る（容器のファイルは書かない）。
+    """Run through to i8 storage (the relative-position tables in F32) and take the golden (no
+    container file is written).
 
-    `model` は複製してから丸める（呼び手の上流の重みを変えない）。golden は丸めた後のラッパの
-    CPU f32 の出力（ADR 0026 決定 2 / 0119 決定 8 — 参照は同じ fake-quant の重みで採る）。
-    書き出しの前に `publish_model` が掛ける検査（`assert_runtime_support` /
-    `assert_op_contracts`）は、ここで同じ相手（格納宣言を commit したグラフ）に掛ける。
+    `model` is copied before rounding (the caller's upstream weights are not changed). The golden is
+    the CPU f32 output of the wrapper after rounding (ADR 0026 decision 2 / 0119 decision 8 — the
+    reference is taken with the same fake-quant weights). The checks `publish_model` applies before
+    writing (`assert_runtime_support` / `assert_op_contracts`) are applied here to the same target
+    (the graph with the storage declarations committed).
 
-    容器を書く口（`graph_name=` を名乗る `publish_model`）は pytest の作業席だけに置く: recipe の
-    台本が `graph_name=` を名乗ると、全 family 横断の門（`tests/test_graph_names.py`）が配布形の
-    部品名（`wan.distribution.WAN_WEIGHTS` のキー）との一致を求める。下見の容器は乱数の重みで
-    配布しないので名乗る部品名が無い（umT5 の部品名と配布の構成は段 10d — ADR 0119 裁定 1）。
+    The code that writes the container (`publish_model` with `graph_name=`) lives only in pytest's
+    scratch area: when a recipe script passes `graph_name=`, the cross-family check
+    (`tests/test_graph_names.py`) requires it to match a component name of a distribution (a key
+    of `wan.distribution.WAN_WEIGHTS`). The preliminary container has random weights and is not
+    distributed, so it has no component name to use (umT5's component name and the distribution's
+    layout are step 10d — ADR 0119 ruling 1).
     """
     wrapper = umt5_patch.Umt5EncoderTokens(copy.deepcopy(model))
     report = umt5_patch.fake_quant_i8(wrapper)
@@ -276,7 +304,10 @@ def export_probe(model: nn.Module) -> ProbeExport:
     except EmitError as error:
         without_overrides = str(error)
     else:
-        raise AssertionError("相対位置の表に scale も F32 の明示も無いのに emit が通った")
+        raise AssertionError(
+            "emit passed although the relative-position tables have neither a scale nor an"
+            " explicit F32"
+        )
     stored = stored_model(
         graph,
         tensors,
@@ -288,17 +319,17 @@ def export_probe(model: nn.Module) -> ProbeExport:
     assert_op_contracts(stored)
     declared = [entry.name for entry in stored.inputs]
     if declared != list(umt5_patch.INPUT_NAMES):
-        raise AssertionError(f"グラフ入力名が宣言と不一致: {declared}")
+        raise AssertionError(f"graph input names do not match the declaration: {declared}")
     golden: dict[str, dict[str, torch.Tensor]] = {}
     for length, inputs in cases.items():
         with torch.no_grad():
             output = wrapper(*inputs)
         io = {
-            f"{INPUT_PREFIX}{name}": normalize_boundary_tensor(value, f"L={length} の入力 '{name}'")
+            f"{INPUT_PREFIX}{name}": normalize_boundary_tensor(value, f"L={length} input '{name}'")
             for name, value in zip(umt5_patch.INPUT_NAMES, inputs, strict=True)
         }
         io[f"{OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
-            output.contiguous(), f"L={length} の出力"
+            output.contiguous(), f"L={length} output"
         )
         golden[f"{IO_PREFIX}l{length:03d}{CASE_SUFFIX}"] = io
     return ProbeExport(
@@ -313,7 +344,7 @@ def export_probe(model: nn.Module) -> ProbeExport:
 
 
 def summarize(export: ProbeExport) -> dict[str, Any]:
-    """export の要約（op の本数・記号・入出力・格納・golden の形）。"""
+    """Summary of the export (op counts, symbols, inputs and outputs, storage, golden shapes)."""
     stored = export.stored
     breakdown = storage_breakdown(stored)
     return {
@@ -333,7 +364,8 @@ def summarize(export: ProbeExport) -> dict[str, Any]:
 
 
 def storage_by_kind(graph: Any, tables: Mapping[str, str]) -> dict[str, list[str]]:
-    """格納 dtype の集合を重みの種類ごとに（相対位置の表・語彙埋め込み・linear・その他）。"""
+    """The set of storage dtypes per weight kind (relative-position tables, token embedding,
+    linear, other)."""
     kinds: dict[str, set[str]] = {}
     for initializer in graph.initializers.values():
         key = initializer.tensor or ""
@@ -352,7 +384,7 @@ def storage_by_kind(graph: Any, tables: Mapping[str, str]) -> dict[str, list[str
 
 
 def run() -> dict[str, Any]:
-    """全部の計測（JSON の欄の意味はモジュールの docstring）。"""
+    """All the measurements (the module docstring gives the meaning of the JSON fields)."""
     model = tiny_model()
     return {
         "config": dict(TINY_CONFIG),

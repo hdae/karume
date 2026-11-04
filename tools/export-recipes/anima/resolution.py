@@ -1,58 +1,71 @@
-"""解像度の綴り（`WxH` と正方の略記 `N`）— 参照台本が共有する 1 箇所（#23）。
+"""Resolution spelling (`WxH` and the square shorthand `N`) — the one place the reference scripts
+share (#23).
 
-デモ（`examples/anima/main.ts`）の `--resolution` と同じ綴りを参照台本でも使う。同じ文字列で
-フィクスチャとデモが指せないと、「1344x768 の参照で 768x1344 のデモを検証した」形の取り違えが
-名前の上で見えなくなる。
+The reference scripts use the same spelling as the demo's `--resolution`
+(`examples/anima/main.ts`). If the fixture and the demo cannot be named by the same string, a
+mix-up of the form "a 768x1344 demo was checked against a 1344x768 reference" becomes invisible
+in the names.
 
-MUST: **受理集合の正本は TS 側**（`packages/models/src/anima/resolution.ts`）。ここが見るのは
-参照フィクスチャが構造として成立する条件（正の整数・{@link GRANULARITY} の倍数）だけで、
-資産側の下限（各辺 ≥ 512 = VAE タイル latent 64）も `Dim("S")` の上限も見ない — 参照台本は
-デモが受けない小さい形で回すこともある（単体テストの合成ケース）。両側に同じ受理集合を
-書くと、片方だけ動かしたときに「参照は採れるがデモが受けない」形が静かに増える。
+MUST: **the TS side is the source of truth for the accepted set**
+(`packages/models/src/anima/resolution.ts`). This module checks only what a reference fixture
+needs to be structurally valid (a positive integer, a multiple of {@link GRANULARITY}); it checks
+neither the asset-side lower bound (each side ≥ 512 = VAE tile latent 64) nor the upper bound of
+`Dim("S")` — the reference scripts sometimes run shapes the demo does not accept (the synthetic
+cases of the unit tests). Writing the same accepted set on both sides would let shapes that "the
+reference can produce but the demo does not accept" grow silently when only one side changes.
 """
 
 from __future__ import annotations
 
-#: 解像度の刻み（= 空間圧縮 8 × patch 2）。latent の各辺が patch 2 で割り切れる最小の単位で、
-#: 外すと patchify が組めない（ホスト側 `latentSides` が落とす）。
+#: Resolution step (= spatial compression 8 × patch 2). The smallest unit at which each latent
+#: side divides by patch 2; off it, patchify cannot be built (the host-side `latentSides` rejects
+#: it).
 GRANULARITY = 16
 
 
 def parse_resolution(text: str) -> tuple[int, int]:
-    """`"1344x768"` → `(1344, 768)`、`"512"` → `(512, 512)`（正方の略記）。
+    """`"1344x768"` → `(1344, 768)`, `"512"` → `(512, 512)` (square shorthand).
 
-    MUST: 略記と `WxH` 以外の綴りを黙って受けない。`1344*768` や `1344,768` を
-    「数値でない」で落とすのは入口の綴り検査であって、寸法の妥当性はここでは見ない。
+    MUST: do not silently accept spellings other than the shorthand and `WxH`. Rejecting
+    `1344*768` or `1344,768` as "not a number" is a spelling check at the entry; the validity of
+    the dimensions is not checked here.
     """
     parts = text.lower().split("x")
     if len(parts) == 1:
         parts = parts * 2
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
-        raise ValueError(f"解像度 {text!r} が WxH でも正方の略記でもない（例: 1344x768 / 512）")
+        raise ValueError(
+            f"resolution {text!r} is neither WxH nor the square shorthand (e.g. 1344x768 / 512)"
+        )
     width, height = (int(part) for part in parts)
-    for side, label in ((width, "幅"), (height, "高さ")):
+    for side, label in ((width, "width"), (height, "height")):
         if side <= 0 or side % GRANULARITY != 0:
-            raise ValueError(f"解像度 {text!r} の{label} {side} が {GRANULARITY} の正の倍数でない")
+            raise ValueError(
+                f"resolution {text!r}: {label} {side} is not a positive multiple of {GRANULARITY}"
+            )
     return width, height
 
 
 def format_resolution(width: int, height: int) -> str:
-    """`(1344, 768)` → `"1344x768"`、正方は略記（`(512, 512)` → `"512"`）。
+    """`(1344, 768)` → `"1344x768"`; a square uses the shorthand (`(512, 512)` → `"512"`).
 
-    {@link parse_resolution} の逆で、往復が恒等になる綴りを返す（ディレクトリ名に載るので、
-    正方の既存フィクスチャのパスが 1 文字も変わらないことが要る）。
+    The inverse of {@link parse_resolution}; it returns a spelling whose round trip is the
+    identity (it ends up in directory names, so the paths of the existing square fixtures must
+    not change by a single character).
     """
     return str(width) if width == height else f"{width}x{height}"
 
 
 def resolution_meta(width: int, height: int) -> dict[str, int | str]:
-    """フィクスチャ JSON の解像度欄（寸法の正本は `width` / `height`）。
+    """The resolution fields of a fixture JSON (`width` / `height` are the source of truth for the
+    dimensions).
 
-    MUST: 正方の run では `resolution` を**これまでどおり int の一辺**で出す。書き出し先
-    （`outputs/series/anima-tiling-<dtype>-<解像度>/tiling.json`）の欄を数として読む席が
-    あり（現物は `anima/tests/test_resolution.py` の `TestResolutionMeta`）、型を動かすと
-    再生成したときだけ黙って壊れる。非正方には一辺が存在しないので
-    綴り（`"1344x768"`）を入れる — 読み手は `width` / `height` を見ること。
+    MUST: for a square run, emit `resolution` **as the int side length, as before**. There is a
+    reader that reads this field of the output
+    (`outputs/series/anima-tiling-<dtype>-<resolution>/tiling.json`) as a number (the instance is
+    `TestResolutionMeta` in `anima/tests/test_resolution.py`); changing its type breaks silently,
+    and only on regeneration. A non-square shape has no single side, so it gets the spelling
+    (`"1344x768"`) — readers should look at `width` / `height`.
     """
     return {
         "resolution": width if width == height else format_resolution(width, height),

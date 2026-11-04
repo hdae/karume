@@ -1,16 +1,19 @@
-"""`siglip2/preprocess.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contracts of `siglip2/preprocess.py` (the part that needs no real weights).
 
-フィクスチャの emit は手動（`irodori/tokenizer_ref.py` と同じ規律）。ここで固定するのは、壊れると
-**沈黙のパリティ不一致**になる側の規律だけ:
+The fixture emit is manual (the same discipline as `irodori/tokenizer_ref.py`). What is pinned
+here is only the discipline whose breakage would give a **silent parity mismatch**:
 
-- `resample` の門が **2（PIL BILINEAR）以外を拒む**こと — 3（BICUBIC）を素通しすると、
-  TS 側は「参照と別のフィルタ」に合わせて緑になる（実測で最大 47/255 ずれる形）
-- 前処理定数（mean / std / rescale）と `do_*` の門が、1 欄ずらすだけで落ちること
-- `check_sibling_configs` が `size` **以外**の差を捕まえること（この層が 224 / 384 の両方に
-  効く、という主張の中身）
-- `reference` の「保存する中間は実経路そのもの」門が、resize を差し替えたら落ちること
-- ケースが互いに違う画像で、縮小 / 拡大 / 同寸 / 軸混在 / 1×1 を実際に覆っていること
-  （ケースを削れば落ちる形で書く）
+- the `resample` check **rejects anything other than 2 (PIL BILINEAR)** — letting 3 (BICUBIC)
+  through would make the TS side go green against "a filter other than the reference's" (measured
+  to be off by up to 47/255)
+- the checks of the preprocessing constants (mean / std / rescale) and `do_*` fail when a single
+  field is changed
+- `check_sibling_configs` catches differences **other than** `size` (the substance of the claim
+  that this layer serves both 224 and 384)
+- the "stored intermediate is the real path itself" check of `reference` fails when the resize is
+  replaced
+- the cases are distinct images and actually cover downscale / upscale / same size / mixed axes /
+  1×1 (written so that removing a case fails)
 """
 
 from __future__ import annotations
@@ -49,8 +52,9 @@ class TestCases:
             case["name"]: (case["image"].shape[0], case["image"].shape[1], *case["out"])
             for case in cases
         }
-        assert len(shapes) == len(cases), "ケース名が重複している"
-        # 縮小 / 拡大 / 同寸 / 軸混在 / 1×1 を、名前ではなく寸法から数える。
+        assert len(shapes) == len(cases), "duplicate case names"
+        # Count downscale / upscale / same size / mixed axes / 1×1 from the dimensions, not the
+        # names.
         shrink = [s for s in shapes.values() if s[0] > s[2] and s[1] > s[3]]
         grow = [s for s in shapes.values() if s[0] < s[2] and s[1] < s[3]]
         same = [s for s in shapes.values() if s[0] == s[2] and s[1] == s[3]]
@@ -59,7 +63,7 @@ class TestCases:
         assert len(shrink) >= 3 and grow and same and mixed and single
 
     def test_images_are_pairwise_distinct(self) -> None:
-        # 同じ画像を 2 度使うと、その 2 ケースは同じ 1 本の検査に縮む。
+        # Using the same image twice would shrink those two cases into a single check.
         blobs = [case["image"].tobytes() for case in pre.build_cases()]
         assert len(set(blobs)) == len(blobs)
 
@@ -70,8 +74,8 @@ class TestCases:
             assert image.ndim == 3 and image.shape[2] == 3
 
     def test_cases_are_reproducible(self) -> None:
-        # 乱数種を固定しているので、2 回呼べば同じ画素が出る（出なければフィクスチャは
-        # 再生成のたびに別物になり、diff が読めなくなる）。
+        # The random seed is fixed, so two calls give the same pixels (otherwise the fixture
+        # would differ on every regeneration and its diff would be unreadable).
         first = [case["image"].tobytes() for case in pre.build_cases()]
         second = [case["image"].tobytes() for case in pre.build_cases()]
         assert first == second
@@ -108,7 +112,8 @@ class TestSiblingConfigs:
 
 
 def _processor(**overrides):
-    """既定を上書きした `SiglipImageProcessor`（transformers が無い環境では skip）。"""
+    """A `SiglipImageProcessor` with overridden defaults (skipped where transformers is not
+    installed)."""
     pytest.importorskip("torchvision")
     transformers = pytest.importorskip("transformers")
     processor = transformers.SiglipImageProcessor(
@@ -129,8 +134,8 @@ class TestProcessorShape:
         assert shape["resample"] == 2
 
     def test_bicubic_is_rejected(self) -> None:
-        # 一番の勘所。`resample` は PIL の定数で 2 = BILINEAR / 3 = BICUBIC で、クラス属性の
-        # 既定は BICUBIC。config の上書きを読み落とした瞬間にここで止まる。
+        # The crux. `resample` is a PIL constant, 2 = BILINEAR / 3 = BICUBIC, and the class
+        # attribute defaults to BICUBIC. The moment the config's override is missed, this stops.
         with pytest.raises(SystemExit, match="resample"):
             pre.check_processor_shape(_processor(resample=3))
 
@@ -169,10 +174,11 @@ class TestReference:
         assert pixel_values.shape == (3, 4, 6)
 
     def test_an_unfused_upstream_fails_loudly(self, monkeypatch) -> None:
-        # 上流が rescale と normalize の**畳み方**を変えた形（先に 1/255 を掛けてから
-        # `[0,1]` 尺度の mean/std を引く）を注入する。値は肉眼では同じだが f32 の丸めが
-        # 1 回増えるので、台本が焼く融合形との差がここで出る — 出なければ、TS 側は
-        # 「上流が変わったのに緑のまま」になる。
+        # Inject the form in which upstream changed **how** rescale and normalize are folded
+        # (multiply by 1/255 first, then subtract the mean/std on the `[0,1]` scale). The values
+        # look the same, but there is one more f32 rounding, so the difference from the fused form
+        # the script bakes shows here — if it did not, the TS side would "stay green although
+        # upstream changed".
         backend = pytest.importorskip("transformers.image_processing_backends")
 
         def unfused(self, images, do_rescale, rescale_factor, do_normalize, image_mean, image_std):
@@ -187,16 +193,18 @@ class TestReference:
 
 
 class TestCommittedFixture:
-    """git 追跡のフィクスチャと `build_cases()` の対応（再生成漏れを赤にする）。
+    """Correspondence between the git-tracked fixture and `build_cases()` (turns a missed
+    regeneration red).
 
-    Python 側は `build_cases()` の幾何被覆を、Deno 側（`packages/models/tests/
-    image_preprocess_test.ts`）は committed JSON を検査する — 突き合わせが無いと、**両者が
-    別物になっても両方緑**のまま回り続ける（片方だけ編集して再生成し忘れた形）。
+    The Python side checks the geometric coverage of `build_cases()`, the Deno side
+    (`packages/models/tests/image_preprocess_test.ts`) checks the committed JSON — without a
+    comparison between them, **both stay green even after they diverge** (the form in which only
+    one was edited and the regeneration was forgotten).
     """
 
     @staticmethod
     def _fixture() -> dict:
-        # git 追跡ファイルなので、無ければ skip ではなく失敗させる。
+        # The file is tracked by git, so a missing file fails rather than skips.
         return json.loads(pre.DEFAULT_FIXTURE_PATH.read_text(encoding="utf-8"))
 
     def test_the_case_names_match_in_order(self) -> None:
@@ -207,7 +215,8 @@ class TestCommittedFixture:
         ]
 
     def test_every_case_carries_the_geometry_it_was_built_from(self) -> None:
-        """入出力の寸法がずれると、Deno 側は別の縮尺で参照と突き合わせる。"""
+        """If the input / output dimensions were off, the Deno side would compare against the
+        reference at a different scale."""
         fixture = self._fixture()
 
         for baked, case in zip(fixture["cases"], pre.build_cases(), strict=True):

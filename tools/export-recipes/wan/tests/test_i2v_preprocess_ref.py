@@ -1,13 +1,16 @@
-"""`wan/i2v_preprocess_ref.py` の約束事 — I2V の画像の前処理の参照（ADR 0121 決定 11・段 9a）。
+"""The contract of `wan/i2v_preprocess_ref.py` — the reference of the I2V image preprocessing
+(ADR 0121 decision 11, step 9a).
 
-合成画像だけで回す（テスト画像〈git 追跡外〉に依らない）。見るもの:
+Runs on synthetic images only (no dependence on the test images, which are not tracked by git). What
+it checks:
 
-- crop（公式）: 覆う側の倍率・Python の `round`（.5 は偶数側）・floor の中央クロップの寸法と起点を、
-  golden の 3 寸法と、丸めが割れる寸法（512×301）で固定する。
-- stretch（diffusers）: 上流の `VideoProcessor.resize` が Pillow の LANCZOS の直接の resize と同じ。
-- [-1, 1]: 公式の `to_tensor → sub(0.5) → div(0.5)` が全 256 値で `f32(2·f32(x/255) − 1)` と
-  ビット一致（TS が写す式）。
-- patchify: チャネル = c·4 + 幅の副添字·2 + 高さの副添字（幅が先）。
+- crop (official): the scale of the covering side, Python's `round` (.5 goes to the even side) and
+  the size and origin of the floor center crop are pinned with the 3 golden sizes and a size where
+  the rounding splits (512×301).
+- stretch (diffusers): upstream `VideoProcessor.resize` equals a direct Pillow LANCZOS resize.
+- [-1, 1]: the official `to_tensor → sub(0.5) → div(0.5)` is bit-identical to
+  `f32(2·f32(x/255) − 1)` for all 256 values (the formula the TS side copies).
+- patchify: channel = c·4 + width sub-index·2 + height sub-index (width first).
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ class TestCropResize:
         ids=["1280x704", "704x1280", "256x160"],
     )
     def test_the_golden_sizes_of_an_832x480_image(self, size, resized, origin):
-        """832×480 → 覆う側へ resize → 中央クロップ（golden の 3 寸法）。"""
+        """832×480 → resize to the covering side → center crop (the 3 golden sizes)."""
         out_width, out_height = size
         source = _image(832, 480)
         x1, y1 = origin
@@ -57,8 +60,8 @@ class TestCropResize:
         assert np.array_equal(np.asarray(got), np.asarray(want))
 
     def test_a_half_way_size_rounds_to_the_even_side(self):
-        """512×301 → 1280×704: scale 2.5 で 301·2.5 = 752.5 → Python の round は 752（JS の
-        Math.round の 753 とは割れる）。起点は (752 − 704) // 2 = 24。"""
+        """512×301 → 1280×704: with scale 2.5, 301·2.5 = 752.5 → Python's round gives 752 (it
+        splits from JS Math.round, which gives 753). The origin is (752 − 704) // 2 = 24."""
         source = _image(512, 301, seed=1)
         want = _lanczos(source, 1280, 752).crop((0, 24, 1280, 728))
         rounded_away = _lanczos(source, 1280, 753).crop((0, 24, 1280, 728))

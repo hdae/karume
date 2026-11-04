@@ -1,13 +1,15 @@
-"""Wan recipe のテストが共有するフィクスチャ（DiT 側・VAE 側のテストの両方が使う）。
+"""Fixtures shared by the Wan recipe tests (used by both the DiT-side and the VAE-side tests).
 
-実重みを要するテストは {@link wan_snapshot}（Wan2.1 T2V-1.3B）か {@link wan22_snapshot}（Wan2.2
-TI2V-5B）を受ける。pin した revision の部品が HF キャッシュに無い機・`wan` グループを同期して
-いない環境では **SKIP**（理由つき）にする — 既定の sync だけで pytest が collection ごと落ちない形を
-保つ（`tests/test_optional_group_imports.py` と同じ向き）。取得は
-`uv run --group wan python -m wan.sources [--model ti2v-5b] --fetch`。
+Tests that need real weights take {@link wan_snapshot} (Wan2.1 T2V-1.3B) or {@link wan22_snapshot}
+(Wan2.2 TI2V-5B). On a machine without the components of the pinned revision in the HF cache, or
+in an environment that has not synced the `wan` group, they **SKIP** (with a reason) — so the
+default sync alone never makes pytest fail at collection (the same direction as
+`tests/test_optional_group_imports.py`). Fetch with
+`uv run --group wan python -m wan.sources [--model ti2v-5b] --fetch`.
 
-{@link ti2v_synthetic_vae} は実重みを読まない合成の Wan2.2 VAE で、snapshot の無い機でも Wan2.2 の
-構造の主張と故障注入を常に走らせるためにある（ADR 0121 段 4）。
+{@link ti2v_synthetic_vae} is a synthetic Wan2.2 VAE that reads no real weights; it exists so that
+the structural assertions and fault injection for Wan2.2 always run, even on a machine without the
+snapshot (ADR 0121 step 4).
 """
 
 from __future__ import annotations
@@ -17,11 +19,11 @@ from typing import Any
 
 import pytest
 
-#: 合成の Wan2.2 VAE の config — 上流 `AutoencoderKLWan` を 5B の VAE（pin した
-#: `vae/config.json`）と同じ構造で、チャネルだけを縮めたもの。decoder の dims は
-#: [64, 64, 64, 32, 16]（5B は [1024, 1024, 1024, 512, 256]）で、ショートカット（DupUp3D）は 5B と
-#: 同じ 3 本（up0 / up1 = ft 2・rep 8、up2 = ft 1・rep 2）。`clip_output` は `from_pretrained` が
-#: 無視するキーなので渡さない。
+#: The config of the synthetic Wan2.2 VAE — upstream `AutoencoderKLWan` with the same structure as
+#: the 5B VAE (the pinned `vae/config.json`), with only the channels shrunk. The decoder dims are
+#: [64, 64, 64, 32, 16] (the 5B has [1024, 1024, 1024, 512, 256]), and the shortcuts (DupUp3D) are
+#: the same three as the 5B (up0 / up1 = ft 2, rep 8; up2 = ft 1, rep 2). `clip_output` is a key
+#: `from_pretrained` ignores, so it is not passed.
 TI2V_SYNTHETIC_CONFIG: dict[str, Any] = {
     "base_dim": 8,
     "decoder_base_dim": 16,
@@ -41,34 +43,34 @@ TI2V_SYNTHETIC_CONFIG: dict[str, Any] = {
 
 @pytest.fixture(scope="session")
 def wan_snapshot() -> Path:
-    """pin した revision の取得済み snapshot（`transformer` / `vae` / `scheduler` を持つ）。"""
+    """The fetched snapshot of the pinned revision (with `transformer` / `vae` / `scheduler`)."""
     pytest.importorskip("huggingface_hub")
     from wan.sources import WanSourceError, local_snapshot
 
     try:
         return local_snapshot()
     except WanSourceError as error:
-        pytest.skip(f"Wan2.1 の上流 checkpoint が手元に無い: {error}")
+        pytest.skip(f"the Wan2.1 upstream checkpoint is not available locally: {error}")
 
 
 @pytest.fixture(scope="session")
 def wan22_snapshot() -> Path:
-    """Wan2.2 TI2V-5B の pin した revision の取得済み snapshot（ADR 0121 決定 1）。"""
+    """The fetched snapshot of the pinned revision of Wan2.2 TI2V-5B (ADR 0121 decision 1)."""
     pytest.importorskip("huggingface_hub")
     from wan.sources import WanSourceError, local_snapshot
 
     try:
         return local_snapshot("ti2v-5b")
     except WanSourceError as error:
-        pytest.skip(f"Wan2.2 TI2V-5B の上流 checkpoint が手元に無い: {error}")
+        pytest.skip(f"the Wan2.2 TI2V-5B upstream checkpoint is not available locally: {error}")
 
 
 @pytest.fixture(scope="session")
 def ti2v_synthetic_vae():
-    """乱数初期化した合成の Wan2.2 VAE（CPU f32・eval — {@link TI2V_SYNTHETIC_CONFIG}）。
+    """A randomly initialised synthetic Wan2.2 VAE (CPU f32, eval — {@link TI2V_SYNTHETIC_CONFIG}).
 
-    初期化の乱数は seed 0 で、グローバルの乱数の状態は汚さない。テストは書き換えない（書き換える
-    なら `copy.deepcopy` してから）。
+    The initialisation uses seed 0 and leaves the global random state untouched. Tests do not modify
+    it (`copy.deepcopy` it first if a test must).
     """
     pytest.importorskip("diffusers")
     import torch

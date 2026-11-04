@@ -1,24 +1,25 @@
-"""civitai の単一ファイル checkpoint を diffusers レイアウトへ組み直す（バリアントの入口）。
+"""Rebuild a civitai single-file checkpoint into the diffusers layout (the entry for variants).
 
     uv run --group anima python -m anima.single_file \
         --checkpoint ../../inputs/anima/waiANIMA_v10Base10.safetensors \
         --out ../../outputs/misc/anima-diffusers/anima-wai
 
-`anima.export` の `--repo` は `from_pretrained(repo, subfolder=...)` にそのまま渡る文字列なので、
-受けられるのは **diffusers レイアウトのリポ / ディレクトリ**だけ（単一ファイルを読む経路は
-無い）。ここが橋渡しを引き受ける。
+`--repo` of `anima.export` is a string passed as is to `from_pretrained(repo, subfolder=...)`,
+so it accepts only **a repository / directory in the diffusers layout** (there is no path that
+reads a single file). This module provides the bridge.
 
-出来上がるディレクトリは「transformer と text_conditioner だけが差し替わった base のコピー」:
+The resulting directory is "a copy of base with only transformer and text_conditioner replaced":
 
-- **checkpoint が持つのは DiT（567 テンソル）と llm_adapter（118 テンソル）の 2 つだけ**で、
-  text_encoder / VAE / tokenizer は入っていない（2026-08-22 実測）。したがってそれらは base から
-  そのまま引く（**symlink** — 数 GB を種類ぶん複製しない）。
-- 鍵名は ComfyUI 系の綴り（`net.` か `model.diffusion_model.` 前置）なので、diffusers の
-  Cosmos 用変換表を通す。実測では base の transformer の鍵を**過不足なく**満たし、shape の
-  食い違いも 0 だった。
+- **The checkpoint holds only two parts: the DiT (567 tensors) and llm_adapter (118 tensors)**;
+  text_encoder / VAE / tokenizer are not in it (measured 2026-08-22). So those are taken from base
+  as they are (**symlinks** — several GB are not duplicated per variant).
+- The key names use the ComfyUI-style spelling (a `net.` or `model.diffusion_model.` prefix), so
+  they go through diffusers' conversion table for Cosmos. Measured, they cover the keys of base's
+  transformer **exactly, with nothing missing or extra**, and with 0 shape mismatches.
 
-MUST: 変換後の鍵集合を base の現物と突き合わせてから書く。表が上流で動いたときに黙って
-「一部だけ移った重み」を書き出すと、export も配布も通って**絵だけが静かに壊れる**。
+MUST: compare the converted key set with base's actual files before writing. If the table
+changes upstream and "weights only partly carried over" are written out silently, both the
+export and the distribution pass and **only the images break, silently**.
 """
 
 from __future__ import annotations
@@ -33,42 +34,47 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 
-# MUST: `diffusers` / `huggingface_hub` は**関数の中で import する**（この recipe の他の
-# モジュールと同じ作法 — `export.py` / `patch.py` / `lora.py` / `rope_tables.py` /
-# `pipeline_ref.py` はどれも module 直下では import しない）。どちらも `anima` 依存グループ
-# 側のもので、**既定の `uv sync` には入らない**（pyproject の同 NOTE）。module 直下で import
-# すると、このファイルを読むだけで `ModuleNotFoundError` になり、グループ非同期の環境では
-# **テストが collection ごと落ちる**（2026-08-22 に踏んだ）。ここで要るのは変換の実行時だけで、
-# 鍵の付け替えと突合（下の純関数）はどちらにも依存しない。
+# MUST: import `diffusers` / `huggingface_hub` **inside functions** (the same practice as the
+# other modules of this recipe — none of `export.py` / `patch.py` / `lora.py` /
+# `rope_tables.py` / `pipeline_ref.py` imports them at module level). Both belong to the `anima`
+# dependency group and are **not part of the default `uv sync`** (the NOTE of the same name in
+# pyproject). Importing them at module level makes merely reading this file raise
+# `ModuleNotFoundError`, and in an environment without the group synced **the tests fail at
+# collection** (hit on 2026-08-22). They are needed only when the conversion runs; renaming and
+# comparing the keys (the pure functions below) depend on neither.
 
-#: 上流の diffusers リポ（`anima/export.py` の `DEFAULT_REPO` と同じもの）。
+#: The upstream diffusers repository (the same one as `DEFAULT_REPO` in `anima/export.py`).
 BASE_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
-#: 変換表が期待する前置。civitai 側は `net.` か `model.diffusion_model.` のどちらかで包む。
+#: The prefix the conversion table expects. The civitai side wraps keys in either `net.` or
+#: `model.diffusion_model.`.
 CANONICAL_PREFIX = "net."
 KNOWN_PREFIXES = ("model.diffusion_model.", "net.")
 
-#: checkpoint 側で text_conditioner に当たる部分木。
+#: The subtree on the checkpoint side that corresponds to text_conditioner.
 CONDITIONER_PREFIX = "llm_adapter."
 
-#: base から symlink で引く部分（checkpoint が持たないもの）。
+#: The parts taken from base by symlink (what the checkpoint does not hold).
 SHARED_ENTRIES = ("text_encoder", "vae", "tokenizer", "t5_tokenizer", "scheduler")
 
-#: 差し替える 2 つと、その重みファイル名（diffusers の既定）。
+#: The two parts that are replaced, and their weight file name (the diffusers default).
 WEIGHT_FILENAME = "diffusion_pytorch_model.safetensors"
 
-#: 変換の出所を残す記録（人が辿るためのもの — 配布の帰属は `anima/card.py` が持つ）。
+#: The record of where the conversion came from (for people to trace — the distribution's
+#: attribution is held by `anima/card.py`).
 SOURCE_PROVENANCE_FILE = "source_provenance.json"
 
-#: 取り込み記録（`anima.civitai` が checkpoint の隣へ書く機械専有ファイル）。
+#: The intake record (a machine-owned file that `anima.civitai` writes next to the checkpoint).
 CIVITAI_PROVENANCE_FILE = "civitai.json"
 
-#: 取り込みが掘る配置（`anima.civitai` の `fetch_checkpoint` が作る `civitai-<versionId>/`）。
-#: ここに居る checkpoint は取り込み経由と分かるので、記録の欠落を手置きと区別できる。
+#: The layout the intake creates (`civitai-<versionId>/`, made by `fetch_checkpoint` of
+#: `anima.civitai`). A checkpoint there is known to have come through the intake, so a missing
+#: record can be told apart from a hand-placed file.
 CIVITAI_INTAKE_DIR = re.compile(r"civitai-[0-9]+")
 
-#: 上の記録から運ぶ欄（説明本文の HTML は運ばない — 変換の出所を辿るのに要らない）。
-#: `sha256` だけは `file` の下にあるので別扱い。
+#: The fields carried over from the record above (the HTML of the description is not carried —
+#: it is not needed to trace where the conversion came from). Only `sha256` sits under `file`, so
+#: it is handled separately.
 CIVITAI_CARRIED_FIELDS = (
     "air",
     "model_id",
@@ -81,7 +87,7 @@ CIVITAI_CARRIED_FIELDS = (
 
 
 def _strip_prefix(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """既知の前置を剥がして、変換表が期待する `net.` へ揃える。"""
+    """Strip a known prefix and normalize to the `net.` the conversion table expects."""
     for prefix in KNOWN_PREFIXES:
         if all(name.startswith(prefix) for name in state):
             return {
@@ -93,7 +99,7 @@ def _strip_prefix(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
 
 def _assert_covers(converted: Mapping[str, torch.Tensor], reference: Path, label: str) -> None:
-    """変換後が base の現物を過不足なく満たすことを確かめる（鍵集合と shape）。"""
+    """Check that the converted state covers base's actual files exactly (key set and shapes)."""
     expected = load_file(reference)
     missing = sorted(set(expected) - set(converted))
     extra = sorted(set(converted) - set(expected))
@@ -110,11 +116,11 @@ def _assert_covers(converted: Mapping[str, torch.Tensor], reference: Path, label
 
 
 def _link(target: Path, link: Path) -> None:
-    """既存を消してから貼り直す（冪等 — 再実行で古い向き先が残らない）。
+    """Remove what exists, then link again (idempotent — a rerun leaves no stale target).
 
-    実ディレクトリが居座っている場合も消す — symlink のつもりで作った場所に実体が入るのは、
-    誰かが中身を写した後（`cp -r` は symlink を辿る）に起こる。`unlink` は
-    `IsADirectoryError` で落ちるので、種類で分ける。
+    A real directory sitting there is removed too — real contents end up where a symlink was
+    meant to be after someone copies the contents (`cp -r` follows symlinks). `unlink` fails
+    with `IsADirectoryError`, so the cases are split by kind.
     """
     if link.is_symlink() or link.is_file():
         link.unlink()
@@ -124,14 +130,17 @@ def _link(target: Path, link: Path) -> None:
 
 
 def _civitai_provenance(checkpoint: Path) -> dict[str, object] | None:
-    """checkpoint の隣の `civitai.json`（`anima.civitai` の記録）を、運ぶ欄だけに絞る。
+    """Narrow the `civitai.json` next to the checkpoint (the record of `anima.civitai`) to the
+    carried fields.
 
-    手で置いた checkpoint には無いので、無ければ `None`（ADR 0088 の帰結 — Civitai 以外の
-    ソースは `civitai.json` が無いだけで従来形の provenance になる）。**ただし親が取り込みの
-    配置（`civitai-<versionId>/`）なら、記録が無いこと自体が壊れた取り込みなので落とす** —
-    手置きと違ってここでの欠落は来歴の連鎖が切れた跡で、黙って手置き扱いに倒すと出所の
-    分からない重みが素通りする。**在って読めない・欄が欠けている場合も落とす** — 黙って節を
-    落とすと、出所の分からない重みが「provenance 付き」の体裁で出てくる。
+    A hand-placed checkpoint has none, so a missing file gives `None` (a consequence of ADR 0088
+    — a source other than Civitai simply has no `civitai.json` and gets the conventional
+    provenance). **But if the parent is the intake layout (`civitai-<versionId>/`), the missing
+    record itself means a broken intake, so it fails** — unlike a hand-placed file, a gap here is
+    the trace of a broken provenance chain, and silently treating it as hand-placed would let
+    weights of unknown origin through. **It also fails when the record exists but cannot be read
+    or lacks fields** — silently dropping the section would present weights of unknown origin as
+    "with provenance".
     """
     record_path = checkpoint.parent / CIVITAI_PROVENANCE_FILE
     if not record_path.exists():
@@ -169,7 +178,8 @@ def _civitai_provenance(checkpoint: Path) -> dict[str, object] | None:
 
 
 def _source_provenance(checkpoint: Path, base_repo: str) -> dict[str, object]:
-    """`source_provenance.json` の中身（civitai 取り込みの記録があれば `civitai` 節を足す）。"""
+    """The contents of `source_provenance.json` (with a `civitai` section when a civitai intake
+    record exists)."""
     provenance: dict[str, object] = {"file": checkpoint.name, "base_repo": base_repo}
     civitai = _civitai_provenance(checkpoint)
     if civitai is not None:
@@ -183,16 +193,18 @@ def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
     )
     from huggingface_hub import snapshot_download
 
-    # 記録は**重い処理の前に**読む（壊れていれば数分の変換を回す前に落ちる）。
+    # Read the record **before the heavy work** (if it is broken, fail before minutes of
+    # conversion).
     provenance = _source_provenance(checkpoint, base_repo)
     base = Path(snapshot_download(base_repo))
     stripped = _strip_prefix(load_file(checkpoint))
-    # MUST: text_conditioner は**変換表を通さない**、かつ**表を呼ぶ前に取り出す**。
-    # ①Cosmos の表は llm_adapter の中まで diffusers 名（`transformer_blocks.0.attn1.*`）へ
-    # 書き換えるが、base の text_conditioner は元の綴り（`blocks.0.cross_attn.*`）のままで、
-    # 読み手（`AnimaTextConditioner`）もそちらを期待する。checkpoint 側の生の鍵は前置を
-    # 剥がすだけで base と 1:1 に対応する（2026-08-22 実測）。②表は入力 dict を pop で
-    # 消費するので、呼んだ後に元の鍵を引こうとすると空になる（同日に踏んだ）。
+    # MUST: text_conditioner **does not go through the conversion table**, and **is taken out
+    # before the table is called**. (1) The Cosmos table rewrites even the inside of llm_adapter
+    # to diffusers names (`transformer_blocks.0.attn1.*`), but base's text_conditioner keeps the
+    # original spelling (`blocks.0.cross_attn.*`), and its reader (`AnimaTextConditioner`)
+    # expects that. The raw checkpoint keys map 1:1 to base once the prefix is stripped
+    # (measured 2026-08-22). (2) The table consumes its input dict with pop, so looking up the
+    # original keys after calling it finds nothing (hit the same day).
     conditioner_prefix = f"{CANONICAL_PREFIX}{CONDITIONER_PREFIX}"
     conditioner = {
         name.removeprefix(conditioner_prefix): value
@@ -210,14 +222,15 @@ def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
     for name, state in (("transformer", transformer), ("text_conditioner", conditioner)):
         target = out / name
         target.mkdir(parents=True, exist_ok=True)
-        # config は checkpoint に入っていない（アーキテクチャは base と同一）ので base から写す。
+        # The checkpoint has no config (the architecture is identical to base), so copy it from
+        # base.
         (target / "config.json").write_bytes((base / name / "config.json").read_bytes())
         save_file(state, target / WEIGHT_FILENAME)
-        print(f"[single-file] {name}: {len(state)} テンソル", flush=True)
+        print(f"[single-file] {name}: {len(state)} tensors", flush=True)
 
     for entry in SHARED_ENTRIES:
         _link(base / entry, out / entry)
-    print(f"[single-file] base から symlink: {', '.join(SHARED_ENTRIES)}", flush=True)
+    print(f"[single-file] symlinked from base: {', '.join(SHARED_ENTRIES)}", flush=True)
 
     (out / SOURCE_PROVENANCE_FILE).write_text(
         json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
@@ -228,9 +241,13 @@ def convert(checkpoint: Path, out: Path, base_repo: str = BASE_REPO) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True, help="civitai の単一ファイル")
-    parser.add_argument("--out", type=Path, required=True, help="組み直す先のディレクトリ")
-    parser.add_argument("--base-repo", default=BASE_REPO, help="不足部分を引く diffusers リポ")
+    parser.add_argument(
+        "--checkpoint", type=Path, required=True, help="civitai single-file checkpoint"
+    )
+    parser.add_argument("--out", type=Path, required=True, help="directory to rebuild into")
+    parser.add_argument(
+        "--base-repo", default=BASE_REPO, help="diffusers repository to take the missing parts from"
+    )
     args = parser.parse_args()
     convert(args.checkpoint, args.out, args.base_repo)
 

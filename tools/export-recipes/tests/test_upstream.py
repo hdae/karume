@@ -1,8 +1,9 @@
-"""上流 checkpoint の出所を手元の実物から読む（`_shared.upstream`）。
+"""Reading the provenance of an upstream checkpoint from the local files (`_shared.upstream`).
 
-固定するのは「読めないときに既定値を名乗らない」ことと、HF の綴り（取得記録の 1 行目・
-front matter の `license` / `license_name`）の読み方。組み立て側の突合
-（`assert_upstream_provenance`）は各 family の `tests/test_distribution.py` が実物の形で見る。
+Pinned here: "never claim a default value when it cannot be read", and how HF's spellings (the
+first line of the download record, `license` / `license_name` of the front matter) are read. The
+assembly-side match (`assert_upstream_provenance`) is checked in its real shape by each family's
+`tests/test_distribution.py`.
 """
 
 from __future__ import annotations
@@ -31,15 +32,16 @@ class TestSnapshotRevision:
         assert snapshot_revision(tmp_path) == FIXTURE_REVISION
 
     def test_a_checkpoint_without_the_record_fails_loudly(self, tmp_path: Path) -> None:
-        """手で置いた checkpoint（`--local-dir` を通していない）は revision を名乗れない。"""
-        with pytest.raises(UpstreamProvenanceError, match="metadata が無い"):
+        """A checkpoint placed by hand (not through `--local-dir`) cannot claim a revision."""
+        with pytest.raises(UpstreamProvenanceError, match="metadata is missing"):
             snapshot_revision(tmp_path)
 
     @pytest.mark.parametrize("first_line", ["", "main", "4e9de7a", FIXTURE_REVISION.upper()])
     def test_a_first_line_that_is_not_a_commit_sha_fails_loudly(
         self, tmp_path: Path, first_line: str
     ) -> None:
-        """枝名・短縮 SHA は revision の席に入れない（同じ綴りが別の commit を指しうる）。"""
+        """A branch name or a short SHA is not accepted as the revision (the same spelling can
+        point at another commit)."""
         record = tmp_path / SNAPSHOT_RECORD_DIR / "config.json.metadata"
         record.parent.mkdir(parents=True)
         record.write_text(f"{first_line}\netag\n0\n", encoding="utf-8")
@@ -55,7 +57,8 @@ class TestSnapshotLicense:
         assert snapshot_license(tmp_path) == "cc-by-nc-4.0"
 
     def test_a_custom_license_is_named_by_its_license_name(self, tmp_path: Path) -> None:
-        """`other` は識別子ではない — 持ち出した容器からライセンスが特定できなくなる。"""
+        """`other` is not an identifier — the license could not be identified from a container
+        taken away."""
         write_snapshot(tmp_path, license="other", extra="license_name: vendor-license\n")
 
         assert snapshot_license(tmp_path) == "vendor-license"
@@ -69,7 +72,7 @@ class TestSnapshotLicense:
     def test_a_readme_without_a_license_fails_loudly(self, tmp_path: Path) -> None:
         (tmp_path / "README.md").write_text("---\ntags:\n- x\n---\n", encoding="utf-8")
 
-        with pytest.raises(UpstreamProvenanceError, match="'license' が無い"):
+        with pytest.raises(UpstreamProvenanceError, match="has no 'license'"):
             snapshot_license(tmp_path)
 
     def test_a_readme_without_front_matter_fails_loudly(self, tmp_path: Path) -> None:
@@ -79,12 +82,13 @@ class TestSnapshotLicense:
             snapshot_license(tmp_path)
 
     def test_a_license_mentioned_below_the_front_matter_is_not_read(self, tmp_path: Path) -> None:
-        """本文の `license:` は宣言ではない（front matter の外は読まない）。"""
+        """A `license:` in the body is not a declaration (nothing outside the front matter is
+        read)."""
         (tmp_path / "README.md").write_text(
             "---\ntags:\n- x\n---\nlicense: mit\n", encoding="utf-8"
         )
 
-        with pytest.raises(UpstreamProvenanceError, match="'license' が無い"):
+        with pytest.raises(UpstreamProvenanceError, match="has no 'license'"):
             snapshot_license(tmp_path)
 
 
@@ -98,7 +102,8 @@ class TestSnapshotProvenance:
 
 
 class TestCardLicenseIdentifier:
-    """カードの frontmatter から容器へ焼く識別子（手元に上流 README が無い family の席）。"""
+    """The identifier written into the container from the card's frontmatter (for families with
+    no upstream README at hand)."""
 
     def test_a_standard_license_is_the_identifier_itself(self) -> None:
         metadata = CardMetadata(pipeline_tag="t", base_model=("a/b",), license="mit", tags=())
@@ -115,5 +120,5 @@ class TestCardLicenseIdentifier:
     def test_other_without_a_license_name_fails_loudly(self) -> None:
         metadata = CardMetadata(pipeline_tag="t", base_model=("a/b",), license="other", tags=())
 
-        with pytest.raises(UpstreamProvenanceError, match="card は 'license: other'"):
+        with pytest.raises(UpstreamProvenanceError, match="card has 'license: other'"):
             card_license_identifier(metadata, "card")

@@ -1,24 +1,26 @@
-"""`wan/dit_reference.py`（DiT の層逐次の f64 / f32 参照）と `wan/dit_probe.py`（5B の RAM の
-下見）の約束事（ADR 0121 決定 7・段 0）。
+"""The contract of `wan/dit_reference.py` (the layer-by-layer f64 / f32 reference of the DiT) and
+`wan/dit_probe.py` (the RAM probe for the 5B) (ADR 0121 decision 7, step 0).
 
-固定するのは、壊れても例外が出ず**数だけが静かにずれる**側:
+It pins the side where a breakage raises no exception and **only the numbers drift silently**:
 
-- 層逐次の f32 / f64 が、上流のモデル全体で回した参照（f32 は `reference_dit_layers`・f64 は
-  `model.double()` + `reference_dit_f64` — Wan2.1 の golden の作り方）とビット一致すること（f16 と
-  i8 の両系列の丸め・読み口は in-memory のモデル / 容器 / checkpoint の 3 つ）
-- 容器の i8 の逆量子化が f32 で行われること（f64 で行うと既存の golden と割れる — 値は
-  `test_it_reads_every_weight_at_the_fake_quant_value`、f64 の値を返す読み口の拒否は
-  `test_a_source_returning_f64_is_rejected`）
-- 同時に実体を持つブロックが 1 個であること（5B の f64 の RAM の見積りの前提）
-- f64 の経路で f64 以外の浮動小数を作ったら止まること（重みの読み込みは監視の外）
-- 上流の mmap のずれの表が `from_pretrained` の実際の番地と一致すること
-- 突き合わせ（`compare_tensors`）が 1 ビットの違いを拾うこと
-- 5B の下見の meta trace のグラフが実重みの export と同じ構造で、行の塊ごとの i8 が fake-quant と
-  同じ値になること
+- layer-by-layer f32 / f64 is bit-identical to the reference run on the whole upstream model (f32
+  is `reference_dit_layers`, f64 is `model.double()` + `reference_dit_f64` — how the Wan2.1 goldens
+  are made) (with the rounding of both the f16 and the i8 series, and with all 3 sources: the
+  in-memory model, the container and the checkpoint)
+- the i8 dequantization of the container is done in f32 (doing it in f64 splits from the existing
+  goldens — the values are `test_it_reads_every_weight_at_the_fake_quant_value`, and the rejection
+  of a source that returns f64 values is `test_a_source_returning_f64_is_rejected`)
+- only one block is materialised at a time (the premise of the RAM estimate for the 5B in f64)
+- the f64 path stops if it creates a floating-point value other than f64 (weight loading is
+  outside the watch)
+- the table of upstream mmap offsets matches the actual addresses of `from_pretrained`
+- the comparison (`compare_tensors`) catches a one-bit difference
+- the graph of the meta trace of the 5B probe has the same structure as the real-weight export,
+  and the per-row-block i8 gives the same values as fake-quant
 
-合成モデル（乱数初期化の小さな `WanTransformer3DModel` — `test_dit_patch.TINY_DIT`）だけで回す。
-1.3B の実物の golden との突き合わせは時間がかかるので
-`python -m wan.dit_reference compare`（runbook）。
+Runs only on a synthetic model (a small randomly initialised `WanTransformer3DModel` —
+`test_dit_patch.TINY_DIT`). The comparison with the real 1.3B goldens takes long, so it is
+`python -m wan.dit_reference compare` (runbook).
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from torch import nn
 from wan import dit_patch, dit_reference, export_dit
 from wan.tests.test_dit_patch import TINY_DIT, TINY_LATENT
 
-#: 合成の層数（TINY_DIT の num_layers）。
+#: The synthetic layer count (num_layers of TINY_DIT).
 LAYERS = int(TINY_DIT["num_layers"])
 
 
@@ -61,14 +63,15 @@ def _rounded(dtype: str, seed: int = 20261004) -> nn.Module:
 
 
 def _whole_f64(model: nn.Module, inputs: tuple[torch.Tensor, ...]) -> torch.Tensor:
-    """Wan2.1 の f64 の参照の作り方（モデル全体を f64 にして上流の forward）。"""
+    """How the Wan2.1 f64 reference is made (the whole model in f64, then the upstream forward)."""
     with torch.no_grad():
         return dit_patch.reference_dit_f64(copy.deepcopy(model).double(), *inputs)
 
 
 @pytest.mark.parametrize("dtype", ["f16", "i8"])
 class TestLayerwiseMatchesTheWholeModel:
-    """in-memory のモデルを読み口にした層逐次 = モデル全体で回した上流の forward（ビット一致）。"""
+    """Layer by layer with the in-memory model as the source = the upstream forward run on the
+    whole model (bit-identical)."""
 
     def test_f32_output_and_every_block_are_bit_identical(self, dtype: str) -> None:
         model = _rounded(dtype)
@@ -97,7 +100,7 @@ class TestLayerwiseMatchesTheWholeModel:
         assert torch.equal(got.output, _whole_f64(model, inputs))
 
     def test_a_different_weight_breaks_the_identity(self, dtype: str) -> None:
-        """故障注入: 1 本の重みを 1 ULP ずらすと一致しない（恒真の門でないこと）。"""
+        """Fault injection: moving one weight by 1 ULP breaks the match (not a vacuous check)."""
         model = _rounded(dtype)
         inputs = _inputs()
         expected = _whole_f64(model, inputs)
@@ -116,7 +119,8 @@ class TestLayerwiseMatchesTheWholeModel:
 
 class TestTheFloat64Path:
     def test_an_upstream_f32_cast_left_in_place_is_caught(self, monkeypatch) -> None:
-        """`.float()` の素通しを外すと（上流の norm と残差の f32 化がそのまま走ると）止まる。"""
+        """Removing the `.float()` pass-through (so that upstream's f32 conversion of the norms and
+        residuals runs as is) stops it."""
         model = _rounded("i8")
         monkeypatch.setattr(dit_patch, "_float_keeps_float64", nullcontext)
 
@@ -137,9 +141,10 @@ class TestTheFloat64Path:
     def test_a_two_dimensional_timestep_stops_at_the_entrance_naming_the_reference_wrapper(
         self,
     ) -> None:
-        """2 次元の timestep（`[1,S]` — diffusers の M = S の経路）は観測用で f64 にしない — 監視の
-        奥で落ちる前に、トークンごとの時刻は段 1 の参照ラッパ（`condition=`）で渡すと分かる文言で
-        入口で止まる。"""
+        """A two-dimensional timestep (`[1,S]` — diffusers' M = S path) is for observation and is
+        not made f64 — instead of failing deep inside the watch, it stops at the entrance with a
+        message saying that per-token times are passed through the reference wrapper of step 1
+        (`condition=`)."""
         model = _rounded("i8")
         latents, _, embeds = _inputs()
         tokens = TINY_LATENT[0] * (TINY_LATENT[1] // 2) * (TINY_LATENT[2] // 2)
@@ -151,7 +156,8 @@ class TestTheFloat64Path:
             )
 
     def test_a_source_returning_f64_is_rejected(self) -> None:
-        """読み口は f32 を返す — f64 の値を受けると「f64 で逆量子化した重み」が素通りしうる。"""
+        """The source returns f32 — accepting f64 values could let "weights dequantized in f64"
+        slip through."""
         model = _rounded("i8")
 
         class Wide:
@@ -162,7 +168,7 @@ class TestTheFloat64Path:
             dit_reference.LayerwiseDit(model.config).forward(Wide(), torch.float64, *_inputs())
 
     def test_a_wrongly_shaped_weight_fails_loudly(self) -> None:
-        """形を戻してよいのは patch 埋め込み（Linear 化の形）だけ。"""
+        """Only the patch embedding (the Linear-form shape) may have its shape restored."""
         model = _rounded("i8")
 
         class Flat:
@@ -176,7 +182,8 @@ class TestTheFloat64Path:
 
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory) -> Path:
-    """上流の `save_pretrained` の形（config + 単一の safetensors）の合成 DiT。"""
+    """A synthetic DiT in the shape of upstream `save_pretrained` (config + a single
+    safetensors)."""
     directory = tmp_path_factory.mktemp("dit-tiny")
     _tiny().save_pretrained(directory)
     return directory
@@ -189,7 +196,8 @@ def _upstream(checkpoint: Path) -> nn.Module:
 
 
 def _container(model: nn.Module, dtype: str, directory: Path) -> Path:
-    """合成のモデルを丸めて、系列と同じ形の容器を書く（`export_dit.emit` と同じ引数の export）。"""
+    """Round the synthetic model and write a container of the same form as the series (an export
+    with the same arguments as `export_dit.emit`)."""
     from karume.container import Provenance
     from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
     from karume.pipeline import export_to_file
@@ -221,12 +229,13 @@ def _container(model: nn.Module, dtype: str, directory: Path) -> Path:
 
 @pytest.mark.parametrize("dtype", ["f16", "i8"])
 class TestTheContainerSource:
-    """系列の容器から読む層逐次（5B の経路）= 上流のモデル全体の参照。"""
+    """Layer by layer read from the series container (the 5B path) = the whole-model upstream
+    reference."""
 
     def test_it_reads_every_weight_at_the_fake_quant_value(
         self, dtype: str, checkpoint: Path, tmp_path: Path
     ) -> None:
-        """i8 は packed × scale を f32 で掛けた値（fake-quant と同じ）・f16 は f16 → f32。"""
+        """i8 is packed × scale multiplied in f32 (the same as fake-quant); f16 is f16 → f32."""
         model = _upstream(checkpoint)
         path = _container(model, dtype, tmp_path)
         source = dit_reference.ContainerDitWeights(path)
@@ -262,10 +271,12 @@ class TestOneBlockAtATime:
     def test_the_previous_block_is_released_before_the_next_is_read(
         self, dtype: torch.dtype
     ) -> None:
-        """次のブロックの重みを読み始める時点で、実体を持つ（meta でない）層逐次のブロックは 0 個。
+        """When the weights of the next block start to load, 0 layer-by-layer blocks are
+        materialised (not meta).
 
-        上流の `for block in self.blocks` のループ変数は前のブロックを握ったまま次を求めるので、
-        前のブロックの重みを手放さないと 2 個が同時に生きる（5B の f64 で 1.22 → 2.44 GiB）。
+        The loop variable of upstream's `for block in self.blocks` still holds the previous block
+        while the next one is requested, so unless the previous block's weights are released, 2
+        blocks are alive at once (1.22 → 2.44 GiB for the 5B in f64).
         """
         import gc
 
@@ -280,7 +291,7 @@ class TestOneBlockAtATime:
         class Counting:
             def tensor(self, key: str) -> torch.Tensor:
                 if key.startswith("blocks.") and key.endswith(f".{first}"):
-                    gc.collect()  # 到達できない循環の残り（回収待ち）は「生きている」に数えない
+                    gc.collect()  # unreachable leftover cycles (not yet collected) are not "alive"
                     live.append(
                         sum(
                             type(item) is transformer_wan.WanTransformerBlock
@@ -298,7 +309,8 @@ class TestOneBlockAtATime:
 
 class TestTheUpstreamAlignment:
     def test_it_predicts_where_from_pretrained_puts_every_weight(self, checkpoint: Path) -> None:
-        """ずれの表 = `from_pretrained` で読んだ重みの実際の番地の 64 バイト境界からのずれ。"""
+        """The offset table = the offsets from a 64-byte boundary of the actual addresses of the
+        weights loaded by `from_pretrained`."""
         model = _upstream(checkpoint)
         table = dit_reference.upstream_alignment(checkpoint)
 
@@ -327,7 +339,8 @@ class TestTheUpstreamAlignment:
 
 
 class TestTheCheckpointSource:
-    """checkpoint から 1 本ずつ丸める読み口 = モデル全体に掛けた丸め（ビット一致）。"""
+    """The source that rounds from the checkpoint one weight at a time = rounding applied to the
+    whole model (bit-identical)."""
 
     @pytest.mark.parametrize("dtype", ["f16", "i8"])
     def test_each_weight_equals_the_whole_model_rounding(
@@ -350,8 +363,8 @@ class TestTheCheckpointSource:
             assert torch.equal(source.tensor(key), value), key
 
     def test_the_quant_keys_are_the_weights_the_export_rounds(self) -> None:
-        """量子化の対象 = export の `fake_quant_i8` の scale 台帳のキー（linear と patch
-        埋め込み）。"""
+        """The quantization targets = the keys of the scale ledger of the export's
+        `fake_quant_i8` (the linears and the patch embedding)."""
         model = _tiny()
         report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
 
@@ -411,7 +424,7 @@ def _row(case: str, mode: str, version: int = dit_reference.COMPARE_VERSION) -> 
 
 
 class TestTheResumeMarker:
-    """`results.jsonl` の行のうち、この実行で「済み」に数えるもの（再開の目印）。"""
+    """The rows of `results.jsonl` this run counts as "done" (the resume marker)."""
 
     def _write(self, tmp_path: Path, text: str) -> Path:
         path = tmp_path / dit_reference.RESULTS_FILE
@@ -422,14 +435,15 @@ class TestTheResumeMarker:
         return "".join(json.dumps(row) + "\n" for row in rows)
 
     def test_an_f64_only_row_does_not_count_for_a_full_run(self, tmp_path: Path) -> None:
-        """f64 だけの行で全量の実行を飛ばすと、f32 の output と block を比べないまま緑になる。"""
+        """Skipping a full run because of an f64-only row would turn green without comparing the
+        f32 output and blocks."""
         path = self._write(tmp_path, self._lines(_row("a", "f64-only"), _row("b", "full")))
 
         assert sorted(dit_reference._done(path, "full")) == ["b"]
         assert sorted(dit_reference._done(path, "f64-only")) == ["a", "b"]
 
     def test_a_row_of_another_compare_version_does_not_count(self, tmp_path: Path) -> None:
-        old = {"case": "a", "status": "equal"}  # 版の欄を持たない行（版 1 の形）
+        old = {"case": "a", "status": "equal"}  # a row without the version field (version 1)
         path = self._write(
             tmp_path,
             self._lines(
@@ -465,7 +479,8 @@ class TestTheResumeMarker:
 
 
 class TestTheExportDitRoute:
-    """`export_dit.float64_references` は層逐次を通り、Wan2.1 の全体 f64 の値を変えない。"""
+    """`export_dit.float64_references` goes through the layer-by-layer path and does not change
+    the Wan2.1 whole-model f64 values."""
 
     def test_it_reproduces_the_whole_model_f64_reference(self, monkeypatch) -> None:
         model = _rounded("i8")
@@ -482,7 +497,8 @@ class TestTheExportDitRoute:
 
     @pytest.mark.parametrize("dtype", ["f16", "i8"])
     def test_a_model_before_the_fake_quant_is_refused(self, dtype: str) -> None:
-        """呼ぶ順が崩れて丸める前のモデルが渡ると止まる（丸めていない f64 golden を書かない）。"""
+        """If the call order breaks and a model before rounding is passed, it stops (no unrounded
+        f64 golden is written)."""
         spec = export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
 
         with pytest.raises(AssertionError, match="丸めの前の重み"):
@@ -494,7 +510,7 @@ class TestTheExportDitRoute:
         assert export_dit.float64_references(_rounded("f16"), [spec], "f16") == {}
 
 
-# ---- 5B の下見（`wan.dit_probe`）--------------------------------------------------------
+# ---- the 5B probe (`wan.dit_probe`) ------------------------------------------------------
 
 
 def _stage(name: str) -> Any:
@@ -505,9 +521,11 @@ def _stage(name: str) -> Any:
 
 class TestTheProbe:
     def test_the_meta_trace_has_the_structure_of_the_real_weight_export(self) -> None:
-        """meta の重み + meta の例示入力の trace = 実重みの export と同じ op・配線・値の形。
+        """The trace of meta weights + meta example inputs = the same ops, wiring and value shapes
+        as the real-weight export.
 
-        値の名前（FX の連番）だけは違う — 構造で比べる（ノードの出力を生産者の位置へ置き換える）。
+        Only the value names (FX sequence numbers) differ — compared by structure (each node output
+        is replaced by the position of its producer).
         """
         from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
         from karume.pipeline import export_module
@@ -536,7 +554,8 @@ class TestTheProbe:
         )
 
     def test_prepare_rounds_like_the_fake_quant_and_stores_i8_linears(self, checkpoint: Path):
-        """行の塊ごとの i8（patch 埋め込みは Conv3d を 2 次元に見て）= モデル全体の fake-quant。"""
+        """Per-row-block i8 (the patch embedding with its Conv3d seen as two-dimensional) = the
+        whole-model fake-quant."""
         from wan import dit_probe
 
         export, summary = dit_probe.prepare(checkpoint, stage=_stage, sym_max=256, chunk_rows=5)
@@ -559,8 +578,8 @@ class TestTheProbe:
 
 class TestTheProbeMemory:
     def test_the_estimate_counts_the_real_parameters(self) -> None:
-        """f32 = 上流の全パラメータ・層逐次の f64 = ブロックの外 + 1 ブロック（meta の雛形から
-        数えた値が、実体のモデルの数と同じ）。"""
+        """f32 = all upstream parameters; layer-by-layer f64 = outside the blocks + 1 block (the
+        count from the meta skeleton equals the count of the materialised model)."""
         from wan import dit_probe
 
         model = _tiny()
@@ -582,13 +601,13 @@ class TestTheProbeMemory:
         from wan import dit_probe
 
         def never(*_args: Any) -> None:
-            raise AssertionError("RAM が足りないのに上流を読んだ")
+            raise AssertionError("read the upstream although the RAM is insufficient")
 
         monkeypatch.setattr(dit_probe, "transformer_dir", lambda _model: checkpoint)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
         monkeypatch.setattr(export_dit, "load_transformer", never)
 
-        with pytest.raises(dit_probe.DitProbeError, match=r"load の前の MemAvailable 1\.00 GiB"):
+        with pytest.raises(dit_probe.DitProbeError, match=r"MemAvailable before load is 1\.00 GiB"):
             dit_probe.run_eager("t2v-1.3b", tmp_path)
 
     def test_the_default_outputs_live_under_the_bench_root(self) -> None:
@@ -606,7 +625,8 @@ _PROBE_SPEC = export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 1)
 
 
 def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
-    """グラフの構造（op・入力の生産者・attrs・出力の形）— 値の名前に依らない。"""
+    """The structure of a graph (op, input producers, attrs, output shapes) — independent of value
+    names."""
     document = json.loads(graph.to_json())
     produced: dict[str, str] = {}
     rows = []
@@ -621,12 +641,13 @@ def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
     return rows
 
 
-# ---- 層逐次のブロックごとの口と、f32 / f64 の差の切り分け（ADR 0121 段 1）----------------
+# ---- layer-by-layer per-block entry points, isolating the f32 / f64 gap (ADR 0121 step 1) ----
 
 
 class TestTheBlockHooks:
     def test_on_output_sees_every_block_output_without_keeping_it(self) -> None:
-        """`on_output` が受けるブロックの出力 = `collect_blocks` が集める出力（同じ順・同じ値）。"""
+        """The block outputs `on_output` receives = the outputs `collect_blocks` collects (same
+        order, same values)."""
         model = _rounded("i8")
         writer = dit_reference.LayerwiseDit(model.config)
         seen: list[tuple[int, torch.Tensor]] = []
@@ -643,7 +664,8 @@ class TestTheBlockHooks:
         assert all(torch.equal(a, b) for (_, a), b in zip(seen, got.blocks, strict=True))
 
     def test_on_output_runs_outside_the_float64_watch(self) -> None:
-        """f64 の回の受け手が f32 の値を作っても（記録との比較）、f64 の監視は止めない。"""
+        """Even if the receiver of the f64 run creates f32 values (the comparison with the record),
+        the f64 watch does not stop it."""
         model = _rounded("i8")
         writer = dit_reference.LayerwiseDit(model.config)
 
@@ -687,7 +709,8 @@ def _tiny_text(monkeypatch) -> None:
 
 
 class TestTheProbeDiagnosis:
-    """`wan.dit_probe reference` の切り分けの口（text の差し替え・ブロックごとの差・切り詰め）。"""
+    """The isolation entry points of `wan.dit_probe reference` (text replacement, per-block
+    differences, truncation)."""
 
     def test_a_named_text_keeps_the_latents_and_swaps_only_the_context(
         self, tmp_path: Path, monkeypatch
@@ -715,7 +738,7 @@ class TestTheProbeDiagnosis:
         assert torch.equal(named[0], synthetic[0])
         assert torch.equal(named[1], synthetic[1])
         assert torch.equal(named[2], embeds.unsqueeze(0))
-        with pytest.raises(dit_probe.DitProbeError, match="'ferret' が無い"):
+        with pytest.raises(dit_probe.DitProbeError, match="has no 'ferret'"):
             dit_probe.probe_inputs(writer, spec, "ferret")
 
     def test_growth_records_one_row_per_block_and_cleans_its_spill(

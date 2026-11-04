@@ -1,6 +1,6 @@
-"""Depth Anything V2 recipe のテスト。
+"""Tests of the Depth Anything V2 recipe.
 
-パッケージにしてあるのは、family が増えたときに `<family>/tests/test_export.py` の
-**basename が衝突しない**ようにするため（pytest の既定 import mode は `__init__.py` の
-無いディレクトリのテストを basename だけのモジュール名で読む）。
+This is a package so that `<family>/tests/test_export.py` files **do not collide by basename** as
+families are added (pytest's default import mode loads tests in a directory without `__init__.py`
+under a module name made of the basename alone).
 """

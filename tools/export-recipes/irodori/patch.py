@@ -1,42 +1,49 @@
-"""Irodori-TTS v4 を torch.export 可能にするパッチ層。
+"""Patch layer that makes Irodori-TTS v4 exportable with torch.export.
 
-対象は**テキスト条件エンコーダ**（同梱 ModernBERT-ja-310m backbone）と、Irodori 自前の
-Transformer 系（speaker encoder = `ReferenceLatentEncoder` / duration predictor / DiT）。
-パッチは 4 種類:
+The targets are the **text condition encoder** (the bundled ModernBERT-ja-310m backbone) and
+Irodori's own Transformer modules (speaker encoder = `ReferenceLatentEncoder` / duration
+predictor / DiT). There are four patches:
 
-1. **ModernBertAttention の qkv 取り出しを rank ≤ 4 に落とす** — 原実装は
-   `Wqkv(x).view(B, T, 3, H, D)` の **rank 5** を作ってから `unbind(dim=-3)` で 3 本に割る。
-   分解後は rank 5 の `slice` になり、strided カーネルの rank 上限（`ops.STRIDED_RANK` = 4）に
-   当たって export できない。最終次元を 3 等分する slice に置き換えると、同じ要素が同じ順序で
-   同じ 3 本に落ちる（下の `_flat_qkv_attention_forward` の同値の根拠）。
-2. **complex 形 RoPE の実数化** — 原実装（`irodori_tts.model.apply_rotary_emb`）は
-   `view_as_complex` で `[B,S,H,D/2]` の complex64 を作り、complex 乗算してから
-   `view_as_real` で戻す。complex は IR の dtype 語彙に無く、実数対の rank 5
-   （`[B,S,H,D/2,2]`）に開くと今度は rank 上限に当たる。**rank 4 のまま**「隣接ペアの入れ替え
-   + cos/sin の要素倍」で書き直す（下の `_real_pair_apply_rotary_emb` の同値の根拠）。
-3. **rank-2 weight の RMSNorm を rms_norm + mul へ分割** — q/k ノルムの weight は
-   `[heads, head_dim]`（head ごとに別のスケール）で、IR の `rms_norm` 契約
-   「weight = 正規化軸長の rank-1」（ADR 0017）に入らない。正規化そのものは最終次元
-   （head_dim）1 本なので、`rms_norm`（weight 無し = ones）と weight の broadcast 乗算へ
-   割る。**rank-1 weight の経路（既存の全 RMSNorm）は逐語のまま**通す。
-4. **LowRankAdaLN の weightless RMS を `rms_norm` へ畳む** — `LowRankAdaLN.forward` は
-   `RMSNorm` モジュールを使わず正規化を式で直書きしており（`x * rsqrt(mean(x²)+eps)`）、
-   `normalize._fold_rms_norm` は weight つき rank-1 の形しか掴まないので `aten.mean.dim` /
-   `aten.rsqrt.default` が IR に残る。`F.rms_norm(x, (D,), None, eps)`（weight 無し =
-   ones 合成）へ差し替えると既存の畳み込み経路にそのまま乗る（下の
-   `_folded_rms_low_rank_adaln_forward`）。
+1. **Bring ModernBertAttention's qkv extraction down to rank ≤ 4** — the original builds the
+   **rank 5** `Wqkv(x).view(B, T, 3, H, D)` and then splits it into three with
+   `unbind(dim=-3)`. After decomposition that becomes a rank-5 `slice`, which hits the strided
+   kernels' rank limit (`ops.STRIDED_RANK` = 4) and cannot be exported. Replacing it with
+   slices that cut the last dimension into three equal parts puts the same elements, in the same
+   order, into the same three tensors (the equivalence argument of `_flat_qkv_attention_forward`
+   below).
+2. **Rewrite the complex-valued RoPE in real arithmetic** — the original
+   (`irodori_tts.model.apply_rotary_emb`) builds a complex64 `[B,S,H,D/2]` with
+   `view_as_complex`, multiplies in complex and converts back with `view_as_real`. complex is
+   not in the IR's dtype vocabulary, and expanding into real pairs at rank 5 (`[B,S,H,D/2,2]`)
+   hits the rank limit instead. It is rewritten **at rank 4** as "swap adjacent pairs +
+   elementwise multiply by cos/sin" (the equivalence argument of `_real_pair_apply_rotary_emb`
+   below).
+3. **Split an RMSNorm with a rank-2 weight into rms_norm + mul** — the q/k norm weight is
+   `[heads, head_dim]` (a separate scale per head), which does not fit the IR's `rms_norm`
+   contract "weight = rank 1 of the normalized axis length" (ADR 0017). The normalization itself
+   is over the last dimension (head_dim) only, so it is split into `rms_norm` (no weight = ones)
+   and a broadcast multiply by the weight. **The rank-1 weight path (every existing RMSNorm)
+   passes through verbatim.**
+4. **Fold LowRankAdaLN's weightless RMS into `rms_norm`** — `LowRankAdaLN.forward` writes the
+   normalization out as an expression (`x * rsqrt(mean(x²)+eps)`) instead of using the
+   `RMSNorm` module, and `normalize._fold_rms_norm` only matches the rank-1 form with a weight,
+   so `aten.mean.dim` / `aten.rsqrt.default` stay in the IR. Replacing it with
+   `F.rms_norm(x, (D,), None, eps)` (no weight = synthesized ones) puts it on the existing fold
+   path as is (`_folded_rms_low_rank_adaln_forward` below).
 
-MUST: パッチ後のモジュールはパッチ前と **eager 同値**であること（`irodori/export.py` が
-実重み・全 golden ケースで実測し、差が出たら export ごと落とす）。3 と 4 は演算列が 1 対 1 で
-**ビット一致**が構造的に成り立つ。2 は式としては厳密同値だが**ビット一致は形依存**
-（`_real_pair_apply_rotary_emb` の注記 — この重みの head_dim 64 では実測 0）。
+MUST: the patched modules are **eager-equivalent** to the unpatched ones (`irodori/export.py`
+measures this with the real weights on every golden case and fails the whole export on any
+difference). For 3 and 4 the op sequences map one to one, so **bit identity** holds
+structurally. 2 is exactly equivalent as a formula, but **bit identity depends on the shape**
+(the note on `_real_pair_apply_rotary_emb` — measured 0 at this checkpoint's head_dim 64).
 
-MUST: パッチはクラス属性の**プロセス全域**差し替えなので、「パッチ前の参照」を採れるのは
-1 プロセスにつき 1 回だけ。適用済みかどうかは {@link patches_applied} が答え、順序違反は
-呼び出し側（`irodori/export.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
+MUST: the patches replace class attributes **process-wide**, so the "unpatched reference" can
+be taken only once per process. {@link patches_applied} says whether they are applied, and the
+caller (`irodori/export.py`) rejects an ordering violation loudly (it blocks the check from
+becoming vacuous, i.e. a false PASS).
 
-NOTE: transformers のモデリングコードを差し替えるので、版は `transformers==5.14.1` に
-ピンして使う（`irodori/export.py` の docstring）。
+NOTE: the patches replace transformers' modeling code, so the version is pinned to
+`transformers==5.14.1` (the docstring of `irodori/export.py`).
 """
 
 from __future__ import annotations
@@ -45,19 +52,22 @@ from typing import Any
 
 import torch
 
-#: パッチ適用済みフラグ。プロセス全域差し替えの副作用を可視化するためだけに持つ
-#: （パッチ後に「パッチ前の参照」を採ると同値検証が恒真化する）。
+#: Whether the patches are applied. Kept only to make the side effect of the process-wide
+#: replacement visible (taking the "unpatched reference" after patching makes the equivalence
+#: check vacuous).
 _APPLIED = False
 
-#: 差し替え前の `irodori_tts.model.apply_rotary_emb`。complex 表で呼ばれた経路の委譲先で、
-#: 大域を差し替えた後に元の実装を名前で引くと自分自身に戻る（無限再帰）ので捕まえておく。
+#: `irodori_tts.model.apply_rotary_emb` before replacement. It is the delegate for calls made
+#: with a complex table; it is captured because looking the original up by name after the
+#: module global is replaced would return this function itself (infinite recursion).
 _ORIGINAL_APPLY_ROTARY_EMB: Any = None
 
 
 def patches_applied() -> bool:
-    """このプロセスで既にパッチを当てたか。
+    """Whether the patches have already been applied in this process.
 
-    参照値を採る側（同値検証）が「まだ当てていない」ことを assert するための門。
+    The check that lets the side taking reference values (the equivalence check) assert that
+    they are "not applied yet".
     """
     return _APPLIED
 
@@ -77,15 +87,16 @@ def _flat_qkv_attention_forward(
     attention_mask: torch.Tensor | None = None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """`ModernBertAttention.forward` の同値実装（rank 5 を作らない）。
+    """Equivalent implementation of `ModernBertAttention.forward` (builds no rank 5).
 
-    原実装との差は **qkv の割り方 1 点だけ**で、残りは逐語（RoPE の適用・attention interface
-    への引数・出力の reshape と `Wo` / `out_drop`）。
+    The only difference from the original is **how qkv is split**; the rest is verbatim (RoPE,
+    the arguments to the attention interface, the output reshape and `Wo` / `out_drop`).
 
-    同値の根拠: 原実装の `view(B, T, 3, H, D)` は最終次元 `3·H·D` を C 順で `(3, H, D)` に
-    括り直すだけなので、`unbind(dim=-3)` の第 i 本は元の最終次元の `[i·H·D, (i+1)·H·D)` 区間
-    そのもの。ここでの `slice` + `view(B, T, H, D)` は同じ区間を同じ順序で取り出す
-    （コピーの有無しか違わない）。
+    Why it is equivalent: the original's `view(B, T, 3, H, D)` only regroups the last dimension
+    `3·H·D` as `(3, H, D)` in C order, so the i-th tensor of `unbind(dim=-3)` is exactly the
+    interval `[i·H·D, (i+1)·H·D)` of the original last dimension. The `slice` +
+    `view(B, T, H, D)` here takes the same interval in the same order (the only difference is
+    whether a copy is made).
     """
     batch, seq = hidden_states.shape[0], hidden_states.shape[1]
     heads = self.config.num_attention_heads
@@ -123,21 +134,24 @@ def _flat_qkv_attention_forward(
     return self.out_drop(self.Wo(attn_output)), attn_weights
 
 
-#: 実数形 RoPE 表の軸 1 の並び（`[S, 2, D]` の `0` = cos・`1` = sin）。表は
-#: {@link real_pair_rope_table} が作り、export 台本が Tmax ぶん焼いて渡す。
+#: Order along axis 1 of the real-valued RoPE table (`[S, 2, D]`: `0` = cos, `1` = sin). The
+#: table is built by {@link real_pair_rope_table}; the export script bakes Tmax rows and passes
+#: it in.
 ROPE_TABLE_COS, ROPE_TABLE_SIN = 0, 1
 
 
 def real_pair_rope_table(head_dim: int, length: int) -> torch.Tensor:
-    """`[length, 2, head_dim]` の実数形 RoPE 表（`irodori_tts` の complex 表と同じ角度）。
+    """Real-valued RoPE table `[length, 2, head_dim]` (the same angles as `irodori_tts`'s
+    complex table).
 
-    上流の `precompute_freqs_cis(D, S)` が返す complex64 `[S, D/2]` の実部 / 虚部を、
-    **隣接ペアへ要素複製**して `[S, D]` へ広げたもの。complex 乗算
-    `(a+bi)(c+di) = (ac−bd) + (ad+bc)i` を実数の rank-4 演算で書くとき、cos / sin は
-    ペアの両成分に同じ値が要る（{@link _real_pair_apply_rotary_emb}）。
+    The real / imaginary parts of the complex64 `[S, D/2]` that upstream's
+    `precompute_freqs_cis(D, S)` returns, **duplicated into adjacent pairs** to widen them to
+    `[S, D]`. When the complex multiply `(a+bi)(c+di) = (ac−bd) + (ad+bc)i` is written as real
+    rank-4 ops, both components of a pair need the same cos / sin value
+    ({@link _real_pair_apply_rotary_emb}).
 
-    MUST: 角度の式は上流の関数から採る（写さない）— θ や次元割りが上流で変われば、写した式は
-    黙って古いまま通る。
+    MUST: the angle formula comes from the upstream function (not a copy) — if upstream changes θ
+    or the dimension split, a copied formula would silently stay at the old one.
     """
     from irodori_tts.model import precompute_freqs_cis
 
@@ -148,40 +162,46 @@ def real_pair_rope_table(head_dim: int, length: int) -> torch.Tensor:
 
 
 def _real_pair_apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    """`irodori_tts.model.apply_rotary_emb` の同値実装（complex を作らない）。
+    """Equivalent implementation of `irodori_tts.model.apply_rotary_emb` (builds no complex).
 
-    `freqs_cis` が complex なら**原実装へそのまま委譲**する（このパッチはモジュール全域の
-    差し替えなので、表を実数化していない呼び出し側の意味論を変えない）。実数表
-    `[S, 2, D]`（{@link real_pair_rope_table}）で呼ばれた経路だけが下の実数式を通る。
+    When `freqs_cis` is complex it **delegates to the original as is** (this patch replaces the
+    function module-wide, so it must not change the semantics for callers that did not convert
+    the table to real). Only calls made with the real table `[S, 2, D]`
+    ({@link real_pair_rope_table}) take the real-valued formula below.
 
-    同値の根拠: 原実装は `x` の最終次元を隣接 2 成分ずつ複素数 `a+bi` と見なし
-    `(a+bi)(c+di) = (ac−bd) + (ad+bc)i` を計算する。ここでは同じ `x` に対し
+    Why it is equivalent: the original treats each two adjacent components of `x`'s last
+    dimension as a complex number `a+bi` and computes `(a+bi)(c+di) = (ac−bd) + (ad+bc)i`. Here,
+    for the same `x`,
 
-    - `x * cos` が `(a·c, b·c)`
-    - 隣接ペアを入れ替えて前半を符号反転した `(−b, a)` に `sin` を掛けたものが `(−b·d, a·d)`
+    - `x * cos` is `(a·c, b·c)`
+    - `(−b, a)` (adjacent pairs swapped, the first negated) times `sin` is `(−b·d, a·d)`
 
-    となり、和は `(a·c − b·d, b·c + a·d)` で成分ごとに一致する。`x − y` を `x + (−y)` に
-    置き換えても f32 の丸めは変わらない（乗算は正確丸めなので `(−b)·d == −(b·d)`）。
+    and the sum `(a·c − b·d, b·c + a·d)` matches component by component. Replacing `x − y` with
+    `x + (−y)` does not change the f32 rounding (multiplication is correctly rounded, so
+    `(−b)·d == −(b·d)`).
 
-    NOTE: **ビット一致は形依存**。head_dim 64（この重みの全 8 層）では実測 0 だが、
-    head_dim 8 では 1 ulp ずれる（`irodori/tests/test_patch.py` が両方を固定している）。
-    _推測_: torch の
-    complex 乗算が最終次元長ごとに別カーネルを選び、積和が FMA へ縮約される形がある —
-    倍精度参照からの誤差は両者同オーダーで、どちらが正しいという差ではない。したがって
-    「式として厳密同値・丸めは実測で確認」が主張の正確な形で、実重みの門
-    （`irodori/export.py` の atol 0）はこの幾何での実測として立っている。
+    NOTE: **bit identity depends on the shape**. At head_dim 64 (all 8 layers of this
+    checkpoint) the measured difference is 0, but at head_dim 8 it is off by 1 ulp
+    (`irodori/tests/test_patch.py` pins both). _Speculation_: torch's
+    complex multiply picks a different kernel per last-dimension length, and some of them
+    contract the multiply-add into an FMA — the error against a double-precision reference is of
+    the same order for both, so neither is more correct. The precise claim is therefore
+    "exactly equivalent as a formula, rounding confirmed by measurement", and the real-weight
+    check (atol 0 in `irodori/export.py`) stands as a measurement at this geometry.
 
-    MUST: 中間を rank 5（`[B,S,H,D/2,2]`）にしない — strided カーネルの rank 上限
-    （`ops.STRIDED_RANK` = 4）に当たる。head 軸を潰した `[B,S,H·D/2,2]` で入れ替えてから
-    元形へ戻す（要素順は変わらない）。
+    MUST: no intermediate is rank 5 (`[B,S,H,D/2,2]`) — that hits the strided kernels' rank
+    limit (`ops.STRIDED_RANK` = 4). The swap is done on `[B,S,H·D/2,2]` with the head axis
+    collapsed, then reshaped back (the element order does not change).
     """
     if freqs_cis.is_complex():
         if _ORIGINAL_APPLY_ROTARY_EMB is None:
-            raise AssertionError("complex 表の委譲先（差し替え前の apply_rotary_emb）が無い")
+            raise AssertionError(
+                "no delegate for the complex table (the apply_rotary_emb from before replacement)"
+            )
         return _ORIGINAL_APPLY_ROTARY_EMB(x, freqs_cis)
-    # MUST: 軸 1 の取り出しは `select` ではなく長さ 1 の `slice`。長さ 2 の軸を切る
-    # `aten.select.int` は IR 語彙に無く（normalize が畳むのは長さ 1 の軸だけ）、未対応 op で
-    # 落ちる。`[S,1,D]` を `unsqueeze(0)` すれば狙いの `[1,S,1,D]` に届く。
+    # MUST: axis 1 is taken with a length-1 `slice`, not `select`. `aten.select.int` on an axis
+    # of length 2 is not in the IR vocabulary (normalize folds only length-1 axes) and fails as
+    # an unsupported op. `unsqueeze(0)` on `[S,1,D]` gives the intended `[1,S,1,D]`.
     cos = freqs_cis[:, ROPE_TABLE_COS : ROPE_TABLE_COS + 1].unsqueeze(0)
     sin = freqs_cis[:, ROPE_TABLE_SIN : ROPE_TABLE_SIN + 1].unsqueeze(0)
     pairs = x.reshape(x.shape[0], x.shape[1], -1, 2)
@@ -197,15 +217,18 @@ def _real_pair_apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> tor
 #
 #   Copyright (c) 2026 Aratako
 def _split_weight_rms_norm_forward(self: Any, x: torch.Tensor) -> torch.Tensor:
-    """`irodori_tts.model.RMSNorm.forward` の同値実装（rank ≥ 2 weight を分割する）。
+    """Equivalent implementation of `irodori_tts.model.RMSNorm.forward` (splits a rank ≥ 2
+    weight).
 
-    weight が rank-1 の経路は**原実装の式をそのまま**通す（`normalize._fold_rms_norm` が
-    従来どおり 1 ノードへ畳む）。rank ≥ 2 の weight（q/k ノルムの `[heads, head_dim]`）だけ、
-    正規化本体を `F.rms_norm`（weight 無し）へ、head ごとのスケールを broadcast 乗算へ割る。
+    The rank-1 weight path runs **the original formula as is** (`normalize._fold_rms_norm`
+    folds it into one node as before). Only a rank ≥ 2 weight (the q/k norms'
+    `[heads, head_dim]`) is split: the normalization goes to `F.rms_norm` (no weight) and the
+    per-head scale to a broadcast multiply.
 
-    同値の根拠: 原実装は最終次元（head_dim）で `x·rsqrt(mean(x²)+eps)` を作ってから weight を
-    掛ける。`F.rms_norm(x, (head_dim,), None, eps)` は同じ縮約・同じ式で、掛ける順序も
-    変わらない（**ビット一致**が主張 — 実測 0）。
+    Why it is equivalent: the original computes `x·rsqrt(mean(x²)+eps)` over the last dimension
+    (head_dim) and then multiplies by the weight. `F.rms_norm(x, (head_dim,), None, eps)` is the
+    same reduction and the same formula, and the multiplication order does not change (the
+    claim is **bit identity** — measured 0).
     """
     x_dtype = x.dtype
     x = x.float()
@@ -227,18 +250,22 @@ def _split_weight_rms_norm_forward(self: Any, x: torch.Tensor) -> torch.Tensor:
 def _folded_rms_low_rank_adaln_forward(
     self: Any, x: torch.Tensor, cond_embed: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """`irodori_tts.model.LowRankAdaLN.forward` の同値実装（正規化を `rms_norm` に寄せる）。
+    """Equivalent implementation of `irodori_tts.model.LowRankAdaLN.forward` (moves the
+    normalization onto `rms_norm`).
 
-    原実装との差は**正規化 1 行だけ**で、残り（shift / scale / gate の低ランク補正・
-    変調・`tanh` ゲート）は逐語。
+    The only difference from the original is **the one normalization line**; the rest (the
+    low-rank corrections of shift / scale / gate, the modulation and the `tanh` gate) is
+    verbatim.
 
-    同値の根拠: 原実装の `x * rsqrt((x*x).mean(-1, keepdim=True) + eps)` は
-    `F.rms_norm(x, (D,), None, eps)` の定義そのもの（weight 無し = ones）で、縮約軸も
-    式も同じ。**ビット一致**が主張（`irodori/export.py` の atol 0 が実重みで実測する）。
+    Why it is equivalent: the original's `x * rsqrt((x*x).mean(-1, keepdim=True) + eps)` is the
+    very definition of `F.rms_norm(x, (D,), None, eps)` (no weight = ones), with the same
+    reduction axis and the same formula. The claim is **bit identity** (atol 0 in
+    `irodori/export.py` measures it with the real weights).
 
-    差し替える理由は語彙の側にある: この正規化は `RMSNorm` モジュールを経由しないので
-    `normalize._fold_rms_norm`（weight つき rank-1 の形を掴む）に引っかからず、
-    `aten.mean.dim` / `aten.rsqrt.default` が IR に残ってしまう。
+    The reason for the replacement is on the vocabulary side: this normalization does not go
+    through the `RMSNorm` module, so `normalize._fold_rms_norm` (which matches the rank-1 form
+    with a weight) does not catch it and `aten.mean.dim` / `aten.rsqrt.default` would stay in the
+    IR.
     """
     shift, scale, gate = cond_embed.chunk(3, dim=-1)
     shift = self.shift_up(self.shift_down(torch.nn.functional.silu(shift))) + shift
@@ -254,9 +281,10 @@ def _folded_rms_low_rank_adaln_forward(
 
 
 def apply_patches() -> None:
-    """ModernBERT / Irodori 本体のパッチをプロセス全域へ当てる（冪等）。
+    """Apply the ModernBERT / Irodori model patches process-wide (idempotent).
 
-    MUST: 呼び出し側は「パッチ前の参照」を採り終えてから呼ぶ（{@link patches_applied}）。
+    MUST: callers call this only after they have taken the "unpatched reference"
+    ({@link patches_applied}).
     """
     global _APPLIED, _ORIGINAL_APPLY_ROTARY_EMB
     if _APPLIED:
@@ -266,7 +294,8 @@ def apply_patches() -> None:
 
     ModernBertAttention.forward = _flat_qkv_attention_forward
     _ORIGINAL_APPLY_ROTARY_EMB = irodori_model.apply_rotary_emb
-    # SelfAttention.forward はモジュール大域の名前で引くので、大域を差し替えれば届く。
+    # SelfAttention.forward looks the function up by its module-global name, so replacing the
+    # global reaches it.
     irodori_model.apply_rotary_emb = _real_pair_apply_rotary_emb
     irodori_model.RMSNorm.forward = _split_weight_rms_norm_forward
     irodori_model.LowRankAdaLN.forward = _folded_rms_low_rank_adaln_forward

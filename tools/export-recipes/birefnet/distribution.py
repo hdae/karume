@@ -1,58 +1,68 @@
-"""BiRefNet 系の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択。
+"""Distribution recipe of the BiRefNet family — series layout, output path table, quant table and
+choice of card.
 
-ADR 0065 決定 2。汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・
-staging/swap・検証）は `karume.dist` が持つ。ここが持つのは **BiRefNet 系固有の事実**だけ:
-どの系列ディレクトリから何を拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を
-既定にするか。
+ADR 0065 decision 2. The general-purpose assembly engine (placement, folding of shared presets,
+sha256, manifest, staging/swap, verification) lives in `karume.dist`. What lives here is **only the
+facts specific to the BiRefNet family**: what to pick up from which series directory, at which path
+of the distribution and under which dtype label to list it, and which quant to make the default.
 
-配布するのは **マット 1 グラフだけ**（`birefnet/export.py` は最終段の logit 1 本しか出さない）。
-実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。quant 席（= 格納 dtype）は
-**checkpoint ごとに上流の格納の型から導く**（ADR 0113 追記 2026-10-11 —
-{@link birefnet_seat_dtypes}）: 上流の格納より広い席は出さず、既定は格納と同じ型の席。HR（上流
-f16）は `f16` 席だけ、Lucida（上流 f32）は `f32`（既定）と `f16`。系列は dtype ごとに別ディレクトリ
-（`lucida-1024` / `lucida-1024-f16`）で、配布形では `matte/model.{dtype}.krm` に並ぶ。
+What is shipped is **a single matte graph** (`birefnet/export.py` emits only the final stage's one
+logit). It is also the only asset the run needs — no tokenizer, no tables (`assets` is empty). The
+quant presets (= storage dtypes) are **derived per checkpoint from the type of the upstream
+storage** (ADR 0113 addendum 2026-10-11 — {@link birefnet_seat_dtypes}): no preset wider than the
+upstream storage, and the default is the preset of the same type as the storage. HR (upstream f16)
+has only the `f16` preset; Lucida (upstream f32) has `f32` (default) and `f16`. Each dtype's series
+is a separate directory (`lucida-1024` / `lucida-1024-f16`), listed in the distribution as
+`matte/model.{dtype}.krm`.
 
-**リポは 2 つ、各リポに 2 モデル**。軸が 2 本あることがこの family の形で、混ぜると配布形が
-静かに壊れる:
+**Two repositories, two models in each.** Having two axes is what this family looks like, and
+mixing them breaks the distribution silently:
 
-- **リポの軸 = checkpoint**（上流 `BiRefNet_HR` と派生 `lucida`）。派生は別リポ（ADR 0092
-  決定 1）で、`--model` からは決まらない — {@link PIPELINE} / {@link LUCIDA_PIPELINE} の
-  **席が固定で持つ**。
-- **モデルの軸 = 解像度**（{@link BIREFNET_MODELS} = `"1024"` / `"2048"`・既定 `"1024"`）。
-  解像度は窓マスクとパディング定数まで定数として焼かれた**別のグラフ**（`birefnet/export.py`
-  の「解像度軸」）なので、SigLIP2 の base / so400m と同じ「1 リポ 2 モデル」の器（ADR 0092
-  決定 8）へ同居させる。利用者が引くのは `defaultModel` 1 つで、寸法は `pipelineConfig` が
-  モデルごとに宣言する。組み立ては `--model 1024 --model 2048 --out <リポ>` の 2 モデル
-  1 周で、**最初の `--model` が `defaultModel`** になる（`karume.dist.main`）。
+- **The repository axis = the checkpoint** (upstream `BiRefNet_HR` and the derivative `lucida`). The
+  derivative is a separate repository (ADR 0092 decision 1) and is not determined by `--model` — the
+  **entries {@link PIPELINE} / {@link LUCIDA_PIPELINE} hold it fixed**.
+- **The model axis = the resolution** ({@link BIREFNET_MODELS} = `"1024"` / `"2048"`, default
+  `"1024"`). Each resolution is a **separate graph** with even the window masks and padding
+  constants baked in as constants (the "resolution axis" of `birefnet/export.py`), so they share the
+  same "1 repository, 2 models" container as SigLIP2's base / so400m (ADR 0092 decision 8). The user
+  pulls one `defaultModel`, and `pipelineConfig` declares the dimensions per model. The assembly is
+  one pass over the 2 models, `--model 1024 --model 2048 --out <repository>`, and **the first
+  `--model` becomes `defaultModel`** (`karume.dist.main`).
 
-リポ名は導出せず {@link BIREFNET_REPO_NAMES} が持つ — `karume-lucida` は「BiRefNet 系の
-1 つ」ではなく上流が名前で売っているモデルで、綴りは命名の決定であって checkpoint 名から
-決まらない（SBV2 のファミリー名と同じ性質）。
+Repository names are not derived; {@link BIREFNET_REPO_NAMES} holds them — `karume-lucida` is not
+"one of the BiRefNet family" but a model upstream markets under its own name, and its spelling is a
+naming decision, not something that follows from the checkpoint name (the same nature as SBV2's
+family names).
 
-公開面が **2 つの Pipeline** に割れているのはこのため（anima の公式 / 追加学習と同じ形）:
-`root_files`（配布リポ直下の `LICENSE.md` / `NOTICE.md`）は Pipeline に固定で載る 1 組で、
-MIT の著作権行はリポごとに違う（HR は ZhengPeng の 1 行、Lucida は fine-tune 側と上流の
-2 行）。1 つに畳むと、どちらかのリポが**自分のものでない著作権を名乗る**か、上流の著作権
-表示を落とす — どちらも散文としては妥当なままなので `verify_dist` も manifest 検査も
-素通りし、配ってからでないと誰も気づけない。カードの帰属も同じ席から入る
-（{@link render_birefnet_model_card} の `checkpoint`）— 帰属・著作権行・系列 path が
-**1 つの checkpoint 名から**決まるので、席を跨いだ取り違えは綴りとして作れない。
+This is why the public surface is split into **2 Pipelines** (the same shape as anima's official /
+fine-tuned): `root_files` (`LICENSE.md` / `NOTICE.md` at the root of the distribution repository)
+is one set fixed per Pipeline, and the MIT copyright lines differ per repository (HR has the one
+ZhengPeng line, Lucida has 2 lines, the fine-tune's and the upstream's). Folding them into one would
+make one of the repositories **claim a copyright that is not its own** or drop the upstream's
+copyright notice — both stay plausible prose, so they pass `verify_dist` and the manifest checks,
+and nobody could notice until after shipping. The card's attribution comes in through the same entry
+(`checkpoint` of {@link render_birefnet_model_card}) — the attribution, the copyright lines and the
+series path are all determined **from one checkpoint name**, so a mix-up across entries cannot even
+be spelled.
 
-`pipelineConfig` の値の出どころは **3 つとも独立**:
+The values of `pipelineConfig` come from **3 independent sources**:
 
-- resize 先（`imageWidth` / `imageHeight`）は**焼かれたグラフの入力宣言**から導く（写経しない）。
-- 正規化定数は上流に機械可読な出どころが**無い** — SigLIP2 の `preprocessor_config.json` に
-  当たるものが BiRefNet 系には無く、事実は同梱 `handler.py` の `ImagePreprocessor`（と
-  モデルカードの利用例）の中にしか書かれていない。したがってここが宣言として持ち
-  （{@link BIREFNET_IMAGE_MEAN}）、台本側の写し（`birefnet.export.IMAGENET_MEAN`）との一致は
-  pytest が毎回突き合わせる（2 表が独立に動く形にはしない）。
-- 後処理の手順（`postprocess`）は **checkpoint** から決まる（{@link BIREFNET_POSTPROCESS}）。上流の
-  手順は系列ごとに違い（ADR 0125）、ロード側（TS）は系列の表を持たない（`config.ts` の MUST —
-  第三者の fine-tune で沈黙の取り違えになる）ので、checkpoint を知っている組み立て段が書く。
+- The resize target (`imageWidth` / `imageHeight`) is derived from **the input declaration of the
+  baked graph** (not copied by hand).
+- The normalization constants have **no** machine-readable source upstream — the BiRefNet family has
+  nothing like SigLIP2's `preprocessor_config.json`; the fact is written only inside the bundled
+  `handler.py`'s `ImagePreprocessor` (and the model card's usage example). So this module holds them
+  as a declaration ({@link BIREFNET_IMAGE_MEAN}), and pytest cross-checks it against the script's
+  copy (`birefnet.export.IMAGENET_MEAN`) on every run (the two tables are never left to move
+  independently).
+- The post-processing procedure (`postprocess`) is determined by the **checkpoint**
+  ({@link BIREFNET_POSTPROCESS}). The upstream procedure differs per series (ADR 0125), and the
+  loader (TS) holds no table of series (the MUST of `config.ts` — with third-party fine-tunes it
+  would become a silent mix-up), so the assembly stage, which knows the checkpoint, writes it.
 
-公開面は {@link PIPELINE}（`--pipeline birefnet`）と {@link LUCIDA_PIPELINE}
-（`--pipeline lucida`）の 2 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
-（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+The public surface is two entries (`karume.dist.Pipeline`), {@link PIPELINE}
+(`--pipeline birefnet`) and {@link LUCIDA_PIPELINE} (`--pipeline lucida`) — the repository's dist
+driver (`tools/export-recipes/dist.py`) merges them into the core's PIPELINES.
 """
 
 from __future__ import annotations
@@ -89,102 +99,115 @@ from .card import (
     render_birefnet_model_card,
 )
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
-#: `BIREFNET_PIPELINE_NAME` / `BIREFNET_PIPELINE_MAJOR`。
+#: Pipeline contract (ADR 0041 §2 — per model). The TS side's accepted set is
+#: `BIREFNET_PIPELINE_NAME` / `BIREFNET_PIPELINE_MAJOR`.
 BIREFNET_PIPELINE = "birefnet/2"
 
-#: 配るモデル名の受理集合 = **入力解像度**（綴りの正本はこの 1 つ）。系列は解像度ごとに別
-#: なので、モデル名がそのまま「どの系列を配るか」を指す。
+#: Accepted set of shipped model names = **input resolutions** (this is the one source of truth for
+#: the spelling). Each resolution is a separate series, so the model name itself says "which series
+#: is shipped".
 BIREFNET_MODELS: tuple[str, ...] = ("1024", "2048")
 
-#: 既定のモデル名（`--model` を省いた組み立てが入れるモデル）。
+#: Default model name (the model an assembly without `--model` includes).
 BIREFNET_DEFAULT_MODEL = "1024"
 
-#: checkpoint の綴り（**pipeline 席が持つ** — `--model` の軸ではない）。帰属表
-#: （`birefnet.card.BIREFNET_CHECKPOINTS`）のキーでもあり、系列 path・リポ名・著作権行・
-#: カードの帰属がこの 1 つから決まる。
+#: Spelling of the checkpoints (**held by the pipeline entry** — not the `--model` axis). They are
+#: also the keys of the attribution table (`birefnet.card.BIREFNET_CHECKPOINTS`); the series path,
+#: repository name, copyright lines and the card's attribution are all determined by this one name.
 BIREFNET_HR_CHECKPOINT = "hr"
 BIREFNET_LUCIDA_CHECKPOINT = "lucida"
 
-#: 実重みの親（`hf download <リポ> --local-dir inputs/birefnet/<名前>` の展開先 —
-#: `birefnet.export.MODELS_ROOT` と同じ場所）。系列名はこのディレクトリ名から決まる。
+#: Parent of the real weights (where `hf download <repository> --local-dir inputs/birefnet/<name>`
+#: unpacks — the same place as `birefnet.export.MODELS_ROOT`). The series name follows from this
+#: directory name.
 BIREFNET_INPUTS_DIRNAME = "birefnet"
 
-#: checkpoint → 配布リポ名（`karume-` prefix はリポ名裁定 2026-08-09）。**導出しない** —
-#: 節の冒頭に書いたとおり、綴りは命名の決定。
+#: checkpoint → distribution repository name (the `karume-` prefix is the repository-name ruling of
+#: 2026-08-09). **Not derived** — as the module doc says, the spelling is a naming decision.
 BIREFNET_REPO_NAMES: Mapping[str, str] = {
     "hr": "karume-birefnet-hr",
     "lucida": "karume-lucida",
 }
 
-#: 唯一の役割名（manifest の weights キー・TS 側 `pipeline.ts` の `MATTE`）。
+#: The only role name (the manifest's weights key; `MATTE` in the TS side's `pipeline.ts`).
 BIREFNET_ROLE = "matte"
 
-#: グラフ入力の名前（`birefnet.export.INPUT_NAME`）。
+#: Name of the graph input (`birefnet.export.INPUT_NAME`).
 BIREFNET_INPUT = "pixel_values"
 
-#: 入力のチャネル数（RGB）と、出力（マット）のチャネル数。
+#: Number of input channels (RGB) and of output (matte) channels.
 BIREFNET_CHANNELS = 3
 BIREFNET_MATTE_CHANNELS = 1
 
-#: TS 側が実装している唯一の補間。上流（`handler.py` / モデルカードの利用例）はどちらも
-#: `torchvision.transforms.Resize((S, S))` を既定の補間で通す = bilinear。
+#: The only interpolation the TS side implements. Upstream (`handler.py` / the model card's usage
+#: example) both pass `torchvision.transforms.Resize((S, S))` with the default interpolation =
+#: bilinear.
 BIREFNET_INTERPOLATION = "bilinear"
 
-#: checkpoint → 後処理の手順（`pipelineConfig.postprocess` — 綴りは TS 側 `MATTE_PROCEDURES`）。
-#: 各 checkpoint の上流の手順の補間と段の順序（ADR 0125 決定 3）:
+#: checkpoint → post-processing procedure (`pipelineConfig.postprocess` — spelled as the TS side's
+#: `MATTE_PROCEDURES`). The interpolation and step order of each checkpoint's upstream procedure
+#: (ADR 0125 decision 3):
 #:
-#: - HR: 同梱 `handler.py` とモデルカードの利用例 = σ → 8bit → Pillow の BICUBIC。
-#: - Lucida: モデルカードの利用例 = σ → torchvision の antialias bilinear（浮動小数）→ 8bit。
+#: - HR: the bundled `handler.py` and the model card's usage example = σ → 8 bit → Pillow's BICUBIC.
+#: - Lucida: the model card's usage example = σ → torchvision's antialiased bilinear (floating
+#:   point) → 8 bit.
 #:
-#: HR の手順は盲検 A/B（8 対とも見分けがつかない）の後に、事前の規則どおり上流を採った
-#: （ADR 0125 の結果の節）。値はカードの説明表（`birefnet.card`）の鍵に含まれること（説明の
-#: 無い手順を書くと、カードが描けない配布形になる — 組み立て時は {@link birefnet_postprocess}、
-#: 表全体は pytest が見る）。
+#: HR's procedure follows upstream, by the rule set in advance, after a blind A/B (no difference
+#: seen in any of the 8 pairs) (the results section of ADR 0125). Every value must be a key of the
+#: card's description table (`birefnet.card`) (writing a procedure without a description gives a
+#: distribution whose card cannot be rendered — checked at assembly by {@link birefnet_postprocess},
+#: and for the whole table by pytest).
 BIREFNET_POSTPROCESS: Mapping[str, str] = {
     BIREFNET_HR_CHECKPOINT: "u8-pil-bicubic",
     BIREFNET_LUCIDA_CHECKPOINT: "float-bilinear",
 }
 
-#: 前処理の正規化定数（節の冒頭のとおり、上流に機械可読な出どころが無いのでここが持つ）。
-#: 正本は同梱 `handler.py` の `ImagePreprocessor` = ImageNet 統計。
+#: Normalization constants of the preprocessing (as the module doc says, upstream has no
+#: machine-readable source, so they are held here). The source of truth is the bundled
+#: `handler.py`'s `ImagePreprocessor` = ImageNet statistics.
 BIREFNET_IMAGE_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 BIREFNET_IMAGE_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
-#: 格納 dtype の語彙（広い順 — 段 1 = f32 / f16・ADR 0113）。**席の集合ではない**: 各 checkpoint が
-#: 配る席はこの語彙から上流の格納の型で絞る（{@link birefnet_seat_dtypes}）。系列名の接尾・出力
-#: path・格納の要求表は役割ごとの事実としてこの語彙の全体で持ち（別々に持つと、dtype を足した
-#: 日に片方だけ更新される — irodori の `IRODORI_DTYPE_ROLES` と同じ規律）、どの役割を組むかは
-#: 席の集合が決める。i8 は BiRefNet 固有の i8 計画と一緒に段 2 で足す
-#: （`birefnet.export.WEIGHT_DTYPES` と揃える — 突合は pytest）。
+#: Vocabulary of storage dtypes (widest first — phase 1 = f32 / f16, ADR 0113). **Not the set of
+#: presets**: the presets each checkpoint ships are narrowed from this vocabulary by the type of the
+#: upstream storage ({@link birefnet_seat_dtypes}). The series-name suffix, the output path and the
+#: storage requirement table are per-role facts held over the whole vocabulary (held separately,
+#: only one of them would be updated on the day a dtype is added — the same discipline as irodori's
+#: `IRODORI_DTYPE_ROLES`), and the set of presets decides which roles are assembled. i8 is added in
+#: phase 2 together with a BiRefNet-specific i8 plan (kept in step with
+#: `birefnet.export.WEIGHT_DTYPES` — cross-checked by pytest).
 BIREFNET_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16")
 
-#: 圧縮していない系列の dtype（系列名に接尾が付かない唯一の dtype — 綴りの規則で、既定席とは
-#: 別の事実）。
+#: dtype of the uncompressed series (the only dtype without a suffix in the series name — a spelling
+#: rule, a separate fact from the default preset).
 BIREFNET_PLAIN_DTYPE = "f32"
 
 
 def _stored_dtype(checkpoint: str) -> str:
-    """上流 checkpoint の格納 dtype（帰属表に無い checkpoint は {@link birefnet_checkpoint} が
-    落とす）。"""
+    """Storage dtype of the upstream checkpoint (a checkpoint missing from the attribution table is
+    refused by {@link birefnet_checkpoint})."""
     birefnet_checkpoint(checkpoint)
     return BIREFNET_CHECKPOINTS[checkpoint].stored_dtype
 
 
 def birefnet_seat_dtypes(checkpoint: str) -> tuple[str, ...]:
-    """checkpoint が配る quant 席の格納 dtype（{@link BIREFNET_WEIGHT_DTYPES} の並び）。
+    """Storage dtypes of the quant presets a checkpoint ships (in the order of
+    {@link BIREFNET_WEIGHT_DTYPES}).
 
-    規則（ADR 0113 追記 2026-10-11）: **上流 checkpoint の格納（`stored_dtype`）より広い席は
-    出さない**。広い席は checkpoint の値を正確に広げるだけで、情報が増えずに常駐とダウンロードが
-    増える（HR の f32 席は 1024² で重みの常駐 919 MiB — f16 席は 509 MiB）。格納より狭い席は丸めた
-    値で、NOTICE とカードが量子化と名乗る。格納と**同じ幅の別の型**（f16 の checkpoint に対する
-    bf16 など — 語彙に足した日）も丸めにあたり、値を変えない席ではない（既定席は型の一致で選ぶ —
-    {@link birefnet_default_quant}）。HR（f16）→ `("f16",)`・Lucida（f32）→ `("f32", "f16")`。
+    Rule (ADR 0113 addendum 2026-10-11): **no preset wider than the upstream checkpoint's storage
+    (`stored_dtype`)**. A wider preset only widens the checkpoint's values exactly: no information
+    is added, while residency and download grow (HR's f32 preset has 919 MiB of resident weights at
+    1024² — the f16 preset 509 MiB). A preset narrower than the storage holds rounded values, and
+    NOTICE and the card call it a quantization. **Another type of the same width** as the storage
+    (bf16 for an f16 checkpoint, on the day it joins the vocabulary) is also a rounding, not a
+    preset that keeps the values (the default preset is chosen by matching type — {@link
+    birefnet_default_quant}). HR (f16) → `("f16",)`, Lucida (f32) → `("f32", "f16")`.
 
-    MUST: 席の集合はここ 1 つから引く — 系列の取得（{@link birefnet_sources}）・配置・weights・
-    quant 表・既定席・NOTICE・`pipelineConfig` の基準の系列。席の表を checkpoint ごとに手で持つと、
-    格納の事実（`birefnet.card.BIREFNET_CHECKPOINTS`）と独立に動く。export の `--dtype` も同じ
-    規則で絞る（`birefnet.export`）。
+    MUST: the set of presets comes from here and nowhere else — fetching the series
+    ({@link birefnet_sources}), placement, weights, the quant table, the default preset, NOTICE and
+    the series `pipelineConfig` is based on. A preset table kept by hand per checkpoint would move
+    independently of the storage facts (`birefnet.card.BIREFNET_CHECKPOINTS`). Export's `--dtype` is
+    narrowed by the same rule (`birefnet.export`).
     """
     stored = _stored_dtype(checkpoint)
     return tuple(
@@ -195,77 +218,89 @@ def birefnet_seat_dtypes(checkpoint: str) -> tuple[str, ...]:
 
 
 def birefnet_default_quant(checkpoint: str) -> str:
-    """checkpoint の既定席 = **上流の格納 dtype そのものの席**（値を変えない唯一の席）。
+    """The checkpoint's default preset = **the preset of exactly the upstream storage dtype** (the
+    only preset that keeps the values).
 
-    ビット幅の一致では選ばない — 同じ幅の別の型（f16 の checkpoint に対する bf16 など）は丸めで、
-    幅で選ぶと語彙に足した日に値を変える席を「値を変えない既定」として配りうる。
+    It is not chosen by matching bit width — another type of the same width (bf16 for an f16
+    checkpoint) is a rounding, and choosing by width could, on the day it joins the vocabulary, ship
+    a preset that changes the values as "the default that keeps the values".
 
-    MUST: 該当する席が無い checkpoint は組まない — 別の型の席を既定に推し量ると、利用者が
-    指定しないときに上流の値と違う重みを配る（または値を広げただけの重い席を配る）。
+    MUST: do not assemble a checkpoint without such a preset — extrapolating another type's preset
+    as the default would ship weights that differ from upstream's values when the user specifies
+    nothing (or ship a heavy preset that only widens the values).
     """
     stored = _stored_dtype(checkpoint)
     seats = birefnet_seat_dtypes(checkpoint)
     if stored not in seats:
         raise DistError(
-            f"BiRefNet 系の checkpoint '{checkpoint}' の格納 {stored} の席が無い"
-            f"（席: {' / '.join(seats)}）— 既定席を決められない"
+            f"BiRefNet family checkpoint '{checkpoint}' has no preset for its storage {stored}"
+            f" (presets: {' / '.join(seats)}) — cannot choose the default preset"
         )
     return stored
 
 
 def birefnet_role(dtype: str) -> str:
-    """配置の役割名（`matte_f16` — 配置表・出力 path・格納 dtype 要求が共有する 1 語）。"""
+    """Placement role name (`matte_f16` — one word shared by the placement table, the output path
+    and the storage dtype requirement)."""
     return f"{BIREFNET_ROLE}_{dtype}"
 
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
-#: 格納 dtype をファイル名に出すのは Anima / SBV2 / Irodori と同じ形（`model.f16.krm`）で、
-#: 1 つのディレクトリに系列 2 本が並んでも取り違えようがない綴りにするため。
+#: Relative output paths (**inside the model subtree**) — the one place shared by the placement
+#: table and the manifest. Putting the storage dtype in the file name is the same shape as Anima /
+#: SBV2 / Irodori (`model.f16.krm`), so that two series side by side in one directory cannot be
+#: mistaken for each other.
 BIREFNET_OUTPUT_PATHS: Mapping[str, str] = {
     birefnet_role(dtype): f"{BIREFNET_ROLE}/model.{dtype}.krm" for dtype in BIREFNET_WEIGHT_DTYPES
 }
 
-#: 格納 dtype の要求（Anima / SBV2 / Irodori / SigLIP2 と同じ根拠 — 素の資産が組み立て・
-#: ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。f16 系列は適格な重みスロット
-#: だけが f16 で、bias / norm / グラフ定数 / deform の重みは f32 のまま（`birefnet/export.py`）
-#: なので「その語彙を含む」を要求する。逆向き（f16 席に f32 系列）はここが要求の不在で落とす。
+#: Storage dtype requirements (the same grounds as Anima / SBV2 / Irodori / SigLIP2 — a measured
+#: incident where a plain asset went through assembly, loading and execution silently until the
+#: reference-match check). In an f16 series only the eligible weight slots are f16, and biases /
+#: norms / graph constants / deform's weights stay f32 (`birefnet/export.py`), so the requirement is
+#: "contains that vocabulary". The reverse (an f32 series on the f16 preset) is caught here by the
+#: requirement being absent.
 BIREFNET_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     birefnet_role(dtype): dtype for dtype in BIREFNET_WEIGHT_DTYPES
 }
 
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
-#: {@link BIREFNET_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮系列も
-#: 適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を f32 で
-#: 持つため「f32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
-#: 取り違えが存在検査だけでは素通りする。
+#: Storage vocabulary that **must not appear** in each role's binding table
+#: ({@link assert_storage_absent}). {@link BIREFNET_STORAGE_REQUIREMENTS} is a one-way check of "is
+#: the required dtype present", and **compressed series also hold their ineligible weights** (biases
+#: / norms / graph constants, i8's per-channel scales, i4's group scales) in f32, so "contains f32"
+#: is true even for f16 / i8 / i4 assets — plugging a compressed series into the f32 preset passes a
+#: presence check alone.
 #:
-#: 禁止表が閉じるのは**系列 root の取り違え**（`--series` が別の木を指す / 別 family の圧縮系列を
-#: 手で置く）で、台本が対応する dtype とは無関係に起こる。系列 root の取り違えは数値の門では
-#: 原理的に検出できない（ADR 0027 / 0029）ので、ここが唯一の検出器。
+#: What the forbidden table closes is **a mix-up of the series root** (`--series` pointing at
+#: another tree / a compressed series of another family placed by hand), which happens regardless of
+#: the dtypes the script supports. A mix-up of the series root cannot in principle be detected by
+#: the numeric checks (ADR 0027 / 0029), so this is the only detector.
 #:
-#: MUST: 禁止は**役割ごとに集合**で持ち、格納検査が見る語彙（codec 台帳
-#: `karume.container.CODEC_LEDGER` の layout — `karume.dist.storage_dtypes`）の f32 / i32 以外を
-#: **全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
-#: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
-#: （`karume.emit` の plain 側）だから — 実際この family の系列は i32 の添字表を 1 本持つので
-#: 束縛表は f32 + i32（2026-08-30 の実測）で、i32 を禁じると既存の配布物が赤になる。
+#: MUST: the forbidden storage is held **as a set per role**, and it names **all** of the vocabulary
+#: the storage check sees (the layouts of the codec ledger `karume.container.CODEC_LEDGER` —
+#: `karume.dist.storage_dtypes`) other than f32 / i32 — leaving even one out lets exactly that
+#: storage form through silently (the same discipline as anima / irodori / sbv2). I32 is not listed
+#: because i32 is plain storage, not compression (the plain side of `karume.emit`) — in fact this
+#: family's series holds one i32 index table, so the binding table is f32 + i32 (measured
+#: 2026-08-30), and forbidding i32 would turn the existing distribution red.
 #:
-#: f16 席は禁止表を持たない: f32 系列は要求検査（f16 が無い）で落ち、混成の圧縮系列はまだ
-#: 無い（irodori の i8 席が i4 を禁じるのは i4 系列が i8 を含む混成だから — 段 2 の i8 系列は
-#: 単一の圧縮 dtype の予定で、f16 席に挿せば要求検査で落ちる）。
+#: The f16 preset has no forbidden table: an f32 series fails the requirement check (no f16), and
+#: there are no mixed compressed series yet (irodori's i8 preset forbids i4 because the i4 series is
+#: a mix that contains i8 — phase 2's i8 series is planned to have a single compressed dtype, and
+#: plugging it into the f16 preset fails the requirement check).
 BIREFNET_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     birefnet_role(BIREFNET_PLAIN_DTYPE): ("f16", "bf16", "i8", "i4", "i2")
 }
 
-#: assets の宣言。**空**（実行に要るのはグラフ 1 本だけ）。
+#: Declaration of assets. **Empty** (the run needs only the one graph).
 BIREFNET_ASSETS: Mapping[str, str] = {}
 
 
 def birefnet_weights(checkpoint: str) -> dict[str, dict[str, WeightFiles]]:
-    """weights の宣言（dtype ラベル → 役割名 — 席は {@link birefnet_seat_dtypes}）。
+    """Declaration of weights (dtype label → role name — the presets are
+    {@link birefnet_seat_dtypes}).
 
-    マット 1 本が席の数だけ dtype を持つので、quant 表が名指しする
-    （{@link complete_quant_weights} は dtype が 1 つのときしか埋めない）。
+    The one matte has as many dtypes as there are presets, so the quant table names them explicitly
+    ({@link complete_quant_weights} fills them in only when there is a single dtype).
     """
     return {
         BIREFNET_ROLE: {
@@ -275,22 +310,26 @@ def birefnet_weights(checkpoint: str) -> dict[str, dict[str, WeightFiles]]:
 
 
 class BirefnetQuantSeat(NamedTuple):
-    """quant 席 1 つの、選択 UI へ出す表示欄（ADR 0075）。"""
+    """Display fields of one quant preset shown in the selection UI (ADR 0075)."""
 
-    #: 選択 UI に出す短い表示名（64 字上限）。
+    #: Short display name shown in the selection UI (64 characters at most).
     label: str
-    #: 同・1 行の説明（200 字上限）。既定であることは書かない（`defaultQuant` が指している）。
+    #: Likewise, a one-line description (200 characters at most). It does not say that it is the
+    #: default (`defaultQuant` points at it).
     description: str
 
 
-#: （席の格納 dtype, 上流 checkpoint の格納 dtype）→ {@link BirefnetQuantSeat}。実行形ノブ
-#: （`session`）は持たない — 計算はどの席も f32 で、違うのは重みの格納だけ。
+#: (storage dtype of the preset, storage dtype of the upstream checkpoint) →
+#: {@link BirefnetQuantSeat}. There are no execution knobs (`session`) — every preset computes in
+#: f32; only the storage of the weights differs.
 #:
-#: 文面を checkpoint の格納との組で引くのは、並ぶ席が checkpoint ごとに違う（{@link
-#: birefnet_seat_dtypes}）から: f16 席の「a smaller download」は f32 席が並ぶリポ（Lucida）でしか
-#: 成り立たず、f16 席だけのリポ（HR）では比べる相手の無い比較になる。値を変えるかどうか
-#: （量子化か）の詳しい事実は NOTICE とカードの帰属節が持つ。MUST: 組が表に無い席は組まない
-#: （{@link birefnet_quants}）— 推し量った文面を選択 UI へ出さない。
+#: The wording is looked up by the pair with the checkpoint's storage because the presets listed
+#: differ per checkpoint ({@link birefnet_seat_dtypes}): the f16 preset's "a smaller download" holds
+#: only in a repository that also lists the f32 preset (Lucida), and in a repository with only the
+#: f16 preset (HR) it would be a comparison with nothing. The detailed facts of whether the values
+#: change (whether it is a quantization) are in NOTICE and the card's attribution section. MUST: do
+#: not assemble a preset whose pair is not in the table ({@link birefnet_quants}) — no extrapolated
+#: wording goes into the selection UI.
 BIREFNET_QUANT_SEATS: Mapping[tuple[str, str], BirefnetQuantSeat] = {
     ("f32", "f32"): BirefnetQuantSeat(
         label="Full precision (f32)",
@@ -311,15 +350,16 @@ BIREFNET_QUANT_SEATS: Mapping[tuple[str, str], BirefnetQuantSeat] = {
 
 
 def birefnet_quants(checkpoint: str) -> dict[str, Any]:
-    """checkpoint の quant 表（席名 = 格納 dtype・並びは {@link birefnet_seat_dtypes}）。"""
+    """The checkpoint's quant table (preset name = storage dtype, in the order of
+    {@link birefnet_seat_dtypes})."""
     stored = _stored_dtype(checkpoint)
     quants: dict[str, Any] = {}
     for dtype in birefnet_seat_dtypes(checkpoint):
         seat = BIREFNET_QUANT_SEATS.get((dtype, stored))
         if seat is None:
             raise DistError(
-                f"格納 {dtype} の席を {stored} の checkpoint '{checkpoint}' について表示する文面が"
-                " 無い — 推し量った文面を選択 UI へ出さない"
+                f"no display wording for an {dtype} storage preset of the {stored} checkpoint"
+                f" '{checkpoint}' — extrapolated wording is not shown in the selection UI"
             )
         quants[dtype] = {
             "weights": {BIREFNET_ROLE: dtype},
@@ -331,30 +371,34 @@ def birefnet_quants(checkpoint: str) -> dict[str, Any]:
 
 
 def birefnet_checkpoint(checkpoint: str) -> str:
-    """checkpoint 名 → 上流チェックポイントのディレクトリ名（= 上流の HF リポ名の末尾）。
+    """Checkpoint name → directory name of the upstream checkpoint (= the tail of the upstream HF
+    repository name).
 
-    `birefnet/export.py` は `--model-dir` のディレクトリ名を系列名にし、そのディレクトリ名は
-    `hf download <リポ>` の展開先なので、綴りの事実は「この checkpoint がどの上流リポか」
-    1 つしかない。帰属表（`birefnet.card.BIREFNET_UPSTREAM`）から導いて、ここに 2 つ目の表を
-    持たない（SigLIP2 の {@link siglip2.distribution.siglip2_checkpoint} と同じ規律）。
+    `birefnet/export.py` makes the directory name of `--model-dir` the series name, and that
+    directory is where `hf download <repository>` unpacks, so there is only one fact about the
+    spelling: "which upstream repository this checkpoint is". It is derived from the attribution
+    table (`birefnet.card.BIREFNET_UPSTREAM`) instead of keeping a second table here (the same
+    discipline as SigLIP2's {@link siglip2.distribution.siglip2_checkpoint}).
     """
     repo = BIREFNET_UPSTREAM.get(checkpoint)
     if repo is None:
         raise DistError(
-            f"BiRefNet 系の checkpoint '{checkpoint}' は知らない"
-            f"（既知: {' / '.join(sorted(BIREFNET_UPSTREAM))}）"
+            f"BiRefNet family checkpoint '{checkpoint}' is unknown"
+            f" (known: {' / '.join(sorted(BIREFNET_UPSTREAM))})"
         )
     return repo.split("/", 1)[1]
 
 
 def birefnet_directory_checkpoint(directory: str) -> str | None:
-    """上流チェックポイントのディレクトリ名 → checkpoint 名（{@link birefnet_checkpoint} の逆）。
+    """Directory name of the upstream checkpoint → checkpoint name (the inverse of
+    {@link birefnet_checkpoint}).
 
-    `birefnet/export.py` が `--model-dir` から席の規則（{@link birefnet_seat_dtypes}）を引く口の
-    **2 番目**（取得記録が無い・読めない・固定値に当たらないとき — {@link
-    birefnet_revision_checkpoint}）で、系列名と同じ紐づけ（ディレクトリ名 = 上流の HF リポ名の
-    末尾）で引く。帰属表に無い名前は `None`（実験の `--model-dir` — 配布の組み立ては帰属表に無い
-    checkpoint を組まない）。
+    This is the **second** way `birefnet/export.py` looks up the preset rule
+    ({@link birefnet_seat_dtypes}) from `--model-dir` (when the download record is missing,
+    unreadable or matches no fixed value — {@link birefnet_revision_checkpoint}); it looks up by the
+    same link as the series name (directory name = tail of the upstream HF repository name). A name
+    missing from the attribution table gives `None` (an experimental `--model-dir` — the
+    distribution assembly does not assemble a checkpoint missing from the attribution table).
     """
     for checkpoint in BIREFNET_UPSTREAM:
         if birefnet_checkpoint(checkpoint) == directory:
@@ -363,12 +407,14 @@ def birefnet_directory_checkpoint(directory: str) -> str | None:
 
 
 def birefnet_revision_checkpoint(revision: str) -> str | None:
-    """上流の commit SHA → その revision を固定値に持つ checkpoint 名（当たらなければ `None`）。
+    """Upstream commit SHA → the checkpoint name whose fixed value is that revision (`None` when
+    none matches).
 
-    `birefnet/export.py` が `--model-dir` の取得記録（`_shared.upstream.snapshot_revision`）から
-    checkpoint を引く口の**1 番目**。名前と違って中身の出所で引くので、ディレクトリ名を変えても
-    席の規則が外れない。固定値（`birefnet.card.BIREFNET_CHECKPOINTS` の `revision`）は配布の門
-    （{@link birefnet_plan}）が容器の出所と突き合わせる値と同じ。
+    This is the **first** way `birefnet/export.py` looks up the checkpoint from the download record
+    of `--model-dir` (`_shared.upstream.snapshot_revision`). Unlike the name, it looks up by the
+    origin of the contents, so renaming the directory does not break the preset rule. The fixed
+    value (`revision` of `birefnet.card.BIREFNET_CHECKPOINTS`) is the same value the distribution
+    check ({@link birefnet_plan}) compares the container's origin against.
     """
     for checkpoint, entry in BIREFNET_CHECKPOINTS.items():
         if entry.revision == revision:
@@ -377,30 +423,32 @@ def birefnet_revision_checkpoint(revision: str) -> str | None:
 
 
 def birefnet_resolution(model: str) -> int:
-    """モデル名 → 焼かれているべき入力の一辺（**モデル名は解像度そのもの**）。
+    """Model name → the side of the input that should be baked in (**the model name is the
+    resolution itself**).
 
-    受理集合を通るのはここ 1 か所で、系列名の導出と `pipelineConfig` の突合の両方がこの数を
-    使う。2 つの経路が別々に綴りを解釈すると、「系列は 2048² なのに宣言は 1024²」という
-    形が作れてしまう。
+    This is the one place that goes through the accepted set; both the derivation of the series name
+    and the cross-check of `pipelineConfig` use this number. If the two paths interpreted the
+    spelling separately, "the series is 2048² but the declaration says 1024²" could be built.
     """
     if model not in BIREFNET_MODELS:
         raise DistError(
-            f"BiRefNet 系のモデル '{model}' は配らない（配るのは: {' / '.join(BIREFNET_MODELS)}）"
-            " — モデル名は配る入力解像度そのもので、系列も別"
+            f"BiRefNet family model '{model}' is not shipped"
+            f" (shipped: {' / '.join(BIREFNET_MODELS)})"
+            " — the model name is the shipped input resolution itself, and its series is separate"
         )
     return int(model)
 
 
 def birefnet_series_name(checkpoint: str, model: str, dtype: str) -> str:
-    """checkpoint・解像度・格納 dtype → 系列ディレクトリ名。
+    """Checkpoint, resolution and storage dtype → series directory name.
 
-    `birefnet.export.default_out_dir` と同じ式 — f32 は接尾なし（既存系列の綴りのまま）・他は
-    `-<dtype>`。
+    The same formula as `birefnet.export.default_out_dir` — f32 has no suffix (the existing series'
+    spelling as is), the others get `-<dtype>`.
     """
     if dtype not in BIREFNET_WEIGHT_DTYPES:
         raise DistError(
-            f"BiRefNet 系の格納 dtype '{dtype}' は配らない"
-            f"（配るのは: {' / '.join(BIREFNET_WEIGHT_DTYPES)}）"
+            f"BiRefNet family storage dtype '{dtype}' is not shipped"
+            f" (shipped: {' / '.join(BIREFNET_WEIGHT_DTYPES)})"
         )
     name = birefnet_checkpoint(checkpoint).lower().replace("_", "-")
     suffix = "" if dtype == BIREFNET_PLAIN_DTYPE else f"-{dtype}"
@@ -408,42 +456,46 @@ def birefnet_series_name(checkpoint: str, model: str, dtype: str) -> str:
 
 
 def birefnet_repo_name(checkpoint: str) -> str:
-    """checkpoint の配布リポ名（{@link BIREFNET_REPO_NAMES}）。
+    """Distribution repository name of the checkpoint ({@link BIREFNET_REPO_NAMES}).
 
-    `Pipeline.repo_name` はモデル名を受ける席だが、リポを決めるのは checkpoint なので
-    {@link PIPELINE} / {@link LUCIDA_PIPELINE} が自分の checkpoint を束ねてここへ渡す
-    （解像度 2 つを 1 周で組むときは `--out` が要る — `dist.default_out_dir`）。
+    `Pipeline.repo_name` is a slot that receives the model name, but the checkpoint decides the
+    repository, so {@link PIPELINE} / {@link LUCIDA_PIPELINE} bind their own checkpoint and pass it
+    here (assembling both resolutions in one pass needs `--out` — `dist.default_out_dir`).
     """
     name = BIREFNET_REPO_NAMES.get(checkpoint)
     if name is None:
         raise DistError(
-            f"BiRefNet 系の checkpoint '{checkpoint}' のリポ名が無い"
-            f"（既知: {' / '.join(sorted(BIREFNET_REPO_NAMES))}）"
+            f"BiRefNet family checkpoint '{checkpoint}' has no repository name"
+            f" (known: {' / '.join(sorted(BIREFNET_REPO_NAMES))})"
         )
     return name
 
 
 @dataclass(frozen=True)
 class BirefnetSources:
-    """組み立ての入力。格納 dtype ごとの系列（どれもグラフ 1 本）だけ。
+    """Inputs of the assembly: only the series per storage dtype (each a single graph).
 
-    SigLIP2 と違って実重みの置き場を持たないのは、前処理定数の出どころになる機械可読な
-    ファイルが上流に無いから（節の冒頭）。**どの重みのどの解像度かを言えるのは系列 path
-    だけ**なので、系列名の導出（{@link birefnet_series_name}）が帰属の唯一の紐づけになる。
+    Unlike SigLIP2 there is no location of the real weights, because upstream has no
+    machine-readable file that could be the source of the preprocessing constants (module doc).
+    **Only the series path can say which weights at which resolution**, so the derivation of the
+    series name ({@link birefnet_series_name}) is the only link to the attribution.
     """
 
-    #: 格納 dtype → 系列 root（checkpoint の席 {@link birefnet_seat_dtypes} の全部 — 1 つでも
-    #: 欠けたら組まない・席に無い dtype の系列も組まない）。
+    #: Storage dtype → series root (all of the checkpoint's presets {@link birefnet_seat_dtypes} —
+    #: nothing is assembled if even one is missing, nor with a series of a dtype that is not a
+    #: preset).
     series_by_dtype: Mapping[str, Path]
 
 
 def birefnet_sources(
     series_dir: Path, checkpoint: str, model: str = BIREFNET_DEFAULT_MODEL
 ) -> BirefnetSources:
-    """系列の親ディレクトリ（`outputs/series/`）と checkpoint・解像度から入力を引く。
+    """Look up the inputs from the series parent directory (`outputs/series/`), the checkpoint and
+    the resolution.
 
-    引くのはその checkpoint の席の系列だけ（{@link birefnet_seat_dtypes} — HR は f16 系列だけ・
-    Lucida は f32 と f16 の両系列）。席に無い系列（HR の f32 系列）は手元にあっても見ない。
+    Only the series of that checkpoint's presets are looked up ({@link birefnet_seat_dtypes} — only
+    the f16 series for HR, both the f32 and f16 series for Lucida). A series that is not a preset
+    (HR's f32 series) is ignored even if it is on disk.
     """
     return BirefnetSources(
         series_by_dtype={
@@ -454,10 +506,10 @@ def birefnet_sources(
 
 
 def birefnet_placements(sources: BirefnetSources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link BIREFNET_OUTPUT_PATHS} が持つ。
+    """Role name → source file. The output paths are held by {@link BIREFNET_OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` / `quality.json` はこれで
-    落ちる）。
+    What is not in this table does not go into the output (this drops the series' `io.*.safetensors`
+    / `quality.json`).
     """
     return {
         birefnet_role(dtype): series / "model.krm"
@@ -466,21 +518,21 @@ def birefnet_placements(sources: BirefnetSources) -> dict[str, Path]:
 
 
 def birefnet_postprocess(checkpoint: str) -> str:
-    """checkpoint → 後処理の手順（{@link BIREFNET_POSTPROCESS}）。
+    """Checkpoint → post-processing procedure ({@link BIREFNET_POSTPROCESS}).
 
-    MUST: 表に無い checkpoint は組まない — 既定の手順で埋めると、上流の手順と違う後処理を
-    宣言した配布形が黙って成立する。
+    MUST: do not assemble a checkpoint missing from the table — filling in a default procedure would
+    silently produce a distribution that declares a post-processing different from upstream's.
     """
     procedure = BIREFNET_POSTPROCESS.get(checkpoint)
     if procedure is None:
         raise DistError(
-            f"BiRefNet 系の checkpoint '{checkpoint}' の後処理の手順が無い"
-            f"（既知: {' / '.join(sorted(BIREFNET_POSTPROCESS))}）"
+            f"BiRefNet family checkpoint '{checkpoint}' has no post-processing procedure"
+            f" (known: {' / '.join(sorted(BIREFNET_POSTPROCESS))})"
         )
     if procedure not in BIREFNET_POSTPROCESS_DESCRIPTIONS:
         raise DistError(
-            f"後処理の手順 '{procedure}' はカードが説明できない"
-            f"（既知: {' / '.join(BIREFNET_POSTPROCESS_DESCRIPTIONS)}）"
+            f"the card cannot describe post-processing procedure '{procedure}'"
+            f" (known: {' / '.join(BIREFNET_POSTPROCESS_DESCRIPTIONS)})"
         )
     return procedure
 
@@ -488,40 +540,42 @@ def birefnet_postprocess(checkpoint: str) -> str:
 def birefnet_pipeline_config(
     graph: Mapping[str, Any], path: Path, model: str, checkpoint: str
 ) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 6 欄）を焼かれたグラフ・正規化定数・checkpoint から組む。
+    """Build `pipelineConfig` (the 6 fields of the TS-side schema) from the baked graph, the
+    normalization constants and the checkpoint.
 
-    resize 先はグラフの入力宣言そのもの — 前処理が別の寸法へ伸ばすと、値が静かに崩れたまま
-    shape だけ合う。入力の名前・階数・batch・チャネル数もここで見る（後段の
-    {@link assert_birefnet_graph} が出力側を見る）。
+    The resize target is the graph's input declaration itself — if the preprocessing stretched to
+    other dimensions, the values would break silently while the shapes still fit. The input's name,
+    rank, batch and channel count are also checked here (the later {@link assert_birefnet_graph}
+    checks the output side).
 
-    MUST: 読んだ解像度を**モデル名**と突き合わせる。モデル名は manifest のキーであり利用者が
-    `model: "2048"` と綴る値そのものなので、系列を 1 つ取り違えたまま組むと「2048 と名乗る
-    1024 のグラフ」が出る — 実行も検証も通り、`pipelineConfig` の宣言とも噛み合ったままで、
-    食い違うのは名前だけになる。
+    MUST: check the resolution read here against the **model name**. The model name is the
+    manifest's key and the very value a user spells as `model: "2048"`, so assembling with one
+    series mixed up would ship "a 1024 graph calling itself 2048" — it runs and verifies, still
+    agrees with the `pipelineConfig` declaration, and only the name disagrees.
     """
     inputs = graph_inputs(graph, path)
     if tuple(inputs) != (BIREFNET_INPUT,):
         raise DistError(
-            f"{path} のグラフ入力が {list(inputs)} で、期待の {[BIREFNET_INPUT]} と違う"
-            " — 実行側は名前で束ねるので、綴りが変われば束ねられない"
+            f"the graph inputs of {path} are {list(inputs)}, not the expected {[BIREFNET_INPUT]}"
+            " — the runtime binds by name, so a changed spelling cannot be bound"
         )
     shape = inputs[BIREFNET_INPUT]
     if len(shape) != 4 or shape[0] != 1 or shape[1] != BIREFNET_CHANNELS:
         raise DistError(
-            f"{path} の入力 '{BIREFNET_INPUT}' が {shape!r}"
-            f" — 期待は [1, {BIREFNET_CHANNELS}, H, W]（batch もチャネル数も静的）"
+            f"{path}: input '{BIREFNET_INPUT}' is {shape!r}"
+            f" — expected [1, {BIREFNET_CHANNELS}, H, W] (both batch and channel count static)"
         )
     height, width = shape[2], shape[3]
     for axis, value in (("H", height), ("W", width)):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise DistError(
-                f"{path} の入力 '{BIREFNET_INPUT}' の {axis} が正の整数でない（{value!r}）"
+                f"{path}: in input '{BIREFNET_INPUT}', {axis} is not a positive integer ({value!r})"
             )
     resolution = birefnet_resolution(model)
     if (height, width) != (resolution, resolution):
         raise DistError(
-            f"{path} は {height}×{width} で焼かれている — モデル '{model}' が名乗る"
-            f" {resolution}² と食い違う（解像度ごとに別のグラフ・別の系列）"
+            f"{path} is baked at {height}×{width} — it disagrees with what model '{model}' claims,"
+            f" {resolution}² (each resolution is a separate graph and a separate series)"
         )
     return {
         "imageWidth": width,
@@ -536,21 +590,28 @@ def birefnet_pipeline_config(
 def assert_birefnet_graph(
     graph: Mapping[str, Any], path: Path, pipeline_config: Mapping[str, Any]
 ) -> None:
-    """出力が**マット 1 本**で、入力と同じ寸法であることを配置の前に実測する。
+    """Measure before placement that the output is **a single matte** with the same dimensions as
+    the input.
 
-    MUST: 落とさない。`birefnet/export.py` のラッパは学習モードだと multi-scale supervision の
-    中間予測まで返す形なので、そちら向けに焼かれたグラフは**位置で引く後段が別の値を α として
-    読む**（要素数だけ見る実装なら shape も通る）。記号次元が無いことも同じ席で見る — 解像度も
-    窓マスクも定数として焼かれており、動かせる軸は 1 本も無い。
+    MUST: do not drop this. In training mode the wrapper of `birefnet/export.py` also returns the
+    intermediate predictions of multi-scale supervision, so for a graph baked that way **a later
+    stage that picks by position reads another value as α** (an implementation that only checks the
+    element count would let the shape through as well). The same place checks that there are no
+    symbolic dimensions — the resolution and the window masks are baked in as constants, and not a
+    single axis can move.
     """
     symbols = graph.get("symbols")
     if not isinstance(symbols, list) or symbols:
         raise DistError(
-            f"{path}: 記号次元 {symbols!r} がある — 解像度も窓マスクも定数として焼かれている"
+            f"{path}: has symbolic dimensions {symbols!r} — the resolution and the window masks are"
+            " baked in as constants"
         )
     outputs = graph.get("outputs")
     if not isinstance(outputs, list) or len(outputs) != 1:
-        raise DistError(f"{path}: グラフ出力が {outputs!r} — 最終段のマット 1 本だけが要る")
+        raise DistError(
+            f"{path}: graph outputs are {outputs!r} — exactly one matte from the final stage is"
+            " needed"
+        )
     values = graph.get("values")
     value = values.get(outputs[0]) if isinstance(values, dict) else None
     shape = value.get("shape") if isinstance(value, dict) else None
@@ -562,39 +623,44 @@ def assert_birefnet_graph(
     ]
     if shape != expected:
         raise DistError(
-            f"{path}: グラフ出力 '{outputs[0]}' の形が {shape!r}、期待は {expected}"
-            " — マットは入力と同じ寸法の 1 チャネル"
+            f"{path}: graph output '{outputs[0]}' has shape {shape!r}, expected {expected}"
+            " — the matte is 1 channel with the same dimensions as the input"
         )
 
 
 def birefnet_plan(
     sources: BirefnetSources, checkpoint: str, model: str = BIREFNET_DEFAULT_MODEL
 ) -> ModelPlan:
-    """BiRefNet 系 1 モデル（= 1 解像度）ぶんの計画を組む（検査と読み取りをここで全部済ませる）。"""
+    """Build the plan for one BiRefNet family model (= one resolution) (all checks and reads happen
+    here)."""
     assert_model_name(model)
     birefnet_resolution(model)
-    # 帰属を名乗れない checkpoint は系列を読む前に落とす（リポ名の表と帰属表は独立に欠けうる）。
+    # A checkpoint that cannot state its attribution fails before any series is read (the repository
+    # name table and the attribution table can each be missing an entry independently).
     birefnet_checkpoint(checkpoint)
     birefnet_repo_name(checkpoint)
     birefnet_postprocess(checkpoint)
     seats = birefnet_seat_dtypes(checkpoint)
     default_quant = birefnet_default_quant(checkpoint)
-    # MUST: 系列はその checkpoint の席の全部で、席に無い dtype は持たない — 欠けた席は宣言だけの
-    # 席になり、余った系列は上流の格納より広い（値を広げただけの）席を配る形になる。
+    # MUST: the series are all of that checkpoint's presets, and no dtype that is not a preset — a
+    # missing preset would become a preset in declaration only, and a surplus series would ship a
+    # preset wider than the upstream storage (one that only widens the values).
     if set(sources.series_by_dtype) != set(seats):
         raise DistError(
-            f"系列の格納 dtype {list(sources.series_by_dtype)} が checkpoint '{checkpoint}' の席"
-            f" {list(seats)} と違う — 席は上流の格納より広くない dtype の全部"
-            "（birefnet_seat_dtypes）"
+            f"storage dtypes of the series {list(sources.series_by_dtype)} differ from checkpoint"
+            f" '{checkpoint}''s presets {list(seats)} — the presets are all dtypes not wider than"
+            " the upstream storage (birefnet_seat_dtypes)"
         )
     placements = birefnet_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, BIREFNET_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, BIREFNET_STORAGE_FORBIDDEN)
-    # MUST: **席の系列を 1 本残らず**検査する（irodori と同じ規律）。f16 系列は f32 とは別
-    # プロセスの emit なので、片方だけ見ると「f32 は宣言どおりだが f16 だけ別解像度 / 別の出所」が
-    # 素通りする。`pipelineConfig` は系列ごとに導いて既定席の系列との**一致**を見る（寸法は焼かれた
-    # グラフの宣言なので、1 本から導いて他へ写すと別寸法の系列が同居できてしまう）。
+    # MUST: check **every single series of the presets** (the same discipline as irodori). The f16
+    # series is emitted by a separate process from f32, so checking only one lets "f32 is as
+    # declared but only f16 has another resolution / another origin" through. `pipelineConfig` is
+    # derived per series and checked for **equality** with the default preset's series (the
+    # dimensions are the baked graph's declaration, so deriving them from one and copying to the
+    # others would let series of different dimensions live together).
     configs: dict[str, dict[str, Any]] = {}
     revision = BIREFNET_CHECKPOINTS[checkpoint].revision
     for dtype in seats:
@@ -602,19 +668,21 @@ def birefnet_plan(
         graph = ir_graph(container)
         configs[dtype] = birefnet_pipeline_config(graph, container, model, checkpoint)
         assert_birefnet_graph(graph, container, configs[dtype])
-        # MUST: 容器が名乗る出所を帰属表の**固定値**（ライセンスと上流 revision — `birefnet.card`
-        # の BIREFNET_CHECKPOINTS）へ突き合わせる（wan と同じ形）。ライセンス（HR / Lucida とも
-        # MIT）と寸法・前処理は checkpoint を跨いで一致するので、revision を見ないと別の
-        # checkpoint の系列（「HR の席に Lucida の系列」・寄せ集めの 2 席 — 2026-09-26 レビュー
-        # A-1）が組み上がる。全容器を同じ固定値で見るので、席どうしの revision の一致も
-        # ここで閉じる。
+        # MUST: check the origin the container states against the attribution table's **fixed
+        # values** (license and upstream revision — BIREFNET_CHECKPOINTS of `birefnet.card`) (the
+        # same shape as wan). The license (MIT for both HR and Lucida), the dimensions and the
+        # preprocessing agree across checkpoints, so without the revision a series of another
+        # checkpoint ("a Lucida series on HR's preset", 2 presets cobbled together — 2026-09-26
+        # review A-1) would assemble. All containers are checked against the same fixed value, so
+        # this also closes the revision agreement between presets.
         assert_upstream_provenance(container, license=BIREFNET_LICENSE, revision=revision)
     pipeline_config = configs[default_quant]
     for dtype, config in configs.items():
         if config != pipeline_config:
             raise DistError(
-                f"格納 {dtype} の系列の pipelineConfig {config} が既定席 {default_quant} の系列の"
-                f" {pipeline_config} と食い違う — 同じモデルの席は同じ寸法・前処理で焼く"
+                f"the {dtype} storage series' pipelineConfig {config} disagrees with the default"
+                f" preset {default_quant}'s series' {pipeline_config} — presets of"
+                " the same model are baked with the same dimensions and preprocessing"
             )
     weights = birefnet_weights(checkpoint)
     return ModelPlan(
@@ -633,27 +701,31 @@ def birefnet_plan(
 
 
 def birefnet_dist_plan(series_dir: Path, model: str, checkpoint: str) -> ModelPlan:
-    """`--series` の親から BiRefNet 系 1 モデル（= 1 解像度）の計画を組む（CLI のディスパッチ先）。
+    """Build the plan for one BiRefNet family model (= one resolution) from the `--series` parent
+    (where the CLI dispatches to).
 
-    MUST: `checkpoint` は**その Pipeline のリポが配る唯一の重み**で、`--model` からは決まらない
-    （anima と同じ規律の置き換え）。系列 path も帰属もリポ直下の著作権表示もこの 1 つから
-    決まるので、席を跨いだ取り違え — リポ直下の著作権表示と改変告知が中身と食い違ったまま
-    配布形が成立する形 — は綴りとして作れない。
+    MUST: `checkpoint` is **the only weights that Pipeline's repository ships** and is not
+    determined by `--model` (a substitution of the same discipline as anima). The series path, the
+    attribution and the copyright notice at the repository root are all determined by this one name,
+    so a mix-up across entries — a distribution coming together while the copyright notice and
+    modification notice at the repository root disagree with its contents — cannot even be spelled.
     """
     return birefnet_plan(birefnet_sources(series_dir, checkpoint, model), checkpoint, model)
 
 
-#: MIT の著作権行（配布リポ直下の `LICENSE.md`）。上流 2 リポとも `license: mit` を名乗る
-#: 一方でライセンス**原文を同梱していない**（HF のカード frontmatter だけ）ので、原文は
-#: 共有テンプレート（`_shared.licenses.mit_license`）から組み、権利者の行をここが持つ。
+#: MIT copyright lines (`LICENSE.md` at the root of the distribution repository). Both upstream
+#: repositories state `license: mit` but **do not bundle the license text** (only the HF card
+#: frontmatter), so the text is built from the shared template (`_shared.licenses.mit_license`) and
+#: the holder lines live here.
 #:
-#: MUST: Lucida は 2 行（fine-tune 側と上流）。MIT の「著作権表示と許諾表示を含めること」は
-#: 派生でも上流の表示を落とせないという要求で、上流カードも「the original copyright notice
-#: is preserved」と自己申告している。
+#: MUST: Lucida has 2 lines (the fine-tune's and the upstream's). MIT's "include the copyright
+#: notice and permission notice" means a derivative cannot drop the upstream's notice either, and
+#: the upstream card itself declares "the original copyright notice is preserved".
 #:
-#: NOTE: 年は上流が明示していない（どちらのリポにも `LICENSE` ファイルが無い）。ZhengPeng は
-#: BiRefNet 論文の年（2024）、egeorcun は上流カード自身が現行重みへ付けている年（2026）を
-#: 採った — リリース前の人手ライセンス確認（ADR 0065 決定 7）が最終判断を持つ。
+#: NOTE: upstream does not state the years (neither repository has a `LICENSE` file). For ZhengPeng
+#: the year of the BiRefNet paper (2024) was taken, for egeorcun the year the upstream card itself
+#: gives the current weights (2026) — the manual license review before release (ADR 0065 decision 7)
+#: has the final say.
 BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
     BIREFNET_HR_CHECKPOINT: ("Copyright (c) 2024 ZhengPeng",),
     BIREFNET_LUCIDA_CHECKPOINT: (
@@ -662,13 +734,15 @@ BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
     ),
 }
 
-#: 改変告知。MIT は改変告知を要求しないが、格納形を変えずコンテナだけを移した配布形である
-#: ことは利用者が最初に確かめたい事実なので、`LICENSE.md` と同じ席で 1 枚出す。
+#: Modification notice. MIT does not require one, but that this distribution moved only the
+#: container without changing the storage form is the fact a user wants to check first, so one page
+#: is shipped in the same place as `LICENSE.md`.
 #:
-#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
-#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。席ごとの格納の説明
-#: （`{storage}`）はカードの帰属節と同じ 1 か所（`birefnet.card.birefnet_storage_lines`）から、
-#: その checkpoint の席（{@link birefnet_seat_dtypes}）と格納から組む。
+#: MUST: the wording matches the distribution's contents — it is plausible prose as a value, so it
+#: passes `verify_dist` and the manifest checks, and a disagreement could not be noticed until after
+#: shipping. The per-preset storage description (`{storage}`) is built from the same single place as
+#: the card's attribution section (`birefnet.card.birefnet_storage_lines`), from that checkpoint's
+#: presets ({@link birefnet_seat_dtypes}) and storage.
 BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 
 This repository redistributes a modified form of `{repo}`, which is licensed under
@@ -691,11 +765,13 @@ No retraining and no fine-tuning were performed. The original checkpoint is not 
 
 
 def birefnet_root_files(checkpoint: str) -> dict[str, str]:
-    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+    """Legal texts placed at the root of the distribution repository
+    (`karume.dist.Pipeline.root_files`).
 
-    MIT は「著作権表示と許諾表示を全ての複製に含める」ことだけを求めるので、`LICENSE.md` は
-    共有テンプレートの本文 + そのリポの著作権行（{@link BIREFNET_COPYRIGHTS}）。本文へは
-    触らない（整形した瞬間に許諾表示のコピーではなくなる）。
+    MIT only asks that "the copyright notice and permission notice be included in all copies", so
+    `LICENSE.md` is the shared template's text + that repository's copyright lines
+    ({@link BIREFNET_COPYRIGHTS}). The text itself is not touched (the moment it is reformatted, it
+    stops being a copy of the permission notice).
     """
     return {
         "LICENSE.md": mit_license(BIREFNET_COPYRIGHTS[checkpoint]),
@@ -707,30 +783,34 @@ def birefnet_root_files(checkpoint: str) -> dict[str, str]:
 
 
 def _birefnet_pipeline(checkpoint: str) -> Pipeline:
-    """1 checkpoint = 1 配布リポぶんの Pipeline を組む（解像度 2 つがその中に同居する）。
+    """Build the Pipeline for 1 checkpoint = 1 distribution repository (both resolutions live inside
+    it).
 
-    checkpoint を**ここで 1 回だけ**束ねるのがこの関数の全て — 系列 path（`plan`）・リポ名・
-    リポ直下の著作権行（`root_files`）・カードの帰属（`card_profiles`）の 4 つが同じ 1 つの
-    綴りから入るので、どれか 1 つだけが別の checkpoint を指す形が作れない。
+    Binding the checkpoint **here, exactly once** is all this function does — the series path
+    (`plan`), the repository name, the copyright lines at the repository root (`root_files`) and the
+    card's attribution (`card_profiles`) all come from the same one spelling, so a shape where only
+    one of them points at another checkpoint cannot be built.
     """
     return Pipeline(
         default_model=BIREFNET_DEFAULT_MODEL,
         repo_name=lambda _model: birefnet_repo_name(checkpoint),
         plan=lambda series_dir, model: birefnet_dist_plan(series_dir, model, checkpoint),
-        # SigLIP2 と同じ理由で選ばせる軸にしない — 帰属（上流リポ・ライセンス・学習データ）は
-        # checkpoint から一意に決まる。プロファイルを分けると「Lucida を BiRefNet_HR の帰属で
-        # 配る」取り違えを操作者が起こせるようになる。
+        # Not an axis to choose, for the same reason as SigLIP2 — the attribution (upstream
+        # repository, license, training data) is determined uniquely by the checkpoint. Splitting
+        # the profiles would let an operator make the mix-up "ship Lucida with BiRefNet_HR's
+        # attribution".
         card_profiles={"birefnet": partial(render_birefnet_model_card, checkpoint=checkpoint)},
         root_files=birefnet_root_files(checkpoint),
     )
 
 
-#: `--pipeline birefnet` の 1 行（配布リポ `karume-birefnet-hr`）。
+#: The `--pipeline birefnet` row (distribution repository `karume-birefnet-hr`).
 #:
-#: MUST: 派生（`lucida`）と**別の Pipeline**にする — 理由はモジュール doc の同段落。
+#: MUST: a **separate Pipeline** from the derivative (`lucida`) — the reason is the same paragraph
+#: of the module doc.
 PIPELINE = _birefnet_pipeline(BIREFNET_HR_CHECKPOINT)
 
-#: `--pipeline lucida` の 1 行（配布リポ `karume-lucida` — BiRefNet_HR の第三者 fine-tune）。
-#: テンプレートは同じ（構造が同一なので配布形も同型）で、違うのは中身とリポ直下の法的
-#: テキストだけ。
+#: The `--pipeline lucida` row (distribution repository `karume-lucida` — a third-party fine-tune of
+#: BiRefNet_HR). The template is the same (the structure is identical, so the distribution has the
+#: same form); only the contents and the legal texts at the repository root differ.
 LUCIDA_PIPELINE = _birefnet_pipeline(BIREFNET_LUCIDA_CHECKPOINT)

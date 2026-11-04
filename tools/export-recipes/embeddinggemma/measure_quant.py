@@ -1,74 +1,86 @@
-"""EmbeddingGemma-300m の**量子化方式**を torch CPU で横並びに測る（方式スクリーニング）。
+"""Measure the **quantization methods** for EmbeddingGemma-300m side by side on torch CPU (method
+screening).
 
-`anima/measure_quant.py` / `irodori/measure_quant.py` と同じ思想の品質軸 — **GPU コードは
-0 行**で、ここで測るのは量子化そのものの質だけ（ADR 0006 の fake-quant 方法論では E2E は
-実装誤差しか測らないので、品質は別軸で測る必要がある）。答えたい問いは 2 つ:
+A quality axis with the same idea as `anima/measure_quant.py` / `irodori/measure_quant.py` — **zero
+lines of GPU code**; what is measured here is the quality of the quantization itself (under the
+fake-quant methodology of ADR 0006 the E2E measures only implementation error, so quality has to be
+measured on a separate axis). Two questions are to be answered:
 
-    ① **4bit の格子の張り方で埋め込みの質は変わるか** — RTN(i4) / FP4 / NF4 / MXFP4 /
-       k-means codebook 3 粒度を、同じ group（g=32 固定）・同じ対象で横並びにする。
-    ② **語彙表を 4bit へ落とせるか** — EG は `embed_tokens` が 201M / 307M（配布サイズの
-       約 66%）を占めるので、量子化の旨みはここに集中している。対象を「linear 限定」と
-       「linear + embedding」の 2 形で走らせ、差を語彙表の寄与として読む。
+    ① **Does the way the 4-bit grid is laid out change the quality of the embedding** — RTN(i4) /
+       FP4 / NF4 / MXFP4 / k-means codebook at 3 granularities, side by side with the same group
+       (g=32 fixed) and the same targets.
+    ② **Can the vocabulary table go down to 4 bits** — in EG `embed_tokens` takes 201M of 307M
+       (about 66% of the distribution size), so the gain from quantization concentrates there. The
+       targets are run in 2 forms, "linear only" and "linear + embedding", and the difference is
+       read as the vocabulary table's contribution.
 
-NOTE: 対象 `linear+embedding` の i4 は**格納できる形**。i4 の適格 op は linear / embedding /
-conv1d の重みスロット（ADR 0069 追記 6 / 7・`karume.emit.I4_WEIGHT_OPS`）で、格納は
-`docs/container-v1.md` §6.3 の codec `int4-sym-g`。ただしここで測るのは方式の質の横並びで、
-出荷する quant 席の主張ではない（FP4 / NF4 / MXFP4 / k-means は格納形を持たない測定専用方式 —
-`quant_methods` の測定専用方式と同じ立場）。
+NOTE: i4 on the `linear+embedding` target is **a form that can be stored**. The ops eligible for i4
+are the weight slots of linear / embedding / conv1d (ADR 0069 addenda 6 / 7,
+`karume.emit.I4_WEIGHT_OPS`), stored with the codec `int4-sym-g` of `docs/container-v1.md` §6.3.
+What is measured here, though, is a side-by-side comparison of method quality, not a claim about a
+quant preset to ship (FP4 / NF4 / MXFP4 / k-means are measurement-only methods with no storage form
+— the same standing as the measurement-only methods of `quant_methods`).
 
-## 構成（8 = baseline + 方式 7 × 対象 2 のうち baseline は対象に依らないので 1 本）
+## Configs (8 = baseline + 7 methods, × 2 targets — the baseline is target-independent, so 1)
 
-| 方式             | 丸め                                                     |
-| ---------------- | -------------------------------------------------------- |
-| `f32`            | 丸めなし（**基準** — 全ての cosine はこの埋め込みとの比） |
-| `rtn-i4-g32`     | `karume.quantize.fake_quant_int4`（出荷形の格納そのもの） |
-| `fp4`            | FP4 (e2m1) 固定表 × group absmax                          |
-| `nf4`            | NF4 固定表 × group absmax                                 |
-| `mxfp4`          | FP4 表 × group の **2 のべき** scale（OCP MX）            |
-| `kmeans:*`       | 16 centroid の codebook（per_tensor / per_channel / shared）|
+| method           | rounding                                                         |
+| ---------------- | ---------------------------------------------------------------- |
+| `f32`            | no rounding (**baseline** — every cosine is against this embedding) |
+| `rtn-i4-g32`     | `karume.quantize.fake_quant_int4` (exactly the shipped storage)  |
+| `fp4`            | fixed FP4 (e2m1) table × group absmax                            |
+| `nf4`            | fixed NF4 table × group absmax                                   |
+| `mxfp4`          | FP4 table × a **power-of-two** group scale (OCP MX)              |
+| `kmeans:*`       | 16-centroid codebook (per_tensor / per_channel / shared)         |
 
-group は **g=32 固定**（方式間の比較を格子の張り方 1 本に絞るため — group 長の軸は ADR 0069
-Phase 0 の sweep が既に持っている）。
+group is **fixed at g=32** (to narrow the comparison between methods to the grid layout alone — the
+group length axis is already covered by the sweep of ADR 0069 Phase 0).
 
-## 校正付き丸め（{@link CALIB_CONFIGS}）
+## Calibrated rounding ({@link CALIB_CONFIGS})
 
-上の 7 方式は重みだけを見て丸める（RTN 系）。**校正付き丸め**（GPTQ / AWQ — core の
-`karume.quant_calib`）は「その層に実際に流れる活性」から同じ格子の中で丸め先を選び直す
-方式で、5 本（GPTQ × 格納グリッド 3 種 / AWQ / AWQ+GPTQ）を同じ測定列へ足す。
+The 7 methods above round by looking at the weights alone (RTN family). **Calibrated rounding**
+(GPTQ / AWQ — `karume.quant_calib` in core) re-chooses the rounding targets within the same grid
+from "the activations that actually flow into that layer"; 5 of them (GPTQ × 3 storage grids / AWQ /
+AWQ+GPTQ) are added to the same measurement columns.
 
-対象は **decoder 内の linear 限定の 1 形**だけ（`embed_tokens` 込みの組は作らない）—
-校正の駆動（`calibrate_stages`）が stage 内の `nn.Linear` に閉じており、Dense 2 段は
-decoder の外なので、上の `linear` 対象より 2 本少ない別集合になる（{@link CALIB_TARGET}）。
-校正入力は {@link embeddinggemma.calib_texts.CALIB_TEXTS} の 48 文で、layer_type ごとの
-mask / RoPE 表ごと先頭 decoder layer への呼び出しを捕まえて stage 列へ流す
-（{@link capture_stage_batches}）。流す前に **stage 分解一致門**
-（{@link assert_stage_split}）で「stage 列の逐次 forward = 本体の最終 hidden」をビット一致で
-実測する — 分解がずれても数値は普通に出るので、門が無いと方式の採否を別経路の測定で決める
-ことになる。
+The target is **only 1 form, linear inside the decoder** (no combination including `embed_tokens`)
+— the calibration driver (`calibrate_stages`) is closed over the `nn.Linear` inside a stage, and the
+2 Dense stages are outside the decoder, so this is a separate set with 2 fewer than the `linear`
+target above ({@link CALIB_TARGET}). The calibration inputs are the 48 texts of
+{@link embeddinggemma.calib_texts.CALIB_TEXTS}; the call into the first decoder layer is captured
+together with the mask / RoPE tables per layer_type and fed into the stage sequence
+({@link capture_stage_batches}). Before feeding, the **stage-split agreement check**
+({@link assert_stage_split}) measures bit-exactly that "the sequential forward of the stage
+sequence = the body's final hidden" — a split that drifts still produces ordinary numbers, so
+without the check the choice of method would be decided by a measurement on another path.
 
-MUST: **方式を積み重ねない** — 全ての丸めは in-place なので、構成ごとに pristine（素の f32
-重み）へ戻してから当てる（{@link restore}）。戻さずに当てると測っているのが「NF4 の上の
-MXFP4」になり、方式間の比較そのものが意味を失う。模型のロードは 1 回きり。
+MUST: **do not stack methods** — every rounding is in place, so each config goes back to pristine
+(the plain f32 weights) before being applied ({@link restore}). Applying without restoring measures
+"MXFP4 on top of NF4", and the comparison between methods itself loses its meaning. The model is
+loaded only once.
 
-## 測定列
+## Measurement columns
 
-- **ケース別 cosine**（`export.py` の golden 5 ケース）— 基準 f32 の埋め込みとの cosine の
-  min と mean。埋め込みは L2 正規化済みなので内積そのものだが、正規化つきで採る。
-- **意味順序の保持** — 近い対（{@link export.NEAR_PAIR}）の cosine が遠い対
-  （{@link export.FAR_PAIR}）を上回るか。`export._sanity` と同じ対で、「数値は動いているが
-  埋め込みとして壊れている」を基準比 cosine とは独立に捕まえる列（cosine が 0.99 でも
-  順序が壊れれば検索は壊れる）。
-- **ペア間 cosine 行列のドリフト** — 5 ケース総当たり 10 対の cosine を f32 と比べた
-  最大絶対差。埋め込みの使い道は「ベクトル同士の比較」なので、基準ベクトルとの近さより
-  こちらが実運用に近い（全ベクトルが同じ向きへ回っても検索順位は動かない）。
-- **サイズ試算** — 方式ごとの実効 bpw と対象集合の投影 MiB（式は {@link Method.formula}）。
+- **Per-case cosine** (the 5 golden cases of `export.py`) — min and mean of the cosine against the
+  baseline f32 embedding. The embeddings are L2-normalised, so this is the dot product itself, but
+  it is taken with normalisation.
+- **Preservation of the semantic order** — whether the cosine of the near pair
+  ({@link export.NEAR_PAIR}) beats the far pair ({@link export.FAR_PAIR}). The same pairs as
+  `export._sanity`; a column that catches "the numbers move but it is broken as an embedding"
+  independently of the cosine against the baseline (even at a cosine of 0.99, a broken order breaks
+  retrieval).
+- **Drift of the pairwise cosine matrix** — the max absolute difference of the cosines of all 10
+  pairs of the 5 cases against f32. Embeddings are used for "comparing vectors with each other", so
+  this is closer to real use than closeness to the baseline vectors (if every vector rotates the
+  same way, retrieval ranking does not move).
+- **Size projection** — effective bpw per method and projected MiB of the target set (the formula
+  is {@link Method.formula}).
 
-## 出力
+## Output
 
     uv run --with 'transformers==5.14.1' python -m embeddinggemma.measure_quant --out <dir>
 
-`<out>/report.json` に全数値、stdout へ Markdown 表 2 枚（品質 / サイズ試算）。進捗は
-stderr へ即 flush する（数十分級の背景実行で追うため）。
+All numbers go to `<out>/report.json`, and 2 Markdown tables (quality / size projection) to stdout.
+Progress goes to stderr, flushed immediately (to follow a background run of tens of minutes).
 """
 
 from __future__ import annotations
@@ -108,47 +120,52 @@ from karume.quantize import channel_rows, fake_quant_int4, iter_quant_targets
 from . import export as eg
 from .calib_texts import CALIB_TEXTS
 
-#: 生成物の既定の置き場（デモ・測定の生成物は系列と分ける — `irodori/measure_quant.py` と同じ）。
+#: The default location of the artifacts (artifacts of demos and measurements are kept apart from
+#: the series — the same as `irodori/measure_quant.py`).
 DEFAULT_OUT = BENCH_ROOT / "embeddinggemma-300m" / f"{date.today().isoformat()}_quant-screen"
 
 REPORT_FILE = "report.json"
 
-#: 基準構成の綴り（丸めなし — 全ての比較の分母）。
+#: The spelling of the baseline config (no rounding — the denominator of every comparison).
 BASE_CONFIG = "f32"
 
-#: 全方式で固定する group 長（方式間の比較を「格子の張り方」1 本に絞るための固定 —
-#: モジュール docstring）。group 長そのものの軸は ADR 0069 Phase 0 の sweep が持つ。
+#: The group length fixed for every method (fixed to narrow the comparison between methods to "the
+#: grid layout" alone — module docstring). The group length axis itself belongs to the sweep of
+#: ADR 0069 Phase 0.
 GROUP_SIZE = 32
 
-# ---- サイズ試算の bit 幅（格納規則の逐語）------------------------------------
+# ---- Bit widths of the size projection (verbatim from the storage rules) ------------------
 #
-# 出典は `docs/container-v1.md` §6.3 の codec `int4-sym-g`（scale は **F32**・group ごと
-# 1 個・groupSize は 2 冪かつ 16 以上）と OCP Microscaling Formats v1.0（MX の共有 scale は
-# E8M0 = 指数 1 バイト）。
-# k-means は格納形を持たない測定専用方式なので、**表のコストを込みで**素直に数える。
+# The sources are the codec `int4-sym-g` of `docs/container-v1.md` §6.3 (the scale is **F32**, one
+# per group, groupSize a power of 2 and at least 16) and OCP Microscaling Formats v1.0 (the shared
+# scale of MX is E8M0 = a 1-byte exponent).
+# k-means is a measurement-only method with no storage form, so it is counted plainly **including
+# the cost of the tables**.
 
-#: 4bit 格子のペイロード（全方式共通 — 比較しているのは「格子の張り方」であって bit 数ではない）。
+#: The payload of the 4-bit grid (common to every method — what is compared is "the grid layout",
+#: not the bit count).
 PAYLOAD_BITS = 4.0
-#: group scale の bit 幅（`int4-sym-g` の格納は F32 の group scale が MUST —
-#: `docs/container-v1.md` §6.3）。
+#: The bit width of a group scale (storing `int4-sym-g` MUST use an F32 group scale —
+#: `docs/container-v1.md` §6.3).
 F32_SCALE_BITS = 32.0
-#: MXFP4 の共有 scale は E8M0（指数 1 バイト）。
+#: The shared scale of MXFP4 is E8M0 (a 1-byte exponent).
 MX_SCALE_BITS = 8.0
-#: codebook 1 エントリの bit 幅（centroid を F32 で持つ）。
+#: The bit width of one codebook entry (the centroids are kept in F32).
 CODEBOOK_ENTRY_BITS = 32.0
 
 BITS_PER_BYTE = 8
 MIB = 1024 * 1024
-#: 基準（丸めなし）の 1 要素あたり bit。
+#: Bits per element of the baseline (no rounding).
 F32_BITS = 32.0
 
 
 @dataclass(frozen=True)
 class TargetStats:
-    """対象テンソル集合の素性（サイズ試算の入力）。
+    """Properties of the target tensor set (the input of the size projection).
 
-    `groups` は g=32 の group 数の総和、`channels` は per-channel 表のコストが比例する行数
-    （= {@link karume.quantize.channel_rows} の行 = 出力チャネル）の総和。
+    `groups` is the total number of g=32 groups, and `channels` the total number of rows the cost of
+    a per-channel table is proportional to (= the rows of {@link karume.quantize.channel_rows} =
+    output channels).
     """
 
     modules: int
@@ -159,25 +176,28 @@ class TargetStats:
 
 @dataclass(frozen=True)
 class Target:
-    """量子化の対象範囲（`op_types` で切り替える — 対象選択の正本は core 側）。"""
+    """The quantization target range (switched with `op_types` — target selection's source of truth
+    is in core)."""
 
     name: str
     op_types: tuple[type[nn.Module], ...]
 
 
-#: transformer の linear + SentenceTransformer の Dense 2 段（i4 を linear の重みスロット
-#: だけに掛ける形）。
+#: The transformer's linear + the 2 SentenceTransformer Dense stages (the form that applies i4 only
+#: to linear weight slots).
 TARGET_LINEAR = Target("linear", (nn.Linear,))
-#: 上に `embed_tokens` を足した形（EG の配布サイズの支配項 — モジュール docstring の ②）。
+#: The above plus `embed_tokens` (the dominant term of EG's distribution size — ② of the module
+#: docstring).
 TARGET_WITH_EMBEDDING = Target("linear+embedding", (nn.Linear, nn.Embedding))
 TARGETS: tuple[Target, ...] = (TARGET_LINEAR, TARGET_WITH_EMBEDDING)
 
-#: pristine 退避と復元の対象（**最も広い形**で採る — 対象の狭い構成でも同じ退避から戻す）。
+#: What the pristine backup and restore cover (taken in **the widest form** — configs with a
+#: narrower target are restored from the same backup).
 WIDEST_OP_TYPES = TARGET_WITH_EMBEDDING.op_types
 
 
 def _group_scaled_bits(scale_bits: float) -> Callable[[TargetStats], float]:
-    """group scale を持つ方式の総 bit（`4·N + scale_bits·G`）。"""
+    """Total bits of a method with group scales (`4·N + scale_bits·G`)."""
 
     def bits(stats: TargetStats) -> float:
         return PAYLOAD_BITS * stats.elements + scale_bits * stats.groups
@@ -188,7 +208,7 @@ def _group_scaled_bits(scale_bits: float) -> Callable[[TargetStats], float]:
 def _codebook_bits(
     tables: Callable[[TargetStats], int], scale_bits: float
 ) -> Callable[[TargetStats], float]:
-    """codebook 方式の総 bit（`4·N + scale_bits·G + 32·16·表の枚数`）。"""
+    """Total bits of a codebook method (`4·N + scale_bits·G + 32·16·number of tables`)."""
 
     def bits(stats: TargetStats) -> float:
         table_bits = CODEBOOK_ENTRY_BITS * DEFAULT_CODEBOOK_LEVELS * tables(stats)
@@ -199,11 +219,11 @@ def _codebook_bits(
 
 @dataclass(frozen=True)
 class Method:
-    """1 方式のレシピ。
+    """The recipe of one method.
 
-    `apply` は**素の f32 重みへ**丸めを当てて計数の 1 行要約を返す（積み重ねの禁止は
-    呼び出し側の {@link restore} が担保する）。`bits` はサイズ試算で、`formula` はその式を
-    読み手が検算できる形の逐語。
+    `apply` applies the rounding **to the plain f32 weights** and returns a one-line summary of the
+    counts (the ban on stacking is guaranteed by the caller's {@link restore}). `bits` is the size
+    projection, and `formula` is its formula verbatim, in a form the reader can verify.
     """
 
     name: str
@@ -217,25 +237,25 @@ METHODS: tuple[Method, ...] = (
         "rtn-i4-g32",
         lambda model, op_types: fake_quant_int4(model, GROUP_SIZE, op_types=op_types).describe(),
         _group_scaled_bits(F32_SCALE_BITS),
-        "4·N + 32·G（G = N/32 の group ごとに F32 scale 1 個）",
+        "4·N + 32·G (one F32 scale per group, G = N/32)",
     ),
     Method(
         "fp4",
         lambda model, op_types: fake_quant_fp4(model, GROUP_SIZE, op_types=op_types).describe(),
         _group_scaled_bits(F32_SCALE_BITS),
-        "4·N + 32·G（i4 と同じ group absmax scale・格子だけが指数的）",
+        "4·N + 32·G (the same group absmax scale as i4; only the grid is exponential)",
     ),
     Method(
         "nf4",
         lambda model, op_types: fake_quant_nf4(model, GROUP_SIZE, op_types=op_types).describe(),
         _group_scaled_bits(F32_SCALE_BITS),
-        "4·N + 32·G（同上・格子が正規分布の分位点）",
+        "4·N + 32·G (as above; the grid is the quantiles of a normal distribution)",
     ),
     Method(
         "mxfp4",
         lambda model, op_types: fake_quant_mxfp4(model, GROUP_SIZE, op_types=op_types).describe(),
         _group_scaled_bits(MX_SCALE_BITS),
-        "4·N + 8·G（共有 scale が E8M0 の 2 のべき — OCP MX v1.0）",
+        "4·N + 8·G (the shared scale is an E8M0 power of two — OCP MX v1.0)",
     ),
     Method(
         "kmeans:per_tensor",
@@ -243,7 +263,7 @@ METHODS: tuple[Method, ...] = (
             model, "per_tensor", GROUP_SIZE, op_types=op_types
         ).describe(),
         _codebook_bits(lambda stats: stats.modules, 0.0),
-        "4·N + 32·16·(テンソル数)（scale 無し・表は層ごと 1 枚）",
+        "4·N + 32·16·(number of tensors) (no scale; one table per layer)",
     ),
     Method(
         "kmeans:per_channel",
@@ -251,7 +271,7 @@ METHODS: tuple[Method, ...] = (
             model, "per_channel", GROUP_SIZE, op_types=op_types
         ).describe(),
         _codebook_bits(lambda stats: stats.channels, 0.0),
-        "4·N + 32·16·(出力チャネル数)（scale 無し・表は行ごと 1 枚）",
+        "4·N + 32·16·(number of output channels) (no scale; one table per row)",
     ),
     Method(
         "kmeans:shared",
@@ -259,13 +279,14 @@ METHODS: tuple[Method, ...] = (
             model, "shared", GROUP_SIZE, op_types=op_types
         ).describe(),
         _codebook_bits(lambda _stats: 1, F32_SCALE_BITS),
-        "4·N + 32·G + 32·16（表はモデル全体で 1 枚・group absmax scale つき）",
+        "4·N + 32·G + 32·16 (one table for the whole model, with a group absmax scale)",
     ),
 )
 
 METHOD_NAMES = tuple(method.name for method in METHODS)
 
-#: ケース名の並び（golden の宣言順 — ペア行列の行列順もこれ）。
+#: The order of the case names (the golden's declaration order — also the row/column order of the
+#: pair matrix).
 CASE_NAMES: tuple[str, ...] = tuple(name for name, _prompt, _body in eg.GOLDEN_CASES)
 
 
@@ -273,21 +294,22 @@ def config_name(method: Method, target: Target) -> str:
     return f"{method.name}/{target.name}"
 
 
-# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+# ---- Calibrated rounding (work item J-2) ---------------------------------------------
 
-#: 校正付き構成の対象名（表の「対象」列）。`linear` の 2 形とは**対象集合が違う** —
-#: 校正の駆動（{@link karume.quant_calib.calibrate_stages}）は stage 内の `nn.Linear` に
-#: 閉じるので、decoder の外にある Dense 2 段（`2_Dense` / `3_Dense`）は入らない。
+#: The target name of the calibrated configs (the "target" column of the table). **A different
+#: target set** from the 2 `linear` forms — the calibration driver
+#: ({@link karume.quant_calib.calibrate_stages}) is closed over the `nn.Linear` inside a stage, so
+#: the 2 Dense stages outside the decoder (`2_Dense` / `3_Dense`) are not included.
 CALIB_TARGET = "linear:decoder"
 
 
 @dataclass(frozen=True)
 class CalibConfig:
-    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+    """The specification of one calibrated rounding (method × storage grid).
 
-    `bits` / `formula` は {@link Method} と同じ器（{@link size_projection} が両方を受ける）—
-    校正は**格子を 1 バイトも変えない**（同じ格子の中で丸め先を選び直すだけ）ので、格納形の
-    式は方式側と共有できる。
+    `bits` / `formula` are the same holders as in {@link Method} ({@link size_projection} accepts
+    both) — calibration **does not change the grid by a single byte** (it only re-chooses rounding
+    targets within the same grid), so the storage formula can be shared with the method side.
     """
 
     name: str
@@ -298,38 +320,41 @@ class CalibConfig:
 
     @property
     def label(self) -> str:
-        """表と JSON に出る方式名（`<方式>/<格納グリッド>`）。"""
+        """The method name shown in the table and the JSON (`<method>/<storage grid>`)."""
         return f"{self.method}/{self.grid.kind}"
 
 
-#: AWQ 系の式に付ける注記 — 等価倍率 `s` は `W_eff` に畳み込んだ形でしか持てず、格納には
-#: fold か companion が要る（`karume.quant_calib` のモジュール docstring）。
-AWQ_FORMULA_NOTE = "（等価倍率 s の fold / companion は未計上）"
+#: The note attached to the AWQ formulas — the equivalent scale factor `s` can only be held folded
+#: into `W_eff`, and storing it needs a fold or a companion (the module docstring of
+#: `karume.quant_calib`).
+AWQ_FORMULA_NOTE = " (the fold / companion of the equivalent scale s is not counted)"
 
-#: 校正グリッド = 5 本（この順で走る）。丸めは core の `karume.quant_calib` の共有で、
-#: ここは呼び分けと投影式だけを持つ。**対象は linear 限定の 1 形のみ** — `embed_tokens`
-#: 込みの組は作らない（校正は `nn.Linear` 限定で、語彙表は stage の外）。
+#: The calibration grid = 5 configs (run in this order). The rounding is shared through core's
+#: `karume.quant_calib`; this file holds only the dispatch and the projection formulas. **The
+#: target is only 1 form, linear only** — no combination including `embed_tokens` (calibration is
+#: limited to `nn.Linear`, and the vocabulary table is outside the stages).
 CALIB_CONFIGS: tuple[CalibConfig, ...] = (
     CalibConfig(
         "gptq-rtn",
         "gptq",
         GridSpec(kind="rtn", group_size=GROUP_SIZE),
         _group_scaled_bits(F32_SCALE_BITS),
-        "4·N + 32·G（格納は RTN i4 そのもの — 校正は丸め先だけを変える）",
+        "4·N + 32·G (the storage is RTN i4 itself — calibration changes only the rounding targets)",
     ),
     CalibConfig(
         "gptq-nf4",
         "gptq",
         GridSpec(kind="nf4", group_size=GROUP_SIZE),
         _group_scaled_bits(F32_SCALE_BITS),
-        "4·N + 32·G（格子は NF4 の固定表）",
+        "4·N + 32·G (the grid is the fixed NF4 table)",
     ),
     CalibConfig(
         "gptq-kmeans",
         "gptq",
         GridSpec(kind="kmeans_shared", group_size=GROUP_SIZE),
         _codebook_bits(lambda stats: stats.modules, F32_SCALE_BITS),
-        "4·N + 32·G + 32·16·(層数)（表の射程は**層内** — 全体 1 枚の kmeans:shared とは別式）",
+        "4·N + 32·G + 32·16·(number of layers) (a table's scope is **within a layer** — a"
+        " different formula from kmeans:shared with one table overall)",
     ),
     CalibConfig(
         "awq-rtn",
@@ -354,21 +379,25 @@ def calib_config_name(config: CalibConfig) -> str:
     return f"{config.name}/{CALIB_TARGET}"
 
 
-# ---- 指標 -------------------------------------------------------------------
+# ---- Metrics ------------------------------------------------------------------------
 
 
 def cosine(value: torch.Tensor, reference: torch.Tensor) -> float:
-    """`⟨v,r⟩ / (‖v‖·‖r‖)` を f64 で採る。
+    """`⟨v,r⟩ / (‖v‖·‖r‖)` taken in f64.
 
-    埋め込みはグラフの最終段で L2 正規化されているので内積そのものになるはずだが、
-    正規化つきで採る — 丸めがノルムを動かした場合に「内積が 1 を超える / 下回る」形で
-    ノルムの崩れが cosine 側へ混ざるのを避ける（ノルムの崩れは別の量）。
+    The embeddings are L2-normalised in the last stage of the graph, so this should be the dot
+    product itself, but it is taken with normalisation — so that when rounding moves the norm, the
+    norm breakage does not leak into the cosine as "a dot product above / below 1" (norm breakage
+    is a separate quantity).
     """
     x = value.reshape(-1).to(torch.float64)
     y = reference.reshape(-1).to(torch.float64)
     denom = float(x.norm() * y.norm())
     if denom == 0.0:
-        raise AssertionError("cosine の分母が 0（埋め込みが全ゼロ — 丸め以前に経路が壊れている）")
+        raise AssertionError(
+            "the cosine denominator is 0 (the embedding is all zeros — the path is broken before"
+            " any rounding)"
+        )
     return float(torch.dot(x, y) / denom)
 
 
@@ -377,7 +406,7 @@ def pair_label(pair: tuple[str, str]) -> str:
 
 
 def pair_cosines(vectors: Mapping[str, torch.Tensor]) -> dict[str, float]:
-    """5 ケース総当たり（上三角 10 対）の cosine。"""
+    """Cosines of all pairs of the 5 cases (the 10 pairs of the upper triangle)."""
     return {
         pair_label((left, right)): cosine(vectors[left], vectors[right])
         for index, left in enumerate(CASE_NAMES)
@@ -392,7 +421,7 @@ def l2_norms(vectors: Mapping[str, torch.Tensor]) -> dict[str, float]:
 def measure(
     vectors: Mapping[str, torch.Tensor], base: Mapping[str, torch.Tensor]
 ) -> dict[str, Any]:
-    """1 構成ぶんの測定列（基準 f32 の埋め込みとの比較）。"""
+    """The measurement columns of one config (compared with the baseline f32 embeddings)."""
     per_case = {name: cosine(vectors[name], base[name]) for name in CASE_NAMES}
     pairs = pair_cosines(vectors)
     base_pairs = pair_cosines(base)
@@ -423,16 +452,18 @@ def measure(
     }
 
 
-# ---- 対象集合とサイズ試算 ---------------------------------------------------
+# ---- Target sets and size projection ------------------------------------------------
 
 
 def count_targets(targets: Iterable[tuple[str, torch.Tensor, int]], where: str) -> TargetStats:
-    """列挙した対象の本数・要素数・group 数・チャネル数を数える（サイズ試算の入力）。
+    """Count the modules, elements, groups and channels of the listed targets (the input of the size
+    projection).
 
-    group 数は {@link karume.quantize.channel_rows} の平坦形から数える — 丸めが group を
-    割る軸（各 op の「in 軸」）と同じ軸で数えないと、試算だけが別の形の数になる。
-    量子化軸が `GROUP_SIZE` で割り切れない対象は fail loudly（格納できない形の bpw を
-    出さない — ADR 0069 決定 2）。
+    The group count is taken from the flattened form of {@link karume.quantize.channel_rows} —
+    unless it is counted on the same axis the rounding splits groups on (each op's "in axis"), the
+    projection alone would be a number for a different shape. A target whose quantization axis is
+    not divisible by `GROUP_SIZE` fails loudly (no bpw for a shape that cannot be stored — ADR 0069
+    decision 2).
     """
     modules = elements = groups = channels = 0
     for fqn, weight, axis in targets:
@@ -440,25 +471,27 @@ def count_targets(targets: Iterable[tuple[str, torch.Tensor, int]], where: str) 
         span = int(rows.shape[1])
         if span % GROUP_SIZE:
             raise AssertionError(
-                f"'{fqn}': 量子化軸 {span} が group {GROUP_SIZE} で割り切れない"
-                "（ADR 0069 決定 2 — 端数 group を作った形の試算は出さない）"
+                f"'{fqn}': quantization axis {span} is not divisible by group {GROUP_SIZE}"
+                " (ADR 0069 decision 2 — no projection for a shape with a partial group)"
             )
         modules += 1
         elements += int(weight.numel())
         groups += int(rows.shape[0]) * (span // GROUP_SIZE)
         channels += int(rows.shape[0])
     if not modules:
-        raise AssertionError(f"対象 '{where}' に量子化できる重みが 1 本も無い")
+        raise AssertionError(f"target '{where}' has no quantizable weight")
     return TargetStats(modules=modules, elements=elements, groups=groups, channels=channels)
 
 
 def target_stats(model: nn.Module, target: Target) -> TargetStats:
-    """model 全体から対象集合の素性を採る（対象選択の正本は core の `iter_quant_targets`）。"""
+    """Take the properties of the target set from the whole model (target selection's source of
+    truth is core's `iter_quant_targets`)."""
     return count_targets(iter_quant_targets(model, target.op_types), target.name)
 
 
 def size_projection(method: Method | CalibConfig, stats: TargetStats) -> dict[str, Any]:
-    """方式 × 対象集合の実効 bpw と投影 MiB（対象テンソルだけの合計 — 模型全体ではない）。"""
+    """Effective bpw and projected MiB of method × target set (the total over the target tensors
+    only — not the whole model)."""
     bits = method.bits(stats)
     baseline_bits = F32_BITS * stats.elements
     return {
@@ -474,35 +507,37 @@ def size_projection(method: Method | CalibConfig, stats: TargetStats) -> dict[st
     }
 
 
-# ---- 校正付き丸めの駆動（Catcher + stage 分解）-------------------------------
+# ---- Driving calibrated rounding (Catcher + stage split) ----------------------------
 
-#: decoder 層のモデル内 FQN 接頭辞（`EmbeddingWrapper.model` = `Gemma3TextModel` →
-#: `.layers`）。stage 内の局所 FQN が `<層番号>.self_attn.q_proj.weight` になるように
-#: {@link LayerStage} が子の名前を層番号にしてあるので、接頭辞はここまでで足りる
-#: （台帳のキーを `Int4Report` と同じモデル内 FQN の空間へ揃えるため — core の `StageSpec`）。
+#: The in-model FQN prefix of the decoder layers (`EmbeddingWrapper.model` = `Gemma3TextModel` →
+#: `.layers`). {@link LayerStage} names its child after the layer index so that the local FQN
+#: inside a stage is `<layer index>.self_attn.q_proj.weight`, so the prefix only needs to reach this
+#: far (to align the ledger keys with the in-model FQN space of `Int4Report` — core's `StageSpec`).
 DECODER_PREFIX = "model.layers"
 
-#: {@link LayerStage.forward} が layer_type ごとの kwargs を受け取る keyword 名。
+#: The keyword name under which {@link LayerStage.forward} receives the kwargs per layer_type.
 LAYER_KWARGS = "layer_kwargs"
 
 
-class _FirstStagesReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図
-    """layer_type ごとの kwargs が揃った合図（校正 forward を打ち切るための番兵）。"""
+class _FirstStagesReached(Exception):  # noqa: N818 — a signal to stop, not an error
+    """Signal that the kwargs of every layer_type are in (a sentinel to cut the calibration forward
+    short)."""
 
 
 class LayerStage(nn.Module):
-    """decoder layer 1 枚を「hidden を位置引数で受ける」形へ包む stage ラッパ。
+    """Stage wrapper that wraps one decoder layer into a form "that takes hidden as a positional
+    argument".
 
-    Gemma3 は層ごとに**別の mask と別の RoPE 表**を受け取る（`layer_types` の
-    sliding / full で `create_causal_mask` も `rotary_emb` も切り替わる — transformers 5.14.1
-    の `Gemma3TextModel.forward`）。`calibrate_stages` は kwargs を stage 間で不変として運ぶ
-    ので、捕捉した **layer_type ごとの kwargs 一式**をまとめて渡し、選ぶのは stage 自身に
-    する。`advance_kwargs`（層番号から引き直す口）では足りない — mask も RoPE 表も校正文
-    ごとに違い、層番号だけでは「どの文の mask か」を特定できないため。
+    Gemma3 gives each layer **its own mask and its own RoPE table** (sliding / full of
+    `layer_types` switch both `create_causal_mask` and `rotary_emb` — `Gemma3TextModel.forward` of
+    transformers 5.14.1). `calibrate_stages` carries the kwargs unchanged across stages, so the
+    captured **set of kwargs per layer_type** is passed as a whole and the stage itself picks one.
+    `advance_kwargs` (the hook that looks them up again by layer index) is not enough — both the
+    mask and the RoPE table differ per calibration text, and the layer index alone cannot identify
+    "which text's mask".
 
-    子モジュールの名前を**層番号**にしてあるのは、stage 内の局所 FQN
-    （`0.self_attn.q_proj.weight`）へ {@link DECODER_PREFIX} を足すだけでモデル内 FQN へ
-    戻すため。
+    The child module is named after **the layer index** so that adding {@link DECODER_PREFIX} to the
+    local FQN inside the stage (`0.self_attn.q_proj.weight`) is enough to get back the in-model FQN.
     """
 
     def __init__(self, index: int, layer: nn.Module, layer_type: str) -> None:
@@ -518,18 +553,19 @@ class LayerStage(nn.Module):
 
 
 def decoder_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の decoder layer を `(モデル内 FQN 接頭辞, stage)` で返す。
+    """Return the decoder layers in execution order as `(in-model FQN prefix, stage)`.
 
-    最終段の `norm` と Dense 2 段（`2_Dense` / `3_Dense`）は**入れない** — 校正の対象は
-    decoder 内の linear だけで、Dense は decoder の外（pooling の後）にある。方式グリッドの
-    `linear` 対象より 2 本少ないのはこのため（{@link CALIB_TARGET}）。
+    The final `norm` and the 2 Dense stages (`2_Dense` / `3_Dense`) are **not included** — the
+    calibration targets are only the linear inside the decoder, and the Dense stages are outside
+    the decoder (after the pooling). This is why there are 2 fewer than the `linear` target of the
+    method grid ({@link CALIB_TARGET}).
     """
     types = tuple(wrapper.model.config.layer_types)
     layers = list(wrapper.model.layers)
     if len(types) != len(layers):
         raise AssertionError(
-            f"layer_types {len(types)} 本と decoder layer {len(layers)} 枚が食い違う"
-            "（模型の構成が台本の想定と違う）"
+            f"{len(types)} layer_types disagree with {len(layers)} decoder layers"
+            " (the model layout differs from what the script expects)"
         )
     return tuple(
         (DECODER_PREFIX, LayerStage(index, layer, types[index]))
@@ -538,10 +574,12 @@ def decoder_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
 
 
 def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], TargetStats]:
-    """stage 内の量子化対象を fqn 引きの重みと素性で返す（校正の**走査** = 門の基準）。
+    """Return the quantization targets inside the stages as weights keyed by fqn plus their
+    properties (the calibration **scan** = the reference of the check).
 
-    対象選択は core の `iter_quant_targets` の共有（{@link target_stats} と同文）。ここで
-    数えた本数と、校正が実際に丸めた本数を {@link assert_calib_covers_scan} が突き合わせる。
+    Target selection is shared through core's `iter_quant_targets` (same as
+    {@link target_stats}). {@link assert_calib_covers_scan} compares the count taken here with the
+    count the calibration actually rounded.
     """
     weights: dict[str, torch.Tensor] = {}
     found: list[tuple[str, torch.Tensor, int]] = []
@@ -554,16 +592,16 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
 
 
 def calib_inputs(model_dir: Path, limit: int | None) -> tuple[torch.Tensor, ...]:
-    """校正コーパスを**既存の tokenizer 経路**（`export.build_cases` と同じ引き方）で
-    `[1,T]` の id 列へ落とす。
+    """Turn the calibration corpus into `[1,T]` id sequences through **the existing tokenizer path**
+    (the same lookup as `export.build_cases`).
 
-    プロンプト接頭辞は `config_sentence_transformers.json` の逐語（{@link
-    embeddinggemma.export.load_prompts}）— 写しを持たないのは golden 側と同文。
+    The prompt prefixes are verbatim from `config_sentence_transformers.json` ({@link
+    embeddinggemma.export.load_prompts}) — no copy is kept, the same as on the golden side.
     """
     from tokenizers import Tokenizer
 
     if limit is not None and limit < 1:
-        raise ValueError(f"校正文数の上限は 1 以上（実測 {limit}）")
+        raise ValueError(f"the calibration text limit must be at least 1 (got {limit})")
     entries = CALIB_TEXTS if limit is None else CALIB_TEXTS[:limit]
     tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     prompts = eg.load_prompts(model_dir)
@@ -573,7 +611,10 @@ def calib_inputs(model_dir: Path, limit: int | None) -> tuple[torch.Tensor, ...]
         ids = torch.tensor([tokenizer.encode(text).ids], dtype=torch.int64)
         length = int(ids.shape[1])
         if not 2 <= length <= eg.SYM_MAX:
-            raise AssertionError(f"校正文の T={length} が記号次元の範囲 [2, {eg.SYM_MAX}] の外")
+            raise AssertionError(
+                f"calibration text T={length} is outside the symbolic dimension range"
+                f" [2, {eg.SYM_MAX}]"
+            )
         inputs.append(ids)
     return tuple(inputs)
 
@@ -581,17 +622,19 @@ def calib_inputs(model_dir: Path, limit: int | None) -> tuple[torch.Tensor, ...]
 def capture_stage_batches(
     wrapper: nn.Module, inputs: Sequence[torch.Tensor]
 ) -> tuple[StageBatch, ...]:
-    """先頭 decoder layer への hidden と **layer_type ごとの kwargs** を捕まえる（Catcher）。
+    """Capture the hidden into the first decoder layer and **the kwargs per layer_type** (Catcher).
 
-    校正入力は「embedding（Gemma3 の normalizer 込み）を通った後の hidden とその付随引数」で、
-    mask も RoPE 表も自前で組み直すと transformers 側と黙って割れる。**各 layer_type の
-    先頭の層への呼び出し**を捕まえ、全種類が揃った時点で番兵例外で forward を打ち切る。
-    mask / RoPE 表は層の値ではなく形（T と layer_type）だけで決まるので、途中の層で捕まえた
-    kwargs はその layer_type の全層のものとして使える（`Gemma3TextModel.forward` が
-    ループの**前**に 2 種類とも作る）。
+    The calibration input is "the hidden after the embedding (including Gemma3's normalizer) and its
+    accompanying arguments"; rebuilding the mask and the RoPE table ourselves would silently split
+    from the transformers side. **The call into the first layer of each layer_type** is captured,
+    and once every kind is in, a sentinel exception cuts the forward short. The mask / RoPE table
+    are determined only by shape (T and layer_type), not by the layer's values, so kwargs captured
+    at a later layer can be used for every layer of that layer_type (`Gemma3TextModel.forward`
+    builds both kinds **before** the loop).
 
-    MUST: 揃わずに forward が完走したら fail loudly — stage の綴りが模型の構成と食い違って
-    いる合図で、黙って進むと「校正入力ゼロ」の診断が core 側で出るだけになる。
+    MUST: fail loudly if the forward runs to completion without everything captured — it signals
+    that the stage spelling disagrees with the model layout, and carrying on silently would only
+    produce a "zero calibration inputs" diagnostic in core.
     """
     layers = list(wrapper.model.layers)
     types = tuple(wrapper.model.config.layer_types)
@@ -629,9 +672,9 @@ def capture_stage_batches(
                 pass
             if len(hidden) != 1 or set(kwargs_by_type) != set(firsts):
                 raise AssertionError(
-                    f"校正入力 {position} で先頭 stage の入力が揃わなかった"
-                    f"（hidden {len(hidden)} 本 / layer_type {sorted(kwargs_by_type)}）"
-                    "— stage の綴りが模型の構成と食い違っている"
+                    f"calibration input {position}: the inputs of the first stages were not all"
+                    f" captured (hidden {len(hidden)} / layer_type {sorted(kwargs_by_type)})"
+                    " — the stage spelling disagrees with the model layout"
                 )
             batches.append(((hidden[0],), {LAYER_KWARGS: dict(kwargs_by_type)}))
     finally:
@@ -642,11 +685,12 @@ def capture_stage_batches(
 
 @dataclass(frozen=True)
 class CalibRig:
-    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+    """The scaffolding shared by the calibrated configs (the stage sequence, the scan, the inputs to
+    the first stage).
 
-    構成ごとに作り直さない — 先頭 stage の入力は `embed_tokens` を通っただけの hidden で、
-    校正が丸めるのは decoder 内の linear だけなので、pristine 復元を挟んでも動かない
-    （**丸めを 1 本も当てる前**に 1 回だけ採る）。
+    Not rebuilt per config — the input to the first stage is the hidden that has only passed
+    `embed_tokens`, and calibration rounds only the linear inside the decoder, so it does not move
+    across a pristine restore (taken once, **before a single rounding is applied**).
     """
 
     stages: tuple[StageSpec, ...]
@@ -661,18 +705,22 @@ def assert_stage_split(
     batch: StageBatch,
     stages: Sequence[StageSpec],
 ) -> None:
-    """stage 列の逐次 forward が本体の最終 hidden と**ビット一致**することを見る。
+    """Check that the sequential forward of the stage sequence is **bit-identical** to the body's
+    final hidden.
 
-    `probe` は捕捉に使った id 列そのもの、`batch` は**同じ入力**で捕まえた先頭 stage への入力。
-    stage 列は最終 `norm` を含まない（{@link decoder_stages}）ので、逐次結果へ `norm` を当てて
-    から `Gemma3TextModel` の `last_hidden_state`（= `EmbeddingWrapper.forward` の 1 行目）と
-    比べる。stage の駆動は core（`_advance_batch`）と同じ形 — 位置引数は hidden 1 本だけ、
-    kwargs は stage 間で不変。
+    `probe` is the id sequence used for the capture itself, and `batch` the input to the first stage
+    captured with **the same input**. The stage sequence does not include the final `norm`
+    ({@link decoder_stages}), so `norm` is applied to the sequential result before comparing it with
+    `last_hidden_state` of `Gemma3TextModel` (= the first line of `EmbeddingWrapper.forward`). The
+    stages are driven in the same form as core (`_advance_batch`) — the only positional argument is
+    the hidden, and the kwargs do not change across stages.
 
-    MUST: 丸める前に実測し、近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを
-    同じ順で呼んでいる以上、一致しないなら分解が本物と違う経路を通っている。校正は「その層に
-    実際に流れる活性」から丸め先を選ぶ方式なので、分解がずれると方式の採否を別経路の測定で
-    決めることになる（数値は普通に出るので表からは読めない）。
+    MUST: measure before rounding, and compare with `torch.equal` rather than an approximate
+    tolerance — the same modules are called in the same order, so a disagreement means the split
+    goes down a path different from the real one. Calibration chooses rounding targets from "the
+    activations that actually flow into that layer", so a drifted split decides the choice of method
+    on a measurement of another path (and the numbers come out ordinary, so the table does not show
+    it).
     """
     args, kwargs = batch
     with torch.no_grad():
@@ -683,14 +731,16 @@ def assert_stage_split(
         hidden = wrapper.model.norm(hidden)
     if not torch.equal(hidden, reference):
         raise AssertionError(
-            "stage 分解の最終 hidden が本体の last_hidden_state とビット一致しない"
-            f"（最大絶対差 {float((hidden - reference).abs().max()):.4e}）"
-            " — LayerStage 列が Gemma3TextModel.forward の経路とずれている"
+            "the final hidden of the stage split is not bit-identical to the model's"
+            " last_hidden_state"
+            f" (max abs diff {float((hidden - reference).abs().max()):.4e})"
+            " — the LayerStage sequence deviates from the path of Gemma3TextModel.forward"
         )
 
 
 def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> CalibRig:
-    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher → 分解一致門）。"""
+    """Build the calibration scaffolding (stage split → scan → tokenize → Catcher → split agreement
+    check)."""
     stages = decoder_stages(wrapper)
     scan, stats = calib_targets(stages)
     inputs = calib_inputs(model_dir, limit)
@@ -700,10 +750,11 @@ def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> C
 
 
 def apply_calib(config: CalibConfig, rig: CalibRig, shared_stride: int = 0) -> CalibReport:
-    """校正付き丸め 1 本を model へ in-place で当てる（stage 逐次の駆動は core 側）。
+    """Apply one calibrated rounding to the model in place (core drives the stages sequentially).
 
-    `shared_stride > 1` のときだけ `kmeans_shared` の**表の fit** が等間隔部分標本になる。
-    使った事実は {@link karume.quant_calib.CalibReport.describe} が拾って出力へ出る。
+    Only when `shared_stride > 1` does the **table fit** of `kmeans_shared` use an evenly spaced
+    subsample. The fact that it was used is picked up by
+    {@link karume.quant_calib.CalibReport.describe} and appears in the output.
     """
     spec = config.grid
     if spec.kind == "kmeans_shared" and shared_stride > 1:
@@ -714,29 +765,31 @@ def apply_calib(config: CalibConfig, rig: CalibRig, shared_stride: int = 0) -> C
 def assert_calib_covers_scan(
     report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
 ) -> None:
-    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+    """Check that the layers the calibration rounded match the stage scan **exactly, with nothing
+    missing or extra**.
 
-    MUST: fail loudly。stage の綴りや対象型が変わって decoder の一部が校正に載らなくなっても
-    表には行が残り、しかも丸め漏れのぶん cosine は**良い側**に出る（素通りを数字から
-    読めない）。既存の 3 門（{@link run_gates}）と同じ立場の恒真化の遮断。
+    MUST: fail loudly. If the stage spelling or the target type changes and part of the decoder
+    drops out of calibration, the row stays in the table, and the cosine even comes out on **the
+    good side** by the amount left unrounded (the pass-through cannot be read from the numbers). It
+    blocks vacuity, the same standing as the existing 3 gates ({@link run_gates}).
     """
     rounded = {layer.fqn for layer in report.layers}
     missing = sorted(set(scan) - rounded)
     extra = sorted(rounded - set(scan))
     if missing or extra or report.modules != len(scan):
         raise AssertionError(
-            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"[{name}] the calibration rounded {report.modules} modules, which does not match the"
+            f" {len(scan)} of the scan (not rounded {missing[:3]} / not in the scan {extra[:3]})"
         )
 
 
-# ---- 実行 -------------------------------------------------------------------
+# ---- Run ----------------------------------------------------------------------------
 
 
 def embed_cases(
     wrapper: nn.Module, cases: Sequence[tuple[str, torch.Tensor, torch.Tensor]]
 ) -> dict[str, torch.Tensor]:
-    """golden 5 ケースの埋め込み（`[H]` へ平坦化した clone）。"""
+    """Embeddings of the 5 golden cases (clones flattened to `[H]`)."""
     vectors: dict[str, torch.Tensor] = {}
     for name, ids, pool_mask in cases:
         with torch.no_grad():
@@ -745,19 +798,22 @@ def embed_cases(
 
 
 def stacked(vectors: Mapping[str, torch.Tensor]) -> torch.Tensor:
-    """ビット等値の判定用に 5 ケースを 1 本へ積む（順序は {@link CASE_NAMES} 固定）。"""
+    """Stack the 5 cases into one tensor for the bit-equality decision (the order is fixed to
+    {@link CASE_NAMES})."""
     return torch.stack([vectors[name] for name in CASE_NAMES])
 
 
 def restore(weights: Mapping[str, torch.Tensor], pristine: Mapping[str, torch.Tensor]) -> None:
-    """全対象を pristine の f32 重みへ戻す（**方式を積み重ねない** MUST の実体）。"""
+    """Restore every target to the pristine f32 weights (the body of the MUST **do not stack
+    methods**)."""
     with torch.no_grad():
         for fqn, weight in weights.items():
             weight.copy_(pristine[fqn])
 
 
 def select_methods(only: Sequence[str]) -> tuple[Method, ...]:
-    """`--only` で選んだ方式を宣言順で返す（基準 f32 は常に走る — 比較の分母）。"""
+    """Return the methods chosen with `--only` in declaration order (the baseline f32 always runs —
+    the denominator of the comparison)."""
     if not only:
         return METHODS
     chosen = set(only)
@@ -765,7 +821,8 @@ def select_methods(only: Sequence[str]) -> tuple[Method, ...]:
 
 
 def select_calib(only: Sequence[str]) -> tuple[CalibConfig, ...]:
-    """`--only` で選んだ校正付き構成を宣言順で返す（{@link select_methods} と同じ流儀）。"""
+    """Return the calibrated configs chosen with `--only` in declaration order (the same way as
+    {@link select_methods})."""
     if not only:
         return CALIB_CONFIGS
     chosen = set(only)
@@ -778,22 +835,23 @@ def run(
     calib_configs: Sequence[CalibConfig] = (),
     calib_limit: int | None = None,
 ) -> dict[str, Any]:
-    """模型を 1 回だけ読み、構成を順に当てて測る。
+    """Load the model only once, apply the configs in turn and measure them.
 
-    校正付き構成は方式グリッドの**後**に走る（対象集合が違うので表の並びで混ざらない）。
-    足場（{@link CalibRig}）は 1 回だけ組む — 校正入力は `restore` を挟んでも動かない。
+    The calibrated configs run **after** the method grid (the target sets differ, so they do not
+    mix in the table's order). The scaffolding ({@link CalibRig}) is built only once — the
+    calibration inputs do not move across `restore`.
     """
     cases = eg.build_cases(model_dir, eg.SYM_MAX)
     lengths = " ".join(f"{name}(T={int(ids.shape[1])})" for name, ids, _ in cases)
-    print(f"[cases] {len(cases)} ケース: {lengths}", file=sys.stderr, flush=True)
+    print(f"[cases] {len(cases)} cases: {lengths}", file=sys.stderr, flush=True)
 
     wrapper = eg.load_wrapper(model_dir)
     stats = {target.name: target_stats(wrapper, target) for target in TARGETS}
     for target in TARGETS:
         entry = stats[target.name]
         print(
-            f"[target] {target.name}: {entry.modules} 本 / {entry.elements:,} 要素"
-            f" / group {entry.groups:,} / チャネル {entry.channels:,}",
+            f"[target] {target.name}: {entry.modules} modules / {entry.elements:,} elements"
+            f" / group {entry.groups:,} / channels {entry.channels:,}",
             file=sys.stderr,
             flush=True,
         )
@@ -802,8 +860,8 @@ def run(
     pristine = {fqn: weight.detach().clone() for fqn, weight in weights.items()}
 
     base_vectors = embed_cases(wrapper, cases)
-    # 基準そのものの門 — 単位ノルムと意味順序（`export._sanity` の逐語）。ここが割れたら
-    # 以後の全数値の意味が消えるので、方式を 1 つも当てる前に落とす。
+    # The check of the baseline itself — unit norm and semantic order (verbatim `export._sanity`).
+    # If it breaks, every number after it loses its meaning, so fail before applying any method.
     base_sanity = eg._sanity(base_vectors)
     print(f"[{BASE_CONFIG}] sanity {json.dumps(base_sanity, ensure_ascii=False)}", file=sys.stderr)
 
@@ -811,7 +869,7 @@ def run(
         BASE_CONFIG: {
             "method": BASE_CONFIG,
             "target": "—",
-            "quantReport": "丸めなし（基準）",
+            "quantReport": "no rounding (baseline)",
             **measure(base_vectors, base_vectors),
         }
     }
@@ -834,8 +892,8 @@ def run(
             configs[name] = entry
             print(
                 f"[{name}] {report} cos min {entry['caseCosineMin']:.6f}"
-                f" 順序 {'保持' if entry['order']['holds'] else '崩壊'}"
-                f" ドリフト {entry['pairDriftMaxAbs']:.4e}"
+                f" order {'held' if entry['order']['holds'] else 'collapsed'}"
+                f" drift {entry['pairDriftMaxAbs']:.4e}"
                 f" ({entry['elapsed']:.0f}s)",
                 file=sys.stderr,
                 flush=True,
@@ -849,9 +907,9 @@ def run(
         if rig is None:
             rig = build_calib_rig(wrapper, model_dir, calib_limit)
             print(
-                f"[calib] 校正 {len(rig.batches)} 文 / stage {len(rig.stages)} 段 /"
-                f" 対象 linear {rig.stats.modules} 本"
-                "（decoder 内のみ — Dense 2 段と embed_tokens は含まない）",
+                f"[calib] {len(rig.batches)} calibration texts / {len(rig.stages)} stages /"
+                f" {rig.stats.modules} target linear modules"
+                " (inside the decoder only — the 2 Dense stages and embed_tokens are excluded)",
                 file=sys.stderr,
                 flush=True,
             )
@@ -872,8 +930,8 @@ def run(
         print(
             f"[{name}] {calib_entry['quantReport']}"
             f" cos min {calib_entry['caseCosineMin']:.6f}"
-            f" 順序 {'保持' if calib_entry['order']['holds'] else '崩壊'}"
-            f" ドリフト {calib_entry['pairDriftMaxAbs']:.4e}"
+            f" order {'held' if calib_entry['order']['holds'] else 'collapsed'}"
+            f" drift {calib_entry['pairDriftMaxAbs']:.4e}"
             f" ({calib_entry['elapsed']:.0f}s)",
             file=sys.stderr,
             flush=True,
@@ -904,45 +962,50 @@ def run(
 def run_gates(
     configs: Mapping[str, Mapping[str, Any]], methods: Sequence[Method]
 ) -> dict[str, Any]:
-    """恒真化の遮断（丸めの素通りと `op_types` の効き目）。
+    """Block vacuity (rounding passing through, and whether `op_types` takes effect).
 
-    ① 各構成の埋め込みが基準と**ビット一致しない** — 一致するのは丸めが 1 本も当たって
-       いない場合だけで、しかも品質は「完璧」側に出るので黙ると誤読しかされない。
-    ② `linear+embedding` が `linear` より**ちょうど embedding のぶんだけ多く**丸める
-       （本数の差 = 1 本）。`op_types` が効いていなければここが 0 になり、「語彙表も測った」
-       と読める表が語彙表を素通りしたまま出る。
-    ③ ② の 2 形の埋め込みが**互いに違う** — 本数だけ増えて値が同じなら、embedding の丸めが
-       出力へ届いていない（対象は増えたが経路が違う、を捕まえる）。
+    ① Each config's embeddings are **not bit-identical** to the baseline — they agree only when not
+       a single rounding was applied, and since quality then comes out on the "perfect" side,
+       staying silent invites nothing but misreading.
+    ② `linear+embedding` rounds **exactly the embedding more** than `linear` (a difference of 1
+       module). If `op_types` has no effect this is 0, and a table that reads as "the vocabulary
+       table was measured too" comes out with the vocabulary table passed through.
+    ③ The embeddings of the 2 forms of ② **differ from each other** — if only the count grows and
+       the values stay the same, the rounding of the embedding does not reach the output (catches
+       "the targets grew but the path is different").
 
-    校正付き構成の「丸めた本数 = 走査の本数」は {@link assert_calib_covers_scan} が構成ごとに
-    **その場で** fail loudly にする（60 分級の実行を最後まで走らせてから落とさない）。ここは
-    その結果を読み手のために記録するだけで、判定を二重に持たない。
+    For the calibrated configs, "rounded count = scan count" fails loudly **on the spot** per config
+    in {@link assert_calib_covers_scan} (instead of letting a 60-minute run finish before failing).
+    This only records the result for the reader and does not hold the decision twice.
     """
     failures: list[str] = []
     for name, entry in configs.items():
         if name != BASE_CONFIG and not entry["moved"]:
-            failures.append(f"{name}: 埋め込みが基準とビット一致（丸めが素通りしている）")
+            failures.append(
+                f"{name}: the embeddings are bit-identical to the baseline (the rounding passed"
+                " through)"
+            )
     embedding_targets: list[str] = []
     for method in methods:
         linear = configs[config_name(method, TARGET_LINEAR)]
         widened = configs[config_name(method, TARGET_WITH_EMBEDDING)]
         delta = widened["size"]["modules"] - linear["size"]["modules"]
-        embedding_targets.append(f"{method.name}: +{delta} 本")
+        embedding_targets.append(f"{method.name}: +{delta} modules")
         if delta != 1:
             failures.append(
-                f"{method.name}: linear+embedding が linear より {delta} 本多い"
-                "（embed_tokens 1 本ぶんのはず — op_types の切り替えが効いていない）"
+                f"{method.name}: linear+embedding rounds {delta} more modules than linear"
+                " (it should be 1, for embed_tokens — the op_types switch has no effect)"
             )
         if widened["caseCosine"] == linear["caseCosine"]:
             failures.append(
-                f"{method.name}: linear+embedding と linear の埋め込みが同一"
-                "（語彙表の丸めが出力へ届いていない）"
+                f"{method.name}: linear+embedding and linear give identical embeddings"
+                " (the rounding of the vocabulary table does not reach the output)"
             )
     return {
         "moved": {name: entry["moved"] for name, entry in configs.items() if name != BASE_CONFIG},
         "embeddingWidening": embedding_targets,
         "calibRounded": {
-            name: f"{entry['calibModules']}/{entry['size']['modules']} 本"
+            name: f"{entry['calibModules']}/{entry['size']['modules']} modules"
             for name, entry in configs.items()
             if "calibModules" in entry
         },
@@ -950,7 +1013,7 @@ def run_gates(
     }
 
 
-# ---- 表 ---------------------------------------------------------------------
+# ---- Tables -------------------------------------------------------------------------
 
 
 def _markdown(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -960,17 +1023,17 @@ def _markdown(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 
 
 def quality_table(report: Mapping[str, Any]) -> str:
-    """方式 × 対象 × 測定列（この台本の主成果）。"""
+    """Method × target × measurement columns (the main result of this script)."""
     header = [
-        "方式",
-        "対象",
-        "本数",
+        "method",
+        "target",
+        "modules",
         "cos min",
         "cos mean",
         "near",
         "far",
-        "意味順序",
-        "ペア最大ドリフト",
+        "semantic order",
+        "max pair drift",
     ]
     rows: list[list[str]] = []
     for name, entry in report["configs"].items():
@@ -985,7 +1048,7 @@ def quality_table(report: Mapping[str, Any]) -> str:
                 f"{entry['caseCosineMean']:.6f}",
                 f"{order['nearCosine']:.4f}",
                 f"{order['farCosine']:.4f}",
-                "保持" if order["holds"] else "**崩壊**",
+                "held" if order["holds"] else "**collapsed**",
                 f"{entry['pairDriftMaxAbs']:.4e}",
             ]
         )
@@ -993,8 +1056,8 @@ def quality_table(report: Mapping[str, Any]) -> str:
 
 
 def size_table(report: Mapping[str, Any]) -> str:
-    """方式 × 対象のサイズ試算（対象テンソル集合だけの合計）。"""
-    header = ["方式", "対象", "要素数", "bpw", "投影 MiB", "f32 MiB", "比", "式"]
+    """Size projection of method × target (the total over the target tensor set only)."""
+    header = ["method", "target", "elements", "bpw", "projected MiB", "f32 MiB", "ratio", "formula"]
     rows = [
         [
             entry["method"],
@@ -1021,15 +1084,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="append",
         default=[],
         choices=(*METHOD_NAMES, *CALIB_NAMES),
-        help="この方式 / 校正付き構成だけ走らせる（複数可・部分再実行用）。基準 f32 は"
-        f"常に走る。{REPORT_FILE} には走らせた構成だけが載る。",
+        help="run only this method / calibrated config (repeatable, for partial reruns). The"
+        f" baseline f32 always runs. {REPORT_FILE} lists only the configs that ran.",
     )
     parser.add_argument(
         "--calib-limit",
         type=int,
         default=None,
-        help=f"校正コーパスの先頭 N 文だけを使う（既定は全 {len(CALIB_TEXTS)} 文）。"
-        "縮小 smoke 用のノブで、校正付き構成にだけ効く。",
+        help="use only the first N texts of the calibration corpus"
+        f" (default: all {len(CALIB_TEXTS)})."
+        " A knob for a reduced smoke run; it affects only the calibrated configs.",
     )
     args = parser.parse_args(argv)
     report = run(
@@ -1042,16 +1106,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     (args.out / REPORT_FILE).write_text(
         json.dumps(report, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    print("品質（基準 f32 の埋め込みとの比較）:")
+    print("Quality (compared with the baseline f32 embeddings):")
     print(quality_table(report))
     print()
-    print(f"サイズ試算（対象テンソル集合のみ・N = 要素数・G = N/{GROUP_SIZE}）:")
+    print(f"Size projection (target tensor set only; N = elements, G = N/{GROUP_SIZE}):")
     print(size_table(report))
     print()
     print(f"report → {args.out / REPORT_FILE}")
     failures = report["gates"]["failures"]
     if failures:
-        raise AssertionError("検証ゲートが赤: " + " / ".join(failures))
+        raise AssertionError("verification gates are red: " + " / ".join(failures))
     print("gates: all green")
 
 

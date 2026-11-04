@@ -1,54 +1,66 @@
-"""Wan2.1 の umT5 トークナイザと前処理を TS が引くだけの資産へ焼き、パリティ用フィクスチャを作る
-（ADR 0119 段 10a — 決定 1・2・4）。
+"""Bakes Wan2.1's umT5 tokenizer and prompt preprocessing into an asset that TS only looks up, and
+writes the parity fixtures (ADR 0119 stage 10a — decisions 1, 2 and 4).
 
     uv run --group wan --inexact python -m wan.umt5_tokenizer
 
-出力は 3 本（**1 回の実行で必ず全部**出す — 同じ表から作らないと、実行時資産とフィクスチャが
-別々に古びて「テストは緑だが実行時だけ別の id 列」になる。anima の `anima/demo.py` と同じ流儀）:
+Three outputs (**always all of them in one run** — unless they are built from the same tables, the
+runtime asset and the fixtures go stale separately and "the tests are green but only the runtime
+gets a different id sequence". The same practice as anima's `anima/demo.py`):
 
-  ① 実行時資産 `outputs/series/wan2.1-umt5-tokenizer/tokenizer.json`（git 追跡外・約 8 MB）
-       語彙とスコア（行番号 = id）・追加語彙・空白集合・前処理の表（`promptClean`）。
-       配布形への組み込みは段 10d。
-  ② パリティ用フィクスチャ `packages/models/tests/fixtures/wan-text/parity.json`（git 管理）
-       ケースごとの期待（id 列か拒否の理由）と、その再現に要る語彙の**部分集合**・前処理の表の全体。
-  ③ 前処理の掃引フィクスチャ `packages/models/tests/fixtures/wan-text/prompt-clean-sweep.json`
-       （git 管理）— 乱択と全コードポイント掃引の期待を digest で持つ（TS が同じ列を再生する）。
+  ① Runtime asset `outputs/series/wan2.1-umt5-tokenizer/tokenizer.json` (untracked, about 8 MB)
+       Vocabulary and scores (line number = id), added tokens, whitespace set, preprocessing
+       tables (`promptClean`). Packaging into the distribution is stage 10d.
+  ② Parity fixture `packages/models/tests/fixtures/wan-text/parity.json` (tracked)
+       Per-case expectations (an id sequence or a rejection reason), the **subset** of the
+       vocabulary needed to reproduce them and the full preprocessing tables.
+  ③ Preprocessing sweep fixture `packages/models/tests/fixtures/wan-text/prompt-clean-sweep.json`
+       (tracked) — holds the expectations of the random and all-code-point sweeps as digests (TS
+       replays the same sequences).
 
-生成後は `deno fmt packages/models/tests/fixtures/wan-text/` を掛ける（commit 形は
-フォーマッタが正）。
+After generating, run `deno fmt packages/models/tests/fixtures/wan-text/` (the committed form is
+what the formatter produces).
 
-## トークナイザの正本（ADR 0119 決定 1）
+## Source of truth for the tokenizer (ADR 0119 decision 1)
 
-id 列の正本は pin した transformers 5.14.1 の `AutoTokenizer` の実挙動（Wan の pin した revision の
-`tokenizer/`）。transformers 5 は `tokenizer.json` を読んだ上で T5 の経路を組み直す
-（`models/t5/tokenization_t5.py:112-127` — 正規化なし・`WhitespaceSplit` + `Metaspace`・
-Unigram の unk_id 2）。資産は組み直した後の backend（`backend_tokenizer.to_str()`）から焼き、
-`tokenizer.json` と語彙・スコア・追加語彙が一致することを確かめる。
+The source of truth for the id sequence is the actual behaviour of `AutoTokenizer` in the pinned
+transformers 5.14.1 (on `tokenizer/` of Wan's pinned revision). transformers 5 reads
+`tokenizer.json` and then rebuilds the T5 pipeline
+(`models/t5/tokenization_t5.py:112-127` — no normalizer, `WhitespaceSplit` + `Metaspace`, Unigram
+with unk_id 2). The asset is baked from the rebuilt backend (`backend_tokenizer.to_str()`), and its
+vocabulary, scores and added tokens are checked to be identical to `tokenizer.json`.
 
-語彙外の文字は拒む（決定 1）。語彙外の id は transformers 5（id 2 = `<s>`）と `tokenizer.json`
-（id 3 = `<unk>`）で割れるので、**受理した入力では 2 経路の id 列が一致する**ことを fixture の
-生成時に必ず確かめる（版に依らないことの検査）。逆に 2 経路が割れたケースは語彙外として
-記録する（割れ方が「同じ位置で 2 と 3」以外なら落とす）。
+Out-of-vocabulary characters are rejected (decision 1). The out-of-vocabulary id differs between
+transformers 5 (id 2 = `<s>`) and `tokenizer.json` (id 3 = `<unk>`), so fixture generation always
+checks that **the two paths give the same id sequence for every accepted input** (a check that the
+result does not depend on the version). Conversely, a case where the two paths diverge is recorded
+as out-of-vocabulary (a divergence other than "2 vs 3 at the same position" fails).
 
-2 経路は語彙外のほかに 2 つの形でも割れる（2026-10-03 の実測 — 乱択 60,000 本で割れた全件が
-「語彙外・追加語彙・空白の直後の U+2581」のどれかを含み、どれも含まないものは全件一致）:
+Besides out-of-vocabulary characters, the two paths diverge in two more shapes (measured on
+2026-10-03 — of 60,000 random strings, every divergent one contained an out-of-vocabulary
+character, an added token or a U+2581 right after whitespace, and every string with none of them
+matched):
 
-  * **本文中の追加語彙**（`</s>`・`<extra_id_*>` など 304 個）— transformers 5 は空白で先に割るので
-    `a </s> b` が `[289, 1, 748, 1]`、`tokenizer.json` は追加語彙の直前の空白を `▁`（273）として
-    残すので `[289, 273, 1, 748, 1]`。
-  * **空白の直後の `▁`（U+2581）** — transformers 5 は空白を捨ててから `▁` で割る（`a ▁b` →
-    `▁a` `▁b`）、`tokenizer.json` は空白そのものを `▁` に置き換える（→ `▁a` `▁` `▁b`）。
+  * **Added tokens inside the text** (304 of them, such as `</s>` and `<extra_id_*>`) —
+    transformers 5 splits on whitespace first, so `a </s> b` gives `[289, 1, 748, 1]`;
+    `tokenizer.json` keeps the whitespace before the added token as `▁` (273), giving
+    `[289, 273, 1, 748, 1]`.
+  * **`▁` (U+2581) right after whitespace** — transformers 5 drops the whitespace and then splits
+    on `▁` (`a ▁b` → `▁a` `▁b`); `tokenizer.json` replaces the whitespace itself with `▁`
+    (→ `▁a` `▁` `▁b`).
 
-決定 1 の「守るもの」（どの版の参照とも同じ id 列）に合わせ、この 2 つも語彙外と同じく拒む
-（ADR 0119 決定 1 は本文中の追加語彙を「上流どおり切り出す」と書くが、調査が 1 文字の掃引しか
-見ておらず、版で割れることを見落としていた — 拒む側へ倒した）。
+In line with what decision 1 protects (the same id sequence as the reference of any version), these
+two are rejected like out-of-vocabulary characters (ADR 0119 decision 1 says added tokens inside the
+text are "split out as upstream does", but the investigation only swept single characters and
+missed that the versions diverge — we chose to reject).
 
-上限 512 は上流の `max_sequence_length`（`wan.pipeline_ref.MAX_SEQUENCE_LENGTH`）で、上流は
-黙って切り詰めるが karume は拒む（決定 4）。下限 2（空・空白だけ = `</s>` だけ）も拒む。
+The upper limit 512 is upstream's `max_sequence_length` (`wan.pipeline_ref.MAX_SEQUENCE_LENGTH`);
+upstream silently truncates, karume rejects (decision 4). The lower limit 2 (empty or whitespace
+only = `</s>` alone) is rejected too.
 
-MUST: transformers / tokenizers / huggingface_hub は関数の中で import する（`wan` グループは既定の
-sync に入らない — `tests/test_optional_group_imports.py`）。torch も import しない（トークナイザ
-だけの台本に重い依存を持ち込まない — `wan.pipeline_ref` を import しないのもそのため）。
+MUST: import transformers / tokenizers / huggingface_hub inside functions (the `wan` group is not in
+the default sync — `tests/test_optional_group_imports.py`). Do not import torch either (a
+tokenizer-only script must not pull in heavy dependencies — this is also why `wan.pipeline_ref` is
+not imported).
 """
 
 from __future__ import annotations
@@ -67,35 +79,36 @@ from wan import prompt_clean as pc
 from wan.prompts import FIXED_PROMPTS
 from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, WanSourceError
 
-#: 系列の席（`<名前>-tokenizer/tokenizer.json` — docs/assets-layout.md）。
+#: Location in the series (`<name>-tokenizer/tokenizer.json` — docs/assets-layout.md).
 SERIES_NAME = "wan2.1-umt5-tokenizer"
 ASSET_FILE = "tokenizer.json"
 
-#: 資産の形式の版（TS 側が知らない版を黙って読まない）。
+#: Version of the asset format (so TS does not silently read a version it does not know).
 ASSET_FORMAT = "karume-wan-umt5-tokenizer/1"
 
-#: フィクスチャの置き場（消費者は `packages/models/tests/wan_text_*_test.ts`）。
+#: Where the fixtures go (consumed by `packages/models/tests/wan_text_*_test.ts`).
 FIXTURE_DIR = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-text"
 PARITY_FIXTURE = "parity.json"
 SWEEP_FIXTURE = "prompt-clean-sweep.json"
 
-#: 上流の `max_sequence_length`（`wan.pipeline_ref.MAX_SEQUENCE_LENGTH` と同じ値 — torch を
-#: 読まないためにここで持ち、pytest が一致を見る）。
+#: Upstream's `max_sequence_length` (the same value as `wan.pipeline_ref.MAX_SEQUENCE_LENGTH` — held
+#: here so that torch is not loaded; pytest checks that they agree).
 MAX_LENGTH = 512
 
-#: 受理集合の下限（`torch.export` の 0 / 1 特殊化を避ける — anima の `PROMPT_MIN_TOKENS` と同じ）。
+#: Lower bound of the accepted set (avoids the 0 / 1 specialization of `torch.export` — the same as
+#: anima's `PROMPT_MIN_TOKENS`).
 MIN_TOKENS = 2
 
-#: pin した transformers の版（id 列の正本）。
+#: The pinned transformers version (the source of truth for id sequences).
 TRANSFORMERS_VERSION = "5.14.1"
 
-#: Metaspace の置換文字（U+2581）。
+#: Metaspace replacement character (U+2581).
 METASPACE = "▁"
 
-#: 受理の固定 4 本の長さ（調査 §1.4・ADR 0118 段 6 の値）。
+#: Lengths of the four fixed accepted prompts (investigation §1.4, the values of ADR 0118 stage 6).
 FIXED_PROMPT_LENGTHS = {"boxing-cats": 28, "ferret": 118, "cat-dog-baking": 50, "negative": 126}
 
-#: 境界のケース（id・入力・狙い）。目に見えない文字は必ず \\uXXXX で書く。
+#: Boundary cases (id, input, purpose). Always write invisible characters as \\uXXXX.
 BOUNDARY_CASES: tuple[tuple[str, str, str], ...] = (
     ("min-two", "cat", "受理の下限ちょうど（`▁cat` + `</s>` の 2 トークン）"),
     ("max-512", "cat " * 511, "受理の上限ちょうど（511 + `</s>` = 512）"),
@@ -133,17 +146,17 @@ BOUNDARY_CASES: tuple[tuple[str, str, str], ...] = (
     ("unassigned", "a͸b", "UCD 16.0.0 で未割り当ての文字は拒む（U+0378 は語彙にある）"),
 )
 
-#: 乱択ケース（受理集合の文字だけ — seed 固定）。
+#: Random cases (only characters of the accepted set — fixed seed).
 RANDOM_CASES = 200
 RANDOM_SEED = 5
 RANDOM_MAX_LENGTH = 40
-#: 乱択の池に混ぜる空白の重み（語の切れ目を作る）。
+#: Weight of the whitespace mixed into the random pool (creates word breaks).
 RANDOM_SPACE_WEIGHT = 2000
 
 
 def tokenizer_snapshot(model: str = DEFAULT_MODEL) -> Path:
-    """pin した revision の snapshot の `tokenizer/` のディレクトリ（ネットワークに出ない —
-    {@link load_truth} が読む置き場）。"""
+    """The `tokenizer/` directory of the snapshot at the pinned revision (does not go to the
+    network — the location {@link load_truth} reads)."""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
@@ -159,38 +172,39 @@ def tokenizer_snapshot(model: str = DEFAULT_MODEL) -> Path:
         )
     except LocalEntryNotFoundError as error:
         raise WanSourceError(
-            f"{source.repo}@{source.revision} の tokenizer/ が HF キャッシュに無い — 先に"
-            " `uv run --group wan --inexact python -m wan.text_embeds --fetch` で取得する"
+            f"tokenizer/ of {source.repo}@{source.revision} is not in the HF cache — fetch it first"
+            " with `uv run --group wan --inexact python -m wan.text_embeds --fetch`"
         ) from error
     if not (snapshot / "tokenizer" / "tokenizer.json").is_file():
-        raise WanSourceError(f"{snapshot}/tokenizer/tokenizer.json が無い")
+        raise WanSourceError(f"{snapshot}/tokenizer/tokenizer.json is missing")
     return snapshot / "tokenizer"
 
 
 @dataclass(frozen=True)
 class Truth:
-    """2 経路の正本（transformers 5.14.1 の `AutoTokenizer` と `tokenizer.json`）。"""
+    """The two sources of truth (`AutoTokenizer` of transformers 5.14.1 and `tokenizer.json`)."""
 
-    #: `tokenizer([text], add_special_tokens=True)` の id 列（切り詰めなし）。
+    #: The id sequence of `tokenizer([text], add_special_tokens=True)` (not truncated).
     transformers: Callable[[str], list[int]]
-    #: 上流の呼び方（`padding="max_length"`・`truncation=True`）のマスクの長さ。
+    #: The mask length under upstream's call (`padding="max_length"`, `truncation=True`).
     masked_length: Callable[[str], int]
-    #: `tokenizers.Tokenizer.from_file(tokenizer.json)` の id 列。
+    #: The id sequence of `tokenizers.Tokenizer.from_file(tokenizer.json)`.
     tokenizer_json: Callable[[str], list[int]]
-    #: transformers が組み直した後の backend（`to_str()` の JSON）。
+    #: The backend after transformers rebuilt it (the JSON of `to_str()`).
     backend: dict[str, Any]
-    #: `tokenizer.json` の中身。
+    #: The contents of `tokenizer.json`.
     raw: dict[str, Any]
-    #: 断片化（`WhitespaceSplit` → `Metaspace`）だけを回す口。
+    #: Runs only the pre-tokenization (`WhitespaceSplit` → `Metaspace`).
     pre_tokenize: Callable[[str], list[str]]
 
 
 def load_truth(directory: Path) -> Truth:
-    """`directory`（`tokenizer.json` と `tokenizer_config.json` を直下に持つ置き場）の 2 経路の
-    正本。
+    """The two sources of truth of `directory` (a location that holds `tokenizer.json` and
+    `tokenizer_config.json` directly).
 
-    Wan は snapshot の `tokenizer/`（{@link tokenizer_snapshot}）、`karume-umt5-xxl` は本家の pin の
-    照合済みの 2 本だけを写した置き場（`wan.umt5_xxl_tokenizer`）を渡す。
+    Wan passes the snapshot's `tokenizer/` ({@link tokenizer_snapshot}); `karume-umt5-xxl` passes a
+    location holding only the two verified files copied from the original pin
+    (`wan.umt5_xxl_tokenizer`).
     """
     import transformers
     from tokenizers import Tokenizer
@@ -198,7 +212,8 @@ def load_truth(directory: Path) -> Truth:
 
     if transformers.__version__ != TRANSFORMERS_VERSION:
         raise ValueError(
-            f"transformers {transformers.__version__} — id 列の正本は {TRANSFORMERS_VERSION}"
+            f"transformers {transformers.__version__} — the source of truth for id sequences is"
+            f" {TRANSFORMERS_VERSION}"
         )
     path = directory / "tokenizer.json"
     auto = AutoTokenizer.from_pretrained(directory)
@@ -229,14 +244,15 @@ def load_truth(directory: Path) -> Truth:
 
 
 def check_upstream_shape(truth: Truth) -> None:
-    """焼いた表が前提にしている backend の構造を検査する（fail loudly）。
+    """Checks the backend structure that the baked tables assume (fail loudly).
 
-    TS は「追加語彙の切り出し → WhitespaceSplit → Metaspace（▁・always・split）→ Unigram →
-    末尾 `</s>`」だけを持つ。backend がこの形から 1 欄でも外れたら、TS の id 列は黙って別物になる。
+    TS holds only "split out added tokens → WhitespaceSplit → Metaspace (▁, always, split) → Unigram
+    → trailing `</s>`". If the backend departs from this shape in a single field, the TS id sequence
+    silently becomes something else.
     """
     backend = truth.backend
     if backend["normalizer"] is not None:
-        raise ValueError(f"backend に正規化がある: {backend['normalizer']}")
+        raise ValueError(f"the backend has a normalizer: {backend['normalizer']}")
     expected_pre = {
         "type": "Sequence",
         "pretokenizers": [
@@ -250,33 +266,42 @@ def check_upstream_shape(truth: Truth) -> None:
         ],
     }
     if backend["pre_tokenizer"] != expected_pre:
-        raise ValueError(f"backend の pre_tokenizer が想定と違う: {backend['pre_tokenizer']}")
+        raise ValueError(
+            f"the backend's pre_tokenizer is not the expected one: {backend['pre_tokenizer']}"
+        )
     model = backend["model"]
     if model["type"] != "Unigram" or model["byte_fallback"] or model["unk_id"] != 2:
-        raise ValueError(f"backend のモデルが Unigram・unk_id 2・byte_fallback なしでない: {model}")
+        raise ValueError(
+            f"the backend's model is not Unigram with unk_id 2 and no byte_fallback: {model}"
+        )
     post = backend["post_processor"]
     specials = [entry["SpecialToken"]["id"] for entry in post["single"] if "SpecialToken" in entry]
     if post["type"] != "TemplateProcessing" or specials != ["</s>"]:
-        raise ValueError(f"post_processor が `</s>` 1 つだけを足す形でない: {post}")
+        raise ValueError(f"the post_processor does not add exactly one `</s>`: {post}")
     if post["single"][-1] != {"SpecialToken": {"id": "</s>", "type_id": 0}}:
-        raise ValueError(f"`</s>` が末尾に足されない: {post['single']}")
-    # 追加語彙のフラグが既定値でないと「正規化の前に leftmost-longest で切り出す」写経の意味が
-    # 変わる。
+        raise ValueError(f"`</s>` is not appended at the end: {post['single']}")
+    # If an added token's flags are not the defaults, the copied rule "split out leftmost-longest
+    # before normalization" means something else.
     for entry in backend["added_tokens"]:
         flags = {key: entry[key] for key in ("lstrip", "rstrip", "single_word", "normalized")}
         if any(flags.values()):
-            raise ValueError(f"追加語彙 {entry['content']!r} のフラグが既定値でない: {flags}")
-    # 語彙・スコア・追加語彙は tokenizer.json と同一（transformers 5 は構成だけを組み直す）。
+            raise ValueError(
+                f"the flags of added token {entry['content']!r} are not the defaults: {flags}"
+            )
+    # Vocabulary, scores and added tokens are identical to tokenizer.json (transformers 5 rebuilds
+    # only the configuration).
     if backend["model"]["vocab"] != truth.raw["model"]["vocab"]:
-        raise ValueError("backend の語彙・スコアが tokenizer.json と違う")
+        raise ValueError("the backend's vocabulary / scores differ from tokenizer.json")
     if backend["added_tokens"] != truth.raw["added_tokens"]:
-        raise ValueError("backend の追加語彙が tokenizer.json と違う")
+        raise ValueError("the backend's added tokens differ from tokenizer.json")
 
 
 def whitespace_split_ranges() -> pc.Ranges:
-    """`WhitespaceSplit` が空白と見なす文字（Rust の `char::is_whitespace`）を畳む。
+    """Collects the characters `WhitespaceSplit` treats as whitespace (Rust's `char::is_whitespace`)
+    into ranges.
 
-    全コードポイントを `a` + 文字 + `b` に入れて、2 断片に割れるかを正本に聞く。
+    Puts every code point into `a` + character + `b` and asks the source of truth whether it splits
+    into two pieces.
     """
     from tokenizers import pre_tokenizers
 
@@ -285,17 +310,21 @@ def whitespace_split_ranges() -> pc.Ranges:
 
 
 def t5_table_fields(truth: Truth) -> dict[str, Any]:
-    """資産の T5 の表の欄（TS の `parseT5Tables` が読む 7 欄 — 並びは資産の欄の並び）。
+    """The T5 table fields of the asset (the 7 fields TS's `parseT5Tables` reads — in the asset's
+    field order).
 
-    Wan の資産（{@link build_asset}）と `karume-umt5-xxl` の資産（`wan.umt5_xxl_tokenizer`）が
-    同じ 1 本を引く（表の焼き方を 2 本持たない）。backend の構造の検査
-    （{@link check_upstream_shape}）もここで掛ける。
+    Wan's asset ({@link build_asset}) and the `karume-umt5-xxl` asset (`wan.umt5_xxl_tokenizer`)
+    both use this one function (there are not two ways of baking the tables). The backend structure
+    check ({@link check_upstream_shape}) also runs here.
     """
     check_upstream_shape(truth)
     vocab = [(token, float(score)) for token, score in truth.backend["model"]["vocab"]]
     for token, _ in vocab:
         if "\n" in token or token == "":
-            raise ValueError(f"語彙に改行を含む / 空のトークン {token!r} — 行区切りが壊れる")
+            raise ValueError(
+                f"a vocabulary token {token!r} contains a newline / is empty — the line"
+                " separation breaks"
+            )
     added = sorted(
         ((entry["content"], entry["id"]) for entry in truth.backend["added_tokens"]),
         key=lambda pair: pair[1],
@@ -307,7 +336,7 @@ def t5_table_fields(truth: Truth) -> dict[str, Any]:
         "eosId": eos,
         "addedTokens": [[content, token_id] for content, token_id in added],
         "space": whitespace_split_ranges(),
-        # 行番号 0-origin = id（改行・空のトークンが無いことは上で検査済み）。
+        # Line number, 0-origin = id (checked above that no token contains a newline or is empty).
         "vocabText": "\n".join(token for token, _ in vocab),
         "scores": [score for _, score in vocab],
     }
@@ -316,7 +345,7 @@ def t5_table_fields(truth: Truth) -> dict[str, Any]:
 def build_asset(
     truth: Truth, tables: pc.PromptCleanTables, versions: Mapping[str, str], model: str
 ) -> dict[str, Any]:
-    """TS が引くだけの資産（`parseWanTokenizerAsset` が読む形）。"""
+    """The asset TS only looks up (the shape `parseWanTokenizerAsset` reads)."""
     source = SOURCES[model]
     return {
         "format": ASSET_FORMAT,
@@ -328,8 +357,8 @@ def build_asset(
 
 
 def asset_versions() -> dict[str, str]:
-    """資産の `versions`（前処理の正本の版 + tokenizers / transformers の版 — {@link main} が
-    焼く値）。"""
+    """The asset's `versions` (the versions of the preprocessing source of truth + the tokenizers /
+    transformers versions — the values {@link main} bakes)."""
     import tokenizers
     import transformers
 
@@ -341,7 +370,7 @@ def asset_versions() -> dict[str, str]:
 
 
 def split_added(text: str, added: Sequence[str]) -> list[tuple[str, bool]]:
-    """追加語彙を leftmost-longest で切り出す（TS の `splitAddedTokens` の鏡像）。"""
+    """Splits out added tokens leftmost-longest (mirror of TS's `splitAddedTokens`)."""
     out: list[tuple[str, bool]] = []
     buffer = ""
     i = 0
@@ -362,7 +391,7 @@ def split_added(text: str, added: Sequence[str]) -> list[tuple[str, bool]]:
 
 
 def pieces_of(truth: Truth, added: Sequence[str], text: str) -> list[str]:
-    """追加語彙の外の断片（Unigram に渡る単位）。"""
+    """The pieces outside the added tokens (the units handed to Unigram)."""
     return [
         piece
         for chunk, is_added in split_added(text, added)
@@ -372,8 +401,9 @@ def pieces_of(truth: Truth, added: Sequence[str], text: str) -> list[str]:
 
 
 def version_split(added: Sequence[str], text: str) -> str | None:
-    """トークナイザに渡す前に拒む形（2 経路の断片化が割れる形）の理由 — 本文中の追加語彙 →
-    空白の直後の `▁` の順。どちらも無ければ None。"""
+    """The reason for a shape rejected before the tokenizer (a shape whose pre-tokenization diverges
+    between the two paths) — added tokens inside the text, then `▁` right after whitespace. None if
+    neither is present."""
     if any(is_added for _, is_added in split_added(text, added)):
         return "added-token"
     if " " + METASPACE in text:
@@ -382,9 +412,11 @@ def version_split(added: Sequence[str], text: str) -> str | None:
 
 
 def expectation(truth: Truth, added: Sequence[str], cleaned: str) -> dict[str, Any]:
-    """前処理を通った文字列の期待（id 列か、トークナイザ側の拒否の理由）。
+    """The expectation for a string that passed preprocessing (an id sequence, or the tokenizer
+    side's rejection reason).
 
-    拒否の順は TS と同じ: 追加語彙 → 空白の直後の `▁` → 語彙外 / 上限超え → 下限割れ。
+    The rejection order is the same as in TS: added token → `▁` right after whitespace →
+    out-of-vocabulary / over the upper limit → under the lower limit.
     """
     reason = version_split(added, cleaned)
     if reason is not None:
@@ -393,12 +425,13 @@ def expectation(truth: Truth, added: Sequence[str], cleaned: str) -> dict[str, A
 
 
 def tokenized_expectation(truth: Truth, text: str) -> dict[str, Any]:
-    """{@link version_split} を通った文字列の期待（2 経路の id 列か、語彙外 / 上限超え /
-    下限割れ）。
+    """The expectation for a string that passed {@link version_split} (the id sequence of the two
+    paths, or out-of-vocabulary / over the upper limit / under the lower limit).
 
-    MUST: 受理するのは 2 経路の id 列が一致したときだけ。追加語彙と空白の直後の `▁` を除いた後に
-    割れたら語彙外で、割れ方は「同じ長さ・同じ位置で transformers 5 が 2・tokenizer.json が 3」
-    以外にありえない（それ以外は経路の構成が違う = 落とす）。
+    MUST: accept only when the two paths give the same id sequence. Once added tokens and `▁` right
+    after whitespace are excluded, a divergence is out-of-vocabulary, and the only possible shape is
+    "same length, transformers 5 has 2 and tokenizer.json has 3 at the same positions" (anything
+    else means the paths are configured differently = fail).
     """
     ids = truth.transformers(text)
     plain = truth.tokenizer_json(text)
@@ -407,17 +440,22 @@ def tokenized_expectation(truth: Truth, text: str) -> dict[str, Any]:
             (a, b) != (2, 3) for a, b in zip(ids, plain, strict=True) if a != b
         ):
             raise ValueError(
-                f"2 経路の割れ方が語彙外（2 と 3）でない: {text!r}\n  tf5={ids}\n  json={plain}"
+                "the two paths differ in a way other than out-of-vocabulary (2 vs 3):"
+                f" {text!r}\n  tf5={ids}\n  json={plain}"
             )
         if len(ids) > MAX_LENGTH:
-            raise ValueError(f"語彙外と上限超えが重なるケースは置かない: {text!r}")
+            raise ValueError(
+                f"a case that is both out-of-vocabulary and over the limit is not kept: {text!r}"
+            )
         return {"reject": "oov"}
     if len(ids) > MAX_LENGTH:
         return {"reject": "too-long"}
     if len(ids) < MIN_TOKENS:
         return {"reject": "too-short"}
     if truth.masked_length(text) != len(ids):
-        raise ValueError(f"上流の呼び方のマスク長が id 列の長さと違う: {text!r}")
+        raise ValueError(
+            f"the mask length under upstream's call differs from the id sequence length: {text!r}"
+        )
     return {"ids": ids, "tokenizerJsonIds": plain}
 
 
@@ -429,7 +467,8 @@ def build_case(
     text: str,
     why: str,
 ) -> dict[str, Any]:
-    """1 ケースの期待。前処理の拒否 → トークナイザの拒否 → 受理の順（TS と同じ）。"""
+    """The expectation of one case. Preprocessing rejection → tokenizer rejection → acceptance, in
+    that order (the same as TS)."""
     outcome = pc.record(compiled, clean_truth, text)
     base = {"id": case_id, "why": why, "text": text}
     if outcome.startswith("R"):
@@ -440,7 +479,8 @@ def build_case(
 
 
 def random_case_pool(truth: Truth, tables: pc.PromptCleanTables) -> list[int]:
-    """乱択ケースの池 — 1 文字として引ける語彙のうち、前処理の門と表引きに触れない文字 + 空白。"""
+    """The pool of the random cases — the vocabulary entries that are a single character and touch
+    neither the preprocessing checks nor the table lookups, plus whitespace."""
     singles = {ord(token) for token, _ in truth.backend["model"]["vocab"] if len(token) == 1}
     assigned = pc.RangeSet(tables.assigned)
     literals = set(pc.badness_literals())
@@ -468,7 +508,7 @@ def build_cases(
     *,
     random_count: int = RANDOM_CASES,
 ) -> list[dict[str, Any]]:
-    """全ケースの期待を作る（固定 4 本 + 境界 + 乱択）。"""
+    """Builds the expectations of all cases (the four fixed ones + boundaries + random)."""
     compiled = pc.CompiledTables(tables)
     cases = [
         build_case(truth, compiled, clean_truth, f"fixed-{p.name}", p.text, f"固定 {p.role}")
@@ -477,7 +517,9 @@ def build_cases(
     for case in cases:
         name = case["id"].removeprefix("fixed-")
         if len(case.get("ids", [])) != FIXED_PROMPT_LENGTHS[name]:
-            raise ValueError(f"固定プロンプト {name} の長さが調査の値と違う: {case}")
+            raise ValueError(
+                f"the length of fixed prompt {name} differs from the investigation's value: {case}"
+            )
     cases += [
         build_case(truth, compiled, clean_truth, case_id, text, why)
         for case_id, text, why in BOUNDARY_CASES
@@ -496,7 +538,8 @@ def build_cases(
 
 
 def check_boundaries(cases: Sequence[Mapping[str, Any]]) -> None:
-    """境界のケースが狙いどおりの決着になっていることを確かめる（狙いが外れたケースは焼かない）。"""
+    """Checks that each boundary case ends with its intended outcome (a case that misses its
+    purpose is not baked)."""
     by_id = {case["id"]: case for case in cases}
     wants = {
         "min-two": lambda c: len(c.get("ids", [])) == MIN_TOKENS,
@@ -520,18 +563,23 @@ def check_boundaries(cases: Sequence[Mapping[str, Any]]) -> None:
     }
     for case_id, want in wants.items():
         if not want(by_id[case_id]):
-            raise ValueError(f"境界ケース {case_id} が狙いの決着でない: {by_id[case_id]}")
+            raise ValueError(
+                f"boundary case {case_id} does not end with its intended outcome: {by_id[case_id]}"
+            )
     accepted = [case for case in cases if case["id"].startswith("random-") and "ids" in case]
     if len(accepted) < len([c for c in cases if c["id"].startswith("random-")]) // 2:
-        raise ValueError("乱択ケースの過半が拒否 — 受理集合の池になっていない")
+        raise ValueError(
+            "most random cases are rejected — the pool is not drawn from the accepted set"
+        )
 
 
 def vocab_subset(truth: Truth, texts: Iterable[str]) -> list[list[Any]]:
-    """全テキストの断片の**部分文字列**に当たる語彙（各断片の格子が全語彙のときと同じになる）。
+    """The vocabulary entries that are **substrings** of the pieces of all texts (the lattice of
+    each piece is then the same as with the full vocabulary).
 
-    分割に使われたピースだけを載せると、未知ノードの入り方や同点の勝ち方が部分集合の格子で
-    変わりうる。断片の部分文字列を全部載せれば格子そのものが一致する（gemma の
-    `_shared/gemma_tokenizer.py` の `subset_keys` と同じ考え）。
+    Keeping only the pieces used by the segmentation can change how unknown nodes enter and how ties
+    are won in the lattice of the subset. Keeping every substring of the pieces makes the lattice
+    itself identical (the same idea as `subset_keys` in gemma's `_shared/gemma_tokenizer.py`).
     """
     vocab = {
         token: (token_id, float(score))
@@ -554,7 +602,8 @@ def build_parity_fixture(
     asset: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """id 列のパリティ用フィクスチャ（語彙は部分集合・前処理の表は全体）。"""
+    """The id sequence parity fixture (a subset of the vocabulary, the full preprocessing
+    tables)."""
     scores = asset["scores"]
     tokens = asset["vocabText"].split("\n")
     return {
@@ -574,7 +623,8 @@ def build_parity_fixture(
             "addedTokens": asset["addedTokens"],
             "unkId": asset["unkId"],
             "eosId": asset["eosId"],
-            # MUST: 未知ノードのスコアと探索幅は**語彙全体**から決まる（部分集合から導かない）。
+            # MUST: the unknown-node score and the search width come from the **whole vocabulary**
+            # (never derived from the subset).
             "minScore": min(scores),
             "maxTokenLength": max(len(token) for token in tokens),
             "space": asset["space"],
@@ -597,10 +647,11 @@ def build_sweep_fixture(
     nfc_sweeps: Sequence[tuple[str, str]] = pc.NFC_SWEEPS,
     log: Callable[[str], None] = lambda _: None,
 ) -> dict[str, Any]:
-    """前処理の乱択・全コードポイント掃引の期待（digest）。
+    """The expectations (digests) of the preprocessing random and all-code-point sweeps.
 
-    期待は常に上流（`prompt_clean`・`BADNESS_RE`・`unicodedata`）から採る。鏡像は拒む入力を
-    決めるだけで、受理した入力では上流と一致しなければ {@link pc.record} が落ちる。
+    The expectations always come from upstream (`prompt_clean`, `BADNESS_RE`, `unicodedata`). The
+    mirror only decides which inputs to reject; for an accepted input, {@link pc.record} fails
+    unless it matches upstream.
     """
     import unicodedata
 
@@ -624,7 +675,10 @@ def build_sweep_fixture(
         texts = list(pc.fuzz_strings(expanded[run.pool], run.seed, run.count, run.max_length))
         bits = pc.badness_bits(BADNESS_RE, texts)
         if bits != pc.badness_bits(compiled.badness, texts):
-            raise ValueError(f"BADNESS_RE の中間表現が上流と割れる（乱択 {run.name}）")
+            raise ValueError(
+                "the intermediate form of BADNESS_RE diverges from upstream"
+                f" (random run {run.name})"
+            )
         badness.append(
             {
                 "name": run.name,
@@ -640,7 +694,9 @@ def build_sweep_fixture(
         texts = [template.replace("{}", chr(cp)) for cp in pc.ALL_CODEPOINTS]
         bits = pc.badness_bits(BADNESS_RE, texts)
         if bits != pc.badness_bits(compiled.badness, texts):
-            raise ValueError(f"BADNESS_RE の中間表現が上流と割れる（掃引 {name}）")
+            raise ValueError(
+                f"the intermediate form of BADNESS_RE diverges from upstream (sweep {name})"
+            )
         badness.append(
             {
                 "name": name,
@@ -673,7 +729,7 @@ def build_sweep_fixture(
         }
         for name, template in nfc_sweeps
     ]
-    log(f"[nfc-sweep] {len(nfc)} 文脈 × {len(domain)} 文字")
+    log(f"[nfc-sweep] {len(nfc)} contexts × {len(domain)} characters")
 
     return {
         "_doc": [
@@ -696,7 +752,7 @@ def build_sweep_fixture(
     }
 
 
-#: `deno fmt` の行幅（deno.json の `fmt.lineWidth`）。
+#: The line width of `deno fmt` (`fmt.lineWidth` in deno.json).
 FMT_LINE_WIDTH = 100
 
 
@@ -707,11 +763,13 @@ def _display_width(text: str) -> int:
 
 
 def fixture_json(value: Any, indent: int = 0) -> str:
-    """フィクスチャの JSON（`deno fmt` の形に寄せる — 行幅に収まる配列は 1 行、他は 1 要素 1 行）。
+    """The fixture's JSON (close to the `deno fmt` form — an array that fits the line width on one
+    line, anything else one element per line).
 
-    素の `indent` 付き `json.dumps` は区間 `[start, end]` や id 列まで 1 要素 1 行に展開し、
-    フィクスチャが数倍に膨らむ。`deno fmt` は 1 行で書かれた配列を行幅に収まる限り 1 行のまま
-    残すので、ここで 1 行にしておけば commit 形（フォーマッタの出力）も小さく保てる。
+    Plain `json.dumps` with `indent` expands even the ranges `[start, end]` and the id sequences to
+    one element per line, and the fixture grows several times over. `deno fmt` keeps an array
+    written on one line as one line as long as it fits the line width, so writing it on one line
+    here keeps the committed form (the formatter's output) small too.
     """
     pad = " " * (indent + 2)
     if isinstance(value, dict):
@@ -733,7 +791,8 @@ def fixture_json(value: Any, indent: int = 0) -> str:
 
 
 def write_text(path: Path, text: str) -> int:
-    """書いてバイト数を返す（staging → 置換 — 途中で落ちても古いファイルが残る）。"""
+    """Writes the file and returns its size in bytes (staging → replace — a failure midway leaves
+    the old file in place)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     staging = path.with_name(path.name + ".staging")
     staging.write_text(text, encoding="utf-8")
@@ -756,16 +815,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     tables = pc.build_tables()
     versions = asset_versions()
     asset = build_asset(truth, tables, versions, args.model)
-    log(f"[asset] 語彙 {len(asset['scores'])}（{time.perf_counter() - started:.1f}s）")
+    log(f"[asset] vocabulary {len(asset['scores'])} ({time.perf_counter() - started:.1f}s)")
 
     clean_truth = pc.upstream_prompt_clean()
     cases = build_cases(truth, tables, clean_truth)
     outcomes = sorted({case.get("reject", "accepted") for case in cases})
-    log(f"[cases] {len(cases)} 件（{outcomes}）")
+    log(f"[cases] {len(cases)} cases ({outcomes})")
     parity = build_parity_fixture(truth, asset, cases)
     sweep = build_sweep_fixture(tables, clean_truth, versions, log=log)
 
-    # 検査を全部通ってから書く（ADR 0005 の fail loudly — 途中で落ちたら 1 バイトも書かない）。
+    # Write only after every check has passed (ADR 0005's fail loudly — a failure midway writes
+    # not a single byte).
     written = {
         "asset": write_text(args.assets_out / ASSET_FILE, json.dumps(asset, ensure_ascii=False)),
         "parity": write_text(args.fixtures_out / PARITY_FIXTURE, fixture_json(parity) + "\n"),

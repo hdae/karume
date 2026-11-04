@@ -1,28 +1,35 @@
-"""MiniCPM5-1B の**校正コーパス**（GPTQ / AWQ が見る活性を作る 48 文）。
+"""The **calibration corpus** of MiniCPM5-1B (48 texts that produce the activations GPTQ / AWQ
+see).
 
-`karume.quant_calib` の校正付き丸めは「その層に実際に流れる活性」から丸め先を選び直す方式
-なので、コーパスの性格がそのまま丸めの偏りになる。ここは `sweep_w4.py` の校正付き構成
-（{@link minicpm5.sweep_w4.CALIB_CONFIGS}）が読む唯一の入力で、選定方針は次の 3 点:
+The calibrated rounding of `karume.quant_calib` re-chooses the rounding target from "the
+activations that actually flow into the layer", so the character of the corpus becomes the bias of
+the rounding as it is. This is the only input read by the calibrated configurations of
+`sweep_w4.py` ({@link minicpm5.sweep_w4.CALIB_CONFIGS}), chosen by three rules:
 
-- **評価文と分離する** — {@link minicpm5.export.GOLDEN_CASES}（= `export_decode` の greedy
-  期待列の素材）と 1 文も重ねない。話題も重ねない（「フランス / 日本の首都」系は 1 文も入れない）。
-  重ねると「校正で見た文をそのまま評価する」形になり、teacher / greedy の一致は**校正の
-  質ではなく漏れ**を測る数になる。
-- **素の言語モデルの分布へ寄せる** — 模型は base LM（chat template は載せない — `export.py`）
-  なので、校正も chat 形式にせず素の散文で採る。英日混合の一般散文（叙述・問い・コード
-  断片）で、話題は互いに離す（1 話題へ寄せると活性の偏りがその話題の形に張り付く）。
-- **長さを散らす** — 短文（10 token 級）から段落（60 token 級）まで。GPTQ の `H = Σ XᵀX` は
-  トークン数で重み付くので、長文だけだと長文の活性が、短文だけだと文頭の活性が支配する。
+- **Keep it apart from the evaluation texts** — not one sentence overlaps
+  {@link minicpm5.export.GOLDEN_CASES} (= the material of the greedy expected sequences of
+  `export_decode`). The topics do not overlap either (not one sentence about "the capital of
+  France / Japan"). With an overlap the run "evaluates the very sentences seen in calibration", and
+  the teacher / greedy agreement measures **leakage, not the quality of the calibration**.
+- **Stay close to the distribution of the plain language model** — the model is a base LM (no chat
+  template — `export.py`), so the calibration is plain prose, not chat format. General English and
+  Japanese prose (narration, questions, code fragments), with topics kept apart from each other
+  (leaning on one topic pins the activation bias to the shape of that topic).
+- **Spread the lengths** — from short sentences (around 10 tokens) to paragraphs (around 60
+  tokens). GPTQ's `H = Σ XᵀX` is weighted by token count, so with only long texts the activations
+  of long texts dominate, and with only short ones the activations at the start of a text dominate.
 
-内訳は英語 26 / 日本語 16 / コード断片 6。固有の人名・実在組織は書かない（校正の入力が
-特定の固有名の活性を引き当てるのを避ける — 一般語彙の分布だけを見たい）。
+The breakdown is 26 English / 16 Japanese / 6 code fragments. No proper names of people or real
+organisations (so that the calibration input does not pull in the activations of specific proper
+nouns — only the distribution of general vocabulary is wanted).
 """
 
 from __future__ import annotations
 
-#: 校正入力の 48 文（この順で先頭から使う — `--calib-limit N` は**先頭 N 文**を採る）。
-#: 順序は英語 → 日本語 → コードではなく**混ぜて**並べる: 上限を掛けた縮小実行でも
-#: 言語とスタイルの混合が保たれる（先頭 4 文だけで英語 / 日本語 / コードが揃う）。
+#: The 48 calibration inputs (used from the start in this order — `--calib-limit N` takes the
+#: **first N texts**). The order **mixes** them rather than English → Japanese → code: a reduced
+#: run with a limit keeps the mix of languages and styles (the first 4 texts already cover English /
+#: Japanese / code).
 CALIB_TEXTS: tuple[str, ...] = (
     "A compiler turns source text into machine instructions, and a good error message often "
     "matters more than the speed of the pass that produced it.",

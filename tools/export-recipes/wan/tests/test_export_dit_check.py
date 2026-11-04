@@ -1,18 +1,21 @@
-"""`wan/export_dit.py` の `--check`（書き手で部品ディレクトリを系列の中の一時ディレクトリへ
-書き直し、既存の系列と全ファイルの sha256 で突き合わせる口 — ADR 0121 決定 10）の約束事。
+"""The contract of the `--check` of `wan/export_dit.py` (the entry point that rewrites the component
+directories with the writers into a temporary directory inside the series and matches every file
+against the existing series by sha256 — ADR 0121 decision 10).
 
-守るのは「Wan2.1 と共有する書き手を変えたとき、1.3B の容器と golden が 1 バイトも動いていないこと」
-を確かめる口そのもの:
+What it guards is the very entry point that confirms "when the writers shared with Wan2.1 change,
+the 1.3B containers and goldens have not moved by a single byte":
 
-- 書き手が変わっていなければ全ファイル（容器の全 part・`io.*`・`reference.*`）が一致し、系列は
-  1 バイトも変わらない（一時ディレクトリも残らない）
-- 書き手の出力が変われば、違うファイルを名指して止まる（故障注入: 1 ケースの seed を変える →
-  そのケースの 2 ファイルだけが名指しされる）
-- `--no-full` は実寸のケースのファイルだけを照合から外す（外したファイルが既存に無ければ名指す）
-- 照合の相手が無ければ、上流を読む前に止まる
+- if the writers did not change, every file (all container parts, `io.*`, `reference.*`) matches,
+  and the series does not change by a single byte (no temporary directory is left either)
+- if the writers' output changes, it stops naming the differing files (fault injection: change the
+  seed of one case → only that case's 2 files are named)
+- `--no-full` leaves only the files of the full-size cases out of the matching (a left-out file
+  missing on the existing side is named)
+- with nothing to match against, it stops before reading the upstream
 
-合成モデル（`test_dit_patch.TINY_DIT` — 乱数初期化の小さな `WanTransformer3DModel`）だけで回す。
-1.3B の実物の照合は `python -m wan.export_dit --dtype i8 --no-full --check` など（runbook）。
+Runs only on a synthetic model (`test_dit_patch.TINY_DIT` — a small randomly initialised
+`WanTransformer3DModel`). The check of the real 1.3B is `python -m wan.export_dit --dtype i8
+--no-full --check` and the like (runbook).
 """
 
 from __future__ import annotations
@@ -30,11 +33,12 @@ from torch import nn
 from wan import export_dit
 from wan.tests.test_dit_patch import TINY_DIT, TINY_LATENT
 
-#: 合成の patch（TINY_DIT の patch_size）。
+#: The synthetic patch (patch_size of TINY_DIT).
 PATCH = (1, 2, 2)
 
-#: 合成の系列のケース（i8 系列が採る役割 2 つ + 実寸の役割 1 つ — 実寸の格子は
-#: {@link export_dit.I8_FULL_LATENTS} を合成の格子へ差し替えて選ばせる）。
+#: The cases of the synthetic series (the 2 roles the i8 series takes + 1 full-size role — the
+#: full-size grid is selected by replacing {@link export_dit.I8_FULL_LATENTS} with the synthetic
+#: grid).
 CASES = (
     export_dit.CaseSpec("band", TINY_LATENT, 999, 5, 1),
     export_dit.CaseSpec("accept", TINY_LATENT, 500, 3, 2),
@@ -43,8 +47,8 @@ CASES = (
 
 
 def _tiny(_model_name: str = "") -> nn.Module:
-    """毎回同じ重みの合成 DiT（`export_dit.load_transformer` の差し替え — 書き直しの回も
-    同じ値）。"""
+    """A synthetic DiT with the same weights every time (stands in for
+    `export_dit.load_transformer` — the rewrite round gets the same values too)."""
     transformer_wan = pytest.importorskip("diffusers.models.transformers.transformer_wan")
     torch.manual_seed(20261004)
     return transformer_wan.WanTransformer3DModel(**TINY_DIT).to(torch.float32).eval()
@@ -67,7 +71,8 @@ def _digests(directory: Path) -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def written(tmp_path_factory) -> Iterator[Path]:
-    """合成の i8 系列（実寸の役割を含む全ケース）を書いた系列の根。"""
+    """The root of a series with the synthetic i8 series written (all cases, the full-size role
+    included)."""
     root = tmp_path_factory.mktemp("export-dit-check")
     with pytest.MonkeyPatch.context() as patch:
         _point_at_tiny(patch, root)
@@ -77,7 +82,8 @@ def written(tmp_path_factory) -> Iterator[Path]:
 
 @pytest.fixture
 def series(written: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """テストごとの写し（壊す・消すテストが他のテストの系列に触らない）。"""
+    """A per-test copy (tests that break or delete things do not touch the series of other
+    tests)."""
     copy = tmp_path / "i8"
     shutil.copytree(written, copy)
     _point_at_tiny(monkeypatch, tmp_path)
@@ -85,12 +91,14 @@ def series(written: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
 
 
 def _check(*flags: str) -> dict[str, Any]:
-    """i8 系列の `--check` を回して要約を返す（引数は `main` の検査を通す）。"""
+    """Run `--check` of the i8 series and return the summary (the arguments pass the checks of
+    `main`)."""
     return export_dit.emit(_namespace("--dtype", "i8", "--check", *flags))
 
 
 def _namespace(*argv: str) -> Any:
-    """`main` と同じ引数の検査を通した `emit` の引数（要約を戻りで受けるため）。"""
+    """The arguments of `emit` after the same argument checks as `main` (to receive the summary as
+    the return value)."""
     import argparse
 
     captured: dict[str, argparse.Namespace] = {}
@@ -132,7 +140,8 @@ class TestAChangedWriter:
     def test_a_changed_case_names_exactly_its_two_files(
         self, series: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """故障注入: 受入れの 1 ケースの seed を変える（書き手の出力がそのケースだけ動く）。"""
+        """Fault injection: change the seed of one acceptance case (only that case's writer output
+        moves)."""
         changed = dataclasses.replace(CASES[1], seed=CASES[1].seed + 1)
         monkeypatch.setattr(export_dit, "CASES", (CASES[0], changed, CASES[2]))
         before = _digests(series / export_dit.TARGET)
@@ -163,7 +172,7 @@ class TestNoExistingSeries:
         _point_at_tiny(monkeypatch, tmp_path)
 
         def never(_model_name: str) -> nn.Module:
-            raise AssertionError("照合の相手が無いのに上流を読んだ")
+            raise AssertionError("read the upstream although there was nothing to match against")
 
         monkeypatch.setattr(export_dit, "load_transformer", never)
 

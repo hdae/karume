@@ -1,14 +1,19 @@
-"""`minicpm5/sweep_w4.py` の量子化式（ADR 0069 決定 3）の振る舞い。
+"""Behaviour of the quantization formulas of `minicpm5/sweep_w4.py` (ADR 0069 decision 3).
 
-実重み・decode の greedy 資産・transformers はどれも要らない**純数式のテスト**。sweep 本体
-（模型を読んで測る側）は手動実行で、ここで固定するのは「壊れると測定値が黙って別物になる」側の性質だけ:
+**Pure-formula tests** that need neither real weights, nor the decode greedy assets, nor
+transformers. The sweep itself (the side that loads the model and measures) is run by hand; what
+is pinned here is only the properties whose breakage "silently turns the measurements into
+something else":
 
-- 対称が冪等で、group の amax 要素を厳密復元し、`q` が −8 へ落ちないこと（格納形の前提そのもの）
-- 全ゼロ group が 0 のまま戻ること（下限 clamp 経路 — 素の式なら NaN）
-- scale が **group ごとに**分かれること（大 amax の group が小 amax の group を潰さない）
-- 整除違反が fail loudly（端数 group を作った形の品質を測らない）
-- 非対称が min / max を復元し `u ∈ [1,15]` に収まること、縮退 group が定数のまま戻ること
-- 非対称が有利な分布で実際に対称より誤差が小さいこと（**恒真でない**ことの裏取り）
+- symmetric is idempotent, restores a group's amax element exactly, and `q` never drops to −8
+  (the very premise of the storage form)
+- an all-zero group comes back as 0 (the lower-clamp path — the bare formula would give NaN)
+- the scales are separate **per group** (a large-amax group does not crush a small-amax one)
+- a divisibility violation fails loudly (the quality of a form with partial groups is not measured)
+- asymmetric restores min / max and stays within `u ∈ [1,15]`, and a degenerate group comes back
+  constant
+- on a distribution that favours asymmetric, its error really is smaller than symmetric's
+  (evidence that it is **not vacuous**)
 """
 
 from __future__ import annotations
@@ -25,13 +30,14 @@ from minicpm5 import sweep_w4 as sweep
 
 
 def relative_error(weight: torch.Tensor, fq: torch.Tensor) -> float:
-    """`‖w − fq‖₂ / ‖w‖₂`（sweep が族別に採るのと同じ量）。"""
+    """`‖w − fq‖₂ / ‖w‖₂` (the same quantity the sweep takes per family)."""
     return float(torch.linalg.vector_norm(fq - weight) / torch.linalg.vector_norm(weight))
 
 
 class TestSymmetricFakeQuant:
     def test_reapplying_it_is_bit_identical(self):
-        """MUST: 冪等（ADR 0069 決定 3）— 崩れると丸め済みの重みが再量子化のたびに動く。"""
+        """MUST: idempotent (ADR 0069 decision 3) — if it broke, rounded weights would move with
+        every requantization."""
         torch.manual_seed(0)
         weight = torch.randn(5, 128)
 
@@ -41,17 +47,19 @@ class TestSymmetricFakeQuant:
         assert torch.equal(once, twice)
 
     def test_the_extreme_of_each_group_is_restored_exactly(self):
-        """amax 要素が `q = ±7` に乗って `q·s` で厳密に戻る（冪等の理由そのもの）。"""
+        """The amax element lands on `q = ±7` and comes back exactly as `q·s` (the very reason for
+        idempotence)."""
         weight = torch.tensor([[0.5, -3.0, 1.25, 0.75, -0.5, 2.0, 8.0, -1.0]])
 
         fq = sweep.fake_quant_symmetric(weight, 4)
 
-        # group 0 の amax は -3.0（1 番目）、group 1 の amax は 8.0（2 番目）。
+        # The amax of group 0 is -3.0 (index 1), the amax of group 1 is 8.0 (index 2).
         assert float(fq[0, 1]) == -3.0
         assert float(fq[0, 6]) == 8.0
 
     def test_an_all_zero_group_stays_zero(self):
-        """下限 clamp が無いと `amax / 7 = 0` で割って NaN が出る（全ゼロは実在する）。"""
+        """Without the lower clamp it divides by `amax / 7 = 0` and gives NaN (all-zero groups do
+        exist)."""
         weight = torch.zeros(2, 16)
 
         fq = sweep.fake_quant_symmetric(weight, 8)
@@ -59,7 +67,8 @@ class TestSymmetricFakeQuant:
         assert torch.equal(fq, torch.zeros(2, 16))
 
     def test_the_levels_never_reach_minus_eight(self):
-        """MUST: `q ∈ [−7, +7]`。−8 を許すと amax 要素の厳密復元（= 冪等）が崩れる。"""
+        """MUST: `q ∈ [−7, +7]`. Allowing −8 breaks the exact restoration of the amax element (=
+        idempotence)."""
         torch.manual_seed(1)
         weight = torch.randn(3, 64)
 
@@ -67,18 +76,20 @@ class TestSymmetricFakeQuant:
 
         assert int(q.min()) >= -sweep.INT4_MAX
         assert int(q.max()) <= sweep.INT4_MAX
-        # 恒真化の防止: 両端が実際に踏まれている（`clamp` の値域だけを見ていない）。
+        # Guarding against a vacuous pass: both ends are really reached (not just the range of
+        # `clamp`).
         assert int(q.min()) == -sweep.INT4_MAX
         assert int(q.max()) == sweep.INT4_MAX
 
 
-#: 振幅が 4 桁違う 2 group（per-tensor / per-channel の scale なら小さい側が全部 0 に潰れる）。
+#: Two groups whose amplitudes differ by 4 orders of magnitude (with a per-tensor / per-channel
+#: scale the smaller one would all be crushed to 0).
 LOUD_GROUP = [100.0, -80.0, 60.0, -40.0]
 QUIET_GROUP = [0.01, -0.008, 0.006, -0.004]
 
 
 class TestGroupBoundaries:
-    """group ごとに scale が分かれること — 「K 方向 group」の存在意義そのもの。"""
+    """The scales are separate per group — the very reason for "groups along K"."""
 
     def test_each_group_gets_its_own_scale(self):
         weight = torch.tensor([LOUD_GROUP + QUIET_GROUP])
@@ -90,40 +101,44 @@ class TestGroupBoundaries:
         assert float(scale[0, 1, 0]) == pytest.approx(0.01 / sweep.INT4_MAX)
 
     def test_the_quiet_group_survives_the_loud_one(self):
-        """大 amax group の誤差が小 amax group へ漏れない（漏れると静かに 0 へ潰れる）。"""
+        """The error of a large-amax group does not leak into a small-amax group (a leak would
+        quietly crush it to 0)."""
         weight = torch.tensor([LOUD_GROUP + QUIET_GROUP])
 
         fq = sweep.fake_quant_symmetric(weight, 4)
 
         quiet = fq[0, 4:]
         assert bool((quiet != 0).all())
-        # 量子化誤差の上界は s/2 = amax/14（group 内の最大振幅で決まる）。
+        # The quantization error is bounded by s/2 = amax/14 (set by the largest amplitude in the
+        # group).
         assert torch.allclose(quiet, torch.tensor(QUIET_GROUP), atol=0.01 / 14)
 
 
 class TestDivisibility:
     def test_a_group_size_that_does_not_divide_the_in_axis_fails_loudly(self):
-        """MUST: 端数 group は格納できない形（ADR 0069 決定 2）— その品質を測らない。"""
+        """MUST: partial groups are a form that cannot be stored (ADR 0069 decision 2) — their
+        quality is not measured."""
         weight = torch.zeros(2, 100)
 
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible by"):
             sweep.fake_quant_symmetric(weight, 32)
 
 
 class TestAsymmetricFakeQuant:
     def test_the_group_extremes_are_restored(self):
-        """`u = 1` が min に、`u = 15` が max に乗る（非対称の値域の使い切り）。"""
+        """`u = 1` lands on min and `u = 15` on max (asymmetric uses its whole range)."""
         weight = torch.tensor([[2.0, 3.5, 9.0, 4.25, -6.0, -1.0, 0.5, -2.5]])
 
         fq = sweep.fake_quant_asymmetric(weight, 4)
 
-        assert float(fq[0, 0]) == pytest.approx(2.0)  # group 0 の min
-        assert float(fq[0, 2]) == pytest.approx(9.0)  # group 0 の max
-        assert float(fq[0, 4]) == pytest.approx(-6.0)  # group 1 の min
-        assert float(fq[0, 6]) == pytest.approx(0.5)  # group 1 の max
+        assert float(fq[0, 0]) == pytest.approx(2.0)  # min of group 0
+        assert float(fq[0, 2]) == pytest.approx(9.0)  # max of group 0
+        assert float(fq[0, 4]) == pytest.approx(-6.0)  # min of group 1
+        assert float(fq[0, 6]) == pytest.approx(0.5)  # max of group 1
 
     def test_the_levels_stay_in_one_to_fifteen(self):
-        """0 は未使用の 15 準位（対称と同じ値域 — pack 形式は zero-point の有無で変わらない）。"""
+        """15 levels with 0 unused (the same range as symmetric — the pack format does not change
+        with or without a zero-point)."""
         torch.manual_seed(2)
         weight = torch.randn(3, 64) * 5.0 + 2.0
 
@@ -133,7 +148,8 @@ class TestAsymmetricFakeQuant:
         assert int(u.max()) == sweep.UINT4_MAX
 
     def test_a_degenerate_group_stays_constant(self):
-        """MUST: `max == min` は対称式へ落とす。min-max 式だと定数 group が ~0 へ潰れる。"""
+        """MUST: `max == min` falls back to the symmetric formula. With the min-max formula a
+        constant group is crushed to ~0."""
         weight = torch.tensor([[3.5, 3.5, 3.5, 3.5, -2.0, -2.0, -2.0, -2.0]])
 
         fq = sweep.fake_quant_asymmetric(weight, 4)
@@ -141,16 +157,18 @@ class TestAsymmetricFakeQuant:
         assert torch.allclose(fq, weight)
 
     def test_a_degenerate_zero_group_stays_zero(self):
-        """縮退かつ全ゼロ（`|c|/7` も下限 clamp へ落ちる経路）。"""
+        """Degenerate and all zero (the path where `|c|/7` also falls to the lower clamp)."""
         fq = sweep.fake_quant_asymmetric(torch.zeros(2, 8), 4)
 
         assert torch.equal(fq, torch.zeros(2, 8))
 
     def test_it_beats_the_symmetric_form_on_a_one_sided_group(self):
-        """非対称の測定列が意味を持つ条件 — 片側に寄った group では実際に誤差が小さい。
+        """The condition for the asymmetric measurement column to mean something — on a one-sided
+        group its error really is smaller.
 
-        対称は `[−amax, amax]` に準位を張るので、全正の group では準位の半分が空振りする。
-        ここが緑にならない実装は「非対称の上界」を測れていない（sweep の列が恒真になる）。
+        Symmetric spreads its levels over `[−amax, amax]`, so on an all-positive group half of the
+        levels go unused. An implementation that does not turn this green is not measuring "the
+        asymmetric upper bound" (the sweep's column would be vacuous).
         """
         torch.manual_seed(3)
         weight = torch.rand(4, 64) + 10.0
@@ -161,11 +179,12 @@ class TestAsymmetricFakeQuant:
         assert asymmetric < symmetric / 10
 
 
-# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+# ---- Calibrated rounding (iteration J-2) ------------------------------------
 
 
 class TinyAttention(nn.Module):
-    """`q_proj` / `o_proj` の 2 本（族名は {@link sweep.LINEAR_FAMILIES} の綴りに合わせる）。"""
+    """The two of `q_proj` / `o_proj` (the family names follow the spelling of
+    {@link sweep.LINEAR_FAMILIES})."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -176,12 +195,13 @@ class TinyAttention(nn.Module):
         return self.o_proj(self.q_proj(hidden))
 
 
-#: 全層へ同じ値で渡す kwargs（Llama の mask / position_ids 相当の代役）。
+#: kwargs passed with the same value to every layer (a stand-in for Llama's mask / position_ids).
 TINY_SHIFT = 0.0
 
 
 class TinyLayer(nn.Module):
-    """decoder layer 相当の stage（kwargs の効きは `shift` の**加算**で観測する）。"""
+    """A stage equivalent to a decoder layer (the effect of the kwargs is observed through the
+    **addition** of `shift`)."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -193,16 +213,17 @@ class TinyLayer(nn.Module):
 
 @dataclass(frozen=True)
 class TinyInnerOutput:
-    """`BaseModelOutputWithPast` の代役（`last_hidden_state` だけを持つ）。"""
+    """A stand-in for `BaseModelOutputWithPast` (holds only `last_hidden_state`)."""
 
     last_hidden_state: torch.Tensor
 
 
 class TinyInner(nn.Module):
-    """`LlamaModel` 相当（`.layers` / `.embed_tokens` / `.norm`）。
+    """Equivalent to `LlamaModel` (`.layers` / `.embed_tokens` / `.norm`).
 
-    `forward` は上流と同じ「embedding → 層を順に → 最終 norm」で、返り値も同じ席
-    （`last_hidden_state`）— {@link sweep.assert_stage_split} の突合先がこれ。
+    `forward` is the same "embedding → the layers in order → final norm" as upstream, and the
+    return value sits in the same field (`last_hidden_state`) — this is what
+    {@link sweep.assert_stage_split} compares against.
     """
 
     def __init__(self, vocab: int, features: int, layers: int) -> None:
@@ -217,10 +238,11 @@ class TinyInner(nn.Module):
         attention_mask: torch.Tensor | None = None,
         use_cache: bool = False,
     ) -> TinyInnerOutput:
-        """kwargs は**全層で同一**（Llama の形 — `calibrate_stages` が stage 間で不変に運ぶ前提）。
+        """The kwargs are **identical for every layer** (Llama's form — the premise under which
+        `calibrate_stages` carries them unchanged across stages).
 
-        層どうしの違いは各 `TinyLayer` の重み（乱数初期化）が持つので、段落としは kwargs に
-        依らず検出できる。
+        The layers differ through the weights of each `TinyLayer` (random initialization), so a
+        dropped stage is detected regardless of the kwargs.
         """
         hidden = self.embed_tokens(input_ids)
         for layer in self.layers:
@@ -229,7 +251,7 @@ class TinyInner(nn.Module):
 
 
 class TinyCausal(nn.Module):
-    """`LlamaForCausalLM` 相当（`.model` が `TinyInner`）。"""
+    """Equivalent to `LlamaForCausalLM` (`.model` is a `TinyInner`)."""
 
     def __init__(self, vocab: int, features: int, layers: int) -> None:
         super().__init__()
@@ -237,7 +259,8 @@ class TinyCausal(nn.Module):
 
 
 class TinyWrapper(nn.Module):
-    """`CausalLmWrapper` 相当 — `sweep.decoder_stages` が辿る `model.model.layers` の形。"""
+    """Equivalent to `CausalLmWrapper` — the `model.model.layers` shape `sweep.decoder_stages`
+    walks."""
 
     def __init__(self, vocab: int = 8, features: int = 32, layers: int = 2) -> None:
         super().__init__()
@@ -251,14 +274,15 @@ class TinyWrapper(nn.Module):
 
 
 class SilentWrapper(TinyWrapper):
-    """先頭 stage を**呼ばない** forward（Catcher の fail loudly を踏ませる形）。"""
+    """A forward that **never calls** the first stage (the form that triggers the Catcher's fail
+    loudly)."""
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.model.embed_tokens(input_ids)
 
 
 def tiny_inputs(count: int = 3) -> tuple[torch.Tensor, ...]:
-    """長さの違う id 列（校正入力の代役 — tokenizer は通さない）。"""
+    """Id sequences of different lengths (a stand-in for calibration inputs — no tokenizer)."""
     return tuple(
         torch.arange(2 + index, dtype=torch.int64).unsqueeze(0) % 8 for index in range(count)
     )
@@ -277,42 +301,46 @@ def tiny_rig(wrapper: TinyWrapper, inputs: tuple[torch.Tensor, ...]) -> sweep.Ca
 
 class TestCalibConfigs:
     def test_every_calib_config_is_selectable(self):
-        """`--only` の選択肢（= `ALL_CONFIGS`）に校正グリッドが載る。"""
+        """The calibration grid is among the choices of `--only` (= `ALL_CONFIGS`)."""
         names = [config.name for config in sweep.ALL_CONFIGS]
 
         assert all(config.name in names for config in sweep.CALIB_CONFIGS)
 
     def test_selecting_a_calib_config_keeps_the_baseline_first(self):
-        """MUST: 部分再実行でも baseline の sanity 門を先に通す（既存の流儀）。"""
+        """MUST: even a partial rerun goes through the baseline's sanity check first (the existing
+        practice)."""
         chosen = sweep.select_configs(["gptq-rtn"])
 
         assert [config.name for config in chosen] == [sweep.BASELINE_NAME, "gptq-rtn"]
 
     def test_the_group_size_is_pinned_for_every_calib_config(self):
-        """校正は格子を変えない — g 軸を振らないのは方式グリッドと同文。"""
+        """Calibration does not change the grid — the g axis is not swept, for the same reason as
+        the method grid."""
         assert all(
             config.grid.group_size == sweep.CALIB_GROUP_SIZE for config in sweep.CALIB_CONFIGS
         )
 
     def test_no_calib_config_fits_its_table_on_a_subsample_by_default(self):
-        """既定は全量 fit（部分標本は `--kmeans-shared-stride` を渡したときだけ）。"""
+        """The default is a full fit (a subsample only when `--kmeans-shared-stride` is passed)."""
         assert all(config.grid.fit_stride == 1 for config in sweep.CALIB_CONFIGS)
 
     def test_the_label_names_both_the_method_and_the_grid(self):
-        """表の「方式」列は方式と格納グリッドの組（片方だけだと行が読めない）。"""
+        """The table's "method" column is the pair of method and storage grid (with only one of them
+        the row cannot be read)."""
         labels = {config.name: config.label for config in sweep.CALIB_CONFIGS}
 
         assert labels["gptq-nf4"] == "gptq/nf4"
         assert labels["awq-gptq-rtn"] == "awq+gptq/rtn"
 
     def test_the_group_scale_grids_project_five_bits(self):
-        """4bit + group 32 ごとの f32 scale = 5.0 bpw（方式グリッドと同じ格納）。"""
+        """4bit + one f32 scale per group of 32 = 5.0 bpw (the same storage as the method grid)."""
         counts = sweep.TargetCounts(modules=2, channels=8, elements=3200)
 
         assert sweep.group_scale_bits(counts) / counts.elements == pytest.approx(5.0)
 
     def test_the_calibrated_codebook_costs_one_table_per_layer(self):
-        """core の `kmeans_shared` は**層内**の表（全体 1 枚の方式グリッドとは式が違う）。"""
+        """Core's `kmeans_shared` is a table **within a layer** (a different formula from the method
+        grid's single overall table)."""
         counts = sweep.TargetCounts(modules=2, channels=8, elements=3200)
 
         difference = sweep.layer_table_bits(counts) - sweep.group_scale_bits(counts)
@@ -322,7 +350,8 @@ class TestCalibConfigs:
 
 class TestCalibScan:
     def test_it_lists_every_decoder_linear_with_a_model_wide_fqn(self):
-        """台帳のキーを `Int4Report` と同じ FQN 空間へ揃えるための接頭辞（core の契約）。"""
+        """The prefix that puts the ledger keys in the same FQN space as `Int4Report` (core's
+        contract)."""
         wrapper = TinyWrapper(layers=2)
 
         scan, counts = sweep.calib_targets(sweep.decoder_stages(wrapper))
@@ -336,7 +365,8 @@ class TestCalibScan:
         assert counts.modules == 4
 
     def test_the_vocabulary_table_is_not_in_the_scan(self):
-        """`embed_tokens` / `lm_head` は stage の外 — 校正の対象集合に入らない。"""
+        """`embed_tokens` / `lm_head` are outside the stages — not in the calibration's target
+        set."""
         scan, _ = sweep.calib_targets(sweep.decoder_stages(TinyWrapper()))
 
         assert not any(sweep.EMBED_TOKENS in fqn or sweep.LM_HEAD in fqn for fqn in scan)
@@ -353,7 +383,8 @@ class TestCatcher:
         assert [int(args[0].shape[1]) for args, _kwargs in batches] == [2, 3, 4]
 
     def test_it_captures_the_keyword_arguments_of_the_call(self):
-        """kwargs（mask / position_ids …）を捨てると stage の再実行が別の数になる。"""
+        """Dropping the kwargs (mask / position_ids …) would make rerunning the stages give
+        different numbers."""
         wrapper = TinyWrapper()
 
         batches = sweep.capture_stage_batches(
@@ -363,7 +394,8 @@ class TestCatcher:
         assert batches[0][1] == {"shift": 0.0}
 
     def test_the_hook_is_removed_even_though_the_forward_was_aborted(self):
-        """番兵で打ち切っても後始末は済む（残ると以後の forward が全部落ちる）。"""
+        """Cutting short with the sentinel still cleans up (a leftover hook would make every later
+        forward fail)."""
         wrapper = TinyWrapper()
         first = wrapper.model.model.layers[0]
 
@@ -374,16 +406,18 @@ class TestCatcher:
             wrapper(tiny_inputs(1)[0])
 
     def test_a_forward_that_never_reaches_the_first_stage_fails_loudly(self):
-        """MUST: 素通りを黙って通すと「校正入力ゼロ」の診断まで見えない。"""
+        """MUST: letting a pass-through go silently would hide it until the "zero calibration
+        inputs" diagnostic."""
         wrapper = SilentWrapper()
 
-        with pytest.raises(AssertionError, match="完走"):
+        with pytest.raises(AssertionError, match="ran to completion"):
             sweep.capture_stage_batches(wrapper, wrapper.model.model.layers[0], tiny_inputs(1))
 
 
 class TestCalibrationRun:
     def test_it_rounds_every_scanned_linear(self):
-        """校正の丸めが走査の全本へ届く（届かない層があれば門が落ちる）。"""
+        """The calibrated rounding reaches every tensor of the scan (a layer it misses fails the
+        check)."""
         torch.manual_seed(0)
         wrapper = TinyWrapper()
         rig = tiny_rig(wrapper, tiny_inputs(2))
@@ -396,7 +430,7 @@ class TestCalibrationRun:
         assert all(not torch.equal(rig.scan[fqn], value) for fqn, value in before.items())
 
     def test_every_calib_config_runs_end_to_end(self):
-        """5 本とも core の駆動へ通る（方式と格納グリッドの組が全部生きている）。"""
+        """All 5 go through core's driver (every pair of method and storage grid is alive)."""
         for config in sweep.CALIB_CONFIGS:
             torch.manual_seed(1)
             wrapper = TinyWrapper()
@@ -409,7 +443,7 @@ class TestCalibrationRun:
             assert report.grid == config.grid.kind
 
     def test_a_subsampled_table_is_reported(self):
-        """MUST: `fit_stride` を使ったら出力へ明記（`describe` が拾う）。"""
+        """MUST: when `fit_stride` is used it is stated in the output (`describe` picks it up)."""
         torch.manual_seed(2)
         wrapper = TinyWrapper()
         rig = tiny_rig(wrapper, tiny_inputs(2))
@@ -420,19 +454,20 @@ class TestCalibrationRun:
         assert "fit_stride 4" in report.describe()
 
     def test_a_scan_the_calibration_missed_fails_loudly(self):
-        """恒真化の遮断 — 走査に無い / 丸め漏れの層があれば門が落ちる。"""
+        """Blocking a vacuous pass — a layer not in the scan / not rounded fails the check."""
         torch.manual_seed(3)
         wrapper = TinyWrapper()
         rig = tiny_rig(wrapper, tiny_inputs(2))
         report = sweep.apply_calib(sweep.CALIB_CONFIGS[0], rig, shared_stride=0)
         widened = {**rig.scan, "model.model.layers.9.self_attn.q_proj.weight": torch.zeros(1)}
 
-        with pytest.raises(AssertionError, match="一致しない"):
+        with pytest.raises(AssertionError, match="do not match the"):
             sweep.assert_calib_covers_scan(report, widened, "gptq-rtn")
 
 
 class TestStageSplit:
-    """分解一致門（{@link sweep.assert_stage_split}）— 校正が「本物と同じ活性」を見る前提。"""
+    """The split check ({@link sweep.assert_stage_split}) — the premise that calibration sees "the
+    same activations as the real model"."""
 
     def test_the_sequential_stages_reproduce_the_model_bit_for_bit(self):
         torch.manual_seed(4)
@@ -444,12 +479,13 @@ class TestStageSplit:
         sweep.assert_stage_split(wrapper, inputs[0], batches[0], stages)
 
     def test_a_dropped_stage_is_caught(self):
-        """段が 1 枚落ちても数値は普通に出る — 一致門だけがそれを落とす。"""
+        """Even with a stage dropped the numbers come out normally — only the split check rejects
+        it."""
         torch.manual_seed(5)
         wrapper = TinyWrapper()
         inputs = tiny_inputs(1)
         stages = sweep.decoder_stages(wrapper)
         batches = sweep.capture_stage_batches(wrapper, stages[0][1], inputs)
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="not bit-identical"):
             sweep.assert_stage_split(wrapper, inputs[0], batches[0], stages[:-1])

@@ -1,8 +1,10 @@
-"""Q0 量子化計測のレポート生成（`measure_quant` の数値エンジンから切り出した文言・整形の島）。
+"""Report generation for the Q0 quantization measurement (the island of wording and formatting split
+out of the numeric engine in `measure_quant`).
 
-`report.md` / `attn.json` / `layers.csv` を組み立てる。engine 側の値（構成表・基準名・指標
-関数）は**全て引数で受け取る** — 実行時 import は `measure_quant` → 本モジュールの一方向だけに
-保ち、`--until` が書き換えるモジュールグローバルを見に行かないため（型注釈だけ TYPE_CHECKING）。
+Builds `report.md` / `attn.json` / `layers.csv`. The engine-side values (the configuration table,
+the baseline name, the metric functions) are **all received as arguments** — so that the run-time
+import stays one-way, `measure_quant` → this module, and this module never reads the module globals
+that `--until` rewrites (type annotations only, under TYPE_CHECKING).
 """
 
 from __future__ import annotations
@@ -26,14 +28,14 @@ if TYPE_CHECKING:
 
     from .measure_quant import AttnStat, DitRun, LayerStat
 
-    #: engine 側の指標関数（逆辺 import を作らないので呼び出し側から渡す）。
+    #: Engine-side metric functions (passed in by the caller so that no reverse import is created).
     RelRms = Callable[[torch.Tensor, torch.Tensor], float]
     Psnr = Callable[[torch.Tensor, torch.Tensor, float], float]
     ToUint8 = Callable[[torch.Tensor], torch.Tensor]
     HistQuantile = Callable[[torch.Tensor, float], float]
 
     class PtGroupSummary(TypedDict):
-        """`pt.by_group` の値（層グループ 1 本ぶんの P̃ 集計）。"""
+        """A value of `pt.by_group` (the P̃ summary of one layer group)."""
 
         nodes: int
         median: float
@@ -41,7 +43,7 @@ if TYPE_CHECKING:
         max: float
 
     class PtSummary(TypedDict):
-        """`build_summary` の `pt` キー（P̃ 行 peak/rms の全体集計）。"""
+        """The `pt` key of `build_summary` (the overall summary of the P̃ row peak/rms)."""
 
         rows: int
         nodes: int
@@ -53,7 +55,7 @@ if TYPE_CHECKING:
         by_group: dict[str, PtGroupSummary]
 
     class ConfigSummary(TypedDict):
-        """`build_summary` の `configs` の値（構成 1 本ぶんの集計）。"""
+        """A value of `configs` in `build_summary` (the summary of one configuration)."""
 
         diagnostics: dict[str, object]
         latent_rel_rms_vs_f32: list[float]
@@ -70,17 +72,19 @@ if TYPE_CHECKING:
         attn_o_worst_node: str | None
 
     class Summary(TypedDict):
-        """`build_summary` の戻り値（`attn.json` と report ⑥ の共通の出どころ）。"""
+        """The return value of `build_summary` (the common source of `attn.json` and report ⑥)."""
 
         pt: PtSummary
         configs: dict[str, ConfigSummary]
         gates: dict[str, str]
-        #: 赤だった門のラベル（判定の正本 — 表示文字列から嗅ぎ直さないための席）。
+        #: Labels of the gates that were red (the source of truth for the verdict — the field that
+        #: avoids sniffing it again from the display strings).
         failed: list[str]
         inject: str | None
 
 
-#: 層名の連番を潰して役割でまとめる（`transformer_blocks.7.attn1.to_q` → `transformer_blocks.*.…`）
+#: Collapse the layer-name indices to group by role (`transformer_blocks.7.attn1.to_q` →
+#: `transformer_blocks.*.…`)
 _INDEX = re.compile(r"\.\d+(?=\.|$)")
 
 
@@ -119,7 +123,7 @@ def write_layer_csv(stats: dict[str, LayerStat], path: Path) -> None:
             )
 
 
-#: 門（設計 doc §5.3）。
+#: Gates (design doc §5.3).
 PT_MEDIAN_GATE = 16.0
 LATENT_RATIO_GATE = 1.5
 
@@ -138,7 +142,8 @@ def build_summary(
     psnr: Psnr,
     hist_quantile: HistQuantile,
 ) -> Summary:
-    """機械可読の集計と門の判定（`attn.json` と report ⑥ の共通の出どころ）。"""
+    """Machine-readable summary and gate verdicts (the common source of `attn.json` and report
+    ⑥)."""
     keys = [f"latents_step{index:04d}" for index in range(1, args.steps + 1)]
     base_vs_f32 = [rel_rms(latents[f"{baseline}/{key}"], latents[f"f32/{key}"]) for key in keys]
     w8_vs_f32 = [rel_rms(latents[f"w8/{key}"], latents[f"f32/{key}"]) for key in keys]
@@ -206,11 +211,12 @@ def build_summary(
     failed: list[str] = []
 
     def gate(label: str, ok: bool, verdict: str) -> None:
-        """門を 1 つ記録する（判定は**真偽で持ち**、`verdict` はその表示形）。
+        """Record one gate (the verdict is **held as a boolean**; `verdict` is its display form).
 
-        MUST: 赤の集計を文字列から嗅ぎ直さない — 判定はここで一度だけ決め、呼び手
-        （`measure_quant.main`）は {@link Summary} の `failed` を読む。文字列の中の `NG` は
-        書式（先頭 / 末尾 / 括弧付き）が門ごとに違うので、後から拾うと取り逃す。
+        MUST: do not sniff the red ones again from the strings — the verdict is decided here once,
+        and the caller (`measure_quant.main`) reads `failed` of {@link Summary}. The `NG` inside the
+        strings has a different format per gate (leading / trailing / in parentheses), so picking it
+        up afterwards misses some.
         """
         gates[label] = verdict
         if not ok:
@@ -218,14 +224,15 @@ def build_summary(
 
     pt_ok = pt["median"] <= PT_MEDIAN_GATE
     gate(
-        f"P̃ 行 peak/rms の median ≤ {PT_MEDIAN_GATE:g}",
+        f"P̃ row peak/rms median ≤ {PT_MEDIAN_GATE:g}",
         pt_ok,
         f"median {pt['median']:.2f} → {'OK' if pt_ok else 'NG'}"
         f"（p99 {pt['p99']:.2f} / max {pt['max']:.2f}）",
     )
     for name in attn_configs:
-        # 設計 doc §5.3 の門は「(c) w8a8 に attention を足したときの相対劣化」なので、
-        # linear 活性を量子化しない (g) は**門の対象外**（`w8` 基準の参考値として出す）。
+        # The gate of design doc §5.3 is "(c) the relative degradation when attention is added to
+        # w8a8", so (g), which does not quantize the linear activations, is **outside the gate**
+        # (reported as a reference value against `w8`).
         if run.diagnostics[name]["linear_act_i8"]:
             series = configs[name]["latent_ratio_vs_baseline"]
             ratio = max(series)
@@ -233,8 +240,7 @@ def build_summary(
             gate(
                 f"`{name}` の latent relRMS ≤ {LATENT_RATIO_GATE:g}× (vs {baseline})",
                 ratio_ok,
-                f"最大 {ratio:.3f}× (step {1 + series.index(ratio)})"
-                f" → {'OK' if ratio_ok else 'NG'}",
+                f"max {ratio:.3f}× (step {1 + series.index(ratio)}) → {'OK' if ratio_ok else 'NG'}",
             )
         else:
             series = configs[name]["latent_ratio_vs_w8"]
@@ -242,7 +248,7 @@ def build_summary(
             gates[f"`{name}` の latent relRMS（参考・門の対象外）"] = (
                 f"`w8` 比 最大 {ratio:.3f}×"
                 f" (step {1 + series.index(ratio)})"
-                " — linear 活性 f32 運用での attention 単独寄与"
+                " — the contribution of attention alone, with the linear activations in f32"
             )
     for name in config_names:
         diagnostic = run.diagnostics[name]
@@ -258,15 +264,16 @@ def build_summary(
         diagnostic = run.diagnostics[name]
         if not diagnostic["score_f16"]:
             continue
-        # 恒真化の防止: 「丸めたつもりで恒等」は数値にも時間にも出ない（沈黙する）ので、
-        # 丸め前後で 1 要素以上変わった呼び出しの数を直接見る。
+        # Guarding against a vacuous pass: "meant to round, but the identity" shows neither in the
+        # numbers nor in the time (it is silent), so count directly the calls in which at least one
+        # element changed across the rounding.
         fired, attempts = diagnostic["s16_fired_calls"], diagnostic["s16_rounded_calls"]
         ok = bool(attempts) and fired == attempts
         gate(
             f"`{name}` の S f16 丸めが全呼び出しで発火",
             ok,
-            f"{fired} / {attempts}（{diagnostic['s16_elements']:,} 要素・"
-            f"|S| 最大 {diagnostic['s16_abs_max']:.1f} < f16 上限 65,504）"
+            f"{fired} / {attempts} ({diagnostic['s16_elements']:,} elements,"
+            f" max |S| {diagnostic['s16_abs_max']:.1f} < f16 limit 65,504)"
             f" → {'OK' if ok else 'NG'}",
         )
     for name in attn_configs:
@@ -309,48 +316,57 @@ def build_report(
 ) -> str:
     stats = run.linear_stats
     lines: list[str] = []
-    lines.append("# Q0 — Anima DiT の w8 / w8a8 / attention a8 量子化品質（torch CPU 実測）")
+    lines.append(
+        "# Q0 — quantization quality of the Anima DiT under w8 / w8a8 / attention a8"
+        " (measured with torch on CPU)"
+    )
     lines.append("")
     lines.append(
-        f"- 日付: {time.strftime('%Y-%m-%d')} / 計測: `tools/export-recipes/anima/measure_quant.py`"
+        f"- Date: {time.strftime('%Y-%m-%d')} / measured by:"
+        " `tools/export-recipes/anima/measure_quant.py`"
     )
     lines.append(
-        f"- 条件: Anima turbo {args.steps} step・{args.resolution}px・CFG={guidance:g}"
-        f"・LoRA 焼き込み・seed {SEED}・torch {torch.__version__}（CPU f32）"
+        f"- Conditions: Anima turbo {args.steps} steps, {args.resolution}px, CFG={guidance:g}"
+        f", LoRA merged, seed {SEED}, torch {torch.__version__} (CPU f32)"
     )
-    lines.append(f"- プロンプト: `{PROMPT}`")
+    lines.append(f"- Prompt: `{PROMPT}`")
     lines.append(
-        "- 構成: **(a) f32** = LoRA 焼き込み済みの素の重み / **(b) w8** = 重みのみ per-channel "
-        "symmetric i8 fake-quant / **(c) w8a8** = (b) + 適格 linear の入力活性を per-token "
-        "symmetric i8 fake-quant / **(d)〜(h)** = (c) または (b) に attention の i8 化を足したもの "
-        "/ **(i)(j) `*-s16`** = さらに attention スコア **S を f16 で格納**（案γ 波 1）"
-    )
-    lines.append(
-        "- 活性量子化は設計 doc §4.2 の鏡像（`s = clamp(rowmax|x|/127, tiny)`・"
-        "`q = clamp(round(x/s), ±127)`・偶数丸め・全ゼロ行は `s = tiny`）。"
-        "適格は §4.1 と同じ「DiT 内 `nn.Linear` で `k % 4 == 0`」。"
+        "- Configurations: **(a) f32** = the plain weights with the LoRA merged / **(b) w8** ="
+        " weight-only per-channel symmetric i8 fake-quant / **(c) w8a8** = (b) + per-token"
+        " symmetric i8 fake-quant of the input activations of the eligible linears / **(d)–(h)** ="
+        " (c) or (b) plus i8 attention / **(i)(j) `*-s16`** = additionally **the attention score S"
+        " stored in f16** (option γ, phase 1)"
     )
     lines.append(
-        "- attention の粒度は attention a8 設計 doc §5.1 の MUST 表"
-        "（q/k = 行ごと amax・P̃ = **scale 固定 1/127**・V = `(b,h,d)` ごとに N 全体の amax・"
-        "半スケールは dequant 側・整数縮約は float64 で厳密）。"
+        "- The activation quantization mirrors design doc §4.2 (`s = clamp(rowmax|x|/127, tiny)`,"
+        " `q = clamp(round(x/s), ±127)`, round half to even, `s = tiny` for an all-zero row)."
+        ' Eligibility is the same as §4.1: "an `nn.Linear` inside the DiT with `k % 4 == 0`".'
     )
     lines.append(
-        "- **S の f16 格納**（`*-s16`）は案γ 設計 doc §3.4② / §7 波 1 の実装形と粒度厳密一致: "
-        "①QK が書く半スケール適用済みの生スコアを f16 へ落として戻し、**丸めはその 1 回だけ**。"
-        "②行 max `m` と分母 `l`・③の `exp(S−m)` と `qP = round(127·exp(S−m))` は**全て同じ"
-        "丸め済み S** から f32 で計算する。"
-        "NOTE: `*-s16` は素通し（torch SDPA）ではなく分解経路で評価されるので、差には f32 の"
-        "演算順差（1e-7 級）が混じる — f16 の相対 eps 4.88e-4 に対し 3 桁下。"
+        "- The attention granularity follows the MUST table of the attention a8 design doc §5.1"
+        " (q/k = amax per row, P̃ = **fixed scale 1/127**, V = amax over the whole N per `(b,h,d)`,"
+        " the half scale on the dequant side, the integer reductions exact in float64)."
     )
     lines.append(
-        "- **非 DiT（text_encoder / text_conditioner / VAE）は全構成とも f32**。"
-        "比較軸を DiT の量子化に絞るため（資産系列の f16 差は全構成へ同形に乗る）。"
-        "attention の SDPA 差し替えも denoise ループの間だけで、text encode / VAE decode は素通し。"
+        "- **Storing S in f16** (`*-s16`) matches the implementation of option γ design doc"
+        " §3.4② / §7 phase 1 exactly in granularity: the half-scaled raw scores that ①QK writes are"
+        " dropped to f16 and back, and **that is the only rounding**. ② the row max `m` and the"
+        " denominator `l`, and ③'s `exp(S−m)` and `qP = round(127·exp(S−m))` are **all computed in"
+        " f32 from the same rounded S**."
+        " NOTE: `*-s16` is evaluated through the decomposed path, not the passthrough (torch SDPA),"
+        " so the difference includes f32 differences of operation order (around 1e-7) — three"
+        " orders of magnitude below f16's relative eps of 4.88e-4."
+    )
+    lines.append(
+        "- **Everything outside the DiT (text_encoder / text_conditioner / VAE) is f32 in every"
+        " configuration**, to narrow the comparison to the DiT's quantization (the f16 difference"
+        " of the asset series lands identically on every configuration). The SDPA replacement of"
+        " attention is also active only during the denoise loop; text encode / VAE decode are"
+        " passed through."
     )
     lines.append("")
 
-    lines.append("## ⓪ 構成と発火計数")
+    lines.append("## ⓪ Configurations and call counts")
     lines.append("")
     rows = []
     for name in config_names:
@@ -362,7 +378,7 @@ def build_report(
                 "i8" if diagnostic["linear_act_i8"] else "f32",
                 str(diagnostic["attn"] or "—"),
                 "f16" if diagnostic["score_f16"] else "f32",
-                "量子化後総和" if diagnostic["stats_quantized"] else "f32 総和",
+                "post-quantization sum" if diagnostic["stats_quantized"] else "f32 sum",
                 f"{diagnostic['attn_calls']} / {diagnostic['attn_calls_expected']}",
                 str(diagnostic["attn_nodes_seen"]),
                 f"{diagnostic['elapsed']:.0f}s",
@@ -372,30 +388,31 @@ def build_report(
         _table(
             rows,
             [
-                "構成",
-                "重み",
-                "linear 活性",
+                "configuration",
+                "weights",
+                "linear activations",
                 "attention",
-                "S 格納",
-                "softmax 分母",
-                "SDPA 発火 / 期待",
-                "ノード数",
-                "所要",
+                "S storage",
+                "softmax denominator",
+                "SDPA calls / expected",
+                "nodes",
+                "elapsed",
             ],
         )
     )
     lines.append("")
     lines.append(
-        f"期待値 = attention ノード {len(run.attention_nodes)} 本 × {args.steps} step。"
-        "0 や不足は「量子化しているつもりで素通し」の唯一の検出器。"
+        f"Expected = {len(run.attention_nodes)} attention nodes × {args.steps} steps."
+        ' Zero or a shortfall is the only detector of "meant to quantize, but passed through".'
     )
     lines.append("")
 
-    lines.append("## ① step ごとの latent relRMS")
+    lines.append("## ① Latent relRMS per step")
     lines.append("")
     lines.append(
-        "`relRMS(v, r) = ‖v − r‖₂ / ‖r‖₂`（括弧内は `−20·log₁₀(relRMS)` の dB）。"
-        f"attention 構成の基準は **{baseline}**（f32 比は既に飽和しているため — 設計 doc §5.3）。"
+        "`relRMS(v, r) = ‖v − r‖₂ / ‖r‖₂` (in parentheses: `−20·log₁₀(relRMS)` in dB)."
+        f" The baseline of the attention configurations is **{baseline}** (the ratio to f32 is"
+        " already saturated — design doc §5.3)."
     )
     lines.append("")
     rows = []
@@ -417,9 +434,10 @@ def build_report(
         )
     lines.append(_table(rows, ["step", "w8 vs f32", "w8a8 vs f32", "w8a8 vs w8"]))
     lines.append("")
-    # attention 構成が 1 つも走っていない（--until による前方部分実行）ときは丸ごと出さない。
+    # When no attention configuration ran (a partial forward run with --until), leave the whole part
+    # out.
     if attn_configs:
-        lines.append(f"### attention 構成の latent relRMS（基準 = `{baseline}`）")
+        lines.append(f"### Latent relRMS of the attention configurations (baseline = `{baseline}`)")
         lines.append("")
         rows = []
         for index in range(1, args.steps + 1):
@@ -432,7 +450,7 @@ def build_report(
         lines.append(_table(rows, ["step", *(f"`{name}`" for name in attn_configs)]))
         lines.append("")
         lines.append(
-            "倍率（最終 step・`f32` 比 relRMS を `w8a8` のそれで割った値）: "
+            "Ratio (final step, the relRMS against `f32` divided by that of `w8a8`): "
             + " / ".join(
                 f"`{name}` {value['latent_ratio_final']:.2f}×"
                 for name, value in summary["configs"].items()
@@ -442,19 +460,20 @@ def build_report(
         lines.append("")
     if "w8-qkpv" in summary["configs"]:
         lines.append(
-            "**`w8-qkpv` だけは基準が違う**（linear 活性が f32 なので `w8a8` より良くて当然）。"
-            "attention 単独の寄与は `w8` 比で読む: 最終 step で "
+            "**Only `w8-qkpv` has a different baseline** (its linear activations are f32, so it is"
+            " naturally better than `w8a8`). Read the contribution of attention alone against"
+            " `w8`: at the final step "
             f"vs `w8` relRMS {summary['configs']['w8-qkpv']['latent_rel_rms_vs_w8'][-1]:.4e}"
-            f"・`w8` の f32 比に対する倍率 "
-            f"{summary['configs']['w8-qkpv']['latent_ratio_vs_w8'][-1]:.2f}×。"
+            ", ratio to the f32 relRMS of `w8` "
+            f"{summary['configs']['w8-qkpv']['latent_ratio_vs_w8'][-1]:.2f}×."
         )
         lines.append("")
 
-    lines.append("## ② VAE decode 後の最終画像")
+    lines.append("## ② Final image after VAE decode")
     lines.append("")
     lines.append(
-        "PSNR は `[-1,1]` の生 tensor（data range 2.0）と、PNG と同じ uint8 量子化後"
-        "（data range 255）の 2 系列。relRMS は生 tensor。"
+        "PSNR is given two ways: on the raw `[-1,1]` tensor (data range 2.0) and after the same"
+        " uint8 quantization as the PNG (data range 255). relRMS is on the raw tensor."
     )
     lines.append("")
     pairs = [("w8", "f32"), ("w8a8", "f32"), ("w8a8", "w8")]
@@ -477,21 +496,22 @@ def build_report(
     lines.append(
         _table(
             rows,
-            ["対", "PSNR f32 (dB)", "PSNR uint8 (dB)", "relRMS", "uint8 最大差 (/255)"],
+            ["pair", "PSNR f32 (dB)", "PSNR uint8 (dB)", "relRMS", "uint8 max diff (/255)"],
         )
     )
     lines.append("")
-    lines.append(f"画像: {image_note}（{' / '.join(f'`image_{n}`' for n in config_names)}）")
+    lines.append(f"Images: {image_note} ({' / '.join(f'`image_{n}`' for n in config_names)})")
     lines.append("")
 
-    lines.append("## ③ 層別 relRMS（適格 linear）")
+    lines.append("## ③ relRMS per layer (eligible linears)")
     lines.append("")
     lines.append(
-        "`in relRMS` = 入力活性の量子化誤差（全 step 通算）。"
-        f"`out relRMS` = その層の出力が活性量子化で動いた量（step {args.measure_step + 1}"
-        " のみ実測・重みは両側とも i8 なので**活性量子化だけ**の寄与）。"
-        "`peak` = 行ごとの `amax/rms` の平均と最大（外れ値の指標 — "
-        "`relRMS ≈ peak / (127·√12) = peak / 440` が一様量子化の目安）。"
+        "`in relRMS` = the quantization error of the input activations (over all steps)."
+        f" `out relRMS` = how far the layer's output moved under activation quantization"
+        f" (measured at step {args.measure_step + 1} only; the weights are i8 on both sides, so it"
+        " is the contribution of **activation quantization alone**)."
+        " `peak` = the mean and max of the per-row `amax/rms` (an outlier indicator — "
+        "`relRMS ≈ peak / (127·√12) = peak / 440` is the rule of thumb for uniform quantization)."
     )
     lines.append("")
     groups: dict[str, list[LayerStat]] = defaultdict(list)
@@ -517,19 +537,19 @@ def build_report(
         _table(
             rows,
             [
-                "層グループ",
-                "本数",
+                "layer group",
+                "count",
                 "k",
-                "in relRMS 平均",
-                "in relRMS 最大",
-                "out relRMS 最大",
-                "peak 平均 最大",
-                "peak 最大",
+                "in relRMS mean",
+                "in relRMS max",
+                "out relRMS max",
+                "peak mean max",
+                "peak max",
             ],
         )
     )
     lines.append("")
-    lines.append("### 個別 worst 20（in relRMS 降順）")
+    lines.append("### Worst 20 individual layers (by in relRMS, descending)")
     lines.append("")
     worst = sorted(stats.items(), key=lambda kv: -kv[1].in_rel_rms())[:20]
     rows = [
@@ -545,20 +565,24 @@ def build_report(
         for name, stat in worst
     ]
     lines.append(
-        _table(rows, ["層", "k", "n", "in relRMS", "out relRMS", "peak 平均", "peak 最大"])
+        _table(rows, ["layer", "k", "n", "in relRMS", "out relRMS", "peak mean", "peak max"])
     )
     lines.append("")
-    lines.append(f"全 {len(stats)} 本の生表は `layers.csv`。")
+    lines.append(f"The raw table of all {len(stats)} layers is in `layers.csv`.")
     lines.append("")
 
-    lines.append("## ④ P̃ の行 peak/rms 分布（PV 量子化 SNR を決める唯一の量）")
+    lines.append(
+        "## ④ Distribution of the P̃ row peak/rms (the only quantity that sets the PV"
+        " quantization SNR)"
+    )
     lines.append("")
     lines.append(
-        f"`{baseline}` の走行中に採った**素の P̃**（attention は f32 のまま = 量子化器が"
-        "実際に見る値）。`peak` は `exp(0)=1` で構造的に 1.0 なので `peak/rms = 1/rms`。"
-        "設計 doc §2.2 の予測は `relRMS(P̃) ≈ (peak/rms)/(127·√12) = (peak/rms)/440`。"
-        f"全 {args.steps} step・全 head・全行を通算（分位点は log₂ 等間隔 {pt_hist_bins} ビンの"
-        "ヒストグラムから補間 — 分解能 0.7%）。"
+        f"**The plain P̃** taken while `{baseline}` runs (attention still f32 = the values the"
+        " quantizer actually sees). `peak` is structurally 1.0 from `exp(0)=1`, so"
+        " `peak/rms = 1/rms`. The prediction of design doc §2.2 is"
+        " `relRMS(P̃) ≈ (peak/rms)/(127·√12) = (peak/rms)/440`."
+        f" Accumulated over all {args.steps} steps, all heads and all rows (quantiles interpolated"
+        f" from a histogram of {pt_hist_bins} log₂-spaced bins — resolution 0.7%)."
     )
     lines.append("")
     pt_stats = run.attn_stats.get(baseline, {})
@@ -585,27 +609,27 @@ def build_report(
         _table(
             rows,
             [
-                "層グループ",
-                "ノード",
-                "行数",
+                "layer group",
+                "nodes",
+                "rows",
                 "median",
                 "p90",
                 "p99",
                 "max",
-                "予測 relRMS(median)",
-                "予測 relRMS(p99)",
+                "predicted relRMS(median)",
+                "predicted relRMS(p99)",
             ],
         )
     )
     lines.append("")
     overall = summary["pt"]
     lines.append(
-        f"**全体（{overall['rows']:,} 行）: median {overall['median']:.2f} / "
+        f"**Overall ({overall['rows']:,} rows): median {overall['median']:.2f} / "
         f"p90 {overall['p90']:.2f} / p99 {overall['p99']:.2f} / max {overall['max']:.2f} / "
         f"mean {overall['mean']:.2f}**"
     )
     lines.append("")
-    lines.append("### 個別ノード worst 12（median 降順）")
+    lines.append("### Worst 12 individual nodes (by median, descending)")
     lines.append("")
     worst_nodes = sorted(pt_stats.items(), key=lambda kv: -kv[1].pt_quantile(0.5))[:12]
     lines.append(
@@ -620,17 +644,18 @@ def build_report(
                 ]
                 for name, stat in worst_nodes
             ],
-            ["ノード", "median", "p99", "max", "平均"],
+            ["node", "median", "p99", "max", "mean"],
         )
     )
     lines.append("")
 
-    lines.append("## ⑤ attention 層別 relRMS（S と O）")
+    lines.append("## ⑤ relRMS per attention layer (S and O)")
     lines.append("")
     lines.append(
-        f"step {args.measure_step + 1} のみ実測。基準は**同じ q/k/v から attention を量子化"
-        "せずに計算した値**（linear の活性量子化は q/k/v の中に既に乗っているので、この差は"
-        "attention 量子化だけの寄与）。"
+        f"Measured at step {args.measure_step + 1} only. The reference is **the value computed"
+        " from the same q/k/v without quantizing attention** (the activation quantization of the"
+        " linears is already inside q/k/v, so this difference is the contribution of attention"
+        " quantization alone)."
     )
     lines.append("")
     for name in attn_configs:
@@ -655,29 +680,31 @@ def build_report(
             for group, members in sorted(groups_attn.items())
         ]
         worst_key = max(measured, key=lambda key: measured[key].o_rel_rms())
-        lines.append(_table(rows, ["層グループ", "本数", "S 平均", "S 最大", "O 平均", "O 最大"]))
+        lines.append(_table(rows, ["layer group", "count", "S mean", "S max", "O mean", "O max"]))
         lines.append("")
         lines.append(
-            f"worst 層（O relRMS）: `{worst_key}` = {measured[worst_key].o_rel_rms():.3e}"
-            f"（S = {measured[worst_key].s_rel_rms():.3e}）"
+            f"worst layer (O relRMS): `{worst_key}` = {measured[worst_key].o_rel_rms():.3e}"
+            f" (S = {measured[worst_key].s_rel_rms():.3e})"
         )
         lines.append("")
 
-    lines.append("## ⑥ 門の判定")
+    lines.append("## ⑥ Gate verdicts")
     lines.append("")
     lines.append(
-        "設計 doc §5.3 の 2 門: **① P̃ 行 peak/rms の中央値 ≤ 16**（PV が w8a8 と同じ土俵）/ "
-        f"**② latent relRMS が `{baseline}` 比 ≤ 1.5×**。"
-        "`*-s16` の門も②と同じ（案γ 設計 doc §6.3 — 基準は f32 ではなく受理済みの "
-        f"`{baseline}`）。加えて **S f16 の丸めが全呼び出しで発火したか**を直接見る"
-        "（恒真化の防止 — 丸めが恒等でも数値にも所要時間にも出ないため）。"
+        "The two gates of design doc §5.3: **① the median of the P̃ row peak/rms ≤ 16** (PV on the"
+        " same footing as w8a8) / "
+        f"**② latent relRMS ≤ 1.5× against `{baseline}`**."
+        " The gate of `*-s16` is the same as ② (option γ design doc §6.3 — the baseline is the"
+        f" accepted `{baseline}`, not f32). In addition it checks directly **whether the S f16"
+        " rounding fired in every call** (guarding against a vacuous pass — an identity rounding"
+        " shows neither in the numbers nor in the elapsed time)."
     )
     lines.append("")
     verdicts = summary["gates"]
     lines.append(
         _table(
             [[str(key), str(value)] for key, value in verdicts.items()],
-            ["門", "判定"],
+            ["gate", "verdict"],
         )
     )
     lines.append("")

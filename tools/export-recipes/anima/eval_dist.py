@@ -1,30 +1,39 @@
-"""視認評価専用の組み立て（**配布しない**）— i4 の量子化感度実験変種を手元で見るための台本。
+"""Assembly for visual evaluation only (**not distributed**) of the i4 sensitivity variants.
 
-素版 3 モデルの i4 は視認裁定で配布スキップになり（research
-`2026-08-24-gptq-expansion-quality.md` §5）、{@link anima.distribution.ANIMA_MODELS} からも i4 席が
-外れている。改善候補（block 内 adaLN + block 外を i8 格納へ回す変種 — `anima.export` の
-`--i4-adaln-i8`）を A/B で見るには i4 席の載った配布形が要るが、その席を配布の受理集合へ戻す
-判断はまだ無い。ここはその 1 点だけを埋める口で、**配布経路には 1 バイトも触らない**:
+A script for viewing the i4 quantization-sensitivity experiment variants locally.
 
-- 席は {@link anima.distribution.anima_plan} の `spec` 差し替えで戻す（i4 を足した spec を渡す
-  だけ — `ANIMA_MODELS` は動かさない）。
-- i4 系列は変種の綴り（{@link EVAL_SERIES}）から引く。配布条件で焼いた `*-i4-dyn` は
-  **見に行かない** — 同じ席へ別の丸め方の系列が入る余地を作らない。
-- 要求する丸め方式は {@link anima.distribution.ADALN_I8_CALIB_METHOD}。配布経路の
-  `gptq` とは綴りが違うので、変種を `dist.py` で組もうとしても方式一致で落ちるし、逆に
-  配布条件で焼いた系列をここへ渡しても落ちる（**両方向**で取り違えが止まる）。
-- 出力先の既定は {@link EVAL_ROOT}（`outputs/bench/` 側 = 消して安全な席）。`models/` は
-  配布形だけの場所（`_shared.paths` の DECIDED）なので、既定では 1 度も触らない。
+The i4 of the 3 plain models was skipped for distribution by the visual verdict (research
+`2026-08-24-gptq-expansion-quality.md` §5), and the i4 preset is gone from
+{@link anima.distribution.ANIMA_MODELS} as well. Viewing the improvement candidate (the variant
+that stores in-block adaLN + what is outside the blocks as i8 — `--i4-adaln-i8` of `anima.export`)
+in an A/B needs a distribution with the i4 preset, but there is no decision yet to put that preset
+back into the distribution's accepted set. This is an entry point that fills only that one gap,
+and it **does not touch a single byte of the distribution path**:
 
-    # ① 変種の i4 系列を焼く（GPTQ 校正込み・実測 ~3h）。系列名の綴りは {@link EVAL_SERIES}。
+- The preset is put back by overriding `spec` in {@link anima.distribution.anima_plan} (it only
+  passes a spec with i4 added — `ANIMA_MODELS` does not move).
+- The i4 series is looked up by the variant's spelling ({@link EVAL_SERIES}). The `*-i4-dyn`
+  baked under the distribution conditions is **never looked at** — no room for a series rounded
+  another way to enter the same slot.
+- The required rounding method is {@link anima.distribution.ADALN_I8_CALIB_METHOD}. It is spelled
+  differently from the distribution path's `gptq`, so assembling the variant with `dist.py` fails
+  on the method match, and conversely passing a series baked under the distribution conditions
+  here fails too (the mix-up is stopped **in both directions**).
+- The default output location is {@link EVAL_ROOT} (the `outputs/bench/` side = safe to delete).
+  `models/` is the place for distributions only (the DECIDED of `_shared.paths`), so by default it
+  is never touched.
+
+    # ① bake the variant's i4 series (GPTQ calibration included, measured ~3h). The series name is
+    #   spelled as in {@link EVAL_SERIES}.
     uv run python -m anima.export --dtype i4 --dit-graph dyn --i4-adaln-i8 \\
         --model anima-v1.0 --out ../../outputs/series/anima-v1.0-i4-adaln8-dyn
-    # ② 視認用に組む（既定 out = outputs/bench/karume-anima-v1.0-adaln8/<日付>_eval/）
+    # ② assemble for viewing (default out = outputs/bench/karume-anima-v1.0-adaln8/<date>_eval/)
     uv run python -m anima.eval_dist --model anima-v1.0
 
-MUST: 出来上がった配布形を HF へ上げない・`models/` へ移さない。quant 席名は配布と同じ
-`f16+dit4`（ADR 0074 の文法）のままで、**中身のバイトだけが違う** — 名前からは判別できないので、
-置き場を分けることが唯一の区別になる。
+MUST: do not upload the resulting distribution to HF and do not move it into `models/`. The quant
+preset name stays `f16+dit4` as in the distribution (ADR 0074's grammar), and **only the bytes
+inside differ** — it cannot be told apart by name, so keeping it in a separate place is the only
+distinction.
 """
 
 from __future__ import annotations
@@ -53,22 +62,27 @@ from anima.distribution import (
 from karume.dist import DistError, ModelPlan, Pipeline
 from karume.dist import main as dist_main
 
-#: 変種の i4 系列のディレクトリ名（`--series` の親からの相対）。`anima.export --i4-adaln-i8` の
-#: 既定 out（`anima-i4-adaln8-dyn`）とはモデル名の有無だけが違う — 配布の系列と同じく、素版は
-#: モデル名で分かれる（{@link anima.distribution.anima_sources} の綴りに合わせる）。
+#: Directory name of the variant's i4 series (relative to the `--series` parent). It differs from
+#: the default out of `anima.export --i4-adaln-i8` (`anima-i4-adaln8-dyn`) only by the model name —
+#: as with the distribution's series, the plain models are split by model name (matching the
+#: spelling of {@link anima.distribution.anima_sources}).
 EVAL_SERIES = f"{{model}}-i4-{ADALN_I8_TAG}-dyn"
 
-#: 評価用の組み立て先の親（`<EVAL_ROOT>/<リポ名>/<日付>_eval/`）。**`models/` へは置かない**
-#: （配布形だけの場所 — `_shared.paths`）。ベンチ生成物なので消して安全な席に置く。
+#: Parent of the evaluation assembly's output (`<EVAL_ROOT>/<repository name>/<date>_eval/`).
+#: **Never placed in `models/`** (the place for distributions only — `_shared.paths`). It is a
+#: benchmark output, so it goes where deleting is safe.
 EVAL_ROOT = BENCH_ROOT
 
-#: `--pipeline` の綴り（受理集合はこの 1 つきり — 配布の表〈`tools/export-recipes/dist.py`〉に
-#: 混ぜないのは、あちらが「HF へ上げてよい pipeline の全量」だから）。
+#: Spelling of `--pipeline` (the accepted set is this one only — it is not mixed into the
+#: distribution's table (`tools/export-recipes/dist.py`) because that table is "every pipeline that
+#: may be uploaded to HF").
 EVAL_PIPELINE = "anima-i4-adaln8-eval"
 
-#: 視認評価用の組み立ての改変告知。配布の告知（int8 / bf16 系列の追加まで）に、ここで席を戻した
-#: i4 系列（adaLN 変種の GPTQ 校正）の行を足す — 中身に i4 が入るのに告知が述べないと、
-#: 下の `root_files` の「改変告知が抜けた配布形を作る練習にはしない」が成り立たない。
+#: Modification notice of the visual-evaluation assembly. To the distribution's notice (up to the
+#: added int8 / bf16 series) it adds a line for the i4 series whose preset is put back here (the
+#: adaLN variant's GPTQ calibration) — if the contents held i4 but the notice did not say so, the
+#: rule at `root_files` below, "do not practise building a distribution without the modification
+#: notice", would not hold.
 EVAL_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
@@ -82,20 +96,27 @@ EVAL_NOTICE_MARKDOWN = notice_markdown(
 
 
 def eval_plan(series_dir: Path, model: str) -> ModelPlan:
-    """視認評価用の計画を組む（i4 席を戻し、変種の系列と丸め方式を要求する）。
+    """Builds the visual-evaluation plan (puts the i4 preset back).
 
-    MUST: 受理するのは**配布で i4 席を持たない** Anima モデルだけ（2026-09-01 の全モデル
-    i4 なし裁定後は全員が該当）。将来 i4 席が配布へ戻ったモデルは `dist.py` の配布経路が
-    そのまま使えるので、ここへ通すと「配布と同じ席名・違う中身」が理由も無く増える —
-    下の storages 検査が落とす。
+    It requires the variant's series and rounding method.
+
+    MUST: only Anima models **without an i4 preset in the distribution** are accepted (since the
+    2026-09-01 ruling that removed i4 from every model, all of them qualify). A model whose i4
+    preset returns to the distribution in the future can use `dist.py`'s distribution path as is,
+    so letting it through here would multiply "the same preset name as the distribution with
+    different contents" for no reason — the storages check below rejects it.
     """
     if model not in ANIMA_MODELS:
-        raise DistError(f"モデル {model!r} は視認評価の対象外（対象: {', '.join(ANIMA_MODELS)}）")
+        raise DistError(
+            f"Model {model!r} is not a visual-evaluation target"
+            f" (targets: {', '.join(ANIMA_MODELS)})"
+        )
     spec = anima_model(model)
     if "i4" in spec.storages:
         raise DistError(
-            f"モデル {model!r} は既に配布で i4 席を持っている — 視認評価の口ではなく"
-            " dist.py で組む（席が戻ったならこの台本の役目は終わっている）"
+            f"Model {model!r} already has an i4 preset in the distribution — assemble it with"
+            " dist.py, not through the visual-evaluation entry point (if the preset is back, this"
+            " script has done its job)"
         )
     sources = anima_sources(series_dir, model)
     return anima_plan(
@@ -120,20 +141,23 @@ PIPELINE = Pipeline(
     repo_name=lambda model: f"karume-{model}-{ADALN_I8_TAG}",
     plan=eval_plan,
     card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
-    # 法的テキストは配布形と同じものを入れる — 手元でしか開かないとはいえ、改変告知が
-    # 抜けた配布形を作る練習にはしない（うっかり上げたときに落ちるのはここではない）。
+    # The legal texts are the same as the distribution's — even though it is only opened locally,
+    # do not practise building a distribution without the modification notice (an accidental
+    # upload would not be caught here).
     root_files=root_files(EVAL_NOTICE_MARKDOWN),
 )
 
 
 def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
-    """`--out` 省略時の出力先（`outputs/bench/<リポ名>/<日付>_eval/`）。
+    """Output location when `--out` is omitted (`outputs/bench/<repository name>/<date>_eval/`).
 
-    複数モデルのリポ名は導出できない（`dist.py` の同名関数と同じ理由）— 明示を求めて落とす。
+    A repository name cannot be derived for several models (the same reason as the function of the
+    same name in `dist.py`) — it fails, asking for an explicit one.
     """
     if len(models) != 1:
         raise DistError(
-            f"モデルを {len(models)} 個組む場合はリポ名を導出できない — --out で出力先を指定する"
+            f"Cannot derive a repository name when assembling {len(models)} models — specify the"
+            " output location with --out"
         )
     return EVAL_ROOT / pipeline.repo_name(models[0]) / f"{date.today().isoformat()}_eval"
 

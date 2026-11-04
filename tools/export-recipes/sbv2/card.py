@@ -1,18 +1,20 @@
-"""SBV2 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""Model card (`README.md`) of the SBV2 distribution — a pure function derived mechanically from
+the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **SBV2 固有の事実**だけ: 帰属（声の出所・
-ライセンス・引用・再配布する text encoder）と、この pipeline のカードに何を書くか。
+The generic rendering pieces (frontmatter, model list, quant table, section assembly) live in
+`karume.modelcard`. This module holds only **the facts specific to SBV2**: attribution (where the
+voices come from, licenses, citations, the redistributed text encoder) and what the card of this
+pipeline says.
 
-**帰属はテンプレートと別の軸**（{@link Sbv2CardProfile}）。同じ SBV2 のテンプレートでも、
-どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わるので、そこだけを
-プロファイルに分けて持つ。どのプロファイルで描くかは **Pipeline が決める** — 声の
-ファミリーごとに別の Pipeline（`sbv2` = JVNV・`sbv2-fn` = FN — `sbv2/distribution.py`）が
-それぞれ自分のプロファイルを 1 つだけ持つので、呼び出し側が選ぶ余地は無い。
+**Attribution is an axis separate from the template** ({@link Sbv2CardProfile}). Even with the same
+SBV2 template, the source, license and citations change completely depending on which family's
+weights are shipped, so only that part is split out into a profile. Which profile renders the card
+is **decided by the Pipeline** — each voice family has its own Pipeline (`sbv2` = JVNV, `sbv2-fn` =
+FN — `sbv2/distribution.py`) that holds exactly one profile, so the caller has nothing to choose.
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
-から導出する**（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、
-manifest に**存在しない事実**だけ。
+MUST: **every number, download size, quant table, dtype label, style table and speaker table is
+derived from the manifest** (the same MUST of `karume.modelcard` applies as is). The only constants
+allowed here are facts that **do not exist** in the manifest.
 """
 
 from __future__ import annotations
@@ -38,30 +40,36 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 SBV2_SUPPORTED_PIPELINE = "sbv2/1"
 
 SBV2_PIPELINE_TAG = "text-to-speech"
 
-#: アーキテクチャ（どのファミリーも JP-Extra 系 — 違うのは重みの出所であって形ではない）。
+#: Architecture (every family is JP-Extra — what differs is the source of the weights, not the
+#: shape).
 SBV2_ARCHITECTURE = "Style-Bert-VITS2 JP-Extra"
 
-#: `text_encoder` の素になった日本語 BERT（`deberta/export.py` の `MODEL_ID`）。manifest は
-#: 役割名しか持たないので、帰属はカード側が負う。ライセンスは実地確認（2026-08-07）。
-#: **どのファミリーでも同じ 1 本**を再配布するので、プロファイルの席ではなくここが持つ。
+#: The Japanese BERT that `text_encoder` was made from (`MODEL_ID` of `deberta/export.py`). The
+#: manifest holds only the role name, so the card carries the attribution. License checked on the
+#: source (2026-08-07). **Every family redistributes the same single model**, so it lives here
+#: rather than in a profile field.
 SBV2_TEXT_ENCODER_MODEL = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
 
-#: 使い方スニペットのデモ文（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
+#: Demo sentence of the usage snippet (an input of the Japanese TTS, so it stays Japanese — the
+#: language rule of CLAUDE.md).
 SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
 
-#: quant ごとの**丸め方**（manifest に無い事実 — 表が持つのは「どの席がどの格納 dtype か」まで
-#: で、その dtype をどう作ったか〈per-channel RTN / GPTQ 校正 / group-32〉は台本の知識）。
-#: 値は箇条 1 つぶんの行の並び。先頭行は quant 名に続く本文で、2 行目以降は Markdown の
-#: 継続行なので自分でインデントを持つ（`attribution` と同じ「行そのもの」の持ち方）。
+#: **How each quant was rounded** (a fact the manifest does not hold — the table only says "which
+#: quant uses which storage dtype"; how that dtype was produced (per-channel RTN / GPTQ calibration
+#: / group-32) is knowledge of the scripts).
+#: A value is the lines of one list item. The first line is the text that follows the quant name;
+#: the following lines are Markdown continuation lines and carry their own indentation (the same
+#: "the lines themselves" form as `attribution`).
 #:
-#: 既定マークは書かない — 既定は manifest の `defaultQuant` から引く（{@link _sbv2_quants}）。
-#: ここに書くと、既定が動いたときに表と説明が別々に嘘をつく。
+#: No default mark is written here — the default is taken from the manifest's `defaultQuant`
+#: ({@link _sbv2_quants}). Writing it here would make the table and the notes go wrong separately
+#: when the default moves.
 SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
     "f16+bert8": (
         "`front` / `voice` in `f16`, each weight rounded to the nearest `f16` value;",
@@ -88,43 +96,49 @@ SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class Sbv2CardProfile:
-    """SBV2 カードの**帰属プロファイル** — 声のファミリーごとに違う「manifest に無い事実」。
+    """The **attribution profile** of the SBV2 card — the "facts not in the manifest" that differ
+    per voice family.
 
-    SBV2 のテンプレートは 1 つでも、帰属（出所・ライセンス・再配布の条件・引用）はファミリー
-    ごとに**別の法的事実**になる。決め打ちのまま別ファミリーのリポへ描くと、表も使い方も
-    正しいのに帰属だけが前のファミリーのまま残る — 配ってからでないと誰も気づけない誤りなので、
-    ここが席として分けて持つ（どれを使うかはファミリー別の Pipeline が 1 つだけ持つことで
-    決まる — `sbv2/distribution.py` の `PIPELINE` / `FN_PIPELINE`）。
+    There is one SBV2 template, but attribution (source, license, redistribution terms, citations)
+    is **a different legal fact** for each family. Hard-coded, rendering into another family's
+    repository would leave the table and the usage correct while the attribution stays that of the
+    previous family — an error nobody can notice until after shipping, so it is held here as a
+    separate field (which one is used is fixed by each family's Pipeline holding exactly one —
+    `PIPELINE` / `FN_PIPELINE` in `sbv2/distribution.py`).
 
-    `attribution` が行の並びそのものなのは、この席に入るのが導出できない散文（ライセンス条項の
-    要約・引用・再配布条件）だから。機械的に組める 2 行（Voices / Architecture）だけは
-    {@link _sbv2_base_weights} が `source_dirs` / `source_version` から組む。
+    `attribution` is the lines themselves because what goes into this field is prose that cannot be
+    derived (summaries of license terms, citations, redistribution terms). Only the two lines that
+    can be built mechanically (Voices / Architecture) are built by {@link _sbv2_base_weights} from
+    `source_dirs` / `source_version`.
     """
 
     metadata: CardMetadata
     title: str
-    #: 出所リポジトリの中で、この配布形の声になったディレクトリ群。
+    #: The directories of the source repository that became the voices of this distribution.
     source_dirs: tuple[str, ...]
-    #: 出所の `config.json` が名乗る version 文字列（SBV2 の世代 — checkpoint は識別しない）。
+    #: The version string the source `config.json` declares (the SBV2 generation — it does not
+    #: identify a checkpoint).
     source_version: str
-    #: 出所リポジトリの commit SHA（容器の `provenance.upstreamRevision` — container-v1 §2.3 の
-    #: 「上流 checkpoint の revision」）。{@link source_version} とは別の事実で、同じ席へ入れない
-    #: （version は同じ世代の全モデルで共通なので checkpoint を識別できない — 2026-09-24 全域
-    #: レビュー W-RC5-3）。取得した revision を確認できていないファミリーは `None`（容器は
-    #: revision を名乗らない — 推測の値を焼かない）。
+    #: Commit SHA of the source repository (the container's `provenance.upstreamRevision` — "the
+    #: revision of the upstream checkpoint" of container-v1 §2.3). A fact separate from
+    #: {@link source_version} and not put into the same field (the version is shared by every model
+    #: of a generation, so it cannot identify a checkpoint — 2026-09-24 repository-wide review
+    #: W-RC5-3). `None` for a family whose retrieved revision has not been confirmed (the container
+    #: declares no revision — a guessed value is not baked in).
     source_revision: str | None
-    #: Voices / Architecture に続く帰属の箇条（Markdown の行そのもの）。
+    #: The attribution items that follow Voices / Architecture (the Markdown lines themselves).
     attribution: tuple[str, ...]
 
 
-# ---- FN 系（単一モデル） -------------------------------------------------
+# ---- FN (a single model) ------------------------------------------------
 
-#: ライセンス（実地確認 2026-08-20）: 出所の HF リポジトリは **license を宣言しておらず、
-#: モデルカードも無い**。利用条件が書かれているのは作者の Booth 頒布ページなので、SPDX
-#: 識別子は当てられず `other` を採り、`license_link` はそのページを指す。
-#: DECIDED: 帰属は**最小記述**に留める（「Booth のこのモデルを変換した」程度 — 条件の引用や
-#: 頒布者の詳細は書かない。2026-08-20 ユーザー裁定 — `docs/backlog.md` parked の
-#: 「karume-sbv2-fn の HF 公開」項。FN の HF 公開自体も同項で保留中）。
+#: License (checked on the source 2026-08-20): the source HF repository **declares no license and
+#: has no model card**. The terms of use are on the author's Booth distribution page, so no SPDX
+#: identifier applies; `other` is used and `license_link` points to that page.
+#: DECIDED: attribution is kept **minimal** (about "converted this model from Booth" — no quoting of
+#: the terms and no details of the distributor. Maintainer ruling of 2026-08-20 — the "HF
+#: publication of karume-sbv2-fn" item under parked in `docs/backlog.md`. The HF publication of FN
+#: itself is also on hold under that item).
 SBV2_FN_METADATA = CardMetadata(
     pipeline_tag=SBV2_PIPELINE_TAG,
     base_model=("rufflet17/voice_models",),
@@ -140,9 +154,9 @@ SBV2_FN_PROFILE = Sbv2CardProfile(
     title="Style-Bert-VITS2 — Karume",
     source_dirs=("FN/",),
     source_version="2.6.1-JP-Extra",
-    # 未確認: HF キャッシュの `refs/main`（`4fe4895a…`）は 2026-08-09 の FN1〜FN10 の取得時に
-    # 書かれたもので、配布の既定モデル FN4 は 2026-08-07 の別の取得。同じ revision だった根拠が
-    # 無いので名乗らない。
+    # Unconfirmed: `refs/main` of the HF cache (`4fe4895a…`) was written when FN1–FN10 were
+    # retrieved on 2026-08-09, while the distribution's default model FN4 comes from a separate
+    # retrieval on 2026-08-07. There is no evidence it was the same revision, so none is declared.
     source_revision=None,
     attribution=(
         "- **Source**: converted from the author's Style-Bert-VITS2 voice-model set distributed",
@@ -157,14 +171,15 @@ SBV2_FN_PROFILE = Sbv2CardProfile(
 )
 
 
-# ---- JVNV 系（ファミリー） -----------------------------------------------
+# ---- JVNV (a family) ----------------------------------------------------
 
-#: ライセンス（実地確認 2026-08-09 — https://huggingface.co/litagin/style_bert_vits2_jvnv）:
-#: 出所のリポジトリは「ライセンスは JVNV コーパスの cc-by-sa-4.0 を引き継ぐ」と明言している。
-#: SPDX 標準タグが当たるので `license_name` / `license_link` は持たない（HF が識別子から解決
-#: する席で、独自名を名乗らせると「名前の無い独自ライセンス」に読める）。
-#: `base_model` に text encoder を併記するのは、この配布形が**両方を再配布している**ため。
-#: 両者とも cc-by-sa-4.0 なので、SA（同一ライセンス継承）はリポジトリ全体で矛盾しない。
+#: License (checked on the source 2026-08-09 —
+#: https://huggingface.co/litagin/style_bert_vits2_jvnv): the source repository states that "the
+#: license inherits the cc-by-sa-4.0 of the JVNV corpus".
+#: A standard SPDX tag applies, so there is no `license_name` / `license_link` (HF resolves that
+#: field from the identifier; declaring a custom name would read as "an unnamed custom license").
+#: `base_model` also lists the text encoder because this distribution **redistributes both**.
+#: Both are cc-by-sa-4.0, so the SA (ShareAlike) term is consistent across the whole repository.
 SBV2_JVNV_METADATA = CardMetadata(
     pipeline_tag=SBV2_PIPELINE_TAG,
     base_model=("litagin/style_bert_vits2_jvnv", SBV2_TEXT_ENCODER_MODEL),
@@ -173,11 +188,13 @@ SBV2_JVNV_METADATA = CardMetadata(
     tags=("text-to-speech", "webgpu", "japanese"),
 )
 
-#: CC BY-SA 4.0 の条文（BY の「ライセンス URL を示す」を、カード自身が満たすための 1 本）。
+#: The CC BY-SA 4.0 legal text (the one link with which the card itself meets BY's "indicate the
+#: license URL").
 SBV2_JVNV_LICENSE_URL = "https://creativecommons.org/licenses/by-sa/4.0/"
 
-#: 声の学習データ（JVNV コーパス）の論文と頒布ページ。カードの帰属と配布リポ直下の
-#: `NOTICE.md`（`sbv2.distribution.SBV2_JVNV_NOTICE_MARKDOWN`）が同じ綴りを引く。
+#: Paper and distribution page of the voices' training data (the JVNV corpus). The card's
+#: attribution and the `NOTICE.md` at the root of the distribution repository
+#: (`sbv2.distribution.SBV2_JVNV_NOTICE_MARKDOWN`) use the same spelling.
 SBV2_JVNV_CORPUS_PAPER = "arXiv:2310.06072"
 SBV2_JVNV_CORPUS_PAPER_URL = "https://arxiv.org/abs/2310.06072"
 SBV2_JVNV_CORPUS_PAGE = (
@@ -189,9 +206,9 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
     title="Style-Bert-VITS2 JVNV — Karume",
     source_dirs=("jvnv-F1-jp/", "jvnv-F2-jp/", "jvnv-M1-jp/", "jvnv-M2-jp/"),
     source_version="2.0-JP-Extra",
-    # `litagin/style_bert_vits2_jvnv` の取得時の main（HF キャッシュの `refs/main` — 2026-08-09
-    # 08:07:52 に書かれた値で、4 声の取得〈08:07:32〜08:08:02・`inputs/sbv2/{F1,F2,M1,M2}`〉の
-    # 最中。2026-09-25 に現物で確認）。
+    # main of `litagin/style_bert_vits2_jvnv` at retrieval time (`refs/main` of the HF cache — the
+    # value written at 2026-08-09 08:07:52, in the middle of retrieving the 4 voices (08:07:32–
+    # 08:08:02, `inputs/sbv2/{F1,F2,M1,M2}`). Checked against the files on 2026-09-25).
     source_revision="205830ca1d49e666ddfbf2a755f0108e9cade4dd",
     attribution=(
         f"- **Terms**: **[CC BY-SA 4.0]({SBV2_JVNV_LICENSE_URL})**, inherited from the JVNV"
@@ -216,7 +233,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         "  voices, so the share-alike term is consistent across everything in this repository.",
         "- **Training data**: the JVNV corpus, licensed CC BY-SA 4.0. Detai Xin, Junfeng Jiang,",
         "  Shinnosuke Takamichi, Yuki Saito, Akiko Aizawa, Hiroshi Saruwatari,",
-        # 論文題は 1 行に収める（折り返すと、題での検索が本文にあるのに当たらなくなる）。
+        # The paper title stays on one line (if wrapped, a search for the title would miss it even
+        # though it is in the text).
         "  *JVNV: A Corpus of Japanese Emotional Speech with Verbal Content and"
         " Nonverbal Expressions*,",
         f"  [{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}). Corpus page:",
@@ -228,8 +246,9 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
     ),
 )
 
-#: 選べる帰属プロファイル。**既定は置かない** — 省略時に片方を黙って選ぶと、新しいファミリーを
-#: 配るたびに前のファミリーの帰属が沈黙で再発する（`karume.dist` が明示を要求する）。
+#: The selectable attribution profiles. **There is no default** — silently picking one when it is
+#: omitted would silently bring back the previous family's attribution every time a new family is
+#: shipped (`karume.dist` requires it explicitly).
 SBV2_CARD_PROFILES: Mapping[str, Sbv2CardProfile] = {
     "fn": SBV2_FN_PROFILE,
     "jvnv": SBV2_JVNV_PROFILE,
@@ -257,7 +276,8 @@ def _sbv2_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
-    """帰属節。声の出所リポジトリは `base_model` の先頭（= 重みの出所そのもの）から引く。"""
+    """Attribution section. The voices' source repository is taken from the first `base_model` entry
+    (= the source of the weights itself)."""
     base_model = profile.metadata.base_model[0]
     dirs = " / ".join(f"`{name}`" for name in profile.source_dirs)
     return [
@@ -277,15 +297,17 @@ def _sbv2_quants(
     abbreviations: Mapping[str, str],
     host_assets: Mapping[FileRefKey, int] = {},
 ) -> list[str]:
-    """汎用の quant 表に、SBV2 の**丸め方**の備考を足した節。
+    """The generic quant table plus SBV2's notes on **how the weights were rounded**.
 
-    表は「どの席がどの格納 dtype か」しか言えない（manifest がそこまでしか持たない）ので、
-    同じ `i4` でも GPTQ 校正付きか素の RTN かが読めない — 既定が品質で選ばれている理由が
-    カードから消える。備考は**このモデルが宣言している quant だけ**に付ける（`_sbv2_knob` と
-    同じ規律 — 配布形が持たない席を説明すると、カードが配れる値を超えて喋る）。
+    The table can only say "which quant uses which storage dtype" (the manifest holds no more than
+    that), so it cannot tell whether an `i4` is GPTQ-calibrated or plain RTN — the reason the
+    default was chosen for quality disappears from the card. Notes are attached **only to the quants
+    this model declares** (the same discipline as `_sbv2_knob` — describing a quant the distribution
+    does not have makes the card say more than what it can ship).
 
-    表示欄（`label` / `description`）とは責務が別 — あちらは「席 1 つが何か」を manifest から
-    出す 1 行で、こちらは「その格納をどう作ったか」という台本側の知識（ADR 0075 決定 5）。
+    A different responsibility from the display fields (`label` / `description`) — those are the one
+    line from the manifest saying "what one quant is", while this is the scripts' knowledge of "how
+    that storage was produced" (ADR 0075 decision 5).
     """
     default = model["defaultQuant"]
     table = quants(model, abbreviations=abbreviations, host_assets=host_assets)
@@ -303,12 +325,13 @@ def _sbv2_quants(
 
 
 def _name_id_rows(table: Mapping[str, int]) -> list[str]:
-    """`名前 → ID` の表を manifest の並びのまま行にする（ID は配る表の行番号そのもの）。"""
+    """Turns a `name → ID` table into rows in the manifest's order (the ID is the row number of the
+    shipped table itself)."""
     return [f"| `{name}` | {identifier} |" for name, identifier in table.items()]
 
 
 def _sbv2_styles(model: Mapping[str, Any]) -> list[str]:
-    """スタイル一覧（利用者が `style` に何を渡せるかをカードだけで知れるようにする節）。"""
+    """Style list (the section that lets a user learn from the card alone what `style` accepts)."""
     path = model["assets"]["style_vectors"]["path"]
     return [
         "### Styles",
@@ -323,7 +346,7 @@ def _sbv2_styles(model: Mapping[str, Any]) -> list[str]:
 
 
 def _sbv2_speakers(model: Mapping[str, Any]) -> list[str]:
-    """話者一覧（`speaker` の受理集合 — スタイルと同じく行番号の対応表）。"""
+    """Speaker list (the values `speaker` accepts — a row-number mapping, like the styles)."""
     path = model["assets"]["speaker_embeddings"]["path"]
     return [
         "### Speakers",
@@ -337,11 +360,12 @@ def _sbv2_speakers(model: Mapping[str, Any]) -> list[str]:
 
 
 def _sbv2_knob(defaults: Mapping[str, Any], key: str, note: str) -> list[str]:
-    """`generate()` の optional ノブ 1 つをコメント行にする（既定が manifest に在るものだけ）。
+    """Turns one optional knob of `generate()` into a comment line (only knobs whose default is in
+    the manifest).
 
-    manifest が持たないキーは**綴らない** — `defaults` に無いノブを勧めると、カードが
-    「この配布形で選べる値」を超えて喋る（`### Defaults` が同じ理由で `defaults` の写しを
-    持たないのと同じ判断）。
+    Keys the manifest does not hold are **not written** — recommending a knob missing from
+    `defaults` makes the card say more than "the values selectable in this distribution" (the same
+    judgement as `### Defaults` not keeping a copy of `defaults`, for the same reason).
     """
     if key not in defaults:
         return []
@@ -351,15 +375,17 @@ def _sbv2_knob(defaults: Mapping[str, Any], key: str, note: str) -> list[str]:
 
 
 def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、声 / スタイル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の
-    一歩へ進める形。
+    """Policy of the usage example: keep the minimal working form, and **list the optionals an
+    ordinary use case is likely to need as commented-out lines** (the selectable values are listed
+    in the comment on the same line — derived mechanically from the manifest, so the lists follow
+    when voices / styles / quants are added). The reader moves to the next step by just
+    uncommenting.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+
+    NOTE: `fromAssets` is **not shown** (ruling of 2026-08-29). It can read split distributions too
+    (X2-101), but it is a surface for local debugging that assumes the caller holds the bytes; the
+    ordinary entry point for a reader using HF is `fromPretrained`. Showing both would leave the
+    reader to decide "which one to use".
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -447,13 +473,16 @@ def render_sbv2_model_card(
     abbreviations: Mapping[str, str],
     host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
-    """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+    """Builds the `README.md` body of the SBV2 distribution (a pure function, with a trailing
+    newline).
 
-    `profile` に既定を置かないのは MUST — 帰属はファミリーごとに違う事実で、既定を持たせた
-    瞬間に「別ファミリーのリポへ前のファミリーの帰属を描く」経路が黙って生える。
+    `profile` has no default, MUST — attribution is a fact that differs per family, and the moment
+    it has a default, a path that "renders the previous family's attribution into another family's
+    repository" silently appears.
 
-    `abbreviations` は席名の部品上書きトークンの対応表（正本は `sbv2.distribution` —
-    ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず引数で受ける。
+    `abbreviations` maps the component-override tokens of quant names (the source of truth is
+    `sbv2.distribution` — ADR 0074 decision 4). It is a fact not in the manifest, so it is taken as
+    an argument rather than copied as a constant.
     """
     require_pipeline(manifest, SBV2_SUPPORTED_PIPELINE)
     return render(

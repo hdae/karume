@@ -1,10 +1,11 @@
-"""リポジトリ用の dist ドライバ — core の組み立てエンジンに recipe 側 pipeline を合成する。
+"""The repository's dist driver — combines the core assembly engine with the recipe-side pipelines.
 
-`karume.dist` が持つ {@link karume.dist.PIPELINES} は「core wheel だけで組める pipeline」で
-あって全量ではない（ADR 0065 決定 2 — モデル別 recipe は wheel の外）。family の移行が全部
-終わった今、core の表は**空**なので、受理集合の正本はこの辞書だけになった。
+The {@link karume.dist.PIPELINES} of `karume.dist` are "the pipelines that can be built with the
+core wheel alone", not all of them (ADR 0065 decision 2 — per-model recipes live outside the
+wheel). Now that every family has moved, the core's table is **empty**, so this dictionary alone
+is the source of truth of the accepted set.
 
-    uv run python dist.py                                  # 既定 = anima（公式 5 変種 — ADR 0087）
+    uv run python dist.py                                  # default = anima (5 variants, ADR 0087)
     uv run python dist.py --pipeline anima-extra \\
         --model anima-wai-v1.0 --model anima-copycat-20260610 \\
         --out ../../models/karume-anima-extra \\
@@ -12,21 +13,22 @@
     uv run python dist.py --pipeline irodori               # v4-small (self-contained)
     uv run python dist.py --pipeline irodori --model v4.1-small \\
         --resolve-refs hf                                  # references karume-irodori-v4-small
-    uv run python dist.py --pipeline sbv2-fn               # FN 系（HF 公開は保留）
+    uv run python dist.py --pipeline sbv2-fn               # the FN line (HF publication on hold)
     uv run python dist.py --pipeline sbv2 \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
     uv run python dist.py --pipeline siglip2 \\
         --model base --model so400m --out ../../models/karume-siglip2
-    uv run python dist.py --pipeline lucida                # BiRefNet_HR の派生（別リポ）
-    uv run python dist.py --pipeline umt5                  # umT5-XXL encoder（Wan の参照先）
+    uv run python dist.py --pipeline lucida                # a BiRefNet_HR derivative (own repo)
+    uv run python dist.py --pipeline umt5                  # umT5-XXL encoder (referenced by Wan)
     uv run python dist.py --pipeline wan --allow-placeholder-ref
                                                            # Wan2.1 T2V 1.3B (not published)
     uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                            # Wan2.2 TI2V 5B (references umT5)
     uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT
 
-置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
-repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
+The default locations (`--series` / `--out`) are passed from here too — the repository's
+`outputs/series/` and `models/` are repository topology, and the core holds no spellings (ADR 0065
+Consequences; the same MUST in `karume.dist`).
 
 ## Cross-repository references (ADR 0038 §7, addendum 2026-10-28)
 
@@ -56,21 +58,23 @@ source per build:
 A model that declares references and gets no source fails before a byte is written — there is no
 silent self-contained build.
 
-## 取り込み由来の手元の実験用ミラー（ADR 0122 決定 5 / 6）
+## Local experimental mirrors from an intake (ADR 0122 decisions 5 / 6)
 
-第三者の umT5 互換 encoder の取り込み（`wan.umt5_intake`）から書いた系列は、`--intake` を付けた
-`--pipeline umt5` でだけ組める。リポ名・ルートのファイル・カードは取り込みの記録 `intake.json` から
-導き（`wan.umt5_distribution.intake_pipeline`）、既定の出力先は {@link LOCAL_DIST_ROOT} の下。
-**ライセンスの宣言の有無によらず**、出力先が `models/`（そのまま上げられる配布形の席）の下なら
-1 バイトも書く前に落とす（{@link assert_outside_distribution_root} — 実 path どうしで比べる）。
-ライセンス未宣言の取り込みは {@link ALLOW_UNDECLARED_LICENSE_FLAG} の明示が要る（計画の時点で
-落とす）:
+A series written from the intake of a third-party umT5-compatible encoder (`wan.umt5_intake`) can
+only be built with `--pipeline umt5` plus `--intake`. The repository name, the root files and the
+card are derived from the intake record `intake.json` (`wan.umt5_distribution.intake_pipeline`),
+and the default output is under {@link LOCAL_DIST_ROOT}.
+**Whether or not a license is declared**, an output under `models/` (the place of distributions
+that are uploaded as they are) fails before a byte is written
+({@link assert_outside_distribution_root} — comparing real paths). An intake without a declared
+license needs the explicit {@link ALLOW_UNDECLARED_LICENSE_FLAG} (it fails at planning time):
 
-    uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<名前> \
-        --allow-undeclared-license        # 未宣言のときだけ — out は outputs/misc/local-dist/<名前>
+    uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<name> \
+        --allow-undeclared-license        # undeclared only — out is outputs/misc/local-dist/<name>
 
-NOTE: `**CORE_PIPELINES` の展開は残す — core が「表を受け取る側」であって「表を持たない側」で
-はないことは変わっておらず、core wheel だけで組める pipeline が将来生えたら黙って合流する。
+NOTE: the `**CORE_PIPELINES` expansion stays — the core is still "the side that receives a table"
+rather than "the side that has no table", and a pipeline buildable with the core wheel alone would
+silently join if one appears in the future.
 """
 
 from __future__ import annotations
@@ -118,17 +122,19 @@ from wan import umt5_distribution
 from wan.umt5_intake import ALLOW_UNDECLARED_LICENSE_FLAG, Umt5IntakeError, load_intake
 from wan.umt5_intake import assert_outside_distribution_root as intake_outside_distribution_root
 
-#: 受理集合の全量。並びは `--help` の並びでもあるので、既定を先頭に置く。
+#: The whole accepted set. The order is also the order of `--help`, so the default comes first.
 PIPELINES: Mapping[str, Pipeline] = {
     "anima": anima_distribution.OFFICIAL_PIPELINE,
     "anima-extra": anima_distribution.EXTRA_PIPELINE,
     "sbv2": sbv2_distribution.PIPELINE,
-    # 声のファミリーはライセンスが違う（JVNV = CC BY-SA 4.0・FN = Booth の頒布条件）ので別席。
+    # The voice families have different licenses (JVNV = CC BY-SA 4.0, FN = Booth's distribution
+    # terms), so they are separate entries.
     "sbv2-fn": sbv2_distribution.FN_PIPELINE,
     "irodori": irodori_distribution.PIPELINE,
     "siglip2": siglip2_distribution.PIPELINE,
     "birefnet": birefnet_distribution.PIPELINE,
-    # 派生は別リポ（ADR 0092 決定 1）— リポ直下の著作権表示が違うので Pipeline も別席。
+    # The derivative is its own repository (ADR 0092 decision 1) — the copyright notice at the
+    # repository root differs, so the Pipeline is a separate entry too.
     "lucida": birefnet_distribution.LUCIDA_PIPELINE,
     "depth-anything": depth_anything_distribution.PIPELINE,
     "vowel-detector": vowel_detector_distribution.PIPELINE,
@@ -139,9 +145,11 @@ PIPELINES: Mapping[str, Pipeline] = {
     "gemma4-qat": gemma4_distribution.QAT_Q4_0_PIPELINE,
     "gemma4-qat-mobile": gemma4_qat_distribution.PIPELINE,
     "wan": wan_distribution.PIPELINE,
-    # Wan の世代は別リポ（ADR 0092 決定 2 — `karume-wan2.2`）なので Pipeline も別席。
+    # Wan's generations are separate repositories (ADR 0092 decision 2 — `karume-wan2.2`), so the
+    # Pipeline is a separate entry too.
     "wan-ti2v": wan_distribution.TI2V_PIPELINE,
-    # Wan の text_encoder の参照先（ADR 0119 追記 D — 部品だけの別リポ・読む TS の家族は無い）。
+    # What Wan's text_encoder references (ADR 0119 addendum D — a components-only repository; no
+    # TS family reads it).
     "umt5": umt5_distribution.PIPELINE,
     # MOSS-Image-SFT (ADR 0138 addendum of 2026-11-01 — self-contained: the Qwen3.5 text tower is
     # the checkpoint's own, stored in this repository).
@@ -149,7 +157,7 @@ PIPELINES: Mapping[str, Pipeline] = {
     **CORE_PIPELINES,
 }
 
-#: 旧 `karume dist`（引数なし）の UX をドライバ側で維持する。
+#: Keeps the UX of the old `karume dist` (no arguments) on the driver side.
 DEFAULT_PIPELINE = "anima"
 
 #: The placeholder commit sha a development mirror is pinned at while the referenced repository is
@@ -361,46 +369,50 @@ def reference_pins(
     )
 
 
-#: 取り込み由来の手元の実験用ミラーの既定の置き場の親（`<LOCAL_DIST_ROOT>/<名前>/` — `models/`
-#: の外。ADR 0122 決定 5）。
+#: Parent of the default location of local experimental mirrors from an intake
+#: (`<LOCAL_DIST_ROOT>/<name>/` — outside `models/`; ADR 0122 decision 5).
 LOCAL_DIST_ROOT = MISC_ROOT / "local-dist"
 
-#: 取り込み（`inputs/umt5/<名前>/`）から手元の実験用ミラーを組む引数（`--pipeline umt5` だけ）。
+#: The argument that builds a local experimental mirror from an intake (`inputs/umt5/<name>/`)
+#: (`--pipeline umt5` only).
 INTAKE_FLAG = "--intake"
 
-#: 取り込みを受ける pipeline（`dist.PIPELINES` のキー）。
+#: The pipeline that accepts an intake (a key of `dist.PIPELINES`).
 INTAKE_PIPELINE = "umt5"
 
 
 def assert_outside_distribution_root(out_dir: Path) -> None:
-    """出力先が `models/`（{@link DIST_ROOT}）の下なら落とす（取り込み由来のモデル — ADR 0122
-    決定 5）。
+    """Fail if the output is under `models/` ({@link DIST_ROOT}) (a model from an intake — ADR
+    0122 decision 5).
 
-    判定は取り込み（`wan.umt5_intake` の `--out`）と同じ 1 本
-    （`wan.umt5_intake.assert_outside_distribution_root` — 実 path どうしで比べる）。
+    The decision is the same single function as the intake's (`--out` of `wan.umt5_intake`)
+    (`wan.umt5_intake.assert_outside_distribution_root` — comparing real paths).
     """
     try:
         intake_outside_distribution_root(out_dir, root=DIST_ROOT)
     except Umt5IntakeError as cause:
         raise DistError(
-            f"出力先: {cause}（手元の実験用ミラーの既定は {LOCAL_DIST_ROOT}/<名前>）"
+            f"output: {cause} (the default for a local experimental mirror is"
+            f" {LOCAL_DIST_ROOT}/<name>)"
         ) from cause
 
 
 def intake_pipelines(
     args: argparse.Namespace,
 ) -> tuple[Mapping[str, Pipeline], Callable[[Pipeline, Sequence[str]], Path]]:
-    """`--intake` の回の pipeline の表と既定の出力先（どちらも 1 バイトも書く前に検査する）。"""
+    """The pipeline table and the default output of an `--intake` run (both checked before a
+    byte is written)."""
     if args.pipeline != INTAKE_PIPELINE:
-        raise DistError(f"{INTAKE_FLAG} は --pipeline {INTAKE_PIPELINE} にだけ効く")
+        raise DistError(f"{INTAKE_FLAG} applies only to --pipeline {INTAKE_PIPELINE}")
     try:
         intake = load_intake(args.intake)
     except Umt5IntakeError as cause:
         raise DistError(str(cause)) from cause
     if args.models is not None and args.models != [intake.name]:
         raise DistError(
-            f"--model {args.models} が取り込みの名前 {intake.name!r} と違う — 取り込み由来の"
-            "モデルは 1 リポに 1 つだけ（本家の karume-umt5-xxl と混ぜない）"
+            f"--model {args.models} differs from the intake name {intake.name!r} — a model from"
+            " an intake is the only one in its repository (never mixed with the base"
+            " karume-umt5-xxl)"
         )
     out_dir = args.out if args.out is not None else LOCAL_DIST_ROOT / intake.name
     assert_outside_distribution_root(out_dir)
@@ -437,15 +449,18 @@ def core_arguments(arguments: Sequence[str]) -> list[str]:
 
 
 def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
-    """`--out` 省略時の出力先（`models/<リポ名>/` = 1 ディレクトリ 1 HF リポ）。
+    """The output when `--out` is omitted (`models/<repository name>/` = one directory, one HF
+    repository).
 
-    リポ名は Pipeline の宣言（`Pipeline.repo_name` — ファミリーのリポ名。sbv2 も
-    `karume-sbv2-jvnv` を宣言する）から引く。複数モデルでは `--out` の明示を求めて落とす —
-    この関数は 1 モデルの宣言だけを引き、並べたモデルの宣言が揃うかの突合を持たない。
+    The repository name comes from the Pipeline's declaration (`Pipeline.repo_name` — the
+    family's repository name; sbv2 declares `karume-sbv2-jvnv` too). With several models it
+    fails and asks for an explicit `--out` — this function reads the declaration of one model
+    only and does not check that the declarations of the listed models agree.
     """
     if len(models) != 1:
         raise DistError(
-            f"モデルを {len(models)} 個組む場合はリポ名を導出できない — --out で出力先を指定する"
+            f"the repository name cannot be derived when building {len(models)} models — give"
+            " the output with --out"
         )
     return DIST_ROOT / pipeline.repo_name(models[0])
 
@@ -486,15 +501,16 @@ def build_driver_parser() -> argparse.ArgumentParser:
         dest="intake",
         type=Path,
         default=None,
-        help=f"--pipeline {INTAKE_PIPELINE}: 取り込み（inputs/umt5/<名前>/）から手元の実験用"
-        f"ミラーを組む（既定の出力先 {LOCAL_DIST_ROOT}/<名前> — models/ の下へは書けない）",
+        help=f"--pipeline {INTAKE_PIPELINE}: build a local experimental mirror from an intake"
+        f" (inputs/umt5/<name>/) (default output {LOCAL_DIST_ROOT}/<name> — it cannot be written"
+        " under models/)",
     )
     parser.add_argument(
         ALLOW_UNDECLARED_LICENSE_FLAG,
         dest="allow_undeclared_license",
         action="store_true",
-        help=f"{INTAKE_FLAG}: ライセンス未宣言の取り込みから実験用ミラーを組むことを許す（ADR 0122"
-        " 決定 6）",
+        help=f"{INTAKE_FLAG}: allow building an experimental mirror from an intake without a"
+        " declared license (ADR 0122 decision 6)",
     )
     return parser
 
@@ -515,7 +531,7 @@ def main(argv: Sequence[str] | None = None, *, get: HfGet = hf_get) -> None:
     if args.intake is not None:
         pipelines, out_dir_hook = intake_pipelines(args)
     elif args.allow_undeclared_license:
-        raise DistError(f"{ALLOW_UNDECLARED_LICENSE_FLAG} は {INTAKE_FLAG} と組むときだけ効く")
+        raise DistError(f"{ALLOW_UNDECLARED_LICENSE_FLAG} applies only together with {INTAKE_FLAG}")
     # Settled before a byte is written (the core's assembly replaces out_dir wholesale through
     # staging) and before the plans read several GB of series.
     pipeline = pipelines[args.pipeline]

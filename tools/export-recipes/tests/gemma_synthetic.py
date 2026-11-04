@@ -1,11 +1,14 @@
-"""Gemma 系トークナイザの**合成資産**（実資産 32MB はローカルにしか無いのでテストはこれで回す）。
+"""The **synthetic asset** of the Gemma tokenizers (the real 32 MB asset exists only locally, so
+the tests run on this one).
 
-置き場が `tests/` の共有ヘルパなのは、compile の受理集合を叩く側（`test_gemma_tokenizer`）と
-chat フィクスチャを叩く側（`gemma4/tests/test_chat`）が**同じ 1 本**を使うため — 合成資産の
-綴りを 2 つ持つと、片方だけが上流の構成から外れても気づけない。
+It is a shared helper under `tests/` because the side that exercises the accepted set of compile
+(`test_gemma_tokenizer`) and the side that exercises the chat fixtures (`gemma4/tests/test_chat`)
+use **the same single copy** — with two spellings of the synthetic asset, one of them drifting
+away from the upstream configuration would go unnoticed.
 
-合成資産は `tokenizers.Tokenizer.from_str` にそのまま食わせられる形なので、期待値の採取経路
-（`build_fixture` / `harvest_cases`）まで同じ台本で通る。
+The synthetic asset is in a form `tokenizers.Tokenizer.from_str` accepts as is, so the same script
+runs all the way through the path that captures the expected values (`build_fixture` /
+`harvest_cases`).
 """
 
 from __future__ import annotations
@@ -19,21 +22,23 @@ from _shared.gemma_tokenizer import (
     byte_token,
 )
 
-#: 合成資産の「普通の」語彙（byte 語彙 256 本の手前に置く特殊トークン）。
+#: The "ordinary" vocabulary of the synthetic asset (the special tokens placed before the 256
+#: byte tokens).
 SPECIALS = ["<pad>", "<eos>", "<bos>", "<unk>"]
 
-#: BPE で畳まれる素の語彙（`▁` は metaspace）。
+#: The plain vocabulary BPE merges into (`▁` is the metaspace).
 PIECES = ["a", "b", "c", "▁", "ab", "abc", "▁a", "▁ab", "\n"]
 
 
 def vocab() -> dict[str, int]:
-    """id 順の語彙（特殊トークン → byte 語彙 256 本 → 素の語彙）。"""
+    """The vocabulary in id order (special tokens → the 256 byte tokens → the plain vocabulary)."""
     tokens = [*SPECIALS, *(byte_token(byte) for byte in range(256)), *PIECES]
     return {token: index for index, token in enumerate(tokens)}
 
 
 def tokenizer_json(**overrides: Any) -> dict[str, Any]:
-    """実資産と同じ構成の最小 `tokenizer.json`（`model.<欄>` で内側も差し替えられる）。"""
+    """The smallest `tokenizer.json` configured like the real asset (`model.<field>` overrides the
+    inner fields too)."""
     raw: dict[str, Any] = {
         "version": "1.0",
         "truncation": None,

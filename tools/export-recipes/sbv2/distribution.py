@@ -1,34 +1,40 @@
-"""SBV2 の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択（ADR 0065 決定 2）。
+"""SBV2 distribution recipe — series layout, output path table, quant table, card selection (ADR
+0065 decision 2).
 
-汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **SBV2 固有の事実**だけ: どの系列ディレクトリから何を
-拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+The generic assembly engine (placement, folding of shared seats, sha256, manifest, staging/swap,
+verification) lives in `karume.dist`. This module holds only **the facts specific to SBV2**: what
+to pick up from which series directory, at which path of the distribution and under which dtype
+label to place it, and which quant is the default.
 
-配布するのは**実行に要る 3 グラフ + ホスト資産 4 本**だけ（ADR 0038 §2 の SBV2 例は
-5 グラフを並べるが、あれは形の例示）。`front` = enc_p + dp + sdp、`voice` = flow + dec の
-融合なので、`dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形には入らない。
-`text_encoder`（DeBERTa）に f16 席が無いのは `deberta/export.py` が f16 を持たないから
-（f32 の 1.32GB は配布に非現実的）。既定の i8 は ADR 0026 が聴感ゲート込みで受理済みで、
-i4 混成（linear と embedding が i4 group32）は `i8+bert4` quant の席として後から足した
-（perf-ledger Q-1 — 2026-08-20 から既定 quant）。`front` / `voice` にも i4 混成席があり
-（適格な linear と conv1d が i4 — conv1d は波 J-5b の追補）、3 席とも i4 を選ぶのが `i4`
-quant（速度 / サイズ優先の opt-in）。
+Only **the 3 graphs and 4 host assets needed to run** are shipped (the SBV2 example of ADR 0038
+§2 lists 5 graphs, but that only illustrates the shape). `front` = enc_p + dp + sdp and `voice` =
+flow + dec are fused, so `dp` / `flow` / `dec` are standalone graphs for golden verification only
+and are not part of the distribution.
+`text_encoder` (DeBERTa) has no f16 seat because `deberta/export.py` has no f16 (1.32GB of f32 is
+impractical to ship). The default i8 was accepted by ADR 0026 including its listening check, and
+the i4 mix (linear and embedding in i4 group32) was added later as the seat of the `i8+bert4`
+quant (perf-ledger Q-1 — the default quant since 2026-08-20). `front` / `voice` also have an i4
+mixed seat (eligible linear and conv1d in i4 — conv1d is the addendum of wave J-5b), and the `i4`
+quant picks i4 for all 3 seats (an opt-in that favours speed / size).
 
-ホスト資産のうち `style_vectors` / `speaker_embeddings` は**表を配って実行時に行を引く**形。
-`front` / `voice` のグラフ入力 `style_vec[1,256]` / `g[1,512,1]` はこの 2 表から作られ、
-名前 → 行の対応は `pipelineConfig` の `styles` / `speakers` が持つ（3 つで 1 組）。
+Of the host assets, `style_vectors` / `speaker_embeddings` take the form **ship the table, look up
+the row at run time**. The graph inputs `style_vec[1,256]` / `g[1,512,1]` of `front` / `voice` are
+built from these 2 tables, and the name → row mapping is held by `styles` / `speakers` of
+`pipelineConfig` (the 3 form one set).
 
-`text_encoder` の出所は `deberta` recipe が書く系列だが、参照するのは**その出力 path だけ**
-（コードの import は持たない — shared 席は資産の共有であって結合ではない）。
+`text_encoder` comes from a series written by the `deberta` recipe, but only **its output path**
+is referenced (there is no code import — the shared seat shares assets, it does not couple the
+code).
 
-公開面は**声のファミリーごとの 2 つ**（`karume.dist.Pipeline`）— {@link PIPELINE}
-（`--pipeline sbv2` = JVNV 系・公開リポ `karume-sbv2-jvnv`）と {@link FN_PIPELINE}
-（`--pipeline sbv2-fn` = FN 系・公開保留）。リポの dist ドライバ（`tools/export-recipes/dist.py`）
-がこれを core の PIPELINES へ合成する。割れているのは anima の公式 / 追加学習と同じ理由:
-`root_files`（配布リポ直下の `LICENSE.md` / `NOTICE.md`）は Pipeline に固定で載る 1 組で、
-ライセンスはファミリーごとに違う（JVNV 系は CC BY-SA 4.0・FN 系は Booth の頒布条件）。
-1 つに畳むと、どちらかのファミリーのリポが自分のものでない条文と帰属を名乗る — 散文としては
-妥当なままなので `verify_dist` も manifest 検査も素通りし、配ってからでないと誰も気づけない。
+The public surface is **two, one per voice family** (`karume.dist.Pipeline`) — {@link PIPELINE}
+(`--pipeline sbv2` = JVNV, public repository `karume-sbv2-jvnv`) and {@link FN_PIPELINE}
+(`--pipeline sbv2-fn` = FN, publication on hold). The repository's dist driver
+(`tools/export-recipes/dist.py`) merges them into the core's PIPELINES. They are split for the same
+reason as anima's official / fine-tuned ones: `root_files` (`LICENSE.md` / `NOTICE.md` at the root
+of the distribution repository) is one fixed set per Pipeline, and the license differs per family
+(JVNV is CC BY-SA 4.0, FN is Booth's distribution terms). Folding them into one would make one
+family's repository declare legal text and attribution that are not its own — still valid prose,
+so `verify_dist` and the manifest checks pass it, and nobody can notice until after shipping.
 """
 
 from __future__ import annotations
@@ -69,59 +75,67 @@ from sbv2.card import (
     render_sbv2_model_card,
 )
 
-#: 既定のモデル名 — 系列の綴り（`sbv2-F1{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
-#: `sbv2.export.default_out_root` が `--model-dir` のディレクトリ名から系列名を作るので、
-#: 読み手のこちらも同じ 1 語から組む。
+#: The default model name — the one word that ties the series spelling (`sbv2-F1{,-f16,-i8}`) to
+#: the location of the real weights. `sbv2.export.default_out_root` builds the series name from the
+#: directory name of `--model-dir`, so this reading side builds from the same word.
 SBV2_DEFAULT_MODEL = "F1"
 
-#: FN 系の Pipeline（{@link FN_PIPELINE}）の既定のモデル名（`sbv2/README.md` が手順に使う話者）。
+#: The default model name of the FN Pipeline ({@link FN_PIPELINE}) (the speaker `sbv2/README.md`
+#: uses in its steps).
 SBV2_FN_DEFAULT_MODEL = "FN4"
 
-#: モデル名（= `--model-dir` のディレクトリ名）の接頭辞 → 声のファミリー（README の
-#: 「the default `--model-dir` is `inputs/sbv2/F1`」と「`inputs/sbv2/FN*`」の規約そのもの）。
-#: 書き出し（`sbv2.export.sbv2_family` — 容器へ焼くライセンス）と組み立て（ファミリーごとの
-#: Pipeline が受け付けるモデル）が同じこの 1 表を引く。
+#: Model name (= the directory name of `--model-dir`) prefix → voice family (exactly the
+#: convention of the README's "the default `--model-dir` is `inputs/sbv2/F1`" and
+#: "`inputs/sbv2/FN*`"). Export (`sbv2.export.sbv2_family` — the license baked into the container)
+#: and assembly (the models each family's Pipeline accepts) both read this one table.
 #:
-#: MUST: **許可リスト**で決める。「`FN` で始まらなければ jvnv」と二値で決めていた頃は、想定外の
-#: ディレクトリ名（新しい話者・手元の写しの名前・`FN` を含まない FN 系の別綴り）が**黙って**
-#: jvnv のライセンス（`cc-by-sa-4.0`）を名乗る配布形になった — 法的事実の沈黙誤値で、配って
-#: からでないと誰も気づけない。
+#: MUST: decided by an **allow-list**. Back when it was the binary "jvnv unless it starts with
+#: `FN`", an unexpected directory name (a new speaker, the name of a local copy, another spelling of
+#: an FN model without `FN`) **silently** produced a distribution declaring the jvnv license
+#: (`cc-by-sa-4.0`) — a silent wrong value in a legal fact, which nobody can notice until after
+#: shipping.
 #:
-#: NOTE: 手元の入力ディレクトリの綴りは**上流リポジトリのディレクトリ名**
-#: （`sbv2.card.Sbv2CardProfile.source_dirs` = `jvnv-F1-jp/` …）とは別で、jvnv 側は話者 id だけ。
+#: NOTE: the spelling of the local input directories differs from **the directory names of the
+#: upstream repository** (`sbv2.card.Sbv2CardProfile.source_dirs` = `jvnv-F1-jp/` …); on the jvnv
+#: side it is the speaker id alone.
 SBV2_FAMILY_DIRS: Mapping[str, tuple[str, ...]] = {
     "fn": ("FN",),
     "jvnv": ("F1", "F2", "M1", "M2"),
 }
 
-#: 系列名とリポ名の接頭辞（`sbv2-<モデル名>`）。
+#: The prefix of series and repository names (`sbv2-<model name>`).
 SBV2_SERIES_PREFIX = "sbv2"
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract (ADR 0041 §2 — per model).
 SBV2_PIPELINE = "sbv2/1"
 
-#: DeBERTa の系列とその variant ディレクトリ（`deberta/export.py` の綴り）。モデル名に依らない
-#: （ファミリー組み立てでは全モデルが同じ text_encoder を指し、`shared/` へ 1 回だけ入る）。
-#: 22 層 variant なのは末尾 2 層が SBV2 の経路で死んでいるから（{@link SBV2_TEXT_ENCODER_LAYERS}）。
-#: i4 系列は**混成**（linear と語彙表 = i4 group32・conv と相対位置表 = i8 — `deberta/export.py`
-#: の `BASE_WEIGHT_DTYPES` / `I4_MODULE_TYPES`）で、`i8+bert4` quant の text_encoder 席になる。
+#: The DeBERTa series and its variant directory (the spelling of `deberta/export.py`). Independent
+#: of the model name (in a family assembly every model points at the same text_encoder, which goes
+#: into `shared/` once). The variant has 22 layers because the last 2 layers are dead on the SBV2
+#: path ({@link SBV2_TEXT_ENCODER_LAYERS}).
+#: The i4 series is **mixed** (linear and the vocabulary table = i4 group32, conv and the
+#: relative-position tables = i8 — `BASE_WEIGHT_DTYPES` / `I4_MODULE_TYPES` of
+#: `deberta/export.py`) and becomes the text_encoder seat of the `i8+bert4` quant.
 SBV2_TEXT_ENCODER_SERIES = "deberta-i8"
 SBV2_TEXT_ENCODER_I4_SERIES = "deberta-i4"
 SBV2_TEXT_ENCODER_VARIANT = "sbv2-22layer"
 
-#: 配布 text_encoder に残っている encoder 層の数。SBV2 が使う `hidden_states[-3]`
-#: （`[0]` = embedding 出力・`[i+1]` = layer i の出力なので先頭から 22 番目 = layer 21 の出力）を
-#: **グラフの最終出力**にするための層数で、参照実装の添字をこの 1 つの数へ解いてある。
+#: The number of encoder layers left in the distributed text_encoder. It is the layer count that
+#: makes `hidden_states[-3]`, which SBV2 uses (`[0]` = embedding output, `[i+1]` = output of layer
+#: i, so the 22nd from the start = the output of layer 21), **the graph's final output**; the
+#: reference implementation's index is resolved into this one number.
 SBV2_TEXT_ENCODER_LAYERS = 22
 
-#: 配布 text_encoder のグラフ出力の本数。SBV2 が読むのは 1 本だけで、ランタイムは
-#: `graph.outputs` を**全部** readback するため、全層出しのまま配ると毎 run で使わない
-#: 22 本ぶんの staging + mapAsync を払う（ADR 0045 波 2 の実測 — T=512 で −10.6%）。
+#: The number of graph outputs of the distributed text_encoder. SBV2 reads only one, and the
+#: runtime reads back **all** of `graph.outputs`, so shipping it with every layer as an output
+#: would pay staging + mapAsync for 22 unused outputs on every run (measured in ADR 0045 wave 2 —
+#: −10.6% at T=512).
 SBV2_TEXT_ENCODER_OUTPUTS = 1
 
-#: 配布 text_encoder のグラフ入力の並び（`deberta.export.INPUT_ORDER` と同じ）。相対位置の
-#: 添字表 2 本が**入力に居ること**が波 3 の成果そのもので、焼き込みへ戻ると 2MiB の死荷重が
-#: 復活する（値は正しいままなので E2E では捕まらない）。
+#: The order of the graph inputs of the distributed text_encoder (the same as
+#: `deberta.export.INPUT_ORDER`). **Having the 2 relative-position index tables as inputs** is the
+#: result of wave 3 itself; going back to baking them in brings back 2MiB of dead weight (the values
+#: stay correct, so the E2E does not catch it).
 SBV2_TEXT_ENCODER_INPUTS: tuple[str, ...] = (
     "input_ids",
     "attention_mask",
@@ -129,47 +143,50 @@ SBV2_TEXT_ENCODER_INPUTS: tuple[str, ...] = (
     "p2c_pos",
 )
 
-#: initializer 名から encoder の層番号を拾う（IR v2 の initializer 名 = テンソルキー
-#: `model.encoder.layer.<i>....` — docs/ir-v2.md）。層数の門はこれで数える。
+#: Picks the encoder layer number out of an initializer name (an IR v2 initializer name = the tensor
+#: key `model.encoder.layer.<i>....` — docs/ir-v2.md). The layer-count check counts with it.
 SBV2_LAYER_PATTERN = re.compile(r"layer[._](\d+)[._]")
 
-#: `sbv2.demo assets` が書くホスト資産の置き場と綴り。系列（IR + io）ではないので
-#: `outputs/series/` の下ではない。
+#: Location and spelling of the host assets `sbv2.demo assets` writes. They are not a series (IR +
+#: io), so they are not under `outputs/series/`.
 SBV2_DEMO_DIRNAME = "sbv2-demo"
 SBV2_SYMBOLS_FILE = "symbols.json"
 SBV2_TOKENIZER_FILE = "deberta-tokenizer.json"
 
-#: 実重みと config の置き場（`sbv2.export.DEFAULT_MODEL_DIR` と同じ場所）。
+#: Location of the real weights and the config (the same place as `sbv2.export.DEFAULT_MODEL_DIR`).
 SBV2_CONFIG_FILE = "config.json"
 SBV2_STYLE_FILE = "style_vectors.npy"
 
-#: `symbols.json` の**モデル固有欄** → `config.json` の `data` のキー（{@link
-#: assert_symbols_match_model} が突き合わせる対）。`style` / `speaker` は TS 側が読まない
-#: （`symbols.ts` の `JpExtraRules` に欄が無い）ので、突合の対象はこの 2 欄だけ。
+#: **Model-specific fields** of `symbols.json` → keys of `data` in `config.json` (the pairs {@link
+#: assert_symbols_match_model} compares). The TS side does not read `style` / `speaker` (there is no
+#: such field in `JpExtraRules` of `symbols.ts`), so only these 2 fields are compared.
 SBV2_SYMBOLS_MODEL_FIELDS: Mapping[str, str] = {
     "samplingRate": "sampling_rate",
     "hopLength": "hop_length",
 }
 
-#: スタイルベクトルの幅（`front` のグラフ入力 `style_vec[1,256]` の 256）。同じ値を
-#: `sbv2.export.style_vector` も持つ — 幅が違う表を受理すると配布形は緑で組み上がり、
-#: **利用者の手元で初めて**グラフ入力と食い違って落ちる。
+#: The width of a style vector (the 256 of `front`'s graph input `style_vec[1,256]`).
+#: `sbv2.export.style_vector` holds the same value — accepting a table of another width would
+#: assemble a green distribution that fails against the graph input **only on the user's machine**.
 SBV2_STYLE_WIDTH = 256
 
-#: 話者埋め込みの出所（ckpt のテンソルキー）。`front` / `voice` はどちらも `g[1,512,1]` を
-#: グラフ入力に取るので、**この表が無いと配布形だけではグラフを実行できない**。
+#: Where the speaker embeddings come from (the tensor key in the ckpt). `front` / `voice` both take
+#: `g[1,512,1]` as a graph input, so **without this table the distribution alone cannot run the
+#: graphs**.
 SBV2_SPEAKER_TENSOR = "emb_g.weight"
 
-#: 配布する表のテンソルキー（`.npy` / ckpt を 1 テンソルの safetensors へ移すときの唯一のキー）。
+#: Tensor keys of the shipped tables (the only key when moving a `.npy` / ckpt into a one-tensor
+#: safetensors).
 SBV2_STYLE_KEY = "style_vectors"
 SBV2_SPEAKER_KEY = "speaker_embeddings"
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表・変換先・manifest が共有する 1 箇所。
-#: `style_vectors` / `speaker_embeddings` だけは配置ではなく変換の出力なので
-#: {@link sbv2_placements} には現れない。
-#: 役割名が dtype 接尾辞を持たない `text_encoder` だけ i8 席の綴りのままなのは、2 つ目の
-#: 格納形（i4 混成）が後から生えた席だから — 既存席の役割名を動かすと配布形の path も
-#: 動くので、増える側にだけ接尾辞を付ける。
+#: Relative output paths (**within the model subtree**) — the one place shared by the placement
+#: table, the conversion targets and the manifest. Only `style_vectors` / `speaker_embeddings` are
+#: outputs of a conversion rather than a placement, so they do not appear in
+#: {@link sbv2_placements}.
+#: `text_encoder` alone keeps the i8 seat's spelling with no dtype suffix on the role name because
+#: the second storage form (the i4 mix) is a seat added later — renaming an existing seat's role
+#: would move the distribution's paths too, so only the added side gets a suffix.
 SBV2_OUTPUT_PATHS: Mapping[str, str] = {
     "text_encoder": "text_encoder/model.i8.krm",
     "text_encoder_i4": "text_encoder/model.i4.krm",
@@ -185,21 +202,23 @@ SBV2_OUTPUT_PATHS: Mapping[str, str] = {
     "speaker_embeddings": "speakers/speaker_embeddings.safetensors",
 }
 
-#: text_encoder の席（格納形ごとに 1 本）。MUST: 門 {@link assert_bert_hidden} は**席ごとに**
-#: 掛ける — 2 本は別々に export された独立のコンテナなので、片方だけ層数・出力形・入力の並びが
-#: ずれた配布形が普通に組み上がる（ずれても shape は合ったまま実行は通り、別の層の BERT 特徴で
-#: 音が出るだけで沈黙する）。
+#: The text_encoder seats (one per storage form). MUST: the check {@link assert_bert_hidden} runs
+#: **per seat** — the 2 are independent containers exported separately, so a distribution where
+#: only one has a shifted layer count, output form or input order assembles without complaint (the
+#: shapes still match and it runs, producing audio from another layer's BERT features — silently).
 SBV2_TEXT_ENCODER_ROLES: tuple[str, ...] = ("text_encoder", "text_encoder_i4")
 
-#: 格納 dtype の要求（Anima の {@link STORAGE_REQUIREMENTS} と同じ根拠 — 素の F32 資産が
-#: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。tokenizer / symbols
-#: （JSON）と style_vectors（こちらが書く F32）はここに載せない。
+#: Storage dtype requirements (the same rationale as Anima's {@link STORAGE_REQUIREMENTS} — an
+#: actual incident where a plain F32 asset passed assembly, loading and execution and stayed silent
+#: until the reference-agreement check). tokenizer / symbols (JSON) and style_vectors (F32 written
+#: here) are not listed.
 #:
-#: `text_encoder` は i8 系列なので I8、`text_encoder_i4` / `front_i4` / `voice_i4` は混成
-#: （F32 + I8 + I4 が同居する）なので **I4 を要求する** — {@link assert_storage} は「要求 dtype が
-#: ヘッダに在るか」の片方向検査なので、集合の中で 2 つの系列を区別できる唯一の dtype を名指し
-#: する。I8 を要求しても i8 系列が素通りしてしまい、席の取り違えが沈黙する（i4 席に i8 系列が
-#: 入ると、サイズだけが元に戻った配布形が層数も形も合ったまま組み上がる）。
+#: `text_encoder` is an i8 series, so I8; `text_encoder_i4` / `front_i4` / `voice_i4` are mixed (F32
+#: + I8 + I4 together), so they **require I4** — {@link assert_storage} is a one-way check of "is
+#: the required dtype in the header", so it names the only dtype that tells the 2 series apart
+#: within the set. Requiring I8 would let the i8 series through and a swapped seat would stay
+#: silent (an i8 series in an i4 seat assembles a distribution whose size alone went back, with
+#: layer count and shapes still matching).
 SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "text_encoder": "i8",
     "text_encoder_i4": "i4",
@@ -211,16 +230,18 @@ SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "voice_i4": "i4",
 }
 
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
-#: {@link SBV2_STORAGE_REQUIREMENTS} の存在検査は片方向なので、**圧縮席どうしの取り違え**が
-#: 素通りする — i4 系列は混成（F32 + I8 + I4）で、i4 適格外の重みは i8 のまま残るので
-#: **必ず I8 を含む**。したがって i4 系列を `text_encoder` / `front_i8` / `voice_i8` の i8 席へ
-#: 挿し込むと「I8 を含む」を満たしてしまい、組み立ても verify_dist も manifest 検査も全部通る。
-#: 出来上がるのは「席名も path も `model.i8.krm` なのに中身は i4 混成」という配布形で、
-#: i8 席は f32 compute なので実行も例外を出さず、音が i4 の品質で出るだけで沈黙する。
-#: MUST: 禁止は**役割ごとに集合**で持つ（1 dtype だけ書くと 4 本目の系列が生えた日に、名指し
-#: しなかったほうが黙って素通りする — anima / irodori と同じ規律）。f16 席は I8 / I4 の
-#: 両方の不在で二重に締める。
+#: Storage vocabulary that **must not appear** in each role's binding table
+#: ({@link assert_storage_absent}). The presence check of {@link SBV2_STORAGE_REQUIREMENTS} is
+#: one-way, so **a swap between compressed seats** gets through — the i4 series is mixed (F32 + I8 +
+#: I4) and the weights not eligible for i4 stay i8, so it **always contains I8**. Plugging the i4
+#: series into the i8 seat of `text_encoder` / `front_i8` / `voice_i8` therefore satisfies "contains
+#: I8", and assembly, verify_dist and the manifest checks all pass. The result is a distribution
+#: whose "seat name and path say `model.i8.krm` but the contents are the i4 mix"; the i8 seat
+#: computes in f32, so execution raises nothing either, and the audio just comes out at i4 quality,
+#: silently.
+#: MUST: the prohibitions are held **as a set per role** (writing a single dtype means that on the
+#: day a 4th series appears, the one not named silently gets through — the same discipline as anima
+#: / irodori). The f16 seats are locked twice, by the absence of both I8 and I4.
 SBV2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "text_encoder": ("i4",),
     "front_f16": ("i8", "i4"),
@@ -229,23 +250,26 @@ SBV2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "voice_i8": ("i4",),
 }
 
-#: 配布形に載る部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1 —
-#: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。書き手はここから
-#: 引く: `front` / `voice` は `sbv2/export.py` の `TARGET_*`、`text_encoder` は別台本
-#: （`deberta/export.py`）が写しを持つ（produce 側が consume 側を import する向きは作らない
-#: — {@link EXPORT_PROVENANCE_FILE} と同じ理由で、一致は deberta 側のテストが突き合わせる）。
+#: The component names in the distribution = the keys of the manifest's weights = **the graph names
+#: of the containers** (container-v1 §2.1 — the runtime looks them up by name with
+#: `prepareContainer(opened, <weights key>)`). The writers take them from here: `front` / `voice`
+#: via `TARGET_*` of `sbv2/export.py`, while `text_encoder` is copied by a separate script
+#: (`deberta/export.py`) (no import from the producing side to the consuming side — for the same
+#: reason as {@link EXPORT_PROVENANCE_FILE}, a deberta-side test checks that they agree).
 #:
-#: NOTE: `dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形に載らない（モジュール
-#: docstring）ので、部品名を持たない — 書き手はターゲット名をそのままグラフ名にする。
+#: NOTE: `dp` / `flow` / `dec` are standalone graphs for golden verification only and are not in the
+#: distribution (module docstring), so they have no component names — the writer uses the target
+#: name as the graph name.
 SBV2_TEXT_ENCODER_COMPONENT = "text_encoder"
 SBV2_FRONT_ROLE = "front"
 SBV2_VOICE_ROLE = "voice"
 
-#: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
-#: `{variants}` の 2 形は消えた）。どの役割でも `i4` は**混成の系列**を指すラベルで、実体は
-#: 「i4 適格な重みが i4 group32・残りは i8」— 適格の範囲は台本ごとに違い、`text_encoder` は
-#: linear + 語彙表（`deberta/export.py`）、`front` / `voice` は linear + conv1d
-#: （`sbv2/export.py` — groups == 1 かつ行長が group32 で割り切れるもの）。
+#: The weights declaration (dtype label → role name). The dtype keys are the unified form of ADR
+#: 0041 §3 (the 2 forms `{file}` / `{variants}` of v1 are gone). For every role, `i4` is a label
+#: pointing at **a mixed series**, which in fact means "i4-eligible weights in i4 group32, the rest
+#: i8" — the eligible range differs per script: linear + the vocabulary table for `text_encoder`
+#: (`deberta/export.py`), linear + conv1d for `front` / `voice` (`sbv2/export.py` — those with
+#: groups == 1 and a row length divisible by group32).
 SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     SBV2_TEXT_ENCODER_COMPONENT: {
         "i8": WeightFiles("text_encoder"),
@@ -263,7 +287,7 @@ SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     },
 }
 
-#: assets の宣言（quant 選択に依存しない無条件ファイル）。
+#: The assets declaration (unconditional files that do not depend on the quant choice).
 SBV2_ASSETS: Mapping[str, str] = {
     "tokenizer": "tokenizer",
     "symbols": "symbols",
@@ -271,32 +295,36 @@ SBV2_ASSETS: Mapping[str, str] = {
     "speaker_embeddings": "speaker_embeddings",
 }
 
-#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が
-#: 持ち、生成モデルカードの quant 表に対応を必ず出す**）。`bert` は役割名 `text_encoder` より
-#: 短く読みやすいが、それ自体が語彙になるので対応を配布物へ必ず出す。
+#: Component-override token of a quant name → its weights name (ADR 0074 decision 4 — **the recipe
+#: defines the abbreviations, and the quant table of the generated model card always shows the
+#: mapping**). `bert` is shorter and easier to read than the role name `text_encoder`, but it
+#: becomes vocabulary itself, so the mapping is always shown in what is shipped.
 SBV2_QUANT_ABBREVIATIONS: Mapping[str, str] = {"bert": "text_encoder"}
 
-#: quant 表。MUST: **dtype が 2 つ以上ある役割は全 quant が明示指定する**
-#: （{@link complete_quant_weights}）— `text_encoder` に i4 席が生えた時点で、既定を勝手に
-#: 選ぶ経路（黙って別の格納形が配られる）は塞がれている。
+#: The quant table. MUST: **for a role with 2 or more dtypes, every quant names one explicitly**
+#: ({@link complete_quant_weights}) — once `text_encoder` gained an i4 seat, the path that picks a
+#: default on its own (silently shipping another storage form) was closed.
 #:
-#: 席名は ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…`。SBV2 は全役割が同じ格納を持つ
-#: ので基底 1 語で足り、`f16` 席だけ text_encoder が i8 なので `+bert8` が付く（実態に合わせる
-#: — f16 席に f16 の text_encoder は無い〈`deberta/export.py` が f16 を持たない〉）。
-#: `i8+bert4` は `i8` と同構成で `text_encoder` だけ i4 混成（BERT の linear と語彙表を i4
-#: group32 に落とす）。`i4` は**3 席とも i4 混成**（session は空 = f32 compute のまま — 活性は
-#: 動かさない）。
-#: 数値は f32 同一性の指標では大きく動く。聴感は一次通過だが、`i4` は f32 比でテンションが
-#: 少し低め（perf-ledger Q-1 / research 2026-08-19 §6 — net_g の RTN i4 由来）で、これが
-#: 既定を `i8+bert4` に戻した根拠（{@link SBV2_DEFAULT_QUANT}）。
+#: Quant names follow the grammar of ADR 0074 `<storage>[+<component><bits>]…[-<knob>]…`. In SBV2
+#: every role has the same storage, so one base word suffices; only the `f16` seat has an i8
+#: text_encoder, so it gets `+bert8` (matching reality — there is no f16 text_encoder for the f16
+#: seat (`deberta/export.py` has no f16)).
+#: `i8+bert4` is configured like `i8` except that `text_encoder` is the i4 mix (BERT's linear and
+#: vocabulary table dropped to i4 group32). `i4` is **the i4 mix for all 3 seats** (session is
+#: empty = still f32 compute — activations are left alone).
+#: The numbers move a lot on f32-identity metrics. It passed a first listening check, but `i4` has
+#: slightly lower tension than f32 (perf-ledger Q-1 / research 2026-08-19 §6 — from the RTN i4 of
+#: net_g), which is the reason the default went back to `i8+bert4` ({@link SBV2_DEFAULT_QUANT}).
 #:
-#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。
-#: 既定であることは書かない（`defaultQuant` が既に指している — ADR 0075 決定 3）。
+#: `label` / `description` are display fields for selection UIs (ADR 0075 decision 1 — English,
+#: limits of 64 / 200 characters). Being the default is not written there (`defaultQuant` already
+#: points at it — ADR 0075 decision 3).
 #:
-#: NOTE: net_g 側の i4 は conv1d 追補（波 J-5b・ADR 0069 追記 7）で**サイズ利得の本体**に
-#: なった — 適格 conv1d ≈56MiB が半減する（linear だけの時代は 6 本 = 配布形全体の 0.1% 未満で
-#: 利得ほぼゼロだった）。`text_encoder` の削減（Q-1 / J-5a）と合わせ、`i4` は名実ともに
-#: 「配布形を丸ごと 4bit 格納で通す席」。
+#: NOTE: on the net_g side, i4 became **the main source of the size gain** with the conv1d addendum
+#: (wave J-5b, ADR 0069 addendum 7) — the eligible conv1d weights (≈56MiB) are halved (in the
+#: linear-only days there were 6 weights = under 0.1% of the whole distribution, and the gain was
+#: nearly zero). Together with the `text_encoder` reduction (Q-1 / J-5a), `i4` is in name and in
+#: fact "the seat that stores the whole distribution in 4 bits".
 SBV2_QUANTS: Mapping[str, Any] = {
     "f16+bert8": {
         "weights": {"text_encoder": "i8", "front": "f16", "voice": "f16"},
@@ -335,16 +363,18 @@ SBV2_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: 既定は `i8+bert4`（2026-08-20 ユーザー再裁定 — 既定は**品質最優先**。`i4` は聴感で f32 比の
-#: 差が残る〈テンションが少し低め — net_g の RTN i4 由来〉ので、速度 / サイズを取りに行く人が
-#: 明示して選ぶ opt-in の席に置く。`i8+bert4` は BERT だけ GPTQ 校正付きの i4 で、聴感は f32
-#: とほぼ同一。経緯と数値は perf-ledger Q-1 / Q-6 と research 2026-08-20 §7）。`i8` は
-#: opt-in の参照系として残る — WAV 参照門（e2e_sbv2_wav_test）の不変アンカー。
+#: The default is `i8+bert4` (maintainer re-ruling of 2026-08-20 — the default **puts quality
+#: first**. `i4` keeps an audible difference from f32 (slightly lower tension — from the RTN i4 of
+#: net_g), so it is an opt-in seat chosen explicitly by those who want speed / size. `i8+bert4` has
+#: only BERT in GPTQ-calibrated i4 and sounds nearly identical to f32. History and numbers are in
+#: perf-ledger Q-1 / Q-6 and research 2026-08-20 §7). `i8` remains as the opt-in reference — the
+#: fixed anchor of the WAV reference check (e2e_sbv2_wav_test).
 SBV2_DEFAULT_QUANT = "i8+bert4"
 
-#: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来 —
-#: {@link sbv2_knob_defaults}）。配布形の中でノブの既定を持つのは manifest のこの 1 席だけで、
-#: 共有席の `symbols.json` には載せない（`sbv2.demo.jp_extra_rules` の MUST）。
+#: The runtime knobs in `pipelineConfig.defaults` (from `style_bert_vits2.constants` —
+#: {@link sbv2_knob_defaults}). Within the distribution, this one field of the manifest is the only
+#: holder of knob defaults; they are not put into the shared seat `symbols.json` (the MUST of
+#: `sbv2.demo.jp_extra_rules`).
 SBV2_KNOB_KEYS: tuple[str, ...] = (
     "style",
     "styleWeight",
@@ -354,34 +384,38 @@ SBV2_KNOB_KEYS: tuple[str, ...] = (
     "lengthScale",
 )
 
-#: `pipelineConfig` に載る**運用上限**。焼いたグラフの記号次元の上限そのもので、
-#: `maxTokens` = DeBERTa のトークン列 T（`deberta.export.SYM_MAX`。front の音素次元 P の上限
-#: `sbv2.export.SYM_MAX` も同値）、`maxFrames` = flow / voice のフレーム次元 T
-#: （`sbv2.export.FLOW_SYM_MAX`）。
+#: **Operating limits** in `pipelineConfig`. They are exactly the symbolic-dimension limits of the
+#: baked graphs: `maxTokens` = the DeBERTa token sequence T (`deberta.export.SYM_MAX`; the limit of
+#: front's phoneme dimension P, `sbv2.export.SYM_MAX`, is the same value), `maxFrames` = the frame
+#: dimension T of flow / voice (`sbv2.export.FLOW_SYM_MAX`).
 #:
-#: MUST: 台本の値と一致させる（`sbv2/tests/test_distribution.py` が突き合わせる）。相対位置の表は
-#: ADR 0045 でホストへ外出しされ **T×T の確保はホスト側**（8·T² bytes 級）になったので、
-#: 割当上限を知る術が配布形にしか無い — ずれると「宣言は通るのにグラフの表が足りない」
-#: 形で利用者の手元でしか出ない。
+#: MUST: they match the scripts' values (`sbv2/tests/test_distribution.py` checks that). ADR 0045
+#: moved the relative-position tables out to the host, so **the T×T allocation is on the host side**
+#: (on the order of 8·T² bytes), and the distribution is the only way to know the allocation limit
+#: — a mismatch shows up only on the user's machine, as "the declaration passes but the graph's
+#: tables are too small".
 SBV2_MAX_TOKENS = 512
 SBV2_MAX_FRAMES = 4096
 
-#: 記号次元の上限を系列へ書き残す出所記録（`sbv2.export` と `deberta.export` が作業席の中で
-#: 書く）。綴りは書き手 2 つと読み手 1 つで一致していなければならないが、`deberta` は SBV2 の
-#: 消費者ではないので**こちらを import しない**（shared 席は資産の共有であって結合ではない —
-#: モジュール doc）。一致は `deberta/tests/test_export.py` が毎回突き合わせる。
+#: The provenance record that writes the symbolic-dimension limit into the series (written by
+#: `sbv2.export` and `deberta.export` inside the staging directory). The spelling must agree between
+#: the 2 writers and the 1 reader, but `deberta` is not a consumer of SBV2, so it **does not import
+#: this module** (the shared seat shares assets, it does not couple the code — module doc).
+#: `deberta/tests/test_export.py` checks the agreement on every run.
 EXPORT_PROVENANCE_FILE = "export_provenance.json"
 
 
 class Sbv2SymExpectation(NamedTuple):
-    """席が焼かれているべき記号次元の宣言（台本のターゲット名・IR の記号名・上限）。
+    """Declaration of the symbolic dimension a seat should be baked with (the script's target name,
+    the IR symbol name, the limit).
 
-    `baked` は「その上限が **artifact のバイトから読めるか**」— front / voice は相対位置の
-    添字表を Tmax で焼いて `sym_prefix_slice` で切り出すので読めるが、text_encoder（DeBERTa）は
-    その表が ADR 0045 波 3 でグラフ**入力**へ昇格したため、上限を運ぶ焼き込み定数を 1 本も
-    持たない（2026-08-30 の出荷 4 コンテナ実測 — `sym_prefix_slice` は 0 本）。読めない席では
-    {@link assert_baked_sym_max} の代わりに {@link assert_baked_sym_max_absent} を掛け、
-    上限そのものの突合は {@link assert_sym_provenance}（記録）だけが持つ。
+    `baked` says whether "that limit **can be read from the artifact's bytes**" — front / voice bake
+    the relative-position index tables at Tmax and cut them with `sym_prefix_slice`, so it can be
+    read; for text_encoder (DeBERTa), ADR 0045 wave 3 promoted those tables to graph **inputs**, so
+    it has no baked constant carrying the limit at all (measured on the 4 shipped containers on
+    2026-08-30 — 0 `sym_prefix_slice` nodes). For seats where it cannot be read,
+    {@link assert_baked_sym_max_absent} runs instead of {@link assert_baked_sym_max}, and only
+    {@link assert_sym_provenance} (the record) compares the limit itself.
     """
 
     target: str
@@ -390,22 +424,24 @@ class Sbv2SymExpectation(NamedTuple):
     baked: bool = True
 
 
-#: 席 → 記号次元の期待。`sbv2.export` / `deberta.export` の `--sym-max` は任意の値を通す研究用
-#: ノブで、渡した値はそのまま `Dim` の max になる。ところが上の {@link SBV2_MAX_TOKENS} /
-#: {@link SBV2_MAX_FRAMES} は定数で manifest へ焼かれるので、既定から外して採り直した系列を挿すと
-#: **export は緑・配布も緑**のまま `pipelineConfig` だけが嘘になり、消費側で初めて上限超過に
-#: 当たる（host 側の `maxFrames` 門は通過する）。2 つの門で塞ぐ:
-#: {@link assert_sym_provenance}（書き出した側の記録）と {@link assert_baked_sym_max}
-#: （**artifact 自身**の焼き込み定数 — `baked` の席だけ）。
+#: Seat → expected symbolic dimension. `--sym-max` of `sbv2.export` / `deberta.export` is a research
+#: knob that accepts any value, and the value passed becomes the max of `Dim` as is. But
+#: {@link SBV2_MAX_TOKENS} / {@link SBV2_MAX_FRAMES} above are constants baked into the manifest, so
+#: plugging in a series re-taken away from the default leaves **export green and distribution
+#: green** while only `pipelineConfig` lies, and the consumer is the first to hit the limit (the
+#: host-side `maxFrames` check passes). Two checks close it:
+#: {@link assert_sym_provenance} (the record of the writing side) and {@link assert_baked_sym_max}
+#: (the baked constants of **the artifact itself** — only for `baked` seats).
 #:
-#: MUST: 列挙元は {@link SBV2_WEIGHTS} — dtype 席が 1 本増えた日に、名指ししなかった席だけが
-#: 黙って素通りする形にしない。
+#: MUST: the enumeration comes from {@link SBV2_WEIGHTS} — so that on the day one more dtype seat
+#: appears, no seat silently gets through because it was not named.
 #:
-#: `text_encoder` の上限が {@link SBV2_MAX_TOKENS} なのは、この定数が front の音素次元 P と
-#: DeBERTa のトークン次元 T の**両方**の上限を兼務しているから（`deberta.export.SYM_MAX` も同値）。
-#: ターゲット名に variant 名を使うのは、`deberta/export.py` に `--target` が無く、どの形として
-#: 焼いたかを名乗るのが variant（層数 × 出力形）1 つきりだから — dev-2layer / full-24layer を
-#: 22 層の席名のディレクトリへ写した取り違えは、この記録だけが名指しできる。
+#: The limit of `text_encoder` is {@link SBV2_MAX_TOKENS} because that constant serves as the limit
+#: of **both** front's phoneme dimension P and DeBERTa's token dimension T (`deberta.export.SYM_MAX`
+#: is the same value). The target name is the variant name because `deberta/export.py` has no
+#: `--target`, and the variant (layer count × output form) is the only thing that says what form it
+#: was baked as — only this record can name the mix-up of copying dev-2layer / full-24layer into the
+#: directory of the 22-layer seat name.
 SBV2_SYM_EXPECTATIONS: Mapping[str, Sbv2SymExpectation] = {
     files.file: expectation
     for name, expectation in (
@@ -421,34 +457,39 @@ SBV2_SYM_EXPECTATIONS: Mapping[str, Sbv2SymExpectation] = {
 
 
 def sbv2_series_name(model: str) -> str:
-    """系列名の幹（`outputs/series/<この名前>-{f16,i8}/`）。
+    """The stem of the series name (`outputs/series/<this name>-{f16,i8}/`).
 
-    綴りは `sbv2.export.default_out_root` と同一 — 書き手と読み手が同じ 1 語から組む。
+    The spelling is identical to `sbv2.export.default_out_root` — writer and reader build from the
+    same word.
     """
     return f"{SBV2_SERIES_PREFIX}-{model}"
 
 
 def sbv2_repo_name(family: str) -> str:
-    """声のファミリーの配布リポ名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。
+    """The distribution repository name of a voice family (`<DIST_ROOT>/<this name>/` becomes one HF
+    repository).
 
-    リポは**声のファミリー単位**（JVNV の 4 声は `karume-sbv2-jvnv` に同居する）で、話者単位の
-    リポは作らない（2026-09-25 裁定 — 全域レビュー W-RC5-2）。Pipeline がこの名前を宣言する
-    ので、`--repo` を明示しなくてもカードの Usage と既定の出力先が公開リポを指す（話者名から
-    導いていた頃は `karume-sbv2-F1` のような実在しないリポを名乗った）。
+    Repositories are **per voice family** (the 4 JVNV voices share `karume-sbv2-jvnv`); there are
+    no per-speaker repositories (ruling of 2026-09-25 — repository-wide review W-RC5-2). The
+    Pipeline declares this name, so the card's Usage and the default output point at the public
+    repository even without an explicit `--repo` (when it was derived from the speaker name, it
+    declared nonexistent repositories such as `karume-sbv2-F1`).
 
-    `karume-` を前置する（リポ名裁定 2026-08-09 — HF org を作らない代わりに配布リポは
-    `karume-` prefix で名前空間を切る）。系列名（{@link sbv2_series_name}）には掛からない。
+    It is prefixed with `karume-` (repository-name ruling of 2026-08-09 — instead of creating an HF
+    org, the distribution repositories get a namespace from the `karume-` prefix). It does not apply
+    to series names ({@link sbv2_series_name}).
     """
     return f"karume-{SBV2_SERIES_PREFIX}-{family}"
 
 
 @dataclass(frozen=True)
 class Sbv2Sources:
-    """組み立ての入力。系列 2 本のほかに、系列でない 2 つの置き場を跨ぐ。
+    """Assembly inputs. Besides the 2 series, they span 2 locations that are not series.
 
-    `demo` は `sbv2.demo assets` が書くホスト資産（`outputs/` 直下 — 系列ではない）、
-    `model` は ckpt と `config.json` / `style_vectors.npy`（`inputs/` — 生成物ではない）。
-    どちらも `--series` の下に無いので、系列の親から機械的に導けるのは前 3 つだけ。
+    `demo` is the host assets written by `sbv2.demo assets` (directly under `outputs/` — not a
+    series), `model` is the ckpt and `config.json` / `style_vectors.npy` (`inputs/` — not generated
+    output). Neither is under `--series`, so only the first 3 can be derived mechanically from the
+    parent of the series.
     """
 
     series_f16: Path
@@ -461,7 +502,8 @@ class Sbv2Sources:
 
 
 def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sources:
-    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
+    """Takes the inputs from the parent directory of the series (`outputs/series/`) and the
+    spellings of `_shared.paths`."""
     return Sbv2Sources(
         series_f16=series_dir / f"{sbv2_series_name(model)}-f16",
         series_i8=series_dir / f"{sbv2_series_name(model)}-i8",
@@ -474,11 +516,12 @@ def sbv2_sources(series_dir: Path, model: str = SBV2_DEFAULT_MODEL) -> Sbv2Sourc
 
 
 def sbv2_placements(sources: Sbv2Sources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link SBV2_OUTPUT_PATHS} が持つ。
+    """Role name → source file. The output paths are held by {@link SBV2_OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（`io.*.safetensors` を落とす仕掛けはこれで足りる）。
-    `style_vectors`（`.npy` → safetensors）と `speaker_embeddings`（ckpt の 1 テンソル →
-    safetensors）は配置ではなく**変換**なのでここには現れない。
+    Anything not in this table does not go into the output (that is all it takes to drop
+    `io.*.safetensors`). `style_vectors` (`.npy` → safetensors) and `speaker_embeddings` (one tensor
+    of the ckpt → safetensors) are **conversions** rather than placements, so they do not appear
+    here.
     """
     return {
         "text_encoder": sources.text_encoder / "model.krm",
@@ -495,15 +538,17 @@ def sbv2_placements(sources: Sbv2Sources) -> dict[str, Path]:
 
 
 def sbv2_knob_defaults() -> dict[str, Any]:
-    """実行時ノブの既定を `style_bert_vits2.constants` から引く（定数を写経しない）。
+    """Takes the runtime knob defaults from `style_bert_vits2.constants` (the constants are not
+    hand-copied).
 
-    配布形でノブの既定を持つのは `karume.json` の `pipelineConfig.defaults` の 1 席だけ
-    （TS 側の `sbv2.Pipeline` もそこだけを読む — `symbols.ts` の `defaults` の doc）。以前は
-    共有席の `symbols.json` にも同じ値の写しを焼いて突き合わせていたが、その写しには消費者が
-    いなかった（2026-09-24 全域レビュー W-RC5-1 で写しごと外した）。
+    In the distribution, the one field `pipelineConfig.defaults` of `karume.json` is the only holder
+    of knob defaults (the TS-side `sbv2.Pipeline` reads only that — the doc of `defaults` in
+    `symbols.ts`). A copy of the same values used to be baked into the shared seat `symbols.json` as
+    well and compared, but that copy had no consumer (removed together with the comparison in the
+    2026-09-24 repository-wide review W-RC5-1).
 
-    NOTE: `style_bert_vits2` は optional な `sbv2` dependency-group なので import は関数内。
-    Anima の組み立てと `karume.dist` の import 自体はこの依存に触れない。
+    NOTE: `style_bert_vits2` is the optional `sbv2` dependency-group, so it is imported inside the
+    function. Anima's assembly and the import of `karume.dist` itself do not touch this dependency.
     """
     from style_bert_vits2.constants import (
         DEFAULT_LENGTH,
@@ -525,36 +570,41 @@ def sbv2_knob_defaults() -> dict[str, Any]:
 
 
 def sbv2_ir_graph(path: Path) -> Mapping[str, Any]:
-    """配布候補のグラフ記述から IR v2 のグラフ JSON を読む（重みは 1 バイトも読まない）。
+    """Reads the IR v2 graph JSON from the graph descriptor of a distribution candidate (not a
+    single byte of the weights is read).
 
-    グラフを見る門が 2 つある（{@link assert_bert_hidden} の層 / 出力 / 入力と、
-    {@link assert_baked_sym_max} の焼き込み次元）ので、読み取りと不整合の名指しはここ 1 本。
+    Two checks look at the graph (layers / outputs / inputs in {@link assert_bert_hidden}, and the
+    baked dimensions in {@link assert_baked_sym_max}), so reading and naming inconsistencies live in
+    this one function.
 
-    実体は core の {@link karume.dist.ir_graph} をそのまま呼ぶ — 以前はここに同じ読み取りを
-    写していたが、配布形が常時分割になった（container-v1 §8）ときに**写しの側だけが代表 path
-    を直接開いたまま**残った（part 0 を名指しで読むのは core 側だけ）。名前を残すのは上の
-    2 門が同じ綴りで引くため。
+    It just calls the core's {@link karume.dist.ir_graph} — this module used to hold a copy of the
+    same reading, but when the distribution became always split (container-v1 §8), **only the copy
+    kept opening the representative path directly** (only the core reads part 0 by name). The name
+    stays because the 2 checks above refer to it by this spelling.
     """
     return ir_graph(path)
 
 
 def sbv2_baked_sym_bounds(role: str, path: Path, symbol: str) -> list[int]:
-    """焼き込み定数の静的次元から、そのグラフが受理する記号次元の上限を**全部**拾う。
+    """Collects **every** limit of a symbolic dimension that the graph accepts, from the static
+    dimensions of its baked constants.
 
-    `sym_prefix_slice` は「Tmax で焼いた静的形の先頭 `coeff·sym+offset` を切り出す」op
-    （ADR 0010）で、切り出し元の定数次元がそのまま**受理できる sym の上限**になる
-    （超過はランタイムの `shapes.ts` が「Tmax 超過」で落とす）。したがって台本の `--sym-max`
-    は資産の中に残っていて、記録を信じずに artifact だけから読める。
+    `sym_prefix_slice` is the op that "cuts the leading `coeff·sym+offset` out of a static shape
+    baked at Tmax" (ADR 0010), and the constant dimension it cuts from is exactly **the sym limit it
+    can accept** (going over fails in the runtime's `shapes.ts` with "Tmax exceeded"). So the
+    script's `--sym-max` remains inside the asset and can be read from the artifact alone, without
+    trusting the record.
 
-    「1 本も無い」を空リストで返して呼び手に判断を預けるのは、席によって意味が逆だから —
-    front / voice では恒真化の兆候（{@link assert_baked_sym_max}）、text_encoder では
-    **在るべき状態**（{@link assert_baked_sym_max_absent}）。
+    "None at all" is returned as an empty list, leaving the decision to the caller, because it means
+    opposite things per seat — for front / voice a sign that the check has become vacuous
+    ({@link assert_baked_sym_max}), for text_encoder **the expected state**
+    ({@link assert_baked_sym_max_absent}).
     """
     graph = sbv2_ir_graph(path)
     values = graph.get("values")
     nodes = graph.get("nodes")
     if not isinstance(values, dict) or not isinstance(nodes, list):
-        raise DistError(f"{role}: {path} の IR メタデータに values / nodes が無い")
+        raise DistError(f"{role}: the IR metadata of {path} has no values / nodes")
     bounds: list[int] = []
     for node in nodes:
         if not isinstance(node, dict):
@@ -569,15 +619,16 @@ def sbv2_baked_sym_bounds(role: str, path: Path, symbol: str) -> list[int]:
             for entry in attrs["slices"]:
                 bounds.append((shape[entry["dim"]] - entry["offset"]) // entry["coeff"])
         except (KeyError, IndexError, TypeError, ZeroDivisionError) as error:
-            raise DistError(f"{role}: {path} の sym_prefix_slice が読めない — {error}") from error
+            raise DistError(f"{role}: unreadable sym_prefix_slice in {path} — {error}") from error
     return bounds
 
 
 def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
-    """そのグラフが実際に受理する記号次元の上限（複数あれば最も厳しいもの）。
+    """The limit of a symbolic dimension the graph actually accepts (the strictest, if several).
 
-    MUST: 対象ノードが 1 本も無ければ落とす（恒真化の門）— 相対位置の表が入力へ昇格するなど
-    グラフの形が変わると、この門は「何も見ずに緑」へ静かに退化する。
+    MUST: fail if there is no target node at all (the vacuity check) — when the graph's form
+    changes, for example by promoting the relative-position tables to inputs, this check silently
+    degrades into "green without looking at anything".
     """
     bounds = sbv2_baked_sym_bounds(role, path, symbol)
     if not bounds:
@@ -589,12 +640,14 @@ def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
 
 
 def assert_baked_sym_max(role: str, path: Path, expectation: Sbv2SymExpectation) -> None:
-    """焼いたグラフの記号次元の上限が `pipelineConfig` の宣言と一致することを見る。
+    """Checks that the symbolic-dimension limit of the baked graph matches the declaration in
+    `pipelineConfig`.
 
-    manifest の `maxTokens` / `maxFrames` は「焼いたグラフの記号次元の上限そのもの」と自称して
-    いる（{@link SBV2_MAX_TOKENS}）のに、値は定数で焼かれていて artifact を一切見ていなかった
-    — その切断をここで閉じる。記録（{@link assert_sym_provenance}）と違い、こちらは**現物の
-    バイト**から導くので、記録の無い古い系列にも効く。
+    The manifest's `maxTokens` / `maxFrames` claim to be "exactly the symbolic-dimension limits of
+    the baked graphs" ({@link SBV2_MAX_TOKENS}), yet the values were baked as constants without ever
+    looking at the artifact — this closes that gap. Unlike the record
+    ({@link assert_sym_provenance}), this derives from **the actual bytes**, so it also works on old
+    series without a record.
     """
     baked = sbv2_baked_sym_max(role, path, expectation.symbol)
     if baked != expectation.sym_max:
@@ -607,18 +660,21 @@ def assert_baked_sym_max(role: str, path: Path, expectation: Sbv2SymExpectation)
 
 
 def assert_baked_sym_max_absent(role: str, path: Path, expectation: Sbv2SymExpectation) -> None:
-    """`baked=False` の席が、本当に上限を運ぶ焼き込み定数を持たないことを見る。
+    """Checks that a `baked=False` seat really has no baked constant carrying the limit.
 
-    text_encoder の上限は artifact から読めない（相対位置の表がグラフ入力 — ADR 0045 波 3）ので、
-    突合は記録（{@link assert_sym_provenance}）だけが持ち、記録の無い系列は受理される。その
-    「読めない」は**グラフの形の事実**であって恒久の保証ではないので、形が戻った日に席の分類が
-    黙って古びる — 表が焼き戻れば `sym_prefix_slice` が生え、そのときは
-    {@link assert_baked_sym_max} 側（`baked=True`）へ移すのが正しい。ここが落ちるのはその合図。
+    The limit of text_encoder cannot be read from the artifact (the relative-position tables are
+    graph inputs — ADR 0045 wave 3), so only the record ({@link assert_sym_provenance}) compares it,
+    and a series without a record is accepted. That "cannot be read" is **a fact about the graph's
+    form**, not a permanent guarantee, so the seat's classification silently goes stale on the day
+    the form comes back — if the tables get baked in again, `sym_prefix_slice` nodes appear, and the
+    right move is to put the seat on the {@link assert_baked_sym_max} side (`baked=True`). This
+    failing is the signal for that.
 
-    NOTE: 読めない席で唯一 512 に見える静的次元は `rel_embeddings` の `[512, 1024]` だが、これは
-    `2 × position_buckets`（= 256）で、`max_position_embeddings` と値が一致しているだけの別物
-    （`deberta/patch.py` の対数バケット化）。上限の出どころとして読むと**偶然の一致に門を建てる**
-    ことになるので、代わりにここは「上限を運ぶノードが無い」ことだけを見る。
+    NOTE: the only static dimension that looks like 512 in the unreadable seat is the `[512, 1024]`
+    of `rel_embeddings`, but that is `2 × position_buckets` (= 256), a different thing whose value
+    merely equals `max_position_embeddings` (the log bucketing of `deberta/patch.py`). Reading it as
+    the source of the limit would **build a check on a coincidence**, so instead this only checks
+    that "there is no node carrying the limit".
     """
     bounds = sbv2_baked_sym_bounds(role, path, expectation.symbol)
     if bounds:
@@ -631,12 +687,13 @@ def assert_baked_sym_max_absent(role: str, path: Path, expectation: Sbv2SymExpec
 
 
 def assert_sym_provenance(role: str, path: Path, expectation: Sbv2SymExpectation) -> None:
-    """書き出した側が残した記録（`export_provenance.json`）を宣言と突き合わせる。
+    """Compares the record left by the writing side (`export_provenance.json`) with the declaration.
 
-    NOTE: 記録が無い系列は受理する。同じ事実を artifact から導く {@link assert_baked_sym_max}
-    が**常に**掛かっていて、こちらが上乗せするのは「どのターゲットとして焼いたか」だけ —
-    記録の不在を拒否に倒すと、記録が生える前に焼いた全系列へ再 export（= 出荷済み配布形の
-    sha が動く作業）を課すことになり、閉じる穴に見合わない。
+    NOTE: a series without a record is accepted. {@link assert_baked_sym_max}, which derives the
+    same fact from the artifact, **always** runs, and this only adds "which target it was baked
+    as" — turning a missing record into a rejection would force a re-export (= work that moves the
+    sha of shipped distributions) on every series baked before records existed, out of proportion
+    to the hole it closes.
     """
     record_path = path.parent / EXPORT_PROVENANCE_FILE
     if not record_path.is_file():
@@ -646,7 +703,7 @@ def assert_sym_provenance(role: str, path: Path, expectation: Sbv2SymExpectation
     except ValueError as error:
         raise DistError(f"{role}: 出所記録を解析できない: {record_path} — {error}") from error
     if not isinstance(record, Mapping):
-        raise DistError(f"{role}: 出所記録 {record_path} が最上位オブジェクトでない")
+        raise DistError(f"{role}: the provenance record {record_path} is not a top-level object")
     if record.get("target") != expectation.target:
         raise DistError(
             f"{role}: 出所記録の target が {record.get('target')!r} で、この席が要求する"
@@ -660,22 +717,27 @@ def assert_sym_provenance(role: str, path: Path, expectation: Sbv2SymExpectation
 
 
 def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
-    """配布 text_encoder が「SBV2 が使う層の出力を 1 本だけ出す」形であることを検査する。
+    """Checks that the distributed text_encoder has the form "outputs only the one layer output SBV2
+    uses".
 
-    正しい組み合わせは **22 層 × 出力 1 本 × `bertHiddenFromEnd` 1** の 1 通りしかないが、
-    層数と出力形は `deberta/export.py` の variant が、取り出し位置は `sbv2/demo.py` の定数が
-    持つ**別々の台本**なので、片方だけ動いた配布形が普通に組み上がってしまう。
+    There is only one correct combination, **22 layers × 1 output × `bertHiddenFromEnd` 1**, but the
+    layer count and output form are held by the variant of `deberta/export.py` and the take-out
+    position by a constant of `sbv2/demo.py` — **separate scripts** — so a distribution where only
+    one of them moved assembles without complaint.
 
-    MUST: ずれても shape は合ったままロードも実行も通り、**別の層の BERT 特徴で音が出る**
-    だけで沈黙する（スタイル表・話者表の行数門と同じ機序）。3 つを別々に見るのは、それぞれが
-    別の取り違えを捕まえるため — 層数は「どの層の出力か」、出力本数は「検証用の全層出し資産が
-    混ざっていないか」、位置は「symbols.json だけ古いか」。
+    MUST: when they disagree, the shapes still match, loading and execution pass, and it stays
+    silent, **producing audio from another layer's BERT features** (the same mechanism as the
+    row-count checks of the style and speaker tables). The 3 are checked separately because each
+    catches a different mix-up — the layer count "which layer's output", the output count "whether
+    an all-layer-output asset for verification got mixed in", the position "whether only
+    symbols.json is stale".
+
     """
     graph = sbv2_ir_graph(text_encoder)
 
     initializers = graph.get("initializers")
     if not isinstance(initializers, dict) or not initializers:
-        raise DistError(f"{text_encoder}: IR メタデータに非空の initializers が無い")
+        raise DistError(f"{text_encoder}: the IR metadata has no non-empty initializers")
     layers = {match.group(1) for name in initializers if (match := SBV2_LAYER_PATTERN.search(name))}
     if len(layers) != SBV2_TEXT_ENCODER_LAYERS:
         raise DistError(
@@ -715,21 +777,24 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
 
 
 def assert_symbols_match_model(symbols_path: Path, config: Mapping[str, Any]) -> None:
-    """`symbols.json` の**モデル固有欄**が、今配っているモデルの `config.json` と一致すること。
+    """Checks that the **model-specific fields** of `symbols.json` match the `config.json` of the
+    model being shipped.
 
-    `sbv2.demo assets` は `--model-dir` で渡されたモデルの `hps.data` から `samplingRate` /
-    `hopLength` を焼くのに、書き先は `outputs/misc/sbv2-demo/` **1 か所固定**でモデル名が
-    綴りに入らない。したがって別モデルの資産が残っている木で組み立てると、記号表（モデル
-    非依存）はそのままに、この 2 欄だけが別モデルの値で配られる。
+    `sbv2.demo assets` bakes `samplingRate` / `hopLength` from `hps.data` of the model passed with
+    `--model-dir`, yet it writes to **one fixed place**, `outputs/misc/sbv2-demo/`, whose spelling
+    does not include the model name. So assembling in a tree where another model's assets remain
+    ships the symbol table (model-independent) unchanged while these 2 fields carry the other
+    model's values.
 
-    MUST: `samplingRate` の食い違いは**沈黙する** — TS 側は `sbv2.Pipeline` の `generate()` の
-    戻り `sampleRate` にそのまま載せるので、WAV が誤った周波数で書かれて再生速度と音高が
-    ずれるだけで、例外は出ない（`hopLength` の側は長さ検算が loud に落とす）。
+    MUST: a `samplingRate` mismatch is **silent** — the TS side passes it straight into the
+    `sampleRate` returned by `generate()` of `sbv2.Pipeline`, so the WAV is written at the wrong
+    frequency and only the playback speed and pitch shift, with no exception (on the `hopLength`
+    side the length cross-check fails loudly).
     """
     data = _sbv2_section(config, "data")
     shipped = json.loads(symbols_path.read_text(encoding="utf-8"))
     if not isinstance(shipped, dict):
-        raise DistError(f"{symbols_path}: 最上位がオブジェクトでない")
+        raise DistError(f"{symbols_path}: the top level is not an object")
     disagreed = [
         f"{asset_key}: symbols.json={shipped.get(asset_key)!r} / config.json={expected!r}"
         for asset_key, config_key in SBV2_SYMBOLS_MODEL_FIELDS.items()
@@ -737,27 +802,29 @@ def assert_symbols_match_model(symbols_path: Path, config: Mapping[str, Any]) ->
     ]
     if disagreed:
         raise DistError(
-            f"{symbols_path} のモデル固有欄が config.json と食い違う（{', '.join(disagreed)}）"
-            " — 別モデルのデモ資産が残っている。`sbv2.demo assets` をこのモデルで採り直す"
+            f"the model-specific fields of {symbols_path} disagree with config.json"
+            f" ({', '.join(disagreed)}) — demo assets of another model remain. Re-run"
+            " `sbv2.demo assets` for this model"
         )
 
 
 def sbv2_config(model_dir: Path) -> Mapping[str, Any]:
-    """`config.json` を読む（styles / speakers / 表の行数と列数の正本）。"""
+    """Reads `config.json` (the source of truth for styles / speakers and the tables' row and column
+    counts)."""
     path = model_dir / SBV2_CONFIG_FILE
     if not path.is_file():
-        raise DistError(f"組み立ての入力が無い: {path}")
+        raise DistError(f"assembly input missing: {path}")
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        raise DistError(f"{path}: JSON として読めない") from error
+        raise DistError(f"{path}: cannot be read as JSON") from error
     if not isinstance(config, dict):
-        raise DistError(f"{path}: 最上位がオブジェクトでない")
+        raise DistError(f"{path}: the top level is not an object")
     return config
 
 
 def _sbv2_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
-    """`config.json` の 1 節（`data` / `model`）を検査して読む。"""
+    """Checks and reads one section of `config.json` (`data` / `model`)."""
     section = config.get(name)
     if not isinstance(section, dict):
         raise DistError(f"config.json に '{name}' 節が無い（実際: {section!r}）")
@@ -765,39 +832,43 @@ def _sbv2_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 
 
 def _sbv2_id_map(data: Mapping[str, Any], key: str) -> dict[str, int]:
-    """`config.json` の `data.<key>`（名前 → ID の非空マップ）を検査して読む。"""
+    """Checks and reads `data.<key>` of `config.json` (a non-empty name → ID map)."""
     table = data.get(key)
     if not isinstance(table, dict) or not table:
-        raise DistError(f"config.json の data.{key} が非空のマップでない（実際: {table!r}）")
+        raise DistError(f"data.{key} of config.json is not a non-empty map (actual: {table!r})")
     for name, value in table.items():
         if not isinstance(value, int) or isinstance(value, bool):
-            raise DistError(f"config.json の data.{key}[{name!r}] が整数でない（{value!r}）")
+            raise DistError(f"data.{key}[{name!r}] of config.json is not an integer ({value!r})")
     return dict(table)
 
 
 def _sbv2_int(section: Mapping[str, Any], key: str, where: str) -> int:
-    """`config.json` の整数フィールド（表の行数 / 列数の宣言）を検査して読む。"""
+    """Checks and reads an integer field of `config.json` (a declared row / column count of a
+    table)."""
     value = section.get(key)
-    # bool は int の派生。`"n_speakers": true` を 1 として通すと表の行数門が緩む。
+    # bool derives from int. Letting `"n_speakers": true` through as 1 would loosen the row-count
+    # check of the table.
     if not isinstance(value, int) or isinstance(value, bool):
-        raise DistError(f"config.json の {where}.{key} が整数でない（{value!r}）")
+        raise DistError(f"{where}.{key} of config.json is not an integer ({value!r})")
     return value
 
 
 def sbv2_pipeline_config(config: Mapping[str, Any], knobs: Mapping[str, Any]) -> dict[str, Any]:
-    """`pipelineConfig` を config.json と実行時ノブから組む（表を焼き込まない）。
+    """Builds `pipelineConfig` from config.json and the runtime knobs (the tables are not baked in).
 
-    MUST: `styles` / `speakers` はハードコードしない。ckpt が変われば名前も並びも変わり
-    （この FN4 は Neutral / high / low / NSFW の 4 つ、別の ckpt は Neutral / Angry / … の
-    7 つ）、写した表を配ると **shape は合ったまま別のスタイルの声が出る**。`defaults` の
-    数値も同じ理由で `style_bert_vits2` から引いた値（{@link sbv2_knob_defaults}）を受ける。
+    MUST: `styles` / `speakers` are not hard-coded. A different ckpt changes the names and their
+    order (this FN4 has the 4 Neutral / high / low / NSFW, another ckpt the 7 Neutral / Angry / …),
+    and shipping a copied table **keeps the shapes matching while another style's voice comes out**.
+    For the same reason the numbers of `defaults` take the values looked up from `style_bert_vits2`
+    ({@link sbv2_knob_defaults}).
 
-    `defaults.speaker` は `spk2id` の先頭キー（`sbv2.demo.resolve_style_and_speaker` と同式）。
-    `speakers` の名前 → 行の解決先は配布形の `speaker_embeddings`
-    （{@link sbv2_speaker_embeddings}）、`styles` の解決先は `style_vectors`。
+    `defaults.speaker` is the first key of `spk2id` (the same formula as
+    `sbv2.demo.resolve_style_and_speaker`). The names of `speakers` resolve to rows of the
+    distribution's `speaker_embeddings` ({@link sbv2_speaker_embeddings}), those of `styles` to
+    `style_vectors`.
 
-    `maxTokens` / `maxFrames` は ckpt に無い**焼いたグラフ側の数**なので
-    {@link SBV2_MAX_TOKENS} / {@link SBV2_MAX_FRAMES} から載せる。
+    `maxTokens` / `maxFrames` are **numbers of the baked graphs** that the ckpt does not have, so
+    they come from {@link SBV2_MAX_TOKENS} / {@link SBV2_MAX_FRAMES}.
     """
     data = _sbv2_section(config, "data")
     styles = _sbv2_id_map(data, "style2id")
@@ -823,19 +894,21 @@ def sbv2_pipeline_config(config: Mapping[str, Any], knobs: Mapping[str, Any]) ->
 
 
 def sbv2_style_vectors(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray:
-    """`style_vectors.npy` を検査して f32 の `[スタイル数, 256]` として読む。
+    """Checks `style_vectors.npy` and reads it as f32 `[number of styles, 256]`.
 
-    MUST: 行数が `data.num_styles` と `len(data.style2id)` の**両方**に一致すること。
-    スタイルの ID は行番号そのものなので、行と名前がずれてもロードも実行も通り、
-    **別のスタイルの声が出る**だけで沈黙する（表の行数を合わせる以外に検出手段がない）。
+    MUST: the row count matches **both** `data.num_styles` and `len(data.style2id)`. A style ID is
+    the row number itself, so even when rows and names drift apart, loading and execution pass and
+    it stays silent, **producing another style's voice** (matching the table's row count is the only
+    way to detect it).
 
-    MUST: 列数も見る（{@link SBV2_STYLE_WIDTH}）— 同じ資産を読む `sbv2.export.style_vector`
-    は幅を落とすので、ここが素通りすると同じ `.npy` に対する受理集合が台本間で食い違う。
+    MUST: the column count is checked too ({@link SBV2_STYLE_WIDTH}) — `sbv2.export.style_vector`,
+    which reads the same asset, rejects other widths, so if this let one through, the scripts would
+    disagree on which `.npy` files they accept.
     """
     data = _sbv2_section(config, "data")
     path = model_dir / SBV2_STYLE_FILE
     if not path.is_file():
-        raise DistError(f"組み立ての入力が無い: {path}")
+        raise DistError(f"assembly input missing: {path}")
     table = np.load(path)
     if table.ndim != 2 or table.shape[1] != SBV2_STYLE_WIDTH:
         raise DistError(f"{path}: 形 {table.shape} が [スタイル数, {SBV2_STYLE_WIDTH}] でない")
@@ -851,9 +924,10 @@ def sbv2_style_vectors(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray
 
 
 def sbv2_ckpt(model_dir: Path) -> Path:
-    """実重みの ckpt。`*.safetensors` の一意存在を要求する（`sbv2.export.load_net_g` と同じ）。
+    """The ckpt of the real weights. Requires exactly one `*.safetensors` (the same as
+    `sbv2.export.load_net_g`).
 
-    複数あると「どれから話者埋め込みを引いたか」が黙って変わる。
+    With several, "which one the speaker embeddings came from" would change silently.
     """
     ckpts = sorted(model_dir.glob("*.safetensors"))
     if len(ckpts) != 1:
@@ -864,19 +938,21 @@ def sbv2_ckpt(model_dir: Path) -> Path:
 
 
 def sbv2_speaker_embeddings(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray:
-    """ckpt の `emb_g.weight` を f32 の `[話者数, gin_channels]` として引く。
+    """Takes `emb_g.weight` of the ckpt as f32 `[number of speakers, gin_channels]`.
 
-    `front` / `voice` はどちらも話者埋め込み `g` を**グラフ入力**に取るので、この表が無いと
-    配布形だけではグラフを実行できない（デモ経路は `assets.safetensors` に焼いていた）。
-    `style_vectors` と同じく「表を配って実行時に行を引く」形にする。
+    `front` / `voice` both take the speaker embedding `g` as a **graph input**, so without this
+    table the distribution alone cannot run the graphs (the demo path baked it into
+    `assets.safetensors`). Like `style_vectors`, it takes the form "ship the table, look up the row
+    at run time".
 
-    MUST: 行数が `data.n_speakers` と `len(data.spk2id)` の**両方**に一致すること —
-    話者 ID は行番号そのものなので、ずれてもロードも実行も通り、**別の話者の声が出る**
-    だけで沈黙する（スタイル表の行数門と同じ機序）。列数は `model.gin_channels` に一致
-    すること（こちらは config から導出できる値なので shape ごと縛れる）。
+    MUST: the row count matches **both** `data.n_speakers` and `len(data.spk2id)` — a speaker ID is
+    the row number itself, so a mismatch still loads and runs and stays silent, **producing another
+    speaker's voice** (the same mechanism as the row-count check of the style table). The column
+    count matches `model.gin_channels` (a value derivable from the config, so the whole shape can be
+    pinned).
 
-    MUST: ckpt は 251MB 級。`safe_open` の遅延読みで**このテンソル 1 本だけ**を引く
-    （`load_file` は全量を numpy へ展開する）。
+    MUST: the ckpt is on the order of 251MB. The lazy read of `safe_open` takes **only this one
+    tensor** (`load_file` expands everything into numpy).
     """
     data = _sbv2_section(config, "data")
     model = _sbv2_section(config, "model")
@@ -885,16 +961,17 @@ def sbv2_speaker_embeddings(model_dir: Path, config: Mapping[str, Any]) -> np.nd
     gin_channels = _sbv2_int(model, "gin_channels", "model")
     ckpt = sbv2_ckpt(model_dir)
     with safe_open(str(ckpt), framework="np") as handle:
-        # `keys()` はヘッダのテンソル名一覧（dict ではない）。`get_tensor` はそのテンソルの
-        # バイト範囲だけを読むので、251MB の ckpt から 2KB を引くのにファイル全量は載らない。
+        # `keys()` is the list of tensor names in the header (not a dict). `get_tensor` reads only
+        # that tensor's byte range, so taking 2KB out of a 251MB ckpt does not load the whole file.
         available = handle.keys()
         if SBV2_SPEAKER_TENSOR not in available:
             raise DistError(
-                f"{ckpt} に {SBV2_SPEAKER_TENSOR} が無い — 話者埋め込みの出所が変わった"
+                f"{ckpt} has no {SBV2_SPEAKER_TENSOR} — the speaker embeddings moved elsewhere"
             )
         table = handle.get_tensor(SBV2_SPEAKER_TENSOR)
     if table.ndim != 2:
-        raise DistError(f"{ckpt}: {SBV2_SPEAKER_TENSOR} の形 {table.shape} が 2 次元でない")
+        raise DistError(f"{ckpt}: {SBV2_SPEAKER_TENSOR} has shape {table.shape}, which is not 2-D")
+
     if table.shape[0] != num_speakers or table.shape[0] != len(speakers):
         raise DistError(
             f"{ckpt}: {SBV2_SPEAKER_TENSOR} の行数 {table.shape[0]} が config の"
@@ -912,11 +989,11 @@ def sbv2_speaker_embeddings(model_dir: Path, config: Mapping[str, Any]) -> np.nd
 def sbv2_plan(
     sources: Sbv2Sources, knobs: Mapping[str, Any], model: str = SBV2_DEFAULT_MODEL
 ) -> ModelPlan:
-    """SBV2 1 モデルぶんの計画を組む（検査と表の読み取りをここで全部済ませる）。
+    """Builds the plan for one SBV2 model (all checks and table reads are done here).
 
-    ノブの既定を引数で受けるのは、値の**出所**（`style_bert_vits2` の定数 — optional な
-    dependency-group）と配布形の**組み立て**を分けるため。出所の解決は
-    {@link sbv2_knob_defaults} が持つ。
+    The knob defaults are taken as an argument to separate **where the values come from** (constants
+    of `style_bert_vits2` — an optional dependency-group) from **assembling** the distribution.
+    Resolving the source is the job of {@link sbv2_knob_defaults}.
     """
     assert_model_name(model)
     placements = sbv2_placements(sources)
@@ -962,17 +1039,19 @@ def sbv2_plan(
 
 
 def sbv2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から SBV2 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    """Builds the plan for one SBV2 model from the parent of `--series` (the CLI's dispatch
+    target)."""
     sources = sbv2_sources(series_dir, model)
     return sbv2_plan(sources, sbv2_knob_defaults(), model)
 
 
 def sbv2_family_dist_plan(series_dir: Path, model: str, family: str) -> ModelPlan:
-    """1 つの声のファミリーの Pipeline として 1 モデルの計画を組む。
+    """Builds the plan for one model as the Pipeline of one voice family.
 
-    MUST: そのファミリーのモデル（{@link SBV2_FAMILY_DIRS}）以外は**組む前に**落とす。
-    リポ直下の条文・帰属・カードはファミリーで決まるので、FN の声を JVNV 系の Pipeline で
-    組むと、FN の重みが CC BY-SA 4.0 の条文と JVNV の帰属を名乗る配布形が成立してしまう。
+    MUST: anything other than that family's models ({@link SBV2_FAMILY_DIRS}) fails **before
+    assembly**. The legal text, attribution and card at the repository root are fixed by the family,
+    so assembling an FN voice with the JVNV Pipeline would produce a distribution in which FN
+    weights declare the CC BY-SA 4.0 text and JVNV's attribution.
     """
     prefixes = SBV2_FAMILY_DIRS[family]
     if not model.startswith(prefixes):
@@ -984,32 +1063,37 @@ def sbv2_family_dist_plan(series_dir: Path, model: str, family: str) -> ModelPla
     return sbv2_dist_plan(series_dir, model)
 
 
-#: JVNV 系の声の出所（カードの `base_model` の先頭 = 重みの出所そのもの）。
+#: Where the JVNV voices come from (the first `base_model` entry of the card = the source of the
+#: weights itself).
 _JVNV_VOICES_REPO = SBV2_JVNV_PROFILE.metadata.base_model[0]
 
 
 def _owner(repo: str) -> str:
-    """HF リポの名前空間（上流が作成者として名乗っている唯一の綴り）。"""
+    """The namespace of an HF repository (the only spelling under which upstream names itself as the
+    author)."""
     return repo.split("/")[0]
 
 
-#: JVNV 系の改変・帰属の表示（CC BY-SA 4.0 §3(a)(1) と §3(b)）。条文は `LICENSE.md` が持つ。
+#: The JVNV notice of modifications and attribution (CC BY-SA 4.0 §3(a)(1) and §3(b)). The legal
+#: text is in `LICENSE.md`.
 #:
-#: 対象は 2 つ — 声（`litagin/style_bert_vits2_jvnv`）と、全モデルが共有して再配布する
-#: text encoder（`ku-nlp/deberta-v2-large-japanese-char-wwm`）。どちらも CC BY-SA 4.0 なので、
-#: 同一ライセンス継承（§3(b)）はリポ全体で矛盾しない。
+#: It covers 2 works — the voices (`litagin/style_bert_vits2_jvnv`) and the text encoder every model
+#: shares and redistributes (`ku-nlp/deberta-v2-large-japanese-char-wwm`). Both are CC BY-SA 4.0, so
+#: ShareAlike (§3(b)) is consistent across the whole repository.
 #:
-#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
-#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。出所・学習データ・部品名・
-#: 層数はカードと組み立てが使う同じ定数から組む（本文とカードで別の事実を名乗らない）。
+#: MUST: the wording corresponds to the contents of the distribution — as a value it is valid prose,
+#: so `verify_dist` and the manifest checks pass it, and a mismatch cannot be noticed until after
+#: shipping. Source, training data, component names and layer count are built from the same
+#: constants the card and the assembly use (the text and the card do not declare different facts).
 #:
-#: MUST: 声は 1 本ずつ名指ししない（「JVNV コーパス由来の話者・内訳はモデルカード」と書く）。
-#: `root_files` は Pipeline に固定の 1 組で、組むモデルの部分集合（例 `--model F1 --model F2`）
-#: でも同じ文面が載るので、名指した瞬間に組まなかった声まで名乗る。内訳はカードが manifest から
-#: 名乗る。
+#: MUST: the voices are not named one by one (it says "speakers from the JVNV corpus, the breakdown
+#: is in the model card"). `root_files` is one fixed set per Pipeline and the same wording ships
+#: even for a subset of models (e.g. `--model F1 --model F2`), so naming them would also declare
+#: voices that were not assembled. The card declares the breakdown from the manifest.
 #:
-#: NOTE: 上流の 2 リポはどちらも著作権表示を配っていない（HF のメタデータと README だけ）ので、
-#: §3(a)(1)(A)(ii) の「保持する著作権表示」は無い。作成者は上流が名乗る名前空間で示す。
+#: NOTE: neither upstream repository ships a copyright notice (only HF metadata and a README), so
+#: there is no "copyright notice to retain" under §3(a)(1)(A)(ii). The authors are shown by the
+#: namespaces upstream uses.
 SBV2_JVNV_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes modified forms of two works licensed under the Creative Commons
@@ -1045,11 +1129,13 @@ restrictions.
 
 
 def sbv2_jvnv_root_files() -> dict[str, str]:
-    """JVNV 系の配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+    """The legal texts placed at the root of the JVNV distribution repository
+    (`karume.dist.Pipeline.root_files`).
 
-    CC BY-SA 4.0 §3(a)(1)(C) / §3(b)(2) は「条文そのものか URI」を求める。URI だけでも満たせるが、
-    リポが HF の外へ写されても条文が一緒に動くよう全文を置く（{@link _shared.licenses.cc_by_sa_4_0}
-    を**逐語で** — 整形するとコピーではなくなる）。帰属と改変の表示は `NOTICE.md` が持つ。
+    CC BY-SA 4.0 §3(a)(1)(C) / §3(b)(2) ask for "the text itself or a URI". The URI alone would
+    satisfy it, but the full text is included so that it moves along when the repository is copied
+    outside HF ({@link _shared.licenses.cc_by_sa_4_0} **verbatim** — reformatting it would make it
+    no longer a copy). The attribution and the notice of modifications are in `NOTICE.md`.
     """
     return {
         "LICENSE.md": cc_by_sa_4_0(),
@@ -1058,13 +1144,14 @@ def sbv2_jvnv_root_files() -> dict[str, str]:
 
 
 def _sbv2_pipeline(family: str, default_model: str, root_files: Mapping[str, str]) -> Pipeline:
-    """1 つの声のファミリー = 1 つの配布リポぶんの Pipeline を組む。
+    """Builds the Pipeline for one voice family = one distribution repository.
 
-    ファミリーを**ここで 1 回だけ**束ねる — 受け付けるモデル（`plan`）・配布リポ名
-    （`repo_name`）・カードの帰属（`card_profiles`）・リポ直下の法的テキスト（`root_files`）が
-    同じ 1 語から入るので、
-    どれか 1 つだけが別のファミリーを指す形が作れない。帰属の選択肢は 1 つなので
-    `--card-profile` は省略で通る（明示しても同じ名前で通る）。
+    The family is bound **once, here** — the accepted models (`plan`), the distribution repository
+    name (`repo_name`), the card's attribution (`card_profiles`) and the legal texts at the
+    repository root (`root_files`) all come from the same word, so no form exists where just one of
+    them points at another family. There is a single attribution option, so `--card-profile` may be
+    omitted (an explicit one passes with the same name).
+
     """
     return Pipeline(
         default_model=default_model,
@@ -1081,14 +1168,14 @@ def _sbv2_pipeline(family: str, default_model: str, root_files: Mapping[str, str
     )
 
 
-#: `--pipeline sbv2` の 1 行（JVNV 系 — 公開リポ `karume-sbv2-jvnv`）。
+#: The row of `--pipeline sbv2` (JVNV — public repository `karume-sbv2-jvnv`).
 #:
-#: MUST: FN 系と**別の Pipeline**にする — 理由はモジュール doc の末段。
+#: MUST: a **separate Pipeline** from FN — the reason is in the last paragraph of the module doc.
 PIPELINE = _sbv2_pipeline("jvnv", SBV2_DEFAULT_MODEL, sbv2_jvnv_root_files())
 
-#: `--pipeline sbv2-fn` の 1 行（FN 系 — HF 公開は保留・カード機構だけ維持）。
+#: The row of `--pipeline sbv2-fn` (FN — HF publication on hold, only the card machinery is kept).
 #:
-#: 法的テキストは置かない: 上流の書面条件は Booth の頒布ページだけで、同梱できるライセンス文が
-#: 無い（`sbv2.card.SBV2_FN_METADATA` の実地確認）。公開を決める日に、その条件に合わせてここを
-#: 埋める。
+#: No legal texts: upstream's written terms exist only on the Booth distribution page, and there is
+#: no license text to bundle (checked on the source for `sbv2.card.SBV2_FN_METADATA`). On the day
+#: publication is decided, fill this in to match those terms.
 FN_PIPELINE = _sbv2_pipeline("fn", SBV2_FN_DEFAULT_MODEL, {})

@@ -1,21 +1,26 @@
-"""`wan/umt5_reference.py`（i8 系列の容器から重みを読む層逐次の CPU 参照）の約束事
-（ADR 0119 決定 8 ①・段 10c）。
+"""The contract of `wan/umt5_reference.py` (the layer-by-layer CPU reference that reads the weights
+from the i8 series' container) (ADR 0119 decision 8 ①, step 10c).
 
-縛るのは、壊れても例外が出ず**参照の値だけが静かにずれる**側:
+What is pinned is the side where a break raises no exception and **only the reference values drift
+quietly**:
 
-- 容器から読んだ重み（packed × scale）が export の fake-quant の値とビット一致する
-- f32 の書き下しが上流の eager（活性を tanh 近似に差し替え・fake-quant 済み）とビット一致する
-  — 層の表の取り違えは割れる（対）
-- f64 の書き下しの中で f64 でない浮動小数が 1 つも作られない — 上流を `.double()` した形は
-  RMSNorm と softmax で f32 に落ちるので同じ検査に掛かる（対）
-- f64 の参照で見ると、上流の bf16 と f32 の不一致はほぼ全部が bf16 の誤差（f32 自身の誤差は
-  その 1% 未満 — 品質の記録で f32 を基準にしてよい根拠の小模型での裏付け）
-- 量子化しない重みの読み口（checkpoint の F32）が上流の parameter とビット一致し、同じ書き下しが
-  量子化しない上流の eager とビット一致する — i8 の参照とは割れる（対）
-- golden の形（キー・dtype・形・メタ）・量子化なしの参照は受入れだけ、と決定用のケースの選び方
+- the weights read from the container (packed × scale) are bit-identical to the export's fake-quant
+  values
+- the f32 rewrite is bit-identical to the upstream eager (activation replaced by the tanh
+  approximation, fake-quant applied) — a mix-up of the layers' tables splits it (the pair)
+- the f64 rewrite creates no floating-point value that is not f64 — the upstream with `.double()`
+  drops to f32 in RMSNorm and softmax, so it trips the same check (the pair)
+- seen against the f64 reference, the mismatch between the upstream bf16 and f32 is almost entirely
+  bf16 error (f32's own error is under 1% of it — the small-model backing for using f32 as the
+  baseline in the quality record)
+- the reader of the unquantized weights (the checkpoint's F32) is bit-identical to the upstream
+  parameters, and the same rewrite is bit-identical to the unquantized upstream eager — it splits
+  from the i8 reference (the pair)
+- the shape of the golden (keys, dtypes, shapes, metadata), that the unquantized reference is
+  acceptance only, and how the decision cases are chosen
 
-乱数初期化の小さな umT5（`wan.umt5_probe.TINY_CONFIG`）を `umt5_export.prepare` で容器にして
-回す — 実重みは読まない。
+It turns a small randomly initialized umT5 (`wan.umt5_probe.TINY_CONFIG`) into a container with
+`umt5_export.prepare` and runs on it — no real weights are read.
 """
 
 from __future__ import annotations
@@ -41,16 +46,20 @@ from wan import umt5_reference as ur
 
 LAYERS = int(probe.TINY_CONFIG["num_layers"])
 
-#: 比べる有効長（下限・固定プロンプトの長さ・max_distance 128 越え・上限）。
+#: The valid lengths compared (the lower bound, the fixed prompt's length, beyond max_distance 128,
+#: the upper bound).
 LENGTHS = (2, 28, 126, 300, 512)
 
-#: 書き出す部品名（pytest の作業席だけで名乗る — `wan/umt5_export.py` のモジュール doc）。
+#: The component name written (claimed only in pytest's working area — the module doc of
+#: `wan/umt5_export.py`).
 GRAPH_NAME = "text_encoder"
 
-#: f32 の書き下しの f64 に対する比の上限（f32 の丸めの桁 — 書き下しの取り違えは O(1) で出る）。
+#: The upper bound of the f32 rewrite's ratio against f64 (f32's rounding digits — a mix-up in the
+#: rewrite shows up at O(1)).
 F32_ROUNDING_RATIO = 1e-5
 
-#: f32 自身の誤差が bf16 との不一致に占める割合の上限（f64 で見た上限の比較）。
+#: The upper bound of the share of f32's own error in its mismatch with bf16 (a comparison of upper
+#: bounds seen through f64).
 F32_SHARE_OF_BF16_MISMATCH = 1e-2
 
 
@@ -62,7 +71,7 @@ def model() -> Any:
 
 @pytest.fixture(scope="module")
 def checkpoint(model: Any, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """小模型の checkpoint（`save_pretrained` — F32 の safetensors）。"""
+    """The small model's checkpoint (`save_pretrained` — F32 safetensors)."""
     directory = tmp_path_factory.mktemp("umt5-reference") / "checkpoint"
     model.save_pretrained(directory)
     return directory
@@ -70,7 +79,8 @@ def checkpoint(model: Any, tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def container(checkpoint: Path) -> Path:
-    """`umt5_export.prepare`（行の塊ごとの i8）で書いた小模型の容器（代表 path）。"""
+    """The small model's container written by `umt5_export.prepare` (i8 per block of rows) (its
+    representative path)."""
     prepared = ue.prepare(checkpoint, chunk_rows=7)
     path = checkpoint.parent / "container" / ue.MODEL_FILE
     path.parent.mkdir()
@@ -92,20 +102,23 @@ def weights(container: Path) -> ur.ContainerWeights:
 
 @pytest.fixture(scope="module")
 def plain(checkpoint: Path) -> ur.CheckpointWeights:
-    """量子化しない重みの読み口（`umt5_export.checkpoint_weights` — 実モデルと同じ組み方）。"""
+    """The reader of the unquantized weights (`umt5_export.checkpoint_weights` — assembled the same
+    way as for the real model)."""
     return ue.checkpoint_weights(checkpoint)
 
 
 @pytest.fixture(scope="module")
 def quantized(model: Any) -> Any:
-    """fake-quant 済みの上流（ラッパ経由で丸める — ラッパは上流のモジュールを共有する）。"""
+    """The fake-quant upstream (rounded through the wrapper — the wrapper shares the upstream
+    modules)."""
     upstream = copy.deepcopy(model)
     up.fake_quant_i8(up.Umt5EncoderTokens(upstream))
     return upstream
 
 
 def upstream_tanh(quantized: Any) -> Any:
-    """`quantized` の写しで、FFN の活性だけを tanh 近似に差し替えたもの（上流の eager の形）。"""
+    """A copy of `quantized` with only the FFN activation replaced by the tanh approximation (the
+    shape of the upstream eager)."""
     upstream = copy.deepcopy(quantized)
     for block in upstream.encoder.block:
         block.layer[-1].DenseReluDense.act = nn.GELU(approximate="tanh")
@@ -130,7 +143,8 @@ def run(
 
 
 class SwappedTables:
-    """層 0 と層 1 の相対位置の表を入れ替えて返す読み口（故障注入）。"""
+    """A reader that returns the relative-position tables of layers 0 and 1 swapped (fault
+    injection)."""
 
     def __init__(self, source: ur.WeightSource) -> None:
         self.source = source
@@ -145,8 +159,9 @@ class SwappedTables:
 
 
 class Preloaded:
-    """重みと語彙埋め込みの行を先に読み切った読み口 — 監視の間に重みの読み出し（容器の
-    f32 の演算）を走らせず、書き下しの演算だけを監視に掛ける。"""
+    """A reader that has read the weights and the vocabulary embedding rows up front — no weight
+    read (the container's f32 arithmetic) runs during the watch, so only the rewrite's arithmetic
+    is watched."""
 
     def __init__(self, source: ur.WeightSource, lengths=LENGTHS) -> None:
         keys = [key for index in range(LAYERS) for key in ur.layer_keys(index).values()]
@@ -164,7 +179,8 @@ class Preloaded:
 
 
 class NarrowFloatWatch(TorchDispatchMode):
-    """この間に作られた f64 でない浮動小数の値を記録する（DiT の `_NarrowFloatWatch` と同じ形）。"""
+    """Record the floating-point values that are not f64 created during this span (the same shape as
+    the DiT's `_NarrowFloatWatch`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -184,15 +200,16 @@ class NarrowFloatWatch(TorchDispatchMode):
 
 class TestContainerWeights:
     def test_every_weight_is_the_fake_quant_value(self, weights, quantized):
-        """容器の重み（i8 は packed × scale）= export の fake-quant の値（ビット一致）。"""
+        """The container's weights (i8 as packed × scale) = the export's fake-quant values
+        (bit-identical)."""
         expected = dict(up.Umt5EncoderTokens(quantized).named_parameters())
 
         mismatched = [
             key for key, value in expected.items() if not torch.equal(weights.tensor(key), value)
         ]
 
-        # 層ごとに q / k / v / o・相対位置の表・RMSNorm 2 本・wi_0 / wi_1 / wo の 10 本
-        # + 語彙埋め込み・最後の norm。
+        # Per layer, the 10 of q / k / v / o, the relative-position table, the 2 RMSNorms and
+        # wi_0 / wi_1 / wo, + the vocabulary embedding and the final norm.
         assert len(expected) == 10 * LAYERS + 2
         assert mismatched == []
 
@@ -204,13 +221,14 @@ class TestContainerWeights:
         assert torch.equal(rows, weights.tensor(ur.EMBED_KEY)[indices])
 
     def test_unsorted_rows_are_rejected(self, weights):
-        with pytest.raises(ur.Umt5ReferenceError, match="昇順"):
+        with pytest.raises(ur.Umt5ReferenceError, match="ascending order"):
             weights.rows(ur.EMBED_KEY, torch.tensor([5, 3]))
 
 
 class TestCheckpointWeights:
     def test_every_weight_is_the_checkpoint_value(self, plain, model):
-        """量子化しない読み口の重み = 上流の parameter（ビット一致・tied な語彙埋め込みも）。"""
+        """The unquantized reader's weights = the upstream parameters (bit-identical, the tied
+        vocabulary embedding included)."""
         expected = dict(up.Umt5EncoderTokens(model).named_parameters())
 
         mismatched = [
@@ -221,7 +239,8 @@ class TestCheckpointWeights:
         assert mismatched == []
 
     def test_rows_are_the_rows_of_the_whole_table(self, plain):
-        """連続する区間と飛び飛びの行が混ざっても、表の同じ行を同じ並びで返す。"""
+        """With contiguous ranges and scattered rows mixed, the same rows of the table come back in
+        the same order."""
         indices = torch.tensor([0, 1, 2, 17, 18, 200, 383])
 
         rows = plain.rows(ur.EMBED_KEY, indices)
@@ -231,17 +250,18 @@ class TestCheckpointWeights:
     def test_rows_past_the_table_fail_loudly(self, plain):
         size = plain.tensor(ur.EMBED_KEY).shape[0]
 
-        with pytest.raises(ur.Umt5ReferenceError, match="表の外"):
+        with pytest.raises(ur.Umt5ReferenceError, match="outside the table"):
             plain.rows(ur.EMBED_KEY, torch.tensor([0, size]))
 
     def test_an_unmapped_key_fails_loudly(self, plain):
-        with pytest.raises(ur.Umt5ReferenceError, match="checkpoint のキーが無い"):
+        with pytest.raises(ur.Umt5ReferenceError, match="no checkpoint key"):
             plain.tensor("encoder.block.0.unknown.weight")
 
 
 class TestUnquantizedReference:
     def test_f32_is_the_unquantized_upstream_eager_bit_for_bit(self, plain, model):
-        """量子化なしの f32 = 量子化しない上流の eager（tanh 近似）— 有効長 2〜512 の全部で。"""
+        """Unquantized f32 = the unquantized upstream eager (tanh approximation) — for every valid
+        length from 2 to 512."""
         upstream = upstream_tanh(model)
 
         actual = run(plain, model, torch.float32)
@@ -251,7 +271,8 @@ class TestUnquantizedReference:
             assert torch.equal(output, expected), f"L = {length}: {up.compare(output, expected)}"
 
     def test_it_differs_from_the_i8_reference(self, plain, weights, model):
-        """対（非恒真）: 量子化なしの参照は i8 の参照と割れる（読み口が容器へ落ちていない）。"""
+        """The pair (not tautological): the unquantized reference splits from the i8 reference (the
+        reader has not fallen back to the container)."""
         (unquantized,) = run(plain, model, torch.float32, lengths=(28,))
         (i8,) = run(weights, model, torch.float32, lengths=(28,))
 
@@ -260,7 +281,8 @@ class TestUnquantizedReference:
 
 class TestFloat32Reference:
     def test_it_is_the_upstream_eager_bit_for_bit(self, weights, quantized, model):
-        """f32 の書き下し = 上流の eager（tanh 近似・fake-quant 済み）— 有効長 2〜512 の全部で。"""
+        """The f32 rewrite = the upstream eager (tanh approximation, fake-quant applied) — for every
+        valid length from 2 to 512."""
         upstream = upstream_tanh(quantized)
 
         actual = run(weights, model, torch.float32)
@@ -270,7 +292,8 @@ class TestFloat32Reference:
             assert torch.equal(output, expected), f"L = {length}: {up.compare(output, expected)}"
 
     def test_swapped_layer_tables_break_the_match(self, weights, quantized, model):
-        """対（非恒真）: 層 0 / 1 の相対位置の表を入れ替えると上流と割れる。"""
+        """The pair (not tautological): swapping the relative-position tables of layers 0 / 1 splits
+        it from the upstream."""
         upstream = upstream_tanh(quantized)
 
         (actual,) = run(SwappedTables(weights), model, torch.float32, lengths=(28,))
@@ -281,7 +304,8 @@ class TestFloat32Reference:
 class TestFloat64Reference:
     def test_no_narrow_float_is_made(self, weights, model):
         source = Preloaded(weights)
-        # 入力（バケット表は meta の上流の attention の式で作る）も監視の外で作る。
+        # The inputs (the bucket table is built with the attention formula of the upstream on meta)
+        # are also built outside the watch.
         inputs = [case_inputs(model, length) for length in LENGTHS]
         watch = NarrowFloatWatch()
 
@@ -291,8 +315,9 @@ class TestFloat64Reference:
         assert watch.found == []
 
     def test_the_watch_sees_the_upstream_double_narrowing(self, quantized):
-        """対（非恒真）: 上流を `.double()` した forward は RMSNorm と softmax で f32 に落ちる —
-        f64 の参照を上流の `.double()` で採らない理由（ADR 0119 追記「10c の準備」）。"""
+        """The pair (not tautological): the upstream forward with `.double()` drops to f32 in
+        RMSNorm and softmax — why the f64 reference is not taken with the upstream's `.double()`
+        (ADR 0119 addendum "preparing 10c")."""
         upstream = upstream_tanh(quantized).double()
         watch = NarrowFloatWatch()
 
@@ -302,7 +327,7 @@ class TestFloat64Reference:
         assert watch.found != []
 
     def test_it_agrees_with_f32_within_f32_rounding(self, weights, model):
-        """同じ関数を書き下している（取り違えは O(1) の比で出る）。"""
+        """It rewrites the same function (a mix-up shows up at an O(1) ratio)."""
         f64 = run(weights, model, torch.float64)
         f32 = run(weights, model, torch.float32)
 
@@ -311,9 +336,9 @@ class TestFloat64Reference:
         assert all(0 < ratio < F32_ROUNDING_RATIO for ratio in ratios), ratios
 
     def test_the_bf16_mismatch_is_bf16_error(self, weights, quantized, model):
-        """上限の比較: f32 自身の誤差（f64 に対する比）は、上流の bf16 と f32 の不一致の
-        1% 未満 — 不一致は bf16 の誤差で、品質の記録で f32 を基準にしてよい
-        （ADR 0119 追記「10b の結果」）。"""
+        """A comparison of upper bounds: f32's own error (its ratio against f64) is under 1% of the
+        mismatch between the upstream bf16 and f32 — the mismatch is bf16 error, and f32 may be the
+        baseline of the quality record (ADR 0119 addendum "results of 10b")."""
         bf16_model = upstream_tanh(quantized).to(torch.bfloat16)
         f64 = run(weights, model, torch.float64)
         f32 = run(weights, model, torch.float32)
@@ -325,7 +350,8 @@ class TestFloat64Reference:
             assert own < F32_SHARE_OF_BF16_MISMATCH * mismatch, (length, own, mismatch)
 
 
-#: golden のメタの軸の記録（形だけ — 値は `wan.umt5_export.reference_axes` が表から組む）。
+#: The record of the axes in the golden's metadata (shape only — the values are assembled from the
+#: table by `wan.umt5_export.reference_axes`).
 AXES = {
     "encoder": {"model": "xxl", "repo": "owner/encoder", "revision": "0" * 40},
     "cases": {
@@ -367,8 +393,8 @@ class TestGolden:
         meta = json.loads(metadata[ur.METADATA_KEY])
         assert (meta["format"], meta["length"], meta["prompt"]) == (ur.REFERENCE_FORMAT, 28, "原文")
         assert meta["container"]["part0Sha256"] == weights.part0_sha256
-        # どの上流の値を使ったか（umT5 の上流とケースの id 列の Wan のトークナイザ —
-        # ADR 0122 決定 3）。
+        # Which upstream values were used (the umT5 upstream and Wan's tokenizer for the cases' id
+        # sequences — ADR 0122 decision 3).
         assert meta["axes"] == AXES
         assert {key: (value.dtype, tuple(value.shape)) for key, value in tensors.items()} == {
             ur.INPUT_IDS_KEY: (torch.int32, (28,)),
@@ -430,18 +456,20 @@ class TestGolden:
         output = torch.zeros(1, 2, 64)
         pair = (output, output) if with_unquantized else None
 
-        with pytest.raises(ur.Umt5ReferenceError, match="受入れだけ"):
+        with pytest.raises(ur.Umt5ReferenceError, match="only acceptance cases"):
             ur.golden_tensors(case, buckets, output, output, pair)
 
 
 def fake_encode(text: str) -> Mapping[str, Any]:
-    """語 1 つ = 1 トークン + 末尾の `</s>`（選び方の検査用 — 長さだけが効く）。"""
+    """One word = one token + a trailing `</s>` (for checking the selection — only the length
+    matters)."""
     words = text.split()
     return {"cleaned": " ".join(words), "ids": [5] * len(words) + [1]}
 
 
 def fake_parity(count: int = 200) -> list[dict[str, Any]]:
-    """長さ 3〜42 の受理した乱択（`fake_encode` と同じ id 列）と、拒否の 1 本。"""
+    """Accepted random picks of length 3–42 (the same id sequences as `fake_encode`) and one
+    rejection."""
     cases = []
     for index in range(count):
         text = " ".join(["w"] * (2 + index % 40))
@@ -469,5 +497,5 @@ class TestBandCases:
             if "ids" in case:
                 case["ids"] = [*case["ids"], 1]
 
-        with pytest.raises(ur.Umt5ReferenceError, match="パリティ fixture と違う"):
+        with pytest.raises(ur.Umt5ReferenceError, match="differs from the parity fixture"):
             ur.band_cases(parity, fake_encode)

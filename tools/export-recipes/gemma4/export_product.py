@@ -128,63 +128,71 @@ from karume.states import to_states_form
 #: exits). The suffix is the distribution recipe's `GEMMA4_PRODUCT_BF16_SUFFIX` (the reader's word).
 DEFAULT_OUT_DIR = one_shot.series_dir(GEMMA4_DEFAULT_MODEL, GEMMA4_PRODUCT_BF16_SUFFIX)
 
-#: ホストが供給する PLE のグラフ入力名（ラッパの forward 引数名そのもの — torch.export が
-#: グラフ入力名に採る）。綴りの正本はここで、{@link assert_ir_form_product} と TS 側の検収門が
-#: 参照する。
+#: Graph input name of the host-supplied PLE (the wrapper's forward argument name itself —
+#: torch.export takes it as the graph input name). The source of truth for the spelling is here,
+#: referenced by {@link assert_ir_form_product} and the acceptance gate on the TS side.
 PER_LAYER_INPUTS = "per_layer_inputs"
 
-#: 行選択の記号名（`last_row[R]` / 出口 2 本の行軸）。投機デコードの verify run が 1 回で
-#: 採点する行数で、通常の prefill / decode は R = 1 に束縛する（従来と同じ 1 行出口）。
+#: Symbol name of the row selection (`last_row[R]` / the row axis of the two exits). The number of
+#: rows a speculative-decoding verify run scores at once; ordinary prefill / decode bind R = 1 (the
+#: same one-row exit as before).
 ROW_SYMBOL = "R"
 
-#: 記号 R の trace 上限。verify が 1 回に採点する行数 = draft k 行 + 直前に確定した bonus 1 行で、
-#: k の上限が sliding ring の余裕（{@link decode.SLIDING_SLACK_ROWS} — 棄却されうる行数の上限）
-#: なので R ≤ 余裕 + 1。余裕と切り離して決めると「棄却行が live 窓を潰さない」設計が成立しない。
+#: Trace upper bound of the symbol R. The rows a verify run scores at once = k draft rows + the one
+#: bonus row confirmed just before, and the upper bound of k is the sliding ring's slack
+#: ({@link decode.SLIDING_SLACK_ROWS} — the upper bound of rows that may be rejected), so
+#: R ≤ slack + 1. Decided apart from the slack, the design "rejected rows do not overwrite the live
+#: window" does not hold.
 #:
-#: NOTE: IR の `symbols` は名前の列だけで上限を持たない（`docs/ir-v2.md`）ので、この数は
-#: **torch の guard を張る範囲**にしか効かない。ランタイム側の上限は context の `slidingSlack`
-#: （deferred run の `queryLength ≤ slidingSlack + 1`）が持つ。
+#: NOTE: the IR's `symbols` is only a list of names with no bounds (`docs/ir-v2.md`), so this number
+#: affects only **the range torch guards**. The runtime-side bound is held by the context's
+#: `slidingSlack` (`queryLength ≤ slidingSlack + 1` of a deferred run).
 ROW_SYM_MAX = decode.SLIDING_SLACK_ROWS + 1
 
-#: 例示入力の行数。**2 以上**でなければ torch.export が R を 1 に特殊化しうるし、記号として
-#: 生きていることを IR で確かめられない。上限側（{@link ROW_SYM_MAX}）は Dim の宣言が持つ。
+#: Row count of the example input. Unless it is **2 or more**, torch.export may specialize R to 1,
+#: and the IR cannot confirm it is alive as a symbol. The upper side ({@link ROW_SYM_MAX}) is held
+#: by the Dim declaration.
 EXAMPLE_ROWS = 2
 
-#: 逆量子化ビット一致の参照のファイル名（**配布物ではない** — 系列に残る検収用の golden）。
+#: File name of the dequantization bit-identity reference (**not part of the distribution** — an
+#: acceptance golden that stays in the series).
 PLE_PROBE_FILE = "ple.probe.safetensors"
 
 #: The storage of the linears, the embedding and the PLE table (module docstring, "Storage").
 BF16_STORAGE = "bf16"
 
 
-#: 行の種別（索引の欄名でもある — `karume.ple.PLE_ROLES` の綴り）。
+#: Row kinds (also the index's field names — the spelling of `karume.ple.PLE_ROLES`).
 PLE_VALUES_KEY = "values"
 PLE_SCALES_KEY = "scales"
 
-#: `ple.probe.safetensors` のテンソルキー。
+#: Tensor keys of `ple.probe.safetensors`.
 PROBE_TOKENS_KEY = "tokens"
 PROBE_INPUTS_KEY = "per_layer_inputs"
 
 
 class ProductChunkWrapper(decode.DecodeChunkWrapper):
-    """`(input_ids, RoPE 4 本, per_layer_inputs, last_row[R]) → (logits[1,R,V], hidden[1,R,H])`。
+    """`(input_ids, 4 RoPE inputs, per_layer_inputs, last_row[R]) → (logits[1,R,V], hidden[1,R,H])`.
 
-    MUST: `DecodeChunkWrapper` の**派生**（モジュール FQN 空間の同一性 — 量子化の対象述語
-    `is_int8_module` / `is_int4_module` と scale 台帳のキーの再利用条件。
-    `export_decode.DecodeChunkWrapper` の docstring と同じ理由）。
+    MUST: a **subclass** of `DecodeChunkWrapper` (identity of the module FQN space — the
+    quantization target predicates `is_int8_module` / `is_int4_module` and the condition for reusing
+    the scale ledger's keys; the same reason as in the docstring of
+    `export_decode.DecodeChunkWrapper`).
     MUST: `self.per_layer` (the 35 PLE tables) is held only as the source of the stored table and
     of the reference, never read by the forward — the PLE is a host-supplied graph input, so the
     module is dropped before the export ({@link export_series}). Exported with it, the graph would
     carry an unused 9.4GB state_dict.
-    MUST: 行選択は `F.embedding`（token-only 形と同文 — 上流の `logits_to_keep` にテンソルを
-    渡す形は `aten.index.Tensor` = IR 語彙外の advanced indexing に落ちる）。lm_head と
-    softcap の 3 行は {@link gemma4.export_token.TokenOnlyChunkWrapper} の逐語同型で、
-    **違いは argmax を置かないことだけ**（ADR 0083 決定 6 — sampling はホスト維持）。
-    MUST: 返す順は **(logits, hidden)** 固定 — ランタイムは出力スロット番号で読むので、
-    入れ替えると形も dtype も合ったまま別のテンソルが sampling へ渡る。
-    MUST: 第 2 出力は**最終 norm の後・lm_head の前**の行選択済み hidden そのもの
-    （`rowed`）。lm_head を通す前の値であることが drafter 側の入力条件で、別の中間値を
-    返しても shape は `[1,R,H]` のまま合う。
+    MUST: the row selection is `F.embedding` (the same text as the token-only form — passing a
+    tensor to upstream's `logits_to_keep` lowers to `aten.index.Tensor` = advanced indexing outside
+    the IR vocabulary). The three lm_head and softcap lines are verbatim isomorphic to
+    {@link gemma4.export_token.TokenOnlyChunkWrapper}; **the only difference is that no argmax is
+    placed** (ADR 0083 decision 6 — sampling stays on the host).
+    MUST: the return order is fixed as **(logits, hidden)** — the runtime reads by output slot
+    number, so swapping them would hand another tensor to sampling with shape and dtype still
+    matching.
+    MUST: the second output is the row-selected hidden itself **after the final norm and before
+    lm_head** (`rowed`). Being the value before lm_head is the drafter side's input condition, and
+    returning another intermediate value would still match the shape `[1,R,H]`.
     """
 
     def forward(  # type: ignore[override]
@@ -217,34 +225,39 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
                 position_ids=None,
                 use_cache=False,
             ).last_hidden_state
-        # 行選択のあと [1,R,H] へ上げてから lm_head へ通す（token-only 形と同文 — 行選択済み
-        # lm_head の構造検査が「選択済みの行」を見るのはこの形が前提）。
+        # Lift to [1,R,H] after the row selection, then run lm_head (the same text as the
+        # token-only form — the structural check of the row-selected lm_head looking at "the
+        # selected rows" assumes this form).
         rowed = functional.embedding(last_row, hidden[0]).unsqueeze(0)
         logits = self.model.lm_head(rowed)
         cap = float(self.model.config.final_logit_softcapping)
         return torch.tanh(logits / cap) * cap, rowed
 
 
-#: {@link decode.load_wrapper} へ渡す variant。**読まれるのは `wrapper` 欄だけ**（素材の読み方と
-#: RoPE の差し替えはラッパ型に依らない）。残り 3 欄は {@link decode.export_series} 用の分岐で、
-#: 本台本はそちらを通らない — 製品形の差（入口 2 本増・出口 logits・PLE 資産）は
-#: `ChunkVariant` の 4 欄に載らないので、系列の駆動はこのモジュールが持つ。
+#: The variant passed to {@link decode.load_wrapper}. **Only the `wrapper` field is read** (how the
+#: source tensors are read and the RoPE replacement do not depend on the wrapper type). The other 3
+#: fields are branches for {@link decode.export_series}, which this script does not go through —
+#: the product form's differences (two more inputs, logits exit, PLE assets) do not fit the 4 fields
+#: of `ChunkVariant`, so this module drives the series.
 _LOAD_VARIANT = decode.ChunkVariant(
     suffix=GEMMA4_PRODUCT_SUFFIX, wrapper=ProductChunkWrapper, token_only=False, goldens=False
 )
 
 
 def load_wrapper(model_dir: Path) -> ProductChunkWrapper:
-    """実重みを f32 で読み、RoPE を受け渡し口へ差し替えた製品ラッパを返す。
+    """Read the real weights in f32 and return the product wrapper with RoPE replaced by the
+    hand-over inputs.
 
-    素材の読み方（3 つの等価検査を含む）と RoPE の差し替えは chunk 系列 3 本で同一なので、
-    {@link decode.load_wrapper} をそのまま通す（同じ規律を 2 箇所に書かない）。
+    How the source tensors are read (including the 3 equivalence checks) and the RoPE replacement
+    are identical across the 3 chunk series, so this goes through {@link decode.load_wrapper}
+    unchanged (the same discipline is not written in two places).
     """
-    # variant の `wrapper` 欄が組む型そのものが返る（{@link _LOAD_VARIANT}）。
+    # The return value is exactly the type the variant's `wrapper` field builds
+    # ({@link _LOAD_VARIANT}).
     return decode.load_wrapper(_LOAD_VARIANT, model_dir)
 
 
-# ---- PLE 資産 --------------------------------------------------------------
+# ---- PLE assets ------------------------------------------------------------
 
 
 def ple_token_bytes(layers: int, dim: int, storage: str) -> int:
@@ -259,35 +272,39 @@ def ple_token_bytes(layers: int, dim: int, storage: str) -> int:
 
 
 def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
-    """PLE 35 分割の行数（= PLE 資産の token 行数）。
+    """Row count of the 35-way PLE split (= the token rows of the PLE assets).
 
-    MUST: `config.vocab_size_per_layer_input` から取らない —
-    {@link gemma4.export.load_model_and_tables} が**検査席の行数**（`ple.PLE_PROBE_ROWS` = 8）へ
-    差し替えた後の値なので、そちらを読むと
-    8 行の PLE 資産が形も型も合ったまま書かれる（実際に 1 度踏んだ）。行数の正本は
-    「実際に読み込んだ分割表」だけ。
+    MUST: do not take it from `config.vocab_size_per_layer_input` — that is the value after
+    {@link gemma4.export.load_model_and_tables} replaced it with **the probe model's row count**
+    (`ple.PLE_PROBE_ROWS` = 8), so reading it would write an 8-row PLE asset that still matches in
+    shape and type (this actually happened once). The source of truth for the row count is only
+    "the split tables actually loaded".
 
-    MUST: 主 embedding の vocab 行数と一致することを見る（ADR 0085 決定 5 の**書き手側**の半分）
-    — ホスト loader はこの 2 つの一致を前提に id 空間を突き合わせるので、食い違ったまま
-    配ると読み手が拒否するか、拒否を緩めた瞬間に「別 token の有効な行」を引く。
+    MUST: check that it matches the main embedding's vocab row count (the **writer-side** half of
+    ADR 0085 decision 5) — the host loader matches the id spaces assuming the two agree, so shipping
+    them disagreeing makes the reader refuse, or, the moment the refusal is relaxed, read "a valid
+    row of another token".
     """
     rows = {int(table.weight.shape[0]) for table in tables}
     if len(rows) != 1:
-        raise AssertionError(f"PLE 分割表の行数が揃っていない: {sorted(rows)}")
+        raise AssertionError(f"the PLE split tables do not share one row count: {sorted(rows)}")
     found = rows.pop()
     if found != vocab_size:
         raise AssertionError(
-            f"PLE 分割表の行数 {found} が主 embedding の vocab 行数 {vocab_size} と違う"
-            "（ホスト gather の id 空間が主 embedding と別物になる — ADR 0085 決定 5）"
+            f"the PLE split tables have {found} rows, not the main embedding's vocab rows"
+            f" {vocab_size} (the id space of the host gather would differ from the main embedding"
+            " — ADR 0085 decision 5)"
         )
     return found
 
 
 def ple_probe_tokens(tokens: int, ranges: Sequence[tuple[int, int]]) -> tuple[int, ...]:
-    """逆量子化ビット一致の参照に使う**散点** token id（block 境界の両側 + 両端 + 中央）。
+    """**Scattered** token ids for the dequantization bit-identity reference (both sides of each
+    block boundary + both ends + the middle).
 
-    連続 N 個だと 1 つの block しか踏まず、別 block だけの取り違え（範囲の off-by-one・
-    scale の層ずれ）が門に映らない（{@link gemma4.ple.probe_rows} と同じ理由の block 版）。
+    N consecutive ids would touch only one block, so a mix-up confined to another block (an
+    off-by-one in a range, a scale shifted by a layer) would not show in the gate (the block version
+    of the same reason as {@link gemma4.ple.probe_rows}).
     """
     picked: list[int] = []
     for start, stop in ranges:
@@ -323,15 +340,18 @@ def bf16_ple_tables(tables: Sequence[torch.nn.Module]) -> list[torch.Tensor]:
     return values
 
 
-#: 一時ファイルへ落とすときの 1 回ぶんの行数の目安（バイト）。転置の中間が RAM に載る量なので、
-#: 35 表ぶんの実体（E2B で約 2.35 GB）より 2 桁小さく取る。
+#: Approximate size of one write when spilling to the temporary file (bytes). It is how much of the
+#: transpose's intermediate sits in RAM, so it is taken two orders of magnitude smaller than the
+#: data of the 35 tables (about 2.35 GB for E2B).
 _SPILL_CHUNK_BYTES = 64 * 1024 * 1024
 
 
 def spill_payload(payload: Buffer, path: Path) -> None:
-    """連結済みの payload を `path` へ 1 度だけ落とす（QAT 側 {@link gemma4_qat.ple} と共有）。
+    """Spill the concatenated payload to `path` once (shared with the QAT side
+    {@link gemma4_qat.ple}).
 
-    MUST: 落とし先は**作業席の一時ファイル**で、呼び手は据え替えの前に消す（配布物ではない）。
+    MUST: the target is **a temporary file in the staging directory**, and the caller deletes it
+    before the swap (it is not part of the distribution).
     """
     with path.open("wb") as handle:
         handle.write(payload)
@@ -340,19 +360,21 @@ def spill_payload(payload: Buffer, path: Path) -> None:
 def _spill_tables(
     tables: Sequence[torch.Tensor], stride: int, rows: int, path: Path
 ) -> Callable[[int, int], bytes]:
-    """層ごとの表を **token-major に連結した payload** として `path` へ 1 度だけ落とし、
-    その区間読みを返す。
+    """Spill the per-layer tables to `path` once as **a payload concatenated token-major**, and
+    return a range reader over it.
 
-    `tables` は**層ごと**（table-major）に持っているので、行の塊ごとに 35 本から `stack` して
-    token-major へ転置しながら書く（転置の中間は 1 塊ぶんだけ生きる）。
+    `tables` is held **per layer** (table-major), so each chunk of rows is stacked from the 35
+    tables and written while being transposed to token-major (only one chunk of the transpose's
+    intermediate is alive at a time).
 
-    MUST: 落とし先は**作業席の一時ファイル**で、呼び手は落とした直後に元の実体を手放す
-    （`values.clear()` / `row_scales.clear()`）— 遅延読み口がメモリ上の 35 表を掴んだままだと、
-    i8 の実体（E2B で約 2.35 GB）が torch.export と変換の間ずっと常駐する（台本の RAM 予算は
-    README の 24GB）。据え替えの前に消すので配布物には出ない。
+    MUST: the target is **a temporary file in the staging directory**, and the caller releases the
+    original data right after the spill (`values.clear()` / `row_scales.clear()`) — if the lazy
+    reader kept the 35 tables in memory, the i8 data (about 2.35 GB for E2B) would stay resident
+    throughout torch.export and the conversion (the script's RAM budget is the README's 24GB). It is
+    deleted before the swap, so it never appears in the distribution.
 
-    MUST: 同じ区間からは**同じバイト列**が返る（書き手は sha256 を採るときと書くときの
-    2 度引く）— 落とした後のファイルは誰も書き換えない。
+    MUST: the same range returns **the same bytes** (the writer reads twice: once to take the sha256
+    and once to write) — nobody rewrites the file after the spill.
     """
     per_chunk = max(1, _SPILL_CHUNK_BYTES // stride)
     with path.open("wb") as handle:
@@ -362,16 +384,18 @@ def _spill_tables(
             handle.write(memoryview(chunk.numpy()).cast("B"))
     written = path.stat().st_size
     if written != rows * stride:
-        raise AssertionError(f"{path}: {written} バイト — {rows} 行 × {stride} バイトと違う")
+        raise AssertionError(f"{path}: {written} bytes — not {rows} rows × {stride} bytes")
 
     def read(begin: int, end: int) -> bytes:
         if begin % stride or end % stride:
-            raise AssertionError(f"PLE の区間 [{begin}, {end}) が 1 行 {stride} バイトの倍数でない")
+            raise AssertionError(
+                f"PLE range [{begin}, {end}) is not a multiple of the {stride}-byte row"
+            )
         with path.open("rb") as handle:
             handle.seek(begin)
             raw = handle.read(end - begin)
         if len(raw) != end - begin:
-            raise AssertionError(f"{path}: PLE の区間 [{begin}, {end}) が途中で尽きた")
+            raise AssertionError(f"{path}: PLE range [{begin}, {end}) ran out partway")
         return raw
 
     return read
@@ -379,15 +403,19 @@ def _spill_tables(
 
 @dataclass(frozen=True)
 class PleContainerAssets:
-    """{@link ple_container_assets} の戻り — 容器へ渡す資産と、消してよい一時ファイル。"""
+    """Return value of {@link ple_container_assets} — the assets for the container, and the
+    temporary files that may be deleted."""
 
-    #: `publish_model(assets=…)` へそのまま渡す資産（索引 + `values` / `scales` の block 列）。
+    #: The assets passed as they are to `publish_model(assets=…)` (the index + the `values` /
+    #: `scales` block sequences).
     assets: dict[str, AssetInput]
-    #: token-major の payload を落とした作業席の一時ファイル（配布物ではない）。
+    #: Temporary files in the staging directory that hold the token-major payload (not part of the
+    #: distribution).
     spills: tuple[Path, ...]
 
     def discard(self) -> None:
-        """一時ファイルを消す（作業席ごと据わる前に呼ぶ MUST — 配布物に混ざらない）。"""
+        """Delete the temporary files (MUST be called before the staging directory is placed as a
+        whole — they must not mix into the distribution)."""
         for path in self.spills:
             path.unlink(missing_ok=True)
 
@@ -408,8 +436,9 @@ def ple_container_assets(
     """Build the PLE as **assets of the model container** (the index + the `values` / `scales`
     block sequences).
 
-    切り方も索引の綴りも core の {@link karume.ple.ple_assets} が持つ（移行 CLI と同じ 1 本）。
-    ここが足すのは「層ごとの表 → token-major の連結 payload」の読み口だけである。
+    Both how it is cut and the index's spelling are owned by the core {@link karume.ple.ple_assets}
+    (the same single path as the migration CLI). All this adds is the reader for "per-layer tables →
+    the concatenated token-major payload".
 
     A bf16 `storage` (this series) takes `values` as each layer's bf16 bits (`[tokens, dim]`
     int16 — {@link bf16_ple_tables}) and `row_scales=None`, and builds the schema-5 index (no
@@ -418,9 +447,9 @@ def ple_container_assets(
     as each layer's scales: `[tokens]` (schema 3, one scale per row) or, with a group size,
     `[tokens, dim / group_size]` (schema 4 — the q4_0 QAT line, {@link gemma4.export_product_qat}).
 
-    MUST: 実体は `spill_dir`（作業席）の一時ファイルへ**1 度だけ**落とす（{@link _spill_tables}
-    の MUST）— 呼び手はこの呼び出しの直後に `values` / `row_scales` を手放し、export 中に
-    i8 の実体を持ち越さない。
+    MUST: the data is spilled **once** to a temporary file in `spill_dir` (the staging directory)
+    (the MUST of {@link _spill_tables}) — the caller releases `values` / `row_scales` right after
+    this call and does not carry the i8 data through the export.
     """
     row_bytes = ple_row_bytes(storage, layers, dim, group_size)
     # The row kinds the storage has (a bf16 table has no scales — `ple_assets` refuses a mismatch).
@@ -449,7 +478,8 @@ def ple_container_assets(
 
 
 def _locate_block(blocks: Sequence[Mapping[str, Any]], token: int) -> Mapping[str, Any] | None:
-    """token を含む block（索引は昇順の隙間なし分割なので線形走査で足りる — probe は散点）。"""
+    """The block containing the token (the index is an ascending partition without gaps, so a
+    linear scan suffices — the probe is a few scattered points)."""
     for block in blocks:
         if int(block["start"]) <= token < int(block["stop"]):
             return block
@@ -457,13 +487,15 @@ def _locate_block(blocks: Sequence[Mapping[str, Any]], token: int) -> Mapping[st
 
 
 def _unpack_ple_values(packed: torch.Tensor, storage: str) -> torch.Tensor:
-    """`values` の生バイト（u8）を量子化値 q（i8）へ展開する — 末尾軸が `× 詰め数` に伸びる。
+    """Unpack the raw bytes (u8) of `values` into the quantized values q (i8) — the last axis grows
+    by `× the pack factor`.
 
-    定義は container-v1 §6.3 の codec 台帳（TS の読み手の `int8-sym` / `int4-sym-g` /
-    `int2-off`）と同じ: i8 は `u = q`、i4 は `u = q + 8`（バイト内の**下位** nibble が先）、
-    i2 は `u = q + 2`（**下位 2bit から**順に）。上流 `QuantizedEmbedding` の展開とも同じ
-    定義で、門はこの 1 本だけを持つ（詰め順を取り違えると参照側と「同じ向きに間違った 2 つ」を
-    突き合わせることになるので、参照側は上流モジュールの出力のまま保つ）。
+    The definition is the same as the codec ledger of container-v1 §6.3 (`int8-sym` / `int4-sym-g` /
+    `int2-off` of the TS reader): i8 is `u = q`, i4 is `u = q + 8` (the **low** nibble of a byte
+    first), i2 is `u = q + 2` (in order **from the low 2 bits**). It is also the same definition as
+    the unpacking of upstream `QuantizedEmbedding`, and the gate holds only this one (getting the
+    packing order wrong would compare "two things wrong in the same direction" with the reference
+    side, so the reference side is kept as the upstream module's output).
     """
     if storage == "i8":
         return packed.view(torch.int8)
@@ -477,18 +509,21 @@ def _unpack_ple_values(packed: torch.Tensor, storage: str) -> torch.Tensor:
 def assert_ple_assets(
     container: Path, index: Mapping[str, Any], probe: Sequence[int], reference: torch.Tensor
 ) -> None:
-    """据えた容器の資産から probe token を組み直し、35 表経路と**ビット一致**することを見る。
+    """Rebuild the probe tokens from the assets of the placed container and check that they are
+    **bit-identical** to the 35-table path.
 
-    参照側（`reference`）は {@link gemma4.ple.per_layer_inputs} が fake-quant 済みの 35 表から
-    組んだ `[1,P,35,256]` そのもの — つまり **PLE をグラフに残していたら embedding op が
-    出していた値**（i8 格納 + per-row scale の逆量子化は fake-quant の値を厳密に復元する
-    — ADR 0019 の ±127 論証）。再配置側は**書いたバイト列を読み直し**、ホストと同じ順序
-    （`f32(q) * scale` → `* embed_scale`）で組む。
+    The reference side (`reference`) is the `[1,P,35,256]` that {@link gemma4.ple.per_layer_inputs}
+    built from the 35 fake-quantized tables itself — that is, **the values the embedding op would
+    have produced had the PLE stayed in the graph** (i8 storage + dequantization with a per-row
+    scale restores the fake-quant values exactly — the ±127 argument of ADR 0019). The relayout side
+    **reads the written bytes back** and assembles them in the same order as the host
+    (`f32(q) * scale` → `* embed_scale`).
 
-    格納（索引の `storage`）は i8 / i4 / i2 のどれでも同じ門を通る — QAT の固定 packed の PLE
-    （ADR 0097 追記 4）の参照は上流 `QuantizedEmbedding` の出力で、packed の値は
-    {@link _unpack_ple_values} で展開する。行のバイト数は索引の `rowBytes` を正本に読み、
-    格納と寸法から導く値（`karume.ple.ple_row_bytes`）と食い違えば落とす。
+    Any storage (the index's `storage`) of i8 / i4 / i2 goes through the same gate — the reference
+    of QAT's fixed packed PLE (ADR 0097 addendum 4) is the output of upstream `QuantizedEmbedding`,
+    and packed values are unpacked by {@link _unpack_ple_values}. The bytes per row are read from
+    the index's `rowBytes` as the source of truth, and a disagreement with the value derived from
+    the storage and dimensions (`karume.ple.ple_row_bytes`) fails.
 
     A schema-4 index (`groupSize` — the q4_0 QAT line, {@link gemma4.export_product_qat}) holds
     one scale per group of `groupSize` values of a (token, layer) row, in (layer, group) order, and
@@ -497,16 +532,19 @@ def assert_ple_assets(
     whole row. A schema-5 index (a bf16 table — the bf16 series) has `values` only: each row's bf16
     bits widened to f32 times `embed_scale`. MUST: it spells neither `scales` nor `groupSize`.
 
-    MUST: `torch.equal`（ビット一致）で見る — scale の対応を 1 層ずらしても、block の範囲を
-    1 行ずらしても、形も型も dtype も合ったまま**別 token の有効な行**が出る。
-    MUST: 読み直す（in-memory の配列を突き合わせない）— 転置は正しいのに書き出しの
-    dtype / 形 / 順序が違う形を、この門が受け止める最後の位置。
-    MUST: 読んだ block は **probe 行だけ取り出して捨てる**（block 丸ごとを器に残さない）—
-    probe は全 block の両端を踏むので、残すと PLE 全量（E2B で約 2.35 GB）がこの門の実行中に
-    もう一度 RAM に載る。容器も 1 度だけ開く（block ごとに `verify_container` を回さない）。
-    MUST: 同じ block を**2 度読まない** — probe は 1 block の両端と中を踏むので、行ごとに
-    読み直すと同じ数十 MB の資産を最大 3 度復号する。要る行を先に集めてから block 単位で
-    1 度だけ読む（常駐は行の器だけで変わらない）。
+    MUST: compare with `torch.equal` (bit-exact) — shifting the scale mapping by one layer, or a
+    block's range by one row, yields **a valid row of another token** with shape, type and dtype
+    still matching.
+    MUST: read back (do not compare the in-memory arrays) — this gate is the last place that catches
+    a form whose transpose is right but whose written dtype / shape / order is wrong.
+    MUST: of each block read, **take only the probe rows and drop the rest** (do not keep whole
+    blocks) — the probe touches both ends of every block, so keeping them would load the whole PLE
+    (about 2.35 GB for E2B) into RAM once more while this gate runs. The container is also opened
+    only once (`verify_container` is not run per block).
+    MUST: do **not read the same block twice** — the probe touches both ends and the middle of a
+    block, so re-reading per row would decode the same tens of MB of asset up to 3 times. Collect
+    the needed rows first and read each block once (what stays resident is only the row buffers,
+    unchanged).
     """
     layers = int(index["layers"])
     dim = int(index["dim"])
@@ -532,14 +570,14 @@ def assert_ple_assets(
     row_bytes = {key: int(index[key]["rowBytes"]) for key in derived}
     if row_bytes != derived:
         raise AssertionError(
-            f"索引の rowBytes {row_bytes} が格納 '{storage}'・layers {layers}・dim {dim}"
-            f"・groupSize {group_size} から導く {derived} と違う"
+            f"the index's rowBytes {row_bytes} for storage '{storage}', layers {layers}, dim {dim}"
+            f", groupSize {group_size} differ from the derived {derived}"
         )
     # One scale per row is one group of `dim` values.
     group = dim if group_size is None else group_size
     expected_shape = (1, len(probe), layers, dim)
     if tuple(reference.shape) != expected_shape:
-        raise AssertionError(f"参照 {tuple(reference.shape)} が {expected_shape} でない")
+        raise AssertionError(f"reference {tuple(reference.shape)} is not {expected_shape}")
 
     rebuilt = torch.zeros(expected_shape, dtype=torch.float32)
     opened = open_container(container)
@@ -547,9 +585,10 @@ def assert_ple_assets(
     def rows_of(
         wanted: Sequence[tuple[Mapping[str, Any], int]], stride: int
     ) -> dict[tuple[str, int], torch.Tensor]:
-        """要る `(block, token)` を **block 1 本につき 1 度の読み**で集める（残りは捨てる）。
+        """Collect the needed `(block, token)` with **one read per block** (the rest is dropped).
 
-        行は u8 の生バイト（`stride` バイト）で返す — 解釈（展開・f32 への読み替え）は呼び手。
+        Rows are returned as raw u8 bytes (`stride` bytes) — interpreting them (unpacking,
+        reading as f32) is the caller's job.
         """
         by_asset: dict[str, tuple[Mapping[str, Any], set[int]]] = {}
         for block, token in wanted:
@@ -562,13 +601,13 @@ def assert_ple_assets(
             expected = rows * stride
             if len(raw) != expected:
                 raise AssertionError(
-                    f"資産 '{name}' が {len(raw)} バイト — 索引の範囲"
-                    f" [{block['start']}, {block['stop']}) から組んだ期待は {expected}"
+                    f"asset '{name}' is {len(raw)} bytes — the expectation built from the index's"
+                    f" range [{block['start']}, {block['stop']}) is {expected}"
                 )
             view = torch.frombuffer(raw, dtype=torch.uint8).reshape(rows, stride)
             for token in sorted(tokens):
                 picked[(name, token)] = view[token - start].clone()
-            # 次の block を読む前に block 丸ごとの器を手放す（`view` は `raw` を共有する）。
+            # Release the whole block's buffer before reading the next block (`view` shares `raw`).
             del view, raw
         return picked
 
@@ -582,8 +621,8 @@ def assert_ple_assets(
         located.append((position, token, values_block, scales_block))
     if len(located) != len(probe):
         raise AssertionError(
-            f"probe {len(probe)} 本のうち {len(located)} 本しか block の範囲に載っていない"
-            "（索引の [start, stop) が vocab を覆っていない）"
+            f"of the {len(probe)} probe tokens only {len(located)} fall in a block's range"
+            " (the index's [start, stop) does not cover the vocab)"
         )
 
     values = rows_of(
@@ -618,12 +657,13 @@ def assert_ple_assets(
     if not torch.equal(rebuilt, reference):
         worst = float((rebuilt - reference).abs().max())
         raise AssertionError(
-            "PLE の再配置が 35 表経路とビット一致しない"
-            f"（最大絶対差 {worst}）— 値と per-row scale の対応か token 範囲がずれている"
+            "the PLE relayout is not bit-identical to the 35-table path"
+            f" (max abs difference {worst}) — the values and the per-row scales are mismatched,"
+            " or the token range is shifted"
         )
 
 
-# ---- 形検査 ----------------------------------------------------------------
+# ---- Form checks -----------------------------------------------------------
 
 
 def assert_ir_form_product(
@@ -636,35 +676,42 @@ def assert_ir_form_product(
     capacity_symbol: str = decode.CAPACITY_SYMBOL,
     row_symbol: str = ROW_SYMBOL,
 ) -> dict[str, Any]:
-    """製品グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
+    """Check the product graph's form (every property that **breaks silently while the numbers
+    still match**).
 
-    states / 層種別 / 残骸 / 格納の各節は {@link decode.assert_ir_form_common} に預ける
-    （3 形が共有する本体 — 段 1b では「入口 / 出口が排他だから」と独立に綴っていたが、
-    共有部分だけを関数に括れば入口 / 出口の引数化は要らない）。ここが綴るのは製品形に固有の
-    入口・出口だけである。
+    The states / layer types / residue / storage sections are delegated to
+    {@link decode.assert_ir_form_common} (the body the 3 forms share — step 1b spelled them
+    independently "because the inputs / exits are exclusive", but bracketing only the shared part
+    into a function needs no parameterization of inputs / exits). What this function spells is only
+    the inputs and exits specific to the product form.
 
-    製品形に固有の門（PLE 外出しと、選択行の logits / hidden 出口の実証）:
+    The gates specific to the product form (evidence of the PLE moved out and of the selected rows'
+    logits / hidden exits):
 
-    - グラフ入力に **`per_layer_inputs` が居る**こと。居なければ PLE がグラフに残っている
-      （常駐は 2,240MiB 戻り、ホスト gather の入力は誰にも読まれない）。
-    - PLE 表の形（`[ple_rows, hidden_size_per_layer_input]`）を引く `embedding` が**1 本も
-      無い**こと。入力が増えても表が残る形（両方通る配線）が書けてしまう。
-      MUST: `ple_rows` は**引数で受ける** — `config.vocab_size_per_layer_input` は
-      {@link gemma4.export.load_model_and_tables} が検査席の 8 行へ差し替えた後の値なので、
-      config から引くとこの検査が実質空振りになる（実際に 1 度踏んだ）。
-    - `embedding` ノードが**主 embedding + 行選択**の 2 本ちょうどであること。本数で見るのは、
-      PLE の一部だけが残る形（35 本中 1 本の刈り漏れ）を数で捕まえるため。RoPE は
-      ホスト供給の入力になったので、表を引く `embedding` はもう 1 本も居ない。
-    - 出口が **argmax でない**こと。`argmax` が 1 本でも残っていれば sampling の余地が消える
-      （ADR 0083 決定 6 — GPU 側は選択行の logits まで）。
-    - 出力が **2 本で、順序は logits → hidden** であること。ランタイムはスロット番号で読むので、
-      入れ替わっても両方 `[1, R, *]` の f32 で軸は合う。順序を固定するのは幅の突合と、
-      **出力 0 の祖先が lm_head に届く**という構造検査の 2 本（幅が偶然一致しても後者が残る）。
-    - 出力の宣言 shape が `[1, R, vocab_size]` / `[1, R, hidden_size]`（選択**行**のみ）である
-      こと。全行 logits へ退行しても token 列は一致するので、構造検査でしか固定できない
-      （ADR 0068 の実効）。
-    - `last_row` の宣言 shape が `[R]` であること。R を束縛できる入力はこれ 1 本なので、
-      静的 `[1]` へ退行すると「記号が居るのに束縛点が無い」形が書ける。
+    - **`per_layer_inputs` is present** among the graph inputs. If not, the PLE is still in the
+      graph (2,240MiB resident again, and nobody reads the host gather's input).
+    - **There is no** `embedding` that looks up the PLE table's shape
+      (`[ple_rows, hidden_size_per_layer_input]`). A form where the input is added yet the table
+      remains (wiring that passes both) can be written.
+      MUST: `ple_rows` **comes in as an argument** — `config.vocab_size_per_layer_input` is the
+      value after {@link gemma4.export.load_model_and_tables} replaced it with the probe model's 8
+      rows, so taking it from the config would make this check effectively a no-op (this actually
+      happened once).
+    - The `embedding` nodes are exactly 2: **the main embedding + the row selection**. Counting
+      catches, by number, a form where only part of the PLE remains (one of the 35 left unpruned).
+      RoPE became a host-supplied input, so no `embedding` looks up a table any more.
+    - The exit is **not argmax**. Even one `argmax` left removes the room for sampling (ADR 0083
+      decision 6 — the GPU side goes up to the selected rows' logits).
+    - There are **two outputs, in the order logits → hidden**. The runtime reads by slot number,
+      and swapped, both are still f32 `[1, R, *]` with matching axes. The order is pinned by two
+      things: the width comparison and the structural check that **output 0's ancestors reach
+      lm_head** (the latter remains even if the widths happen to match).
+    - The declared output shapes are `[1, R, vocab_size]` / `[1, R, hidden_size]` (the selected
+      **rows** only). A regression to all-row logits still gives the same token sequence, so only
+      a structural check can pin it (what ADR 0068 achieves).
+    - The declared shape of `last_row` is `[R]`. It is the only input that can bind R, so a
+      regression to a static `[1]` could write a form where "the symbol exists but has no binding
+      point".
 
     `ple_rows=None` is the form of a model without per-layer embeddings (12B —
     `gemma4.export_unified`): the same contract minus PLE, so `per_layer_inputs` MUST be absent
@@ -690,16 +737,16 @@ def assert_ir_form_product(
     names = [spec.name for spec in graph.inputs]
     if names != expected_inputs:
         raise AssertionError(
-            f"グラフ入力が {names} — {expected_inputs} でない"
-            "（PLE がグラフに残っている / mask や position_ids が畳み込まれずに入力へ残って"
-            "いる可能性）"
+            f"graph inputs are {names}, not {expected_inputs}"
+            " (the PLE may still be in the graph / mask or position_ids may be left as inputs"
+            " instead of being folded)"
         )
     decode.assert_rope_inputs(graph, config, seq_symbol=seq_symbol)
     last_row_spec = next(spec for spec in graph.inputs if spec.name == decode.TOKEN_ONLY_LAST_ROW)
     if list(last_row_spec.shape) != [row_symbol]:
         raise AssertionError(
-            f"'{decode.TOKEN_ONLY_LAST_ROW}' の宣言 shape が {list(last_row_spec.shape)} —"
-            f" [{row_symbol}] でない（記号 {row_symbol} の唯一の束縛点）"
+            f"declared shape of '{decode.TOKEN_ONLY_LAST_ROW}' is {list(last_row_spec.shape)} —"
+            f" not [{row_symbol}] (the only binding point of the symbol {row_symbol})"
         )
     embeddings = [node for node in graph.nodes if node.op == EMBEDDING_OP]
     if ple_rows is not None:
@@ -707,13 +754,14 @@ def assert_ir_form_product(
         expected_shape = [1, seq_symbol, layers, ple_dim]
         if per_layer_spec.dtype != "f32" or list(per_layer_spec.shape) != expected_shape:
             raise AssertionError(
-                f"'{PER_LAYER_INPUTS}' が {per_layer_spec.dtype} {list(per_layer_spec.shape)} —"
-                f" f32 {expected_shape} でない"
+                f"'{PER_LAYER_INPUTS}' is {per_layer_spec.dtype} {list(per_layer_spec.shape)} —"
+                f" not f32 {expected_shape}"
             )
 
-        # PLE 表は **embedding の重みスロット**（`WEIGHT_SLOTS[embedding] = 0`）で消費される形
-        # でしか居られないので、そこを名指しで見る。initializer の shape だけを見ると別スロットの
-        # 同形テンソル（tiny 模型の `mlp.down_proj` 等）に当たる。
+        # A PLE table can only exist in a form consumed by **the embedding's weight slot**
+        # (`WEIGHT_SLOTS[embedding] = 0`), so that slot is checked by name. Looking only at the
+        # initializers' shapes would hit a same-shaped tensor in another slot (e.g. `mlp.down_proj`
+        # of a tiny model).
         residents = sorted(
             node.ins[0]
             for node in embeddings
@@ -721,47 +769,53 @@ def assert_ir_form_product(
         )
         if residents:
             raise AssertionError(
-                f"PLE 表の形 [{ple_rows}, {ple_dim}] を引く `{EMBEDDING_OP}` が"
-                f" {len(residents)} 本残っている: {residents[:4]}"
-                "（ホスト gather へ外に出し切れていない）"
+                f"PLE table shape [{ple_rows}, {ple_dim}] is still looked up by `{EMBEDDING_OP}`"
+                f" × {len(residents)}: {residents[:4]}"
+                " (not fully moved out to the host gather)"
             )
-    # 主 embedding（tied lm_head と同一実体）1 本 + 最終行の行選択 1 本。PLE が 1 本でも
-    # 残ればここが増え、RoPE の表引きが戻ってもここが増える（どちらも退行の印）。
+    # One main embedding (the same data as the tied lm_head) + one row selection of the last row.
+    # Even one PLE left adds to this, and the RoPE table lookup returning adds to it too (both are
+    # signs of a regression).
     expected_embeddings = 2
     if len(embeddings) != expected_embeddings:
         raise AssertionError(
-            f"`{EMBEDDING_OP}` が {len(embeddings)} 本 — 主 embedding 1 + 行選択 1 の"
-            f" {expected_embeddings} 本でない"
+            f"`{EMBEDDING_OP}` × {len(embeddings)} — not 1 main embedding + 1 row selection"
+            f" = {expected_embeddings}"
         )
 
     if len(graph.outputs) != 2:
         raise AssertionError(
-            f"IR 出力が {len(graph.outputs)} 本"
-            "（製品出口は logits + hidden の 2 本 — ADR 0083 決定 6 / 投機 verify の足場）"
+            f"{len(graph.outputs)} IR outputs"
+            " (the product exit is the 2 outputs logits + hidden — ADR 0083 decision 6 / the"
+            " groundwork of speculative verify)"
         )
     if ARGMAX_OP in graph.required_ops:
         raise AssertionError(
-            f"`{ARGMAX_OP}` がグラフに残っている"
-            "（製品出口は選択行 logits で、sampling / argmax はホスト側 — ADR 0083 決定 6）"
+            f"`{ARGMAX_OP}` is still in the graph"
+            " (the product exit is the selected rows' logits; sampling / argmax are on the host"
+            " — ADR 0083 decision 6)"
         )
     logits_shape = list(declared_shape(graph, graph.outputs[0]))
     hidden_shape = list(declared_shape(graph, graph.outputs[1]))
     expected_logits = [1, row_symbol, int(config.vocab_size)]
     expected_hidden = [1, row_symbol, int(config.hidden_size)]
-    # MUST: 順序まで見る（幅が違うだけで両方 f32 [1,R,*] なので、入れ替えは形では落ちない）。
+    # MUST: check the order too (they differ only in width and are both f32 [1,R,*], so a swap does
+    # not fail on the shape).
     for slot, (found, expected, what) in enumerate(
         ((logits_shape, expected_logits, "logits"), (hidden_shape, expected_hidden, "hidden"))
     ):
         if found != expected:
             raise AssertionError(
-                f"出力 {slot} の宣言 shape が {found} — {expected}（選択行の {what}）でない"
+                f"declared shape of output {slot} is {found} — not {expected}"
+                f" (the selected rows' {what})"
             )
 
-    # 行選択済み lm_head の固定は token-only 形と**同じ構造検査**（decode 側の 1 本を通す）。
+    # The row-selected lm_head is pinned by **the same structural check** as the token-only form
+    # (through the one on the decode side).
     producer = {out: node for node in graph.nodes for out in node.outs}
     logits_source = producer.get(graph.outputs[0])
     if logits_source is None:
-        raise AssertionError(f"出力 0 ('{graph.outputs[0]}') がノード出力でない")
+        raise AssertionError(f"output 0 ('{graph.outputs[0]}') is not a node output")
     decode.assert_row_selected_lm_head(graph, producer, logits_source, rows=row_symbol)
 
     form = decode.assert_ir_form_common(
@@ -780,7 +834,7 @@ def assert_ir_form_product(
     }
 
 
-# ---- 系列 ------------------------------------------------------------------
+# ---- Series ----------------------------------------------------------------
 
 
 def trace(
@@ -802,8 +856,8 @@ def trace(
     config = wrapper.model.config
     example_rope = decode.rope_args(decode.rope_specs(config), positions_for(example_ids))
     seq = Dim(decode.SEQ_SYMBOL, min=2, max=sym_max)
-    # min=1 は MUST — 通常の prefill / decode は R = 1 で走るので、そこを特殊化されると
-    # 従来経路が動かない。torch.export は size 1 を含む Dim を記号のまま保つ（2.13 で実測）。
+    # min=1 is a MUST — ordinary prefill / decode run with R = 1, so specializing it would break the
+    # existing path. torch.export keeps a Dim that includes size 1 as a symbol (measured on 2.13).
     rows = Dim(ROW_SYMBOL, min=1, max=ROW_SYM_MAX)
     graph, tensors = export_module(
         wrapper,
@@ -814,9 +868,9 @@ def trace(
             decode.last_rows_for(example_ids, EXAMPLE_ROWS),
         ),
         dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), {0: rows}),
-        # 割り当ては user 入力 placeholder の出現順
-        # （`karume.convert._assign_input_symbols`）なので、`input_ids[1,M]` →
-        # `last_row[R]` の順で並べる。
+        # The assignment follows the order of the user input placeholders
+        # (`karume.convert._assign_input_symbols`), so they are listed as `input_ids[1,M]` →
+        # `last_row[R]`.
         symbol_names=(decode.SEQ_SYMBOL, ROW_SYMBOL),
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
@@ -833,10 +887,11 @@ def export_series(
     """Write the product container (the PLE as its assets), the PLE probe, the series' own greedy
     goldens of `steps` steps and the provenance record, and return the summary.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（PLE のビット一致・形検査・1-shot 期待表との
-    sanity・golden の margin）を通してから据える。門より前に final へ置くと、落ちた実走が
-    「検収門を通れる資産」を残す（据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。
+    MUST: the outputs are written into the staging directory and placed only after passing **every
+    gate** (PLE bit-identity, the form check, the sanity check against the 1-shot expectation
+    table, the golden margin). Placing them in the final location before the gates would let a
+    failed run leave "assets that can pass the acceptance gate" behind (the discipline of the swap
+    and the cleanup is the core primitive {@link karume.artifacts.staged_publication}).
     MUST: the PLE order is "build the reference and each case's inputs on the 35-table path → take
     the goldens (a full re-forward over the same path) → turn the tables into the stored values
     (the checkpoint's bf16 values unchanged — {@link bf16_ple_tables}) → drop `per_layer` →
@@ -865,17 +920,23 @@ def export_series(
 
     layers = int(config.num_hidden_layers)
     dim = int(config.hidden_size_per_layer_input)
-    # MUST: 行数の正本は読み込んだ分割表（config の欄は検査席の 8 行へ差し替え済み —
-    # {@link ple_table_rows}）。
+    # MUST: the source of truth for the row count is the loaded split tables (the config field has
+    # been replaced with the probe model's 8 rows — {@link ple_table_rows}).
     tokens = ple_table_rows(wrapper.per_layer, int(config.vocab_size))
     embed_scale = float(wrapper.per_layer_scale)
-    # block の切り目は寸法だけで決まる（実体は要らない）ので、表を変換する前に probe を選べる。
+    # The block cuts are determined by the dimensions alone (no data is needed), so the probe can be
+    # chosen before the tables are converted.
     ranges = ple_block_ranges(storage=BF16_STORAGE, tokens=tokens, layers=layers, dim=dim)
     probe = ple_probe_tokens(tokens, ranges[PLE_VALUES_KEY])
 
-    # PLE をグラフから外す前に、①ビット一致の参照 ②各ケースのグラフ入力 を
-    # **35 表経路**（台本 3 本が通す {@link gemma4.ple.per_layer_inputs}）で 1 度だけ組む。
-    print("[ple] 35 表経路で参照とケース入力を組む", file=sys.stderr, flush=True)
+    # Before the PLE leaves the graph, build ① the bit-identity reference and ② each case's graph
+    # inputs once, on **the 35-table path** ({@link gemma4.ple.per_layer_inputs}, which the 3
+    # scripts go through).
+    print(
+        "[ple] building the reference and the case inputs on the 35-table path",
+        file=sys.stderr,
+        flush=True,
+    )
     with torch.no_grad():
         probe_reference = ple.per_layer_inputs(
             wrapper.per_layer, torch.tensor([list(probe)], dtype=torch.int64), embed_scale
@@ -888,7 +949,8 @@ def export_series(
 
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory itself (the primitive does not create it — it only
+        # hands out a path).
         staged.mkdir()
         # The goldens of the stored model (the checkpoint's values throughout), by full re-forward
         # over the 35-table path — so before the tables go.
@@ -905,7 +967,8 @@ def export_series(
 
         print("[ple] 35 tables → bf16 values", file=sys.stderr, flush=True)
         values = bf16_ple_tables(wrapper.per_layer)
-        # 実体は上で手放し済み。席そのものを落として、未使用の 35 表を export へ持ち込まない。
+        # The data was released above. Drop the attribute itself so the unused 35 tables are not
+        # carried into the export.
         del wrapper.per_layer
 
         ple_assets_built = ple_container_assets(
@@ -931,16 +994,17 @@ def export_series(
             str(staged / PLE_PROBE_FILE),
         )
 
-        print("[export] torch.export → 変換", file=sys.stderr, flush=True)
+        print("[export] torch.export → conversion", file=sys.stderr, flush=True)
         try:
             surgical, tensors = trace(wrapper, example_ids, case_inputs[example_name], sym_max)
             verified = decode._write_container(
                 surgical,
                 tensors,
                 staged / one_shot.MODEL_FILE,
-                # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-                # 導かない — 系列名（`gemma4-e2b-product-bf16`）も作業席の名前も部品名とは一致
-                # しない（container-v1 §2.1）。
+                # The graph name is **the component name** (= the weights key of karume.json). It is
+                # not derived from the directory name — neither the series name
+                # (`gemma4-e2b-product-bf16`) nor the staging directory's name matches the
+                # component name (container-v1 §2.1).
                 graph_name=GEMMA4_ROLE,
                 weight_dtype=BF16_STORAGE,
                 weight_scales={},
@@ -948,22 +1012,28 @@ def export_series(
                 assets=assets,
             )
         finally:
-            # MUST: 一時ファイルは据え替えの前に消す（作業席ごと据わるので、残すと配布物に混ざる）。
+            # MUST: delete the temporary files before the swap (the staging directory is placed as
+            # a whole, so leftovers would mix into the distribution).
             ple_assets_built.discard()
         index = json.loads(bytes(assets[PLE_INDEX_ASSET].payload))
-        print("[ple] 据えた容器の資産から probe を組み直す", file=sys.stderr, flush=True)
+        print(
+            "[ple] rebuilding the probe from the placed container's assets",
+            file=sys.stderr,
+            flush=True,
+        )
         assert_ple_assets(staged / one_shot.MODEL_FILE, index, probe, probe_reference)
         # Every linear and the embedding are bf16, and nothing is i8 / i4 (the PLE tables left the
         # graph).
         storage_expectation = {BF16_STORAGE: bf16_weights, "i8": 0, "i4": 0}
         form = assert_ir_form_product(verified, config, storage_expectation, tokens)
 
-        print("[sanity] 全長 forward", file=sys.stderr, flush=True)
+        print("[sanity] full-length forward", file=sys.stderr, flush=True)
         first: dict[str, int] = {}
         for name, ids in cases:
             with torch.no_grad():
-                # 例示入力と同じ R 行で引き、**最終行**の 1 位を見る（R > 1 の行選択そのものを
-                # sanity でも 1 度踏む — 期待表と突き合わせるのは prompt 最終行の継続だけ）。
+                # Look up the same R rows as the example input and check the top-1 of the **last
+                # row** (the sanity check also exercises the R > 1 row selection once — only the
+                # continuation of the prompt's last row is compared with the expectation table).
                 logits, _hidden = wrapper(
                     ids,
                     *decode.rope_args(specs, positions_for(ids)),
@@ -972,9 +1042,10 @@ def export_series(
                 )
             first[name] = int(logits[0, -1].argmax())
 
-        # 第 1 継続 token を 1-shot 台本の期待表と突き合わせる（機構横断の突合 — 台本が別物
-        # なので、同じ重み・同じ prompt で 1 位が一致することが交差検証になる）。
-        # MUST: 公開より前に評価する（落ちたら作業席ごと消える）。
+        # Compare the first continuation token with the 1-shot script's expectation table (a
+        # cross-mechanism comparison — the scripts are different, so agreement of the top-1 with
+        # the same weights and the same prompt is a cross-check).
+        # MUST: evaluate before publishing (on failure the staging directory goes with it).
         tokenizer = one_shot.load_tokenizer(model_dir)
         expected = {
             name: token
@@ -987,9 +1058,10 @@ def export_series(
         }
         sanity = one_shot._sanity(first, expected, labels)
 
-        # 出所記録は容器と**同じ席**へ置く（据え替えが 1 回なので、新しい容器 + 古い記録という
-        # 組が作れない）。名乗る系列名は据えた後の名前 — 席の名前ではない。
-        print("[provenance] チェックポイント指紋 → reference.json", file=sys.stderr, flush=True)
+        # The provenance record goes into **the same directory** as the container (one swap, so a
+        # pair of new container + old record cannot arise). The series name it states is the name
+        # after placement — not the staging directory's name.
+        print("[provenance] checkpoint fingerprint → reference.json", file=sys.stderr, flush=True)
         # The series' own goldens, as the q4_0 QAT series records them.
         own = provenance.assert_reference_goldens(staged, greedy_cases)
         reference_goldens = {**own, "series": out_dir.name, "suppressTokens": list(suppress)}
@@ -1004,8 +1076,9 @@ def export_series(
         "model_bytes": sum(
             path.stat().st_size for path in container_parts(out_dir / one_shot.MODEL_FILE)
         ),
-        # PLE は容器の中の資産なので、バイト数は索引が名乗る行数 × 1 行から出す
-        # （容器の part はグラフの重みと同居するので、ファイルサイズからは切り出せない）。
+        # PLE is an asset inside the container, so its byte count comes from the row count the
+        # index states × one row (the container's parts also hold the graph's weights, so it cannot
+        # be cut out of the file sizes).
         "ple_bytes": tokens * ple_token_bytes(layers, dim, BF16_STORAGE),
         "ple_blocks": {
             key: len(index[key]["blocks"])

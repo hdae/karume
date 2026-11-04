@@ -1,21 +1,23 @@
-"""EmbeddingGemma-300m のトークナイザ資産の compile と parity フィクスチャ採取。
+"""Compile of the EmbeddingGemma-300m tokenizer asset and harvest of the parity fixture.
 
     uv run python -m embeddinggemma.tokenizer
 
-gemma4 と**同じ台本系**で回る（ADR 0084 決定 6 の裁定 9 — 段 1a に同乗）。共用できるのは
-`_shared/gemma_tokenizer.py` の compile と Deno 側の実装であって、**資産は共用できない**:
-`.model.merges` は gemma4 と sha256 ビット同一（514,906 本）だが、`.model.vocab` は 262,144
-本のうち 6,206 スロットで綴りが違い、`added_tokens` は 24 本 vs 6,415 本、post_processor は
-gemma4 が素通しなのに対しこちらは `<bos>` … `<eos>` を付ける（ADR 0084 Context 1）。
+Runs on **the same script family** as gemma4 (ADR 0084 decision 6, ruling 9 — it rode along with
+step 1a). What can be shared is the compile in `_shared/gemma_tokenizer.py` and the Deno-side
+implementation; **the asset cannot be shared**: `.model.merges` is sha256 bit-identical to gemma4's
+(514,906 entries), but `.model.vocab` differs in spelling in 6,206 of its 262,144 slots,
+`added_tokens` is 24 vs 6,415 entries, and the post_processor adds `<bos>` … `<eos>` here while
+gemma4's passes through (ADR 0084 Context 1).
 
-出力は 2 系統:
+Two outputs:
 
-  ① 実行時資産 `outputs/series/embeddinggemma-300m-tokenizer/tokenizer.json`
-  ② パリティ用フィクスチャ
-     `packages/models/tests/fixtures/gemma-text/embeddinggemma-parity.json`（**git 管理**）
+  ① runtime asset `outputs/series/embeddinggemma-300m-tokenizer/tokenizer.json`
+  ② parity fixture
+     `packages/models/tests/fixtures/gemma-text/embeddinggemma-parity.json` (**tracked in git**)
 
-NOTE: models pipeline / batch>1 export / attention_mask 配線は本段の射程外（backlog later
-「EmbeddingGemma の完成」に残る）— ここで消化するのは tokenizer 部分だけ。
+NOTE: the models pipeline / batch>1 export / attention_mask wiring are out of scope for this step
+(they remain in the backlog's later item "complete EmbeddingGemma") — only the tokenizer part is
+done here.
 """
 
 from __future__ import annotations
@@ -23,13 +25,13 @@ from __future__ import annotations
 from _shared.gemma_tokenizer import EncodeCase, emit
 from _shared.paths import INPUTS_ROOT, REPO_ROOT, SERIES_ROOT
 
-#: 上流の手置き資産（`google/embeddinggemma-300m` のスナップショット）。
+#: The hand-placed upstream asset (a snapshot of `google/embeddinggemma-300m`).
 TOKENIZER_JSON = INPUTS_ROOT / "embeddinggemma" / "google-300m" / "tokenizer.json"
 
-#: 実行時資産（系列出力）。
+#: The runtime asset (series output).
 ASSET_PATH = SERIES_ROOT / "embeddinggemma-300m-tokenizer" / "tokenizer.json"
 
-#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma4_tokenizer_test.ts` が読む）。
+#: The parity fixture (tracked in git — read by the Deno-side `gemma4_tokenizer_test.ts`).
 FIXTURE_PATH = (
     REPO_ROOT
     / "packages"
@@ -40,7 +42,7 @@ FIXTURE_PATH = (
     / "embeddinggemma-parity.json"
 )
 
-#: EmbeddingGemma 固有の符号化ケース（共通の電池へ足す分）。
+#: The encode cases specific to EmbeddingGemma (added to the shared battery).
 CASES: tuple[EncodeCase, ...] = (
     EncodeCase(
         "prompt-query",

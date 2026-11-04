@@ -1,31 +1,37 @@
-"""i4 系列の**校正付き丸め**（GPTQ × RTN 格子）を回すリグ（perf-ledger Q-6）。
+"""Rig that runs the **calibrated rounding** (GPTQ × RTN grid) of the i4 series (perf-ledger Q-6).
 
-`karume.quant_calib.calibrate_stages` は「stage を 1 つずつ進めながら、その層に実際に流れる
-活性から丸め先を選び直す」駆動で、格納グリッドは {@link karume.quantize.quantize_to_int4} と
-**1 バイトも変わらない**（`scale = group amax / 7`・`q ∈ [−7,+7]`）。変わるのは丸め値と
-scale 台帳の中身だけで、`emit` 側の格納経路も配布形のバイト構造も一切動かない。
+`karume.quant_calib.calibrate_stages` is a driver that "advances one stage at a time and re-picks
+the rounding targets from the activations that actually flow through that layer". The storage
+grid is **not one byte different** from {@link karume.quantize.quantize_to_int4}
+(`scale = group amax / 7`, `q ∈ [−7,+7]`). Only the rounded values and the contents of the scale
+ledger change; neither the storage path on the `emit` side nor the byte structure of the
+distribution moves at all.
 
-ここが用意するのは core の駆動が要求する 3 つ:
+This module provides the three things the core driver requires:
 
-1. **stage 列** — `DebertaV2Encoder.forward` のループを写した {@link EncoderStage} の並び。
-   `(モデル内 FQN 接頭辞, モジュール)` の組で、接頭辞は **export する wrapper の FQN 空間**
-   （{@link STAGE_PREFIX}）— scale 台帳のキーが safetensors のテンソルキーと同じ空間に
-   居ないと emit 側の突合が空振りする（`deberta.export._fake_quant` の FQN 規律 MUST）。
-2. **先頭 stage への入力** — 埋め込みと 4 次元 mask / 相対位置の添字表 / `rel_embeddings` を
-   自前で組み直さず、**先頭層の呼び出しそのもの**を forward_pre_hook で捕まえる
-   （{@link capture_stage_batches}）。
-3. **stage 分解一致門** — 捕まえた入力を stage 列で逐次 forward した最終 hidden が、フック
-   なしの wrapper forward の対応出力と**ビット一致**すること（{@link assert_stage_split}）。
+1. **The stage list** — a sequence of {@link EncoderStage} that copies the loop of
+   `DebertaV2Encoder.forward`. Each entry is a `(in-model FQN prefix, module)` pair, and the prefix
+   lives in **the FQN space of the wrapper being exported** ({@link STAGE_PREFIX}) — unless the
+   scale ledger's keys live in the same space as the safetensors tensor keys, the matching on the
+   emit side finds nothing (the FQN discipline MUST of `deberta.export._fake_quant`).
+2. **The inputs to the first stage** — instead of rebuilding the embeddings, the 4-D mask, the
+   relative-position index tables and `rel_embeddings` by hand, a forward_pre_hook captures
+   **the call of the first layer itself** ({@link capture_stage_batches}).
+3. **The stage-split equivalence check** — running the captured inputs through the stage list in
+   order must give a final hidden that is **bit-identical** to the corresponding output of the
+   wrapper forward without hooks ({@link assert_stage_split}).
 
-MUST: 3 は丸める前に実測する。{@link EncoderStage} は上流ループの写しなので、transformers 側の
-`DebertaV2Encoder.forward` が変わると黙ってずれる — ずれた側で丸めると「別の経路の GPTQ」を
-出荷することになり、しかも数値は普通に出る（golden も緑のまま通る）。
+MUST: measure 3 before rounding. {@link EncoderStage} is a copy of the upstream loop, so it drifts
+silently when `DebertaV2Encoder.forward` changes on the transformers side — rounding on the
+drifted copy ships "GPTQ of a different path", and the numbers still come out normally (the
+goldens stay green as well).
 
-NOTE（`sbv2.measure_quant` のリグと共有しない理由）: あちらが駆動するのは**素の**
-`DebertaV2Model` だが、export は `deberta.patch.apply_external_rel_pos_patch()` を当てた後の
-wrapper を駆動するので、stage の実シグネチャ（`relative_pos` がタプルで来る）が同一である
-保証が無い。写しを 1 本にまとめると、片方の前提が動いたときにもう片方が黙って追随する。
-各リグが自前の一致門で独立に自己検証する形にしてある。
+NOTE (why this is not shared with the rig of `sbv2.measure_quant`): that rig drives the **plain**
+`DebertaV2Model`, whereas export drives the wrapper after
+`deberta.patch.apply_external_rel_pos_patch()` has been applied, so the actual signature of a
+stage (`relative_pos` arrives as a tuple) is not guaranteed to be the same. Merging the copies into
+one would make one side follow silently when the other's assumption moves. Each rig verifies itself
+independently with its own equivalence check.
 """
 
 from __future__ import annotations
@@ -46,47 +52,54 @@ from karume.quant_calib import (
 )
 from karume.quantize import DEFAULT_GROUP_SIZE, Int4Report, iter_quant_targets
 
-#: stage 列のモデル内 FQN 接頭辞。`HiddenStatesWrapper.model` が `DebertaV2Model` なので、
-#: 層の FQN は `model.encoder.layer.<層番号>.…` になる（{@link EncoderStage} が子の名前を
-#: 層番号にしてあるので、接頭辞はここまでで足りる）。
+#: The in-model FQN prefix of the stage list. `HiddenStatesWrapper.model` is a `DebertaV2Model`,
+#: so a layer's FQN is `model.encoder.layer.<layer index>.…` ({@link EncoderStage} names its child
+#: by the layer index, so the prefix needs to go only this far).
 STAGE_PREFIX = "model.encoder.layer"
 
-#: {@link EncoderStage.forward} が ConvLayer 用に受け取る keyword 名。`DebertaV2Encoder` は
-#: 層へ渡す 4 次元 mask とは別に、**素の 2 次元 mask** を ConvLayer へ渡す。
+#: The keyword name {@link EncoderStage.forward} receives for the ConvLayer. Apart from the 4-D
+#: mask it passes to the layers, `DebertaV2Encoder` passes **the plain 2-D mask** to the ConvLayer.
 INPUT_MASK_KWARG = "input_mask"
 
-#: 校正付き丸めの方式。GPTQ 以外は scale 台帳を返さない（`karume.quant_calib` の MUST）。
+#: The calibrated-rounding method. Only GPTQ returns a scale ledger (a MUST of
+#: `karume.quant_calib`).
 CALIB_METHOD = "gptq"
 
-#: 丸め先の格納グリッド。**`rtn` × g32 = 既存 i4 系列と同じ格子**（唯一の出荷経路）。
+#: The storage grid rounded onto. **`rtn` × g32 = the same grid as the existing i4 series** (the
+#: only shipping path).
 CALIB_GRID = GridSpec(kind="rtn", group_size=DEFAULT_GROUP_SIZE)
 
 
-class _FirstStageReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図なので Error と呼ばない
-    """先頭 stage の入力が揃った合図（校正 forward を打ち切るための番兵）。"""
+class _FirstStageReached(Exception):  # noqa: N818 — a stop signal, not a failure, so not an Error
+    """Signal that the first stage's inputs are complete (a sentinel that cuts the calibration
+    forward short)."""
 
 
 class EncoderStage(nn.Module):
-    """encoder layer 1 枚を「hidden を位置引数で受ける」形へ包む stage ラッパ。
+    """Stage wrapper that wraps one encoder layer into the form "receives hidden as a positional
+    argument".
 
-    包む理由は 2 つあり、どちらも `DebertaV2Encoder.forward`（transformers 5.14.1）の
-    呼び出しの形に由来する:
+    There are two reasons to wrap, and both come from the call shape of
+    `DebertaV2Encoder.forward` (transformers 5.14.1):
 
-    1. 層へ mask を**位置引数**で渡す（`layer_module(next_kv, attention_mask, …)`）。
-       `calibrate_stages` は次 stage へ「選んだ出力を**唯一の位置引数**」として渡す駆動なので、
-       mask は keyword で運ぶ形に直さないと 2 段目以降で落ちる。
-    2. **先頭層だけ**は出力に ConvLayer が乗る（ループ内の `i == 0` — stage の入力 hidden を
-       残差として混ぜ直す）。ここを落とすと 2 段目以降が本物と違う hidden を見ることになり、
-       校正が別の活性から丸め先を選ぶ。
+    1. The mask is passed to a layer as a **positional argument**
+       (`layer_module(next_kv, attention_mask, …)`). `calibrate_stages` is a driver that passes
+       "the selected output as **the only positional argument**" to the next stage, so unless the
+       mask is moved to a keyword, the second stage onwards fails.
+    2. **Only the first layer** has the ConvLayer on its output (`i == 0` inside the loop — it
+       blends the stage's input hidden back in as a residual). Dropping it makes the second stage
+       onwards see a hidden different from the real one, and the calibration picks rounding
+       targets from different activations.
 
-    層 kwargs（`relative_pos` / `rel_embeddings` / `query_states` / `output_attentions`）は
-    ループの**前**に 1 度だけ作られ全層で同一なので、`calibrate_stages` の既定（stage 間で
-    kwargs 不変）にそのまま乗る。
+    The layer kwargs (`relative_pos` / `rel_embeddings` / `query_states` / `output_attentions`)
+    are built once **before** the loop and are identical for every layer, so they fit the default
+    of `calibrate_stages` (kwargs unchanged between stages) as they are.
 
-    子モジュールの名前を**層番号**にしてあるのは、stage 内の局所 FQN
-    （`0.attention.self.query_proj.weight`）へ {@link STAGE_PREFIX} を足すだけでモデル内 FQN へ
-    戻すため。ConvLayer も子として登録されるが `nn.Linear` を 1 本も持たない（`Conv1d` +
-    `LayerNorm`）ので、走査（`iter_quant_targets` の `nn.Linear` 限定）の対象集合は動かない。
+    The child module is named by **the layer index** so that the local FQN within a stage
+    (`0.attention.self.query_proj.weight`) turns back into the in-model FQN just by prepending
+    {@link STAGE_PREFIX}. The ConvLayer is registered as a child too, but it holds no `nn.Linear`
+    at all (`Conv1d` + `LayerNorm`), so the target set of the scan (`iter_quant_targets`, limited
+    to `nn.Linear`) does not move.
     """
 
     def __init__(self, index: int, layer: nn.Module, conv: nn.Module | None) -> None:
@@ -105,22 +118,23 @@ class EncoderStage(nn.Module):
 
 
 def _encoder(wrapper: nn.Module) -> nn.Module:
-    """wrapper の中の `DebertaV2Encoder` を取り出す（構成が想定と違えば fail loudly）。"""
+    """Take the `DebertaV2Encoder` out of the wrapper (fail loudly if the structure is not the
+    expected one)."""
     encoder = wrapper.model.encoder
     if encoder.conv is None:
         raise AssertionError(
-            "DeBERTa encoder に ConvLayer が無い（先頭層の残差混合が消える構成 —"
-            " 模型の構成が台本の想定と違う）"
+            "the DeBERTa encoder has no ConvLayer (a structure without the first layer's residual"
+            " blend — the model's structure differs from what the script assumes)"
         )
     return encoder
 
 
 def encoder_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の encoder layer を `(モデル内 FQN 接頭辞, stage)` で返す。
+    """Return the encoder layers in execution order as `(in-model FQN prefix, stage)`.
 
-    **export するグラフに載る全層**を並べる（`sbv2.measure_quant` のリグが末尾の死に層を
-    落とすのと違う点）— こちらは切り詰め済みの模型をそのまま出荷するので、載っている層は
-    全部が配布形の重みだから。
+    It lists **every layer in the exported graph** (unlike the rig of `sbv2.measure_quant`, which
+    drops the dead layers at the end) — this side ships the already truncated model as is, so every
+    layer present is a weight of the distribution.
     """
     encoder = _encoder(wrapper)
     return tuple(
@@ -130,10 +144,12 @@ def encoder_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
 
 
 def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
-    """stage 列が抱える `nn.Linear` のモデル内 FQN（`.weight` を落とした**モジュール名**）。
+    """The in-model FQNs of the `nn.Linear` modules the stage list holds (**module names**, without
+    `.weight`).
 
-    対象選択は core の `iter_quant_targets` の共有 — 「校正が丸める対象」と「呼び出し側が
-    stage 内と数える対象」を写した別実装にすると、どちらにも入らない重みが黙って i8 へ落ちる。
+    Target selection shares the core's `iter_quant_targets` — if "what the calibration rounds" and
+    "what the caller counts as inside a stage" were separate copied implementations, a weight in
+    neither would silently drop to i8.
     """
     return frozenset(
         f"{prefix}.{local}".removesuffix(".weight")
@@ -145,17 +161,21 @@ def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
 def capture_stage_batches(
     wrapper: nn.Module, inputs: Sequence[Sequence[torch.Tensor]]
 ) -> tuple[StageBatch, ...]:
-    """先頭 stage への hidden と付随引数を forward_pre_hook で捕まえる（Catcher）。
+    """Capture the hidden and the accompanying arguments of the first stage with a
+    forward_pre_hook (Catcher).
 
-    `inputs` は wrapper の **位置引数そのもの**（`deberta.export.INPUT_ORDER` の並び）。捕まえる
-    のは「embeddings を通った後の hidden と、encoder が組んだ 4 次元 mask / 相対位置 /
-    `rel_embeddings`」で、自前で組み直すと transformers 側と黙って割れる。
+    `inputs` are **the wrapper's positional arguments themselves** (in the order of
+    `deberta.export.INPUT_ORDER`). What is captured is "the hidden after the embeddings, and the
+    4-D mask / relative positions / `rel_embeddings` the encoder built"; rebuilding them by hand
+    would silently diverge from the transformers side.
 
-    ConvLayer が要る 2 次元 mask は層へは渡らないので、**ConvLayer の呼び出し**からもう 1 本
-    捕まえる。番兵で打ち切るのは ConvLayer 側 — そこまでで走るのは先頭層 1 枚だけ。
+    The 2-D mask the ConvLayer needs is not passed to the layers, so one more tensor is captured
+    from **the ConvLayer's call**. The sentinel stops at the ConvLayer — only the first layer runs
+    up to that point.
 
-    MUST: 揃わずに forward が完走したら fail loudly — stage の綴りが模型の構成と食い違って
-    いる合図で、黙って進むと「校正入力ゼロ」の診断が core 側で出るだけになる。
+    MUST: if the forward completes without everything captured, fail loudly — it signals that the
+    stage spelling disagrees with the model's structure, and carrying on silently would only end in
+    a "zero calibration inputs" diagnostic on the core side.
     """
     encoder = _encoder(wrapper)
     captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -184,15 +204,16 @@ def capture_stage_batches(
                 pass
             if len(captured) != 1 or len(masks) != 1:
                 raise AssertionError(
-                    f"校正入力 {index} で先頭 stage の入力が揃わなかった"
-                    f"（層 {len(captured)} 件 / ConvLayer {len(masks)} 件）"
-                    "— stage の綴りが模型の構成と食い違っている"
+                    f"calibration input {index} did not capture the first stage's inputs"
+                    f" (layer {len(captured)} / ConvLayer {len(masks)})"
+                    " — the stage spelling disagrees with the model's structure"
                 )
             layer_args, layer_kwargs = captured[0]
             if len(layer_args) != 2:
                 raise AssertionError(
-                    f"先頭層が位置引数 {len(layer_args)} 個で呼ばれた（hidden と mask の 2 個が"
-                    "想定 — transformers 側の呼び出しの形が変わっている）"
+                    f"the first layer was called with {len(layer_args)} positional arguments"
+                    " (2 expected, hidden and mask — the call shape on the transformers side has"
+                    " changed)"
                 )
             hidden, attention_mask = layer_args
             batches.append(
@@ -213,14 +234,16 @@ def assert_stage_split(
     batch: StageBatch,
     stages: Sequence[StageSpec],
 ) -> None:
-    """stage 列の逐次 forward が wrapper の最終 hidden と**ビット一致**することを見る。
+    """Check that running the stage list in order is **bit-identical** to the wrapper's final
+    hidden.
 
-    `probe` は wrapper の位置引数、`batch` は**同じ入力**で捕まえた先頭 stage への入力。
-    wrapper の出力は最終層の hidden で終わる（`single_output` の有無に依らず末尾がそれ）ので、
-    突合先は `outputs[-1]`。
+    `probe` is the wrapper's positional arguments, and `batch` is the first-stage input captured
+    from **the same input**. The wrapper's output ends with the final layer's hidden (it is last
+    with or without `single_output`), so the comparison target is `outputs[-1]`.
 
-    MUST: 丸める前に実測し、近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを
-    同じ順で呼んでいる以上、一致しないなら分解が本物と違う経路を通っている。
+    MUST: measure this before rounding, with `torch.equal` rather than an approximate tolerance —
+    since the same modules are called in the same order, a mismatch means the split takes a path
+    different from the real one.
     """
     args, kwargs = batch
     with torch.no_grad():
@@ -230,48 +253,52 @@ def assert_stage_split(
             hidden = stage(hidden, **kwargs)
     if not torch.equal(hidden, reference):
         raise AssertionError(
-            "stage 分解の最終 hidden が wrapper の出力とビット一致しない"
-            f"（最大絶対差 {float((hidden - reference).abs().max()):.4e}）"
-            " — EncoderStage の写しが DebertaV2Encoder.forward とずれている"
+            "the final hidden of the stage split is not bit-identical to the wrapper output"
+            f" (max abs diff {float((hidden - reference).abs().max()):.4e})"
+            " — the EncoderStage copy has drifted from DebertaV2Encoder.forward"
         )
 
 
 @dataclass(frozen=True)
 class CalibRig:
-    """校正 1 回ぶんの足場（stage 列と先頭 stage への入力）。"""
+    """Scaffolding for one calibration run (the stage list and the inputs to the first stage)."""
 
     stages: tuple[StageSpec, ...]
     batches: tuple[StageBatch, ...]
 
     @property
     def tokens(self) -> int:
-        """校正に積んだ hidden の総トークン数（縮小実行を数値の横に残すための診断）。"""
+        """Total tokens of the hidden states fed to the calibration (a diagnostic that records a
+        reduced run next to the numbers)."""
         return sum(int(args[0].shape[-2]) for args, _kwargs in self.batches)
 
 
 def build_rig(
     wrapper: nn.Module, stages: Sequence[StageSpec], inputs: Sequence[Sequence[torch.Tensor]]
 ) -> CalibRig:
-    """校正の足場を組む（Catcher → stage 分解一致門）。
+    """Build the calibration scaffolding (Catcher → stage-split equivalence check).
 
-    MUST: 校正入力が 0 件なら fail loudly — 黙って素の RTN へ落ちる分岐は作らない
-    （「校正付きのつもりで校正なしを配った」が資産からは読めない）。
+    MUST: fail loudly with zero calibration inputs — no branch silently drops to plain RTN
+    ("shipped uncalibrated while meaning to calibrate" cannot be read from the assets).
     """
     if not inputs:
-        raise AssertionError("校正入力が 1 件も無い（校正付き i4 は入力ゼロでは成立しない）")
+        raise AssertionError(
+            "no calibration inputs at all (calibrated i4 cannot be built from zero inputs)"
+        )
     batches = capture_stage_batches(wrapper, inputs)
     assert_stage_split(wrapper, inputs[0], batches[0], stages)
     return CalibRig(stages=tuple(stages), batches=batches)
 
 
 def calibrate_i4(rig: CalibRig, include: Callable[[str], bool]) -> tuple[CalibReport, Int4Report]:
-    """stage 逐次の GPTQ を当て、`(レポート, scale 台帳)` を返す（丸めは in-place）。
+    """Apply stage-by-stage GPTQ and return `(report, scale ledger)` (the rounding is in place).
 
-    `include` は **stage 内の局所モジュール FQN**（`0.attention.self.query_proj`）の述語
-    （core の `iter_quant_targets` の契約）。
+    `include` is a predicate on **the local module FQN within a stage**
+    (`0.attention.self.query_proj`) (the contract of the core's `iter_quant_targets`).
 
-    MUST: 台帳の無いレポートは fail loudly — 出荷経路を持つのは `gptq` × `rtn` だけで
-    （`karume.quant_calib` の MUST）、台帳が無いまま進むと i4 席に scale の無い重みが載る。
+    MUST: a report without a ledger fails loudly — only `gptq` × `rtn` has a shipping path (a MUST
+    of `karume.quant_calib`), and going on without a ledger would put weights without scales into
+    the i4 storage.
     """
     report = calibrate_stages(
         rig.stages, rig.batches, method=CALIB_METHOD, spec=CALIB_GRID, include=include
@@ -279,7 +306,7 @@ def calibrate_i4(rig: CalibRig, include: Callable[[str], bool]) -> tuple[CalibRe
     ledger = report.int4
     if ledger is None:
         raise AssertionError(
-            f"校正が scale 台帳を返さなかった（{report.describe()}）"
-            " — 出荷できるのは gptq × rtn だけ（karume.quant_calib の MUST）"
+            f"the calibration returned no scale ledger ({report.describe()})"
+            " — only gptq × rtn can ship (a MUST of karume.quant_calib)"
         )
     return report, ledger

@@ -1,4 +1,5 @@
-"""固定 payload の保存監査が、piece へ割れた値・scale の破損を検出する。"""
+"""The storage audit of fixed payloads detects corruption of values and scales split into
+pieces."""
 
 import pytest
 import torch
@@ -31,7 +32,7 @@ def test_audit_reads_all_pieces_and_rejects_changed_payload(tmp_path, fault):
     stored = stored_model(
         graph, {"weight": torch.empty(rows, width, device="meta")}, fixed_weights=fixed
     )
-    # block 上限を 4 行（64 バイト）まで下げて、32 行の重みを piece 列へ割らせる。
+    # Lower the block limit to 4 rows (64 bytes) so the 32-row weight is split into pieces.
     result = publish_container(
         path,
         stored.graph,
@@ -43,26 +44,31 @@ def test_audit_reads_all_pieces_and_rejects_changed_payload(tmp_path, fault):
     )
     read = read_container(result.parts)
     supply = read.model.binding["model"]["weight"]
-    assert len(supply.pieces or ()) > 1, "piece 列を踏ませる（畳まない読み手なら実体が切れる）"
+    assert len(supply.pieces or ()) > 1, (
+        "exercise the pieces (a reader that does not fold them would cut the data)"
+    )
 
     assert_fixed_bytes(path, fixed)
     if fault is None:
         return
 
-    # 固定 payload の 1 バイトを書き換える。block の sha256 は宣言と食い違うので、取り直しの
-    # 段で落ちる（`assert_fixed_bytes` は `ReadContainer.block` 越しに読む）。
+    # Rewrite one byte of the fixed payload. The block's sha256 then disagrees with the
+    # declaration, so it fails when read back (`assert_fixed_bytes` reads through
+    # `ReadContainer.block`).
     # The scale's first block: at this block limit the 128-byte scale is split on the pieces (ADR
     # 0108 addendum 15), so it is a piece of the split scale.
     target = supply.encoding.scale_blocks[0] if fault == "scale" else (supply.pieces or ())[0][0]
     block = next(entry for entry in read.model.blocks if entry.id == target)
     part = container_parts(path)[block.part]
     raw = bytearray(part.read_bytes())
-    # 在処は読み手の宣言から引かず、取り出した実体を part の中で探す（private な写像を写さない）。
+    # The location is not taken from the reader's declarations; the extracted data is searched
+    # for inside the part (no copy of a private mapping).
     begin = raw.find(read.block(target))
     assert begin >= 0, target
     raw[begin] ^= 1
     part.write_bytes(raw)
 
-    # 取り直しの sha256 が先に落ちる（`assert_fixed_bytes` の突合まで届かない）。
+    # The sha256 of the read-back fails first (the comparison in `assert_fixed_bytes` is never
+    # reached).
     with pytest.raises((ValueError, ContainerFormatError)):
         assert_fixed_bytes(path, fixed)

@@ -1,4 +1,5 @@
-"""元整数の保持と SRQ / 共有 / PLE の故障を、実モデルなしで検出する。"""
+"""Detect, without the real model, faults in keeping the original integers and in SRQ / sharing /
+PLE."""
 
 from __future__ import annotations
 
@@ -25,10 +26,11 @@ from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
 
 def _publish(tmp_path: Path, bits: int, *, bend=None, rows: int = 9):
-    """packed PLE を資産として載せた容器を据え、`(代表 path, 索引, probe の参照)` を返す。
+    """Write a container carrying the packed PLE as an asset; return `(representative path,
+    index, probe reference)`.
 
-    `bend` は索引 JSON だけを 1 箇所曲げる口（資産の block 列はそのまま — 「索引だけ古い
-    組み合わせ」を作る席）。
+    `bend` is the hook that bends the index JSON alone in one place (the asset's block list stays
+    — the way to build "a combination where only the index is stale").
     """
     module = packed_embedding(bits, rows=rows)
     build = build_ple(module, 3, 32, tmp_path)
@@ -83,7 +85,8 @@ class TestPackedPle:
             gemma4_ple_index(container, storage="i4")
 
     def test_an_index_that_names_an_absent_asset_is_detected(self, tmp_path: Path):
-        """索引だけ差し替えた組み合わせは**形も dtype も合う**まま別 token の行を引く。"""
+        """A combination where only the index was replaced reads other tokens' rows **with shape
+        and dtype still matching**."""
         container, _, _ = _publish(
             tmp_path,
             2,
@@ -93,7 +96,7 @@ class TestPackedPle:
         )
         parsed = gemma4_ple_index(container, storage="i2")
 
-        with pytest.raises(DistError, match="容器に無い"):
+        with pytest.raises(DistError, match="is not in the container"):
             assert_gemma4_ple_assets(container, parsed)
 
     @pytest.mark.parametrize("fault", ["dtype", "shape", "negative", "nan", "embedScale"])
@@ -119,10 +122,12 @@ def _probe(tmp_path: Path) -> list[int]:
 
 
 class TestPackedPleGate:
-    """export が呼ぶ PLE のビット一致門（`assert_ple_assets`）は packed の格納でも同じ 1 本。
+    """The PLE bit-exactness check export calls (`assert_ple_assets`) is the same single one for
+    packed storage.
 
-    参照は上流 `QuantizedEmbedding` の出力のまま — 門の展開が詰め順か offset を取り違えると
-    （この fixture の各バイトは下位と上位で違う値を持つので）ビット一致が崩れる。
+    The reference is upstream `QuantizedEmbedding`'s output as is — if the check's unpacking
+    mixes up the packing order or the offset, bit-exactness breaks (every byte of this fixture
+    has different values in its low and high parts).
     """
 
     @pytest.mark.parametrize("bits", [2, 4])
@@ -143,7 +148,8 @@ class TestPackedPleGate:
     def test_one_flipped_field_in_a_probe_row_is_detected(
         self, tmp_path: Path, bits: int, flip: int
     ):
-        """容器が持つ行と 1 要素だけ違う上流（i4 は上位 nibble・i2 は 2 番目の 2bit）。"""
+        """An upstream that differs from the container's rows in one element only (i4: the high
+        nibble; i2: the second 2 bits)."""
         container, index, _ = _publish(tmp_path, bits)
         probe = _probe(tmp_path)
         bent = packed_embedding(bits, rows=9)
@@ -151,11 +157,12 @@ class TestPackedPleGate:
         with torch.inference_mode():
             reference = bent(torch.tensor([probe], dtype=torch.int64)).reshape(1, len(probe), 3, 32)
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="not bit-identical"):
             assert_ple_assets(container, index, probe, reference)
 
     def test_a_layer_shifted_scale_is_detected(self, tmp_path: Path):
-        """scale の層ずれは形も型も dtype も合う（`torch.equal` でしか捕まらない）。"""
+        """A scale shifted by one layer matches in shape, type and dtype (only `torch.equal`
+        catches it)."""
         container, index, module = _publish(tmp_path, 2)
         probe = _probe(tmp_path)
         with torch.inference_mode():
@@ -165,11 +172,12 @@ class TestPackedPleGate:
         shifted = reference.clone()
         shifted[0, :, 0] = reference[0, :, 1]
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="not bit-identical"):
             assert_ple_assets(container, index, probe, shifted)
 
     def test_a_row_length_that_disagrees_with_the_storage_is_rejected(self, tmp_path: Path):
-        """行長は索引の `rowBytes` が正本 — 格納と寸法から導く値と割れた索引は読まない。"""
+        """The index's `rowBytes` is the source of truth of the row length — an index that
+        disagrees with the value derived from the storage and dimensions is not read."""
         container, index, module = _publish(tmp_path, 4)
         probe = _probe(tmp_path)
         with torch.inference_mode():
@@ -204,10 +212,11 @@ class TestTraceLinear:
     def test_it_traces_only_the_srq_that_actually_rounds(
         self, input_scale: float, output_scale: float, rounds: int
     ):
-        """scale=0 は恒等（ADR 0097 追記 2）なので IR に残さない。
+        """scale=0 is the identity (ADR 0097 addendum 2), so it is not left in the IR.
 
-        残すと runtime が decode のたびに恒等コピーを dispatch する（上流で 0 なのは lm_head の
-        入出力だけなので、その 1 本は語彙全体の読み書きになる）。入力側・出力側は独立に判定する。
+        Left in, the runtime would dispatch an identity copy on every decode (upstream has 0 only
+        for lm_head's input and output, so that one reads and writes the whole vocabulary). Input
+        and output are decided independently.
         """
         source = QuantizedLinear(64, 8, num_bits=4).requires_grad_(False)
         source.input_activation_scale.fill_(input_scale)
@@ -265,7 +274,7 @@ class TestCheckpointAdmission:
         wrapper.model.lm_head = head
         if fault:
             (head.weight if fault == "packed" else head.weight_scale)[0, 0] = 1
-            with pytest.raises(ValueError, match="一致しない"):
+            with pytest.raises(ValueError, match="do not match"):
                 fixed_trace_weights(wrapper)
         else:
             saved = fixed_trace_weights(wrapper)
@@ -274,10 +283,11 @@ class TestCheckpointAdmission:
 
 
 class TestThePleSpill:
-    """PLE の実体は**作業席の一時ファイル**へ落ち、据え替えの前に消える。
+    """The PLE data is spilled to **a temporary file in the working directory** and deleted
+    before the swap.
 
-    上流の packed 実体を掴む読み口にすると、`trace_qat` と書き出しの間ずっと常駐する
-    （製品系列の `gemma4.export_product._spill_tables` と同じ規律）。
+    A reader holding upstream's packed data would keep it resident through `trace_qat` and the
+    write (the same rule as the product series' `gemma4.export_product._spill_tables`).
     """
 
     def test_the_payload_lands_in_the_working_seat(self, tmp_path: Path) -> None:
@@ -294,7 +304,8 @@ class TestThePleSpill:
         assert [path for path in build.spills if path.exists()] == []
 
     def test_the_assets_still_read_after_the_module_is_released(self, tmp_path: Path) -> None:
-        """実体はファイル側にあるので、上流モジュールを手放しても payload が引ける。"""
+        """The data lives in the file, so the payload can be read after the upstream module is
+        released."""
         module = packed_embedding(4, rows=9)
         build = build_ple(module, 3, 32, tmp_path)
         index = json.loads(bytes(build.assets[PLE_INDEX_ASSET].payload))

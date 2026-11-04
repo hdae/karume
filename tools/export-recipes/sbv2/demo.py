@@ -1,28 +1,29 @@
-"""examples/sbv2 デモの資産 prep と torch 参照（3 サブコマンド）。
+"""Asset prep and torch reference for the examples/sbv2 demo (3 subcommands).
 
-`sbv2/export.py` / `deberta/export.py` が **グラフ**を出すのに対し、こちらが扱うのは
-「テキスト → front 入力」に要るホスト側の資産と、デモ出力の**数値パリティ**だけ。
-モデルグラフには一切触らない（既存の emit 経路・golden は変更しない）。
+Where `sbv2/export.py` / `deberta/export.py` emit **graphs**, this module handles only the
+host-side assets needed for "text → front inputs" and the **numeric parity** of the demo output.
+It does not touch the model graphs at all (the existing emit path and goldens are unchanged).
 
     uv run --group sbv2 python -m sbv2.demo assets
     uv run --group sbv2 python -m sbv2.demo reference \\
         --dump ../../outputs/examples/karume-sbv2-jvnv/sbv2-dump/dump.safetensors
     uv run --group sbv2 python -m sbv2.demo official --text "こんにちは。"
 
-MUST（1 プロセス 1 サブコマンド）: `sbv2.patch` のパッチはクラス属性のプロセス全域差し替えで、
-`reference` はそれを当てる。`official` は**パッチ前の原経路**を走らせるのが主張の中身なので、
-同一プロセスで両方を走らせると official が黙ってパッチ後の経路になる。argparse の
-サブパーサは 1 プロセスにつき 1 つしか選べないため、この排他は構造的に成立する
-（`sbv2/export.py` の `--verify` が対ごとの排他表を持たないのと同じ理由づけ）。
+MUST (one subcommand per process): the patches of `sbv2.patch` replace class attributes
+process-wide, and `reference` applies them. The whole point of `official` is to run **the original
+path before patching**, so running both in one process would silently put official on the patched
+path. argparse lets a process pick only one subparser, so this exclusion holds structurally
+(the same reasoning as `--verify` of `sbv2/export.py` not keeping a pairwise exclusion table).
 
-## JP-Extra の定数は「写す」のではなく「引く」
+## The JP-Extra constants are "looked up", not "copied"
 
-音素記号表・tone 基点・言語 ID・add_blank の挿入値は **`style_bert_vits2` の実物から
-引いて JSON に落とす**（`assets` サブコマンド）。多言語版の値を手で写すと、記号表の
-並びや tone 基点がずれても **shape は合ったまま音だけが壊れる**（沈黙誤値クラス）。
-挿入値 0 だけは参照実装のソースにリテラルで書かれているので、
-{@link blank_id_from_source} が `infer.get_text` のソースから正規表現で抜き、3 系列
-（phone / tone / language）が同じ値であることまで確認する。
+The phoneme symbol table, the tone base, the language ID and the add_blank insertion value are
+**looked up from the real `style_bert_vits2` and written to JSON** (the `assets` subcommand). If
+the values of the multilingual version were copied by hand, a shifted symbol order or tone base
+would **keep the shapes matching and break only the audio** (the silent-wrong-value class).
+Only the insertion value 0 is written as a literal in the reference implementation's source, so
+{@link blank_id_from_source} extracts it with a regex from the source of `infer.get_text` and also
+checks that the 3 sequences (phone / tone / language) use the same value.
 """
 
 from __future__ import annotations
@@ -46,47 +47,53 @@ from _shared.paths import MISC_ROOT
 
 from . import export, patch
 
-#: 実重みの置き場（`sbv2/export.py` と同じ — 綴りは向こうが持つ）。
+#: Where the real weights live (the same as `sbv2/export.py` — that module owns the spelling).
 DEFAULT_MODEL_DIR = export.DEFAULT_MODEL_DIR
-#: デモ資産の置き場。系列（IR + io）でもベンチ生成物でもなく、消すと再エミットが要る
-#: ホスト資産なので `outputs/misc/` の下。`outputs/` は `.gitignore` 済み。
+#: Where the demo assets live. They are neither a series (IR + io) nor benchmark output but host
+#: assets that need a re-emit when deleted, so they go under `outputs/misc/`. `outputs/` is in
+#: `.gitignore`.
 DEFAULT_DEMO_DIR = MISC_ROOT / "sbv2-demo"
 
-#: SBV2 JP-Extra の text front が使う BERT（`deberta/export.py` の MODEL_ID と同一）。
+#: The BERT the SBV2 JP-Extra text front uses (identical to MODEL_ID of `deberta/export.py`).
 BERT_REPO = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
-#: BERT 特徴に使う hidden_states の**末尾からの位置**。参照実装
-#: `nlp/japanese/bert_feature.py` の `res["hidden_states"][-3:-2]` そのもの。
+#: The **position from the end** of hidden_states used for the BERT features. Exactly
+#: `res["hidden_states"][-3:-2]` of the reference implementation's `nlp/japanese/bert_feature.py`.
 #:
-#: MUST: これは **torch の全 24 層モデル**に対する位置で、配布グラフの出力位置ではない
-#: （そちらは {@link BERT_GRAPH_HIDDEN_FROM_END}）。参照計算はこの定数を直に使う — 配布形の
-#: `symbols.json` から引くと、層を削った途端に参照だけが別の層を指す。
+#: MUST: this is the position in **the full 24-layer torch model**, not the output position of the
+#: distributed graph (that one is {@link BERT_GRAPH_HIDDEN_FROM_END}). The reference computation
+#: uses this constant directly — taking it from the distribution's `symbols.json` would make only
+#: the reference point at a different layer as soon as layers are cut.
 BERT_HIDDEN_FROM_END = 3
 
-#: 配布グラフ（`deberta/export.py` の 22 層 variant）から**同じテンソル**を引く位置。グラフは
-#: SBV2 が使う層までで切り詰めてあるので最終出力の 1 本目になる。
+#: The position at which **the same tensor** is taken from the distributed graph (the 22-layer
+#: variant of `deberta/export.py`). The graph is truncated at the layer SBV2 uses, so it is the
+#: first of the final outputs.
 #:
-#: 両者が同じテンソルを指すことは組み立て時に検査される（`sbv2.distribution.assert_bert_hidden` —
-#: 22 層 × 出力 1 本 × 位置 1 の 3 点検査。ADR 0045 決定 4）。
+#: That both point at the same tensor is checked at assembly time
+#: (`sbv2.distribution.assert_bert_hidden` — a 3-point check of 22 layers × 1 output × position 1.
+#: ADR 0045 decision 4).
 BERT_GRAPH_HIDDEN_FROM_END = 1
 
-#: 資産ファイル名。`symbols.json` / `deberta-tokenizer.json` は `karume dist` が配布形へ運び、
-#: `assets.safetensors` は `reference` が `--assets` で読む（Deno 側は配布形から読む）。
+#: Asset file names. `karume dist` carries `symbols.json` / `deberta-tokenizer.json` into the
+#: distribution, and `reference` reads `assets.safetensors` via `--assets` (the Deno side reads
+#: from the distribution).
 SYMBOLS_FILE = "symbols.json"
 TOKENIZER_FILE = "deberta-tokenizer.json"
 STYLE_FILE = "assets.safetensors"
 
 
-# ---- ① assets: JP-Extra の規則とスタイル資産を落とす -------------------------
+# ---- ① assets: write out the JP-Extra rules and the style assets -------------
 
 
 def blank_id_from_source() -> int:
-    """add_blank の挿入値を参照実装のソースから引く（手写しの定数にしない）。
+    """Takes the add_blank insertion value from the reference implementation's source (not a
+    hand-copied constant).
 
-    `infer.get_text` は `commons.intersperse(phone, 0)` を phone / tone / language の
-    3 系列に当てる。ここでは 3 本すべての第 2 引数を正規表現で抜き、値が 1 種類に
-    揃っていることを要求する。上流でこのリテラルが変われば AssertionError で落ちる
-    （黙って別の音素列になる経路を塞ぐ）。
+    `infer.get_text` applies `commons.intersperse(phone, 0)` to the 3 sequences phone / tone /
+    language. This extracts the second argument of all 3 with a regex and requires them to share
+    one value. If upstream changes this literal, it fails with AssertionError (closing the path that
+    would silently produce a different phoneme sequence).
     """
     from style_bert_vits2.models import infer as infer_module
 
@@ -94,21 +101,23 @@ def blank_id_from_source() -> int:
     found = re.findall(r"commons\.intersperse\((?:phone|tone|language),\s*(-?\d+)\)", source)
     if len(found) != 3:
         raise AssertionError(
-            f"infer.get_text の intersperse 呼び出しが 3 本見つからない（{len(found)} 本）"
-            " — add_blank の規則が上流で変わった可能性"
+            f"expected 3 intersperse calls in infer.get_text, found {len(found)}"
+            " — the add_blank rule may have changed upstream"
         )
     values = {int(value) for value in found}
     if len(values) != 1:
-        raise AssertionError(f"intersperse の挿入値が系列ごとに違う: {sorted(values)}")
+        raise AssertionError(f"intersperse insertion values differ per sequence: {sorted(values)}")
     return values.pop()
 
 
 def clean_text_ranges() -> dict[str, list[list[int]]]:
-    """`BasicTokenizer._clean_text` の除去 / スペース化コードポイントを閉区間へ畳む。
+    """Folds the code points `BasicTokenizer._clean_text` removes / turns into spaces into closed
+    ranges.
 
-    参照実装は `unicodedata.category(ch).startswith("C")` などの Unicode 分類で判定する。
-    TS 側に分類表を持ち込むと ICU 版差が静かな不一致になるため、判定の正本を Python に
-    一本化し、全コードポイントを実評価した結果だけを資産へ焼く。
+    The reference implementation decides by Unicode category (`unicodedata.category(ch)
+    .startswith("C")` and the like). Bringing a category table into TS would turn ICU version
+    differences into silent mismatches, so the source of truth for the decision stays in Python and
+    only the result of evaluating every code point is baked into the asset.
     """
 
     def is_control(ch: str) -> bool:
@@ -125,8 +134,8 @@ def clean_text_ranges() -> dict[str, list[list[int]]]:
     spaced: list[list[int]] = []
     for cp in range(0x110000):
         if 0xD800 <= cp <= 0xDFFF:
-            # サロゲート（Cs）。参照実装が str として受け取る経路には現れないが、
-            # 分類上は control なので除去側へ置く。
+            # Surrogates (Cs). They never appear on the path where the reference implementation
+            # receives a str, but by category they are control, so they go to the removed side.
             target = removed
         else:
             ch = chr(cp)
@@ -144,7 +153,7 @@ def clean_text_ranges() -> dict[str, list[list[int]]]:
 
 
 def load_bert_tokenizer() -> Any:
-    """SBV2 が使うのと同じ経路で DeBERTa 文字トークナイザを得る。"""
+    """Gets the DeBERTa character tokenizer through the same path SBV2 uses."""
     from style_bert_vits2.constants import Languages
     from style_bert_vits2.nlp import bert_models
 
@@ -152,24 +161,24 @@ def load_bert_tokenizer() -> Any:
 
 
 def jp_extra_rules(hps: Any) -> dict[str, Any]:
-    """JP-Extra の ID 化規則を `style_bert_vits2` の実物から引く。
+    """Takes the JP-Extra ID rules from the real `style_bert_vits2`.
 
-    MUST: ここに literal を書かない（`blank_id_from_source` の 0 だけが例外で、それも
-    ソースから抜いた値）。**多言語版の値の盲写しがこの資産を作る動機**なので、写経に
-    退化させると存在意義が消える。
+    MUST: no literals here (the 0 of `blank_id_from_source` is the only exception, and that too is
+    a value extracted from the source). **Blindly copying the multilingual values is the reason this
+    asset exists**, so letting it degrade into hand-copying removes its purpose.
 
-    NOTE: `language` は JP-Extra でも **全 0 ではない**。`infer.get_text` は
-    `cleaned_text_to_sequence(..., Languages.JP)` を通すので実音素位置は
-    `LANGUAGE_ID_MAP["JP"]`、add_blank の挿入位置だけが 0 になる。
-    `sbv2.export.make_language` が全 0 なのは golden の合成入力としての選択で、
-    推論規則ではない（合成 golden はどんな値でも成立する）。
+    NOTE: `language` is **not all 0** even for JP-Extra. `infer.get_text` goes through
+    `cleaned_text_to_sequence(..., Languages.JP)`, so the real phoneme positions get
+    `LANGUAGE_ID_MAP["JP"]` and only the add_blank insertion positions are 0.
+    `sbv2.export.make_language` being all 0 is a choice for the synthetic golden input, not an
+    inference rule (a synthetic golden holds for any value).
 
-    MUST: 載せるのは**全モデル共通の規則**だけ。この 1 本は配布形の共有席
-    （`shared/text/symbols.json`）として全話者に配られるので、焼いたモデル固有の事実
-    （style / speaker / config の `version`）を載せると、別の話者に対して誤ったモデル名を
-    名乗る。実行時ノブの既定も載せない — 正本は manifest の `pipelineConfig.defaults`
-    （`sbv2.distribution.sbv2_knob_defaults`）で、TS 側はここのノブを読まない
-    （2026-09-24 全域レビュー W-RC5-1）。
+    MUST: only **rules shared by every model** go in. This one file is shipped to every speaker as a
+    shared seat of the distribution (`shared/text/symbols.json`), so baking model-specific facts
+    into it (style / speaker / the config `version`) would declare the wrong model name for other
+    speakers. Runtime knob defaults are not included either — the source of truth is the manifest's
+    `pipelineConfig.defaults` (`sbv2.distribution.sbv2_knob_defaults`), and the TS side does not
+    read knobs from here (2026-09-24 repository-wide review W-RC5-1).
     """
     from style_bert_vits2.constants import VERSION, Languages
     from style_bert_vits2.nlp.symbols import (
@@ -183,9 +192,9 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
     )
 
     if not hps.version.endswith("JP-Extra"):
-        raise ValueError(f"JP-Extra 以外のモデル（version={hps.version}）はデモの対象外")
+        raise ValueError(f"a non-JP-Extra model (version={hps.version}) is out of the demo's scope")
     if not hps.data.add_blank:
-        raise ValueError("add_blank=False のモデルは未対応（intersperse 規則が変わる）")
+        raise ValueError("add_blank=False models are not supported (the intersperse rule differs)")
 
     language = Languages.JP
     return {
@@ -194,38 +203,41 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
             "version": VERSION,
             "bert": BERT_REPO,
         },
-        # 音素記号表。添字が enc_p.emb の行番号。
+        # Phoneme symbol table. The index is the row number of enc_p.emb.
         "symbols": list(SYMBOLS),
         "pad": PAD,
         "punctuations": list(PUNCTUATIONS),
-        # cleaned_text_to_sequence の 3 規則（tone は加算、language は定数）。
+        # The 3 rules of cleaned_text_to_sequence (tone is an offset, language is a constant).
         "toneStart": LANGUAGE_TONE_START_MAP[language],
         "languageId": LANGUAGE_ID_MAP[language],
         "numTones": NUM_TONES,
         "numLanguages": NUM_LANGUAGES,
-        # add_blank（infer.get_text）— 挿入値はソースから抜く。
+        # add_blank (infer.get_text) — the insertion value is extracted from the source.
         "addBlank": bool(hps.data.add_blank),
         "blankId": blank_id_from_source(),
-        # 波形長の検算に使う（audio 長 = hopLength × フレーム数）。
+        # Used to cross-check the waveform length (audio length = hopLength × frame count).
         "samplingRate": hps.data.sampling_rate,
         "hopLength": hps.data.hop_length,
-        # BERT 特徴の取り出し位置（**配布グラフの出力**を末尾から数える — 参照側の位置とは別物）。
+        # Where the BERT features are taken (counted from the end of **the distributed graph's
+        # outputs** — a different thing from the position on the reference side).
         "bertHiddenFromEnd": BERT_GRAPH_HIDDEN_FROM_END,
-        # 相対位置の添字表をホストが作るための規則（DeBERTa の config 由来 — 写経しない）。
+        # The rule the host needs to build the relative-position index tables (from the DeBERTa
+        # config — not hand-copied).
         "bertRelPos": bert_rel_pos_rule(),
     }
 
 
 def bert_rel_pos_rule() -> dict[str, int]:
-    """DeBERTa の相対位置バケットの規則を config から引く（表の生成に要る 2 値）。
+    """Takes the DeBERTa relative-position bucket rule from the config (the 2 values needed to build
+    the tables).
 
-    表そのものはグラフ入力なので、実長ぶんをホストが作る（`rel-pos-tables.ts`）。式は
-    `deberta.patch.build_rel_pos_tables` が正本で、両者のバイト一致は golden io を
-    使ったパリティテストが縛る。
+    The tables themselves are graph inputs, so the host builds them for the real length
+    (`rel-pos-tables.ts`). The formula's source of truth is `deberta.patch.build_rel_pos_tables`,
+    and a parity test using the golden io pins the byte identity of the two.
 
-    `max_relative_positions` が 1 未満のとき `max_position_embeddings` へ落とすのは
-    `DisentangledSelfAttention.__init__` の規則そのもの（写すと二重管理になるので、
-    ここでも同じ 1 箇所だけで解く）。
+    Falling back to `max_position_embeddings` when `max_relative_positions` is below 1 is exactly
+    the rule of `DisentangledSelfAttention.__init__` (copying it would mean maintaining it twice,
+    so it is resolved in this one place here too).
     """
     from transformers import AutoConfig
 
@@ -239,7 +251,7 @@ def bert_rel_pos_rule() -> dict[str, int]:
 def resolve_style_and_speaker(
     hps: Any, style: str | None, weight: float | None, speaker: str | None
 ) -> tuple[str, float, str]:
-    """CLI 既定を config と `constants` から解決する（CLI に literal を置かない）。"""
+    """Resolves the CLI defaults from the config and `constants` (no literals in the CLI)."""
     from style_bert_vits2.constants import DEFAULT_STYLE, DEFAULT_STYLE_WEIGHT
 
     return (
@@ -250,13 +262,13 @@ def resolve_style_and_speaker(
 
 
 def style_vector(model_dir: Path, hps: Any, style: str, weight: float) -> np.ndarray:
-    """`TTSModel.__get_style_vector` と同式のスタイルベクトル `[256]`。"""
+    """The style vector `[256]`, computed with the same formula as `TTSModel.__get_style_vector`."""
     table = np.load(model_dir / export.STYLE_FILE)
     if table.ndim != 2:
-        raise ValueError(f"style_vectors.npy の形 {table.shape} が 2 次元でない")
+        raise ValueError(f"the shape {table.shape} of style_vectors.npy is not 2-D")
     style2id: dict[str, int] = hps.data.style2id
     if style not in style2id:
-        raise ValueError(f"スタイル {style!r} が config の style2id {sorted(style2id)} に無い")
+        raise ValueError(f"style {style!r} is not in the config's style2id {sorted(style2id)}")
     mean = table[0]
     picked = table[style2id[style]]
     return np.ascontiguousarray(mean + (picked - mean) * weight, dtype=np.float32)
@@ -270,12 +282,12 @@ def emit_assets(
     style_weight: float | None,
     speaker: str | None,
 ) -> dict[str, Any]:
-    """デモの実行時資産 3 本を書く。"""
+    """Writes the demo's 3 runtime assets."""
     net_g, hps = export.load_net_g(model_dir)
     style, weight, speaker = resolve_style_and_speaker(hps, style, style_weight, speaker)
     spk2id: dict[str, int] = hps.data.spk2id
     if speaker not in spk2id:
-        raise ValueError(f"話者 {speaker!r} が config の spk2id {sorted(spk2id)} に無い")
+        raise ValueError(f"speaker {speaker!r} is not in the config's spk2id {sorted(spk2id)}")
     speaker_id = spk2id[speaker]
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -291,7 +303,7 @@ def emit_assets(
     for token, token_id in vocab.items():
         ordered[token_id] = token
     if any(token == "" for token in ordered):
-        raise AssertionError("vocab の ID に穴がある（行番号 = ID の前提が崩れている）")
+        raise AssertionError("the vocab IDs have gaps (the row number = ID assumption is broken)")
     (out_dir / TOKENIZER_FILE).write_text(
         json.dumps(
             {
@@ -302,7 +314,7 @@ def emit_assets(
                     "unkId": tokenizer.unk_token_id,
                 },
                 "cleanRanges": clean_text_ranges(),
-                # 行番号 0-origin = ID。Deno 側はこの文字列をそのまま食う。
+                # 0-based row number = ID. The Deno side consumes this string as is.
                 "vocabText": "\n".join(ordered),
             },
             ensure_ascii=False,
@@ -334,15 +346,15 @@ def emit_assets(
     }
 
 
-# ---- ② reference: dump を読んで torch でチェーンを再実行 ---------------------
+# ---- ② reference: read the dump and rerun the chain in torch ----------------
 
 
 def wav_pcm16(samples: np.ndarray, sampling_rate: int) -> bytes:
-    """f32 モノラルを 16bit PCM の WAV バイト列にする。
+    """Turns f32 mono into the bytes of a 16-bit PCM WAV.
 
-    MUST: 丸めは `floor(x + 0.5)`（JS の `Math.round` と同じ規則）。Python 組み込みの
-    `round` は偶数丸めなので、同じ波形から 1 LSB 違う WAV が出る — 3 本の wav を
-    同じ規則で書けないと「聴き比べ」が実装差の混入した比較になる。
+    MUST: rounding is `floor(x + 0.5)` (the same rule as JS `Math.round`). Python's built-in `round`
+    rounds half to even, so the same waveform would give a WAV 1 LSB off — unless the 3 wavs are
+    written with the same rule, the listening comparison mixes in implementation differences.
     """
     clipped = np.clip(np.asarray(samples, dtype=np.float64), -1.0, 1.0)
     pcm = np.floor(clipped * 32767.0 + 0.5).astype(np.int16)
@@ -354,7 +366,7 @@ def wav_pcm16(samples: np.ndarray, sampling_rate: int) -> bytes:
 
 
 def dump_metadata(path: Path) -> dict[str, Any]:
-    """dump safetensors の `__metadata__["demo"]` を読む（JSON 1 本に畳んである）。"""
+    """Reads `__metadata__["demo"]` of the dump safetensors (folded into one JSON string)."""
     with safe_open(str(path), framework="pt") as handle:
         metadata = handle.metadata() or {}
     if "demo" not in metadata:
@@ -363,7 +375,8 @@ def dump_metadata(path: Path) -> dict[str, Any]:
 
 
 def tile_bert(hidden: torch.Tensor, word2ph: list[int]) -> torch.Tensor:
-    """`bert_feature.extract_bert_feature` の tile 展開（`res[i].repeat(w,1)` の連結 → 転置）。"""
+    """The tile expansion of `bert_feature.extract_bert_feature` (concatenating `res[i].repeat(w,1)`
+    → transpose)."""
     if hidden.shape[0] != len(word2ph):
         raise AssertionError(
             f"hidden のトークン数 {hidden.shape[0]} が word2ph 長 {len(word2ph)} と違う"
@@ -372,12 +385,13 @@ def tile_bert(hidden: torch.Tensor, word2ph: list[int]) -> torch.Tensor:
 
 
 def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path: Path) -> dict:
-    """dump の離散入力・乱数列から torch でチェーンを再実行し、reference.wav を書く。
+    """Reruns the chain in torch from the dump's discrete inputs and noise, and writes
+    reference.wav.
 
-    実行するのは **`sbv2.patch` のモジュール群**（`Sbv2Front` / `Sbv2Voice`）と、デモと
-    同じホストグルー。つまりこの突合が測るのは「同じ計算グラフを Karume が実 GPU で
-    走らせた値 vs torch CPU で走らせた値」で、パッチ前の原実装との同値は
-    `sbv2.export --verify` が別に受け持つ（層を混ぜない）。
+    What runs is **the modules of `sbv2.patch`** (`Sbv2Front` / `Sbv2Voice`) and the same host glue
+    as the demo. So this comparison measures "the same computation graph run by Karume on a real GPU
+    vs run by torch on the CPU"; equivalence with the original implementation before patching is
+    handled separately by `sbv2.export --verify` (the layers are not mixed).
     """
     started = time.perf_counter()
     meta = dump_metadata(dump_path)
@@ -386,19 +400,21 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
     g = assets["g"].to(torch.float32)
     style_vec = assets["style_vec"].to(torch.float32)
 
-    # --- テキスト層のパリティ: 同じ bert_text から同じ input_ids が出ること -------
-    # Deno 側の文字トークナイザ移植が参照実装と食い違えば、BERT 特徴が音素へ誤配置
-    # されて「音は出るが崩れる」形で沈黙する。波形の突合より手前で落とす。
+    # --- Text-layer parity: the same bert_text gives the same input_ids ---------
+    # If the port of the character tokenizer on the Deno side disagrees with the reference
+    # implementation, the BERT features land on the wrong phonemes and it fails silently as
+    # "there is audio, but it is garbled". Fail before the waveform comparison.
     tokenizer = load_bert_tokenizer()
     expected_ids = tokenizer(meta["bertText"])["input_ids"]
     dumped_ids = tensors["input_ids"].reshape(-1).tolist()
     if expected_ids != dumped_ids:
         raise AssertionError(
-            "DeBERTa トークナイズが Deno 実装と食い違う"
-            f"（python={expected_ids} / deno={dumped_ids}）"
+            "DeBERTa tokenization disagrees with the Deno implementation"
+            f" (python={expected_ids} / deno={dumped_ids})"
         )
 
-    # --- DeBERTa（transformers・eager）--------------------------------------
+    # --- DeBERTa (transformers, eager) --------------------------------------
+
     from transformers import DebertaV2Model
 
     bert = DebertaV2Model.from_pretrained(
@@ -411,13 +427,14 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
             attention_mask=tensors["attention_mask"].to(torch.int64),
             output_hidden_states=True,
         ).hidden_states
-    # MUST: 参照は**切り詰めていない全 24 層**モデルなので、位置は BERT_HIDDEN_FROM_END を直に
-    # 使う（`meta["bertHiddenFromEnd"]` は配布グラフ側の位置で、22 層グラフでは 1 になる）。
+    # MUST: the reference is the **untruncated full 24-layer** model, so the position uses
+    # BERT_HIDDEN_FROM_END directly (`meta["bertHiddenFromEnd"]` is the position on the distributed
+    # graph's side, which is 1 for the 22-layer graph).
     hidden = hidden_states[-BERT_HIDDEN_FROM_END][0]
     word2ph = tensors["word2ph"].reshape(-1).tolist()
     bert_feature = tile_bert(hidden, word2ph).unsqueeze(0)
 
-    # --- front（パッチ後の融合グラフ）----------------------------------------
+    # --- front (the fused graph after patching) ------------------------------
     net_g, hps = export.load_net_g(model_dir)
     patch.apply_all_patches()
     front = patch.Sbv2Front(net_g)
@@ -434,15 +451,16 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
             tensors["z_noise"].to(torch.float32),
         )
 
-    # --- ホストグルー（デモ main.ts と同式）----------------------------------
+    # --- Host glue (the same formulas as the demo's main.ts) -----------------
     knobs = meta["knobs"]
     logw = logw_sdp * knobs["sdpRatio"] + logw_dp * (1.0 - knobs["sdpRatio"])
     w = torch.exp(logw) * x_mask * knobs["lengthScale"]
     w_ceil = torch.ceil(w).to(torch.int64).reshape(-1)
     dumped_w_ceil = tensors["w_ceil"].reshape(-1).to(torch.int64)
     ceil_match = bool(torch.equal(w_ceil, dumped_w_ceil))
-    # 食い違った位置は値そのものを見せる（「w が整数の直上にいて GPU/CPU の 1e-5 差で
-    # ceil が飛んだ」フレークか、ホストグルーの実装差かを読み手が判定できる形）。
+    # Show the values themselves at mismatched positions (so the reader can tell a flake where "w
+    # sat just above an integer and a 1e-5 GPU/CPU difference flipped the ceil" from an
+    # implementation difference in the host glue).
     ceil_diffs = [
         {
             "index": int(i),
@@ -452,8 +470,8 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
         }
         for i in torch.nonzero(w_ceil != dumped_w_ceil).reshape(-1).tolist()
     ]
-    # 以降は **dump 側の w_ceil** を使う（乱数列 zp_noise の形が Karume 側の Ty で
-    # 決まっているため。torch 側の Ty で組み直すと「別の入力での比較」になる）。
+    # From here on, use **the dump's w_ceil** (the shape of the noise zp_noise is fixed by the Ty of
+    # the Karume side; rebuilding it with the torch side's Ty would compare different inputs).
     expand_idx = torch.repeat_interleave(torch.arange(dumped_w_ceil.shape[0]), dumped_w_ceil)
     total_frames = int(expand_idx.shape[0])
     zp_noise = tensors["zp_noise"].to(torch.float32)
@@ -463,7 +481,7 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
     y_mask = torch.ones(1, 1, total_frames)
     idx_k, valid = patch.build_relattn_tables(total_frames, export.EXPECTED_WINDOW_SIZE)
 
-    # --- voice（flow + dec 融合）--------------------------------------------
+    # --- voice (flow + dec fused) -------------------------------------------
     export.ensure_dec_plain(net_g)
     voice = patch.Sbv2Voice(net_g)
     with torch.no_grad():
@@ -477,8 +495,8 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
     metrics: dict[str, Any] = {"length_match": reference.shape[0] == got.shape[0]}
     if metrics["length_match"]:
         diff = np.abs(reference.astype(np.float64) - got.astype(np.float64))
-        # maxRel は 0 除算を避けるためだけに下限を置く（波形は零交差の連続なので、
-        # rel は「その要素の |ref| が小さい」ことしか意味しない — 判定の主役は abs）。
+        # maxRel has a floor only to avoid division by zero (a waveform is a run of zero
+        # crossings, so rel only says "|ref| of that element is small" — abs is what decides).
         metrics["maxAbs"] = float(diff.max())
         metrics["maxRel"] = float((diff / np.maximum(np.abs(reference), 1e-12)).max())
         metrics["rmse"] = float(np.sqrt((diff**2).mean()))
@@ -501,7 +519,7 @@ def run_reference(dump_path: Path, model_dir: Path, assets_path: Path, out_path:
     }
 
 
-# ---- ③ official: style_bert_vits2 の公式 infer（pyopenjtalk 経路）-----------
+# ---- ③ official: the official infer of style_bert_vits2 (pyopenjtalk path) --
 
 
 def run_official(
@@ -513,15 +531,16 @@ def run_official(
     style_weight: float | None,
     speaker: str | None,
 ) -> dict[str, Any]:
-    """公式 `infer()` で同じテキストを合成する（アクセント付与が yomi と違い得る聴き比べ用）。
+    """Synthesizes the same text with the official `infer()` (for listening comparisons, since its
+    accent assignment can differ from yomi's).
 
-    MUST: このサブコマンドは**パッチを当てない**。原実装の g2p（pyopenjtalk）・原実装の
-    注意 / spline を通した音が主張の中身で、`reference` と同居させると黙ってパッチ後の
-    経路になる（モジュール冒頭の 1 プロセス 1 サブコマンド）。
+    MUST: this subcommand **applies no patches**. The audio through the original g2p (pyopenjtalk)
+    and the original attention / spline is the whole point; sharing a process with `reference`
+    would silently put it on the patched path (one subcommand per process, see the module top).
     """
     started = time.perf_counter()
     if patch.patches_applied():
-        raise RuntimeError("official はパッチ未適用のプロセスでのみ走らせる")
+        raise RuntimeError("official runs only in a process where no patches have been applied")
 
     from style_bert_vits2.constants import (
         DEFAULT_LENGTH,
@@ -534,16 +553,16 @@ def run_official(
     from style_bert_vits2.nlp import bert_models
 
     bert_models.load_tokenizer(Languages.JP, BERT_REPO)
-    # MUST: f32 へ揃える。transformers 5.x はチェックポイントの dtype（この repo は f16）を
-    # そのまま採るため、既定のままだと bert 特徴が Half で出て net_g（f32）の conv で落ちる。
-    # デモ 3 本の wav を同じ精度で比べるためにも f32 に固定する。
+    # MUST: cast to f32. transformers 5.x takes the checkpoint's dtype (f16 for this repo) as is, so
+    # by default the bert features come out as Half and fail in the conv of net_g (f32). It is also
+    # fixed to f32 so that the demo's 3 wavs are compared at the same precision.
     bert_models.load_model(Languages.JP, BERT_REPO).float()
 
     net_g, hps = export.load_net_g(model_dir)
     style, weight, speaker = resolve_style_and_speaker(hps, style, style_weight, speaker)
     style_vec = style_vector(model_dir, hps, style, weight)
-    # 実行時ノブの既定は `style_bert_vits2.constants` を直に読む（`symbols.json` へは載せない —
-    # {@link jp_extra_rules} の MUST）。
+    # The runtime knob defaults are read directly from `style_bert_vits2.constants` (they are not
+    # put into `symbols.json` — the MUST of {@link jp_extra_rules}).
     knobs = {
         "sdpRatio": DEFAULT_SDP_RATIO,
         "noiseScale": DEFAULT_NOISE,
@@ -581,27 +600,29 @@ def run_official(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
-    # MUST: required=True。サブコマンド無しで走らせられると「1 プロセス 1 サブコマンド」の
-    # 排他が「何も選ばない」で抜けられる形になる。
+    # MUST: required=True. If it could run without a subcommand, the "one subcommand per process"
+    # exclusion could be bypassed by choosing nothing.
     sub = parser.add_subparsers(dest="command", required=True)
 
     for name, help_text in (
-        ("assets", "symbols.json / tokenizer / style 資産を書く"),
-        ("official", "公式 infer（pyopenjtalk 経路）で合成する"),
+        ("assets", "write the symbols.json / tokenizer / style assets"),
+        ("official", "synthesize with the official infer (pyopenjtalk path)"),
     ):
         target = sub.add_parser(name, help=help_text)
         target.add_argument(
-            "--style", default=None, help="config の style2id（既定 DEFAULT_STYLE）"
+            "--style", default=None, help="a key of the config's style2id (default DEFAULT_STYLE)"
         )
         target.add_argument("--style-weight", type=float, default=None)
-        target.add_argument("--speaker", default=None, help="config の spk2id（既定は先頭）")
+        target.add_argument(
+            "--speaker", default=None, help="a key of the config's spk2id (default: the first)"
+        )
         if name == "official":
             target.add_argument("--text", required=True)
 
-    reference = sub.add_parser("reference", help="デモの dump から torch でチェーンを再実行する")
+    reference = sub.add_parser("reference", help="rerun the chain in torch from the demo's dump")
     reference.add_argument("--dump", type=Path, required=True)
     reference.add_argument("--assets", type=Path, default=DEFAULT_DEMO_DIR / STYLE_FILE)
-    reference.add_argument("--out", type=Path, default=None, help="既定は dump と同じ場所")
+    reference.add_argument("--out", type=Path, default=None, help="default: next to the dump")
 
     args = parser.parse_args()
     if args.command == "assets":

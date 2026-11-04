@@ -1,12 +1,14 @@
-"""`irodori/dacvae/host.py` の台本レベルの約束事（実重み・音声ライブラリ不要分）。
+"""Script-level contracts of `irodori/dacvae/host.py` (the part that needs no real weights or
+audio libraries).
 
-LUFS 測定と WAV の読み書きは audiotools / soundfile の実経路なのでここでは回さない
-（実測は emit のたびに走る常設門が受け持つ）。ここで固定するのは、壊れると**偽 PASS** に
-なる側の規律だけ:
+LUFS measurement and WAV reading / writing are the real paths of audiotools / soundfile, so they
+are not run here (the standing checks that run on every emit measure them). What is pinned here
+is only the discipline whose breakage would produce a **false PASS**:
 
-- 正規化の**分解**（LUFS 利得 × peak 利得）が波形を再現できなければ落ちる
-- ケースが狙った枝を踏んでいなければ落ちる（短尺 / peak > 1 / reflect pad の端数）
-- 末尾トリムが「常に長さを返す」実装でも「常に 0 を返す」実装でも落ちる
+- fails if the **decomposition** of the normalization (LUFS gain × peak gain) cannot reproduce the
+  waveform
+- fails if a case does not take the branch it targets (short / peak > 1 / reflect pad remainder)
+- fails for a tail trim that "always returns the length" as well as one that "always returns 0"
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ from irodori.dacvae import host
 
 
 def _cases(**overrides: dict[str, float]) -> dict[str, dict[str, float]]:
-    """`_branch_evidence` が読む最小のケース表（既定は全ての枝を正しく踏んでいる形）。"""
+    """The minimal case table `_branch_evidence` reads (by default every branch is taken
+    correctly)."""
     base = {
         "ref-default": {"refDb": -15.7, "peakGain": 1.0, "padSamples": 0, "seconds": 7.6},
         "ref-plain": {"refDb": -14.2, "peakGain": 1.0, "padSamples": 0, "seconds": 3.0},
@@ -37,24 +40,27 @@ def _cases(**overrides: dict[str, float]) -> dict[str, dict[str, float]]:
 
 
 class TestDecompositionEvidence:
-    """MUST: TS 側は audiotools を持たない — 「利得 2 本が正規化の全て」が移植の前提。"""
+    """MUST: the TS side has no audiotools — "the two gains are the whole normalization" is the
+    premise of the port."""
 
     def test_a_faithful_decomposition_measures_zero(self):
         raw = torch.linspace(-1.0, 1.0, 16)
         scalars = {"loudnessGain": 0.5, "peakGain": 0.25}
 
-        assert host._decomposition_evidence(raw, raw * 0.5 * 0.25, scalars, "テスト") == 0.0
+        assert host._decomposition_evidence(raw, raw * 0.5 * 0.25, scalars, "test") == 0.0
 
     def test_a_hidden_extra_step_fails_loudly(self):
         raw = torch.linspace(-1.0, 1.0, 16)
         scalars = {"loudnessGain": 0.5, "peakGain": 0.25}
 
-        with pytest.raises(AssertionError, match="利得 2 本で正規化後の波形を再現できない"):
-            host._decomposition_evidence(raw, raw * 0.5 * 0.25 + 1e-4, scalars, "テスト")
+        with pytest.raises(
+            AssertionError, match="the two gains do not reproduce the normalized waveform"
+        ):
+            host._decomposition_evidence(raw, raw * 0.5 * 0.25 + 1e-4, scalars, "test")
 
 
 class TestBranchEvidence:
-    """MUST: ケースを増やしても「どれも既定経路だった」で緑にならないようにする。"""
+    """MUST: adding cases must not let "every one was the default path" go green."""
 
     def test_the_default_table_passes(self):
         evidence = host._branch_evidence(_cases(), 1920)
@@ -62,32 +68,33 @@ class TestBranchEvidence:
         assert evidence == {"shortSeconds": 0.4, "hotPeakGain": 0.33, "oddPadSamples": 1143}
 
     def test_a_short_case_over_half_a_second_fails_loudly(self):
-        with pytest.raises(AssertionError, match="ゼロ pad 測定枝"):
+        with pytest.raises(AssertionError, match="zero-pad measurement branch"):
             host._branch_evidence(_cases(**{"ref-short": {"seconds": 0.7}}), 1920)
 
     def test_a_short_case_with_the_same_loudness_fails_loudly(self):
-        with pytest.raises(AssertionError, match="測定が長さに依っていない"):
+        with pytest.raises(AssertionError, match="does not depend on the length"):
             host._branch_evidence(_cases(**{"ref-short": {"refDb": -15.7}}), 1920)
 
     def test_a_hot_case_that_is_not_scaled_fails_loudly(self):
-        with pytest.raises(AssertionError, match="peak > 1 の枝"):
+        with pytest.raises(AssertionError, match="the peak > 1 branch"):
             host._branch_evidence(_cases(**{"ref-hot": {"peakGain": 1.0}}), 1920)
 
     def test_a_plain_case_that_is_scaled_fails_loudly(self):
-        with pytest.raises(AssertionError, match="peak ≤ 1 で縮んでいる"):
+        with pytest.raises(AssertionError, match="shrinks at peak ≤ 1"):
             host._branch_evidence(_cases(**{"ref-plain": {"peakGain": 0.9}}), 1920)
 
     def test_a_padded_default_case_fails_loudly(self):
-        with pytest.raises(AssertionError, match="hop 1920 の倍数でなくなっている"):
+        with pytest.raises(AssertionError, match="no longer a multiple of hop 1920"):
             host._branch_evidence(_cases(**{"ref-default": {"padSamples": 7}}), 1920)
 
     def test_an_odd_case_without_padding_fails_loudly(self):
-        with pytest.raises(AssertionError, match="端数の枝"):
+        with pytest.raises(AssertionError, match="remainder branch"):
             host._branch_evidence(_cases(**{"ref-odd": {"padSamples": 0}}), 1920)
 
 
 def _always(value: int):
-    """`find_flattening_point` の代役（常に同じ値を返す故障注入）。"""
+    """Stand-in for `find_flattening_point` (fault injection that always returns the same
+    value)."""
     return lambda latent: value
 
 
@@ -117,18 +124,19 @@ class TestTrimEvidence:
     def test_an_implementation_that_never_trims_fails_loudly(self):
         latents = {name: torch.zeros(1, 161, 2) for name, _s, _t in host.TRIM_CASES}
 
-        with pytest.raises(AssertionError, match="末尾トリムの前提"):
+        with pytest.raises(AssertionError, match="premise of the tail trim"):
             host._trim_evidence(_always(161), latents)
 
     def test_an_implementation_that_always_trims_fails_loudly(self):
         latents = {name: torch.zeros(1, 161, 2) for name, _s, _t in host.TRIM_CASES}
 
-        with pytest.raises(AssertionError, match="末尾トリムの前提"):
+        with pytest.raises(AssertionError, match="premise of the tail trim"):
             host._trim_evidence(_always(0), latents)
 
 
 def _trailing_zero_point(latent: torch.Tensor) -> int:
-    """代役の `find_flattening_point`: 末尾の 0 フレーム数を数える（実物と同じ向きの応答）。"""
+    """Stand-in `find_flattening_point`: counts the trailing zero frames (responds in the same
+    direction as the real one)."""
     zeros = 0
     for index in range(latent.shape[0] - 1, -1, -1):
         if float(latent[index].abs().max()) != 0.0:
@@ -155,11 +163,11 @@ class TestTrimLatents:
         silent = latents["z-silent-tail"]
         assert torch.equal(silent[:, :-40], source[:, :-40])
         assert float(silent[:, -40:].abs().max()) == 0.0
-        # 供給元は書き換えない（同じ実 z を 2 ケースが共有する）。
+        # The source is not modified (two cases share the same real z).
         assert float(source[:, -40:].abs().max()) > 0.0
 
     def test_a_missing_latent_fails_loudly(self, tmp_path):
-        with pytest.raises(SystemExit, match="実 latent が無い"):
+        with pytest.raises(SystemExit, match="real latent missing"):
             host._trim_latents(tmp_path)
 
 
@@ -177,12 +185,13 @@ class TestSliceReference:
         assert float(host._slice_reference(wav, 2, None, 0, 3.0).max()) == 3.0
 
     def test_a_slice_longer_than_the_source_fails_loudly(self):
-        with pytest.raises(SystemExit, match="収まらない"):
+        with pytest.raises(SystemExit, match="does not fit"):
             host._slice_reference(torch.ones(10), 2, 9.0, 0, 1.0)
 
 
 class TestReadWav:
-    """int16 → f32 の規約（/32768）と mono 化（チャネル平均）— どちらもホスト移植の前提。"""
+    """The int16 → f32 convention (/32768) and downmix to mono (channel average) — both are
+    premises of the host port."""
 
     @staticmethod
     def _write(path, values, *, sample_rate=48000):
@@ -193,7 +202,7 @@ class TestReadWav:
         return path
 
     def test_int16_is_normalized_by_32768(self, tmp_path):
-        """下端 −32768 が厳密に −1.0 へ写るのが /32768 の側（/32767 なら溢れる）。"""
+        """The low end −32768 mapping to exactly −1.0 is the /32768 side (/32767 would overflow)."""
         path = self._write(tmp_path / "mono.wav", [-32768, 0, 32767])
 
         wav, sample_rate = ex.read_wav(path)
@@ -202,7 +211,8 @@ class TestReadWav:
         assert torch.equal(wav, torch.tensor([-1.0, 0.0, 32767 / 32768]))
 
     def test_a_stereo_file_is_averaged_into_one_channel(self, tmp_path):
-        """`codec.py` の `encode_waveform` と同じ mono 化（左右の平均・チャネル軸は消える）。"""
+        """The same downmix to mono as `encode_waveform` in `codec.py` (average of left and right;
+        the channel axis disappears)."""
         path = self._write(tmp_path / "stereo.wav", [[16384, -16384], [8192, 16384], [-32768, 0]])
 
         wav, _sample_rate = ex.read_wav(path)
@@ -212,7 +222,8 @@ class TestReadWav:
 
 
 class TestWavScaleEvidence:
-    """MUST: 規約は主張ではなく実測（実音声では /32767 との相対差 3e-5 しか出ない）。"""
+    """MUST: the convention is measured, not asserted (on real audio it differs from /32767 by
+    only 3e-5 relative)."""
 
     def test_the_real_reader_passes_and_records_the_divisor(self, tmp_path):
         pytest.importorskip("soundfile")
@@ -223,7 +234,8 @@ class TestWavScaleEvidence:
         assert evidence["probeInt16"] == list(host.WAV_SCALE_PROBE)
 
     def test_a_reader_that_divides_by_32767_fails_loudly(self, monkeypatch):
-        """恒真化の遮断: 門が「読めた」ではなく「規約どおりか」を見ていることの実測。"""
+        """Guarding against tautology: measures that the check looks at "does it follow the
+        convention", not "could it be read"."""
         pytest.importorskip("soundfile")
         real = ex.read_wav
 
@@ -233,15 +245,17 @@ class TestWavScaleEvidence:
 
         monkeypatch.setattr(ex, "read_wav", divided_by_32767)
 
-        with pytest.raises(AssertionError, match="/32768 でない"):
+        with pytest.raises(AssertionError, match="is not /32768"):
             host._wav_scale_evidence(48000)
 
 
 class _FakeAudioSignal:
-    """`audiotools.AudioSignal` のうち `_normalize_decomposed` が触る面だけの身代わり。
+    """A stand-in for only the surface of `audiotools.AudioSignal` that `_normalize_decomposed`
+    touches.
 
-    `target_db=None` の経路は LUFS 測定を**記録するだけ**で利得には使わない — 身代わりが
-    返す既知の値がそのまま `refDb` に出て、`loudnessGain` は 1.0 のまま、が観測点。
+    The `target_db=None` path **only records** the LUFS measurement and does not use it for the
+    gain — what is observed is that the known value the stand-in returns shows up as `refDb` as is,
+    while `loudnessGain` stays 1.0.
     """
 
     GAIN_FACTOR = 0.1
@@ -263,7 +277,8 @@ def fake_audiotools(monkeypatch):
 
 
 class TestNormalizeDecomposedWithoutTarget:
-    """`target_db=None` = 上流 `encode_waveform` の peak 安全スケールだけの経路。"""
+    """`target_db=None` = the path of upstream `encode_waveform` with only the peak safety
+    scale."""
 
     def test_a_waveform_inside_unity_is_left_bit_identical(self, fake_audiotools):
         raw = torch.tensor([0.5, -0.25, 1.0])
@@ -272,7 +287,9 @@ class TestNormalizeDecomposedWithoutTarget:
 
         assert scalars["loudnessGain"] == 1.0
         assert scalars["peakGain"] == 1.0
-        assert scalars["refDb"] == -12.5, "測ってはいるが None 経路では利得に効かない"
+        assert scalars["refDb"] == -12.5, (
+            "measured, but it has no effect on the gain on the None path"
+        )
         assert torch.equal(decomposed, raw)
 
     def test_a_hot_waveform_is_scaled_by_one_over_the_peak(self, fake_audiotools):

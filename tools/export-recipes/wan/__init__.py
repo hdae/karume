@@ -1,15 +1,16 @@
-"""Wan2.1（text-to-video）の export recipe（ADR 0118 / ADR 0065 決定 2 — wheel 外・リポ専用）。
+"""The Wan2.1 (text-to-video) export recipe (ADR 0118 / ADR 0065 decision 2 — outside the wheel,
+repository only).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: 上流の取得元の pin
-（{@link wan.sources}）・diffusers の参照パイプライン（{@link wan.pipeline_ref}）・DiT と
-動画 VAE のパッチと export 台本・タイルの参照・テキスト埋め込みの生成・配布 recipe。依存方向は
-**recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py` が機械で
-守る）。
+Only **what cannot live in the general-purpose exporter core** goes here: the pins of the upstream
+sources ({@link wan.sources}), the diffusers reference pipeline ({@link wan.pipeline_ref}), the
+patches and export scripts of the DiT and the video VAE, the tiling reference, the text-embedding
+generation and the distribution recipe. Dependencies point **one way only, recipe → core**
+(`tools/exporter/tests/test_architecture_boundary.py` enforces it mechanically).
 
-MUST: **再輸出しない**（`from wan import X` で family の中身が芋づるに import される形に
-しない）。台本はどれも重い上流 import を持つので、`import wan` が diffusers を引き込む形に
-なると `wan.sources` の pin を読むだけの経路まで巻き添えになる。呼び出し側はサブモジュールを
-名指しで import すること。
+MUST: **do not re-export** (no shape where `from wan import X` drags the family's contents in with
+it). Every script has heavy upstream imports, so if `import wan` pulled in diffusers, even the paths
+that only read the pins of `wan.sources` would pay for it. Callers import the submodule by name.
 
-台本の起動は export-recipes ルートから（例: `uv run --group wan python -m wan.sources --fetch`）。
+Run the scripts from the export-recipes root, e.g.
+`uv run --group wan python -m wan.sources --fetch`.
 """

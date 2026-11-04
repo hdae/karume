@@ -1,25 +1,33 @@
-"""`wan/umt5_export.py`（meta で trace し、重みを checkpoint から 1 本ずつ i8 にする形）の約束事
-（ADR 0119 段 10b — 決定 5 / 6）。
+"""The contract of `wan/umt5_export.py` (trace on meta and turn the weights into i8 one at a time
+from the checkpoint) (ADR 0119 step 10b — decisions 5 / 6).
 
-固定するのは、壊れても例外が出ず**容器のバイトだけが静かにずれる**側:
+What is pinned is the side where a break raises no exception and **only the container bytes drift
+quietly**:
 
-- 重みを持たない（meta）上流で trace したグラフが、実重みの export と JSON で同一
-- 行の塊ごとに作った i8（`fixed_weights`）で書いた容器が、素直な形（f32 で `fake_quant_i8` →
-  `weight_dtype="i8"` + 表の F32 明示）で書いた容器と**全 part のバイトで一致**する — 塊の境目が
-  行の途中に来ない・tied な語彙埋め込みを `shared.weight` から読む・表を丸めない、の全部をここで縛る
-- 格納の内訳: linear と語彙埋め込みは i8、相対位置の表と RMSNorm は f32
-- checkpoint のキーが決まらない・F32 でない、は fail loudly
-- 本家の pickle 分割形（ADR 0122 決定 2）: 表の行の sha256 を照合してから mmap で読み、
-  safetensors と同じ値・同じ容器になる。tied な別名の規則（同じ storage / ビット一致 →
-  `shared.weight`・違えば fail loudly）。sha256・shard の欠落・表の古さ・表を経ない索引は
-  `torch.load` の前に落ちる。照合の後に path が差し替わっても照合した内容を読む・読んだ後に
-  shard の mmap が残らない・許可外のグローバルを含む pickle は拒む
-- サブコマンドに効かない引数（軸 `--upstream` / `--model` ほか）の明示は拒む
-- 正式な書き口（{@link wan.umt5_export.write_container}）が上の素直な形と同じバイトを書き、既存の
-  容器との照合（{@link wan.umt5_export.assert_same_container}）が 1 バイトの違いも part で名指しする
+- the graph traced on an upstream without weights (meta) is identical in JSON to the export with
+  real weights
+- the container written with i8 made per block of rows (`fixed_weights`) **matches in the bytes of
+  every part** the container written in the plain form (`fake_quant_i8` in f32 →
+  `weight_dtype="i8"` + the tables explicitly F32) — this pins all of: no block boundary in the
+  middle of a row, the tied vocabulary embedding read from `shared.weight`, the tables not rounded
+- the storage breakdown: linear and the vocabulary embedding are i8, the relative-position tables
+  and RMSNorm are f32
+- a checkpoint key that cannot be determined or that is not F32 fails loudly
+- the original model's split pickle form (ADR 0122 decision 2): the sha256 of the table row is
+  checked before reading through mmap, giving the same values and the same container as
+  safetensors. The rule for tied aliases (same storage / bit-identical → `shared.weight`; otherwise
+  fail loudly). A sha256 mismatch, a missing shard, a stale table and an index not reached through
+  the table fail before `torch.load`. The checked content is read even if the path is swapped after
+  the check; no shard mmap remains after reading; a pickle with a global outside the allow list is
+  refused
+- an explicit argument that has no effect on the subcommand (the axis `--upstream` / `--model` and
+  others) is refused
+- the official writer ({@link wan.umt5_export.write_container}) writes the same bytes as the plain
+  form above, and the comparison with an existing container
+  ({@link wan.umt5_export.assert_same_container}) names a single-byte difference by part
 
-乱数初期化の小さな umT5（`wan.umt5_probe.TINY_CONFIG`）を `save_pretrained` した checkpoint で回す —
-実重みは読まない。
+It runs on a checkpoint `save_pretrained` from a small randomly initialized umT5
+(`wan.umt5_probe.TINY_CONFIG`) — no real weights are read.
 """
 
 from __future__ import annotations
@@ -45,10 +53,11 @@ from wan.umt5_distribution import UMT5_DEFAULT_MODEL
 
 LAYERS = int(probe.TINY_CONFIG["num_layers"])
 
-#: 小模型の linear の本数（層ごとに q / k / v / o と wi_0 / wi_1 / wo）。
+#: The number of linear layers of the small model (per layer q / k / v / o and wi_0 / wi_1 / wo).
 LINEARS_PER_LAYER = 7
 
-#: 塊の行数（語彙 384・d_ff 160・d_model 64 のどれも割り切らない — 半端な塊を必ず踏む）。
+#: The number of rows per block (divides none of vocabulary 384, d_ff 160, d_model 64 — a partial
+#: block is always hit).
 CHUNK_ROWS = 7
 
 
@@ -60,7 +69,8 @@ def model() -> Any:
 
 @pytest.fixture(scope="module")
 def checkpoint_dir(model: Any, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """上流の `save_pretrained` の形（config + 単一の safetensors — tied な重みは片方だけ）。"""
+    """The upstream `save_pretrained` form (config + a single safetensors — only one of the tied
+    weights)."""
     directory = tmp_path_factory.mktemp("umt5-tiny")
     model.save_pretrained(directory)
     return directory
@@ -72,8 +82,8 @@ def prepared(checkpoint_dir: Path) -> ue.Umt5Export:
 
 
 def write(path: Path, graph: Any, tensors: Any, **storage: Any) -> list[bytes]:
-    """容器を書いて全 part のバイトを返す（出所とグラフ名は正式な書き口と同じ — 差はバイトの
-    中身だけに出る）。"""
+    """Write the container and return the bytes of every part (the provenance and graph name are
+    the same as the official writer's — differences show only in the byte contents)."""
     publish_model(
         path / ue.MODEL_FILE,
         graph,
@@ -91,7 +101,7 @@ def read_parts(path: Path) -> list[bytes]:
 
 class TestCheckpoint:
     def test_the_tied_embedding_is_read_from_the_saved_name(self, checkpoint_dir, model):
-        """`encoder.embed_tokens.weight` は checkpoint に `shared.weight` としてしか無い。"""
+        """`encoder.embed_tokens.weight` exists in the checkpoint only as `shared.weight`."""
         checkpoint = ue.Checkpoint(checkpoint_dir)
 
         mapping = ue.checkpoint_keys(model, ["encoder.embed_tokens.weight"], checkpoint)
@@ -105,22 +115,24 @@ class TestCheckpoint:
         del tensors[table]
         save_file(tensors, str(tmp_path / ue.CHECKPOINT_SINGLE))
 
-        with pytest.raises(ue.Umt5ExportError, match="1 つに決まらない"):
+        with pytest.raises(ue.Umt5ExportError, match="not determined uniquely"):
             ue.checkpoint_keys(model, [table], ue.Checkpoint(tmp_path))
 
     def test_a_non_f32_checkpoint_is_rejected(self, checkpoint_dir, tmp_path):
-        """丸めの出発点が F32 でない checkpoint は読まない（bf16 から i8 にすると別の値になる）。"""
+        """A checkpoint whose rounding starting point is not F32 is not read (going from bf16 to i8
+        gives different values)."""
         tensors = load_file(str(checkpoint_dir / ue.CHECKPOINT_SINGLE))
         save_file(
             {key: value.to(torch.bfloat16) for key, value in tensors.items()},
             str(tmp_path / ue.CHECKPOINT_SINGLE),
         )
 
-        with pytest.raises(ue.Umt5ExportError, match="F32 だけ"):
+        with pytest.raises(ue.Umt5ExportError, match="only F32 is accepted"):
             ue.Checkpoint(tmp_path).read_rows("shared.weight", 0, 1)
 
 
-#: 語彙埋め込みの tied な別名の対（本家の索引は両方を持つ — ADR 0122 決定 2）。
+#: The pair of tied aliases of the vocabulary embedding (the original index holds both — ADR 0122
+#: decision 2).
 SHARED, EMBED = "shared.weight", "encoder.embed_tokens.weight"
 
 
@@ -129,8 +141,9 @@ def sha256_of(path: Path) -> str:
 
 
 def write_bin_split(directory: Path, shards: list[dict[str, torch.Tensor]]) -> dict[str, str]:
-    """本家の形の pickle 分割形（`pytorch_model-0000N-of-0000M.bin` + 索引）を書き、各 shard の
-    ファイル名 → sha256 を返す（表の行の `shards` の形 — 渡す側が要る分だけ選ぶ）。"""
+    """Write the original model's split pickle form (`pytorch_model-0000N-of-0000M.bin` + index) and
+    return each shard's file name → sha256 (the shape of the table row's `shards` — the caller picks
+    only what it needs)."""
     weight_map: dict[str, str] = {}
     digests: dict[str, str] = {}
     for number, tensors in enumerate(shards, start=1):
@@ -147,11 +160,12 @@ def write_bin_split(directory: Path, shards: list[dict[str, torch.Tensor]]) -> d
 def google_shards(
     model: Any, *, embed: torch.Tensor | None = None
 ) -> list[dict[str, torch.Tensor]]:
-    """小模型を本家の並びに割る: shard 1 = 語彙埋め込みの対 + encoder の前半・shard 2 = encoder の
-    後半・shard 3 = decoder と `lm_head` だけ（encoder の読み手は取らない shard）。
+    """Split the small model in the original order: shard 1 = the vocabulary embedding pair + the
+    first half of the encoder, shard 2 = the second half of the encoder, shard 3 = only the decoder
+    and `lm_head` (a shard the encoder reader does not take).
 
-    `embed` を渡すと `encoder.embed_tokens.weight` をその値にする（既定は `shared.weight` と同じ
-    storage — 本家の実物の形）。
+    Passing `embed` sets `encoder.embed_tokens.weight` to that value (by default the same storage as
+    `shared.weight` — the shape of the original files).
     """
     state = {key: value.detach() for key, value in model.state_dict().items()}
     encoder = sorted(key for key in state if key.startswith("encoder.") and key != EMBED)
@@ -168,26 +182,27 @@ def google_shards(
 
 
 def encoder_pin(digests: Mapping[str, str]) -> dict[str, str]:
-    """表の行の `shards`（encoder の重みが載る shard 1 / 2 だけ）。"""
+    """The table row's `shards` (only shards 1 / 2, which hold the encoder weights)."""
     return {name: digest for name, digest in digests.items() if "-00003-" not in name}
 
 
 @pytest.fixture
 def no_unpickle(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """`torch.load` を呼ばれたら記録する（「開く前に落ちる」の故障注入の検査用）。"""
+    """Record any call to `torch.load` (for the fault-injection checks of "fails before
+    opening")."""
     opened: list[Path] = []
 
     def refuse(path: Any, *args: Any, **kwargs: Any) -> Any:
         opened.append(Path(path))
-        raise AssertionError(f"unpickle された: {path}")
+        raise AssertionError(f"unpickled: {path}")
 
     monkeypatch.setattr(torch, "load", refuse)
     return opened
 
 
 class TestThePinnedPickleSplit:
-    """本家の pickle 分割形の読み口（ADR 0122 決定 2 — 表の行の sha256 を照合してから mmap で
-    読む）。"""
+    """The reader of the original model's split pickle form (ADR 0122 decision 2 — check the sha256
+    of the table row, then read through mmap)."""
 
     @pytest.fixture
     def bin_dir(self, model: Any, tmp_path: Path) -> tuple[Path, dict[str, str]]:
@@ -211,8 +226,8 @@ class TestThePinnedPickleSplit:
     def test_the_container_is_byte_identical_to_the_safetensors_one(
         self, bin_dir, prepared, tmp_path
     ):
-        """読み口が違っても値が同じなら、容器は全 part のバイトで一致する（段 a の予測の
-        小模型版）。"""
+        """With a different reader but the same values, the container matches in the bytes of every
+        part (the small-model version of step a's prediction)."""
         directory, pin = bin_dir
         for name, export in (
             ("pickled", ue.prepare(directory, shards=pin, chunk_rows=CHUNK_ROWS)),
@@ -224,8 +239,8 @@ class TestThePinnedPickleSplit:
         assert read_parts(tmp_path / "pickled") == read_parts(tmp_path / "saved")
 
     def test_the_shards_are_derived_from_the_index(self, bin_dir):
-        """encoder の重みが載る shard だけを導く（decoder と lm_head だけの shard 3 は
-        読まない）。"""
+        """Derive only the shards that hold the encoder weights (shard 3, which holds only the
+        decoder and lm_head, is not read)."""
         directory, pin = bin_dir
         index = json.loads((directory / UMT5_BIN_INDEX).read_text(encoding="utf-8"))
 
@@ -258,18 +273,19 @@ class TestThePinnedPickleSplit:
         assert ue.checkpoint_keys(model, [EMBED], ue.Checkpoint(tmp_path)) == {EMBED: SHARED}
 
     def test_a_tied_pair_that_differs_in_one_element_fails_loudly(self, model, tmp_path):
-        """故障注入: 別名の片方の 1 要素だけを変える — どちらを読んでも別の重みになる。"""
+        """Fault injection: change one element of one of the aliases — either one read gives a
+        different weight."""
         model.config.save_pretrained(tmp_path)
         drifted = model.shared.weight.detach().clone()
         drifted[-1, -1] = torch.nextafter(drifted[-1, -1], torch.tensor(float("inf")))
         pin = encoder_pin(write_bin_split(tmp_path, google_shards(model, embed=drifted)))
 
-        with pytest.raises(ue.Umt5ExportError, match="値が checkpoint の中で違う"):
+        with pytest.raises(ue.Umt5ExportError, match="differ within the checkpoint"):
             ue.checkpoint_keys(model, [EMBED], ue.Checkpoint(tmp_path, shards=pin))
 
     def test_a_flipped_byte_fails_before_anything_is_unpickled(self, bin_dir, no_unpickle):
-        """故障注入: shard の 1 バイトを変える — sha256 が表と食い違い、`torch.load` の前に
-        落ちる。"""
+        """Fault injection: change one byte of a shard — the sha256 disagrees with the table and it
+        fails before `torch.load`."""
         directory, pin = bin_dir
         shard = directory / sorted(pin)[1]
         raw = bytearray(shard.read_bytes())
@@ -281,56 +297,61 @@ class TestThePinnedPickleSplit:
         assert no_unpickle == []
 
     def test_a_missing_shard_fails_before_anything_is_unpickled(self, bin_dir, no_unpickle):
-        """故障注入: shard を 1 本外す（ディスクから消す）。"""
+        """Fault injection: drop one shard (delete it from disk)."""
         directory, pin = bin_dir
         (directory / sorted(pin)[1]).unlink()
 
-        with pytest.raises(ue.Umt5ExportError, match="が無い"):
+        with pytest.raises(ue.Umt5ExportError, match="is missing"):
             ue.Checkpoint(directory, shards=pin)
         assert no_unpickle == []
 
     def test_a_table_that_misses_a_derived_shard_fails_loudly(self, bin_dir, no_unpickle):
-        """故障注入: 表から shard を 1 本外す — 索引から導いた集合と食い違う（表が古い）。"""
+        """Fault injection: drop one shard from the table — it disagrees with the set derived from
+        the index (a stale table)."""
         directory, pin = bin_dir
         stale = dict(sorted(pin.items())[:1])
 
-        with pytest.raises(ue.Umt5ExportError, match="表の shard"):
+        with pytest.raises(ue.Umt5ExportError, match="the table's shards"):
             ue.Checkpoint(directory, shards=stale)
         assert no_unpickle == []
 
     def test_an_index_without_the_table_row_is_never_unpickled(self, bin_dir, no_unpickle):
-        """故障注入: 表の行を経ずに `pytorch_model.bin.index.json` だけのディレクトリを渡す。"""
+        """Fault injection: pass a directory holding only `pytorch_model.bin.index.json`, bypassing
+        the table row."""
         directory, _ = bin_dir
 
-        with pytest.raises(ue.Umt5ExportError, match=r"も .* も無い"):
+        with pytest.raises(ue.Umt5ExportError, match=r"has neither .* nor"):
             ue.Checkpoint(directory)
         assert no_unpickle == []
 
     def test_a_non_f32_pickle_is_rejected(self, model, tmp_path):
-        """故障注入: F32 でない `.bin`（sha256 は表と一致）— 丸めの出発点が変わるので読まない。"""
+        """Fault injection: a `.bin` that is not F32 (the sha256 matches the table) — the rounding
+        starting point changes, so it is not read."""
         shards = [
             {key: value.to(torch.bfloat16) for key, value in shard.items()}
             for shard in google_shards(model)
         ]
         pin = encoder_pin(write_bin_split(tmp_path, shards))
 
-        with pytest.raises(ue.Umt5ExportError, match="F32 だけ"):
+        with pytest.raises(ue.Umt5ExportError, match="only F32 is accepted"):
             ue.Checkpoint(tmp_path, shards=pin).read_rows(SHARED, 0, 1)
 
     def test_a_legacy_pickle_is_named(self, model, tmp_path):
-        """zip 形式でない（旧い `torch.save` の）pickle は mmap で開けない — 例外を名指しで包む。"""
+        """A pickle not in zip format (from an old `torch.save`) cannot be opened through mmap —
+        the exception is wrapped and named."""
         digests = write_bin_split(tmp_path, google_shards(model))
         first = sorted(digests)[0]
         tensors = torch.load(tmp_path / first, weights_only=True)
         torch.save(tensors, tmp_path / first, _use_new_zipfile_serialization=False)
         pin = encoder_pin({**digests, first: sha256_of(tmp_path / first)})
 
-        with pytest.raises(ue.Umt5ExportError, match=r"zip 形式の torch\.save でない"):
+        with pytest.raises(ue.Umt5ExportError, match=r"is not a zip-form torch\.save"):
             ue.Checkpoint(tmp_path, shards=pin).read(SHARED)
 
     def test_a_pickle_with_an_unlisted_global_is_refused(self, model, tmp_path):
-        """故障注入: 許可されていないグローバル（`datetime.date` — 無害で、実行する payload は
-        持たない）を含む shard（sha256 は表と一致）— `weights_only` の unpickler が拒む。"""
+        """Fault injection: a shard (the sha256 matches the table) containing a global that is not
+        allowed (`datetime.date` — harmless, carrying no payload to execute) — the `weights_only`
+        unpickler refuses it."""
         shards = google_shards(model)
         shards[0]["note"] = datetime.date(2026, 10, 4)
         pin = encoder_pin(write_bin_split(tmp_path, shards))
@@ -339,8 +360,8 @@ class TestThePinnedPickleSplit:
             ue.Checkpoint(tmp_path, shards=pin).read(SHARED)
 
     def test_a_shard_replaced_after_the_check_is_not_read(self, bin_dir, model):
-        """故障注入: 照合の後で shard の path を別の中身に差し替える（rename — HF のキャッシュの
-        書き方）。読むのは照合した内容のまま。"""
+        """Fault injection: after the check, replace the shard's path with other content (rename —
+        how the HF cache writes). What is read stays the checked content."""
         directory, pin = bin_dir
         checkpoint = ue.Checkpoint(directory, shards=pin)
         shard = directory / sorted(pin)[0]
@@ -354,8 +375,8 @@ class TestThePinnedPickleSplit:
         assert torch.equal(checkpoint.read(SHARED), model.shared.weight.detach())
 
     def test_no_shard_stays_mapped_after_a_read(self, bin_dir, model):
-        """読んだ後に shard の mmap が残らない（握り続けると、触ったページが file-backed の
-        RSS に乗ったまま残る）。"""
+        """No shard mmap remains after reading (holding it keeps the touched pages in file-backed
+        RSS)."""
         directory, pin = bin_dir
         checkpoint = ue.Checkpoint(directory, shards=pin)
         shards = {str((directory / name).resolve()) for name in pin}
@@ -369,18 +390,19 @@ class TestThePinnedPickleSplit:
 
 
 def mapped_files() -> set[str]:
-    """このプロセスが mmap しているファイルの path（`/proc/self/maps` の 6 列目）。"""
+    """The paths of the files this process has mmapped (column 6 of `/proc/self/maps`)."""
     with open("/proc/self/maps", encoding="utf-8") as stream:
         fields = (line.split(maxsplit=5) for line in stream)
         return {columns[5].strip() for columns in fields if len(columns) == 6}
 
 
 class TestCommandLine:
-    """サブコマンドに効かない引数を明示したら拒む（黙って無視しない）。"""
+    """An explicit argument that has no effect on the subcommand is refused (not silently
+    ignored)."""
 
     @pytest.fixture
     def calls(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, tuple[Any, ...], Any]]:
-        """サブコマンドの本体を記録係に差し替える（重みは読まない）。"""
+        """Replace the subcommand's body with a recorder (no weights are read)."""
         recorded: list[tuple[str, tuple[Any, ...], Any]] = []
 
         def recorder(name: str) -> Any:
@@ -414,12 +436,13 @@ class TestCommandLine:
         ],
     )
     def test_an_argument_the_command_does_not_use_is_refused(self, argv, refused, calls, capsys):
-        """既定値と同じ値でも、明示したら拒む（効かない軸を指定したつもりの回を走らせない）。"""
+        """Even a value equal to the default is refused when given explicitly (a run that believes
+        it set an axis that has no effect does not start)."""
         with pytest.raises(SystemExit) as exited:
             ue.main(argv)
 
         assert exited.value.code == 2
-        assert f"{refused} は {argv[0]} に効かない" in capsys.readouterr().err
+        assert f"{refused} does not apply to {argv[0]}" in capsys.readouterr().err
         assert calls == []
 
     def test_omitted_arguments_take_their_defaults(self, calls, capsys):
@@ -449,14 +472,15 @@ class TestCommandLine:
 
 class TestMetaTrace:
     def test_the_graph_is_the_real_weight_export(self, prepared, model):
-        """meta の重みで辿ったグラフ = 実重み（f32 で丸める前）の export のグラフ。"""
+        """The graph walked with meta weights = the graph of the export with real weights (before
+        rounding in f32)."""
         wrapper = up.Umt5EncoderTokens(model)
         graph, _ = ue.trace(wrapper)
 
         assert prepared.graph.to_json() == graph.to_json()
 
     def test_only_the_weights_stay_meta(self, prepared):
-        """meta のまま残るのは i8 の対象だけで、残りの重みは checkpoint の実体。"""
+        """Only the i8 targets stay on meta; the remaining weights are the checkpoint's tensors."""
         meta = sorted(key for key, value in prepared.tensors.items() if value.is_meta)
 
         assert meta == sorted(prepared.fixed)
@@ -476,8 +500,8 @@ class TestStorage:
     def test_the_container_matches_the_whole_tensor_path_byte_for_byte(
         self, prepared, model, tmp_path
     ):
-        """正式な書き口（行の塊ごとの i8）が、素直な形（f32 で丸め → i8 + 表の F32 明示）と
-        全 part のバイトで一致する。"""
+        """The official writer (i8 per block of rows) matches the plain form (round in f32 → i8 +
+        the tables explicitly F32) in the bytes of every part."""
         whole = probe.export_probe(model)
 
         expected = write(
@@ -496,7 +520,8 @@ class TestStorage:
         assert actual == expected
 
     def test_a_shifted_chunk_breaks_the_match(self, prepared, model):
-        """対（非恒真）: 塊の scale を 1 行ずらすと packed が素直な形と割れる。"""
+        """The pair (not tautological): shifting a block's scale by one row splits the packed bytes
+        from the plain form."""
         whole = probe.export_probe(model)
         key = "encoder.embed_tokens.weight"
         fixed = prepared.fixed[key]
@@ -510,7 +535,8 @@ class TestStorage:
 
 
 class TestTheSeriesCheck:
-    """`write --check` の照合（書いた容器と既存の容器を part 列の sha256 で突き合わせる）。"""
+    """The comparison of `write --check` (the written container against an existing container, by
+    the sha256 of the part sequence)."""
 
     @pytest.fixture
     def pair(self, prepared, tmp_path) -> tuple[Path, Path]:
@@ -527,7 +553,7 @@ class TestTheSeriesCheck:
         assert len(ue.part_digests(written)) > 1
 
     def test_one_flipped_byte_is_named_by_its_part(self, pair):
-        """故障注入: 既存の最後の part の 1 バイトを反転すると、その添字で落ちる。"""
+        """Fault injection: flipping one byte of the existing last part fails at that index."""
         written, existing = pair
         parts = sorted(existing.parent.glob("*.krm"))
         last = bytearray(parts[-1].read_bytes())
@@ -538,21 +564,23 @@ class TestTheSeriesCheck:
             ue.assert_same_container(written, existing)
 
     def test_another_part_count_is_refused(self, pair, tmp_path):
-        """part の本数が違えば、中身を比べる前に落ちる（別の分割で書いた容器）。"""
+        """A different part count fails before the contents are compared (a container written with
+        another split)."""
         written, _ = pair
         single = tmp_path / "single"
         single.mkdir()
         (single / "model-00001-of-00002.krm").write_bytes(b"0")
         (single / "model-00002-of-00002.krm").write_bytes(b"1")
 
-        with pytest.raises(ue.Umt5ExportError, match="part の本数"):
+        with pytest.raises(ue.Umt5ExportError, match="part counts differ"):
             ue.assert_same_container(written, single / ue.MODEL_FILE)
 
 
 class TestQuantizeRows:
     @pytest.mark.parametrize("chunk_rows", [1, CHUNK_ROWS, 10_000])
     def test_the_chunk_size_does_not_change_the_values(self, checkpoint_dir, chunk_rows):
-        """塊の大きさ（1 行ずつ・半端・全体を 1 塊）に依らず同じ packed と scale。"""
+        """The same packed bytes and scale regardless of block size (one row at a time, partial,
+        the whole as one block)."""
         checkpoint = ue.Checkpoint(checkpoint_dir)
         reference = ue.quantize_rows(checkpoint, "shared.weight", chunk_rows=10_000)
 
@@ -564,7 +592,7 @@ class TestQuantizeRows:
 
 class TestMemoryMonitor:
     def test_a_stage_sees_what_it_allocates(self):
-        """段の中で確保して触った 256 MiB が、その段の山（VmHWM）に出る。"""
+        """256 MiB allocated and touched within a stage shows up in that stage's peak (VmHWM)."""
         with ue.MemoryMonitor(interval=0.05) as monitor:
             with monitor.stage("idle") as idle:
                 pass
@@ -579,9 +607,9 @@ class TestMemoryMonitor:
 
 class TestReferenceAxes:
     def test_the_two_axes_name_their_own_rows(self):
-        """`reference` は umT5 の上流（config と量子化しない重み）と Wan の text 側の snapshot
-        （ケースの id 列）を混ぜて使う — golden のメタはそれぞれの行を名指しする（ADR 0122
-        決定 3）。"""
+        """`reference` mixes the umT5 upstream (config and unquantized weights) with the snapshot
+        of Wan's text side (the cases' id sequences) — the golden's metadata names each row
+        (ADR 0122 decision 3)."""
         from wan.sources import SOURCES, UMT5_SOURCES
 
         axes = ue.reference_axes("xxl", "t2v-1.3b")

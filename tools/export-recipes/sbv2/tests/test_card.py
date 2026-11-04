@@ -1,22 +1,25 @@
-"""SBV2 配布形のモデルカード描画（`sbv2.card`）。
+"""Model card rendering of the SBV2 distribution (`sbv2.card`).
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。スタイル表・話者表も同じ理由で実重み FN4 と別の名前・別の並びに
-してある（表を焼き込んでいれば落ちる）。
+The real distribution's `karume.json` is not used — the job here is to see that the values of a
+fake manifest appear in the text as they are (= that not a single hand-written number is mixed
+in), so building it with values that **differ** from the real ones detects more. For the same
+reason the style table and the speaker table use different names and a different order from the
+real FN4 weights (baking a table in would fail).
 
-manifest v2（`karume/2` — ADR 0041）以降、カードは 1 リポの複数モデルを説明する。ファミリーの
-形（2 モデル・共有ファイルつき）を偽 manifest の既定にしてあるのは、単一モデルでしか通らない
-描画を素通ししないため。
+Since manifest v2 (`karume/2` — ADR 0041) a card describes several models of one repository. The
+fake manifest defaults to the family shape (2 models, with shared files) so that rendering that
+only works for a single model does not slip through.
 
-帰属はファミリー別プロファイル（`fn` / `jvnv`）。manifest からの導出を見る節は `fn` 1 本で
-足りる（プロファイルは帰属節と frontmatter にしか掛からない）ので、プロファイル固有の事実と
-取り違えの検出は末尾の `TestSbv2CardProfiles` にまとめてある。
+Attribution is a per-family profile (`fn` / `jvnv`). The sections that look at what is derived from
+the manifest need only `fn` (a profile affects only the attribution section and the frontmatter),
+so the profile-specific facts and the detection of mix-ups are gathered in `TestSbv2CardProfiles`
+at the end.
 
-NOTE: このテストだけ `siglip2.card` を import する（recipe 間で唯一のコード結合）—
-{@link TestSbv2PipelineGate.test_the_two_templates_do_not_answer_for_each_other} は「2 つの
-**実在テンプレート**が互いの manifest を拒む」ことの主張で、相手を合成に置き換えると主張が
-割れる。SigLIP2 のテンプレートが core にあった頃から同じ被験体で、移設で指し先が変わっただけ。
+NOTE: only this test imports `siglip2.card` (the only code coupling between recipes) —
+{@link TestSbv2PipelineGate.test_the_two_templates_do_not_answer_for_each_other} asserts that "2
+**real templates** reject each other's manifest", and replacing the counterpart with a synthetic
+one would break the claim. It has had the same subject since the SigLIP2 template lived in core;
+the move only changed what it points at.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from sbv2.card import (
 from sbv2.distribution import SBV2_QUANT_ABBREVIATIONS, SBV2_QUANTS
 from siglip2.card import SIGLIP2_SUPPORTED_PIPELINE, render_siglip2_model_card
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: The repository ID spelled in the usage snippet (dist passes it from the pipeline's declaration).
 REPO = "hdae/fake-repo"
 
 
@@ -49,9 +52,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    `descriptor` is a field the card does not read, so only its shape follows the real thing (the
+    lengths and sha256 of the 2 documents).
     """
     return {
         "container": {
@@ -65,7 +69,8 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
-    """SigLIP2 の最小 manifest（テンプレート取り違えの門を両向きに見るための相手）。"""
+    """A minimal SigLIP2 manifest (the counterpart for looking at the template mix-up gate in both
+    directions)."""
     return {
         "format": "karume/5",
         "generator": "karume/9.9.9",
@@ -93,10 +98,11 @@ def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
 
 
 def _sbv2_manifest() -> dict[str, Any]:
-    """ADR 0041 の形を保った最小の SBV2 manifest（値は実物と重ならない偽値）。
+    """A minimal SBV2 manifest that keeps the shape of ADR 0041 (fake values that do not overlap the
+    real ones).
 
-    `styles` は **ID の昇順に並べない** — カードが manifest の並びをそのまま出すこと
-    （並べ替えを挟んでいないこと）を、そのまま観測できるようにするため。
+    `styles` is **not sorted by ID** — so that the card printing the manifest's order as is (no
+    sorting in between) can be observed directly.
     """
     text_encoder = _ref("shared/text_encoder/model.i8-00001-of-00003.krm", 555, "e")
     tokenizer = _ref("shared/tokenizer/fake-tokenizer.json", 11, "3")
@@ -136,8 +142,8 @@ def _sbv2_manifest() -> dict[str, Any]:
                     "i8-a8": {
                         "weights": {"text_encoder": "i8", "front": "i8", "voice": "i8"},
                         "session": {"linearCompute": "a8"},
-                        "label": "偽のラベル",
-                        "description": "偽の説明。",
+                        "label": "Fake label",
+                        "description": "A fake description.",
                     },
                 },
                 "defaultQuant": "i8-a8",
@@ -191,7 +197,8 @@ def _sbv2_manifest() -> dict[str, Any]:
 
 @pytest.fixture
 def sbv2_card() -> str:
-    """`fn` プロファイルで描いたカード（manifest 導出の観測はプロファイルに依らない）。"""
+    """The card rendered with the `fn` profile (what is derived from the manifest does not depend
+    on the profile)."""
     return render_sbv2_model_card(_sbv2_manifest(), REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
 
 
@@ -201,7 +208,7 @@ class TestSbv2Frontmatter:
         assert "library_name: karume" in head
         assert "pipeline_tag: text-to-speech" in head
         assert "base_model: rufflet17/voice_models" in head
-        # 量子化した配布形なので merge / finetune ではない（Anima と同じ裁定）。
+        # A quantized distribution, so not merge / finetune (the same ruling as Anima).
         assert "base_model_relation: quantized" in head
         assert "license: other" in head
         assert [line for line in head.splitlines() if line.startswith("  - ")] == [
@@ -235,15 +242,16 @@ class TestSbv2Sections:
             ]
 
     def test_it_attributes_both_upstream_models(self, sbv2_card: str) -> None:
-        """帰属は manifest に無い事実 — 声の出所と、再配布する text encoder の両方。"""
+        """Attribution is a fact the manifest does not have — both where the voice comes from and
+        the text encoder that is redistributed."""
         assert "rufflet17/voice_models" in sbv2_card
         assert "2.6.1-JP-Extra" in sbv2_card
         assert "ku-nlp/deberta-v2-large-japanese-char-wwm" in sbv2_card
         assert "cc-by-sa-4.0" in sbv2_card
 
     def test_it_shows_the_minimal_typescript_entry_point(self, sbv2_card: str) -> None:
-        """実在する公開面だけを綴る（`packages/models/mod.ts` の `encodeWav` +
-        `packages/models/sbv2.ts` の 2 名 + 実シグネチャ）。"""
+        """Spells only the public surface that exists (`encodeWav` of `packages/models/mod.ts` +
+        the 2 names of `packages/models/sbv2.ts` + the real signatures)."""
         assert "await Pipeline.fromPretrained({" in sbv2_card
         assert f'  repo: "{REPO}",' in sbv2_card
         assert '  // revision: "<full commit sha>",' in sbv2_card
@@ -253,15 +261,17 @@ class TestSbv2Sections:
         assert "const audio = await pipeline.generate(utterance, {" in sbv2_card
 
     def test_the_usage_snippet_declares_the_pipeline_with_await_using(self, sbv2_card: str) -> None:
-        """`sbv2.Pipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期 `using` は宣言で落ちる。"""
+        """`sbv2.Pipeline` has only `[Symbol.asyncDispose]` — a synchronous `using` fails at the
+        declaration."""
         lines = sbv2_card.splitlines()
         assert "await using pipeline = await Pipeline.fromPretrained({" in lines
         assert not any(line.startswith("using pipeline") for line in lines)
 
     def test_the_usage_snippet_hands_generate_an_analyzed_utterance(self, sbv2_card: str) -> None:
-        """`generate(utterance, options)` の 2 層入力（0.6.0〜）— テキスト解析は呼び手の責務。
+        """The 2-layer input of `generate(utterance, options)` (0.6.0 on) — text analysis is the
+        caller's job.
 
-        生テキストを options に入れる形（`generate({ text })`）は型が通らない。
+        The form that puts raw text in the options (`generate({ text })`) does not type-check.
         """
         lines = sbv2_card.splitlines()
         assert 'import { encodeWav } from "jsr:@karume/models";' in lines
@@ -275,7 +285,8 @@ class TestSbv2Sections:
     def test_it_does_not_promise_a_dictionary_the_package_does_not_fetch(
         self, sbv2_card: str
     ) -> None:
-        """パッケージは辞書を取得せず、`dictionary` option も持たない（解析は呼び手）。"""
+        """The package does not fetch a dictionary and has no `dictionary` option (analysis is the
+        caller's)."""
         assert "`dictionary` option" not in sbv2_card
         assert "the pipeline fetches it" not in sbv2_card
         assert "belongs to the caller" in sbv2_card
@@ -286,7 +297,8 @@ class TestSbv2Sections:
 
 
 class TestSbv2QuantRounding:
-    """quant 表に続く**丸め方**の備考（同じ `i4` でも GPTQ 校正付きか素の RTN かは表に出ない）。"""
+    """The note on **how the weights were rounded** that follows the quant table (the table does not
+    show whether the same `i4` is GPTQ-calibrated or plain RTN)."""
 
     @staticmethod
     def _notes(card: str) -> str:
@@ -295,7 +307,8 @@ class TestSbv2QuantRounding:
         return notes.partition("### Styles")[0]
 
     def test_it_explains_only_the_quants_the_model_declares(self, sbv2_card: str) -> None:
-        """配布形が持たない席は説明しない（`_sbv2_knob` と同じ規律）。"""
+        """Quants the distribution does not have are not explained (the same discipline as
+        `_sbv2_knob`)."""
         notes = self._notes(sbv2_card)
         assert "- `i8` —" in notes
         assert "`i8+bert4`" not in notes
@@ -304,17 +317,20 @@ class TestSbv2QuantRounding:
     def test_the_i8_note_names_the_granularity_the_implementation_uses(
         self, sbv2_card: str
     ) -> None:
-        """丸めは `karume.quantize.fake_quant_int8` = **出力チャネルごとの** scale（ADR 0019）。
+        """The rounding is `karume.quantize.fake_quant_int8` = a scale **per output channel** (ADR
+        0019).
 
-        量子化の文脈で "per tensor" は「テンソル全体で scale 1 個」を指す確立した語なので、
-        そう名乗ると実際より粗い方式を配布物が名乗ることになる。
+        In the context of quantization "per tensor" is the established term for "one scale for the
+        whole tensor", so calling it that would make the distribution claim a coarser method than
+        the real one.
         """
         notes = self._notes(sbv2_card)
         assert "rounded per output channel (plain RTN)" in notes
         assert "per tensor" not in notes
 
     def test_every_shipped_seat_has_a_rounding_note(self) -> None:
-        """席を足した日に備考の欠けが沈黙で生えない（`_sbv2_quants` は無いキーを飛ばす）。"""
+        """A missing note cannot appear silently on the day a quant is added (`_sbv2_quants` skips
+        keys that do not exist)."""
         assert set(SBV2_QUANT_ROUNDING) == set(SBV2_QUANTS)
 
     def test_a_model_declaring_every_seat_gets_a_note_for_every_seat(self) -> None:
@@ -333,7 +349,8 @@ class TestSbv2QuantRounding:
             assert f"- `{name}`" in notes, name
 
     def test_the_default_mark_follows_default_quant(self, sbv2_card: str) -> None:
-        """既定マークは manifest 由来 — 備考に焼くと、既定が動いたとき表とだけ食い違う。"""
+        """The default mark comes from the manifest — baking it into the notes would make them
+        disagree with the table alone when the default moves."""
         assert "- `i8-a8` (default) —" in self._notes(sbv2_card)
         assert "- `i8` (default)" not in self._notes(sbv2_card)
 
@@ -344,13 +361,15 @@ class TestSbv2QuantRounding:
 
 
 class TestSbv2Derivation:
-    """MUST: 数値・ダウンロード量・quant 表・スタイル表・話者表は manifest 由来。"""
+    """MUST: the numbers, the download sizes, the quant table, the style table and the speaker table
+    come from the manifest."""
 
     def test_each_seat_counts_the_files_it_declares(self, sbv2_card: str) -> None:
-        """shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 席ごとの合計が Download 欄に入る。
+        """The table with one row per shard was retired (ruling of 2026-09-03) — the total of each
+        quant goes into the Download column.
 
-        `f16` = text_encoder 555 + front 666 + voice 888 + assets 110 = 2,219 B、`i8` は
-        front / voice が 777 / 999 に替わって 2,441 B。重みの path はカードに 1 つも出ない。
+        `f16` = text_encoder 555 + front 666 + voice 888 + assets 110 = 2,219 B; for `i8` front /
+        voice become 777 / 999, giving 2,441 B. Not a single weight path appears in the card.
         """
         _, _, rest = sbv2_card.partition("## Model: ZA")
         quants, _, _ = rest.partition("### Styles")
@@ -380,12 +399,12 @@ class TestSbv2Derivation:
         assert "| `Whisper` | 1 |" in rows
 
     def test_it_keeps_the_style_table_in_the_manifests_own_order(self) -> None:
-        """並べ替えを挟まない — manifest の並びを変えると表の並びも変わる。"""
+        """No sorting in between — changing the manifest's order changes the table's order too."""
 
         def style_rows(manifest: dict[str, Any]) -> list[str]:
             card = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
             head, _, rest = card.partition("### Styles")
-            assert head  # 節が消えたら以下の抽出が無意味になる
+            assert head  # if the section disappeared, the extraction below would be meaningless
             return [line for line in rest.splitlines() if line.startswith("| `")]
 
         manifest = _sbv2_manifest()
@@ -406,7 +425,8 @@ class TestSbv2Derivation:
         ]
 
     def test_it_renames_the_styles_when_the_manifest_does(self) -> None:
-        """名前も焼き込まない（別 ckpt の配布形なら別のスタイル名が出る）。"""
+        """Names are not baked in either (a distribution of another ckpt shows other style
+        names)."""
         manifest = _sbv2_manifest()
         del manifest["models"]["ZB"]
         manifest["models"]["ZA"]["pipelineConfig"]["styles"] = {"Angry": 0}
@@ -422,7 +442,8 @@ class TestSbv2Derivation:
         assert rows[:2] == ["| `ZZ9` | 0 |", "| `ZZ8` | 1 |"]
 
     def test_it_names_the_tables_the_ids_index(self, sbv2_card: str) -> None:
-        """行番号の解決先も manifest のファイル path から引く（綴りを写経しない）。"""
+        """Where the row IDs resolve to is also taken from the manifest's file paths (the spelling
+        is not copied)."""
         assert "`ZA/styles/fake_styles.safetensors`" in sbv2_card
         assert "`ZA/speakers/fake_spk.safetensors`" in sbv2_card
         assert "`ZB/styles/fake_styles.safetensors`" in sbv2_card
@@ -440,11 +461,12 @@ class TestSbv2Derivation:
         )
 
     def test_it_prints_the_presentation_fields_the_manifest_carries(self, sbv2_card: str) -> None:
-        """表示欄はカードにも同じ文字列で出る（ADR 0075 決定 5）。"""
-        assert "**偽のラベル** — 偽の説明。" in sbv2_card
+        """The display fields appear in the card with the same strings (ADR 0075 decision 5)."""
+        assert "**Fake label** — A fake description." in sbv2_card
 
     def test_it_explains_the_abbreviation_the_seat_names_use(self, sbv2_card: str) -> None:
-        """略称の対応は**必ず**出す（ADR 0074 決定 4）— `bert4` がどの部品の話か読めるように。"""
+        """The abbreviation mapping is **always** printed (ADR 0074 decision 4) — so it is readable
+        which component `bert4` is about."""
         assert "In a quant name, `bert` is the `text_encoder` component." in sbv2_card
 
     def test_it_takes_every_default_knob_from_the_pipeline_config(self, sbv2_card: str) -> None:
@@ -460,17 +482,18 @@ class TestSbv2Derivation:
             assert line in sbv2_card, line
 
     def test_it_does_not_invent_knobs_the_manifest_left_out(self, sbv2_card: str) -> None:
-        """既定の一覧は manifest の `defaults` そのもの（キーの写しを持たない）。"""
+        """The list of defaults is the manifest's `defaults` itself (no copy of the keys)."""
         _, _, second = sbv2_card.partition("## Model: ZB")
         assert "- **speaker**: `YY1`" in second
         assert "noiseScaleW" not in second
 
     def test_the_usage_snippet_follows_the_manifest(self, sbv2_card: str) -> None:
-        """スニペットの model / quant / スタイルも manifest 由来（存在しない綴りを勧めない）。
+        """The snippet's model / quant / style also come from the manifest (it does not recommend a
+        spelling that does not exist).
 
-        既定は綴られたうえで**コメントアウト**（裁定 2026-08-12 の「コメントを外すだけ」形）
-        で、選べる値は同じ行に manifest から列挙される（声 / スタイル / quant が増えれば
-        列挙も追従する）。
+        The default is spelled out and **commented out** (the "just uncomment it" form of the
+        ruling of 2026-08-12), and the selectable values are listed on the same line from the
+        manifest (when voices / styles / quants are added, the list follows).
         """
         assert '  // model: "ZA", // default — available: ZA / ZB' in sbv2_card
         assert '  // quant: "i8-a8", // default — available: f16 / i8 / i8-a8' in sbv2_card
@@ -480,7 +503,8 @@ class TestSbv2Derivation:
     def test_the_usage_snippet_carries_every_delivery_knob_the_manifest_defines(
         self, sbv2_card: str
     ) -> None:
-        """`generate()` の残りの optional も既定つきでコメント併記する（値は manifest 由来）。"""
+        """The remaining optionals of `generate()` are also written as comments with their defaults
+        (the values come from the manifest)."""
         for line in (
             "  // styleWeight: 0.75, //",
             "  // lengthScale: 1.5, //",
@@ -491,9 +515,10 @@ class TestSbv2Derivation:
             assert line in sbv2_card, line
 
     def test_the_usage_snippet_skips_a_knob_the_manifest_left_out(self) -> None:
-        """`defaults` に無いノブは綴らない（`### Defaults` と同じ判断 — 値を捏造しない）。"""
+        """A knob not in `defaults` is not spelled (the same judgement as `### Defaults` — no
+        invented values)."""
         manifest = _sbv2_manifest()
-        manifest["defaultModel"] = "ZB"  # noiseScaleW 等を持たないモデル
+        manifest["defaultModel"] = "ZB"  # a model without noiseScaleW and the like
         usage = render_sbv2_model_card(
             manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS
         ).partition("## Usage")[2]
@@ -531,7 +556,8 @@ class TestSbv2PipelineGate:
             render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
 
     def test_the_two_templates_do_not_answer_for_each_other(self) -> None:
-        """テンプレートは pipeline 固有 — 取り違えると「表は合うが説明が別モデル」になる。"""
+        """A template is pipeline-specific — a mix-up gives "the table matches but the description
+        is of another model"."""
         with pytest.raises(ValueError, match=SBV2_SUPPORTED_PIPELINE):
             render_siglip2_model_card(_sbv2_manifest(), REPO)
         with pytest.raises(ValueError, match=SIGLIP2_SUPPORTED_PIPELINE):
@@ -540,7 +566,7 @@ class TestSbv2PipelineGate:
             )
 
 
-# ---- 帰属プロファイル（fn / jvnv）--------------------------------------
+# ---- Attribution profiles (fn / jvnv) --------------------------------------
 
 
 def _profile_card(profile: Sbv2CardProfile) -> str:
@@ -548,10 +574,12 @@ def _profile_card(profile: Sbv2CardProfile) -> str:
 
 
 class TestSbv2CardProfiles:
-    """帰属（出所・ライセンス・引用）だけがファミリーごとに違う席であることを見る節。
+    """The section that checks that attribution (source, license, citation) is the only part that
+    differs per family.
 
-    誤帰属は表も使い方も正しいまま起きるので、配ってからでないと誰も気づけない — 「別の
-    ファミリーの事実が 1 語も混ざっていない」ことを両向きに観測する。
+    A wrong attribution happens while the tables and the usage stay correct, so nobody can notice
+    until it has been shipped — it observes in both directions that "not a single word of the other
+    family's facts is mixed in".
     """
 
     def test_it_offers_exactly_the_families_it_can_attribute(self) -> None:
@@ -560,13 +588,15 @@ class TestSbv2CardProfiles:
         assert SBV2_CARD_PROFILES["jvnv"] is SBV2_JVNV_PROFILE
 
     def test_it_refuses_to_draw_a_card_without_naming_the_family(self) -> None:
-        """既定のプロファイルを持たない — 省略で描けると誤帰属が沈黙で再発する。"""
+        """There is no default profile — if it could be rendered by omission, wrong attribution
+        would silently come back."""
         with pytest.raises(TypeError):
             render_sbv2_model_card(_sbv2_manifest(), REPO)  # type: ignore[call-arg]
 
     @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
     def test_every_profile_keeps_the_same_skeleton(self, name: str) -> None:
-        """プロファイルが動かすのは frontmatter と帰属節だけ（節の並びも表も同じ形）。"""
+        """A profile moves only the frontmatter and the attribution section (the section order and
+        the tables keep the same shape)."""
         card = _profile_card(SBV2_CARD_PROFILES[name])
         assert [line for line in card.splitlines() if line.startswith("## ")] == [
             "## What is this",
@@ -585,14 +615,15 @@ class TestSbv2CardProfiles:
         assert f"\n# {SBV2_CARD_PROFILES[name].title}\n" in card
 
     def test_the_jvnv_frontmatter_declares_the_license_hf_can_resolve(self) -> None:
-        """SPDX 標準タグなので `license_name` / `license_link` は**並べない**。"""
+        """A standard SPDX tag, so `license_name` / `license_link` are **not listed**."""
         head = _profile_card(SBV2_JVNV_PROFILE).split("---")[1]
         assert "license: cc-by-sa-4.0" in head
         assert "license_name" not in head
         assert "license_link" not in head
 
     def test_the_jvnv_frontmatter_lists_both_redistributed_upstreams(self) -> None:
-        """再配布しているのは声と text encoder の 2 本 — 関係はどちらも `quantized`。"""
+        """What is redistributed is the voice and the text encoder — both with the relation
+        `quantized`."""
         head = _profile_card(SBV2_JVNV_PROFILE).split("---")[1]
         assert "base_model:\n" in head
         assert "  - litagin/style_bert_vits2_jvnv\n" in head
@@ -606,7 +637,8 @@ class TestSbv2CardProfiles:
         assert "`version: 2.0-JP-Extra`" in card
 
     def test_the_jvnv_attribution_carries_what_cc_by_sa_requires(self) -> None:
-        """BY = クレジット・出典・ライセンス URL・**加えた改変**の表示 / SA = 同一ライセンス。"""
+        """BY = credit, source, license URL and a notice of **the changes made** / SA = the same
+        license."""
         card = _profile_card(SBV2_JVNV_PROFILE)
         for required in (
             "https://creativecommons.org/licenses/by-sa/4.0/",
@@ -636,7 +668,8 @@ class TestSbv2CardProfiles:
             assert required in card, required
 
     def test_neither_family_carries_the_others_attribution(self) -> None:
-        """片方の事実がもう片方へ 1 語も漏れない（誤帰属の観測はこの両向きが本体）。"""
+        """Not a single word of one family's facts leaks into the other (observing this in both
+        directions is the core of catching wrong attribution)."""
         fn = _profile_card(SBV2_FN_PROFILE)
         jvnv = _profile_card(SBV2_JVNV_PROFILE)
         for leaked in ("jvnv", "litagin", "2.0-JP-Extra", "CC BY-SA 4.0", "arxiv"):
@@ -662,17 +695,18 @@ class TestSbv2CardProfiles:
 
 
 class TestSbv2EntryPoint:
-    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+    """The load entry point the card points to — only `fromPretrained`."""
 
     @pytest.mark.parametrize("name", sorted(SBV2_CARD_PROFILES))
     def test_it_does_not_advertise_the_local_asset_entry_point(self, name: str) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）。
+        """`fromAssets` is not advertised (ruling of 2026-08-29).
 
-        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
-        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
-        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
-        見るのは、Usage ごと消えても通る門にしないため。Usage 節はプロファイル共有なので、
-        片方のプロファイルにだけ案内が生えることも含めて全プロファイルで見る。
+        The split distribution can be read too (X2-101), but that surface is for local debugging
+        and assumes you hold the bytes yourself; the ordinary entry point for a reader using HF is
+        `fromPretrained`. Listing both would leave the reader to decide "which one to use".
+        `fromPretrained` is checked as well so that this does not become a gate that passes even
+        when the whole Usage disappears. The Usage section is shared by the profiles, so every
+        profile is checked, including the case of advice appearing in only one profile.
         """
         card = _profile_card(SBV2_CARD_PROFILES[name])
         assert "fromAssets" not in card

@@ -1,4 +1,5 @@
-"""固定 QAT の別ファミリ配布。グラフと PLE の共通門は Gemma から再利用する。"""
+"""The separate-family distribution of the fixed QAT. The shared graph and PLE checks are reused
+from Gemma."""
 
 from __future__ import annotations
 
@@ -62,11 +63,12 @@ from .config import (
 
 
 def assert_qat_graph(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> None:
-    """通常 Gemma や SRQ の落ちた QAT を同じ配布として通さない。
+    """Do not let the regular Gemma, or a QAT that lost its SRQ, through as this distribution.
 
-    `layouts` はテンソルキー → 格納の layout（{@link _shared.container_read.read_layouts}）—
-    IR v2 のグラフ記述は格納を持たない（正本は束縛表）ので、固定格納の判定はそちらから引く。
-    IR v2 では initializer の名前がテンソルキーそのものなので、両者は同じ鍵で引ける。
+    `layouts` is tensor key → storage layout ({@link _shared.container_read.read_layouts}) — the
+    IR v2 graph description has no storage (the source of truth is the binding table), so the
+    fixed-storage decision is taken from there. In IR v2 an initializer's name is the tensor key
+    itself, so both are looked up by the same key.
     """
     nodes, initializers = graph["nodes"], graph["initializers"]
     producers = {value: node for node in nodes for value in node["outs"]}
@@ -78,10 +80,10 @@ def assert_qat_graph(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> No
         node for node in nodes if node["op"] == "embedding" and node["ins"][1] == "input_ids"
     ]
     if len(embeddings) != 1:
-        raise DistError("QAT token embedding が1本でない")
+        raise DistError("the QAT graph does not have exactly one token embedding")
     token_weight = embeddings[0]["ins"][0]
     if token_weight not in initializers or layouts.get(token_weight) != "i2":
-        raise DistError("QAT token embedding は固定 i2 が必要")
+        raise DistError("the QAT token embedding must be fixed i2")
     head_count = 0
     ordinary_count = 0
     for node in nodes:
@@ -91,14 +93,18 @@ def assert_qat_graph(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> No
         dtype = layouts.get(key, "f32") if key in initializers else "f32"
         if dtype == "f32":
             if key != "model.model.per_layer_model_projection.weight":
-                raise DistError("QAT の固定量子化でない linear が許可した projection 以外に在る")
+                raise DistError(
+                    "the QAT graph has a linear without fixed quantization other than the allowed"
+                    " projection"
+                )
             ordinary_count += 1
             continue
         if dtype not in ("i2", "i4", "i8"):
-            raise DistError(f"QAT linear の固定格納に未対応: {dtype}")
-        # 共有 head だけ前後の SRQ を省略してよい — 上流 lm_head の SRQ scale は入出力とも 0
-        # （未較正 = 恒等）で、recipe は scale=0 の SRQ を IR に挟まない（`checkpoint.py` の
-        # `TraceLinear`）。他の量子化 linear の scale は全て正なので、前後とも必須のまま。
+            raise DistError(f"unsupported fixed storage of a QAT linear: {dtype}")
+        # Only the shared head may omit the SRQ on either side — upstream lm_head's SRQ scales are
+        # 0 for both input and output (uncalibrated = identity), and the recipe does not put an
+        # SRQ with scale=0 into the IR (`TraceLinear` in `checkpoint.py`). Every other quantized
+        # linear has positive scales, so both sides stay required.
         shared_head = node["ins"][1] == token_weight
         head_count += shared_head
         if shared_head:
@@ -110,17 +116,18 @@ def assert_qat_graph(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> No
             or len(after) != 1
             or after[0]["op"] != "static_quantize"
         ):
-            raise DistError("QAT linear の前後に固定 SRQ が必要")
+            raise DistError("a QAT linear needs a fixed SRQ before and after it")
     if head_count != 1 or ordinary_count != 1:
-        raise DistError("QAT の共有 head または非量子化 projection の本数が違う")
+        raise DistError("wrong number of QAT shared heads or unquantized projections")
 
 
-#: 固定格納の dtype（`reference.json` の `storageCounts` の鍵でもある）。
+#: The fixed-storage dtypes (also the keys of `storageCounts` in `reference.json`).
 FIXED_STORAGE_DTYPES: tuple[str, ...] = ("i2", "i4", "i8")
 
 
 def fixed_storage_counts(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> dict[str, int]:
-    """束縛表の initializer を固定格納の語彙別に数える（`reference.json` の突合相手）。"""
+    """Count the binding table's initializers per fixed-storage dtype (what `reference.json` is
+    compared against)."""
     counts = dict.fromkeys(FIXED_STORAGE_DTYPES, 0)
     for key in graph["initializers"]:
         dtype = layouts.get(key)
@@ -129,26 +136,30 @@ def fixed_storage_counts(graph: Mapping[str, Any], layouts: Mapping[str, str]) -
     return counts
 
 
-#: 系列ごとの既定 quant。実測で検収した席だけを既定にするので導出できず、宣言が要る
-#: （ADR 0104）。`qat_plan` の中の分岐に書くと `qat_quants` のキーと二重管理になり、
-#: 片方だけ書き換えると既定が存在しない quant を指すため、純データとして 1 箇所に置く。
-#: E2B / E4B とも `i4-fast`（2026-09-26・Arc B570 の flag-bench で単体フラグが全て速度低下
-#: なし → 全部入り — ADR 0104 追記 2026-09-26）。
+#: The default quant per series. Only presets accepted by measurement become the default, so it
+#: cannot be derived and must be declared (ADR 0104). Written as a branch inside `qat_plan` it
+#: would be maintained twice alongside the keys of `qat_quants`, and changing only one would make
+#: the default point at a quant that does not exist, so it lives in one place as plain data.
+#: Both E2B / E4B use `i4-fast` (2026-09-26; on the Arc B570 flag-bench no single flag slowed
+#: down → all of them — ADR 0104 addendum 2026-09-26).
 QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4-fast"}
 
-#: `i4-fast` の説明に足す実測の 1 文（GPU decode ms/step の `i4` 比）。E2B は従来どおり
-#: 実測を説明に書かない。E4B は初めて席を持つので、既定にした根拠の数字を 1 つだけ添える
-#: （表示欄の上限 200 字の内側）。
+#: The one measured sentence added to the description of `i4-fast` (GPU decode ms/step relative
+#: to `i4`). E2B, as before, puts no measurement in its description. E4B has the preset for the
+#: first time, so a single number backing the default is added (within the 200-character limit
+#: of the display field).
 QAT_FAST_MEASURED_NOTE: Mapping[str, str] = {"e2b": "", "e4b": " E4B decode time -42% (B570)."}
 
 
 def qat_quants(model: str) -> Mapping[str, Any]:
-    """参照quantを保持し、同じ重みに並列・融合の定義を足す（ADR 0104）。
+    """Keep the reference quant and add parallel / fused definitions over the same weights (ADR
+    0104).
 
-    `i4` は `session` を空に保つ = GEMV も attention も runtime の参照経路。`i4-gemvpar` は
-    GEMV と attention の並列（融合なし）、`i4-fast` は単体で速度低下の無かったフラグの全部入りで、
-    attention は `parallel` より GPU decode が速かった `"parallel-fused"`（ADR 0104 追記
-    2026-09-26）。E2B と E4B は同じ 3 席・同じ宣言を持つ。
+    `i4` keeps `session` empty = both GEMV and attention take the runtime's reference path.
+    `i4-gemvpar` parallelizes GEMV and attention (no fusion); `i4-fast` has every flag that
+    showed no slowdown on its own, with attention `"parallel-fused"`, whose GPU decode was faster
+    than `parallel` (ADR 0104 addendum 2026-09-26). E2B and E4B have the same three presets with
+    the same declarations.
     """
     checkpoint_name(model)
     quant = {
@@ -187,29 +198,34 @@ def qat_quants(model: str) -> Mapping[str, Any]:
     }
 
 
-#: 旧 sidecar 世代の記録が名乗る PLE の本数 → 容器の資産の block 本数（schema 3 の繰り上げ）。
+#: The PLE count a record of the old sidecar generation claims → the block count of the
+#: container's asset (the schema 3 promotion).
 REFERENCE_SHARDS_FIELD = "pleShards"
 REFERENCE_BLOCKS_FIELD = "pleBlocks"
 
 
 def assert_reference_generation(reference: Mapping[str, Any], where: Path) -> None:
-    """検収記録が**今の世代**であること（版の不一致は欄の不在で綴る）。
+    """The acceptance record is of **the current generation** (a version mismatch is spelled
+    out as the missing field).
 
-    MUST: 旧世代を名指しで落とす — schema を据え置いたまま欄名だけ変えると、古い記録は版の
-    門を素通りして「`pleBlocks`（= None）が現物と違う」でだけ落ち、実際に足りないのが
-    **欄そのもの**であることがどこにも出ない。
+    MUST: name the old generation when failing — if only the field name changed while the schema
+    stayed, an old record would pass the version check and fail only as "`pleBlocks` (= None)
+    differs from the actual one", and nowhere would it say that what is really missing is **the
+    field itself**.
     """
     schema = reference.get("schema")
     if schema == REFERENCE_SCHEMA:
         return
     if REFERENCE_SHARDS_FIELD in reference:
         raise DistError(
-            f"{where}: 旧 sidecar 世代の検収記録（schema {schema} —"
-            f" `{REFERENCE_SHARDS_FIELD}` を持ち `{REFERENCE_BLOCKS_FIELD}` を持たない）。"
-            " PLE は容器の資産へ畳まれ、数える単位が shard から block へ変わった"
-            " — 系列を移行（`migrate_series`）するか再 export する"
+            f"{where}: an acceptance record of the old sidecar generation (schema {schema} —"
+            f" it has `{REFERENCE_SHARDS_FIELD}` and no `{REFERENCE_BLOCKS_FIELD}`)."
+            " PLE is now folded into the container's asset and the counting unit changed from"
+            " shard to block — migrate the series (`migrate_series`) or export it again"
         )
-    raise DistError(f"{where}: QAT reference の schema が {schema}（期待 {REFERENCE_SCHEMA}）")
+    raise DistError(
+        f"{where}: the QAT reference's schema is {schema} (expected {REFERENCE_SCHEMA})"
+    )
 
 
 def assert_pinned_source(reference: Mapping[str, Any], model: str, where: Path) -> None:
@@ -240,7 +256,8 @@ def assert_pinned_source(reference: Mapping[str, Any], model: str, where: Path) 
 
 
 def qat_plan(series_dir: Path, model: str) -> ModelPlan:
-    """検査した1系列から配布計画を作る。元チェックポイントの再ダウンロードは不要。"""
+    """Build the distribution plan from one checked series. The original checkpoint need not be
+    downloaded again."""
     source = series_dir / series_name(model)
     reference = json.loads((source / "reference.json").read_text())
     assert_reference_generation(reference, source / "reference.json")
@@ -250,7 +267,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         or reference.get("maxChunkLength") != MAX_CHUNK_LENGTH
         or reference.get("maxSelectedRows") != MAX_SELECTED_ROWS
     ):
-        raise DistError("QAT reference の family/model/trace範囲が合わない")
+        raise DistError("the QAT reference's family/model/trace range does not match")
     assert_pinned_source(reference, model, source / "reference.json")
     container = source / "model.krm"
     index = gemma4_ple_index(container, storage=f"i{PLE_BITS[model]}")
@@ -260,7 +277,8 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     graph = ir_graph(container)
     layouts = read_layouts(container)
     assert_qat_graph(graph, layouts)
-    # 変換時の検証結果は「何本を照合したか」で突き合わせる（常に True のフラグは門にならない）。
+    # The conversion-time verification is compared by "how many were checked" (a flag that is
+    # always True is no check).
     counts = fixed_storage_counts(graph, layouts)
     actual = {
         "fixedWeights": sum(counts.values()),
@@ -274,9 +292,10 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     }
     if differing:
         raise DistError(
-            "QAT reference の固定重み本数・格納内訳・PLE block 本数が現物と違う: "
+            "the QAT reference's fixed-weight count / storage breakdown / PLE block count differ"
+            " from the actual ones: "
             + " / ".join(
-                f"{field} 記録 {recorded} ≠ 現物 {value}"
+                f"{field} recorded {recorded} ≠ actual {value}"
                 for field, (recorded, value) in sorted(differing.items())
             )
         )
@@ -286,7 +305,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     vocab = gemma4_vocab_size(graph, container)
     assert_gemma4_graph(graph, container, index, rope, gemma4_hidden_size(config, where))
     if index["tokens"] != vocab:
-        raise DistError("QAT PLE とグラフの語彙数が違う")
+        raise DistError("the vocabulary sizes of the QAT PLE and the graph differ")
     assert_gemma4_ple_assets(container, index)
     assert_gemma4_tokenizer(source / "tokenizer.json", vocab)
     artifacts = {
@@ -298,14 +317,16 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         name=model,
         pipeline="gemma4-qat/1",
         artifacts=artifacts,
-        # 部品名は通常 Gemma と同じ 1 語（書き手 `gemma4_qat/export.py` も同じ定数で
-        # 容器のグラフを名乗る — container-v1 §2.1）。
+        # The component name is the same single word as the regular Gemma's (the writer
+        # `gemma4_qat/export.py` names the container's graph with the same constant —
+        # container-v1 §2.1).
         weights={GEMMA4_ROLE: {"i4": WeightFiles(GEMMA4_ROLE)}},
         assets=GEMMA4_ASSETS,
         quants=quant_modes,
         default_quant=QAT_DEFAULT_QUANT[model],
-        # 3 式（chunkLength ≤ maxChunkLength / chunkLength ≤ capacity / capacity ≤ maxPosition）
-        # の検査は通常 Gemma と同じ 1 実装を通す。trace 上限は provenance に記録した値を使う。
+        # The three inequalities (chunkLength ≤ maxChunkLength / chunkLength ≤ capacity /
+        # capacity ≤ maxPosition) are checked by the same single implementation as the regular
+        # Gemma's. The trace bound is the value recorded in the provenance.
         pipeline_config=gemma4_pipeline_config(
             gemma4_max_position(config, where),
             rope,
@@ -381,7 +402,8 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
 def render_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
-    """数値・モデル一覧・量子化表を manifest から描く。固定値保持を再量子化と呼ばない。"""
+    """Draw the numbers, the model list and the quantization table from the manifest. Keeping the
+    fixed values is never called requantization."""
     require_pipeline(manifest, "gemma4-qat/1")
     # Every redistributed upstream: per model its base model (the regular `-it` repository its
     # tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
@@ -411,9 +433,7 @@ def render_card(
     )
     sections = [
         frontmatter(metadata),
-        introduction(
-            "Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)
-        ),
+        introduction("Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)),
         [
             "Experimental text-only conversion of the official mobile QAT checkpoints.",
             "Fixed integers and scales are preserved; activations use "

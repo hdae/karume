@@ -1,12 +1,14 @@
-"""anima.patch の各書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
+"""Regression tests that each rewrite of anima.patch is equivalent to the original implementation
+(the part that needs no real weights).
 
-実モデルでの端から端までの同値検証は `anima/export.py --verify`（手動・実重み）。ここでは
-diffusers があれば回る純関数 / 小モジュールレベルの同値だけを固定する。`--group anima` 無しの
-pytest 実行では skip される。
+End-to-end equivalence on the real model is checked by `anima/export.py --verify` (manual, real
+weights). Here only the equivalences at the level of pure functions / small modules that run
+whenever diffusers is present are pinned. A pytest run without `--group anima` skips them.
 
-MUST: 「差が小さい」ではなく**書き換えごとに主張の強さを分ける**。データ移動だけの書き換え
-（upsample）はビット一致、演算順序が変わる書き換え（conv3d → conv2d / チャネル L2）は f64 で
-桁が落ちること（= 丸めであって意味の違いでないこと）まで見る。
+MUST: rather than "the difference is small", **grade the strength of the claim per rewrite**.
+Rewrites that only move data (upsample) are bit-identical; rewrites that change the order of
+operations (conv3d → conv2d / channel L2) are checked down to the error dropping by orders of
+magnitude in f64 (= it is rounding, not a difference in meaning).
 """
 
 from __future__ import annotations
@@ -28,10 +30,10 @@ class TestCausalConv3dToConv2d:
         [((3, 3, 3), (1, 1, 1)), ((1, 1, 1), (0, 0, 0)), ((3, 1, 1), (1, 0, 0))],
     )
     def test_t1_causal_conv3d_matches_the_flattened_conv2d(self, kernel, padding) -> None:
-        """T=1 の因果 conv3d は「重みの時間方向 最終スライスによる conv2d」と一致する。
+        """A causal conv3d with T=1 equals "a conv2d with the last temporal slice of the weight".
 
-        f64 で測るのは、残差が「縮約順序の丸め差」か「本当の不一致」かを分けるため
-        （前者なら f64 で桁が落ちる）。
+        It is measured in f64 to tell whether the residual is "a rounding difference of the
+        reduction order" or "a real mismatch" (the former drops by orders of magnitude in f64).
         """
         torch.manual_seed(0)
         conv = qwenimage.QwenImageCausalConv3d(3, 4, kernel, padding=padding).to(torch.float64)
@@ -45,28 +47,33 @@ class TestCausalConv3dToConv2d:
         assert float((got - reference.squeeze(2)).abs().max()) < 1e-14
 
     def test_a_kernel_taller_than_the_causal_padding_is_rejected(self) -> None:
-        """時間方向の因果パディングが足りない形（downsample3d の time_conv）は落とす。"""
+        """A shape whose temporal causal padding is too small (downsample3d's time_conv) fails."""
         conv = qwenimage.QwenImageCausalConv3d(3, 3, (3, 1, 1), stride=(2, 1, 1), padding=(0, 0, 0))
 
         with pytest.raises(NotImplementedError, match="因果パディングが等価条件を外れる"):
             patch_anima._causal_conv3d_to_conv2d(conv)
 
     def test_padding_beyond_the_causal_amount_is_rejected(self) -> None:
-        """パディング過多も落とす — 先頭のゼロにも窓が当たり、出力が 2 フレームになる。
+        """Excess padding fails too — the window also covers the leading zeros and the output
+        has two frames.
 
-        「不足だけ」を見る片側検査はこの形を素通りさせ、時間長 2 の出力の 1 枚目だけを
-        conv2d の出力として黙って採ることになる（`2·pad_t=2, kt=2` で出力時間長 2）。
+        A one-sided check that looks only for "too little" lets this shape through and silently
+        takes only the first frame of a length-2 output as the conv2d output (`2·pad_t=2, kt=2`
+        gives an output length of 2).
         """
         conv = qwenimage.QwenImageCausalConv3d(3, 3, (2, 1, 1), padding=(1, 0, 0))
         with torch.no_grad():
             reference = conv(torch.randn(1, 3, 1, 4, 4))
-        assert reference.shape[2] == 2, "前提: 等価条件を外れた形は時間長が 1 にならない"
+        assert reference.shape[2] == 2, (
+            "premise: a shape outside the equivalence condition does not have length 1"
+        )
 
         with pytest.raises(NotImplementedError, match="因果パディングが等価条件を外れる"):
             patch_anima._causal_conv3d_to_conv2d(conv)
 
     def test_a_time_stride_other_than_one_is_rejected(self) -> None:
-        """時間方向を間引く形は「重みの最終スライス」等価の主張が別物になる。"""
+        """For a shape that subsamples in time, the "last slice of the weight" equivalence is a
+        different claim."""
         conv = qwenimage.QwenImageCausalConv3d(3, 3, (3, 1, 1), stride=(2, 1, 1), padding=(1, 0, 0))
 
         with pytest.raises(NotImplementedError, match="時間 stride"):
@@ -75,7 +82,8 @@ class TestCausalConv3dToConv2d:
 
 class TestUpsample:
     def test_the_expand_form_matches_nearest_exact_bit_for_bit(self) -> None:
-        """×2 アップサンプルはデータ移動だけなので **ビット一致**（丸めの余地が無い）。"""
+        """×2 upsampling is only data movement, so it is **bit-identical** (no room for
+        rounding)."""
         torch.manual_seed(0)
         module = qwenimage.QwenImageUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact")
         x = torch.randn(1, 3, 4, 5)
@@ -86,14 +94,15 @@ class TestUpsample:
         assert torch.equal(got, reference)
 
     def test_a_non_integer_scale_is_rejected(self) -> None:
-        """整数倍でない nearest-exact は添字の写像が複製と一致しない（黙って近似しない）。"""
+        """For a non-integer nearest-exact factor the index mapping does not match duplication (no
+        silent approximation)."""
         module = qwenimage.QwenImageUpsample(scale_factor=(1.5, 1.5), mode="nearest-exact")
 
-        with pytest.raises(NotImplementedError, match="×2 以外"):
+        with pytest.raises(NotImplementedError, match="other than ×2"):
             patch_anima._upsample_forward(module, torch.randn(1, 3, 4, 4))
 
     def test_a_scalar_scale_factor_is_accepted(self) -> None:
-        """スカラ表記の `scale_factor` も同じ複製になる（表記の吸収はここで済ませる）。"""
+        """A scalar `scale_factor` gives the same duplication (the notation is absorbed here)."""
         torch.manual_seed(0)
         module = qwenimage.QwenImageUpsample(scale_factor=2, mode="nearest-exact")
         x = torch.randn(1, 3, 4, 5)
@@ -103,18 +112,21 @@ class TestUpsample:
         assert torch.equal(got, functional.interpolate(x, scale_factor=2.0, mode="nearest-exact"))
 
     def test_another_mode_is_rejected(self) -> None:
-        """写像が違う `nearest` を素通りさせない（×2 は同じでも出力添字の写り方が別）。"""
+        """`nearest`, a different mapping, is not let through (the same ×2, but the output index
+        maps differently)."""
         module = qwenimage.QwenImageUpsample(scale_factor=(2.0, 2.0), mode="nearest")
 
-        with pytest.raises(NotImplementedError, match="nearest-exact 以外"):
+        with pytest.raises(NotImplementedError, match="other than nearest-exact"):
             patch_anima._upsample_forward(module, torch.randn(1, 3, 4, 4))
 
 
 class TestChannelL2:
     def test_it_matches_f_normalize(self) -> None:
-        """チャネル方向 L2 は permute + 最終次元 sum で表しても `F.normalize` と一致する。
+        """Channel-wise L2 expressed as permute + a sum over the last dimension still matches
+        `F.normalize`.
 
-        `clamp_min(eps) → 除算` の順序も原実装のまま（`+eps` に置き換えない）。
+        The `clamp_min(eps) → divide` order is the original implementation's too (not replaced by
+        `+eps`).
         """
         torch.manual_seed(0)
         x = torch.randn(1, 6, 4, 5, dtype=torch.float64)
@@ -124,7 +136,8 @@ class TestChannelL2:
         assert float((got - functional.normalize(x, dim=1)).abs().max()) < 1e-14
 
     def test_a_zero_column_keeps_the_epsilon_floor(self) -> None:
-        """ゼロ入力でも 0/0 にならない（`clamp_min` が効いている）ことを故障注入で確認する。"""
+        """Fault injection confirms that a zero input does not become 0/0 (`clamp_min` is in
+        effect)."""
         zeros = torch.zeros(1, 3, 2, 2)
 
         got = l2_normalize(zeros, dim=1)
@@ -135,7 +148,8 @@ class TestChannelL2:
 
 class TestRmsNormForward:
     def test_the_rank4_form_matches_the_rank5_original(self) -> None:
-        """gamma を (1,C,1,1) へ整形した rank4 版が原実装（rank5 入力）と一致する。"""
+        """The rank-4 version with gamma reshaped to (1,C,1,1) matches the original (rank-5
+        input)."""
         torch.manual_seed(0)
         module = qwenimage.QwenImageRMS_norm(6, images=False).to(torch.float64)
         with torch.no_grad():
@@ -151,7 +165,7 @@ class TestRmsNormForward:
         assert float((got - reference).abs().max()) < 1e-14
 
     def test_a_learned_bias_is_rejected(self) -> None:
-        """原実装の `+ self.bias` を落とせるのは bias が Python の 0.0 のときだけ。"""
+        """The original's `+ self.bias` can be dropped only when bias is Python's 0.0."""
         module = qwenimage.QwenImageRMS_norm(4, bias=True)
         module.gamma = nn.Parameter(module.gamma.detach().reshape(1, -1, 1, 1))
 
@@ -161,18 +175,20 @@ class TestRmsNormForward:
 
 class TestResample:
     def test_a_feat_cache_is_rejected(self) -> None:
-        """`feat_cache` は T=1 では参照されない — 渡されたら黙って捨てず落とす。"""
+        """`feat_cache` is never read with T=1 — when one is passed it fails rather than being
+        silently dropped."""
         module = qwenimage.QwenImageResample(4, mode="none")
 
         with pytest.raises(NotImplementedError, match="feat_cache"):
             patch_anima._resample_forward(module, torch.randn(1, 4, 2, 2), feat_cache=[None])
 
 
-# ---- #21 波 T2: DiT の S 化（トークン形） -----------------------------------
+# ---- #21 iteration T2: the DiT over S (token form) ---------------------------
 
-#: 合成 DiT の形。**patch の高さ / 幅 / チャネル数を全部違う値にする** — 軸の取り違えは
-#: 「実測形では対合になって偶然一致する」クラスの誤りなので（ACTIVE_DESIGN の Pitfalls）、
-#: 巡回長 3 以上の並べ替えになる形でしか捕まらない。
+#: The synthetic DiT's shape. **The patch height / width and the channel count all differ** — an
+#: axis mix-up is the class of error that "becomes an involution on the measured shapes and
+#: matches by accident" (ACTIVE_DESIGN's Pitfalls), so it is only caught by shapes that make it a
+#: permutation with a cycle of length 3 or more.
 TINY_DIT = {
     "in_channels": 3,
     "out_channels": 3,
@@ -188,7 +204,7 @@ TINY_DIT = {
     "concat_padding_mask": True,
     "extra_pos_embed_type": None,
 }
-#: latent の形（H / W も違う値にする — 正方だと h/w の取り違えが転置で隠れる）。
+#: The latent shape (H / W differ too — with a square an h/w mix-up hides as a transpose).
 TINY_LATENT = (8, 12)
 
 
@@ -210,14 +226,16 @@ def _tiny_inputs(model):
 
 
 class TestDitTokens:
-    """S 形ラッパ = 静的ラッパの入口 / 出口だけをホストへ出した形（#21 波 T2）。"""
+    """The S-form wrapper = the static wrapper with only its entry / exit moved to the host (#21
+    iteration T2)."""
 
     def test_the_token_form_composes_back_to_the_static_wrapper_bit_exactly(self) -> None:
-        """`unpatchify ∘ S 形 ∘ patchify` は静的ラッパと**ビット同一**。
+        """`unpatchify ∘ S form ∘ patchify` is **bit-identical** to the static wrapper.
 
-        両者は同じ演算列を同じ順で通る（差は「patchify / rope をどちら側で作るか」だけ）
-        ので、丸め差すら出ないのが期待値。ここが緩むと実 GPU の主門
-        （`packages/e2e/tests/e2e_anima_test.ts` の PNG sha256）も緩む。
+        Both go through the same operations in the same order (the only difference is "which side
+        builds patchify / rope"), so not even a rounding difference is expected. If this loosens,
+        the main check on the real GPU (the PNG sha256 in `packages/e2e/tests/e2e_anima_test.ts`)
+        loosens too.
         """
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)
@@ -239,7 +257,8 @@ class TestDitTokens:
         assert torch.equal(got, expected)
 
     def test_patchify_matches_the_upstream_patch_embed_chain(self) -> None:
-        """patchify の並べ替えは上流 `CosmosPatchEmbed` の proj 前段と一致する（独立オラクル）。"""
+        """patchify's reordering matches the stage before proj in upstream's `CosmosPatchEmbed`
+        (an independent oracle)."""
         from diffusers.models.transformers.transformer_cosmos import CosmosPatchEmbed
 
         model = _tiny_dit()
@@ -257,10 +276,12 @@ class TestDitTokens:
         assert torch.equal(got, reference)
 
     def test_unpatchify_matches_an_index_level_oracle(self) -> None:
-        """unpatchify の並べ替えを**添字の式**で独立に置く（view 連鎖の写しではない）。
+        """State unpatchify's reordering independently **as an index formula** (not a copy of the
+        view chain).
 
-        最終次元の並びは `(ph, pw, pt, C)`（patchify 側の `(C, pt, ph, pw)` と**別**）で、
-        トークン添字は `(f·H' + h)·W' + w`。逆順に「直した」実装はここで赤くなる。
+        The last dimension is ordered `(ph, pw, pt, C)` (**different** from patchify's
+        `(C, pt, ph, pw)`), and the token index is `(f·H' + h)·W' + w`. An implementation "fixed"
+        to the reverse order goes red here.
         """
         height, width = TINY_LATENT
         patch_t, patch_h, patch_w = (1, 2, 3)
@@ -285,10 +306,11 @@ class TestDitTokens:
                             )
 
     def test_the_host_base_tables_rebuild_the_full_rope_table_bit_exactly(self) -> None:
-        """軸別素表からの組み立てが `model.rope` の表と**ビット同一**（ホスト実装の正本）。
+        """Assembling from the per-axis base tables is **bit-identical** to `model.rope`'s table
+        (the source of truth of the host implementation).
 
-        torch の f32 `cos` / `sin` は正しい丸めと 1 ulp ずれることがあり、JS の `Math.cos`
-        では再現できない。素表を焼くのはそのため（`dit_rope_base_tables` の doc）。
+        torch's f32 `cos` / `sin` can be 1 ulp off correct rounding, which JS's `Math.cos` cannot
+        reproduce. That is why the base tables are baked (the doc of `dit_rope_base_tables`).
         """
         model = _tiny_dit()
         height, width = TINY_LATENT
@@ -311,7 +333,8 @@ class TestDitTokens:
         assert torch.equal(torch.stack(built_sin), expected_sin[0, 0])
 
     def test_the_base_tables_cover_the_models_own_position_ceiling(self) -> None:
-        """素表の行数は上流 `seq = arange(max(max_size))` の長さ（= 位置表の天井）。"""
+        """The base tables have as many rows as upstream's `seq = arange(max(max_size))` (= the
+        ceiling of the position table)."""
         model = _tiny_dit()
         base = patch_anima.dit_rope_base_tables(model)
         rows = max(model.rope.max_size)
@@ -323,7 +346,8 @@ class TestDitTokens:
         assert base["cos_h"].shape[1] == model.rope.dim_h // 2
 
     def test_a_misaligned_base_slice_is_rejected(self) -> None:
-        """恒真化の門: ブロック境界をずらした切り出しは「その軸で動かない」ので落ちる。"""
+        """Vacuity check: a slice with shifted block boundaries "does not vary along that axis",
+        so it fails."""
         model = _tiny_dit()
         base = patch_anima.dit_rope_base_tables(model)
         broken = dict(base)
@@ -337,12 +361,14 @@ class TestDitTokens:
             )
 
     def test_the_token_graph_carries_no_resolution_dependent_initializer(self) -> None:
-        """S 形の IR には**解像度依存の焼き込みが 1 本も無い**（波 T2 の設計前提そのもの）。
+        """The S-form IR has **not one resolution-dependent baked constant** (the very design
+        premise of iteration T2).
 
-        静的形が焼いていたのは 3 本だけ（padding channel の `[1,1,H,W]` と rope 表 2 本の
-        `[1,1,S,D]`）で、いずれも rank 4。重み側は linear / norm しか無いので rank ≤ 2 に
-        収まる。したがって「rank ≥ 3 の initializer が 0 本」がそのまま invariant になり、
-        S 依存の定数が畳み込まれたら（`Dim` の上限 = 16,384 で焼かれるので）必ず破れる。
+        The static form baked only three (the padding channel's `[1,1,H,W]` and the two rope
+        tables' `[1,1,S,D]`), all rank 4. The weights are only linear / norm, so they stay within
+        rank ≤ 2. Hence "zero initializers of rank ≥ 3" is itself the invariant, and it is
+        guaranteed to break if an S-dependent constant gets folded in (it would be baked at the
+        `Dim` upper bound = 16,384).
         """
         from torch.export import Dim
 
@@ -382,16 +408,18 @@ class TestDitTokens:
             for name in graph.initializers
             if len(graph.values[name].shape) >= 3
         }
-        assert baked == {}, f"解像度依存の焼き込みが残っている: {baked}"
+        assert baked == {}, f"resolution-dependent baked constants remain: {baked}"
 
 
 class TestTextEncoderExport:
-    """`AnimaTextEncoder`（マスクを渡さない形）が tiny の Qwen3 で S 形の export を通る。"""
+    """`AnimaTextEncoder` (the form that passes no mask) exports in S form on a tiny Qwen3."""
 
     def test_the_text_encoder_exports_without_the_packed_sequence_mask(self) -> None:
-        """`find_packed_sequence_indices` を固定しないと、トレース中の検出が `cumsum` を位置で引く
-        `index` と `eq` のマスクを残し、exporter が語彙外の op で落ちる（2026-10-17 実測 —
-        exporter が記号軸を添字で引く index を畳まなくなった ADR 0010 追記 2026-10-10 以降）。
+        """Without pinning `find_packed_sequence_indices`, the detection during tracing leaves an
+        `index` that looks up `cumsum` by position and an `eq` mask, and the exporter fails on an
+        op outside the vocabulary (measured 2026-10-17 — since the ADR 0010 addendum of
+        2026-10-10, after which the exporter no longer folds an index that looks up a symbolic
+        axis by position).
         """
         transformers = pytest.importorskip("transformers")
         from torch.export import Dim

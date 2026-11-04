@@ -1,22 +1,27 @@
-"""`birefnet.patch` の書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
+"""Regression tests that the `birefnet.patch` rewrites are equivalent to the original
+implementation (the part that needs no real weights).
 
-原実装（HF `ZhengPeng7/BiRefNet_HR` 同梱の `birefnet.py`）を**逐語で写した参照**をこの
-ファイル内に置き、パッチ側と突き合わせる。実重み 1024² での端から端までの同値は
-export 台本側の責務で、ここは「どの書き換えがどの強さで同値か」を単体で固定する。
+A **verbatim copy** of the original implementation (`birefnet.py` shipped with HF
+`ZhengPeng7/BiRefNet_HR`) lives in this file as the reference, and the patched side is compared
+with it. End-to-end equivalence with the real weights at 1024² is the export script's job; this
+file pins, unit by unit, "which rewrite is equivalent and how strongly".
 
-主張の強さは 2 段（`birefnet.patch` の docstring と対応）:
+The strength of the claim has two levels (matching the `birefnet.patch` docstring):
 
-- **データの並べ替えだけの書き換え**（窓の切り出し / qkv の 3 等分 / roll / pad / PatchMerging /
-  image2patches / 窓マスク）は **`torch.equal` = ビット一致**。演算を 1 つも増減させないので、
-  「差が小さい」で通す形にすると H/W の取り違えや窓の並び違いが素通りする。
-- **式は同値・丸めだけ違う書き換え**（BatchNorm2d の per-channel affine 化 / AdaptiveAvgPool2d
-  の 2 段 sum 化 / decoder 末尾の 1×1 conv と upsample の順序交換）は近い値まで。ATen 側が
-  積和を FMA で畳む / 2 軸を同時に縮約する / 縮約を伸ばす前に済ませるぶんだけ最下位ビットが
-  動く。tolerance は f32 の丸め幅に留めて、α/β の取り違えやチャネルの割り方の取り違えが
-  通らないようにする（割り方の取り違えが実際に落ちることは故障注入で実測する）。
+- **Rewrites that only reorder data** (window partition / splitting qkv in three / roll / pad /
+  PatchMerging / image2patches / window mask) are **`torch.equal` = bit-identical**. They add or
+  remove no operation, so accepting them on "the difference is small" would let an H/W swap or a
+  wrong window order slip through.
+- **Rewrites with an equivalent formula that differ only in rounding** (BatchNorm2d as a
+  per-channel affine / AdaptiveAvgPool2d as a two-step sum / swapping the order of the 1×1 conv
+  and the upsample at the end of the decoder) are checked to close values. The last bits move by
+  as much as ATen folds the multiply-add into an FMA / reduces both axes at once / finishes the
+  reduction before the upsample. The tolerance stays at the f32 rounding width, so that an α/β
+  swap or a wrong channel split does not pass (fault injection measures that a wrong split
+  actually fails).
 
-参照は**非正方**（H ≠ W）・**窓で割り切れない**形を混ぜる — 正方形だけで見ると H/W の
-入れ替えがビット一致のまま通る。
+The references mix **non-square** (H ≠ W) shapes and shapes **not divisible by the window** —
+with squares only, an H/W swap stays bit-identical and passes.
 """
 
 from __future__ import annotations
@@ -30,23 +35,24 @@ from torch import nn
 
 from birefnet import patch as patch_birefnet
 
-#: BatchNorm2d の affine 化の許容差（実測 max 2.4e-07 — ATen の FMA との差）。
+#: Tolerance of BatchNorm2d as an affine (measured max 2.4e-07 — the difference from ATen's FMA).
 BATCH_NORM_ATOL = 1e-6
 
-#: AdaptiveAvgPool2d の 2 段 sum 化の許容差（実測 max 1.1e-08 — 縮約順序の差）。
+#: Tolerance of AdaptiveAvgPool2d as a two-step sum (measured max 1.1e-08 — reduction order).
 MEAN_ATOL = 1e-7
 
-#: decoder 末尾の順序交換の許容差（実測 max 2.0e-5）。他の 2 つより桁が大きいのは**出力の
-#: 絶対値が大きい**ため — 下のテストは重みを `normal_()` で振るので 240 チャネルの積和が
-#: 絶対値 ~55 まで出る（相対では 3.5e-07 = f32 の丸め幅の数倍で、⑦の 2.4e-07 と同じ桁）。
+#: Tolerance of the reordered decoder tail (measured max 2.0e-5). It is an order of magnitude
+#: above the other two because **the outputs are large in absolute value** — the test below draws
+#: the weights with `normal_()`, so the 240-channel multiply-add reaches ~55 in absolute value
+#: (relative 3.5e-07 = a few f32 rounding widths, the same order as ⑦'s 2.4e-07).
 TAIL_ATOL = 5e-5
 
 
-# ---- 原実装の逐語写し ------------------------------------------------------
+# ---- Verbatim copy of the original implementation --------------------------
 
 
 def ref_window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
-    """原実装 `window_partition`（rank-6 view + permute）。"""
+    """The original `window_partition` (rank-6 view + permute)."""
     batch, height, width, channels = x.shape
     x = x.view(
         batch, height // window_size, window_size, width // window_size, window_size, channels
@@ -57,7 +63,7 @@ def ref_window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
 def ref_window_reverse(
     windows: torch.Tensor, window_size: int, height: int, width: int
 ) -> torch.Tensor:
-    """原実装 `window_reverse`（rank-6 view + permute）。"""
+    """The original `window_reverse` (rank-6 view + permute)."""
     batch = int(windows.shape[0] / (height * width / window_size / window_size))
     x = windows.view(
         batch, height // window_size, width // window_size, window_size, window_size, -1
@@ -66,10 +72,10 @@ def ref_window_reverse(
 
 
 def ref_image2patches(image: torch.Tensor, grid_h: int, grid_w: int) -> torch.Tensor:
-    """原実装 `image2patches`（einops `b c (hg h) (wg w) -> b (c hg wg) h w`）を素の torch で。
+    """The original `image2patches` (einops `b c (hg h) (wg w) -> b (c hg wg) h w`) in plain torch.
 
-    einops を持たない環境でも回る独立オラクル（添字を素で写す）。einops 本体との突合は
-    {@link test_image2patches_matches_einops} が einops のある環境でだけ行う。
+    An independent oracle that runs without einops (it spells the indices out). The comparison
+    with einops itself is {@link test_image2patches_matches_einops}, only where einops exists.
     """
     batch, channels, height, width = image.shape
     patch_h, patch_w = height // grid_h, width // grid_w
@@ -88,7 +94,8 @@ def ref_image2patches(image: torch.Tensor, grid_h: int, grid_w: int) -> torch.Te
 def ref_attn_mask(
     padded_height: int, padded_width: int, window_size: int, shift_size: int
 ) -> torch.Tensor:
-    """原実装 `BasicLayer.forward` の窓マスク生成（in-place 代入 + masked_fill）。"""
+    """The window-mask construction of the original `BasicLayer.forward` (in-place assignment +
+    masked_fill)."""
     img_mask = torch.zeros((1, padded_height, padded_width, 1))
     slices = (
         slice(0, -window_size),
@@ -107,7 +114,7 @@ def ref_attn_mask(
 
 
 def _bits_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
-    """dtype・形・ビット列の一致（`torch.equal` は `0.0` と `-0.0` を等しいとみなす）。"""
+    """Same dtype, shape and bits (`torch.equal` treats `0.0` and `-0.0` as equal)."""
     return (
         left.dtype == right.dtype
         and left.shape == right.shape
@@ -118,13 +125,15 @@ def _bits_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
 def ref_decoder_tail(
     conv: nn.Conv2d, head: torch.Tensor, size: tuple[int, int], ipt: torch.Tensor
 ) -> torch.Tensor:
-    """原実装 `Decoder.forward` の末尾（2226〜2231 行）— 伸ばす → `cat` → 1×1 conv。"""
+    """The tail of the original `Decoder.forward` (lines 2226–2231) — upsample → `cat` → 1×1
+    conv."""
     upsampled = nn.functional.interpolate(head, size=size, mode="bilinear", align_corners=True)
     return conv(torch.cat((upsampled, ipt), 1))
 
 
 class RefWindowAttention(nn.Module):
-    """原実装 `WindowAttention` の骨格（forward は逐語写し・`SDPA_enabled=False` 側）。"""
+    """A skeleton of the original `WindowAttention` (forward copied verbatim, the
+    `SDPA_enabled=False` side)."""
 
     def __init__(self, dim: int, window_size: int, num_heads: int) -> None:
         super().__init__()
@@ -183,7 +192,7 @@ class RefWindowAttention(nn.Module):
 
 
 class RefSwinBlock(nn.Module):
-    """原実装 `SwinTransformerBlock` の骨格（forward は逐語写し）。"""
+    """A skeleton of the original `SwinTransformerBlock` (forward copied verbatim)."""
 
     def __init__(self, dim: int, num_heads: int, window_size: int, shift_size: int) -> None:
         super().__init__()
@@ -235,7 +244,7 @@ class RefSwinBlock(nn.Module):
 
 
 class RefPatchMerging(nn.Module):
-    """原実装 `PatchMerging` の骨格（forward は逐語写し）。"""
+    """A skeleton of the original `PatchMerging` (forward copied verbatim)."""
 
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -256,7 +265,7 @@ class RefPatchMerging(nn.Module):
         return self.reduction(self.norm(x))
 
 
-# ---- ①窓の切り出し / 復元 --------------------------------------------------
+# ---- ① Window partition / reverse ------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -291,7 +300,7 @@ def test_window_roundtrip_is_identity() -> None:
     assert torch.equal(patch_birefnet._window_reverse(windows, 12, 24, 36), x)
 
 
-# ---- ③roll / pad -----------------------------------------------------------
+# ---- ③ roll / pad ----------------------------------------------------------
 
 
 @pytest.mark.parametrize("shift", [-6, -1, 0, 1, 6])
@@ -305,20 +314,21 @@ def test_roll_matches_torch(shift: int, dim: int) -> None:
 def test_pad_zero_matches_functional_pad(dim: int, width: int) -> None:
     x = torch.randn(1, 7, 11, 3)
     pads = [0, 0, 0, 0, 0, 0]
-    # F.pad の並びは最終次元から（dim 2 = 位置 2..3 / dim 1 = 位置 4..5）
+    # F.pad lists dimensions from the last one (dim 2 = positions 2..3 / dim 1 = positions 4..5)
     pads[2 * (3 - dim) + 1] = width
     assert torch.equal(patch_birefnet._pad_zero(x, dim, width), nn.functional.pad(x, pads))
 
 
 class TestPadZeroAtExportSizes:
-    """③ のゼロ pad は実寸でも `F.pad` と値・形がビット一致し、export で巨大な定数を焼かない。"""
+    """③'s zero pad is bit-identical to `F.pad` in values and shape at real sizes too, and bakes
+    no huge constant into the export."""
 
     @pytest.mark.parametrize(
         ("shape", "dim", "width"),
         [
-            ((1, 256, 256, 2), 1, 8),  # 1024² の stage 0（256 → 264）
+            ((1, 256, 256, 2), 1, 8),  # stage 0 of 1024² (256 → 264)
             ((1, 264, 256, 2), 2, 8),
-            ((1, 512, 512, 1), 1, 4),  # 2048² の stage 0（512 → 516）
+            ((1, 512, 512, 1), 1, 4),  # stage 0 of 2048² (512 → 516)
             ((1, 516, 512, 1), 2, 4),
         ],
     )
@@ -331,10 +341,12 @@ class TestPadZeroAtExportSizes:
         assert _bits_equal(patch_birefnet._pad_zero(x, dim, width), nn.functional.pad(x, pads))
 
     def test_the_exported_graph_bakes_no_zero_block(self) -> None:
-        """ゼロは 1 要素の定数を実行時に `expand` で広げる（全ゼロの initializer を焼かない）。
+        """The zeros are a one-element constant widened by `expand` at run time (no all-zero
+        initializer is baked).
 
-        以前の `torch.zeros(shape)` は定数畳み込みで `[1, pad, W, C]` の全ゼロへ焼かれ、2048² の
-        容器の長いゼロ列（HF xet の転送の断片化）の一因だった（`birefnet.patch` の docstring）。
+        The earlier `torch.zeros(shape)` was baked by constant folding into an all-zero
+        `[1, pad, W, C]`, one cause of the long zero runs in the 2048² container (fragmenting HF
+        xet transfers) (the `birefnet.patch` docstring).
         """
         from karume.pipeline import export_module
 
@@ -351,7 +363,7 @@ class TestPadZeroAtExportSizes:
         assert largest == 1
 
 
-# ---- ②窓 attention ---------------------------------------------------------
+# ---- ② Window attention ----------------------------------------------------
 
 
 @pytest.mark.parametrize("with_mask", [False, True])
@@ -371,7 +383,7 @@ def test_window_attention_matches_reference(with_mask: bool) -> None:
 
 
 def test_window_attention_rejects_batched_mask() -> None:
-    """窓数と第 0 軸が食い違う形（バッチ > 1）は fail loudly。"""
+    """A shape whose axis 0 disagrees with the window count (batch > 1) fails loudly."""
     window, heads, dim = 4, 3, 12
     attention = RefWindowAttention(dim, window, heads).eval()
     windows = 6
@@ -381,7 +393,7 @@ def test_window_attention_rejects_batched_mask() -> None:
         patch_birefnet._window_attention_forward(attention, x, mask=mask)
 
 
-# ---- ③Swin ブロック --------------------------------------------------------
+# ---- ③ Swin block ----------------------------------------------------------
 
 
 @pytest.mark.parametrize(("height", "width"), [(8, 8), (10, 6), (13, 9)])
@@ -401,7 +413,7 @@ def test_swin_block_matches_reference(height: int, width: int, shift: int) -> No
     assert torch.equal(expected, got)
 
 
-# ---- ④窓マスク -------------------------------------------------------------
+# ---- ④ Window mask ---------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -414,18 +426,20 @@ def test_attn_mask_matches_reference(padded_height: int, padded_width: int, wind
     assert torch.equal(got, ref_attn_mask(padded_height, padded_width, window, window // 2))
 
 
-#: 実モデルの `BasicLayer` が窓マスクを引く padding 後の一辺（window 12・shift 6）。本体側は
-#: S/4・S/8・S/16・S/32、`mul_scl_ipt='cat'` の半解像度枝は S/8〜S/64 を 12 の倍数へ切り上げる。
-#: 1024² = {264, 132, 72, 36, 24}、2048² = {516, 264, 132, 72, 36}（再 export した容器の
-#: initializer 名で実測 — 2026-10-16）。
+#: The padded sides at which the real model's `BasicLayer` looks up a window mask (window 12,
+#: shift 6). The main body rounds S/4, S/8, S/16, S/32, and the half-resolution branch of
+#: `mul_scl_ipt='cat'` rounds S/8 to S/64, up to a multiple of 12. 1024² = {264, 132, 72, 36, 24},
+#: 2048² = {516, 264, 132, 72, 36} (measured from the initializer names of a re-exported
+#: container — 2026-10-16).
 EXPORT_PADDED_SIZES = (516, 264, 132, 72, 36, 24)
 
-#: 実モデルの窓（`swin_v1_l` の window_size）。shift はその半分。
+#: The real model's window (`swin_v1_l`'s window_size). The shift is half of it.
 EXPORT_WINDOW = 12
 
 
 class TestCompactAttnMask:
-    """④ の表 + 添字は上流のマスクを 1 ビットも変えずに組み立て直す / 種類は高々 4。"""
+    """④'s table + index rebuild the upstream mask without changing a single bit / there are at
+    most 4 kinds."""
 
     @staticmethod
     def _compact(height: int, width: int, window: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -444,7 +458,7 @@ class TestCompactAttnMask:
 
     @pytest.mark.parametrize(("height", "width"), [(24, 36), (36, 24), (24, 60)])
     def test_it_reproduces_the_upstream_mask_off_square(self, height: int, width: int) -> None:
-        """非正方（H/W の取り違えと格子の行 / 列の取り違えはここでしか落ちない）。"""
+        """Non-square (an H/W swap and a swap of the grid's rows / columns fail only here)."""
         table, index = self._compact(height, width, EXPORT_WINDOW)
 
         got = patch_birefnet._expand_attn_mask(table, index)
@@ -453,7 +467,8 @@ class TestCompactAttnMask:
 
     @pytest.mark.parametrize("size", EXPORT_PADDED_SIZES)
     def test_the_baked_tensors_are_small(self, size: int) -> None:
-        """焼くのは `[K ≤ 4, N·N]` の f32 表と窓の格子上の i64 添字だけ（N = 144）。"""
+        """Only a `[K ≤ 4, N·N]` f32 table and an i64 index over the window grid are baked
+        (N = 144)."""
         table, index = self._compact(size, size, EXPORT_WINDOW)
         tokens = EXPORT_WINDOW * EXPORT_WINDOW
 
@@ -464,7 +479,8 @@ class TestCompactAttnMask:
         assert tuple(index.shape) == (size // EXPORT_WINDOW, size // EXPORT_WINDOW)
 
     def test_table_rows_follow_the_upstream_window_order(self) -> None:
-        """表の行は窓の行優先の並びで初めて現れた順（内部 → 右端の列 → 下端の行 → 右下の角）。"""
+        """The table rows are in order of first appearance in row-major window order (interior →
+        right column → bottom row → bottom-right corner)."""
         table, index = self._compact(36, 48, EXPORT_WINDOW)
 
         flat = index.reshape(-1).tolist()
@@ -474,20 +490,21 @@ class TestCompactAttnMask:
         assert not table[0].any()
 
     def test_more_than_four_window_kinds_fail_loudly(self) -> None:
-        """3 帯分割から外れたマスク（種類が 5 通り以上）は黙って畳まない。"""
+        """A mask outside the three-band split (5 or more kinds) is not folded silently."""
         mask = torch.zeros(5, 4, 4)
         for window in range(5):
             mask[window, 0, window % 4] = -100.0
         mask[4, 1, 0] = -100.0
 
-        with pytest.raises(NotImplementedError, match="5 通り"):
+        with pytest.raises(NotImplementedError, match="5 kinds"):
             patch_birefnet._compact_attn_mask(mask, (1, 5))
 
     def test_the_exported_graph_bakes_the_table_and_an_i32_index(self) -> None:
-        """export で焼かれるのは表と i32 添字だけで、`[nW, N, N]` の塊は焼かれない。
+        """The export bakes only the table and an i32 index, not an `[nW, N, N]` block.
 
-        組み立ては `embedding` 1 本（② の相対位置バイアスと同じ形）。添字は格子から平坦化する
-        `reshape` が定数畳み込みを通って i32 の定数になる。
+        The rebuild is one `embedding` (the same shape as ②'s relative-position bias). The
+        `reshape` that flattens the index from the grid goes through constant folding and becomes
+        an i32 constant.
         """
         from karume.pipeline import export_module
 
@@ -519,7 +536,7 @@ class TestCompactAttnMask:
         ]
 
 
-# ---- ⑤PatchMerging ---------------------------------------------------------
+# ---- ⑤ PatchMerging --------------------------------------------------------
 
 
 @pytest.mark.parametrize(("height", "width"), [(4, 4), (8, 6), (6, 10)])
@@ -534,14 +551,15 @@ def test_patch_merging_matches_reference(height: int, width: int) -> None:
 
 
 def test_patch_merging_rejects_odd_resolution() -> None:
-    """原実装の pad 分岐（奇数解像度）は差し替え版が持たない — 黙って別の形にしない。"""
+    """The replacement does not have the original's pad branch (odd resolution) — it does not
+    silently produce another shape."""
     merging = RefPatchMerging(5).eval()
     x = torch.randn(1, 5 * 4, 5)
-    with pytest.raises(NotImplementedError, match="奇数解像度"):
+    with pytest.raises(NotImplementedError, match="odd resolution"):
         patch_birefnet._patch_merging_forward(merging, x, 5, 4)
 
 
-# ---- ⑥image2patches --------------------------------------------------------
+# ---- ⑥ image2patches -------------------------------------------------------
 
 
 @pytest.mark.parametrize(("grid_h", "grid_w"), [(2, 2), (4, 2), (8, 8)])
@@ -553,7 +571,7 @@ def test_image2patches_matches_reference(grid_h: int, grid_w: int) -> None:
 
 
 def test_image2patches_matches_einops() -> None:
-    """einops のある環境では本家の `rearrange` とも突き合わせる。"""
+    """Where einops exists, also compare with the real `rearrange`."""
     rearrange = pytest.importorskip("einops").rearrange
     image = torch.randn(1, 3, 16, 12)
     got = patch_birefnet._image2patches(image, grid_h=2, grid_w=3)
@@ -562,11 +580,11 @@ def test_image2patches_matches_einops() -> None:
 
 
 def test_image2patches_rejects_other_transformation() -> None:
-    with pytest.raises(NotImplementedError, match="変換式"):
+    with pytest.raises(NotImplementedError, match="transformation"):
         patch_birefnet._image2patches(torch.randn(1, 3, 4, 4), transformation="b c h w -> b c w h")
 
 
-# ---- ⑦⑧ モジュールの差し替え ---------------------------------------------
+# ---- ⑦⑧ Module replacement -------------------------------------------------
 
 
 @pytest.mark.parametrize(("channels", "height", "width"), [(4, 5, 3), (16, 8, 8)])
@@ -582,12 +600,13 @@ def test_channel_affine_matches_batch_norm(channels: int, height: int, width: in
     with torch.no_grad():
         expected = norm(x)
         got = patch_birefnet.ChannelAffine(norm)(x)
-    # ビット一致ではない（ATen の推論カーネルが積和を FMA で畳む）— docstring 参照。
+    # Not bit-identical (ATen's inference kernel folds the multiply-add into an FMA) — see the
+    # docstring.
     assert torch.allclose(expected, got, rtol=0, atol=BATCH_NORM_ATOL)
 
 
 def test_channel_affine_rejects_training_mode() -> None:
-    with pytest.raises(ValueError, match="学習モード"):
+    with pytest.raises(ValueError, match="training-mode"):
         patch_birefnet.ChannelAffine(nn.BatchNorm2d(4))
 
 
@@ -599,7 +618,7 @@ def test_spatial_mean_matches_adaptive_avg_pool(channels: int, height: int, widt
         expected = nn.AdaptiveAvgPool2d((1, 1))(x)
         got = patch_birefnet.SpatialMean()(x)
     assert got.shape == expected.shape
-    # ビット一致ではない（2 軸同時縮約と 1 軸ずつの縮約の順序差）— docstring 参照。
+    # Not bit-identical (reducing both axes at once vs one axis at a time) — see the docstring.
     assert torch.allclose(expected, got, rtol=0, atol=MEAN_ATOL)
 
 
@@ -627,7 +646,7 @@ def test_replace_modules_rejects_non_unit_pooling() -> None:
 
 
 def test_lift_relative_position_index_keeps_values() -> None:
-    """バッファ → 素の属性（lifted 定数）への降ろしで値が 1 要素も変わらないこと。"""
+    """Lowering a buffer to a plain attribute (a lifted constant) changes not a single element."""
     attention = RefWindowAttention(12, 4, 3)
     before = copy.deepcopy(attention.relative_position_index)
     assert "relative_position_index" in dict(attention.named_buffers())
@@ -637,14 +656,15 @@ def test_lift_relative_position_index_keeps_values() -> None:
     assert patch_birefnet._lift_relative_position_index(attention) == 0
 
 
-# ---- ⑨decoder 末尾（1×1 conv と upsample の順序交換） ----------------------
+# ---- ⑨ Decoder tail (1×1 conv and upsample in swapped order) ---------------
 
 
 def _tail_source(in_channels: int) -> nn.Sequential:
-    """`Decoder.conv_out1` の席（`nn.Sequential(nn.Conv2d(C, 1, 1, 1, 0))`）。
+    """The slot of `Decoder.conv_out1` (`nn.Sequential(nn.Conv2d(C, 1, 1, 1, 0))`).
 
-    重みは `normal_()` で振る — 既定初期化のままだと絶対値が小さすぎて、チャネルの割り方の
-    取り違え（下の故障注入）が丸め差に埋もれかねない。
+    The weights are drawn with `normal_()` — with the default initialization the absolute values
+    are so small that a wrong channel split (the fault injection below) could drown in rounding
+    differences.
     """
     conv = nn.Conv2d(in_channels, 1, 1, 1, 0)
     conv.weight.data.normal_()
@@ -653,14 +673,15 @@ def _tail_source(in_channels: int) -> nn.Sequential:
 
 
 class TestTailConv:
-    """末尾の代数書き換えが原実装の末尾と同値 / 前提を外れたら落ちる。"""
+    """The algebraic rewrite of the tail is equivalent to the original tail / fails outside its
+    assumptions."""
 
     @pytest.mark.parametrize(
         ("head_channels", "ipt_channels", "small", "size"),
         [
-            (192, 48, (16, 16), (64, 64)),  # 実物の割り方（channels[3]//2 と channels[3]//8）
-            (12, 5, (5, 3), (20, 12)),  # 非正方・割り切れない拡大率
-            (8, 8, (7, 9), (7, 9)),  # 伸ばさない（size が head と同じ）
+            (192, 48, (16, 16), (64, 64)),  # the real split (channels[3]//2 and channels[3]//8)
+            (12, 5, (5, 3), (20, 12)),  # non-square, non-integer scale factor
+            (8, 8, (7, 9), (7, 9)),  # no upsample (size equals head's)
         ],
     )
     def test_it_matches_the_upstream_tail(
@@ -680,11 +701,12 @@ class TestTailConv:
             got = patch_birefnet.TailConv(source, head_channels)(head, size, ipt)
 
         assert got.shape == expected.shape
-        # ビット一致ではない（縮約を伸ばす前に済ませる順序差）— docstring 参照。
+        # Not bit-identical (the reduction is finished before the upsample) — see the docstring.
         assert torch.allclose(expected, got, rtol=0, atol=TAIL_ATOL)
 
     def test_a_swapped_channel_split_does_not_match(self) -> None:
-        """故障注入: head / ipt の重みを入れ替えると参照から外れる（許容差が空振りでない）。"""
+        """Fault injection: swapping the head / ipt weights departs from the reference (the
+        tolerance is not vacuous)."""
         torch.manual_seed(7)
         channels = 6
         source = _tail_source(2 * channels)
@@ -706,7 +728,7 @@ class TestTailConv:
         assert not torch.allclose(expected, got, rtol=0, atol=TAIL_ATOL)
 
     def test_a_head_split_outside_the_input_is_rejected(self) -> None:
-        with pytest.raises(NotImplementedError, match="噛み合わない"):
+        with pytest.raises(NotImplementedError, match="do not fit"):
             patch_birefnet.TailConv(_tail_source(8), 8)
 
     @pytest.mark.parametrize(
@@ -721,7 +743,8 @@ class TestTailConv:
         ],
     )
     def test_an_unsupported_tail_shape_fails_loudly(self, source: nn.Module, match: str) -> None:
-        """1×1・stride 1・pad 0・groups 1・bias あり以外は upsample と可換にならない。"""
+        """Anything but 1×1, stride 1, pad 0, groups 1 with a bias does not commute with the
+        upsample."""
         with pytest.raises(NotImplementedError, match=match):
             patch_birefnet.TailConv(source, 4)
 
@@ -729,7 +752,7 @@ class TestTailConv:
 def _decoder_shape_stub(
     head_channels: int = 192, ipt_channels: int = 48, tail_in_channels: int = 240
 ) -> SimpleNamespace:
-    """`_tail_head_channels` が触る 3 つの数だけを持つ decoder の席。"""
+    """A decoder stand-in holding only the three numbers `_tail_head_channels` touches."""
     return SimpleNamespace(
         decoder_block1=SimpleNamespace(conv_out=SimpleNamespace(out_channels=head_channels)),
         ipt_blk1=SimpleNamespace(conv_out=SimpleNamespace(out_channels=ipt_channels)),
@@ -738,42 +761,45 @@ def _decoder_shape_stub(
 
 
 class TestTailHeadChannels:
-    """head 側のチャネル数は 2 通りに導けるので、突き合わせてから使う。"""
+    """The head-side channel count can be derived two ways, so they are compared before use."""
 
     def test_the_two_derivations_agree_on_the_reference_shape(self) -> None:
-        """正常系（これが無いと以下の否定形が恒真になる）。"""
+        """The normal case (without it the negative cases below would hold trivially)."""
         assert patch_birefnet._tail_head_channels(_decoder_shape_stub()) == 192
 
     def test_a_disagreement_fails_loudly(self) -> None:
-        """故障注入: ipt 枝の出力を 1 本ずらすと 2 つの導出が食い違って落ちる。"""
-        with pytest.raises(NotImplementedError, match="食い違う"):
+        """Fault injection: shifting the ipt branch's output by one channel makes the two
+        derivations disagree, and it fails."""
+        with pytest.raises(NotImplementedError, match="disagree"):
             patch_birefnet._tail_head_channels(_decoder_shape_stub(ipt_channels=47))
 
 
 class TestDecoderForward:
-    """差し替えた `Decoder.forward` は eval 経路しか持たない。"""
+    """The replaced `Decoder.forward` has only the eval path."""
 
     def test_training_mode_is_rejected(self) -> None:
-        """学習経路（ms_supervision の append / gdt の GT）を写していないので落とす。"""
+        """The training path (ms_supervision's append / gdt's GT) is not copied, so it fails."""
         decoder = nn.Module()
         assert decoder.training
 
-        with pytest.raises(RuntimeError, match="学習モード"):
+        with pytest.raises(RuntimeError, match="training-mode"):
             patch_birefnet._decoder_forward(decoder, ())
 
     def test_eval_mode_gets_past_the_gate(self) -> None:
-        """上の否定形が恒真でないこと — eval では門を通り、features の分解まで進む。"""
+        """The negative case above is not trivial — in eval it passes the gate and gets as far
+        as unpacking the features."""
         decoder = nn.Module().eval()
 
         with pytest.raises(ValueError, match="unpack"):
             patch_birefnet._decoder_forward(decoder, ())
 
 
-# ---- 構成の検査（外れても shape エラーにならない欄） ------------------------
+# ---- Configuration check (fields whose mismatch raises no shape error) -----
 
 
 def _supported_config(**overrides: object) -> SimpleNamespace:
-    """`assert_supported` が通す構成（上流クラスは `trust_remote_code` 由来で import 不可）。"""
+    """A configuration `assert_supported` accepts (the upstream class comes from
+    `trust_remote_code` and cannot be imported)."""
     config = SimpleNamespace(
         bb="swin_v1_l",
         dec_att="ASPPDeformable",
@@ -791,15 +817,16 @@ def _supported_config(**overrides: object) -> SimpleNamespace:
 
 
 def _supported_model(ape: bool = False, **overrides: object) -> SimpleNamespace:
-    """`assert_supported` が触るのは `config.<key>` と `model.bb.ape` だけ。"""
+    """`assert_supported` touches only `config.<key>` and `model.bb.ape`."""
     return SimpleNamespace(config=_supported_config(**overrides), bb=SimpleNamespace(ape=ape))
 
 
 class TestAssertSupported:
-    """差し替え版が前提にする構成の検査（外れても別の**数値経路**へ落ちるものだけ）。"""
+    """The check of the configuration the replacement assumes (only fields whose mismatch falls
+    into another **numeric path**)."""
 
     def test_the_reference_configuration_passes(self) -> None:
-        """正常系（これが無いと以下の否定形が恒真になる）。"""
+        """The normal case (without it the negative cases below would hold trivially)."""
         patch_birefnet.assert_supported(_supported_model())
 
     @pytest.mark.parametrize(
@@ -814,7 +841,8 @@ class TestAssertSupported:
         ],
     )
     def test_a_different_component_is_rejected(self, key: str, value: str) -> None:
-        """6 欄はどれも「外れると別の重み・別のグラフ」— 文言に欄名と期待値が出る。"""
+        """For each of the 6 fields a mismatch means other weights and another graph — the
+        message names the field and the expected value."""
         with pytest.raises(ValueError, match=f"config.{key}"):
             patch_birefnet.assert_supported(_supported_model(**{key: value}))
 
@@ -824,33 +852,36 @@ class TestAssertSupported:
 
     @pytest.mark.parametrize("key", ["dec_ipt", "dec_ipt_split"])
     def test_the_patch_split_input_path_is_required(self, key: str) -> None:
-        """`dec_ipt` 系が False だと image2patches の書き換えが噛み合わない。"""
+        """With a `dec_ipt` field False, the image2patches rewrite does not fit."""
         with pytest.raises(ValueError, match="image2patches"):
             patch_birefnet.assert_supported(_supported_model(**{key: False}))
 
     def test_a_batch_size_of_one_is_rejected(self) -> None:
-        """`batch_size <= 1` では上流の `BatchNorm2d` が Identity になり重みの前提と違う。"""
+        """With `batch_size <= 1` the upstream `BatchNorm2d` becomes an Identity, unlike what the
+        weights assume."""
         with pytest.raises(ValueError, match="BatchNorm2d"):
             patch_birefnet.assert_supported(_supported_model(batch_size=1))
 
     def test_absolute_position_embeddings_are_rejected(self) -> None:
-        """`ape=True` は bicubic の位置埋め込み補間（語彙に無い）を出す経路。"""
+        """`ape=True` is the path that emits a bicubic interpolation of the position embedding
+        (not in the vocabulary)."""
         with pytest.raises(ValueError, match="ape"):
             patch_birefnet.assert_supported(_supported_model(ape=True))
 
 
-# ---- BasicLayer.forward（焼いたマスクを引く） ------------------------------
+# ---- BasicLayer.forward (looks up the baked mask) --------------------------
 
 
 class _NoopDownsample(nn.Module):
-    """`BasicLayer.downsample` の席（戻り値の形は問わない — 見るのは末尾の 2 数）。"""
+    """The slot of `BasicLayer.downsample` (the shape of the return value does not matter — the
+    test looks at the trailing two numbers)."""
 
     def forward(self, x: torch.Tensor, height: int, width: int) -> torch.Tensor:
         return x
 
 
 class _MinimalBasicLayer(nn.Module):
-    """`BasicLayer` の最小の骨格（`_basic_layer_forward` が触る属性だけ）。"""
+    """A minimal skeleton of `BasicLayer` (only the attributes `_basic_layer_forward` touches)."""
 
     def __init__(self, use_checkpoint: bool = False, downsample: nn.Module | None = None) -> None:
         super().__init__()
@@ -862,7 +893,7 @@ class _MinimalBasicLayer(nn.Module):
 
 
 class TestBasicLayerForward:
-    """マスクは**焼いたバッファ**からしか引かない / 分岐が正しく並ぶ。"""
+    """The mask is looked up only from **the baked buffer** / the branches line up correctly."""
 
     HEIGHT = 10
     WIDTH = 6
@@ -875,18 +906,18 @@ class TestBasicLayerForward:
         return torch.randn(1, height * width, 12)
 
     def test_an_unbaked_mask_fails_loudly(self) -> None:
-        """MUST: export 中に `register_buffer` が走る（定数が黙って生える）形を作らない。"""
+        """MUST: never let `register_buffer` run during export (a constant appearing silently)."""
         layer = _MinimalBasicLayer()
 
-        with pytest.raises(RuntimeError, match=r"12×8 の窓マスクが焼かれていない"):
+        with pytest.raises(RuntimeError, match=r"the 12×8 window mask is not baked"):
             patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
 
         with pytest.raises(RuntimeError, match="prepare"):
             patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
 
     def test_the_build_window_bakes_the_reference_mask(self, monkeypatch) -> None:
-        """ビルド窓を開けた 1 回だけ表（バッファ）と添字（素の属性）が生え、組み立てた値は
-        `_build_attn_mask` とビット一致する。"""
+        """Only the one call with the build window open adds the table (a buffer) and the index
+        (a plain attribute), and the rebuilt values are bit-identical to `_build_attn_mask`."""
         monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
         layer = _MinimalBasicLayer()
 
@@ -896,7 +927,8 @@ class TestBasicLayerForward:
         suffix = f"{self.PADDED_HEIGHT}x{self.PADDED_WIDTH}"
         buffers = dict(layer.named_buffers())
         table = buffers[f"karume_attn_mask_table_{suffix}"]
-        # 添字はバッファにしない（i64 のバッファは initializer にできない — lifted 定数で運ぶ）。
+        # The index is not a buffer (an i64 buffer cannot be an initializer — it travels as a
+        # lifted constant).
         assert f"karume_attn_mask_index_{suffix}" not in buffers
         index = getattr(layer, f"karume_attn_mask_index_{suffix}")
         expected = patch_birefnet._build_attn_mask(
@@ -910,7 +942,7 @@ class TestBasicLayerForward:
         assert _bits_equal(patch_birefnet._expand_attn_mask(table, index), expected)
 
     def test_checkpointing_is_rejected(self, monkeypatch) -> None:
-        """`use_checkpoint=True` は差し替え版が持たない経路（黙って通さない）。"""
+        """`use_checkpoint=True` is a path the replacement does not have (not passed silently)."""
         monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
         layer = _MinimalBasicLayer(use_checkpoint=True)
 
@@ -931,7 +963,8 @@ class TestBasicLayerForward:
         assert got[0] is got[3]
 
     def test_a_downsample_halves_the_trailing_resolution(self, monkeypatch) -> None:
-        """`(H+1)//2` / `(W+1)//2` — 奇数側の切り上げが落ちると次の段の形がずれる。"""
+        """`(H+1)//2` / `(W+1)//2` — dropping the round-up on the odd side shifts the next
+        stage's shape."""
         monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
         layer = _MinimalBasicLayer(downsample=_NoopDownsample())
 
@@ -942,34 +975,35 @@ class TestBasicLayerForward:
         assert got[4:] == (5, 4)
 
 
-# ---- prepare / apply の門 ---------------------------------------------------
+# ---- The prepare / apply gate -----------------------------------------------
 
 
 class _ExplodingModel(nn.Module):
-    """`prepare` の中で落ちるモデル（`finally` の復元を観測するための席）。"""
+    """A model that fails inside `prepare` (a stand-in for observing the `finally` restore)."""
 
     def forward(self, sample: torch.Tensor) -> torch.Tensor:
-        raise RuntimeError("上流の forward が落ちた")
+        raise RuntimeError("the upstream forward failed")
 
 
 class TestPrepareGate:
-    """`apply` より先に `prepare` を呼べない / ビルド窓は例外経路でも閉じる。"""
+    """`prepare` cannot be called before `apply` / the build window closes on the exception path
+    too."""
 
     def test_prepare_before_apply_fails_loudly(self, monkeypatch) -> None:
-        """素の forward はマスクバッファを引かないので、焼く前に落とす。"""
+        """The plain forward does not look up the mask buffers, so it fails before baking."""
         monkeypatch.setattr(patch_birefnet, "_APPLIED", False)
 
         with pytest.raises(RuntimeError, match=r"apply\(model\)"):
             patch_birefnet.prepare(_ExplodingModel(), torch.zeros(1))
 
     def test_the_build_window_closes_even_when_prepare_raises(self, monkeypatch) -> None:
-        """MUST: 窓が開いたままだと、以後どこでもマスクが黙って焼ける。"""
+        """MUST: a window left open would let masks be baked silently anywhere afterwards."""
         monkeypatch.setattr(patch_birefnet, "_APPLIED", True)
         monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", False)
 
-        with pytest.raises(RuntimeError, match="上流の forward が落ちた"):
+        with pytest.raises(RuntimeError, match="the upstream forward failed"):
             patch_birefnet.prepare(_ExplodingModel(), torch.zeros(1))
 
         layer = _MinimalBasicLayer()
-        with pytest.raises(RuntimeError, match="焼かれていない"):
+        with pytest.raises(RuntimeError, match="is not baked"):
             patch_birefnet._basic_layer_forward(layer, TestBasicLayerForward._input(), 10, 6)

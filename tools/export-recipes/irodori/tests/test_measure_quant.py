@@ -1,15 +1,20 @@
-"""`irodori/measure_quant.py` の pure 部分（実重み不要分）。
+"""The pure part of `irodori/measure_quant.py` (the part that needs no real weights).
 
-実測そのものは手動（full-loop は torch CPU で数十分かかる）。ここで固定するのは、壊れると
-**測定値が静かに嘘になる**側だけ:
+The measurement itself is manual (the full loop takes tens of minutes on torch CPU). Pinned here
+is only the part whose breakage would make **the measurements silently lie**:
 
-- 指標（SNR / LSD / relRMS）の境界値 — 一致で inf / 0、参照が全ゼロ、スケール倍の上界
-- 構成表 — `i8-all` が全役割を覆い、`i8-mixed` が duration だけ外し、直交分解が 1 役割ずつ、
-  `w8a8` が `i8-all` と同じ重みで活性だけ足す
-- 活性シムの適用 — DiT の適格 `nn.Linear` に掛かること・**0 本は fail loudly**
-- 役割 → モジュールの束ね方 — 全役割で `export_series` が丸める 9 本と**同じ集合**になること
-  （食い違うと「配布系列の f16 と同じもの」を測っているつもりで別物を測る）
-- 直交性の門 — z / 波形が「変わるべきところだけ変わる」の**両側**が実際に落ちること
+- The edge values of the metrics (SNR / LSD / relRMS) — inf / 0 on a match, an all-zero
+  reference, the upper bound for a scaled copy
+- The config table — `i8-all` covers every role, `i8-mixed` leaves out only duration, the
+  orthogonal decomposition takes one role at a time, `w8a8` adds only activations to the same
+  weights as `i8-all`
+- Applying the activation simulation — it hooks the eligible `nn.Linear`s of the DiT, and **zero
+  hooks fail loudly**
+- Grouping roles → modules — with every role it is **the same set** as the 9 modules
+  `export_series` rounds (a mismatch would measure something else while believing it measures
+  "the same thing as the distributed f16 series")
+- The orthogonality check — **both sides** of "z / the waveform change only where they should"
+  really fail
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ class TestMetrics:
         assert mq.snr_db(value, reference) == pytest.approx(10.0 * math.log10(1.0 / 0.01))
 
     def test_snr_of_a_zero_reference_is_minus_infinite(self):
-        """全ゼロ参照は SNR が定義できない — 0 で割って NaN を返さない。"""
+        """SNR is undefined for an all-zero reference — do not divide by 0 and return NaN."""
         assert mq.snr_db(torch.ones(4), torch.zeros(4)) == -math.inf
 
     def test_rel_rms_is_zero_for_a_zero_reference(self):
@@ -58,7 +63,8 @@ class TestMetrics:
         assert mq.log_spectral_distance(signal, signal) == 0.0
 
     def test_lsd_of_a_scaled_copy_stays_under_the_scale_factor(self):
-        """2 倍にした信号の LSD は 20log10(2) が上界（床 clamp は縮める方向にしか効かない）。"""
+        """The LSD of a doubled signal is bounded by 20log10(2) (the floor clamp only ever
+        shrinks it)."""
         torch.manual_seed(0)
         reference = torch.randn(mq.STFT_N_FFT * 4)
 
@@ -77,7 +83,8 @@ class TestConfigTable:
         assert mq.RECIPES["i8-all"].roles == mq.ROLES
 
     def test_i8_mixed_leaves_duration_alone(self):
-        """混成表の候補（ADR 0050 決定 6 の (i) 案）— 外すのは duration **だけ**。"""
+        """The candidate mixed table (option (i) of ADR 0050 decision 6) — it leaves out
+        duration **only**."""
         mixed = set(mq.RECIPES["i8-mixed"].roles)
 
         assert mixed == set(mq.ROLES) - {ex.TARGET_DURATION}
@@ -90,11 +97,13 @@ class TestConfigTable:
         assert {recipe.roles[0] for recipe in legs.values()} == set(mq.DECOMPOSED_ROLES)
 
     def test_duration_and_codec_are_outside_the_latent_path(self):
-        """MUST: 直交性の門の期待値そのもの（duration は S だけ・codec は波形だけ）。"""
+        """MUST: the very expectation of the orthogonality check (duration affects only S, the
+        codec only the waveform)."""
         assert set(mq.ROLES) - {ex.TARGET_DURATION, mq.ROLE_CODEC} == mq.LATENT_ROLES
 
     def test_w8a8_rounds_the_same_weights_as_the_weight_only_config(self):
-        """配布形の 2 席は**同じ i8 バイトを共有する** — 違いは活性側だけ。"""
+        """The two distributed presets **share the same i8 bytes** — they differ only on the
+        activation side."""
         weight_only = mq.RECIPES[mq.WEIGHT_ONLY_BASE]
         act = mq.RECIPES["w8a8"]
 
@@ -102,7 +111,8 @@ class TestConfigTable:
         assert act.act_quant and not weight_only.act_quant
 
     def test_only_w8a8_carries_the_activation_sim(self):
-        """活性シムを持つ構成が増えたら、素通り検出の比較相手も増やす必要がある。"""
+        """If more configs get the activation simulation, the pass-through detection needs more
+        comparison targets too."""
         with_sim = [name for name, recipe in mq.RECIPES.items() if recipe.act_quant]
 
         assert with_sim == ["w8a8"]
@@ -132,7 +142,8 @@ def _modules() -> dict[str, nn.Module]:
 
 
 class TestRoleModules:
-    """役割 → 丸め対象の束ね方（`export_series` / `emit` が丸める 9 本との集合一致が肝）。"""
+    """Grouping roles → rounding targets (the key is set equality with the 9 modules
+    `export_series` / `emit` round)."""
 
     def test_all_roles_hand_the_same_nine_modules_as_the_export(self):
         modules = _modules()
@@ -142,11 +153,13 @@ class TestRoleModules:
         assert set(picked) == set(modules)
 
     def test_the_codec_role_touches_nothing_on_the_latent_side(self):
-        """`i8-codec-only` は latent 側を 1 本も丸めない（z のビット一致が門になる）。"""
+        """`i8-codec-only` rounds nothing on the latent side (bit identity of z is the
+        check)."""
         assert mq.role_modules(_modules(), (mq.ROLE_CODEC,)) == {}
 
     def test_each_norm_rides_with_the_graph_that_holds_it(self):
-        """MUST: norm は**消費側**の役割へ（所在は ADR 0048 決定 1）。"""
+        """MUST: a norm goes with the role that **consumes** it (where it lives: ADR 0048
+        decision 1)."""
         modules = _modules()
 
         assert sorted(mq.role_modules(modules, (ex.TARGET_DURATION,))) == [
@@ -165,7 +178,7 @@ class TestRoleModules:
 
 
 class _DitLike(nn.Module):
-    """適格 `nn.Linear`（`in_features % 4 == 0`）を 2 本持つ DiT 代役。"""
+    """A DiT stand-in with two eligible `nn.Linear`s (`in_features % 4 == 0`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -174,7 +187,8 @@ class _DitLike(nn.Module):
 
 
 class TestActQuantSim:
-    """MUST: 掛かった本数を出す（0 本のまま回すと `i8-all` と同じ数が w8a8 の名前で載る）。"""
+    """MUST: report how many were hooked (running with zero would publish the same numbers as
+    `i8-all` under the name w8a8)."""
 
     def test_it_hooks_every_eligible_linear_in_the_dit(self):
         modules = {ex.TARGET_DIT: _DitLike()}
@@ -185,7 +199,8 @@ class TestActQuantSim:
         mq.act_quant.detach_act_quant(handles)
 
     def test_it_actually_rounds_the_activations(self):
-        """フックの効き目そのもの（掛けた後の出力が `quantize_rows` を通した入力と一致する）。"""
+        """The hook's effect itself (the output after hooking equals the input passed through
+        `quantize_rows`)."""
         modules = {ex.TARGET_DIT: _DitLike()}
         linear = modules[ex.TARGET_DIT].qkv
         x = torch.tensor([[1.0, -0.3, 0.02, 0.7]])
@@ -199,10 +214,11 @@ class TestActQuantSim:
         assert torch.equal(hooked, expected)
 
     def test_zero_eligible_linears_is_fail_loudly(self):
-        """適格 0 本で素通りさせない — 品質は「良い」側に出るので黙ると誤読しかされない。"""
-        modules = {ex.TARGET_DIT: TinyModule()}  # Linear(2, 2) は k % 4 != 0
+        """Do not pass with zero eligible linears — the quality comes out on the "good" side, so
+        staying silent can only be misread."""
+        modules = {ex.TARGET_DIT: TinyModule()}  # Linear(2, 2) has k % 4 != 0
 
-        with pytest.raises(SystemExit, match="0 本"):
+        with pytest.raises(SystemExit, match=r"attached to 0 nn\.Linear"):
             mq.attach_dit_act_quant(mq.RECIPES["w8a8"], modules)
 
     def test_a_weight_only_config_hooks_nothing(self):
@@ -222,7 +238,8 @@ def _gates(config: str, *, z_changed: bool, wav_changed: bool) -> list[str]:
 
 
 class TestOrthogonalityGate:
-    """MUST: 期待は**両側**（変わる / 変わらない）— 片側だけだと素通りか scope 漏れが素通りする。"""
+    """MUST: the expectation has **both sides** (changes / does not change) — with one side only,
+    either a pass-through or a scope leak goes unnoticed."""
 
     def test_a_dit_only_config_that_did_not_move_the_latent_is_red(self):
         failures = _gates("i8-dit-only", z_changed=False, wav_changed=False)
@@ -233,7 +250,7 @@ class TestOrthogonalityGate:
         assert _gates("i8-dit-only", z_changed=True, wav_changed=True) == []
 
     def test_a_duration_only_config_that_moved_the_latent_is_red(self):
-        """duration は S にしか効かない — z が動いたら scope が漏れている。"""
+        """duration affects only S — if z moved, the scope leaked."""
         failures = _gates("i8-duration-only", z_changed=True, wav_changed=True)
 
         assert len(failures) == 2
@@ -242,8 +259,9 @@ class TestOrthogonalityGate:
         assert _gates("i8-duration-only", z_changed=False, wav_changed=False) == []
 
     def test_a_speaker_only_config_is_expected_to_move_nothing_without_a_reference(self):
-        """speaker の期待は**ケース条件**（参照なしはゼロ供給短絡で encoder が走らない —
-        ADR 0048。実測 2026-08-12: no-ref はビット一致・full は変化）。"""
+        """The speaker expectation **depends on the case** (without a reference the zero-input
+        short-circuit skips the encoder — ADR 0048. Measured 2026-08-12: no-ref bit-identical,
+        full changed)."""
         entries = {
             "full": _entry(z_changed=True, wav_changed=True),
             "no-ref": _entry(z_changed=False, wav_changed=False),
@@ -253,7 +271,8 @@ class TestOrthogonalityGate:
         assert gates["failures"] == []
 
     def test_a_speaker_only_config_that_moved_the_no_ref_case_is_red(self):
-        """参照なしのケースで z が動いたら、ゼロ短絡が壊れたか scope が漏れている。"""
+        """If z moved in the case without a reference, the zero short-circuit broke or the scope
+        leaked."""
         entries = {"no-ref": _entry(z_changed=True, wav_changed=True)}
         gates = mq.run_gates("i8-speaker-only", mq.RECIPES["i8-speaker-only"], {}, entries, None)
 
@@ -273,7 +292,8 @@ def _act_gates(*, moved_from_weight_only: bool) -> list[str]:
 
 
 class TestActQuantPassThroughGate:
-    """MUST: 素通り検出は**重みだけの構成との差**（基準との差は重みの丸めで説明が付く）。"""
+    """MUST: pass-through detection uses **the difference from the weight-only config** (the
+    difference from the base is explained by the weight rounding)."""
 
     def test_a_latent_that_moved_off_the_weight_only_config_is_green(self):
         assert _act_gates(moved_from_weight_only=True) == []
@@ -286,7 +306,8 @@ class TestActQuantPassThroughGate:
 
 
 class TestGoldenGate:
-    """MUST: 基準 `f32` は full-loop golden とバイト一致（外れたら測定値は全部意味を失う）。"""
+    """MUST: the base `f32` is byte-identical to the full-loop golden (otherwise every
+    measurement loses its meaning)."""
 
     def _failures(self, latent: torch.Tensor, golden: torch.Tensor) -> list[str]:
         gates = mq.run_gates(
@@ -300,7 +321,7 @@ class TestGoldenGate:
         assert self._failures(golden.clone(), golden) == []
 
     def test_a_latent_off_by_one_ulp_is_red(self):
-        """近似では通さない — 1ulp 動いていれば経路が別物になっている。"""
+        """No approximate pass — a 1-ulp move means the path has changed."""
         golden = torch.tensor([[[0.25, -0.5]]])
         drifted = golden + torch.tensor([[[0.0, 2.0**-23]]])
 
@@ -320,7 +341,8 @@ class TestWriteWav:
             assert handle.getnframes() == 4
 
     def test_it_clips_instead_of_wrapping_around(self):
-        """MUST: 飽和は clamp（int16 へそのまま落とすと +1.5 が負の値へ巻き付く）。"""
+        """MUST: saturation clamps (a plain cast to int16 wraps +1.5 around to a negative
+        value)."""
         clipped = torch.tensor([2.0, -2.0]).clamp(-1.0, 1.0)
         pcm = torch.floor(clipped * 32767.0 + 0.5).to(torch.int16)
 
@@ -341,7 +363,8 @@ def _payload(name: str, predicted: int, *, versus: dict[str, float] | None) -> d
 
 
 class TestReportTables:
-    """S ドリフトの表は**この台本の主成果**（混成表の裁定がこの 1 枚に乗る）。"""
+    """The S drift table is **this script's main output** (the ruling on the mixed table rests on
+    this one table)."""
 
     def _collected(self, drifted: int) -> dict[str, dict[str, object]]:
         return {
@@ -361,7 +384,7 @@ class TestReportTables:
     def test_a_matching_prediction_reads_as_agreement(self):
         table = mq.drift_table(self._collected(161))
 
-        assert "| i8-all | full | 161 | 161 | 一致 |" in table
+        assert "| i8-all | full | 161 | 161 | match |" in table
 
     def test_a_drifting_prediction_is_signed(self):
         table = mq.drift_table(self._collected(159))
@@ -371,12 +394,14 @@ class TestReportTables:
     def test_the_base_row_says_it_is_the_base(self):
         table = mq.quality_table(self._collected(161))
 
-        assert "| f32 | full | 0（基準）" in table
+        assert "| f32 | full | 0 (base)" in table
         assert "| i8-all | full | 1.5000e-02 | 3.0000e-02 | 12.50 | 3.20 |" in table
 
     def test_the_report_lists_only_red_configs(self):
         collected = self._collected(161)
-        collected["i8-all"]["gates"] = {"failures": ["full: z が「変わる」期待に反した"]}
+        collected["i8-all"]["gates"] = {
+            "failures": ["full: z broke the expectation that it changes"]
+        }
 
         report = mq.build_report(collected)
 
@@ -384,7 +409,8 @@ class TestReportTables:
 
 
 class TestFramesOverride:
-    """`irodori.pipeline_ref.run_case` の注入口（S を外から固定する）— 既定は素の予測。"""
+    """The injection point of `irodori.pipeline_ref.run_case` (fixes S from outside) — the
+    default is the plain prediction."""
 
     def test_the_golden_path_keeps_the_predicted_length(self):
         signature = ip.run_case.__kwdefaults__
@@ -393,11 +419,12 @@ class TestFramesOverride:
 
 
 class _W4Like(nn.Module):
-    """g32 に載る重みと載らない重みを混ぜた木（対象の割り方と除外の検査用）。
+    """A tree mixing weights that fit g32 and weights that do not (to test the target split and
+    the exclusions).
 
-    - `aligned` … linear の in 軸 64 = g32 が 2 本
-    - `ragged` … linear の in 軸 12（g32 で割り切れない → 除外）
-    - `conv` … `Cin·K = 8·4 = 32`（受容野を平坦化した軸で 1 本ぶん）
+    - `aligned` … a linear with in axis 64 = two g32 groups
+    - `ragged` … a linear with in axis 12 (not divisible by g32 → excluded)
+    - `conv` … `Cin·K = 8·4 = 32` (one group on the flattened receptive-field axis)
     """
 
     def __init__(self) -> None:
@@ -408,19 +435,21 @@ class _W4Like(nn.Module):
 
 
 class TestW4ConfigTable:
-    """w4 構成表（ADR 0069 追記 5 — 勝者 4 方式 × 全役割 + RTN の混成）。"""
+    """The w4 config table (ADR 0069 addendum 5 — the 4 winning methods × all roles + the RTN
+    mix)."""
 
     def test_every_w4_config_carries_a_method(self):
         assert all(recipe.method is not None for recipe in mq.W4_CONFIGS.values())
 
     def test_no_storage_dtype_config_carries_a_method(self):
-        """f16 / i8 側に方式が付くと `irodori.export.fake_quant` を素通りする。"""
+        """A method on the f16 / i8 side would bypass `irodori.export.fake_quant`."""
         others = {**mq.CONFIGS, **mq.DIAGNOSTICS}
 
         assert all(recipe.method is None for recipe in others.values())
 
     def test_the_methods_are_the_four_screening_winners(self):
-        """スクリーニングで残った 4 種そのもの（fp4 と kmeans の他 2 粒度は落選）。"""
+        """Exactly the 4 that survived screening (fp4 and the other 2 kmeans granularities were
+        dropped)."""
         names = {recipe.method.name for recipe in mq.W4_CONFIGS.values()}
 
         assert names == {"rtn-i4-g32", "nf4", "mxfp4", "kmeans:shared"}
@@ -431,39 +460,47 @@ class TestW4ConfigTable:
         assert covering == ["i4-all", "nf4-all", "mxfp4-all", "kmeans-shared-all"]
 
     def test_the_w4_mixed_config_shares_the_axis_with_the_i8_one(self):
-        """MUST: 混成の軸は i8 と同じ（別々に書くと 2 つの混成が黙って別物になる）。"""
+        """MUST: the mix axis is the same as for i8 (written separately, the two mixes would
+        silently diverge)."""
         assert mq.RECIPES["i4-mixed"].roles == mq.RECIPES["i8-mixed"].roles
         assert set(mq.RECIPES["i4-mixed"].roles) == set(mq.ROLES) - {ex.TARGET_DURATION}
 
     def test_the_weight_spelling_is_the_method_name(self):
-        """`weight` は丸めの綴り — 方式名と二重管理にしない。"""
+        """`weight` is the rounding's spelling — not maintained twice next to the method
+        name."""
         assert mq.RECIPES["nf4-all"].weight == "nf4"
 
     def test_the_op_types_stay_the_five_i8_kinds(self):
-        """狭めると「非 linear まで丸めた品質」を測っているつもりで linear だけ測る。"""
+        """Narrowing them would measure linears only while believing it measures "the quality
+        with non-linears rounded too"."""
         assert mq.W4_OP_TYPES == QUANT_MODULE_TYPES
 
     def test_the_group_size_is_pinned_to_32(self):
-        """方式比較で g を同時に振らない（ADR 0069 追記 5 の 3）。"""
+        """Do not vary g at the same time as the methods are compared (ADR 0069 addendum 5,
+        item 3)."""
         assert mq.W4_GROUP_SIZE == 32
 
     def test_the_linear_config_is_the_shippable_form(self):
-        """`i4-linear` = RTN × Linear のみ（今日の配布対応形 — ADR 0069 決定 5）。"""
+        """`i4-linear` = RTN × Linear only (the form distribution supports today — ADR 0069
+        decision 5)."""
         recipe = mq.RECIPES["i4-linear"]
 
         assert recipe.method is mq.W4_RTN
         assert recipe.op_types == (nn.Linear,)
-        # codec に linear は 1 本も無いので roles から外す（恒等 — 対象 0 の役割を回さない）。
+        # The codec has no linear at all, so it is left out of roles (identity — a role with no
+        # target is not run).
         assert set(recipe.roles) == set(mq.ROLES) - {mq.ROLE_CODEC}
 
     def test_the_all_role_configs_keep_the_wide_op_types(self):
-        """既定の op 種は広い 5 種のまま（i4-linear の追加で既存構成が狭まっていない）。"""
+        """The default op kinds stay the wide 5 (adding i4-linear did not narrow the existing
+        configs)."""
         for name in ("i4-all", "i4-mixed", "nf4-all", "mxfp4-all", "kmeans-shared-all"):
             assert mq.RECIPES[name].op_types == mq.W4_OP_TYPES, name
 
 
 class TestScanTargets:
-    """対象の割り方（g32 に載る側 / 割り切れず外す側）— 除外は必ず一覧で出る。"""
+    """The target split (the side that fits g32 / the side that does not divide and is left
+    out) — exclusions are always listed."""
 
     def test_it_splits_the_aligned_and_the_ragged(self):
         scan = mq.scan_targets(_W4Like(), mq.W4_OP_TYPES)
@@ -483,13 +520,14 @@ class TestScanTargets:
         assert counts.groups == 384 // 32
 
     def test_the_conv_axis_is_the_flattened_receptive_field(self):
-        """group 軸は各 op の「in 軸」一般化 — conv は `Cin·K`（ADR 0069 追記 5 の 1）。"""
+        """The group axis generalizes each op's "in axis" — `Cin·K` for conv (ADR 0069
+        addendum 5, item 1)."""
         weight = nn.Conv1d(8, 4, 4, bias=False).weight
 
         assert mq.group_axis_length(weight, 0) == 8 * 4
 
     def test_the_transposed_conv_axis_is_the_layout_axis_one(self):
-        """`ConvTranspose1d` は重みが `[Cin, Cout, K]` なのでチャネル軸が 1。"""
+        """`ConvTranspose1d` has the weight `[Cin, Cout, K]`, so the channel axis is 1."""
         weight = nn.ConvTranspose1d(4, 8, 8, bias=False).weight
 
         assert mq.group_axis_length(weight, 1) == 4 * 8
@@ -504,7 +542,8 @@ class TestScanTargets:
 
 
 class TestApplyWeightQuant:
-    """丸めの当て方（w4 は方式ごとの core 呼び・f16 / i8 は配布経路と同じ関数）。"""
+    """How the rounding is applied (w4 calls core per method, f16 / i8 use the same function as
+    the distribution path)."""
 
     def test_it_rounds_the_aligned_weights_and_leaves_the_ragged_alone(self):
         torch.manual_seed(0)
@@ -518,18 +557,20 @@ class TestApplyWeightQuant:
         assert not torch.equal(module.aligned.weight, before["aligned.weight"])
         assert not torch.equal(module.conv.weight, before["conv.weight"])
         assert torch.equal(module.ragged.weight, before["ragged.weight"])
-        assert "g32 非整列 1 本を除外" in reports[ex.TARGET_DIT]
+        assert "excluded 1 not aligned to g32" in reports[ex.TARGET_DIT]
 
     def test_a_role_without_target_types_stays_f32(self):
-        """norm 系は w4 の対象型を持たない — 役割単位の「0 本」で落とさない側。"""
+        """The norms have no w4 target type — the side that does not fail on "zero" per
+        role."""
         reports = mq.apply_weight_quant(
             mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,)), {"text_norm": nn.LayerNorm(8)}
         )
 
-        assert reports["text_norm"] == "格納 f32 のまま（w4 の対象型を持たない）"
+        assert reports["text_norm"] == "kept as f32 storage (no w4 target types)"
 
     def test_a_role_whose_targets_all_fall_off_the_grid_is_fail_loudly(self):
-        """全部 g32 で外れた役割を黙って f32 で回すと「丸めたつもりの構成」を測る。"""
+        """Silently running a role whose targets all fell off g32 in f32 would measure "a config
+        believed to be rounded"."""
         module = nn.Linear(12, 4, bias=False)
 
         with pytest.raises(SystemExit, match="g32"):
@@ -538,7 +579,8 @@ class TestApplyWeightQuant:
             )
 
     def test_a_storage_dtype_recipe_goes_through_the_export_helper(self):
-        """f16 / i8 は配布経路と同じ `irodori.export.fake_quant` のまま。"""
+        """f16 / i8 keep using `irodori.export.fake_quant`, the same as the distribution
+        path."""
         reports = mq.apply_weight_quant(
             mq.Recipe("f16", (ex.TARGET_DIT,)), {ex.TARGET_DIT: TinyModule()}
         )
@@ -546,7 +588,8 @@ class TestApplyWeightQuant:
         assert "f16" in reports[ex.TARGET_DIT]
 
     def test_a_linear_only_recipe_leaves_the_conv_untouched(self):
-        """`i4-linear` の実体 — op_types が丸めの側にも効く（scan だけ狭めても意味が無い）。"""
+        """What `i4-linear` really is — op_types also apply to the rounding (narrowing only the
+        scan would be pointless)."""
         torch.manual_seed(0)
         module = _W4Like()
         before = {name: tensor.detach().clone() for name, tensor in module.named_parameters()}
@@ -561,35 +604,39 @@ class TestApplyWeightQuant:
         assert torch.equal(module.ragged.weight, before["ragged.weight"])
 
     def test_a_method_that_rounds_a_different_set_than_the_scan_is_fail_loudly(self):
-        """数えた対象と丸めた対象が割れたら落とす（op_types の焼き込み退行の検出器）。"""
+        """Fail when the counted targets and the rounded targets diverge (the detector for a
+        regression in baking in op_types)."""
         wide = mq.W4Method(
             "rtn-i4-g32",
-            # 構成の op_types を無視して常に広い 5 種で丸める（退行の再現）。
+            # Ignores the config's op_types and always rounds the wide 5 kinds (reproduces the
+            # regression).
             lambda model, _op_types, include, _stride: mq.fake_quant_int4(
                 model, mq.W4_GROUP_SIZE, include=include, op_types=mq.W4_OP_TYPES
             ),
             lambda counts, _tables: 4.0 * counts.elements,
-            "検査用",
+            "for testing",
         )
 
-        with pytest.raises(SystemExit, match="丸めた本数"):
+        with pytest.raises(SystemExit, match="the rounded count"):
             mq.apply_weight_quant(
                 mq.w4_recipe(wide, (ex.TARGET_DIT,), op_types=(nn.Linear,)),
                 {ex.TARGET_DIT: _W4Like()},
             )
 
     def test_the_shared_codebook_takes_the_fit_stride(self):
-        """表の fit だけ部分標本（適用は全量）— dit 役割の全量 fit は実メモリを超える。"""
+        """Only the table fit uses a subsample (it is applied to everything) — a full fit of the
+        dit role exceeds the real memory."""
         torch.manual_seed(0)
         module = _W4Like()
         recipe = mq.w4_recipe(mq.W4_KMEANS_SHARED, (ex.TARGET_DIT,))
 
         reports = mq.apply_weight_quant(recipe, {ex.TARGET_DIT: module}, 3)
 
-        assert "表の fit は 1/3 部分標本" in reports[ex.TARGET_DIT]
+        assert "table fit on a 1/3 subsample" in reports[ex.TARGET_DIT]
 
     def test_a_fit_stride_on_a_method_without_a_table_is_fail_loudly(self):
-        """MUST: 効かない構成へ渡されたら落とす（黙って無視すると数値の読み方が変わる）。"""
+        """MUST: fail when passed to a config it does not affect (silently ignoring it changes
+        how the numbers read)."""
         with pytest.raises(SystemExit, match="fit"):
             mq.check_fit_stride(mq.RECIPES["i4-all"], 11)
 
@@ -598,7 +645,8 @@ class TestApplyWeightQuant:
             mq.check_fit_stride(recipe, 1)
 
     def test_the_rounding_is_idempotent(self):
-        """MUST: 冪等（±7 に閉じた対称 — 再適用でビット不変・ADR 0069 決定 3）。"""
+        """MUST: idempotent (symmetric, closed at ±7 — bit-unchanged on reapplication, ADR 0069
+        decision 3)."""
         torch.manual_seed(0)
         module = _W4Like()
         recipe = mq.w4_recipe(mq.W4_RTN, (ex.TARGET_DIT,))
@@ -611,7 +659,8 @@ class TestApplyWeightQuant:
 
 
 class TestSizeProjection:
-    """サイズ試算（**式による投影**・実測ではない）— 品質と同じ表に載せる列。"""
+    """The size estimate (**a projection by formula**, not a measurement) — columns that go in
+    the same table as the quality."""
 
     COUNTS = mq.TargetCounts(modules=2, channels=8, elements=384)
 
@@ -620,7 +669,7 @@ class TestSizeProjection:
         assert mq.project_size(mq.W4_NF4, self.COUNTS, 1).bits_per_weight == 5.0
 
     def test_the_power_of_two_scale_saves_the_scale_bits(self):
-        """MXFP4 の scale は E8M0（1 バイト）— g32 なら 4.25 bpw。"""
+        """The MXFP4 scale is E8M0 (1 byte) — 4.25 bpw with g32."""
         assert mq.project_size(mq.W4_MXFP4, self.COUNTS, 1).bits_per_weight == 4.25
 
     def test_the_shared_codebook_costs_one_table_per_artifact(self):
@@ -658,7 +707,8 @@ def _w4_config(excluded: list[dict[str, object]]) -> dict[str, object]:
 
 
 class TestW4Tables:
-    """w4 の 2 出力（サイズ試算の表・除外一覧）— 除外を黙らせない。"""
+    """The two w4 outputs (the size estimate table, the exclusion list) — exclusions are never
+    silent."""
 
     def test_the_size_table_carries_the_formula_and_the_ratio(self):
         table = mq.size_table({"i4-all": _w4_config([])})
@@ -685,38 +735,42 @@ class TestW4Tables:
 
         lines = mq.excluded_lines({"i4-all": _w4_config(excluded)})
 
-        assert lines[0] == "- i4-all: g32 非整列 1 本を除外"
-        assert "speaker / encoder.blocks.0.mlp.w2.weight 軸長 1996" in lines[1]
+        assert lines[0] == "- i4-all: excluded 1 not aligned to g32"
+        assert "speaker / encoder.blocks.0.mlp.w2.weight axis length 1996" in lines[1]
 
     def test_no_exclusion_still_says_so(self):
-        """「除外なし」も出す — 行が無いのは「w4 でない」と区別が付かない。"""
+        """Says "no exclusions" too — a missing line could not be told apart from "not w4"."""
         assert mq.excluded_lines({"i4-all": _w4_config([])}) == [
-            "- i4-all: g32 非整列による除外なし"
+            "- i4-all: no exclusions for g32 misalignment"
         ]
 
     def test_a_config_without_w4_is_silent(self):
         assert mq.excluded_lines({"i8-all": {"cases": {}, "gates": {"failures": []}}}) == []
 
 
-# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+# ---- Calibrated rounding (step J-2) ----------------------------------------------
 #
-# 実重み無しで固定できるのは「捕まえ方」と「門」だけ。DiT block の写し
-# （{@link mq.DitBlockStage}）そのものは実重みでしか意味を持たないので、ここでは
-# **同値門が実際に落ちること**（検出力）を代役の stage で実測する。
+# Without real weights, only "how the batches are captured" and "the checks" can be pinned. The
+# copy of the DiT block ({@link mq.DitBlockStage}) itself only means something with the real
+# weights, so this checks with a stand-in stage that **the equivalence check really fails**
+# (its detection power).
 
 
 def _tiny_pooled(text: torch.Tensor, speaker: torch.Tensor, caption: torch.Tensor) -> torch.Tensor:
-    """条件側の射影の代役（`dit-context` が生成 1 回だけ作る値 — 3 本の条件を全部混ぜる）。"""
+    """A stand-in for the condition-side projection (the value `dit-context` builds once per
+    generation — it mixes all three conditions)."""
     return text.mean(dim=1) + speaker.mean(dim=1) + caption.mean(dim=1)
 
 
 def _tiny_mix(pooled: torch.Tensor, mask: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    """条件側の値にマスクと RoPE 表を混ぜた項（1 本でも取り違えたら出力が変わる形にする）。"""
+    """A term mixing the mask and the RoPE table into the condition-side value (mixing up any one
+    of them changes the output)."""
     return pooled[:, None, :] * float(mask.sum()) + freqs[None, :, :]
 
 
 class TinyAdaLN(nn.Module):
-    """`LowRankAdaLN` の席 — Catcher が先頭 block を捕まえるフック点そのもの。"""
+    """The place of `LowRankAdaLN` — the very hook point where the Catcher captures the first
+    block."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -734,10 +788,11 @@ class TinyBlock(nn.Module):
 
 
 class TinyContextGraph(nn.Module):
-    """`DitContextGraph` の代役 — 条件 state 3 本に norm を掛け、ブロックごとの条件側の値を返す。
+    """A stand-in for `DitContextGraph` — applies the norms to the three condition states and
+    returns the condition-side value per block.
 
-    DiT を `dit-context` / `dit` に割った（ADR 0114）形の写し: norm 済みの条件は**生成 1 回**だけ
-    作られ、`dit` はそれを入力で受ける。
+    A copy of the DiT split into `dit-context` / `dit` (ADR 0114): the normed conditions are built
+    **once per generation**, and `dit` takes them as inputs.
     """
 
     def __init__(self, features: int = 32, blocks: int = 2) -> None:
@@ -756,8 +811,8 @@ class TinyContextGraph(nn.Module):
 
 
 class TinyGraph(nn.Module):
-    """`DitGraph` の代役 — 引数の並び（`x_t` / `t_embed` / `mask` + 条件側の値）と「付随引数を
-    block ループの**前**に 1 回作る」形の写し。"""
+    """A stand-in for `DitGraph` — copies the argument order (`x_t` / `t_embed` / `mask` + the
+    condition-side values) and "the side inputs are built once **before** the block loop"."""
 
     def __init__(self, features: int = 32, blocks: int = 2, sym_max: int = 8) -> None:
         super().__init__()
@@ -786,10 +841,11 @@ class TinyGraph(nn.Module):
 
 
 class TinyStage(nn.Module):
-    """`TinyGraph` の block 1 枚ぶん（{@link mq.DitBlockStage} と同じ子の名付け方）。
+    """One block of `TinyGraph` (the child is named as in {@link mq.DitBlockStage}).
 
-    条件側の値は block の**中で**作り直す（{@link mq.DitBlockStage} が条件側の射影を block の中で
-    呼ぶのと同じ形 — 校正がその重みの入力を見るため）。
+    The condition-side value is rebuilt **inside** the block (the same as {@link mq.DitBlockStage}
+    calling the condition-side projection inside the block — so the calibration sees the inputs
+    of those weights).
     """
 
     def __init__(self, index: int, block: nn.Module) -> None:
@@ -813,7 +869,8 @@ class TinyStage(nn.Module):
 
 
 class BrokenStage(TinyStage):
-    """付随引数を 1 本落とした stage（同値門の検出力を実証する故障注入）。"""
+    """A stage that drops one side input (fault injection that proves the equivalence check's
+    detection power)."""
 
     def forward(self, x, cond_embed, text, speaker, caption, mask, freqs):
         block = getattr(self, self.child)
@@ -829,10 +886,10 @@ def tiny_stages(graph: TinyGraph, stage_cls: type[TinyStage] = TinyStage) -> tup
 def tiny_reference(
     context_graph: TinyContextGraph, graph: TinyGraph, steps: int, forwards_per_step: int
 ) -> list[int]:
-    """`pipeline_ref.run_case` / `_euler` と同じ形の参照ループ。
+    """A reference loop shaped like `pipeline_ref.run_case` / `_euler`.
 
-    条件側の値は**生成 1 回**だけ `dit-context` で作り（ADR 0114）、step 内の forward は
-    **同じ `x_t`** を使い回す。
+    The condition-side values are built by `dit-context` **once per generation** (ADR 0114), and
+    the forwards within a step reuse **the same `x_t`**.
     """
     torch.manual_seed(7)
     seen: list[int] = []
@@ -863,13 +920,15 @@ class TestCalibConfigTable:
         assert all(name in mq.RECIPES for name in mq.CALIB_NAMES)
 
     def test_every_calibrated_config_rounds_only_the_dit_role(self):
-        """校正は DiT block の linear だけ — 直交性の門の期待値がそこから出る。"""
+        """Calibration covers only the linears of the DiT blocks — the orthogonality check's
+        expectation follows from that."""
         for name in mq.CALIB_NAMES:
             assert mq.RECIPES[name].roles == (ex.TARGET_DIT,)
             assert mq.RECIPES[name].op_types == (nn.Linear,)
 
     def test_a_calibrated_config_is_not_a_w4_method_config(self):
-        """`method` と `calib` は排他 — 両方立つと役割一括の経路にも入ってしまう。"""
+        """`method` and `calib` are exclusive — with both set it would also take the whole-role
+        path."""
         for recipe in mq.RECIPES.values():
             assert recipe.method is None or recipe.calib is None
 
@@ -880,7 +939,8 @@ class TestCalibConfigTable:
         assert all(config.grid.fit_stride == 1 for config in mq.CALIB_CONFIGS)
 
     def test_the_calibrated_grids_project_to_the_same_bpw_as_the_methods(self):
-        """校正は格子を 1 バイトも変えない — rtn / nf4 は方式側と同じ 5.0 bpw。"""
+        """Calibration does not change the grid by a single byte — rtn / nf4 are 5.0 bpw, the
+        same as the methods."""
         counts = mq.TargetCounts(modules=2, channels=8, elements=384)
 
         for name in ("gptq-rtn", "gptq-nf4"):
@@ -888,21 +948,24 @@ class TestCalibConfigTable:
             assert mq.project_size(config, counts, 2).bits_per_weight == 5.0
 
     def test_the_calibrated_codebook_costs_one_table_per_layer(self):
-        """core の `kmeans_shared` は**層内**の表（役割ごとに 1 枚の kmeans:shared とは別式）。"""
+        """core's `kmeans_shared` is a **per-layer** table (a different formula from
+        kmeans:shared with one table per role)."""
         counts = mq.TargetCounts(modules=2, channels=8, elements=384)
         config = next(item for item in mq.CALIB_CONFIGS if item.name == "gptq-kmeans")
 
         assert mq.project_size(config, counts, 2).bits == 5.0 * 384 + mq.CODEBOOK_BITS * 2
 
     def test_a_fit_stride_on_a_calibrated_config_is_fail_loudly(self):
-        """MUST: 効かないノブを黙って無視しない（表の射程が層内なので全量 fit で足りる）。"""
-        with pytest.raises(SystemExit, match="校正付き構成"):
+        """MUST: do not silently ignore a knob that has no effect (the table's reach is one
+        layer, so a full fit is enough)."""
+        with pytest.raises(SystemExit, match="calibrated configurations"):
             mq.check_fit_stride(mq.RECIPES["gptq-kmeans"], 3)
 
 
 class TestCalibTargets:
     def test_the_scan_keys_are_model_wide_fqns(self):
-        """台帳のキーを `Int4Report` と同じ FQN 空間へ揃える（core の `StageSpec` の契約）。"""
+        """The ledger keys are in the same FQN space as `Int4Report` (the contract of core's
+        `StageSpec`)."""
         scan, counts = mq.calib_targets(tiny_stages(TinyGraph()))
 
         assert sorted(scan)[:2] == [
@@ -912,20 +975,22 @@ class TestCalibTargets:
         assert counts.modules == 4
 
     def test_a_weight_off_the_group_grid_is_fail_loudly(self):
-        """MUST: 除外して進まない — stage 単位の駆動では過不足一致門が張れなくなる。"""
+        """MUST: do not exclude and carry on — when driven per stage, the exact-coverage check
+        could no longer be set up."""
         stages = ((mq.DIT_BLOCK_PREFIX, nn.Linear(12, 4, bias=False)),)
 
-        with pytest.raises(SystemExit, match="割り切れない"):
+        with pytest.raises(SystemExit, match="is not divisible by g32"):
             mq.calib_targets(stages)
 
     def test_stages_without_a_linear_are_fail_loudly(self):
-        with pytest.raises(SystemExit, match="1 本も無い"):
+        with pytest.raises(SystemExit, match="has not a single quantizable weight"):
             mq.calib_targets(((mq.DIT_BLOCK_PREFIX, nn.LayerNorm(8)),))
 
 
 class TestCatcher:
     def test_it_takes_one_batch_per_step_not_per_forward(self):
-        """CFG の uncond forward は**同じ `x_t`** を受ける — step を数えるのはその同一性。"""
+        """CFG's uncond forwards receive **the same `x_t`** — that identity is what counts the
+        steps."""
         context, graph = tiny_pair()
 
         batches, _probe = mq.capture_case_batches(
@@ -935,7 +1000,8 @@ class TestCatcher:
         assert len(batches) == 3
 
     def test_the_keyword_arguments_carry_the_whole_side_input(self):
-        """条件（norm 済み）は `dit-context` から、マスクと RoPE 表は `dit` の forward から採る。"""
+        """The (normed) conditions come from `dit-context`, the mask and the RoPE table from the
+        forward of `dit`."""
         context, graph = tiny_pair()
 
         batches, _probe = mq.capture_case_batches(
@@ -947,7 +1013,8 @@ class TestCatcher:
         assert torch.equal(kwargs["freqs"], graph.rope_table[: int(hidden.shape[1])])
 
     def test_the_limit_cuts_the_reference_loop_short(self):
-        """捕まえ切ったら畳む — `run_case` は CFG 有りの後にもう 1 周回すので混ざらせない。"""
+        """Stop once enough is captured — `run_case` runs one more pass after the one with CFG,
+        so do not let it mix in."""
         context, graph = tiny_pair()
         seen: list[int] = []
 
@@ -956,7 +1023,7 @@ class TestCatcher:
         )
 
         assert len(batches) == 2
-        assert len(seen) == 0  # 番兵で抜けるので参照ループは最後まで走らない
+        assert len(seen) == 0  # the sentinel exits, so the reference loop does not run to the end
 
     def test_the_hooks_are_removed_even_though_the_loop_was_aborted(self):
         context, graph = tiny_pair()
@@ -974,11 +1041,12 @@ class TestCatcher:
     def test_a_loop_that_never_reaches_the_graph_is_fail_loudly(self):
         context, graph = tiny_pair()
 
-        with pytest.raises(SystemExit, match="1 step も"):
+        with pytest.raises(SystemExit, match="even 1 step"):
             mq.capture_case_batches(context, graph, lambda: None, limit=4)
 
     def test_a_dit_forward_before_the_context_graph_is_fail_loudly(self):
-        """条件（norm 済み）を捕まえる前に `dit` が回る形 — 前のケースの条件を黙って流用しない。"""
+        """`dit` runs before the (normed) conditions are captured — do not silently reuse the
+        previous case's conditions."""
         context, graph = tiny_pair()
         x_t = torch.randn(1, 4, graph.features)
 
@@ -991,7 +1059,7 @@ class TestCatcher:
                     *(torch.randn(1, graph.features) for _ in graph.blocks),
                 )
 
-        with pytest.raises(SystemExit, match="dit-context より先に"):
+        with pytest.raises(SystemExit, match="dit ran before dit-context"):
             mq.capture_case_batches(context, graph, dit_only, limit=4)
 
 
@@ -1005,24 +1073,27 @@ class TestStageSplitGate:
         mq.assert_stage_split_matches_graph(graph, probe, batches[0], tiny_stages(graph))
 
     def test_a_split_that_drops_a_side_input_is_fail_loudly(self):
-        """MUST: 写しがずれたら落とす — ずれた経路の GPTQ は数字からは読めない。"""
+        """MUST: fail when the copy diverges — GPTQ on a diverged path cannot be read from the
+        numbers."""
         context, graph = tiny_pair()
         batches, probe = mq.capture_case_batches(
             context, graph, lambda: tiny_reference(context, graph, 1, 1), limit=1
         )
 
-        with pytest.raises(SystemExit, match="ビット一致しない"):
+        with pytest.raises(SystemExit, match="not bit-identical"):
             mq.assert_stage_split_matches_graph(
                 graph, probe, batches[0], tiny_stages(graph, BrokenStage)
             )
 
 
 class TestDitBlockStageOnTheRealModules:
-    """{@link mq.DitBlockStage} の写しが、上流の実モジュールで組んだ配布ラッパ 2 本とビット一致。
+    """The copy in {@link mq.DitBlockStage} is bit-identical to the two distribution wrappers
+    built from upstream's real modules.
 
-    DiT を割った（ADR 0114）後も校正の stage は block 丸ごとで、条件側の射影を block の**中で**
-    計算し直す — その経路が「`dit-context` の出力を入力で受ける `dit`」と同じ値を出すことを、
-    小さな実物 DiT（`irodori/tests/test_export.py` と同じ組み方）で実測する。
+    Even after the DiT split (ADR 0114) the calibration stage is the whole block and recomputes
+    the condition-side projection **inside** the block — this checks with a small real DiT (built
+    as in `irodori/tests/test_export.py`) that this path gives the same values as "`dit` taking
+    the output of `dit-context` as input".
     """
 
     def test_the_stage_split_reproduces_the_dit_graph_bit_for_bit(self, restore_forward):
@@ -1046,9 +1117,10 @@ class TestDitBlockStageOnTheRealModules:
         stages = mq.dit_stages(wrappers.dit)
 
         mq.assert_stage_split_matches_graph(wrappers.dit, probe, batches[0], stages)
-        # 校正の stage は block 丸ごと — 条件側の射影も入る（配布では `dit-context` の容器へ載る
-        # 側）。小さな構成は g32 に揃えていないので、走査の門（`calib_targets`）ではなく対象の
-        # 列挙そのもので見る。
+        # The calibration stage is the whole block — the condition-side projections are included
+        # too (the side that goes into the `dit-context` container in the distribution). The small
+        # config is not aligned to g32, so this looks at the target enumeration itself rather
+        # than the scan check (`calib_targets`).
         scanned = {
             f"{prefix}.{local}"
             for prefix, stage in stages
@@ -1102,13 +1174,14 @@ class TestCalibrationRun:
         assert "gptq-rtn" in reports[ex.TARGET_DIT]
 
     def test_a_scan_the_calibration_missed_is_fail_loudly(self):
-        """MUST: 丸め漏れは品質が**良い側**へ出る — 数字から読めないので門が唯一の検出手段。"""
+        """MUST: a missed rounding shows as **better** quality — the numbers cannot reveal it, so
+        the check is the only way to detect it."""
         torch.manual_seed(5)
         graph = TinyGraph()
         rig = _tiny_rig(graph)
         _reports, report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
 
-        with pytest.raises(SystemExit, match="一致しない"):
+        with pytest.raises(SystemExit, match="which does not match the"):
             mq.assert_calib_covers_scan(
                 report, {**rig.scan, "blocks.9.mlp.weight": torch.zeros(1)}, "gptq-rtn"
             )
@@ -1118,10 +1191,12 @@ class TestLoadModules:
     def test_it_reads_the_upstream_checkpoint_not_the_exported_container(
         self, tmp_path, monkeypatch
     ):
-        """上流チェックポイント（`ex.CHECKPOINT_FILE`）と出力容器（`ex.MODEL_FILE`）は別の事実。
+        """The upstream checkpoint (`ex.CHECKPOINT_FILE`) and the output container
+        (`ex.MODEL_FILE`) are separate things.
 
-        計測は上流の重みから 9 本を組むので、読み先が出力の `model.krm` だと実重みでは起動直後に
-        落ちる（実重みを要らないここでは、読み先の path だけを観測する）。
+        The measurement builds the 9 modules from upstream's weights, so reading the output
+        `model.krm` instead would fail right at startup with the real weights (here, without
+        real weights, only the path read is observed).
         """
         opened: list[str] = []
 

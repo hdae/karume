@@ -1,20 +1,23 @@
-"""gemma4 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""The model card (`README.md`) of the gemma4 distribution — a pure function derived by machine
+from the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **gemma4 固有の事実**だけ: 帰属（出所・ライセンス）と、
-この pipeline のカードに何を書くか。
+The general-purpose rendering parts (frontmatter, model list, quant table, assembling the
+sections) live in `karume.modelcard`. What lives here is **the gemma4-specific facts** only:
+attribution (source, license) and what this pipeline's card says.
 
-帰属は**モデル名から一意に決まる**（{@link GEMMA4_UPSTREAM}）ので、プロファイルの軸には
-割らない — 分けると「別のチェックポイントを別の帰属で配る」取り違えを操作者が起こせる。
+Attribution is **determined by the model name alone** ({@link GEMMA4_UPSTREAM}), so it is not
+split into a profile axis — splitting it would let an operator make the mix-up "ship another
+checkpoint under another attribution".
 
-ライセンス方針（2026-09-01 のユーザー裁定 — `gemma4/README.md` 冒頭）: 上流は **Apache 2.0** で、
-カードは Apache 2.0 の帰属とライセンス文へのリンクを持ち、**使われ方の詳細は上流モデルカードへ
-誘導する**（このプロジェクトが keep する情報ではない）。再配布条件のファイル（`LICENSE.md` /
-`NOTICE.md`）はカードではなく `gemma4.distribution.gemma4_root_files` が配布リポ直下へ置く。
+License policy (the maintainer's ruling of 2026-09-01 — the top of `gemma4/README.md`): upstream
+is **Apache 2.0**, and the card carries the Apache 2.0 attribution and a link to the license text,
+and **points to the upstream model card for the details of use** (this project does not keep that
+information). The files with the redistribution terms (`LICENSE.md` / `NOTICE.md`) are placed at
+the distribution repository's root by `gemma4.distribution.gemma4_root_files`, not by the card.
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies unchanged). The only constants this module may hold
+are facts that **do not exist in the manifest**.
 """
 
 from __future__ import annotations
@@ -39,22 +42,24 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 GEMMA4_SUPPORTED_PIPELINE = "gemma4/1"
 
-#: HF の pipeline tag。配布形が持つのは**テキストデコーダだけ**なので、上流カードの
-#: `any-to-any`（画像・音声タワー込み）は名乗れない。
+#: The HF pipeline tag. The distribution carries **only the text decoder**, so it cannot claim the
+#: upstream card's `any-to-any` (which includes the image and audio towers).
 GEMMA4_PIPELINE_TAG = "text-generation"
 
-#: 題は**この配布形が何を持つか**だけを名乗る。MUST: モデルの綴り（`E2B` など）を焼かない —
-#: gemma4 は家族 1 リポ（ADR 0092 決定 1）で manifest に並ぶモデルは増えうるので、題が 1 つの
-#: モデルを名乗ると別のモデルを足した日に嘘になる。名乗るべき綴りは
-#: {@link _gemma4_upstream_spellings} が manifest から引く。
+#: The title names only **what this distribution carries**. MUST: do not bake a model's spelling
+#: (`E2B` and the like) into it — gemma4 is one repository per family (ADR 0092 decision 1) and the
+#: models listed in the manifest can grow, so a title that names one model becomes false on the day
+#: another model is added. The spellings to name are read from the manifest by
+#: {@link _gemma4_upstream_spellings}.
 GEMMA4_TITLE = "Gemma 4 Text Decoder — Karume"
 
-#: モデル名 → 上流チェックポイントの HF リポ ID。**この 1 表が「どのモデルが何の重みか」の
-#: 唯一の事実**で、`gemma4.distribution` は系列名 / 入力素材のディレクトリ名をここから導く。
-#: 載っていないモデル名は帰属を書けないので、カードは描かずに落ちる。
+#: Model name → the HF repository ID of the upstream checkpoint. **This one table is the only
+#: record of "which model is which weights"**, and `gemma4.distribution` derives the series names /
+#: input directory names from it. A model name it does not list cannot be attributed, so the card
+#: fails instead of rendering.
 GEMMA4_UPSTREAM: Mapping[str, str] = {
     "e2b": "google/gemma-4-E2B-it",
     "e4b": "google/gemma-4-E4B-it",
@@ -122,54 +127,59 @@ GEMMA4_FRONT_ENDS: Mapping[str, str] = {
     "12b": "encoder-free vision and audio embedders",
 }
 
-#: MTP drafter の weights の役割名（manifest の `weights` のキー）。カードは「drafter を
-#: 運んでいるモデル」を manifest のこのキーから引くので、綴りの正本をここに置き、
-#: `gemma4.distribution` が import する（distribution → card の一方向を保つため）。
+#: The role name of the MTP drafter's weights (the key in the manifest's `weights`). The card reads
+#: "the models that carry a drafter" from this manifest key, so the canonical spelling lives here
+#: and `gemma4.distribution` imports it (to keep the distribution → card direction one-way).
 GEMMA4_DRAFTER_ROLE = "drafter"
 #: The main model's weights role (the spelling `gemma4.distribution.GEMMA4_ROLE` imports — the card
 #: reads the storage of the main model from it, {@link _gemma4_storage_lines}).
 GEMMA4_MODEL_ROLE = "model"
 
-#: モデル名 → MTP drafter の上流（ADR 0096 段 2）。帰属表（モデル名 → 上流）とは別の席で
-#: 持つ — `e2b` 1 モデルが 2 つの上流チェックポイントから出来ているため。**この表に無い
-#: モデルは drafter を配らない**（`gemma4.distribution` が drafter 役の有無をここから決める —
-#: E4B の drafter は未対応）。再配布している以上 Apache 2.0 §4(b) の告知対象で、綴りの正本は
-#: ここ 1 箇所（`gemma4.export_drafter.ASSISTANT_REPO` / `NOTICE.md` の散文と同じもの）。
+#: Model name → the upstream of its MTP drafter (ADR 0096 step 2). Kept apart from the attribution
+#: table (model name → upstream) — the one model `e2b` is built from two upstream checkpoints.
+#: **A model not in this table ships no drafter** (`gemma4.distribution` decides from this table
+#: whether the drafter role exists — E4B's drafter is not supported). Being redistributed, it falls
+#: under the Apache 2.0 §4(b) notice, and this is the one place of the canonical spelling (the same
+#: one as `gemma4.export_drafter.ASSISTANT_REPO` / the prose of `NOTICE.md`).
 GEMMA4_DRAFTER_UPSTREAM: Mapping[str, str] = {"e2b": "google/gemma-4-E2B-it-assistant"}
 
-#: ライセンス（実地確認 2026-09-01 — チェックポイント snapshot の README frontmatter が
-#: `license: apache-2.0` を名乗り、その `license_link` 先が Apache 2.0 の本文を載せている）。
+#: License (checked first-hand on 2026-09-01 — the README frontmatter of the checkpoint snapshot
+#: says `license: apache-2.0`, and its `license_link` target carries the Apache 2.0 text).
 GEMMA4_LICENSE = "apache-2.0"
 GEMMA4_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
 GEMMA4_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 
 def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
-    """frontmatter を manifest に並んだモデルから組む（`base_model` は再配布する上流の全部）。
+    """Build the frontmatter from the models listed in the manifest (`base_model` is every
+    redistributed upstream).
 
-    MUST: 未知のモデル名では描かない — 帰属の表に無いモデルを黙って落とすと、`base_model` が
-    1 つ足りないカード（= 出所を名乗っていない再配布）が静かに出る。
+    MUST: do not render for an unknown model name — silently dropping a model missing from the
+    attribution table quietly emits a card one `base_model` short (= a redistribution that does
+    not name its source).
     """
     upstream: list[str] = []
     for name in manifest["models"]:
         if name not in GEMMA4_UPSTREAM:
             raise ValueError(
-                f"モデル '{name}' の上流が帰属表に無い（既知: {sorted(GEMMA4_UPSTREAM)}）"
-                " — 出所を名乗れないカードは描かない"
+                f"model '{name}' has no upstream in the attribution table"
+                f" (known: {sorted(GEMMA4_UPSTREAM)}) — a card that cannot name its source is not"
+                " drawn"
             )
         upstream.append(GEMMA4_UPSTREAM[name])
-    # MUST: drafter の上流も `base_model` に載せる — 再配布しているのは 2 本で、片方を
-    # 落とすと「出所を名乗っていない再配布」になる（`GEMMA4_DRAFTER_UPSTREAM` の MUST）。
-    # 逆に drafter を運んでいないモデルの drafter は名乗らない（配っていない上流を出所に書かない）。
+    # MUST: the drafter's upstream goes into `base_model` too — two checkpoints are redistributed,
+    # and dropping one is "a redistribution that does not name its source" (the MUST of
+    # `GEMMA4_DRAFTER_UPSTREAM`). Conversely, the drafter of a model that carries none is not named
+    # (an upstream that is not shipped is not written as a source).
     upstream.extend(_gemma4_drafter_upstreams(manifest))
     return CardMetadata(
         pipeline_tag=GEMMA4_PIPELINE_TAG,
         base_model=tuple(upstream),
         base_model_relation=_gemma4_relation(manifest),
         license=GEMMA4_LICENSE,
-        # NOTE: `license_link` は HF が `license: other` のときに読む席だが、**上流カード自身が
-        # SPDX 識別子と併記している**綴りへ揃える（読み手が上流と同じ 1 本のライセンス URL へ
-        # 辿り着けることを優先した — 2026-09-01 のライセンス方針）。
+        # NOTE: `license_link` is the field HF reads with `license: other`, but it is set to the
+        # spelling **the upstream card itself writes next to the SPDX identifier** (so that readers
+        # reach the same single license URL as upstream — the 2026-09-01 license policy).
         license_link=GEMMA4_LICENSE_LINK,
         tags=(GEMMA4_PIPELINE_TAG, "webgpu", "gemma", "llm"),
     )
@@ -189,13 +199,16 @@ def _gemma4_relation(manifest: Mapping[str, Any]) -> str | None:
 
 
 def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
-    """manifest が drafter を**実際に運んでいる**モデルの drafter 上流（モデルの並び順）。
+    """The drafter upstreams of the models whose manifest entry **actually carries** a drafter
+    (in the models' order).
 
-    drafter の有無はモデルごとに違う（E4B は drafter 無し）ので、有無は manifest の
-    `weights` から引く（カードの数値・事実は manifest から導く MUST — モジュール docstring）。
+    Whether a drafter exists differs per model (E4B has none), so it is read from the manifest's
+    `weights` (the MUST that the card's numbers and facts come from the manifest — module
+    docstring).
 
-    MUST: drafter を運んでいるのに上流表に無いモデルでは描かない — 出所を名乗れない
-    再配布になる（{@link _gemma4_metadata} の帰属表の門と同じ理由）。
+    MUST: do not render for a model that carries a drafter but is not in the upstream table — it
+    would be a redistribution that cannot name its source (the same reason as the attribution
+    table's check in {@link _gemma4_metadata}).
     """
     upstream: list[str] = []
     for name, model in manifest["models"].items():
@@ -203,8 +216,9 @@ def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
             continue
         if name not in GEMMA4_DRAFTER_UPSTREAM:
             raise ValueError(
-                f"モデル '{name}' は drafter を運んでいるが、drafter の上流が表に無い"
-                f"（既知: {sorted(GEMMA4_DRAFTER_UPSTREAM)}）— 出所を名乗れないカードは描かない"
+                f"model '{name}' carries a drafter, but its drafter upstream is not in the table"
+                f" (known: {sorted(GEMMA4_DRAFTER_UPSTREAM)}) — a card that cannot name its source"
+                " is not drawn"
             )
         upstream.append(GEMMA4_DRAFTER_UPSTREAM[name])
     return upstream
@@ -213,12 +227,14 @@ def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
 def _gemma4_upstream_spellings(
     manifest: Mapping[str, Any], upstream: Mapping[str, str] = GEMMA4_UPSTREAM
 ) -> str:
-    """散文が名乗る上流の綴り — **この配布形が実際に運んでいるモデル**だけを manifest から引く。
+    """The upstream spellings the prose names — read from the manifest for **the models this
+    distribution actually carries** only.
 
     `upstream` is the line's attribution table (the base models for the regular line, the QAT
     checkpoints for the q4_0 QAT line — {@link GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM}).
 
-    MUST: 散文にモデルの綴りを焼かない（{@link GEMMA4_TITLE} の MUST と同じ理由）。
+    MUST: do not bake model spellings into the prose (the same reason as {@link GEMMA4_TITLE}'s
+    MUST).
     """
     return " / ".join(f"`{upstream[name]}`" for name in manifest["models"])
 
@@ -342,7 +358,8 @@ def _gemma4_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
-    """帰属節。使われ方（能力・制限・安全性・評価）は**上流カードへ誘導する**。"""
+    """The attribution section. Use (capabilities, limitations, safety, evaluation) is **left to
+    the upstream card**."""
     lines = [
         "## Base weights and attribution",
         "",
@@ -390,12 +407,13 @@ _GEMMA4_CHANGES: tuple[str, ...] = (
 def _gemma4_usage(
     manifest: Mapping[str, Any], repo: str, extra_options: Sequence[str] = ()
 ) -> list[str]:
-    """Usage 例。**動く最小形**（`fromPretrained` → `chat`）を 1 本だけ出し、普通に触りそうな
-    optional はコメントアウトで併記する（選べる値は manifest から機械導出）。
+    """The usage example. Shows one **minimal working form** (`fromPretrained` → `chat`), with the
+    options one would commonly touch alongside as comments (the selectable values derived from the
+    manifest by machine).
 
     `extra_options` is the line's own commented-out option lines, after `model` / `quant`.
 
-    NOTE: `fromAssets` は案内しない（2026-08-29 裁定 — 全 family 共通）。
+    NOTE: `fromAssets` is not shown (ruling of 2026-08-29 — the same for every family).
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -443,10 +461,12 @@ def _gemma4_usage(
 
 
 def _gemma4_device_limits(quants: Mapping[str, Mapping[str, Any]]) -> str:
-    """`requiredLimits` を上限名ごとに畳む（全 quant で値が同じなら名前 1 回・値 1 つ）。
+    """Fold `requiredLimits` per limit name (one name and one value when every quant has the same
+    value).
 
-    値が quant 間で割れたとき（その上限を宣言しない quant があるときも含む）だけ、値ごとに
-    quant 名を添える — 畳んだ 1 つの値を「全席の上限」と読ませない。
+    Only when the value splits between quants (including a quant that does not declare that
+    limit) is each value given with its quant names — a single folded value must not read as "the
+    limit of every seat".
     """
     names = dict.fromkeys(
         name for quant in quants.values() for name in quant.get("requiredLimits", {})
@@ -469,7 +489,8 @@ def _gemma4_device_limits(quants: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def _gemma4_generation(model: Mapping[str, Any]) -> list[str]:
-    """この配布形の生成側の宣言（利用者が渡すもの・上限・推奨既定がここで読める）。"""
+    """The generation-side declarations of this distribution (what the user passes, the limits and
+    the recommended defaults are readable here)."""
     config = model["pipelineConfig"]
     sampler = config["sampler"]
     limits = _gemma4_device_limits(model["quants"])
@@ -497,7 +518,8 @@ def _gemma4_generation(model: Mapping[str, Any]) -> list[str]:
 def render_gemma4_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
-    """gemma4 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Build the body of the gemma4 distribution's `README.md` (a pure function, trailing
+    newline)."""
     require_pipeline(manifest, GEMMA4_SUPPORTED_PIPELINE)
     metadata = _gemma4_metadata(manifest)
     return render(

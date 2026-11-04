@@ -1,16 +1,20 @@
-"""系列の移行ドライバ（`migrate_series`）— 合成の系列で不変条件を固定する。
+"""The series migration driver (`migrate_series`) — its invariants pinned on synthetic series.
 
-被験体は合成の**正当な旧配布形**（`legacy_writer.legacy_shards` が旧規約で焼く shard 列）を
-実在の family のレイアウトどおりに並べたもの。family を偽物にしないのは、このドライバの仕事が
-まさに「どのディレクトリがどの部品名か」を family の表から引くことだから — 偽の family を
-足して通すと、表そのものの綻びを見ない恒真な門になる。
+The subject is a synthetic **valid old distribution** (the shard list `legacy_writer.legacy_shards`
+writes under the old convention), laid out like a real family. The families are not faked because
+this driver's job is precisely to look up "which directory is which component name" in the family
+table — passing a fake family would make a vacuous check that never sees a flaw in the table
+itself.
 
-見るのは 4 つ:
+4 things are checked:
 
-1. `krm` が据わり、容器の**グラフ名が weights のキー**である（ディレクトリ名ではない）。
-2. golden（`io.*`）・旧 shard・`*.json` は **1 バイトも動かない**（移行は読むだけ）。
-3. sidecar（`rope_base` / PLE）が**ビット同一**で容器の資産になる。
-4. 分類できない系列・表に無い部品・畳み先の無い `.safetensors` は fail loudly。
+1. A `krm` is placed, and the container's **graph name is the weights key** (not the directory
+   name).
+2. Goldens (`io.*`), old shards and `*.json` **do not change by a single byte** (the migration
+   only reads them).
+3. Sidecars (`rope_base` / PLE) become container assets **bit-identical**.
+4. A series that cannot be classified, a component not in the table and a `.safetensors` with
+   nowhere to fold into fail loudly.
 """
 
 from __future__ import annotations
@@ -35,19 +39,21 @@ from karume.container import container_parts, read_container
 from karume.migrate import MigrateError
 from karume.ple import PLE_INDEX_ASSET
 
-#: 旧 shard 列の代表ファイル名（どの family も同じ綴り）。
+#: The representative file name of an old shard list (the same spelling in every family).
 COMPONENT = f"{migrate_series.SHARD_STEM}{migrate_series.SHARD_SUFFIX}"
 
-#: golden の 1 本（移行が触らないことを見るための同居ファイル）。
+#: One golden (a file placed alongside to check that the migration does not touch it).
 GOLDEN = "io.case0.safetensors"
 
-#: 配布形に載らない部品名（golden 検証専用の単体グラフ — `sbv2/distribution.py` のモジュール
-#: doc）。ドライバの表には在るが、どの `<family>/distribution.py` の weights にも居ない。
+#: Component names that are not in the distribution (single graphs only for golden verification —
+#: the module doc of `sbv2/distribution.py`). They are in the driver's table but in the weights of
+#: no `<family>/distribution.py`.
 GOLDEN_ONLY_ROLES: frozenset[str] = frozenset({"dp", "flow", "dec"})
 
 
 def place(directory: Path, *, mark: str, groups: int = 2) -> dict[str, bytes]:
-    """旧 shard 列 + golden 1 本を置き、**置いた時点のバイト列**を返す（不変の突合用）。"""
+    """Place an old shard list + one golden and return **the bytes as placed** (for matching the
+    invariance)."""
     stage_shards(directory, COMPONENT, legacy_shards(mark=mark, groups=groups))
     (directory / GOLDEN).write_bytes(b"golden-" + mark.encode())
     return {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
@@ -58,19 +64,20 @@ def run(root: Path, *extra: str) -> None:
 
 
 def graph_names(component: Path) -> list[str]:
-    """据わった容器が名乗るグラフ名（読み直して引く — 計画の写しではない）。"""
+    """The graph names the placed container claims (read back — not a copy of the plan)."""
     read = read_container(list(container_parts(component)))
     return sorted(read.graph.graphs)
 
 
 def assert_untouched(directory: Path, before: dict[str, bytes]) -> None:
-    """移行の前に在ったファイルが 1 バイトも動いていないこと。"""
+    """The files that existed before the migration have not changed by a single byte."""
     for name, payload in before.items():
         assert (directory / name).read_bytes() == payload, name
 
 
 def _write_reference(series: Path, *, shards: int, schema: int = REFERENCE_SCHEMA - 1) -> None:
-    """QAT 系列の旧世代 `reference.json`（`pleShards` を持ち `pleBlocks` を持たない）。"""
+    """The old-generation `reference.json` of a QAT series (it has `pleShards` and no
+    `pleBlocks`)."""
     (series / migrate_series.QAT_REFERENCE_FILE).write_text(
         json.dumps(
             {
@@ -90,7 +97,8 @@ def _write_reference(series: Path, *, shards: int, schema: int = REFERENCE_SCHEM
 
 
 class TestFlatSeries:
-    """系列直下に 1 部品を置く family（部品名は系列名と綴りが違う）。"""
+    """Families that put one component directly under the series (the component name is spelled
+    differently from the series name)."""
 
     def test_the_graph_is_named_after_the_weights_key(self, tmp_path: Path) -> None:
         series = tmp_path / "vowel-detector-fixture"
@@ -115,7 +123,8 @@ class TestFlatSeries:
 
 
 class TestNestedSeries:
-    """サブディレクトリに部品が並ぶ family（ディレクトリ名 ≠ 部品名の実例）。"""
+    """Families whose components sit in subdirectories (real cases of directory name ≠ component
+    name)."""
 
     def test_the_hyphenated_directory_becomes_the_underscored_key(self, tmp_path: Path) -> None:
         series = tmp_path / "irodori-fixture"
@@ -141,7 +150,8 @@ class TestNestedSeries:
             assert graph_names(series / variant / "model.krm") == ["text_encoder"]
 
     def test_the_speaker_name_and_the_rate_label_are_stripped(self, tmp_path: Path) -> None:
-        """sbv2 は系列名が `sbv2-<話者>-<格納>` で、部品名はサブディレクトリ側にある。"""
+        """sbv2's series name is `sbv2-<speaker>-<storage>`, and the component name is on the
+        subdirectory side."""
         series = tmp_path / "sbv2-F1-i8"
         place(series / "front", mark="front")
         place(series / "voice", mark="voice")
@@ -155,12 +165,14 @@ class TestNestedSeries:
     def test_the_provenance_is_looked_up_by_the_speaker_alone(
         self, series: str, expected: str
     ) -> None:
-        """出所（ライセンスと上流の版）は話者ごとに違う — 剥がし方が唯一の引き当て。"""
+        """The provenance (license and upstream revision) differs per speaker — how the name is
+        stripped is the only lookup."""
         assert migrate_series.sbv2_model(series) == expected
 
 
 class TestTheInputCheckpointOfAFlatSeries:
-    """系列直下形の出所は、その系列を焼いた checkpoint の実物から引く（台本と同じ 1 本）。"""
+    """The provenance of a flat series is read from the checkpoint that built it (the same one as
+    the script's)."""
 
     @pytest.mark.parametrize(
         ("series", "expected"),
@@ -179,7 +191,8 @@ class TestTheInputCheckpointOfAFlatSeries:
         assert migrate_series.input_checkpoint(tmp_path, series) == tmp_path / expected
 
     def test_a_series_without_its_checkpoint_stops(self, tmp_path: Path) -> None:
-        """出所を導けない系列は移さない（別の checkpoint の出所を名乗る容器を作らない）。"""
+        """A series whose provenance cannot be derived is not migrated (no container that claims
+        another checkpoint's provenance is made)."""
         (tmp_path / "Depth-Anything-V2-Base-hf").mkdir()
 
         with pytest.raises(migrate_series.SeriesMigrationError, match="一意に決まらない"):
@@ -187,10 +200,12 @@ class TestTheInputCheckpointOfAFlatSeries:
 
 
 class TestTheOrderOfTheFamilyTable:
-    """判定の順序と接尾の分岐（表の中で唯一「条件が入る」3 か所）。"""
+    """The order of matching and the suffix branches (the only 3 places in the table that hold a
+    condition)."""
 
     def test_a_qat_series_is_not_eaten_by_the_plain_gemma_entry(self, tmp_path: Path) -> None:
-        """`gemma4-qat-*` は `gemma4-` の接頭辞を共有する — 表の並びが逆だと qat が消える。"""
+        """`gemma4-qat-*` shares the `gemma4-` prefix — with the table in the reverse order the qat
+        entry would vanish."""
         series = tmp_path / "gemma4-qat-fixture-product"
         place(series, mark="qat")
         legacy_ple_sidecar(series)
@@ -202,7 +217,7 @@ class TestTheOrderOfTheFamilyTable:
         assert graph_names(series / "model.krm") == ["model"]
 
     def test_the_drafter_suffix_names_the_other_seat(self, tmp_path: Path) -> None:
-        """MTP の借り手だけが別の部品名（同じ family・同じ系列直下形）。"""
+        """Only the MTP borrower has another component name (same family, same flat layout)."""
         drafter = tmp_path / "gemma4-fixture-drafter"
         place(drafter, mark="drafter")
         product = tmp_path / "gemma4-fixture-product"
@@ -215,7 +230,7 @@ class TestTheOrderOfTheFamilyTable:
 
 
 class TestSidecarsBecomeAssets:
-    """同居する sidecar が**ビット同一**で容器の資産になる。"""
+    """The sidecars placed alongside become container assets **bit-identical**."""
 
     def test_rope_base_is_folded_byte_for_byte(self, tmp_path: Path) -> None:
         component = tmp_path / "anima-fixture-dyn" / "transformer"
@@ -224,7 +239,8 @@ class TestSidecarsBecomeAssets:
         run(tmp_path)
         container = component / "model.krm"
         assert read_asset(container, ROPE_BASE_NAME) == payload
-        # 畳んでも**元のファイルは残る**（退避はディレクトリ単位で別に行う）。
+        # Folding **keeps the original file** (moving it aside is done separately, per
+        # directory).
         assert (component / f"{ROPE_BASE_NAME}.safetensors").read_bytes() == payload
 
     def test_the_ple_sidecar_becomes_the_index_and_the_blocks(self, tmp_path: Path) -> None:
@@ -243,7 +259,8 @@ class TestSidecarsBecomeAssets:
             assert joined == payload, key
 
     def test_the_probe_is_not_folded(self, tmp_path: Path) -> None:
-        """`ple.probe.safetensors` は検収の参照であって資産ではない（畳むと配布物に混ざる）。"""
+        """`ple.probe.safetensors` is a reference for the acceptance check, not an asset (folding
+        it would mix it into the distribution)."""
         component = tmp_path / "gemma4-fixture-product"
         place(component, mark="gemma")
         legacy_ple_sidecar(component)
@@ -254,7 +271,8 @@ class TestSidecarsBecomeAssets:
 
 
 class TestGatesThatFailLoudly:
-    """移行は 1 度きりなので、決められない形は黙って通さない。"""
+    """The migration runs only once, so a shape that cannot be decided is never let through
+    silently."""
 
     def test_an_unknown_series_name_stops(self, tmp_path: Path) -> None:
         place(tmp_path / "unknown-family-fixture", mark="x")
@@ -274,7 +292,8 @@ class TestGatesThatFailLoudly:
             run(tmp_path)
 
     def test_the_diagnostic_names_the_directory_once(self, tmp_path: Path) -> None:
-        """系列直下形では `<系列>/<系列>` にならない（部品 path は系列からの相対）。"""
+        """A flat series does not become `<series>/<series>` (the component path is relative to the
+        series)."""
         component = tmp_path / "vowel-detector-fixture"
         place(component, mark="vowel")
         (component / "mel_basis.safetensors").write_bytes(b"unknown")
@@ -285,11 +304,13 @@ class TestGatesThatFailLoudly:
         assert str(raised.value).startswith("vowel-detector-fixture: 'mel_basis.safetensors'")
 
     def test_a_sidecar_only_subdirectory_is_examined_too(self, tmp_path: Path) -> None:
-        """MUST: 門は**系列の全ディレクトリ**（旧 shard 列を持たない置き場も）。
+        """MUST: the check covers **every directory of the series** (including those without an
+        old shard list).
 
-        irodori の `pipeline/` や dacvae の `host/` は golden だけを持つので部品にならない。
-        部品ディレクトリだけを見る形に戻すと、そこへ生えた新種の sidecar が黙って置き去りに
-        なる（移行は 1 度きりなので、気づく機会が後から来ない）。
+        irodori's `pipeline/` and dacvae's `host/` hold only goldens, so they are not components.
+        Going back to looking only at component directories would silently leave behind a new kind
+        of sidecar that appears there (the migration runs only once, so there is no later chance to
+        notice).
         """
         series = tmp_path / "irodori-fixture"
         place(series / "dit", mark="dit")
@@ -303,7 +324,8 @@ class TestGatesThatFailLoudly:
         assert "irodori-fixture/pipeline: 'latents.safetensors'" in str(raised.value)
 
     def test_a_series_without_any_component_still_passes_the_gate(self, tmp_path: Path) -> None:
-        """部品 0 本の系列（`anima-pipeline*` の形）でも取りこぼしは見る。"""
+        """Leftovers are checked even in a series with no component (the `anima-pipeline*`
+        shape)."""
         series = tmp_path / "anima-fixture-pipeline"
         series.mkdir()
         (series / "pipeline.safetensors").write_bytes(b"golden")
@@ -314,7 +336,7 @@ class TestGatesThatFailLoudly:
 
     @pytest.mark.parametrize("name", ["case.full.safetensors", "trim.safetensors"])
     def test_the_host_goldens_are_allowed_everywhere(self, tmp_path: Path, name: str) -> None:
-        """対（恒真でない）: 表に載っている golden は同じ置き場でも通る。"""
+        """Counterpart (not vacuous): a golden that is in the table passes in the same place."""
         series = tmp_path / "irodori-fixture"
         place(series / "dit", mark="dit")
         (series / "pipeline").mkdir()
@@ -325,10 +347,11 @@ class TestGatesThatFailLoudly:
         assert graph_names(series / "dit" / "model.krm") == ["dit"]
 
     def test_a_ple_shard_the_index_does_not_declare_stops(self, tmp_path: Path) -> None:
-        """MUST: PLE の勘定は**索引の宣言**から引く（現物の glob ではない）。
+        """MUST: the PLE count comes from **the index's declaration** (not a glob of the files).
 
-        glob で勘定すると、索引より多い現物（版を変えた再生成の残骸）が**畳まれないのに
-        門も通る** — F-7 と同じ「資産が 1 つ足りない容器」を作る経路。
+        Counting with a glob lets files beyond the index (leftovers of a regeneration at another
+        revision) **pass the check without being folded** — the same route as F-7 to "a container
+        missing one asset".
         """
         series = tmp_path / "gemma4-fixture-product"
         place(series, mark="gemma")
@@ -351,17 +374,21 @@ class TestGatesThatFailLoudly:
 
 
 class TestTheBlockSizeReachesBothPaths:
-    """資産の刻みと容器の刻みが**同じ 1 つの値**から回ること。"""
+    """The asset's block size and the container's block size come from **one and the same
+    value**."""
 
     def test_a_smaller_block_cuts_the_ple_asset_too(self, tmp_path: Path) -> None:
-        """MUST: `block_bytes` は資産の畳み込みと容器の両方へ同じ値が届く。
+        """MUST: `block_bytes` reaches both the asset folding and the container with the same
+        value.
 
-        別々に決まる形だと、寸法を差し込んだ実行で**資産だけが既定の刻みのまま**据わる
-        （容器は 1 行ごとの block、資産は 1 本の block という食い違った器ができる）。
+        If they were decided separately, a run with an injected size would place **only the asset
+        at the default block size** (a mismatched result: the container in per-row blocks, the
+        asset in a single block).
         """
         series = tmp_path / "gemma4-fixture-product"
         place(series, mark="gemma")
-        # 行 512 バイト × 16 token の PLE（既定の刻みでは 1 block に収まる大きさ）。
+        # A PLE of 512-byte rows × 16 tokens (small enough to fit in one block at the default
+        # size).
         ple = legacy_ple_sidecar(series, tokens=16, layers=8, dim=64)
         plan = migrate_series.plan_series(series)
         row_bytes = len(ple.payloads["values"]) // ple.tokens
@@ -376,7 +403,8 @@ class TestTheBlockSizeReachesBothPaths:
 
 
 class TestTheQatReferenceFollowsTheAssets:
-    """QAT 系列の `reference.json` は「触らないもの」の唯一の例外（裁定 2）。"""
+    """The `reference.json` of a QAT series is the only exception to "left untouched" (ruling
+    2)."""
 
     def _migrate(self, tmp_path: Path, *, shards: int = 1) -> Path:
         series = tmp_path / "gemma4-qat-fixture-product"
@@ -387,7 +415,8 @@ class TestTheQatReferenceFollowsTheAssets:
         return series
 
     def test_the_shard_count_becomes_the_block_count(self, tmp_path: Path) -> None:
-        """MUST: shard 本数は畳んだ後どこにも無い数（block の切り方は shard 境界を無視する）。"""
+        """MUST: the shard count is a number found nowhere after folding (the block split ignores
+        the shard boundaries)."""
         series = self._migrate(tmp_path)
 
         record = json.loads(
@@ -400,7 +429,8 @@ class TestTheQatReferenceFollowsTheAssets:
         assert record[migrate_series.QAT_BLOCKS_FIELD] == len(index["values"]["blocks"])
 
     def test_the_other_fields_and_their_order_stay_put(self, tmp_path: Path) -> None:
-        """移行は値を 1 ビットも変えない — 現物と突き合わせる数はそのまま正しい。"""
+        """The migration changes no value by a single bit — the numbers matched against the files
+        stay correct."""
         series = self._migrate(tmp_path)
 
         record = json.loads(
@@ -409,7 +439,8 @@ class TestTheQatReferenceFollowsTheAssets:
 
         assert record["fixedWeights"] == 4
         assert record["upstreamUnused"] == {"vision": 1}
-        # `pleShards` の席へ `pleBlocks` が入る（再 export が書く記録と同じ並び）。
+        # `pleBlocks` takes the place of `pleShards` (the same order as the record a re-export
+        # writes).
         assert list(record) == [
             "schema",
             "family",
@@ -421,7 +452,7 @@ class TestTheQatReferenceFollowsTheAssets:
         ]
 
     def test_a_record_that_already_counts_blocks_stops(self, tmp_path: Path) -> None:
-        """対（恒真でない）: 畳んだ後の記録をもう一度上げようとしたら止まる。"""
+        """Counterpart (not vacuous): trying to upgrade an already-folded record again stops."""
         series = tmp_path / "gemma4-qat-fixture-product"
         place(series, mark="qat")
         legacy_ple_sidecar(series)
@@ -446,7 +477,8 @@ class TestTheQatReferenceFollowsTheAssets:
             run(tmp_path)
 
     def test_only_the_record_of_a_qat_series_is_rewritten(self, tmp_path: Path) -> None:
-        """対（恒真でない）: 通常 Gemma の系列に同じ記録を置いても触らない。"""
+        """Counterpart (not vacuous): the same record placed in a plain Gemma series is left
+        untouched."""
         series = tmp_path / "gemma4-fixture-product"
         place(series, mark="gemma")
         legacy_ple_sidecar(series)
@@ -459,7 +491,8 @@ class TestTheQatReferenceFollowsTheAssets:
 
 
 class TestWhatIsNotConverted:
-    """参照されていない系列（実験 / 棄却の記録）と、旧 shard 列を持たない系列は移さない。"""
+    """Unreferenced series (records of experiments / rejected candidates) and series without an
+    old shard list are not migrated."""
 
     @pytest.mark.parametrize("name", ["minicpm5-fixture-probe", "qwen3-fixture-rejected"])
     def test_experiment_records_are_skipped(self, tmp_path: Path, name: str) -> None:
@@ -476,26 +509,28 @@ class TestWhatIsNotConverted:
 
 
 class TestTheFamilyTableMatchesTheDistributionDeclarations:
-    """部品名の表が `<family>/distribution.py` の weights と食い違っていないこと。
+    """The component-name table does not disagree with the weights of `<family>/distribution.py`.
 
-    ドライバが名乗る綴りは配布形の部品名そのもの（container-v1 §2.1）なので、片方だけ動いた
-    日に「移行した容器だけがランタイムから引けない」形になる。
+    The spellings the driver uses are the distribution's component names themselves (container-v1
+    §2.1), so on the day only one side moves, "only the migrated containers cannot be looked up by
+    the runtime".
     """
 
     @pytest.mark.parametrize(
         ("declared", "families"),
         [
             ("anima.distribution.ANIMA_WEIGHTS", ("anima",)),
-            # コーデックの 2 席は別系列（`dacvae-*`）が持つ。
+            # The 2 codec slots belong to a separate series (`dacvae-*`).
             ("irodori.distribution.IRODORI_WEIGHTS", ("irodori", "dacvae")),
-            # `text_encoder` 席を焼くのは別 recipe（`deberta-*` 系列）。
+            # The `text_encoder` slot is written by another recipe (the `deberta-*` series).
             ("sbv2.distribution.SBV2_WEIGHTS", ("sbv2", "deberta")),
         ],
     )
     def test_the_table_and_the_declaration_name_the_same_seats(
         self, declared: str, families: tuple[str, ...]
     ) -> None:
-        """**両方向**で見る（宣言 ⊆ 表 の片側だけだと、表の打ち間違いの席が素通りする）。"""
+        """Checked in **both directions** (with only declaration ⊆ table, a mistyped table entry
+        would pass)."""
         module, name = declared.rsplit(".", 1)
         weights = getattr(importlib.import_module(module), name)
         roles = {role for family in families for role in _family(family).roles.values()}
@@ -510,4 +545,4 @@ def _family(name: str) -> migrate_series.Family:
     for family in migrate_series.FAMILIES:
         if family.name == name:
             return family
-    raise AssertionError(f"family '{name}' が表に無い")
+    raise AssertionError(f"family '{name}' is not in the table")

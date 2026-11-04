@@ -1,28 +1,34 @@
-"""VAE decoder の rank 4 書き直しが共有する末端の純関数（ADR 0065 決定 2・ADR 0118 検収 4）。
+"""Leaf pure functions shared by the rank-4 rewrites of VAE decoders (ADR 0065 decision 2; ADR
+0118 acceptance 4).
 
-anima（QwenImage VAE・T = 1 の画像専用パッチ）と wan（Wan2.1 / 2.2 VAE・chunk グラフ）の decoder の
-書き直しは、新 op を語彙に入れずに同じ演算を表す必要がある:
+The decoder rewrites of anima (QwenImage VAE; an image-only patch with T = 1) and wan (Wan2.1 /
+2.2 VAE; chunk graphs) must express the same computations without adding new ops to the
+vocabulary:
 
-- チャネル方向の L2 正規化（{@link l2_normalize} — `linalg_vector_norm` を語彙に入れない・ADR 0017）
-- nearest-exact ×2 のアップサンプル（{@link nearest_exact_2x} — upsample を語彙に入れない）
-- `time_conv` の出力の時間インターリーブ（{@link interleave_frames} — rank 6 を rank 4 に収める。
-  今の使い手は wan だけ）
-- Wan2.2 の残差の外側のショートカット `DupUp3D`（{@link dup_up_3d} — rank 8 を rank 4 に収める。
-  今の使い手は wan だけ・ADR 0121 決定 6）
+- L2 normalization along channels ({@link l2_normalize} — `linalg_vector_norm` stays out of the
+  vocabulary; ADR 0017)
+- nearest-exact ×2 upsampling ({@link nearest_exact_2x} — upsample stays out of the vocabulary)
+- temporal interleaving of the `time_conv` output ({@link interleave_frames} — fits rank 6 into
+  rank 4; wan is its only user today)
+- Wan2.2's shortcut outside the residual, `DupUp3D` ({@link dup_up_3d} — fits rank 8 into rank 4;
+  wan is its only user today; ADR 0121 decision 6)
 
-どれもモジュールの重みも family の構成も読まない純関数なので、2 つの family で写しを持つと片方
-だけ直った形が作れる。正本をここ 1 本にする。
+All of them are pure functions that read neither module weights nor family configuration, so with
+a copy in each of the two families one could end up fixed in only one. The single source of truth
+is here.
 
-ここへ**上げないもの**: cache の仕組み・構成の門（`wan.vae_patch.assert_supported`）・上流のコードを
-写した forward（RMS_norm / Resample / AttentionBlock）。family ごとに上流のクラスと前提が違う。
+What is **not lifted here**: the cache mechanism, the configuration check
+(`wan.vae_patch.assert_supported`), and the forwards ported from upstream code (RMS_norm /
+Resample / AttentionBlock). Each family's upstream classes and assumptions differ.
 
-MUST: 書き換えは**同値**であること。データ移動だけのもの（{@link nearest_exact_2x} /
-{@link interleave_frames} / {@link dup_up_3d}）は上流とビット一致、縮約の順が変わるもの
-（{@link l2_normalize}）は `F.normalize` と丸めの範囲で一致する（`anima/tests/test_patch.py`・
-`wan/tests/test_vae_patch.py`・`wan/tests/test_dup_up_3d.py`）。
+MUST: the rewrites are **equivalent**. Pure data movement ({@link nearest_exact_2x} /
+{@link interleave_frames} / {@link dup_up_3d}) is bit-identical to upstream; the one whose
+reduction order changes ({@link l2_normalize}) matches `F.normalize` within rounding
+(`anima/tests/test_patch.py`, `wan/tests/test_vae_patch.py`, `wan/tests/test_dup_up_3d.py`).
 
-依存方向は recipe → `_shared` の一方向だけ（ここは family を import しない）。torch だけに依存し、
-diffusers は読まない（受け取るアップサンプルのモジュールは `mode` と `scale_factor` だけを見る）。
+The dependency direction is recipe → `_shared` only (this module does not import families). It
+depends only on torch and does not read diffusers (of the upsampling module it receives, it looks
+only at `mode` and `scale_factor`).
 """
 
 from __future__ import annotations
@@ -30,40 +36,47 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-#: `F.normalize` の既定 eps（ノルムをこの値で下から抑えてから割る）。
+#: The default eps of `F.normalize` (the norm is clamped from below to this value before dividing).
 NORM_EPS = 1e-12
 
-#: nearest-exact アップサンプルの倍率。**整数倍のときだけ** reshape / expand と厳密一致する。
+#: The factor of the nearest-exact upsampling. It matches reshape / expand exactly **only for an
+#: integer factor**.
 UPSAMPLE_SCALE = 2
 
 
 def l2_normalize(x: torch.Tensor, dim: int, eps: float = NORM_EPS) -> torch.Tensor:
-    """`F.normalize(x, dim=dim)` の同値実装（`sum` → `sqrt` → `clamp_min` → 除算）。
+    """An equivalent implementation of `F.normalize(x, dim=dim)` (`sum` → `sqrt` → `clamp_min` →
+    divide).
 
-    `sum` が縮約軸を attrs で持つので、チャネル方向の L2 を **permute 無し**でその軸に掛ける
-    （以前の anima は permute → 最終次元 sum → permute と往復しており、その 2 本が VAE decoder の
-    非コアレス strided トラフィックの 99% を占めていた —
-    docs/research/2026-08-04-vae-axis-reduce-recon.md §2）。
+    `sum` carries the reduction axis in its attrs, so the channel-wise L2 is applied to that axis
+    **without a permute** (anima used to go permute → sum over the last dimension → permute, and
+    those two accounted for 99% of the VAE decoder's uncoalesced strided traffic —
+    docs/research/2026-08-04-vae-axis-reduce-recon.md §2).
 
-    MUST: `clamp_min(eps) → 除算` の順は原実装のまま。`+eps` に置き換えると数値意味論が変わる
-    （ゼロ入力で 0 を返す性質が消える）。
+    MUST: keep the original `clamp_min(eps) → divide` order. Replacing it with `+eps` changes the
+    numeric semantics (the property of returning 0 for a zero input is lost).
     """
     norm = torch.sqrt(torch.sum(x * x, dim=dim)).clamp(min=eps).unsqueeze(dim)
     return x / norm
 
 
 def nearest_exact_2x(upsample: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """nearest-exact ×2（`[B,C,H,W]`）を reshape / expand で表す（データ移動だけなのでビット一致）。
+    """Express nearest-exact ×2 (`[B,C,H,W]`) with reshape / expand (data movement only, so
+    bit-identical).
 
-    nearest-exact は出力添字 o を `floor((o+0.5)/scale)` へ写す。scale が整数 2 なら各入力要素の
-    2 連複製と厳密に一致する（非整数倍は写像が一致しないので fail loudly）。上流のアップサンプル
-    （`QwenImageUpsample` / `WanUpsample`）の `x.float()` / `type_as` は f32 の活性では恒等。
+    nearest-exact maps output index o to `floor((o+0.5)/scale)`. With the integer scale 2 this is
+    exactly a twofold duplication of each input element (a non-integer factor does not map the
+    same, so it fails loudly). The `x.float()` / `type_as` of the upstream upsamplers
+    (`QwenImageUpsample` / `WanUpsample`) are identities on f32 activations.
 
-    MUST: `mode` も見る。この置き換えが一致するのは nearest-exact だけで、`nearest` は出力添字を
-    `floor(o/scale)` へ写す別の写像、bilinear 等は補間そのものが違う。
+    MUST: check `mode` too. The replacement matches only nearest-exact; `nearest` is a different
+    mapping of the output index (to `floor(o/scale)`), and bilinear and the like interpolate
+    differently altogether.
     """
     if upsample.mode != "nearest-exact":
-        raise NotImplementedError(f"nearest-exact 以外のアップサンプルは未対応: {upsample.mode}")
+        raise NotImplementedError(
+            f"upsampling other than nearest-exact is unsupported: {upsample.mode}"
+        )
     raw = upsample.scale_factor
     scale = (
         (float(raw), float(raw))
@@ -71,7 +84,9 @@ def nearest_exact_2x(upsample: nn.Module, x: torch.Tensor) -> torch.Tensor:
         else tuple(float(value) for value in raw)
     )
     if scale != (float(UPSAMPLE_SCALE), float(UPSAMPLE_SCALE)):
-        raise NotImplementedError(f"×{UPSAMPLE_SCALE} 以外の nearest-exact は未対応: {scale}")
+        raise NotImplementedError(
+            f"nearest-exact other than ×{UPSAMPLE_SCALE} is unsupported: {scale}"
+        )
     return repeat_2x(x)
 
 
@@ -93,56 +108,60 @@ def repeat_2x(x: torch.Tensor) -> torch.Tensor:
 
 
 def interleave_frames(x: torch.Tensor) -> torch.Tensor:
-    """`time_conv` の 2 倍チャネルの出力 `[2C,T,H,W]` をフレーム方向へ交互に並べ直す
-    → `[C,2T,H,W]`。
+    """Reorder the doubled-channel output `[2C,T,H,W]` of `time_conv` alternately along frames
+    → `[C,2T,H,W]`.
 
-    `out[c, 2t+i] = x[i·C+c, t]`（上流 `reshape(b,2,c,t,h,w)` → `stack(dim=3)` → `reshape` と
-    同じ並び — diffusers 0.39.0 `autoencoder_kl_wan.py:299-301`）。途中は rank 4 に収める:
-    `[2,C,T,H·W]` → permute `(1,2,0,3)` → `[C,T,2,H·W]` → `[C,2T,H,W]`。データ移動だけ。
+    `out[c, 2t+i] = x[i·C+c, t]` (the same order as upstream's `reshape(b,2,c,t,h,w)` →
+    `stack(dim=3)` → `reshape` — diffusers 0.39.0 `autoencoder_kl_wan.py:299-301`). The
+    intermediates stay within rank 4: `[2,C,T,H·W]` → permute `(1,2,0,3)` → `[C,T,2,H·W]` →
+    `[C,2T,H,W]`. Data movement only.
     """
     doubled, frames, height, width = x.shape
     if doubled % 2 != 0:
-        raise ValueError(f"time_conv の出力チャネル {doubled} が 2 の倍数でない")
+        raise ValueError(f"the time_conv output channels {doubled} are not a multiple of 2")
     channels = doubled // 2
     paired = x.reshape(2, channels, frames, height * width).permute(1, 2, 0, 3)
     return paired.reshape(channels, 2 * frames, height, width)
 
 
 def dup_up_3d(x: torch.Tensor, *, out_channels: int, factor_t: int, factor_s: int) -> torch.Tensor:
-    """`DupUp3D.forward`（チャネルの複製 → rank 8 の view / permute）の rank 4 版。
+    """The rank-4 version of `DupUp3D.forward` (channel duplication → rank-8 view / permute).
 
-    `x` は unbatched の `[Cin, T, H, W]`、戻りは `[Cout, T·ft, H·fs, W·fs]`。並びは上流と同じで、
-    `j = ((o·ft + a)·fs + b)·fs + d`・`rep = Cout·ft·fs² / Cin` と置くと
-    `out[o, t·ft + a, h·fs + b, w·fs + d] = x[⌊j / rep⌋, t, h, w]`（上流 `repeat_interleave` →
+    `x` is the unbatched `[Cin, T, H, W]`; the result is `[Cout, T·ft, H·fs, W·fs]`. The order is
+    upstream's: with `j = ((o·ft + a)·fs + b)·fs + d` and `rep = Cout·ft·fs² / Cin`,
+    `out[o, t·ft + a, h·fs + b, w·fs + d] = x[⌊j / rep⌋, t, h, w]` (upstream `repeat_interleave` →
     `view(B, Cout, ft, fs, fs, T, H, W)` → `permute(0, 1, 5, 2, 6, 3, 7, 4)` — diffusers 0.39.0
-    `autoencoder_kl_wan.py:106-125`）。途中は rank 4 に収める: 複製 `[Cin, 1, T·H·W]` → expand
-    `[Cin, rep, T·H·W]` → チャネルの添字 j の下の桁から順に W・H・T へ depth-to-space（各段
-    reshape → permute → reshape）。データ移動だけなので上流とビット一致する。
+    `autoencoder_kl_wan.py:106-125`). The intermediates stay within rank 4: duplicate
+    `[Cin, 1, T·H·W]` → expand `[Cin, rep, T·H·W]` → depth-to-space into W, H, T in turn, starting
+    from the lowest digit of the channel index j (each stage reshape → permute → reshape). Data
+    movement only, so bit-identical to upstream.
 
-    最初の chunk で時間の先頭 `ft − 1` 枚を捨てる slice（上流の `first_chunk`）はここに入れない —
-    cache の仕組みに属するので wan 側（`wan.vae_patch.avg_shortcut`）が持つ。
+    The slice that drops the first `ft − 1` frames of the first chunk (upstream's `first_chunk`)
+    is not here — it belongs to the cache mechanism, so the wan side
+    (`wan.vae_patch.avg_shortcut`) holds it.
     """
     channels, frames, height, width = x.shape
     factor = factor_t * factor_s * factor_s
     if (out_channels * factor) % channels != 0:
         raise ValueError(
-            f"出力チャネル {out_channels} × 倍率 {factor} が入力チャネル {channels} で割り切れない"
+            f"output channels {out_channels} × factor {factor} is not divisible by the input"
+            f" channels {channels}"
         )
     repeats = out_channels * factor // channels
     volume = frames * height * width
-    # 複製（上流の repeat_interleave(dim=1)）: チャネルの添字 j = c·rep + r。
+    # Duplication (upstream's repeat_interleave(dim=1)): channel index j = c·rep + r.
     dup = x.reshape(channels, 1, volume).expand(channels, repeats, volume)
-    # W の桁: j = m·fs + d → [m, T·H, W, d] → [m, T, H, W·fs]（m < Cout·ft·fs）。
+    # The W digit: j = m·fs + d → [m, T·H, W, d] → [m, T, H, W·fs] (m < Cout·ft·fs).
     rows = out_channels * factor_t * factor_s
     y = dup.reshape(rows, factor_s, frames * height, width).permute(0, 2, 3, 1)
     y = y.reshape(rows, frames, height, width * factor_s)
-    # H の桁: m = n·fs + b → [n, T·H, b, W·fs] → [n, T, H·fs, W·fs]（n < Cout·ft）。
+    # The H digit: m = n·fs + b → [n, T·H, b, W·fs] → [n, T, H·fs, W·fs] (n < Cout·ft).
     rows = out_channels * factor_t
     y = y.reshape(rows, factor_s, frames * height, width * factor_s).permute(0, 2, 1, 3)
     y = y.reshape(rows, frames, height * factor_s, width * factor_s)
     if factor_t == 1:
         return y
-    # T の桁: n = o·ft + a → [o, T, a, H·fs·W·fs] → [o, T·ft, H·fs, W·fs]。
+    # The T digit: n = o·ft + a → [o, T, a, H·fs·W·fs] → [o, T·ft, H·fs, W·fs].
     plane = height * factor_s * width * factor_s
     y = y.reshape(out_channels, factor_t, frames, plane).permute(0, 2, 1, 3)
     return y.reshape(out_channels, frames * factor_t, height * factor_s, width * factor_s)

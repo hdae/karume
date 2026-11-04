@@ -1,27 +1,35 @@
-"""Anima の校正コーパス（GPTQ が見る活性を作る danbooru 系タグ 24 本・既定は先頭 4 本）。
+"""Anima's calibration corpus (24 danbooru-style tag prompts; the first 4 by default).
 
-`karume.quant_calib` の校正付き丸めは「その層に実際に流れる活性」から丸め先を選び直す方式
-なので、コーパスの性格がそのまま丸めの偏りになる。DiT の活性は**プロンプト（= 交差 attention
-に入る条件）と解像度と sigma** で動くので、選定方針は 3 点:
+The prompts produce the activations GPTQ sees.
 
-- **評価入力と分離する**（2026-08-21 ユーザー裁定）— 校正で見たプロンプトをそのまま評価に
-  使うと、PSNR / 視認が「校正で見た絵をそのまま出せたか」を測る数になり、校正の質ではなく
-  漏れを測ることになる。評価入力の正本は `anima.pipeline_ref` の固定プロンプトと TS 側の E2E
-  （実ファイルから抽出 — 写すと片方だけ古くなる）、それに視認評価の 4 ケース（正本だった
-  `examples/` が移植で消えたので {@link EVAL_IMAGE_SUBJECTS} に置く）で、{@link evaluation_prompts}
-  が集めて {@link assert_calib_disjoint} で突き合わせる。
-- **Anima の領域に寄せる** — 模型はアニメ画像特化（danbooru 系タグ）なので、校正も同じタグ
-  語彙で採る。**被写体（人数 0〜4・動物）・構図（寄り / 引き / 俯瞰 / 煽り / 後ろ姿）・
-  画風（chibi / 線画 / 水彩 / フィルム粒子）を散らす** — 1 つの型へ寄せると、活性の偏りが
-  その型に張り付く。
-- **先頭から使う**（`--calib-prompts N` は**先頭 N 本**）ので、並びは型ごとに固めず**混ぜる** —
-  縮小実行（既定の 4 本もその一種）でも被写体・構図・画風の混合が保たれる。
+The calibrated rounding of `karume.quant_calib` re-picks the rounding targets from "the activations
+that actually flow through that layer", so the character of the corpus becomes the bias of the
+rounding as is. The DiT's activations move with **the prompt (= the condition fed to cross
+attention), the resolution and sigma**, so the selection follows 3 rules:
 
-NOTE（品質の上振れ軸）: 校正の質は**本数**と**解像度**で上がる（本数はプロンプト間の活性の
-散り・解像度は 1 プロンプトあたりのトークン数 = `H = Σ XᵀX` の標本数）。どちらも export の
-CPU 時間に線形で効く。解像度は品質裁定の条件ごと固定（{@link anima.calib.CALIB_RESOLUTION}）
-なので、動かせるのは本数だけ。上限 24 本まではここのコーパスで足り、それ以上へ広げるときは
-本文を足す。
+- **Keep it separate from the evaluation inputs** (maintainer ruling of 2026-08-21) — if prompts
+  seen in calibration were used for evaluation as they are, PSNR / visual review would measure
+  "could it reproduce the images it saw in calibration", measuring leakage rather than calibration
+  quality. The sources of truth for the evaluation inputs are the fixed prompts of
+  `anima.pipeline_ref` and the TS-side E2E (extracted from the real file — a copy would let one
+  side go stale), plus the 4 cases of the visual evaluation (their source of truth, `examples/`,
+  was removed in the port, so they live in {@link EVAL_IMAGE_SUBJECTS}); {@link evaluation_prompts}
+  collects them and {@link assert_calib_disjoint} compares.
+- **Lean toward Anima's domain** — the model specialises in anime images (danbooru-style tags), so
+  the calibration uses the same tag vocabulary. **Spread the subject (0–4 people, animals), the
+  composition (close-up / wide / from above / from below / back view) and the style (chibi /
+  lineart / watercolor / film grain)** — leaning toward one type makes the activation bias stick to
+  that type.
+- **Used from the top** (`--calib-prompts N` takes **the first N**), so the order is **mixed**
+  rather than grouped by type — even a reduced run (the default 4 is one) keeps the mix of subject,
+  composition and style.
+
+NOTE (the axes for better quality): calibration quality rises with **the prompt count** and **the
+resolution** (the count spreads the activations across prompts; the resolution is the number of
+tokens per prompt = the number of samples of `H = Σ XᵀX`). Both scale the export's CPU time
+linearly. The resolution is fixed together with the conditions of the quality verdict
+({@link anima.calib.CALIB_RESOLUTION}), so only the count can move. This corpus covers up to 24;
+going beyond that means adding prompts here.
 """
 
 from __future__ import annotations
@@ -34,17 +42,18 @@ from _shared.paths import REPO_ROOT
 
 from .pipeline_ref import NEGATIVE_PROMPT, PROMPT
 
-#: `--calib-prompts` の既定（{@link CALIB_PROMPTS} の**先頭からこの本数**）。
+#: Default of `--calib-prompts` (**this many from the top** of {@link CALIB_PROMPTS}).
 #:
-#: **根拠のある下限に置く**: 品質裁定（PSNR 22.73dB・視認で f32 とほぼ同一）が採られた波 J-2
-#: の校正条件は 1 本 × 10 step = 10 バッチなので、4 本 × 8 step = 32 バッチはそれを下回らない。
-#: 一方で 12 本 / 24 本へ増やしたときの**追加利得は未測定**で、費用（{@link
-#: anima.calib.CALIB_SECONDS_PER_BATCH} の外挿で 4 本 ≒ 38 分・12 本 ≒ 1.9 時間の CPU 時間と、
-#: `current` と次段リストが同時に生きるぶんのメモリ）は本数に線形で効く。上げるときは測ってから
-#: （`--calib-prompts N` で 24 本まで振れる）。
+#: **Set at the lower bound that has evidence**: the calibration conditions of run J-2, where the
+#: quality verdict (PSNR 22.73dB, visually nearly identical to f32) was reached, were 1 prompt × 10
+#: steps = 10 batches, so 4 prompts × 8 steps = 32 batches does not fall below that. On the other
+#: hand, **the extra gain of going to 12 / 24 is unmeasured**, and the cost (by extrapolating {@link
+#: anima.calib.CALIB_SECONDS_PER_BATCH}, CPU time of 4 ≈ 38 minutes and 12 ≈ 1.9 hours, plus the
+#: memory for `current` and the next-stage list being alive at once) grows linearly with the count.
+#: Measure before raising it (`--calib-prompts N` goes up to 24).
 DEFAULT_CALIB_PROMPTS = 4
 
-#: 校正入力のプロンプト（この順で先頭から使う）。
+#: Prompts of the calibration inputs (used from the top in this order).
 CALIB_PROMPTS: tuple[str, ...] = (
     "2girls, library, bookshelves, reading, sitting, window light, detailed background",
     "scenery, rice field, summer sky, cumulonimbus, power lines, no humans, wide angle",
@@ -72,15 +81,18 @@ CALIB_PROMPTS: tuple[str, ...] = (
     "1girl, hoodie, train station, platform, evening, vending machine, film grain",
 )
 
-#: 評価入力の正本（リポジトリ相対）。Deno 側なので import できず、**実ファイルから抽出**する
-#: （写しを持つと片方だけ古くなり、分離検査が黙って緩む）。抽出が空になったら fail loudly。
+#: Source of truth of an evaluation input (repo-relative). It is on the TS side and cannot be
+#: imported, so it is **extracted from the real file** (holding a copy lets one side go stale and
+#: silently loosens the separation check). An empty extraction fails loudly.
 E2E_SOURCE = Path("packages/e2e/tests/e2e_anima_test.ts")
 
-#: 視認評価（eval-images）の 4 ケース。正本だった `examples/anima/eval-images.ts` は 0.15 の移植で
-#: 削除された（ADR 0127 — 計測ツールと例はブラウザアプリとして作り直す）ので、戻るまでは
-#: **ここが唯一の置き場**。合成はあちらの `prompt()` と同じ `<prefix>, <subject>, <suffix>`。
-#: NOTE: アプリを作り直すときはこの 4 本をあちらから読み直すこと — 写しを 2 つにすると分離検査が
-#: 片方だけ古くなる（この定数を正本にして TS 側が引く形でもよい）。
+#: The 4 cases of the visual evaluation (eval-images). Their source of truth,
+#: `examples/anima/eval-images.ts`, was deleted in the 0.15 port (ADR 0127 — the measurement tools
+#: and examples are rebuilt as browser apps), so until it returns **this is the only place they
+#: live**. They are composed as `<prefix>, <subject>, <suffix>`, the same as `prompt()` there.
+#: NOTE: when the app is rebuilt, read these 4 back from there — two copies would let the separation
+#: check go stale on one side (making this constant the source of truth and having the TS side read
+#: it is fine too).
 EVAL_IMAGE_QUALITY_PREFIX = "score_9, score_8_up, score_7_up"
 EVAL_IMAGE_QUALITY_SUFFIX = "masterpiece, best quality"
 EVAL_IMAGE_SUBJECTS: tuple[str, ...] = (
@@ -90,7 +102,7 @@ EVAL_IMAGE_SUBJECTS: tuple[str, ...] = (
     "1girl, solo, full body, standing, city street, buildings, detailed background",
 )
 
-#: TS の二重引用符文字列 1 本（エスケープ込み）。
+#: One TS double-quoted string (escapes included).
 _STRING = r'"((?:[^"\\]|\\.)*)"'
 
 
@@ -98,25 +110,27 @@ def _read_source(source: Path) -> str:
     path = REPO_ROOT / source
     if not path.is_file():
         raise AssertionError(
-            f"評価入力の正本 {source} が無い（校正コーパスとの分離検査の基準が引けない）"
+            f"The source of truth of the evaluation input {source} is missing (the reference for"
+            " the separation check against the calibration corpus cannot be read)"
         )
     return path.read_text(encoding="utf-8")
 
 
 def _declaration(text: str, source: Path, name: str) -> str:
-    """`const <name> = "…" + "…";` の文字列リテラルを連結して返す。"""
+    """Returns the string literals of `const <name> = "…" + "…";` concatenated."""
     match = re.search(rf"const {name}\s*=\s*(.*?);", text, re.DOTALL)
     parts = re.findall(_STRING, match.group(1)) if match is not None else []
     if not parts:
         raise AssertionError(
-            f"{source} の const {name} から文字列を抽出できなかった"
-            "（綴りが変わっている — 分離検査の基準が空になる方が危ないので落とす）"
+            f"{source}: could not extract a string from const {name}"
+            " (the code has changed — an empty reference for the separation check is more"
+            " dangerous, so this fails)"
         )
     return "".join(parts)
 
 
 def _eval_image_prompts() -> tuple[str, ...]:
-    """視認評価の 4 ケースのプロンプト（{@link EVAL_IMAGE_SUBJECTS} を合成したもの）。"""
+    """Prompts of the 4 visual-evaluation cases (composed from {@link EVAL_IMAGE_SUBJECTS})."""
     return tuple(
         f"{EVAL_IMAGE_QUALITY_PREFIX}, {subject}, {EVAL_IMAGE_QUALITY_SUFFIX}"
         for subject in EVAL_IMAGE_SUBJECTS
@@ -124,11 +138,12 @@ def _eval_image_prompts() -> tuple[str, ...]:
 
 
 def evaluation_prompts() -> tuple[str, ...]:
-    """校正から**分離すべき**評価入力の全量（3 箇所の正本から抽出）。
+    """All evaluation inputs that **must stay separate** from calibration (from 3 sources of truth).
 
-    - `anima.pipeline_ref` の固定プロンプト（参照フィクスチャ = 数値パリティの入力）
-    - TS 側 E2E（`packages/e2e/tests/e2e_anima_test.ts`）の `PROMPT`
-    - 視認評価の 4 ケース（{@link EVAL_IMAGE_SUBJECTS} — 元は `examples/anima/eval-images.ts`）
+    - the fixed prompts of `anima.pipeline_ref` (the reference fixture = numeric parity's input)
+    - `PROMPT` of the TS-side E2E (`packages/e2e/tests/e2e_anima_test.ts`)
+    - the 4 visual-evaluation cases ({@link EVAL_IMAGE_SUBJECTS} — originally
+      `examples/anima/eval-images.ts`)
     """
     return (
         PROMPT,
@@ -139,26 +154,29 @@ def evaluation_prompts() -> tuple[str, ...]:
 
 
 def assert_calib_disjoint(prompts: Sequence[str], evaluated: Sequence[str]) -> None:
-    """校正コーパスが評価入力と**部分一致でも**重ならないことを見る。
+    """Checks the calibration corpus does not overlap the evaluation inputs, **not even partially**.
 
-    MUST: fail loudly（`sbv2.measure_quant.assert_calib_disjoint` と同じ形）。重なると PSNR /
-    視認が「校正で見た絵をそのまま出せたか」を測る数になり、校正の質ではなく漏れを測る。
+    MUST: fail loudly (the same form as `sbv2.measure_quant.assert_calib_disjoint`). An overlap
+    makes PSNR / visual review measure "could it reproduce the images it saw in calibration",
+    measuring leakage rather than calibration quality.
     """
     hits = sorted(
         {text for text in prompts for body in evaluated if body and (body in text or text in body)}
     )
     if hits:
         raise AssertionError(
-            f"校正コーパスが評価入力と重なっている: {hits[:3]}（評価入力 {len(evaluated)} 本）"
+            f"The calibration corpus overlaps the evaluation inputs: {hits[:3]}"
+            f" ({len(evaluated)} evaluation inputs)"
         )
 
 
 def calibration_prompts(count: int) -> tuple[str, ...]:
-    """先頭 `count` 本を分離検査つきで返す（`--calib-prompts` の実体）。"""
+    """Returns the first `count` prompts with the separation check (what `--calib-prompts` does)."""
     if not 1 <= count <= len(CALIB_PROMPTS):
         raise ValueError(
-            f"--calib-prompts {count} は 1〜{len(CALIB_PROMPTS)} の範囲外"
-            f"（コーパスは {len(CALIB_PROMPTS)} 本 — 増やすなら calib_prompts.py へ本文を足す）"
+            f"--calib-prompts {count} is out of range 1–{len(CALIB_PROMPTS)}"
+            f" (the corpus has {len(CALIB_PROMPTS)} prompts — to grow it, add prompts to"
+            " calib_prompts.py)"
         )
     prompts = CALIB_PROMPTS[:count]
     assert_calib_disjoint(prompts, evaluation_prompts())

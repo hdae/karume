@@ -1,8 +1,10 @@
-"""umT5-XXL encoder の配布 recipe（`wan.umt5_distribution`）— 配布リポ `karume-umt5-xxl` の
-組み立て。
+"""The umT5-XXL encoder distribution recipe (`wan.umt5_distribution`) — assembling the distribution
+repository `karume-umt5-xxl`.
 
-入力は実物と同じ綴り・同じ種類ごとの格納の合成容器（`umt5_fixture`）と、書き手と同じ最上位の欄を持つ
-合成のトークナイザ資産。門に落とされることを見るケースも同じ器で作り、**宣言だけを実物とずらす**。
+The inputs are a synthetic container with the real spelling and the real per-kind storage
+(`umt5_fixture`) and a synthetic tokenizer asset with the writer's top-level fields. The cases that
+check the gate refuses something are built from the same fixture, **moving only the declarations
+away from the real thing**.
 Where the `karume-umt5-xxl` mirror is present, the real binding table is pinned down to its counts
 (169 i8, 73 f32) and the plan is built from the real container and tokenizer asset as the mirror
 ships them (SKIP without it).
@@ -62,10 +64,12 @@ from wan.umt5_distribution import (
     umt5_tokenizer_asset,
 )
 
-#: umT5 の上流の表の行（本家 `google/umt5-xxl` の pin — ADR 0122 決定 1）。
+#: The row of the umT5 upstream table (the pin of the original `google/umt5-xxl` — ADR 0122
+#: decision 1).
 _UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source
 
-#: 書き手（`wan.umt5_export.provenance`）が焼く出所の正常形 — umT5 の上流の pin した revision。
+#: The normal form of the provenance the writer (`wan.umt5_export.provenance`) bakes — the pinned
+#: revision of the umT5 upstream.
 _PINNED = Provenance(
     license=_UPSTREAM.license,
     notice=NOTICE_FILENAME,
@@ -75,29 +79,31 @@ _PINNED = Provenance(
 
 @pytest.fixture(autouse=True)
 def _pinned_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """合成の容器（`ir_fixtures` を含む）に「台本が pin した revision から焼いた」出所を
-    名乗らせる。"""
+    """Make the synthetic containers (`ir_fixtures` included) claim the provenance "baked from the
+    revision the script pinned"."""
     stamp_fixture_provenance(monkeypatch, _PINNED)
 
 
 def _series(root: Path, **overrides: Any) -> Path:
-    """系列に容器 1 本を置き、代表 path を返す（`overrides` は合成の容器の故障注入の席 —
-    出所は `ir_fixtures` が焼く値に揃え、テストの間だけ差し替わる）。"""
+    """Put one container in the series and return its representative path (`overrides` are the
+    fault-injection knobs of the synthetic container — the provenance is matched to the value
+    `ir_fixtures` bakes and is swapped only for the duration of the test)."""
     container = umt5_container(root / "outputs" / "series")
     parts = umt5_fixture.umt5_container(provenance=ir_fixtures.FIXTURE_PROVENANCE, **overrides)
     write_component(container, parts)
-    # 配布に入ってはいけない golden（系列には実際にこれが並んでいる）。
+    # A golden that must not enter the distribution (the series really holds these next to it).
     (container.parent / "reference.band-l0008.safetensors").write_bytes(b"golden")
     return container
 
 
 def _tokenizer(root: Path, **overrides: Any) -> Path:
-    """系列にトークナイザ資産を置き、その path を返す（`umt5_fixture.write_tokenizer_asset`）。"""
+    """Put a tokenizer asset in the series and return its path
+    (`umt5_fixture.write_tokenizer_asset`)."""
     return umt5_fixture.write_tokenizer_asset(root / "outputs" / "series", **overrides)
 
 
 def _plan(root: Path, container: Path, model: str = UMT5_DEFAULT_MODEL):
-    """系列の容器と、正常形のトークナイザ資産で計画を組む。"""
+    """Build the plan from the series' container and a normal-form tokenizer asset."""
     return umt5_plan(container, _tokenizer(root), model)
 
 
@@ -130,8 +136,8 @@ def _present(out_dir: Path) -> list[str]:
 
 class TestLayout:
     def test_it_places_one_container_the_tokenizer_and_the_legal_texts(self, assembled) -> None:
-        """容器 1 本（部品 `text_encoder`）・トークナイザ資産 1 本と直下の 4 本だけ — 系列の
-        golden は入らない。"""
+        """One container (component `text_encoder`), one tokenizer asset and the four top-level
+        files only — the series' golden does not enter."""
         out_dir, _ = assembled
         expected = [
             f"{UMT5_DEFAULT_MODEL}/{rel}" for rel in part_paths(UMT5_OUTPUT_PATHS[UMT5_ROLE])
@@ -151,7 +157,8 @@ class TestLayout:
         assert tokenizer == "xxl/tokenizer/tokenizer.json"
 
     def test_the_manifest_declares_the_encoder_seat_and_the_tokenizer(self, assembled) -> None:
-        """pipeline は `umt5-encoder/1`・席は i8 の 1 つ・資産はトークナイザ 1 本・設定は空。"""
+        """The pipeline is `umt5-encoder/1`, one preset (i8), one asset (the tokenizer) and an
+        empty config."""
         out_dir, manifest = assembled
         model = _model(manifest)
         assert manifest["defaultModel"] == UMT5_DEFAULT_MODEL == "xxl"
@@ -176,17 +183,19 @@ class TestLayout:
         assert "**int8 weights**" in prose
         assert "keep the source float32 values" in prose
         assert 'GELU(approximate="tanh")' in prose
-        # 上流の格納は F32（bf16 の写しではない — 調査の実測）。
+        # The upstream storage is F32 (not a copy of bf16 — measured during the investigation).
         assert "holds the encoder in float32" in prose
         assert "bfloat16" not in prose
-        # 上流は本家の encoder で、Wan2.1 の text_encoder とのビット一致は確かめた（ADR 0122
-        # 決定 1 — 「同一は未確認」から事実が変わった）。decoder と lm_head は含めない。
+        # The upstream is the original encoder, and it was checked bit-identical to Wan2.1's
+        # text_encoder (ADR 0122 decision 1 — the fact changed from "identity not checked").
+        # The decoder and lm_head are not included.
         assert "has not been checked" not in prose
         assert "the encoder of the umT5-XXL checkpoint `google/umt5-xxl`" in prose
         assert "that repository has no NOTICE file" in prose
         assert "bit-identical to the float32 `text_encoder` folder" in prose
         assert "the decoder and `lm_head` are not included" in prose
-        # 単体で配るトークナイザ（Apache 2.0 §4(b) の改変告知 — 「配らない」の文は消えた）。
+        # The tokenizer is shipped on its own (the change notice of Apache 2.0 §4(b) — the
+        # "not distributed" sentence is gone).
         assert "and a converted form of that checkpoint's tokenizer" in prose
         assert (
             "**Tokenizer**: the tokenizer files `tokenizer.json` and `tokenizer_config.json`"
@@ -198,8 +207,8 @@ class TestLayout:
 
 
 class TestTheBindingGate:
-    """束縛表の種類ごとの格納（`assert_umt5_bindings`）。「i8 を含む」だけでは素通りする
-    取り違え。"""
+    """The per-kind storage of the binding table (`assert_umt5_bindings`). A mix-up that a mere
+    "contains i8" check lets through."""
 
     def test_it_refuses_quantized_relative_position_tables(self, tmp_path: Path) -> None:
         container = _series(tmp_path, table_layout="i8")
@@ -213,11 +222,11 @@ class TestTheBindingGate:
 
     def test_it_refuses_an_encoder_without_relative_position_tables(self, tmp_path: Path) -> None:
         container = _series(tmp_path, tables=False)
-        with pytest.raises(DistError, match="重みの種類"):
+        with pytest.raises(DistError, match="weight kinds"):
             _plan(tmp_path, container)
 
     def test_the_bindings_are_counted_by_kind(self, tmp_path: Path) -> None:
-        """対（非恒真）: 正常形は種類ごとに要求の格納だけを持つ。"""
+        """The pair (not tautological): the normal form holds only the required storage per kind."""
         bindings = umt5_bindings(_series(tmp_path))
         layers = umt5_fixture.LAYERS
         assert bindings == {
@@ -231,8 +240,8 @@ class TestTheBindingGate:
 
 
 class TestTheTokenizerGate:
-    """トークナイザ資産の門（`assert_umt5_tokenizer`）— 表は容器の検査に掛からず、取り違えは
-    利用者の手元で「別の id 列」として沈黙する。"""
+    """The tokenizer asset gate (`assert_umt5_tokenizer`) — the tables escape the container checks,
+    and a mix-up stays silent on the user's machine as "different id sequences"."""
 
     def test_the_plan_requires_the_tokenizer_asset(self, tmp_path: Path) -> None:
         container = _series(tmp_path)
@@ -241,16 +250,17 @@ class TestTheTokenizerGate:
             umt5_plan(container, missing)
 
     def test_it_refuses_the_wan_tokenizer_asset(self, tmp_path: Path) -> None:
-        """Wan の資産（前処理の表つき・Wan の checkpoint の出所）は形式で落ちる。"""
+        """Wan's asset (with the preprocessing tables, with the provenance of Wan's checkpoint)
+        fails on its format."""
         container = _series(tmp_path)
         with pytest.raises(DistError, match="karume-umt5-tokenizer/1"):
             umt5_plan(container, _tokenizer(tmp_path, format="karume-wan-umt5-tokenizer/1"))
 
     def test_it_refuses_extra_fields_such_as_prompt_cleaning(self, tmp_path: Path) -> None:
         container = _series(tmp_path)
-        with pytest.raises(DistError, match="欄"):
+        with pytest.raises(DistError, match="the fields"):
             umt5_plan(container, _tokenizer(tmp_path, promptClean={}))
-        with pytest.raises(DistError, match="欄"):
+        with pytest.raises(DistError, match="the fields"):
             umt5_plan(container, _tokenizer(tmp_path, scores=None))
 
     def test_it_refuses_a_tokenizer_from_another_revision_or_other_bytes(
@@ -263,14 +273,14 @@ class TestTheTokenizerGate:
             "revision": OTHER_REVISION,
             "files": dict(sorted(row.tokenizer.items())),
         }
-        with pytest.raises(DistError, match="出所"):
+        with pytest.raises(DistError, match="the tokenizer provenance"):
             umt5_plan(container, _tokenizer(tmp_path, source=source))
         other_bytes = {
             **source,
             "revision": row.source.revision,
             "files": {"tokenizer.json": "0" * 64},
         }
-        with pytest.raises(DistError, match="出所"):
+        with pytest.raises(DistError, match="the tokenizer provenance"):
             umt5_plan(container, _tokenizer(tmp_path, source=other_bytes))
 
     def test_it_refuses_another_transformers_version(self, tmp_path: Path) -> None:
@@ -285,7 +295,8 @@ class TestTheTokenizerGate:
             umt5_plan(container, _tokenizer(tmp_path, maxLength=256))
 
     def test_the_synthetic_asset_has_the_writers_fields(self) -> None:
-        """合成の資産は門が要求する欄の集合ちょうど（対 — 正常形が門を通るのは欄が揃うから）。"""
+        """The synthetic asset has exactly the set of fields the gate requires (the pair — the
+        normal form passes the gate because the fields line up)."""
         assert {
             "format",
             "source",
@@ -301,14 +312,16 @@ class TestTheTokenizerGate:
 
 
 class TestTheContract:
-    """グラフの入出力（`umt5_context_width`）— 読み手は入力を名前で束ねる。"""
+    """The graph's inputs and outputs (`umt5_context_width`) — the reader binds the inputs by
+    name."""
 
     @pytest.mark.parametrize(
         ("index", "replacement", "verified"),
         [
             (0, ("ids", "i32", [1, "L"]), True),
-            # f32 の token id を embedding が受けるグラフは IR の受理規則に反する — 公開の門を
-            # 通らないので、低水準の書き手で故意に作る（門が「入力の dtype」で落とすことを見る）。
+            # A graph whose embedding takes f32 token ids violates the IR acceptance rules — it
+            # does not pass the public gate, so it is built deliberately with the low-level writer
+            # (to see that the gate fails it on "the input dtype").
             (0, ("input_ids", "f32", [1, "L"]), False),
             (1, ("relative_position_buckets", "i32", ["L", "M"]), True),
         ],
@@ -324,7 +337,7 @@ class TestTheContract:
         inputs = list(UMT5_INPUTS)
         inputs[index] = replacement
         container = _series(tmp_path, inputs=inputs, verified=verified)
-        with pytest.raises(DistError, match="グラフ入力"):
+        with pytest.raises(DistError, match="the graph inputs"):
             _plan(tmp_path, container)
 
     def test_it_returns_the_output_width(self, tmp_path: Path) -> None:
@@ -343,7 +356,7 @@ class TestTheProvenance:
                 license=_PINNED.license, notice=NOTICE_FILENAME, upstream_revision=OTHER_REVISION
             ),
         )
-        with pytest.raises(DistError, match="別の revision"):
+        with pytest.raises(DistError, match="different revision"):
             _plan(tmp_path, _series(tmp_path))
 
     def test_it_refuses_a_container_that_names_another_license(
@@ -357,16 +370,16 @@ class TestTheProvenance:
                 upstream_revision=_PINNED.upstream_revision,
             ),
         )
-        with pytest.raises(DistError, match=r"provenance\.license が 'cc-by-nc-4.0'"):
+        with pytest.raises(DistError, match=r"provenance\.license is 'cc-by-nc-4.0'"):
             _plan(tmp_path, _series(tmp_path))
 
     def test_it_refuses_a_model_missing_from_the_upstream_table(self, tmp_path: Path) -> None:
-        with pytest.raises(DistError, match="知らない"):
+        with pytest.raises(DistError, match="is unknown"):
             _plan(tmp_path, _series(tmp_path), "base")
 
     def test_the_upstream_is_the_pinned_commit_of_google_umt5_xxl(self) -> None:
-        """本家の main の commit を 40 桁で pin し、encoder に要る shard 3 本の sha256（64 桁）を
-        持つ。"""
+        """Pins the main commit of the original model with 40 digits and holds the sha256 (64
+        digits) of the three shards the encoder needs."""
         row = UMT5_SOURCES[UMT5_DEFAULT_MODEL]
         assert row.source.repo == "google/umt5-xxl"
         assert row.source.revision == "66cb9e7e85526fe440a945569e42c72fb6cbc0ad"
@@ -408,9 +421,10 @@ class TestTheModelCard:
         )
 
     def test_it_attributes_the_encoder_of_google_umt5_xxl(self, assembled) -> None:
-        """帰属は本家の commit の encoder（decoder と lm_head は含めない）・Relation は Wan の
-        2 つの checkpoint との確かめた関係（ADR 0122 決定 1）。本家の encoder はリポ直下にあるので、
-        帰属の文面に空の subfolder を流さない。"""
+        """The attribution is the encoder of the original model's commit (the decoder and lm_head
+        are not included), and the Relation is the checked relationship with Wan's two checkpoints
+        (ADR 0122 decision 1). The original encoder sits at the repository root, so no empty
+        subfolder is passed into the attribution text."""
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         prose = " ".join(card.split())
@@ -428,8 +442,8 @@ class TestTheModelCard:
         assert "has not been checked" not in prose
 
     def test_the_usage_is_the_standalone_encoder(self, assembled) -> None:
-        """Usage は単体の `Encoder`（`@karume/models/umt5`）— source は他の家族と同じ object
-        ref 形 + pin の席。"""
+        """Usage is the standalone `Encoder` (`@karume/models/umt5`) — the source is the same
+        object ref form as the other families plus the revision pin."""
         out_dir, _ = assembled
         lines = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").splitlines()
         start = lines.index('import { Encoder } from "jsr:@karume/models/umt5";')
@@ -449,7 +463,8 @@ class TestTheModelCard:
         assert "There is no standalone pipeline class" not in card
 
     def test_the_usage_states_the_input_rules(self, assembled) -> None:
-        """入力の規則（前処理なし・拒否の 6 つ — `wan.umt5_xxl_tokenizer` の実測）。"""
+        """The input rules (no preprocessing, six rejections — measured by
+        `wan.umt5_xxl_tokenizer`)."""
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "no prompt cleaning and no Unicode normalization" in card
@@ -462,7 +477,8 @@ class TestTheModelCard:
         assert "- fewer than 2 tokens (an empty text)." in card
 
     def test_wan22_is_named_only_as_a_consumer(self, assembled) -> None:
-        """Wan は「Used by」の参照元としてだけ（Wan2.1 は公開しないのでリポとして名指ししない）。"""
+        """Wan appears only as a referrer under "Used by" (Wan2.1 is not published, so it is not
+        named as a repository)."""
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "### Used by" in card
@@ -486,8 +502,8 @@ class TestTheModelCard:
         assert "the tokenizer converted into one JSON table" in card
 
     def test_the_usage_explains_swapping_in_a_compatible_encoder(self, assembled) -> None:
-        """差し替えの段落は席の綴り・pin の規則・precomputed では効かないこと・受理の条件を書く
-        （ADR 0122 決定 7 の 2）。"""
+        """The replacement paragraph states the spelling of the option, the pin rule, that it has no
+        effect with precomputed, and the acceptance conditions (ADR 0122 decision 7, item 2)."""
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "`components: { text_encoder: { source: { repo, revision } } }`" in card
@@ -518,7 +534,8 @@ class TestTheModelCard:
 
 
 class TestTheWritersSpellTheSameNames:
-    """配布 recipe は torch を読まないので綴りを自前で持つ — 書き手（torch を読む）と一致する。"""
+    """The distribution recipe does not import torch, so it keeps its own spelling — it equals the
+    writer's (which imports torch)."""
 
     def test_the_series_and_the_part_name(self) -> None:
         from wan import umt5_export
@@ -529,7 +546,8 @@ class TestTheWritersSpellTheSameNames:
         assert umt5_export.GRAPH_NAME == UMT5_ROLE
 
     def test_the_writer_bakes_the_row_the_gate_checks(self) -> None:
-        """書き手が焼く出所と配布の門が突き合わせる出所は、同じ表の同じ行。"""
+        """The provenance the writer bakes and the provenance the distribution gate compares are
+        the same row of the same table."""
         from wan import umt5_export
 
         assert umt5_export.provenance(UMT5_DEFAULT_MODEL) == _PINNED
@@ -542,7 +560,8 @@ class TestTheWritersSpellTheSameNames:
         assert umt5_patch.RELATIVE_BIAS_ATTRIBUTE == UMT5_RELATIVE_BIAS
 
     def test_the_writer_classifies_with_the_same_function(self) -> None:
-        """種類の分類は 1 本（書き手の検収の表と組み立ての門が同じ関数を引く）。"""
+        """There is one classification of kinds (the writer's acceptance table and the assembly
+        gate call the same function)."""
         from wan import umt5_export
 
         assert umt5_export.storage_kind is storage_kind
@@ -553,7 +572,8 @@ class TestTheWritersSpellTheSameNames:
         assert UMT5_TOKENS == (umt5_tokenizer.MIN_TOKENS, umt5_tokenizer.MAX_LENGTH)
 
     def test_the_consumer_is_the_published_wan_repository(self) -> None:
-        """越境参照の参照元として名指しするのは公開する Wan2.2 の配布リポ。"""
+        """The referrer named for the cross-repository reference is the published Wan2.2
+        distribution repository."""
         from wan.distribution import WAN22_REPO_NAME
 
         assert UMT5_CONSUMER_REPO_NAME == WAN22_REPO_NAME
@@ -602,8 +622,9 @@ class TestTheRealSeries:
         assert set(plan.artifacts) == {UMT5_ROLE, UMT5_TOKENIZER_ROLE}
 
     def test_the_binding_table_is_169_int8_and_73_float32_weights(self) -> None:
-        """linear 168 + 語彙埋め込み 1 が i8、相対位置の表 24 + RMSNorm 49 が f32（24 層 —
-        ADR 0119 追記 10b）。持ち上げ定数（`const.*`）は重みではないので数えない。"""
+        """linear 168 + the vocabulary embedding 1 are i8, the relative-position tables 24 +
+        RMSNorm 49 are f32 (24 layers — ADR 0119 addendum 10b). The lifted constants (`const.*`)
+        are not weights, so they are not counted."""
         bindings = umt5_bindings(_shipped_container())
         assert bindings == {
             "constant": {"f32": 2},

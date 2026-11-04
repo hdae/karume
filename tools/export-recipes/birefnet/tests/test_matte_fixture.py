@@ -1,15 +1,18 @@
-"""`birefnet/matte_fixture.py` の約束事 — git 管理の α マットの後処理の golden が、今のライブラリで
-系列ごとの上流の関数（量子化だけを四捨五入へ差し替えたもの）を呼んだ結果であること。
+"""The contract of `birefnet/matte_fixture.py` — the git-tracked post-processing golden of the α
+matte is what today's libraries produce when they call each series' upstream functions (with only
+the quantization replaced by round-half-up).
 
-TS 側の後処理（`matte.ts` の 2 つの手順）は fixture と突き合わせて門にする。fixture の値は
-torch / torchvision / Pillow / numpy の版で決まるので、git にある入力から今の版で作り直した組と、
-git にある組（入力表・ケース表・テンソル）が一致することをここで見る — 版を上げて値が変わったのに
-fixture を作り直し忘れた状態を赤にする。
+The TS-side post-processing (the two procedures of `matte.ts`) is gated against the fixture. The
+fixture's values are decided by the torch / torchvision / Pillow / numpy versions, so this checks
+that the set rebuilt with today's versions from the inputs in git matches the set in git (input
+table, case table, tensors) — a version bump that changed the values without the fixture being
+rebuilt turns red.
 
-ただし lucida（torch の CPU の f32 の σ と resize）の最終 bit は CPU の命令セットでも変わるので、
-そのバイト一致は参照環境専用（docs/limitations.md「sha256 参照門は参照環境専用」の CPU 側の原則）。
-JSON と hr（Pillow の経路）は x86 の 3 つの命令セット（AVX-512 / AVX2 / SIMD なし）で一致を実測
-（2026-10-15）したので、どの環境でもバイト一致を要求する。
+The last bit of lucida (torch's CPU f32 σ and resize) also changes with the CPU's instruction set,
+though, so its byte identity is for the reference environment only (the CPU-side principle of
+docs/limitations.md "sha256 reference checks are for the reference environment only"). The JSON
+and hr (the Pillow path) were measured identical on three x86 instruction sets (AVX-512 / AVX2 /
+no SIMD) (2026-10-15), so byte identity is required in every environment.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ def committed() -> tuple[dict, dict[str, np.ndarray]]:
 
 @pytest.fixture(scope="module")
 def rebuilt() -> tuple[dict, dict[str, np.ndarray]]:
-    """git にある入力から今のライブラリで作り直した組。"""
+    """The set rebuilt with today's libraries from the inputs in git."""
     return matte_fixture.build_fixture(matte_fixture.committed_real_inputs())
 
 
@@ -62,8 +65,8 @@ class TestTheCommittedFixture:
 
     @pytest.mark.skipif(
         os.environ.get("CI") == "true",
-        reason="lucida の torch CPU 出力は最終 bit が CPU の命令セットで変わる — "
-        "バイト一致は参照環境専用",
+        reason="the last bit of lucida's torch CPU output changes with the CPU's instruction set"
+        " — byte identity is for the reference environment only",
     )
     def test_its_lucida_is_what_todays_torch_produces(self, committed, rebuilt):
         _, tensors = committed
@@ -129,10 +132,12 @@ class TestTheCommittedFixture:
 
 class TestTheRealSeries:
     def test_each_series_is_the_default_seat_of_its_checkpoint(self):
-        """実画像の切り出しの元は、checkpoint ごとに 1 本ずつ、配布の既定席の 1024² の系列。
+        """The real-image crops come from one series per checkpoint: the 1024² series of the
+        distribution's default seat.
 
-        退役した席（HR の f32）や既定でない席の logit から fixture を採らない — 系列名の綴りを
-        `birefnet_series_name` で逆に辿った席を、`birefnet_default_quant` と突き合わせる。
+        The fixture is not taken from the logits of a retired seat (HR's f32) or a non-default
+        seat — the seat found by tracing the series name back through `birefnet_series_name` is
+        checked against `birefnet_default_quant`.
         """
         from birefnet.card import BIREFNET_CHECKPOINTS
         from birefnet.distribution import birefnet_default_quant
@@ -151,14 +156,15 @@ class TestTheRealSeries:
 
 @pytest.fixture(scope="module")
 def shapes() -> list[tuple[int, int, int, int]]:
-    """ケースごとの（入力の高さ・幅・出力の高さ・幅）。"""
+    """Per case: (input height, input width, output height, output width)."""
     inputs, cases = matte_fixture.build_cases(matte_fixture.committed_real_inputs())
     by_name = {entry.name: entry.logits.shape for entry in inputs}
     return [(*by_name[case.input], case.out_height, case.out_width) for case in cases]
 
 
 class TestTheGeometry:
-    """ケースが掃くはずの経路が表に残っていること（ケースを削って経路が抜ける形を赤にする）。"""
+    """The paths the cases are meant to sweep stay in the table (removing a case that drops a path
+    turns red)."""
 
     def test_it_never_targets_the_graph_resolution(self, shapes):
         assert all((oh, ow) != (1024, 1024) for _, _, oh, ow in shapes)
@@ -194,12 +200,13 @@ class TestTheUpstreamProcedures:
         ]
 
     def test_hr_with_truncation_is_the_upstream_call_chain_itself(self):
-        """量子化を切り捨てに戻すと、上流の `ToPILImage()(pred).resize(size)` とビット一致する
-        （差し替えたのが量子化だけであることの裏付け）。
+        """With the quantization set back to truncation, it is bit-identical to the upstream
+        `ToPILImage()(pred).resize(size)` (evidence that only the quantization was replaced).
 
-        σ の精度は写さない（ADR 0125 決定 5 — 上流の半精度の σ ではなく f64 の σ で比べる）ので、
-        裏付けの範囲は Pillow の段と `ToPILImage` の切り捨てまで。上流の半精度の sigmoid との
-        一致はここでは主張しない。"""
+        The precision of σ is not copied (ADR 0125 decision 5 — the comparison uses an f64 σ, not
+        the upstream half-precision σ), so the evidence covers the Pillow stage and the truncation
+        of `ToPILImage` only. Agreement with the upstream half-precision sigmoid is not claimed
+        here."""
         import torch
         from torchvision import transforms
 
@@ -214,12 +221,13 @@ class TestTheUpstreamProcedures:
         )
 
     def test_hr_rejects_samples_whose_rounding_direction_is_not_pinned(self):
-        # logit 0 → 255σ = 127.5 ちょうど（k + 0.5 — 丸めの向きが exp の実装に預けられる境目）。
+        # Logit 0 → 255σ = exactly 127.5 (k + 0.5 — the boundary where the rounding direction is
+        # left to the exp implementation).
         with pytest.raises(ValueError, match=r"k \+ 0\.5"):
             matte_fixture.hr_alpha(np.asarray([[1.0, 0.0]], dtype=np.float32), 3, 1)
 
     def test_lucida_refuses_the_width_one_input_that_breaks_torch(self):
-        with pytest.raises(ValueError, match="幅 1"):
+        with pytest.raises(ValueError, match="width 1"):
             matte_fixture.lucida_scaled(np.zeros((8, 1), dtype=np.float32), 1, 5)
 
     def test_lucida_keeps_the_unrounded_value_in_f32(self):

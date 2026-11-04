@@ -1,81 +1,95 @@
-"""Wan2.2 TI2V-5B の DiT の export と参照のホスト RAM を測る台本（ADR 0121 段 0 — 決定 7）。
+"""Measure host RAM of the Wan2.2 TI2V-5B DiT export and reference (ADR 0121 step 0, decision 7).
 
-    uv run --group wan --inexact python -m wan.dit_probe prepare --trace-only  # 重み不要
-    uv run --group wan --inexact python -m wan.dit_probe prepare     # i8 export の材料まで
-    uv run --group wan --inexact python -m wan.dit_probe eager       # eager 同値の門
-    uv run --group wan --inexact python -m wan.dit_probe reference   # 層逐次の参照（S = 192）
+    uv run --group wan --inexact python -m wan.dit_probe prepare --trace-only  # no weights needed
+    uv run --group wan --inexact python -m wan.dit_probe prepare     # up to the i8 export material
+    uv run --group wan --inexact python -m wan.dit_probe eager       # the eager-equivalence check
+    uv run --group wan --inexact python -m wan.dit_probe reference   # layer-by-layer, S = 192
     uv run --group wan --inexact python -m wan.dit_probe reference --latent 21,30,52  # 8,190
     uv run --group wan --inexact python -m wan.dit_probe reference --latent 21,30,52 \
-        --text boxing-cats --timestep 500 --growth   # f32 と f64 の差の切り分け（段 1）
+        --text boxing-cats --timestep 500 --growth   # isolating the f32 vs f64 difference (step 1)
 
-どのサブコマンドも段ごとの壁時間と RSS（`wan.umt5_export.MemoryMonitor` — `/proc` の 1 秒ごとの
-標本と段ごとの VmHWM）を JSON で出し、同じものを `--out`（既定 {@link default_out} —
-`outputs/bench/<配布名>/<日付>_dit-probe/`）の `<command>.json` に書く。系列
-（`outputs/series/`）には何も書かない。`reference` は同じ置き場の `eager` の結果と
-突き合わせるので、日をまたぐときは両方に同じ `--out` を渡す。
+Every subcommand prints the wall time and RSS per stage (`wan.umt5_export.MemoryMonitor` — samples
+of `/proc` every second and VmHWM per stage) as JSON, and writes the same to `<command>.json` under
+`--out` (default {@link default_out} — `outputs/bench/<distribution name>/<date>_dit-probe/`).
+Nothing is written to the series (`outputs/series/`). `reference` compares with the `eager` result
+in the same place, so pass the same `--out` to both when they run on different days.
 
-`prepare` / `eager` の DiT のパッチは段 0 のまま Wan2.1 と同じ形（時刻入力 1 本 —
-`dit_patch.WanDitTokens`）で、5B の構成はその前提の門（`image_dim` / `added_kv_proj_dim` が None）を
-通る。製品の I2V 対応のグラフ（時刻入力 2 本・条件マスク — ADR 0121 決定 3）は段 1 の
-`wan.ti2v_export_dit` が `prepare` に自前の trace（`tracer=`）を渡して書く。グラフは linear の
-ノードが 3 本増えるだけ（段 1 の IR の検査で 310）なので、RAM の形はここで測った値で読める。
+The DiT patch of `prepare` / `eager` stays in step 0's form, the same as Wan2.1 (one time input —
+`dit_patch.WanDitTokens`), and the 5B configuration passes the check of that premise (`image_dim` /
+`added_kv_proj_dim` are None). The product's I2V-capable graph (2 time inputs, a condition mask —
+ADR 0121 decision 3) is written by step 1's `wan.ti2v_export_dit`, which passes its own trace
+(`tracer=`) to `prepare`. That graph only adds 3 linear nodes (310 in step 1's IR inspection), so
+the shape of the RAM can be read from the values measured here.
 
-## prepare（meta trace + 行の塊ごとの i8 + `fixed_weights` — ADR 0119 段 10b の形）
+## prepare (meta trace + i8 per chunk of rows + `fixed_weights` — the form of ADR 0119 step 10b)
 
-1. **trace**: 重みを持たない meta の上流（config だけ）を S 形のラッパで包み、meta の例示入力
-   （S = 192）で export する。S の記号の上限は {@link SYM_MAX}（1280×704×121 — ADR 0121 決定 3）。
-2. **plain**: 量子化しない重み（bias・norm・`scale_shift_table`）を checkpoint の F32 のまま読む。
-3. **quantize**: linear 307 本（patch 埋め込みの Linear を含む）を checkpoint から行の塊ごとに読み、
-   exporter と同じ手順で i8 の packed + 行ごとの scale にする（`umt5_export.quantize_rows` —
-   patch 埋め込みは上流では Conv3d `[3072,48,1,2,2]` なので、出力チャネルを行にした 2 次元で読む）。
-4. **store**: `karume.emit.stored_model(..., fixed_weights=...)` で格納宣言を commit し、
-   `publish_model` が書き出しの前に掛ける検査（`assert_runtime_support` / `assert_op_contracts`）を
-   掛ける。容器のファイルは書かない — 書く口（`graph_name=` を名乗る `publish_model`）は全 family
-   横断の門（`tests/test_graph_names.py` の表）に行を足す段 1 の仕事。
+1. **trace**: wrap a meta upstream without weights (config only) in the S-shaped wrapper and export
+   it with meta example inputs (S = 192). The upper bound of the S symbol is {@link SYM_MAX}
+   (1280×704×121 — ADR 0121 decision 3).
+2. **plain**: read the weights that are not quantized (bias, norm, `scale_shift_table`) from the
+   checkpoint as F32.
+3. **quantize**: read the 307 linears (including the patch embedding's Linear) from the checkpoint
+   one chunk of rows at a time, and turn them into packed i8 + per-row scales with the same
+   procedure as the exporter (`umt5_export.quantize_rows` — the patch embedding is a Conv3d
+   `[3072,48,1,2,2]` upstream, so it is read in 2-D with the output channels as rows).
+4. **store**: commit the storage declaration with `karume.emit.stored_model(..., fixed_weights=...)`
+   and apply the checks `publish_model` applies before writing (`assert_runtime_support` /
+   `assert_op_contracts`). No container file is written — the writing entry point (`publish_model`
+   stating `graph_name=`) is step 1's job, which adds a row to the cross-family check (the table in
+   `tests/test_graph_names.py`).
 
-## eager（eager 同値の門の RAM — ADR 0121 決定 4 の「f32 全量 18.63 GiB + 小さい活性」）
+## eager (the RAM of the eager-equivalence check — ADR 0121 decision 4's "full f32 18.63 GiB + small
+activations")
 
-上流を `from_pretrained` で f32 全量読み、S 形のラッパ経由で i8 の fake-quant を掛け、S = 192 の
-1 ケースで上流の素の forward（参照）とパッチ後の eager を回して `export_dit.eager_failures` の門に
-掛ける（`wan.export_dit` と同じ関数）。加えて層逐次の参照（`wan.dit_reference` — 同じ in-memory の
-重み）の f32 が上流の f32 とビット一致することを見て、層逐次の f64 も採る。
+Read the full upstream in f32 with `from_pretrained`, apply the i8 fake-quant through the S-shaped
+wrapper, run the plain upstream forward (the reference) and the patched eager on one S = 192 case,
+and apply the `export_dit.eager_failures` check (the same function as `wan.export_dit`). In
+addition, confirm that the f32 of the layer-by-layer reference (`wan.dit_reference` — the same
+in-memory weights) is bit-identical to the upstream f32, and take the layer-by-layer f64 too.
 
-RAM の山は fake-quant の段ではなく層逐次の段に来る: f32 の全量を持ったまま、層逐次の f64 が
-ブロックの外と 1 ブロックを f64 で足す（{@link eager_memory} — 5B で 18.63 + 0.67 + 1.22 GiB に
-基礎分 {@link EAGER_BASE_BYTES} を足して約 21.1 GiB。1.3B の実測〈山 6.76 GiB = f32 5.29 + f64 の
-外と 2 ブロック 0.88 + 0.59〉から、1 ブロックずつにした後の値として読んだ見込み）。台本は
-`load` と `layerwise` の段の前に `/proc/meminfo` の MemAvailable を読み、残りの見込みに余白
-{@link MEMORY_HEADROOM_BYTES} を足した量に足りなければ、必要量を言って止まる（GPU のジョブと
-ホスト RAM を分け合う機で、途中で swap に落ちて数時間を失わない）。
+The RAM peak comes not in the fake-quant stage but in the layer-by-layer stage: while the full f32
+is held, the layer-by-layer f64 adds the parts outside the blocks and one block in f64
+({@link eager_memory} — for 5B, 18.63 + 0.67 + 1.22 GiB plus the base amount
+{@link EAGER_BASE_BYTES}, about 21.1 GiB; an estimate read from the 1.3B measurement (peak
+6.76 GiB = f32 5.29 + f64 outside the blocks and 2 blocks 0.88 + 0.59) as the value after moving to
+one block at a time). Before the `load` and `layerwise` stages the script reads MemAvailable from
+`/proc/meminfo`, and if it is less than the remaining estimate plus the headroom
+{@link MEMORY_HEADROOM_BYTES}, it stops and states the amount needed (on a machine where a GPU job
+shares host RAM, so that hours are not lost by falling into swap midway).
 
-## reference（層逐次の参照の RAM と所要 — 容器がまだ無いので checkpoint から）
+## reference (the RAM and time of the layer-by-layer reference — from the checkpoint, since there is
+no container yet)
 
-checkpoint から 1 本ずつ読んで i8 の fake-quant を掛ける読み口
-（`dit_reference.CheckpointDitWeights`）で、層逐次の f32 / f64 を採る。f32 は上流の mmap と
-同じずれの番地で回す（`dit_reference.upstream_alignment`）。`eager` の結果が `--out` にあれば、
-f32 は上流の f32 の参照と、f64 は eager の層逐次の f64 とビットで比べる（同じケースのときだけ）。
+Take the layer-by-layer f32 / f64 with a reader that loads tensors from the checkpoint one at a time
+and applies the i8 fake-quant (`dit_reference.CheckpointDitWeights`). The f32 runs at the same
+misaligned addresses as upstream's mmap (`dit_reference.upstream_alignment`). If the `eager` result
+is in `--out`, the f32 is compared bitwise with the upstream f32 reference and the f64 with eager's
+layer-by-layer f64 (only for the same case).
 
-### CPU f32 と f64 の差の切り分け（ADR 0121 段 0 の要調査 → 段 1）
+### Isolating the CPU f32 vs f64 difference (ADR 0121 step 0's open investigation → step 1)
 
-S = 8,190 の合成の入力で f32 と f64 の出力の比が 1.2e-1 だった（S = 192 は 5.3e-4）。原因を
-切り分ける口:
+With synthetic inputs at S = 8,190 the ratio between the f32 and f64 outputs was 1.2e-1 (5.3e-4 at
+S = 192). The options for isolating the cause:
 
-- `--text <名前>`: text の入力を合成の乱数 `[有効長, 4096]` から、Wan2.1 の事前計算の埋め込み
-  資産（同じ umT5 の出力 — `wan.text_embeds`）の 1 本に替える。潜在は同じ seed の同じ乱数（乱数は
-  潜在を先に引く）なので、差は text だけ。
-- `--timestep <t>`: t = 999 以外。
-- `--growth`: ブロックごとの f32 と f64 の差（最大絶対差・比・relRMS・最大差のトークン）。f32 の
-  回でブロックの出力を `--out` の下へ 1 本ずつ書き（S = 8,190 で 1 本 100 MB）、f64 の回で 1 本
-  ずつ読んで比べて消す（両方を RAM に持たない）。行は `growth.<case>.jsonl` に 1 ブロック 1 行で
-  足していく（途中で止めても済んだブロックは読める）。
-- `--blocks <N>`: 先頭の N ブロックだけを回す（S = 8,190 の f64 は 1 ブロック 30 s 級 — 全 30 層を
-  回せない時間の枠で、伸びの始まる層を見る）。出力は N ブロック目の後に head を掛けた値（参照では
-  ない）。
-- `--case F,H,W:t:text[:N]`（繰り返し可）: 上の 4 つの組を 1 回の実行で順に回す（重みの読み口と
-  プロセスの起動を 1 回で済ませる — 要約はケースごとの `reference.<case>.json`）。
+- `--text <name>`: replace the text input, synthetic random `[valid length, 4096]`, with one of
+  Wan2.1's precomputed embedding assets (the output of the same umT5 — `wan.text_embeds`). The
+  latent is the same random draw of the same seed (the latent is drawn first), so only the text
+  differs.
+- `--timestep <t>`: a t other than 999.
+- `--growth`: the per-block difference between f32 and f64 (largest absolute difference, ratio,
+  relRMS, the token of the largest difference). The f32 run writes the block outputs one by one
+  under `--out` (100 MB each at S = 8,190), and the f64 run reads them one by one, compares and
+  deletes them (both are never held in RAM). Rows are appended to `growth.<case>.jsonl`, one row per
+  block (blocks already done stay readable if the run stops midway).
+- `--blocks <N>`: run only the first N blocks (f64 at S = 8,190 takes about 30 s per block — to see
+  the layer where the growth starts within a time budget that cannot cover all 30 layers). The
+  output is the value after the N-th block with the head applied (not a reference).
+- `--case F,H,W:t:text[:N]` (repeatable): run the combinations of the 4 above in sequence in one
+  execution (the weight reader and the process start-up happen once — the summary is
+  `reference.<case>.json` per case).
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -109,41 +123,48 @@ from wan.pipeline_ref import pad_text_embeds
 from wan.sources import SOURCES, local_snapshot
 from wan.umt5_export import CHUNK_ROWS, Checkpoint, MemoryMonitor, quantize_rows
 
-#: 既定のモデル（Wan2.2 TI2V-5B — ADR 0121）。
+#: The default model (Wan2.2 TI2V-5B — ADR 0121).
 DEFAULT_MODEL = "ti2v-5b"
 
-#: モデル → 出力の既定の置き場の配布名（`outputs/bench/<配布名>/` — `docs/assets-layout.md`）。
+#: Model → the distribution name of the default output location (`outputs/bench/<distribution
+#: name>/` — `docs/assets-layout.md`).
 BENCH_NAMES: dict[str, str] = {"t2v-1.3b": "karume-wan2.1", "ti2v-5b": "karume-wan2.2"}
 
-#: eager の山の見積りに足す基礎分（プロセスの基礎・活性・fake-quant の一時 — 1.3B の実測で、山から
-#: f32 の全量と層逐次の f64 を引いた残り 0.59 GiB を丸めた値）。
+#: The base amount added to the estimate of the eager peak (the process base, activations, the
+#: fake-quant temporaries — from the 1.3B measurement, the 0.59 GiB left after subtracting the full
+#: f32 and the layer-by-layer f64 from the peak, rounded).
 EAGER_BASE_BYTES = int(0.6 * 2**30)
 
-#: MemAvailable の検査で見込みに足す余白（ほかのプロセスの揺れ・見込みの誤差）。
+#: The headroom added to the estimate in the MemAvailable check (fluctuation of other processes,
+#: error of the estimate).
 MEMORY_HEADROOM_BYTES = 1 * 2**30
 
-#: `Dim("S")` の上限（1280×704×121 = 27,280 — ADR 0121 決定 3）と下限（Wan2.1 と同じ）。
+#: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — ADR 0121 decision 3) and the lower bound
+#: (the same as Wan2.1).
 SYM_MAX = 27_280
 SYM_MIN = export_dit.DIT_SYM_MIN
 
-#: 測るケース（`export_dit.CASES` の先頭 = 帯の決定の S = 192・t = 999）。
+#: The case to measure (the head of `export_dit.CASES` = the band-deciding S = 192, t = 999).
 PROBE_CASE = export_dit.CASES[0]
 
-#: eager / reference の出力ファイルの綴り（`<command>.<case>.safetensors`）。
+#: The spelling of the eager / reference output files (`<command>.<case>.safetensors`).
 EAGER_PREFIX = "eager."
 REFERENCE_PREFIX = "reference."
-#: 出力テンソルのキー（上流の f32 の参照・層逐次の f32 / f64 — f64 は f32 へ丸めずに F64 で持つ）。
+#: The output tensor keys (the upstream f32 reference, the layer-by-layer f32 / f64 — the f64 is
+#: kept as F64 without rounding to f32).
 UPSTREAM_KEY = "upstream.f32"
 LAYERWISE_F32_KEY = "layerwise.f32"
 LAYERWISE_F64_KEY = "layerwise.f64"
 
 
 class DitProbeError(RuntimeError):
-    """checkpoint・グラフ・量子化の対象が想定から外れた・ホスト RAM が足りない。"""
+    """The checkpoint, the graph or the quantization targets differ from the assumptions, or host
+    RAM is insufficient."""
 
 
 def default_out(model: str) -> Path:
-    """出力（要約の JSON と、eager / reference の出力テンソル）の既定の置き場。"""
+    """The default location of the outputs (the summary JSON and the eager / reference output
+    tensors)."""
     return BENCH_ROOT / BENCH_NAMES[model] / f"{date.today().isoformat()}_dit-probe"
 
 
@@ -151,10 +172,10 @@ _GIB = 2**30
 
 
 def eager_memory(config: Mapping[str, Any]) -> dict[str, int]:
-    """eager の段ごとの RAM の見込み（バイト — モジュール doc「eager」）。
+    """The RAM estimate per eager stage (bytes — the module doc "eager").
 
-    `f32`: 上流の f32 の全量（`load` から持ち続ける）。`layerwise_f64`: 層逐次の f64 が足す
-    ブロックの外と 1 ブロック。`peak`: 両方に基礎分を足した山。
+    `f32`: the full upstream f32 (held from `load` on). `layerwise_f64`: the parts outside the
+    blocks and one block that the layer-by-layer f64 adds. `peak`: both plus the base amount.
     """
     writer = dit_reference.LayerwiseDit(config)
     outer = sum(math.prod(shape) for shape in writer.outer_shapes.values())
@@ -169,38 +190,42 @@ def eager_memory(config: Mapping[str, Any]) -> dict[str, int]:
 
 
 def mem_available() -> int:
-    """`/proc/meminfo` の MemAvailable（バイト）。"""
+    """MemAvailable from `/proc/meminfo` (bytes)."""
     for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
         name, _, value = line.partition(":")
         if name == "MemAvailable":
             return int(value.split()[0]) * 1024
-    raise DitProbeError("/proc/meminfo に MemAvailable が無い")
+    raise DitProbeError("/proc/meminfo has no MemAvailable")
 
 
 def require_available(stage: str, need: int) -> None:
-    """MemAvailable が `need` + 余白に足りなければ、必要量を言って止まる（重い段の前に呼ぶ）。"""
+    """Stop and state the amount needed if MemAvailable is less than `need` + headroom (call it
+    before a heavy stage)."""
     available = mem_available()
     wanted = need + MEMORY_HEADROOM_BYTES
     if available < wanted:
         raise DitProbeError(
-            f"{stage} の前の MemAvailable {available / _GIB:.2f} GiB が必要量"
-            f" {wanted / _GIB:.2f} GiB（見込み {need / _GIB:.2f} + 余白"
-            f" {MEMORY_HEADROOM_BYTES / _GIB:.2f}）に足りない — ほかの重い作業が退いてから回す"
+            f"MemAvailable before {stage} is {available / _GIB:.2f} GiB, less than the required"
+            f" {wanted / _GIB:.2f} GiB (estimate {need / _GIB:.2f} + headroom"
+            f" {MEMORY_HEADROOM_BYTES / _GIB:.2f}) — run it after other heavy work has finished"
         )
 
 
 def transformer_dir(model: str) -> Path:
-    """pin した revision の DiT の置き場（取得済みでなければ `local_snapshot` が fail loudly）。"""
+    """Where the DiT of the pinned revision lives (`local_snapshot` fails loudly if it has not been
+    fetched)."""
     return local_snapshot(model) / dit_reference.TRANSFORMER_SUBFOLDER
 
 
 def meta_wrapper(config: Mapping[str, Any]) -> dit_patch.WanDitTokens:
-    """config だけから組んだ meta の上流を S 形のラッパで包む（重みは読まない）。"""
+    """Wrap a meta upstream built from the config alone in the S-shaped wrapper (no weights are
+    read)."""
     return dit_patch.WanDitTokens(dit_reference.meta_model(config))
 
 
 def meta_inputs(config: Mapping[str, Any], spec: export_dit.CaseSpec) -> tuple[torch.Tensor, ...]:
-    """trace の例示入力（meta — 値は trace に効かない。重みが meta なので入力も meta に揃える）。"""
+    """The example inputs of the trace (meta — values do not affect the trace; the weights are meta,
+    so the inputs are meta too)."""
     patch = [int(size) for size in config["patch_size"]]
     frames, height, width = spec.latent_shape
     tokens = (frames // patch[0]) * (height // patch[1]) * (width // patch[2])
@@ -217,7 +242,8 @@ def meta_inputs(config: Mapping[str, Any], spec: export_dit.CaseSpec) -> tuple[t
 
 
 def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
-    """`export_dit.dynamic_shapes` と同じ形で、上限だけを 5B の受理の最大にする。"""
+    """The same form as `export_dit.dynamic_shapes`, with only the upper bound raised to 5B's
+    accepted maximum."""
     tokens = Dim("S", min=SYM_MIN, max=sym_max)
     return ({1: tokens}, None, None, {1: tokens}, {1: tokens})
 
@@ -225,7 +251,8 @@ def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
 def trace(
     config: Mapping[str, Any], sym_max: int = SYM_MAX
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, int]]:
-    """meta の上流で S 形の export を回す（グラフ・格納テンソル〈重みは meta〉・量子化の対象）。"""
+    """Run the S-shaped export on the meta upstream (graph, stored tensors (weights are meta),
+    quantization targets)."""
     wrapper = meta_wrapper(config)
     graph, tensors = export_module(
         wrapper,
@@ -236,7 +263,7 @@ def trace(
     )
     declared = [entry.name for entry in graph.inputs]
     if declared != list(export_dit.INPUT_NAMES):
-        raise DitProbeError(f"グラフ入力名が宣言と不一致: {declared}")
+        raise DitProbeError(f"the graph input names do not match the declaration: {declared}")
     targets = {
         fqn: axis for fqn, _, axis in iter_quant_targets(wrapper, op_types=QUANT_MODULE_TYPES)
     }
@@ -244,9 +271,9 @@ def trace(
 
 
 class _FlatRows:
-    """checkpoint の rank 3 以上の重み（patch 埋め込みの Conv3d）を、出力チャネルを行にした 2 次元で
-    見せる読み口（`quantize_rows` は rank 2 だけを受ける）。行ごとの scale は Linear 化した重みと
-    同じ（行の amax）。"""
+    """A reader that presents the checkpoint's weights of rank 3 or more (the patch embedding's
+    Conv3d) in 2-D with the output channels as rows (`quantize_rows` takes rank 2 only). The
+    per-row scales are the same as for the Linear-form weight (the row amax)."""
 
     def __init__(self, checkpoint: Checkpoint) -> None:
         self._checkpoint = checkpoint
@@ -262,7 +289,8 @@ class _FlatRows:
 
 @dataclass(frozen=True)
 class DitExport:
-    """容器の材料（`publish_model` へそのまま渡せる形 — 量子化の対象は meta・実体は `fixed`）。"""
+    """The container material (in a form that can be passed to `publish_model` as is — quantization
+    targets are meta, the real values in `fixed`)."""
 
     graph: IrGraph
     tensors: Mapping[str, torch.Tensor]
@@ -270,7 +298,7 @@ class DitExport:
     plain: tuple[str, ...]
 
 
-#: trace の口（config・S の上限 → グラフ・格納テンソル・量子化の対象）。
+#: The trace entry point (config, upper bound of S → graph, stored tensors, quantization targets).
 Tracer = Callable[[Mapping[str, Any], int], tuple[IrGraph, dict[str, torch.Tensor], dict[str, int]]]
 
 
@@ -283,10 +311,12 @@ def prepare(
     trace_only: bool = False,
     tracer: Tracer | None = None,
 ) -> tuple[DitExport, dict[str, Any]]:
-    """trace → plain → quantize（`trace_only` なら trace まで）。戻りは材料と要約の欄。
+    """trace → plain → quantize (up to trace with `trace_only`). Returns the material and the
+    summary fields.
 
-    `tracer` は trace の差し替え（既定は 2.1 形の {@link trace}。I2V 対応のグラフは
-    `wan.ti2v_export_dit.trace` — 材料作りの残り〈plain / quantize〉は同じ 1 本を通す）。
+    `tracer` replaces the trace (the default is the 2.1-form {@link trace}; the I2V-capable graph
+    uses `wan.ti2v_export_dit.trace` — the rest of the material building (plain / quantize) goes
+    through the same single path).
     """
     config = dit_reference.load_config(directory)
     with stage("trace") as record:
@@ -295,7 +325,9 @@ def prepare(
     weights = sorted(key for key, value in tensors.items() if value.is_meta)
     unknown = sorted(set(targets) - set(weights))
     if unknown or any(axis != 0 for axis in targets.values()):
-        raise DitProbeError(f"量子化の対象がグラフの重みに無い / 軸 0 でない: {unknown}")
+        raise DitProbeError(
+            f"quantization targets missing from the graph's weights / not on axis 0: {unknown}"
+        )
     summary: dict[str, Any] = {
         "nodes": len(graph.nodes),
         "ops": dict(sorted(Counter(node.op for node in graph.nodes).items())),
@@ -313,13 +345,15 @@ def prepare(
     )
     missing = sorted(set(weights) - checkpoint.names())
     if missing:
-        raise DitProbeError(f"グラフの重みが checkpoint に無い: {missing[:5]}")
+        raise DitProbeError(f"graph weights missing from the checkpoint: {missing[:5]}")
     materialized = dict(tensors)
     with stage("plain") as record:
         for key in plain:
             value = checkpoint.read(key)
             if list(value.shape) != list(tensors[key].shape):
-                raise DitProbeError(f"'{key}': checkpoint の形 {list(value.shape)} がグラフと違う")
+                raise DitProbeError(
+                    f"'{key}': the checkpoint shape {list(value.shape)} differs from the graph"
+                )
             materialized[key] = value
         record.details["tensors"] = len(plain)
     fixed: dict[str, FixedQuantizedWeight] = {}
@@ -328,7 +362,7 @@ def prepare(
         for key in sorted(targets):
             weight = quantize_rows(rows_view, key, chunk_rows)  # type: ignore[arg-type]
             if list(weight.packed.shape) != list(tensors[key].shape):
-                raise DitProbeError(f"'{key}': checkpoint の形がグラフと違う")
+                raise DitProbeError(f"'{key}': the checkpoint shape differs from the graph")
             fixed[key] = weight
         record.details["tensors"] = len(fixed)
     summary["packed_bytes"] = sum(weight.packed.numel() for weight in fixed.values())
@@ -336,7 +370,7 @@ def prepare(
 
 
 def store(export: DitExport) -> dict[str, Any]:
-    """格納宣言を commit し、書き出しの前の検査を掛ける（容器は書かない）。"""
+    """Commit the storage declaration and apply the pre-write checks (no container is written)."""
     stored = stored_model(export.graph, dict(export.tensors), fixed_weights=export.fixed).graph
     assert_runtime_support(stored)
     assert_op_contracts(stored)
@@ -367,8 +401,8 @@ def run_prepare(model: str, *, trace_only: bool, sym_max: int) -> dict[str, Any]
 def _probe_spec(
     latent: tuple[int, int, int] | None, timestep: int | None = None
 ) -> export_dit.CaseSpec:
-    """測るケース（既定は {@link PROBE_CASE}・`latent` / `timestep` を渡すと同じ有効長 / seed の
-    別の格子・別の時刻）。"""
+    """The case to measure (default {@link PROBE_CASE}; passing `latent` / `timestep` gives another
+    grid or another time with the same valid length / seed)."""
     if latent is None and timestep is None:
         return PROBE_CASE
     return export_dit.CaseSpec(
@@ -386,7 +420,8 @@ def _case_name(spec: export_dit.CaseSpec, config: Mapping[str, Any]) -> str:
 
 
 def run_eager(model: str, out: Path) -> dict[str, Any]:
-    """eager 同値の門と層逐次の f32 / f64（同じ in-memory の重み）の RAM。"""
+    """The RAM of the eager-equivalence check and the layer-by-layer f32 / f64 (the same in-memory
+    weights)."""
     spec = PROBE_CASE
     estimate = eager_memory(dit_reference.load_config(transformer_dir(model)))
     require_available("load", estimate["peak"])
@@ -431,13 +466,16 @@ def run_eager(model: str, out: Path) -> dict[str, Any]:
     }
 
 
-#: text の入力の既定（合成の乱数 — `export_dit.case_inputs`）。ほかの値は埋め込み資産のテンソル名。
+#: The default text input (synthetic random — `export_dit.case_inputs`). Any other value is a tensor
+#: name in the embeddings asset.
 SYNTHETIC_TEXT = "synthetic"
 
-#: Wan2.1 の事前計算の埋め込み資産（同じ umT5 の出力 — `wan.text_embeds` の席）。
+#: Wan2.1's precomputed embeddings asset (the output of the same umT5 — the place of
+#: `wan.text_embeds`).
 TEXT_EMBEDS_ASSET = SERIES_ROOT / "wan2.1-t2v-1.3b-text-embeds" / "text_embeds.safetensors"
 
-#: ブロックごとの差の行のファイルの綴り（`growth.<case>.jsonl`）と、f32 のブロック出力の一時置き場。
+#: The spelling of the per-block difference row file (`growth.<case>.jsonl`) and the temporary place
+#: of the f32 block outputs.
 GROWTH_PREFIX = "growth."
 GROWTH_SPILL = "growth-spill"
 
@@ -445,10 +483,11 @@ GROWTH_SPILL = "growth-spill"
 def probe_inputs(
     model: Any, spec: export_dit.CaseSpec, text: str = SYNTHETIC_TEXT
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """下見の入力（潜在・timestep・文脈 `[1,512,4096]`）。
+    """The probe's inputs (latent, timestep, context `[1,512,4096]`).
 
-    `text` が合成なら `export_dit.case_inputs` そのもの。埋め込み資産の名前なら、潜在は同じ seed の
-    同じ乱数（`case_inputs` は潜在を先に引く）で、文脈だけをその埋め込みにする — 差は text だけ。
+    If `text` is synthetic, exactly `export_dit.case_inputs`. If it is a name in the embeddings
+    asset, the latent is the same random draw of the same seed (`case_inputs` draws the latent
+    first) and only the context becomes that embedding — only the text differs.
     """
     latents, timestep, synthetic = export_dit.case_inputs(model, spec)
     if text == SYNTHETIC_TEXT:
@@ -457,14 +496,16 @@ def probe_inputs(
 
     tensors, _ = read_asset(TEXT_EMBEDS_ASSET)
     if text not in tensors:
-        raise DitProbeError(f"埋め込み資産に '{text}' が無い（{sorted(tensors)}）")
+        raise DitProbeError(f"the embeddings asset has no '{text}' ({sorted(tensors)})")
     return latents, timestep, pad_text_embeds(tensors[text])
 
 
 def _difference(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, Any]:
-    """f32 と f64 の差の要約（比 = 最大絶対差 ÷ 参照の最大絶対値・relRMS・最大差のトークン）。
+    """A summary of the f32 vs f64 difference (ratio = largest absolute difference ÷ the reference's
+    largest absolute value, relRMS, the token of the largest difference).
 
-    `expected` は f64。トークンは `[1,S,dim]` の S 軸（出力 `[1,C,F,H,W]` は平坦の位置）。
+    `expected` is f64. The token is on the S axis of `[1,S,dim]` (for the output `[1,C,F,H,W]`, the
+    flat position).
     """
     reference = expected.double()
     difference = (actual.double() - reference).abs()
@@ -481,10 +522,10 @@ def _difference(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, Any]:
 
 
 class _GrowthRecorder:
-    """ブロックごとの f32 と f64 の差（モジュール doc「切り分け」）。
+    """The per-block difference between f32 and f64 (the module doc's "Isolating").
 
-    f32 の回の {@link spill} がブロックの出力を 1 本ずつ書き、f64 の回の {@link compare} が 1 本
-    ずつ読んで比べて消し、行を `rows_path` へ足す。
+    In the f32 run, {@link spill} writes the block outputs one by one; in the f64 run,
+    {@link compare} reads them one by one, compares, deletes them and appends a row to `rows_path`.
     """
 
     def __init__(self, spill: Path, rows_path: Path) -> None:
@@ -511,7 +552,8 @@ class _GrowthRecorder:
             stream.write(json.dumps(row) + "\n")
 
     def close(self) -> None:
-        """比べ終えた一時置き場（ケースのディレクトリと、空になった親）を消す。"""
+        """Delete the temporary place after the comparison (the case directory and the parent once
+        it is empty)."""
         for directory in (self.spill_dir, self.spill_dir.parent):
             if directory.is_dir() and not any(directory.iterdir()):
                 directory.rmdir()
@@ -527,8 +569,9 @@ def run_reference(
     growth: bool = False,
     blocks: int | None = None,
 ) -> dict[str, Any]:
-    """checkpoint から 1 本ずつ i8 の fake-quant を掛けて読む層逐次の f32 / f64 の RAM と所要
-    （`text` / `timestep` / `growth` / `blocks` は切り分けの口 — モジュール doc）。"""
+    """The RAM and time of the layer-by-layer f32 / f64 read from the checkpoint one tensor at a
+    time with the i8 fake-quant applied (`text` / `timestep` / `growth` / `blocks` are the
+    isolation options — the module doc)."""
     directory = transformer_dir(model)
     config = dit_reference.load_config(directory)
     spec = _probe_spec(latent, timestep)
@@ -592,7 +635,8 @@ def run_reference(
         recorder.close()
         summary["growth"] = recorder.rows
     eager = out / f"{EAGER_PREFIX}{name}.safetensors"
-    # 突き合わせの相手の有無を要約に出す（無いと比較の欄が出ない — 「比べていない」を見える形に）。
+    # Show in the summary whether the counterpart to compare with exists (without it there is no
+    # comparison field — making "not compared" visible).
     summary["eager_result"] = str(eager) if eager.is_file() else None
     if eager.is_file():
         with safe_open(str(eager), framework="pt") as handle:
@@ -615,13 +659,13 @@ def _progress(name: str, label: str, layers: int) -> Any:
 def _latent(text: str) -> tuple[int, int, int]:
     parts = tuple(int(part) for part in text.split(","))
     if len(parts) != 3:
-        raise argparse.ArgumentTypeError("--latent は F,H,W（潜在の格子 — 例 21,30,52）")
+        raise argparse.ArgumentTypeError("--latent is F,H,W (the latent grid — e.g. 21,30,52)")
     return parts[0], parts[1], parts[2]
 
 
 @dataclass(frozen=True)
 class ProbeRun:
-    """`reference` の 1 ケースの指定（`--case` の 1 本 — 格子・時刻・text・回すブロックの数）。"""
+    """One `reference` case (one `--case` — grid, time, text, number of blocks to run)."""
 
     latent: tuple[int, int, int] | None
     timestep: int | None
@@ -630,10 +674,10 @@ class ProbeRun:
 
 
 def _probe_run(text: str) -> ProbeRun:
-    """`--case F,H,W:t:text[:N]`（例 `4,30,52:999:boxing-cats`・`9,44,80:999:synthetic:6`）。"""
+    """`--case F,H,W:t:text[:N]` (e.g. `4,30,52:999:boxing-cats`, `9,44,80:999:synthetic:6`)."""
     parts = text.split(":")
     if len(parts) not in (3, 4):
-        raise argparse.ArgumentTypeError("--case は F,H,W:timestep:text[:blocks]")
+        raise argparse.ArgumentTypeError("--case is F,H,W:timestep:text[:blocks]")
     return ProbeRun(
         latent=_latent(parts[0]),
         timestep=int(parts[1]),
@@ -647,33 +691,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("command", choices=("prepare", "eager", "reference"))
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
     parser.add_argument(
-        "--out", type=Path, help="出力の置き場（既定 outputs/bench/<配布名>/<日付>_dit-probe）"
+        "--out",
+        type=Path,
+        help="output location (default outputs/bench/<distribution name>/<date>_dit-probe)",
     )
-    parser.add_argument("--trace-only", action="store_true", help="prepare: trace だけ")
-    parser.add_argument("--sym-max", type=int, default=SYM_MAX, help="prepare: S の記号の上限")
-    parser.add_argument("--latent", type=_latent, help="reference: 潜在の格子 F,H,W")
-    parser.add_argument("--timestep", type=int, help="reference: timestep（既定 999）")
+    parser.add_argument("--trace-only", action="store_true", help="prepare: trace only")
+    parser.add_argument(
+        "--sym-max", type=int, default=SYM_MAX, help="prepare: upper bound of the S symbol"
+    )
+    parser.add_argument("--latent", type=_latent, help="reference: latent grid F,H,W")
+    parser.add_argument("--timestep", type=int, help="reference: timestep (default 999)")
     parser.add_argument(
         "--text",
         default=SYNTHETIC_TEXT,
-        help="reference: text の入力（synthetic = 合成の乱数・ほかは埋め込み資産のプロンプト名）",
+        help="reference: the text input (synthetic = synthetic random, otherwise a prompt name"
+        " in the embeddings asset)",
     )
     parser.add_argument(
-        "--growth", action="store_true", help="reference: ブロックごとの f32 と f64 の差を記録する"
+        "--growth",
+        action="store_true",
+        help="reference: record the per-block difference between f32 and f64",
     )
     parser.add_argument(
-        "--blocks", type=int, help="reference: 先頭の N ブロックだけ回す（誤差の伸びの切り詰め）"
+        "--blocks",
+        type=int,
+        help="reference: run only the first N blocks (truncation for the error growth)",
     )
     parser.add_argument(
         "--case",
         type=_probe_run,
         action="append",
         default=[],
-        help="reference: F,H,W:timestep:text[:blocks] を 1 回の実行で順に回す（繰り返し可）",
+        help="reference: run F,H,W:timestep:text[:blocks] in sequence in one execution"
+        " (repeatable)",
     )
     args = parser.parse_args(argv)
     if args.trace_only and args.command != "prepare":
-        parser.error("--trace-only は prepare にだけ掛かる")
+        parser.error("--trace-only applies only to prepare")
     reference_only = (
         args.latent is not None
         or args.timestep is not None
@@ -683,11 +737,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if (reference_only or args.case) and args.command != "reference":
         parser.error(
-            "--latent / --timestep / --text / --growth / --blocks / --case は reference に"
-            "だけ掛かる"
+            "--latent / --timestep / --text / --growth / --blocks / --case apply only to reference"
         )
     if args.case and _single_flags(args):
-        parser.error("--case と --latent / --timestep / --text / --blocks は併用しない")
+        parser.error("--case is not combined with --latent / --timestep / --text / --blocks")
     if args.out is None:
         args.out = default_out(args.model)
     if args.command == "reference":
@@ -700,7 +753,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _single_flags(args: argparse.Namespace) -> bool:
-    """1 ケースの指定（`--latent` / `--timestep` / `--text` / `--blocks`）が 1 つでもあるか。"""
+    """Whether any single-case option (`--latent` / `--timestep` / `--text` / `--blocks`) is
+    given."""
     return (
         args.latent is not None
         or args.timestep is not None
@@ -731,7 +785,8 @@ def _summary(args: argparse.Namespace) -> tuple[dict[str, Any], float]:
 
 
 def _write_document(args: argparse.Namespace, result: tuple[dict[str, Any], float]) -> bool:
-    """要約を `--out` の `<command>.json`（reference はケースごと）へ書き、失敗の判定を返す。"""
+    """Write the summary to `<command>.json` under `--out` (per case for reference) and return
+    whether it failed."""
     summary, started = result
     document = {
         "command": args.command,
@@ -741,7 +796,8 @@ def _write_document(args: argparse.Namespace, result: tuple[dict[str, Any], floa
         "torch_threads": torch.get_num_threads(),
     }
     args.out.mkdir(parents=True, exist_ok=True)
-    # reference はケースごとに書く（格子・時刻・text を替えた実行どうしで上書きしない）。
+    # reference is written per case (runs with a different grid, time or text do not overwrite each
+    # other).
     suffix = "-trace" if args.trace_only else ""
     if args.command == "reference":
         suffix = f".{summary['case']}"

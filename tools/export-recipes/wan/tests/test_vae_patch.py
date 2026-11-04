@@ -1,18 +1,22 @@
-"""`wan/vae_patch.py` の約束事（実重み — ADR 0118 決定 2 / 段 4 の検収）。
+"""The contract of `wan/vae_patch.py` (real weights — ADR 0118 decision 2, the acceptance of
+step 4).
 
-固定するのは 3 層:
+Three levels are pinned:
 
-- **cache の表**が決定 2 の表（32 本・形・`time_conv` の位置）と一致し、first が `time_conv` の
-  2 本を持たないこと。
-- **cache の正規化**（常に 2 フレーム・初期値ゼロ）が値を変えないこと — 上流の decoder のコード
-  のまま cache だけを正規化した chunk ループが、上流の非タイル `_decode` と**ビット一致**する。
-- **書き直しの部品**の eager 同値 — データ移動だけの書き直し（時間インターリーブ・nearest ×2・
-  フレームを (b t) に畳む形）はビット一致、縮約順が変わる書き直し（RMS_norm の `sum` 形・空間
-  padding の attrs 化）は実測から導いた帯の内側。chunk ループ全体（最終形）も帯の内側。
+- **The cache table** equals decision 2's table (32 entries, shapes, the position of `time_conv`),
+  and first does not hold the two `time_conv` entries.
+- **Cache normalization** (always 2 frames, initialized to zero) does not change the values — a
+  chunk loop that keeps the upstream decoder code and normalizes only the cache is
+  **bit-identical** to the upstream untiled `_decode`.
+- **The rewrite components** are eager-equivalent — rewrites that only move data (the temporal
+  interleave, nearest ×2, folding frames into (b t)) are bit-identical, and rewrites that change the
+  reduction order (the `sum` form of RMS_norm, the spatial padding moved into attrs) are inside
+  bands derived from measurements. The whole chunk loop (the final form) is inside its band too.
 
-潜在は空間 8×8（64 px）・5 chunk（最初の chunk・`time_conv` の `'Rep'` 経路を通る 2 chunk 目・
-cache が 2 フレーム揃う 3 chunk 目以降を全て通る最小の本数）。タイル 32・9 chunk の実寸の値は
-`python -m wan.export_vae --verify` が測る（README の VAE 節）。
+The latent is spatially 8×8 (64 px) with 5 chunks (the smallest count that goes through the first
+chunk, the second chunk on the `'Rep'` path of `time_conv`, and the third and later chunks where
+the cache holds 2 frames). The real-size values at tile 32 with 9 chunks are measured by
+`python -m wan.export_vae --verify` (the VAE section of the README).
 """
 
 from __future__ import annotations
@@ -23,30 +27,36 @@ from torch import nn
 
 from wan import vae_patch
 
-#: 小さな潜在タイル（空間）と chunk 数。
+#: A small latent tile (spatial) and the chunk count.
 TILE = 8
 CHUNKS = 5
 
-#: 書き直しの最終形（chunk ループ全体）と上流の差の帯（参照の最大絶対値に対する比）。
-#: 実測（実重み f32・2026-10-02）: このテストの潜在（タイル 8・5 chunk）で 1.95e-6、タイル 32・
-#: 9 chunk で 2.79e-6（`--verify`）。後者の約 5 倍。差の出所は RMS_norm の縮約形と conv の padding
-#: の attrs 化（下の部品テスト）で、どちらも chunk を重ねても伸びない（最後の chunk は 1.36e-6）。
+#: The band of the difference between the final form of the rewrite (the whole chunk loop) and the
+#: upstream (ratio to the reference's maximum absolute value). Measured (real weights f32,
+#: 2026-10-02): 1.95e-6 on this test's latent (tile 8, 5 chunks), 2.79e-6 at tile 32 with 9 chunks
+#: (`--verify`). About 5 times the latter. The difference comes from the reduced form of RMS_norm
+#: and the conv padding moved into attrs (the component tests below), and neither grows as chunks
+#: stack up (the last chunk is 1.36e-6).
 FINAL_RATIO_BAND = 1.5e-5
 
-#: RMS_norm の `sum` 形と上流 `F.normalize`（`linalg_vector_norm`）の差（絶対値）。
-#: 実測 1.19e-6（チャネル 384・4 フレーム・8×8・入力 N(0, 3²)）の約 5 倍。
+#: The difference (absolute) between the `sum` form of RMS_norm and the upstream `F.normalize`
+#: (`linalg_vector_norm`). About 5 times the measured 1.19e-6 (384 channels, 4 frames, 8×8,
+#: input N(0, 3²)).
 RMS_NORM_BAND = 6e-6
 
-#: 空間 padding を conv3d の attrs へ畳んだ形と上流（明示の `F.pad`）の差（出力の最大絶対値に
-#: 対する比）。torch CPU は padding の持ち方と形で別の畳み込み経路を選ぶので、ビット一致は期待
-#: しない — このテストの入力（8×8）では T = 1 がビット一致・T = 4 が 6.67e-6 で、16×16 の試作では
-#: 逆に T = 1 だけが差を持った（2026-10-02）。帯は 6.67e-6 の約 5 倍。
+#: The difference between the spatial padding folded into conv3d's attrs and the upstream (an
+#: explicit `F.pad`) (ratio to the output's maximum absolute value). torch CPU picks a different
+#: convolution path depending on how the padding is held and on the shape, so bit identity is not
+#: expected — on this test's input (8×8) T = 1 is bit-identical and T = 4 is 6.67e-6, while in a
+#: 16×16 trial it was the other way around, only T = 1 differed (2026-10-02). The band is about 5
+#: times 6.67e-6.
 CONV_PADDING_RATIO_BAND = 3.5e-5
 
 
 @pytest.fixture(scope="module")
 def vae(wan_snapshot):
-    """pin した revision の VAE（CPU f32・丸め無し — 同値の主張は重みの値に依らない）。"""
+    """The VAE of the pinned revision (CPU f32, no rounding — the equivalence claim does not depend
+    on the weight values)."""
     pytest.importorskip("diffusers")
     from diffusers import AutoencoderKLWan
 
@@ -57,7 +67,8 @@ def vae(wan_snapshot):
 
 @pytest.fixture(scope="module")
 def latents(vae) -> torch.Tensor:
-    """逆正規化した固定 seed の乱数潜在 `[1, 16, 5, 8, 8]`（実運用と同じ値域）。"""
+    """A fixed-seed random latent `[1, 16, 5, 8, 8]`, denormalized (the same value range as in real
+    use)."""
     generator = torch.Generator().manual_seed(7)
     mean = torch.tensor(vae.config.latents_mean).view(1, 16, 1, 1, 1)
     std = torch.tensor(vae.config.latents_std).view(1, 16, 1, 1, 1)
@@ -75,7 +86,7 @@ def _ratio(got: torch.Tensor, want: torch.Tensor) -> float:
 
 
 class TestCacheTable:
-    #: 決定 2 の表（潜在タイル 32 のとき）。(キー, 形, time_conv)。
+    #: Decision 2's table (at latent tile 32). (key, shape, time_conv).
     ADR_TABLE = (
         [("00", (16, 2, 32, 32), False)]
         + [(f"{index:02d}", (384, 2, 32, 32), False) for index in range(1, 11)]
@@ -115,8 +126,8 @@ class TestCacheNormalization:
     def test_two_zero_frames_reproduce_the_upstream_cache_bit_for_bit(
         self, vae, latents, reference
     ):
-        """上流のコードのまま cache の初期値だけを 2 フレームのゼロにする（決定 2 の導出の
-        実測）。"""
+        """Keep the upstream code and only set the cache's initial value to 2 zero frames (the
+        measurement behind decision 2's derivation)."""
         with torch.no_grad():
             normalized = vae_patch.normalized_cache_decode(vae, latents, TILE)
 
@@ -125,7 +136,7 @@ class TestCacheNormalization:
 
 @pytest.fixture(scope="module")
 def decoded(vae, latents) -> torch.Tensor:
-    """書き直しの最終形（chunk グラフ 2 本の eager）で回した chunk ループ。"""
+    """The chunk loop run on the final form of the rewrite (eager of the two chunk graphs)."""
     first = vae_patch.WanVaeChunkDecoder(vae, first=True).eval()
     following = vae_patch.WanVaeChunkDecoder(vae, first=False).eval()
     with torch.no_grad():
@@ -138,7 +149,8 @@ class TestChunkDecode:
         assert _ratio(decoded, reference[0]) <= FINAL_RATIO_BAND
 
     def test_the_error_does_not_grow_with_the_chunks(self, decoded, reference):
-        """cache の取り違えは後の chunk ほど差を積む — 最後の chunk も最初の帯に収まる。"""
+        """A cache mix-up accumulates difference in later chunks — the last chunk also stays within
+        the first band."""
         scale = reference.abs().max()
         last = (decoded[:, -4:] - reference[0, :, -4:]).abs().max() / scale
 
@@ -147,8 +159,8 @@ class TestChunkDecode:
     def test_a_cache_with_its_two_frames_swapped_is_far_outside_the_band(
         self, vae, latents, reference, monkeypatch: pytest.MonkeyPatch
     ):
-        """故障注入: cache の 2 フレームの順を逆にすると帯を大きく外れる（帯が順を見分け
-        られる）。"""
+        """Fault injection: reversing the order of the cache's 2 frames lands far outside the band
+        (the band can tell the order apart)."""
         first = vae_patch.WanVaeChunkDecoder(vae, first=True).eval()
         following = vae_patch.WanVaeChunkDecoder(vae, first=False).eval()
         original = vae_patch.causal_conv3d
@@ -186,7 +198,8 @@ class TestDataMovementIsBitExact:
         assert torch.equal(vae_patch.pointwise_conv3d(vae.post_quant_conv, x), want)
 
     def test_the_2d_upsample_folds_frames_into_the_batch(self, vae):
-        """upsample2d（up2）は time_conv を持たない — フレームを (b t) に畳む形だけを見る。"""
+        """upsample2d (up2) has no time_conv — only the form that folds frames into (b t) is
+        checked."""
         module = vae.decoder.up_blocks[2].upsamplers[0]
         x = torch.randn(192, 4, TILE, TILE)
 
@@ -199,8 +212,8 @@ class TestDataMovementIsBitExact:
     def test_the_attention_fold_is_exact_once_the_norm_is_the_upstream_one(
         self, vae, monkeypatch: pytest.MonkeyPatch
     ):
-        """RMS_norm だけを上流のものに戻すと、(b t) に畳む形はビット一致する（差の出所を
-        切り分ける）。"""
+        """With only RMS_norm put back to the upstream one, the form that folds into (b t) is
+        bit-identical (isolating where the difference comes from)."""
         block = vae.decoder.mid_block.attentions[0]
         x = torch.randn(384, 1, TILE, TILE)
 
@@ -253,13 +266,13 @@ class TestFailsLoudly:
         cache = vae_patch.zero_caches(module.slots, TILE, first=False)
         reordered = dict(reversed(list(cache.items())))
 
-        with pytest.raises(ValueError, match="順"):
+        with pytest.raises(ValueError, match="the order is checked"):
             module(torch.zeros(16, 1, TILE, TILE), reordered)
 
     def test_a_cache_of_the_wrong_shape_is_refused(self, vae):
         conv = vae.decoder.conv_in
 
-        with pytest.raises(ValueError, match="cache の形"):
+        with pytest.raises(ValueError, match="cache shape"):
             vae_patch.causal_conv3d(conv, torch.zeros(16, 1, 4, 4), torch.zeros(16, 1, 4, 4))
 
     def test_a_batched_latent_is_refused(self, vae):

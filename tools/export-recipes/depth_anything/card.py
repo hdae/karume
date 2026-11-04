@@ -1,16 +1,17 @@
-"""Depth Anything V2 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""The model card (`README.md`) of the Depth Anything V2 distribution — a pure function derived
+mechanically from the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **Depth Anything V2 固有の事実**だけ: 帰属（出所・
-ライセンス・引用）と、この pipeline のカードに何を書くか。
+The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live
+in `karume.modelcard`. This module holds only **facts specific to Depth Anything V2**: the
+attribution (source, licence, citation) and what this pipeline's card says.
 
-帰属は**サイズから一意に決まる**（{@link DEPTH_ANYTHING_UPSTREAM}）ので、プロファイルの軸には
-割らない — 分けると「Base を Small の帰属で配る」取り違えを操作者が起こせるようになる
-（しかも Base は CC BY-NC 4.0）。
+The attribution is **determined uniquely by the size** ({@link DEPTH_ANYTHING_UPSTREAM}), so it is
+not split into a profile axis — splitting it would let an operator make the mistake of "shipping
+Base under Small's attribution" (and Base is CC BY-NC 4.0 at that).
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies unchanged). The only constants allowed here are facts
+that **do not exist** in the manifest.
 """
 
 from __future__ import annotations
@@ -36,83 +37,94 @@ from karume.modelcard import (
 
 from .measurements import convt_diff_text
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 DEPTH_ANYTHING_SUPPORTED_PIPELINE = "depth-anything/1"
 
-#: HF の pipeline tag（上流と同じ）。出すのは相対深度の地図 1 枚で、metric depth ではない。
+#: The HF pipeline tag (same as upstream). The output is one relative-depth map, not metric depth.
 DEPTH_ANYTHING_PIPELINE_TAG = "depth-estimation"
 
-#: 上流の論文（Depth Anything V2）。
+#: The upstream paper (Depth Anything V2).
 DEPTH_ANYTHING_PAPER = "arxiv.org/abs/2406.09414"
 
-#: モデル名 → 上流チェックポイントの HF リポ ID。**この 1 表が「どのモデルが何の重みか」の
-#: 唯一の事実**で、`depth_anything.distribution` は系列名 / 入力素材のディレクトリ名（どちらも
-#: 上流リポ名そのもの — `depth_anything/export.py` の綴り）をここから導く。載っていないモデル名
-#: は帰属を書けないので、カードは描かずに落ちる。
+#: Model name → HF repository ID of the upstream checkpoint. **This one table is the only fact
+#: about "which model is which weights"**; `depth_anything.distribution` derives the series name
+#: and the input directory name from it (both are the upstream repository name itself — the
+#: spelling of `depth_anything/export.py`). A model name not listed here has no attribution to
+#: write, so the card fails instead of rendering.
 #:
-#: MUST: **Small だけが Apache-2.0**（実地確認 2026-08-14 — HF の model API:
-#: `depth-anything/Depth-Anything-V2-Base-hf` と `-Large-hf` はどちらも `license:
-#: cc-by-nc-4.0`）。サイズ軸そのものは配布形のモデル軸（世代 1 リポの中に並ぶ —
-#: `depth_anything.distribution`）だが、**この表に載っているものしか配れない**。門は名前と、
-#: 系列の容器が名乗る出所（`provenance.license` がこの表のライセンスと一致すること）の 2 段で、
-#: NC の重みを Apache-2.0 のカードで再配布する事故はそこで止まる。Base / Large を足すときは、
-#: ライセンス欄をモデル単位へ割る改修とセット（{@link DEPTH_ANYTHING_LICENSE} は今 1 値しかない）。
+#: MUST: **only Small is Apache-2.0** (checked 2026-08-14 against the HF model API:
+#: `depth-anything/Depth-Anything-V2-Base-hf` and `-Large-hf` are both `license:
+#: cc-by-nc-4.0`). The size axis itself is the distribution's model axis (models side by side in
+#: one per-generation repository — `depth_anything.distribution`), but **only what this table
+#: lists can be shipped**. The check has two stages, the name and the provenance the series'
+#: container states (`provenance.license` must equal this table's licence), and that is where an
+#: accident of redistributing NC weights under an Apache-2.0 card stops. Adding Base / Large goes
+#: together with splitting the licence field per model ({@link DEPTH_ANYTHING_LICENSE} holds a
+#: single value today).
 DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
     "small": "depth-anything/Depth-Anything-V2-Small-hf",
 }
 
-#: 実地確認（2026-08-14 — HF の model API）: `license: apache-2.0`。**表に載っている全モデルが
-#: この 1 値**である前提で frontmatter を書く（上の MUST）。
+#: Checked 2026-08-14 against the HF model API: `license: apache-2.0`. The frontmatter is written
+#: on the premise that **every model in the table has this one value** (the MUST above).
 DEPTH_ANYTHING_LICENSE = "apache-2.0"
 
-#: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
+#: Where the original text lives (the same text as `LICENSE.md` at the distribution repository's
+#: root — Apache 2.0 §4(a)).
 DEPTH_ANYTHING_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: `ConvTranspose2d` → 1×1 conv + pixel shuffle の差し替え（`depth_anything.patch` の
-#: ③）が持ち込む差の実測幅。**ビット同一ではない**ので帰属節が明示する
-#: （`depth_anything/export.py --verify` が毎回実測する値・深度の RMS はおよそ 1.0）。
-#: 数も書式も持たない — 正本は {@link depth_anything.measurements.convt_diff_text}。
+#: Measured width of the difference introduced by replacing `ConvTranspose2d` with a 1×1 conv +
+#: pixel shuffle (③ of `depth_anything.patch`). It is **not bit-identical**, so the attribution
+#: section states it (a value `depth_anything/export.py --verify` measures every time; the RMS of
+#: the depth is about 1.0). This holds neither the number nor its format — the source of truth is
+#: {@link depth_anything.measurements.convt_diff_text}.
 DEPTH_ANYTHING_CONVT_DIFF = convt_diff_text()
 
 
 def _depth_anything_repo(name: str) -> str:
-    """モデル名 → 上流リポ ID（帰属表に無ければ描かない）。"""
+    """Model name → upstream repository ID (no rendering when it is not in the attribution
+    table)."""
     repo = DEPTH_ANYTHING_UPSTREAM.get(name)
     if repo is None:
         raise ValueError(
-            f"モデル '{name}' の上流が帰属表に無い（既知: {sorted(DEPTH_ANYTHING_UPSTREAM)}）"
-            " — 出所を名乗れないカードは描かない"
+            f"the upstream of model '{name}' is not in the attribution table (known:"
+            f" {sorted(DEPTH_ANYTHING_UPSTREAM)}) — a card that cannot state its source is not"
+            " rendered"
         )
     return repo
 
 
 def _depth_anything_title(manifest: Mapping[str, Any]) -> str:
-    """見出し（`Depth Anything V2 Small — Karume`）。
+    """The title (`Depth Anything V2 Small — Karume`).
 
-    サイズの綴りは**上流リポ名から導く**（既定モデルの上流リポ名をそのまま見出しにする）—
-    2 つ目の表を持つと、片方だけ動いたときに「Base の重みを Small として売る」カードが黙って
-    作れる。
+    The size is spelled **from the upstream repository name** (the default model's upstream
+    repository name becomes the title as is) — with a second table, a card that "sells Base
+    weights as Small" could be produced silently when only one of them moves.
 
-    NOTE: リポは世代 1 つでサイズはその中のモデル軸（`depth_anything.distribution`）なので、
-    見出しが既定サイズだけを名乗る形は、配れるサイズが Small 1 つの今だけ成り立つ。2 サイズ目を
-    載せるとき（{@link DEPTH_ANYTHING_UPSTREAM} の MUST のライセンス割りとセット）に見出しを
-    世代名へ改める — 今変えると中身が同じ配布カードの再発行だけが生じる。
+    NOTE: the repository is per generation and the size is a model axis inside it
+    (`depth_anything.distribution`), so a title that names only the default size holds only while
+    Small is the one size that can be shipped. When a second size is added (together with the
+    per-model licence split of the {@link DEPTH_ANYTHING_UPSTREAM} MUST), the title changes to the
+    generation name — changing it now would only reissue distribution cards with the same content.
     """
     checkpoint = _depth_anything_repo(manifest["defaultModel"]).split("/", 1)[1]
     return f"{checkpoint.removesuffix('-hf').replace('-', ' ')} — Karume"
 
 
 def _depth_anything_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
-    """frontmatter を manifest に並んだモデルから組む（`base_model` は再配布する上流の全部）。
+    """Build the frontmatter from the models listed in the manifest (`base_model` is every
+    upstream that is redistributed).
 
-    MUST: 未知のモデル名では描かない — 帰属の表に無いモデルを黙って落とすと、`base_model` が
-    1 つ足りないカード（= 出所を名乗っていない再配布）が静かに出る。
+    MUST: do not render for an unknown model name — silently dropping a model missing from the
+    attribution table would quietly produce a card with one `base_model` short (= a redistribution
+    that does not state its source).
     """
     return CardMetadata(
         pipeline_tag=DEPTH_ANYTHING_PIPELINE_TAG,
         base_model=tuple(_depth_anything_repo(name) for name in manifest["models"]),
-        # `base_model_relation` は置かない — 格納形を変えず（f32 のまま）コンテナだけを移した
-        # もので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+        # No `base_model_relation` — only the container changed while the storage stayed the
+        # same (still f32), so it is none of adapter / merge / quantized / finetune (the doc of
+        # CardMetadata).
         license=DEPTH_ANYTHING_LICENSE,
         tags=(DEPTH_ANYTHING_PIPELINE_TAG, "depth", "monocular-depth-estimation", "webgpu"),
     )
@@ -148,7 +160,7 @@ def _depth_anything_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
-    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+    """The attribution section. The storage is unchanged, so it claims only "converted"."""
     lines = [
         "## Base weights and attribution",
         "",
@@ -187,19 +199,20 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、サイズ / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
-    進める形。
+    """The policy of the usage example: keep the minimal working form, and **list the options a
+    typical use case is likely to need as commented-out lines** (with the selectable values
+    enumerated in the comment on the same line — derived mechanically from the manifest, so the
+    enumeration follows when sizes / quants are added). Readers take the next step just by
+    uncommenting.
 
-    `estimate()` は画像 1 枚しか受けない（解像度は事前学習の正方形でグラフに焼かれていて実行時
-    に選べない — `depthAnything.Pipeline` の公開面）ので、この pipeline の optional ノブは
-    model / quant の 2 つだけである。
+    `estimate()` accepts a single image only (the resolution is the square pretraining resolution
+    baked into the graph and cannot be chosen at run time — the public surface of
+    `depthAnything.Pipeline`), so this pipeline's optional knobs are just two, model and quant.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+    NOTE: `fromAssets` is **not advertised** (ruling of 2026-08-29). The split distribution can
+    now be read as well (X2-101), but that is a surface for local debugging that assumes you hold
+    the bytes yourself; the ordinary entry point for readers using HF is `fromPretrained`. Showing
+    both would leave readers to decide which one to use.
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -245,7 +258,8 @@ def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _depth_anything_shape(model: Mapping[str, Any]) -> list[str]:
-    """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。"""
+    """The preprocessing constants and the input / output shapes (what users pass in and get
+    back can be read here)."""
     config = model["pipelineConfig"]
     mean = " / ".join(str(value) for value in config["imageMean"])
     std = " / ".join(str(value) for value in config["imageStd"])
@@ -273,7 +287,8 @@ def _depth_anything_shape(model: Mapping[str, Any]) -> list[str]:
 def render_depth_anything_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
-    """Depth Anything V2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Assemble the `README.md` body of the Depth Anything V2 distribution (pure function, with a
+    trailing newline)."""
     require_pipeline(manifest, DEPTH_ANYTHING_SUPPORTED_PIPELINE)
     metadata = _depth_anything_metadata(manifest)
     return render(

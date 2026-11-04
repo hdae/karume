@@ -1,52 +1,59 @@
-"""実重み DeBERTa-v2（SBV2 text front）を IR v2 の容器（`krm`）+ golden io へ書き出す台本。
+"""Script that writes the real-weight DeBERTa-v2 (SBV2 text front) to an IR v2 container (`krm`)
++ golden io.
 
-`karume.goldens` の tiny golden が「op 契約の被覆」を受け持つのに対し、こちらは
-**実重み・実トークン列での数値一致**を受け持つ。生成物は `outputs/series/`
-配下で、リポジトリ直下の `.gitignore` によりコミット対象外（重み 1.3GB 級）。
+Where the tiny goldens of `karume.goldens` cover "the op contracts", this script covers
+**numeric agreement with real weights and real token sequences**. The outputs go under
+`outputs/series/` and are kept out of commits by the repository's top-level `.gitignore` (the
+weights are about 1.3GB).
 
     uv run --with 'transformers==5.14.1' python -m deberta.export
     uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
     uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-quant
     uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layers 22
 
-transformers は **5.14.1 でピン**する（`docs/research/2026-08-02-deberta-front-recon.md` §6 の
-5 項目 — モデリングコードが変わるとグラフ形が変わる）。pyproject.toml / uv.lock には入れず
-`--with` で一時的に足す。
+transformers is **pinned to 5.14.1** (the 5 items of
+`docs/research/2026-08-02-deberta-front-recon.md` §6 — when the modelling code changes, the graph
+shape changes). It is not put into pyproject.toml / uv.lock; it is added temporarily with `--with`.
 
-出力レイアウト（TS 側 `packages/e2e/tests/e2e_deberta_test.ts` が列挙する）:
+Output layout (enumerated by the TS side, `packages/e2e/tests/e2e_deberta_test.ts`):
 
-    outputs/series/deberta/<variant>/model-NNNNN-of-NNNNN.krm 重み・定数 + 2 文書の記述
-    outputs/series/deberta/<variant>/io.<case>.safetensors    入力と torch CPU での期待出力
+    outputs/series/deberta/<variant>/model-NNNNN-of-NNNNN.krm weights, constants + 2 descriptors
+    outputs/series/deberta/<variant>/io.<case>.safetensors    inputs + torch CPU expected outputs
 
-容器は `model.krm`（{@link MODEL_FILE}）を stem とする part 列（container-v1 §8）。
+The container is a part sequence whose stem is `model.krm` ({@link MODEL_FILE}) (container-v1 §8).
 
-io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
-1 モデルに対して io が複数ある点だけが違う。
+The tensor key convention of io is the same as for the tiny goldens (`input.<graph input name>` /
+`output.<position>`). The only difference is that one model has several io files.
 
-## 格納 dtype と w8a8 の鏡像（ADR 0019 / 0025）
+## Storage dtypes and the w8a8 mirror (ADR 0019 / 0025)
 
-`--dtype i8` は**別系列**（`outputs/series/deberta-i8/`）へ書く — f32 系列と同居させると既存 E2E の
-網（f32 の tolerance）が黙って別の資産に掛かる。`--dtype f16` は**足さない**（SBV2 系列の
-f16 化と一体で決める話 — 未起票）。
+`--dtype i8` writes to a **separate series** (`outputs/series/deberta-i8/`) — sharing a directory
+with the f32 series would silently put the existing E2E net (the f32 tolerance) on different
+assets. `--dtype f16` is **not added** (it is decided together with moving the SBV2 series to f16
+— not filed yet).
 
-`--dtype i4` も同じ理由で**別系列**（`outputs/series/deberta-i4/`）で、中身は**混成**
-（`nn.Linear` / `nn.Embedding` = i4 group32・残り = i8）。SBV2 配布形では `i8+bert4` quant の
-`text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の適格 op は linear / embedding / conv1d
-（`groups == 1`）の重みスロットで（ADR 0069 追記 6 / 7）、conv1d はこの系列では i4 に**選んで
-いない**（{@link I4_MODULE_TYPES}）ので、系列は混成になる。
+`--dtype i4` is also a **separate series** (`outputs/series/deberta-i4/`) for the same reason, and
+its contents are **mixed** (`nn.Linear` / `nn.Embedding` = i4 group32, the rest = i8). In the SBV2
+distribution it is the `text_encoder` component of the `i8+bert4` quant (`sbv2/distribution.py`).
+The ops eligible for i4 are the weight slots of linear / embedding / conv1d (`groups == 1`) (ADR
+0069 addenda 6 / 7), and this series **does not select** conv1d for i4 ({@link I4_MODULE_TYPES}),
+so the series is mixed.
 
-i4 系列の encoder linear は **GPTQ 校正付きで丸める**（既定 — perf-ledger Q-6 / `deberta.calib`）。
-格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）で、変わるのは丸め値と scale 台帳の
-中身だけ。校正入力は {@link deberta.calib_texts.CALIB_TEXTS} の 48 文を **golden と同じ入力
-構築経路**（{@link build_graph_inputs}）で通したもの。校正の失敗は fail loudly で、素の RTN へ
-黙って落ちる分岐は持たない（「校正付きのつもりで校正なしを配った」は資産から読めない）。
+The encoder linears of the i4 series are **rounded with GPTQ calibration** (the default —
+perf-ledger Q-6 / `deberta.calib`). The storage form does not change by a single byte (the grid
+stays RTN i4 g32); only the rounded values and the contents of the scale ledger change. The
+calibration inputs are the 48 sentences of {@link deberta.calib_texts.CALIB_TEXTS} passed through
+**the same input-building path as the goldens** ({@link build_graph_inputs}). A calibration failure
+fails loudly; there is no branch that silently drops to plain RTN ("shipped uncalibrated while
+meaning to calibrate" cannot be read from the assets).
 
-`--act-quant` は w8a8（`SessionOptions.linearCompute: "a8"`）の torch 鏡像で、適格
-`nn.Linear` の入力を per-token i8 へ落とした期待値を **`io-i8a8.<case>.safetensors`** という
-別 prefix で追加で書く。**通常の golden io はフックなしで採る** MUST — フックを掛けたまま
-`io.<case>` を書くと w8（f32 計算）E2E の期待値が活性量子化ごと汚染され、緑のまま検出力
-だけが消える。prefix を分けるのは Deno 側の列挙（`io.` の startsWith）が鏡像を通常ケースと
-取り違えないため。
+`--act-quant` is the torch mirror of w8a8 (`SessionOptions.linearCompute: "a8"`): it additionally
+writes expected values with the inputs of the eligible `nn.Linear` modules dropped to per-token i8,
+under the separate prefix **`io-i8a8.<case>.safetensors`**. **The plain golden io is taken without
+hooks** MUST — writing `io.<case>` with the hooks attached contaminates the expected values of the
+w8 (f32 compute) E2E with activation quantization, and only the detection power disappears while
+everything stays green. The prefix is separate so that the enumeration on the Deno side
+(startsWith `io.`) does not mistake the mirror for a plain case.
 """
 
 from __future__ import annotations
@@ -81,180 +88,199 @@ from karume.quantize import (
 from . import calib, patch
 from .calib_texts import CALIB_TEXTS
 
-#: SBV2 text front が使う BERT そのもの（recon §1）。
+#: The very BERT the SBV2 text front uses (recon §1).
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
-#: {@link MODEL_ID} を取得する revision（HF の commit SHA）。重みと tokenizer の取得はこの 1 点に
-#: 固定し、容器の `provenance.upstreamRevision` にも同じ値を焼く（{@link PROVENANCE}）。
+#: The revision (HF commit SHA) {@link MODEL_ID} is fetched at. Fetching the weights and the
+#: tokenizer is pinned to this one point, and the same value is baked into the container's
+#: `provenance.upstreamRevision` ({@link PROVENANCE}).
 #:
-#: MUST: `revision=` を外さない — 外すと HF の main をその時点で引くので、上流の main が動いた
-#: 日に SBV2 配布の `text_encoder` 席が黙って別の revision から焼かれる（transformers は固定して
-#: いても重みは固定されない）。値は 2026-08-02 に取得した HF キャッシュ
-#: （`models--ku-nlp--deberta-v2-large-japanese-char-wwm`）の唯一のスナップショットで、
-#: 現行の配布物はこれから焼いた（`refs/main` も同じ値 — 2026-09-25 に現物で確認）。
+#: MUST: do not drop `revision=` — without it HF's main is pulled as of that moment, so on the day
+#: upstream main moves, the `text_encoder` component of the SBV2 distribution is silently baked from
+#: a different revision (pinning transformers does not pin the weights). The value is the only
+#: snapshot in the HF cache fetched on 2026-08-02
+#: (`models--ku-nlp--deberta-v2-large-japanese-char-wwm`), and the current distribution was baked
+#: from it (`refs/main` has the same value — checked against the cache on 2026-09-25).
 #:
-#: NOTE: `--model` に HF 以外（ローカルのディレクトリ）を渡すと transformers は `revision` を
-#: 見ない。その経路で焼いた容器もこの revision を名乗るので、配布に使う系列は既定の
-#: `--model` で焼く。
+#: NOTE: when `--model` is given something other than HF (a local directory), transformers ignores
+#: `revision`. A container baked that way still claims this revision, so the series used for the
+#: distribution is baked with the default `--model`.
 MODEL_REVISION = "547b0e8b044fba3f9b84d0ab9f990440bd130c8b"
 
-#: 対応する格納 dtype。**f16 は無い** — SBV2 系列の f16 化と一体で決める（未起票）。
-#: `i4` は**混成**の系列名で、実体は「{@link I4_MODULE_TYPES} の適格な重み = i4 group32・
-#: それ以外（conv・group 長で割り切れない重み）= 従来どおり i8 per-channel」
-#: （{@link BASE_WEIGHT_DTYPES} / {@link _fake_quant}）。conv1d は ADR 0069 追記 7 で i4 の
-#: 実行経路を持つが、この系列では i4 に選んでいないので、系列としては混成になる。
+#: The supported storage dtypes. **There is no f16** — it is decided together with moving the SBV2
+#: series to f16 (not filed yet). `i4` is the name of a **mixed** series; what it holds is "the
+#: eligible weights of {@link I4_MODULE_TYPES} = i4 group32, everything else (conv, weights the
+#: group size does not divide) = i8 per-channel as before" ({@link BASE_WEIGHT_DTYPES} /
+#: {@link _fake_quant}). conv1d has an i4 execution path since ADR 0069 addendum 7, but this series
+#: does not select it for i4, so the series is mixed.
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8", "i4")
 
-#: i4 group32 で丸める**モジュール型**（`karume.emit` の `I4_WEIGHT_OPS` の部分集合）。conv1d
-#: （`groups == 1`）も ADR 0069 追記 7 で i4 適格だが、ここには**選んでいない**（入れると SBV2
-#: WAV の参照値の採り直しを伴う — 別の裁定）。
+#: The **module types** rounded to i4 group32 (a subset of `I4_WEIGHT_OPS` in `karume.emit`).
+#: conv1d (`groups == 1`) is also i4-eligible since ADR 0069 addendum 7, but it is **not selected**
+#: here (adding it means re-recording the SBV2 WAV reference values — a separate ruling).
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
 
-#: `nn.Embedding` の器に入っているが**表引きされない**重みの FQN。相対位置の埋め込み表は
-#: `deberta.patch` が差し替えた forward で「表を切り出して query_proj / key_proj に通す」形で
-#: 使われるので、グラフに `embedding` op が立たない — 重みスロットの消費がゼロなので圧縮格納の
-#: 適格外で、i8 系列でも f32 のまま残っている。型だけで i4 に振ると emit が「適格でない」で
-#: fail loudly するため、i4 の対象集合からは名前で外す（丸めは従来どおり i8 側が担う）。
+#: FQNs of weights that sit in an `nn.Embedding` container but are **never looked up**. The
+#: relative-position embedding table is used by the forward `deberta.patch` replaces as "slice the
+#: table and pass it through query_proj / key_proj", so no `embedding` op appears in the graph — no
+#: weight slot consumes it, so it is not eligible for compressed storage and stays f32 even in the
+#: i8 series. Assigning it to i4 by type alone makes emit fail loudly with "not eligible", so it is
+#: excluded from the i4 target set by name (the i8 side does the rounding as before).
 #:
-#: NOTE: 綴りが上流のモジュール名の変更で空振りしても沈黙はしない — 除外が消えた瞬間に emit の
-#: 明示指定の門が「適格でない」でそのテンソル名を挙げて落ちる。
+#: NOTE: if an upstream module rename makes the spelling miss, it does not go silent — the moment
+#: the exclusion disappears, emit's check of explicit assignments fails with "not eligible" and
+#: names that tensor.
 NON_LOOKUP_EMBEDDINGS: frozenset[str] = frozenset({"model.encoder.rel_embeddings"})
 
-#: encoder stage の**外**に居る i4 適格の重み（= 語彙表 1 本）。校正付き丸めは stage 逐次の
-#: 駆動なので stage の中しか丸められず、外の適格は素の RTN i4 が担う
-#: （{@link _round_i4_calibrated}）。
+#: The i4-eligible weights **outside** the encoder stages (= the one vocabulary table). Calibrated
+#: rounding is driven stage by stage, so it can round only inside the stages; eligible weights
+#: outside are handled by plain RTN i4 ({@link _round_i4_calibrated}).
 #:
-#: 名前で宣言するのは「黙った分類替え」を作らないため — 実測（config から組んだ全層 wrapper）で
-#: stage 外の i4 適格はこの 1 本だけ（`embed_proj` は `embedding_size == hidden_size` で
-#: `None`・`position_embeddings` / `token_type_embeddings` も config で `None`・`rel_embeddings` は
-#: {@link NON_LOOKUP_EMBEDDINGS} で適格外）。上流の構成が変わって適格が増減したら、
-#: {@link _round_i4_calibrated} の門がその FQN を挙げて落ちる。
+#: They are declared by name so that no "silent reclassification" happens — measured (on the
+#: all-layer wrapper built from the config), this is the only i4-eligible weight outside the stages
+#: (`embed_proj` is `None` because `embedding_size == hidden_size`, `position_embeddings` /
+#: `token_type_embeddings` are `None` by config too, and `rel_embeddings` is ineligible via
+#: {@link NON_LOOKUP_EMBEDDINGS}). If the upstream structure changes and the eligible set grows or
+#: shrinks, the check of {@link _round_i4_calibrated} fails and names the FQN.
 NON_STAGE_I4_WEIGHTS: frozenset[str] = frozenset({"model.embeddings.word_embeddings"})
 
-#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な
-#: linear / embedding は 1 本単位の `weight_dtype_overrides` で i4 へ振る（gemma4 の混成
-#: i8+i4 と同形）。
+#: Series name → the **default** storage dtype passed to `export_to_file`. Only the i4 series
+#: defaults to i8, and the eligible linear / embedding weights are assigned to i4 one by one with
+#: `weight_dtype_overrides` (the same form as gemma4's mixed i8+i4).
 BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "i8": "i8", "i4": "i8"}
 
-#: 生成物の既定の置き場（格納 dtype 別の**系列**）。親は `SERIES_ROOT`（= outputs/series/）—
-#: models/ は配布形だけの場所（_shared.paths）。`.gitignore` の `outputs/` でコミット対象外。
-#: MUST: dtype ごとに別ディレクトリ（ADR 0019）— 同居させると f32 系列の網が i8 資産に掛かる。
+#: The default location of the outputs (one **series** per storage dtype). The parent is
+#: `SERIES_ROOT` (= outputs/series/) — models/ holds distributions only (_shared.paths). Kept out of
+#: commits by `outputs/` in `.gitignore`.
+#: MUST: one directory per dtype (ADR 0019) — sharing one puts the f32 series' net on i8 assets.
 DEFAULT_OUT_ROOTS: Mapping[str, Path] = {
     "f32": SERIES_ROOT / "deberta",
     "i8": SERIES_ROOT / "deberta-i8",
     "i4": SERIES_ROOT / "deberta-i4",
 }
 
-#: 1 ケースぶんのグラフ入力（名前 → テンソル）。
+#: The graph inputs of one case (name → tensor).
 InputArgs = Mapping[str, torch.Tensor]
 
-#: グラフ入力の順序 = `HiddenStatesWrapper.forward` の引数順。torch.export はこの順で
-#: `graph.inputs` を並べるので、export 後に突合して**ずれていたら止める**（位置で渡す以上、
-#: 黙ってずれると golden の入力だけが入れ替わる）。
+#: The order of the graph inputs = the argument order of `HiddenStatesWrapper.forward`.
+#: torch.export lays out `graph.inputs` in this order, so it is compared after export and **export
+#: stops on a mismatch** (since the inputs are passed by position, a silent shift would swap only
+#: the golden's inputs).
 INPUT_ORDER: tuple[str, ...] = ("input_ids", "attention_mask", "c2p_pos", "p2c_pos")
 
 MODEL_FILE = "model.krm"
 
-#: 容器のグラフ名 = **配布形の部品名**（= `karume.json` の weights のキー —
-#: container-v1 §2.1）。この台本は SBV2 の `text_encoder` 席を焼くだけなので、正本は消費側
-#: （`sbv2.distribution.SBV2_TEXT_ENCODER_COMPONENT`）にある。
+#: The container's graph name = **the component name in the distribution** (= the key of weights in
+#: `karume.json` — container-v1 §2.1). This script only bakes SBV2's `text_encoder` component, so
+#: the source of truth is on the consuming side (`sbv2.distribution.SBV2_TEXT_ENCODER_COMPONENT`).
 #:
-#: MUST: 綴りは読み手と一致させる。写しを持つのは {@link LICENSE} と同じ理由 — produce 側が
-#: consume 側を import する向きは作らない。一致を毎回突き合わせるのは全 family 横断の門
-#: `tests/test_graph_names.py::TestTheNamesAreTheWeightsKeys` の
-#: `test_deberta_names_the_seat_its_consumer_declares`（`deberta/tests/test_export.py` は
-#: この定数を見ない）。系列ディレクトリ名（`full-24layer` / `dev-2layer`）とは一致しない。
+#: MUST: the spelling matches the reader. A copy is kept for the same reason as {@link LICENSE} —
+#: the producing side never imports the consuming side. The cross-family check
+#: `test_deberta_names_the_seat_its_consumer_declares` in
+#: `tests/test_graph_names.py::TestTheNamesAreTheWeightsKeys` compares them on every run
+#: (`deberta/tests/test_export.py` does not look at this constant). It does not match the series
+#: directory names (`full-24layer` / `dev-2layer`).
 GRAPH_NAME = "text_encoder"
 
-#: 容器へ焼く出所（container-v1 §2.3）。この recipe は SBV2 の `text_encoder` 席を焼くだけで
-#: 自分のカードを持たないので、ライセンス識別子の正本は消費側のカード
-#: （`sbv2.card.SBV2_TEXT_ENCODER_LICENSE`・実地確認 2026-08-07）にある。
+#: The provenance baked into the container (container-v1 §2.3). This recipe only bakes SBV2's
+#: `text_encoder` component and has no card of its own, so the source of truth of the license
+#: identifier is the consuming side's card (`sbv2.card.SBV2_TEXT_ENCODER_LICENSE`, checked at the
+#: source on 2026-08-07).
 #:
-#: MUST: 綴りは読み手と一致させる。写しを持つのは {@link EXPORT_PROVENANCE_FILE} と同じ理由 —
-#: produce 側が consume 側を import する向きは作らない。一致は
-#: `deberta/tests/test_export.py` が毎回突き合わせる。
+#: MUST: the spelling matches the reader. A copy is kept for the same reason as
+#: {@link EXPORT_PROVENANCE_FILE} — the producing side never imports the consuming side.
+#: `deberta/tests/test_export.py` compares them on every run.
 LICENSE = "cc-by-sa-4.0"
 
 PROVENANCE = Provenance(license=LICENSE, upstream_revision=MODEL_REVISION)
 IO_PREFIX = "io."
-#: w8a8 鏡像 io の prefix。**`io.` で始まらない**こと MUST — Deno 側の通常ケース列挙は
-#: `startsWith("io.")` なので、`io.` 始まりにすると鏡像が w8 の golden として拾われる。
+#: The prefix of the w8a8 mirror io. It **does not start with `io.`** MUST — the Deno side
+#: enumerates plain cases with `startsWith("io.")`, so an `io.` prefix would pick the mirror up as
+#: a w8 golden.
 ACT_IO_PREFIX = "io-i8a8."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: 記号次元 T の上限。config の `max_position_embeddings` と一致させる（`Dim` の上限 =
-#: `export_provenance.json` が運ぶ上限 — 焼き込み定数は無いので記録だけが運ぶ）。
+#: The upper bound of the symbolic dimension T. It matches the config's `max_position_embeddings`
+#: (the `Dim` bound = the bound `export_provenance.json` carries — there is no baked constant, so
+#: only the record carries it).
 SYM_MAX = 512
 
-#: 記号次元の上限を系列へ書き残す出所記録（{@link _write_export_provenance}）。
+#: The provenance record that writes the symbolic dimension's bound into the series
+#: ({@link _write_export_provenance}).
 #:
-#: MUST: 綴りは読み手（`sbv2.distribution.EXPORT_PROVENANCE_FILE` /
-#: `sbv2.distribution.assert_sym_provenance`）と一致させる。写しを持つのは、`deberta` が SBV2 の
-#: **消費者ではない**から — 配布形の text_encoder 席は資産の共有であって結合ではないので
-#: （`sbv2/distribution.py` のモジュール doc）、produce 側が consume 側を import する向きは
-#: 作らない。2 表が独立に動く形にしないため、一致は `deberta/tests/test_export.py` が毎回
-#: 突き合わせる（`birefnet` の正規化定数と同じ規律）。
+#: MUST: the spelling matches the readers (`sbv2.distribution.EXPORT_PROVENANCE_FILE` /
+#: `sbv2.distribution.assert_sym_provenance`). A copy is kept because `deberta` is **not a
+#: consumer** of SBV2 — the distribution's text_encoder component is a shared asset, not a coupling
+#: (the module doc of `sbv2/distribution.py`), so the producing side never imports the consuming
+#: side. So that the two tables cannot move independently, `deberta/tests/test_export.py` compares
+#: them on every run (the same discipline as `birefnet`'s normalisation constants).
 EXPORT_PROVENANCE_FILE = "export_provenance.json"
 
 
 @dataclass(frozen=True)
 class Variant:
-    """1 つの出力ディレクトリの綴りと出力形。
+    """The spelling and output form of one output directory.
 
-    出力形を層数と一緒にここへ書くのは、**配布形（1 本出し）と検証用（全層出し）を
-    取り違えると沈黙する**から — どちらも同じ shape のテンソルを出すので、間違えても
-    ロードも実行も通ってしまう。
+    The output form is written here next to the layer count because **mixing up the distribution
+    form (one output) and the verification form (every layer) goes unnoticed** — both output
+    tensors of the same shape, so a mistake still loads and runs.
     """
 
     name: str
-    #: SBV2 が使う 1 本だけを出力する（配布形）。False は全層の hidden_states を並べる。
+    #: Output only the one tensor SBV2 uses (the distribution form). False lists every layer's
+    #: hidden_states.
     single_output: bool = False
 
 
-#: 層数 → variant。2 層は開発イテレーション用、**22 層が SBV2 の配布形**、24 層は全層の
-#: golden 検証用（層別の誤差の伸びを読む — ADR 0026 決定 2 の tolerance 導出）。
+#: Layer count → variant. 2 layers is for development iterations, **22 layers is the SBV2
+#: distribution form**, and 24 layers is for verifying the goldens of every layer (reading how the
+#: error grows per layer — the tolerance derivation of ADR 0026 decision 2).
 #:
-#: 22 なのは SBV2 が使うのが `hidden_states[-3]`（= 先頭から 22 番目 = layer 21 の出力）だから
-#: で、末尾 2 層は配布形で完全に死んでいる。切り詰めた 22 層モデルの最終出力が 24 層モデルの
-#: `hidden_states[-3]` と**ビット一致する**ことは実測済み（f32 / i8 / i8+a8 の 3 構成）—
-#: ADR 0045 / docs/research/2026-08-11-deberta-size-recon.md §4。
+#: It is 22 because SBV2 uses `hidden_states[-3]` (= the 22nd from the start = the output of layer
+#: 21), so the last 2 layers are completely dead in the distribution. The final output of the
+#: truncated 22-layer model was measured to be **bit-identical** to `hidden_states[-3]` of the
+#: 24-layer model (in the 3 configurations f32 / i8 / i8+a8) —
+#: ADR 0045 / docs/research/2026-08-11-deberta-size-recon.md §4.
 VARIANTS: dict[int, Variant] = {
     2: Variant("dev-2layer"),
     22: Variant("sbv2-22layer", single_output=True),
     24: Variant("full-24layer"),
 }
 
-#: golden の固定文（トークナイザは文字単位の BertJapaneseTokenizer）。
-#: 短文 / 長め / 記号混じり の 3 本で T を散らす。
+#: The fixed sentences of the goldens (the tokenizer is the character-level BertJapaneseTokenizer).
+#: Three sentences — short / longer / with symbols — spread T.
 GOLDEN_SENTENCES: tuple[str, ...] = (
     "こんにちは、世界。",
     "音声合成のための特徴量を、この文から抽出します。",
     "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。",
 )
 
-#: padded ケースで足す [PAD] の本数。`attention_mask=0` を混ぜてマスク経路
-#: （mul → cast → bitwise_not → masked_fill、および conv 経路の 0 埋め）を踏ませる。
+#: The number of [PAD] tokens added in the padded case. Mixing in `attention_mask=0` exercises the
+#: mask path (mul → cast → bitwise_not → masked_fill, and the zero fill of the conv path).
 PAD_COUNT = 5
 
 
 class HiddenStatesWrapper(nn.Module):
-    """`ModelOutput`（dict）ではなく hidden_states のタプルを返す export 用ラッパ。
+    """Export wrapper that returns a tuple of hidden_states instead of a `ModelOutput` (dict).
 
-    IR v2 のグラフ出力は位置で引く（`output.<i>`）ので、全層の hidden_states をそのまま
-    出力に並べる。層ごとに突合できるため、**誤差が層数でどう伸びるか**が golden から
-    直接読める（tolerance の根拠づけがこれで実測になる）。
+    IR v2 graph outputs are addressed by position (`output.<i>`), so every layer's hidden_states
+    is laid out as an output as is. Each layer can be compared, so **how the error grows with the
+    layer count** can be read directly from the goldens (this turns the justification of the
+    tolerance into a measurement).
 
-    `single_output` を立てると**最終層の 1 本だけ**を出力する（配布形）。ランタイムは
-    `graph.outputs` を全部 readback するので、25 本出しのままだと 1 本しか使わない SBV2 でも
-    毎 run で 25 本ぶんの staging + mapAsync を払う（ADR 0026 の「読み戻し ~52MB が支配」）。
-    層を切り詰めた variant では最終層 = SBV2 が使う層なので、絞っても情報は落ちない。
+    With `single_output` set, **only the final layer's tensor** is output (the distribution form).
+    The runtime reads back all of `graph.outputs`, so with 25 outputs even SBV2, which uses only
+    one, would pay 25 tensors' worth of staging + mapAsync on every run (ADR 0026's "readback of
+    ~52MB dominates"). In a truncated variant the final layer = the layer SBV2 uses, so narrowing
+    loses no information.
 
-    MUST: `DebertaV2Model.forward` は使わず embeddings + encoder を直接呼ぶ — 前者は
-    `relative_pos` を encoder へ渡す口を持たず、相対位置の添字表を**外部供給にできない**
-    （`deberta.patch` — 焼き込むと Tmax=512 で 2MiB の定数が 2 本入る）。z_steps 分岐は
-    `self.z_steps = 0` のハードコードで恒久的に死んでいるので写さない。
+    MUST: do not use `DebertaV2Model.forward`; call embeddings + encoder directly — the former has
+    no way to pass `relative_pos` to the encoder, so the relative-position index tables **cannot
+    be supplied externally** (`deberta.patch` — baking them adds two 2MiB constants at Tmax=512).
+    The z_steps branch is permanently dead through the hard-coded `self.z_steps = 0`, so it is not
+    copied.
     """
 
     def __init__(self, model: nn.Module, *, single_output: bool = False) -> None:
@@ -290,10 +316,11 @@ class HiddenStatesWrapper(nn.Module):
 
 
 def load_model(model_id: str, num_layers: int) -> nn.Module:
-    """実重みを取得し、層数を切り詰めて eval にする。
+    """Fetch the real weights, truncate the layer count and switch to eval.
 
-    MUST: `attn_implementation="eager"` — SDPA 経路は torch.export で別のグラフ形になり、
-    recon の実測（27 種の未対応 op 分類）と対応が取れなくなる。
+    MUST: `attn_implementation="eager"` — the SDPA path gives a different graph shape under
+    torch.export and no longer matches the recon's measurement (the classification of 27
+    unsupported ops).
     """
     from transformers import DebertaV2Model
 
@@ -302,7 +329,8 @@ def load_model(model_id: str, num_layers: int) -> nn.Module:
     )
     if num_layers > model.config.num_hidden_layers:
         raise ValueError(
-            f"--layers {num_layers} がモデルの層数 {model.config.num_hidden_layers} を超えている"
+            f"--layers {num_layers} exceeds the model's layer count"
+            f" {model.config.num_hidden_layers}"
         )
     model.encoder.layer = model.encoder.layer[:num_layers]
     model.config.num_hidden_layers = num_layers
@@ -311,20 +339,23 @@ def load_model(model_id: str, num_layers: int) -> nn.Module:
 
 
 def encode_text(tokenizer: Any, text: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """1 文を `[1, T]` の `(input_ids, attention_mask)` へ落とす（mask は全 1）。"""
+    """Turn one sentence into `[1, T]` `(input_ids, attention_mask)` (the mask is all ones)."""
     ids = torch.tensor([tokenizer(text)["input_ids"]], dtype=torch.int64)
     return ids, torch.ones_like(ids)
 
 
 def build_graph_inputs(model: nn.Module, ids: torch.Tensor, mask: torch.Tensor) -> InputArgs:
-    """`(input_ids, attention_mask)` へ相対位置の添字表を足して 4 入力の組にする。
+    """Add the relative-position index tables to `(input_ids, attention_mask)` to make the set of 4
+    inputs.
 
-    相対位置の添字表はグラフ入力なのでケースごとに実長で作る（`deberta.patch` が正本）。
-    バケット幅と最大位置は**モジュールから読む** — config の `max_relative_positions` は
-    -1 のとき `max_position_embeddings` へフォールバックする規則を持つので、写すと二重管理になる。
+    The relative-position index tables are graph inputs, so they are built per case at the actual
+    length (`deberta.patch` is the source of truth). The bucket size and the maximum position are
+    **read from the module** — the config's `max_relative_positions` has a rule that falls back to
+    `max_position_embeddings` when it is -1, so copying it would mean maintaining it twice.
 
-    golden ケース（{@link build_cases}）と校正入力（{@link build_calib_args}）が**同じここを
-    通る**こと MUST — 別の綴りで組むと、校正で見た活性と golden が流す活性が黙って別物になる。
+    The golden cases ({@link build_cases}) and the calibration inputs ({@link build_calib_args})
+    **go through this same function** MUST — built with a different spelling, the activations seen
+    in calibration and those the goldens run would silently differ.
     """
     attention = model.encoder.layer[0].attention.self
     c2p_pos, p2c_pos = patch.build_rel_pos_tables(
@@ -341,7 +372,7 @@ def build_graph_inputs(model: nn.Module, ids: torch.Tensor, mask: torch.Tensor) 
 
 
 def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs], ...]:
-    """golden 4 ケース（3 文 + padded）の `(名前, グラフ入力名 → テンソル)`。"""
+    """`(name, graph input name → tensor)` of the 4 golden cases (3 sentences + padded)."""
     ids_cases: list[tuple[str, torch.Tensor, torch.Tensor]] = [
         (f"case{index}", *encode_text(tokenizer, text))
         for index, text in enumerate(GOLDEN_SENTENCES)
@@ -349,7 +380,7 @@ def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs]
 
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
-        raise ValueError("トークナイザに pad_token_id が無い（padded ケースを作れない）")
+        raise ValueError("the tokenizer has no pad_token_id (the padded case cannot be built)")
     base_ids = ids_cases[0][1]
     pad_ids = torch.full((1, PAD_COUNT), pad_id, dtype=torch.int64)
     ids_cases.append(
@@ -365,14 +396,18 @@ def build_cases(tokenizer: Any, model: nn.Module) -> tuple[tuple[str, InputArgs]
 def build_calib_args(
     tokenizer: Any, model: nn.Module, texts: Sequence[str]
 ) -> tuple[tuple[torch.Tensor, ...], ...]:
-    """校正コーパスを wrapper の**位置引数**（{@link INPUT_ORDER} の並び）の列へ落とす。
+    """Turn the calibration corpus into a list of the wrapper's **positional arguments** (in the
+    order of {@link INPUT_ORDER}).
 
-    トークナイズも添字表も golden と同じ経路（{@link encode_text} / {@link build_graph_inputs}）
-    を通す。位置引数にするのは、校正リグ（`deberta.calib`）がグラフ入力の**名前を知らない**で
-    済ませるため（リグは wrapper を呼ぶだけ）。
+    Tokenization and the index tables go through the same path as the goldens
+    ({@link encode_text} / {@link build_graph_inputs}). Positional arguments let the calibration
+    rig (`deberta.calib`) **not know the names** of the graph inputs (the rig only calls the
+    wrapper).
     """
     if not texts:
-        raise ValueError("校正コーパスが空（校正付き i4 は入力ゼロでは成立しない）")
+        raise ValueError(
+            "the calibration corpus is empty (calibrated i4 cannot be built from zero inputs)"
+        )
     built: list[tuple[torch.Tensor, ...]] = []
     for text in texts:
         args = build_graph_inputs(model, *encode_text(tokenizer, text))
@@ -388,27 +423,30 @@ def _write_io(
     *,
     prefix: str = IO_PREFIX,
 ) -> list[str]:
-    """各ケースの入力と torch CPU 期待出力を `<prefix><case>.safetensors` へ書く。"""
+    """Write each case's inputs and the torch CPU expected outputs to
+    `<prefix><case>.safetensors`."""
     written: list[str] = []
     for name, args in cases:
-        # 位置で渡すが並びは `graph.inputs` から引く（export 側で INPUT_ORDER と突合済み）。
+        # Passed by position, but the order comes from `graph.inputs` (export already compared it
+        # with INPUT_ORDER).
         with torch.no_grad():
             outputs = wrapper(*(args[declared.name] for declared in graph.inputs))
         if len(outputs) != len(graph.outputs):
             raise AssertionError(
-                f"{name}: torch 出力 {len(outputs)} 本 ≠ IR 出力 {len(graph.outputs)} 本"
+                f"{name}: {len(outputs)} torch outputs ≠ {len(graph.outputs)} IR outputs"
             )
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → I32）。ランタイムが受け取る
-        # 形と揃っていないと Deno 側 E2E が golden を読めない（ADR 0009 の境界正規化）。
+        # MUST: io is also lowered to the concrete representation of the IR's semantic dtype
+        # (i64 → I32). Unless it matches the form the runtime receives, the Deno-side E2E cannot
+        # read the goldens (the boundary normalization of ADR 0009).
         tensors = {
             f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
-                args[declared.name], f"{name} の入力 '{declared.name}'"
+                args[declared.name], f"{name} input '{declared.name}'"
             )
             for declared in graph.inputs
         }
         for index, tensor in enumerate(outputs):
             tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
-                tensor.detach().contiguous(), f"{name} の出力 {index}"
+                tensor.detach().contiguous(), f"{name} output {index}"
             )
         path = out_dir / f"{prefix}{name}{IO_SUFFIX}"
         save_file(tensors, str(path))
@@ -422,19 +460,24 @@ def _write_mirror_io(
     cases: Sequence[tuple[str, InputArgs]],
     out_dir: Path,
 ) -> tuple[list[str], int]:
-    """活性 i8 のフックを掛けた期待値（w8a8 の鏡像）を `io-i8a8.<case>` へ書く。
+    """Write the expected values with the activation-i8 hooks attached (the w8a8 mirror) to
+    `io-i8a8.<case>`.
 
-    MUST: フックの区間はこの関数の中で閉じる（`finally` で必ず外す）— 掛けたまま通常の
-    `io.<case>` を採ると w8 E2E の期待値が汚染される。呼び出し側は**通常の io を先に**
-    書き終えてからここへ来る。
+    MUST: the hooked span closes inside this function (the hooks are always removed in `finally`)
+    — taking the plain `io.<case>` with them attached contaminates the expected values of the w8
+    E2E. Callers come here only **after the plain io** has been written.
 
-    戻り値の本数は Deno 側の診断キー検査（`linearI8a8Key` の dispatch 本数）の期待定数の
-    根拠になる。0 本は fail loudly — 「w8a8 のつもりで w8 の数を採った」を沈黙させない。
+    The returned count is the basis of the expected constant of the diagnostic-key check on the
+    Deno side (the dispatch count of `linearI8a8Key`). Zero fails loudly — "took w8 numbers while
+    meaning w8a8" must not go unnoticed.
     """
     handles, attached = attach_act_quant(wrapper)
-    print(f"[act-quant] 適格 linear {attached} 本に per-token i8 を適用（w8a8 鏡像）")
+    print(f"[act-quant] applied per-token i8 to {attached} eligible linears (w8a8 mirror)")
     if attached == 0:
-        raise SystemExit("--act-quant を指定したが適格 linear が 0 本（適格判定の破れ）")
+        raise SystemExit(
+            "--act-quant was given but there are 0 eligible linears (the eligibility rule is"
+            " broken)"
+        )
     try:
         return _write_io(wrapper, graph, cases, out_dir, prefix=ACT_IO_PREFIX), attached
     finally:
@@ -442,18 +485,22 @@ def _write_mirror_io(
 
 
 def _i4_module_names(wrapper: nn.Module) -> frozenset[str]:
-    """i4 group32 で丸めるモジュールの FQN 集合（混成 i8+i4 の**排他割り**の唯一の源）。
+    """The FQN set of the modules rounded to i4 group32 (the single source of the **exclusive
+    split** of mixed i8+i4).
 
-    適格は 3 条件の積: ① {@link I4_MODULE_TYPES} であること（emit の i4 適格 = linear /
-    embedding の重みスロット限定 — ADR 0069 決定 5。外れたテンソルへ i4 を明示指定すると emit が
-    fail loudly する）② 量子化軸が group 長で割り切れること（i4 は端数 group を作らない MUST —
-    同決定 2。外れた重みは**構成ごと落とすのではなく対象から外す**ので i8 側へ落ちる）
-    ③ {@link NON_LOOKUP_EMBEDDINGS} でないこと（器は `nn.Embedding` でも表引きされない重み）。
+    Eligibility is the conjunction of 3 conditions: ① it is one of {@link I4_MODULE_TYPES} (emit's
+    i4 eligibility = limited to the weight slots of linear / embedding — ADR 0069 decision 5;
+    explicitly assigning i4 to any other tensor makes emit fail loudly) ② the quantization axis is
+    divisible by the group size (i4 never creates a partial group MUST — the same ADR's decision 2;
+    such a weight is **excluded from the targets rather than failing the whole configuration**, so
+    it falls to the i8 side) ③ it is not in {@link NON_LOOKUP_EMBEDDINGS} (weights in an
+    `nn.Embedding` container that are never looked up).
 
-    対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
-    1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
-    2 つの述語を別々の綴りから作ると、どちらにも入らない重みが**黙って f32 のまま残る**
-    （二重丸め禁止の逆側の穴で、値は正しいままサイズだけが戻る）。
+    Target enumeration goes through the core (`iter_quant_targets`) so that the set the rounding
+    sees and the set counted here stay one implementation. The i8-side predicate is written as
+    "not in this set" for the same reason: building the two predicates from separate spellings
+    would leave weights in neither **silently in f32** (the hole on the other side of the ban on
+    double rounding — the values stay correct, only the size comes back).
     """
     return frozenset(
         fqn.removesuffix(".weight")
@@ -466,16 +513,18 @@ def _i4_module_names(wrapper: nn.Module) -> frozenset[str]:
 def _round_i4_plain(
     wrapper: nn.Module, names: frozenset[str], label: str
 ) -> Mapping[str, torch.Tensor]:
-    """名指しの集合を素の RTN i4 g32 で丸める（校正を通さない 1 段目の格子そのもの）。
+    """Round the named set with plain RTN i4 g32 (the first-level grid itself, without
+    calibration).
 
-    `label` は診断行の主語（助詞まで込み — 「〜を i4 group へ丸めた」に嵌まる形）。
+    `label` names what was rounded in the diagnostic line (it fills "rounded <label> to i4
+    groups").
     """
     report = fake_quant_int4(
         wrapper,
         include=lambda name: name in names,
         op_types=I4_MODULE_TYPES,
     )
-    print(f"[fake-quant] {label} i4 group へ丸めた（RTN） — {report.describe()}", flush=True)
+    print(f"[fake-quant] rounded {label} to i4 groups (RTN) — {report.describe()}", flush=True)
     return report.scales
 
 
@@ -484,43 +533,51 @@ def _round_i4_calibrated(
     i4_names: frozenset[str],
     calib_args: Sequence[Sequence[torch.Tensor]],
 ) -> Mapping[str, torch.Tensor]:
-    """i4 適格を「stage 外 = RTN」「encoder stage 内 = GPTQ」へ排他に割って丸める。
+    """Split the i4-eligible weights exclusively into "outside the stages = RTN" and "inside the
+    encoder stages = GPTQ", and round them.
 
-    順序 MUST（① → ② → ③）:
+    Order MUST (① → ② → ③):
 
-    1. **stage 外の適格（語彙表）を先に RTN i4 で丸める** — 配布実行時に encoder へ入るのは
-       i4 の語彙表を引いた活性なので、校正入力を配布条件へ合わせる（語彙表の丸め誤差が
-       伝播した状態で encoder の丸め先を選ぶ）。後に回すと「f32 の表を引いた活性」で校正した
-       重みを、i4 の表と組んで配ることになる。
-    2. 校正バッチの捕捉と stage 分解一致門（`deberta.calib.build_rig`）。
-    3. stage 内の適格 linear を GPTQ × RTN 格子で丸める。
+    1. **Round the eligible weights outside the stages (the vocabulary table) with RTN i4 first**
+       — at distribution run time, what enters the encoder are activations looked up from the i4
+       vocabulary table, so the calibration inputs are matched to the distribution's conditions
+       (the encoder's rounding targets are picked with the vocabulary table's rounding error
+       already propagated). Doing it later would ship weights calibrated on "activations looked
+       up from the f32 table" paired with the i4 table.
+    2. Capture of the calibration batches and the stage-split equivalence check
+       (`deberta.calib.build_rig`).
+    3. Round the eligible linears inside the stages with the GPTQ × RTN grid.
 
-    MUST: stage 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致すること — 一致しないなら上流の
-    構成が変わって適格が増減している。黙って RTN 側へ流す（= 校正が痩せる）のも、黙って i8 へ
-    落とす（= サイズだけ戻る）のも数字から読めないので、その場で落とす。
+    MUST: the eligible weights outside the stages equal {@link NON_STAGE_I4_WEIGHTS} — otherwise
+    the upstream structure has changed and the eligible set has grown or shrunk. Silently routing
+    them to the RTN side (= thinner calibration) and silently dropping them to i8 (= only the size
+    comes back) are both unreadable from the numbers, so it fails on the spot.
     """
     stages = calib.encoder_stages(wrapper)
     stage_names = calib.stage_linear_names(stages) & i4_names
     plain_names = i4_names - stage_names
     if plain_names != NON_STAGE_I4_WEIGHTS:
         raise AssertionError(
-            f"encoder stage の外の i4 適格が {sorted(plain_names)} で、宣言"
-            f"（NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)}）と違う"
-            " — 上流の構成が変わって i4 の割り方が動いている"
+            f"the i4-eligible weights outside the encoder stages are {sorted(plain_names)}, which"
+            f" differs from the declaration (NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)})"
+            " — the upstream structure changed and moved the i4 split"
         )
-    plain = _round_i4_plain(wrapper, plain_names, "stage 外の語彙表を")
+    plain = _round_i4_plain(wrapper, plain_names, "the vocabulary table outside the stages")
     rig = calib.build_rig(wrapper, stages, calib_args)
     report, ledger = calib.calibrate_i4(
         rig, include=lambda local: f"{calib.STAGE_PREFIX}.{local}" in stage_names
     )
     calibrated = ledger.scales
-    # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
+    # MUST: the 2 paths are disjoint (an overlap would round the same weight twice, and only the
+    # values would quietly go wrong).
     overlap = sorted(set(plain) & set(calibrated))
     if overlap:
-        raise AssertionError(f"i4 の 2 経路が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
+        raise AssertionError(
+            f"the two i4 paths round the same weights (double rounding): {overlap[:3]}"
+        )
     print(
-        f"[fake-quant] encoder stage の linear を GPTQ 校正付きで丸めた — {report.describe()}"
-        f" / 校正入力 {len(rig.batches)} 件・{rig.tokens:,} トークン",
+        "[fake-quant] rounded the encoder-stage linears with GPTQ calibration"
+        f" — {report.describe()} / {len(rig.batches)} calibration inputs, {rig.tokens:,} tokens",
         flush=True,
     )
     return {**plain, **calibrated}
@@ -532,67 +589,75 @@ def _fake_quant(
     *,
     calib_args: Sequence[Sequence[torch.Tensor]] | None = None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
-    """格納 dtype の表現可能値へ重みを丸め、scale 台帳と 1 本単位の格納指定を返す（ADR 0006）。
+    """Round the weights to the representable values of the storage dtype, and return the scale
+    ledger and the per-tensor storage assignments (ADR 0006).
 
-    MUST: **export する `nn.Module` そのもの**（= `HiddenStatesWrapper`）に当てる。scale 台帳の
-    キーはここで見た FQN で、safetensors のテンソルキー（= `torch.export` が見る FQN）と同じで
-    なければ emit 側の突合が空振りする（`quantize.py` の FQN 規律 — `id()` 突合は禁止）。
+    MUST: apply this to **the very `nn.Module` being exported** (= `HiddenStatesWrapper`). The
+    scale ledger's keys are the FQNs seen here, and unless they equal the safetensors tensor keys
+    (= the FQNs `torch.export` sees), the matching on the emit side finds nothing (the FQN
+    discipline of `quantize.py` — matching by `id()` is forbidden).
 
-    MUST: 呼ぶのは **golden io の採取より前**（`quantize.py` の docstring）— 後に当てると
-    期待値だけが元の重みで計算され、E2E の差に量子化誤差が混ざって tolerance の意味が消える。
-    校正付き丸め（GPTQ）も同じ理由でここに閉じる。
+    MUST: call it **before the golden io is taken** (the docstring of `quantize.py`) — applying it
+    later computes only the expected values with the original weights, quantization error mixes
+    into the E2E difference, and the tolerance loses its meaning. Calibrated rounding (GPTQ) is
+    kept inside this function for the same reason.
 
-    i4 系列は混成（適格な linear / embedding = i4 group32・残り = i8 per-channel）で、2 つの
-    述語は {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す
-    override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を
-    満たせなければ fail loudly する。
+    The i4 series is mixed (eligible linear / embedding = i4 group32, the rest = i8 per-channel),
+    and the two predicates are split **exclusively** from {@link _i4_module_names} (the mixed MUST
+    of `quantize.py`). The returned overrides are the mapping "assign every key of the i4 scale
+    ledger to i4", and emit fails loudly if it cannot honour an explicit assignment.
 
-    `calib_args` は i4 のときだけ効く（`None` = 校正なしの素の RTN — テスト用の opt-out）。
+    `calib_args` takes effect only for i4 (`None` = plain RTN without calibration — an opt-out for
+    tests).
     """
     if dtype == "f32":
         return {}, {}
     if dtype == "i8":
         report = fake_quant_int8(wrapper)
-        print(f"[fake-quant] i8 per-channel へ丸めた — {report.describe()}", flush=True)
+        print(f"[fake-quant] rounded to i8 per-channel — {report.describe()}", flush=True)
         return report.scales, {}
     i4_names = _i4_module_names(wrapper)
     int4_scales = (
-        _round_i4_plain(wrapper, i4_names, "linear / embedding を")
+        _round_i4_plain(wrapper, i4_names, "linear / embedding")
         if calib_args is None
         else _round_i4_calibrated(wrapper, i4_names, calib_args)
     )
-    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「適格と数えたのに丸まって
-    # いない」形で、i4 席に i8 の重みが混ざったまま緑になる。
+    # MUST: the rounded set = the stored set (the override keys). A mismatch has the form "counted
+    # as eligible but not rounded", which stays green with i8 weights mixed into the i4 storage.
     if set(int4_scales) != {f"{name}.weight" for name in i4_names}:
         raise AssertionError(
-            f"i4 適格 {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
-            f"（過不足: {sorted(set(int4_scales) ^ {f'{name}.weight' for name in i4_names})[:3]}）"
+            f"{len(i4_names)} i4-eligible weights, but {len(int4_scales)} were rounded (difference:"
+            f" {sorted(set(int4_scales) ^ {f'{name}.weight' for name in i4_names})[:3]})"
         )
     int8 = fake_quant_int8(wrapper, include=lambda name: name not in i4_names)
-    print(f"[fake-quant] 残りは i8 per-channel — {int8.describe()}", flush=True)
+    print(f"[fake-quant] the rest is i8 per-channel — {int8.describe()}", flush=True)
     return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
 
 def _write_export_provenance(target: str, sym_max: int, out_dir: Path) -> None:
-    """この variant を**どの記号次元の上限で**焼いたかを系列へ書き残す。
+    """Record in the series **which symbolic-dimension bound** this variant was baked with.
 
-    `--sym-max` は任意の値を通す研究用ノブで、渡した値はそのまま `Dim` の max になる。ところが
-    SBV2 配布形の `pipelineConfig.maxTokens` は定数で焼かれる（`sbv2/distribution.py` の
-    `SBV2_MAX_TOKENS`）ため、既定から外して採り直した系列を text_encoder 席へ挿すと
-    **export は緑・配布も緑**のまま宣言だけが嘘になり、利用者の手元で初めて長い入力が落ちる。
+    `--sym-max` is a research knob that accepts any value, and the value given becomes the `Dim`
+    max as is. But `pipelineConfig.maxTokens` of the SBV2 distribution is baked as a constant
+    (`SBV2_MAX_TOKENS` in `sbv2/distribution.py`), so plugging a series re-taken off the default
+    into the text_encoder component makes only the declaration a lie while **export stays green and
+    the distribution stays green**, and long inputs first fail on the user's machine.
 
-    MUST: この事実は**記録でしか運べない**。front / voice は上限を `sym_prefix_slice` の
-    焼き込み定数として持つので artifact から読み直せる（`sbv2.distribution.assert_baked_sym_max`）
-    が、DeBERTa は相対位置の添字表を ADR 0045 波 3 でグラフ**入力**へ昇格させたので、上限を運ぶ
-    定数がグラフに 1 本も残っていない。突合は `sbv2.distribution.assert_sym_provenance` が行う。
+    MUST: this fact **can be carried only by a record**. front / voice hold the bound as a baked
+    constant of `sym_prefix_slice`, so it can be read back from the artifact
+    (`sbv2.distribution.assert_baked_sym_max`), but DeBERTa promoted the relative-position index
+    tables to graph **inputs** in ADR 0045 wave 3, so not one constant carrying the bound remains
+    in the graph. `sbv2.distribution.assert_sym_provenance` does the comparison.
 
-    `target` は variant 名（層数 × 出力形 — {@link VARIANTS}）。`deberta/export.py` に `--target`
-    は無く、「どの形として焼いたか」を名乗れるのがこれ 1 つきりで、配布側もその綴りで席を引く
-    （`sbv2.distribution.SBV2_TEXT_ENCODER_VARIANT`）。
+    `target` is the variant name (layer count × output form — {@link VARIANTS}). `deberta/export.py`
+    has no `--target`, so this is the only thing that can state "which form it was baked as", and
+    the distribution side looks the component up by that spelling
+    (`sbv2.distribution.SBV2_TEXT_ENCODER_VARIANT`).
 
-    MUST: 書くのは**作業席の中**（`staged_publication` の `with` の内側）— 据え替えが 1 回に
-    なるので、新しい容器と古い記録という組が作れない（`sbv2/export.py` の `_staged_target` と
-    同じ規律。席の外に出ていないことは `tests/test_staged_publication.py` が AST で機械強制する）。
+    MUST: it is written **inside the staging directory** (inside the `with` of
+    `staged_publication`) — the swap into place happens once, so a pair of a new container and an
+    old record cannot arise (the same discipline as `_staged_target` in `sbv2/export.py`;
+    `tests/test_staged_publication.py` enforces mechanically via the AST that it stays inside).
     """
     record = {"target": target, "sym_max": sym_max}
     (out_dir / EXPORT_PROVENANCE_FILE).write_text(
@@ -611,30 +676,35 @@ def export_variant(
     single_output: bool = False,
     calib_texts: Sequence[str] | None = CALIB_TEXTS,
 ) -> dict[str, Any]:
-    """1 層数ぶんの IR コンテナと golden io を書き、要約を返す。
+    """Write the IR container and the golden io for one layer count, and return a summary.
 
-    `calib_texts` は **i4 系列だけ**が読む校正コーパス（既定 = 全 48 文）。`None` にすると
-    校正なしの素の RTN i4 に戻る — テスト用の opt-out で、CLI からは届かない
-    （`--dtype i4` は必ず校正付き）。
+    `calib_texts` is the calibration corpus that **only the i4 series** reads (default = all 48
+    sentences). `None` goes back to plain RTN i4 without calibration — an opt-out for tests that
+    the CLI cannot reach (`--dtype i4` is always calibrated).
 
-    MUST: 生成物は作業席へ書き、**全ての門**（入力の並び）を通してから据える。門より前に final
-    へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから採るので
-    互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
-    {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。出所記録
-    （{@link _write_export_provenance}）は席を抜ける直前に同じ席へ書く。
+    MUST: the outputs are written to the staging directory and published only after passing
+    **every check** (the input order). Placing them at the final location before the checks would
+    let a failed run leave "assets that pass the acceptance checks" — the io goldens are taken from
+    the same broken wrapper, so they are consistent with it and the TS-side comparison **turns
+    green** (the spelling of "when publishing is allowed" is {@link _shared.decode_series._publish};
+    the discipline of the swap and the cleanup is the core primitive
+    {@link karume.artifacts.staged_publication}). The provenance record
+    ({@link _write_export_provenance}) is written into the same staging directory just before
+    leaving it.
     """
     from transformers import AutoTokenizer
 
-    # MUST: 差し替えは golden を採る前（`deberta.patch` の docstring）— 後に当てると期待値だけが
-    # 元の経路（表を内部で作る形）で計算され、グラフと食い違ったまま緑になる。
+    # MUST: the replacement comes before the goldens are taken (the docstring of `deberta.patch`)
+    # — applying it later computes only the expected values on the original path (the tables built
+    # internally), which stays green while disagreeing with the graph.
     model = load_model(model_id, num_layers)
     patch.assert_supported(model.config)
     patch.apply_external_rel_pos_patch()
     tokenizer = AutoTokenizer.from_pretrained(model_id, revision=MODEL_REVISION)
     cases = build_cases(tokenizer, model)
     wrapper = HiddenStatesWrapper(model, single_output=single_output)
-    # MUST: 校正入力は**パッチ適用後の wrapper**へ流す（stage の実シグネチャがパッチで変わる）。
+    # MUST: the calibration inputs run through **the wrapper after the patch** (the patch changes
+    # the actual signature of a stage).
     calib_args = (
         build_calib_args(tokenizer, model, calib_texts)
         if dtype == "i4" and calib_texts is not None
@@ -642,23 +712,26 @@ def export_variant(
     )
     scales, dtype_overrides = _fake_quant(dtype, wrapper, calib_args=calib_args)
 
-    # 例示入力は padded ケース（mask に 0 を含む実トークン列）。min=2 は 0/1 特殊化を避ける
-    # ため、max は `export_provenance.json` が運ぶ上限そのもの（別ノブで二重管理しない）。
+    # The example input is the padded case (a real token sequence with zeros in the mask). min=2
+    # avoids the 0/1 specialization, and max is exactly the bound `export_provenance.json` carries
+    # (not maintained twice through a separate knob).
     _, example_args = cases[-1]
     seq = Dim("T", min=2, max=sym_max)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory (the primitive does not create it — it only hands over
+        # a path).
         staged.mkdir()
         graph = export_to_file(
             wrapper,
             tuple(example_args[key] for key in INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（{@link GRAPH_NAME}）— ディレクトリ名（`full-24layer`）
-            # から導かない。
+            # The graph name is **the component name** ({@link GRAPH_NAME}) — not derived from
+            # the directory name (`full-24layer`).
             graph_name=GRAPH_NAME,
-            # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
+            # The index tables are `[T, T]` — both axes share one symbol (squareness is pinned at
+            # the export step).
             dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
             weight_scales=scales,
@@ -666,8 +739,11 @@ def export_variant(
         )
         declared = tuple(item.name for item in graph.inputs)
         if declared != INPUT_ORDER:
-            raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {INPUT_ORDER} と違う")
-        # MUST: 通常の golden io は**フックなし**で採る（`_write_mirror_io` の docstring）。
+            raise AssertionError(
+                f"the graph input order is {declared}, not the expected {INPUT_ORDER}"
+            )
+        # MUST: the plain golden io is taken **without hooks** (the docstring of
+        # `_write_mirror_io`).
         written = _write_io(wrapper, graph, cases, staged)
         mirror: list[str] = []
         attached = 0
@@ -701,37 +777,41 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 — outputs/series/deberta{,-i8,-i4}/）",
+        help="output directory (default: the series of each --dtype —"
+        " outputs/series/deberta{,-i8,-i4}/)",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（i8 は fake-quant してから適格スロットだけ圧縮格納する — ADR 0019。"
-        "i4 は混成で、適格な linear / embedding が group32 の i4・残りは i8 — ADR 0069。"
-        f"i4 の encoder linear は GPTQ 校正付き（校正コーパス {len(CALIB_TEXTS)} 文）で丸める）",
+        help="storage dtype of the weights (i8 fake-quantizes, then stores only the eligible slots"
+        " compressed — ADR 0019. i4 is mixed: the eligible linear / embedding are group32 i4, the"
+        " rest i8 — ADR 0069. The i4 encoder linears are rounded with GPTQ calibration"
+        f" (calibration corpus of {len(CALIB_TEXTS)} sentences))",
     )
     parser.add_argument(
         "--act-quant",
         action="store_true",
-        help="適格 linear の入力を per-token i8 へ fake-quant した鏡像 io を追加で書く"
-        "（ランタイムの linearCompute:'a8' の鏡像 — 重み側は --dtype i8 と併用する）",
+        help="additionally write mirror io with the inputs of the eligible linears fake-quantized"
+        " to per-token i8 (the mirror of the runtime's linearCompute:'a8' — use it with"
+        " --dtype i8 for the weights)",
     )
     parser.add_argument(
         "--layers",
         type=int,
         nargs="+",
         default=sorted(VARIANTS),
-        help=f"書き出す層数（既定 {sorted(VARIANTS)}）",
+        help=f"layer counts to write (default {sorted(VARIANTS)})",
     )
     parser.add_argument("--sym-max", type=int, default=SYM_MAX)
     args = parser.parse_args(argv)
-    # MUST: 活性 i8 は **i8 常駐重みの linear** にしか効かない（ADR 0025 決定 1）。f32 資産に
-    # 対する鏡像は「ランタイムでは絶対に再現されない期待値」なので機械的に拒否する。
+    # MUST: activation i8 applies only to **linears with i8-resident weights** (ADR 0025 decision
+    # 1). A mirror of f32 assets is "expected values the runtime never reproduces", so it is
+    # rejected mechanically.
     if args.act_quant and args.dtype != "i8":
         raise SystemExit(
-            f"--act-quant は --dtype i8 と併用する（指定は {args.dtype}）— "
-            "活性 i8 は i8 常駐重みの linear にしか効かない（ADR 0025）"
+            f"--act-quant requires --dtype i8 (given {args.dtype}) — "
+            "activation i8 applies only to linears with i8-resident weights (ADR 0025)"
         )
     if args.out is None:
         args.out = DEFAULT_OUT_ROOTS[args.dtype]

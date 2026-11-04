@@ -1,66 +1,75 @@
-"""BiRefNet_HR（同梱 `birefnet.py`）を torch.export → IR（docs/ir-v2.md）まで通すパッチ層。
+"""Patch layer that takes BiRefNet_HR (the bundled `birefnet.py`) through torch.export → IR
+(docs/ir-v2.md).
 
-対象は HF `ZhengPeng7/BiRefNet_HR` が `trust_remote_code` で読み込む動的モジュール
-（`transformers_modules.…birefnet`）。差し替えるのはそのモジュールのクラス属性と
-グローバル関数だけで、transformers / timm / torchvision 側には一切触らない。
+The target is the dynamic module HF `ZhengPeng7/BiRefNet_HR` loads with `trust_remote_code`
+(`transformers_modules.…birefnet`). Only that module's class attributes and global functions are
+replaced; nothing on the transformers / timm / torchvision side is touched.
 
-差し替えは**全て第 0 層**（新しい op を足さない）で、性格は 2 群に分かれる:
+The replacements are **all layer 0** (no new ops are added) and fall into 2 groups by nature:
 
-- **ビット同一（データの並べ替えだけ — 演算を 1 つも増減させない）**
-  ① `window_partition` / `window_reverse` の rank-6 view+permute を rank-4 の隣接転置へ
-     （IR の strided 表現は rank ≤ 4 — `normalize._lower_reshape_permute` が rank5 以上の
-     端点を見つけられずに落ちる）
-  ② `WindowAttention` の qkv を rank-5 permute から**最終次元 slice 3 本**へ（同じ理由）。
-     相対位置バイアスの表引き `table[index.view(-1)]`（`aten.index.Tensor` = 未対応）は
-     同値な `nn.functional.embedding(index, table)` へ。窓マスクの加算は rank-5 view +
-     broadcast から rank-4 の broadcast へ（**B = 1 でのみ同値** — 外れたら fail loudly）
-  ③ `SwinTransformerBlock` の H/W 方向 `F.pad`（IR の pad は最終次元のみ）を 1 要素の
-     ゼロを `expand` で広げたものとの `cat` へ（{@link _pad_zero}）、`torch.roll`（ハンドラ
-     無し・分解形は `index_select` + `fmod`）を静的シフトの slice + cat へ
-  ④ `BasicLayer` の shifted-window マスク（`zeros` への in-place 代入 = `slice_scatter` /
-     `select` / `copy` の列）を**焼いた小さな 2 本**（窓の種類の表 + 窓ごとの添字）と、
-     グラフ内の `embedding` での組み立てへ（{@link _compact_attn_mask}）。値の作り方は元実装の
-     逐語（{@link _build_attn_mask}）で、実行の場所が export の外に移るだけ
+- **Bit-identical (data reordering only — not a single operation added or removed)**
+  ① The rank-6 view+permute of `window_partition` / `window_reverse` becomes an adjacent
+     transpose at rank 4 (the IR's strided representation is rank ≤ 4 —
+     `normalize._lower_reshape_permute` cannot find the endpoints at rank 5 or more and fails)
+  ② The qkv of `WindowAttention` goes from a rank-5 permute to **3 slices of the last dimension**
+     (the same reason). The relative-position-bias table lookup `table[index.view(-1)]`
+     (`aten.index.Tensor` = unsupported) becomes the equivalent
+     `nn.functional.embedding(index, table)`. The window-mask addition goes from a rank-5 view +
+     broadcast to a rank-4 broadcast (**equivalent only for B = 1** — fails loudly otherwise)
+  ③ The H/W `F.pad` of `SwinTransformerBlock` (the IR's pad is last-dimension only) becomes a
+     `cat` with a single zero element widened by `expand` ({@link _pad_zero}), and `torch.roll` (no
+     handler; its decomposition is `index_select` + `fmod`) becomes slice + cat with a static shift
+  ④ The shifted-window mask of `BasicLayer` (in-place assignment into `zeros` = a sequence of
+     `slice_scatter` / `select` / `copy`) becomes **2 small baked tensors** (a table of window
+     kinds + per-window indices) assembled in the graph with `embedding`
+     ({@link _compact_attn_mask}). The values are made verbatim as in the original
+     ({@link _build_attn_mask}); only where it runs moves outside the export
 
-③ と ④ が巨大な定数を焼かない形になっているのは、配布形の転送のため（調査記録
-`outputs/diag/birefnet-xet-2026-10-16/`）。以前は ④ のマスクを `[nW, 144, 144]` の f32 で丸ごと
-焼き（2048² で計 248 MiB・値は {0, −100} だけ・窓の種類は 1 枚あたり 4 つ）、③ のゼロ pad も
-エクスポータの定数畳み込みが全ゼロの initializer へ焼いていた（2048² で計 ~29 MB）。2048² の容器は
-~86% がゼロのバイトになり、HF xet の content-defined chunking が長いゼロ列の中を切れないので、
-同一の 128 KiB ゼロチャンクを参照する term が数百本に割れた（転送の断片化）。中身はどちらも冗長な
-バイトなので、値を 1 ビットも変えずに焼く量そのものを減らす。
-  ⑤ `PatchMerging` の `x[:, 0::2, 0::2, :]`（step 2 の slice = IR の slice は連続窓のみ）を
-     reshape + 連続 slice へ
-  ⑥ `image2patches` の einops `rearrange`（rank-6）を rank-4 の隣接転置へ
-- **ビット同一ではない（式は同値・丸めだけ違う）— 実測値は下記**
-  ⑦ `nn.BatchNorm2d`（推論）を per-channel の `x·α + β` へ。α/β の作り方は ATen の
-     推論経路（`alpha = weight·rsqrt(var+eps)` / `beta = bias − mean·alpha`）と同式だが、
-     ATen のカーネルは積和を 1 命令（FMA）で畳むので**最下位ビットが違う**
-     （実測 max 2.4e-07 — `birefnet/tests/test_patch.py`）。分解形を FMA で書き直しても
-     torch 側と一致させる手段は無い（torch の eager `x*a+b` 自体が一致しない）
-  ⑧ `nn.AdaptiveAvgPool2d((1, 1))` を `sum(dim=3) → sum(dim=2) → div(H·W)` へ。
-     縮約の順序が torch の 2 軸同時縮約と違うぶん最下位ビットが違う（実測 max 1.1e-08）
-  ⑨ `Decoder` 末尾の「全解像度へ伸ばす → `cat` → 1×1 conv」を「1×1 conv → 伸ばす →
-     もう片側の 1×1 conv を足す」へ組み替える（{@link TailConv}）。1×1 conv も bilinear
-     upsample も線形なので実数の上で可換で、全解像度の巨大な中間 2 本（2048² で
-     `[1,192,2048,2048]` 3.2GB と `[1,240,2048,2048]` 4.0GB）が消える。縮約の順序が
-     変わるぶん最下位ビットが違うが、寄与は ⑦⑧ の丸めに埋もれる大きさ（1024² を端から
-     端まで通した実測 maxdiff は ⑦⑧ まで 5.3e-05 → ⑨ まで 5.8e-05・`export.py --verify`）
+③ and ④ take a form that bakes no huge constants for the sake of transferring the distribution
+(investigation record `outputs/diag/birefnet-xet-2026-10-16/`). Previously ④'s mask was baked whole
+as f32 `[nW, 144, 144]` (248 MiB in total at 2048², values only {0, −100}, 4 window kinds per
+mask), and ③'s zero pad was also baked by the exporter's constant folding into all-zero
+initializers (~29 MB in total at 2048²). The 2048² container became ~86% zero bytes, and since HF
+xet's content-defined chunking cannot cut inside long runs of zeros, the terms referencing the same
+128 KiB zero chunk split into hundreds (fragmented transfer). Both contents are redundant bytes, so
+the amount baked is itself reduced, without changing a single bit of the values.
+  ⑤ The `x[:, 0::2, 0::2, :]` of `PatchMerging` (a step-2 slice = the IR's slice is contiguous
+     windows only) becomes reshape + contiguous slices
+  ⑥ The einops `rearrange` (rank 6) of `image2patches` becomes an adjacent transpose at rank 4
+- **Not bit-identical (equivalent formulas, only the rounding differs) — measurements below**
+  ⑦ `nn.BatchNorm2d` (inference) becomes a per-channel `x·α + β`. α/β are computed with the same
+     formula as ATen's inference path (`alpha = weight·rsqrt(var+eps)` /
+     `beta = bias − mean·alpha`), but ATen's kernel folds the multiply-add into one instruction
+     (FMA), so **the lowest bits differ** (measured max 2.4e-07 — `birefnet/tests/test_patch.py`).
+     Rewriting the decomposition with FMA gives no way to match the torch side (torch's own eager
+     `x*a+b` does not match)
+  ⑧ `nn.AdaptiveAvgPool2d((1, 1))` becomes `sum(dim=3) → sum(dim=2) → div(H·W)`. The reduction
+     order differs from torch's simultaneous 2-axis reduction, so the lowest bits differ (measured
+     max 1.1e-08)
+  ⑨ The tail of `Decoder`, "stretch to full resolution → `cat` → 1×1 conv", is rearranged into
+     "1×1 conv → stretch → add the other side's 1×1 conv" ({@link TailConv}). Both the 1×1 conv
+     and the bilinear upsample are linear, so they commute over the reals, and the 2 huge
+     full-resolution intermediates (at 2048², `[1,192,2048,2048]` 3.2GB and `[1,240,2048,2048]`
+     4.0GB) disappear. The changed reduction order makes the lowest bits differ, but the
+     contribution is small enough to be buried in ⑦⑧'s rounding (measured end to end at 1024²,
+     maxdiff 5.3e-05 up to ⑦⑧ → 5.8e-05 up to ⑨, `export.py --verify`)
 
-入口は 3 群に対応して分かれている（{@link apply_layout_patches} / {@link apply_module_patches}
-/ {@link apply_tail_patches}・全て当てるのが {@link apply}）— 一括でしか当てられないと、
-①〜⑥ のビット同一を単体で実測できず、⑦⑧ と ⑨ の丸めの寄与も分けて採れない。
+The entry points are split to match the 3 groups ({@link apply_layout_patches} /
+{@link apply_module_patches} / {@link apply_tail_patches}; {@link apply} applies them all) — if
+they could only be applied together, the bit identity of ①–⑥ could not be measured on its own, nor
+could the rounding contributions of ⑦⑧ and ⑨ be taken separately.
 
-MUST: どのパッチも fallback を持たない（`siglip2.patch` / `deberta.patch` と同じ規律）。
-前提（B = 1 / 偶数解像度 / `dec_att='ASPPDeformable'` 等）を外したモデルは黙って別の数値
-経路へ落ちるのではなく、その場で落ちる。
+MUST: no patch has a fallback (the same discipline as `siglip2.patch` / `deberta.patch`). A model
+that breaks a premise (B = 1 / even resolution / `dec_att='ASPPDeformable'` and so on) fails on the
+spot rather than silently falling to another numeric path.
 
-MUST: {@link apply} の後に {@link prepare} を**必ず**通す。④ の表と添字は解像度依存の定数で、
-export の中では作れない（`register_buffer` がグラフに乗らない）。`prepare` は eager の
-1 forward で表と添字を焼き、そのまま**パッチ後の参照出力**を返す。
+MUST: {@link prepare} **always** runs after {@link apply}. ④'s table and indices are
+resolution-dependent constants that cannot be made inside export (`register_buffer` does not get
+into the graph). `prepare` bakes the table and indices in one eager forward and returns **the
+patched reference output** as it is.
 
-NOTE: 動的モジュールのクラス属性をプロセス全域で差し替えるので、「パッチ前の参照」を採れる
-のは 1 プロセスにつき 1 回だけ（{@link patches_applied} が門）。
+NOTE: class attributes of the dynamic module are replaced process-wide, so "the reference before
+the patches" can be taken only once per process ({@link patches_applied} is the check).
 """
 
 from __future__ import annotations
@@ -73,23 +82,25 @@ from typing import Any
 import torch
 from torch import nn
 
-#: 差し替えを当てたか（パッチ前の参照を採る側の恒真化を防ぐ門）。
+#: Whether the replacements were applied (the check that keeps the side taking the pre-patch
+#: reference from becoming trivially true).
 _APPLIED = False
 
-#: {@link prepare} の実行中だけ True。窓マスクの構築を許す唯一の窓で、export 中に
-#: `register_buffer` が走る（= グラフに乗らない定数が黙って生える）ことを防ぐ。
+#: True only while {@link prepare} runs. The only window in which building the window mask is
+#: allowed; it keeps `register_buffer` from running during export (= constants that are not in the
+#: graph silently appearing).
 _MASK_BUILD_ENABLED = False
 
 
 def patches_applied() -> bool:
-    """このプロセスでクラス属性の差し替えを当てたか。"""
+    """Whether this process applied the class-attribute replacements."""
     return _APPLIED
 
 
 def assert_supported(model: nn.Module) -> None:
-    """差し替え版が前提にしている構成を検査する。
+    """Check the configuration the replacement version assumes.
 
-    見るのは**外れても shape エラーにならずに別の経路へ落ちる**ものだけ。
+    Only what **falls to another path without a shape error when it differs** is checked.
     """
     config = model.config
     expected = {
@@ -103,26 +114,33 @@ def assert_supported(model: nn.Module) -> None:
     for key, want in expected.items():
         got = getattr(config, key)
         if got != want:
-            raise ValueError(f"config.{key} が {want!r} でない（{got!r}）— 差し替え版の対象外")
+            raise ValueError(
+                f"config.{key} is not {want!r} ({got!r}) — not covered by the replacement version"
+            )
     if not config.dec_ipt or not config.dec_ipt_split:
         raise ValueError(
-            "dec_ipt / dec_ipt_split が False — image2patches の書き換えが噛み合わない"
+            "dec_ipt / dec_ipt_split is False — the image2patches rewrite does not fit"
         )
     if config.batch_size <= 1:
-        raise ValueError("batch_size ≤ 1 では BatchNorm2d が Identity になる — 重みの前提と違う")
+        raise ValueError(
+            "with batch_size ≤ 1 BatchNorm2d becomes Identity — not what the weights assume"
+        )
     if model.bb.ape:
-        raise ValueError("ape=True は差し替え版が持たない経路（bicubic の位置埋め込み補間が出る）")
+        raise ValueError(
+            "ape=True is a path the replacement version does not have (bicubic interpolation of the"
+            " position embedding appears)"
+        )
 
 
-# ---- ①窓の切り出し / 復元（rank ≤ 4） -------------------------------------
+# ---- ① Window partition / reverse (rank ≤ 4) -------------------------------
 
 
 def _window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
-    """`[B, H, W, C]` → `[B·nH·nW, ws, ws, C]`（元実装の rank-6 版とビット同一）。
+    """`[B, H, W, C]` → `[B·nH·nW, ws, ws, C]` (bit-identical to the original rank-6 version).
 
-    元実装は `(b, hb, hi, wb, wi, c)` を `(b, hb, wb, hi, wi, c)` へ並べ替える。入れ替える
-    のは**隣接する 2 軸**（`hi` と `wb`）だけなので、先頭 `(b, hb)` と末尾 `(wi, c)` を
-    それぞれ 1 軸に畳めば rank-4 の permute 1 本で書ける。
+    The original reorders `(b, hb, hi, wb, wi, c)` into `(b, hb, wb, hi, wi, c)`. Only **2 adjacent
+    axes** (`hi` and `wb`) are swapped, so folding the leading `(b, hb)` and the trailing `(wi, c)`
+    into one axis each lets it be written as a single rank-4 permute.
     """
     batch, height, width, channels = x.shape
     x = x.reshape(
@@ -138,7 +156,7 @@ def _window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
 def _window_reverse(
     windows: torch.Tensor, window_size: int, height: int, width: int
 ) -> torch.Tensor:
-    """`[B·nH·nW, ws, ws, C]` → `[B, H, W, C]`（{@link _window_partition} の逆写像）。"""
+    """`[B·nH·nW, ws, ws, C]` → `[B, H, W, C]` (the inverse of {@link _window_partition})."""
     channels = windows.shape[-1]
     batch = windows.shape[0] // ((height // window_size) * (width // window_size))
     x = windows.reshape(
@@ -151,29 +169,33 @@ def _window_reverse(
     return x.reshape(batch, height, width, channels)
 
 
-# ---- ②窓 attention ---------------------------------------------------------
+# ---- ② Window attention -----------------------------------------------------
 
 
 def _window_attention_forward(
     self: nn.Module, x: torch.Tensor, mask: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """`WindowAttention.forward` の同値実装（rank ≤ 4・表引きは embedding）。
+    """Equivalent implementation of `WindowAttention.forward` (rank ≤ 4, table lookup via
+    embedding).
 
-    元実装との差は 3 点だけで、いずれも値の並べ替え方が違うだけ:
+    It differs from the original in only 3 points, each only in how values are reordered:
 
-    1. qkv は `reshape(B_, N, 3, nH, hd).permute(2, 0, 3, 1, 4)` の代わりに最終次元を
-       3 等分する（`(3, nH, hd)` の入れ子なので先頭 C 要素が q）。
-    2. 相対位置バイアスは `table[index.view(-1)]`（`aten.index.Tensor`）ではなく
-       `nn.functional.embedding(index, table)`。どちらも行 gather そのもの。
-    3. 窓マスクの加算は `attn.view(B_//nW, nW, …) + mask[None, :, None]` ではなく
-       `attn + mask[:, None]`。**B_ == nW（= バッチ 1）でのみ同値**なので明示に落とす。
+    1. Instead of `reshape(B_, N, 3, nH, hd).permute(2, 0, 3, 1, 4)`, qkv splits the last
+       dimension into 3 equal parts (it is nested as `(3, nH, hd)`, so the first C elements are q).
+    2. The relative position bias is `nn.functional.embedding(index, table)` rather than
+       `table[index.view(-1)]` (`aten.index.Tensor`). Both are a plain row gather.
+    3. The window-mask addition is `attn + mask[:, None]` rather than
+       `attn.view(B_//nW, nW, …) + mask[None, :, None]`. It is **equivalent only for B_ == nW
+       (= batch 1)**, so anything else fails explicitly.
     """
     batch_windows, tokens, channels = x.shape
     heads = self.num_heads
     head_dim = channels // heads
     window_tokens = self.window_size[0] * self.window_size[1]
     if tokens != window_tokens:
-        raise ValueError(f"窓の要素数 {tokens} が window_size {self.window_size} と合わない")
+        raise ValueError(
+            f"window element count {tokens} does not match window_size {self.window_size}"
+        )
 
     qkv = self.qkv(x)
     projections = []
@@ -195,8 +217,8 @@ def _window_attention_forward(
         windows = mask.shape[0]
         if batch_windows != windows:
             raise NotImplementedError(
-                f"窓数 {windows} と第 0 軸 {batch_windows} が違う（バッチ > 1）—"
-                " 差し替え版の broadcast は B = 1 でのみ元実装と同値"
+                f"window count {windows} differs from axis 0, {batch_windows} (batch > 1) —"
+                " the replacement's broadcast is equivalent to the original only for B = 1"
             )
         attn = attn + mask.unsqueeze(1)
     attn = self.softmax(attn)
@@ -207,20 +229,22 @@ def _window_attention_forward(
     return self.proj_drop(out)
 
 
-# ---- ③Swin ブロック（pad → cat / roll → slice+cat） ------------------------
+# ---- ③ Swin block (pad → cat / roll → slice+cat) ----------------------------
 
 
 def _pad_zero(x: torch.Tensor, dim: int, width: int) -> torch.Tensor:
-    """`x` の軸 `dim` の末尾へゼロを `width` 本足す（`F.pad` の同値形）。
+    """Append `width` zeros at the end of axis `dim` of `x` (the equivalent of `F.pad`).
 
-    IR の `pad` は最終次元専業なので、H/W 方向の padding は**ゼロとの `cat`** で書く。
+    The IR's `pad` handles only the last dimension, so padding along H/W is written as **a `cat`
+    with zeros**.
 
-    ゼロは「1 要素のゼロを `expand` で広げたもの」にする。`torch.zeros(shape)` で書くと、入力に
-    依存しない部分木としてエクスポータの定数畳み込みが `[1, pad, W, C]` の全ゼロを initializer へ
-    焼く（2048² で計 ~29 MB — 長いゼロ列は HF xet の転送を断片化させる。モジュール docstring の
-    調査記録）。形の変わる `expand` は定数畳み込みの frontier（`karume.convert` の
-    `_classify_foldable` が止める）なので、焼かれるのは 1 要素の定数だけで、広げるのは実行時に
-    なる。値は `F.pad` のゼロ（+0.0）と同じ。
+    The zeros are "a single zero element widened by `expand`". Written as `torch.zeros(shape)`, the
+    exporter's constant folding would bake an all-zero `[1, pad, W, C]` into an initializer as a
+    subtree independent of the input (~29 MB in total at 2048² — long runs of zeros fragment the HF
+    xet transfer; the investigation record in the module docstring). A shape-changing `expand` is a
+    frontier of constant folding (`_classify_foldable` of `karume.convert` stops there), so only a
+    one-element constant is baked and the widening happens at run time. The values are the same as
+    `F.pad`'s zeros (+0.0).
     """
     if width == 0:
         return x
@@ -231,10 +255,11 @@ def _pad_zero(x: torch.Tensor, dim: int, width: int) -> torch.Tensor:
 
 
 def _roll(x: torch.Tensor, shift: int, dim: int) -> torch.Tensor:
-    """`torch.roll(x, shift, dim)` の同値形（静的シフトの slice + cat）。
+    """The equivalent of `torch.roll(x, shift, dim)` (slice + cat with a static shift).
 
-    `torch.roll` は curated decomp 後に `arange` + `fmod` + `index_select` へ落ちる
-    （`index_select` は語彙外）。シフト量が静的なら連結順を入れ替えるだけで書ける。
+    After the curated decomposition `torch.roll` falls to `arange` + `fmod` + `index_select`
+    (`index_select` is outside the vocabulary). With a static shift it can be written just by
+    swapping the order of concatenation.
     """
     if shift == 0:
         return x
@@ -248,11 +273,11 @@ def _roll(x: torch.Tensor, shift: int, dim: int) -> torch.Tensor:
 def _swin_block_forward(
     self: nn.Module, x: torch.Tensor, mask_matrix: torch.Tensor | None
 ) -> torch.Tensor:
-    """`SwinTransformerBlock.forward` の同値実装（pad と roll だけ書き換え）。"""
+    """Equivalent implementation of `SwinTransformerBlock.forward` (only pad and roll rewritten)."""
     batch, length, channels = x.shape
     height, width = self.H, self.W
     if length != height * width:
-        raise ValueError(f"入力長 {length} が {height}×{width} と合わない")
+        raise ValueError(f"input length {length} does not match {height}×{width}")
 
     shortcut = x
     x = self.norm1(x)
@@ -291,11 +316,13 @@ def _swin_block_forward(
     return x + self.drop_path(self.mlp(self.norm2(x)))
 
 
-# ---- ④shifted-window マスク（窓の種類の表 + 窓ごとの添字） ------------------
+# ---- ④ Shifted-window mask (table of window kinds + per-window indices) ----
 
-#: 1 枚のマスクが持ちうる窓の種類の上限。マスクの元は画像を行 / 列とも 3 帯（`slice(0, -ws)` /
-#: `slice(-ws, -shift)` / `slice(-shift, None)`）に割った 9 領域の番号で、窓の格子は最後の帯
-#: 2 本だけをまたぐ — 窓の中身は「内部 / 右端の列 / 下端の行 / 右下の角」の 4 通りにしかならない。
+#: Upper bound of the window kinds one mask can have. The mask comes from the numbers of the 9
+#: regions made by cutting the image into 3 bands in both rows and columns (`slice(0, -ws)` /
+#: `slice(-ws, -shift)` / `slice(-shift, None)`), and the window grid straddles only the last 2
+#: bands — a window's contents can only be one of 4 kinds: "interior / right column / bottom row /
+#: bottom-right corner".
 MAX_MASK_WINDOW_KINDS = 4
 
 
@@ -307,10 +334,11 @@ def _build_attn_mask(
     dtype: torch.dtype,
     device: torch.device,
 ) -> torch.Tensor:
-    """`BasicLayer.forward` のマスク生成の逐語移植（eager 実行専用）。
+    """Verbatim port of the mask generation of `BasicLayer.forward` (eager execution only).
 
-    元実装との差は ①`Hp` / `Wp` を tensor ではなく python int で受ける ②`window_partition`
-    が {@link _window_partition}（ビット同一）である の 2 点だけ。値の作り方は同じ。
+    It differs from the original in only 2 points: ① `Hp` / `Wp` are taken as python ints rather
+    than tensors, and ② `window_partition` is {@link _window_partition} (bit-identical). The values
+    are made the same way.
     """
     img_mask = torch.zeros((1, padded_height, padded_width, 1), device=device)
     slices = (
@@ -331,45 +359,52 @@ def _build_attn_mask(
 
 
 def _expand_attn_mask(table: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-    """窓の種類の表 `[K, N·N]` と窓の格子 `[nH, nW]` 上の添字から `[nH·nW, N, N]` のマスクを組む。
+    """Build the `[nH·nW, N, N]` mask from the table of window kinds `[K, N·N]` and the indices on
+    the window grid `[nH, nW]`.
 
-    行 gather そのもので、IR では `embedding` 1 本になる（② の相対位置バイアスと同じ形 —
-    添字が lifted 定数・表がバッファ）。
+    It is a plain row gather and becomes a single `embedding` in the IR (the same shape as ②'s
+    relative position bias — the indices a lifted constant, the table a buffer).
 
-    添字を格子の形で持ち、ここで行優先に平坦化するのも ② と同じ理由: `reshape` は定数畳み込みの
-    対象なので、平坦化した添字はエクスポータが i32 の定数として焼く
-    （`karume.convert._add_const` — ADR 0009 / 0010）。lifted 定数を `embedding` へ直に渡すと
-    initializer の経路（意味論 f32 のみ）に落ちて i64 で止まる（実測）。窓の並びは
-    {@link _window_partition} と同じ行優先。
+    The indices are held in grid shape and flattened row-major here for the same reason as ②:
+    `reshape` is subject to constant folding, so the exporter bakes the flattened indices as an i32
+    constant (`karume.convert._add_const` — ADR 0009 / 0010). Passing a lifted constant straight to
+    `embedding` falls to the initializer path (semantic f32 only) and stops at i64 (measured). The
+    window order is row-major, as in {@link _window_partition}.
     """
     tokens = math.isqrt(table.shape[1])
     if tokens * tokens != table.shape[1]:
-        raise ValueError(f"表の行長 {table.shape[1]} が窓の要素数の 2 乗でない")
+        raise ValueError(
+            f"table row length {table.shape[1]} is not the square of a window's element count"
+        )
     return nn.functional.embedding(index.reshape(-1), table).view(index.numel(), tokens, tokens)
 
 
 def _compact_attn_mask(
     mask: torch.Tensor, grid: tuple[int, int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """`[nW, N, N]` のマスクを（窓の種類の表 `[K, N·N]`, 窓の格子 `grid` 上の添字 i64）へ畳む。
+    """Fold a `[nW, N, N]` mask into (a table of window kinds `[K, N·N]`, i64 indices on the window
+    grid `grid`).
 
-    なぜ畳むか: マスクを丸ごと焼くと 2048² で計 248 MiB になるが、中身は {0, −100} だけで、窓の
-    種類は高々 {@link MAX_MASK_WINDOW_KINDS} 通り — 残りは同じ窓の繰り返しで、HF xet の転送を
-    断片化させる長いゼロ列にもなる（モジュール docstring の調査記録）。
+    Why fold: baking the mask whole comes to 248 MiB in total at 2048², but its contents are only
+    {0, −100} and there are at most {@link MAX_MASK_WINDOW_KINDS} window kinds — the rest repeats
+    the same windows, and also forms long runs of zeros that fragment the HF xet transfer (the
+    investigation record in the module docstring).
 
-    表の行は上流のマスクの窓の並び（`window_partition` の行優先）で**初めて現れた順**。表の dtype
-    は `mask` と同じ。添字の dtype は i64 — ② の `relative_position_index` と同じく素の属性
-    （lifted 定数）として持ち、エクスポータが i32 へ境界正規化して焼く（i64 のバッファは
-    initializer にできない — {@link _lift_relative_position_index}）。
+    The table's rows are in **order of first appearance** in the window order of the upstream mask
+    (`window_partition`'s row-major). The table's dtype is the same as `mask`. The indices' dtype is
+    i64 — like ②'s `relative_position_index` they are held as a plain attribute (a lifted constant),
+    which the exporter boundary-normalizes to i32 and bakes (an i64 buffer cannot be an initializer
+    — {@link _lift_relative_position_index}).
 
-    MUST: 種類が上限を超えたら、または組み立て直した値が元のマスクとビット列で一致しなければ
-    落とす（前提の 3 帯分割から外れたマスクを黙って別の値にしない）。
+    MUST: fail when the kinds exceed the bound or the reassembled values do not match the original
+    mask bit for bit (a mask outside the assumed 3-band split is not silently turned into other
+    values).
     """
     windows = mask.shape[0]
     if grid[0] * grid[1] != windows:
-        raise ValueError(f"窓の格子 {grid} がマスクの窓数 {windows} と合わない")
+        raise ValueError(f"window grid {grid} does not match the mask's window count {windows}")
     flat = mask.reshape(windows, -1)
-    # ビット列で比べる（値の `==` は `0.0` と `-0.0` を同一視する）。
+    # Compare bit patterns (value `==` treats `0.0` and `-0.0` as the same).
     bits = flat.contiguous().view(torch.uint8)
     kinds: list[int] = []
     index = torch.empty(windows, dtype=torch.long)
@@ -383,21 +418,25 @@ def _compact_attn_mask(
             kinds.append(window)
     if len(kinds) > MAX_MASK_WINDOW_KINDS:
         raise NotImplementedError(
-            f"窓マスクの種類が {len(kinds)} 通り（上限 {MAX_MASK_WINDOW_KINDS}）—"
-            " 3 帯分割の shifted-window マスクではない"
+            f"the window mask has {len(kinds)} kinds (at most {MAX_MASK_WINDOW_KINDS}) —"
+            " not a shifted-window mask from a 3-band split"
         )
     table = flat[kinds]
     index = index.reshape(grid)
     rebuilt = _expand_attn_mask(table, index)
     if not torch.equal(rebuilt.contiguous().view(torch.uint8), mask.contiguous().view(torch.uint8)):
-        raise AssertionError("表と添字から組み立て直した窓マスクが元のマスクとビット一致しない")
+        raise AssertionError(
+            "the window mask reassembled from the table and indices is not bit-identical to the"
+            " original"
+        )
     return table, index
 
 
 def _basic_layer_forward(
     self: nn.Module, x: torch.Tensor, height: int, width: int
 ) -> tuple[Any, ...]:
-    """`BasicLayer.forward` の同値実装（マスクは焼いた表と添字からグラフ内で組み立てる）。"""
+    """Equivalent implementation of `BasicLayer.forward` (the mask is assembled in the graph from
+    the baked table and indices)."""
     window_size = self.window_size
     padded_height = -(-height // window_size) * window_size
     padded_width = -(-width // window_size) * window_size
@@ -407,8 +446,8 @@ def _basic_layer_forward(
     if table is None:
         if not _MASK_BUILD_ENABLED:
             raise RuntimeError(
-                f"{padded_height}×{padded_width} の窓マスクが焼かれていない —"
-                " export の前に birefnet.patch.prepare(model, x) を通すこと"
+                f"the {padded_height}×{padded_width} window mask is not baked —"
+                " run birefnet.patch.prepare(model, x) before export"
             )
         table, index = _compact_attn_mask(
             _build_attn_mask(
@@ -417,12 +456,15 @@ def _basic_layer_forward(
             (padded_height // window_size, padded_width // window_size),
         )
         self.register_buffer(table_name, table)
-        # 添字はバッファにせず素の属性へ置く（lifted 定数 — 理由は _compact_attn_mask）。
+        # The indices go on a plain attribute, not a buffer (a lifted constant — the reason is in
+        # _compact_attn_mask).
         object.__setattr__(self, index_name, index)
     attn_mask = _expand_attn_mask(table, getattr(self, index_name))
 
     if self.use_checkpoint:
-        raise NotImplementedError("use_checkpoint=True は差し替え版が持たない経路")
+        raise NotImplementedError(
+            "use_checkpoint=True is a path the replacement version does not have"
+        )
     for block in self.blocks:
         block.H, block.W = height, width
         x = block(x, attn_mask)
@@ -432,23 +474,25 @@ def _basic_layer_forward(
     return x, height, width, x, height, width
 
 
-# ---- ⑤PatchMerging（step 2 の slice を消す） -------------------------------
+# ---- ⑤ PatchMerging (removes the step-2 slices) -----------------------------
 
 
 def _patch_merging_forward(
     self: nn.Module, x: torch.Tensor, height: int, width: int
 ) -> torch.Tensor:
-    """`PatchMerging.forward` の同値実装（`x[:, 0::2, 0::2, :]` を連続 slice へ）。
+    """Equivalent implementation of `PatchMerging.forward` (`x[:, 0::2, 0::2, :]` to contiguous
+    slices).
 
-    `(hb, hi, wb, wi)` に割り直すと、元実装の 4 本の step-2 slice は「軸 `hi` と `wi` を
-    それぞれ 0 / 1 で切る」だけになる。`hi` は 2 番目の軸、`wi` は最終次元の前半 / 後半。
+    Re-split into `(hb, hi, wb, wi)`, the original's 4 step-2 slices become just "cut axes `hi` and
+    `wi` at 0 / 1 each". `hi` is the 2nd axis, `wi` the first / second half of the last dimension.
     """
     batch, length, channels = x.shape
     if length != height * width:
-        raise ValueError(f"入力長 {length} が {height}×{width} と合わない")
+        raise ValueError(f"input length {length} does not match {height}×{width}")
     if height % 2 or width % 2:
         raise NotImplementedError(
-            f"奇数解像度 {height}×{width} は差し替え版が持たない経路（元実装の pad 分岐）"
+            f"odd resolution {height}×{width} is a path the replacement version does not have (the"
+            " original's pad branch)"
         )
     x = x.view(batch, height, width, channels)
     x = x.reshape(batch * (height // 2), 2, width // 2, 2 * channels)
@@ -459,7 +503,7 @@ def _patch_merging_forward(
         for column in range(2):
             part = picked[:, :, :, column * channels : (column + 1) * channels]
             quadrants.append(part.reshape(batch, height // 2, width // 2, channels))
-    # 元実装の並び（even/even, odd/even, even/odd, odd/odd）へ組み直す。
+    # Reassemble into the original's order (even/even, odd/even, even/odd, odd/odd).
     even_even, even_odd, odd_even, odd_odd = quadrants
     x = torch.cat([even_even, odd_even, even_odd, odd_odd], -1)
     x = x.view(batch, -1, 4 * channels)
@@ -467,9 +511,10 @@ def _patch_merging_forward(
     return self.reduction(self.norm(x))
 
 
-# ---- ⑥image2patches（einops の rank-6 rearrange） --------------------------
+# ---- ⑥ image2patches (einops rank-6 rearrange) ------------------------------
 
-#: 差し替え版が持つ唯一の変換式（`Decoder.forward` / `BiRefNet` の実測形）。
+#: The only transformation the replacement version has (the measured form in `Decoder.forward` /
+#: `BiRefNet`).
 _SUPPORTED_TRANSFORMATION = "b c (hg h) (wg w) -> b (c hg wg) h w"
 
 
@@ -480,13 +525,15 @@ def _image2patches(
     patch_ref: torch.Tensor | None = None,
     transformation: str = _SUPPORTED_TRANSFORMATION,
 ) -> torch.Tensor:
-    """`image2patches` の同値実装（rank-4 の隣接転置 1 本）。
+    """Equivalent implementation of `image2patches` (a single rank-4 adjacent transpose).
 
-    `(b, c, hg, h, wg, w)` → `(b, c, hg, wg, h, w)` は隣接 2 軸（`h` と `wg`）の入れ替え
-    なので、先頭 `(b, c, hg)` を 1 軸に畳めば rank-4 で書ける。
+    `(b, c, hg, h, wg, w)` → `(b, c, hg, wg, h, w)` swaps 2 adjacent axes (`h` and `wg`), so folding
+    the leading `(b, c, hg)` into one axis lets it be written at rank 4.
     """
     if transformation != _SUPPORTED_TRANSFORMATION:
-        raise NotImplementedError(f"変換式 {transformation!r} は差し替え版が持たない経路")
+        raise NotImplementedError(
+            f"transformation {transformation!r} is a path the replacement version does not have"
+        )
     if patch_ref is not None:
         grid_h = image.shape[-2] // patch_ref.shape[-2]
         grid_w = image.shape[-1] // patch_ref.shape[-1]
@@ -497,22 +544,26 @@ def _image2patches(
     return patches.reshape(batch, channels * grid_h * grid_w, patch_h, patch_w)
 
 
-# ---- ⑦⑧ モジュールの差し替え（BatchNorm2d / AdaptiveAvgPool2d） -----------
+# ---- ⑦⑧ Module replacement (BatchNorm2d / AdaptiveAvgPool2d) --------------
 
 
 class ChannelAffine(nn.Module):
-    """推論時 `nn.BatchNorm2d` の同値形 `x·α + β`（α / β は per-channel の定数）。
+    """The equivalent `x·α + β` of inference-time `nn.BatchNorm2d` (α / β are per-channel
+    constants).
 
-    ATen の推論経路と同式（`alpha = weight·rsqrt(var+eps)` / `beta = bias − mean·alpha`）だが、
-    ATen 側は積和を FMA で畳むので**ビット一致はしない**（実測 max 2.4e-07）。
+    The same formula as ATen's inference path (`alpha = weight·rsqrt(var+eps)` /
+    `beta = bias − mean·alpha`), but ATen folds the multiply-add with FMA, so it is **not
+    bit-identical** (measured max 2.4e-07).
     """
 
     def __init__(self, source: nn.BatchNorm2d) -> None:
         super().__init__()
         if source.training:
-            raise ValueError("学習モードの BatchNorm2d は差し替え対象外（統計が動く）")
+            raise ValueError("a training-mode BatchNorm2d is not replaced (its statistics move)")
         if source.running_mean is None or source.running_var is None:
-            raise ValueError("track_running_stats=False の BatchNorm2d は推論の統計を持たない")
+            raise ValueError(
+                "a BatchNorm2d with track_running_stats=False has no inference statistics"
+            )
         weight = source.weight if source.affine else torch.ones_like(source.running_var)
         bias = source.bias if source.affine else torch.zeros_like(source.running_var)
         alpha = weight.detach() * torch.rsqrt(source.running_var.detach() + source.eps)
@@ -525,11 +576,11 @@ class ChannelAffine(nn.Module):
 
 
 class SpatialMean(nn.Module):
-    """`nn.AdaptiveAvgPool2d((1, 1))` の同値形（1 軸ずつの `sum` + `div`）。
+    """The equivalent of `nn.AdaptiveAvgPool2d((1, 1))` (`sum` one axis at a time + `div`).
 
-    IR の reduce は 1 軸専業で `keepdim` を持たないので、`sum(dim=3) → sum(dim=2)` の 2 段に
-    割ってから `[B, C, 1, 1]` へ戻す。縮約順序が torch の 2 軸同時縮約と違うぶん最下位ビット
-    が違う（実測 max 1.1e-08）。
+    The IR's reduce handles one axis only and has no `keepdim`, so it is split into the 2 stages
+    `sum(dim=3) → sum(dim=2)` and then reshaped back to `[B, C, 1, 1]`. The reduction order differs
+    from torch's simultaneous 2-axis reduction, so the lowest bits differ (measured max 1.1e-08).
     """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -539,12 +590,12 @@ class SpatialMean(nn.Module):
 
 
 def _lift_relative_position_index(model: nn.Module) -> int:
-    """`relative_position_index` をバッファから**素のテンソル属性**へ降ろす。
+    """Move `relative_position_index` from a buffer down to a **plain tensor attribute**.
 
-    IR の initializer は意味論 f32 のみで、i64 バッファはそのままでは載らない
-    （`convert._materialize_initializer` が fail loudly）。素の属性にすると torch.export は
-    lifted tensor constant として扱い、エクスポータの定数畳み込み経路が i32 へ境界正規化して
-    焼く（`convert._add_const` — ADR 0009 / 0010）。値は 1 要素も変えない。
+    The IR's initializers are semantic f32 only, so an i64 buffer cannot go in as it is
+    (`convert._materialize_initializer` fails loudly). As a plain attribute, torch.export treats it
+    as a lifted tensor constant, and the exporter's constant-folding path boundary-normalizes it to
+    i32 and bakes it (`convert._add_const` — ADR 0009 / 0010). Not a single element's value changes.
     """
     lifted = 0
     for module in model.modules():
@@ -558,7 +609,7 @@ def _lift_relative_position_index(model: nn.Module) -> int:
 
 
 def _replace_modules(model: nn.Module) -> dict[str, int]:
-    """`BatchNorm2d` → {@link ChannelAffine} / `AdaptiveAvgPool2d` → {@link SpatialMean}。"""
+    """`BatchNorm2d` → {@link ChannelAffine} / `AdaptiveAvgPool2d` → {@link SpatialMean}."""
     counts = {"batch_norm": 0, "adaptive_avg_pool": 0}
     for parent in list(model.modules()):
         for name, child in list(parent.named_children()):
@@ -568,39 +619,43 @@ def _replace_modules(model: nn.Module) -> dict[str, int]:
             elif isinstance(child, nn.AdaptiveAvgPool2d):
                 if tuple(child.output_size) != (1, 1):
                     raise NotImplementedError(
-                        f"output_size={child.output_size} の AdaptiveAvgPool2d は差し替え対象外"
+                        f"an AdaptiveAvgPool2d with output_size={child.output_size} is not replaced"
                     )
                 setattr(parent, name, SpatialMean())
                 counts["adaptive_avg_pool"] += 1
     return counts
 
 
-# ---- ⑨decoder 末尾（1×1 conv と bilinear upsample の順序交換） -------------
+# ---- ⑨ Decoder tail (swapping the order of the 1×1 conv and bilinear upsample) -
 
 
 def _resize(x: torch.Tensor, size: Any) -> torch.Tensor:
-    """上流の `F.interpolate(..., mode='bilinear', align_corners=True)` の綴り違い。"""
+    """Another spelling of upstream's `F.interpolate(..., mode='bilinear', align_corners=True)`."""
     return nn.functional.interpolate(x, size=size, mode="bilinear", align_corners=True)
 
 
 class TailConv(nn.Module):
-    """`Decoder.conv_out1`（1×1 conv 240→1）を「先に潰してから伸ばす」順序へ組み替えた同値形。
+    """The equivalent of `Decoder.conv_out1` (1×1 conv 240→1) rearranged into the order "reduce
+    first, then stretch".
 
-    上流の末尾は全解像度の中間を 2 本作る（`decoder_block1` の出力を伸ばした `[1,192,S,S]` と、
-    そこへ ipt 枝 48 チャネルを継いだ `[1,240,S,S]`）。S = 2048 では 3.2GB / 4.0GB になり、
-    どちらも NVIDIA の束縛上限 2GiB を超える。
+    Upstream's tail makes 2 full-resolution intermediates (`[1,192,S,S]`, the stretched output of
+    `decoder_block1`, and `[1,240,S,S]`, with the ipt branch's 48 channels concatenated onto it). At
+    S = 2048 they are 3.2GB / 4.0GB, both above NVIDIA's 2GiB binding limit.
 
-    1×1 conv はチャネル方向の線形結合、bilinear upsample は空間方向の線形結合で、掛かる軸が
-    互いに素なので**実数の上で可換**。さらに `cat` の後の 1×1 conv は 2 つの部分和に割れる
-    ので、重みを head 側（`[1,192,1,1]`）と ipt 側（`[1,48,1,1]`）へ分けて
+    A 1×1 conv is a linear combination along channels and a bilinear upsample a linear combination
+    in space; the axes they act on are disjoint, so they **commute over the reals**. Moreover the
+    1×1 conv after `cat` splits into 2 partial sums, so splitting the weights into the head side
+    (`[1,192,1,1]`) and the ipt side (`[1,48,1,1]`) lets it be written as
 
         p1_out = interpolate(conv1x1(head, W_head)) + conv1x1(ipt, W_ipt, b)
 
-    と書ける。全解像度で残る中間は `[1,1,S,S]`（4MB）と ipt 枝の内部だけになる。
+    The only intermediates left at full resolution are `[1,1,S,S]` (4MB) and the inside of the ipt
+    branch.
 
-    式は同値だが縮約の順序が変わる（192 チャネルの積和を伸ばす前に畳む）ので**ビット一致は
-    しない** — ⑦⑧ と同じ「丸めだけ違う」群（単体の実測 max 2.0e-05 = 出力の絶対値 ~55 に
-    対する相対 3.5e-07・`birefnet/tests/test_patch.py`）。
+    The formulas are equivalent but the reduction order changes (the multiply-add over 192 channels
+    is folded before stretching), so it is **not bit-identical** — the same "only the rounding
+    differs" group as ⑦⑧ (measured on its own max 2.0e-05 = relative 3.5e-07 against output
+    magnitudes of ~55, `birefnet/tests/test_patch.py`).
     """
 
     def __init__(self, source: nn.Module, head_channels: int) -> None:
@@ -608,8 +663,8 @@ class TailConv(nn.Module):
         conv = _tail_conv2d(source)
         if not 0 < head_channels < conv.in_channels:
             raise NotImplementedError(
-                f"head 側 {head_channels} チャネルが conv_out1 の入力 {conv.in_channels} と"
-                " 噛み合わない（重みをチャネルで割れない）"
+                f"the head side's {head_channels} channels do not fit conv_out1's input"
+                f" {conv.in_channels} (the weights cannot be split by channel)"
             )
         weight = conv.weight.detach()
         self.register_buffer("head_weight", weight[:, :head_channels].clone())
@@ -617,21 +672,22 @@ class TailConv(nn.Module):
         self.register_buffer("bias", conv.bias.detach().clone())
 
     def forward(self, head: torch.Tensor, size: Any, ipt: torch.Tensor) -> torch.Tensor:
-        """`head`（低解像度）を `size` へ伸ばした結果と `ipt`（全解像度）の寄与を足す。
+        """Add the result of stretching `head` (low resolution) to `size` and the contribution of
+        `ipt` (full resolution).
 
-        bias は片側にだけ足す（両方に足すと 2 回効く）。
+        The bias is added on one side only (adding it on both would apply it twice).
         """
         pooled = nn.functional.conv2d(head, self.head_weight)
         return _resize(pooled, size) + nn.functional.conv2d(ipt, self.ipt_weight, self.bias)
 
 
 def _tail_conv2d(source: nn.Module) -> nn.Conv2d:
-    """`conv_out1` から 1×1 conv を取り出す（前提を外れたら落とす — fallback 無し）。"""
+    """Take the 1×1 conv out of `conv_out1` (fails when a premise breaks — no fallback)."""
     if not isinstance(source, nn.Sequential) or len(source) != 1:
-        raise NotImplementedError(f"conv_out1 が長さ 1 の nn.Sequential でない（{source!r}）")
+        raise NotImplementedError(f"conv_out1 is not an nn.Sequential of length 1 ({source!r})")
     conv = source[0]
     if not isinstance(conv, nn.Conv2d):
-        raise NotImplementedError(f"conv_out1[0] が nn.Conv2d でない（{type(conv).__name__}）")
+        raise NotImplementedError(f"conv_out1[0] is not an nn.Conv2d ({type(conv).__name__})")
     if (
         tuple(conv.kernel_size) != (1, 1)
         or tuple(conv.stride) != (1, 1)
@@ -640,46 +696,53 @@ def _tail_conv2d(source: nn.Module) -> nn.Conv2d:
         or conv.groups != 1
     ):
         raise NotImplementedError(
-            "conv_out1[0] が 1×1・stride 1・pad 0・groups 1 の conv でない"
-            f"（kernel={conv.kernel_size} stride={conv.stride} padding={conv.padding}"
-            f" dilation={conv.dilation} groups={conv.groups}）— upsample と可換にならない"
+            "conv_out1[0] is not a 1×1, stride 1, pad 0, groups 1 conv"
+            f" (kernel={conv.kernel_size} stride={conv.stride} padding={conv.padding}"
+            f" dilation={conv.dilation} groups={conv.groups}) — it would not commute with the"
+            " upsample"
         )
     if conv.bias is None:
-        raise NotImplementedError("conv_out1[0] が bias を持たない — 差し替え版の前提と違う")
+        raise NotImplementedError(
+            "conv_out1[0] has no bias — not what the replacement version assumes"
+        )
     return conv
 
 
 def _tail_head_channels(decoder: nn.Module) -> int:
-    """`conv_out1` の入力のうち `decoder_block1` 由来の本数（残りが ipt 枝）。
+    """The number of `conv_out1`'s input channels that come from `decoder_block1` (the rest are the
+    ipt branch).
 
-    同じ数が 2 通りに導ける（`decoder_block1` の出力 conv / `conv_out1` の入力から ipt 枝の
-    出力を引く）ので両方を採って突き合わせる — 食い違ったら重みをチャネルで割る位置が
-    前提と違うので、黙って別の分け方をせずに落とす。
+    The same number can be derived 2 ways (`decoder_block1`'s output conv / `conv_out1`'s input
+    minus the ipt branch's output), so both are taken and compared — if they disagree, the position
+    to split the weights by channel is not the assumed one, so it fails instead of silently
+    splitting another way.
     """
     from_block = decoder.decoder_block1.conv_out.out_channels
     from_split = decoder.conv_out1[0].in_channels - decoder.ipt_blk1.conv_out.out_channels
     if from_block != from_split:
         raise NotImplementedError(
-            f"decoder_block1 の出力 {from_block} と conv_out1 の残り {from_split} が食い違う"
-            " — 末尾の重みをチャネルで割れない"
+            f"decoder_block1's output {from_block} and conv_out1's remainder {from_split} disagree"
+            " — the tail's weights cannot be split by channel"
         )
     return from_block
 
 
 def _decoder_forward(self: nn.Module, features: Sequence[torch.Tensor]) -> list[torch.Tensor]:
-    """`Decoder.forward` の eval 経路の同値実装（末尾だけ {@link TailConv} へ差し替え）。
+    """Equivalent implementation of the eval path of `Decoder.forward` (only the tail replaced with
+    {@link TailConv}).
 
-    上流 2145〜2224 行（x4 → p4 → p3 → p2 → _p1 の 4 段）は逐語で、`config.out_ref` の gdt
-    attention（`p4 = p4 * gdt_attn_4` など）は eval でも走るのでそのまま写す。書き換えたのは
-    末尾 2225〜2231 行だけ（理屈は {@link TailConv}）。
+    Upstream lines 2145–2224 (the 4 stages x4 → p4 → p3 → p2 → _p1) are verbatim, and the gdt
+    attention of `config.out_ref` (`p4 = p4 * gdt_attn_4` and so on) also runs in eval, so it is
+    copied as is. Only the tail, lines 2225–2231, is rewritten (the reasoning is in
+    {@link TailConv}).
 
-    学習経路（`ms_supervision` の中間予測 append / gdt の GT 側）は写していないので、
-    `self.training` が真ならその場で落とす。
+    The training path (the `ms_supervision` intermediate-prediction appends / the GT side of gdt) is
+    not copied, so it fails on the spot when `self.training` is true.
     """
     if self.training:
         raise RuntimeError(
-            "学習モードの Decoder.forward は差し替え版が持たない経路"
-            "（ms_supervision の中間予測と gdt の GT を写していない）"
+            "a training-mode Decoder.forward is a path the replacement version does not"
+            " have (the ms_supervision intermediate predictions and gdt's GT are not copied)"
         )
     x, x1, x2, x3, x4 = features
 
@@ -719,10 +782,11 @@ def _decoder_forward(self: nn.Module, features: Sequence[torch.Tensor]) -> list[
     if self.config.dec_ipt:
         patches_batch = _image2patches(x, patch_ref=_p1) if self.split else x
         _p1 = torch.cat((_p1, self.ipt_blk2(_resize(patches_batch, x1.shape[2:]))), 1)
-    # 以下が書き換えた末尾。上流は head を全解像度へ伸ばして `_p1` に代入し（2226 行）、その
-    # `[1, 192, S, S]` を次の `patch_ref` に渡す（2229 行）。`image2patches` が `patch_ref` から
-    # 読むのは空間サイズだけで、伸ばした後の形は `x` と同じ `(S, S)` — 格子は 1×1 になるので、
-    # 伸ばす前に `x` 自身を渡しても上流と同じ `patches_batch` になる。
+    # Below is the rewritten tail. Upstream stretches head to full resolution, assigns it to `_p1`
+    # (line 2226) and passes that `[1, 192, S, S]` as the next `patch_ref` (line 2229).
+    # `image2patches` reads only the spatial size from `patch_ref`, and after stretching the shape
+    # is `(S, S)`, the same as `x` — the grid becomes 1×1, so passing `x` itself before stretching
+    # gives the same `patches_batch` as upstream.
     head = self.decoder_block1(_p1)
     patches_batch = _image2patches(x, patch_ref=x) if self.split else x
     ipt = self.ipt_blk1(_resize(patches_batch, x.shape[2:]))
@@ -730,15 +794,16 @@ def _decoder_forward(self: nn.Module, features: Sequence[torch.Tensor]) -> list[
     return [p1_out]
 
 
-# ---- 適用と準備 ------------------------------------------------------------
+# ---- Applying and preparing -------------------------------------------------
 
 
 def apply_layout_patches(model: nn.Module) -> dict[str, int]:
-    """並べ替えだけの差し替え ①〜⑥ を当てる（クラス属性 5 本 + モジュールグローバル 1 本）。
+    """Apply the reorder-only replacements ①–⑥ (5 class attributes + 1 module global).
 
-    この段だけならパッチ前 eager と**ビット同一**で、`birefnet.export.py --verify` の 1 点目
-    がその主張を実測する。⑦⑧ と分けて公開しているのはそのため（一括で当てると、丸めが動く
-    書き換えと混ざってビット一致の主張が採れない）。
+    This stage alone is **bit-identical** to the pre-patch eager, and the first point of
+    `birefnet.export.py --verify` measures that claim. That is why it is exposed separately from
+    ⑦⑧ (applied together, it would mix with rewrites that move the rounding and the bit-identity
+    claim could not be taken).
     """
     global _APPLIED
     assert_supported(model)
@@ -753,16 +818,19 @@ def apply_layout_patches(model: nn.Module) -> dict[str, int]:
 
 
 def apply_module_patches(model: nn.Module) -> dict[str, int]:
-    """丸めが動く差し替え ⑦⑧ を当てる（`BatchNorm2d` / `AdaptiveAvgPool2d` のインスタンス走査）。"""
+    """Apply the replacements ⑦⑧ that move the rounding (an instance scan for `BatchNorm2d` /
+    `AdaptiveAvgPool2d`)."""
     return _replace_modules(model)
 
 
 def apply_tail_patches(model: nn.Module) -> dict[str, int]:
-    """decoder 末尾の代数書き換え ⑨ を当てる（`conv_out1` の差し替え + `Decoder.forward`）。
+    """Apply ⑨, the algebraic rewrite of the decoder tail (replacing `conv_out1` +
+    `Decoder.forward`).
 
-    `dec_ipt` / `dec_ipt_split` / `mul_scl_ipt == 'cat'` は {@link assert_supported} が保証
-    済みなので、ここで足すのは `conv_out1` の形の検査だけ（{@link _tail_conv2d}）。⑦⑧ と
-    別の入口にしているのは、`birefnet.export.py --verify` が段ごとに maxdiff を採るため。
+    `dec_ipt` / `dec_ipt_split` / `mul_scl_ipt == 'cat'` are already guaranteed by
+    {@link assert_supported}, so the only check added here is the shape of `conv_out1`
+    ({@link _tail_conv2d}). It is a separate entry point from ⑦⑧ so that
+    `birefnet.export.py --verify` can take the maxdiff per stage.
     """
     decoder = model.decoder
     decoder.conv_out1 = TailConv(decoder.conv_out1, _tail_head_channels(decoder))
@@ -772,9 +840,9 @@ def apply_tail_patches(model: nn.Module) -> dict[str, int]:
 
 
 def apply(model: nn.Module) -> dict[str, int]:
-    """差し替えを全て当てる（export 経路 — ①〜⑥ + ⑦⑧ + ⑨）。
+    """Apply all replacements (the export path — ①–⑥ + ⑦⑧ + ⑨).
 
-    戻り値は差し替えたモジュール数。
+    The return value is the number of replaced modules.
     """
     return {
         **apply_layout_patches(model),
@@ -784,14 +852,17 @@ def apply(model: nn.Module) -> dict[str, int]:
 
 
 def prepare(model: nn.Module, sample: torch.Tensor) -> Any:
-    """解像度依存の定数（shifted-window マスク）を焼き、パッチ後の参照出力を返す。
+    """Bake the resolution-dependent constants (the shifted-window mask) and return the patched
+    reference output.
 
-    MUST: export の直前に、**export と同じ形の入力**で通すこと。マスクは
-    `(padded_height, padded_width)` ごとの別バッファで、形が違えば焼かれていない。
+    MUST: run it right before export, **with an input of the same shape as the export**. The mask is
+    a separate buffer per `(padded_height, padded_width)`, and for another shape it is not baked.
     """
     global _MASK_BUILD_ENABLED
     if not _APPLIED:
-        raise RuntimeError("apply(model) が先 — 素の forward はマスクバッファを引かない")
+        raise RuntimeError(
+            "apply(model) comes first — the plain forward does not read the mask buffer"
+        )
     _MASK_BUILD_ENABLED = True
     try:
         with torch.no_grad():

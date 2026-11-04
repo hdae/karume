@@ -1,72 +1,82 @@
-"""Wan2.2 TI2V-5B の 2 ステップの通しの CPU 参照（ADR 0121 段 6 — T2V）。
+"""The two-step end-to-end CPU reference of Wan2.2 TI2V-5B (ADR 0121 step 6 — T2V).
 
-1280×704・17 フレーム（潜在 `[48,5,44,80]`・S = 4,400）を 2 ステップ（CFG あり・guidance 5.0・
-shift 5.0）回した潜在（VAE の前）と、それをタイル decode → unpatchify → クランプした RGB の
-フレームを、diffusers の `WanPipeline` を CPU f32 で素のまま回して作る。GPU の通し
-（`wan.Ti2vPipeline`）はこの値と帯で照合する。2.1 の `wan/few_step_ref.py` の 2.2 版で、2.1 の台本と
-`pipeline_ref.py` は変えない（`pipeline_ref.video_size` が 16 ch と縮尺 8 を書き込んでいる）—
-使うのは `pipeline_ref.pad_text_embeds` と `few_step_ref.denormalize_latents` だけ。
+It runs diffusers' `WanPipeline` unmodified on the CPU in f32 for two steps (with CFG, guidance 5.0,
+shift 5.0) at 1280×704 with 17 frames (latent `[48,5,44,80]`, S = 4,400) and produces the latents
+(before the VAE) and the RGB frames from tiled decode → unpatchify → clamp of them. The GPU end to
+end (`wan.Ti2vPipeline`) is compared with these values within a band. It is the 2.2 version of
+2.1's `wan/few_step_ref.py`; the 2.1 script and `pipeline_ref.py` do not change
+(`pipeline_ref.video_size` hard-codes 16 ch and scale 8) — only `pipeline_ref.pad_text_embeds` and
+`few_step_ref.denormalize_latents` are used.
 
-## 入力
+## Inputs
 
-- テキスト文脈: 埋め込み資産（`wan.text_embeds` — 2.1 と同じバイトの資産・ADR 0121 決定 9）。
-  プロンプトは資産のメタの `name` で引き、役割（positive / negative）を確かめる。negative は
-  `name` が `negative` の行。資産の sha256 をメタに書く（埋め込みを作り直したら参照も作り直す）。
-- 初期ノイズ: torch CPU の `randn`（seed 固定・`[1,48,5,44,80]`）を上流の `latents=` に注入する。
-- 重み: DiT は f32 の全量を読んでから per-channel i8 の表現可能値へ丸める（RTN の fake-quant —
-  `ti2v_export_dit.eager_full` と同じ手順なので、系列の i8 と同じ値になる）。VAE は
-  `export_vae.load_vae(round_f16=True)` の f16 表現可能値。
-- scheduler: pin の config を `flow_shift=5.0` を明示して読み、読んだ値を確かめる（ADR 0121
-  決定 8 — pin の値も 5.0 だが、参照の前提を config の既定に預けない）。
+- Text context: the embedding asset (`wan.text_embeds` — the same bytes as 2.1's asset, ADR 0121
+  decision 9). Prompts are looked up by `name` in the asset's metadata and their role (positive /
+  negative) is checked. The negative is the row whose `name` is `negative`. The asset's sha256 is
+  written into the metadata (when the embeddings are rebuilt, the reference is rebuilt too).
+- Initial noise: torch CPU `randn` (fixed seed, `[1,48,5,44,80]`) injected into the upstream's
+  `latents=`.
+- Weights: the DiT is loaded whole in f32 and then rounded to per-channel i8 representable values
+  (RTN fake-quant — the same procedure as `ti2v_export_dit.eager_full`, so the values equal the
+  series' i8). The VAE is the f16 representable values of `export_vae.load_vae(round_f16=True)`.
+- scheduler: the pinned config is loaded with `flow_shift=5.0` given explicitly, and the loaded
+  value is checked (ADR 0121 decision 8 — the pinned value is also 5.0, but the reference's premise
+  is not left to the config's default).
 
-## 組み方（単一プロセス・2 相）
+## How it is put together (single process, two phases)
 
-1. 第 1 相（DiT）: `WanPipeline(expand_timesteps=False)` で全ケースを 2 ステップ回す。時刻は
-   1 次元の timestep の経路（時刻の MLP は M = 1・`[B,6,C]` の変調）で、決定 4 の T2V の形と
-   同じ。DiT の出力は forward の hook で記録し、cond / uncond の振り分けは hook が受けたテキスト
-   文脈の値で決める（`few_step_ref` と同じ — 呼び順に依らない）。
-2. 観測（門ではない）: 決定用の 2 本は `expand_timesteps=True`（上流の既定・timestep が `[1,S]`
-   の M = S の経路）でも 2 ステップ回し、各ステップの潜在を `observed_m_s.latents.<i>` に書く。
-   hook は別のもの（timestep が `[1,S]` で値が 1 つであることを確かめる — `few_step_ref` の
-   `int()` は `[S]` を受けない）。
-3. 第 2 相（VAE）: DiT を手放し（参照が残っていたら fail loudly）、段 5 の 2.2 の経路
-   （`vae_tiling` — patchify 空間でブレンド → 上流の unpatchify → clamp）でフレームを作る。
+1. Phase 1 (DiT): run every case for two steps with `WanPipeline(expand_timesteps=False)`. Time
+   takes the one-dimensional timestep path (the time MLP with M = 1, modulation `[B,6,C]`), the same
+   as decision 4's T2V form. The DiT outputs are recorded with a forward hook, and the cond / uncond
+   split is decided by the value of the text context the hook received (the same as
+   `few_step_ref` — independent of the call order).
+2. Observation (not a gate): the two decision cases also run two steps with `expand_timesteps=True`
+   (the upstream default, the M = S path where the timestep is `[1,S]`), and the latents of each
+   step are written to `observed_m_s.latents.<i>`. The hook is a different one (it checks that the
+   timestep is `[1,S]` with a single value — `int()` of `few_step_ref` does not take `[S]`).
+3. Phase 2 (VAE): release the DiT (fail loudly if a reference remains), and make the frames through
+   step 5's 2.2 path (`vae_tiling` — blend in patchify space → upstream unpatchify → clamp).
 
-## 出力（i8 の DiT の系列の根の `pipeline_steps.<case>.safetensors`）
+## Outputs (`pipeline_steps.<case>.safetensors` at the root of the i8 DiT series)
 
-- テンソル: `latents_init`・`noise_cond.<i>`・`noise_uncond.<i>`・`latents.<i>`
-  （`[48,5,44,80]`）・`frames [3,17,704,1280]`（unpatchify とクランプの後）・`latents_mean` /
-  `latents_std`（f32・48 値）、決定用だけ `observed_m_s.latents.<i>`。
-- メタ: role / seed / prompt / negative / `text_embeds_sha256` / steps / `guidance_scale` /
-  `flow_shift`（`"5.0"`）/ timesteps / sigmas / weights / reference / source / タイル計画
-  （`vae_tiling.TilePlan.meta` + `patch_size`）/ `expand_timesteps`（`"false"`）/ `environment`
-  （torch の版・スレッド数・MKL / OpenMP の環境変数 — f32 の最終ビットは MKL の振る舞いに依る・
-  `dit_reference.numeric_environment`）、決定用だけ `observed_m_s`（観測の説明）。
+- Tensors: `latents_init`, `noise_cond.<i>`, `noise_uncond.<i>`, `latents.<i>` (`[48,5,44,80]`),
+  `frames [3,17,704,1280]` (after unpatchify and clamping), `latents_mean` / `latents_std` (f32, 48
+  values), and `observed_m_s.latents.<i>` for the decision cases only.
+- Metadata: role / seed / prompt / negative / `text_embeds_sha256` / steps / `guidance_scale` /
+  `flow_shift` (`"5.0"`) / timesteps / sigmas / weights / reference / source / the tile plan
+  (`vae_tiling.TilePlan.meta` + `patch_size`) / `expand_timesteps` (`"false"`) / `environment`
+  (torch version, thread count, MKL / OpenMP environment variables — the last bits of f32 depend on
+  MKL's behavior; `dit_reference.numeric_environment`), and `observed_m_s` (a description of the
+  observation) for the decision cases only.
 
-## ケース（決定用 2 本 + 受入れ 1 本 — 3 本とも同じ形）
+## Cases (2 decision + 1 acceptance — all three the same shape)
 
-MUST: `accept` の結果を見て決定用のケースも帯も変えない。受入れの形を決定用と変えない（形を
-変えると帯の外へ出る理由が混ざる）。
+MUST: do not change the decision cases or the band after seeing the result of `accept`. Do not give
+the acceptance case a different shape from the decision cases (a different shape mixes in other
+reasons for leaving the band).
 
-    uv run --group wan --inexact python -m wan.ti2v_few_step_ref                          # 全部
-    uv run --group wan --inexact python -m wan.ti2v_few_step_ref --case accept-ferret     # 1 本だけ
+    uv run --group wan --inexact python -m wan.ti2v_few_step_ref                          # all
+    uv run --group wan --inexact python -m wan.ti2v_few_step_ref --case accept-ferret     # one only
 
-## RAM と所要（推測）
+## RAM and run time (guesses)
 
-- RAM の山は第 1 相で約 24 GiB（{@link memory_estimate} の見込み 23.7 GiB = DiT の f32 の全量
-  18.63 + 基礎分 0.6 + 実測と式の差 0.35 + S = 4,400 の活性 1.5 + VAE の f32 2.63）。読み込みの前に
-  MemAvailable を見て、見込み + 余白 1 GiB（約 24.7 GiB）に足りなければ止まる。見込みが外れれば
-  門を通っても山で足りなくなりうる（門は保証ではない）。第 2 相は約 6 GiB。
-- 所要は 3 ケースで約 3 時間（DiT の forward 20 回 × 約 2 分 + タイル decode 28 枚 × 5 chunk
-  × 3 ケース）。
-- 第 1 相の結果はメモリにだけ持つ。DiT の手放しの検査で止まる・第 2 相の途中で落ちると、
-  第 1 相（約 40 分）を回し直す（書き終えたケースのファイルは残る）。
-- 空きが足りないときの戻り道は層逐次の書き手（`dit_reference.LayerwiseDit` — 山約 5 GiB）だが、
-  `WanPipeline.transformer` に差し替えられる部品ではない（独自の `forward` を持つ）ので、
-  diffusers の呼び方へ合わせる adapter を新しく書く必要がある（ここには無い）。
+- The RAM peak is about 24 GiB in phase 1 (the {@link memory_estimate} estimate of 23.7 GiB = the
+  DiT's whole f32 18.63 + base 0.6 + the gap between measurement and formula 0.35 + activations at
+  S = 4,400 1.5 + the VAE's f32 2.63). Before loading it checks MemAvailable and stops if it falls
+  short of the estimate + a 1 GiB margin (about 24.7 GiB). If the estimate is wrong, the peak can
+  still run short after passing the check (the check is not a guarantee). Phase 2 is about 6 GiB.
+- The run time is about 3 hours for the 3 cases (20 DiT forwards × about 2 minutes + tiled decode of
+  28 tiles × 5 chunks × 3 cases).
+- Phase 1's results are held only in memory. If the DiT release check stops it or it fails partway
+  through phase 2, phase 1 (about 40 minutes) is run again (the files of cases already written
+  remain).
+- The fallback when free memory is short is the layer-by-layer writer (`dit_reference.LayerwiseDit`
+  — peak about 5 GiB), but it is not a component that can be swapped into `WanPipeline.transformer`
+  (it has its own `forward`), so a new adapter that matches the diffusers call would have to be
+  written (there is none here).
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: diffusers is imported inside functions (the `wan` group is not part of the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -107,38 +117,41 @@ from wan.sources import SOURCES, count_parameters, local_snapshot
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanPipeline
 
-#: 上流のモデル（`wan.sources.SOURCES` のキー）。
+#: The upstream model (a key of `wan.sources.SOURCES`).
 MODEL = "ti2v-5b"
 
-#: 少ステップの通しのステップ数。
+#: The step count of the few-step end to end.
 STEPS = 2
 
-#: 潜在 `[C, F, H, W]`（1280×704・17 フレーム — 公式の対応寸法・利用者の裁定 2026-10-05）。
+#: The latent `[C, F, H, W]` (1280×704, 17 frames — the official supported size, the maintainer's
+#: ruling of 2026-10-05).
 LATENT_SHAPE = (48, 5, 44, 80)
 
-#: UniPC の shift（pin の scheduler の `flow_shift` = 公式の 720p の値 — 明示して読み、確かめる）。
+#: UniPC's shift (the pinned scheduler's `flow_shift` = the official 720p value — loaded explicitly
+#: and checked).
 FLOW_SHIFT = 5.0
 
-#: CFG の強さ（2.1 の参照と同じ値）。
+#: The CFG strength (the same value as the 2.1 reference).
 GUIDANCE_SCALE = pipeline_ref.GUIDANCE_SCALE
 
-#: 系列の根（i8 の DiT が参照席を特徴づけるので、i8 の DiT の系列に置く）。
+#: The series root (the i8 DiT characterizes the reference preset, so it goes in the i8 DiT
+#: series).
 SERIES = ti2v_export_dit.SERIES
 
-#: VAE の系列（タイルと patchify の倍率の正本）。
+#: The VAE series (the source of truth of the tile and the patchify factor).
 VAE_SERIES = export_vae.VAE_SERIES[MODEL]
 
-#: メタの `weights`（DiT は i8 の RTN の fake-quant・VAE は f16 表現可能値）。
+#: The metadata's `weights` (the DiT is i8 RTN fake-quant, the VAE is f16 representable values).
 WEIGHTS = "dit-i8-rtn-fake-quant+vae-f16-rounded"
 
-#: メタの `reference`（参照の素性）。
+#: The metadata's `reference` (the reference's origin).
 REFERENCE = (
     "diffusers WanPipeline(expand_timesteps=False) CPU f32 (umT5 embeddings injected), then the"
     " snapped-tile decode with upstream blend_v / blend_h in patchify space, upstream unpatchify"
     " and clamp"
 )
 
-#: 決定用のメタの `observed_m_s`（観測の素性 — 門ではない）。
+#: The decision cases' metadata `observed_m_s` (the observation's origin — not a gate).
 OBSERVED_M_S = (
     "latents after each step with expand_timesteps=True (timestep [1,S], the upstream default);"
     " observation only, not a gate"
@@ -147,73 +160,76 @@ OBSERVED_M_S = (
 
 @dataclass(frozen=True)
 class FixtureCase:
-    """少ステップの通し 1 本（初期ノイズの seed と正のプロンプト）。"""
+    """One few-step end-to-end run (the seed of the initial noise and the positive prompt)."""
 
     name: str
-    #: `band` = 帯を決めるケース・`accept` = 受け入れを判定するケース。
+    #: `band` = a case that decides the band, `accept` = a case that judges acceptance.
     role: str
     seed: int
-    #: 埋め込み資産の正のプロンプトの名前（資産のメタの `name`）。
+    #: The name of the positive prompt in the embedding asset (`name` in the asset's metadata).
     prompt: str
 
     @property
     def observes_m_s(self) -> bool:
-        """M = S の経路の観測も採るか（決定用だけ）。"""
+        """Whether the observation of the M = S path is also taken (decision cases only)."""
         return self.role == "band"
 
 
-#: 決定用 2 本（帯を決める）+ 受入れ 1 本。seed は 2.1 の参照（20261030〜33）とも、DiT の golden
-#: （20262000 台の前半）とも違う値。
-#: MUST: `accept` の結果を見て決定用のケースも帯も変えない。
+#: 2 decision cases (they decide the band) + 1 acceptance case. The seeds differ from both the 2.1
+#: reference (20261030–33) and the DiT golden (the low part of the 20262000s).
+#: MUST: do not change the decision cases or the band after seeing the result of `accept`.
 FIXTURE_CASES = (
     FixtureCase("band-boxing-cats", role="band", seed=20262101, prompt="boxing-cats"),
     FixtureCase("band-cat-dog-baking", role="band", seed=20262102, prompt="cat-dog-baking"),
     FixtureCase("accept-ferret", role="accept", seed=20262103, prompt="ferret"),
 )
 
-#: negative の行の名前（資産のメタの `name`）。
+#: The name of the negative row (`name` in the asset's metadata).
 NEGATIVE_NAME = "negative"
 
 
 @dataclass(frozen=True)
 class PromptNames:
-    """1 ケースが資産から引く正 / negative の名前。"""
+    """The positive / negative names one case looks up in the asset."""
 
     positive: str
     negative: str
 
 
 def prompt_names(asset_metadata: Mapping[str, Any], case: FixtureCase) -> PromptNames:
-    """資産のメタの `name` で正 / negative の行を引き、役割を確かめる（外れたら fail loudly）。"""
+    """Look up the positive / negative rows by `name` in the asset's metadata and check their roles
+    (fail loudly on a mismatch)."""
     entries = {entry["name"]: entry for entry in asset_metadata["prompts"]}
     for name, role in ((case.prompt, prompts.POSITIVE), (NEGATIVE_NAME, prompts.NEGATIVE)):
         entry = entries.get(name)
         if entry is None:
             raise ValueError(
-                f"{case.name}: 埋め込み資産に {name!r} の行が無い（{sorted(entries)}）"
+                f"{case.name}: the embedding asset has no row {name!r} ({sorted(entries)})"
             )
         if entry["role"] != role:
             raise ValueError(
-                f"{case.name}: 資産の {name!r} の役割が {entry['role']!r}（{role} のはず）"
+                f"{case.name}: the role of {name!r} in the asset is {entry['role']!r} (expected"
+                f" {role})"
             )
     return PromptNames(positive=case.prompt, negative=NEGATIVE_NAME)
 
 
 def video_size(pipeline: WanPipeline, latent_shape: Sequence[int]) -> tuple[int, int, int]:
-    """潜在 `[C, F, H, W]` → 上流の `(num_frames, height, width)`。
+    """Latent `[C, F, H, W]` → the upstream's `(num_frames, height, width)`.
 
-    縮尺は上流が vae の config から取った値（`vae_scale_factor_*` — 2.2 は 4 / 16）。上流の
-    `prepare_latents` は注入した潜在の形を見ないので、チャネルは DiT と VAE の両方と突き合わせる。
+    The scale factors are the values the upstream took from the vae's config
+    (`vae_scale_factor_*` — 4 / 16 for 2.2). The upstream `prepare_latents` does not look at the
+    shape of the injected latents, so the channels are checked against both the DiT and the VAE.
     """
     channels, frames, height, width = latent_shape
     if channels != pipeline.vae.config.z_dim:
         raise ValueError(
-            f"潜在のチャネル {channels} が VAE の z_dim {pipeline.vae.config.z_dim} と違う"
+            f"latent channels {channels} differ from the VAE's z_dim {pipeline.vae.config.z_dim}"
         )
     if pipeline.transformer is not None and channels != pipeline.transformer.config.in_channels:
         raise ValueError(
-            f"潜在のチャネル {channels} が DiT の in_channels"
-            f" {pipeline.transformer.config.in_channels} と違う"
+            f"latent channels {channels} differ from the DiT's in_channels"
+            f" {pipeline.transformer.config.in_channels}"
         )
     temporal = pipeline.vae_scale_factor_temporal
     spatial = pipeline.vae_scale_factor_spatial
@@ -221,15 +237,15 @@ def video_size(pipeline: WanPipeline, latent_shape: Sequence[int]) -> tuple[int,
 
 
 def token_count(transformer: nn.Module, latent_shape: Sequence[int]) -> int:
-    """DiT のトークン数 S = F/pt · H/ph · W/pw（M = S の経路の timestep の長さ）。"""
+    """The DiT's token count S = F/pt · H/ph · W/pw (the timestep length of the M = S path)."""
     patch_t, patch_h, patch_w = transformer.config.patch_size
     _, frames, height, width = latent_shape
     return (frames // patch_t) * (height // patch_h) * (width // patch_w)
 
 
 def load_quantized_transformer(model: str = MODEL) -> nn.Module:
-    """DiT を f32 の全量で読み、i8 の表現可能値へ丸める（`ti2v_export_dit.eager_full` と同じ
-    手順）。"""
+    """Load the DiT whole in f32 and round it to i8 representable values (the same procedure as
+    `ti2v_export_dit.eager_full`)."""
     upstream = export_dit.load_transformer(model)
     report = export_dit.fake_quant_i8(upstream, dit_patch.WanDitTokensTi2v(upstream))
     print(f"[fake-quant] transformer: {report.describe()}", flush=True)
@@ -237,17 +253,19 @@ def load_quantized_transformer(model: str = MODEL) -> nn.Module:
 
 
 def load_rounded_vae(model: str = MODEL) -> AutoencoderKLWan:
-    """VAE を f16 表現可能値で読み、系列の前提（patch_size・空間の圧縮）と照合する。"""
+    """Load the VAE as f16 representable values and check it against the series' premises
+    (patch_size, spatial compression)."""
     vae = export_vae.load_vae(model, round_f16=True)
     export_vae.assert_series_config(vae, VAE_SERIES)
     if vae.use_tiling:
-        # MUST: 上流のタイル化は走査形が違う（`vae_tiling` のモジュール doc）。
-        raise SystemExit("vae.use_tiling が True — 上流のタイル化は使わない")
+        # MUST: the upstream tiling scans differently (the module doc of `vae_tiling`).
+        raise SystemExit("vae.use_tiling is True — the upstream tiling is not used")
     return vae
 
 
 def load_scheduler(snapshot: Path) -> UniPCMultistepScheduler:
-    """pin の scheduler を `flow_shift` を明示して読み、読んだ値を確かめる（決定 8）。"""
+    """Load the pinned scheduler with `flow_shift` given explicitly and check the loaded value
+    (decision 8)."""
     from diffusers import UniPCMultistepScheduler
 
     scheduler = UniPCMultistepScheduler.from_pretrained(
@@ -255,18 +273,19 @@ def load_scheduler(snapshot: Path) -> UniPCMultistepScheduler:
     )
     if scheduler.config.flow_shift != FLOW_SHIFT:
         raise AssertionError(
-            f"scheduler の flow_shift {scheduler.config.flow_shift} が {FLOW_SHIFT} でない"
+            f"scheduler flow_shift {scheduler.config.flow_shift} is not {FLOW_SHIFT}"
         )
-    # `flow_shift` が σ に効くのは flow の σ で、動的 shift でないときだけ（動的 shift は
-    # `set_timesteps` で `mu` の式に替わり、`flow_shift` を読まない）。
+    # `flow_shift` acts on σ only with flow σ and without dynamic shift (with dynamic shift,
+    # `set_timesteps` switches to the `mu` formula and does not read `flow_shift`).
     if (
         scheduler.config.use_dynamic_shifting is not False
         or scheduler.config.use_flow_sigmas is not True
     ):
         raise AssertionError(
-            "scheduler の use_dynamic_shifting"
-            f" {scheduler.config.use_dynamic_shifting}・use_flow_sigmas"
-            f" {scheduler.config.use_flow_sigmas} — flow_shift の式が効く形（False / True）でない"
+            "scheduler use_dynamic_shifting"
+            f" {scheduler.config.use_dynamic_shifting}, use_flow_sigmas"
+            f" {scheduler.config.use_flow_sigmas} — not the form where the flow_shift formula"
+            " applies (False / True)"
         )
     return scheduler
 
@@ -278,7 +297,8 @@ def build_pipeline(
     *,
     expand_timesteps: bool,
 ) -> WanPipeline:
-    """umT5 無しの `WanPipeline` を組む（vae は外さない — 外すと空間の縮尺が既定の 8 に落ちる）。"""
+    """Build a `WanPipeline` without umT5 (the vae is kept — without it the spatial scale falls
+    back to the default 8)."""
     pipeline_ref.assert_no_mps()
     from diffusers import WanPipeline
 
@@ -294,20 +314,23 @@ def build_pipeline(
     return pipeline
 
 
-#: f32 の全量 + fake-quant の実測の山が式（f32 の全量 + 基礎分）を上回った分（ADR 0121 の追記
-#: 「f32 の全量での eager 同値」の eager-full — 山 19.57 GiB・式 18.63 + 0.6 = 19.23 GiB）。段 0 の
-#: 20.89 GiB は層逐次の f64（1.89 GiB）を含むので、ここの比較の相手ではない。
+#: How much the measured peak of whole f32 + fake-quant exceeded the formula (whole f32 + base)
+#: (eager-full of the ADR 0121 addendum "eager equivalence with the whole f32" — peak 19.57 GiB,
+#: formula 18.63 + 0.6 = 19.23 GiB). Step 0's 20.89 GiB includes the layer-by-layer f64 (1.89 GiB),
+#: so it is not the counterpart of this comparison.
 MEASURED_EXCESS_BYTES = int(0.35 * 2**30)
 
-#: S = 4,400 の 1 forward の活性の山の見込み（推測 — 実測なし）。M = S の観測が最大で、
-#: `[1,S,6,3072]` の変調（全体と各ブロックの和の 2 本 × 0.30 GiB）+ FFN の中間と GELU の出力
-#: （2 本 × `[1,S,14336]` 0.23 GiB）+ `[1,S,3072]` 6 本ほど（0.30 GiB）≈ 1.37 GiB を切り上げた値。
+#: The estimated activation peak of one forward at S = 4,400 (a guess — not measured). The M = S
+#: observation is the largest: the `[1,S,6,3072]` modulation (2 of them, the whole and the
+#: per-block sum, × 0.30 GiB) + the FFN intermediate and the GELU output (2 × `[1,S,14336]`
+#: 0.23 GiB) + about 6 `[1,S,3072]` (0.30 GiB) ≈ 1.37 GiB, rounded up.
 ACTIVATION_BYTES = int(1.5 * 2**30)
 
 
 def memory_estimate(model: str = MODEL) -> int:
-    """第 1 相の RAM の見込み（バイト）= DiT の f32 の全量 + 基礎分 + 実測と式の差 + 活性 +
-    VAE の f32（encoder を含む）。5B で約 23.7 GiB（`require_available` が余白 1 GiB を足す）。
+    """Phase 1's RAM estimate (bytes) = the DiT's whole f32 + base + the gap between measurement
+    and formula + activations + the VAE's f32 (encoder included). About 23.7 GiB for the 5B
+    (`require_available` adds a 1 GiB margin).
     """
     config = dit_reference.load_config(dit_probe.transformer_dir(model))
     vae_bytes = count_parameters(local_snapshot(model) / "vae") * 4
@@ -321,13 +344,13 @@ def memory_estimate(model: str = MODEL) -> int:
 
 
 def _peak_rss_gib() -> float:
-    """このプロセスの RSS の最大（GiB — Linux の `ru_maxrss` は KiB）。"""
+    """This process's peak RSS (GiB — Linux's `ru_maxrss` is in KiB)."""
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
 
 
 @dataclass
 class Denoised:
-    """第 1 相の 1 ケースぶん（第 2 相と書き出しへ渡す）。"""
+    """One case of phase 1 (handed to phase 2 and to the writer)."""
 
     case: FixtureCase
     names: PromptNames
@@ -335,7 +358,7 @@ class Denoised:
     noise_cond: list[torch.Tensor]
     noise_uncond: list[torch.Tensor]
     latents: list[torch.Tensor]
-    #: M = S の経路の各ステップの潜在（決定用だけ — 受入れは None）。
+    #: The latents of each step of the M = S path (decision cases only — None for acceptance).
     observed: list[torch.Tensor] | None
     timesteps: list[int]
     sigmas: list[float]
@@ -382,11 +405,12 @@ def denoise_case(
     embeds: Mapping[str, torch.Tensor],
     names: PromptNames,
 ) -> Denoised:
-    """M = 1 の経路（`expand_timesteps=False`）で 1 ケースを 2 ステップ回す。"""
+    """Run one case for two steps on the M = 1 path (`expand_timesteps=False`)."""
     generator = torch.Generator().manual_seed(case.seed)
     latents_init = torch.randn(1, *LATENT_SHAPE, generator=generator)
 
-    # 上流へ渡す文脈と同じ値（`_call` が同じ関数で埋める）— hook はこれと値で突き合わせる。
+    # The same values as the context passed to the upstream (`_call` fills them with the same
+    # function) — the hook compares against these by value.
     contexts = {
         "cond": pipeline_ref.pad_text_embeds(embeds[names.positive]),
         "uncond": pipeline_ref.pad_text_embeds(embeds[names.negative]),
@@ -394,19 +418,20 @@ def denoise_case(
     forwards: list[tuple[int, str, torch.Tensor]] = []
 
     def record_forward(_module: Any, _args: Any, kwargs: dict[str, Any], output: Any) -> None:
-        # 上流は `return_dict=False` でタプルを返す。timestep は `t.expand(1)`（1 次元の int64）。
+        # The upstream returns a tuple with `return_dict=False`. The timestep is `t.expand(1)`
+        # (one-dimensional int64).
         timestep = kwargs["timestep"]
         if timestep.dim() != 1:
             raise AssertionError(
-                f"{case.name}: timestep の形 {tuple(timestep.shape)} が 1 次元でない"
-                "（M = 1 の経路のはず）"
+                f"{case.name}: timestep shape {tuple(timestep.shape)} is not one-dimensional"
+                " (expected the M = 1 path)"
             )
         context = kwargs["encoder_hidden_states"]
         labels = [label for label, value in contexts.items() if torch.equal(context, value)]
         if len(labels) != 1:
             raise AssertionError(
-                f"{case.name}: DiT の文脈が cond / uncond の埋め込みの {len(labels)} 本と一致する"
-                "（1 本のはず）— 振り分けを決められない"
+                f"{case.name}: the DiT's context matches {len(labels)} of the cond / uncond"
+                " embeddings (expected 1) — the split cannot be decided"
             )
         forwards.append((int(timestep[0]), labels[0], output[0].detach().clone()))
 
@@ -414,8 +439,8 @@ def denoise_case(
     handle = pipeline.transformer.register_forward_hook(record_forward, with_kwargs=True)
     started = time.perf_counter()
     try:
-        # attention は `export_dit` の参照と同じく CPU の flash 経路に固定する（MATH へ黙って
-        # 落ちる経路を残さない — `few_step_ref` と同じ）。
+        # attention is pinned to the CPU flash path, as in `export_dit`'s reference (leaving no
+        # path that silently falls back to MATH — the same as `few_step_ref`).
         with torch.no_grad(), dit_patch.flash_attention_only():
             final = _call(pipeline, embeds, names, latents_init, _step_recorder(steps))
     finally:
@@ -425,22 +450,21 @@ def denoise_case(
     sigmas = [float(value) for value in pipeline.scheduler.sigmas]
     if len(forwards) != 2 * STEPS or len(steps) != STEPS:
         raise AssertionError(
-            f"forward {len(forwards)} 回・step {len(steps)} 回（CFG あり 2 ステップ）"
+            f"{len(forwards)} forwards, {len(steps)} steps (expected 2 steps with CFG)"
         )
     if [t for t, _, _ in forwards] != [t for t in timesteps for _ in range(2)]:
         raise AssertionError(
-            f"forward の timestep {[t for t, _, _ in forwards]} が {timesteps} と合わない"
+            f"the forwards' timesteps {[t for t, _, _ in forwards]} do not match {timesteps}"
         )
     outputs: dict[tuple[int, str], torch.Tensor] = {}
     for index, (_, label, output) in enumerate(forwards):
         outputs[(index // 2, label)] = output
     if sorted(outputs) != [(step, label) for step in range(STEPS) for label in sorted(contexts)]:
         raise AssertionError(
-            "ステップごとの cond / uncond が 1 本ずつでない"
-            f"（{[label for _, label, _ in forwards]}）"
+            f"not exactly one cond / uncond per step ({[label for _, label, _ in forwards]})"
         )
     if not torch.equal(final, steps[-1]):
-        raise AssertionError("最終の潜在が最後の step の記録と違う")
+        raise AssertionError("the final latents differ from the record of the last step")
     return Denoised(
         case=case,
         names=names,
@@ -458,11 +482,12 @@ def denoise_case(
 def observe_m_s(
     pipeline: WanPipeline, denoised: Denoised, embeds: Mapping[str, torch.Tensor]
 ) -> list[torch.Tensor]:
-    """M = S の経路（`expand_timesteps=True`）で同じ初期ノイズを 2 ステップ回し、各ステップの潜在を
-    返す（観測 — 門ではない）。
+    """Run the same initial noise for two steps on the M = S path (`expand_timesteps=True`) and
+    return the latents of each step (an observation — not a gate).
 
-    hook は M = 1 とは別のもの: 上流はここで timestep を `[1,S]`（全トークン同じ値）で渡すので、
-    形と値が 1 つであることを確かめ、M = 1 と同じ時刻の列かを見る。
+    The hook differs from the M = 1 one: here the upstream passes the timestep as `[1,S]` (the same
+    value for every token), so it checks the shape and that there is a single value, and whether
+    the sequence of times is the same as with M = 1.
     """
     case = denoised.case
     tokens = token_count(pipeline.transformer, LATENT_SHAPE)
@@ -472,13 +497,13 @@ def observe_m_s(
         timestep = kwargs["timestep"]
         if tuple(timestep.shape) != (1, tokens):
             raise AssertionError(
-                f"{case.name}: M = S の経路の timestep の形 {tuple(timestep.shape)} が"
-                f" (1, {tokens}) でない"
+                f"{case.name}: the timestep shape of the M = S path {tuple(timestep.shape)} is"
+                f" not (1, {tokens})"
             )
         values = timestep.unique()
         if values.numel() != 1:
             raise AssertionError(
-                f"{case.name}: M = S の timestep が {values.numel()} 値（T2V は 1 値）"
+                f"{case.name}: the M = S timestep has {values.numel()} values (T2V has 1)"
             )
         seen.append(int(values[0]))
 
@@ -495,11 +520,13 @@ def observe_m_s(
     denoised.seconds["observe_m_s"] = round(time.perf_counter() - started, 1)
     if seen != [t for t in denoised.timesteps for _ in range(2)] or len(steps) != STEPS:
         raise AssertionError(
-            f"{case.name}: M = S の forward の timestep {seen}・step {len(steps)} 回が"
-            f" M = 1 の {denoised.timesteps} と合わない"
+            f"{case.name}: the M = S forwards' timesteps {seen} and {len(steps)} steps do not"
+            f" match M = 1's {denoised.timesteps}"
         )
     if not torch.equal(final, steps[-1]):
-        raise AssertionError(f"{case.name}: M = S の最終の潜在が最後の step の記録と違う")
+        raise AssertionError(
+            f"{case.name}: the final M = S latents differ from the record of the last step"
+        )
     return [step[0] for step in steps]
 
 
@@ -511,9 +538,11 @@ def denoise_phase(
     embeds: Mapping[str, torch.Tensor],
     names: Mapping[str, PromptNames],
 ) -> tuple[list[Denoised], weakref.ref[nn.Module]]:
-    """第 1 相: DiT を読み、全ケースを回す。DiT への参照はこの関数の中だけに置く（戻ると手放す）。
+    """Phase 1: load the DiT and run every case. The reference to the DiT lives only inside this
+    function (it is released on return).
 
-    戻りの弱参照は、第 2 相の前に DiT が回収されたことを確かめるため（{@link assert_released}）。
+    The returned weak reference is for checking that the DiT was collected before phase 2
+    ({@link assert_released}).
     """
     transformer = load_transformer()
     released = weakref.ref(transformer)
@@ -530,19 +559,20 @@ def denoise_phase(
 
 
 def assert_released(released: weakref.ref[nn.Module]) -> None:
-    """DiT が回収されたことを確かめる（第 2 相の RAM の見込みは DiT が居ない前提）。"""
+    """Check that the DiT was collected (phase 2's RAM estimate assumes the DiT is gone)."""
     gc.collect()
     if released() is not None:
-        raise AssertionError("DiT への参照が残っている — 第 2 相（VAE）の前に手放す")
+        raise AssertionError("a reference to the DiT remains — release it before phase 2 (VAE)")
 
 
 def decode_frames(
     pipeline: WanPipeline, latents: torch.Tensor, plan: vae_tiling.TilePlan, patch_size: int
 ) -> torch.Tensor:
-    """最終の潜在 `[1, z, F, H, W]` → RGB `[3, F', H·16, W·16]`（unpatchify とクランプの後）。
+    """Final latents `[1, z, F, H, W]` → RGB `[3, F', H·16, W·16]` (after unpatchify and clamping).
 
-    上流と同じ逆正規化 → 段 5 のタイル decode（patchify 空間・クランプ前）→ 上流の unpatchify →
-    `clamp(-1, 1)`（上流 `_decode` の末尾と同じ順）。
+    The same denormalization as the upstream → step 5's tiled decode (patchify space, before
+    clamping) → the upstream unpatchify → `clamp(-1, 1)` (the same order as the end of the upstream
+    `_decode`).
     """
     with torch.no_grad():
         patchified = vae_tiling.tiled_decode_unclamped(
@@ -560,7 +590,7 @@ def _difference(got: torch.Tensor, want: torch.Tensor) -> dict[str, float]:
 def case_tensors(
     denoised: Denoised, frames: torch.Tensor, vae: AutoencoderKLWan
 ) -> dict[str, torch.Tensor]:
-    """書き出すテンソル（全て f32・非有限があれば fail loudly）。"""
+    """The tensors to write (all f32; fail loudly on any non-finite value)."""
     tensors: dict[str, torch.Tensor] = {"latents_init": denoised.latents_init}
     for index in range(STEPS):
         tensors[f"noise_cond.{index}"] = denoised.noise_cond[index]
@@ -574,9 +604,9 @@ def case_tensors(
     tensors["latents_std"] = torch.tensor(vae.config.latents_std, dtype=torch.float32)
     for name, tensor in tensors.items():
         if tensor.dtype != torch.float32:
-            raise AssertionError(f"{denoised.case.name}: {name} が f32 でない（{tensor.dtype}）")
+            raise AssertionError(f"{denoised.case.name}: {name} is not f32 ({tensor.dtype})")
         if not bool(tensor.isfinite().all()):
-            raise AssertionError(f"{denoised.case.name}: {name} に非有限値がある")
+            raise AssertionError(f"{denoised.case.name}: {name} has non-finite values")
     return tensors
 
 
@@ -587,7 +617,7 @@ def case_metadata(
     flow_shift: float,
     common: Mapping[str, str],
 ) -> dict[str, str]:
-    """書き出すメタ（safetensors のメタは文字列だけ）。"""
+    """The metadata to write (safetensors metadata is strings only)."""
     case = denoised.case
     metadata = {
         "role": case.role,
@@ -612,7 +642,8 @@ def case_metadata(
 
 
 def common_metadata(embeds_sha256: str, model: str = MODEL) -> dict[str, str]:
-    """全ケースに共通のメタ（埋め込みの sha256・出所の pin・f32 の最終ビットが依る実行環境）。"""
+    """The metadata common to every case (the embeddings' sha256, the source pin, the execution
+    environment the last bits of f32 depend on)."""
     source = SOURCES[model]
     return {
         "text_embeds_sha256": embeds_sha256,
@@ -633,14 +664,16 @@ def generate(
     out_root: Path,
     common: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    """2 相で全ケースを回して書く（staging → 置換）。要約を返す。
+    """Run every case in two phases and write them (staging → replace). Returns the summaries.
 
-    MUST: 第 2 相は DiT を手放してから（{@link assert_released}）— 第 1 相の山に VAE の decode を
-    重ねない。
+    MUST: phase 2 starts only after the DiT is released ({@link assert_released}) — the VAE decode
+    is not stacked on phase 1's peak.
     """
     patch_size = vae.config.patch_size
     if patch_size is None:
-        raise ValueError("VAE の patch_size が None — Wan2.2（patchify する世代）の VAE を渡す")
+        raise ValueError(
+            "the VAE's patch_size is None — pass a Wan2.2 VAE (the patchifying generation)"
+        )
     denoised_cases, released = denoise_phase(load_transformer, vae, scheduler, cases, embeds, names)
     assert_released(released)
     decoder = build_pipeline(None, vae, scheduler, expand_timesteps=False)
@@ -661,7 +694,7 @@ def generate(
         expected = (3, *video_size(decoder, final.shape[1:]))
         if tuple(frames.shape) != expected:
             raise AssertionError(
-                f"{case.name}: frames の形 {tuple(frames.shape)} が {expected} でない"
+                f"{case.name}: frames shape {tuple(frames.shape)} is not {expected}"
             )
         tensors = case_tensors(denoised, frames, vae)
         metadata = case_metadata(denoised, plan, patch_size, flow_shift, common)
@@ -702,28 +735,30 @@ def generate(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
-        "--out", type=Path, default=SERIES, help="系列の根（既定は i8 の DiT の系列）"
+        "--out", type=Path, default=SERIES, help="the series root (default: the i8 DiT series)"
     )
     parser.add_argument(
         "--embeds",
         type=Path,
         default=SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME,
-        help="テキスト埋め込み資産（wan.text_embeds の出力）",
+        help="the text embedding asset (the output of wan.text_embeds)",
     )
     parser.add_argument(
         "--case",
         action="append",
         choices=[case.name for case in FIXTURE_CASES],
         default=None,
-        help="書くケース（既定は全部）",
+        help="the cases to write (default: all)",
     )
     args = parser.parse_args(argv)
     if not args.embeds.is_file():
-        parser.error(f"{args.embeds} が無い — 先に `python -m wan.text_embeds` で作る")
+        parser.error(
+            f"{args.embeds} does not exist — build it first with `python -m wan.text_embeds`"
+        )
 
     embeds, asset_metadata = text_embeds.read_asset(args.embeds)
     selected = [case for case in FIXTURE_CASES if args.case is None or case.name in args.case]
-    # 重い読み込みの前に、資産の行と役割を全ケースぶん確かめる。
+    # Before the heavy loading, check the asset's rows and roles for every case.
     names = {case.name: prompt_names(asset_metadata, case) for case in selected}
     embeds_sha256 = hashlib.sha256(args.embeds.read_bytes()).hexdigest()
 

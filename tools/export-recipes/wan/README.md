@@ -737,8 +737,8 @@ the one the Wan manifest declares (the `descriptor.graph.sha256` of `text_encode
 `karume.json` files). The writer traces a meta model built from `config.json`, so an encoder whose
 configuration matches `google/umt5-xxl` gets the same graph; a mismatch (for example a different
 exporter, torch or transformers version) fails at construction before any weight is downloaded,
-with `グラフ記述が manifest の宣言と違う` and both hashes. Matching graphs do not prove a matching
-tokenizer or relative-position buckets — see `docs/limitations.md`.
+with `the graph descriptor does not match the manifest's declaration` and both hashes. Matching
+graphs do not prove a matching tokenizer or relative-position buckets — see `docs/limitations.md`.
 
 The mirror stays local. Before any upload, `tools/release/hf-upload.zsh upload <repo-dir-name>` runs
 the pre-publish gate on `models/<repo-dir-name>`; the same check can be run by hand on any

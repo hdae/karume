@@ -1,28 +1,34 @@
-"""SBV2（Style-Bert-VITS2 JP-Extra）を torch.export 可能にするパッチ層（ADR 0013）。
+"""The patch layer that makes SBV2 (Style-Bert-VITS2 JP-Extra) exportable with torch.export (ADR
+0013).
 
-対象は **front**（enc_p + dp + sdp reverse の融合 1 グラフ）と、後半チェーンの
-**flow**（TransformerCouplingBlock の reverse）/ **voice**（flow + dec の融合）。パッチは
-import 済みクラスの属性差し替え（monkeypatch）とラッパで行い、`style_bert_vits2` パッケージ
-本体には触れない（**dec** はパッチ不要 — `remove_weight_norm` だけが前処理）。
+The targets are the **front** (one graph fusing enc_p + dp + sdp reverse) and, in the second half
+of the chain, the **flow** (the reverse of TransformerCouplingBlock) / the **voice** (flow + dec
+fused). The patches replace attributes of imported classes (monkeypatch) and add wrappers; the
+`style_bert_vits2` package itself is not touched (**dec** needs no patch — `remove_weight_norm` is
+the only preprocessing).
 
-パッチは 3 種 + ラッパ 2 本:
+3 patches + 2 wrappers:
 
-1. **spline の分岐フリー・非破壊化** — `transforms.py` の boolean-mask indexing / テンソル値
-   依存の Python 分岐 / in-place を除いた同値実装。原形は「区間内の要素だけを 1 次元へ抽出」
-   するため要素数がデータ依存になり、`torch.export` が GuardOnDataDependentSymNode で落ちる。
-2. **相対位置注意の gather 化** — rel⇄abs シフトが作る `2P−1` / `2P²` / `P(2P−1)` の二次
-   shape 式（front 側で 144 箇所）を、`P` 非依存の添字表 + 最終次元 gather に置換する。
-   二次式は次元言語（`coeff·sym+offset`）のアフィン拡張でも救えないので、**動的 P を成立
-   させる構造的前提**であって最適化ではない。
-3. **FFN の明示 pad → conv の padding 引数** — `constant_pad_nd` を畳んで消す（奇数 kernel
-   かつ非 causal のときだけ厳密に等価 — 下の `_patched_ffn_forward` を参照）。
+1. **Branch-free, non-destructive spline** — an equivalent implementation of `transforms.py`
+   without boolean-mask indexing / Python branches on tensor values / in-place ops. The original
+   "extracts only the elements inside the interval into 1 dimension", so the element count depends
+   on the data and `torch.export` fails with GuardOnDataDependentSymNode.
+2. **Relative-position attention as a gather** — replaces the quadratic shape expressions
+   `2P−1` / `2P²` / `P(2P−1)` created by the rel⇄abs shift (144 places on the front side) with a
+   P-independent index table + a gather on the last dimension. A quadratic expression cannot be
+   rescued even by an affine extension of the dimension language (`coeff·sym+offset`), so this is
+   **a structural precondition for a dynamic P**, not an optimization.
+3. **FFN's explicit pad → conv's padding argument** — folds `constant_pad_nd` away (exactly
+   equivalent only for an odd kernel that is not causal — see `_patched_ffn_forward` below).
 
-MUST: パッチ後のモジュールはパッチ前と **eager 同値**であること。同値でない変更をここに
-置いてはならない（`sbv2.export --verify` が実重み・複数 P で実測する）。
+MUST: the patched modules are **eager-equivalent** to the unpatched ones. A change that is not
+equivalent MUST NOT be placed here (`sbv2.export --verify` measures it with the real weights and
+several P).
 
-MUST: パッチはクラス属性の**プロセス全域**差し替えなので、「パッチ前の参照」を採れるのは
-1 プロセスにつき 1 回だけ。適用済みかどうかは {@link patches_applied} が答え、順序違反は
-呼び出し側（`sbv2.export`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
+MUST: the patches replace class attributes **process-wide**, so "the unpatched reference" can be
+taken only once per process. {@link patches_applied} answers whether they are applied, and the
+caller (`sbv2.export`) rejects an order violation by failing loudly (blocking vacuous passes =
+false PASSes).
 """
 
 from __future__ import annotations
@@ -34,35 +40,38 @@ import torch
 from torch import nn
 from torch.nn import functional
 
-#: spline の既定値（`style_bert_vits2.models.transforms` と同じ値）。差し替え先の関数
-#: シグネチャに既定値として現れるので、原実装と食い違うと呼び出し側の省略時に別の spline
-#: になる（沈黙誤値）。
+#: The spline defaults (the same values as `style_bert_vits2.models.transforms`). They appear as
+#: defaults in the signature of the replacement function, so if they disagree with the original
+#: implementation a call that omits them gets a different spline (a silently wrong value).
 DEFAULT_MIN_BIN_WIDTH = 1e-3
 DEFAULT_MIN_BIN_HEIGHT = 1e-3
 DEFAULT_MIN_DERIVATIVE = 1e-3
 
-#: パッチ適用済みフラグ。プロセス全域差し替えの副作用を可視化するためだけに持つ
-#: （パッチ後に「パッチ前の参照」を採ると同値検証が恒真化する — ADR 0013）。
+#: The patches-applied flag. Held only to make the side effect of the process-wide replacement
+#: visible (taking "the unpatched reference" after patching makes the equivalence check vacuous —
+#: ADR 0013).
 _APPLIED = False
 
 
 def patches_applied() -> bool:
-    """このプロセスで既にパッチを当てたか。
+    """Whether this process has already applied the patches.
 
-    参照値を採る側（同値検証）が「まだ当てていない」ことを assert するための門。
+    The gate the reference-taking side (the equivalence check) uses to assert "not applied yet".
     """
     return _APPLIED
 
 
-# ---- ① spline の分岐フリー・非破壊化 --------------------------------------
+# ---- ① Branch-free, non-destructive spline --------------------------------------
 
 
 def _constant_column(t: torch.Tensor, value: float) -> torch.Tensor:
-    """`t[..., :1]` と同形の定数列を **既存の語彙だけで**作る。
+    """Builds a constant column of the same shape as `t[..., :1]` **using only the existing
+    vocabulary**.
 
-    `full_like` / `zeros_like` は IR の語彙に無い（定数生成 op を足すと、実行時 shape に
-    依存する定数という新しい概念が IR に入る）。`x * 0.0 + value` は t が有限値である限り
-    厳密に `value` になる — spline へ来る値は clamp 済みで有限なので前提は満たされる。
+    `full_like` / `zeros_like` are not in the IR vocabulary (adding a constant-generating op would
+    bring a new concept into the IR: a constant that depends on the runtime shape). `x * 0.0 +
+    value` is exactly `value` as long as t is finite — the values reaching the spline are clamped
+    and finite, so the precondition holds.
     """
     return t[..., :1] * 0.0 + value
 
@@ -70,13 +79,14 @@ def _constant_column(t: torch.Tensor, value: float) -> torch.Tensor:
 def searchsorted_free(
     bin_locations: torch.Tensor, inputs: torch.Tensor, eps: float = 1e-6
 ) -> torch.Tensor:
-    """原実装 `transforms.searchsorted` の in-place 破壊を除いた同値版。
+    """The equivalent of the original `transforms.searchsorted` without its in-place mutation.
 
-    原実装は `bin_locations[..., -1] += eps` で**引数を破壊**してから比較する。非破壊化
-    （末尾 1 列だけ eps を足した列を cat で組み直す）が同値なのは、破壊された最終要素が
-    後段の gather から**参照されないため** — 返り値は `sum(...) - 1` で高々 `num_bins - 1`
-    にしかならず、gather の添字は常に最終要素の 1 つ手前までしか届かない。この理由を
-    運ばないと「同値でない変更」に見える。
+    The original **mutates its argument** with `bin_locations[..., -1] += eps` before comparing.
+    The non-destructive form (rebuilding with cat a column with eps added to the last entry only) is
+    equivalent because the mutated last element is **never referenced** by the later gather — the
+    return value is `sum(...) - 1`, at most `num_bins - 1`, so the gather's index never reaches
+    beyond the element just before the last one. Without carrying this reason it looks like "a
+    change that is not equivalent".
     """
     last = bin_locations[..., -1:] + eps
     shifted = torch.cat([bin_locations[..., :-1], last], dim=-1)
@@ -97,31 +107,36 @@ def rational_quadratic_spline_free(
     min_bin_height: float = DEFAULT_MIN_BIN_HEIGHT,
     min_derivative: float = DEFAULT_MIN_DERIVATIVE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """`transforms.rational_quadratic_spline` の分岐フリー・非破壊版（数値同値）。
+    """The branch-free, non-destructive version of `transforms.rational_quadratic_spline`
+    (numerically equivalent).
 
-    原実装からの差分は 3 点だけ:
+    Only 3 differences from the original:
 
-    - **定義域検査の削除** — `if torch.min(inputs) < left ...: raise` はテンソルの値に
-      依存した Python 分岐で、export 時に data-dependent guard になる。呼び出し元
-      （`unconstrained_rqs_free`）が定義域へ clamp 済みの値しか渡さないので検査は恒真。
-      **安全弁を外した以上、この関数を clamp 抜きで呼ばせてはならない**（差し替え関数
-      `piecewise_free` の `tails is None` 分岐が RuntimeError なのはこのため）。
-    - **累積境界の組み立て** — `pad` してから `cumwidths[..., 0] = left` / `[..., -1] = right`
-      と slice 代入する形を、cat による構築に置換（in-place の除去）。値は同一。
-    - **searchsorted の非破壊化**（{@link searchsorted_free}）。
+    - **The domain check is removed** — `if torch.min(inputs) < left ...: raise` is a Python
+      branch on tensor values and becomes a data-dependent guard at export. The caller
+      (`unconstrained_rqs_free`) only passes values already clamped to the domain, so the check is
+      always true. **Now that the safety valve is gone, this function MUST NOT be called without
+      the clamp** (this is why the `tails is None` branch of the replacement `piecewise_free` is a
+      RuntimeError).
+    - **Building the cumulative bounds** — the form that `pad`s and then slice-assigns
+      `cumwidths[..., 0] = left` / `[..., -1] = right` is replaced by a construction with cat
+      (removing the in-place op). The values are identical.
+    - **The non-destructive searchsorted** ({@link searchsorted_free}).
     """
     num_bins = unnormalized_widths.shape[-1]
-    # 形状だけで決まる前提（テンソルの値に依らない）ので Python 分岐のまま残せる。
+    # A precondition decided by shapes alone (independent of tensor values), so it can stay a
+    # Python branch.
     if min_bin_width * num_bins > 1.0:
-        raise ValueError(f"min_bin_width {min_bin_width} が bin 数 {num_bins} に対して大きすぎる")
+        raise ValueError(f"min_bin_width {min_bin_width} is too large for {num_bins} bins")
     if min_bin_height * num_bins > 1.0:
-        raise ValueError(f"min_bin_height {min_bin_height} が bin 数 {num_bins} に対して大きすぎる")
+        raise ValueError(f"min_bin_height {min_bin_height} is too large for {num_bins} bins")
 
     widths = functional.softmax(unnormalized_widths, dim=-1)
     widths = min_bin_width + (1 - min_bin_width * num_bins) * widths
     scaled_widths = (right - left) * torch.cumsum(widths, dim=-1) + left
-    # 原実装の「先頭に 0 を pad → スケール → 両端を left / right で上書き」と同じ列。
-    # 末尾の 1 要素は捨てる（累積和の最終値は上書きされる側）。
+    # The same column as the original's "pad a 0 at the start → scale → overwrite both ends with
+    # left / right". The last element is dropped (the final value of the cumulative sum is the one
+    # that gets overwritten).
     cumwidths = torch.cat(
         [
             _constant_column(scaled_widths, left),
@@ -150,9 +165,10 @@ def rational_quadratic_spline_free(
     locations = cumheights if inverse else cumwidths
     bin_idx = searchsorted_free(locations, inputs)[..., None]
 
-    # 原実装の `gather(...)[..., 0]` は `aten.select.int`（軸を 1 本落とす添字アクセス）に
-    # なる。IR には select が無く、長さ 1 の軸を落とすこの形は要素順を変えない純粋な
-    # メタ操作なので `squeeze(-1)`（= reshape）で書く。値もレイアウトも同一。
+    # The original `gather(...)[..., 0]` becomes `aten.select.int` (an indexing access that drops
+    # an axis). The IR has no select, and this form, which drops an axis of length 1, is a pure
+    # meta operation that does not change the element order, so it is written as `squeeze(-1)`
+    # (= reshape). Values and layout are identical.
     input_cumwidths = cumwidths.gather(-1, bin_idx).squeeze(-1)
     input_bin_widths = widths.gather(-1, bin_idx).squeeze(-1)
     input_cumheights = cumheights.gather(-1, bin_idx).squeeze(-1)
@@ -170,8 +186,9 @@ def rational_quadratic_spline_free(
             input_derivatives + input_derivatives_plus_one - 2 * input_delta
         )
         c = -input_delta * (inputs - input_cumheights)
-        # 原実装の `assert (discriminant >= 0).all()` もテンソル値依存の Python 分岐なので
-        # 落とす（定義域内では数学的に非負 — 単調な rational-quadratic の逆解）。
+        # The original's `assert (discriminant >= 0).all()` is also a Python branch on tensor
+        # values, so it is dropped (inside the domain it is mathematically non-negative — the
+        # inverse of a monotonic rational-quadratic).
         discriminant = b.pow(2) - 4 * a * c
         root = (2 * c) / (-b - torch.sqrt(discriminant))
         outputs = root * input_bin_widths + input_cumwidths
@@ -218,20 +235,23 @@ def unconstrained_rqs_free(
     min_bin_height: float = DEFAULT_MIN_BIN_HEIGHT,
     min_derivative: float = DEFAULT_MIN_DERIVATIVE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """boolean-mask indexing を clamp + where に置換した同値版。
+    """The equivalent version with boolean-mask indexing replaced by clamp + where.
 
-    原実装は `inputs[inside_interval_mask]` で区間内の要素だけを 1 次元へ抽出するため、
-    **要素数がテンソルの値で決まる**（export できない）。全要素を定義域へ clamp して
-    spline に通し、区間外は where で入力そのものへ戻す — 区間内の要素は clamp が恒等
-    （既に定義域内）なので選ばれる値は原実装と厳密に一致し、区間外の要素は spline の
-    結果が捨てられるので clamp が何を返そうと影響しない。
+    The original extracts only the elements inside the interval into 1 dimension with
+    `inputs[inside_interval_mask]`, so **the element count is decided by tensor values** (not
+    exportable). Every element is clamped to the domain and passed through the spline, and the
+    elements outside the interval are put back to the input itself with where — for elements inside
+    the interval the clamp is the identity (they are already in the domain), so the chosen values
+    match the original exactly, and for elements outside the interval the spline's result is
+    discarded, so whatever the clamp returns has no effect.
     """
     if tails != "linear":
         raise RuntimeError(f"{tails} tails are not implemented.")
 
     inside = (inputs >= -tail_bound) & (inputs <= tail_bound)
 
-    # 原実装の「両端に pad → 端の 2 要素を constant で上書き」と同じ列（in-place の除去）。
+    # The same column as the original's "pad both ends → overwrite the 2 end elements with
+    # constant" (removing the in-place op).
     constant = float(np.log(np.exp(1 - min_derivative) - 1))
     tail_column = _constant_column(unnormalized_derivatives, constant)
     padded_derivatives = torch.cat([tail_column, unnormalized_derivatives, tail_column], dim=-1)
@@ -251,19 +271,21 @@ def unconstrained_rqs_free(
         min_derivative=min_derivative,
     )
     outputs = torch.where(inside, spline_outputs, inputs)
-    # 区間外の logabsdet は 0（原実装の `torch.zeros_like` 初期値そのもの）。定数 0 は
-    # `x * 0.0` で作る — zeros_like を IR に持ち込まないための定型手筋。
+    # The logabsdet outside the interval is 0 (exactly the original's `torch.zeros_like` initial
+    # value). The constant 0 is built as `x * 0.0` — the standard technique to keep zeros_like out
+    # of the IR.
     logabsdet = torch.where(inside, spline_logabsdet, spline_logabsdet * 0.0)
     return outputs, logabsdet
 
 
 def apply_spline_patch() -> None:
-    """spline 実装を分岐フリー版へ差し替える。
+    """Replaces the spline implementation with the branch-free version.
 
-    MUST: 差し替え先は **`style_bert_vits2.models.modules`** — `modules.py` は
-    `from ...transforms import piecewise_rational_quadratic_transform` で関数オブジェクトを
-    自分の名前空間へ束縛済みなので、`transforms` 側を差し替えても呼び出しには効かない
-    （差し替えたつもりで原実装が走り、export だけが落ちる形になる）。
+    MUST: the replacement target is **`style_bert_vits2.models.modules`** — `modules.py` has
+    already bound the function object into its own namespace with
+    `from ...transforms import piecewise_rational_quadratic_transform`, so replacing it on the
+    `transforms` side has no effect on the calls (the original would run while we think it is
+    replaced, and only the export would fail).
     """
     from style_bert_vits2.models import modules
 
@@ -280,11 +302,14 @@ def apply_spline_patch() -> None:
         min_derivative=DEFAULT_MIN_DERIVATIVE,
     ):
         if tails is None:
-            # MUST: 握り潰さない。`rational_quadratic_spline_free` は原実装の定義域検査
-            # （InputOutsideDomain）を削除しているので、tails=None はクランプ無しでその
-            # spline へ直行する経路 = **安全弁だけが外れた形**になる。SBV2 の呼び出し元
-            # （ConvFlow）は tails="linear" 固定で到達不能だが、到達したら落とす。
-            raise RuntimeError("tails=None は未対応（定義域クランプ経由でのみ spline を呼ぶ）")
+            # MUST: do not swallow this. `rational_quadratic_spline_free` removes the original's
+            # domain check (InputOutsideDomain), so tails=None would be a path straight into that
+            # spline without the clamp = **the form with only the safety valve removed**. SBV2's
+            # caller (ConvFlow) always uses tails="linear", so it is unreachable, but if it is
+            # reached it fails.
+            raise RuntimeError(
+                "tails=None is not supported (the spline is only called through the domain clamp)"
+            )
         return unconstrained_rqs_free(
             inputs,
             unnormalized_widths,
@@ -301,7 +326,7 @@ def apply_spline_patch() -> None:
     modules.piecewise_rational_quadratic_transform = piecewise_free
 
 
-# ---- ② 相対位置注意の gather 化 -------------------------------------------
+# ---- ② Relative-position attention as a gather -------------------------------------------
 
 
 def build_relattn_tables(
@@ -311,20 +336,24 @@ def build_relattn_tables(
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """gather 化注意の `(T, T)` 表 `(idx_k, valid)` を実長で生成する（Python 側の正本）。
+    """Builds the `(T, T)` tables `(idx_k, valid)` of the gather attention at the real length (the
+    Python-side source of truth).
 
-    front（P ≤ 512）は同じ式を **in-graph** で組んでエクスポータの定数畳み込みに
-    Pmax 焼き込み + `sym_prefix_slice` を作らせるが、flow は Ty が桁違いで焼き込みが
-    O(Tmax²)（sym_max=4096 で 134MB）になるため**グラフ入力へ昇格**する（ADR 0013）。
-    昇格すると表の値を作る責務がホスト側へ移るので、ここが golden の供給元、
-    `packages/models/src/sbv2/relattn-tables.ts` が TS 側の鏡像で、両者のバイト一致は
-    `packages/models/tests/sbv2_relattn_parity_test.ts` が golden の実データで固定する。
+    The front (P ≤ 512) builds the same formula **in-graph** and lets the exporter's constant
+    folding bake in Pmax + create `sym_prefix_slice`, but the flow's Ty is orders of magnitude
+    larger and baking in would be O(Tmax²) (134MB at sym_max=4096), so the tables are **promoted to
+    graph inputs** (ADR 0013). Promotion moves the responsibility for building the table values to
+    the host, so this is where the golden comes from,
+    `packages/models/src/sbv2/relattn-tables.ts` is the TS-side mirror, and
+    `packages/models/tests/sbv2_relattn_parity_test.ts` pins that the two are byte-identical with
+    the golden's real data.
 
-    MUST: front の in-graph 構築も**この関数を呼ぶ**（{@link mha_gather_forward} の
-    `relattn_tables is None` 経路）。式を 2 箇所に書くと、片方だけ直したとき front
-    （焼き込み）と flow（入力）で別の表になり、どちらも shape は合うので黙って別の
-    モデルになる（沈黙誤値クラス）。`device` / `dtype` はトレース中の in-graph 構築が
-    余計な `_to_copy` を生まないための引数で、ホスト供給側は既定（CPU / f32）を使う。
+    MUST: the front's in-graph construction also **calls this function** (the
+    `relattn_tables is None` path of {@link mha_gather_forward}). Writing the formula in 2 places
+    means that when only one is fixed, the front (baked in) and the flow (input) get different
+    tables, and since both shapes still match it silently becomes a different model (the silently
+    wrong value class). `device` / `dtype` are arguments that keep the in-graph construction during
+    tracing from producing an extra `_to_copy`; the host-supply side uses the defaults (CPU / f32).
     """
     positions = torch.arange(length, device=device)
     rel = positions.unsqueeze(0) - positions.unsqueeze(1)
@@ -340,46 +369,53 @@ def mha_gather_forward(
     attn_mask: torch.Tensor | None = None,
     relattn_tables: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """窓付き相対位置注意の gather 版 `MultiHeadAttention.forward`（原実装と同値）。
+    """The gather version of `MultiHeadAttention.forward` for windowed relative-position attention
+    (equivalent to the original).
 
-    原実装は相対 logits `(b,h,P,2P−1)` を pad / view のシフトで絶対位置 `(b,h,P,P)` へ
-    写す。この経路が `2P−1` / `2P²` / `P(2P−1)` という**二次の shape 式**を作るため、
-    動的 P では export が成立しない。窓幅 `2w+1` の外が恒等的に 0 であることを使って、
-    同じ値を添字表と gather で組む:
+    The original maps the relative logits `(b,h,P,2P−1)` to absolute positions `(b,h,P,P)` with a
+    pad / view shift. That path creates **quadratic shape expressions** `2P−1` / `2P²` /
+    `P(2P−1)`, so export does not work with a dynamic P. Using the fact that everything outside the
+    window width `2w+1` is identically 0, the same values are built with index tables and gather:
 
-    - key 側: `scores_local[i,j] = (q_i·Ek)[w + (j−i)] · [|j−i| ≤ w]`
-      → 添字表 `idx_k[i,j] = clamp(w + j − i, 0, 2w)` の gather × 0/1 マスク乗算。
-      clamp した添字は窓外で**別の埋め込みを読む**が、valid マスクの乗算で必ず 0 になる
-      （gather の範囲外規約に頼らない形 — ADR 0013）。
-    - value 側: `out_i += Σ_j p[i,j]·Ev[w + (j−i)]`（窓外は 0）
-      → p を `[w,w]` ゼロパディングして `idx_v[i,c] = i + c` を gather。パディング済みの
-      長さ `P+2w` に対し `i+c` は常に範囲内なので、窓外は厳密に 0 を読む（clamp 不要）。
+    - key side: `scores_local[i,j] = (q_i·Ek)[w + (j−i)] · [|j−i| ≤ w]`
+      → a gather with the index table `idx_k[i,j] = clamp(w + j − i, 0, 2w)` × a 0/1 mask multiply.
+      Outside the window the clamped index **reads another embedding**, but the multiply by the
+      valid mask always makes it 0 (a form that does not rely on gather's out-of-range convention
+      — ADR 0013).
+    - value side: `out_i += Σ_j p[i,j]·Ev[w + (j−i)]` (0 outside the window)
+      → zero-pad p by `[w,w]` and gather `idx_v[i,c] = i + c`. For the padded length `P+2w`, `i+c`
+      is always in range, so outside the window it reads exactly 0 (no clamp needed).
 
-    表は `i` と `j`（と定数 w）だけで決まり **P に依存しない**ので、エクスポータの定数
-    畳み込みが Pmax で焼き込み + `sym_prefix_slice` に落とす（2 点評価検査も通る）。
+    The tables are decided by `i` and `j` (and the constant w) alone and **do not depend on P**, so
+    the exporter's constant folding bakes them in at Pmax + lowers them to `sym_prefix_slice` (the
+    2-point evaluation check passes too).
 
-    `relattn_tables=(idx_k, valid)` を渡すと key 側の `(T, T)` 表だけが**外部供給**へ
-    切り替わる（flow 経路 — {@link FlowReverse} がグラフ入力をここまでスレッディングする）。
-    None なら in-graph 構築（front 経路 — 焼き込み適格）。値は両経路で同一
-    （{@link build_relattn_tables} と同じ式）。**value 側の `idx_v` は `(T, 2w+1)` と
-    小さく、焼き込んでも Tmax=4096 で 150KB にしかならない**ので flow でも in-graph の
-    ままにする（グラフ入力を増やすほどホスト側の鏡像実装の責務が増える）。
+    Passing `relattn_tables=(idx_k, valid)` switches only the key-side `(T, T)` table to **external
+    supply** (the flow path — {@link FlowReverse} threads the graph inputs down to here). With None
+    it is built in-graph (the front path — eligible for baking in). The values are identical on
+    both paths (the same formula as {@link build_relattn_tables}). **The value-side `idx_v` is a
+    small `(T, 2w+1)`; baked in it is only 150KB at Tmax=4096**, so it stays in-graph on the flow
+    too (every extra graph input adds to the responsibilities of the host-side mirror
+    implementation).
 
-    MUST: 埋め込み側は **4D に expand して 4D×4D** で掛ける。2D のまま matmul すると
-    `(b·h·P, kc)` の view に分解され、係数付きシンボル次元 `2P` が生えて次元言語の
-    アフィン拡張が要るように見えてしまう（実際には要らない — recon §4）。
+    MUST: the embedding side is **expanded to 4D and multiplied 4D×4D**. A matmul kept in 2D is
+    decomposed into a `(b·h·P, kc)` view, a symbolic dimension with a coefficient, `2P`, appears,
+    and it looks as if the affine extension of the dimension language were needed (it is not —
+    recon §4).
     """
     if self.window_size is None:
-        raise ValueError("gather 化は窓付き相対位置注意が対象（window_size=None）")
+        raise ValueError(
+            "the gather form targets windowed relative-position attention (window_size=None)"
+        )
     if not self.heads_share:
         raise ValueError(
-            "heads_share=False は未対応 — 埋め込みの head 軸（長さ 1）を expand で"
-            " 全 head に配る形が成立しなくなる"
+            "heads_share=False is not supported — expanding the embedding's head axis (length 1)"
+            " to every head no longer works"
         )
     if self.block_length is not None or self.proximal_bias:
         raise ValueError(
-            f"未対応の注意構成（block_length={self.block_length} /"
-            f" proximal_bias={self.proximal_bias}）"
+            f"unsupported attention configuration (block_length={self.block_length} /"
+            f" proximal_bias={self.proximal_bias})"
         )
 
     q = self.conv_q(x)
@@ -389,7 +425,9 @@ def mha_gather_forward(
     b, d, t_s = k.size()
     t_t = q.size(2)
     if t_s != t_t:
-        raise ValueError("gather 化は self-attention（正方の相対位置表）が対象")
+        raise ValueError(
+            "the gather form targets self-attention (a square relative-position table)"
+        )
     h = self.n_heads
     kc = self.k_channels
     w = self.window_size
@@ -400,15 +438,17 @@ def mha_gather_forward(
     scaled_q = q / math.sqrt(kc)
     scores = torch.matmul(scaled_q, k.transpose(-2, -1))
 
-    # rel[i,j] = j − i（原実装の rel→abs 写像 `x_final[i,j] = x[i, j−i+P−1]` と同じ向き）。
+    # rel[i,j] = j − i (the same direction as the original's rel→abs mapping
+    # `x_final[i,j] = x[i, j−i+P−1]`).
     positions = torch.arange(t_t, device=x.device)
     if relattn_tables is None:
         idx_k, valid = build_relattn_tables(t_t, w, device=x.device, dtype=scores.dtype)
     else:
         idx_k, valid = relattn_tables
 
-    # emb_rel_k は [1, 2w+1, kc]（heads_share なので head 軸は長さ 1）。head 軸をそのまま
-    # broadcast 元にして [1, 1, kc, 2w+1] を作る（`emb[0]` の select を経由しない）。
+    # emb_rel_k is [1, 2w+1, kc] (heads_share, so the head axis has length 1). The head axis is
+    # used as the broadcast source as is to build [1, 1, kc, 2w+1] (without going through the
+    # select of `emb[0]`).
     ek = self.emb_rel_k.permute(0, 2, 1).unsqueeze(0)
     rel_local = torch.matmul(scaled_q, ek.expand(b, h, kc, 2 * w + 1))
     scores_local = torch.gather(
@@ -434,30 +474,31 @@ def mha_gather_forward(
 
 
 def apply_gather_relattn_patch() -> None:
-    """`MultiHeadAttention.forward` を gather 版へ差し替える。
+    """Replaces `MultiHeadAttention.forward` with the gather version.
 
-    原実装は `x, self.attn = self.attention(...)` で**モジュールへ副作用代入**しており、
-    export ではこれ自体が警告になる。差し替えで副作用ごと消える（`self.attn` は推論経路の
-    誰も読まない）。
+    The original **assigns to the module as a side effect** with `x, self.attn =
+    self.attention(...)`, which by itself is a warning at export. The replacement removes the side
+    effect along with it (nobody on the inference path reads `self.attn`).
     """
     from style_bert_vits2.models.attentions import MultiHeadAttention
 
     MultiHeadAttention.forward = mha_gather_forward
 
 
-# ---- ③ FFN の明示 pad → conv の padding ------------------------------------
+# ---- ③ FFN's explicit pad → conv's padding ------------------------------------
 
 
 def _patched_ffn_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
-    """`FFN.forward` から明示 `F.pad` を消し、conv の padding 引数へ畳んだ版。
+    """`FFN.forward` with the explicit `F.pad` removed and folded into conv's padding argument.
 
-    MUST: 等価なのは **奇数 kernel かつ非 causal** のときだけ。原実装の `_same_padding` は
-    左 `(k−1)//2` / 右 `k//2` の非対称パディングで、偶数 kernel では左右が 1 ずれる
-    （conv1d の padding 引数は左右対称しか表せない）。causal 側は左だけ `k−1` 詰めるので
-    そもそも別物。どちらも黙って通すと出力が 1 サンプルずれた別のモデルになるので落とす。
+    MUST: it is equivalent **only for an odd kernel that is not causal**. The original's
+    `_same_padding` pads asymmetrically, left `(k−1)//2` / right `k//2`, so for an even kernel left
+    and right differ by 1 (conv1d's padding argument can only express symmetric padding). The causal
+    side pads only the left by `k−1`, so it is a different thing altogether. Letting either through
+    silently would give a different model whose output is shifted by 1 sample, so they fail.
     """
     if self.causal:
-        raise ValueError("causal FFN はこのパッチの対象外（左右非対称パディング）")
+        raise ValueError("a causal FFN is outside this patch (asymmetric left/right padding)")
     if self.kernel_size % 2 == 0:
         raise ValueError(
             f"kernel_size={self.kernel_size} は偶数 — 明示 pad と conv の padding は等価でない"
@@ -471,19 +512,19 @@ def _patched_ffn_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.T
 
 
 def apply_ffn_conv_padding_patch() -> None:
-    """`FFN.forward` を pad 畳み込み版へ差し替える。"""
+    """Replaces `FFN.forward` with the folded-pad version."""
     from style_bert_vits2.models.attentions import FFN
 
     FFN.forward = _patched_ffn_forward
 
 
 def apply_all_patches() -> None:
-    """SBV2 の export に必要な全パッチを当てる（冪等）。front / flow / voice の各ターゲットと
-    `demo` / `measure_quant` が共通に呼ぶ。
+    """Applies every patch SBV2's export needs (idempotent). Called by each of the front / flow /
+    voice targets and by `demo` / `measure_quant` alike.
 
-    MUST: 「パッチ前の参照」を採る処理より**後**に呼ぶこと。クラス属性のプロセス全域
-    差し替えなので、先に当てると以後の参照値がパッチ後の値になり、同値検証が恒真化して
-    偽 PASS する（ADR 0013）。
+    MUST: call it **after** whatever takes "the unpatched reference". It replaces class attributes
+    process-wide, so applying it first turns every later reference value into a patched value, and
+    the equivalence check becomes vacuous and gives a false PASS (ADR 0013).
     """
     global _APPLIED
     apply_spline_patch()
@@ -492,22 +533,26 @@ def apply_all_patches() -> None:
     _APPLIED = True
 
 
-# ---- ④ 乱数の外出し + 融合 front ラッパ ------------------------------------
+# ---- ④ Externalizing the random numbers + the fused front wrapper -----------------------------
 
 
 class SdpReverseNoiseIn(nn.Module):
-    """`StochasticDurationPredictor` の reverse 経路 — 乱数を外部入力へ昇格した版。
+    """The reverse path of `StochasticDurationPredictor` — with the random numbers promoted to an
+    external input.
 
-    原 `forward(..., reverse=True)` と等価で、差分は `torch.randn(B,2,P) * noise_scale` を
-    外部入力 `z_noise` で受ける 1 点のみ（`noise_scale` の乗算はホスト側 — 実行時ノブを
-    グラフに焼かない）。`torch.detach` は eager の推論経路で恒等なので写さない。
+    Equivalent to the original `forward(..., reverse=True)`; the only difference is that
+    `torch.randn(B,2,P) * noise_scale` is received as the external input `z_noise` (the multiply by
+    `noise_scale` happens on the host — runtime knobs are not baked into the graph).
+    `torch.detach` is the identity on the eager inference path, so it is not copied.
 
-    MUST: **使う部分モジュールだけを持つ**（sdp 丸ごとを抱えない）。reverse 経路が触らない
-    `post_*`（訓練専用の posterior）と落とす ConvFlow は木に居ると fake-quant の census には
-    乗るのに torch.export が辿らず initializer に立たない — i4 の override 綴り検査（emit の
-    沈黙 drop 防止）が「グラフに無いキー」で落ちる。所有 = 使用にすると census と graph が
-    構造的に一致する（波 J-5b で顕在化）。flow の選別（reversed 順から末尾 2 本目 =
-    無用な vflow を除く — 原実装どおり）も同じ理由で `__init__` へ寄せ、使う 7 本だけを登録する。
+    MUST: **hold only the submodules that are used** (do not hold the whole sdp). The `post_*`
+    modules the reverse path does not touch (the training-only posterior) and the dropped ConvFlow
+    would, if in the tree, be counted by the fake-quant census while torch.export never visits them
+    and they never become initializers — the i4 override spelling check (which prevents emit from
+    silently dropping entries) fails on "a key not in the graph". Making ownership = use makes the
+    census and the graph agree structurally (surfaced in wave J-5b). The selection of the flows
+    (dropping the second from the end in reversed order = the unused vflow — as the original does)
+    is moved into `__init__` for the same reason, and only the 7 used ones are registered.
     """
 
     def __init__(self, sdp: nn.Module) -> None:
@@ -533,19 +578,23 @@ class SdpReverseNoiseIn(nn.Module):
         z = z_noise
         for flow in self.flows:
             z = flow(z, x_mask, g=x, reverse=True)
-        # 原実装は `torch.split(z, [1, 1], 1)` の第 1 要素。分割は取り出し口 1 本で足りる。
+        # The original takes the first element of `torch.split(z, [1, 1], 1)`. One outlet is
+        # enough for the split.
         return z[:, :1]
 
 
 class Sbv2Front(nn.Module):
-    """enc_p + dp + sdp(reverse) の融合 front グラフ（ADR 0013 の emit ターゲット）。
+    """The fused front graph of enc_p + dp + sdp(reverse) (an emit target of ADR 0013).
 
-    - `x_mask` は外部入力（原 `TextEncoder.forward` の `sequence_mask` 生成はホスト側へ）。
-      長さから mask を組む部分はグラフに入れても定数畳み込みの対象にならず、`x_lengths` を
-      値として使う形（記号を値にする経路）になるため。
-    - `TextEncoder.forward` はここへ写した — 原形は x_mask を内部生成し `torch.split` で
-      m/logs を割るので、入力の形と分割の形を両方ここで固定する（値は原実装と同一）。
-    - 出力は `(logw_sdp, logw_dp, m_p, logs_p)`。sdp_ratio の混合・durations 化はホスト側。
+    - `x_mask` is an external input (the `sequence_mask` generation of the original
+      `TextEncoder.forward` moves to the host). Putting the part that builds the mask from lengths
+      into the graph would not make it a target of constant folding, and would take the form that
+      uses `x_lengths` as a value (a path that turns symbols into values).
+    - `TextEncoder.forward` is copied here — the original generates x_mask internally and splits
+      m/logs with `torch.split`, so both the input shape and the split shape are fixed here (the
+      values are identical to the original).
+    - The outputs are `(logw_sdp, logw_dp, m_p, logs_p)`. Mixing with sdp_ratio and turning them
+      into durations happen on the host.
     """
 
     def __init__(self, net_g: nn.Module) -> None:
@@ -582,7 +631,7 @@ class Sbv2Front(nn.Module):
         return logw_sdp, logw_dp, m_p, logs_p
 
 
-# ---- ⑤ flow reverse（表を入力へ昇格）と voice 融合 ---------------------------
+# ---- ⑤ flow reverse (tables promoted to inputs) and the fused voice ---------------------------
 
 
 def _encoder_forward(
@@ -592,17 +641,19 @@ def _encoder_forward(
     g: torch.Tensor,
     tables: tuple[torch.Tensor, torch.Tensor],
 ) -> torch.Tensor:
-    """`attentions.Encoder.forward` の写し + 相対位置表のスレッディング。
+    """A copy of `attentions.Encoder.forward` + threading of the relative-position tables.
 
-    front は `enc_p.encoder(...)` を**そのまま**呼ぶ（表は in-graph 構築 = 焼き込み適格）。
-    flow は表をグラフ入力から注意層まで運ぶ必要があるが、`Encoder.forward` の引数には
-    表を載せる口が無い。**Encoder.forward もクラス属性差し替えで表を受ける形にする**案は
-    front 経路（表なし）と分岐を共有することになり、「front が誤って flow の表を掴む」
-    経路を作ってしまうので採らない — 写しを 1 本置いて呼び分ける方が経路が交わらない。
+    The front calls `enc_p.encoder(...)` **as is** (the tables are built in-graph = eligible for
+    baking in). The flow has to carry the tables from the graph inputs to the attention layers, but
+    the arguments of `Encoder.forward` have no slot for them. The alternative of **also replacing
+    the class attribute Encoder.forward so it takes the tables** would share a branch with the front
+    path (no tables) and create a path where "the front grabs the flow's tables by mistake", so it
+    is not taken — keeping one copy and calling it separately keeps the paths from crossing.
 
-    MUST: 原実装（`attentions.py` の `Encoder.forward`）と行対応を保つこと。`isflow`
-    構成の条件付け（`cond_layer_idx` 層で `spk_emb_linear(g)` を足す）を含む。`drop` は
-    eval では恒等だが、原実装との突合を行単位で追えるように残す。
+    MUST: keep a line-by-line correspondence with the original (`Encoder.forward` in
+    `attentions.py`), including the conditioning of the `isflow` configuration (adding
+    `spk_emb_linear(g)` at layer `cond_layer_idx`). `drop` is the identity in eval, but it is kept
+    so the comparison with the original can be followed line by line.
     """
     attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
     x = x * x_mask
@@ -630,22 +681,24 @@ def _coupling_reverse(
     g: torch.Tensor,
     tables: tuple[torch.Tensor, torch.Tensor],
 ) -> torch.Tensor:
-    """`modules.TransformerCouplingLayer.forward(reverse=True)` の写し（数値同値）。
+    """A copy of `modules.TransformerCouplingLayer.forward(reverse=True)` (numerically
+    equivalent).
 
-    原実装からの差分は 2 点:
+    2 differences from the original:
 
-    - `torch.split(x, [half] * 2, 1)` → 明示スライス 2 本（`split_with_sizes` → `getitem`
-      は IR に無い形で、正規化で slice へ落とす経路も持たない — front の `stats` 分割と
-      同じ流儀）。
-    - **`exp(-logs)` の乗算を畳む**。`mean_only=True` なので原実装の `logs` は
-      `torch.zeros_like(m)`、`exp(-0.0)` は IEEE 754 で**厳密に 1.0**、`t * 1.0 == t` は
-      NaN/Inf を含めてビット一致するので `(x1 − m) * exp(−logs) * x_mask` は
-      `(x1 − m) * x_mask` と同じ数になる。`zeros_like` / `full_like` を IR に持ち込まない
-      ための定型手筋（recon §4）で、近似ではない。
+    - `torch.split(x, [half] * 2, 1)` → 2 explicit slices (`split_with_sizes` → `getitem` is a
+      form the IR does not have, and there is no path that normalizes it into a slice — the same
+      convention as the front's `stats` split).
+    - **The multiply by `exp(-logs)` is folded.** With `mean_only=True` the original's `logs` is
+      `torch.zeros_like(m)`, `exp(-0.0)` is **exactly 1.0** in IEEE 754, and `t * 1.0 == t` is
+      bit-identical including NaN/Inf, so `(x1 − m) * exp(−logs) * x_mask` gives the same numbers
+      as `(x1 − m) * x_mask`. The standard technique for keeping `zeros_like` / `full_like` out of
+      the IR (recon §4), not an approximation.
     """
     if not layer.mean_only:
         raise ValueError(
-            "mean_only=False の coupling は未対応 — logs が 0 でなくなり exp(−logs) を畳めない"
+            "a coupling with mean_only=False is not supported — logs is no longer 0 and"
+            " exp(−logs) cannot be folded"
         )
     half = layer.half_channels
     x0, x1 = x[:, :half], x[:, half:]
@@ -657,19 +710,21 @@ def _coupling_reverse(
 
 
 class FlowReverse(nn.Module):
-    """`TransformerCouplingBlock` の reverse 経路 — 相対位置表を入力へ昇格した版。
+    """The reverse path of `TransformerCouplingBlock` — with the relative-position tables promoted
+    to inputs.
 
-    `forward(z_p, y_mask, g, idx_k, valid) -> z`。原
-    `TransformerCouplingBlock.forward(..., reverse=True)` と等価で、差分は
+    `forward(z_p, y_mask, g, idx_k, valid) -> z`. Equivalent to the original
+    `TransformerCouplingBlock.forward(..., reverse=True)`; the differences are
 
-    - 表 `idx_k` `(T, T)` i64 / `valid` `(T, T)` f32 を**グラフ入力**で受ける
-      （焼き込みは sym_max=4096 で 134MB — ADR 0013）。値はホストが
-      {@link build_relattn_tables} の鏡像で作る。
-    - `Flip` は `torch.flip(x, [1])`（`modules.Flip.forward` の reverse 分岐は logdet を
-      返さないだけで値は同じ）。
-    - coupling は {@link _coupling_reverse}（split → slice、`exp(−logs)=1` の畳み込み）。
+    - the tables `idx_k` `(T, T)` i64 / `valid` `(T, T)` f32 are received as **graph inputs**
+      (baked in they would be 134MB at sym_max=4096 — ADR 0013). The host builds the values with
+      the mirror of {@link build_relattn_tables}.
+    - `Flip` is `torch.flip(x, [1])` (the reverse branch of `modules.Flip.forward` only omits the
+      logdet; the values are the same).
+    - the coupling is {@link _coupling_reverse} (split → slice, folding `exp(−logs)=1`).
 
-    flows のループは Python 側で展開されるので、IR は完全に静的な直列グラフになる。
+    The loop over the flows is unrolled on the Python side, so the IR is a fully static serial
+    graph.
     """
 
     def __init__(self, net_g: nn.Module) -> None:
@@ -696,17 +751,17 @@ class FlowReverse(nn.Module):
 
 
 class Sbv2Voice(nn.Module):
-    """flow reverse + dec の融合グラフ（ADR 0013 の emit ターゲット `voice`）。
+    """The fused graph of flow reverse + dec (the emit target `voice` of ADR 0013).
 
-    `forward(z_p, y_mask, g, idx_k, valid) -> audio [1, 1, 512T]`。参照 infer の末尾
-    （`models_jp_extra.py` の `z = flow(z_p, y_mask, g, reverse=True)` →
-    `o = dec((z * y_mask)[:, :, :max_len], g=g)`）と同順。`max_len` は推論経路で常に
-    `None`（＝恒等スライス）なのでグラフには持ち込まない。
+    `forward(z_p, y_mask, g, idx_k, valid) -> audio [1, 1, 512T]`. The same order as the end of the
+    reference infer (`z = flow(z_p, y_mask, g, reverse=True)` →
+    `o = dec((z * y_mask)[:, :, :max_len], g=g)` in `models_jp_extra.py`). `max_len` is always
+    `None` on the inference path (= an identity slice), so it is not brought into the graph.
 
-    MUST: `dec` は **`remove_weight_norm` 済み**であること（`sbv2.export.ensure_dec_plain`）。
-    weight_norm が残っていると `dec.weight` は実効重みではなく、そのまま IR へ書けば
-    別のモデルになる。f16 / i8 / i4 の丸め（`sbv2.export._fake_quant`）は remove **後**の実効重みに
-    当てる（ADR 0013）。
+    MUST: `dec` has **already had `remove_weight_norm` applied** (`sbv2.export.ensure_dec_plain`).
+    If weight_norm is still in place, `dec.weight` is not the effective weight, and writing it to
+    the IR as is gives a different model. The f16 / i8 / i4 rounding (`sbv2.export._fake_quant`) is
+    applied to the effective weights **after** the removal (ADR 0013).
     """
 
     def __init__(self, net_g: nn.Module) -> None:

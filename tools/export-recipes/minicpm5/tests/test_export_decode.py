@@ -1,18 +1,22 @@
-"""`minicpm5/export_decode.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level guarantees of `minicpm5/export_decode.py` (the part that needs no real weights).
 
-実重みの emit は手動（1-shot 形のテストと同じ規律）。ここで固定するのは、壊れると**偽 PASS**
-になる側の規律だけ:
+Emitting with real weights is manual (the same rule as the one-shot form's tests). What is pinned
+here is only the rules whose breakage gives a **false PASS**:
 
-- RoPE 表引きが元実装と**値同一**であること（差し替えの正当性そのもの）と、表で表せない
-  実装（位置以外に依存する forward）が突合で落ちること
-- `states_plan` が nodes 順に層番号つきスロットを割り当て、本数の食い違いで落ちること
-- `assert_ir_form_decode` が「数値は合うが静かに壊れた」形を**実際に検出**すること
-  （従来形の残り / repeat_kv 実体化 / window 付き / 容量の焼き込み / 残骸 op / 出口の取り違え）
-- greedy の margin 門が下限以下の step を落とすこと（恒真でない余裕保証）
-- `greedy_continuation` が **full re-forward**（毎 step 先頭から・位置は arange）で採ること
+- the RoPE table lookup is **value-identical** to the original implementation (the very
+  justification of the replacement), and an implementation the table cannot express (a forward
+  that depends on more than the position) fails the comparison
+- `states_plan` assigns layer-numbered slots in node order and fails on a count mismatch
+- `assert_ir_form_decode` **actually detects** the forms that "agree numerically but are quietly
+  broken" (a conventional form left over / repeat_kv materialized / a window attached / a baked-in
+  capacity / residue ops / a mixed-up exit)
+- the greedy margin check fails steps at or below the floor (a margin guarantee that is not
+  vacuous)
+- `greedy_continuation` takes the sequence by **full re-forward** (from the start every step, the
+  positions are an arange)
 
-transformers を要するケースだけ `importorskip` で SKIP する（既定 sync の CI ではモデル系
-依存が入らない — ADR 0065 の 2 job 構成）。
+Only the cases that need transformers SKIP via `importorskip` (the default-sync CI does not install
+the model dependencies — the 2-job layout of ADR 0065).
 """
 
 from __future__ import annotations
@@ -47,11 +51,12 @@ from minicpm5.tests.test_export import (
     _tiny_checkpoint,
 )
 
-#: tiny な RoPE 表の位置数（{@link decode.assert_rope_table_matches} の probe が 17 と
-#: `positions - 1` を踏むので 18 以上が要る）。
+#: Number of positions of the tiny RoPE table (the probes of
+#: {@link decode.assert_rope_table_matches} hit 17 and `positions - 1`, so it needs 18 or more).
 TINY_POSITIONS = 32
 
-#: 加算 causal mask を焼いた定数の Tmax（手術で刈られる残骸 — ADR 0010）。
+#: Tmax of the constant the additive causal mask is baked into (residue the surgery prunes —
+#: ADR 0010).
 TINY_TMAX = TINY_SYM_MAX
 
 TINY_IR_CONFIG = SimpleNamespace(
@@ -63,10 +68,11 @@ TINY_IR_CONFIG = SimpleNamespace(
 
 
 class _StubRotary(nn.Module):
-    """`LlamaRotaryEmbedding` の呼び出し規約だけを持つ被験体。
+    """A subject with only the calling convention of `LlamaRotaryEmbedding`.
 
-    値は**位置だけの決定的な関数**（表引きで厳密に再現できる形）。`x` は dtype / device の
-    ためだけに受ける引数で、上流実装と同じく値は読まない。
+    The values are **a deterministic function of the position alone** (a form the table lookup can
+    reproduce exactly). `x` is taken only for its dtype / device, and as in the upstream
+    implementation its value is not read.
     """
 
     def __init__(self, depth: int) -> None:
@@ -83,7 +89,8 @@ class _StubRotary(nn.Module):
 
 
 class _LengthDependentRotary(_StubRotary):
-    """位置**以外**（系列長）にも依存する rotary — 表引きでは原理的に再現できない被験体。"""
+    """A rotary that also depends on something **other than** the position (the sequence length) — a
+    subject the table lookup cannot reproduce in principle."""
 
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor):
         del x
@@ -93,7 +100,7 @@ class _LengthDependentRotary(_StubRotary):
 
 @pytest.fixture
 def probe() -> torch.Tensor:
-    """rotary が dtype / device を読むためのダミー入力。"""
+    """A dummy input from which the rotary reads dtype / device."""
     return torch.zeros(1, 1, HIDDEN, dtype=torch.float32)
 
 
@@ -103,30 +110,34 @@ class TestRopeTable:
 
         table = decode.build_rope_table(rotary, probe, TINY_POSITIONS)
 
-        # 例外が出なければ全 probe で torch.equal（値・shape・dtype・タプル構成の全一致）。
+        # No exception means torch.equal on every probe (values, shape, dtype and tuple structure
+        # all match).
         decode.assert_rope_table_matches(rotary, table, probe, TINY_POSITIONS)
         assert table.cos_table.shape == (TINY_POSITIONS, HEAD_DIM)
         assert table.sin_table.shape == (TINY_POSITIONS, HEAD_DIM)
 
     def test_a_reference_that_is_not_a_function_of_position_is_rejected(self, probe):
-        """MUST: 表で表せない実装を黙って表に落とすと、値が「それらしく」ずれる。"""
+        """MUST: silently lowering an implementation the table cannot express to a table shifts the
+        values "plausibly"."""
         rotary = _LengthDependentRotary(HEAD_DIM)
         table = decode.build_rope_table(rotary, probe, TINY_POSITIONS)
 
-        with pytest.raises(AssertionError, match="表の引き方がずれている"):
+        with pytest.raises(AssertionError, match="the table lookup is misaligned"):
             decode.assert_rope_table_matches(rotary, table, probe, TINY_POSITIONS)
 
     def test_a_shifted_table_is_rejected(self, probe):
-        """故障注入: 表を 1 行ずらすと突合が落ちる（= 上の緑が恒真でないことの裏取り）。"""
+        """Fault injection: shifting the table by one row fails the comparison (= evidence that the
+        green above is not vacuous)."""
         rotary = _StubRotary(HEAD_DIM)
         table = decode.build_rope_table(rotary, probe, TINY_POSITIONS)
         shifted = decode.RopeTable(table.cos_table.roll(1, 0), table.sin_table)
 
-        with pytest.raises(AssertionError, match="表の引き方がずれている"):
+        with pytest.raises(AssertionError, match="the table lookup is misaligned"):
             decode.assert_rope_table_matches(rotary, shifted, probe, TINY_POSITIONS)
 
     def test_the_swap_leaves_the_model_untouched_when_the_check_fails(self, probe):
-        """MUST: 突合の失敗で模型が半端な状態（表引きだが値が違う）に残らない。"""
+        """MUST: a failed comparison does not leave the model half-changed (a table lookup with
+        wrong values)."""
         model = SimpleNamespace(
             model=SimpleNamespace(rotary_emb=_LengthDependentRotary(HEAD_DIM)),
             config=SimpleNamespace(hidden_size=HIDDEN),
@@ -140,14 +151,15 @@ class TestRopeTable:
 
 
 def _pre_surgery_graph(kv_heads: int = KV_HEADS, layers: int = LAYERS) -> IrGraph:
-    """従来形 attention `layers` 本を持つ decode chunk グラフの**骨組み**。
+    """The **skeleton** of a decode chunk graph with `layers` conventional-form attention nodes.
 
-    検査対象は attention / `state_append` / states 節と、入力・出力・残骸 op の有無だけなので、
-    q / k / v を作る側は「宣言 shape を持つ生きたノード」であればよい（op の意味は問わない）。
+    The checks look only at attention / `state_append` / the states section and at the presence
+    of inputs, outputs and residue ops, so what produces q / k / v only has to be "live nodes with
+    declared shapes" (the meaning of the ops does not matter).
 
-    MUST: 層は**直列に繋ぐ**（層 i の q/k/v は層 i-1 の出力から作る）。繋がない層は手術の
-    刈り込み（`to_states_form` は出力から到達しないノードを落とす）で消え、被験体が黙って
-    1 層のグラフになる。
+    MUST: the layers are **chained in series** (layer i's q/k/v are made from layer i-1's output).
+    An unchained layer vanishes in the surgery's pruning (`to_states_form` drops nodes not
+    reachable from the outputs), and the subject silently becomes a 1-layer graph.
     """
     graph = IrGraph(symbols=[decode.SEQ_SYMBOL])
     graph.inputs.append(IrInput(name=decode.INPUT_IDS, dtype="i32", shape=[1, "M"]))
@@ -205,7 +217,7 @@ def _pre_surgery_graph(kv_heads: int = KV_HEADS, layers: int = LAYERS) -> IrGrap
 
 
 def _surgical_graph(**kwargs) -> IrGraph:
-    """{@link _pre_surgery_graph} を全 attention について states 形へ手術したグラフ。"""
+    """{@link _pre_surgery_graph} after surgery to the states form for every attention."""
     graph = _pre_surgery_graph(**kwargs)
     return to_states_form(graph, decode.states_plan(graph, kwargs.get("layers", LAYERS)))
 
@@ -221,15 +233,16 @@ class TestStatesPlan:
             ("l0.k", "l0.v"),
             ("l1.k", "l1.v"),
         ]
-        # nodes 順の attention に 1 対 1（取り違えると別層の KV へ書く形になる）
+        # One to one with the attention nodes in node order (a mix-up would write into another
+        # layer's KV)
         assert [spec.output for spec in plan.attentions] == ["attn0", "attn1"]
         assert all(spec.window is None and spec.capacity is None for spec in plan.attentions)
 
     def test_a_layer_count_mismatch_fails_loudly(self):
-        """MUST: 取りこぼした層は chunk 局所 causal のまま残る（沈黙誤値）。"""
+        """MUST: a missed layer stays chunk-local causal (a silent wrong value)."""
         graph = _pre_surgery_graph(layers=1)
 
-        with pytest.raises(AssertionError, match="層と一致しない"):
+        with pytest.raises(AssertionError, match=r"does not match the \d+ layers"):
             decode.states_plan(graph, LAYERS)
 
 
@@ -244,14 +257,15 @@ class TestAssertIrFormDecode:
         assert form["heads"] == [HEADS, KV_HEADS, KV_HEADS]
 
     def test_a_conventional_attention_left_behind_is_rejected(self):
-        """MUST: 手術し損ねた層は過去を見ない（数値は動くので golden では捕まらない）。"""
+        """MUST: a layer the surgery missed does not look at the past (the numbers move, so the
+        golden does not catch it)."""
         graph = _pre_surgery_graph()
         partial = StatesPlan(
             capacity_symbol=decode.CAPACITY_SYMBOL,
             attentions=(StateAttentionSpec(output="attn0", k_slot="l0.k", v_slot="l0.v"),),
         )
 
-        with pytest.raises(AssertionError, match="q / k / v の 3 本ちょうど"):
+        with pytest.raises(AssertionError, match="exactly 3: q / k / v"):
             decode.assert_ir_form_decode(to_states_form(graph, partial), TINY_IR_CONFIG)
 
     def test_a_materialized_kv_shape_is_rejected(self):
@@ -270,7 +284,8 @@ class TestAssertIrFormDecode:
             decode.assert_ir_form_decode(_surgical_graph(), derived)
 
     def test_a_window_attribute_is_rejected(self):
-        """全 context の full 層に window が付くと、窓外の過去を黙って切り捨てる。"""
+        """A window attached to a full layer over the whole context silently cuts off the past
+        outside the window."""
         graph = _surgical_graph()
         index, node = next(
             (index, node)
@@ -283,7 +298,8 @@ class TestAssertIrFormDecode:
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG)
 
     def test_a_baked_capacity_is_rejected(self):
-        """容量を数値で焼くと `createGenerationContext` で容量を選べない（ADR 0066 決定 3）。"""
+        """Baking the capacity as a number leaves no way to choose it in `createGenerationContext`
+        (ADR 0066 decision 3)."""
         graph = _pre_surgery_graph()
         baked = StatesPlan(
             capacity_symbol=decode.CAPACITY_SYMBOL,
@@ -298,49 +314,52 @@ class TestAssertIrFormDecode:
             ),
         )
 
-        with pytest.raises(AssertionError, match="容量は記号のまま残す"):
+        with pytest.raises(AssertionError, match="the capacity MUST stay a symbol"):
             decode.assert_ir_form_decode(to_states_form(graph, baked), TINY_IR_CONFIG)
 
     def test_a_missing_state_append_is_rejected(self):
         graph = _surgical_graph()
         graph.nodes = [node for node in graph.nodes if node.states.get("slot") != "l1.v"]
 
-        with pytest.raises(AssertionError, match="全スロット 1 本ずつでない"):
+        with pytest.raises(AssertionError, match="not one per slot"):
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG)
 
     def test_a_mask_left_as_a_graph_input_is_rejected(self):
         graph = _surgical_graph()
         graph.inputs.append(IrInput(name="attention_mask", dtype="f32", shape=[1, 1, "M", "M"]))
 
-        with pytest.raises(AssertionError, match="グラフ入力"):
+        with pytest.raises(AssertionError, match="graph inputs"):
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG)
 
     @pytest.mark.parametrize("op", decode.RESIDUE_OPS)
     def test_a_leftover_residue_op_is_rejected(self, op):
-        """MUST: 誰も読まない Tmax 定数 / 畳み残した RoPE が配布物に居座る形を落とす。"""
+        """MUST: reject the form where a Tmax constant nobody reads / RoPE left unfolded sits in the
+        distribution."""
         graph = _surgical_graph()
         graph.nodes.append(IrNode(op=op, ins=["logits"], outs=["residue"], attrs={}))
 
-        with pytest.raises(AssertionError, match="手術で死ぬはずの op"):
+        with pytest.raises(AssertionError, match="ops that the surgery should have removed"):
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG)
 
     def test_an_exit_that_is_not_argmax_is_rejected(self):
-        """出力 1 は decode 出口（ADR 0068 決定 4）— logits を 2 本出す形と取り違えない。"""
+        """Output 1 is the decode exit (ADR 0068 decision 4) — not to be confused with a form that
+        emits the logits twice."""
         graph = _surgical_graph()
         graph.outputs[1] = "logits"
 
-        with pytest.raises(AssertionError, match="出力 1 の供給元"):
+        with pytest.raises(AssertionError, match="output 1 comes from"):
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG)
 
     def test_a_single_output_graph_is_rejected(self):
         graph = _surgical_graph()
         graph.outputs.pop()
 
-        with pytest.raises(AssertionError, match="decode 出口は logits / token の 2 本"):
+        with pytest.raises(AssertionError, match="the decode exit has 2: logits / token"):
             decode.assert_ir_form_decode(graph, TINY_IR_CONFIG)
 
     def test_a_capacity_symbol_that_collides_with_an_input_symbol_fails_loudly(self):
-        """記号の取り違え（容量を入力由来の記号に重ねる）は手術側が落とす。"""
+        """A symbol mix-up (putting the capacity on a symbol that comes from the inputs) is rejected
+        by the surgery."""
         graph = _pre_surgery_graph()
         colliding = StatesPlan(
             capacity_symbol=decode.SEQ_SYMBOL,
@@ -356,26 +375,30 @@ class TestGreedyMargins:
         shared.assert_greedy_margins({"a": [1.0, 0.5, 0.011], "b": [2.0]}, decode.MARGIN_FLOOR)
 
     def test_the_floor_stays_above_the_gate_precondition(self):
-        """生産側の床 > 消費側の前提（2 × atol 1e-3 — gemma4 側と同形の門）。
+        """The producer's floor > the consumer's precondition (2 × atol 1e-3 — the same check as the
+        gemma4 side).
 
-        下だと「台本は採るが検収門の margin 前提で落ちる」ケースが作れてしまい、門の
-        『ここが落ちるのは台本と資産が食い違ったときだけ』が成立しない。atol の正本は
-        `e2e_minicpm5_greedy_test.ts` の PREFILL_ATOL（= 1e-3）— 変えたら両方を動かす。
+        Below it, a case that "the script takes but fails the acceptance check's margin
+        precondition" could be produced, and the check's "this fails only when the script and the
+        asset disagree" would not hold. The source of truth of atol is PREFILL_ATOL (= 1e-3) in
+        `e2e_minicpm5_greedy_test.ts` — change both together.
         """
         assert decode.MARGIN_FLOOR > 2 * 1e-3
 
     def test_a_thin_margin_fails_loudly(self):
-        """MUST: 余裕の無い step を golden に混ぜると GPU 偏差で列が割れる。"""
-        with pytest.raises(AssertionError, match=r"margin が下限"):
+        """MUST: mixing a step without margin into the golden lets GPU deviation split the
+        sequence."""
+        with pytest.raises(AssertionError, match=r"margin at or below the floor"):
             shared.assert_greedy_margins({"a": [1.0, 1e-3, 0.5]}, decode.MARGIN_FLOOR)
 
     def test_the_floor_itself_is_not_accepted(self):
-        """境界は「超える」— ちょうど下限は通さない。"""
-        with pytest.raises(AssertionError, match=r"margin が下限"):
+        """The boundary is "exceeds" — exactly the floor does not pass."""
+        with pytest.raises(AssertionError, match=r"margin at or below the floor"):
             shared.assert_greedy_margins({"a": [decode.MARGIN_FLOOR]}, decode.MARGIN_FLOOR)
 
     def test_every_offending_case_is_reported_at_once(self):
-        """MUST: 最初の 1 件で止めない — 外すケースの判断材料が 1 回の実走で揃わなくなる。"""
+        """MUST: do not stop at the first one — otherwise one real run would not gather what is
+        needed to decide which cases to remove."""
         with pytest.raises(AssertionError) as failure:
             shared.assert_greedy_margins(
                 {"a": [1.0], "b": [1e-3], "c": [0.5, 0.0]}, decode.MARGIN_FLOOR
@@ -383,15 +406,16 @@ class TestGreedyMargins:
 
         message = str(failure.value)
         assert "'b'" in message and "'c'" in message
-        # 通ったケースは診断に出さない（外す対象の名前だけが並ぶ）
+        # Cases that passed are not in the diagnostic (only the names of those to remove are listed)
         assert "'a'" not in message
 
 
 class _StubWrapper(nn.Module):
-    """呼び出し形を記録する chunk ラッパの被験体（logits は最終位置だけを設計する）。
+    """A chunk-wrapper subject that records how it is called (only the logits at the last position
+    are designed).
 
-    最終位置の logits は「今の系列長」で決まる決め打ち行を返すので、期待 token 列と margin 列が
-    手計算できる。
+    The logits at the last position are a fixed row chosen by "the current sequence length", so
+    the expected token sequence and the margin sequence can be computed by hand.
     """
 
     def __init__(self, rows: dict[int, list[float]]) -> None:
@@ -409,7 +433,8 @@ class _StubWrapper(nn.Module):
 
 class TestGreedyContinuation:
     def test_it_re_forwards_the_whole_prefix_each_step(self):
-        """MUST: full re-forward（KV 経路を使わない）— 検収対象の機構で期待値を作らない。"""
+        """MUST: full re-forward (no KV path) — the expected values are not produced by the
+        mechanism under acceptance."""
         wrapper = _StubWrapper({2: [0.0, 3.0, 1.0], 3: [5.0, 0.0, 1.0], 4: [0.0, 0.0, 2.5]})
 
         tokens, margins = shared.greedy_continuation(wrapper, torch.tensor([[7, 8]]), 3)
@@ -423,7 +448,8 @@ class TestGreedyContinuation:
         ]
 
     def test_the_positions_are_the_absolute_prefix(self):
-        """位置は毎 step `arange(len)`（表引き RoPE が実位置で引けることの前提）。"""
+        """The positions are `arange(len)` every step (the precondition for the table-lookup RoPE to
+        look up real positions)."""
         wrapper = _StubWrapper({3: [1.0, 0.0], 4: [0.0, 2.0]})
 
         shared.greedy_continuation(wrapper, torch.tensor([[4, 5, 6]]), 2)
@@ -436,22 +462,26 @@ class TestCaseRoom:
         shared.assert_case_room([("case", torch.zeros(1, 10, dtype=torch.int64))], 6, 16)
 
     def test_a_continuation_past_the_table_fails_loudly(self):
-        """MUST: 表の外の位置は引けない（`F.embedding` は OOB を黙って返さない）。"""
-        with pytest.raises(AssertionError, match="RoPE 表の位置数"):
+        """MUST: positions outside the table cannot be looked up (`F.embedding` does not silently
+        return out-of-bounds values)."""
+        with pytest.raises(AssertionError, match="the RoPE table's 16 positions"):
             shared.assert_case_room([("case", torch.zeros(1, 11, dtype=torch.int64))], 6, 16)
 
 
 class TestGreedyCases:
     def test_every_greedy_case_is_a_golden_case(self):
-        """MUST: golden に無いケース名を greedy 側だけで持たない（prompt の出どころが消える）。"""
+        """MUST: no case name only on the greedy side that is not in the golden (the prompt would
+        lose its source)."""
         assert set(decode.GREEDY_CASES) <= {name for name, _ in one_shot.GOLDEN_CASES}
 
     def test_every_greedy_case_has_a_first_token_expectation(self):
-        """第 1 継続 token の突合（1-shot 形の期待表との機構横断検証）が全採用ケースで効く条件。"""
+        """The condition for the first-continuation-token comparison (the cross-mechanism check
+        against the one-shot form's expectation table) to work on every adopted case."""
         assert set(decode.GREEDY_CASES) <= set(one_shot.GREEDY_EXPECTATIONS)
 
     def test_the_adopted_expectations_are_not_all_the_same_token(self):
-        """ケースを外した結果、`_sanity` の定数出力検出線が恒真にならないことの条件。"""
+        """The condition that keeps the constant-output detection line of `_sanity` from becoming
+        vacuous after cases were removed."""
         adopted = {one_shot.GREEDY_EXPECTATIONS[name] for name in decode.GREEDY_CASES}
 
         assert len(adopted) > 1
@@ -470,11 +500,12 @@ def _export_tiny_decode(wrapper) -> tuple[IrGraph, dict]:
 
 
 class TestPublish:
-    """staging → final の入れ替え（`_publish`）。
+    """The staging → final swap (`_publish`).
 
-    守るのは「**新旧の混ざった正規資産を作れない**」こと（独立レビュー high 指摘の閉鎖）。
-    ファイル単位で final へ書く形だと、門の途中で落ちた実走が「新 model + 旧 greedy」を残し、
-    検収門が拒否済み資産で緑になれる。
+    What it protects is that "**no canonical asset mixing old and new can be produced**" (closing
+    a high finding of an independent review). Writing into final file by file would let a run that
+    failed halfway through the checks leave "new model + old greedy", and the acceptance check
+    could go green on an asset that was already rejected.
     """
 
     @staticmethod
@@ -494,7 +525,8 @@ class TestPublish:
         assert not staging.exists()
 
     def test_an_existing_target_is_replaced_wholesale(self, tmp_path):
-        """旧にだけあるファイル（例: 除外されたケースの greedy）が final に残らない。"""
+        """A file only the old series has (e.g. the greedy of an excluded case) does not remain in
+        final."""
         final = self._series(tmp_path, "final", {"model": "old", "greedy.stale": "old"})
         staging = self._series(tmp_path, "staging", {"model": "new"})
 
@@ -505,9 +537,11 @@ class TestPublish:
         assert not list(tmp_path.glob("final" + SUPERSEDED_SUFFIX))
 
     def test_a_failed_promotion_restores_the_old_series(self, tmp_path, monkeypatch):
-        """昇格の rename が失敗しても、final は**完全な旧資産のまま**（不在にも混成にもならない）。
+        """Even when the promoting rename fails, final stays **the complete old asset** (neither
+        missing nor mixed).
 
-        NOTE: `os.replace` を staging 昇格の 1 回だけ失敗させる（退避と復元は本物を通す）。
+        NOTE: `os.replace` fails only for the one staging promotion (moving aside and restoring go
+        through the real one).
         """
         final = self._series(tmp_path, "final", {"model": "old"})
         staging = self._series(tmp_path, "staging", {"model": "new"})
@@ -515,12 +549,12 @@ class TestPublish:
 
         def failing_replace(src, dst):
             if Path(src) == staging:
-                raise OSError("昇格に失敗")
+                raise OSError("promotion failed")
             return real_replace(src, dst)
 
         monkeypatch.setattr(os, "replace", failing_replace)
 
-        with pytest.raises(OSError, match="昇格に失敗"):
+        with pytest.raises(OSError, match="promotion failed"):
             shared._publish(staging, final)
 
         assert (final / "model").read_text() == "old"
@@ -528,7 +562,8 @@ class TestPublish:
 
 
 class TestExportedDecodeForm:
-    """tiny な実モデルを実際に export → 手術 → コンテナ検証まで通す（transformers が要る）。"""
+    """Actually run a tiny real model through export → surgery → container verification (needs
+    transformers)."""
 
     @pytest.fixture
     def tiny_container(self, tmp_path):
@@ -553,18 +588,21 @@ class TestExportedDecodeForm:
         assert form["state_append_nodes"] == 2 * LAYERS
         assert [spec.name for spec in verified.inputs] == [decode.INPUT_IDS, decode.POSITION_IDS]
         assert sorted(verified.symbols) == [decode.CAPACITY_SYMBOL, decode.SEQ_SYMBOL]
-        # 手術は必ず何かを刈る（mask の Tmax² 定数）— 0 本なら畳み込みが効いていない
+        # The surgery always prunes something (the mask's Tmax² constant) — none means the folding
+        # is not working
         assert len(pre.initializers) > len(verified.initializers)
 
     def test_the_mask_residue_is_gone_but_the_pre_surgery_graph_had_it(self, tiny_container):
-        """恒真化の門: 刈る対象が export 側に**実在した**ことを同じ資産で見る。"""
+        """The check against a vacuous pass: confirm on the same asset that what gets pruned
+        **really existed** on the export side."""
         pre, verified, _ = tiny_container
 
         assert one_shot.SYM_PREFIX_SLICE_OP in pre.required_ops
         assert one_shot.SYM_PREFIX_SLICE_OP not in verified.required_ops
 
     def test_the_rope_is_a_table_lookup_not_folded_trig(self, tiny_container):
-        """位置が入力になった以上、RoPE は畳み込みでなく `embedding` で引かれていること。"""
+        """Now that positions are an input, RoPE is looked up with `embedding` rather than
+        folded."""
         _, verified, _ = tiny_container
 
         readers = [
@@ -577,7 +615,7 @@ class TestExportedDecodeForm:
         assert "sin" not in verified.required_ops
 
     def test_the_wrapper_returns_logits_and_the_greedy_token(self, tmp_path):
-        """MUST: 出力順は `[logits, token]`（ランタイムは slot 番号で読む）。"""
+        """MUST: the output order is `[logits, token]` (the runtime reads by slot number)."""
         wrapper = decode.load_wrapper(_tiny_checkpoint(tmp_path / "ckpt"), positions=TINY_POSITIONS)
         ids = torch.randint(0, VOCAB, (1, 5), dtype=torch.int64)
 

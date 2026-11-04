@@ -1,19 +1,22 @@
-"""emit 台本の公開規律 — 「門より前に final へ置かない」の機械門（全 family 横断）。
+"""The publication rule of the emit scripts — the mechanical check of "nothing is placed in final
+before the checks", across every family.
 
-decode 系列の 2 台本が `karume.artifacts.staged_publication` で守っている不変条件を、
-1-shot 系列の台本にも同じ形で掛ける。守るのは 1 つだけ:
+The invariant the 2 decode-series scripts keep with `karume.artifacts.staged_publication` is
+applied in the same form to the scripts of the one-shot series. Only one thing is guarded:
 
-    生成物を書く呼び（`export_to_file` / `_write_io` / `save_file` …）が、全て
-    作業席の `with` の**内側**にあること。
+    Every call that writes an output (`export_to_file` / `_write_io` / `save_file` …) is
+    **inside** the `with` of the staging directory.
 
-外側に 1 本でも漏れると、落ちた実走が「検収門を通れる資産」を final に残す — io golden は
-同じ壊れたラッパから採るので互いに整合し、TS 側の突合は**緑になる**（規律の綴りは
-`_shared/decode_series._publish`）。この門が要るのは、その状態が「落ちた実走の後始末を忘れた」
-ようには見えず、**次の検収まで沈黙する**から。
+If even one leaks outside, a failed run leaves "an asset that can pass the acceptance check" in
+final — the io goldens are captured from the same broken wrapper, so they agree with each other,
+and the TS-side match **goes green** (the rule is spelled out in `_shared/decode_series._publish`).
+This check is needed because that state does not look like "the cleanup after a failed run was
+forgotten" and **stays silent until the next acceptance check**.
 
-ソースを AST で読むのは、実行して確かめるには実重み（数 GB）か family ごとの tiny 模型が要る
-ため。ここが見るのは「呼びの位置関係」だけで、据え替えそのものの規律（退避 → 昇格 →
-失敗時の戻し）は core の `tools/exporter/tests/` が実測で持つ。
+The source is read as an AST because checking it by running would need the real weights (several
+GB) or a tiny model per family. Only "the relative position of the calls" is checked here; the
+rule of the swap itself (move aside → promote → restore on failure) is measured by the core's
+`tools/exporter/tests/`.
 
 """
 
@@ -26,12 +29,14 @@ import pytest
 
 RECIPES_ROOT = Path(__file__).resolve().parent.parent
 
-#: 作業席を開く呼びの名前（family 内のラッパ経由も認める — `sbv2._staged_target` は
-#: `staged_publication` を包んで出所記録まで同じ席へ書く・`wan.export_vae._staged_set` は
-#: 席を複数まとめて開き、全部の門を通ってから一組で据える）。
+#: The names of the calls that open a staging directory (wrappers inside a family count too —
+#: `sbv2._staged_target` wraps `staged_publication` and writes the provenance record into the same
+#: directory; `wan.export_vae._staged_set` opens several directories together and places them as
+#: one set after all the checks pass).
 STAGING_CALLS = frozenset({"staged_publication", "_staged_target", "_staged_set"})
 
-#: 生成物を書く呼び。1 つでも席の外に出た瞬間、その台本は「門より前に final へ置く」形に戻る。
+#: The calls that write outputs. The moment even one is outside the staging directory, that script
+#: is back to "placing in final before the checks".
 WRITER_CALLS = frozenset(
     {
         "export_to_file",
@@ -43,14 +48,16 @@ WRITER_CALLS = frozenset(
         "_write_lora_provenance",
         "_write_calib_provenance",
         "save_file",
-        # gemma4 の product 台本が使う 2 本（PLE の shard 書き出しと出所記録）。名前が
-        # 表に無いと、その台本を表へ載せても「書いている場所」を 1 つも見ないまま緑になる。
+        # The 2 used by gemma4's product script (writing the PLE shards and the provenance
+        # record). Without their names in the table, listing that script would still go green
+        # without looking at a single "place that writes".
         "write_ple_shards",
         "write_record",
-        # 固定 QAT のコンテナと PLE も同じ作業席の内側へ置く。
+        # The fixed-QAT container and PLE are also placed inside the same staging directory.
         "publish_model",
         "write_ple",
-        # Wan2.2 TI2V の DiT の台本（`wan/ti2v_export_dit.py`）の容器と golden の書き手。
+        # The writers of the container and goldens of the Wan2.2 TI2V DiT script
+        # (`wan/ti2v_export_dit.py`).
         "write_container",
         "golden_case",
         # MOSS-Image's DiT script (`moss/export_dit.py`) writes its three containers through this
@@ -61,11 +68,13 @@ WRITER_CALLS = frozenset(
     }
 )
 
-#: (台本, emit を行う関数)。1-shot 台本 + 手本の decode 台本。
+#: (script, the function that emits). The one-shot scripts + the decode scripts that set the
+#: example.
 #:
-#: MUST: 実在する台本が 1 本残らずここに載っていること（表 → 実在の
-#: {@link TestTheGateItselfCanFail.test_every_listed_script_exists} と、実在 → 表 の
-#: {@link TestEveryStagingScriptIsListed} の両方向）。片方向だけだと**載せ忘れが永久に沈黙する**。
+#: MUST: every existing script is listed here (both directions: table → existing,
+#: {@link TestTheGateItselfCanFail.test_every_listed_script_exists}, and existing → table,
+#: {@link TestEveryStagingScriptIsListed}). With one direction only, **a missing entry stays silent
+#: forever**.
 EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("irodori/export.py", "export_series"),
     ("gemma4/export.py", "export_series"),
@@ -103,7 +112,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
 
 
 def _called_name(node: ast.AST) -> str | None:
-    """呼びの名前（`f(...)` / `mod.f(...)` のどちらも末尾の綴りで引く）。"""
+    """The name of a call (both `f(...)` and `mod.f(...)` are taken by their last component)."""
     if not isinstance(node, ast.Call):
         return None
     target = node.func
@@ -118,11 +127,12 @@ def _emit_function(source: str, name: str) -> ast.FunctionDef:
     for node in ast.parse(source).body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"{name} がモジュール直下に無い（台本の綴りが動いた）")
+    raise AssertionError(f"{name} is not at module level (the script's spelling moved)")
 
 
 def _staged_bodies(function: ast.FunctionDef) -> list[list[ast.stmt]]:
-    """作業席を開く `with` の本体（for の中に入っていても拾う）。"""
+    """The bodies of the `with` statements that open a staging directory (found inside a for loop
+    too)."""
     return [
         node.body
         for node in ast.walk(function)
@@ -148,23 +158,26 @@ class TestEmitPublishesThroughAStagedSeat:
 
     def test_it_opens_a_staged_seat(self, script: str, function: str) -> None:
         assert _staged_bodies(self._function(script, function)), (
-            f"{script}:{function} が作業席を開いていない — 生成物が final へ直接書かれる"
+            f"{script}:{function} opens no staging directory — the outputs are written straight"
+            " into final"
         )
 
     def test_every_write_happens_inside_that_seat(self, script: str, function: str) -> None:
-        """席の外に残った書き込みを、名前と行番号で名指しする。"""
+        """Names any write left outside the staging directory by name and line number."""
         node = self._function(script, function)
         inside = set().union(*(_writer_calls(body) for body in _staged_bodies(node)))
         outside = _writer_calls(node.body) - inside
 
         assert not outside, (
-            f"{script}:{function} が作業席の外で書いている {sorted(outside)} —"
-            "門より前に final へ置くと、落ちた実走が検収門を通れる資産を残す"
+            f"{script}:{function} writes outside the staging directory {sorted(outside)} —"
+            " placing in final before the checks lets a failed run leave an asset that can pass"
+            " the acceptance check"
         )
 
 
 class TestTheGateItselfCanFail:
-    """門が「何も見ずに緑」へ退化していないこと（対象表が空・述語が恒真の 2 つを潰す）。"""
+    """The check has not degenerated into "green without looking at anything" (rules out both an
+    empty target table and a vacuous predicate)."""
 
     def test_it_names_a_writer_left_outside_the_seat(self) -> None:
         source = (
@@ -184,17 +197,18 @@ class TestTheGateItselfCanFail:
         assert _staged_bodies(_emit_function(source, "export_series")) == []
 
     def test_every_listed_script_exists(self) -> None:
-        """対象表の綴りが動いたら（ファイル名変更・移動）ここで落ちる。"""
+        """Fails here when a spelling in the target table moves (a file renamed or moved)."""
         for script, _function in EMIT_ENTRIES:
             assert (RECIPES_ROOT / script).is_file(), script
 
 
-#: `_staged_target` の**定義そのもの**（ラッパは中で `staged_publication` を開くので、
-#: 走査すると「席を開くモジュール直下関数」として拾われる）。
+#: **The definition itself** of `_staged_target` (the wrapper opens `staged_publication` inside,
+#: so a scan would pick it up as "a module-level function that opens a staging directory").
 STAGING_WRAPPER_DEFINITIONS = frozenset({"_staged_target"})
 
-#: 走査する台本の綴り。`export*.py` に加えて、同じ family の派生モデルの台本
-#: `<派生>_export_<部品>.py`（`wan/ti2v_export_dit.py` — Wan2.2 TI2V の DiT）。
+#: The script name patterns scanned. Besides `export*.py`, the scripts of derived models of the
+#: same family, `<derived>_export_<component>.py` (`wan/ti2v_export_dit.py` — the Wan2.2 TI2V
+#: DiT).
 SCANNED_SCRIPTS = ("*/**/export*.py", "*/**/*_export_*.py")
 
 
@@ -203,10 +217,12 @@ def _scanned_scripts() -> list[Path]:
 
 
 def _staging_functions() -> set[tuple[str, str]]:
-    """作業席を開くモジュール直下関数を、ソース走査で列挙する（実在 → 表 の側）。
+    """List the module-level functions that open a staging directory by scanning the sources
+    (the existing → table side).
 
-    走査対象を台本の綴り（{@link SCANNED_SCRIPTS}）に限るのは、テスト用の疑似 `with` を偽陽性に
-    しないため（`sbv2/tests/test_export.py` は綴りが `test_` 始まりなので拾われない）。
+    The scan is limited to the script name patterns ({@link SCANNED_SCRIPTS}) so that the mock
+    `with` statements of tests do not become false positives (`sbv2/tests/test_export.py` starts
+    with `test_`, so it is not picked up).
     """
     found: set[tuple[str, str]] = set()
     for path in _scanned_scripts():
@@ -222,19 +238,22 @@ def _staging_functions() -> set[tuple[str, str]]:
 
 
 class TestEveryStagingScriptIsListed:
-    """実在 → 表 の逆方向（表 → 実在 だけだと、載せ忘れが永久に沈黙する）。"""
+    """The reverse direction, existing → table (with only table → existing, a missing entry stays
+    silent forever)."""
 
     def test_the_scan_finds_the_scripts(self) -> None:
-        """走査が 0 本なら、この門は恒真になる。"""
+        """If the scan finds nothing, this check is vacuous."""
         assert len(_staging_functions()) >= 19
 
     def test_the_scan_reaches_the_derived_model_scripts(self) -> None:
-        """`<派生>_export_<部品>.py` の綴りも走査に入る（`export*.py` だけだと漏れる）。"""
+        """The `<derived>_export_<component>.py` pattern is scanned too (`export*.py` alone would
+        miss it)."""
         assert ("wan/ti2v_export_dit.py", "write_series") in _staging_functions()
 
     def test_the_ti2v_writer_has_writes_for_the_gate_to_see(self) -> None:
-        """TI2V の `write_series` の書き込み（容器と golden）が書き手の名前の表に掛かる —
-        掛からないと「書いている場所」を 1 つも見ないまま緑になる。"""
+        """The writes of TI2V's `write_series` (the container and the goldens) match the table of
+        writer names — otherwise it would go green without looking at a single "place that
+        writes"."""
         node = _emit_function(
             (RECIPES_ROOT / "wan/ti2v_export_dit.py").read_text(encoding="utf-8"), "write_series"
         )
@@ -245,6 +264,7 @@ class TestEveryStagingScriptIsListed:
         missing = sorted(_staging_functions() - set(EMIT_ENTRIES))
 
         assert missing == [], (
-            f"作業席を開いているのに公開規律の門が掛かっていない台本がある: {missing} —"
-            " EMIT_ENTRIES へ足す（表に無い台本は「門より前に final へ置く」形に戻せる）"
+            f"scripts that open a staging directory but have no publication-rule check: {missing}"
+            " — add them to EMIT_ENTRIES (a script outside the table could go back to placing in"
+            " final before the checks)"
         )

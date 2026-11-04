@@ -1,19 +1,21 @@
-"""recipe のテストが part 列（`ir_fixtures` の戻り）を系列 / 配布形として扱うための糊。
+"""Glue that lets the recipe tests treat a part list (what `ir_fixtures` returns) as a series /
+distribution.
 
-配布形は常に分割される（container-v1 §8）ので、`ir_fixtures.ir_container` が返すのは 1 ファイル
-ぶんのバイト列ではなく **part 列**（part 0 = 2 文書・part 1 = const 領域・part 2 以降 = 重み）に
-なる。系列側へ置くにも、組み立て後の現物と突き合わせるにも、代表 path から連番 path を導く
-同じ 1 本の綴りが要る — それが `karume.container` の連番規約なので、ここが持つのはその薄い
-呼び出しだけである。
+The distribution is always split (container-v1 §8), so `ir_fixtures.ir_container` returns not the
+bytes of one file but a **part list** (part 0 = the 2 documents, part 1 = the const region, part 2
+onward = weights). Placing it into a series and matching it against what assembly produced both
+need the same single spelling that derives the numbered paths from the representative path — that
+is the numbering convention of `karume.container`, so all this module holds is a thin call into it.
 
-置き場がここ 1 箇所なのは、7 家族の `tests/test_distribution.py` が同じ 3 手を踏むため
-（系列へ書く / 期待 path を並べる / 置かれた現物を読む）。連番の綴りを各 family へ写すと、
-分割規則が動いた日にテストだけが古びる。`tools/export-recipes/conftest.py` がこのディレクトリを
-sys.path へ張る（`ir_fixtures` と同じ経路）。
+It lives in this one place because the `tests/test_distribution.py` of 7 families take the same 3
+steps (write into the series / list the expected paths / read what was placed). Copying the
+numbering spelling into each family would leave only the tests stale on the day the split rule
+changes. `tools/export-recipes/conftest.py` puts this directory on sys.path (the same route as
+`ir_fixtures`).
 
-MUST: 正当なコンポーネントの代表 path 自身（`model.krm`）は**書かない** — 単一ファイルと
-連番の同居は「どちらを配るか」が一意に決まらないので `karume.container.container_parts` が
-fail loudly する。
+MUST: the representative path of a valid component itself (`model.krm`) is **not written** — a
+single file next to numbered parts leaves "which one to distribute" undetermined, so
+`karume.container.container_parts` fails loudly.
 """
 
 from __future__ import annotations
@@ -36,22 +38,25 @@ from karume.emit import FixedQuantizedWeight, stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.publish import publish_container
 
-#: `ir_fixtures.ir_container` の戻りが割れる part 本数（2 文書 + const 領域 + 重み 1 part）。
-#: 合成の資産は数 KB なので重みは 1 part に収まるが、**常時分割**（container-v1 §8）なので
-#: 1 本きりにはならない。ここが狂えば期待 path の突合（{@link placed_paths}）がそのまま落ちる。
+#: The number of parts the return value of `ir_fixtures.ir_container` splits into (2 documents +
+#: the const region + 1 weight part). The synthetic assets are a few KB, so the weights fit in one
+#: part, but splitting is **always on** (container-v1 §8), so it is never a single file. If this
+#: drifts, the match of the expected paths ({@link placed_paths}) fails directly.
 CONTAINER_PARTS = 3
 
 
 def write_component(path: Path, payload: bytes | Sequence[bytes]) -> None:
-    """代表 path が指すコンポーネントを系列へ置く（親ディレクトリごと作る）。
+    """Place the component the representative path points at into the series (creating the parent
+    directories).
 
-    形は 2 つあり、どちらを渡すかがそのまま「実物どおりの配布形か、門に落とすための偽資産か」の
-    区別になる:
+    There are 2 forms, and which one is passed is exactly the distinction between "a real
+    distribution form" and "a fake asset meant to fail a check":
 
-    - `Sequence[bytes]`（`ir_fixtures` の戻り）は **part 連番**へ書く。読む順そのままで、
-      先頭が part 0（ヘッダ + 2 文書）。
-    - `bytes` は代表 path **自身**へ 1 本で書く。これは容器として開く前段（計画の門）で止まる
-      ことを見るための偽資産の席で、連番にする理由が無い。
+    - `Sequence[bytes]` (what `ir_fixtures` returns) is written as **numbered parts**. In reading
+      order, the first is part 0 (header + 2 documents).
+    - `bytes` is written as one file at the representative path **itself**. This is the slot for a
+      fake asset that checks the stop before the file is opened as a container (the plan check),
+      so there is no reason to number it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(payload, bytes):
@@ -63,11 +68,13 @@ def write_component(path: Path, payload: bytes | Sequence[bytes]) -> None:
 
 
 def replace_component(path: Path, payload: bytes | Sequence[bytes]) -> None:
-    """既に置かれているコンポーネントを**別の中身へ差し替える**（前の形の現物を消してから書く）。
+    """**Replace** a component already in place with other contents (removing the files of the
+    previous form before writing).
 
-    系列の 1 席だけを取り違えた資産へ差し替えて門を試す、という形の席。単一ファイルと連番の
-    同居は `karume.container.container_parts` が fail loudly するので、前の形（分割 / 単一）の
-    現物を先に払わないと、**試したい門の手前で別の理由で落ちる**。
+    The slot for testing a check by swapping just one slot of the series for a mismatched asset.
+    `karume.container.container_parts` fails loudly on a single file next to numbered parts, so
+    unless the files of the previous form (split / single) are cleared first, the test **fails for
+    another reason before it reaches the check it means to exercise**.
     """
     for stale in sequence_siblings(path):
         stale.unlink()
@@ -75,21 +82,25 @@ def replace_component(path: Path, payload: bytes | Sequence[bytes]) -> None:
 
 
 def read_component(path: Path) -> list[bytes]:
-    """代表 path が指すコンポーネントの現物を、読む順の part バイト列として返す。
+    """Return the files of the component the representative path points at as part bytes in
+    reading order.
 
-    `write_component` の逆で、`ir_fixtures` の戻り（`list[bytes]`）とそのまま比較できる。
+    The inverse of `write_component`; comparable as is with what `ir_fixtures` returns
+    (`list[bytes]`).
     """
     return [part.read_bytes() for part in container_parts(path)]
 
 
 def i2_container(*, named: str) -> list[bytes]:
-    """重み 1 本を `int2-off`（layout `i2`）で持つ最小の正当なコンテナの part 列。
+    """The part list of the smallest valid container that holds one weight as `int2-off` (layout
+    `i2`).
 
-    `ir_fixtures.ir_container` は `karume.emit.WEIGHT_DTYPES`（f32 / f16 / bf16 / i8 / i4）しか
-    書けないが、格納の門が見る語彙は codec 台帳の layout 全体で、i2 は QAT 系列（固定の packed 値 —
-    `FixedQuantizedWeight`）だけが持つ。その系列 root を素の f32 席へ取り違えたときに禁止表が
-    落とすことを、**本物の束縛表**で試すための席（scale の companion が f32 なので「f32 を
-    含む」も真になり、要求検査は素通りする — 実物の圧縮系列と同じ形）。
+    `ir_fixtures.ir_container` can only write `karume.emit.WEIGHT_DTYPES` (f32 / f16 / bf16 / i8 /
+    i4), but the vocabulary the storage check looks at is every layout of the codec table, and only
+    QAT series (fixed packed values — `FixedQuantizedWeight`) have i2. This is the slot for testing,
+    **with a real binding table**, that the forbidden table fails such a series root mistaken for a
+    plain f32 slot (the scale companion is f32, so "contains f32" is also true and the requirement
+    check passes — the same shape as a real compressed series).
     """
     graph = IrGraph(
         symbols=[],
@@ -121,7 +132,7 @@ def i2_container(*, named: str) -> list[bytes]:
 
 
 def part_paths(rel_path: str, total: int = CONTAINER_PARTS) -> list[str]:
-    """代表の相対 path → 配布形に現れる連番 path 列。"""
+    """Representative relative path → the numbered paths that appear in the distribution."""
     return [numbered_name(rel_path, index, total) for index in range(1, total + 1)]
 
 
@@ -130,14 +141,17 @@ def placed_paths(
     weights: Mapping[str, Mapping[str, WeightFiles]],
     totals: Mapping[str, int] = {},
 ) -> list[str]:
-    """出力 path 表 → 配布形に現れる相対 path 列（**weights の席だけ**を連番へ展開する）。
+    """Output path table → the relative paths that appear in the distribution (**only the weights
+    slots** are expanded into numbered parts).
 
-    展開が掛かる席の判定は `karume.dist.expand_weight_parts` と同じ導出 — weights 宣言が
-    指す役割名の集合で、assets の席（1 ファイル参照）はそのまま残る。recipe 側で「どの役割が
-    分割されるか」を手で列挙すると、席が増えた日に期待値だけが古びる。
+    Which slots get expanded is derived the same way as `karume.dist.expand_weight_parts` — the set
+    of role names the weights declaration points at; the assets slots (single-file references) stay
+    as they are. Listing by hand on the recipe side "which roles get split" would leave only the
+    expected values stale on the day a slot is added.
 
-    `totals` は役割名 → part 本数の上書き（既定は {@link CONTAINER_PARTS}）— 資産を同梱する
-    容器は専用 part がその分だけ増えるので、席ごとに本数が違う family がここで名乗る。
+    `totals` overrides the part count per role name (the default is {@link CONTAINER_PARTS}) — a
+    container that bundles assets gains dedicated parts for them, so a family whose slots differ in
+    part count declares it here.
     """
     expanded = {files.file for labels in weights.values() for files in labels.values()}
     return [

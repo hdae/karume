@@ -1,13 +1,14 @@
-"""Depth Anything V2 配布形のモデルカード描画（`depth_anything.card`）。
+"""Model card rendering of the Depth Anything V2 distribution (`depth_anything.card`).
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。
+The real distribution's `karume.json` is not used — the job here is to see that the fake
+manifest's values reach the body as they are (= not a single hand-written number is mixed in), so
+building it from values that **differ** from the real ones detects more.
 
-manifest からの導出（表・数・使い方）は `depth_anything/tests/test_distribution.py` の
-`TestDepthAnythingModelCard` が**組み立て 1 周ぶん**で見る。ここが持つのはカード側にしか無い
-門 — テンプレートの pipeline 固有性と、帰属表に無いサイズを描かないこと、そして案内する
-ロード入口。
+The derivation from the manifest (tables, numbers, usage) is checked by
+`TestDepthAnythingModelCard` in `depth_anything/tests/test_distribution.py` over **one full
+assembly run**. What this file holds are the checks that exist only on the card side — the
+template's pipeline specificity, not rendering a size missing from the attribution table, and the
+loading entry point the card advertises.
 """
 
 from __future__ import annotations
@@ -24,12 +25,13 @@ from depth_anything.card import (
     render_depth_anything_model_card,
 )
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: The repository ID spelled in the usage snippet (dist passes it from the pipeline declaration).
 REPO = "hdae/fake-repo"
 
-#: 別 family の pipeline 契約（**綴りをそのまま持つ** — recipe 間のコード結合を作らないため）。
-#: 2 つの実在テンプレートが互いの manifest を拒むことは `sbv2/tests/test_card.py` が
-#: 両向きで見る。ここが要るのは「自分の契約以外を拒む」という 1 方向だけ。
+#: Another family's pipeline contract (**the spelling is held as is** — so that no code coupling
+#: between recipes is created). That two real templates reject each other's manifests is checked
+#: in both directions by `sbv2/tests/test_card.py`. Only one direction is needed here: "reject
+#: every contract other than its own".
 FOREIGN_PIPELINE = "siglip2/1"
 
 
@@ -38,9 +40,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype's worth of weights (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so only its shape follows the real thing (the lengths
+    and sha256 of the 2 documents).
     """
     return {
         "container": {
@@ -54,7 +57,8 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _depth_anything_manifest(model: str = "small") -> dict[str, Any]:
-    """Depth Anything V2 の最小 manifest（値は実物と重ならない偽値）。"""
+    """A minimal Depth Anything V2 manifest (fake values that do not overlap with the real
+    ones)."""
     return {
         "format": "karume/5",
         "generator": "karume/9.9.9",
@@ -88,8 +92,9 @@ class TestDepthAnythingCardGate:
             render_depth_anything_model_card(manifest, REPO)
 
     def test_it_refuses_a_size_it_cannot_attribute(self) -> None:
-        """帰属表に無いサイズで描くと、CC BY-NC 4.0 の重みが Apache-2.0 の frontmatter を
-        まとったカードになる（`DEPTH_ANYTHING_UPSTREAM` の MUST）。既知の一覧を添えて落とす。
+        """Rendering a size missing from the attribution table would put CC BY-NC 4.0 weights
+        under an Apache-2.0 frontmatter (the MUST of `DEPTH_ANYTHING_UPSTREAM`). It fails with
+        the list of known sizes.
         """
         for size in ("base", "large"):
             with pytest.raises(ValueError, match=size):
@@ -104,30 +109,33 @@ class TestDepthAnythingCardGate:
         assert manifest == before
 
     def test_the_attribution_table_only_holds_apache_licensed_sizes(self) -> None:
-        """配れるサイズの表 = ライセンスの門（`depth_anything.distribution` の冒頭の MUST）。
+        """The table of shippable sizes = the licence check (the MUST at the top of
+        `depth_anything.distribution`).
 
-        表を広げるときは `DEPTH_ANYTHING_LICENSE`（今は 1 値）をモデル単位へ割る改修と
-        セットなので、ここが「広がったこと」を検出する席になる。
+        Widening the table goes together with splitting `DEPTH_ANYTHING_LICENSE` (one value
+        today) per model, so this is the place that detects that it was widened.
         """
         assert sorted(DEPTH_ANYTHING_UPSTREAM) == ["small"]
         assert DEPTH_ANYTHING_LICENSE == "apache-2.0"
 
     def test_the_title_comes_from_the_upstream_checkpoint_name(self) -> None:
-        """見出しのサイズは帰属表 1 本から導く（2 表にすると別サイズとして売れてしまう）。"""
+        """The size in the title is derived from the one attribution table (with two tables a
+        card could sell one size as another)."""
         card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
         assert "# Depth Anything V2 Small — Karume" in card
 
 
 class TestDepthAnythingEntryPoint:
-    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+    """The loading entry point the card advertises — `fromPretrained` only."""
 
     def test_it_does_not_advertise_the_local_asset_entry_point(self) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）。
+        """`fromAssets` is not advertised (ruling of 2026-08-29).
 
-        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
-        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
-        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
-        見るのは、Usage ごと消えても通る門にしないため。
+        The split distribution can now be read as well (X2-101), but that is a surface for local
+        debugging that assumes you hold the bytes yourself; the ordinary entry point for readers
+        using HF is `fromPretrained`. Showing both would leave readers to decide which one to
+        use. `fromPretrained` is checked too so that the check does not pass when the whole Usage
+        section disappears.
         """
         card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
         assert "fromAssets" not in card

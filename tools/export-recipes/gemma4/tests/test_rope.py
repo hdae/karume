@@ -1,24 +1,28 @@
-"""RoPE の式（`gemma4/rope.py`）と、上流実装との**位置比例の許容差**での突合。
+"""The RoPE formula (`gemma4/rope.py`) and its comparison with the upstream implementation within
+a **position-proportional tolerance**.
 
-RoPE 表はもうグラフに焼かない（ホストが宣言から組む）ので、正しさの根拠は「表を上流の
-出力そのものにした」ことから「**式が上流と同じ角度を作る**」ことへ移った。ここが縛るのは
-その 2 本:
+The RoPE tables are no longer baked into the graph (the host builds them from the declaration), so
+the basis of correctness moved from "the table is upstream's output itself" to "**the formula
+produces the same angles as upstream**". This file pins those two:
 
-- {@link gemma4.rope.rope_specs} が上流 config から theta / headDim / rotaryDim を導けること
-  （full 層だけ `global_head_dim` を読む枝を含む）と、写せない宣言を fail loudly で落とすこと
-- {@link gemma4.rope.rope_rows} が上流 `Gemma4TextRotaryEmbedding` の実出力と、位置に比例する
-  許容差の内側で一致すること
+- {@link gemma4.rope.rope_specs} derives theta / headDim / rotaryDim from the upstream config
+  (including the branch where only full layers read `global_head_dim`), and fails loudly on a
+  declaration it cannot mirror
+- {@link gemma4.rope.rope_rows} matches the actual output of upstream `Gemma4TextRotaryEmbedding`
+  within a tolerance proportional to the position
 
-MUST: 突合の相手は**上流モジュールの実出力**（同じ式を 2 回書いて比べない）。恒真でないこと
-は故障注入（位置ずらし・層種入れ替え・theta 差し替え・rotaryDim 差し替え）で裏を取る。
+MUST: the comparison target is **the actual output of the upstream module** (not the same formula
+written twice). That it is not vacuous is backed by fault injections (shifted position, swapped
+layer type, replaced theta, replaced rotaryDim).
 
-MUST: ビット一致では見ない。上流は inv_freq も角度も cos / sin も全部 f32 で通すので、f64 で
-組んでから丸めた値とは必ず食い違う（`gemma4.rope` の module docstring）。許容差は
-{@link atol_for} — 定数項が cos / sin の 1 ULP（5.96e-8）の数倍、位置比例項が「角度の f32
-表現誤差 × 導関数」の実測（P=131,071 で 4.8e-3）に約 2 倍の余裕を持たせた線。
+MUST: no bit-exact comparison. Upstream runs inv_freq, the angles and cos / sin all in f32, so it
+always differs from values built in f64 and then rounded (the module docstring of `gemma4.rope`).
+The tolerance is {@link atol_for} — a constant term of a few times the 1 ULP of cos / sin
+(5.96e-8), and a position-proportional term set with about 2× headroom over the measured "f32
+representation error of the angle × derivative" (4.8e-3 at P=131,071).
 
-transformers を要するので、上流を呼ぶケースは `importorskip` で SKIP する（ADR 0065 の
-2 job 構成）。
+The cases that call upstream need transformers, so they SKIP through `importorskip` (the two-job
+setup of ADR 0065).
 """
 
 from __future__ import annotations
@@ -35,17 +39,20 @@ import pytest
 from gemma4 import rope
 from gemma4.tests import rope_fixture
 
-#: 許容差の 2 項（定数 = 実装差の 1 ULP 数個ぶん / 位置比例 = 角度の f32 表現誤差ぶん）。
+#: The two terms of the tolerance (constant = a few ULPs of implementation difference /
+#: position-proportional = the f32 representation error of the angle).
 ATOL_BASE = 2.5e-7
 ATOL_PER_POSITION = 1.2e-7
 
-#: 突合に踏む位置。散点（{@link rope_fixture.FIXTURE_POSITIONS}）に加えて**連続 0..64** も
-#: 見る — 散点だけだと「先頭と上限だけ合う」形（周波数の並びが逆など）が素通りしうる。
+#: The positions compared. Besides the scattered points ({@link rope_fixture.FIXTURE_POSITIONS}),
+#: **the contiguous 0..64** are checked too — scattered points alone could let through a form that
+#: "matches only at the start and the limit" (frequencies in reverse order, for example).
 CONTIGUOUS_POSITIONS: tuple[int, ...] = tuple(range(65))
 
-#: 手写しの宣言（{@link rope_fixture.E2B_TEXT_CONFIG_FIELDS}）を実物へ結ぶ欄。RoPE の角度に
-#: 効くのはこの 4 つで、残りの欄は rotary モジュールを組むための足場（層数・hidden_size など）
-#: なので cos / sin の値には効かない。
+#: The fields that tie the hand-copied declaration ({@link rope_fixture.E2B_TEXT_CONFIG_FIELDS})
+#: to the real checkpoint. Only these 4 affect the RoPE angles; the other fields are scaffolding
+#: for building the rotary module (layer count, hidden_size and so on) and do not affect the
+#: cos / sin values.
 UPSTREAM_ROPE_FIELDS: tuple[str, ...] = (
     "max_position_embeddings",
     "head_dim",
@@ -55,24 +62,25 @@ UPSTREAM_ROPE_FIELDS: tuple[str, ...] = (
 
 
 def atol_for(position: int) -> float:
-    """位置 1 つの許容差（位置に比例して開く）。"""
+    """The tolerance at one position (it widens in proportion to the position)."""
     return ATOL_BASE + position * ATOL_PER_POSITION
 
 
 def assert_rope_parity(
     got: np.ndarray, want: np.ndarray, positions: Sequence[int], where: str
 ) -> None:
-    """要素ごとに `atol(pos)` で突合する（一番外れた要素を診断に出す）。"""
+    """Compares element by element within `atol(pos)` (the worst element goes into the
+    diagnostic)."""
     if got.shape != want.shape:
-        raise AssertionError(f"{where}: 形が {got.shape} — 上流は {want.shape}")
+        raise AssertionError(f"{where}: shape is {got.shape} — upstream's is {want.shape}")
     tolerance = np.array([atol_for(position) for position in positions], dtype=np.float64)
     difference = np.abs(got.astype(np.float64) - want.astype(np.float64))
     excess = difference / tolerance[:, None]
     row, column = np.unravel_index(int(excess.argmax()), excess.shape)
     if excess[row, column] > 1.0:
         raise AssertionError(
-            f"{where}: 位置 {positions[row]} の列 {column} が {difference[row, column]:.3e} 差"
-            f"（許容 {tolerance[row]:.3e}）"
+            f"{where}: position {positions[row]}, column {column} differs by"
+            f" {difference[row, column]:.3e} (tolerance {tolerance[row]:.3e})"
         )
 
 
@@ -83,7 +91,8 @@ def e2b_config():
 
 
 class TestRopeSpecs:
-    """宣言の導出 — 値を 1 つも写経せず、写せない宣言は落とす。"""
+    """Deriving the declaration — no value is copied by hand, and a declaration that cannot be
+    mirrored fails."""
 
     def test_it_derives_both_layer_types_from_the_upstream_config(self, e2b_config) -> None:
         specs = rope.rope_specs(e2b_config)
@@ -91,20 +100,22 @@ class TestRopeSpecs:
         assert specs[rope.SLIDING_ATTENTION] == rope.RopeLayerSpec(
             theta=10000.0, head_dim=256, rotary_dim=256
         )
-        # full 層だけ `global_head_dim`（512）を読み、`proportional` は先頭 128 本だけが回る。
+        # Only full layers read `global_head_dim` (512), and `proportional` rotates only the first
+        # 128.
         assert specs[rope.FULL_ATTENTION] == rope.RopeLayerSpec(
             theta=1000000.0, head_dim=512, rotary_dim=128
         )
 
     def test_the_order_follows_the_layer_type_order(self, e2b_config) -> None:
-        """出現順（先頭は sliding）— グラフ入力の並びと同じ根拠を持つ。"""
+        """Order of appearance (sliding first) — the same basis as the order of the graph inputs."""
         assert list(rope.rope_specs(e2b_config)) == [
             rope.SLIDING_ATTENTION,
             rope.FULL_ATTENTION,
         ]
 
     def test_it_falls_back_to_the_derived_head_dim(self) -> None:
-        """`head_dim` を持たない config は `hidden_size / num_attention_heads`（上流と同文）。"""
+        """A config without `head_dim` uses `hidden_size / num_attention_heads` (the same as
+        upstream)."""
         config = SimpleNamespace(
             hidden_size=64,
             num_attention_heads=4,
@@ -126,7 +137,8 @@ class TestRopeSpecs:
     def test_it_refuses_a_declaration_it_cannot_mirror(
         self, override: dict[str, object], message: str
     ) -> None:
-        """MUST: 式が別物なのに theta と幅だけ写すと、ホストが別の角度で表を組む。"""
+        """MUST: mirroring only theta and the width when the formula is a different one would make
+        the host build the table with other angles."""
         config = SimpleNamespace(
             head_dim=16,
             hidden_size=64,
@@ -161,7 +173,8 @@ class TestRopeSpecs:
 
 class TestInverseFrequencies:
     def test_the_nope_tail_is_exactly_zero(self) -> None:
-        """`proportional` の零周波数は cos = 1 / sin = 0 の定数列になる席（full 層の 192 本）。"""
+        """The zero frequencies of `proportional` are the slots that become constant columns of
+        cos = 1 / sin = 0 (192 of them on full layers)."""
         spec = rope.RopeLayerSpec(theta=1e6, head_dim=512, rotary_dim=128)
 
         frequencies = rope.inverse_frequencies(spec)
@@ -171,7 +184,8 @@ class TestInverseFrequencies:
         assert not frequencies[64:].any()
 
     def test_the_row_repeats_its_first_half(self) -> None:
-        """行は `cat(freqs, freqs)`（上流と同じ並び）— 前半と後半が同一。"""
+        """A row is `cat(freqs, freqs)` (the same order as upstream) — the two halves are
+        identical."""
         spec = rope.RopeLayerSpec(theta=1e4, head_dim=16, rotary_dim=16)
 
         cos, sin = rope.rope_rows(spec, [7])
@@ -187,7 +201,8 @@ class TestInverseFrequencies:
         assert np.array_equal(sin[0], np.zeros(8, dtype=np.float32))
 
     def test_the_rows_are_stored_as_float32(self) -> None:
-        """格納だけ f32（計算は f64）— TS 側が f32 の表を渡す契約と同じ。"""
+        """Only the storage is f32 (the computation is f64) — the same contract as the TS side
+        passing f32 tables."""
         cos, sin = rope.rope_rows(rope.RopeLayerSpec(theta=1e4, head_dim=8, rotary_dim=8), [1, 2])
 
         assert cos.dtype == np.float32
@@ -195,7 +210,8 @@ class TestInverseFrequencies:
 
 
 class TestUpstreamParity:
-    """上流実装との突合（**恒真でない**ことは下の故障注入が裏を取る）。"""
+    """Comparison with the upstream implementation (the fault injections below back that it is
+    **not vacuous**)."""
 
     @pytest.fixture
     def upstream(self, e2b_config):
@@ -224,13 +240,16 @@ class TestUpstreamParity:
         assert_rope_parity(sin, want_sin, positions, f"{layer_type} sin")
 
     def test_the_tolerance_is_not_slack(self, e2b_config, upstream) -> None:
-        """許容差が実測の何倍かを固定する — 緩めすぎれば故障注入も通ってしまう。
+        """Pins how many times the measurement the tolerance is — too loose and the fault injections
+        pass as well.
 
-        見るのは fixture の 13 点での最悪比（実測 0.548 = 余裕 1.8 倍・full sin の P=511）。
-        上限 0.9 は「余裕が 1.1 倍を切ったら上流の f32 誤差が想定より大きい」線で、位置
-        0..131,071 を全掃引したときの最悪比 0.756（余裕 1.3 倍）もその内側に入る。下限 0.01 は
-        逆に緩すぎる側（余裕 100 倍）を落とす。{@link ATOL_PER_POSITION} は角度の f32 表現誤差の
-        **上界**から採った係数なので、この比を理由に動かさない（動かすなら前提の側を採り直す）。
+        What is checked is the worst ratio over the fixture's 13 points (measured 0.548 = 1.8×
+        headroom, at P=511 of full sin). The upper bound 0.9 is the line "below 1.1× headroom,
+        upstream's f32 error is larger than assumed", and the worst ratio over a full sweep of
+        positions 0..131,071, 0.756 (1.3× headroom), is inside it too. The lower bound 0.01
+        rejects the opposite, too-loose side (100× headroom). {@link ATOL_PER_POSITION} is a
+        coefficient taken from an **upper bound** of the angle's f32 representation error, so do
+        not move it because of this ratio (to move it, retake the premise instead).
         """
         positions = rope_fixture.FIXTURE_POSITIONS
         worst = 0.0
@@ -242,10 +261,11 @@ class TestUpstreamParity:
                 for row, position in enumerate(positions):
                     worst = max(worst, float(difference[row].max()) / atol_for(position))
 
-        assert 0.01 < worst < 0.9, f"許容差に対する実測の比が {worst}"
+        assert 0.01 < worst < 0.9, f"the ratio of the measurement to the tolerance is {worst}"
 
     def test_a_position_shifted_by_one_is_rejected(self, e2b_config, upstream) -> None:
-        """故障注入: 位置を 1 ずらす（表引き時代の「行がずれた表」と同じ壊れ方）。"""
+        """Fault injection: shift the position by 1 (the same breakage as a "table with shifted
+        rows" in the table-lookup era)."""
         positions = rope_fixture.FIXTURE_POSITIONS
         spec = rope.rope_specs(e2b_config)[rope.SLIDING_ATTENTION]
         want_cos, _ = upstream(positions)[rope.SLIDING_ATTENTION]
@@ -256,18 +276,20 @@ class TestUpstreamParity:
             assert_rope_parity(cos, want_cos, positions, "shifted")
 
     def test_a_table_built_for_the_other_layer_type_is_rejected(self, e2b_config, upstream) -> None:
-        """故障注入: 層種を入れ替える（theta も幅も違うので形の段で落ちる）。"""
+        """Fault injection: swap the layer type (theta and the width both differ, so it fails at the
+        shape stage)."""
         positions = rope_fixture.FIXTURE_POSITIONS
         specs = rope.rope_specs(e2b_config)
         want_cos, _ = upstream(positions)[rope.FULL_ATTENTION]
 
         cos, _ = rope.rope_rows(specs[rope.SLIDING_ATTENTION], positions)
 
-        with pytest.raises(AssertionError, match="形が"):
+        with pytest.raises(AssertionError, match="shape is"):
             assert_rope_parity(cos, want_cos, positions, "swapped")
 
     def test_a_wrong_theta_is_rejected(self, e2b_config, upstream) -> None:
-        """故障注入: full 層の theta を 1e6 → 1e5 に（幅も並びも合ったまま角度だけ違う）。"""
+        """Fault injection: full-layer theta 1e6 → 1e5 (the width and the order still match, only
+        the angles differ)."""
         positions = rope_fixture.FIXTURE_POSITIONS
         spec = replace(rope.rope_specs(e2b_config)[rope.FULL_ATTENTION], theta=1e5)
         want_cos, _ = upstream(positions)[rope.FULL_ATTENTION]
@@ -278,7 +300,8 @@ class TestUpstreamParity:
             assert_rope_parity(cos, want_cos, positions, "theta")
 
     def test_a_full_rotary_dim_on_the_partial_layer_is_rejected(self, e2b_config, upstream) -> None:
-        """故障注入: full 層の rotaryDim を headDim に（零周波数 192 本が回り出す）。"""
+        """Fault injection: full-layer rotaryDim set to headDim (the 192 zero frequencies start
+        rotating)."""
         positions = rope_fixture.FIXTURE_POSITIONS
         spec = rope.rope_specs(e2b_config)[rope.FULL_ATTENTION]
         broken = replace(spec, rotary_dim=spec.head_dim)
@@ -291,13 +314,15 @@ class TestUpstreamParity:
 
 
 class TestFixture:
-    """TS 側へ渡すフィクスチャが**いま**の上流と同じであること。"""
+    """The fixture handed to the TS side matches upstream **as it is now**."""
 
     def test_the_checked_in_fixture_is_what_the_generator_writes(self, e2b_config) -> None:
-        """MUST: 再生成して**同じ内容** — 古びたフィクスチャは TS 側の門を静かに無意味にする。
+        """MUST: regenerating gives **the same contents** — a stale fixture quietly makes the TS
+        side's check meaningless.
 
-        整形はリポのフォーマッタが正（2026-10-16 以降は Oxfmt が JSON も整形し、短い配列を
-        1 行に畳む）なので、バイト列ではなく JSON の値で比べる。書き直したら `vp fmt` を掛ける。
+        The repository's formatter owns the layout (since 2026-10-16 Oxfmt formats JSON too and
+        folds short arrays onto one line), so the JSON values are compared, not the bytes. After
+        rewriting, run `vp fmt`.
         """
         stored = rope_fixture.FIXTURE_PATH.read_text(encoding="utf-8")
 
@@ -314,15 +339,16 @@ class TestFixture:
 
     @pytest.mark.skipif(
         not rope_fixture.E2B_CONFIG_PATH.exists(),
-        reason=f"上流チェックポイントが無い（{rope_fixture.E2B_CONFIG_PATH}）",
+        reason=f"no upstream checkpoint ({rope_fixture.E2B_CONFIG_PATH})",
     )
     def test_the_declaration_matches_the_upstream_checkpoint(self) -> None:
-        """MUST（`rope_fixture` の module docstring）: 手写しの宣言は実物の `config.json` と
-        同じ数を持つ。
+        """MUST (the module docstring of `rope_fixture`): the hand-copied declaration holds the same
+        numbers as the real `config.json`.
 
-        上の 2 本は「フィクスチャが宣言どおり」までしか見ない — 宣言そのものが実物とずれると、
-        フィクスチャ・TS 実装・Python 実装の三者は自己整合したまま**配布形とだけ**食い違う
-        （上流が E2B の theta を変えた版を出したときの壊れ方）。
+        The two tests above only check "the fixture follows the declaration" — if the declaration
+        itself drifts from the real checkpoint, the fixture, the TS implementation and the Python
+        implementation stay consistent with each other and disagree **only with the distributed
+        form** (the breakage when upstream ships a version that changes E2B's theta).
         """
         text_config = json.loads(rope_fixture.E2B_CONFIG_PATH.read_text(encoding="utf-8"))[
             "text_config"
@@ -332,7 +358,8 @@ class TestFixture:
             assert rope_fixture.E2B_TEXT_CONFIG_FIELDS[field] == text_config[field], field
 
     def test_the_tables_decode_to_the_declared_shape(self) -> None:
-        """base64 は f32 リトルエンディアンの `positions × headDim`（TS 側の読み方の前提）。"""
+        """The base64 is little-endian f32 `positions × headDim` (the premise of how the TS side
+        reads it)."""
         stored = json.loads(rope_fixture.FIXTURE_PATH.read_text(encoding="utf-8"))
         rows = len(stored["positions"])
 

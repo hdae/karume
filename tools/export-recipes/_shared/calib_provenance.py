@@ -1,23 +1,27 @@
-"""i4 系列の校正条件（`calib_provenance.json`）が配布に足りるかの判定（ADR 0065 決定 2）。
+"""Decide whether the calibration conditions of an i4 series (`calib_provenance.json`) are good
+enough for distribution (ADR 0065 decision 2).
 
-校正の方式も予算も**格納形を 1 バイトも変えない**（格子は RTN i4 g32 のまま — 変わるのは
-丸め値と scale 台帳だけ）ので、`verify_dist` の構造検査も束縛表の格納検査（`assert_storage`）も
-素通りする。
-判別できる事実は「書き出した側が残した記録」1 つきりで、その記録を読む席は
-`irodori.distribution`（配布の組み立て）・`irodori.pipeline_ref`（golden の焼き直し）・
-`anima.distribution`（同じく組み立て）の 3 つある。
+Neither the calibration method nor its budget **changes the storage by a single byte** (the grid
+stays RTN i4 g32 — only the rounded values and the scale ledger change), so both the structural
+check of `verify_dist` and the storage check of the binding table (`assert_storage`) let them
+through.
+The only fact that tells them apart is "the record the writer left", and three places read that
+record: `irodori.distribution` (assembling the distribution), `irodori.pipeline_ref` (rebuilding
+the golden) and `anima.distribution` (assembling likewise).
 
-MUST: **判定の正本はここ 1 本**（読み手はこれを呼んで、家族固有の後始末だけを足す）。
-3 箇所に写すと、片方の門だけを強めた日にもう片方が黙って弱くなる — 実際、方式 1 欄だけを
-見ていた時期に「smoke 予算（`--calib-steps 1`）で焼いた資産」が 3 つとも素通りした
-（2026-08-24 レビュー Ca17）。`_shared.decode_series` と同じ理由。
+MUST: **this module is the single source of truth for the decision** (readers call it and add
+only their family-specific follow-up). With three copies, the day one check is tightened the
+others silently become weaker — in fact, while only the method field was examined, "assets
+built with the smoke budget (`--calib-steps 1`)" passed all three (review Ca17 of 2026-08-24).
+Same reason as `_shared.decode_series`.
 
-MUST: **欄が無い記録は受理する**。欄は後から足せる（anima の `guidance` は 2026-08-23 に
-足した）ので、存在を要求すると 1 行の追加が既存系列へ「丸め時間ぶんの再 export」を課す
-ことになる。在る欄だけを見て、**予算は下限で・モデル条件は一致で**判定する。
+MUST: **a record without a field is accepted**. Fields can be added later (anima's `guidance` was
+added on 2026-08-23), so requiring their presence would make a one-line addition impose "a
+re-export costing the rounding time" on every existing series. Only the fields present are
+examined: **budgets against a lower bound, model conditions by equality**.
 
-依存方向は recipe → core の一方向だけ（`_shared` は family を import しない）— 下限も条件も
-呼び手が正本から引いて渡す。
+The dependency direction is recipe → core only (`_shared` does not import families) — callers
+take both the bounds and the conditions from their source of truth and pass them in.
 """
 
 from __future__ import annotations
@@ -26,10 +30,10 @@ from collections.abc import Mapping
 
 
 def _number(value: object) -> float | None:
-    """記録の欄を数として読む（読めなければ `None`）。
+    """Read a record field as a number (`None` if it cannot be read).
 
-    `bool` を弾くのは、`True` が 1 として下限を通り抜けるのを避けるため（JSON の `true` は
-    記録の書き手が書く形ではないので、現れたら記録そのものが壊れている）。
+    `bool` is rejected so that `True` does not pass a lower bound as 1 (the record writer never
+    writes a JSON `true`, so one appearing means the record itself is broken).
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
@@ -43,35 +47,45 @@ def calib_complaint(
     at_least: Mapping[str, float] | None = None,
     exactly: Mapping[str, float] | None = None,
 ) -> str | None:
-    """記録が配布の条件を満たさない理由を 1 文で返す（満たしていれば `None`）。
+    """Return in one sentence why the record fails the distribution conditions (`None` if it
+    meets them).
 
-    `at_least` は**予算**（削ると質だけが落ちる欄 — 捕捉 step 数・校正プロンプト本数・
-    コーパスの件数）、`exactly` は**どの条件で焼いたか**（モデルごとに決まる欄 — step 数・
-    CFG）。予算は下限、条件は一致で見るのは、後者では「大きい方が良い」が成り立たないから
-    （turbo の 8 step で焼いた資産を素モデルの席に載せるのも、その逆も等しく誤り）。
+    `at_least` holds the **budget** (fields whose reduction only lowers quality — the number of
+    capture steps, of calibration prompts, of corpus entries); `exactly` holds **the conditions it
+    was built under** (fields fixed per model — the step count, CFG). Budgets are checked against
+    a lower bound and conditions by equality because "bigger is better" does not hold for the
+    latter (putting an asset built with turbo's 8 steps into the base model's slot is as wrong as
+    the reverse).
 
-    記録が辞書でない場合は `method` が読めない扱いにする（方式の不一致として落ちる）—
-    壊れた記録を「欄が無いだけ」として受理する側には倒さない。
+    A record that is not a mapping is treated as having an unreadable `method` (it fails as a
+    method mismatch) — a broken record is never accepted as "just missing fields".
     """
     fields = record if isinstance(record, Mapping) else {}
     if fields.get("method") != method:
         return (
-            f"配布して良い丸め方式で作られていない（{fields.get('method')!r}、配布可は {method!r}）"
+            "not built with a rounding method allowed for distribution"
+            f" ({fields.get('method')!r}; allowed: {method!r})"
         )
     for name, floor in (at_least or {}).items():
         if name not in fields:
             continue
         value = _number(fields[name])
         if value is None:
-            return f"校正予算 {name!r} が数でない（{fields[name]!r}）"
+            return f"calibration budget {name!r} is not a number ({fields[name]!r})"
         if value < floor:
-            return f"校正予算 {name!r} が配布の下限を下回る（{value:g} < {floor:g}）"
+            return (
+                f"calibration budget {name!r} is below the distribution floor"
+                f" ({value:g} < {floor:g})"
+            )
     for name, want in (exactly or {}).items():
         if name not in fields:
             continue
         value = _number(fields[name])
         if value is None:
-            return f"校正条件 {name!r} が数でない（{fields[name]!r}）"
+            return f"calibration condition {name!r} is not a number ({fields[name]!r})"
         if value != want:
-            return f"校正条件 {name!r} がこのモデルの既定と違う（{value:g}、既定は {want:g}）"
+            return (
+                f"calibration condition {name!r} differs from this model's default"
+                f" ({value:g}; default {want:g})"
+            )
     return None

@@ -1,7 +1,8 @@
-"""QAT の小さな正本（`gemma4_qat.config`）が、torch を避けるために持つ写しの定数。
+"""The copied constants the small QAT source of truth (`gemma4_qat.config`) keeps to avoid torch.
 
-`config.py` は dist から torch を import しないために、通常 Gemma の製品形が持つ値を
-写しで綴る。写しは正本を動かした日に片方だけ古びるので、同値をここで縛る。
+So that dist does not import torch, `config.py` spells copies of values the regular Gemma's
+product form holds. A copy goes stale on one side the day the source of truth moves, so the
+equality is pinned here.
 """
 
 from __future__ import annotations
@@ -16,10 +17,11 @@ from gemma4_qat.config import CHECKPOINTS, MAX_SELECTED_ROWS, SOURCES, checkpoin
 
 class TestCopiedConstants:
     def test_the_selected_rows_ceiling_follows_the_product_form(self) -> None:
-        """trace の記号 R の上限は、製品形の `ROW_SYM_MAX`（sliding ring の余裕 + 1）と同じ。
+        """The upper bound of the trace symbol R equals the product form's `ROW_SYM_MAX` (the
+        sliding ring's slack + 1).
 
-        食い違うと、QAT の trace 上限と配布形が宣言する `slidingSlack` がずれる（余裕を動かした
-        日に QAT 側だけ古い上限で焼かれる）。
+        If they disagree, the QAT trace bound and the `slidingSlack` the distribution declares
+        drift apart (the day the slack moves, only the QAT side is built with the old bound).
         """
         assert MAX_SELECTED_ROWS == export_product.ROW_SYM_MAX
 

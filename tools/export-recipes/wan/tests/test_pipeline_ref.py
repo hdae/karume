@@ -1,12 +1,14 @@
-"""`wan/pipeline_ref.py` のうち**実重みが要らない**部分の約束事。
+"""The contract of the parts of `wan/pipeline_ref.py` that **need no real weights**.
 
-壊れても例外が出ず**数だけが静かにずれる**側だけを固定する:
+Pins only the side where a breakage raises no exception and **only the numbers drift silently**:
 
-- 埋め込みの注入の形（有効長の後ろをゼロで 512 まで埋める — 上流 `_get_t5_prompt_embeds`）
-- 潜在の形から導く動画の大きさ（`4(F−1)+1` / `8H` / `8W`）
-- MPS が見える機では組まない（RoPE の表が float32 になる — ADR 0118 決定 3）
+- the shape of the embedding injection (zero padding after the valid length up to 512 — upstream
+  `_get_t5_prompt_embeds`)
+- the video size derived from the latent shape (`4(F−1)+1` / `8H` / `8W`)
+- no build on a machine where MPS is visible (the RoPE tables would become float32 — ADR 0118
+  decision 3)
 
-読み込みと 1 ステップの疎通は手動（`uv run --group wan python -m wan.pipeline_ref --smoke`）。
+Loading and a 1-step smoke run are manual (`uv run --group wan python -m wan.pipeline_ref --smoke`).
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ class TestPadTextEmbeds:
 
 class TestVideoSize:
     def test_it_inverts_the_vae_compression(self):
-        """832×480・33 フレーム ↔ 潜在 `[16, 9, 60, 104]`（ADR 0118 の受理集合）。"""
+        """832×480, 33 frames ↔ latent `[16, 9, 60, 104]` (the accepted set of ADR 0118)."""
         latents = torch.zeros(1, 16, 9, 60, 104)
 
         assert pipeline_ref.video_size(latents) == (33, 480, 832)

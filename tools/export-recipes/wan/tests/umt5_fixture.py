@@ -1,21 +1,27 @@
-"""umT5 encoder の合成容器 — 配布の門（`wan.umt5_distribution`）を実物と同じ形で試すための器。
+"""A synthetic umT5 encoder container — a fixture for trying the distribution gate
+(`wan.umt5_distribution`) on the same shape as the real thing.
 
-実物（`wan.umt5_export` が書く i8 の S 形容器）と同じに揃えるのは、門が読む 4 つだけ:
+It matches the real container (the i8 S-form container `wan.umt5_export` writes) only in the four
+things the gate reads:
 
-- テンソルキーの綴り（語彙埋め込み `encoder.embed_tokens.weight`・層ごとの linear / RMSNorm /
-  相対位置の表・最後の RMSNorm・持ち上げ定数 `const.*`）と、その種類ごとの格納（linear と語彙
-  埋め込みは i8 の packed + 行ごとの scale・残りは f32）
-- グラフ入力 `input_ids [1, L]` / `relative_position_buckets [L, L]`（i32）と記号 `L`
-- 出力 `[1, L, W]`（f32）1 本
-- 容器のグラフ名（部品名 `text_encoder`）と出所
+- the spelling of the tensor keys (the vocabulary embedding `encoder.embed_tokens.weight`, the
+  per-layer linear / RMSNorm / relative-position tables, the final RMSNorm, the lifted constants
+  `const.*`) and the storage of each kind (linear and the vocabulary embedding are i8 packed + a
+  per-row scale; the rest is f32)
+- the graph inputs `input_ids [1, L]` / `relative_position_buckets [L, L]` (i32) and the symbol `L`
+- one output `[1, L, W]` (f32)
+- the container's graph name (the component name `text_encoder`) and the provenance
 
-計算の中身（attention・FFN）は持たない — 門は宣言しか読まない。重みは数十バイトで、実重みも
-transformers も要らない（既定の sync だけで回る）。故障注入の席（表や linear の格納・表の有無・
-入力・出力の幅）は引数で差し替える。記号は入力の shape から導く（宣言と束縛点が独立に動かない
-— 2 本目の記号を入力に綴れば、その記号を宣言した正当な IR になる）。
+It holds none of the computation (attention, FFN) — the gate reads only declarations. The weights
+are a few dozen bytes, and neither real weights nor transformers are needed (it runs on the default
+sync alone). The fault-injection knobs (the storage of the tables and of linear, whether the tables
+exist, the inputs, the output width) are swapped through arguments. The symbols are derived from the
+input shapes (the declaration and the binding sites do not move independently — spelling a second
+symbol into an input yields a valid IR that declares that symbol).
 
-配布形 `karume-umt5-xxl` の必須の資産（トークナイザ — `wan.umt5_xxl_tokenizer`）の合成
-（{@link write_tokenizer_asset}）もここに置く（umT5 の配布形を組むテストが共有する）。
+The synthetic version of the required asset of the distribution `karume-umt5-xxl` (the tokenizer —
+`wan.umt5_xxl_tokenizer`) ({@link write_tokenizer_asset}) also lives here (shared by the tests that
+assemble the umT5 distribution).
 """
 
 from __future__ import annotations
@@ -44,7 +50,8 @@ from wan.umt5_distribution import (
     umt5_tokenizer_asset,
 )
 
-#: 合成の寸法（実物の d_model 4096・語彙 256,384・head 64 と**違う**数 — 焼き込んでいれば落ちる）。
+#: Synthetic sizes (numbers **different** from the real d_model 4096, vocabulary 256,384, head 64 —
+#: anything baked in fails).
 WIDTH = 8
 VOCAB = 16
 HEADS = 2
@@ -62,8 +69,8 @@ def _ramp(*shape: int, offset: float = 0.0) -> torch.Tensor:
 
 
 def _fixed(weight: torch.Tensor) -> FixedQuantizedWeight:
-    """行ごとの scale の i8（書き手の `quantize_rows` と同じ形 — packed + `[rows, 1]` の
-    scale）。"""
+    """A per-row-scale i8 (the same shape as the writer's `quantize_rows` — packed + a `[rows, 1]`
+    scale)."""
     scale = channel_scale(weight, 0)
     return FixedQuantizedWeight(dtype="i8", packed=quantize_to_int8(weight, scale), scale=scale)
 
@@ -79,14 +86,16 @@ def umt5_container(
     named: str = UMT5_ROLE,
     verified: bool = True,
 ) -> list[bytes]:
-    """正当な umT5 風の容器 1 本ぶんの part バイト列（添字順 — 先頭が part 0）。
+    """The part bytes of one valid umT5-like container (in index order — the first is part 0).
 
-    `table_layout` / `linear_layout` は相対位置の表と linear の格納（`"i8"` か `"f32"`）、
-    `tables` は表を持つか、`inputs` はグラフ入力の宣言（名前・dtype・形）、`width` は出力の幅。
+    `table_layout` / `linear_layout` are the storage of the relative-position tables and of linear
+    (`"i8"` or `"f32"`), `tables` is whether the tables exist, `inputs` is the declaration of the
+    graph inputs (name, dtype, shape), and `width` is the output width.
 
-    `verified=False` は IR の受理規則に反する容器（例: f32 の token id を embedding が受ける）を
-    故意に作る故障注入の席 — 公開の門（`publish_container`）が拒否するので、同じ書き手の低水準の
-    口（`write_model_container`）で書き、読み直し検証を通さない。
+    `verified=False` is the fault-injection knob that deliberately builds a container that violates
+    the IR acceptance rules (e.g. an embedding that takes f32 token ids) — the public gate
+    (`publish_container`) refuses it, so it is written through the same writer's low-level entry
+    point (`write_model_container`) without the read-back verification.
     """
     initializers: dict[str, IrInitializer] = {}
     values: dict[str, IrValue] = {}
@@ -172,11 +181,13 @@ def umt5_container(
 
 
 def write_tokenizer_asset(series_dir: Path, **overrides: Any) -> Path:
-    """系列の親（`outputs/series/`）にトークナイザ資産を置き、その path を返す。
+    """Put a tokenizer asset in the parent of the series (`outputs/series/`) and return its path.
 
-    最上位の欄は書き手（`wan.umt5_xxl_tokenizer.build_asset`）と同じで、出所は上流の表の行・版は
-    id 列の正本の版（門が見る値）。語彙と表は門が中身を読まないので小さな値。`overrides` は欄の
-    上書きで、値が None の欄は外す（故障注入の席）。
+    The top-level fields are the same as the writer's (`wan.umt5_xxl_tokenizer.build_asset`); the
+    source is the row of the upstream table and the versions are the versions of the id-sequence
+    source of truth (the values the gate checks). The vocabulary and the tables are small values,
+    since the gate does not read their contents. `overrides` overrides fields, and a field whose
+    value is None is removed (the fault-injection knob).
     """
     row = UMT5_SOURCES[UMT5_DEFAULT_MODEL]
     asset: dict[str, Any] = {

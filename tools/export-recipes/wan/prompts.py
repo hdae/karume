@@ -1,40 +1,43 @@
-"""Wan2.1 の固定プロンプト（第 1 段の受理集合 — ADR 0118 決定 4・利用者裁定 2026-10-02）。
+"""The fixed prompts of Wan2.1 (the accepted set of step 1 — ADR 0118 decision 4, maintainer's
+ruling 2026-10-02).
 
-テキスト埋め込み資産を書く台本（`wan.text_embeds`）と、配布形のモデルカード（`wan.card`）・
-組み立ての門（`wan.distribution`）が同じ 1 表を引く。torch も diffusers も import しない —
-`import dist` は torch を読まない（`tests/test_dist_driver.py` の `TestImportingTheDriver`）ので、
-カードと門が引く表は torch 依存の台本の外に置く。
+The script that writes the text-embeddings asset (`wan.text_embeds`), the model card of the
+distribution (`wan.card`) and the assembly check (`wan.distribution`) read the same single table.
+It imports neither torch nor diffusers — `import dist` does not load torch
+(`TestImportingTheDriver` in `tests/test_dist_driver.py`), so the table that the card and the check
+read lives outside the torch-dependent script.
 
-文面の出所（公式 README / Diffusers ドキュメントの例文）と動きの量の選び方は
-`wan.text_embeds` のモジュール doc。
+Where the texts come from (example prompts of the official README / the Diffusers documentation) and
+how the amount of motion was chosen: the module doc of `wan.text_embeds`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: 役割の語彙。
+#: The role vocabulary.
 POSITIVE = "positive"
 NEGATIVE = "negative"
 
-#: 出所の commit（URL の版を固定するため — ブランチ名の URL は先頭が動くと別の文面を指しうる）。
-#: 公式リポは 2026-10-02 時点の main の先頭（2026-03-05 の commit）、Diffusers は v0.39.0 の
-#: タグが指す commit。
+#: The source commits (to pin the version in the URLs — a URL with a branch name can point at a
+#: different text once the branch head moves). The official repository: the head of main as of
+#: 2026-10-02 (a commit of 2026-03-05); Diffusers: the commit the v0.39.0 tag points at.
 _WAN_COMMIT = "9737cba9c1c3c4d04b33fcad41c111989865d315"
 _DIFFUSERS_COMMIT = "a3608b512ed7248499a44c61d954965ed9bdae4d"
 
 
 @dataclass(frozen=True)
 class FixedPrompt:
-    """固定プロンプト 1 本（資産のテンソル名・役割・原文・出所）。"""
+    """One fixed prompt (tensor name in the asset, role, original text, source)."""
 
     name: str
     role: str
-    #: 出所の原文（改行や全角の約物を含めて逐語 — 正規化は生成時に上流の関数で掛ける）。
+    #: The original text of the source, verbatim (including line breaks and full-width punctuation
+    #: — normalization is applied by the upstream function at generation time).
     text: str
-    #: 出所の URL（commit を固定した版）。
+    #: The source URL (the version with a pinned commit).
     url: str
-    #: URL の中の位置（読み手が原文を探せる粒度）。
+    #: The position within the URL (fine enough for a reader to find the original text).
     locator: str
 
 
@@ -48,8 +51,8 @@ FIXED_PROMPTS: tuple[FixedPrompt, ...] = (
         ),
         url=f"https://github.com/Wan-Video/Wan2.1/blob/{_WAN_COMMIT}/README.md",
         locator=(
-            "README の t2v-1.3B の実行例の --prompt"
-            "（generate.py の EXAMPLE_PROMPT['t2v-1.3B'] と同文）"
+            "The --prompt of the t2v-1.3B run example in the README"
+            " (the same text as EXAMPLE_PROMPT['t2v-1.3B'] in generate.py)"
         ),
     ),
     FixedPrompt(
@@ -70,7 +73,10 @@ FIXED_PROMPTS: tuple[FixedPrompt, ...] = (
             f"https://github.com/huggingface/diffusers/blob/{_DIFFUSERS_COMMIT}"
             "/docs/source/en/api/pipelines/wan.md"
         ),
-        locator='Text-to-Video の例（T2V memory / T2V inference speed のタブ）の prompt = """…"""',
+        locator=(
+            'The prompt = """…""" of the Text-to-Video example'
+            " (the T2V memory / T2V inference speed tabs)"
+        ),
     ),
     FixedPrompt(
         name="cat-dog-baking",
@@ -85,8 +91,8 @@ FIXED_PROMPTS: tuple[FixedPrompt, ...] = (
             "/src/diffusers/pipelines/wan/pipeline_wan.py"
         ),
         locator=(
-            "EXAMPLE_DOC_STRING の prompt（WanPipeline.__call__ の例 — ドキュメントの API"
-            " リファレンスに出る）"
+            "The prompt of EXAMPLE_DOC_STRING (the WanPipeline.__call__ example — shown in the"
+            " API reference of the documentation)"
         ),
     ),
     FixedPrompt(

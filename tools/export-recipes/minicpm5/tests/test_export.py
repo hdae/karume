@@ -1,17 +1,20 @@
-"""`minicpm5/export.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level guarantees of `minicpm5/export.py` (the part that needs no real weights).
 
-実重みの emit は手動（`deberta` / `embeddinggemma` のテストと同じ規律）。ここで固定するのは、
-壊れると**偽 PASS** になる側の規律だけ:
+Emitting with real weights is manual (the same rule as the `deberta` / `embeddinggemma` tests).
+What is pinned here is only the rules whose breakage gives a **false PASS**:
 
-- `gqa_sdpa_attention` が `repeat_kv` 実体化版と**同じ数値**を返すこと（迂回の正当性そのもの）
-- mask 無し / dropout / `is_causal` が fail loudly（因果性が黙って消える経路を残さない）
-- 加算 causal マスクが **prefix と可換**（ADR 0010 の畳み込みが成立する条件）
-- `assert_ir_form` が repeat_kv 実体化形と mask のグラフ入力残りを**実際に検出**すること
-  （tiny な実モデルを素の `sdpa` で export した形を被験体にする — 恒真化の門）
-- sanity が期待継続の不一致と定数出力の両方を落とすこと（片方だけでは恒真になる）
+- `gqa_sdpa_attention` returns **the same numbers** as the `repeat_kv` materialized version (the
+  very justification of the detour)
+- no mask / dropout / `is_causal` fail loudly (no path left where causality silently disappears)
+- the additive causal mask **commutes with the prefix** (the condition for ADR 0010's folding)
+- `assert_ir_form` **actually detects** the repeat_kv materialized form and a mask left as a graph
+  input (the subject is a tiny real model exported with plain `sdpa` — the check against a vacuous
+  pass)
+- the sanity check fails on both an expected-continuation mismatch and constant output (either one
+  alone would be vacuous)
 
-transformers を要するケースだけ `importorskip` で SKIP する（既定 sync の CI ではモデル系
-依存が入らない — ADR 0065 の 2 job 構成）。
+Only the cases that need transformers SKIP via `importorskip` (the default-sync CI does not install
+the model dependencies — the 2-job layout of ADR 0065).
 """
 
 from __future__ import annotations
@@ -32,8 +35,8 @@ from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
 from minicpm5 import export as mc
 
-#: tiny な被験体の形（head_dim は hidden/heads = 8 と**別の値**にする — 実物 MiniCPM5-1B の
-#: `head_dim: 128` ≠ 1536/16 = 96 と同じ罠を踏ませるため）。
+#: Shape of the tiny subject (head_dim is set to **a value other than** hidden/heads = 8 — to set
+#: the same trap as the real MiniCPM5-1B's `head_dim: 128` ≠ 1536/16 = 96).
 HEADS = 4
 KV_HEADS = 2
 HEAD_DIM = 16
@@ -61,7 +64,8 @@ def _tiny_config(attn_implementation: str):
 
 
 def _tiny_checkpoint(tmp_path: Path) -> Path:
-    """tiny な `LlamaForCausalLM` を実チェックポイントとして書く（`load_wrapper` の実経路用）。"""
+    """Write a tiny `LlamaForCausalLM` as a real checkpoint (for the real path of
+    `load_wrapper`)."""
     transformers = pytest.importorskip("transformers")
     torch.manual_seed(0)
     model = transformers.LlamaForCausalLM(_tiny_config("sdpa")).to(torch.float32).eval()
@@ -84,14 +88,15 @@ def _export_tiny(tmp_path: Path, wrapper) -> IrGraph:
 
 @pytest.fixture
 def tiny_gqa(tmp_path):
-    """台本の `load_wrapper` を通した tiny ラッパを export して `(graph, config)`。"""
+    """Export the tiny wrapper built by the script's `load_wrapper` → `(graph, config)`."""
     wrapper = mc.load_wrapper(_tiny_checkpoint(tmp_path / "ckpt"))
     return _export_tiny(tmp_path, wrapper), wrapper.model.config
 
 
 @pytest.fixture
 def tiny_plain_sdpa(tmp_path):
-    """**素の `sdpa`** で読んだ同じモデルを export して `(graph, config)`（repeat_kv 実体化形）。"""
+    """Export the same model loaded with **plain `sdpa`** → `(graph, config)` (the repeat_kv
+    materialized form)."""
     transformers = pytest.importorskip("transformers")
     model = transformers.LlamaForCausalLM.from_pretrained(
         _tiny_checkpoint(tmp_path / "ckpt"), dtype=torch.float32, attn_implementation="sdpa"
@@ -103,8 +108,9 @@ def tiny_plain_sdpa(tmp_path):
 
 
 class TestGqaSdpaAttentionMatchesTheMaterializedForm:
-    """迂回の正当性: `enable_gqa=True` は `repeat_kv` してから呼ぶのと同じ数値でなければ
-    ならない（これが崩れていれば「GQA 形は保てたが別の数値」になる）。"""
+    """Justification of the detour: `enable_gqa=True` MUST give the same numbers as calling after
+    `repeat_kv` (if this broke, the result would be "the GQA form was kept but the numbers
+    differ")."""
 
     @staticmethod
     def _reference(query, key, value, mask, scaling):
@@ -134,7 +140,8 @@ class TestGqaSdpaAttentionMatchesTheMaterializedForm:
         assert torch.allclose(actual, expected, atol=1e-6)
 
     def test_a_wrong_group_mapping_would_be_visible(self):
-        """故障注入: kv head を入れ替えると上の突合が壊れる（恒真でないことの裏取り）。"""
+        """Fault injection: swapping the kv heads breaks the comparison above (evidence that it is
+        not vacuous)."""
         torch.manual_seed(0)
         query = torch.randn(1, 8, 5, HEAD_DIM)
         key = torch.randn(1, 2, 5, HEAD_DIM)
@@ -152,11 +159,11 @@ class TestGqaSdpaAttentionMatchesTheMaterializedForm:
 
 class TestGqaSdpaAttentionGates:
     def test_a_missing_mask_fails_loudly(self):
-        """MUST: mask 無しを素通しすると非因果の attention が黙って出る。"""
+        """MUST: passing a missing mask through silently emits non-causal attention."""
         query = torch.zeros(1, 4, 3, HEAD_DIM)
         key = torch.zeros(1, 2, 3, HEAD_DIM)
 
-        with pytest.raises(ValueError, match="attn_mask 無し"):
+        with pytest.raises(ValueError, match="without attn_mask"):
             mc.gqa_sdpa_attention(torch.nn.Identity(), query, key, key, None)
 
     def test_dropout_fails_loudly(self):
@@ -169,7 +176,7 @@ class TestGqaSdpaAttentionGates:
 
     @pytest.mark.parametrize("name", ["is_causal", "position_bias"])
     def test_semantics_changing_kwargs_fail_loudly(self, name):
-        """MUST: 無視すると eager 側と別の数値経路になったことがどこにも出ない。"""
+        """MUST: if ignored, nothing would show that the numerical path differs from eager."""
         query = torch.zeros(1, 4, 3, HEAD_DIM)
         key = torch.zeros(1, 2, 3, HEAD_DIM)
         mask = mc.additive_causal_mask(3)
@@ -190,7 +197,8 @@ class TestAdditiveCausalMask:
         assert bool(torch.isneginf(mask[0, 0]).sum() == 6)
 
     def test_the_prefix_of_a_longer_mask_is_the_shorter_mask(self):
-        """MUST: prefix と可換（ADR 0010）— これが崩れると Tmax 畳み込みが黙って別の値になる。"""
+        """MUST: commutes with the prefix (ADR 0010) — if this broke, the Tmax folding would
+        silently give other values."""
         long_mask = mc.additive_causal_mask(TINY_SYM_MAX)
 
         prefix = long_mask[:, :, :5, :5]
@@ -199,7 +207,7 @@ class TestAdditiveCausalMask:
 
 
 def _ir_graph(heads: int, kv_heads: int, layers: int = LAYERS) -> IrGraph:
-    """attention `layers` 本の最小 IR（mask は Tmax 定数 + sym_prefix_slice）。"""
+    """Minimal IR with `layers` attention nodes (the mask is a Tmax constant + sym_prefix_slice)."""
     graph = IrGraph(symbols=["T"])
     graph.inputs.append(IrInput(name=mc.INPUT_IDS, dtype="i32", shape=[1, "T"]))
     graph.initializers["mask_const"] = IrInitializer(
@@ -248,7 +256,8 @@ class TestAssertIrForm:
         assert form["mask_constant"] == "mask_const"
 
     def test_a_materialized_kv_shape_is_rejected(self):
-        """MUST: Hkv が H に化けた形は「数値は合うが検収の意味が消えた」資産。"""
+        """MUST: the form where Hkv turned into H is an asset where "the numbers agree but the
+        acceptance has lost its meaning"."""
         with pytest.raises(AssertionError, match="repeat_kv"):
             mc.assert_ir_form(_ir_graph(HEADS, HEADS), TINY_IR_CONFIG, TINY_SYM_MAX)
 
@@ -256,23 +265,25 @@ class TestAssertIrForm:
         graph = _ir_graph(HEADS, KV_HEADS)
         graph.inputs.append(IrInput(name="attention_mask", dtype="f32", shape=[1, 1, "T", "T"]))
 
-        with pytest.raises(AssertionError, match="グラフ入力"):
+        with pytest.raises(AssertionError, match="graph inputs"):
             mc.assert_ir_form(graph, TINY_IR_CONFIG, TINY_SYM_MAX)
 
     def test_a_mask_constant_of_the_wrong_extent_is_rejected(self):
-        """Tmax より短い定数は「T が上限まで伸びると黙って足りない」形。"""
+        """A constant shorter than Tmax is the form that "silently falls short when T grows to the
+        upper bound"."""
         graph = _ir_graph(HEADS, KV_HEADS)
         graph.values["mask_const"] = IrValue(dtype="f32", shape=[1, 1, 8, 8])
 
-        with pytest.raises(AssertionError, match="Tmax 形"):
+        with pytest.raises(AssertionError, match="Tmax shape"):
             mc.assert_ir_form(graph, TINY_IR_CONFIG, TINY_SYM_MAX)
 
     def test_a_missing_layer_is_rejected(self):
-        with pytest.raises(AssertionError, match="層と一致しない"):
+        with pytest.raises(AssertionError, match=r"does not match the \d+ layers"):
             mc.assert_ir_form(_ir_graph(HEADS, KV_HEADS, layers=1), TINY_IR_CONFIG, TINY_SYM_MAX)
 
     def test_a_derived_head_dim_is_rejected(self):
-        """MUST: D は `config.head_dim` と突合する（hidden/heads から導出した値では通らない）。"""
+        """MUST: D is compared with `config.head_dim` (a value derived from hidden/heads does not
+        pass)."""
         derived = SimpleNamespace(
             num_attention_heads=HEADS,
             num_key_value_heads=KV_HEADS,
@@ -285,7 +296,7 @@ class TestAssertIrForm:
 
 
 class TestExportedForm:
-    """tiny な実モデルを実際に export して形を見る（transformers が要る）。"""
+    """Actually export a tiny real model and look at the form (needs transformers)."""
 
     def test_the_graph_keeps_the_grouped_shape_and_folds_the_mask(self, tiny_gqa):
         graph, config = tiny_gqa
@@ -298,14 +309,15 @@ class TestExportedForm:
         assert mc.SYM_PREFIX_SLICE_OP in graph.required_ops
 
     def test_plain_sdpa_materializes_repeat_kv_and_is_rejected(self, tiny_plain_sdpa):
-        """恒真化の門: 上流既定の経路は本当に Hkv を潰す（= 上の緑は検査が効いた結果）。"""
+        """The check against a vacuous pass: upstream's default path really collapses Hkv (= the
+        green above is the result of the check working)."""
         graph, config = tiny_plain_sdpa
 
         with pytest.raises(AssertionError, match="repeat_kv"):
             mc.assert_ir_form(graph, config, TINY_SYM_MAX)
 
 
-#: `_sanity` の被験体（ケース名 → 期待トークン id）と表示名。
+#: The subject of `_sanity` (case name → expected token id) and the display names.
 SANITY_EXPECTED = {"a": 10, "b": 20}
 SANITY_LABELS = {10: "Ġx", 20: "Ġy", 30: "Ġz"}
 
@@ -317,22 +329,24 @@ class TestSanity:
         assert result == {"a": "10(Ġx)", "b": "20(Ġy)"}
 
     def test_a_mismatch_fails_loudly(self):
-        with pytest.raises(AssertionError, match="期待継続と違う"):
+        with pytest.raises(AssertionError, match="differs from the expected continuation"):
             mc._sanity({"a": 30, "b": 20}, SANITY_EXPECTED, SANITY_LABELS)
 
     def test_a_constant_output_fails_loudly(self):
-        """MUST: 期待表を緩めても残る検出線（両ケースが同じ 1 位 = 定数出力）。"""
-        with pytest.raises(AssertionError, match="定数出力"):
+        """MUST: the detection line that remains even if the expectation table is loosened (both
+        cases have the same top-1 = constant output)."""
+        with pytest.raises(AssertionError, match="constant output"):
             mc._sanity({"a": 10, "b": 10}, {"a": 10, "b": 10}, SANITY_LABELS)
 
     def test_a_case_set_mismatch_fails_loudly(self):
-        with pytest.raises(AssertionError, match="ケース集合"):
+        with pytest.raises(AssertionError, match="case sets differ"):
             mc._sanity({"a": 10}, SANITY_EXPECTED, SANITY_LABELS)
 
 
 class TestGreedyTokens:
     def test_the_last_position_is_the_one_that_is_read(self):
-        """MUST: 最終位置。他の位置を見ると「継続の予測」ではない量を突合することになる。"""
+        """MUST: the last position. Reading another position would compare a quantity that is not
+        "the prediction of the continuation"."""
         logits = torch.zeros(1, 3, 5)
         logits[0, 0, 4] = 1.0
         logits[0, -1, 2] = 1.0
@@ -341,13 +355,15 @@ class TestGreedyTokens:
 
 
 class _StubTokenizer:
-    """`encode(...).ids` だけを持つ最小のトークナイザ（期待継続の単一トークン検査用）。"""
+    """A minimal tokenizer with only `encode(...).ids` (for the single-token check of the expected
+    continuations)."""
 
     def __init__(self, ids: list[int]) -> None:
         self._ids = ids
 
     def encode(self, text: str, add_special_tokens: bool = True):
-        """`tokenizers.Tokenizer.encode` の呼び出し規約だけ合わせる（引数は使わない）。"""
+        """Matches only the calling convention of `tokenizers.Tokenizer.encode` (the arguments are
+        unused)."""
         return SimpleNamespace(ids=list(self._ids))
 
 
@@ -356,23 +372,27 @@ class TestExpectedTokenIds:
         assert set(mc.expected_token_ids(_StubTokenizer([7])).values()) == {7}
 
     def test_a_multi_token_continuation_fails_loudly(self):
-        """MUST: 複数トークンだと「1 位の一致」の意味が定まらない（黙って先頭だけ見ない）。"""
-        with pytest.raises(AssertionError, match="単一トークン"):
+        """MUST: with several tokens "top-1 agreement" has no defined meaning (do not silently look
+        at the first one only)."""
+        with pytest.raises(AssertionError, match="single token"):
             mc.expected_token_ids(_StubTokenizer([7, 8]))
 
 
 class TestGoldenCases:
     def test_every_case_has_a_greedy_expectation(self):
-        """MUST: 期待の無いケースを混ぜない（sanity が一部のケースだけ見る形にしない）。"""
+        """MUST: no case without an expectation (the sanity check does not look at only some
+        cases)."""
         assert {name for name, _ in mc.GOLDEN_CASES} == set(mc.GREEDY_EXPECTATIONS)
 
     def test_the_expectations_are_not_all_the_same_token(self):
-        """定数出力の検出線が恒真にならない条件（期待が 1 種類だと `_sanity` の後段が死ぬ）。"""
+        """The condition that keeps the constant-output detection line from being vacuous (with a
+        single kind of expectation, the latter half of `_sanity` is dead)."""
         assert len(set(mc.GREEDY_EXPECTATIONS.values())) > 1
 
 
 class TestUpstreamProvenance:
-    """容器の revision は `--model-dir` の取得記録から導く（直書きしない）。"""
+    """The container's revision is derived from the download record of `--model-dir` (not
+    hard-coded)."""
 
     def test_the_revision_comes_from_the_download_record(self, tmp_path) -> None:
         write_snapshot(tmp_path, license="ignored", revision=OTHER_REVISION)
@@ -382,5 +402,5 @@ class TestUpstreamProvenance:
         )
 
     def test_a_checkpoint_without_the_record_fails_loudly(self, tmp_path) -> None:
-        with pytest.raises(UpstreamProvenanceError, match="metadata が無い"):
+        with pytest.raises(UpstreamProvenanceError, match="metadata is missing"):
             mc.upstream_provenance(tmp_path)

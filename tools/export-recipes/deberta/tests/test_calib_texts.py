@@ -1,18 +1,23 @@
-"""`deberta/calib_texts.py` の校正コーパスの性質。
+"""Properties of the calibration corpus in `deberta/calib_texts.py`.
 
-文面そのものは判断の対象にしない（品質は実測が答える）。ここで固定するのは、崩れると
-**測定値の意味が変わる**側だけ:
+The wording itself is not judged (measurement answers for quality). What is pinned here is only
+what **changes the meaning of the measurements** when it breaks:
 
-- 48 文ちょうどで重複が無い（`--calib-limit` の縮小実行が「同じ文を N 回」にならない）
-- 長さが散っている（GPTQ の `H = Σ XᵀX` はトークン数で重み付くので、長さが揃うと
-  その長さの活性だけが支配する）
-- 先頭を切っても役割の混合が保たれる（縮小 smoke の入力が朗読調だけにならない）
-- 台本自身が持つ golden 文（{@link deberta.export.GOLDEN_SENTENCES}）と 1 文も重ならない
+- exactly 48 sentences without duplicates (a reduced `--calib-limit` run does not become "the same
+  sentence N times")
+- the lengths are spread (GPTQ's `H = Σ XᵀX` is weighted by token count, so with uniform lengths
+  only the activations of that length dominate)
+- the mix of roles survives truncation from the start (the input of a reduced smoke run is not
+  narration only)
+- not one sentence overlaps the script's own golden sentences
+  ({@link deberta.export.GOLDEN_SENTENCES})
 
-最後の 1 本だけは**静的に確かめられる**（golden 文は台本の定数で、資産を読まない）。実行時の
-評価文との分離は別の話で、そちらは**資産（dump）が正本**なので、ここではなく実行時の
-{@link sbv2.measure_quant.assert_calib_disjoint} が見る（写しをコーパス側へ置くと dump を
-録り直したときに片方だけ古くなる）。その門自体の検出力は `test_measure_quant.py` が試す。
+Only the last one **can be checked statically** (the golden sentences are constants of the script;
+no assets are read). Keeping it disjoint from the evaluation sentences at run time is a separate
+matter: there **the assets (the dump) are the source of truth**, so the run-time
+{@link sbv2.measure_quant.assert_calib_disjoint} checks it, not this file (a copy on the corpus
+side would leave only one side stale when the dump is re-recorded). `test_measure_quant.py` tests
+the detection power of that check itself.
 """
 
 from __future__ import annotations
@@ -20,17 +25,18 @@ from __future__ import annotations
 from deberta import export as export_deberta
 from deberta.calib_texts import CALIB_TEXTS
 
-#: 数字読みの席の判定に使う漢数字（トークナイザは通さない — 文字の有無だけで見る）。
+#: Kanji numerals used to detect the number-reading role (not passed through the tokenizer — only
+#: the presence of the characters is checked).
 NUMERALS = "〇一二三四五六七八九十百千万"
 
 
 def is_question(text: str) -> bool:
-    """問いかけ（会話調）の文か。"""
+    """Whether the sentence is a question (conversational)."""
     return text.endswith("？")
 
 
 def has_numeral(text: str) -> bool:
-    """数字読みを含む文か。"""
+    """Whether the sentence contains a number reading."""
     return any(char in NUMERALS for char in text)
 
 
@@ -40,23 +46,26 @@ class TestCorpus:
         assert len(set(CALIB_TEXTS)) == 48
 
     def test_no_text_is_a_golden_sentence(self):
-        """校正文が golden 文と重なると、丸め先を「測る文そのもの」から選ぶことになる。"""
+        """If a calibration sentence overlaps a golden sentence, the rounding targets are picked
+        from "the very sentence being measured"."""
         assert not set(export_deberta.GOLDEN_SENTENCES) & set(CALIB_TEXTS)
 
     def test_no_text_quotes_a_golden_sentence(self):
-        """部分一致でも重なりは重なり（`in` で片方向ずつ見る）。"""
+        """A partial match is still an overlap (checked with `in` in each direction)."""
         for golden in export_deberta.GOLDEN_SENTENCES:
             assert not any(golden in text or text in golden for text in CALIB_TEXTS)
 
     def test_the_lengths_are_spread(self):
-        """短文と長文の両方が要る（char-wwm なので文字数がほぼトークン数）。"""
+        """Both short and long sentences are needed (with char-wwm the character count is about the
+        token count)."""
         lengths = [len(text) for text in CALIB_TEXTS]
 
         assert min(lengths) <= 12
         assert max(lengths) >= 40
 
     def test_every_role_appears_in_the_first_few_texts(self):
-        """縮小実行（`--calib-limit 4`）でも朗読調 / 問いかけ / 数字読みが揃う並び。"""
+        """An order in which even a reduced run (`--calib-limit 4`) covers narration / question /
+        number reading."""
         head = CALIB_TEXTS[:4]
 
         assert any(is_question(text) for text in head)
@@ -64,7 +73,8 @@ class TestCorpus:
         assert any(not is_question(text) and not has_numeral(text) for text in head)
 
     def test_both_roles_are_well_represented(self):
-        """どちらかへ寄ると、活性の偏りがその役割の語彙分布に張り付く。"""
+        """Leaning towards either one pins the bias of the activations to that role's vocabulary
+        distribution."""
         questions = sum(1 for text in CALIB_TEXTS if is_question(text))
         numerals = sum(1 for text in CALIB_TEXTS if has_numeral(text))
 

@@ -1,13 +1,17 @@
-"""`wan/umt5_host_fixture.py`（相対位置のバケット表の TS 照合用 fixture）の約束事。
+"""The contract of `wan/umt5_host_fixture.py` (the fixture the TS side checks the relative-position
+bucket table against).
 
-- 追跡している fixture（`packages/models/tests/fixtures/wan-umt5/`）が生成器の今の出力と一致する
-  （生成器か上流の式が変わったのに fixture が古いまま、の検出 — TS 側はこの fixture としか比べない）
-- fixture が記録したバケットの構成が pin した revision の `text_encoder/config.json` と一致する
-  （config が手元に無い機では SKIP — 取得は `python -m wan.text_embeds --fetch`）
-- 距離の列と表の向きの自己検査が、向きの取り違えを書く前に止める
+- The tracked fixture (`packages/models/tests/fixtures/wan-umt5/`) equals the generator's current
+  output (catches a fixture left stale after the generator or the upstream formula changed — the TS
+  side compares only against this fixture)
+- The bucket configuration the fixture records equals `text_encoder/config.json` of the pinned
+  revision (SKIP on a machine without the config — fetch it with
+  `python -m wan.text_embeds --fetch`)
+- The self-check of the distance column against the table's orientation stops a flipped orientation
+  before anything is written
 
-再生成は記録された構成から作る（実モデルも config も読まない — meta 上の上流のモジュールで
-式を呼ぶ）。
+Regeneration works from the recorded configuration (it reads neither the real model nor the config —
+it calls the formula on the upstream module on meta).
 """
 
 from __future__ import annotations
@@ -64,7 +68,7 @@ def test_recorded_bucket_config_is_the_pinned_text_encoder(committed):
     try:
         config = fixture.pinned_config()
     except WanSourceError as error:
-        pytest.skip(f"pin した text_encoder の config が手元に無い: {error}")
+        pytest.skip(f"the config of the pinned text_encoder is not available locally: {error}")
 
     assert (
         config.relative_attention_num_buckets,
@@ -74,7 +78,8 @@ def test_recorded_bucket_config_is_the_pinned_text_encoder(committed):
 
 
 def test_consistency_check_stops_a_flipped_distance_column(committed):
-    """距離の列を逆向き（クエリ − キー）で焼くと、表と食い違って書く前に落ちる。"""
+    """Baking the distance column reversed (query − key) disagrees with the table and fails before
+    anything is written."""
     pytest.importorskip("transformers")
     meta, _ = committed
     attention = fixture.umt5_patch.bucket_attention(recorded_config(meta))

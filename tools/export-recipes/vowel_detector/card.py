@@ -1,14 +1,15 @@
-"""母音検出配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""Model card (`README.md`) of the vowel-detection distribution — a pure function derived
+mechanically from the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **母音検出固有の事実**だけ: 帰属（出所・
-ライセンス・学習素材）と、この pipeline のカードに何を書くか。
+The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
+`karume.modelcard`. What lives here is **only the facts specific to vowel detection**: attribution
+(source, license, training material) and what this pipeline's card says.
 
-帰属は 1 通りだけ（上流 1 リポ・1 ライセンス）なのでプロファイルの軸を持たない。
+There is only one attribution (one upstream repository, one license), so there is no profile axis.
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies unchanged). The only constants allowed here are facts
+that **do not exist in the manifest**.
 """
 
 from __future__ import annotations
@@ -30,23 +31,25 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 VOWEL_DETECTOR_SUPPORTED_PIPELINE = "vowel-detector/1"
 
-#: HF の pipeline tag。フレーム単位の 8 クラス分類なので `audio-classification` が最も近い
-#: （HF の語彙にフレーム分類の席は無い）。何を出すかは本文が説明する。
+#: The HF pipeline tag. Per-frame 8-class classification is closest to `audio-classification`
+#: (HF's vocabulary has no entry for frame classification). The body explains what it outputs.
 VOWEL_DETECTOR_PIPELINE_TAG = "audio-classification"
 
 VOWEL_DETECTOR_TITLE = "Vowel Detector for Lip-sync — Karume"
 
-#: 上流の配布（同じ重みの ONNX 版）。**再配布しているのはこの重み**なので `base_model` に置く。
-#: ライセンスは上流 `LICENSE` / `NOTICE.txt`（MIT・(c) 2026 Spectopathy）。
+#: The upstream distribution (an ONNX version of the same weights). **These are the weights being
+#: redistributed**, so it goes in `base_model`. The license is upstream's `LICENSE` / `NOTICE.txt`
+#: (MIT, (c) 2026 Spectopathy).
 VOWEL_DETECTOR_UPSTREAM = "hdae/vowel-detector"
 VOWEL_DETECTOR_LICENSE = "mit"
 
-#: 学習パイプラインの帰属（上流 `NOTICE.txt` の逐語）。**MIT は NOTICE の再配布を要求しないが、
-#: 上流が「配布するなら帰属を残してほしい」と明記している**ので、カードが機械的に持ち回る。
-#: 表を 1 つにしてあるのは、片方だけ動いたときに帰属が静かに欠けるのを避けるため。
+#: Attribution of the training pipeline (verbatim from upstream's `NOTICE.txt`). **MIT does not
+#: require redistributing the NOTICE, but upstream states explicitly that it wants the attribution
+#: kept when the model is distributed**, so the card carries it mechanically. It is kept as one
+#: table so that the attribution cannot go missing silently when only one copy changes.
 VOWEL_DETECTOR_ATTRIBUTION: tuple[str, ...] = (
     "- **Teacher backbone (not distributed)**:"
     " [reazon-research/japanese-hubert-base-k2]"
@@ -78,31 +81,33 @@ def _vowel_detector_metadata() -> CardMetadata:
     return CardMetadata(
         pipeline_tag=VOWEL_DETECTOR_PIPELINE_TAG,
         base_model=(VOWEL_DETECTOR_UPSTREAM,),
-        # `base_model_relation` は置かない — 格納形を変えず（f32 のまま）コンテナだけを移した
-        # もので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+        # No `base_model_relation` — this moves only the container without changing the storage
+        # (still f32), so it is none of adapter / merge / quantized / finetune (CardMetadata's doc).
         license=VOWEL_DETECTOR_LICENSE,
         tags=(VOWEL_DETECTOR_PIPELINE_TAG, "lip-sync", "japanese", "webgpu"),
     )
 
 
-#: 入力フレームの hop（10ms 格子）。特徴抽出の契約そのもので、`pipelineConfig` には無い
-#: （実行時に選べない数を宣言だけ持たせない — `src/vowel-detector/config.ts` の判断）。
-#: ここが要るのは**秒に直して説明する**ためだけ。
+#: Hop of the input frames (10 ms grid). It is part of the feature-extraction contract itself and is
+#: not in `pipelineConfig` (a number that cannot be chosen at run time is not declared for show —
+#: the decision of `src/vowel-detector/config.ts`). It is needed here **only to state durations in
+#: seconds**.
 #:
-#: 上流 config の `hop` と一致することは組み立て段が突き合わせる
-#: （{@link vowel_detector.distribution.vowel_detector_pipeline_config}）— 突き合わせが無いと、
-#: 上流が hop を変えた日にカードだけが黙って間違った秒数を書く。
+#: The assembly stage checks that it matches the upstream config's `hop`
+#: ({@link vowel_detector.distribution.vowel_detector_pipeline_config}) — without that check, the
+#: day upstream changes the hop, the card alone would silently state the wrong number of seconds.
 VOWEL_DETECTOR_HOP = 160
 
 
 def _vowel_detector_seconds(config: Mapping[str, Any], frames: int) -> str:
-    """フレーム数 → 秒（`sampleRate` から導く — 秒を宣言として持たない）。"""
+    """Frame count → seconds (derived from `sampleRate` — seconds are not held as a declaration)."""
     per_second = config["sampleRate"] / VOWEL_DETECTOR_HOP
     return f"{frames / per_second:.1f}"
 
 
 def _vowel_detector_milliseconds(config: Mapping[str, Any], frames: int) -> str:
-    """フレーム数 → ミリ秒（下限は 1 秒に満たないので、秒の小数 1 桁では 0.0 に潰れる）。"""
+    """Frame count → milliseconds (the lower bound is under one second, so seconds with one decimal
+    place would collapse it to 0.0)."""
     per_second = config["sampleRate"] / VOWEL_DETECTOR_HOP
     return f"{frames * 1000 / per_second:g}"
 
@@ -140,7 +145,7 @@ def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _vowel_detector_base_weights() -> list[str]:
-    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+    """The attribution section. The storage is unchanged, so it claims only to be a conversion."""
     return [
         "## Base weights and attribution",
         "",
@@ -164,19 +169,19 @@ def _vowel_detector_base_weights() -> list[str]:
 
 
 def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、モデル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
-    進める形。
+    """Policy of the Usage example: keep the minimal working form live, and **list the options a
+    typical use case is likely to need alongside it, commented out** (the selectable values are
+    listed in a comment on the same line — derived mechanically from the manifest, so the list
+    follows when models / quants are added). The reader takes the next step just by uncommenting.
 
-    `detect()` は波形 1 本しか受けない（後処理の閾値も含めて実行時に選べる欄が無い —
-    `vowelDetector.Pipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
-    2 つだけである。
+    `detect()` takes only one waveform (there is no run-time field to choose, post-processing
+    thresholds included — the public surface of `vowelDetector.Pipeline`), so this pipeline's only
+    optional knobs are model and quant.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+    NOTE: `fromAssets` is **not advertised** (ruling of 2026-08-29). The split distribution form can
+    be read as well now (X2-101), but that surface is meant for local debugging and assumes the
+    caller holds the bytes; the ordinary entry point for a reader using HF is `fromPretrained`.
+    Listing both would leave the reader to decide which one to use.
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -216,7 +221,7 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
-    """入出力と運用上限（利用者が渡すもの・受け取るものがここで読める）。"""
+    """Input, output and operating limits (what the user passes in and gets back, in one place)."""
     config = model["pipelineConfig"]
     floor = config["minFrames"]
     limit = config["maxFrames"]
@@ -249,7 +254,8 @@ def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
 def render_vowel_detector_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
-    """母音検出配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Assemble the `README.md` body of the vowel-detection distribution (a pure function, with a
+    trailing newline)."""
     require_pipeline(manifest, VOWEL_DETECTOR_SUPPORTED_PIPELINE)
     return render(
         (

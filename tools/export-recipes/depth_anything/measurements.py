@@ -1,32 +1,37 @@
-"""Depth Anything V2 の export で実測した数（**torch を読まない側**に置く）。
+"""Numbers measured during the Depth Anything V2 export (kept on the **side that does not load
+torch**).
 
-置き場を patch 層から分けている理由は `siglip2.measurements` と同じ — 実測幅を語る綴りは
-配布側（`depth_anything.card` のモデルカード / `depth_anything.distribution` の改変告知）が
-引くが、それらは `dist.py` ドライバの import 連鎖に乗っている。数を `depth_anything.patch` が
-持つと、配布側の import 連鎖に patch 層（torch 依存）が入る。exporter core の `karume/__init__` は
-公開面を初回参照で解決する（PEP 562）ので、`import dist` は torch を読まない（2026-09-24 実測）。
-ここで patch 層を配布経路の連鎖から外しておかないと、その性質がこのファイル経由で崩れる。
+They live apart from the patch layer for the same reason as `siglip2.measurements`: the wording
+that states the measured width is used by the distribution side (the model card in
+`depth_anything.card` and the modification notice in `depth_anything.distribution`), and those
+sit on the import chain of the `dist.py` driver. If `depth_anything.patch` held the number, the
+patch layer (which depends on torch) would enter the distribution side's import chain. The
+exporter core's `karume/__init__` resolves its public surface on first access (PEP 562), so
+`import dist` does not load torch (measured 2026-09-24). Unless the patch layer is kept off the
+distribution path's chain here, that property breaks through this file.
 
-MUST: 実測幅を語る綴りはこのファイルの 1 つだけ。以前は patch 層の docstring（`1.4e-06`）と
-カードの定数（`1.4e-6`）に分かれており、**同じ実測値が 2 つの綴りで並んでいた** — 片方だけが
-動いても散文としては妥当なままなので、配ってからでないと誰も気づけない。
+MUST: the measured width is spelled in this one file only. It used to be split between the patch
+layer's docstring (`1.4e-06`) and the card's constant (`1.4e-6`), so **the same measured value
+appeared under two spellings** — and since the prose stays plausible when only one of them moves,
+nobody can notice until after it has shipped.
 """
 
 from __future__ import annotations
 
-#: DPT reassemble の `ConvTranspose2d` → 1×1 conv + pixel shuffle 差し替え
-#: （`depth_anything.patch` の段 ③）が持ち込む深度の差の実測上限。縮約順序の違いで最下位
-#: ビットが動くぶんで、深度の値の RMS はおよそ 1.0。出どころは
-#: `depth_anything/export.py --verify`（合成 4 ケースの最大 — 2026-09-05 実測: checker 1.67e-06 /
-#: disc 1.55e-06 / noise 1.67e-06 / ramp 6.08e-06。以前の綴り 1.4e-06 は 1 ケースの値で、
-#: 4 ケースの上限ではなかった）。`verify_patches` はこの値を**門**として持ち、再実測が
-#: 超えれば落ちる（W-P6-3）。
+#: Measured upper bound of the depth difference introduced by replacing the DPT reassemble
+#: `ConvTranspose2d` with a 1×1 conv + pixel shuffle (step ③ of `depth_anything.patch`). It is the
+#: least significant bits moving because of a different reduction order; the RMS of the depth
+#: values is about 1.0. The source is `depth_anything/export.py --verify` (the maximum over the 4
+#: synthetic cases — measured 2026-09-05: checker 1.67e-06 / disc 1.55e-06 / noise 1.67e-06 /
+#: ramp 6.08e-06. The earlier spelling 1.4e-06 was the value of one case, not the upper bound of
+#: the 4). `verify_patches` holds this value as a **check** and fails when a re-measurement
+#: exceeds it (W-P6-3).
 CONVT_MAXDIFF: float = 6.1e-06
 
 
 def convt_diff_text() -> str:
-    """{@link CONVT_MAXDIFF} を散文へ埋める綴り（`"6.1e-06"`）。
+    """The spelling of {@link CONVT_MAXDIFF} embedded in prose (`"6.1e-06"`).
 
-    書式を関数にしているのは、モデルカードと `NOTICE.md` が**同じ文字列**を名乗るため。
+    The format is a function so that the model card and `NOTICE.md` state **the same string**.
     """
     return f"{CONVT_MAXDIFF:g}"

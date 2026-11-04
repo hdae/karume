@@ -1,17 +1,19 @@
-"""Irodori 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""Model card (`README.md`) of the Irodori distribution — pure functions derived from the
+manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **Irodori 固有の事実**だけ: 帰属（重みの出所・
-同梱するコーデックと text backbone・ライセンス）と、この pipeline のカードに何を書くか。
+The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
+live in `karume.modelcard`. This module holds only **facts specific to Irodori**: attribution (where
+the weights come from, the bundled codec and text backbone, the licenses) and what this pipeline's
+card says.
 
-帰属プロファイルは 1 つだけ（本体 + 同梱の text backbone + コーデック〈+ その元の Apache 2.0 の
-重み〉の組はどのモデルでも同じで、変わるのは本体の上流リポだけ）— SBV2 のように
-声のファミリーで出所が割れる軸を持たないので、{@link irodori.distribution.PIPELINE} は
-`card_profiles` に 1 席しか置かない。
+There is a single attribution profile (the set of main model + bundled text backbone + codec
+(+ its original Apache 2.0 weights) is the same for every model; only the main model's upstream
+repository changes) — unlike SBV2 there is no axis along which the origin splits by voice family,
+so {@link irodori.distribution.PIPELINE} puts a single slot in `card_profiles`.
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies as is). The only constants allowed here are facts that
+**do not exist in the manifest**.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 IRODORI_SUPPORTED_PIPELINE = "irodori/1"
 
 IRODORI_PIPELINE_TAG = "text-to-speech"
@@ -45,19 +47,24 @@ IRODORI_PIPELINE_TAG = "text-to-speech"
 
 @dataclass(frozen=True)
 class IrodoriUpstream:
-    """配布モデル 1 つぶんの上流の事実（manifest に存在しないのでここが持つ — 冒頭の MUST）。"""
+    """Upstream facts of one distributed model (not in the manifest, so held here — the MUST at
+    the top)."""
 
-    #: 重みの出所（`inputs/irodori/<モデル名>/` に手で置く HF リポ）。
+    #: Where the weights come from (the HF repository placed by hand in
+    #: `inputs/irodori/<model name>/`).
     repo: str
-    #: タイトルと概要の太字に使う表示名（上流の名乗りに合わせる）。
+    #: Display name used in the title and the bold text of the overview (matches what upstream
+    #: calls itself).
     display: str
 
 
-#: 配布モデル名 → 上流の事実。v4.1-small は duration predictor のみ再学習した後継
-#: （他 683 テンソルは v4 とビット同一・tokenizer もバイト同一 — 2026-09-01 実測）。
-#: 表に無いモデル名は fail loudly — 黙って別の版の帰属を書くと出所表記が現物と食い違う。
-#: ライセンスは実地確認（2026-08-12 / v4.1 は 2026-09-01・HF の models API の `tags`）:
-#: いずれも `license: mit`。
+#: Distributed model name → upstream facts. v4.1-small is the successor with only the duration
+#: predictor retrained (the other 683 tensors are bit-identical to v4 and the tokenizer is
+#: byte-identical — measured 2026-09-01).
+#: A model name missing from the table fails loudly — silently writing another version's
+#: attribution would make the stated origin disagree with the actual weights.
+#: Licenses checked at the source (2026-08-12 / v4.1 on 2026-09-01, `tags` of the HF models API):
+#: all are `license: mit`.
 IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
     "v4-small": IrodoriUpstream(
         repo="Aratako/Irodori-TTS-v4-Small", display="Irodori-TTS v4 Small"
@@ -67,61 +74,70 @@ IRODORI_UPSTREAMS: Mapping[str, IrodoriUpstream] = {
     ),
 }
 
-#: text backbone の素になった日本語 ModernBERT（チェックポイントの `config_json` が
-#: `text_tokenizer_repo` / `text_encoder_revision` で名指ししている 1 本）。上流の版に依らず
-#: 同一（v4 → v4.1 で text encoder は凍結 — 上の実測と同根）。再配布しているので帰属に並べる。
-#: ライセンスは実地確認（2026-08-12）: `license: mit`。
+#: The Japanese ModernBERT the text backbone was made from (the one the checkpoint's
+#: `config_json` names in `text_tokenizer_repo` / `text_encoder_revision`). The same for every
+#: upstream version (the text encoder is frozen from v4 to v4.1 — the same root as the measurement
+#: above). It is redistributed, so it is listed in the attribution.
+#: License checked at the source (2026-08-12): `license: mit`.
 IRODORI_TEXT_BACKBONE_MODEL = "sbintuitions/modernbert-ja-310m"
 
 
 def irodori_upstream(model_name: str) -> IrodoriUpstream:
-    """配布モデル名から上流の事実を引く（未知の名前は fail loudly）。"""
+    """Look up the upstream facts of a distributed model name (an unknown name fails loudly)."""
     if model_name not in IRODORI_UPSTREAMS:
         known = " / ".join(sorted(IRODORI_UPSTREAMS))
         raise ValueError(
-            f"モデル名 '{model_name}' の上流が {__name__}.IRODORI_UPSTREAMS に無い"
-            f"（既知: {known}）— 新しい版はまず出所と表示名をこの表に足す"
+            f"model name '{model_name}' has no upstream in {__name__}.IRODORI_UPSTREAMS"
+            f" (known: {known}) — add the origin and display name of a new version to that table"
+            " first"
         )
     return IRODORI_UPSTREAMS[model_name]
 
 
-#: 波形へ落とすコーデック（上流では別リポ・別重み — この配布形には**同梱している**）。
-#: ライセンスは MIT（`docs/research/2026-08-11-irodori-source-recon.md` の実地確認）。
-#: 再配布しているので `base_model` にも帰属節にも並べる。
+#: The codec that turns latents into a waveform (a separate repository with separate weights
+#: upstream — **bundled** in this distribution).
+#: Its license is MIT (checked at the source in `docs/research/2026-08-11-irodori-source-recon.md`).
+#: It is redistributed, so it is listed both in `base_model` and in the attribution section.
 IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
-#: コーデックの重みの上流の鎖（2026-09-24 に HF の models API と各 README で確認）。
-#: `IRODORI_CODEC_MODEL`（`47376ee2…`・`license: mit`）の `base_model` は
-#: `IRODORI_CODEC_PARENT_MODEL`（`96adcf19…`・`license: mit`）で、README は "originally
-#: facebook/dacvae-watermarked" / "Weights derived from facebook/dacvae-watermarked" と書く。
-#: 親の `base_model` は `IRODORI_CODEC_ORIGIN_MODEL`（`8680102d…`・`license: apache-2.0`）。
-#: 元の重みは Apache 2.0 なので、MIT の帰属に加えて Apache の条文と帰属を配布リポに置く
-#: （`irodori.distribution.irodori_root_files`）。元のコードリポ（GitHub
-#: `facebookresearch/dacvae`）の `LICENSE` も Apache 2.0。HF 側・GitHub 側とも `NOTICE`
-#: ファイルは無く（2026-09-24 のファイル一覧）、保持すべき上流の告知文は無い。
+#: The upstream chain of the codec weights (checked 2026-09-24 against the HF models API and
+#: each README).
+#: The `base_model` of `IRODORI_CODEC_MODEL` (`47376ee2…`, `license: mit`) is
+#: `IRODORI_CODEC_PARENT_MODEL` (`96adcf19…`, `license: mit`), whose README says "originally
+#: facebook/dacvae-watermarked" / "Weights derived from facebook/dacvae-watermarked".
+#: The parent's `base_model` is `IRODORI_CODEC_ORIGIN_MODEL` (`8680102d…`, `license: apache-2.0`).
+#: The original weights are Apache 2.0, so the distribution repository carries the Apache license
+#: text and attribution in addition to the MIT attribution
+#: (`irodori.distribution.irodori_root_files`). The `LICENSE` of the original code repository
+#: (GitHub `facebookresearch/dacvae`) is Apache 2.0 too. Neither the HF side nor the GitHub side has
+#: a `NOTICE` file (file listing of 2026-09-24), so there is no upstream notice to preserve.
 #:
-#: NOTE: HF の `facebook/dacvae-watermarked` の README 末尾は "licensed under the SAM License"
-#: と書いており、同じリポの license タグ（`apache-2.0`）と食い違う。GitHub 側の README は
-#: "licensed under Apache-2.0" と書き、同リポの discussions/1 で README 側の記載が誤りだと
-#: 確認されている（2026-09-24 利用者確認）。ここでは機械可読なタグと同梱の `LICENSE` に合わせる。
+#: NOTE: the end of the README of HF `facebook/dacvae-watermarked` says "licensed under the SAM
+#: License", which disagrees with the same repository's license tag (`apache-2.0`). The GitHub
+#: README says "licensed under Apache-2.0", and discussions/1 of the same repository confirms that
+#: the README statement is the mistake (checked by the maintainer 2026-09-24). Here we follow the
+#: machine-readable tag and the bundled `LICENSE`.
 IRODORI_CODEC_PARENT_MODEL = "Aratako/Semantic-DACVAE-Japanese"
 IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
 
-#: 配布形のライセンス識別子（カードの frontmatter の HF タグ — 上流の Irodori-TTS も、同梱
-#: コーデックの直接の上流 {@link IRODORI_CODEC_MODEL} も `license: mit`）。本体側の容器へ焼く出所
-#: （`irodori.export.PROVENANCE`）もここから引く — 2 表が独立に動く形にしない。
+#: License identifier of the distribution (the HF tag in the card's frontmatter — upstream
+#: Irodori-TTS and the direct upstream of the bundled codec, {@link IRODORI_CODEC_MODEL}, are both
+#: `license: mit`). The provenance baked into the main model's containers
+#: (`irodori.export.PROVENANCE`) is taken from here too — the two tables must not move
+#: independently.
 #:
-#: NOTE: コーデックの重みは MIT だけでは言い切れない — 元の重みが Apache 2.0 の
-#: {@link IRODORI_CODEC_ORIGIN_MODEL}（上の鎖）なので、コーデック容器の識別子は
-#: {@link IRODORI_CODEC_LICENSE} が別に持つ。
+#: NOTE: MIT alone does not cover the codec weights — their original weights are the Apache 2.0
+#: {@link IRODORI_CODEC_ORIGIN_MODEL} (the chain above), so the codec containers' identifier is
+#: held separately by {@link IRODORI_CODEC_LICENSE}.
 IRODORI_LICENSE = "mit"
 
-#: コーデック容器（`codec_decoder` / `codec_encoder` — `irodori.dacvae.export.PROVENANCE`）へ
-#: 焼くライセンス識別子。上の鎖の実態（MIT の派生 + Apache 2.0 の元の重み）を、HF の識別子を
-#: SPDX の `AND` で結んで表す — 部品を単体で持ち出したとき（`fromPretrained` の `components` 席）、
-#: 容器だけで Apache 2.0 §4(a)(b) の条件が掛かることが読める形にする（2026-09-24 全域レビュー
-#: W-RC4-1・2026-09-25 裁定）。容器の `license` は識別子の文字列を運ぶだけで、読み手（core の
-#: `karume.container` / TS の `descriptor.ts`）は語彙を検査しない。
+#: License identifier baked into the codec containers (`codec_decoder` / `codec_encoder` —
+#: `irodori.dacvae.export.PROVENANCE`). It states the reality of the chain above (an MIT derivative
+#: + Apache 2.0 original weights) by joining the HF identifiers with SPDX `AND` — so that when a
+#: component is taken out on its own (the `components` slot of `fromPretrained`), the container
+#: alone shows that the conditions of Apache 2.0 §4(a)(b) apply (2026-09-24 full review W-RC4-1,
+#: ruling of 2026-09-25). The container's `license` only carries the identifier string; its readers
+#: (core `karume.container` / TS `descriptor.ts`) do not check the vocabulary.
 IRODORI_CODEC_LICENSE = "mit AND apache-2.0"
 
 
@@ -129,16 +145,18 @@ def _irodori_metadata(upstream: IrodoriUpstream) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=IRODORI_PIPELINE_TAG,
         base_model=(upstream.repo, IRODORI_TEXT_BACKBONE_MODEL, IRODORI_CODEC_MODEL),
-        # 既定 quant（`i8-a8`）の DL 実体が int8 系列なので `quantized` を宣言する（sbv2 /
-        # anima と同型。
-        # 旧「f32 のまま・quantized ではない」は i8 系列同梱前の陳腐化した前提だった）。
+        # What the default quant (`i8-a8`) downloads is the int8 series, so `quantized` is
+        # declared (same shape as sbv2 / anima.
+        # The old "kept as f32, not quantized" was a stale premise from before the i8 series was
+        # bundled).
         base_model_relation="quantized",
         license=IRODORI_LICENSE,
         tags=("text-to-speech", "webgpu", "japanese"),
     )
 
 
-#: 使い方スニペットのデモ入力（日本語 TTS の入力なので日本語のまま — CLAUDE.md の言語規約）。
+#: Demo inputs of the usage snippet (Japanese TTS inputs, so they stay Japanese — the language
+#: rules of CLAUDE.md).
 IRODORI_DEMO_TEXT = "こんにちは、これはテストです。"
 IRODORI_DEMO_CAPTION = "落ち着いた女性の声で、ゆっくりと丁寧に話している。"
 
@@ -178,7 +196,8 @@ def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) ->
 
 
 def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
-    """帰属節。変換 + 量子化（int8 系列の生成）を主張する — 再学習・fine-tune はしていない。"""
+    """The attribution section. It claims conversion + quantization (producing the int8 series)
+    — no retraining or fine-tuning."""
     return [
         "## Base weights and attribution",
         "",
@@ -214,14 +233,15 @@ def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
 
 
 def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、系列が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
+    """Policy of the usage example: keep the minimal working form, and **list the optional
+    arguments an ordinary use case is likely to need, commented out** (the selectable values are
+    listed in a comment on the same line — derived from the manifest, so the list follows when
+    series are added). The reader takes the next step just by uncommenting.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+    NOTE: `fromAssets` is **not advertised** (ruling of 2026-08-29). It can read the split
+    distribution too (X2-101), but it is a surface for local debugging that assumes you hold the
+    bytes yourself; the ordinary entry point for a reader using HF is `fromPretrained`. Listing
+    both would leave the reader to decide which one to use.
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -280,7 +300,8 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _irodori_shape(model: Mapping[str, Any]) -> list[str]:
-    """モデル固有の数（グラフの宣言と噛み合う側）— 利用者の入力上限がここで読める。"""
+    """Model-specific numbers (the side that meshes with the graph declarations) — the user's
+    input limits can be read here."""
     config = model["pipelineConfig"]
     frame_rate = config["frameRate"]
     return [
@@ -305,7 +326,7 @@ def _irodori_shape(model: Mapping[str, Any]) -> list[str]:
 
 
 def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
-    """実行時ノブ（`generate()` に渡さなかったものを埋める側）。"""
+    """Runtime knobs (the side that fills in what was not passed to `generate()`)."""
     config = model["pipelineConfig"]
     scales = config["cfgScales"]
     return [
@@ -328,7 +349,8 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
 def render_irodori_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
-    """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Assemble the `README.md` body of the Irodori distribution (pure function, trailing
+    newline included)."""
     require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
     upstream = irodori_upstream(manifest["defaultModel"])
     metadata = _irodori_metadata(upstream)

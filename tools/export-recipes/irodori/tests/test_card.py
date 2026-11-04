@@ -1,14 +1,15 @@
-"""Irodori 配布形のモデルカード描画（`irodori.card`）— カード側にしか無い門。
+"""Model card rendering of the Irodori distribution (`irodori.card`) — checks that exist only on
+the card side.
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。
+The real distribution's `karume.json` is not used — the job here is to see that the values of a
+fake manifest appear in the text as they are (= that not a single hand-written number is mixed
+in), so building it from values that **differ** from the real ones detects more.
 
-manifest からの導出（表・数・使い方）は `irodori/tests/test_distribution.py` の
-`TestIrodoriModelCard` が**組み立て 1 周ぶん**で見る。これまで Irodori のテンプレートは
-core の `tests/test_modelcard.py` に固有の節を持っていなかったので `test_card.py` を作って
-いなかったが、「案内するロード入口」は組み立てを 1 周しなくても観測できるカード側だけの門なので
-ここに置く（2026-08-30）。
+Derivation from the manifest (tables, numbers, usage) is checked by `TestIrodoriModelCard` in
+`irodori/tests/test_distribution.py` over **one full build**. Until now the Irodori template had
+no section of its own in the core's `tests/test_modelcard.py`, so there was no `test_card.py`,
+but "the load entry point the card points to" is a card-only check that can be observed without
+a full build, so it lives here (2026-08-30).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import pytest
 
 from irodori.card import IRODORI_SUPPORTED_PIPELINE, render_irodori_model_card
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: The repo ID written into the usage snippet (dist passes it from the pipeline declaration).
 REPO = "hdae/fake-repo"
 
 
@@ -28,9 +29,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of `weights` (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so it only has the real shape (the length and sha256 of
+    the 2 documents).
     """
     return {
         "container": {
@@ -43,13 +45,15 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: 偽 manifest のモデル名。帰属（上流リポ・表示名）はモデル名から `IRODORI_UPSTREAMS` で
-#: 引くようになった（2026-09-01）ので、ここだけは実在キーを使う — それ以外の値は偽のまま。
+#: The model name of the fake manifest. Attribution (upstream repo, display name) is now
+#: looked up from the model name in `IRODORI_UPSTREAMS` (2026-09-01), so only this uses a real
+#: key — every other value stays fake.
 MODEL = "v4.1-small"
 
 
 def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
-    """Irodori の最小 manifest（モデル名以外の値は実物と重ならない偽値）。"""
+    """Minimal Irodori manifest (every value but the model name is fake and differs from the
+    real ones)."""
     return {
         "format": "karume/5",
         "generator": "karume/9.9.9",
@@ -101,24 +105,27 @@ def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
 
 
 class TestIrodoriEntryPoint:
-    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+    """The load entry point the card points to — `fromPretrained` only."""
 
     def test_it_does_not_advertise_the_local_asset_entry_point(self) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）。
+        """`fromAssets` is not advertised (ruling of 2026-08-29).
 
-        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
-        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
-        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
-        見るのは、Usage ごと消えても通る門にしないため。
+        It can now read the split distribution too (X2-101), but it is a local-debugging surface
+        that assumes the caller holds the bytes; the normal entry point for readers using HF is
+        `fromPretrained`. Listing both would leave the reader to decide "which one to use".
+        `fromPretrained` is checked as well so that the check does not pass when the whole Usage
+        section is gone.
         """
         card = render_irodori_model_card(_irodori_manifest(), REPO)
         assert "fromAssets" not in card
         assert "await Pipeline.fromPretrained" in card
 
     def test_the_usage_snippet_declares_the_pipeline_with_await_using(self) -> None:
-        """`irodori.Pipeline` は `[Symbol.asyncDispose]` だけを持つ（同期 `using` は宣言で落ちる）。
+        """`irodori.Pipeline` has only `[Symbol.asyncDispose]` (a synchronous `using` fails at
+        the declaration).
 
-        部分一致は `await using` でも `using` でも通るので、宣言行を丸ごと突き合わせる。
+        A substring match passes for both `await using` and `using`, so the whole declaration
+        line is compared.
         """
         lines = render_irodori_model_card(_irodori_manifest(), REPO).splitlines()
         assert "await using pipeline = await Pipeline.fromPretrained({" in lines
@@ -126,7 +133,8 @@ class TestIrodoriEntryPoint:
 
 
 class TestIrodoriUpstreamAttribution:
-    """帰属はモデル名から引く — 版を取り違えた出所表記を門で止める。"""
+    """Attribution is looked up from the model name — the check stops a credit line that names
+    the wrong version."""
 
     def test_v4_renders_its_own_upstream(self) -> None:
         card = render_irodori_model_card(_irodori_manifest("v4-small"), REPO)
@@ -141,7 +149,8 @@ class TestIrodoriUpstreamAttribution:
         assert "Irodori-TTS-v4-Small" not in card
 
     def test_unknown_model_name_fails_loudly(self) -> None:
-        """表に無い版で黙って別の帰属を書かない（fail loudly）。"""
+        """A version missing from the table does not silently get another attribution (fail
+        loudly)."""
         with pytest.raises(ValueError, match="IRODORI_UPSTREAMS"):
             render_irodori_model_card(_irodori_manifest("v9-small"), REPO)
 

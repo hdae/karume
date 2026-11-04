@@ -1,8 +1,8 @@
-"""token-only 既定出口の台本（`gemma4/export_token.py`）の挙動テスト。
+"""Behaviour tests of the script for the default token-only exit (`gemma4/export_token.py`).
 
-tiny な実モデルの一周（export → 手術 → 混成量子化つき書き出し → 形検査）と、
-**logits opt-in 形との eager 同値**（同じ重みを共有する 2 ラッパで、選んだ行の token が
-一致する）を縛る。実重み・GPU は使わない。
+Pins one round trip of a tiny real model (export → surgery → write with mixed quantization → form
+check) and **eager equivalence with the logits opt-in form** (two wrappers sharing the same weights
+produce the same token for the selected row). No real weights or GPU are used.
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ from karume.states import to_states_form
 
 @pytest.fixture
 def tiny_model_pair():
-    """同じ重みを共有する (logits opt-in ラッパ, token-only ラッパ)。
+    """(logits opt-in wrapper, token-only wrapper) sharing the same weights.
 
-    MUST: model / tables の**実体を共有**する — 別々に組むと乱数重みが割れて eager 同値の
-    突合が「一致すべき前提」を失う。共有できるのは両ラッパがモジュールを持つだけで
-    状態を書かないから。
+    MUST: **share the objects** of model / tables — building them separately splits the random
+    weights, and the eager-equivalence comparison loses its premise that the two should agree.
+    Sharing works because both wrappers only hold the modules and write no state.
     """
     transformers = pytest.importorskip("transformers")
     torch.manual_seed(0)
@@ -56,9 +56,11 @@ def tiny_model_pair():
 
 class TestEagerEquivalence:
     def test_the_selected_row_token_matches_the_logits_form(self, tiny_model_pair):
-        """行選択 + 1 行 lm_head + softcap + argmax が opt-in 形の同じ行の token と一致する。
+        """Row selection + one-row lm_head + softcap + argmax matches the opt-in form's token for
+        the same row.
 
-        全行を踏む（最終行だけだと行選択の添字ずれ — 例えば常に 0 行 — が素通りする）。
+        Every row is exercised (with only the last row, an index slip in the row selection — for
+        example always row 0 — would pass unnoticed).
         """
         logits_form, token_form = tiny_model_pair
         torch.manual_seed(1)
@@ -69,12 +71,13 @@ class TestEagerEquivalence:
             _, reference = logits_form(ids, *rope)
             for row in range(int(ids.shape[1])):
                 selected = token_form(ids, *rope, torch.tensor([row], dtype=torch.int64))
-                assert tuple(selected.shape) == (1, 1, 1), f"row {row} の出力形"
-                assert int(selected[0, 0, 0]) == int(reference[0, row, 0]), f"row {row} の token"
+                assert tuple(selected.shape) == (1, 1, 1), f"row {row}: output shape"
+                assert int(selected[0, 0, 0]) == int(reference[0, row, 0]), f"row {row}: token"
 
 
 class TestExportedTokenForm:
-    """tiny な実モデルを export → 手術 → 混成量子化つき書き出しまで通す（transformers が要る）。"""
+    """Runs a tiny real model through export → surgery → write with mixed quantization (needs
+    transformers)."""
 
     @pytest.fixture
     def tiny_container(self, tiny_model_pair, tmp_path):
@@ -121,8 +124,8 @@ class TestExportedTokenForm:
         assert "argmax" in verified.required_ops
 
     def test_the_logits_form_check_rejects_the_token_only_graph(self, tiny_container):
-        """`token_only` の指定し忘れ（またはその逆）が黙って通らないことの固定。"""
+        """Pins that forgetting `token_only` (or the reverse) does not pass silently."""
         verified, config, storage = tiny_container
 
-        with pytest.raises(AssertionError, match="グラフ入力"):
+        with pytest.raises(AssertionError, match="graph input"):
             decode.assert_ir_form_decode(verified, config, storage)

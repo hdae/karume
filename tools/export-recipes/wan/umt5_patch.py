@@ -1,48 +1,56 @@
-"""Wan2.1 の umT5（`UMT5EncoderModel`）を有効長 `L` の 1 シンボルの IR にするラッパと、相対位置の
-バケット表の Python 側の正本（ADR 0119 決定 3〜5・段 10c）。
+"""The wrapper that turns Wan2.1 umT5 (`UMT5EncoderModel`) into an IR with a single symbol for the
+valid length `L`, and the Python-side source of truth for the relative-position bucket table
+(ADR 0119 decisions 3 to 5, step 10c).
 
-グラフの入力は token id `[1, L]` とバケット表 `[L, L]`（{@link INPUT_NAMES}）、出力は
-`[1, L, d_model]`。マスク入力は持たない（決定 4 — 有効長だけで回す）。
+The graph inputs are the token ids `[1, L]` and the bucket table `[L, L]` ({@link INPUT_NAMES});
+the output is `[1, L, d_model]`. There is no mask input (decision 4 — it runs on the valid length
+only).
 
-## 上流との差（どれも {@link Umt5EncoderTokens} の中だけ）
+## Differences from upstream (all inside {@link Umt5EncoderTokens})
 
-- 相対位置のバケット: 上流は `compute_bias` がグラフの中で `arange` → 差 → `log` → `where` で
-  作る。ラッパはホストが作った表を入力で受け、層ごとの表 `[32, heads]` を `embedding` で引く
-  （決定 3）。
-- マスク: 上流は有効長で 1 の加算型マスク（`(1 − m)·finfo.min`）を全層のバイアスに足す。ラッパは
-  持たない（決定 4）。
-- FFN の活性: 上流は `gelu_new`（`0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` の手書き式）。
-  ラッパは `nn.GELU(approximate="tanh")`（同じ式の `aten.gelu` — 下の節）。
-- dropout: 上流は eval で恒等。ラッパは持たない（{@link Umt5EncoderTokens} が eval を要求する）。
+- Relative-position buckets: upstream, `compute_bias` builds them inside the graph with `arange` →
+  difference → `log` → `where`. The wrapper takes a host-built table as an input and looks up the
+  per-layer table `[32, heads]` with `embedding` (decision 3).
+- Mask: upstream adds an additive mask that is 1 over the valid length (`(1 − m)·finfo.min`) to the
+  bias of every layer. The wrapper has none (decision 4).
+- FFN activation: upstream uses `gelu_new` (the hand-written formula
+  `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))`). The wrapper uses `nn.GELU(approximate="tanh")`
+  (`aten.gelu` with the same formula — see the section below).
+- dropout: upstream it is the identity in eval. The wrapper has none ({@link Umt5EncoderTokens}
+  requires eval).
 
-残りの部品（語彙埋め込み・q/k/v/o・RMSNorm・softmax を f32 で取る形・ゲート付き FFN・最後の
-RMSNorm）は上流のモジュールをそのまま呼ぶか、上流の行を同じ順で書き下す。活性を上流のまま
-（`activation="upstream"`）にしたラッパは上流の forward と f32 で**ビット一致**する（pytest が
-縛る — 書き下しの誤りと活性の差し替えの丸めを分けて見るため）。
+The remaining parts (token embedding, q/k/v/o, RMSNorm, softmax taken in f32, the gated FFN, the
+final RMSNorm) either call the upstream modules as they are or spell out the upstream lines in the
+same order. With the activation left as upstream (`activation="upstream"`), the wrapper is
+**bit-exact** with the upstream forward in f32 (pinned by pytest — so that a mistake in the spelled-
+out code is told apart from the rounding of the activation replacement).
 
-## `gelu_new` を差し替える理由（段 10c の下見の実測）
+## Why `gelu_new` is replaced (measured in the step 10c preliminary check)
 
-exporter は `gelu_new` の `pow(x, 3.0)` を拾えない（`aten.pow.Tensor_Scalar` が未対応 op の列挙に
-落ちる — 正規化 `_pow2_to_mul` は指数 2 だけ）。`nn.GELU(approximate="tanh")` は数学的に同じ関数
-（tanh 近似の GELU）を `aten.gelu` 1 本で書き、IR の `gelu_tanh` に降りる。差は f32 の丸めだけで、
-要素ごとの実測は {@link wan.umt5_probe} の `activation_rounding`。
+The exporter cannot take the `pow(x, 3.0)` in `gelu_new` (`aten.pow.Tensor_Scalar` ends up in the
+list of unsupported ops — the `_pow2_to_mul` normalization handles exponent 2 only).
+`nn.GELU(approximate="tanh")` writes the mathematically same function (the tanh-approximated GELU)
+as a single `aten.gelu`, which lowers to the IR's `gelu_tanh`. The only difference is f32 rounding;
+the per-element measurement is `activation_rounding` in {@link wan.umt5_probe}.
 
-## バケット表（決定 3）
+## The bucket table (decision 3)
 
-{@link relative_position_buckets} は上流の `UMT5Attention._relative_position_bucket` をそのまま呼ぶ
-（式を写さない）。表の向きは上流の `compute_bias` と同じ `table[i][j] = bucket(j − i)`（キーの位置 −
-クエリの位置）。TS の生成器（`packages/models/src/umt5/relative-position.ts`）はこの表と
-バイト一致する（fixture は {@link wan.umt5_host_fixture}）。
+{@link relative_position_buckets} calls upstream `UMT5Attention._relative_position_bucket` as is
+(the formula is not copied). The table's orientation is the same as upstream `compute_bias`:
+`table[i][j] = bucket(j − i)` (key position − query position). The TS generator
+(`packages/models/src/umt5/relative-position.ts`) is byte-identical to this table (the fixture is
+{@link wan.umt5_host_fixture}).
 
-## 量子化の対象（決定 5）
+## What is quantized (decision 5)
 
-`karume.quantize.fake_quant_int8` の既定の対象は `nn.Embedding` を含むので、層ごとの相対位置の表
-（`relative_attention_bias` — `nn.Embedding [32, heads]`）まで i8 になる。{@link fake_quant_i8} は
-include でこの表を外し、emit には {@link storage_overrides} で F32 を明示する（表は `embedding` の
-重みスロットに入るので emit の適格集合に載り、scale が無いと `per-channel scale が無い` で落ちる）。
+The default targets of `karume.quantize.fake_quant_int8` include `nn.Embedding`, so the per-layer
+relative-position tables (`relative_attention_bias` — `nn.Embedding [32, heads]`) would become i8
+too. {@link fake_quant_i8} excludes these tables through include, and emit is told F32 explicitly
+through {@link storage_overrides} (the tables go into the weight slot of `embedding`, so they are in
+emit's eligible set, and without a scale emit fails with `has no per-channel scale`).
 
-MUST: transformers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: transformers is imported inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -58,46 +66,55 @@ from torch.nn import functional
 from karume.quantize import QUANT_MODULE_TYPES, Int8Report, fake_quant_int8, iter_quant_targets
 from wan.umt5_tokenizer import MAX_LENGTH, MIN_TOKENS
 
-#: グラフ入力の名前（並びは forward の引数の順 — TS の `src/umt5/session-io.ts` と同じ綴り）。
+#: Names of the graph inputs (in the order of the forward arguments — the same spelling as TS
+#: `src/umt5/session-io.ts`).
 INPUT_NAMES = ("input_ids", "relative_position_buckets")
 
-#: 有効長の記号次元の名前（決定 4 — 1 シンボル）。
+#: Name of the symbolic dimension for the valid length (decision 4 — a single symbol).
 SYMBOL = "L"
 
-#: 上流の FFN の活性（`config.dense_act_fn`）。これ以外の構成はラッパが扱わない。
+#: The upstream FFN activation (`config.dense_act_fn`). The wrapper handles no other configuration.
 UPSTREAM_ACTIVATION = "gelu_new"
 
-#: ラッパの活性の選択（`tanh` = export の形・`upstream` = 書き下しの同値を見る形）。
+#: The wrapper's activation choice (`tanh` = the export form, `upstream` = the form that checks the
+#: spelled-out code is equivalent).
 Activation = Literal["tanh", "upstream"]
 
-#: 相対位置の表のモジュール名の末尾（上流 `UMT5Attention` の属性名）。
+#: Trailing part of the relative-position table's module name (the attribute name in upstream
+#: `UMT5Attention`).
 RELATIVE_BIAS_ATTRIBUTE = "relative_attention_bias"
 
 
 class Umt5ConfigError(ValueError):
-    """ラッパが前提にする上流の構成（エンコーダ・ゲート付き `gelu_new`・層ごとの表）から外れた。"""
+    """The upstream configuration differs from what the wrapper assumes (encoder, gated `gelu_new`,
+    per-layer tables)."""
 
 
 def check_supported(config: Any) -> None:
-    """ラッパの書き下しが成り立つ構成かを見る（外れたら黙って別の計算をしない）。"""
+    """Check that the configuration is one the wrapper's spelled-out code holds for (it never
+    silently computes something else when it does not)."""
     problems = []
     if config.is_decoder:
-        problems.append("is_decoder が真（双方向のバケットと自己注意だけを書き下している）")
+        problems.append(
+            "is_decoder is true (only bidirectional buckets and self-attention are spelled out)"
+        )
     if not config.is_gated_act:
-        problems.append("FFN がゲート付きでない（`wi_0`・`wi_1`・`wo` の形だけを書き下している）")
+        problems.append("the FFN is not gated (only the `wi_0`, `wi_1`, `wo` form is spelled out)")
     if config.dense_act_fn != UPSTREAM_ACTIVATION:
         problems.append(
-            f"活性が {config.dense_act_fn!r}（{UPSTREAM_ACTIVATION!r} だけを差し替える）"
+            f"the activation is {config.dense_act_fn!r} (only {UPSTREAM_ACTIVATION!r} is replaced)"
         )
     if problems:
         raise Umt5ConfigError("; ".join(problems))
 
 
 def bucket_attention(config: Any) -> nn.Module:
-    """バケットの式だけを持つ上流の `UMT5Attention`（重みは meta — 実体を確保しない）。
+    """An upstream `UMT5Attention` that only carries the bucket formula (weights on meta — no
+    storage is allocated).
 
-    実モデルを読まずに上流の式を呼ぶための口（fixture の生成 — {@link wan.umt5_host_fixture}）。
-    q/k/v/o の Linear は meta 上に作るので、実寸の構成（4,096 × 4,096 × 4）でもメモリを取らない。
+    The entry point for calling the upstream formula without loading the real model (fixture
+    generation — {@link wan.umt5_host_fixture}). The q/k/v/o Linears are built on meta, so even the
+    full-size configuration (4,096 × 4,096 × 4) takes no memory.
     """
     from transformers.models.umt5.modeling_umt5 import UMT5Attention
 
@@ -107,38 +124,46 @@ def bucket_attention(config: Any) -> nn.Module:
 
 
 def relative_position_buckets(length: int, attention: nn.Module) -> torch.Tensor:
-    """有効長 `length` のバケット表 `[L, L]`（int64 — 上流の `compute_bias` の中間そのもの）。
+    """The bucket table `[L, L]` for valid length `length` (int64 — exactly the intermediate in
+    upstream `compute_bias`).
 
-    `attention` は上流の `UMT5Attention`（実モデルの層か {@link bucket_attention}）。上流の
-    `compute_bias` の前半（位置の差 → `_relative_position_bucket`）と同じ行で、表の向きは
-    `table[i][j] = bucket(j − i)`。`embedding` で層の表を引いて `[heads, L, L]` へ回すと上流の
-    `compute_bias` とビット一致する（pytest）。
+    `attention` is an upstream `UMT5Attention` (a layer of the real model or
+    {@link bucket_attention}). The same lines as the first half of upstream `compute_bias`
+    (position difference → `_relative_position_bucket`); the table's orientation is
+    `table[i][j] = bucket(j − i)`. Looking up a layer's table with `embedding` and permuting to
+    `[heads, L, L]` is bit-exact with upstream `compute_bias` (pytest).
 
-    受ける長さはグラフの記号次元と同じ 2〜512（決定 4）。TS の生成器と突き合わせたのもこの範囲
-    だけ（f64 の `Math.log` と torch の f32 の `log` の一致は距離 ±511 の全件で実測 — 調査 §4.3）。
-    境界での i32 への変換は呼び手が `karume.convert.normalize_boundary_tensor` で掛ける
-    （ADR 0009）。
+    The accepted lengths are 2 to 512, the same as the graph's symbolic dimension (decision 4).
+    The TS generator was checked against this range only (f64 `Math.log` matching torch's f32 `log`
+    was measured on every distance up to ±511 — research §4.3). The caller applies the i32
+    conversion at the boundary with `karume.convert.normalize_boundary_tensor` (ADR 0009).
     """
     if isinstance(length, bool) or not isinstance(length, int):
-        raise TypeError(f"有効長は int で渡す（{type(length).__name__}）")
+        raise TypeError(f"pass the valid length as an int ({type(length).__name__})")
     if not MIN_TOKENS <= length <= MAX_LENGTH:
-        raise ValueError(f"有効長 {length} が {MIN_TOKENS}〜{MAX_LENGTH} の外（決定 4）")
+        raise ValueError(
+            f"valid length {length} is outside {MIN_TOKENS} to {MAX_LENGTH} (decision 4)"
+        )
     if attention.is_decoder:
-        raise Umt5ConfigError("デコーダの片方向バケットは扱わない（エンコーダの双方向だけ）")
+        raise Umt5ConfigError(
+            "decoder (unidirectional) buckets are not handled (encoder bidirectional only)"
+        )
     context_position = torch.arange(length, dtype=torch.long)[:, None]
     memory_position = torch.arange(length, dtype=torch.long)[None, :]
     return attention._relative_position_bucket(memory_position - context_position)
 
 
 class Umt5EncoderTokens(nn.Module):
-    """`UMT5EncoderModel` を「token id `[1, L]` + バケット表 `[L, L]` → `[1, L, d_model]`」にする。
+    """Turn `UMT5EncoderModel` into "token ids `[1, L]` + bucket table `[L, L]` →
+    `[1, L, d_model]`".
 
-    上流のモジュールは共有する（重みの丸め〈fake-quant〉はラッパ経由で上流にも届く）。
-    `self.encoder` に上流の `UMT5Stack` だけを持たせるのは、tied な `shared` を名前の空間に入れない
-    ため（重みのキーが `encoder.embed_tokens.weight` の 1 通りに決まる）。
+    The upstream modules are shared (rounding the weights — fake-quant — through the wrapper reaches
+    upstream too). `self.encoder` holds only the upstream `UMT5Stack` so that the tied `shared`
+    stays out of the name space (the weight key is then only `encoder.embed_tokens.weight`).
 
-    MUST: eval の上流だけを包む（dropout を持たないので、学習モードの上流とは別の計算になる）。
-    MUST: 重みは f32（上流の FFN にある `wo` の手前の dtype 合わせを書き下していない）。
+    MUST: wrap an upstream in eval only (the wrapper has no dropout, so it would compute something
+    other than an upstream in training mode).
+    MUST: f32 weights (the dtype cast before `wo` in the upstream FFN is not spelled out).
     """
 
     def __init__(self, model: nn.Module, *, activation: Activation = "tanh") -> None:
@@ -146,13 +171,14 @@ class Umt5EncoderTokens(nn.Module):
         check_supported(model.config)
         if model.training:
             raise Umt5ConfigError(
-                "学習モードの上流は包まない（dropout が恒等でない）— eval() で渡す"
+                "an upstream in training mode is not wrapped (dropout is not the identity)"
+                " — pass it after eval()"
             )
         dtypes = {parameter.dtype for parameter in model.parameters()}
         if dtypes != {torch.float32}:
-            raise Umt5ConfigError(f"重みの dtype {sorted(map(str, dtypes))} — f32 だけを包む")
+            raise Umt5ConfigError(f"weight dtypes {sorted(map(str, dtypes))} — only f32 is wrapped")
         if activation not in ("tanh", "upstream"):
-            raise ValueError(f"活性 {activation!r} は tanh / upstream のどちらか")
+            raise ValueError(f"activation {activation!r} must be tanh or upstream")
         self.encoder = model.encoder
         self.activation = activation
         self.gelu = nn.GELU(approximate="tanh")
@@ -170,11 +196,11 @@ class Umt5EncoderTokens(nn.Module):
     def _self_attention(
         layer: nn.Module, hidden: torch.Tensor, buckets: torch.Tensor
     ) -> torch.Tensor:
-        """`UMT5LayerSelfAttention` + `UMT5Attention.forward` の書き下し（キャッシュ・マスクなし）。
+        """`UMT5LayerSelfAttention` + `UMT5Attention.forward` spelled out (no cache, no mask).
 
-        スコアにスケールを掛けない・softmax を f32 で取って元の dtype へ戻す、は上流の行のまま。
-        バイアスだけが `compute_bias` の後半（表の gather → `[1, heads, L, L]`）で、表は入力から
-        受ける。
+        No scale on the scores, and softmax taken in f32 and cast back to the original dtype — both
+        as in the upstream lines. Only the bias is the second half of `compute_bias` (gather from
+        the table → `[1, heads, L, L]`), with the table taken from the input.
         """
         attention = layer.SelfAttention
         normed = layer.layer_norm(hidden)
@@ -192,7 +218,8 @@ class Umt5EncoderTokens(nn.Module):
         return hidden + attention.o(output)
 
     def _feed_forward(self, layer: nn.Module, hidden: torch.Tensor) -> torch.Tensor:
-        """`UMT5LayerFF` + `UMT5DenseGatedActDense.forward` の書き下し（活性だけ選べる）。"""
+        """`UMT5LayerFF` + `UMT5DenseGatedActDense.forward` spelled out (only the activation is
+        selectable)."""
         dense = layer.DenseReluDense
         normed = layer.layer_norm(hidden)
         activation = self.gelu if self.activation == "tanh" else dense.act
@@ -201,17 +228,18 @@ class Umt5EncoderTokens(nn.Module):
 
 
 def dynamic_shapes() -> tuple[dict[int, Any], dict[int, Any]]:
-    """入力ごとの記号次元。バケット表の 2 軸も token id と同じ `L` で宣言する（別シンボルにすると
-    「表と本体の長さがずれた」形が受理されて沈黙誤値になる — DiT の RoPE の表と同じ理由）。"""
+    """The symbolic dimensions per input. Both axes of the bucket table are declared with the same
+    `L` as the token ids (separate symbols would accept a table whose length differs from the body's
+    and silently give wrong values — the same reason as the DiT's RoPE tables)."""
     length = Dim(SYMBOL, min=MIN_TOKENS, max=MAX_LENGTH)
     return ({1: length}, {0: length, 1: length})
 
 
 def relative_bias_modules(wrapper: nn.Module) -> tuple[str, ...]:
-    """層ごとの相対位置の表（`nn.Embedding [num_buckets, heads]`）のモジュール FQN。
+    """Module FQNs of the per-layer relative-position tables (`nn.Embedding [num_buckets, heads]`).
 
-    MUST: 本数が層数と一致する（umT5 は全層が自分の表を持つ — 調査 §1.1）。足りないと
-    量子化から外し損ねた表が i8 で焼かれる。
+    MUST: the count matches the layer count (every umT5 layer has its own table — research §1.1).
+    If any are missing, a table that failed to be excluded from quantization is written as i8.
     """
     names = tuple(
         name
@@ -220,31 +248,37 @@ def relative_bias_modules(wrapper: nn.Module) -> tuple[str, ...]:
     )
     layers = len(wrapper.encoder.block)
     if len(names) != layers:
-        raise Umt5ConfigError(f"相対位置の表 {len(names)} 本が層数 {layers} と違う")
+        raise Umt5ConfigError(
+            f"{len(names)} relative-position tables differ from the layer count {layers}"
+        )
     return names
 
 
 def quant_include(wrapper: nn.Module) -> Callable[[str], bool]:
-    """i8 の対象の述語（モジュール FQN — 相対位置の表だけを外す）。"""
+    """Predicate for the i8 targets (module FQN — excludes only the relative-position tables)."""
     tables = frozenset(relative_bias_modules(wrapper))
     return lambda name: name not in tables
 
 
 def storage_overrides(wrapper: nn.Module) -> dict[str, str]:
-    """emit へ渡す格納の明示（テンソルキー → `"f32"` — 相対位置の表を F32 のまま焼く）。
+    """Explicit storage passed to emit (tensor key → `"f32"` — the relative-position tables are
+    written as F32).
 
-    表は `embedding` の重みスロットだけに消費されるので emit の適格集合に載る。既定 `i8` のまま
-    scale が無いと emit が fail loudly で落ちるので、ここで F32 を明示する（決定 5）。
+    The tables are consumed only by the weight slot of `embedding`, so they are in emit's eligible
+    set. Left at the default `i8` without a scale, emit fails loudly, so F32 is stated here
+    (decision 5).
     """
     return {f"{name}.weight": "f32" for name in relative_bias_modules(wrapper)}
 
 
 def fake_quant_i8(wrapper: nn.Module) -> Int8Report:
-    """linear と語彙埋め込みの重みを per-channel symmetric i8 の表現可能値へ丸める（決定 5）。
+    """Round the linear and token-embedding weights to values representable in per-channel
+    symmetric i8 (decision 5).
 
-    相対位置の表は丸めない（F32 のまま — 決定 5）。MUST: 丸めた本数が「量子化できる型の全重み −
-    相対位置の表」と一致し、表の値が 1 ビットも動いていないことを確かめる — 外し損ねると golden と
-    格納の両方が i8 の表になり、門では見えない。
+    The relative-position tables are not rounded (they stay F32 — decision 5). MUST: check that the
+    number of rounded weights equals "every weight of a quantizable type − the relative-position
+    tables" and that the table values did not move by a single bit — if a table were not excluded,
+    both the golden and the storage would hold the i8 table and no check would see it.
     """
     include = quant_include(wrapper)
     tables = relative_bias_modules(wrapper)
@@ -256,25 +290,28 @@ def fake_quant_i8(wrapper: nn.Module) -> Int8Report:
     )
     report = fake_quant_int8(wrapper, include=include)
     if sorted(report.scales) != expected:
-        raise AssertionError(f"i8 に丸めた重みが想定と違う: {sorted(report.scales)} vs {expected}")
+        raise AssertionError(
+            f"the weights rounded to i8 differ from the expected ones: {sorted(report.scales)}"
+            f" vs {expected}"
+        )
     moved = [name for name in tables if not torch.equal(modules[name].weight, before[name])]
     if moved:
-        raise AssertionError(f"相対位置の表が丸められた: {moved}")
+        raise AssertionError(f"relative-position tables were rounded: {moved}")
     return report
 
 
 def padded_output(
     model: nn.Module, input_ids: torch.Tensor, max_length: int = MAX_LENGTH
 ) -> torch.Tensor:
-    """上流の写し方（`_get_t5_prompt_embeds` — 512 まで pad id で詰めてマスク）の出力を
-    有効長で切る。
+    """The output of the upstream way of calling (`_get_t5_prompt_embeds` — padded with the pad id
+    to 512 and masked), cut to the valid length.
 
-    `model` は上流の `UMT5EncoderModel`（dtype は問わない — bf16 の比較にも使う）。マスクは上流の
-    トークナイザと同じ int64 の 0 / 1。
+    `model` is an upstream `UMT5EncoderModel` (any dtype — also used for the bf16 comparison). The
+    mask is int64 0 / 1, the same as the upstream tokenizer's.
     """
     length = int(input_ids.shape[1])
     if input_ids.shape[0] != 1 or not 0 < length <= max_length:
-        raise ValueError(f"token id は [1, 1〜{max_length}] で渡す（{tuple(input_ids.shape)}）")
+        raise ValueError(f"pass the token ids as [1, 1 to {max_length}] ({tuple(input_ids.shape)})")
     padded = torch.full((1, max_length), model.config.pad_token_id, dtype=input_ids.dtype)
     padded[:, :length] = input_ids
     mask = torch.zeros((1, max_length), dtype=torch.long)
@@ -285,22 +322,25 @@ def padded_output(
 
 
 def valid_output(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
-    """有効長だけで回した上流の出力（マスクを渡さない — 上流は全 1 のマスクを自分で作る）。"""
+    """The upstream output run on the valid length only (no mask passed — upstream builds an
+    all-ones mask itself)."""
     with torch.no_grad():
         return model(input_ids=input_ids).last_hidden_state
 
 
 def max_ratio(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    """最大絶対差 ÷ 参照の最大絶対値（f64 で — `wan.export_dit` の帯の指標と同じ形）。"""
+    """Max absolute difference ÷ max absolute value of the reference (in f64 — the same form as the
+    band metric of `wan.export_dit`)."""
     expected = expected.double()
     return float((actual.double() - expected).abs().max() / expected.abs().max())
 
 
 def compare(actual: torch.Tensor, expected: torch.Tensor) -> Mapping[str, Any]:
-    """2 本の出力の一致の度合い（ビット一致・比・最大絶対差・違う要素の割合）。"""
+    """How closely two outputs agree (bit-exact, ratio, max absolute difference, fraction of
+    differing elements)."""
     if actual.shape != expected.shape or actual.dtype != expected.dtype:
         raise ValueError(
-            f"形か dtype が違う: {tuple(actual.shape)} {actual.dtype} vs "
+            f"shape or dtype differs: {tuple(actual.shape)} {actual.dtype} vs "
             f"{tuple(expected.shape)} {expected.dtype}"
         )
     return {

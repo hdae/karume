@@ -1,15 +1,17 @@
-"""SBV2 の配布 recipe（`sbv2.distribution`）— 組み立て 1 周ぶんの単体テスト。
+"""SBV2's distribution recipe (`sbv2.distribution`) — unit tests of one assembly pass.
 
-実資産は使わない。weights の席へ挿すのは数 KB の**正当な最小 IR コンテナ**（`ir_fixtures` —
-{@link _sbv2_container}）で、門に落とされることを見るケースだけが従来の偽資産のまま。SBV2 は加えて
-`config.json` と `style_vectors.npy` を読むが、どちらも数行 / 数 KB の合成物で足りる
-（**合成 config の style2id は実重み FN4 と別の並び**にしてある — 表を焼き込んでいれば落ちる）。
+No real assets are used. What goes into the weights slots are **valid minimal IR containers** of a
+few KB (`ir_fixtures` — {@link _sbv2_container}); only the cases that check that a gate rejects
+something keep the older fake assets. SBV2 also reads `config.json` and `style_vectors.npy`, and a
+synthetic one of a few lines / a few KB is enough for each (**the synthetic config's style2id is in
+a different order from the real FN4 weights** — baking a table in would fail).
 
-manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
-`shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
+Since manifest v2 (`karume/2` — ADR 0041) the in-repository layout is uniformly "a subtree per
+model + `shared/`", so every expected path starts with `<model name>/…`.
 
-core だけで観測できる層（合成計画で足りる規模上限・quant 完全写像・staging/swap の不変条件）は
-`tools/exporter/tests/test_dist.py` が持つ（ADR 0065 段 3+4 の分割）。
+The layers observable with core alone (the size limit a synthetic plan is enough for, the complete
+quant mapping, the staging/swap invariants) live in `tools/exporter/tests/test_dist.py` (the split
+of ADR 0065 steps 3+4).
 """
 
 from __future__ import annotations
@@ -91,14 +93,16 @@ def _write(path: Path, payload: bytes) -> None:
 
 
 def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
-    """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
+    """The expected paths inside a model subtree (the uniform layout of ADR 0041 §9)."""
     return [f"{model}/{rel}" for rel in paths]
 
 
 def _placed_paths() -> list[str]:
-    """配布形に現れる相対 path — **weights の席だけ**が part 連番に展開される（container-v1 §8）。
+    """The relative paths that appear in the distribution — **only the weights slots** expand into
+    numbered parts (container-v1 §8).
 
-    tokenizer / symbols / 2 表は assets の席（1 ファイル参照）なので分割されない。
+    tokenizer / symbols / the 2 tables are assets slots (one file reference each), so they are not
+    split.
     """
     return placed_paths(SBV2_OUTPUT_PATHS, SBV2_WEIGHTS)
 
@@ -107,16 +111,19 @@ def _present(out_dir: Path) -> list[str]:
     return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
 
 
-#: `style_bert_vits2` は optional な `sbv2` dependency-group。定数から既定ノブを引く層だけが
-#: これを要る（組み立て本体はノブを引数で受けるので、無い環境でも全経路を観測できる）。
+#: `style_bert_vits2` is the optional `sbv2` dependency group. Only the layer that takes the default
+#: knobs from its constants needs it (the assembly itself receives the knobs as arguments, so every
+#: path can be observed even without it).
 requires_sbv2_package = pytest.mark.skipif(
     importlib.util.find_spec("style_bert_vits2") is None,
-    reason="sbv2 dependency-group が無い（`uv sync --group sbv2` が前提）",
+    reason="the sbv2 dependency group is missing (`uv sync --group sbv2` is required)",
 )
 
-#: 偽 text_encoder の IR の形と `symbols.json` の取り出し位置。門 `assert_bert_hidden` が
-#: 通すのは **22 層 × 出力 1 本 × 位置 1** の組み合わせだけ（実資産と同じ）。
-#: text_encoder 席へ**故意に**焼き込みを生やすときの記号名（実物には無い — 恒真化の門の席）。
+#: The IR shape of the fake text_encoder and the extraction position of `symbols.json`. The gate
+#: `assert_bert_hidden` passes only the combination **22 layers × 1 output × position 1** (the same
+#: as the real assets).
+#: The symbol name used when a baked constant is **deliberately** grown in the text_encoder slot
+#: (the real thing has none — the slot of the vacuous-pass gate).
 _SBV2_TEXT_ENCODER_SYMBOL = "T"
 
 _SBV2_GRAPH_LAYERS = 22
@@ -124,14 +131,15 @@ _SBV2_GRAPH_OUTPUTS = 1
 _SBV2_BERT_FROM_END = 1
 
 
-#: 役割（dtype ラベルつきの席）→ **部品名** = manifest の weights のキー = 容器のグラフ名
-#: （container-v1 §2.1）。`text_encoder` と `text_encoder_i4` は同じ 1 つの部品の 2 dtype なので、
-#: 名乗る綴りは 1 つ。宣言から導く（写しを持つと片方だけ動く）。
+#: Role (a slot with a dtype label) → **component name** = the key of the manifest's weights = the
+#: container's graph name (container-v1 §2.1). `text_encoder` and `text_encoder_i4` are 2 dtypes of
+#: the same single component, so they go by one spelling. Derived from the declaration (a copy would
+#: let one of them move alone).
 _SBV2_COMPONENTS: Mapping[str, str] = {
     files.file: component for component, labels in SBV2_WEIGHTS.items() for files in labels.values()
 }
 
-#: 役割 → その系列の格納 dtype（IR の語彙）。
+#: Role → the storage dtype of that series (the IR vocabulary).
 _SBV2_STORAGES: Mapping[str, str] = {
     "text_encoder": "i8",
     "text_encoder_i4": "i4",
@@ -152,30 +160,35 @@ def _sbv2_container(
     sym_max: int | None = None,
     baked: bool = True,
 ) -> list[bytes]:
-    """weights の席へ挿す**正当なコンテナ**（役割ごとに違うバイト列）。
+    """**Valid containers** for the weights slots (a different byte sequence per role).
 
-    組み立ては入力コンテナを開いて宣言の全規則で見る
-    （`karume.dist.assert_weight_components_verified`）ので、weights の席は本物でなければ
-    ならない。門に落とす側も同じ器で作り、**宣言だけを実物とずらす**。family 固有の門が読む
-    形もここが持つ — text_encoder は層番号つき initializer 名 22 本 × 出力 1 本 × 入力の並び
-    （{@link assert_bert_hidden}）、front / voice は焼き込み定数の静的次元
-    （{@link assert_baked_sym_max}）。
+    The assembly opens the input containers and checks them against every rule of the declaration
+    (`karume.dist.assert_weight_components_verified`), so the weights slots must hold the real
+    thing. The side that makes a gate fail uses the same container and **shifts only the
+    declaration from the real one**. This also holds the shapes the family-specific gates read —
+    for text_encoder, 22 initializer names with layer indices × 1 output × the order of the inputs
+    ({@link assert_bert_hidden}); for front / voice, the static dimension of the baked constant
+    ({@link assert_baked_sym_max}).
 
-    格納の語彙は実物と同じ形（適格な重みだけが圧縮・bias / 定数 / scale は f32・i4 は
-    i4 + i8 + f32 の混成 — {@link _SBV2_SERIES_HEADERS}）になるので、席の取り違えを見る門
-    もこの形に掛かる。`storage` を渡すと**形は席のまま格納だけ別系列**にできる（3×3 の
-    取り違えを実 gate で回すため）。`model` はモデルごとにバイト列をずらす軸で、残りは門に
-    落とす側の軸（層数 / 出力本数 / 入力の並び / 焼き込み上限 / 焼き込みの有無）。
+    The storage vocabulary has the same shape as the real thing (only the eligible weights are
+    compressed, bias / constants / scales are f32, i4 is a mix of i4 + i8 + f32 —
+    {@link _SBV2_SERIES_HEADERS}), so the gates that look for slot mix-ups also apply to this
+    shape. Passing `storage` makes **the shape stay the slot's while only the storage is of another
+    series** (to run the 3×3 mix-ups through the real gate). `model` is the axis that shifts the
+    bytes per model, and the rest are axes for making gates fail (layer count / output count / input
+    order / baked limit / whether it is baked at all).
     """
     mark = f"{role}-{model}" if model else role
     dtype = storage if storage is not None else _SBV2_STORAGES[role]
     if role.startswith("text_encoder"):
-        # 焼き込みを足す席（`sym_max` を渡した回）は、記号を束縛する入力次元も一緒に生やす
-        # — 束縛点の無い記号は実物のグラフには現れない。
+        # A slot that adds a baked constant (when `sym_max` is passed) also grows the input
+        # dimension that binds the symbol — a symbol without a binding point never appears in a
+        # real graph.
         axis: Any = 4 if sym_max is None else _SBV2_TEXT_ENCODER_SYMBOL
         return ir_container(
             mark=mark,
-            # 疑似系列も**部品名で名乗る**（組み立ての門がグラフ名とキーの一致を見る）。
+            # The pseudo series also **go by the component name** (the assembly's gate checks
+            # that the graph name matches the key).
             named=_SBV2_COMPONENTS[role],
             storage=dtype,
             inputs=tuple((name, (1, axis)) for name in inputs),
@@ -197,15 +210,17 @@ def _sbv2_container(
     )
 
 
-#: 偽資産（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 8 役は
-#: `SBV2_STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持ち、IR コンテナとしても読まれる。
+#: Fake assets (a different byte sequence per role — a mix-up shows in the hash). The 8 model
+#: roles carry in their headers the dtypes `SBV2_STORAGE_REQUIREMENTS` requires and are also read
+#: as IR containers.
 _SBV2_PAYLOADS = {
     **{role: _sbv2_container(role) for role in _SBV2_STORAGES},
     "tokenizer": b'{"deberta": true}',
 }
 
-#: 席 → その系列の束縛表が**必ず含む**格納の語彙（実配布資産の実測 — i4 は混成で、i4 適格外の
-#: 重みが i8 のまま残るので i8 も含む）。取り違えを再現するときはこの集合ごと差し替える。
+#: Slot → the storage vocabulary the binding table of that series **always contains** (measured on
+#: the real distributed assets — i4 is a mix, and the weights not eligible for i4 stay i8, so it
+#: contains i8 too). To reproduce a mix-up, this whole set is swapped.
 _SBV2_SERIES_HEADERS: Mapping[str, tuple[str, ...]] = {
     "text_encoder": ("f32", "i8"),
     "text_encoder_i4": ("f32", "i8", "i4"),
@@ -217,17 +232,19 @@ _SBV2_SERIES_HEADERS: Mapping[str, tuple[str, ...]] = {
     "voice_i4": ("f32", "i8", "i4"),
 }
 
-#: 同じグラフの席どうし（格納 dtype だけで区別できる範囲）。`front_i8` → `voice_i8` のような
-#: **別グラフ**の取り違えは格納形が同じなので dtype の門では原理的に見えない — そちらは
-#: 出所 path（{@link sbv2_placements}）と形の門の担当で、ここでは扱わない。
+#: Slots of the same graph (the range that the storage dtype alone can tell apart). A mix-up across
+#: **different graphs**, such as `front_i8` → `voice_i8`, has the same storage form, so the dtype
+#: gate cannot see it in principle — that belongs to the source path ({@link sbv2_placements}) and
+#: the shape gates, and is not handled here.
 _SBV2_SERIES_GROUPS: tuple[tuple[str, ...], ...] = (
     ("text_encoder", "text_encoder_i4"),
     ("front_f16", "front_i8", "front_i4"),
     ("voice_f16", "voice_i8", "voice_i4"),
 )
 
-#: 実行時ノブの既定。**実際の `style_bert_vits2` の値とは別の数**にしてある — 組み立てが
-#: 引数のノブを配るのか自分の表を配るのかを、値そのもので見分けるため。
+#: The runtime knob defaults. **Different numbers from the real `style_bert_vits2` values** — so
+#: the values themselves tell whether the assembly ships the knobs from its arguments or its own
+#: table.
 _SBV2_KNOBS: Mapping[str, Any] = {
     "style": "Neutral",
     "styleWeight": 0.5,
@@ -237,13 +254,14 @@ _SBV2_KNOBS: Mapping[str, Any] = {
     "lengthScale": 1.25,
 }
 
-#: `symbols.json` のモデル固有欄。**実重み（44100 / 512）とは別の数**にしてある — 組み立てが
-#: config.json と突き合わせているのか、実物の数を焼き込んでいるのかを値で見分けるため。
+#: The model-specific fields of `symbols.json`. **Different numbers from the real weights (44100 /
+#: 512)** — so the values tell whether the assembly matches them against config.json or bakes in
+#: the real numbers.
 _SBV2_SAMPLING_RATE = 22050
 _SBV2_HOP_LENGTH = 256
 
-#: 共有席の `symbols.json`（全モデル共通の規則だけ — ノブの既定も style / speaker も持たない。
-#: `sbv2.demo.jp_extra_rules` の MUST）。
+#: The `symbols.json` of the shared slot (only the rules common to every model — it holds neither
+#: knob defaults nor style / speaker; the MUST of `sbv2.demo.jp_extra_rules`).
 _SBV2_SYMBOLS = json.dumps(
     {
         "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
@@ -253,12 +271,13 @@ _SBV2_SYMBOLS = json.dumps(
     ensure_ascii=False,
 ).encode("utf-8")
 
-#: 話者埋め込みの幅（合成 config の `model.gin_channels`。実重み FN4 は 512 だが、偽資産は
-#: 幅を縛れていることが見えれば足りる — 実値との一致は config から導出するので固定しない）。
+#: The width of the speaker embedding (the synthetic config's `model.gin_channels`. The real FN4
+#: weights use 512, but for the fake assets it is enough to see that the width is constrained — the
+#: match with the real value is derived from the config, so it is not pinned).
 _SBV2_GIN_CHANNELS = 8
 
-#: 合成 config。**実重み FN4 の style2id（Neutral / high / low / NSFW）とは別の並び**で、
-#: 話者も 2 人。焼き込んだ表を配っていればここで落ちる。
+#: The synthetic config. **In a different order from the real FN4 weights' style2id (Neutral / high
+#: / low / NSFW)**, with 2 speakers. Shipping a baked-in table fails here.
 _SBV2_CONFIG: Mapping[str, Any] = {
     "version": "2.6.1-JP-Extra",
     "data": {
@@ -274,17 +293,19 @@ _SBV2_CONFIG: Mapping[str, Any] = {
 
 
 def _style_table(rows: int, offset: float = 0.0) -> np.ndarray:
-    """行ごとに違う値を持つ `[rows, 256]` の f32（配布形へ移した後の同一性を見るため）。"""
+    """A `[rows, 256]` f32 with a different value per row (to check identity after moving it into
+    the distribution)."""
     return np.arange(rows * 256, dtype=np.float32).reshape(rows, 256) + offset
 
 
 def _speaker_table(rows: int, cols: int = _SBV2_GIN_CHANNELS, offset: float = 0.0) -> np.ndarray:
-    """ckpt の `emb_g.weight` に相当する `[rows, cols]` の f32（値は style 表と別系列）。"""
+    """A `[rows, cols]` f32 corresponding to the ckpt's `emb_g.weight` (its values are a different
+    series from the style table)."""
     return (np.arange(rows * cols, dtype=np.float32) * 0.5 - 1.0).reshape(rows, cols) + offset
 
 
 def _write_ckpt(model_dir: Path, tensors: Mapping[str, np.ndarray]) -> None:
-    """実重み ckpt を偽物で置く（`*.safetensors` の一意存在が dist の要求）。"""
+    """Puts a fake real-weights ckpt in place (dist requires exactly one `*.safetensors`)."""
     model_dir.mkdir(parents=True, exist_ok=True)
     save_file(dict(tensors), str(model_dir / "ckpt.safetensors"))
 
@@ -300,11 +321,13 @@ def _build_sbv2_sources(
     symbols: bytes = _SBV2_SYMBOLS,
     offset: float = 0.0,
 ) -> Sbv2Sources:
-    """系列 + デモ資産 + 実重みの置き場を偽資産で再現する（配布しないものの混入込み）。
+    """Reproduces the locations of the series + demo assets + real weights with fake assets
+    (including things that are not distributed mixed in).
 
-    3 つの置き場の並びは `_shared.paths` の実レイアウト（`outputs/series/` / `outputs/` 直下 /
-    `inputs/`）に揃える — CLI 経路のテストが root を差し替えるだけで同じ木を指せる形。
-    `offset` は表と重みにモデルごとの差を入れる軸（ファミリー組み立ての共有判定を見るため）。
+    The 3 locations follow the real layout of `_shared.paths` (`outputs/series/` / directly under
+    `outputs/` / `inputs/`) — so a test of the CLI path can point at the same tree just by swapping
+    the root. `offset` is the axis that puts a per-model difference into the tables and the weights
+    (to check the family assembly's sharing decision).
     """
     series = root / "outputs" / "series"
     stem = sbv2_series_name(model)
@@ -331,17 +354,19 @@ def _build_sbv2_sources(
             payload = _SBV2_PAYLOADS[role] if not offset else _sbv2_container(role, model=model)
             write_component(series_dir / target / "model.krm", payload)
             _write(series_dir / target / "io.p2.safetensors", b"io-fixture")
-        # 配布しない単体グラフ（golden 検証専用）も系列には並ぶ。
+        # The standalone graphs that are not distributed (for golden verification only) also sit
+        # in the series.
         for target in ("dp", "flow", "dec"):
             _write(series_dir / target / "model.safetensors", b"not-distributed")
     _write(sources.demo / "deberta-tokenizer.json", _SBV2_PAYLOADS["tokenizer"])
     _write(sources.demo / "symbols.json", symbols)
-    # デモ専用資産（配布形には入らない）。
+    # Demo-only assets (not part of the distribution).
     _write(sources.demo / "assets.safetensors", b"demo-only")
     _write(sources.model / "config.json", json.dumps(config, ensure_ascii=False).encode("utf-8"))
     sources.model.mkdir(parents=True, exist_ok=True)
     np.save(sources.model / "style_vectors.npy", _style_table(style_rows, offset))
-    # ckpt には話者埋め込み以外も並ぶ（名前で 1 本だけ引けていることが見える形）。
+    # The ckpt holds more than the speaker embedding (a shape that shows exactly one is picked by
+    # name).
     _write_ckpt(
         sources.model,
         {
@@ -381,7 +406,8 @@ class TestSbv2Layout:
         assert list(out_dir.rglob("io.*")) == []
 
     def test_it_leaves_the_single_graphs_out_of_the_distribution(self, sbv2_assembled) -> None:
-        """dp / flow / dec は golden 検証専用（front / voice の融合が実行経路の全て）。"""
+        """dp / flow / dec are for golden verification only (the fused front / voice are the
+        whole execution path)."""
         out_dir, manifest = sbv2_assembled
         model = _sbv2_model(manifest)
         assert sorted(model["weights"]) == ["front", "text_encoder", "voice"]
@@ -404,13 +430,14 @@ class TestSbv2Layout:
         sources = _build_sbv2_sources(tmp_path)
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         _assemble_sbv2(sources, out_dir)
-        _assemble_sbv2(sources, out_dir)  # 既存リンクがあっても落ちない
+        _assemble_sbv2(sources, out_dir)  # does not fail when links already exist
         assert verify_dist(out_dir)
 
     def test_it_rewrites_a_generated_table_without_touching_the_source(
         self, tmp_path: Path
     ) -> None:
-        """生成物（表）は前回のリンクを外してから書く — 開いて書くと源の資産が壊れる。"""
+        """A generated product (a table) is written after unlinking the previous link — opening it
+        and writing would corrupt the source asset."""
         sources = _build_sbv2_sources(tmp_path)
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         _assemble_sbv2(sources, out_dir)
@@ -438,13 +465,13 @@ class TestSbv2StyleVectors:
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match="行数 2 が config の num_styles 3"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_the_row_count_disagrees_with_the_style_names(
         self, tmp_path: Path
     ) -> None:
-        """`num_styles` とは合うのに名前が足りない形（行と名前の対応が崩れている）。"""
+        """A form that matches `num_styles` but lacks names (the row-to-name mapping is broken)."""
         data = {**_SBV2_CONFIG["data"], "style2id": {"Neutral": 0, "Sleepy": 1}}
         config = {**_SBV2_CONFIG, "data": data}
         sources = _build_sbv2_sources(tmp_path, config=config)
@@ -458,10 +485,11 @@ class TestSbv2StyleVectors:
             sbv2_style_vectors(sources.model, _SBV2_CONFIG)
 
     def test_it_stops_when_the_table_is_not_256_wide(self, tmp_path: Path) -> None:
-        """行数だけ合った幅違いの表は、配布形が緑で組み上がり利用者の手元で落ちる形。
+        """A table of the wrong width with only the row count matching is a form where the
+        distribution assembles green and fails on the user's machine.
 
-        同じ `.npy` を読む `sbv2.export.style_vector` は幅を落とすので、ここが素通りすると
-        1 つの資産に対する受理集合が台本間で食い違う。
+        `sbv2.export.style_vector`, which reads the same `.npy`, rejects the width, so if this
+        slipped through, the accepted set for one asset would differ between scripts.
         """
         sources = _build_sbv2_sources(tmp_path)
         np.save(sources.model / "style_vectors.npy", np.zeros((3, 128), dtype=np.float32))
@@ -470,7 +498,7 @@ class TestSbv2StyleVectors:
 
 
 class TestSbv2SpeakerEmbeddings:
-    """`front` / `voice` はどちらも `g` をグラフ入力に取る — この表が無いと実行できない。"""
+    """`front` / `voice` both take `g` as a graph input — they cannot run without this table."""
 
     def test_it_converts_the_ckpt_tensor_into_a_single_f32_tensor(self, sbv2_assembled) -> None:
         out_dir, manifest = sbv2_assembled
@@ -483,7 +511,8 @@ class TestSbv2SpeakerEmbeddings:
         assert np.array_equal(table, _speaker_table(2))
 
     def test_it_picks_the_speaker_tensor_by_name(self, tmp_path: Path) -> None:
-        """ckpt には他のテンソルも並ぶ（名前で引けていなければ別の重みが配られる）。"""
+        """The ckpt holds other tensors too (if the lookup by name failed, other weights would be
+        shipped)."""
         sources = _build_sbv2_sources(tmp_path)
         table = sbv2_speaker_embeddings(sources.model, _SBV2_CONFIG)
         assert np.array_equal(table, _speaker_table(2))
@@ -493,13 +522,13 @@ class TestSbv2SpeakerEmbeddings:
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match="行数 3 が config の n_speakers 2"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_the_row_count_disagrees_with_the_speaker_names(
         self, tmp_path: Path
     ) -> None:
-        """`n_speakers` とは合うのに名前が足りない形（行と名前の対応が崩れている）。"""
+        """A form that matches `n_speakers` but lacks names (the row-to-name mapping is broken)."""
         data = {**_SBV2_CONFIG["data"], "spk2id": {"kappa": 0}}
         config = {**_SBV2_CONFIG, "data": data}
         sources = _build_sbv2_sources(tmp_path, config=config)
@@ -509,7 +538,8 @@ class TestSbv2SpeakerEmbeddings:
     def test_it_stops_when_the_column_count_disagrees_with_gin_channels(
         self, tmp_path: Path
     ) -> None:
-        """列数は config から導出できる（グラフ入力 g の幅そのもの）ので shape ごと縛る。"""
+        """The column count can be derived from the config (it is the width of the graph input g
+        itself), so the whole shape is constrained."""
         sources = _build_sbv2_sources(tmp_path, speaker_cols=_SBV2_GIN_CHANNELS + 1)
         with pytest.raises(DistError, match="列数 9 が config の gin_channels 8"):
             sbv2_speaker_embeddings(sources.model, _SBV2_CONFIG)
@@ -521,7 +551,8 @@ class TestSbv2SpeakerEmbeddings:
             sbv2_speaker_embeddings(sources.model, _SBV2_CONFIG)
 
     def test_it_stops_when_the_ckpt_is_not_unique(self, tmp_path: Path) -> None:
-        """どの ckpt から引いたかが黙って変わる形を塞ぐ（`load_net_g` と同じ要求）。"""
+        """Closes the form where which ckpt it was taken from changes silently (the same
+        requirement as `load_net_g`)."""
         sources = _build_sbv2_sources(tmp_path)
         save_file({"emb_g.weight": _speaker_table(2)}, str(sources.model / "another.safetensors"))
         with pytest.raises(DistError, match="ckpt が一意でない"):
@@ -533,7 +564,8 @@ class TestSbv2SpeakerEmbeddings:
             sbv2_speaker_embeddings(sources.model, {"data": _SBV2_CONFIG["data"]})
 
     def test_the_speaker_map_resolves_into_the_shipped_table(self, sbv2_assembled) -> None:
-        """`pipelineConfig.speakers` の値が話者表の行番号として閉じていること。"""
+        """The values of `pipelineConfig.speakers` are closed as row numbers of the speaker
+        table."""
         out_dir, manifest = sbv2_assembled
         model = _sbv2_model(manifest)
         speakers = model["pipelineConfig"]["speakers"]
@@ -546,7 +578,8 @@ class TestSbv2SpeakerEmbeddings:
 
 class TestSbv2PipelineConfig:
     def test_it_reads_the_tables_from_the_config_instead_of_baking_them(self) -> None:
-        """**同じ経路が別の表を返すこと**が「焼き込んでいない」の観測可能な形。"""
+        """**The same path returning a different table** is the observable form of "not baked
+        in"."""
         first = sbv2_pipeline_config(
             {"data": {"style2id": {"Neutral": 0, "Sleepy": 1}, "spk2id": {"kappa": 0}}},
             _SBV2_KNOBS,
@@ -599,19 +632,22 @@ class TestSbv2PipelineConfig:
             sbv2_pipeline_config({"model": {"gin_channels": 512}}, _SBV2_KNOBS)
 
     def test_it_declares_the_operating_limits_the_loader_requires(self, sbv2_assembled) -> None:
-        """上限 2 欄は配布形にしか無い（ロード側は定数を持たず、欠けていれば読めない）。"""
+        """The 2 limit fields exist only in the distribution (the loader has no constants and
+        cannot read it if they are missing)."""
         _, manifest = sbv2_assembled
         config = _sbv2_model(manifest)["pipelineConfig"]
         assert config["maxTokens"] == SBV2_MAX_TOKENS
         assert config["maxFrames"] == SBV2_MAX_FRAMES
 
     def test_the_limits_are_the_symbolic_maxima_the_export_scripts_baked(self) -> None:
-        """配る上限と焼いた記号次元の上限が同じ 1 組であること。
+        """The shipped limits and the limits of the baked symbolic dimensions are the same single
+        pair.
 
-        ずれると「宣言は通るのにグラフの相対位置表が足りない」形になり、**配ってから利用者の
-        手元でしか出ない**（front / voice は記号次元の上限を実行時に自己申告しない）。
-        トークン列 T は DeBERTa の記号次元で、音素次元 P の上限（front）と同値であることも
-        ここで固定する — 片方だけ動いたら上限の意味が割れる。
+        If they drift, it becomes "the declaration passes but the graph's relative-position table
+        is too short", which **shows up only on the user's machine after shipping** (front / voice
+        do not report the limit of their symbolic dimension at run time). This also pins that the
+        token sequence T, DeBERTa's symbolic dimension, equals the limit of the phoneme dimension P
+        (front) — if only one of them moved, the meaning of the limit would split.
         """
         from deberta import export as export_deberta
         from sbv2 import export as export_sbv2
@@ -622,7 +658,8 @@ class TestSbv2PipelineConfig:
 
 
 class TestSbv2StorageGate:
-    """格納 dtype の門（Anima と同じ実測事故が根拠 — 素 F32 は参照一致の門まで沈黙した）。"""
+    """The storage dtype gate (grounded in the same real accident as Anima — raw F32 stayed silent
+    all the way to the reference-match gate)."""
 
     def test_it_stops_when_an_f16_series_holds_raw_f32(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
@@ -633,7 +670,7 @@ class TestSbv2StorageGate:
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match=r"front_f16: .* has no f16"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_an_i8_series_lacks_i8_storage(self, tmp_path: Path) -> None:
@@ -646,7 +683,7 @@ class TestSbv2StorageGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_text_encoder_is_not_i8(self, tmp_path: Path) -> None:
-        """DeBERTa は i8 系列 1 本だけを配る（f32 の 1.32GB は配布に非現実的）。"""
+        """DeBERTa ships only one i8 series (1.32GB of f32 is unrealistic for distribution)."""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(
             sources.text_encoder / "model.krm",
@@ -656,10 +693,11 @@ class TestSbv2StorageGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_i4_seat_holds_the_i8_series(self, tmp_path: Path) -> None:
-        """i4 席に i8 系列を挿すと、サイズだけが元へ戻った配布形が黙って組み上がる。
+        """Putting the i8 series into the i4 slot silently assembles a distribution whose size
+        alone went back to the original.
 
-        2 つの席は同じ 22 層 DeBERTa なので、層数・出力・入力の門は**両方とも通る** —
-        格納 dtype の要求だけが席を区別できる。
+        The 2 slots are the same 22-layer DeBERTa, so the layer count, output and input gates
+        **both pass** — only the storage dtype requirement can tell the slots apart.
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.text_encoder_i4 / "model.krm", _SBV2_PAYLOADS["text_encoder"])
@@ -667,10 +705,12 @@ class TestSbv2StorageGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_a_voice_i4_seat_holds_the_i8_series(self, tmp_path: Path) -> None:
-        """net_g の i4 席も同じ — 混成の利得が小さいぶん、取り違えはサイズ差でも見えない。
+        """The same for net_g's i4 slot — the gain of the mix is small, so a mix-up is not visible
+        from the size difference either.
 
-        `front` / `voice` の i4 混成は同じグラフの別系列（適格 linear 6 本だけが i4）なので、
-        i8 系列を挿しても層数も入力も出力も一致する。格納 dtype の要求だけが席を区別できる。
+        The i4 mix of `front` / `voice` is another series of the same graph (only the 6 eligible
+        linears are i4), so putting in the i8 series matches the layer count, the inputs and the
+        outputs alike. Only the storage dtype requirement can tell the slots apart.
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.series_i4 / "voice" / "model.krm", _SBV2_PAYLOADS["voice_i8"])
@@ -678,39 +718,43 @@ class TestSbv2StorageGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_i4_series_lands_in_the_voice_i8_seat(self, tmp_path: Path) -> None:
-        """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
+        """The mix-up in the other direction (i4 series → i8 slot) — an existence check alone
+        **lets it through**.
 
-        i4 系列は混成で、i4 適格外の重みは i8 のまま残るので必ず i8 を含み、「i8 を含む」を
-        満たしてしまう。i8 席は f32 compute なので実行も例外を出さず、席名も path も
-        `model.i8.krm` のまま音だけが i4 の品質で出る。禁止表
-        （`SBV2_STORAGE_FORBIDDEN`）が唯一の検出器。
+        The i4 series is a mix, and the weights not eligible for i4 stay i8, so it always contains
+        i8 and satisfies "contains i8". The i8 slot computes in f32, so execution raises nothing
+        either, and with the slot name and the path still `model.i8.krm` only the audio comes out
+        at i4 quality. The forbidden table (`SBV2_STORAGE_FORBIDDEN`) is the only detector.
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.series_i8 / "voice" / "model.krm", _SBV2_PAYLOADS["voice_i4"])
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match=r"voice_i8: .* has i4"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_the_i4_series_lands_in_the_text_encoder_seat(
         self, tmp_path: Path
     ) -> None:
-        """DeBERTa の i8 席も同じ — 2 本は同じ 22 層なので形の門は両方とも通る。"""
+        """The same for DeBERTa's i8 slot — the 2 are the same 22 layers, so the shape gates both
+        pass."""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.text_encoder / "model.krm", _SBV2_PAYLOADS["text_encoder_i4"])
         with pytest.raises(DistError, match=r"text_encoder: .* has i4"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_no_series_slips_into_another_seat_of_the_same_graph(self) -> None:
-        """同じグラフの席 × 他系列の**全ての**取り違えが、要求か禁止のどちらかで落ちる。
+        """**Every** mix-up of a slot of the same graph × another series fails on either a
+        requirement or a prohibition.
 
-        席が増えた日に片方の表だけ更新されると、網から漏れた組み合わせが黙って配布形に並ぶ
-        （系列 root の取り違えは数値の門では原理的に検出できない — ADR 0027 / 0029）。
+        If only one of the tables is updated on the day a slot is added, the combinations that slip
+        through the net silently line up in the distribution (a mix-up of series roots cannot in
+        principle be detected by the numeric gates — ADR 0027 / 0029).
         """
-        # MUST: 列挙元を production の表へ縛る。テスト内 dict のままにすると、4 本目の系列が
-        # `SBV2_STORAGE_REQUIREMENTS` に生えてここへ足されなかったとき、docstring が名指しする
-        # 失敗モードそのものを一度も見ないまま緑が残る。
+        # MUST: tie the enumeration to the production tables. With a dict inside the test, when a
+        # 4th series appeared in `SBV2_STORAGE_REQUIREMENTS` and was not added here, it would stay
+        # green without ever seeing the very failure mode the docstring names.
         assert set(_SBV2_SERIES_HEADERS) == set(SBV2_STORAGE_REQUIREMENTS)
         assert {role for group in _SBV2_SERIES_GROUPS for role in group} == set(
             SBV2_STORAGE_REQUIREMENTS
@@ -723,25 +767,27 @@ class TestSbv2StorageGate:
                     caught = SBV2_STORAGE_REQUIREMENTS[seat] not in found or any(
                         dtype in found for dtype in SBV2_STORAGE_FORBIDDEN.get(seat, ())
                     )
-                    assert caught is (series != seat), f"{series} → {seat} 席"
+                    assert caught is (series != seat), f"{series} → the {seat} slot"
 
     def test_every_same_graph_seat_mix_up_is_refused_by_the_real_gates(
         self, tmp_path: Path
     ) -> None:
-        """上の表ではなく**実 gate**（`assert_storage` / `assert_storage_absent`）で回す。
+        """Runs through the **real gates** (`assert_storage` / `assert_storage_absent`) instead
+        of the table above.
 
-        上のテストは述語を再実装しているので、`sbv2_plan` から `assert_storage_absent` の呼びが
-        1 行消えても落ちない。ここは組み立てを実際に通すので、呼びが外れた瞬間に非対角が緑に
-        なって落ちる。
+        The test above reimplements the predicate, so it would not fail even if the call to
+        `assert_storage_absent` disappeared from `sbv2_plan`. This one actually goes through the
+        assembly, so the moment the call is dropped the off-diagonal turns green and it fails.
         """
         for group in _SBV2_SERIES_GROUPS:
             for seat in group:
                 for series in group:
                     sources = _build_sbv2_sources(tmp_path / f"{seat}-{series}")
-                    # グラフの形は**席側**を名乗らせる（記号次元の門〈CG4-3〉ではなく
-                    # 格納 dtype の門だけを回すため — 席と系列の両方を動かすと、どちらの門で
-                    # 落ちたのか分からなくなる）。動かすのは格納 dtype だけで、その集合は
-                    # {@link _SBV2_SERIES_HEADERS} が名指しする実物の形になる。
+                    # The graph's shape claims to be **the slot's** (to run only the storage
+                    # dtype gate, not the symbolic dimension gate <CG4-3> — moving both the slot
+                    # and the series would make it unclear which gate failed). Only the storage
+                    # dtype moves, and its set is the real shape named by
+                    # {@link _SBV2_SERIES_HEADERS}.
                     replace_component(
                         sbv2_placements(sources)[seat],
                         _sbv2_container(
@@ -751,27 +797,32 @@ class TestSbv2StorageGate:
                     out_dir = tmp_path / "out" / f"{seat}-{series}"
 
                     if series == seat:
-                        _assemble_sbv2(sources, out_dir)  # 対角は通る（同じ系列を同じ席へ）
+                        # The diagonal passes (the same series into the same slot).
+                        _assemble_sbv2(sources, out_dir)
                     else:
                         with pytest.raises(DistError):
                             _assemble_sbv2(sources, out_dir)
 
 
 class TestSbv2SymGate:
-    """記号次元の上限の門（CG4-3）— `--sym-max` の非既定値と manifest の定数の切断を塞ぐ。
+    """The gate on the limit of the symbolic dimension (CG4-3) — closes the disconnect between a
+    non-default `--sym-max` and the manifest's constants.
 
-    `sbv2.export --target voice --sym-max 1024` は公式 CLI で通り、golden も 512 までなので
-    export は成立する。配布側は `maxFrames` を 4096 で焼くので**配布も緑**になり、利用者が
-    1025〜4096 フレームの発話を頼んだときに初めて `sym_prefix_slice` の Tmax 超過で落ちる。
+    `sbv2.export --target voice --sym-max 1024` passes on the official CLI, and the golden only goes
+    up to 512, so the export holds. The distribution side bakes `maxFrames` as 4096, so **the
+    distribution is green too**, and it first fails with `sym_prefix_slice` exceeding Tmax when a
+    user asks for an utterance of 1025–4096 frames.
 
-    text_encoder 席だけは向きが逆で、上限を運ぶ焼き込み定数が**無い**ことを見る（記録だけが
-    突合の手段である前提そのもの）— 焼き戻ったら席の分類を移す合図になる。
+    Only the text_encoder slot points the other way: it checks that there is **no** baked constant
+    carrying the limit (the very premise that the record is the only means of matching) — if one is
+    baked back in, it is the signal to move the slot's classification.
     """
 
     @staticmethod
     def _rebake(sources: Sbv2Sources, role: str, symbol: str, sym_max: int) -> None:
-        """席の資産だけを別の記号次元で焼き直した形にする（格納 dtype は正しいまま）。"""
-        del symbol  # 記号は席が決める（焼き直すのは上限だけ）。
+        """Makes only the slot's asset look re-baked at another symbolic dimension (the storage
+        dtype stays correct)."""
+        del symbol  # The slot decides the symbol (only the limit is re-baked).
         replace_component(sbv2_placements(sources)[role], _sbv2_container(role, sym_max=sym_max))
 
     def test_it_stops_when_the_voice_graph_is_baked_at_another_frame_max(
@@ -783,13 +834,13 @@ class TestSbv2SymGate:
 
         with pytest.raises(DistError, match=r"voice_i8: .*上限 1024 .*宣言は 4096"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_the_front_graph_is_baked_at_another_token_max(
         self, tmp_path: Path
     ) -> None:
-        """front / maxTokens 側にも同型の穴がある（`--target front --sym-max` は同じく通る）。"""
+        """The front / maxTokens side has the same hole (`--target front --sym-max` passes too)."""
         sources = _build_sbv2_sources(tmp_path)
         self._rebake(sources, "front_f16", "P", 256)
 
@@ -797,12 +848,14 @@ class TestSbv2SymGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_text_encoder_grew_a_baked_symbol_slice(self, tmp_path: Path) -> None:
-        """text_encoder 席の恒真化の門 — 「読めない」はグラフの形の事実で、恒久の保証ではない。
+        """The vacuous-pass gate of the text_encoder slot — "cannot be read" is a fact about the
+        graph's shape, not a permanent guarantee.
 
-        DeBERTa は相対位置の添字表を ADR 0045 波 3 でグラフ入力へ昇格させたので上限を運ぶ
-        焼き込み定数を持たず、突合は記録（記録の無い系列は受理）だけが担う。表が焼き戻れば
-        `sym_prefix_slice` が生えて artifact から読めるようになるので、そのときは席を
-        `baked=True` 側へ移すのが正しい — 黙って記録だけの弱い門に留まらせない。
+        DeBERTa promoted the relative-position index table to a graph input in ADR 0045 wave 3, so
+        it has no baked constant carrying the limit, and the matching relies on the record alone (a
+        series without a record is accepted). If the table were baked back in, a `sym_prefix_slice`
+        would appear and become readable from the artifact, and then the right move is to put the
+        slot on the `baked=True` side — it must not silently stay with the weaker record-only gate.
         """
         sources = _build_sbv2_sources(tmp_path)
         self._rebake(sources, "text_encoder", "T", SBV2_MAX_TOKENS)
@@ -811,7 +864,8 @@ class TestSbv2SymGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_graph_has_no_baked_symbol_slice(self, tmp_path: Path) -> None:
-        """恒真化の門 — 表が入力へ昇格するなどして対象ノードが消えたら、黙って緑にしない。"""
+        """The vacuous-pass gate — when the target node disappears, e.g. because the table was
+        promoted to an input, it does not silently go green."""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(
             sbv2_placements(sources)["front_i4"], _sbv2_container("front_i4", baked=False)
@@ -821,10 +875,12 @@ class TestSbv2SymGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_the_expectations_cover_every_weights_seat(self) -> None:
-        """dtype 席が 1 本増えた日に、名指ししなかった席だけが黙って素通りする形にしない。
+        """On the day one more dtype slot is added, only the slots not named must not silently
+        slip through.
 
-        text_encoder も対象（席は全 8 役）— front と DeBERTa は `SBV2_MAX_TOKENS` を兼務する
-        別々の台本なので、片方だけ非既定で採り直した組が普通に組み上がる。
+        text_encoder is covered too (all 8 roles of the slots) — front and DeBERTa are separate
+        scripts that share `SBV2_MAX_TOKENS`, so a pair where only one was re-taken with a
+        non-default value assembles normally.
         """
         expected = {files.file for seats in SBV2_WEIGHTS.values() for files in seats.values()}
 
@@ -835,14 +891,15 @@ class TestSbv2SymGate:
         }
 
     def test_only_the_text_encoder_seats_are_unreadable_from_the_artifact(self) -> None:
-        """`baked` が偽なのは text_encoder だけ（front / voice の焼き込み門を落とさない）。"""
+        """Only the text_encoder slots have `baked` false (the bake gate of front / voice is not
+        dropped)."""
         unreadable = {role for role, entry in SBV2_SYM_EXPECTATIONS.items() if not entry.baked}
 
         assert unreadable == {files.file for files in SBV2_WEIGHTS["text_encoder"].values()}
 
 
 class TestSbv2SymProvenance:
-    """書き出した側の記録（`export_provenance.json`）と席の宣言の突き合わせ。"""
+    """Matching the writer's record (`export_provenance.json`) against the slot's declaration."""
 
     @staticmethod
     def _record(sources: Sbv2Sources, role: str, record: Mapping[str, Any]) -> Path:
@@ -857,7 +914,8 @@ class TestSbv2SymProvenance:
         _assemble_sbv2(sources, tmp_path / "out")
 
     def test_a_series_without_a_record_is_accepted(self, tmp_path: Path) -> None:
-        """記録が生える前に焼いた系列に再 export を課さない（同じ事実は焼き込み次元が持つ）。"""
+        """A series baked before records existed is not required to be re-exported (the baked
+        dimension holds the same fact)."""
         sources = _build_sbv2_sources(tmp_path)
 
         _assemble_sbv2(sources, tmp_path / "out")
@@ -872,7 +930,8 @@ class TestSbv2SymProvenance:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_record_names_another_target(self, tmp_path: Path) -> None:
-        """`front` として焼いたものを voice 席へ置く取り違え（記録だけが名指しできる）。"""
+        """The mix-up of putting what was baked as `front` into the voice slot (only the record can
+        name it)."""
         sources = _build_sbv2_sources(tmp_path)
         self._record(sources, "voice_i4", {"target": "front", "sym_max": SBV2_MAX_FRAMES})
 
@@ -880,7 +939,8 @@ class TestSbv2SymProvenance:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_a_matching_text_encoder_record_changes_nothing(self, tmp_path: Path) -> None:
-        """正常対 — 既定の `--sym-max` で焼いた 22 層 variant の記録は素通りする。"""
+        """The normal pair — the record of the 22-layer variant baked with the default
+        `--sym-max` passes."""
         sources = _build_sbv2_sources(tmp_path)
         self._record(
             sources,
@@ -893,12 +953,14 @@ class TestSbv2SymProvenance:
     def test_it_stops_when_the_text_encoder_was_baked_at_another_token_max(
         self, tmp_path: Path
     ) -> None:
-        """text_encoder 席は**記録だけ**が上限を運ぶ（`deberta.export --sym-max` の逸脱）。
+        """For the text_encoder slot **only the record** carries the limit (a deviation of
+        `deberta.export --sym-max`).
 
-        DeBERTa のグラフには上限を運ぶ焼き込み定数が無い（相対位置の表がグラフ入力 —
-        ADR 0045 波 3）ので、`assert_baked_sym_max` に当たる artifact 側の検出器が存在しない。
-        `pipelineConfig.maxTokens` は定数で焼かれるため、ここが落とさなければ配布形は
-        「512 まで受けると宣言しているのに 256 で焼かれた text_encoder」で成立する。
+        DeBERTa's graph has no baked constant carrying the limit (the relative-position tables are
+        graph inputs — ADR 0045 wave 3), so there is no artifact-side detector like
+        `assert_baked_sym_max`. `pipelineConfig.maxTokens` is baked as a constant, so unless this
+        fails the distribution holds as "a text_encoder baked at 256 while declaring that it accepts
+        up to 512".
         """
         sources = _build_sbv2_sources(tmp_path)
         self._record(
@@ -911,11 +973,13 @@ class TestSbv2SymProvenance:
     def test_it_stops_when_the_text_encoder_record_names_another_variant(
         self, tmp_path: Path
     ) -> None:
-        """検証用 variant（全層出し / dev）を 22 層の席へ写した取り違え。
+        """The mix-up of copying a verification variant (all layers out / dev) into the 22-layer
+        slot.
 
-        層数と出力本数は {@link assert_bert_hidden} が見るが、それは**中身が正しい 22 層**なら
-        通る — `--layers 22` を別の出力形で焼き直した系列は形の門を素通りする。どの variant と
-        して焼いたかを名乗れるのは記録だけ。
+        {@link assert_bert_hidden} checks the layer count and the output count, but that passes
+        for **a 22-layer graph whose contents are correct** — a series re-baked from `--layers 22`
+        with another output shape slips through the shape gates. Only the record can say which
+        variant it was baked as.
         """
         sources = _build_sbv2_sources(tmp_path)
         self._record(sources, "text_encoder", {"target": "full-24layer", "sym_max": 512})
@@ -934,15 +998,17 @@ class TestSbv2SymProvenance:
 
 
 class TestSbv2BertHiddenGate:
-    """22 層 × 出力 1 本 × 位置 1 の組み合わせだけを通す門。
+    """The gate that passes only the combination 22 layers × 1 output × position 1.
 
-    層数と出力形は `deberta/export.py` の variant が、位置は `sbv2/demo.py` の定数が持つ別々の
-    台本なので、対で動かし忘れた配布形が普通に組み上がる。ずれても shape は合ったまま実行が
-    通り、**別の層の BERT 特徴で音が出る**だけで沈黙する。
+    The layer count and the output shape are held by the variant in `deberta/export.py`, and the
+    position by a constant in `sbv2/demo.py` — separate scripts, so a distribution where one forgot
+    to move them as a pair assembles normally. Even when they drift the shapes still match and it
+    runs; it stays silent, only **producing audio from the BERT features of another layer**.
     """
 
     def test_it_stops_when_the_encoder_was_not_truncated(self, tmp_path: Path) -> None:
-        """切り詰め忘れの 24 層資産（出力 1 本）は、最終出力が layer 23 なので別の層になる。"""
+        """A 24-layer asset whose truncation was forgotten (1 output) has its final output at layer
+        23, so it is another layer."""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(
             sources.text_encoder / "model.krm", _sbv2_container("text_encoder", layers=24)
@@ -950,11 +1016,12 @@ class TestSbv2BertHiddenGate:
         out_dir = tmp_path / "out"
         with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_the_verification_variant_slipped_in(self, tmp_path: Path) -> None:
-        """全層出し（検証用）の資産が配布経路に混ざると、readback も取り出し位置も変わる。"""
+        """If the all-layers-out (verification) asset gets into the distribution path, both the
+        readback and the extraction position change."""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(
             sources.text_encoder / "model.krm", _sbv2_container("text_encoder", outputs=23)
@@ -963,14 +1030,16 @@ class TestSbv2BertHiddenGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_only_the_symbols_are_stale(self, tmp_path: Path) -> None:
-        """資産は 1 本出しなのに `symbols.json` が旧・全層出し向けの 3 を主張したまま。"""
+        """The asset has one output but `symbols.json` still claims the 3 meant for the old
+        all-layers-out graph."""
         symbols = json.dumps({"bertHiddenFromEnd": 3})
         sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
         with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 が、出力 1 本のグラフで"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_position_tables_were_baked_back_in(self, tmp_path: Path) -> None:
-        """添字表が入力から外れた資産（= 2MiB の定数が焼き戻った形）を配布経路で止める。"""
+        """Stops, on the distribution path, an asset whose index table left the inputs (= the
+        form where 2MiB of constants were baked back in)."""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(
             sources.text_encoder / "model.krm",
@@ -980,9 +1049,11 @@ class TestSbv2BertHiddenGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_checks_every_text_encoder_seat(self, tmp_path: Path) -> None:
-        """席ごとに掛ける門 — i8 席だけ見ていると i4 席の切り詰め忘れが素通りする。
+        """A gate applied per slot — looking only at the i8 slot lets a forgotten truncation in
+        the i4 slot through.
 
-        2 本は別々の `deberta/export.py` 実行の産物なので、対で動かし忘れる形は普通に起きる。
+        The 2 are products of separate `deberta/export.py` runs, so forgetting to move them as a
+        pair happens in the ordinary course of things.
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(
@@ -993,11 +1064,13 @@ class TestSbv2BertHiddenGate:
 
 
 class TestSbv2SymbolsModelFields:
-    """`symbols.json` の**モデル固有欄**が今配っているモデルの config と一致すること。
+    """The **model-specific fields** of `symbols.json` match the config of the model being
+    shipped.
 
-    デモ資産の書き先はモデル名を持たない 1 か所固定なので、別モデルの資産が残っている木で
-    組み立てると `samplingRate` だけが別値のまま配られる（TS 側は `generate()` の戻り
-    `sampleRate` にそのまま載せるので**沈黙**する）。
+    The demo assets are written to one fixed place without the model name, so assembling in a tree
+    where another model's assets are left over ships `samplingRate` alone with a different value
+    (the TS side puts it as is into the `sampleRate` returned by `generate()`, so it stays
+    **silent**).
     """
 
     @staticmethod
@@ -1023,7 +1096,7 @@ class TestSbv2SymbolsModelFields:
 
         with pytest.raises(DistError, match=r"samplingRate: symbols.json=44100"):
             _assemble_sbv2(sources, out_dir)
-        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
 
     def test_it_stops_when_the_hop_length_disagrees_with_the_config(self, tmp_path: Path) -> None:
@@ -1033,7 +1106,8 @@ class TestSbv2SymbolsModelFields:
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_field_is_missing_entirely(self, tmp_path: Path) -> None:
-        """欄の欠落は「古い `sbv2.demo assets`」— 突合できない形を通さない。"""
+        """A missing field means "an old `sbv2.demo assets`" — a form that cannot be matched is not
+        let through."""
         payload = json.loads(self._symbols())
         del payload["samplingRate"]
         sources = _build_sbv2_sources(
@@ -1057,17 +1131,19 @@ class TestSbv2Manifest:
     def test_it_derives_size_and_sha256_from_the_placed_files(self, sbv2_assembled) -> None:
         out_dir, manifest = sbv2_assembled
         shards = _sbv2_model(manifest)["weights"]["front"]["i8"]["container"]["parts"]
-        # 3 点セットは shard 1 本ずつに掛かる（列のどこかだけ古い、を作れない）。
+        # The 3-piece set applies per shard (no way to make just some part of the list stale).
         for ref, payload in zip(shards, _SBV2_PAYLOADS["front_i8"], strict=True):
             assert ref["size"] == len(payload)
             assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
             assert (out_dir / ref["path"]).read_bytes() == payload
 
     def test_the_text_encoder_declares_both_storage_forms(self, sbv2_assembled) -> None:
-        """dtype キーは常に要る統一形（ADR 0041 §3 — 2 形パースを消した）。
+        """The dtype key is always required, a uniform form (ADR 0041 §3 — the 2-form parsing was
+        removed).
 
-        並びは {@link SBV2_WEIGHTS} の宣言順そのもの（manifest の weights 節と quant 節で
-        同じ役割が別の順に並ばない — `complete_quant_weights` の MUST と対）。
+        The order is exactly the declaration order of {@link SBV2_WEIGHTS} (the same role is not
+        listed in different orders in the manifest's weights section and quant section — the
+        counterpart of the MUST of `complete_quant_weights`).
         """
         _, manifest = sbv2_assembled
         entry = _sbv2_model(manifest)["weights"]["text_encoder"]
@@ -1078,16 +1154,18 @@ class TestSbv2Manifest:
             assert [path.rsplit("/", 1)[-1] for path in paths] == expected
 
     def test_every_dtype_seat_declares_an_ordered_part_list(self, sbv2_assembled) -> None:
-        """`karume/5` の part 列は**常に 2 要素以上**（グラフ記述の part 0 + 後続の part —
-        container-v1 §8 の常時分割）。
+        """The part list of `karume/5` **always has 2 or more entries** (part 0 of the graph
+        description + the following parts — the always-split form of container-v1 §8).
 
-        以前ここは「常に 1 要素」を固定していた（分割規則が席だけで、1 本のコンテナを 1 本として
-        配っていた時代の観測点）。常時分割になった今それは配布形の不変条件そのものが反転した
-        ので、主張も反転させる — 1 要素の宣言が出たら、それは書き手がグラフ記述の part を分けて
-        いない形で、`karume verify` の part 列の門が落とすべき資産である。
+        This used to pin "always 1 entry" (an observation point from the time when the split rule
+        applied only to slots and one container was shipped as one file). Now that splitting is
+        always on, that invariant of the distribution itself is inverted, so the claim is inverted
+        too — a declaration with 1 entry is a form where the writer did not split off the graph
+        description's part, an asset that the part-list gate of `karume verify` should reject.
 
-        並びの検査（連番が 1 始まりで欠けなく揃う）まで見るのは、ロード側が**列の順**に読む
-        から（先頭が part 0）— 集合として合っていても順が崩れれば読めない。
+        The order is checked too (numbering starts at 1 with no gaps) because the loader reads **in
+        list order** (the first is part 0) — even if the set matches, a broken order cannot be
+        read.
         """
         _, manifest = sbv2_assembled
         for name, labels in _sbv2_model(manifest)["weights"].items():
@@ -1109,11 +1187,12 @@ class TestSbv2Manifest:
         assert model["defaultQuant"] in model["quants"]
 
     def test_every_quant_names_the_text_encoder_too(self, sbv2_assembled) -> None:
-        """v1 で `weights` に書けなかった単一ファイル役も、v2 では完全写像の一部（§3）。
+        """The single-file role that could not be written in `weights` in v1 is part of the
+        complete mapping in v2 (§3).
 
-        BERT を i4 混成で焼く quant の**名指し**を表と独立に持つのは、`SBV2_QUANTS` の編集で
-        既存 quant の text_encoder が黙って別の格納形へ動いた場合を捕まえるため
-        （表から導くと恒真になる）。
+        The quants that bake BERT as the i4 mix are **named** independently of the table to catch
+        the case where an edit of `SBV2_QUANTS` silently moves an existing quant's text_encoder to
+        another storage form (deriving it from the table would be vacuous).
         """
         bert_i4_quants = {"i8+bert4", "i4"}
         _, manifest = sbv2_assembled
@@ -1126,10 +1205,12 @@ class TestSbv2Manifest:
             )
 
     def test_the_bert4_quant_is_i8_with_only_the_text_encoder_swapped(self, sbv2_assembled) -> None:
-        """`i8+bert4` の意味は「`i8` と同構成で BERT だけ i4」— 差分が 1 席であることを固定する。
+        """`i8+bert4` means "the same configuration as `i8` with only BERT in i4" — pins that the
+        difference is 1 slot.
 
-        session ノブまで見るのは、`i8-a8` のような**別軸**の変更が紛れ込んだまま「格納形だけの
-        席」を名乗ると、聴感で採った裁定（perf-ledger Q-1）の対象が黙って変わるから。
+        The session knobs are checked as well because if a change on **another axis**, such as
+        `i8-a8`, slipped in while it still claims to be "a storage-only slot", what the
+        listening-based ruling (perf-ledger Q-1) applies to would silently change.
         """
         _, manifest = sbv2_assembled
         quants = _sbv2_model(manifest)["quants"]
@@ -1143,7 +1224,8 @@ class TestSbv2Manifest:
         assert variant["weights"]["text_encoder"] == "i4"
 
     def test_the_voices_declare_all_three_storage_forms(self, sbv2_assembled) -> None:
-        """`front` / `voice` は f16 / i8 / i4 混成の 3 席（並びは {@link SBV2_WEIGHTS} 宣言順）。"""
+        """`front` / `voice` have 3 slots, f16 / i8 / the i4 mix (in the declaration order of
+        {@link SBV2_WEIGHTS})."""
         _, manifest = sbv2_assembled
         for role in ("front", "voice"):
             entry = _sbv2_model(manifest)["weights"][role]
@@ -1154,10 +1236,12 @@ class TestSbv2Manifest:
                 assert [path.rsplit("/", 1)[-1] for path in paths] == names, role
 
     def test_the_i4_quant_takes_the_mixed_form_in_every_role(self, sbv2_assembled) -> None:
-        """`i4` の意味は「3 席とも i4 混成・session は `i8` のまま」— 軸が 1 つであることを固定。
+        """`i4` means "all 3 slots as the i4 mix, session stays `i8`" — pins that there is a single
+        axis.
 
-        session まで見るのは `i8+bert4` の門と同じ理由 — 活性の量子化（`-a8` 軸）が紛れ込むと、
-        聴感で採った裁定（perf-ledger Q-1 / research 2026-08-19 §6）の対象が黙って変わる。
+        The session is checked for the same reason as the `i8+bert4` gate — if activation
+        quantization (the `-a8` axis) slipped in, what the listening-based ruling (perf-ledger Q-1 /
+        research 2026-08-19 §6) applies to would silently change.
         """
         _, manifest = sbv2_assembled
         quants = _sbv2_model(manifest)["quants"]
@@ -1169,20 +1253,24 @@ class TestSbv2Manifest:
 
 
 class TestSbv2QuantNaming:
-    """席名は ADR 0074 の文法（`<格納>[+<部品><ビット>]…[-<ノブ>]…`）と表示欄（ADR 0075）。"""
+    """Quant names follow ADR 0074's grammar (`<storage>[+<component><bits>]…[-<knob>]…`) and the
+    display fields (ADR 0075)."""
 
     def test_every_seat_starts_from_a_storage_dtype_of_the_vocabulary(self) -> None:
-        """`<格納>` は資産ヘッダの語彙（ADR 0074 決定 2）— `w8` / `w4` の第 2 語彙は廃した。"""
+        """`<storage>` is the vocabulary of the asset headers (ADR 0074 decision 2) — the second
+        vocabulary `w8` / `w4` was retired."""
         for name in SBV2_QUANTS:
             assert name.split("+")[0].split("-")[0] in ("f32", "f16", "i8", "i4"), name
 
     def test_the_component_override_token_spells_the_text_encoder(self) -> None:
-        """略称は recipe が定める（ADR 0074 決定 4）— 対応はカードにも出る。"""
+        """The recipe defines the abbreviations (ADR 0074 decision 4) — the mapping also appears
+        in the card."""
         assert SBV2_QUANT_ABBREVIATIONS == {"bert": "text_encoder"}
         assert set(SBV2_QUANT_ABBREVIATIONS.values()) <= set(SBV2_WEIGHTS)
 
     def test_the_f16_seat_names_the_int8_text_encoder_it_actually_ships(self) -> None:
-        """実態に合わせる（ADR 0074 決定 6）— f16 席の text_encoder は i8（f16 系列が無い）。"""
+        """Matches what is actually shipped (ADR 0074 decision 6) — the f16 slot's text_encoder is
+        i8 (there is no f16 series)."""
         assert SBV2_QUANTS["f16+bert8"]["weights"]["text_encoder"] == "i8"
         assert "f16" not in SBV2_QUANTS
 
@@ -1199,7 +1287,8 @@ class TestSbv2VerifyDist:
         assert sorted(verify_dist(out_dir)) == sorted(expected)
 
     def test_it_passes_without_a_model_card(self, sbv2_assembled) -> None:
-        """検証は**カードを書く前**に走る。無いことは宣言外ファイル検査の障害にならない。"""
+        """Verification runs **before the card is written**. Its absence does not trip the check
+        for undeclared files."""
         out_dir, _ = sbv2_assembled
         assert not (out_dir / MODEL_CARD_FILENAME).exists()
         assert verify_dist(out_dir)
@@ -1212,7 +1301,8 @@ class TestSbv2VerifyDist:
 
 
 class TestSbv2Family:
-    """JVNV 4 モデルのような「1 リポ複数話者」— text_encoder / tokenizer が共有になる。"""
+    """ "Several speakers in one repository" like the 4 JVNV models — text_encoder / tokenizer
+    become shared."""
 
     @pytest.fixture
     def family(self, tmp_path: Path) -> tuple[Path, dict]:
@@ -1227,12 +1317,12 @@ class TestSbv2Family:
         return out_dir, manifest
 
     def test_the_text_encoder_is_fetched_once_for_the_whole_family(self, family) -> None:
-        """319MB の DeBERTa がモデルごとに複製されるのが v1 の実害（ADR 0041 Context ②）。"""
+        """The 319MB DeBERTa duplicated per model is the real harm of v1 (ADR 0041 Context ②)."""
         _, manifest = family
         shared = [
             f"{SHARED_DIRNAME}/{rel}" for rel in part_paths(SBV2_OUTPUT_PATHS["text_encoder"])
         ]
-        # 畳まれるのは**コンポーネント丸ごと**（shard 列がそのまま shared/ の下へ移る）。
+        # What is folded is **the whole component** (the shard list moves under shared/ as is).
         for name, model in manifest["models"].items():
             refs = model["weights"]["text_encoder"]["i8"]["container"]["parts"]
             assert [ref["path"] for ref in refs] == shared, name
@@ -1268,13 +1358,14 @@ class TestSbv2Sources:
         assert sources.series_f16 == tmp_path / "sbv2-FN7-f16"
         assert sources.series_i8 == tmp_path / "sbv2-FN7-i8"
         assert sources.model.name == "FN7"
-        # DeBERTa はモデル名に依らない（ファミリーでは shared/ へ 1 本化される）。
+        # DeBERTa does not depend on the model name (a family keeps a single one in shared/).
         assert sources.text_encoder == tmp_path / "deberta-i8" / "sbv2-22layer"
-        # 格納形ごとに**別系列**（ADR 0019）— variant 名だけが両者で同じ。
+        # A **separate series** per storage form (ADR 0019) — only the variant name is the same.
         assert sources.text_encoder_i4 == tmp_path / "deberta-i4" / "sbv2-22layer"
 
     def test_it_looks_outside_the_series_root_for_the_host_assets(self, tmp_path: Path) -> None:
-        """デモ資産（`outputs/` 直下）と実重み（`inputs/`）は系列ではない — 綴りは paths.py。"""
+        """The demo assets (directly under `outputs/`) and the real weights (`inputs/`) are not
+        series — the spelling is in paths.py."""
         sources = sbv2_sources(tmp_path)
         assert tmp_path not in sources.demo.parents
         assert tmp_path not in sources.model.parents
@@ -1284,7 +1375,8 @@ class TestSbv2Sources:
 
 @requires_sbv2_package
 class TestSbv2KnobDefaults:
-    """既定ノブの出所（`style_bert_vits2.constants`）— 配布形でノブを持つのは manifest だけ。"""
+    """Where the default knobs come from (`style_bert_vits2.constants`) — in the distribution only
+    the manifest holds knobs."""
 
     @staticmethod
     def _package_knobs() -> dict[str, Any]:
@@ -1312,7 +1404,8 @@ class TestSbv2KnobDefaults:
 
 @requires_sbv2_package
 class TestSbv2Cli:
-    """`karume dist --pipeline sbv2` の経路（既定の出力先・`--model` 軸・ファミリー）。"""
+    """The path of `karume dist --pipeline sbv2` (the default output location, the `--model` axis,
+    families)."""
 
     @staticmethod
     def _sources(tmp_path: Path, model: str, offset: float = 0.0):
@@ -1332,8 +1425,9 @@ class TestSbv2Cli:
         import dist
         from sbv2 import distribution
 
-        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`MISC_ROOT` /
-        # `INPUTS_ROOT` は系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
+        # `DIST_ROOT` is on the driver side that decides the default output location
+        # (`dist.default_out_dir`), `MISC_ROOT` / `INPUTS_ROOT` on the recipe side that takes the
+        # inputs from outside the series — bindings of different modules are swapped separately.
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(distribution, "MISC_ROOT", tmp_path / "outputs" / "misc")
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
@@ -1352,7 +1446,8 @@ class TestSbv2Cli:
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         defaults = _sbv2_model(manifest)["pipelineConfig"]["defaults"]
         assert defaults["style"] == knobs["style"]
-        # カードは検証を通った manifest から描かれる（スタイル表がそのまま本文に出る）。
+        # The card is drawn from the manifest that passed verification (the style table appears in
+        # the text as is).
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "pipeline_tag: text-to-speech" in card
         for style in _sbv2_model(manifest)["pipelineConfig"]["styles"]:
@@ -1375,7 +1470,8 @@ class TestSbv2Cli:
             ]
         )
 
-        # 既定の出力先はファミリーのリポ（話者単位のリポは作らない — W-RC5-2）。
+        # The default output location is the family's repository (no per-speaker repository is
+        # created — W-RC5-2).
         out_dir = tmp_path / "models" / "karume-sbv2-fn"
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert list(manifest["models"]) == ["FN7"]
@@ -1386,7 +1482,7 @@ class TestSbv2Cli:
     ) -> None:
         _, first = self._sources(tmp_path, "F1")
         _, second = self._sources(tmp_path, "F2", offset=3.0)
-        assert second.demo == first.demo  # デモ資産は共通の置き場
+        assert second.demo == first.demo  # the demo assets share one location
         self._reroot(tmp_path, monkeypatch)
         out_dir = tmp_path / "models" / "karume-sbv2-jvnv"
 
@@ -1417,7 +1513,7 @@ class TestSbv2Cli:
         assert "## Model: F1" in card
         assert "## Model: F2" in card
         assert '  repo: "hdae/karume-sbv2-jvnv",' in card
-        # 帰属は選んだファミリーのもの（FN の出所が 1 語も混ざらない）。
+        # The attribution is the chosen family's (not a single word of FN's source is mixed in).
         assert "base_model:\n  - litagin/style_bert_vits2_jvnv\n" in card
         assert "license: cc-by-sa-4.0" in card
         assert "rufflet17" not in card
@@ -1426,8 +1522,9 @@ class TestSbv2Cli:
     def test_it_refuses_a_voice_of_the_other_family_before_assembling(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline: str, model: str
     ) -> None:
-        """リポ直下の条文と帰属はファミリーで決まる — 他ファミリーの声は**組み立てる前**に
-        落ちる（残骸を作らない）。通すと FN の声が CC BY-SA の条文を名乗る配布形が成立する。
+        """The license text and the attribution at the repository root are decided by the family —
+        a voice of another family fails **before assembling** (no leftovers). Letting it through
+        would produce a distribution in which an FN voice claims the CC BY-SA license text.
         """
         _, sources = self._sources(tmp_path, model)
         self._reroot(tmp_path, monkeypatch)
@@ -1449,7 +1546,8 @@ class TestSbv2Cli:
 
 @requires_sbv2_package
 class TestSbv2LegalText:
-    """配布リポ直下の CC BY-SA 4.0 の条文と帰属・改変の表示（ADR 0092 決定 7）。"""
+    """The CC BY-SA 4.0 license text and the notice of attribution and changes at the distribution
+    repository's root (ADR 0092 decision 7)."""
 
     @staticmethod
     def _assemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline: str, model: str):
@@ -1473,10 +1571,11 @@ class TestSbv2LegalText:
     def test_the_jvnv_repository_ships_the_license_text_byte_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """§3(a)(1)(C) — 載せるのは**この条文のコピー**（要約でも整形でもない）。
+        """§3(a)(1)(C) — what is included is **a copy of this license text** (neither a summary nor
+        a reformatting).
 
-        組み立ての経路のどこかで整形や改行変換が入ると 1 バイト動くが、散文としては妥当な
-        ままなので他の門は素通りする。
+        Reformatting or a newline conversion anywhere on the assembly path moves a byte, but it
+        stays valid as prose, so the other gates let it through.
         """
         out_dir = self._assemble(tmp_path, monkeypatch, "sbv2", "F1")
         assert (out_dir / "LICENSE.md").read_bytes() == CC_BY_SA_4_0_PATH.read_bytes()
@@ -1484,7 +1583,8 @@ class TestSbv2LegalText:
     def test_the_legal_text_passes_the_undeclared_file_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """manifest が宣言しない 2 枚は `LEGAL_PATHS` の席として `verify_dist` を通る。"""
+        """The 2 files the manifest does not declare pass `verify_dist` as the `LEGAL_PATHS`
+        slots."""
         out_dir = self._assemble(tmp_path, monkeypatch, "sbv2", "F1")
 
         assert sorted(LEGAL_PATHS) == ["LICENSE.md", "NOTICE.md"]
@@ -1494,7 +1594,8 @@ class TestSbv2LegalText:
     def test_the_notice_credits_both_works_and_states_the_changes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """§3(a)(1)(A)(B) と §3(b) — 出所 2 本・改変の表示・同一ライセンス継承。"""
+        """§3(a)(1)(A)(B) and §3(b) — the 2 sources, the notice of changes and the same-license
+        inheritance."""
         out_dir = self._assemble(tmp_path, monkeypatch, "sbv2", "F1")
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
@@ -1502,14 +1603,16 @@ class TestSbv2LegalText:
         assert "https://huggingface.co/litagin/style_bert_vits2_jvnv" in notice
         assert f"https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}" in notice
         assert SBV2_JVNV_CORPUS_PAGE in notice
-        # 改変の表示: 22 層への切り詰め（text encoder の構造が変わる唯一の改変）と量子化。
+        # The notice of changes: the truncation to 22 layers (the only change that alters the text
+        # encoder's structure) and quantization.
         assert f"first {SBV2_TEXT_ENCODER_LAYERS} encoder layers" in notice
         assert "quantized" in notice
         assert "licensed under CC BY-SA 4.0 as well" in notice
 
     def test_the_notice_holds_for_any_subset_of_the_voices(self) -> None:
-        """MUST: 声は 1 本ずつ名指ししない — 1 組の `root_files` が `--model` の部分集合にも
-        載るので、名指した瞬間に組まなかった声まで名乗る（内訳はカードが manifest から名乗る）。
+        """MUST: the voices are not named one by one — one set of `root_files` also goes with any
+        subset given by `--model`, so naming them would claim voices that were not assembled (the
+        card names the breakdown from the manifest).
         """
         for source_dir in SBV2_JVNV_PROFILE.source_dirs:
             assert source_dir not in SBV2_JVNV_NOTICE_MARKDOWN, source_dir
@@ -1518,7 +1621,8 @@ class TestSbv2LegalText:
     def test_the_fn_repository_carries_no_legal_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """FN 系は同梱できる条文が無い（Booth の頒布条件だけ）— CC BY-SA を名乗らせない。"""
+        """The FN line has no license text that can be bundled (only Booth's distribution terms) —
+        it must not claim CC BY-SA."""
         out_dir = self._assemble(tmp_path, monkeypatch, "sbv2-fn", "FN4")
 
         assert not (out_dir / "LICENSE.md").exists()
@@ -1527,11 +1631,12 @@ class TestSbv2LegalText:
 
 
 class TestSbv2CardProfile:
-    """帰属プロファイル — ファミリーごとの Pipeline がそれぞれ**1 つだけ**持つ。
+    """Attribution profiles — each family's Pipeline holds **exactly one**.
 
-    engine 側の規則（1 つなら省略で通る / 2 つ以上なら明示必須）は
-    `tools/exporter/tests/test_dist.py` の `TestCardProfile` が合成 pipeline で持つ。ここは
-    **各席の帰属が自分のファミリーのもの**で、他ファミリーの名前を受け付けないことを見る。
+    The engine-side rule (with one it passes when omitted / with 2 or more it must be explicit) is
+    held by `TestCardProfile` in `tools/exporter/tests/test_dist.py` with a synthetic pipeline.
+    This checks that **each slot's attribution belongs to its own family** and that the names of
+    other families are not accepted.
     """
 
     @pytest.mark.parametrize(("pipeline", "family"), [(PIPELINE, "jvnv"), (FN_PIPELINE, "fn")])
@@ -1544,17 +1649,19 @@ class TestSbv2CardProfile:
 
     @pytest.mark.parametrize(("pipeline", "other"), [(PIPELINE, "fn"), (FN_PIPELINE, "jvnv")])
     def test_it_refuses_the_other_familys_attribution(self, pipeline, other: str) -> None:
-        """`--pipeline sbv2 --card-profile fn` は JVNV の声に FN の帰属を描く形 — 落とす。"""
+        """`--pipeline sbv2 --card-profile fn` would draw FN's attribution on JVNV voices — it
+        fails."""
         with pytest.raises(DistError, match=f"'{other}' does not exist"):
             resolve_card_renderer(pipeline, other)
 
     def test_the_two_families_render_different_cards(self) -> None:
-        """束ね違いなら 2 つのファミリーが同じカードを描く。"""
+        """Bundled the wrong way, the 2 families would draw the same card."""
         assert PIPELINE.card_profiles["jvnv"] is not FN_PIPELINE.card_profiles["fn"]
 
 
 class TestSbv2PipelineEntry:
-    """`--pipeline sbv2` / `sbv2-fn` の 1 行が指す先（ドライバが core の表へ合成する席）。"""
+    """What the one line of `--pipeline sbv2` / `sbv2-fn` points to (the slot the driver merges into
+    core's table)."""
 
     def test_it_carries_the_default_model_and_the_repo_name(self) -> None:
         assert PIPELINE.default_model == SBV2_DEFAULT_MODEL
@@ -1570,13 +1677,15 @@ class TestSbv2PipelineEntry:
     def test_every_voice_of_a_family_names_the_family_repository(
         self, pipeline, models: tuple[str, ...], repo: str
     ) -> None:
-        """MUST: リポはファミリー単位（W-RC5-2）— 話者名から導くと `--repo` 無しの 1 周が、
-        カードの Usage に実在しないリポ（`karume-sbv2-F1`）を名乗る配布形を作る。
+        """MUST: repositories are per family (W-RC5-2) — deriving one from the speaker name would
+        make a pass without `--repo` produce a distribution whose card Usage names a repository
+        that does not exist (`karume-sbv2-F1`).
         """
         assert {pipeline.repo_name(model) for model in models} == {repo}
 
     def test_each_default_model_belongs_to_its_own_family(self) -> None:
-        """既定のモデルが他ファミリーの声だと、`--model` 省略の 1 周が必ず門で落ちる。"""
+        """If the default model were a voice of another family, a pass that omits `--model` would
+        always fail at the gate."""
         assert PIPELINE.default_model.startswith(SBV2_FAMILY_DIRS["jvnv"])
         assert FN_PIPELINE.default_model.startswith(SBV2_FAMILY_DIRS["fn"])
 

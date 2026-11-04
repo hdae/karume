@@ -1,9 +1,10 @@
-"""DPM++ 2M の golden リグが**本当に karume の梯子の上で実クラスを回している**ことの門。
+"""Check that the DPM++ 2M golden rig **really runs the real class on karume's sigma ladder**.
 
-このリグの出力は `packages/models/tests/anima_dpm_solver_multistep_test.ts` に inline されている
-ので、リグが黙って別の梯子・別の構成へ滑ると **TS 側だけが赤くなり原因が読めない**。差し替えが
-効いていること（と、差し替えが必要であること = 内蔵 flow 梯子とは別物であること）をここで固定
-する。数値の正本は TS 側ではなくこのリグ。
+This rig's output is inlined in `packages/models/tests/anima_dpm_solver_multistep_test.ts`, so if
+the rig silently slides onto another ladder or another configuration, **only the TS side turns red
+and the cause cannot be read**. This pins that the substitution takes effect (and that it is
+needed = the ladder differs from the built-in flow ladder). The numeric source of truth is this
+rig, not the TS side.
 """
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ STEPS = 8
 
 class TestLadderSubstitution:
     def test_the_scheduler_runs_on_the_karume_ladder_bit_for_bit(self) -> None:
-        """MUST: ビット一致。梯子は写しではなく `sigma_schedule` の値そのものを差し込む。"""
+        """MUST: bit-identical. The ladder plugs in the values of `sigma_schedule` themselves, not a
+        copy."""
         sigmas = sigma_schedule(STEPS, SHIFT)
 
         scheduler = build_scheduler(sigmas, SHIFT)
@@ -32,9 +34,11 @@ class TestLadderSubstitution:
         )
 
     def test_the_builtin_flow_ladder_is_a_different_one(self) -> None:
-        """恒真化の門: 差し替えが要る理由（内蔵 flow 梯子と別物）を数で示す。
+        """Guard against a vacuous test: show in numbers why the substitution is needed (it differs
+        from the built-in flow ladder).
 
-        一致するようになったら差し替えは不要になる — その時はリグの MUST 節ごと畳む。
+        Once they match, the substitution is no longer needed — then fold the rig's MUST section
+        away with it.
         """
         sigmas = sigma_schedule(STEPS, SHIFT)
 
@@ -47,7 +51,8 @@ class TestLadderSubstitution:
 
 class TestSeries:
     def test_the_last_step_returns_the_x0_prediction_unchanged(self) -> None:
-        """終端 σ=0 の 1 次落ち（係数が `(0, −1)`）— TS 側の同名テストと対。"""
+        """The drop to first order at the terminal σ=0 (coefficients `(0, −1)`) — pairs with the TS
+        test of the same name."""
         series = run(STEPS, SHIFT, elements=4, seed=1)
 
         last = series["records"][-1]
@@ -55,14 +60,16 @@ class TestSeries:
         assert last["sample"] == last["x0"]
 
     def test_only_the_first_and_last_steps_drop_to_first_order(self) -> None:
-        """`solver_order=2` では `lower_order_second` に到達しない（step() の分岐構造）。"""
+        """With `solver_order=2`, `lower_order_second` is never reached (the branch structure of
+        step())."""
         series = run(STEPS, SHIFT, elements=2, seed=1)
 
         orders = [record["coefficients"]["order"] for record in series["records"]]
         assert orders == [1, 2, 2, 2, 2, 2, 2, 1]
 
     def test_the_series_is_reproducible_from_the_seed(self) -> None:
-        """golden を inline する前提 — 同じ seed なら同じ数（環境差は別途 torch が担保）。"""
+        """The premise of inlining the golden — the same seed gives the same numbers (torch covers
+        environment differences separately)."""
         first = run(4, SHIFT, elements=3, seed=99)
         second = run(4, SHIFT, elements=3, seed=99)
 

@@ -1,21 +1,29 @@
-"""`wan/ti2v_export_dit.py`（Wan2.2 TI2V-5B の DiT の i8 系列と小さい S の golden — ADR 0121
-段 1）の約束事。
+"""The contract of `wan/ti2v_export_dit.py` (the i8 series of the Wan2.2 TI2V-5B DiT and the small-S
+goldens — ADR 0121 step 1).
 
-固定するのは、壊れても例外が出ず**数だけが静かにずれる**側と、段 1 の検収の形:
+It pins the side where a breakage raises no exception and **only the numbers drift silently**, and
+the form of the step 1 acceptance:
 
-- ケースの表（決定用 6 本 = T2V 3 + I2V 3・受入れ 4 本 = T2V 2 + I2V 2・全て S = 192）
-- meta trace のグラフが実重みの export と同じ構造であること（7 入力・条件マスクは bool `[1,S,1]`）
-- IR の検査: linear のノード = 量子化の対象 + 時刻の MLP の 3 本・`where` がブロックあたり 6 本 +
-  head の 2 本で、どれも消費者が直後の 1 ノード（故障注入: 上流の順でブロックの先頭へ寄せる・
-  時刻の MLP を M = 2 の 1 回にまとめる — どちらも名指しで落ちる）
-- 容器の格納: i8 = 量子化の対象ちょうど・bias / norm / `scale_shift_table` は f32
-- golden: 7 入力と eager 出力・参照（f32 / f64・条件側の timestep）・I2V の条件マスク
-- 作業席の規律: 門（IR の検査・eager 同値・本数の期待値）に落ちたら系列は 1 バイトも変わらない
-- 実寸の golden（段 2 — `write-full`）: ケースの表（2 つの形・決定用 6 本・受入れ 8 本）と、据えた
-  容器を書き直さずに 1 ケースずつ足す・再開する・古い golden で止まる・門に落ちたら何も移さない
+- the case table (6 decision cases = T2V 3 + I2V 3, 4 acceptance cases = T2V 2 + I2V 2, all with
+  S = 192)
+- the graph of the meta trace has the same structure as the real-weight export (7 inputs; the
+  condition mask is bool `[1,S,1]`)
+- the IR check: the linear nodes = the quantization targets + the 3 of the time MLP; the `where`s
+  are 6 per block + 2 in the head, each consumed by the very next single node (fault injection:
+  hoisting them to the block top in upstream's order, merging the time MLP into one M = 2 run —
+  both fail by name)
+- container storage: i8 = exactly the quantization targets; bias / norm / `scale_shift_table` are
+  f32
+- goldens: the 7 inputs and the eager output, the references (f32 / f64, the conditioned-side
+  timestep), the I2V condition mask
+- the discipline of the working directory: if a check (the IR check, eager equivalence, the
+  expected counts) fails, the series does not change by a single byte
+- the full-size goldens (step 2 — `write-full`): the case table (2 shapes, 6 decision cases, 8
+  acceptance cases), and adding cases one at a time without rewriting the placed container,
+  resuming, stopping on stale goldens, and moving nothing when a check fails
 
-合成モデル（`test_dit_patch.TINY_DIT` を `save_pretrained` した checkpoint）だけで回す。5B の実物は
-`python -m wan.ti2v_export_dit write` / `write-full`（runbook）。
+Runs only on a synthetic model (a checkpoint of `test_dit_patch.TINY_DIT` written with
+`save_pretrained`). The real 5B is `python -m wan.ti2v_export_dit write` / `write-full` (runbook).
 """
 
 from __future__ import annotations
@@ -37,10 +45,11 @@ from torch import nn
 from wan import dit_patch, dit_probe, dit_reference, export_dit, ti2v_export_dit
 from wan.tests.test_dit_patch import EXPECTED_OPS, TINY_DIT
 
-#: 合成の層数（TINY_DIT の num_layers）。
+#: The synthetic layer count (num_layers of TINY_DIT).
 LAYERS = int(TINY_DIT["num_layers"])
 
-#: trace の S の上限（合成 — 5B の 27,280 だと trace が重いだけで構造は同じ）。
+#: The upper bound of S for the trace (synthetic — the 27,280 of the 5B only makes the trace heavy;
+#: the structure is the same).
 SYM_MAX = 256
 
 
@@ -58,7 +67,8 @@ def _stage(name: str) -> Any:
 
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory) -> Path:
-    """上流の `save_pretrained` の形（config + 単一の safetensors）の合成 DiT。"""
+    """A synthetic DiT in the shape of upstream `save_pretrained` (config + a single
+    safetensors)."""
     directory = tmp_path_factory.mktemp("ti2v-tiny")
     _tiny().save_pretrained(directory)
     return directory
@@ -69,8 +79,9 @@ def _tracer(config: Any, _sym_max: int) -> Any:
 
 
 def _tiny_text(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
-    """golden の文脈を合成の text_dim（8）で作る（実物は埋め込み資産の `[L, 4096]` を 512 行へ
-    埋める）。固定 4 プロンプトの名前で、合成の埋め込みの資産を `directory` に書いて差し替える。"""
+    """Build the golden contexts at the synthetic text_dim (8) (the real ones pad the `[L, 4096]`
+    of the embedding assets to 512 rows). Writes a synthetic embedding asset with the names of the
+    4 fixed prompts into `directory` and swaps it in."""
     from safetensors.torch import save_file
 
     from wan.prompts import FIXED_PROMPTS
@@ -93,7 +104,8 @@ def _tiny_text(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
 
 
 def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
-    """グラフの構造（op・入力の生産者・attrs・出力の形）— 値の名前に依らない。"""
+    """The structure of a graph (op, input producers, attrs, output shapes) — independent of value
+    names."""
     document = json.loads(graph.to_json())
     produced: dict[str, str] = {}
     rows = []
@@ -112,7 +124,8 @@ class TestTheCases:
     PATCH = (1, 2, 2)
 
     def test_the_roles_and_forms_have_the_stage_2_counts(self) -> None:
-        """決定用 6 本（T2V 3 + I2V 3）・受入れ 4 本（T2V 2 + I2V 2）— 段 2 の r 門の本数。"""
+        """6 decision cases (T2V 3 + I2V 3), 4 acceptance cases (T2V 2 + I2V 2) — the counts of the
+        r check of step 2."""
         counts = {
             (role, form): sum(c.role == role and c.form == form for c in ti2v_export_dit.CASES)
             for role in ("band", "accept")
@@ -135,7 +148,8 @@ class TestTheCases:
         assert not {case.seed for case in cases} & {spec.seed for spec in export_dit.CASES}
 
     def test_every_context_is_a_fixed_prompt_and_every_prompt_is_used(self) -> None:
-        """文脈は埋め込み資産の固定 4 プロンプト（合成の乱数は 5B の f32 / f64 の差を増幅）。"""
+        """The contexts are the 4 fixed prompts of the embedding assets (synthetic random values
+        would amplify the f32 / f64 difference of the 5B)."""
         from wan.prompts import FIXED_PROMPTS
 
         texts = [case.text for case in ti2v_export_dit.CASES]
@@ -143,7 +157,8 @@ class TestTheCases:
         assert set(texts) == {prompt.name for prompt in FIXED_PROMPTS}
 
     def test_i2v_cases_keep_generated_frames_and_grids_are_not_all_square(self) -> None:
-        """I2V は F' ≥ 2（F' = 1 だと全トークンが条件）。格子は非正方を含む（h / w の取り違え）。"""
+        """I2V has F' ≥ 2 (with F' = 1 every token is conditioned). The grids include non-square
+        ones (h / w mix-ups)."""
         cases = ti2v_export_dit.CASES
 
         assert all(case.latent_shape[0] >= 2 for case in cases if case.form == "i2v")
@@ -201,7 +216,8 @@ def _hoisted_block(
     condition_mask: torch.Tensor,
     rotary_emb: Any,
 ) -> torch.Tensor:
-    """故障注入用: 上流の順（ブロックの先頭で 6 成分の `where` をまとめて作る）で書いたブロック。"""
+    """For fault injection: a block written in upstream's order (all 6 components' `where`s built
+    together at the block top)."""
     table = block.scale_shift_table
     shift, scale, gate, c_shift, c_scale, c_gate = (
         torch.where(condition_mask, c, g)
@@ -232,23 +248,23 @@ class TestTheStructureInspection:
         assert inspection["where"] == 6 * LAYERS + 2
 
     def test_wheres_hoisted_to_the_block_top_are_named(self, monkeypatch) -> None:
-        """上流の順で 6 成分の `where` を先頭にまとめると、attention
-        をまたいで生きる出力として名指す
-        （値は同じなので eager 同値では見えない — IR の検査だけが拾う）。"""
+        """Gathering the 6 components' `where`s at the top in upstream's order is named as outputs
+        that stay alive across the attention (the values are the same, so eager equivalence cannot
+        see it — only the IR check catches it)."""
         monkeypatch.setattr(dit_patch, "_ti2v_block", _hoisted_block)
         graph, _, targets = ti2v_export_dit.trace(dict(_tiny().config), SYM_MAX)
 
         inspection = ti2v_export_dit.inspect_structure(graph, sorted(targets), LAYERS)
 
         assert inspection["where"] == 6 * LAYERS + 2
-        crossing = [f for f in inspection["failures"] if "attention をまたぐ" in f]
-        # ブロックあたり、先頭の 2 本（shift / scale）は直後に消費されうるが、gate と FFN の 3 本は
-        # attention の後まで生きる。
+        crossing = [f for f in inspection["failures"] if "crosses attention" in f]
+        # Per block, the first 2 (shift / scale) may be consumed right away, but the gate and the 3
+        # of the FFN stay alive until after the attention.
         assert len(crossing) >= 4 * LAYERS
 
     def test_a_time_mlp_run_once_for_both_times_is_named(self, monkeypatch) -> None:
-        """時刻の MLP を M = 2 の 1 回にまとめると linear のノードが 3 本足りない（決定 3 の
-        「M = 2 の 1 回にしない」）。"""
+        """Merging the time MLP into one M = 2 run leaves the linear nodes 3 short (decision 3's
+        "not one M = 2 run")."""
 
         def batched(
             embedder: nn.Module,
@@ -266,13 +282,13 @@ class TestTheStructureInspection:
 
         inspection = ti2v_export_dit.inspect_structure(graph, sorted(targets), LAYERS)
 
-        assert any("linear のノードが" in f for f in inspection["failures"])
+        assert any("linear nodes (expected" in f for f in inspection["failures"])
 
     def test_the_5b_counts_are_checked_only_for_the_5b(self) -> None:
         inspection = {"i8_weights": 306, "linear_nodes": 310}
 
         assert ti2v_export_dit.expected_counts("ti2v-5b", inspection) == [
-            "i8_weights が 306（決定 2 の期待値 307）"
+            "i8_weights is 306 (decision 2 expects 307)"
         ]
         assert ti2v_export_dit.expected_counts("t2v-1.3b", inspection) == []
 
@@ -305,7 +321,8 @@ class TestTheContainer:
 
 @pytest.fixture(scope="module")
 def written(checkpoint: Path, tmp_path_factory) -> tuple[Path, dict[str, Any]]:
-    """合成の checkpoint で系列を書く（`transformer_dir` / `SERIES` / 本数の期待値を合成へ）。"""
+    """Write the series with the synthetic checkpoint (`transformer_dir` / `SERIES` / the expected
+    counts pointed at the synthetic ones)."""
     series = tmp_path_factory.mktemp("series") / ti2v_export_dit.SERIES_NAME
     with pytest.MonkeyPatch.context() as patch:
         _tiny_text(patch, tmp_path_factory.mktemp("text"))
@@ -349,7 +366,7 @@ class TestTheSeriesWriter:
 
         assert keys == {f"input.{name}" for name in ti2v_export_dit.INPUT_NAMES} | {"output.0"}
         assert mask.dtype == torch.uint32
-        # 潜在 (3, 16, 16) → 1 フレーム 8·8 = 64 トークンが条件フレーム。
+        # Latent (3, 16, 16) → 1 frame of 8·8 = 64 tokens is the conditioned frame.
         assert mask.flatten().to(torch.int64).tolist() == [1] * 64 + [0] * 128
         assert not t2v_mask.to(torch.int64).any()
 
@@ -385,7 +402,7 @@ class TestTheSeriesWriter:
         _tiny_text(monkeypatch, tmp_path)
         _point_at_tiny(monkeypatch, checkpoint, series)
 
-        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="系列を据えない"):
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="does not install the series"):
             ti2v_export_dit.write_series(names=["band-t2v-s00192-t0999"])
 
         assert not (series / ti2v_export_dit.TARGET).exists()
@@ -394,7 +411,8 @@ class TestTheSeriesWriter:
     def test_a_broken_gate_leaves_the_existing_series_untouched(
         self, fault: str, checkpoint: Path, tmp_path: Path, monkeypatch
     ) -> None:
-        """門（eager 同値・本数の期待値）に落ちたら、据わっている系列は 1 バイトも変わらない。"""
+        """If a check (eager equivalence, the expected counts) fails, the placed series does not
+        change by a single byte."""
         series = tmp_path / ti2v_export_dit.SERIES_NAME
         target = series / ti2v_export_dit.TARGET
         target.mkdir(parents=True)
@@ -421,7 +439,8 @@ class TestTheSeriesWriter:
 
 
 def _point_eager_full_at(patch: pytest.MonkeyPatch, checkpoint: Path, series: Path) -> None:
-    """`eager-full` を合成の checkpoint（`from_pretrained` で全量）と書いた系列へ向ける。"""
+    """Point `eager-full` at the synthetic checkpoint (all of it via `from_pretrained`) and the
+    written series."""
 
     def load(_model: str) -> nn.Module:
         from diffusers import WanTransformer3DModel
@@ -433,8 +452,8 @@ def _point_eager_full_at(patch: pytest.MonkeyPatch, checkpoint: Path, series: Pa
 
 
 class TestTheFullEager:
-    """独立した重み（f32 の全量 1 本）での eager 同値と、据えた golden との突き合わせ
-    （決定 4 の形）。"""
+    """Eager equivalence with independent weights (one full f32 copy) and the comparison with the
+    placed goldens (the form of decision 4)."""
 
     def test_the_full_model_agrees_with_the_patched_graph_and_the_written_golden(
         self, written, checkpoint: Path, tmp_path: Path, monkeypatch
@@ -458,8 +477,9 @@ class TestTheFullEager:
     def test_a_container_read_error_that_the_write_gate_cannot_see_is_caught(
         self, checkpoint: Path, tmp_path: Path, monkeypatch
     ) -> None:
-        """故障注入: 容器の読み口が 1 本の重みを 1 ULP ずらす。`write` の門は両側が同じ読み口を
-        通るので緑のまま golden を据える — `eager-full` だけが golden との食い違いとして拾う。"""
+        """Fault injection: the container source moves one weight by 1 ULP. Both sides of the
+        `write` check go through the same source, so it stays green and places the goldens — only
+        `eager-full` catches it as a mismatch with the goldens."""
         series = tmp_path / ti2v_export_dit.SERIES_NAME
         _tiny_text(monkeypatch, tmp_path)
         _point_at_tiny(monkeypatch, checkpoint, series)
@@ -491,7 +511,9 @@ class TestTheFullEager:
         _point_eager_full_at(monkeypatch, checkpoint, tmp_path / ti2v_export_dit.SERIES_NAME)
         monkeypatch.setattr(export_dit, "load_transformer", _never_load)
 
-        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="据えた golden が揃っていない"):
+        with pytest.raises(
+            ti2v_export_dit.Ti2vExportError, match="the installed goldens are incomplete"
+        ):
             ti2v_export_dit.eager_full()
 
     def test_it_stops_before_loading_when_memory_is_short(
@@ -502,16 +524,17 @@ class TestTheFullEager:
         monkeypatch.setattr(export_dit, "load_transformer", _never_load)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
 
-        with pytest.raises(dit_probe.DitProbeError, match=r"load の前の MemAvailable 1\.00 GiB"):
+        with pytest.raises(dit_probe.DitProbeError, match=r"MemAvailable before load is 1\.00 GiB"):
             ti2v_export_dit.eager_full()
 
 
 def _never_load(_model: str) -> nn.Module:
-    raise AssertionError("止まるべきところで上流を読んだ")
+    raise AssertionError("read the upstream where it should have stopped")
 
 
 class TestTheFullCases:
-    """実寸の golden のケースの表（段 2 — 2 つの形・決定用 6 本・受入れ 8 本）。"""
+    """The case table of the full-size goldens (step 2 — 2 shapes, 6 decision cases, 8 acceptance
+    cases)."""
 
     PATCH = (1, 2, 2)
     SHAPES: ClassVar[dict[tuple[int, int, int], int]] = {(21, 30, 52): 8190, (9, 44, 80): 7920}
@@ -520,10 +543,12 @@ class TestTheFullCases:
         return [case for case in ti2v_export_dit.FULL_CASES if case.role == role]
 
     def test_the_two_shapes_are_the_acceptance_limits_of_both_allocations(self) -> None:
-        """832×480・81 フレーム（S = 8,190）と 1280×704・33 フレーム（S = 7,920）の数値の門の形。
+        """832×480 with 81 frames (S = 8,190) and 1280×704 with 33 frames (S = 7,920) — the shapes
+        of the numeric check.
 
-        ADR 0121 追記「裁定 1 の確定」の受理の上限から採った形（832×480 は追記（2026-10-05）で
-        受理の外になったが、受理寸法と無関係な数値の門の形として使う）。
+        Shapes taken from the acceptance limits of ADR 0121's addendum "ruling 1 finalised" (832×480
+        fell outside the accepted set in the addendum of 2026-10-05, but is still used as a shape of
+        the numeric check, which does not depend on the accepted sizes).
         """
         shapes = {case.latent_shape: case.tokens(self.PATCH) for case in ti2v_export_dit.FULL_CASES}
 
@@ -546,7 +571,8 @@ class TestTheFullCases:
         }
 
     def test_the_decision_timesteps_spread_within_each_form(self) -> None:
-        """決定用の時刻は形ごとに重ならず、生成の最初のステップ（999）を両方の形で含む。"""
+        """The decision timesteps do not overlap within each shape, and both shapes include the
+        first generation step (999)."""
         band = self._cases("full-band")
         for form in ("t2v", "i2v"):
             steps = [case.timestep for case in band if case.form == form]
@@ -576,7 +602,8 @@ class TestTheFullCases:
         )
 
 
-#: 合成の実寸のケース（格子 3·3·5 / 2·5·3 — `TINY_DIT` の RoPE の長さ 32 の内・非正方を含む）。
+#: The synthetic full-size cases (grids 3·3·5 / 2·5·3 — within the RoPE length 32 of `TINY_DIT`,
+#: non-square included).
 TINY_FULL_CASES = (
     ti2v_export_dit.Ti2vCase("full-band", "t2v", (3, 6, 10), 999, "boxing-cats", 31),
     ti2v_export_dit.Ti2vCase("full-band", "i2v", (3, 6, 10), 500, "ferret", 32),
@@ -593,8 +620,8 @@ def _digests(directory: Path) -> dict[str, str]:
 
 @pytest.fixture
 def full_series(written, checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """書いた合成の系列の写し（実寸のケースは合成の格子へ・MemAvailable の検査は通す）。戻りは部品
-    ディレクトリ。"""
+    """A copy of the written synthetic series (full-size cases pointed at the synthetic grids; the
+    MemAvailable check passes). Returns the component directory."""
     target, _ = written
     series = tmp_path / ti2v_export_dit.SERIES_NAME
     shutil.copytree(target.parent, series)
@@ -610,8 +637,8 @@ def _full_names() -> list[str]:
 
 
 class TestTheFullGoldenWriter:
-    """据えた容器を書き直さずに実寸の golden を足す口（`write-full` — モジュール doc「実寸の
-    golden」）。"""
+    """The entry point that adds full-size goldens without rewriting the placed container
+    (`write-full` — the module doc "full-size goldens")."""
 
     def test_every_case_is_added_next_to_the_container_which_stays_byte_identical(
         self, full_series: Path
@@ -645,7 +672,7 @@ class TestTheFullGoldenWriter:
             condition = handle.get_tensor("condition_timestep").tolist()
 
         assert keys == {f"input.{key}" for key in ti2v_export_dit.INPUT_NAMES} | {"output.0"}
-        # 潜在 (3, 6, 10) → 1 フレーム 3·5 = 15 トークンが条件フレーム。
+        # Latent (3, 6, 10) → 1 frame of 3·5 = 15 tokens is the conditioned frame.
         assert mask.flatten().to(torch.int64).tolist() == [1] * 15 + [0] * 30
         assert reference_keys == {
             "latents",
@@ -675,13 +702,14 @@ class TestTheFullGoldenWriter:
     def test_a_stored_case_that_differs_from_the_table_stops_before_writing(
         self, full_series: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """表を変えた（同じ名前で seed が違う）後の古い golden を「済み」に数えない。"""
+        """Old goldens from before the table changed (same name, different seed) do not count as
+        "done"."""
         ti2v_export_dit.write_full()
         before = _digests(full_series)
         changed = dataclasses.replace(TINY_FULL_CASES[0], seed=99)
         monkeypatch.setattr(ti2v_export_dit, "FULL_CASES", (changed, *TINY_FULL_CASES[1:]))
 
-        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="食い違う"):
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="disagrees with the case table"):
             ti2v_export_dit.write_full()
 
         assert _digests(full_series) == before
@@ -700,7 +728,8 @@ class TestTheFullGoldenWriter:
         with pytest.raises(export_dit.EagerEquivalenceError):
             ti2v_export_dit.write_full()
 
-        # T2V の先頭は変調の取り違えが効かず（両側が同じ時刻）据わり、I2V の 2 本目で止まる。
+        # The first T2V case is placed because a modulation mix-up has no effect on it (both sides
+        # at the same time), and it stops at the second I2V case.
         assert sorted(set(_digests(full_series)) - set(before)) == sorted(
             export_dit.case_file_names(_full_names()[0])
         )
@@ -714,7 +743,7 @@ class TestTheFullGoldenWriter:
         assert [row["case"] for row in summary["cases"]] == [name]
         assert (full_series / f"io.{name}.safetensors").is_file()
         assert not (full_series / f"io.{_full_names()[0]}.safetensors").exists()
-        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="知らないケース名"):
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="unknown case names"):
             ti2v_export_dit.write_full(names=["full-band-t2v-s99999-t0001"])
 
     def test_the_log_gets_one_row_per_written_case(self, full_series: Path, tmp_path: Path) -> None:
@@ -759,7 +788,7 @@ class TestTheFullGoldenWriter:
         (empty / ti2v_export_dit.TARGET).mkdir(parents=True)
         monkeypatch.setattr(ti2v_export_dit, "SERIES", empty)
 
-        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="据えた容器が無い"):
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="no installed container"):
             ti2v_export_dit.write_full()
 
     def test_it_stops_before_writing_when_memory_is_short(
@@ -768,7 +797,7 @@ class TestTheFullGoldenWriter:
         before = _digests(full_series)
         monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
 
-        with pytest.raises(dit_probe.DitProbeError, match="write-full の前の MemAvailable"):
+        with pytest.raises(dit_probe.DitProbeError, match="MemAvailable before write-full"):
             ti2v_export_dit.write_full()
 
         assert _digests(full_series) == before
@@ -783,7 +812,8 @@ class TestTheQuantObservation:
         assert len(one_three) == 6
         assert {form for _, _, form, _ in one_three} == {"t2v"}
         assert all(name.startswith("band-") for name, *_ in five_b + one_three)
-        # 文脈の作り方を 2 つのモデルで揃える（同じ順に同じプロンプト）。
+        # The contexts are built the same way for the two models (the same prompts in the same
+        # order).
         assert [text for *_, text in five_b] == [text for *_, text in one_three]
 
     def test_it_measures_both_models_and_compares_their_worst_case(

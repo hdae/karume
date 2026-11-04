@@ -1,44 +1,52 @@
-"""Wan2.1 の少ステップの通しの参照（ADR 0118 決定 5 / 8・検収 段 6）。
+"""Reference for the few-step end-to-end run of Wan2.1 (ADR 0118 decisions 5 / 8, acceptance of
+step 6).
 
-832×480・33 フレーム（潜在 `[16,9,60,104]`）を 2 ステップ（CFG あり・guide 5.0・shift 3.0）回した
-潜在（VAE の前）と、それをタイル decode したフレーム（クランプ前）を、diffusers の `WanPipeline` を
-CPU f32 で素のまま回して作る（`wan/pipeline_ref.py` の上に乗る）。GPU の通し
-（`packages/models/src/wan/` の結線）はこの値と帯で照合する。
+Runs diffusers' `WanPipeline` unmodified on CPU f32 for 832×480, 33 frames (latent
+`[16,9,60,104]`), 2 steps (with CFG, guide 5.0, shift 3.0), and records the latent (before the VAE)
+and the frames from its tiled decode (before the clamp) (it builds on `wan/pipeline_ref.py`). The
+GPU end-to-end run (the wiring in `packages/models/src/wan/`) is checked against these values within
+a band.
 
-## 入力
+## Inputs
 
-- テキスト文脈: 埋め込み資産（`wan.text_embeds` — `outputs/series/wan2.1-t2v-1.3b-text-embeds/`）の
-  正 1 本 + negative。資産の sha256 をメタに書く（埋め込みを作り直したら参照も作り直す）。
-- 初期ノイズ: torch CPU の `randn`（seed 固定・`[1,16,9,60,104]`）を上流の `latents=` に注入する
-  （決定 5 — 製品のホスト生成器とは別の列。TS はこの値を fixture から読む）。
-- 重み: DiT と VAE を f16 表現可能値へ丸めてから回す（決定 8・ADR 0006）。DiT は RoPE の
-  バッファを丸めない経路（`export_dit.round_to_f16`）、VAE は `export_vae.load_vae(round_f16=True)`
-  と同じ丸め。
+- Text context: one positive prompt + the negative from the embeddings asset (`wan.text_embeds` —
+  `outputs/series/wan2.1-t2v-1.3b-text-embeds/`). The asset's sha256 goes into the metadata (when
+  the embeddings are rebuilt, the reference is rebuilt too).
+- Initial noise: a torch CPU `randn` (fixed seed, `[1,16,9,60,104]`) injected through upstream's
+  `latents=` (decision 5 — a different sequence from the product's host generator; TS reads these
+  values from the fixture).
+- Weights: the DiT and the VAE are rounded to f16-representable values before the run (decision 8,
+  ADR 0006). The DiT takes the path that does not round the RoPE buffers
+  (`export_dit.round_to_f16`); the VAE gets the same rounding as
+  `export_vae.load_vae(round_f16=True)`.
 
-## 出力（系列の根の `pipeline_steps.<case>.safetensors`）
+## Output (`pipeline_steps.<case>.safetensors` at the series root)
 
-- `latents_init` `[16,9,60,104]`: 注入した初期ノイズ。
-- `noise_cond.<i>` / `noise_uncond.<i>`: ステップ `i` の DiT の出力（forward の hook で記録。上流の
-  計算には触らない）。cond / uncond の振り分けは呼び出しの順ではなく、hook が受けたテキスト文脈の
-  値（正 / negative の埋め込みのどちらと一致するか）で決める — 上流の呼び順が変わっても入れ替わった
-  まま書かない。GPU との差を DiT とホストの UniPC / CFG に帰属させる用。
-- `latents.<i>`: ステップ `i` の後の潜在（`callback_on_step_end` で記録）。最後が VAE の入力。
-- `frames` `[3,33,480,832]`: 最終の潜在を上流と同じ逆正規化（`pipeline_wan.py` の
-  `latents / latents_std + latents_mean` の逐語）→ 段 5 のタイル decode の参照
-  （`vae_tiling.tiled_decode_unclamped` — タイル 32・12 枚）。クランプ前。
+- `latents_init` `[16,9,60,104]`: the injected initial noise.
+- `noise_cond.<i>` / `noise_uncond.<i>`: the DiT output at step `i` (recorded by a forward hook;
+  upstream's computation is not touched). cond and uncond are told apart not by call order but by
+  the value of the text context the hook received (whether it equals the positive or the negative
+  embeddings) — if upstream's call order changes, they are not written swapped. Used to attribute a
+  GPU difference to the DiT versus the host UniPC / CFG.
+- `latents.<i>`: the latent after step `i` (recorded with `callback_on_step_end`). The last one is
+  the VAE input.
+- `frames` `[3,33,480,832]`: the final latent, de-normalized as upstream does (verbatim
+  `latents / latents_std + latents_mean` from `pipeline_wan.py`) → the reference of the step-5
+  tiled decode (`vae_tiling.tiled_decode_unclamped` — tile 32, 12 tiles). Before the clamp.
 
-## ケース（帯の決定用と受入れ用を分ける — ADR 0118 決定 8・追記 2026-10-02）
+## Cases (band cases and acceptance cases are separate — ADR 0118 decision 8, addendum 2026-10-02)
 
-決定用（role `band`）2 本と受入れ（role `accept`）1 本は seed もプロンプトも互いに違う。
-MUST: `accept` の結果を見て決定用のケースも帯も変えない。
+The 2 band cases (role `band`) and the 1 acceptance case (role `accept`) all differ in seed and
+prompt.
+MUST: do not change the band cases or the band after looking at the `accept` result.
 
-    uv run --group wan --inexact python -m wan.few_step_ref                               # 全部
-    uv run --group wan --inexact python -m wan.few_step_ref --case accept-ferret          # 1 本だけ
+    uv run --group wan --inexact python -m wan.few_step_ref                               # all
+    uv run --group wan --inexact python -m wan.few_step_ref --case accept-ferret          # one
 
-所要の目安（6 コアの CPU）: DiT の forward 4 回 + タイル decode で 1 ケース約 25 分。
+Rough cost (6-core CPU): 4 DiT forwards + the tiled decode, about 25 minutes per case.
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -66,32 +74,34 @@ from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS
 if TYPE_CHECKING:
     from diffusers import WanPipeline
 
-#: 少ステップの通しのステップ数（決定 8）。
+#: The step count of the few-step end-to-end run (decision 8).
 STEPS = 2
 
-#: 潜在 `[C, F, H, W]`（832×480・33 フレーム — 最初の到達目標）。
+#: The latent `[C, F, H, W]` (832×480, 33 frames — the first target).
 LATENT_SHAPE = (16, 9, 60, 104)
 
-#: 参照のファイル名（系列の根に置く — `pipeline_steps.<case>.safetensors`）。
+#: The reference file name (at the series root — `pipeline_steps.<case>.safetensors`).
 FIXTURE_PREFIX = "pipeline_steps."
 FIXTURE_SUFFIX = ".safetensors"
 
 
 @dataclass(frozen=True)
 class FixtureCase:
-    """少ステップの通し 1 本（初期ノイズの seed と正のプロンプト）。"""
+    """One few-step end-to-end run (seed of the initial noise and the positive prompt)."""
 
     name: str
-    #: `band` = 帯を決めるケース・`accept` = 受け入れを判定するケース。
+    #: `band` = a case that sets the band, `accept` = a case that judges acceptance.
     role: str
     seed: int
-    #: 埋め込み資産の正のプロンプトの名前（{@link wan.prompts.FIXED_PROMPTS}）。
+    #: The name of the positive prompt in the embeddings asset ({@link wan.prompts.FIXED_PROMPTS}).
     prompt: str
 
 
-#: 決定用 2 本（帯を決める）+ 受入れ 1 本（決定 8 の形 — 段 3 の `band` / `accept` と同じ分け方）。
-#: MUST: `accept` の結果を見て決定用のケースも帯も変えない。seed 20261031 は前の受入れに使った値で、
-#: 帯の決定に影響した可能性があるので使わない（受入れは未見の seed で見る）。
+#: 2 band cases (set the band) + 1 acceptance case (the shape of decision 8 — the same split as the
+#: `band` / `accept` of step 3).
+#: MUST: do not change the band cases or the band after looking at the `accept` result. Seed
+#: 20261031 was used for an earlier acceptance and may have influenced the band, so it is not used
+#: (acceptance is judged on an unseen seed).
 FIXTURE_CASES = (
     FixtureCase("band-boxing-cats", role="band", seed=20261030, prompt="boxing-cats"),
     FixtureCase("band-cat-dog-baking", role="band", seed=20261032, prompt="cat-dog-baking"),
@@ -100,7 +110,8 @@ FIXTURE_CASES = (
 
 
 def load_rounded_pipeline(model: str = DEFAULT_MODEL) -> WanPipeline:
-    """上流の `WanPipeline`（umT5 無し・CPU f32）の DiT と VAE を f16 表現可能値へ丸める。"""
+    """Rounds the DiT and the VAE of upstream `WanPipeline` (no umT5, CPU f32) to f16-representable
+    values."""
     pipeline = pipeline_ref.load_pipeline(model)
     transformer = pipeline.transformer.eval()
     rounded = round_to_f16(transformer, dit_patch.WanDitTokens(transformer))
@@ -117,7 +128,8 @@ def load_rounded_pipeline(model: str = DEFAULT_MODEL) -> WanPipeline:
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 def denormalize_latents(pipeline: WanPipeline, latents: torch.Tensor) -> torch.Tensor:
-    """上流の decode の直前の逆正規化（`latents / (1 / std) + mean` — 演算の順も上流のまま）。"""
+    """The de-normalization right before upstream's decode (`latents / (1 / std) + mean` — the
+    order of operations is also upstream's)."""
     latents = latents.to(pipeline.vae.dtype)
     latents_mean = (
         torch.tensor(pipeline.vae.config.latents_mean)
@@ -131,7 +143,7 @@ def denormalize_latents(pipeline: WanPipeline, latents: torch.Tensor) -> torch.T
 
 
 def _peak_rss_gib() -> float:
-    """このプロセスの RSS の最大（GiB — Linux の `ru_maxrss` は KiB）。"""
+    """The peak RSS of this process (GiB — Linux `ru_maxrss` is in KiB)."""
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
 
 
@@ -142,15 +154,15 @@ def run_case(
     *,
     tile: int,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    """1 ケースを回し、テンソルと要約を返す。"""
+    """Runs one case and returns the tensors and a summary."""
     prompt = text_embeds.prompt_by_name(case.prompt)
     if prompt.role != prompts.POSITIVE:
-        raise ValueError(f"{case.name}: {case.prompt} は正のプロンプトでない")
+        raise ValueError(f"{case.name}: {case.prompt} is not a positive prompt")
     generator = torch.Generator().manual_seed(case.seed)
     latents_init = torch.randn(1, *LATENT_SHAPE, generator=generator)
 
-    # 上流へ渡す文脈と同じ値（`pipeline_ref.run` が同じ関数で埋める）— hook はこれと値で
-    # 突き合わせる。
+    # The same values as the context passed upstream (`pipeline_ref.run` pads them with the same
+    # function) — the hook matches against these by value.
     contexts = {
         "cond": pipeline_ref.pad_text_embeds(embeds[case.prompt]),
         "uncond": pipeline_ref.pad_text_embeds(embeds["negative"]),
@@ -158,7 +170,7 @@ def run_case(
     forwards: list[tuple[int, str, torch.Tensor]] = []
 
     def record_forward(_module: Any, _args: Any, kwargs: dict[str, Any], output: Any) -> None:
-        # 上流は `return_dict=False` でタプルを返す。timestep は `t.expand(1)`（int64）。
+        # Upstream returns a tuple with `return_dict=False`. The timestep is `t.expand(1)` (int64).
         context = kwargs["encoder_hidden_states"]
         labels = [label for label, value in contexts.items() if torch.equal(context, value)]
         if len(labels) != 1:
@@ -177,9 +189,9 @@ def run_case(
     handle = pipeline.transformer.register_forward_hook(record_forward, with_kwargs=True)
     started = time.perf_counter()
     try:
-        # attention は `export_dit` の参照と同じく CPU の flash 経路に固定する — 既定の選択が
-        # torch の更新で MATH へ変わったとき、2 種の参照の前提が黙って割れないように（落ちる形で
-        # 止める）。
+        # Pin attention to the CPU flash path, as the `export_dit` reference does — so that if a
+        # torch update switches the default choice to MATH, the premise shared by the two kinds of
+        # reference does not break silently (it stops with an error instead).
         with torch.no_grad(), dit_patch.flash_attention_only():
             final = pipeline_ref.run(
                 pipeline,
@@ -197,22 +209,21 @@ def run_case(
     timesteps = [int(value) for value in pipeline.scheduler.timesteps]
     if len(forwards) != 2 * STEPS or len(steps) != STEPS:
         raise AssertionError(
-            f"forward {len(forwards)} 回・step {len(steps)} 回（CFG あり 2 ステップ）"
+            f"{len(forwards)} forwards, {len(steps)} steps (expected: CFG with 2 steps)"
         )
     if [t for t, _, _ in forwards] != [t for t in timesteps for _ in range(2)]:
         raise AssertionError(
-            f"forward の timestep {[t for t, _, _ in forwards]} が {timesteps} と合わない"
+            f"forward timesteps {[t for t, _, _ in forwards]} do not match {timesteps}"
         )
     outputs: dict[tuple[int, str], torch.Tensor] = {}
     for index, (_, label, output) in enumerate(forwards):
         outputs[(index // 2, label)] = output
     if sorted(outputs) != [(step, label) for step in range(STEPS) for label in sorted(contexts)]:
         raise AssertionError(
-            "ステップごとの cond / uncond が 1 本ずつでない"
-            f"（{[label for _, label, _ in forwards]}）"
+            f"not exactly one cond and one uncond per step ({[label for _, label, _ in forwards]})"
         )
     if not torch.equal(final, steps[-1]):
-        raise AssertionError("最終の潜在が最後の step の記録と違う")
+        raise AssertionError("the final latent differs from the record of the last step")
 
     plan = vae_tiling.plan_tiles(
         LATENT_SHAPE[2], LATENT_SHAPE[3], tile, vae_tiling.WAN21_MIN_OVERLAP_LATENT
@@ -232,7 +243,7 @@ def run_case(
     tensors["frames"] = frames
     for name, tensor in tensors.items():
         if not bool(tensor.isfinite().all()):
-            raise AssertionError(f"{case.name}: {name} に非有限値がある")
+            raise AssertionError(f"{case.name}: {name} has non-finite values")
     summary = {
         "case": case.name,
         "role": case.role,
@@ -259,7 +270,7 @@ def write_case(
     model: str,
     out_root: Path,
 ) -> dict[str, Any]:
-    """1 ケースを回して書く（staging → 置換）。要約を返す。"""
+    """Runs and writes one case (staging → replace). Returns a summary."""
     tensors, summary = run_case(pipeline, case, embeds, tile=tile)
     plan = vae_tiling.plan_tiles(
         LATENT_SHAPE[2], LATENT_SHAPE[3], tile, vae_tiling.WAN21_MIN_OVERLAP_LATENT
@@ -308,22 +319,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--embeds",
         type=Path,
         default=SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME,
-        help="テキスト埋め込み資産（wan.text_embeds の出力）",
+        help="the text-embeddings asset (the output of wan.text_embeds)",
     )
     names = [case.name for case in FIXTURE_CASES]
     parser.add_argument(
-        "--case", action="append", choices=names, default=None, help="書くケース（既定は全部）"
+        "--case", action="append", choices=names, default=None, help="cases to write (default: all)"
     )
     args = parser.parse_args(argv)
     if not args.embeds.is_file():
-        parser.error(f"{args.embeds} が無い — 先に `python -m wan.text_embeds` で作る")
+        parser.error(f"{args.embeds} is missing — build it first with `python -m wan.text_embeds`")
 
     embeds, _ = text_embeds.read_asset(args.embeds)
     embeds_sha256 = hashlib.sha256(args.embeds.read_bytes()).hexdigest()
     pipeline = load_rounded_pipeline(args.model)
     if pipeline.vae.use_tiling:
-        # MUST: 上流のタイル化は走査形が違う（vae_tiling のモジュール doc）。
-        raise SystemExit("vae.use_tiling が True — 上流のタイル化は使わない")
+        # MUST: upstream's tiling scans in a different order (module doc of vae_tiling).
+        raise SystemExit("vae.use_tiling is True — upstream's tiling is not used")
     selected = [case for case in FIXTURE_CASES if args.case is None or case.name in args.case]
     summary = {
         "series": str(args.out),

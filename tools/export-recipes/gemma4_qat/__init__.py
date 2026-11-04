@@ -1,1 +1,1 @@
-"""Gemma 4 QAT mobile の固定整数を保持する変換レシピ（ADR 0097）。"""
+"""The conversion recipe that keeps the fixed integers of Gemma 4 QAT mobile (ADR 0097)."""

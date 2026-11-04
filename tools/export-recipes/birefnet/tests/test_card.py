@@ -1,15 +1,18 @@
-"""BiRefNet 系配布形のモデルカード描画（`birefnet.card`）。
+"""Model card rendering of the BiRefNet family distributions (`birefnet.card`).
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。**例外は解像度**（`imageWidth` / `imageHeight`）と**席**: 実行資源の
-実測（checkpoint ごとの `BirefnetCheckpoint.resources`）は解像度で引き、測った席が manifest に
-無ければ描かないので、偽 manifest も実測のある解像度と席を持つ。
+The real distribution's `karume.json` is not used — the job here is to see that the fake manifest's
+values appear in the text as they are (= that not a single hand-written number is mixed in), so
+building it with values that **differ** from the real ones detects more. **The exceptions are the
+resolution** (`imageWidth` / `imageHeight`) **and the presets**: the measured execution resources
+(`BirefnetCheckpoint.resources` per checkpoint) are looked up by resolution, and the card is not
+rendered when the measured preset is missing from the manifest, so the fake manifest also carries a
+measured resolution and preset.
 
-manifest からの導出（表・数・使い方）は `birefnet/tests/test_distribution.py` の
-`TestBirefnetModelCard` / `TestBirefnetResolutionFamily` が**組み立て 1 周ぶん**で見る。ここが
-持つのはカード側にしか無い門 — テンプレートの pipeline 固有性と、帰属表に無い checkpoint を
-描かないこと、実測していない解像度を描かないこと、そして案内するロード入口。
+The derivations from the manifest (tables, numbers, usage) are checked by `TestBirefnetModelCard` /
+`TestBirefnetResolutionFamily` in `birefnet/tests/test_distribution.py` over **one full assembly**.
+What lives here are the checks only the card side has — that the template is specific to its
+pipeline, that it does not render for a checkpoint missing from the attribution table or for an
+unmeasured resolution, and the loading entry point it advertises.
 """
 
 from __future__ import annotations
@@ -30,47 +33,54 @@ from birefnet.card import (
     render_birefnet_model_card,
 )
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: Repository ID spelled in the usage snippet (dist passes it from the pipeline's declaration).
 REPO = "hdae/fake-repo"
 
-#: このリポが配る重み（pipeline 席が渡す軸 — manifest には無い）。
+#: The weights this repository ships (the axis the pipeline entry passes — not in the manifest).
 CHECKPOINT = "hr"
 
-#: 既定のモデル名 = 既定の解像度。
+#: Default model name = default resolution.
 MODEL = "1024"
 
-#: checkpoint → 実物の配布形の席（先頭が既定 — `birefnet.distribution.birefnet_seat_dtypes` の値。
-#: 規則そのものは `birefnet/tests/test_distribution.py` が見る）。偽 manifest もこの席で組む —
-#: カードは測った席が無いモデルも、上流の格納より広い席も描かない。
+#: checkpoint → presets of the real distribution (default first — the values of
+#: `birefnet.distribution.birefnet_seat_dtypes`; the rule itself is checked by
+#: `birefnet/tests/test_distribution.py`). The fake manifest is built with these presets too — the
+#: card
+#: renders neither a model without the measured preset nor a preset wider than the upstream storage.
 SEATS: dict[str, tuple[str, ...]] = {"hr": ("f16",), "lucida": ("f32", "f16")}
 
-#: 別 family の pipeline 契約（**綴りをそのまま持つ** — recipe 間のコード結合を作らないため）。
-#: 2 つの実在テンプレートが互いの manifest を拒むことは `sbv2/tests/test_card.py` が
-#: 両向きで見る。ここが要るのは「自分の契約以外を拒む」という 1 方向だけ。
+#: Another family's pipeline contract (**kept as a literal spelling** — so that no code coupling
+#: between recipes is created). That two real templates refuse each other's manifests is checked in
+#: both directions by `sbv2/tests/test_card.py`. Here only one direction is needed: "refuse any
+#: contract other than its own".
 FOREIGN_PIPELINE = "siglip2/1"
 
-#: ロード側が受理する後処理の手順の閉じた集合の宣言（TS の `MATTE_PROCEDURES`）。
+#: Declaration of the closed set of post-processing procedures the loader accepts (TS
+#: `MATTE_PROCEDURES`).
 MATTE_SOURCE = REPO_ROOT / "packages/models/src/birefnet/matte.ts"
 
-#: `MATTE_PROCEDURES` の宣言の 1 行（`export const MATTE_PROCEDURES = [...] as const;`）。
+#: The one-line declaration of `MATTE_PROCEDURES` (`export const MATTE_PROCEDURES = [...] as
+#: const;`).
 MATTE_PROCEDURES_DECLARATION = re.compile(
     r"^export const MATTE_PROCEDURES = \[(?P<body>[^\]]*)\] as const;$", re.MULTILINE
 )
 
 
 def _ts_matte_procedures(source: str) -> tuple[str, ...]:
-    """TS の宣言から手順の名前を読む（宣言の形が動いたら黙って空にせず落とす）。"""
+    """Read the procedure names from the TS declaration (fail, rather than silently go empty, when
+    its form changes)."""
     declarations = MATTE_PROCEDURES_DECLARATION.findall(source)
-    assert len(declarations) == 1, f"{MATTE_SOURCE} の MATTE_PROCEDURES の宣言が読めない"
+    assert len(declarations) == 1, f"cannot read the MATTE_PROCEDURES declaration in {MATTE_SOURCE}"
     (body,) = declarations
     names = tuple(re.findall(r'"([^"]+)"', body))
     rest = re.sub(r'"[^"]+"|,|\s', "", body)
-    assert names and rest == "", f"MATTE_PROCEDURES に文字列の名前以外の要素がある: {body!r}"
+    assert names and rest == "", f"MATTE_PROCEDURES has elements other than string names: {body!r}"
     return names
 
 
-#: TS 側の宣言を読んだ値（手書きの写しにすると、片側だけ動いても緑のままになる）。カードが説明を
-#: 持たない手順も、ロード側が読めない手順を説明するカードも作らない。
+#: The values read from the TS declaration (a hand-written copy would stay green when only one side
+#: moves). Neither a procedure the card cannot describe nor a card describing a procedure the loader
+#: cannot read is created.
 TS_MATTE_PROCEDURES = _ts_matte_procedures(MATTE_SOURCE.read_text(encoding="utf-8"))
 
 
@@ -79,9 +89,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so only its shape follows the real one (lengths and sha256
+    of the 2 documents).
     """
     return {
         "container": {
@@ -97,9 +108,11 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 def _birefnet_manifest(
     model: str = MODEL, seats: tuple[str, ...] = SEATS[CHECKPOINT]
 ) -> dict[str, Any]:
-    """BiRefNet 系の最小 manifest（解像度と席以外は実物と重ならない偽値）。
+    """Minimal BiRefNet family manifest (fake values that do not overlap the real ones, except the
+    resolution and the presets).
 
-    `seats` は quant 席の格納 dtype（先頭が既定）。既定は {@link CHECKPOINT}（HR）の実物の席。
+    `seats` are the storage dtypes of the quant presets (default first). The default is the real
+    presets of {@link CHECKPOINT} (HR).
     """
     side = int(model)
     return {
@@ -133,8 +146,9 @@ def _birefnet_manifest(
 
 class TestTheSeatTable:
     def test_it_is_the_distributions_seats_with_the_default_first(self) -> None:
-        """{@link SEATS} は配布の席の写し — 規則（`birefnet_seat_dtypes` /
-        `birefnet_default_quant`）が動いたのに偽 manifest だけ古い席で組んで緑、を作らない。"""
+        """{@link SEATS} is a copy of the distribution's presets — no going green with the fake
+        manifest built on old presets after the rule (`birefnet_seat_dtypes` /
+        `birefnet_default_quant`) moved."""
         from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
 
         assert set(SEATS) == set(BIREFNET_CHECKPOINTS)
@@ -144,13 +158,15 @@ class TestTheSeatTable:
 
 
 class TestBirefnetPostprocess:
-    """後処理の手順（`pipelineConfig.postprocess`）の説明 — 手順の名前はモデルの宣言から引く。"""
+    """Description of the post-processing procedure (`pipelineConfig.postprocess`) — the name comes
+    from the model's declaration."""
 
     def test_it_describes_exactly_the_procedures_the_loader_accepts(self) -> None:
         assert sorted(BIREFNET_POSTPROCESS_DESCRIPTIONS) == sorted(TS_MATTE_PROCEDURES)
 
     def test_every_checkpoint_declares_a_procedure_the_loader_accepts(self) -> None:
-        """組み立て段が書く手順は、ロード側の閉じた集合の中（外なら配布形が読めない）。"""
+        """The procedure the assembly writes is inside the loader's closed set (otherwise the
+        distribution cannot be read)."""
         from birefnet.distribution import BIREFNET_POSTPROCESS
 
         assert set(BIREFNET_POSTPROCESS.values()) <= set(TS_MATTE_PROCEDURES)
@@ -165,17 +181,19 @@ class TestBirefnetPostprocess:
         assert f"`{other}`" not in card
 
     def test_it_refuses_a_procedure_it_cannot_describe(self) -> None:
-        """推し量った説明を載せない — 配布形の実際の後処理とカードが食い違ったまま公開される。"""
+        """No extrapolated description — the card would be published disagreeing with the
+        distribution's actual post-processing."""
         manifest = _birefnet_manifest()
         manifest["models"][MODEL]["pipelineConfig"]["postprocess"] = "nearest"
         with pytest.raises(ValueError, match="nearest"):
             render_birefnet_model_card(manifest, REPO, CHECKPOINT)
 
     def test_it_refuses_a_model_without_a_declared_procedure(self) -> None:
-        """欄の欠けも、説明を持たない手順と同じ文言で落とす（素の `KeyError` にしない）。"""
+        """A missing field fails with the same wording as a procedure without a description (not a
+        bare `KeyError`)."""
         manifest = _birefnet_manifest()
         del manifest["models"][MODEL]["pipelineConfig"]["postprocess"]
-        with pytest.raises(ValueError, match="後処理の手順 None の説明を持たない"):
+        with pytest.raises(ValueError, match="no description for post-processing procedure None"):
             render_birefnet_model_card(manifest, REPO, CHECKPOINT)
 
 
@@ -187,14 +205,16 @@ class TestBirefnetCardGate:
             render_birefnet_model_card(manifest, REPO, CHECKPOINT)
 
     def test_it_refuses_a_checkpoint_it_cannot_attribute(self) -> None:
-        """帰属表に無い checkpoint で描くと、`base_model` の無いカード（= 出所を名乗って
-        いない再配布）が黙って出る。既知の一覧を添えて落とす。
+        """Rendering for a checkpoint missing from the attribution table would silently produce a
+        card without `base_model` (= a redistribution that does not state its origin). It fails
+        with the list of known checkpoints.
         """
         with pytest.raises(ValueError, match="tiny"):
             render_birefnet_model_card(_birefnet_manifest(), REPO, "tiny")
 
     def test_it_refuses_a_resolution_it_has_not_measured(self) -> None:
-        """カードが名乗る資源の数は 1 つ残らず実測に紐づく（実測の無い解像度では描かない）。"""
+        """Every resource number the card states is tied to a measurement (no rendering at an
+        unmeasured resolution)."""
         manifest = _birefnet_manifest()
         manifest["models"][MODEL]["pipelineConfig"]["imageWidth"] = 512
         with pytest.raises(ValueError, match="512"):
@@ -209,7 +229,8 @@ class TestBirefnetCardGate:
         assert manifest == before
 
     def test_the_title_follows_the_checkpoint(self) -> None:
-        """上流が名前で売っているモデルはその名前で呼ぶ（見出しは帰属表 1 つから来る）。"""
+        """A model upstream markets under a name is called by that name (the heading comes from the
+        one attribution table)."""
         assert "# Lucida (BiRefNet) — Karume" in render_birefnet_model_card(
             _birefnet_manifest(seats=SEATS["lucida"]), REPO, "lucida"
         )
@@ -218,8 +239,8 @@ class TestBirefnetCardGate:
         )
 
     def test_the_attribution_does_not_follow_the_model_name(self) -> None:
-        """モデル名は解像度で、帰属の軸ではない — 同じモデル名でも席（checkpoint）が違えば別の
-        上流を名乗る。"""
+        """The model name is the resolution, not the attribution axis — with the same model name,
+        a different entry (checkpoint) states a different upstream."""
         for checkpoint, repo in BIREFNET_UPSTREAM.items():
             card = render_birefnet_model_card(
                 _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
@@ -227,29 +248,31 @@ class TestBirefnetCardGate:
             assert f"base_model: {repo}" in card
 
     def test_the_upstream_table_is_the_only_source_of_the_repository_ids(self) -> None:
-        """`BIREFNET_UPSTREAM` は帰属表からの導出（2 表にすると片方だけ動ける）。"""
+        """`BIREFNET_UPSTREAM` is derived from the attribution table (with two tables, one could
+        move alone)."""
         assert {
             name: entry.repo for name, entry in BIREFNET_CHECKPOINTS.items()
         } == BIREFNET_UPSTREAM
 
 
 class TestBirefnetEntryPoint:
-    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+    """The loading entry point the card advertises — `fromPretrained` only."""
 
     def test_it_does_not_advertise_the_local_asset_entry_point(self) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）。
+        """`fromAssets` is not advertised (ruling of 2026-08-29).
 
-        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
-        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
-        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
-        見るのは、Usage ごと消えても通る門にしないため。
+        It can read split distributions now (X2-101), but it is a surface for local debugging that
+        assumes you hold the bytes yourself; the ordinary entry point for a reader using HF is
+        `fromPretrained`. Listing both would leave the reader to decide "which one do I use". The
+        `fromPretrained` side is checked as well so that the check does not pass when the whole
+        Usage section disappears.
         """
         card = render_birefnet_model_card(_birefnet_manifest(), REPO, CHECKPOINT)
         assert "fromAssets" not in card
         assert "await Pipeline.fromPretrained" in card
 
 
-#: checkpoint × 実測した解像度（実行資源の注記のパラメータ）。
+#: checkpoint × measured resolution (parameters of the execution-resource note).
 _MEASURED = [
     (checkpoint, model)
     for checkpoint, entry in sorted(BIREFNET_CHECKPOINTS.items())
@@ -258,17 +281,20 @@ _MEASURED = [
 
 
 class TestBirefnetResourceNote:
-    """実行資源の注記（利用者が「渡す前に知りたい事実」— manifest に無いので定数）。"""
+    """The execution-resource note (facts a user wants "before handing it over" — constants, since
+    they are not in the manifest)."""
 
     @pytest.mark.parametrize(("checkpoint", "model"), _MEASURED)
     def test_the_card_names_the_gpu_memory_that_resolution_needs(
         self, checkpoint: str, model: str
     ) -> None:
-        """MUST: 総確保と、128MiB 既定を超える binding の両方を**そのモデルの実測で**名乗る。
+        """MUST: state both the total allocation and the binding above the 128MiB default **from
+        that model's measurement**.
 
-        WebGPU の `maxStorageBufferBindingSize` の仕様既定は 128MiB なので、それを超える
-        binding は「端末によっては要求自体が通らない」制約。カードが黙っていると、読み手は
-        `requiredLimits` が空なこと（= 常駐分は既定内）を「既定スペックで動く」と読む。
+        The spec default of WebGPU's `maxStorageBufferBindingSize` is 128MiB, so a larger binding is
+        a constraint where "on some devices the request itself fails". If the card stays silent,
+        the reader takes an empty `requiredLimits` (= the resident part fits the defaults) to mean
+        "runs on default limits".
         """
         card = render_birefnet_model_card(
             _birefnet_manifest(model, SEATS[checkpoint]), REPO, checkpoint
@@ -283,8 +309,8 @@ class TestBirefnetResourceNote:
         assert "maxStorageBufferBindingSize" in card
 
     def test_each_checkpoint_measured_the_seat_it_names(self) -> None:
-        """実測した席は checkpoint ごと — HR は f16 席・Lucida は f32 席（どちらも
-        2026-10-16）。"""
+        """The measured preset is per checkpoint — HR on the f16 preset, Lucida on the f32 preset
+        (both 2026-10-16)."""
         assert {name: entry.resources.quant for name, entry in BIREFNET_CHECKPOINTS.items()} == {
             "hr": "f16",
             "lucida": "f32",
@@ -292,8 +318,8 @@ class TestBirefnetResourceNote:
 
     @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
     def test_the_total_is_named_as_the_measured_seats_number(self, checkpoint: str) -> None:
-        """総確保がどの席の実測かを言う（席が 2 つ並ぶ Lucida のカードでも、他の席の総確保は
-        推し量らない — 2026-09-26 レビュー F2）。"""
+        """Say which preset the total allocation was measured on (even on Lucida's card with two
+        presets, the totals of the other preset are not extrapolated — 2026-09-26 review F2)."""
         card = render_birefnet_model_card(
             _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
         )
@@ -306,25 +332,32 @@ class TestBirefnetResourceNote:
         )
 
     def test_it_refuses_a_model_without_the_measured_seat(self) -> None:
-        """実測した席が無い配布形では、総確保を名乗れない（別の席の数として読まれる）。
+        """A distribution without the measured preset cannot state the total allocation (it would be
+        read as another preset's number).
 
-        Lucida（f32 席で実測）の f16 席だけの manifest。HR は f16 席の他に描ける席が無い
-        （f32 席は上流の格納より広く、帰属節が落とす — {@link
-        TestBirefnetStorageAttribution.test_a_seat_wider_than_the_checkpoint_is_refused}）。
+        A manifest with only the f16 preset for Lucida (measured on the f32 preset). HR has no
+        renderable preset besides f16 (an f32 preset is wider than the upstream storage and the
+        attribution section refuses it — {@link
+        TestBirefnetStorageAttribution.test_a_seat_wider_than_the_checkpoint_is_refused}).
         """
-        with pytest.raises(ValueError, match="実測した quant 'f32'"):
+        with pytest.raises(
+            ValueError, match="the quant 'f32' the execution resources were measured with"
+        ):
             render_birefnet_model_card(_birefnet_manifest(seats=("f16",)), REPO, "lucida")
 
     def test_it_does_not_carry_another_resolutions_measurement(self) -> None:
-        """1 つの実測を全モデルへ写すと、片方のカードが**測っていない数**を名乗る。"""
+        """Copying one measurement to all models would make one of the cards state **numbers that
+        were not measured**."""
         card = render_birefnet_model_card(_birefnet_manifest(MODEL), REPO, CHECKPOINT)
 
         assert BIREFNET_CHECKPOINTS[CHECKPOINT].resources.by_resolution["2048"].total not in card
 
     def test_it_does_not_carry_another_checkpoints_measurement(self) -> None:
-        """実測は checkpoint ごと — HR のカードは Lucida の総確保も、それを測った席も名乗らない。
+        """Measurements are per checkpoint — HR's card states neither Lucida's total allocation nor
+        the preset it was measured on.
 
-        測った条件（日付と機種）は 2 つの checkpoint で同じになりうるので、区別には使わない。
+        The measurement conditions (date and machine) can be the same for both checkpoints, so they
+        are not used to tell them apart.
         """
         card = render_birefnet_model_card(_birefnet_manifest(MODEL), REPO, CHECKPOINT)
         prose = " ".join(card.split())
@@ -335,7 +368,8 @@ class TestBirefnetResourceNote:
 
 
 def _with_seat(manifest: dict[str, Any], dtype: str, *, default: bool = False) -> dict[str, Any]:
-    """既定モデルへ `dtype` の weights と同名の quant 席を足す（`default` なら既定席にする）。"""
+    """Add `dtype` weights and a quant preset of the same name to the default model (made the
+    default preset when `default`)."""
     model = manifest["models"][manifest["defaultModel"]]
     model["weights"]["matte"][dtype] = _container(
         _ref(f"m/model.{dtype}-00001-of-00002.krm", 7, "e")
@@ -347,18 +381,20 @@ def _with_seat(manifest: dict[str, Any], dtype: str, *, default: bool = False) -
 
 
 class TestBirefnetStorageAttribution:
-    """席ごとの格納の説明と `base_model_relation`（ADR 0113 — checkpoint の格納から決まる）。"""
+    """Per-preset storage description and `base_model_relation` (ADR 0113 — determined by the
+    checkpoint's storage)."""
 
     def test_the_weights_key_is_the_distributions_role(self) -> None:
-        """カードは循環 import を避けて weights キーを自分で綴る — 配布 recipe と一致させる。"""
+        """The card spells the weights key itself to avoid a circular import — it must match the
+        distribution recipe."""
         from birefnet.distribution import BIREFNET_ROLE
 
         assert BIREFNET_MATTE_WEIGHTS == BIREFNET_ROLE
 
     @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
     def test_the_default_seat_declares_no_relation(self, checkpoint: str) -> None:
-        """既定席（上流の格納と同じ型 — HR は f16・Lucida は f32）は checkpoint の値を変えない —
-        4 値のどれでもないので置かない。"""
+        """The default preset (the same type as the upstream storage — f16 for HR, f32 for Lucida)
+        does not change the checkpoint's values — it is none of the 4 values, so it is left out."""
         card = render_birefnet_model_card(
             _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
         )
@@ -371,7 +407,8 @@ class TestBirefnetStorageAttribution:
         assert "base_model_relation: quantized" in card
 
     def test_the_storage_lines_follow_the_seats_in_the_manifest(self) -> None:
-        """dtype ラベルは manifest から — f32 だけの配布形は f16 席を名乗らない。"""
+        """dtype labels come from the manifest — an f32-only distribution does not claim an f16
+        preset."""
         plain = render_birefnet_model_card(_birefnet_manifest(seats=("f32",)), REPO, "lucida")
         both = render_birefnet_model_card(_birefnet_manifest(seats=SEATS["lucida"]), REPO, "lucida")
 
@@ -379,9 +416,10 @@ class TestBirefnetStorageAttribution:
         assert "  - `f32`:" in both and "  - `f16`:" in both
 
     def test_the_hr_card_names_its_f16_checkpoint(self) -> None:
-        """HR の唯一の席（f16）は上流の値そのもの — 席が 1 つなので単数で名乗る。
+        """HR's only preset (f16) is the upstream values themselves — with one preset, it is stated
+        in the singular.
 
-        旧文面「source checkpoint's own f32 values」は HR では事実と違った（上流は f16）。
+        The old wording "source checkpoint's own f32 values" was not true for HR (upstream is f16).
         """
         card = render_birefnet_model_card(_birefnet_manifest(), REPO, "hr")
         prose = " ".join(card.split())
@@ -395,9 +433,10 @@ class TestBirefnetStorageAttribution:
         assert "own f32 values" not in card
 
     def test_a_seat_wider_than_the_checkpoint_is_refused(self) -> None:
-        """上流の格納より広い席（HR の f32 席）の文面は持たない — 値を正確に広げるだけの席は
-        配らない（ADR 0113 追記 2026-10-11）ので、その席を名乗るカードは描かない。"""
-        with pytest.raises(ValueError, match="格納 f32 の席を f16 の checkpoint"):
+        """There is no wording for a preset wider than the upstream storage (HR's f32 preset) — a
+        preset that only widens the values exactly is not shipped (ADR 0113 addendum 2026-10-11),
+        so a card claiming one is not rendered."""
+        with pytest.raises(ValueError, match="for an f32 storage preset of an f16 checkpoint"):
             render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f32"), REPO, "hr")
 
     def test_the_lucida_card_declares_its_f16_seat_quantized(self) -> None:
@@ -408,7 +447,8 @@ class TestBirefnetStorageAttribution:
         assert "  - `f32`: the checkpoint's own f32 values, unchanged." in card
 
     def test_a_seat_it_has_no_wording_for_is_refused(self) -> None:
-        """段 2 の i8 は文面と一緒に足す — 推し量った文面を帰属節へ載せない。"""
+        """Phase 2's i8 is added together with its wording — no extrapolated wording goes into the
+        attribution section."""
         with pytest.raises(ValueError, match="i8"):
             render_birefnet_model_card(_with_seat(_birefnet_manifest(), "i8"), REPO, "hr")
 

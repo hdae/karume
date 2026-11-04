@@ -1,21 +1,24 @@
-"""civitai の checkpoint を AIR / URL で取り込む（重み + 機械 provenance を `inputs/` へ）。
+"""Imports a civitai checkpoint by AIR / URL (the weights + machine provenance into `inputs/`).
 
     uv run python -m anima.civitai --air "urn:air:anima:checkpoint:civitai:2544636@2983680"
     uv run python -m anima.civitai --url \
         "https://civitai.com/models/2544636/wai-anima?modelVersionId=2983680"
-    uv run python -m anima.civitai --url "https://civitai.com/models/2544636"  # 版一覧だけ出す
+    uv run python -m anima.civitai --url "https://civitai.com/models/2544636"  # lists versions
 
-責務は**取得・検証・記録まで**の 1 段。diffusers レイアウトへの組み直しは
-{@link anima.single_file}、配布カードの帰属は {@link anima.card} が持つ。
+Its responsibility is one step: **fetch, verify and record**. Rebuilding into the diffusers layout
+belongs to {@link anima.single_file}, and the attribution in the distribution card to
+{@link anima.card}.
 
-**ライセンスの判定はしない** — API の許諾 4 欄と説明本文（HTML）を `civitai.json` へ写すだけで、
-可否は取り込む人が原文を読んで決める（2026-09-01 裁定 — 確認フラグは設けない）。人が確認した
-記録は同じディレクトリの `license-review.md` に置く運用で、このコマンドはそちらに一切触らない
-（機械が書く `civitai.json` に人の追記を混ぜると、再取得のたびに片方が消える）。
+**It does not judge the licence** — it only copies the API's 4 permission fields and the
+description body (HTML) into `civitai.json`; whether the import is allowed is decided by the person
+importing, after reading the original (ruling of 2026-09-01 — there is no confirmation flag). The
+record of a human review goes into `license-review.md` in the same directory, which this command
+never touches (mixing human additions into the machine-written `civitai.json` would lose one side
+on every re-fetch).
 
-MUST: torch / diffusers / huggingface_hub を import しない（`anima.single_file` の NOTE と同じ
-理由 — 依存グループ非同期の環境でも動く必要がある）。ここは重み 1 本を落として記録するだけで、
-標準ライブラリで足りる。
+MUST: do not import torch / diffusers / huggingface_hub (the same reason as the NOTE of
+`anima.single_file` — it must work in an environment where the dependency group is not synced).
+This only downloads and records one weight file; the standard library is enough.
 """
 
 from __future__ import annotations
@@ -35,52 +38,58 @@ from urllib.parse import parse_qs, urlsplit
 
 from _shared.paths import INPUTS_ROOT
 
-#: メタ取得の口（無認証で読める）。
+#: Endpoint for metadata (readable without authentication).
 API_ROOT = "https://civitai.com/api/v1"
 
-#: DL トークンの置き場（https://civitai.com/user/account の API Keys で発行する）。
+#: Where the download token goes (issued under API Keys at https://civitai.com/user/account).
 TOKEN_ENV = "CIVITAI_API_TOKEN"
 
-#: 取り込み先の親（`inputs/anima/civitai-<versionId>/` — docs/assets-layout.md）。
+#: Parent of the import destination (`inputs/anima/civitai-<versionId>/` — docs/assets-layout.md).
 DEFAULT_OUT = INPUTS_ROOT / "anima"
 
-#: 機械が専有する取り込み記録。人の確認記録はここではなく `license-review.md` へ。
+#: The import record owned by the machine. Human review records go to `license-review.md`, not
+#: here.
 PROVENANCE_FILE = "civitai.json"
 
 MIB = 1024 * 1024
 
-#: 読み書きの刻みと、進捗を出す間隔（4GB 級の checkpoint を無言で待たせない）。
+#: Read / write chunk size and the progress interval (no silent wait on a 4GB-class checkpoint).
 CHUNK_BYTES = 8 * MIB
 PROGRESS_BYTES = 256 * MIB
 
-#: AIR（civitai の資産 URN）の綴り。`ecosystem` / `type` は**検証しない**（記録するだけ —
-#: 上流が語彙を増やしたときに、こちらの門が理由で取り込めなくなる形にしない）。
+#: Syntax of an AIR (civitai's asset URN). `ecosystem` / `type` are **not validated** (only recorded
+#: — when upstream extends the vocabulary, a check here must not be what blocks the import).
 AIR_PATTERN = re.compile(
     r"urn:air:(?P<ecosystem>[^:]+):(?P<type>[^:]+):(?P<source>[^:@]+):(?P<model>\d+)"
     r"(?:@(?P<version>\d+))?"
 )
 
-#: モデルページの path（`/models/<id>` + 任意のスラグ）。版は query の `modelVersionId`。
+#: Path of a model page (`/models/<id>` + an optional slug). The version is `modelVersionId` in the
+#: query.
 MODEL_PATH_PATTERN = re.compile(r"/models/(?P<model>\d+)(?:/[^/]*)?/?")
 
-#: 配布名の受理集合（ADR 0077 — `karume.dist` の `MODEL_NAME_RE` の**逐語の写し**）。
+#: The accepted set of distribution names (ADR 0077 — a **verbatim copy** of `MODEL_NAME_RE` in
+#: `karume.dist`).
 #:
-#: MUST: 写しにするのは上の MUST（torch を import しない）から — `karume.dist` を import すると
-#: `karume/__init__.py` 経由で `karume.convert` が torch を引く（2026-09-05 実測）ので、正本を
-#: 直接呼べない。正本が規則を足したらここも同じ日に直す。正本と同じく `.fullmatch` で引く
-#: （Python の `$` は末尾の改行の直前でも一致する）。
+#: MUST: it is a copy because of the MUST above (do not import torch) — importing `karume.dist`
+#: pulls in torch through `karume.convert` via `karume/__init__.py` (measured 2026-09-05), so the
+#: source of truth cannot be called directly. When the source of truth adds a rule, fix this on the
+#: same day. Like the source of truth, match with `.fullmatch` (Python's `$` also matches right
+#: before a trailing newline).
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
-#: 配布名に使えない予約名（`karume.dist` の `SHARED_DIRNAME` — 共有ファイルの席と衝突する）。
+#: Reserved name not allowed as a distribution name (`SHARED_DIRNAME` of `karume.dist` — it
+#: collides with the shared-files directory).
 RESERVED_MODEL_NAME = "shared"
 
-#: 導出名から落とすファミリ名（`WAI-ANIMA` → `wai` — 前置の `anima-` と二重にしない）。
+#: Family name dropped from derived names (`WAI-ANIMA` → `wai` — not doubled with the `anima-`
+#: prefix).
 FAMILY_TOKEN = "anima"
 
 
 @dataclass(frozen=True)
 class Air:
-    """AIR の中身（`urn:air:{ecosystem}:{type}:civitai:{model_id}@{version_id}`）。"""
+    """The contents of an AIR (`urn:air:{ecosystem}:{type}:civitai:{model_id}@{version_id}`)."""
 
     ecosystem: str
     type: str
@@ -89,33 +98,33 @@ class Air:
 
     @property
     def urn(self) -> str:
-        """自前で組み立て直した綴り（API が返す値との突合に使う）。"""
+        """The URN rebuilt locally (used to compare against the value the API returns)."""
         return f"urn:air:{self.ecosystem}:{self.type}:civitai:{self.model_id}@{self.version_id}"
 
 
 @dataclass(frozen=True)
 class Target:
-    """モデルページが指すもの。版は URL では省ける（省いた場合は版一覧の案内へ回る）。"""
+    """What a model page points to. A URL may omit the version (then the version list is shown)."""
 
     model_id: int
     version_id: int | None
 
 
 def parse_air(text: str) -> Air:
-    """AIR を読む。civitai 以外の source と、版を持たない AIR は受けない。"""
+    """Parses an AIR. Rejects sources other than civitai and AIRs without a version."""
     match = AIR_PATTERN.fullmatch(text.strip())
     if match is None:
         raise SystemExit(
-            f"AIR として読めない: {text}"
-            "（想定: urn:air:<ecosystem>:<type>:civitai:<modelId>@<versionId>）"
+            f"Cannot be read as an AIR: {text}"
+            " (expected: urn:air:<ecosystem>:<type>:civitai:<modelId>@<versionId>)"
         )
     source = match["source"]
     if source != "civitai":
-        raise SystemExit(f"civitai 以外の source は扱わない: {source}（{text}）")
+        raise SystemExit(f"A source other than civitai is not supported: {source} ({text})")
     if match["version"] is None:
-        # 版が無いと「最新」を勝手に選ぶことになるが、上流は順序の付かない系統を同時に配る
-        # （ADR 0077）。どれを取り込むかは人が決める。
-        raise SystemExit(f"版まで指定する: {text}@<versionId>")
+        # Without a version we would pick "the latest" on our own, but upstream distributes lines
+        # with no order between them at the same time (ADR 0077). A person decides which to import.
+        raise SystemExit(f"Specify the version too: {text}@<versionId>")
     return Air(
         ecosystem=match["ecosystem"],
         type=match["type"],
@@ -125,94 +134,106 @@ def parse_air(text: str) -> Air:
 
 
 def parse_url(text: str) -> Target:
-    """モデルページの URL を読む（`?modelVersionId=` があれば版まで、無ければモデルだけ）。"""
+    """Parses a model page URL (the version with `?modelVersionId=`, else the model only)."""
     parts = urlsplit(text.strip())
     if parts.netloc.removeprefix("www.") != "civitai.com":
-        raise SystemExit(f"civitai.com の URL ではない: {text}")
+        raise SystemExit(f"Not a civitai.com URL: {text}")
     match = MODEL_PATH_PATTERN.fullmatch(parts.path)
     if match is None:
-        raise SystemExit(f"モデルページの URL として読めない: {text}（想定: /models/<modelId>）")
+        raise SystemExit(
+            f"Cannot be read as a model page URL: {text} (expected: /models/<modelId>)"
+        )
     values = parse_qs(parts.query).get("modelVersionId", [])
     if not values:
         return Target(model_id=int(match["model"]), version_id=None)
     if not values[0].isdigit():
-        raise SystemExit(f"modelVersionId が数値でない: {values[0]}（{text}）")
+        raise SystemExit(f"modelVersionId is not a number: {values[0]} ({text})")
     return Target(model_id=int(match["model"]), version_id=int(values[0]))
 
 
 def _slug(text: str) -> str:
-    """受理集合の外を `-` へ潰して均す（連続と両端の区切りは残さない）。"""
+    """Collapses characters outside the accepted set into `-` (no runs, no separators at ends)."""
     slug = re.sub(r"[^a-z0-9._-]+", "-", text.lower())
     return re.sub(r"-+", "-", slug).strip("-._")
 
 
 def _assert_name(name: str) -> str:
-    """配布名として通る綴りかを最後に確かめる（ADR 0077 の受理集合）。"""
+    """Finally checks the name is valid as a distribution name (the accepted set of ADR 0077)."""
     if MODEL_NAME_PATTERN.fullmatch(name) is None:
         raise SystemExit(
-            f"配布名に使えない文字がある: {name}（受理集合: A-Za-z0-9._- ・先頭のドット不可）"
+            f"The distribution name has characters that are not allowed: {name}"
+            " (accepted: A-Za-z0-9._-, no leading dot)"
         )
     if name == RESERVED_MODEL_NAME:
         raise SystemExit(
-            f"配布名に '{RESERVED_MODEL_NAME}' は使えない（共有ファイルの席と衝突する）"
+            f"'{RESERVED_MODEL_NAME}' cannot be a distribution name (it collides with the"
+            " shared-files directory)"
         )
     return name
 
 
 def derive_model_name(model_name: str, version_name: str) -> str:
-    """上流の名乗りから配布名を導く（`WAI-ANIMA` + `v1.0(base 1.0)` → `anima-wai-v1.0`）。
+    """Derives the distribution name from upstream's naming.
 
-    機械正規化は綴りを受理集合へ落とすだけで、版の名乗りを別書式へ揃えることはしない
-    （ADR 0088 — 日付名乗りと semver 風が混在するが、こちらで揃えると出所ページと突き
-    合わせられなくなる。逐語の名乗りは `civitai.json` が保持する）。落とすのは**丸括弧の
-    補足**（`(base 1.0)` は上流ページ上の但し書きで、版の識別には要らない）と、モデル名側の
-    ファミリ名だけ。
+    Example: `WAI-ANIMA` + `v1.0(base 1.0)` → `anima-wai-v1.0`.
+
+    The mechanical normalisation only folds the spelling into the accepted set; it does not bring
+    version names to a common format (ADR 0088 — date names and semver-like names are mixed, but
+    unifying them here would make them impossible to match against the origin page; the verbatim
+    names are kept in `civitai.json`). It drops only **the parenthesised remarks** (`(base 1.0)` is
+    a note on the upstream page and is not needed to identify the version) and the family name on
+    the model-name side.
     """
     version = _slug(re.sub(r"\([^)]*\)", "", version_name))
     tokens = [token for token in _slug(model_name).split("-") if token and token != FAMILY_TOKEN]
     model = "-".join(tokens)
     if not model or not version:
-        raise SystemExit(f"名前を導けない: モデル名 {model_name!r} / 版名 {version_name!r}")
+        raise SystemExit(
+            f"Cannot derive a name: model name {model_name!r} / version name {version_name!r}"
+        )
     return _assert_name(f"{FAMILY_TOKEN}-{model}-{version}")
 
 
 def _assert_basename(name: str) -> str:
-    """API が返したファイル名を取り込み先の 1 段下に閉じ込める（結合の直前で通す）。
+    """Confines the API's file name to one level below the destination (checked before joining).
 
-    MUST: 区切りを含む名前・`..`・絶対パスを受けない — `Path` の結合は `..` で親へ上がり、
-    絶対パスでは前段を丸ごと捨てるので、上流メタの異常がそのまま `civitai-<versionId>/` の
-    外への書き込みになる（来歴記録だけが取り込み先に残り、重みが外へ出る）。
+    MUST: reject names with separators, `..` and absolute paths — joining a `Path` climbs to the
+    parent on `..` and drops everything before it on an absolute path, so an anomaly in upstream
+    metadata would turn straight into a write outside `civitai-<versionId>/` (only the provenance
+    record would stay in the destination, and the weights would land outside).
 
-    `:` も落とす — Windows では `D:x.safetensors` がドライブ相対名で、区切りを 1 つも含まない
-    まま結合の前段を捨てる（`PureWindowsPath("C:/intake") / "D:x"` → `D:x`）。
+    `:` is rejected too — on Windows `D:x.safetensors` is a drive-relative name that drops the
+    joined prefix without containing a single separator (`PureWindowsPath("C:/intake") / "D:x"` →
+    `D:x`).
     """
     if not name or name in {".", ".."} or "/" in name or "\\" in name or ":" in name:
         raise SystemExit(
-            f"上流のファイル名が basename でない: {name!r}"
-            "（取り込み先の外を指しうる — 上流のメタを確かめる）"
+            f"The upstream file name is not a basename: {name!r}"
+            " (it could point outside the destination — check the upstream metadata)"
         )
     return name
 
 
 def _masked(url: str) -> str:
-    """表示用（トークンは残さない — 端末とログに撒かない）。"""
+    """For display (drops the token — do not spread it over the terminal and logs)."""
     return re.sub(r"([?&]token=)[^&]*", r"\1***", url)
 
 
-#: 送信する User-Agent。urllib 既定の `Python-urllib/…` は civitai 側が名指しで 403 に
-#: する（2026-09-01 実測 — 同じ URL が curl と本 UA では 200）。名乗りは出所が辿れる形に。
+#: The User-Agent sent. civitai explicitly answers urllib's default `Python-urllib/…` with 403
+#: (measured 2026-09-01 — the same URL gives 200 with curl and with this UA). The name lets the
+#: origin be traced.
 USER_AGENT = "karume-export-recipes/anima.civitai"
 
 
 def _open(url: str) -> Any:
-    """GET を張る。失敗は status と行き先を添えて止める（黙って空を返さない）。"""
+    """Issues a GET. A failure stops with the status and target (never returns empty silently)."""
     request = urllib.request.Request(url, headers={"Accept": "*/*", "User-Agent": USER_AGENT})
     try:
         return urllib.request.urlopen(request)
     except urllib.error.HTTPError as error:
         raise SystemExit(f"HTTP {error.code}: {_masked(url)}") from error
     except urllib.error.URLError as error:
-        raise SystemExit(f"到達できない: {_masked(url)}（{error.reason}）") from error
+        raise SystemExit(f"Unreachable: {_masked(url)} ({error.reason})") from error
 
 
 def _get_json(url: str) -> dict[str, Any]:
@@ -222,20 +243,21 @@ def _get_json(url: str) -> dict[str, Any]:
 
 
 def fetch_version(version_id: int) -> dict[str, Any]:
-    """版のメタ（air / files / hashes / usageControl / 版の説明）。"""
+    """Version metadata (air / files / hashes / usageControl / the version description)."""
     return _get_json(f"{API_ROOT}/model-versions/{version_id}")
 
 
 def fetch_model(model_id: int) -> dict[str, Any]:
-    """モデルのメタ（名前 / type / 許諾 4 欄 / 説明 / 版の一覧）。"""
+    """Model metadata (name / type / the 4 permission fields / description / version list)."""
     return _get_json(f"{API_ROOT}/models/{model_id}")
 
 
 def select_file(files: list[dict[str, Any]]) -> dict[str, Any]:
-    """本体 1 本を選ぶ。同梱の Text Encoder / VAE は取らない（base 側を共有するため）。
+    """Selects the one main file. A bundled Text Encoder / VAE is skipped (the base's is shared).
 
-    候補は `type == "Model"` に限る（ADR 0088 追記）— primary 真偽だけで採ると、上流が
-    VAE や Text Encoder を primary に立てた版でそちらを本体にしてしまう。
+    Candidates are limited to `type == "Model"` (ADR 0088 addendum) — choosing on the primary flag
+    alone would make the VAE or the Text Encoder the main file in a version where upstream marked
+    one of them primary.
     """
     models = [entry for entry in files if entry.get("type") == "Model"]
     primary = [entry for entry in models if entry.get("primary")]
@@ -244,24 +266,25 @@ def select_file(files: list[dict[str, Any]]) -> dict[str, Any]:
     if not primary and len(models) == 1:
         return models[0]
     listing = [(entry.get("name"), entry.get("type")) for entry in files]
-    raise SystemExit(f"本体のファイルを特定できない: {listing}")
+    raise SystemExit(f"Cannot identify the main file: {listing}")
 
 
 def _require_token() -> str:
     token = os.environ.get(TOKEN_ENV, "").strip()
     if not token:
         raise SystemExit(
-            f"DL には civitai の API トークンが要る — env {TOKEN_ENV} に設定する"
-            "（https://civitai.com/user/account の API Keys）"
+            f"Downloading needs a civitai API token — set it in env {TOKEN_ENV}"
+            " (API Keys at https://civitai.com/user/account)"
         )
     return token
 
 
 def _with_token(url: str, token: str) -> str:
-    """トークンは**クエリで**渡す。
+    """The token is passed **in the query**.
 
-    MUST: `Authorization` ヘッダにしない — DL の口は S3 の署名 URL へ 307 で飛び、リダイレクト
-    先へヘッダが持ち越されると署名と衝突して 400 で落ちうる。クエリなら civitai 側で解決される。
+    MUST: not as an `Authorization` header — the download endpoint redirects with 307 to a signed
+    S3 URL, and a header carried over to the redirect target can collide with the signature and
+    fail with 400. In the query, civitai resolves it on its side.
     """
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}token={token}"
@@ -276,20 +299,22 @@ def _sha256(path: Path) -> str:
 
 
 def download(url: str, dest: Path, expected_sha256: str) -> None:
-    """本体を取って据える。既に同じ sha で在れば何もしない（再実行安全）。
+    """Downloads the main file into place. A no-op if it exists with the same sha (safe to re-run).
 
-    書くのは `<dest>.part` で、**sha が API の値と合ってから** rename する — 途中で切れた
-    ファイルが完成品の名前で残ると、次の実行がそれを「取得済み」と読んでしまう。
+    It writes `<dest>.part` and renames it **only after the sha matches the API's value** — a file
+    cut off halfway that stayed under the finished name would be read as "already fetched" by the
+    next run.
     """
     expected = expected_sha256.casefold()
     if dest.exists():
         actual = _sha256(dest)
         if actual == expected:
-            print(f"[civitai] 取得済み（sha256 一致）: {dest}", flush=True)
+            print(f"[civitai] already fetched (sha256 matches): {dest}", flush=True)
             return
         raise SystemExit(
-            f"同名で別物が置かれている: {dest} — API {expected} / 実測 {actual}"
-            "（上流が差し替えたか手置きの別ファイル。確かめてから消す）"
+            f"A different file is in place under the same name: {dest} — API {expected} /"
+            f" measured {actual}"
+            " (upstream replaced it, or another file was put there by hand; check before deleting)"
         )
 
     token = _require_token()
@@ -311,20 +336,24 @@ def download(url: str, dest: Path, expected_sha256: str) -> None:
     actual = digest.hexdigest()
     if actual != expected:
         raise SystemExit(
-            f"sha256 が API の値と違う: API {expected} / 実測 {actual}"
-            f"（{part} は残す — 中身を確かめてから消す）"
+            f"sha256 differs from the API's value: API {expected} / measured {actual}"
+            f" ({part} is kept — check its contents before deleting)"
         )
     part.rename(dest)
-    print(f"[civitai] {dest}（{written // MIB} MiB・sha256 一致）", flush=True)
+    print(f"[civitai] {dest} ({written // MIB} MiB, sha256 matches)", flush=True)
 
 
 def _resolve_air(version: dict[str, Any], requested: Air | None) -> str | None:
-    """API が発行した AIR を採る（自前組み立てと食い違えば、その旨を出してから API 側）。"""
+    """Takes the AIR the API issued (on a mismatch with the local URN, warns and uses the API's)."""
     served = version.get("air")
     if served is None:
         return requested.urn if requested is not None else None
     if requested is not None and served != requested.urn:
-        print(f"[civitai] 警告: AIR が指定と違う — 指定 {requested.urn} / API {served}", flush=True)
+        print(
+            f"[civitai] warning: the AIR differs from the requested one — requested"
+            f" {requested.urn} / API {served}",
+            flush=True,
+        )
     return str(served)
 
 
@@ -335,7 +364,7 @@ def build_record(
     derived_name: str,
     air: str | None,
 ) -> dict[str, Any]:
-    """`civitai.json` の中身（許諾は**判定せず**そのまま写す）。"""
+    """The contents of `civitai.json` (the permissions are copied as they are, **not judged**)."""
     return {
         "air": air,
         "model_id": model["id"],
@@ -366,16 +395,16 @@ def build_record(
 
 
 def print_versions(model_id: int) -> None:
-    """版を選び直すための一覧（版未指定の URL で来たときの案内モード — DL はしない）。"""
+    """The list for choosing a version (guide mode for a URL without a version — no download)."""
     model = fetch_model(model_id)
-    print(f"[civitai] {model['name']}（{model.get('type')}）の版:", flush=True)
+    print(f"[civitai] versions of {model['name']} ({model.get('type')}):", flush=True)
     for version in model.get("modelVersions", []):
         files = version.get("files", [])
         primary = next((entry.get("name") for entry in files if entry.get("primary")), "-")
         print(f"  {version['id']}  {version['name']}  {primary}", flush=True)
     print(
-        f"[civitai] 版を選んで指定し直す: --url '…/models/{model_id}?modelVersionId=<id>'"
-        " か --air 'urn:air:…@<id>'",
+        f"[civitai] pick a version and run again: --url '…/models/{model_id}?modelVersionId=<id>'"
+        " or --air 'urn:air:…@<id>'",
         flush=True,
     )
 
@@ -387,14 +416,16 @@ def fetch_checkpoint(
     name: str | None = None,
     requested_air: Air | None = None,
 ) -> Path:
-    """版 1 つを `<out>/civitai-<versionId>/` へ取り込み、置いた本体の path を返す。"""
+    """Imports one version into `<out>/civitai-<versionId>/`; returns the path of the main file."""
     version = fetch_version(version_id)
     served_model_id = int(version["modelId"])
     if served_model_id != model_id:
-        # URL の `/models/<id>` は版と食い違いうる（別モデルの版 id を貼った URL）。版が持つ
-        # `modelId` が正 — 許諾欄を取りに行く先を間違えない。
+        # The URL's `/models/<id>` can disagree with the version (a URL with another model's
+        # version id pasted in). The version's `modelId` is authoritative — so the permission
+        # fields are fetched from the right place.
         print(
-            f"[civitai] 警告: modelId が指定と違う — 指定 {model_id} / API {served_model_id}",
+            f"[civitai] warning: the modelId differs from the requested one — requested"
+            f" {model_id} / API {served_model_id}",
             flush=True,
         )
     model = fetch_model(served_model_id)
@@ -404,14 +435,15 @@ def fetch_checkpoint(
     others = [entry for entry in version.get("files", []) if entry is not file]
     if others:
         listing = ", ".join(f"{entry.get('name')}（{entry.get('type')}）" for entry in others)
-        print(f"[civitai] 取得しない同梱ファイル: {listing}", flush=True)
+        print(f"[civitai] bundled files not fetched: {listing}", flush=True)
     hashes = file.get("hashes", {})
     if "SHA256" not in hashes:
-        raise SystemExit(f"API が sha256 を持たない: {file.get('name')}（突合できない）")
+        raise SystemExit(f"The API has no sha256: {file.get('name')} (cannot verify)")
 
-    # 取り込み先の 1 段目も上流の値 — 整数化しないと、逸脱した id がそのまま `out` の外を指す
-    # path 要素になる（`mkdir(parents=True)` は親も作るので重みごと外へ出る）。上の modelId と
-    # 同じく非整数は fail loudly。
+    # The first level of the destination is an upstream value too — without the int conversion a
+    # deviant id becomes a path element pointing outside `out` (`mkdir(parents=True)` creates the
+    # parents too, so the weights go out with it). As with modelId above, a non-integer fails
+    # loudly.
     destination = out / f"civitai-{int(version['id'])}"
     destination.mkdir(parents=True, exist_ok=True)
     checkpoint = destination / _assert_basename(file["name"])
@@ -423,7 +455,7 @@ def fetch_checkpoint(
     )
     print(f"[civitai] {destination / PROVENANCE_FILE}", flush=True)
     print(
-        "[civitai] 次: uv run --group anima python -m anima.single_file "
+        "[civitai] next: uv run --group anima python -m anima.single_file "
         f"--checkpoint {checkpoint} --out ../../outputs/misc/anima-diffusers/{derived_name}",
         flush=True,
     )
@@ -434,9 +466,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--air", help="urn:air:<ecosystem>:<type>:civitai:<modelId>@<versionId>")
-    source.add_argument("--url", help="モデルページの URL（版は ?modelVersionId=<id>）")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="取り込み先の親")
-    parser.add_argument("--name", help="配布名の上書き（既定は上流の名乗りから導く）")
+    source.add_argument("--url", help="model page URL (the version is ?modelVersionId=<id>)")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="parent of the destination")
+    parser.add_argument(
+        "--name", help="override the distribution name (derived from upstream's naming by default)"
+    )
     args = parser.parse_args()
 
     if args.air:

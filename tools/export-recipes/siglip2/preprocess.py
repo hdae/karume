@@ -1,65 +1,71 @@
-r"""SigLIP2 の画像前処理（resize → rescale → normalize）の**パリティ用フィクスチャ**。
+r"""**Parity fixture** for SigLIP2's image preprocessing (resize → rescale → normalize).
 
-`siglip2/export.py` が**グラフ**を出すのに対し、こちらが扱うのはグラフの手前
-（生の RGB8 画素 → 正規化済み `pixel_values`）だけ。モデルの重みにも触らない
-（読むのは `preprocessor_config.json` だけ）。`irodori/tokenizer_ref.py` と同じ役割の台本を、
-テキストではなく画像で持つ。
+Where `siglip2/export.py` emits the **graph**, this script deals only with what comes before it
+(raw RGB8 pixels → normalized `pixel_values`). It does not touch the model weights either (it
+reads only `preprocessor_config.json`). It is the image counterpart of `irodori/tokenizer_ref.py`,
+which plays the same role for text.
 
     cd tools/export-recipes
     uv run --group siglip2-preprocess python -m siglip2.preprocess
 
-出力は 1 本（**git 管理**・`.gitignore` の外）:
+There is one output (**tracked by git**, outside `.gitignore`):
 
     packages/models/tests/fixtures/image-preprocess/parity.json
 
-生成後は `deno fmt packages/models/tests/fixtures/image-preprocess/parity.json` を掛ける
-（commit 形はフォーマッタが正 — `deno task verify` の `fmt --check` が fixtures も見る）。
+After generating it, run `deno fmt packages/models/tests/fixtures/image-preprocess/parity.json`
+(the formatter decides the committed form — `fmt --check` in `deno task verify` covers the fixtures
+too).
 
-## 正本は何か
+## What the source of truth is
 
-`AutoImageProcessor.from_pretrained(<siglip2 の重み>)` が返す実体、つまり transformers
-5.14.1 の **`SiglipImageProcessor`（`TorchvisionBackend`）**。v5 の既定は fast 側なので、
-利用者が素直に書いたコードが通るのはこちらで、PIL 側（`SiglipImageProcessorPil`）ではない。
+The object that `AutoImageProcessor.from_pretrained(<siglip2 weights>)` returns, that is, the
+**`SiglipImageProcessor` (`TorchvisionBackend`)** of transformers 5.14.1. The v5 default is the fast
+side, so this is what straightforward user code goes through, not the PIL side
+(`SiglipImageProcessorPil`).
 
-MUST: `preprocessor_config.json` の `"resample": 2` は **PIL の定数で BILINEAR**
-（`PIL.Image.Resampling`: NEAREST=0 / LANCZOS=1 / **BILINEAR=2** / BICUBIC=3 / BOX=4 /
-HAMMING=5）。クラス属性の既定が `PILImageResampling.BICUBIC` なので「SigLIP は bicubic」と
-読み違えやすいが、**チェックポイントの config が既定を上書きしている**。実測でも bicubic を
-当てると最大 47/255 ずれる。{@link check_processor_shape} が毎回この 2 を実測する。
+MUST: `"resample": 2` in `preprocessor_config.json` is **BILINEAR as a PIL constant**
+(`PIL.Image.Resampling`: NEAREST=0 / LANCZOS=1 / **BILINEAR=2** / BICUBIC=3 / BOX=4 /
+HAMMING=5). The class attribute defaults to `PILImageResampling.BICUBIC`, which makes "SigLIP is
+bicubic" an easy misreading, but **the checkpoint's config overrides the default**. Measured,
+applying bicubic is off by up to 47/255. {@link check_processor_shape} checks this 2 on every run.
 
-resize は `torchvision.transforms.v2.functional.resize(..., antialias=True)`。この
-antialias 経路は Pillow の `ImagingResample` と同じ「support を縮尺で伸ばす分離型
-リサンプリング」で、
+resize is `torchvision.transforms.v2.functional.resize(..., antialias=True)`. This antialias path
+is the same "separable resampling that stretches the support by the scale" as Pillow's
+`ImagingResample`:
 
-    scale       = 入力長 / 出力長
+    scale       = input length / output length
     filterScale = max(scale, 1)
-    support     = 1 * filterScale                    # 三角フィルタの台の半径は 1
+    support     = 1 * filterScale                    # the triangle filter's support radius is 1
     center      = (i + 0.5) * scale
     start       = max(0, floor(center - support + 0.5))
-    stop        = min(入力長, floor(center + support + 0.5))
-    w[j]        = triangle((start + j - center + 0.5) / filterScale)  # Σw = 1 に正規化
+    stop        = min(input length, floor(center + support + 0.5))
+    w[j]        = triangle((start + j - center + 0.5) / filterScale)  # normalized to Σw = 1
 
-を横 → 縦の順に掛け、**各パスの結果を uint8 へ丸め直す**（PIL / torchvision の uint8 経路が
-中間バッファを uint8 で持つため）。TS 側 `packages/models/src/image/preprocess.ts` はこの形を
-f64 で書き下したもの。積算精度の違い（参照は f32）で丸め境界の標本だけが 1 LSB ずれるので、
-TS 側の門は完全一致ではなく幅を持つ — 導出は
-`packages/models/tests/image_preprocess_test.ts` 冒頭。
+applied horizontally, then vertically, **rounding each pass's result back to uint8** (because the
+uint8 paths of PIL / torchvision keep the intermediate buffer in uint8). The TS-side
+`packages/models/src/image/preprocess.ts` writes this form out in f64. The difference in
+accumulation precision (the reference uses f32) shifts only the samples at rounding boundaries by
+1 LSB, so the TS-side check has a tolerance rather than requiring an exact match — the derivation is
+at the top of `packages/models/tests/image_preprocess_test.ts`.
 
-rescale と normalize は `TorchvisionBackend._fuse_mean_std_and_rescale_factor` が畳んだ形
-（`mean * (1/rescale_factor)` と `std * (1/rescale_factor)` を作って `(x - mean) / std` を
-1 回だけ掛ける）。`1 / 0.00392156862745098` は f64 でちょうど 255.0 になる（実測）。
+rescale and normalize are in the form folded by
+`TorchvisionBackend._fuse_mean_std_and_rescale_factor` (it builds `mean * (1/rescale_factor)` and
+`std * (1/rescale_factor)` and applies `(x - mean) / std` once). `1 / 0.00392156862745098` is
+exactly 255.0 in f64 (measured).
 
-## 何を門にするか
+## What is checked
 
-emit の前に全て実測し、1 つでも外れたら**何も書かない**（fail loudly）:
+Everything is measured before the emit, and if even one check fails **nothing is written** (fail
+loudly):
 
-- image processor の実体が `TorchvisionBackend` であること（PIL 側に落ちていない）
-- `resample` / `image_mean` / `image_std` / `rescale_factor` / `do_*` が期待どおりで、
-  center crop も pad も**入っていない**こと
-- `inputs/siglip2/` 配下の全チェックポイントで、`size` 以外の前処理定数が**同一**であること
-  （この前処理層は 224 と 384 の両方に効く、という主張の中身）
-- 保存する中間 `resized` が**実経路そのもの**であること — `resized` を融合正規化に通した
-  結果が、フルパイプラインの `pixel_values` と**ビット同一**であること
+- the image processor is a `TorchvisionBackend` (it has not dropped to the PIL side)
+- `resample` / `image_mean` / `image_std` / `rescale_factor` / `do_*` are as expected, and
+  **neither** center crop nor pad is enabled
+- the preprocessing constants other than `size` are **identical** across all checkpoints under
+  `inputs/siglip2/` (the substance of the claim that this preprocessing layer serves both 224 and
+  384)
+- the stored intermediate `resized` is **the real path itself** — passing `resized` through the
+  fused normalization gives a result **bit-identical** to the full pipeline's `pixel_values`
 """
 
 from __future__ import annotations
@@ -77,21 +83,22 @@ from _shared.paths import REPO_ROOT
 
 from .export import DEFAULT_MODEL_DIR, MODELS_ROOT
 
-#: パリティ用フィクスチャ（**git 管理**）。Deno 側
-#: `packages/models/tests/image_preprocess_test.ts` が読む。
+#: Parity fixture (**tracked by git**). Read on the Deno side by
+#: `packages/models/tests/image_preprocess_test.ts`.
 DEFAULT_FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "image-preprocess" / "parity.json"
 )
 
-#: `preprocessor_config.json` の `"resample"`。**PIL の定数で BILINEAR**（モジュール docstring）。
+#: `"resample"` of `preprocessor_config.json`. **BILINEAR as a PIL constant** (module docstring).
 EXPECTED_RESAMPLE = 2
 
-#: 前処理定数の期待値（2 チェックポイントとも同じ — {@link check_sibling_configs} が実測）。
+#: Expected preprocessing constants (the same for both checkpoints — measured by
+#: {@link check_sibling_configs}).
 EXPECTED_MEAN = (0.5, 0.5, 0.5)
 EXPECTED_STD = (0.5, 0.5, 0.5)
 EXPECTED_RESCALE = 1.0 / 255.0
 
-#: `size` 以外は全チェックポイントで一致することを要求する欄。
+#: Fields required to match across all checkpoints (everything except `size`).
 SHARED_CONFIG_KEYS = (
     "do_normalize",
     "do_rescale",
@@ -103,17 +110,19 @@ SHARED_CONFIG_KEYS = (
     "resample",
 )
 
-#: 合成画像の乱数種（ケース順に 1 本の系列から引く — 順序を変えると全ケースの画素が変わる）。
+#: Random seed of the synthetic images (drawn from one stream in case order — reordering the cases
+#: changes the pixels of every case).
 SEED = 20260813
 
 
 def _noise(rng: np.random.Generator, height: int, width: int) -> np.ndarray:
-    """一様乱数の RGB8（高周波 — 丸めの衝突が最も出る形）。"""
+    """Uniformly random RGB8 (high frequency — the form where rounding collisions show most)."""
     return rng.integers(0, 256, size=(height, width, 3), dtype=np.uint8)
 
 
 def _smooth(height: int, width: int) -> np.ndarray:
-    """写真に近い連続階調の RGB8（低周波 — 縮小で平均が効く形）。"""
+    """Photo-like continuous-tone RGB8 (low frequency — the form where averaging takes effect on
+    downscaling)."""
     yy, xx = np.mgrid[0:height, 0:width]
     red = 127.0 + 120.0 * np.sin(xx / 3.7 + yy / 5.1)
     green = 127.0 + 120.0 * np.cos(yy / 2.9)
@@ -122,13 +131,14 @@ def _smooth(height: int, width: int) -> np.ndarray:
 
 
 def build_cases() -> tuple[dict[str, Any], ...]:
-    """フィクスチャのケース `(名前, 理由, 画像, 出力寸法)`。
+    """The fixture's cases `(name, reason, image, output size)`.
 
-    網羅ではなく「素朴な移植が落ちる境界」を 1 件ずつ置く設計（`irodori/tokenizer_ref.py` の
-    `ENCODE_CASES` と同じ規律）。寸法を実運用の 224 / 384 まで上げないのは、1 ケースだけで
-    f32 が 150,528 本になりフィクスチャが git に載らないため — resize は寸法に対して一様な
-    コードで、境界の場合分けは**縮尺**（`scale >= 1` かどうか）と**端の切り詰め**にしか無い
-    ので、小さい寸法でも同じ経路を通る。
+    Designed not for exhaustiveness but to place one case per "boundary where a naive port fails"
+    (the same discipline as `ENCODE_CASES` in `irodori/tokenizer_ref.py`). The dimensions are not
+    raised to the production 224 / 384 because a single case would then be 150,528 f32 values and
+    the fixture would not fit in git — resize is code that is uniform in the dimensions, and its
+    only boundary cases are the **scale** (whether `scale >= 1`) and **clipping at the edges**, so
+    small dimensions go through the same paths.
     """
     rng = np.random.default_rng(SEED)
     return (
@@ -178,37 +188,38 @@ def build_cases() -> tuple[dict[str, Any], ...]:
 
 
 def load_processor(model_dir: Path) -> Any:
-    """`AutoImageProcessor` の実体を読む（利用者が素直に書いたときと同じ経路）。"""
+    """Load the `AutoImageProcessor` object (the same path as straightforward user code)."""
     from transformers import AutoImageProcessor
 
     return AutoImageProcessor.from_pretrained(model_dir)
 
 
 def check_processor_shape(processor: Any) -> dict[str, Any]:
-    """image processor が期待どおりの実体・定数であることを実測する（外れたら止める）。"""
+    """Check that the image processor has the expected type and constants (stop if not)."""
     from transformers.image_processing_backends import TorchvisionBackend
 
     if not isinstance(processor, TorchvisionBackend):
         raise SystemExit(
-            f"image processor が TorchvisionBackend でない: {type(processor).__mro__}"
-            "（transformers 5.x の既定は fast 側 — PIL 側に落ちていると resize の実装が変わる）"
+            f"the image processor is not a TorchvisionBackend: {type(processor).__mro__}"
+            " (the transformers 5.x default is the fast side — on the PIL side the resize"
+            " implementation differs)"
         )
     if int(processor.resample) != EXPECTED_RESAMPLE:
         raise SystemExit(
-            f"resample が {int(processor.resample)}（期待 {EXPECTED_RESAMPLE} = PIL BILINEAR）"
+            f"resample is {int(processor.resample)} (expected {EXPECTED_RESAMPLE} = PIL BILINEAR)"
         )
     if tuple(processor.image_mean) != EXPECTED_MEAN or tuple(processor.image_std) != EXPECTED_STD:
-        raise SystemExit(f"mean/std が {processor.image_mean} / {processor.image_std}")
+        raise SystemExit(f"mean/std is {processor.image_mean} / {processor.image_std}")
     if processor.rescale_factor != EXPECTED_RESCALE:
-        raise SystemExit(f"rescale_factor が {processor.rescale_factor}")
+        raise SystemExit(f"rescale_factor is {processor.rescale_factor}")
     if 1.0 / processor.rescale_factor != 255.0:
-        raise SystemExit(f"1/rescale_factor が {1.0 / processor.rescale_factor}（255.0 でない）")
+        raise SystemExit(f"1/rescale_factor is {1.0 / processor.rescale_factor} (not 255.0)")
     for flag in ("do_resize", "do_rescale", "do_normalize"):
         if not getattr(processor, flag):
-            raise SystemExit(f"{flag} が False（前処理の 3 段が揃っていない）")
+            raise SystemExit(f"{flag} is False (the 3 preprocessing stages are incomplete)")
     for flag in ("do_center_crop", "do_pad"):
         if getattr(processor, flag, False):
-            raise SystemExit(f"{flag} が True（この層は crop も pad も持たない）")
+            raise SystemExit(f"{flag} is True (this layer has neither crop nor pad)")
     return {
         "class": type(processor).__name__,
         "backend": "TorchvisionBackend",
@@ -217,23 +228,25 @@ def check_processor_shape(processor: Any) -> dict[str, Any]:
 
 
 def check_sibling_configs(models_root: Path) -> dict[str, Any]:
-    """`inputs/siglip2/` 配下の全チェックポイントで `size` 以外が同一であることを実測する。
+    """Check that everything except `size` is identical across all checkpoints under
+    `inputs/siglip2/`.
 
-    この前処理層は base（224）と so400m（384）の両方に効く、という主張の中身。寸法だけが
-    違うことを毎回実測しておかないと、片方の定数が変わったときに黙って片側だけ正しくなる。
+    This is the substance of the claim that this preprocessing layer serves both base (224) and
+    so400m (384). Unless it is measured on every run that only the dimensions differ, a change to
+    one checkpoint's constants would silently leave only one side correct.
     """
     found: dict[str, dict[str, Any]] = {}
     for path in sorted(models_root.glob("*/preprocessor_config.json")):
         found[path.parent.name] = json.loads(path.read_text(encoding="utf-8"))
     if not found:
-        raise SystemExit(f"preprocessor_config.json が 1 つも無い: {models_root}")
+        raise SystemExit(f"no preprocessor_config.json found: {models_root}")
     names = sorted(found)
     base = found[names[0]]
     for name in names[1:]:
         for key in SHARED_CONFIG_KEYS:
             if found[name].get(key) != base.get(key):
                 raise SystemExit(
-                    f"{name} の '{key}' が {names[0]} と違う: "
+                    f"{name}: '{key}' differs from {names[0]}: "
                     f"{found[name].get(key)!r} != {base.get(key)!r}"
                 )
     return {name: found[name]["size"] for name in names}
@@ -242,11 +255,11 @@ def check_sibling_configs(models_root: Path) -> dict[str, Any]:
 def reference(
     processor: Any, image: np.ndarray, out_height: int, out_width: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """1 ケースの `(resize 後の RGB8, pixel_values f32 [3,H,W])` を正本から採る。
+    """Take one case's `(RGB8 after resize, pixel_values f32 [3,H,W])` from the source of truth.
 
-    MUST: `resized` は**実経路そのもの**でなければならない — 別に呼んだ resize が
-    フルパイプラインの中間と違えば、TS 側は「どこにも無い中間」に合わせてしまう。
-    融合正規化を通してビット同一であることをここで実測する。
+    MUST: `resized` must be **the real path itself** — if a separately called resize differed from
+    the full pipeline's intermediate, the TS side would match "an intermediate that exists nowhere".
+    This checks that it is bit-identical after the fused normalization.
     """
     from transformers.image_utils import SizeDict
 
@@ -254,7 +267,7 @@ def reference(
     tensor = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1)[None]
     resized = processor.resize(image=tensor, size=size, resample=processor.resample)
     if resized.dtype != torch.uint8:
-        raise SystemExit(f"resize の出力が {resized.dtype}（uint8 でない）")
+        raise SystemExit(f"the resize output is {resized.dtype} (not uint8)")
 
     pixel_values = processor(
         images=image,
@@ -269,14 +282,14 @@ def reference(
     fused = (resized.to(dtype=torch.float32) - mean) / std
     if not torch.equal(fused, pixel_values):
         raise SystemExit(
-            "resize 単体の結果を融合正規化に通した値が pixel_values と一致しない"
-            f"（最大差 {(fused - pixel_values).abs().max().item():.6g}）"
+            "the result of resize alone passed through the fused normalization does not match"
+            f" pixel_values (max difference {(fused - pixel_values).abs().max().item():.6g})"
         )
     return resized[0].permute(1, 2, 0).numpy(), pixel_values[0].numpy()
 
 
 def build_fixture(processor: Any, models_root: Path) -> dict[str, Any]:
-    """フィクスチャ本体を組む（全ケースを正本に通してから返す）。"""
+    """Build the fixture body (returns after passing every case through the source of truth)."""
     cases: list[dict[str, Any]] = []
     for case in build_cases():
         image: np.ndarray = case["image"]
@@ -323,7 +336,7 @@ def build_fixture(processor: Any, models_root: Path) -> dict[str, Any]:
 
 
 def emit(model_dir: Path, models_root: Path, fixture_path: Path) -> dict[str, Any]:
-    """フィクスチャを書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
+    """Write the fixture and return a summary (if a check fails, not a single byte is written)."""
     processor = load_processor(model_dir)
     shape = check_processor_shape(processor)
     fixture = build_fixture(processor, models_root)

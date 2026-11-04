@@ -1,35 +1,38 @@
-"""`nn.GRU` を `karume::gru_scan` の並びへ割る patch 層（ADR 0056 決定 7）。
+"""Patch layer that splits `nn.GRU` into a sequence of `karume::gru_scan` (ADR 0056 decision 7).
 
-`aten.gru.input` の分解は Python ループで**時間方向へ完全展開**されるので、`torch.export` が
-長さ軸を specialize する（`Specializations unexpectedly required (T)`）。差し替え先の
-`karume::gru_scan{,_reverse}` は本体が `register_fake` の裏に隠れるため T を記号のまま通す
-（`karume/custom_ops.py`）。
+The decomposition of `aten.gru.input` is **fully unrolled along time** by a Python loop, so
+`torch.export` specializes the length axis (`Specializations unexpectedly required (T)`). The
+replacement `karume::gru_scan{,_reverse}` hides its body behind `register_fake` and so passes T
+through as a symbol (`karume/custom_ops.py`).
 
-## 割り方 — 多層 / 双方向は**ノードを並べて**表す
+## How it is split — multiple layers / both directions are expressed **as a sequence of nodes**
 
-IR の可変アリティ op は `cat` だけで、`gru_scan` はアリティ 4 固定（ADR 0056 決定 1）なので、
-`aten.gru` の `Tensor[16]`（層 × 方向 × 4 本の重み）は構造的に載らない。したがって層と方向は
-グラフの構造で表す:
+The only variable-arity op in the IR is `cat`, and `gru_scan` has a fixed arity of 4 (ADR 0056
+decision 1), so the `Tensor[16]` of `aten.gru` (layer × direction × 4 weights) does not fit
+structurally. Layers and directions are therefore expressed by the structure of the graph:
 
-    層 k: gi = linear(x, W_ih_k, b_ih_k)         ← 入力側 GEMM は既存 `linear`（時間一括 1 本）
-          y_fwd = gru_scan(gi, h0, W_hh_k, b_hh_k)
-          y_rev = gru_scan_reverse(gi_rev, h0, W_hh_k_rev, b_hh_k_rev)
-          x     = cat([y_fwd, y_rev], dim=2)     ← 次の層の入力
+    layer k: gi    = linear(x, W_ih_k, b_ih_k)     ← input GEMM: plain `linear`, one call for all t
+             y_fwd = gru_scan(gi, h0, W_hh_k, b_hh_k)
+             y_rev = gru_scan_reverse(gi_rev, h0, W_hh_k_rev, b_hh_k_rev)
+             x     = cat([y_fwd, y_rev], dim=2)    ← input of the next layer
 
-**この分割は `nn.GRU` と `torch.equal` でビット一致する**（`vowel_detector/tests/test_patch.py`
-が実測で固定）。一致の根拠は torch の GRU 分解の構造をそのまま写していること:
+**This split is bit-identical to `nn.GRU` under `torch.equal`**
+(`vowel_detector/tests/test_patch.py` pins it by measurement). It matches because it copies the
+structure of torch's GRU decomposition as is:
 
-- 入力側 linear は**時間一括 1 本**（`[T,N,3H]` を作ってから t ごとに切る）で、隠れ側だけが
-  毎ステップ。したがって入力側を素の `linear` へ出しても丸め列は変わらない。
-- 逆方向は**走査順だけ**が逆で、書き出しは順方向の時間添字（`flip` は記号軸を拒否するので
-  出力側の反転は op の中へ畳んである）。
-- ゲートの式と更新式は `karume/custom_ops.py` の本体が持つ（`(h − n)·z + n`）。
+- The input-side linear is **one call over all time** (it builds `[T,N,3H]` and then slices it per
+  t), and only the hidden side runs per step. Emitting the input side as a plain `linear` therefore
+  leaves the rounding sequence unchanged.
+- The reverse direction reverses **only the scan order**; it writes at the forward time index
+  (`flip` rejects symbolic axes, so the output-side reversal is folded into the op).
+- The gate and update equations are held by the body in `karume/custom_ops.py` (`(h − n)·z + n`).
 
-## 対応する `nn.GRU` の形
+## Supported `nn.GRU` shapes
 
-母音認識 CRNN が持つ形（batch_first・双方向・bias あり・dropout なし）だけを受ける。
-欄を増やさないのは ADR 0023 決定 4 の規律で、**対応外は fail loudly**（黙って別の経路を
-選ぶと「グラフは焼けるが数値が別物」が沈黙で出る）。
+Only the shape the vowel-recognition CRNN has (batch_first, bidirectional, with bias, no dropout)
+is accepted. Not adding fields follows the discipline of ADR 0023 decision 4, and **anything
+unsupported fails loudly** (silently choosing another path would produce, without a sound, "the
+graph bakes but the numbers are something else").
 """
 
 from __future__ import annotations
@@ -37,12 +40,12 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-# NOTE: import は `karume::` 名前空間への**登録の副作用**も兼ねる（`torch.ops.karume` は
-# 登録済みでなければ引けない）。
-from karume import custom_ops  # noqa: F401  — torch.ops.karume の登録
+# NOTE: the import also serves the **side effect of registering** the `karume::` namespace
+# (`torch.ops.karume` cannot be looked up unless it is registered).
+from karume import custom_ops  # noqa: F401  — registers torch.ops.karume
 
-#: 方向ごとの (`state_dict` の接尾辞, 走査する op)。並びは `cat` の並び順そのもので、
-#: `nn.GRU` の出力レイアウト（前半が順方向・後半が逆方向）と一致していなければならない。
+#: Per direction, (`state_dict` suffix, scan op). The order is the order of `cat` itself and must
+#: match the output layout of `nn.GRU` (forward direction first, reverse direction second).
 _DIRECTIONS = (
     ("", torch.ops.karume.gru_scan),
     ("_reverse", torch.ops.karume.gru_scan_reverse),
@@ -50,37 +53,48 @@ _DIRECTIONS = (
 
 
 def assert_supported(gru: nn.GRU) -> None:
-    """差し替えが**同値**になる形かを見る（対応外は fail loudly）。
+    """Check that the replacement is **equivalent** for this shape (unsupported fails loudly).
 
-    見ているのはどれも「通してしまうと値が静かに変わる」軸:
-    `batch_first=False` は時間軸と batch 軸の取り違え、`bidirectional=False` は逆方向ぶんの
-    `cat` が余る形、`bias=False` は `b_ih` / `b_hh` が存在しない形（`gru_scan` の契約は
-    bias 必須 — ADR 0056 決定 6）、`dropout` は推論では無効でも学習時と式が違う宣言。
+    Every axis checked here is one where letting it through would change values silently:
+    `batch_first=False` swaps the time and batch axes, `bidirectional=False` leaves the reverse
+    half of `cat` over, `bias=False` has no `b_ih` / `b_hh` (the `gru_scan` contract requires bias
+    — ADR 0056 decision 6), and `dropout` declares a different equation at training time even if
+    it is a no-op at inference.
     """
     if not isinstance(gru, nn.GRU):
-        raise TypeError(f"nn.GRU でない（{type(gru).__name__}）")
+        raise TypeError(f"not an nn.GRU ({type(gru).__name__})")
     if not gru.batch_first:
-        raise ValueError("batch_first=False は差し替え版が持たない経路（時間軸の位置が違う）")
+        raise ValueError(
+            "batch_first=False is a path the replacement does not have (the time axis is elsewhere)"
+        )
     if not gru.bidirectional:
-        raise ValueError("bidirectional=False は差し替え版が持たない経路（実測に出た形は双方向）")
+        raise ValueError(
+            "bidirectional=False is a path the replacement does not have"
+            " (the shape seen in practice is bidirectional)"
+        )
     if not gru.bias:
-        raise ValueError("bias=False は差し替え版が持たない経路（gru_scan の契約は bias 必須）")
+        raise ValueError(
+            "bias=False is a path the replacement does not have"
+            " (the gru_scan contract requires bias)"
+        )
     if gru.dropout != 0:
-        raise ValueError(f"dropout={gru.dropout} は差し替え版が持たない経路")
+        raise ValueError(f"dropout={gru.dropout} is a path the replacement does not have")
 
 
 def gru_forward(gru: nn.GRU, x: torch.Tensor) -> torch.Tensor:
-    """`nn.GRU.forward` の**出力 `y` だけ**を `gru_scan` の並びで組む。
+    """Build **only the output `y`** of `nn.GRU.forward` from a sequence of `gru_scan`.
 
-    `[N, T, input_size]` → `[N, T, 2·hidden_size]`（batch_first の入出力そのもの）。
+    `[N, T, input_size]` → `[N, T, 2·hidden_size]` (the batch_first input and output as they are).
 
-    MUST: `h_n` を返さない — `gru_scan` の契約は出力 1 本（全ステップの `h`）で、最終状態を
-    持ち帰らない（ADR 0056 決定 1・決定 7）。呼び手が `h_n` を消費する形はこの層では表せない。
+    MUST: do not return `h_n` — the `gru_scan` contract has one output (the `h` of every step) and
+    does not bring back the final state (ADR 0056 decisions 1 and 7). A caller that consumes `h_n`
+    cannot be expressed by this layer.
     """
     assert_supported(gru)
     hidden_size = gru.hidden_size
-    # 全層・全方向の初期状態はゼロ（`nn.GRU` の `h_0` 省略時と同じ）。定数なので変換段で
-    # 畳み込まれ、IR には initializer 1 本として載る。
+    # The initial state of every layer and direction is zero (the same as `nn.GRU` with `h_0`
+    # omitted). It is a constant, so the conversion folds it and it lands in the IR as one
+    # initializer.
     initial = torch.zeros(x.shape[0], hidden_size)
     sequence = x.transpose(0, 1)
     for layer in range(gru.num_layers):
@@ -99,6 +113,7 @@ def gru_forward(gru: nn.GRU, x: torch.Tensor) -> torch.Tensor:
                     getattr(gru, f"bias_hh_l{layer}{suffix}"),
                 )
             )
-        # 次の層は両方向の連結を受ける（`nn.GRU` の層間の受け渡しと同じ）。
+        # The next layer takes the concatenation of both directions (the same hand-off between
+        # layers as `nn.GRU`).
         sequence = torch.cat(directions, dim=2)
     return sequence.transpose(0, 1)

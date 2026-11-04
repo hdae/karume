@@ -1,46 +1,49 @@
-r"""Pillow の LANCZOS の**ホストテスト用 fixture**（ADR 0121 決定 11・段 9a — git 管理）。
+r"""**Host-test fixture** for Pillow's LANCZOS (ADR 0121 decision 11, step 9a — tracked in git).
 
-TS 側の LANCZOS（Wan2.2 の I2V の前処理の内部関数 — Pillow `Resample.c` の 22 bit 固定小数点の
-逐語の写し）を、Pillow の `Image.resize(size, Image.LANCZOS)` の出力と uint8 で突き合わせるための
-入出力の組。モデルの重みにもテスト画像（`inputs/` — git 追跡外）にも触らない合成画像だけで作る。
+Input / output pairs for checking the TS LANCZOS (an internal function of the Wan2.2 I2V
+preprocessing — a verbatim copy of the 22-bit fixed point of Pillow's `Resample.c`) against the
+output of Pillow's `Image.resize(size, Image.LANCZOS)` in uint8. Built only from synthetic images
+that touch neither model weights nor test images (`inputs/` — not tracked in git).
 
     cd tools/export-recipes
     uv run --group wan --inexact python -m wan.lanczos_fixture
 
-出力は 2 本（**git 管理**）:
+Two output files (**tracked in git**):
 
-    packages/models/tests/fixtures/wan-i2v/lanczos.json         — 説明・来歴・ケース表
-    packages/models/tests/fixtures/wan-i2v/lanczos.safetensors  — 画素（U8）
+    packages/models/tests/fixtures/wan-i2v/lanczos.json         — description, provenance, cases
+    packages/models/tests/fixtures/wan-i2v/lanczos.safetensors  — pixels (U8)
 
-生成後は `deno fmt packages/models/tests/fixtures/wan-i2v/lanczos.json` を掛ける（commit 形は
-フォーマッタが正 — `deno task verify` の `fmt --check` が fixtures も見る）。画素を JSON の配列に
-しないのは、フォーマッタが 1 値 1 行に開いて 1 MB を超えるため（wan-scheduler の `unipc.json` +
-`unipc.safetensors` と同じ分け方）。
+After generating, run `deno fmt packages/models/tests/fixtures/wan-i2v/lanczos.json` (the formatter
+decides the committed form — the `fmt --check` of `deno task verify` also covers fixtures). The
+pixels are not a JSON array because the formatter would expand it to one value per line and exceed
+1 MB (the same split as `unipc.json` + `unipc.safetensors` of wan-scheduler).
 
-safetensors のテンソルはケースごとに 2 本: `<name>.input`（`[height, width, 3]`）と
-`<name>.resized`（`[outHeight, outWidth, 3]`）。どちらも RGB8 の行優先（画素あたり 3 バイト）。
+The safetensors holds 2 tensors per case: `<name>.input` (`[height, width, 3]`) and
+`<name>.resized` (`[outHeight, outWidth, 3]`). Both are RGB8, row-major (3 bytes per pixel).
 
-## ケースの設計
+## Case design
 
-網羅ではなく「素朴な移植が落ちる境界」を 1 件ずつ置く（`siglip2/preprocess.py` の `build_cases`
-と同じ規律）+ 実運用の 1 次元の係数表 + 乱択の掃引:
+Not exhaustive: one case per "boundary where a naive port fails" (the same discipline as
+`build_cases` of `siglip2/preprocess.py`) + the 1-D coefficient tables of real use + a random sweep:
 
-- 2 次元の幾何: 拡大（整数倍・非整数倍）・縮小（整数倍・非整数倍・台が大きく伸びる）・片軸だけ
-  （もう片軸は寸法が変わらずパスを飛ばす — Pillow の `need_horizontal` / `need_vertical`）・
-  横は縮小で縦は拡大・恒等（両パスを飛ばす）・端の切り詰め（3×2・1×1）・飽和（市松の拡大は
-  負のローブで 0 と 255 を越える）。
-- 実運用の係数表（1 行・1 列の高周波ノイズの画像 — 係数表の全列を出力で掃く）:
-  832 → 1280（1280×704 の crop / stretch の横）・832 → 2219（704×1280 の crop の横）・
-  832 → 277（256×160 の crop の横）・480 → 738 / 1280 / 160（各 crop の縦）・480 → 704
-  （stretch の縦）。見るのは出力の uint8 だけなので、整数係数の ±1 はまず検出できない（ずれた
-  係数が出力を変えるのは積和が 2^22 の境界をまたぐときだけ — 1 標本あたりおよそ 画素値 / 2^22）。
-  出力の一致は係数表の一致の証拠にならない。
-- 乱択の掃引（seed 固定）: 小さい寸法の組を {@link SWEEP_CASES} 本。
+- 2-D geometry: upscaling (integer and non-integer factors), downscaling (integer and non-integer
+  factors, and a large widening of the support), one axis only (the other axis keeps its size and
+  skips its pass — Pillow's `need_horizontal` / `need_vertical`), horizontal downscale with
+  vertical upscale, identity (both passes skipped), edge truncation (3×2, 1×1), saturation (a
+  checkerboard upscale exceeds 0 and 255 through the negative lobes).
+- Coefficient tables of real use (1-row / 1-column high-frequency noise images — the output sweeps
+  every column of the coefficient table): 832 → 1280 (width of crop / stretch for 1280×704),
+  832 → 2219 (width of crop for 704×1280), 832 → 277 (width of crop for 256×160), 480 → 738 / 1280
+  / 160 (height of each crop), 480 → 704 (height of stretch). Only the uint8 output is compared, so
+  a ±1 in an integer coefficient is very unlikely to be detected (a shifted coefficient changes the
+  output only when the multiply-accumulate crosses a 2^22 boundary — roughly pixel value / 2^22
+  per sample). Matching outputs are not evidence that the coefficient tables match.
+- Random sweep (fixed seed): {@link SWEEP_CASES} pairs of small sizes.
 
-MUST: Pillow は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。値は Pillow の版で決まるので、版を来歴に記録する
-（`wan/tests/test_lanczos_fixture.py` が今の Pillow で作り直して突き合わせ、版の更新で黙って
-ずれた fixture を赤にする）。
+MUST: import Pillow inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`). The values depend on the Pillow version, so the version is
+recorded in the provenance (`wan/tests/test_lanczos_fixture.py` rebuilds with the current Pillow and
+compares, turning a fixture that silently drifted with a version update red).
 """
 
 from __future__ import annotations
@@ -57,26 +60,26 @@ import numpy as np
 
 from _shared.paths import REPO_ROOT
 
-#: fixture の置き場（git 管理）。
+#: Where the fixture lives (tracked in git).
 FIXTURE_DIR = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-i2v"
 FIXTURE_JSON = "lanczos.json"
 FIXTURE_TENSORS = "lanczos.safetensors"
 
-#: 合成画像の乱数の seed（ノイズと掃引の寸法）。
+#: The seed of the synthetic images' random numbers (the noise and the sweep sizes).
 SEED = 20261009
 
-#: 乱択の掃引の本数と寸法の上限（入力の辺 ≤ 32・出力の辺 ≤ 48）。
+#: The number of random sweep cases and the size limits (input side ≤ 32, output side ≤ 48).
 SWEEP_CASES = 24
 SWEEP_MAX_INPUT = 32
 SWEEP_MAX_OUTPUT = 48
 
-#: fixture の合計の上限（git 管理の小さな fixture — バイト）。
+#: The limit on the fixture's total size (a small fixture tracked in git — bytes).
 MAX_TOTAL_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
 class LanczosCase:
-    """fixture の 1 ケース（入力画像と出力寸法）。"""
+    """One fixture case (input image and output size)."""
 
     name: str
     why: str
@@ -90,7 +93,7 @@ def _noise(rng: np.random.Generator, height: int, width: int) -> np.ndarray:
 
 
 def _gradient(height: int, width: int) -> np.ndarray:
-    """滑らかな模様（チャネルごとに位相をずらした正弦の積）。"""
+    """A smooth pattern (a product of sines with a phase shift per channel)."""
     yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
     channels = [
         127.5 + 127.5 * np.sin(xx / 5.0 + phase) * np.cos(yy / 3.0 - phase)
@@ -100,7 +103,7 @@ def _gradient(height: int, width: int) -> np.ndarray:
 
 
 def _checker(height: int, width: int) -> np.ndarray:
-    """1 画素ごとの市松（0 / 255 — チャネルごとに反転を変える）。"""
+    """A checkerboard of single pixels (0 / 255 — the inversion differs per channel)."""
     yy, xx = np.mgrid[0:height, 0:width]
     parity = (yy + xx) % 2
     channels = [parity, 1 - parity, parity]
@@ -108,7 +111,7 @@ def _checker(height: int, width: int) -> np.ndarray:
 
 
 def build_cases() -> tuple[LanczosCase, ...]:
-    """fixture のケース（並びと中身は seed で決まる — 作り直しても同じ）。"""
+    """The fixture cases (order and contents are set by the seed — rebuilding gives the same)."""
     rng = np.random.default_rng(SEED)
     cases = [
         LanczosCase("up-2x", "両軸ちょうど 2 倍の拡大", _noise(rng, 7, 11), 14, 22),
@@ -219,12 +222,12 @@ def build_cases() -> tuple[LanczosCase, ...]:
         )
     names = [case.name for case in cases]
     if len(set(names)) != len(names):
-        raise AssertionError(f"ケース名が重複している: {names}")
+        raise AssertionError(f"duplicate case names: {names}")
     return tuple(cases)
 
 
 def pillow_lanczos(image: np.ndarray, out_height: int, out_width: int) -> np.ndarray:
-    """Pillow の `Image.resize((out_width, out_height), Image.LANCZOS)`（RGB8 `[H, W, 3]`）。"""
+    """Pillow's `Image.resize((out_width, out_height), Image.LANCZOS)` (RGB8 `[H, W, 3]`)."""
     from PIL import Image
 
     resized = Image.fromarray(image).resize((out_width, out_height), Image.LANCZOS)
@@ -232,7 +235,7 @@ def pillow_lanczos(image: np.ndarray, out_height: int, out_width: int) -> np.nda
 
 
 def build_fixture() -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """fixture の JSON（説明・来歴・ケース表）と safetensors のテンソル。"""
+    """The fixture's JSON (description, provenance, cases) and its safetensors tensors."""
     pillow = version("pillow")
     tensors: dict[str, np.ndarray] = {}
     rows: list[dict[str, Any]] = []
@@ -279,7 +282,8 @@ def build_fixture() -> tuple[dict[str, Any], dict[str, np.ndarray]]:
 
 
 def emit(fixture_dir: Path) -> dict[str, Any]:
-    """fixture を書き、要約を返す（合計が {@link MAX_TOTAL_BYTES} を超えたら何も書かない）。"""
+    """Writes the fixture and returns a summary (writes nothing when the total exceeds
+    {@link MAX_TOTAL_BYTES})."""
     from safetensors.numpy import save
 
     document, tensors = build_fixture()
@@ -287,7 +291,9 @@ def emit(fixture_dir: Path) -> dict[str, Any]:
     text = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
     total = len(payload) + len(text.encode("utf-8"))
     if total > MAX_TOTAL_BYTES:
-        raise AssertionError(f"fixture の合計 {total} バイトが上限 {MAX_TOTAL_BYTES} を超える")
+        raise AssertionError(
+            f"the fixture total of {total} bytes exceeds the limit {MAX_TOTAL_BYTES}"
+        )
     fixture_dir.mkdir(parents=True, exist_ok=True)
     (fixture_dir / FIXTURE_TENSORS).write_bytes(payload)
     (fixture_dir / FIXTURE_JSON).write_text(text, encoding="utf-8")

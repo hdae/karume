@@ -1,4 +1,4 @@
-"""据えた容器の固定整数・scale を入力 bytes と突合する。"""
+"""Compare the fixed integers and scales of a written container with the input bytes."""
 
 from __future__ import annotations
 
@@ -17,19 +17,21 @@ def _digest(tensor: torch.Tensor) -> bytes:
 
 
 def assert_fixed_bytes(path: Path, fixed: Mapping[str, FixedQuantizedWeight]) -> None:
-    """容器から取り直した payload を入力 bytes と照合する。f32 展開はしない。
+    """Check the payloads read back from the container against the input bytes. Nothing is
+    expanded to f32.
 
-    piece に割れた席も供給計画が行の順に畳むので（{@link _shared.container_read.read_stored}）、
-    突合の意味は分割の有無で変わらない。companion scale は同じ供給計画がぶら下げて持つ。
+    The supply plan folds tensors split into pieces back in row order too
+    ({@link _shared.container_read.read_stored}), so the comparison means the same with or
+    without a split. The same supply plan carries the companion scale.
     """
     stored = read_stored(path)
     for key, value in fixed.items():
         entry = stored.get(key)
         if entry is None:
-            raise ValueError(f"{path}: 固定重み '{key}' が容器に無い")
+            raise ValueError(f"{path}: fixed weight '{key}' is not in the container")
         if hashlib.sha256(entry.payload).digest() != _digest(value.packed):
-            raise ValueError(f"{path}: 固定 payload {key} が入力 bytes と違う")
+            raise ValueError(f"{path}: fixed payload {key} differs from the input bytes")
         if entry.scale is None:
-            raise ValueError(f"{path}: 固定重み '{key}' に companion scale が無い")
+            raise ValueError(f"{path}: fixed weight '{key}' has no companion scale")
         if hashlib.sha256(entry.scale).digest() != _digest(value.scale):
-            raise ValueError(f"{path}: 固定 scale {key} が入力 bytes と違う")
+            raise ValueError(f"{path}: fixed scale {key} differs from the input bytes")

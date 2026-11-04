@@ -1,4 +1,5 @@
-"""`wan/few_step_ref.py` の約束事 — ケースの独立・逆正規化・書いた参照の形。
+"""The contract of `wan/few_step_ref.py` — independent cases, the inverse normalization and the
+shape of the written reference.
 
 The reference itself (four DiT forwards and a tiled decode, about 25 minutes a case) is not run
 here. The written references are checked for their shapes and metadata where the goldens are
@@ -26,7 +27,8 @@ GOLDENS = GOLDENS_ROOT / export_vae.SERIES_NAME
 
 class TestCases:
     def test_two_band_cases_and_one_accept_case_differ_in_seed_and_prompt(self):
-        """決定用 2 本 + 受入れ 1 本（決定 8 の形）。受入れは決定用と別の seed・プロンプト。"""
+        """2 cases for the decision + 1 acceptance case (the shape of decision 8). The acceptance
+        case uses a different seed and prompt from the decision cases."""
         cases = few_step_ref.FIXTURE_CASES
         roles = [case.role for case in cases]
 
@@ -36,7 +38,8 @@ class TestCases:
         assert len({case.name for case in cases}) == len(cases)
 
     def test_the_accept_seed_was_never_seen_by_the_band(self):
-        """前の受入れの seed 20261031 は帯の決定に影響した可能性があるので使わない。"""
+        """The seed 20261031 of the previous acceptance case may have influenced the band decision,
+        so it is not used."""
         assert 20261031 not in {case.seed for case in few_step_ref.FIXTURE_CASES}
 
     def test_every_case_uses_a_positive_fixed_prompt(self):
@@ -46,7 +49,8 @@ class TestCases:
 
 class TestDenormalize:
     def test_it_inverts_the_upstream_latent_normalization(self):
-        """平均と標準偏差の取り違え（`·std + mean` の逆や `mean`/`std` の入れ替え）を掴む。"""
+        """Catches mixing up the mean and the standard deviation (the inverse of `·std + mean`, or
+        `mean` / `std` swapped)."""
         generator = torch.Generator().manual_seed(0)
         mean = torch.randn(16, generator=generator).tolist()
         std = (torch.rand(16, generator=generator) + 0.5).tolist()
@@ -122,7 +126,8 @@ class TestWrittenReference:
         assert metadata["text_embeds_sha256"] == hashlib.sha256(embeds.read_bytes()).hexdigest()
 
     def test_the_noise_is_the_seeded_torch_randn(self, written):
-        """初期ノイズは torch CPU の `randn`（seed 固定）— TS が fixture から読む値の出所。"""
+        """The initial noise is torch CPU `randn` (fixed seed) — the origin of the values the TS
+        side reads from the fixture."""
         name, tensors, _ = written
         case = next(case for case in few_step_ref.FIXTURE_CASES if case.name == name)
         generator = torch.Generator().manual_seed(case.seed)
@@ -133,10 +138,11 @@ class TestWrittenReference:
 
 
 class TestRunCase:
-    """`run_case` の記録の振り分けと attention の固定（DiT・decode・scheduler は差し替え — 重みは
-    読まない）。
+    """How `run_case` sorts its records, and the pinned attention (the DiT, the decode and the
+    scheduler are stubbed — no weights are read).
 
-    差し替えた DiT は「受けた文脈の先頭の値」を出力に書くので、記録の行き先が値で分かる。
+    The stubbed DiT writes "the first value of the context it received" into its output, so the
+    values show where each record went.
     """
 
     CASE = few_step_ref.FIXTURE_CASES[0]
@@ -176,7 +182,8 @@ class TestRunCase:
         }
 
     def _upstream(self, monkeypatch, order) -> None:
-        """上流の denoise ループの代役（`order` が 1 ステップの中の文脈の呼び順を決める）。"""
+        """A stand-in for the upstream denoise loop (`order` sets the call order of the contexts
+        within one step)."""
 
         def run(pipeline, *, prompt_embeds, negative_prompt_embeds, latents, **kwargs):
             contexts = {
@@ -202,7 +209,8 @@ class TestRunCase:
         "order", [("cond", "uncond"), ("uncond", "cond")], ids=["upstream", "swapped"]
     )
     def test_the_outputs_are_labelled_by_their_text_context(self, pipeline, monkeypatch, order):
-        """上流の呼び順（cond → uncond）が入れ替わっても、cond の出力は cond の欄へ入る。"""
+        """Even if the upstream call order (cond → uncond) is swapped, the cond output goes into
+        the cond slot."""
         self._upstream(monkeypatch, order)
 
         tensors, _ = few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)
@@ -218,7 +226,8 @@ class TestRunCase:
             few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)
 
     def test_the_denoise_runs_with_the_math_kernel_disabled(self, pipeline, monkeypatch):
-        """`export_dit` の参照と同じく flash に固定する（MATH へ黙って落ちる経路を残さない）。"""
+        """Pinned to flash like the reference of `export_dit` (no path that silently drops to
+        MATH)."""
         self._upstream(monkeypatch, ("cond", "uncond"))
 
         few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)

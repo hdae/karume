@@ -1,6 +1,6 @@
-"""BiRefNet 系 recipe のテスト。
+"""Tests for the BiRefNet family recipe.
 
-パッケージにしてあるのは、family が増えたときに `<family>/tests/test_export.py` の
-**basename が衝突しない**ようにするため（pytest の既定 import mode は `__init__.py` の
-無いディレクトリのテストを basename だけのモジュール名で読む）。
+This is a package so that the **basenames of `<family>/tests/test_export.py` do not collide** as
+families are added (pytest's default import mode loads tests in a directory without `__init__.py`
+under a module name made of the basename alone).
 """

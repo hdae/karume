@@ -1,19 +1,22 @@
-"""QAT の配布 recipe が入力に使う**正当な最小の系列**（固定格納のコンテナ + PLE + 資産）。
+"""**The valid minimal series** the QAT distribution recipe takes as input (a fixed-storage
+container + PLE + assets).
 
-`gemma4/tests/product_fixture.py` の QAT 版。違いは固定量子化そのもの — 混成格納
-（i2 の共有 head / i4 / i8）と、量子化 linear の前後の SRQ、packed PLE（`gemma4_qat.ple`
-が容器の資産へ組む）、そして `reference.json` である。
+The QAT version of `gemma4/tests/product_fixture.py`. The difference is the fixed quantization
+itself — mixed storage (the i2 shared head / i4 / i8), the SRQ around the quantized linears, the
+packed PLE (which `gemma4_qat.ple` builds into the container's asset), and `reference.json`.
 
-MUST: 容器のバイト列も IR の規則も PLE の索引も手で綴らない（`product_fixture` の同 MUST）
-— 規則の写しを持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ
-落ちる」になる。書き出しは実物と同じ 1 本道（`karume.emit.stored_model` →
-`karume.publish.publish_container`・`gemma4_qat.ple.build_ple`）を通す。
+MUST: never spell the container bytes, the IR rules or the PLE index by hand (the same MUST as
+`product_fixture`) — with a copy of the rules, the day the rules move only the fixture goes stale
+and "the tests are green, only the real thing fails". Writing goes down the same single path as
+the real thing (`karume.emit.stored_model` → `karume.publish.publish_container`,
+`gemma4_qat.ple.build_ple`).
 
-MUST: **実物と違う数**にする（語彙 9・層 3・次元 32・hidden 16・位置上限 8192）— 寸法を
-焼き込んでいれば落ちる。
+MUST: use **numbers different from the real ones** (vocabulary 9, layers 3, dim 32, hidden 16,
+position limit 8192) — anything with baked-in dimensions fails.
 
-上流の固定量子化モジュール（`transformers.integrations.gemma_quant`）を使うので、依存グループ
-`gemma4-qat` を同期していない環境では、このモジュールを import するテストごと SKIP になる。
+It uses upstream's fixed-quantization module (`transformers.integrations.gemma_quant`), so in an
+environment that has not synced the dependency group `gemma4-qat`, every test importing this
+module is SKIPped.
 """
 
 from __future__ import annotations
@@ -58,22 +61,25 @@ from karume.ir import (
 )
 from karume.publish import publish_container
 
-#: フィクスチャの出所（`--license` を落とした配布形は作らない — container-v1 §12）。
+#: The fixture's provenance (no distribution is built without `--license` — container-v1 §12).
 FIXTURE_PROVENANCE = Provenance(license="apache-2.0", writer="karume-fixture")
 
-#: 合成の寸法（実物は語彙 262144・層 35/42・次元 256・hidden 1536/2560）。
-#: `HIDDEN` が 16 の倍数なのは I2 格納の整列要求（`karume.emit._plan_fixed_weights`）。
+#: The synthetic dimensions (the real ones: vocabulary 262144, layers 35/42, dim 256, hidden
+#: 1536/2560). `HIDDEN` is a multiple of 16 because of the I2 storage's alignment requirement
+#: (`karume.emit._plan_fixed_weights`).
 VOCAB = 9
 LAYERS = 3
 DIM = 32
 HIDDEN = 16
 
-#: 中間幅（`HIDDEN` と違う数 — 取り違えれば形で落ちる）と I4 の group 長。
+#: The intermediate width (a number different from `HIDDEN` — a mix-up fails on shape) and the
+#: I4 group length.
 INNER = 32
 GROUP_SIZE = 16
 
-#: 上流 `config.json` の `text_config`（配布 recipe が読む欄だけ）。位置上限は既定 capacity
-#: （4096）より大きく、実物（131072）とは違う数にする。
+#: The `text_config` of upstream `config.json` (only the fields the distribution recipe reads).
+#: The position limit is larger than the default capacity (4096) and differs from the real one
+#: (131072).
 MAX_POSITION = 8192
 SLIDING_HEAD_DIM = 4
 FULL_HEAD_DIM = 8
@@ -100,7 +106,8 @@ ROPE_HEAD_DIMS: Mapping[str, int] = {
     FULL_ATTENTION: FULL_HEAD_DIM,
 }
 
-#: 上流 `generation_config.json` の推奨（**実物と違う値**）。
+#: The recommendations of upstream `generation_config.json` (**values different from the real
+#: ones**).
 GENERATION_CONFIG: Mapping[str, Any] = {
     "do_sample": True,
     "eos_token_id": [1, 2],
@@ -109,21 +116,21 @@ GENERATION_CONFIG: Mapping[str, Any] = {
     "top_p": 0.5,
 }
 
-#: 記号（`M` = chunk の行数・`R` = 出口の行数・`C` = full スロットの容量）。
+#: Symbols (`M` = chunk rows, `R` = exit rows, `C` = capacity of the full slots).
 SEQ_SYMBOL = "M"
 ROW_SYMBOL = "R"
 CAPACITY_SYMBOL = "C"
 SYM_MAX = 4
 
-#: 非量子化のまま残る唯一の linear（構造門が名指しで許可している 1 本）。
+#: The only linear left unquantized (the one the structural check allows by name).
 PROJECTION_TENSOR = "model.model.per_layer_model_projection.weight"
 
-#: SRQ の固定 scale（厳密な f32 値であることが op 契約の要求）。
+#: The fixed SRQ scale (the op contract requires an exact f32 value).
 SRQ_SCALE = 0.125
 
 
 def packed_embedding(bits: int, rows: int = VOCAB, width: int = LAYERS * DIM) -> QuantizedEmbedding:
-    """上流形式の packed 埋め込み（PLE と token embedding の材料）。"""
+    """A packed embedding in upstream's format (the material of PLE and the token embedding)."""
     factor = 8 // bits
     module = QuantizedEmbedding(rows, width, torch.float32, embed_scale=3.5, num_bits=bits)
     module.embedding_quantized = nn.Parameter(
@@ -170,14 +177,16 @@ def qat_container(
     mlp_bits: int = 8,
     assets: Mapping[str, AssetInput] | None = None,
 ) -> list[bytes]:
-    """QAT 製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
+    """The part bytes of one QAT product graph (in reading order — part 0 first).
 
-    形は実物の縮小版: token embedding は i2 で、同じ initializer を head linear が重みに使う
-    （共有 head・前後の SRQ は持たない）。ほかに i4 / i8 の量子化 linear が 1 本ずつあり、
-    どちらも前後に SRQ を持つ。非量子化の linear は許可された projection 1 本だけ。
-    PLE は容器の**資産**として同梱される（ADR 0109 決定 4）。
+    The shape is a scaled-down real one: the token embedding is i2, and the head linear uses the
+    same initializer as its weight (the shared head, without SRQ on either side). There is also
+    one quantized linear each of i4 / i8, both with SRQ before and after. The only unquantized
+    linear is the one allowed projection. PLE ships as an **asset** of the container (ADR 0109
+    decision 4).
 
-    `mlp_bits` は混成格納の故障注入の口（`4` にすると i8 が束縛表から消える）。
+    `mlp_bits` is the fault-injection point of the mixed storage (`4` removes i8 from the binding
+    table).
     """
     widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
@@ -194,7 +203,8 @@ def qat_container(
         return tensor_key
 
     def declare_fixed(name: str, rows: int, width: int, bits: int, groups: int = 1) -> None:
-        """固定格納の重み 1 本（論理形は meta の f32・値は packed 側だけが持つ）。"""
+        """One fixed-storage weight (the logical shape is a meta f32; only the packed side holds
+        values)."""
         key = declare(name, torch.empty(rows, width, dtype=torch.float32, device="meta"))
         fixed[key] = FixedQuantizedWeight(
             f"i{bits}", _packed(rows, width, bits), _row_scale(rows, groups)
@@ -214,7 +224,7 @@ def qat_container(
         nodes.append(IrNode(op="linear", ins=[source, weight, bias], outs=[out], attrs={}))
         return out
 
-    # ① token embedding（I2）— 同じ initializer を共有 head が重みに使う。
+    # ① token embedding (I2) — the shared head uses the same initializer as its weight.
     declare_fixed("embed", vocab, hidden_size, 2)
     embedded = "embedded"
     values[embedded] = IrValue(dtype="f32", shape=[1, SEQ_SYMBOL, hidden_size])
@@ -227,18 +237,19 @@ def qat_container(
         )
     )
 
-    # ② 許可された非量子化 linear（per-layer projection）1 本。
+    # ② the one allowed unquantized linear (the per-layer projection).
     declare("projection", _ramp(INNER, hidden_size), key=PROJECTION_TENSOR)
     projected = linear(embedded, "projection", "projected", INNER)
 
-    # ③ 量子化 linear 2 本（I4 / I8）— どちらも前後に SRQ を持つ。
+    # ③ two quantized linears (I4 / I8) — both with SRQ before and after.
     declare_fixed("attention", INNER, INNER, 4, groups=INNER // GROUP_SIZE)
     declare_fixed("mlp", hidden_size, INNER, mlp_bits)
     attended = linear(quantize(projected, "projected_q"), "attention", "attended", INNER)
     projected_out = linear(quantize(attended, "attended_q"), "mlp", "mlp_out", hidden_size)
     quantize(projected_out, "mlp_q")
 
-    # ④ full スロット（容量記号 `C` が現れる唯一の場所）と、それを触る effect op。
+    # ④ the full slots (the only place the capacity symbol `C` appears) and the effect ops that
+    # touch them.
     const = declare("baked", torch.zeros(1, 1, SYM_MAX, 1, dtype=torch.int32), dtype="i32")
     del const
     values["prefix"] = IrValue(dtype="i32", shape=[1, 1, SEQ_SYMBOL, 1])
@@ -257,7 +268,8 @@ def qat_container(
             IrNode(op="state_append", ins=["kv"], outs=[], attrs={}, states={"slot": slot})
         )
 
-    # ⑤ 出口は選択行の logits と hidden の 2 本。logits は共有 head が作る（SRQ 無し）。
+    # ⑤ two exits: the logits and hidden of the selected rows. The shared head makes the logits
+    # (no SRQ).
     declare("seed", _ramp(1, 1, 1))
     hidden = "hidden"
     values[hidden] = IrValue(dtype="f32", shape=[1, ROW_SYMBOL, hidden_size])
@@ -330,7 +342,8 @@ def reference_record(
     ple_blocks: int = 1,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """`reference.json` の中身（既定は {@link qat_container} が実際に作る本数）。"""
+    """The contents of `reference.json` (by default the counts {@link qat_container} really
+    produces)."""
     record = {
         "schema": REFERENCE_SCHEMA,
         "family": "gemma4-qat",
@@ -362,12 +375,12 @@ def write_series(
     text_config: Mapping[str, Any] | None = None,
     generation_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """1 系列ぶんを書き、使った `reference.json` の中身を返す。
+    """Write one series and return the contents of the `reference.json` used.
 
-    PLE は容器の資産なので、容器は常に {@link qat_container} が組む — 呼び手が差し替えたい
-    軸（`mlp_bits` / `hidden_size` …）は `container_kwargs` で渡す。
+    PLE is an asset of the container, so the container is always built by {@link qat_container}
+    — the axes a caller wants to vary (`mlp_bits` / `hidden_size` …) go in `container_kwargs`.
     """
-    from container_series import write_component  # conftest が張る recipe 共有ヘルパ
+    from container_series import write_component  # the recipe-shared helper conftest provides
 
     source.mkdir(parents=True, exist_ok=True)
     bits = ple_bits if ple_bits is not None else (4 if model == "e2b" else 2)
@@ -376,7 +389,8 @@ def write_series(
         source / "model.krm",
         qat_container(assets=ple.assets, **dict(container_kwargs or {})),
     )
-    # 実物と同じ順序 — 一時ファイルは容器が据わったら消す（系列に残さない）。
+    # The same order as the real thing — the temporary files are deleted once the container is
+    # in place (nothing left in the series).
     ple.discard()
     (source / "tokenizer.json").write_text(
         json.dumps(dict(tokenizer if tokenizer is not None else tokenizer_asset(vocab=VOCAB))),

@@ -1,34 +1,39 @@
-"""母音検出の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択（ADR 0065 決定 2）。
+"""Distribution recipe of vowel detection — series layout, output path table, quant table and choice
+of card (ADR 0065 decision 2).
 
-汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **母音検出固有の事実**だけ: どの系列ディレクトリから何を
-拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+The general-purpose assembly engine (placement, folding of shared slots, sha256, manifest,
+staging/swap, verification) lives in `karume.dist`. What lives here is **only the facts specific to
+vowel detection**: what to pick up from which series directory, at which path of the distribution
+and under which dtype label to list it, and which quant to make the default.
 
-配布するのは **CRNN グラフ 1 本**と、特徴抽出が要る **mel 基底 1 本**（`assets` 席）。
-格納 dtype は f32 の 1 系列だけなので quant 席も 1 つ。
+What is shipped is **one CRNN graph** and the **one mel basis** the feature extraction needs (an
+`assets` entry). There is a single storage dtype series, f32, so there is also a single quant.
 
-## 長さバケットは無くなった（ADR 0056 / 0057）
+## Length buckets are gone (ADR 0056 / 0057)
 
-かつては `aten.gru.input` が時間方向へ完全展開されて T を動的軸にできず、長さバケット 4 本
-（250 / 500 / 1000 / 2000 フレーム）を weights の役割軸に並べて右ゼロ pad で丸めていた。
-`gru_scan` への差し替え（ADR 0056）と派生次元からのシンボル束縛（ADR 0057）で、**任意長が
-1 本のグラフで通る**ようになったので、役割は `crnn` 1 つだけになった。
+`aten.gru.input` used to be fully unrolled along time, so T could not be a dynamic axis; four length
+buckets (250 / 500 / 1000 / 2000 frames) were listed on the role axis of the weights and inputs were
+rounded up with right zero padding. With the replacement by `gru_scan` (ADR 0056) and symbol binding
+from derived dimensions (ADR 0057), **any length runs through one graph**, so the only role left is
+`crnn`.
 
-副作用として **pad 由来の数値差が消える**: 逆方向 GRU が pad 側から状態を持ち帰るせいで
-バケット経路の `.lab` は「末尾 40ms の pau」「20ms の境界ずれ」「発話中間の pau」の 3 型で
-実長経路と割れていた（実音声 4 本 × pad 10 段の実測）。今はパイプラインが実長のまま回すので、
-実重み E2E が固定している `.lab` と**同じもの**が配布形からも出る。
+As a side effect **the numeric differences caused by padding are gone**: because the reverse GRU
+carries state back from the padded side, the `.lab` of the bucket path diverged from the true-length
+path in three ways — "a 40 ms pau at the end", "a 20 ms boundary shift" and "a pau in the middle of
+the utterance" (measured on 4 real recordings × 10 padding steps). The pipeline now runs at the true
+length, so the distribution produces **the same** `.lab` that the real-weight E2E pins.
 
-## `pipelineConfig` の出どころ
+## Where `pipelineConfig` comes from
 
-特徴の契約（`sampleRate` / `featureDim` / `classes`）は上流 `feature_config.json` の逐語。
-`maxFrames` は**焼いたグラフの記号次元の上限**で、IR は値域を持たない（`docs/ir-v2.md` の
-`symbols` は名前だけ）ので配布形にしか無い数になる — SBV2 の `maxTokens` / `maxFrames` と
-同じ持ち方で、台本の定数との一致は `vowel_detector/tests/test_distribution.py` が突き合わせる。
-噛み合っていることは {@link assert_vowel_detector_graph} が実測する。
+The feature contract (`sampleRate` / `featureDim` / `classes`) is verbatim from upstream's
+`feature_config.json`. `maxFrames` is **the upper bound of the baked graph's symbolic dimension**;
+the IR holds no value ranges (`symbols` in `docs/ir-v2.md` are names only), so it is a number that
+exists only in the distribution — held the same way as SBV2's `maxTokens` / `maxFrames`, and
+`vowel_detector/tests/test_distribution.py` checks it against the script's constant.
+{@link assert_vowel_detector_graph} measures that they fit together.
 
-公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
-（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+The public surface is the one {@link PIPELINE} (`karume.dist.Pipeline`) — the repository's dist
+driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
 """
 
 from __future__ import annotations
@@ -60,110 +65,128 @@ from karume.dist import (
 
 from .card import VOWEL_DETECTOR_HOP, render_vowel_detector_model_card
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
-#: `VOWEL_DETECTOR_PIPELINE_NAME` / `VOWEL_DETECTOR_PIPELINE_MAJOR`。
+#: Pipeline contract (ADR 0041 §2 — per model). The set the TS side accepts is
+#: `VOWEL_DETECTOR_PIPELINE_NAME` / `VOWEL_DETECTOR_PIPELINE_MAJOR`.
 VOWEL_DETECTOR_PIPELINE = "vowel-detector/1"
 
-#: 既定のモデル名 = **チェックポイントの世代**（`vowel_detector.export.default_out_dir` が
-#: 系列名へ焼く綴りと同じ導出 — `crnn_epoch3.pt` → `crnn-epoch3`）。学習し直した重みは別の
-#: モデル名で並ぶ（manifest のキーが世代の正本）。
+#: The default model name = **the checkpoint generation** (the same derivation as the spelling
+#: `vowel_detector.export.default_out_dir` bakes into the series name — `crnn_epoch3.pt` →
+#: `crnn-epoch3`). Retrained weights are listed under another model name (the manifest keys are the
+#: source of truth for generations).
 VOWEL_DETECTOR_DEFAULT_MODEL = "crnn-epoch3"
 
-#: 系列名の接頭辞（`vowel-detector-<モデル名>` — 台本の `MODELS_ROOT.name` と同じ 1 語）。
+#: Prefix of the series name (`vowel-detector-<model name>` — the same word as the script's
+#: `MODELS_ROOT.name`).
 VOWEL_DETECTOR_PREFIX = "vowel-detector"
 
-#: 上流素材の置き場（`inputs/vowel-detector/` — `vowel_detector.export.MODELS_ROOT` と同じ）。
+#: Location of the upstream material (`inputs/vowel-detector/` — the same as
+#: `vowel_detector.export.MODELS_ROOT`).
 VOWEL_DETECTOR_INPUTS_DIRNAME = "vowel-detector"
 
-#: グラフの役割名（配布形に CRNN は 1 本きり）。配置表・出力 path・weights 宣言が共有する 1 語。
+#: Role name of the graph (the distribution has exactly one CRNN). One word shared by the placement
+#: table, the output paths and the weights declaration.
 VOWEL_DETECTOR_GRAPH_ROLE = "crnn"
 
-#: `pipelineConfig` に載る**運用上限**（10ms フレーム数 = 10 分）。焼いたグラフの記号次元
-#: `T`（20ms 格子）の上限 `vowel_detector.export.SYM_MAX` を入力側の単位へ直したもので、
-#: 一致は `vowel_detector/tests/test_distribution.py` が突き合わせる。
+#: **Operating upper bound** carried in `pipelineConfig` (in 10 ms frames = 10 minutes). It is the
+#: upper bound `vowel_detector.export.SYM_MAX` of the baked graph's symbolic dimension `T` (20 ms
+#: grid) converted into input-side units; `vowel_detector/tests/test_distribution.py` checks that
+#: they match.
 #:
-#: MUST: 台本の値と一致させる。IR は記号の値域を持たない（名前だけ）ので、宣言より長い入力を
-#: 止められるのは**この数を読むパイプラインだけ**。ずれると超過は配布形の門ではなく利用者の
-#: 手元の確保失敗として出る。
+#: MUST: keep it equal to the script's value. The IR holds no ranges for symbols (names only), so
+#: **only the pipeline that reads this number** can stop input longer than declared. If they drift,
+#: an overrun shows up not as a check of the distribution but as an allocation failure on the user's
+#: machine.
 VOWEL_DETECTOR_MAX_FRAMES = 60_000
 
-#: `pipelineConfig` に載る**運用下限**（10ms フレーム数 = 40ms）。焼いたグラフの記号次元 `T` の
-#: 下限 `vowel_detector.export.SYM_MIN` を入力側の単位へ直したもの（= `export.MIN_LENGTH`）。
+#: **Operating lower bound** carried in `pipelineConfig` (in 10 ms frames = 40 ms). It is the lower
+#: bound `vowel_detector.export.SYM_MIN` of the baked graph's symbolic dimension `T` converted into
+#: input-side units (= `export.MIN_LENGTH`).
 #:
-#: MUST: 上限と同じ理由でここが要る。IR は記号の値域を持たないので、`Dim(min=…)` より短い入力を
-#: 止められるのは**この数を読むパイプラインだけ**。宣言が無いと、10ms フレーム 2〜3 本の音声が
-#: `T = 1` を束縛して **traced 範囲外**で走る（例外は出ず、値だけが保証の外へ出る）。
+#: MUST: it is needed here for the same reason as the upper bound. The IR holds no ranges for
+#: symbols, so **only the pipeline that reads this number** can stop input shorter than
+#: `Dim(min=…)`. Without the declaration, audio of 2–3 frames of 10 ms binds `T = 1` and runs
+#: **outside the traced range** (no exception is raised; only the values leave what is guaranteed).
 VOWEL_DETECTOR_MIN_FRAMES = 4
 
-#: グラフ入力の名前（`vowel_detector.export.INPUT_NAME`）と、出力の時間軸の刻み（conv の
-#: stride 2 — 入力 2 フレームで出力 1 フレーム）。
+#: Name of the graph input (`vowel_detector.export.INPUT_NAME`) and the time-axis stride of the
+#: output (conv stride 2 — two input frames per output frame).
 VOWEL_DETECTOR_INPUT = "features"
 VOWEL_DETECTOR_TIME_STRIDE = 2
 
-#: 時間軸の記号名（`vowel_detector.export` が `convert(symbol_names=("T",))` で焼く綴り）。
-#: 入力は `2T`（10ms 格子）・出力は `T`（20ms 格子）で現れる。
+#: Name of the time-axis symbol (the spelling `vowel_detector.export` bakes with
+#: `convert(symbol_names=("T",))`). It appears as `2T` on the input (10 ms grid) and `T` on the
+#: output (20 ms grid).
 VOWEL_DETECTOR_SYMBOL = "T"
 
-#: 特徴の契約の出どころ（上流 `assets/feature_config.json` を `inputs/vowel-detector/` へ手置き）。
-#: mel 基底もこの中にあり、配布形へは 1 テンソルの safetensors として移す。
+#: Source of the feature contract (upstream's `assets/feature_config.json`, placed by hand in
+#: `inputs/vowel-detector/`). The mel basis is also in it and is moved into the distribution as a
+#: one-tensor safetensors file.
 VOWEL_DETECTOR_FEATURE_CONFIG_FILE = "feature_config.json"
 
-#: 配布する mel 基底のテンソルキー（TS 側 `pipeline.ts` の `MEL_BASIS` と対）。
+#: Tensor key of the shipped mel basis (paired with `MEL_BASIS` in the TS side's `pipeline.ts`).
 VOWEL_DETECTOR_MEL_BASIS_KEY = "mel_basis"
 
-#: DSP 補助特徴の本数（有声性 / log エネルギー / 零交差率）。`feature_dim = n_mels + 3` の
-#: 内部整合を見るためだけに持つ（値の正本は上流の特徴抽出）。
+#: Number of DSP auxiliary features (voicing / log energy / zero-crossing rate). Held only to check
+#: the internal consistency `feature_dim = n_mels + 3` (the source of truth for the value is
+#: upstream's feature extraction).
 VOWEL_DETECTOR_DSP_DIM = 3
 
-#: 出力クラスの本数（`feature_config.json` の `classes` — 並びは配らない側の関心事で、
-#: **並びが id** であることの検査は TS 側 `config.ts` が持つ）。
+#: Number of output classes (`classes` of `feature_config.json` — the order is not this side's
+#: concern; the check that **the order is the id** lives in the TS side's `config.ts`).
 VOWEL_DETECTOR_CLASS_COUNT = 8
 
-#: 唯一の読み手（`packages/models/src/vowel-detector/features.ts`）が**焼き込んでいる**
-#: 特徴抽出の寸法。上流 config がこれと違う値を名乗る配布形は、組み上がっても実機ロードで
-#: 拒まれる — 組み立て段で落とすのが {@link _vowel_detector_expects}。
+#: Feature-extraction dimensions **baked into** the only reader
+#: (`packages/models/src/vowel-detector/features.ts`). A distribution whose upstream config declares
+#: other values assembles but is refused when it is loaded on a real device —
+#: {@link _vowel_detector_expects} stops it at the assembly stage.
 VOWEL_DETECTOR_SAMPLE_RATE = 16_000
 VOWEL_DETECTOR_N_FFT = 512
 VOWEL_DETECTOR_N_MELS = 80
 
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
-#: ファイル名に出すのは他ファミリと同じ形。
+#: Relative output paths (**inside the model subtree**) — the one place shared by the placement
+#: table and the manifest. Putting the storage dtype in the file name is the same form as other
+#: families.
 VOWEL_DETECTOR_OUTPUT_PATHS: Mapping[str, str] = {
     VOWEL_DETECTOR_GRAPH_ROLE: "model.f32.krm",
     VOWEL_DETECTOR_MEL_BASIS_KEY: f"features/{VOWEL_DETECTOR_MEL_BASIS_KEY}.safetensors",
 }
 
-#: 格納 dtype の要求（他ファミリと同じ根拠 — 素の資産が組み立て・ロード・実行を全て通って
-#: 参照一致の門まで沈黙した実測事故）。mel 基底はこちらが書く f32 なので載せない。
+#: Required storage dtype (the same rationale as other families — a measured incident where a plain
+#: asset passed assembly, loading and execution silently until the reference-match check). The mel
+#: basis is f32 written by this side, so it is not listed.
 VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {VOWEL_DETECTOR_GRAPH_ROLE: "f32"}
 
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
-#: {@link VOWEL_DETECTOR_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮
-#: 系列も適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を
-#: f32 で持つため「f32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
-#: 取り違えが存在検査だけでは素通りする。
+#: Storage vocabulary that **must not appear** in each role's binding table
+#: ({@link assert_storage_absent}). {@link VOWEL_DETECTOR_STORAGE_REQUIREMENTS} is a one-way check
+#: of "is the required dtype present", and **compressed series also hold their ineligible
+#: weights** (biases / norms / graph constants, i8's per-channel scales, i4's group scales) in f32,
+#: so "contains f32" is true even for f16 / i8 / i4 assets — plugging a compressed series into the
+#: f32 slot passes a presence check alone.
 #:
-#: この台本（`vowel_detector/export.py`）は f32 しか焼かないが、禁止表が閉じるのは**系列 root の
-#: 取り違え**（`--series` が別の木を指す / 別 family の圧縮系列を手で置く）で、台本が対応する
-#: dtype とは無関係に起こる。系列 root の取り違えは数値の門では原理的に検出できない
-#: （ADR 0027 / 0029）ので、ここが唯一の検出器。
+#: This script (`vowel_detector/export.py`) bakes only f32, but what the forbidden table closes is
+#: **a mix-up of the series root** (`--series` pointing at another tree / a compressed series of
+#: another family placed by hand), which happens regardless of the dtypes the script supports. A
+#: mix-up of the series root cannot in principle be detected by the numeric checks
+#: (ADR 0027 / 0029), so this is the only detector.
 #:
-#: MUST: 禁止は**役割ごとに集合**で持ち、書き出しうる圧縮格納（`karume.emit.WEIGHT_DTYPES` の
-#: f32 以外）を**全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
-#: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
-#: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
+#: MUST: the forbidden storage is held **as a set per role** and names **all** of the compressed
+#: storage that can be written (`karume.emit.WEIGHT_DTYPES` other than f32) — leaving even one out
+#: lets exactly that storage form through silently (the same discipline as anima / irodori / sbv2).
+#: I32 is not listed because i32 is plain storage, not compression (the plain side of
+#: `karume.emit`), and it appears routinely in plain series as index tables.
 VOWEL_DETECTOR_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     VOWEL_DETECTOR_GRAPH_ROLE: ("f16", "bf16", "i8", "i4")
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。グラフは 1 本で dtype も 1 つしかないので quant 表は
-#: 空でよい（{@link complete_quant_weights} が完全写像へ埋める）。
+#: Declaration of weights (dtype label → role name). There is one graph with only one dtype, so the
+#: quant table may be empty ({@link complete_quant_weights} fills it into a complete mapping).
 VOWEL_DETECTOR_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     VOWEL_DETECTOR_GRAPH_ROLE: {"f32": WeightFiles(VOWEL_DETECTOR_GRAPH_ROLE)}
 }
 
-#: assets の宣言（quant 選択に依存しない無条件ファイル — 特徴抽出の mel 基底 1 本）。
+#: Declaration of assets (unconditional files independent of the quant choice — the one mel basis
+#: of the feature extraction).
 VOWEL_DETECTOR_ASSETS: Mapping[str, str] = {
     VOWEL_DETECTOR_MEL_BASIS_KEY: VOWEL_DETECTOR_MEL_BASIS_KEY
 }
@@ -173,31 +196,34 @@ VOWEL_DETECTOR_DEFAULT_QUANT = "f32"
 
 
 def vowel_detector_series_name(model: str) -> str:
-    """モデル名 → 系列ディレクトリ名（`vowel_detector.export.default_out_dir` と同じ式）。"""
+    """Model name → series directory name (the same expression as
+    `vowel_detector.export.default_out_dir`)."""
     return f"{VOWEL_DETECTOR_PREFIX}-{model}"
 
 
 def vowel_detector_repo_name(model: str) -> str:
-    """配布リポ名。**モデル名を含めない** — チェックポイントの世代（`crnn-epoch3`）はリポの
-    名前ではなく manifest のキーが綴る事実で、世代が上がるたびにリポが増える形にしない
-    （上流の配布も `vowel-detector` 1 リポ）。
+    """Distribution repository name. It **does not include the model name** — the checkpoint
+    generation (`crnn-epoch3`) is a fact spelled by the manifest keys, not part of the repository's
+    name, and a new repository is not created each time the generation goes up (upstream also
+    distributes from the one `vowel-detector` repository).
     """
     return f"karume-{VOWEL_DETECTOR_PREFIX}"
 
 
 @dataclass(frozen=True)
 class VowelDetectorSources:
-    """組み立ての入力。CRNN 1 本の系列と、上流素材の置き場（`inputs/` — 生成物ではない）。
+    """Inputs of the assembly: the one CRNN series, and the location of the upstream material
+    (`inputs/` — not generated output).
 
-    後者が要るのは特徴の契約と mel 基底を**焼き込まずに導出**するため（読むのは
-    `feature_config.json` 1 本だけ）。
+    The latter is needed to **derive the feature contract and the mel basis instead of baking them
+    in** (only the one `feature_config.json` is read).
     """
 
-    #: 系列ディレクトリ群の親（`outputs/series/`）— 系列名はここから組む。
+    #: Parent of the series directories (`outputs/series/`) — the series name is joined onto it.
     series_dir: Path
-    #: 上流素材（`feature_config.json` を置いたディレクトリ）。
+    #: Upstream material (the directory holding `feature_config.json`).
     model: Path
-    #: 系列を引くモデル名（世代）。
+    #: Model name (generation) used to look up the series.
     model_name: str
 
     @property
@@ -208,7 +234,8 @@ class VowelDetectorSources:
 def vowel_detector_sources(
     series_dir: Path, model: str = VOWEL_DETECTOR_DEFAULT_MODEL
 ) -> VowelDetectorSources:
-    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
+    """Build the inputs from the series parent directory (`outputs/series/`) and the spellings of
+    `_shared.paths`."""
     return VowelDetectorSources(
         series_dir=series_dir,
         model=INPUTS_ROOT / VOWEL_DETECTOR_INPUTS_DIRNAME,
@@ -217,141 +244,152 @@ def vowel_detector_sources(
 
 
 def vowel_detector_placements(sources: VowelDetectorSources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link VOWEL_DETECTOR_OUTPUT_PATHS} が持つ。
+    """Role name → source file. The output paths are held by {@link VOWEL_DETECTOR_OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` はこれで落ちる）。
-    mel 基底は配置ではなく変換の出力なので、ここには現れない（SBV2 の表 2 本と同じ形）。
+    Anything not in this table does not go into the output (the `io.*.safetensors` files listed in
+    the series are dropped this way). The mel basis is an output of conversion, not a placement, so
+    it does not appear here (the same form as SBV2's two tables).
     """
     return {VOWEL_DETECTOR_GRAPH_ROLE: sources.series / "model.krm"}
 
 
 def vowel_detector_feature_config(model_dir: Path) -> Mapping[str, Any]:
-    """上流の `feature_config.json` を読む（特徴の契約と mel 基底の唯一の出どころ）。"""
+    """Read upstream's `feature_config.json` (the only source of the feature contract and the mel
+    basis)."""
     path = model_dir / VOWEL_DETECTOR_FEATURE_CONFIG_FILE
     if not path.is_file():
         raise DistError(
-            f"組み立ての入力が無い: {path}"
-            "（上流 vowel-detector の assets/feature_config.json をここへ置く）"
+            f"Assembly input is missing: {path}"
+            " (place the upstream vowel-detector's assets/feature_config.json here)"
         )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        raise DistError(f"{path} が JSON として読めない") from error
+        raise DistError(f"{path} cannot be read as JSON") from error
     if not isinstance(raw, dict):
-        raise DistError(f"{path}: 最上位オブジェクトでない")
+        raise DistError(f"{path}: the top level is not an object")
     return raw
 
 
 def _vowel_detector_int(raw: Mapping[str, Any], key: str, where: str) -> int:
-    """特徴 config の正整数フィールドを検査して読む。"""
+    """Check and read a positive-integer field of the feature config."""
     value = raw.get(key)
-    # bool は int の派生。`"n_mels": true` を 1 として通すと寸法の突合が緩む。
+    # bool is a subclass of int. Letting `"n_mels": true` through as 1 loosens the dimension check.
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise DistError(f"{where} の {key} が正の整数でない（{value!r}）")
+        raise DistError(f"{where}: {key} is not a positive integer ({value!r})")
     return value
 
 
 def vowel_detector_classes(raw: Mapping[str, Any], where: str) -> list[str]:
-    """クラス語彙を読む（**並びのまま**配る — 並びがそのままクラス id）。
+    """Read the class vocabulary (shipped **in its order** — the order is the class id).
 
-    NOTE: 語彙そのもの（`a`/`i`/…/`cons` の綴りと並び）はここが持たない。上流 config が唯一の
-    出どころで、それを写した 2 つ目の表をここに置くと、片方だけ動いたときに「宣言は通るのに
-    ラベルが置換されている」形が黙って作れる。**受理集合の検査はロード側**
-    （`packages/models/src/vowel-detector/config.ts`）が持ち、ここは構造だけを見る。
+    NOTE: the vocabulary itself (the spelling and order of `a`/`i`/…/`cons`) is not held here. The
+    upstream config is its only source; a second table copying it here would make it possible to
+    silently build "a declaration that passes while labels are swapped" when only one copy changes.
+    **The check against the accepted set lives on the load side**
+    (`packages/models/src/vowel-detector/config.ts`); this side checks only the structure.
     """
     value = raw.get("classes")
     if not isinstance(value, list) or len(value) != VOWEL_DETECTOR_CLASS_COUNT:
         raise DistError(
-            f"{where} の classes が長さ {VOWEL_DETECTOR_CLASS_COUNT} の配列でない（{value!r}）"
+            f"{where}: classes is not an array of length {VOWEL_DETECTOR_CLASS_COUNT} ({value!r})"
         )
     for entry in value:
         if not isinstance(entry, str) or not entry:
-            raise DistError(f"{where} の classes に空でない文字列でない要素がある（{value!r}）")
+            raise DistError(
+                f"{where}: classes has an element that is not a non-empty string ({value!r})"
+            )
     if len(set(value)) != len(value):
-        raise DistError(f"{where} の classes に重複がある（{value!r}）")
+        raise DistError(f"{where}: classes has duplicates ({value!r})")
     return list(value)
 
 
 def vowel_detector_mel_basis(raw: Mapping[str, Any], where: str) -> np.ndarray:
-    """mel 基底 `[n_mels, n_fft // 2 + 1]` を f32 の行列として読む。
+    """Read the mel basis `[n_mels, n_fft // 2 + 1]` as an f32 matrix.
 
-    MUST: 形は `n_mels` と `n_fft` の**両方**から組んだ期待と突き合わせる — 基底がずれても
-    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
+    MUST: the shape is checked against the expectation built from **both** `n_mels` and `n_fft` —
+    a shifted basis only turns the features into "plausible other values" and goes all the way
+    through with shape and value range still matching.
 
-    MUST: 全行に正の要素があることまで見る。空の三角窓（帯域外へ落ちた mel チャネル）は
-    その列を常に `log(1e-5)` に張り付かせるが、80 本の中の 1 本なので目視でも数値でも
-    「静かにおかしい」形にしかならない。
+    MUST: also check that every row has a positive element. An empty triangular window (a mel
+    channel that fell outside the band) pins that column to `log(1e-5)` forever, but as one of 80
+    it only shows up as "quietly wrong", by eye and by the numbers alike.
     """
     n_mels = _vowel_detector_int(raw, "n_mels", where)
     n_fft = _vowel_detector_int(raw, "n_fft", where)
     expected = (n_mels, n_fft // 2 + 1)
     value = raw.get(VOWEL_DETECTOR_MEL_BASIS_KEY)
     if not isinstance(value, list):
-        raise DistError(f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} が配列でない（{type(value)}）")
+        raise DistError(f"{where}: {VOWEL_DETECTOR_MEL_BASIS_KEY} is not an array ({type(value)})")
     try:
         basis = np.asarray(value, dtype=np.float32)
     except (TypeError, ValueError) as error:
         raise DistError(
-            f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} が f32 行列にならない"
+            f"{where}: {VOWEL_DETECTOR_MEL_BASIS_KEY} does not form an f32 matrix"
         ) from error
     if basis.shape != expected:
         raise DistError(
-            f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} の形が {basis.shape}、"
-            f"n_mels / n_fft から組んだ期待は {expected}"
+            f"{where}: {VOWEL_DETECTOR_MEL_BASIS_KEY} has shape {basis.shape},"
+            f" expected {expected} from n_mels / n_fft"
         )
     if not np.isfinite(basis).all():
-        raise DistError(f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} に有限でない要素がある")
+        raise DistError(f"{where}: {VOWEL_DETECTOR_MEL_BASIS_KEY} has non-finite elements")
     empty = [int(row) for row in np.flatnonzero(basis.max(axis=1) <= 0)]
     if empty:
         raise DistError(
-            f"{where} の {VOWEL_DETECTOR_MEL_BASIS_KEY} に空の mel チャネルがある（行 {empty}）"
+            f"{where}: {VOWEL_DETECTOR_MEL_BASIS_KEY} has empty mel channels (rows {empty})"
         )
     return basis
 
 
 def _vowel_detector_expects(raw: Mapping[str, Any], key: str, expected: int, where: str) -> int:
-    """特徴抽出の契約を、**読み手が焼き込んでいる値**と突き合わせて読む。
+    """Read a feature-extraction contract value, checking it against **the value the reader has
+    baked in**.
 
-    MUST: 落とさない。外れた値でも組み立ては通り `verify_dist` も緑になるが、唯一の読み手が
-    ロード時に拒む配布形が出来上がる（組み立て → HF アップロード → 実機ロードまで進んでから
-    落ちる）。
+    MUST: do not drop this. With a mismatched value the assembly still passes and `verify_dist` is
+    green, but the result is a distribution that the only reader refuses at load time (it fails
+    only after assembly → HF upload → loading on a real device).
     """
     value = _vowel_detector_int(raw, key, where)
     if value != expected:
         raise DistError(
-            f"{where} の {key} が {value} — karume の特徴抽出は {expected} で焼き込んであり"
-            "（packages/models/src/vowel-detector/features.ts）、この配布形はロード時に拒まれる"
+            f"{where}: {key} is {value} — karume's feature extraction has {expected} baked in"
+            " (packages/models/src/vowel-detector/features.ts), so this distribution would be"
+            " refused at load time"
         )
     return value
 
 
 def vowel_detector_pipeline_config(feature_config: Mapping[str, Any], where: str) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 5 欄）を上流 config と台本の宣言から組む。
+    """Build `pipelineConfig` (the 5 fields of the TS-side schema) from the upstream config and the
+    script's declarations.
 
-    `minFrames` / `maxFrames` だけが**焼いたグラフ側の数**（{@link VOWEL_DETECTOR_MIN_FRAMES} /
-    {@link VOWEL_DETECTOR_MAX_FRAMES} = 記号次元 `T` の値域を入力側の単位へ直したもの）で、
-    残り 3 欄は上流 config の逐語。
+    Only `minFrames` / `maxFrames` are **numbers of the baked graph**
+    ({@link VOWEL_DETECTOR_MIN_FRAMES} / {@link VOWEL_DETECTOR_MAX_FRAMES} = the range of the
+    symbolic dimension `T` converted into input-side units); the other 3 fields are verbatim from
+    the upstream config.
 
-    寸法 4 欄（`sample_rate` / `n_fft` / `n_mels` / `hop`）は読み手の焼き込み値と突き合わせる
-    （{@link _vowel_detector_expects}）。{@link vowel_detector_classes} が「上流 config を写した
-    2 つ目の表を置かない」と言っているのは**語彙**の話で、こちらは上流の写しではなく
-    **karume 側の実装が受けられる値**（上流が寸法を変えれば TS の焼き込みも同時に動く）—
-    siglip2 の `SIGLIP2_RESAMPLE` / `SIGLIP2_RESCALE_FACTOR` と同じ形。
+    The 4 dimension fields (`sample_rate` / `n_fft` / `n_mels` / `hop`) are checked against the
+    reader's baked-in values ({@link _vowel_detector_expects}). When {@link vowel_detector_classes}
+    says "no second table copying the upstream config", it means the **vocabulary**; these are not a
+    copy of upstream but **the values karume's implementation can accept** (if upstream changes a
+    dimension, the TS baked-in value moves with it) — the same form as siglip2's
+    `SIGLIP2_RESAMPLE` / `SIGLIP2_RESCALE_FACTOR`.
     """
     sample_rate = _vowel_detector_expects(
         feature_config, "sample_rate", VOWEL_DETECTOR_SAMPLE_RATE, where
     )
     _vowel_detector_expects(feature_config, "n_fft", VOWEL_DETECTOR_N_FFT, where)
-    # hop は `pipelineConfig` に載らないが、カードの秒換算がこの数を使う（card.py の
-    # {@link vowel_detector.card.VOWEL_DETECTOR_HOP}）— 突き合わせ相手が居ないと、上流が
-    # 変えた日にカードだけが静かに間違った秒数を書く。
+    # hop is not carried in `pipelineConfig`, but the card's conversion to seconds uses it
+    # ({@link vowel_detector.card.VOWEL_DETECTOR_HOP} in card.py) — without something to check it
+    # against, the day upstream changes it the card alone would silently state the wrong seconds.
     _vowel_detector_expects(feature_config, "hop", VOWEL_DETECTOR_HOP, where)
     feature_dim = _vowel_detector_int(feature_config, "feature_dim", where)
     n_mels = _vowel_detector_expects(feature_config, "n_mels", VOWEL_DETECTOR_N_MELS, where)
     if feature_dim != n_mels + VOWEL_DETECTOR_DSP_DIM:
         raise DistError(
-            f"{where} の feature_dim {feature_dim} が n_mels {n_mels} +"
-            f" DSP {VOWEL_DETECTOR_DSP_DIM} と違う — 特徴の内訳が上流と食い違っている"
+            f"{where}: feature_dim {feature_dim} is not n_mels {n_mels} +"
+            f" DSP {VOWEL_DETECTOR_DSP_DIM} — the feature breakdown disagrees with upstream"
         )
     return {
         "sampleRate": sample_rate,
@@ -365,55 +403,61 @@ def vowel_detector_pipeline_config(feature_config: Mapping[str, Any], where: str
 def assert_vowel_detector_graph(
     placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
 ) -> None:
-    """CRNN グラフの入出力が `pipelineConfig` と噛み合うことを、配置の前に実測する。
+    """Measure, before placement, that the CRNN graph's inputs and outputs fit `pipelineConfig`.
 
-    MUST: 落とさない。特徴次元とクラス数は上流 config 由来、形はグラフ由来で**別々に決まる**
-    ので、別の特徴で学習された派生の重みと今の config を組み合わせても、ここまでは何も落ちない。
+    MUST: do not drop this. The feature dimension and class count come from the upstream config and
+    the shapes from the graph — **decided independently** — so combining weights derived from
+    training on other features with the current config fails nowhere up to this point.
 
-    MUST: 時間軸が**記号**（入力 `2T` / 出力 `T`）であることまで見る。長さを固定して焼いた
-    古い形のグラフは名前も階数も同じで、載せてしまうと「その 1 長でしか動かない配布形」が
-    manifest としては成立する（利用者の手元では、その長さ以外の全ての音声で落ちる）。
+    MUST: also check that the time axis is **symbolic** (input `2T` / output `T`). An older graph
+    baked at a fixed length has the same names and ranks; shipping it yields a manifest that is
+    valid as "a distribution that runs at that one length only" (on the user's machine, every audio
+    clip of any other length fails).
     """
     path = placements[VOWEL_DETECTOR_GRAPH_ROLE]
     graph = ir_graph(path)
     inputs = graph_inputs(graph, path)
     if tuple(inputs) != (VOWEL_DETECTOR_INPUT,):
         raise DistError(
-            f"{path} のグラフ入力が {list(inputs)} で、期待の {[VOWEL_DETECTOR_INPUT]} と違う"
-            " — 実行側は名前で束ねるので、綴りが変われば束ねられない"
+            f"{path}: the graph inputs are {list(inputs)},"
+            f" not the expected {[VOWEL_DETECTOR_INPUT]}"
+            " — the runtime binds by name, so a changed spelling cannot be bound"
         )
     if graph.get("symbols") != [VOWEL_DETECTOR_SYMBOL]:
         raise DistError(
-            f"{path}: 記号次元が {graph.get('symbols')!r} — 期待は"
-            f" [{VOWEL_DETECTOR_SYMBOL!r}]（時間軸 1 本だけが記号）"
+            f"{path}: the symbolic dimensions are {graph.get('symbols')!r} — expected"
+            f" [{VOWEL_DETECTOR_SYMBOL!r}] (only the time axis is symbolic)"
         )
     feature_dim = pipeline_config["featureDim"]
     stride_dim = f"{VOWEL_DETECTOR_TIME_STRIDE}{VOWEL_DETECTOR_SYMBOL}"
     expected_input = [1, stride_dim, feature_dim]
     if inputs[VOWEL_DETECTOR_INPUT] != expected_input:
         raise DistError(
-            f"{path} の入力 '{VOWEL_DETECTOR_INPUT}' が"
-            f" {inputs[VOWEL_DETECTOR_INPUT]!r}、期待は {expected_input!r}"
-            " — 10ms 格子の長さは記号 T の 2 倍（batch は静的 1）"
+            f"{path}: input '{VOWEL_DETECTOR_INPUT}' is"
+            f" {inputs[VOWEL_DETECTOR_INPUT]!r}, expected {expected_input!r}"
+            " — the length on the 10 ms grid is twice the symbol T (batch is a static 1)"
         )
     outputs = graph.get("outputs")
     if not isinstance(outputs, list) or len(outputs) != 1:
-        raise DistError(f"{path}: グラフ出力が {outputs!r} — ロジット 1 本だけが要る")
+        raise DistError(
+            f"{path}: the graph outputs are {outputs!r} — exactly one logits output is needed"
+        )
     values = graph.get("values")
     value = values.get(outputs[0]) if isinstance(values, dict) else None
     out_shape = value.get("shape") if isinstance(value, dict) else None
     expected_output = [1, VOWEL_DETECTOR_SYMBOL, len(pipeline_config["classes"])]
     if out_shape != expected_output:
         raise DistError(
-            f"{path}: グラフ出力 '{outputs[0]}' の形が {out_shape!r}、期待は {expected_output!r}"
-            " — 出力は 20ms 格子（入力 2 フレームで 1 本）× クラス数"
+            f"{path}: graph output '{outputs[0]}' has shape {out_shape!r},"
+            f" expected {expected_output!r}"
+            " — the output is the 20 ms grid (one per two input frames) × the class count"
         )
 
 
 def vowel_detector_plan(
     sources: VowelDetectorSources, model: str = VOWEL_DETECTOR_DEFAULT_MODEL
 ) -> ModelPlan:
-    """母音検出 1 モデルぶんの計画を組む（検査と config の読み取りをここで全部済ませる）。"""
+    """Build the plan for one vowel-detection model (all checks and config reading happen here)."""
     assert_model_name(model)
     placements = vowel_detector_placements(sources)
     for role, source in placements.items():
@@ -446,26 +490,31 @@ def vowel_detector_plan(
 
 
 def vowel_detector_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から母音検出 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    """Build the plan for one vowel-detection model from the `--series` parent (the CLI's dispatch
+    target)."""
     return vowel_detector_plan(vowel_detector_sources(series_dir, model), model)
 
 
-#: 配布リポ直下の `LICENSE.md` に載せる著作権行（上流 `LICENSE` / `NOTICE.txt` の逐語 —
-#: 綴りの出どころは {@link vowel_detector.card.VOWEL_DETECTOR_LICENSE} の注記と同じ）。
+#: Copyright lines for the `LICENSE.md` at the root of the distribution repository (verbatim from
+#: upstream's `LICENSE` / `NOTICE.txt` — the spelling comes from the same place as the note on
+#: {@link vowel_detector.card.VOWEL_DETECTOR_LICENSE}).
 #:
-#: MUST: MIT は「全文 + 著作権行」を配布リポ直下へ置くことを要求する（ADR 0092 決定 7）—
-#: 著作権行が欠けた MIT は「上記の著作権表示」が指す先を持たない。
+#: MUST: MIT requires "the full text + the copyright line" at the root of the distribution
+#: repository (ADR 0092 decision 7) — an MIT text without the copyright line has nothing for "the
+#: above copyright notice" to point to.
 VOWEL_DETECTOR_COPYRIGHTS: tuple[str, ...] = ("Copyright (c) 2026 Spectopathy",)
 
-#: `--pipeline vowel-detector` の 1 行（ドライバが core の PIPELINES へ合成する）。
+#: The one entry for `--pipeline vowel-detector` (the driver merges it into the core's PIPELINES).
 PIPELINE = Pipeline(
     default_model=VOWEL_DETECTOR_DEFAULT_MODEL,
     repo_name=vowel_detector_repo_name,
     plan=vowel_detector_dist_plan,
-    # 帰属は 1 通りだけ（上流 1 リポ・1 ライセンス — 学習素材の帰属も重みに紐づいた
-    # 1 組）。選択肢が無いので省略で通る。
+    # There is only one attribution (one upstream repository, one license — the attribution of
+    # the training material is also one set tied to the weights). With nothing to choose, the
+    # profile can be omitted.
     card_profiles={"vowel-detector": render_vowel_detector_model_card},
-    # 改変告知（`NOTICE.md`）は置かない — MIT は要求せず、上流と著作権者が同じなので
-    # 「誰に対する告知か」の宛先が無い（Apache 家族の席とはそこが違う）。
+    # No modification notice (`NOTICE.md`) — MIT does not require one, and upstream and the
+    # copyright holder are the same, so there is nobody for the notice to address (that is where
+    # it differs from the Apache-licensed families).
     root_files={"LICENSE.md": mit_license(VOWEL_DETECTOR_COPYRIGHTS)},
 )

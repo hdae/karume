@@ -1,19 +1,24 @@
-"""Anima のモデルカード描画（`anima.card`）— 公式リポと追加学習リポの 2 枚。
+"""Anima's model card rendering (`anima.card`) — the two cards of the official repository and the
+fine-tune repository.
 
-実物の `models/karume-anima/karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。数値・path・表示欄は実物と重ならない偽値のままで、**モデル名だけ**が
-実物の綴り（{@link UPSTREAM_MODELS} のキー）— 出所節が manifest のモデル名から帰属を引くので、
-架空の名前ではどちらのカードも 1 枚も描けない。
+The real `models/karume-anima/karume.json` is not used — the job here is to see that the values
+of a fake manifest show up in the text as they are (= not a single hand-written number is mixed
+in), so building it with values **different** from the real ones detects more. The numbers, paths
+and presentation fields stay fake values that do not overlap the real ones; **only the model
+names** use the real spelling (the keys of {@link UPSTREAM_MODELS}) — the origins section looks
+up the attribution from the manifest's model names, so with made-up names neither card can be
+rendered at all.
 
-manifest v2（`karume/2` — ADR 0041）以降、カードは 1 リポの複数モデルを説明する。ファミリーの
-形（2 モデル・共有ファイルつき）を偽 manifest の既定にしてあるのは、単一モデルでしか通らない
-描画を素通ししないため。
+Since manifest v2 (`karume/2` — ADR 0041), a card describes several models of one repository.
+The fake manifest defaults to the family shape (2 models, with shared files) so that rendering
+that works only with a single model does not slip through.
 
-カードが 2 枚になったのは 2026-09-01 の再構造（ADR 0087）— 公式リポ（CircleStone の 5 変種
-同居・既定 = Turbo）と追加学習リポ（第三者 fine-tune）でライセンス告知も出所節の導入も違う。
-Turbo が公式 checkpoint になったので **LoRA 焼き込みの帰属節そのものが消えた**（旧 turbo 専用
-カードとその帰属門はこの波で削除）。
+There have been two cards since the restructuring of 2026-09-01 (ADR 0087) — the official
+repository (CircleStone's 5 variants together, default = Turbo) and the fine-tune repository
+(third-party fine-tunes) differ in both the license notice and the introduction of the origins
+section. Turbo became an official checkpoint, so **the attribution section for a baked-in LoRA is
+gone entirely** (the old turbo-only card and its attribution check were removed in that
+iteration).
 """
 
 from __future__ import annotations
@@ -39,15 +44,17 @@ from anima.card import (
 )
 from anima.distribution import ANIMA_QUANT_ABBREVIATIONS, LICENSE_SOURCE_PATH
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: The repository ID spelled into the usage snippet (dist passes it from the pipeline's
+#: declaration).
 REPO = "hdae/fake-repo"
 
-#: 公式リポのフィクスチャが並べるモデル（既定 = Turbo = guidance 1 の席）。
+#: The models the official repository's fixture lists (default = Turbo = the guidance 1
+#: entry).
 OFFICIAL_DEFAULT = "anima-turbo-v1.1"
 OFFICIAL_SECOND = "anima-aesthetic-v1.1"
 
-#: 追加学習リポのフィクスチャが並べるモデル（2 本目は `allowDifferentLicense` が false の出所 —
-#: 再ライセンス禁止の注意書きが出る側）。
+#: The models the fine-tune repository's fixture lists (the 2nd is a source whose
+#: `allowDifferentLicense` is false — the one that gets the no-relicensing note).
 EXTRA_DEFAULT = "anima-wai-v1.0"
 EXTRA_SECOND = "anima-copycat-20260610"
 
@@ -57,9 +64,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so only its shape follows the real one (the lengths and
+    sha256 of the 2 documents).
     """
     return {
         "container": {
@@ -73,15 +81,18 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _numbered(model: str, label: str, index: int, total: int) -> str:
-    """transformer の part 1 本ぶんの相対 path（連番規約は container-v1 §8）。"""
+    """The relative path of one transformer part (the numbering convention is container-v1
+    §8)."""
     return f"{model}/transformer/model.{label}-{index:05d}-of-{total:05d}.krm"
 
 
 def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
-    """ADR 0041 の形を保った最小の manifest（値は実物と重ならない偽値）。
+    """The minimal manifest that keeps the shape of ADR 0041 (fake values that do not overlap the
+    real ones).
 
-    2 モデルで、`shared/` の text_encoder を共有する形にしてある。既定モデルは guidance 1
-    （= 負プロンプトが効かない席）、2 本目は CFG 側なので、1 枚のカードで両方の分岐を通る。
+    2 models sharing the text_encoder under `shared/`. The default model is guidance 1 (= the
+    negative prompt has no effect), the 2nd is on the CFG side, so one card goes through both
+    branches.
     """
     shared_encoder = _ref("shared/text_encoder/model.krm", 111, "a")
     return {
@@ -93,8 +104,9 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
                 "pipeline": SUPPORTED_PIPELINE,
                 "weights": {
                     "text_encoder": {"f16": _container(shared_encoder)},
-                    # rope 素表は容器の**資産**（ADR 0109 決定 4）— 専用 part として part 列に
-                    # 並ぶので、席ごとに 333 B が 1 本ずつ増える形になる。
+                    # The rope base table is an **asset** of the container (ADR 0109 decision
+                    # 4) — it sits in the part list as a dedicated part, so each entry gains one
+                    # 333 B part.
                     "transformer": {
                         "f16": _container(
                             _ref(_numbered(default_name, "f16", 1, 2), 222, "b"),
@@ -115,8 +127,8 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
                     "f16+dit8-a8": {
                         "weights": {"text_encoder": "f16", "transformer": "i8"},
                         "session": {"linearCompute": "a8"},
-                        "label": "偽のラベル",
-                        "description": "偽の説明。",
+                        "label": "fake label",
+                        "description": "Fake description.",
                     },
                     "f16-c16": {
                         "weights": {"text_encoder": "f16", "transformer": "f16"},
@@ -131,7 +143,7 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
                         "steps": 7,
                         "guidanceScale": 1,
                         "resolution": {"width": 640, "height": 384},
-                        "negativePrompt": "ネガティブの偽値",
+                        "negativePrompt": "fake negative value",
                     },
                 },
             },
@@ -157,7 +169,7 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
                         "steps": 4,
                         "guidanceScale": 2,
                         "resolution": {"width": 128, "height": 256},
-                        "negativePrompt": "もう一つのネガティブ",
+                        "negativePrompt": "another negative",
                     },
                 },
             },
@@ -166,12 +178,14 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
 
 
 def _official_manifest() -> dict[str, Any]:
-    """公式リポ（karume-anima）の形 — 既定 = Turbo（guidance 1）+ 公式 Aesthetic。"""
+    """The shape of the official repository (karume-anima) — default = Turbo (guidance 1) + the
+    official Aesthetic."""
     return _two_model_manifest(OFFICIAL_DEFAULT, OFFICIAL_SECOND)
 
 
 def _extra_manifest() -> dict[str, Any]:
-    """追加学習リポ（karume-anima-extra）の形 — 既定も CFG 側（多 step + guidance）。"""
+    """The shape of the fine-tune repository (karume-anima-extra) — its default is on the CFG side
+    too (many steps + guidance)."""
     manifest = _two_model_manifest(EXTRA_DEFAULT, EXTRA_SECOND)
     defaults = manifest["models"][EXTRA_DEFAULT]["pipelineConfig"]["defaults"]
     defaults["guidanceScale"] = 4
@@ -198,18 +212,21 @@ def extra_card() -> str:
 
 
 def _quant_row(card: str, name: str) -> str:
-    """quant 表からその席の行を 1 本引く（席名で引く — 列の位置にも既定マークにも依らない）。"""
+    """Pick that entry's row from the quant table (by entry name — independent of column positions
+    and of the default mark)."""
     rows = [line for line in card.splitlines() if line.startswith(f"| `{name}`")]
     assert len(rows) == 1, name
     return rows[0]
 
 
 def _split_manifest() -> dict[str, Any]:
-    """重みが**さらに多くの part** へ割れた配布形（1GiB 超の分割 — container-v1 §8）。
+    """A distribution whose weights are split into **even more parts** (splitting above 1GiB —
+    container-v1 §8).
 
-    実配布の anima はこの形（transformer が 2〜4 part + 資産の part）。重みが 1 part きりの
-    フィクスチャしか無いと、「コンテナ = 1 個のファイル」という散文が事実と食い違ったまま
-    素通りする（実際に公開カードで起きた — X2-103）。
+    The real anima distribution has this shape (the transformer in 2–4 parts + the asset part).
+    With only fixtures whose weights are a single part, prose saying "container = 1 file" would
+    slip through while contradicting the facts (it actually happened on a published card —
+    X2-103).
     """
     manifest = _official_manifest()
     manifest["models"][OFFICIAL_DEFAULT]["weights"]["transformer"]["f16"]["container"]["parts"] = [
@@ -226,13 +243,15 @@ def split_card() -> str:
 
 
 class TestSplitDistribution:
-    """分割された配布形（実配布の形）でカードが事実と食い違わないこと。"""
+    """With a split distribution (the real distribution's shape), the card does not contradict the
+    facts."""
 
     def test_it_counts_every_part_of_a_split_component(self, card: str, split_card: str) -> None:
-        """Download 欄は part を 1 本残らず足す（part 0 だけだと配布量が過小に出る）。
+        """The Download column adds up every single part (part 0 alone would understate the download
+        size).
 
-        分割前の f16 席は 111 + 222 + rope の part 333 + tokenizer 555 = 1,221 B（= 1.19 KiB）、
-        分割後は 222 が 777 + 888 に割れて 2,664 B（= 2.60 KiB）。
+        Before the split the f16 entry is 111 + 222 + rope part 333 + tokenizer 555 = 1,221 B
+        (= 1.19 KiB); after it, 222 splits into 777 + 888 for 2,664 B (= 2.60 KiB).
         """
         assert "| 1.19 KiB (" in _quant_row(card, "f16")
         assert "| 2.60 KiB (" in _quant_row(split_card, "f16")
@@ -240,11 +259,11 @@ class TestSplitDistribution:
     def test_it_never_calls_the_container_a_single_file(
         self, card: str, split_card: str, extra_card: str
     ) -> None:
-        """散文は分割の有無に依らず 1 本（manifest 依存の出し分けはしない — X2-103 裁定 a）。
+        """One wording regardless of splitting (no manifest-dependent variants — X2-103 ruling a).
 
-        `NOTICE.md` の改変列挙は Pipeline 構築時に固定で組まれ manifest を見られないので、
-        カード側だけ出し分けると 2 つの文書が別のことを言う。したがって**どの manifest でも**
-        「1 個の safetensors ファイル」とは書かない。
+        The list of modifications in `NOTICE.md` is fixed when the Pipeline is built and cannot
+        see the manifest, so varying only the card would make the two documents say different
+        things. Hence **no manifest** gets "a single safetensors file".
         """
         for text in (card, split_card, extra_card):
             flat = " ".join(text.split())
@@ -254,31 +273,36 @@ class TestSplitDistribution:
     def test_it_does_not_advertise_the_local_asset_entry_point(
         self, card: str, split_card: str, extra_card: str
     ) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）— HF から使う入口は `fromPretrained`。"""
+        """`fromAssets` is not advertised (ruling of 2026-08-29) — the entry point for using it from
+        HF is `fromPretrained`."""
         for text in (card, split_card, extra_card):
             assert "fromAssets" not in text
 
 
 class TestOfficialCard:
-    """公式リポのカード（`render_base_card`）— CircleStone の 5 変種が同居するリポの 1 枚。"""
+    """The official repository's card (`render_base_card`) — the card of the repository holding
+    CircleStone's 5 variants."""
 
     def test_it_titles_the_repository_as_the_official_one(self, card: str) -> None:
         assert f"# {ANIMA_OFFICIAL_TITLE}" in card
         assert f"# {ANIMA_EXTRA_TITLE}" not in card
 
     def test_it_introduces_every_model_as_an_official_release(self, card: str) -> None:
-        """出所節の導入はリポごとに違う事実 — 取り違えると帰属の主張そのものが入れ替わる。"""
+        """The introduction of the origins section is a fact that differs per repository — mixing
+        them up swaps the attribution claim itself."""
         for line in OFFICIAL_ORIGINS_INTRO:
             assert line in card
         assert EXTRA_ORIGINS_INTRO[0] not in card
 
     def test_it_never_mentions_a_baked_lora(self, card: str) -> None:
-        """Turbo は公式 checkpoint になり、焼き込んだ LoRA が無くなった（2026-09-01）。
+        """Turbo became an official checkpoint, and the baked-in LoRA is gone (2026-09-01).
 
-        帰属節が残っていると、焼いていない配布物が「この LoRA を焼いた」と名乗ることになる —
-        値としては妥当な散文なので、読者が上流を辿って初めて食い違いに気づく。門を**全文**に
-        掛けるのは、帰属節を消しても散文の 1 行が焼き込みを語り続けた実例があるため
-        （`_usage` の step 説明が「the baked-in LoRA is distilled for…」のまま残っていた）。
+        If the attribution section remained, a distribution with nothing baked in would claim
+        "this LoRA was baked in" — the prose is plausible as values go, so a reader would notice
+        the contradiction only by tracing upstream. The check covers **the whole text** because
+        there was a real case where, with the attribution section removed, one line of prose
+        kept talking about baking (the step explanation of `_usage` still said "the baked-in LoRA
+        is distilled for…").
         """
         assert "LoRA" not in card
         assert "## Baked-in LoRA" not in card
@@ -286,13 +310,14 @@ class TestOfficialCard:
         assert "1b55e40bdb1d0e5a78cb498f245fccfdaae97823265db957d2aabdcf4cd3caf1" not in card
 
     def test_it_shows_the_attribution_notice_verbatim(self, card: str) -> None:
-        """§3(b) の掲示要件は逐語で満たす（要約は掲示でない）。"""
+        """The display requirement of §3(b) is met verbatim (a summary is not a display)."""
         assert ATTRIBUTION_NOTICE in card
 
     def test_it_specifies_that_the_rights_are_granted_directly_by_the_company(
         self, card: str
     ) -> None:
-        """§3(a) 後段の明示文は `NOTICE.md` と同じ 1 定数を逐語で載せる。"""
+        """The explicit statement of the latter half of §3(a) carries, verbatim, the same single
+        constant as `NOTICE.md`."""
         assert RIGHTS_GRANT_STATEMENT in card
 
     def test_it_carries_the_nvidia_open_model_license_part(self, card: str) -> None:
@@ -318,9 +343,11 @@ class TestOfficialCard:
         )
 
     def test_it_states_that_the_outputs_stay_the_users_own(self, card: str) -> None:
-        """ライセンス v1.2 §2(e) — 非商用の縛りが掛かるのは重みで、生成物には掛からない。
+        """License v1.2 §2(e) — the non-commercial restriction applies to the weights, not to the
+        outputs.
 
-        読者が最初に知りたい 1 点なので、License 節の中で名指しする（一次確認 2026-09-01）。
+        It is the first thing a reader wants to know, so the License section names it (checked
+        against the primary source 2026-09-01).
         """
         _, _, license_section = card.partition("## License")
         section, _, _ = license_section.partition("## Models")
@@ -331,7 +358,8 @@ class TestOfficialCard:
         assert "the non-commercial restriction applies to the model weights and derivatives" in flat
 
     def test_the_license_section_points_at_the_two_files_shipped_alongside(self, card: str) -> None:
-        """§3(a) のライセンス文と §3(d) の Notice は同梱物 — カードはその在り処を言う。"""
+        """The license text of §3(a) and the Notice of §3(d) are shipped alongside — the card says
+        where they are."""
         _, _, license_section = card.partition("## License")
         section, _, _ = license_section.partition("## Models")
         assert "`LICENSE.md`" in section
@@ -348,7 +376,8 @@ class TestOfficialCard:
         assert f"{title} (non-commercial use only)" in flat
 
     def test_the_license_section_denies_any_official_standing(self, card: str) -> None:
-        """§3(d)(iii) — 公式製品・承認済みと誤認させない（折り位置に依らず**文**で見る）。"""
+        """§3(d)(iii) — must not be mistaken for an official or endorsed product (checked as **a
+        sentence**, regardless of where lines wrap)."""
         _, _, license_section = card.partition("## License")
         section, _, _ = license_section.partition("## Models")
         assert (
@@ -357,10 +386,11 @@ class TestOfficialCard:
         )
 
     def test_it_stays_silent_about_third_party_permissions(self, card: str) -> None:
-        """公式リポに掛かるのは CircleStone のライセンス 1 本だけ。
+        """Only CircleStone's single license applies to the official repository.
 
-        第三者 fine-tune 向けの注意書き（出所ページの許諾・再ライセンス禁止）が常時出ると、
-        読み手はこのリポにも別の条件が重なっていると読む。
+        If the notes meant for third-party fine-tunes (the source page's permissions, no
+        relicensing) always appeared, readers would take it that other conditions apply to this
+        repository too.
         """
         assert "do not relicense it" not in card
         assert "community fine-tunes are redistributed" not in " ".join(card.split())
@@ -374,23 +404,27 @@ class TestOfficialCard:
             assert f"- **Converted from**: `{upstream.file}`" in card
 
     def test_it_lists_the_origins_in_manifest_order(self, card: str) -> None:
-        """出所節の並びは manifest のまま — `models` 表・モデル別節と同じ順序にする。
+        """The origins section keeps the manifest's order — the same order as the `models` table and
+        the per-model sections.
 
-        名前順に並べ替えると、既定モデルより後ろに来るはずのものが先頭へ出る（実際に
-        `anima-copycat-…` が先頭に出て指摘された）。同じカードの中で 2 通りの順序が
-        混在すると、読者は「この並びには意味がある」と読んでしまう。
+        Sorting by name would bring to the front what should come after the default model (this
+        really happened: `anima-copycat-…` came first and was pointed out). Two orders mixed in
+        one card make readers think "this order means something".
         """
         order = list(_official_manifest()["models"])
-        assert order != sorted(order), "名前順と一致する並びでは順序の主張を検査できない"
+        assert order != sorted(order), (
+            "an order that equals name order cannot test the ordering claim"
+        )
         positions = [card.index(f"### `{name}` — ") for name in order]
         assert positions == sorted(positions)
 
     def test_it_refuses_a_model_whose_origin_is_unknown(self) -> None:
-        """出所表に無いモデルは**帰属を書けない** — 黙って省かず落とす。"""
+        """A model not in the origins table **cannot get an attribution** — it fails instead of
+        being silently omitted."""
         manifest = _official_manifest()
         manifest["models"]["anima-nope"] = manifest["models"][OFFICIAL_DEFAULT]
 
-        with pytest.raises(ValueError, match=r"出所が card\.py に無い"):
+        with pytest.raises(ValueError, match=r"has no origin in card\.py"):
             _official(manifest)
 
     def test_it_refuses_another_pipelines_manifest(self) -> None:
@@ -402,7 +436,8 @@ class TestOfficialCard:
 
 
 class TestExtraCard:
-    """追加学習リポのカード（`render_extra_card`）— 第三者 fine-tune だけが並ぶリポの 1 枚。"""
+    """The fine-tune repository's card (`render_extra_card`) — the card of the repository that
+    lists only third-party fine-tunes."""
 
     def test_it_titles_the_repository_as_the_community_one(self, extra_card: str) -> None:
         assert f"# {ANIMA_EXTRA_TITLE}" in extra_card
@@ -414,25 +449,30 @@ class TestExtraCard:
         assert OFFICIAL_ORIGINS_INTRO[0] not in extra_card
 
     def test_it_points_the_reader_at_the_official_repository(self, extra_card: str) -> None:
-        """text stack は公式リポへの越境参照で持つ（`karume.json` の pinned 参照）。
+        """The text stack is held as a cross-repository reference to the official repository (the
+        pinned reference of `karume.json`).
 
-        どこから重みが来るのかを書かないと、読者は「このリポだけで閉じている」と読む。
+        Without saying where the weights come from, readers take it that "this repository is
+        self-contained".
         """
         assert "hdae/karume-anima" in extra_card
         assert "The official models (base / Aesthetic /" in extra_card
 
     def test_it_never_mentions_a_baked_lora(self, extra_card: str) -> None:
-        """LoRA を焼いていない配布物で LoRA を名乗ると、帰属そのものが嘘になる。"""
+        """Naming a LoRA in a distribution with no LoRA baked in makes the attribution itself a
+        lie."""
         assert "LoRA" not in extra_card
 
     def test_it_shows_the_attribution_notice_verbatim(self, extra_card: str) -> None:
-        """§3(b) の掲示要件は公式リポ側と同じく逐語で満たす。"""
+        """The display requirement of §3(b) is met verbatim, as on the official repository's
+        card."""
         assert ATTRIBUTION_NOTICE in extra_card
 
     def test_it_specifies_that_the_rights_are_granted_directly_by_the_company(
         self, extra_card: str
     ) -> None:
-        """§3(a) 後段の明示文は公式リポ側と同じ 1 定数を逐語で載せる。"""
+        """The explicit statement of the latter half of §3(a) carries, verbatim, the same single
+        constant as the official repository's card."""
         assert RIGHTS_GRANT_STATEMENT in extra_card
 
     def test_it_carries_the_nvidia_open_model_license_part(self, extra_card: str) -> None:
@@ -443,26 +483,30 @@ class TestExtraCard:
         assert "Built on NVIDIA Cosmos." in lines
 
     def test_it_lists_the_permissions_of_every_source_page(self, extra_card: str) -> None:
-        """出所ページの許諾欄は作者ごとに違う — **出所ごとに逐語で**載せる。"""
+        """The permissions of the source page differ per author — carried **verbatim per
+        source**."""
         for name in (EXTRA_DEFAULT, EXTRA_SECOND):
             for key, value in UPSTREAM_MODELS[name].permissions:
                 assert f"- `{key}`: {value}" in extra_card
 
     def test_it_warns_when_a_source_forbids_relicensing(self, extra_card: str) -> None:
-        """`allowDifferentLicense` が false の出所は「同じ条件で配る」ことを要求する。"""
+        """A source whose `allowDifferentLicense` is false requires "redistribute under the same
+        terms"."""
         assert "allowDifferentLicense`: false" in extra_card
         assert "do not relicense it" in extra_card
         assert f"`{EXTRA_SECOND}`" in extra_card.partition("do not relicense it")[0]
 
     def test_it_stays_silent_about_relicensing_when_no_source_forbids_it(self) -> None:
-        """条件の無いリポにだけ効く注意書きが常時出ると、読み手が条件を取り違える。"""
+        """A note that matters only for some repositories would, if always shown, make readers
+        misread the terms."""
         manifest = _extra_manifest()
         del manifest["models"][EXTRA_SECOND]
 
         assert "do not relicense it" not in _extra(manifest)
 
     def test_it_never_lists_a_model_the_manifest_does_not_carry(self) -> None:
-        """帰属を組み立ての引数から独立に持つと、入っていないモデルの出所が載る。"""
+        """Holding the attribution independently of the build arguments would list the origin of a
+        model that is not included."""
         manifest = _extra_manifest()
         del manifest["models"][EXTRA_SECOND]
         card = _extra(manifest)
@@ -471,7 +515,8 @@ class TestExtraCard:
         assert UPSTREAM_MODELS[EXTRA_DEFAULT].source in card
 
     def test_its_usage_snippet_keeps_the_cfg_knobs_as_defaults(self, extra_card: str) -> None:
-        """CFG が既定で入っている配布物では、guidance / negative を「省略可の既定」として出す。"""
+        """In a distribution whose default uses CFG, guidance / negative are shown as "optional
+        defaults"."""
         assert "// guidanceScale: 4, // default" in extra_card
         assert "makes the negative prompt take effect" in extra_card
 
@@ -518,7 +563,8 @@ class TestFrontmatter:
     def test_both_repositories_declare_the_same_upstream_license(
         self, card: str, extra_card: str
     ) -> None:
-        """どちらのリポも同じ base の Derivative — 上流ライセンスは 1 本しか掛からない。"""
+        """Both repositories are Derivatives of the same base — only one upstream license
+        applies."""
         assert card.split("---")[1] == extra_card.split("---")[1]
 
 
@@ -536,7 +582,8 @@ class TestSections:
         ]
 
     def test_the_extra_card_carries_the_same_shape(self, extra_card: str) -> None:
-        """2 枚のカードは**同じ骨格**（違うのは題・概要・出所節の導入だけ）。"""
+        """The two cards have **the same skeleton** (only the title, the overview and the
+        introduction of the origins section differ)."""
         headings = [line for line in extra_card.splitlines() if line.startswith("## ")]
         assert headings == [
             "## What is this",
@@ -564,33 +611,38 @@ class TestSections:
         assert "using pipeline" in card
 
     def test_the_usage_snippet_declares_the_pipeline_with_await_using(self, card: str) -> None:
-        """`anima.Pipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期の `using` は宣言で落ちる。
+        """`anima.Pipeline` has only `[Symbol.asyncDispose]` — a synchronous `using` fails at the
+        declaration.
 
-        部分一致（`"using pipeline" in card`）は `await using` でも `using` でも通るので、
-        宣言行を丸ごと突き合わせる。
+        A substring match (`"using pipeline" in card`) passes for both `await using` and
+        `using`, so the whole declaration line is compared.
         """
         lines = card.splitlines()
         assert "await using pipeline = await Pipeline.fromPretrained({" in lines
         assert not any(line.startswith("using pipeline") for line in lines)
 
     def test_the_usage_snippet_offers_the_revision_pin(self, card: str) -> None:
-        """source は object ref 形 — revision を書く席が無いと読み手は暗黙に `main` 追従になる。"""
+        """The source is in object ref form — without a place to write the revision, readers
+        implicitly follow `main`."""
         assert '  // revision: "<full commit sha>",' in card
         assert "Pin a commit for reproducible builds" in card
 
     def test_the_usage_snippet_carries_the_optional_knobs_commented_out(self, card: str) -> None:
-        """裁定 2026-08-12 の形: 動く最小形 + `generate()` の optional をコメントで併記する
-        （値は manifest 由来 — steps も解像度もこの偽 manifest の値がそのまま出る）。
+        """The form of the 2026-08-12 ruling: the minimal working form + `generate()`'s optional
+        arguments written alongside as comments (the values come from the manifest — both steps
+        and resolution show this fake manifest's values as they are).
         """
         assert "  // steps: 7, //" in card
         assert "  // resolution: { width: 640, height: 384 }, // default" in card
-        # guidance と negativePrompt は**対**で意味を持つ（guidanceScale 1 では後者が拒まれる）。
+        # guidance and negativePrompt mean something **as a pair** (with guidanceScale 1 the
+        # latter is rejected).
         assert "  // guidanceScale: 5," in card
-        assert '  // negativePrompt: "ネガティブの偽値",' in card
+        assert '  // negativePrompt: "fake negative value",' in card
 
 
 class TestModelSelection:
-    """v2 で初めて機械可読になった軸（ADR 0041 §2）— 一覧・既定・使い方の 3 箇所に出る。"""
+    """The axis that first became machine-readable in v2 (ADR 0041 §2) — it shows up in 3 places:
+    the list, the default and the usage."""
 
     def test_it_lists_every_model_with_its_quants(self, card: str) -> None:
         _, _, rest = card.partition("## Models")
@@ -603,8 +655,9 @@ class TestModelSelection:
         ]
 
     def test_the_usage_snippet_names_the_default_model_and_its_quant(self, card: str) -> None:
-        """既定は綴られたうえで**コメントアウト**（裁定 2026-08-12 の「コメントを外すだけ」形）
-        で、選べる値は同じ行に manifest から列挙される（モデル / quant が増えれば追従する）。
+        """The default is spelled out and **commented out** (the "just uncomment it" form of the
+        2026-08-12 ruling), and the selectable values are listed from the manifest on the same
+        line (they follow when models / quants are added).
         """
         available = " / ".join(sorted((OFFICIAL_DEFAULT, OFFICIAL_SECOND)))
         assert f'  // model: "{OFFICIAL_DEFAULT}", // default — available: {available}' in card
@@ -624,23 +677,27 @@ class TestModelSelection:
 
 
 class TestDerivation:
-    """MUST: 数値・ダウンロード量・quant 表は manifest 由来（手書きが混ざっていない）。"""
+    """MUST: the numbers, download sizes and quant table come from the manifest (nothing
+    hand-written mixed in)."""
 
     def test_each_model_section_counts_only_its_own_files(self, card: str) -> None:
-        """節ごとに数え直す — 既定席は 111 + i8 444 + rope の part 333 + tokenizer 555 = 1,443 B
-        （= 1.41 KiB）、2 本目は 111 + i8 666 + tokenizer 555 = 1,332 B（= 1.30 KiB）。
+        """Counted again per section — the default entry is 111 + i8 444 + rope part 333 + tokenizer
+        555 = 1,443 B (= 1.41 KiB), the 2nd is 111 + i8 666 + tokenizer 555 = 1,332 B
+        (= 1.30 KiB).
         """
         _, _, rest = card.partition(f"## Model: {OFFICIAL_DEFAULT}")
         first, _, second = rest.partition(f"## Model: {OFFICIAL_SECOND}")
 
         assert "| 1.41 KiB (666 B shared; 555 B of assets, read on the host) |" in first
         assert "| 1.30 KiB (666 B shared; 555 B of assets, read on the host) |" in second
-        # shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 重みの path はカードに 1 つも出ない。
+        # The one-row-per-shard table was dropped (ruling of 2026-09-03) — no weight path
+        # appears on the card.
         assert f"{OFFICIAL_DEFAULT}/transformer" not in card
         assert "shared/text_encoder/model.krm" not in card
 
     def test_it_counts_the_asset_part_in_every_seat_that_declares_it(self, card: str) -> None:
-        """資産（rope 素表）の専用 part も落ちるファイル — 両 dtype の席が 1 本ずつ持つ。"""
+        """The dedicated part of the asset (the rope base table) is a downloaded file too — each of
+        the two dtype entries has one."""
         manifest = _official_manifest()
         for entry in manifest["models"][OFFICIAL_DEFAULT]["weights"]["transformer"].values():
             del entry["container"]["parts"][-1]
@@ -651,7 +708,8 @@ class TestDerivation:
         assert "| 1.08 KiB (" in _quant_row(dropped, "f16+dit8-a8")
 
     def test_an_asset_is_counted_in_every_quant(self, card: str) -> None:
-        """assets は quant 選択に依存しない無条件ファイル（ADR 0041 §3）— どの席にも乗る。"""
+        """assets are unconditional files independent of the quant choice (ADR 0041 §3) — they count
+        in every entry."""
         manifest = _official_manifest()
         manifest["models"][OFFICIAL_DEFAULT]["assets"] = {}
         dropped = _official(manifest)
@@ -670,7 +728,8 @@ class TestDerivation:
         assert "| 2.28 KiB (" in _quant_row(moved, "f16+dit8-a8")
 
     def test_it_marks_exactly_the_default_quant_of_each_model(self, card: str) -> None:
-        """印は**モデルごとに 1 つ**（既定は quant 表の持ち主が決める — ADR 0041 §2）。"""
+        """**One mark per model** (the owner of the quant table decides the default — ADR 0041
+        §2)."""
         _, _, rest = card.partition(f"## Model: {OFFICIAL_DEFAULT}")
         first, _, second = rest.partition(f"## Model: {OFFICIAL_SECOND}")
         marked = {
@@ -685,7 +744,8 @@ class TestDerivation:
             default = [line for line in rows if "(default)" in line]
             assert len(default) == 1
             assert default[0].startswith(expected)
-        # 表に「既定」列を持たない（印は名前の横だけ — 列が空欄で並ぶ形にしない）。
+        # The table has no "default" column (the mark is only next to the name — no column of
+        # blanks).
         assert "| Quant | What it is | Download | Weights | Compute |" in card
 
     def test_it_carries_every_quant_with_its_session_knobs(self, card: str) -> None:
@@ -697,24 +757,27 @@ class TestDerivation:
         assert "requires `shaderF16`" in card
 
     def test_it_prints_the_presentation_fields_the_manifest_carries(self, card: str) -> None:
-        """表示欄はカードにも同じ文字列で出る（ADR 0075 決定 5 — 説明が 2 箇所で育たない）。"""
-        assert "**偽のラベル** — 偽の説明。" in card
+        """The presentation fields appear on the card with the same strings (ADR 0075 decision 5 —
+        the description does not grow in 2 places)."""
+        assert "**fake label** — Fake description." in card
 
     def test_it_explains_the_abbreviation_the_seat_names_use(self, card: str) -> None:
-        """略称の対応は**必ず**出す（ADR 0074 決定 4）— `dit8` がどの部品の話か読めるように。"""
+        """The abbreviation mapping is **always** shown (ADR 0074 decision 4) — so that readers can
+        tell which component `dit8` is about."""
         assert "In a quant name, `dit` is the `transformer` component." in card
 
     def test_it_takes_the_defaults_from_each_models_pipeline_config(self, card: str) -> None:
         assert "- **steps**: 7" in card
         assert "- **resolution**: 640 × 384" in card
-        assert "ネガティブの偽値" in card
+        assert "fake negative value" in card
         assert "- **steps**: 4" in card
         assert "- **resolution**: 128 × 256" in card
 
     def test_it_only_warns_about_the_unused_negative_prompt_at_guidance_one(
         self, card: str
     ) -> None:
-        """注意書きが出るのは guidance 1 の席だけ（偽 manifest では既定モデルの 1 本）。"""
+        """The note appears only for guidance 1 entries (in the fake manifest, the one of the
+        default model)."""
         manifest = _official_manifest()
         manifest["models"][OFFICIAL_DEFAULT]["pipelineConfig"]["defaults"]["guidanceScale"] = 4
 

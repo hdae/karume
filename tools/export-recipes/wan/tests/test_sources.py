@@ -1,7 +1,9 @@
-"""`wan/sources.py` の約束事 — 上流取得元の pin と、取得した部品の中身。
+"""The contract of `wan/sources.py` — the pins of the upstream sources and the contents of the
+fetched components.
 
-pin の形（40 桁の SHA・取得する部品の集合）は重み無しで見る。取得した config と
-パラメータ数は {@link wan_snapshot}（取得済みでなければ SKIP）で見る。
+The shape of the pins (40-digit SHAs, the set of fetched components) is checked without weights.
+The fetched config and parameter counts are checked with {@link wan_snapshot} (SKIP unless already
+fetched).
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ from wan import sources
 
 class TestPin:
     def test_every_revision_is_a_full_commit_sha(self):
-        """ブランチ名や短縮 SHA は既定ブランチの移動で読む中身が黙って変わる。"""
+        """A branch name or a short SHA silently changes what is read when the default branch
+        moves."""
         for source in sources.SOURCES.values():
             assert re.fullmatch(r"[0-9a-f]{40}", source.revision), source
 
@@ -29,7 +32,8 @@ class TestPin:
         assert source.license == "apache-2.0"
 
     def test_it_fetches_dit_vae_and_scheduler_but_never_the_text_encoder(self):
-        """umT5（f32 約 22.7 GB）を取得対象に入れると、31 GiB 機の参照が別プロセスに分かれない。"""
+        """With umT5 (about 22.7 GB in f32) among the fetch targets, the reference on a 31 GiB
+        machine could not be split into separate processes."""
         parts = sources.COMPONENTS[sources.DEFAULT_MODEL]
         fetched = {part.subfolder for part in parts if part.fetch}
         skipped = {part.subfolder for part in parts if not part.fetch}
@@ -42,8 +46,8 @@ class TestPin:
         )
 
     def test_the_text_embedding_process_takes_exactly_the_skipped_parts(self):
-        """`wan.text_embeds` の取得口（`text_snapshot`）が取るのは DiT / VAE 側が取らない
-        部品だけ。"""
+        """The fetch entry point of `wan.text_embeds` (`text_snapshot`) takes only the components
+        the DiT / VAE side does not take."""
         assert set(sources.text_components(sources.DEFAULT_MODEL)) == {"text_encoder", "tokenizer"}
 
 
@@ -66,7 +70,7 @@ class TestSafetensorsHeader:
 
 class TestFetchedSnapshot:
     def test_the_scheduler_is_flow_unipc_with_shift_3(self, wan_snapshot: Path):
-        """参照の設定は配布物の config をそのまま使う（ADR 0118 決定 5）。"""
+        """The reference settings use the config of the distribution as is (ADR 0118 decision 5)."""
         config = json.loads((wan_snapshot / "scheduler" / "scheduler_config.json").read_text())
 
         assert config["_class_name"] == "UniPCMultistepScheduler"
@@ -96,8 +100,8 @@ class TestFetchedSnapshot:
 
 
 class TestTheTi2v5bRow:
-    """Wan2.2 TI2V-5B の行（ADR 0121 決定 1）— pin・取得範囲・期待パラメータ数がモデル別の
-    表に載る。"""
+    """The Wan2.2 TI2V-5B row (ADR 0121 decision 1) — the pin, the fetch scope and the expected
+    parameter counts are in the per-model tables."""
 
     MODEL = "ti2v-5b"
 
@@ -109,8 +113,8 @@ class TestTheTi2v5bRow:
         assert source.license == "apache-2.0"
 
     def test_it_fetches_dit_vae_and_scheduler_and_never_the_text_parts(self):
-        """umT5 は越境参照・トークナイザ資産は Wan2.1 の系列から写す（決定 9）— どの経路でも
-        取らない。"""
+        """umT5 is a cross-repository reference and the tokenizer assets are copied from the Wan2.1
+        series (decision 9) — fetched on no path."""
         parts = sources.COMPONENTS[self.MODEL]
 
         assert {part.subfolder for part in parts if part.fetch} == {
@@ -131,7 +135,7 @@ class TestTheTi2v5bRow:
     def test_asking_for_its_text_snapshot_fails_before_any_download(self):
         pytest.importorskip("huggingface_hub")
 
-        with pytest.raises(sources.WanSourceError, match="決定 9"):
+        with pytest.raises(sources.WanSourceError, match="decision 9"):
             sources.text_snapshot(self.MODEL, fetch=True)
 
     def test_the_expected_parameters_are_the_counts_of_the_adr(self):
@@ -146,7 +150,8 @@ class TestTheTi2v5bRow:
 
 
 class TestTheModelKeyedCheck:
-    """`check_snapshot` は渡したモデルの行で数を突き合わせる（別のモデルの行で通らない）。"""
+    """`check_snapshot` matches the counts against the row of the model passed (another model's
+    row does not let it through)."""
 
     def _snapshot(self, tmp_path: Path) -> Path:
         torch = pytest.importorskip("torch")
@@ -166,18 +171,18 @@ class TestTheModelKeyedCheck:
         )
 
         assert sources.check_snapshot(snapshot, "a") == {"transformer": 6, "vae": 4}
-        with pytest.raises(sources.WanSourceError, match="b: パラメータ数"):
+        with pytest.raises(sources.WanSourceError, match="b: parameter counts"):
             sources.check_snapshot(snapshot, "b")
 
     def test_an_unknown_model_fails_loudly(self, tmp_path: Path):
-        with pytest.raises(sources.WanSourceError, match="期待パラメータ数が無い"):
+        with pytest.raises(sources.WanSourceError, match="no expected parameter counts"):
             sources.check_snapshot(tmp_path, "unknown")
-        with pytest.raises(sources.WanSourceError, match="部品の表が無い"):
+        with pytest.raises(sources.WanSourceError, match="no component table"):
             sources.allow_patterns("unknown")
 
 
-#: Wan2.1 に固定した台本（系列の置き場・ケースの表・テキスト段が Wan2.1 — `--model` の受理は
-#: `WAN21_MODELS`）と、引数の残り（必須の位置引数）。
+#: The scripts fixed to Wan2.1 (series location, case table and text step are Wan2.1 — `--model`
+#: accepts `WAN21_MODELS`) and the rest of their arguments (the required positional arguments).
 WAN21_SCRIPTS = (
     ("wan.export_dit", ["--verify"]),
     ("wan.dit_host_fixture", []),
@@ -193,7 +198,8 @@ WAN21_SCRIPTS = (
 
 @pytest.mark.parametrize(("module", "rest"), WAN21_SCRIPTS, ids=[m for m, _ in WAN21_SCRIPTS])
 def test_the_wan21_scripts_refuse_the_ti2v_5b_model(module: str, rest: list[str], capsys):
-    """表に `ti2v-5b` が載っても、Wan2.1 の系列へ書く台本は 5B を受けない（引数の段で止まる）。"""
+    """Even with `ti2v-5b` in the table, the scripts that write into the Wan2.1 series do not
+    accept the 5B (they stop at argument parsing)."""
     pytest.importorskip("diffusers")
     import importlib
 
@@ -208,7 +214,7 @@ def test_the_wan21_scripts_refuse_the_ti2v_5b_model(module: str, rest: list[str]
 
 
 class TestTheUmt5Row:
-    """umT5 の上流の表（本家 `google/umt5-xxl` — ADR 0122 決定 1 / 2）。"""
+    """The umT5 upstream table (the original `google/umt5-xxl` — ADR 0122 decisions 1 / 2)."""
 
     def test_it_pins_a_full_commit_and_full_shard_digests(self):
         for row in sources.UMT5_SOURCES.values():
@@ -217,8 +223,8 @@ class TestTheUmt5Row:
             assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in row.tokenizer.values())
 
     def test_the_tokenizer_pin_names_the_two_files_the_truth_reads(self):
-        """`AutoTokenizer` がリポ全体と同じ backend を組むのに要る 2 本
-        （`wan.umt5_xxl_tokenizer`）。"""
+        """The two files `AutoTokenizer` needs to build the same backend as from the whole
+        repository (`wan.umt5_xxl_tokenizer`)."""
         assert sorted(sources.UMT5_SOURCES["xxl"].tokenizer) == [
             "tokenizer.json",
             "tokenizer_config.json",
@@ -236,14 +242,15 @@ class TestTheUmt5Row:
         assert sources.umt5_encoder_shards(weight_map) == frozenset({"a.bin", "b.bin"})
 
     def test_an_index_that_disagrees_with_the_table_fails_loudly(self, tmp_path: Path):
-        """索引が動いた（encoder の重みが表に無い shard に載る）・表が古い、を黙って通さない。"""
+        """An index that moved (encoder weights in a shard not in the table) or a stale table is
+        not silently let through."""
         index = tmp_path / sources.UMT5_BIN_INDEX
         index.write_text(
             json.dumps({"weight_map": {"shared.weight": "a.bin", "encoder.final.weight": "b.bin"}}),
             encoding="utf-8",
         )
 
-        with pytest.raises(sources.WanSourceError, match="表の shard"):
+        with pytest.raises(sources.WanSourceError, match="table's shards"):
             sources.pinned_umt5_shards(index, {"a.bin": "0" * 64})
         assert sources.pinned_umt5_shards(index, {"a.bin": "0" * 64, "b.bin": "1" * 64}) == {
             "shared.weight": "a.bin",
@@ -251,19 +258,20 @@ class TestTheUmt5Row:
         }
 
     def test_an_unknown_model_fails_before_any_download(self, tmp_path: Path):
-        with pytest.raises(sources.WanSourceError, match="上流の表に無い"):
+        with pytest.raises(sources.WanSourceError, match="not in the upstream table"):
             sources.umt5_snapshot("base")
-        with pytest.raises(sources.WanSourceError, match="上流の表に無い"):
+        with pytest.raises(sources.WanSourceError, match="not in the upstream table"):
             sources.pinned_umt5_tokenizer("base", tmp_path / "out")
 
 
 class TestThePinnedUmt5Tokenizer:
-    """照合したバイト列だけを写す（表の sha256 と違えば 1 本も写さずに落ちる）。"""
+    """Only verified bytes are copied (a mismatch with the table's sha256 fails without copying
+    any file)."""
 
     @pytest.fixture
     def cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """合成の HF キャッシュ（表のファイル 2 本 + 表に無い `config.json`）と、それを指す表の
-        行。"""
+        """A synthetic HF cache (the two files of the table + a `config.json` not in the table) and
+        a table row pointing at it."""
         cache = tmp_path / "cache"
         cache.mkdir()
         files = {"tokenizer.json": b'{"a": 1}', "tokenizer_config.json": b'{"b": 2}'}
@@ -293,20 +301,20 @@ class TestThePinnedUmt5Tokenizer:
     def test_a_file_that_differs_from_the_pin_fails_loudly(self, cache: Path, tmp_path: Path):
         (cache / "tokenizer_config.json").write_bytes(b'{"b": 3}')
 
-        with pytest.raises(sources.WanSourceError, match="表の"):
+        with pytest.raises(sources.WanSourceError, match="in the table"):
             sources.pinned_umt5_tokenizer("xxl", tmp_path / "out")
         assert not (tmp_path / "out").exists()
 
 
 class TestTheFetchedUmt5Snapshot:
     def test_the_cached_snapshot_has_the_pinned_shards(self):
-        """取得済みの機だけ（無ければ SKIP）: 索引から導いた shard が表の 3 本で、config が
-        読める。"""
+        """Only on a machine that has fetched it (SKIP otherwise): the shards derived from the index
+        are the 3 of the table, and the config is readable."""
         pytest.importorskip("huggingface_hub")
         try:
             snapshot = sources.umt5_snapshot("xxl")
         except sources.WanSourceError as error:
-            pytest.skip(f"本家 umT5 の shard が手元に無い: {error}")
+            pytest.skip(f"the original umT5 shards are not available locally: {error}")
         pinned = sources.UMT5_SOURCES["xxl"].shards
 
         assert set(

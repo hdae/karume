@@ -1,69 +1,88 @@
-"""w8 / w8a8 / attention a8 の**量子化品質**を torch CPU 上で測る（Q0 の品質ゲート）。
+"""Measure the **quantization quality** of w8 / w8a8 / attention a8 on torch CPU (the Q0 quality
+gate).
 
-GPU コードは 0 行。ADR 0006 の fake-quant 方法論では E2E は**実装誤差しか測らない**ので、
-量子化そのものの質は別軸で測る必要がある（ADR 0019 の品質ゲート①）。この台本はその軸を
-Anima DiT で埋める。
+Zero lines of GPU code. Under ADR 0006's fake-quant methodology the E2E tests **measure only
+implementation error**, so the quality of the quantization itself has to be measured on a separate
+axis (quality gate ① of ADR 0019). This script covers that axis for the Anima DiT.
 
-10 構成を**同一プロセス・同一 seed**で走らせて直交分解する（{@link CONFIGS}）:
+It runs 10 configurations **in the same process with the same seed** and decomposes them
+orthogonally ({@link CONFIGS}):
 
-    (a) f32               基準（LoRA 焼き込み済みの素の重み）
-    (b) w8                重みのみ per-channel symmetric i8 で fake-quant（`fake_quant_int8`）
-    (c) w8a8              (b) + **適格 linear の入力活性**を per-token symmetric i8 で fake-quant
-    (d) w8a8-qk           (c) + attention の **q / k のみ** i8
-    (e) w8a8-pv           (c) + attention の **P̃ / V のみ** i8
-    (f) w8a8-qkpv         (c) + attention の q/k/P̃/V を i8（attention a8 の本命）
-    (g) w8-qkpv           (b) + attention のみ i8（linear 活性は f32 運用のときの単独寄与）
-    (i) w8a8-qkpv-s16     (f) + **attention スコア S を f16 で格納**（案γ 波 1 の実運用形）
-    (j) w8a8-s16          (c) + S の f16 格納のみ（S 丸め単独の寄与を分離する）
-    (h) w8a8-qkpv-statsq  (f) の softmax 分母を**量子化後総和** `Σ round(127·P̃)/127` に置換
+    (a) f32               the baseline (the plain weights with the LoRA merged)
+    (b) w8                weight-only per-channel symmetric i8 fake-quant (`fake_quant_int8`)
+    (c) w8a8              (b) + per-token symmetric i8 fake-quant of **the input activations of the
+                          eligible linears**
+    (d) w8a8-qk           (c) + i8 on **only q / k** of attention
+    (e) w8a8-pv           (c) + i8 on **only P̃ / V** of attention
+    (f) w8a8-qkpv         (c) + i8 on q/k/P̃/V of attention (the main candidate of attention a8)
+    (g) w8-qkpv           (b) + i8 on attention only (its contribution alone with the linear
+                          activations in f32)
+    (i) w8a8-qkpv-s16     (f) + **the attention score S stored in f16** (the production form of
+                          option γ, phase 1)
+    (j) w8a8-s16          (c) + only the f16 storage of S (isolates the contribution of the
+                          S rounding alone)
+    (h) w8a8-qkpv-statsq  (f) with the softmax denominator replaced by **the post-quantization sum**
+                          `Σ round(127·P̃)/127`
 
-記号は**外部参照の安定のため据え置き**（ADR 0030 と ACTIVE_DESIGN が「構成 (h)」を名指しで
-参照している）。実行順は上の並びどおりで、(h) は末尾のまま — (h) は波 Q0 で**不採用確定**なので、
-`--until w8a8-qkpv-s16` が案γ の門に必要な最小の前方接頭辞になる（{@link CONFIGS} のコメント）。
+The labels are **kept as they are so that external references stay stable** (ADR 0030 and
+ACTIVE_DESIGN refer to "configuration (h)" by name). The run order is the order above, with (h)
+staying last — (h) was **definitively rejected** in phase Q0, so `--until w8a8-qkpv-s16` is the
+minimal forward prefix that the option γ gate needs (the comment on {@link CONFIGS}).
 
-(c) の活性量子化は `docs/research/2026-08-03-dp4a-w8a8-design.md` §4.2 の数値仕様の鏡像:
+The activation quantization of (c) mirrors the numeric spec of
+`docs/research/2026-08-03-dp4a-w8a8-design.md` §4.2:
 
-    s = clamp(rowmax(|x|) / 127, f32 tiny)      … 行 = 最終軸（per-token）
-    q = clamp(round(x / s), -127, +127)         … **±127 に閉じる**（−128 不使用）
+    s = clamp(rowmax(|x|) / 127, f32 tiny)      … row = last axis (per-token)
+    q = clamp(round(x / s), -127, +127)         … **closed at ±127** (−128 unused)
     x̂ = q · s
 
-`torch.round` は偶数丸め。全ゼロ行は `s = tiny` → `q = 0` → `x̂ = 0` で厳密。
-適格判定は同 doc §4.1 と同じ「DiT 内の `nn.Linear`（bias 有無を問わない）で `k % 4 == 0`」。
+`torch.round` rounds half to even. An all-zero row is exact: `s = tiny` → `q = 0` → `x̂ = 0`.
+Eligibility is the same as §4.1 of that doc: "an `nn.Linear` inside the DiT (with or without bias)
+with `k % 4 == 0`".
 
-(d)〜(h) の attention 量子化の粒度は `docs/research/2026-08-04-attention-a8-design.md` §5.1 の
-粒度 MUST 表（= ランタイムが実装できる粒度と厳密一致）。詳細は {@link attention_sim}。
-(i)(j) の S f16 格納は `docs/research/2026-08-04-intermediate-f16-design.md` §3.4② / §7 波 1 の
-実装形と粒度厳密一致（{@link round_scores_f16}）。
+The granularity of the attention quantization of (d)–(h) is the granularity MUST table of
+`docs/research/2026-08-04-attention-a8-design.md` §5.1 (= exactly the granularity the runtime can
+implement). Details in {@link attention_sim}.
+The f16 storage of S in (i)(j) matches the implementation of
+`docs/research/2026-08-04-intermediate-f16-design.md` §3.4② / §7 phase 1 exactly in granularity
+({@link round_scores_f16}).
 
-MUST: (a)→(b)→… の順に**同じモデルインスタンス**を使う（fake_quant_int8 は in-place で
-f32 重みを潰すので順序が逆にできない）。7.29GiB のロードが 1 回で済む副次効果もある。
+MUST: (a)→(b)→… use **the same model instance** in order (fake_quant_int8 overwrites the f32
+weights in place, so the order cannot be reversed). A side effect is that the 7.29GiB load happens
+only once.
 
-出力（`--out`、既定はこのファイルの隣ではなくスクラッチ側を明示指定する運用）:
+Outputs (`--out`; by convention given explicitly on the scratch side, not next to this file):
 
-    report.md              数値表（step 別 relRMS / PSNR / 層別 relRMS / P̃ 分布 / 門の判定）
-    attn.json              attention 量子化の集計（機械可読 — 門の判定値もここ）
-    image_<config>.png     最終画像（PIL が無ければ image_*.npy へフォールバック）
-    dit_out.safetensors    全構成の step 別 latent（生データ — 追加の分析用）
-    layers.csv             層別の生表（454 本ぶん — report.md には要約だけ載る）
+    report.md              tables of numbers (relRMS per step / PSNR / relRMS per layer / P̃
+                           distribution / gate verdicts)
+    attn.json              the attention quantization summary (machine-readable — the gate
+                           verdicts are here too)
+    image_<config>.png     final images (falls back to image_*.npy without PIL)
+    dit_out.safetensors    the latents of every configuration per step (raw data — for further
+                           analysis)
+    layers.csv             the raw per-layer table (all 454 layers — report.md carries only a
+                           summary)
 
     uv run python -m anima.measure_quant --out /path/to/q0
 
-`--w4-screen` は**独立のモード**（10 構成は 1 本も走らない — {@link run_w4_screen}）。
-w4 の丸め方式（rtn-i4-g32 / nf4 / mxfp4 / kmeans:shared）と**校正付き丸め**（gptq-rtn /
-gptq-nf4 / gptq-kmeans — 波 J-2）を横並びにする側で、上の 10 構成の**積み上げ意味論とは
-別経路**: あちらは同じインスタンスへ in-place で積み上げるが、方式比較は構成ごとに pristine
-（素の f32 重み）へ戻してから当てる（積み重ね禁止 MUST）。記号・基準・出力ファイル名も
-共有しない。校正付きの対象は **DiT block 列の linear 限定**で 4 方式とは集合が違う
-（{@link CALIB_TARGET}）。
+`--w4-screen` is **a separate mode** (none of the 10 configurations runs — {@link run_w4_screen}).
+It lines up the w4 rounding methods (rtn-i4-g32 / nf4 / mxfp4 / kmeans:shared) and **calibrated
+rounding** (gptq-rtn / gptq-nf4 / gptq-kmeans — phase J-2) side by side, on a **path separate from
+the stacking semantics** of the 10 configurations above: those stack in place on the same instance,
+whereas the method comparison restores the pristine weights (the plain f32 weights) before each
+configuration (MUST: no stacking). Labels, baselines and output file names are not shared either.
+The calibrated methods target **only the linears of the DiT block list**, a different set from the
+four methods ({@link CALIB_TARGET}).
 
-NOTE: 非 DiT（text_encoder / text_conditioner / VAE）は全構成とも **f32 のまま**にする。
-比較軸を DiT の量子化 1 本に絞るため（資産系列 `outputs/series/anima-i8/` は他 3 つが f16 だが、
-その差は全構成に同じ形で乗るので相対比較では相殺される）。attention の差し替えも
-**DiT の denoise ループの間だけ**掛かる（text encode / VAE decode は素通し — 復元は
-`PRISTINE_SDPA` 検査で機械確認する）。
+NOTE: everything outside the DiT (text_encoder / text_conditioner / VAE) **stays f32** in every
+configuration, to narrow the comparison to the DiT's quantization alone (in the asset series
+`outputs/series/anima-i8/` the other three are f16, but that difference lands identically on every
+configuration and cancels in a relative comparison). The attention replacement is also active **only
+during the DiT's denoise loop** (text encode / VAE decode are passed through — the restore is
+checked mechanically against `PRISTINE_SDPA`).
 
-NOTE: レポート生成（`report.md` / `attn.json` / `layers.csv` の組み立て）は
-`anima/measure_report.py` に分けてある — 数値仕様とは変更頻度が違うため。
+NOTE: report generation (assembling `report.md` / `attn.json` / `layers.csv`) lives in
+`anima/measure_report.py` — it changes at a different rate from the numeric spec.
 """
 
 from __future__ import annotations
@@ -132,10 +151,12 @@ from .pipeline_ref import (
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 DEFAULT_LORA = INPUTS_ROOT / "anima" / "anima-turbo-lora-v0.2.safetensors"
 
-#: turbo 運用値（CFG=1 は uncond 分岐を計算しない — anima/pipeline_ref.py の MUST と同じ形）。
+#: The turbo operating value (CFG=1 does not compute the uncond branch — the same form as the MUST
+#: in anima/pipeline_ref.py).
 GUIDANCE = 1.0
 
-#: 差し替え前の SDPA 実体（復元検査の正本 — import 時に 1 度だけ捕まえる）。
+#: The SDPA implementation before replacement (the source of truth for the restore check — captured
+#: once at import).
 PRISTINE_SDPA = F.scaled_dot_product_attention
 
 TINY = torch.finfo(torch.float32).tiny
@@ -143,33 +164,37 @@ TINY = torch.finfo(torch.float32).tiny
 
 @dataclass(frozen=True)
 class Config:
-    """1 構成のレシピ。
+    """The recipe of one configuration.
 
-    `weight_i8` は「この構成に入る**手前**で重みを i8 へ落とす」フラグ（`fake_quant_int8` は
-    in-place なので、表の順序がそのまま適用順になる）。`attn` は attention の量子化範囲。
+    `weight_i8` is the flag "drop the weights to i8 **before** entering this configuration"
+    (`fake_quant_int8` is in place, so the table order is the application order as is). `attn` is
+    the range of the attention quantization.
     """
 
     name: str
     weight_i8: bool
     linear_act: bool
-    #: `None` / `"qk"` / `"pv"` / `"qkpv"`。
+    #: `None` / `"qk"` / `"pv"` / `"qkpv"`.
     attn: str | None = None
-    #: softmax の分母を `Σ round(127·P̃)/127`（量子化後総和）にする（設計 doc §4.3）。
+    #: Use `Σ round(127·P̃)/127` (the post-quantization sum) as the softmax denominator (design doc
+    #: §4.3).
     stats_quantized: bool = False
-    #: attention スコア S を **f16 で格納**する（案γ 波 1 — {@link round_scores_f16}）。
+    #: Store the attention score S **in f16** (option γ, phase 1 — {@link round_scores_f16}).
     score_f16: bool = False
-    #: P̃ の行 peak/rms 分布を採る（量子化していない素の P̃ を見る構成でだけ true）。
+    #: Collect the P̃ row peak/rms distribution (true only in a configuration that sees the plain,
+    #: unquantized P̃).
     measure_pt: bool = False
 
 
-#: 実行順（重みの丸めは in-place なので **順序が意味を持つ** MUST）。
+#: Run order (MUST: weight rounding is in place, so **the order carries meaning**).
 #:
-#: s16 の 2 本は `w8-qkpv` の直後・`w8a8-qkpv-statsq` の手前に置く。重みは (b) の 1 回きりで
-#: in-place に i8 へ落ちるので、(b) 以降はどこに挿しても**重み状態は同じ**（挿入位置が決めるのは
-#: `--until` の前方接頭辞に何が入るかだけ）。門の対象 `w8a8-qkpv-s16` を先に置いてあるので
-#: `--until w8a8-qkpv-s16` が門に必要な最小の接頭辞になる: 集計に要る (a)(b)(c) と、
-#: 「S f16 が attn-a8 へ上乗せする劣化」の直接の対照 (f) までが入り、**波 Q0 で不採用が確定した
-#: (h) statsq だけが外れる**。S 丸め単独の寄与まで見るなら `--until w8a8-s16`。
+#: The two s16 entries go right after `w8-qkpv` and before `w8a8-qkpv-statsq`. The weights are
+#: dropped to i8 in place exactly once, at (b), so anywhere after (b) **the weight state is the
+#: same** (the position only decides what falls into the forward prefix of `--until`). The gated
+#: `w8a8-qkpv-s16` comes first, so `--until w8a8-qkpv-s16` is the minimal prefix the gate needs: it
+#: includes (a)(b)(c), which the summary needs, and (f), the direct control for "the degradation S
+#: f16 adds on top of attn-a8", and **leaves out only (h) statsq, which was definitively rejected in
+#: phase Q0**. To also see the contribution of the S rounding alone, use `--until w8a8-s16`.
 CONFIGS: tuple[Config, ...] = (
     Config("f32", weight_i8=False, linear_act=False),
     Config("w8", weight_i8=True, linear_act=False),
@@ -185,42 +210,47 @@ CONFIGS: tuple[Config, ...] = (
 
 
 def attn_config_names(configs: tuple[Config, ...]) -> tuple[str, ...]:
-    """**attention を触る**構成（門の判定対象）。
+    """The configurations that **touch attention** (the subjects of the gate verdicts).
 
-    a8 量子化（`attn`）と S の f16 格納（`score_f16`）はどちらも attention 側の変更なので、
-    門・②の PSNR 対・⑤の層別表は同じ集合を見る。
+    a8 quantization (`attn`) and the f16 storage of S (`score_f16`) are both changes on the
+    attention side, so the gate, the PSNR pairs of ② and the per-layer table of ⑤ look at the same
+    set.
     """
     return tuple(config.name for config in configs if config.attn or config.score_f16)
 
 
 CONFIG_NAMES = tuple(config.name for config in CONFIGS)
-#: 相対劣化の基準（f32 比 PSNR は w8a8 で既に飽和しているため — 設計 doc §5.3）。
+#: The baseline of the relative degradation (the PSNR against f32 is already saturated at w8a8 —
+#: design doc §5.3).
 BASELINE = "w8a8"
 ATTN_CONFIGS = attn_config_names(CONFIGS)
 
 
-# ---- 活性の per-token fake-quant -------------------------------------------
+# ---- Per-token fake-quant of activations --------------------------------------
 #
-# 数値仕様（`quantize_rows`）と適格判定（`is_eligible`）の正本は
-# `karume.act_quant`（`anima/pipeline_ref.py` の鏡像フィクスチャと共有 — 2 箇所に
-# 書き写すと片方だけが仕様から外れる）。ここはその上に**層別の誤差集計**を足したフック。
+# The source of truth for the numeric spec (`quantize_rows`) and eligibility (`is_eligible`) is
+# `karume.act_quant` (shared with the mirror fixture of `anima/pipeline_ref.py` — copying it into
+# two places lets one of them drift from the spec). This is a hook that adds **per-layer error
+# accounting** on top of it.
 
 
 @dataclass
 class LayerStat:
-    """1 層ぶんの誤差集計（全 step・全呼び出しを通算した二乗和で持つ）。"""
+    """Error accounting of one layer (held as sums of squares over all steps and all calls)."""
 
     in_features: int
     out_features: int
     calls: int = 0
-    #: 入力活性の量子化誤差（Σ(x̂−x)² と Σx²）。
+    #: The quantization error of the input activations (Σ(x̂−x)² and Σx²).
     in_err2: float = 0.0
     in_ref2: float = 0.0
-    #: 出力の差（w8a8 − w8）。`--measure-step` の step だけ実測する（linear がもう 1 回走る）。
+    #: The output difference (w8a8 − w8). Measured only at the `--measure-step` step (the linear
+    #: runs once more).
     out_err2: float = 0.0
     out_ref2: float = 0.0
     out_calls: int = 0
-    #: 行ごとの amax/rms（外れ値の指標 — 大きいほど i8 の格子が無駄になる）。
+    #: amax/rms per row (an outlier indicator — the larger it is, the more of the i8 grid is
+    #: wasted).
     peak_sum: float = 0.0
     peak_rows: int = 0
     peak_max: float = 0.0
@@ -237,10 +267,12 @@ class LayerStat:
 
 @dataclass
 class ActQuantHooks:
-    """適格 linear の入力を per-token i8 へ落とし、層別の誤差を集計するフック束。
+    """The hooks that drop the inputs of the eligible linears to per-token i8 and account the error
+    per layer.
 
-    `measure_step` の step でだけ「量子化しなかった場合の出力」を追加で計算して層別の
-    出力 relRMS を採る（w8 の重みは既に当たっているので、この差は**活性量子化だけ**の寄与）。
+    Only at the `measure_step` step they additionally compute "the output without quantization" to
+    get the per-layer output relRMS (the w8 weights are already applied, so this difference is the
+    contribution of **activation quantization alone**).
     """
 
     model: nn.Module
@@ -267,14 +299,15 @@ class ActQuantHooks:
         self.handles.clear()
 
     def _on_model(self, _module: nn.Module, _args: tuple[object, ...]) -> None:
-        # CFG=1 なので DiT の呼び出し 1 回 = 1 step。
+        # CFG=1, so one DiT call = one step.
         self.step += 1
 
     def _make_pre(self, name: str):
         def pre(_module: nn.Module, args: tuple[torch.Tensor, ...]):
             if not args:
-                # 位置引数で呼ばれない linear は活性量子化の対象にできない（本数が減れば
-                # `[eligible]` の計数と `stat.calls == 0` で見える）。
+                # A linear not called with positional arguments cannot be a target of activation
+                # quantization (a drop in their number shows in the `[eligible]` count and in
+                # `stat.calls == 0`).
                 return None
             x = args[0]
             xq = quantize_rows(x)
@@ -311,50 +344,57 @@ class ActQuantHooks:
         return post
 
 
-# ---- attention の a8 シム ----------------------------------------------------
+# ---- The a8 shim of attention ---------------------------------------------------
 #
-# 設計 = `docs/research/2026-08-04-attention-a8-design.md`。粒度は同 §5.1 の MUST 表で、
-# **ランタイムが実装できる粒度と厳密一致**させる（緩めると「実装不能な楽観上界」になる）:
+# Design = `docs/research/2026-08-04-attention-a8-design.md`. The granularity is the MUST table of
+# its §5.1, kept **exactly equal to the granularity the runtime can implement** (loosening it gives
+# "an optimistic upper bound that cannot be implemented"):
 #
-#   q     [B·H·M, D] の行ごと amax（縮約軸 D が最内連続なので `quantize_rows` そのもの）
-#   k     [B·H·N, D] の行ごと amax（同上）
-#   P̃     **scale 固定 1/127**（`q_P = round(127·exp(S−m))`）。行内 max が構造的に 1.0 なので
-#         per-token amax を取っても 1/127 にしかならない = 適応の余地がゼロ（§2.2）。
-#         **amax を取り直してはならない**（「取れる」実装だと誤読されるため式にも書かない）。
-#   V     `(b,h,d)` ごとに **N 全体**の amax（縮約軸 n に依存しない scale = 括り出せる形）。
-#         per-token（行 n ごと）はランタイムに実装不能な楽観上界なので**禁止**（§2.3）。
-#   S     **f16 格納**（`score_f16` 構成 — 案γ 設計 doc §3.4② / §7 波 1）。①QK が書く
-#         「半スケール適用済みの生スコア」を f16 へ落として戻し、**丸めはその 1 回だけ**。
-#         ② 行 max `m` と分母 `l = Σexp(S−m)`・③ の `exp(S−m)` と `qP = round(127·exp(S−m))` は
-#         **全て同じ丸め済み S** から f32 で計算する（ランタイムの ②③ が同じ f16 バッファを
-#         読んで `f32()` へ広げるのと厳密に同じ粒度 — attention.ts の `read()` と
-#         attention-i8a8.ts の A タイル充填）。
+#   q     amax per row of [B·H·M, D] (the reduction axis D is innermost and contiguous, so it is
+#         `quantize_rows` itself)
+#   k     amax per row of [B·H·N, D] (same as above)
+#   P̃     **fixed scale 1/127** (`q_P = round(127·exp(S−m))`). The in-row max is structurally 1.0,
+#         so a per-token amax would only give 1/127 = zero room for adaptation (§2.2).
+#         **The amax MUST NOT be recomputed** (not even written in the formula, so that the
+#         implementation is not misread as "it can").
+#   V     amax over **the whole N** per `(b,h,d)` (a scale independent of the reduction axis n = a
+#         form that can be factored out). Per-token (per row n) is an optimistic upper bound the
+#         runtime cannot implement, so it is **forbidden** (§2.3).
+#   S     **stored in f16** (the `score_f16` configurations — option γ design doc §3.4② / §7 phase
+#         1). The "half-scaled raw scores" that ①QK writes are dropped to f16 and back, and **that
+#         is the only rounding**. ② the row max `m` and the denominator `l = Σexp(S−m)`, and ③'s
+#         `exp(S−m)` and `qP = round(127·exp(S−m))` are **all computed in f32 from the same rounded
+#         S** (exactly the same granularity as the runtime's ②③ reading the same f16 buffer and
+#         widening it to `f32()` — `read()` in attention.ts and the A-tile fill of
+#         attention-i8a8.ts).
 #
-# 半スケール（√scale_factor）は **dequant 側**へ 2 回掛ける（量子化の前に掛けると丸めが 1 段
-# ずれ、`quantize_rows` を無改変で使えなくもなる — §2.1 の裁定）。
+# The half scale (√scale_factor) is applied twice **on the dequant side** (applying it before
+# quantization shifts the rounding by one stage and also stops `quantize_rows` from being usable
+# unmodified — the ruling of §2.1).
 #
-# 整数縮約は float64 で厳密に行う（|acc| ≤ D·127² も N·127² も 2^53 に対し桁で余裕があるので
-# 加算順に依らず厳密）。目的は品質測定なので f32 の ULP 級の丸め差までは再現しない。
+# The integer reductions are exact in float64 (|acc| ≤ D·127² and N·127² are orders of magnitude
+# below 2^53, so they are exact regardless of the addition order). The purpose is a quality
+# measurement, so rounding differences at the f32 ULP level are not reproduced.
 
-#: P̃ 行 peak/rms のヒストグラム（分位点を有界メモリで採る）。peak/rms ≤ √N なので log₂ 上限 8
-#: は N ≤ 65,536 まで足りる。分解能は 0.01 log₂ ≈ 0.7%。
+#: Histogram of the P̃ row peak/rms (quantiles with bounded memory). peak/rms ≤ √N, so a log₂ upper
+#: bound of 8 suffices up to N ≤ 65,536. The resolution is 0.01 log₂ ≈ 0.7%.
 PT_HIST_BINS = 800
 PT_HIST_LOG_MAX = 8.0
 
 
 @dataclass
 class AttnStat:
-    """1 attention ノードぶんの集計（全 step 通算）。"""
+    """Accounting of one attention node (over all steps)."""
 
     calls: int = 0
-    #: P̃ の行 peak/rms（= 1/rms — peak は構造的に 1.0）のヒストグラムと生の最大値。
+    #: Histogram and raw maximum of the P̃ row peak/rms (= 1/rms — peak is structurally 1.0).
     pt_hist: torch.Tensor = field(
         default_factory=lambda: torch.zeros(PT_HIST_BINS, dtype=torch.int64)
     )
     pt_rows: int = 0
     pt_max: float = 0.0
     pt_sum: float = 0.0
-    #: S / O が「attention を量子化しなかった場合」から動いた量（`measure_step` のみ実測）。
+    #: How far S / O moved from "attention without quantization" (measured at `measure_step` only).
     s_err2: float = 0.0
     s_ref2: float = 0.0
     o_err2: float = 0.0
@@ -375,14 +415,14 @@ class AttnStat:
 
 
 def hist_add(counts: torch.Tensor, values: torch.Tensor) -> None:
-    """log₂ 等間隔ビンへ加算（値は 1 以上 — peak/rms は定義から 1 を下回らない）。"""
+    """Add into log₂-spaced bins (values are ≥ 1 — peak/rms is never below 1 by definition)."""
     scaled = torch.log2(values.reshape(-1).clamp_min(1.0)) * (PT_HIST_BINS / PT_HIST_LOG_MAX)
     index = scaled.to(torch.int64).clamp_(0, PT_HIST_BINS - 1)
     counts += torch.bincount(index, minlength=PT_HIST_BINS)
 
 
 def hist_quantile(counts: torch.Tensor, q: float) -> float:
-    """ヒストグラムの分位点（ビン内は log₂ 上で線形補間）。"""
+    """A quantile of the histogram (linear interpolation on log₂ within a bin)."""
     total = int(counts.sum())
     if total == 0:
         return 0.0
@@ -396,42 +436,46 @@ def hist_quantile(counts: torch.Tensor, q: float) -> float:
 
 
 def peak_over_rms(pt: torch.Tensor) -> torch.Tensor:
-    """P̃ の行ごとの `peak/rms`。peak は `exp(0) = 1` で構造的に 1.0 なので `1/rms`。"""
+    """`peak/rms` per row of P̃. peak is structurally 1.0 from `exp(0) = 1`, so this is `1/rms`."""
     mean_square = pt.square().sum(dim=-1, dtype=torch.float64) / pt.shape[-1]
     return mean_square.clamp_min(TINY).rsqrt()
 
 
 @dataclass
 class ScoreF16Probe:
-    """S の f16 丸めが**実際に発火した**ことの機械検査（恒真化の防止）。
+    """A mechanical check that the f16 rounding of S **actually fired** (guarding against a vacuous
+    pass).
 
-    「丸めを掛けたつもりで恒等だった」は数値にも所要時間にも出ない（ADR 0024 追補 /
-    0030 決定 5 と同型の沈黙）。丸め**前後で 1 要素も変わらない呼び出しがゼロ**であることを
-    毎回見て、集計を門（{@link build_summary}）へ出す。
+    "Meant to apply the rounding, but it was the identity" shows neither in the numbers nor in the
+    elapsed time (the same kind of silence as the ADR 0024 supplement / 0030 decision 5). Every call
+    checks that **no call leaves every element unchanged** across the rounding, and the tally goes
+    to the gate ({@link build_summary}).
     """
 
     calls: int = 0
     fired: int = 0
     elements: int = 0
-    #: 素の S の |最大値|（f16 の上限 65,504 に対する余裕 — 波 1 の格納形が飽和しない裏取り）。
+    #: |max| of the raw S (the headroom against f16's limit of 65,504 — evidence that the storage
+    #: form of phase 1 does not saturate).
     abs_max: float = 0.0
 
     def observe(self, before: torch.Tensor, after: torch.Tensor) -> None:
         self.calls += 1
         self.elements += before.numel()
-        # `abs()` の巨大な一時を作らずに |max| を採る（S は 1024px で 2.7 億要素 / ノード）。
+        # Take |max| without a huge `abs()` temporary (S has 270 million elements per node at
+        # 1024px).
         self.abs_max = max(self.abs_max, float(before.max()), -float(before.min()))
-        # `torch.equal` は短絡評価なので bool の一時テンソルを作らない。
+        # `torch.equal` short-circuits, so it creates no temporary bool tensor.
         if not torch.equal(after, before):
             self.fired += 1
 
 
 def round_scores_f16(scores: torch.Tensor, probe: ScoreF16Probe | None = None) -> torch.Tensor:
-    """S を f16 へ落として f32 へ戻す（案γ 波 1 の「S の格納形」の鏡像）。
+    """Drop S to f16 and back to f32 (the mirror of "the storage form of S" in option γ, phase 1).
 
-    MUST: 呼び出しは attention 1 回につき**ここ 1 箇所だけ**。②行統計も ③PV も、戻り値の
-    丸め済み S から計算する（ランタイムは同じ f16 バッファを 2 度読むので、2 度丸めた形は
-    実装できない上界になる）。
+    MUST: per attention call this is called **in this one place only**. Both ② the row statistics
+    and ③ PV are computed from the rounded S it returns (the runtime reads the same f16 buffer
+    twice, so a form that rounds twice would be an upper bound that cannot be implemented).
     """
     rounded = scores.half().float()
     if probe is not None:
@@ -440,18 +484,20 @@ def round_scores_f16(scores: torch.Tensor, probe: ScoreF16Probe | None = None) -
 
 
 def flatten_heads(x: torch.Tensor) -> torch.Tensor:
-    """`[B,H,S,D]` → `[B·H,S,D]`（scale の行/列束縛はこの平坦形の上で定義される）。"""
+    """`[B,H,S,D]` → `[B·H,S,D]` (the row/column binding of the scale is defined on this flat
+    form)."""
     return x.reshape(x.shape[0] * x.shape[1], x.shape[2], x.shape[3])
 
 
 def attention_scores(
     query: torch.Tensor, key: torch.Tensor, scale: float, *, quant_qk: bool
 ) -> torch.Tensor:
-    """`S = (q·√sf)·(k·√sf)ᵀ` を `[B·H,M,N]` で返す。"""
+    """Return `S = (q·√sf)·(k·√sf)ᵀ` as `[B·H,M,N]`."""
     q, k = flatten_heads(query), flatten_heads(key)
     if not quant_qk:
         return torch.matmul(q, k.transpose(-1, -2)) * scale
-    # 半スケールは dequant 側（`qs·√sf` と `ks·√sf`）— 量子化の前には掛けない MUST。
+    # MUST: the half scale is on the dequant side (`qs·√sf` and `ks·√sf`) — never applied before
+    # quantization.
     half = math.sqrt(scale)
     qq, qs = quantize_rows_parts(q)
     kq, ks = quantize_rows_parts(k)
@@ -472,24 +518,28 @@ def attention_sim(
     scale: float,
     probe: ScoreF16Probe | None = None,
 ) -> torch.Tensor:
-    """`[B,H,M,D]` レイアウトの SDPA を、指定範囲だけ i8 粒度で置き換えて評価する。"""
+    """Evaluate SDPA in the `[B,H,M,D]` layout with only the given ranges replaced at i8
+    granularity."""
     v = flatten_heads(value)
     scores = attention_scores(query, key, scale, quant_qk=quant_qk)
     if score_f16:
-        # 格納の丸めはここ 1 回だけ（以降の m / Σ / exp / qP は全て丸め済み S から）。
+        # The storage rounding happens only here (m / Σ / exp / qP all come from the rounded S
+        # afterwards).
         scores = round_scores_f16(scores, probe)
     exponent = torch.exp(scores - scores.amax(dim=-1, keepdim=True))
     if not quant_pv:
         probabilities = exponent / exponent.sum(dim=-1, keepdim=True)
         return torch.matmul(probabilities, v).reshape(query.shape)
 
-    # P̃ の scale は 1/127 固定（clamp 不要 — 上限 127 は `exp(0)=1` から構造的）。
+    # The scale of P̃ is fixed at 1/127 (no clamp needed — the 127 upper bound follows structurally
+    # from `exp(0)=1`).
     quantized_pt = torch.round(exponent * INT8_MAX)
     if stats_quantized:
         total = quantized_pt.sum(dim=-1, keepdim=True, dtype=torch.float32) / INT8_MAX
     else:
         total = exponent.sum(dim=-1, keepdim=True)
-    # V は (b,h,d) ごとに N 全体の amax（縮約軸 n に依存しない = 括り出せる）。
+    # V uses the amax over the whole N per (b,h,d) (independent of the reduction axis n = can be
+    # factored out).
     value_scale = torch.clamp(v.abs().amax(dim=-2, keepdim=True) / INT8_MAX, min=TINY)
     quantized_v = torch.round(v / value_scale).clamp_(-INT8_MAX, INT8_MAX)
     accumulator = quantized_pt.double() @ quantized_v.double()
@@ -499,31 +549,34 @@ def attention_sim(
 
 @dataclass
 class AttnSim:
-    """`F.scaled_dot_product_attention` を **op 粒度**で差し替える（モジュールフック禁止）。
+    """Replace `F.scaled_dot_product_attention` **at op granularity** (module hooks are forbidden).
 
-    差し替えが op 粒度でなければならない理由は ADR 0029 の教訓そのもの: diffusers の
-    `CosmosAttnProcessor2_*` は `attn.processor` の中から
-    `attention_dispatch._native_attention` 経由で `F.scaled_dot_product_attention` を
-    **キーワード引数で**直に呼ぶ（`nn.Module` として存在しない）。モジュールフックでは
-    1 度も発火しないまま「量子化しているつもりで劣化が軽く出る」向きに沈黙する。
+    Why the replacement has to be at op granularity is exactly the lesson of ADR 0029: diffusers'
+    `CosmosAttnProcessor2_*` calls `F.scaled_dot_product_attention` directly **with keyword
+    arguments** from inside `attn.processor`, through `attention_dispatch._native_attention` (it
+    does not exist as an `nn.Module`). A module hook never fires and stays silent in the direction
+    of "meant to quantize, but the degradation looks small".
 
-    帰属のためだけに DiT 配下の全モジュールへ push/pop フックを掛けて名前スタックを持つ
-    （`measure_quant_sbv2.ActQuant` と同じ仕掛け）。スタック先頭が attention モジュール名になる。
+    Only for attribution, push/pop hooks go on every module under the DiT to keep a name stack (the
+    same device as `measure_quant_sbv2.ActQuant`). The top of the stack is the attention module's
+    name.
 
-    スコープは **DiT のみ**: `attach` / `detach` を denoise ループの前後だけで呼ぶので、
-    text encode（`run_dit` の冒頭）と VAE decode（`decode_all`）は素通しになる。
+    The scope is **the DiT only**: `attach` / `detach` are called just around the denoise loop, so
+    text encode (the start of `run_dit`) and VAE decode (`decode_all`) are passed through.
     """
 
     model: nn.Module
     mode: str | None
     stats_quantized: bool
-    #: S を f16 で格納する（案γ 波 1 — a8 量子化とは独立の軸）。
+    #: Store S in f16 (option γ, phase 1 — an axis independent of a8 quantization).
     score_f16: bool
     measure_pt: bool
     measure_step: int
-    #: 故障注入（`--inject drop-attn-quant`）: 帰属の足場だけ作り、量子化も S の丸めも掛けない。
+    #: Fault injection (`--inject drop-attn-quant`): build only the attribution scaffolding, and
+    #: apply neither the quantization nor the S rounding.
     disable: bool = False
-    #: S f16 丸めの発火検査（恒真化の防止 — 構成を通した集計）。
+    #: The firing check of the S f16 rounding (guarding against a vacuous pass — tallied across the
+    #: configuration).
     s16: ScoreF16Probe = field(default_factory=ScoreF16Probe)
     stats: dict[str, AttnStat] = field(default_factory=dict)
     handles: list[torch.utils.hooks.RemovableHandle] = field(default_factory=list)
@@ -551,7 +604,7 @@ class AttnSim:
         self.stack.clear()
 
     def _on_model(self, _module: nn.Module, _args: tuple[object, ...]) -> None:
-        # CFG=1 なので DiT の呼び出し 1 回 = 1 step。
+        # CFG=1, so one DiT call = one step.
         self.step += 1
 
     def _make_push(self, name: str):
@@ -568,13 +621,16 @@ class AttnSim:
         key = kwargs.get("key", args[1] if len(args) > 1 else None)
         value = kwargs.get("value", args[2] if len(args) > 2 else None)
         if not isinstance(query, torch.Tensor) or query.dim() != 4:
-            # 想定外の呼ばれ方は黙って素通しにせず数える（0 でなければ報告に出る）。
+            # Count an unexpected call shape instead of silently passing it through (a non-zero
+            # count shows up in the report).
             self.skipped += 1
             return PRISTINE_SDPA(*args, **kwargs)
         for name in ("attn_mask", "is_causal", "dropout_p", "enable_gqa"):
             given = kwargs.get(name)
             if given not in (None, False, 0.0, 0):
-                raise NotImplementedError(f"attention シムが想定しない SDPA 引数: {name}={given}")
+                raise NotImplementedError(
+                    f"SDPA argument the attention shim does not expect: {name}={given}"
+                )
         scale = kwargs.get("scale")
         scale = 1.0 / math.sqrt(query.shape[-1]) if scale is None else float(scale)
 
@@ -584,7 +640,8 @@ class AttnSim:
         self.calls += 1
 
         if self.measure_pt:
-            # (c) の走行中に採る = 量子化器が見る**素の P̃**（attention は f32 のまま）。
+            # Collected during the run of (c) = **the plain P̃** that the quantizer sees (attention
+            # still f32).
             scores = attention_scores(query, key, scale, quant_qk=False)
             ratio = peak_over_rms(torch.exp(scores - scores.amax(dim=-1, keepdim=True)))
             hist_add(stat.pt_hist, ratio)
@@ -610,8 +667,8 @@ class AttnSim:
             probe=self.s16,
         )
         if self.step == self.measure_step:
-            # 「attention を量子化しなかった場合」との差 = attention 量子化だけの寄与
-            # （linear の活性量子化は q/k/v の中に既に乗っている）。
+            # The difference from "attention without quantization" = the contribution of attention
+            # quantization alone (the linear activation quantization is already inside q/k/v).
             reference = attention_sim(
                 query,
                 key,
@@ -627,7 +684,8 @@ class AttnSim:
                 attention_scores(query, key, scale, quant_qk=True) if quant_qk else scores_ref
             )
             if self.score_f16:
-                # S 側の誤差にも格納の丸めを含める（probe は渡さない — 本走行で計上済み）。
+                # The S-side error also includes the storage rounding (no probe — already counted in
+                # the main run).
                 scores_value = round_scores_f16(scores_value)
             stat.s_err2 += float((scores_value - scores_ref).square().sum())
             stat.s_ref2 += float(scores_ref.square().sum())
@@ -638,7 +696,7 @@ class AttnSim:
 
 
 def count_attention_nodes(model: nn.Module) -> list[str]:
-    """DiT 内の attention モジュール名（発火計数の期待値の出どころ）。"""
+    """The attention module names inside the DiT (the source of the expected call count)."""
     return [
         name
         for name, module in model.named_modules()
@@ -646,11 +704,11 @@ def count_attention_nodes(model: nn.Module) -> list[str]:
     ]
 
 
-# ---- 指標 -------------------------------------------------------------------
+# ---- Metrics -----------------------------------------------------------------
 
 
 def rel_rms(value: torch.Tensor, reference: torch.Tensor) -> float:
-    """‖v − r‖₂ / ‖r‖₂。"""
+    """‖v − r‖₂ / ‖r‖₂."""
     denom = float(reference.square().sum())
     if denom == 0.0:
         return 0.0
@@ -665,30 +723,31 @@ def psnr(value: torch.Tensor, reference: torch.Tensor, data_range: float) -> flo
 
 
 def to_uint8(image: torch.Tensor) -> torch.Tensor:
-    """[-1,1] の [1,3,H,W] を [H,W,3] の uint8 へ（PNG と目視 PSNR の共通経路）。"""
+    """[1,3,H,W] in [-1,1] to [H,W,3] uint8 (the common path of the PNG and the visual PSNR)."""
     scaled = (image[0].permute(1, 2, 0).clamp(-1.0, 1.0) + 1.0) * 127.5
     return scaled.round().clamp(0.0, 255.0).to(torch.uint8)
 
 
-# ---- 段 ---------------------------------------------------------------------
+# ---- Stages ------------------------------------------------------------------
 
 
 @dataclass
 class DitRun:
-    """`run_dit` の成果（構成横断の生データと診断）。"""
+    """The result of `run_dit` (raw data and diagnostics across configurations)."""
 
     latents: dict[str, torch.Tensor]
-    #: (c) w8a8 の適格 linear 層別統計（既存の ③ 表の出どころ）。
+    #: Per-layer statistics of the eligible linears of (c) w8a8 (the source of table ③).
     linear_stats: dict[str, LayerStat]
-    #: 構成名 → attention ノード別統計。
+    #: Configuration name → statistics per attention node.
     attn_stats: dict[str, dict[str, AttnStat]]
-    #: 構成名 → 発火計数などの診断。
+    #: Configuration name → diagnostics such as call counts.
     diagnostics: dict[str, dict[str, object]]
     attention_nodes: list[str]
 
 
 def run_dit(args: argparse.Namespace) -> DitRun:
-    """全構成の DiT を同一インスタンスで順に走らせ、step 別 latent と診断を返す。"""
+    """Run the DiT of every configuration in order on the same instance, and return the latents per
+    step and the diagnostics."""
     sigmas = sigma_schedule(args.steps, SHIFT)
     print(f"[sigmas] {sigmas[0]:.4f} … {sigmas[-2]:.4f} → 0 ({args.steps} steps)", flush=True)
 
@@ -706,10 +765,10 @@ def run_dit(args: argparse.Namespace) -> DitRun:
     _proj, model = timesteps_proj_table(args.repo, sigmas, "f32", args.lora, args.lora_scale)
     eligible = sum(1 for _, m in model.named_modules() if is_eligible(m))
     linears = sum(1 for _, m in model.named_modules() if isinstance(m, nn.Linear))
-    print(f"[eligible] linear {linears} 本中 k%4==0 が {eligible} 本", flush=True)
+    print(f"[eligible] of {linears} linears, {eligible} have k%4==0", flush=True)
 
     attention_nodes = count_attention_nodes(model)
-    print(f"[attention] ノード {len(attention_nodes)} 本 / step", flush=True)
+    print(f"[attention] {len(attention_nodes)} nodes / step", flush=True)
 
     out: dict[str, torch.Tensor] = {}
     attn_stats: dict[str, dict[str, AttnStat]] = {}
@@ -723,7 +782,8 @@ def run_dit(args: argparse.Namespace) -> DitRun:
             print(f"[fake-quant] transformer (i8): {report.describe()}", flush=True)
             weights_i8 = True
 
-        # 層別統計を採るのは基準構成 (c) だけ（他は計測コストを払う理由が無い）。
+        # Per-layer statistics are collected only for the baseline configuration (c) (the others
+        # have no reason to pay the measurement cost).
         hooks: ActQuantHooks | None = None
         handles: list[object] = []
         attached = 0
@@ -754,8 +814,9 @@ def run_dit(args: argparse.Namespace) -> DitRun:
             embeds,
             embeds,
             sigmas,
-            # `reference_steps` は Anima family 移行（c84dd07）から (width, height) を受ける —
-            # int のままだと展開で TypeError（known-issues 2026-08-19 解消分・正方形前提）。
+            # `reference_steps` takes (width, height) since the move to the Anima family (c84dd07)
+            # — an int fails the unpacking with a TypeError (resolved in known-issues 2026-08-19;
+            # assumes a square).
             (args.resolution, args.resolution),
             args.steps,
             GUIDANCE,
@@ -776,10 +837,11 @@ def run_dit(args: argparse.Namespace) -> DitRun:
             attn_stats[config.name] = sim.stats
             calls, skipped = sim.calls, sim.skipped
             s16 = sim.s16
-        # 差し替えは構成を跨ぐ唯一のグローバル可変状態。素の実体まで戻ったことを **毎構成**
-        # `is` で見る（残ると次の構成が黙って量子化され、text/VAE 段まで汚染する）。
+        # The replacement is the only global mutable state that crosses configurations. Check with
+        # `is` **after every configuration** that the plain implementation is back (a leftover
+        # would silently quantize the next configuration and contaminate the text/VAE stages too).
         if F.scaled_dot_product_attention is not PRISTINE_SDPA:
-            raise AssertionError(f"{config.name}: SDPA の差し替えが残っている")
+            raise AssertionError(f"{config.name}: the SDPA replacement is still in place")
 
         diagnostics[config.name] = {
             "weight_i8": weights_i8,
@@ -812,10 +874,12 @@ def run_dit(args: argparse.Namespace) -> DitRun:
 def decode_all(
     repo: str, latents: dict[str, torch.Tensor], last: str, tags: Sequence[str]
 ) -> dict[str, torch.Tensor]:
-    """全構成の最終 latent を**同じ f32 VAE**で decode する（VAE のロードは 1 回）。
+    """Decode the final latents of every configuration with **the same f32 VAE** (the VAE is loaded
+    once).
 
-    構成名を引数で受けるのは、`--w4-screen` が別の表を持つため（10 構成のモジュール
-    グローバルをこちらから読むと、モードごとに別の集合を渡せない）。
+    The configuration names are taken as an argument because `--w4-screen` has its own table
+    (reading the module globals of the 10 configurations from here would not allow passing a
+    different set per mode).
     """
     from diffusers import AutoencoderKLQwenImage
 
@@ -834,7 +898,7 @@ def decode_all(
 
 
 def save_images(images: dict[str, torch.Tensor], out: Path) -> str:
-    """PNG で保存（PIL が無ければ npy へフォールバックし、その旨を返す）。"""
+    """Save as PNG (falls back to npy without PIL, and returns a note saying so)."""
     arrays = {tag: to_uint8(image) for tag, image in images.items()}
     try:
         from PIL import Image
@@ -843,72 +907,83 @@ def save_images(images: dict[str, torch.Tensor], out: Path) -> str:
 
         for tag, array in arrays.items():
             np.save(out / f"image_{tag}.npy", array.numpy())
-        return "PIL が無いため image_*.npy（uint8 [H,W,3]）で保存"
+        return "saved as image_*.npy (uint8 [H,W,3]) because PIL is unavailable"
     for tag, array in arrays.items():
         Image.fromarray(array.numpy()).save(out / f"image_{tag}.png")
     return "image_*.png"
 
 
-# ---- w4 方式スクリーニング（`--w4-screen` — 独立モード）----------------------
+# ---- w4 method screening (`--w4-screen` — a separate mode) ----------------------
 #
-# 上の 10 構成とは**別経路**（MUST）。あちらは (a)→(b)→… を同じインスタンスへ in-place で
-# 積み上げる意味論（重みの i8 の上に活性 i8 を足す）だが、こちらは**方式間の比較**なので、
-# 構成ごとに pristine（素の f32 重み）へ戻してから当てる。戻さずに当てると測っているのが
-# 「NF4 の上の MXFP4」になり、方式比較そのものが成立しない（EG / MiniCPM5 の台本と同じ規律）。
-# 記号・基準・出力ファイル名も上の表とは共有しない。
+# MUST: a **separate path** from the 10 configurations above. Those stack (a)→(b)→… in place on the
+# same instance (activation i8 on top of weight i8), whereas this is **a comparison between
+# methods**, so each configuration first restores the pristine weights (the plain f32 weights).
+# Applying without restoring would measure "MXFP4 on top of NF4", and the method comparison itself
+# would not hold (the same discipline as the EG / MiniCPM5 scripts). Labels, baselines and output
+# file names are not shared with the table above either.
 #
-# 持ち込む 4 方式は、安いファミリ 2 本のスクリーニングで残った勝者（ADR 0069 追記 5）:
+# The four methods brought in are the winners that survived the screening of two cheap families
+# (ADR 0069 addendum 5):
 #
-#     rtn-i4-g32     配布形 `i4` の格納そのもの（比較の基準）
-#     nf4            正規分布の分位点格子（fp4 は同コストで nf4 に支配されたので落選）
-#     mxfp4          FP4 表 × group の 2 のべき scale（4.25 bpw の側）
-#     kmeans:shared  層をまたいで 1 枚の 16 centroid 表（per_tensor は崩壊・per_channel は被支配）
+#     rtn-i4-g32     the storage of the distributed `i4` itself (the baseline of the comparison)
+#     nf4            a grid of normal-distribution quantiles (fp4 was dropped: dominated by nf4
+#                    at the same cost)
+#     mxfp4          FP4 table × a power-of-two scale per group (the 4.25 bpw side)
+#     kmeans:shared  one 16-centroid table shared across layers (per_tensor collapses,
+#                    per_channel is dominated)
 #
-# 丸めの実装は全て core（`karume.quantize` / `karume.quant_methods`）の共有で、対象選択も
-# `iter_quant_targets` の共有 — 写した別実装にすると「測った対象・式」と「出荷する対象・式」が
-# 黙って割れる。スコープは 10 構成と同じ **DiT のみ**（text_encoder / text_conditioner / VAE は
-# 全構成 f32 のまま）。
+# Every rounding implementation is shared from core (`karume.quantize` / `karume.quant_methods`),
+# and so is the target selection, `iter_quant_targets` — a copied implementation would silently
+# split "the targets and formula measured" from "the targets and formula shipped". The scope is the
+# same as the 10 configurations, **the DiT only** (text_encoder / text_conditioner / VAE stay f32 in
+# every configuration).
 
-#: 方式比較の group 長 = **32 固定**（ADR 0069 追記 1 で確定した既定 = core の既定）。
-#: g 軸を同時に振らないのは、方式の差と g の差が混ざると「どちらが効いたか」が言えなくなるため
-#: （ADR 0069 追記 5 ③ / 2026-08-19 ユーザー裁定）。
+#: The group length of the method comparison = **fixed at 32** (the default settled in ADR 0069
+#: addendum 1 = core's default). The g axis is not swept at the same time because, with the method
+#: difference and the g difference mixed, one could not say "which one had the effect"
+#: (ADR 0069 addendum 5 ③ / user ruling 2026-08-19).
 W4_GROUP_SIZE = DEFAULT_GROUP_SIZE
 
-#: 丸めの対象型。**DiT に実在する量子化可能型は `nn.Linear` だけ**（patchify も
-#: `CosmosPatchEmbed.proj` = `nn.Linear`・埋め込み表も conv も無い）なので、i4 の実行経路
-#: （ADR 0069 決定 5 の linear 限定）と対象が一致する = 全構成が**配布対応形**になる。
-#: 非 linear が現れたら {@link scan_w4_targets} が fail loudly で落とす。
+#: The module types to round. **The only quantizable type present in the DiT is `nn.Linear`**
+#: (patchify is `CosmosPatchEmbed.proj` = `nn.Linear` too, and there is no embedding table and no
+#: conv), so the targets match the i4 execution path (linear only, ADR 0069 decision 5) = every
+#: configuration is **a distributable form**. If a non-linear appears, {@link scan_w4_targets} fails
+#: loudly.
 W4_OP_TYPES: tuple[type[nn.Module], ...] = (nn.Linear,)
 
-#: 基準構成の綴り（丸めなし — 全ての relRMS / PSNR の分母）。
+#: The spelling of the baseline configuration (no rounding — the denominator of every relRMS /
+#: PSNR).
 W4_BASE_CONFIG = "f32"
 
-#: `--w4-screen` の生成物（10 構成の `report.md` / `attn.json` とは別名 — 同じ `--out` へ
-#: 出しても取り違えないように）。
+#: The outputs of `--w4-screen` (named differently from `report.md` / `attn.json` of the 10
+#: configurations — so that they are not mixed up when written to the same `--out`).
 W4_REPORT_FILE = "w4_report.md"
 W4_JSON_FILE = "w4_screen.json"
 W4_LATENTS_FILE = "w4_latents.safetensors"
 
-#: `kmeans:shared` の**表の fit** に使う標本数の予算。shared は全対象の正規化値を 1 本へ
-#: 連結してから Lloyd 法を回すので、f32 の連結 + f64 の作業領域 + int64 の割り当て添字で
-#: 標本 1 要素あたり ~28B 要る。DiT は 19.6 億要素あり、全量 fit は連結だけで 7.3GiB・
-#: 作業領域込みで 50GiB 級 = 実メモリ（31GB）に載らない。2,000 万要素なら ~0.6GiB に収まり、
-#: 16 centroid の 1 次元 k-means には桁で足りる（適用は常に全量 — core の `fit_stride`）。
+#: The sample budget for **fitting the table** of `kmeans:shared`. shared concatenates the
+#: normalised values of every target into one vector before running Lloyd's algorithm, so the f32
+#: concatenation + the f64 workspace + the int64 assignment indices need ~28B per sample element.
+#: The DiT has 1.96 billion elements; a full fit needs 7.3GiB for the concatenation alone and around
+#: 50GiB with the workspace = it does not fit in physical memory (31GB). 20 million elements fit in
+#: ~0.6GiB, which is more than enough by orders of magnitude for a 1-D k-means with 16 centroids
+#: (application is always to everything — core's `fit_stride`).
 W4_KMEANS_FIT_BUDGET = 20_000_000
 
-# サイズ試算の bit 幅（格納規則の逐語）。出典は `docs/container-v1.md` §6.3 の codec 台帳の
-# `int4-sym-g`（scale は **F32**・group ごと 1 個）と OCP Microscaling Formats v1.0（MX の
-# 共有 scale は E8M0 = 指数 1 バイト）。k-means は格納形を持たない測定専用方式なので、
-# **表のコストを込みで**数える。
+# Bit widths of the size estimate (verbatim from the storage rules). The sources are `int4-sym-g` in
+# the codec ledger of `docs/container-v1.md` §6.3 (the scale is **F32**, one per group) and OCP
+# Microscaling Formats v1.0 (the shared scale of MX is E8M0 = a one-byte exponent). k-means is a
+# measurement-only method without a storage form, so it is counted **including the table cost**.
 
-#: 4bit 格子のペイロード（全方式共通 — 比較しているのは「格子の張り方」であって bit 数ではない）。
+#: The payload of the 4-bit grid (common to every method — what is compared is "how the grid is
+#: laid out", not the bit count).
 W4_PAYLOAD_BITS = 4.0
-#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/container-v1.md`
-#: §6.3 の `int4-sym-g`）。
+#: The bit width of the group scale (MUST: `i4` storage uses an F32 group scale —
+#: `int4-sym-g` of `docs/container-v1.md` §6.3).
 W4_F32_SCALE_BITS = 32.0
-#: MXFP4 の共有 scale は E8M0（指数 1 バイト）。
+#: The shared scale of MXFP4 is E8M0 (a one-byte exponent).
 W4_MX_SCALE_BITS = 8.0
-#: codebook 1 エントリの bit 幅（centroid を F32 で持つ）。
+#: The bit width of one codebook entry (centroids are held in F32).
 W4_CODEBOOK_ENTRY_BITS = 32.0
 
 W4_F32_BITS = 32.0
@@ -918,37 +993,44 @@ MIB = 1024 * 1024
 
 @dataclass(frozen=True)
 class W4Targets:
-    """w4 の対象集合の素性（サイズ試算の入力と、除外の台帳）。
+    """The profile of the w4 target set (the input of the size estimate, and the ledger of
+    exclusions).
 
-    `groups` は g32 の group 数の総和で、{@link karume.quantize.channel_rows} の平坦形
-    （= 丸めが group を割る軸）から数える — 別の軸で数えると試算だけが別の形の数になる。
+    `groups` is the total number of g32 groups, counted from the flat form of
+    {@link karume.quantize.channel_rows} (= the axis along which the rounding splits groups) —
+    counting on another axis would make only the estimate a number for a different shape.
     """
 
     modules: int
     elements: int
     groups: int
-    #: 量子化軸が `W4_GROUP_SIZE` で割り切れず**対象から外した**重み（FQN → 量子化軸長）。
+    #: Weights **excluded from the targets** because the quantization axis is not divisible by
+    #: `W4_GROUP_SIZE` (FQN → quantization axis length).
     excluded: Mapping[str, int]
 
     def include(self, name: str) -> bool:
-        """`fake_quant_*` の `include` 述語（**モジュール FQN** で呼ばれる）。
+        """The `include` predicate of `fake_quant_*` (called with **the module FQN**).
 
-        FQN の綴りは {@link karume.quantize.iter_quant_targets} と同じ形で作る（片方だけ
-        別の綴りにすると、除外したつもりのモジュールが黙って対象に残る）。
+        The FQN is spelled the same way as in {@link karume.quantize.iter_quant_targets} (spelling
+        only one side differently would silently keep a module meant to be excluded among the
+        targets).
         """
         return (f"{name}.weight" if name else "weight") not in self.excluded
 
 
 def scan_w4_targets(model: nn.Module) -> W4Targets:
-    """対象集合の素性と、量子化軸が g32 で割り切れない除外一覧を 1 度に採る。
+    """Take the profile of the target set and the list of exclusions whose quantization axis is not
+    divisible by g32, in one pass.
 
-    MUST: 非 linear の量子化可能型（conv 系 / embedding）が現れたら fail loudly。この台本は
-    「対象 = linear 限定 = i4 の実行経路と一致 = 配布対応形」を前提に表を作っており、上流の
-    diffusers が patchify を conv へ替えれば前提が黙って崩れる（表は出るが、出せない形の
-    数値になる）。増えたときは**非 linear 込みの列を足すかどうか**をまず決める。
+    MUST: fail loudly if a non-linear quantizable type (conv types / embedding) appears. This script
+    builds its table on the premise "targets = linear only = matches the i4 execution path =
+    distributable form", and if upstream diffusers switched patchify to a conv the premise would
+    break silently (the table would still come out, with numbers for a form that cannot ship). When
+    that happens, first decide **whether to add a column that includes the non-linears**.
 
-    MUST: 割り切れない対象は `include` で外し、除外一覧を出力へ載せる（ADR 0069 決定 2 —
-    端数 group は格納できない形なので、その bpw も品質も出さない）。黙って全体を諦めない。
+    MUST: exclude a non-divisible target through `include` and list the exclusions in the output
+    (ADR 0069 decision 2 — a partial group cannot be stored, so neither its bpw nor its quality is
+    reported). Do not silently give up on the whole set.
     """
     wide = {fqn for fqn, _weight, _axis in iter_quant_targets(model, QUANT_MODULE_TYPES)}
     targets = list(iter_quant_targets(model, W4_OP_TYPES))
@@ -978,18 +1060,21 @@ def scan_w4_targets(model: nn.Module) -> W4Targets:
 
 
 def w4_fit_stride(elements: int) -> int:
-    """対象要素数から `fake_quant_kmeans(fit_stride=…)` の等間隔 stride を決める。
+    """Decide the even stride of `fake_quant_kmeans(fit_stride=…)` from the number of target
+    elements.
 
-    予算（{@link W4_KMEANS_FIT_BUDGET}）に収まるなら 1 = 全量 fit。**奇数へ切り上げる**のは
-    group 長が 2 冪だから — 偶数 stride は group 内の偶数 lane しか踏まない（`gcd > 1`）が、
-    奇数なら常に互いに素で標本が group 内の全 lane を等しく踏む。
+    If it fits within the budget ({@link W4_KMEANS_FIT_BUDGET}), 1 = a full fit. It **rounds up to
+    an odd number** because the group length is a power of two — an even stride only visits the even
+    lanes of a group (`gcd > 1`), whereas an odd one is always coprime and the samples visit every
+    lane of a group equally.
     """
     stride = -(-elements // W4_KMEANS_FIT_BUDGET)
     return stride + 1 if stride % 2 == 0 else stride
 
 
 class W4RoundReport(Protocol):
-    """`fake_quant_*` の戻り値のうち**この台本が読む面**だけ（i4 と測定専用方式で型が違う）。"""
+    """Only **the surface this script reads** of the return value of `fake_quant_*` (the types
+    differ between i4 and the measurement-only methods)."""
 
     @property
     def modules(self) -> int: ...
@@ -999,24 +1084,27 @@ class W4RoundReport(Protocol):
 
 @dataclass(frozen=True)
 class W4Method:
-    """1 方式のレシピ（丸めの当て方とサイズ試算の式を 1 行に束ねる）。
+    """The recipe of one method (binds how the rounding is applied and the size-estimate formula in
+    one row).
 
-    2 つを別表に散らすと「品質を測った方式」と「サイズを試算した方式」が黙って割れる
-    （方式を 1 つ足したときに片方だけ更新される形になる）。`apply` は**素の f32 重みへ**
-    当てる前提で、積み重ねの禁止は呼び出し側の {@link restore_w4} が担保する。
+    Spreading the two over separate tables would silently split "the methods whose quality was
+    measured" from "the methods whose size was estimated" (adding a method would update only one of
+    them). `apply` assumes it is applied **to the plain f32 weights**; the prohibition on stacking
+    is guaranteed by the caller's {@link restore_w4}.
     """
 
     name: str
-    #: `(model, include 述語, kmeans の fit_stride) -> 丸めの計数`。
+    #: `(model, include predicate, kmeans fit_stride) -> rounding counts`.
     apply: Callable[[nn.Module, Callable[[str], bool], int], W4RoundReport]
-    #: 対象集合の投影ビット数。
+    #: The projected bit count of the target set.
     bits: Callable[[W4Targets], float]
-    #: `bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
+    #: The formula of `bits` (**carried into the output as is** — so that the premise of the
+    #: projection can be traced from the table).
     formula: str
 
 
 def _w4_group_scaled_bits(scale_bits: float) -> Callable[[W4Targets], float]:
-    """group scale を持つ方式の総 bit（`4·N + scale_bits·G`）。"""
+    """The total bits of a method with a group scale (`4·N + scale_bits·G`)."""
 
     def bits(targets: W4Targets) -> float:
         return W4_PAYLOAD_BITS * targets.elements + scale_bits * targets.groups
@@ -1031,7 +1119,8 @@ W4_METHODS: tuple[W4Method, ...] = (
             model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
         ),
         _w4_group_scaled_bits(W4_F32_SCALE_BITS),
-        "4·N + 32·G（G = N/32 の group ごとに F32 scale 1 個 — 配布形 `i4` の格納そのもの）",
+        "4·N + 32·G (G = one F32 scale per group of N/32 — the storage of the distributed `i4`"
+        " itself)",
     ),
     W4Method(
         "nf4",
@@ -1039,7 +1128,7 @@ W4_METHODS: tuple[W4Method, ...] = (
             model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
         ),
         _w4_group_scaled_bits(W4_F32_SCALE_BITS),
-        "4·N + 32·G（i4 と同じ group absmax scale・格子が正規分布の分位点）",
+        "4·N + 32·G (the same group absmax scale as i4; the grid is normal-distribution quantiles)",
     ),
     W4Method(
         "mxfp4",
@@ -1047,7 +1136,7 @@ W4_METHODS: tuple[W4Method, ...] = (
             model, W4_GROUP_SIZE, include=include, op_types=W4_OP_TYPES
         ),
         _w4_group_scaled_bits(W4_MX_SCALE_BITS),
-        "4·N + 8·G（共有 scale が E8M0 の 2 のべき — OCP MX v1.0）",
+        "4·N + 8·G (the shared scale is a power of two in E8M0 — OCP MX v1.0)",
     ),
     W4Method(
         "kmeans:shared",
@@ -1064,7 +1153,7 @@ W4_METHODS: tuple[W4Method, ...] = (
             + W4_F32_SCALE_BITS * targets.groups
             + W4_CODEBOOK_ENTRY_BITS * DEFAULT_CODEBOOK_LEVELS
         ),
-        "4·N + 32·G + 32·16（表はモデル全体で 1 枚・group absmax scale つき）",
+        "4·N + 32·G + 32·16 (one table for the whole model, with a group absmax scale)",
     ),
 )
 
@@ -1072,7 +1161,8 @@ W4_METHOD_NAMES = tuple(method.name for method in W4_METHODS)
 
 
 def select_w4_methods(only: Sequence[str]) -> tuple[W4Method, ...]:
-    """`--w4-only` で選んだ方式を宣言順で返す（基準 `f32` は常に走る — 比較の分母）。"""
+    """Return the methods chosen with `--w4-only` in declaration order (the baseline `f32` always
+    runs — the denominator of the comparison)."""
     if not only:
         return W4_METHODS
     chosen = set(only)
@@ -1080,7 +1170,8 @@ def select_w4_methods(only: Sequence[str]) -> tuple[W4Method, ...]:
 
 
 def w4_size_projection(method: W4Method, targets: W4Targets) -> dict[str, Any]:
-    """方式 × 対象集合の実効 bpw と投影 MiB（対象テンソルだけの合計 — 模型全体ではない）。"""
+    """The effective bpw and projected MiB of method × target set (the total of the target tensors
+    only — not the whole model)."""
     bits = method.bits(targets)
     baseline_bits = W4_F32_BITS * targets.elements
     return {
@@ -1096,40 +1187,48 @@ def w4_size_projection(method: W4Method, targets: W4Targets) -> dict[str, Any]:
 
 
 def restore_w4(weights: Mapping[str, torch.Tensor], pristine: Mapping[str, torch.Tensor]) -> None:
-    """全対象を pristine の f32 重みへ戻す（**方式を積み重ねない** MUST の実体）。"""
+    """Restore every target to the pristine f32 weights (the implementation of the MUST **do not
+    stack methods**)."""
     with torch.no_grad():
         for fqn, weight in weights.items():
             weight.copy_(pristine[fqn])
 
 
-# ---- 校正付き丸め（`--w4-screen` の校正列・波 J-2）---------------------------
+# ---- Calibrated rounding (the calibrated columns of `--w4-screen`, phase J-2) --------------
 #
-# 上の 4 方式は重みだけを見て丸める（RTN 系）。**校正付き丸め**（GPTQ — core の
-# `karume.quant_calib`）は「その層に実際に流れる活性」から**同じ格子の中で**丸め先を選び直す
-# 側で、格納グリッド 3 種を同じ列へ足す。積み重ね禁止も pristine 復元も 4 方式と同文。
+# The four methods above round by looking at the weights only (the RTN family). **Calibrated
+# rounding** (GPTQ — core's `karume.quant_calib`) re-chooses the rounding targets **within the same
+# grid** from "the activations that actually flow into that layer", and adds three storage grids to
+# the same table. The prohibition on stacking and the pristine restore are the same as for the four
+# methods.
 #
-# 対象は **DiT block 列の `nn.Linear` 限定**（{@link CALIB_TARGET}）で、4 方式の対象（DiT 全体の
-# linear）とは**集合が違う** — 校正の駆動（`calibrate_stages`）は stage 内の `nn.Linear` に
-# 閉じるので、block の外（`patch_embed.proj` / `norm_out` / `proj_out` / `time_embed`）が入らない。
-# サイズ試算も品質もその集合で読む（表と JSON に対象を明記する）。
+# The targets are **only the `nn.Linear` of the DiT block list** ({@link CALIB_TARGET}), **a
+# different set** from the targets of the four methods (the linears of the whole DiT) — the
+# calibration driver (`calibrate_stages`) is closed over the `nn.Linear` inside a stage, so what is
+# outside the blocks (`patch_embed.proj` / `norm_out` / `proj_out` / `time_embed`) is not included.
+# The size estimate and the quality are read on that set too (the table and the JSON state the
+# targets).
 #
-# 校正入力は**参照 step 列を横断**して採る（`--steps` ぶん・固定 PROMPT / 固定 SEED）。拡散
-# モデルの活性は sigma で分布が動くので、1 step だけ見ると後半 step の分布が校正から漏れる。
+# The calibration inputs are taken **across the reference step sequence** (`--steps` of them, fixed
+# PROMPT / fixed SEED). The activations of a diffusion model shift in distribution with sigma, so
+# looking at one step only would leave the distributions of the later steps out of the calibration.
 
-#: 校正付き構成の対象名（表と JSON の「対象」列）。
+#: The target name of the calibrated configurations (the "targets" column of the table and the
+#: JSON).
 CALIB_TARGET = "dit:blocks-linear"
 
-#: DiT block 列の**モデル内 FQN 接頭辞**（scale 台帳のキーを `Int4Report` と同じ FQN 空間へ
-#: 揃えるために stage へ渡す — core の `StageSpec` の契約）。
+#: **The in-model FQN prefix** of the DiT block list (passed to the stages to align the keys of the
+#: scale ledger with the FQN space of `Int4Report` — the contract of core's `StageSpec`).
 CALIB_BLOCK_PREFIX = "transformer_blocks"
 
 
 @dataclass(frozen=True)
 class CalibConfig:
-    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+    """The specification of one calibrated rounding (method × storage grid).
 
-    `bits` / `formula` は {@link W4Method} と同じ器（{@link w4_size_projection} が両方を受ける）
-    — 校正は**格子を 1 バイトも変えない**ので、格納形の式は方式側と共有できる。
+    `bits` / `formula` are the same container as {@link W4Method} ({@link w4_size_projection}
+    accepts both) — calibration **does not change the grid by a single byte**, so the formula of the
+    storage form can be shared with the method side.
     """
 
     name: str
@@ -1140,7 +1239,8 @@ class CalibConfig:
 
 
 def _calib_codebook_bits(targets: W4Targets) -> float:
-    """`kmeans_shared` の総 bit — 表は**層ごとに 1 枚**（core の `GridSpec` の NOTE）。"""
+    """The total bits of `kmeans_shared` — **one table per layer** (the NOTE of core's
+    `GridSpec`)."""
     return (
         W4_PAYLOAD_BITS * targets.elements
         + W4_F32_SCALE_BITS * targets.groups
@@ -1148,29 +1248,32 @@ def _calib_codebook_bits(targets: W4Targets) -> float:
     )
 
 
-#: 校正付き構成 3 本（この順で表に並ぶ）。AWQ を置かないのは、等価倍率 `s` が単独で格納できず
-#: （fold か companion が要る）出口の無い列になるため（core の `quant_calib` の MUST）。
+#: The three calibrated configurations (listed in the table in this order). AWQ is not included
+#: because its equivalent scale `s` cannot be stored on its own (it needs a fold or a companion),
+#: which would make a column without an exit (the MUST of core's `quant_calib`).
 CALIB_CONFIGS: tuple[CalibConfig, ...] = (
     CalibConfig(
         "gptq-rtn",
         "gptq",
         GridSpec(kind="rtn", group_size=W4_GROUP_SIZE),
         _w4_group_scaled_bits(W4_F32_SCALE_BITS),
-        "4·N + 32·G（格納は配布形 `i4` そのもの — 校正は丸め先だけを変える）",
+        "4·N + 32·G (the storage is the distributed `i4` itself — calibration changes only the"
+        " rounding targets)",
     ),
     CalibConfig(
         "gptq-nf4",
         "gptq",
         GridSpec(kind="nf4", group_size=W4_GROUP_SIZE),
         _w4_group_scaled_bits(W4_F32_SCALE_BITS),
-        "4·N + 32·G（格子は NF4 の固定表）",
+        "4·N + 32·G (the grid is NF4's fixed table)",
     ),
     CalibConfig(
         "gptq-kmeans",
         "gptq",
         GridSpec(kind="kmeans_shared", group_size=W4_GROUP_SIZE),
         _calib_codebook_bits,
-        "4·N + 32·G + 32·16·(層数)（表の射程は**層内** — 全体 1 枚の kmeans:shared とは別式）",
+        "4·N + 32·G + 32·16·(layers) (the table's scope is **per layer** — a different formula from"
+        " kmeans:shared with one table overall)",
     ),
 )
 
@@ -1178,7 +1281,8 @@ CALIB_NAMES: tuple[str, ...] = tuple(config.name for config in CALIB_CONFIGS)
 
 
 def select_calib(only: Sequence[str]) -> tuple[CalibConfig, ...]:
-    """`--w4-only` で選んだ校正付き構成を宣言順で返す（{@link select_w4_methods} と同じ流儀）。"""
+    """Return the calibrated configurations chosen with `--w4-only` in declaration order (the same
+    approach as {@link select_w4_methods})."""
     if not only:
         return CALIB_CONFIGS
     chosen = set(only)
@@ -1186,12 +1290,12 @@ def select_calib(only: Sequence[str]) -> tuple[CalibConfig, ...]:
 
 
 def calib_stages(model: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の DiT block を `(モデル内 FQN 接頭辞, stage)` で返す。
+    """Return the DiT blocks in execution order as `(in-model FQN prefix, stage)`.
 
-    block を**そのまま** stage にできるのは `CosmosTransformerBlock.forward` が
-    「hidden を位置引数・残りを keyword で受けて hidden を返す」形をしているから
-    （包み直すと写しが上流とずれうるので、包まないのが最善）。接頭辞に block 番号まで
-    入れてあるので、stage 内の局所 FQN（`attn1.to_q.weight`）はそのままモデル内 FQN へ戻る。
+    A block can be a stage **as is** because `CosmosTransformerBlock.forward` has the shape "takes
+    hidden positionally and the rest as keywords, returns hidden" (re-wrapping it could make the
+    copy drift from upstream, so not wrapping is best). The prefix includes the block index, so the
+    local FQN inside a stage (`attn1.to_q.weight`) maps back to the in-model FQN as is.
     """
     return tuple(
         (f"{CALIB_BLOCK_PREFIX}.{index}", block)
@@ -1200,13 +1304,16 @@ def calib_stages(model: nn.Module) -> tuple[StageSpec, ...]:
 
 
 def scan_calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], W4Targets]:
-    """stage 内の校正対象を fqn 引きの重みと素性で返す（**走査** = 過不足一致門の基準）。
+    """Return the calibration targets inside the stages as weights keyed by fqn plus their profile
+    (**the scan** = the reference of the exact-match check).
 
-    MUST: 非 linear の量子化可能型が現れたら fail loudly（{@link scan_w4_targets} と同文）。
+    MUST: fail loudly if a non-linear quantizable type appears (the same as {@link
+    scan_w4_targets}).
 
-    MUST: g32 非整列は**除外せず fail loudly** — 校正は stage を丸ごと駆動する形なので、
-    途中の 1 本だけ外すと「走査の本数 = 丸めた本数」の門が張れなくなる（4 方式側は層ごとに
-    独立なので除外一覧を出す運用でよい）。
+    MUST: a non-g32-aligned target **fails loudly instead of being excluded** — calibration drives a
+    whole stage, so leaving out one layer midway would make the check "number scanned = number
+    rounded" impossible (the four methods are independent per layer, so listing exclusions is fine
+    there).
     """
     weights: dict[str, torch.Tensor] = {}
     modules = elements = groups = 0
@@ -1239,16 +1346,18 @@ def scan_calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Ten
 def capture_stage_batches(
     model: nn.Module, run_reference: Callable[[], dict[str, torch.Tensor]], limit: int
 ) -> tuple[dict[str, torch.Tensor], tuple[StageBatch, ...]]:
-    """参照 denoise を 1 周回しつつ、先頭 block への `(args, kwargs)` を step ごとに捕まえる。
+    """Run one reference denoise pass while capturing `(args, kwargs)` to the first block per step.
 
-    CFG=1（{@link GUIDANCE}）なので 1 step = DiT 1 forward = 1 バッチ。付随引数は
-    `CosmosTransformer3DModel.forward` が block ループの**前**に 1 回作って全 block へ同じ
-    ものを渡すので、stage 間で不変にできる（`advance_kwargs` は要らない）。
+    CFG=1 ({@link GUIDANCE}), so 1 step = 1 DiT forward = 1 batch. The accompanying arguments are
+    built once by `CosmosTransformer3DModel.forward` **before** the block loop and the same ones are
+    passed to every block, so they can stay invariant across stages (no `advance_kwargs` needed).
 
-    位置引数の名前は `block.forward` の**シグネチャから**引く — 上流が引数の順序を変えても
-    綴りが黙って入れ替わらないようにするため（写した名前の並びを持たない）。
+    The names of the positional arguments are taken **from the signature** of `block.forward` — so
+    that the spelling does not silently shift if upstream reorders the arguments (no copied list of
+    names is kept).
 
-    MUST: 呼び出し側は**丸めを 1 本も当てる前**（基準 `f32` の周回）にだけ使う。
+    MUST: the caller uses this only **before any rounding is applied** (the pass of the baseline
+    `f32`).
     """
     blocks = list(model.transformer_blocks)
     names = tuple(inspect.signature(blocks[0].forward).parameters)
@@ -1279,9 +1388,11 @@ def capture_stage_batches(
 
 @dataclass(frozen=True)
 class CalibRig:
-    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+    """The scaffolding the calibrated configurations share (the stage list, the scan, the inputs to
+    the first stage).
 
-    構成ごとに作り直さない — 捕捉は基準 `f32` の周回で 1 回だけ（**丸めを 1 本も当てる前**）。
+    It is not rebuilt per configuration — the capture happens once, in the pass of the baseline
+    `f32` (**before any rounding is applied**).
     """
 
     stages: tuple[StageSpec, ...]
@@ -1291,7 +1402,8 @@ class CalibRig:
 
 
 def apply_calib(config: CalibConfig, rig: CalibRig) -> CalibReport:
-    """校正付き丸め 1 本を DiT へ in-place で当てる（stage 逐次の駆動は core 側）。"""
+    """Apply one calibrated rounding to the DiT in place (the per-stage driver is on the core
+    side)."""
     report = calibrate_stages(rig.stages, rig.batches, method=config.method, spec=config.grid)
     assert_calib_covers_scan(report, rig.scan, config.name)
     return report
@@ -1300,10 +1412,11 @@ def apply_calib(config: CalibConfig, rig: CalibRig) -> CalibReport:
 def assert_calib_covers_scan(
     report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
 ) -> None:
-    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+    """Check that the layers the calibration rounded match the stage scan **exactly**.
 
-    MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても
-    表には行が残り、しかも丸め漏れのぶん PSNR は**良い側**に出る（素通りを数字から読めない）。
+    MUST: fail loudly. Even if a change in the stage spelling or the target type left part of a
+    block out of the calibration, the table would keep its rows, and the PSNR would come out on
+    **the good side** by the amount left unrounded (a passthrough cannot be read from the numbers).
     """
     rounded = {layer.fqn for layer in report.layers}
     missing = sorted(set(scan) - rounded)
@@ -1316,14 +1429,17 @@ def assert_calib_covers_scan(
 
 
 def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
-    """方式ごとに pristine から丸め直して DiT を走らせ、品質とサイズ試算を集める。
+    """Re-round from pristine per method, run the DiT, and collect the quality and the size
+    estimate.
 
-    模型のロードは 1 回きり（7.29GiB）。pristine の退避は対象の重みだけ（除外分は 1 度も
-    触らないので採らない）で、丸めの一時領域と合わせたピークが実メモリを決める。
+    The model is loaded only once (7.29GiB). Only the target weights are saved as pristine (the
+    excluded ones are never touched, so they are not saved), and the peak together with the rounding
+    workspace decides the physical memory.
 
-    校正付き構成（{@link CALIB_CONFIGS}）は 4 方式の**後**に走る（対象集合が違うので表の
-    並びで混ざらない）。足場は基準 `f32` の周回で 1 回だけ組む — 校正入力は**丸めを 1 本も
-    当てる前**に採る必要があるため。
+    The calibrated configurations ({@link CALIB_CONFIGS}) run **after** the four methods (the target
+    sets differ, so they do not mix in the table order). The scaffolding is built only once, in the
+    pass of the baseline `f32` — the calibration inputs have to be taken **before any rounding is
+    applied**.
     """
     methods = select_w4_methods(args.w4_only)
     calib_configs = select_calib(args.w4_only)
@@ -1345,16 +1461,19 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
     targets = scan_w4_targets(model)
     stride = w4_fit_stride(targets.elements)
     print(
-        f"[w4] 対象 {targets.modules} 本 / {targets.elements:,} 要素"
-        f" / group {targets.groups:,}（g{W4_GROUP_SIZE}）",
+        f"[w4] {targets.modules} targets / {targets.elements:,} elements"
+        f" / {targets.groups:,} groups (g{W4_GROUP_SIZE})",
         flush=True,
     )
     for fqn, span in sorted(targets.excluded.items()):
-        print(f"[w4] 除外 {fqn}: 量子化軸 {span} が {W4_GROUP_SIZE} で割り切れない", flush=True)
+        print(
+            f"[w4] excluded {fqn}: quantization axis {span} is not divisible by {W4_GROUP_SIZE}",
+            flush=True,
+        )
     if stride > 1:
         print(
-            f"[w4] kmeans:shared の表は 1/{stride} の等間隔部分標本で fit"
-            f"（≈ {targets.elements // stride:,} 要素・適用は全量）",
+            f"[w4] the kmeans:shared table is fitted on an even 1/{stride} subsample"
+            f" (≈ {targets.elements // stride:,} elements; applied to everything)",
             flush=True,
         )
 
@@ -1370,13 +1489,14 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
         stages = calib_stages(model)
         calib_scan, calib_targets = scan_calib_targets(stages)
         print(
-            f"[calib] stage {len(stages)} 段 / 対象 linear {calib_targets.modules} 本"
-            f" / {calib_targets.elements:,} 要素（{CALIB_TARGET} — block の外は含まない）",
+            f"[calib] {len(stages)} stages / {calib_targets.modules} target linears"
+            f" / {calib_targets.elements:,} elements ({CALIB_TARGET} — nothing outside the blocks)",
             flush=True,
         )
 
-    # `model` を**既定引数で束ねる**のは、下の `del` が同名の局所を外すため（素のクロージャ
-    # だと、消えた後に呼ばれたとき NameError になる形が残る）。
+    # `model` is **bound through a default argument** because the `del` below removes the local of
+    # the same name (a plain closure would leave a form that raises NameError if called after it is
+    # gone).
     def run_reference(model: nn.Module = model) -> dict[str, torch.Tensor]:
         return reference_steps(
             model,
@@ -1396,23 +1516,25 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
         name = W4_BASE_CONFIG if method is None else method.name
         started = time.perf_counter()
         if method is None:
-            report = "丸めなし（基準）"
+            report = "no rounding (baseline)"
         else:
-            # MUST: 当てる前に必ず戻す（方式を積み重ねない — 節の冒頭）。
+            # MUST: always restore before applying (do not stack methods — the start of the
+            # section).
             restore_w4(weights, pristine)
             rounded = method.apply(model, targets.include, stride)
             if rounded.modules != targets.modules:
                 raise AssertionError(
-                    f"{name}: 丸めた本数 {rounded.modules} が対象 {targets.modules} と違う"
-                    "（include 述語か op_types が効いていない）"
+                    f"{name}: rounded {rounded.modules} modules, not the {targets.modules} targets"
+                    " (the include predicate or op_types has no effect)"
                 )
             report = rounded.describe()
             sizes[name] = w4_size_projection(method, targets)
         if method is None and calib_configs:
-            # MUST: 捕捉は**丸めを 1 本も当てる前**（基準 f32 の周回）に 1 回だけ。
+            # MUST: the capture happens once only, **before any rounding is applied** (the pass of
+            # the baseline f32).
             result, batches = capture_stage_batches(model, run_reference, args.steps)
             rig = CalibRig(stages=stages, scan=calib_scan, targets=calib_targets, batches=batches)
-            print(f"[calib] 校正バッチ {len(batches)} 本（step 横断）を捕捉", flush=True)
+            print(f"[calib] captured {len(batches)} calibration batches (across steps)", flush=True)
         else:
             result = run_reference()
         for key, value in result.items():
@@ -1424,9 +1546,13 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
 
     for config in calib_configs:
         if rig is None:
-            raise AssertionError("校正の足場が組まれていない（基準 f32 の周回が走っていない）")
+            raise AssertionError(
+                "the calibration scaffolding was not built"
+                " (the pass of the baseline f32 did not run)"
+            )
         started = time.perf_counter()
-        # MUST: 校正付きも積み重ねない — 当てる前に pristine へ戻す（4 方式と同文）。
+        # MUST: calibrated configurations do not stack either — restore pristine before applying
+        # (the same as the four methods).
         restore_w4(weights, pristine)
         calib_report = apply_calib(config, rig)
         result = run_reference()
@@ -1457,8 +1583,9 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
             "batches": len(rig.batches),
         }
     )
-    # 丸め済みの重みと pristine（対象と同サイズ）を VAE decode の前に手放す。
-    # `rig` は stage 経由で block を、batches で校正入力を掴んだままなので一緒に落とす。
+    # Release the rounded weights and pristine (the same size as the targets) before the VAE decode.
+    # `rig` still holds the blocks through the stages and the calibration inputs through batches, so
+    # it goes too.
     del model, weights, pristine, rig
     if calib_configs:
         del stages, calib_scan, calib_targets
@@ -1471,8 +1598,9 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
     failures: list[str] = []
     base_image = images[W4_BASE_CONFIG]
     u8_base = to_uint8(base_image).to(torch.float32)
-    # 基準行そのものは測らない（自分との比較は relRMS 0 / PSNR ∞ で情報が無く、∞ は JSON の
-    # 値としても不正）。表も門も丸めた構成だけを見る。
+    # The baseline row itself is not measured (comparing with itself gives relRMS 0 / PSNR ∞, which
+    # carries no information, and ∞ is not a valid JSON value either). The table and the gate look
+    # only at the rounded configurations.
     for name, entry in ((name, configs[name]) for name in configs if name != W4_BASE_CONFIG):
         u8 = to_uint8(images[name]).to(torch.float32)
         entry["latentRelRms"] = [
@@ -1486,10 +1614,13 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
             latents[f"{name}/{last}"], latents[f"{W4_BASE_CONFIG}/{last}"]
         )
         entry["size"] = sizes[name]
-        # 恒真化の遮断: 素通りは常に「品質が良い」側の嘘になる（丸めが 1 本も当たっていない
-        # 場合だけ基準とビット一致し、しかも数値は完璧に見える）。
+        # Guarding against a vacuous pass: a passthrough is always a lie on the "good quality" side
+        # (only when no rounding was applied at all does it match the baseline bit for bit, and then
+        # the numbers look perfect).
         if not entry["moved"]:
-            failures.append(f"{name}: 最終 latent が `{W4_BASE_CONFIG}` とビット一致（素通り）")
+            failures.append(
+                f"{name}: the final latent matches `{W4_BASE_CONFIG}` bit for bit (passthrough)"
+            )
 
     image_note = save_images(images, args.out)
     if not args.no_latents:
@@ -1517,8 +1648,9 @@ def run_w4_screen(args: argparse.Namespace) -> dict[str, Any]:
             "elements": targets.elements,
             "groups": targets.groups,
         },
-        # 校正列の対象は上の 4 方式と**別集合**（block の外が入らない）— 表の bpw と品質を
-        # 読むときに取り違えないよう、素性を並べて出す。
+        # The targets of the calibrated columns are **a different set** from the four methods above
+        # (nothing outside the blocks) — their profile is listed alongside so that the bpw and the
+        # quality of the table are not mixed up when read.
         "calibTargets": calib_meta,
         "excluded": [
             {"weight": fqn, "quantAxis": span} for fqn, span in sorted(targets.excluded.items())
@@ -1541,38 +1673,42 @@ def _w4_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 
 
 def w4_report_markdown(payload: Mapping[str, Any]) -> str:
-    """`w4_report.md` の本文（**payload だけ**から作る — 表と JSON が割れないように）。"""
+    """The body of `w4_report.md` (built **from the payload only** — so that the table and the JSON
+    do not diverge)."""
     configs: dict[str, dict[str, Any]] = payload["configs"]
     names = list(configs)
     quantized = [name for name in names if name != W4_BASE_CONFIG]
     lines: list[str] = []
     lines.append(
-        f"# w4 方式スクリーニング — Anima DiT の丸め方式 {len(quantized)} 種（torch CPU 実測）"
+        f"# w4 method screening — {len(quantized)} rounding methods for the Anima DiT"
+        " (measured with torch on CPU)"
     )
     lines.append("")
     lines.append(
-        f"- 日付: {payload['generated']} / 計測: `{payload['script']}`"
-        f"（torch {payload['torch']}・CPU f32）"
+        f"- Date: {payload['generated']} / measured by: `{payload['script']}`"
+        f" (torch {payload['torch']}, CPU f32)"
     )
     lines.append(
-        f"- 条件: Anima turbo {payload['steps']} step・{payload['resolution']}px"
-        f"・CFG={payload['guidanceScale']:g}・LoRA 焼き込み・seed {payload['seed']}"
+        f"- Conditions: Anima turbo {payload['steps']} steps, {payload['resolution']}px"
+        f", CFG={payload['guidanceScale']:g}, LoRA merged, seed {payload['seed']}"
     )
-    lines.append(f"- プロンプト: `{payload['prompt']}`")
+    lines.append(f"- Prompt: `{payload['prompt']}`")
     lines.append(
-        f"- 対象: DiT の `{'` / `'.join(payload['targets']['opTypes'])}`"
-        f" {payload['targets']['modules']} 本 / {payload['targets']['elements']:,} 要素"
-        f"（g={payload['groupSize']} 固定・group {payload['targets']['groups']:,} 個）。"
-        "**非 DiT（text_encoder / text_conditioner / VAE）は全構成とも f32 のまま**。"
-    )
-    lines.append(
-        "- MUST: 構成ごとに pristine（素の f32 重み）へ戻してから当てる — **方式は積み重ねない**。"
-        "同じ台本の 10 構成（w8 / w8a8 / attention a8）の積み上げ意味論とは**別経路**。"
+        f"- Targets: `{'` / `'.join(payload['targets']['opTypes'])}` of the DiT,"
+        f" {payload['targets']['modules']} modules / {payload['targets']['elements']:,} elements"
+        f" (g={payload['groupSize']} fixed, {payload['targets']['groups']:,} groups)."
+        " **Everything outside the DiT (text_encoder / text_conditioner / VAE) stays f32 in every"
+        " configuration**."
     )
     lines.append(
-        "- 丸めは全て core の共有実装（`karume.quantize.fake_quant_int4` / "
-        "`karume.quant_methods` の nf4 / mxfp4 / kmeans）で、対象選択も "
-        "`iter_quant_targets` の共有（測った対象と出荷する対象を割らないため）。"
+        "- MUST: each configuration first restores the pristine weights (the plain f32 weights)"
+        " — **methods are not stacked**. A **separate path** from the stacking semantics of the 10"
+        " configurations of the same script (w8 / w8a8 / attention a8)."
+    )
+    lines.append(
+        "- Every rounding is core's shared implementation (`karume.quantize.fake_quant_int4` / "
+        "nf4 / mxfp4 / kmeans of `karume.quant_methods`), and so is the target selection, "
+        "`iter_quant_targets` (so that the targets measured and the targets shipped do not split)."
     )
     excluded = payload["excluded"]
     if excluded:
@@ -1600,9 +1736,9 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
         )
     lines.append("")
 
-    lines.append(f"## ① step ごとの latent relRMS（基準 = `{W4_BASE_CONFIG}`）")
+    lines.append(f"## ① Latent relRMS per step (baseline = `{W4_BASE_CONFIG}`)")
     lines.append("")
-    lines.append("`relRMS(v, r) = ‖v − r‖₂ / ‖r‖₂`。")
+    lines.append("`relRMS(v, r) = ‖v − r‖₂ / ‖r‖₂`.")
     lines.append("")
     rows = [
         [str(index + 1), *(f"{configs[name]['latentRelRms'][index]:.4e}" for name in quantized)]
@@ -1611,11 +1747,11 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
     lines.append(_w4_table(["step", *(f"`{name}`" for name in quantized)], rows))
     lines.append("")
 
-    lines.append(f"## ② VAE decode 後の最終画像（基準 = `{W4_BASE_CONFIG}`）")
+    lines.append(f"## ② Final image after VAE decode (baseline = `{W4_BASE_CONFIG}`)")
     lines.append("")
     lines.append(
-        "PSNR は `[-1,1]` の生 tensor（data range 2.0）と、PNG と同じ uint8 量子化後"
-        "（data range 255）の 2 系列。relRMS は生 tensor。"
+        "PSNR is given two ways: on the raw `[-1,1]` tensor (data range 2.0) and after the same"
+        " uint8 quantization as the PNG (data range 255). relRMS is on the raw tensor."
     )
     lines.append("")
     rows = [
@@ -1631,23 +1767,31 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
     ]
     lines.append(
         _w4_table(
-            ["構成", "PSNR f32 (dB)", "PSNR uint8 (dB)", "relRMS", "uint8 最大差 (/255)", "所要"],
+            [
+                "configuration",
+                "PSNR f32 (dB)",
+                "PSNR uint8 (dB)",
+                "relRMS",
+                "uint8 max diff (/255)",
+                "elapsed",
+            ],
             rows,
         )
     )
     lines.append("")
     lines.append(
-        f"画像: {payload['imageNote']}（{' / '.join(f'`image_{name}`' for name in names)}）"
+        f"Images: {payload['imageNote']} ({' / '.join(f'`image_{name}`' for name in names)})"
     )
     lines.append("")
 
-    lines.append("## ③ サイズ試算（対象テンソル集合のみ・**式による投影**）")
+    lines.append("## ③ Size estimate (target tensor set only, **projected by formula**)")
     lines.append("")
     lines.append(
-        f"N = 対象要素数 {payload['targets']['elements']:,} / G = N/{payload['groupSize']} = "
-        f"{payload['targets']['groups']:,}。実測ではなく格納規則の式で、格納形を持たない方式"
-        "（rtn 以外）は書けもしない — 品質と同じ表で並べるのは、表のコストが見えないまま"
-        "品質だけで選ばないため。"
+        f"N = {payload['targets']['elements']:,} target elements / G = N/{payload['groupSize']} = "
+        f"{payload['targets']['groups']:,}. These come from the storage-rule formulas, not from"
+        " measurement, and a method without a storage form (anything but rtn) cannot even be"
+        " written — they are laid out in the same table as the quality so that nothing is chosen on"
+        " quality alone while the table cost stays invisible."
     )
     lines.append("")
     rows = [
@@ -1661,14 +1805,17 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
         ]
         for name in quantized
     ]
-    lines.append(_w4_table(["構成", "bpw", "投影 MiB", "f32 MiB", "比", "式"], rows))
+    lines.append(
+        _w4_table(["configuration", "bpw", "projected MiB", "f32 MiB", "ratio", "formula"], rows)
+    )
     lines.append("")
 
-    lines.append("## ④ 門")
+    lines.append("## ④ Gate")
     lines.append("")
     lines.append(
-        "丸めが素通りしていないこと（各構成の最終 latent が基準と**ビット一致しない**）— "
-        "一致するのは丸めが 1 本も当たっていない場合だけで、しかも品質は「完璧」側に出る。"
+        "The rounding was not passed through (each configuration's final latent **does not match**"
+        " the baseline bit for bit) — a match happens only when no rounding was applied at all, and"
+        ' then the quality comes out on the "perfect" side.'
     )
     lines.append("")
     rows = [
@@ -1679,13 +1826,13 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
         ]
         for name in quantized
     ]
-    lines.append(_w4_table(["構成", "基準と異なる", "丸めの計数"], rows))
+    lines.append(_w4_table(["configuration", "differs from baseline", "rounding counts"], rows))
     lines.append("")
     return "\n".join(lines) + "\n"
 
 
 def main_w4(args: argparse.Namespace) -> None:
-    """`--w4-screen` の入口（10 構成は 1 本も走らない）。"""
+    """The entry point of `--w4-screen` (none of the 10 configurations runs)."""
     args.out.mkdir(parents=True, exist_ok=True)
     payload = run_w4_screen(args)
     (args.out / W4_REPORT_FILE).write_text(w4_report_markdown(payload), encoding="utf-8")
@@ -1696,79 +1843,92 @@ def main_w4(args: argparse.Namespace) -> None:
     print(f"report OK → {args.out / W4_REPORT_FILE}", flush=True)
     failures = payload["gates"]["failures"]
     if failures:
-        raise AssertionError("検証ゲートが赤: " + " / ".join(failures))
+        raise AssertionError("verification gate is red: " + " / ".join(failures))
     print("gates: all green", flush=True)
 
 
 def main() -> None:
-    # --until が派生テーブルごと前方部分へ差し替えるため（宣言は使用より前が文法上の要請）。
+    # Because --until replaces the derived tables too with the forward part (the declaration has to
+    # come before any use, as the grammar requires).
     global CONFIGS, CONFIG_NAMES, ATTN_CONFIGS
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", default=DEFAULT_REPO)
-    parser.add_argument("--out", type=Path, required=True, help="レポートと画像の出力先")
-    parser.add_argument("--steps", type=int, default=10, help="turbo の step 数")
-    parser.add_argument("--resolution", type=int, default=512, help="正方形の一辺（px）")
+    parser.add_argument(
+        "--out", type=Path, required=True, help="output directory for the report and images"
+    )
+    parser.add_argument("--steps", type=int, default=10, help="number of turbo steps")
+    parser.add_argument("--resolution", type=int, default=512, help="side of the square (px)")
     parser.add_argument("--max-sequence-length", type=int, default=512)
-    parser.add_argument("--lora", type=Path, default=DEFAULT_LORA, help="DiT へ焼き込む LoRA")
+    parser.add_argument(
+        "--lora", type=Path, default=DEFAULT_LORA, help="LoRA to merge into the DiT"
+    )
     parser.add_argument("--lora-scale", type=float, default=1.0)
     parser.add_argument(
         "--measure-step",
         type=int,
         default=1,
-        help="層別の出力 relRMS を採る step（0 起点）",
+        help="step at which the per-layer output relRMS is collected (0-based)",
     )
     parser.add_argument(
         "--inject",
         choices=("drop-attn-quant",),
         default=None,
-        help="故障注入（検出器の検出力を実証する）— attention の SDPA 差し替えは掛けるが"
-        " 量子化も S の f16 丸めも一切適用しない（(d)〜(j) が基準構成と一致する向きへ倒れ、"
-        "`*-s16` は丸めの発火計数も 0 に落ちることを実測する）",
+        help="fault injection (demonstrates the detectors' power) — installs the attention SDPA"
+        " replacement but applies neither quantization nor the S f16 rounding (measures that"
+        " (d)–(j) collapse toward the baseline configuration and that the rounding call count of"
+        " `*-s16` drops to 0)",
     )
     parser.add_argument(
         "--no-latents",
         action="store_true",
-        help="dit_out.safetensors（構成 × step の生 latent）を書かない",
+        help="do not write dit_out.safetensors (the raw latents of configuration × step)",
     )
     parser.add_argument(
         "--until",
         choices=CONFIG_NAMES,
         default=None,
-        help="この構成までの**前方部分**だけ走らせる（P̃ 分布の確認だけなら `w8a8` で足りる）。"
-        " 重みの i8 丸めは in-place で順序依存なので任意の部分集合は許さない — 前方接頭辞のみ。"
-        f" 基準 `{BASELINE}` より手前で切る指定は集計が成立しないため拒否する",
+        help="run only the **forward part** up to this configuration (`w8a8` is enough to check"
+        " the P̃ distribution). The i8 rounding of the weights is in place and order-dependent, so"
+        " an arbitrary subset is not allowed — forward prefixes only."
+        f" A cutoff before the baseline `{BASELINE}` is rejected because the summary would not"
+        " hold",
     )
     parser.add_argument(
         "--w4-screen",
         action="store_true",
-        help="**10 構成の代わりに** w4 の丸め方式スクリーニングを走らせる"
-        f"（{' / '.join(W4_METHOD_NAMES)} + 校正付き {' / '.join(CALIB_NAMES)}"
-        f" + 基準 f32・g{W4_GROUP_SIZE} 固定）。"
-        "構成ごとに素の f32 重みへ戻してから当てる別経路で、生成物も別名",
+        help="run the w4 rounding method screening **instead of the 10 configurations**"
+        f" ({' / '.join(W4_METHOD_NAMES)} + calibrated {' / '.join(CALIB_NAMES)}"
+        f" + baseline f32, g{W4_GROUP_SIZE} fixed)."
+        " A separate path that restores the plain f32 weights before each configuration, with"
+        " differently named outputs",
     )
     parser.add_argument(
         "--w4-only",
         action="append",
         default=[],
         choices=(*W4_METHOD_NAMES, *CALIB_NAMES),
-        help="`--w4-screen` でこの方式 / 校正付き構成だけ走らせる（複数可・部分再実行用）。"
-        "基準 f32 は常に走る",
+        help="with `--w4-screen`, run only this method / calibrated configuration (repeatable; for"
+        " partial re-runs). The baseline f32 always runs",
     )
     args = parser.parse_args()
     if args.w4_only and not args.w4_screen:
-        parser.error("--w4-only は --w4-screen と併用する")
+        parser.error("--w4-only requires --w4-screen")
     if args.w4_screen:
-        # 積み上げ経路のノブ（前方接頭辞と attention の故障注入）は方式スクリーニングに
-        # 意味を持たない — 黙って無視せず拒否する。
+        # The knobs of the stacking path (the forward prefix and the attention fault injection)
+        # mean nothing to the method screening — reject them instead of silently ignoring them.
         if args.until is not None or args.inject is not None:
-            parser.error("--w4-screen は --until / --inject と併用できない（別経路）")
+            parser.error("--w4-screen cannot be combined with --until / --inject (separate path)")
         main_w4(args)
         return
     if args.until is not None:
         cutoff = CONFIG_NAMES.index(args.until)
         if cutoff < CONFIG_NAMES.index(BASELINE):
-            parser.error(f"--until は {BASELINE} 以降の構成のみ（基準が無いと集計不能）")
-        # 派生テーブルごと前方部分へ差し替える（以降の全段が同じ正本を読む）。
+            parser.error(
+                f"--until accepts only configurations from {BASELINE} on (no summary without the"
+                " baseline)"
+            )
+        # Replace the derived tables too with the forward part (every later stage reads the same
+        # source of truth).
         CONFIGS = CONFIGS[: cutoff + 1]
         CONFIG_NAMES = tuple(config.name for config in CONFIGS)
         ATTN_CONFIGS = attn_config_names(CONFIGS)
@@ -1784,8 +1944,9 @@ def main() -> None:
 
     images = decode_all(args.repo, latents, f"latents_step{args.steps:04d}", CONFIG_NAMES)
     image_note = save_images(images, args.out)
-    # --until が書き換えた派生表と engine 側の指標は**全て引数で渡す**（レポート側から
-    # このモジュールを import すると循環するので、逆辺は型注釈だけに留めてある）。
+    # The derived tables --until rewrote and the engine-side metrics are **all passed as
+    # arguments** (importing this module from the report side would be circular, so the reverse
+    # edge is kept to type annotations only).
     summary = build_summary(
         args,
         run,
@@ -1845,8 +2006,9 @@ def main() -> None:
     for key, value in summary["gates"].items():
         print(f"[gate] {key}: {value}", flush=True)
     print(f"report OK → {args.out / 'report.md'}", flush=True)
-    # ADR 0019 の品質ゲート①を埋める台本なので、赤は終了コードにも出す（`--w4-screen` 経路と
-    # 同じ強さ）。`--inject` は検出力の実証で**赤にすること自体が目的**なので投げない。
+    # This script fills quality gate ① of ADR 0019, so red also shows in the exit code (the same
+    # strength as the `--w4-screen` path). `--inject` demonstrates detection power, and **turning it
+    # red is the very purpose**, so it does not raise.
     if args.inject is None and summary["failed"]:
         raise AssertionError("品質ゲートが赤: " + " / ".join(summary["failed"]))
 

@@ -1,40 +1,49 @@
-"""anima の i4 系列の**校正付き丸め**（GPTQ × RTN 格子）を回すリグ（perf-ledger Q-6）。
+"""Rig that runs **calibrated rounding** (GPTQ × RTN grid) for anima's i4 series (perf-ledger Q-6).
 
-`karume.quant_calib.calibrate_stages` は「stage を 1 つずつ進めながら、その層に実際に流れる
-活性から丸め先を選び直す」駆動で、格納グリッドは {@link karume.quantize.quantize_to_int4} と
-**1 バイトも変わらない**（`scale = group amax / 7`・`q ∈ [−7,+7]`）。変わるのは丸め値と
-scale 台帳の中身だけで、`emit` 側の格納経路も配布形のバイト構造も一切動かない。
+`karume.quant_calib.calibrate_stages` is a driver that "advances one stage at a time and re-picks
+the rounding targets from the activations that actually flow through that layer". The storage grid
+is **not a single byte different** from {@link karume.quantize.quantize_to_int4}
+(`scale = group amax / 7`, `q ∈ [−7,+7]`). Only the rounded values and the contents of the scale
+ledger change; neither the storage path on the `emit` side nor the byte structure of the
+distribution moves at all.
 
-ここが用意するのは core の駆動が要求する 3 つと、anima 固有の門 1 つ:
+This module provides the three things the core driver requires, plus one anima-specific check:
 
-1. **stage 列** — DiT の `transformer_blocks` をそのまま並べたもの（{@link dit_stages}）。
-   `CosmosTransformerBlock.forward` が「hidden を位置引数・残りを keyword で受けて hidden を
-   返す」形なので**包まない**（包み直すと写しが上流とずれうる）。接頭辞は
-   **export するラッパの FQN 空間**（{@link STAGE_PREFIX} = `model.transformer_blocks`）—
-   計測リグ（`anima.measure_quant`）が素の `CosmosTransformer3DModel` を駆動して
-   `transformer_blocks.<i>` を使うのに対し、export は `patch.AnimaDit` を通すので `model.` が
-   1 段挟まる。ここを外すと scale 台帳のキーが容器の initializer 名（= 束縛表の鍵）と空振りする。
-2. **先頭 stage への入力** — {@link capture_stage_batches} が**参照 denoise を実際に回して**
-   先頭 block への `(args, kwargs)` を forward_pre_hook で捕まえる。自前で組み直さないのは
-   deberta / 計測リグと同文で、拡散モデルでは加えて「活性が sigma で動く」ので**step を
-   横断して**採る（1 step だけ見ると後半 step の分布が校正から漏れる）。
-3. **stage 分解一致門** — {@link assert_stage_split}。deberta の同名の門は「`EncoderStage` と
-   いう写しが上流のループとずれていないか」を見るが、anima は block をそのまま stage にして
-   いるのでその形では degenerate になる。代わりに「ラッパの block ループを stage 逐次で
-   回した結果が、ラッパを 1 回 forward したときの `norm_out` への入力とビット一致する」を
-   見る（丸めを 1 本も当てる前に実測する MUST）。
-4. **校正入力とグラフの付随引数一致門** — {@link assert_calib_batches_match_graph}。捕捉は素の
-   `CosmosTransformer3DModel` の forward から採るのに、丸めるのはラッパ（`patch.AnimaDit`）の
-   重み。両者が block へ渡す付随引数の顔ぶれが違うと、「配布グラフとは別の条件で選んだ
-   丸め先」を出荷することになる（数値は普通に出るので golden も緑のまま通る）。見るのは
-   **keyword 名の集合だけ**で、値・shape・位置引数は突き合わせない（「経路が同じ」までは
-   主張しない — 顔ぶれのずれだけを捕まえる門）。
+1. **The stage list** — the DiT's `transformer_blocks` laid out as they are ({@link dit_stages}).
+   `CosmosTransformerBlock.forward` "takes hidden positionally and the rest as keywords and
+   returns hidden", so the blocks are **not wrapped** (re-wrapping could let the copy drift from
+   upstream). The prefix lives in **the FQN space of the exported wrapper**
+   ({@link STAGE_PREFIX} = `model.transformer_blocks`) — the measurement rig
+   (`anima.measure_quant`) drives the bare `CosmosTransformer3DModel` and uses
+   `transformer_blocks.<i>`, whereas export goes through `patch.AnimaDit`, which inserts one
+   `model.` level. Dropping it makes the scale ledger's keys miss the container's initializer
+   names (= the binding table's keys).
+2. **The input to the first stage** — {@link capture_stage_batches} **actually runs the
+   reference denoise** and catches the `(args, kwargs)` to the first block with a
+   forward_pre_hook. Not rebuilding it by hand follows the same reasoning as deberta and the
+   measurement rig; for a diffusion model, in addition, "the activations move with sigma", so the
+   capture spans **all steps** (looking at a single step leaves the distribution of the later
+   steps out of the calibration).
+3. **The stage-split equality check** — {@link assert_stage_split}. deberta's check of the same
+   name asks "does the `EncoderStage` copy drift from the upstream loop", but anima uses the
+   blocks themselves as stages, so that form would be degenerate. Instead it checks that "running
+   the wrapper's block loop stage by stage is bit-identical to the input to `norm_out` in one
+   forward of the wrapper" (MUST be measured before a single rounding is applied).
+4. **The check that the calibration inputs and the graph share the same auxiliary arguments** —
+   {@link assert_calib_batches_match_graph}. The capture comes from the forward of the bare
+   `CosmosTransformer3DModel`, but the weights that are rounded are the wrapper's
+   (`patch.AnimaDit`). If the set of auxiliary arguments the two pass to a block differs, we ship
+   "rounding targets chosen under conditions other than the distributed graph's" (the numbers come
+   out normally, so the golden stays green too). Only **the set of keyword names** is checked;
+   values, shapes and positional arguments are not compared (it does not claim "the path is the
+   same" — it is a check that only catches a mismatch in the set).
 
-NOTE（`anima.measure_quant` のリグと共有しない理由）: あちらは 3 グリッド × 品質計測のための
-足場で、対象も駆動も「素のモデル」に閉じている。export 側はラッパの FQN 空間・配布条件
-（stage 外を先に丸める）・出荷可能な台帳の取り出しが要る。写しを 1 本にまとめると、片方の
-前提が動いたときにもう片方が黙って追随する — 各リグが自前の一致門で独立に自己検証する形に
-してある。
+NOTE (why this does not share the rig of `anima.measure_quant`): that one is scaffolding for 3
+grids × quality measurement, and both its target and its driver stay within "the bare model". The
+export side needs the wrapper's FQN space, the distribution conditions (round what is outside the
+stages first) and extraction of a shippable ledger. Merging the copies into one would make one side
+follow silently when the other side's premises move — instead each rig verifies itself
+independently with its own equality checks.
 """
 
 from __future__ import annotations
@@ -61,92 +70,110 @@ from karume.quantize import DEFAULT_GROUP_SIZE, Int4Report, iter_quant_targets
 from . import pipeline_ref
 from .distribution import anima_model
 
-#: stage 列のモデル内 FQN 接頭辞。`patch.AnimaDit.model` / `patch.AnimaDitTokens.model` が
-#: `CosmosTransformer3DModel` なので、block の FQN は `model.transformer_blocks.<番号>.…`。
+#: In-model FQN prefix of the stage list. `patch.AnimaDit.model` / `patch.AnimaDitTokens.model` is
+#: a `CosmosTransformer3DModel`, so a block's FQN is `model.transformer_blocks.<index>.…`.
 STAGE_PREFIX = "model.transformer_blocks"
 
-#: 校正付き丸めの方式。GPTQ 以外は scale 台帳を返さない（`karume.quant_calib` の MUST）。
+#: Method of the calibrated rounding. Methods other than GPTQ return no scale ledger (a MUST of
+#: `karume.quant_calib`).
 CALIB_METHOD = "gptq"
 
-#: adaLN（modulation の shift / scale / gate を作る層）を指す block 内 FQN セグメント。
+#: In-block FQN segments that denote adaLN (the layers that produce the modulation's shift / scale /
+#: gate).
 #:
-#: `CosmosTransformerBlock` は block ごとに `norm1` / `norm2` / `norm3` の
-#: `CosmosAdaLayerNormZero` を持ち、各々が `linear_1` / `linear_2` を抱える
-#: （anima-v1.0 = 28 block × 3 × 2 = **168 本**。実 checkpoint のヘッダ走査で確認）。
-#: 感度実験変種（`anima.export` の `--i4-adaln-i8`）はこの 168 本を i4 から外して i8 で丸める
-#: — irodori の w4 席で同型の構成が聴感を回復させた実績があり（research
-#: `2026-08-24-gptq-expansion-quality.md` §1）、素版 i4 の視認裁定（同 §5 = 配布スキップ）の
-#: 改善候補として名指しされた側。
+#: Each `CosmosTransformerBlock` has the `CosmosAdaLayerNormZero` modules `norm1` / `norm2` /
+#: `norm3`, each holding `linear_1` / `linear_2` (anima-v1.0 = 28 blocks × 3 × 2 = **168
+#: weights**; confirmed by scanning the header of the real checkpoint). The sensitivity-experiment
+#: variant (`--i4-adaln-i8` of `anima.export`) takes these 168 out of i4 and rounds them to i8 —
+#: the same configuration restored the listening quality of irodori's w4 preset (research
+#: `2026-08-24-gptq-expansion-quality.md` §1), and it was named as the candidate for improving the
+#: visual verdict on plain i4 (§5 of the same = distribution skipped).
 ADALN_SEGMENTS = frozenset({"norm1", "norm2", "norm3"})
 
-#: 丸め先の格納グリッド。**`rtn` × g32 = 既存 i4 系列と同じ格子**（唯一の出荷経路）。
+#: Storage grid of the rounding targets. **`rtn` × g32 = the same grid as the existing i4 series**
+#: (the only shipping path).
 CALIB_GRID = GridSpec(kind="rtn", group_size=DEFAULT_GROUP_SIZE)
 
-#: 校正の解像度（px・正方）。波 J-2 の実測条件と同じ（`docs/research/2026-08-20-…` §6）で、
-#: **`--resolution` には追随しない** — 品質裁定（f32 とほぼ同一）が採られた条件を固定して
-#: おかないと、解像度を動かすたびに根拠の採り直しになる。追随しない代わりに **CLI が食い違いを
-#: 拒否する**（`anima.export.main` — 別解像度のグラフへ 512px で選んだ丸め先を焼かないため）。
-#: 1 プロンプトあたりのトークン数 = GPTQ の `H = Σ XᵀX` の標本数なので、上げれば校正は効くが
-#: export の CPU 時間が線形に伸びる（本数と並ぶ品質の上振れ軸 — `calib_prompts` の NOTE）。
+#: Calibration resolution (px, square). The same as the measurement conditions of run J-2
+#: (`docs/research/2026-08-20-…` §6), and it **does not follow `--resolution`** — unless the
+#: conditions under which the quality verdict (nearly identical to f32) was reached are fixed, every
+#: change of resolution would mean re-establishing the evidence. In exchange for not following,
+#: **the CLI rejects a mismatch** (`anima.export.main` — so that rounding targets chosen at 512px
+#: are not baked into a graph of another resolution). The number of tokens per prompt = the number
+#: of samples of GPTQ's `H = Σ XᵀX`, so raising it makes the calibration more effective but grows
+#: the export's CPU time linearly (the axis for better quality next to the prompt count — the NOTE
+#: of `calib_prompts`).
 CALIB_RESOLUTION = 512
 
-#: 校正 1 バッチあたりの丸め所要（秒・CPU）。**同じ recipe の配布 export 実測**（512px・
-#: 4 プロンプト × 8 step = 32 バッチで 2,287 秒 —
-#: `docs/research/2026-08-21-anima-i4-seat-speed.md` §6）をバッチ数で割った**線形外挿の係数**で、
-#: 開始時に見積りを 1 行出すためだけに使う（判断の根拠にはしない — 実機と stage 数が変われば
-#: 当然ずれる）。波 J-2 の別条件実測（10 バッチで 933 秒 = 93 秒/バッチ）より小さいが、
-#: そちらは 1 プロンプト × 10 step の測定で条件が違う。
+#: Rounding time per calibration batch (seconds, CPU). A **linear-extrapolation coefficient**: the
+#: **measured distribution export of the same recipe** (512px, 4 prompts × 8 steps = 32 batches in
+#: 2,287 seconds — `docs/research/2026-08-21-anima-i4-seat-speed.md` §6) divided by the batch
+#: count. Used only to print a one-line estimate at the start (not as the basis for any decision
+#: — it naturally drifts when the machine or the number of stages changes). It is smaller than the
+#: J-2 measurement under other conditions (933 seconds for 10 batches = 93 seconds/batch), but that
+#: one measured 1 prompt × 10 steps, a different condition.
 CALIB_SECONDS_PER_BATCH = 72
 
-#: トークナイザの `max_length`（パイプライン既定 — `pipeline_ref` の `--max-sequence-length`）。
+#: The tokenizer's `max_length` (pipeline default — `--max-sequence-length` of `pipeline_ref`).
 CALIB_MAX_SEQUENCE_LENGTH = 512
 
-#: 校正入力を作るときのテキスト前段の格納 dtype。**配布条件に合わせる** — 配布形の
-#: `text_encoder` / `text_conditioner` は F16（`anima.distribution.STORAGE_REQUIREMENTS`）で、
-#: 校正は「配布で実際に流れる活性」から丸め先を選ぶ機構だから、前段の丸めも揃える
-#: （block 外を先に RTN で丸めるのと同じ理由）。波 J-2 の計測は f32 前段だったが、前段の
-#: f16 / f32 差が H = Σ XᵀX の統計に出るほどの大きさではないと見ている（**この見立ての実測は
-#: research に記録していない** — 条件を戻す / 広げる判断が出たら測り直す）。
+#: Storage dtype of the text front end when building the calibration inputs. **Matches the
+#: distribution conditions** — the distributed `text_encoder` / `text_conditioner` are F16
+#: (`anima.distribution.STORAGE_REQUIREMENTS`), and calibration is a mechanism that picks rounding
+#: targets from "the activations that actually flow in the distribution", so the front end's
+#: rounding is matched too (the same reason the weights outside the blocks are rounded with RTN
+#: first). The J-2 measurement used an f32 front end, but the f16 / f32 difference of the front end
+#: is judged too small to show in the statistics of H = Σ XᵀX (**no measurement of this judgement
+#: is recorded in research** — measure again if a decision to revert or widen the conditions comes
+#: up).
 CALIB_TEXT_DTYPE = "f16"
 
 
 @dataclass(frozen=True)
 class CalibConditions:
-    """参照 denoise の条件のうち**モデルごとに違う**もの（{@link calib_conditions} が導く）。
+    """The conditions of the reference denoise that **differ per model**.
 
-    定数で持たないのは、turbo（8 step・CFG 1）と素の base 系（20 step・CFG 4）で校正が見る
-    sigma 列も分岐の顔ぶれも違うから — 片方を焼き込むと、もう片方は「配布実行時には通らない
-    条件」で選んだ丸め先を出荷することになる（格納形も本数も正しいままなので資産からは
-    読めない）。解像度・テキスト前段の dtype・トークン長はモデルに依らないので、ここには
-    載せずモジュール定数のまま。
+    Derived by {@link calib_conditions}.
+
+    They are not constants because turbo (8 steps, CFG 1) and the plain base models (20 steps,
+    CFG 4) differ both in the sigma sequence the calibration sees and in the set of branches —
+    baking in one would make the other ship rounding targets chosen under "conditions that the
+    distribution never runs" (the storage form and the counts stay correct, so it cannot be read
+    from the assets). Resolution, the text front end's dtype and the token length do not depend on
+    the model, so they are not here and remain module constants.
     """
 
-    #: 参照 denoise の step 数（配布形の `defaults.steps`）。
+    #: Step count of the reference denoise (`defaults.steps` of the distribution).
     steps: int
-    #: CFG 係数（配布形の `defaults.guidanceScale`）。
+    #: CFG scale (`defaults.guidanceScale` of the distribution).
     guidance: float
-    #: uncond 分岐へ通すプロンプト（配布形の `defaults.negativePrompt`）。`guidance == 1.0` では
-    #: 1 度も使われない（{@link pipeline_ref.reference_steps} が uncond 分岐を計算しない）。
+    #: Prompt fed to the uncond branch (`defaults.negativePrompt` of the distribution). Never used
+    #: when `guidance == 1.0` ({@link pipeline_ref.reference_steps} does not compute the uncond
+    #: branch).
     negative_prompt: str
 
     @property
     def branches(self) -> int:
-        """1 step で DiT を通る forward の本数（= 1 step が積む校正バッチ数）。
+        """Number of forwards through the DiT in one step (= calibration batches one step adds).
 
-        MUST: 述語は {@link pipeline_ref.reference_steps} の `skip_uncond` と**同じ形**
-        （`== 1.0`）。ずれると捕捉バッチ数の検算門が本物の分岐数と食い違い、正しい捕捉を
-        落とす / 誤った捕捉を通すのどちらにも倒れる。
+        MUST: the predicate has **the same form** as `skip_uncond` in
+        {@link pipeline_ref.reference_steps} (`== 1.0`). If they drift, the check on the captured
+        batch count disagrees with the real branch count and fails either way — rejecting a correct
+        capture or passing a wrong one.
         """
         return 1 if self.guidance == 1.0 else 2
 
 
 def calib_conditions(model: str) -> CalibConditions:
-    """配布形の既定（`anima.distribution` の `pipeline_config`）から校正条件を**導く**。
+    """**Derives** the calibration conditions from the distribution defaults.
 
-    MUST: 写しを別に持たない。校正条件と配布既定を独立に更新できる形にすると、既定 step を
-    動かした日に校正だけが古い sigma 列で回り、その食い違いはどこにも出ない（格納形は 1 バイトも
-    変わらず、絵が少し眠くなるだけ）。turbo はここから 8 step / CFG 1 が出て、モジュール定数
-    だった頃と 1 ビットも変わらない。
+    The defaults are `pipeline_config` of `anima.distribution`.
+
+    MUST: keep no separate copy. If the calibration conditions and the distribution defaults could
+    be updated independently, the day the default step count moves only the calibration would run
+    on the old sigma sequence, and the mismatch would show up nowhere (the storage form does not
+    change by a single byte; the images just get slightly blurrier). For turbo this yields 8 steps
+    / CFG 1, not a single bit different from when they were module constants.
     """
     defaults = anima_model(model).pipeline_config["defaults"]
     return CalibConditions(
@@ -157,10 +184,10 @@ def calib_conditions(model: str) -> CalibConditions:
 
 
 def dit_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の DiT block を `(モデル内 FQN 接頭辞, block)` で返す。
+    """Returns the DiT blocks in execution order as `(in-model FQN prefix, block)`.
 
-    接頭辞に block 番号まで入れてあるので、stage 内の局所 FQN（`attn1.to_q.weight`）は
-    そのままラッパ内 FQN（`model.transformer_blocks.0.attn1.to_q.weight`）へ戻る。
+    The prefix includes the block index, so a stage-local FQN (`attn1.to_q.weight`) maps straight
+    back to the in-wrapper FQN (`model.transformer_blocks.0.attn1.to_q.weight`).
     """
     return tuple(
         (f"{STAGE_PREFIX}.{index}", block)
@@ -169,10 +196,11 @@ def dit_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
 
 
 def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
-    """stage 列が抱える `nn.Linear` のラッパ内 FQN（`.weight` を落とした**モジュール名**）。
+    """In-wrapper FQNs of the stage list's `nn.Linear` modules (**module names**, no `.weight`).
 
-    対象選択は core の `iter_quant_targets` の共有 — 「校正が丸める対象」と「呼び出し側が
-    stage 内と数える対象」を写した別実装にすると、どちらにも入らない重みが黙って i8 へ落ちる。
+    Target selection shares core's `iter_quant_targets` — if "what the calibration rounds" and
+    "what the caller counts as inside a stage" were separate copied implementations, weights that
+    belong to neither would silently fall back to i8.
     """
     return frozenset(
         f"{prefix}.{local}".removesuffix(".weight")
@@ -182,30 +210,31 @@ def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
 
 
 def is_adaln(name: str) -> bool:
-    """モジュール FQN が adaLN 配下か（{@link ADALN_SEGMENTS} を**セグメントとして**含むか）。
+    """Whether a module FQN is under adaLN (contains {@link ADALN_SEGMENTS} **as a segment**).
 
-    判定を `.` で割った要素の一致で採るのは、部分文字列一致だと `norm_out` の綴りに引っ張られる
-    ような取り違えを招き、逆に接尾辞一致だと adaLN 配下の子（`norm1.linear_1`）を取りこぼす
-    ため。stage 内の局所 FQN（`norm1.linear_1`）とラッパ内 FQN
-    （`model.transformer_blocks.0.norm1.linear_1`）のどちらにも同じ答えを返すので、校正の
-    `include` と export 側の集合分割が 1 実装で決まる（写すと i4 に丸めた集合と i4 で格納する
-    集合が割れる）。
+    The test matches the elements split on `.` because a substring match invites mix-ups such as
+    being pulled by the spelling of `norm_out`, while a suffix match would miss the children under
+    adaLN (`norm1.linear_1`). It gives the same answer for a stage-local FQN (`norm1.linear_1`)
+    and for an in-wrapper FQN (`model.transformer_blocks.0.norm1.linear_1`), so the calibration's
+    `include` and the set split on the export side are decided by one implementation (a copy would
+    split the set rounded to i4 from the set stored as i4).
 
-    NOTE: 判定は **block の中でだけ**使う。DiT には block の外にも `norm_out`
-    （`CosmosAdaLayerNorm` = 同じ modulation の役割）が居るが、あちらは
-    {@link anima.export.NON_STAGE_I4_WEIGHTS} が名指しで持つ側で、セグメントの綴りも違う。
+    NOTE: use the test **only inside the blocks**. The DiT also has `norm_out` outside the blocks
+    (`CosmosAdaLayerNorm` = the same modulation role), but that one is named explicitly by
+    {@link anima.export.NON_STAGE_I4_WEIGHTS}, and its segment is spelled differently too.
     """
     return not ADALN_SEGMENTS.isdisjoint(name.split("."))
 
 
 def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
-    """`names` の中に**セグメントとして**現れた {@link ADALN_SEGMENTS} の綴り。
+    """The spellings of {@link ADALN_SEGMENTS} that appeared **as segments** in `names`.
 
-    {@link is_adaln} が「どれか 1 つでも当たったか」を返すのに対し、こちらは**どれが当たったか**
-    を返す。両方を数える理由は、i8 へ戻す 168 本が 3 セグメントの**和**で決まるから — 上流が
-    一部（例: `norm3`）だけを改名すると、`is_adaln` は残る綴りで真を返し続けるので「adaLN が
-    1 本も無い」だけを見る門は素通りし、本数の門も同じ分類器から両辺を作るので自己整合した
-    まま緑になる（= 除外したはずの 56 本だけが黙って i4 へ戻る）。
+    Where {@link is_adaln} returns "did any one match", this returns **which ones matched**. Both
+    are counted because the 168 weights moved back to i8 are the **union** of 3 segments — if
+    upstream renames only some of them (e.g. `norm3`), `is_adaln` keeps returning true on the
+    remaining spellings, so a check that only looks for "not a single adaLN weight" passes, and the
+    count check builds both sides from the same classifier and stays green while self-consistent
+    (= only the 56 weights that were meant to be excluded silently go back to i4).
     """
     seen: set[str] = set()
     for name in names:
@@ -214,12 +243,13 @@ def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
 
 
 def _on_cpu(value: Any) -> Any:
-    """捕捉した付随引数を CPU へ落とす（Tensor と**素の** tuple / list の中身だけ）。
+    """Moves a captured auxiliary argument to the CPU (Tensors and **plain** tuple / list items).
 
-    組の中まで見るのは、block が rope を `(cos, sin)` の組で受けるから — 素通しにすると
-    `--calib-device cuda` で校正バッチの一部だけが VRAM に残り続ける。戻す側（stage 実行直前の
-    デバイス移動）は core の `karume.quant_calib` が同じ形で持つ。CPU 経路では `Tensor.cpu()` が
-    self を返すので、既定の捕捉は 1bit も変わらない。
+    It looks inside the tuples because a block receives rope as a `(cos, sin)` pair — passing them
+    through untouched would leave part of the calibration batches in VRAM with
+    `--calib-device cuda`. The reverse direction (the device move right before running a stage) is
+    held in the same form by core's `karume.quant_calib`. On the CPU path `Tensor.cpu()` returns
+    self, so the default capture does not change by a single bit.
     """
     if isinstance(value, torch.Tensor):
         return value.cpu()
@@ -233,10 +263,11 @@ def _on_cpu(value: Any) -> Any:
 def _block_kwargs(
     names: Sequence[str], args: Sequence[Any], kwargs: dict[str, Any]
 ) -> dict[str, Any]:
-    """block への位置引数を**シグネチャの名前**で keyword へ畳む（hidden は除く）。
+    """Folds a block's positional arguments into keywords by **its signature's names** (no hidden).
 
-    名前を写した並びで持たないのは、上流が引数の順序を変えたときに綴りが黙って入れ替わる
-    のを避けるため（`anima.measure_quant.capture_stage_batches` と同じ手）。
+    The names are not held as a copied list so that the spellings cannot silently swap when
+    upstream reorders the arguments (the same approach as
+    `anima.measure_quant.capture_stage_batches`).
     """
     return {**dict(zip(names[1:], args[1:], strict=False)), **kwargs}
 
@@ -244,18 +275,19 @@ def _block_kwargs(
 def assert_stage_split(
     wrapper: nn.Module, probe: Sequence[torch.Tensor], stages: Sequence[StageSpec]
 ) -> StageBatch:
-    """stage 逐次の block ループが**ラッパ 1 回の forward とビット一致**することを見る。
+    """Checks that the stage-by-stage block loop is **bit-identical to one forward of the wrapper**.
 
-    ラッパの出力は unpatchify（静的形）や `proj_out`（S 形）まで進んでいて block 列の出力
-    そのものではないので、突合先は **`norm_out` への入力**を forward_pre_hook で採る。
-    これで「ラッパが block をどう呼んでいるか」と「校正が block をどう呼ぶか」が同じである
-    ことが、丸める前に実測で固定される。
+    The wrapper's output has gone on through unpatchify (static form) or `proj_out` (S form) and is
+    not the output of the block list itself, so the comparison target is **the input to
+    `norm_out`**, captured with a forward_pre_hook. This pins down by measurement, before any
+    rounding, that "how the wrapper calls the blocks" and "how the calibration calls the blocks"
+    are the same.
 
-    MUST: 近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを同じ順で呼んで
-    いる以上、一致しないなら分解が本物と違う経路を通っている。
+    MUST: compare with `torch.equal`, not an approximate tolerance — the same modules are called in
+    the same order, so a mismatch means the split goes through a path different from the real one.
 
-    戻り値はラッパが先頭 block へ渡した `(args, kwargs)`（{@link
-    assert_calib_batches_match_graph} の基準）。
+    Returns the `(args, kwargs)` the wrapper passed to the first block (the reference for {@link
+    assert_calib_batches_match_graph}).
     """
     model = wrapper.model
     blocks = model.transformer_blocks
@@ -281,8 +313,9 @@ def assert_stage_split(
             handle.remove()
     if len(captured) != 1 or len(tail) != 1:
         raise AssertionError(
-            f"ラッパ 1 回の forward で先頭 block {len(captured)} 回 / norm_out {len(tail)} 回"
-            "（どちらも 1 回が想定 — ラッパの綴りが台本の想定と食い違っている）"
+            f"One forward of the wrapper hit the first block {len(captured)} times / norm_out"
+            f" {len(tail)} times (both are expected once — the wrapper's code disagrees with what"
+            " the script assumes)"
         )
     args, kwargs = captured[0]
     with torch.no_grad():
@@ -291,9 +324,10 @@ def assert_stage_split(
             hidden = stage(hidden, **kwargs)
     if not torch.equal(hidden, tail[0]):
         raise AssertionError(
-            "stage 分解の最終 hidden がラッパの block ループの出力とビット一致しない"
-            f"（最大絶対差 {float((hidden - tail[0]).abs().max()):.4e}）"
-            " — stage 列がラッパの経路とずれている"
+            "The final hidden of the stage split is not bit-identical to the output of the"
+            " wrapper's block loop"
+            f" (max abs difference {float((hidden - tail[0]).abs().max()):.4e})"
+            " — the stage list has drifted from the wrapper's path"
         )
     return captured[0]
 
@@ -306,39 +340,45 @@ def capture_stage_batches(
     conditions: CalibConditions,
     resolution: int = CALIB_RESOLUTION,
 ) -> tuple[StageBatch, ...]:
-    """校正プロンプトごとに参照 denoise を回し、先頭 block への入力を step 横断で捕まえる。
+    """Runs the reference denoise per prompt and catches the first block's input across all steps.
 
-    経路は参照フィクスチャ（`anima.pipeline_ref`）の使い回し — テキスト前段
-    （{@link pipeline_ref.load_text_stack} / {@link pipeline_ref.encode_prompt}）と sigma 列と
-    `reference_steps` をそのまま通す。写しを作らないのは「校正で見る活性」と「配布で流れる
-    活性」を 1 本の実装のままにするため。`timesteps_proj_table` だけは使わない — あれは DiT を
-    **もう 1 体ロードする**入口で、ここには既に丸める対象の実体がある（timestep 埋め込みは
-    `reference_steps` が素の forward の中で組む）。
+    The path reuses the reference fixture (`anima.pipeline_ref`) — the text front end
+    ({@link pipeline_ref.load_text_stack} / {@link pipeline_ref.encode_prompt}), the sigma sequence
+    and `reference_steps` are used as they are. No copy is made so that "the activations the
+    calibration sees" and "the activations that flow in the distribution" stay one implementation.
+    Only `timesteps_proj_table` is not used — it is an entry point that **loads a second copy of
+    the DiT**, and the instance to be rounded is already here (`reference_steps` builds the
+    timestep embedding inside the plain forward).
 
-    MUST: **CFG > 1 では cond / uncond の両分岐を採る**。素の base 系は CFG 運用なので、配布
-    実行時に DiT を通る活性は cond だけではなく negative prompt 側も同数ある — cond に絞ると
-    「実際に流れる活性の半分」で丸め先を選ぶことになる。`reference_steps` は
-    `guidance != 1.0` のとき 1 step で forward を 2 回回すので、先頭 block の
-    forward_pre_hook が**両方をそのまま**採る（分岐をここで組み立てない）。検算門も
-    {@link CalibConditions.branches} 倍で数える。
+    MUST: **with CFG > 1, capture both the cond and the uncond branches**. The plain base models
+    run with CFG, so the activations that pass through the DiT at distribution time include as many
+    from the negative prompt side as from cond — restricting to cond would pick the rounding
+    targets from "half of the activations that actually flow". `reference_steps` runs the forward
+    twice per step when `guidance != 1.0`, so the first block's forward_pre_hook captures **both as
+    they are** (the branches are not assembled here). The count check also multiplies by
+    {@link CalibConditions.branches}.
 
-    決定的であること MUST: seed 固定（`pipeline_ref.SEED`）・乱数はここの `latents_init`
-    1 本きり（CFG 分岐は乱数を持たない）。初期ノイズは**全プロンプト共通**（波 J-2 の条件を
-    そのまま広げた形 — 散らす軸はプロンプトと解像度に閉じる）。
+    MUST be deterministic: fixed seed (`pipeline_ref.SEED`), and the only random draw is
+    `latents_init` here (the CFG branches have no randomness). The initial noise is **shared by all
+    prompts** (the conditions of run J-2 widened as they are — the axes that vary are limited to
+    the prompt and the resolution).
 
-    MUST: 呼び出し側は**block 内の丸めを 1 本も当てる前**に呼ぶ（当てた後だと、丸めた重みが
-    作った活性から同じ重みの丸め先を選ぶ循環になる）。
+    MUST: the caller calls this **before a single in-block rounding is applied** (afterwards, the
+    rounding targets of a weight would be chosen from activations produced by that same rounded
+    weight — a loop).
 
-    NOTE（デバイス）: 参照 denoise は `model` が居るデバイスで回す（`--calib-device cuda` の
-    感度実験経路では DiT が GPU に居る）。**テキスト前段は CPU のまま**動かす — Qwen3 +
-    conditioner と f32 の DiT は同じ VRAM に同居できないので、GPU へ運ぶのは条件が出来上がった
-    後の `embeds` / `negative` / `latents_init` だけ。初期ノイズは **CPU で生成してから移す**
-    （`torch.randn` の乱数列はデバイスごとに別物なので、生成をデバイス側に寄せると CPU 経路と
-    ビットが割れる）。捕捉したバッチは常に CPU へ落として持つ（校正バッチの置き場は CPU 一択 —
-    stage 実行時の運搬は `karume.quant_calib` の JIT 移動が担う）。
+    NOTE (device): the reference denoise runs on the device `model` lives on (on the
+    `--calib-device cuda` sensitivity-experiment path the DiT is on the GPU). **The text front end
+    stays on the CPU** — Qwen3 + the conditioner cannot share VRAM with the f32 DiT, so only
+    `embeds` / `negative` / `latents_init` move to the GPU once the conditions are built. The
+    initial noise is **generated on the CPU and then moved** (`torch.randn`'s random sequence
+    differs per device, so generating on the device would split the bits from the CPU path).
+    Captured batches are always moved to the CPU and kept there (the CPU is the only place for
+    calibration batches — transport when a stage runs is handled by the JIT move in
+    `karume.quant_calib`).
     """
     if not prompts:
-        raise AssertionError("校正プロンプトが 1 件も無い（校正付き i4 は入力ゼロでは成立しない）")
+        raise AssertionError("No calibration prompts (calibrated i4 cannot work with zero inputs)")
     stack = pipeline_ref.load_text_stack(repo, CALIB_TEXT_DTYPE)
     embeds = [
         pipeline_ref.encode_prompt(stack, CALIB_MAX_SEQUENCE_LENGTH, prompt)[
@@ -346,14 +386,16 @@ def capture_stage_batches(
         ]
         for prompt in prompts
     ]
-    # uncond 分岐のプロンプトは CFG=1 では 1 度も使われないが、分岐を作らず常に用意する —
-    # 「使う / 使わない」の判断は `reference_steps` の MUST 1 箇所に閉じる（2 箇所で持つと、
-    # 片方だけが CFG の扱いを変えた日に cond と同じ埋め込みで uncond を回すことになり、
-    # バッチ本数だけが正しいまま H に同じ活性が 2 倍積まれる）。
+    # The uncond branch's prompt is never used with CFG=1, but it is always prepared without a
+    # branch — the "use / do not use" decision stays in one place, the MUST of `reference_steps`
+    # (holding it in two places means that the day one side changes how it treats CFG, uncond runs
+    # with the same embedding as cond, and the same activations are added to H twice while only the
+    # batch count stays correct).
     negative = pipeline_ref.encode_prompt(
         stack, CALIB_MAX_SEQUENCE_LENGTH, conditions.negative_prompt
     )["encoder_hidden_states"]
-    # テキスト前段（Qwen3 + conditioner）は条件を作り終えたら手放す — DiT の常駐と重ねない。
+    # Release the text front end (Qwen3 + conditioner) once the conditions are built — do not
+    # overlap it with the resident DiT.
     del stack
     gc.collect()
 
@@ -373,8 +415,9 @@ def capture_stage_batches(
     batches: list[StageBatch] = []
 
     def catch(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-        # 捕捉は CPU へ落として溜める（バッチ数 × hidden を VRAM に常駐させない）。CPU 経路では
-        # `Tensor.cpu()` が self を返すので、既定の捕捉は 1bit も変わらない。
+        # Captures are moved to the CPU as they accumulate (batch count × hidden does not stay
+        # resident in VRAM). On the CPU path `Tensor.cpu()` returns self, so the default capture
+        # does not change by a single bit.
         captured = _block_kwargs(names, args, kwargs)
         batches.append(
             (
@@ -386,7 +429,7 @@ def capture_stage_batches(
     handle = blocks[0].register_forward_pre_hook(catch, with_kwargs=True)
     try:
         for index, embed in enumerate(embeds):
-            print(f"[calib] プロンプト {index + 1}/{len(embeds)} の参照 denoise", flush=True)
+            print(f"[calib] reference denoise for prompt {index + 1}/{len(embeds)}", flush=True)
             pipeline_ref.reference_steps(
                 model,
                 latents_init,
@@ -402,10 +445,10 @@ def capture_stage_batches(
     expected = len(prompts) * conditions.steps * conditions.branches
     if len(batches) != expected:
         raise AssertionError(
-            f"校正バッチが {len(batches)} 本で、プロンプト {len(prompts)}"
-            f" × step {conditions.steps} × 分岐 {conditions.branches}"
-            f"（CFG {conditions.guidance}）= {expected} 本と違う"
-            "（DiT の block ループが台本の想定と食い違っている）"
+            f"Got {len(batches)} calibration batches, not prompts {len(prompts)}"
+            f" × steps {conditions.steps} × branches {conditions.branches}"
+            f" (CFG {conditions.guidance}) = {expected}"
+            " (the DiT's block loop disagrees with what the script assumes)"
         )
     return tuple(batches)
 
@@ -413,48 +456,59 @@ def capture_stage_batches(
 def assert_calib_batches_match_graph(
     graph_batch: StageBatch, batches: Sequence[StageBatch]
 ) -> None:
-    """校正入力が**グラフと同じ顔ぶれの付随引数**で block へ入ることを見る。
+    """Checks calibration inputs reach the blocks with **the graph's set of auxiliary arguments**.
 
-    捕捉は素の `CosmosTransformer3DModel` の forward から採るのに、丸めるのは export する
-    ラッパの重み。両者が block へ渡す keyword の集合が違えば、「配布グラフとは別の条件で
-    選んだ丸め先」を出荷することになる — しかも数値は普通に出る（golden も緑のまま通る）。
+    The capture comes from the forward of the bare `CosmosTransformer3DModel`, but the weights
+    that are rounded belong to the exported wrapper. If the sets of keywords the two pass to a
+    block differ, we ship "rounding targets chosen under conditions other than the distributed
+    graph's" — and the numbers come out normally (the golden stays green too).
 
-    見るのは **keyword 名の集合**だけ。値・shape・位置引数は突き合わせないので、同じ顔ぶれの
-    まま中身が違う入力（例: 別の sigma で採った temb）は素通りする — この門が主張するのは
-    「引数の顔ぶれが同じ」までで、「経路が同じ」ではない。
+    Only **the set of keyword names** is checked. Values, shapes and positional arguments are not
+    compared, so an input with the same set but different contents (e.g. a temb taken at another
+    sigma) passes — what this check claims is "the set of arguments is the same", not "the path is
+    the same".
 
-    MUST: fail loudly。ここが黙ると、上流が block の引数を増やした日に校正だけがそれを見る
-    （あるいは見ない）状態が資産から読めない形で入り込む。
+    MUST: fail loudly. If this stays silent, then on the day upstream adds an argument to the
+    block, a state where only the calibration sees it (or does not) slips in, unreadable from the
+    assets.
     """
     wanted = set(graph_batch[1])
     for index, (_args, kwargs) in enumerate(batches):
         if set(kwargs) != wanted:
             raise AssertionError(
-                f"校正バッチ {index} の block 付随引数 {sorted(kwargs)} が"
-                f" グラフの {sorted(wanted)} と違う — 参照 denoise とラッパで block の呼び方が違う"
+                f"Calibration batch {index}: the block auxiliary arguments {sorted(kwargs)}"
+                f" differ from the graph's {sorted(wanted)} — the reference denoise and the"
+                " wrapper call the blocks differently"
             )
 
 
 @dataclass(frozen=True)
 class CalibRig:
-    """校正 1 回ぶんの足場（stage 列と先頭 stage への入力）。"""
+    """The scaffolding for one calibration (the stage list and the inputs to the first stage)."""
 
     stages: tuple[StageSpec, ...]
     batches: tuple[StageBatch, ...]
 
     @property
     def tokens(self) -> int:
-        """校正に積んだ hidden の総トークン数（縮小実行を数値の横に残すための診断）。"""
+        """Total hidden tokens fed to the calibration.
+
+        A diagnostic that records a reduced run next to the numbers.
+        """
         return sum(int(args[0].shape[-2]) for args, _kwargs in self.batches)
 
 
 def _announce_stages(stages: Sequence[StageSpec]) -> list[RemovableHandle]:
-    """各 stage の**初回** forward で進捗を 1 行出す hook を張る（戻り値は外す用の handle）。
+    """Hooks that print one progress line on each stage's **first** forward (returns the handles).
 
-    `karume.quant_calib` は 1 行も印字しないので、既定運用の校正は開始行から最終診断行まで
-    時間単位で無出力になり、ハングと区別がつかない。core は境界（ADR 0065）なので触らず、
-    呼び出し側から覗く。初回だけに絞るのは、stage が「観測 × バッチ数 + 前進 × バッチ数」回
-    呼ばれるため — 出る行数は stage 数と同じで、待ち時間がその粒度で割れる。
+    The returned handles are for removing the hooks.
+
+    `karume.quant_calib` prints nothing, so a calibration in the default setup is silent for hours
+    from the start line to the final diagnostic line and cannot be told apart from a hang. core is
+    a boundary (ADR 0065), so it is left untouched and observed from the caller. Only the first
+    call is reported because a stage is called "observation × batch count + advance × batch count"
+    times — the number of lines printed equals the number of stages, and the wait is divided at
+    that granularity.
     """
     total = len(stages)
 
@@ -479,29 +533,33 @@ def _announce_stages(stages: Sequence[StageSpec]) -> list[RemovableHandle]:
 def calibrate_i4(
     rig: CalibRig, include: Callable[[str], bool] | None = None
 ) -> tuple[CalibReport, Int4Report]:
-    """stage 逐次の GPTQ を当て、`(レポート, scale 台帳)` を返す（丸めは in-place）。
+    """Applies stage-by-stage GPTQ and returns `(report, scale ledger)` (the rounding is in place).
 
-    `include` は **stage 内の局所モジュール FQN** の述語で、core の `calibrate_stages` へ
-    そのまま渡る（`None` = stage 内の `nn.Linear` 全部 = 既定の配布経路）。感度実験変種
-    （`anima.export` の `--i4-adaln-i8`）だけが述語を渡し、adaLN 168 本を GPTQ から外して
-    i8 側へ回す。
+    `include` is a predicate on **stage-local module FQNs** and is passed straight to core's
+    `calibrate_stages` (`None` = every `nn.Linear` in the stages = the default distribution path).
+    Only the sensitivity-experiment variant (`--i4-adaln-i8` of `anima.export`) passes a
+    predicate, taking the 168 adaLN weights out of GPTQ and sending them to the i8 side.
 
-    MUST: 渡した述語が選ぶ集合と i4 で格納する集合は**同一**であること — ずれると「走査の
-    本数 = 丸めた本数」の門が意味を失い、丸めていない重みに i4 の格納指定が付く。実測は
-    {@link assert_calib_covers_scan}（呼び出し側が i4 格納の集合を渡して突き合わせる）。
+    MUST: the set the predicate selects and the set stored as i4 are **identical** — if they
+    drift, the check "scanned count = rounded count" loses its meaning and weights that were never
+    rounded get an i4 storage spec. The measurement is {@link assert_calib_covers_scan} (the caller
+    passes the set stored as i4 to compare against).
 
-    MUST: 台帳の無いレポートは fail loudly — 出荷経路を持つのは `gptq` × `rtn` だけで
-    （`karume.quant_calib` の MUST）、台帳が無いまま進むと i4 席に scale の無い重みが載る。
+    MUST: a report without a ledger fails loudly — only `gptq` × `rtn` has a shipping path (a MUST
+    of `karume.quant_calib`), and going on without a ledger puts weights without a scale into the
+    i4 preset.
     """
-    # デバイスは stage から読む（core が計算デバイスを導くのと同じ源 — 印字だけ別の綴りから
-    # 作ると、実際に回った場所と診断行が食い違いうる）。見積りの係数は CPU 実測なので、
-    # `device=cuda` の行では桁が合わない（そちらは感度実験専用の経路）。
+    # The device is read from the stages (the same source core uses to derive the compute device —
+    # building only the printout from another source could make the diagnostic line disagree with
+    # where it actually ran). The estimate's coefficient is a CPU measurement, so on a
+    # `device=cuda` line the order of magnitude is off (that is a path for sensitivity experiments
+    # only).
     device = next(rig.stages[0][1].parameters()).device
     print(
-        f"[calib] GPTQ 校正を開始（device={device.type}）"
-        f" — stage {len(rig.stages)} × バッチ {len(rig.batches)} 本"
-        f"（見積り約 {len(rig.batches) * CALIB_SECONDS_PER_BATCH / 60:.0f} 分"
-        " — 波 J-2 実測からの線形外挿）",
+        f"[calib] starting GPTQ calibration (device={device.type})"
+        f" — {len(rig.stages)} stages × {len(rig.batches)} batches"
+        f" (estimate about {len(rig.batches) * CALIB_SECONDS_PER_BATCH / 60:.0f} minutes"
+        " — linear extrapolation from the J-2 measurement)",
         flush=True,
     )
     handles = _announce_stages(rig.stages)
@@ -515,27 +573,28 @@ def calibrate_i4(
     ledger = report.int4
     if ledger is None:
         raise AssertionError(
-            f"校正が scale 台帳を返さなかった（{report.describe()}）"
-            " — 出荷できるのは gptq × rtn だけ（karume.quant_calib の MUST）"
+            f"The calibration returned no scale ledger ({report.describe()})"
+            " — only gptq × rtn can be shipped (a MUST of karume.quant_calib)"
         )
     return report, ledger
 
 
 def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
-    """校正が丸めた層が **i4 で格納する block 内の集合**と過不足なく一致することを見る。
+    """Checks the layers the calibration rounded match **the in-block set stored as i4** exactly.
 
-    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形。既定は
-    stage の走査そのもの・感度実験変種では adaLN を除いた側 = {@link calibrate_i4} の
-    `include` が選ぶ集合と同一）。
+    `scan` is a set of module names without `.weight` (the form of {@link stage_linear_names}; by
+    default the stages' scan itself, and in the sensitivity-experiment variant the side without
+    adaLN = identical to the set the `include` of {@link calibrate_i4} selects).
 
-    MUST: fail loudly。丸め漏れは品質を**良い側**へ動かすので、素通りを数字から読めない。
-    しかも漏れた重みはその後 i8 側にも i4 側にも入らないまま、格納指定だけが i4 を要求する
-    形になる。
+    MUST: fail loudly. A missed rounding moves quality to the **better side**, so passing silently
+    cannot be read from the numbers. On top of that, the missed weights end up on neither the i8
+    side nor the i4 side, while only the storage spec demands i4.
 
-    捕まえられるのは「**校正の実走が走査からずれた**」形（core が対象を落とした / 別の
-    `stages` を渡した / 台帳の取り出しが層を落とした）まで。走査そのもの（`iter_quant_targets`
-    の対象型・stage 分解）が変わった場合は**両辺が一緒に動くのでこの門は黙る** — そちらは
-    `export.py` 側の「走査 == i4 適格集合」の突合（グラフ由来の独立な源）が受け持つ。
+    What it catches is the case where "**the actual calibration run drifted from the scan**" (core
+    dropped a target / other `stages` were passed / the ledger extraction dropped a layer). When the
+    scan itself changes (the target types of `iter_quant_targets`, the stage split), **both sides
+    move together and this check stays silent** — that is covered by the comparison "scan == i4
+    eligible set" on the `export.py` side (an independent source derived from the graph).
     """
     rounded = {layer.fqn for layer in report.layers}
     wanted = {f"{name}.weight" for name in scan}
@@ -543,6 +602,6 @@ def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
     extra = sorted(rounded - wanted)
     if missing or extra or report.modules != len(wanted):
         raise AssertionError(
-            f"校正が丸めた {report.modules} 本が走査の {len(wanted)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"The {report.modules} layers the calibration rounded do not match the {len(wanted)}"
+            f" of the scan (not rounded {missing[:3]} / not in the scan {extra[:3]})"
         )

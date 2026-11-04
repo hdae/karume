@@ -1,36 +1,44 @@
-"""Wan の上流取得元（HF リポと revision の pin）と部品の取得（ADR 0118 決定 5 / 7・0121 決定 1）。
+"""Wan's upstream sources (HF repositories with pinned revisions) and component fetching (ADR 0118
+decisions 5 / 7, 0121 decision 1).
 
-`SOURCES` が上流取得元の表の正本。値の revision は HF API で解決した commit SHA（40 桁）で、
-ADR 0092 決定 3（配布リポの revision を焼く流儀）を上流側にも当てたもの。recipe の台本は
-ここを通して上流を読む — 台本ごとに `from_pretrained(repo)` を綴ると、既定ブランチの先頭が
-動いた日に参照と export が黙って別の checkpoint を読む。
+`SOURCES` is the source of truth for the table of upstream sources. Each revision is a commit SHA
+(40 digits) resolved through the HF API — ADR 0092 decision 3 (the practice of baking the revision
+of a distribution repository) applied to the upstream side as well. The recipe scripts read the
+upstream through this module — if each script spelled `from_pretrained(repo)` itself, the day the
+head of the default branch moved, the reference and the export would silently read a different
+checkpoint.
 
-取得の要否（{@link COMPONENTS}）と期待パラメータ数（{@link EXPECTED_PARAMETERS}）はモデル名を
-キーにした表（ADR 0121 決定 1 — 世代で部品の扱いが違う）。どのモデルも取得するのは DiT
-（`transformer`）・VAE（`vae`）・scheduler の config と、ライセンスの front matter を持つ
-`README.md`・部品の索引 `model_index.json` だけ。
+Whether a component is fetched ({@link COMPONENTS}) and the expected parameter counts
+({@link EXPECTED_PARAMETERS}) are tables keyed by model name (ADR 0121 decision 1 — the generations
+treat components differently). Every model fetches only the DiT (`transformer`), the VAE (`vae`),
+the scheduler config, the `README.md` that carries the license front matter, and the component
+index `model_index.json`.
 
-- Wan2.1（`t2v-1.3b`）: umT5（`text_encoder`・f32 で約 22.7 GB）とトークナイザは DiT / VAE の取得
-  では取らない — 段 6 のテキスト埋め込みの別プロセス（`wan.text_embeds`）が {@link text_snapshot}
-  で取る（開発機のホスト RAM 31 GiB に umT5 と DiT を同居させない — ADR 0118 決定 4）。
-- Wan2.2（`ti2v-5b`）: `text_encoder` と `tokenizer` はどの経路でも取らない（ADR 0121 決定 9 —
-  umT5 は `karume-umt5-xxl` を越境参照し、トークナイザ資産は Wan2.1 の系列から写す）。
+- Wan2.1 (`t2v-1.3b`): umT5 (`text_encoder`, about 22.7 GB in f32) and the tokenizer are not
+  fetched with the DiT / VAE — the separate text-embedding process of step 6 (`wan.text_embeds`)
+  fetches them with {@link text_snapshot} (umT5 and the DiT are not held together in the 31 GiB of
+  host RAM of the development machine — ADR 0118 decision 4).
+- Wan2.2 (`ti2v-5b`): `text_encoder` and `tokenizer` are fetched on no path (ADR 0121 decision 9 —
+  umT5 is a cross-repository reference to `karume-umt5-xxl`, and the tokenizer assets are copied
+  from the Wan2.1 series).
 
-umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（{@link UMT5_SOURCES} — ADR 0122 決定 1）。
-本家は pickle の `.bin` 分割形だけを持つので、取得口（{@link umt5_snapshot}）は索引から encoder に
-要る shard を導き、表の shard（sha256 の pin つき）と突き合わせてからその分だけを取る（決定 2）。
-`karume-umt5-xxl` が単体で配るトークナイザ資産は本家のトークナイザのファイル（同じ表の sha256 の
-pin つき — {@link pinned_umt5_tokenizer}）から焼く（`wan.umt5_xxl_tokenizer`）。Wan の snapshot
-（{@link text_snapshot}）は Wan のトークナイザ資産（前処理の表つき）・check-mask・事前計算・
-golden の id 列のために残る（決定 3）。
+The upstream of the umT5 container is not Wan but the original `google/umt5-xxl`
+({@link UMT5_SOURCES} — ADR 0122 decision 1). The original only has the sharded pickle `.bin` form,
+so the fetch entry point ({@link umt5_snapshot}) derives from the index the shards the encoder
+needs, matches them against the shards of the table (pinned by sha256) and fetches only those
+(decision 2). The tokenizer assets that `karume-umt5-xxl` distributes on its own are baked
+(`wan.umt5_xxl_tokenizer`) from the original tokenizer files (pinned by sha256 in the same table —
+{@link pinned_umt5_tokenizer}). The Wan snapshot ({@link text_snapshot}) stays for the Wan tokenizer
+assets (with the preprocessing tables), check-mask, the precomputation and the golden id lists
+(decision 3).
 
-    uv run --group wan python -m wan.sources --fetch     # 取得（HF の既定キャッシュへ）
-    uv run --group wan python -m wan.sources             # 取得済みの検査（パラメータ数）
-    uv run --group wan python -m wan.sources --model ti2v-5b --fetch   # TI2V-5B（約 22.8 GB）
-    uv run --group wan python -m wan.sources --umt5 xxl --fetch        # 本家 umT5（約 29.8 GB）
+    uv run --group wan python -m wan.sources --fetch     # fetch (into the default HF cache)
+    uv run --group wan python -m wan.sources             # check what was fetched (parameter counts)
+    uv run --group wan python -m wan.sources --model ti2v-5b --fetch   # TI2V-5B (~22.8 GB)
+    uv run --group wan python -m wan.sources --umt5 xxl --fetch        # original umT5 (~29.8 GB)
 
-MUST: `huggingface_hub` は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: `huggingface_hub` is imported inside the functions (the `wan` group is not in the default
+sync — `tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -47,30 +55,32 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class UpstreamSource:
-    """上流の HF リポ 1 本（repo + pin した revision + ライセンス識別子）。"""
+    """One upstream HF repository (repo + pinned revision + license identifier)."""
 
     repo: str
-    #: HF の commit SHA（40 桁の小文字 16 進）。ブランチ名やタグは置かない。
+    #: HF commit SHA (40 lowercase hex digits). No branch names or tags.
     revision: str
-    #: 上流 `README.md` の front matter の `license:`（2026-10-02 に HF API で確認）。
+    #: `license:` in the front matter of the upstream `README.md` (checked with the HF API on
+    #: 2026-10-02).
     license: str
 
 
 @dataclass(frozen=True)
 class Component:
-    """上流リポの部品 1 つ（`subfolder`）と、それを取得するか。"""
+    """One component of an upstream repository (`subfolder`) and whether it is fetched."""
 
     subfolder: str
     fetch: bool
-    #: 取得の要否の理由（台本と報告の読み手向け）。
+    #: Why it is or is not fetched (for readers of the scripts and the reports).
     why: str
-    #: DiT / VAE の取得（`fetch=False`）から外したうえで、テキスト埋め込みの別プロセスが
-    #: {@link text_snapshot} で取る部品か（Wan2.1 の umT5 とトークナイザ）。
+    #: Whether this is a component left out of the DiT / VAE fetch (`fetch=False`) and fetched by
+    #: the separate text-embedding process with {@link text_snapshot} (Wan2.1's umT5 and tokenizer).
     text: bool = False
 
 
-#: 上流取得元の表。キーは配布形のモデル名（`models/karume-wan2.1/` のモデル `t2v-1.3b`
-#: — ADR 0118 決定 7・`models/karume-wan2.2/` のモデル `ti2v-5b` — ADR 0121 決定 1 / 10）。
+#: The table of upstream sources. Keys are the model names of the distribution (model `t2v-1.3b`
+#: of `models/karume-wan2.1/` — ADR 0118 decision 7; model `ti2v-5b` of `models/karume-wan2.2/` —
+#: ADR 0121 decisions 1 / 10).
 SOURCES: dict[str, UpstreamSource] = {
     "t2v-1.3b": UpstreamSource(
         repo="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
@@ -84,103 +94,119 @@ SOURCES: dict[str, UpstreamSource] = {
     ),
 }
 
-#: 既定のモデル（Wan2.1 の台本の既定 — {@link WAN21_MODELS}）。
+#: The default model (the default of the Wan2.1 scripts — {@link WAN21_MODELS}).
 DEFAULT_MODEL = "t2v-1.3b"
 
-#: Wan2.1 の台本（系列の置き場・ケースの表・テキスト段が Wan2.1 に固定）が `--model` で受ける
-#: モデル。`sorted(SOURCES)` を選択肢にすると、`ti2v-5b` を渡したときに Wan2.1 の系列の置き場へ
-#: 5B を書く口が開く（ADR 0121 の段 0 で表に `ti2v-5b` を足したときに閉じた）。
+#: The models that the Wan2.1 scripts (series location, case table and text step fixed to Wan2.1)
+#: accept with `--model`. Using `sorted(SOURCES)` as the choices would open a way to write the 5B
+#: into the Wan2.1 series location when `ti2v-5b` is passed (closed at step 0 of ADR 0121, when
+#: `ti2v-5b` was added to the table).
 WAN21_MODELS: tuple[str, ...] = ("t2v-1.3b",)
 
-#: Wan2.2 の配布（`karume-wan2.2`）が配るモデル — 配布 recipe の計画の門
-#: （`wan.distribution.WAN22`）とカードの帰属の門（`wan.card.WAN22_CARD`）が共有する 1 つの集合。
-#: {@link WAN21_MODELS} と同じく、表（{@link SOURCES}）に有ることでは通さない（表は両方の世代の
-#: 行を持つ）。
+#: The models that the Wan2.2 distribution (`karume-wan2.2`) distributes — one set shared by the
+#: plan check of the distribution recipe (`wan.distribution.WAN22`) and the attribution check of
+#: the card (`wan.card.WAN22_CARD`). As with {@link WAN21_MODELS}, being in the table
+#: ({@link SOURCES}) does not let a model through (the table has rows for both generations).
 WAN22_MODELS: tuple[str, ...] = ("ti2v-5b",)
 
-#: Wan2.2 の配布が持つテキスト資産 2 本（埋め込み・トークナイザ）の出所のモデル = Wan2.1 の
-#: checkpoint（ADR 0121 決定 9 — 同じ umT5 と同じトークナイザなので、2.1 の系列のファイルそのもの
-#: を配る）。配布 recipe の出所の門（`wan.distribution.WAN22` の `text_model`）とカードの記述が
-#: 共有する。
+#: The model the two text assets of the Wan2.2 distribution (embeddings, tokenizer) come from = the
+#: Wan2.1 checkpoint (ADR 0121 decision 9 — the same umT5 and the same tokenizer, so the very files
+#: of the 2.1 series are distributed). Shared by the provenance check of the distribution recipe
+#: (`text_model` of `wan.distribution.WAN22`) and the text of the card.
 WAN22_TEXT_MODEL = "t2v-1.3b"
 
-#: 上流リポの部品の列挙（モデル名 → 部品）。`fetch=False` の部品は DiT / VAE の取得では落とさない。
+#: The components of the upstream repository (model name → components). A component with
+#: `fetch=False` is not downloaded by the DiT / VAE fetch.
 COMPONENTS: dict[str, tuple[Component, ...]] = {
     "t2v-1.3b": (
         Component(
-            "transformer", fetch=True, why="DiT（段 2 / 3）— fp32 safetensors 2 分割・約 5.7 GB"
+            "transformer",
+            fetch=True,
+            why="DiT (steps 2 / 3) — fp32 safetensors in 2 shards, about 5.7 GB",
         ),
-        Component("vae", fetch=True, why="動画 VAE（段 4 / 5）— fp32 約 0.5 GB"),
-        Component("scheduler", fetch=True, why="UniPC の config（shift 3.0 — 決定 5）"),
+        Component("vae", fetch=True, why="video VAE (steps 4 / 5) — fp32, about 0.5 GB"),
+        Component("scheduler", fetch=True, why="UniPC config (shift 3.0 — decision 5)"),
         Component(
             "text_encoder",
             fetch=False,
             text=True,
-            why="umT5-XXL f32 約 22.7 GB — 段 6 の別プロセスが取る",
+            why="umT5-XXL f32, about 22.7 GB — fetched by the separate process of step 6",
         ),
         Component(
-            "tokenizer", fetch=False, text=True, why="umT5 のトークナイザ — 段 6 の別プロセスが取る"
+            "tokenizer",
+            fetch=False,
+            text=True,
+            why="umT5 tokenizer — fetched by the separate process of step 6",
         ),
     ),
     "ti2v-5b": (
         Component(
             "transformer",
             fetch=True,
-            why="DiT — fp32 safetensors 5 分割・約 19.99 GB（ADR 0121 決定 1）",
+            why="DiT — fp32 safetensors in 5 shards, about 19.99 GB (ADR 0121 decision 1)",
         ),
         Component(
-            "vae", fetch=True, why="Wan2.2-VAE — fp32 約 2.82 GB（encoder を含む・ADR 0121 決定 1）"
+            "vae",
+            fetch=True,
+            why="Wan2.2-VAE — fp32, about 2.82 GB (encoder included, ADR 0121 decision 1)",
         ),
         Component(
             "scheduler",
             fetch=True,
-            why="UniPC の config（flow_shift は golden のメタに書く — ADR 0121 決定 1 / 8）",
+            why="UniPC config (flow_shift is written into the golden metadata"
+            " — ADR 0121 decisions 1 / 8)",
         ),
         Component(
             "text_encoder",
             fetch=False,
-            why="umT5 は karume-umt5-xxl を越境参照する — 取らない（ADR 0121 決定 9）",
+            why="umT5 is a cross-repository reference to karume-umt5-xxl — not fetched"
+            " (ADR 0121 decision 9)",
         ),
         Component(
             "tokenizer",
             fetch=False,
-            why="トークナイザ資産は Wan2.1 の系列から写す — 取らない（ADR 0121 決定 9）",
+            why="the tokenizer assets are copied from the Wan2.1 series — not fetched"
+            " (ADR 0121 decision 9)",
         ),
     ),
 }
 
-#: 部品の外で取得するリポ直下のファイル（ライセンスの front matter と部品の索引）。
+#: Files directly under the repository root fetched outside the components (the license front
+#: matter and the component index).
 ROOT_FILES: tuple[str, ...] = ("README.md", "model_index.json")
 
 
 @dataclass(frozen=True)
 class Umt5Source:
-    """umT5 の上流 1 本（pin した HF リポと、encoder に要る pickle の shard・トークナイザの
-    ファイルの sha256 — ADR 0122 決定 1 / 2）。encoder とトークナイザはリポ直下にある（subfolder を
-    持たない）。"""
+    """One umT5 upstream (the pinned HF repository, and the sha256 of the pickle shards the encoder
+    needs and of the tokenizer files — ADR 0122 decisions 1 / 2). The encoder and the tokenizer are
+    directly under the repository root (no subfolder)."""
 
     source: UpstreamSource
-    #: encoder に要る shard（ファイル名 → HF API の LFS の sha256・64 桁の小文字 16 進）。
-    #: 取得口と読み口は、索引から導いた shard の集合がこの表と同じことを見る（上流の索引が
-    #: 動いた・表が古い、を黙って通さない）。読み口は unpickle の前に各 shard の sha256 を照合する
-    #: — pickle は読むと任意コードが走りうるので、1 枚目の防御は内容の pin（2 枚目が
-    #: `weights_only=True`）。
+    #: The shards the encoder needs (file name → the LFS sha256 from the HF API, 64 lowercase hex
+    #: digits). The fetch and read entry points check that the set of shards derived from the index
+    #: equals this table (an upstream index that moved or a stale table is not silently let
+    #: through). The read entry point checks the sha256 of each shard before unpickling — reading a
+    #: pickle can run arbitrary code, so the first line of defence is the content pin (the second is
+    #: `weights_only=True`).
     shards: Mapping[str, str]
-    #: トークナイザの正本（transformers 5.14.1 の `AutoTokenizer`）が読むファイル（ファイル名 →
-    #: sha256）。`tokenizer.json` と `tokenizer_config.json` の 2 本だけで、リポ全体から読んだときと
-    #: 同じ backend になる（`special_tokens_map.json` と `spiece.model` は backend を変えない —
-    #: 2026-10-15 の実測・`wan.umt5_xxl_tokenizer` の docstring）。取得口
-    #: （{@link pinned_umt5_tokenizer}）は照合したバイト列だけを置き場へ写す。
+    #: The files the tokenizer source of truth (`AutoTokenizer` of transformers 5.14.1) reads (file
+    #: name → sha256). `tokenizer.json` and `tokenizer_config.json` alone give the same backend as
+    #: reading the whole repository (`special_tokens_map.json` and `spiece.model` do not change the
+    #: backend — measured on 2026-10-15, see the docstring of `wan.umt5_xxl_tokenizer`). The fetch
+    #: entry point ({@link pinned_umt5_tokenizer}) copies only the verified bytes to the
+    #: destination.
     tokenizer: Mapping[str, str]
 
 
-#: umT5 の上流の表（キーは umT5 の配布形のモデル名 — `wan.umt5_distribution.UMT5_DEFAULT_MODEL`）。
-#: 本家の main の commit（tags なし）・ライセンスは API の `cardData` と README の front matter・
-#: shard の sha256 は `/api/models/google/umt5-xxl/revision/<commit>?blobs=true` の LFS の値
-#: （2026-10-04 に確認 — research `2026-10-04-umt5-upstream-provenance` §1）。トークナイザの
-#: `tokenizer.json` は同じ API の LFS の値、LFS でない `tokenizer_config.json` は手元のバイト列の
-#: sha256（その git blob id `c1a69656…` が同じ API の `blobId` と一致することを 2026-10-15 に
-#: 確認）。
+#: The umT5 upstream table (keys are the model names of the umT5 distribution —
+#: `wan.umt5_distribution.UMT5_DEFAULT_MODEL`). The commit is on main of the original repository
+#: (no tags); the license comes from `cardData` of the API and the README front matter; the shard
+#: sha256 values are the LFS values of `/api/models/google/umt5-xxl/revision/<commit>?blobs=true`
+#: (checked on 2026-10-04 — research `2026-10-04-umt5-upstream-provenance` §1). For the tokenizer,
+#: `tokenizer.json` uses the LFS value of the same API, and `tokenizer_config.json`, which is not in
+#: LFS, uses the sha256 of the local bytes (checked on 2026-10-15 that its git blob id
+#: `c1a69656…` equals `blobId` of the same API).
 UMT5_SOURCES: dict[str, Umt5Source] = {
     "xxl": Umt5Source(
         source=UpstreamSource(
@@ -208,19 +234,22 @@ UMT5_SOURCES: dict[str, Umt5Source] = {
     ),
 }
 
-#: 本家の pickle 分割形の索引と config（transformers の `save_pretrained` の綴り）。
+#: The index and the config of the original sharded pickle form (spelled as transformers'
+#: `save_pretrained` writes them).
 UMT5_BIN_INDEX = "pytorch_model.bin.index.json"
 UMT5_CONFIG = "config.json"
 
-#: encoder が使う重みのキーの接頭辞（語彙埋め込み `shared.weight` と `encoder.*` — decoder と
-#: `lm_head` は取らない）。
+#: Key prefixes of the weights the encoder uses (the vocabulary embedding `shared.weight` and
+#: `encoder.*` — the decoder and `lm_head` are not fetched).
 UMT5_ENCODER_PREFIXES: tuple[str, ...] = ("shared.", "encoder.")
 
-#: 取得済みの checkpoint が持つべきパラメータ数（モデル名 → 部品名 → safetensors のヘッダの
-#: 要素数の和）。VAE は encoder を含む。
-#: - `t2v-1.3b`: 調査（2026-10-02）の値で、pin した revision の実物でも一致を確かめた。
-#: - `ti2v-5b`: ADR 0121 決定 1 の値（pin した revision の safetensors のヘッダから集計 — vae は
-#:   decoder + `post_quant_conv` 555,051,580・encoder + `quant_conv` 149,637,088）。
+#: The parameter counts a fetched checkpoint must have (model name → component name → sum of the
+#: element counts in the safetensors headers). The VAE includes the encoder.
+#: - `t2v-1.3b`: the values from the survey (2026-10-02), also confirmed on the files of the pinned
+#:   revision.
+#: - `ti2v-5b`: the values of ADR 0121 decision 1 (summed from the safetensors headers of the
+#:   pinned revision — the vae is decoder + `post_quant_conv` 555,051,580 and encoder +
+#:   `quant_conv` 149,637,088).
 EXPECTED_PARAMETERS: dict[str, dict[str, int]] = {
     "t2v-1.3b": {
         "transformer": 1_418_996_800,
@@ -232,34 +261,41 @@ EXPECTED_PARAMETERS: dict[str, dict[str, int]] = {
     },
 }
 
-#: safetensors のヘッダの dtype → 要素あたりバイト数（ヘッダの整合検査用）。
+#: safetensors header dtype → bytes per element (for the header consistency check).
 _DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I8": 1, "U8": 1}
 
 
 class WanSourceError(RuntimeError):
-    """上流の checkpoint が pin した形で手元に無い・ヘッダが読めない。"""
+    """The upstream checkpoint is not available locally in its pinned form, or a header cannot be
+    read."""
 
 
 def _components(model: str) -> tuple[Component, ...]:
-    """モデルの部品の表（表に無いモデルは fail loudly — 黙って別のモデルの表を使わない）。"""
+    """The component table of a model (a model not in the table fails loudly — another model's
+    table is never used silently)."""
     parts = COMPONENTS.get(model)
     if parts is None:
-        raise WanSourceError(f"モデル {model!r} の部品の表が無い（既知: {sorted(COMPONENTS)}）")
+        raise WanSourceError(
+            f"no component table for model {model!r} (known: {sorted(COMPONENTS)})"
+        )
     return parts
 
 
 def text_components(model: str = DEFAULT_MODEL) -> tuple[str, ...]:
-    """テキスト埋め込みの別プロセス（`wan.text_embeds`）だけが取る部品（無いモデルは空）。"""
+    """Components fetched only by the separate text-embedding process (`wan.text_embeds`) (empty
+    for a model without any)."""
     return tuple(part.subfolder for part in _components(model) if part.text)
 
 
 def allow_patterns(model: str = DEFAULT_MODEL) -> list[str]:
-    """`snapshot_download` へ渡す取得対象（取得する部品の配下 + リポ直下の 2 本）。"""
+    """The fetch targets passed to `snapshot_download` (under each fetched component + the two
+    files at the repository root)."""
     return [*ROOT_FILES, *(f"{part.subfolder}/*" for part in _components(model) if part.fetch)]
 
 
 def fetch(model: str = DEFAULT_MODEL) -> Path:
-    """pin した revision の取得対象を HF の既定キャッシュへ落とし、snapshot の置き場を返す。"""
+    """Download the fetch targets of the pinned revision into the default HF cache and return the
+    snapshot directory."""
     from huggingface_hub import snapshot_download
 
     source = SOURCES[model]
@@ -271,9 +307,10 @@ def fetch(model: str = DEFAULT_MODEL) -> Path:
 
 
 def local_snapshot(model: str = DEFAULT_MODEL) -> Path:
-    """取得済みの snapshot のディレクトリ（ネットワークに出ない）。
+    """The directory of an already fetched snapshot (no network access).
 
-    無ければ fail loudly — 台本が黙って取得を始めると、5.7 GB の取得が参照作成の途中に紛れる。
+    Fails loudly when it is absent — if a script silently started fetching, a 5.7 GB download would
+    slip into the middle of building a reference.
     """
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
@@ -290,23 +327,27 @@ def local_snapshot(model: str = DEFAULT_MODEL) -> Path:
         )
     except LocalEntryNotFoundError as error:
         raise WanSourceError(
-            f"{source.repo}@{source.revision} が HF キャッシュに無い — 先に"
-            f" `uv run --group wan python -m wan.sources --model {model} --fetch` で取得する"
+            f"{source.repo}@{source.revision} is not in the HF cache — fetch it first with"
+            f" `uv run --group wan python -m wan.sources --model {model} --fetch`"
         ) from error
     missing = [part.subfolder for part in _components(model) if part.fetch]
     missing = [name for name in missing if not (snapshot / name).is_dir()]
     if missing:
-        raise WanSourceError(f"{snapshot} に部品 {missing} が無い — `--fetch` で取り直す")
+        raise WanSourceError(
+            f"{snapshot} is missing components {missing} — fetch again with `--fetch`"
+        )
     return snapshot
 
 
 def text_snapshot(model: str = DEFAULT_MODEL, *, fetch: bool = False) -> Path:
-    """pin した revision の umT5 とトークナイザ（{@link text_components}）の snapshot。
+    """The snapshot of umT5 and the tokenizer ({@link text_components}) at the pinned revision.
 
-    `fetch=False` ならネットワークに出ず、無ければ fail loudly（{@link local_snapshot} と同じ理由 —
-    約 23 GB の取得が埋め込みの生成に紛れない）。DiT / VAE の取得対象とは別の呼び口にして、
-    参照パイプラインの取得に umT5 が混ざらない形を保つ。
-    MUST: テキスト段の部品を上流から取らないモデル（`ti2v-5b` — ADR 0121 決定 9）は fail loudly。
+    With `fetch=False` there is no network access, and an absent snapshot fails loudly (the same
+    reason as {@link local_snapshot} — a download of about 23 GB does not slip into generating the
+    embeddings). It is a separate entry point from the DiT / VAE fetch targets, so that umT5 never
+    mixes into the fetch of the reference pipeline.
+    MUST: a model that does not fetch the text-step components from upstream (`ti2v-5b` — ADR 0121
+    decision 9) fails loudly.
     """
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
@@ -315,8 +356,9 @@ def text_snapshot(model: str = DEFAULT_MODEL, *, fetch: bool = False) -> Path:
     names = text_components(model)
     if not names:
         raise WanSourceError(
-            f"モデル {model!r} はテキスト段の部品（umT5・トークナイザ）を上流から取らない"
-            "（ADR 0121 決定 9 — umT5 は越境参照・トークナイザ資産は Wan2.1 の系列から写す）"
+            f"model {model!r} does not fetch the text-step components (umT5, tokenizer)"
+            " from upstream (ADR 0121 decision 9 — umT5 is a cross-repository reference and the"
+            " tokenizer assets are copied from the Wan2.1 series)"
         )
     patterns = [f"{name}/*" for name in names]
     try:
@@ -330,74 +372,81 @@ def text_snapshot(model: str = DEFAULT_MODEL, *, fetch: bool = False) -> Path:
         )
     except LocalEntryNotFoundError as error:
         raise WanSourceError(
-            f"{source.repo}@{source.revision} の {list(names)} が HF キャッシュに無い —"
-            " 先に `uv run --group wan --inexact python -m wan.text_embeds --fetch` で取得する"
+            f"{source.repo}@{source.revision}: {list(names)} not in the HF cache —"
+            " fetch them first with"
+            " `uv run --group wan --inexact python -m wan.text_embeds --fetch`"
         ) from error
     missing = [name for name in names if not (snapshot / name).is_dir()]
     if missing:
-        raise WanSourceError(f"{snapshot} に部品 {missing} が無い — `--fetch` で取り直す")
+        raise WanSourceError(
+            f"{snapshot} is missing components {missing} — fetch again with `--fetch`"
+        )
     return snapshot
 
 
 def umt5_encoder_shards(weight_map: Mapping[str, str]) -> frozenset[str]:
-    """索引の `weight_map`（キー → shard のファイル名）から、encoder の重み
-    （{@link UMT5_ENCODER_PREFIXES}）が載る shard を導く。"""
+    """Derive from the `weight_map` of the index (key → shard file name) the shards that hold the
+    encoder weights ({@link UMT5_ENCODER_PREFIXES})."""
     return frozenset(
         shard for key, shard in weight_map.items() if key.startswith(UMT5_ENCODER_PREFIXES)
     )
 
 
 def pinned_umt5_shards(index: Path, pinned: Mapping[str, str]) -> dict[str, str]:
-    """索引から導いた shard の集合が表（`pinned`）と同じことを見て、索引の `weight_map` のうち
-    表の shard に載るキーを返す（キー → shard のファイル名）。
+    """Check that the set of shards derived from the index equals the table (`pinned`), and return
+    the keys of the index's `weight_map` that live in the table's shards (key → shard file name).
 
-    MUST: 集合が違えば fail loudly — 上流の索引が動いたか表が古い。どちらでも、表の sha256 が
-    覆わない shard を読むか、要る shard を取りこぼす。
+    MUST: if the sets differ, fail loudly — the upstream index moved or the table is stale. Either
+    way, a shard the table's sha256 does not cover would be read, or a needed shard would be missed.
     """
     weight_map: dict[str, str] = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
     derived = umt5_encoder_shards(weight_map)
     if derived != frozenset(pinned):
         raise WanSourceError(
-            f"{index}: 索引から導いた encoder の shard {sorted(derived)} が表の shard"
-            f" {sorted(pinned)} と違う — 上流の索引が動いたか表（wan.sources.UMT5_SOURCES）が古い"
+            f"{index}: encoder shards derived from the index {sorted(derived)} differ from the"
+            f" table's shards {sorted(pinned)} — the upstream index moved or the table"
+            " (wan.sources.UMT5_SOURCES) is stale"
         )
     return {key: shard for key, shard in weight_map.items() if shard in pinned}
 
 
 def umt5_snapshot(model: str, *, fetch: bool = False) -> Path:
-    """umT5 の上流の pin（{@link UMT5_SOURCES}）の snapshot（config・索引・encoder の shard）。
+    """The snapshot of the umT5 upstream pin ({@link UMT5_SOURCES}) (config, index, encoder shards).
 
-    先に config と索引だけを取り、索引から導いた shard（{@link pinned_umt5_shards} — 表と
-    違えば落ちる）を取る。decoder だけの shard は取らない（本家は 6 本・約 51.9 GB のうち encoder に
-    要るのは約 29.8 GB）。`fetch=False` ならネットワークに出ず、無ければ fail loudly
-    （{@link local_snapshot} と同じ理由）。shard の sha256 の照合は読み口
-    （`wan.umt5_export.Checkpoint`）が unpickle の前に掛ける — 取得の記録ではなく読む実物で閉じる。
+    Fetches the config and the index first, then the shards derived from the index
+    ({@link pinned_umt5_shards} — fails if they differ from the table). Shards with only decoder
+    weights are not fetched (of the original's 6 shards, about 51.9 GB, the encoder needs about
+    29.8 GB). With `fetch=False` there is no network access, and an absent snapshot fails loudly
+    (the same reason as {@link local_snapshot}). The sha256 of the shards is checked by the read
+    entry point (`wan.umt5_export.Checkpoint`) before unpickling — the check closes on the files
+    actually read, not on a record of the fetch.
     """
     row = _umt5_row(model)
     hint = f"uv run --group wan python -m wan.sources --umt5 {model} --fetch"
     snapshot = _umt5_download(row, [UMT5_CONFIG, UMT5_BIN_INDEX], fetch=fetch, hint=hint)
     index = snapshot / UMT5_BIN_INDEX
     if not index.is_file() or not (snapshot / UMT5_CONFIG).is_file():
-        raise WanSourceError(f"{snapshot} に {UMT5_CONFIG} / {UMT5_BIN_INDEX} が無い — `--fetch`")
+        raise WanSourceError(f"{snapshot} has no {UMT5_CONFIG} / {UMT5_BIN_INDEX} — `--fetch`")
     shards = sorted(set(pinned_umt5_shards(index, row.shards).values()))
     snapshot = _umt5_download(row, shards, fetch=fetch, hint=hint)
     missing = [name for name in shards if not (snapshot / name).is_file()]
     if missing:
-        raise WanSourceError(f"{snapshot} に shard {missing} が無い — `--fetch` で取り直す")
+        raise WanSourceError(f"{snapshot} is missing shards {missing} — fetch again with `--fetch`")
     return snapshot
 
 
 def pinned_umt5_tokenizer(model: str, destination: Path, *, fetch: bool = False) -> None:
-    """umT5 の上流の pin のトークナイザのファイル（{@link Umt5Source.tokenizer}）を取り、sha256 を
-    照合したバイト列だけを `destination` へ写す（正本はこの置き場から読む）。
+    """Fetch the tokenizer files of the umT5 upstream pin ({@link Umt5Source.tokenizer}) and copy
+    only the sha256-verified bytes to `destination` (the source of truth reads from there).
 
-    `fetch=False` ならネットワークに出ず、無ければ fail loudly（{@link local_snapshot} と同じ
-    理由）。
+    With `fetch=False` there is no network access, and absent files fail loudly (the same reason as
+    {@link local_snapshot}).
 
-    MUST: 照合は写すバイト列そのものに掛ける（読んで照合してから書く — 照合の後で HF キャッシュの
-    実体が差し替わっても、写した側は照合したバイト列のまま）。表に無いファイルは写さない — snapshot
-    の置き場には encoder の取得で落ちた `config.json` なども並ぶので、そこから直に読むと正本が
-    pin していないファイルに依る。
+    MUST: the check runs on the very bytes that are copied (read, verify, then write — even if the
+    file in the HF cache is swapped after the check, the copy keeps the verified bytes). Files not
+    in the table are not copied — the snapshot directory also holds `config.json` and other files
+    downloaded for the encoder, so reading directly from there would make the source of truth depend
+    on files that are not pinned.
     """
     row = _umt5_row(model)
     names = sorted(row.tokenizer)
@@ -407,34 +456,35 @@ def pinned_umt5_tokenizer(model: str, destination: Path, *, fetch: bool = False)
     for name in names:
         path = snapshot / name
         if not path.is_file():
-            raise WanSourceError(f"{snapshot} に {name} が無い — `--fetch` で取り直す")
+            raise WanSourceError(f"{snapshot} has no {name} — fetch again with `--fetch`")
         data = path.read_bytes()
         actual = hashlib.sha256(data).hexdigest()
         if actual != row.tokenizer[name]:
             raise WanSourceError(
-                f"{path} の sha256 {actual} が表の {row.tokenizer[name]} と違う — 上流の pin"
-                " と別のトークナイザは読まない（表 wan.sources.UMT5_SOURCES か HF キャッシュが"
-                "壊れた）"
+                f"{path}: sha256 {actual} differs from {row.tokenizer[name]} in the table — no"
+                " tokenizer other than the upstream pin is read (the table wan.sources.UMT5_SOURCES"
+                " or the HF cache is broken)"
             )
         verified[name] = data
-    # 全部を照合してから写す（1 本でも違えば 1 本も写さない）。
+    # Copy only after verifying all of them (if even one differs, none is copied).
     destination.mkdir(parents=True, exist_ok=True)
     for name, data in verified.items():
         (destination / name).write_bytes(data)
 
 
 def _umt5_row(model: str) -> Umt5Source:
-    """umT5 の上流の表の行（表に無いモデルは fail loudly）。"""
+    """The row of the umT5 upstream table (a model not in the table fails loudly)."""
     row = UMT5_SOURCES.get(model)
     if row is None:
         raise WanSourceError(
-            f"umT5 のモデル {model!r} は上流の表に無い（既知: {sorted(UMT5_SOURCES)}）"
+            f"umT5 model {model!r} is not in the upstream table (known: {sorted(UMT5_SOURCES)})"
         )
     return row
 
 
 def _umt5_download(row: Umt5Source, patterns: list[str], *, fetch: bool, hint: str) -> Path:
-    """umT5 の上流の pin から `patterns` だけを取る（`fetch=False` ならキャッシュだけを見る）。"""
+    """Fetch only `patterns` from the umT5 upstream pin (with `fetch=False`, only the cache is
+    consulted)."""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
@@ -450,13 +500,14 @@ def _umt5_download(row: Umt5Source, patterns: list[str], *, fetch: bool, hint: s
         )
     except LocalEntryNotFoundError as error:
         raise WanSourceError(
-            f"{source.repo}@{source.revision} の {patterns} が HF キャッシュに無い — 先に"
-            f" `{hint}` で取得する"
+            f"{source.repo}@{source.revision}: {patterns} not in the HF cache — fetch them first"
+            f" with `{hint}`"
         ) from error
 
 
 def read_safetensors_header(path: Path) -> dict[str, dict[str, object]]:
-    """safetensors のヘッダ（先頭 8 バイトの長さ + JSON）だけを読む（本体は読まない）。"""
+    """Read only the safetensors header (the 8-byte length at the start + JSON; the body is not
+    read)."""
     with path.open("rb") as stream:
         (length,) = struct.unpack("<Q", stream.read(8))
         header = json.loads(stream.read(length))
@@ -465,14 +516,15 @@ def read_safetensors_header(path: Path) -> dict[str, dict[str, object]]:
 
 
 def count_parameters(component_dir: Path) -> int:
-    """部品のディレクトリにある safetensors の全テンソルの要素数の和。
+    """The sum of the element counts of all tensors in the safetensors files of a component
+    directory.
 
-    ヘッダの `data_offsets` の幅と `dtype × shape` が食い違う行は fail loudly（ヘッダの読み違い
-    で数が合ってしまう形を潰す）。
+    A row whose `data_offsets` width disagrees with `dtype × shape` fails loudly (rules out a
+    misread header that happens to give the right count).
     """
     files = sorted(component_dir.glob("*.safetensors"))
     if not files:
-        raise WanSourceError(f"{component_dir} に safetensors が無い")
+        raise WanSourceError(f"{component_dir} has no safetensors")
     total = 0
     for file in files:
         for name, entry in read_safetensors_header(file).items():
@@ -484,18 +536,21 @@ def count_parameters(component_dir: Path) -> int:
             for size in shape:
                 count *= int(size)
             if count * _DTYPE_BYTES[dtype] != int(offsets[1]) - int(offsets[0]):
-                raise WanSourceError(f"{file} の {name}: dtype {dtype} × {shape} と幅が合わない")
+                raise WanSourceError(
+                    f"{file}: {name}: dtype {dtype} × {shape} does not match the width"
+                )
             total += count
     return total
 
 
 def check_snapshot(snapshot: Path, model: str = DEFAULT_MODEL) -> dict[str, int]:
-    """取得済みの部品のパラメータ数を数え、{@link EXPECTED_PARAMETERS} のモデルの行と
-    突き合わせる。"""
+    """Count the parameters of the fetched components and match them against the model's row of
+    {@link EXPECTED_PARAMETERS}."""
     expected_counts = EXPECTED_PARAMETERS.get(model)
     if expected_counts is None:
         raise WanSourceError(
-            f"モデル {model!r} の期待パラメータ数が無い（既知: {sorted(EXPECTED_PARAMETERS)}）"
+            f"no expected parameter counts for model {model!r}"
+            f" (known: {sorted(EXPECTED_PARAMETERS)})"
         )
     counts = {name: count_parameters(snapshot / name) for name in expected_counts}
     wrong = {
@@ -504,18 +559,20 @@ def check_snapshot(snapshot: Path, model: str = DEFAULT_MODEL) -> dict[str, int]
         if counts[name] != expected
     }
     if wrong:
-        raise WanSourceError(f"{model}: パラメータ数が調査の値と違う（実物, 期待）: {wrong}")
+        raise WanSourceError(
+            f"{model}: parameter counts differ from the survey (actual, expected): {wrong}"
+        )
     return counts
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
-    parser.add_argument("--fetch", action="store_true", help="pin した revision で取得する")
+    parser.add_argument("--fetch", action="store_true", help="fetch at the pinned revision")
     parser.add_argument(
         "--umt5",
         choices=sorted(UMT5_SOURCES),
-        help="Wan ではなく umT5 の上流（本家の encoder の shard）を取得 / 検査する",
+        help="fetch / check the umT5 upstream (the encoder shards of the original) instead of Wan",
     )
     args = parser.parse_args(argv)
 

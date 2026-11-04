@@ -1,15 +1,19 @@
-"""`sbv2/demo.py` の台本レベルの約束事（上流パッケージも実重みも要らない純関数だけ）。
+"""The script-level rules of `sbv2/demo.py` (only pure functions that need neither the upstream
+package nor real weights).
 
-デモの実行と資産 prep は手動（`style_bert_vits2` が要る）。ここで固定するのは、壊れると
-**配布形か 3 本の WAV 比較が黙って別物になる**側の規律だけ:
+Running the demo and preparing the assets are manual (they need `style_bert_vits2`). What is pinned
+here is only the discipline whose breakage would **silently turn the distribution or the comparison
+of the 3 WAVs into something else**:
 
-- `wav_pcm16` の丸めが `floor(x + 0.5)`（JS の `Math.round` と同じ規則）であること —
-  Python 組み込みの `round`（偶数丸め）へ滑ると、同じ波形から 1 LSB 違う WAV が出て
-  「out / reference / official の聴き比べ」が実装差の混入した比較になる
-- `clean_text_ranges` の畳み込みの後条件（昇順・隣接しない）と、境界のコードポイントが
-  どちらの列に入るか — 出力はそのまま配布形の tokenizer 資産になる
-- `tile_bert` の本数不一致が fail loudly すること
-- `dump_metadata` が `demo` 欄の無い safetensors を受け取らないこと
+- `wav_pcm16` rounds with `floor(x + 0.5)` (the same rule as JS `Math.round`) — slipping to
+  Python's built-in `round` (round half to even) gives a WAV 1 LSB off from the same waveform, and
+  "listening to out / reference / official side by side" becomes a comparison mixed with an
+  implementation difference
+- the postconditions of the folding in `clean_text_ranges` (ascending, not adjacent) and which
+  list the boundary code points go into — the output becomes the distribution's tokenizer asset as
+  is
+- a count mismatch in `tile_bert` fails loudly
+- `dump_metadata` does not accept a safetensors without the `demo` field
 """
 
 from __future__ import annotations
@@ -29,7 +33,8 @@ from sbv2 import demo
 
 
 def _wav_fields(blob: bytes) -> dict[str, int]:
-    """WAV ヘッダの数値欄（`fmt ` チャンクの 16 バイト + `data` 長）。"""
+    """The numeric fields of the WAV header (the 16 bytes of the `fmt ` chunk + the `data`
+    length)."""
     (
         _size,
         audio_format,
@@ -68,12 +73,12 @@ class TestWavPcm16:
             "bits": 16,
             "dataLength": 16,
         }
-        # RIFF のサイズ欄は「以降の全バイト」= 36 + データ長。
+        # The RIFF size field is "every byte after it" = 36 + the data length.
         assert struct.unpack("<I", blob[4:8])[0] == 36 + 16
         assert len(blob) == 44 + 16
 
     def test_the_rounding_is_floor_of_x_plus_half(self):
-        """MUST: JS の `Math.round` と同じ規則（偶数丸めなら [0, 2, 0, -2] になる）。"""
+        """MUST: the same rule as JS `Math.round` (round half to even would give [0, 2, 0, -2])."""
         samples = np.array([0.5, 1.5, -0.5, -1.5], dtype=np.float64) / 32767.0
 
         pcm = np.frombuffer(demo.wav_pcm16(samples, 48000)[44:], dtype="<i2")
@@ -81,19 +86,22 @@ class TestWavPcm16:
         assert list(pcm) == [1, 2, 0, -1]
 
     def test_it_clips_to_unity_without_using_the_lower_end(self):
-        """クリップは ±1.0 で、下端 −32768 は使わない（正負で対称な振幅）。"""
+        """Clipping is at ±1.0 and the low end −32768 is not used (an amplitude symmetric in
+        sign)."""
         pcm = np.frombuffer(demo.wav_pcm16(np.array([2.0, -2.0]), 48000)[44:], dtype="<i2")
 
         assert list(pcm) == [32767, -32767]
 
 
 def _in_ranges(ranges: list[list[int]], cp: int) -> bool:
-    """コードポイントが閉区間の列に含まれるか（走査は台本ではなくテスト側が持つ）。"""
+    """Whether a code point is in a list of closed intervals (the test, not the script, owns the
+    scan)."""
     return any(start <= cp <= end for start, end in ranges)
 
 
 class TestCleanTextRanges:
-    """判定の正本を Python に一本化した結果そのもの（TS へ Unicode 分類表を持ち込まない）。"""
+    """The very result of making Python the single source of truth for the classification (no
+    Unicode classification table is brought into TS)."""
 
     @pytest.fixture(scope="class")
     @staticmethod
@@ -101,7 +109,8 @@ class TestCleanTextRanges:
         return demo.clean_text_ranges()
 
     def test_both_lists_are_folded_ascending_and_never_adjacent(self, ranges):
-        """畳み込みの後条件 — 隣接した 2 区間が残っていたら畳み込みが効いていない。"""
+        """The postcondition of the folding — 2 adjacent intervals left over mean the folding did
+        not work."""
         for name, table in ranges.items():
             assert table, name
             for start, end in table:
@@ -115,7 +124,8 @@ class TestCleanTextRanges:
             assert not _in_ranges(ranges["spaced"], cp), hex(cp)
 
     def test_the_spaced_side_holds_the_whitespace_including_the_three_controls(self, ranges):
-        """`\\t` `\\n` `\\r` は control 判定から**外して**空白側へ置く（参照実装の分岐）。"""
+        """`\\t` `\\n` `\\r` are **taken out of** the control class and put on the whitespace side
+        (the reference implementation's branch)."""
         for cp in (0x0020, 0x00A0, ord("\t"), ord("\n"), ord("\r")):
             assert _in_ranges(ranges["spaced"], cp), hex(cp)
             assert not _in_ranges(ranges["removed"], cp), hex(cp)
@@ -158,18 +168,20 @@ class TestDumpMetadata:
 
 @pytest.mark.skipif(
     importlib.util.find_spec("style_bert_vits2") is None,
-    reason="sbv2 dependency-group が無い（`uv sync --group sbv2` が前提）",
+    reason="the sbv2 dependency group is missing (`uv sync --group sbv2` is required)",
 )
 class TestSharedSymbolsCarryOnlyTheCommonRules:
-    """`symbols.json` は配布形の**共有席**（全話者に同じ 1 本）— モデル固有の事実を載せない。
+    """`symbols.json` is a **shared slot** of the distribution (the same single file for every
+    speaker) — it carries no model-specific facts.
 
-    焼いたモデルの style / speaker / config の `version` を載せると、別の話者に対して誤った
-    モデル名を名乗る。ノブの既定も載せない（正本は manifest の `pipelineConfig.defaults`・TS 側は
-    ここのノブを読まない — W-RC5-1）。
+    Carrying the baked model's style / speaker / config `version` would claim the wrong model name
+    for another speaker. Knob defaults are not carried either (the source of truth is the manifest's
+    `pipelineConfig.defaults`, and the TS side does not read the knobs here — W-RC5-1).
     """
 
     def test_the_rules_have_no_model_specific_fields(self, monkeypatch) -> None:
-        # 規則の残り 2 本はソースと HF の config を読むので、この検査では差し込む。
+        # The other 2 rules read the source and the HF config, so they are injected for this
+        # check.
         monkeypatch.setattr(demo, "blank_id_from_source", lambda: 0)
         monkeypatch.setattr(demo, "bert_rel_pos_rule", lambda: {"positionBuckets": 1})
         hps = types.SimpleNamespace(

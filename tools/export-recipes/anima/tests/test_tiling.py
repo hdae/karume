@@ -1,14 +1,18 @@
-"""`anima/tiling.py` の幾何とブレンドの約束事（実重み不要分）。
+"""The contracts of `anima/tiling.py`'s geometry and blending (the part that needs no real
+weights).
 
-ここで固定するのは、壊れても例外が出ず**数だけが静かにずれる**側:
+Pinned here is the side where a breakage raises nothing and **only the numbers silently drift**:
 
-- 丸め等間隔スナップ配置の不変条件（末尾が `extent − tile` / 重なりが下限以上 /
-  本数が解析式どおり / 間隔のばらつきが高々 1 latent）
-- 開始位置が TS 側（`packages/models/src/anima/tiling.ts`）と一致すること
-- ブレンド式が上流（`AutoencoderKLQwenImage.blend_v` / `blend_h`）と**ビット一致**
-- 貼り付けの担当領域（間隔ぶんで切り詰めると末端が欠ける — 上流からの意図的逸脱の帰結）
+- the invariants of the rounded equal-spacing snap placement (the last start is `extent − tile` /
+  every overlap is at least the floor / the count follows the closed form / the spacing varies by
+  at most 1 latent)
+- the start positions match the TS side (`packages/models/src/anima/tiling.ts`)
+- the blend formulas are **bit-identical** to upstream (`AutoencoderKLQwenImage.blend_v` /
+  `blend_h`)
+- the regions each tile pastes (truncating to the spacing loses the end — a consequence of the
+  deliberate deviation from upstream)
 
-実重みでの参照フィクスチャ生成は手動（モジュール doc）。
+Generating the reference fixture with real weights is manual (see the module doc).
 """
 
 from __future__ import annotations
@@ -18,16 +22,18 @@ import torch
 
 from anima import tiling as anima_tiling
 
-#: TS 側（`packages/models/src/anima/tiling.ts` の `planTileAxis`）と一致する開始位置の実測
-#: （辺 px → latent の開始位置列）。**両実装の一致を機械で突き合わせる経路が無い**
-#: （フィクスチャ生成は手動）ので、代表 4 辺を値で凍結して鏡像のずれを検出する。TS 側は
-#: 受理集合の全 97 辺を同じ値で凍結している（`packages/models/tests/anima_tiling_test.ts` の
-#: `AXIS_STARTS`）ので、この 4 行はその表の部分集合である。
+#: Measured start positions that match the TS side (`planTileAxis` in
+#: `packages/models/src/anima/tiling.ts`) (side px → latent start positions). **There is no path
+#: that compares the two implementations mechanically** (fixture generation is manual), so four
+#: representative sides are frozen by value to detect the mirror drifting. The TS side freezes all
+#: 97 sides of the accepted set with the same values (`AXIS_STARTS` in
+#: `packages/models/tests/anima_tiling_test.ts`), so these four rows are a subset of that table.
 #:
-#: 1456px は旧規則で 60 本に跳ねて入口で拒否していた辺、1824px は P-3 の測定対象。**1872px は
-#: `i·span/(本数−1)` がちょうど半分になる辺**（span 170 / 5 本 → 42.5 と 127.5）で、
-#: `plan_tile_axis` の整数式が組み込み `round`（偶数丸め）へ退行すると (0, 42, 85, 128, 170) に
-#: なる — 他の 3 辺は半端が出ないので、この 1 行だけがその退行を捕まえる。
+#: 1456px is the side that jumped to 60 tiles under the old rule and was rejected at the entry;
+#: 1824px is P-3's measurement target. **1872px is the side where `i·span/(count−1)` lands exactly
+#: on a half** (span 170 / 5 tiles → 42.5 and 127.5): if `plan_tile_axis`'s integer formula
+#: regressed to the built-in `round` (half to even) it would give (0, 42, 85, 128, 170) — the
+#: other three sides produce no halves, so this row alone catches that regression.
 MIRRORED_STARTS = {
     1024: (0, 32, 64),
     1456: (0, 39, 79, 118),
@@ -44,14 +50,16 @@ class TestPlanTileAxis:
         assert axis.starts == MIRRORED_STARTS[side]
 
     def test_1024_latent_is_three_tiles_blended_over_256_sample_px(self):
-        """1024px（latent 128）は 3 タイル・重なり latent 32（= sample 256）— 旧規則と同配置。"""
+        """1024px (latent 128) is 3 tiles with a latent overlap of 32 (= 256 in sample space) —
+        the same placement as the old rule."""
         axis = anima_tiling.plan_tile_axis(128, 64, 8)
 
         assert axis.starts == (0, 32, 64)
         assert axis.blends(8) == [256, 256]
 
     def test_single_tile_degenerates_without_blending(self):
-        """`extent == tile`（512px）は 1 枚・ブレンド対なし — 非タイル経路とビット同一の前提。"""
+        """`extent == tile` (512px) is one tile with no blend pair — the premise of being
+        bit-identical to the untiled path."""
         axis = anima_tiling.plan_tile_axis(64, 64, 8)
 
         assert axis.starts == (0,)
@@ -61,25 +69,28 @@ class TestPlanTileAxis:
         "extent", [64, 80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512]
     )
     def test_invariants_hold_for_every_extent(self, extent):
-        """固定形の decoder が食える配置であることの不変条件（丸め等間隔配置の帰結）。"""
+        """The invariants of a placement a fixed-shape decoder can take (consequences of the
+        rounded equal-spacing placement)."""
         axis = anima_tiling.plan_tile_axis(extent, 64, 8)
         span = extent - 64
         gaps = [second - first for first, second in zip(axis.starts, axis.starts[1:], strict=False)]
 
         assert axis.starts[0] == 0
-        assert axis.starts[-1] == span, "最後のタイルは末端へスナップする"
-        assert all(64 - gap >= 8 for gap in gaps), "どの対も重なりが下限以上"
+        assert axis.starts[-1] == span, "the last tile snaps to the end"
+        assert all(64 - gap >= 8 for gap in gaps), "every pair overlaps at least the floor"
         assert axis.blends(8) == [(64 - gap) * 8 for gap in gaps]
-        # 丸め等間隔の実体 = 間隔（したがってブレンド幅）の差は高々 1 latent。上流同型の
-        # 「固定 stride + 末尾だけスナップ」に退行すると最後の対だけ大きく開いて割れる。
-        assert not gaps or max(gaps) - min(gaps) <= 1, f"間隔のばらつき {gaps}"
+        # What rounded equal spacing means = the spacings (hence the blend widths) differ by at
+        # most 1 latent. A regression to upstream's "fixed stride + snap only the last" would
+        # open the last pair wide and break this.
+        assert not gaps or max(gaps) - min(gaps) <= 1, f"spacing varies: {gaps}"
 
     @pytest.mark.parametrize("extent", [80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512])
     def test_tile_count_is_minimal(self, extent):
-        """本数は「重なりの下限だけを制約にした最小」= `ceil(span / (tile − 下限)) + 1`。
+        """The count is "the minimum constrained only by the overlap floor" =
+        `ceil(span / (tile − floor)) + 1`.
 
-        これが無いと「常に間隔 1」のような安全側の実装が緑のまま通り、タイル数が
-        跳ね上がる（時間の冗長がそのまま効く）。
+        Without this, an over-safe implementation such as "always a spacing of 1" would stay
+        green while the tile count soared (the redundancy costs time directly).
         """
         axis = anima_tiling.plan_tile_axis(extent, 64, 8)
         span = extent - 64
@@ -87,7 +98,7 @@ class TestPlanTileAxis:
         assert len(axis.starts) == -(-span // (64 - 8)) + 1
 
     def test_minimum_overlap_is_honored(self):
-        """重なりの下限を上げると本数が増える（下限が本当に効いている）。"""
+        """Raising the overlap floor increases the count (the floor really takes effect)."""
         loose = anima_tiling.plan_tile_axis(128, 64, 8)
         tight = anima_tiling.plan_tile_axis(128, 64, 48)
 
@@ -95,23 +106,24 @@ class TestPlanTileAxis:
         assert all(tight.blend_at(1, index) >= 48 for index in range(1, len(tight.starts)))
 
     def test_extent_shorter_than_the_tile_is_rejected(self):
-        """固定形の decoder は短い入力を食えない — 黙ってゼロ埋めしない。"""
-        with pytest.raises(ValueError, match="タイル幅"):
+        """A fixed-shape decoder cannot take a short input — no silent zero padding."""
+        with pytest.raises(ValueError, match="tile width"):
             anima_tiling.plan_tile_axis(32, 64, 8)
 
     def test_overlap_at_or_above_the_tile_width_is_rejected(self):
-        with pytest.raises(ValueError, match="最小の重なり"):
+        with pytest.raises(ValueError, match="minimum overlap"):
             anima_tiling.plan_tile_axis(128, 64, 64)
 
     def test_a_pair_outside_the_axis_is_rejected(self):
-        """縮退（1 枚）に対を求めるのは幾何の取り違え — 0 を返して黙って素通ししない。"""
-        with pytest.raises(ValueError, match="ブレンド対"):
+        """Asking a degenerate axis (one tile) for a pair is a geometry mix-up — it does not
+        silently return 0."""
+        with pytest.raises(ValueError, match="blend pair"):
             anima_tiling.plan_tile_axis(64, 64, 8).blend_at(8, 1)
 
 
 class TestPlanTiling:
     def test_axes_are_planned_independently(self):
-        """H = W でなくても成立する一般形（軸ごとに独立）。"""
+        """The general form, valid without H = W (each axis independent)."""
         geometry = anima_tiling.plan_tiling((1, 16, 128, 64))
 
         assert len(geometry.rows.starts) == 3
@@ -140,13 +152,15 @@ class TestGeometryMeta:
 
 
 class TestBlendIsomorphism:
-    """上流の `blend_v` / `blend_h` の**逐語移植**であることを本物との突合で固定する。
+    """Pin, by comparing against the real ones, that these are **verbatim ports** of upstream's
+    `blend_v` / `blend_h`.
 
-    `enable_tiling` を使わない（走査形が違う）ぶん、式の同型はここでしか担保できない。
+    Since `enable_tiling` is not used (its scan differs), the formulas' identity can only be
+    guaranteed here.
 
-    `importorskip` は**各テストの中**で受ける — クラス本体（= モジュール import 時）に置くと
-    `Skipped(allow_module_level=True)` がモジュール全体を skip し、diffusers を要さない幾何の
-    ケースまで CI（既定 sync に diffusers は入らない）で 1 度も走らなくなる。
+    `importorskip` is called **inside each test** — in the class body (= at module import)
+    `Skipped(allow_module_level=True)` would skip the whole module, and even the geometry cases
+    that need no diffusers would never run in CI (the default sync does not install diffusers).
     """
 
     @pytest.mark.parametrize("blend", [1, 3, 8])
@@ -175,11 +189,13 @@ class TestBlendIsomorphism:
 
 
 def _ramp_decoder(axis: str):
-    """タイル内の位置に依る合成 decoder（重なりの値がタイルごとに**違う**ものになる）。
+    """A synthetic decoder that depends on the position inside the tile (so the overlapping
+    values **differ** per tile).
 
-    latent の中身に依らず `value = タイル内の行（列）番号` を返す。これで重なり領域の値が
-    上下（左右）のタイルで別の数になり、**ブレンドの向き**と**担当領域の割り当て**が
-    数値として現れる（同じ値が重なる作りだと向きを反転しても緑のまま通る）。
+    Regardless of the latent's contents it returns `value = the row (column) number inside the
+    tile`. That makes the values of an overlap region differ between the upper and lower (left and
+    right) tiles, so **the blend direction** and **the region assignment** show up as numbers (with
+    equal values overlapping, a reversed direction would stay green).
     """
 
     def decode(tile: torch.Tensor) -> torch.Tensor:
@@ -197,7 +213,8 @@ def _ramp_decoder(axis: str):
 
 class TestTiledDecode:
     def test_single_tile_is_a_bitwise_identity(self):
-        """縮退（1 枚）はブレンド無し・領域が全体 — decode 出力の素の写しになる。"""
+        """The degenerate case (one tile) has no blending and one region covering everything — a
+        plain copy of the decode output."""
         geometry = anima_tiling.plan_tiling((1, 2, 8, 8), tile=8, min_overlap=2, scale=1)
         z = torch.randn(1, 2, 1, 8, 8)
         decoded = torch.randn(1, 3, 1, 8, 8)
@@ -208,12 +225,13 @@ class TestTiledDecode:
 
     @pytest.mark.parametrize("axis", ["rows", "cols"])
     def test_linear_ramp_is_reconstructed_across_the_seams(self, axis):
-        """位置依存の decoder に対する解析解と一致する。
+        """It matches the closed-form result for a position-dependent decoder.
 
-        extent 16 / tile 8 / 間隔 4（重なり 4）で開始位置は 0,4,8。タイル内の値が
-        `0..7` の傾斜のとき、貼り合わせ後は `0,1,2,3` → 中間は全て 4 → 末尾が `4,5,6,7`
-        になる（重なり幅の線形ランプが傾斜を平坦へ潰す）。ブレンドの向き反転・間隔の
-        off-by-one・末端タイルのスナップ落とし・担当領域の取り違えは全てここで割れる。
+        With extent 16 / tile 8 / spacing 4 (overlap 4) the start positions are 0,4,8. When the
+        values inside a tile are the slope `0..7`, the stitched result is `0,1,2,3` → all 4 in the
+        middle → `4,5,6,7` at the end (the linear ramp over the overlap flattens the slope). A
+        reversed blend direction, an off-by-one spacing, a missing snap of the last tile and a
+        mixed-up region assignment all break here.
         """
         geometry = anima_tiling.plan_tiling((1, 2, 16, 16), tile=8, min_overlap=2, scale=1)
         assert geometry.rows.starts == (0, 4, 8)
@@ -225,7 +243,8 @@ class TestTiledDecode:
         assert torch.equal(line, expected)
 
     def test_the_far_edge_is_covered(self):
-        """末端まで覆う（間隔ぶんで切り詰めるだけだと総和が `extent − tile` で欠ける）。"""
+        """It covers up to the far end (merely truncating to the spacing would sum to
+        `extent − tile` and leave a gap)."""
         geometry = anima_tiling.plan_tiling((1, 2, 16, 16), tile=8, min_overlap=2, scale=1)
 
         out = anima_tiling.tiled_decode(

@@ -1,15 +1,17 @@
-"""SigLIP2 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""Model card (`README.md`) of the SigLIP2 distribution — a pure function derived mechanically from
+the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **SigLIP2 固有の事実**だけ: 帰属（出所・
-ライセンス・引用）と、この pipeline のカードに何を書くか。
+The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
+`karume.modelcard`. This module holds only **facts specific to SigLIP2**: attribution (source,
+license, citation) and what this pipeline's card says.
 
-帰属は**モデル名から一意に決まる**（{@link SIGLIP2_UPSTREAM}）ので、プロファイルの軸には
-割らない — 分けると「so400m を base の帰属で配る」取り違えを操作者が起こせるようになる。
+Attribution is **determined uniquely by the model name** ({@link SIGLIP2_UPSTREAM}), so it is not
+split into a profile axis — splitting it would let the operator make the mix-up of "shipping
+so400m under base's attribution".
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies as is). The only constants this module may hold are
+**facts that do not exist** in the manifest.
 """
 
 from __future__ import annotations
@@ -35,22 +37,23 @@ from karume.modelcard import (
 
 from .measurements import map_head_diff_text, map_head_norm_text
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 SIGLIP2_SUPPORTED_PIPELINE = "siglip2/1"
 
-#: HF の pipeline tag。この配布形が持つのは **vision tower だけ**なので、上流カードの
-#: `zero-shot-image-classification` は名乗れない（text tower が無いと成立しない）。
+#: HF pipeline tag. This distribution carries **only the vision tower**, so it cannot claim the
+#: upstream card's `zero-shot-image-classification` (that needs the text tower).
 SIGLIP2_PIPELINE_TAG = "image-feature-extraction"
 
 SIGLIP2_TITLE = "SigLIP2 Vision Tower — Karume"
 
-#: モデル名 → 上流チェックポイントの HF リポ ID。**この 1 表が「どのモデルが何の重みか」の
-#: 唯一の事実**で、`siglip2.distribution` は系列名 / 入力素材のディレクトリ名（どちらも上流
-#: リポ名そのもの — `siglip2/export.py` の綴り）をここから導く。載っていないモデル名は帰属を
-#: 書けないので、カードは描かずに落ちる。
+#: Model name → HF repository ID of the upstream checkpoint. **This one table is the only fact of
+#: "which model is which weights"**; `siglip2.distribution` derives the series name and the input
+#: directory name from it (both are the upstream repository name itself — the spelling of
+#: `siglip2/export.py`). A model name not listed has no attribution to write, so the card is not
+#: rendered and fails.
 #:
-#: ライセンスは実地確認（2026-08-13 — https://huggingface.co/google/siglip2-base-patch16-224）:
-#: `license: apache-2.0`。so400m 側も同じ。
+#: License checked at the source (2026-08-13 — https://huggingface.co/google/siglip2-base-patch16-224):
+#: `license: apache-2.0`. The same for so400m.
 SIGLIP2_UPSTREAM: Mapping[str, str] = {
     "base": "google/siglip2-base-patch16-224",
     "so400m": "google/siglip2-so400m-patch14-384",
@@ -58,40 +61,46 @@ SIGLIP2_UPSTREAM: Mapping[str, str] = {
 
 SIGLIP2_LICENSE = "apache-2.0"
 
-#: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
+#: Where the full text lives (the same text as `LICENSE.md` at the distribution repository's root —
+#: Apache 2.0 §4(a)).
 SIGLIP2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: MAP head の差し替え（`siglip2.patch` の段 ③）が持ち込む差の実測幅を本文の綴りへ。
-#: **ビット同一ではない**ので帰属節が明示する（`siglip2/export.py --verify` が 2 系列とも
-#: 毎回実測する値）。数も書式も持たない — 正本は
-#: {@link siglip2.measurements.map_head_diff_text}。
+#: The measured range of the difference that replacing the MAP head (step ③ of `siglip2.patch`)
+#: introduces, as body text. It is **not bit-identical**, so the attribution section states it (a
+#: value `siglip2/export.py --verify` measures on both series every run). This module holds neither
+#: the number nor the format — the source of truth is
+#: {@link siglip2.measurements.map_head_diff_text}.
 SIGLIP2_MAP_HEAD_DIFF = map_head_diff_text()
 
-#: 上の差に意味を与えるスケール（pooled ベクトルの L2 ノルム）。差の大小はこの数との比でしか
-#: 読めないので、告知とカードが**同じ 1 語**を名乗る必要がある。正本は
-#: {@link siglip2.measurements.map_head_norm_text}。
+#: The scale that gives the difference above its meaning (the L2 norm of the pooled vector). The
+#: size of the difference can only be read as a ratio to this number, so the notice and the card
+#: must state **the same single word**. The source of truth is
+#: {@link siglip2.measurements.map_head_norm_text}.
 SIGLIP2_MAP_HEAD_NORM = map_head_norm_text()
 
 
 def _siglip2_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
-    """frontmatter を manifest に並んだモデルから組む（`base_model` は再配布する上流の全部）。
+    """Build the frontmatter from the models listed in the manifest (`base_model` is every upstream
+    that is redistributed).
 
-    MUST: 未知のモデル名では描かない — 帰属の表に無いモデルを黙って落とすと、`base_model` が
-    1 つ足りないカード（= 出所を名乗っていない再配布）が静かに出る。
+    MUST: do not render for an unknown model name — silently dropping a model missing from the
+    attribution table quietly produces a card with one `base_model` short (= a redistribution that
+    does not name its source).
     """
     upstream: list[str] = []
     for name in manifest["models"]:
         if name not in SIGLIP2_UPSTREAM:
             raise ValueError(
-                f"モデル '{name}' の上流が帰属表に無い（既知: {sorted(SIGLIP2_UPSTREAM)}）"
-                " — 出所を名乗れないカードは描かない"
+                f"the upstream of model '{name}' is not in the attribution table (known:"
+                f" {sorted(SIGLIP2_UPSTREAM)}) — a card that cannot name its source is not rendered"
             )
         upstream.append(SIGLIP2_UPSTREAM[name])
     return CardMetadata(
         pipeline_tag=SIGLIP2_PIPELINE_TAG,
         base_model=tuple(upstream),
-        # `base_model_relation` は置かない — 格納形を変えず（f32 のまま）コンテナだけを移した
-        # もので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+        # No `base_model_relation` — this only moves the weights into another container without
+        # changing their storage (still f32), so it is none of adapter / merge / quantized /
+        # finetune (the CardMetadata doc).
         license=SIGLIP2_LICENSE,
         tags=(SIGLIP2_PIPELINE_TAG, "webgpu", "siglip", "vision"),
     )
@@ -124,7 +133,7 @@ def _siglip2_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
-    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+    """The attribution section. The storage is unchanged, so it claims only "converted"."""
     lines = [
         "## Base weights and attribution",
         "",
@@ -153,17 +162,19 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、系列 / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
+    """Policy of the Usage example: keep the minimal working form, and **list the optionals an
+    ordinary use case is likely to need as commented-out lines** (with the selectable values
+    enumerated in a comment on the same line — derived mechanically from the manifest, so the list
+    follows when series / quants are added). The reader takes the next step just by uncommenting.
 
-    `embed()` は画像 1 枚しか受けない（前処理は配布形の定数で固定 — `siglip2.Pipeline` の
-    公開面）ので、この pipeline の optional ノブは model / quant の 2 つだけである。
+    `embed()` takes a single image only (preprocessing is fixed by the distribution's constants —
+    the public surface of `siglip2.Pipeline`), so this pipeline's optional knobs are only model and
+    quant.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+    NOTE: `fromAssets` is **not advertised** (ruling of 2026-08-29). The split distribution form
+    became readable too (X2-101), but that surface is meant for local debugging and assumes the
+    caller holds the bytes; the ordinary entry point for a reader using HF is `fromPretrained`.
+    Listing both would leave the reader to decide "which one to use".
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -202,7 +213,8 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _siglip2_shape(model: Mapping[str, Any]) -> list[str]:
-    """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。"""
+    """Preprocessing constants and the input / output shapes (what the user passes in and gets
+    back can be read here)."""
     config = model["pipelineConfig"]
     mean = " / ".join(str(value) for value in config["imageMean"])
     std = " / ".join(str(value) for value in config["imageStd"])
@@ -223,7 +235,8 @@ def _siglip2_shape(model: Mapping[str, Any]) -> list[str]:
 def render_siglip2_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
-    """SigLIP2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Assemble the `README.md` body of the SigLIP2 distribution (pure function, with a trailing
+    newline)."""
     require_pipeline(manifest, SIGLIP2_SUPPORTED_PIPELINE)
     metadata = _siglip2_metadata(manifest)
     return render(

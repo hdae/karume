@@ -1,13 +1,19 @@
-"""`anima/measure_report.py` の `build_summary` — ADR 0019 の品質ゲート①の判定の約束事。
+"""`build_summary` of `anima/measure_report.py` — the rules of the verdicts of quality gate (1)
+of ADR 0019.
 
-`failed` は `measure_quant.main` の終了コードへ届く（`test_measure_quant.py` はそこから先を
-スタブで見る）ので、ここでは門の述語そのものを合成の `DitRun` / latent で固定する:
+`failed` reaches the exit code of `measure_quant.main` (`test_measure_quant.py` covers the rest
+from there with stubs), so this pins the gate predicates themselves with synthetic `DitRun`s /
+latents:
 
-- P̃ 行 peak/rms の median は上限以下が緑・超えれば赤
-- latent 比の門は linear 活性を量子化する構成だけが対象（しない構成は `w8` 比の参考値）
-- SDPA の発火計数は期待値と一致して緑・期待値 0 の構成は門を立てない
-- S f16 丸めは全呼び出しで発火して緑・試行 0 回は赤（恒真化の防止）
-- attention を触る構成が基準と同じ latent なら赤（素通し）
+- the median of P̃ row peak/rms is green at or below the ceiling, red above it
+- the latent-ratio gate applies only to configurations that quantize linear activations (the
+  others get a reference value against `w8`)
+- the SDPA call count is green when it matches the expectation; a configuration expecting 0
+  raises no gate
+- S f16 rounding is green when it fires on every call; 0 attempts is red (prevents a vacuous
+  pass)
+- a configuration that touches attention is red if its latent equals the baseline's
+  (passthrough)
 """
 
 from __future__ import annotations
@@ -21,13 +27,14 @@ from anima import measure_report as mr
 
 STEPS = 2
 BASELINE = "w8a8"
-#: 門の対象（linear 活性を量子化する + S f16 格納）。
+#: Subject to the gates (quantizes linear activations + stores S in f16).
 GATED = "w8a8-qkpv-s16"
-#: 門の対象外（linear 活性 f32 — `w8` 比の参考値だけが出る）。
+#: Not subject to the gates (linear activations in f32 — only a reference value against `w8`).
 REFERENCE_ONLY = "w8-qkpv"
 CONFIG_NAMES = ("f32", "w8", BASELINE, GATED, REFERENCE_ONLY)
 ATTN_CONFIGS = (GATED, REFERENCE_ONLY)
-#: f32 からの相対誤差（`w8` と基準）。構成の誤差はこれの倍率で与える。
+#: Relative error from f32 (`w8` and the baseline). Configuration errors are given as multiples
+#: of these.
 W8_ERROR = 0.005
 BASELINE_ERROR = 0.01
 
@@ -63,7 +70,8 @@ def _summarize(
     s16_fired_calls: int = 4,
     s16_rounded_calls: int = 4,
 ) -> mr.Summary:
-    """既定は全門が緑の合成ケース。引数 1 つを動かすと、その門だけが動く。"""
+    """By default a synthetic case with every gate green. Moving one argument moves only that
+    gate."""
     reference = torch.linspace(1.0, 2.0, 16)
     errors = {
         "f32": 0.0,
@@ -160,7 +168,8 @@ class TestLatentRatioGate:
         assert f"`{GATED}` の latent relRMS" in failure
 
     def test_a_config_without_linear_act_is_only_reported_against_w8(self):
-        """(g) 相当は門の対象外 — 劣化が大きくても赤にせず、`w8` 比の参考値として出す。"""
+        """The (g)-like configuration is not gated — even a large degradation is not red; it is
+        reported as a reference value against `w8`."""
         summary = _summarize(reference_only_ratio=10.0)
 
         assert summary["failed"] == []
@@ -199,7 +208,8 @@ class TestScoreF16Gate:
         assert _only_failure(summary) == f"`{GATED}` の S f16 丸めが全呼び出しで発火"
 
     def test_no_rounding_attempt_at_all_fails(self):
-        """試行 0 回は `0 == 0` で恒真になる — 丸めが一度も呼ばれない構成を緑にしない。"""
+        """0 attempts is vacuously true as `0 == 0` — a configuration whose rounding is never called
+        must not be green."""
         summary = _summarize(s16_fired_calls=0, s16_rounded_calls=0)
 
         assert _only_failure(summary) == f"`{GATED}` の S f16 丸めが全呼び出しで発火"
@@ -207,7 +217,7 @@ class TestScoreF16Gate:
 
 class TestPassthroughGate:
     def test_an_attention_config_identical_to_the_baseline_fails(self):
-        """ratio 1.0 = latent が基準と同一（量子化が素通しになっている）。"""
+        """ratio 1.0 = the latent equals the baseline's (the quantization is a passthrough)."""
         summary = _summarize(gated_ratio=1.0)
 
         assert _only_failure(summary) == f"`{GATED}` が `{BASELINE}` と異なる"

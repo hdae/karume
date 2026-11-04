@@ -1,22 +1,23 @@
-"""`wan/dit_patch.py` の Wan2.2 TI2V の形（ADR 0121 決定 3 / 4・段 1）の約束事。
+"""The contract of the Wan2.2 TI2V form of `wan/dit_patch.py` (ADR 0121 decisions 3 / 4, step 1).
 
-固定するのは、壊れても例外が出ず**数だけが静かにずれる**側:
+It pins the side where a breakage raises no exception and **only the numbers drift silently**:
 
-- I2V 対応のグラフ（`WanDitTokensTi2v` — 時刻入力 2 本・条件マスク・`where`）の T2V の使い方が、
-  上流の 1 次元 timestep の forward と**ビット一致**すること（2.1 と同じ形の計算 — 決定 3 の
-  「なぜ」）
-- I2V の使い方が、決定 4 の参照ラッパ（時刻の MLP を値ごとに M = 1 で回し、トークンごとの表を上流の
-  ブロックへ渡す）と**ビット一致**すること（故障注入: 時刻入力 2 本の取り違え・マスクの 1 トークンの
-  ずれが割れる）
-- 参照ラッパは、全トークンが同じ時刻（T2V）のとき上流の 1 次元 timestep の経路とビット一致すること
-  （f32 / f64・in-memory と層逐次の両方）
-- 層逐次の書き手（`wan.dit_reference.LayerwiseDit`）の参照ラッパの経路が、モデル全体の参照と
-  ビット一致すること（f64 は全体 `double()` + `float64_forward` の値）
-- 条件マスクのホスト関数（先頭の潜在フレームのトークンが真）
+- the T2V use of the I2V-capable graph (`WanDitTokensTi2v` — two time inputs, a condition mask,
+  `where`) is **bit-identical** to the upstream forward with a one-dimensional timestep (the same
+  form of computation as 2.1 — the "why" of decision 3)
+- the I2V use is **bit-identical** to the reference wrapper of decision 4 (it runs the time MLP per
+  value with M = 1 and passes per-token tables to the upstream blocks) (fault injection: swapping
+  the two time inputs, or shifting the mask by one token, splits them)
+- the reference wrapper is bit-identical to the upstream one-dimensional timestep path when every
+  token has the same time (T2V) (f32 / f64, both in-memory and layer by layer)
+- the reference-wrapper path of the layer-by-layer writer (`wan.dit_reference.LayerwiseDit`) is
+  bit-identical to the whole-model reference (for f64, the values of whole-model `double()` +
+  `float64_forward`)
+- the host function of the condition mask (true for the tokens of the first latent frame)
 
-合成モデル（`test_dit_patch.TINY_DIT` — 乱数初期化の小さな `WanTransformer3DModel`）だけで回す。
-5B の実重みの eager 同値は `python -m wan.ti2v_export_dit write`（golden の書き出しの門 —
-runbook）。
+Runs only on a synthetic model (`test_dit_patch.TINY_DIT` — a small randomly initialised
+`WanTransformer3DModel`). The eager equivalence on the real 5B weights is
+`python -m wan.ti2v_export_dit write` (the check of the golden export — runbook).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from torch import nn
 from wan import dit_patch, dit_reference
 from wan.tests.test_dit_patch import TINY_DIT, TINY_LATENT
 
-#: 合成の patch（TINY_DIT の patch_size）。
+#: The synthetic patch (patch_size of TINY_DIT).
 PATCH = (1, 2, 2)
 
 
@@ -67,7 +68,8 @@ def _graph_inputs(
 
 
 def _trunk(model: nn.Module, latents: torch.Tensor, inputs: tuple[torch.Tensor, ...]):
-    """patch 埋め込みを上流の conv3d の出力にした経路（グラフの本体だけを比べる — 2.1 と同じ）。"""
+    """The path with the patch embedding replaced by the output of the upstream conv3d (compares
+    only the body of the graph — the same as 2.1)."""
     wrapper = dit_patch.WanDitTokensTi2v(model)
     with torch.no_grad():
         hidden = model.patch_embedding(latents).flatten(2).transpose(1, 2)
@@ -84,7 +86,7 @@ ZERO = torch.tensor([0], dtype=torch.int64)
 
 class TestTheConditionMask:
     def test_i2v_marks_exactly_the_tokens_of_the_first_latent_frame(self) -> None:
-        """トークン添字 `(f·H' + h)·W' + w` — 先頭の潜在フレームの 15 トークンが先頭に並ぶ。"""
+        """Token index `(f·H' + h)·W' + w` — the 15 tokens of the first latent frame come first."""
         mask = _i2v_mask()
 
         assert mask.dtype == torch.bool
@@ -99,13 +101,14 @@ class TestTheConditionMask:
         assert not mask.any()
 
     def test_a_temporal_patch_other_than_one_fails_loudly(self) -> None:
-        with pytest.raises(NotImplementedError, match="時間方向の patch 2"):
+        with pytest.raises(NotImplementedError, match="temporal patch 2"):
             dit_patch.dit_condition_mask((4, 6, 10), (2, 2, 2), conditioned=True)
 
 
 class TestTheTi2vGraphForm:
     def test_t2v_matches_the_upstream_one_dimensional_timestep_forward_bit_exactly(self) -> None:
-        """マスクが全て偽・条件側の時刻 = 生成側 → 上流の `[B,6,C]` の経路とビット一致。"""
+        """All-false mask, conditioned-side time = generated side → bit-identical to the upstream
+        `[B,6,C]` path."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         no_mask = dit_patch.dit_condition_mask(TINY_LATENT, PATCH, conditioned=False)
@@ -126,13 +129,15 @@ class TestTheTi2vGraphForm:
             one_dimensional = dit_patch.reference_dit(model, latents, timestep, embeds)
 
         assert torch.equal(_trunk(model, latents, inputs), expected)
-        # 恒真の門でないこと: 条件フレームの t = 0 は 1 次元の経路（全トークン t = 750）と値が違う。
+        # Not a vacuous check: t = 0 of the conditioned frame differs in value from the
+        # one-dimensional path (every token at t = 750).
         assert not torch.equal(expected, one_dimensional)
 
     @pytest.mark.parametrize("fault", ["swapped-times", "shifted-mask"])
     def test_a_wiring_fault_breaks_the_i2v_identity(self, fault: str) -> None:
-        """故障注入: 時刻入力 2 本の取り違え・条件マスクを 1 トークンずらす → 参照ラッパと割れる
-        （段 2 の r 門の故障注入と同じ 2 件 — I2V の形でしか効かない）。"""
+        """Fault injection: swapping the two time inputs or shifting the condition mask by one
+        token → splits from the reference wrapper (the same 2 injections as for the r check of
+        step 2 — they only bite in the I2V form)."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         mask = _i2v_mask()
@@ -147,7 +152,8 @@ class TestTheTi2vGraphForm:
         assert not torch.equal(_trunk(model, latents, inputs), expected)
 
     def test_the_two_wrappers_share_the_patch_embedding_and_parts(self) -> None:
-        """TI2V のラッパは 2.1 のラッパと同じ部品を参照する（重みの丸めが両方と上流に届く）。"""
+        """The TI2V wrapper refers to the same parts as the 2.1 wrapper (weight rounding reaches
+        both and upstream)."""
         model = _tiny()
         wrapper = dit_patch.WanDitTokensTi2v(model)
 
@@ -161,9 +167,11 @@ class TestTheReferenceWrapper:
     def test_one_time_for_every_token_is_the_one_dimensional_path_in_f32(
         self, variant: str
     ) -> None:
-        """全トークンが同じ時刻なら、参照ラッパ = 上流の 1 次元 timestep の経路（ビット一致）。
+        """When every token has the same time, reference wrapper = upstream one-dimensional
+        timestep path (bit-identical).
 
-        マスクが全て偽の形と、マスクは真でも条件側の時刻が生成側と同じ形の両方。
+        Both the all-false mask, and a true mask whose conditioned-side time equals the generated
+        side.
         """
         model = _tiny()
         latents, timestep, embeds = _inputs()
@@ -203,8 +211,9 @@ class TestTheReferenceWrapper:
         assert model.condition_embedder is original
 
     def test_a_per_token_timestep_out_of_line_with_the_mask_fails_loudly(self) -> None:
-        """上流が渡す平坦の timestep が `where(mask, 条件側, 生成側)` と違えば止まる（上流の平坦化の
-        順が変わったら、トークンと変調の対応が黙ってずれる）。"""
+        """It stops if the flat timestep upstream passes differs from `where(mask, conditioned side,
+        generated side)` (if the order of upstream's flattening changed, the mapping between tokens
+        and modulation would drift silently)."""
         model = _tiny()
         mask = _i2v_mask()[..., 0]
         embedder = dit_patch._TokenwiseTimeEmbedder(
@@ -212,7 +221,7 @@ class TestTheReferenceWrapper:
         )
         wrong = torch.full((mask.shape[1],), 750, dtype=torch.int64)
 
-        with pytest.raises(AssertionError, match="条件マスクと一致しない"):
+        with pytest.raises(AssertionError, match="does not match the condition mask"):
             embedder(wrong, _inputs()[2], None, mask.shape[1])
 
     def test_the_condition_timestep_must_be_one_value(self) -> None:
@@ -220,7 +229,7 @@ class TestTheReferenceWrapper:
         latents, timestep, embeds = _inputs()
         mask = _i2v_mask()[..., 0]
 
-        with pytest.raises(ValueError, match="生成側・条件側とも"):
+        with pytest.raises(ValueError, match="both the generated and the conditioned side"):
             dit_patch.reference_dit(
                 model,
                 latents,
@@ -230,10 +239,11 @@ class TestTheReferenceWrapper:
             )
 
     def test_the_diffusers_per_token_path_runs_the_time_mlp_on_every_token(self) -> None:
-        """観測の相手（diffusers の 2 次元 timestep — M = S の linear）
-        は参照ラッパと別の経路を通る。
+        """The observed counterpart (diffusers' two-dimensional timestep — a linear with M = S)
+        takes a different path from the reference wrapper.
 
-        時刻の MLP の linear の入力の行数で見る: 参照ラッパは 1 行ずつ 2 回、2 次元の経路は S 行。
+        Checked by the row count of the input of the time MLP's linear: the reference wrapper feeds
+        one row twice, the two-dimensional path S rows.
         """
         model = _tiny()
         latents, timestep, embeds = _inputs()
@@ -255,7 +265,8 @@ class TestTheReferenceWrapper:
 
 
 class TestTheLayerwiseTokenwisePath:
-    """層逐次の参照ラッパの経路 = モデル全体の参照（5B の f64 / f32 の golden の作り方）。"""
+    """The layer-by-layer reference-wrapper path = the whole-model reference (how the f64 / f32
+    goldens of the 5B are made)."""
 
     def test_f32_and_f64_are_bit_identical_to_the_whole_model(self) -> None:
         model = _tiny()
@@ -285,7 +296,8 @@ class TestTheLayerwiseTokenwisePath:
     def test_one_time_for_every_token_is_the_one_dimensional_layerwise_path(
         self, dtype: torch.dtype
     ) -> None:
-        """T2V（全トークンが同じ t）で参照ラッパの経路 = 1 次元 timestep の経路（段 1 の検収）。"""
+        """With T2V (every token at the same t), reference-wrapper path = one-dimensional timestep
+        path (the acceptance of step 1)."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         condition = dit_patch.TimestepCondition(timestep, torch.zeros_like(_i2v_mask()[..., 0]))
@@ -298,8 +310,9 @@ class TestTheLayerwiseTokenwisePath:
         assert torch.equal(got.output, expected.output)
 
     def test_the_patched_graph_runs_on_the_layerwise_weights(self) -> None:
-        """パッチ後のグラフの eager を層逐次の重みで回す口（`run` + `install_processors=False`）=
-        in-memory のモデルで回したパッチ後のグラフ（5B の eager 同値の形）。"""
+        """The entry point that runs the eager patched graph on the layer-by-layer weights (`run` +
+        `install_processors=False`) = the patched graph run on the in-memory model (the form of the
+        5B eager equivalence)."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         mask = _i2v_mask()
@@ -321,12 +334,13 @@ class TestTheLayerwiseTokenwisePath:
     def test_the_layerwise_patched_graph_runs_the_real_pair_rope(
         self, installed: bool, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """層逐次のパッチ後の eager はグラフと同じ実数形の RoPE を通る（ブロックごとに q / k の
-        2 回）。
+        """The layer-by-layer patched eager goes through the same real-form RoPE as the graph
+        (twice per block, for q and k).
 
-        値では見分けられない: 上流の processor も `RealPairRope`（中身は上流と同じ形の表）を
-        tuple として受け、ビット一致する値を出す。だから `prepare_block` を落とすと、グラフの経路を
-        回したつもりで上流の経路を回すことになる — 呼び出しの回数で縛る。
+        The values cannot tell them apart: the upstream processor also accepts `RealPairRope`
+        (holding tables of the same form as upstream) as a tuple and produces bit-identical values.
+        So if `prepare_block` were dropped, the upstream path would run while we believed the graph
+        path was running — hence the binding by call count.
         """
         model = _tiny()
         latents, timestep, embeds = _inputs()
@@ -355,8 +369,9 @@ class TestTheLayerwiseTokenwisePath:
 
     @pytest.mark.parametrize("hook", ["collect_blocks", "on_block", "on_output"])
     def test_block_hooks_that_cannot_reach_the_patched_graph_fail_loudly(self, hook: str) -> None:
-        """ブロックごとの口はブロックの forward hook で発火する — 部品を直に呼ぶ TI2V のグラフには
-        届かないので、黙って空の記録を返さずに止まる。"""
+        """The per-block entry points fire from the blocks' forward hooks — they cannot reach the
+        TI2V graph, which calls the parts directly, so it stops instead of silently returning an
+        empty record."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         inputs = _graph_inputs(model, latents, timestep, embeds, ZERO, _i2v_mask())
@@ -368,7 +383,7 @@ class TestTheLayerwiseTokenwisePath:
             "on_output": {"on_output": lambda index, _output: seen.append(index)},
         }[hook]
 
-        with pytest.raises(dit_reference.DitReferenceError, match="forward が呼ばれていない"):
+        with pytest.raises(dit_reference.DitReferenceError, match="forward was not called"):
             writer.run(
                 dit_reference.ModuleWeights(model),
                 torch.float32,
@@ -380,13 +395,14 @@ class TestTheLayerwiseTokenwisePath:
         assert seen == []
 
     def test_a_single_block_run_is_checked_at_the_end(self) -> None:
-        """1 ブロックだけ回すと「次のブロックを求める時点」が来ない — 終わりの検査が止める。"""
+        """Running a single block never reaches "the point where the next block is requested" —
+        the final check stops it."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         inputs = _graph_inputs(model, latents, timestep, embeds, ZERO, _i2v_mask())
         writer = dit_reference.LayerwiseDit(model.config)
 
-        with pytest.raises(dit_reference.DitReferenceError, match="ブロック 0 の forward"):
+        with pytest.raises(dit_reference.DitReferenceError, match="block 0's forward"):
             writer.run(
                 dit_reference.ModuleWeights(model),
                 torch.float32,
@@ -397,7 +413,8 @@ class TestTheLayerwiseTokenwisePath:
             )
 
     def test_the_upstream_reference_wrapper_still_feeds_every_block_hook(self) -> None:
-        """上流のブロックの forward を通る参照ラッパの経路では、口が全ブロックで発火する。"""
+        """On the reference-wrapper path, which goes through the upstream blocks' forward, the
+        entry points fire on every block."""
         model = _tiny()
         latents, timestep, embeds = _inputs()
         condition = dit_patch.TimestepCondition(ZERO, _i2v_mask()[..., 0])

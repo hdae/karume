@@ -1,19 +1,22 @@
-"""`anima/measure_quant.py` の**実重みが要らない**部分の約束事。
+"""The rules of the parts of `anima/measure_quant.py` that **need no real weights**.
 
-実測そのものは手動（7.29GiB の DiT を構成ぶん丸めて回す）。ここで固定するのは、壊れると
-実行時に例外が出ず**測定値が静かに嘘になる**側だけ:
+The measurement itself is manual (the 7.29GiB DiT is rounded and run once per configuration).
+What is pinned here is only what, when broken, raises nothing at run time and **silently makes
+the measurements lie**:
 
-- 10 構成の記号・順序・基準が**据え置き**であること（ADR 0030 / ACTIVE_DESIGN が構成名を
-  名指しで参照する — 外部参照の安定）
-- `--w4-screen` が**方式を積み重ねない**こと（戻さずに当てると「NF4 の上の MXFP4」を測る
-  ことになり、方式比較そのものが成立しない）
-- 対象集合の素性 — group 数を「丸めが group を割る軸」と同じ軸で数えること・g32 で割り
-  切れない重みを除外して**一覧に載せる**こと・除外が丸めに実際に効くこと
-- 非 linear の量子化可能型が現れたら fail loudly（linear 限定 = i4 の実行経路と一致、が
-  この台本の前提）
-- サイズ試算の式 — g32 の group scale 込みで rtn / nf4 が 5.0 bpw・mxfp4 が 4.25 bpw・
-  kmeans:shared が表 1 枚ぶん上乗せ（表に載る数字の出どころ）
-- `kmeans:shared` の fit_stride の導出（予算内は全量・大規模は group 長と互いに素な奇数）
+- the symbols, order and baseline of the 10 configurations **stay as they are** (ADR 0030 /
+  ACTIVE_DESIGN refer to configurations by name — stability of external references)
+- `--w4-screen` **does not stack methods** (applying one without restoring would measure "MXFP4
+  on top of NF4", and the method comparison itself would not hold)
+- the properties of the target set — groups are counted on the same axis as "the axis the
+  rounding splits into groups"; weights not divisible by g32 are excluded and **listed**; the
+  exclusion actually reaches the rounding
+- fail loudly when a non-linear quantizable type appears (the premise of this script is linear
+  only = matches i4's execution path)
+- the size-projection formulas — with the g32 group scale, rtn / nf4 are 5.0 bpw, mxfp4 is
+  4.25 bpw, kmeans:shared adds one table (where the numbers in the table come from)
+- the derivation of `kmeans:shared`'s fit_stride (the whole set within the budget; at large scale
+  an odd number coprime with the group length)
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from karume.quantize import iter_quant_targets
 
 
 class TinyDit(nn.Module):
-    """g32 で割り切れる linear 2 本 + 割り切れない 1 本（= `patch_embed.proj` の縮小形）。"""
+    """2 linears divisible by g32 + 1 that is not (= a scaled-down `patch_embed.proj`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -41,13 +44,14 @@ def _method(name: str) -> mq.W4Method:
 
 
 def _targets(**overrides: int) -> mq.W4Targets:
-    """既定は「32 要素 = 1 group・1 本」の最小形（除外なし）。"""
+    """By default the minimal form "32 elements = 1 group, 1 module" (no exclusions)."""
     base = {"modules": 1, "elements": 32, "groups": 1}
     return mq.W4Targets(excluded={}, **{**base, **overrides})
 
 
 class TestExistingConfigsAreFrozen:
-    """MUST: 10 構成の記号・順序・基準は据え置き（ADR 0030 が構成名を名指しで参照する）。"""
+    """MUST: the symbols, order and baseline of the 10 configurations stay as they are (ADR 0030
+    refers to configurations by name)."""
 
     def test_the_ten_configs_keep_their_names_and_order(self):
         assert mq.CONFIG_NAMES == (
@@ -67,21 +71,24 @@ class TestExistingConfigsAreFrozen:
         assert mq.BASELINE == "w8a8"
 
     def test_the_w4_screen_does_not_share_the_stacking_table(self):
-        """方式スクリーニングは別経路 — 10 構成の表を 1 つも借りない。"""
+        """The method screening is a separate path — it borrows nothing from the table of 10
+        configurations."""
         assert set(mq.W4_METHOD_NAMES).isdisjoint(mq.CONFIG_NAMES)
 
 
 class TestTargetScan:
     def test_it_counts_groups_on_the_axis_the_rounding_splits(self):
-        """group 数は `channel_rows` の平坦形（= 丸めが group を割る軸）から数える。"""
+        """Groups are counted from the flattened form of `channel_rows` (= the axis the rounding
+        splits into groups)."""
         targets = mq.scan_w4_targets(TinyDit())
 
-        # attn `[32,64]` … 32 行 × (64/32) group / ff `[64,32]` … 64 行 × 1 group。
+        # attn `[32,64]` … 32 rows × (64/32) groups / ff `[64,32]` … 64 rows × 1 group.
         assert (targets.modules, targets.elements) == (2, 32 * 64 + 64 * 32)
         assert targets.groups == 32 * 2 + 64
 
     def test_an_indivisible_quantization_axis_is_excluded_and_listed(self):
-        """MUST: 端数 group は格納できない形（ADR 0069 決定 2）— 黙って全体を諦めない。"""
+        """MUST: a partial group is a shape that cannot be stored (ADR 0069 decision 2) — do not
+        silently give up on the whole."""
         targets = mq.scan_w4_targets(TinyDit())
 
         assert targets.excluded == {"patch_embed.weight": 68}
@@ -89,7 +96,8 @@ class TestTargetScan:
         assert targets.include("attn")
 
     def test_a_non_linear_quantizable_weight_fails_loudly(self):
-        """conv / embedding が増えたら「linear 限定 = 配布対応形」の前提が崩れる。"""
+        """If conv / embedding appear, the premise "linear only = the form the distribution
+        supports" breaks."""
 
         class WithConv(TinyDit):
             def __init__(self) -> None:
@@ -109,7 +117,8 @@ class TestTargetScan:
             mq.scan_w4_targets(Odd())
 
     def test_the_include_predicate_matches_the_root_module_spelling(self):
-        """述語は**モジュール FQN** で呼ばれる（根は空文字列 → 重み FQN は `weight`）。"""
+        """The predicate is called with **module FQNs** (the root is the empty string → the weight
+        FQN is `weight`)."""
         targets = mq.scan_w4_targets(nn.Linear(64, 8, bias=False))
 
         assert targets.modules == 1
@@ -117,7 +126,8 @@ class TestTargetScan:
 
 
 class TestExclusionReachesTheRounding:
-    """除外は「一覧に載る」だけでなく**丸めに効く**こと（載っただけでは沈黙誤値が残る）。"""
+    """The exclusion must not only "be listed" but **reach the rounding** (being listed alone leaves
+    silently wrong values)."""
 
     def test_the_excluded_weight_is_untouched_by_every_method(self):
         torch.manual_seed(0)
@@ -131,11 +141,13 @@ class TestExclusionReachesTheRounding:
 
             assert report.modules == targets.modules == 2
             assert torch.equal(model.patch_embed.weight, skipped)
-            # 対象側は実際に動いている（= 述語が「全部落とす」向きに壊れていない）。
+            # The targets actually moved (= the predicate is not broken towards "exclude
+            # everything").
             assert not torch.equal(model.attn.weight, rounded)
 
     def test_without_the_predicate_the_indivisible_weight_would_fail_loudly(self):
-        """恒真化の防止 — 除外しなければ core が端数 group で落ちる（上のテストが効く条件）。"""
+        """Prevents a vacuous test — without the exclusion, core fails on the partial group (the
+        condition for the test above to mean something)."""
         model = TinyDit()
 
         with pytest.raises(Exception, match="is not divisible"):
@@ -143,7 +155,8 @@ class TestExclusionReachesTheRounding:
 
 
 class TestMethodsAreNotStacked:
-    """MUST: 構成ごとに pristine へ戻す（戻さないと方式間の比較が成立しない）。"""
+    """MUST: restore to pristine per configuration (without it, the comparison between methods does
+    not hold)."""
 
     def _pristine(self, model: nn.Module, targets: mq.W4Targets):
         weights = {
@@ -165,7 +178,8 @@ class TestMethodsAreNotStacked:
         assert all(torch.equal(weights[fqn], pristine[fqn]) for fqn in pristine)
 
     def test_a_restored_run_matches_a_fresh_one(self):
-        """別方式の後に戻して当てた rtn が、素の重みへ当てた rtn とビット一致する。"""
+        """rtn applied after restoring from another method is bit-identical to rtn applied to the
+        original weights."""
         torch.manual_seed(0)
         model = TinyDit()
         targets = mq.scan_w4_targets(model)
@@ -182,7 +196,7 @@ class TestMethodsAreNotStacked:
         assert torch.equal(after_restore, weights["attn.weight"])
 
     def test_stacking_the_two_methods_would_have_changed_the_answer(self):
-        """恒真化の防止 — 戻さずに重ねた場合は実際に別の値になる。"""
+        """Prevents a vacuous test — stacking without restoring actually gives different values."""
         torch.manual_seed(0)
         model = TinyDit()
         targets = mq.scan_w4_targets(model)
@@ -199,23 +213,24 @@ class TestMethodsAreNotStacked:
 
 
 class TestSizeProjection:
-    """表に載る bpw の出どころ（`docs/container-v1.md` §6.3 の `int4-sym-g` と OCP MX の逐語）。"""
+    """Where the bpw in the table comes from (`int4-sym-g` of `docs/container-v1.md` §6.3 and OCP
+    MX, to the letter)."""
 
     @pytest.mark.parametrize("name", ["rtn-i4-g32", "nf4"])
     def test_group_absmax_methods_land_on_five_bits(self, name):
-        """4bit ペイロード + group 32 ごとの F32 scale = 4 + 32/32 = 5.0 bpw。"""
+        """4-bit payload + an F32 scale per group of 32 = 4 + 32/32 = 5.0 bpw."""
         projection = mq.w4_size_projection(_method(name), _targets(elements=3200, groups=100))
 
         assert projection["bitsPerWeight"] == pytest.approx(5.0)
 
     def test_mxfp4_lands_on_four_and_a_quarter_bits(self):
-        """共有 scale が E8M0（8bit）なので 4 + 8/32 = 4.25 bpw。"""
+        """The shared scale is E8M0 (8 bits), so 4 + 8/32 = 4.25 bpw."""
         projection = mq.w4_size_projection(_method("mxfp4"), _targets(elements=3200, groups=100))
 
         assert projection["bitsPerWeight"] == pytest.approx(4.25)
 
     def test_the_shared_codebook_costs_one_table_for_the_whole_model(self):
-        """表は 1 枚だが group scale が要る（= i4 と同じ 5.0 bpw + 表 1 枚ぶん）。"""
+        """One table, but group scales are needed (= the same 5.0 bpw as i4 + one table)."""
         targets = _targets(modules=10, elements=3200, groups=100)
 
         projection = mq.w4_size_projection(_method("kmeans:shared"), targets)
@@ -223,14 +238,15 @@ class TestSizeProjection:
         assert projection["bitsPerWeight"] == pytest.approx(5.0 + 32 * 16 / 3200)
 
     def test_the_ratio_is_the_bpw_against_f32(self):
-        """比は「f32 格納に対する何 %」— MiB の 2 系列と同じ数から出ていること。"""
+        """The ratio is "what % of f32 storage" — derived from the same numbers as the two MiB
+        columns."""
         projection = mq.w4_size_projection(_method("nf4"), _targets(elements=3200, groups=100))
 
         assert projection["ratio"] == pytest.approx(5.0 / 32.0)
         assert projection["projectedMiB"] == pytest.approx(projection["f32MiB"] * 5.0 / 32.0)
 
     def test_one_mebibyte_is_the_binary_one(self):
-        """`MiB` 表記どおり 2^20（10^6 と混ぜると表の数字が 5% ずれる）。"""
+        """2^20, as the `MiB` notation says (mixing in 10^6 shifts the table's numbers by 5%)."""
         assert mq.MIB == 2**20
 
 
@@ -239,14 +255,15 @@ class TestKmeansFitStride:
         assert mq.w4_fit_stride(mq.W4_KMEANS_FIT_BUDGET) == 1
 
     def test_the_sample_stays_inside_the_budget(self):
-        elements = 1_956_249_600  # Anima DiT の実測（linear 453 本・除外 1 本のあと）
+        elements = 1_956_249_600  # Anima DiT, measured (453 linears, after excluding 1)
 
         stride = mq.w4_fit_stride(elements)
 
         assert elements // stride <= mq.W4_KMEANS_FIT_BUDGET
 
     def test_the_stride_is_coprime_with_the_group_size(self):
-        """MUST: 偶数 stride は group 内の偶数 lane しか踏まない（group 長は 2 冪）。"""
+        """MUST: an even stride touches only the even lanes of a group (the group length is a power
+        of 2)."""
         for elements in (mq.W4_KMEANS_FIT_BUDGET * 2, mq.W4_KMEANS_FIT_BUDGET * 97 + 1):
             assert mq.w4_fit_stride(elements) % 2 == 1
 
@@ -256,7 +273,8 @@ class TestMethodTable:
         assert mq.W4_METHOD_NAMES == ("rtn-i4-g32", "nf4", "mxfp4", "kmeans:shared")
 
     def test_the_group_size_is_pinned_for_every_method(self):
-        """方式比較の軸は「格子の張り方」だけ — group 長は動かさない（ADR 0069 追記 5）。"""
+        """The only axis of the method comparison is "how the grid is laid out" — the group length
+        does not move (ADR 0069 addendum 5)."""
         assert mq.W4_GROUP_SIZE == 32
 
     def test_selecting_a_subset_keeps_the_declaration_order(self):
@@ -305,9 +323,10 @@ def _payload(**overrides: object) -> dict[str, object]:
         "targets": {"opTypes": ["Linear"], "modules": 453, "elements": 3200, "groups": 100},
         "excluded": [{"weight": "patch_embed.proj.weight", "quantAxis": 68}],
         "imageNote": "image_*.png",
-        # 基準行は品質列を持たない（自分との比較は情報が無く、PSNR ∞ は JSON でも不正）。
+        # The baseline row has no quality columns (comparing with itself carries no information,
+        # and PSNR ∞ is invalid in JSON too).
         "configs": {
-            "f32": {"method": "f32", "quantReport": "丸めなし（基準）", "elapsed": 9.0},
+            "f32": {"method": "f32", "quantReport": "no rounding (baseline)", "elapsed": 9.0},
             "nf4": entry,
         },
     }
@@ -315,7 +334,8 @@ def _payload(**overrides: object) -> dict[str, object]:
 
 
 class TestReport:
-    """表は payload だけから作る（JSON と markdown が割れないため）。"""
+    """The table is built from the payload alone (so that the JSON and the markdown cannot
+    disagree)."""
 
     def test_it_carries_the_size_formula_and_the_quality_row(self):
         report = mq.w4_report_markdown(_payload())
@@ -324,13 +344,13 @@ class TestReport:
         assert "| `nf4` | 31.25 | 31.30 | 4.2000e-02 | 41 | 612s |" in report
 
     def test_the_excluded_weight_is_named_in_the_report(self):
-        """MUST: 除外を出力へ明記（黙って全体を諦めない）。"""
+        """MUST: state the exclusions in the output (do not silently give up on the whole)."""
         report = mq.w4_report_markdown(_payload())
 
         assert "`patch_embed.proj.weight`（軸 68）" in report
 
     def test_a_sampled_codebook_fit_is_stated(self):
-        """MUST: fit_stride を使ったら明記する（core docstring の MUST）。"""
+        """MUST: state it when fit_stride was used (the MUST of the core docstring)."""
         report = mq.w4_report_markdown(_payload())
 
         assert "1/99 の等間隔部分標本" in report
@@ -348,14 +368,16 @@ class TestReport:
         assert "**NG（素通り）**" in mq.w4_report_markdown(payload)
 
 
-# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+# ---- calibrated rounding (iteration J-2) ------------------------------------
 #
-# 実重み無しで固定できるのは「対象の割り方」と「捕まえ方」と「門」だけ。GPTQ の数値そのものは
-# core（`karume.quant_calib`）のテストが持つ。
+# Without real weights, only "how the targets are split", "how inputs are captured" and "the
+# checks" can be pinned. The GPTQ numbers themselves belong to the tests of core
+# (`karume.quant_calib`).
 
 
 class TinyCalibBlock(nn.Module):
-    """`CosmosTransformerBlock` の代役 — **引数の名前と並び**を写す（Catcher の対応表の根拠）。"""
+    """Stand-in for `CosmosTransformerBlock` — copies **the names and order of the arguments** (the
+    basis of the Catcher's mapping)."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -379,7 +401,8 @@ class TinyCalibBlock(nn.Module):
 
 
 class TinyCalibDit(nn.Module):
-    """`CosmosTransformer3DModel` の代役（block を**全て位置引数で**呼ぶ形も写す）。"""
+    """Stand-in for `CosmosTransformer3DModel` (also copies calling the blocks with **all positional
+    arguments**)."""
 
     def __init__(self, features: int = 32, blocks: int = 2) -> None:
         super().__init__()
@@ -401,7 +424,8 @@ class TinyCalibDit(nn.Module):
 
 
 def tiny_denoise(model: TinyCalibDit, steps: int) -> dict[str, torch.Tensor]:
-    """`reference_steps` と同じ形の参照ループ（1 step = DiT 1 forward — CFG=1）。"""
+    """A reference loop of the same shape as `reference_steps` (1 step = 1 DiT forward —
+    CFG=1)."""
     torch.manual_seed(11)
     x = torch.randn(1, 4, model.features)
     encoder = torch.randn(1, 5, model.features)
@@ -435,7 +459,8 @@ class TestCalibConfigTable:
         assert mq.select_calib([]) == mq.CALIB_CONFIGS
 
     def test_selecting_only_a_method_leaves_no_calibrated_config(self):
-        """`--w4-only nf4` は方式だけ — 校正付き構成を巻き込まない。"""
+        """`--w4-only nf4` selects only the method — it does not pull in calibrated
+        configurations."""
         assert mq.select_calib(["nf4"]) == ()
 
     def test_selecting_only_a_calibrated_config_leaves_no_method(self):
@@ -445,11 +470,13 @@ class TestCalibConfigTable:
         assert all(config.grid.group_size == mq.W4_GROUP_SIZE for config in mq.CALIB_CONFIGS)
 
     def test_no_calibrated_config_fits_its_table_on_a_subsample(self):
-        """校正の表は**層ごと**に張るので全量 fit で作業領域が収まる（stride は要らない）。"""
+        """The calibration's tables are laid out **per layer**, so a full fit fits in the working
+        memory (no stride needed)."""
         assert all(config.grid.fit_stride == 1 for config in mq.CALIB_CONFIGS)
 
     def test_the_calibrated_grids_project_to_the_same_bpw_as_the_methods(self):
-        """校正は格子を 1 バイトも変えない — rtn / nf4 は方式側と同じ 5.0 bpw。"""
+        """Calibration changes not one byte of the grid — rtn / nf4 are 5.0 bpw, the same as the
+        methods."""
         for name in ("gptq-rtn", "gptq-nf4"):
             config = next(item for item in mq.CALIB_CONFIGS if item.name == name)
             assert mq.w4_size_projection(config, _targets())["bitsPerWeight"] == 5.0
@@ -466,7 +493,8 @@ class TestCalibConfigTable:
 
 class TestCalibTargets:
     def test_the_stage_prefix_carries_the_block_index(self):
-        """局所 FQN（`attn1.weight`）へ足すだけでモデル内 FQN へ戻る形（core の `StageSpec`）。"""
+        """Prepending it to a local FQN (`attn1.weight`) gives back the model-wide FQN (core's
+        `StageSpec`)."""
         stages = mq.calib_stages(TinyCalibDit())
 
         assert [prefix for prefix, _stage in stages] == [
@@ -485,14 +513,16 @@ class TestCalibTargets:
         assert targets.groups == 4 * 32 * (32 // mq.W4_GROUP_SIZE)
 
     def test_a_non_linear_quantizable_weight_is_fail_loudly(self):
-        """linear 限定 = i4 の実行経路と一致、がこの列の前提（`scan_w4_targets` と同文）。"""
+        """Linear only = matches i4's execution path is the premise of this column (the same text as
+        `scan_w4_targets`)."""
         stages = (("transformer_blocks.0", nn.Conv1d(32, 8, 3, bias=False)),)
 
         with pytest.raises(AssertionError, match="非 linear"):
             mq.scan_calib_targets(stages)
 
     def test_a_weight_off_the_group_grid_is_fail_loudly(self):
-        """MUST: 除外して進まない — stage 単位の駆動では過不足一致門が張れなくなる。"""
+        """MUST: do not exclude and continue — driving per stage would make the exact-coverage check
+        impossible."""
         stages = (("transformer_blocks.0", nn.Linear(12, 4, bias=False)),)
 
         with pytest.raises(AssertionError, match="割り切れない"):
@@ -512,7 +542,8 @@ class TestCatcher:
         assert len(batches) == 3
 
     def test_the_positional_arguments_are_named_from_the_block_signature(self):
-        """写した名前の並びを持たない — 上流が並べ替えても綴りが黙って入れ替わらない。"""
+        """No copied list of names is kept — even if upstream reorders them, the spellings do not
+        silently swap."""
         model = TinyCalibDit()
 
         _result, batches = mq.capture_stage_batches(model, lambda: tiny_denoise(model, 1), 1)
@@ -529,7 +560,7 @@ class TestCatcher:
         ]
 
     def test_the_limit_caps_the_batches_without_cutting_the_reference(self):
-        """基準 f32 の周回そのものは最後まで回す（latent は全 step ぶん要る）。"""
+        """The baseline f32 run itself goes to the end (latents are needed for every step)."""
         model = TinyCalibDit()
 
         result, batches = mq.capture_stage_batches(model, lambda: tiny_denoise(model, 4), 2)
@@ -565,7 +596,8 @@ class TestCalibrationRun:
             assert all(not torch.equal(rig.scan[fqn], value) for fqn, value in before.items())
 
     def test_a_scan_the_calibration_missed_is_fail_loudly(self):
-        """MUST: 丸め漏れは PSNR が**良い側**へ出る — 門が唯一の検出手段。"""
+        """MUST: a missed rounding shows up as a **better** PSNR — the check is the only way to
+        detect it."""
         torch.manual_seed(17)
         model = TinyCalibDit()
         rig = _calib_rig(model)
@@ -577,7 +609,8 @@ class TestCalibrationRun:
             )
 
 
-#: 校正列の対象素性（`run_w4_screen` が JSON へ載せる形の代役）。
+#: The target properties of the calibration column (a stand-in for what `run_w4_screen` writes
+#: into the JSON).
 CALIB_META = {
     "name": mq.CALIB_TARGET,
     "stages": 28,
@@ -590,7 +623,8 @@ CALIB_META = {
 
 class TestCalibReport:
     def test_the_calibrated_target_set_is_spelled_out(self):
-        """MUST: 4 方式と対象集合が違うことを表に明記（bpw も品質も直接は比較できない）。"""
+        """MUST: the table states that the target set differs from the 4 methods' (neither bpw nor
+        quality can be compared directly)."""
         report = mq.w4_report_markdown(_payload(calibTargets=CALIB_META))
 
         assert mq.CALIB_TARGET in report
@@ -601,12 +635,14 @@ class TestCalibReport:
 
 
 def _stub_run() -> mq.DitRun:
-    """実重み無しで `main()` を通すための最小 `DitRun`（数値は誰も読まない）。"""
+    """The minimal `DitRun` to get through `main()` without real weights (nobody reads the
+    numbers)."""
     return mq.DitRun(latents={}, linear_stats={}, attn_stats={}, diagnostics={}, attention_nodes=[])
 
 
 def _stub_the_measurement(monkeypatch: pytest.MonkeyPatch, *, failed: list[str]) -> None:
-    """`main()` の実測段を全て差し替え、集計だけを与えられた判定に固定する。"""
+    """Replace every measurement step of `main()` and fix only the summary to the given
+    verdicts."""
     monkeypatch.setattr(mq, "run_dit", lambda _args: _stub_run())
     monkeypatch.setattr(mq, "write_layer_csv", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mq, "decode_all", lambda *_args, **_kwargs: {})
@@ -617,7 +653,7 @@ def _stub_the_measurement(monkeypatch: pytest.MonkeyPatch, *, failed: list[str])
         lambda *_args, **_kwargs: {
             "pt": {},
             "configs": {},
-            "gates": {label: "… → NG" for label in failed} or {"どれか": "OK"},
+            "gates": {label: "… → NG" for label in failed} or {"any": "OK"},
             "failed": failed,
             "inject": None,
         },
@@ -626,10 +662,11 @@ def _stub_the_measurement(monkeypatch: pytest.MonkeyPatch, *, failed: list[str])
 
 
 class TestTheQualityGateReachesTheExitCode:
-    """ADR 0019 の品質ゲート①を埋める台本なので、赤は印字だけで終わらない。
+    """This script fills quality gate (1) of ADR 0019, so red does not end with just a printout.
 
-    `--w4-screen` 経路（`main_w4`）は最初から `AssertionError` を投げる — 同じ台本の 2 経路で
-    強さが割れていると、自動実行では 10 構成側の赤だけが見落とされる。
+    The `--w4-screen` path (`main_w4`) has raised `AssertionError` from the start — if the two
+    paths of the same script differed in strength, an automated run would miss only the red of
+    the 10-configuration side.
     """
 
     def test_a_red_gate_ends_the_run_with_an_error(
@@ -646,7 +683,8 @@ class TestTheQualityGateReachesTheExitCode:
     def test_an_injected_failure_is_allowed_to_be_red(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`--inject` は検出力の実証で、赤にすること自体が目的の経路（塞がない）。"""
+        """`--inject` demonstrates the detection power; being red is the very purpose of this path
+        (not blocked)."""
         _stub_the_measurement(monkeypatch, failed=["`w8a8` の SDPA 発火計数"])
         monkeypatch.setattr(
             "sys.argv",

@@ -1,72 +1,81 @@
-"""SBV2 音響チェーンを IR v2 の容器（`krm`）+ golden io へ書き出す台本（ADR 0013 の emit
-ターゲット）。
+"""Script that writes the SBV2 acoustic chain to IR v2 containers (`krm`) + golden io (the emit
+targets of ADR 0013).
 
-ターゲットは 5 本（ADR 0013 の全量）:
+There are 5 targets (all of ADR 0013):
 
-- **`dp`**（M1-P3 波 1）— DurationPredictor 単体。パッチ層も語彙拡張も要らず、「実重み →
-  export → 実 GPU E2E」の貫通を先に取るための足場。
-- **`front`**（波 6）— enc_p + dp + sdp(reverse) の融合 1 グラフ。動的 `P`（音素数）で、
-  `sbv2.patch` のパッチ層（spline 分岐フリー化 / 相対位置注意の gather 化 /
-  FFN の pad 畳み込み）を当てて初めて export できる。
-- **`flow`**（波 7）— TransformerCouplingBlock の reverse。動的 `T`（フレーム数）で、相対
-  位置注意の `(T,T)` 表は**グラフ入力**（焼き込みは 134MB — ADR 0013）。
-- **`dec`**（波 7）— HiFi-GAN Generator。パッチ不要で、前処理は `remove_weight_norm` のみ。
-- **`voice`**（波 7）— flow + dec の融合 1 グラフ。**この E2E が緑になった時点で SBV2 の
-  全チェーンが成立する**。
+- **`dp`** (M1-P3 wave 1) — DurationPredictor alone. It needs neither the patch layer nor
+  vocabulary growth; a scaffold for getting "real weights → export → real-GPU E2E" through end to
+  end first.
+- **`front`** (wave 6) — enc_p + dp + sdp(reverse) fused into one graph. Dynamic `P` (phoneme
+  count); it can be exported only with the patch layer of `sbv2.patch` applied (branch-free spline
+  / gather-based relative-position attention / folding of the FFN pad).
+- **`flow`** (wave 7) — the reverse of TransformerCouplingBlock. Dynamic `T` (frame count); the
+  `(T,T)` tables of the relative-position attention are **graph inputs** (baking them in would be
+  134MB — ADR 0013).
+- **`dec`** (wave 7) — HiFi-GAN Generator. No patches; the only preprocessing is
+  `remove_weight_norm`.
+- **`voice`** (wave 7) — flow + dec fused into one graph. **Once this E2E is green, the whole SBV2
+  chain holds**.
 
-    uv sync --all-groups                                    # tools/export-recipes/ で 1 回
-    uv run --group sbv2 python -m sbv2.export               # 全ターゲットを emit
+    uv sync --all-groups                                    # once, in tools/export-recipes/
+    uv run --group sbv2 python -m sbv2.export               # emit every target
     uv run --group sbv2 python -m sbv2.export --target front
     uv run --group sbv2 python -m sbv2.export --dtype f16   # → outputs/series/sbv2-F1-f16/
     uv run --group sbv2 python -m sbv2.export --dtype i8    # → outputs/series/sbv2-F1-i8/
     uv run --group sbv2 python -m sbv2.export --dtype i4 --target front --target voice
-    uv run --group sbv2 python -m sbv2.export --verify flow  # 参照実装との eager 同値検証
+    uv run --group sbv2 python -m sbv2.export --verify flow  # eager equivalence vs the reference
 
-NOTE: sync が `--all-groups` なのは workspace の venv が 1 つだからで（`tools/pyproject.toml`）、
-`--group sbv2` だけを sync すると他 family のグループが**外れる**（実測）。
+NOTE: the sync uses `--all-groups` because the workspace has one venv (`tools/pyproject.toml`);
+syncing only `--group sbv2` **drops** the groups of the other families (measured).
 
-MUST: `--verify` と emit は**同一プロセスで併用できない**（CLI が機械的に拒否する）。
-パッチはクラス属性のプロセス全域差し替えなので、emit 側が先にパッチを当てると「パッチ前の
-参照」が採れなくなり、同値検証が恒真化して偽 PASS する（ADR 0013）。検証自体も
-「全ケースの参照値を確定 → 変更 → 比較」の順序を守り、順序が破れていれば参照採取の直前で
-落とす — front / flow / voice は `sbv2.patch.patches_applied()`、**dec は逆向き**に
-「weight_norm 由来のパラメータがまだ残っていること」を見る（汚染源が remove だから）。
+MUST: `--verify` and emit **cannot be combined in one process** (the CLI rejects it
+mechanically). The patches replace class attributes process-wide, so if the emit side patched
+first, "the reference before patching" could no longer be taken, and the equivalence check would
+become vacuous and give a false PASS (ADR 0013). The verification itself also keeps the order
+"settle the references of every case → change → compare" and fails right before taking a
+reference if the order is broken — front / flow / voice look at `sbv2.patch.patches_applied()`,
+while **dec looks the other way**, at "parameters derived from weight_norm are still there" (the
+source of contamination is remove).
 
-MUST: `--verify` は**ターゲットを 1 つだけ取る**（`--verify front` / `--verify dec` …）。
-複数の検証を並べられる形にすると「MHA パッチ系どうしは排他 / dec の remove は voice と
-だけ排他 / 丸めは全てと排他」という対ごとの排他表を CLI が持つことになり、表の穴が
-そのまま偽 PASS になる。**1 プロセス 1 検証**なら汚染の組み合わせが構造的に存在しない。
+MUST: `--verify` **takes exactly one target** (`--verify front` / `--verify dec` …). Allowing
+several verifications in a row would make the CLI hold a pairwise exclusion table ("the MHA patches
+exclude each other / dec's remove excludes only voice / rounding excludes everything"), and any
+hole in the table would turn straight into a false PASS. With **one verification per process**,
+contaminating combinations do not exist structurally.
 
-重みは配布物に含まれない（`inputs/` は `.gitignore` 済み）。入手手順は README を参照。
+The weights are not part of what is shipped (`inputs/` is in `.gitignore`). See the README for how
+to get them.
 
-出力レイアウト（Deno 側 `packages/runtime/tests/e2e_sbv2_test.ts` が列挙する）。系列名は
-`--model-dir` のディレクトリ名から導く（既定の `inputs/sbv2/F1/` なら `sbv2-F1`）:
+Output layout (enumerated by the Deno side, `packages/runtime/tests/e2e_sbv2_test.ts`). The series
+name is derived from the directory name of `--model-dir` (`sbv2-F1` for the default
+`inputs/sbv2/F1/`):
 
-    outputs/series/sbv2-F1/<target>/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/sbv2-F1/<target>/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/sbv2-F1/<target>/model.krm             weights, constants + 2 descriptors
+    outputs/series/sbv2-F1/<target>/io.<case>.safetensors inputs + torch CPU expected outputs
 
-io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` /
-`output.<位置>`）。
+The tensor key convention of io is the same as for the tiny goldens / DeBERTa
+(`input.<graph input name>` / `output.<position>`).
 
-## 格納 dtype の系列（ADR 0018 / 0019 / 0069）
+## Series per storage dtype (ADR 0018 / 0019 / 0069)
 
-`--dtype f16` / `--dtype i8` / `--dtype i4` はそれぞれ**別系列**（`sbv2-F1-f16/` /
-`sbv2-F1-i8/` / `sbv2-F1-i4/`）へ書く — f32 系列と同居させると既存 E2E の網（f32 の
-tolerance）が黙って別の資産に掛かる。丸め（fake-quant）は共有の
-`quantize.round_weights_to_f16` / `quantize.fake_quant_int8` / `quantize.fake_quant_int4` を
-**remove_weight_norm / パッチ適用の後・参照と golden の採取の前**に当てる
-（`_fake_quant` の順序 MUST）。
+`--dtype f16` / `--dtype i8` / `--dtype i4` each write to a **separate series** (`sbv2-F1-f16/` /
+`sbv2-F1-i8/` / `sbv2-F1-i4/`) — sharing a directory with the f32 series would silently put the
+existing E2E net (the f32 tolerance) on different assets. Rounding (fake-quant) applies the shared
+`quantize.round_weights_to_f16` / `quantize.fake_quant_int8` / `quantize.fake_quant_int4`
+**after remove_weight_norm / patching and before taking the references and goldens** (the order
+MUST of `_fake_quant`).
 
-`--dtype i4` だけは**混成**（適格な `nn.Linear` / `nn.Conv1d` = i4 group32・残りは i8
-per-channel）で、配布形では `i4` quant の `front` / `voice` 席に入る（`sbv2/distribution.py`）。
-i4 の実行経路は linear / embedding / conv1d の重みスロット限定（ADR 0069 決定 5 とその追補）で、
-`nn.ConvTranspose1d` と depthwise conv（`groups > 1`）と行長が group32 で割り切れない重みは
-i8 側へ落ちるので、系列としては混成にしかならない。
+Only `--dtype i4` is **mixed** (eligible `nn.Linear` / `nn.Conv1d` = i4 group32, the rest i8
+per-channel), and in the distribution it goes into the `front` / `voice` seats of the `i4` quant
+(`sbv2/distribution.py`). The i4 execution path is limited to the weight slots of linear /
+embedding / conv1d (ADR 0069 decision 5 and its addendum), and `nn.ConvTranspose1d`, depthwise
+convs (`groups > 1`) and weights whose row length is not divisible by group32 drop to the i8 side,
+so the series can only be mixed.
 
-MUST: `--dtype` は **emit 専用**（`--sym-max` と同じ扱い）。`--verify` は格納形式を見ない
-eager 比較で、しかも dec / voice では丸めを remove の**後**にしか当てられないのに参照は
-remove の**前**に採るため、併用すると「丸めた側 vs 丸めていない側」の比較になって
-`bit_exact` の主張が壊れる。CLI が機械的に拒否する。
+MUST: `--dtype` is **emit-only** (treated like `--sym-max`). `--verify` is an eager comparison that
+ignores the storage format, and for dec / voice rounding can only be applied **after** remove while
+the reference is taken **before** remove, so combining them would compare "rounded vs unrounded"
+and break the `bit_exact` claim. The CLI rejects it mechanically.
 """
 
 from __future__ import annotations
@@ -102,10 +111,12 @@ from karume.quantize import (
     round_weights_to_f16,
 )
 
-# 出所記録のファイル名と**配布形の部品名**は読み手側（配布の組み立て）が持つ — 綴りを
-# 2 箇所に置くと、片方だけ動いた日に「書いたのに読まれない記録」や「ランタイムが引けない
-# グラフ名」が黙って生える（anima の `CALIB_PROVENANCE_FILE` と同じ向き）。声のファミリーの
-# 許可リストも同じ側に置く — 組み立てがリポの境界（Pipeline の席）に同じ表を使うため。
+# The provenance record's file name and **the component names of the distribution** are owned by
+# the reading side (the distribution assembly) — with the spelling in 2 places, the day only one
+# moves silently produces "a record written but never read" or "a graph name the runtime cannot
+# find" (the same direction as anima's `CALIB_PROVENANCE_FILE`). The allow-list of voice families
+# lives on the same side — the assembly uses the same table for the repository boundary (the
+# Pipeline's field).
 from sbv2.distribution import (
     EXPORT_PROVENANCE_FILE,
     SBV2_FAMILY_DIRS,
@@ -116,53 +127,56 @@ from sbv2.distribution import (
 from . import patch
 from .card import SBV2_CARD_PROFILES
 
-#: 実重みの置き場。リポジトリ管理外（`.gitignore` の `inputs/`）で、手で配置する。
+#: Where the real weights live. Outside version control (`inputs/` in `.gitignore`), placed by hand.
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "F1"
 
-#: 書き出せる格納 dtype。`i8` は **2026-08-04 のユーザー裁定**で足した（ADR 0027 決定 1 の
-#: 「i8 は足さない」の上書き — 記録は SBV2 w8 系列の ADR）。**w8a8 の受け皿ではない**点は
-#: 変わらない（5 ターゲットとも conv1d が 86〜90% を占め linear は実質 0 GFLOP —
-#: ADR 0025 決定⑤）。狙いは資産サイズとロード時間で、実行経路は ADR 0019 の w8a32
-#: （i8 格納・計算は f32）そのもの。
-#: `i4` は**混成**の系列名で、実体は「適格な `nn.Linear` / `nn.Conv1d` = i4 group32・それ以外
-#: （非適格の linear / conv1d と `ConvTranspose1d` / embedding）= 従来どおり i8 per-channel」
-#: （{@link BASE_WEIGHT_DTYPES} / {@link I4_MODULE_TYPES} / {@link _i4_module_names}）。
-#: 適格外が必ず残る（`dec` の `ups` は転置レイアウト・`dp` の `convs_sep` は depthwise）ので、
-#: 系列としては混成にしかなり得ない。net_g の linear は 6 本しかない（front 2 / voice 4）が、
-#: **conv1d は 5 ターゲットとも本体**（ADR 0025 決定⑤）なので、conv1d の追補（波 J-5b）で
-#: 初めて net_g 自身の配布サイズが動く。
+#: The storage dtypes that can be written. `i8` was added by **the maintainer ruling of
+#: 2026-08-04** (overriding "no i8" of ADR 0027 decision 1 — recorded in the ADR of the SBV2 w8
+#: series). It is still **not meant for w8a8** (in all 5 targets conv1d takes 86–90% and linear is
+#: practically 0 GFLOP — ADR 0025 decision ⑤). The aim is asset size and load time; the execution
+#: path is exactly the w8a32 of ADR 0019 (i8 storage, f32 compute).
+#: `i4` is the series name of a **mix**: in fact "eligible `nn.Linear` / `nn.Conv1d` = i4 group32,
+#: everything else (ineligible linear / conv1d and `ConvTranspose1d` / embedding) = i8 per-channel
+#: as before" ({@link BASE_WEIGHT_DTYPES} / {@link I4_MODULE_TYPES} / {@link _i4_module_names}).
+#: Ineligible weights always remain (`ups` of `dec` has a transposed layout, `convs_sep` of `dp` is
+#: depthwise), so the series can only ever be mixed. net_g has only 6 linears (front 2 / voice 4),
+#: but **conv1d is the bulk of all 5 targets** (ADR 0025 decision ⑤), so only the conv1d addendum
+#: (wave J-5b) moves the distribution size of net_g itself.
 #:
-#: MUST: i4 の適格を 1 本も持たないターゲットに `i4` を渡すと `fake_quant_int4` が
-#: 「対象 0 本」で fail loudly する（沈黙 i8 系列を作らないための門）。
+#: MUST: passing `i4` for a target with no i4-eligible weight makes `fake_quant_int4` fail loudly
+#: with "0 targets" (the check that keeps a silent i8 series from being produced).
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 
-#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な重みは
-#: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の i4 混成系列と同形）。
+#: Series name → the **default** storage dtype passed to `export_to_file`. Only the i4 series
+#: defaults to i8, and the eligible weights are switched to i4 one by one through
+#: `weight_dtype_overrides` (the same form as deberta's i4 mixed series).
 BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8", "i4": "i8"}
 
-#: i4 group32 で丸めるモジュール型（emit の `I4_WEIGHT_OPS` = linear / embedding / conv1d の
-#: モジュール側の綴り）。**embedding は入れない** — net_g の語彙表（`enc_p.emb`）の i4 化は
-#: 別の判断で、波 J-5b の射程外（`nn.ConvTranspose1d` は `nn.Conv1d` の派生ではないので、
-#: `dec` の `ups` は型で自然に落ちる）。実際の適格はこの型に `groups == 1` と行長の整除を
-#: 掛けた積（{@link _i4_module_names}）。
+#: The module types rounded to i4 group32 (the module-side spelling of emit's `I4_WEIGHT_OPS` =
+#: linear / embedding / conv1d). **embedding is not included** — i4 for net_g's vocabulary table
+#: (`enc_p.emb`) is a separate decision, outside the scope of wave J-5b (`nn.ConvTranspose1d` does
+#: not derive from `nn.Conv1d`, so `ups` of `dec` drops out naturally by type). The actual
+#: eligibility is this type combined with `groups == 1` and row-length divisibility
+#: ({@link _i4_module_names}).
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Conv1d)
 
 
 class Sbv2FamilyError(ValueError):
-    """`--model-dir` の綴りから声のファミリー（= 出所とライセンス）が決まらない。
+    """The spelling of `--model-dir` does not determine a voice family (= source and license).
 
-    リポの流儀は `Error` サブクラス（`DistError` / `RopeSpecError` / `ContainerReadError`）。
-    素の `ValueError` だと、呼び手の `except` がこの**法的事実の門**と「引数が変」一般を
-    区別できない — 握り潰しの経路が生えた日に、黙って既定のライセンスを名乗る配布形へ
-    戻る（{@link SBV2_FAMILY_DIRS} の MUST が防いでいるもの）。
+    The repository's convention is `Error` subclasses (`DistError` / `RopeSpecError` /
+    `ContainerReadError`). With a plain `ValueError`, a caller's `except` could not tell this
+    **legal-fact check** apart from "a bad argument" in general — on the day a swallowing path
+    appears, it would silently go back to a distribution that declares the default license (what
+    the MUST of {@link SBV2_FAMILY_DIRS} prevents).
     """
 
 
 def sbv2_family(model_dir: Path) -> str:
-    """`--model-dir` のディレクトリ名 → 声のファミリー（`fn` / `jvnv`）。
+    """The directory name of `--model-dir` → voice family (`fn` / `jvnv`).
 
-    判定は {@link SBV2_FAMILY_DIRS} の許可リストだけで、どれにも当たらない名前は
-    **fail loudly**（同定数の MUST — {@link Sbv2FamilyError}）。
+    The decision uses only the allow-list of {@link SBV2_FAMILY_DIRS}; a name that matches none
+    **fails loudly** (the MUST of that constant — {@link Sbv2FamilyError}).
     """
     name = model_dir.name
     for family, prefixes in SBV2_FAMILY_DIRS.items():
@@ -179,42 +193,45 @@ def sbv2_family(model_dir: Path) -> str:
 
 
 def sbv2_provenance(model_dir: Path) -> Provenance:
-    """系列の容器へ焼く出所（container-v1 §2.3）。
+    """The provenance baked into the series' containers (container-v1 §2.3).
 
-    SBV2 は声のファミリーごとに**別の法的事実**を持つ（`sbv2.card.SBV2_CARD_PROFILES` —
-    FN 系は `other` + Booth の頒布条件、jvnv 系は JVNV コーパス由来の `cc-by-sa-4.0`）。
-    識別子の正本はカード側なので、ここは**どちらのファミリーか**だけを決める
-    （{@link sbv2_family}）。
+    SBV2 has **a different legal fact** per voice family (`sbv2.card.SBV2_CARD_PROFILES` — FN is
+    `other` + Booth's distribution terms, jvnv is `cc-by-sa-4.0` from the JVNV corpus). The source
+    of truth for the identifier is the card side, so this only decides **which family it is**
+    ({@link sbv2_family}).
     """
     profile = SBV2_CARD_PROFILES[sbv2_family(model_dir)]
     return Provenance(
         license=profile.metadata.license,
-        # 上流 checkpoint の revision（commit SHA）。config の `version`（`source_version`）は
-        # SBV2 の世代で checkpoint を識別しないので、この席へは入れない（container-v1 §2.3）。
+        # The revision (commit SHA) of the upstream checkpoint. The config's `version`
+        # (`source_version`) is the SBV2 generation and does not identify a checkpoint, so it does
+        # not go into this field (container-v1 §2.3).
         upstream_revision=profile.source_revision,
     )
 
 
 def default_out_root(model_dir: Path, dtype: str) -> Path:
-    """生成物の既定の置き場（`outputs/series/sbv2-<実重みのディレクトリ名>{,-f16,-i8,-i4}/`）。
+    """The default location of the output (`outputs/series/sbv2-<directory name of the real
+    weights>{,-f16,-i8,-i4}/`).
 
-    ターゲット名（`dp` / `front`）のサブディレクトリは呼び出し側が 1 段掘る。
+    The caller adds the subdirectory of the target name (`dp` / `front`).
 
-    話者名（`--model-dir` のディレクトリ名）を系列の綴りへ焼くのは、将来の多話者で系列
-    どうしを衝突させないため — 綴りを `sbv2/` で共有すると、別の話者を書き出した瞬間に
-    先の資産が黙って上書きされる。
+    The speaker name (the directory name of `--model-dir`) is baked into the series spelling so
+    that series do not collide once there are several speakers — sharing the spelling `sbv2/`
+    would silently overwrite the earlier assets the moment another speaker is written.
 
-    MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0019）— 同居させると f32 系列の網（実測から
-    導いたターゲット別 tolerance）が圧縮資産へ黙って掛かる。
+    MUST: a separate directory per dtype (ADR 0018 / 0019) — sharing one would silently put the net
+    of the f32 series (per-target tolerances derived from measurements) on compressed assets.
     """
     suffix = "" if dtype == "f32" else f"-{dtype}"
     return SERIES_ROOT / f"sbv2-{model_dir.name}{suffix}"
 
 
-#: ターゲット名（系列のサブディレクトリ名でもある）。`front` / `voice` は**配布形の部品名**
-#: でもあるので、綴りの正本は torch を要らない側（`sbv2/distribution.py`）から引く — 容器の
-#: グラフ名は manifest の weights のキーと一致すること MUST（container-v1 §2.1）。`dp` /
-#: `flow` / `dec` は golden 検証専用で配布形に載らないので、ここが唯一の綴り。
+#: Target names (also the subdirectory names of the series). `front` / `voice` are also **the
+#: component names of the distribution**, so their spelling's source of truth comes from the side
+#: that needs no torch (`sbv2/distribution.py`) — the container's graph name MUST match the key in
+#: the manifest's weights (container-v1 §2.1). `dp` / `flow` / `dec` are for golden verification
+#: only and are not in the distribution, so this is their only spelling.
 TARGET_DP = "dp"
 TARGET_FRONT = SBV2_FRONT_ROLE
 TARGET_FLOW = "flow"
@@ -230,17 +247,19 @@ IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: 記号次元 P（音素数）の上限 — **front 系（dp / front）の既定**。
+#: Limit of the symbolic dimension P (phoneme count) — **the default for the front group (dp /
+#: front)**.
 SYM_MAX = 512
 
-#: 記号次元 T（フレーム数）の上限 — **flow 系（flow / dec / voice）の既定**。
+#: Limit of the symbolic dimension T (frame count) — **the default for the flow group (flow / dec /
+#: voice)**.
 FLOW_SYM_MAX = 4096
 
-#: ターゲット → 記号次元の上限。ADR 0013 の「sym_max はターゲット別既定」そのもので、
-#: 取り違えは沈黙する（front を 4096 で出すと相対位置表の焼き込みが 134MB になり、flow を
-#: 512 で出すと 512 フレーム = 約 6 秒より長い発話が Tmax 超過で落ちる）。**CLI の
-#: `--sym-max` は既定 None** で、逸脱するときだけ明示させる（しかも単一ターゲット限定 —
-#: 複数ターゲットに 1 つの値を配ると必ずどちらかが誤値になる）。
+#: Target → symbolic-dimension limit. Exactly ADR 0013's "sym_max defaults per target"; a mix-up is
+#: silent (emitting front at 4096 bakes 134MB of relative-position tables, emitting flow at 512
+#: makes utterances longer than 512 frames ≈ 6 seconds fail with Tmax exceeded). **The CLI's
+#: `--sym-max` defaults to None** and must be given explicitly only to deviate (and only for a
+#: single target — one value handed to several targets is always wrong for one of them).
 TARGET_SYM_MAX: dict[str, int] = {
     TARGET_DP: SYM_MAX,
     TARGET_FRONT: SYM_MAX,
@@ -249,41 +268,50 @@ TARGET_SYM_MAX: dict[str, int] = {
     TARGET_VOICE: FLOW_SYM_MAX,
 }
 
-#: 相対位置注意の窓幅。gather 化パッチはこの幅の埋め込み（2w+1 = 9 行）を前提に添字表を
-#: 組み、エクスポータの定数畳み込みが Pmax で焼き込む。
+#: Window size of the relative-position attention. The gather patch builds its index tables
+#: assuming embeddings of this width (2w+1 = 9 rows), and the exporter's constant folding bakes them
+#: in at Pmax.
 EXPECTED_WINDOW_SIZE = 4
 
-#: 話者埋め込みを引く話者 ID。実重みは 1 話者モデル（config の `n_speakers`）。
+#: The speaker ID whose embedding is taken. The real weights are a single-speaker model
+#: (`n_speakers` of the config).
 SPEAKER_ID = 0
 
-#: 使うスタイルベクトルの行（`style_vectors.npy` は [スタイル数, 256]）。0 は平均スタイル。
+#: The row of the style vector used (`style_vectors.npy` is [number of styles, 256]). 0 is the
+#: average style.
 STYLE_ID = 0
 
-#: 乱数はここから派生させる（グローバル seed に依存しない — 再生成でバイト一致させる）。
+#: Random numbers derive from this (independent of the global seed — regeneration is
+#: byte-identical).
 SEED = 20260802
 
-#: sdp reverse のノイズ倍率。**グラフには焼かない**（実行時ノブ — ADR 0013）: golden の
-#: `z_noise` は「乗算済みの列」で、ランタイム側は倍率を知らないまま同じ数を再現する。
-#: 参照実装 `StochasticDurationPredictor.forward(reverse=True)` の既定と同じ 0.8 を使う。
+#: Noise scale of the sdp reverse. **Not baked into the graph** (a runtime knob — ADR 0013): the
+#: golden `z_noise` is "the already-multiplied sequence", and the runtime reproduces the same
+#: numbers without knowing the scale. Uses 0.8, the same as the default of the reference
+#: implementation `StochasticDurationPredictor.forward(reverse=True)`.
 NOISE_SCALE = 0.8
 
-#: golden ケース `(名前, 長さ, 末尾パディング長)`。**全ターゲットで共通**（Deno 側の
-#: `EXPECTED_CASES` が 1 本の表でターゲット横断に等値検査する）。長さの意味はターゲットで
-#: 変わる — front 系は P（音素数）、flow 系は T（フレーム数）。
+#: Golden cases `(name, length, trailing padding)`. **Shared by every target** (the Deno-side
+#: `EXPECTED_CASES` checks them for equality across targets with one table). What the length
+#: means depends on the target — P (phoneme count) for the front group, T (frame count) for the
+#: flow group.
 #:
-#: 長さは下限（2 — torch.export の 0/1 特殊化を避ける最小値）から front の宣言上限
-#: SYM_MAX まで散らす。`padded` は **マスクの末尾に 0 を置く唯一のケース**で、マスク乗算が
-#: 効いていることを踏む（外れるとパディング列の出力が 0 でなくなる）。
+#: The lengths are spread from the lower bound (2 — the smallest value that avoids the 0/1
+#: specialization of torch.export) up to front's declared limit SYM_MAX. `padded` is **the only case
+#: with 0s at the end of the mask**, exercising that the mask multiplication takes effect (if it
+#: does not, the outputs in the padding columns are no longer 0).
 #:
-#: NOTE: flow 系の宣言上限 4096 を踏む golden は**置かない**。相対位置表と注意スコアが
-#: O(T²) なので T=4096 では表だけで io 1 ケース 134MB、dec の出力も 512·4096 = 210 万点に
-#: なり、golden 資産としても実 GPU テストとしても割に合わない。上限近傍の挙動は
-#: 「宣言上限に依存した実装（プランを Tmax で組む等）が無いこと」を長さの散らばりで踏む
-#: 側に寄せる（P/T が 2 → 512 で 256 倍変わる 5 ケース）。
-#: **grid-stride の縮退耐性はこの表では踏めない** — 必要 workgroup 数が 1 次元の dispatch 上限
-#: （65535）を超えて初めて発動する経路で、T=512 では届かない（pad は T ≳ 2900 で超える）。
-#: 担保は Deno 側の縮退ハーネス `packages/runtime/tests/gpu_gridstride_test.ts`
-#: （dispatch 数を意図的に絞って全カーネル族に当てる）が持つ。
+#: NOTE: there is **no** golden at the flow group's declared limit 4096. The relative-position
+#: tables and attention scores are O(T²), so at T=4096 the tables alone make one io case 134MB, and
+#: dec's output is 512·4096 = 2.1 million points — not worth it as a golden asset or as a real-GPU
+#: test. Behaviour near the limit is covered instead by exercising "no implementation depends on the
+#: declared limit (such as building a plan at Tmax)" through the spread of lengths (5 cases where
+#: P/T varies 256× from 2 → 512).
+#: **This table cannot exercise grid-stride degradation** — that path triggers only when the
+#: required workgroup count exceeds the 1-D dispatch limit (65535), which T=512 does not reach (pad
+#: exceeds it at T ≳ 2900). It is covered by the Deno-side degradation harness
+#: `packages/runtime/tests/gpu_gridstride_test.ts` (which deliberately limits the dispatch count and
+#: applies it to every kernel family).
 GOLDEN_CASES: tuple[tuple[str, int, int], ...] = (
     ("p2", 2, 0),
     ("p37", 37, 0),
@@ -292,16 +320,20 @@ GOLDEN_CASES: tuple[tuple[str, int, int], ...] = (
     ("padded", 16, 5),
 )
 
-#: `Sbv2Front.forward` の引数順（= IR の入力宣言順）。dynamic_shapes は位置で対応するので、
-#: 例示入力の並べ方をここ 1 箇所に固定する（並べ替えると動的軸が別の入力に付く）。
+#: The argument order of `Sbv2Front.forward` (= the declaration order of the IR inputs).
+#: dynamic_shapes correspond by position, so the order of the example inputs is fixed in this one
+#: place (reordering would attach the dynamic axes to other inputs).
 FRONT_INPUT_ORDER = ("x", "x_mask", "tone", "language", "bert", "style_vec", "g", "z_noise")
 
-#: front の出力名（IR の `output.<位置>` に対応。同値検証のレポート用）。
+#: front's output names (corresponding to `output.<position>` of the IR; for the equivalence
+#: report).
 FRONT_OUTPUT_NAMES = ("logw_sdp", "logw_dp", "m_p", "logs_p")
 
-#: パッチ同値検証のケース `(P, 末尾パディング長)`。golden より広く採る — 同値性は
-#: golden の 5 点だけでなく **P の連続域**で成り立つべき性質で、特に `P ≤ window_size`
-#: （相対位置埋め込みのスライス幅が P で変わる領域）と、その境界前後を踏む必要がある。
+#: Cases of the patch equivalence check `(P, trailing padding)`. Taken more widely than the
+#: goldens — equivalence is a property that should hold over **the continuous range of P**, not
+#: just at the 5 golden points, and in particular it must exercise `P ≤ window_size` (the range
+#: where the slice width of the relative-position embedding changes with P) and both sides of that
+#: boundary.
 VERIFY_CASES: tuple[tuple[int, int], ...] = (
     (2, 0),
     (4, 0),
@@ -314,15 +346,17 @@ VERIFY_CASES: tuple[tuple[int, int], ...] = (
     (SYM_MAX, 0),
 )
 
-#: `FlowReverse` / `Sbv2Voice` / `dec` の入力順（= IR の入力宣言順）。front と同じく
-#: dynamic_shapes は位置で対応するので、並べ方をここ 1 箇所に固定する。
+#: The input order of `FlowReverse` / `Sbv2Voice` / `dec` (= the declaration order of the IR
+#: inputs). As for front, dynamic_shapes correspond by position, so the order is fixed in this one
+#: place.
 FLOW_INPUT_ORDER = ("z_p", "y_mask", "g", "idx_k", "valid")
 DEC_INPUT_ORDER = ("x", "g")
 
-#: flow 系の同値検証ケース `(T, 末尾パディング長)`。golden より広く採る（同値性は golden の
-#: 5 点ではなく T の連続域で成り立つべき性質）。**窓幅 4 の前後**（T ≤ w / T = w+1 / T > w）
-#: を踏む — 相対位置表は `clamp(rel+w, 0, 2w)` なので小さい T では clamp が全域に効き、
-#: 大きい T とは別の分岐を通る。
+#: Equivalence-check cases of the flow group `(T, trailing padding)`. Taken more widely than the
+#: goldens (equivalence should hold over the continuous range of T, not at the 5 golden points). It
+#: exercises **both sides of the window size 4** (T ≤ w / T = w+1 / T > w) — the relative-position
+#: table is `clamp(rel+w, 0, 2w)`, so for small T the clamp applies everywhere and takes a different
+#: branch from large T.
 FLOW_VERIFY_CASES: tuple[tuple[int, int], ...] = (
     (2, 0),
     (4, 0),
@@ -338,12 +372,12 @@ FLOW_VERIFY_CASES: tuple[tuple[int, int], ...] = (
 
 
 class DurationPredictorGraph(nn.Module):
-    """dp を「g 必須・引数名が IR の入力名」の形に固定する export 用ラッパ。
+    """Export wrapper that fixes dp to the form "g required, argument names = IR input names".
 
-    素の `DurationPredictor.forward` は `g` が `Optional` で `g is not None` の分岐を
-    持つ。ラッパで必須にして分岐を消し、入力名を recon の呼び名（h / x_mask / g）に
-    揃える — IR の入力名は forward の引数名がそのまま出るので、ここが golden の
-    `input.<name>` キーの正本になる。
+    The plain `DurationPredictor.forward` has `g` as `Optional` with a `g is not None` branch. The
+    wrapper makes it required to remove the branch and aligns the input names with the names used
+    in the recon (h / x_mask / g) — the IR input names are the forward's argument names as is, so
+    this is the source of truth for the golden's `input.<name>` keys.
     """
 
     def __init__(self, dp: nn.Module) -> None:
@@ -355,56 +389,60 @@ class DurationPredictorGraph(nn.Module):
 
 
 def load_net_g(model_dir: Path) -> tuple[nn.Module, Any]:
-    """`inputs/sbv2/<名前>/` に配置された実重みから net_g を組み立て、eval で返す。
+    """Builds net_g from the real weights placed in `inputs/sbv2/<name>/` and returns it in eval
+    mode.
 
-    ckpt は `*.safetensors` の一意存在を要求する（複数あると「どれを読んだか」が
-    黙って変わる）。
+    Requires exactly one `*.safetensors` ckpt (with several, "which one was read" would change
+    silently).
     """
     from style_bert_vits2.models.hyper_parameters import HyperParameters
     from style_bert_vits2.models.infer import get_net_g
 
-    # 非再帰の glob。系列は `outputs/series/` 側なので、ここには入力素材しか並ばない。
+    # Non-recursive glob. The series live under `outputs/series/`, so only input material is here.
     ckpts = sorted(model_dir.glob("*.safetensors"))
     if len(ckpts) != 1:
         raise FileNotFoundError(
-            f"{model_dir} の ckpt が一意でない（{len(ckpts)} 件: {[p.name for p in ckpts]}）"
+            f"the ckpt in {model_dir} is not unique ({len(ckpts)}: {[p.name for p in ckpts]})"
         )
     config = model_dir / CONFIG_FILE
     if not config.is_file():
-        raise FileNotFoundError(f"{config} が無い（ckpt と同じディレクトリに置く）")
+        raise FileNotFoundError(f"{config} is missing (put it in the same directory as the ckpt)")
 
     hps = HyperParameters.load_from_json(str(config))
     net_g = get_net_g(str(ckpts[0]), hps.version, "cpu", hps)
     net_g.eval()
     _assert_window_size(net_g)
-    # weight_norm が 0 件と実測されている 4 モジュール（recon §3 — 残る 95 件は dec に集中）。
-    # dp だけを見ていると、enc_p / sdp / flow に導出パラメータが復活したモデルを黙って
-    # 書き出す穴が残る。**dec はここに入れない** — 有効な weight_norm を持って出荷される
-    # 側で、除去は `ensure_dec_plain` が export の直前に行う。
+    # The 4 modules measured to have 0 weight_norm instances (recon §3 — the remaining 95 are all
+    # in dec). Looking only at dp would leave a hole that silently writes out a model in which
+    # derived parameters came back to enc_p / sdp / flow. **dec is not included** — it ships with
+    # an active weight_norm, and `ensure_dec_plain` removes it right before export.
     _assert_no_weight_norm(net_g.enc_p, net_g.sdp, net_g.dp, net_g.flow)
     return net_g, hps
 
 
 def _assert_window_size(net_g: nn.Module) -> None:
-    """相対位置注意の窓幅が前提どおり 4 であることを load 時に固定する（ADR 0013）。
+    """Pins at load time that the window size of the relative-position attention is 4, as assumed
+    (ADR 0013).
 
-    gather 化パッチの添字表は `clamp(rel + 4, 0, 8)` を焼き込むので、モデル側の窓幅が
-    違うと**幅の違う埋め込みを gather する**。要素数は合うため shape エラーにならず、
-    黙って誤った埋め込みを読む（沈黙誤値クラス）。しかも golden も同じ誤りで生成される
-    ため数値突合もすり抜ける。ckpt を差し替えた瞬間に落とすのが最小の対処なので、
-    ローダの側に置く。
+    The index tables of the gather patch bake in `clamp(rel + 4, 0, 8)`, so a different window size
+    on the model side would **gather embeddings of a different width**. The element counts match,
+    so there is no shape error and it silently reads the wrong embeddings (the silent-wrong-value
+    class). The goldens are generated with the same error too, so the numeric comparison misses it
+    as well. Failing the moment the ckpt is swapped is the smallest fix, so it sits in the loader.
 
-    MUST: 走査は **net_g 全体**（先頭 1 層ずつではない）。パッチは MultiHeadAttention の
-    クラス属性差し替えで、`FlowReverse` は**全 coupling × 全層**に同じ表を配る構造なので、
-    層ごとに窓幅が違うモデルを先頭層だけで見ると残りの層が黙って別の幅を読む。門の粒度を
-    表の配り方に揃える。
-    MUST: `window_size` を持つモジュールが 1 枚も無ければ落とす（恒真化の門）。属性名が
-    上流で変われば走査は静かに空振りし、以後どんな窓幅でも通る。
+    MUST: the scan covers **all of net_g** (not just the first layer of each). The patch replaces
+    class attributes of MultiHeadAttention, and `FlowReverse` hands the same tables to **every
+    coupling × every layer**, so checking only the first layer of a model whose window size differs
+    per layer would let the other layers silently read another width. The granularity of the check
+    matches how the tables are handed out.
+    MUST: fail if no module has `window_size` at all (the vacuity check). If the attribute name
+    changes upstream, the scan silently finds nothing, and from then on any window size passes.
     """
     found = [
         (name or type(module).__name__, module.window_size)
         for name, module in net_g.named_modules()
-        # 相対位置注意を使わない層は属性ごと None（実測: 窓幅を持つのは attn 層だけ）。
+        # Layers that do not use relative-position attention have the attribute set to None
+        # (measured: only the attn layers have a window size).
         if getattr(module, "window_size", None) is not None
     ]
     if not found:
@@ -422,10 +460,11 @@ def _assert_window_size(net_g: nn.Module) -> None:
 
 
 def _weight_norm_parameters(*modules: nn.Module) -> list[str]:
-    """weight_norm 由来の導出パラメータ（`weight_g` / `weight_v` / parametrizations）の一覧。
+    """The list of derived parameters from weight_norm (`weight_g` / `weight_v` /
+    parametrizations).
 
-    「残っていないこと」と「まだ残っていること」の両方の門がこの 1 本の判定を共有する
-    （判定を 2 箇所に書くと必ず割れ、片方だけ緩い門になる）。
+    The checks for both "none left" and "still there" share this one test (writing the test in 2
+    places always makes them diverge, leaving one check looser).
     """
     return [
         f"{type(module).__name__}.{name}"
@@ -436,24 +475,27 @@ def _weight_norm_parameters(*modules: nn.Module) -> list[str]:
 
 
 def _assert_no_weight_norm(*modules: nn.Module) -> None:
-    """weight_norm 由来の導出パラメータが無いことを固定する。
+    """Pins that there are no derived parameters from weight_norm.
 
-    weight_norm が残っていると `weight` は「実効重みではない」ため、そのまま IR へ
-    書き出すと別のモデルになる。enc_p / sdp / dp は実測 0 件だが、無いことを前提に
-    何もしていない側なので fail loudly で固定する（remove を先に通す順序制約は dec を
-    扱う波で効いてくる）。
+    While weight_norm remains, `weight` is "not the effective weight", so writing it into the IR as
+    is would give a different model. enc_p / sdp / dp measure 0 instances, but they are the side
+    that does nothing on the assumption that there are none, so it is pinned with fail loudly (the
+    ordering constraint of running remove first matters in the wave that handles dec).
     """
     derived = _weight_norm_parameters(*modules)
     if derived:
-        raise ValueError(f"weight_norm 由来のパラメータが残っている: {derived}")
+        raise ValueError(f"parameters derived from weight_norm remain: {derived}")
 
 
 def _assert_patches_not_applied(where: str) -> None:
-    """参照採取がパッチ適用**前**であることを固定する（ADR 0013 の順序制約の門）。
+    """Pins that references are taken **before** patching (the check of ADR 0013's ordering
+    constraint).
 
-    パッチはクラス属性のプロセス全域差し替えなので、適用後に採った「参照」はパッチ後の
-    値そのものになり、同値検証が恒真化して偽 PASS する。**差が常に 0 になる**方向の
-    壊れ方なので、検証が緑であること自体は何の証拠にもならない — 門でしか塞げない。
+    The patches replace class attributes process-wide, so a "reference" taken after patching is the
+    patched value itself, and the equivalence check becomes vacuous and gives a false PASS. It
+    breaks in the direction where **the difference is always 0**, so a green verification proves
+    nothing by itself — only a check can close it.
+
     """
     if patch.patches_applied():
         raise RuntimeError(
@@ -463,13 +505,15 @@ def _assert_patches_not_applied(where: str) -> None:
 
 
 def _assert_weight_norm_present(module: nn.Module, where: str) -> None:
-    """dec の参照採取が `remove_weight_norm` **前**であることを固定する（**逆向きの門**）。
+    """Pins that dec's references are taken **before** `remove_weight_norm` (**the check pointing
+    the other way**).
 
-    dec の同値検証の参照は「weight_norm が有効な原経路」で、主張の中身は
-    **remove 前後のビット一致**。remove 済みの net_g で参照を採ると remove 後どうしの
-    比較になり、差 0 が自明に成立して偽 PASS する。他の 3 ターゲットは「パッチが
-    当たっていないこと」を要求するのに対し、ここだけは「導出パラメータが**残っている**
-    こと」を要求する — 汚染源が逆向きだから。
+    The reference of dec's equivalence check is "the original path with weight_norm active", and
+    the claim is **bit identity before and after remove**. Taking the reference on an already
+    removed net_g compares removed against removed, a difference of 0 holds trivially, and it gives
+    a false PASS. While the other 3 targets require "no patches applied", this one alone requires
+    "derived parameters **still present**" — because the source of contamination points the other
+    way.
     """
     if not _weight_norm_parameters(module):
         raise RuntimeError(
@@ -480,11 +524,13 @@ def _assert_weight_norm_present(module: nn.Module, where: str) -> None:
 
 
 def speaker_embedding(net_g: nn.Module, speaker_id: int = SPEAKER_ID) -> torch.Tensor:
-    """話者埋め込み g `[1, 512, 1]` を実重みから引く（参照実装 infer と同じ形）。
+    """Takes the speaker embedding g `[1, 512, 1]` from the real weights (the same shape as the
+    reference implementation's infer).
 
-    合成乱数ではなく実重みの埋め込みを使う — g は enc_p の条件付け（cond_layer_idx 層）と
-    dp / sdp の cond に入るので、実際の値域が下流の LayerNorm や spline の効き方を決める。
-    golden の数値許容差の根拠を実運用の値域と対応させるための選択。
+    The real weights' embedding is used rather than synthetic noise — g goes into the conditioning
+    of enc_p (the cond_layer_idx layer) and the cond of dp / sdp, so its real value range decides
+    how the downstream LayerNorm and spline behave. A choice that ties the basis of the goldens'
+    numeric tolerances to the value range of real use.
     """
     num_speakers = net_g.emb_g.num_embeddings
     if not 0 <= speaker_id < num_speakers:
@@ -494,47 +540,49 @@ def speaker_embedding(net_g: nn.Module, speaker_id: int = SPEAKER_ID) -> torch.T
 
 
 def style_vector(model_dir: Path, style_id: int = STYLE_ID) -> torch.Tensor:
-    """スタイルベクトル `[1, 256]` を実資産（`style_vectors.npy`）から引く。
+    """Takes the style vector `[1, 256]` from the real asset (`style_vectors.npy`).
 
-    話者埋め込みと同じ理由で合成乱数を使わない。style_proj は全音素に同じ値を足す経路
-    （`[1,1,256] → [1,1,192]` の broadcast 加算）なので、値域がずれると h の平均が
-    実運用と別の場所に乗る。
+    No synthetic noise, for the same reason as the speaker embedding. style_proj adds the same value
+    to every phoneme (a broadcast add `[1,1,256] → [1,1,192]`), so a shifted value range would put
+    the mean of h somewhere other than in real use.
     """
     path = model_dir / STYLE_FILE
     if not path.is_file():
-        raise FileNotFoundError(f"{path} が無い（ckpt と同じディレクトリに置く）")
+        raise FileNotFoundError(f"{path} is missing (put it in the same directory as the ckpt)")
     table = np.load(path)
     if table.ndim != 2 or table.shape[1] != 256:
-        raise ValueError(f"{path} の形 {table.shape} が [スタイル数, 256] でない")
+        raise ValueError(f"{path} has shape {table.shape}, not [number of styles, 256]")
     if not 0 <= style_id < table.shape[0]:
         raise ValueError(f"スタイル ID {style_id} がスタイル数 {table.shape[0]} の外")
     return torch.from_numpy(np.ascontiguousarray(table[style_id])).to(torch.float32).unsqueeze(0)
 
 
 def _generator(length: int, pad: int, salt: int) -> torch.Generator:
-    """ケース（長さ・パディング）と用途ごとに独立した乱数列を引く。
+    """Draws an independent random sequence per case (length, padding) and purpose.
 
-    グローバル seed に依存しないので、生成順を変えても・単体で 1 ケースだけ作り直しても
-    バイト一致する（golden の再生成可能性の前提）。
+    It does not depend on the global seed, so the result is byte-identical even when the
+    generation order changes or a single case is rebuilt alone (the premise of regenerable
+    goldens).
     """
     return torch.Generator().manual_seed(SEED + salt * 1_000_003 + length * 31 + pad)
 
 
 def make_hidden(length: int) -> torch.Tensor:
-    """dp 用の h `[1, 192, P]`（enc_p 出力に相当。ケースごとに別の固定 seed）。
+    """h `[1, 192, P]` for dp (the counterpart of the enc_p output; a separate fixed seed per case).
 
-    実 h は enc_p 側で x_mask 済みだが、ここでは**パディング列にも値を入れる** —
-    dp 自身のマスク（3 箇所の `x * x_mask` と最終段）が効いていれば出力の末尾は
-    厳密に 0 になり、外れれば値が漏れる。マスク経路の検出器はこの形でしか作れない。
+    The real h is already masked by x_mask on the enc_p side, but here **the padding columns get
+    values too** — if dp's own masking (the 3 `x * x_mask` and the last stage) takes effect, the end
+    of the output is exactly 0, and if it does not, values leak. A detector for the mask path can
+    only be built this way.
     """
     generator = torch.Generator().manual_seed(SEED + length)
     return torch.randn(1, 192, length, generator=generator)
 
 
 def make_mask(length: int, pad: int) -> torch.Tensor:
-    """x_mask `[1, 1, P]` — 先頭 `P - pad` が 1、末尾 `pad` が 0 の f32。"""
+    """x_mask `[1, 1, P]` — f32 with the first `P - pad` set to 1 and the last `pad` set to 0."""
     if not 0 <= pad < length:
-        raise ValueError(f"pad={pad} が P={length} に対して不正")
+        raise ValueError(f"pad={pad} is invalid for P={length}")
     mask = torch.ones(1, 1, length)
     if pad:
         mask[..., length - pad :] = 0.0
@@ -542,48 +590,52 @@ def make_mask(length: int, pad: int) -> torch.Tensor:
 
 
 def make_noise(length: int) -> torch.Tensor:
-    """sdp reverse の外部ノイズ `z_noise` `[1, 2, P]`（`noise_scale` 乗算済み）。
+    """The external noise `z_noise` `[1, 2, P]` of the sdp reverse (already multiplied by
+    `noise_scale`).
 
-    MUST: 参照実装が内部で引く `torch.randn(1, 2, P) * noise_scale` と**同じ列**であること
-    （同値検証はこの一致が前提）。torch の CPU 既定生成器は同一 seed なら
-    `Generator` 経由でもグローバル seed 経由でも同じ列を返すので、参照側は
-    `torch.manual_seed(_noise_seed(P))` を呼んでから原 forward を通す。
+    MUST: it is **the same sequence** as the `torch.randn(1, 2, P) * noise_scale` the reference
+    implementation draws internally (the equivalence check depends on this). torch's default CPU
+    generator returns the same sequence for the same seed whether through a `Generator` or the
+    global seed, so the reference side calls `torch.manual_seed(_noise_seed(P))` before running the
+    original forward.
     """
     generator = torch.Generator().manual_seed(_noise_seed(length))
     return torch.randn(1, 2, length, generator=generator) * NOISE_SCALE
 
 
 def _noise_seed(length: int) -> int:
-    """`make_noise` の seed（参照側がグローバル seed として使う同じ値）。"""
+    """The seed of `make_noise` (the same value the reference side uses as the global seed)."""
     return SEED + 7 * length
 
 
 def make_phones(length: int) -> torch.Tensor:
-    """音素 ID `x` `[1, P]`（i64）。0 は `_`（無音記号）なので 1 以上から引く。"""
+    """Phoneme IDs `x` `[1, P]` (i64). 0 is `_` (the silence symbol), so they are drawn from 1
+    up."""
     from style_bert_vits2.nlp.symbols import SYMBOLS
 
     return torch.randint(1, len(SYMBOLS), (1, length), generator=_generator(length, 0, 1))
 
 
 def make_tones(length: int) -> torch.Tensor:
-    """アクセント ID `tone` `[1, P]`（i64）。"""
+    """Accent IDs `tone` `[1, P]` (i64)."""
     from style_bert_vits2.nlp.symbols import NUM_TONES
 
     return torch.randint(0, NUM_TONES, (1, length), generator=_generator(length, 0, 2))
 
 
 def make_language(length: int) -> torch.Tensor:
-    """言語 ID `language` `[1, P]`（i64）。JP-Extra は日本語単言語なので全て 0。"""
+    """Language IDs `language` `[1, P]` (i64). JP-Extra is Japanese only, so all 0."""
     return torch.zeros((1, length), dtype=torch.int64)
 
 
 def make_bert(length: int) -> torch.Tensor:
-    """BERT 特徴 `bert` `[1, 1024, P]`。
+    """BERT features `bert` `[1, 1024, P]`.
 
-    NOTE: 実 DeBERTa の hidden ではなく randn の合成値（実 hidden を作るには
-    `outputs/series/deberta` の 1.3GB と音素↔文字のアライメントが要り、front の数値検証の
-    目的からは遠い）。bert_proj は 1x1 conv 1 本で下流は LayerNorm 群なので、
-    値域の違いは h のスケールに一様に効くだけで、誤差の伸び方の構造は変わらない。
+    NOTE: synthetic randn values rather than real DeBERTa hidden states (building a real hidden
+    state needs the 1.3GB of `outputs/series/deberta` and a phoneme ↔ character alignment, far from
+    the purpose of front's numeric verification). bert_proj is a single 1x1 conv followed by
+    LayerNorms, so a different value range only scales h uniformly and does not change how the error
+    grows.
     """
     return torch.randn(1, 1024, length, generator=_generator(length, 0, 3))
 
@@ -592,7 +644,7 @@ def build_cases(
     g: torch.Tensor,
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
 ) -> tuple[tuple[str, dict[str, torch.Tensor]], ...]:
-    """dp の golden ケース `(名前, {入力名: テンソル})`。キーはグラフ入力名に一致させる。"""
+    """Golden cases of dp `(name, {input name: tensor})`. The keys match the graph input names."""
     return tuple(
         (name, {"h": make_hidden(length), "x_mask": make_mask(length, pad), "g": g})
         for name, length, pad in cases
@@ -600,10 +652,11 @@ def build_cases(
 
 
 def front_inputs(length: int, pad: int, g: torch.Tensor, style: torch.Tensor) -> dict[str, Any]:
-    """front の入力一式（グラフ入力名 + 参照実装が要る `x_lengths`）。
+    """The full input set of front (the graph input names + `x_lengths`, which the reference
+    implementation needs).
 
-    x / tone / bert は**パディング列にも値を入れる**（dp の h と同じ理由 — マスク経路が
-    効いていれば出力の末尾は厳密に 0 になる）。
+    x / tone / bert **get values in the padding columns too** (the same reason as dp's h — if the
+    mask path takes effect, the end of the output is exactly 0).
     """
     return {
         "x": make_phones(length),
@@ -619,21 +672,23 @@ def front_inputs(length: int, pad: int, g: torch.Tensor, style: torch.Tensor) ->
 
 
 def make_latent(length: int, salt: int) -> torch.Tensor:
-    """flow / dec の入力になる潜在系列 `[1, 192, T]`（ケース・用途ごとに別の固定 seed）。
+    """The latent sequence `[1, 192, T]` fed to flow / dec (a separate fixed seed per case and
+    purpose).
 
-    実チェーンの `z_p` は `m_p + randn·exp(logs_p)·noise_scale` で、値域は O(1) の
-    正規分布そのもの。合成 randn を使うのはそのため（front の `bert` と違い、実分布から
-    大きく外れない）。
+    In the real chain `z_p` is `m_p + randn·exp(logs_p)·noise_scale`, whose value range is a normal
+    distribution of O(1) itself. That is why synthetic randn is used (unlike front's `bert`, it does
+    not stray far from the real distribution).
     """
     return torch.randn(1, 192, length, generator=_generator(length, 0, salt))
 
 
 def flow_inputs(length: int, pad: int, g: torch.Tensor) -> dict[str, torch.Tensor]:
-    """flow / voice の入力一式（グラフ入力名がキー）。
+    """The full input set of flow / voice (keyed by graph input name).
 
-    `z_p` は**パディング列にも値を入れる**（dp / front と同じ理由 — `y_mask` 乗算が効いて
-    いれば出力の末尾は厳密に 0 になり、外れれば値が漏れる）。表 `idx_k` / `valid` は
-    `sbv2.patch.build_relattn_tables`（ホスト TS 鏡像の Python 側正本）から採る。
+    `z_p` **gets values in the padding columns too** (the same reason as dp / front — if the
+    `y_mask` multiplication takes effect, the end of the output is exactly 0, and if not, values
+    leak). The tables `idx_k` / `valid` come from `sbv2.patch.build_relattn_tables` (the
+    Python-side source of truth mirrored by the host TS).
     """
     idx_k, valid = patch.build_relattn_tables(length, EXPECTED_WINDOW_SIZE)
     return {
@@ -646,13 +701,13 @@ def flow_inputs(length: int, pad: int, g: torch.Tensor) -> dict[str, torch.Tenso
 
 
 def dec_inputs(length: int, pad: int, g: torch.Tensor) -> dict[str, torch.Tensor]:
-    """dec の入力一式。
+    """The full input set of dec.
 
-    dec には**マスク入力が無い**（`Generator.forward(x, g)`）ので、`padded` ケースは実
-    チェーンと同じく**入力側**で末尾を 0 にする（融合 voice が `dec(z * y_mask, g)` を
-    呼ぶのと同じ形）。dec 単体にマスク経路は存在しないため、このケースが踏むのは
-    「末尾が 0 の入力でも上流と同じ数が出る」ことだけで、front / flow の padded のような
-    漏れ検出器にはならない — 検出器は voice 側が持つ。
+    dec has **no mask input** (`Generator.forward(x, g)`), so the `padded` case zeroes the end **on
+    the input side**, as in the real chain (the same form as the fused voice calling
+    `dec(z * y_mask, g)`). dec alone has no mask path, so all this case exercises is "an input
+    ending in 0 still gives the same numbers as upstream"; it is not a leak detector like front's /
+    flow's padded — voice holds the detector.
     """
     return {"x": make_latent(length, salt=5) * make_mask(length, pad), "g": g}
 
@@ -661,7 +716,7 @@ def build_flow_cases(
     g: torch.Tensor,
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
 ) -> tuple[tuple[str, dict[str, torch.Tensor]], ...]:
-    """flow / voice の golden ケース（入力は共通 — 融合の有無だけが違う）。"""
+    """Golden cases of flow / voice (shared inputs — they differ only in whether dec is fused)."""
     return tuple((name, flow_inputs(length, pad, g)) for name, length, pad in cases)
 
 
@@ -669,7 +724,7 @@ def build_dec_cases(
     g: torch.Tensor,
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
 ) -> tuple[tuple[str, dict[str, torch.Tensor]], ...]:
-    """dec の golden ケース。"""
+    """Golden cases of dec."""
     return tuple((name, dec_inputs(length, pad, g)) for name, length, pad in cases)
 
 
@@ -678,7 +733,7 @@ def build_front_cases(
     style: torch.Tensor,
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
 ) -> tuple[tuple[str, dict[str, torch.Tensor]], ...]:
-    """front の golden ケース。`x_lengths` は参照専用なので golden には載せない。"""
+    """Golden cases of front. `x_lengths` is only for the reference, so it is not in the golden."""
     return tuple(
         (
             name,
@@ -698,11 +753,11 @@ def _write_io(
     cases: Sequence[tuple[str, dict[str, torch.Tensor]]],
     out_dir: Path,
 ) -> list[str]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+    """Writes each case's inputs and torch CPU expected outputs to `io.<case>.safetensors`.
 
-    forward は**グラフ入力の宣言順**で呼ぶ（IR の入力名 = forward の引数名なので、
-    ケース辞書のキーが 1 つでも食い違えば KeyError で落ちる — 名前の対応が黙ってずれた
-    まま別の引数に流れ込む形を潰す）。
+    forward is called in **the declaration order of the graph inputs** (IR input names = forward
+    argument names, so a single mismatched key of the case dict fails with KeyError — closing off
+    the form where names drift silently and values flow into other arguments).
     """
     written: list[str] = []
     for name, args in cases:
@@ -711,18 +766,19 @@ def _write_io(
         outputs = (output,) if isinstance(output, torch.Tensor) else tuple(output)
         if len(outputs) != len(graph.outputs):
             raise AssertionError(
-                f"{name}: eager 出力 {len(outputs)} 本が IR 出力 {len(graph.outputs)} 本と違う"
+                f"{name}: {len(outputs)} eager outputs differ from {len(graph.outputs)} IR outputs"
             )
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（ADR 0009 の境界正規化）。
+        # MUST: io is also reduced to the concrete representation of the IR's semantic dtype (the
+        # boundary normalization of ADR 0009).
         tensors = {
             f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
-                args[declared.name], f"{name} の入力 '{declared.name}'"
+                args[declared.name], f"{name}: input '{declared.name}'"
             )
             for declared in graph.inputs
         }
         for index, value in enumerate(outputs):
             tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
-                value.detach().contiguous(), f"{name} の出力 {index}"
+                value.detach().contiguous(), f"{name}: output {index}"
             )
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
         save_file(tensors, str(path))
@@ -731,33 +787,39 @@ def _write_io(
 
 
 def _module_name(weight_fqn: str) -> str:
-    """`iter_quant_targets` が返す重み FQN（`<module>.weight` / 根なら `weight`）→ モジュール FQN。
+    """The weight FQN returned by `iter_quant_targets` (`<module>.weight` / `weight` for the root)
+    → the module FQN.
 
-    `include` 述語（`fake_quant_int8` / `fake_quant_int4`）が見るのは**モジュール**の FQN で、
-    台帳のキーは**重み**の FQN — 2 つの空間を取り違えると述語が 1 本も当たらない。
-    `removesuffix` 1 発で書けないのは根モジュール（`""`）だけが `.` を持たないから。
+    The `include` predicate (`fake_quant_int8` / `fake_quant_int4`) looks at **module** FQNs, while
+    the ledger keys are **weight** FQNs — mixing up the 2 spaces makes the predicate match nothing.
+    A single `removesuffix` does not do it because only the root module (`""`) has no `.`.
     """
     return weight_fqn[: -len(".weight")] if weight_fqn.endswith(".weight") else ""
 
 
 def _i4_module_names(module: nn.Module) -> frozenset[str]:
-    """i4 group32 で丸めるモジュールの FQN 集合（混成の**排他割り**の唯一の源）。
+    """The set of FQNs of modules rounded to i4 group32 (the only source of the **exclusive split**
+    of the mix).
 
-    適格は 3 条件の積: ① {@link I4_MODULE_TYPES} の型であること（emit の i4 適格 =
-    `emit.I4_WEIGHT_OPS` の重みスロット限定 — ADR 0069 決定 5 とその conv1d 追補。外れた
-    テンソルへ i4 を明示指定すると emit が fail loudly する）② `groups == 1`（conv1d の i4 は
-    igemm 変種だけが展開でき、depthwise〈`DDSConv` の `convs_sep`〉は direct カーネル =
-    i4 非対応）③ 平坦化後の行長が group 長で割り切れること（i4 は端数 group を作らない MUST —
-    同決定 2。外れた重みは**構成ごと落とすのではなく対象から外す**〈`measure_quant`
-    `census_w4_targets` と同じ扱い〉ので、非適格の linear / conv1d は i8 側へ落ちる）。
+    Eligibility is the conjunction of 3 conditions: ① the type is one of {@link I4_MODULE_TYPES}
+    (emit's i4 eligibility = limited to the weight slots of `emit.I4_WEIGHT_OPS` — ADR 0069 decision
+    5 and its conv1d addendum; explicitly assigning i4 to a tensor outside it makes emit fail
+    loudly) ② `groups == 1` (conv1d in i4 can be expanded only by the igemm variant; depthwise
+    (`convs_sep` of `DDSConv`) uses the direct kernel = no i4 support) ③ the row length after
+    flattening is divisible by the group length (i4 MUST NOT make partial groups — decision 2 of the
+    same ADR; a weight that fails this is **dropped from the targets rather than failing the whole
+    configuration** (the same treatment as `census_w4_targets` of `measure_quant`), so ineligible
+    linear / conv1d drop to the i8 side).
 
-    対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
-    1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
-    2 つの述語を別々の綴りから作るとどちらにも入らない重みが**黙って f32 のまま残る**
-    （二重丸め禁止の逆側の穴で、値は正しいままサイズだけが戻る）。
+    The targets are enumerated through the core (`iter_quant_targets`) so that the set the rounding
+    looks at and the set counted here stay one implementation. The i8-side predicate is written as
+    "not in this set" for the same reason: building the 2 predicates from separate spellings would
+    leave weights in neither **silently in f32** (the hole on the opposite side of the no-double-
+    rounding rule, where the values stay correct and only the size goes back).
 
-    NOTE: `nn.ConvTranspose1d` は `nn.Conv1d` の派生ではないので、型で自然に落ちる
-    （`dec` の `ups` — 行軸が先頭でない重みは pack 順が合わず i4 にできない）。
+    NOTE: `nn.ConvTranspose1d` does not derive from `nn.Conv1d`, so it drops out naturally by type
+    (`ups` of `dec` — a weight whose row axis is not the first does not match the pack order and
+    cannot be i4).
     """
     modules = dict(module.named_modules())
     names: set[str] = set()
@@ -773,50 +835,59 @@ def _i4_module_names(module: nn.Module) -> frozenset[str]:
 def _fake_quant(
     dtype: str, module: nn.Module, target: str
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
-    """格納 dtype の表現可能値へ**実効重み**を丸め、scale 台帳と 1 本単位の格納指定を返す。
+    """Rounds **the effective weights** to values representable in the storage dtype, and returns
+    the scale ledger and the per-weight storage assignments.
 
-    ADR 0006 / 0018（f16）/ 0019（i8）/ 0069（i4）の fake-quant。台帳のキーはモデル内 FQN で、
-    emit 側が safetensors のテンソルキーとして突き合わせる（`id()` 突合は禁止 — ADR 0006）。
+    The fake-quant of ADR 0006 / 0018 (f16) / 0019 (i8) / 0069 (i4). The ledger keys are in-model
+    FQNs, which the emit side matches as safetensors tensor keys (matching by `id()` is forbidden —
+    ADR 0006).
 
-    i4 系列は混成（適格な linear / conv1d = i4 group32・残り = i8 per-channel）で、2 つの述語は
-    {@link _i4_module_names} から**排他に**割る（`quantize.py` の混成 MUST）。返す override は
-    「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示指定を満たせなければ
-    fail loudly する（`emit._plan_i4` — 沈黙 i8 へ落ちる経路は無い）。
+    The i4 series is mixed (eligible linear / conv1d = i4 group32, the rest = i8 per-channel), and
+    the 2 predicates are split **exclusively** from {@link _i4_module_names} (the mixed MUST of
+    `quantize.py`). The returned override is the mapping "assign every key of the i4 scale ledger to
+    i4", and the emit side fails loudly if it cannot honour an explicit assignment
+    (`emit._plan_i4` — there is no path that drops silently to i8).
 
-    MUST: 当てる相手は **export する `nn.Module` そのもの**（`net_g` 全体ではない）。
-    そのターゲットのグラフに現れない重みまで動かすと、同じ net_g から別ターゲットを
-    採るときの前提が濁る。
+    MUST: it is applied to **the `nn.Module` being exported itself** (not to all of `net_g`).
+    Moving weights that do not appear in that target's graph would muddy the premise when another
+    target is taken from the same net_g.
 
-    MUST（順序）: ① `remove_weight_norm` / パッチ適用の**後**に呼ぶ。remove より先に丸めると
-    `weight_g` / `weight_v` を丸めることになり、そこから作られる実効重みは f16 / i8 の格子に
-    乗らない（`ensure_dec_plain` の順序制約そのもの）。i8 は**さらに strict** で、捨てられる
-    要素が amax に効くと per-channel scale そのものがずれる。② 参照・golden の採取の**前**に
-    呼ぶ（`quantize` モジュールの MUST — 後に当てると golden だけが元の重みで計算され、E2E の
-    差に量子化誤差が混ざって tolerance の意味が消える）。
+    MUST (order): ① call it **after** `remove_weight_norm` / patching. Rounding before remove would
+    round `weight_g` / `weight_v`, and the effective weights built from them would not sit on the
+    f16 / i8 grid (exactly the ordering constraint of `ensure_dec_plain`). i8 is **even stricter**:
+    if discarded elements affect amax, the per-channel scale itself shifts. ② call it **before**
+    taking references and goldens (the MUST of the `quantize` module — applied afterwards, only the
+    goldens would be computed with the original weights, quantization error would mix into the E2E
+    difference, and the tolerance would lose its meaning).
 
-    5 ターゲットはそれぞれ `load_net_g` で新しい net_g を組むので、丸めがターゲットを跨いで
-    漏れることはない。voice は flow と dec を 1 つのラッパで束ねるためここ 1 回で両方に
-    掛かる（丸めは f16 / i8 とも冪等 — i8 は ±127 に閉じた量子化が f32 の不動点になる
-    〈ADR 0019〉。ただし依存しているのは冪等性ではなく「実効重みが確定した後に呼ぶ」という
-    上の順序で、実重みでの冪等性は `sbv2/tests/test_export.py` が固定する）。
+    Each of the 5 targets builds a new net_g with `load_net_g`, so rounding never leaks across
+    targets. voice bundles flow and dec in one wrapper, so this single call covers both (rounding is
+    idempotent for f16 and i8 alike — for i8, quantization closed under ±127 is a fixed point in f32
+    (ADR 0019). What it depends on, though, is not idempotence but the order above, "call it after
+    the effective weights are settled"; idempotence on the real weights is pinned by
+    `sbv2/tests/test_export.py`).
 
-    NOTE: `g`（`emb_g` の話者埋め込み）と `style_vec` は export 対象のモジュールに含まれない
-    **グラフ入力**なので丸めない — 入力は参照と GPU が同じバイト列を読む側で、格納 dtype の
-    影響を受けない。front の焼き込み相対位置表も同じくモジュールの重みではないので触れない
-    （グラフ定数は適格外 = f32 格納 — emit.py の適格判定）。
+    NOTE: `g` (the speaker embedding of `emb_g`) and `style_vec` are **graph inputs** not contained
+    in the exported module, so they are not rounded — inputs are where the reference and the GPU
+    read the same bytes, unaffected by the storage dtype. front's baked relative-position tables are
+    not module weights either, so they are not touched (graph constants are ineligible = f32 storage
+    — the eligibility rule of emit.py).
     """
     if dtype == "f32":
         return {}, {}
     if dtype == "i8":
         int8 = fake_quant_int8(module)
         print(
-            f"[fake-quant] {target}: i8 per-channel へ丸めた — {int8.describe()}",
+            f"[fake-quant] {target}: rounded to i8 per-channel — {int8.describe()}",
             flush=True,
         )
         return int8.scales, {}
     if dtype == "f16":
         report = round_weights_to_f16(module)
-        print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
+        print(
+            f"[fake-quant] {target}: rounded to f16-representable values — {report.describe()}",
+            flush=True,
+        )
         return {}, {}
     i4_names = _i4_module_names(module)
     i8_names = {
@@ -825,19 +896,20 @@ def _fake_quant(
     int4 = fake_quant_int4(
         module, DEFAULT_GROUP_SIZE, include=lambda name: name in i4_names, op_types=I4_MODULE_TYPES
     )
-    # MUST: 排他割りの**両側を列挙してから**丸める。i8 側を「i4 に居ない」の否定だけで書くと、
-    # 全ての量子化対象が i4 適格な系列（`flow` は conv1d だけで構成され、全本が groups == 1 かつ
-    # 整除する）で `fake_quant_int8` の「対象 0 本」が発火して export が落ちる — 0 本が
-    # **数え上げの結果**である以上、沈黙ではないので丸めごと飛ばす。
+    # MUST: round only **after enumerating both sides** of the exclusive split. Writing the i8 side
+    # just as the negation "not in i4" would, for a series where every quantization target is
+    # i4-eligible (`flow` consists only of conv1d, all with groups == 1 and divisible), trigger the
+    # "0 targets" of `fake_quant_int8` and fail the export — since the 0 is **the result of a
+    # count**, it is not silent, so the rounding is skipped altogether.
     i8_scales: Mapping[str, torch.Tensor] = {}
     if i8_names:
         rest = fake_quant_int8(module, include=lambda name: name in i8_names)
         i8_scales = rest.scales
-        remainder = f"残りは i8 per-channel — {rest.describe()}"
+        remainder = f"the rest in i8 per-channel — {rest.describe()}"
     else:
-        remainder = "i8 側は対象 0 本（量子化対象が全て i4 適格）"
+        remainder = "no i8 targets (every quantization target is i4-eligible)"
     print(
-        f"[fake-quant] {target}: 適格 linear / conv1d を i4 group へ丸めた —"
+        f"[fake-quant] {target}: rounded eligible linear / conv1d to i4 groups —"
         f" {int4.describe()} / {remainder}",
         flush=True,
     )
@@ -846,40 +918,46 @@ def _fake_quant(
 
 @contextmanager
 def _staged_target(target: str, out_dir: Path, sym_max: int) -> Iterator[Path]:
-    """ターゲット 1 本ぶんの作業席を渡し、門を全部通ってから `out_dir` へ据える。
+    """Hands over the staging directory of one target and publishes it to `out_dir` once every
+    check has passed.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（出力本数・境界正規化）を通してから据える。門より
-    前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れた
-    モジュールから採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の
-    綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。
+    MUST: the output is written to the staging directory and published only after passing **every
+    check** (output count, boundary normalization). Placing it in the final location before the
+    checks would let a failed run leave "assets that can pass the acceptance check" — the io goldens
+    come from the same broken module, so they agree with each other and the TS-side comparison
+    **goes green** (the spelling of "when publishing is allowed" is in
+    {@link _shared.decode_series._publish}; the discipline of swapping in and cleaning up is the
+    core primitive {@link karume.artifacts.staged_publication}).
 
-    出所記録（{@link _write_export_provenance}）は席を抜ける直前に同じ席へ書く — 据え替えが
-    1 回なので、新しい容器と古い記録という組は作れない。
+    The provenance record ({@link _write_export_provenance}) is written into the same directory
+    right before leaving it — the swap happens once, so a new container can never pair with an old
+    record.
     """
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory (the primitive creates nothing — it only hands over a
+        # path).
         staged.mkdir()
         yield staged
         _write_export_provenance(target, sym_max, staged)
 
 
 def _write_export_provenance(target: str, sym_max: int, out_dir: Path) -> None:
-    """このターゲットを**どの記号次元の上限で**焼いたかを系列へ書き残す。
+    """Records in the series **with which symbolic-dimension limit** this target was baked.
 
-    `--sym-max` は単一ターゲット限定で任意の値を通す（研究用途 — {@link TARGET_SYM_MAX}）。
-    その値は `Dim` の max としてそのまま焼き込み定数の静的次元になるので、既定から外して
-    書き出した系列は「グラフの受理する上限」が既定と違う。ところが配布側の
-    `pipelineConfig.maxTokens` / `maxFrames` は定数で焼かれる（`sbv2/distribution.py`）ため、
-    ずれても**export は緑・配布も緑**で、消費側で初めて `sym_prefix_slice` の Tmax 超過に
-    当たる。したがって書き出した側が事実を書き残し、組み立て時に
-    {@link sbv2.distribution.assert_sym_provenance} が突き合わせる
-    （`--lora` / `calib_provenance.json` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
-    突き合わせる」規律）。
+    `--sym-max` accepts any value, for a single target only (for research — {@link TARGET_SYM_MAX}).
+    That value becomes the max of `Dim` and, as is, the static dimension of the baked constants, so
+    a series written away from the default has a "limit the graph accepts" different from the
+    default. But the distribution side's `pipelineConfig.maxTokens` / `maxFrames` are baked as
+    constants (`sbv2/distribution.py`), so a mismatch leaves **export green and distribution
+    green**, and the consumer is the first to hit Tmax exceeded in `sym_prefix_slice`. So the
+    writing side records the fact, and {@link sbv2.distribution.assert_sym_provenance} compares it
+    at assembly time (the same discipline as `--lora` / `calib_provenance.json`: "the same fact held
+    by separate scripts is always compared at assembly time").
 
-    MUST: 書くのは**作業席の中**（`staged_publication` の `with` の内側）— 据え替えが 1 回に
-    なるので、新しい容器と古い記録という組が作れない。
+    MUST: it is written **inside the staging directory** (inside the `with` of
+    `staged_publication`) — the swap happens once, so a new container can never pair with an old
+    record.
     """
     record = {"target": target, "sym_max": sym_max}
     (out_dir / EXPORT_PROVENANCE_FILE).write_text(
@@ -898,7 +976,8 @@ def _summary(
     elapsed: float,
     dtype: str,
 ) -> dict[str, Any]:
-    # 適格 = 圧縮のまま GPU 常駐する重み / 適格外 = f32 格納（ADR 0006 の常設診断）。
+    # Eligible = weights kept resident on the GPU compressed / ineligible = f32 storage (the
+    # standing diagnostic of ADR 0006).
     breakdown = storage_breakdown(graph)
     return {
         "target": target,
@@ -913,7 +992,7 @@ def _summary(
         "compressed_bytes": breakdown.compressed_bytes,
         "plain_tensors": breakdown.plain_tensors,
         "plain_bytes": breakdown.plain_bytes,
-        # i8 の companion scale（ADR 0019）。f32 / f16 では 0。
+        # The companion scale of i8 (ADR 0019). 0 for f32 / f16.
         "scale_bytes": breakdown.scale_bytes,
         "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
@@ -932,21 +1011,23 @@ def export_dp(
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """dp の IR コンテナと golden io を書き、要約を返す。
+    """Writes the IR container and golden io of dp and returns a summary.
 
-    MUST: 生成物は作業席へ書き、全ての門（出力本数・境界正規化）を通してから据える
-    （{@link _staged_target} が理由を綴る）。
+    MUST: the output is written to the staging directory and published only after passing every
+    check (output count, boundary normalization) ({@link _staged_target} spells out why).
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
     module = DurationPredictorGraph(net_g.dp)
-    # 前処理は無い（パッチも remove_weight_norm も通らない）ので、ここが「実効重み確定後」。
+    # There is no preprocessing (neither patches nor remove_weight_norm), so this is "after the
+    # effective weights are settled".
     scales, dtype_overrides = _fake_quant(dtype, module, TARGET_DP)
     g = speaker_embedding(net_g)
     built = build_cases(g, cases)
 
-    # 例示入力は padded ケース（x_mask に 0 を含む形）。min=2 は 0/1 特殊化を避けるため、
-    # max は宣言そのもの（ADR 0010 — 畳み込みの評価点は range_constraints から取る）。
+    # The example input is the padded case (an x_mask containing 0). min=2 avoids the 0/1
+    # specialization, max is the declaration itself (ADR 0010 — the evaluation point of constant
+    # folding is taken from range_constraints).
     example = dict(built[-1][1])
     phonemes = Dim("P", min=2, max=sym_max)
     with _staged_target(TARGET_DP, out_dir, sym_max) as staged:
@@ -955,8 +1036,9 @@ def export_dp(
             (example["h"], example["x_mask"], example["g"]),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
+            # The graph name is **the component name** (= the key of weights in karume.json). It is
+            # not derived from the directory name (container-v1 §2.1) — the staging directory is
+            # `<target>.staging/`.
             graph_name=TARGET_DP,
             dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
             symbol_names=("P",),
@@ -986,13 +1068,16 @@ def export_front(
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """front（enc_p + dp + sdp reverse の融合グラフ）の IR コンテナと golden io を書く。
+    """Writes the IR container and golden io of front (the fused graph of enc_p + dp + sdp
+    reverse).
 
-    パッチ層をここで当てる — golden は**パッチ適用後**の eager 出力（= IR が計算すべき数の
-    正）で、パッチ前の参照実装との差は `--verify` が別プロセスで実測する二層構造
-    （ADR 0013）。
+    The patch layer is applied here — the golden is the eager output **after patching** (= the
+    ground truth of what the IR must compute), and the difference from the reference implementation
+    before patching is measured by `--verify` in a separate process: a two-layer structure (ADR
+    0013).
 
-    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
+    MUST: the output is written to the staging directory and published only after passing every
+    check ({@link _staged_target}).
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
@@ -1001,11 +1086,11 @@ def export_front(
     scales, dtype_overrides = _fake_quant(dtype, module, TARGET_FRONT)
     built = build_front_cases(speaker_embedding(net_g), style_vector(model_dir), cases)
 
-    # 例示入力は padded ケース（x_mask に 0 を含む形）。
+    # The example input is the padded case (an x_mask containing 0).
     example = dict(built[-1][1])
     phonemes = Dim("P", min=2, max=sym_max)
-    # 動的軸: x / tone / language は [1,P]、x_mask / bert / z_noise は [...,P]。
-    # style_vec [1,256] と g [1,512,1] は P に依らない。
+    # Dynamic axes: x / tone / language are [1,P], x_mask / bert / z_noise are [...,P].
+    # style_vec [1,256] and g [1,512,1] do not depend on P.
     dynamic_shapes = (
         {1: phonemes},
         {2: phonemes},
@@ -1022,8 +1107,9 @@ def export_front(
             tuple(example[declared] for declared in FRONT_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
+            # The graph name is **the component name** (= the key of weights in karume.json). It is
+            # not derived from the directory name (container-v1 §2.1) — the staging directory is
+            # `<target>.staging/`.
             graph_name=TARGET_FRONT,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("P",),
@@ -1046,19 +1132,22 @@ def export_front(
 
 
 def ensure_dec_plain(net_g: nn.Module) -> None:
-    """dec の weight_norm を除去して実効重みに畳む（冪等）。
+    """Removes dec's weight_norm and folds it into the effective weights (idempotent).
 
-    weight_norm が残っている間、`Conv1d.weight` は**実効重みではない**（`weight_g` /
-    `weight_v` から forward pre-hook が毎回作る）。そのまま IR へ書き出すと別のモデルに
-    なるので、export 前に必ず通す。冪等なのは融合 voice が dec と同じ net_g を共有する
-    ため（二重適用は `remove_weight_norm` が RuntimeError で落ちる）。
+    While weight_norm remains, `Conv1d.weight` is **not the effective weight** (a forward pre-hook
+    builds it from `weight_g` / `weight_v` every time). Writing it into the IR as is would give a
+    different model, so this always runs before export. It is idempotent because the fused voice
+    shares the same net_g with dec (applying it twice makes `remove_weight_norm` fail with
+    RuntimeError).
 
-    MUST（順序制約 — ADR 0013 / 0018）: 重みの丸め（`_fake_quant`）は **remove 後の実効重み**
-    に当てる。remove より先に丸めると `weight_g`/`weight_v` を丸めることになり、実効重みは
-    丸めの格子に乗らない（配信サイズは減るが数値は別物になる）。dec / voice の export は
-    どちらもこの関数の**後**に `_fake_quant` を呼ぶ形で並べてある。
+    MUST (ordering constraint — ADR 0013 / 0018): weight rounding (`_fake_quant`) is applied to
+    **the effective weights after remove**. Rounding before remove would round
+    `weight_g`/`weight_v`, and the effective weights would not sit on the rounding grid (the
+    download shrinks, but the numbers become something else). The exports of dec / voice are both
+    arranged to call `_fake_quant` **after** this function.
 
-    数値同値（remove 前後）は `--verify dec` が実重み・全ケースで実測する。
+    Numeric equivalence (before and after remove) is measured by `--verify dec` on the real weights
+    for every case.
     """
     if any(hasattr(module, "weight_g") for module in net_g.dec.modules()):
         net_g.dec.remove_weight_norm()
@@ -1073,12 +1162,14 @@ def export_flow(
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """flow（TransformerCouplingBlock reverse）の IR コンテナと golden io を書く。
+    """Writes the IR container and golden io of flow (TransformerCouplingBlock reverse).
 
-    相対位置注意の `(T,T)` 表は**グラフ入力**（`idx_k` / `valid`）。front の焼き込み方式と
-    違うのは sym_max が桁違いだから（4096 で O(T²) = 134MB — ADR 0013）。
+    The `(T,T)` tables of the relative-position attention are **graph inputs** (`idx_k` /
+    `valid`). It differs from front's baking because sym_max is orders of magnitude larger (O(T²)
+    at 4096 = 134MB — ADR 0013).
 
-    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
+    MUST: the output is written to the staging directory and published only after passing every
+    check ({@link _staged_target}).
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
@@ -1087,9 +1178,9 @@ def export_flow(
     scales, dtype_overrides = _fake_quant(dtype, module, TARGET_FLOW)
     built = build_flow_cases(speaker_embedding(net_g), cases)
 
-    example = dict(built[-1][1])  # padded ケース（y_mask に 0 を含む形）
+    example = dict(built[-1][1])  # the padded case (a y_mask containing 0)
     frames = Dim("T", min=2, max=sym_max)
-    # z_p [1,192,T] / y_mask [1,1,T] / g [1,512,1] / idx_k [T,T] / valid [T,T]。
+    # z_p [1,192,T] / y_mask [1,1,T] / g [1,512,1] / idx_k [T,T] / valid [T,T].
     dynamic_shapes = (
         {2: frames},
         {2: frames},
@@ -1103,8 +1194,9 @@ def export_flow(
             tuple(example[declared] for declared in FLOW_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
+            # The graph name is **the component name** (= the key of weights in karume.json). It is
+            # not derived from the directory name (container-v1 §2.1) — the staging directory is
+            # `<target>.staging/`.
             graph_name=TARGET_FLOW,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
@@ -1134,18 +1226,20 @@ def export_dec(
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """dec（HiFi-GAN Generator）の IR コンテナと golden io を書く。
+    """Writes the IR container and golden io of dec (HiFi-GAN Generator).
 
-    パッチ層は要らない（注意も spline も通らない）。前処理は `remove_weight_norm` だけで、
-    ラッパも置かない — `Generator.forward(x, g)` の引数名がそのまま IR の入力名になる。
+    No patch layer is needed (it goes through neither attention nor spline). The only preprocessing
+    is `remove_weight_norm`, and there is no wrapper either — the argument names of
+    `Generator.forward(x, g)` become the IR input names as is.
 
-    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
+    MUST: the output is written to the staging directory and published only after passing every
+    check ({@link _staged_target}).
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
     ensure_dec_plain(net_g)
     module = net_g.dec
-    # MUST: remove_weight_norm の**後**（`ensure_dec_plain` が予告している順序制約）。
+    # MUST: **after** remove_weight_norm (the ordering constraint announced by `ensure_dec_plain`).
     scales, dtype_overrides = _fake_quant(dtype, module, TARGET_DEC)
     built = build_dec_cases(speaker_embedding(net_g), cases)
 
@@ -1157,8 +1251,9 @@ def export_dec(
             tuple(example[declared] for declared in DEC_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
+            # The graph name is **the component name** (= the key of weights in karume.json). It is
+            # not derived from the directory name (container-v1 §2.1) — the staging directory is
+            # `<target>.staging/`.
             graph_name=TARGET_DEC,
             dynamic_shapes=({2: frames}, {}),
             symbol_names=("T",),
@@ -1188,20 +1283,23 @@ def export_voice(
     cases: Sequence[tuple[str, int, int]] = GOLDEN_CASES,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """voice（flow reverse + dec の融合 1 グラフ）の IR コンテナと golden io を書く。
+    """Writes the IR container and golden io of voice (flow reverse + dec fused into one graph).
 
-    **このターゲットの E2E が緑になった時点で SBV2 の全チェーンが成立する**（front で
-    durations を出し、ホスト側で z_p を組み、ここで波形になる）。融合の利得は中間 z の
-    readback 往復の排除で、代わりに z のデバッグ突合は flow 単体側でしかできない。
+    **Once this target's E2E is green, the whole SBV2 chain holds** (front produces the durations,
+    the host builds z_p, and this turns it into a waveform). The gain of fusing is removing the
+    readback round trip of the intermediate z; in exchange, comparing z for debugging is possible
+    only on the standalone flow.
 
-    MUST: 生成物は作業席へ書き、全ての門を通してから据える（{@link _staged_target}）。
+    MUST: the output is written to the staging directory and published only after passing every
+    check ({@link _staged_target}).
     """
     started = time.perf_counter()
     net_g, hps = load_net_g(model_dir)
     patch.apply_all_patches()
     ensure_dec_plain(net_g)
     module = patch.Sbv2Voice(net_g)
-    # MUST: remove_weight_norm の**後**（dec を内包するので dec 単体と同じ順序制約）。
+    # MUST: **after** remove_weight_norm (it contains dec, so the same ordering constraint as dec
+    # alone).
     scales, dtype_overrides = _fake_quant(dtype, module, TARGET_VOICE)
     built = build_flow_cases(speaker_embedding(net_g), cases)
 
@@ -1220,8 +1318,9 @@ def export_voice(
             tuple(example[declared] for declared in FLOW_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
+            # The graph name is **the component name** (= the key of weights in karume.json). It is
+            # not derived from the directory name (container-v1 §2.1) — the staging directory is
+            # `<target>.staging/`.
             graph_name=TARGET_VOICE,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
@@ -1244,12 +1343,12 @@ def export_voice(
 
 
 def reference_front_outputs(net_g: nn.Module, inputs: dict[str, Any]) -> list[torch.Tensor]:
-    """**パッチ前**の参照実装で front の 4 出力を得る。
+    """Gets the 4 outputs of front from the reference implementation **before patching**.
 
-    MUST: パッチ適用前にだけ呼べる。パッチ後に呼ぶと参照そのものがパッチ後の値になり、
-    同値検証が恒真化して偽 PASS する（ADR 0013）。
+    MUST: callable only before patching. Called after patching, the reference itself would be the
+    patched value, and the equivalence check would become vacuous and give a false PASS (ADR 0013).
     """
-    _assert_patches_not_applied("front の参照採取")
+    _assert_patches_not_applied("taking the front reference")
     with torch.no_grad():
         h, m_p, logs_p, x_mask = net_g.enc_p(
             inputs["x"],
@@ -1260,12 +1359,16 @@ def reference_front_outputs(net_g: nn.Module, inputs: dict[str, Any]) -> list[to
             inputs["style_vec"],
             g=inputs["g"],
         )
-        # 参照実装は x_lengths から x_mask を組む。こちらが外から渡す x_mask と食い違うと
-        # 「同じ入力の比較」でなくなるので、ここで固定する。
+        # The reference implementation builds x_mask from x_lengths. If it disagreed with the
+        # x_mask passed from outside, it would no longer be "a comparison on the same input", so it
+        # is pinned here.
         if not torch.equal(x_mask, inputs["x_mask"]):
-            raise AssertionError("参照実装が生成した x_mask が golden の x_mask と違う")
-        # 参照の reverse 経路は内部で randn を 1 回だけ引く。同じ seed をグローバルへ置けば
-        # make_noise（Generator 経由）と同じ列になる（CPU 既定生成器の同一性）。
+            raise AssertionError(
+                "the x_mask built by the reference implementation differs from the golden x_mask"
+            )
+        # The reference's reverse path draws randn exactly once internally. Putting the same seed
+        # into the global state gives the same sequence as make_noise (through a Generator) (the
+        # default CPU generator is the same).
         torch.manual_seed(_noise_seed(int(inputs["x"].shape[1])))
         logw_sdp = net_g.sdp(h, x_mask, g=inputs["g"], reverse=True, noise_scale=NOISE_SCALE)
         logw_dp = net_g.dp(h, x_mask, g=inputs["g"])
@@ -1279,10 +1382,12 @@ def _diff_entry(
     got: Sequence[torch.Tensor],
     expected: Sequence[torch.Tensor],
 ) -> dict[str, Any]:
-    """1 ケース分の同値レポート（出力名 → maxdiff と、全出力のビット一致）。
+    """The equivalence report for one case (output name → maxdiff, and bit identity of all
+    outputs).
 
-    `bit_exact` は「差 0」より強い主張（`0.0 == -0.0` は差 0 だがビットは違う）で、
-    remove_weight_norm のように**ビット一致が主張の中身**である検証で意味を持つ。
+    `bit_exact` is a stronger claim than "difference 0" (`0.0 == -0.0` has difference 0 but
+    different bits), and it matters for verifications where **bit identity is the claim**, such as
+    remove_weight_norm.
     """
     return {
         "length": length,
@@ -1298,11 +1403,12 @@ def _diff_entry(
 def verify_front(
     model_dir: Path, *, cases: Sequence[tuple[int, int]] = VERIFY_CASES
 ) -> list[dict[str, Any]]:
-    """front のパッチ前後 eager 同値を実重みで実測する。
+    """Measures the eager equivalence of front before and after patching, on the real weights.
 
-    MUST: 順序は「**全ケースの参照値を確定** → パッチ適用 → 比較」。パッチはクラス属性の
-    プロセス全域差し替えなので、1 ケースずつ「参照 → 比較」を回すと 2 ケース目以降の参照が
-    パッチ後の値になる（差が常に 0 になる恒真化）。
+    MUST: the order is "**settle the references of every case** → patch → compare". The patches
+    replace class attributes process-wide, so running "reference → compare" one case at a time would
+    make the references from the second case on the patched values (a vacuous check whose
+    difference is always 0).
     """
     net_g, _hps = load_net_g(model_dir)
     g = speaker_embedding(net_g)
@@ -1330,15 +1436,17 @@ def verify_front(
 def verify_flow(
     model_dir: Path, *, cases: Sequence[tuple[int, int]] = FLOW_VERIFY_CASES
 ) -> list[dict[str, Any]]:
-    """flow: 表入力版 `FlowReverse` と参照 `TransformerCouplingBlock(reverse=True)` の同値。
+    """flow: equivalence of the table-input `FlowReverse` with the reference
+    `TransformerCouplingBlock(reverse=True)`.
 
-    MUST: front と同じ順序制約（参照を全部採ってからパッチ）。MHA パッチはクラス属性
-    差し替えなので `net_g.flow` 側の注意層にも同時に効く。
+    MUST: the same ordering constraint as front (take every reference, then patch). The MHA patch
+    replaces class attributes, so it also takes effect on the attention layers of `net_g.flow` at
+    the same time.
     """
     net_g, _hps = load_net_g(model_dir)
     g = speaker_embedding(net_g)
 
-    _assert_patches_not_applied("flow の参照採取")
+    _assert_patches_not_applied("taking the flow reference")
     references = {}
     for length, pad in cases:
         inputs = flow_inputs(length, pad, g)
@@ -1362,19 +1470,21 @@ def verify_flow(
 def verify_dec(
     model_dir: Path, *, cases: Sequence[tuple[int, int]] = FLOW_VERIFY_CASES
 ) -> list[dict[str, Any]]:
-    """dec: `remove_weight_norm` **前後**の eager 同値（参照 = weight_norm 有効の原経路）。
+    """dec: eager equivalence **before and after** `remove_weight_norm` (reference = the original
+    path with weight_norm active).
 
-    recon はビット一致を 1 ケース（z=(1,192,50)）でしか実測しておらず、weight_norm の
-    実効重み `g · v / ‖v‖` が f32 で厳密に再現される保証はスペックには無い。ここで**全
-    ケース**を突合してその未検証事項を閉じる（`bit_exact` が主張の中身）。
+    The recon measured bit identity on only one case (z=(1,192,50)), and nothing in the spec
+    guarantees that weight_norm's effective weight `g · v / ‖v‖` is reproduced exactly in f32. This
+    compares **every case** to close that unverified point (`bit_exact` is the claim).
 
-    MUST: 参照を全ケース採ってから remove する。`remove_weight_norm` はパラメータを
-    破壊的に畳むので、1 ケースずつ回すと 2 ケース目以降の参照が remove 後の値になる。
+    MUST: take the references of every case before remove. `remove_weight_norm` folds the
+    parameters destructively, so running one case at a time would make the references from the
+    second case on the values after remove.
     """
     net_g, _hps = load_net_g(model_dir)
     g = speaker_embedding(net_g)
 
-    _assert_weight_norm_present(net_g.dec, "dec の参照採取")
+    _assert_weight_norm_present(net_g.dec, "taking the dec reference")
     references = {}
     for length, pad in cases:
         inputs = dec_inputs(length, pad, g)
@@ -1395,18 +1505,19 @@ def verify_dec(
 def verify_voice(
     model_dir: Path, *, cases: Sequence[tuple[int, int]] = FLOW_VERIFY_CASES
 ) -> list[dict[str, Any]]:
-    """voice: 融合ラッパと参照チェーン（未パッチ flow + weight_norm 有効 dec）の同値。
+    """voice: equivalence of the fused wrapper with the reference chain (unpatched flow + dec with
+    weight_norm active).
 
-    flow と dec の**両方**の汚染源を跨ぐので、このプロセスでは他の検証を一切走らせない
-    （CLI が 1 プロセス 1 検証を強制する）。
+    It spans the sources of contamination of **both** flow and dec, so no other verification runs
+    in this process (the CLI enforces one verification per process).
     """
     net_g, _hps = load_net_g(model_dir)
     g = speaker_embedding(net_g)
 
-    # 汚染源が 2 つ（パッチと remove）あるので門も 2 枚。片方だけ置くと、もう片方の順序
-    # 違反が「差 0 の偽 PASS」として通る。
-    _assert_patches_not_applied("voice の参照採取")
-    _assert_weight_norm_present(net_g.dec, "voice の参照採取")
+    # There are 2 sources of contamination (patches and remove), so there are 2 checks too. With
+    # only one, an ordering violation of the other would pass as "a false PASS with difference 0".
+    _assert_patches_not_applied("taking the voice reference")
+    _assert_weight_norm_present(net_g.dec, "taking the voice reference")
     references = {}
     for length, pad in cases:
         inputs = flow_inputs(length, pad, g)
@@ -1435,8 +1546,9 @@ EXPORTERS = {
     TARGET_VOICE: export_voice,
 }
 
-#: `--verify <target>` → 検証関数。**dp は無い** — パッチも前処理も通らないので「参照」と
-#: 「対象」が同一のモジュールになり、比較が恒真になる。
+#: `--verify <target>` → verification function. **There is none for dp** — it goes through neither
+#: patches nor preprocessing, so "reference" and "subject" would be the same module and the
+#: comparison would be vacuous.
 VERIFIERS = {
     TARGET_FRONT: verify_front,
     TARGET_FLOW: verify_flow,
@@ -1444,7 +1556,8 @@ VERIFIERS = {
     TARGET_VOICE: verify_voice,
 }
 
-#: 検証レポートの表示に使う記号名（front 系は P = 音素数、flow 系は T = フレーム数）。
+#: The symbol names shown in the verification report (P = phoneme count for the front group, T =
+#: frame count for the flow group).
 VERIFY_SYMBOL = {
     TARGET_FRONT: "P",
     TARGET_FLOW: "T",
@@ -1460,67 +1573,74 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 —"
-        " outputs/series/sbv2-<--model-dir のディレクトリ名>{,-f16,-i8,-i4}/）",
+        help="output directory (default: the series of each --dtype —"
+        " outputs/series/sbv2-<directory name of --model-dir>{,-f16,-i8,-i4}/)",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019。i4 は混成で、適格 linear / conv1d だけ group32 の i4・"
-        "残りは i8 — ADR 0069。**emit 専用**で"
-        " --verify とは併用できない）",
+        help="storage dtype of the weights (f16 / i8 fake-quantize, then store only the eligible"
+        " slots compressed — ADR 0018 / 0019; i4 is mixed: only eligible linear / conv1d in"
+        " group32 i4, the rest i8 — ADR 0069. **Emit-only**,"
+        " cannot be combined with --verify)",
     )
     parser.add_argument(
         "--target",
         action="append",
         choices=TARGETS,
         default=None,
-        help=f"emit するターゲット（繰り返し可・既定は全て: {', '.join(TARGETS)}）",
+        help=f"target to emit (repeatable; default: all of {', '.join(TARGETS)})",
     )
     parser.add_argument(
         "--sym-max",
         type=int,
         default=None,
         help=(
-            "記号次元の上限（既定はターゲット別: "
+            "limit of the symbolic dimension (default per target: "
             + " / ".join(f"{name}={value}" for name, value in TARGET_SYM_MAX.items())
-            + "）。逸脱は単一 --target のときだけ許す"
+            + "). A deviation is allowed only with a single --target"
         ),
     )
     parser.add_argument(
         "--verify",
         choices=sorted(VERIFIERS),
         default=None,
-        help="参照実装との eager 同値を検証する（emit はしない・1 プロセス 1 ターゲット）",
+        help="verify eager equivalence with the reference implementation (no emit; one target per"
+        " process)",
     )
     args = parser.parse_args(argv)
 
-    # MUST: 同一プロセスでの併用を機械的に拒否する。emit はパッチを当て・weight_norm を
-    # 畳むので、後から採る「前の参照」が既に汚染済みになり、同値検証が恒真化して偽 PASS
-    # する（ADR 0013）。順序を main の中で気をつける規律にはしない — 規律は破れるが、
-    # ここで落とせば破れない。
+    # MUST: reject combining them in one process, mechanically. emit applies the patches and folds
+    # weight_norm, so a "before" reference taken afterwards would already be contaminated, and the
+    # equivalence check would become vacuous and give a false PASS (ADR 0013). The order is not
+    # left as a discipline to observe inside main — a discipline can be broken, failing here
+    # cannot.
     if args.verify is not None and args.target is not None:
         parser.error(
-            "--verify と --target は同一プロセスで併用できない"
-            "（パッチのプロセス全域差し替えで参照が汚染され、同値検証が恒真化する）"
+            "--verify and --target cannot be combined in one process"
+            " (the process-wide patch replacement contaminates the reference and makes the"
+            " equivalence check vacuous)"
         )
 
     if args.verify is not None:
         if args.sym_max is not None:
-            parser.error("--sym-max は emit 専用（検証は eager 実行で記号次元を持たない）")
-        # MUST: --dtype も emit 専用。検証は格納形式を一切見ない eager 比較で、丸めを
-        # 足しても主張（パッチ前後の同値 / remove 前後のビット一致）は変わらない。むしろ
-        # dec / voice では**当てられない** — 丸めは remove の後にしか置けないのに参照は
-        # remove の前に採るので、丸めた側と丸めていない側の比較になって bit_exact が
-        # 常に False へ落ちる（門が壊れたのか資産が壊れたのか区別できなくなる）。
+            parser.error(
+                "--sym-max is emit-only (verification runs eagerly and has no symbolic dimensions)"
+            )
+        # MUST: --dtype is emit-only too. Verification is an eager comparison that never looks at
+        # the storage format, and adding rounding does not change the claim (equivalence before
+        # and after patching / bit identity before and after remove). Worse, for dec / voice it
+        # **cannot be applied** — rounding can only go after remove while the reference is taken
+        # before remove, so it would compare rounded against unrounded and bit_exact would always
+        # drop to False (making it impossible to tell a broken check from broken assets).
         if args.dtype != "f32":
             parser.error(
-                f"--dtype {args.dtype} は emit 専用（--verify とは併用できない）— 検証は"
-                "格納形式を見ない eager 比較で、dec / voice では丸めを remove_weight_norm の"
-                "後にしか当てられないのに参照は remove の前に採るため、"
-                "丸めた側と丸めていない側の比較になって bit_exact の主張が壊れる"
+                f"--dtype {args.dtype} is emit-only (cannot be combined with --verify) —"
+                " verification is an eager comparison that ignores the storage format, and for"
+                " dec / voice rounding can only be applied after remove_weight_norm while the"
+                " reference is taken before remove, "
+                "so it would compare rounded against unrounded and break the bit_exact claim"
             )
         report = VERIFIERS[args.verify](args.model_dir)
         symbol = VERIFY_SYMBOL[args.verify]
@@ -1536,10 +1656,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     targets = list(dict.fromkeys(args.target if args.target is not None else TARGETS))
-    # MUST: 1 つの --sym-max を複数ターゲットへ配ると、既定が桁違いに違う front 系と
-    # flow 系のどちらかが必ず誤値になる（しかも沈黙する — ADR 0013）。
+    # MUST: handing one --sym-max to several targets always gives a wrong value for one of the
+    # front and flow groups, whose defaults differ by orders of magnitude (silently, too — ADR
+    # 0013).
     if args.sym_max is not None and len(targets) != 1:
-        parser.error("--sym-max は --target をちょうど 1 つ指定したときだけ使える")
+        parser.error("--sym-max can be used only when exactly one --target is given")
     if args.out is None:
         args.out = default_out_root(args.model_dir, args.dtype)
 

@@ -1,16 +1,20 @@
-"""視認評価専用の組み立て（`anima/eval_dist.py`）の約束事。
+"""The rules of the build used only for visual evaluation (`anima/eval_dist.py`).
 
-ここが守るのは 1 点だけ — **配布と評価を取り違えない**こと。i4 の感度実験変種は格納形も
-本数も `verify_dist` もヘッダ検査も既定と同じ（i4 と i8 の混成）なので、資産から見分ける手は
-`calib_provenance.json` の `method` しか無い。したがって:
+This guards one thing only — **not mixing up the distribution and the evaluation**. The i4
+sensitivity-experiment variant has the same storage form, count, `verify_dist` and header checks
+as the default (a mix of i4 and i8), so the only way to tell them apart from the assets is the
+`method` of `calib_provenance.json`. Hence **both directions** are needed:
 
-- 評価の口は**変種の記録しか受けない**（配布条件で焼いた系列を挿しても落ちる）
-- 配布の口は**既定の記録しか受けない**（変種を挿しても落ちる）
+- the evaluation entry **accepts only the variant's record** (plugging in a series baked under the
+  shipping conditions fails)
+- the shipping entry **accepts only the default record** (plugging in the variant fails)
 
-の**両方向**が要る。片方だけだと「i4 席の中身がどちらの丸め方か」が置き場から読めなくなる。
+With only one of them, "which rounding method fills the i4 slot" can no longer be read from the
+location.
 
-組み立てエンジンそのもの（配置・共有・manifest・検証）は `test_distribution.py` の担当なので、
-ここでは計画（1 バイトも書かない側）までを見る。
+The build engine itself (placement, sharing, manifest, verification) is covered by
+`test_distribution.py`, so this file goes only as far as the plan (the side that writes not a
+single byte).
 """
 
 from __future__ import annotations
@@ -42,12 +46,14 @@ from anima.distribution import (
 from karume.container import AssetInput
 from karume.dist import DistError
 
-#: 素版の視認対象（i4 席が配布から外れているモデル — 2026-08-24 の裁定）。
+#: The base model's visual-evaluation target (a model whose i4 slot is out of the distribution —
+#: the ruling of 2026-08-24).
 MODEL = ANIMA_BASE_MODEL_NAME
 
 
 def _fake_safetensors(dtype: str, payload: bytes) -> bytes:
-    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。"""
+    """The smallest safetensors that passes the storage-dtype check (8-byte length + header JSON +
+    data section)."""
     header: dict[str, Any] = {
         "w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}
     }
@@ -61,11 +67,13 @@ def _write(path: Path, payload: bytes) -> None:
 
 
 def _calib_record(method: str, model: str) -> bytes:
-    """`anima/export.py` が i4 系列へ残す校正条件の記録（実物と同じ形）。
+    """The record of calibration conditions that `anima/export.py` leaves in an i4 series (the same
+    shape as the real one).
 
-    step / CFG は**モデル別**（`anima.calib.calib_conditions` が `pipeline_config` から導く）
-    ので、身代わりも同じ 1 箇所から引く — 写すと「どのモデルの条件で焼いたか」を見る門と
-    独立でなくなる。
+    step / CFG are **per model** (`anima.calib.calib_conditions` derives them from
+    `pipeline_config`), so the stand-in takes them from the same single place — copying them
+    would make it no longer independent of the check of "which model's conditions it was baked
+    with".
     """
     defaults = anima_model(model).pipeline_config["defaults"]
     return json.dumps(
@@ -83,14 +91,17 @@ def _calib_record(method: str, model: str) -> bytes:
 
 
 def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> Path:
-    """素版 1 モデルの系列（f16 / i8 / bf16 の配布系列 + **変種の i4 系列**）を偽資産で作る。
+    """Build the series of one base model (the f16 / i8 / bf16 shipping series + **the variant's
+    i4 series**) from fake assets.
 
-    weights の席は**正当なコンテナ**（組み立ては入力を開いて宣言の全規則で見る —
-    `karume.dist.assert_weight_components_verified`）。rope 素表は transformer の容器の
-    **資産**（ADR 0109 決定 4）なので、同じ器の中へ入る。
+    The weights slots are **valid containers** (the build opens its inputs and checks them against
+    every rule of the declaration — `karume.dist.assert_weight_components_verified`). The rope
+    base table is an **asset** of the transformer's container (ADR 0109 decision 4), so it goes
+    into the same container.
     """
     sources = anima_sources(series_dir, MODEL)
-    # text stack は素版が宣言する格納ラベルの数だけ（f16 + 忠実プリセットの bf16）。
+    # One text stack per storage label the base model declares (f16 + the bf16 of the faithful
+    # preset).
     for storage, base in sources.base.items():
         write_component(
             base / "text_encoder" / "model.krm",
@@ -113,7 +124,8 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
             series / "transformer" / "model.krm",
             ir_container(
                 mark=f"dit-{storage}",
-                # 疑似系列も**部品名で名乗る**（グラフ名 = weights のキー・container-v1 §2.1）。
+                # The fake series is **named by its component** too (graph name = weights key,
+                # container-v1 §2.1).
                 named="transformer",
                 storage=storage,
                 assets={ROPE_BASE_ASSET: rope},
@@ -125,17 +137,19 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
 
 class TestEvalPlan:
     def test_it_restores_the_i4_seat_without_touching_the_shipping_table(self, tmp_path):
-        """MUST: 席は spec の差し替えで戻す — `ANIMA_MODELS` は 1 行も動かない。"""
+        """MUST: the slot is restored by replacing the spec — not one line of `ANIMA_MODELS`
+        moves."""
         _build_series(tmp_path / "series")
 
         plan = eval_dist.eval_plan(tmp_path / "series", MODEL)
 
-        assert "i4" not in anima_model(MODEL).storages, "配布の受理集合が動いている"
+        assert "i4" not in anima_model(MODEL).storages, "the distribution's accepted set moved"
         assert set(plan.weights["transformer"]) == {"f16", "i8", "bf16", "i4"}
         assert "f16+dit4" in plan.quants
 
     def test_the_i4_seat_reads_the_variant_series(self, tmp_path):
-        """MUST: 配布条件で焼いた `*-i4-dyn` は見に行かない（同じ席へ別の丸め方が入らない）。"""
+        """MUST: it does not read `*-i4-dyn` baked under the shipping conditions (no other rounding
+        method gets into the same slot)."""
         variant = _build_series(tmp_path / "series")
 
         plan = eval_dist.eval_plan(tmp_path / "series", MODEL)
@@ -144,40 +158,48 @@ class TestEvalPlan:
         assert eval_dist.EVAL_SERIES.format(model=MODEL) != f"{MODEL}-i4-dyn"
 
     def test_a_series_calibrated_for_shipping_is_refused(self, tmp_path):
-        """取り違えの片方向: 既定の丸め方で焼いた系列を視認の席へ挿しても落ちる。"""
+        """One direction of the mix-up: plugging a series baked with the default rounding into the
+        visual-evaluation slot fails."""
         _build_series(tmp_path / "series", method=CALIB_SHIPPABLE_METHOD)
 
-        with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
+        with pytest.raises(
+            DistError, match="not built with a rounding method allowed for distribution"
+        ):
             eval_dist.eval_plan(tmp_path / "series", MODEL)
 
     def test_a_series_without_calibration_is_refused(self, tmp_path):
-        """`--no-calib` の smoke 生成物で視認裁定を採らない（品質の基線が別物）。"""
+        """No visual ruling is taken from a `--no-calib` smoke output (its quality baseline is a
+        different one)."""
         _build_series(tmp_path / "series", method="rtn-adaln8")
 
         with pytest.raises(DistError):
             eval_dist.eval_plan(tmp_path / "series", MODEL)
 
     def test_an_unknown_model_is_refused(self, tmp_path):
-        """知らない名前は選択肢を並べて落とす（受理集合 = ANIMA_MODELS）。"""
-        with pytest.raises(DistError, match="視認評価の対象外"):
+        """An unknown name fails with the choices listed (accepted set = ANIMA_MODELS)."""
+        with pytest.raises(DistError, match="is not a visual-evaluation target"):
             eval_dist.eval_plan(tmp_path / "series", "anima-nonexistent")
 
     def test_a_model_with_a_shipped_i4_seat_is_refused(self, tmp_path, monkeypatch):
-        """配布へ i4 席が戻ったモデルは配布経路で組む — この口では受けない。
+        """A model whose i4 slot is back in the distribution is built by the shipping path — this
+        entry does not accept it.
 
-        2026-09-01 の裁定で配布の i4 席は全モデルから消えた（旧 fused turbo の席も持ち越さ
-        ない）ので、実在のモデルではこの分岐を踏めない — i4 席を注入した spec で機構を守る。
+        The ruling of 2026-09-01 removed the shipping i4 slot from every model (the slot of the
+        old fused turbo is not carried over either), so no real model reaches this branch — a
+        spec with an injected i4 slot guards the mechanism.
         """
         spec = replace(anima_model(ANIMA_TURBO_MODEL_NAME), storages=("f16", "i8", "i4"))
         monkeypatch.setattr(eval_dist, "anima_model", lambda name: spec)
-        with pytest.raises(DistError, match="既に配布で i4 席を持っている"):
+        with pytest.raises(DistError, match="already has an i4 preset in the distribution"):
             eval_dist.eval_plan(tmp_path / "series", ANIMA_TURBO_MODEL_NAME)
 
     def test_the_default_output_never_lands_in_the_distribution_root(self):
-        """MUST: `models/` は配布形だけの場所（`_shared.paths` の DECIDED）。"""
+        """MUST: `models/` is a place for the distribution layout only (the DECIDED of
+        `_shared.paths`)."""
         out = eval_dist.default_out_dir(eval_dist.PIPELINE, [MODEL])
 
-        # 既定 out = `<EVAL_ROOT>/<リポ名>/<日付>_eval/`（bench の日付席 — assets-layout）。
+        # Default out = `<EVAL_ROOT>/<repo name>/<date>_eval/` (the dated slot of bench —
+        # assets-layout).
         assert out.parent.parent == eval_dist.EVAL_ROOT
         assert "models" not in out.parts
 
@@ -187,11 +209,11 @@ class TestEvalPlan:
 
 
 class TestEndToEnd:
-    """CLI から 1 周（計画 → 実体化 → カード → `verify_dist`）通ることを見る。
+    """Check one full round from the CLI (plan → materialize → card → `verify_dist`).
 
-    ここだけ実体化まで踏むのは費用の非対称のため — 変種の i4 系列を焼くのに実測 ~3h 掛かる
-    ので、組み立て側の綻び（カードの描き手・既定の出力先・manifest の形）を**焼いた後で**
-    知る形にしない。
+    Only this class goes as far as materializing, because of the cost asymmetry — baking the
+    variant's i4 series takes ~3h (measured), so a flaw on the build side (the card renderer, the
+    default output location, the manifest's shape) must not be discovered **only after baking**.
     """
 
     def test_the_cli_assembles_a_loadable_distribution(self, tmp_path):
@@ -205,11 +227,13 @@ class TestEndToEnd:
         quants = manifest["models"][MODEL]["quants"]
         assert "f16+dit4" in quants
         assert quants["f16+dit4"]["weights"]["transformer"] == "i4"
-        # 視認の入口（`examples/anima/main.ts` の `--source`）が要求するのは manifest 1 枚。
+        # The visual-evaluation entry (`--source` of `examples/anima/main.ts`) needs just the
+        # manifest.
         assert (out_dir / "README.md").is_file()
 
     def test_the_notice_states_the_i4_series_it_carries(self, tmp_path):
-        """改変告知は中身と揃う — 席を戻した i4 系列の追加も配布の int8 行と並べて述べる。"""
+        """The modification notice matches the contents — the added i4 series of the restored slot
+        is stated alongside the shipping int8 line."""
         _build_series(tmp_path / "series")
         out_dir = tmp_path / "eval" / "karume-anima-v1.0-adaln8"
 
@@ -235,11 +259,12 @@ class TestEndToEnd:
 
 
 class TestShippingRefusesTheVariant:
-    """取り違えのもう片方向: 変種の記録は**配布の**組み立てで落ちる。
+    """The other direction of the mix-up: the variant's record fails **the shipping** build.
 
-    2026-09-01 の裁定で配布の i4 席は全モデルから消えたので、実在の spec ではこの網を
-    踏めない — i4 席を注入した spec と系列で機構を守る。席が将来どのモデルへ戻っても
-    同じ 1 実装が掛かる（判定は `spec.calib_method` 1 箇所）。
+    The ruling of 2026-09-01 removed the shipping i4 slot from every model, so no real spec
+    reaches this check — a spec and series with an injected i4 slot guard the mechanism. Whichever
+    model the slot returns to in the future, the same single implementation applies (the decision
+    is in one place, `spec.calib_method`).
     """
 
     def _i4_seat(self, tmp_path):
@@ -262,7 +287,9 @@ class TestShippingRefusesTheVariant:
             _calib_record(ADALN_I8_CALIB_METHOD, model),
         )
 
-        with pytest.raises(DistError, match="配布して良い丸め方式で作られていない"):
+        with pytest.raises(
+            DistError, match="not built with a rounding method allowed for distribution"
+        ):
             assert_calib_provenance(sources, spec)
 
     def test_the_shipping_gate_still_accepts_the_default_record(self, tmp_path):

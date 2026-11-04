@@ -1,33 +1,40 @@
-r"""examples/anima デモのプロンプト層（トークナイザ）の資産 prep（表焼き + フィクスチャ）。
+r"""Asset prep for the prompt layer (tokenizers) of the examples/anima demo (tables + fixture).
 
-`anima/export.py` が**グラフ**を、`anima/pipeline_ref.py` が**ホスト側の数の正**を出すのに対し、
-こちらが扱うのは「プロンプト文字列 → トークン id 列」だけ。モデルグラフには触らない。
+Where `anima/export.py` produces **the graph** and `anima/pipeline_ref.py` **the host-side numeric
+truth**, this module handles only "prompt string → token id sequence". It does not touch the model
+graph.
 
     uv run python -m anima.demo
 
-出力は 2 系統（**1 回の実行で必ず両方**出す — 同じ表から作らないと、実行時資産と
-フィクスチャが別々に古びて「テストは緑だがデモだけ別の id 列」になる）:
+Two outputs (**always both in one run** — unless they are built from the same tables, the runtime
+assets and the fixture go stale separately and you get "the tests are green but only the demo has
+a different id sequence"):
 
-  ① 実行時資産 `outputs/series/anima-demo/text/`（`.gitignore` 配下・計 4.6MB 級）
-       qwen2-tokenizer.json   語彙 / merges / 文字クラス表 / NFC 分節表 / 追加語彙
-       t5-tokenizer.json      語彙 / スコア / 正規化表（Precompiled の畳み込み）/ 追加語彙
-  ② パリティ用フィクスチャ `packages/models/tests/fixtures/anima-text/parity.json`
-     （**git 管理**・470KB 級）
-       全ケース（PROMPT_CASES）の参照 id 列と、その再現に要る語彙の**部分集合**
-       （151k / 32k の語彙を commit しないための分離）、および NFC の実測対
+  ① runtime assets `outputs/series/anima-demo/text/` (under `.gitignore`, about 4.6MB in total)
+       qwen2-tokenizer.json   vocab / merges / char-class table / NFC segment table / added tokens
+       t5-tokenizer.json      vocab / scores / normalizer table (folded Precompiled) / added tokens
+  ② parity fixture `packages/models/tests/fixtures/anima-text/parity.json`
+     (**tracked in git**, about 470KB)
+       the reference id sequences of all cases (PROMPT_CASES) and the **subset** of the vocab
+       needed to reproduce them (split off so the 151k / 32k vocabs are not committed), plus the
+       measured NFC pairs
 
-MUST: 資産を `models/<repo>/`（配布形）直下に置かない。あちらは manifest が宣言した
-ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
-止まる（`outputs/misc/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
+MUST: do not put the assets directly under `models/<repo>/` (the distribution). That is a tree that
+lists only the files the manifest declares and is **uploaded to HF as is**; an undeclared file
+stops `verify_dist` (the same reason `outputs/misc/sbv2-demo/` / the series `anima-pipeline/` were
+kept separate).
 
-畳み方の根拠と検証は `anima/text.py` / `_shared/qwen2_tokenizer.py` の docstring が正本。要点だけ:
-**Unicode 判定は TS で再実装しないし標準 API にも委ねない** — 正本（Rust の `tokenizers` /
-その正規表現エンジン / `unicode-normalization`）を Python から全コードポイントに当てて
-閉区間表・写像表へ畳む。畳み込みの同値は emit のたびに網羅 + 乱択で検査し、加えて参照実装と
-`AutoTokenizer` の id 列を乱択 2,000 件で突き合わせる。外れたら**何も書かない**（ADR 0005）。
+The source of truth for how the tables are folded and verified is the docstrings of
+`anima/text.py` / `_shared/qwen2_tokenizer.py`. In short: **Unicode decisions are neither
+reimplemented in TS nor delegated to a standard API** — the source of truth (Rust `tokenizers` /
+its regex engine / `unicode-normalization`) is applied from Python to every code point and folded
+into closed-interval tables and mapping tables. The equivalence of the folding is checked
+exhaustively + by random sampling on every emit, and in addition the id sequences of the reference
+implementation and `AutoTokenizer` are compared on 2,000 random samples. On a mismatch **nothing is
+written** (ADR 0005).
 
-生成後は `deno fmt packages/models/tests/fixtures/anima-text/parity.json` を掛ける
-（commit 形はフォーマッタが正 — `deno task verify` の `fmt --check` が fixtures も見る）。
+After generation, run `deno fmt packages/models/tests/fixtures/anima-text/parity.json` (the
+formatter decides the committed form — `fmt --check` of `deno task verify` also covers fixtures).
 """
 
 from __future__ import annotations
@@ -45,29 +52,31 @@ from . import text as at
 
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
-#: 実行時資産の置き場（`outputs/` は `.gitignore` 済み）。この 2 本が配布形の `tokenizer/` /
-#: `tokenizer_2/` へ入り（`anima/distribution.py` の `ANIMA_TOKENIZER_SERIES`）、Deno 側は
-#: manifest の asset 経由で `packages/models/src/text/qwen2-tokenizer.ts` /
-#: `packages/models/src/anima/text/t5-tokenizer.ts` が読む
-#: （この置き場を直接読む TS は無い）。
+#: Location of the runtime assets (`outputs/` is in `.gitignore`). These 2 files go into the
+#: distribution's `tokenizer/` / `tokenizer_2/` (`ANIMA_TOKENIZER_SERIES` in
+#: `anima/distribution.py`), and on the TS side `packages/models/src/text/qwen2-tokenizer.ts` /
+#: `packages/models/src/anima/text/t5-tokenizer.ts` read them through the manifest's assets
+#: (no TS reads this location directly).
 DEFAULT_ASSETS_DIR = SERIES_ROOT / "anima-demo" / "text"
 QWEN_ASSET_FILE = "qwen2-tokenizer.json"
 T5_ASSET_FILE = "t5-tokenizer.json"
 
-#: パリティ用フィクスチャ（**git 管理**）。Deno 側
-#: `packages/models/tests/anima_tokenizer_test.ts` が読む。
+#: Parity fixture (**tracked in git**). Read on the TS side by
+#: `packages/models/tests/anima_tokenizer_test.ts`.
 DEFAULT_FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "anima-text" / "parity.json"
 )
 
-#: 正本の呼び出しに合わせた切り詰め長。`anima/pipeline_ref.py` の `--max-sequence-length` の既定
-#: （両トークナイザ共通で `max_length=512, truncation=True` として渡される）。
+#: Truncation length matching the source of truth's call. The default of `--max-sequence-length`
+#: in `anima/pipeline_ref.py` (passed to both tokenizers as `max_length=512, truncation=True`).
 MAX_LENGTH = 512
 
-#: パリティ検証のプロンプト集。**素朴な移植が落ちる境界を 1 件ずつ**持たせる設計で、
-#: 目に見えない文字は必ず \uXXXX で書く（編集の途中で消えたり別物が混ざるため）。
-#: **正規化で別の文字へ潰れる綴りも同じ扱い**にする（`hangul` のジャモ列は可視だが、NFC が
-#: 1 度掛かると合成済み音節に化けて「合成済み × 2」になり、ケースの狙いだけが静かに消える）。
+#: Prompt set for the parity check. Designed so that **each case holds one boundary where a naive
+#: port fails**; invisible characters are always written as \uXXXX (they can vanish or be replaced
+#: during editing). **Spellings that normalization collapses into other characters are treated the
+#: same way** (the jamo sequence of `hangul` is visible, but once NFC is applied it turns into a
+#: precomposed syllable, giving "precomposed × 2", and only the point of the case silently
+#: disappears).
 PROMPT_CASES: list[tuple[str, str, str]] = [
     (
         "tags",
@@ -222,54 +231,58 @@ def _resolve(repo: str, filename: str, snapshot: Path | None) -> Path:
 
 
 def check_upstream_shape(qwen_raw: dict[str, Any], t5_raw: dict[str, Any]) -> None:
-    """焼いた表が前提にしている上流 `tokenizer.json` の構造を検査する（fail loudly）。
+    """Checks the structure of upstream `tokenizer.json` that the baked tables assume (fail loudly).
 
-    ここで見る項目はどれも「外れると id 列だけが静かに変わる」形で、`build_cases` の
-    AutoTokenizer 突合は **PROMPT_CASES が叩く範囲でしか**拾えない（NFC のエンジン差が
-    28 ケースをすり抜けたのと同じ穴）。前提そのものを構造で固定する。
+    Every item here is of the kind "when it is off, only the id sequence silently changes", and the
+    AutoTokenizer comparison of `build_cases` catches it **only within what PROMPT_CASES exercises**
+    (the same hole through which the NFC engine difference slipped past 28 cases). The premises
+    themselves are pinned structurally.
     """
     if qwen_raw["normalizer"]["type"] != "NFC":
-        raise ValueError(f"Qwen2 の normalizer が NFC でない: {qwen_raw['normalizer']['type']}")
+        raise ValueError(f"Qwen2's normalizer is not NFC: {qwen_raw['normalizer']['type']}")
     pre = qwen_raw["pre_tokenizer"]["pretokenizers"]
     if pre[0]["type"] != "Split":
-        raise ValueError(f"Qwen2 の pre_tokenizer 先頭が Split でない: {pre[0]['type']}")
+        raise ValueError(f"Qwen2's first pre_tokenizer is not Split: {pre[0]['type']}")
     byte_level = [entry for entry in pre if entry["type"] == "ByteLevel"]
     if len(byte_level) != 1 or byte_level[0]["add_prefix_space"]:
-        raise ValueError("Qwen2 の ByteLevel が 1 段・add_prefix_space=false でない")
+        raise ValueError("Qwen2's ByteLevel is not a single stage with add_prefix_space=false")
     if t5_raw["model"].get("byte_fallback"):
-        raise ValueError("T5 の Unigram が byte_fallback を使っている（unk 融合の前提が崩れる）")
+        raise ValueError("T5's Unigram uses byte_fallback (breaks the premise of unk fusion)")
 
-    # post_processor: Qwen2 は**何も足さない**（だから切り詰めが単純な先頭切りでよい）、
-    # T5 は末尾に `</s>` を 1 つだけ足す（参照実装が自前で足している分）。
+    # post_processor: Qwen2 **adds nothing** (which is why truncation can simply keep the head),
+    # T5 adds exactly one `</s>` at the end (what the reference implementation adds itself).
     qwen_post = qwen_raw["post_processor"]
     if qwen_post["type"] != "TemplateProcessing" or any(
         "SpecialToken" in entry for entry in qwen_post["single"]
     ):
-        raise ValueError(f"Qwen2 の post_processor が特殊トークンを足す: {qwen_post}")
+        raise ValueError(f"Qwen2's post_processor adds special tokens: {qwen_post}")
     t5_post = t5_raw["post_processor"]
     t5_specials = [
         entry["SpecialToken"]["id"] for entry in t5_post["single"] if "SpecialToken" in entry
     ]
     if t5_post["type"] != "TemplateProcessing" or t5_specials != ["</s>"]:
-        raise ValueError(f"T5 の post_processor が `</s>` 1 つだけを足す形でない: {t5_post}")
+        raise ValueError(f"T5's post_processor does not add exactly one `</s>`: {t5_post}")
 
-    # 追加語彙のフラグは全て既定値のはず（`normalized: true` は正規化**後**に照合される /
-    # `lstrip` `rstrip` は前後の空白を食う / `single_word` は語境界を要求する — どれも
-    # 「正規化の前に leftmost-longest で切り出す」という写経の意味を変える）。
+    # The flags of the added tokens should all be at their defaults (`normalized: true` matches
+    # **after** normalization / `lstrip` `rstrip` eat the surrounding whitespace / `single_word`
+    # requires word boundaries — each changes the meaning of the transcription, "split out
+    # leftmost-longest before normalization").
     for name, raw in (("Qwen2", qwen_raw), ("T5", t5_raw)):
         for entry in raw["added_tokens"]:
             flags = {key: entry[key] for key in ("lstrip", "rstrip", "single_word", "normalized")}
             if any(flags.values()):
                 raise ValueError(
-                    f"{name} の追加語彙 {entry['content']!r} のフラグが既定値でない: {flags}"
+                    f"{name}: the flags of added token {entry['content']!r} are not the"
+                    f" defaults: {flags}"
                 )
 
 
 def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
-    """`tokenizer.json` 2 本から、Deno 側が引くだけの表を作って検証する。
+    """Builds and verifies, from the 2 `tokenizer.json` files, the tables the TS side only looks up.
 
-    検証（畳み込みの同値）を通らなければ例外で落ちる = **1 バイトも書かない**。畳んだ根拠
-    そのものなので、`--fuzz 0` で薄めることはできても網羅の 3 本は外せない。
+    If the verification (equivalence of the folding) fails, it raises = **not a single byte is
+    written**. It is the very justification of the folding, so `--fuzz 0` can thin it out, but the
+    3 exhaustive checks cannot be removed.
     """
     qwen_path = _resolve(repo, "tokenizer/tokenizer.json", snapshot)
     t5_path = _resolve(repo, "t5_tokenizer/tokenizer.json", snapshot)
@@ -277,7 +290,7 @@ def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
     qwen_raw, t5_raw = source.qwen_json(), source.t5_json()
 
     if qwen_raw["model"]["type"] != "BPE" or t5_raw["model"]["type"] != "Unigram":
-        raise ValueError("model.type が想定（BPE / Unigram）と違う")
+        raise ValueError("model.type differs from the expected (BPE / Unigram)")
     check_upstream_shape(qwen_raw, t5_raw)
 
     started = time.perf_counter()
@@ -305,37 +318,44 @@ def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
 
     qwen_vocab: dict[str, int] = qwen_raw["model"]["vocab"]
     qwen_merges = [(left, right) for left, right in qwen_raw["model"]["merges"]]
-    # 行区切り形式（行番号 = id / rank）が壊れないことを emit の側で検査する。上流の語彙が
-    # 変わったときに黙って壊れる形を塞ぐ（TS 側は行を split するだけで、異常を検出できない）。
+    # The emit side checks that the line-separated format (line number = id / rank) cannot break.
+    # This closes off silent breakage when the upstream vocab changes (the TS side only splits the
+    # lines and cannot detect an anomaly).
     for token in qwen_vocab:
         if "\n" in token or " " in token:
-            raise ValueError(f"Qwen2 語彙に改行 / 空白を含むトークン {token!r} — 行区切りが壊れる")
+            raise ValueError(
+                f"Qwen2 vocab token {token!r} contains a newline / space — breaks the line format"
+            )
     t5_vocab = [(token, float(score)) for token, score in t5_raw["model"]["vocab"]]
     for token, _ in t5_vocab:
         if "\n" in token:
-            raise ValueError(f"T5 語彙に改行を含むトークン {token!r} — 行区切りが壊れる")
+            raise ValueError(
+                f"T5 vocab token {token!r} contains a newline — breaks the line format"
+            )
 
     ordered_qwen = [""] * len(qwen_vocab)
     for token, tid in qwen_vocab.items():
         ordered_qwen[tid] = token
     if any(token == "" for token in ordered_qwen):
-        raise ValueError("Qwen2 語彙の id に穴がある（行番号 = id の前提が崩れている）")
+        raise ValueError("Qwen2 vocab ids have a gap (breaks the premise line number = id)")
 
     qwen_asset = {
         "source": f"{repo}#tokenizer",
         "maxLength": MAX_LENGTH,
         "addedTokens": sorted(at.added_token_map(qwen_raw).items(), key=lambda kv: kv[1]),
         "classes": classes,
-        # 短縮形 `(?i:'s|…)` の大小無視。ASCII 相当ではない（U+017F → s）。
+        # Case-insensitivity of the contractions `(?i:'s|…)`. Not ASCII-equivalent (U+017F → s).
         "caseFold": sorted([cp, target] for cp, target in case_fold.items()),
-        # 正本の NFC と素の NFC が割れる cp（ここで分節してから正規化する）。
+        # Code points where the source of truth's NFC and plain NFC split (segment here, then
+        # normalize).
         "nfcSegments": nfc_segments,
-        # 行番号 0-origin = id。byte-level 語彙は改行も空白も含まない（上で検査済み）。
+        # 0-based line number = id. The byte-level vocab contains no newline or space (checked
+        # above).
         "vocabText": "\n".join(ordered_qwen),
-        # 行番号 0-origin = rank。
+        # 0-based line number = rank.
         "mergesText": "\n".join(f"{left} {right}" for left, right in qwen_merges),
-        # 行数の期待値。欠けた `mergesText` は「BPE の分割だけが変わる」沈黙誤値になるので、
-        # TS 側が split の結果と突き合わせられるようにする。
+        # Expected line counts. A truncated `mergesText` gives a silent wrong value where "only the
+        # BPE split changes", so the TS side can compare them with the result of the split.
         "vocabCount": len(ordered_qwen),
         "mergesCount": len(qwen_merges),
     }
@@ -345,7 +365,7 @@ def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
         "unkId": t5_raw["model"]["unk_id"],
         "eosId": at.added_token_map(t5_raw)["</s>"],
         "addedTokens": sorted(at.added_token_map(t5_raw).items(), key=lambda kv: kv[1]),
-        # T5 の WhitespaceSplit は Qwen2 の `\s` と同じ集合（`verify_char_classes` が実測済み）。
+        # T5's WhitespaceSplit is the same set as Qwen2's `\s` (measured by `verify_char_classes`).
         "space": classes["space"],
         "normalizer": tables.to_json(),
         "vocabText": "\n".join(token for token, _ in t5_vocab),
@@ -372,7 +392,7 @@ def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
 
 
 def references(built: dict[str, Any]) -> tuple[q2.Qwen2Reference, at.T5Reference]:
-    """焼いた表**だけ**を見る参照実装の対（TS 実装の鏡像）。"""
+    """The pair of reference implementations that read **only** the baked tables (mirrors of TS)."""
     qwen = q2.Qwen2Reference(
         vocab=built["qwenVocab"],
         merges={pair: rank for rank, pair in enumerate(built["qwenMerges"])},
@@ -395,24 +415,25 @@ def references(built: dict[str, Any]) -> tuple[q2.Qwen2Reference, at.T5Reference
 
 
 def reference_ids(tokenizer: Any, text: str) -> list[int]:
-    """`anima.pipeline_ref.encode_text` と**同じ呼び方**で正本の id 列を取る。
+    """Gets the true id sequence with **the same call** as `anima.pipeline_ref.encode_text`.
 
-    MUST: chat template を通さない（素の `__call__`）。`tokenizer/chat_template.jinja` は
-    同梱されているが Anima の経路では使わず、`apply_chat_template` を通すと `<|im_start|>`
-    系が前置されて id 列が丸ごと別物になる。
+    MUST: no chat template (the plain `__call__`). `tokenizer/chat_template.jinja` is bundled but
+    the Anima path does not use it; going through `apply_chat_template` prefixes the `<|im_start|>`
+    family and makes the id sequence entirely different.
     """
     encoded = tokenizer([text], padding="longest", max_length=MAX_LENGTH, truncation=True)
     return list(encoded["input_ids"][0])
 
 
 def build_cases(repo: str, built: dict[str, Any]) -> list[dict[str, Any]]:
-    """全ケースの正本 id 列を採り、参照実装と一致することを確かめる。
+    """Takes the true id sequences of all cases and checks the reference implementation matches.
 
-    正本は `transformers` の `AutoTokenizer`。ここが緑であることが「焼いた表に必要な情報が
-    全部入っている」ことの機械証明で、TS 実装はこの写経になる。1 件でも違えば **emit しない**
-    （フィクスチャに「参照実装では再現できない id 列」を焼き付けない）。同じ突合を
-    `anima/tests/test_demo.py` が**commit 済みフィクスチャ**に対しても走らせる（上流の
-    tokenizer.json が動いたときに、再生成しなくても気づけるようにするため）。
+    The source of truth is `transformers`' `AutoTokenizer`. This being green is the mechanical proof
+    that "the baked tables hold all the information needed", and the TS implementation is a
+    transcription of it. If even one case differs, **nothing is emitted** (no "id sequence the
+    reference implementation cannot reproduce" is baked into the fixture).
+    `anima/tests/test_demo.py` runs the same comparison against **the committed fixture** too (so
+    that a change in upstream's tokenizer.json is noticed even without regenerating).
     """
     from transformers import AutoTokenizer
 
@@ -429,9 +450,15 @@ def build_cases(repo: str, built: dict[str, Any]) -> list[dict[str, Any]]:
         got_q = qwen_ref.encode(text, MAX_LENGTH)
         got_t = t5_ref.encode(text, MAX_LENGTH)
         if got_q != want_q:
-            raise ValueError(f"[{name}] Qwen2 id 列が正本と違う\n  正本={want_q}\n  参照={got_q}")
+            raise ValueError(
+                f"[{name}] Qwen2 id sequence differs from the source of truth\n"
+                f"  truth={want_q}\n  reference={got_q}"
+            )
         if got_t != want_t:
-            raise ValueError(f"[{name}] T5 id 列が正本と違う\n  正本={want_t}\n  参照={got_t}")
+            raise ValueError(
+                f"[{name}] T5 id sequence differs from the source of truth\n"
+                f"  truth={want_t}\n  reference={got_t}"
+            )
         cases.append(
             {
                 "id": name,
@@ -445,8 +472,9 @@ def build_cases(repo: str, built: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
-#: id 列の乱択突合に混ぜる文字（絵文字 / 地域表示子 / 異体字 / 結合文字 / ハングル字母 /
-#: 各種空白・制御 / 珍しい面の文字）。`PROMPT_CASES` が叩かない組み合わせを機械的に踏ませる。
+#: Characters mixed into the random comparison of id sequences (emoji / regional indicators /
+#: variation selectors / combining marks / hangul jamo / assorted spaces and controls / characters
+#: from rare planes). Mechanically exercises combinations `PROMPT_CASES` does not hit.
 _FUZZ_EXOTIC = (
     0x000A, 0x000D, 0x0009, 0x0020, 0x00A0, 0x2028, 0x3000, 0x200B, 0x200D, 0xFEFF,
     0x00AD, 0x0001, 0x0027, 0x0060, 0x005C, 0x002F, 0x0025, 0x2581, 0x017F, 0x00DF,
@@ -456,20 +484,21 @@ _FUZZ_EXOTIC = (
     0x1F408, 0x1F600, 0x1F1EF, 0x1F1F5, 0x1F3FB, 0x1F468, 0x2F929, 0x0818, 0x089A,
 )  # fmt: skip
 
-#: 乱択の素材にする普通の語（実プロンプトに近い列も混ぜる — 全部が exotic だと BPE の
-#: 通常経路が薄くなる）。
+#: Ordinary words used as random material (sequences close to real prompts are mixed in — if
+#: everything were exotic, the ordinary BPE path would be thinly covered).
 _FUZZ_WORDS = ("1girl", "solo", "masterpiece", "cat's", "café", "夕焼け", "2024", "<|endoftext|>")
 
 
 def verify_reference_fuzz(
     repo: str, built: dict[str, Any], *, count: int = 2_000, seed: int = 0
 ) -> dict[str, Any]:
-    """乱択プロンプトで参照実装と正本（AutoTokenizer）の id 列を突き合わせる。
+    """Compares id sequences of the reference implementation and AutoTokenizer on random prompts.
 
-    `PROMPT_CASES` は「素朴な移植が落ちる境界」を人手で 1 件ずつ置いたもので、**そこに
-    無い文字は 1 つも検査されない**（NFC のエンジン差はこの穴を通って id 列を割った）。
-    ここは網羅ではないが、seed 固定の乱択で「人手の台本が思いつかなかった組み合わせ」を
-    機械的に踏ませる恒久の門にする。1 件でも違えば emit しない。
+    `PROMPT_CASES` places "the boundaries where a naive port fails" by hand, one per case, and
+    **no character outside them is checked at all** (the NFC engine difference split the id
+    sequences through this hole). This is not exhaustive, but with fixed-seed random sampling it is
+    a permanent check that mechanically exercises "combinations the hand-written script did not
+    think of". If even one differs, nothing is emitted.
     """
     import random
 
@@ -479,8 +508,8 @@ def verify_reference_fuzz(
         "qwen": AutoTokenizer.from_pretrained(repo, subfolder="tokenizer"),
         "t5": AutoTokenizer.from_pretrained(repo, subfolder="t5_tokenizer"),
     }
-    # 参照実装は `used_vocab` を溜めるので、フィクスチャの部分集合を膨らませないよう
-    # **この検査専用のインスタンス**を作る（build_fixture は別に組み直す）。
+    # The reference implementations accumulate `used_vocab`, so to keep the fixture's subset from
+    # growing, **instances dedicated to this check** are built (build_fixture builds its own).
     qwen_ref, t5_ref = references(built)
     alphabet = [chr(cp) for cp in _FUZZ_EXOTIC]
     alphabet += [chr(cp) for start, end in built["nfcSegments"] for cp in range(start, end + 1)]
@@ -497,17 +526,18 @@ def verify_reference_fuzz(
             got = ref.encode(text, MAX_LENGTH)
             if got != want:
                 raise ValueError(
-                    f"乱択 {index} 件目の {which} id 列が正本と違う\n"
-                    f"  入力={[hex(ord(c)) for c in text]}\n  正本={want}\n  参照={got}"
+                    f"Random sample {index}: the {which} id sequence differs from the source of"
+                    " truth\n"
+                    f"  input={[hex(ord(c)) for c in text]}\n  truth={want}\n  reference={got}"
                 )
     return {"count": count, "seed": seed, "alphabet": len(alphabet)}
 
 
 def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
-    """フィクスチャ = 参照 id 列 + それを再現できる**最小の**語彙・merges。
+    """Fixture = reference id sequences + the **minimal** vocab / merges that reproduce them.
 
-    語彙（151k / 32k）を丸ごと commit しない。正規化表と文字クラス表は**畳み込みの成果物
-    そのもの**（= 検証対象）なので削らない。
+    The vocabs (151k / 32k) are not committed whole. The normalizer table and the char-class table
+    are **the output of the folding itself** (= what is being verified), so they are not trimmed.
     """
     qwen_ref, t5_ref = references(built)
     for case in cases:
@@ -531,8 +561,8 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
             "classes": built["classes"],
             "caseFold": built["qwen"]["caseFold"],
             "nfcSegments": built["nfcSegments"],
-            # `[入力, 正本の NFC 出力]` — TS 側は素の `normalize("NFC")` では再現できない
-            # （分節表を引かない実装がここで落ちる）。
+            # `[input, the source of truth's NFC output]` — the TS side cannot reproduce it with a
+            # plain `normalize("NFC")` (an implementation that skips the segment table fails here).
             "nfcCases": q2.nfc_fixture_cases(built["nfcSegments"]),
             "vocab": {t: built["qwenVocab"][t] for t in sorted(qwen_ref.used_vocab)},
             "merges": sorted(
@@ -544,8 +574,9 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
             "addedTokens": built["t5"]["addedTokens"],
             "unkId": built["t5"]["unkId"],
             "eosId": built["t5"]["eosId"],
-            # MUST: 未知ノードのスコアと Viterbi の探索幅は**語彙全体**から決まる。部分集合
-            # から計算すると別の分割になるので、部分集合とは別に持つ。
+            # MUST: the score of unknown nodes and the Viterbi search width are determined by
+            # **the whole vocab**. Computing them from the subset gives another split, so they are
+            # kept apart from the subset.
             "minScore": min(score for _, score in built["t5Vocab"]),
             "maxTokenLength": max(len(token) for token, _ in built["t5Vocab"]),
             "space": built["classes"]["space"],
@@ -562,16 +593,20 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", default=DEFAULT_REPO)
-    parser.add_argument("--snapshot", type=Path, default=None, help="HF スナップショット直指定")
+    parser.add_argument("--snapshot", type=Path, default=None, help="use this HF snapshot directly")
     parser.add_argument("--assets-out", type=Path, default=DEFAULT_ASSETS_DIR)
     parser.add_argument("--fixtures-out", type=Path, default=DEFAULT_FIXTURE_PATH)
-    parser.add_argument("--fuzz", type=int, default=200_000, help="畳み込み検査の乱択件数")
-    parser.add_argument("--id-fuzz", type=int, default=2_000, help="id 列の乱択突合の件数")
+    parser.add_argument(
+        "--fuzz", type=int, default=200_000, help="random samples for the folding check"
+    )
+    parser.add_argument(
+        "--id-fuzz", type=int, default=2_000, help="random samples for the id comparison"
+    )
     args = parser.parse_args()
 
     built = build_assets(args.repo, args.snapshot, args.fuzz)
     cases = build_cases(args.repo, built)
-    print(f"[cases] {len(cases)} 件が正本と一致", flush=True)
+    print(f"[cases] {len(cases)} cases match the source of truth", flush=True)
 
     started = time.perf_counter()
     fuzz_stats = verify_reference_fuzz(args.repo, built, count=args.id_fuzz)

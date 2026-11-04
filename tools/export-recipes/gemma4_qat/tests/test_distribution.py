@@ -1,4 +1,4 @@
-"""QAT の格納・丸めの検査が、通常 Gemma との取り違えを検出する。"""
+"""The QAT storage and rounding checks detect a mix-up with the regular Gemma."""
 
 from copy import deepcopy
 
@@ -8,17 +8,19 @@ from gemma4_qat.config import CHECKPOINTS, checkpoint_name, series_name
 from gemma4_qat.distribution import QAT_DEFAULT_QUANT, assert_qat_graph, qat_quants, repo_name
 from karume.dist import DistError, assert_quant_presentation
 
-#: 非量子化のまま残ってよい唯一の linear のテンソルキー（構造門が名指しで許可する 1 本）。
+#: The tensor key of the only linear allowed to stay unquantized (the one the structural check
+#: allows by name).
 PROJECTION = "model.model.per_layer_model_projection.weight"
 
 
 def graph_fixture():
-    """正当な最小の QAT グラフ（**IR v2 の文書** — initializer 名 = テンソルキー）。
+    """The valid minimal QAT graph (**an IR v2 document** — initializer name = tensor key).
 
-    量子化 linear は 2 本 — 共有 head（token embedding と同じ initializer）と、ごく普通の
-    量子化 linear 1 本。前者は前後の SRQ を持たない（上流 lm_head の SRQ scale が 0 = 恒等
-    なので recipe が挟まない）、後者は前後とも持つ。この非対称が契約そのものなので、
-    故障注入は**普通の linear 側**へ掛ける。
+    There are two quantized linears — the shared head (the same initializer as the token
+    embedding) and one quite ordinary quantized linear. The former has no SRQ on either side
+    (upstream lm_head's SRQ scales are 0 = identity, so the recipe inserts none); the latter has
+    both. This asymmetry is the contract itself, so faults are injected on **the ordinary
+    linear's side**.
     """
     return {
         "initializers": {"head": {}, "mlp": {}, PROJECTION: {}},
@@ -34,20 +36,21 @@ def graph_fixture():
 
 
 def layouts_fixture():
-    """{@link graph_fixture} の束縛表（テンソルキー → 格納の layout）。
+    """The binding table of {@link graph_fixture} (tensor key → storage layout).
 
-    IR v2 のグラフ記述は格納を持たない（正本は束縛表 — docs/ir-v2.md）ので、格納の故障注入は
-    こちら側へ掛ける。
+    The IR v2 graph description has no storage (the source of truth is the binding table —
+    docs/ir-v2.md), so storage faults are injected on this side.
     """
     return {"head": "i2", "mlp": "i4", PROJECTION: "f32"}
 
 
-#: {@link graph_fixture} の head linear（最後のノード）の位置。
+#: The position of the head linear (the last node) of {@link graph_fixture}.
 HEAD_NODE = 5
 
 
 def wrap_head_with_srq(graph):
-    """head linear の前後へ SRQ を足す（scale>0 で焼かれた形 — 省略しない側の系列）。"""
+    """Add SRQ before and after the head linear (the shape built with scale>0 — a series that
+    does not omit it)."""
     head = graph["nodes"][HEAD_NODE]
     graph["nodes"].insert(
         HEAD_NODE, {"op": "static_quantize", "ins": [head["ins"][0]], "outs": ["head_in"]}
@@ -66,7 +69,8 @@ class TestQatGraph:
         assert graph == before
 
     def test_accepts_a_shared_head_that_still_carries_its_srq(self):
-        """head の SRQ は「省略してよい」であって禁止ではない（scale>0 で焼かれた形も通す）。"""
+        """The head's SRQ "may be omitted", not "is forbidden" (the shape built with scale>0
+        passes too)."""
         assert_qat_graph(wrap_head_with_srq(graph_fixture()), layouts_fixture())
 
     @pytest.mark.parametrize(
@@ -86,8 +90,9 @@ class TestQatGraph:
             graph["nodes"][1]["ins"][1] = "another.linear.weight"
             layouts["another.linear.weight"] = layouts.pop(PROJECTION)
         else:
-            # 共有でなくなった head は普通の量子化 linear になるので SRQ を補う — 残る違反を
-            # 「共有 head が 1 本でない」1 つに絞り、SRQ 欠落の経路と取り違えないため。
+            # A head that is no longer shared becomes an ordinary quantized linear, so SRQ is
+            # added — to narrow the remaining violation to the single "not exactly one shared
+            # head" and not confuse it with the missing-SRQ path.
             graph["initializers"]["separate"] = {}
             layouts["separate"] = "i2"
             wrap_head_with_srq(graph)["nodes"][HEAD_NODE + 1]["ins"][1] = "separate"
@@ -95,11 +100,12 @@ class TestQatGraph:
             assert_qat_graph(graph, layouts)
 
     def test_only_the_shared_head_may_omit_its_srq(self):
-        """省略を許すのは共有 head だけ — 同じ省略を普通の量子化 linear がすると落ちる。"""
+        """Only the shared head may omit it — the same omission by an ordinary quantized linear
+        fails."""
         assert_qat_graph(graph_fixture(), layouts_fixture())
         graph = graph_fixture()
         graph["nodes"][2]["op"] = "reshape"
-        with pytest.raises(DistError, match="固定 SRQ"):
+        with pytest.raises(DistError, match="fixed SRQ"):
             assert_qat_graph(graph, layouts_fixture())
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
@@ -109,7 +115,7 @@ class TestQatGraph:
         assert checkpoint_name(model).endswith("-qat-mobile-transformers")
 
     def test_unknown_model_is_rejected(self):
-        with pytest.raises(ValueError, match="未対応"):
+        with pytest.raises(ValueError, match="unsupported"):
             series_name("12b")
 
 
@@ -121,7 +127,8 @@ class TestQatQuants:
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_parallel_uses_the_same_weights_and_keeps_the_reference(self, model):
-        """E2B / E4B とも同じ 3 席・同じ宣言（E4B は 2026-09-26 の実測で席を新設した）。"""
+        """E2B / E4B have the same three presets with the same declarations (E4B got its presets
+        from the measurement of 2026-09-26)."""
         modes = qat_quants(model)
         assert list(modes) == ["i4", "i4-gemvpar", "i4-fast"]
         assert modes["i4"]["session"] == {}
@@ -141,7 +148,8 @@ class TestQatQuants:
         }
 
     def test_only_the_e4b_fast_mode_names_its_measurement(self):
-        """実測の 1 文は E4B の `i4-fast` だけに付き、E2B の説明と他の席は同じ文面のまま。"""
+        """The measured sentence goes only on E4B's `i4-fast`; E2B's descriptions and the other
+        presets keep the same wording."""
         e2b, e4b = qat_quants("e2b"), qat_quants("e4b")
         for name in ("i4", "i4-gemvpar"):
             assert e4b[name] == e2b[name]
@@ -150,7 +158,7 @@ class TestQatQuants:
         )
 
     def test_unknown_model_is_rejected(self):
-        with pytest.raises(ValueError, match="未対応"):
+        with pytest.raises(ValueError, match="unsupported"):
             qat_quants("12b")
 
 

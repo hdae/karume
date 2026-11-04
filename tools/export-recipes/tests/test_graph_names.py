@@ -1,30 +1,33 @@
-"""容器のグラフ名 = 配布形の部品名（= `karume.json` の weights のキー）の機械門（全 family 横断）。
+"""The mechanical check that a container's graph name = the component name in the distribution
+(= the key of weights in `karume.json`), across every family.
 
-ランタイムはグラフを**名前で**引く（`prepareContainer(opened, <weights キー>)` —
-container-v1 §2.1）。移行 CLI も同じキーで焼く（`karume.migrate._convert_unit` が
-`graph_name=unit.component`）ので、書き手が別の綴りを名乗ると「移行済みミラー」と「再 export
-した系列」が**別物**になる。
+The runtime looks a graph up **by name** (`prepareContainer(opened, <weights key>)` —
+container-v1 §2.1). The migration CLI writes under the same key (`karume.migrate._convert_unit`
+passes `graph_name=unit.component`), so a writer that uses another spelling makes "the migrated
+mirror" and "the re-exported series" **different things**.
 
-守るのは 2 つ:
+Two things are guarded:
 
-1. `graph_name=` に渡すのは**部品名の定数**であって、置き場の path から導いた名前ではない。
-   ディレクトリ名は部品名と一致しない: 系列直下に容器を置く family（siglip2 / birefnet /
-   depth_anything / vowel_detector / gemma4 / minicpm5 / embeddinggemma / gemma4_qat）では
-   ディレクトリ名が**系列名**（`siglip2-so400m-patch14-384`）になり、irodori は
-   `caption-proj` / `decoder` に対してキーが `caption_proj` / `codec_decoder`、deberta は
-   `full-24layer` に対してキーが `text_encoder`（SBV2 の消費側の席）である。
-2. 台本が名乗る綴りの集合が、その family の配布計画（`<family>/distribution.py` の weights）
-   と一致する。
+1. What is passed to `graph_name=` is **the component-name constant**, not a name derived from the
+   path it is placed at. Directory names do not match component names: in the families that put
+   the container directly under the series (siglip2 / birefnet / depth_anything / vowel_detector /
+   gemma4 / minicpm5 / embeddinggemma / gemma4_qat) the directory name is the **series name**
+   (`siglip2-so400m-patch14-384`); irodori has the keys `caption_proj` / `codec_decoder` for
+   `caption-proj` / `decoder`, and deberta has the key `text_encoder` (SBV2's consuming slot) for
+   `full-24layer`.
+2. The set of spellings the scripts use matches that family's distribution plan (the weights of
+   `<family>/distribution.py`).
 
-この門が要るのは、書き手（export の一本道）がグラフ名を weights のキーと突き合わせないから。
-現物の容器との突合は `karume dist`（{@link karume.dist.assert_weight_components_verified}）が
-組み立ての前に掛けるが、そこへ届くのは実重みで export を回した後である — ここは綴りの割れを
-ソースの段で落とす。
+This check is needed because the writer (the single export path) does not match the graph name
+against the weights keys. `karume dist` ({@link karume.dist.assert_weight_components_verified})
+matches the real containers before assembly, but that is reached only after an export with real
+weights — this check catches the mismatched spelling at the source level.
 
-ソースを AST で読むのは、実行して確かめるには実重み（数 GB）か family ごとの tiny 模型が
-要るため（`tests/test_staged_publication.py` と同じ理由）。実物を書いて読み直す側の対は
-`vowel_detector/tests/test_export.py` の {@link
-vowel_detector.tests.test_export.TestGraphNameIsThePartName} が 1 本持つ。
+The source is read as an AST because checking it by running would need the real weights (several
+GB) or a tiny model per family (the same reason as `tests/test_staged_publication.py`). The
+counterpart that writes the real thing and reads it back is the one
+{@link vowel_detector.tests.test_export.TestGraphNameIsThePartName} in
+`vowel_detector/tests/test_export.py`.
 """
 
 from __future__ import annotations
@@ -39,13 +42,15 @@ import pytest
 RECIPES_ROOT = Path(__file__).resolve().parent.parent
 
 
-#: (台本, emit 関数, `graph_name=` の式, その式が取りうる値を持つモジュール定数)。
+#: (script, emit function, the `graph_name=` expression, the module constant that holds the
+#: values that expression can take).
 #:
-#: 式と値の欄が別なのは、ループ変数越しに渡す台本があるため（anima は `target`、irodori は
-#: `IRODORI_SERIES_ROLES[target]`）— 値の欄には**モジュール直下の定数名**だけを書き、
-#: {@link _declared_values} が `str` / 並び / 表のどれでも綴りの集合へ畳む。
+#: The expression and value columns are separate because some scripts pass it through a loop
+#: variable (anima's `target`, irodori's `IRODORI_SERIES_ROLES[target]`) — the value column holds
+#: only **a module-level constant name**, and {@link _declared_values} folds a `str` / sequence /
+#: table alike into a set of spellings.
 #:
-#: MUST: 実在 → 表 の側（{@link TestEveryCallSiteIsListed}）と両建て。
+#: MUST: paired with the existing → table direction ({@link TestEveryCallSiteIsListed}).
 ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("anima/export.py", "emit_target", "target", "TARGETS"),
     ("deberta/export.py", "export_variant", "GRAPH_NAME", "GRAPH_NAME"),
@@ -97,12 +102,14 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("moss/export_vae.py", "write_graphs", "name", "GRAPHS"),
 )
 
-#: `minicpm5/export_decode.py` のように、値の定数が**別モジュール**に在る台本の引き先。
+#: Where to look up the value constant of a script whose constant lives in **another module**,
+#: like `minicpm5/export_decode.py`.
 VALUE_MODULES: Mapping[str, str] = {"minicpm5/export_decode.py": "minicpm5.export"}
 
 
 def _module_name(script: str) -> str:
-    """台本の相対 path → import 名（`irodori/dacvae/export.py` → `irodori.dacvae.export`）。"""
+    """A script's relative path → its import name (`irodori/dacvae/export.py` →
+    `irodori.dacvae.export`)."""
     return script.removesuffix(".py").replace("/", ".")
 
 
@@ -111,11 +118,11 @@ def _function(script: str, name: str) -> ast.FunctionDef:
     for node in ast.parse(source).body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"{script}: {name} がモジュール直下に無い（台本の綴りが動いた）")
+    raise AssertionError(f"{script}: {name} is not at module level (the script's spelling moved)")
 
 
 def _graph_name_arguments(node: ast.AST) -> list[ast.expr]:
-    """その木の中で `graph_name=` に渡している式を全部。"""
+    """Every expression passed to `graph_name=` within that tree."""
     return [
         keyword.value
         for call in ast.walk(node)
@@ -126,10 +133,12 @@ def _graph_name_arguments(node: ast.AST) -> list[ast.expr]:
 
 
 def _derived_from_a_path(expression: ast.expr) -> bool:
-    """式が `<なにか>.name`（= 置き場の path から導いた名前）を含むか。
+    """Whether the expression contains `<something>.name` (= a name derived from the path it is
+    placed at).
 
-    見るのは属性の綴りだけ（`Path.name` も `Path.parent.name` も同じ形）— `one_shot.GRAPH_NAME`
-    のような module 越しの定数参照は属性名が違うので当たらない。
+    Only the attribute spelling is looked at (`Path.name` and `Path.parent.name` have the same
+    shape) — a constant referenced through a module, like `one_shot.GRAPH_NAME`, has another
+    attribute name and does not match.
     """
     return any(
         isinstance(node, ast.Attribute) and node.attr == "name" for node in ast.walk(expression)
@@ -137,7 +146,8 @@ def _derived_from_a_path(expression: ast.expr) -> bool:
 
 
 def _declared_values(script: str, constant: str) -> set[str]:
-    """台本が `graph_name=` に渡しうる綴りの集合（定数を実体から引く）。"""
+    """The set of spellings a script can pass to `graph_name=` (the constant is read from the
+    module itself)."""
     module = importlib.import_module(VALUE_MODULES.get(script, _module_name(script)))
     value = getattr(module, constant)
     if isinstance(value, str):
@@ -148,12 +158,14 @@ def _declared_values(script: str, constant: str) -> set[str]:
 
 
 def _scanned_call_sites() -> set[tuple[str, str]]:
-    """`graph_name=` を渡している関数を、recipes の**全 Python ソース**から列挙する（実在 → 表）。
+    """List the functions that pass `graph_name=` from **every Python source** of the recipes
+    (existing → table).
 
-    MUST: 走査は `rglob("*.py")` + {@link ast.walk} — 名前（`export*.py`）でも置き場
-    （`<family>/…`）でもモジュール直下でも絞らない。絞ると「門が名乗る範囲」が実装より広く
-    なり、リポ直下の書き手（`migrate_series.py`）やクラスメソッドの呼び出し口が**表に載らない
-    まま緑**で通る（実測で 1 本取りこぼしていた）。
+    MUST: the scan is `rglob("*.py")` + {@link ast.walk} — not narrowed by name (`export*.py`),
+    by location (`<family>/…`) or to module level. Narrowing it makes "the scope the check claims"
+    wider than what it implements, and a writer at the repository root (`migrate_series.py`) or a
+    call site in a class method passes **green without being in the table** (it measurably missed
+    one).
     """
     found: set[tuple[str, str]] = set()
     for path in sorted(RECIPES_ROOT.rglob("*.py")):
@@ -167,8 +179,8 @@ def _scanned_call_sites() -> set[tuple[str, str]]:
     return found
 
 
-#: 表に載せない呼び手（`graph_name` を**受け取って素通しする**内部ヘルパ）。名乗るのは呼び出し
-#: 元の emit 関数なので、ここで綴りを決めているわけではない。
+#: Callers kept out of the table (internal helpers that **take `graph_name` and pass it
+#: through**). The name comes from the calling emit function, so the spelling is not decided here.
 FORWARDERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("gemma4/export_decode.py", "_write_container"),
@@ -176,9 +188,10 @@ FORWARDERS: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-#: 表に載せない呼び手（綴りを**family の表から引く**移行ドライバ）。{@link ENTRIES} は
-#: 「台本が定数を名乗る」形しか綴れないが、このドライバは系列ディレクトリ → 部品名の写像を
-#: 走らせる側なので、綴りの正しさは `tests/test_migrate_series.py` の family 表の門が見る。
+#: Callers kept out of the table (the migration driver, which **looks the spelling up in the
+#: family table**). {@link ENTRIES} can only express "the script names a constant", but this driver
+#: runs the series directory → component name mapping, so the correctness of its spellings is
+#: checked by the family-table check of `tests/test_migrate_series.py`.
 TABLE_DRIVEN: frozenset[tuple[str, str]] = frozenset({("migrate_series.py", "migrate_series")})
 
 
@@ -189,20 +202,22 @@ class TestTheEmitScriptNamesThePartName:
     def test_it_passes_the_declared_constant(
         self, script: str, function: str, expression: str, constant: str
     ) -> None:
-        """`graph_name=` の式が表の綴りと逐語で一致すること（式が動いたらここで落ちる）。"""
+        """The `graph_name=` expression matches the table's spelling verbatim (this fails when the
+        expression moves)."""
         passed = {
             ast.unparse(argument) for argument in _graph_name_arguments(_function(script, function))
         }
 
         assert passed == {expression}, (
-            f"{script}:{function} が graph_name へ渡しているのは {sorted(passed)} —"
-            f" 表の綴りは {expression}"
+            f"{script}:{function} passes {sorted(passed)} to graph_name —"
+            f" the table spells {expression}"
         )
 
     def test_it_does_not_derive_the_name_from_a_directory(
         self, script: str, function: str, expression: str, constant: str
     ) -> None:
-        """置き場の path から導いた名前は部品名ではない（この門の存在理由）。"""
+        """A name derived from the path it is placed at is not the component name (the reason
+        this check exists)."""
         derived = [
             ast.unparse(argument)
             for argument in _graph_name_arguments(_function(script, function))
@@ -210,16 +225,18 @@ class TestTheEmitScriptNamesThePartName:
         ]
 
         assert derived == [], (
-            f"{script}:{function} が graph_name を置き場の名前 {derived} から導いている —"
-            " ディレクトリ名は部品名（karume.json の weights のキー）と一致しない"
+            f"{script}:{function} derives graph_name from the location name {derived} —"
+            " a directory name does not match the component name (the key of weights in"
+            " karume.json)"
         )
 
 
 class TestTheNamesAreTheWeightsKeys:
-    """台本が名乗る綴りの集合 ↔ 配布計画の weights のキー。
+    """The set of spellings the scripts use ↔ the weights keys of the distribution plan.
 
-    どちらの向きも見る: キーに無い綴りを焼くと**ランタイムが引けない容器**になり、キーが
-    余ると**その部品だけ焼き手が居ない**（= 配布形が組めない）。
+    Both directions are checked: writing a spelling that is not a key makes **a container the
+    runtime cannot look up**, and a surplus key means **that component has no writer** (= the
+    distribution cannot be built).
     """
 
     @staticmethod
@@ -229,7 +246,7 @@ class TestTheNamesAreTheWeightsKeys:
             if script.split("/")[0] == family:
                 assert _graph_name_arguments(_function(script, function))
                 names |= _declared_values(script, constant)
-        assert names, f"{family}: 表に台本が 1 本も無い"
+        assert names, f"{family}: the table has no script at all"
         return names
 
     @staticmethod
@@ -245,8 +262,9 @@ class TestTheNamesAreTheWeightsKeys:
         assert self._named(family) == self._weights(family)
 
     def test_birefnet_covers_exactly_the_weights_keys_of_every_checkpoint(self) -> None:
-        """BiRefNet の weights は checkpoint ごと（席が上流の格納から決まる — `birefnet_weights`）
-        なので、family 名から導く表の綴りにならない。checkpoint ごとに名指しで見る。"""
+        """BiRefNet's weights are per checkpoint (the slots follow the upstream storage —
+        `birefnet_weights`), so they are not spelled as a table named after the family. They are
+        checked per checkpoint, by name."""
         from birefnet.card import BIREFNET_CHECKPOINTS
         from birefnet.distribution import birefnet_weights
 
@@ -254,16 +272,18 @@ class TestTheNamesAreTheWeightsKeys:
             assert self._named("birefnet") == set(birefnet_weights(checkpoint)), checkpoint
 
     def test_vowel_detector_covers_exactly_its_weights_keys(self) -> None:
-        """`VOWEL_DETECTOR_WEIGHTS` は family 名から導く綴りにならないので名指しで見る。"""
+        """`VOWEL_DETECTOR_WEIGHTS` is not spelled after the family name, so it is checked by
+        name."""
         from vowel_detector.distribution import VOWEL_DETECTOR_WEIGHTS
 
         assert self._named("vowel_detector") == set(VOWEL_DETECTOR_WEIGHTS)
 
     def test_sbv2_covers_the_distributed_seats_and_nothing_else(self) -> None:
-        """SBV2 は `dp` / `flow` / `dec` が golden 検証専用（配布形に載らない）。
+        """In SBV2, `dp` / `flow` / `dec` are only for golden verification (not in the
+        distribution).
 
-        `text_encoder` を焼くのは別台本（`deberta/export.py`）なので、SBV2 側の台本が
-        名乗るのは残りの 2 席だけ。
+        `text_encoder` is written by another script (`deberta/export.py`), so the SBV2 scripts name
+        only the remaining 2 slots.
         """
         from sbv2.distribution import SBV2_FRONT_ROLE, SBV2_VOICE_ROLE, SBV2_WEIGHTS
 
@@ -273,16 +293,18 @@ class TestTheNamesAreTheWeightsKeys:
         assert named - set(SBV2_WEIGHTS) == {"dp", "flow", "dec"}
 
     def test_deberta_names_the_seat_its_consumer_declares(self) -> None:
-        """produce 側（deberta）は consume 側（SBV2）を import しないので、写しを突き合わせる。"""
+        """The producer (deberta) does not import the consumer (SBV2), so the copies are matched
+        against each other."""
         from sbv2.distribution import SBV2_TEXT_ENCODER_COMPONENT, SBV2_WEIGHTS
 
         assert self._named("deberta") == {SBV2_TEXT_ENCODER_COMPONENT}
         assert SBV2_TEXT_ENCODER_COMPONENT in SBV2_WEIGHTS
 
     def test_umt5_names_the_seat_both_repositories_declare(self) -> None:
-        """umT5 の容器は 2 つの配布形の同じ席に据わる — umT5 のリポ（自前）と Wan のリポ（越境
-        参照 — ADR 0119 追記 A / D）。`wan` 家族の突合（上の parametrize）は Wan の weights だけを
-        見るので、umT5 のリポの weights とも名指しで突き合わせる。"""
+        """The umT5 container sits in the same slot of 2 distributions — the umT5 repository (its
+        own) and the Wan repository (a cross-repository reference — ADR 0119 addenda A / D). The
+        match of the `wan` family (the parametrize above) looks only at Wan's weights, so it is
+        also matched by name against the weights of the umT5 repository."""
         from wan.distribution import WAN_WEIGHTS
         from wan.umt5_distribution import UMT5_WEIGHTS
 
@@ -292,7 +314,8 @@ class TestTheNamesAreTheWeightsKeys:
         assert named <= set(WAN_WEIGHTS)
 
     def test_gemma4_qat_names_the_seat_its_own_plan_declares(self) -> None:
-        """QAT は別 family の配布計画を持つが、部品名は通常 Gemma と同じ 1 語を共有する。"""
+        """QAT has the distribution plan of a separate family, but shares the single component name
+        of the plain Gemma."""
         from gemma4.distribution import GEMMA4_ROLE
 
         assert self._named("gemma4_qat") == {GEMMA4_ROLE}
@@ -317,19 +340,22 @@ class TestTheNamesAreTheWeightsKeys:
 
     @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
-        """配布形を組まない 2 家族（`distribution.py` を持たない）の綴りを固定する。
+        """Pin the spelling of the 2 families that build no distribution (they have no
+        `distribution.py`).
 
-        組む日が来たときに据わっている容器がそのまま使えるよう、部品 1 つの系列の慣例
-        （`model` — gemma4 / gemma4_qat と同じ）で名乗っておく。
+        So that the containers already in place can be used as is on the day one is built, they
+        use the convention of a single-component series (`model` — the same as gemma4 /
+        gemma4_qat).
         """
         assert self._named(family) == {"model"}
 
 
 class TestEveryCallSiteIsListed:
-    """実在 → 表 の逆方向（表 → 実在 だけだと、載せ忘れが永久に沈黙する）。"""
+    """The reverse direction, existing → table (with only table → existing, a missing entry stays
+    silent forever)."""
 
     def test_the_scan_finds_the_call_sites(self) -> None:
-        """走査が 0 本なら、この門は恒真になる。"""
+        """If the scan finds nothing, this check is vacuous."""
         assert len(_scanned_call_sites()) >= len(ENTRIES)
 
     def test_no_call_site_is_missing_from_the_table(self) -> None:
@@ -337,25 +363,28 @@ class TestEveryCallSiteIsListed:
         missing = sorted(_scanned_call_sites() - listed - FORWARDERS - TABLE_DRIVEN)
 
         assert missing == [], (
-            f"graph_name を渡しているのに綴りの門が掛かっていない台本がある: {missing} —"
-            " ENTRIES へ足す（表に無い台本は置き場の名前を名乗る形に戻せる）"
+            f"scripts that pass graph_name but have no spelling check: {missing} —"
+            " add them to ENTRIES (a script outside the table could go back to using the location"
+            " name)"
         )
 
     def test_the_scan_reaches_a_writer_that_is_not_an_export_script(self) -> None:
-        """走査が `export*.py` / `<family>/…` に絞られていないこと（F-4 の取りこぼし）。
+        """The scan is not narrowed to `export*.py` / `<family>/…` (the miss of F-4).
 
-        移行ドライバはリポ直下の `migrate_series.py` に在り、名前も置き場も台本の形から
-        外れている。ここが落ちる形に戻すと、表に載らない書き手が永久に沈黙する。
+        The migration driver is `migrate_series.py` at the repository root, outside the scripts'
+        pattern in both name and location. Going back to a form where this fails leaves a writer
+        outside the table silent forever.
         """
         assert _scanned_call_sites() >= TABLE_DRIVEN
 
     def test_every_table_driven_writer_really_reads_a_table(self) -> None:
-        """表引きの口も**実在**と形を見る（消えた綴りが除外表に残ると載せ忘れが隠れる）。"""
+        """The table-driven callers are checked for **existence** and shape too (a vanished
+        spelling left in an exclusion table hides a missing entry)."""
         for script, function in sorted(TABLE_DRIVEN):
             arguments = _graph_name_arguments(_function(script, function))
-            assert arguments, f"{script}:{function} が graph_name を渡していない"
+            assert arguments, f"{script}:{function} does not pass graph_name"
             assert not any(_derived_from_a_path(argument) for argument in arguments), (
-                f"{script}:{function} が graph_name を置き場の名前から導いている"
+                f"{script}:{function} derives graph_name from the location name"
             )
 
     def test_every_listed_script_exists(self) -> None:
@@ -363,30 +392,34 @@ class TestEveryCallSiteIsListed:
             assert (RECIPES_ROOT / script).is_file(), script
 
     def test_every_forwarder_really_forwards(self) -> None:
-        """素通しの口も**実在**を見る（消えた綴りが除外表に残ると、載せ忘れが隠れる）。"""
+        """The pass-through callers are checked for **existence** too (a vanished spelling left in
+        an exclusion table hides a missing entry)."""
         for script, function in sorted(FORWARDERS):
             node = _function(script, function)
             assert [ast.unparse(a) for a in _graph_name_arguments(node)] == ["graph_name"]
             assert any(argument.arg == "graph_name" for argument in node.args.kwonlyargs)
 
 
-#: リポジトリの根（`RECIPES_ROOT` は `tools/export-recipes/`）。
+#: The repository root (`RECIPES_ROOT` is `tools/export-recipes/`).
 REPO_ROOT = RECIPES_ROOT.parent.parent
 
-#: 仕様の正本（`docs/container-v1.md`）。
+#: The source of truth of the spec (`docs/container-v1.md`).
 DOCS_ROOT = REPO_ROOT / "docs"
 
-#: 「グラフ名 = weights のキー」の規則の本文を持つ仕様節（見出し行そのもの）。
+#: The spec section that holds the text of the rule "graph name = key of weights" (the heading
+#: line itself).
 CONTAINER_SPEC_SECTION = "### 2.1 Graph descriptor"
 
-#: 移行 CLI の契約。グラフ名の既定（親ディレクトリ名）を持ち、規則は §2.1 を参照する。
+#: The migration CLI contract. It holds the graph name's default (the parent directory name) and
+#: refers to §2.1 for the rule.
 MIGRATE_SPEC_SECTION = "## 12. Migration CLI contract"
 
-#: グラフ名の話の指し先として**使ってはいけない**綴り。
+#: Spellings that **must not be used** as the pointer for the graph-name topic.
 #:
-#: 決定 3 は `container` 欄（descriptor の期待値 + part の FileRef 列）、決定 8 は移行 CLI の
-#: リポ丸ごとモードの話で、どちらも**グラフ名を述べていない**。片方だけ縛ると、同じ種類の
-#: 誤指しがもう片方の綴りで復活する（実際に決定 3 を潰した後、決定 8 で 6 箇所に再発した）。
+#: Decision 3 is about the `container` field (the descriptor's expected values + the parts' FileRef
+#: list) and decision 8 about the whole-repository mode of the migration CLI; **neither states the
+#: graph name**. Constraining only one lets the same kind of wrong pointer come back under the
+#: other spelling (after decision 3 was cleared, it actually reappeared in 6 places as decision 8).
 WRONG_POINTERS = (
     "ADR 0109 決定 3",
     "ADR 0109 決定 8",
@@ -394,20 +427,23 @@ WRONG_POINTERS = (
     "ADR 0109 decision 8",
 )
 
-#: 誤指しを走査する根（`docs/` は ADR 自身が住む場所なので外す）。
+#: The roots scanned for wrong pointers (`docs/` is left out because the ADRs themselves live
+#: there).
 POINTER_SCAN_ROOTS = ("packages", "tools")
 
-#: 走査する綴り（読み手の TS と書き手の Python の両方 — 誤指しは両側で起きる）。
+#: The file suffixes scanned (both the TS readers and the Python writers — wrong pointers occur on
+#: both sides).
 POINTER_SCAN_SUFFIXES = (".py", ".ts")
 
-#: 走査から外すディレクトリ名（生成物・依存の取り込み先）。
+#: Directory names left out of the scan (generated files, installed dependencies).
 POINTER_SCAN_SKIP = frozenset({"__pycache__", ".venv", "node_modules"})
 
 
 def _spec_section(document: Path, heading: str) -> str:
-    """見出し行 `heading`（`## …` / `### …`）から、同じか浅い次の見出しまでを返す。
+    """Return the text from the heading line `heading` (`## …` / `### …`) up to the next heading
+    of the same or a shallower level.
 
-    見出しが無ければ落ちる。
+    Fails if the heading is missing.
     """
     lines = document.read_text(encoding="utf-8").split("\n")
     start = next(index for index, line in enumerate(lines) if line == heading)
@@ -425,7 +461,7 @@ def _spec_section(document: Path, heading: str) -> str:
 
 
 def _scanned_sources() -> list[Path]:
-    """誤指しを走査するソース一覧（この門自身は除く）。"""
+    """The sources scanned for wrong pointers (excluding this check itself)."""
     return sorted(
         path
         for root in POINTER_SCAN_ROOTS
@@ -436,16 +472,17 @@ def _scanned_sources() -> list[Path]:
 
 
 class TestThePointerNamesTheDocumentThatCarriesTheClaim:
-    """「グラフ名 = weights のキー」の指し先が、その主張を実際に持つ文書であること。
+    """The pointer for "graph name = key of weights" names the document that actually makes that
+    claim.
 
-    指し先が外れていても**どこも赤くならない**（読み手が ADR を開いて食い違いに当たるだけ）
-    ので、機械で縛る。実際に 25 箇所以上が `ADR 0109 決定 3` を指していたが、あの決定が
-    述べているのは `container` 欄（descriptor の期待値 + part の FileRef 列）であって
-    グラフ名ではない。
+    A wrong pointer **turns nothing red** (a reader just opens the ADR and runs into the
+    mismatch), so it is constrained mechanically. In fact more than 25 places pointed at `ADR 0109
+    decision 3`, but that decision is about the `container` field (the descriptor's expected values
+    + the parts' FileRef list), not the graph name.
     """
 
     def test_the_container_spec_section_states_the_rule(self) -> None:
-        """`container-v1 §2.1` が「容器のグラフ名 = `weights` のキー MUST」を持つ。"""
+        """`container-v1 §2.1` holds "container graph name = key of `weights` MUST"."""
         section = _spec_section(DOCS_ROOT / "container-v1.md", CONTAINER_SPEC_SECTION)
 
         assert "**Graph-name rules**" in section
@@ -455,14 +492,16 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         )
 
     def test_the_migrate_spec_section_defers_to_the_rule(self) -> None:
-        """`container-v1 §12` は CLI の既定（親ディレクトリ名）を持ち、規則は §2.1 を指す。"""
+        """`container-v1 §12` holds the CLI default (the parent directory name) and points at
+        §2.1 for the rule."""
         section = _spec_section(DOCS_ROOT / "container-v1.md", MIGRATE_SPEC_SECTION)
 
         assert "The graph name defaults to the parent directory\n  name" in section
         assert "Per the rule of §2.1 it MUST be the key of weights" in section
 
     def test_the_old_pointers_do_not_state_the_rule(self) -> None:
-        """対（非恒真）: 誤りの指し先 2 つが住む節には「グラフ名」という語が 1 度も出ない。"""
+        """Counterpart (not vacuous): the word "graph name" never appears in the section where
+        the 2 wrong pointers live."""
         decision = _spec_section(
             DOCS_ROOT / "decisions" / "0109-manifest-v5-container.md", "## Decision"
         )
@@ -473,13 +512,15 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         assert "グラフ名" not in decision
 
     def test_no_source_cites_an_old_pointer_for_the_naming_rule(self) -> None:
-        """グラフ名 / 部品名を綴る行が {@link WRONG_POINTERS} を指していないこと。
+        """No line that spells the graph name / component name points at {@link WRONG_POINTERS}.
 
-        走査は読み手（TS）と書き手（Python）の両方 — 誤指しは recipe だけでなく runtime /
-        models / hub のテストや tools 側の注釈でも起きる（実際そうなった）。
+        The scan covers both the readers (TS) and the writers (Python) — wrong pointers occur not
+        only in the recipes but also in the runtime / models / hub tests and in comments on the
+        tools side (and they did).
 
-        NOTE: この門自身のソースは走査から外す — 除外しないと、上の 2 本が綴る「なぜ
-        その指し先が誤りか」の説明文が自分の網に掛かる（門は他人の綴りを見る道具）。
+        NOTE: this check's own source is left out of the scan — otherwise the text above that
+        explains "why those pointers are wrong" would be caught in its own net (the check is a
+        tool that looks at other files' spellings).
         """
         offenders = [
             f"{path.relative_to(REPO_ROOT)}:{number} ({pointer})"
@@ -491,13 +532,13 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         ]
 
         assert offenders == [], (
-            f"グラフ名 / 部品名の指し先が {' / '.join(WRONG_POINTERS)} になっている:"
-            f" {offenders} — 正本は container-v1"
+            f"the graph name / component name points at {' / '.join(WRONG_POINTERS)}:"
+            f" {offenders} — the source of truth is container-v1"
             f" §{CONTAINER_SPEC_SECTION.split()[1]}"
         )
 
     def test_the_scan_really_reaches_both_languages(self) -> None:
-        """対（走査が空・片言語だけに縮退していないこと）。"""
+        """Counterpart (the scan has not collapsed to nothing or to one language only)."""
         scanned = _scanned_sources()
         suffixes = {path.suffix for path in scanned}
         roots = {path.relative_to(REPO_ROOT).parts[0] for path in scanned}
@@ -507,7 +548,7 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         assert Path(__file__).resolve() not in scanned
 
     def test_the_deberta_note_points_at_the_gate_that_really_runs(self) -> None:
-        """deberta の写しが名指しする突合の門が**実在**すること（F-2 の取り違え）。"""
+        """The matching check that deberta's copy names **exists** (the mix-up of F-2)."""
         source = (RECIPES_ROOT / "deberta" / "export.py").read_text(encoding="utf-8")
         gate = TestTheNamesAreTheWeightsKeys.test_deberta_names_the_seat_its_consumer_declares
 
@@ -516,7 +557,8 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
 
 
 class TestTheGateItselfCanFail:
-    """門が「何も見ずに緑」へ退化していないこと（述語が恒真・走査が空の 2 つを潰す）。"""
+    """The check has not degenerated into "green without looking at anything" (rules out both a
+    vacuous predicate and an empty scan)."""
 
     def test_it_names_a_graph_name_taken_from_a_directory(self) -> None:
         source = (
@@ -531,7 +573,8 @@ class TestTheGateItselfCanFail:
         assert _derived_from_a_path(arguments[0])
 
     def test_it_passes_a_plain_constant(self) -> None:
-        """対（定数を名乗る形は落ちない）— これが無いと上の主張が恒真になりうる。"""
+        """Counterpart (naming a constant does not fail) — without it the claim above could be
+        vacuous."""
         source = "def export_series(out_dir):\n    f(path, graph_name=SIGLIP2_ROLE)\n"
         node = next(iter(ast.parse(source).body))
         assert isinstance(node, ast.FunctionDef)
@@ -539,7 +582,8 @@ class TestTheGateItselfCanFail:
         assert not _derived_from_a_path(_graph_name_arguments(node)[0])
 
     def test_a_staging_seat_name_is_also_caught(self) -> None:
-        """作業席（`<部品>.staging`）から導く形も同じ述語が捕まえる。"""
+        """A name derived from the staging directory (`<component>.staging`) is caught by the same
+        predicate."""
         source = "def export_series(staged):\n    f(path, graph_name=staged.parent.name)\n"
         node = next(iter(ast.parse(source).body))
         assert isinstance(node, ast.FunctionDef)

@@ -1,8 +1,10 @@
-"""Gemma 4 の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択（ADR 0065 決定 2）。
+"""The Gemma 4 distribution recipe — series layout, output path table, quant table and the card
+choice (ADR 0065 decision 2).
 
-汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **gemma4 固有の事実**だけ: どの系列ディレクトリから何を
-拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+The general-purpose assembly engine (placement, folding shared files, sha256, manifest,
+staging/swap, verification) lives in `karume.dist`. What lives here is **the gemma4-specific facts**
+only: which series directory each file is picked from, at which distribution path and under which
+dtype label it is listed, and which quant is the default.
 
 Per model the regular line ships the product graph, the borrowing drafter for a model with an
 upstream drafter, and one asset kind (ADR 0084 decision 5 / 0096 step 2 / 0109 decision 4): E2B
@@ -54,24 +56,26 @@ tokenizer and configuration checks are the regular line's; what differs is read 
 - the pins: every product container names its QAT weights' revision and every drafter container
   its QAT drafter's (`gemma4.sources.QAT_TARGET_PINS` / `QAT_DRAFTER_PINS`).
 
-`pipelineConfig` は 2 系統に割れる（Irodori と同じ分け方）: **モデルが決める数**
-（`maxPosition` = 上流 `text_config.max_position_embeddings`・`rope` = 層種別ごとの式の
-パラメータ）は上流 `config.json` から導出し、**実行時ノブ**（`chunkLength` / `capacity`）と
-**配布者の推奨サンプラ**（上流 `generation_config.json` の temperature / top_k / top_p —
-ADR 0083 決定 7）はそれぞれの正本から引く。前者を写経すると、チェックポイントを差し替えた
-日に宣言だけが古びて「宣言どおりに組んだ表が上流と別の角度で回る」形になる。
+`pipelineConfig` splits into two kinds (the same split as Irodori): **the numbers the model
+decides** (`maxPosition` = upstream `text_config.max_position_embeddings`, `rope` = the parameters
+of each layer type's formula) are derived from upstream `config.json`, while the **runtime knobs**
+(`chunkLength` / `capacity`) and the **distributor's recommended sampler** (temperature / top_k /
+top_p of upstream `generation_config.json` — ADR 0083 decision 7) are read from their own sources
+of truth. Copying the former by hand means that on the day the checkpoint is replaced only the
+declaration goes stale, and "a table built as declared rotates at angles other than upstream's".
 
-実行時ノブのうち `chunkLength` だけは**上限も宣言する**（`maxChunkLength`）— IR の `symbols`
-は名前の列だけで記号の上限を持たないので、読み手は「この資産が受けられる chunk 行数」を
-資産から導けない。焼く側（`gemma4.export.SYM_MAX`）が知っている唯一の数を宣言へ載せて、
-trace 範囲の外の `chunkLength` を TS 側の門が落とせるようにする（2026-09-03 裁定）。
+Of the runtime knobs, only `chunkLength` **also declares its upper bound** (`maxChunkLength`) — the
+IR's `symbols` is only a list of names and carries no bounds, so a reader cannot derive "how many
+chunk rows this asset accepts" from the asset. The one number the writer (`gemma4.export.SYM_MAX`)
+knows is put into the declaration, so that a check on the TS side can reject a `chunkLength`
+outside the traced range (ruling of 2026-09-03).
 
-RoPE の cos / sin 表は**もう配布物に入らない** — ホスト（TS 側）が `rope` の宣言から実行時に
-組む。したがって位置の上限を決めるのは資産ではなくモデルの宣言だけで、`capacity` は
-`maxPosition` までの実行時ノブになる。
+The RoPE cos / sin tables **are no longer part of the distribution** — the host (TS side) builds
+them at run time from the `rope` declaration. So the position limit is set by the model's
+declaration alone, not by an asset, and `capacity` becomes a runtime knob bounded by `maxPosition`.
 
-公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
-（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+The public surface is the one {@link PIPELINE} (`karume.dist.Pipeline`) — the repository's dist
+driver (`tools/export-recipes/dist.py`) merges it into the core's PIPELINES.
 """
 
 from __future__ import annotations
@@ -149,12 +153,12 @@ from .sources import (
     tokenizer_dir,
 )
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
-#: `GEMMA4_PIPELINE_NAME` / `GEMMA4_PIPELINE_MAJOR`（`packages/models/src/gemma/config.ts`）。
+#: The pipeline contract (ADR 0041 §2 — per model). The set the TS side accepts is
+#: `GEMMA4_PIPELINE_NAME` / `GEMMA4_PIPELINE_MAJOR` (`packages/models/src/gemma/config.ts`).
 GEMMA4_PIPELINE = "gemma4/1"
 
-#: 既定のモデル名（`--model` を省いた組み立てが入れるモデル）。綴りの受理集合は帰属表
-#: （`gemma4.card.GEMMA4_UPSTREAM`）が持つ。
+#: The default model name (the model an assembly without `--model` includes). The set of accepted
+#: spellings is held by the attribution table (`gemma4.card.GEMMA4_UPSTREAM`).
 GEMMA4_DEFAULT_MODEL = "e2b"
 
 #: The models the regular line (`karume-gemma4`) ships. 12B is not one of them: its only line is
@@ -162,11 +166,11 @@ GEMMA4_DEFAULT_MODEL = "e2b"
 #: refuses it ({@link gemma4_sources} / {@link gemma4_plan}).
 GEMMA4_REGULAR_MODELS: tuple[str, ...] = ("e2b", "e4b")
 
-#: 系列名の接頭辞（`gemma4-<モデル名>-<接尾>`）。
+#: The series name prefix (`gemma4-<model name>-<suffix>`).
 GEMMA4_PREFIX = "gemma4"
 
-#: 配布リポ名（ADR 0092 決定 1 の `karume-<family>`）。**モデル名から導かない** — the regular line
-#: is one repository, whichever of its models is assembled.
+#: The distribution repository name (`karume-<family>` of ADR 0092 decision 1). **Not derived from
+#: the model name** — the regular line is one repository, whichever of its models is assembled.
 GEMMA4_REPO_NAME = "karume-gemma4"
 
 #: Series suffixes — the writers (`gemma4/export_unified.py`, `gemma4/tokenizer.py`'s `ASSET_PATH`)
@@ -176,7 +180,7 @@ GEMMA4_PRODUCT_SUFFIX = "product"
 #: `gemma4/export_product.py` writes under it, this module reads it).
 GEMMA4_PRODUCT_BF16_SUFFIX = f"{GEMMA4_PRODUCT_SUFFIX}-bf16"
 GEMMA4_TOKENIZER_SUFFIX = "tokenizer"
-#: MTP drafter の系列接尾（`gemma4/export_drafter.py` の `DEFAULT_OUT_DIR`）。
+#: The MTP drafter's series suffix (`DEFAULT_OUT_DIR` of `gemma4/export_drafter.py`).
 GEMMA4_DRAFTER_SUFFIX = "drafter"
 #: The q4_0 QAT line's series suffixes (`outputs/series/gemma4-<model>-qat-product/` and
 #: `…-qat-drafter/` — `gemma4/export_product_qat.py` / `gemma4/export_drafter_qat.py` write under
@@ -184,13 +188,15 @@ GEMMA4_DRAFTER_SUFFIX = "drafter"
 GEMMA4_QAT_PRODUCT_SUFFIX = "qat-product"
 GEMMA4_QAT_DRAFTER_SUFFIX = "qat-drafter"
 
-#: 系列側のファイル名（`gemma4.export.MODEL_FILE` / `tokenizer.ASSET_PATH` の綴り）。
-#: **代表 path** なので、分割されていれば {@link karume.dist.component_parts} が連番へ解決する。
+#: The file names on the series side (the spellings of `gemma4.export.MODEL_FILE` /
+#: `tokenizer.ASSET_PATH`). They are **representative paths**, so a split file is resolved to its
+#: numbered parts by {@link karume.dist.component_parts}.
 GEMMA4_MODEL_FILE = "model.krm"
 GEMMA4_TOKENIZER_FILE = "tokenizer.json"
 
-#: 上流チェックポイントが持つ推奨サンプラの出どころ（ADR 0083 決定 7）と、モデルが決める数
-#: （位置の上限・RoPE の式）の出どころ。text 部は `config.json` の `text_config` 節。
+#: The source of the recommended sampler the upstream checkpoint carries (ADR 0083 decision 7) and
+#: of the numbers the model decides (the position limit, the RoPE formula). The text part is the
+#: `text_config` section of `config.json`.
 GEMMA4_GENERATION_CONFIG_FILE = "generation_config.json"
 GEMMA4_CONFIG_FILE = "config.json"
 #: The upstream checkpoint's tokenizer (the HF form, before compiling): what every model's compiled
@@ -200,13 +206,14 @@ GEMMA4_TEXT_CONFIG_KEY = "text_config"
 GEMMA4_MAX_POSITION_KEY = "max_position_embeddings"
 GEMMA4_HIDDEN_SIZE_KEY = "hidden_size"
 
-#: 役割名（manifest の weights / assets が指す内部キー）。
+#: Role names (the internal keys the manifest's weights / assets point to).
 GEMMA4_ROLE = GEMMA4_MODEL_ROLE
 GEMMA4_TOKENIZER_ROLE = "tokenizer"
-# MTP drafter の役割名 `GEMMA4_DRAFTER_ROLE`（weights の 2 本目 — 貸し手 `model` が居ないと
-# 単独では実行できない）は `gemma4.card` から import する — カードが manifest の weights から
-# drafter の有無を引くので、綴りの正本を card 側に置いた（card → distribution の import は
-# 循環になる）。drafter を配るモデルは `GEMMA4_DRAFTER_UPSTREAM` の表に載っているものだけ。
+# The MTP drafter's role name `GEMMA4_DRAFTER_ROLE` (the second weights entry — it cannot run alone,
+# without the lender `model`) is imported from `gemma4.card` — the card reads whether a drafter
+# exists from the manifest's weights, so the canonical spelling lives on the card side (the card
+# importing distribution would be circular). The models that ship a drafter are only those listed
+# in `GEMMA4_DRAFTER_UPSTREAM`.
 
 #: Model → the **model name** of the series that holds its compiled tokenizer asset
 #: (`gemma4-<this>-tokenizer`).
@@ -224,9 +231,10 @@ GEMMA4_TOKENIZER_ROLE = "tokenizer"
 #: give other ids for some inputs.
 GEMMA4_TOKENIZER_SERIES: Mapping[str, str] = {"e2b": "e2b", "e4b": "e4b", "12b": "12b"}
 
-#: グラフ入力の名前と並び（正本は `gemma4/export_product.py` — ラッパの forward 引数名）。
-#: 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない。RoPE の 4 本はホストが
-#: 実行時に組む cos / sin（綴りの正本は `gemma4.export_decode.rope_input_name`）。
+#: The names and order of the graph inputs (canonical in `gemma4/export_product.py` — the wrapper's
+#: forward argument names). The runtime binds by name, so if a single spelling changes the inputs
+#: cannot be bound. The four RoPE inputs are the cos / sin the host builds at run time (canonical
+#: spelling in `gemma4.export_decode.rope_input_name`).
 GEMMA4_INPUT_IDS = "input_ids"
 GEMMA4_PER_LAYER_INPUTS = "per_layer_inputs"
 GEMMA4_LAST_ROW = "last_row"
@@ -236,7 +244,8 @@ GEMMA4_ROPE_LAYER_TYPES: tuple[str, ...] = (SLIDING_ATTENTION, FULL_ATTENTION)
 
 
 def gemma4_rope_input_name(layer_type: str, part: str) -> str:
-    """RoPE 派生入力 1 本の綴り（焼く側 `export_decode.rope_input_name` の鏡像）。"""
+    """The spelling of one derived RoPE input (the mirror of the writer's
+    `export_decode.rope_input_name`)."""
     return f"{GEMMA4_ROPE_INPUT_PREFIX}{layer_type}_{part}"
 
 
@@ -257,9 +266,10 @@ GEMMA4_PLE_FREE_GRAPH_INPUTS: tuple[str, ...] = tuple(
     name for name in GEMMA4_GRAPH_INPUTS if name != GEMMA4_PER_LAYER_INPUTS
 )
 
-#: drafter グラフの入力（正本は `gemma4/export_drafter.py` — ラッパの forward 引数名）。
-#: `token` = 直前に確定した token・`hidden` = target の最終 norm 後 hidden（製品グラフの出力 1）。
-#: K / V は trace 用の入力を手術で external スロットへ置き換えたので、ここには載らない。
+#: The drafter graph's inputs (canonical in `gemma4/export_drafter.py` — the wrapper's forward
+#: argument names). `token` = the token decided just before, `hidden` = the target's hidden after
+#: the final norm (output 1 of the product graph). K / V are not listed: surgery replaced their
+#: trace-time inputs with external slots.
 GEMMA4_DRAFTER_TOKEN = "token"
 GEMMA4_DRAFTER_HIDDEN = "hidden"
 GEMMA4_DRAFTER_GRAPH_INPUTS: tuple[str, ...] = (
@@ -268,14 +278,17 @@ GEMMA4_DRAFTER_GRAPH_INPUTS: tuple[str, ...] = (
     *GEMMA4_ROPE_INPUTS,
 )
 
-#: drafter が 1 回の run で出す draft 本数（`gemma4.export_drafter.DRAFT_STEPS` の鏡像 —
-#: 配布形の drafter はこの 3 段で焼かれている。実行時の k は `k <= 3` の範囲で選べ、それより
-#: 多い段数が要るなら再 export）。出力の本数はこれと一致する MUST。
+#: The number of drafts the drafter emits per run (the mirror of
+#: `gemma4.export_drafter.DRAFT_STEPS` — the distributed drafter is baked with these 3 steps; the
+#: runtime k can be chosen within `k <= 3`, and more steps need a re-export). The number of outputs
+#: MUST equal it.
 GEMMA4_DRAFT_STEPS = 3
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
-#: ファイル名に出すのは他 family と同じ形（系列が 2 本並んでも取り違えようがない綴り）。
-#: PLE は `model` 容器の資産なので、この表に席を持たない（ADR 0109 決定 4）。
+#: The relative output paths (**inside the model subtree**) — the one place the placement table and
+#: the manifest share. The storage dtype appears in the file name, as in the other families (a
+#: spelling that cannot be mixed up even with two series side by side).
+#: The PLE is an asset of the `model` container, so it has no entry in this table (ADR 0109
+#: decision 4).
 GEMMA4_OUTPUT_PATHS: Mapping[str, str] = {
     GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.bf16.krm",
     GEMMA4_DRAFTER_ROLE: f"{GEMMA4_DRAFTER_ROLE}/model.i8.krm",
@@ -298,9 +311,9 @@ GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: As in the other families, every compressed storage the writer can write that must not be there
 #: is named: the product forbids every rounded storage — an int4 product series (the q4_0 QAT
 #: line's) has the same graph contract, so the storage is what tells it apart first.
-#: drafter は i4 も禁止側 — 存在検査（i8 が在る）は「linear だけ i4 に落ちた drafter」を
-#: 素通りさせる（出力ヘッドの i8 で要求が満たされる）。受理率が 1 〜 3 割落ちるだけの資産は
-#: 形も manifest も正しいままなので、ここが唯一の検出器になる。
+#: The drafter forbids i4 too — a presence check (i8 is there) lets "a drafter whose linears alone
+#: dropped to i4" through (the output head's i8 meets the requirement). An asset that only loses
+#: 10–30 % of its acceptance rate keeps a correct shape and manifest, so this is the only detector.
 GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     GEMMA4_ROLE: ("f16", "i8", "i4", "i2"),
     GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i4"),
@@ -326,10 +339,11 @@ GEMMA4_STORAGE = Gemma4StorageTables(
 GEMMA4_DTYPE = "bf16"
 GEMMA4_DRAFTER_DTYPE = "i8"
 
-#: weights の宣言（dtype ラベル → 役割名）。分割は現物が決めるので、ここが指すのは代表 1 役。
-#: MUST: drafter を **weights の 2 本目**として宣言する（assets ではない）— IR コンテナで
-#: グラフを持ち、`createSession` が食う側の資産だからで、hub の `ResolveOptions.weights` が
-#: 「既定では取らない」を表せる軸もここ 1 本しかない。
+#: The weights declaration (dtype label → role name). The split is decided by the actual files, so
+#: this points to one representative role.
+#: MUST: declare the drafter as **the second weights entry** (not as an asset) — it is an IR
+#: container that holds a graph and is consumed by `createSession`, and this is the only axis on
+#: which hub's `ResolveOptions.weights` can express "not fetched by default".
 GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     GEMMA4_ROLE: {GEMMA4_DTYPE: WeightFiles(GEMMA4_ROLE)},
     GEMMA4_DRAFTER_ROLE: {GEMMA4_DRAFTER_DTYPE: WeightFiles(GEMMA4_DRAFTER_ROLE)},
@@ -337,16 +351,18 @@ GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
 
 
 def gemma4_has_drafter(model: str) -> bool:
-    """このモデルが MTP drafter を配るか（drafter の上流表 `GEMMA4_DRAFTER_UPSTREAM` に載るか）。"""
+    """Whether this model ships an MTP drafter (whether the drafter upstream table
+    `GEMMA4_DRAFTER_UPSTREAM` lists it)."""
     return model in GEMMA4_DRAFTER_UPSTREAM
 
 
 def gemma4_weights(model: str) -> Mapping[str, Mapping[str, WeightFiles]]:
-    """モデルの weights 宣言 — drafter を配らないモデルは `model` 役 1 本だけ。
+    """The model's weights declaration — a model that ships no drafter has the `model` role only.
 
-    MUST: drafter の無いモデルに drafter 役を宣言しない。manifest の weights にその役が
-    無いことが「このモデルは投機を張れない」の唯一の表現で、読み手は `speculative` 指定の
-    ロードを weights の解決（hub `ResolveOptions.weights`）で fail loudly に落とす。
+    MUST: do not declare a drafter role for a model without a drafter. The absence of that role in
+    the manifest's weights is the only way to say "this model cannot run speculative decoding", and
+    a reader fails a load that asks for `speculative` loudly at weights resolution (hub
+    `ResolveOptions.weights`).
     """
     if gemma4_has_drafter(model):
         return GEMMA4_WEIGHTS
@@ -381,38 +397,44 @@ def gemma4_quants(model: str) -> dict[str, Any]:
     return quants
 
 
-#: モデルごとの既定 quant。キー集合は the regular line's models ({@link GEMMA4_REGULAR_MODELS})
-#: と一致する MUST（tests が固定する）。Both default to the line's one preset, `bf16` (the
-#: maintainer's ruling of 2026-11-04 — ADR 0128 addendum 2026-11-04).
+#: The default quant per model. The key set MUST equal the regular line's models
+#: ({@link GEMMA4_REGULAR_MODELS}; the tests pin it). Both default to the line's one preset, `bf16`
+#: (the maintainer's ruling of 2026-11-04 — ADR 0128 addendum 2026-11-04).
 GEMMA4_DEFAULT_QUANT: Mapping[str, str] = dict.fromkeys(GEMMA4_REGULAR_MODELS, GEMMA4_DTYPE)
 
-#: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
-#: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
+#: The row count of a fixed-length prefill chunk (ADR 0066 decision 4 — a context planning
+#: constant). It is a **runtime knob**, so it cannot be derived from the asset. Its upper bound is
+#: the trace-time bound of the symbol `M` ({@link GEMMA4_MAX_CHUNK_LENGTH}).
 GEMMA4_CHUNK_LENGTH = 768
 
-#: 記号 `M`（1 chunk の行数）の上限。焼く側の `gemma4.export.SYM_MAX` の鏡像で、こちらは
-#: torch を読まない側に置いた写し（同値は `tests/test_distribution.py` が突き合わせる）。
+#: The upper bound of the symbol `M` (the rows of one chunk). The mirror of the writer's
+#: `gemma4.export.SYM_MAX`, copied to the side that does not read torch (the two are held equal by
+#: `tests/test_distribution.py`).
 #:
-#: これは `pipelineConfig.maxChunkLength` として**配布形に載る**（{@link gemma4_pipeline_config}）。
-#: 資産からは導けない数（IR の `symbols` は名前の列だけ）なので、宣言が無いと読み手は
-#: `chunkLength` の上書きが trace 範囲の内側かどうかを判定できない。
+#: It is **carried in the distribution** as `pipelineConfig.maxChunkLength`
+#: ({@link gemma4_pipeline_config}). It cannot be derived from the asset (the IR's `symbols` is only
+#: a list of names), so without the declaration a reader cannot tell whether a `chunkLength`
+#: override is inside the traced range.
 GEMMA4_MAX_CHUNK_LENGTH = 768
 
-#: 出口の行数記号（`last_row[R]` と出力 2 本の行軸）。焼く側の `gemma4.export_product.ROW_SYMBOL`
-#: の鏡像で、こちらは torch を読まない側に置いた写し（同値は `tests/test_distribution.py` が
-#: 突き合わせる）。R は入力 shape が束縛するので、容量記号と違って配布形の宣言には載らない。
+#: The exit's row symbol (`last_row[R]` and the row axis of both outputs). The mirror of the
+#: writer's `gemma4.export_product.ROW_SYMBOL`, copied to the side that does not read torch (the two
+#: are held equal by `tests/test_distribution.py`). R is bound by an input shape, so unlike the
+#: capacity symbol it is not carried in the distribution's declaration.
 GEMMA4_ROW_SYMBOL = "R"
 
-#: full スロットの容量（会話が使える最大の論理長）の**既定値**。同じく実行時ノブで、上限は
-#: {@link gemma4_pipeline_config} がモデルの宣言（`maxPosition`）で押さえる。
+#: The **default** capacity of the full slots (the largest logical length a conversation can use).
+#: Also a runtime knob; {@link gemma4_pipeline_config} bounds it by the model's declaration
+#: (`maxPosition`).
 #:
-#: NOTE: **VRAM と会話長のトレードオフの政策値**。RoPE をホスト生成へ移したので資産側の
-#: 位置上限は消え、`maxPosition`（E2B は 131,072）まで宣言できる — ここに置くのは
-#: 「既定でどこまで確保するか」だけで、full スロットの常駐バイト数が容量に比例する
-#: （`karume.limits`）ぶんが代償になる。
+#: NOTE: **a policy value trading VRAM against conversation length**. With RoPE moved to the host
+#: the asset-side position limit is gone, and up to `maxPosition` (131,072 for E2B) can be declared
+#: — this only sets "how much is reserved by default", and the price is that the resident bytes of
+#: the full slots grow with the capacity (`karume.limits`).
 GEMMA4_CAPACITY = 4096
 
-#: 上流 `generation_config.json` → `pipelineConfig.sampler` の欄名（TS 側 `SamplerSpec` の綴り）。
+#: Upstream `generation_config.json` → the field names of `pipelineConfig.sampler` (the spellings
+#: of the TS `SamplerSpec`).
 GEMMA4_SAMPLER_FIELDS: tuple[tuple[str, str], ...] = (
     ("temperature", "temperature"),
     ("top_k", "topK"),
@@ -443,12 +465,14 @@ GEMMA4_GENERATION_NOT_CARRIED: Mapping[str, str] = {
     "transformers_version": "the version of the library that wrote the file, not a default",
 }
 
-#: compile 済みトークナイザ資産の形式識別子（書き手は `_shared/gemma_tokenizer.py`）。
+#: The format identifier of the compiled tokenizer asset (the writer is
+#: `_shared/gemma_tokenizer.py`).
 GEMMA4_TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
 
-#: PLE 索引の版と欄（読み手 `packages/models/src/gemma/ple-index.ts` の
-#: `SCHEMA` / `INDEX_KEYS` / `TABLE_KEYS` / `BLOCK_KEYS` の鏡像 — 焼く側が先に落とす）。
-#: 版そのもの（`PLE_INDEX_SCHEMA` / `PLE_GROUPED_INDEX_SCHEMA`）は書き手（`karume.ple`）と共有する。
+#: The PLE index's version and fields (the mirror of `SCHEMA` / `INDEX_KEYS` / `TABLE_KEYS` /
+#: `BLOCK_KEYS` of the reader `packages/models/src/gemma/ple-index.ts` — the writer side fails
+#: first). The versions themselves (`PLE_INDEX_SCHEMA` / `PLE_GROUPED_INDEX_SCHEMA`) are shared
+#: with the writer (`karume.ple`).
 GEMMA4_PLE_VALUES_KEY = "values"
 GEMMA4_PLE_SCALES_KEY = "scales"
 GEMMA4_PLE_INDEX_KEYS: tuple[str, ...] = (
@@ -469,32 +493,36 @@ GEMMA4_PLE_GROUP_SIZE_KEY = "groupSize"
 
 
 def gemma4_checkpoint(model: str) -> str:
-    """モデル名 → 上流チェックポイントのディレクトリ名（= 上流の HF リポ名の末尾）。
+    """Model name → the directory name of the upstream checkpoint (= the tail of the upstream HF
+    repository name).
 
-    綴りの事実は「このモデルがどの上流リポか」1 つしかないので、帰属表
-    （`gemma4.card.GEMMA4_UPSTREAM`）から導いてここに 2 つ目の表を持たない（SigLIP2 と同じ規律）。
+    The spelling has one fact behind it, "which upstream repository this model is", so it is
+    derived from the attribution table (`gemma4.card.GEMMA4_UPSTREAM`) instead of keeping a second
+    table here (the same rule as SigLIP2).
     """
     repo = GEMMA4_UPSTREAM.get(model)
     if repo is None:
         raise DistError(
-            f"gemma4 のモデル '{model}' は知らない（既知: {' / '.join(sorted(GEMMA4_UPSTREAM))}）"
+            f"unknown gemma4 model '{model}' (known: {' / '.join(sorted(GEMMA4_UPSTREAM))})"
         )
     return repo.split("/", 1)[1]
 
 
 def gemma4_repo_name(_model: str) -> str:
-    """配布リポ名（家族 1 リポなので、どのモデルでも同じ 1 つ — `karume-` prefix はリポ名裁定
-    2026-08-09）。
+    """The distribution repository name (one repository per family, so the same one for every
+    model — the `karume-` prefix is the repository-name ruling of 2026-08-09).
 
-    `Pipeline.repo_name` はカードの Usage 例に載る repo 名の正本（`karume.dist.resolve_repo`）で、
-    単一モデルを組んだときの既定の出力先も答える席。家族が 1 リポに畳まれた今はモデル名を
-    見ない。
+    `Pipeline.repo_name` is the canonical repository name shown in the card's usage example
+    (`karume.dist.resolve_repo`), and it also answers the default output location when a single
+    model is assembled. Now that the family is folded into one repository, it ignores the model
+    name.
     """
     return GEMMA4_REPO_NAME
 
 
 def gemma4_series_name(model: str, suffix: str) -> str:
-    """系列名（`outputs/series/gemma4-<モデル名>-<接尾>/`）— 書き手の既定と同じ綴り。"""
+    """The series name (`outputs/series/gemma4-<model name>-<suffix>/`) — the same spelling as the
+    writers' defaults."""
     return f"{GEMMA4_PREFIX}-{model}-{suffix}"
 
 
@@ -506,7 +534,7 @@ class Gemma4Sources:
     tokenizer asset is held against — {@link assert_gemma4_tokenizer_source}) are read, never the
     weights.
 
-    `drafter` が `None` のモデルは drafter を配らない（{@link gemma4_has_drafter}）。
+    A model whose `drafter` is `None` ships no drafter ({@link gemma4_has_drafter}).
 
     The upstream side is two directories: `model` holds the weights' `config.json` (the numbers the
     model decides — {@link gemma4_text_config}) and `upstream_tokenizer` the `tokenizer.json` and
@@ -525,7 +553,8 @@ class Gemma4Sources:
 
 
 def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
-    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。
+    """Look up the inputs from the series' parent directory (`outputs/series/`) and the spellings
+    of `_shared.paths`.
 
     The upstream directories come from `gemma4.sources.checkpoint_dir` / `tokenizer_dir`
     (`inputs/gemma4/…`). A model outside the regular line ({@link GEMMA4_REGULAR_MODELS} — 12B
@@ -553,91 +582,98 @@ def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma
 
 def _read_json(path: Path, what: str) -> Any:
     if not path.is_file():
-        raise DistError(f"{what}が無い: {path}")
+        raise DistError(f"{what} is missing: {path}")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        raise DistError(f"{path} が JSON として読めない") from error
+        raise DistError(f"{path} cannot be read as JSON") from error
 
 
 def _positive_int(raw: Mapping[str, Any], key: str, where: str) -> int:
     value = raw.get(key)
-    # bool は int の派生。`"tokens": true` を 1 として通すと行数の突合が緩む。
+    # bool is a subclass of int; letting `"tokens": true` through as 1 would loosen the row-count
+    # match.
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise DistError(f"{where} の {key} が正の整数でない（{value!r}）")
+        raise DistError(f"{where}: {key} is not a positive integer ({value!r})")
     return value
 
 
 def _offset(raw: Mapping[str, Any], key: str, where: str) -> int:
     value = raw.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise DistError(f"{where} の {key} が 0 以上の整数でない（{value!r}）")
+        raise DistError(f"{where}: {key} is not a non-negative integer ({value!r})")
     return value
 
 
 def gemma4_ple_table(
     root: Mapping[str, Any], name: str, row_bytes: int, tokens: int, where: str
 ) -> dict[str, Any]:
-    """索引の表 1 本（`values` / `scales`）を検査して読む。
+    """Check and read one index table (`values` / `scales`).
 
-    MUST: block の範囲は `[0, tokens)` の**隙間も重なりも無い昇順分割**であること。緩めると
-    「引けない id がある索引」や「2 本が同じ id を持つ索引」が通り、後者は**どちらの行を
-    引いたか**で結果が変わる（例外の出ない沈黙誤値）。
-    MUST: `rowBytes` は宣言（層数 / 次元 / 格納）から決まる値と一致すること。ここがずれると
-    行 offset の掛け算だけが静かにずれ、形も dtype も合ったまま別 token の行を引く。
+    MUST: the block ranges are **an ascending partition of `[0, tokens)` with no gap and no
+    overlap**. Loosening this lets through "an index with ids that cannot be looked up" and "an
+    index in which two blocks hold the same id", and with the latter the result depends on **which
+    row was looked up** (a silent wrong value with no exception).
+    MUST: `rowBytes` equals the value the declaration determines (layers / dim / storage). If it
+    drifts, only the multiplication of the row offset shifts, quietly, and a row of another token is
+    read with the shape and dtype still matching.
     """
     at = f"{where}.{name}"
     table = root.get(name)
     if not isinstance(table, dict):
-        raise DistError(f"{at}: オブジェクトでない")
+        raise DistError(f"{at}: not an object")
     extra = sorted(set(table) - set(GEMMA4_PLE_TABLE_KEYS))
     if extra:
-        raise DistError(f"{at}: 未知キー {extra}（許可: {list(GEMMA4_PLE_TABLE_KEYS)}）")
+        raise DistError(f"{at}: unknown keys {extra} (allowed: {list(GEMMA4_PLE_TABLE_KEYS)})")
     declared = _positive_int(table, "rowBytes", at)
     if declared != row_bytes:
-        raise DistError(f"{at}.rowBytes {declared} が宣言から決まる {row_bytes} と違う")
+        raise DistError(
+            f"{at}.rowBytes {declared} differs from {row_bytes}, set by the declaration"
+        )
     blocks = table.get("blocks")
     if not isinstance(blocks, list) or not blocks:
-        raise DistError(f"{at}.blocks が非空の配列でない")
+        raise DistError(f"{at}.blocks is not a non-empty array")
     seen: set[str] = set()
     expected = 0
     for position, entry in enumerate(blocks):
         block_at = f"{at}.blocks[{position}]"
         if not isinstance(entry, dict):
-            raise DistError(f"{block_at}: オブジェクトでない")
+            raise DistError(f"{block_at}: not an object")
         unknown = sorted(set(entry) - set(GEMMA4_PLE_BLOCK_KEYS))
         if unknown:
             raise DistError(
-                f"{block_at}: 未知キー {unknown}（許可: {list(GEMMA4_PLE_BLOCK_KEYS)}）"
+                f"{block_at}: unknown keys {unknown} (allowed: {list(GEMMA4_PLE_BLOCK_KEYS)})"
             )
         asset = entry.get("asset")
         if not isinstance(asset, str) or not asset:
-            raise DistError(f"{block_at}: asset が非空の文字列でない（{asset!r}）")
+            raise DistError(f"{block_at}: asset is not a non-empty string ({asset!r})")
         if asset in seen:
-            raise DistError(f"{block_at}: asset '{asset}' が重複している")
+            raise DistError(f"{block_at}: asset '{asset}' is duplicated")
         seen.add(asset)
         start = _offset(entry, "start", block_at)
         stop = _offset(entry, "stop", block_at)
         if start != expected:
             raise DistError(
-                f"{block_at}: start {start} が直前の block の末尾 {expected} と連続しない"
+                f"{block_at}: start {start} does not continue from the previous block's end"
+                f" {expected}"
             )
         if stop <= start:
-            raise DistError(f"{block_at}: 範囲 [{start}, {stop}) が空")
+            raise DistError(f"{block_at}: range [{start}, {stop}) is empty")
         expected = stop
     if expected != tokens:
-        raise DistError(f"{at}: block の合計 {expected} 行が tokens {tokens} と違う")
+        raise DistError(f"{at}: the blocks total {expected} rows, not tokens {tokens}")
     return {"rowBytes": row_bytes, "blocks": blocks}
 
 
 def gemma4_ple_index(
     container: Path, *, storage: str, group_size: int | None = None
 ) -> Mapping[str, Any]:
-    """`model` 容器の資産 `ple_index` を読んで**形まで**落とす。
+    """Read the `model` container's asset `ple_index` and check it **down to its form**.
 
-    読み手（`packages/models/src/gemma/ple-index.ts` の `parseGemma4PleIndex`）の受理集合の
-    鏡像（旧 sidecar の索引は配布形ごと退役した — ADR 0109 決定 1 の major 繰り上げ規則）。
-    `storage` は呼び手が要求する格納（QAT は `i2` / `i4`）。`group_size` is the form the caller
+    The mirror of the set the reader accepts (`parseGemma4PleIndex` in
+    `packages/models/src/gemma/ple-index.ts`; the old sidecar index retired together with its
+    distribution form — ADR 0109 decision 1's rule of bumping the major). `storage` is the storage
+    the caller requires (`i2` / `i4` for QAT). `group_size` is the form the caller
     requires: `None` = schema 3 (one f32 scale per (token, layer) row), a group size = schema 4
     with exactly that `groupSize` (one f32 scale per group — the q4_0 QAT line's 32). The reader
     takes both; a distribution takes the one its line writes, so a series of the other form fails
@@ -647,12 +683,13 @@ def gemma4_ple_index(
     of the floats themselves and no `scales` (neither the key nor `groupSize`); the result then
     has no `scales` entry either.
 
-    MUST: 配ってから利用者の手元で初めて落ちる形にしない — 同じ検査を組み立て側でも掛ける。
+    MUST: no form may first fail in the user's hands after it is distributed — the same checks run
+    on the assembly side too.
     """
-    where = f"{container} の資産 '{PLE_INDEX_ASSET}'"
+    where = f"{container}: asset '{PLE_INDEX_ASSET}'"
     float_bytes = PLE_FLOAT_BYTES.get(storage)
     if storage not in PLE_PACK_FACTOR and float_bytes is None:
-        raise DistError(f"未対応 PLE storage: {storage}")
+        raise DistError(f"unsupported PLE storage: {storage}")
     if float_bytes is not None and group_size is not None:
         raise DistError(f"PLE storage '{storage}' has no scales, so no group size ({group_size})")
     if float_bytes is not None:
@@ -668,23 +705,24 @@ def gemma4_ple_index(
     try:
         payload = read_asset(container, PLE_INDEX_ASSET)
     except (KeyError, ContainerError, ContainerFormatError) as cause:
-        raise DistError(f"{where} が読めない: {cause}") from cause
+        raise DistError(f"{where} cannot be read: {cause}") from cause
     try:
         raw = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise DistError(f"{where} が JSON として読めない") from error
+        raise DistError(f"{where} cannot be read as JSON") from error
     if not isinstance(raw, dict):
-        raise DistError(f"{where}: 最上位オブジェクトでない")
+        raise DistError(f"{where}: the top level is not an object")
     unknown = sorted(set(raw) - set(allowed))
     if unknown:
-        raise DistError(f"{where}: 未知キー {unknown}（許可: {list(allowed)}）")
+        raise DistError(f"{where}: unknown keys {unknown} (allowed: {list(allowed)})")
     if raw.get("schema") != schema:
         raise DistError(
-            f"{where}: schema が {raw.get('schema')!r}（期待 {schema}）"
-            " — 旧 sidecar の索引と、この配布が書かない版は読まない"
+            f"{where}: schema is {raw.get('schema')!r} (expected {schema})"
+            " — neither the old sidecar index nor a version this distribution does not write"
+            " is read"
         )
     if raw.get("storage") != storage:
-        raise DistError(f"{where}: storage が {raw.get('storage')!r}（期待 {storage}）")
+        raise DistError(f"{where}: storage is {raw.get('storage')!r} (expected {storage})")
     tokens = _positive_int(raw, "tokens", where)
     layers = _positive_int(raw, "layers", where)
     dim = _positive_int(raw, "dim", where)
@@ -695,7 +733,7 @@ def gemma4_ple_index(
         or not math.isfinite(scale)
         or scale <= 0
     ):
-        raise DistError(f"{where}: embedScale が正の有限数でない（{scale!r}）")
+        raise DistError(f"{where}: embedScale is not a positive finite number ({scale!r})")
     if float_bytes is not None:
         return {
             "storage": storage,
@@ -709,7 +747,10 @@ def gemma4_ple_index(
         }
     factor = PLE_PACK_FACTOR[storage]
     if dim % factor:
-        raise DistError(f"{where}: dim {dim} が格納 '{storage}' の詰め数 {factor} で割り切れない")
+        raise DistError(
+            f"{where}: dim {dim} is not divisible by the pack factor of storage '{storage}'"
+            f" ({factor})"
+        )
     # The scales per (token, layer) row: one (schema 3), or one per group (schema 4).
     groups = 1
     if group_size is not None:
@@ -741,12 +782,13 @@ def gemma4_ple_index(
 
 
 def gemma4_placements(sources: Gemma4Sources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link GEMMA4_OUTPUT_PATHS} が持つ。
+    """Role name → source file. The output paths are held by {@link GEMMA4_OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（製品系列に同居する `ple.probe.safetensors` と
-    `reference.json`・drafter 系列の `drafter-golden.*.safetensors` はこれで落ちる — どれも
-    検収と出所記録のためのもので実行に要らない）。PLE は `model` 容器の中なので席を持たない。
-    drafter を配らないモデル（`sources.drafter is None`）は drafter の席も持たない。
+    Anything not in this table does not go into the output (this drops the `ple.probe.safetensors`
+    and `reference.json` that sit in the product series and the drafter series'
+    `drafter-golden.*.safetensors` — all of them serve acceptance and provenance, not running). The
+    PLE lives inside the `model` container, so it has no entry. A model that ships no drafter
+    (`sources.drafter is None`) has no drafter entry either.
     """
     placements = {GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE}
     if sources.drafter is not None:
@@ -755,26 +797,30 @@ def gemma4_placements(sources: Gemma4Sources) -> dict[str, Path]:
     return placements
 
 
-#: assets の宣言（asset 名 → 役割名）。PLE は容器の中へ移ったので、残るのはトークナイザ 1 本。
+#: The assets declaration (asset name → role name). The PLE moved into the container, so the
+#: tokenizer is the only one left.
 GEMMA4_ASSETS: Mapping[str, str] = {GEMMA4_TOKENIZER_ROLE: GEMMA4_TOKENIZER_ROLE}
 
 
 def gemma4_vocab_size(graph: Mapping[str, Any], path: Path) -> int:
-    """選択行 logits 出口の語彙数をグラフの出力宣言から読む（`[1, R, V]` — ADR 0083 決定 6）。
+    """Read the vocabulary size of the selected-rows logits exit from the graph's output
+    declaration (`[1, R, V]` — ADR 0083 decision 6).
 
-    出力が **2 本**（`logits[1, R, V]` → `hidden[1, R, H]` の順）であることまで見るのは、
-    検収用の 2 系列（logits opt-in / token-only）が同じ系列名の下に紛れ込むと**幅だけが別の
-    意味の数**になるため。行軸が記号 `R` なのは投機 verify が 1 回で複数行を採点するからで、
-    通常の decode はそこを 1 に束縛する。V は主 embedding の行数そのもので、PLE（容器の資産）と
-    トークナイザの相互照合（ADR 0085 決定 5）の基準になる。
+    It checks that there are **two** outputs (in the order `logits[1, R, V]` → `hidden[1, R, H]`)
+    because if the two acceptance series (logits opt-in / token-only) slip in under the same series
+    name, **only the width becomes a number with another meaning**. The row axis is the symbol `R`
+    because speculative verification scores several rows in one run; an ordinary decode binds it
+    to 1. V is the row count of the main embedding itself, and the reference for cross-checking the
+    PLE (a container asset) and the tokenizer (ADR 0085 decision 5).
 
-    MUST: 順序まで見る（logits と hidden は行軸まで同型で、幅だけが違う）— 入れ替わった資産を
-    受けると、V のつもりで hidden_size を読んだまま manifest が組み上がる。
+    MUST: check the order too (logits and hidden have the same form down to the row axis and differ
+    only in width) — accepting a swapped asset builds a manifest that read hidden_size as V.
     """
     outputs = graph.get("outputs")
     if not isinstance(outputs, list) or len(outputs) != 2:
         raise DistError(
-            f"{path}: グラフ出力が {outputs!r} — 製品グラフの出口は選択行の logits + hidden の 2 本"
+            f"{path}: graph outputs are {outputs!r} — the product graph's exit is two outputs, the"
+            " selected rows' logits + hidden"
         )
     values = graph.get("values")
     widths: list[int] = []
@@ -788,56 +834,66 @@ def gemma4_vocab_size(graph: Mapping[str, Any], path: Path) -> int:
             or shape[1] != GEMMA4_ROW_SYMBOL
         ):
             raise DistError(
-                f"{path}: グラフ出力 '{outputs[slot]}'（{what}）の形が"
-                f" [1, {GEMMA4_ROW_SYMBOL}, *] でない（{shape!r}）"
+                f"{path}: the shape of graph output '{outputs[slot]}' ({what}) is not"
+                f" [1, {GEMMA4_ROW_SYMBOL}, *] ({shape!r})"
             )
         width = shape[2]
         if not isinstance(width, int) or isinstance(width, bool) or width <= 0:
             raise DistError(
-                f"{path}: グラフ出力 '{outputs[slot]}' の幅が正の整数でない（{width!r}）"
+                f"{path}: the width of graph output '{outputs[slot]}' is not a positive integer"
+                f" ({width!r})"
             )
         widths.append(width)
     return widths[0]
 
 
 def gemma4_text_config(model_dir: Path) -> SimpleNamespace:
-    """上流 `config.json` の `text_config` 節（位置の上限と RoPE の式の出どころ）。
+    """The `text_config` section of upstream `config.json` (the source of the position limit and
+    of the RoPE formula).
 
-    属性アクセスの形へ寄せるのは {@link gemma4.rope.rope_specs} が transformers の config
-    オブジェクトと同じ読み方をするため — 焼く側と配る側で**同じ導出コード**を通す。
+    It is turned into attribute access because {@link gemma4.rope.rope_specs} reads it the same way
+    as a transformers config object — the writer and the distribution go through **the same
+    derivation code**.
     """
     where = str(model_dir / GEMMA4_CONFIG_FILE)
-    raw = _read_json(model_dir / GEMMA4_CONFIG_FILE, "上流のモデル設定")
+    raw = _read_json(model_dir / GEMMA4_CONFIG_FILE, "the upstream model config")
     if not isinstance(raw, dict):
-        raise DistError(f"{where}: 最上位オブジェクトでない")
+        raise DistError(f"{where}: the top level is not an object")
     text = raw.get(GEMMA4_TEXT_CONFIG_KEY)
     if not isinstance(text, dict):
-        raise DistError(f"{where}: {GEMMA4_TEXT_CONFIG_KEY} がオブジェクトでない（{text!r}）")
+        raise DistError(f"{where}: {GEMMA4_TEXT_CONFIG_KEY} is not an object ({text!r})")
     return SimpleNamespace(**text)
 
 
 def gemma4_max_position(text_config: SimpleNamespace, where: str) -> int:
-    """モデルが宣言する位置の上限（= `pipelineConfig.maxPosition`）。
+    """The position limit the model declares (= `pipelineConfig.maxPosition`).
 
-    MUST: 写経しない（上流 `text_config.max_position_embeddings` が唯一の出どころ）。RoPE を
-    ホスト生成へ移した以上、位置の上限を持っているのは資産ではなくモデルの宣言だけになる。
+    MUST: do not copy it by hand (upstream `text_config.max_position_embeddings` is its only
+    source). With RoPE moved to the host, the position limit is held by the model's declaration
+    alone, not by an asset.
     """
     declared = getattr(text_config, GEMMA4_MAX_POSITION_KEY, None)
     if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
-        raise DistError(f"{where}: {GEMMA4_MAX_POSITION_KEY} が正の整数でない（{declared!r}）")
+        raise DistError(
+            f"{where}: {GEMMA4_MAX_POSITION_KEY} is not a positive integer ({declared!r})"
+        )
     return declared
 
 
 def gemma4_hidden_size(text_config: SimpleNamespace, where: str) -> int:
-    """モデルが宣言する hidden 幅（製品グラフの出力 1 = 選択行 hidden の幅）。
+    """The hidden width the model declares (output 1 of the product graph = the width of the
+    selected rows' hidden).
 
-    MUST: 写経しない（上流 `text_config.hidden_size` が唯一の出どころ）。宣言とグラフは別々の
-    正本から来るので、噛み合わせは {@link assert_gemma4_graph} でしか見られない — 出力 2 本は
-    行軸まで同型なので、入れ替えを落とせるのは**幅を宣言と突き合わせる**この 1 点だけ。
+    MUST: do not copy it by hand (upstream `text_config.hidden_size` is its only source). The
+    declaration and the graph come from separate sources of truth, so their fit is only seen in
+    {@link assert_gemma4_graph} — the two outputs have the same form down to the row axis, so the
+    one point that can catch a swap is **matching the width against the declaration**.
     """
     declared = getattr(text_config, GEMMA4_HIDDEN_SIZE_KEY, None)
     if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
-        raise DistError(f"{where}: {GEMMA4_HIDDEN_SIZE_KEY} が正の整数でない（{declared!r}）")
+        raise DistError(
+            f"{where}: {GEMMA4_HIDDEN_SIZE_KEY} is not a positive integer ({declared!r})"
+        )
     return declared
 
 
@@ -864,20 +920,21 @@ def gemma4_ple_dim(text_config: Any, where: str) -> int:
 
 
 def gemma4_rope(text_config: SimpleNamespace, where: str) -> dict[str, Any]:
-    """`pipelineConfig.rope`（層種別ごとの theta / headDim / rotaryDim）を config から導く。
+    """Derive `pipelineConfig.rope` (theta / headDim / rotaryDim per layer type) from the config.
 
-    MUST: 受理外の rope_type / 係数は fail loudly（{@link gemma4.rope.layer_spec}）— 式が
-    別物なのに theta と幅だけを写すと、ホストが**形も型も合う別の角度**で表を組む。
-    MUST: 層種別は sliding / full の 2 つちょうど。増減はグラフ入力の本数
-    （{@link GEMMA4_ROPE_INPUTS}）と噛み合わなくなる。
+    MUST: an unaccepted rope_type / coefficient fails loudly ({@link gemma4.rope.layer_spec}) —
+    copying only theta and the width of a different formula makes the host build the table at
+    **other angles that still match in shape and type**.
+    MUST: exactly two layer types, sliding / full. Any more or fewer no longer fits the number of
+    graph inputs ({@link GEMMA4_ROPE_INPUTS}).
     """
     try:
         specs = rope_specs(text_config)
     except RopeSpecError as error:
-        raise DistError(f"{where}: RoPE の宣言を導けない — {error}") from error
+        raise DistError(f"{where}: cannot derive the RoPE declaration — {error}") from error
     if sorted(specs) != sorted(GEMMA4_ROPE_LAYER_TYPES):
         raise DistError(
-            f"{where}: 層種別が {sorted(specs)} — {sorted(GEMMA4_ROPE_LAYER_TYPES)} でない"
+            f"{where}: layer types are {sorted(specs)} — not {sorted(GEMMA4_ROPE_LAYER_TYPES)}"
         )
     return {layer_type: specs[layer_type].declaration() for layer_type in GEMMA4_ROPE_LAYER_TYPES}
 
@@ -889,43 +946,47 @@ def assert_gemma4_graph(
     rope: Mapping[str, Any],
     hidden_size: int,
 ) -> None:
-    """グラフ入力の並び・形・記号の割れ方を、配置の前に実測する。
+    """Measure the order, shapes and symbol split of the graph inputs before placement.
 
     `index` is the container's PLE index, or `None` for a model without per-layer embeddings
     (12B): its graph takes {@link GEMMA4_PLE_FREE_GRAPH_INPUTS} — `per_layer_inputs` absent — and
     every other rule below holds unchanged.
 
-    MUST: PLE の層数と層当たり次元は**グラフ入力の宣言**と**索引**の両方が持つ（前者は
-    `per_layer_inputs[1, M, 35, 256]`・後者は `layers` / `dim`）。食い違ったまま配ると、
-    ホストが組む表と GPU が読む形が別物になる — shape が合う組み合わせでは沈黙する
-    （索引は同じ容器の資産だが、書き手が別々に組むので噛み合わせは残る）。
+    MUST: the PLE's layer count and per-layer dim are held by both **the graph input declaration**
+    and **the index** (the former `per_layer_inputs[1, M, 35, 256]`, the latter `layers` / `dim`).
+    Distributed while they disagree, the table the host builds and the form the GPU reads differ —
+    silently, for combinations whose shapes fit (the index is an asset of the same container, but
+    the writer builds the two separately, so their fit still needs checking).
 
-    MUST: RoPE 派生入力の幅は `pipelineConfig.rope` の `headDim` と一致すること。宣言と
-    グラフは別々の正本（config / コンテナ）から来るので、噛み合わせはここでしか見られない
-    — ホストが宣言どおりに組んだ表が入力の幅と違えば、実行時まで誰も気づけない。
+    MUST: the width of the derived RoPE inputs equals `headDim` of `pipelineConfig.rope`. The
+    declaration and the graph come from separate sources of truth (config / container), so their
+    fit can only be seen here — if the table the host builds as declared differs from the input
+    width, nobody notices until run time.
 
-    MUST: 出力 1（hidden）の幅は上流の `hidden_size` と一致すること。出力 2 本は行軸まで
-    同型（どちらも f32 `[1, R, *]`）なので、**入れ替わりを落とせるのはこの幅の突合だけ**
-    — 取り違えたまま通すと、語彙数のつもりで hidden_size を読んだ manifest が組み上がる。
+    MUST: the width of output 1 (hidden) equals upstream `hidden_size`. The two outputs have the
+    same form down to the row axis (both f32 `[1, R, *]`), so **only this width match can catch a
+    swap** — letting a mix-up through builds a manifest that read hidden_size as the vocabulary
+    size.
 
-    MUST: 表の initializer が 1 本も残っていないこと。派生入力を足したのに表も残っている形は
-    常駐が戻るうえ、位置の上限が資産側へ逆戻りする。
+    MUST: no table initializer remains. A form that added the derived inputs but kept the tables
+    brings the resident memory back and moves the position limit back to the asset side.
 
-    MUST: 呼び手は {@link gemma4_vocab_size} を**先に**通していること（出力が 2 本で、どちらも
-    `[1, R, 幅]` の 3 軸であることを前提に幅だけを読む）。
+    MUST: the caller has run {@link gemma4_vocab_size} **first** (only the width is read, on the
+    premise that there are two outputs, each with the three axes `[1, R, width]`).
 
-    MUST: 記号は 3 本（chunk 行数 `M` / 出口の行数 `R` / full スロットの容量）で、**入力 shape
-    から決まらないもの**がちょうど 1 本（容量記号）。TS 側 `gemma.Pipeline` はこの 1 本を容量の
-    束縛点にするので、割れ方が変わるとロード時に落ちる（`capacitySymbolOf` の同じ検査）。
-    `R` は `last_row[R]` が束縛するので、この勘定では自由記号に数えない。
+    MUST: there are three symbols (the chunk rows `M`, the exit rows `R`, the full slots'
+    capacity), and exactly one of them is **not determined by the input shapes** (the capacity
+    symbol). The TS side's `gemma.Pipeline` makes that one the binding point of the capacity, so a
+    different split fails at load time (the same check as `capacitySymbolOf`).
+    `R` is bound by `last_row[R]`, so this count does not treat it as free.
     """
     inputs = graph_inputs(graph, path)
     names = tuple(inputs)
     expected_names = GEMMA4_GRAPH_INPUTS if index is not None else GEMMA4_PLE_FREE_GRAPH_INPUTS
     if names != expected_names:
         raise DistError(
-            f"{path} のグラフ入力が {list(names)} で、期待の {list(expected_names)} と違う"
-            " — 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない"
+            f"{path}: graph inputs are {list(names)}, not the expected {list(expected_names)}"
+            " — the runtime binds by name, so if a single spelling changes they cannot be bound"
         )
     sequence = inputs[GEMMA4_INPUT_IDS][1]
     for layer_type in GEMMA4_ROPE_LAYER_TYPES:
@@ -935,30 +996,31 @@ def assert_gemma4_graph(
             declared = inputs[name]
             if list(declared) != [1, sequence, head_dim]:
                 raise DistError(
-                    f"{path} の入力 '{name}' が {list(declared)!r} — 宣言した headDim から組んだ"
-                    f" 期待 {[1, sequence, head_dim]} と違う（表とグラフが別世代）"
+                    f"{path}: input '{name}' is {list(declared)!r} — not the"
+                    f" {[1, sequence, head_dim]} expected from the declared headDim (the table and"
+                    " the graph are of different generations)"
                 )
-    # IR v2 では initializer 名がテンソルキーそのもの（docs/ir-v2.md）— 綴りで拾う。
+    # In IR v2 an initializer name is the tensor key itself (docs/ir-v2.md) — found by spelling.
     baked = sorted(key for key in (graph.get("initializers") or {}) if BAKED_TABLE_INFIX in key)
     if baked:
         raise DistError(
-            f"{path}: 焼き込んだ RoPE 表の initializer が {len(baked)} 本残っている: {baked[:4]}"
-            " — ホスト生成へ外に出し切れていない世代の資産"
+            f"{path}: {len(baked)} baked RoPE table initializers remain: {baked[:4]}"
+            " — an asset of a generation not yet moved fully to host generation"
         )
     if index is not None:
         per_layer = inputs[GEMMA4_PER_LAYER_INPUTS]
         if len(per_layer) != 4:
             raise DistError(
-                f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' が {per_layer!r} — [1, M, 層数, 次元]"
-                "の 4 軸でない"
+                f"{path}: input '{GEMMA4_PER_LAYER_INPUTS}' is {per_layer!r} — not the 4 axes"
+                " [1, M, layers, dim]"
             )
         for axis, field in ((2, "layers"), (3, "dim")):
             if per_layer[axis] != index[field]:
                 raise DistError(
-                    f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' の軸 {axis} が"
-                    f" {per_layer[axis]!r}、"
-                    f"資産 '{PLE_INDEX_ASSET}' の {field} は {index[field]}"
-                    " — グラフと PLE が別世代"
+                    f"{path}: input '{GEMMA4_PER_LAYER_INPUTS}' axis {axis} is"
+                    f" {per_layer[axis]!r}, "
+                    f"but asset '{PLE_INDEX_ASSET}' has {field} {index[field]}"
+                    " — the graph and the PLE are of different generations"
                 )
     outputs = graph.get("outputs")
     values = graph.get("values")
@@ -966,19 +1028,19 @@ def assert_gemma4_graph(
     found = hidden.get("shape")[2] if isinstance(hidden, dict) else None
     if found != hidden_size:
         raise DistError(
-            f"{path} の出力 1（hidden）の幅が {found!r} — 上流の"
-            f" {GEMMA4_HIDDEN_SIZE_KEY} {hidden_size} と違う（出力 2 本が入れ替わっている"
-            "／グラフと宣言が別世代）"
+            f"{path}: the width of output 1 (hidden) is {found!r} — not upstream"
+            f" {GEMMA4_HIDDEN_SIZE_KEY} {hidden_size} (the two outputs are swapped"
+            " / the graph and the declaration are of different generations)"
         )
     symbols = graph.get("symbols")
     if not isinstance(symbols, list):
-        raise DistError(f"{path}: IR メタデータに symbols が無い")
+        raise DistError(f"{path}: no symbols in the IR metadata")
     bound = {dim for shape in inputs.values() for dim in shape if isinstance(dim, str)}
     free = [symbol for symbol in symbols if symbol not in bound]
     if len(free) != 1:
         raise DistError(
-            f"{path}: 入力 shape から決まらない記号が {len(free)} 本（{free}）"
-            " — full スロットの容量記号 1 本であること"
+            f"{path}: {len(free)} symbols not determined by the input shapes ({free})"
+            " — there must be exactly one, the full slots' capacity symbol"
         )
 
 
@@ -990,34 +1052,40 @@ def assert_gemma4_drafter_graph(
     rope: Mapping[str, Any],
     hidden_size: int,
 ) -> None:
-    """drafter グラフ（借り手）の形と、**貸し手との噛み合わせ**を配置の前に実測する。
+    """Measure the form of the drafter graph (the borrower) and **its fit with the lender** before
+    placement.
 
-    借り手は単独では実行できない資産なので、見るべき性質の半分は「貸し手と一致していること」に
-    なる。食い違ったまま配ると、ロード時に落ちるか（名前が違う）、**形も型も合ったまま別の列を
-    読む**（容量が違う）。
+    The borrower is an asset that cannot run alone, so half of what to check is "it matches the
+    lender". Distributed while they disagree, it either fails at load time (a name differs) or
+    **reads other columns with the shape and type still matching** (the capacity differs).
 
-    - グラフ入力が `token` / `hidden` / RoPE 4 本ちょうど（K/V の placeholder が残っていれば、
-      呼び手が渡す値をどのノードも読まない形になる）
-    - `hidden` の幅が上流の `hidden_size`（= 製品グラフの出力 1 の幅）と一致
-    - RoPE 派生入力の幅が `pipelineConfig.rope` の `headDim` と一致（貸し手と同じ突合）
-    - 出力が k 本ちょうど（配布形は {@link GEMMA4_DRAFT_STEPS} 本）
-    - `states` が**全部 external**で、名前も形も**貸し手の宣言と 1 対 1**
-    - initializer に**共有宣言が 1 本**で、指し先が貸し手コンテナに実在するテンソルキー
-    - 記号は容量記号 1 本だけで、**貸し手と同じ綴り**（借り手の bindings は貸し手を継承する）
+    - the graph inputs are exactly `token` / `hidden` / the four RoPE inputs (if a K/V placeholder
+      remained, no node would read the value the caller passes)
+    - the width of `hidden` equals upstream `hidden_size` (= the width of output 1 of the product
+      graph)
+    - the width of the derived RoPE inputs equals `headDim` of `pipelineConfig.rope` (the same
+      match as for the lender)
+    - exactly k outputs ({@link GEMMA4_DRAFT_STEPS} in the distribution)
+    - the `states` are **all external**, and their names and shapes are **one to one with the
+      lender's declaration**
+    - the initializers hold **exactly one shared declaration**, whose target is a tensor key that
+      exists in the lender container
+    - the only symbol is the capacity symbol, **spelled as in the lender** (the borrower's bindings
+      inherit the lender's)
     """
     inputs = graph_inputs(graph, path)
     names = tuple(inputs)
     if names != GEMMA4_DRAFTER_GRAPH_INPUTS:
         raise DistError(
-            f"{path} のグラフ入力が {list(names)} で、期待の"
-            f" {list(GEMMA4_DRAFTER_GRAPH_INPUTS)} と違う"
-            " — K/V の placeholder が手術で落ちていない世代の資産"
+            f"{path}: graph inputs are {list(names)}, not the expected"
+            f" {list(GEMMA4_DRAFTER_GRAPH_INPUTS)}"
+            " — an asset of a generation whose K/V placeholders the surgery did not remove"
         )
     hidden = inputs[GEMMA4_DRAFTER_HIDDEN]
     if list(hidden) != [1, hidden_size]:
         raise DistError(
-            f"{path} の入力 '{GEMMA4_DRAFTER_HIDDEN}' が {list(hidden)!r} —"
-            f" [1, {hidden_size}]（target の最終 norm 後 hidden 1 行）でない"
+            f"{path}: input '{GEMMA4_DRAFTER_HIDDEN}' is {list(hidden)!r} —"
+            f" not [1, {hidden_size}] (one row of the target's hidden after the final norm)"
         )
     for layer_type in GEMMA4_ROPE_LAYER_TYPES:
         head_dim = rope[layer_type][HEAD_DIM_FIELD]
@@ -1026,84 +1094,91 @@ def assert_gemma4_drafter_graph(
             declared = inputs[name]
             if list(declared) != [1, 1, head_dim]:
                 raise DistError(
-                    f"{path} の入力 '{name}' が {list(declared)!r} — 宣言した headDim から組んだ"
-                    f" 期待 {[1, 1, head_dim]} と違う（表とグラフが別世代）"
+                    f"{path}: input '{name}' is {list(declared)!r} — not the"
+                    f" {[1, 1, head_dim]} expected from the declared headDim (the table and the"
+                    " graph are of different generations)"
                 )
     outputs = graph.get("outputs")
     if not isinstance(outputs, list) or len(outputs) != GEMMA4_DRAFT_STEPS:
-        raise DistError(f"{path} の IR 出力が {outputs!r} — draft {GEMMA4_DRAFT_STEPS} 本でない")
+        raise DistError(f"{path}: IR outputs are {outputs!r} — not {GEMMA4_DRAFT_STEPS} drafts")
 
     borrowed = graph.get("states")
     lent = lender.get("states")
     if not isinstance(borrowed, dict) or not isinstance(lent, dict):
-        raise DistError(f"{path}: IR メタデータに states が無い（借り手 / 貸し手のどちらか）")
+        raise DistError(f"{path}: no states in the IR metadata (of the borrower or the lender)")
     for name, slot in sorted(borrowed.items()):
         if not slot.get("external"):
             raise DistError(
-                f"{path}: state スロット '{name}' が external でない"
-                "（借り手は実体を持たない — 全スロットが external MUST）"
+                f"{path}: state slot '{name}' is not external"
+                " (the borrower holds no storage of its own — every slot MUST be external)"
             )
         owner = lent.get(name)
         if owner is None:
             raise DistError(
-                f"{path}: state スロット '{name}' が貸し手 {lender_path} に無い"
-                f"（貸し手の宣言: {sorted(lent)}）"
+                f"{path}: state slot '{name}' is not in the lender {lender_path}"
+                f" (the lender declares: {sorted(lent)})"
             )
         if owner.get("dtype") != slot.get("dtype") or owner.get("shape") != slot.get("shape"):
             raise DistError(
-                f"{path}: state スロット '{name}' が {slot.get('dtype')} {slot.get('shape')} —"
-                f" 貸し手の {owner.get('dtype')} {owner.get('shape')} と違う（別世代の組）"
+                f"{path}: state slot '{name}' is {slot.get('dtype')} {slot.get('shape')} —"
+                f" not the lender's {owner.get('dtype')} {owner.get('shape')} (a pair of different"
+                " generations)"
             )
 
     initializers = graph.get("initializers") or {}
-    # IR v2 では initializer 名がテンソルキーそのもの（docs/ir-v2.md）なので、共有宣言の
-    # **名前が指し先**になる（v1 の `shared.tensor` の席はもう無い）。
+    # In IR v2 an initializer name is the tensor key itself (docs/ir-v2.md), so the **name** of the
+    # shared declaration is its target (v1's `shared.tensor` field is gone).
     shared = sorted(
         name
         for name, entry in initializers.items()
         if isinstance(entry, dict) and entry.get("shared") is True
     )
     if len(shared) != 1:
-        raise DistError(f"{path}: 共有 initializer が {len(shared)} 本 {shared}（1 本ちょうど）")
+        raise DistError(
+            f"{path}: {len(shared)} shared initializers {shared} (exactly one expected)"
+        )
     tensor = shared[0]
     lent_tensors = set(lender.get("initializers") or {})
     if tensor not in lent_tensors:
         raise DistError(
-            f"{path}: 共有 initializer の指し先 '{tensor}' が貸し手 {lender_path} に無い"
-            "（貸し手を焼き直した世代と噛み合っていない）"
+            f"{path}: the target '{tensor}' of the shared initializer is not in the lender"
+            f" {lender_path} (it does not fit the generation the lender was re-baked as)"
         )
 
     symbols = graph.get("symbols")
     lent_symbols = lender.get("symbols")
     if not isinstance(symbols, list) or len(symbols) != 1:
         raise DistError(
-            f"{path}: symbols が {symbols!r} — 容量記号 1 本だけであること"
-            "（借り手の入力はどの記号も束縛しない）"
+            f"{path}: symbols are {symbols!r} — there must be the capacity symbol only"
+            " (the borrower's inputs bind no symbol)"
         )
     if not isinstance(lent_symbols, list) or symbols[0] not in lent_symbols:
         raise DistError(
-            f"{path}: 容量記号 '{symbols[0]}' が貸し手 {lender_path} の symbols"
-            f" {lent_symbols!r} に無い — 借り手の束縛は貸し手から継承する"
+            f"{path}: capacity symbol '{symbols[0]}' is not among the symbols of the lender"
+            f" {lender_path} ({lent_symbols!r})"
+            " — the borrower inherits its bindings from the lender"
         )
 
 
 def assert_gemma4_ple_assets(container: Path, index: Mapping[str, Any]) -> None:
-    """索引が名指しする block が、その容器の資産として**同じ役割・同じ長さ**で在ることを見る。
+    """Check that every block the index names exists as an asset of that container with **the
+    same role and the same length**.
 
-    MUST: 索引と容器の宣言は別々に動きうる（索引は書き手が組んだ JSON・資産宣言は容器の
-    モデル記述）ので、噛み合わせはここでしか見られない — 索引だけ差し替えた組み合わせは
-    **形も dtype も合う**まま別 token の行を引く（読み手 `ple-index.ts` の
-    `assertGemma4PleAssets` と同じ規律）。宣言しか読まないので数 GB の再読みにはならない。
+    MUST: the index and the container's declarations can move independently (the index is JSON the
+    writer built, the asset declarations are the container's model descriptor), so their fit can
+    only be seen here — a combination in which only the index was replaced reads rows of other
+    tokens **with shape and dtype still matching** (the same rule as `assertGemma4PleAssets` in the
+    reader `ple-index.ts`). Only the declarations are read, so this does not re-read gigabytes.
     """
     try:
         declared = read_asset_declarations(container)
     except (KeyError, ContainerError, ContainerFormatError) as cause:
-        raise DistError(f"{container}: 資産の宣言が読めない: {cause}") from cause
+        raise DistError(f"{container}: cannot read the asset declarations: {cause}") from cause
     seen = {PLE_INDEX_ASSET}
     if declared.get(PLE_INDEX_ASSET, (None, 0))[0] != PLE_INDEX_ROLE:
         raise DistError(
-            f"{container}: 資産 '{PLE_INDEX_ASSET}' の役割が"
-            f" {declared.get(PLE_INDEX_ASSET, (None, 0))[0]!r}（期待 '{PLE_INDEX_ROLE}'）"
+            f"{container}: asset '{PLE_INDEX_ASSET}' has role"
+            f" {declared.get(PLE_INDEX_ASSET, (None, 0))[0]!r} (expected '{PLE_INDEX_ROLE}')"
         )
     # A float index (schema 5) has no `scales` table; a `ple-scales` asset in its container is
     # then surplus below.
@@ -1117,14 +1192,14 @@ def assert_gemma4_ple_assets(container: Path, index: Mapping[str, Any]) -> None:
             found = declared.get(name)
             if found is None:
                 raise DistError(
-                    f"{container}: 索引が名指しする資産 '{name}' が容器に無い"
-                    f"（宣言: {sorted(declared)[:4]}…）"
+                    f"{container}: asset '{name}' named by the index is not in the container"
+                    f" (declared: {sorted(declared)[:4]}…)"
                 )
             expected = (int(block["stop"]) - int(block["start"])) * table["rowBytes"]
             if found != (role, expected):
                 raise DistError(
-                    f"{container}: 資産 '{name}' が {found}"
-                    f"（索引から組んだ期待は ('{role}', {expected})）"
+                    f"{container}: asset '{name}' is {found}"
+                    f" (the index implies ('{role}', {expected}))"
                 )
     surplus = sorted(
         name
@@ -1133,7 +1208,8 @@ def assert_gemma4_ple_assets(container: Path, index: Mapping[str, Any]) -> None:
     )
     if surplus:
         raise DistError(
-            f"{container}: 索引が指していない PLE の資産がある: {surplus} — 索引だけ古い組み合わせ"
+            f"{container}: PLE assets the index does not point to: {surplus}"
+            " — a combination in which only the index is old"
         )
 
 
@@ -1148,7 +1224,7 @@ def assert_gemma4_no_ple_assets(container: Path) -> None:
     try:
         declared = read_asset_declarations(container)
     except (KeyError, ContainerError, ContainerFormatError) as cause:
-        raise DistError(f"{container}: 資産の宣言が読めない: {cause}") from cause
+        raise DistError(f"{container}: cannot read the asset declarations: {cause}") from cause
     ple_roles = {PLE_INDEX_ROLE, *PLE_ROLES.values()}
     carried = sorted(name for name, (role, _length) in declared.items() if role in ple_roles)
     if carried:
@@ -1159,27 +1235,28 @@ def assert_gemma4_no_ple_assets(container: Path) -> None:
 
 
 def assert_gemma4_tokenizer(path: Path, vocab_size: int) -> None:
-    """compile 済みトークナイザ資産が**この語彙で焼かれたもの**であることを見る。
+    """Check that the compiled tokenizer asset **was baked with this vocabulary**.
 
-    MUST: 行数まで突き合わせる（ADR 0085 決定 5 の相互照合を焼く側でも掛ける）— 別語彙の資産は
-    id が範囲内に収まる限り**別 token の有効な行**を引き、例外なしで沈黙して壊れる。TS 側の
-    admission も同じ検査を持つが、あちらは 4GiB を落とした後にしか走らない。
+    MUST: match down to the row count (the writer side applies ADR 0085 decision 5's cross-check
+    too) — an asset of another vocabulary reads **valid rows of other tokens** as long as the ids
+    stay in range, and breaks silently, without an exception. The TS side's admission has the same
+    check, but it only runs after 4 GiB were downloaded.
     """
-    raw = _read_json(path, "compile 済みトークナイザ資産")
+    raw = _read_json(path, "the compiled tokenizer asset")
     if not isinstance(raw, dict):
-        raise DistError(f"{path}: 最上位オブジェクトでない")
+        raise DistError(f"{path}: the top level is not an object")
     if raw.get("format") != GEMMA4_TOKENIZER_FORMAT:
         raise DistError(
-            f"{path}: format が {raw.get('format')!r}（期待 '{GEMMA4_TOKENIZER_FORMAT}'）"
-            " — compile 台本（`python -m gemma4.tokenizer`）が書いた資産でない"
+            f"{path}: format is {raw.get('format')!r} (expected '{GEMMA4_TOKENIZER_FORMAT}')"
+            " — not an asset written by the compile script (`python -m gemma4.tokenizer`)"
         )
     vocab = raw.get("vocab")
     if not isinstance(vocab, list):
-        raise DistError(f"{path}: vocab が配列でない")
+        raise DistError(f"{path}: vocab is not an array")
     if len(vocab) != vocab_size:
         raise DistError(
-            f"{path}: vocab が {len(vocab)} 行で、製品グラフの語彙数 {vocab_size} と違う"
-            " — 別の語彙で焼かれた組み合わせ"
+            f"{path}: vocab has {len(vocab)} rows, not the product graph's vocabulary size"
+            f" {vocab_size} — a combination baked with another vocabulary"
         )
 
 
@@ -1194,10 +1271,11 @@ def assert_gemma4_tokenizer_source(path: Path, checkpoint_tokenizer: Path) -> No
     before its upstream file was replaced (Google's glitch-token fixes of 2026-11-03 changed E2B's
     and E4B's `tokenizer.json`).
 
-    MUST: 語彙数の一致（{@link assert_gemma4_tokenizer}）では足りない — 同じ語彙数で merges や
-    特殊トークンだけが違うトークナイザは、id が範囲内に収まったまま**別の id 列**を作る。
+    MUST: matching the vocabulary size ({@link assert_gemma4_tokenizer}) is not enough — a
+    tokenizer of the same vocabulary size that differs only in its merges or special tokens
+    produces **other id sequences** with the ids still in range.
     """
-    raw = _read_json(path, "compile 済みトークナイザ資産")
+    raw = _read_json(path, "the compiled tokenizer asset")
     source = raw.get("source") if isinstance(raw, dict) else None
     recorded = source.get("sha256") if isinstance(source, dict) else None
     if not isinstance(recorded, str):
@@ -1205,7 +1283,7 @@ def assert_gemma4_tokenizer_source(path: Path, checkpoint_tokenizer: Path) -> No
             f"{path}: no source.sha256 — an asset whose source cannot be checked is not distributed"
         )
     if not checkpoint_tokenizer.is_file():
-        raise DistError(f"上流のトークナイザが無い: {checkpoint_tokenizer}")
+        raise DistError(f"the upstream tokenizer is missing: {checkpoint_tokenizer}")
     actual = sha256_file(checkpoint_tokenizer)
     if recorded != actual:
         raise DistError(
@@ -1235,9 +1313,9 @@ def gemma4_generation_defaults(model_dir: Path) -> Gemma4GenerationDefaults:
     (the vocabulary bound is checked against the graph — {@link assert_gemma4_suppress_tokens}).
     """
     where = str(model_dir / GEMMA4_GENERATION_CONFIG_FILE)
-    raw = _read_json(model_dir / GEMMA4_GENERATION_CONFIG_FILE, "上流の生成既定")
+    raw = _read_json(model_dir / GEMMA4_GENERATION_CONFIG_FILE, "the upstream generation defaults")
     if not isinstance(raw, dict):
-        raise DistError(f"{where}: 最上位オブジェクトでない")
+        raise DistError(f"{where}: the top level is not an object")
     known = {
         *(source for source, _ in GEMMA4_SAMPLER_FIELDS),
         GEMMA4_SUPPRESS_TOKENS_KEY,
@@ -1299,29 +1377,35 @@ def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
 
 
 def _sampler(raw: Mapping[str, Any], where: str) -> dict[str, Any]:
-    """上流 `generation_config.json` の推奨サンプラを `pipelineConfig.sampler` へ写す。
+    """Copy the recommended sampler of upstream `generation_config.json` into
+    `pipelineConfig.sampler`.
 
-    MUST: 値を写経しない（ADR 0083 決定 7 — 「既定値は配布形が宣言する」の出どころは上流の
-    宣言そのもの）。欄名だけは TS 側 `SamplerSpec` の綴りへ翻訳する（`top_k` → `topK`）。
-    値域は TS 側 `gemma.parsePipelineConfig` と同じ — 配ってから parse で落ちる形にしない。
+    MUST: do not copy the values by hand (ADR 0083 decision 7 — the source of "the distribution
+    declares the defaults" is upstream's declaration itself). Only the field names are translated
+    into the spellings of the TS `SamplerSpec` (`top_k` → `topK`). The value ranges are the same as
+    the TS side's `gemma.parsePipelineConfig` — no form may fail at parse after distribution.
     """
     sampler: dict[str, Any] = {}
     for source, field in GEMMA4_SAMPLER_FIELDS:
         if source not in raw:
-            raise DistError(f"{where}: {source} が無い — 推奨サンプラを宣言できない")
+            raise DistError(
+                f"{where}: {source} is missing — the recommended sampler cannot be declared"
+            )
         value = raw[source]
         if isinstance(value, bool) or not isinstance(value, int | float):
-            raise DistError(f"{where}: {source} が数でない（{value!r}）")
+            raise DistError(f"{where}: {source} is not a number ({value!r})")
         sampler[field] = value
     temperature = sampler["temperature"]
     if not math.isfinite(temperature) or temperature < 0:
-        raise DistError(f"{where}: temperature が 0 以上の有限数でない（{temperature!r}）")
+        raise DistError(
+            f"{where}: temperature is not a non-negative finite number ({temperature!r})"
+        )
     top_k = sampler["topK"]
     if not isinstance(top_k, int) or top_k < 1:
-        raise DistError(f"{where}: top_k が 1 以上の整数でない（{top_k!r}）")
+        raise DistError(f"{where}: top_k is not an integer of at least 1 ({top_k!r})")
     top_p = sampler["topP"]
     if not math.isfinite(top_p) or not 0 < top_p <= 1:
-        raise DistError(f"{where}: top_p が (0, 1] の有限数でない（{top_p!r}）")
+        raise DistError(f"{where}: top_p is not a finite number in (0, 1] ({top_p!r})")
     sampler["temperature"] = float(temperature)
     sampler["topP"] = float(top_p)
     return sampler
@@ -1338,7 +1422,7 @@ def gemma4_pipeline_config(
     chat_dialect: str = GEMMA4_CHAT_DIALECT,
     suppress_tokens: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 6 欄）を組む。
+    """Build `pipelineConfig` (the six fields of the TS-side schema).
 
     `chat_dialect` is the optional seventh field `chatDialect` (`gemma4.chat.CHAT_DIALECTS` — a
     closed set). MUST: the default dialect is **not written** — an absent field reads as `gemma4`,
@@ -1349,40 +1433,44 @@ def gemma4_pipeline_config(
     host token selection — {@link gemma4_generation_defaults}), written only when upstream
     declares them (12B), for the same byte-identity reason.
 
-    実行時ノブの 3 つ（`chunk_length` / `max_chunk_length` / `capacity`）は**呼び手が渡す** —
-    通常 Gemma は {@link GEMMA4_CHUNK_LENGTH} / {@link GEMMA4_MAX_CHUNK_LENGTH} /
-    {@link GEMMA4_CAPACITY} を、固定 QAT は `gemma4_qat.config` の同種の定数を渡す。関係式の
-    実装が 1 本しかないので、family が増えても「3 式のうち 1 式しか見ていない配布形」を作れない。
+    The three runtime knobs (`chunk_length` / `max_chunk_length` / `capacity`) are **passed by the
+    caller** — regular Gemma passes {@link GEMMA4_CHUNK_LENGTH} / {@link GEMMA4_MAX_CHUNK_LENGTH} /
+    {@link GEMMA4_CAPACITY}, the fixed QAT family the same kind of constants of `gemma4_qat.config`.
+    The relations have one implementation only, so a new family cannot produce "a distribution that
+    checks only one of the three relations".
 
-    MUST: 実行時ノブが**両側の上限の内側**に収まることをここで落とす。chunk の行数は記号 `M`
-    の trace 時の上限（`max_chunk_length`）を超えられず、`capacity` は会話が使える最大の
-    論理長なので位置は最大 `capacity - 1` まで進む — モデルの宣言（`maxPosition`）を超える
-    容量は「宣言の内側なのに上流が想定していない位置を回す」形で、長い会話でだけ表面化する。
+    MUST: reject here a runtime knob outside **the bounds on either side**. The chunk row count
+    cannot exceed the trace-time bound of the symbol `M` (`max_chunk_length`), and `capacity` is the
+    largest logical length a conversation can use, so positions go up to `capacity - 1` — a
+    capacity beyond the model's declaration (`maxPosition`) "rotates positions upstream did not plan
+    for while inside the declaration", and shows up only in long conversations.
 
-    MUST: その chunk の上限を `maxChunkLength` として**宣言にも載せる**。ここの検査が見るのは
-    配布形が焼く既定値だけで、`chunkLength` は読み手の実行時ノブでもある — 宣言が無いと
-    「trace 範囲の外の chunk 長で走る」形を読み手側で落とせない（IR の `symbols` は名前の列
-    だけで上限を持たない）。
+    MUST: **also put** that chunk bound into the declaration as `maxChunkLength`. The check here
+    only sees the defaults the distribution bakes, while `chunkLength` is also the reader's runtime
+    knob — without the declaration, the reader cannot reject "running with a chunk length outside
+    the traced range" (the IR's `symbols` is only a list of names, without bounds).
 
-    NOTE: 上限の側は**写しの同値しか見ていない**。比較相手 {@link GEMMA4_MAX_CHUNK_LENGTH} は
-    `gemma4.export.SYM_MAX` を写した定数で、系列を組んだときに実際に使われた `--sym-max` は
-    どこにも記録されていない（資産からも読めない）。小さい `--sym-max` で trace した容器に対して
-    `chunkLength: 768` を名乗る配布形は、この検査も同値テストも素通りする。
+    NOTE: the bound side **only checks that a copy is equal**. The comparison target
+    {@link GEMMA4_MAX_CHUNK_LENGTH} is a constant copied from `gemma4.export.SYM_MAX`, and the
+    `--sym-max` actually used when the series was built is recorded nowhere (it cannot be read from
+    the asset either). A distribution that claims `chunkLength: 768` for a container traced with a
+    smaller `--sym-max` passes both this check and the equality test.
     """
     if not 2 <= chunk_length <= max_chunk_length:
         raise DistError(
-            f"chunkLength {chunk_length} が [2, {max_chunk_length}] の外"
-            "（下限は記号 M の下限・上限は trace 時の `Dim` の上限）"
+            f"chunkLength {chunk_length} is outside [2, {max_chunk_length}]"
+            " (the lower bound is that of the symbol M, the upper bound that of the trace-time"
+            " `Dim`)"
         )
     if capacity < chunk_length:
         raise DistError(
-            f"capacity {capacity} が chunkLength {chunk_length} より小さい"
-            " — 1 chunk すら入らない容量は宣言できない"
+            f"capacity {capacity} is smaller than chunkLength {chunk_length}"
+            " — a capacity in which not even one chunk fits cannot be declared"
         )
     if max_position < capacity:
         raise DistError(
-            f"capacity {capacity} がモデルの位置上限 {max_position} を超えた"
-            " — 容量いっぱいの会話が宣言の外の位置を回す"
+            f"capacity {capacity} exceeds the model's position limit {max_position}"
+            " — a conversation filling the capacity would rotate positions outside the declaration"
         )
     if chat_dialect not in GENERATION_PROMPT_SUFFIX:
         raise DistError(
@@ -1475,14 +1563,15 @@ def gemma4_plan(
     model: str = GEMMA4_DEFAULT_MODEL,
     line: Gemma4Line = GEMMA4_REGULAR_LINE,
 ) -> ModelPlan:
-    """gemma4 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。
+    """Build the plan of one gemma4 model (every check and read is done here).
 
     `line` holds what the distribution decides per model ({@link Gemma4Line}); the regular line
     is the default.
 
-    drafter の有無はモデルで決まる（`line.has_drafter`）。MUST: `sources` の drafter 席と
-    食い違えば落とす — drafter を配るモデルの席が空なら黙って投機なしの配布形が出来、配らない
-    モデルに席があれば別モデル向けの drafter が紛れ込む。
+    Whether a drafter exists is decided by the model (`line.has_drafter`). MUST: fail when the
+    drafter entry of `sources` disagrees — an empty entry for a model that ships a drafter would
+    quietly produce a distribution without speculative decoding, and an entry for a model that
+    ships none would let a drafter meant for another model slip in.
     """
     assert_model_name(model)
     gemma4_checkpoint(model)
@@ -1492,8 +1581,8 @@ def gemma4_plan(
         )
     if (sources.drafter is not None) != line.has_drafter(model):
         raise DistError(
-            f"モデル '{model}' の drafter 系列が"
-            f" {'無い' if sources.drafter is None else f'指定されている（{sources.drafter}）'}"
+            f"model '{model}': the drafter series is"
+            f" {'missing' if sources.drafter is None else f'given ({sources.drafter})'}"
             f" — this line ships {'a' if line.has_drafter(model) else 'no'} drafter for it"
         )
     placements = gemma4_placements(sources)
@@ -1528,8 +1617,9 @@ def gemma4_plan(
     else:
         if index["tokens"] != vocab_size:
             raise DistError(
-                f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
-                f"語彙数 {vocab_size} と違う — 別の語彙で焼かれた組み合わせ"
+                f"{container}: asset '{PLE_INDEX_ASSET}': tokens {index['tokens']} is not the"
+                f" product graph's vocabulary size {vocab_size}"
+                " — a combination baked with another vocabulary"
             )
         assert_gemma4_ple_assets(container, index)
     drafter_container = placements.get(GEMMA4_DRAFTER_ROLE)
@@ -1589,8 +1679,9 @@ def gemma4_plan(
         },
         weights=weights,
         assets=GEMMA4_ASSETS,
-        # requiredLimits は書かない — core の dist が組み立て時に一括導出して焼く
-        # （karume/limits.py。計画側の手書きは二重管理として拒否される）。
+        # requiredLimits is not written — the core's dist derives and bakes it all at once during
+        # assembly (karume/limits.py; a hand-written value on the plan side is rejected as double
+        # bookkeeping).
         quants=complete_quant_weights(weights, line.quants(model)),
         default_quant=line.default_quant[model],
         pipeline_config=pipeline_config,
@@ -1598,7 +1689,7 @@ def gemma4_plan(
 
 
 def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から gemma4 1 モデルの計画を組む（CLI のディスパッチ先）。
+    """Build one gemma4 model's plan from the parent of `--series` (the CLI's dispatch target).
 
     The regular line reads hand-placed checkpoints only ({@link GEMMA4_REGULAR_LINE} has no pins),
     so there is no snapshot to check here; the q4_0 QAT line's entry
@@ -1607,17 +1698,19 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return gemma4_plan(gemma4_sources(series_dir, model), model)
 
 
-#: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
+#: The modification notice (Apache 2.0 §4(b)). It lists **the changes this repository made to the
+#: upstream weights**.
 #:
-#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
-#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。
+#: MUST: the text matches the distribution's content — it is valid prose as a value, so it passes
+#: `verify_dist` and the manifest checks, and a mismatch would only be noticed after distribution.
 #:
-#: MUST: **`GEMMA4_UPSTREAM` へモデルを足す日は、名指しの 1 行もここで足す** — §4(b) の告知は
-#: 「再配布した全上流の改変」を述べる義務なので、モデルが増えたのに文面が据え置かれると
-#: 告知が 1 モデルぶん欠ける。この席は `Pipeline.root_files`（core の型は `Mapping[str, str]`）で、
-#: 組み立てる manifest を見られない — 散文を機械導出できないぶんを門で受ける
-#: （`tests/test_distribution.py::TestGemma4LegalText` が帰属表と manifest の両方から検査し、
-#: 2 件目が入った瞬間に赤くなる）。
+#: MUST: **on the day a model is added to `GEMMA4_UPSTREAM`, a line naming it is added here too** —
+#: the §4(b) notice must state "the modifications of every redistributed upstream", so a text left
+#: unchanged while the models grow lacks the notice for one model. This field is
+#: `Pipeline.root_files` (the core's type is `Mapping[str, str]`) and cannot see the manifest being
+#: assembled — the prose cannot be derived by machine, so a check covers it instead
+#: (`tests/test_distribution.py::TestGemma4LegalText` checks it against both the attribution table
+#: and the manifest, and turns red the moment a second entry comes in).
 GEMMA4_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes modified forms of `google/gemma-4-E2B-it` and
@@ -1652,14 +1745,16 @@ No retraining and no fine-tuning were performed. The original checkpoints are no
 
 
 def gemma4_root_files() -> dict[str, str]:
-    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+    """The legal texts placed at the distribution repository's root
+    (`karume.dist.Pipeline.root_files`).
 
-    上流は Apache License 2.0（`gemma4/README.md` 冒頭のライセンス方針 — 2026-09-01 の裁定）で、
-    §4(a) は「派生物の受領者にライセンスのコピーを渡す」ことを、§4(b) は「改変したファイルに
-    改変した旨の目立つ告知を付ける」ことを求める。ライセンス原文は family で共有する現物
-    （{@link _shared.licenses.apache_license_2_0}）を**逐語で**読む — 整形や差し替えをすると
-    コピーではなくなる。上流に `NOTICE` ファイルは無い（§4(d) は掛からない）ので、`NOTICE.md`
-    は §4(b) の改変告知だけを持つ。
+    Upstream is Apache License 2.0 (the license policy at the top of `gemma4/README.md` — the
+    ruling of 2026-09-01); §4(a) requires "giving recipients of derivative works a copy of the
+    license", and §4(b) "causing modified files to carry prominent notices stating that you changed
+    them". The license text is the original shared across families
+    ({@link _shared.licenses.apache_license_2_0}), read **verbatim** — reformatting or replacing it
+    would make it no longer a copy. Upstream has no `NOTICE` file (§4(d) does not apply), so
+    `NOTICE.md` holds the §4(b) modification notice only.
     """
     return {
         "LICENSE.md": apache_license_2_0(),
@@ -1667,15 +1762,16 @@ def gemma4_root_files() -> dict[str, str]:
     }
 
 
-#: `--pipeline gemma4` の 1 行（ドライバが core の PIPELINES へ合成する）。
+#: The one `--pipeline gemma4` entry (the driver merges it into the core's PIPELINES).
 PIPELINE = Pipeline(
     default_model=GEMMA4_DEFAULT_MODEL,
     repo_name=gemma4_repo_name,
     plan=gemma4_dist_plan,
-    # 帰属は**モデル名から一意に決まる**（`GEMMA4_UPSTREAM`）ので、選ばせる軸にしない。
+    # Attribution is **determined by the model name alone** (`GEMMA4_UPSTREAM`), so it is not an
+    # axis to choose.
     card_profiles={"gemma4": render_gemma4_model_card},
-    # 上流ライセンスの再配布条件（§4）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
-    # よらずここで 1 回。
+    # The upstream license's redistribution terms (§4) apply to the one distribution repository, so
+    # they are read once here, however many times the assembly runs.
     root_files=gemma4_root_files(),
 )
 

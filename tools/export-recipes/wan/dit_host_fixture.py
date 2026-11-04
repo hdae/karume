@@ -1,31 +1,36 @@
-"""Wan2.1 の DiT のホスト関数（TS — `packages/models/src/wan/dit-*.ts`）の照合用 fixture を書く。
+"""Write the fixture checking the Wan2.1 DiT host functions (TS `packages/models/src/wan/dit-*.ts`).
 
-TS が持つのは S 形グラフの外の 4 段（patchify / unpatchify / RoPE の表の並べ替え /
-`timesteps_proj`）で、ここはその入力と**上流の値**を小さな格子で焼く（ADR 0118 決定 3・検収 段 2）。
-追跡対象の fixture なので、大きさは格子 1 つ（潜在 `[16,21,6,10]` → F'·H'·W' = 21·3·5 = 315
-トークン）と timestep 50 本に絞る。時間軸は 81 フレームの潜在の T' = 21 そのもの（ADR 0118 段 8 —
-RoPE の t 軸の位置 0〜20 を全部、上流の表と突き合わせる）。
+TS owns the 4 steps outside the S-shaped graph (patchify / unpatchify / the reordering of the RoPE
+tables / `timesteps_proj`); this script bakes their inputs and **the upstream values** on a small
+grid (ADR 0118 decision 3, acceptance step 2). The fixture is tracked, so it is kept to one grid
+(latent `[16,21,6,10]` → F'·H'·W' = 21·3·5 = 315 tokens) and 50 timesteps. The time axis is the
+T' = 21 of an 81-frame latent itself (ADR 0118 step 8 — every position 0 to 20 of the RoPE t axis
+is checked against the upstream table).
 
     uv run --group wan --inexact python -m wan.dit_host_fixture
 
-出力（既定 `packages/models/tests/fixtures/wan-dit/`）:
+Output (default `packages/models/tests/fixtures/wan-dit/`):
 
-    host.safetensors       patchify / unpatchify / RoPE の表 / timesteps_proj の入力と期待値
-    rope_base.safetensors  資産 `rope_base` と同じ形式の素表（行を格子に要る 24 行へ切り詰めたもの）
-    host.json              出所（repo / revision）・patch・格子・timestep の列
+    host.safetensors       inputs and expected values of patchify / unpatchify / the RoPE
+                           tables / timesteps_proj
+    rope_base.safetensors  the base table in the same form as the asset `rope_base` (rows
+                           cut to the 24 the grid needs)
+    host.json              provenance (repo / revision), patch, grid and the timestep list
 
-期待値の作り方（どれも上流の演算を呼ぶ — 式を写さない）:
+How the expected values are made (each one calls the upstream op — no formula is copied):
 
-- patchify: 上流の patch 埋め込みと同じ `Conv3d(k = s = patch)` に**1-hot の重み**を入れた畳み込み。
-  出力 `[1,64,F',H',W']` の `flatten(2).transpose(1, 2)` が、入力の窓を conv の重みの平坦化順
-  `(c, pt, ph, pw)` で並べたトークンそのもの（積は 1 か 0 で、和は 1 項だけが非ゼロ —
-  丸めが入らない）。
-- unpatchify: 上流の出口の逐語（`dit_patch.dit_unpatchify`）。
-- RoPE の表: 上流 `model.rope` の出力（`dit_patch.dit_rope_tables`）。素表は
-  `dit_patch.dit_rope_base_tables`。
-- `timesteps_proj`: 上流 `condition_embedder.timesteps_proj`（`dit_patch.dit_timesteps_proj`）。
-  timestep は参照の設定（50 ステップ・shift 3.0 — 決定 5）の UniPC の列に、端の 0 / 1 と、TS
-  との差が最悪になる 745（全 1,001 通りの実測 — TS テストの doc）を足したもの。
+- patchify: a convolution with the same `Conv3d(k = s = patch)` as the upstream patch embedding,
+  loaded with **one-hot weights**. The `flatten(2).transpose(1, 2)` of the output `[1,64,F',H',W']`
+  is exactly the tokens with the input window laid out in the flattening order of the conv weights
+  `(c, pt, ph, pw)` (each product is 1 or 0 and only one term of each sum is non-zero — no
+  rounding enters).
+- unpatchify: the upstream exit, verbatim (`dit_patch.dit_unpatchify`).
+- RoPE tables: the output of the upstream `model.rope` (`dit_patch.dit_rope_tables`). The base
+  table is `dit_patch.dit_rope_base_tables`.
+- `timesteps_proj`: the upstream `condition_embedder.timesteps_proj`
+  (`dit_patch.dit_timesteps_proj`). The timesteps are the UniPC list of the reference settings
+  (50 steps, shift 3.0 — decision 5) plus the ends 0 / 1 and 745, where the difference from TS is
+  worst (measured over all 1,001 values — the doc of the TS test).
 """
 
 from __future__ import annotations
@@ -47,24 +52,28 @@ from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, local_snapshot
 
 DEFAULT_OUT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-dit"
 
-#: fixture の潜在 `(F, H, W)`。格子 F'·H'·W' = 21·3·5 は 3 軸とも違う値（軸の取り違えが対合にならな
-#: い）で、F' = 21 は 81 フレームの潜在の時間軸（ADR 0118 段 8）。
+#: The latent `(F, H, W)` of the fixture. The grid F'·H'·W' = 21·3·5 has a different value on each
+#: of the 3 axes (a swapped axis cannot cancel out), and F' = 21 is the time axis of an 81-frame
+#: latent (ADR 0118 step 8).
 LATENT_SHAPE = (21, 6, 10)
 
-#: 素表を切り詰める行数（格子の最大 F' = 21 を覆う。資産の 1,024 行のままだと fixture が 0.5 MiB
-#: になる）。
+#: The number of rows the base table is cut to (covers the grid's largest F' = 21; with the asset's
+#: 1,024 rows the fixture would be 0.5 MiB).
 ROPE_BASE_ROWS = 24
 
-#: 参照の設定の列に足す timestep（端の 0 / 1 と、TS との差の実測最悪 745）。
+#: Timesteps added to the list of the reference settings (the ends 0 / 1 and 745, the measured worst
+#: difference from TS).
 EXTRA_TIMESTEPS = (0, 1, 745)
 
 SEED = 20261002
 
 
 def onehot_patchify(latents: torch.Tensor, patch_size: tuple[int, int, int]) -> torch.Tensor:
-    """上流の patch 埋め込みと同じ `Conv3d(k = s = patch)` に 1-hot の重みを入れて窓を並べる。
+    """Lay out the windows with the same `Conv3d(k = s = patch)` as the upstream patch embedding,
+    loaded with one-hot weights.
 
-    TS と Python の patchify の並びの独立オラクル（積は 1 か 0・和は 1 項だけが非ゼロ）。
+    An independent oracle for the patchify order of TS and Python (each product is 1 or 0, only one
+    term of each sum is non-zero).
     """
     channels = latents.shape[1]
     volume = patch_size[0] * patch_size[1] * patch_size[2]
@@ -77,7 +86,8 @@ def onehot_patchify(latents: torch.Tensor, patch_size: tuple[int, int, int]) -> 
 
 
 def schedule_timesteps(model_name: str) -> list[int]:
-    """参照の設定（50 ステップ・config の shift — 決定 5）の UniPC の timestep の列。"""
+    """The UniPC timestep list of the reference settings (50 steps, the config's shift — decision
+    5)."""
     from diffusers import UniPCMultistepScheduler
 
     scheduler = UniPCMultistepScheduler.from_pretrained(
@@ -102,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     tokens = dit_patch.dit_patchify(latents, patch_size)
     oracle = onehot_patchify(latents, patch_size)
     if not torch.equal(tokens, oracle):
-        raise AssertionError("dit_patchify が上流の patch 埋め込み（1-hot conv3d）の並びと違う")
+        raise AssertionError(
+            "dit_patchify differs from the order of the upstream patch embedding (one-hot conv3d)"
+        )
 
     output_tokens = torch.randn(tokens.shape, generator=generator)
     unpatched = dit_patch.dit_unpatchify(output_tokens, LATENT_SHAPE, patch_size)
@@ -116,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     save_file(
         {
-            # 潜在はホストの形（バッチ軸を持たない `[C,F,H,W]` — ADR 0118 決定 3）で置く。
+            # The latent is stored in the host's shape (`[C,F,H,W]` without the batch axis — ADR
+            # 0118 decision 3).
             "patchify.latents": latents[0].contiguous(),
             "patchify.tokens": tokens.contiguous(),
             "unpatchify.tokens": output_tokens.contiguous(),
@@ -148,11 +161,12 @@ def main(argv: list[str] | None = None) -> int:
         "rope_base_rows": ROPE_BASE_ROWS,
         "timesteps": timesteps,
     }
-    # 2 字下げ（`deno fmt` の JSON の形 — 追跡対象の fixture なので書き直しで差分を出さない）。
+    # Indent by 2 (the JSON shape of `deno fmt` — the fixture is tracked, so a rewrite must not
+    # produce a diff).
     (args.out / "host.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    print(f"fixture OK: {args.out}（timestep {len(timesteps)} 本・格子 {LATENT_SHAPE}）")
+    print(f"fixture OK: {args.out} ({len(timesteps)} timesteps, grid {LATENT_SHAPE})")
     return 0
 
 

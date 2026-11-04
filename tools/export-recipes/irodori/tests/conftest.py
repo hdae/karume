@@ -1,16 +1,18 @@
-"""Irodori のモデル実装 clone を import 可能にする（`irodori.export` の `--source-dir` 既定）。
+"""Make the clone of Irodori's model implementation importable (the default `--source-dir` of
+`irodori.export`).
 
-**在れば** `sys.path` へ載せる — {@link irodori.patch} の Irodori 側パッチは `irodori_tts` を
-差し替えるので、同値テストにはこの clone が要る。git 追跡外なので無い環境ではテスト側が
-skip する（`pytest.importorskip("irodori_tts")`）。
+It is put on `sys.path` **when present** — the Irodori-side patches of {@link irodori.patch}
+replace parts of `irodori_tts`, so the equivalence tests need this clone. It is not tracked by
+git, so in an environment without it the tests skip (`pytest.importorskip("irodori_tts")`).
 
-置き場が `irodori/tests/` なのは、**この 4 本のテストだけが必要とするから**（pytest は
-rootdir から対象ファイルのディレクトリまでの conftest を、そのディレクトリのテストを
-import する前に読む）。export-recipes 直下に置くと、clone の有無が他 family の収集にも
-効いてしまう — 依存の射程は要求元の隣に置く。
+It lives in `irodori/tests/` because **only these 4 tests need it** (pytest reads the conftest
+files from the rootdir down to a test file's directory before importing the tests of that
+directory). Placed at the top of export-recipes, the presence of the clone would also affect
+collection of the other families — a dependency's reach stays next to what requires it.
 
-NOTE: 元は core 側の `tools/exporter/tests/conftest.py` に居た（ADR 0065 Context が名指しで
-挙げた逆流の 1 つ）。family の移動と一緒にここへ降りてきた（同 段 4）。
+NOTE: this used to live in the core's `tools/exporter/tests/conftest.py` (one of the reverse
+dependencies the Context of ADR 0065 names). It moved down here together with the family (step
+4 of the same ADR).
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ import pytest
 
 from _shared.paths import REPO_ROOT
 
-#: `irodori.export.DEFAULT_SOURCE_DIR` と同じ置き場（綴りが割れると片方だけ空振りする）。
+#: The same location as `irodori.export.DEFAULT_SOURCE_DIR` (if the spellings diverge, one of
+#: them silently finds nothing).
 IRODORI_SOURCE_DIR = REPO_ROOT / "inputs" / "irodori" / "Irodori-TTS"
 if IRODORI_SOURCE_DIR.is_dir() and str(IRODORI_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(IRODORI_SOURCE_DIR))
@@ -29,13 +32,15 @@ if IRODORI_SOURCE_DIR.is_dir() and str(IRODORI_SOURCE_DIR) not in sys.path:
 
 @pytest.fixture
 def restore_forward():
-    """`irodori.patch.apply_patches` のクラス属性の差し替えをテスト後に戻す。
+    """Undo the class-attribute replacements of `irodori.patch.apply_patches` after the test.
 
-    差し替えはプロセス全域なので、戻さないと後続のテストがパッチ後の実装で回る。
+    The replacement is process-wide, so without undoing it the following tests run on the
+    patched implementation.
 
-    `apply_patches` は `irodori_tts`（git 追跡外の clone — 上で `sys.path` へ足す）も
-    差し替えるので、無い環境ではこのフィクスチャを使うテストだけを skip する。パッチの同値
-    （`test_patch.py`）と DiT の分割の同値（`test_export.py`）の両方が使うのでここに置く。
+    `apply_patches` also replaces parts of `irodori_tts` (a clone not tracked by git — added to
+    `sys.path` above), so in an environment without it only the tests that use this fixture skip.
+    It lives here because both the patch equivalence (`test_patch.py`) and the DiT split
+    equivalence (`test_export.py`) use it.
     """
     from irodori import patch as patch_irodori
 

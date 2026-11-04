@@ -1,52 +1,67 @@
-r"""DACVAE を挟む**ホスト側前処理**の数の正（参照音声の正規化・reflect pad・末尾トリム）。
+r"""Reference numbers of the **host-side preprocessing** around DACVAE (normalization of the
+reference audio, reflect pad, tail trim).
 
-`irodori/dacvae/export.py` がグラフ（G6 decoder / G7 encoder）を出すのに対し、こちらが出すのは
-グラフの**外側**に残る段の参照値。W4 のホスト実装（TS の codec 統合）が突き合わせる材料で、
-値は上流実装（`irodori_tts.codec` / `irodori_tts.inference_runtime`）を**呼んで**採る。
+Where `irodori/dacvae/export.py` produces the graphs (G6 decoder / G7 encoder), this produces the
+reference values of the stages that stay **outside** the graphs. They are what W4's host
+implementation (the TS codec integration) is compared against, and the values are taken by
+**calling** the upstream implementation (`irodori_tts.codec` / `irodori_tts.inference_runtime`).
 
     cd tools/export-recipes
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
         python -m irodori.dacvae.host
 
-`irodori_tts` を import するので transformers のピンが要る（`irodori/export.py` と同じ理由）。
-`descript-audiotools` は LUFS 測定の実経路（ITU-R BS.1770-4 の K-weighting IIR）、`einops` は
-`dacvae/__init__.py` が引くためだけに要る。
+It imports `irodori_tts`, so the transformers pin is needed (the same reason as
+`irodori/export.py`). `descript-audiotools` is the real path of the LUFS measurement (the
+K-weighting IIR of ITU-R BS.1770-4); `einops` is needed only because `dacvae/__init__.py` pulls it
+in.
 
-出力（既定 `outputs/series/dacvae-32dim/host/`・`.gitignore` 配下）:
+Output (default `outputs/series/dacvae-32dim/host/`, under `.gitignore`):
 
-    meta.json                ケースごとの実測スカラー（LUFS・利得・長さ）と常設門の実測値
-    case.<name>.safetensors  生波形 / 正規化後 / reflect pad 後 / latent
-    trim.safetensors         末尾トリムの入力 latent（実 z 2 本 + 末尾無音の合成 1 本）
+    meta.json                measured scalars per case (LUFS, gains, lengths) and the values the
+                             standing checks measured
+    case.<name>.safetensors  raw waveform / normalized / after reflect pad / latent
+    trim.safetensors         input latents of the tail trim (2 real z + 1 synthetic with a silent
+                             tail)
 
-## ホストが担う段（このファイルが写している唯一のもの）
+## The stages the host owns (the only thing this file copies)
 
-1. **WAV の読み出し**（int16 PCM → f32）。規約は **/32768**（`_wav_scale_evidence` が
-   int16 の両端で毎回実測する — この 1 本で TS 側のデコーダの割り算が決まる）
-2. **LUFS 正規化**（`normalize_db = -16` のとき）→ `ensure_max_of_audio`。
-   利得は `exp((target − ref_db) · GAIN_FACTOR)`、続く peak 利得は `peak > 1` のときだけ `1/peak`
-3. **peak 安全スケール**（`normalize_db = None` かつ `ensure_max = True` のとき）。
-   上流はこちらだけ `1.0 / float(peak)` を掛ける別経路（`codec.py` の `encode_waveform`）
-4. **reflect pad**（`DACVAE._pad` — hop 1920 の倍数へ右詰め）
-5. **末尾トリム**（`find_flattening_point` — 生成 latent の末尾が平坦かつ 0 近傍になる位置）
+1. **Reading the WAV** (int16 PCM → f32). The convention is **/32768** (`_wav_scale_evidence`
+   measures it at both ends of int16 every run — this one value decides the division in the TS
+   decoder)
+2. **LUFS normalization** (when `normalize_db = -16`) → `ensure_max_of_audio`.
+   The gain is `exp((target − ref_db) · GAIN_FACTOR)`; the peak gain that follows is `1/peak` only
+   when `peak > 1`
+3. **Peak safety scale** (when `normalize_db = None` and `ensure_max = True`).
+   Only here does upstream take a separate path that multiplies by `1.0 / float(peak)`
+   (`encode_waveform` in `codec.py`)
+4. **Reflect pad** (`DACVAE._pad` — right-padded to a multiple of hop 1920)
+5. **Tail trim** (`find_flattening_point` — the position where the tail of a generated latent
+   becomes flat and close to 0)
 
-MUST: 2〜5 は**式を写さず上流を呼ぶ**（`_normalize_loudness` / `_pad` /
-`find_flattening_point`）。写しているのは 1 と、正規化を「LUFS 利得 × peak 利得」へ**分解**した
-表現だけで、後者は `_decomposition_evidence` が「記録したスカラーで正規化後の波形が
-ビット一致で再現できる」ことを毎回実測する（TS 側は分解された形しか使えない — audiotools の
-IIR を移植せずに済ませるには ref_db を golden から受け取るしかない）。
+MUST: 2 to 5 **call upstream instead of copying the formulas** (`_normalize_loudness` / `_pad` /
+`find_flattening_point`). What is copied is only 1 and the representation that **decomposes** the
+normalization into "LUFS gain × peak gain"; for the latter, `_decomposition_evidence` measures
+every run that "the recorded scalars reproduce the normalized waveform bit for bit" (the TS side
+can only use the decomposed form — to avoid porting the audiotools IIR, it has to receive ref_db
+from the golden).
 
-## 何を門にするか
+## What is checked
 
-emit の前に全て実測し、1 つでも外れたら**何も書かない**（ADR 0005 の fail loudly）:
+Everything is measured before emit, and if any one check fails **nothing is written** (ADR 0005's
+fail loudly):
 
-- **WAV の正規化規約**が /32768 ちょうどであること（int16 の下端 −32768 が厳密に −1.0）
-- **分解の再現**（上記）と、**上流 `_normalize_loudness` とのビット一致**
-- **latent が上流 `encode_waveform` とビット一致**すること（前処理 → グラフの全経路）
-- 各ケースが**狙った枝を実際に踏んでいる**こと（恒真化の遮断）:
-  0.5 秒未満のケースが本当に 0.5 秒未満 / peak > 1 のケースで peak 利得が 1 未満 /
-  ちょうど hop の倍数のケースで pad が 0 サンプル・端数のケースで正
-- **末尾トリム**が実 latent では切らず（point == 長さ）、末尾を 0 にした合成 latent では
-  ちょうどその位置を返すこと
+- the **WAV normalization convention** is exactly /32768 (the int16 low end −32768 maps to exactly
+  −1.0)
+- **the decomposition reproduces** (above), and is **bit-identical to upstream
+  `_normalize_loudness`**
+- **the latent is bit-identical to upstream `encode_waveform`** (the whole path preprocessing →
+  graph)
+- each case **actually takes the branch it targets** (guarding against tautology):
+  the case under 0.5 s really is under 0.5 s / the peak gain is below 1 in the peak > 1 case /
+  the pad is 0 samples in the case that is an exact multiple of hop, and positive in the
+  remainder case
+- **the tail trim** does not cut a real latent (point == length), and returns exactly that position
+  for a synthetic latent whose tail was zeroed
 """
 
 from __future__ import annotations
@@ -73,18 +88,20 @@ CASE_PREFIX = "case."
 CASE_SUFFIX = ".safetensors"
 TRIM_FILE = "trim.safetensors"
 
-#: `ensure_max` の既定（`inference_runtime.SamplingRequest.ref_ensure_max`）。**噛むのは
-#: `normalize_db = None` のときだけ**で、LUFS 正規化側は audiotools の
-#: `ensure_max_of_audio()` が内側で同じことをする（`codec.py` のコメントどおり）。
+#: Default of `ensure_max` (`inference_runtime.SamplingRequest.ref_ensure_max`). **It only takes
+#: effect when `normalize_db = None`**; on the LUFS normalization side, audiotools'
+#: `ensure_max_of_audio()` does the same thing internally (as the comment in `codec.py` says).
 ENSURE_MAX = True
 
-#: ホスト前処理の golden ケース。
-#: `(名前, 長さ〈秒・None = 全長〉, 追加サンプル, 振幅倍率, 目標 LUFS〈None = 正規化しない〉)`。
+#: Golden cases of the host preprocessing.
+#: `(name, length (seconds; None = full length), extra samples, amplitude scale, target LUFS
+#: (None = no normalization))`.
 #:
-#: 参照音声は 48kHz mono 7.6 秒で、長さが hop 1920 のちょうど倍数（190 フレーム）。そのため
-#: 既定ケースだけでは reflect pad が 0 サンプルの恒等になるので、端数（+777 サンプル）の
-#: ケースを別に置く。4 本目は 0.5 秒未満で、audiotools が**測定のためにゼロ pad する**枝
-#: （`LoudnessMixin.loudness`）を踏む。3 本目は振幅 3 倍で peak > 1 を作る。
+#: The reference audio is 48 kHz mono, 7.6 s, and its length is an exact multiple of hop 1920
+#: (190 frames). The default case alone would therefore make reflect pad an identity with 0
+#: samples, so a separate case with a remainder (+777 samples) is added. The fourth is under
+#: 0.5 s and takes the branch where audiotools **zero-pads for the measurement**
+#: (`LoudnessMixin.loudness`). The third scales the amplitude by 3 to produce peak > 1.
 HOST_CASES: tuple[tuple[str, float | None, int, float, float | None], ...] = (
     ("ref-default", None, 0, 1.0, ex.REFERENCE_NORMALIZE_DB),
     ("ref-plain", 3.0, 0, 1.0, None),
@@ -93,27 +110,30 @@ HOST_CASES: tuple[tuple[str, float | None, int, float, float | None], ...] = (
     ("ref-odd", 3.0, 777, 1.0, ex.REFERENCE_NORMALIZE_DB),
 )
 
-#: 末尾トリムの golden ケース `(名前, 供給元, 末尾を 0 にするフレーム数)`。
+#: Golden cases of the tail trim `(name, source, number of tail frames set to 0)`.
 #:
-#: 実 latent 2 本は**切らない**側（`find_flattening_point` が長さそのものを返す）の実測で、
-#: 合成 1 本は末尾 40 フレームを 0 にして「ちょうど 121 を返す」ことを見る。前者だけだと
-#: 「常に長さを返す実装」でも通ってしまう（恒真化の遮断）。
+#: The 2 real latents measure the **no-cut** side (`find_flattening_point` returns the length
+#: itself), and the 1 synthetic zeroes the last 40 frames and checks that "it returns exactly 121".
+#: With only the former, "an implementation that always returns the length" would pass too
+#: (guarding against tautology).
 TRIM_CASES: tuple[tuple[str, str, int], ...] = (
     ("z-full", "full", 0),
     ("z-no-ref", "no-ref", 0),
     ("z-silent-tail", "full", 40),
 )
 
-#: int16 PCM の正規化規約を測る値（両端と 0 近傍）。−32768 が厳密に −1.0 へ写れば /32768。
+#: Values that measure the int16 PCM normalization convention (both ends and near 0). If −32768
+#: maps to exactly −1.0, it is /32768.
 WAV_SCALE_PROBE = (-32768, -32767, -1, 0, 1, 16384, 32767)
 INT16_DIVISOR = 32768
 
 
 class IrodoriHostSource(NamedTuple):
-    """`irodori_tts` から借りるホスト側の 2 つ（`sys.path` 追加で import する）。
+    """The two host-side pieces borrowed from `irodori_tts` (imported by adding to `sys.path`).
 
-    MUST: import は**実装 clone から**行う（写しを台本に持たない）。`irodori_tts/__init__.py`
-    が transformers を引くので、ピン付きの `--with` が無い環境では import 時に落ちる。
+    MUST: import **from the implementation clone** (the script keeps no copy).
+    `irodori_tts/__init__.py` pulls in transformers, so an environment without the pinned `--with`
+    fails at import time.
     """
 
     codec_cls: Any
@@ -124,9 +144,9 @@ class IrodoriHostSource(NamedTuple):
         codec_py = source_dir / "irodori_tts" / "codec.py"
         if not codec_py.is_file():
             raise SystemExit(
-                f"Irodori の実装が見つからない: {codec_py}"
-                "（`git clone https://github.com/Aratako/Irodori-TTS` の展開先を"
-                " --irodori-dir に指定する）"
+                f"Irodori implementation not found: {codec_py}"
+                " (pass the checkout of `git clone https://github.com/Aratako/Irodori-TTS`"
+                " as --irodori-dir)"
             )
         if str(source_dir) not in sys.path:
             sys.path.insert(0, str(source_dir))
@@ -137,10 +157,10 @@ class IrodoriHostSource(NamedTuple):
 
 
 def _wav_scale_evidence(sample_rate: int) -> dict[str, Any]:
-    """WAV リーダの int16 → f32 規約を合成ファイルで実測する（門）。
+    """Measure the WAV reader's int16 → f32 convention on a synthetic file (a check).
 
-    MUST: 主張ではなく実測にする — /32767 の実装と /32768 の実装は、実音声では相対差
-    3e-5 しか出ず、golden を突き合わせるだけでは tolerance に埋もれて見えない。
+    MUST: measure rather than assert — a /32767 implementation and a /32768 implementation differ by
+    only 3e-5 relative on real audio, which is buried in the tolerance when comparing goldens.
     """
     import numpy as np
     import soundfile as sf
@@ -151,12 +171,14 @@ def _wav_scale_evidence(sample_rate: int) -> dict[str, Any]:
         sf.write(str(path), values, sample_rate, subtype="PCM_16")
         decoded, decoded_rate = ex.read_wav(path)
     if decoded_rate != sample_rate:
-        raise AssertionError(f"probe の sr が {decoded_rate}（書いた値 {sample_rate} と違う）")
+        raise AssertionError(
+            f"the probe's sr is {decoded_rate} (differs from the written {sample_rate})"
+        )
     expected = torch.tensor([value / INT16_DIVISOR for value in WAV_SCALE_PROBE])
     if not torch.equal(decoded, expected.to(decoded.dtype)):
         raise AssertionError(
-            f"WAV の int16 正規化が /{INT16_DIVISOR} でない"
-            f"（{WAV_SCALE_PROBE} → {[float(v) for v in decoded]}）"
+            f"the WAV int16 normalization is not /{INT16_DIVISOR}"
+            f" ({WAV_SCALE_PROBE} → {[float(v) for v in decoded]})"
         )
     return {
         "loader": "soundfile",
@@ -169,22 +191,27 @@ def _wav_scale_evidence(sample_rate: int) -> dict[str, Any]:
 def _slice_reference(
     wav: torch.Tensor, sample_rate: int, seconds: float | None, extra: int, scale: float
 ) -> torch.Tensor:
-    """参照音声から 1 ケースぶんの生波形を切り出す（長さと振幅だけを変える）。"""
+    """Cut one case's raw waveform out of the reference audio (only length and amplitude
+    change)."""
     length = wav.numel() if seconds is None else int(seconds * sample_rate) + extra
     if not 0 < length <= wav.numel():
-        raise SystemExit(f"切り出し長 {length} が参照音声の {wav.numel()} サンプルに収まらない")
+        raise SystemExit(
+            f"slice length {length} does not fit in the reference audio's {wav.numel()} samples"
+        )
     return (wav[:length] * scale).contiguous()
 
 
 def _normalize_decomposed(
     raw: torch.Tensor, sample_rate: int, target_db: float | None
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """正規化を「LUFS 利得 × peak 利得」へ分解して返す（`(正規化後, スカラー)`）。
+    """Decompose the normalization into "LUFS gain × peak gain" and return it
+    (`(normalized, scalars)`).
 
-    `target_db` が `None` のときは上流 `encode_waveform` の peak 安全スケールだけの経路
-    （`1.0 / float(peak)`）。それ以外は audiotools の `normalize` → `ensure_max_of_audio` で、
-    利得は `exp((target − ref_db) · GAIN_FACTOR)`。**分解が正しいこと自体は
-    `_decomposition_evidence` が実測する**（ここは記録のための式）。
+    When `target_db` is `None`, this is the path of upstream `encode_waveform` with only the peak
+    safety scale (`1.0 / float(peak)`). Otherwise it is audiotools' `normalize` →
+    `ensure_max_of_audio`, with gain `exp((target − ref_db) · GAIN_FACTOR)`. **That the
+    decomposition is correct is itself measured by `_decomposition_evidence`** (this is the formula
+    for the record).
     """
     from audiotools import AudioSignal
 
@@ -212,16 +239,16 @@ def _decomposition_evidence(
     scalars: Mapping[str, float],
     where: str,
 ) -> float:
-    """記録したスカラーだけで正規化後の波形が再現できることを実測する（門）。
+    """Measure that the recorded scalars alone reproduce the normalized waveform (a check).
 
-    TS 側は audiotools の IIR を持たない（`refDb` を golden から受け取る）ので、**この 2 つの
-    掛け算が正規化の全て**であることがホスト移植の前提そのものになる。
+    The TS side has no audiotools IIR (it receives `refDb` from the golden), so **these two
+    multiplications being the whole normalization** is the very premise of the host port.
     """
     rebuilt = raw * scalars["loudnessGain"] * scalars["peakGain"]
     if not torch.equal(rebuilt, decomposed):
         raise AssertionError(
-            f"{where}: 利得 2 本で正規化後の波形を再現できない"
-            f"（最大絶対差 {float((rebuilt - decomposed).abs().max())}）"
+            f"{where}: the two gains do not reproduce the normalized waveform"
+            f" (max abs diff {float((rebuilt - decomposed).abs().max())})"
         )
     return 0.0
 
@@ -229,46 +256,54 @@ def _decomposition_evidence(
 def _upstream_normalize_evidence(
     codec_cls: Any, raw: torch.Tensor, sample_rate: int, target_db: float, normalized: torch.Tensor
 ) -> float:
-    """上流 `DACVAECodec._normalize_loudness` とのビット一致（門）。"""
+    """Bit identity with upstream `DACVAECodec._normalize_loudness` (a check)."""
     upstream = codec_cls._normalize_loudness(raw, sample_rate=sample_rate, target_db=target_db)
     if not torch.equal(upstream, normalized):
         raise AssertionError(
-            "LUFS 正規化が上流と一致しない"
-            f"（最大絶対差 {float((upstream - normalized).abs().max())}）"
+            "the LUFS normalization does not match upstream"
+            f" (max abs diff {float((upstream - normalized).abs().max())})"
         )
     return 0.0
 
 
 def _branch_evidence(cases: Mapping[str, Mapping[str, Any]], hop: int) -> dict[str, Any]:
-    """各ケースが狙った枝を実際に踏んでいることを実測する（恒真化の遮断）。
+    """Measure that each case actually takes the branch it targets (guarding against tautology).
 
-    MUST: ケース表を増やしても「どれも既定経路を通っただけ」で緑になる形にしない。
-    見るのは ① 0.5 秒未満のケースが本当に短い ② peak > 1 のケースで peak 利得が 1 未満・
-    peak ≤ 1 のケースで厳密に 1 ③ hop の倍数のケースで pad が 0・端数のケースで正、の 3 点。
+    MUST: adding cases to the table must not let "every one just took the default path" go green.
+    Three things are checked: ① the case under 0.5 s really is short ② the peak gain is below 1 in
+    the peak > 1 case and exactly 1 in the peak ≤ 1 case ③ the pad is 0 in the case that is a
+    multiple of hop and positive in the remainder case.
     """
     short = cases["ref-short"]
     if short["seconds"] >= 0.5:
         raise AssertionError(
-            f"ref-short が {short['seconds']} 秒 — audiotools のゼロ pad 測定枝を踏んでいない"
+            f"ref-short is {short['seconds']} s — it does not take audiotools' zero-pad"
+            " measurement branch"
         )
     if short["refDb"] == cases["ref-default"]["refDb"]:
-        raise AssertionError("ref-short と ref-default の LUFS が同値 — 測定が長さに依っていない")
+        raise AssertionError(
+            "ref-short and ref-default have the same LUFS — the measurement does not depend on"
+            " the length"
+        )
     if not cases["ref-hot"]["peakGain"] < 1.0:
         raise AssertionError(
-            f"ref-hot の peak 利得が {cases['ref-hot']['peakGain']} — peak > 1 の枝を踏んでいない"
+            f"the peak gain of ref-hot is {cases['ref-hot']['peakGain']} — it does not take"
+            " the peak > 1 branch"
         )
     if cases["ref-plain"]["peakGain"] != 1.0:
         raise AssertionError(
-            f"ref-plain の peak 利得が {cases['ref-plain']['peakGain']} — peak ≤ 1 で縮んでいる"
+            f"the peak gain of ref-plain is {cases['ref-plain']['peakGain']} — it shrinks"
+            " at peak ≤ 1"
         )
     if cases["ref-default"]["padSamples"] != 0:
         raise AssertionError(
-            f"ref-default の pad が {cases['ref-default']['padSamples']} サンプル"
-            f" — 参照音声の長さが hop {hop} の倍数でなくなっている"
+            f"the pad of ref-default is {cases['ref-default']['padSamples']} samples"
+            f" — the reference audio's length is no longer a multiple of hop {hop}"
         )
     if not 0 < cases["ref-odd"]["padSamples"] < hop:
         raise AssertionError(
-            f"ref-odd の pad が {cases['ref-odd']['padSamples']} サンプル — 端数の枝を踏んでいない"
+            f"the pad of ref-odd is {cases['ref-odd']['padSamples']} samples — it does not"
+            " take the remainder branch"
         )
     return {
         "shortSeconds": short["seconds"],
@@ -280,10 +315,12 @@ def _branch_evidence(cases: Mapping[str, Mapping[str, Any]], hop: int) -> dict[s
 def _trim_evidence(
     find_flattening_point: Any, latents: Mapping[str, torch.Tensor]
 ) -> dict[str, dict[str, int]]:
-    """末尾トリムの `{z → 位置}` を上流関数で採り、恒真でないことを確かめる（門）。
+    """Take the tail trim's `{z → position}` with the upstream function and confirm it is not a
+    tautology (a check).
 
-    実 latent は**切らない**（位置 = 長さ）、末尾を 0 にした合成は**ちょうどその位置**を返す。
-    片方だけだと「常に長さを返す」「常に 0 を返す」実装が通ってしまう。
+    A real latent is **not cut** (position = length), and a synthetic one with a zeroed tail returns
+    **exactly that position**. With only one side, an implementation that "always returns the
+    length" or "always returns 0" would pass.
     """
     points: dict[str, dict[str, int]] = {}
     for name, source, silence in TRIM_CASES:
@@ -293,22 +330,25 @@ def _trim_evidence(
         expected = frames - silence
         if point != expected:
             raise AssertionError(
-                f"{name}: find_flattening_point が {point}（期待 {expected}）"
-                " — 末尾トリムの前提（実 latent は切らない / 無音は切る）が崩れている"
+                f"{name}: find_flattening_point returned {point} (expected {expected})"
+                " — the premise of the tail trim (do not cut a real latent / cut silence) is"
+                " broken"
             )
         points[name] = {"source": source, "frames": frames, "silentTail": silence, "point": point}
     return points
 
 
 def _trim_latents(latent_dir: Path) -> dict[str, torch.Tensor]:
-    """{@link TRIM_CASES} の入力 latent を組む（実 z の末尾を 0 にした合成を含む）。"""
+    """Build the input latents of {@link TRIM_CASES} (including the synthetic one made by zeroing
+    the tail of a real z)."""
     sources: dict[str, torch.Tensor] = {}
     for name in {source for _n, source, _s in TRIM_CASES}:
         path = latent_dir / f"{ex.LATENT_CASE_PREFIX}{name}{CASE_SUFFIX}"
         if not path.is_file():
             raise SystemExit(
-                f"実 latent が無い: {path}"
-                "（`uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref` で作る）"
+                f"real latent missing: {path}"
+                " (create it with `uv run --with 'transformers==5.14.1' python -m"
+                " irodori.pipeline_ref`)"
             )
         sources[name] = load_file(str(path))[ex.LATENT_KEY].to(torch.float32)
     latents: dict[str, torch.Tensor] = {}
@@ -316,7 +356,7 @@ def _trim_latents(latent_dir: Path) -> dict[str, torch.Tensor]:
         latent = sources[source].clone()
         if silence:
             if silence >= int(latent.shape[1]):
-                raise SystemExit(f"{name}: 無音 {silence} フレームが latent 長以上")
+                raise SystemExit(f"{name}: {silence} silent frames are not shorter than the latent")
             latent[:, -silence:] = 0.0
         latents[name] = latent.contiguous()
     return latents
@@ -331,9 +371,10 @@ def emit(
     reference_wav: Path = ex.DEFAULT_REFERENCE_WAV,
     irodori_dir: Path = ir.DEFAULT_SOURCE_DIR,
 ) -> dict[str, Any]:
-    """ホスト前処理の golden を書き、要約を返す（門に落ちたら 1 バイトも書かない）。"""
+    """Write the golden of the host preprocessing and return a summary (nothing is written if a
+    check fails)."""
     upstream = IrodoriHostSource.load(irodori_dir)
-    DACVAECodec = upstream.codec_cls  # noqa: N806 — 上流のクラス名をそのまま使う
+    DACVAECodec = upstream.codec_cls  # noqa: N806 — keeps upstream's class name
 
     source = ex.DacvaeSource(source_dir)
     model = ex.load_codec(source, model_dir)
@@ -343,14 +384,14 @@ def emit(
     wav, wav_rate = ex.read_wav(reference_wav)
     if wav_rate != sample_rate:
         raise SystemExit(
-            f"{reference_wav.name}: {wav_rate}Hz はコーデックの {sample_rate}Hz と違う"
-            "（リサンプルはこの台本では通さない）"
+            f"{reference_wav.name}: {wav_rate}Hz differs from the codec's {sample_rate}Hz"
+            " (this script does not resample)"
         )
     wav_scale = _wav_scale_evidence(sample_rate)
 
-    # 上流の正本経路（`encode_waveform`）は **weight_norm を畳む前**に通す — 畳んだ後で採ると
-    # 「畳んだ後どうし」の比較になり、latent の突合が恒真化する
-    # （`irodori.dacvae.export` と同じ規律）。
+    # Upstream's canonical path (`encode_waveform`) runs **before weight_norm is folded** —
+    # taking it afterwards would compare "folded against folded" and turn the latent comparison
+    # into a tautology (the same discipline as `irodori.dacvae.export`).
     codec = DACVAECodec(
         model=model,
         sample_rate=sample_rate,
@@ -390,8 +431,8 @@ def emit(
         payloads[name] = {
             "raw": raw,
             "normalized": normalized,
-            # MUST: clone する — pad が 0 サンプルのケース（`ref-default`）では `_pad` が入力を
-            # そのまま返すので、記憶域を共有したまま safetensors へ渡すと保存が落ちる。
+            # MUST: clone — in the case with 0 pad samples (`ref-default`) `_pad` returns its input
+            # as is, and passing tensors that share storage to safetensors makes the save fail.
             "padded": padded.reshape(-1).clone(),
             "latent": upstream_latents[name],
         }
@@ -408,7 +449,8 @@ def emit(
         }
     branch = _branch_evidence(cases, hop)
 
-    # ---- 前処理を当てて、ホスト鎖（正規化 → pad → グラフ）が上流とビット一致することを実測 ----
+    # ---- Apply the preprocessing and measure that the host chain (normalize → pad → graph)
+    # is bit-identical to upstream ----
     ex.fold_weight_norm(model)
     ex.lift_snake_alphas(source, model)
     encoder_graph = ex.EncoderGraph(model.encoder, ex.truncated_in_proj(model.quantizer.in_proj))
@@ -419,8 +461,8 @@ def emit(
             chain = encoder_graph(framed)
         if not torch.equal(chain, upstream_latents[name]):
             raise AssertionError(
-                f"{name}: ホスト鎖の latent が上流 encode_waveform と一致しない"
-                f"（最大絶対差 {float((chain - upstream_latents[name]).abs().max())}）"
+                f"{name}: the host chain's latent does not match upstream encode_waveform"
+                f" (max abs diff {float((chain - upstream_latents[name]).abs().max())})"
             )
         chain_evidence[name] = 0.0
 
@@ -433,7 +475,7 @@ def emit(
         path = out_dir / f"{CASE_PREFIX}{name}{CASE_SUFFIX}"
         save_file(
             {
-                key: normalize_boundary_tensor(value.contiguous(), f"{name} の '{key}'")
+                key: normalize_boundary_tensor(value.contiguous(), f"{name}: '{key}'")
                 for key, value in tensors.items()
             },
             str(path),
@@ -469,14 +511,15 @@ def emit(
 
 
 def _gain_factor() -> float:
-    """audiotools の利得換算係数（`ln(10)/20`）。**定数を写さずライブラリから読む**。"""
+    """audiotools' gain conversion factor (`ln(10)/20`). **Read from the library, not copied as
+    a constant**."""
     from audiotools import AudioSignal
 
     return float(AudioSignal.GAIN_FACTOR)
 
 
 def default_out_dir(model_dir: Path) -> Path:
-    """既定の置き場（`outputs/series/<実重みのディレクトリ名>/host/`）。"""
+    """The default location (`outputs/series/<directory name of the real weights>/host/`)."""
     return SERIES_ROOT / model_dir.name / "host"
 
 

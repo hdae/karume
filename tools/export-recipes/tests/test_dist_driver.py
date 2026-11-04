@@ -1,12 +1,14 @@
-"""リポの dist ドライバ（`tools/export-recipes/dist.py`）— 受理集合と置き場の既定の合成。
+"""The repository's dist driver (`tools/export-recipes/dist.py`) — how the accepted set and the
+default locations are composed.
 
-core の {@link karume.dist.PIPELINES} は wheel だけで組める分しか持たない（ADR 0065 決定 2）。
-ここで固定するのは「recipe 側の family が 1 つ残らず表に載り、旧 UX の既定が保たれる」こと —
-載せ忘れは `--pipeline <family>` が「そんな pipeline は無い」で落ちる形でしか表面化せず、
-資産を作り終えた後に初めて気づく。
+The core's {@link karume.dist.PIPELINES} holds only what the wheel alone can build (ADR 0065
+decision 2). What is pinned here is "every recipe-side family is in the table, and the defaults of
+the old UX are kept" — a missing entry only surfaces as `--pipeline <family>` failing with "no such
+pipeline", noticed for the first time after the assets are built.
 
-置き場の既定（`models/` / `outputs/series/`）もドライバの持ち物（ADR 0065 Consequences）—
-core は綴りを持たないので、{@link dist.default_out_dir} の規則はここが見る。
+The default locations (`models/` / `outputs/series/`) also belong to the driver (ADR 0065
+Consequences) — the core holds no spelling for them, so the rule of {@link dist.default_out_dir} is
+checked here.
 """
 
 from __future__ import annotations
@@ -53,8 +55,9 @@ from wan.distribution import PIPELINE as WAN_PIPELINE
 from wan.distribution import TI2V_PIPELINE as WAN_TI2V_PIPELINE
 from wan.umt5_distribution import PIPELINE as UMT5_PIPELINE
 
-#: 配布 recipe を持つ family の全量（名前 → その family が公開する `PIPELINE`）。
-#: **ここが受理集合の期待値**で、`dist.PIPELINES` の載せ忘れも余剰も 1 つの表で検出する。
+#: Every family that has a distribution recipe (name → the `PIPELINE` that family exports).
+#: **This is the expected accepted set**; one table catches both a missing and a surplus entry of
+#: `dist.PIPELINES`.
 RECIPE_PIPELINES = {
     "anima": ANIMA_OFFICIAL_PIPELINE,
     "anima-extra": ANIMA_EXTRA_PIPELINE,
@@ -86,27 +89,32 @@ class TestRegistry:
             assert dist.PIPELINES[name] is spec
 
     def test_the_table_holds_nothing_else(self) -> None:
-        """余剰の席は「どの family の表でもない pipeline」— 名前だけで組める形にしない。"""
+        """A surplus entry is "a pipeline in no family's table" — never something that builds from
+        a name alone."""
         assert sorted(dist.PIPELINES) == sorted({**RECIPE_PIPELINES, **CORE_PIPELINES})
 
     def test_the_core_table_is_empty_now_that_every_family_has_moved(self) -> None:
-        """移行済み family が core 側に残っていれば、合成で 2 つの表が同じ名前を主張する。
+        """If a family that has moved were still on the core side, the composition would have 2
+        tables claim the same name.
 
-        ADR 0065 段 3+4 の完了条件そのもの — core wheel に family 知識が 1 つも残っていない。
+        This is the very completion condition of ADR 0065 steps 3+4 — no family knowledge is left
+        in the core wheel.
         """
         assert CORE_PIPELINES == {}
 
     def test_the_default_is_anima(self) -> None:
-        """旧 `karume dist`（引数なし）の UX をドライバ側で維持する。"""
+        """Keep the UX of the old `karume dist` (no arguments) on the driver side."""
         assert dist.DEFAULT_PIPELINE == "anima"
         assert dist.DEFAULT_PIPELINE in dist.PIPELINES
 
     def test_the_two_anima_repositories_stay_separate_pipelines(self) -> None:
-        """公式（`anima`）と追加学習（`anima-extra`）は**別の席**（ADR 0087 の分割軸）。
+        """The official models (`anima`) and the fine-tunes (`anima-extra`) are **separate
+        entries** (the split axis of ADR 0087).
 
-        `root_files` は Pipeline に固定で載る 1 組なので、1 つに畳むとどちらかのリポの
-        改変告知が中身と食い違う — 散文としては妥当なままなので `verify_dist` も manifest
-        検査も素通りし、配ってからでないと誰も気づけない。
+        `root_files` is one fixed set per Pipeline, so folding them into one would make one
+        repository's modification notice disagree with its contents — it still reads as valid
+        prose, so `verify_dist` and the manifest check both pass, and nobody notices until it is
+        distributed.
         """
         official = dist.PIPELINES["anima"]
         extra = dist.PIPELINES["anima-extra"]
@@ -115,10 +123,12 @@ class TestRegistry:
         assert official.root_files["NOTICE.md"] != extra.root_files["NOTICE.md"]
 
     def test_the_two_birefnet_repositories_stay_separate_pipelines(self) -> None:
-        """BiRefNet HR と派生の Lucida も**別の席**（ADR 0092 決定 1）。
+        """BiRefNet HR and its derivative Lucida are **separate entries** too (ADR 0092 decision
+        1).
 
-        MIT の著作権行はリポごとに違う（Lucida は fine-tune 側と上流の 2 行）ので、1 つに
-        畳むとどちらかのリポが自分のものでない著作権を名乗るか、上流の表示を落とす。
+        The MIT copyright lines differ per repository (Lucida has 2 lines: the fine-tune's and the
+        upstream's), so folding them into one would make one repository claim a copyright that is
+        not its own, or drop the upstream notice.
         """
         base = dist.PIPELINES["birefnet"]
         derived = dist.PIPELINES["lucida"]
@@ -128,10 +138,11 @@ class TestRegistry:
         assert base.root_files["NOTICE.md"] != derived.root_files["NOTICE.md"]
 
     def test_the_two_sbv2_voice_families_stay_separate_pipelines(self) -> None:
-        """SBV2 の JVNV 系（`sbv2`）と FN 系（`sbv2-fn`）も**別の席**。
+        """SBV2's JVNV line (`sbv2`) and FN line (`sbv2-fn`) are **separate entries** too.
 
-        ライセンスがファミリーごとに違う（JVNV = CC BY-SA 4.0・FN = Booth の頒布条件で同梱
-        できる条文が無い）ので、1 つに畳むと FN のリポが CC BY-SA の条文と JVNV の帰属を名乗る。
+        The license differs per family (JVNV = CC BY-SA 4.0; FN = Booth's distribution terms, with
+        no license text that can be bundled), so folding them into one would make the FN repository
+        claim the CC BY-SA text and the JVNV attribution.
         """
         jvnv = dist.PIPELINES["sbv2"]
         fn = dist.PIPELINES["sbv2-fn"]
@@ -143,16 +154,19 @@ class TestRegistry:
         assert fn.root_files == {}
 
     def test_every_distribution_pipeline_ships_its_legal_text(self) -> None:
-        """配布リポ直下に `LICENSE.md` と `NOTICE.md` の**両方**を置く席（ADR 0092 決定 7）。
+        """The entries that put **both** `LICENSE.md` and `NOTICE.md` at the root of the
+        distribution repository (ADR 0092 decision 7).
 
-        名指しにするのは、新しい family が黙って同梱なしで生えるのを「表に載せ忘れた」形で
-        見えるようにするため。
+        They are named one by one so that a new family appearing silently without the bundled texts
+        shows up as "missing from the table".
 
-        vowel-detector はここに入らない: MIT が要求するのは「全文 + 著作権行」だけで、
-        改変告知（`NOTICE.md`）の宛先が無い（上流と著作権者が同じ）。許諾表示そのものは
-        下の `test_the_mit_only_pipeline_still_ships_its_permission_notice` が見る。
-        `sbv2-fn` も入らない: HF 公開が保留で、上流の書面条件（Booth の頒布ページ）に同梱
-        できるライセンス文が無い（{@link sbv2.distribution.FN_PIPELINE}）。
+        vowel-detector is not among them: MIT requires only "the full text + the copyright lines",
+        and a modification notice (`NOTICE.md`) has nobody to address (the upstream and the
+        copyright holder are the same). The permission notice itself is checked by
+        `test_the_mit_only_pipeline_still_ships_its_permission_notice` below. `sbv2-fn` is not
+        among them either: its HF publication is on hold, and the upstream's written terms (the
+        Booth distribution page) have no license text that can be bundled
+        ({@link sbv2.distribution.FN_PIPELINE}).
         """
         expected = {
             "anima",
@@ -179,10 +193,12 @@ class TestRegistry:
         assert carried == expected
 
     def test_the_mit_only_pipeline_still_ships_its_permission_notice(self) -> None:
-        """MUST: MIT の席も許諾表示は落とさない（`NOTICE.md` が無いことと別の話）。
+        """MUST: an MIT entry does not drop the permission notice either (a separate matter from
+        having no `NOTICE.md`).
 
-        `karume.dist.LEGAL_PATHS` は受理集合であって**在ることを要求しない**ので、
-        `root_files` が空のまま組み上がっても `verify_dist` も manifest 検査も何も言わない。
+        `karume.dist.LEGAL_PATHS` is an accepted set and **does not require presence**, so if
+        `root_files` were built empty, neither `verify_dist` nor the manifest check would say
+        anything.
         """
         root_files = dist.PIPELINES["vowel-detector"].root_files
 
@@ -191,7 +207,8 @@ class TestRegistry:
         assert "Copyright (c) " in root_files["LICENSE.md"]
 
     def test_every_pipeline_renders_its_own_model_card(self) -> None:
-        """カードは pipeline ごとのテンプレート — 描き手が他 pipeline の manifest を拒む。"""
+        """A card is a per-pipeline template — its renderer refuses another pipeline's
+        manifest."""
         for name, spec in dist.PIPELINES.items():
             manifest = {"models": {"m": {"pipeline": f"{name}/0"}}}
             for render_card in spec.card_profiles.values():
@@ -200,10 +217,10 @@ class TestRegistry:
 
 
 class TestDefaultPlaces:
-    """`--series` / `--out` の既定 — repo topology を知っているのはドライバだけ。"""
+    """The defaults of `--series` / `--out` — only the driver knows the repo topology."""
 
     def test_the_series_default_is_the_repository_series_root(self) -> None:
-        """`--series` を省いた起動が読むのはリポの `outputs/series/`。"""
+        """A run without `--series` reads the repository's `outputs/series/`."""
         assert dist.SERIES_ROOT is SERIES_ROOT
 
     def test_the_default_output_directory_follows_the_single_model(self) -> None:
@@ -211,15 +228,17 @@ class TestDefaultPlaces:
         assert dist.default_out_dir(SIGLIP2_PIPELINE, ["base"]).name == "karume-siglip2"
 
     def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
-        """複数モデルの出力先は `--out` の明示を求める（1 モデルの宣言だけを引く — 並べた
-        モデルの宣言が揃うかは突き合わせない）。"""
+        """The output directory of several models requires an explicit `--out` (only one model's
+        declaration is looked up — whether the declarations of the listed models agree is not
+        matched)."""
         with pytest.raises(DistError, match="--out"):
             dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1", "jvnv-F2"])
 
 
-#: 公開中のリポを焼く手順（pipeline・`--model` の並び・`--repo`）→ 焼き先 `models/<名前>/`。
-#: `tools/release/hf-upload.zsh` はこのディレクトリを `hdae/<名前>` へ上げるので、カードの
-#: Usage 例がこの名前を指さないと公開カードが別のリポを指す。
+#: How each published repository is built (pipeline, the `--model` list, `--repo`) → the output
+#: directory `models/<name>/`. `tools/release/hf-upload.zsh` uploads this directory to
+#: `hdae/<name>`, so unless the card's Usage example names it, the published card points at
+#: another repository.
 RELEASE_REPOSITORIES = [
     (
         "anima",
@@ -243,22 +262,25 @@ RELEASE_REPOSITORIES = [
     ("gemma4-qat-mobile", ["e2b", "e4b"], None, "karume-gemma4-qat-mobile"),
     ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
     ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
-    # `--repo` 無しで公開リポを指す（Pipeline がファミリーのリポ名を宣言する — W-RC5-2）。
+    # Points at the published repository without `--repo` (the Pipeline declares the family's
+    # repository name — W-RC5-2).
     ("sbv2", ["F1", "F2", "M1", "M2"], None, "karume-sbv2-jvnv"),
     ("siglip2", ["base", "so400m"], None, "karume-siglip2"),
     ("umt5", ["xxl"], None, "karume-umt5-xxl"),
-    # Wan2.1（`--pipeline wan` → karume-wan2.1）は HF に公開しないので載せない
-    # （ADR 0118 追記 2026-10-15）。
+    # Wan2.1 (`--pipeline wan` → karume-wan2.1) is not published on HF, so it is not listed
+    # (ADR 0118 addendum 2026-10-15).
     ("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2"),
     ("moss-image", ["sft"], None, "karume-moss-image"),
 ]
 
 
 class TestReleaseRepositories:
-    """公開リポの焼き直しで、カードの Usage 例が上げ先のリポ名のまま変わらないこと。
+    """Rebuilding a published repository keeps the card's Usage example on the name of the
+    repository it is uploaded to.
 
-    repo の出所が出力ディレクトリ名から pipeline の宣言へ移っても、手順どおりの `--out`
-    （`models/<リポ名>/`）で焼いたカードは同じバイトになる（違うのは別名で焼いたときだけ）。
+    Even though the repo now comes from the pipeline's declaration instead of the output directory
+    name, a card built with the documented `--out` (`models/<repository name>/`) has the same bytes
+    (it differs only when built under another name).
     """
 
     @pytest.mark.parametrize(("pipeline", "models", "repo", "directory"), RELEASE_REPOSITORIES)
@@ -268,13 +290,15 @@ class TestReleaseRepositories:
         assert resolve_repo(dist.PIPELINES[pipeline], models, repo) == f"hdae/{directory}"
 
     def test_the_table_names_the_same_repositories_as_the_typescript_sources(self) -> None:
-        """公開 revision の正本（TS の各 family の `SOURCES`）と同じリポの集合を焼くこと。
+        """Build the same set of repositories as the source of truth for published revisions
+        (each TS family's `SOURCES`).
 
-        2 つの表は別の言語で独立に更新されるので、リポの追加・改名を片側だけにすると、カードの
-        Usage 例と pin のリポが割れる。TS 側は Python から読めるテキストなので機械で突き合わせる。
+        The 2 tables are updated independently in different languages, so adding or renaming a
+        repository on one side only would split the card's Usage example from the pinned
+        repository. The TS side is text Python can read, so they are matched mechanically.
         """
         sources = sorted((REPO_ROOT / "packages" / "models" / "src").glob("*/config.ts"))
-        assert sources, "packages/models/src/*/config.ts が見つからない（置き場が動いた）"
+        assert sources, "packages/models/src/*/config.ts not found (the location moved)"
         declared = {
             match
             for path in sources
@@ -631,40 +655,46 @@ class TestCoreArguments:
         ) == ["--pipeline", "irodori", "--ref-revision", "a=b"]
 
 
-#: README の受理集合を綴る 1 文（`--pipeline` の引数として叩ける名前がバッククォートで並ぶ）。
-#: 同じ節の「13 pipeline seats across 10 families」は**家族数**を語る別の文なので拾わない。
+#: The README sentence that spells out the accepted set (the names usable as `--pipeline` arguments,
+#: in backquotes). "13 pipeline seats across 10 families" in the same section is another sentence
+#: about the **number of families**, so it is not picked up.
 README_ACCEPTED_SET = re.compile(r"The accepted set is (?P<names>[^.]+)\.")
 
 
 class TestReadme:
-    """README（英語 MUST）の受理集合が実装から乖離しないこと。
+    """The accepted set in the README (English MUST) does not drift from the implementation.
 
-    README どおりに `--pipeline <名前>` を叩いて argparse が落ちる状態は、利用者が最初に
-    踏む地面が抜けている形。ADR 0092 決定 5 でこの README はライセンス carve-out の宣言
-    文書でもあるので、他の記述の信頼性がそのまま carve-out の信頼性に見える。
+    argparse failing on `--pipeline <name>` typed as the README says is the very first step a user
+    takes giving way. By ADR 0092 decision 5 this README is also the document that declares the
+    license carve-out, so the reliability of its other statements reads as the reliability of the
+    carve-out.
     """
 
     @staticmethod
     def _accepted_names() -> list[str]:
         readme = (Path(dist.__file__).resolve().parent / "README.md").read_text(encoding="utf-8")
         match = README_ACCEPTED_SET.search(readme)
-        assert match is not None, "README の受理集合の 1 文が見つからない（綴りが動いた）"
+        assert match is not None, (
+            "the README sentence of the accepted set not found (its wording moved)"
+        )
         return re.findall(r"`([^`]+)`", match.group("names"))
 
     def test_the_readme_lists_every_accepted_pipeline(self) -> None:
         assert sorted(self._accepted_names()) == sorted(dist.PIPELINES)
 
     def test_the_readme_lists_them_in_the_help_order(self) -> None:
-        """並びは `--help` の並び（既定が先頭）— 読み手が CLI と突き合わせられる形にする。"""
+        """The order is the `--help` order (the default first) — so a reader can match it
+        against the CLI."""
         assert self._accepted_names() == list(dist.PIPELINES)
 
 
 def _torch_loaded_after(source: str) -> bool:
-    """新しいインタプリタで `source` を実行し、torch が `sys.modules` に入ったかを返す。
+    """Run `source` in a fresh interpreter and return whether torch entered `sys.modules`.
 
-    「どのモジュールが既に import 済みか」はテストセッションの `sys.modules` では判定できない
-    （他のテストが torch を読み込み済み）ので、core の test_package_init と同じ subprocess 形で
-    毎回確かめる。cwd を recipe のルートにして、`dist` / family を pytest と同じ綴りで引く。
+    "Which modules are already imported" cannot be judged from the test session's `sys.modules`
+    (other tests have already loaded torch), so it is checked every time in a subprocess, the same
+    way as the core's test_package_init. The cwd is the recipe root, so `dist` / the families are
+    imported under the same names as in pytest.
     """
     completed = subprocess.run(
         [sys.executable, "-c", f"import sys\n{source}\nprint('torch' in sys.modules)"],
@@ -678,16 +708,18 @@ def _torch_loaded_after(source: str) -> bool:
 
 
 class TestImportingTheDriver:
-    """配布・カード層は torch を読まずに組めること（siglip2 / depth の `measurements.py` の前提）。
+    """The distribution and card layers build without loading torch (the premise of the
+    `measurements.py` of siglip2 / depth).
 
-    patch 層（torch 依存）を配布経路の import 連鎖から外す判断は、「`import dist` は torch を
-    読まない」を根拠にしている。どれか 1 つの distribution / card が patch 層や torch 依存の
-    helper を module 直下で import すると、この性質は黙って崩れる。
+    Keeping the patch layer (torch-dependent) out of the import chain of the distribution path
+    rests on "`import dist` does not load torch". If any one distribution / card imports the patch
+    layer or a torch-dependent helper at module level, this property breaks silently.
     """
 
     def test_importing_the_driver_does_not_load_torch(self) -> None:
         assert not _torch_loaded_after("import dist")
 
     def test_importing_a_patch_layer_does_load_torch(self) -> None:
-        """対照: 同じ判定が torch 依存の import を検出できる（上の検査が恒真でない）。"""
+        """Control: the same check detects a torch-dependent import (the check above is not
+        vacuous)."""
         assert _torch_loaded_after("import siglip2.patch")

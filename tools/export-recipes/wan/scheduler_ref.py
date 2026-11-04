@@ -1,40 +1,44 @@
-"""Wan2.1 のホストの UniPC と CFG の参照 fixture（ADR 0118 決定 5・段 6）。
+"""Reference fixture for the host UniPC and CFG of Wan2.1 (ADR 0118 decision 5, step 6).
 
-TS のホスト（`packages/models/src/wan/`）が持つ UniPC（flow matching・shift 3.0・bh2・order 2・
-50 ステップ）と CFG の合成を、diffusers 0.39.0 の**実クラスを駆動して**焼く。実重みは要らない —
-食わせるのは seed 固定の合成のモデル出力（小形の潜在 `[1,16,3,16,16]`・f32）。scheduler の
-config は pin した revision の `scheduler/scheduler_config.json` をそのまま使う（参照を作る側で
-値を書き換えない — 決定 5）。
+Bakes the UniPC (flow matching, shift 3.0, bh2, order 2, 50 steps) and the CFG combination that the
+TS host (`packages/models/src/wan/`) implements by **driving the real classes** of diffusers 0.39.0.
+No real weights are needed — what is fed in is synthetic model output with a fixed seed (a small
+latent `[1,16,3,16,16]`, f32). The scheduler config is the pinned revision's
+`scheduler/scheduler_config.json` as is (the side that makes the reference does not rewrite values —
+decision 5).
 
-## 中身
+## Contents
 
-- **σ 列と timestep 列**（{@link SCHEDULE_STEPS} の各ステップ数 — 50 は参照の設定・2 は少ステップの
-  通し）: `set_timesteps` の後の `scheduler.sigmas`（f32・最後の 0 を含む）と `scheduler.timesteps`
-  （int64）。加えて **f64 の σ 列**を JSON に置く（TS は f64 で計算して最後に f32 へ落とす —
-  決定 5）。f64 の列は上流の `set_timesteps` の flow の分岐
-  （`scheduling_unipc_multistep.py:428-450`）と同じ numpy の式で作り直し、f32 へ落とした値が
-  `scheduler.sigmas` とビット一致・`σ × 1000` の int64 への切り捨てが `scheduler.timesteps` と
-  完全一致することを確かめてから書く（上流は f64 の中間を外へ出さないので、取り出せない値を
-  作り直して、出せる値で縛る）。
-- **軌跡**: 初期の潜在と 50 本のモデル出力（どちらも seed 固定の `randn`）を、上流のループと同じ
-  形（`for t in scheduler.timesteps: latents = scheduler.step(out, t, latents)`）で回した各ステップ
-  後の潜在。ステップごとの次数（`this_order`）と corrector の有無を JSON に置く。
-- **CFG**: cond / uncond（seed 固定）と、上流の合成 `noise_uncond + guidance_scale * (noise_pred -
-  noise_uncond)`（`pipeline_wan.py:632` の逐語・f32・guide 5.0）。
+- **σ and timestep sequences** (for each step count in {@link SCHEDULE_STEPS} — 50 is the reference
+  setting, 2 the few-step end-to-end run): `scheduler.sigmas` after `set_timesteps` (f32, including
+  the trailing 0) and `scheduler.timesteps` (int64). In addition, the **f64 σ sequence** goes into
+  the JSON (TS computes in f64 and drops to f32 at the end — decision 5). The f64 sequence is
+  rebuilt with the same numpy expressions as the flow branch of upstream `set_timesteps`
+  (`scheduling_unipc_multistep.py:428-450`), and is written only after checking that its values
+  dropped to f32 are bit-identical to `scheduler.sigmas` and that truncating `σ × 1000` to int64
+  matches `scheduler.timesteps` exactly (upstream does not expose its f64 intermediates, so the
+  values that cannot be extracted are rebuilt and pinned by the values that can).
+- **Trajectory**: the latent after each step when the initial latent and 50 model outputs (both a
+  fixed-seed `randn`) are run in the same shape as the upstream loop
+  (`for t in scheduler.timesteps: latents = scheduler.step(out, t, latents)`). The order of each
+  step (`this_order`) and whether the corrector ran go into the JSON.
+- **CFG**: cond / uncond (fixed seed) and the upstream combination `noise_uncond + guidance_scale *
+  (noise_pred - noise_uncond)` (verbatim from `pipeline_wan.py:632`, f32, guide 5.0).
 
-TS の読み手は F64 を持たない（`packages/runtime/src/format/safetensors.ts`）ので、f64 の列は JSON
-（Python の `repr` は往復で値を保つ 10 進）に置く。
+The TS reader has no F64 (`packages/runtime/src/format/safetensors.ts`), so the f64 sequences go
+into the JSON (Python's `repr` is a decimal form that round-trips the value).
 
     uv run --group wan --inexact python -m wan.scheduler_ref
 
-出力（既定 `packages/models/tests/fixtures/wan-scheduler/`）:
+Output (default `packages/models/tests/fixtures/wan-scheduler/`):
 
-    unipc.safetensors  sigmas / timesteps（50 ステップ）・latents_init・model_outputs・
-                       trajectory・cfg.*
-    unipc.json         出所・config・σ（f64 / f32）と timestep の列（2 / 50 ステップ）・次数・seed
+    unipc.safetensors  sigmas / timesteps (50 steps), latents_init, model_outputs,
+                       trajectory, cfg.*
+    unipc.json         source, config, σ (f64 / f32) and timestep sequences (2 / 50 steps), orders,
+                       seeds
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -55,40 +59,44 @@ from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, local_snapshot
 
 DEFAULT_OUT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-scheduler"
 
-#: fixture の潜在 `[C, F, H, W]`（バッチ軸はホストの形に合わせて落とす — 上流へは `[1, …]` で
-#: 渡す）。
+#: The fixture latent `[C, F, H, W]` (the batch axis is dropped to match the host's shape — upstream
+#: receives `[1, …]`).
 LATENT_SHAPE = (16, 3, 16, 16)
 
-#: σ / timestep の列を焼くステップ数（50 = 参照の設定・2 = 少ステップの通し — 決定 8）。
+#: The step counts whose σ / timestep sequences are baked (50 = the reference setting, 2 = the
+#: few-step end-to-end run — decision 8).
 SCHEDULE_STEPS = (2, NUM_INFERENCE_STEPS)
 
-#: 軌跡と CFG の乱数の seed（値に意味は無い — 固定されていることだけが要件）。
+#: Seeds of the trajectory and CFG random numbers (the values mean nothing — only being fixed
+#: matters).
 TRAJECTORY_SEED = 20261020
 CFG_SEED = 20261021
 
-#: 上流が σ[0] から引く量（`scheduling_unipc_multistep.py:437-440`）。
+#: The amount upstream subtracts from σ[0] (`scheduling_unipc_multistep.py:437-440`).
 SIGMA_EPS = 1e-6
 
 
 class SchedulerFixtureError(AssertionError):
-    """作り直した f64 の列が上流の f32 / int64 の列と合わない。"""
+    """A rebuilt f64 sequence does not match the upstream f32 / int64 sequence."""
 
 
 def load_scheduler(model: str = DEFAULT_MODEL) -> Any:
-    """pin した revision の scheduler の config で `UniPCMultistepScheduler` を組む。"""
+    """Builds `UniPCMultistepScheduler` from the scheduler config of the pinned revision."""
     from diffusers import UniPCMultistepScheduler
 
     return UniPCMultistepScheduler.from_pretrained(local_snapshot(model), subfolder="scheduler")
 
 
 def sigmas_float64(config: Any, steps: int) -> np.ndarray:
-    """上流 `set_timesteps` の flow の分岐の f64 の σ 列（最後の 0 を足す前・長さ `steps`）。
+    """The f64 σ sequence of the flow branch of upstream `set_timesteps` (before the trailing 0 is
+    appended; length `steps`).
 
-    式は上流の行（`scheduling_unipc_multistep.py:430-440`）と同じ numpy の呼び出し。動的 shift と
-    `shift_terminal` の分岐は Wan2.1 の config では通らないので、立っていたら fail loudly。
+    The expressions are the same numpy calls as the upstream lines
+    (`scheduling_unipc_multistep.py:430-440`). The dynamic-shift and `shift_terminal` branches are
+    not taken with the Wan2.1 config, so fail loudly if either is set.
     """
     if not config.use_flow_sigmas or config.use_dynamic_shifting or config.shift_terminal:
-        raise SchedulerFixtureError("flow の静的 shift の分岐以外は対象外")
+        raise SchedulerFixtureError("only the static-shift flow branch is supported")
     sigmas = np.linspace(1, 1 / config.num_train_timesteps, steps + 1)[:-1]
     sigmas = config.flow_shift * sigmas / (1 + (config.flow_shift - 1) * sigmas)
     if np.fabs(sigmas[0] - 1) < SIGMA_EPS:
@@ -97,21 +105,27 @@ def sigmas_float64(config: Any, steps: int) -> np.ndarray:
 
 
 def schedule(scheduler: Any, steps: int) -> dict[str, Any]:
-    """`set_timesteps(steps)` の列（f32 の σ・int64 の timestep）と、縛った f64 の σ 列。"""
+    """The sequences of `set_timesteps(steps)` (f32 σ, int64 timesteps) and the pinned f64 σ
+    sequence."""
     scheduler.set_timesteps(steps)
     sigmas32 = scheduler.sigmas.numpy()
     timesteps = scheduler.timesteps.numpy()
     if scheduler.sigmas.dtype != torch.float32 or scheduler.timesteps.dtype != torch.int64:
         raise SchedulerFixtureError(
-            f"上流の列の dtype が想定外: {scheduler.sigmas.dtype} / {scheduler.timesteps.dtype}"
+            f"unexpected dtype of the upstream sequences: {scheduler.sigmas.dtype} /"
+            f" {scheduler.timesteps.dtype}"
         )
     sigmas64 = sigmas_float64(scheduler.config, steps)
     with_zero = np.concatenate([sigmas64, [0.0]])
     if not np.array_equal(with_zero.astype(np.float32).view(np.uint32), sigmas32.view(np.uint32)):
-        raise SchedulerFixtureError(f"steps={steps}: f64 の列を f32 へ落とした値が上流と違う")
+        raise SchedulerFixtureError(
+            f"steps={steps}: the f64 sequence dropped to f32 differs from upstream"
+        )
     truncated = (sigmas64 * scheduler.config.num_train_timesteps).astype(np.int64)
     if not np.array_equal(truncated, timesteps):
-        raise SchedulerFixtureError(f"steps={steps}: σ × 1000 の切り捨てが上流の timestep と違う")
+        raise SchedulerFixtureError(
+            f"steps={steps}: truncating σ × 1000 differs from the upstream timesteps"
+        )
     return {
         "steps": steps,
         "sigmas_f64": [float(value) for value in with_zero],
@@ -121,7 +135,8 @@ def schedule(scheduler: Any, steps: int) -> dict[str, Any]:
 
 
 def trajectory(scheduler: Any, seed: int) -> dict[str, Any]:
-    """合成のモデル出力を上流のループと同じ形で `step` に食わせ、各ステップ後の潜在を集める。"""
+    """Feeds synthetic model outputs to `step` in the same shape as the upstream loop and collects
+    the latent after each step."""
     scheduler.set_timesteps(NUM_INFERENCE_STEPS)
     generator = torch.Generator().manual_seed(seed)
     latents_init = torch.randn(1, *LATENT_SHAPE, generator=generator)
@@ -131,7 +146,8 @@ def trajectory(scheduler: Any, seed: int) -> dict[str, Any]:
     orders: list[int] = []
     correctors: list[bool] = []
     for index, t in enumerate(scheduler.timesteps):
-        # `step` の中の判定（`use_corrector`）と同じ条件を、呼ぶ前の状態で記録する。
+        # Record the same condition as the check inside `step` (`use_corrector`), from the state
+        # before the call.
         correctors.append(
             index > 0
             and index - 1 not in scheduler.disable_corrector
@@ -142,7 +158,7 @@ def trajectory(scheduler: Any, seed: int) -> dict[str, Any]:
         orders.append(int(scheduler.this_order))
     stacked = torch.cat(states)
     if not bool(stacked.isfinite().all()):
-        raise SchedulerFixtureError("軌跡に非有限値がある")
+        raise SchedulerFixtureError("the trajectory has non-finite values")
     return {
         "latents_init": latents_init[0],
         "model_outputs": model_outputs[:, 0],
@@ -153,7 +169,8 @@ def trajectory(scheduler: Any, seed: int) -> dict[str, Any]:
 
 
 def classifier_free_guidance(seed: int, guidance_scale: float) -> dict[str, torch.Tensor]:
-    """CFG の合成（上流 `pipeline_wan.py:632` の式を逐語 — 上流に関数が無いので式を写す）。"""
+    """The CFG combination (the expression of upstream `pipeline_wan.py:632`, verbatim — upstream
+    has no function for it, so the expression is copied)."""
     generator = torch.Generator().manual_seed(seed)
     noise_pred = torch.randn(1, *LATENT_SHAPE, generator=generator)
     noise_uncond = torch.randn(1, *LATENT_SHAPE, generator=generator)
@@ -163,10 +180,11 @@ def classifier_free_guidance(seed: int, guidance_scale: float) -> dict[str, torc
 
 
 def build(model: str = DEFAULT_MODEL) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    """fixture のテンソルとメタ（JSON）を組む（書かない）。"""
+    """Builds the fixture tensors and metadata (JSON) without writing them."""
     scheduler = load_scheduler(model)
     schedules = {str(steps): schedule(scheduler, steps) for steps in SCHEDULE_STEPS}
-    # 列を取った後で作り直す — `set_timesteps` が step の状態（model_outputs 等）を初期化する。
+    # Rebuild after taking the sequences — `set_timesteps` resets the step state (model_outputs
+    # and so on).
     run = trajectory(load_scheduler(model), TRAJECTORY_SEED)
     reference = schedules[str(NUM_INFERENCE_STEPS)]
     tensors = {
@@ -205,14 +223,15 @@ def build(model: str = DEFAULT_MODEL) -> tuple[dict[str, torch.Tensor], dict[str
 
 
 def write(out: Path, model: str = DEFAULT_MODEL) -> dict[str, Any]:
-    """fixture を書き、要約を返す。"""
+    """Writes the fixture and returns a summary."""
     tensors, meta = build(model)
     out.mkdir(parents=True, exist_ok=True)
     save_file(
         {name: tensor.contiguous() for name, tensor in tensors.items()},
         str(out / "unipc.safetensors"),
     )
-    # 2 字下げ（`deno fmt` の JSON の形 — 追跡対象の fixture なので書き直しで差分を出さない）。
+    # Two-space indent (the JSON shape of `deno fmt` — the fixture is tracked, so a rewrite must not
+    # produce a diff).
     (out / "unipc.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

@@ -1,21 +1,28 @@
-"""`wan/umt5_patch.py`（umT5 の有効長の S 形ラッパ・バケット表の Python 側の正本）と
-`wan/umt5_probe.py` の約束事（ADR 0119 決定 3〜5・段 10c の下見）。
+"""The contract of `wan/umt5_patch.py` (the S-form wrapper of umT5 over the valid length and the
+Python-side source of truth of the bucket table) and `wan/umt5_probe.py` (ADR 0119 decisions 3–5,
+the preview of step 10c).
 
-固定するのは、壊れても例外が出ず**数だけが静かにずれる**側:
+What is pinned is the side where a break raises no exception and **only the numbers drift
+quietly**:
 
-- 入力で受けたバケット表を層の表で引いたバイアスが、上流の `compute_bias` と**ビット一致**する
-  （表の向き `table[i][j] = bucket(j − i)` と式）
-- 活性を上流のままにしたラッパが上流の forward と f32 で**ビット一致**する（書き下しの同値）。
-  `gelu_new` → `nn.GELU(approximate="tanh")` の差し替えは丸めの差だけ
-- ラッパは入力の表を実際に使う（表を転置・1 ずらすと出力が大きく動く — 上の一致が恒真でない対）
-- exporter の i8 の既定の対象は相対位置の表を含む（調査 §1.2 の推測の確認）。ラッパの選択はそれを
-  外し、emit は F32 の明示が無いと落ちる（決定 5 の「F32 のままにする指定の形」）
-- S 形の export: 入力 2 本（i32）・記号 `L` 1 つ・RMSNorm が `rms_norm` に畳まれ・活性が
-  `gelu_tanh`・`pow` が残らない・表の格納は F32・golden が CPU で採れる
-- 「有効長だけ」と「512 + マスク」の一致（調査 §2.3 の再現 — 実モデルでの一致は段 10c の検収）
+- the bias looked up from the input bucket table through the layer's table is **bit-identical** to
+  the upstream `compute_bias` (the table orientation `table[i][j] = bucket(j − i)` and the formula)
+- the wrapper with the upstream activation left in place is **bit-identical** in f32 to the
+  upstream forward (the rewrite is equivalent). Replacing `gelu_new` → `nn.GELU(approximate="tanh")`
+  differs only by rounding
+- the wrapper really uses the input table (transposing the table or shifting it by 1 moves the
+  output a lot — the pair that keeps the match above from being tautological)
+- the exporter's default i8 targets include the relative-position tables (confirming the guess of
+  the investigation §1.2). The wrapper's selection removes them, and emit fails without the explicit
+  F32 (decision 5's "form that keeps them F32")
+- the S-form export: two inputs (i32), one symbol `L`, RMSNorm folded into `rms_norm`, the
+  activation `gelu_tanh`, no `pow` left, the tables stored as F32, the golden can be taken on CPU
+- "valid length only" matches "512 + mask" (reproducing the investigation §2.3 — the match on the
+  real model is the acceptance of step 10c)
 
-乱数初期化の小さな umT5（`wan.umt5_probe.TINY_CONFIG`）だけで回す — 実重みは読まない。
-transformers は `wan` グループにしか無いので、モデルを作る fixture の中で `importorskip` する。
+It runs only on a small randomly initialized umT5 (`wan.umt5_probe.TINY_CONFIG`) — no real weights
+are read. transformers exists only in the `wan` group, so the fixture that builds the model calls
+`importorskip`.
 """
 
 from __future__ import annotations
@@ -32,23 +39,27 @@ from karume.pipeline import publish_model
 from wan import umt5_patch as up
 from wan import umt5_probe as probe
 
-#: 層数（`TINY_CONFIG` — op の本数の期待はこれから導く）。
+#: The number of layers (`TINY_CONFIG` — the expected op counts derive from it).
 LAYERS = int(probe.TINY_CONFIG["num_layers"])
 D_MODEL = int(probe.TINY_CONFIG["d_model"])
 
-#: `gelu_new` を tanh 近似の `aten.gelu` へ差し替えた出力と上流の差の上限（比 = 最大絶対差 ÷
-#: 参照の最大絶対値）。実測（2026-10-03・`LENGTHS` の 8 本）の最悪は 3.93e-7（L = 511）で、その
-#: 約 5 倍。表の取り違え（下の故障注入）は 2.6e-2 以上で、5 桁離れている。
+#: The upper bound of the difference between the output with `gelu_new` replaced by the tanh
+#: approximation `aten.gelu` and the upstream (ratio = maximum absolute difference ÷ maximum
+#: absolute value of the reference). The worst measured (2026-10-03, the 8 lengths of `LENGTHS`)
+#: is 3.93e-7 (L = 511), and this is about 5 times that. A mixed-up table (the fault injection
+#: below) gives 2.6e-2 or more, five orders of magnitude away.
 TANH_RATIO_BOUND = 2e-6
 
-#: 「有効長だけ」と「512 + マスク」の f32 の差の上限（同じ比）。実測の最悪は 7.02e-7（L = 2 — 8 本中
-#: 6 本はビット一致・差は GEMM の縮約順）で、その約 5 倍。マスクを落とすと 1.1 以上。
+#: The upper bound of the f32 difference between "valid length only" and "512 + mask" (the same
+#: ratio). The worst measured is 7.02e-7 (L = 2 — 6 of the 8 are bit-identical; the difference is
+#: the GEMM reduction order), and this is about 5 times that. Dropping the mask gives 1.1 or more.
 MASK_F32_RATIO_BOUND = 3.5e-6
 
-#: 表の故障注入が少なくとも動かす比（実測の最小は転置の 2.6e-2〈L = 2〉）。
+#: The ratio the table fault injections move at least (the smallest measured is the transpose's
+#: 2.6e-2 at L = 2).
 FAULT_RATIO_FLOOR = 1e-2
 
-#: 計測の対象の長さ（下限・固定プロンプト・max_distance 越え・上限）。
+#: The lengths measured (the lower bound, the fixed prompt, beyond max_distance, the upper bound).
 LENGTHS = (2, 28, 126, 300, 512)
 
 
@@ -65,7 +76,8 @@ def attentions(model: Any) -> list[Any]:
 class TestRelativePositionBuckets:
     @pytest.mark.parametrize("length", [2, 9, 28, 130, 512])
     def test_gathered_table_is_upstream_compute_bias(self, model, length):
-        """全層で: 表を層の表で引いて `[1, heads, L, L]` へ回すと上流の `compute_bias` そのもの。"""
+        """In every layer: looking the table up through the layer's table and rotating it to
+        `[1, heads, L, L]` gives exactly the upstream `compute_bias`."""
         for attention in attentions(model):
             table = up.relative_position_buckets(length, attention)
             with torch.no_grad():
@@ -76,7 +88,8 @@ class TestRelativePositionBuckets:
             assert torch.equal(gathered, expected)
 
     def test_meta_attention_builds_the_same_table_as_the_model(self, model):
-        """重みを持たない上流のモジュール（fixture の生成に使う口）でも同じ表。"""
+        """The same table from the upstream module without weights (the entry point used to
+        generate the fixture)."""
         meta = up.bucket_attention(model.config)
 
         assert torch.equal(
@@ -86,7 +99,7 @@ class TestRelativePositionBuckets:
 
     @pytest.mark.parametrize("length", [0, 1, up.MAX_LENGTH + 1])
     def test_lengths_outside_the_graph_domain_are_rejected(self, model, length):
-        with pytest.raises(ValueError, match="の外"):
+        with pytest.raises(ValueError, match="is outside"):
             up.relative_position_buckets(length, attentions(model)[0])
 
     @pytest.mark.parametrize("length", [True, 28.0])
@@ -95,7 +108,8 @@ class TestRelativePositionBuckets:
             up.relative_position_buckets(length, attentions(model)[0])
 
     def test_decoder_config_is_rejected(self, model):
-        """片方向（デコーダ）のバケットは別の式 — 双方向だけを扱う。"""
+        """Unidirectional (decoder) buckets use another formula — only bidirectional ones are
+        handled."""
         decoder = copy.deepcopy(model.config)
         decoder.is_decoder = True
 
@@ -123,7 +137,8 @@ class TestWrapper:
             report = up.compare(wrapper(*inputs), up.valid_output(model, inputs[0]))
 
         assert report["ratio"] <= TANH_RATIO_BOUND
-        # 差し替えが実際に効いている（上流の活性のままなら 0 — 上の上限が恒真でないことの対）。
+        # The replacement really takes effect (0 with the upstream activation left in place — the
+        # pair that keeps the upper bound above from being tautological).
         assert report["differing"] > 0
 
     @pytest.mark.parametrize(
@@ -135,7 +150,8 @@ class TestWrapper:
     )
     @pytest.mark.parametrize("length", [2, 28, 512])
     def test_a_wrong_table_moves_the_output(self, model, length, fault):
-        """表は入力から実際に読まれる — 取り違えた表は丸めの桁を大きく越えて出力を動かす。"""
+        """The table is really read from the input — a mixed-up table moves the output far beyond
+        the rounding digits."""
         wrapper = up.Umt5EncoderTokens(model, activation="upstream")
         ids, table = probe.case_inputs(wrapper, length)
 
@@ -147,7 +163,7 @@ class TestWrapper:
     def test_training_mode_is_rejected(self, model):
         training = copy.deepcopy(model).train()
 
-        with pytest.raises(up.Umt5ConfigError, match="学習モード"):
+        with pytest.raises(up.Umt5ConfigError, match="training mode"):
             up.Umt5EncoderTokens(training)
 
     def test_non_f32_weights_are_rejected(self, model):
@@ -164,7 +180,8 @@ class TestWrapper:
 
 class TestQuantSelection:
     def test_default_targets_include_the_relative_bias_tables(self, model):
-        """exporter の i8 の既定（`QUANT_CHANNEL_AXES` の `nn.Embedding`）は表まで丸める。"""
+        """The exporter's default i8 (`nn.Embedding` in `QUANT_CHANNEL_AXES`) rounds the tables
+        too."""
         report = probe.quant_targets(model)
 
         assert report["relative_bias_tables"] == LAYERS
@@ -204,9 +221,11 @@ class TestQuantSelection:
 
 @pytest.fixture(scope="module")
 def exported(model, tmp_path_factory) -> tuple[dict[str, Any], Path]:
-    """下見の export を容器と golden のファイルまで書く（読み直しの検証は `publish_model` の中）。
+    """Write the preview export through to the container and golden files (the read-back
+    verification is inside `publish_model`).
 
-    容器を書く口はここだけ — 台本側が `graph_name=` を名乗らない理由は `probe.export_probe`。
+    This is the only place that writes a container — why the script side does not state
+    `graph_name=` is explained in `probe.export_probe`.
     """
     export = probe.export_probe(model)
     out_dir = tmp_path_factory.mktemp("umt5") / probe.TARGET
@@ -238,9 +257,10 @@ class TestExport:
         assert summary["outputs"] == [[1, "L", D_MODEL]]
 
     def test_ops_take_the_decomposed_attention_path(self, exported):
-        """RMSNorm は `rms_norm` に畳まれ、活性は `gelu_tanh`。
+        """RMSNorm is folded into `rms_norm`, and the activation is `gelu_tanh`.
 
-        attention は融合 op に乗らず bmm → add → softmax → bmm の分解経路。
+        attention does not land on a fused op and takes the decomposed path bmm → add → softmax →
+        bmm.
         """
         ops = exported[0]["ops"]
 
@@ -289,14 +309,16 @@ class TestMaskEquivalence:
         assert max(row["ratio"] for row in rows) <= MASK_F32_RATIO_BOUND
 
     def test_bf16_is_bit_exact(self, model):
-        """調査 §2.3 の観察（4 層・乱数初期化で 7 本ともビット一致）の再現。"""
+        """Reproduces the observation of the investigation §2.3 (4 layers, random initialization,
+        all 7 bit-identical)."""
         rows = probe.mask_equivalence(model, torch.bfloat16, LENGTHS)
 
         assert [row["length"] for row in rows if not row["bit_exact"]] == []
 
     @pytest.mark.parametrize("length", [2, 28, 300])
     def test_padding_without_the_mask_is_far_off(self, model, length):
-        """マスクを落とした詰め方は大きく割れる（上の一致が恒真でないことの対）。"""
+        """Packing with the mask dropped splits a lot (the pair that keeps the match above from
+        being tautological)."""
         ids = probe.tiny_ids(length)
         padded = torch.zeros((1, up.MAX_LENGTH), dtype=torch.long)
         padded[:, :length] = ids

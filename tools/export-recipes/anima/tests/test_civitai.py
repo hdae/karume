@@ -1,9 +1,11 @@
-"""civitai 取り込み（`anima.civitai`）— 指定のパース・命名・sha 突合・記録の形。
+"""The civitai intake (`anima.civitai`) — parsing the target, naming, the sha comparison and the
+shape of the record.
 
-ネットワークへは出ない（`urllib.request.urlopen` を差し替える）。応答は実物
-（`GET /api/v1/model-versions/2983680` と `GET /api/v1/models/2544636` の 2026-09-01 実測）から
-要点だけ残して縮めたもので、**本体 4GB は数十バイトの偽物で足りる** — ここで観測したいのは
-バイト列の中身ではなく、sha が合わない限り完成品の名前へ据えないことだから。
+Nothing goes to the network (`urllib.request.urlopen` is replaced). The responses are cut down to
+the essentials from the real ones (`GET /api/v1/model-versions/2983680` and
+`GET /api/v1/models/2544636`, measured 2026-09-01), and **a fake of a few dozen bytes is enough for
+the 4GB body** — what this observes is not the contents of the bytes but that nothing is put under
+the finished name unless the sha matches.
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ import pytest
 
 from anima import civitai
 
-#: 本体の偽バイト列と、API が返す綴り（大文字 — 突合が casefold しているかを見る）。
+#: The fake bytes of the body, and the spelling the API returns (upper case — checks that the
+#: comparison casefolds).
 FILE_BODY = b"weights-of-the-checkpoint"
 FILE_SHA256 = hashlib.sha256(FILE_BODY).hexdigest()
 
@@ -89,7 +92,8 @@ MODEL_RESPONSE = {
 
 
 class _FakeResponse:
-    """`urlopen` が返すものの最小形（`with` で使えて `read(size)` で刻める）。"""
+    """The minimal form of what `urlopen` returns (usable with `with`, readable in pieces with
+    `read(size)`)."""
 
     def __init__(self, payload: bytes) -> None:
         self._buffer = io.BytesIO(payload)
@@ -105,7 +109,8 @@ class _FakeResponse:
 
 
 class _FakeNetwork:
-    """URL の前置 → 本文。呼ばれた URL を覚える（**呼ばれない**ことも観測したい）。"""
+    """URL prefix → body. Records the URLs called (we also want to observe that **no call**
+    happens)."""
 
     def __init__(self, bodies: dict[str, bytes]) -> None:
         self.bodies = bodies
@@ -117,7 +122,7 @@ class _FakeNetwork:
         for prefix, body in self.bodies.items():
             if url.startswith(prefix):
                 return _FakeResponse(body)
-        raise AssertionError(f"想定外の GET: {url}")
+        raise AssertionError(f"unexpected GET: {url}")
 
 
 @pytest.fixture
@@ -139,7 +144,7 @@ def token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestParseAir:
-    """AIR は「どの版か」まで含んだ 1 語 — 曖昧なものは受けない。"""
+    """An AIR is one word that includes "which version" — nothing ambiguous is accepted."""
 
     def test_it_reads_ecosystem_type_and_ids(self) -> None:
         air = civitai.parse_air("urn:air:anima:checkpoint:civitai:2544636@2983680")
@@ -148,18 +153,20 @@ class TestParseAir:
         assert (air.model_id, air.version_id) == (2544636, 2983680)
 
     def test_it_rebuilds_the_urn_for_comparison(self) -> None:
-        """API 発行値との突合に使うので、読んだものから元の綴りへ戻せる。"""
+        """It is compared with the value the API issues, so what was read can be turned back into
+        the original spelling."""
         text = "urn:air:anima:checkpoint:civitai:2544636@2983680"
 
         assert civitai.parse_air(text).urn == text
 
     def test_it_refuses_an_air_without_a_version(self) -> None:
-        """版が無いと「最新」を勝手に選ぶことになる（上流は順序の付かない系統を同時に配る）。"""
-        with pytest.raises(SystemExit, match="版まで指定する"):
+        """Without a version, "the latest" would be picked arbitrarily (upstream ships unordered
+        lines side by side)."""
+        with pytest.raises(SystemExit, match="Specify the version too"):
             civitai.parse_air("urn:air:anima:checkpoint:civitai:2544636")
 
     def test_it_refuses_a_source_other_than_civitai(self) -> None:
-        with pytest.raises(SystemExit, match="civitai 以外の source"):
+        with pytest.raises(SystemExit, match="A source other than civitai"):
             civitai.parse_air("urn:air:anima:checkpoint:huggingface:2544636@2983680")
 
     @pytest.mark.parametrize(
@@ -172,12 +179,13 @@ class TestParseAir:
         ],
     )
     def test_it_refuses_a_malformed_air(self, text: str) -> None:
-        with pytest.raises(SystemExit, match="AIR として読めない"):
+        with pytest.raises(SystemExit, match="Cannot be read as an AIR"):
             civitai.parse_air(text)
 
 
 class TestParseUrl:
-    """モデルページの URL は版を持つとは限らない（持たない形は案内モードへ回る）。"""
+    """A model page URL does not always carry a version (the form without one goes to guidance
+    mode)."""
 
     def test_it_reads_the_version_from_the_query(self) -> None:
         target = civitai.parse_url(
@@ -204,20 +212,21 @@ class TestParseUrl:
         assert civitai.parse_url(text).model_id == 2544636
 
     def test_it_refuses_another_host(self) -> None:
-        with pytest.raises(SystemExit, match=r"civitai\.com の URL ではない"):
+        with pytest.raises(SystemExit, match=r"Not a civitai\.com URL"):
             civitai.parse_url("https://example.com/models/2544636")
 
     def test_it_refuses_a_page_that_is_not_a_model(self) -> None:
-        with pytest.raises(SystemExit, match="モデルページの URL として読めない"):
+        with pytest.raises(SystemExit, match="Cannot be read as a model page URL"):
             civitai.parse_url("https://civitai.com/user/WAI0731")
 
     def test_it_refuses_a_non_numeric_version(self) -> None:
-        with pytest.raises(SystemExit, match="modelVersionId が数値でない"):
+        with pytest.raises(SystemExit, match="modelVersionId is not a number"):
             civitai.parse_url("https://civitai.com/models/2544636?modelVersionId=latest")
 
 
 class TestDeriveModelName:
-    """配布名は上流の名乗りから機械で導く（ADR 0077 — 版表記そのものは正規化しない）。"""
+    """The distribution name is derived mechanically from upstream's own naming (ADR 0077 — the
+    version notation itself is not normalized)."""
 
     @pytest.mark.parametrize(
         ("model_name", "version_name", "expected"),
@@ -233,7 +242,8 @@ class TestDeriveModelName:
         assert civitai.derive_model_name(model_name, version_name) == expected
 
     def test_it_drops_a_parenthesised_note_from_the_version(self) -> None:
-        """丸括弧の中は上流ページ上の但し書きで、版の識別には要らない。"""
+        """The parenthesized part is a note on the upstream page and is not needed to identify the
+        version."""
         assert civitai.derive_model_name("Foo", "v2 (fp16 pruned)") == "anima-foo-v2"
 
     def test_it_squeezes_separators_instead_of_stacking_them(self) -> None:
@@ -246,44 +256,50 @@ class TestDeriveModelName:
     def test_it_refuses_when_a_half_comes_out_empty(
         self, model_name: str, version_name: str
     ) -> None:
-        """ファミリ名だけのモデル名や括弧だけの版名は、名前を導く材料になっていない。"""
-        with pytest.raises(SystemExit, match="名前を導けない"):
+        """A model name that is only the family name, or a version name that is only parentheses,
+        gives nothing to derive a name from."""
+        with pytest.raises(SystemExit, match="Cannot derive a name"):
             civitai.derive_model_name(model_name, version_name)
 
     def test_it_refuses_a_name_outside_the_accepted_set(self) -> None:
-        with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
+        with pytest.raises(SystemExit, match="has characters that are not allowed"):
             civitai._assert_name("anima-wai v1.0")
 
     @pytest.mark.parametrize("name", [".hidden", "..", ".x"])
     def test_it_refuses_a_leading_dot(self, name: str) -> None:
-        """`--name` の受理集合は `karume.dist` と同じ — 先頭のドットは組み立て段で落ちる綴り。
+        """The accepted set of `--name` is the same as `karume.dist`'s — a leading dot is a spelling
+        the build step rejects.
 
-        ここが広いと、誤った `--name` は `civitai.json` と「次に叩くコマンド」の案内まで
-        載ってから、数十分後の `karume dist` で初めて落ちる。
+        If this were wider, a wrong `--name` would make it into `civitai.json` and the "command to
+        run next" guidance, and fail only in `karume dist` tens of minutes later.
         """
-        with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
+        with pytest.raises(SystemExit, match="has characters that are not allowed"):
             civitai._assert_name(name)
 
     def test_it_refuses_a_trailing_newline(self) -> None:
-        """Python の `$` は末尾の改行の直前でも一致する — 正本の `MODEL_NAME_RE` と同じく拒む。"""
-        with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
+        """Python's `$` also matches right before a trailing newline — rejected, like the source of
+        truth `MODEL_NAME_RE`."""
+        with pytest.raises(SystemExit, match="has characters that are not allowed"):
             civitai._assert_name("anima-wai\n")
 
     def test_it_refuses_the_shared_seat(self) -> None:
-        """`shared` は配布リポの共有ファイルの席（`karume.dist` の `SHARED_DIRNAME`）。"""
-        with pytest.raises(SystemExit, match="共有ファイルの席と衝突する"):
+        """`shared` is the location of the distribution repository's shared files (`SHARED_DIRNAME`
+        of `karume.dist`)."""
+        with pytest.raises(SystemExit, match="collides with the"):
             civitai._assert_name("shared")
 
     def test_it_gates_the_derived_name_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """正規化が上流の綴りを取りこぼしても、受理集合の門は最後に効く。"""
+        """Even if the normalization misses some upstream spelling, the accepted-set check applies
+        last."""
         monkeypatch.setattr(civitai, "_slug", lambda text: "wai v1.0")
 
-        with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
+        with pytest.raises(SystemExit, match="has characters that are not allowed"):
             civitai.derive_model_name("WAI-ANIMA", "v1.0")
 
 
 class TestAssertBasename:
-    """API が返したファイル名は取り込み先の 1 段下に閉じ込める（結合規則で外へ出さない）。"""
+    """A file name returned by the API is confined to one level below the intake directory (the
+    path-join rules must not take it outside)."""
 
     @pytest.mark.parametrize(
         "name",
@@ -298,17 +314,18 @@ class TestAssertBasename:
         ],
     )
     def test_it_refuses_a_name_that_is_not_a_basename(self, name: str) -> None:
-        with pytest.raises(SystemExit, match="basename でない"):
+        with pytest.raises(SystemExit, match="is not a basename"):
             civitai._assert_basename(name)
 
     @pytest.mark.parametrize("name", ["D:x.safetensors", "C:weights.safetensors"])
     def test_it_refuses_a_windows_drive_relative_name(self, name: str) -> None:
-        """`D:x` は区切りを 1 つも含まないのに Windows ではドライブ相対名。
+        """`D:x` contains no separator, yet on Windows it is a drive-relative name.
 
-        `PureWindowsPath("C:/intake/civitai-123") / "D:x"` は `D:x` になり、結合の前段が
-        丸ごと捨てられる（別ドライブの作業ディレクトリ直下へ 4GB が落ちる）。
+        `PureWindowsPath("C:/intake/civitai-123") / "D:x"` becomes `D:x`, and the leading part of
+        the join is discarded entirely (4GB lands directly in the working directory of another
+        drive).
         """
-        with pytest.raises(SystemExit, match="basename でない"):
+        with pytest.raises(SystemExit, match="is not a basename"):
             civitai._assert_basename(name)
 
     def test_it_passes_an_ordinary_upstream_name_through(self) -> None:
@@ -318,7 +335,7 @@ class TestAssertBasename:
 
 
 class TestSelectFile:
-    """同梱の Text Encoder / VAE は取らない（base 側を共有する）。"""
+    """The bundled Text Encoder / VAE are not taken (base's are shared)."""
 
     def test_it_picks_the_primary_file(self) -> None:
         chosen = civitai.select_file(VERSION_RESPONSE["files"])
@@ -331,7 +348,7 @@ class TestSelectFile:
         assert civitai.select_file(files)["name"] == "a.safetensors"
 
     def test_it_ignores_a_primary_that_is_not_a_model_file(self) -> None:
-        """primary = Model 型という同一視は上流が保証しない（ADR 0088 追記）。"""
+        """Upstream does not guarantee that primary = the Model type (ADR 0088 addendum)."""
         files = [
             {"name": "vae.safetensors", "type": "VAE", "primary": True},
             {"name": "body.safetensors", "type": "Model", "primary": False},
@@ -342,7 +359,7 @@ class TestSelectFile:
     def test_it_stops_when_no_model_file_is_present(self) -> None:
         files = [{"name": "vae.safetensors", "type": "VAE", "primary": True}]
 
-        with pytest.raises(SystemExit, match="本体のファイルを特定できない"):
+        with pytest.raises(SystemExit, match="Cannot identify the main file"):
             civitai.select_file(files)
 
     def test_it_stops_when_the_body_cannot_be_told_apart(self) -> None:
@@ -351,12 +368,13 @@ class TestSelectFile:
             {"name": "b.safetensors", "type": "Model"},
         ]
 
-        with pytest.raises(SystemExit, match="本体のファイルを特定できない"):
+        with pytest.raises(SystemExit, match="Cannot identify the main file"):
             civitai.select_file(files)
 
 
 class TestDownload:
-    """完成品の名前へ据えるのは sha が合ってから（途中で切れた物を取得済みと読まない）。"""
+    """The file goes under the finished name only once the sha matches (a truncated download is not
+    read as fetched)."""
 
     def test_it_writes_the_file_when_the_hash_matches(
         self, tmp_path: Path, network: _FakeNetwork, token: None
@@ -371,10 +389,11 @@ class TestDownload:
     def test_it_keeps_the_part_file_when_the_hash_differs(
         self, tmp_path: Path, network: _FakeNetwork, token: None
     ) -> None:
-        """落ちたバイト列は残す — 上流が差し替えたのか壊れたのかは人が見て決める。"""
+        """The downloaded bytes are kept — a person decides whether upstream replaced the file or it
+        broke."""
         dest = tmp_path / "waiANIMA_v10Base10.safetensors"
 
-        with pytest.raises(SystemExit, match="sha256 が API の値と違う"):
+        with pytest.raises(SystemExit, match="sha256 differs from the API's value"):
             civitai.download(DOWNLOAD_URL, dest, "0" * 64)
 
         assert not dest.exists()
@@ -393,7 +412,7 @@ class TestDownload:
     def test_it_skips_a_file_that_is_already_there(
         self, tmp_path: Path, network: _FakeNetwork, token: None
     ) -> None:
-        """再実行で 4GB を取り直さない（sha 一致が「取得済み」の定義）。"""
+        """A rerun does not fetch the 4GB again (a matching sha is the definition of "fetched")."""
         dest = tmp_path / "weights.safetensors"
         dest.write_bytes(FILE_BODY)
 
@@ -407,7 +426,7 @@ class TestDownload:
         dest = tmp_path / "weights.safetensors"
         dest.write_bytes(b"something else")
 
-        with pytest.raises(SystemExit, match="同名で別物が置かれている"):
+        with pytest.raises(SystemExit, match="A different file is in place under the same name"):
             civitai.download(DOWNLOAD_URL, dest, FILE_SHA256)
 
         assert network.calls == []
@@ -424,7 +443,8 @@ class TestDownload:
 
 
 class TestResolveAir:
-    """AIR は API 発行値が正 — 自前組み立てと食い違ったら、その旨を出してから API 側を採る。"""
+    """The value the API issues is the source of truth for the AIR — if it disagrees with the one
+    we built, say so, then take the API's."""
 
     def test_it_reports_a_disagreement_and_takes_the_served_value(
         self, capsys: pytest.CaptureFixture[str]
@@ -434,7 +454,7 @@ class TestResolveAir:
         resolved = civitai._resolve_air(VERSION_RESPONSE, requested)
 
         assert resolved == VERSION_RESPONSE["air"]
-        assert "警告: AIR が指定と違う" in capsys.readouterr().out
+        assert "warning: the AIR differs from the requested one" in capsys.readouterr().out
 
     def test_it_falls_back_to_the_requested_urn_when_the_api_has_none(self) -> None:
         requested = civitai.parse_air("urn:air:anima:checkpoint:civitai:2544636@2983680")
@@ -443,7 +463,7 @@ class TestResolveAir:
 
 
 class TestFetchCheckpoint:
-    """取り込み 1 回分 — 本体 1 本と `civitai.json` だけを置く。"""
+    """One intake — places only the one body file and `civitai.json`."""
 
     @pytest.fixture
     def taken(self, tmp_path: Path, network: _FakeNetwork, token: None) -> Path:
@@ -456,7 +476,7 @@ class TestFetchCheckpoint:
         assert taken.read_bytes() == FILE_BODY
 
     def test_it_leaves_only_the_body_and_the_record(self, tmp_path: Path, taken: Path) -> None:
-        """同梱の Text Encoder / VAE は base 側を共有するので取らない。"""
+        """The bundled Text Encoder / VAE are not taken, since base's are shared."""
         assert sorted(path.name for path in taken.parent.iterdir()) == [
             "civitai.json",
             "waiANIMA_v10Base10.safetensors",
@@ -490,7 +510,8 @@ class TestFetchCheckpoint:
         assert record["descriptions"] == {"model": "<p>WAI-ANIMA</p>", "version": None}
 
     def test_it_records_the_hash_in_lower_case(self, taken: Path) -> None:
-        """突合も配布カードも小文字で書く（API は大文字で返す）。"""
+        """Both the comparison and the distribution card use lower case (the API returns upper
+        case)."""
         record = json.loads((taken.parent / civitai.PROVENANCE_FILE).read_text(encoding="utf-8"))
 
         assert record["file"]["sha256"] == FILE_SHA256
@@ -517,7 +538,8 @@ class TestFetchCheckpoint:
     def test_it_refuses_a_file_name_that_escapes_the_version_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: None
     ) -> None:
-        """逸脱名は結合の前に落ちる — 重みだけが取り込み先の外へ出る形を作らない。"""
+        """An escaping name fails before the join — the weights alone must not end up outside the
+        intake directory."""
         escaping = json.loads(json.dumps(VERSION_RESPONSE))
         for entry in escaping["files"]:
             if entry["primary"]:
@@ -530,7 +552,7 @@ class TestFetchCheckpoint:
         )
         monkeypatch.setattr(urllib.request, "urlopen", fake)
 
-        with pytest.raises(SystemExit, match="basename でない"):
+        with pytest.raises(SystemExit, match="is not a basename"):
             civitai.fetch_checkpoint(2544636, 2983680, out=tmp_path)
 
         assert sorted(path.name for path in tmp_path.rglob("*")) == ["civitai-2983680"]
@@ -538,10 +560,12 @@ class TestFetchCheckpoint:
     def test_it_refuses_a_version_id_that_is_not_an_integer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: None
     ) -> None:
-        """取り込み先の 1 段目も上流の値 — 逸脱した id では `out` の外に何も作らない。
+        """The first level of the intake directory is an upstream value too — an escaping id creates
+        nothing outside `out`.
 
-        `mkdir(parents=True)` は途中の `..` ごと親を作るので、素通しだと重みと `civitai.json`
-        の両方が `out` の外（ここでは `tmp_path` 直下）へ落ちる。
+        `mkdir(parents=True)` creates the parents including any `..` on the way, so letting it
+        through would put both the weights and `civitai.json` outside `out` (here, directly under
+        `tmp_path`).
         """
         escaping = json.loads(json.dumps(VERSION_RESPONSE))
         escaping["id"] = "/../../escape"
@@ -569,7 +593,8 @@ class TestFetchCheckpoint:
 
 
 class TestGuidanceMode:
-    """版を選ばずに来たときは、選び直す材料だけ出して何も落とさない。"""
+    """When no version was chosen, it prints only what is needed to choose again and downloads
+    nothing."""
 
     def test_it_lists_the_versions_and_downloads_nothing(
         self,

@@ -1,22 +1,31 @@
-"""`irodori/export.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contracts of `irodori/export.py` (the part that needs no real weights).
 
-実重みの emit は手動（既存 `deberta/export.py` / `embeddinggemma/export.py` のテストと同じ
-規律）。ここで固定するのは、壊れると**偽 PASS** になる側の規律だけ:
+Emitting from the real weights is manual (the same discipline as the tests of the existing
+`deberta/export.py` / `embeddinggemma/export.py`). Pinned here is only the discipline whose
+breakage would give a **false pass**:
 
-- 参照（golden の期待値）は**パッチ前**にしか採れない（採れてしまうと同値検証が恒真化する）
-- 静的方式（実行時 attention_mask 非対応）の実測が、方式が崩れたときに実際に落ちる
-- text / caption projector の取り違え（同じ重みを 2 回読む）が `_sanity` で落ちる
-- `_write_io` が IR の入力名と食い違う io を書かない / 出力の本数がずれた io を書かない
-- `caption-proj` の第 2 出力が `caption_norm` を掛けた系列であり、第 1 出力は素の projector 出力
-  のまま（`text-proj` と同じ式）であること
-- `text_norm` / `caption_norm` の取り違え（同じ重みを 2 回読む）が `_norm_divergence` で落ちる
-- 参照なし（マスク全 0）の speaker 出力が**厳密に 0** であることの実測が、0 でなければ落ちる
-- 実 latent 由来の speaker ケースが、資産の欠け・形の食い違いで**合成に化けずに**落ちる
-- `duration` の `aux_features` 非依存の実測が、依存していたら落ちる
-- `dit` の cond / uncond 3 変種が**互いに違う**ことの実測が、同じなら落ちる
-- 条件 state の右 pad が宣言長を超えたら落ちる
-- DiT を `dit-context` / `dit` に割った対（ADR 0114）が、上流 `forward_with_encoded_conditions`
-  と**ビット一致**し、2 本の所有が「条件側の射影 / 残り」に割れ、IR の境界名が契約の綴りになる
+- The reference (the golden's expectation) can only be taken **before patching** (if it could be
+  taken after, the equivalence check would become tautological)
+- The check of the static scheme (no runtime attention_mask) really fails when the scheme breaks
+- Mixing up the text / caption projectors (reading the same weights twice) fails in `_sanity`
+- `_write_io` writes no io that disagrees with the IR's input names / no io with a different
+  number of outputs
+- The second output of `caption-proj` is the sequence with `caption_norm` applied, and the
+  first output stays the plain projector output (the same formula as `text-proj`)
+- Mixing up `text_norm` / `caption_norm` (reading the same weights twice) fails in
+  `_norm_divergence`
+- The check that the speaker output without a reference (mask all 0) is **exactly 0** fails when
+  it is not 0
+- The speaker cases from the real latent fail on a missing asset or a shape mismatch **instead
+  of turning into synthetic ones**
+- The check that `duration` does not depend on `aux_features` fails if it does
+- The check that the cond / three uncond variants of `dit` **differ from each other** fails when
+  they are the same
+- Right-padding a condition state beyond its declared length fails
+- The pair from splitting the DiT into `dit-context` / `dit` (ADR 0114) is **bit-identical** to
+  upstream's `forward_with_encoded_conditions`, the two split ownership into "the
+  condition-side projections / the rest", and the IR's boundary names follow the contract's
+  spelling
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ from karume.ir import IrGraph, IrInput, IrNode, IrValue
 from karume.pipeline import export_to_file, publish_model
 from karume.quantize import quantize_to_int8
 
-#: `_static_scheme_evidence` / `build_cases` が読む config の最小形。
+#: A minimal config of what `_static_scheme_evidence` / `build_cases` read.
 TEXT_CONFIG = {"pad_token_id": 3, "bos_token_id": 1}
 MODEL_CONFIG = {"max_text_len": 16, "max_caption_len": 32}
 
@@ -50,10 +59,12 @@ CASES = (
 
 
 class MaskRespectingBackbone(nn.Module):
-    """pad を**正しく無視する** backbone の代役（静的方式が成立する側）。
+    """A backbone stand-in that **correctly ignores** padding (the side where the static scheme
+    holds).
 
-    出力は「マスクされた位置を 0 にした埋め込み」だけで決まるので、pad を足しても先頭 T 行は
-    変わらない — 実物の双方向マスクが持つ性質と同じ。
+    The output depends only on "the embedding with the masked positions set to 0", so adding
+    padding leaves the first T rows unchanged — the same property the real bidirectional mask
+    has.
     """
 
     def forward(self, input_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -62,7 +73,8 @@ class MaskRespectingBackbone(nn.Module):
 
 
 class PadLeakingBackbone(nn.Module):
-    """pad の**本数が出力に漏れる** backbone の代役（静的方式が成立しない側の故障注入）。"""
+    """A backbone stand-in where **the amount of padding leaks into the output** (fault injection
+    for the side where the static scheme fails)."""
 
     def forward(self, input_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         base = MaskRespectingBackbone()(input_ids, mask)
@@ -70,7 +82,8 @@ class PadLeakingBackbone(nn.Module):
 
 
 class ScalingNorm(nn.Module):
-    """`caption_norm` の代役（定数倍 — 掛かったかどうかが値で判る）。"""
+    """A stand-in for `caption_norm` (a constant factor — the value shows whether it was
+    applied)."""
 
     def __init__(self, scale: float) -> None:
         super().__init__()
@@ -81,7 +94,8 @@ class ScalingNorm(nn.Module):
 
 
 class DoublingProjector(nn.Module):
-    """`_pristine_outputs` が呼ぶ実 projector の代役（`(backbone, ids, mask)` を受ける形）。"""
+    """A stand-in for the real projector `_pristine_outputs` calls (it takes
+    `(backbone, ids, mask)`)."""
 
     def __init__(self, gain: float) -> None:
         super().__init__()
@@ -92,12 +106,15 @@ class DoublingProjector(nn.Module):
 
 
 class TestPristineReferenceOrdering:
-    """MUST: 参照はパッチ前にしか採れない（採れると同値検証が恒真化して偽 PASS になる）。"""
+    """MUST: the reference can only be taken before patching (otherwise the equivalence check
+    becomes tautological and gives a false pass)."""
 
     def test_taking_a_reference_after_patching_fails_loudly(self, monkeypatch):
         monkeypatch.setattr(patch_irodori, "_APPLIED", True)
 
-        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+        with pytest.raises(
+            AssertionError, match="Tried to take a reference after the patches were applied"
+        ):
             ir._pristine_outputs(MaskRespectingBackbone(), {}, ScalingNorm(2.0), CASES)
 
     def test_taking_a_reference_before_patching_is_allowed(self, monkeypatch):
@@ -109,7 +126,8 @@ class TestPristineReferenceOrdering:
         assert tuple(outputs[ir.TARGET_BACKBONE]["short"][0].shape) == (1, 3, 4)
 
     def test_only_the_caption_projector_gets_a_second_output(self, monkeypatch):
-        """MUST: 第 2 出力は caption 側だけ（text 側に生えたら `duration` の鎖が変わる）。"""
+        """MUST: only the caption side gets a second output (one on the text side would change
+        the `duration` chain)."""
         monkeypatch.setattr(patch_irodori, "_APPLIED", False)
         projectors = {
             ir.TARGET_TEXT_PROJ: DoublingProjector(1.0),
@@ -123,19 +141,21 @@ class TestPristineReferenceOrdering:
         assert len(outputs[ir.TARGET_TEXT_PROJ]["short"]) == 1
         caption = outputs[ir.TARGET_CAPTION_PROJ]["short"]
         assert len(caption) == 2
-        # 第 2 出力 = norm(第 1 出力)。第 1 出力そのものは norm 前のまま。
+        # Second output = norm(first output). The first output itself stays before the norm.
         assert torch.equal(caption[1], caption[0] * 2.0)
 
 
 def _backbone_first(backbone: nn.Module, cases) -> dict[str, torch.Tensor]:
-    """`_pristine_outputs` の backbone 側から第 1 出力だけを取り出す（鎖の下流が食う形）。"""
+    """Take only the first output from the backbone side of `_pristine_outputs` (the form the
+    downstream of the chain consumes)."""
     return ir._first(
         ir._pristine_outputs(backbone, {}, ScalingNorm(2.0), cases)[ir.TARGET_BACKBONE]
     )
 
 
 class TestStaticSchemeEvidence:
-    """静的方式（右詰め pad をホストで消す）の実測が、恒真でないことを確かめる。"""
+    """Checks that the check of the static scheme (the host removes the right padding) is not
+    tautological."""
 
     def test_a_mask_respecting_backbone_measures_zero(self, monkeypatch):
         monkeypatch.setattr(patch_irodori, "_APPLIED", False)
@@ -147,12 +167,13 @@ class TestStaticSchemeEvidence:
         assert evidence == {"short": 0.0, "cap": 0.0}
 
     def test_a_pad_leaking_backbone_fails_loudly(self, monkeypatch):
-        """MUST: 方式が崩れていたら落ちる — 回避せずに止めるための門。"""
+        """MUST: fails when the scheme is broken — a check that stops instead of working around
+        it."""
         monkeypatch.setattr(patch_irodori, "_APPLIED", False)
         backbone = PadLeakingBackbone()
         pristine = _backbone_first(backbone, CASES)
 
-        with pytest.raises(AssertionError, match="静的方式"):
+        with pytest.raises(AssertionError, match="the static scheme"):
             ir._static_scheme_evidence(backbone, TEXT_CONFIG, MODEL_CONFIG, CASES, pristine)
 
     def test_a_case_longer_than_its_family_cap_fails_loudly(self, monkeypatch):
@@ -161,12 +182,13 @@ class TestStaticSchemeEvidence:
         backbone = MaskRespectingBackbone()
         pristine = _backbone_first(backbone, long_case)
 
-        with pytest.raises(SystemExit, match="上限"):
+        with pytest.raises(SystemExit, match="upper bound"):
             ir._static_scheme_evidence(backbone, TEXT_CONFIG, MODEL_CONFIG, long_case, pristine)
 
 
 class MaskZeroingEncoder(nn.Module):
-    """マスクされた位置を**厳密に 0** にする参照エンコーダの代役（実物と同じ性質）。"""
+    """A stand-in for the reference encoder that sets masked positions to **exactly 0** (the same
+    property as the real one)."""
 
     def forward(self, latent: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         hidden = latent.sum(dim=-1, keepdim=True).expand(-1, -1, 3) + 1.0
@@ -174,32 +196,35 @@ class MaskZeroingEncoder(nn.Module):
 
 
 class MaskLeakingEncoder(nn.Module):
-    """マスク全 0 でも非ゼロを返す代役（故障注入 — ホストのゼロ供給が成立しない側）。"""
+    """A stand-in that returns non-zero even with an all-zero mask (fault injection — the side
+    where the host's zero input does not hold)."""
 
     def forward(self, latent: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         return MaskZeroingEncoder()(latent, mask) + 1e-3
 
 
 class TestNoReferenceEvidence:
-    """MUST: 「参照なしは 0」を主張のままにしない（ホストのゼロ供給の唯一の根拠）。"""
+    """MUST: do not leave "no reference gives 0" as a claim (the only basis for the host's zero
+    input)."""
 
     def test_a_mask_zeroing_encoder_measures_zero(self):
         assert ir._no_reference_evidence(MaskZeroingEncoder(), 4, 4) == 0.0
 
     def test_a_leaking_encoder_fails_loudly(self):
-        with pytest.raises(AssertionError, match="参照なし"):
+        with pytest.raises(AssertionError, match="without a reference"):
             ir._no_reference_evidence(MaskLeakingEncoder(), 4, 4)
 
 
 class AuxReadingPredictor(nn.Module):
-    """`aux_features` を読む duration の代役（故障注入）。"""
+    """A duration stand-in that reads `aux_features` (fault injection)."""
 
     def forward(self, text_state: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
         return text_state.sum(dim=(1, 2)) + kwargs["aux_features"].sum(dim=1)
 
 
 class AuxIgnoringPredictor(nn.Module):
-    """`aux_features` を読まない duration の代役（token-sum 形と同じ性質）。"""
+    """A duration stand-in that does not read `aux_features` (the same property as the token-sum
+    form)."""
 
     def forward(self, text_state: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
         return text_state.sum(dim=(1, 2))
@@ -220,7 +245,7 @@ DURATION_REFERENCE = {
 
 
 class TestDurationAuxInertness:
-    """MUST: `aux_features` をグラフ入力から落とす根拠を実測で持つ。"""
+    """MUST: dropping `aux_features` from the graph inputs is backed by a check."""
 
     def test_an_aux_ignoring_predictor_measures_zero(self, monkeypatch):
         monkeypatch.setattr(patch_irodori, "_APPLIED", False)
@@ -240,7 +265,9 @@ class TestDurationAuxInertness:
     def test_taking_a_reference_after_patching_fails_loudly(self, monkeypatch):
         monkeypatch.setattr(patch_irodori, "_APPLIED", True)
 
-        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+        with pytest.raises(
+            AssertionError, match="Tried to take a reference after the patches were applied"
+        ):
             ir._pristine_duration_outputs(AuxIgnoringPredictor(), DURATION_REFERENCE, 4)
 
 
@@ -254,16 +281,18 @@ class TestSpeakerCases:
             assert torch.equal(lhs, rhs)
 
     def test_a_case_over_the_symbolic_cap_fails_loudly(self):
-        with pytest.raises(SystemExit, match="記号次元の範囲"):
+        with pytest.raises(SystemExit, match="outside the symbolic dimension's range"):
             ir.build_speaker_cases(4, 8)
 
 
 def _fake_patch(seq, mask, patch_size):
-    """`patch_sequence_with_mask` の代役（端を捨てて `patch_size` 本ずつ束ねる）。
+    """A stand-in for `patch_sequence_with_mask` (drops the remainder and groups `patch_size`
+    rows at a time).
 
-    実物は上流実装から注入される（`IrodoriSource.patch_sequence_with_mask`）ので、ここで
-    見るのは **`build_real_speaker_cases` 自身の振る舞い**だけ — 束ね方の正しさは上流の責任で、
-    代役で写しても意味が無い。
+    The real one is injected from the upstream implementation
+    (`IrodoriSource.patch_sequence_with_mask`), so all this looks at is **the behavior of
+    `build_real_speaker_cases` itself** — the correctness of the grouping is upstream's
+    responsibility, and copying it into a stand-in would mean nothing.
     """
     usable = (seq.shape[1] // patch_size) * patch_size
     bundles = usable // patch_size
@@ -279,10 +308,12 @@ def _write_reference_latent(latent_dir: Path, latent: torch.Tensor) -> None:
 
 
 class TestRealSpeakerCases:
-    """MUST: 実 latent 由来のケースは**合成で代替しない**（tolerance の根拠が値域に立つ）。"""
+    """MUST: the cases from the real latent are **not replaced by synthetic ones** (the tolerance
+    rests on the value range)."""
 
     def test_the_cases_follow_the_table_and_share_one_prefix(self, tmp_path):
-        # 190 フレーム（参照音声 7.6 秒）→ patch 4 で 47 行、という実資産と同じ形。
+        # 190 frames (7.6 s of reference audio) → 47 rows with patch 4, the same shape as the real
+        # asset.
         latent = torch.arange(190 * 32, dtype=torch.float32).reshape(1, 190, 32)
         _write_reference_latent(tmp_path, latent)
 
@@ -292,39 +323,41 @@ class TestRealSpeakerCases:
         by_name = dict(cases)
         assert by_name["ref-real-full"].shape == (1, 47, 128)
         assert by_name["ref-real-short"].shape == (1, 6, 128)
-        # 短尺は全長の**先頭**を切り出したもの（別の乱数や別の区間に化けていない）。
+        # The short one is cut from the **start** of the full length (not other random values or
+        # another range).
         assert torch.equal(by_name["ref-real-short"], by_name["ref-real-full"][:, :6])
 
     def test_a_missing_latent_fails_loudly(self, tmp_path):
-        with pytest.raises(SystemExit, match="実 latent が無い"):
+        with pytest.raises(SystemExit, match="Real latent missing"):
             ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
 
     def test_a_latent_of_the_wrong_width_fails_loudly(self, tmp_path):
         _write_reference_latent(tmp_path, torch.zeros((1, 190, 16)))
 
-        with pytest.raises(SystemExit, match=r"\[1,S,32\] でない"):
+        with pytest.raises(SystemExit, match=r"is not \[1,S,32\]"):
             ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
 
     def test_a_patch_size_that_misses_the_speaker_input_width_fails_loudly(self, tmp_path):
         _write_reference_latent(tmp_path, torch.zeros((1, 190, 32)))
 
-        # patch 2 なら束ねた幅は 64 で、speaker グラフの入力 128 と食い違う。
-        with pytest.raises(SystemExit, match="speaker の入力次元"):
+        # With patch 2 the grouped width is 64, which disagrees with the speaker graph's input
+        # 128.
+        with pytest.raises(SystemExit, match="speaker's input dimension"):
             ir.build_real_speaker_cases(_fake_patch, 32, 2, 128, 750, latent_dir=tmp_path)
 
     def test_a_latent_shorter_than_the_table_fails_loudly(self, tmp_path):
-        # 20 フレーム → patch 後 5 行で、表の短尺 6 行に足りない。
+        # 20 frames → 5 rows after patching, short of the table's 6 short rows.
         _write_reference_latent(tmp_path, torch.zeros((1, 20, 32)))
 
-        with pytest.raises(SystemExit, match="実 latent の patch 後の長さ"):
+        with pytest.raises(SystemExit, match="real latent's length after patching"):
             ir.build_real_speaker_cases(_fake_patch, 32, 4, 128, 750, latent_dir=tmp_path)
 
 
 def _dit_pristine(distinct: bool) -> dict[str, torch.Tensor]:
-    """全 `DIT_CASES` ぶんのダミー出力（`distinct` なら 1 本ずつ違う値）。
+    """Dummy outputs for all `DIT_CASES` (a different value each when `distinct`).
 
-    グループの取り方は `_dit_uncond_divergence` 自身に任せる（テスト側で写すと、
-    グループ分けの誤りが両側で同じように壊れて素通りする）。
+    The grouping is left to `_dit_uncond_divergence` itself (copying it into the test would let a
+    grouping mistake break both sides the same way and pass unnoticed).
     """
     return {
         name: torch.full((1, 2, 3), float(index) if distinct else 0.0)
@@ -333,17 +366,18 @@ def _dit_pristine(distinct: bool) -> dict[str, torch.Tensor]:
 
 
 class TestDitUncondDivergence:
-    """MUST: 「マスクが効いている」を主張のままにしない（uncond をマスクで表す根拠）。"""
+    """MUST: do not leave "the mask takes effect" as a claim (the basis for expressing uncond with
+    the mask)."""
 
     def test_distinct_outputs_are_reported_pairwise(self):
         pairs = ir._dit_uncond_divergence(_dit_pristine(distinct=True))
 
-        # cond + uncond 3 変種の総当たり = 6 組。
+        # All pairs of cond + the three uncond variants = 6 pairs.
         assert len(pairs) == 6
         assert min(pairs.values()) >= ir.DIT_UNCOND_DIVERGENCE_MIN
 
     def test_identical_outputs_fail_loudly(self):
-        with pytest.raises(AssertionError, match="マスクの区間割り"):
+        with pytest.raises(AssertionError, match="segment layout of the mask"):
             ir._dit_uncond_divergence(_dit_pristine(distinct=False))
 
 
@@ -351,50 +385,55 @@ class TestPristineDitReferenceOrdering:
     def test_taking_a_reference_after_patching_fails_loudly(self, monkeypatch):
         monkeypatch.setattr(patch_irodori, "_APPLIED", True)
 
-        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+        with pytest.raises(
+            AssertionError, match="Tried to take a reference after the patches were applied"
+        ):
             ir._pristine_dit_outputs(AuxIgnoringPredictor(), {})
 
 
 class TestRightPad:
-    """条件 state の右 pad（ADR 0047 のホスト残置）。"""
+    """Right padding of the condition states (kept on the host, ADR 0047)."""
 
     def test_pads_with_zeros_and_keeps_the_head(self):
-        padded = ir._right_pad(torch.ones(1, 2, 3), 5, "テスト")
+        padded = ir._right_pad(torch.ones(1, 2, 3), 5, "test")
 
         assert tuple(padded.shape) == (1, 5, 3)
         assert torch.equal(padded[:, :2], torch.ones(1, 2, 3))
         assert float(padded[:, 2:].abs().max()) == 0.0
 
     def test_a_state_longer_than_the_declared_length_fails_loudly(self):
-        with pytest.raises(SystemExit, match="条件の宣言長"):
-            ir._right_pad(torch.ones(1, 6, 3), 5, "テスト")
+        with pytest.raises(SystemExit, match="condition's declared length"):
+            ir._right_pad(torch.ones(1, 6, 3), 5, "test")
 
 
 class TestGoldenCaseBody:
-    """MUST: golden ケースの前処理は**種別で違う**（上流 `_synthesize` の綴り）。
+    """MUST: the preprocessing of the golden cases **differs by kind** (as spelled in upstream's
+    `_synthesize`).
 
-    text は `normalize_text` + strip、caption は **strip のみ**。caption へ正規化を掛けると
-    外側括弧の剥がし・NFKC・記号削除のぶんだけ conditioning が黙って別物になる。
+    text gets `normalize_text` + strip, the caption **strip only**. Normalizing the caption would
+    silently change the conditioning by the outer-bracket stripping, NFKC and symbol removal.
     """
 
-    #: 正規化に感受する綴り（外側括弧 + 記号 — どちらも `normalize_text` の削除対象）。
+    #: A spelling sensitive to normalization (outer brackets + a symbol — both removed by
+    #: `normalize_text`).
     BODY = " 「①明るい声」 "
 
     @staticmethod
     def _spy():
-        """呼ばれたら記録して**別物**を返す `normalize_text` の身代わり。"""
+        """A stand-in for `normalize_text` that records the call and returns **something
+        else**."""
         calls: list[str] = []
 
         def normalize_text(body: str) -> str:
             calls.append(body)
-            return "正規化された"
+            return "normalized"
 
         return calls, normalize_text
 
     def test_the_text_kind_goes_through_normalization(self):
         calls, normalize_text = self._spy()
 
-        assert ir.golden_case_body("t", "text", self.BODY, normalize_text) == "正規化された"
+        assert ir.golden_case_body("t", "text", self.BODY, normalize_text) == "normalized"
         assert calls == [self.BODY]
 
     def test_the_caption_kind_never_calls_normalization(self):
@@ -404,46 +443,51 @@ class TestGoldenCaseBody:
         assert calls == []
 
     def test_an_unknown_kind_fails_loudly(self):
-        """種別の綴りが割れると、黙ってどちらかの前処理へ倒れる。"""
+        """If the spellings of the kinds diverge, it silently falls back to one of the two
+        preprocessings."""
         _calls, normalize_text = self._spy()
 
-        with pytest.raises(SystemExit, match="text / caption のどちらでもない"):
+        with pytest.raises(SystemExit, match="is neither text nor caption"):
             ir.golden_case_body("x", "Caption", self.BODY, normalize_text)
 
     def test_an_empty_body_fails_loudly(self):
         _calls, normalize_text = self._spy()
 
-        with pytest.raises(SystemExit, match="前処理後の本文が空"):
+        with pytest.raises(SystemExit, match="the text is empty after preprocessing"):
             ir.golden_case_body("c", "caption", "  \n ", normalize_text)
 
     def test_the_existing_caption_goldens_are_insensitive_to_normalization(self):
-        """MUST: 既存 golden が動かないことの実測（動くなら再 export が要る合図）。
+        """MUST: checks that the existing golden does not move (if it does, that is the signal to
+        re-export).
 
-        caption を strip-only へ直した波の前提そのもの。正規化に感受する caption ケースを
-        足したときはここが落ちるので、golden の採り直しに気づける。
+        The very premise of the change that moved the caption to strip-only. Adding a caption case
+        that is sensitive to normalization makes this fail, so the need to regenerate the golden
+        shows.
         """
         pytest.importorskip("irodori_tts")
         from irodori_tts.text_normalization import normalize_text
 
         captions = [(name, body) for name, kind, body in ir.GOLDEN_CASES if kind == "caption"]
 
-        assert captions, "caption 種別の golden ケースが 1 本も無い"
+        assert captions, "no golden case of the caption kind"
         for name, body in captions:
             assert normalize_text(body).strip() == body.strip(), name
 
 
 class TestSanityCatchesProjectorMixups:
-    """MUST: 同じ重みを 2 回読む取り違えは shape も dtype も一致するので、ここでしか出ない。"""
+    """MUST: a mix-up that reads the same weights twice matches in shape and dtype, so it shows
+    only here."""
 
     def test_identical_projector_outputs_fail_loudly(self):
         shared = {"a": (torch.ones(1, 3, 4),)}
         pristine = {ir.TARGET_TEXT_PROJ: shared, ir.TARGET_CAPTION_PROJ: dict(shared)}
 
-        with pytest.raises(AssertionError, match="同じ重みを 2 回読んでいる疑い"):
+        with pytest.raises(AssertionError, match="same weights are suspected to be read twice"):
             ir._sanity(pristine)
 
     def test_diverging_projector_outputs_are_reported(self):
-        """MUST: 比べるのは第 1 出力（caption 側の第 2 出力は norm 済みで値域が違う）。"""
+        """MUST: the first outputs are compared (the caption side's second output is normed and
+        has a different value range)."""
         pristine = {
             ir.TARGET_TEXT_PROJ: {"a": (torch.zeros(1, 3, 4),)},
             ir.TARGET_CAPTION_PROJ: {"a": (torch.full((1, 3, 4), 2.0), torch.full((1, 3, 4), 9.0))},
@@ -453,7 +497,7 @@ class TestSanityCatchesProjectorMixups:
 
 
 class TinyResidualProjector(nn.Module):
-    """`ProjectorGraph` が読む属性だけを持つ residual_mlp の代役。"""
+    """A residual_mlp stand-in with only the attributes `ProjectorGraph` reads."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -464,7 +508,8 @@ class TinyResidualProjector(nn.Module):
 
 
 class TestCaptionProjectorGraph:
-    """MUST: 第 1 出力は `text-proj` と同じ式のまま（既存 golden とビット一致する根拠）。"""
+    """MUST: the first output keeps the same formula as `text-proj` (the basis for bit identity
+    with the existing golden)."""
 
     def test_the_first_output_is_the_plain_projection(self):
         torch.manual_seed(0)
@@ -485,28 +530,30 @@ class TestWrapperEquivalence:
         hidden = torch.zeros(1, 3, 4)
 
         diff = ir._check_wrapper_equivalence(
-            wrapper, (hidden,), (torch.zeros(1, 3, 4), torch.zeros(1, 3, 4)), "テスト", 0.0
+            wrapper, (hidden,), (torch.zeros(1, 3, 4), torch.zeros(1, 3, 4)), "test", 0.0
         )
 
         assert diff == 0.0
 
     def test_a_missing_output_fails_loudly(self):
-        """MUST: 本数がずれたまま `zip` で黙って切り捨てない（未検証の出力が残る）。"""
+        """MUST: do not silently truncate with `zip` when the counts differ (an unchecked output
+        would remain)."""
         wrapper = ir.CaptionProjectorGraph(TinyResidualProjector(), ScalingNorm(2.0))
 
-        with pytest.raises(AssertionError, match="ラッパの出力が"):
+        with pytest.raises(AssertionError, match="the wrapper has"):
             ir._check_wrapper_equivalence(
-                wrapper, (torch.zeros(1, 3, 4),), (torch.zeros(1, 3, 4),), "テスト", 0.0
+                wrapper, (torch.zeros(1, 3, 4),), (torch.zeros(1, 3, 4),), "test", 0.0
             )
 
 
 class TestNormDivergence:
-    """MUST: `caption-proj` 第 2 出力の契約（`caption_norm` を掛けた系列）を守る唯一の門。"""
+    """MUST: the only check guarding the contract of `caption-proj`'s second output (the sequence
+    with `caption_norm` applied)."""
 
     def test_identical_norm_weights_fail_loudly(self):
         shared = ScalingNorm(1.5)
 
-        with pytest.raises(AssertionError, match="同じ重みを 2 回読んでいる疑い"):
+        with pytest.raises(AssertionError, match="same weights are suspected to be read twice"):
             ir._norm_divergence(shared, ScalingNorm(1.5))
 
     def test_diverging_norm_weights_are_reported(self):
@@ -529,7 +576,7 @@ class TestOutputTupleHelpers:
 
 
 class TinyProjector(nn.Module):
-    """`_write_io` を回すための最小グラフ（入力名 `hidden` の 1 入力 1 出力）。"""
+    """A minimal graph to run `_write_io` (one input named `hidden`, one output)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -564,7 +611,7 @@ class TestWriteIo:
         assert written == [f"{ir.IO_PREFIX}a{ir.IO_SUFFIX}"]
 
     def test_writes_every_output_position(self, exported):
-        """`caption-proj` の 2 出力が `output.0` / `output.1` として揃うこと。"""
+        """The two outputs of `caption-proj` both appear as `output.0` / `output.1`."""
         module, graph, out_dir = exported
         hidden = torch.randn(1, 3, 4)
         with torch.no_grad():
@@ -585,17 +632,18 @@ class TestWriteIo:
         assert torch.equal(written["output.1"], head * 2.0)
 
     def test_an_input_name_mismatch_fails_loudly(self, exported):
-        """MUST: 名前がずれた io は「読めるが別の入力へ入る」形で静かに通ってしまう。"""
+        """MUST: an io with shifted names passes silently as "readable, but fed into another
+        input"."""
         module, graph, out_dir = exported
         hidden = torch.randn(1, 3, 4)
         with torch.no_grad():
             expected = {"a": (module(hidden),)}
 
-        with pytest.raises(AssertionError, match="入力名"):
+        with pytest.raises(AssertionError, match="the input names"):
             ir._write_io(graph, {"a": {"state": hidden}}, expected, out_dir)
 
     def test_an_output_count_mismatch_fails_loudly(self, exported):
-        """MUST: 本数がずれた io は「1 本ぶん検証されない」形で静かに通ってしまう。"""
+        """MUST: an io with a different count passes silently as "one output goes unchecked"."""
         module, graph, out_dir = exported
         hidden = torch.randn(1, 3, 4)
         with torch.no_grad():
@@ -609,7 +657,7 @@ class TestWriteIo:
             symbols=graph.symbols,
         )
 
-        with pytest.raises(AssertionError, match="期待出力"):
+        with pytest.raises(AssertionError, match="expected outputs"):
             ir._write_io(two, {"a": {"hidden": hidden}}, expected, out_dir)
 
 
@@ -643,21 +691,24 @@ class TestTargetCli:
     def test_a_calib_step_count_outside_the_reference_loop_is_refused_at_the_entrance(
         self, monkeypatch, capsys, steps
     ):
-        """MUST: 上限は**入口**で見る（超過は完走してから主語違いの診断で落ちる）。
+        """MUST: the limit is checked **at the entrance** (an excess would fail only after a full
+        run, with a diagnosis about something else).
 
-        打ち切り番兵は `len(batches) >= steps` でしか飛ばないので、参照ループ全長を超えた
-        指定は 1 度も飛ばず、実重み 1 ケースぶんの denoise を回し切った後に「上流の綴りが
-        台本の想定と食い違っている」で落ちる — 原因の違う診断で、しかも一番高くつく。
+        The cutoff sentinel fires only on `len(batches) >= steps`, so a value beyond the full
+        reference loop never fires, and after running a whole real-weight case's denoise it fails
+        with "upstream's spelling disagrees with what the script expects" — a diagnosis with the
+        wrong cause, and the most expensive one.
         """
         monkeypatch.setattr(ir, "export_series", lambda *_a, **_kw: {"dir": "x"})
 
         with pytest.raises(SystemExit):
             ir.main(["--dtype", "i4", "--calib-steps", steps])
 
-        assert f"--calib-steps は 1〜{ip.NUM_STEPS}" in capsys.readouterr().err
+        assert f"--calib-steps must be 1 to {ip.NUM_STEPS}" in capsys.readouterr().err
 
     def test_a_calib_step_count_inside_the_reference_loop_is_forwarded(self, monkeypatch):
-        """縮小 smoke の窓は塞がない（配布へ載せる側は組み立ての予算門が拒否する）。"""
+        """The window for a reduced smoke run stays open (for what goes into the distribution,
+        the assembly's budget check refuses it)."""
         seen: dict[str, object] = {}
         monkeypatch.setattr(ir, "export_series", lambda *_a, **kw: seen.update(kw) or {"dir": "x"})
         ir.main(["--dtype", "i4", "--calib-steps", str(ip.NUM_STEPS)])
@@ -666,19 +717,21 @@ class TestTargetCli:
 
 
 def _is_f16_exact(tensor: torch.Tensor) -> bool:
-    """f16 の格子に乗っているか（emit の適格判定と同じ述語）。"""
+    """Whether it is on the f16 grid (the same predicate as emit's eligibility check)."""
     return bool(torch.equal(tensor, tensor.to(torch.float16).to(torch.float32)))
 
 
 class TestWeightDtypeSeries:
-    """格納 dtype の系列（ADR 0018 / 0019 / 0027 / 0050）— 壊れると**偽 PASS** になる側だけ。
+    """Series per storage dtype (ADR 0018 / 0019 / 0027 / 0050) — only the part whose breakage
+    gives a **false pass**.
 
-    実重みは使わない（配線の規律はモデルに依らない）。数値そのものの検証は Deno 側の E2E と
-    emit の適格判定が持つ。
+    No real weights (the wiring discipline does not depend on the model). The numbers themselves
+    are checked by the E2E on the Deno side and by emit's eligibility check.
     """
 
     def test_each_dtype_gets_its_own_series_root(self, tmp_path):
-        """MUST: 圧縮系列は別ディレクトリ（同居させると f32 の網が圧縮資産へ掛かる）。"""
+        """MUST: a compressed series gets its own directory (sharing one would put the compressed
+        assets under the f32 checks)."""
         roots = {
             dtype: ir.default_out_root(tmp_path / "v4-small", dtype) for dtype in ir.WEIGHT_DTYPES
         }
@@ -696,9 +749,10 @@ class TestWeightDtypeSeries:
         assert other.name == "irodori-v9-large-f16"
 
     def test_f32_leaves_the_weights_untouched(self):
-        # MUST: 種を蒔いたら元へ戻す（`fork_rng`）— 大域 RNG を置き去りにすると、後続の
-        # テストファイルが**別の乱数**でモジュールを組むことになり、こちらの追加が離れた
-        # 場所の実測門（`irodori.dacvae.export` の切り詰めビット一致）を動かす。
+        # MUST: restore the RNG after seeding (`fork_rng`) — leaving the global RNG changed makes
+        # later test files build their modules from **different random values**, and an addition
+        # here would move a check far away (the truncation bit identity of
+        # `irodori.dacvae.export`).
         with torch.random.fork_rng():
             torch.manual_seed(0)
             module = TinyResidualProjector()
@@ -711,12 +765,13 @@ class TestWeightDtypeSeries:
             assert torch.equal(module.projector.weight, before)
 
     def test_f16_rounds_every_module_it_is_handed(self):
-        """MUST: 1 本でも漏らすと、漏れた側だけが元の重みで計算した値を golden に載せる。"""
+        """MUST: missing even one would put values computed with the original weights into the
+        golden for that one."""
         with torch.random.fork_rng():
             torch.manual_seed(0)
             modules = {name: TinyResidualProjector() for name in "abc"}
             assert not any(_is_f16_exact(module.projector.weight) for module in modules.values()), (
-                "丸め前から格子に乗っていては検出力が無い"
+                "already on the grid before rounding, so the test would detect nothing"
             )
 
             quantized = ir.fake_quant("f16", modules)
@@ -727,25 +782,26 @@ class TestWeightDtypeSeries:
                 assert all(_is_f16_exact(tensor) for tensor in module.parameters())
 
     def test_it_refuses_an_empty_set_of_modules(self):
-        """`--dtype f16` を指定したのに丸める相手が 0 本、を沈黙させない。"""
-        with pytest.raises(SystemExit, match="1 本も無い"):
+        """Do not stay silent when `--dtype f16` is given but there is nothing to round."""
+        with pytest.raises(SystemExit, match="there is no module to round"):
             ir.fake_quant("f16", {})
 
     def test_f16_refuses_a_set_where_nothing_was_actually_rounded(self):
-        """入口の「モジュール 0 本」とは別の穴 — **モジュールは在るが丸めた本数が 0**。
+        """A different hole from "zero modules" at the entrance — **the modules exist but zero
+        weights were rounded**.
 
-        docstring が名乗る「総数 0 は落とす」は i8 だけの門だったので、f16 は 1 本も丸めずに
-        素通りできた（現行の 9 モジュールは必ず f32 パラメータを持つので今は到達しないが、
-        門としては立っていなかった）。
+        The "a total of 0 fails" the docstring claims was a check for i8 only, so f16 could pass
+        without rounding anything (unreachable today, since the current 9 modules always have f32
+        parameters, but the check was not in place).
         """
-        with pytest.raises(SystemExit, match="丸めた重みが 1 本も無い"):
+        with pytest.raises(SystemExit, match="not a single weight was rounded"):
             ir.fake_quant("f16", {"text_norm": nn.Identity()})
 
     def test_i8_quantizes_only_the_per_channel_types(self):
-        """MUST: i8 が触るのは `QUANT_CHANNEL_AXES` の型の `weight` だけ（ADR 0019）。
+        """MUST: i8 touches only the `weight` of the types in `QUANT_CHANNEL_AXES` (ADR 0019).
 
-        norm 系まで丸めると emit の適格判定（重みスロットだけ圧縮）と食い違い、golden だけが
-        別の重みで計算した値になる。
+        Rounding the norms too would disagree with emit's eligibility check (only weight slots
+        are compressed), and only the golden would be computed with different weights.
         """
         with torch.random.fork_rng():
             torch.manual_seed(0)
@@ -763,10 +819,11 @@ class TestWeightDtypeSeries:
             for key, scale in quantized.scales["text-proj"].items():
                 weight = module.get_parameter(key)
                 restored = quantize_to_int8(weight, scale).to(torch.float32) * scale
-                assert torch.equal(restored, weight), "i8 の格子に乗っていない"
+                assert torch.equal(restored, weight), "not on the i8 grid"
 
     def test_i8_lets_a_norm_only_role_through(self):
-        """MUST: norm 単体の役割は i8 で素通り（`f16` と違い「0 本」が正しい状態）。"""
+        """MUST: a norm-only role passes through under i8 (unlike `f16`, "zero" is the correct
+        state)."""
         with torch.random.fork_rng():
             torch.manual_seed(0)
             modules = {"text-proj": TinyResidualProjector(), "text_norm": ScalingNorm(1.5)}
@@ -777,15 +834,17 @@ class TestWeightDtypeSeries:
             assert sorted(quantized.scales) == ["text-proj"]
 
     def test_i8_refuses_a_set_with_nothing_quantizable(self):
-        """`--dtype i8` を指定したのに per-channel の対象が全体で 0 本、を沈黙させない。"""
-        with pytest.raises(SystemExit, match="per-channel 量子化できたモジュールが 1 本も無い"):
+        """Do not stay silent when `--dtype i8` is given but there are zero per-channel targets
+        overall."""
+        with pytest.raises(SystemExit, match="no module could be quantized per channel"):
             ir.fake_quant("i8", {"text_norm": ScalingNorm(1.5)})
 
     def test_every_loaded_module_reaches_the_fake_quant(self):
-        """束ねる相手は `export_series` が `load_*` で組む全部（欠けは golden の食い違いになる）。
+        """What gets passed is everything `export_series` builds with `load_*` (a gap would make
+        the golden disagree).
 
-        名前を数え上げるのではなく**呼び出しの実引数**を捕まえる — 表を書き写すと、
-        `export_series` 側が 1 本増やしたときに写しだけが古いまま緑になる。
+        Captures **the actual arguments of the call** instead of listing names — a copied table
+        would stay green and stale when `export_series` adds one more.
         """
         source = inspect.getsource(ir.export_series)
         handed = source[source.index("quantized = fake_quant(") :]
@@ -797,7 +856,7 @@ class TestWeightDtypeSeries:
 
 
 class TinyRopeBody(nn.Module):
-    """`assert_rope_lifted` が降格できる buffer を持つ backbone 本体の代役。"""
+    """A stand-in for the backbone body with a buffer `assert_rope_lifted` can demote."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -806,7 +865,7 @@ class TinyRopeBody(nn.Module):
 
 
 class TinyBackboneHolder(nn.Module):
-    """`BackboneGraph` が読む形（本体は `backbone` 属性の内側）。"""
+    """The shape `BackboneGraph` reads (the body is inside the `backbone` attribute)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -814,7 +873,7 @@ class TinyBackboneHolder(nn.Module):
 
 
 class TinyRopeEncoder(nn.Module):
-    """`SpeakerGraph` が `__init__` で読む属性（`head_dim`）を持つ encoder の代役。"""
+    """An encoder stand-in with the attribute `SpeakerGraph` reads in `__init__` (`head_dim`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -824,9 +883,11 @@ class TinyRopeEncoder(nn.Module):
 
 
 class TinyJointAttention(nn.Module):
-    """`JointAttention` の**子の顔ぶれ**だけを写した代役（計算は持たない — 張り替えを見るだけ）。
+    """A stand-in that copies only **the set of children** of `JointAttention` (no computation —
+    it only serves to check the rebasing).
 
-    並びも実物と同じ（self 側 3 本 → 条件側 6 本 → gate / wo → q/k ノルム）。
+    The order matches the real one too (3 on the self side → 6 on the condition side → gate / wo
+    → the q/k norms).
     """
 
     def __init__(self) -> None:
@@ -838,7 +899,7 @@ class TinyJointAttention(nn.Module):
 
 
 class TinyDitBlock(nn.Module):
-    """`DiffusionBlock` の子の顔ぶれ（attention + mlp + 2 本の adaLN）。"""
+    """The children of `DiffusionBlock` (attention + mlp + two adaLNs)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -849,10 +910,12 @@ class TinyDitBlock(nn.Module):
 
 
 class TinyDit(nn.Module):
-    """DiT のラッパ 2 本が抱える部分木 + **抱えない**枝（`load_dit` が丸ごと組む内側のコピー相当）。
+    """The subtrees the two DiT wrappers hold + branches they **do not** hold (like the inner copy
+    `load_dit` builds whole).
 
-    block は実物の子の顔ぶれを持つ（DiT を `dit-context` / `dit` に割った — ADR 0114 — ので、
-    1 つの block の重みが 2 本のラッパへどう分かれるかを表で見るには block の中身が要る）。
+    The block has the real set of children (the DiT is split into `dit-context` / `dit` — ADR
+    0114 — so checking with the table how one block's weights divide between the two wrappers
+    needs the block's contents).
     """
 
     def __init__(self) -> None:
@@ -869,10 +932,12 @@ class TinyDit(nn.Module):
 
 
 class TestTargetScales:
-    """i8 の scale 台帳を**ラッパ内 FQN**へ張り替える表（`TARGET_SCALE_SOURCES`）。
+    """The table that rebases the i8 scale ledger onto **the FQNs inside the wrapper**
+    (`TARGET_SCALE_SOURCES`).
 
-    MUST: ここが崩れると emit が「適格なのに scale が無い」で落ちる（値が壊れる形では
-    通らない）。落ちる場所が遠いので、表とラッパの対応はここで固定する。
+    MUST: if this breaks, emit fails with "eligible but no scale" (it does not pass with broken
+    values). That failure is far away, so the mapping between the table and the wrappers is
+    pinned here.
     """
 
     def test_the_table_covers_every_target(self):
@@ -885,10 +950,11 @@ class TestTargetScales:
         return sorted(ir.target_scales(target, wrapper, scales))
 
     def test_every_wrapper_receives_a_scale_for_each_of_its_weights(self):
-        """MUST: ラッパが持つ per-channel 対象の重みは**全て**張り替え先が見つかること。
+        """MUST: **every** per-channel target weight a wrapper holds finds its rebase target.
 
-        `pytest.importorskip` は `SpeakerGraph` / `DitGraph` が実数形 RoPE 表を作るのに
-        上流実装を引くため（表そのものは張り替えに使わないが `__init__` が呼ぶ）。
+        `pytest.importorskip` is there because `SpeakerGraph` / `DitGraph` pull in the upstream
+        implementation to build the real-pair RoPE table (the table itself is not used for the
+        rebasing, but `__init__` calls it).
         """
         pytest.importorskip("irodori_tts")
         cases = {
@@ -906,7 +972,7 @@ class TestTargetScales:
             assert self._rebased(target, wrapper, module) == expected
 
     def test_the_caption_projector_is_rebased_two_levels_deep(self):
-        """`CaptionProjectorGraph` は `ProjectorGraph` を内包する（接頭辞が 2 段）。"""
+        """`CaptionProjectorGraph` contains `ProjectorGraph` (a two-level prefix)."""
         module = TinyResidualProjector()
         wrapper = ir.CaptionProjectorGraph(module, ScalingNorm(2.0))
 
@@ -937,11 +1003,12 @@ class TestTargetScales:
         ]
 
     def test_weights_the_dit_wrapper_does_not_hold_are_dropped(self):
-        """`load_dit` は DiT **丸ごと**を組むので、台帳には使わない枝の scale まで載る。
+        """`load_dit` builds the **whole** DiT, so the ledger also holds scales of unused
+        branches.
 
-        DiT を 2 本に割った（ADR 0114）ので、`dit` が受け取るのは条件側の射影を除いた block の
-        linear と block 外 — 条件側の 6 本は `dit-context` へ行く（期待値はグラフが変わったぶん
-        だけ動いた）。
+        The DiT is split in two (ADR 0114), so `dit` receives the block linears except the
+        condition-side projections plus what is outside the blocks — the 6 condition-side ones go
+        to `dit-context` (the expectation moved exactly as far as the graph changed).
         """
         pytest.importorskip("irodori_tts")
         module = TinyDit()
@@ -965,10 +1032,11 @@ class TestTargetScales:
         assert "pretrained_text_backbone.weight" not in rebased
 
     def test_the_context_wrapper_receives_only_the_conditioning_projections(self):
-        """`dit-context` は同じ `dit` 役の台帳から、条件側の射影 6 本 × ブロックだけを拾う。
+        """`dit-context` picks only the 6 condition-side projections × blocks from the same ledger
+        of the `dit` role.
 
-        丸めは `export_series` と同じく `dit` 役（`TextToLatentRFDiT` 丸ごと）に 1 回だけ当てる —
-        `dit-context` 役の台帳というものは無い。
+        As in `export_series`, the rounding is applied once to the `dit` role (the whole
+        `TextToLatentRFDiT`) — there is no ledger of a `dit-context` role.
         """
         module = TinyDit()
         wrapper = ir.DitContextGraph(module)
@@ -983,7 +1051,8 @@ class TestTargetScales:
         )
 
     def test_a_stale_prefix_fails_loudly(self, monkeypatch):
-        """MUST: 1 本も当たらない張り替えを黙って空で返さない（emit まで気づけなくなる）。"""
+        """MUST: a rebasing that matches nothing does not silently return empty (it would go
+        unnoticed until emit)."""
         module = TinyResidualProjector()
         wrapper = ir.ProjectorGraph(module)
         monkeypatch.setattr(
@@ -992,30 +1061,33 @@ class TestTargetScales:
             {ir.TARGET_TEXT_PROJ: ((ir.TARGET_TEXT_PROJ, "", "stale."),)},
         )
 
-        with pytest.raises(SystemExit, match="張り替えられなかった"):
+        with pytest.raises(SystemExit, match="could be remapped to an FQN in the wrapper"):
             self._rebased(ir.TARGET_TEXT_PROJ, wrapper, module)
 
     def test_f32_and_f16_hand_no_scales_to_emit(self):
-        """f16 は scale を持たない（台帳が空なら張り替えも空 — emit も f16 では引かない）。"""
+        """f16 has no scales (an empty ledger rebases to empty — emit does not look them up for
+        f16 either)."""
         wrapper = ir.ProjectorGraph(TinyResidualProjector())
 
         assert ir.target_scales(ir.TARGET_TEXT_PROJ, wrapper, {}) == {}
 
 
-#: 小さな実物 DiT の条件の宣言長（`_dit_cases` が右 pad する長さ）と speaker の patch 後上限。
+#: The declared condition lengths of the small real DiT (what `_dit_cases` right-pads to) and the
+#: speaker's limit after patching.
 TINY_MODEL_CONFIG = {"max_text_len": 6, "max_caption_len": 7}
 TINY_SPEAKER_MAX = 4
-#: `dit` の mask の条件側の総長（text 6 + speaker 4+1 + caption 7）。
+#: The total condition-side length of the `dit` mask (text 6 + speaker 4+1 + caption 7).
 TINY_CONTEXT_TOTAL = 6 + (TINY_SPEAKER_MAX + 1) + 7
 
 
 def _tiny_real_dit() -> nn.Module:
-    """上流の `TextToLatentRFDiT` そのもの（小さな config・scratch の条件エンコーダ）。
+    """Upstream's `TextToLatentRFDiT` itself (a small config, condition encoders from scratch).
 
-    head_dim は実重みと同じ 64（RoPE の実数化のビット一致は形依存 — `irodori.patch` の NOTE。
-    64 では 0）、heads は 2（`_apply_rotary_half` が heads 軸を半分に割る）。重みは全部を
-    決定的な乱数で上書きする — 上流は `out_proj` を 0 で初期化するので、そのままだと出力が
-    恒等的に 0 になり比較が恒真になる。
+    head_dim is 64 as in the real weights (the bit identity of real-pair RoPE depends on the
+    shape — the NOTE of `irodori.patch`; 0 at 64), heads is 2 (`_apply_rotary_half` splits the
+    heads axis in half). Every weight is overwritten with deterministic random values — upstream
+    initializes `out_proj` to 0, so as is the output would be identically 0 and the comparison
+    tautological.
     """
     irodori_model = pytest.importorskip("irodori_tts.model")
     from irodori_tts.config import ModelConfig
@@ -1055,8 +1127,8 @@ def _tiny_real_dit() -> nn.Module:
 
 
 class _TinySplit:
-    """小さな実物 DiT で、`export_series` の DiT の段（ケース → パッチ前の参照 → 入力の組み）を
-    同じ関数で踏んだ結果。"""
+    """The result of running the DiT stage of `export_series` (cases → pre-patch reference →
+    assembling the inputs) with the same functions on a small real DiT."""
 
     def __init__(self, model: nn.Module) -> None:
         from irodori_tts.model import TextToLatentRFDiT, get_timestep_embedding
@@ -1092,7 +1164,8 @@ class _TinySplit:
 
 @pytest.fixture
 def tiny_split(restore_forward) -> tuple[nn.Module, _TinySplit]:
-    """パッチ前に参照を採り、パッチを当ててから返す（`export_series` の ①→② の順序）。"""
+    """Takes the reference before patching and returns after applying the patches (the ①→②
+    order of `export_series`)."""
     model = _tiny_real_dit()
     split = _TinySplit(model)
     patch_irodori.apply_patches()
@@ -1100,13 +1173,16 @@ def tiny_split(restore_forward) -> tuple[nn.Module, _TinySplit]:
 
 
 class TestDitSplit:
-    """DiT を `dit-context`（条件側 K/V・生成 1 回）と `dit` に割る（ADR 0114）。
+    """Splits the DiT into `dit-context` (condition-side K/V, once per generation) and `dit`
+    (ADR 0114).
 
-    MUST: 割っても数値は 1 ビットも動かない — 参照層の sha 門（WAV / latent）は不変が期待値。
+    MUST: the split does not move the numbers by a single bit — the sha checks of the reference
+    layer (WAV / latent) are expected to stay unchanged.
     """
 
     def test_the_composed_pair_reproduces_the_upstream_forward_bit_for_bit(self, tiny_split):
-        """分割の同値門そのもの（uncond 3 変種と S の両端 2 / 750 を含む全ケース・atol 0）。"""
+        """The split's equivalence check itself (every case, including the three uncond variants
+        and both ends of S, 2 / 750; atol 0)."""
         model, split = tiny_split
         wrappers = ir.dit_wrappers(model, split.sym_max)
         composed = ir.ComposedDitGraph(wrappers.context, wrappers.dit)
@@ -1118,7 +1194,8 @@ class TestDitSplit:
             assert diff == 0.0, name
 
     def test_the_context_graph_matches_the_upstream_kv_cache(self, tiny_split):
-        """`dit-context` の golden は上流 `build_context_kv_cache` の値（ラッパ自身ではない）。"""
+        """The golden of `dit-context` is the value of upstream's `build_context_kv_cache` (not
+        of the wrapper itself)."""
         model, split = tiny_split
         wrappers = ir.dit_wrappers(model, split.sym_max)
 
@@ -1135,12 +1212,15 @@ class TestDitSplit:
             )
 
     def test_the_dit_graph_fed_with_the_context_golden_matches_upstream(self, tiny_split):
-        """`dit` の golden 入力（K/V = `dit-context` の期待値）で上流の出力にビット一致する。"""
+        """With the golden inputs of `dit` (K/V = the expectation of `dit-context`) it is
+        bit-identical to upstream's output."""
         model, split = tiny_split
         wrappers = ir.dit_wrappers(model, split.sym_max)
 
         for name, args in split.dit_inputs.items():
-            assert list(args) == list(wrappers.dit.input_names), "golden 入力の並びが IR と違う"
+            assert list(args) == list(wrappers.dit.input_names), (
+                "the order of the golden inputs differs from the IR"
+            )
             assert (
                 ir._check_wrapper_equivalence(
                     wrappers.dit, tuple(args.values()), (split.pristine[name],), name, 0.0
@@ -1149,7 +1229,8 @@ class TestDitSplit:
             )
 
     def test_the_context_outputs_are_one_k_and_one_v_per_block_in_order(self, tiny_split):
-        """出力は 2 × ブロック数本で、ブロック b の K / V（1 段目の連結）が b の昇順に並ぶ。"""
+        """There are 2 × the number of blocks outputs, with the K / V of block b (the first-level
+        concatenation) in ascending b."""
         model, split = tiny_split
         wrappers = ir.dit_wrappers(model, split.sym_max)
         states = next(iter(split.context_inputs.values()))
@@ -1173,27 +1254,31 @@ class TestDitSplit:
             assert torch.equal(outputs[2 * index], key)
             assert torch.equal(outputs[2 * index + 1], value)
             assert tuple(key.shape) == (1, TINY_CONTEXT_TOTAL, 2, 64)
-        # 取り違えの検出力: ブロックごとに値が違う（同じなら順序の入れ替えが素通りする）。
+        # Power to detect a mix-up: the values differ per block (if they were equal, a swapped
+        # order would pass unnoticed).
         assert not torch.equal(outputs[0], outputs[2])
 
     def test_a_swapped_block_order_breaks_the_composition(self, tiny_split):
-        """故障注入: ブロック 0 と 1 の K/V を入れ替えて渡すと、上流とのビット一致が崩れる。"""
+        """Fault injection: passing the K/V of blocks 0 and 1 swapped breaks the bit identity with
+        upstream."""
         model, split = tiny_split
         wrappers = ir.dit_wrappers(model, split.sym_max)
         args = split.dit_inputs["dit-cond-1s"]
         values = list(args.values())
         values[3:5], values[5:7] = values[5:7], values[3:5]
 
-        with pytest.raises(AssertionError, match="eager 同値が崩れた"):
+        with pytest.raises(AssertionError, match="eager equivalence broke"):
             ir._check_wrapper_equivalence(
                 wrappers.dit, tuple(values), (split.pristine["dit-cond-1s"],), "swap", 0.0
             )
 
     def test_the_two_wrappers_split_the_old_ownership_and_share_only_k_norm(self):
-        """所有の和 = 割る前の `DitGraph` が抱えていた部分木の全重み・重なりは `k_norm` だけ。
+        """The union of the ownership = every weight of the subtrees the unsplit `DitGraph` held;
+        the only overlap is `k_norm`.
 
-        所有 = 容器の initializer（張り替え・読み戻し・i4 適格の判定の前提）なので、ここが崩れると
-        格納指定が未知キーで落ちるか、重みがどちらの容器にも載らない。
+        Ownership = the container's initializers (the premise of the rebasing, the read-back and
+        the i4 eligibility check), so if this breaks, the storage overrides fail on unknown keys or
+        a weight lands in neither container.
         """
         model = _tiny_real_dit()
         wrappers = ir.dit_wrappers(model, ir.dit_sym_max(model.cfg))
@@ -1225,7 +1310,8 @@ class TestDitSplit:
         assert not {name for name in rest if name.startswith(("text_norm", "caption_norm"))}
 
     def test_every_case_with_the_same_states_shares_one_context_golden(self, tiny_split):
-        """uncond 3 変種は cond の state のまま — `dit-context` の golden は 1 組で足りる。"""
+        """The three uncond variants keep the cond states — one set of `dit-context` goldens is
+        enough."""
         _model, split = tiny_split
 
         assert list(split.context_inputs) == [ir.DIT_CASES[0][0]]
@@ -1233,11 +1319,12 @@ class TestDitSplit:
         assert set(split.owner.values()) == {ir.DIT_CASES[0][0]}
 
     def test_the_exported_boundary_carries_the_contract_names(self, tiny_split, tmp_path):
-        """IR の境界名（`dit-context` の出力 / `dit` の 4 本目以降の入力）が契約の綴りになり、
-        組み立ての門（`irodori.distribution`）がそのまま受け取る。
+        """The IR's boundary names (the outputs of `dit-context` / the inputs of `dit` from the
+        fourth on) follow the contract's spelling, and the assembly check
+        (`irodori.distribution`) accepts them as they are.
 
-        torch.export は可変長引数を `context_<i>`・出力を FX ノード名で名乗る — 付け替えが
-        外れるとランタイムが常駐テンソルを名前で束ねられない。
+        torch.export names variadic arguments `context_<i>` and outputs after FX nodes — if the
+        renaming is lost, the runtime cannot bind the resident tensors by name.
         """
         model, split = tiny_split
         wrappers = ir.dit_wrappers(model, split.sym_max)
@@ -1293,7 +1380,8 @@ class TestDitSplit:
             {"dit_context": paths[ir.TARGET_DIT_CONTEXT], "dit": paths[ir.TARGET_DIT]},
             {"maxTextLen": 6, "speakerRows": TINY_SPEAKER_MAX + 1, "maxCaptionLen": 7},
         )
-        # golden io は IR の入力名と一致して初めて書ける（`_write_io` の門）。
+        # A golden io can be written only when it matches the IR's input names (the check of
+        # `_write_io`).
         written = ir._write_io(
             dit_graph,
             {"dit-cond-1s": split.dit_inputs["dit-cond-1s"]},
@@ -1305,15 +1393,18 @@ class TestDitSplit:
 
 class TestPristineDitContextOrdering:
     def test_taking_the_context_reference_after_patching_fails_loudly(self, monkeypatch):
-        """MUST: パッチ後に採るとラッパと同じ経路の値になり、同値門が恒真化する。"""
+        """MUST: taken after patching, the value comes from the same path as the wrapper and the
+        equivalence check becomes tautological."""
         monkeypatch.setattr(patch_irodori, "_APPLIED", True)
 
-        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+        with pytest.raises(
+            AssertionError, match="Tried to take a reference after the patches were applied"
+        ):
             ir._pristine_dit_context_outputs(TinyDit(), {})
 
 
 class TestDitContextCases:
-    """`dit-context` の golden は条件 state の組ごとに 1 本（組は値で判定する）。"""
+    """One `dit-context` golden per set of condition states (sets are compared by value)."""
 
     @staticmethod
     def _states(seed: int) -> dict[str, torch.Tensor]:
@@ -1348,7 +1439,8 @@ class TestDitContextCases:
 
 
 def _boundary_graph() -> IrGraph:
-    """入力 2 本・出力 2 本（ノードの出力）の最小グラフ（境界名の付け替えの被験体）。"""
+    """A minimal graph with two inputs and two outputs (node outputs) (the subject of the
+    boundary renaming)."""
     return IrGraph(
         inputs=[
             IrInput(name="x", dtype="f32", shape=[1, 2]),
@@ -1389,26 +1481,27 @@ class TestNameBoundary:
         assert graph.outputs == ["add", "add_1"]
 
     def test_a_count_mismatch_fails_loudly(self):
-        with pytest.raises(AssertionError, match="名前 1 本"):
+        with pytest.raises(AssertionError, match="with 1 names"):
             ir.name_boundary(_boundary_graph(), outputs=("only",))
 
     def test_a_name_that_collides_with_a_remaining_value_fails_loudly(self):
-        """潰すと宣言が黙って 1 本消える。"""
-        with pytest.raises(AssertionError, match="衝突"):
+        """A collision would silently drop one declaration."""
+        with pytest.raises(AssertionError, match="collide"):
             ir.name_boundary(_boundary_graph(), outputs=("add", "x"))
 
     def test_an_output_that_is_not_produced_by_a_node_fails_loudly(self):
-        """入力をそのまま返す出力を付け替えると、入力名まで動く。"""
+        """Renaming an output that returns an input as is would move the input's name too."""
         graph = _boundary_graph()
         graph.outputs = ["x", "add_1"]
 
-        with pytest.raises(AssertionError, match="ノードの出力でない"):
+        with pytest.raises(AssertionError, match="is not a node output"):
             ir.name_boundary(graph, outputs=("first", "second"))
 
 
 class TestProvenance:
     def test_the_container_points_at_the_notice(self) -> None:
-        """NOTICE を配る他の family と同じく、単一の krm から改変告知の在処が辿れる。"""
+        """As in the other families that ship a NOTICE, the location of the modification notice
+        can be traced from a single krm."""
         from karume.dist import NOTICE_FILENAME
 
         assert ir.PROVENANCE.notice == NOTICE_FILENAME

@@ -1,62 +1,70 @@
-"""Wan の動画 VAE decoder の chunk グラフ 2 種を IR v2 へ書き出す台本（ADR 0118 / 0121 の段 4）。
+"""The script that writes the 2 chunk graphs of the Wan video VAE decoder out to IR v2 (step 4 of
+ADR 0118 / 0121).
 
-モデル（`--model` — 既定 `t2v-1.3b`）ごとの系列・潜在タイル・フィクスチャのケースは
-{@link VAE_SERIES} の表が一括で決める（渡し忘れても 2.1 の系列を 2.1 の値で書くだけで、別の
-モデルの系列を黙って壊す経路は無い）:
+The series, latent tile and fixture cases of each model (`--model` — default `t2v-1.3b`) are set
+all at once by the {@link VAE_SERIES} table (forgetting to pass something only writes the 2.1 series
+with 2.1 values; there is no path that silently breaks another model's series):
 
-| モデル | 系列（`outputs/series/` — 決定 7） | タイル t | 潜在 z | フレーム C |
+| Model | Series (`outputs/series/` — decision 7) | Tile t | Latent z | Frame C |
 |---|---|---|---|---|
-| `t2v-1.3b`（Wan2.1） | `wan2.1-t2v-1.3b-f16-dyn`（ADR 0118） | 32 | 16 | 3（画素） |
-| `ti2v-5b`（Wan2.2） | `wan2.2-ti2v-5b-f16-dyn`（ADR 0121） | 16 | 48 | 12（patchify 空間） |
+| `t2v-1.3b` (Wan2.1) | `wan2.1-t2v-1.3b-f16-dyn` (ADR 0118) | 32 | 16 | 3 (pixels) |
+| `ti2v-5b` (Wan2.2) | `wan2.2-ti2v-5b-f16-dyn` (ADR 0121) | 16 | 48 | 12 (patchify space) |
 
-書き出すもの:
+What it writes:
 
-- `vae_decoder_first/model.krm` — 最初の chunk 用。入力 = 潜在 `[z,1,t,t]` + cache 30 本・
-  出力 = フレーム `[C,1,8t,8t]` + 更新後の cache 30 本（`time_conv` の 2 本を持たない）。
-- `vae_decoder_next/model.krm` — それ以降用。入力 = 潜在 + cache 32 本・出力 = フレーム
-  `[C,4,8t,8t]` + 更新後の cache 32 本。
-- `vae_chunks.<case>.safetensors`（系列の根）— chunk 列の照合のフィクスチャ。固定 seed の乱数潜在
-  （逆正規化済み `z·std + mean`）と、上流の非タイル `_decode` の chunk ループの**クランプ前**
-  （2.2 は unpatchify の前でもある）の出力（{@link wan.vae_patch.reference_decode_unclamped}）。
-  GPU の chunk 列の照合（段 4 の検収）が読む。ケースは帯を決める `band`（9 chunk = 33 フレーム）と、
-  受け入れを判定する別の潜在・別の chunk 境界の `accept`（5 chunk = 17 フレーム）と `long`
-  （21 chunk = 81 フレーム — ADR 0118 段 8・cache を 20 回持ち越す長さ）の 3 本（ADR 0118 追記
-  2026-10-02 — 決定用と受入れ用を分ける）。seed はモデルごとに別。
+- `vae_decoder_first/model.krm` — for the first chunk. Inputs = latent `[z,1,t,t]` + 30 caches;
+  outputs = frames `[C,1,8t,8t]` + the 30 updated caches (it does not have the 2 of `time_conv`).
+- `vae_decoder_next/model.krm` — for the following chunks. Inputs = latent + 32 caches; outputs =
+  frames `[C,4,8t,8t]` + the 32 updated caches.
+- `vae_chunks.<case>.safetensors` (at the series root) — the fixtures for checking the chunk
+  sequence. A fixed-seed random latent (de-normalized, `z·std + mean`) and the output of the chunk
+  loop of upstream's non-tiled `_decode` **before the clamp** (for 2.2 also before unpatchify)
+  ({@link wan.vae_patch.reference_decode_unclamped}). The GPU check of the chunk sequence (the
+  acceptance of step 4) reads them. There are 3 cases (ADR 0118 addendum 2026-10-02 — band cases
+  and acceptance cases are separate): `band`, which sets the band (9 chunks = 33 frames), and
+  `accept` (5 chunks = 17 frames) and `long` (21 chunks = 81 frames — ADR 0118 step 8, long enough
+  to carry the caches over 20 times), which judge acceptance with another latent and other chunk
+  boundaries. The seeds differ per model.
 
-タイル辺 `t`（潜在）は引数で上書きできる（既定は表 — 2.1 は diffusers の `tile_sample_min`
-256 px ÷ 8、2.2 は 256 px ÷ 空間の圧縮 16）。ホストはタイル辺を literal で持たず、開いた資産の
-入力形から導く（決定 2）。
+The tile side `t` (latent) can be overridden by an argument (the default comes from the table — 2.1
+is diffusers' `tile_sample_min` 256 px ÷ 8, 2.2 is 256 px ÷ the spatial compression 16). The host
+does not hold the tile side as a literal; it derives it from the input shapes of the opened asset
+(decision 2).
 
-格納は f16 席（決定 7）が既定: 重みを f16 表現可能値へ丸めて（fake-quant — ADR 0006）から
-export とフィクスチャの参照を採る。丸めより前に参照を採ると、照合の差が量子化誤差と実装誤差の
-合成になって帯の意味が消える。
+Storage defaults to the f16 preset (decision 7): the weights are rounded to f16-representable
+values (fake-quant — ADR 0006) before the export and the fixtures' reference are taken. Taking the
+reference before rounding would make the checked difference a mix of quantization error and
+implementation error, and the band would lose its meaning.
 
-`--dtype i8`（ADR 0133 決定 7 — i8 系列を持つモデルだけ・今は Wan2.2）は f16 へ丸めた後に
-`fake_quant_int8`（既定の対象 — decoder の conv3d・conv2d と mid の 1×1 conv が出力チャネルごとの
-scale 1 本の i8）を掛け、同じ 2 グラフを**モデルの i8 系列の根**（Wan2.2 は DiT の i8 容器と同じ
-`wan2.2-ti2v-5b-i8-dyn` — 部品ディレクトリは `vae_decoder_first/` / `vae_decoder_next/` で
-`transformer/` と重ならない）へ書く。i8 の回はフィクスチャを書かない（フィクスチャは e2e の f16 の
-参照 — i8 系列は GPU 側で f16 の decode と比べる）。
+`--dtype i8` (ADR 0133 decision 7 — only for models with an i8 series, currently Wan2.2) applies
+`fake_quant_int8` after the f16 rounding (the default targets — the decoder's conv3d and conv2d and
+the mid 1×1 convs get i8 with one scale per output channel) and writes the same 2 graphs to **the
+model's i8 series root** (for Wan2.2 the same `wan2.2-ti2v-5b-i8-dyn` as the DiT's i8 container —
+the component directories `vae_decoder_first/` / `vae_decoder_next/` do not overlap with
+`transformer/`). An i8 run writes no fixtures (the fixtures are the e2e f16 reference — the i8
+series is compared with the f16 decode on the GPU side).
 
-`--shared`（ADR 0134 決定 1 — `--tile` が必須）は同じモジュールを `--tile` の辺で trace し直し、
-重みのバイトを 1 つも持たない組 `<ターゲット>_<タイル>/model.krm`（例 `vae_decoder_first_32` /
-`vae_decoder_next_32` — グラフ名 = 部品ディレクトリ名 = manifest の weights のキー）を同じ系列の根へ
-書く。initializer は**全部**共有宣言（`IrShared` — 貸し手のテンソルキーと、貸し手の束縛表の
-格納）で、貸し手は同じ系列の根・同じ格納の既定タイルの容器（`<系列の根>/<ターゲット>/model.krm`
-— 表のタイル辺で書いたもの）。バイトを書かないので重みの丸めも i8 の量子化も掛けない（格納の
-宣言は貸し手から写す — `--dtype i8` も i8 系列の根の貸し手を読むだけ）。フィクスチャは書かない
-（chunk 列の参照は既定タイルの組のフィクスチャ）。
+`--shared` (ADR 0134 decision 1 — `--tile` is required) traces the same module again at the
+`--tile` side and writes, to the same series root, a pair that holds no weight bytes at all,
+`<target>_<tile>/model.krm` (e.g. `vae_decoder_first_32` / `vae_decoder_next_32` — graph name =
+component directory name = the key under the manifest's weights). **Every** initializer is a
+shared declaration (`IrShared` — the lender's tensor key and the storage of the lender's binding
+table), and the lender is the default-tile container of the same series root and the same storage
+(`<series root>/<target>/model.krm` — written at the table's tile side). No bytes are written, so
+neither the weight rounding nor the i8 quantization is applied (the storage declarations are copied
+from the lender — `--dtype i8` also just reads the lender of the i8 series root). No fixtures are
+written (the reference of the chunk sequence is the default-tile pair's fixtures).
 
-    uv run --group wan --inexact python -m wan.export_vae              # 2 グラフ + フィクスチャ
-    uv run --group wan --inexact python -m wan.export_vae --verify     # eager 同値の実測（実重み）
+    uv run --group wan --inexact python -m wan.export_vae              # 2 graphs + fixtures
+    uv run --group wan --inexact python -m wan.export_vae --verify     # eager equivalence (real)
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b [--verify]   # Wan2.2
-    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8   # i8 系列
+    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8   # i8 series
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --tile 32 --shared
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8 \\
-        --tile 32 --shared                                             # 32 の組（i8 系列）
+        --tile 32 --shared                                             # the 32 pair (i8 series)
 
-MUST: diffusers / huggingface_hub は関数の中で import する（`wan` グループは既定の sync に
-入らない — `tests/test_optional_group_imports.py`）。
+MUST: import diffusers / huggingface_hub inside functions (the `wan` group is not in the default
+sync — `tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -93,44 +101,48 @@ from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
 
-#: 系列名（決定 7 — 接尾辞 `-dyn` は DiT の S 形に合わせた ADR 0077 の慣例。VAE の 2 グラフも
-#: 同じ系列）。
+#: The series name (decision 7 — the `-dyn` suffix is the ADR 0077 convention, matching the DiT's
+#: S shape. The 2 VAE graphs are in the same series).
 SERIES_NAME = "wan2.1-t2v-1.3b-f16-dyn"
 
-#: ターゲット名 = 部品名 = 容器のグラフ名（決定 7）。
+#: Target name = component name = the container's graph name (decision 7).
 TARGET_FIRST = "vae_decoder_first"
 TARGET_NEXT = "vae_decoder_next"
 TARGETS = (TARGET_FIRST, TARGET_NEXT)
 
 MODEL_FILE = "model.krm"
 
-#: 潜在タイルの既定の辺（決定 2 — diffusers の `tile_sample_min` 256 px ÷ 8）。
+#: The default latent tile side (decision 2 — diffusers' `tile_sample_min` 256 px ÷ 8).
 DEFAULT_TILE = 32
 
-#: chunk グラフの入出力の空間比（潜在 1 に対するフレームの辺 — 2.2 は patchify 空間の画素）。上流
-#: config の `scale_factor_spatial` はこれ × `patch_size`（2.1 は 8 × 1・2.2 は 8 × 2 = 16 —
-#: {@link assert_series_config} が見る・ADR 0121 決定 6）。
+#: The spatial ratio between the chunk graph's inputs and outputs (the frame side per latent 1 —
+#: pixels of the patchify space for 2.2). Upstream config's `scale_factor_spatial` is this ×
+#: `patch_size` (8 × 1 for 2.1, 8 × 2 = 16 for 2.2 — checked by {@link assert_series_config},
+#: ADR 0121 decision 6).
 SPATIAL_SCALE = 8
 
-#: next の chunk が出すフレーム数（時間 upsample 2 段 = 4 倍）。first は 1 枚。
+#: The number of frames a next chunk produces (2 temporal upsample stages = 4×). first produces 1.
 NEXT_FRAMES = 4
 
-#: chunk 列のフィクスチャのファイル名（系列の根に置く — `vae_chunks.<case>.safetensors`）。
+#: The file name of the chunk-sequence fixtures (at the series root —
+#: `vae_chunks.<case>.safetensors`).
 FIXTURE_PREFIX = "vae_chunks."
 FIXTURE_SUFFIX = ".safetensors"
 
-#: フィクスチャのメタ `reference`（参照の素性）。patchify しない世代（2.1）と、chunk ループの
-#: 出力が unpatchify の前の patchify 空間である世代（2.2）。
+#: The fixtures' metadata `reference` (the reference's provenance). One for the generation without
+#: patchify (2.1) and one for the generation whose chunk-loop output is in the patchify space
+#: before unpatchify (2.2).
 FIXTURE_REFERENCE = "diffusers AutoencoderKLWan._decode chunk loop before clamp (CPU f32)"
 FIXTURE_REFERENCE_BEFORE_UNPATCHIFY = (
     "diffusers AutoencoderKLWan._decode chunk loop before unpatchify and clamp (CPU f32)"
 )
 
-#: グラフ入力の綴り（`WanVaeChunkDecoder.forward` の引数名がそのまま IR の入力名になる）。
+#: The spelling of the graph input (the argument names of `WanVaeChunkDecoder.forward` become the IR
+#: input names as is).
 LATENT_INPUT = "latent"
 
-#: chunk グラフの IR に現れてよい op の集合（これ以外が出たら書き直しの漏れ — fail loudly）。
-#: SiLU は `x · sigmoid(x)` に分解される・mid の attention は SDPA の保存（ADR 0023）。
+#: The set of ops allowed in the chunk graph's IR (anything else means a missed rewrite — fail
+#: loudly). SiLU decomposes into `x · sigmoid(x)`; the mid attention is SDPA preserved (ADR 0023).
 EXPECTED_OPS = frozenset(
     {
         "add",
@@ -151,43 +163,48 @@ EXPECTED_OPS = frozenset(
     }
 )
 
-#: 値の rank の上限（strided コピー族の上限 — 決定 2）。rank 5 は conv3d の重みだけに許す。
+#: The upper bound on value rank (the limit of the strided-copy family — decision 2). Rank 5 is
+#: allowed only for conv3d weights.
 MAX_VALUE_RANK = 4
 
 
 @dataclass(frozen=True)
 class FixtureCase:
-    """chunk 列のフィクスチャ 1 本（潜在の seed と chunk 数）。"""
+    """One chunk-sequence fixture (the latent's seed and the chunk count)."""
 
     name: str
     seed: int
     chunks: int
-    #: `band` = 帯を決めるケース・`accept` = 受け入れを判定するケース（追記 2026-10-02）。
+    #: `band` = a case that sets the band, `accept` = a case that judges acceptance (addendum
+    #: 2026-10-02).
     role: str
 
 
-#: 帯の決定用と受入れ用で、潜在（seed）と chunk 境界（chunk 数）を両方変える。`long` は 81 フレーム
-#: （ADR 0118 段 8）の受入れで、帯は `band` のまま（帯を 21 chunk の結果から導き直さない）。
+#: Band and acceptance cases differ in both the latent (seed) and the chunk boundaries (chunk
+#: count). `long` is the 81-frame acceptance (ADR 0118 step 8), and the band stays that of `band`
+#: (the band is not re-derived from the 21-chunk result).
 FIXTURE_CASES = (
     FixtureCase("band", seed=20261002, chunks=9, role="band"),
     FixtureCase("accept", seed=20261003, chunks=5, role="accept"),
     FixtureCase("long", seed=20261004, chunks=21, role="accept"),
 )
 
-#: Wan2.2 TI2V-5B の VAE の系列（ADR 0121 決定 7 — VAE だけの系列・DiT は持たない）。
+#: The VAE series of Wan2.2 TI2V-5B (ADR 0121 decision 7 — a VAE-only series, no DiT).
 TI2V_SERIES_NAME = "wan2.2-ti2v-5b-f16-dyn"
 
-#: Wan2.2 の VAE の decoder の i8 系列（ADR 0133 決定 7 — DiT の i8 容器と同じ系列の根。書き手の
-#: 綴りは `wan.ti2v_export_dit.SERIES_NAME`）。
+#: The i8 series of the Wan2.2 VAE decoder (ADR 0133 decision 7 — the same series root as the
+#: DiT's i8 container; the writer's spelling is `wan.ti2v_export_dit.SERIES_NAME`).
 TI2V_I8_SERIES_NAME = "wan2.2-ti2v-5b-i8-dyn"
 
-#: 書き出せる重みの格納（= `export_to_file` の `weight_dtype`）。i8 は i8 系列を持つモデルだけ。
+#: The weight storages that can be written (= `weight_dtype` of `export_to_file`). i8 only for
+#: models with an i8 series.
 WEIGHT_DTYPES = ("f16", "i8")
 
-#: Wan2.2 の潜在タイルの辺（ADR 0121 決定 6 — 出力 256 px ÷ 空間の圧縮 16）。
+#: The latent tile side of Wan2.2 (ADR 0121 decision 6 — output 256 px ÷ spatial compression 16).
 TI2V_TILE = 16
 
-#: Wan2.2 のケース（2.1 と同じ組み立て・seed だけ別 — 決定用 1 本 + 受入れ 2 本）。
+#: The Wan2.2 cases (the same construction as 2.1, only the seeds differ — 1 band case + 2
+#: acceptance cases).
 TI2V_FIXTURE_CASES = (
     FixtureCase("band", seed=20261041, chunks=9, role="band"),
     FixtureCase("accept", seed=20261042, chunks=5, role="accept"),
@@ -197,18 +214,19 @@ TI2V_FIXTURE_CASES = (
 
 @dataclass(frozen=True)
 class VaeSeries:
-    """モデル 1 つの VAE の系列（置き場・潜在タイル・patchify の倍率・フィクスチャのケース）。"""
+    """The VAE series of one model (location, latent tile, patchify factor, fixture cases)."""
 
     series: str
     tile: int
-    #: 上流 config の `patch_size` の期待値（違えば fail loudly — {@link assert_series_config}）。
+    #: The expected `patch_size` of the upstream config (fail loudly otherwise —
+    #: {@link assert_series_config}).
     patch_size: int | None
     cases: tuple[FixtureCase, ...]
-    #: `--dtype i8` の書き先の系列（ADR 0133 決定 7 — None のモデルは i8 を書けない）。
+    #: The series `--dtype i8` writes to (ADR 0133 decision 7 — a model with None cannot write i8).
     i8_series: str | None = None
 
 
-#: モデル名（`wan.sources.SOURCES` のキー）→ 系列。
+#: Model name (a key of `wan.sources.SOURCES`) → series.
 VAE_SERIES: dict[str, VaeSeries] = {
     "t2v-1.3b": VaeSeries(SERIES_NAME, DEFAULT_TILE, None, FIXTURE_CASES, None),
     "ti2v-5b": VaeSeries(TI2V_SERIES_NAME, TI2V_TILE, 2, TI2V_FIXTURE_CASES, TI2V_I8_SERIES_NAME),
@@ -216,12 +234,14 @@ VAE_SERIES: dict[str, VaeSeries] = {
 
 
 class ChunkGraphError(AssertionError):
-    """export した chunk グラフが決定 2 の取り決め（rank・op・cache の入出力）から外れたか、書き手の
-    前提（出所の revision・上流 config の `patch_size` と空間の圧縮）が系列と合わない。"""
+    """The exported chunk graph departs from the conventions of decision 2 (rank, ops, cache
+    inputs / outputs), or the writer's premises (the source revision, upstream config's
+    `patch_size` and spatial compression) do not match the series."""
 
 
 def load_vae(model: str = DEFAULT_MODEL, *, round_f16: bool) -> AutoencoderKLWan:
-    """pin した revision の VAE を CPU f32 で読む（`round_f16` なら f16 表現可能値へ丸める）。"""
+    """Loads the VAE of the pinned revision on CPU f32 (with `round_f16`, rounds it to
+    f16-representable values)."""
     from diffusers import AutoencoderKLWan
 
     vae = AutoencoderKLWan.from_pretrained(
@@ -229,65 +249,75 @@ def load_vae(model: str = DEFAULT_MODEL, *, round_f16: bool) -> AutoencoderKLWan
     ).eval()
     if round_f16:
         report = round_weights_to_f16(vae)
-        print(f"[fake-quant] vae: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
+        print(
+            f"[fake-quant] vae: rounded to f16-representable values — {report.describe()}",
+            flush=True,
+        )
     return vae
 
 
 def fake_quant_i8(vae: AutoencoderKLWan) -> Mapping[str, torch.Tensor]:
-    """f16 へ丸めた VAE の重みを per-channel symmetric i8 の表現可能値へ丸め、scale 台帳を返す
-    （ADR 0133 決定 7 — DiT の `dit8` と同じ量子化器・既定の対象）。
+    """Rounds the f16-rounded VAE weights to per-channel symmetric i8-representable values and
+    returns the scale ledger (ADR 0133 decision 7 — the same quantizer as the DiT's `dit8`, default
+    targets).
 
-    対象は `fake_quant_int8` の既定の型（`nn.Conv3d` を含む）の weight だけで、bias・norm は f16 へ
-    丸めた値のまま（格納は f32）。台帳のキーは VAE の FQN で、chunk グラフのラッパ
-    （{@link wan.vae_patch.WanVaeChunkDecoder}）は `decoder` / `post_quant_conv` を同じ名前で持つ
-    ので、そのまま `export_to_file` へ渡せる（encoder の分は emit が引かない）。
+    The targets are only the weights of `fake_quant_int8`'s default types (including `nn.Conv3d`);
+    biases and norms keep their f16-rounded values (stored as f32). The ledger's keys are the VAE's
+    FQNs, and the chunk graph wrapper ({@link wan.vae_patch.WanVaeChunkDecoder}) holds `decoder` /
+    `post_quant_conv` under the same names, so it can be passed to `export_to_file` as is (emit does
+    not look up the encoder's entries).
     """
     report = fake_quant_int8(vae)
-    print(f"[fake-quant] vae: i8 per-channel へ丸めた — {report.describe()}", flush=True)
+    print(f"[fake-quant] vae: rounded to i8 per-channel — {report.describe()}", flush=True)
     return report.scales
 
 
 def provenance(model: str = DEFAULT_MODEL) -> Provenance:
-    """容器へ焼く出所（ライセンスは手元の snapshot の README・revision は pin した値）。
+    """The provenance baked into the container (the license from the local snapshot's README, the
+    revision is the pinned value).
 
-    snapshot のディレクトリ名は HF キャッシュの commit SHA そのもので、`local_snapshot` は pin した
-    revision しか解決しない。食い違いは fail loudly（別の checkpoint の出所を名乗らない）。
+    The snapshot's directory name is the HF cache commit SHA itself, and `local_snapshot` resolves
+    only the pinned revision. A mismatch fails loudly (never claim the provenance of another
+    checkpoint).
     """
     snapshot = local_snapshot(model)
     revision = SOURCES[model].revision
     if snapshot.name != revision:
-        raise ChunkGraphError(f"snapshot {snapshot} が pin した revision {revision} でない")
+        raise ChunkGraphError(f"snapshot {snapshot} is not the pinned revision {revision}")
     return Provenance(
         license=snapshot_license(snapshot), notice=NOTICE_FILENAME, upstream_revision=revision
     )
 
 
 def assert_series_config(vae: AutoencoderKLWan, series: VaeSeries) -> None:
-    """上流 config が系列の前提（`patch_size` と空間の圧縮）と合うかを見る（外れたら fail loudly）。
+    """Checks that the upstream config matches the series' premises (`patch_size` and spatial
+    compression) (fails loudly otherwise).
 
-    空間の圧縮 `scale_factor_spatial` は chunk グラフの入出力の空間比 {@link SPATIAL_SCALE} ×
-    `patch_size` でなければならない — ホストの重なりの式（`vae_tiling.min_overlap_latent`）と
-    フレームの辺 `8t` がこの比に依る。
+    The spatial compression `scale_factor_spatial` must be the chunk graph's input / output spatial
+    ratio {@link SPATIAL_SCALE} × `patch_size` — the host's overlap formula
+    (`vae_tiling.min_overlap_latent`) and the frame side `8t` depend on this ratio.
     """
     config = vae.config
     if config.patch_size != series.patch_size:
         raise ChunkGraphError(
-            f"上流の patch_size {config.patch_size} が系列 {series.series} の"
-            f" {series.patch_size} でない"
+            f"upstream patch_size {config.patch_size} differs from what series {series.series}"
+            f" expects ({series.patch_size})"
         )
     expected = SPATIAL_SCALE * (series.patch_size or 1)
     if config.scale_factor_spatial != expected:
         raise ChunkGraphError(
-            f"上流の scale_factor_spatial {config.scale_factor_spatial} が"
-            f" {SPATIAL_SCALE} × patch_size = {expected} でない"
+            f"upstream scale_factor_spatial {config.scale_factor_spatial} is not"
+            f" {SPATIAL_SCALE} × patch_size = {expected}"
         )
 
 
 def weight_summary(vae: AutoencoderKLWan) -> dict[str, Any]:
-    """グラフが読む重み（decoder + post-quant）の要素数・最大絶対値・非有限の数（要約の記録用）。
+    """Element count, max absolute value and non-finite count of the weights the graphs read
+    (decoder + post-quant) (for the summary record).
 
-    f16 の丸め（`round_weights_to_f16`）は有限値が非有限へ飽和すると fail loudly なので、丸めた後の
-    非有限は 0 のはず — その実測をここで残す（ADR 0121 段 4 の検収）。
+    The f16 rounding (`round_weights_to_f16`) fails loudly when a finite value saturates to
+    non-finite, so the non-finite count after rounding should be 0 — the measurement is kept here
+    (the acceptance of ADR 0121 step 4).
     """
     tensors = [*vae.decoder.parameters(), *vae.post_quant_conv.parameters()]
     with torch.no_grad():
@@ -299,34 +329,38 @@ def weight_summary(vae: AutoencoderKLWan) -> dict[str, Any]:
 
 
 def _peak_rss_gib() -> float:
-    """このプロセスの RSS の最大（GiB — Linux の `ru_maxrss` は KiB）。"""
+    """The peak RSS of this process (GiB — Linux `ru_maxrss` is in KiB)."""
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
 
 
 def example_inputs(
     module: vae_patch.WanVaeChunkDecoder, tile: int
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """export の例示入力（潜在 1 フレーム + ゼロの cache — 値は形にしか効かない）。"""
+    """The export's example inputs (latent of 1 frame + zero caches — the values only affect the
+    shapes)."""
     channels = int(module.post_quant_conv.in_channels)
     latent = torch.zeros(channels, 1, tile, tile)
     return latent, vae_patch.zero_caches(module.slots, tile, first=module.first)
 
 
 def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, tile: int) -> None:
-    """chunk グラフの IR が決定 2 の取り決めを満たすことを見る（外れたら fail loudly）。
+    """Checks that the chunk graph's IR meets the conventions of decision 2 (fails loudly
+    otherwise).
 
-    - op は {@link EXPECTED_OPS} の中だけ（pad は無い — 因果パディングは cache の cat で表す）。
-    - 値は rank 4 以下。rank 5 は conv3d の重み（initializer・第 2 入力）だけ（rank 6 の reshape も
-      この検査で落ちる）。
-    - 入力は `latent` + cache（名前・形・順が表どおり）・出力はフレーム + 更新後の cache（同じ順）。
-      潜在とフレームのチャネル数はモジュール（post-quant の入力・`conv_out` の出力）から読む。
-    - 出力の cache k は「cache 入力 k を時間の先頭に cat した値の slice」から作られている
-      （順を取り違えたグラフは、形が揃う cache どうしで黙って入れ替わる — 形の検査では掴めない）。
+    - ops only from {@link EXPECTED_OPS} (no pad — causal padding is expressed by the cache cat).
+    - values of rank 4 or less. Rank 5 only for conv3d weights (initializer, second input) (a rank-6
+      reshape also fails this check).
+    - inputs are `latent` + caches (names, shapes and order as in the table); outputs are the frames
+      + the updated caches (in the same order). The channel counts of the latent and the frames are
+      read from the module (the input of post-quant, the output of `conv_out`).
+    - output cache k is built from "a slice of the value with cache input k concatenated at the
+      start in time" (a graph with a swapped order silently exchanges caches of matching shapes — a
+      shape check cannot catch it).
     """
     ops = Counter(node.op for node in graph.nodes)
     unexpected = sorted(set(ops) - EXPECTED_OPS)
     if unexpected:
-        raise ChunkGraphError(f"想定外の op {unexpected}（書き直しの漏れ）")
+        raise ChunkGraphError(f"unexpected ops {unexpected} (a missed rewrite)")
 
     producer = {out: node for node in graph.nodes for out in node.outs}
     conv3d_weights = {node.ins[1] for node in graph.nodes if node.op == "conv3d"}
@@ -335,7 +369,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
         if rank <= MAX_VALUE_RANK:
             continue
         if name not in graph.initializers or name not in conv3d_weights or rank != 5:
-            raise ChunkGraphError(f"rank {rank} の値 '{name}'（rank 5 は conv3d の重みだけ）")
+            raise ChunkGraphError(f"rank {rank} value '{name}' (rank 5 only for conv3d weights)")
 
     slots = module.cache_slots
     side = tile * SPATIAL_SCALE
@@ -348,7 +382,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
         raise ChunkGraphError(f"入力 {actual_inputs} が表 {expected_inputs} と違う")
 
     if len(graph.outputs) != 1 + len(slots):
-        raise ChunkGraphError(f"出力 {len(graph.outputs)} 本（期待 1 + {len(slots)}）")
+        raise ChunkGraphError(f"{len(graph.outputs)} outputs (expected 1 + {len(slots)})")
     frames = 1 if module.first else NEXT_FRAMES
     frame_shape = [int(dim) for dim in graph.values[graph.outputs[0]].shape]
     if frame_shape != [frame_channels, frames, side, side]:
@@ -358,7 +392,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
     for slot, output in zip(slots, graph.outputs[1:], strict=True):
         shape = [int(dim) for dim in graph.values[output].shape]
         if shape != list(slot.shape(tile)):
-            raise ChunkGraphError(f"出力 '{output}' の形 {shape} が {slot.name} と違う")
+            raise ChunkGraphError(f"output '{output}' has shape {shape}, unlike {slot.name}")
         sliced = producer.get(output)
         joined = producer.get(sliced.ins[0]) if sliced is not None and sliced.ins else None
         if (
@@ -376,11 +410,13 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
 
 @contextmanager
 def _staged_set(finals: Sequence[Path]) -> Iterator[list[Path]]:
-    """複数の final の作業席を `finals` の順で渡し、`with` を例外なく抜けたときにだけ全部を据える。
+    """Hands out staging directories for several finals in the order of `finals`, and publishes all
+    of them only when the `with` exits without an exception.
 
-    1 つでも書き込み・検査で落ちれば全部の作業席が消え、どの final も 1 バイトも変わらない
-    （{@link karume.artifacts.staged_publication} を席の数だけ重ねたもの）。据え替えは席ごとの
-    rename なので、途中で落ちうる窓は最後の rename の列だけになる。
+    If any write or check fails, every staging directory is removed and no final changes by a
+    single byte ({@link karume.artifacts.staged_publication} stacked once per staging directory).
+    Publishing is one rename per staging directory, so the only window where a crash can land is
+    the final sequence of renames.
     """
     with ExitStack() as stack:
         yield [stack.enter_context(staged_publication(final)) for final in finals]
@@ -389,9 +425,11 @@ def _staged_set(finals: Sequence[Path]) -> Iterator[list[Path]]:
 def _graph_summary(
     target: str, out_dir: Path, staged: Path, graph: IrGraph, tile: int, started: float
 ) -> dict[str, Any]:
-    """1 グラフの要約（容器のバイト数は作業席の現物から数える — 据え替えは名前を変えるだけ）。
+    """The summary of one graph (the container's byte count comes from what is in the staging
+    directory — publishing only renames).
 
-    `peak_rss_gib` はこのプロセスのここまでの RSS の最大（グラフの相の山。全体の山は要約の根の値）。
+    `peak_rss_gib` is the peak RSS of this process so far (the peak of the graph phase; the overall
+    peak is the value at the summary root).
     """
     breakdown = storage_breakdown(graph)
     return {
@@ -419,7 +457,8 @@ def _graph_summary(
 
 
 def fixture_path(out_root: Path, case: FixtureCase) -> Path:
-    """chunk 列のフィクスチャの置き場（系列の根の `vae_chunks.<case>.safetensors`）。"""
+    """Where a chunk-sequence fixture lives (`vae_chunks.<case>.safetensors` at the series
+    root)."""
     return out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
 
 
@@ -435,21 +474,24 @@ def emit_targets(
     weight_dtype: str = "f16",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, Any]:
-    """グラフと chunk 列のフィクスチャ（`cases` — 空なら書かない）を一組で作業席へ書き、全部の
-    検査を通してから据える。
+    """Writes the graphs and the chunk-sequence fixtures (`cases` — none when empty) as one set into
+    staging directories, and publishes them after every check has passed.
 
-    `weight_dtype` は重みの格納（{@link WEIGHT_DTYPES}）で、i8 は `weight_scales`（{@link
-    fake_quant_i8} の台帳）を伴う。i8 はフィクスチャを書かない（メタの `weights` が f16-rounded の
-    参照だけを名乗る — i8 の重みで作った参照をその名で据えない）。
+    `weight_dtype` is the weight storage ({@link WEIGHT_DTYPES}); i8 comes with `weight_scales` (the
+    ledger of {@link fake_quant_i8}). i8 writes no fixtures (the metadata `weights` claims only the
+    f16-rounded reference — a reference made with i8 weights is not published under that name).
 
-    `patch_size` は系列の表の値（{@link VaeSeries}）で、フィクスチャのメタ `reference` の文言だけを
-    決める（2.1 は unpatchify が無いので、文言は 2.1 の既存のフィクスチャと同じまま）。
+    `patch_size` is the value of the series table ({@link VaeSeries}) and decides only the wording
+    of the fixtures' metadata `reference` (2.1 has no unpatchify, so the wording stays that of the
+    existing 2.1 fixtures).
 
-    MUST: 一組で据える。グラフごと・ファイルごとに据えると、途中で落ちた実走が新旧の混ざった組
-    （first だけ新しいタイル辺で、next と fixture は旧のまま）を系列に残す。タイル辺の違う混在は
-    配布の門（`wan.distribution.assert_vae_chunk_pair`）と TS の `wanVaeChunkLayout` が拒むが、
-    同じ形で中身の世代だけが違う混在はどちらにも見分けられない（出所は revision しか持たない —
-    捕まえられるのは GPU の chunk 列の照合だけ）。
+    MUST: publish as one set. Publishing per graph or per file would let a run that failed midway
+    leave a mixed old/new set in the series (only first at the new tile side, next and the fixtures
+    still old). A mix of different tile sides is rejected by the distribution check
+    (`wan.distribution.assert_vae_chunk_pair`) and by the TS `wanVaeChunkLayout`, but a mix of the
+    same shapes where only the generation of the contents differs cannot be told apart by either
+    (the provenance carries only the revision — only the GPU check of the chunk sequence can catch
+    it).
     """
     unknown = sorted(set(targets) - set(TARGETS))
     if unknown or len(set(targets)) != len(targets):
@@ -457,7 +499,9 @@ def emit_targets(
             f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
         )
     if weight_dtype not in WEIGHT_DTYPES:
-        raise ChunkGraphError(f"格納 {weight_dtype!r} は書けない（{' / '.join(WEIGHT_DTYPES)}）")
+        raise ChunkGraphError(
+            f"cannot write storage {weight_dtype!r} ({' / '.join(WEIGHT_DTYPES)})"
+        )
     if weight_dtype != "f16" and cases:
         raise ChunkGraphError(f"{weight_dtype} の回はフィクスチャを書かない（f16 の参照だけ）")
     reference = FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_BEFORE_UNPATCHIFY
@@ -519,24 +563,27 @@ def emit_targets(
 
 
 def shared_target(target: str, tile: int) -> str:
-    """共有の組（ADR 0134 決定 1）の名前 `<ターゲット>_<タイル>`（グラフ名 = 部品ディレクトリ名 =
-    manifest の weights のキー）。"""
+    """The name `<target>_<tile>` of a shared pair (ADR 0134 decision 1) (graph name = component
+    directory name = the key under the manifest's weights)."""
     return f"{target}_{tile}"
 
 
-#: 配布が名指す共有の組（ADR 0134 決定 5 — Wan2.2 の 32 潜在タイル）のグラフ名。`--shared` は
-#: どのタイルでも書けるが、weights のキーになるのはこの 2 つ（綴りの門 `tests/test_graph_names.py`
-#: が `wan.distribution.WAN_WEIGHTS` と突き合わせる）。
+#: The graph names of the shared pair the distribution names (ADR 0134 decision 5 — Wan2.2's 32
+#: latent tile). `--shared` can write any tile, but these 2 are the ones that become keys under
+#: weights (the spelling check `tests/test_graph_names.py` compares them with
+#: `wan.distribution.WAN_WEIGHTS`).
 SHARED_TILE = 32
 SHARED_TARGETS = tuple(shared_target(target, SHARED_TILE) for target in TARGETS)
 
 
 def read_lender(path: Path, target: str, lender_tile: int, weight_dtype: str) -> IrGraph:
-    """貸し手（既定タイルの容器）のグラフを、束縛表の格納を埋めた IR で読む（重みは読まない）。
+    """Reads the lender's graph (the default-tile container) as IR with the binding table's storage
+    filled in (no weights are read).
 
-    門（外れたら fail loudly）: 容器が在る・グラフ名が `target`・潜在入力が `[z, 1, t, t]` で
-    `t = lender_tile`・圧縮格納が `weight_dtype` の 1 つだけ（f16 系列の根に i8 の容器を置いた
-    取り違えは、借り手が別の格納の重みを名指す形になる）。
+    Checks (fail loudly otherwise): the container exists, the graph name is `target`, the latent
+    input is `[z, 1, t, t]` with `t = lender_tile`, and the only compressed storage is
+    `weight_dtype` (an i8 container placed by mistake at an f16 series root would make the borrower
+    name weights of another storage).
     """
     parts = container_parts(path)
     if not all(part.is_file() for part in parts):
@@ -559,12 +606,14 @@ def read_lender(path: Path, target: str, lender_tile: int, weight_dtype: str) ->
 
 
 def share_lender_weights(graph: IrGraph, lender: IrGraph, lender_path: Path) -> IrGraph:
-    """trace したグラフの initializer を**全部**、貸し手の同じテンソルキーへの共有宣言に置き換える。
+    """Replaces **every** initializer of the traced graph with a shared declaration pointing at the
+    same tensor key of the lender.
 
-    宣言の格納は貸し手の束縛表の格納（layout）で、scale は書かない（貸し手の常駐重みが持つ —
-    `IrInitializer` の約束）。門: 各 initializer のテンソルキーが貸し手に実体として在り、値の
-    dtype と形が貸し手と同じ（別のタイル辺で trace しても重みの形は変わらない — 変わるなら
-    モジュールが別物）。
+    The declaration's storage is the storage (layout) of the lender's binding table, and no scale
+    is written (the lender's resident weights hold it — the contract of `IrInitializer`). Checks:
+    each initializer's tensor key exists as a real tensor in the lender, and the value's dtype and
+    shape equal the lender's (tracing at another tile side does not change the weight shapes — if
+    they change, the module is a different one).
     """
     initializers: dict[str, IrInitializer] = {}
     for name, initializer in graph.initializers.items():
@@ -572,13 +621,13 @@ def share_lender_weights(graph: IrGraph, lender: IrGraph, lender_path: Path) -> 
         lent = lender.initializers.get(key) if key is not None else None
         if lent is None or lent.is_shared:
             raise ChunkGraphError(
-                f"initializer '{name}'（{key}）の実体が貸し手 {lender_path} に無い"
+                f"initializer '{name}' ({key}) has no real tensor in the lender {lender_path}"
             )
         mine, theirs = graph.values[name], lender.values[key]
         if (mine.dtype, list(mine.shape)) != (theirs.dtype, list(theirs.shape)):
             raise ChunkGraphError(
-                f"initializer '{key}' が {mine.dtype} {list(mine.shape)} — 貸し手 {lender_path} の"
-                f" {theirs.dtype} {list(theirs.shape)} と違う"
+                f"initializer '{key}' is {mine.dtype} {list(mine.shape)} — the lender {lender_path}"
+                f" has {theirs.dtype} {list(theirs.shape)}"
             )
         initializers[name] = IrInitializer(
             shared=IrShared(tensor=key), storage=IrStorage(dtype=lent.storage.dtype)
@@ -605,17 +654,21 @@ def emit_shared_targets(
     weight_dtype: str = "f16",
     cases: Sequence[FixtureCase] = (),
 ) -> dict[str, Any]:
-    """重みのバイトを持たない組 `<ターゲット>_<tile>` を書く（ADR 0134 決定 1 — `--shared`）。
+    """Writes the pair `<target>_<tile>` that holds no weight bytes (ADR 0134 decision 1 —
+    `--shared`).
 
-    貸し手は同じ系列の根の `<ターゲット>/model.krm`（タイル `lender_tile`・格納 `weight_dtype`）。
-    モジュールの重みは 1 バイトも書かないので、f16 への丸めも i8 の量子化も要らない（格納の宣言は
-    貸し手の束縛表から写す）。`cases` は空でなければ拒む — chunk 列の参照は貸し手の組の
-    フィクスチャで、この組は書かない（タイルの参照は ADR 0134 決定 6）。
+    The lender is `<target>/model.krm` at the same series root (tile `lender_tile`, storage
+    `weight_dtype`). Not a single byte of the module's weights is written, so neither the f16
+    rounding nor the i8 quantization is needed (the storage declarations are copied from the
+    lender's binding table). A non-empty `cases` is rejected — the reference of the chunk sequence
+    is the lender pair's fixtures, and this pair writes none (the tile reference is ADR 0134
+    decision 6).
 
-    門（外れたら何も据えない）: 貸し手の容器が在る（{@link read_lender}）・trace したグラフの
-    initializer が全部貸し手の同じキー・形・dtype の実体を名指す（{@link share_lender_weights}）・
-    書いた容器の initializer が全部共有宣言（バイトを持つものが無い）・{@link assert_chunk_graph} が
-    `tile` で成り立つ。2 本は {@link emit_targets} と同じく一組で据える。
+    Checks (nothing is published otherwise): the lender's container exists ({@link read_lender}),
+    every initializer of the traced graph names a real tensor of the lender with the same key, shape
+    and dtype ({@link share_lender_weights}), every initializer of the written container is a shared
+    declaration (none holds bytes), and {@link assert_chunk_graph} holds at `tile`. The 2 are
+    published as one set, as in {@link emit_targets}.
     """
     unknown = sorted(set(targets) - set(TARGETS))
     if unknown or len(set(targets)) != len(targets):
@@ -623,11 +676,15 @@ def emit_shared_targets(
             f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
         )
     if weight_dtype not in WEIGHT_DTYPES:
-        raise ChunkGraphError(f"格納 {weight_dtype!r} は書けない（{' / '.join(WEIGHT_DTYPES)}）")
+        raise ChunkGraphError(
+            f"cannot write storage {weight_dtype!r} ({' / '.join(WEIGHT_DTYPES)})"
+        )
     if cases:
         raise ChunkGraphError("共有の組はフィクスチャを書かない（chunk 列の参照は貸し手の組）")
     if tile == lender_tile:
-        raise ChunkGraphError(f"タイル {tile} は貸し手と同じ — 共有の組は別のタイル辺だけ")
+        raise ChunkGraphError(
+            f"tile {tile} equals the lender's — a shared pair is only for another tile side"
+        )
     lenders = {
         target: read_lender(out_root / target / MODEL_FILE, target, lender_tile, weight_dtype)
         for target in targets
@@ -655,7 +712,7 @@ def emit_shared_targets(
             )
             owned = sorted(key for key, init in graph.initializers.items() if not init.is_shared)
             if owned:
-                raise ChunkGraphError(f"{name}: バイトを持つ initializer が残った {owned[:4]}")
+                raise ChunkGraphError(f"{name}: initializers holding bytes remain {owned[:4]}")
             assert_chunk_graph(graph, module, tile)
             summary = _graph_summary(name, out_root / name, staged, graph, tile, started)
             summary["lender"] = str(lender_path)
@@ -670,12 +727,13 @@ def emit_shared_targets(
 
 
 def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torch.Tensor:
-    """固定 seed の乱数潜在を逆正規化した `[1, z, F, t, t]`（上流 `WanPipeline` の decode 直前の
-    値・z は上流 config の `z_dim` — 2.1 は 16・2.2 は 48）。
+    """A fixed-seed random latent, de-normalized, `[1, z, F, t, t]` (the value right before decode
+    in upstream `WanPipeline`; z is upstream config's `z_dim` — 16 for 2.1, 48 for 2.2).
 
-    `WanPipeline` は `latents / (1/std) + mean` で逆正規化してから `vae.decode` へ渡す。グラフの
-    入力はその後の値なので、フィクスチャも実運用と同じ値域で作る（帯の根拠を実運用の値域と
-    対応させる — dacvae の golden と同じ判断）。
+    `WanPipeline` de-normalizes with `latents / (1/std) + mean` before passing to `vae.decode`. The
+    graph input is the value after that, so the fixtures are built in the same value range as real
+    use (the band's justification is tied to the value range of real use — the same judgment as the
+    dacvae goldens).
     """
     generator = torch.Generator().manual_seed(case.seed)
     channels = int(vae.config.z_dim)
@@ -686,12 +744,15 @@ def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torc
 
 
 def verify(model: str, tile: int, chunks: int, seed: int) -> dict[str, Any]:
-    """パッチの eager 同値を実重み（f32・丸め無し）で測る。
+    """Measures the patch's eager equivalence on the real weights (f32, no rounding).
 
-    - `clamp(unpatchify(上流のクランプ前の chunk ループ)) == 上流 _decode`（参照の素性 — ビット
-      一致。unpatchify は patchify する世代〈2.2〉だけで、diffusers の関数そのものを当てる）
-    - cache の正規化だけを当てた形（上流のコードのまま）== 上流（ビット一致 — 決定 2 の導出の実測）
-    - 書き直しの最終形（{@link wan.vae_patch.chunk_decode}）と上流の差（記録）
+    - `clamp(unpatchify(upstream's chunk loop before clamp)) == upstream _decode` (the reference's
+      provenance — bit-exact. unpatchify applies only to the generation with patchify (2.2), using
+      diffusers' function itself)
+    - the form with only the cache normalization applied (upstream's code as is) == upstream
+      (bit-exact — the measurement behind the derivation of decision 2)
+    - the difference between the final rewritten form ({@link wan.vae_patch.chunk_decode}) and
+      upstream (recorded)
     """
     from diffusers.models.autoencoders.autoencoder_kl_wan import unpatchify
 
@@ -735,42 +796,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--model",
         choices=sorted(VAE_SERIES),
         default=DEFAULT_MODEL,
-        help=f"モデル（系列・タイル・ケースは表から — 既定 {DEFAULT_MODEL}）",
+        help=f"model (series, tile and cases come from the table — default {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--tile", type=int, default=None, help="潜在タイルの辺（既定は表 — 2.1 は 32・2.2 は 16）"
+        "--tile",
+        type=int,
+        default=None,
+        help="latent tile side (default from the table — 32 for 2.1, 16 for 2.2)",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f16",
-        help="重みの格納（既定 f16。i8 は i8 系列を持つモデルだけ — ADR 0133 決定 7。i8 は"
-        " フィクスチャを書かない: フィクスチャは e2e の f16 の参照で、i8 系列は GPU 側で f16 の"
-        " decode と比べる）",
+        help="weight storage (default f16. i8 only for models with an i8 series — ADR 0133"
+        " decision 7. i8 writes no fixtures: the fixtures are the e2e f16 reference, and the i8"
+        " series is compared with the f16 decode on the GPU side)",
     )
     parser.add_argument(
-        "--out", type=Path, default=None, help="系列の根（既定はモデルの系列 — 表の値）"
+        "--out", type=Path, default=None, help="series root (default: the model's series — table)"
     )
     parser.add_argument(
-        "--target", action="append", choices=TARGETS, default=None, help="書くグラフ（既定は両方）"
+        "--target",
+        action="append",
+        choices=TARGETS,
+        default=None,
+        help="graphs to write (default: both)",
     )
     parser.add_argument(
-        "--no-fixtures", action="store_true", help="chunk 列のフィクスチャを書かない"
+        "--no-fixtures", action="store_true", help="do not write the chunk-sequence fixtures"
     )
     parser.add_argument(
         "--shared",
         action="store_true",
-        help="重みのバイトを持たない組 `<ターゲット>_<タイル>` を書く（--tile 必須・貸し手は同じ"
-        " 系列の根の既定タイルの組・フィクスチャは書かない — ADR 0134 決定 1）",
+        help="write the pair `<target>_<tile>` that holds no weight bytes (--tile required; the"
+        " lender is the default-tile pair at the same series root; no fixtures — ADR 0134"
+        " decision 1)",
     )
-    parser.add_argument("--verify", action="store_true", help="eager 同値を測るだけ（書かない）")
-    parser.add_argument("--chunks", type=int, default=9, help="--verify の chunk 数（既定 9）")
-    parser.add_argument("--seed", type=int, default=0, help="--verify の潜在の seed")
+    parser.add_argument(
+        "--verify", action="store_true", help="only measure the eager equivalence (writes nothing)"
+    )
+    parser.add_argument(
+        "--chunks", type=int, default=9, help="chunk count for --verify (default 9)"
+    )
+    parser.add_argument("--seed", type=int, default=0, help="latent seed for --verify")
     args = parser.parse_args(argv)
     series = VAE_SERIES[args.model]
     tile = series.tile if args.tile is None else args.tile
     if tile <= 0:
-        parser.error(f"--tile は正の整数（{tile}）")
+        parser.error(f"--tile must be a positive integer (got {tile})")
     i8 = args.dtype == "i8"
     series_name = series.series
     if i8:
@@ -782,7 +855,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.shared and args.tile is None:
         parser.error("--shared は --tile を要する（貸し手の既定タイルと別の辺 — ADR 0134 決定 1）")
     if args.shared and args.verify:
-        parser.error("--shared と --verify は同時に使えない（--verify は書かない）")
+        parser.error("--shared and --verify cannot be used together (--verify writes nothing)")
 
     if args.verify:
         summary = verify(args.model, tile, args.chunks, args.seed)
@@ -791,7 +864,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     source = provenance(args.model)
     if args.shared:
-        # バイトを書かないので丸めない（格納の宣言は貸し手から写す）。
+        # No bytes are written, so no rounding (the storage declarations are copied from the
+        # lender).
         vae = load_vae(args.model, round_f16=False)
         assert_series_config(vae, series)
         summary = emit_shared_targets(

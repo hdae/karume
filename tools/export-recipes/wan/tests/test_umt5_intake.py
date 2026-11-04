@@ -1,28 +1,38 @@
-"""第三者の umT5 互換 encoder の取り込み（ADR 0122 段 b — 決定 5 / 6）の約束事。
+"""The contract of the intake of a third-party umT5-compatible encoder (ADR 0122 step b —
+decisions 5 / 6).
 
-- 取り込み（`wan.umt5_intake`）: ファイルを名前も中身もそのまま置き、sha256 が API の値と
-  一致・`intake.json` が元の dtype・config の出所（上流のもの / 本家の写し）・ライセンス（未宣言
-  なら印）を名乗る。sha256・キー集合・別名の対の値・FP8・混在・`.bin`・旧い綴り・構成の欄の
-  不一致は fail loudly。対の両方を持つ形と片方だけの形は受ける。`unknown` など再配布の条件を
-  識別しないライセンスの値は未宣言の印になる。取り込み先が `models/` の下なら API を引く前に、
-  取り込み先に置いてよいファイル（記録のファイル・config・記録・確認の記録）の外のもの（索引・
-  大文字の拡張子・`.pkl`・書きかけの `.part` を含む）があれば記録を書く前に落ちる。記録は置いた
-  config の sha256 を持ち、取り込みの後に config を書き換えると読み口（書き手・参照・組み立て）が
-  読む前に落ちる。
-- 読み口: 記録が名指すファイルだけを、sha256 を照合した記述子越しに読む（索引を置いても、照合の
-  後に path を差し替えても、読むのは照合した内容）。
-- 書き手（`wan.umt5_export --intake`）: BF16 の取り込みから書いた容器が、同じ値を F32 へ広げた
-  safetensors から同じ記録（dtype と、中身に従うファイルの sha256 / バイト数だけが違う）で書いた
-  容器と全 part の sha256 で一致する（読みの時点の拡幅が丸めの出発点を変えない）。記録の dtype と
-  ファイルの dtype の食い違い・取り込んだ後のファイルの差し替えは fail loudly。未宣言は明示なしの
-  `write` が何も読まず・書かずに落ち、明示ありなら容器のライセンス欄に印が入る。
-- 組み立て（`dist.py --pipeline umt5 --intake`）: 取り込み由来のモデルは、ライセンスの宣言の有無に
-  よらず出力先が `models/` の下なら落ちる（symlink・`..` を含む相対でも）。未宣言は明示なしで書く
-  前に落ちる。ルートのファイルは記録から導き、本家向けの LICENSE と「No retraining」の NOTICE を
-  付けない。`karume-umt5-xxl` を名乗らない。宣言済みなら記録と容器の provenance が照合される。
+- Intake (`wan.umt5_intake`): the files are placed with their names and contents unchanged, the
+  sha256 equals the API's value, and `intake.json` states the original dtype, the provenance of the
+  config (the upstream's own / a copy of the original model's) and the license (a marker when
+  undeclared). A mismatch in sha256, the key set, the values of the alias pair or the configuration
+  fields, FP8, a mix, `.bin` and the old spelling fail loudly. The form with both members of the
+  pair and the form with only one are accepted. A license value that does not identify the
+  redistribution terms, such as `unknown`, becomes the undeclared marker. When the intake target is
+  under `models/`, it fails before the API is called; when the intake target holds anything outside
+  the files allowed there (the recorded file, the config, the record, the confirmation record) —
+  an index, an upper-case extension, `.pkl`, a half-written `.part` included — it fails before the
+  record is written. The record holds the sha256 of the placed config, and rewriting the config
+  after the intake makes the readers (the writer, the reference, the assembly) fail before reading.
+- Reader: only the files the record names are read, through a descriptor whose sha256 was checked
+  (even with an index in place or a path swapped after the check, what is read is the checked
+  content).
+- Writer (`wan.umt5_export --intake`): the container written from a BF16 intake matches, in the
+  sha256 of every part, the container written from safetensors widened to F32 with the same values
+  and the same record (differing only in the dtype and in the sha256 / byte count of the files,
+  which follow their contents) (widening at read time does not change the rounding starting point).
+  A mismatch between the record's dtype and the file's dtype and a file swapped after the intake
+  fail loudly. With an undeclared license, `write` without the explicit flag fails reading and
+  writing nothing; with the flag, the marker goes into the container's license field.
+- Assembly (`dist.py --pipeline umt5 --intake`): a model that came from an intake fails when the
+  output is under `models/`, whether or not its license is declared (also through a symlink or a
+  relative path with `..`). An undeclared license fails before writing without the explicit flag.
+  The root files are derived from the record, without the original model's LICENSE and the
+  "No retraining" NOTICE. It does not claim the name `karume-umt5-xxl`. When declared, the record
+  and the container's provenance are compared.
 
-リポ名は架空（ADR 0122 — 第三者のリポ名を追跡されるファイルに書かない）。重みは乱数初期化の小さな
-umT5（`wan.umt5_probe.TINY_CONFIG`）— 実重みも HF へのアクセスも要らない。
+The repository names are fictitious (ADR 0122 — no third-party repository name is written into a
+tracked file). The weights are a small randomly initialized umT5 (`wan.umt5_probe.TINY_CONFIG`) —
+neither real weights nor HF access are needed.
 """
 
 from __future__ import annotations
@@ -66,18 +76,18 @@ from wan.umt5_distribution import (
     intake_repo_name,
 )
 
-#: 架空の上流（実在のどのリポとも一致しない綴り）。
+#: A fictitious upstream (a spelling that matches no real repository).
 REPO = "fixture-org/umt5-compatible-fixture"
 FILE = "umt5-compatible-fixture_bf16.safetensors"
 NAME = "fixture"
 
-#: 本家の行（構成の照合と写しの基準）。
+#: The original model's row (the basis for checking the configuration and for the copy).
 BASE = UMT5_SOURCES[ui.BASE_UPSTREAM].source
 
 EMBED = "encoder.embed_tokens.weight"
 SHARED = "shared.weight"
 
-#: 塊の行数（語彙 384・d_ff 160・d_model 64 のどれも割り切らない）。
+#: The number of rows per block (divides none of vocabulary 384, d_ff 160, d_model 64).
 CHUNK_ROWS = 7
 
 
@@ -87,10 +97,11 @@ def _sha256(path: Path) -> str:
 
 
 class FakeHub:
-    """HF API と取得の模擬（`wan.umt5_intake.Hub`）。
+    """A stand-in for the HF API and downloads (`wan.umt5_intake.Hub`).
 
-    上流は {@link REPO} の `FIXTURE_REVISION` だけ、本家は config だけを持つ。`sha256` は LFS の値の
-    上書き（不一致の故障注入）、`card` は `cardData`（ライセンス・ベース）。
+    The upstream holds only `FIXTURE_REVISION` of {@link REPO}, and the original model holds only
+    its config. `sha256` overrides the LFS value (fault injection of a mismatch), and `card` is
+    `cardData` (license, base).
     """
 
     def __init__(
@@ -137,8 +148,8 @@ class FakeHub:
 
 @pytest.fixture(scope="module")
 def tiny_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """小さな umT5 の `save_pretrained`（config + F32 の単一 safetensors — tied な重みは
-    片方だけ）。"""
+    """`save_pretrained` of a small umT5 (config + a single F32 safetensors — only one of the tied
+    weights)."""
     pytest.importorskip("transformers")
     directory = tmp_path_factory.mktemp("umt5-tiny")
     probe.tiny_model().save_pretrained(directory)
@@ -152,7 +163,8 @@ def f32_tensors(tiny_dir: Path) -> dict[str, torch.Tensor]:
 
 @pytest.fixture(scope="module")
 def bf16_tensors(f32_tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """追加学習版の形（同じキー・同じ形の BF16 — f32 を RNE で丸めた値）。"""
+    """The shape of a fine-tuned version (the same keys, BF16 of the same shapes — f32 values
+    rounded with RNE)."""
     return {key: value.to(torch.bfloat16) for key, value in f32_tensors.items()}
 
 
@@ -185,7 +197,8 @@ def _intake(
 
 
 def _config(tmp_path: Path, tiny_dir: Path, **changes: Any) -> Path:
-    """上流が持つ config（本家の config からの差だけを `changes` で入れる）。"""
+    """The config the upstream holds (only the differences from the original config, through
+    `changes`)."""
     document = json.loads((tiny_dir / UMT5_CONFIG).read_text(encoding="utf-8"))
     document.update(changes)
     path = tmp_path / "upstream-config" / UMT5_CONFIG
@@ -195,7 +208,7 @@ def _config(tmp_path: Path, tiny_dir: Path, **changes: Any) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 取り込み
+# Intake
 # ---------------------------------------------------------------------------
 
 
@@ -223,8 +236,8 @@ class TestTheIntake:
     def test_an_undeclared_upstream_is_marked_and_its_configuration_is_assumed(
         self, tmp_path, tiny_dir, bf16_tensors
     ):
-        """cardData も config も無い上流（今回の追加学習版の形）: 未宣言の印・ベースは null・構成は
-        本家の config の写し。"""
+        """An upstream with neither cardData nor a config (the shape of this fine-tuned version):
+        the undeclared marker, a null base, and a configuration copied from the original config."""
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
 
         assert intake.license == ui.UNDECLARED_LICENSE == "NOASSERTION"
@@ -271,7 +284,7 @@ class TestTheIntake:
     def test_a_sha256_that_differs_from_the_api_fails_and_records_nothing(
         self, tmp_path, tiny_dir, bf16_tensors
     ):
-        with pytest.raises(ui.Umt5IntakeError, match="API の値と違う"):
+        with pytest.raises(ui.Umt5IntakeError, match="differs from the API values"):
             _intake(tmp_path, tiny_dir, bf16_tensors, sha256={FILE: "0" * 64})
 
         destination = tmp_path / "inputs" / "umt5" / NAME
@@ -279,15 +292,15 @@ class TestTheIntake:
         assert not (destination / ui.INTAKE_FILE).exists()
 
     def test_an_api_commit_other_than_the_pin_fails(self, tmp_path, tiny_dir, bf16_tensors):
-        with pytest.raises(ui.Umt5IntakeError, match="指定の revision"):
+        with pytest.raises(ui.Umt5IntakeError, match="the requested revision"):
             _intake(tmp_path, tiny_dir, bf16_tensors, api_revision=OTHER_REVISION)
 
     @pytest.mark.parametrize(
         ("file", "revision", "match"),
         [
-            ("pytorch_model.bin", FIXTURE_REVISION, "safetensors でない"),
-            ("sub/" + FILE, FIXTURE_REVISION, "basename でない"),
-            (FILE, "main", "40 桁"),
+            ("pytorch_model.bin", FIXTURE_REVISION, "is not safetensors"),
+            ("sub/" + FILE, FIXTURE_REVISION, "is not a basename"),
+            (FILE, "main", "40-digit"),
         ],
     )
     def test_a_pickle_a_nested_file_or_a_branch_fails_before_the_api(
@@ -295,38 +308,40 @@ class TestTheIntake:
     ):
         class Unreachable:
             def revision(self, *_: Any) -> Any:
-                raise AssertionError("API を引く前に落ちていない")
+                raise AssertionError("did not fail before calling the API")
 
             def download(self, *_: Any) -> Any:
-                raise AssertionError("取得の前に落ちていない")
+                raise AssertionError("did not fail before the download")
 
         with pytest.raises(ui.Umt5IntakeError, match=match):
             ui.intake(REPO, revision, file, NAME, hub=Unreachable(), out_root=tmp_path)
 
     def test_a_repository_with_a_trailing_newline_fails_before_the_api(self, tmp_path):
-        """Python の `$` は末尾の改行の直前でも一致する — hub が拒否する綴りを通さない。"""
+        """Python's `$` also matches right before a trailing newline — a spelling the hub refuses
+        must not get through."""
 
         class Unreachable:
             def revision(self, *_: Any) -> Any:
-                raise AssertionError("API を引く前に落ちていない")
+                raise AssertionError("did not fail before calling the API")
 
             def download(self, *_: Any) -> Any:
-                raise AssertionError("取得の前に落ちていない")
+                raise AssertionError("did not fail before the download")
 
-        with pytest.raises(ui.Umt5IntakeError, match="'<owner>/<name>' の形でない"):
+        with pytest.raises(ui.Umt5IntakeError, match="is not of the form '<owner>/<name>'"):
             ui.intake(
                 f"{REPO}\n", FIXTURE_REVISION, FILE, NAME, hub=Unreachable(), out_root=tmp_path
             )
 
     def test_the_name_of_the_base_row_is_refused(self):
-        with pytest.raises(ui.Umt5IntakeError, match="本家の行"):
+        with pytest.raises(ui.Umt5IntakeError, match="the original's row"):
             ui.assert_intake_name(UMT5_DEFAULT_MODEL)
 
     @pytest.mark.parametrize("license", ["unknown", "UNKNOWN", "", "  ", "NoAssertion", "none"])
     def test_a_license_that_names_no_terms_is_recorded_as_undeclared(
         self, tmp_path, tiny_dir, bf16_tensors, license
     ):
-        """HF の `license: unknown` などは宣言が無いのと同じ（明示なしで容器を書かせない）。"""
+        """HF's `license: unknown` and the like count as no declaration (no container is written
+        without the explicit flag)."""
         intake = _intake(tmp_path, tiny_dir, bf16_tensors, license=license)
 
         assert intake.license == ui.UNDECLARED_LICENSE
@@ -341,20 +356,21 @@ class TestTheIntake:
             json.dumps({"weight_map": {SHARED: "evil.safetensors"}}), encoding="utf-8"
         )
 
-        with pytest.raises(ue.Umt5ExportError, match="記録の外の重みのファイル"):
+        with pytest.raises(ue.Umt5ExportError, match="files outside the record"):
             _intake(tmp_path, tiny_dir, bf16_tensors)
         assert not (destination / ui.INTAKE_FILE).exists()
 
 
 class TestTheIntakeDestination:
-    """取り込み先（`--out` の下の `<名前>`）が `models/` の下なら、API を引く前に落ちる。"""
+    """When the intake target (`<name>` under `--out`) is under `models/`, it fails before the API
+    is called."""
 
     class Unreachable:
         def revision(self, *_: Any) -> Any:
-            raise AssertionError("API を引く前に落ちていない")
+            raise AssertionError("did not fail before calling the API")
 
         def download(self, *_: Any) -> Any:
-            raise AssertionError("取得の前に落ちていない")
+            raise AssertionError("did not fail before the download")
 
     @pytest.fixture
     def models(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -363,7 +379,7 @@ class TestTheIntakeDestination:
         return tmp_path / "models"
 
     def _refused(self, out_root: Path, models: Path) -> None:
-        with pytest.raises(ui.Umt5IntakeError, match="models/ に置かない"):
+        with pytest.raises(ui.Umt5IntakeError, match="are not placed in models/"):
             ui.intake(REPO, FIXTURE_REVISION, FILE, NAME, hub=self.Unreachable(), out_root=out_root)
         assert not (models / NAME).exists()
 
@@ -382,12 +398,14 @@ class TestTheIntakeDestination:
         self._refused(Path("..", "inputs", "..", "models"), models)
 
     def test_the_default_destination_is_outside_models(self):
-        """既定の置き場（`inputs/umt5/`）は判定を通る（判定がどこでも落ちる形でない — 対）。"""
+        """The default location (`inputs/umt5/`) passes the check (the check is not one that fails
+        everywhere — the pair)."""
         ui.assert_outside_distribution_root(ui.INTAKE_ROOT / NAME, root=ui.DIST_ROOT)
 
 
 class TestTheCardLicense:
-    """`cardData` の `license` / `license_name` → 記録する識別子（`None` は未宣言の印になる）。"""
+    """`license` / `license_name` of `cardData` → the identifier recorded (`None` becomes the
+    undeclared marker)."""
 
     @pytest.mark.parametrize(
         ("license_id", "license_name", "expected"),
@@ -408,12 +426,13 @@ class TestTheCardLicense:
 
     @pytest.mark.parametrize(("license_id", "license_name"), [(["mit"], None), ("other", 1)])
     def test_a_value_that_is_not_a_string_fails(self, license_id, license_name):
-        with pytest.raises(ui.Umt5IntakeError, match="文字列でない"):
+        with pytest.raises(ui.Umt5IntakeError, match="is not a string"):
             ui._card_license(license_id, license_name, REPO)
 
 
 class TestTheCheckpointGate:
-    """取り込みの手順 4（ヘッダ・キー集合・形・別名の対）— どれが違っても記録を書かない。"""
+    """Step 4 of the intake (header, key set, shapes, alias pair) — any difference and no record is
+    written."""
 
     def _refused(self, tmp_path, tiny_dir, tensors, match: str) -> None:
         with pytest.raises(ue.Umt5ExportError, match=match):
@@ -423,38 +442,39 @@ class TestTheCheckpointGate:
     def test_a_missing_key_fails(self, tmp_path, tiny_dir, bf16_tensors):
         tensors = dict(bf16_tensors)
         del tensors["encoder.final_layer_norm.weight"]
-        self._refused(tmp_path, tiny_dir, tensors, "キー集合")
+        self._refused(tmp_path, tiny_dir, tensors, "key set differs")
 
     def test_a_decoder_key_fails(self, tmp_path, tiny_dir, bf16_tensors):
         tensors = {**bf16_tensors, "decoder.final_layer_norm.weight": torch.ones(64).bfloat16()}
-        self._refused(tmp_path, tiny_dir, tensors, "余り 1 本")
+        self._refused(tmp_path, tiny_dir, tensors, "extra 1")
 
     def test_the_old_spelling_fails(self, tmp_path, tiny_dir, bf16_tensors):
-        """Wan の原典の綴り（`blocks.N.attn.q` 等）は変換表を持たずに拒む。"""
+        """Wan's original spelling (`blocks.N.attn.q` and so on) is refused without a conversion
+        table."""
         tensors = {
             key.replace("encoder.block.", "blocks.").replace(".layer.0.SelfAttention.", ".attn."): (
                 value
             )
             for key, value in bf16_tensors.items()
         }
-        self._refused(tmp_path, tiny_dir, tensors, "キー集合")
+        self._refused(tmp_path, tiny_dir, tensors, "key set differs")
 
     def test_a_wrong_shape_fails(self, tmp_path, tiny_dir, bf16_tensors):
         tensors = {**bf16_tensors, "encoder.final_layer_norm.weight": torch.ones(65).bfloat16()}
-        self._refused(tmp_path, tiny_dir, tensors, "形が")
+        self._refused(tmp_path, tiny_dir, tensors, "shapes differ")
 
     def test_fp8_fails(self, tmp_path, tiny_dir, f32_tensors):
         tensors = {key: value.to(torch.float8_e4m3fn) for key, value in f32_tensors.items()}
-        self._refused(tmp_path, tiny_dir, tensors, "F8_E4M3 は受けない")
+        self._refused(tmp_path, tiny_dir, tensors, "dtype F8_E4M3 is not accepted")
 
     def test_mixed_bf16_and_f32_fails(self, tmp_path, tiny_dir, bf16_tensors):
         tensors = {**bf16_tensors, SHARED: bf16_tensors[SHARED].float()}
-        self._refused(tmp_path, tiny_dir, tensors, "混在")
+        self._refused(tmp_path, tiny_dir, tensors, "mixed dtypes")
 
     def test_both_names_of_the_tied_pair_are_accepted_when_bit_identical(
         self, tmp_path, tiny_dir, bf16_tensors
     ):
-        """本家の形（対の両方 — 243 本の側）。"""
+        """The original model's form (both members of the pair — the 243-tensor side)."""
         tensors = {**bf16_tensors, EMBED: bf16_tensors[SHARED].clone()}
 
         assert _intake(tmp_path, tiny_dir, tensors).dtype == "BF16"
@@ -465,7 +485,7 @@ class TestTheCheckpointGate:
         other = bf16_tensors[SHARED].clone()
         other[3, 5] += 1
         self._refused(
-            tmp_path, tiny_dir, {**bf16_tensors, EMBED: other}, "値が checkpoint の中で違う"
+            tmp_path, tiny_dir, {**bf16_tensors, EMBED: other}, "differ within the checkpoint"
         )
 
     def test_only_the_other_name_of_the_pair_is_accepted(self, tmp_path, tiny_dir, bf16_tensors):
@@ -487,16 +507,17 @@ class TestTheConfigGate:
     def test_an_upstream_config_that_differs_from_the_base_fails(
         self, tmp_path, tiny_dir, bf16_tensors, change
     ):
-        """バケットの構成はグラフ記述に入らない（容器がバイト同一のまま出力だけが変わりうる）ので、
-        上流が config を持てば本家と突き合わせる。"""
+        """The bucket configuration is not part of the graph description (the output alone could
+        change while the container stays byte-identical), so when the upstream has a config it is
+        compared with the original model's."""
         config = _config(tmp_path, tiny_dir, **change)
 
-        with pytest.raises(ui.Umt5IntakeError, match="構成の"):
+        with pytest.raises(ui.Umt5IntakeError, match="in the configuration fields"):
             _intake(tmp_path, tiny_dir, bf16_tensors, config=config)
 
     @staticmethod
     def _rewrite_config(intake: ui.Umt5Intake, **changes: Any) -> None:
-        """取り込みの後に config を手で書き換える（故障注入）。"""
+        """Rewrite the config by hand after the intake (fault injection)."""
         path = intake.directory / UMT5_CONFIG
         document = json.loads(path.read_text(encoding="utf-8"))
         document.update(changes)
@@ -506,21 +527,22 @@ class TestTheConfigGate:
     def test_a_config_rewritten_after_the_intake_is_refused(
         self, tmp_path, tiny_dir, bf16_tensors, config_source
     ):
-        """記録が置いたバイト列の sha256 を持ち、読むたびに照合する（グラフに効かないバケットの
-        構成の書き換えも、本家と照合していない構成として拒む）。"""
+        """The record holds the sha256 of the placed bytes and checks it on every read (a rewrite of
+        the bucket configuration, which does not affect the graph, is also refused as a
+        configuration not checked against the original model)."""
         config = None if config_source == "base-copy" else _config(tmp_path, tiny_dir)
         intake = _intake(tmp_path, tiny_dir, bf16_tensors, config=config)
         assert intake.config.source == config_source
         self._rewrite_config(intake, relative_attention_max_distance=64)
 
-        with pytest.raises(ui.Umt5IntakeError, match=r"記録の .* と違う"):
+        with pytest.raises(ui.Umt5IntakeError, match="differs from the record's"):
             ui.load_intake(intake.directory)
 
     def test_a_missing_config_is_refused(self, tmp_path, tiny_dir, bf16_tensors):
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
         (intake.directory / UMT5_CONFIG).unlink()
 
-        with pytest.raises(ui.Umt5IntakeError, match="が無い"):
+        with pytest.raises(ui.Umt5IntakeError, match="is missing"):
             ui.load_intake(intake.directory)
 
     @pytest.mark.parametrize(
@@ -539,11 +561,11 @@ class TestTheConfigGate:
         monkeypatch.setattr(ue, "SERIES_ROOT", tmp_path / "series")
 
         def unreachable(*_: Any, **__: Any) -> Any:
-            raise AssertionError("書き換えた config で読んだ")
+            raise AssertionError("read with the rewritten config")
 
         monkeypatch.setattr(ue, entry, unreachable)
 
-        with pytest.raises(ui.Umt5IntakeError, match=r"記録の .* と違う"):
+        with pytest.raises(ui.Umt5IntakeError, match="differs from the record's"):
             ue.main([command[0], "--intake", str(intake.directory), *command[1:]])
         assert not (tmp_path / "series").exists()
 
@@ -559,7 +581,7 @@ class TestTheRecord:
         [
             ({"dtype": "F16"}, "dtype"),
             ({"format": "karume-umt5-intake/0"}, "format"),
-            ({"format": "karume-umt5-intake/1"}, "やり直す"),
+            ({"format": "karume-umt5-intake/1"}, "redo"),
             (
                 {
                     "config": {
@@ -567,14 +589,14 @@ class TestTheRecord:
                         "base": {"repo": BASE.repo, "revision": BASE.revision},
                     }
                 },
-                "sha256} でない",
+                "config is not of the form",
             ),
-            ({"extra": 1}, "余剰"),
-            ({"revision": "main"}, "40 桁"),
-            ({"license": ""}, "license が空"),
-            ({"license": "unknown"}, "識別しない値"),
-            ({"license": "noassertion"}, "識別しない値"),
-            ({"license": "Other"}, "識別しない値"),
+            ({"extra": 1}, "the fields differ"),
+            ({"revision": "main"}, "40-digit"),
+            ({"license": ""}, "license is empty"),
+            ({"license": "unknown"}, "does not identify the redistribution terms"),
+            ({"license": "noassertion"}, "does not identify the redistribution terms"),
+            ({"license": "Other"}, "does not identify the redistribution terms"),
         ],
     )
     def test_a_broken_record_is_refused(self, tmp_path, tiny_dir, bf16_tensors, change, match):
@@ -589,13 +611,14 @@ class TestTheRecord:
 
 
 # ---------------------------------------------------------------------------
-# 書き手（--intake）
+# Writer (--intake)
 # ---------------------------------------------------------------------------
 
 
 def _widened_copy(intake: ui.Umt5Intake, root: Path, tensors: Mapping[str, torch.Tensor]) -> Path:
-    """同じ取り込みの写しで、ファイルを F32 の `tensors` に替え、記録の dtype を F32 にしたもの
-    （ファイルの sha256 / バイト数は中身に従って変わる — 他の欄は同じ）。"""
+    """A copy of the same intake with the file replaced by F32 `tensors` and the record's dtype set
+    to F32 (the file's sha256 / byte count change with its contents — the other fields are the
+    same)."""
     shutil.copytree(intake.directory, root)
     save_file(dict(tensors), str(root / FILE))
     document = json.loads((root / ui.INTAKE_FILE).read_text(encoding="utf-8"))
@@ -621,8 +644,9 @@ class TestTheWriter:
     def test_the_bf16_intake_writes_the_container_of_its_values_widened_to_f32(
         self, tmp_path, tiny_dir, bf16_tensors, f32_tensors
     ):
-        """読みの時点の拡幅は丸めの出発点を変えない（ADR 0122 段 b の検収）。対照: 丸める前の F32
-        から書くと別の容器になる（同じ層でも bf16 起点の i8 はバイトが違う）。"""
+        """Widening at read time does not change the rounding starting point (the acceptance of
+        ADR 0122 step b). The control: writing from F32 before rounding gives a different container
+        (even for the same layer, i8 starting from bf16 has different bytes)."""
         bf16 = _intake(tmp_path, tiny_dir, bf16_tensors)
         widened = ui.load_intake(
             _widened_copy(
@@ -647,7 +671,7 @@ class TestTheWriter:
             encoding="utf-8",
         )
 
-        with pytest.raises(ue.Umt5ExportError, match="F32 だけを受ける"):
+        with pytest.raises(ue.Umt5ExportError, match="only F32 is accepted"):
             ue.prepare(
                 intake.directory,
                 checkpoint=ue.intake_checkpoint(ui.load_intake(intake.directory)),
@@ -664,7 +688,9 @@ class TestTheWriter:
             encoding="utf-8",
         )
 
-        with pytest.raises(ue.Umt5ExportError, match=r"intake\.json が名乗る BF16 だけを受ける"):
+        with pytest.raises(
+            ue.Umt5ExportError, match=r"only the BF16 intake\.json declares is accepted"
+        ):
             ue.prepare(widened, checkpoint=ue.intake_checkpoint(ui.load_intake(widened)))
 
     def test_a_file_replaced_after_the_intake_fails(self, tmp_path, tiny_dir, bf16_tensors):
@@ -679,8 +705,9 @@ class TestTheWriter:
     def test_the_reader_ignores_an_index_and_reads_only_the_recorded_file(
         self, tmp_path, tiny_dir, bf16_tensors, monkeypatch
     ):
-        """故障注入: 取り込み先に別のファイル（値 +1）とそれを指す索引を置き、記録の外の重みの門を
-        外しても、読み口は照合したファイルだけを読む（索引の分岐を通らない）。"""
+        """Fault injection: put another file (values +1) and an index pointing at it in the intake
+        target, and even with the outside-the-record weights check removed, the reader reads only
+        the checked file (it does not take the index branch)."""
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
         evil = {key: value + 1 for key, value in bf16_tensors.items()}
         save_file(evil, str(intake.directory / "evil.safetensors"))
@@ -699,7 +726,7 @@ class TestTheWriter:
             ue.CHECKPOINT_INDEX,
             "evil.safetensors",
             "sub/x.bin",
-            # 許可の一覧で閉じる（拡張子の一覧では見落とす形）。
+            # Closed by an allow list (forms that a list of extensions misses).
             "EVIL.SAFETENSORS",
             "weights.pkl",
             "weights.npz",
@@ -715,29 +742,32 @@ class TestTheWriter:
         (intake.directory / foreign).parent.mkdir(parents=True, exist_ok=True)
         (intake.directory / foreign).write_bytes(b"{}")
 
-        with pytest.raises(ue.Umt5ExportError, match="記録の外の重みのファイル"):
+        with pytest.raises(ue.Umt5ExportError, match="files outside the record"):
             ue.intake_checkpoint(intake)
 
     def test_a_symlink_under_an_allowed_name_fails(self, tmp_path, tiny_dir, bf16_tensors):
-        """許可の名前でも symlink は外のもの: 確認の記録の名前で、記録の外の重みを指せてしまう。"""
+        """A symlink is outside even with an allowed name: under the confirmation record's name it
+        could point at weights outside the record."""
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
         outside = tmp_path / "outside.safetensors"
         outside.write_bytes(b"{}")
         (intake.directory / ui.LICENSE_REVIEW_FILE).symlink_to(outside)
 
-        with pytest.raises(ue.Umt5ExportError, match="記録の外の重みのファイル"):
+        with pytest.raises(ue.Umt5ExportError, match="files outside the record"):
             ue.intake_checkpoint(intake)
 
     def test_the_review_note_is_allowed_next_to_the_record(self, tmp_path, tiny_dir, bf16_tensors):
-        """対: 置いてよいファイル（記録のファイル・config・記録・確認の記録）だけなら読める。"""
+        """The pair: with only the allowed files (the recorded file, the config, the record, the
+        confirmation record) it reads."""
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
         (intake.directory / ui.LICENSE_REVIEW_FILE).write_text("reviewed\n", encoding="utf-8")
 
         assert ue.intake_checkpoint(intake).names()
 
     def test_a_file_swapped_after_the_check_is_not_read(self, tmp_path, tiny_dir, bf16_tensors):
-        """照合と読みが同じ内容: 照合の後に path の先を別のファイルへ差し替えても（rename）、
-        読むのは握った記述子の指す照合済みの内容。"""
+        """The check and the read see the same content: even when the path is pointed at another
+        file after the check (rename), what is read is the checked content the held descriptor
+        points at."""
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
         checkpoint = ue.intake_checkpoint(intake)
         swapped = tmp_path / "swapped.safetensors"
@@ -750,7 +780,7 @@ class TestTheWriter:
     def test_the_upstream_table_path_still_takes_f32_only(self, tmp_path, bf16_tensors):
         save_file(dict(bf16_tensors), str(tmp_path / ue.CHECKPOINT_SINGLE))
 
-        with pytest.raises(ue.Umt5ExportError, match="F32 だけを受ける"):
+        with pytest.raises(ue.Umt5ExportError, match="only F32 is accepted"):
             ue.Checkpoint(tmp_path).read(SHARED)
 
 
@@ -767,7 +797,7 @@ class TestTheWriteCommand:
         intake = _intake(tmp_path, tiny_dir, bf16_tensors)
 
         def unreachable(*_: Any, **__: Any) -> Any:
-            raise AssertionError("明示なしで重みを読んだ")
+            raise AssertionError("read the weights without the explicit flag")
 
         monkeypatch.setattr(ue, "prepare", unreachable)
 
@@ -801,12 +831,12 @@ class TestTheWriteCommand:
     @pytest.mark.parametrize(
         ("argv", "message"),
         [
-            (["write", ui.ALLOW_UNDECLARED_LICENSE_FLAG], "--intake の write にだけ効く"),
-            (["write", "--intake", "seat", "--upstream", "xxl"], "同じ軸"),
-            (["check-mask", "--intake", "seat"], "--intake は check-mask に効かない"),
+            (["write", ui.ALLOW_UNDECLARED_LICENSE_FLAG], "applies only to write with --intake"),
+            (["write", "--intake", "seat", "--upstream", "xxl"], "are the same axis"),
+            (["check-mask", "--intake", "seat"], "--intake does not apply to check-mask"),
             (
                 ["reference", "--intake", "seat", ui.ALLOW_UNDECLARED_LICENSE_FLAG],
-                "--allow-undeclared-license は reference に効かない",
+                "--allow-undeclared-license does not apply to reference",
             ),
         ],
     )
@@ -819,7 +849,7 @@ class TestTheWriteCommand:
 
 
 # ---------------------------------------------------------------------------
-# 組み立て（dist.py --intake）
+# Assembly (dist.py --intake)
 # ---------------------------------------------------------------------------
 
 
@@ -830,8 +860,8 @@ def _record(
     config_source: str = "base-copy",
     base_model: list[str] | None = None,
 ) -> Path:
-    """組み立てが読む記録と、記録が pin する config だけを置く（組み立ては重みのファイルを
-    読まない）。"""
+    """Put only the record the assembly reads and the config the record pins (the assembly does not
+    read the weight files)."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / UMT5_CONFIG).write_text("{}\n", encoding="utf-8")
     (directory / ui.INTAKE_FILE).write_text(
@@ -861,7 +891,8 @@ def _record(
 class TestTheMirror:
     @pytest.fixture
     def roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """`models/` と実験用ミラーの既定の置き場を一時ディレクトリへ向ける。"""
+        """Point the default locations of `models/` and the local experimental mirror at a
+        temporary directory."""
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(dist, "LOCAL_DIST_ROOT", tmp_path / "local-dist")
         (tmp_path / "models").mkdir()
@@ -946,7 +977,7 @@ class TestTheMirror:
         _record(roots / "inputs" / "umt5" / NAME, license=license)
         self._series(roots, license=license)
 
-        with pytest.raises(DistError, match="models/ に置かない"):
+        with pytest.raises(DistError, match="are not placed in models/"):
             dist.main(
                 self._argv(
                     roots, "--out", str(roots / "models" / NAME), ui.ALLOW_UNDECLARED_LICENSE_FLAG
@@ -959,7 +990,7 @@ class TestTheMirror:
         self._series(roots)
         (roots / "staging").symlink_to(roots / "models")
 
-        with pytest.raises(DistError, match="models/ に置かない"):
+        with pytest.raises(DistError, match="are not placed in models/"):
             dist.main(
                 self._argv(
                     roots, "--out", str(roots / "staging" / NAME), ui.ALLOW_UNDECLARED_LICENSE_FLAG
@@ -974,7 +1005,7 @@ class TestTheMirror:
         monkeypatch.chdir(roots / "work")
         out = os.path.join("..", "local-dist", "..", "models", NAME)
 
-        with pytest.raises(DistError, match="models/ に置かない"):
+        with pytest.raises(DistError, match="are not placed in models/"):
             dist.main(self._argv(roots, "--out", out, ui.ALLOW_UNDECLARED_LICENSE_FLAG))
         assert not (roots / "models" / NAME).exists()
 
@@ -982,7 +1013,7 @@ class TestTheMirror:
         ("license", "revision", "match"),
         [
             ("cc-by-nc-4.0", FIXTURE_REVISION, r"provenance\.license"),
-            ("apache-2.0", OTHER_REVISION, "別の revision"),
+            ("apache-2.0", OTHER_REVISION, "different revision"),
         ],
     )
     def test_the_container_provenance_is_checked_against_the_record(
@@ -996,7 +1027,8 @@ class TestTheMirror:
         assert not (roots / "local-dist").exists()
 
     def test_a_marked_container_does_not_pass_as_a_declared_record(self, roots):
-        """記録を宣言済みに書き換えても、印を焼いた容器は照合で落ちる（容器の中身で閉じる）。"""
+        """Even with the record rewritten to declared, a container baked with the marker fails the
+        comparison (closed by the container's contents)."""
         _record(roots / "inputs" / "umt5" / NAME, license="apache-2.0")
         self._series(roots, license=ui.UNDECLARED_LICENSE)
 
@@ -1007,15 +1039,15 @@ class TestTheMirror:
         _record(roots / "inputs" / "umt5" / NAME, license="mit")
         self._series(roots, license="mit")
 
-        with pytest.raises(DistError, match="本文が無い"):
+        with pytest.raises(DistError, match="there is no text for the license"):
             dist.main(self._argv(roots))
         assert not (roots / "local-dist").exists()
 
     @pytest.mark.parametrize(
         ("extra", "match"),
         [
-            (["--model", UMT5_DEFAULT_MODEL], "取り込みの名前"),
-            (["--pipeline", "wan"], "--pipeline umt5 にだけ効く"),
+            (["--model", UMT5_DEFAULT_MODEL], "differs from the intake name"),
+            (["--pipeline", "wan"], "--intake applies only to --pipeline umt5"),
         ],
     )
     def test_mixing_with_other_models_or_pipelines_is_refused(self, roots, extra, match):
@@ -1026,7 +1058,7 @@ class TestTheMirror:
             dist.main([*self._argv(roots, ui.ALLOW_UNDECLARED_LICENSE_FLAG), *extra])
 
     def test_the_declaration_alone_is_refused(self, roots):
-        with pytest.raises(DistError, match="--intake と組むときだけ"):
+        with pytest.raises(DistError, match="applies only together with --intake"):
             dist.main(["--pipeline", "umt5", ui.ALLOW_UNDECLARED_LICENSE_FLAG])
 
     def test_it_never_names_the_base_repository(self, tmp_path):
@@ -1045,7 +1077,8 @@ class TestTheMirror:
 
 class TestTheWholeChain:
     def test_intake_write_and_mirror(self, tmp_path, tiny_dir, bf16_tensors, monkeypatch, capsys):
-        """取り込み → 書き手（明示あり）→ 実験用ミラー（明示あり）を実物の書き口で通す。"""
+        """Run intake → writer (explicit flag) → local experimental mirror (explicit flag) through
+        the real writers."""
         monkeypatch.setattr(ue, "SERIES_ROOT", tmp_path / "series")
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(dist, "LOCAL_DIST_ROOT", tmp_path / "local-dist")

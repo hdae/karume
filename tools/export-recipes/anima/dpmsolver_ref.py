@@ -1,45 +1,50 @@
-"""DPM++ 2M（`DPMSolverMultistepScheduler`）の golden を出す小さいリグ。
+"""A small rig that produces the golden of DPM++ 2M (`DPMSolverMultistepScheduler`).
 
-TS 側の family 非依存モジュール（`packages/models/src/generation/dpm-solver-multistep.ts`）は
-diffusers 0.39.0 の `DPMSolverMultistepScheduler` の 1:1 写しなので、その**実クラスを駆動して**
-係数と各 step の状態更新を印字する。突き合わせ先は
-`packages/models/tests/anima_dpm_solver_multistep_test.ts`（inline 期待値の由来がここ）。
+The family-independent TS module (`packages/models/src/generation/dpm-solver-multistep.ts`) is a
+1:1 copy of diffusers 0.39.0's `DPMSolverMultistepScheduler`, so this **drives the real class** and
+prints the coefficients and the state update of each step. The comparison target is
+`packages/models/tests/anima_dpm_solver_multistep_test.ts` (its inline expected values come from
+here).
 
-実重みは 1 バイトも要らない — 食わせるのは**合成 model 出力**（シード固定・小テンソル・f32）
-なので、`uv run --no-sync python -m anima.dpmsolver_ref` が数秒で回る。
+No real weights are needed at all — what is fed in is **synthetic model output** (fixed seed,
+small tensors, f32), so `uv run --no-sync python -m anima.dpmsolver_ref` runs in seconds.
 
-## MUST: 梯子は既存 Euler 経路のものを差し込む（diffusers 内蔵の flow 梯子は使わない）
+## MUST: plug in the Euler path's sigma schedule (not diffusers' built-in flow schedule)
 
-diffusers 0.39.0 の `set_timesteps` は `sigmas=` 引数を持たない（実測 — 受けるのは
-`num_inference_steps` / `device` / `mu` / `timesteps` の 4 つだけ）ので、flow の梯子を組む
-経路は `use_flow_sigmas=True` + `flow_shift` の 1 本しかない。その内蔵経路は
+diffusers 0.39.0's `set_timesteps` has no `sigmas=` argument (measured — it takes only the 4
+arguments `num_inference_steps` / `device` / `mu` / `timesteps`), so the only path that builds a
+flow schedule is `use_flow_sigmas=True` + `flow_shift`. That built-in path is
 
     alphas = linspace(1, 1/num_train_timesteps, N+1);  sigmas = 1 − alphas
     sigmas = flip(shift·s / (1 + (shift−1)·s))[:-1]  ⧺ [0]
 
-なので梯子の格子点が `shift(0.999·k/N)`（k = N…1）になり、karume の Euler 経路
-（{@link sigma_schedule} = `shift(k/N)`）と**バイト同一にならない**。実測（shift=3）:
-steps=2/4/8/32 のいずれでも最大絶対差 3.752112e-04・全要素がビット不一致。原因は
-①`1/num_train_timesteps` を linspace の終端に置くので先頭 sigma が 1 でなく 0.999666 になる
-②f32 への丸めが shift 変換の**後**（karume は前）の 2 点。
+so the grid points of the schedule become `shift(0.999·k/N)` (k = N…1) and are **not
+byte-identical** to karume's Euler path ({@link sigma_schedule} = `shift(k/N)`). Measured
+(shift=3): for every one of steps=2/4/8/32 the max abs difference is 3.752112e-04 and every element
+differs in its bits. The causes are two: ① `1/num_train_timesteps` is the end point of the
+linspace, so the first sigma is 0.999666 instead of 1; ② the rounding to f32 happens **after** the
+shift transform (karume rounds before).
 
-選択サンプラは **既存 Euler 経路と同じ梯子の上**で回すのが要件なので、`set_timesteps` の後に
-`sigmas` / `timesteps` を karume の梯子で差し替えてから `step()` を回す。差し替えるのは表だけで、
-`convert_model_output` / `dpm_solver_first_order_update` /
-`multistep_dpm_solver_second_order_update` / `step` の更新式は実クラスのものがそのまま走る。
+The selectable sampler is required to run **on the same schedule as the existing Euler path**, so
+after `set_timesteps` the `sigmas` / `timesteps` are replaced with karume's schedule before running
+`step()`. Only the tables are replaced; the update formulas of `convert_model_output` /
+`dpm_solver_first_order_update` / `multistep_dpm_solver_second_order_update` / `step` run as the
+real class has them.
 
-## 梯子の端で出る ±inf は正常（潰さない）
+## The ±inf at the ends of the schedule is expected (do not clamp it)
 
-karume の梯子は先頭が厳密に 1・末尾が厳密に 0 なので、`_sigma_to_alpha_sigma_t`（flow 経路は
-`alpha = 1 − sigma`）が step 0 で `alpha_s = 0`・最終 step で `sigma_t = 0` を返し、
-`lambda = log(alpha) − log(sigma)` が ∓inf、`h` が +inf になる。式は破綻せず
+karume's schedule starts at exactly 1 and ends at exactly 0, so `_sigma_to_alpha_sigma_t` (on the
+flow path `alpha = 1 − sigma`) returns `alpha_s = 0` at step 0 and `sigma_t = 0` at the last step,
+making `lambda = log(alpha) − log(sigma)` ∓inf and `h` +inf. The formulas do not break down and
+reduce to
 
-    step 0      exp(−h) = 0 → x ← sigma_t·x + alpha_t·x0（Euler 1 段と同値）
-    step 1      lambda_s1 = −inf → r0 = inf → D1 = 0（2 次項が自然に落ちる）
-    最終 step   sigma_t/sigma_s0 = 0・係数 = −1 → x ← x0（ビット同一）
+    step 0      exp(−h) = 0 → x ← sigma_t·x + alpha_t·x0 (equivalent to one Euler step)
+    step 1      lambda_s1 = −inf → r0 = inf → D1 = 0 (the second-order term drops out naturally)
+    last step   sigma_t/sigma_s0 = 0, coefficient = −1 → x ← x0 (bit-identical)
 
-に落ちる。diffusers 内蔵の flow 梯子は先頭が 0.999666 なので inf を踏まない — **この経路
-固有の性質**なので、TS 側の写しでも同じ順序で ∓inf を通す（前もって特別扱いすると値が変わる）。
+diffusers' built-in flow schedule starts at 0.999666 and never hits inf — **a property specific to
+this path**, so the TS copy also passes ∓inf through in the same order (special-casing it in
+advance changes the values).
 """
 
 from __future__ import annotations
@@ -53,20 +58,20 @@ import torch
 
 from .pipeline_ref import NUM_TRAIN_TIMESTEPS, SHIFT, sigma_schedule
 
-#: 合成 model 出力のシード。値に意味は無い（固定されていることだけが要件）。
+#: Seed of the synthetic model output. The value has no meaning (only being fixed matters).
 DEFAULT_SEED = 20260824
 
 
 def build_scheduler(sigmas: np.ndarray, shift: float) -> Any:
-    """karume の梯子を差し込んだ `DPMSolverMultistepScheduler`（DPM++ 2M の構成）。
+    """A `DPMSolverMultistepScheduler` with karume's schedule plugged in (configured as DPM++ 2M).
 
-    構成は DPM++ 2M そのもの: `algorithm_type="dpmsolver++"` × `solver_order=2` ×
-    `solver_type="midpoint"`。flow matching なので `prediction_type="flow_prediction"`
-    （`x0 = x − sigma·v`）で、`final_sigmas_type="zero"` は梱包の終端 0 と対。
+    The configuration is DPM++ 2M itself: `algorithm_type="dpmsolver++"` × `solver_order=2` ×
+    `solver_type="midpoint"`. It is flow matching, so `prediction_type="flow_prediction"`
+    (`x0 = x − sigma·v`), and `final_sigmas_type="zero"` pairs with the schedule's terminal 0.
 
-    MUST: `set_begin_index(0)` を立てる。既定の `_init_step_index` は timestep 値を
-    `self.timesteps` から検索して step を決めるので、差し替えた梯子に**同じ整数へ丸まる
-    timestep が 2 つ**あると（steps を増やすと起きる）先頭の step が 1 つずれる。
+    MUST: call `set_begin_index(0)`. The default `_init_step_index` finds the step by searching
+    `self.timesteps` for the timestep value, so if the replaced schedule has **two timesteps that
+    round to the same integer** (which happens as steps grow), the first step is off by one.
     """
     from diffusers import DPMSolverMultistepScheduler
 
@@ -88,7 +93,7 @@ def build_scheduler(sigmas: np.ndarray, shift: float) -> Any:
 
 
 def native_flow_sigmas(steps: int, shift: float) -> np.ndarray:
-    """diffusers 内蔵の flow 梯子（`use_flow_sigmas=True`）— 差分の記録用。"""
+    """diffusers' built-in flow schedule (`use_flow_sigmas=True`) — for recording the difference."""
     from diffusers import DPMSolverMultistepScheduler
 
     scheduler = DPMSolverMultistepScheduler(
@@ -103,16 +108,17 @@ def native_flow_sigmas(steps: int, shift: float) -> np.ndarray:
 
 
 def step_coefficients(scheduler: Any, index: int, steps: int) -> dict[str, Any]:
-    """その step の中間スケジュール（TS 側の写しと 1 対 1 で突き合わせる係数）。
+    """The intermediate schedule of that step (coefficients compared 1:1 with the TS copy).
 
-    `sample_scale` = `sigma_t/sigma_s0`・`d0_scale` = `alpha_t·(exp(−h) − 1)`・
-    `d1_scale` = その半分（midpoint）・`inv_r0` = `1/r0`（2 次項の係数）。
+    `sample_scale` = `sigma_t/sigma_s0`, `d0_scale` = `alpha_t·(exp(−h) − 1)`, `d1_scale` = half of
+    it (midpoint), `inv_r0` = `1/r0` (the coefficient of the second-order term).
 
-    `solver_order=2` では `step()` の分岐構造上 `lower_order_second` に到達しないので、1 次へ
-    落ちるのは **step 0**（`lower_order_nums < 1`）と**最終 step**（`final_sigmas_type="zero"`
-    ⇒ `lower_order_final` が常に真）の 2 つだけ。2 次項の係数はその 2 つでは**出さない** —
-    最終 step は `h` も `h_0` も +inf で `r0 = inf/inf = NaN` になり、印字すると「使われない
-    NaN」が golden に混ざる。
+    With `solver_order=2` the branch structure of `step()` never reaches `lower_order_second`, so
+    the only steps that fall back to first order are **step 0** (`lower_order_nums < 1`) and **the
+    last step** (`final_sigmas_type="zero"` ⇒ `lower_order_final` is always true). The
+    second-order coefficients are **not emitted** for those two — at the last step both `h` and
+    `h_0` are +inf and `r0 = inf/inf = NaN`, and printing it would mix "an unused NaN" into the
+    golden.
     """
     sigmas = scheduler.sigmas
     sigma_s0, sigma_t = sigmas[index], sigmas[index + 1]
@@ -139,7 +145,7 @@ def step_coefficients(scheduler: Any, index: int, steps: int) -> dict[str, Any]:
 
 
 def run(steps: int, shift: float, elements: int, seed: int) -> dict[str, Any]:
-    """合成 model 出力の系列を実クラスへ食わせ、係数と各 step の更新出力を集める。"""
+    """Feeds synthetic model outputs to the real class; collects coefficients and step updates."""
     sigmas = sigma_schedule(steps, shift)
     scheduler = build_scheduler(sigmas, shift)
     native = native_flow_sigmas(steps, shift)
@@ -157,7 +163,8 @@ def run(steps: int, shift: float, elements: int, seed: int) -> dict[str, Any]:
                 "index": index,
                 "velocity": [float(value) for value in velocity],
                 "coefficients": coefficients,
-                # `model_outputs[-1]` = その step の x0 予測（`convert_model_output` の出力）。
+                # `model_outputs[-1]` = that step's x0 prediction (the output of
+                # `convert_model_output`).
                 "x0": [float(value) for value in scheduler.model_outputs[-1]],
                 "sample": [float(value) for value in updated],
             }

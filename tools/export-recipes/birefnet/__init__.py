@@ -1,18 +1,22 @@
-"""BiRefNet 系（image-segmentation — BiRefNet_HR / Lucida）の export recipe（ADR 0065 決定 2）。
+"""Export recipe for the BiRefNet family (image-segmentation — BiRefNet_HR / Lucida) (ADR 0065
+decision 2).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: 上流モデル由来のパッチ層
-（{@link birefnet.patch}）・export 台本・配布 recipe（{@link birefnet.distribution}）と
-カードテンプレート（{@link birefnet.card}）。依存方向は **recipe → core の一方向だけ**
-（`tools/exporter/tests/test_architecture_boundary.py` が機械で守る）。
+Only what **cannot live in the general-purpose exporter core** goes here: the patch layer for the
+upstream model ({@link birefnet.patch}), the export script, the distribution recipe
+({@link birefnet.distribution}) and the card template ({@link birefnet.card}). Dependencies run
+**one way only, recipe → core** (enforced mechanically by
+`tools/exporter/tests/test_architecture_boundary.py`).
 
-Lucida は独立 recipe にしない — 構造は BiRefNet_HR と同一で、違うのは重みの出所（と、それに
-紐づく帰属・リポ名）だけなので、export 台本では `--model-dir` の 1 軸、配布では pipeline 席
-（`--pipeline birefnet` / `lucida` の別リポ — ADR 0092 決定 1）として同じ recipe が持つ。
+Lucida is not a separate recipe — its structure is identical to BiRefNet_HR and only the origin of
+the weights (and the attribution and repository name tied to it) differs, so the same recipe carries
+it: as one axis of `--model-dir` in the export script, and as a pipeline entry in the distribution
+(`--pipeline birefnet` / `lucida`, separate repositories — ADR 0092 decision 1).
 
-MUST: **再輸出しない**（`from birefnet import X` で family の中身が芋づるに import される形に
-しない）。台本は重い上流 import を持つので、`import birefnet` が transformers / timm / kornia を
-引き込む形になると、配布 recipe を触るだけの経路まで巻き添えになる。呼び出し側はサブモジュールを
-名指しで import すること。
+MUST: **do not re-export** (no `from birefnet import X` that drags the family's contents in
+transitively). The script carries heavy upstream imports, so if `import birefnet` pulled in
+transformers / timm / kornia, even paths that only touch the distribution recipe would be dragged
+along. Callers import the submodule by name.
 
-台本の起動は export-recipes ルートから（例: `uv run --group birefnet python -m birefnet.export`）。
+Run the script from the export-recipes root (e.g.
+`uv run --group birefnet python -m birefnet.export`).
 """

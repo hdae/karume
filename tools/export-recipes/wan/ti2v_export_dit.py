@@ -1,120 +1,140 @@
-"""Wan2.2 TI2V-5B の DiT を I2V 対応の S 形の IR（`krm`・i8 系列）と小さい S の golden へ
-書き出す台本（ADR 0121 段 1 — 決定 2 / 3 / 4 / 5 / 7）。
+"""The script that writes the Wan2.2 TI2V-5B DiT to an I2V-capable S-form IR (`krm`, i8 series) and
+small-S goldens (ADR 0121 step 1 — decisions 2 / 3 / 4 / 5 / 7).
 
-    uv run --group wan --inexact python -m wan.ti2v_export_dit inspect        # trace と構造の検査
-    uv run --group wan --inexact python -m wan.ti2v_export_dit write          # 容器 + golden
-    uv run --group wan --inexact python -m wan.ti2v_export_dit write-full     # 実寸の golden を足す
-    uv run --group wan --inexact python -m wan.ti2v_export_dit observe-quant  # 量子化の観測
-    uv run --group wan --inexact python -m wan.ti2v_export_dit eager-full     # 全量の eager 同値
+    uv run --group wan --inexact python -m wan.ti2v_export_dit inspect        # trace + structure
+    uv run --group wan --inexact python -m wan.ti2v_export_dit write          # container + golden
+    uv run --group wan --inexact python -m wan.ti2v_export_dit write-full     # real-size goldens
+    uv run --group wan --inexact python -m wan.ti2v_export_dit observe-quant  # observe quantization
+    uv run --group wan --inexact python -m wan.ti2v_export_dit eager-full     # whole eager equiv.
 
-どのサブコマンドも要約の JSON を標準出力と `--out`（既定
-`outputs/bench/karume-wan2.2/<日付>_dit-export/` — 系列とは別）の `<command>.json` に書き、
-欄 `passed` が偽なら非 0 で終わる。
+Every subcommand writes a JSON summary to standard output and to `<command>.json` under `--out`
+(default `outputs/bench/karume-wan2.2/<date>_dit-export/` — separate from the series), and exits
+non-zero when its `passed` field is false.
 
-## グラフ（決定 3）
+## The graph (decision 3)
 
-`wan.dit_patch.WanDitTokensTi2v`: 2.1 の 5 入力（トークン・`timesteps_proj`・文脈・RoPE の
-2 本）の後ろに `timesteps_proj_condition [1,256]` と `condition_mask [1,S,1]`（bool）を足した
-7 入力。時刻の MLP を M = 1 で 2 回回し、変調の各成分を消費の直前の `where` で選ぶ。
-`Dim("S")` の上限は 27,280（1280×704×121 — 受理集合は TS が絞る）。
+`wan.dit_patch.WanDitTokensTi2v`: 7 inputs — 2.1's 5 inputs (tokens, `timesteps_proj`, context,
+the two RoPE tables) followed by `timesteps_proj_condition [1,256]` and `condition_mask [1,S,1]`
+(bool). The time MLP runs twice with M = 1, and each modulation component is selected by a `where`
+right before it is consumed. The upper bound of `Dim("S")` is 27,280 (1280×704×121 — the TS side
+narrows the accepted set).
 
-## export の形（決定 7 — ADR 0119 段 10b の形・exporter core の変更なし）
+## The export form (decision 7 — the form of ADR 0119 step 10b, no change to the exporter core)
 
-trace は重みを持たない meta の上流で回し（{@link trace}）、linear 307 本（patch 埋め込みの
-Linear を含む）は checkpoint から行の塊ごとに i8 にして `fixed_weights` で渡す。bias・norm・
-`scale_shift_table` は checkpoint の f32 のまま（`wan.dit_probe.prepare` の材料作りを
-{@link trace} で回す — 段 0 の実測の山 5.84 GiB）。容器には資産 `rope_base`（2.1 と同じ席）が
-入る。
+The trace runs on the upstream on meta without weights ({@link trace}), and the 307 linears (the
+patch embedding's Linear included) are turned into i8 per block of rows from the checkpoint and
+passed as `fixed_weights`. bias, norm and `scale_shift_table` stay the checkpoint's f32 (the
+material preparation of `wan.dit_probe.prepare` runs through {@link trace} — measured peak at step 0
+5.84 GiB). The container holds the asset `rope_base` (the same slot as in 2.1).
 
-## IR の検査（{@link inspect_graph} — 段 1 の検収）
+## The IR check ({@link inspect_graph} — the acceptance of step 1)
 
-- linear のノードが「量子化の対象 + 時刻の MLP の 3 本」（5B で 310 — 決定 2 の dispatch の
-  本数）
-- i8 の重みが量子化の対象とちょうど同じ（5B で 307）で、残りの重み（bias・norm・
-  `scale_shift_table`）は f32
-- `where` がブロックあたり 6 本 + head の 2 本で、どれも出力 `[1,S,dim]` の消費者が**直後の
-  1 ノードだけ**（attention をまたいで生きる `where` の出力が無い — {@link where_placement}）
-- グラフ入力が 7 本の宣言どおりで、`condition_mask` が bool `[1,S,1]`
+- the linear nodes are "the quantization targets + the 3 of the time MLP" (310 for the 5B — the
+  dispatch count of decision 2)
+- the i8 weights are exactly the quantization targets (307 for the 5B), and the remaining weights
+  (bias, norm, `scale_shift_table`) are f32
+- there are 6 `where`s per block + 2 in the head, and for each, the consumer of the output
+  `[1,S,dim]` is **only the next node** (no `where` output lives across attention —
+  {@link where_placement})
+- the graph inputs are the 7 declared ones, and `condition_mask` is bool `[1,S,1]`
 
-## golden（段 1 — S = 192 の T2V の形と I2V の形）
+## The goldens (step 1 — S = 192 in the T2V form and the I2V form)
 
-ケースは {@link CASES}（決定用 6 本 = T2V の形 3 + I2V の形 3・受入れ 4 本 = T2V 2 + I2V 2 —
-段 2 の r 門の本数）。文脈は Wan2.1 の事前計算の埋め込み資産の固定 4 プロンプト（合成の乱数は 5B の
-CPU f32 と f64 の差を増幅する — {@link Ti2vCase} の doc）、潜在は seed からの乱数。重みは
-**書いたばかりの容器**から層逐次で読む
-（`dit_reference.ContainerDitWeights` — i8 は packed × scale を f32 で）。f32 は上流の
-`from_pretrained` と同じ番地のずれで回す（f32 の GEMM の最終ビットが番地に依る —
-`wan.dit_reference` のモジュール doc）。
+The cases are {@link CASES} (6 decision cases = 3 in the T2V form + 3 in the I2V form, 4 acceptance
+cases = 2 T2V + 2 I2V — the counts of step 2's r check). The context is the fixed 4 prompts of
+Wan2.1's precomputed embedding asset (a synthetic random context amplifies the difference between
+CPU f32 and f64 on the 5B — the doc of {@link Ti2vCase}), and the latents are random from the seed.
+The weights are read layer by layer from **the container just written**
+(`dit_reference.ContainerDitWeights` — i8 as packed × scale in f32). f32 runs with the same address
+offsets as the upstream's `from_pretrained` (the last bits of the f32 GEMM depend on the addresses —
+the module doc of `wan.dit_reference`).
 
-- `reference.<case>`: `latents` / `timestep`（i32・生成側）/ `condition_timestep`（i32・条件側 —
-  I2V は 0・T2V は生成側と同じ）/ `output`（CPU f32）/ `output.f64`（活性も f64・f32 へ丸めた値）。
-  参照の時刻の表し方は決定 4: T2V は上流の 1 次元 timestep の forward、I2V は参照ラッパ（時刻の
-  MLP を値ごとに M = 1 — `dit_patch.reference_dit` の `condition`）
-- `io.<case>`: グラフ入力 7 本（`input.*` — 条件マスクは u32 の 0 / 1）とパッチ後の eager の出力
-  `output.0`（同じ層逐次の重みで回した S 形のラッパ）
+- `reference.<case>`: `latents` / `timestep` (i32, generation side) / `condition_timestep` (i32,
+  condition side — 0 for I2V, the same as the generation side for T2V) / `output` (CPU f32) /
+  `output.f64` (activations in f64 too, rounded to f32). How the reference represents time is
+  decision 4: T2V uses the upstream forward with the one-dimensional timestep, I2V the reference
+  wrapper (the time MLP with M = 1 per value — `condition` of `dit_patch.reference_dit`)
+- `io.<case>`: the 7 graph inputs (`input.*` — the condition mask as u32 0 / 1) and the patched
+  eager output `output.0` (the S-form wrapper run with the same layer-by-layer weights)
 
-eager 同値の門（`export_dit.eager_failures` と同じ判定）: T2V の形は上流の 1 次元 timestep の
-経路と、I2V の形は参照ラッパと trunk がビット一致。1 本でも外れたら作業席の中で止める（系列は
-1 バイトも変わらない）。両側が同じ層逐次の重みを読むので、読み込みに共通の誤りはこの門では見えない
-（下の `eager-full` が独立した重みで見る）。diffusers の 2 次元 timestep の経路（M = S の linear）
-との差は観測として決定用ケースの要約に並べる（門ではない — 決定 4）。
+The eager-equivalence check (the same judgment as `export_dit.eager_failures`): the T2V form is
+bit-identical in the trunk to the upstream path with the one-dimensional timestep, and the I2V form
+to the reference wrapper. If even one fails, it stops inside the working directory (the series does
+not change by a single byte). Both sides read the same layer-by-layer weights, so an error common to
+the loading is not visible to this check (`eager-full` below checks with independent weights). The
+difference from diffusers' two-dimensional timestep path (linear with M = S) is listed in the
+summaries of the decision cases as an observation (not a gate — decision 4).
 
-## 実寸の golden（段 2 — `write-full`）
+## Real-size goldens (step 2 — `write-full`)
 
-ケースは {@link FULL_CASES}（数値の門の 2 つの形 — 潜在 `[48,21,30,52]`〈832×480・81 フレーム・
-S = 8,190〉と `[48,9,44,80]`〈1280×704・33 フレーム・S = 7,920〉。ADR 0121 追記「裁定 1 の確定」の
-受理の上限から採った形で、832×480 は追記（2026-10-05）「受理寸法を公式の 2 寸法へ」で受理の外に
-なった。DiT のグラフは寸法に依らないので、受理寸法と無関係な数値の門の形として使う）。決定用
-6 本（形ごとに 3 本・T2V 3 + I2V 3）と受入れ 8 本（形ごとに T2V 2 + I2V 2）。1 ケースの中身は
-S = 192 の golden と同じ（{@link golden_case} — f32 / f64 の参照・パッチ後の eager・eager 同値の
-門）で、重みは**据えた容器**から層逐次で読む（容器は書き直さない）。M = S の経路の観測は採らない
-（{@link OBSERVED_ROLES} は S = 192 の決定用だけ — 実寸で 1 ケース 1 forward 延びる）。
+The cases are {@link FULL_CASES} (the two shapes of the numeric check — latent `[48,21,30,52]`
+(832×480, 81 frames, S = 8,190) and `[48,9,44,80]` (1280×704, 33 frames, S = 7,920). The shapes
+were taken from the acceptance upper bounds of the ADR 0121 addendum "settling ruling 1"; 832×480
+fell outside the accepted set with the addendum (2026-10-05) "accepted sizes down to the two
+official sizes". The DiT graph does not depend on the size, so it is used as a numeric check shape
+unrelated to the accepted sizes). 6 decision cases (3 per shape, T2V 3 + I2V 3) and 8 acceptance
+cases (T2V 2 + I2V 2 per shape). The contents of one case are the same as the S = 192 golden
+({@link golden_case} — f32 / f64 references, the patched eager, the eager-equivalence check), and
+the weights are read layer by layer from **the installed container** (the container is not
+rewritten). No observation of the M = S path is taken ({@link OBSERVED_ROLES} is only the S = 192
+decision cases — at real size it would add one forward per case).
 
-- **足し方**: 1 ケースずつ、系列の直下の作業ディレクトリ（`.write-full-*` — 部品ディレクトリの外）へ
-  書いてから、2 本のファイルを部品ディレクトリへ `os.replace` で移す（同じファイルシステムの中の
-  rename — 書きかけのファイルが部品ディレクトリに現れない）。門に落ちたケースは何も移さない。
-- **再開**: 2 本とも揃ったケースは飛ばす。飛ばす前に、据わっている `input.*`（7 本）と
-  `latents` / `timestep` / `condition_timestep` を今のケースの表から組み直した値とビットで比べ、
-  違えば止める（{@link stored_case_state} — 表を変えた後の古い golden を「済み」に数えない）。
-  1 本だけあるケース（移す途中で落ちた）は書き直す。前の実行が残した作業ディレクトリは始めに消す。
-- **進捗**: ケースごとに `[write-full]` の行（済み・残り・残りの見込み — 見込みは済んだケースの
-  平均、無ければ段 0 の実測から {@link FULL_CASE_SECONDS}）と、参照の f32 / f64 のブロックごとの
-  `[block]` の行（`dit_reference.PROGRESS_TOKENS` 以上の S）を出す。RAM の山は段 0 の実測で
-  約 5 GiB（{@link FULL_PEAK_BYTES} — 書く前に MemAvailable を確かめる）。
-- MUST: `write` は部品ディレクトリを作業席ごと据え替えるので、`write` の後は実寸の golden が消える。
-  `write` を回し直したら `write-full` も回し直す。
+- **How they are added**: one case at a time, written into a working directory right under the
+  series (`.write-full-*` — outside the component directory), then the two files are moved into the
+  component directory with `os.replace` (a rename within the same file system — no half-written
+  file appears in the component directory). A case that fails a check moves nothing.
+- **Resuming**: a case with both files present is skipped. Before skipping, the installed
+  `input.*` (7) and `latents` / `timestep` / `condition_timestep` are compared bit by bit with the
+  values rebuilt from the current case table, and it stops on a difference
+  ({@link stored_case_state} — an old golden from before a table change is not counted as "done").
+  A case with only one file (it failed partway through the move) is rewritten. A working directory
+  left by a previous run is deleted at the start.
+- **Progress**: per case a `[write-full]` line (done, remaining, the remaining estimate — the
+  estimate is the average of the finished cases, or {@link FULL_CASE_SECONDS} from step 0's
+  measurement when there is none), and the `[block]` lines per block of the f32 / f64 references
+  (for S at or above `dit_reference.PROGRESS_TOKENS`). The RAM peak is about 5 GiB as measured at
+  step 0 ({@link FULL_PEAK_BYTES} — MemAvailable is checked before writing).
+- MUST: `write` replaces the component directory together with the working directory, so the
+  real-size goldens are gone after `write`. After re-running `write`, re-run `write-full` too.
 
-## 独立した重みでの eager 同値（`eager-full` — 決定 4 の形）
+## Eager equivalence with independent weights (`eager-full` — the form of decision 4)
 
-`write` の門は、パッチ後のグラフも参照も**同じ容器から読む層逐次の仕組み**で回す（RAM 8 GiB の枠に
-収めるため）。だから読み込みに共通の誤り（容器の読み口・層逐次の列の組み方）は両側で相殺され、門を
-すり抜けうる。`eager-full`（{@link eager_full}）はその穴を、決定 4 が書く形で 1 回だけ塞ぐ:
+The `write` check runs both the patched graph and the reference through **the same layer-by-layer
+mechanism that reads from the same container** (to fit within 8 GiB of RAM). So an error common to
+the loading (the container reader, how the layer-by-layer sequence is assembled) cancels out on both
+sides and can slip through the check. `eager-full` ({@link eager_full}) closes that hole once, in
+the form decision 4 describes:
 
-- 上流を `from_pretrained` で f32 の全量 1 本として読み、i8 の fake-quant をパッチ後のラッパ経由で
-  掛ける（2.1 の `export_dit` と同じ — 容器も層逐次も通らない）
-- 各ケースで、パッチ後のグラフ（{@link dit_patch.WanDitTokensTi2v} — T2V / I2V の形）の eager を
-  上流（T2V は 1 次元 timestep の forward・I2V は参照ラッパ）と比べる（`export_dit.eager_failures`
-  と同じ判定 — trunk のビット一致）
-- 据えた golden とも突き合わせる: 上流の参照 = `reference.<case>` の `output`、パッチ後の出力 =
-  `io.<case>` の `output.0`（どちらもビット一致 — golden は容器 + 上流の番地のずれで採った値で、
-  層逐次の f32 が上流の f32 eager とビット一致する決定 7 の主張に依る。NOTE: MKL の振る舞いで仕様の
-  保証ではない — `wan.dit_reference` のモジュール doc）。グラフ入力 7 本も golden と同じであること
-  （同じケースを組めていること）を見る。
+- the upstream is loaded whole as one f32 model with `from_pretrained`, and i8 fake-quant is applied
+  through the patched wrapper (the same as 2.1's `export_dit` — neither the container nor the
+  layer-by-layer path is involved)
+- for each case, the eager of the patched graph ({@link dit_patch.WanDitTokensTi2v} — the T2V /
+  I2V form) is compared with the upstream (T2V with the forward of the one-dimensional timestep,
+  I2V with the reference wrapper) (the same judgment as `export_dit.eager_failures` — bit
+  identity of the trunk)
+- it is also compared with the installed goldens: the upstream reference = `output` of
+  `reference.<case>`, the patched output = `output.0` of `io.<case>` (both bit-identical — the
+  goldens are values taken from the container + the upstream's address offsets, relying on decision
+  7's claim that the layer-by-layer f32 is bit-identical to the upstream f32 eager. NOTE: this is
+  MKL's behavior, not a guarantee of a specification — the module doc of `wan.dit_reference`). It
+  also checks that the 7 graph inputs are the same as the golden's (that the same case was built).
 
-RAM の山は約 21 GiB（f32 全量 18.63 GiB + 基礎分）。上流を読む前に MemAvailable を読み、見込み
-（`dit_probe.eager_memory` の f32 + 基礎分）に余白を足した量に足りなければ止まる
-（`dit_probe.require_available`）。据えた golden が揃っていなければ、それも読む前に止まる。
+The RAM peak is about 21 GiB (the whole f32 18.63 GiB + base). Before loading the upstream it reads
+MemAvailable and stops if it falls short of the estimate (f32 of `dit_probe.eager_memory` + base)
+plus a margin (`dit_probe.require_available`). If the installed goldens are incomplete, it also
+stops before loading.
 
-## 量子化の観測（決定 5 — `observe-quant`）
+## Observing quantization (decision 5 — `observe-quant`)
 
-量子化なしの CPU f32 参照に対する、重みだけ i8 の CPU f32 参照の差（max abs ÷ max ref）を
-S = 192 の決定用ケースで 5B と 1.3B の両方について、同じプロンプトの割り当てで採る（読み口は
-checkpoint の F32 と、1 本ずつ i8 の fake-quant を掛けた値 —
-`dit_reference.CheckpointDitWeights`）。5B の最悪が 1.3B の最悪の 2 倍（目安）を超えたら
-`escalate` が真になる（段 2 の前に裁定へ上げる）。
+The difference (max abs ÷ max ref) of the CPU f32 reference with i8 weights only against the
+unquantized CPU f32 reference is taken on the S = 192 decision cases for both the 5B and the 1.3B,
+with the same assignment of prompts (the reader is the checkpoint's F32 and the values with i8
+fake-quant applied one at a time — `dit_reference.CheckpointDitWeights`). When the 5B's worst
+exceeds twice the 1.3B's worst (a rule of thumb), `escalate` becomes true (raised for a ruling
+before step 2).
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: diffusers is imported inside functions (the `wan` group is not part of the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -154,48 +174,54 @@ from wan import dit_patch, dit_probe, dit_reference, export_dit
 from wan.sources import local_snapshot
 from wan.umt5_export import MemoryMonitor
 
-#: 既定のモデル（Wan2.2 TI2V-5B — ADR 0121）。
+#: The default model (Wan2.2 TI2V-5B — ADR 0121).
 DEFAULT_MODEL = "ti2v-5b"
 
-#: i8 系列（決定 7 の系列名 — 接尾辞 `-dyn` は ADR 0077 の慣例）。
+#: The i8 series (the series name of decision 7 — the suffix `-dyn` is the convention of ADR 0077).
 SERIES_NAME = "wan2.2-ti2v-5b-i8-dyn"
 SERIES = SERIES_ROOT / SERIES_NAME
 
-#: 容器のグラフ名 = 配布形の部品名 = weights のキー（container-v1 §2.1 — 2.1 の DiT と同じ席。
-#: 一致は `tests/test_graph_names.py` の門）。系列の中の置き場も同じ綴り
-#: （規約であって導出ではない）。
+#: The container's graph name = the distribution's component name = the key in weights
+#: (container-v1 §2.1 — the same slot as 2.1's DiT; the match is checked by
+#: `tests/test_graph_names.py`). The location inside the series uses the same spelling (a
+#: convention, not a derivation).
 TARGET = "transformer"
 MODEL_FILE = "model.krm"
 
-#: グラフ入力の名前（ラッパの forward の引数名がそのまま IR の入力名になる —
-#: 先頭 5 本は 2.1 と同じ）。
+#: The graph input names (the arguments of the wrapper's forward become the IR input names as is —
+#: the first 5 are the same as in 2.1).
 INPUT_NAMES = (*export_dit.INPUT_NAMES, "timesteps_proj_condition", "condition_mask")
 
-#: `Dim("S")` の上限（1280×704×121 = 27,280 — 決定 3）と下限（2.1 と同じ）。
+#: The upper bound of `Dim("S")` (1280×704×121 = 27,280 — decision 3) and the lower bound (the same
+#: as in 2.1).
 SYM_MAX = 27_280
 SYM_MIN = export_dit.DIT_SYM_MIN
 
-#: 時刻の MLP の linear の本数（`time_embedder` の 2 本 + `time_proj`）— M = 1 で 2 回回すので、
-#: linear のノードはこの本数だけ量子化の対象より多い（決定 2）。
+#: The number of linears of the time MLP (the 2 of `time_embedder` + `time_proj`) — it runs twice
+#: with M = 1, so there are this many more linear nodes than quantization targets (decision 2).
 TIME_MLP_LINEARS = 3
 
-#: 変調の `where` の本数（ブロックあたり 6 成分・head の 2 成分 — 決定 3）。
+#: The number of modulation `where`s (6 components per block, 2 components in the head —
+#: decision 3).
 WHERE_PER_BLOCK = 6
 WHERE_HEAD = 2
 
-#: 5B の期待値（決定 2 — i8 の重みの本数 / 1 パスの linear の dispatch の本数）。
+#: The 5B's expected values (decision 2 — the number of i8 weights / the number of linear dispatches
+#: per pass).
 EXPECTED_5B = {"i8_weights": 307, "linear_nodes": 310}
 
-#: golden の乱数の seed の起点（決定用。受入れは別系統の seed を直に持つ — 1.3B の
-#: `export_dit.SEED` + 0〜25 とも受入れの 777001〜とも重ならない値）。
+#: The base of the golden's random seeds (for the decision cases; the acceptance cases hold seeds
+#: from a separate line directly — a value that overlaps neither the 1.3B's `export_dit.SEED` +
+#: 0–25 nor the acceptance 777001 and up).
 SEED = 20262000
 
-#: 置き場の配布名（`outputs/bench/<配布名>/` — `docs/assets-layout.md`）。
+#: The distribution name of the location (`outputs/bench/<distribution name>/` —
+#: `docs/assets-layout.md`).
 BENCH_NAME = "karume-wan2.2"
 
 
 class Ti2vExportError(RuntimeError):
-    """グラフ・重み・golden が段 1 の検収の形から外れた。"""
+    """The graph, the weights or the goldens departed from the form of step 1's acceptance."""
 
 
 Form = Literal["t2v", "i2v"]
@@ -203,18 +229,21 @@ Form = Literal["t2v", "i2v"]
 
 @dataclass(frozen=True)
 class Ti2vCase:
-    """golden 1 ケースの条件（T2V / I2V・潜在の形・生成側の timestep・文脈のプロンプト・seed）。
+    """The conditions of one golden case (T2V / I2V, the latent shape, the generation-side
+    timestep, the context prompt, the seed).
 
-    文脈は Wan2.1 の事前計算の埋め込み資産（同じ umT5 の出力 — ADR 0121 決定 9 が 2.2 にも
-    そのまま写す資産）のプロンプト 1 本（`dit_probe.probe_inputs` — 有効長の後ろをゼロで 512 行
-    まで埋める）。潜在は seed からの乱数。
+    The context is one prompt of Wan2.1's precomputed embedding asset (the same umT5 output — an
+    asset ADR 0121 decision 9 carries over to 2.2 as is) (`dit_probe.probe_inputs` — zero-padded to
+    512 rows after the valid length). The latents are random from the seed.
 
-    なぜ合成の乱数の文脈（2.1 の golden の作り方）を使わないか（段 1 の切り分け — 結果は
-    `outputs/bench/karume-wan2.2/2026-10-04_dit-f32-f64-diagnosis/`）: N(0,1) の乱数は実の umT5
-    の出力（std 約 0.08）の約 12 倍の大きさの分布の外で、5B ではそれだけで CPU f32 と f64 の差が
-    層ごとに増幅される。S = 1,170・t = 999 の出力の比は合成 1.38e-2 / 実プロンプト 1.24e-6、
-    S = 192 でも合成は 5.3e-4（1.3B の同じ作り方は 2e-6〜1.6e-4）。r 門の分母（CPU f32 の f64 に
-    対する比）がこの増幅で飽和すると、微妙な故障注入が帯に紛れる。
+    Why the synthetic random context (how 2.1's goldens are made) is not used (step 1's isolation —
+    results in `outputs/bench/karume-wan2.2/2026-10-04_dit-f32-f64-diagnosis/`): N(0,1) random
+    values are outside the distribution, about 12 times the size of the real umT5 output (std about
+    0.08), and on the 5B that alone amplifies the difference between CPU f32 and f64 layer after
+    layer. The output ratio at S = 1,170, t = 999 is 1.38e-2 synthetic / 1.24e-6 with a real
+    prompt, and even at S = 192 the synthetic one is 5.3e-4 (the same construction on the 1.3B gives
+    2e-6 to 1.6e-4). When the denominator of the r check (the ratio of CPU f32 against f64)
+    saturates from this amplification, subtle fault injections get lost in the band.
     """
 
     role: str
@@ -232,19 +261,22 @@ class Ti2vCase:
         return (frames // patch_size[0]) * (height // patch_size[1]) * (width // patch_size[2])
 
     def spec(self) -> export_dit.CaseSpec:
-        """潜在の乱数を引く形（`export_dit.case_inputs` — 潜在を先に引くので、合成の text の有効長
-        〈ここでは 1〉は潜在の値に効かない。文脈は `probe_inputs` がプロンプトに替える）。"""
+        """The form that draws the random latents (`export_dit.case_inputs` — the latents are drawn
+        first, so the synthetic text's valid length (1 here) does not affect the latent values.
+        `probe_inputs` replaces the context with the prompt)."""
         return export_dit.CaseSpec(
             self.role, self.latent_shape, self.timestep, 1, self.seed, blocks=False
         )
 
 
-#: golden のケース（S = 192・潜在 `[48,F,H,W]`）。決定用は timestep を 999〜113 に散らし、格子は正方
-#: （3·8·8）と非正方（2·8·12 / 1·8·24 / 2·12·8 / 6·4·8 / 4·4·12）を混ぜる（h と w の取り違えは
-#: 正方では隠れる）。I2V の形は F' ≥ 2（先頭の潜在フレームだけが条件 — F' = 1 だと全トークンが条件に
-#: なる）。プロンプトは固定 4 本（正 3 本 + negative — CFG の 2 本目の文脈）を形と役割に散らす。
-#: MUST: `accept`（受入れ）の結果を見て `band`（決定用）を足し引きしない（帯の決定と受入れの独立 —
-#: 2.1 の `export_dit.CASES` と同じ規律）。
+#: The golden cases (S = 192, latent `[48,F,H,W]`). The decision cases spread the timestep over
+#: 999–113 and mix square grids (3·8·8) with non-square ones (2·8·12 / 1·8·24 / 2·12·8 / 6·4·8 /
+#: 4·4·12) (an h / w mix-up hides on a square). The I2V form has F' ≥ 2 (only the first latent frame
+#: is the condition — with F' = 1 every token would be the condition). The fixed 4 prompts (3
+#: positive + the negative — the context of CFG's second pass) are spread over the forms and roles.
+#: MUST: do not add or remove `band` (decision) cases after seeing the results of `accept`
+#: (acceptance) (deciding the band and accepting are independent — the same discipline as 2.1's
+#: `export_dit.CASES`).
 CASES: tuple[Ti2vCase, ...] = (
     Ti2vCase("band", "t2v", (3, 16, 16), 999, "boxing-cats", SEED + 0),
     Ti2vCase("band", "t2v", (2, 16, 24), 500, "ferret", SEED + 1),
@@ -258,22 +290,25 @@ CASES: tuple[Ti2vCase, ...] = (
     Ti2vCase("accept", "i2v", (4, 8, 24), 900, "cat-dog-baking", 778004),
 )
 
-#: trace の例示入力の格子（先頭のケース — 値は trace に効かない・S = 192 は 0 / 1 特殊化を
-#: 踏まない）。
+#: The grid of the trace's example inputs (the first case — the values do not affect the trace;
+#: S = 192 does not hit the 0 / 1 specialization).
 TRACE_LATENT = CASES[0].latent_shape
 
-#: 実寸の 2 つの形（数値の門の形 — ADR 0121 追記「裁定 1 の確定」の受理の上限から採った）:
-#: 832×480・81 フレーム = 潜在 `[48,21,30,52]`〈S = 21·15·26 = 8,190〉と 1280×704・33 フレーム =
-#: `[48,9,44,80]`〈S = 9·22·40 = 7,920〉。832×480 は追記（2026-10-05）で受理の外になったが、DiT の
-#: グラフは寸法に依らないので、受理寸法と無関係な数値の門の形として使う。
+#: The two real-size shapes (the shapes of the numeric check — taken from the acceptance upper
+#: bounds of the ADR 0121 addendum "settling ruling 1"): 832×480 with 81 frames = latent
+#: `[48,21,30,52]` (S = 21·15·26 = 8,190) and 1280×704 with 33 frames = `[48,9,44,80]`
+#: (S = 9·22·40 = 7,920). 832×480 fell outside the accepted set with the addendum (2026-10-05), but
+#: the DiT graph does not depend on the size, so it is used as a numeric check shape unrelated to
+#: the accepted sizes.
 FULL_LATENTS: tuple[tuple[int, int, int], ...] = ((21, 30, 52), (9, 44, 80))
 
-#: 実寸の golden のケース（段 2 の r 門 — モジュール doc「実寸の golden」）。決定用（`full-band`）は
-#: 形ごとに 3 本で、T2V 3 本（t 999 / 113 / 750）と I2V 3 本（t 500 / 999 / 250）に分け、どちらの形
-#: にも T2V と I2V を混ぜる。受入れ（`full-accept`）は形ごとに T2V 2 本 + I2V 2 本で、seed はどの
-#: ケースとも別（778011〜）。文脈は固定 4 プロンプトを形と役割に散らす（{@link Ti2vCase} — 合成の
-#: 乱数は使わない）。
-#: MUST: `full-accept` の結果を見て `full-band` を足し引きしない（{@link CASES} と同じ規律）。
+#: The real-size golden cases (step 2's r check — the module doc's "Real-size goldens"). The
+#: decision cases (`full-band`) are 3 per shape, split into 3 T2V (t 999 / 113 / 750) and 3 I2V
+#: (t 500 / 999 / 250), with T2V and I2V mixed in both shapes. The acceptance cases (`full-accept`)
+#: are T2V 2 + I2V 2 per shape, with seeds distinct from every other case (778011 and up). The fixed
+#: 4 prompts are spread over the shapes and roles ({@link Ti2vCase} — no synthetic random context).
+#: MUST: do not add or remove `full-band` cases after seeing the results of `full-accept` (the same
+#: discipline as {@link CASES}).
 FULL_CASES: tuple[Ti2vCase, ...] = (
     Ti2vCase("full-band", "t2v", (21, 30, 52), 999, "boxing-cats", SEED + 10),
     Ti2vCase("full-band", "i2v", (21, 30, 52), 500, "ferret", SEED + 11),
@@ -291,35 +326,40 @@ FULL_CASES: tuple[Ti2vCase, ...] = (
     Ti2vCase("full-accept", "i2v", (9, 44, 80), 50, "cat-dog-baking", 778018),
 )
 
-#: 実寸の 1 ケースの所要の見込み（秒 — 進捗の初期値）。段 0 の実測（S = 8,190・層逐次）の
-#: f32 233 s + f64 510 s に、パッチ後の eager（f32・同じ層逐次）を f32 と同じ 233 s と見た和。
+#: The estimated run time of one real-size case (seconds — the initial value for progress).
+#: Step 0's measurement (S = 8,190, layer by layer) of f32 233 s + f64 510 s, plus the patched
+#: eager (f32, the same layer-by-layer path) taken as the same 233 s as f32.
 FULL_CASE_SECONDS = 233 + 510 + 233
 
-#: 実寸の 1 ケースの RAM の山の見込み（段 0 の実測 5.04 GiB — 層逐次の参照・S = 8,190）。書く前に
-#: MemAvailable がこれ + 余白（`dit_probe.MEMORY_HEADROOM_BYTES`）に足りなければ止まる。
+#: The estimated RAM peak of one real-size case (measured 5.04 GiB at step 0 — the layer-by-layer
+#: reference, S = 8,190). Before writing, it stops if MemAvailable falls short of this + a margin
+#: (`dit_probe.MEMORY_HEADROOM_BYTES`).
 FULL_PEAK_BYTES = int(5.1 * 2**30)
 
-#: `write-full` の作業ディレクトリの接頭辞（系列の直下 — 部品ディレクトリの外）。
+#: The prefix of the `write-full` working directory (right under the series — outside the component
+#: directory).
 FULL_STAGING_PREFIX = ".write-full-"
 
 
 def default_out() -> Path:
-    """要約の既定の置き場（系列とは別 — `outputs/bench/karume-wan2.2/<日付>_dit-export/`）。"""
+    """The default location of the summaries (separate from the series —
+    `outputs/bench/karume-wan2.2/<date>_dit-export/`)."""
     return BENCH_ROOT / BENCH_NAME / f"{date.today().isoformat()}_dit-export"
 
 
 def transformer_dir(model: str = DEFAULT_MODEL) -> Path:
-    """pin した revision の DiT の置き場（取得済みでなければ `local_snapshot` が fail loudly）。"""
+    """The location of the pinned revision's DiT (`local_snapshot` fails loudly unless it has been
+    fetched)."""
     return local_snapshot(model) / dit_reference.TRANSFORMER_SUBFOLDER
 
 
 # ---------------------------------------------------------------------------
-# trace（重みを持たない上流）
+# trace (an upstream without weights)
 # ---------------------------------------------------------------------------
 
 
 def meta_inputs(config: Mapping[str, Any], latent_shape: tuple[int, int, int]) -> tuple[Any, ...]:
-    """trace の例示入力 7 本（meta — 重みが meta なので入力も meta に揃える）。"""
+    """The 7 example inputs of the trace (meta — the weights are on meta, so the inputs are too)."""
     patch = [int(size) for size in config["patch_size"]]
     frames, height, width = latent_shape
     tokens = (frames // patch[0]) * (height // patch[1]) * (width // patch[2])
@@ -339,8 +379,9 @@ def meta_inputs(config: Mapping[str, Any], latent_shape: tuple[int, int, int]) -
 
 
 def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
-    """入力ごとの記号次元。RoPE の表と条件マスクも同じ `S`（別シンボルにすると長さのずれた形が
-    受理されて沈黙誤値になる — 2.1 と同じ判断）。"""
+    """The symbolic dimensions per input. The RoPE tables and the condition mask share the same
+    `S` (a separate symbol would accept shapes of mismatched length and give silently wrong
+    values — the same judgment as in 2.1)."""
     tokens = Dim("S", min=SYM_MIN, max=sym_max)
     return ({1: tokens}, None, None, {1: tokens}, {1: tokens}, None, {1: tokens})
 
@@ -348,9 +389,11 @@ def dynamic_shapes(sym_max: int = SYM_MAX) -> tuple[Any, ...]:
 def trace(
     config: Mapping[str, Any], sym_max: int = SYM_MAX
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, int]]:
-    """meta の上流で I2V 対応の S 形の export を回す（`dit_probe.prepare` の tracer）。
+    """Run the I2V-capable S-form export on the upstream on meta (the tracer of
+    `dit_probe.prepare`).
 
-    戻りはグラフ・格納テンソル（重みは meta）・量子化の対象（テンソルキー → チャネル軸）。
+    Returns the graph, the stored tensors (weights on meta) and the quantization targets (tensor key
+    → channel axis).
     """
     wrapper = dit_patch.WanDitTokensTi2v(dit_reference.meta_model(config))
     graph, tensors = export_module(
@@ -362,7 +405,7 @@ def trace(
     )
     declared = [entry.name for entry in graph.inputs]
     if declared != list(INPUT_NAMES):
-        raise Ti2vExportError(f"グラフ入力名が宣言と不一致: {declared}")
+        raise Ti2vExportError(f"graph input names do not match the declaration: {declared}")
     targets = {
         fqn: axis for fqn, _, axis in iter_quant_targets(wrapper, op_types=QUANT_MODULE_TYPES)
     }
@@ -370,15 +413,17 @@ def trace(
 
 
 # ---------------------------------------------------------------------------
-# IR の検査
+# The IR check
 # ---------------------------------------------------------------------------
 
 
 def where_placement(graph: IrGraph) -> dict[str, Any]:
-    """`where` の置き場所（決定 3）: 出力の消費者が直後の 1 ノードだけか。
+    """Where the `where`s sit (decision 3): whether the only consumer of the output is the next
+    node.
 
-    消費者が直後の 1 本なら、`where` の出力 `[1,S,dim]` はそのノードの間だけ生き、attention を
-    またがない。上流の順（ブロックの先頭で 6 成分をまとめて作る）で書くと、ここで名指しされる。
+    When the only consumer is the next node, the `where` output `[1,S,dim]` lives only for that
+    node and does not cross attention. Written in the upstream order (all 6 components made together
+    at the start of the block), it is named here.
     """
     consumers: dict[str, list[int]] = {}
     for position, node in enumerate(graph.nodes):
@@ -401,37 +446,37 @@ def where_placement(graph: IrGraph) -> dict[str, Any]:
                 }
             )
             violations.append(
-                f"where #{position}（{output}）の消費者がノード {users}（直後の 1 本でない"
-                f"{' — attention をまたぐ' if crossed else ''}）"
+                f"where #{position} ({output}) is consumed by nodes {users} (not only the next one"
+                f"{' — crosses attention' if crossed else ''})"
             )
         shape = graph.values[output].shape
         if len(shape) != 3 or shape[1] != "S":
-            violations.append(f"where #{position}（{output}）の出力が {shape}（[1,S,dim] でない）")
+            violations.append(f"where #{position} ({output}) outputs {shape} (not [1,S,dim])")
     return {"count": count, "violations": violations}
 
 
 def inspect_structure(graph: IrGraph, quant_targets: Sequence[str], layers: int) -> dict[str, Any]:
-    """格納に依らない検査（linear の本数・`where` の本数と置き場所・入力の宣言）— 戻りの
-    `failures` が空なら合格。"""
+    """The checks that do not depend on storage (the linear count, the `where` count and placement,
+    the input declarations) — passes when the returned `failures` is empty."""
     ops = Counter(node.op for node in graph.nodes)
     placement = where_placement(graph)
     inputs = [[entry.name, list(entry.shape), entry.dtype] for entry in graph.inputs]
     failures: list[str] = []
     if ops["linear"] != len(quant_targets) + TIME_MLP_LINEARS:
         failures.append(
-            f"linear のノードが {ops['linear']} 本（量子化の対象 {len(quant_targets)} +"
-            f" 時刻の MLP {TIME_MLP_LINEARS} のはず）"
+            f"{ops['linear']} linear nodes (expected the {len(quant_targets)} quantization"
+            f" targets + the {TIME_MLP_LINEARS} of the time MLP)"
         )
     if placement["count"] != WHERE_PER_BLOCK * layers + WHERE_HEAD:
         failures.append(
-            f"where が {placement['count']} 本"
-            f"（{WHERE_PER_BLOCK} × {layers} + {WHERE_HEAD} のはず）"
+            f"{placement['count']} where nodes"
+            f" (expected {WHERE_PER_BLOCK} × {layers} + {WHERE_HEAD})"
         )
     failures.extend(placement["violations"])
     if [name for name, _, _ in inputs] != list(INPUT_NAMES):
-        failures.append(f"グラフ入力が宣言と違う: {inputs}")
+        failures.append(f"the graph inputs differ from the declaration: {inputs}")
     elif inputs[-1][1:] != [[1, "S", 1], "bool"]:
-        failures.append(f"条件マスクが bool [1,S,1] でない: {inputs[-1]}")
+        failures.append(f"the condition mask is not bool [1,S,1]: {inputs[-1]}")
     return {
         "ops": dict(sorted(ops.items())),
         "linear_nodes": ops["linear"],
@@ -446,7 +491,8 @@ def inspect_structure(graph: IrGraph, quant_targets: Sequence[str], layers: int)
 def inspect_storage(
     graph: IrGraph, quant_targets: Sequence[str], plain: Sequence[str]
 ) -> dict[str, Any]:
-    """格納宣言を commit したグラフの格納の検査（i8 = 量子化の対象ちょうど・残りの重みは f32）。"""
+    """The storage check of the graph whose storage declarations were committed (i8 = exactly the
+    quantization targets, the remaining weights f32)."""
     storage = {
         initializer.tensor: initializer.storage.dtype
         for initializer in graph.initializers.values()
@@ -457,41 +503,44 @@ def inspect_storage(
     failures: list[str] = []
     if i8 != sorted(quant_targets):
         failures.append(
-            f"i8 の重みが量子化の対象と違う（i8 {len(i8)} 本 / 対象 {len(quant_targets)}）"
+            f"the i8 weights differ from the quantization targets (i8 {len(i8)} / targets"
+            f" {len(quant_targets)})"
         )
     if not_f32:
-        failures.append(f"f32 のはずの重みが f32 でない: {not_f32[:5]}")
+        failures.append(f"weights that should be f32 are not f32: {not_f32[:5]}")
     return {"i8_weights": len(i8), "f32_weights": len(plain) - len(not_f32), "failures": failures}
 
 
 def inspect_graph(
     graph: IrGraph, quant_targets: Sequence[str], plain: Sequence[str], layers: int
 ) -> dict[str, Any]:
-    """格納宣言を commit したグラフの検査（モジュール doc「IR の検査」— 構造 + 格納）。"""
+    """The check of the graph whose storage declarations were committed (the module doc's "The IR
+    check" — structure + storage)."""
     structure = inspect_structure(graph, quant_targets, layers)
     storage = inspect_storage(graph, quant_targets, plain)
     return {**structure, **storage, "failures": structure["failures"] + storage["failures"]}
 
 
 def expected_counts(model: str, inspection: Mapping[str, Any]) -> list[str]:
-    """5B の本数の期待値（決定 2 — {@link EXPECTED_5B}）との食い違い（5B 以外と、検査に
-    無い欄は見ない）。"""
+    """Mismatches against the 5B's expected counts (decision 2 — {@link EXPECTED_5B}) (models other
+    than the 5B, and fields not in the inspection, are not checked)."""
     if model != DEFAULT_MODEL:
         return []
     return [
-        f"{key} が {inspection[key]}（決定 2 の期待値 {value}）"
+        f"{key} is {inspection[key]} (decision 2 expects {value})"
         for key, value in EXPECTED_5B.items()
         if key in inspection and inspection[key] != value
     ]
 
 
 # ---------------------------------------------------------------------------
-# 容器
+# The container
 # ---------------------------------------------------------------------------
 
 
 def rope_base_asset(writer: dit_reference.LayerwiseDit) -> dict[str, AssetInput]:
-    """資産 `rope_base`（上流の RoPE の表から切り出した軸別素表 — 2.1 と同じ席・同じ形式）。"""
+    """The asset `rope_base` (per-axis base tables cut from the upstream RoPE tables — the same
+    slot and format as in 2.1)."""
     payload = save(dit_patch.dit_rope_base_tables(writer.rope))
     return {
         export_dit.ROPE_BASE_ASSET: AssetInput(export_dit.ROPE_BASE_ROLE, len(payload), payload)
@@ -504,10 +553,12 @@ def write_container(
     assets: Mapping[str, AssetInput],
     model: str = DEFAULT_MODEL,
 ) -> IrGraph:
-    """材料（`dit_probe.prepare` の戻り）を容器に書く（`path` は代表 path — 分割形の part 列）。
+    """Write the material (what `dit_probe.prepare` returns) into a container (`path` is the
+    representative path — the part sequence of the split form).
 
-    格納は材料のまま（量子化の対象は `fixed` の packed + scale・残りは checkpoint の f32）。戻りは
-    格納宣言を commit したグラフ（{@link inspect_graph} の入力）。
+    The storage is the material's (the quantization targets as `fixed`'s packed + scale, the rest
+    the checkpoint's f32). Returns the graph whose storage declarations were committed (the input of
+    {@link inspect_graph}).
     """
     return publish_model(
         path,
@@ -527,20 +578,21 @@ def write_container(
 
 @dataclass(frozen=True)
 class CaseInputs:
-    """1 ケースの上流の入力・参照の時刻・グラフ入力 7 本。"""
+    """One case's upstream inputs, the reference's time, and the 7 graph inputs."""
 
     latents: torch.Tensor
     timestep: torch.Tensor
     condition_timestep: torch.Tensor
     encoder_hidden_states: torch.Tensor
-    #: 参照の時刻の表し方（T2V は None = 上流の 1 次元 timestep・I2V は参照ラッパ — 決定 4）。
+    #: How the reference represents time (T2V: None = the upstream one-dimensional timestep, I2V:
+    #: the reference wrapper — decision 4).
     condition: dit_patch.TimestepCondition | None
     graph_inputs: tuple[torch.Tensor, ...]
 
 
 def case_inputs(writer: dit_reference.LayerwiseDit, case: Ti2vCase) -> CaseInputs:
-    """1 ケースの入力（乱数と文脈は `dit_probe.probe_inputs` の 1 か所で作る — f32 / f64 / eager が
-    同じ値）。"""
+    """One case's inputs (the random values and the context are made in one place,
+    `dit_probe.probe_inputs` — the same values for f32 / f64 / eager)."""
     patch = writer.patch_size
     latents, timestep, encoder_hidden_states = dit_probe.probe_inputs(
         writer, case.spec(), case.text
@@ -577,12 +629,14 @@ def patched_eager(
     latent_shape: tuple[int, int, int],
     reference: torch.Tensor,
 ) -> tuple[dict[str, Any], torch.Tensor]:
-    """パッチ後のグラフ（{@link dit_patch.WanDitTokensTi2v}）の eager を同じ層逐次の重みで回し、
-    参照との差の要約（`export_dit.eager_report` と同じ欄 — 判定は `export_dit.eager_failures`）と
-    グラフ出力 `[1,S,pt·ph·pw·C]` を返す。
+    """Run the eager of the patched graph ({@link dit_patch.WanDitTokensTi2v}) with the same
+    layer-by-layer weights and return a summary of its difference from the reference (the same
+    fields as `export_dit.eager_report` — judged by `export_dit.eager_failures`) and the graph
+    output `[1,S,pt·ph·pw·C]`.
 
-    trunk は patch 埋め込みを上流の conv3d の出力に差し替えた経路（ビット一致が主張）。Linear 化した
-    patch 埋め込みの出力が conv3d とビット一致すれば trunk = full なので列を 1 回だけ回す。
+    The trunk is the path with the patch embedding replaced by the upstream conv3d output (claimed
+    bit-identical). When the output of the Linear-ized patch embedding is bit-identical to conv3d,
+    trunk = full, so the sequence runs only once.
     """
     patch = writer.patch_size
 
@@ -632,9 +686,9 @@ def patched_eager(
 
 
 def per_token_timestep(inputs: CaseInputs) -> torch.Tensor:
-    """diffusers の 2 次元 timestep `[1,S]`（観測の相手 — `WanPipeline(expand_timesteps=True)`
-    は T2V でも全トークンに t を並べ、`WanImageToVideoPipeline` は条件フレームのトークンを 0 に
-    する）。"""
+    """diffusers' two-dimensional timestep `[1,S]` (the observation's counterpart —
+    `WanPipeline(expand_timesteps=True)` lines t up over every token even for T2V, and
+    `WanImageToVideoPipeline` sets the tokens of the condition frames to 0)."""
     mask = inputs.graph_inputs[-1][..., 0]
     return torch.where(mask, inputs.condition_timestep, inputs.timestep).to(torch.int64)
 
@@ -645,10 +699,12 @@ def golden_case(
     case: Ti2vCase,
     out_dir: Path,
 ) -> dict[str, Any]:
-    """1 ケースの参照（f32 / f64）・パッチ後の eager・観測を採り、門に掛けてから golden を書く。
+    """Take one case's references (f32 / f64), the patched eager and the observation, run them
+    through the checks, then write the golden.
 
-    S が `dit_reference.PROGRESS_TOKENS` 以上のケース（実寸 — 1 forward が分単位）は、参照の
-    ブロックごとの `[block]` の行と、パッチ後の eager の開始の行を出す（値は変わらない）。
+    For cases with S at or above `dit_reference.PROGRESS_TOKENS` (real size — one forward takes
+    minutes), it prints the reference's per-block `[block]` lines and a line when the patched eager
+    starts (the values do not change).
     """
     patch = writer.patch_size
     name = case.name(patch)
@@ -666,7 +722,7 @@ def golden_case(
         source, torch.float64, *common, condition=inputs.condition, on_block=progress("f64")
     )
     if long_case:
-        print(f"[golden] {name}: パッチ後の eager（f32・同じ層逐次の重み）", flush=True)
+        print(f"[golden] {name}: patched eager (f32, the same layer-by-layer weights)", flush=True)
     report, tokens_out = patched_eager(
         writer, source, inputs, case.latent_shape, reference32.output
     )
@@ -692,13 +748,11 @@ def golden_case(
     if failures:
         raise export_dit.EagerEquivalenceError(f"{name}: {failures}")
     io = {
-        f"{export_dit.INPUT_PREFIX}{key}": normalize_boundary_tensor(
-            value, f"{name} の入力 '{key}'"
-        )
+        f"{export_dit.INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{name} input '{key}'")
         for key, value in zip(INPUT_NAMES, inputs.graph_inputs, strict=True)
     }
     io[f"{export_dit.OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
-        tokens_out.contiguous(), f"{name} の出力"
+        tokens_out.contiguous(), f"{name} output"
     )
     reference = export_dit.reference_tensors(
         name,
@@ -709,7 +763,7 @@ def golden_case(
         output_f64=reference64.output,
     )
     reference[CONDITION_TIMESTEP_KEY] = normalize_boundary_tensor(
-        inputs.condition_timestep, f"{name} の条件側の timestep"
+        inputs.condition_timestep, f"{name} condition-side timestep"
     )
     save_file(io, str(out_dir / f"{export_dit.IO_PREFIX}{name}{export_dit.CASE_SUFFIX}"))
     save_file(
@@ -718,19 +772,22 @@ def golden_case(
     return report
 
 
-#: diffusers の 2 次元 timestep の経路との差（観測 — 門ではない）を採る役割（決定用 6 本 —
-#: T2V / I2V の形の両方を含む。受入れまで採ると 1 ケース 1 forward ずつ書き出しが延びる）。
+#: The roles for which the difference from diffusers' two-dimensional timestep path is taken (an
+#: observation — not a gate) (the 6 decision cases — both the T2V and I2V forms. Taking it for the
+#: acceptance cases too would add one forward per case to the writing).
 OBSERVED_ROLES = frozenset({"band"})
 
-#: `reference.<case>` の条件側の timestep のキー（I2V は 0・T2V は生成側と同じ — TS のホストテストが
-#: `timesteps_proj_condition` の突き合わせに使う）。
+#: The key of the condition-side timestep in `reference.<case>` (0 for I2V, the same as the
+#: generation side for T2V — the TS host test uses it to check `timesteps_proj_condition`).
 CONDITION_TIMESTEP_KEY = "condition_timestep"
 
 
 def write_series(model: str = DEFAULT_MODEL, *, names: Sequence[str] = ()) -> dict[str, Any]:
-    """容器と golden を作業席に書き、門（IR の検査・eager 同値）を全部通ったときだけ系列へ据える。
+    """Write the container and goldens into a working directory, and install them into the series
+    only when every check (the IR check, eager equivalence) passes.
 
-    `names` はケース名で絞る（開発用 — 絞った系列は据えない: 席の中で止める）。
+    `names` narrows the cases by name (for development — a narrowed series is not installed: it
+    stops inside the working directory).
     """
     directory = transformer_dir(model)
     writer = dit_reference.LayerwiseDit(
@@ -739,7 +796,7 @@ def write_series(model: str = DEFAULT_MODEL, *, names: Sequence[str] = ()) -> di
     )
     known = {case.name(writer.patch_size) for case in CASES}
     if set(names) - known:
-        raise Ti2vExportError(f"知らないケース名がある: {sorted(set(names) - known)}")
+        raise Ti2vExportError(f"unknown case names: {sorted(set(names) - known)}")
     chosen = [case for case in CASES if not names or case.name(writer.patch_size) in names]
     target = SERIES / TARGET
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -755,21 +812,23 @@ def write_series(model: str = DEFAULT_MODEL, *, names: Sequence[str] = ()) -> di
             with monitor.stage("write") as record:
                 graph = write_container(export, staged / MODEL_FILE, rope_base_asset(writer), model)
                 record.details["initializers"] = len(graph.initializers)
-            # golden は容器から読むので、材料（i8 の packed 約 4.65 GiB）を先に手放す。
+            # The goldens are read from the container, so the material (i8 packed, about 4.65 GiB)
+            # is released first.
             del export
             gc.collect()
             inspection = inspect_graph(graph, quant_targets, plain, writer.layers)
             failures = inspection["failures"] + expected_counts(model, inspection)
             if failures:
-                raise Ti2vExportError(f"IR の検査に落ちた: {failures}")
+                raise Ti2vExportError(f"failed the IR check: {failures}")
             source = dit_reference.ContainerDitWeights(staged / MODEL_FILE)
             for case in chosen:
                 with monitor.stage(f"golden {case.name(writer.patch_size)}"):
                     eager.append(golden_case(writer, source, case, staged))
             if names:
                 raise Ti2vExportError(
-                    f"ケースを絞った回（{len(chosen)} / {len(CASES)} 本）は系列を据えない"
-                    "（全ケースが揃った系列だけを据える — 各ケースの結果は [eager] の行に出ている）"
+                    f"a run with narrowed cases ({len(chosen)} / {len(CASES)}) does not install the"
+                    " series (only a series with every case is installed — each case's result is"
+                    " in the [eager] lines)"
                 )
     breakdown = storage_breakdown(graph)
     return {
@@ -792,29 +851,33 @@ def write_series(model: str = DEFAULT_MODEL, *, names: Sequence[str] = ()) -> di
 
 
 # ---------------------------------------------------------------------------
-# 実寸の golden（段 2 — 据えた容器に golden を足す）
+# Real-size goldens (step 2 — add goldens to the installed container)
 # ---------------------------------------------------------------------------
 
-#: 据わっている `reference.<case>` の、ケースの表から組み直せる入力のキー（再開の照合）。
+#: The input keys of the installed `reference.<case>` that can be rebuilt from the case table (the
+#: resume check).
 _STORED_REFERENCE_INPUTS = ("latents", "timestep", CONDITION_TIMESTEP_KEY)
 
-#: 据わっているケースのファイルが持つべき出力のキー（`io` / `reference`）。
+#: The output keys an installed case's files must hold (`io` / `reference`).
 _STORED_IO_OUTPUT = f"{export_dit.OUTPUT_PREFIX}0"
 _STORED_REFERENCE_OUTPUTS = ("output", export_dit.REFERENCE_F64_KEY)
 
-#: {@link stored_case_state} の戻り。
+#: What {@link stored_case_state} returns.
 StoredState = Literal["absent", "partial", "present"]
 
 
 def stored_case_state(
     writer: dit_reference.LayerwiseDit, case: Ti2vCase, target: Path
 ) -> StoredState:
-    """部品ディレクトリにある 1 ケースの golden の状態（モジュール doc「実寸の golden」の再開）。
+    """The state of one case's golden in the component directory (the resume of the module doc's
+    "Real-size goldens").
 
-    2 本とも揃っていれば、据わっている入力（`io` の `input.*` 7 本と `reference` の
-    {@link _STORED_REFERENCE_INPUTS}）を今のケースの表から組み直した値とビットで比べ、出力のキーが
-    揃っていることも見る。MUST: 食い違えば fail loudly — 表を変えた後の古い golden を「済み」に
-    数えると、帯の決定用と受入れが黙って別の入力になる（消すのは人の判断）。
+    When both files are present, the installed inputs (the 7 `input.*` of `io` and
+    {@link _STORED_REFERENCE_INPUTS} of `reference`) are compared bit by bit with the values rebuilt
+    from the current case table, and the output keys are checked to be present. MUST: fail loudly
+    on a mismatch — counting an old golden from before a table change as "done" would silently
+    give the band's decision cases and the acceptance cases different inputs (deleting it is a
+    human decision).
     """
     name = case.name(writer.patch_size)
     io_name, reference_name = export_dit.case_file_names(name)
@@ -826,9 +889,9 @@ def stored_case_state(
     inputs = case_inputs(writer, case)
     expected = {
         "latents": inputs.latents,
-        "timestep": normalize_boundary_tensor(inputs.timestep, f"{name} の timestep"),
+        "timestep": normalize_boundary_tensor(inputs.timestep, f"{name} timestep"),
         CONDITION_TIMESTEP_KEY: normalize_boundary_tensor(
-            inputs.condition_timestep, f"{name} の条件側の timestep"
+            inputs.condition_timestep, f"{name} condition-side timestep"
         ),
     }
     differing: list[str] = []
@@ -836,32 +899,33 @@ def stored_case_state(
         keys = set(handle.keys())
         for key, value in zip(INPUT_NAMES, inputs.graph_inputs, strict=True):
             stored = f"{export_dit.INPUT_PREFIX}{key}"
-            built = normalize_boundary_tensor(value, f"{name} の入力 '{key}'")
+            built = normalize_boundary_tensor(value, f"{name} input '{key}'")
             if stored not in keys or not torch.equal(handle.get_tensor(stored), built):
                 differing.append(stored)
         if _STORED_IO_OUTPUT not in keys:
-            differing.append(f"{_STORED_IO_OUTPUT}（無い）")
+            differing.append(f"{_STORED_IO_OUTPUT} (missing)")
     with safe_open(str(target / reference_name), "pt") as handle:
         keys = set(handle.keys())
         for key in _STORED_REFERENCE_INPUTS:
             if key not in keys or not torch.equal(handle.get_tensor(key), expected[key]):
                 differing.append(f"reference.{key}")
         differing += [
-            f"reference.{key}（無い）" for key in _STORED_REFERENCE_OUTPUTS if key not in keys
+            f"reference.{key} (missing)" for key in _STORED_REFERENCE_OUTPUTS if key not in keys
         ]
     if differing:
         raise Ti2vExportError(
-            f"{target} の {name} の golden がケースの表と食い違う（{differing}）— 表を変えたなら、"
-            f"古い {io_name} / {reference_name} を消してから回し直す"
+            f"{target}: the golden of {name} disagrees with the case table ({differing}) — if"
+            f" the table changed, delete the old {io_name} / {reference_name} and run again"
         )
     return "present"
 
 
 def _stored_ratio(target: Path, name: str) -> float:
-    """据わっているケースの CPU f32 の参照の f64 に対する比（要約用）。
+    """The ratio of an installed case's CPU f32 reference against f64 (for the summary).
 
-    据えた `output.f64`（f32 へ丸めた値）から採るので、TS の r 門の正規化の分母と同じ値になる
-    （`golden_case` の要約の比は丸める前の f64 が相手で、分母の小さいケースでは数 % 違う）。
+    It is taken from the installed `output.f64` (rounded to f32), so it equals the denominator of
+    the TS r check's normalization (the ratio in `golden_case`'s summary is against f64 before
+    rounding, and differs by a few % on cases with a small denominator).
     """
     _, reference_name = export_dit.case_file_names(name)
     with safe_open(str(target / reference_name), "pt") as handle:
@@ -871,8 +935,8 @@ def _stored_ratio(target: Path, name: str) -> float:
 
 
 def _append_log(log: Path, row: Mapping[str, Any]) -> None:
-    """1 ケースの結果の行を 1 回の write で改行まで書いてディスクへ落とす（記録 — 再開の目印は
-    部品ディレクトリのファイルの方）。"""
+    """Write one case's result row, newline included, in one write and flush it to disk (a record —
+    the resume marker is the files in the component directory)."""
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -883,16 +947,20 @@ def _append_log(log: Path, row: Mapping[str, Any]) -> None:
 def write_full(
     model: str = DEFAULT_MODEL, *, names: Sequence[str] = (), log: Path | None = None
 ) -> dict[str, Any]:
-    """据えた系列に実寸の golden を足す（モジュール doc「実寸の golden」— 容器は書き直さない）。
+    """Add real-size goldens to the installed series (the module doc's "Real-size goldens" — the
+    container is not rewritten).
 
-    `names` はケース名で絞る（絞っても書いたケースは据える — 1 ケースずつ足す形なので、長い実行を
-    分けられる）。`log` を渡すと書いたケースごとに 1 行の JSON を足す。
+    `names` narrows the cases by name (even narrowed, the written cases are installed — cases are
+    added one at a time, so a long run can be split). With `log`, one JSON line is appended per
+    written case.
     """
     directory = transformer_dir(model)
     target = SERIES / TARGET
     container = target / MODEL_FILE
     if not all(part.is_file() for part in container_parts(container)):
-        raise Ti2vExportError(f"据えた容器が無い（{container}）。先に write で系列を据える")
+        raise Ti2vExportError(
+            f"no installed container ({container}); install the series with write first"
+        )
     writer = dit_reference.LayerwiseDit(
         dit_reference.load_config(directory),
         alignment=dit_reference.upstream_alignment(directory),
@@ -900,17 +968,17 @@ def write_full(
     patch = writer.patch_size
     known = {case.name(patch) for case in FULL_CASES}
     if set(names) - known:
-        raise Ti2vExportError(f"知らないケース名がある: {sorted(set(names) - known)}")
+        raise Ti2vExportError(f"unknown case names: {sorted(set(names) - known)}")
     chosen = [case for case in FULL_CASES if not names or case.name(patch) in names]
     for stale in sorted(SERIES.glob(f"{FULL_STAGING_PREFIX}*")):
-        print(f"[write-full] 前の実行の作業ディレクトリ {stale} を消す", flush=True)
+        print(f"[write-full] deleting the working directory {stale} of a previous run", flush=True)
         shutil.rmtree(stale)
     states = {case.name(patch): stored_case_state(writer, case, target) for case in chosen}
     pending = [case for case in chosen if states[case.name(patch)] != "present"]
     print(
-        f"[write-full] {target}: {len(chosen)} ケースのうち済み {len(chosen) - len(pending)}・"
-        f"これから {len(pending)}（1 ケースの見込み {FULL_CASE_SECONDS} s・"
-        f"環境 {json.dumps(dit_reference.numeric_environment(), ensure_ascii=False)}）",
+        f"[write-full] {target}: of {len(chosen)} cases, {len(chosen) - len(pending)} done,"
+        f" {len(pending)} to go (estimate per case {FULL_CASE_SECONDS} s,"
+        f" environment {json.dumps(dit_reference.numeric_environment(), ensure_ascii=False)})",
         flush=True,
     )
     if pending:
@@ -923,8 +991,8 @@ def write_full(
             name = case.name(patch)
             each = statistics.mean(elapsed) if elapsed else FULL_CASE_SECONDS
             print(
-                f"[write-full] {position}/{len(pending)} {name}（{states[name]}）: 開始 —"
-                f" 残りの見込み {each * (len(pending) - position + 1) / 60:.0f} 分",
+                f"[write-full] {position}/{len(pending)} {name} ({states[name]}): starting —"
+                f" remaining estimate {each * (len(pending) - position + 1) / 60:.0f} min",
                 flush=True,
             )
             started = time.perf_counter()
@@ -933,7 +1001,8 @@ def write_full(
                 tempfile.TemporaryDirectory(dir=SERIES, prefix=FULL_STAGING_PREFIX) as scratch,
             ):
                 report = golden_case(writer, source, case, Path(scratch))
-                # 門を通ったケースだけを部品ディレクトリへ移す（同じファイルシステムの rename）。
+                # Only a case that passed the checks is moved into the component directory (a
+                # rename within the same file system).
                 for file in export_dit.case_file_names(name):
                     os.replace(Path(scratch) / file, target / file)
             elapsed.append(time.perf_counter() - started)
@@ -947,7 +1016,7 @@ def write_full(
             if log is not None:
                 _append_log(log, row)
             print(
-                f"[write-full] {position}/{len(pending)} {name}: 据えた {elapsed[-1]:.0f} s",
+                f"[write-full] {position}/{len(pending)} {name}: installed {elapsed[-1]:.0f} s",
                 flush=True,
             )
     cases = []
@@ -980,7 +1049,7 @@ def write_full(
 
 
 # ---------------------------------------------------------------------------
-# 独立した重みでの eager 同値（決定 4 の形）
+# Eager equivalence with independent weights (the form of decision 4)
 # ---------------------------------------------------------------------------
 
 
@@ -991,10 +1060,11 @@ def golden_agreement(
     tokens_out: torch.Tensor,
     golden_dir: Path,
 ) -> tuple[dict[str, Any], list[str]]:
-    """in-memory の上流の参照・パッチ後の出力と、据えた golden の突き合わせ（要約の欄と食い違い）。
+    """Compare the in-memory upstream reference and patched output with the installed golden (the
+    summary fields and the mismatches).
 
-    グラフ入力 7 本も golden の `input.*` とビットで比べる（同じケースを組めていなければ、出力の
-    比較は意味を持たない）。
+    The 7 graph inputs are also compared bit by bit with the golden's `input.*` (if the same case
+    was not built, comparing the outputs means nothing).
     """
     io_name, reference_name = export_dit.case_file_names(name)
     with safe_open(str(golden_dir / io_name), "pt") as handle:
@@ -1008,7 +1078,7 @@ def golden_agreement(
         key
         for key, value in zip(INPUT_NAMES, inputs.graph_inputs, strict=True)
         if not torch.equal(
-            normalize_boundary_tensor(value, f"{name} の入力 '{key}'"), stored_inputs[key]
+            normalize_boundary_tensor(value, f"{name} input '{key}'"), stored_inputs[key]
         )
     ]
     record = {
@@ -1021,17 +1091,17 @@ def golden_agreement(
     failures = []
     if differing:
         failures.append(
-            f"グラフ入力 {differing} が golden の io と違う（同じケースを組めていない）"
+            f"graph inputs {differing} differ from the golden's io (the same case was not built)"
         )
     if not record["golden_reference_bit_exact"]:
         failures.append(
-            "上流の f32 の参照が golden の reference の output とビット一致しない"
-            f"（比 {record['golden_reference_ratio']:.3e}）"
+            "the upstream f32 reference is not bit-identical to output of the golden's reference"
+            f" (ratio {record['golden_reference_ratio']:.3e})"
         )
     if not record["golden_output_bit_exact"]:
         failures.append(
-            "パッチ後のグラフの出力が golden の io の output.0 とビット一致しない"
-            f"（比 {record['golden_output_ratio']:.3e}）"
+            "the patched graph's output is not bit-identical to output.0 of the golden's io"
+            f" (ratio {record['golden_output_ratio']:.3e})"
         )
     return record, failures
 
@@ -1043,11 +1113,12 @@ def full_eager_case(
     case: Ti2vCase,
     golden_dir: Path,
 ) -> dict[str, Any]:
-    """1 ケースの独立した重みでの eager 同値（モジュール doc「独立した重みでの eager 同値」）。
+    """One case of eager equivalence with independent weights (the module doc's "Eager
+    equivalence with independent weights").
 
-    `writer` は入力を組むだけ（RoPE の表と時刻の sinusoid — 重みは読まない）。参照とパッチ後の
-    eager は f32 の全量の `upstream`（fake-quant 済み）と、それを包む `wrapper` で回す。戻りの欄
-    `failures` が空なら合格。
+    `writer` only builds the inputs (the RoPE tables and the time sinusoid — no weights are read).
+    The reference and the patched eager run on the whole f32 `upstream` (fake-quant applied) and the
+    `wrapper` around it. Passes when the returned field `failures` is empty.
     """
     name = case.name(writer.patch_size)
     inputs = case_inputs(writer, case)
@@ -1080,10 +1151,12 @@ def full_eager_case(
 
 
 def eager_full(model: str = DEFAULT_MODEL) -> dict[str, Any]:
-    """f32 の fake-quant の全量 1 本で、パッチ後のグラフを上流と比べ、据えた golden とも突き合わせる
-    （モジュール doc「独立した重みでの eager 同値」— 全ケース）。
+    """With one whole f32 fake-quant model, compare the patched graph with the upstream and also
+    with the installed goldens (the module doc's "Eager equivalence with independent weights" —
+    every case).
 
-    MUST: 上流を読む（約 21 GiB）前に、据えた golden が揃っていることと MemAvailable を確かめる。
+    MUST: before loading the upstream (about 21 GiB), check that the installed goldens are complete
+    and check MemAvailable.
     """
     directory = transformer_dir(model)
     config = dit_reference.load_config(directory)
@@ -1097,8 +1170,8 @@ def eager_full(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     ]
     if missing:
         raise Ti2vExportError(
-            f"据えた golden が揃っていない（{target} — 欠け {len(missing)} 本: {missing[:3]}）。"
-            "先に write で系列を据える"
+            f"the installed goldens are incomplete ({target} — {len(missing)} missing:"
+            f" {missing[:3]}); install the series with write first"
         )
     estimate = dit_probe.eager_memory(config)["f32"] + dit_probe.EAGER_BASE_BYTES
     dit_probe.require_available("load", estimate)
@@ -1125,10 +1198,11 @@ def eager_full(model: str = DEFAULT_MODEL) -> dict[str, Any]:
 
 
 def inspect_only(model: str = DEFAULT_MODEL) -> dict[str, Any]:
-    """trace と構造の検査だけ（重みは読まない — config だけ）。
+    """Only the trace and the structure check (no weights are read — only the config).
 
-    格納の検査（i8 の本数・f32 の残り）は `write` が書いた容器のグラフで見る。ここが見るのは
-    linear の本数・`where` の置き場所・入力の宣言（どれも格納に依らない）と、量子化の対象の本数。
+    The storage check (the i8 count, the f32 remainder) is done on the graph of the container
+    `write` wrote. What this checks is the linear count, the `where` placement and the input
+    declarations (none depends on storage), and the number of quantization targets.
     """
     config = dit_reference.load_config(transformer_dir(model))
     graph, _, targets = trace(config)
@@ -1145,24 +1219,27 @@ def inspect_only(model: str = DEFAULT_MODEL) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 量子化の観測（決定 5）
+# Observing quantization (decision 5)
 # ---------------------------------------------------------------------------
 
-#: 観測のモデル → そのモデルの決定用ケース（S = 192）。1.3B は i8 系列の決定用 6 本（T2V だけ）。
+#: The observed models → each model's decision cases (S = 192). For the 1.3B, the 6 decision cases
+#: of the i8 series (T2V only).
 OBSERVE_MODELS = ("t2v-1.3b", DEFAULT_MODEL)
 
-#: 5B の観測値が 1.3B の観測値の何倍を超えたら裁定に上げるか（決定 5 の目安）。
+#: How many times the 1.3B's observed value the 5B's must exceed to be raised for a ruling (the
+#: rule of thumb of decision 5).
 ESCALATE_FACTOR = 2.0
 
 
 def _observe_cases(
     model: str, patch: tuple[int, int, int]
 ) -> list[tuple[str, export_dit.CaseSpec, Form, str]]:
-    """観測のケース（名前・潜在の形・T2V / I2V の形・文脈のプロンプト）。
+    """The observation cases (name, latent shape, T2V / I2V form, context prompt).
 
-    5B は {@link CASES} の決定用 6 本。1.3B は i8 系列の決定用 6 本（T2V だけ）に、5B の決定用と
-    同じ順でプロンプトを割り当てる（文脈の作り方を 2 つのモデルで揃える — 合成の乱数の文脈は
-    5B だけを増幅する・{@link Ti2vCase}）。
+    For the 5B, the 6 decision cases of {@link CASES}. For the 1.3B, the 6 decision cases of the i8
+    series (T2V only), with the prompts assigned in the same order as the 5B's decision cases (the
+    context is built the same way on both models — a synthetic random context amplifies only the
+    5B, {@link Ti2vCase}).
     """
     band = [case for case in CASES if case.role == "band"]
     if model == DEFAULT_MODEL:
@@ -1174,9 +1251,11 @@ def _observe_cases(
 
 
 def observe_quant(models: Sequence[str] = OBSERVE_MODELS) -> dict[str, Any]:
-    """量子化なしの f32 参照に対する重みだけ i8 の f32 参照の差（モジュール doc「量子化の観測」）。
+    """The difference of the f32 reference with i8 weights only against the unquantized f32
+    reference (the module doc's "Observing quantization").
 
-    5B と 1.3B の決定用ケースで採り、5B の最悪が 1.3B の最悪の何倍かを並べる。
+    Taken on the decision cases of the 5B and the 1.3B, it lists how many times the 1.3B's worst the
+    5B's worst is.
     """
     results: dict[str, Any] = {}
     for model in models:
@@ -1231,12 +1310,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--case",
         action="append",
         default=[],
-        help="ケース名で絞る（write: 系列は据えない・write-full: 書いたケースは据える）",
+        help="narrow by case name (write: the series is not installed; write-full: the written"
+        " cases are installed)",
     )
-    parser.add_argument("--out", type=Path, default=None, help="要約の置き場")
+    parser.add_argument("--out", type=Path, default=None, help="where the summaries go")
     args = parser.parse_args(argv)
     if args.case and args.command not in ("write", "write-full"):
-        parser.error("--case は write / write-full にだけ掛かる")
+        parser.error("--case applies only to write / write-full")
     out = default_out() if args.out is None else args.out
     started = time.perf_counter()
     if args.command == "inspect":

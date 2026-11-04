@@ -1,21 +1,28 @@
-"""i4 系列の校正条件の判定（`_shared/calib_provenance.py`）— 3 つの読み手が共有する規律。
+"""The check of the calibration conditions of an i4 series (`_shared/calib_provenance.py`) — the
+rule its 3 readers share.
 
-固定するのは、**壊れても資産からは読めない**側だけ:
+Only what **cannot be read from the asset once broken** is pinned here:
 
-- 方式が配布可でなければ他の欄を見るまでもなく落ちること（診断の主語を予算にしない）
-- 予算は**下限**で、モデル条件は**一致**で見ること（後者は「大きい方が良い」が成り立たない）
-- **欄の不在は受理する**こと（後方互換 MUST — 欄を足しても既存系列に再 export を課さない）
-- 欄が在るのに数として読めない場合は fail loudly すること（黙って受理する側に倒さない）
+- a method that is not allowed for distribution fails before any other field is looked at (the
+  diagnostic is not about the budget)
+- budgets are checked against a **lower bound** and model conditions by **equality** (for the
+  latter "bigger is better" does not hold)
+- **a missing field is accepted** (backward compatibility MUST — adding a field does not force a
+  re-export of existing series)
+- a field that is present but cannot be read as a number fails loudly (it is never silently
+  accepted)
 
-家族側の席（どの欄をどちらのモードで見るか）は `irodori/tests/test_distribution.py` /
-`irodori/tests/test_pipeline_ref.py` / `anima/tests/test_distribution.py` が持つ。
+The family side (which field is checked in which mode) lives in
+`irodori/tests/test_distribution.py` / `irodori/tests/test_pipeline_ref.py` /
+`anima/tests/test_distribution.py`.
 """
 
 from __future__ import annotations
 
 from _shared.calib_provenance import calib_complaint
 
-#: 出荷済みの irodori w4 系列の記録と同じ形（`outputs/series/irodori-v4-small-i4/`）。
+#: The same shape as the record of the shipped irodori w4 series
+#: (`outputs/series/irodori-v4-small-i4/`).
 SHIPPED = {"method": "gptq", "grid": "rtn", "group_size": 32, "cases": 12, "steps": 40}
 
 FLOOR = {"cases": 12, "steps": 40}
@@ -33,17 +40,18 @@ class TestMethod:
         assert "'gptq'" in complaint
 
     def test_a_record_that_is_not_a_mapping_falls_out_as_a_method_mismatch(self) -> None:
-        """壊れた記録を「欄が無いだけ」として受理する側には倒さない。"""
+        """A broken record is never accepted as "just missing fields"."""
         assert calib_complaint([1, 2, 3], method="gptq") is not None
 
     def test_the_method_is_judged_before_the_budget(self) -> None:
-        """`--no-calib` は予算欄を 0 で書く — 主語が「予算不足」になると原因が読めない。"""
+        """`--no-calib` writes the budget fields as 0 — a diagnostic about "budget too small" would
+        hide the cause."""
         record = {**SHIPPED, "method": "rtn", "cases": 0, "steps": 0}
 
         complaint = calib_complaint(record, method="gptq", at_least=FLOOR)
 
         assert complaint is not None
-        assert "丸め方式" in complaint
+        assert "rounding method" in complaint
 
 
 class TestBudgetFloor:
@@ -55,11 +63,12 @@ class TestBudgetFloor:
         assert "1 < 40" in complaint
 
     def test_a_budget_above_the_floor_passes(self) -> None:
-        """予算は「削られていないこと」だけを見る（増やした側は質が上がるだけ）。"""
+        """The budget is only checked for "not cut" (a larger one only raises the quality)."""
         assert calib_complaint({**SHIPPED, "steps": 80}, method="gptq", at_least=FLOOR) is None
 
     def test_a_field_the_record_does_not_carry_is_skipped(self) -> None:
-        """後方互換 MUST: 欄の追加が既存系列へ再 export（= 丸め時間）を課さない。"""
+        """Backward compatibility MUST: adding a field does not force a re-export (= the rounding
+        time) on existing series."""
         legacy = {"method": "gptq", "grid": "rtn", "group_size": 32}
 
         assert calib_complaint(legacy, method="gptq", at_least=FLOOR) is None
@@ -70,7 +79,7 @@ class TestBudgetFloor:
         )
 
     def test_a_boolean_does_not_slip_through_as_one(self) -> None:
-        """`True` は数として 1 に化ける — 記録が壊れている合図なので落とす。"""
+        """`True` turns into 1 as a number — it signals a broken record, so it fails."""
         complaint = calib_complaint(
             {**SHIPPED, "steps": True}, method="gptq", at_least={"steps": 1}
         )
@@ -79,7 +88,8 @@ class TestBudgetFloor:
 
 
 class TestExactConditions:
-    """モデル別の条件（step / CFG）は一致で見る — 大きい方が良いが成り立たない軸。"""
+    """Per-model conditions (step / CFG) are checked by equality — an axis where "bigger is
+    better" does not hold."""
 
     def test_the_conditions_of_the_model_pass(self) -> None:
         record = {"method": "gptq", "steps": 8, "guidance": 1.0}
@@ -87,7 +97,8 @@ class TestExactConditions:
         assert calib_complaint(record, method="gptq", exactly={"steps": 8, "guidance": 1.0}) is None
 
     def test_a_larger_budget_from_another_model_is_still_refused(self) -> None:
-        """素版（20 step・CFG 4）の条件で焼いた資産を turbo の席に載せるのも誤り。"""
+        """Putting an asset built under the base model's conditions (20 steps, CFG 4) into the
+        turbo slot is wrong too."""
         record = {"method": "gptq", "steps": 20, "guidance": 4.0}
 
         complaint = calib_complaint(record, method="gptq", exactly={"steps": 8, "guidance": 1.0})
@@ -96,7 +107,7 @@ class TestExactConditions:
         assert "'steps'" in complaint
 
     def test_a_condition_the_record_does_not_carry_is_skipped(self) -> None:
-        """`guidance` は 2026-08-23 に足した欄 — それ以前の系列は欄を持たない。"""
+        """`guidance` is a field added on 2026-08-23 — series from before that do not have it."""
         record = {"method": "gptq", "steps": 8}
 
         assert calib_complaint(record, method="gptq", exactly={"steps": 8, "guidance": 1.0}) is None

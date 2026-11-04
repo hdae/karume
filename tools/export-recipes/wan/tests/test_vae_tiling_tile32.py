@@ -131,9 +131,9 @@ class TestCliTile:
             ("ti2v-5b", 20, "--tile 20 is not a multiple of 16"),
             ("ti2v-5b", 24, "--tile 24 is not a multiple of 16"),
             ("t2v-1.3b", 40, "--tile 40 is not a multiple of 16"),
-            ("ti2v-5b", 0, "--tile は正の整数（0）"),
-            ("ti2v-5b", -16, "--tile は正の整数（-16）"),
-            ("ti2v-5b", 4, "--tile 4 が重なりの下限 4（潜在）以下"),
+            ("ti2v-5b", 0, "--tile must be a positive integer (0)"),
+            ("ti2v-5b", -16, "--tile must be a positive integer (-16)"),
+            ("ti2v-5b", 4, "--tile 4 is not above the minimum overlap 4 (latents)"),
         ],
     )
     def test_a_tile_that_is_not_a_positive_multiple_of_16_above_the_overlap_is_refused(

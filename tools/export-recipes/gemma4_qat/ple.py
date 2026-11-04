@@ -1,4 +1,5 @@
-"""QAT PLE を固定 packed のまま**容器の資産**へ組む（ADR 0097 追記 4 / ADR 0109 決定 4）。"""
+"""Build the QAT PLE, still fixed and packed, into **the container's asset** (ADR 0097 addendum 4
+/ ADR 0109 decision 4)."""
 
 from __future__ import annotations
 
@@ -25,32 +26,39 @@ if TYPE_CHECKING:
 
 
 class PleBuild(NamedTuple):
-    """{@link build_ple} の戻り — 容器へ渡す資産と、参照の突合に要る事実。"""
+    """What {@link build_ple} returns — the assets passed to the container, and the facts the
+    reference comparison needs."""
 
-    #: `publish_model(assets=…)` へそのまま渡す資産（索引 + `values` / `scales` の block 列）。
+    #: The assets passed as they are to `publish_model(assets=…)` (the index + the block lists of
+    #: `values` / `scales`).
     assets: dict[str, AssetInput]
-    #: 逆量子化ビット一致の参照に使う散点 token id。
+    #: The scattered token ids used as the reference for bit-exact dequantization.
     probe: tuple[int, ...]
-    #: `values` の block 本数（`reference.json` の突合相手）。
+    #: The block count of `values` (what `reference.json` is compared against).
     blocks: int
-    #: token-major の payload を落とした作業席の一時ファイル（配布物ではない）。
+    #: Temporary files in the working directory holding the token-major payload (not part of the
+    #: distribution).
     spills: tuple[Path, ...]
 
     def discard(self) -> None:
-        """一時ファイルを消す（作業席ごと据わる前に呼ぶ MUST — 配布物に混ざらない）。"""
+        """Delete the temporary files (MUST be called before the working directory is swapped in
+        — so they never end up in the distribution)."""
         for path in self.spills:
             path.unlink(missing_ok=True)
 
 
 def _spill_reader(tensor: torch.Tensor, path: Path) -> Callable[[int, int], Buffer]:
-    """行優先に連結済みの実体を作業席の一時ファイルへ落とし、その区間読みを返す。
+    """Spill the row-major concatenated data to a temporary file in the working directory and
+    return a range reader over it.
 
-    QAT の PLE は上流が既に token-major（`values[tokens, layers*dim//factor]` /
-    `scales[tokens, layers]`）で持っているので、転置は要らず素のバイト列がそのまま payload。
+    Upstream already holds the QAT PLE token-major (`values[tokens, layers*dim//factor]` /
+    `scales[tokens, layers]`), so no transpose is needed and the raw bytes are the payload as
+    they are.
 
-    MUST: 実体を**持ち越さない**（製品系列の {@link gemma4.export_product._spill_tables} と
-    同じ規律）— メモリ上のテンソルを掴む読み口にすると、packed の実体が `trace_qat` と
-    書き出しの間ずっと常駐する。落としてしまえば呼び手は上流モジュールごと手放せる。
+    MUST: **do not carry the data along** (the same rule as the product series'
+    {@link gemma4.export_product._spill_tables}) — a reader holding the in-memory tensor would
+    keep the packed data resident through `trace_qat` and the write. Once spilled, the caller can
+    let go of the whole upstream module.
     """
     spill_payload(memoryview(tensor.numpy()).cast("B"), path)
 
@@ -59,41 +67,44 @@ def _spill_reader(tensor: torch.Tensor, path: Path) -> Callable[[int, int], Buff
             handle.seek(begin)
             raw = handle.read(end - begin)
         if len(raw) != end - begin:
-            raise AssertionError(f"{path}: PLE の区間 [{begin}, {end}) が途中で尽きた")
+            raise AssertionError(f"{path}: the PLE range [{begin}, {end}) ran out partway")
         return raw
 
     return read
 
 
 def build_ple(module: QuantizedEmbedding, layers: int, dim: int, destination: Path) -> PleBuild:
-    """固定表を容器の資産へ組み、散点参照（probe）を系列へ書く。
+    """Build the fixed tables into the container's asset and write the scattered reference (probe)
+    into the series.
 
-    `destination` は staging 側が作る席で、ここが書くのは**配布物でない** probe だけである
-    （資産そのものは容器の中へ入るので、書くのは `publish_model` の仕事）。
+    `destination` is a directory the staging side creates, and all this function writes there is
+    the probe, **which is not part of the distribution** (the asset itself goes inside the
+    container, so writing it is `publish_model`'s job).
 
-    MUST: 上流の固定整数と scale を**再量子化しない** — 検査するのは形と値域だけで、
-    バイト列は 1 ビットも作り替えずに資産の payload になる。
+    MUST: **do not requantize** the upstream fixed integers and scales — only the shape and the
+    value range are checked, and the bytes become the asset's payload without a single bit
+    rewritten.
     """
     bits, tokens = module.num_bits, module.num_embeddings
     if bits not in (2, 4) or layers <= 0 or dim <= 0 or dim % 16:
-        raise ValueError("PLE は I2/I4、正の layers、16の倍数の dim が必要")
+        raise ValueError("PLE needs I2/I4, positive layers and a dim that is a multiple of 16")
     factor = 8 // bits
     values, scales = module.embedding_quantized.detach(), module.embedding_scale.detach()
     embed_scale = float(module.scalar_embed_scale)
     if not math.isfinite(embed_scale) or embed_scale <= 0:
-        raise ValueError("PLE embedScale は正の有限数が必要")
+        raise ValueError("PLE embedScale must be a positive finite number")
     if values.device.type != "cpu" or values.dtype != torch.uint8 or not values.is_contiguous():
-        raise ValueError("PLE packed values は CPU U8 の連続配置が必要")
+        raise ValueError("PLE packed values must be contiguous CPU U8")
     if values.shape != (tokens, layers * dim // factor):
-        raise ValueError("PLE packed values の形が tokens/layers/dim と違う")
+        raise ValueError("the shape of the PLE packed values does not match tokens/layers/dim")
     if (
         scales.device.type != "cpu"
         or scales.dtype != torch.float32
         or scales.shape != (tokens, layers)
     ):
-        raise ValueError("PLE scales は CPU F32 [tokens,layers] が必要")
+        raise ValueError("PLE scales must be CPU F32 [tokens,layers]")
     if not torch.isfinite(scales).all() or not (scales > 0).all():
-        raise ValueError("PLE scales は正の有限数が必要")
+        raise ValueError("PLE scales must be positive finite numbers")
     scales = scales.contiguous()
     storage = f"i{bits}"
     ranges = ple_block_ranges(storage=storage, tokens=tokens, layers=layers, dim=dim)

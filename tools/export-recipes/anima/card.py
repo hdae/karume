@@ -1,12 +1,12 @@
-"""Anima 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""The model card (`README.md`) of the Anima distribution — pure functions over the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **Anima 固有の事実**だけ: 帰属
-（base model・ライセンス・焼き込んだ LoRA の出所）と、この pipeline のカードに何を書くか。
+The generic rendering parts (frontmatter, model list, quant table, section assembly) live in
+`karume.modelcard`. This module holds only **Anima-specific facts**: attribution (base model,
+licence, the origin of baked-in LoRAs) and what this pipeline's card says.
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies as is). The only constants allowed here are **facts
+that do not exist** in the manifest.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 SUPPORTED_PIPELINE = "anima/1"
 
 PIPELINE_TAG = "text-to-image"
@@ -57,37 +57,40 @@ ANIMA_METADATA = CardMetadata(
     tags=("text-to-image", "webgpu"),
 )
 
-#: 公式リポ（karume-anima — CircleStone の 5 変種同居）のタイトル。
+#: Title of the official repository (karume-anima — CircleStone's 5 variants together).
 ANIMA_OFFICIAL_TITLE = "Anima — Karume"
 
-#: 追加学習リポ（karume-anima-extra — 第三者 fine-tune）のタイトル。
+#: Title of the extra repository (karume-anima-extra — third-party fine-tunes).
 ANIMA_EXTRA_TITLE = "Anima Extra — Karume"
 
 
 @dataclass(frozen=True)
 class UpstreamModel:
-    """このリポの 1 モデルの出所（**manifest には現れない事実**なのでここが持つ）。
+    """The origin of one model in this repository (held here: **a fact absent from the manifest**).
 
-    第三者 fine-tune は同じ base の Derivative なので上流ライセンスはそのまま流れてくるが、
-    配布ページ側の許諾欄は作者ごとに違う。特に `allowDifferentLicense` が false の出所は
-    「同じ条件で配ること」を要求するので、**出所ごとに逐語で載せる**。
+    Third-party fine-tunes are Derivatives of the same base, so the upstream licence flows through
+    unchanged, but the permission fields on the distribution pages differ per author. In
+    particular, an origin with `allowDifferentLicense` false requires "distribute under the same
+    terms", so the fields are **listed verbatim per origin**.
     """
 
     title: str
     author: str
     source: str
-    #: 変換元のファイル名（`None` = 上流の diffusers リポそのもの）。
+    #: File name of the conversion source (`None` = the upstream diffusers repository itself).
     file: str | None
-    #: 出所ページの許諾欄（実地確認 — 取得日は下の {@link PERMISSIONS_RETRIEVED}）。
+    #: Permission fields of the origin page (checked at the source — retrieved on
+    #: {@link PERMISSIONS_RETRIEVED} below).
     permissions: tuple[tuple[str, str], ...]
 
 
-#: 許諾欄を実地確認した日（カードに「as of」で出す — 後から変わりうる事実だから）。
+#: Date the permission fields were checked at the source (shown "as of" in the card — the facts
+#: may change later).
 PERMISSIONS_RETRIEVED = "2026-08-22"
 
-#: モデル名 → 出所。CircleStone 公式（base / aesthetic / turbo）は civitai の許諾欄を
-#: 持たない — 掛かるのは CircleStone のライセンス 1 本だけ。公式変種の単一ファイル
-#: checkpoint は HF `circlestone-labs/Anima`（civitai 2458426 と同一バイト配布）から。
+#: Model name → origin. The official CircleStone models (base / aesthetic / turbo) have no civitai
+#: permission fields — only the CircleStone licence applies. The single-file checkpoints of the
+#: official variants come from HF `circlestone-labs/Anima` (byte-identical to civitai 2458426).
 UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     "anima-turbo-v1.1": UpstreamModel(
         title="Anima Turbo v1.1",
@@ -110,8 +113,9 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
         file="anima-aesthetic-v1.1.safetensors",
         permissions=(),
     ),
-    # v1.0 世代も並行配布する（2026-09-01 ユーザー裁定 — この系はバージョン間で好みが
-    # 分かれるため。ADR 0077 の「最新が優れるとは限らない」の実例）。
+    # The v1.0 generation is distributed alongside (maintainer ruling of 2026-09-01 — preferences
+    # between versions differ for this family; an instance of ADR 0077's "the latest is not
+    # necessarily better").
     "anima-turbo-v1.0": UpstreamModel(
         title="Anima Turbo v1.0",
         author="circlestone_labs",
@@ -152,9 +156,10 @@ UPSTREAM_MODELS: Mapping[str, UpstreamModel] = {
     ),
 }
 
-#: 上流ライセンス §3(b) が**逐語での掲示**を求める Attribution Notice（1 字も変えない）。
-#: 配布リポ直下の `NOTICE.md`（`anima/distribution.py`）とこのカードの両方がここを引く —
-#: 同じ法的文言を 2 箇所で独立に持つと、片方だけが条件を満たさない形へ静かに割れる。
+#: The Attribution Notice that §3(b) of the upstream licence requires **to be displayed verbatim**
+#: (do not change a single character). Both `NOTICE.md` at the root of the distribution repository
+#: (`anima/distribution.py`) and this card read it from here — holding the same legal wording in two
+#: places independently lets one side silently drift into a form that fails the terms.
 ATTRIBUTION_NOTICE = (
     "The CircleStone Model is licensed by CircleStone Labs LLC under the CircleStone"
     " Non-Commercial License. Copyright CircleStone Labs LLC.\n"
@@ -163,12 +168,14 @@ ATTRIBUTION_NOTICE = (
     " WITH USE OF THIS MODEL."
 )
 
-#: 上流ライセンス §3(a) 後段 — 受領者へ「CircleStone Models / Derivatives の使用権は本ライセンスに
-#: 基づき Company から直接付与される」と**明示する（specify）**ための固定文。前段（ライセンスの
-#: コピーの提供）は `LICENSE.md` の逐語同梱で満たし、後段はこの 1 文で満たす（2026-09-25 裁定）。
-#: 当事者名・定義語・ライセンス名は原文（`circlestone_license.txt` の前文と §1 / §3(a)）の綴りに
-#: 合わせる。{@link ATTRIBUTION_NOTICE} と同じく `NOTICE.md`（`anima/distribution.py`）とこの
-#: カードの両方がここを引く — 法的文言を 2 箇所で独立に持つと、片方だけが割れる。
+#: The latter half of §3(a) of the upstream licence — the fixed sentence that **specifies** to
+#: recipients that "the rights to use the CircleStone Models / Derivatives are granted directly by
+#: the Company under this licence". The first half (providing a copy of the licence) is met by
+#: bundling `LICENSE.md` verbatim, the latter half by this sentence (ruling of 2026-09-25). Party
+#: names, defined terms and the licence name follow the spelling of the original
+#: (`circlestone_license.txt`, its preamble and §1 / §3(a)). Like {@link ATTRIBUTION_NOTICE}, both
+#: `NOTICE.md` (`anima/distribution.py`) and this card read it from here — holding the legal wording
+#: in two places independently lets one side drift.
 RIGHTS_GRANT_STATEMENT = (
     "Any rights to use the CircleStone Models and/or Derivatives in this repository are granted"
     " to you directly by CircleStone Labs LLC under the CircleStone Labs Non-Commercial License"
@@ -199,28 +206,31 @@ NVIDIA_NOTICE = (
     "Built on NVIDIA Cosmos."
 )
 
-#: `resolution` ノブの受理集合を 1 行で言ったもの（**manifest に無い事実** — 受理集合の正本は
-#: `packages/models/src/anima/resolution.ts` で、ADR 0038 §2 により manifest には書かない）。
-#: 刻み = 空間圧縮 8 × patch 2、下限は VAE タイル decoder の latent 64（= 512px）、上限は
-#: rope 素表の 128 行（= 2048px）。向こうが動いたらここも追随する写しである。
+#: The accepted set of the `resolution` knob in one line (**a fact absent from the manifest** — the
+#: source of truth of the accepted set is `packages/models/src/anima/resolution.ts`, and per ADR
+#: 0038 §2 it is not written into the manifest). Step = spatial compression 8 × patch 2; the lower
+#: bound is latent 64 of the VAE tiled decoder (= 512px), the upper bound the 128 rows of the raw
+#: rope table (= 2048px). This is a copy that follows when that file moves.
 RESOLUTION_NOTE = (
     "Resolution — non-square is fine; each side on a 16 px grid, between 512 and 2048 px:"
 )
 
-#: 上限帯（1920px 超）の注記。**受理集合は縮めない**（2026-09-04 裁定 — 実測なしに配布形の
-#: 自由度を削らない）代わりに、宣言外の位置で走ることをカードに書く。素表の行数を決めている
-#: のは **t 軸**の上限（128 行）で、h / w 軸の宣言（`rope.max_size` = 120 トークン = 1920px）は
-#: それより低い。1920px 超の行は上流と同じ式で引けるので数値の定義はあり、静的形とのビット
-#: 一致も保たれる — 差が出るとすれば学習分布外の位置に由来する品質だけ（未実測）。
-#: `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE と同じ事実の写し。
+#: Note for the top band (above 1920px). **The accepted set is not narrowed** (ruling of 2026-09-04
+#: — the distribution's freedom is not cut without a measurement); instead the card says it runs at
+#: positions outside the declaration. The row count of the raw table is set by the upper bound of
+#: **the t axis** (128 rows), and the declaration of the h / w axes (`rope.max_size` = 120 tokens =
+#: 1920px) is lower. Rows above 1920px are computed with the same formula as upstream, so the
+#: numbers are defined and bit equality with the static form holds — any difference would only be
+#: quality from positions outside the training distribution (unmeasured). A copy of the same fact as
+#: the NOTE of `MAX_LATENT_SIDE` in `packages/models/src/anima/resolution.ts`.
 RESOLUTION_EXTRAPOLATION_NOTE = (
     "  // Sides above 1920 px sit outside the range this model declares (its RoPE tables",
     "  // declare 120 tokens = 1920 px per side); those positions are extrapolated with the",
     "  // same formula, so what can differ there is the image quality.",
 )
 
-#: CFG の代償を 1 行で言ったもの（**両方のカードで同じ文面** — 定数にしないと、片方の行を
-#: 折り返した日にもう片方のカード本文まで動く）。
+#: The cost of CFG in one line (**the same wording in both cards** — without a constant, the day
+#: one side's line is rewrapped the other card's body moves too).
 CFG_NOTE = "  // Classifier-free guidance runs a second (uncond) branch — twice the work per step."
 
 
@@ -281,15 +291,15 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、モデル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
-    進める形。
+    """Policy of the Usage example: keep the minimal working form, and **list the optionals an
+    ordinary use case is likely to need as commented-out lines** (the selectable values are listed
+    in the same line's comment — derived from the manifest, so the list follows as models / quants
+    are added). The reader takes the next step just by uncommenting.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+    NOTE: `fromAssets` is **not shown** (ruling of 2026-08-29). The split distribution can be read
+    now too (X2-101), but that surface is for local debugging and assumes you hold the bytes
+    yourself; the ordinary entry point for a reader using HF is `fromPretrained`. Listing both
+    would make the reader decide "which one to use".
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -388,20 +398,22 @@ def _upstream_model(name: str) -> UpstreamModel:
     same one); a model without one fails the render."""
     upstream = UPSTREAM_MODELS.get(name)
     if upstream is None:
-        raise ValueError(f"モデル {name!r} の出所が card.py に無い — 帰属を書けない")
+        raise ValueError(f"Model {name!r} has no origin in card.py — cannot write its attribution")
     return upstream
 
 
 def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
-    """モデルごとの出所（**このリポに入っているモデルだけ**を manifest から引いて並べる）。
+    """Origins per model (**only the models in this repository**, listed from the manifest).
 
-    MUST: 並びは manifest 由来にする — 出所の表を組み立ての引数と独立に持つと、モデルを
-    1 つ落として組んだ日に「入っていないモデルの帰属」が載ったカードが出る。
+    MUST: the list comes from the manifest — holding the origin table independently of the
+    assembly arguments means that the day the repository is assembled with one model left out, a
+    card carrying "the attribution of a model that is not included" goes out.
 
-    MUST: **順序も manifest のまま**（名前順に並べ替えない）。`models` 表とモデル別節は
-    `karume.modelcard` が manifest の並びのまま組むので、ここだけ並べ替えると同じカードの中で
-    2 通りの順序が混在する（実際に `anima-copycat-…` が先頭へ来て指摘された — 2026-08-22）。
-    manifest の並びは既定モデルが先頭に来る組み立て順そのもので、読者にとっての推奨順でもある。
+    MUST: **keep the manifest's order too** (do not sort by name). `karume.modelcard` builds the
+    `models` table and the per-model sections in manifest order, so sorting only here mixes two
+    orders in the same card (it actually happened — `anima-copycat-…` came first and was pointed
+    out, 2026-08-22). The manifest order is the assembly order itself, with the default model
+    first, and it is also the order recommended to the reader.
     """
     lines = [
         "## Models and their origins",
@@ -430,12 +442,14 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
 
 
 def _base_license(manifest: Mapping[str, Any]) -> list[str]:
-    """ライセンス節 — 上流の再配布条件と、第三者 fine-tune 側の許諾の**重ね合わせ**。
+    """Licence section — the **combination** of the upstream redistribution terms and the
+    third-party fine-tunes' permissions.
 
-    Notice の本文はカードにも逐語で出す（turbo 側と同じ理由 — §3(b) の掲示要件）。§3(a) 後段の
-    権利付与の明示文（{@link RIGHTS_GRANT_STATEMENT}）も `NOTICE.md` と同じ 1 定数で出す。
+    The Notice text is also shown verbatim in the card (the same reason as on the turbo side — the
+    display requirement of §3(b)). The statement of the rights grant in the latter half of §3(a)
+    ({@link RIGHTS_GRANT_STATEMENT}) is also emitted from the same single constant as `NOTICE.md`.
     """
-    # 並びは出所節と同じく manifest のまま（同 MUST — カード内で順序を 2 通りにしない）。
+    # Manifest order, as in the origins section (the same MUST — no two orders in one card).
     fine_tunes = [name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions]
     same_license = [
         name
@@ -482,7 +496,7 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-#: 出所節の導入（リポごとに事実が違う — 公式 / 追加学習）。
+#: Introduction of the origins section (the facts differ per repository — official / extra).
 OFFICIAL_ORIGINS_INTRO = (
     "Each model below is an official CircleStone release — the Anima base model itself or an",
     "official variant of it. The text encoder, VAE and tokenizers are shared across them.",
@@ -519,10 +533,11 @@ def render_base_card(
     abbreviations: Mapping[str, str],
     host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
-    """公式リポ（CircleStone の 5 変種同居）配布形の `README.md` 本文。
+    """The `README.md` body of the official repository's distribution (CircleStone's 5 variants).
 
-    `abbreviations` は席名の部品上書きトークンの対応表（正本は `anima.distribution` —
-    ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず引数で受ける。
+    `abbreviations` maps the component-override tokens of preset names (source of truth:
+    `anima.distribution` — ADR 0074 decision 4). It is a fact absent from the manifest, so it is
+    taken as an argument rather than copied as a constant.
     """
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
@@ -552,7 +567,7 @@ def render_extra_card(
     abbreviations: Mapping[str, str],
     host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
-    """追加学習リポ（第三者 fine-tune）配布形の `README.md` 本文。"""
+    """The `README.md` body of the extra repository's distribution (third-party fine-tunes)."""
     require_pipeline(manifest, SUPPORTED_PIPELINE)
     return render(
         (

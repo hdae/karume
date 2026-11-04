@@ -1,11 +1,12 @@
-"""recipe 全体のパス解決の根（`_shared.paths`）。
+"""The root of path resolution for all recipes (`_shared.paths`).
 
-`REPO_ROOT = Path(__file__).resolve().parents[3]` は**ファイルの深さに依存する派生値**で、
-1 段ずれると 7 定数が丸ごとずれる。破れ方が悪い: `INPUTS_ROOT` / `SERIES_ROOT` を引く家族
-テストは資産不在の `skipif` / `importorskip` へ落ちるので、**全部 skip されたまま緑**になる。
+`REPO_ROOT = Path(__file__).resolve().parents[3]` is **a derived value that depends on the file's
+depth**; one level off shifts all 7 constants. It breaks badly: the family tests that use
+`INPUTS_ROOT` / `SERIES_ROOT` fall into the missing-asset `skipif` / `importorskip`, so they stay
+**green with everything skipped**.
 
-MUST: `models/` / `outputs/` の**存在**は要求しない（どちらも git 追跡外で、資産の無い機に
-存在しない）。ここが見るのは階層の数と綴りだけ。
+MUST: the **existence** of `models/` / `outputs/` is not required (both are outside git and do not
+exist on a machine without assets). Only the number of levels and the spellings are checked here.
 """
 
 from __future__ import annotations
@@ -24,28 +25,33 @@ from _shared.paths import (
 
 class TestRepoRoot:
     def test_it_points_at_the_repository_root(self) -> None:
-        """リポ直下の恒久物（`deno.json` — CLAUDE.md 検証コマンド節）から根を検める。"""
+        """Check the root against a permanent file at the repository root (`deno.json` — the
+        verification commands section of CLAUDE.md)."""
         assert (REPO_ROOT / "deno.json").is_file()
 
     def test_it_can_reach_back_to_this_module_source(self) -> None:
-        """自分自身へ戻れること = `parents[3]` の階層数そのものの直接の証明。"""
+        """Reaching back to the module itself = direct proof of the level count of
+        `parents[3]`."""
         assert (REPO_ROOT / "tools" / "export-recipes" / "_shared" / "paths.py").is_file()
 
 
 class TestDerivedRoots:
     def test_the_three_asset_roots_hang_off_the_repository_root(self) -> None:
-        """資産 3 根（配布形 / 生成物 / 入力素材）はリポ直下（docs/assets-layout.md）。"""
+        """The 3 asset roots (distributions / generated files / input material) are at the
+        repository root (docs/assets-layout.md)."""
         assert DIST_ROOT.parent == REPO_ROOT
         assert OUTPUTS_ROOT.parent == REPO_ROOT
         assert INPUTS_ROOT.parent == REPO_ROOT
 
     def test_the_generated_roots_hang_off_the_outputs_root(self) -> None:
-        """MUST: 生成物は `models/` に置かない（paths.py 冒頭の DECIDED）。"""
+        """MUST: generated files are not placed in `models/` (the DECIDED at the top of
+        paths.py)."""
         for root in (SERIES_ROOT, BENCH_ROOT, MISC_ROOT, EXAMPLES_ROOT):
             assert root.parent == OUTPUTS_ROOT, root
 
     def test_the_spellings_are_the_ones_the_layout_document_names(self) -> None:
-        """綴りは書き手（台本）と読み手（dist ドライバ）の共有知識なので値まで固定する。"""
+        """The spellings are knowledge shared by the writers (scripts) and the reader (the dist
+        driver), so the values themselves are pinned."""
         assert DIST_ROOT.name == "models"
         assert OUTPUTS_ROOT.name == "outputs"
         assert INPUTS_ROOT.name == "inputs"

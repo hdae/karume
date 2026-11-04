@@ -1,21 +1,24 @@
-"""decode 系列の台本が共有する門とファイル操作（ADR 0065 決定 2 — core へは昇格できない）。
+"""Checks and file operations shared by the scripts of decode series (ADR 0065 decision 2 — they
+cannot be promoted to core).
 
-ここに置くのは **states 形 decode 台本のうちモデル知識を 1 つも持たない層**だけ:
-greedy 継続の採り方（{@link greedy_continuation}）・その余裕門（{@link assert_greedy_margins}）
-・golden の書き出し（{@link _write_greedy}）・位置表の容量門（{@link assert_case_room}）・
-公開の時機（{@link _publish} — 据え替えそのものは core の
-{@link karume.artifacts.swap_into_place}）。config も layer_type も読まないので、family
-ごとに引数を一般化する必要が無い。
+Only **the layer of the states-form decode scripts that holds no model knowledge** lives here:
+how a greedy continuation is taken ({@link greedy_continuation}), its margin check
+({@link assert_greedy_margins}), writing the golden ({@link _write_greedy}), the capacity check
+of the position table ({@link assert_case_room}) and the timing of publication ({@link _publish}
+— the swap itself is core's {@link karume.artifacts.swap_into_place}). None of it reads the
+config or layer_type, so the arguments need no per-family generalisation.
 
-MUST: **これらの規律の正本はここ 1 本**（family 側の台本は import して使う）。門を片方の
-family でだけ強めると、もう片方が黙って弱くなる — 実際に逐語コピーだった時期に margin 床の
-MUST が gemma4 側にしか無い状態が生まれた（2026-08-19 レビュー G3-03）。
+MUST: **this module is the single source of truth for these rules** (the family scripts import
+it). Tightening a check in one family alone silently weakens the other — in fact, while they were
+verbatim copies, the MUST of the margin floor existed only on the gemma4 side (review G3-03 of
+2026-08-19).
 
-ここへ**上げないもの**: `_write_container`（量子化引数の有無で分岐する）と `_write_io`
-（出力本数と入力名が family の形）。一般化するとかえって読めなくなる境界を越えない。
+What is **not lifted here**: `_write_container` (it branches on whether quantization arguments
+are given) and `_write_io` (the number of outputs and the input names are family-shaped). This
+does not cross the boundary where generalising would make the code harder to read.
 
-依存方向は recipe → core の一方向だけ（`_shared` は family を import しない — 綴りが要る
-ものはここが持つ）。
+The dependency direction is recipe → core only (`_shared` does not import families — spellings
+it needs are held here).
 """
 
 from __future__ import annotations
@@ -31,34 +34,38 @@ from torch import nn
 from karume.artifacts import swap_into_place
 from karume.convert import normalize_boundary_tensor
 
-#: greedy golden のファイル名（`greedy.<case>.safetensors`）。読み手は TS 側の検収門と
-#: `minicpm5/sweep_w4.py`。拡張子は 1-shot の `io.*` と同じだが、`_shared` は family を
-#: import しないので綴りはここが持つ。
+#: File name of the greedy golden (`greedy.<case>.safetensors`). Its readers are the TS-side
+#: acceptance check and `minicpm5/sweep_w4.py`. The extension is the same as the one-shot
+#: `io.*`, but `_shared` does not import families, so the spelling is held here.
 GREEDY_PREFIX = "greedy."
 GREEDY_SUFFIX = ".safetensors"
 
-#: `greedy.<case>.safetensors` のテンソルキー。
+#: Tensor keys of `greedy.<case>.safetensors`.
 PROMPT_KEY = "prompt"
 EXPECTED_KEY = "expected"
 MARGIN_KEY = "margin"
 
 
 def positions_for(ids: torch.Tensor) -> torch.Tensor:
-    """無 pad 全長の位置列 `[[0, 1, …, T-1]]`（1 chunk で全 prompt を食う形）。"""
+    """The full-length unpadded position row `[[0, 1, …, T-1]]` (one chunk consumes the whole
+    prompt)."""
     return torch.arange(int(ids.shape[1])).unsqueeze(0)
 
 
 def greedy_continuation(
     wrapper: nn.Module, ids: torch.Tensor, steps: int, *, label: str = ""
 ) -> tuple[list[int], list[float]]:
-    """chunk ラッパを**全長で呼び直す** greedy 継続 `steps` step の `(token 列, margin 列)`。
+    """`(tokens, margins)` of a `steps`-step greedy continuation that **calls the chunk wrapper
+    again on the full length**.
 
-    MUST: full re-forward（毎 step 先頭から標準 causal で計算）で採る。KV cache 経路で採ると
-    「ランタイムが検収したい機構」と同じ機構で期待値を作ることになり、両方が同じ向きに
-    間違っていても緑になる。遅いのは承知の上（1 ケース `steps` 回の全長 forward）。
+    MUST: take it with a full re-forward (every step computed from the start with standard
+    causal attention). Taking it through the KV-cache path would build the expected values with
+    the very mechanism the runtime wants to check, and the check would be green even when both
+    are wrong in the same direction. The slowness is accepted (`steps` full-length forwards per
+    case).
 
-    `margin` は各 step の top1 − top2 の logit 差。GPU 実行の偏差でこの列が割れないことの
-    保証で、閾値検査は {@link assert_greedy_margins} が持つ。
+    `margin` is each step's top1 − top2 logit gap. It guarantees that GPU-execution deviation
+    cannot flip this sequence; the threshold check lives in {@link assert_greedy_margins}.
     """
     tokens: list[int] = []
     margins: list[float] = []
@@ -80,13 +87,15 @@ def greedy_continuation(
 
 
 def assert_greedy_margins(margins: Mapping[str, Sequence[float]], floor: float) -> None:
-    """全ケース・全 step の margin が下限を超えることを見る（波 A の余裕保証門の多 step 版）。
+    """Check that the margin of every step of every case exceeds the floor (the multi-step
+    version of iteration A's margin-guarantee check).
 
-    MUST: fail loudly。margin の小さい step を golden に混ぜると「GPU 側が正しくても偏差で
-    1 位が入れ替わる」門になり、以後どの赤も信用できなくなる。
-    MUST: **全ケースを測り終えてから 1 度に**掛ける（1 ケース目で止めない）。門の役目は
-    「どのケースを golden にできるか」の判断材料で、最初の 1 件で止めると除外のたびに実走を
-    やり直すことになる（実重みの 1 実走は数十分かかる）。
+    MUST: fail loudly. Mixing a small-margin step into the golden makes a check where "the top-1
+    swaps through deviation even when the GPU side is right", and no red can be trusted after
+    that.
+    MUST: apply it **once, after every case has been measured** (do not stop at the first case).
+    The check's job is to inform "which cases can become golden"; stopping at the first one would
+    mean redoing the real run after every exclusion (one real-weight run takes tens of minutes).
     """
     weak = {
         name: {step: margin for step, margin in enumerate(values) if margin <= floor}
@@ -95,8 +104,8 @@ def assert_greedy_margins(margins: Mapping[str, Sequence[float]], floor: float) 
     offenders = {name: steps for name, steps in weak.items() if steps}
     if offenders:
         raise AssertionError(
-            f"margin が下限 {floor} 以下の step がある {offenders}"
-            "（K を下げず、当該ケースを GREEDY_CASES から外すこと）"
+            f"steps with a margin at or below the floor {floor}: {offenders}"
+            " (do not lower K; remove those cases from GREEDY_CASES)"
         )
 
 
@@ -108,9 +117,11 @@ def _write_greedy(
     steps: int,
     floor: float,
 ) -> tuple[list[str], dict[str, list[int]], dict[str, list[float]]]:
-    """採用ケースの greedy 継続を測り、**全ケース測ってから**門を掛けて書く。
+    """Measure the greedy continuations of the adopted cases and write them after applying the
+    check **once every case is measured**.
 
-    門より前に 1 本も書かないので、落ちたときに「一部のケースだけ新しい」golden が残らない。
+    Nothing is written before the check, so a failure never leaves a golden in which "only some
+    cases are new".
     """
     tokens: dict[str, list[int]] = {}
     margins: dict[str, list[float]] = {}
@@ -122,9 +133,9 @@ def _write_greedy(
     for name, ids in cases:
         continuation, margin = tokens[name], margins[name]
         tensors = {
-            PROMPT_KEY: normalize_boundary_tensor(ids[0], f"{name} の prompt"),
+            PROMPT_KEY: normalize_boundary_tensor(ids[0], f"prompt of {name}"),
             EXPECTED_KEY: normalize_boundary_tensor(
-                torch.tensor(continuation, dtype=torch.int64), f"{name} の expected"
+                torch.tensor(continuation, dtype=torch.int64), f"expected of {name}"
             ),
             MARGIN_KEY: torch.tensor(margin, dtype=torch.float32).contiguous(),
         }
@@ -135,30 +146,34 @@ def _write_greedy(
 
 
 def assert_case_room(cases: Sequence[tuple[str, torch.Tensor]], steps: int, positions: int) -> None:
-    """prompt + 継続が RoPE 表の位置数に収まることを見る（表の外は引けない）。"""
+    """Check that prompt + continuation fits in the RoPE table's positions (nothing outside the
+    table can be looked up)."""
     for name, ids in cases:
         total = int(ids.shape[1]) + steps
         if total > positions:
             raise AssertionError(
-                f"{name}: prompt {int(ids.shape[1])} + {steps} step = {total} が"
-                f" RoPE 表の位置数 {positions} を超える"
+                f"{name}: prompt {int(ids.shape[1])} + {steps} steps = {total} exceeds"
+                f" the RoPE table's {positions} positions"
             )
 
 
 def _publish(staging: Path, final: Path) -> None:
-    """全ての門を通した staging ディレクトリを final へ**丸ごと**入れ替える。
+    """Swap a staging directory that passed every check into final **as a whole**.
 
-    MUST: 公開は形検査・margin 門・sanity の**全部の後**（呼び手 = 各 family の
-    `export_series` の構造で保証）。ファイル単位で final へ書いていく形だと、途中の門で
-    落ちたときに「新しい model + 古い greedy」の**混ざった正規資産**が残り、検収門が
-    拒否済みの資産で緑になれる。
+    MUST: publication comes **after all of** the shape checks, the margin check and the sanity
+    checks (guaranteed by the structure of each family's `export_series`, the caller). Writing
+    into final file by file would, on a failure of a check halfway, leave a **mixed canonical
+    asset** of "new model + old greedy", and the acceptance check could go green on an asset that
+    was already rejected.
 
-    据え替えそのものの規律（退避 → 昇格 → 失敗時の戻し・中断が残した席の始末）は core の
-    原語が持つ（{@link karume.artifacts.swap_into_place}）— ここが綴るのは「いつ公開して
-    よいか」だけ。
+    The rules of the swap itself (move aside → promote → restore on failure, cleaning up what an
+    interruption left behind) belong to the core primitive
+    ({@link karume.artifacts.swap_into_place}) — this function only spells out "when publishing
+    is allowed".
 
-    NOTE: 本番の呼び手は全て core 直呼びへ移行済み（2026-08-19 の CX-1.1/1.4）で、参照は
-    両 family のテストのみ。それでも**意図して温存**する（2026-08-19 ユーザー裁定）—
-    「公開の時機」の規律の文書アンカーとして。dead code 掃除の対象にしない。
+    NOTE: every production caller has moved to calling core directly (CX-1.1/1.4 of 2026-08-19),
+    and only the tests of both families reference it. It is still **kept on purpose** (the
+    maintainer's decision of 2026-08-19) — as the documentation anchor of the "timing of
+    publication" rule. Not a target of dead-code cleanup.
     """
     swap_into_place(staging, final)

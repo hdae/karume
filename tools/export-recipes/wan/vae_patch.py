@@ -1,52 +1,60 @@
-"""Wan の動画 VAE decoder（2.1 と 2.2）を **chunk グラフ**（unbatched の rank 4）へ書き直す
-（ADR 0118・ADR 0121 決定 6）。
+"""Rewrites Wan's video VAE decoder (2.1 and 2.2) into **chunk graphs** (unbatched rank 4)
+(ADR 0118, ADR 0121 decision 6).
 
-上流 `AutoencoderKLWan`（diffusers 0.39.0 `autoencoder_kl_wan.py`）の decode は、潜在 1 フレームずつ
-decoder を回し、因果キャッシュ（feat_cache）を Python のリストと番兵 `'Rep'` で持ち回す。これを
-「潜在 1 フレーム + cache テンソル群 → フレーム + 更新後の cache」の静的なグラフ 2 種
-（最初の chunk 用 = {@link WanVaeChunkDecoder} の `first=True`・それ以降用 = `first=False`）に
-組み替える。書き直しは 6 つで、どれも **上流のモジュールの重みをそのまま読む関数**として書く:
+The decode of upstream `AutoencoderKLWan` (diffusers 0.39.0 `autoencoder_kl_wan.py`) runs the
+decoder one latent frame at a time and carries the causal cache (feat_cache) around as a Python list
+with the sentinel `'Rep'`. This is restructured into two kinds of static graphs, "one latent frame +
+cache tensors → frames + updated cache" (one for the first chunk = `first=True` of
+{@link WanVaeChunkDecoder}, one for the following chunks = `first=False`). There are six rewrites,
+each written as **a function that reads the weights of upstream's modules as they are**:
 
-1. **cache の正規化 + 因果パディングの cat 化**（{@link causal_conv3d}）— cache は常に 2 フレーム・
-   初期値ゼロ・更新は `cat(cache, x)` の末尾 2 フレーム。時間カーネル 3 の CausalConv3d は
-   どの chunk でも `conv3d(cat(cache, x))`（時間 padding 0・空間 padding は attrs）になる。
-2. **RMS_norm の rank 4 化**（{@link rms_norm}）— `F.normalize` × √C × gamma を `sum` → `sqrt` →
-   `clamp_min` → 除算で書く（`linalg_vector_norm` を語彙に入れない — ADR 0017）。
-3. **upsample3d の時間インターリーブの rank 4 化**（{@link _shared.vae_rank4.interleave_frames}）—
-   上流の rank 6（`reshape(b,2,c,t,h,w)` → `stack(dim=3)`）を rank 4 の reshape / permute で書く。
-4. **フレームごとの 2D 処理を (b t) に畳む**（{@link resample} / {@link attention_block}）—
-   `[C,T,H,W]` → permute → `[T,C,H,W]` で、フレームを conv2d / attention のバッチに置く。
-5. **f32 の normalize**: diffusers は fp16 / bf16 入力のとき normalize を f32 で行う
-   （`autoencoder_kl_wan.py:202-210`）。karume の活性は常に f32（格納だけを圧縮 — ADR 0006）なので
-   この分岐は常に「f32 のまま」側で、書き直しは要らない（{@link rms_norm} は f32 以外を拒む）。
-6. **残差の外側のショートカットの rank 4 化**（Wan2.2 の `DupUp3D` — {@link avg_shortcut} →
-   {@link _shared.vae_rank4.dup_up_3d}）— 上流の rank 8 の view / permute を、複製と軸ごとの
-   depth-to-space（各段 rank 4）で書く。最初の chunk で時間の先頭 `ft − 1` 枚を捨てる slice は
-   cache の仕組みの側（ここ）に置く。
+1. **Normalized cache + causal padding as a cat** ({@link causal_conv3d}) — the cache always has 2
+   frames, starts as zeros, and is updated to the last 2 frames of `cat(cache, x)`. A CausalConv3d
+   with time kernel 3 becomes `conv3d(cat(cache, x))` in every chunk (time padding 0, spatial
+   padding in the attrs).
+2. **RMS_norm in rank 4** ({@link rms_norm}) — `F.normalize` × √C × gamma is written as `sum` →
+   `sqrt` → `clamp_min` → division (`linalg_vector_norm` is kept out of the vocabulary — ADR 0017).
+3. **upsample3d's time interleave in rank 4** ({@link _shared.vae_rank4.interleave_frames}) —
+   upstream's rank 6 (`reshape(b,2,c,t,h,w)` → `stack(dim=3)`) is written with rank-4 reshapes /
+   permutes.
+4. **Folding per-frame 2D processing into (b t)** ({@link resample} / {@link attention_block}) —
+   `[C,T,H,W]` → permute → `[T,C,H,W]` puts the frames on the batch axis of conv2d / attention.
+5. **f32 normalize**: diffusers runs normalize in f32 for fp16 / bf16 input
+   (`autoencoder_kl_wan.py:202-210`). karume's activations are always f32 (only storage is
+   compressed — ADR 0006), so this branch always takes the "stay f32" side and needs no rewrite
+   ({@link rms_norm} rejects anything but f32).
+6. **The shortcut outside the residual in rank 4** (Wan2.2's `DupUp3D` — {@link avg_shortcut} →
+   {@link _shared.vae_rank4.dup_up_3d}) — upstream's rank-8 view / permute is written as a
+   duplication and per-axis depth-to-space (each step rank 4). The slice that drops the first
+   `ft − 1` frames of time in the first chunk lives on the side of the cache mechanism (here).
 
-受ける世代は {@link SUPPORTED_GENERATIONS} の 2 つに閉じる: Wan2.1（`WanUpBlock`・出口は画素の
-3 ch）と Wan2.2（`WanResidualUpBlock`・出口は patchify 空間の 12 ch）。2.2 の出口は unpatchify
-せずに返す（unpatchify と clamp はホスト — ADR 0121 決定 6）。2.1 の分岐は 2.2 の部品を通らない
-（{@link WanVaeChunkDecoder.forward}）。
+The accepted generations are closed to the two of {@link SUPPORTED_GENERATIONS}: Wan2.1
+(`WanUpBlock`, output 3 pixel channels) and Wan2.2 (`WanResidualUpBlock`, output 12 channels in
+patchify space). The 2.2 output is returned without unpatchify (unpatchify and clamp are on the host
+— ADR 0121 decision 6). The 2.1 branch does not go through the 2.2 parts
+({@link WanVaeChunkDecoder.forward}).
 
-cache の正規化が上流と値で一致する根拠（決定 2 の導出）: 上流が `F.pad` で時間の先頭に詰める
-ゼロと、ここで cache に置くゼロは同じ値なので、各 conv3d の入力テンソルは要素ごとに上流と同一に
-なる（潜在解像度の conv なら上流 `[0,0,x0]` → `[0,x0,x1]` → `[x0,x1,x2]`・こちらは cache が
-`[0,0]` → `[0,x0]` → `[x0,x1]` と進んで同じ並び）。`time_conv` は最初の chunk で走らない
-（上流の `'Rep'`）ので、その cache はゼロのまま残り、chunk 2 が `[0,0,x1]` を読む — 上流の `'Rep'`
-の経路（ゼロ 2 枚の pad）と同じ。この同値は {@link normalized_cache_decode} が**上流のコードの
-まま** cache だけを正規化した形で実測する（2.1 は `tests/test_vae_patch.py`・2.2 は
-`tests/test_vae_patch_ti2v.py`）。
+Why the normalized cache matches upstream in value (the derivation of decision 2): the zeros
+upstream pads at the start of time with `F.pad` and the zeros placed in the cache here are the same
+values, so the input tensor of each conv3d is element-wise identical to upstream's (for a conv at
+latent resolution, upstream goes `[0,0,x0]` → `[0,x0,x1]` → `[x0,x1,x2]`, and here the cache goes
+`[0,0]` → `[0,x0]` → `[x0,x1]`, giving the same order). `time_conv` does not run in the first chunk
+(upstream's `'Rep'`), so its cache stays zero and chunk 2 reads `[0,0,x1]` — the same as upstream's
+`'Rep'` path (a pad of two zeros). This equivalence is measured by {@link normalized_cache_decode}
+with **upstream's code unchanged** and only the cache normalized (2.1 in `tests/test_vae_patch.py`,
+2.2 in `tests/test_vae_patch_ti2v.py`).
 
-テンソルは unbatched の `[C, T, H, W]`（B = 1 を落とす — 決定 2）。conv3d の重みだけが rank 5 で、
-値は全て rank 4 以下に収まる（strided コピー族の上限 — ADR 0011 / 0014 / 0016）。
+Tensors are unbatched `[C, T, H, W]` (B = 1 is dropped — decision 2). Only the conv3d weights are
+rank 5; all values fit in rank 4 or less (the limit of the strided copy family — ADR 0011 / 0014 /
+0016).
 
-MUST: モジュールの差し替え（クラス属性の monkeypatch）はしない。関数は上流モジュールを**読むだけ**
-で、パッチ前の参照（{@link reference_decode_unclamped}）はいつでも採れる — anima の VAE パッチが
-持つ「適用済みフラグ」の門（パッチ後に参照を採ると同値検証が恒真化する）が要らない形にした。
+MUST: no module is replaced (no monkeypatching of class attributes). The functions only **read**
+upstream's modules, so the pre-patch reference ({@link reference_decode_unclamped}) can be taken at
+any time — this shape makes unnecessary the "already applied" flag check that anima's VAE patch has
+(taking the reference after patching would make the equivalence check vacuous).
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -70,81 +78,85 @@ from _shared.vae_rank4 import (
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
 
-#: 各 CausalConv3d が次の chunk へ持ち越すフレーム数（上流の `CACHE_T` —
-#: `autoencoder_kl_wan.py:31`）。
+#: The number of frames each CausalConv3d carries over to the next chunk (upstream's `CACHE_T` —
+#: `autoencoder_kl_wan.py:31`).
 CACHE_FRAMES = 2
 
-#: cache の入力の名前の接頭辞（グラフ入力は `cache_00` … — dict 入力を `torch.export` が平らにした
-#: 名前）。
+#: The prefix of the cache input names (the graph inputs are `cache_00` … — the names `torch.export`
+#: gives when it flattens a dict input).
 CACHE_INPUT = "cache"
 
-#: 書き直しが受ける世代の閉じた表: 上流 config の `(is_residual, patch_size)` → up block の型名
-#: （`diffusers.models.autoencoders.autoencoder_kl_wan` の名前 — diffusers は関数の中で
-#: import する）。
-#: Wan2.1 は `WanUpBlock`、Wan2.2 は `WanResidualUpBlock`（`avg_shortcut` の DupUp3D を持ち、
-#: upsampler は dim → dim の 1 本）。表に無い組（`(True, None)`・`(False, 2)`・patch 4 など）は、
-#: ショートカットの有無と出口の並びの前提を確かめていないので fail loudly。
+#: The closed table of generations the rewrite accepts: upstream config's
+#: `(is_residual, patch_size)` → type name of the up block (the name in
+#: `diffusers.models.autoencoders.autoencoder_kl_wan` — diffusers is imported inside functions).
+#: Wan2.1 is `WanUpBlock`, Wan2.2 `WanResidualUpBlock` (it has the DupUp3D `avg_shortcut`, and a
+#: single dim → dim upsampler). A combination outside the table (`(True, None)`, `(False, 2)`,
+#: patch 4 and so on) fails loudly, because the assumptions about whether there is a shortcut and
+#: about the output order have not been checked for it.
 SUPPORTED_GENERATIONS: dict[tuple[bool, int | None], str] = {
     (False, None): "WanUpBlock",
     (True, 2): "WanResidualUpBlock",
 }
 
-#: 出口の画素のチャネル数（RGB）。patchify する世代は `× patch_size²` のチャネル（patchify 空間 —
-#: 2.2 は 12）のまま返す。
+#: The number of output pixel channels (RGB). A generation that patchifies returns `× patch_size²`
+#: channels (patchify space — 12 for 2.2) as they are.
 SAMPLE_CHANNELS = 3
 
-#: upsampler の mode → 時間の倍率（upsample3d は `time_conv` の時間インターリーブで 2 倍）。
+#: upsampler mode → time factor (upsample3d doubles it with `time_conv`'s time interleave).
 TIME_FACTORS = {"upsample3d": 2, "upsample2d": 1}
 
 
 class UnsupportedVaeError(NotImplementedError):
-    """書き直しが前提とする構成（{@link SUPPORTED_GENERATIONS} の decoder）から外れた VAE を
-    受け取った。"""
+    """Received a VAE outside the configuration the rewrite assumes (a decoder of
+    {@link SUPPORTED_GENERATIONS})."""
 
 
-# ---- cache の表 ------------------------------------------------------------------
+# ---- Cache table ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CacheSlot:
-    """因果キャッシュ 1 本（時間カーネル 3 の CausalConv3d 1 つに対応）。
+    """One causal cache (corresponds to one CausalConv3d with time kernel 3).
 
-    `index` は上流の `feat_idx` の順（decoder の forward で CausalConv3d を通る順）で、名前と
-    グラフの入出力の並びはこの順に揃える。`scale` は潜在タイルの辺に対する空間倍率
-    （up block の nearest ×2 を通るたびに 2 倍）。
+    `index` follows upstream's `feat_idx` order (the order in which the decoder's forward goes
+    through the CausalConv3d layers); the names and the order of the graph inputs / outputs follow
+    it. `scale` is the spatial factor relative to the side of the latent tile (doubled at every
+    nearest ×2 of an up block).
     """
 
     index: int
     channels: int
     scale: int
-    #: upsample3d の `time_conv`（最初の chunk では走らない — 上流の `'Rep'`）。
+    #: upsample3d's `time_conv` (does not run in the first chunk — upstream's `'Rep'`).
     time_conv: bool
 
     @property
     def key(self) -> str:
-        """dict 入力のキー（グラフ入力名は `cache_<key>`）。"""
+        """The key of the dict input (the graph input name is `cache_<key>`)."""
         return f"{self.index:02d}"
 
     @property
     def name(self) -> str:
-        """グラフ入力名（`torch.export` が dict 入力 `cache` を平らにした綴り）。"""
+        """The graph input name (the spelling `torch.export` gives when it flattens the dict input
+        `cache`)."""
         return f"{CACHE_INPUT}_{self.key}"
 
     def shape(self, tile: int) -> tuple[int, int, int, int]:
-        """潜在タイル辺 `tile` のときの形 `[C, 2, h, w]`。"""
+        """The shape `[C, 2, h, w]` for a latent tile side `tile`."""
         side = tile * self.scale
         return (self.channels, CACHE_FRAMES, side, side)
 
 
 def assert_supported(vae: AutoencoderKLWan) -> None:
-    """書き直しが前提とする decoder の構成かを確かめる（外れたら fail loudly）。
+    """Checks that the decoder has the configuration the rewrite assumes (fails loudly otherwise).
 
-    見るのは書き直しが**構造として**仮定している点だけ: 世代が {@link SUPPORTED_GENERATIONS} の
-    表にあり、up block が全てその世代の型であること・mid の attention が 1 本であること・出口の
-    チャネル数が `3 × patch_size²` であること。Wan2.2 は加えて、各 up block のショートカットと
-    upsampler の有無が揃い、ショートカットの倍率が upsampler と同じ（空間 ×2・時間は upsample3d なら
-    ×2・upsample2d なら ×1）であること — 最初の chunk 1 枚・以降 4 枚の取り決めは、残差の経路と
-    ショートカットの時間の倍率が揃っていることに依る。
+    Only the points the rewrite assumes **structurally** are checked: the generation is in the table
+    {@link SUPPORTED_GENERATIONS} and every up block has that generation's type, mid has one
+    attention, and the number of output channels is `3 × patch_size²`. For Wan2.2 additionally, each
+    up block has a shortcut exactly when it has an upsampler, and the shortcut's factors are the
+    upsampler's (space ×2; time ×2 for upsample3d, ×1 for upsample2d) — the convention of 1 frame
+    for the first chunk and 4 frames afterwards relies on the residual path and the shortcut having
+    the same time factor.
     """
     from diffusers.models.autoencoders import autoencoder_kl_wan
 
@@ -152,63 +164,67 @@ def assert_supported(vae: AutoencoderKLWan) -> None:
     generation = (bool(config.is_residual), config.patch_size)
     if generation not in SUPPORTED_GENERATIONS:
         raise UnsupportedVaeError(
-            f"(is_residual, patch_size) = {generation} は未対応"
-            f"（受けるのは {list(SUPPORTED_GENERATIONS)} だけ）"
+            f"(is_residual, patch_size) = {generation} is unsupported"
+            f" (only {list(SUPPORTED_GENERATIONS)} are accepted)"
         )
     decoder = vae.decoder
     if len(decoder.mid_block.attentions) != 1 or len(decoder.mid_block.resnets) != 2:
-        raise UnsupportedVaeError("mid block は Res → Attention → Res の 1 層だけを書いている")
+        raise UnsupportedVaeError("only a mid block of one Res → Attention → Res layer is written")
     up_block_type = getattr(autoencoder_kl_wan, SUPPORTED_GENERATIONS[generation])
     for block in decoder.up_blocks:
         if not isinstance(block, up_block_type):
             raise UnsupportedVaeError(
-                f"up block の型 {type(block).__name__} は世代 {generation} の"
-                f" {up_block_type.__name__} でない"
+                f"up block type {type(block).__name__} is not generation {generation}'s"
+                f" {up_block_type.__name__}"
             )
         if config.is_residual:
             _assert_shortcut_follows_the_upsampler(block)
     channels = SAMPLE_CHANNELS * (config.patch_size or 1) ** 2
     if decoder.conv_out.out_channels != channels:
         raise UnsupportedVaeError(
-            f"出口のチャネル {decoder.conv_out.out_channels} が"
-            f" {SAMPLE_CHANNELS} × patch_size² = {channels} でない"
+            f"the output channels {decoder.conv_out.out_channels} are not"
+            f" {SAMPLE_CHANNELS} × patch_size² = {channels}"
         )
 
 
 def _assert_shortcut_follows_the_upsampler(block: nn.Module) -> None:
-    """`WanResidualUpBlock` のショートカット（DupUp3D）が upsampler と同じ倍率で同じ有無か。"""
+    """Whether the shortcut (DupUp3D) of a `WanResidualUpBlock` is present exactly when the
+    upsampler is, with the same factors."""
     shortcut, upsampler = block.avg_shortcut, block.upsampler
     if (shortcut is None) != (upsampler is None):
-        raise UnsupportedVaeError("up block のショートカットと upsampler の有無が揃っていない")
+        raise UnsupportedVaeError(
+            "an up block's shortcut and upsampler disagree on presence (only one of them exists)"
+        )
     if shortcut is None:
         return
     expected = (TIME_FACTORS.get(upsampler.mode), UPSAMPLE_SCALE)
     if (shortcut.factor_t, shortcut.factor_s) != expected:
         raise UnsupportedVaeError(
-            f"ショートカットの倍率 (時間 {shortcut.factor_t}, 空間 {shortcut.factor_s}) が"
-            f" upsampler（{upsampler.mode}）の {expected} と違う"
+            f"the shortcut scale factors (time {shortcut.factor_t}, space {shortcut.factor_s})"
+            f" differ from the upsampler ({upsampler.mode}), which has {expected}"
         )
 
 
 def _upsampler_of(block: nn.Module) -> nn.Module | None:
-    """up block の upsampler（`WanResidualUpBlock` は `upsampler` 1 本・`WanUpBlock` は
-    `upsamplers[0]`・無ければ None）。"""
+    """The upsampler of an up block (`WanResidualUpBlock` has one `upsampler`, `WanUpBlock`
+    `upsamplers[0]`; None if there is none)."""
     from diffusers.models.autoencoders.autoencoder_kl_wan import WanResidualUpBlock, WanUpBlock
 
     if isinstance(block, WanResidualUpBlock):
         return block.upsampler
     if isinstance(block, WanUpBlock):
         return None if block.upsamplers is None else block.upsamplers[0]
-    raise UnsupportedVaeError(f"up block の型 {type(block).__name__} は未対応")
+    raise UnsupportedVaeError(f"up block type {type(block).__name__} is unsupported")
 
 
 def cache_slots(vae: AutoencoderKLWan) -> tuple[CacheSlot, ...]:
-    """decoder の forward 順に因果キャッシュの表を作る（上流の `feat_idx` と同じ順）。
+    """Builds the causal cache table in the decoder's forward order (the same order as upstream's
+    `feat_idx`).
 
-    実モジュールを歩いて導く（表を手で持たない）: conv_in → mid の Res ×2 → 各 up block の
-    Res ×3 と upsample3d の `time_conv` → head。`shortcut` と post-quant の 1×1×1 は cache を
-    持たない（時間 padding 0 — 決定 2）。Wan2.2 のショートカット（DupUp3D）もデータ移動だけで
-    cache を持たない。
+    Derived by walking the real modules (the table is not held by hand): conv_in → mid's Res ×2 →
+    each up block's Res ×3 and upsample3d's `time_conv` → head. `shortcut` and the post-quant 1×1×1
+    have no cache (time padding 0 — decision 2). Wan2.2's shortcut (DupUp3D) only moves data and has
+    no cache either.
     """
     assert_supported(vae)
     decoder = vae.decoder
@@ -232,61 +248,66 @@ def cache_slots(vae: AutoencoderKLWan) -> tuple[CacheSlot, ...]:
             if upsampler.mode == "upsample3d":
                 add(upsampler.time_conv, time_conv=True)
             elif upsampler.mode != "upsample2d":
-                raise UnsupportedVaeError(f"decoder に現れない resample mode: {upsampler.mode}")
+                raise UnsupportedVaeError(
+                    f"resample mode that does not occur in the decoder: {upsampler.mode}"
+                )
             scale *= UPSAMPLE_SCALE
     add(decoder.conv_out)
     return tuple(slots)
 
 
 def graph_slots(slots: Sequence[CacheSlot], *, first: bool) -> tuple[CacheSlot, ...]:
-    """そのグラフが入出力に持つ cache（first は `time_conv` の 2 本を持たない — 決定 2 の表）。"""
+    """The caches the graph has as inputs / outputs (first does not have the two `time_conv` ones —
+    the table of decision 2)."""
     return tuple(slot for slot in slots if not (first and slot.time_conv))
 
 
 def zero_caches(slots: Sequence[CacheSlot], tile: int, *, first: bool) -> dict[str, torch.Tensor]:
-    """そのグラフの cache 入力をゼロで揃えた dict（キーの順 = グラフ入力の順）。"""
+    """A dict with the graph's cache inputs set to zeros (key order = graph input order)."""
     return {slot.key: torch.zeros(slot.shape(tile)) for slot in graph_slots(slots, first=first)}
 
 
-# ---- 書き直しの部品（上流モジュールを読むだけ）------------------------------------
+# ---- Rewrite parts (they only read upstream modules) --------------------------------------
 
 
 def _assert_causal(conv: nn.Module) -> None:
-    """時間カーネル 3・因果パディング 2・stride / dilation 1 の CausalConv3d か。"""
+    """Whether it is a CausalConv3d with time kernel 3, causal padding 2 and stride / dilation 1."""
     pad_w, pad_w_after, pad_h, pad_h_after, pad_t, pad_t_after = conv._padding
     kernel_t = int(conv.weight.shape[2])
     if pad_t != CACHE_FRAMES or pad_t_after != 0 or kernel_t != CACHE_FRAMES + 1:
         raise UnsupportedVaeError(
-            f"因果パディング {conv._padding}・時間カーネル {kernel_t} は未対応"
-            f"（時間の先頭に {CACHE_FRAMES} 枚・カーネル {CACHE_FRAMES + 1} だけ）"
+            f"causal padding {conv._padding} with time kernel {kernel_t} is unsupported"
+            f" (only {CACHE_FRAMES} frames at the start of time and kernel {CACHE_FRAMES + 1})"
         )
     if pad_w != pad_w_after or pad_h != pad_h_after:
         raise UnsupportedVaeError(
-            f"空間の非対称 padding {conv._padding} は conv3d の attrs に畳めない"
+            f"the asymmetric spatial padding {conv._padding} cannot be folded into conv3d's attrs"
         )
     if tuple(conv.stride) != (1, 1, 1) or tuple(conv.dilation) != (1, 1, 1):
         raise UnsupportedVaeError(
-            f"stride {conv.stride}・dilation {conv.dilation} は未対応（1 だけ）"
+            f"stride {conv.stride} / dilation {conv.dilation} are unsupported (only 1)"
         )
 
 
 def causal_conv3d(
     conv: nn.Module, x: torch.Tensor, cache: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """時間カーネル 3 の CausalConv3d を「cache を時間の先頭に cat → 時間 padding 0 の conv3d」
-    で回す。
+    """Runs a CausalConv3d with time kernel 3 as "cat the cache at the start of time → conv3d with
+    time padding 0".
 
-    `x` は `[Cin, T, H, W]`、`cache` は前の chunk の入力の末尾 2 フレーム `[Cin, 2, H, W]`
-    （最初の chunk はゼロ）。戻りは出力 `[Cout, T, H, W]` と、次の chunk へ渡す
-    `cat(cache, x)` の末尾 2 フレーム（上流の `cache_x` の更新規則を T = 1 / T ≥ 2 で 1 本に
-    した形）。
-    空間 padding は conv3d の attrs へ畳む（IR の pad は最終次元・定数 0 だけ — 決定 1）。
+    `x` is `[Cin, T, H, W]`, `cache` the last 2 frames of the previous chunk's input
+    `[Cin, 2, H, W]` (zeros for the first chunk). Returns the output `[Cout, T, H, W]` and the last
+    2 frames of `cat(cache, x)` to hand to the next chunk (upstream's update rule for `cache_x`
+    with T = 1 / T ≥ 2 merged into one).
+    The spatial padding is folded into conv3d's attrs (IR's pad covers only the last dimension with
+    constant 0 — decision 1).
     """
     _assert_causal(conv)
     expected = (x.shape[0], CACHE_FRAMES, x.shape[2], x.shape[3])
     if tuple(cache.shape) != expected:
         raise ValueError(
-            f"cache の形 {tuple(cache.shape)} が入力 {tuple(x.shape)} と合わない（{expected}）"
+            f"cache shape {tuple(cache.shape)} does not match the input {tuple(x.shape)}"
+            f" ({expected})"
         )
     pad_w, _, pad_h, _, _, _ = conv._padding
     joined = torch.cat([cache, x], dim=1)
@@ -295,31 +316,33 @@ def causal_conv3d(
 
 
 def pointwise_conv3d(conv: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """cache を持たない 1×1×1 の CausalConv3d（post-quant・shortcut）を unbatched の conv3d で
-    回す。"""
+    """Runs a 1×1×1 CausalConv3d without a cache (post-quant, shortcut) as an unbatched conv3d."""
     if tuple(conv.weight.shape[2:]) != (1, 1, 1) or any(conv._padding):
         raise UnsupportedVaeError(
-            f"1×1×1 以外（カーネル {tuple(conv.weight.shape[2:])}・padding {conv._padding}）は"
-            " cache 無しで回せない"
+            f"anything other than 1×1×1 (kernel {tuple(conv.weight.shape[2:])}, padding"
+            f" {conv._padding}) cannot run without a cache"
         )
     return functional.conv3d(x, conv.weight, conv.bias)
 
 
 def rms_norm(norm: nn.Module, x: torch.Tensor, dim: int) -> torch.Tensor:
-    """`WanRMS_norm` の rank 4 版（チャネル軸 `dim` — `[C,T,H,W]` は 0・`[T,C,H,W]` は 1）。
+    """The rank-4 version of `WanRMS_norm` (channel axis `dim` — 0 for `[C,T,H,W]`, 1 for
+    `[T,C,H,W]`).
 
-    gamma は上流の格納形のまま右詰めで当たる（`images=False` の `(C,1,1,1)` は `[C,T,H,W]` に、
-    `images=True` の `(C,1,1)` は `[T,C,H,W]` の後ろ 3 軸に揃う）。上流の `+ self.bias`
-    （`bias=False` のとき Python の `0.0`）は落とす — 値を変えずノードだけ増やす加算で、符号付き
-    ゼロ以外に観測できる差は無い（anima の VAE パッチと同じ判断）。
+    gamma applies right-aligned in upstream's stored shape (`images=False`'s `(C,1,1,1)` lines up
+    with `[C,T,H,W]`, `images=True`'s `(C,1,1)` with the last 3 axes of `[T,C,H,W]`). Upstream's
+    `+ self.bias` (Python's `0.0` when `bias=False`) is dropped — an addition that adds only a node
+    without changing the value, with no observable difference other than signed zeros (the same
+    judgement as anima's VAE patch).
     """
     if isinstance(norm.bias, torch.Tensor):
-        raise UnsupportedVaeError("学習された bias 付きの RMS_norm は未対応")
+        raise UnsupportedVaeError("an RMS_norm with a learned bias is unsupported")
     if not norm.channel_first:
-        raise UnsupportedVaeError("channel_first=False の RMS_norm は未対応")
+        raise UnsupportedVaeError("an RMS_norm with channel_first=False is unsupported")
     if x.dtype != torch.float32:
-        # 上流の fp16 / bf16 分岐（normalize だけ f32 で行う）を書いていない — 活性は常に f32。
-        raise UnsupportedVaeError(f"RMS_norm の入力は f32 だけ（{x.dtype}）")
+        # Upstream's fp16 / bf16 branch (only normalize runs in f32) is not written — activations
+        # are always f32.
+        raise UnsupportedVaeError(f"the input of RMS_norm must be f32 ({x.dtype})")
     return l2_normalize(x, dim) * norm.scale * norm.gamma
 
 
@@ -333,13 +356,13 @@ def rms_norm(norm: nn.Module, x: torch.Tensor, dim: int) -> torch.Tensor:
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 def attention_block(block: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """mid の単一 head attention（`WanAttentionBlock`）を `[C,T,H,W]` のまま回す。
+    """Runs mid's single-head attention (`WanAttentionBlock`) on `[C,T,H,W]` as is.
 
-    上流の `rearrange(b c t h w → (b t) c h w)` を permute `[C,T,H,W] → [T,C,H,W]` で写し、
-    フレームを
-    attention のバッチに置く（`[T,1,H·W,C]` — B = T・H = 1・D = C）。chunk の mid は潜在 1 フレーム
-    なので T = 1。中身は上流の forward から時間軸の出入りを外しただけ（anima の
-    `_attention_block_forward` と同じ形）。
+    Upstream's `rearrange(b c t h w → (b t) c h w)` is copied as the permute
+    `[C,T,H,W] → [T,C,H,W]`, which puts the frames on the attention's batch axis (`[T,1,H·W,C]` —
+    B = T, H = 1, D = C). A chunk's mid is one latent frame, so T = 1. The body is upstream's
+    forward with only the entry into and exit from the time axis removed (the same shape as anima's
+    `_attention_block_forward`).
     """
     identity = x
     channels, frames, height, width = x.shape
@@ -353,15 +376,17 @@ def attention_block(block: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 class _CacheCursor:
-    """decoder の forward 順に cache を配り、更新後の cache を同じ順で集める
-    （上流の `feat_idx`）。"""
+    """Hands out the caches in the decoder's forward order and collects the updated caches in the
+    same order (upstream's `feat_idx`)."""
 
     def __init__(
         self, slots: Sequence[CacheSlot], cache: Mapping[str, torch.Tensor], *, first: bool
     ) -> None:
         expected = [slot.key for slot in graph_slots(slots, first=first)]
         if list(cache) != expected:
-            raise ValueError(f"cache のキー {list(cache)} が {expected} と違う（順も見る）")
+            raise ValueError(
+                f"cache keys {list(cache)} differ from {expected} (the order is checked too)"
+            )
         self._slots: Iterator[CacheSlot] = iter(slots)
         self._cache = cache
         self._first = first
@@ -370,24 +395,29 @@ class _CacheCursor:
     def causal(self, conv: nn.Module, x: torch.Tensor) -> torch.Tensor:
         slot = next(self._slots)
         if slot.time_conv:
-            raise AssertionError(f"slot {slot.key} は time_conv（forward の順が表とずれている）")
+            raise AssertionError(
+                f"slot {slot.key} is a time_conv (the forward order is out of step with the table)"
+            )
         return self._apply(slot, conv, x)
 
     def time_conv(self, conv: nn.Module, x: torch.Tensor) -> torch.Tensor | None:
-        """`time_conv` を回す。最初の chunk では走らせず None（上流の `'Rep'` の経路）。"""
+        """Runs `time_conv`. In the first chunk it does not run and returns None (upstream's `'Rep'`
+        path)."""
         slot = next(self._slots)
         if not slot.time_conv:
             raise AssertionError(
-                f"slot {slot.key} は time_conv でない（forward の順が表とずれている）"
+                f"slot {slot.key} is not a time_conv (the forward order is out of step with the"
+                " table)"
             )
         return None if self._first else self._apply(slot, conv, x)
 
     def finish(self) -> list[torch.Tensor]:
-        """更新後の cache（入力と同じ順）。表を使い切っていなければ fail loudly。"""
+        """The updated caches (in the same order as the input). Fails loudly unless the table is
+        used up."""
         rest = list(self._slots)
         if rest:
             raise AssertionError(
-                f"forward が cache を使い切っていない: {[slot.key for slot in rest]}"
+                f"forward did not use up the caches: {[slot.key for slot in rest]}"
             )
         return self._updated
 
@@ -408,10 +438,11 @@ class _CacheCursor:
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 def residual_block(block: nn.Module, x: torch.Tensor, cursor: _CacheCursor) -> torch.Tensor:
-    """`WanResidualBlock` の rank 4 版（shortcut → norm1 → SiLU → conv1 → norm2 → SiLU → conv2
-    → 加算）。
+    """The rank-4 version of `WanResidualBlock` (shortcut → norm1 → SiLU → conv1 → norm2 → SiLU →
+    conv2 → add).
 
-    dropout は eval で恒等（`nn.Dropout` を素通しする — 上流と同じモジュールを呼ぶ）。
+    dropout is the identity in eval (`nn.Dropout` is passed through — the same module as upstream
+    is called).
     """
     shortcut = x if isinstance(block.conv_shortcut, nn.Identity) else None
     if shortcut is None:
@@ -424,18 +455,20 @@ def residual_block(block: nn.Module, x: torch.Tensor, cursor: _CacheCursor) -> t
 
 
 def resample(module: nn.Module, x: torch.Tensor, cursor: _CacheCursor) -> torch.Tensor:
-    """`WanResample`（upsample3d / upsample2d）の rank 4 版。
+    """The rank-4 version of `WanResample` (upsample3d / upsample2d).
 
-    upsample3d は `time_conv`（next だけ）→ 時間インターリーブ → フレームごとの nearest ×2 +
-    Conv2d 3×3。フレームごとの 2D 処理は permute `[C,T,H,W] → [T,C,H,W]` でフレームをバッチに置く
-    （上流の `permute(0,2,1,3,4).reshape(b*t, …)` と op が 1 対 1）。
+    upsample3d is `time_conv` (next only) → time interleave → per-frame nearest ×2 + Conv2d 3×3. The
+    per-frame 2D processing puts the frames on the batch axis with the permute
+    `[C,T,H,W] → [T,C,H,W]` (op for op the same as upstream's `permute(0,2,1,3,4).reshape(b*t, …)`).
     """
     if module.mode == "upsample3d":
         doubled = cursor.time_conv(module.time_conv, x)
         if doubled is not None:
             x = interleave_frames(doubled)
     elif module.mode != "upsample2d":
-        raise UnsupportedVaeError(f"decoder に現れない resample mode: {module.mode}")
+        raise UnsupportedVaeError(
+            f"resample mode that does not occur in the decoder: {module.mode}"
+        )
     upsample, conv = module.resample
     frames = conv(nearest_exact_2x(upsample, x.permute(1, 0, 2, 3)))
     return frames.permute(1, 0, 2, 3)
@@ -453,15 +486,17 @@ def resample(module: nn.Module, x: torch.Tensor, cursor: _CacheCursor) -> torch.
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 def avg_shortcut(module: nn.Module, x: torch.Tensor, *, first_chunk: bool) -> torch.Tensor:
-    """Wan2.2 のショートカット `DupUp3D` の rank 4 版（`x` は `[Cin, T, H, W]`）。
+    """The rank-4 version of Wan2.2's shortcut `DupUp3D` (`x` is `[Cin, T, H, W]`).
 
-    本体は {@link _shared.vae_rank4.dup_up_3d}。最初の chunk では時間の先頭 `ft − 1` 枚を捨てる
-    （上流の `x[:, :, ft-1:]` — 残差の経路の upsample3d が最初の chunk で `time_conv` を走らせず
-    1 枚のまま進むのに揃える）。ft = 1 の上流の slice は恒等なので書かない。
+    The body is {@link _shared.vae_rank4.dup_up_3d}. In the first chunk the first `ft − 1` frames of
+    time are dropped (upstream's `x[:, :, ft-1:]` — matching the residual path's upsample3d, which
+    does not run `time_conv` in the first chunk and stays at one frame). Upstream's slice for ft = 1
+    is the identity, so it is not written.
     """
     if int(module.in_channels) != x.shape[0]:
         raise UnsupportedVaeError(
-            f"ショートカットの入力チャネル {module.in_channels} が入力 {tuple(x.shape)} と合わない"
+            f"the shortcut's input channels {module.in_channels} do not match the input"
+            f" {tuple(x.shape)}"
         )
     factor_t = int(module.factor_t)
     out = dup_up_3d(
@@ -476,10 +511,10 @@ def avg_shortcut(module: nn.Module, x: torch.Tensor, *, first_chunk: bool) -> to
 def residual_up_block(
     block: nn.Module, x: torch.Tensor, cursor: _CacheCursor, *, first: bool
 ) -> torch.Tensor:
-    """`WanResidualUpBlock` の rank 4 版（Res ×3 → upsampler → ショートカットを加算）。
+    """The rank-4 version of `WanResidualUpBlock` (Res ×3 → upsampler → add the shortcut).
 
-    ショートカットは block の入力から作り、残差の経路の出力に足す（上流の
-    `x + avg_shortcut(x_copy, first_chunk)` と同じ順）。
+    The shortcut is built from the block's input and added to the residual path's output (the same
+    order as upstream's `x + avg_shortcut(x_copy, first_chunk)`).
     """
     shortcut_input = x
     for resnet in block.resnets:
@@ -502,16 +537,20 @@ def residual_up_block(
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 class WanVaeChunkDecoder(nn.Module):
-    """VAE decode の chunk グラフ 1 本（`first=True` が最初の chunk 用・`False` がそれ以降用）。
+    """One VAE decode chunk graph (`first=True` for the first chunk, `False` for the following
+    ones).
 
-    入力は潜在 1 フレーム `[z, 1, h, w]`（z は 2.1 が 16・2.2 が 48。逆正規化 `z·std + mean` は
-    ホスト — 決定 2）と cache の dict（キーは {@link CacheSlot.key}・順は表の順）。出力は
-    **クランプ前**のフレーム（first は `[C, 1, 8h, 8w]`・next は `[C, 4, 8h, 8w]` — C は 2.1 が
-    画素の 3・2.2 が patchify 空間の 12）と、更新後の cache（入力と同じ順）。`clamp(-1, 1)`（と
-    2.2 の unpatchify）はホスト（タイルのブレンドの後 — 上流 `tiled_decode` と同じ位置）。
+    The input is one latent frame `[z, 1, h, w]` (z is 16 for 2.1 and 48 for 2.2; the
+    denormalization `z·std + mean` is on the host — decision 2) and the cache dict (keys are
+    {@link CacheSlot.key}, in table order). The output is the frames **before clamping** (first
+    gives `[C, 1, 8h, 8w]`, next `[C, 4, 8h, 8w]` — C is 3 pixel channels for 2.1 and 12 channels
+    in patchify space for 2.2) and the updated cache (in the same order as the input).
+    `clamp(-1, 1)` (and 2.2's unpatchify) are on the host (after the tile blending — the same place
+    as upstream's `tiled_decode`).
 
-    post-quant の 1×1×1 conv はグラフの中でフレームごとに掛ける（上流の非タイル decode は全フレーム
-    に 1 度掛けるが、1×1×1 なのでフレームごとと同じ値 — `tiled_decode` はフレームごとに掛ける）。
+    The post-quant 1×1×1 conv is applied per frame inside the graph (upstream's non-tiled decode
+    applies it once to all frames, but for a 1×1×1 conv that equals per frame — `tiled_decode`
+    applies it per frame).
     """
 
     def __init__(self, vae: AutoencoderKLWan, *, first: bool) -> None:
@@ -520,12 +559,13 @@ class WanVaeChunkDecoder(nn.Module):
         self.post_quant_conv = vae.post_quant_conv
         self.decoder = vae.decoder
         self.first = first
-        #: Wan2.2 の up block（`WanResidualUpBlock` — {@link assert_supported} が型を揃えてある）。
+        #: Wan2.2's up blocks (`WanResidualUpBlock` — {@link assert_supported} has checked the
+        #: types).
         self.residual = bool(vae.config.is_residual)
 
     @property
     def cache_slots(self) -> tuple[CacheSlot, ...]:
-        """このグラフが入出力に持つ cache（入力の順 = 出力の順）。"""
+        """The caches this graph has as inputs / outputs (input order = output order)."""
         return graph_slots(self.slots, first=self.first)
 
     def forward(
@@ -533,7 +573,7 @@ class WanVaeChunkDecoder(nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         if latent.dim() != 4 or latent.shape[1] != 1:
             raise ValueError(
-                f"潜在は unbatched の 1 フレーム [C, 1, h, w] で渡す（{tuple(latent.shape)}）"
+                f"pass the latent as one unbatched frame [C, 1, h, w] ({tuple(latent.shape)})"
             )
         decoder = self.decoder
         cursor = _CacheCursor(self.slots, cache, first=self.first)
@@ -556,7 +596,7 @@ class WanVaeChunkDecoder(nn.Module):
         return (x, *cursor.finish())
 
 
-# ---- 参照と chunk ループ（eager）----------------------------------------------------
+# ---- Reference and chunk loop (eager) -----------------------------------------------------
 
 
 # Third-party code notice. The loop of `reference_decode_unclamped` below reproduces the chunk loop
@@ -569,15 +609,16 @@ class WanVaeChunkDecoder(nn.Module):
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 def reference_decode_unclamped(vae: AutoencoderKLWan, latents: torch.Tensor) -> torch.Tensor:
-    """上流の非タイル `_decode` の chunk ループそのもの（その後の unpatchify と `clamp` を外した
-    もの）。
+    """The chunk loop of upstream's non-tiled `_decode` itself (without the unpatchify and `clamp`
+    after it).
 
-    `latents` は `[1, z, F, h, w]`（逆正規化済み）。戻りは `[1, C, 1 + 4(F−1), 8h, 8w]`（C は 2.1 が
-    画素の 3・2.2 が patchify 空間の 12 — chunk グラフの出口と同じ空間）。上流の
-    `AutoencoderKLWan._decode`（`autoencoder_kl_wan.py:1187-1217`）の chunk ループを逐語で写し、
-    unpatchify（2.1 には無い）と `clamp` の手前で止める — クランプは飽和した要素の差を隠すので、
-    照合はクランプ前で行う（unpatchify とクランプを当てると上流の `_decode` とビット一致することは
-    テストが固定する）。
+    `latents` is `[1, z, F, h, w]` (denormalized). Returns `[1, C, 1 + 4(F−1), 8h, 8w]` (C is 3
+    pixel channels for 2.1 and 12 channels in patchify space for 2.2 — the same space as the chunk
+    graph's output). Copies the chunk loop of upstream's `AutoencoderKLWan._decode`
+    (`autoencoder_kl_wan.py:1187-1217`) verbatim and stops before unpatchify (absent in 2.1) and
+    `clamp` — clamping hides the differences of saturated elements, so the comparison is done before
+    clamping (the tests pin that applying unpatchify and clamp makes it bit-identical to upstream's
+    `_decode`).
     """
     assert_supported(vae)
     vae.clear_cache()
@@ -600,18 +641,22 @@ def reference_decode_unclamped(vae: AutoencoderKLWan, latents: torch.Tensor) -> 
 def normalized_cache_decode(
     vae: AutoencoderKLWan, latents: torch.Tensor, tile: int
 ) -> torch.Tensor:
-    """**cache の正規化だけ**を当てた chunk ループ（上流の decoder のコードのまま・rank 5）。
+    """A chunk loop with **only the cache normalization** applied (upstream's decoder code as is,
+    rank 5).
 
-    上流の decoder をそのまま呼び、feat_cache の初期値だけを「2 フレームのゼロ」に変える
-    （`time_conv` の 2 本は最初の chunk で `None` = 上流の `'Rep'` の経路・2 chunk 目の前に
-    ゼロへ差し替える）。上流は 2 フレームの cache を受けると時間の pad を 0 にして cat だけで
-    回すので、ここが上流の `_decode` とビット一致すれば「cache の正規化は値を変えない」が
-    言える（決定 2 の導出の実測。空間の pad は上流のまま明示）。
+    Calls upstream's decoder unchanged and only changes the initial value of feat_cache to "2 zero
+    frames" (the two `time_conv` ones are `None` in the first chunk = upstream's `'Rep'` path, and
+    are replaced by zeros before the second chunk). When upstream receives a 2-frame cache it sets
+    the time pad to 0 and runs on the cat alone, so if this is bit-identical to upstream's `_decode`
+    then "the cache normalization does not change values" holds (the measurement of decision 2's
+    derivation; the spatial pad stays explicit as upstream has it).
     """
     slots = cache_slots(vae)
     side = latents.shape[3]
     if latents.shape[4] != side or side != tile:
-        raise ValueError(f"潜在の空間 {tuple(latents.shape[3:])} がタイル {tile} の正方でない")
+        raise ValueError(
+            f"the latent's spatial size {tuple(latents.shape[3:])} is not a square of tile {tile}"
+        )
 
     def zero(slot: CacheSlot) -> torch.Tensor:
         return torch.zeros(1, *slot.shape(tile))
@@ -632,26 +677,29 @@ def normalized_cache_decode(
         )
         if index == 0:
             if any(feat[slot.index] != "Rep" for slot in slots if slot.time_conv):
-                raise AssertionError("最初の chunk で time_conv が 'Rep' の経路を通っていない")
+                raise AssertionError("time_conv did not take the 'Rep' path in the first chunk")
             feat = [zero(slot) if slot.time_conv else feat[slot.index] for slot in slots]
         for slot in slots:
             cached = feat[slot.index]
             if not isinstance(cached, torch.Tensor) or cached.shape[2] != CACHE_FRAMES:
-                raise AssertionError(f"chunk {index} の後の cache {slot.key} が 2 フレームでない")
+                raise AssertionError(
+                    f"after chunk {index}, cache {slot.key} does not have 2 frames"
+                )
     return torch.cat(frames, dim=2)
 
 
 def chunk_decode(
     first: WanVaeChunkDecoder, following: WanVaeChunkDecoder, latents: torch.Tensor
 ) -> torch.Tensor:
-    """書き直した chunk グラフ 2 本を eager で回す（ホストのタイル 1 枚ぶんの chunk ループ）。
+    """Runs the two rewritten chunk graphs eagerly (the host's chunk loop for one tile).
 
-    `latents` は unbatched の `[z, F, h, w]`。cache はタイルの頭でゼロに作り直し、first の後は
-    `time_conv` の 2 本だけゼロのまま足して next へ渡す（first は触らない — 決定 2）。戻りは
-    クランプ前の `[C, 1 + 4(F−1), 8h, 8w]`（C は {@link WanVaeChunkDecoder} の出口と同じ）。
+    `latents` is unbatched `[z, F, h, w]`. The cache is recreated as zeros at the start of the tile;
+    after first, only the two `time_conv` ones are added, still zero, before handing it to next
+    (first does not touch them — decision 2). Returns `[C, 1 + 4(F−1), 8h, 8w]` before clamping
+    (C is the same as the output of {@link WanVaeChunkDecoder}).
     """
     if not first.first or following.first:
-        raise ValueError("first には first=True・following には first=False のグラフを渡す")
+        raise ValueError("pass a first=True graph as first and a first=False graph as following")
     tile = latents.shape[2]
     zeros = zero_caches(first.slots, tile, first=False)
     cache = {slot.key: zeros[slot.key] for slot in first.cache_slots}

@@ -1,21 +1,26 @@
-"""`wan/ti2v_few_step_ref.py`（Wan2.2 の 2 ステップの通しの CPU 参照 — ADR 0121 段 6）の約束事。
+"""The contract of `wan/ti2v_few_step_ref.py` (the CPU reference of a full 2-step Wan2.2 run — ADR
+0121 step 6).
 
-参照そのもの（5B の DiT の forward 20 回 + 28 タイルの decode × 3 ケース・RAM 約 24 GiB）は
-回さない。ここで固定するのは:
+The reference itself (20 forwards of the 5B DiT + a 28-tile decode × 3 cases, about 24 GiB of RAM)
+is not run. What is pinned here:
 
-- ケースの表（決定用 2 本 + 受入れ 1 本・seed もプロンプトも互いに違う・3 本とも同じ形）と、
-  潜在の形・shift・guidance の定数（利用者の裁定 2026-10-05 — 1280×704・17 フレーム・shift 5.0）
-- 資産のメタの `name` で正 / negative を引くこと（役割の取り違えは読み込みの前に落ちる）
-- CLI（`--case` で 1 本だけ・重い読み込みの前に落ちる口）
-- scheduler の `flow_shift` を明示して読むこと（config の値に依らず 5.0・式が効く形でなければ
-  止まる）
-- 第 2 相の合成が、統計の非自明な VAE で上流の逆正規化 + 非タイルの decode と同じ値になること
-- 実行の DiT の読み手（i8 の fake-quant + 実数形 RoPE の processor）で 2 ステップが完走すること
-- 合成の小さな 2.2 モデル（48 ch の DiT + 合成の 2.2 VAE）で、2 相の順（DiT を手放してから
-  decode する — 手放さなければ落ちる）・M = 1 / M = S の hook・書いたテンソルとメタの欄・
-  記録した cond / uncond から上流の CFG + UniPC が潜在をビット一致で作り直せること
+- the case table (2 decision cases + 1 acceptance case, all with different seeds and prompts, all 3
+  of the same shape) and the constants of the latent shape, shift and guidance (the maintainer's
+  ruling of 2026-10-05 — 1280×704, 17 frames, shift 5.0)
+- positive / negative are looked up by `name` in the asset metadata (a role mix-up fails before
+  loading)
+- the CLI (`--case` for a single case; the paths that fail before the heavy loading)
+- the scheduler's `flow_shift` is read explicitly (5.0 regardless of the config value; it stops
+  unless the formula applies)
+- the second-phase composition gives the same values as upstream's inverse normalization + an
+  untiled decode, on a VAE with non-trivial statistics
+- 2 steps complete with the execution's DiT loader (i8 fake-quant + real-form RoPE processors)
+- on a small synthetic 2.2 model (48-ch DiT + synthetic 2.2 VAE): the order of the 2 phases (the DiT
+  is released before decoding — it fails if not released), the M = 1 / M = S hooks, the fields of
+  the written tensors and metadata, and that upstream CFG + UniPC rebuild the latents bit-exactly
+  from the recorded cond / uncond
 
-生成は `uv run --group wan --inexact python -m wan.ti2v_few_step_ref`。
+Generate with `uv run --group wan --inexact python -m wan.ti2v_few_step_ref`.
 """
 
 from __future__ import annotations
@@ -40,17 +45,20 @@ from wan import (
 )
 from wan.tests.test_dit_patch import TINY_DIT
 
-#: 合成の潜在 `[C, F, H, W]`（48 ch・格子 2·3·5 — 上流の高さ / 幅の倍数 32 を満たす）。
+#: The synthetic latent `[C, F, H, W]` (48 ch, grid 2·3·5 — satisfies upstream's height / width
+#: multiple of 32).
 SYNTHETIC_LATENT = (48, 2, 6, 10)
 
-#: 合成のタイル辺（潜在）。重なりの下限 4 より大きく、縦 1 枚 × 横 3 枚になる。
+#: The synthetic tile edge (latent). Larger than the overlap floor of 4; gives 1 tile vertically ×
+#: 3 horizontally.
 SYNTHETIC_TILE = 6
 
-#: 合成の 2.2 の DiT（`TINY_DIT` の 48 ch 版 — 文脈の幅は埋め込み資産と同じ 4096）。
+#: The synthetic 2.2 DiT (a 48-ch version of `TINY_DIT` — the context width is 4096, the same as
+#: the embedding assets).
 TINY_TI2V_DIT = {**TINY_DIT, "in_channels": 48, "out_channels": 48, "text_dim": 4096}
 
-#: pin の `scheduler/scheduler_config.json` の値（`flow_shift` だけ 3.0 に変えてある —
-#: 明示の 5.0 が config の値に勝つことを見る）。
+#: The values of the pinned `scheduler/scheduler_config.json` (only `flow_shift` changed to 3.0 —
+#: checks that the explicit 5.0 wins over the config value).
 SCHEDULER_CONFIG: dict[str, Any] = {
     "_class_name": "UniPCMultistepScheduler",
     "beta_end": 0.02,
@@ -90,7 +98,7 @@ def _asset_metadata(negative_role: str = prompts.NEGATIVE) -> dict[str, Any]:
 
 
 def _embeds() -> dict[str, torch.Tensor]:
-    """正 3 本 + negative（値は互いに違う — hook の値での振り分けが決まる）。"""
+    """3 positives + the negative (all different values — so the hook values decide the sorting)."""
     generator = torch.Generator().manual_seed(20262199)
     lengths = {"boxing-cats": 3, "cat-dog-baking": 4, "ferret": 5, "negative": 6}
     return {name: torch.randn(rows, 4096, generator=generator) for name, rows in lengths.items()}
@@ -105,7 +113,8 @@ def _write_asset(path: Path, metadata: dict[str, Any]) -> None:
 
 class TestCases:
     def test_two_band_cases_and_one_accept_case_differ_in_seed_and_prompt(self):
-        """決定用 2 本 + 受入れ 1 本。受入れは決定用と別の seed・プロンプト。"""
+        """2 decision cases + 1 acceptance case. The acceptance case uses a different seed and
+        prompt from the decision cases."""
         assert [(case.name, case.role, case.seed, case.prompt) for case in CASES] == [
             ("band-boxing-cats", "band", 20262101, "boxing-cats"),
             ("band-cat-dog-baking", "band", 20262102, "cat-dog-baking"),
@@ -127,7 +136,8 @@ class TestCases:
             assert text_embeds.prompt_by_name(case.prompt).role == prompts.POSITIVE
 
     def test_the_shape_is_1280x704_with_17_frames_and_shift_5(self):
-        """3 本とも同じ形（受入れの形を変えて帯を外させない — 裁定 2026-10-05）。"""
+        """All 3 have the same shape (the acceptance shape is not changed to escape the band —
+        ruling of 2026-10-05)."""
         channels, frames, height, width = ti2v_few_step_ref.LATENT_SHAPE
 
         assert channels == 48
@@ -162,22 +172,24 @@ class TestPromptNames:
         assert (names.positive, names.negative) == ("ferret", "negative")
 
     def test_a_negative_row_with_the_wrong_role_is_refused(self):
-        with pytest.raises(ValueError, match="'negative' の役割"):
+        with pytest.raises(ValueError, match="the role of 'negative'"):
             ti2v_few_step_ref.prompt_names(_asset_metadata(prompts.POSITIVE), CASES[0])
 
     def test_a_missing_row_is_refused(self):
         metadata = {"prompts": [{"name": "negative", "role": prompts.NEGATIVE}]}
 
-        with pytest.raises(ValueError, match="'boxing-cats' の行が無い"):
+        with pytest.raises(ValueError, match="has no row 'boxing-cats'"):
             ti2v_few_step_ref.prompt_names(metadata, CASES[0])
 
 
 class TestCli:
     @pytest.fixture
     def heavy(self, monkeypatch, tmp_path):
-        """重い段（RAM の確認・読み込み・2 相）を記録だけの代役に差し替える。
+        """Replace the heavy steps (RAM check, loading, the 2 phases) with stand-ins that only
+        record.
 
-        代役が呼ばれた順は `calls["order"]` に積む（何も呼ばれなければ `calls` は空のまま）。
+        The order in which the stand-ins were called is pushed onto `calls["order"]` (if nothing is
+        called, `calls` stays empty).
         """
         calls: dict[str, Any] = {}
 
@@ -205,7 +217,7 @@ class TestCli:
         def generate(cases, **kwargs):
             called("generate", None)
             calls.update(cases=[case.name for case in cases], **kwargs)
-            # main が渡す DiT の読み手が i8 の読み手へ届くこと（DiT は第 1 相の中で読む）。
+            # The DiT loader main passes reaches the i8 loader (the DiT is loaded inside phase 1).
             calls["dit"] = kwargs["load_transformer"]()
             return []
 
@@ -257,7 +269,7 @@ class TestCli:
         embeds = tmp_path / "text_embeds.safetensors"
         _write_asset(embeds, _asset_metadata(prompts.POSITIVE))
 
-        with pytest.raises(ValueError, match="役割"):
+        with pytest.raises(ValueError, match="the role of"):
             ti2v_few_step_ref.main(["--embeds", str(embeds)])
 
         assert heavy == {}
@@ -265,7 +277,7 @@ class TestCli:
 
 @pytest.fixture
 def snapshot(tmp_path) -> Path:
-    """scheduler の config だけを持つ snapshot（`flow_shift` は 3.0）。"""
+    """A snapshot with only the scheduler config (`flow_shift` is 3.0)."""
     directory = tmp_path / "snapshot" / "scheduler"
     directory.mkdir(parents=True)
     (directory / "scheduler_config.json").write_text(json.dumps(SCHEDULER_CONFIG))
@@ -290,14 +302,15 @@ class TestScheduler:
 
         monkeypatch.setattr(diffusers.UniPCMultistepScheduler, "from_pretrained", ignoring)
 
-        with pytest.raises(AssertionError, match=r"flow_shift 3\.0 が 5\.0 でない"):
+        with pytest.raises(AssertionError, match=r"flow_shift 3\.0 is not 5\.0"):
             ti2v_few_step_ref.load_scheduler(snapshot)
 
     @pytest.mark.parametrize(
         "override", [{"use_dynamic_shifting": True}, {"use_flow_sigmas": False}]
     )
     def test_a_config_where_the_shift_does_not_apply_is_refused(self, tmp_path, override):
-        """動的 shift・flow でない σ では `flow_shift` が σ に効かない — 5.0 を読めても止まる。"""
+        """With a dynamic shift or a non-flow σ, `flow_shift` has no effect on σ — it stops even if
+        5.0 can be read."""
         pytest.importorskip("diffusers")
         directory = tmp_path / "snapshot" / "scheduler"
         directory.mkdir(parents=True)
@@ -305,14 +318,14 @@ class TestScheduler:
             json.dumps({**SCHEDULER_CONFIG, **override})
         )
 
-        with pytest.raises(AssertionError, match="flow_shift の式が効く形"):
+        with pytest.raises(AssertionError, match="the form where the flow_shift formula applies"):
             ti2v_few_step_ref.load_scheduler(directory.parent)
 
 
 class TestMemoryEstimate:
     def test_the_gate_is_not_below_the_documented_peak(self, wan22_snapshot):
-        """読み込み前の門（見込み + 余白）が doc / README の第 1 相の山（約 24 GiB）を
-        下回らない。"""
+        """The pre-loading check (estimate + margin) is not below the phase-1 peak in the doc /
+        README (about 24 GiB)."""
         estimate = ti2v_few_step_ref.memory_estimate()
 
         assert estimate + dit_probe.MEMORY_HEADROOM_BYTES >= 24 * 2**30
@@ -326,7 +339,7 @@ def _tiny_dit() -> torch.nn.Module:
 
 
 class TestSyntheticRun:
-    """合成の 2.2 モデルで 2 相を通して書く（5B の重みは読まない）。"""
+    """Writes through both phases on a synthetic 2.2 model (the 5B weights are not read)."""
 
     @pytest.fixture
     def run(self, monkeypatch, tmp_path, snapshot, ti2v_synthetic_vae):
@@ -343,7 +356,7 @@ class TestSyntheticRun:
         decode_tiles = ti2v_few_step_ref.vae_tiling.decode_tiles
 
         def spying(vae, latents, plan):
-            # decode の時点で DiT が回収済みか（2 相の順）。
+            # Whether the DiT has been collected at decode time (the order of the 2 phases).
             decodes.append(refs[0]() is None)
             return decode_tiles(vae, latents, plan)
 
@@ -378,7 +391,7 @@ class TestSyntheticRun:
         }
 
     def test_the_dit_is_released_before_the_first_decode(self, run):
-        """第 1 相（全ケースの DiT）→ DiT を手放す → 第 2 相（decode）。"""
+        """Phase 1 (the DiT for all cases) → release the DiT → phase 2 (decode)."""
         assert run["decodes"] == [True, True]
 
     def test_the_tensors_have_the_documented_names_and_shapes(self, run):
@@ -411,7 +424,7 @@ class TestSyntheticRun:
         )
 
     def test_upstream_cfg_and_unipc_rebuild_the_latents_from_the_recorded_outputs(self, run):
-        """cond / uncond の取り違え・step の記録のずれは、ここでビットが合わなくなる。"""
+        """A cond / uncond mix-up or a shifted step record breaks the bit match here."""
         from diffusers import UniPCMultistepScheduler
 
         for case, (tensors, _) in run["written"].items():
@@ -472,8 +485,9 @@ def _read_fixture(path: str) -> dict[str, torch.Tensor]:
 
 
 class TestDecodeFrames:
-    """第 2 相の合成（逆正規化 → タイル decode → unpatchify → clamp）が上流の decode と同じ値に
-    なること。共有の合成 VAE は mean 0・std 1 で逆正規化が恒等なので、統計の非自明な VAE で見る。"""
+    """The second-phase composition (inverse normalization → tiled decode → unpatchify → clamp)
+    gives the same values as upstream's decode. The shared synthetic VAE has mean 0 and std 1, so
+    its inverse normalization is the identity; a VAE with non-trivial statistics is used instead."""
 
     def test_a_single_tile_decode_matches_the_upstream_decode_of_the_denormalized_latents(
         self, snapshot, ti2v_synthetic_vae
@@ -496,8 +510,8 @@ class TestDecodeFrames:
         )
 
         got = ti2v_few_step_ref.decode_frames(pipeline, latents, plan, 2)
-        # 上流 `WanPipeline.__call__` の逆正規化（`latents / (1 / std) + mean`）→ 非タイルの decode
-        # （unpatchify とクランプ込み）。
+        # Upstream `WanPipeline.__call__` inverse normalization (`latents / (1 / std) + mean`) → an
+        # untiled decode (unpatchify and clamp included).
         mean_view = torch.tensor(mean).view(1, 48, 1, 1, 1)
         std_view = torch.tensor(std).view(1, 48, 1, 1, 1)
         with torch.no_grad():
@@ -507,13 +521,14 @@ class TestDecodeFrames:
         assert plan.tiles == 1
         assert got.shape == want.shape == (3, 5, 96, 96)
         torch.testing.assert_close(got, want, rtol=0, atol=1e-6)
-        # 逆正規化を飛ばした値とは区別がつく（この比較が恒等の逆正規化で素通りしない）。
+        # Distinguishable from the values that skip the inverse normalization (this comparison does
+        # not pass vacuously with an identity inverse normalization).
         assert float((skipped - want).abs().max()) > 1e-3
 
 
 class TestQuantizedDit:
-    """実行が使う DiT の読み手（f32 → i8 の fake-quant と実数形 RoPE の processor）を、合成の
-    48 ch の DiT で `WanPipeline` に通す（5B の重みは読まない）。"""
+    """Runs the DiT loader the execution uses (f32 → i8 fake-quant and real-form RoPE processors)
+    through `WanPipeline` with the synthetic 48-ch DiT (the 5B weights are not read)."""
 
     @pytest.fixture
     def tiny_upstream(self, monkeypatch):
@@ -522,7 +537,8 @@ class TestQuantizedDit:
         )
 
     def test_the_loaded_dit_is_on_the_i8_grid_with_the_real_pair_processors(self, tiny_upstream):
-        # 乱数初期化の素の重みは i8 の格子に無い（下の空の判定が素通りでないこと）。
+        # The raw randomly initialised weights are not on the i8 grid (the empty check below is
+        # not vacuous).
         assert export_dit.unrounded_weights("i8", _tiny_dit())
 
         model = ti2v_few_step_ref.load_quantized_transformer()
@@ -558,12 +574,13 @@ class TestQuantizedDit:
 
         for index in range(ti2v_few_step_ref.STEPS):
             assert quantized[f"latents.{index}"].shape == SYNTHETIC_LATENT
-        # 丸めた重みが pipeline の forward に届いている（素の重みと出力が違う）。
+        # The rounded weights reach the pipeline's forward (the output differs from the raw
+        # weights).
         assert not torch.equal(quantized["noise_cond.0"], unrounded["noise_cond.0"])
 
 
 class TestFaults:
-    """順と経路の検査が落ちうること（故障注入）。"""
+    """The order and path checks can fail (fault injection)."""
 
     @pytest.fixture
     def parts(self, monkeypatch, snapshot, ti2v_synthetic_vae):
@@ -574,7 +591,7 @@ class TestFaults:
         vae, scheduler = parts
         kept = _tiny_dit()
 
-        with pytest.raises(AssertionError, match="DiT への参照が残っている"):
+        with pytest.raises(AssertionError, match="a reference to the DiT remains"):
             ti2v_few_step_ref.generate(
                 [CASES[2]],
                 load_transformer=lambda: kept,
@@ -589,18 +606,19 @@ class TestFaults:
         assert not (tmp_path / "series").exists()
 
     def test_the_m_1_hook_refuses_a_per_token_timestep(self, parts):
-        """M = S の経路を M = 1 の記録に回すと落ちる（経路の取り違え）。"""
+        """Feeding the M = S path into the M = 1 record fails (a path mix-up)."""
         vae, scheduler = parts
         pipeline = ti2v_few_step_ref.build_pipeline(
             _tiny_dit(), vae, scheduler, expand_timesteps=True
         )
         names = ti2v_few_step_ref.prompt_names(_asset_metadata(), CASES[2])
 
-        with pytest.raises(AssertionError, match="1 次元でない"):
+        with pytest.raises(AssertionError, match="is not one-dimensional"):
             ti2v_few_step_ref.denoise_case(pipeline, CASES[2], _embeds(), names)
 
     def test_the_m_s_hook_refuses_a_scalar_timestep(self, parts):
-        """M = 1 の経路を M = S の観測に回すと落ちる（別の hook が形を見る）。"""
+        """Feeding the M = 1 path into the M = S observation fails (the other hook checks the
+        shape)."""
         vae, scheduler = parts
         pipeline = ti2v_few_step_ref.build_pipeline(
             _tiny_dit(), vae, scheduler, expand_timesteps=False
@@ -608,15 +626,16 @@ class TestFaults:
         names = ti2v_few_step_ref.prompt_names(_asset_metadata(), CASES[0])
         denoised = ti2v_few_step_ref.denoise_case(pipeline, CASES[0], _embeds(), names)
 
-        with pytest.raises(AssertionError, match="M = S の経路の timestep の形"):
+        with pytest.raises(AssertionError, match="the timestep shape of the M = S path"):
             ti2v_few_step_ref.observe_m_s(pipeline, denoised, _embeds())
 
     def test_latents_whose_channels_differ_from_the_dit_are_refused(self, parts):
-        """上流は注入した潜在の形を見ない — 16 ch の潜在が黙って流れないこと。"""
+        """Upstream does not check the shape of the injected latents — a 16-ch latent must not flow
+        through silently."""
         vae, scheduler = parts
         pipeline = ti2v_few_step_ref.build_pipeline(
             _tiny_dit(), vae, scheduler, expand_timesteps=False
         )
 
-        with pytest.raises(ValueError, match="z_dim 48 と違う"):
+        with pytest.raises(ValueError, match="differ from the VAE's z_dim 48"):
             ti2v_few_step_ref.video_size(pipeline, (16, 2, 6, 10))

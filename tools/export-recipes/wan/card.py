@@ -1,28 +1,34 @@
-"""Wan の配布形のモデルカード（`README.md`）— manifest から機械導出する純関数（Wan2.1 / Wan2.2）。
+"""The model card (`README.md`) of the Wan distribution — pure functions derived mechanically from
+the manifest (Wan2.1 / Wan2.2).
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は `karume.modelcard` が持つ。
-ここが持つのは **Wan の世代ごとの事実**だけ: 帰属（出所・pin した revision・ライセンス）と、この
-pipeline のカードに何を書くか（第 1 段の固定プロンプト・受理する入力・数値の門・実行資源の実測）。
+The general-purpose rendering parts (frontmatter, model list, quant table, assembling the sections)
+live in `karume.modelcard`. This module owns only **the facts of each Wan generation**: attribution
+(provenance, pinned revision, license) and what this pipeline's card says (the fixed prompts of
+step 1, the accepted inputs, the numeric checks, the measured resources).
 
-世代で違う事実は世代の表 {@link WanCard}（{@link WAN21_CARD} / {@link WAN22_CARD}）に集め、カードの
-骨組み（節の並び・帰属の行・Usage・プロンプト・受理する入力の枠・既定値・宣言 limit）は 1 本の
-{@link render_wan_model_card} が描く。世代の表が持つのは、値として引数化できる事実（pipeline 契約・
-モデルの集合・受理集合・公開 class 名）と、散文が丸ごと違う節（概要・改変の要約・検証の範囲・実行
-資源の実測）の描き手。
+The facts that differ per generation are collected in the generation table {@link WanCard}
+({@link WAN21_CARD} / {@link WAN22_CARD}); the card's skeleton (section order, attribution lines,
+Usage, prompts, the frame of the accepted inputs, defaults, declared limits) is drawn by the single
+{@link render_wan_model_card}. A generation table holds the facts that can be passed as values
+(pipeline contract, model set, accepted sets, public class name) and the renderers of the sections
+whose prose differs entirely (overview, summary of modifications, verification scope, measured
+resources).
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベル・既定値は 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる — text_encoder の取得量・越境参照の先・宣言された
-device limit も manifest から引く）。ここが持ってよい定数は manifest に**存在しない事実**だけ —
-上流の取得元と pin（`wan.sources.SOURCES` が正本）・固定プロンプトの表（`wan.prompts.FIXED_PROMPTS`
-が正本 — 組み立ての門 `wan.distribution.assert_text_embeds` が資産のメタとの一致を見るので、ここに
-描く本文と配る資産は食い違わない）・TS 側の受理集合（`packages/models/src/wan/descriptor.ts` の
-`WAN21_GENERATION` の `acceptedSizes` / `minFrames` / `maxFrames`・テキストの経路の選択
-`textEncoder` — ADR 0119 追記 B・プロンプトの受理規則 — ADR 0119 決定 1 / 2 / 4 と追記 10a。
-Wan2.2 は `WAN22_TI2V_GENERATION`）・実行資源の実測（`_wan21_resources` / `_wan22_resources` —
-ADR 0089 決定 3）。
+MUST: **every number, download size, quant table, dtype label and default is derived from the
+manifest** (the same MUST of `karume.modelcard` applies as is — the text_encoder download size, the
+target of a cross-repository reference and the declared device limits also come from the manifest).
+The only constants allowed here are facts **that are not in the manifest** — the upstream sources
+and pins (`wan.sources.SOURCES` is the source of truth), the table of fixed prompts
+(`wan.prompts.FIXED_PROMPTS` is the source of truth — the assembly check
+`wan.distribution.assert_text_embeds` matches it against the asset's metadata, so the text drawn
+here cannot drift from the shipped assets), the accepted sets of the TS side (`acceptedSizes` /
+`minFrames` / `maxFrames` of `WAN21_GENERATION` in `packages/models/src/wan/descriptor.ts`, the
+choice of text path `textEncoder` — ADR 0119 addendum B, the prompt acceptance rules — ADR 0119
+decisions 1 / 2 / 4 and addendum 10a; Wan2.2 uses `WAN22_TI2V_GENERATION`) and the measured
+resources (`_wan21_resources` / `_wan22_resources` — ADR 0089 decision 3).
 
-MUST: torch を import しない（`import dist` が torch を読まない —
-`tests/test_dist_driver.py` の `TestImportingTheDriver`）。
+MUST: do not import torch (`import dist` does not load torch —
+`TestImportingTheDriver` in `tests/test_dist_driver.py`).
 """
 
 from __future__ import annotations
@@ -51,60 +57,67 @@ from wan.prompts import FIXED_PROMPTS
 from wan.sources import SOURCES, UMT5_SOURCES, WAN21_MODELS, WAN22_MODELS, WAN22_TEXT_MODEL
 from wan.umt5_distribution import UMT5_DEFAULT_MODEL, UMT5_ROLE
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 WAN_SUPPORTED_PIPELINE = "wan/1"
 
-#: HF の pipeline tag（上流と同じ）。
+#: The HF pipeline tag (the same as upstream).
 WAN_PIPELINE_TAG = "text-to-video"
 
-#: 上流の技術レポート。
+#: The upstream technical report.
 WAN_PAPER = "arxiv.org/abs/2503.20314"
 
-#: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
+#: Where the original text lives (the same text as `LICENSE.md` at the distribution repository's
+#: root — Apache 2.0 §4(a)).
 WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: TS 側が受理する寸法とフレーム数（`packages/models/src/wan/descriptor.ts` の受理集合の写し —
-#: manifest に無い事実）。
-#: MUST: TS 側と同じ値（`packages/models/tests/fixtures/wan-card-limits.json` を挟んで両側の
-#: テストが突き合わせる — 片側だけ変えると赤）。
+#: The sizes and frame counts the TS side accepts (a copy of the accepted set in
+#: `packages/models/src/wan/descriptor.ts` — a fact not in the manifest).
+#: MUST: the same values as the TS side (the tests on both sides compare through
+#: `packages/models/tests/fixtures/wan-card-limits.json` — changing one side only turns them red).
 WAN_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((832, 480), (480, 832))
 WAN_FRAMES = (5, 81)
 
-#: TS 側の生成の既定（`WAN21_GENERATION.defaults` の写し — Usage のコメントが描く）。
+#: The TS side's generation defaults (a copy of `WAN21_GENERATION.defaults` — drawn by the Usage
+#: comment).
 WAN_DEFAULT_SIZE = (832, 480)
 WAN_DEFAULT_FRAMES = 33
 
-#: テキストの経路を選ぶ構築時のオプション（TS 側 `wan.Pipeline.fromPretrained` の第 2 引数 —
-#: ADR 0119 追記 B。manifest に無い事実）。既定は GPU 経路（決定 7）。
+#: The construction option that chooses the text path (the second argument of the TS side's
+#: `wan.Pipeline.fromPretrained` — ADR 0119 addendum B; a fact not in the manifest). The default is
+#: the GPU path (decision 7).
 WAN_TEXT_ENCODER_OPTION = "textEncoder"
 WAN_TEXT_ENCODER_PATHS = ("gpu", "precomputed")
 
-#: GPU 経路が受けるプロンプトの token 数（末尾の `</s>` を含む — ADR 0119 決定 4。TS 側の
-#: 受理集合で、上限はトークナイザ資産の `maxLength`）。
+#: The prompt token counts the GPU path accepts (including the trailing `</s>` — ADR 0119 decision
+#: 4; the TS side's accepted set, whose upper bound is the tokenizer asset's `maxLength`).
 WAN_PROMPT_TOKENS = (2, 512)
 
-#: umT5 の部品名（manifest の weights のキー — `wan.distribution.WAN_TEXT_ENCODER_ROLE` と
-#: 同じ正本）。
+#: The umT5 component name (the key in the manifest's weights — the same source of truth as
+#: `wan.distribution.WAN_TEXT_ENCODER_ROLE`).
 WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
 
-#: text encoder の上流（本家の encoder — ADR 0122 決定 1 / 3。この checkpoint の `text_encoder` とは
-#: f32 でビット一致するが、出所は本家を名乗る — umT5 の配布形のカードと食い違わせない）。
+#: The text encoder's upstream (the original encoder — ADR 0122 decisions 1 / 3. It is bit-identical
+#: in f32 to this checkpoint's `text_encoder`, but the provenance names the original — so that it
+#: does not disagree with the card of the umT5 distribution).
 WAN_TEXT_ENCODER_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
 
-#: 通しの実行資源（``_wan_resources`` の段ごとの表）を実測した quant 席。MUST: カードは数を
-#: **この席の数として**名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない —
-#: BiRefNet のカードと同じ）。
+#: The quant preset whose end-to-end resources (the per-stage table of ``_wan_resources``) were
+#: measured. MUST: the card states the numbers **as numbers of this preset** — a distribution
+#: without this preset does not draw them (no numbers for a preset that was not measured — the same
+#: as the BiRefNet card).
 WAN_RESOURCE_QUANT = "f16"
 
-#: 席ごとの transformer の実測（ADR 0120 追記「段 3 / 4 / 5 の結果」〈DiT 単体・通常モード・
-#: B570〉と「段 6 の素材」〈実用席の 50 ステップ・33 フレームの通し・precomputed の経路〉・
-#: 「50 ステップの実用席の sha 行 2 本」〈実用席の 81 フレームの通し: 壁 3,703 s = DiT 段 3,383 s
-#: + VAE 段 319 s〉）。
-#: 行は `(フレーム数, 1 forward, DiT 単体の確保, 50 ステップの通し)`。`f16` の行は比べる基準で、
-#: 通しの欄は上の段ごとの表と同じ通し（ADR 0118 段 6 / 8）。参照席 `f16+dit8` の 1 forward は
-#: r 門の計測（S = 14,040）で `f16` と同じ時間 — 確保と 81 フレームは計測していない。
-#: MUST: 計測していない欄は「not measured」/「not run」と書き、推し量った数で埋めない。
-#: 表に無い席は「未計測」と名乗る（席の並びは manifest のまま）。
+#: The measured transformer per preset (ADR 0120 addenda "Results of steps 3 / 4 / 5" (DiT alone,
+#: normal mode, B570), "Material for step 6" (the practical preset's 50-step 33-frame end-to-end
+#: run, the precomputed path) and "The two sha rows of the 50-step practical preset" (the
+#: practical preset's 81-frame end-to-end run: wall 3,703 s = DiT stage 3,383 s + VAE stage 319 s)).
+#: A row is `(frames, 1 forward, DiT-alone allocation, 50-step end-to-end run)`. The `f16` rows are
+#: the baseline, and their end-to-end column is the same run as the per-stage table above (ADR 0118
+#: steps 6 / 8). The reference preset `f16+dit8` takes the same time per forward as `f16` in the
+#: r check measurement (S = 14,040) — its allocation and 81 frames were not measured.
+#: MUST: an unmeasured cell says "not measured" / "not run" and is never filled with an estimate. A
+#: preset missing from the table is stated as "not measured" (the preset order stays the
+#: manifest's).
 WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
     "f16": (
         (33, "17.1 s", "5.15 GiB", "~30 minutes"),
@@ -120,52 +133,60 @@ WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
     ),
 }
 
-#: 実用席の step 1 の潜在の相対 RMS 誤差（参照席 `f16+dit8` に対して — ADR 0120 段 4 の自機
-#: A/B 門の実測）。`(席, 参照席, 33 フレーム, 81 フレーム)`。カードが併記する視認の結果は ADR 0120
-#: 裁定 2026-10-04 の 1（段 6 の 12 対 — `f16` と実用席・50 ステップ・33 フレーム）。
+#: The step-1 latent relative RMS error of the practical preset (against the reference preset
+#: `f16+dit8` — measured by the on-machine A/B check of ADR 0120 step 4). `(preset, reference
+#: preset, 33 frames, 81 frames)`. The visual result the card states next to it is ADR 0120 ruling
+#: 2026-10-04 item 1 (the 12 pairs of step 6 — `f16` and the practical preset, 50 steps, 33 frames).
 WAN_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.107", "0.210")
 
-#: Wan2.2 TI2V 5B のカードが説明できるパイプライン契約（TS 側 `packages/models/src/wan/config.ts` の
-#: `WAN_TI2V_PIPELINE_NAME` / `WAN_TI2V_PIPELINE_MAJOR`）。
+#: The pipeline contract the Wan2.2 TI2V 5B card can describe (`WAN_TI2V_PIPELINE_NAME` /
+#: `WAN_TI2V_PIPELINE_MAJOR` in the TS side's `packages/models/src/wan/config.ts`).
 WAN22_SUPPORTED_PIPELINE = "wan-ti2v/1"
 
-#: TS 側が受理する寸法とフレーム数（`packages/models/src/wan/descriptor.ts` の
-#: `WAN22_TI2V_GENERATION` の写し — ADR 0121 追記「受理寸法を公式の 2 寸法へ」）。
-#: MUST: TS 側と同じ値（`packages/models/tests/fixtures/wan-ti2v-card-limits.json` を挟んで両側の
-#: テストが突き合わせる — 片側だけ変えると赤）。
+#: The sizes and frame counts the TS side accepts (a copy of `WAN22_TI2V_GENERATION` in
+#: `packages/models/src/wan/descriptor.ts` — ADR 0121 addendum "Accepted sizes to the 2 official
+#: sizes").
+#: MUST: the same values as the TS side (the tests on both sides compare through
+#: `packages/models/tests/fixtures/wan-ti2v-card-limits.json` — changing one side only turns them
+#: red).
 WAN22_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((1280, 704), (704, 1280))
 WAN22_FRAMES = (5, 121)
 
-#: TS 側の生成の既定（`WAN22_TI2V_GENERATION.defaults` の写し — 利用者の裁定 2026-10-09・
-#: ADR 0121 追記「段 7 の結果」）。NOTE: fixture `wan-ti2v-card-limits.json` はまだ既定を
-#: 持たないので、TS 側との突き合わせは無い — 既定を替えるときは descriptor.ts とここを両方直す。
+#: The TS side's generation defaults (a copy of `WAN22_TI2V_GENERATION.defaults` — the maintainer's
+#: ruling 2026-10-09, ADR 0121 addendum "Results of step 7"). NOTE: the fixture
+#: `wan-ti2v-card-limits.json` does not carry the defaults yet, so nothing compares them with the TS
+#: side — when a default changes, fix both descriptor.ts and this place.
 WAN22_DEFAULT_SIZE = (1280, 704)
 WAN22_DEFAULT_FRAMES = 33
 
-#: Wan2.2 の席ごとの実測。行は `(フレーム数, 1 forward, DiT の段の VRAM の山, DiT の段, VAE の段,
-#: 通し)`。50 ステップの通しは全て 1280×704・shift 5・guidance 5・seed 42（時間は DiT の段 /
-#: VAE の段 / 壁）。33 / 49 フレームの行は B570・Deno 2.9.6・2026-10-05・precomputed の経路
-#: （VRAM の山は fdinfo の DiT の段）。121 フレームの行だけは GPU も測り方も違う（下の項）。
+#: Measurements per Wan2.2 preset. A row is `(frames, 1 forward, peak VRAM of the DiT stage, DiT
+#: stage, VAE stage, end to end)`. Every 50-step end-to-end run is 1280×704, shift 5, guidance 5,
+#: seed 42 (times are DiT stage / VAE stage / wall). The 33 / 49-frame rows are B570, Deno 2.9.6,
+#: 2026-10-05, the precomputed path (the peak VRAM is fdinfo's for the DiT stage). Only the
+#: 121-frame row differs in both GPU and method (the item below).
 #:
-#: - 33 フレームの行は 2 席とも**製品の class**（`wan.Ti2vPipeline`）の opt-in の通し（ADR 0121 追記
-#:   「段 6 の結果」の「50 ステップの通し」— 参照席 2,142.9 / 439.2 / 2,582.5 s・7.859 GiB、実用席
-#:   959.9 / 438.5 / 1,398.8 s・7.843 GiB）。
-#: - 49 フレームの行は、製品の class ではなく同じ製品部品を呼ぶ**生成スクリプト**の通し（追記
-#:   「受理寸法を公式の 2 寸法へ」の試走の表）。同じ要求の実用席 33 フレームでは、生成スクリプトの
-#:   DiT の段の山（7.72 GiB）が製品の class（7.843 GiB）より 0.12 GiB 小さかった（出力はバイト
-#:   同一）ので、カードはその向きを注に書く。
-#: - 121 フレームの行（実用席だけ）は ADR 0121 追記「RTX 3080 Ti のレーンとフル verify」の
-#:   開発機の通し: RTX 3080 Ti（12,288 MiB）・Deno 2.9.6・2026-10-06・**GPU の umT5 の経路**・
-#:   cat-dog-baking・生成スクリプト（`outputs/diag/wan22-121.ts` — 記述子の上限だけを 121 へ広げた
-#:   家族で内部 API を呼ぶ・配布形を読む）。壁 3,787.9 s = umT5 9.1 / DiT 3,068.2 / VAE 709.8 s。
-#:   **VRAM の山は nvidia-smi の GPU 全体**（DiT の段 11,361 MiB = 11.09 GiB — fdinfo ではない）で、
-#:   時間は熱制限込み（93 ℃・throttle `sw_thermal`）なので B570 の行と比べられない — カードの注が
-#:   その行の GPU・runtime・測り方・熱制限を名乗る。
-#:   記録 `outputs/misc/wan22-121-2026-10-06/record.json`。
-#:   参照席の 121 フレームの 50 ステップは回していないので行を持たない（推し量って埋めない）。
-#: - 1 forward は追記「段 2 の結果」（2026-10-04）の所要（DiT 単体・通常モード・batch 1・
-#:   S = 7,920 = 1280×704×33）。49 フレーム（S = 11,440）と 121 フレーム（S = 27,280）の
-#:   1 forward は計測していない。
+#: - The 33-frame rows are, for both presets, opt-in end-to-end runs of **the product class**
+#:   (`wan.Ti2vPipeline`) (the "50-step end-to-end run" of ADR 0121 addendum "Results of step 6" —
+#:   reference preset 2,142.9 / 439.2 / 2,582.5 s, 7.859 GiB; practical preset 959.9 / 438.5 /
+#:   1,398.8 s, 7.843 GiB).
+#: - The 49-frame rows are end-to-end runs of **a generation script** that calls the same product
+#:   components rather than the product class (the trial table of the addendum "Accepted sizes to
+#:   the 2 official sizes"). For the same request with the practical preset at 33 frames, the
+#:   generation script's DiT-stage peak (7.72 GiB) was 0.12 GiB lower than the product class's
+#:   (7.843 GiB) (the output was byte-identical), so the card notes that direction.
+#: - The 121-frame row (practical preset only) is the development machine's run from ADR 0121
+#:   addendum "The RTX 3080 Ti lanes and the full verify": RTX 3080 Ti (12,288 MiB), Deno 2.9.6,
+#:   2026-10-06, **the GPU umT5 path**, cat-dog-baking, a generation script
+#:   (`outputs/diag/wan22-121.ts` — calls internal APIs with a family whose descriptor only widens
+#:   the upper bound to 121, and reads the distribution). Wall 3,787.9 s = umT5 9.1 / DiT 3,068.2 /
+#:   VAE 709.8 s. **The peak VRAM is nvidia-smi's for the whole GPU** (DiT stage 11,361 MiB = 11.09
+#:   GiB — not fdinfo), and the times include thermal limiting (93 ℃, throttle `sw_thermal`), so
+#:   they cannot be compared with the B570 rows — the card's note states that row's GPU, runtime,
+#:   method and thermal limiting. Record: `outputs/misc/wan22-121-2026-10-06/record.json`. The
+#:   reference preset's 121-frame 50-step run was not done, so it has no row (no estimate fills it).
+#: - 1 forward is the time from the addendum "Results of step 2" (2026-10-04) (DiT alone, normal
+#:   mode, batch 1, S = 7,920 = 1280×704×33). 1 forward at 49 frames (S = 11,440) and at 121 frames
+#:   (S = 27,280) was not measured.
 #:
 #: - The `f16+dit8-a8-attn8-online` row (ADR 0132 "Results"): RTX 3080 Ti, Node + Dawn,
 #:   2026-10-23, the DiT measured-mode e2e at S = 27,280 (one forward, the second run of the same
@@ -174,8 +195,9 @@ WAN22_DEFAULT_FRAMES = 33
 #:   forward. The preset has not run 50 steps, so its stage / VAE / clip cells are "not run", and
 #:   it has no 33 / 49-frame rows (not measured).
 #:
-#: MUST: 計測していない欄は「not measured」と書き、推し量った数で埋めない。表に無い席は「未計測」と
-#: 名乗る（席の並びは manifest のまま — 2.1 の {@link WAN_QUANT_TRANSFORMER} と同じ扱い）。
+#: MUST: an unmeasured cell says "not measured" and is never filled with an estimate. A preset
+#: missing from the table is stated as "not measured" (the preset order stays the manifest's — the
+#: same treatment as 2.1's {@link WAN_QUANT_TRANSFORMER}).
 WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] = {
     "f16+dit8": (
         (33, "21.8 s", "7.86 GiB", "2,143 s", "439 s", "43 min 3 s"),
@@ -189,18 +211,19 @@ WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] =
     "f16+dit8-a8-attn8-online": ((121, "21.7 s", "9.01 GiB", "not run", "not run", "not run"),),
 }
 
-#: Wan2.2 の Usage が呼ぶ公開 class（`@karume/models/wan`）。資源の注も名指しする（33 フレームの
-#: 通しを回した class）。
+#: The public class the Wan2.2 Usage calls (`@karume/models/wan`). The resources note names it too
+#: (the class that ran the 33-frame end-to-end run).
 WAN22_PIPELINE_CLASS = "Ti2vPipeline"
 
-#: Wan2.2 の実用席の step 1 の潜在の相対 RMS 誤差（参照席 `f16+dit8` に対して — ADR 0121 段 7 の
-#: 自機 A/B 門の実測・RTX 3080 Ti・2026-10-09）。`(席, 参照席, 33 フレーム, 121 フレーム)`。
-#: カードが併記する視認の結果は同じ追記の利用者の判定（参照席と実用席の 12 対・50 ステップ・
-#: 1280×704・33 フレーム — 劣化なし）。
+#: The step-1 latent relative RMS error of Wan2.2's practical preset (against the reference preset
+#: `f16+dit8` — measured by the on-machine A/B check of ADR 0121 step 7, RTX 3080 Ti, 2026-10-09).
+#: `(preset, reference preset, 33 frames, 121 frames)`. The visual result the card states next to it
+#: is the maintainer's judgement in the same addendum (12 pairs of the reference and practical
+#: presets, 50 steps, 1280×704, 33 frames — no degradation).
 WAN22_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.044", "0.049")
-#: I2V の実用席の自機 A/B（ADR 0121 段 9d・`e2e_wan_ti2v_ab_test.ts` の i2v-33f —
-#: 1280×704・33 フレーム・条件画像 1 枚・fit crop・opt-in）: step 1 の潜在の relRMS。帯は × 2 の
-#: 切り上げ（9.3e-2）。
+#: The on-machine A/B of the I2V practical preset (ADR 0121 step 9d, i2v-33f of
+#: `e2e_wan_ti2v_ab_test.ts` — 1280×704, 33 frames, one conditioning image, fit crop, opt-in): the
+#: step-1 latent relRMS. The band is × 2 rounded up (9.3e-2).
 WAN22_PRACTICAL_QUANT_I2V_ERROR_33 = "0.046"
 #: The online preset's (the default on 2026-10-23 until `conv8`) step-1 latent relative RMS error
 #: against the reference preset (ADR 0132 "Results" — `e2e_wan_ti2v_ab_test.ts`, RTX 3080 Ti, Node +
@@ -218,79 +241,89 @@ WAN22_INT8_VAE_QUANTS = ("i8", "i8-a8-attn8-online-conv8")
 
 @dataclass(frozen=True)
 class WanCard:
-    """カードの世代の表 — 世代ごとに違う事実（値）と、散文が丸ごと違う節の描き手。
+    """The generation table of the card — the facts (values) that differ per generation and the
+    renderers of the sections whose prose differs entirely.
 
-    骨組み（節の並び・帰属の行・Usage・プロンプト・受理する入力の枠・既定値・宣言 limit）は
-    {@link render_wan_model_card} が 1 本で描く。
+    The skeleton (section order, attribution lines, Usage, prompts, the frame of the accepted
+    inputs, defaults, declared limits) is drawn by the single {@link render_wan_model_card}.
     """
 
-    #: 世代の名前（帰属の行・門の文言 — `Wan2.1` / `Wan2.2`）。
+    #: The generation's name (attribution lines and check messages — `Wan2.1` / `Wan2.2`).
     generation: str
-    #: カードの見出しに出す checkpoint の名前。
+    #: The checkpoint name shown in the card's heading.
     title: str
-    #: このカードが説明できるパイプライン契約（ADR 0041 §2）。
+    #: The pipeline contract this card can describe (ADR 0041 §2).
     supported_pipeline: str
-    #: この世代の配布が配るモデル（帰属の門 — 取得元の表の全モデルは通さない）。
+    #: The models this generation's distribution ships (the attribution check — not every model of
+    #: the sources table passes).
     models: tuple[str, ...]
-    #: Usage が呼ぶ公開 class（`@karume/models`）。
+    #: The public class the Usage calls (`@karume/models`).
     pipeline_class: str
-    #: 上流の技術レポート（上流の README が引くもの — 確かめられないなら None で行を省く）。
+    #: The upstream technical report (the one the upstream README cites — None omits the line when
+    #: it cannot be confirmed).
     paper: str | None
-    #: TS 側の受理集合の写し（寸法 `(width, height)` の並び・フレーム数の `(下限, 上限)`）。
+    #: A copy of the TS side's accepted set (the list of sizes `(width, height)`, the frame count
+    #: `(min, max)`).
     accepted_sizes: tuple[tuple[int, int], ...]
     frames: tuple[int, int]
-    #: TS 側の生成の既定（寸法 `(width, height)` とフレーム数 — `descriptor.ts` の `defaults` の
-    #: 写し）。Usage のコメントが描く。受理集合の並びの先頭からは導かない（既定は受理集合と
-    #: 別の裁定 — Wan2.2 は ADR 0121 追記「段 7 の結果」）。
+    #: The TS side's generation defaults (size `(width, height)` and frame count — a copy of
+    #: `defaults` in `descriptor.ts`). Drawn by the Usage comment. Not derived from the head of the
+    #: accepted set (the defaults are a ruling separate from the accepted set — for Wan2.2, ADR 0121
+    #: addendum "Results of step 7").
     default_size: tuple[int, int]
     default_frames: int
-    #: 受理するフレーム数の行に続けて書く「GPU で確かめた範囲」の行（先頭の要素は範囲と同じ行に
-    #: 続く）。
+    #: The "range checked on the GPU" lines written after the accepted-frames line (the first
+    #: element continues on the same line as the range).
     frames_checked: tuple[str, ...]
-    #: 「Determinism and verification」節のうち、ビット同一の項の後に続く項の行。
+    #: The items of the "Determinism and verification" section that follow the bit-identity item.
     verification: tuple[str, ...]
-    #: 「What is this」節（manifest から — text_encoder の取得元を描く）。
+    #: The "What is this" section (from the manifest — it draws where the text_encoder comes from).
     overview: Callable[[Mapping[str, Any]], list[str]]
-    #: 帰属節のうち、モデルごとの出所の行の後に続く項（作者・改変の要約・text encoder・資産）。
+    #: The items of the attribution section after the per-model provenance lines (authors, summary
+    #: of modifications, text encoder, assets).
     attribution_notes: Callable[[Mapping[str, Any]], list[str]]
-    #: 「Resources」節（実測の表と注 — ADR 0089 決定 3）。
+    #: The "Resources" section (the measured table and its notes — ADR 0089 decision 3).
     resources: Callable[[Mapping[str, Any]], list[str]]
-    #: 以下は I2V を受ける世代（Wan2.2）だけが持つ行。既定は空 — Wan2.1 のカードはバイト不変
-    #: （2.1 の `wan.Pipeline` は `image` を `ModelInputError` で拒む — ADR 0121 段 9b）。
-    #: frontmatter の tags のうち pipeline tag の後に足すもの（pipeline tag は HF では 1 つなので
-    #: text-to-video のまま — I2V は tag で名乗る）。
+    #: The lines below exist only for the generation that takes I2V (Wan2.2). They default to empty
+    #: — the Wan2.1 card stays byte-identical (2.1's `wan.Pipeline` rejects `image` with
+    #: `ModelInputError` — ADR 0121 step 9b). Tags added to the frontmatter after the pipeline tag
+    #: (HF has one pipeline tag, so it stays text-to-video — I2V is stated by a tag).
     extra_tags: tuple[str, ...] = ()
-    #: Usage 節の末尾に足す行（I2V の例と画像の decode の注）。
+    #: Lines added at the end of the Usage section (the I2V example and the note on image decoding).
     usage_extra: tuple[str, ...] = ()
-    #: 受理する入力の節で seed の項の後に足す項（`image` / `fit`）。
+    #: Items added after the seed item in the accepted-inputs section (`image` / `fit`).
     inputs_extra: tuple[str, ...] = ()
 
 
 def _upstream(name: str, card: WanCard) -> Any:
-    """モデル名 → 上流の取得元（その世代のモデルでなければ描かない — このカードはその世代の配布の
-    事実だけを書く。取得元の表は別の世代の行も持つので、表に有ることでは通さない）。"""
+    """Model name → upstream source (a model of another generation is not drawn — this card states
+    only the facts of its generation's distribution. The sources table also holds rows of the other
+    generation, so being in the table is not enough)."""
     if name not in card.models:
         raise ValueError(
-            f"モデル '{name}' は {card.generation} のモデルでない"
-            f"（既知: {list(card.models)}）— {card.generation} のカードに別の世代の出所を書かない"
+            f"model '{name}' is not a {card.generation} model"
+            f" (known: {list(card.models)}) — a {card.generation} card does not state the"
+            " provenance of another generation"
         )
     return SOURCES[name]
 
 
 def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
-    """frontmatter を manifest に並んだモデルから組む（`base_model` は manifest のモデルの上流 —
-    HF の「派生元のモデル」の意味。Wan2.2 のテキスト資産 2 本の出所〈Wan2.1 の checkpoint〉は
-    派生元のモデルではないので載せず、帰属の節が書く）。"""
+    """Build the frontmatter from the models listed in the manifest (`base_model` is the upstream of
+    the manifest's models — HF's meaning of "the model it derives from". The provenance of
+    Wan2.2's two text assets (the Wan2.1 checkpoint) is not a model it derives from, so it is
+    left out here and the attribution section states it)."""
     licenses = {_upstream(name, card).license for name in manifest["models"]}
     if len(licenses) != 1:
         raise ValueError(
-            f"モデルごとにライセンスが割れている（{sorted(licenses)}）— 1 値で書けない"
+            f"the license differs per model ({sorted(licenses)}) — it cannot be written as one"
+            " value"
         )
     return CardMetadata(
         pipeline_tag=WAN_PIPELINE_TAG,
         base_model=tuple(_upstream(name, card).repo for name in manifest["models"]),
-        # f32 の上流を f16 / i8 へ落とし直した配布形（`CardMetadata` の doc — f16 / i8 の配布形は
-        # `quantized`）。
+        # A distribution that lowers the f32 upstream to f16 / i8 (the doc of `CardMetadata` — f16 /
+        # i8 distributions are `quantized`).
         base_model_relation="quantized",
         license=next(iter(licenses)),
         tags=(WAN_PIPELINE_TAG, *card.extra_tags, "video-generation", "wan", "webgpu"),
@@ -298,33 +331,39 @@ def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
 
 
 def _text_encoder(manifest: Mapping[str, Any]) -> tuple[int, tuple[str, str] | None]:
-    """既定モデルの既定 quant が取る text_encoder の容器の `(バイト数, 越境参照の先)`。
+    """The `(byte count, cross-repository reference target)` of the text_encoder container that the
+    default model's default quant fetches.
 
-    越境参照の先は `(repo, revision)`（容器単位で全 part が同じ — ADR 0109 決定 3）で、自リポに
-    置いた配布形なら `None`。カードは「どこから取るか」を manifest のこの事実から描く。
+    The reference target is `(repo, revision)` (the same for every part of a container — ADR 0109
+    decision 3), or `None` for a distribution stored in its own repository. The card draws "where it
+    is fetched from" from this fact of the manifest.
     """
     model = default_model(manifest)
     weights = model["weights"].get(WAN_TEXT_ENCODER_COMPONENT)
     if weights is None:
         raise ValueError(
-            f"manifest の weights に '{WAN_TEXT_ENCODER_COMPONENT}' が無い — テキストの GPU 経路を"
-            " 描けない"
+            f"the manifest's weights have no '{WAN_TEXT_ENCODER_COMPONENT}' — the GPU text path"
+            " cannot be drawn"
         )
     label = model["quants"][model["defaultQuant"]]["weights"][WAN_TEXT_ENCODER_COMPONENT]
     parts = weights[label]["container"]["parts"]
     borrowed = {(ref["repo"], ref["revision"]) for ref in parts if "repo" in ref}
     if len(borrowed) > 1:
-        raise ValueError(f"text_encoder の越境参照の先が 1 つでない: {sorted(borrowed)}")
+        raise ValueError(
+            "the text_encoder's cross-repository reference has more than one target:"
+            f" {sorted(borrowed)}"
+        )
     return sum(ref["size"] for ref in parts), next(iter(borrowed), None)
 
 
 def _gib(size: int) -> str:
-    """バイト数を GiB の 3 桁で綴る（このカードの資源の数と同じ書式）。"""
+    """Spell a byte count in GiB to 3 digits (the same format as this card's resource numbers)."""
     return f"{size / (1 << 30):.2f} GiB"
 
 
 def _encoder_whereabouts(manifest: Mapping[str, Any]) -> str:
-    """text_encoder の置き場の句（自リポか、越境参照の先のリポか — manifest から）。"""
+    """The clause for where the text_encoder lives (this repository or the referenced repository —
+    from the manifest)."""
     _, borrowed = _text_encoder(manifest)
     return (
         "stored in this repository"
@@ -334,7 +373,8 @@ def _encoder_whereabouts(manifest: Mapping[str, Any]) -> str:
 
 
 def _reader_lines(manifest: Mapping[str, Any], pipeline: str) -> list[str]:
-    """概要の末尾 2 項（読み手の契約と、変換に使った exporter・manifest の形式）。"""
+    """The last 2 items of the overview (the reader contract, and the exporter and manifest format
+    used for the conversion)."""
     return [
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{pipeline}`.",
@@ -374,22 +414,26 @@ def _wan21_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
-    """Wan2.2 の概要。検証の範囲は ADR 0121 追記「段 6 の結果」（sha 行 6 本は全て参照席・
-    17 フレーム — 1280×704 と 704×1280 は precomputed、GPU のテキスト経路は 1280×704 だけ・
-    50 ステップの製品の class の通しは 2 席・1280×704・33 フレーム）。49 / 121 フレームの生成
-    スクリプトの通しは受理する入力の節（{@link _WAN22_FRAMES_CHECKED}）が書く。ブラウザは
-    RTX 5070 Ti の Chrome で実用席・GPU の umT5・1280×704×121 の通し 1 本だけ（ADR 0121 追記
-    「RTX 5070 Ti の Chrome」— 壁 2,417.5 s。gpu-lab が記述子の上限を広げて内部 API で呼んだ）。
+    """The Wan2.2 overview. The verification scope is ADR 0121 addendum "Results of step 6" (the 6
+    sha rows are all the reference preset at 17 frames — 1280×704 and 704×1280 with precomputed
+    embeddings, the GPU text path at 1280×704 only; the 50-step end-to-end runs of the product
+    class are 2 presets at 1280×704 with 33 frames). The 49 / 121-frame end-to-end runs of the
+    generation script are stated by the accepted-inputs section ({@link _WAN22_FRAMES_CHECKED}).
+    The browser has only one end-to-end run: the practical preset with the GPU umT5 at
+    1280×704×121 in Chrome on an RTX 5070 Ti (ADR 0121 addendum "Chrome on the RTX 5070 Ti" —
+    wall 2,417.5 s; gpu-lab widened the descriptor's upper bound and called the internal API).
 
-    I2V（ADR 0121 決定 11・追記「段 9b の結果」）: 条件づけは diffusers の `expand_timesteps` の形
-    （`packages/models/src/wan/dit-loop.ts` の `withWanFirstFrameCondition` / `wanConditionMask` —
-    条件マスクは先頭の潜在フレームのトークンが真・条件側の時刻は t = 0）。検証は RTX 3080 Ti・
-    precomputed の経路・2 ステップ × 9 フレームと opt-in の 50 ステップ × 33 フレームの sha 行だけ
-    （詳細は {@link _WAN22_VERIFICATION}）。ブラウザは RTX 5070 Ti の Chrome（gpu-lab・
-    2026-10-10）で実用席・GPU の umT5・条件画像 896×1152 → 704×1280（crop）・20 ステップ・
-    shift 7 の 33 / 121 フレームが完走した組だけ（壁 390.0 / 1,346.5 s — 一次資料は git 追跡外の
-    `outputs/bench-browser/wan-browser-2026-10-10T14-11-07.191Z.json`）。参照ケースとは照合しない
-    （gpu-lab の仕様）ので、品質は主張しない。"""
+    I2V (ADR 0121 decision 11, addendum "Results of step 9b"): the conditioning has the form of
+    diffusers' `expand_timesteps` (`withWanFirstFrameCondition` / `wanConditionMask` in
+    `packages/models/src/wan/dit-loop.ts` — the condition mask is true for the tokens of the first
+    latent frame, and the conditioned side's time is t = 0). It was verified only by the sha rows
+    of the RTX 3080 Ti on the precomputed path, 2 steps × 9 frames and the opt-in 50 steps × 33
+    frames (details in {@link _WAN22_VERIFICATION}). In the browser, only the runs that finished in
+    Chrome on the RTX 5070 Ti (gpu-lab, 2026-10-10) with the practical preset, the GPU umT5, a
+    conditioning image 896×1152 → 704×1280 (crop), 20 steps and shift 7 at 33 / 121 frames (wall
+    390.0 / 1,346.5 s — the primary record is the untracked
+    `outputs/bench-browser/wan-browser-2026-10-10T14-11-07.191Z.json`). They are not compared with
+    reference cases (gpu-lab's design), so no quality is claimed."""
     where = _encoder_whereabouts(manifest)
     return [
         "## What is this",
@@ -441,7 +485,8 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
-    """帰属節。上流の revision は pin した 40 桁を全部出す（容器の provenance と同じ値）。"""
+    """The attribution section. The upstream revision is shown as the full pinned 40 digits (the
+    same value as the container's provenance)."""
     lines = [
         "## Base weights and attribution",
         "",
@@ -464,7 +509,8 @@ def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
 
 
 def _wan21_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
-    """Wan2.1 の改変の要約・text encoder の置き場・事前計算の埋め込み。"""
+    """Wan2.1's summary of modifications, where the text encoder lives, and the precomputed
+    embeddings."""
     lines = [
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
         "  conversion into the Karume container format; every parameter of the float16",
@@ -504,13 +550,15 @@ def _wan21_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
-    """Wan2.2 の改変の要約・text encoder の置き場・Wan2.1 の checkpoint から作った資産 2 本。
+    """Wan2.2's summary of modifications, where the text encoder lives, and the 2 assets made from
+    the Wan2.1 checkpoint.
 
-    umT5 は本家の encoder と書き、この checkpoint の bf16 の `text_encoder` はその丸めと書く
-    （ADR 0122 決定 8）。資産 2 本の出所は Wan2.1 の pin（ADR 0121 決定 9 — 組み立ての門
-    `wan.distribution.assert_text_embeds` / `assert_umt5_tokenizer` がその pin で突き合わせる）。
-    トークナイザのファイルが 2 つの checkpoint で同じことは、pin した 2 つの revision の
-    `tokenizer/` の 4 ファイルの sha256 の一致で確かめた（2026-10-06）。
+    umT5 is described as the original encoder, and this checkpoint's bf16 `text_encoder` as its
+    rounding (ADR 0122 decision 8). The provenance of the 2 assets is the Wan2.1 pin (ADR 0121
+    decision 9 — the assembly checks `wan.distribution.assert_text_embeds` / `assert_umt5_tokenizer`
+    compare against that pin). That the tokenizer files are the same in the 2 checkpoints was
+    confirmed by matching sha256 of the 4 files in `tokenizer/` at the 2 pinned revisions
+    (2026-10-06).
     """
     text = SOURCES[WAN22_TEXT_MODEL]
     lines = [
@@ -563,10 +611,11 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan_usage(manifest: Mapping[str, Any], repo: str, card: WanCard) -> list[str]:
-    """Usage 例: 動く最小形 + 普通に使いそうな optional はコメントアウトで併記する。
+    """The Usage example: the minimal form that runs, with the optional settings one would commonly
+    use shown commented out.
 
-    NOTE: `fromAssets` は案内しない（Depth Anything のカードと同じ裁定 — HF から使う読者の入口は
-    `fromPretrained`）。
+    NOTE: `fromAssets` is not shown (the same ruling as the Depth Anything card — the entry point
+    for readers using HF is `fromPretrained`).
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -623,8 +672,8 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str, card: WanCard) -> list[st
 
 
 def _wan_prompts() -> list[str]:
-    """プロンプトの受理集合（GPU 経路の規則と、precomputed の経路の固定プロンプトの表 — 原文は
-    逐語で出す）。"""
+    """The accepted set of prompts (the rules of the GPU path, and the table of fixed prompts of the
+    precomputed path — the original texts are shown verbatim)."""
     gpu, precomputed = WAN_TEXT_ENCODER_PATHS
     low, high = WAN_PROMPT_TOKENS
     lines = [
@@ -667,16 +716,16 @@ def _wan_prompts() -> list[str]:
     return lines
 
 
-#: Wan2.1 の受理するフレーム数のうち GPU で通しを確かめた範囲（ADR 0118 段 6 / 8・ADR 0119
-#: 段 10c）。
+#: The range of Wan2.1's accepted frame counts that was checked end to end on the GPU (ADR 0118
+#: steps 6 / 8, ADR 0119 step 10c).
 _WAN21_FRAMES_CHECKED = (
     "Only 832 × 480 has been checked end to end on",
     "  the GPU: 33 and 81 frames with the precomputed embeddings, and 33 frames with the",
     "  text encoder.",
 )
 
-#: Wan2.1 の上流との照合（`f16` 席の 2 ステップの通しと、実寸の transformer 1 forward の f64 参照
-#: — ADR 0118）とタイル decode の注。
+#: Wan2.1's comparison with upstream (the 2-step end-to-end run of the `f16` preset, and one
+#: full-size transformer forward against an f64 reference — ADR 0118) and the note on tiled decode.
 _WAN21_VERIFICATION = (
     "- **Against the upstream reference** (the `f16` quant, with the precomputed",
     "  embeddings): a 2-step run with injected noise is compared with diffusers on CPU in",
@@ -688,30 +737,36 @@ _WAN21_VERIFICATION = (
     "  slightly from the upstream untiled decode.",
 )
 
-#: Wan2.2 の受理するフレーム数のうち GPU で通しを確かめた範囲（ADR 0121 追記「段 6 の結果」の
-#: 2 ステップ・17 フレームの sha 行と 50 ステップの製品の class の通し〈33 フレーム〉、追記「受理
-#: 寸法を公式の 2 寸法へ」の生成スクリプトの 50 ステップの試走〈49 フレーム — 製品の class では
-#: 回していない。生成スクリプト ≡ 製品を示したのは実用席の 33 フレームだけ〉）、追記「RTX 3080 Ti の
-#: レーンとフル verify」の開発機の 121 フレーム〈実用席・生成スクリプト・DiT の段の山 11,361 MiB /
-#: 12,288 MiB — 余裕 927 MiB〉と追記「RTX 5070 Ti の Chrome」の 121 フレーム〈gpu-lab〉。
-#: 3080 Ti の山は nvidia-smi の GPU 全体の値で、0.9 GiB は物理容量との差 — Deno で先に効くのは
-#: 総確保の天井（ドライバの予算の 97%・時点ごとに動く）なので、実際の余裕はもっと薄いことがある
-#: （docs/limitations.md の Wan2.2 の節 — 推測）。天井の数は時点で動くのでカードには書かない。
-#: B570（Deno の総確保の天井 9,600 MiB）で確かめた長さは 57 フレームまで（追記「受理寸法を
-#: 公式の 2 寸法へ」の試走の表 — 2 席とも 49・実用席だけ 57、どちらも生成スクリプト）。
-#: それより長いクリップは ADR 0121 追記「段 10 — 121 フレームの受理」の決着どおり**非対応**と
-#: 言い切る。非対応の理由は B570 で回していないことで、入るかどうかの見込みは推測: Context
-#: 「容量と時間の見積り」の表が見積ったのは 2 点だけで、81 フレーム（S = 18,480）は実用席が
-#: 入らず、121 は 2 席とも入らない（121 は DiT の段の診断値〈重み + backing〉も 3080 Ti で
-#: 10.64 GiB と天井を超える）。61〜77 と 85〜117 は見積りも無いので「分からない」と書く（入らない
-#: 見込みとは書かない）。NOTE: カードには 2.1 の既定の 81 を写さない門
-#: （`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`）があるので、81 は「77 フレームの次の
-#: 長さ」と書く（4n+1 で 77 の次が 81 — 見積りが求めた境界ではない）。受理集合は機ごとではないので
-#: admission では拒まれず、入らなければ実行の途中で落ちる（OOM の errorScope か、天井の付近では
-#: device lost）と書く。資源の表の B570 の行は 49 で止まる（57 は表に無い）ことも書く。
-#: 704×1280 は 2 ステップ × 17 フレームの sha 行だけ（50 ステップの通しは全て 1280×704）。
-#: ここは全て T2V の事実（I2V の確かめた範囲は {@link _WAN22_I2V_INPUTS} と {@link
-#: _WAN22_VERIFICATION} が書く）。
+#: The range of Wan2.2's accepted frame counts that was checked end to end on the GPU (the 2-step
+#: 17-frame sha rows and the 50-step end-to-end runs of the product class (33 frames) of ADR 0121
+#: addendum "Results of step 6"; the generation script's 50-step trial runs of the addendum
+#: "Accepted sizes to the 2 official sizes" (49 frames — not run with the product class; generation
+#: script ≡ product was shown only for the practical preset at 33 frames); the development machine's
+#: 121 frames of the addendum "The RTX 3080 Ti lanes and the full verify" (practical preset,
+#: generation script, DiT-stage peak 11,361 MiB / 12,288 MiB — headroom 927 MiB); and the 121 frames
+#: of the addendum "Chrome on the RTX 5070 Ti" (gpu-lab)). The 3080 Ti peak is nvidia-smi's value
+#: for the whole GPU, and 0.9 GiB is the difference from the physical capacity — what bites first in
+#: Deno is the ceiling on total allocation (97% of the driver's budget, moving over time), so the
+#: real headroom can be thinner (the Wan2.2 section of docs/limitations.md — an estimate). The
+#: ceiling moves over time, so the card does not state it. On the B570 (Deno's total-allocation
+#: ceiling 9,600 MiB) the checked lengths go up to 57 frames (the trial table of the addendum
+#: "Accepted sizes to the 2 official sizes" — 49 for both presets, 57 for the practical preset only,
+#: both with the generation script). Longer clips are stated flatly as **unsupported**, as settled
+#: by ADR 0121 addendum "Step 10 — accepting 121 frames". The reason they are unsupported is that
+#: they were not run on the B570; whether they would fit is an estimate: the table "Estimate of
+#: capacity and time" in Context estimated only 2 points — at 81 frames (S = 18,480) the practical
+#: preset does not fit, and at 121 neither preset fits (for 121, the DiT stage's diagnostic value
+#: (weights + backing) is 10.64 GiB even on the 3080 Ti, above the ceiling). 61 to 77 and 85 to 117
+#: have no estimate either, so the card says "unknown" (it does not say they are expected not to
+#: fit). NOTE: a check keeps the card from copying 2.1's default of 81
+#: (`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`), so 81 is written as "the length
+#: after 77 frames" (with 4n+1 the one after 77 is 81 — not a boundary the estimate found). The
+#: accepted set is not per machine, so admission does not reject it, and the card says that a clip
+#: that does not fit fails partway through the run (an OOM errorScope, or device lost near the
+#: ceiling). It also says that the B570 rows of the resources table stop at 49 (57 is not in the
+#: table). 704×1280 has only the 2-step × 17-frame sha rows (every 50-step end-to-end run is
+#: 1280×704). All of this is about T2V (the checked range of I2V is stated by
+#: {@link _WAN22_I2V_INPUTS} and {@link _WAN22_VERIFICATION}).
 _WAN22_FRAMES_CHECKED = (
     "Text to video has been checked end to end",
     "  on the GPU: 17 frames at both sizes in 2-step runs, and 33 frames at 1280 × 704 in",
@@ -742,30 +797,36 @@ _WAN22_FRAMES_CHECKED = (
     "  than with `ModelInputError`, and the time spent on the stages before it is lost.",
 )
 
-#: Wan2.2 の上流との照合（参照席の 2 ステップの通し — ADR 0121 追記「段 6 の結果」・実寸の
-#: transformer 1 forward の f64 参照 — 追記「段 2 の結果」の r 門〈S = 8,190 / 7,920〉）とタイル
-#: decode の注（patchify 空間でブレンドしてから unpatchify — 決定 6）。実用席は自機 A/B 門
-#: （段 7）が未計測なので、数値では比べていないと書き、既定に採った根拠（視認 12 本）だけを書く。
+#: Wan2.2's comparison with upstream (the reference preset's 2-step end-to-end run — ADR 0121
+#: addendum "Results of step 6"; one full-size transformer forward against an f64 reference — the r
+#: check of the addendum "Results of step 2" (S = 8,190 / 7,920)) and the note on tiled decode
+#: (blended in patchified space, then unpatchified — decision 6). The practical preset's on-machine
+#: A/B check (step 7) is not measured, so the card says it was not compared numerically and states
+#: only the grounds for making it the default (12 visual clips).
 #:
-#: I2V の項（追記「段 9a の結果」「段 9b の結果」と、テストの定数 — encoder の帯
-#: `WAN_I2V_ENCODER_BAND` 7.8e-5〈`packages/models/tests/helpers/wan-i2v-image.ts` — 決定用の最悪
-#: 1.550e-5 × 5・参照の最大絶対値 2.89〜4.04・故障注入 5 件は帯の 1.5 万倍以上〉、通しの帯
-#: `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3・`FINAL_RATIO_BAND` 3.9e-3・`FRAME_RATIO_BAND` 8.9e-3
-#: 〈`e2e_wan_ti2v_i2v_pipeline_test.ts` — 決定用 2 本の最悪 × 5・受入れ ferret は帯の内〉、故障注入
-#: 5 件は latents.1 で帯の 138〜358 倍、T2V の latents.1 の帯 9.5e-4
-#: 〈`e2e_wan_ti2v_pipeline_test.ts`〉）。
-#: 帯が T2V より広い理由は追記「段 9b の結果」の切り分け（cat-dog-baking の条件の潜在の maxAbs
-#: 1.26e-5 を DiT が条件のトークンで約 250 倍に増幅・参照の条件へ差し替えると T2V の桁に戻る）。
-#: T2V の帯との比は latents.1 だけを書く（latents.0 は T2V の帯 3.6e-5 と桁が違い「約 4 倍」と
-#: 一般化できない・フレームの帯は I2V の方が狭い）。sha 行は全て RTX 3080 Ti・precomputed の経路
-#: （既定のレーン = 参照席と実用席の boxing-cats・opt-in = cat-dog-baking / ferret / 704×1280）。
-#: 50 ステップの I2V（1280×704・33 フレーム）は opt-in の sha 行を参照席と実用席の 2 本持つ
-#: （実用席は参照席と 1 bit 以上違う床 — `136cee60` / `28ab44fe`・`KARUME_WAN_TI2V_I2V_FULL=1`）。
-#: 実用席の品質の数（段 7 の A/B と視認）は T2V で測ったもの。I2V の席の比べは段 9d で済
-#: （A/B 0.046・視認 12 対に破綻なし — 2026-10-10）で、同じ文の中に I2V の分も書く。カードは上流に
-#: 対する I2V の品質は主張しない。
-#: NOTE: 元画像の寸法（832×480）は書かない — 2.1 の寸法を写さない門
-#: （`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`）に掛かる。
+#: The I2V items (the addenda "Results of step 9a" and "Results of step 9b", and the test constants
+#: — the encoder band `WAN_I2V_ENCODER_BAND` 7.8e-5
+#: (`packages/models/tests/helpers/wan-i2v-image.ts` — worst of the deciding cases 1.550e-5 × 5, the
+#: reference's largest absolute value 2.89 to 4.04, the 5 fault injections at 15,000 times the band
+#: or more), the end-to-end bands `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3, `FINAL_RATIO_BAND` 3.9e-3,
+#: `FRAME_RATIO_BAND` 8.9e-3 (`e2e_wan_ti2v_i2v_pipeline_test.ts` — the worst of the 2 deciding
+#: cases × 5, the acceptance case ferret inside the band), the 5 fault injections at 138 to 358
+#: times the band on latents.1, and T2V's latents.1 band 9.5e-4 (`e2e_wan_ti2v_pipeline_test.ts`)).
+#: Why the bands are wider than T2V's is the isolation of the addendum "Results of step 9b" (the DiT
+#: amplifies the maxAbs 1.26e-5 of cat-dog-baking's conditioning latent about 250 times on the
+#: conditioning tokens; with the reference's conditioning swapped in, it returns to T2V's order).
+#: The ratio to the T2V band is stated for latents.1 only (latents.0 is of a different order from
+#: T2V's band 3.6e-5 and cannot be generalized as "about 4 times"; the frame band is narrower for
+#: I2V). Every sha row is on the RTX 3080 Ti, on the precomputed path (default lane = boxing-cats of
+#: the reference and practical presets; opt-in = cat-dog-baking / ferret / 704×1280). The 50-step
+#: I2V (1280×704, 33 frames) has 2 opt-in sha rows, for the reference and the practical presets (the
+#: practical one is pinned to differ from the reference by at least 1 bit — `136cee60` / `28ab44fe`,
+#: `KARUME_WAN_TI2V_I2V_FULL=1`). The practical preset's quality numbers (the A/B and visual check
+#: of step 7) were measured on T2V. The preset comparison for I2V was done in step 9d (A/B 0.046, 12
+#: visual pairs without breakdown — 2026-10-10), and the I2V part is written in the same sentence.
+#: The card claims no I2V quality relative to upstream.
+#: NOTE: the size of the source image (832×480) is not written — it would trip the check that keeps
+#: 2.1's sizes out (`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`).
 _WAN22_VERIFICATION = (
     "- **Text to video against the upstream reference** (the `f16+dit8` quant, with the",
     "  precomputed embeddings): a 2-step run at 1280 × 704 with 17 frames and injected noise is",
@@ -835,15 +896,16 @@ _WAN22_VERIFICATION = (
     "  decode.",
 )
 
-#: Wan2.2 の受理する入力のうち I2V の項（`image` / `fit` —
-#: `packages/models/src/wan/ti2v-pipeline.ts` の `Ti2vGenerateRequest`・門 `plan.ts` の
-#: `planWanRequest`・前処理 `i2v-preprocess.ts`）。寸法の選択は受理集合から公式の比較式
-#: `max(r / rc, rc / r)`・同点は横長（`selectWanI2vSize`）— 受理集合が 2 寸法なら「幅 ≥ 高さ →
-#: 1280×704」と同じ。明示した欄は受理集合に合う寸法でなければ `ModelInputError`。公式は受理集合の
-#: 外の寸法（16:9 で 1248×704）も選ぶ。LANCZOS は Pillow 12.3.0 の逐語の移植
-#: （`packages/models/src/image/lanczos.ts` — fixture と掃引で uint8 が全一致）。`fit` の綴り違いは
-#: 素の `Error`・`image` 無しの `fit` は `ModelInputError`（ADR 0121 追記「段 9b の結果」）。
-#: 画素はそのまま使う（色空間の変換をしない）。
+#: The I2V items of Wan2.2's accepted inputs (`image` / `fit` — `Ti2vGenerateRequest` in
+#: `packages/models/src/wan/ti2v-pipeline.ts`, the check `planWanRequest` in `plan.ts`, the
+#: preprocessing in `i2v-preprocess.ts`). The size is chosen from the accepted set with the official
+#: comparison `max(r / rc, rc / r)`, ties going to landscape (`selectWanI2vSize`) — with an accepted
+#: set of 2 sizes this equals "width ≥ height → 1280×704". An explicit field must name a size in the
+#: accepted set, else `ModelInputError`. The official code also picks sizes outside the accepted set
+#: (1248×704 for 16:9). LANCZOS is a verbatim port of Pillow 12.3.0
+#: (`packages/models/src/image/lanczos.ts` — every uint8 matches on the fixture and the sweep). A
+#: misspelled `fit` is a plain `Error`; `fit` without `image` is `ModelInputError` (ADR 0121
+#: addendum "Results of step 9b"). The pixels are used as given (no color-space conversion).
 _WAN22_I2V_INPUTS = (
     "- **image**: the first frame for image to video, as decoded RGB8 pixels",
     "  `{ data, width, height }` (`data` a `Uint8Array` with 3 bytes per pixel, row by row; any",
@@ -862,16 +924,17 @@ _WAN22_I2V_INPUTS = (
     "  exception to the sentence below).",
 )
 
-#: Wan2.2 の Usage に足す I2V の例（画像の decode は呼び手 — `generate()` は RGB8 を受ける。Deno の
-#: example は fast-png / jpeg-js〈`formatAsRGBA: false` で RGB を直接受ける —
-#: `examples/wan/decode-image.ts`〉、ブラウザは createImageBitmap と canvas〈RGBA を出す〉）。
-#: 復号の段の参照との差（EXIF の向き・アルファ・JPEG の復号器の差）は `examples/wan/README.md` と
-#: `tools/gpu-lab/README.md` と同じ事実を写す。Deno の I2V は precomputed の経路でだけ回した（GPU の
-#: umT5 との組は e2e でも 50 ステップの sha 行でも未実行 — ADR 0121 追記「段 9b の結果」・
-#: `e2e_wan_ti2v_i2v_pipeline_test.ts`）。GPU の umT5 との組は RTX 5070 Ti の Chrome（gpu-lab・
-#: 2026-10-10）でだけ完走した（{@link _wan22_overview} の docstring）。段の順は
-#: `pipeline.ts` の「（encoder →）text → DiT →
-#: VAE」（text の段は `"gpu"` の経路だけ）。
+#: The I2V example added to Wan2.2's Usage (decoding the image is the caller's job — `generate()`
+#: takes RGB8. The Deno example uses fast-png / jpeg-js (`formatAsRGBA: false` gives RGB directly —
+#: `examples/wan/decode-image.ts`), the browser createImageBitmap and a canvas (which yield RGBA)).
+#: The differences of the decoding step from the reference (EXIF orientation, alpha, differences
+#: between JPEG decoders) copy the same facts as `examples/wan/README.md` and
+#: `tools/gpu-lab/README.md`. Deno's I2V was run on the precomputed path only (the combination with
+#: the GPU umT5 has run neither in e2e nor in the 50-step sha rows — ADR 0121 addendum "Results of
+#: step 9b", `e2e_wan_ti2v_i2v_pipeline_test.ts`). The combination with the GPU umT5 finished only
+#: in Chrome on the RTX 5070 Ti (gpu-lab, 2026-10-10) (the docstring of {@link _wan22_overview}).
+#: The stage order is `pipeline.ts`'s "(encoder →) text → DiT → VAE" (the text stage only on the
+#: `"gpu"` path).
 _WAN22_I2V_USAGE = (
     "",
     "For image to video, pass the first frame as `image`. Decoding the image file is up to the",
@@ -909,7 +972,8 @@ _WAN22_I2V_USAGE = (
 
 
 def _wan_inputs(card: WanCard) -> list[str]:
-    """受理する入力と、数値の門（ビット同一・参照照合）の説明。"""
+    """The accepted inputs and the explanation of the numeric checks (bit identity, comparison with
+    the reference)."""
     sizes = " or ".join(f"{width} × {height}" for width, height in card.accepted_sizes)
     low, high = card.frames
     first, *rest = card.frames_checked
@@ -939,33 +1003,39 @@ def _wan_inputs(card: WanCard) -> list[str]:
 
 
 def _wan21_resources(manifest: Mapping[str, Any]) -> list[str]:
-    """実行資源の目安（ADR 0089 決定 3 — 中間テンソルの確保と束縛の大きさは manifest の
-    `requiredLimits` が数えない、**manifest に存在しない事実**。BiRefNet のカードと同じ扱い）。
+    """Guidance on execution resources (ADR 0089 decision 3 — the allocations of intermediate
+    tensors and the binding sizes are not counted by the manifest's `requiredLimits`: **facts
+    that are not in the manifest**. The same treatment as the BiRefNet card).
 
-    数は B570・Deno の 50 ステップの通しの実測 — 33 フレームは 2026-10-02（ADR 0118 段 6 の検収）、
-    81 フレームは 2026-10-03（段 8）: VRAM は fdinfo の `drm-total-vram0` の段ごとの山・時間は
-    transformer 1 パス（batch 1）と VAE のタイル decode 全体。
-    1 パス × 100 + VAE は通しと合う（33 フレーム: 16.8 × 100 + 129 ≈ 1,809 s / 1,811 s・
-    81 フレーム: 68.6 × 100 + 315 ≈ 7,175 s / 7,173 s）。中間テンソルの大きさは形からの計算
-    （FFN の `[S, 8960]` f32 は S = 14,040 で 503,193,600 B・S = 32,760 で 1,174,118,400 B。
-    self-attention のスコアの行ブロック 1 枚は 81 フレームで 2,146,435,200 B —
-    B570 の束縛上限 2,147,483,644 B の内）。
+    The numbers are measured 50-step end-to-end runs on the B570 in Deno — 33 frames on 2026-10-02
+    (the acceptance of ADR 0118 step 6), 81 frames on 2026-10-03 (step 8): VRAM is the per-stage
+    peak of fdinfo's `drm-total-vram0`; the times are one transformer pass (batch 1) and the whole
+    tiled VAE decode.
+    1 pass × 100 + VAE agrees with the end-to-end run (33 frames: 16.8 × 100 + 129 ≈ 1,809 s /
+    1,811 s; 81 frames: 68.6 × 100 + 315 ≈ 7,175 s / 7,173 s). The intermediate tensor sizes are
+    computed from the shapes (the FFN's `[S, 8960]` f32 is 503,193,600 B at S = 14,040 and
+    1,174,118,400 B at S = 32,760; one row block of the self-attention scores is 2,146,435,200 B at
+    81 frames — inside the B570's binding limit of 2,147,483,644 B).
 
-    text 段（GPU 経路）の数は ADR 0119 追記「段 10c の GPU の門と段 10d-4 の結果」の実測
-    （2 ステップ・33 フレームの通し 1 回と、umT5 単体の 1 forward）。席ごとの transformer の数は
-    `WAN_QUANT_TRANSFORMER` の出所のとおり。
+    The text stage numbers (GPU path) are measured in ADR 0119 addendum "The GPU check of step 10c
+    and the results of step 10d-4" (one 2-step 33-frame end-to-end run, and one forward of umT5
+    alone). The per-preset transformer numbers are as the provenance of `WAN_QUANT_TRANSFORMER`
+    says.
 
-    MUST: 実測していない条件の数は載せない — 受理集合の別の寸法・フレーム数・別の GPU の数を推し
-    量って書かない。ブラウザは RTX 5070 Ti の Chrome で `f16` 席・資産の経路の 81 フレームの
-    通しだけを確かめた（ADR 0118 追記「段 9 の結果」）ので、それ以外は未確認と書く。
+    MUST: no numbers for conditions that were not measured — no estimates for the other sizes and
+    frame counts of the accepted set or for other GPUs. The browser was checked only with one
+    81-frame end-to-end run of the `f16` preset on the asset path in Chrome on the RTX 5070 Ti (ADR
+    0118 addendum "Results of step 9"), so everything else is stated as unchecked.
     """
     for name, model in manifest["models"].items():
         if WAN_RESOURCE_QUANT not in model["quants"]:
             raise ValueError(
-                f"実行資源を実測した quant '{WAN_RESOURCE_QUANT}' がモデル '{name}' の席に無い"
-                f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
+                f"quant '{WAN_RESOURCE_QUANT}', whose execution resources were measured, is not a"
+                f" preset of model '{name}' (presets: {sorted(model['quants'])}) — no numbers are"
+                " stated for a preset that was not measured"
             )
-    # 席の並びは manifest のまま。表に無い席は数を推し量らず、未計測と名乗る。
+    # The preset order stays the manifest's. A preset missing from the table gets no estimate and is
+    # stated as not measured.
     seats = dict.fromkeys(
         quant for model in manifest["models"].values() for quant in model["quants"]
     )
@@ -1044,37 +1114,44 @@ def _wan21_resources(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
-    """Wan2.2 の実行資源の目安（ADR 0089 決定 3 — 2.1 の {@link _wan21_resources} と同じ扱い）。
+    """Guidance on Wan2.2's execution resources (ADR 0089 decision 3 — the same treatment as 2.1's
+    {@link _wan21_resources}).
 
-    数は {@link WAN22_RESOURCES} の出所のとおり。VAE の段の山は受理するフレーム数の通しの値だけを
-    書く: 33 フレームは製品の class の通しの 4.360 / 4.361 GiB（参照席 / 実用席 — 追記「段 6 の
-    結果」・記録 `outputs/bench/karume-wan2.2/2026-10-05_stage6-gpu/g1-full.log`）、49 フレームは
-    生成スクリプトの通しの 4.513 / 4.512 GiB（記録
-    `outputs/verify/deno-intel-graphics-bmg-g21/2026-10-05_wan22-visual/` の `vramPeaksGiB`）。
-    試走の表の注の範囲 4.36〜4.52 GiB は受理の外の 57 フレームの試走を含むので使わない。
+    The numbers are as the provenance of {@link WAN22_RESOURCES} says. The VAE-stage peak is written
+    only from end-to-end runs at accepted frame counts: 33 frames is 4.360 / 4.361 GiB from the
+    product class's runs (reference / practical preset — addendum "Results of step 6", record
+    `outputs/bench/karume-wan2.2/2026-10-05_stage6-gpu/g1-full.log`), 49 frames is 4.513 / 4.512 GiB
+    from the generation script's runs (`vramPeaksGiB` in the record
+    `outputs/verify/deno-intel-graphics-bmg-g21/2026-10-05_wan22-visual/`). The range 4.36 to 4.52
+    GiB in the note of the trial table includes the 57-frame trial outside the accepted set, so it
+    is not used.
 
-    中間テンソルの大きさは形からの計算（FFN の `[S, 14336]` f32 は S = 7,920 で 454,164,480 B・
-    S = 11,440 で 656,015,360 B・S = 27,280 で 1,564,344,320 B — `ffn_dim` は pin した
-    `transformer/config.json`）。121 フレームの束縛の最大 約 1.96 GiB（self-attention のスコアの
-    行ブロック）は ADR 0121 追記（2026-10-07）「段 10 — 121 フレームの受理」の値。
+    The intermediate tensor sizes are computed from the shapes (the FFN's `[S, 14336]` f32 is
+    454,164,480 B at S = 7,920, 656,015,360 B at S = 11,440 and 1,564,344,320 B at S = 27,280 —
+    `ffn_dim` from the pinned `transformer/config.json`). The largest binding at 121 frames, about
+    1.96 GiB (a row block of the self-attention scores), is the value from ADR 0121 addendum
+    (2026-10-07) "Step 10 — accepting 121 frames".
 
-    121 フレームの行と、テキストエンコーダの段の 9.1 s は RTX 3080 Ti の開発機の通し（{@link
-    WAN22_RESOURCES} の出所）。ブラウザの数は RTX 5070 Ti の Chrome の同じ要求の壁 2,417.5 s と、
-    adapter / device の `maxStorageBufferBindingSize` 2,147,483,644 B（ADR 0121 追記「RTX 5070 Ti の
-    Chrome」）— どちらも別の GPU・runtime の値と名乗る。
+    The 121-frame row and the text encoder stage's 9.1 s are the RTX 3080 Ti development machine's
+    run (the provenance of {@link WAN22_RESOURCES}). The browser numbers are the wall time 2,417.5 s
+    of the same request in Chrome on the RTX 5070 Ti and the adapter / device
+    `maxStorageBufferBindingSize` 2,147,483,644 B (ADR 0121 addendum "Chrome on the RTX 5070 Ti") —
+    both are stated as values of another GPU and runtime.
 
-    MUST: 実測していない条件の数は載せない（2.1 と同じ規律）。測っていない席・フレーム数・GPU・
-    ブラウザの組は、まだ計測していないと書く。実用席の品質は段 7 の自機 A/B 門の相対 RMS 誤差
-    （{@link WAN22_PRACTICAL_QUANT_ERROR}）と視認の判定を書き、どちらも T2V で測ったと範囲を名乗る
-    （I2V の席の比べは段 9d — I2V の品質は主張しない）。
+    MUST: no numbers for conditions that were not measured (the same discipline as 2.1). Unmeasured
+    combinations of preset, frame count, GPU and browser are stated as not measured yet. The
+    practical preset's quality is given as the relative RMS error of step 7's on-machine A/B check
+    ({@link WAN22_PRACTICAL_QUANT_ERROR}) and the visual judgement, both stated as measured on T2V
+    (the preset comparison for I2V is step 9d — no I2V quality is claimed).
 
-    I2V の資源は表に入れない（表は全て T2V）。書くのは測った範囲だけ: encoder 単独のプロセスの
-    VRAM の山 1,421 MiB（ADR 0121 追記「段 9a の結果」— nvidia-smi・RTX 3080 Ti）と、50 ステップの
-    I2V の壁（1280×704・33 フレーム・precomputed — 参照席 1,395.3 s・実用席 723.5 s・encoder の段は
-    0.5 / 0.8 s。`outputs/verify/deno-nvidia-geforce-rtx-3080-ti/` の
-    `2026-10-09_wan-ti2v-i2v-pipeline-full/results.json` の壁。ADR の 23 分 20 秒 / 12 分 8 秒は
-    同じ走行の `elapsedMs`）。その走行は
-    VRAM を読んでいない（n/a）ので、I2V の 1 本の山は未計測と書く。
+    The I2V resources are not put in the table (the table is all T2V). Only what was measured is
+    written: the peak VRAM of the encoder alone in its own process, 1,421 MiB (ADR 0121 addendum
+    "Results of step 9a" — nvidia-smi, RTX 3080 Ti), and the wall time of 50-step I2V (1280×704, 33
+    frames, precomputed — reference preset 1,395.3 s, practical preset 723.5 s, encoder stage 0.5 /
+    0.8 s; the wall time in `2026-10-09_wan-ti2v-i2v-pipeline-full/results.json` under
+    `outputs/verify/deno-nvidia-geforce-rtx-3080-ti/`. The ADR's 23 min 20 s / 12 min 8 s are the
+    `elapsedMs` of the same runs). Those runs
+    did not read VRAM (n/a), so the peak of one I2V clip is stated as not measured.
     """
     seats = dict.fromkeys(
         quant for model in manifest["models"].values() for quant in model["quants"]
@@ -1082,8 +1159,9 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     measured = [quant for quant in seats if quant in WAN22_RESOURCES]
     if not measured:
         raise ValueError(
-            f"実行資源を実測した quant（{sorted(WAN22_RESOURCES)}）が manifest の席"
-            f"（{list(seats)}）に 1 つも無い — 実測していない席の数は名乗らない"
+            "no quant whose execution resources were measured"
+            f" ({sorted(WAN22_RESOURCES)}) is among the manifest's presets ({list(seats)}) — no"
+            " numbers are stated for a preset that was not measured"
         )
     unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN22_RESOURCES]
     practical, reference, error_33, error_121 = WAN22_PRACTICAL_QUANT_ERROR
@@ -1239,10 +1317,11 @@ def _download_and_memory(
     manifest: Mapping[str, Any],
     peaks: str = "the peaks are of the total allocation (the driver's fdinfo)",
 ) -> list[str]:
-    """資源の注のうち、text_encoder の取得量（manifest から）と VRAM の山の読み方の 2 項。
+    """The 2 items of the resources note on the text_encoder download size (from the manifest) and
+    on how to read the VRAM peaks.
 
-    `peaks` は山の測り方の文。2.1 は既定のまま（全て fdinfo）。2.2 は表に nvidia-smi の行
-    （121 フレーム）が混ざるので、行ごとの測り方を渡す。
+    `peaks` is the sentence on how the peaks were measured. 2.1 keeps the default (all fdinfo).
+    2.2's table mixes in an nvidia-smi row (121 frames), so it passes the method per row.
     """
     encoder_bytes, borrowed = _text_encoder(manifest)
     source = "" if borrowed is None else f" from `{borrowed[0]}`"
@@ -1256,7 +1335,8 @@ def _download_and_memory(
 
 
 def _undeclared(manifest: Mapping[str, Any]) -> list[str]:
-    """資源の注の末尾（manifest が宣言しない数であることと、宣言された limit）。"""
+    """The end of the resources note (that the manifest does not declare these numbers, and the
+    declared limits)."""
     return [
         "- `karume.json` does not declare these figures: its declared limits cover the resident",
         "  weights and state, not the intermediate tensors a run allocates.",
@@ -1265,18 +1345,20 @@ def _undeclared(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _declared_limits(manifest: Mapping[str, Any]) -> list[str]:
-    """manifest が quant ごとに宣言した device limit（`requiredLimits` — 無ければ行も無い）。
+    """The device limits the manifest declares per quant (`requiredLimits` — no line when absent).
 
-    Wan の宣言は text_encoder の i8 の語彙埋め込み（1 バッファ）で決まる — どの席も同じ
-    text_encoder を選ぶ（weights は完全写像）ので、全席が同じ宣言を持つ。席ごとに違う manifest は
-    この 1 行では描けないので落とす（推し量って 1 つに畳まない）。
+    Wan's declaration is set by the text_encoder's i8 vocabulary embedding (one buffer) — every
+    preset picks the same text_encoder (weights is a complete mapping), so every preset has the same
+    declaration. A manifest that differs per preset cannot be drawn in this one line, so it fails
+    (no estimate folds it into one).
     """
     declared = [quant.get("requiredLimits") for quant in default_model(manifest)["quants"].values()]
     if not any(declared):
         return []
     if any(limits != declared[0] for limits in declared):
         raise ValueError(
-            f"席ごとに requiredLimits が違う（{declared}）— 全席に同じ宣言が掛かる形しか描かない"
+            f"requiredLimits differ per preset ({declared}) — only a declaration that applies to"
+            " every preset is drawn"
         )
     spelled = " and ".join(f"`{key}` ≥ {value:,} bytes" for key, value in declared[0].items())
     return [
@@ -1288,7 +1370,7 @@ def _declared_limits(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _wan_defaults(model: Mapping[str, Any]) -> list[str]:
-    """`pipelineConfig` が持つ生成の既定（manifest から）。"""
+    """The generation defaults held by `pipelineConfig` (from the manifest)."""
     config = model["pipelineConfig"]
     defaults = config["defaults"]
     return [
@@ -1302,7 +1384,7 @@ def _wan_defaults(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-#: Wan2.1 T2V 1.3B（`karume-wan2.1`）のカードの世代の表。
+#: The generation table of the card of Wan2.1 T2V 1.3B (`karume-wan2.1`).
 WAN21_CARD = WanCard(
     generation="Wan2.1",
     title="Wan2.1 T2V 1.3B",
@@ -1321,9 +1403,9 @@ WAN21_CARD = WanCard(
     resources=_wan21_resources,
 )
 
-#: Wan2.2 TI2V 5B（`karume-wan2.2`）のカードの世代の表。技術レポートは pin した revision の上流
-#: `README.md` が引くもの（Wan2.1 と同じ arXiv 2503.20314 — 2026-10-06 に HF キャッシュの pin の
-#: README で確かめた）。
+#: The generation table of the card of Wan2.2 TI2V 5B (`karume-wan2.2`). The technical report is the
+#: one the upstream `README.md` at the pinned revision cites (the same arXiv 2503.20314 as Wan2.1 —
+#: confirmed on 2026-10-06 in the README of the pin in the HF cache).
 WAN22_CARD = WanCard(
     generation="Wan2.2",
     title="Wan2.2 TI2V 5B",
@@ -1353,12 +1435,14 @@ def render_wan_model_card(
     host_assets: Mapping[FileRefKey, int] = {},
     card: WanCard = WAN21_CARD,
 ) -> str:
-    """Wan の配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+    """Assemble the body of the Wan distribution's `README.md` (pure function, with a trailing
+    newline).
 
-    `abbreviations` は席名の部品上書きトークンの対応表（正本は `wan.distribution` の
-    `WAN_QUANT_ABBREVIATIONS` — ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず
-    引数で受ける（anima のカードと同じ形）。`card` は世代の表（配布 recipe の Pipeline が
-    世代ごとに束ねて渡す — 既定は Wan2.1）。
+    `abbreviations` maps the component-override tokens of preset names (the source of truth is
+    `WAN_QUANT_ABBREVIATIONS` in `wan.distribution` — ADR 0074 decision 4). It is a fact not in the
+    manifest, so it is taken as an argument rather than copied as a constant (the same form as the
+    anima card). `card` is the generation table (the distribution recipe's Pipeline bundles it per
+    generation — the default is Wan2.1).
     """
     require_pipeline(manifest, card.supported_pipeline)
     metadata = _wan_metadata(manifest, card)

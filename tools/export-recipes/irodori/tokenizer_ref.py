@@ -1,68 +1,79 @@
-r"""Irodori-TTS v4 のテキスト前処理層（`normalize_text` + Unigram トークナイザ）の資産と golden。
+r"""Asset and goldens of the Irodori-TTS v4 text preprocessing layer (`normalize_text` + Unigram).
 
-`irodori/export.py` が**グラフ**を出すのに対し、こちらが扱うのは「生テキスト → トークン id 列」
-だけ。モデルグラフにも重みにも触らない（読むのはチェックポイントの `__metadata__` の
-`bos_token_id` / `pad_token_id` だけ）。
+`irodori/export.py` emits the **graphs**; this script handles only "raw text → token id list".
+It touches neither the model graph nor the weights (all it reads from the checkpoint is
+`bos_token_id` / `pad_token_id` in `__metadata__`).
 
     cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref
 
-出力は 4 本（既定 `outputs/series/irodori-v4-small/tokenizer/`・`.gitignore` 配下）:
+Four outputs (default `outputs/series/irodori-v4-small/tokenizer/`, under `.gitignore`):
 
-    tokenizer.json         実行時資産（vocabText / scores / addedTokens / bosId / padId /
-                           unkId / byteBaseId）
-    golden.encode.json     `{raw, normalized, ids}` の固定ケース・batch_encode 同値ケース・
-                           **caption 経路**（strip のみ）のケース
-    golden.normalize.json  `normalize_text` の `{raw, normalized}`（各置換規則を最低 1 回発火）
-    nfkc-diff.json         NFKC が**恒等でない**単一コードポイントの写像表 `{cp: 正規化後}`
+    tokenizer.json         the runtime asset (vocabText / scores / addedTokens / bosId / padId /
+                           unkId / byteBaseId)
+    golden.encode.json     fixed `{raw, normalized, ids}` cases, batch_encode equivalence cases
+                           and the cases of the **caption path** (strip only)
+    golden.normalize.json  `{raw, normalized}` of `normalize_text` (every replacement rule fires
+                           at least once)
+    nfkc-diff.json         the map `{cp: normalized}` of single code points on which NFKC is
+                           **not the identity**
 
-加えて TS 側パリティ門のフィクスチャ 1 本（**git 管理**・`.gitignore` の外）:
+Plus one fixture for the TS-side parity check (**tracked in git**, outside `.gitignore`):
 
     packages/models/tests/fixtures/irodori-text/parity.json
-        上の 4 本と同じ内容 + 語彙の**部分集合**（102,400 本を commit しないための分離。
-        格子が全語彙と同じであることは {@link check_subset_covers_lattice} が実測する）
+        the same content as the four above + a **subset** of the vocabulary (split off so that
+        the 102,400 entries are not committed; {@link check_subset_covers_lattice} checks that
+        the lattice is the same as with the full vocabulary)
 
-生成後は `deno fmt packages/models/tests/fixtures/irodori-text/parity.json` を掛ける
-（commit 形はフォーマッタが正 — `deno task verify` の `fmt --check` が fixtures も見る）。
+After generating, run `deno fmt packages/models/tests/fixtures/irodori-text/parity.json`
+(the formatter's output is the committed form — the `fmt --check` of `deno task verify` also
+covers the fixtures).
 
-## 資産の形（anima の T5 資産に倣う）
+## Shape of the asset (follows anima's T5 asset)
 
-`packages/models/src/anima/text/tokenizer.ts` の `parseT5Asset` と同じ畳み方: 語彙は
-**改行 join の 1 本の文字列**（行番号 0-origin = id）+ スコア配列。この Unigram の語彙には
-改行・タブ・生の空白を含むトークンが 1 つも無い（{@link check_upstream_shape} が毎回実測 —
-1 つでもあれば行区切りが壊れて id が総ずれする）。
+Folded the same way as `parseT5Asset` in `packages/models/src/anima/text/tokenizer.ts`: the
+vocabulary is **one string joined with newlines** (0-based line number = id) + a score array. No
+token of this Unigram vocabulary contains a newline, a tab or a raw space
+({@link check_upstream_shape} checks it every time — a single one would break the line split and
+shift every id).
 
-anima と違って **`normalizer` / `space` の表は持たない**:
+Unlike anima, **there are no `normalizer` / `space` tables**:
 
-- `tokenizer.json` の `normalizer` は `null`（正規化はモデル側ではなく上流の
-  `normalize_text` が担う — NFKC は言語標準の `String.prototype.normalize` で足りる。
-  ずれる可能性のある単一 cp だけ {@link nfkc_diff_table} が突合材料として焼く）
-- pre_tokenizer は `Metaspace{replacement=▁, prepend_scheme=never, split=false}` で、
-  空白の判定表が要る `WhitespaceSplit` を**通らない**（U+0020 を ▁ に置換するだけ）
+- The `normalizer` of `tokenizer.json` is `null` (normalization is done by upstream's
+  `normalize_text`, not by the model side — the language's built-in `String.prototype.normalize`
+  is enough for NFKC. Only the single code points that may diverge are baked by
+  {@link nfkc_diff_table} as material for the comparison)
+- The pre_tokenizer is `Metaspace{replacement=▁, prepend_scheme=never, split=false}`, which does
+  **not go through** `WhitespaceSplit` and its whitespace table (it only replaces U+0020 with ▁)
 
 ## byte_fallback
 
-`unk_id=0` だが `byte_fallback=true` なので、語彙に無い文字は `<0xNN>` の**バイト列**へ落ちる
-（id = `byteBaseId` + バイト値。`byteBaseId` が 15 であることは毎回実測する）。TS 側は
-「語彙に無ければ UTF-8 バイトへ展開」を実装すれば良く、unk は byte_fallback が無い場合の
-経路として残るだけ。golden の c / d ケースがこの経路を固定する。
+`unk_id=0`, but `byte_fallback=true`, so a character missing from the vocabulary falls back to a
+**byte sequence** of `<0xNN>` (id = `byteBaseId` + byte value; that `byteBaseId` is 15 is checked
+every time). The TS side only has to implement "expand to UTF-8 bytes when not in the
+vocabulary"; unk stays only as the path for the case without byte_fallback. The c / d cases of
+the golden pin this path.
 
-## 何を門にするか
+## What is checked
 
-emit の前に全て実測し、1 つでも外れたら**何も書かない**（ADR 0005 の fail loudly）:
+Everything is checked before emitting, and if any check fails **nothing is written** (fail loudly,
+ADR 0005):
 
-- 上流 `tokenizer.json` の形（model 種別 / unk_id / byte_fallback / normalizer / pre_tokenizer /
-  added_tokens のフラグ / 256 本のバイトトークンの id）
-- 語彙に改行・タブ・生空白を含むトークンが無いこと（行区切りの前提）
-- `bos_token_id` / `pad_token_id` が**チェックポイントの config と added_tokens で一致**すること
-- **2 つの呼び出し経路が同じ id 列を出すこと** — `tokenizers.Tokenizer`（`irodori/export.py` の
-  `build_cases` が使う）と `transformers.AutoTokenizer`（上流 `PretrainedTextTokenizer` が
-  使う）。片方だけが正しくても golden は自己一致するので、ここで突き合わせる
-- byte_fallback ケースが**実際に**バイト展開になっていること（期待バイト id 列との一致）
-- 語彙内絵文字ケースが**実際に**語彙内であること（外れると b と c が同じ検査になる）
-- `normalize_text` の各置換規則が golden のどこかで**最低 1 回発火**すること
-- caption ケースが**正規化に感受**すること（strip 版と normalize 版の id 列が違う） — caption
-  経路は上流が strip しか掛けないので、無感なケースだけだと取り違えが門を素通りする
+- The shape of upstream's `tokenizer.json` (model type / unk_id / byte_fallback / normalizer /
+  pre_tokenizer / the added_tokens flags / the ids of the 256 byte tokens)
+- No vocabulary token contains a newline, a tab or a raw space (the premise of the line split)
+- `bos_token_id` / `pad_token_id` **agree between the checkpoint config and added_tokens**
+- **The two call paths produce the same id list** — `tokenizers.Tokenizer` (used by `build_cases`
+  in `irodori/export.py`) and `transformers.AutoTokenizer` (used by upstream's
+  `PretrainedTextTokenizer`). The golden agrees with itself even when only one of them is right,
+  so they are compared here
+- The byte_fallback case **really** expands to bytes (it matches the expected byte id list)
+- The in-vocabulary emoji case **really** is in the vocabulary (otherwise b and c become the
+  same test)
+- Every replacement rule of `normalize_text` **fires at least once** somewhere in the golden
+- The caption cases are **sensitive to normalization** (the strip and normalize id lists
+  differ) — upstream applies only strip on the caption path, so with insensitive cases alone a
+  mix-up would pass the check unnoticed
 """
 
 from __future__ import annotations
@@ -84,22 +95,22 @@ ENCODE_GOLDEN_FILE = "golden.encode.json"
 NORMALIZE_GOLDEN_FILE = "golden.normalize.json"
 NFKC_DIFF_FILE = "nfkc-diff.json"
 
-#: パリティ用フィクスチャ（**git 管理**）。Deno 側
-#: `packages/models/tests/irodori_text_test.ts` が読む。
+#: The parity fixture (**tracked in git**). Read on the Deno side by
+#: `packages/models/tests/irodori_text_test.ts`.
 DEFAULT_FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "irodori-text" / "parity.json"
 )
 
-#: Metaspace の置換文字（U+2581）。`split=false` / `prepend_scheme=never` なので、
-#: pre-tokenize は「U+0020 をこれに置き換える」以外に何もしない。
+#: The Metaspace replacement character (U+2581). With `split=false` / `prepend_scheme=never`,
+#: pre-tokenization does nothing besides "replace U+0020 with this".
 METASPACE = "▁"
 
-#: 資産のバイトトークンの id 起点（`<0x00>` の id）。**直書きせず毎回実測する**
-#: （{@link check_upstream_shape}）— 上流が特殊トークンを 1 本足すだけで 256 本全部がずれる。
+#: The base id of the asset's byte tokens (the id of `<0x00>`). **Checked every time instead of
+#: trusted** ({@link check_upstream_shape}) — one extra special token upstream shifts all 256.
 EXPECTED_BYTE_BASE_ID = 15
 
-#: 上流の pre_tokenizer に期待する形。`split=false` は「▁ で断片に割らない」形で、
-#: `prepend_scheme=never` は「先頭に ▁ を足さない」形（i ケースが固定する）。
+#: The expected shape of upstream's pre_tokenizer. `split=false` means "do not split into pieces
+#: at ▁", and `prepend_scheme=never` means "do not prepend ▁" (pinned by case i).
 EXPECTED_PRE_TOKENIZER = {
     "type": "Metaspace",
     "replacement": "▁",
@@ -107,24 +118,26 @@ EXPECTED_PRE_TOKENIZER = {
     "split": False,
 }
 
-#: `batch_encode` 同値ケースの `max_length`。text 側は `max_text_len`（256）、caption 側は
-#: `max_caption_len`（512）— どちらもチェックポイントの config が正本なので、値は
-#: {@link build_batch_cases} が config から採る。ここに直書きはしない。
+#: The `max_length` of the `batch_encode` equivalence cases. `max_text_len` (256) for text,
+#: `max_caption_len` (512) for the caption — the checkpoint config is the source of truth for
+#: both, so {@link build_batch_cases} takes the values from the config. They are not hard-coded
+#: here.
 TEXT_MAX_LENGTH_KEY = "max_text_len"
 CAPTION_MAX_LENGTH_KEY = "max_caption_len"
 
-#: 語彙内であることを実測する絵文字（b ケース）。
+#: The emoji checked to be in the vocabulary (case b).
 IN_VOCAB_EMOJI = "\U0001f60a"
 
-#: 語彙**外**であることを実測する絵文字（c / d ケース）。UTF-8 4 バイトなので
-#: byte_fallback が 4 トークンに展開する。
+#: The emoji checked to be **outside** the vocabulary (cases c / d). It is 4 bytes in UTF-8, so
+#: byte_fallback expands it to 4 tokens.
 OUT_OF_VOCAB_EMOJI = "\U0001f442"
 
-#: `golden.encode.json` の固定ケース `(名前, 理由, 生テキスト)`。
+#: The fixed cases of `golden.encode.json`, `(name, reason, raw text)`.
 #:
-#: MUST: 目に見えない文字は必ず `\uXXXX` で書く（編集の途中で消えたり別物が混ざる）。
-#: 網羅ではなく「素朴な移植が落ちる境界」を 1 件ずつ置く設計（anima の `PROMPT_CASES` と
-#: 同じ規律）で、a〜l の分類はそのまま W3 のホスト実装の受け入れ条件になる。
+#: MUST: invisible characters are always written as `\uXXXX` (otherwise they vanish or get
+#: swapped for something else during editing). Not exhaustive: one case per boundary where a
+#: naive port fails (the same discipline as anima's `PROMPT_CASES`), and the a–l classes are
+#: directly the acceptance criteria of the W3 host implementation.
 ENCODE_CASES: tuple[tuple[str, str, str], ...] = (
     ("ja-plain", "a: 漢字かな混じり + 句読点", "今日は近くの店まで歩いて行きました。"),
     (
@@ -174,11 +187,11 @@ ENCODE_CASES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
-#: `batch_encode` 同値ケース `(名前, 理由, 生テキスト, max_length のキー)`。
+#: The `batch_encode` equivalence cases `(name, reason, raw text, max_length key)`.
 #:
-#: MUST: 1 件は**実際に truncation が発火する**長さにする（`max_text_len` = 256 に対し
-#: body が 255 を超える）。発火しないケースだけだと「切り詰めの順序（BOS の前か後か）」が
-#: golden に現れず、TS 側の取り違えが素通りする。
+#: MUST: one case is long enough that **truncation really fires** (a body over 255 against
+#: `max_text_len` = 256). With only cases that do not fire, "the truncation order (before or
+#: after the BOS)" never shows in the golden, and a mix-up on the TS side passes unnoticed.
 BATCH_CASES: tuple[tuple[str, str, str, str], ...] = (
     (
         "batch-short",
@@ -194,12 +207,13 @@ BATCH_CASES: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
-#: **caption 側**の前処理ケース `(名前, 理由, 生テキスト)`。
+#: The preprocessing cases of the **caption side** `(name, reason, raw text)`.
 #:
-#: 上流 `inference_runtime._synthesize` は caption に `str(...).strip()` しか掛けない
-#: （`normalize_text` は text 専用）。ここに並べるのは全て**正規化に感受**する綴りで、
-#: caption 経路へ誤って `normalize_text` を掛けると id 列が変わる = {@link build_caption_cases}
-#: の「strip 版と normalize 版が違う」実測が成立する。
+#: Upstream's `inference_runtime._synthesize` applies only `str(...).strip()` to the caption
+#: (`normalize_text` is for the text only). Every spelling listed here is **sensitive to
+#: normalization**: applying `normalize_text` to the caption path by mistake changes the id list,
+#: so the check of {@link build_caption_cases} that "the strip and normalize versions differ"
+#: holds.
 CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "caption-brackets",
@@ -233,9 +247,9 @@ CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
-#: 長文（`batch-truncated` の本文）。`irodori/export.py` の `LONG_PASSAGE_A` と同じ文体で、
-#: **1 段落では足りない**（T=144）ので 3 段落ぶんの長さを持たせる — `max_text_len` = 256 の
-#: truncation を実際に踏ませるのが目的。
+#: A long passage (the body of `batch-truncated`). The same style as `LONG_PASSAGE_A` in
+#: `irodori/export.py`; **one paragraph is not enough** (T=144), so it is three paragraphs long —
+#: the point is to really hit the truncation at `max_text_len` = 256.
 TRUNCATING_PASSAGE = (
     "秋の朝、駅前の商店街はまだ静かで、シャッターの下りた店の前を、通勤の人がまばらに"
     "歩いていた。パン屋の換気口から流れてくる甘い匂いだけが、これから一日が始まることを"
@@ -255,12 +269,12 @@ TRUNCATING_PASSAGE = (
     "近づいてきて、私は原稿を閉じ、顔を上げて扉のほうを見た。"
 )
 
-#: `golden.normalize.json` の固定ケース `(名前, 理由, 生テキスト)`。
+#: The fixed cases of `golden.normalize.json` `(name, reason, raw text)`.
 #:
-#: `normalize_text` の段は SIMPLE_REPLACE_MAP → REGEX_REPLACE_MAP → `strip_outer_brackets`
-#: → NFKC → `...`/`..` の `…` 化 の 5 段で、**順序そのものが観測できる**ケースを混ぜてある
-#: （例: `①` は NFKC の前に削除されるので `1` にはならない / 全角 `；` は削除規則を
-#: すり抜けて NFKC で `;` になる）。
+#: `normalize_text` has five stages, SIMPLE_REPLACE_MAP → REGEX_REPLACE_MAP →
+#: `strip_outer_brackets` → NFKC → `...`/`..` to `…`, and the list includes cases where **the
+#: order itself is observable** (e.g. `①` is removed before NFKC and so does not become `1` / the
+#: full-width `；` slips past the removal rule and becomes `;` under NFKC).
 NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
     ("plain", "何も起きない素の文", "今日は近くの店まで歩いて行きました。"),
     ("tab", "SIMPLE: タブ削除", "前\t後ろ"),
@@ -321,50 +335,59 @@ NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
 def _tokenizer_json(model_dir: Path) -> dict[str, Any]:
     path = model_dir / TOKENIZER_FILE
     if not path.is_file():
-        raise SystemExit(f"tokenizer.json が見つからない: {path}")
+        raise SystemExit(f"tokenizer.json not found: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def check_upstream_shape(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """上流 `tokenizer.json` が資産の畳み方の前提どおりであることを実測する。
+    """Check that upstream's `tokenizer.json` matches the premises of how the asset is folded.
 
-    MUST: 主張のままにしない — ここが外れたまま emit すると、id 列だけが静かに別物になる
-    形（行区切りの崩れ / byte_fallback の起点ずれ / 追加語彙の切り出し規則の違い）で
-    TS 側へ流れ込む。
+    MUST: do not leave this as an assumption — emitting with a premise broken lets the id list
+    alone silently change on the TS side (a broken line split / a shifted byte_fallback base / a
+    different splitting rule for the added tokens).
     """
     model = raw["model"]
     if model.get("type") != "Unigram":
-        raise SystemExit(f"model.type が Unigram でない: {model.get('type')}")
+        raise SystemExit(f"model.type is not Unigram: {model.get('type')}")
     if int(model.get("unk_id", -1)) != 0:
-        raise SystemExit(f"unk_id が 0 でない: {model.get('unk_id')}")
+        raise SystemExit(f"unk_id is not 0: {model.get('unk_id')}")
     if not bool(model.get("byte_fallback")):
-        raise SystemExit("byte_fallback が false — 語彙外文字の扱いが別物になる")
+        raise SystemExit(
+            "byte_fallback is false — out-of-vocabulary characters would be handled differently"
+        )
     if raw.get("normalizer") is not None:
-        raise SystemExit(f"normalizer が null でない: {raw['normalizer']} — 正規化表が要る")
+        raise SystemExit(
+            f"normalizer is not null: {raw['normalizer']} — a normalization table would be needed"
+        )
     if raw.get("pre_tokenizer") != EXPECTED_PRE_TOKENIZER:
         raise SystemExit(
-            f"pre_tokenizer が {EXPECTED_PRE_TOKENIZER} と違う: {raw.get('pre_tokenizer')}"
+            f"pre_tokenizer differs from {EXPECTED_PRE_TOKENIZER}: {raw.get('pre_tokenizer')}"
         )
-    # 追加語彙のフラグは全て既定値のはず（normalized / lstrip / rstrip / single_word のどれかが
-    # 立つと「正規化の前に leftmost-longest で切り出す」という写経の意味が変わる）。
+    # The flags of the added tokens should all be at their defaults (if any of normalized /
+    # lstrip / rstrip / single_word is set, the meaning of the copied rule "split them out
+    # leftmost-longest before normalization" changes).
     for entry in raw["added_tokens"]:
         flags = {key: entry[key] for key in ("lstrip", "rstrip", "single_word", "normalized")}
         if any(flags.values()):
-            raise SystemExit(f"追加語彙 {entry['content']!r} のフラグが既定値でない: {flags}")
+            raise SystemExit(f"added token {entry['content']!r} has non-default flags: {flags}")
 
     vocab: list[list[Any]] = model["vocab"]
     for index, (token, _score) in enumerate(vocab):
         if "\n" in token or "\t" in token or " " in token:
-            raise SystemExit(f"語彙 id {index} のトークン {token!r} が改行 / タブ / 空白を含む")
+            raise SystemExit(
+                f"vocabulary id {index}: the token {token!r} contains a newline / tab / space"
+            )
     byte_ids = {
         int(token[3:5], 16): index
         for index, (token, _score) in enumerate(vocab)
         if len(token) == 6 and token.startswith("<0x") and token.endswith(">")
     }
     if len(byte_ids) != 256:
-        raise SystemExit(f"バイトトークンが {len(byte_ids)} 本（256 本のはず）")
+        raise SystemExit(f"{len(byte_ids)} byte tokens (expected 256)")
     if any(index != EXPECTED_BYTE_BASE_ID + value for value, index in byte_ids.items()):
-        raise SystemExit(f"バイトトークンの id が {EXPECTED_BYTE_BASE_ID} + バイト値で並んでいない")
+        raise SystemExit(
+            f"the byte token ids are not laid out as {EXPECTED_BYTE_BASE_ID} + byte value"
+        )
     return {
         "vocab": len(vocab),
         "addedTokens": len(raw["added_tokens"]),
@@ -373,11 +396,12 @@ def check_upstream_shape(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def build_asset(raw: Mapping[str, Any], text_config: Mapping[str, Any]) -> dict[str, Any]:
-    """Deno 側が「引くだけ」で使える資産（anima の T5 資産と同じ畳み方）。
+    """The asset the Deno side uses by lookup alone (folded like anima's T5 asset).
 
-    MUST: `bosId` / `padId` は**チェックポイントの config** から採り、追加語彙の綴りと
-    突き合わせる。トークナイザ側の `added_tokens` だけを見ると、config が別の id を
-    指していた場合に「モデルが期待する BOS と違う id を前置する」形で静かに割れる。
+    MUST: `bosId` / `padId` come from the **checkpoint config** and are checked against the
+    spelling of the added tokens. Looking only at the tokenizer's `added_tokens` breaks silently
+    when the config points at another id: a different id from the BOS the model expects gets
+    prepended.
     """
     vocab: list[list[Any]] = raw["model"]["vocab"]
     added = {entry["content"]: int(entry["id"]) for entry in raw["added_tokens"]}
@@ -386,12 +410,13 @@ def build_asset(raw: Mapping[str, Any], text_config: Mapping[str, Any]) -> dict[
     for label, token, want in (("bos", "<s>", bos_id), ("pad", "<pad>", pad_id)):
         if added.get(token) != want:
             raise SystemExit(
-                f"{label}: config の id {want} と追加語彙 {token!r} の id {added.get(token)} が違う"
+                f"{label}: the config id {want} differs from the added token {token!r}, whose id"
+                f" is {added.get(token)}"
             )
     return {
         "vocabText": "\n".join(token for token, _score in vocab),
         "scores": [float(score) for _token, score in vocab],
-        # `[文字列, id]` の対（TS 側 `parseAddedTokens` の形）。id 昇順に並べる。
+        # `[string, id]` pairs (the shape of `parseAddedTokens` on the TS side), in ascending id.
         "addedTokens": [
             [content, value] for content, value in sorted(added.items(), key=lambda item: item[1])
         ],
@@ -403,16 +428,18 @@ def build_asset(raw: Mapping[str, Any], text_config: Mapping[str, Any]) -> dict[
 
 
 def byte_fallback_ids(text: str) -> list[int]:
-    """`text` を byte_fallback だけで表したときの id 列（c ケースの期待値の独立計算）。"""
+    """The id list of `text` written with byte_fallback alone (computes case c's expectation
+    independently)."""
     return [EXPECTED_BYTE_BASE_ID + byte for byte in text.encode("utf-8")]
 
 
 class TokenizerPair:
-    """id 列の**2 経路**（`tokenizers` 生 / `transformers` 経由）を束ねて突き合わせる。
+    """Holds the **two paths** to an id list (raw `tokenizers` / through `transformers`) and
+    compares them.
 
-    `irodori/export.py` の `build_cases` は前者を、上流の `PretrainedTextTokenizer` は
-    後者を使う。golden はどちらか一方から採るしかないので、**両方が同じ列を出すこと**を
-    ケースごとに実測してから採る（片方だけ壊れても golden は自己一致してしまう）。
+    `build_cases` in `irodori/export.py` uses the former, upstream's `PretrainedTextTokenizer` the
+    latter. The golden can only be taken from one of them, so **both producing the same list** is
+    checked per case before it is taken (if only one breaks, the golden still agrees with itself).
     """
 
     def __init__(self, model_dir: Path) -> None:
@@ -425,31 +452,35 @@ class TokenizerPair:
         self.wrapper = PretrainedTextTokenizer(self.hf, add_bos=True)
 
     def encode(self, text: str, where: str) -> list[int]:
-        """特殊トークン無しの素の id 列（上流 `PretrainedTextTokenizer.encode` と同じ呼び方）。"""
+        """The plain id list without special tokens (called like upstream's
+        `PretrainedTextTokenizer.encode`)."""
         raw_ids = list(self.raw.encode(text, add_special_tokens=False).ids)
         hf_ids = list(self.hf.encode(text, add_special_tokens=False))
         if raw_ids != hf_ids:
             raise SystemExit(
-                f"{where}: tokenizers と transformers の id 列が違う\n"
+                f"{where}: the id lists of tokenizers and transformers differ\n"
                 f"  tokenizers={raw_ids}\n  transformers={hf_ids}"
             )
         return raw_ids
 
 
 def build_encode_cases(pair: TokenizerPair, normalize_text: Any) -> list[dict[str, Any]]:
-    """`{raw, normalized, ids}` の固定ケース。
+    """The fixed `{raw, normalized, ids}` cases.
 
-    `normalized` は `normalize_text` を掛けただけの文字列で、**`strip()` は掛けない** —
-    strip は上流のパイプライン段（`inference_runtime._synthesize`）が掛けるもので
-    トークナイザの契約ではなく、掛けると先頭空白ケース（i）が検査対象を失う。
-    `ids` は **BOS 前置前**の素の列（前置は {@link build_batch_cases} 側の契約）。
+    `normalized` is the string with only `normalize_text` applied, **without `strip()`** — strip
+    is applied by upstream's pipeline stage (`inference_runtime._synthesize`) and is not part of
+    the tokenizer's contract; applying it would leave the leading-space case (i) nothing to test.
+    `ids` is the plain list **before the BOS is prepended** (prepending is the contract of
+    {@link build_batch_cases}).
     """
     vocab = set(pair.raw.get_vocab())
     if IN_VOCAB_EMOJI not in vocab:
-        raise SystemExit(f"{IN_VOCAB_EMOJI!r} が語彙に無い — b ケースが c ケースと同じ検査になる")
+        raise SystemExit(
+            f"{IN_VOCAB_EMOJI!r} is not in the vocabulary — case b would test the same as case c"
+        )
     if OUT_OF_VOCAB_EMOJI in vocab:
         raise SystemExit(
-            f"{OUT_OF_VOCAB_EMOJI!r} が語彙にある — c / d ケースが byte_fallback を踏まない"
+            f"{OUT_OF_VOCAB_EMOJI!r} is in the vocabulary — cases c / d do not take byte_fallback"
         )
 
     cases: list[dict[str, Any]] = []
@@ -465,23 +496,23 @@ def build_encode_cases(pair: TokenizerPair, normalize_text: Any) -> list[dict[st
             }
         )
     by_name = {case["name"]: case for case in cases}
-    # byte_fallback が**実際に**発火していることの実測（恒真にしない — 期待バイト列は
-    # 語彙を見ずに UTF-8 から独立に計算する）。
+    # Check that byte_fallback **really** fires (not tautological — the expected byte list is
+    # computed independently from UTF-8, without looking at the vocabulary).
     want = byte_fallback_ids(OUT_OF_VOCAB_EMOJI)
     got = by_name["emoji-byte-fallback"]["ids"]
     if got != want:
-        raise SystemExit(f"c ケースが byte_fallback になっていない: {got} != {want}")
+        raise SystemExit(f"case c did not go through byte_fallback: {got} != {want}")
     return cases
 
 
 def build_batch_cases(
     pair: TokenizerPair, normalize_text: Any, model_config: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """上流 `batch_encode` の**最終形**（BOS 前置 + 右詰め pad + マスク）。
+    """The **final form** of upstream's `batch_encode` (BOS prepended + right padding + mask).
 
-    MUST: 手順を写さず上流の `PretrainedTextTokenizer.batch_encode` を**呼ぶ** — 切り詰めの
-    順序（body を `max_length-1` で切ってから BOS を足す）は写経が最も外しやすい点で、
-    写した式は上流が変わっても黙って古いまま通る。
+    MUST: **call** upstream's `PretrainedTextTokenizer.batch_encode` instead of copying its steps —
+    the truncation order (cut the body at `max_length-1`, then add the BOS) is the point a copy
+    most easily gets wrong, and a copied formula keeps passing silently after upstream changes.
     """
     specs = [
         *BATCH_CASES,
@@ -501,7 +532,7 @@ def build_batch_cases(
         body = pair.encode(normalized, name)
         used = int(mask[0].sum())
         if used != min(len(body) + 1, max_length):
-            raise SystemExit(f"{name}: マスクの有効長 {used} が BOS + body の想定と違う")
+            raise SystemExit(f"{name}: the mask's valid length {used} differs from BOS + body")
         truncated += int(len(body) + 1 > max_length)
         cases.append(
             {
@@ -515,15 +546,16 @@ def build_batch_cases(
             }
         )
     if truncated == 0:
-        raise SystemExit("truncation が発火するケースが 1 件も無い（切り詰めの順序が固定されない）")
+        raise SystemExit("no case makes truncation fire (the truncation order would not be pinned)")
     return cases
 
 
 def _packed_upstream_ids(pair: TokenizerPair, body: str, max_length: int) -> list[int]:
-    """上流 `batch_encode` の最終形から pad を落とした**詰めた** id 列。
+    """The **packed** id list: the final form of upstream's `batch_encode` without the padding.
 
-    マスクは必ず先頭からの連続した prefix なので、有効長は総和で取れる（静的方式で
-    ホストが作る列と同じ形 — `packages/models/src/irodori/host/pack.ts`）。
+    The mask is always a contiguous prefix from the start, so its sum is the valid length (the
+    same shape as the list the host builds in the static mode —
+    `packages/models/src/irodori/host/pack.ts`).
     """
     ids, mask = pair.wrapper.batch_encode([body], max_length=max_length)
     used = int(mask[0].sum())
@@ -533,17 +565,19 @@ def _packed_upstream_ids(pair: TokenizerPair, body: str, max_length: int) -> lis
 def build_caption_cases(
     pair: TokenizerPair, normalize_text: Any, model_config: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """**caption 経路**（strip のみ）の詰めた id 列と、**text 経路**（normalize）の同じ列。
+    """The packed id list of the **caption path** (strip only) and the same list of the **text
+    path** (normalize).
 
-    どちらも上流の入口（`PretrainedTextTokenizer.batch_encode`）を**呼んで**採り、pad を
-    落とした prefix だけを載せる（TS 側のホストが作るのはこの詰めた列 — `host/pack.ts`）。
-    `normalizedIdsPacked` は「もし caption にも `normalize_text` を掛けたら」の列で、TS 側の
-    門はこの 2 本が**違う**ことまで見る（一致するケースだけだと、caption の前処理を
-    取り違えても門が緑のまま通る）。
+    Both are taken by **calling** upstream's entry point (`PretrainedTextTokenizer.batch_encode`),
+    and only the prefix without the padding is kept (the host on the TS side builds this packed
+    list — `host/pack.ts`). `normalizedIdsPacked` is the list "if `normalize_text` were applied to
+    the caption too", and the TS-side check goes as far as these two lists **differing** (with
+    only matching cases, a mix-up of the caption preprocessing would keep the check green).
 
-    MUST: 正規化に感受するケース（2 本の列が違う）が {@link CAPTION_CASES} の大半を占める
-    こと。無感なのは公式 Voice Design 文 1 本だけで、そちらも事実を `normalizeSensitive` に
-    書き出す（既存 golden の caption がこの側だから = 前処理を直しても golden が動かない）。
+    MUST: cases sensitive to normalization (the two lists differ) make up most of
+    {@link CAPTION_CASES}. The only insensitive one is the official Voice Design sentence, and
+    that fact is written out to `normalizeSensitive` too (the caption of the existing golden is on
+    that side = fixing the preprocessing does not move the golden).
     """
     max_length = int(model_config[CAPTION_MAX_LENGTH_KEY])
     cases: list[dict[str, Any]] = []
@@ -551,7 +585,7 @@ def build_caption_cases(
     for name, why, text in CAPTION_CASES:
         stripped = text.strip()
         if not stripped:
-            raise SystemExit(f"{name}: strip 後の caption が空")
+            raise SystemExit(f"{name}: the caption is empty after strip")
         normalized = normalize_text(text).strip()
         stripped_ids = _packed_upstream_ids(pair, stripped, max_length)
         normalized_ids = _packed_upstream_ids(pair, normalized, max_length)
@@ -572,14 +606,15 @@ def build_caption_cases(
         )
     if sensitive < len(CAPTION_CASES) - 1:
         raise SystemExit(
-            f"正規化に感受する caption ケースが {sensitive} 件しかない"
-            "（caption の前処理を取り違えても門が緑のまま通る）"
+            f"only {sensitive} caption cases are sensitive to normalization"
+            " (a mix-up of the caption preprocessing would keep the check green)"
         )
     return cases
 
 
 def build_normalize_cases(normalize_text: Any) -> list[dict[str, Any]]:
-    """`normalize_text` の `{raw, normalized}` golden（各置換規則を最低 1 回発火させる）。"""
+    """The `{raw, normalized}` golden of `normalize_text` (fires every replacement rule at least
+    once)."""
     return [
         {"name": name, "why": why, "raw": text, "normalized": normalize_text(text)}
         for name, why, text in NORMALIZE_CASES
@@ -587,11 +622,11 @@ def build_normalize_cases(normalize_text: Any) -> list[dict[str, Any]]:
 
 
 def check_rule_coverage(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """上流の置換規則が golden のどこかで**発火している**ことを実測する。
+    """Check that every upstream replacement rule **fires** somewhere in the golden.
 
-    MUST: 恒真にしない — 「規則の綴りがケースの生テキストに含まれる」だけでなく、
-    その規則が**実際に出力を変えている**（発火前後で文字列が違う）ことまで見る。
-    上流が規則を足したらここが落ちて、golden の穴に気づける。
+    MUST: not tautological — beyond "the rule's spelling appears in a case's raw text", it checks
+    that the rule **really changes the output** (the string differs before and after it fires).
+    When upstream adds a rule this fails, and the hole in the golden shows.
     """
     from irodori_tts.text_normalization import REGEX_REPLACE_MAP, SIMPLE_REPLACE_MAP
 
@@ -609,7 +644,7 @@ def check_rule_coverage(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if hits == 0:
             missing.append(f"REGEX_REPLACE_MAP[{pattern.pattern!r}]")
     if missing:
-        raise SystemExit(f"golden がどの規則も発火させていない: {missing}")
+        raise SystemExit(f"the golden does not fire these rules: {missing}")
 
     stripped = sum(1 for case in cases if case["why"].startswith("括弧剥がし"))
     changed_by_nfkc = sum(
@@ -618,25 +653,29 @@ def check_rule_coverage(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     dots = sum(1 for case in cases if ".." in case["raw"])
     if stripped < 3 or changed_by_nfkc < 3 or dots < 2:
         raise SystemExit(
-            f"golden の被覆が薄い（括弧 {stripped} / NFKC {changed_by_nfkc} / ドット {dots}）"
+            f"the golden's coverage is thin (brackets {stripped} / NFKC {changed_by_nfkc} /"
+            f" dots {dots})"
         )
     return {"rules": len(fired), "brackets": stripped, "nfkc": changed_by_nfkc, "dots": dots}
 
 
-#: サロゲート（Python の str に載らない）を除く全コードポイント。
+#: Every code point except the surrogates (which a Python str cannot hold).
 ALL_CODEPOINTS = [cp for cp in range(0x110000) if not (0xD800 <= cp <= 0xDFFF)]
 
 
 def nfkc_diff_table() -> dict[str, str]:
-    """NFKC が**恒等でない**単一コードポイントの写像表 `{cp（10 進の文字列）: 正規化後}`。
+    """The map of single code points on which NFKC is **not the identity**,
+    `{cp (decimal string): normalized}`.
 
-    TS 側は NFKC を自前実装せず `String.prototype.normalize("NFKC")` に委ねる（`normalize_text`
-    の正本が Python の `unicodedata` なので、両者の Unicode 版がずれた瞬間に**例外も警告も
-    出さずに**正規化結果が変わる）。この表はその突合材料で、TS 側のテストが全エントリを
-    自分の `normalize` に通して一致を確かめる。
+    The TS side does not implement NFKC itself but defers to `String.prototype.normalize("NFKC")`
+    (the source of truth of `normalize_text` is Python's `unicodedata`, so the moment the two
+    Unicode versions diverge the normalization result changes **with no exception or warning**).
+    This table is the material for that comparison: the TS-side test runs every entry through its
+    own `normalize` and checks that they agree.
 
-    NOTE: 単一 cp の表なので**複数 cp にまたがる差**（正準順序付け・合成）は捕まえられない。
-    そちらは `golden.normalize.json` の結合文字ケース（か + U+3099 など）が受け持つ。
+    NOTE: a single-cp table cannot catch **differences spanning several code points** (canonical
+    ordering, composition). Those are covered by the combining-character cases of
+    `golden.normalize.json` (か + U+3099 and the like).
     """
     return {
         str(cp): normalized
@@ -650,13 +689,15 @@ def lattice_texts(
     batch_cases: Sequence[Mapping[str, Any]],
     caption_cases: Sequence[Mapping[str, Any]],
 ) -> list[str]:
-    """Viterbi の格子が実際に見る文字列（golden の本文を ▁ 置換したもの）。
+    """The strings the Viterbi lattice really sees (the golden's bodies with ▁ replaced).
 
-    caption ケースは **strip 版と normalize 版の両方**を載せる — TS 側の門が同じ生テキストを
-    2 経路へ通して id 列の違いを見るので、片方だけだと語彙の部分集合が足りなくなる。
+    The caption cases contribute **both the strip and the normalize versions** — the TS-side
+    check runs the same raw text through two paths and compares the id lists, so with only one
+    of them the vocabulary subset would come up short.
 
-    追加語彙の切り出しで断片に割れるが、**割った断片の部分文字列は元の文字列の部分文字列**
-    なので、割る前の全体を渡せば語彙の抽出には十分（超集合になるだけで格子は変わらない）。
+    Splitting out the added tokens cuts the text into pieces, but **a substring of a piece is a
+    substring of the original string**, so passing the whole text before the split is enough to
+    extract the vocabulary (it only yields a superset; the lattice does not change).
     """
     texts = [case["normalized"] for case in (*encode_cases, *batch_cases, *caption_cases)]
     texts.extend(case["stripped"] for case in caption_cases)
@@ -666,12 +707,14 @@ def lattice_texts(
 def vocab_subset(
     vocab: Sequence[Sequence[Any]], texts: Sequence[str], added: Mapping[str, int]
 ) -> list[list[Any]]:
-    """フィクスチャに載せる語彙の**部分集合** `[トークン, id, スコア]`（id 昇順）。
+    """The **subset** of the vocabulary that goes into the fixture, `[token, id, score]` (in
+    ascending id).
 
-    載せるのは ①texts のいずれかの部分文字列に一致するトークン全件（= 格子が引きうる全て）
-    ②バイトトークン 256 本（byte_fallback の id 連番そのものを TS 側が検査する）③追加語彙。
-    102,400 本の語彙を丸ごと commit しないための分離で、格子が同じであることは
-    {@link check_subset_covers_lattice} が**逆向き**に実測する。
+    It holds ① every token that matches a substring of any of the texts (= everything the
+    lattice can look up), ② the 256 byte tokens (the TS side tests the consecutive byte_fallback
+    ids themselves), ③ the added tokens. Split off so that the 102,400-entry vocabulary is not
+    committed whole; {@link check_subset_covers_lattice} checks **in the opposite direction** that
+    the lattice is the same.
     """
     entry = {token: (index, score) for index, (token, score) in enumerate(vocab)}
     width = max(len(token) for token, _score in vocab)
@@ -692,12 +735,13 @@ def vocab_subset(
 def check_subset_covers_lattice(
     vocab: Sequence[Sequence[Any]], texts: Sequence[str], subset: Sequence[Sequence[Any]]
 ) -> int:
-    """部分集合でも Viterbi の結果が語彙全体と一致することを実測する。
+    """Check that Viterbi gives the same result with the subset as with the full vocabulary.
 
-    格子は「その断片の部分文字列に一致する語彙エントリ」しか引かないので、**一致集合が同じ
-    なら格子も同じ**。ここは語彙**全体**を走査して「texts の部分文字列であるのに部分集合に
-    無いトークン」を数える — 抽出（部分文字列 → 語彙引き）とは向きが逆なので、抽出側の
-    取りこぼしをそのまま写す恒真検査にならない。
+    The lattice only looks up "vocabulary entries that match a substring of the piece", so **the
+    same match set means the same lattice**. This scans the **full** vocabulary and counts "tokens
+    that are substrings of the texts but missing from the subset" — the opposite direction from
+    the extraction (substring → vocabulary lookup), so it is not a tautological test that would
+    copy a miss of the extraction.
     """
     present = {row[0] for row in subset}
     missing = [
@@ -707,7 +751,8 @@ def check_subset_covers_lattice(
     ]
     if missing:
         raise SystemExit(
-            f"部分集合が格子の一致集合を覆えていない: {missing[:8]}（計 {len(missing)} 件）"
+            f"the subset does not cover the lattice's match set: {missing[:8]}"
+            f" ({len(missing)} in total)"
         )
     return sum(1 for token, _score in vocab if any(token in text for text in texts))
 
@@ -721,10 +766,11 @@ def build_parity_fixture(
     normalize_cases: Sequence[Mapping[str, Any]],
     diff: Mapping[str, str],
 ) -> dict[str, Any]:
-    """TS 側パリティ門のフィクスチャ（**git 管理**・実資産無しで走る形）。
+    """The fixture of the TS-side parity check (**tracked in git**, runs without the real assets).
 
-    MUST: `minScore` / `maxTokenLength` は語彙**全体**から採る。未知ノードのスコアと前方一致の
-    探索幅は全体で決まるので、部分集合から導くと別の分割になる（anima の T5 と同じ罠）。
+    MUST: `minScore` / `maxTokenLength` come from the **full** vocabulary. The score of unknown
+    nodes and the search width of the prefix match are determined by the whole, so deriving them
+    from the subset gives a different segmentation (the same trap as anima's T5).
     """
     texts = lattice_texts(encode_cases, batch_cases, caption_cases)
     subset = vocab_subset(raw_vocab, texts, dict(asset["addedTokens"]))
@@ -763,12 +809,13 @@ def build_parity_fixture(
 
 
 def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -> dict[str, Any]:
-    """資産・golden・フィクスチャを書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
+    """Write the asset, the goldens and the fixture and return a summary (nothing is written when
+    a check fails)."""
     if not (source_dir / "irodori_tts" / "text_normalization.py").is_file():
         raise SystemExit(
-            f"モデル実装が見つからない: {source_dir}"
-            "（`git clone https://github.com/Aratako/Irodori-TTS` の展開先を"
-            " --source-dir に指定する）"
+            f"model implementation not found: {source_dir}"
+            " (pass the checkout of `git clone https://github.com/Aratako/Irodori-TTS`"
+            " as --source-dir)"
         )
     if str(source_dir) not in sys.path:
         sys.path.insert(0, str(source_dir))
@@ -853,7 +900,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, fixture_path: Path) -
 
 
 def default_out_dir(model_dir: Path) -> Path:
-    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>/tokenizer/`）。"""
+    """The default location (`outputs/series/irodori-<real weight directory name>/tokenizer/`)."""
     return SERIES_ROOT / f"irodori-{model_dir.name}" / "tokenizer"
 
 

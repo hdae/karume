@@ -1,9 +1,10 @@
-"""`wan/lanczos_fixture.py` の約束事 — git 管理の LANCZOS の fixture が今の Pillow の出力で
-あること。
+"""The contract of `wan/lanczos_fixture.py` — the git-tracked LANCZOS fixture is the output of the
+current Pillow.
 
-TS 側の LANCZOS は fixture と uint8 で完全一致を門にする。fixture の値は Pillow の版で決まるので、
-今の Pillow で作り直した組と、git にある組（ケース表・テンソル）が一致することをここで見る — 版を
-上げて値が変わったのに fixture を作り直し忘れた状態を赤にする。
+The TS-side LANCZOS is checked for an exact uint8 match with the fixture. The fixture values depend
+on the Pillow version, so this file checks that the set regenerated with the current Pillow equals
+the set in git (case table, tensors) — a Pillow upgrade that changed the values without the fixture
+being regenerated turns red.
 """
 
 from __future__ import annotations
@@ -63,7 +64,8 @@ class TestTheCommittedFixture:
 
 
 class TestTheGeometry:
-    """ケースが掃くはずの経路が表に残っていること（ケースを削って経路が抜ける形を赤にする）。"""
+    """The paths the cases are meant to sweep stay in the table (removing a case so that a path
+    drops out turns red)."""
 
     def test_the_sweep_covers_the_skipped_axes_and_both_directions(self):
         cases = lanczos_fixture.build_cases()

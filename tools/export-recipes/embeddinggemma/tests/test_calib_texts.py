@@ -1,14 +1,16 @@
-"""`embeddinggemma/calib_texts.py` の校正コーパスの性質。
+"""Properties of the calibration corpus in `embeddinggemma/calib_texts.py`.
 
-文面そのものは判断の対象にしない（品質は実測が答える）。ここで固定するのは、崩れると
-**測定値の意味が変わる**側だけ:
+The wording itself is not under judgment (measurement answers for quality). What is pinned here is
+only the side that **changes the meaning of the measurements** when it breaks:
 
-- **評価文と 1 文も重ならない** — 重なると cosine が「校正で見た文をそのまま埋め込めたか」
-  になり、校正の質ではなく漏れを測る数になる
-- 48 文ちょうどで重複が無い（`--calib-limit` の縮小実行が「同じ文を N 回」にならない）
-- プロンプト種別が `export.load_prompts` のキーか `None` のどちらか（綴りが外れると
-  校正入力の先頭トークン列だけが実運用と食い違う）
-- 先頭を切っても役割（query / document / 素）の混合が保たれる
+- **Not a single text overlaps the evaluation texts** — with an overlap the cosine becomes "did the
+  model embed a text the calibration already saw", a number that measures leakage, not the quality
+  of the calibration
+- Exactly 48 texts with no duplicates (a reduced run with `--calib-limit` does not become "the same
+  text N times")
+- Every prompt kind is either a key of `export.load_prompts` or `None` (with a misspelling only the
+  leading token sequence of the calibration inputs drifts from real use)
+- Cutting the head still keeps the mix of roles (query / document / plain)
 """
 
 from __future__ import annotations
@@ -16,8 +18,8 @@ from __future__ import annotations
 from embeddinggemma import export as eg
 from embeddinggemma.calib_texts import CALIB_TEXTS
 
-#: `config_sentence_transformers.json` の `prompts` が持つキー（実資産を読まずに固定する
-#: 綴り — 実際の引きは `calib_inputs` が辞書アクセスで落とす）。
+#: The keys of `prompts` in `config_sentence_transformers.json` (spellings pinned without reading
+#: the real asset — the actual lookup in `calib_inputs` fails on a dict access).
 PROMPT_KEYS = {"query", "document"}
 
 
@@ -27,13 +29,13 @@ class TestCorpus:
         assert len({body for _prompt, body in CALIB_TEXTS}) == 48
 
     def test_no_text_overlaps_the_golden_cases(self):
-        """MUST: 校正と評価の分離（モジュール docstring）。"""
+        """MUST: calibration and evaluation stay apart (module docstring)."""
         golden = {body for _name, _prompt, body in eg.GOLDEN_CASES}
 
         assert not golden & {body for _prompt, body in CALIB_TEXTS}
 
     def test_no_text_quotes_a_golden_case(self):
-        """部分一致でも重なりは重なり（`in` で片方向ずつ見る）。"""
+        """A partial match is still an overlap (checked one direction at a time with `in`)."""
         bodies = [body for _prompt, body in CALIB_TEXTS]
         for _name, _prompt, golden in eg.GOLDEN_CASES:
             assert not any(golden in body or body in golden for body in bodies)
@@ -42,13 +44,15 @@ class TestCorpus:
         assert {prompt for prompt, _body in CALIB_TEXTS} <= PROMPT_KEYS | {None}
 
     def test_all_three_roles_appear_in_the_first_few_texts(self):
-        """縮小実行（`--calib-limit 3`）でも query / document / 素が揃う並び。"""
+        """An order in which a reduced run (`--calib-limit 3`) still has query / document /
+        plain."""
         head = {prompt for prompt, _body in CALIB_TEXTS[:3]}
 
         assert head == PROMPT_KEYS | {None}
 
     def test_the_two_query_roles_are_balanced(self):
-        """検索は query と document の**非対称**な使い方 — 片方だけの活性で丸めない。"""
+        """Retrieval uses query and document **asymmetrically** — do not round on the activations of
+        only one of them."""
         prompts = [prompt for prompt, _body in CALIB_TEXTS]
 
         assert prompts.count("query") == prompts.count("document") == 20

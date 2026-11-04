@@ -1,26 +1,32 @@
-"""`wan/export_vae.py` の約束事 — chunk グラフ 2 種の IR が決定 2 の取り決めを満たすこと。
+"""The contract of `wan/export_vae.py` — the IR of the two chunk graphs meets the rules of
+decision 2.
 
-Wan2.1 は実重み（潜在タイル 8）、Wan2.2 は合成の VAE（conftest の `ti2v_synthetic_vae`・潜在
-タイル 4 — 5B と同じ構造なので op とノードの並びは同じで、宣言 shape だけが変わる）で export する
-（グラフの構造はタイル辺に依らない）。実寸（2.1 はタイル 32・2.2 はタイル 16）の要約は
-`python -m wan.export_vae [--model ti2v-5b]` が出す（README の VAE 節）。
+Wan2.1 is exported with the real weights (latent tile 8), Wan2.2 with the synthetic VAE
+(`ti2v_synthetic_vae` of conftest, latent tile 4 — the same structure as the 5B, so the ops and
+the node order are the same and only the declared shapes change) (the graph structure does not
+depend on the tile edge). The full-size summary (tile 32 for 2.1, tile 16 for 2.2) comes from
+`python -m wan.export_vae [--model ti2v-5b]` (the VAE section of the README).
 
-見るもの:
+What it checks:
 
-- op の集合（pad が無い・SiLU の分解と保存した attention を含む既知の集合だけ）
-- 値の rank（4 以下。rank 5 は conv3d の重みだけ — rank 6 の reshape もここで落ちる）
-- cache の入出力（名前・形・順が決定 2 の表どおりで、出力の cache k が cache 入力 k の cat
-  から作られている）
-- 検査関数（{@link wan.export_vae.assert_chunk_graph}）自身が、順の取り違えと語彙外の op を
-  落とすこと
-- `--dtype i8`（ADR 0133 決定 7）: 合成の 2.2 VAE の i8 の書き出しで、畳み込みの重みだけが
-  `int8-sym`（出力チャネルごとの scale）になり、グラフの構造と他の格納は f16 の回と同じで、
-  フィクスチャを書かないこと・i8 系列を持たないモデルは拒むこと
-- `--shared`（ADR 0134 決定 1）: 合成の 2.2 VAE の f16 / i8 の組（タイル 4）を貸し手に、
-  タイル 8 の組 `<ターゲット>_8` を同じ系列の根へ書き、initializer が全部貸し手の同じキー・形・
-  格納の共有宣言で、重みのバイトを持たず、chunk グラフの取り決めがタイル 8 で成り立ち、貸し手の
-  組がバイト同一のままであること・貸し手の無い系列 / フィクスチャ / 別の格納・別のタイルの
-  貸し手 / `--tile` 無しを拒むこと
+- the op set (no pad; only the known set, including the SiLU decomposition and the preserved
+  attention)
+- the rank of the values (4 or less; rank 5 only for the conv3d weights — a rank-6 reshape is
+  caught here too)
+- the cache inputs and outputs (names, shapes and order as in the table of decision 2, and output
+  cache k is built from a cat of cache input k)
+- the check function itself ({@link wan.export_vae.assert_chunk_graph}) rejects an order mix-up
+  and an op outside the vocabulary
+- `--dtype i8` (ADR 0133 decision 7): in the i8 export of the synthetic 2.2 VAE, only the
+  convolution weights become `int8-sym` (one scale per output channel), the graph structure and
+  the other storage are the same as in the f16 run, no fixtures are written, and a model without
+  an i8 series is refused
+- `--shared` (ADR 0134 decision 1): with the f16 / i8 sets of the synthetic 2.2 VAE (tile 4) as
+  lenders, the tile-8 set `<target>_8` is written into the same series root; every initializer is
+  a shared declaration with the same key, shape and storage as the lender, no weight bytes are
+  held, the chunk-graph rules hold at tile 8, and the lender sets stay byte-identical; a series
+  without a lender, fixtures, a lender of another storage or another tile, and a missing `--tile`
+  are refused
 """
 
 from __future__ import annotations
@@ -61,7 +67,7 @@ def vae(wan_snapshot):
 
 @pytest.fixture(scope="module")
 def exported(vae) -> dict[bool, tuple[IrGraph, vae_patch.WanVaeChunkDecoder]]:
-    """first / next の IR（キーは `first`）。"""
+    """The first / next IR (keyed by `first`)."""
     graphs = {}
     for first in (True, False):
         module = vae_patch.WanVaeChunkDecoder(vae, first=first).eval()
@@ -100,7 +106,7 @@ class TestChunkGraphs:
         assert first_ops == next_ops == export_vae.EXPECTED_OPS
 
     def test_only_next_runs_the_two_time_convs(self, exported):
-        """conv3d は post-quant 1・shortcut 1・cache 付き 30（first）/ 32（next）。"""
+        """conv3d: post-quant 1, shortcut 1, with cache 30 (first) / 32 (next)."""
         counts = {
             first: Counter(node.op for node in exported[first][0].nodes) for first in exported
         }
@@ -119,12 +125,14 @@ class TestChunkGraphs:
 
 
 class TestTheCheckItself:
-    """検査が緩むと形の揃う cache どうしの入れ替えが素通りする — 故障注入で赤を確かめる。"""
+    """If the check loosened, swapping caches of the same shape would slip through — fault
+    injection confirms the red."""
 
     def test_two_swapped_cache_outputs_are_caught(self, exported):
         graph, module = exported[False]
         broken = copy.deepcopy(graph)
-        # cache_01 と cache_02 は同じ形 [384, 2, t, t] — 形の検査だけでは見分けられない。
+        # cache_01 and cache_02 have the same shape [384, 2, t, t] — a shape check alone cannot
+        # tell them apart.
         broken.outputs[2], broken.outputs[3] = broken.outputs[3], broken.outputs[2]
 
         with pytest.raises(export_vae.ChunkGraphError, match="順の取り違え"):
@@ -155,23 +163,26 @@ class TestFixtureCases:
         assert (band.role, accept.role) == ("band", "accept")
         assert band.seed != accept.seed
         assert band.chunks != accept.chunks
-        assert band.chunks == 9  # 33 フレーム = 最初の到達目標の 1 タイル分（ADR 0118）
-        # 81 フレーム（ADR 0118 段 8）の受入れ: 1 + 4·20 = 81。帯は band のまま（受入れ側）。
+        assert band.chunks == 9  # 33 frames = 1 tile of the first target (ADR 0118)
+        # Acceptance at 81 frames (ADR 0118 step 8): 1 + 4·20 = 81. The band stays band (acceptance
+        # side).
         assert (long.name, long.role, long.chunks) == ("long", "accept", 21)
         assert long.seed not in {band.seed, accept.seed}
 
 
 class TestTheSetIsPublishedTogether:
-    """first / next / フィクスチャは一組で据わる — 途中で落ちた実走が新旧の混ざった組を残さない。
+    """first / next / the fixtures are placed as one set — a real run that fails midway does not
+    leave a set mixing old and new.
 
-    export と参照の decode は差し替えて、置き場の規律だけを見る（実重みは読まない）。
+    The export and the reference decode are stubbed, and only the discipline of the location is
+    checked (no real weights are read).
     """
 
     OLD = "tile32-old"
 
     @pytest.fixture
     def series(self, tmp_path, monkeypatch):
-        """旧世代の組が据わった系列と、書き込みを差し替えた export_vae。"""
+        """A series with an old-generation set in place, and export_vae with its writes stubbed."""
         root = tmp_path / "series"
         for target in export_vae.TARGETS:
             (root / target).mkdir(parents=True)
@@ -253,32 +264,34 @@ class TestTheSetIsPublishedTogether:
         )
 
     def test_a_failure_in_the_second_graph_leaves_the_first_untouched(self, series, monkeypatch):
-        """next の export で落ちると、先に書いた first も据わらない（m6 の再現の形）。"""
+        """If the next export fails, the first written earlier is not placed either (the
+        reproduction of m6)."""
         written = export_vae.export_to_file
 
         def failing(module, inputs, path, *, graph_name, **kwargs):
             if graph_name == export_vae.TARGET_NEXT:
-                raise RuntimeError("next の export で落ちる（故障注入）")
+                raise RuntimeError("fails in the next export (fault injection)")
             return written(module, inputs, path, graph_name=graph_name, **kwargs)
 
         monkeypatch.setattr(export_vae, "export_to_file", failing)
-        with pytest.raises(RuntimeError, match="故障注入"):
+        with pytest.raises(RuntimeError, match="fault injection"):
             self._emit(series)
 
         assert self._contents(series) == [self.OLD] * 5
         assert not [path for path in series.iterdir() if path.name.endswith(".staging")]
 
     def test_a_failure_in_a_fixture_leaves_both_graphs_untouched(self, series, monkeypatch):
-        """フィクスチャの 2 本目で落ちると、検査を通ったグラフ 2 本も据わらない。"""
+        """If the second fixture fails, the two graphs that passed the check are not placed
+        either."""
         written = export_vae.save_file
 
         def failing(tensors, path, metadata):
             if metadata["seed"] == str(export_vae.FIXTURE_CASES[1].seed):
-                raise OSError("フィクスチャの書き込みで落ちる（故障注入）")
+                raise OSError("fails writing a fixture (fault injection)")
             written(tensors, path, metadata)
 
         monkeypatch.setattr(export_vae, "save_file", failing)
-        with pytest.raises(OSError, match="故障注入"):
+        with pytest.raises(OSError, match="fault injection"):
             self._emit(series)
 
         assert self._contents(series) == [self.OLD] * 5
@@ -290,15 +303,15 @@ class TestTheSetIsPublishedTogether:
         assert self._contents(series) == [self.OLD] * 5
 
 
-# ---- Wan2.2（合成の VAE — ADR 0121 段 4）-----------------------------------------------
+# ---- Wan2.2 (synthetic VAE — ADR 0121 step 4) ------------------------------------------------
 
-#: 合成の 2.2 VAE の潜在タイル。
+#: The latent tile of the synthetic 2.2 VAE.
 TI2V_TILE = 4
 
 
 @pytest.fixture(scope="module")
 def ti2v_exported(ti2v_synthetic_vae) -> dict[bool, tuple[IrGraph, vae_patch.WanVaeChunkDecoder]]:
-    """合成の 2.2 VAE の first / next の IR（キーは `first`）。"""
+    """The first / next IR of the synthetic 2.2 VAE (keyed by `first`)."""
     graphs = {}
     for first in (True, False):
         module = vae_patch.WanVaeChunkDecoder(ti2v_synthetic_vae, first=first).eval()
@@ -323,7 +336,8 @@ class TestTi2vChunkGraphs:
     def test_a_48_channel_latent_in_and_12_channel_frames_out(
         self, ti2v_exported, first: bool, frames: int, caches: int
     ):
-        """潜在 48 ch・フレームは patchify 空間の 12 ch（unpatchify はホスト — 決定 6）。"""
+        """48 latent ch; the frames are the 12 ch of the patchified space (unpatchify is on the host
+        — decision 6)."""
         graph, _ = ti2v_exported[first]
         side = 8 * TI2V_TILE
 
@@ -333,16 +347,16 @@ class TestTi2vChunkGraphs:
         assert graph.values[graph.outputs[0]].shape == [12, frames, side, side]
 
     def test_both_graphs_use_the_same_op_set(self, ti2v_exported):
-        """ショートカットは reshape / expand / permute / slice / add だけ — 2.1 と同じ op の
-        集合。"""
+        """The shortcuts are only reshape / expand / permute / slice / add — the same op set as
+        2.1."""
         first_ops = set(ti2v_exported[True][0].required_ops)
         next_ops = set(ti2v_exported[False][0].required_ops)
 
         assert first_ops == next_ops == export_vae.EXPECTED_OPS
 
     def test_only_next_runs_the_two_time_convs(self, ti2v_exported):
-        """conv3d は post-quant 1・shortcut 2（up2 / up3 の Res0）・cache 付き 30（first）/
-        32（next）。"""
+        """conv3d: post-quant 1, shortcut 2 (Res0 of up2 / up3), with cache 30 (first) /
+        32 (next)."""
         counts = {
             first: Counter(node.op for node in ti2v_exported[first][0].nodes)
             for first in ti2v_exported
@@ -354,8 +368,8 @@ class TestTi2vChunkGraphs:
         assert counts[False]["cat"] == 32
 
     def test_three_channel_frames_are_caught_in_a_ti2v_graph(self, ti2v_exported):
-        """検査が落ちうること: フレームのチャネルはモジュールから導く（2.1 の 3 を literal で
-        持たない）。"""
+        """The check can fail: the frame channels are derived from the module (2.1's 3 is not held
+        as a literal)."""
         graph, module = ti2v_exported[False]
         broken = copy.deepcopy(graph)
         side = 8 * TI2V_TILE
@@ -382,7 +396,7 @@ class TestVaeSeries:
         )
 
     def test_the_ti2v_row(self):
-        """ADR 0121 決定 6 / 7: 系列 `wan2.2-ti2v-5b-f16-dyn`・潜在タイル 16・patch 2。"""
+        """ADR 0121 decisions 6 / 7: series `wan2.2-ti2v-5b-f16-dyn`, latent tile 16, patch 2."""
         series = export_vae.VAE_SERIES["ti2v-5b"]
 
         assert (series.series, series.tile, series.patch_size) == (
@@ -406,15 +420,16 @@ class TestVaeSeries:
         assert set(export_vae.VAE_SERIES) <= set(SOURCES)
 
     def test_only_ti2v_has_an_i8_series_and_it_is_the_dit_series(self):
-        """ADR 0133 決定 7: Wan2.2 の VAE の i8 は DiT の i8 容器と同じ系列の根へ書く（部品
-        ディレクトリが違うので `transformer/` と重ならない）。"""
+        """ADR 0133 decision 7: the Wan2.2 VAE i8 is written into the same series root as the DiT
+        i8 container (the component directory differs, so it does not overlap `transformer/`)."""
         assert export_vae.VAE_SERIES["t2v-1.3b"].i8_series is None
         assert export_vae.VAE_SERIES["ti2v-5b"].i8_series == "wan2.2-ti2v-5b-i8-dyn"
         assert export_vae.TI2V_I8_SERIES_NAME == "wan2.2-ti2v-5b-i8-dyn"
 
 
 class TestSeriesConfigGate:
-    """上流 config の `patch_size` と空間の圧縮が系列の前提と合わなければ書かない。"""
+    """If the `patch_size` and the spatial compression of the upstream config do not fit the
+    series' premises, nothing is written."""
 
     @staticmethod
     def _vae(patch_size: int | None, scale_factor_spatial: int) -> SimpleNamespace:
@@ -431,15 +446,16 @@ class TestSeriesConfigGate:
             export_vae.assert_series_config(self._vae(2, 16), export_vae.VAE_SERIES["t2v-1.3b"])
 
     def test_a_spatial_compression_off_the_graph_ratio_is_refused(self):
-        """2.2 で圧縮が 8 のままだと、ホストの重なりとフレームの辺の前提が崩れる。"""
+        """If the compression stays 8 for 2.2, the premises of the host overlap and of the frame
+        edge break."""
         with pytest.raises(export_vae.ChunkGraphError, match="scale_factor_spatial"):
             export_vae.assert_series_config(self._vae(2, 8), export_vae.VAE_SERIES["ti2v-5b"])
 
 
 @pytest.fixture(scope="module")
 def written(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path, object]:
-    """合成の 2.2 VAE で書いた要約・系列の根・書いた VAE（`load_vae(round_f16=True)` と同じく
-    f16 へ丸めた写し）。"""
+    """The summary written with the synthetic 2.2 VAE, the series root and the written VAE (a copy
+    rounded to f16, like `load_vae(round_f16=True)`)."""
     vae = copy.deepcopy(ti2v_synthetic_vae)
     round_weights_to_f16(vae)
     root = tmp_path_factory.mktemp("ti2v") / "series"
@@ -457,7 +473,8 @@ def written(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path, object]:
 
 
 class TestTi2vWriter:
-    """合成の 2.2 VAE で書き手を通しで回す（容器 2 本 + フィクスチャ 3 本を一組で据える）。"""
+    """Runs the writer end to end with the synthetic 2.2 VAE (2 containers + 3 fixtures placed as
+    one set)."""
 
     def test_the_summary_records_the_ti2v_graphs(self, written):
         summary, _, _ = written
@@ -510,14 +527,17 @@ class TestTi2vWriter:
 
 
 class TestCommandLine:
-    """`--model` が系列・潜在タイル・ケース・patch の倍率を一括で選ぶ（実重みは読まない）。"""
+    """`--model` selects the series, the latent tile, the cases and the patch factor at once (no
+    real weights are read)."""
 
-    #: `fake_quant_i8` の身代わりが返す scale 台帳（中身は見ない — 渡り先だけを見る）。
+    #: The scale ledger the stand-in for `fake_quant_i8` returns (its contents are not checked —
+    #: only where it is passed).
     SCALES: ClassVar[dict[str, torch.Tensor]] = {"decoder.conv_in.weight": torch.ones(1)}
 
     @pytest.fixture
     def storage(self) -> dict:
-        """書き手へ渡った格納（`weight_dtype` / `weight_scales`）と、i8 へ丸めた VAE。"""
+        """The storage passed to the writer (`weight_dtype` / `weight_scales`) and the VAE rounded
+        to i8."""
         return {}
 
     @pytest.fixture
@@ -574,7 +594,8 @@ class TestCommandLine:
         assert storage == {"dtype": "f16", "scales": None}
 
     def test_i8_writes_the_ti2v_i8_series_without_fixtures(self, emitted, storage, capsys):
-        """ADR 0133 決定 7: i8 の回はモデルの i8 系列の根へ・フィクスチャ無し・台帳を渡す。"""
+        """ADR 0133 decision 7: the i8 run goes to the model's i8 series root, writes no fixtures
+        and passes the ledger."""
         export_vae.main(["--model", "ti2v-5b", "--dtype", "i8"])
 
         assert emitted == {
@@ -595,8 +616,8 @@ class TestCommandLine:
 
 @pytest.fixture(scope="module")
 def written_i8(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path]:
-    """合成の 2.2 VAE を `main` の i8 の回と同じ順（f16 へ丸め → i8 へ丸め）で書いた要約と
-    系列の根。"""
+    """The summary and the series root written with the synthetic 2.2 VAE in the same order as the
+    i8 run of `main` (round to f16 → round to i8)."""
     vae = copy.deepcopy(ti2v_synthetic_vae)
     round_weights_to_f16(vae)
     scales = export_vae.fake_quant_i8(vae)
@@ -617,13 +638,14 @@ def written_i8(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path]:
 
 
 def _container(root: Path, target: str) -> tuple[IrGraph, BoundGraph]:
-    """据わった容器のグラフ（IR）と束縛表（格納の正本）。"""
+    """The graph (IR) and the binding table (the source of truth for storage) of a placed
+    container."""
     verified = verify_container(container_parts(root / target / export_vae.MODEL_FILE))
     return ir_graph_from_container(verified.read, target), verified.graphs[target]
 
 
 def _weight_slots(graph: IrGraph) -> dict[str, str]:
-    """重みスロットに入る initializer → 消費する op。"""
+    """Initializer that fills a weight slot → the op that consumes it."""
     return {
         node.ins[WEIGHT_SLOTS[node.op]]: node.op
         for node in graph.nodes
@@ -632,8 +654,8 @@ def _weight_slots(graph: IrGraph) -> dict[str, str]:
 
 
 class TestTi2vI8Writer:
-    """`--dtype i8` の書き手（ADR 0133 決定 7）— 合成の 2.2 VAE の f16 の回（{@link written}）と
-    比べる。"""
+    """The `--dtype i8` writer (ADR 0133 decision 7) — compared with the f16 run of the synthetic
+    2.2 VAE ({@link written})."""
 
     @pytest.mark.parametrize("target", export_vae.TARGETS)
     def test_every_convolution_weight_is_int8_with_a_scale_per_output_channel(
@@ -643,7 +665,7 @@ class TestTi2vI8Writer:
         graph, bound = _container(root, target)
         slots = _weight_slots(graph)
 
-        # 空振りしない: decoder の conv3d と、up sampler / mid の attention の conv2d がある。
+        # Not vacuous: there are decoder conv3d and conv2d of the up samplers / mid attention.
         assert {"conv3d", "conv2d"} <= set(slots.values())
         assert set(slots.values()) <= {"conv3d", "conv2d", "linear"}
         for name in slots:
@@ -656,8 +678,9 @@ class TestTi2vI8Writer:
 
     @pytest.mark.parametrize("target", export_vae.TARGETS)
     def test_nothing_else_changes_from_the_f16_graph(self, written, written_i8, target: str):
-        """ノード・入出力・値の宣言は f16 の回と同じで、格納が変わるのは重みスロットの
-        initializer（f16 → int8-sym）だけ（bias・norm は f16 の回と同じ格納のまま）。"""
+        """Nodes, inputs and outputs, and value declarations are the same as in the f16 run; only
+        the storage of the weight-slot initializers changes (f16 → int8-sym) (bias and norm keep
+        the same storage as in the f16 run)."""
         _, f16_root, _ = written
         _, i8_root = written_i8
         f16_graph, f16_bound = _container(f16_root, target)
@@ -685,7 +708,8 @@ class TestTi2vI8Writer:
         assert written[0]["dtype"] == "f16"
 
     def test_a_fixture_with_i8_weights_is_refused_before_anything_is_written(self, tmp_path):
-        """フィクスチャのメタは f16-rounded の参照を名乗る — i8 の重みで作った参照は据えない。"""
+        """The fixture metadata claims an f16-rounded reference — a reference made with i8 weights
+        is not placed."""
         root = tmp_path / "series"
 
         with pytest.raises(export_vae.ChunkGraphError, match="フィクスチャを書かない"):
@@ -705,11 +729,13 @@ class TestTi2vI8Writer:
 
 
 class TestTi2vVerify:
-    """`--verify` の 2.2 の経路（unpatchify・モデルの受け渡し・config の門）を合成の VAE で通す。
+    """Runs the 2.2 path of `--verify` (unpatchify, model hand-off, the config check) with the
+    synthetic VAE.
 
-    実寸（5B・タイル 16・9 chunk）は
-    `python -m wan.export_vae --model ti2v-5b --verify --chunks 9`。
-    ここは経路だけを見る — 最終形の差は記録の値で、帯は `test_vae_patch_ti2v.py` が固定する。
+    The full size (5B, tile 16, 9 chunks) is
+    `python -m wan.export_vae --model ti2v-5b --verify --chunks 9`.
+    Only the path is checked here — the final-form difference is a recorded value, and the band is
+    pinned by `test_vae_patch_ti2v.py`.
     """
 
     CHUNKS = 3
@@ -741,9 +767,10 @@ class TestTi2vVerify:
         assert summary["normalized_cache_bit_exact"] is True
 
 
-# ---- `--shared`（ADR 0134 決定 1 — 重みのバイトを持たない別タイルの組）-----------------------
+# ---- `--shared` (ADR 0134 decision 1 — a set of another tile that holds no weight bytes) ------
 
-#: 共有の組のタイル（貸し手の {@link TI2V_TILE} と別の辺 — 実寸の 16 → 32 と同じ 2 倍）。
+#: The tile of the shared set (a different edge from the lender's {@link TI2V_TILE} — 2× like the
+#: real 16 → 32).
 SHARED_TILE = 8
 
 _SOURCE = Provenance(license="apache-2.0", upstream_revision="0" * 40)
@@ -753,10 +780,12 @@ _SOURCE = Provenance(license="apache-2.0", upstream_revision="0" * 40)
 def written_shared(
     ti2v_synthetic_vae, written, written_i8, tmp_path_factory
 ) -> dict[str, tuple[dict, Path, Path]]:
-    """格納ラベル → (要約, 系列の根, 書く前の貸し手の系列の根)。f16 / i8 の貸し手の組
-    （{@link written} / {@link written_i8}）の写しへ、共有の組をタイル {@link SHARED_TILE} で書く。
+    """Storage label → (summary, series root, the lender's series root before writing). Writes the
+    shared set at tile {@link SHARED_TILE} into copies of the f16 / i8 lender sets
+    ({@link written} / {@link written_i8}).
 
-    VAE は丸めない（`main` の `--shared` と同じ — バイトを書かないので丸めも量子化も要らない）。
+    The VAE is not rounded (the same as `--shared` of `main` — no bytes are written, so neither
+    rounding nor quantization is needed).
     """
     import shutil
 
@@ -783,7 +812,8 @@ def _shared_name(target: str) -> str:
 
 @pytest.mark.parametrize("dtype", export_vae.WEIGHT_DTYPES)
 class TestSharedWriter:
-    """合成の 2.2 VAE の 16 の組（ここではタイル 4）を貸し手に、タイル 8 の組を書く。"""
+    """With the 16 set of the synthetic 2.2 VAE (tile 4 here) as the lender, writes the tile-8
+    set."""
 
     @pytest.mark.parametrize("target", export_vae.TARGETS)
     def test_every_initializer_borrows_a_lender_tensor_of_the_same_key_and_shape(
@@ -795,14 +825,15 @@ class TestSharedWriter:
 
         assert graph.initializers
         assert all(init.is_shared for init in graph.initializers.values())
-        # IR v2 では initializer の名前がテンソルキー — 共有宣言の名前が貸し手の実体を指す。
+        # In IR v2 an initializer's name is the tensor key — the name of the shared declaration
+        # points at the lender's data.
         assert set(graph.initializers) <= set(lender_bound.supplies)
         for name in graph.initializers:
             assert graph.values[name] == lender.values[name], name
 
     @pytest.mark.parametrize("target", export_vae.TARGETS)
     def test_no_weight_byte_is_written(self, written_shared, dtype: str, target: str):
-        """束縛表が空で、part 0（2 文書）の外は 0 バイト。"""
+        """The binding table is empty, and outside part 0 (the 2 documents) there are 0 bytes."""
         _, root, _ = written_shared[dtype]
         _, bound = _container(root, _shared_name(target))
         parts = container_parts(root / _shared_name(target) / export_vae.MODEL_FILE)
@@ -843,7 +874,8 @@ class TestSharedWriter:
     def test_only_the_shared_pair_is_added_and_the_lenders_are_unchanged(
         self, written_shared, dtype: str
     ):
-        """フィクスチャは書かない・貸し手の組はバイト同一（ADR 0134 決定 7 の 1）。"""
+        """No fixtures are written, and the lender sets stay byte-identical (ADR 0134 decision 7,
+        item 1)."""
         _, root, lender_root = written_shared[dtype]
 
         before = sorted(path.name for path in lender_root.iterdir())
@@ -858,8 +890,9 @@ class TestSharedWriter:
     def test_each_declaration_carries_the_lender_storage(
         self, written_shared, ti2v_synthetic_vae, dtype: str
     ):
-        """共有宣言の格納は貸し手の束縛表の格納（容器には残らないので、置き換えの関数で見る）。
-        i8 の貸し手では畳み込みの重みが i8・それ以外は f32。"""
+        """The storage of a shared declaration is the storage in the lender's binding table (not
+        kept in the container, so it is checked with the replacement function). With an i8 lender
+        the convolution weights are i8 and everything else is f32."""
         _, root, _ = written_shared[dtype]
         target = export_vae.TARGET_NEXT
         path = root / target / export_vae.MODEL_FILE
@@ -882,7 +915,7 @@ class TestSharedWriter:
 
 
 class TestSharedRefusals:
-    """共有の組の門 — 外れたら何も据えない。"""
+    """The checks of a shared set — when one fails, nothing is placed."""
 
     def test_no_lender_is_refused(self, ti2v_synthetic_vae, tmp_path):
         root = tmp_path / "series"
@@ -912,7 +945,7 @@ class TestSharedRefusals:
         assert list(tmp_path.iterdir()) == []
 
     def test_a_lender_of_the_other_storage_is_refused(self, written, ti2v_synthetic_vae, tmp_path):
-        """f16 系列の根の貸し手を i8 の組として借りる取り違え。"""
+        """The mix-up of borrowing a lender at the f16 series root as an i8 set."""
         import shutil
 
         root = tmp_path / "series"
@@ -932,7 +965,8 @@ class TestSharedRefusals:
         assert not [path for path in root.iterdir() if path.name.endswith(f"_{SHARED_TILE}")]
 
     def test_a_lender_of_another_tile_is_refused(self, written, ti2v_synthetic_vae, tmp_path):
-        """貸し手のタイルは系列の表のタイル（別のタイルで書いた組は貸し手にしない）。"""
+        """The lender's tile is the tile of the series table (a set written at another tile is not
+        a lender)."""
         import shutil
 
         root = tmp_path / "series"
@@ -949,7 +983,7 @@ class TestSharedRefusals:
 
 
 class TestSharedCommandLine:
-    """`--shared` の CLI（実重みは読まない — 書き手は差し替える）。"""
+    """The `--shared` CLI (no real weights are read — the writers are stubbed)."""
 
     @pytest.fixture
     def emitted(self, monkeypatch) -> dict:
@@ -966,7 +1000,7 @@ class TestSharedCommandLine:
             return model
 
         def refuse(*_args, **_kwargs):
-            raise AssertionError("--shared は既定の書き手・量子化を通らない")
+            raise AssertionError("--shared must not go through the default writer or quantization")
 
         monkeypatch.setattr(export_vae, "provenance", lambda model: model)
         monkeypatch.setattr(export_vae, "load_vae", load_vae)

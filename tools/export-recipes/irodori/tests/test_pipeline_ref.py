@@ -1,22 +1,27 @@
-"""`irodori/pipeline_ref.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contracts of `irodori/pipeline_ref.py` (the part that needs no real weights).
 
-実重みの emit は手動（`irodori/export.py` と同じ規律）。ここで固定するのは、**ホストが
-写している 2 段**（S 決定と Euler の組み立て）の細部で、壊れると golden が静かに別物になる側:
+Emitting from the real weights is manual (the same discipline as `irodori/export.py`). Pinned
+here are the details of **the two stages the host copies** (deciding S and assembling Euler),
+whose breakage would silently change the golden:
 
-- t スケジュールが上流の式（`(1 - linspace) * 0.999`）で、単調減少であること
-- 銀行家丸めが「四捨五入」に化けていないこと（0.5 の扱い）
-- S の clamp が下限 13 / 上限 750 で効くこと
-- 区間マスクの割り方（self / text / speaker / caption の順とオフセット）と、uncond が
-  **その区間だけ**を落とすこと
-- CFG のスケール表が uncond 変種の綴りと 1 対 1 であること
-- token 列の前処理が種別で分かれていること（text は `normalize_text` + strip・caption は
-  strip のみ）と、上流突合へ渡す caption が**上流の入口から**作られること
-- i4 席（`--dtype i4`）の**出荷バイトからの読み戻し**の門（provenance / 形 / 本数 / 席の効き）が
-  1 つ残らず発火すること — ここが素通りすると「i8 の golden を i8+dit4 の golden と呼ぶ」事故が
-  数値も形も合ったまま通る。i4 席は **I4 + I8 + F32 の混成**（block 内の adaLN 以外が i4・
-  adaLN と block 外が i8 — 聴感裁定 2026-08-23）なので、i8 の逆変換と「効き門は i4 だけで
-  数える」もここで固定する。DiT は `dit` / `dit-context` の 2 容器に割れている（ADR 0114）ので、
-  2 本の間の整合（校正記録の一致・共有テンソルの同一）もここで固定する
+- The t schedule follows upstream's formula (`(1 - linspace) * 0.999`) and decreases
+  monotonically
+- Banker's rounding has not turned into "round half up" (the handling of 0.5)
+- The clamp of S takes effect at the floor 13 / ceiling 750
+- How the segment mask is split (the order and offsets of self / text / speaker / caption), and
+  that an uncond variant drops **only its own segment**
+- The CFG scale table is one-to-one with the spellings of the uncond variants
+- The token preprocessing differs by kind (text gets `normalize_text` + strip, the caption strip
+  only), and the caption passed to the upstream comparison is built **from upstream's entry
+  point**
+- Every check of the i4 preset's (`--dtype i4`) **read-back from the shipped bytes**
+  (provenance / shape / count / whether the preset takes effect) fires — if one passes
+  unnoticed, the accident of "calling an i8 golden an i8+dit4 golden" goes through with
+  matching numbers and shapes. The i4 preset is **a mix of I4 + I8 + F32** (i4 inside the
+  blocks except adaLN, i8 for adaLN and outside the blocks — listening ruling 2026-08-23), so the
+  inverse of i8 and "the takes-effect check counts i4 only" are pinned here as well. The DiT is
+  split into the two containers `dit` / `dit-context` (ADR 0114), so the consistency between
+  the two (matching calibration records, identical shared tensors) is pinned here too
 """
 
 from __future__ import annotations
@@ -58,18 +63,19 @@ class TestTSchedule:
         assert float(schedule[-1]) == 0.0
 
     def test_it_is_strictly_decreasing(self):
-        """上流 `sample_euler_rf_cfg` が `t_schedule[:-1] > t_schedule[1:]` を要求する。"""
+        """Upstream's `sample_euler_rf_cfg` requires `t_schedule[:-1] > t_schedule[1:]`."""
         schedule = ip.t_schedule(40)
 
         assert bool(torch.all(schedule[:-1] > schedule[1:]))
 
     def test_the_closed_form_is_within_one_ulp(self):
-        """TS 側は閉形式で作る想定 — 差が 1 ulp 級であることを固定する。"""
+        """The TS side is expected to use the closed form — pins the difference at about 1
+        ulp."""
         assert ip.closed_form_matches(ip.t_schedule(2), 2) == 0.0
         assert ip.closed_form_matches(ip.t_schedule(40), 40) < 1e-7
 
     def test_the_cfg_window_covers_the_first_half_of_the_steps(self):
-        """CFG は `t ∈ [0.5, 1.0]` の step だけ — 40 step では前半 20 本。"""
+        """CFG runs only on the steps with `t ∈ [0.5, 1.0]` — the first 20 of 40 steps."""
         schedule = ip.t_schedule(40)
         inside = [
             index for index in range(40) if ip.CFG_MIN_T <= float(schedule[index]) <= ip.CFG_MAX_T
@@ -79,7 +85,8 @@ class TestTSchedule:
 
 
 class TestBankerRounding:
-    """MUST: 「四捨五入」に化けさせない（TS の `Math.round` は 0.5 で常に上へ行く）。"""
+    """MUST: do not let it turn into "round half up" (TS's `Math.round` always goes up at
+    0.5)."""
 
     @pytest.mark.parametrize(
         ("frames", "want"),
@@ -91,7 +98,7 @@ class TestBankerRounding:
 
 class TestSequenceLength:
     def test_a_typical_prediction_is_used_as_is(self):
-        # expm1 の逆（log1p）を入れて狙った frames を作る。
+        # Feed the inverse of expm1 (log1p) to get the intended frames.
         log_frames = torch.log1p(torch.tensor([160.9389]))
 
         steps, meta = ip.sequence_length(log_frames, ex.CODEC_FRAME_RATE)
@@ -111,7 +118,8 @@ class TestSequenceLength:
         assert steps == meta["maxFrames"] == 750
 
     def test_the_mean_is_taken_over_the_batch(self):
-        """上流は `expm1(...).float().mean()`（候補数 > 1 のときの平均）。"""
+        """Upstream uses `expm1(...).float().mean()` (the mean when there is more than one
+        candidate)."""
         log_frames = torch.log1p(torch.tensor([100.0, 200.0]))
 
         steps, _meta = ip.sequence_length(log_frames, ex.CODEC_FRAME_RATE)
@@ -124,7 +132,8 @@ USED = {"text": 2, "speaker": 3, "caption": 4}
 
 
 class TestSegmentMasks:
-    """MUST: 区間の割り方（順序とオフセット）を固定する — ずれても shape は合ってしまう。"""
+    """MUST: pin how the segments are split (order and offsets) — a shift would still match the
+    shape."""
 
     def test_the_cond_mask_marks_every_used_prefix(self):
         mask = ip._segment_masks(3, USED, CAPS, None)
@@ -149,7 +158,7 @@ class TestSegmentMasks:
         assert torch.equal(got[end:], cond[end:])
 
     def test_the_variant_names_match_the_export_script(self):
-        """綴りが割れると uncond の区間が黙って別の条件を落とす。"""
+        """If the spellings diverge, an uncond segment silently drops a different condition."""
         assert tuple(ip.CFG_SCALES) == ex.DIT_UNCOND_VARIANTS
 
 
@@ -163,7 +172,7 @@ class TestRightPadIds:
         assert mask[0].tolist() == [True, True, True, False, False, False]
 
     def test_a_missing_sequence_becomes_all_pad_with_an_empty_mask(self):
-        """caption 空の経路（上流 `caption_mask.zero_()`）。"""
+        """The empty-caption path (upstream's `caption_mask.zero_()`)."""
         padded, mask = ip._right_pad_ids(None, 4, 3)
 
         assert padded[0].tolist() == [3, 3, 3, 3]
@@ -171,29 +180,33 @@ class TestRightPadIds:
 
 
 class _RecordingTokenizer:
-    """`tokenizers.Tokenizer` の最小の身代わり（**渡された文字列を記録する**）。
+    """A minimal stand-in for `tokenizers.Tokenizer` (**records the strings it is given**).
 
-    id はコードポイントそのもの — 何が渡ったかだけを見たいので、語彙は持たない。
+    The ids are the code points themselves — all this needs to see is what was passed, so it has
+    no vocabulary.
     """
 
     def __init__(self) -> None:
         self.seen: list[str] = []
 
     def encode(self, text: str, add_special_tokens: bool = True) -> Any:
-        assert add_special_tokens is False, "上流は特殊トークン無しで呼ぶ"
+        assert add_special_tokens is False, "upstream calls it without special tokens"
         self.seen.append(text)
         return SimpleNamespace(ids=[ord(char) for char in text])
 
 
 class TestPackedIds:
-    """MUST: 前処理は種別で違う（text = `normalize_text` + strip / caption = strip のみ）。"""
+    """MUST: the preprocessing differs by kind (text = `normalize_text` + strip / caption =
+    strip only)."""
 
-    #: 正規化に感受する caption（外側括弧・記号 — どちらも `normalize_text` の削除対象）。
+    #: A caption sensitive to normalization (outer brackets, a symbol — both removed by
+    #: `normalize_text`).
     CAPTION = " 「①明るい声」 "
 
     @staticmethod
     def _bracket_stripper(body: str) -> str:
-        """`normalize_text` の身代わり（外側括弧を剥がし ① を消すぶんだけを写す）。"""
+        """A stand-in for `normalize_text` (copies only stripping the outer brackets and removing
+        ①)."""
         return body.strip().removeprefix("「").removesuffix("」").replace("①", "")
 
     def test_the_text_side_goes_through_normalization(self):
@@ -204,7 +217,7 @@ class TestPackedIds:
         assert tokenizer.seen == ["明るい声"]
 
     def test_the_caption_side_only_strips(self):
-        """上流 `_synthesize` は caption に `str(...).strip()` しか掛けない。"""
+        """Upstream's `_synthesize` applies only `str(...).strip()` to the caption."""
         tokenizer = _RecordingTokenizer()
 
         ids = ip._packed_caption_ids(tokenizer, self.CAPTION, 1, 64)
@@ -218,16 +231,19 @@ class TestPackedIds:
         assert ids[0].tolist() == [1, ord("あ"), ord("い")]
 
     def test_an_empty_caption_fails_loudly(self):
-        """BOS だけの列を条件に載せると、caption 無しとも違う別の条件になる。"""
-        with pytest.raises(SystemExit, match="strip 後の caption が空"):
+        """Conditioning on a BOS-only sequence would be yet another condition, different from no
+        caption."""
+        with pytest.raises(SystemExit, match="the caption is empty after strip"):
             ip._packed_caption_ids(_RecordingTokenizer(), "  \n ", 1, 64)
 
 
 class _FakeCaptionTokenizer:
-    """上流 `PretrainedTextTokenizer.batch_encode` の**呼ばれ方**だけを写した身代わり。
+    """A stand-in that copies only **how** upstream's `PretrainedTextTokenizer.batch_encode` is
+    called.
 
-    返す列は固定（先頭 2 本のマスクが立つ形）— ここで見たいのは「渡る文字列が strip 済みか」と
-    「空 caption でマスクが BOS ごと全 0 になるか」の 2 点だけ。
+    The returned list is fixed (the first two mask entries set) — all this needs to see is "is
+    the string passed in already stripped" and "does an empty caption zero the whole mask,
+    BOS included".
     """
 
     def __init__(self) -> None:
@@ -251,7 +267,7 @@ class TestUpstreamCaptionCondition:
         assert int(mask.sum()) == 2
 
     def test_an_empty_caption_zeroes_the_whole_mask(self):
-        """上流 `_synthesize` の `caption_mask.zero_()` — BOS の列も落とす。"""
+        """Upstream `_synthesize`'s `caption_mask.zero_()` — it drops the BOS entry too."""
         fake = _FakeCaptionTokenizer()
 
         _ids, mask = ip.upstream_caption_condition(fake, "   ", 8)
@@ -262,10 +278,12 @@ class TestUpstreamCaptionCondition:
 
 class TestCaptionGoldenStability:
     def test_the_pipeline_captions_are_insensitive_to_normalization(self):
-        """MUST: 既存 golden が動かないことの実測（動くなら再 emit が要る合図）。
+        """MUST: checks that the existing golden does not move (if it does, that is the signal to
+        re-emit).
 
-        caption を strip-only へ直した波の前提そのもの。ここが落ちたら
-        `outputs/series/irodori-*/pipeline/` を採り直さないと TS 側の統合門が割れる。
+        The very premise of the change that moved the caption to strip-only. If this fails,
+        `outputs/series/irodori-*/pipeline/` must be regenerated, or the TS-side integration
+        check breaks.
         """
         pytest.importorskip("irodori_tts")
         from irodori_tts.text_normalization import normalize_text
@@ -274,27 +292,31 @@ class TestCaptionGoldenStability:
             assert normalize_text(case.caption).strip() == case.caption.strip(), case.name
 
 
-#: 合成コンテナの group 長（i4 は端数 group を作らない — ADR 0069 決定 2）。
+#: The group length of the synthetic container (i4 makes no partial group — ADR 0069 decision 2).
 GROUP = 32
 
-#: i4 格納の席と i8 格納の席（聴感裁定 2026-08-23 で block 外 5 本と adaLN 144 本を i4 から
-#: 外した）。読み戻しはコンテナの宣言駆動なので合成コンテナは各 1 本で足りるが、実重みの
-#: 期待値は `meta.json` の `i4Source` に出る **`dit` が int4Tensors 96 / int8Tensors 149・
-#: `dit-context` が int4Tensors 72 / int8Tensors 0**（割る前は `dit` 1 本で 168 / 149 — ADR 0114）。
+#: The entries stored as i4 and as i8 (the listening ruling of 2026-08-23 took the 5 outside the
+#: blocks and the 144 adaLN tensors out of i4). The read-back is driven by the container's
+#: declarations, so one of each is enough for the synthetic container, but the expectation for
+#: the real weights shows in `i4Source` of `meta.json`: **`dit` int4Tensors 96 / int8Tensors 149,
+#: `dit-context` int4Tensors 72 / int8Tensors 0** (before the split, `dit` alone had 168 / 149 —
+#: ADR 0114).
 I4_KEY = "in_proj.weight"
 SCALE_KEY = f"karume.scale.{I4_KEY}"
 I8_KEY = "out_proj.weight"
 I8_SCALE_KEY = f"karume.scale.{I8_KEY}"
-#: 持ち上げ定数の席（`karume.convert` の綴り）— 上書き対象から外れることを見るために置く。
+#: A lifted-constant entry (spelled as in `karume.convert`) — present to check that it is left out
+#: of the overwrite targets.
 CONST_KEY = "const.0f0f0f0f0f0f0f0f"
 
 
 class _DitWrapper(nn.Module):
-    """`irodori.export.DitGraph` の身代わり（**所有パラメタの顔ぶれ**だけを写す）。
+    """A stand-in for `irodori.export.DitGraph` (copies only **which parameters it owns**).
 
-    i4 席 1 本（`in_proj.weight` — 量子化軸が g32 で割り切れる）と i8 席 1 本
-    （`out_proj.weight` — block 外）と f32 席 4 本（bias / norm）。名前を実物と同じ綴りに
-    するのは、読み戻しがラッパ内 FQN 空間で動くことをそのまま試すため。
+    One i4 entry (`in_proj.weight` — its quantization axis divides by g32), one i8 entry
+    (`out_proj.weight` — outside the blocks) and four f32 entries (bias / norm). The names are
+    spelled as in the real one to test directly that the read-back works in the wrapper's FQN
+    space.
     """
 
     def __init__(self) -> None:
@@ -305,33 +327,38 @@ class _DitWrapper(nn.Module):
 
 
 def _shipped(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """`weight` の i4 出荷形 `(group scale, 出荷バイトから戻した f32)`。
+    """The shipped i4 form of `weight`, `(group scale, f32 restored from the shipped bytes)`.
 
-    期待値は**書いたバイトから**戻す（`karume.emit` の格納時ビット一致門と同じ向き）。
+    The expectation is restored **from the bytes written** (the same direction as the
+    bit-identity check of `karume.emit` at storage time).
     """
     scale = group_scale(weight, GROUP)
     return scale, dequantize_int4(quantize_to_int4(weight, scale), scale)
 
 
 def _shipped_i8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """同・i8 席（`(per-channel scale, 出荷バイトから戻した f32)`）。"""
+    """The same for an i8 entry (`(per-channel scale, f32 restored from the shipped bytes)`)."""
     scale = channel_scale(weight, 0)
     return scale, quantize_to_int8(weight, scale).to(torch.float32) * scale
 
 
 def _init_name(key: str) -> str:
-    """テンソルキー → IR v1 の initializer 名（torch.export が FQN を正規化した綴り）。"""
+    """Tensor key → IR v1 initializer name (the spelling torch.export normalizes the FQN to)."""
     return "const_0f0f0f0f0f0f0f0f" if key == CONST_KEY else f"p_{key.replace('.', '_')}"
 
 
 def _graph(tensors: Mapping[str, torch.Tensor]) -> IrGraph:
-    """合成 `dit` のグラフ（i4 / i8 の席が **linear の重みスロット**で消費される形）。
+    """The graph of a synthetic `dit` (the i4 / i8 entries are consumed by **the weight slot of
+    a linear**).
 
-    圧縮格納の適格判定は「重みスロットで消費されているか」なので、宣言だけ並べた器では
-    `--dtype i4` が 1 本も効かない（`karume.emit` が fail loudly する）。
+    Compressed storage is eligible only where "the tensor is consumed by a weight slot", so in a
+    shell that only lists declarations `--dtype i4` takes effect nowhere (`karume.emit` fails
+    loudly).
 
-    出口の add の鎖は**素材に在る**席（norm の 2 本と持ち上げ定数）だけで組む — 席を 1 本
-    抜いた素材でも、未定義の値を参照しない正当な IR になる（公開の門が IR の受理規則を見る）。
+    The chain of adds at the exit is built only from the entries **present in the material** (the
+    two norm tensors and the lifted constant) — material with one entry removed still makes a
+    valid IR that references no undefined value (the publish check applies the IR's acceptance
+    rules).
     """
     initializers = {
         _init_name(key): IrInitializer(tensor=key, storage=IrStorage(dtype="f32"))
@@ -372,17 +399,18 @@ def _graph(tensors: Mapping[str, torch.Tensor]) -> IrGraph:
 
 
 class _Material(NamedTuple):
-    """合成コンテナの素材（門ごとに 1 箇所だけ壊してから {@link _write_series} へ渡す）。"""
+    """The material of a synthetic container (each check breaks exactly one thing before
+    passing it to {@link _write_series})."""
 
     tensors: dict[str, torch.Tensor]
     scales: dict[str, torch.Tensor]
     overrides: dict[str, str]
-    #: モジュールの所有パラメタ名 → 読み戻しで入るはずの f32 実体。
+    #: Name of a parameter the module owns → the f32 value the read-back should put there.
     shipped: dict[str, torch.Tensor]
 
 
 def _material(seed: int = 0) -> _Material:
-    """i4 1 本 + i8 1 本 + f32 4 本 + 持ち上げ定数 1 本の素材。"""
+    """Material of one i4 + one i8 + four f32 tensors + one lifted constant."""
     generator = torch.Generator().manual_seed(seed)
     i4_scale, i4_stored = _shipped(torch.randn(4, 2 * GROUP, generator=generator))
     i8_scale, i8_stored = _shipped_i8(torch.randn(4, 2 * GROUP, generator=generator))
@@ -409,15 +437,17 @@ def _write_series(
     block_bytes: int = BLOCK_MAX_BYTES,
     graph: Callable[[Mapping[str, torch.Tensor]], IrGraph] | None = None,
 ) -> Path:
-    """合成の i4 系列（`krm` の part 列 + 校正記録）を書く（`method=None` で記録を落とす）。
+    """Write a synthetic i4 series (the `krm` parts + the calibration record; `method=None`
+    drops the record).
 
-    書き出しは実物と同じ 1 本道（`karume.emit.stored_model` →
-    `karume.publish.publish_container`）を通す — 規則の写しを持つと、規則が動いた日に
-    フィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
+    Writing goes through the same single path as the real one (`karume.emit.stored_model` →
+    `karume.publish.publish_container`) — keeping a copy of the rules would let the fixture alone
+    go stale the day the rules move, giving "tests green, only the real thing fails".
 
-    `budget` は校正予算の 2 欄（既定は配布の下限ちょうど = 出荷済み系列と同じ形）。smoke 予算で
-    焼いた系列から golden を焼こうとする軸をここで振る。`block_bytes` は piece 分割を踏ませる
-    ための寸法の差し込み。
+    `budget` is the two fields of the calibration budget (the default is exactly the
+    distribution floor = the same shape as a shipped series). This is where the axis of trying
+    to bake a golden from a series built with a smoke budget is varied. `block_bytes` injects a
+    size that forces the piece split.
     """
     directory.mkdir(parents=True, exist_ok=True)
     stored = stored_model(
@@ -448,16 +478,18 @@ def _write_series(
 
 
 def _restore(wrapper: nn.Module, series: Path) -> ip.RestoredDit:
-    """容器 1 本ぶんの読み戻し（{@link irodori.pipeline_ref.restore_dit_from_i4_series} を
-    1 ターゲットで呼ぶ — `series` は系列 root 直下の `<ターゲット>/`）。
+    """Read back one container (calls {@link irodori.pipeline_ref.restore_dit_from_i4_series}
+    with one target — `series` is `<target>/` directly under the series root).
 
-    容器ごとの門はターゲットの数に依らないので、既存の門のテストはこの形で 1 本ずつ試す。
+    The per-container checks do not depend on the number of targets, so the tests of the
+    existing checks try them one at a time in this form.
     """
     return ip.restore_dit_from_i4_series({series.name: wrapper}, series.parent)[series.name]
 
 
 class TestRestoreDitFromI4Series:
-    """MUST: golden は出荷バイトから焼く（校正を 2 度走らせて一致に賭けない）。"""
+    """MUST: the golden is baked from the shipped bytes (do not run calibration twice and bet on
+    the results agreeing)."""
 
     def test_every_owned_parameter_comes_from_the_shipped_bytes(self, tmp_path):
         module = _DitWrapper()
@@ -469,58 +501,65 @@ class TestRestoreDitFromI4Series:
         assert (record.int4, record.int8, record.plain, record.changed) == (1, 1, 4, 1)
         assert record.calib["method"] == "gptq"
         owned = dict(module.named_parameters())
-        # 持ち上げ定数（`const.*`）は席から外れる — 在っても上書き対象にならない。
+        # The lifted constant (`const.*`) is not an entry — present or not, it is not overwritten.
         assert set(owned) == set(material.shipped)
         for key, value in material.shipped.items():
             assert torch.equal(owned[key].detach(), value), key
 
     def test_an_uncalibrated_series_is_refused(self, tmp_path):
-        """`--no-calib` の生成物は格納形が同じ = 資産から判別できない（音だけが劣化する）。"""
+        """The output of `--no-calib` has the same storage form = the assets cannot tell it
+        apart (only the audio degrades)."""
         series = _write_series(tmp_path / "dit", _material(), method="rtn")
 
-        with pytest.raises(SystemExit, match="配布して良い丸め方式"):
+        with pytest.raises(SystemExit, match="rounding method allowed for distribution"):
             _restore(_DitWrapper(), series)
 
     def test_a_missing_provenance_record_is_refused(self, tmp_path):
         series = _write_series(tmp_path / "dit", _material(), method=None)
 
-        with pytest.raises(SystemExit, match="校正条件の記録が無い"):
+        with pytest.raises(SystemExit, match="no record of the i4 series' calibration conditions"):
             _restore(_DitWrapper(), series)
 
     def test_a_smoke_budget_series_is_refused(self, tmp_path):
-        """`--calib-steps 1` は `method` を `gptq` のまま残す — 予算欄まで見ないと通る。
+        """`--calib-steps 1` leaves `method` at `gptq` — it passes unless the budget fields are
+        checked too.
 
-        golden だけが smoke 用の丸めで焼かれると、配布資産との突合が「両辺が違う重み」の
-        まま緑になる（格納形も本数も 1 つも動かない）。
+        If only the golden is baked with the smoke rounding, the comparison with the distributed
+        assets stays green with "different weights on the two sides" (neither the storage form
+        nor the count moves at all).
         """
         series = _write_series(
             tmp_path / "dit", _material(), budget={**irodori_calib_floor(), "steps": 1}
         )
 
-        with pytest.raises(SystemExit, match="校正予算 'steps' が配布の下限を下回る"):
+        with pytest.raises(
+            SystemExit, match="calibration budget 'steps' is below the distribution floor"
+        ):
             _restore(_DitWrapper(), series)
 
     def test_a_tensor_the_module_does_not_own_fails_loudly(self, tmp_path):
-        """コンテナに在るのにモジュールに無い席（持ち上げ定数以外）は即エラー。"""
+        """An entry in the container but not in the module (other than a lifted constant) is an
+        immediate error."""
         material = _material()
         material.tensors["extra.weight"] = torch.zeros(1, 4)
         series = _write_series(tmp_path / "dit", material)
 
-        with pytest.raises(SystemExit, match="モジュールに無い"):
+        with pytest.raises(SystemExit, match="missing from the module"):
             _restore(_DitWrapper(), series)
 
     def test_a_parameter_missing_from_the_container_fails_loudly(self, tmp_path):
-        """逆向き（モジュールに在るのにコンテナに無い）— 上書きされない席が残る。"""
+        """The opposite direction (in the module but not in the container) — an entry would be
+        left un-overwritten."""
         material = _material()
         del material.tensors["out_norm.bias"]
         del material.shipped["out_norm.bias"]
         series = _write_series(tmp_path / "dit", material)
 
-        with pytest.raises(SystemExit, match="コンテナに無い"):
+        with pytest.raises(SystemExit, match="missing from the container"):
             _restore(_DitWrapper(), series)
 
     def test_a_container_without_any_i4_tensor_fails_loudly(self, tmp_path):
-        """i4 系列でないディレクトリ（f16 / i8 の系列）を指した形。"""
+        """Pointing at a directory that is not an i4 series (an f16 / i8 series)."""
         material = _material()
         material.overrides[I4_KEY] = "i8"
         material.scales[I4_KEY] = channel_scale(material.tensors[I4_KEY], 0)
@@ -530,33 +569,36 @@ class TestRestoreDitFromI4Series:
         )
         series = _write_series(tmp_path / "dit", material)
 
-        with pytest.raises(SystemExit, match="i4 格納のテンソルが 1 本も無い"):
+        with pytest.raises(SystemExit, match="no tensor is stored as i4"):
             _restore(_DitWrapper(), series)
 
     def test_a_restore_that_changes_nothing_fails_loudly(self, tmp_path):
-        """席の効き門: 段 1（i8 丸め）の値と全て同じなら、読み戻しが効いていない。"""
+        """The takes-effect check: if everything equals the stage-1 (i8 rounding) values, the
+        read-back had no effect."""
         module = _DitWrapper()
         material = _material()
         with torch.no_grad():
             module.in_proj.weight.copy_(material.shipped[I4_KEY])
         series = _write_series(tmp_path / "dit", material)
 
-        with pytest.raises(SystemExit, match="i4 の読み戻しが効いていない"):
+        with pytest.raises(SystemExit, match="the i4 read-back has no effect"):
             _restore(module, series)
 
     def test_a_shape_mismatch_fails_loudly(self, tmp_path):
-        """コンテナの `[1, 4]` とモジュールの `[4]` — グラフの add は broadcast で通る形。"""
+        """The container's `[1, 4]` against the module's `[4]` — a shape the graph's add accepts
+        through broadcasting."""
         material = _material()
         material.tensors["out_norm.bias"] = torch.zeros(1, 4)
         series = _write_series(tmp_path / "dit", material)
 
-        with pytest.raises(SystemExit, match="の形が コンテナ"):
+        with pytest.raises(SystemExit, match="disagrees: container"):
             _restore(_DitWrapper(), series)
 
     def test_a_storage_outside_the_seat_fails_loudly(self, tmp_path):
-        """i8+dit4 席の dit に f16 は並ばない（並んだら混成が想定と違う形で出荷されている）。
+        """The dit of the i8+dit4 preset holds no f16 (if it did, the mix would have shipped in an
+        unexpected form).
 
-        受理するのは f32 / i8 / i4 の 3 つだけ（{@link irodori.pipeline_ref._RESTORE_STORAGE}）。
+        Only f32 / i8 / i4 are accepted ({@link irodori.pipeline_ref._RESTORE_STORAGE}).
         """
         material = _material()
         material.overrides[I8_KEY] = "f16"
@@ -564,15 +606,16 @@ class TestRestoreDitFromI4Series:
         material.tensors[I8_KEY] = material.tensors[I8_KEY].to(torch.float16).to(torch.float32)
         series = _write_series(tmp_path / "dit", material)
 
-        with pytest.raises(SystemExit, match="は読み戻せない"):
+        with pytest.raises(SystemExit, match="cannot be read back"):
             _restore(_DitWrapper(), series)
 
     def test_the_i8_seat_does_not_count_as_the_i4_seat_working(self, tmp_path):
-        """MUST: 席の効き門は **i4 だけ**で数える。
+        """MUST: the takes-effect check counts **i4 only**.
 
-        block 外の i8 は段 1（i8 丸め）と同じ格子なので値が動かないのが正常だが、実行のたびに
-        必ず一致するとは限らない（段 1 は `dit` 丸ごと・段 2 はコンテナのバイト）。そこを効き門に
-        数えると、i4 が 1 本も効いていない事故を i8 の差が埋め合わせて隠す。
+        The i8 outside the blocks is on the same grid as stage 1 (i8 rounding), so its values not
+        moving is normal, but they are not guaranteed to match on every run (stage 1 is the whole
+        `dit`, stage 2 the container's bytes). Counting them in the takes-effect check would let
+        the i8 differences cover up the accident of no i4 tensor taking effect.
         """
         module = _DitWrapper()
         material = _material()
@@ -580,31 +623,33 @@ class TestRestoreDitFromI4Series:
             module.in_proj.weight.copy_(material.shipped[I4_KEY])
         series = _write_series(tmp_path / "dit", material)
         assert not torch.equal(module.out_proj.weight.detach(), material.shipped[I8_KEY]), (
-            "i8 席が段 1 と同値では、効き門が i4 だけを数えていることを試せない"
+            "with the i8 entry equal to stage 1, the test cannot show that the takes-effect check"
+            " counts i4 only"
         )
 
-        with pytest.raises(SystemExit, match="i4 の読み戻しが効いていない"):
+        with pytest.raises(SystemExit, match="the i4 read-back has no effect"):
             _restore(module, series)
 
     def test_a_missing_container_fails_loudly(self, tmp_path):
-        with pytest.raises(SystemExit, match="i4 系列のコンテナが無い"):
+        with pytest.raises(SystemExit, match="no container of the i4 series"):
             _restore(_DitWrapper(), tmp_path / "dit")
 
 
 class TestRestoreDitFromASplitSeries:
-    """piece へ割れたテンソル（container-v1 §4.2）を含む系列でも読み戻しは同じ結果になる。
+    """The read-back gives the same result for a series with tensors split into pieces
+    (container-v1 §4.2).
 
-    畳まない読み手だと i4 席が piece のまま数えられ、実体が途中で切れたまま上書きされる
-    （= この 1 本が畳みの有無を決める）。
+    A reader that does not join them would count the i4 entry piece by piece and overwrite it with
+    a value cut short (= this one test decides whether joining happens).
     """
 
     def test_every_owned_parameter_still_comes_from_the_shipped_bytes(self, tmp_path):
         module = _DitWrapper()
         material = _material()
-        # block 上限を 1 行（i4 は 2 要素 1 バイトなので 32 バイト）まで下げて、4 行の重みを
-        # piece 列へ割らせる。
+        # Lower the block limit to one row (32 bytes, since i4 packs 2 elements per byte) so the
+        # 4-row weight is split into pieces.
         series = _write_series(tmp_path / "dit", material, block_bytes=64)
-        # 前提の観測点 — piece が 1 本も無ければこのテストは空振りになる。
+        # Observation point for the premise — with no piece at all this test would test nothing.
         verified = verify_container(container_parts(series / ex.MODEL_FILE))
         split = [
             name
@@ -622,16 +667,16 @@ class TestRestoreDitFromASplitSeries:
             assert torch.equal(owned[key].detach(), value), key
 
 
-#: DiT の 2 容器が両方持つテンソル（実物の `blocks.<b>.attention.k_norm.weight` — 条件側と self 側の
-#: K に共通して掛かるので 2 本のラッパが両方抱える。ADR 0114）。
+#: A tensor both DiT containers hold (the real `blocks.<b>.attention.k_norm.weight` — it applies to
+#: the K of both the condition side and the self side, so both wrappers carry it. ADR 0114).
 SHARED_KEY = "blocks.0.attention.k_norm.weight"
-#: `dit-context` の i4 席（実物の条件側射影と同じ綴り）。
+#: The i4 entry of `dit-context` (spelled like the real condition-side projection).
 CONTEXT_I4_KEY = "blocks.0.attention.wk_text.weight"
 CONTEXT_BIAS_KEY = "blocks.0.attention.wk_text.bias"
 
 
 class _KeyNorm(nn.Module):
-    """共有の `k_norm` の身代わり（量子化対象型ではない重み 1 本）。"""
+    """A stand-in for the shared `k_norm` (one weight of a type that is not quantized)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -639,7 +684,8 @@ class _KeyNorm(nn.Module):
 
 
 def _holder(entries: Mapping[str, nn.Module]) -> nn.Module:
-    """FQN（`blocks.0.attention.k_norm`）の位置へモジュールを置いた器（実物のラッパの所有の縮図）。"""
+    """A shell that places modules at FQNs (`blocks.0.attention.k_norm`) (a miniature of what the
+    real wrappers own)."""
     root = nn.Module()
     for fqn, module in entries.items():
         *parents, leaf = fqn.split(".")
@@ -653,7 +699,8 @@ def _holder(entries: Mapping[str, nn.Module]) -> nn.Module:
 
 
 def _pair_graph(weight_key: str, bias_key: str) -> Callable[[Mapping[str, torch.Tensor]], IrGraph]:
-    """i4 の linear 1 本 + 共有テンソルを消費する容器の器（DiT の 2 容器の縮図）。"""
+    """The shell of a container that consumes one i4 linear + the shared tensor (a miniature of
+    the two DiT containers)."""
 
     def build(tensors: Mapping[str, torch.Tensor]) -> IrGraph:
         keys = (weight_key, bias_key, SHARED_KEY)
@@ -684,7 +731,7 @@ def _pair_graph(weight_key: str, bias_key: str) -> Callable[[Mapping[str, torch.
 
 
 def _pair_material(weight_key: str, bias_key: str, shared: torch.Tensor, seed: int) -> _Material:
-    """i4 1 本 + bias + 共有テンソルの素材。"""
+    """Material of one i4 tensor + bias + the shared tensor."""
     generator = torch.Generator().manual_seed(seed)
     scale, stored = _shipped(torch.randn(4, 2 * GROUP, generator=generator))
     bias = torch.randn(4, generator=generator)
@@ -698,10 +745,11 @@ def _pair_material(weight_key: str, bias_key: str, shared: torch.Tensor, seed: i
 
 
 class TestRestoreBothDitSeries:
-    """DiT の 2 容器（`dit` / `dit-context` — ADR 0114）を 1 回の呼び出しで読み戻す。
+    """Reads back the two DiT containers (`dit` / `dit-context` — ADR 0114) in one call.
 
-    2 本は 1 回の export で同じ丸めを書き分けたもの。容器ごとの門は上の
-    {@link TestRestoreDitFromI4Series} が持ち、ここは 2 本の間の整合だけを見る。
+    The two are written from the same rounding by one export. The per-container checks live in
+    {@link TestRestoreDitFromI4Series} above; this only looks at the consistency between the
+    two.
     """
 
     @staticmethod
@@ -754,7 +802,8 @@ class TestRestoreBothDitSeries:
         assert set(records) == {ex.TARGET_DIT, ex.TARGET_DIT_CONTEXT}
         for target, material in ((ex.TARGET_DIT, dit), (ex.TARGET_DIT_CONTEXT, context)):
             record = records[target]
-            # 容器ごとに i4 の効き門が立つ（どちらの容器も i4 1 本・値が動いた 1 本）。
+            # The i4 takes-effect check holds per container (each has one i4 tensor, one that
+            # moved).
             assert (record.int4, record.changed) == (1, 1), target
             owned = dict(wrappers[target].named_parameters())
             assert set(owned) == set(material.shipped)
@@ -762,33 +811,37 @@ class TestRestoreBothDitSeries:
                 assert torch.equal(owned[key].detach(), value), (target, key)
 
     def test_a_shared_tensor_that_differs_between_the_containers_fails_loudly(self, tmp_path):
-        """後から読んだ容器が先の値を黙って上書きする形にしない（別々の export 実行の混在）。"""
+        """A container read later must not silently overwrite the earlier values (a mix of
+        separate export runs)."""
         self._series(tmp_path, context_shared=torch.full((4,), 2.5))
 
-        with pytest.raises(SystemExit, match="共有のテンソル"):
+        with pytest.raises(SystemExit, match="shared tensors should be the same bytes"):
             ip.restore_dit_from_i4_series(self._wrappers(), tmp_path)
 
     def test_calibration_records_that_differ_between_the_containers_fail_loudly(self, tmp_path):
-        """どちらの記録も単独では配布の条件を満たす（下限以上の予算）— 1 本ずつでは通る形。"""
+        """Each record meets the distribution conditions on its own (a budget at or above the
+        floor) — one at a time they pass."""
         self._series(tmp_path, context_budget={**irodori_calib_floor(), "steps": ip.NUM_STEPS + 1})
 
-        with pytest.raises(SystemExit, match="ターゲットごとに違う"):
+        with pytest.raises(SystemExit, match="records differ per target"):
             ip.restore_dit_from_i4_series(self._wrappers(), tmp_path)
 
     def test_a_missing_context_container_fails_loudly(self, tmp_path):
-        """`dit` の容器だけでは i8+dit4 席の DiT にならない（条件側の 72 本が i8 のまま残る）。"""
+        """The `dit` container alone does not make the DiT of the i8+dit4 preset (the 72
+        condition-side tensors stay i8)."""
         _write_series(
             tmp_path / ex.TARGET_DIT,
             _pair_material("in_proj.weight", "in_proj.bias", torch.ones(4), seed=1),
             graph=_pair_graph("in_proj.weight", "in_proj.bias"),
         )
 
-        with pytest.raises(SystemExit, match="i4 系列のコンテナが無い"):
+        with pytest.raises(SystemExit, match="no container of the i4 series"):
             ip.restore_dit_from_i4_series(self._wrappers(), tmp_path)
 
 
 class TestEulerSharesOneContext:
-    """条件側 K/V は生成 1 回だけ作り、cond も uncond も同じ値を使う（ADR 0114 / 0047 決定 1）。"""
+    """The condition-side K/V is built once per generation, and cond and uncond use the same
+    values (ADR 0114 / 0047 decision 1)."""
 
     def test_every_dit_forward_receives_the_same_context_and_only_dit_is_counted(self):
         context = (torch.ones(1, 2), torch.full((1, 2), 2.0))
@@ -822,7 +875,7 @@ class TestEulerSharesOneContext:
             ip.t_schedule(4),
         )
 
-        # CFG 区間（t ∈ [0.5, 1.0]）の step は cond + uncond 2 本、それ以外は cond だけ。
+        # Steps inside the CFG window (t ∈ [0.5, 1.0]) run cond + two uncond, the rest cond only.
         assert forwards == len(received) > 4
         assert all(
             len(kv) == len(context) and all(a is b for a, b in zip(kv, context, strict=True))
@@ -838,15 +891,16 @@ class TestCli:
         assert out.parent.name == "irodori-v4-small"
 
     def test_each_dtype_writes_into_its_own_series(self, tmp_path):
-        """MUST: golden も系列ごと（f32 の golden で f16 資産を突き合わせると量子化誤差が
-        tolerance に混ざり、緑のまま検出力だけが落ちる）。"""
+        """MUST: goldens are per series too (comparing f16 assets with the f32 golden mixes the
+        quantization error into the tolerance, and only the detection power drops while it stays
+        green)."""
         dirs = {
             dtype: ip.default_out_dir(tmp_path / "v4-small", dtype) for dtype in ex.WEIGHT_DTYPES
         }
 
         assert len(set(dirs.values())) == len(dirs)
         assert dirs["f16"].parent.name == "irodori-v4-small-f16"
-        # 系列 root の綴りは export 台本と共有する 1 語（写経しない）。
+        # The spelling of the series root is shared with the export script (not copied).
         for dtype, path in dirs.items():
             assert path.parent == ex.default_out_root(tmp_path / "v4-small", dtype)
 
@@ -863,30 +917,35 @@ class TestCli:
         assert len(names) == len(set(names))
 
     def test_the_reference_frames_divide_by_the_speaker_patch_size(self):
-        """割り切れないと上流 `patch_sequence_with_mask` が端を捨て、保存した入力とずれる。"""
+        """Without exact division, upstream's `patch_sequence_with_mask` drops the remainder and
+        diverges from the saved input."""
         for case in ip.PIPELINE_CASES:
             if case.reference is not None:
                 assert case.reference.frames % 4 == 0
 
 
 class TestEulerReferenceSensitivity:
-    """2 段目の合否関数（増幅率で正規化した実装差の判定 — 2026-09-01 追記の型）。"""
+    """The pass/fail function of the second stage (judging the implementation difference
+    normalized by the amplification factor — the form added on 2026-09-01)."""
 
     def test_the_measured_v41_f16_pair_passes(self):
-        """導入の動機になった実測ペア（worst 1.33e-2 / amp 37,107）は 2 段目を通る。"""
+        """The measured pair that motivated it (worst 1.33e-2 / amp 37,107) passes the second
+        stage."""
         assert ip.euler_reference_within_sensitivity(1.33e-2, 37_107.0)
 
     def test_a_low_amplification_trajectory_keeps_the_tight_bound(self):
-        """増幅がおとなしい軌道（v4-small 級 amp≈353）では 1e-2 の差は退行として落ちる。"""
+        """On a trajectory with mild amplification (v4-small class, amp≈353) a difference of 1e-2
+        fails as a regression."""
         assert not ip.euler_reference_within_sensitivity(1.0e-2, 353.0)
 
     def test_the_absolute_ceiling_stops_gross_breakage(self):
-        """式の取り違え級（O(1)）は増幅率がいくら大きくても落ちる。"""
+        """An error the size of a wrong formula (O(1)) fails however large the amplification
+        is."""
         assert not ip.euler_reference_within_sensitivity(0.5, 1.0e9)
 
     def test_the_ceiling_binds_even_when_normalized_noise_is_small(self):
-        """正規化では通る大きさでも絶対上限が先に効く。"""
-        amp = 1.0e5  # amp × EULER_NOISE_PER_AMP = 0.5 > 上限 5e-2
+        """The absolute ceiling binds first, even for a size the normalization would pass."""
+        amp = 1.0e5  # amp × EULER_NOISE_PER_AMP = 0.5 > the ceiling 5e-2
         worst = 1.0e-1
         assert worst <= amp * ip.EULER_NOISE_PER_AMP
         assert not ip.euler_reference_within_sensitivity(worst, amp)

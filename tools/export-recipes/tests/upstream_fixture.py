@@ -1,17 +1,19 @@
-"""上流 checkpoint の出所（`_shared.upstream`）をテストで再現する糊。
+"""Glue that reproduces the provenance of an upstream checkpoint (`_shared.upstream`) in tests.
 
-2 つの席を合成する:
+Two things are synthesized:
 
-- **手元の checkpoint の取得記録**（{@link write_snapshot}）— `hf download --local-dir` が残す
-  `.cache/huggingface/download/config.json.metadata` と、`README.md` の front matter。台本が
-  容器へ焼く出所と、組み立てが突き合わせる revision の出どころ。
-- **フィクスチャ容器が名乗る出所**（{@link stamp_fixture_provenance}）— `ir_fixtures.ir_container`
-  は出所を引数に取らず、モジュール定数 `FIXTURE_PROVENANCE` を焼く（core のテストヘルパで、
-  recipe 側からは編集しない）。出所の門を持つ family の組み立てテストは、その定数をテストの間だけ
-  差し替えて「台本が焼いた形」の容器を作る。
+- **The download record of the local checkpoint** ({@link write_snapshot}) — the
+  `.cache/huggingface/download/config.json.metadata` that `hf download --local-dir` leaves, and the
+  front matter of `README.md`. The source of the provenance a script writes into the container and
+  of the revision assembly matches.
+- **The provenance a fixture container claims** ({@link stamp_fixture_provenance}) —
+  `ir_fixtures.ir_container` takes no provenance argument and writes the module constant
+  `FIXTURE_PROVENANCE` (a core test helper, not edited from the recipe side). The assembly tests
+  of the families that have a provenance check replace that constant for the duration of the test
+  to make a container "in the shape a script writes".
 
-`tools/export-recipes/conftest.py` がこのディレクトリを sys.path へ張る（`container_series` と同じ
-経路）。
+`tools/export-recipes/conftest.py` puts this directory on sys.path (the same route as
+`container_series`).
 """
 
 from __future__ import annotations
@@ -24,19 +26,19 @@ import pytest
 from _shared.upstream import SNAPSHOT_RECORD_DIR, SNAPSHOT_RECORD_FILE
 from karume.container import Provenance
 
-#: 合成の commit SHA（実在のどの revision とも一致しない綴り）。
+#: A synthetic commit SHA (a spelling that matches no real revision).
 FIXTURE_REVISION = "0123456789abcdef0123456789abcdef01234567"
 
-#: 取り違えの故障注入に使う、もう 1 つの commit SHA。
+#: Another commit SHA, used for fault injection of a mix-up.
 OTHER_REVISION = "fedcba9876543210fedcba9876543210fedcba98"
 
 
 def write_snapshot(
     model_dir: Path, *, license: str, revision: str = FIXTURE_REVISION, extra: str = ""
 ) -> None:
-    """`hf download --local-dir` の取得記録と README の front matter を合成する。
+    """Synthesize the download record of `hf download --local-dir` and the README front matter.
 
-    `extra` は front matter へ足す行（`license_name: …` など）。
+    `extra` is lines added to the front matter (`license_name: …` and the like).
     """
     record = model_dir / SNAPSHOT_RECORD_DIR / f"{SNAPSHOT_RECORD_FILE}.metadata"
     record.parent.mkdir(parents=True, exist_ok=True)
@@ -47,5 +49,5 @@ def write_snapshot(
 
 
 def stamp_fixture_provenance(monkeypatch: pytest.MonkeyPatch, provenance: Provenance) -> None:
-    """このテストの間だけ、`ir_fixtures.ir_container` が焼く出所を差し替える。"""
+    """Replace the provenance `ir_fixtures.ir_container` writes, for the duration of this test."""
     monkeypatch.setattr(ir_fixtures, "FIXTURE_PROVENANCE", provenance)

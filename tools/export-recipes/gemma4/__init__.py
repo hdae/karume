@@ -1,30 +1,36 @@
-"""Gemma 4 E2B / E4B（causal LM）の export recipe（ADR 0065 決定 2 — wheel 外・リポ専用）。
+"""The export recipe of Gemma 4 E2B / E4B (causal LM) (ADR 0065 decision 2 — outside the wheel,
+repository only).
 
-モデルは export 台本の `--model e2b|e4b`（既定 e2b）で選ぶ。MTP drafter とトークナイザ資産の
-compile は E2B だけ（E4B は drafter を持たず、トークナイザは上流が同一なので E2B の系列を共有 —
-{@link gemma4.distribution}）。
+The export scripts pick the model with `--model e2b|e4b` (default e2b). The MTP drafter and the
+tokenizer asset compile exist for E2B only (E4B has no drafter, and its tokenizer is the same
+upstream, so it shares E2B's series — {@link gemma4.distribution}).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: export 台本 5 本
-（1-shot の {@link gemma4.export}・states 形 decode の {@link gemma4.export_decode}・
-token-only 出口の {@link gemma4.export_token}・PLE 外出し + 最終行 logits 出口の
-{@link gemma4.export_product}・MTP drafter の {@link gemma4.export_drafter}）、
-トークナイザ資産の compile
-（{@link gemma4.tokenizer} — ADR 0084 決定 1。グラフには触らず「文字列 ⇄ id 列」だけを扱う）と、
-chat フォーマットの parity フィクスチャ採取（{@link gemma4.chat} — ADR 0084 決定 5 / 決定 7）。
-独立したパッチ層は持たない — 上流のモデリングコードは差し替えず、transformers の公開拡張点
-（`AttentionInterface.register`）へ MQA / GQA を保つ attention 実装を 1 本足すだけで済む
-（台本内に同居 — `gemma4.export.gqa_sdpa_attention`）。
-配布 recipe（{@link gemma4.distribution} / {@link gemma4.card}）も持つ: 製品コンテナ
-（PLE は容器の資産）・drafter コンテナ・トークナイザ資産を 1 リポ `karume-gemma4` へ畳む
-（ADR 0092 決定 1 — 家族 1 リポ）。
+Only what **cannot sit in the general-purpose exporter core** lives here: five export scripts
+(the one-shot {@link gemma4.export}, the states-form decode {@link gemma4.export_decode}, the
+token-only exit {@link gemma4.export_token}, the exit with the PLE taken out and the last row's
+logits {@link gemma4.export_product}, and the MTP drafter {@link gemma4.export_drafter}), the
+tokenizer asset compile
+({@link gemma4.tokenizer} — ADR 0084 decision 1; it never touches the graph and handles only
+"string ⇄ id sequence"), and the harvesting of the chat format's parity fixtures
+({@link gemma4.chat} — ADR 0084 decisions 5 / 7).
+There is no separate patch layer — the upstream modeling code is not replaced; adding one
+attention implementation that keeps MQA / GQA through transformers' public extension point
+(`AttentionInterface.register`) is enough
+(it lives inside the script — `gemma4.export.gqa_sdpa_attention`).
+It also holds the distribution recipe ({@link gemma4.distribution} / {@link gemma4.card}): the
+product container (the PLE is an asset of the container), the drafter container and the tokenizer
+asset are folded into one repository, `karume-gemma4`
+(ADR 0092 decision 1 — one repository per family).
 
-台本と配布側が共有する裏方は 3 本: PLE 1 枚表の層別分割（{@link gemma4.ple}）、golden を
-採らない系列の出所記録（{@link gemma4.provenance}）、ホスト生成 RoPE の式
-（{@link gemma4.rope} — ADR 0091）。どれも「同じ規律を 2 箇所に書かない」ための分離で、
-読み手の本数はモジュールごとに違う（`rope` は配布側も読む）。
-MUST: `rope` は torch を import しない（配布側の import を重くしないため — 当のモジュールが
-理由ごと自己申告している。これは MUST の再掲であって検査ではない）。トークナイザ側の同じ役は
-`_shared/gemma_tokenizer.py`（EmbeddingGemma と共有 — ADR 0084 決定 6）。
+The scripts and the distribution side share three helpers: the per-layer split of the single PLE
+table ({@link gemma4.ple}), the provenance record of a series that takes no golden
+({@link gemma4.provenance}), and the formula of the host-generated RoPE
+({@link gemma4.rope} — ADR 0091). Each is split out so that one rule is not written in two
+places, and the number of readers differs per module (`rope` is read by the distribution side too).
+MUST: `rope` does not import torch (to keep the distribution side's imports light — the module
+itself states this with its reason; this is a restatement of the MUST, not a check). The same role
+on the tokenizer side is
+`_shared/gemma_tokenizer.py` (shared with EmbeddingGemma — ADR 0084 decision 6).
 
 12B (`--model 12b`) is another upstream class (`gemma4_unified`: no per-layer embeddings, no
 KV sharing, K = V on the full layers) and has its own export script,
@@ -39,12 +45,12 @@ grid imported as i4, a schema-4 PLE asset and its own goldens. Its MTP drafter h
 assistants, for E2B and E4B (the one E4B drafter here), every weight imported from its grid as
 i4 and the borrowed table the QAT product series' i4 table.
 
-依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
-が機械で守る）。
+The dependency direction is **recipe → core only**
+(`tools/exporter/tests/test_architecture_boundary.py` guards it by machine).
 
-MUST: **再輸出しない**（`from gemma4 import X` で transformers が芋づるに入る形にしない）。
-呼び出し側はサブモジュールを名指しで import すること。
+MUST: **do not re-export** (no form in which `from gemma4 import X` drags transformers in).
+Callers import the submodule by name.
 
-台本の起動は export-recipes ルートから（例:
-`uv run --with 'transformers==5.14.1' python -m gemma4.export`）。
+Scripts are launched from the export-recipes root (e.g.
+`uv run --with 'transformers==5.14.1' python -m gemma4.export`).
 """

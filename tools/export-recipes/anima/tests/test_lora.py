@@ -1,11 +1,11 @@
-"""LoRA 焼き込みの振る舞い固定（ADR 0016）。
+"""Pins the behavior of baking a LoRA in (ADR 0016).
 
-主張は 2 つ: ①ΔW=(B@A)·scale が f32 で計算されて元の重みへ加算されること ②解決できない
-対象・形の食い違いは**必ず例外**になること（黙って読み飛ばすと「一部の層だけ LoRA が乗った
-劣化モデル」が何事もなく出てくる）。
+Two claims: (1) ΔW=(B@A)·scale is computed in f32 and added to the original weights; (2) an
+unresolvable target or a shape mismatch **always raises** (skipping it silently would quietly
+output "a degraded model with the LoRA on only some layers").
 
-`load_lora_state_dict` は diffusers 同梱の命名変換を呼ぶので、ここでは扱わない
-（変換表は上流が正 — 自前で持たない）。
+`load_lora_state_dict` calls the naming conversion bundled with diffusers, so it is not covered
+here (upstream is the source of truth for the conversion table — we do not keep our own).
 """
 
 from __future__ import annotations
@@ -50,7 +50,8 @@ class TestFuseLora:
             torch.testing.assert_close(block.weight, before[index] + delta)
 
     def test_the_scale_actually_scales(self):
-        """倍率が効いていない実装は scale を変えても同じ重みになる（恒真化の検出）。"""
+        """An implementation that ignores the scale gives the same weights for any scale (detects a
+        vacuous test)."""
         half, full = Target(), Target()
         full.load_state_dict(half.state_dict())
         state = _state()
@@ -61,7 +62,8 @@ class TestFuseLora:
         assert not torch.equal(half.blocks[0].weight, full.blocks[0].weight)
 
     def test_an_all_zero_lora_b_is_reported_as_a_noop(self):
-        """成分ごとの ΔW=0 は正常でありうる — 例外にはせず戻り値で知らせる。"""
+        """ΔW=0 for a component can be legitimate — it is reported in the return value, not
+        raised."""
         model = Target()
 
         report = fuse_lora(model, _state(scale_b=0.0), "transformer")
@@ -81,7 +83,8 @@ class TestFuseLora:
             fuse_lora(Target(), state, "transformer")
 
     def test_a_target_absent_from_the_model_is_rejected(self):
-        """命名変換の取りこぼしは「一部だけ乗った劣化モデル」になるので必ず落とす。"""
+        """A key missed by the naming conversion yields "a degraded model with only part applied",
+        so it always fails."""
         state = _state()
         for suffix in ("lora_A", "lora_B"):
             key = f"transformer.blocks.1.{suffix}.weight"
@@ -91,10 +94,12 @@ class TestFuseLora:
             fuse_lora(Target(), state, "transformer")
 
     def test_a_leftover_key_under_the_prefix_is_rejected(self):
-        """A/B ペアとして消費されないキーは「焼き込まれない成分」— 黙って捨てない。
+        """A key not consumed as an A/B pair is "a component that is not baked in" — it is not
+        dropped silently.
 
-        `lora_A` を起点に走査するだけの実装ではここが素通りする（`.alpha` や別サフィックスの
-        重みが配布形式に混ざっても、宣言どおり「解決できない対象は必ず例外」にならない）。
+        An implementation that only scans from `lora_A` lets this through (even if `.alpha` or
+        weights with another suffix get into the distributed format, it does not "always raise on
+        an unresolvable target" as declared).
         """
         state = _state()
         state["transformer.blocks.0.lora_C.weight"] = torch.zeros(3, 4)

@@ -1,70 +1,82 @@
-"""MiniCPM5-1B の w4 fake-quant sweep（ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md)
-決定 6 = Phase 0）と**量子化方式スクリーニング**の台本。
+"""Script for the w4 fake-quant sweep of MiniCPM5-1B
+(ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md) decision 6 = Phase 0) and the
+**quantization-method screening**.
 
     uv run --with 'transformers==5.14.1' python -m minicpm5.sweep_w4
 
-**runtime は 1 行も触らない**。ここでやるのは torch 側で重みを丸めて（fake-quant）品質の
-劣化を測ることだけ。格納形（容器の codec `int4-sym-g` — `docs/container-v1.md` §6.3 /
-pack 順 / WGSL）は Phase 0 の後に実装済みで、この台本はそれを通らない。ADR 0058 決定 5 の
-分担で言えば「品質 = 人間レビュー + 助言的数値」の数値側を作る側で、機械門はここでは
-baseline の再現性 1 本だけ（{@link assert_baseline_reproduces}）。
+**Not one line of the runtime is touched**. All this does is round the weights on the torch side
+(fake-quant) and measure the quality loss. The storage form (the container codec `int4-sym-g` —
+`docs/container-v1.md` §6.3 / pack order / WGSL) was implemented after Phase 0, and this script
+does not go through it. In terms of ADR 0058 decision 5's split it produces the numbers side of
+"quality = human review + advisory numbers", and its only mechanical check is the reproducibility
+of the baseline ({@link assert_baseline_reproduces}).
 
-## 何を測るか
+## What is measured
 
-**Phase 0 グリッド**（{@link SWEEP_CONFIGS}）= group_size {32, 64, 128} × 対称 / 非対称の
-6 通り + baseline + `lm_head` 除外の 1 本。
+**Phase 0 grid** ({@link SWEEP_CONFIGS}) = group_size {32, 64, 128} × symmetric / asymmetric, 6
+configurations + the baseline + one run excluding `lm_head`.
 
-**方式グリッド**（{@link METHOD_CONFIGS}）= 方式 7 種（{@link QUANT_METHODS} — RTN i4 /
-FP4 / NF4 / MXFP4 / k-means の表 3 粒度）× 対象 2 形（linear 限定 169 本 / `embed_tokens`
-込み 170 本）。**group_size は 32 固定**で g 軸は振らない — g の答えは Phase 0 が出して
-いて、ここで測りたいのは「同じ g で丸め方を変えたときの差」だけだから（2 軸を同時に
-振ると方式の差と g の差が混ざる）。丸めの実装は core（`karume.quant_methods` /
-`karume.quantize`）の共有で、対象選択も `iter_quant_targets` の共有 — 写した別実装にすると
-「測った対象・式」と「出荷する対象・式」が黙って割れる。
+**Method grid** ({@link METHOD_CONFIGS}) = 7 methods ({@link QUANT_METHODS} — RTN i4 / FP4 / NF4 /
+MXFP4 / k-means at 3 table granularities) × 2 target sets (linear only, 169 tensors / including
+`embed_tokens`, 170 tensors). **group_size is fixed at 32** and the g axis is not swept — Phase 0
+has answered the g question, and what is wanted here is only "the difference when the rounding
+changes at the same g" (sweeping both axes at once would mix the method difference with the g
+difference). The rounding implementation is shared with core (`karume.quant_methods` /
+`karume.quantize`), and so is the target selection (`iter_quant_targets`) — a copied
+implementation would let "the targets and formulas measured" and "the targets and formulas
+shipped" silently diverge.
 
-**校正グリッド**（{@link CALIB_CONFIGS}）= 校正付き丸め 5 本（GPTQ × 格納グリッド 3 種 /
-AWQ / AWQ+GPTQ）。丸めは core の `karume.quant_calib` の共有で、**格子は方式グリッドと同じ**
-（変わるのは同じ格子の中でどの準位へ寄せるか）。対象は **decoder 内の linear 限定の 1 形**
-だけで、`embed_tokens` 込みの組も `lm_head` も作らない — 校正の駆動（`calibrate_stages`）が
-stage 内の `nn.Linear` に閉じているため、既存の「方式 7 種 × 対象 2 形」の表とは対象集合が
-違う（{@link CalibConfig}）。校正入力は {@link minicpm5.calib_texts.CALIB_TEXTS} の 48 文で、
-先頭 decoder layer への呼び出しを捕まえて stage 列へ流す（{@link capture_stage_batches}）。
-流す前に **stage 分解一致門**（{@link assert_stage_split}）で「stage 列の逐次 forward =
-本体の最終 hidden」をビット一致で実測する — 分解がずれても数値は普通に出るので、門が無いと
-方式の採否を別経路の測定で決めることになる。
+**Calibration grid** ({@link CALIB_CONFIGS}) = 5 calibrated roundings (GPTQ × 3 storage grids /
+AWQ / AWQ+GPTQ). The rounding is shared with core's `karume.quant_calib`, and **the grid is the
+same as the method grid's** (what changes is which level of the same grid a value goes to). The
+target is **a single set: the linears inside the decoder** — neither a set including
+`embed_tokens` nor `lm_head` is built — because the calibration driver (`calibrate_stages`) is
+confined to the `nn.Linear` inside a stage, so the target set differs from the existing table of
+"7 methods × 2 target sets" ({@link CalibConfig}). The calibration input is the 48 texts of
+{@link minicpm5.calib_texts.CALIB_TEXTS}; the calls into the first decoder layer are captured and
+fed to the stage sequence ({@link capture_stage_batches}). Before feeding, **the stage-split
+check** ({@link assert_stage_split}) measures with bit identity that "the sequential forward of
+the stage sequence = the model's final hidden" — a split that drifts still yields ordinary
+numbers, so without the check the adoption of a method would be decided by a measurement of a
+different path.
 
-config ごとに 4 列を採る（先の 3 列は Phase 0 と同じ・4 列目は方式グリッドと校正グリッド）:
+Four columns are taken per config (the first 3 are the same as Phase 0; the 4th is for the method
+and calibration grids):
 
-1. **weight 相対 RMSE**（族別）— 丸めそのものの大きさ。族内の全層をまとめた
-   `‖w − fq‖₂ / ‖w‖₂` で、どの族が壊れやすいかを見る。
-2. **teacher-forced 一致 / NLL** — 期待列を 1 つずつ与えたときの次トークン。発散しても列が
-   ずれないので、config 間で**同じ位置**の劣化量を比べられる。
-3. **自由走行 greedy の発散 step** — 実際の生成が期待列から離れるまでの長さ。人間が読む
-   ときの「壊れ方」に一番近い列。
-4. **サイズ試算**（{@link QuantMethod.formula}）— 方式ごとの実効 bpw と、量子化対象テンソル
-   集合だけを投影した MiB。品質だけ見ると表のコストが見えない（k-means per-channel は
-   表がチャネル数に比例する）ので、品質と同じ表で並べる。**実測ではなく式による投影**で、
-   格納形を持たない方式（この台本の 7 種のうち RTN 以外全部）は書けもしない。
+1. **Relative weight RMSE** (per family) — the size of the rounding itself. `‖w − fq‖₂ / ‖w‖₂`
+   over all the layers of a family, to see which families break easily.
+2. **Teacher-forced agreement / NLL** — the next token when the expected sequence is fed one token
+   at a time. The sequence does not shift even after a divergence, so the loss at **the same
+   positions** can be compared across configs.
+3. **Divergence step of free-running greedy** — how long actual generation follows the expected
+   sequence. The column closest to "how it breaks" as a human reads it.
+4. **Size estimate** ({@link QuantMethod.formula}) — each method's effective bpw and the MiB
+   projected over the quantized tensor set alone. Quality alone hides the cost of the tables
+   (k-means per-channel has tables proportional to the channel count), so it sits in the same
+   table as quality. **A projection by formula, not a measurement**; methods without a storage
+   form (all 7 of this script except RTN) cannot even be written.
 
-期待列は**`minicpm5.export_decode` が margin 門つきで採った greedy 期待列が正本**
-（`outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors` の 3 ケース）。ここで採り直さ
-ないのは、sweep が測りたいのが「同じ期待列に対する量子化の劣化」だけだから。tokenizer は
-通さない（トークン id で完結する）。
+**The source of truth of the expected sequences is the greedy expected sequences
+`minicpm5.export_decode` took with the margin check** (the 3 cases of
+`outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors`). They are not re-taken here because
+what the sweep wants to measure is only "the quantization loss against the same expected
+sequences". No tokenizer is involved (everything stays in token ids).
 
-## 量子化の形（ADR 0069 決定 3）
+## The quantization form (ADR 0069 decision 3)
 
-group 軸は**重みの最終次元 = linear の in 軸**。対称は `s = clamp(amax/7, f32 tiny)` /
-`q = clamp(round(w/s), ±7)` で、amax 要素が厳密復元されるので fake-quant が冪等になる
-（ADR 0019 の ±127 論証の 4bit 版）。非対称は**測定列**で、zero-point を丸めも格納もしない
-連続値のまま使う — 「zero-point を足したときに届きうる品質の上界」を見て、対称の品質不足を
-実装前に検知するための列（決定 3 の予約 3）。
+The group axis is **the last dimension of the weight = the in axis of the linear**. Symmetric is
+`s = clamp(amax/7, f32 tiny)` / `q = clamp(round(w/s), ±7)`; the amax element is restored exactly,
+so the fake-quant is idempotent (the 4-bit version of ADR 0019's ±127 argument). Asymmetric is a
+**measurement column** that uses the zero-point as a continuous value, neither rounded nor stored
+— a column that shows "the upper bound of the quality reachable by adding a zero-point", to
+detect a quality shortfall of symmetric before implementing it (reservation 3 of decision 3).
 
-## 出力
+## Output
 
-進捗は stderr へ即 flush（背景実行で追うため）。最後に stdout へ markdown 表 4 枚
-（要約 / 品質 / 族別 wRMSE / サイズ試算）を出す — そのまま `docs/research/` へ転記する形。
-`--json` を渡すと機械可読の JSON も書く（**config 1 本ごとに書き直す** — 数十分級の実行が
-途中で落ちても、そこまでの測定値が残る）。
+Progress goes to stderr, flushed immediately (to follow a background run). At the end, 4 markdown
+tables go to stdout (summary / quality / wRMSE per family / size estimate) — in a form to copy into
+`docs/research/` as is. With `--json`, machine-readable JSON is written too (**rewritten after
+every config** — if a run of tens of minutes dies halfway, the measurements so far remain).
 """
 
 from __future__ import annotations
@@ -112,30 +124,32 @@ from minicpm5 import export as one_shot
 from minicpm5 import export_decode as decode
 from minicpm5.calib_texts import CALIB_TEXTS
 
-#: 実重みの置き場（1-shot / decode 形と同じ素材）。
+#: Where the real weights live (the same material as the one-shot / decode forms).
 DEFAULT_MODEL_DIR = one_shot.DEFAULT_MODEL_DIR
 
-#: 期待列（`export_decode` が margin 門つきで採った greedy golden）の置き場。
+#: Where the expected sequences live (the greedy golden `export_decode` took with the margin check).
 DEFAULT_DECODE_DIR = decode.DEFAULT_OUT_DIR
 
-#: 対称量子化の片側幅（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に
-#: 乗って `q·s` で厳密に復元され、fake-quant が**冪等**になる（ADR 0069 決定 3 — ADR 0019 の
-#: ±127 論証の 4bit 版）。−8 を許すと scale だけが動く再量子化が起きる。
+#: Half-width of symmetric quantization (**−8 is not used**). Closing it at ±7 puts a group's amax
+#: element on `q = ±7`, restored exactly by `q·s`, so the fake-quant is **idempotent** (ADR 0069
+#: decision 3 — the 4-bit version of ADR 0019's ±127 argument). Allowing −8 causes
+#: requantizations where only the scale moves.
 INT4_MAX = 7
 
-#: 非対称の unsigned nibble の値域（**0 は未使用**の 15 準位）。対称の `q ∈ [−7,7]` を
-#: offset 8 で載せた先と同じ値域で、pack 形式・pack 順は zero-point の有無で変わらない
-#: （ADR 0069 決定 3 の予約 2）。
+#: Value range of the asymmetric unsigned nibble (15 levels, **0 unused**). The same range that
+#: symmetric `q ∈ [−7,7]` lands on with offset 8, so the pack format and pack order do not change
+#: with or without a zero-point (reservation 2 of ADR 0069 decision 3).
 UINT4_MIN = 1
 UINT4_MAX = 15
 
-#: zero-point 省略時の既定（ADR 0069 決定 3 の予約 2 — dequant は `(u − 8)·scale`）。
-#: 非対称の縮退 group はこの既定へ落ちる（{@link asymmetric_components}）。
+#: Default when the zero-point is omitted (reservation 2 of ADR 0069 decision 3 — dequant is
+#: `(u − 8)·scale`). Degenerate asymmetric groups fall back to this default
+#: ({@link asymmetric_components}).
 DEFAULT_ZERO_POINT = 8
 
-#: 量子化対象の linear 族（fqn の末尾モジュール名）。MiniCPM5-1B は 24 層 ×
-#: q/k/v/o/gate/up/down + `lm_head` の 169 本で、`tie_word_embeddings: false` なので
-#: `lm_head` は独立した重み。族に割るのは「どこが壊れるか」を分離するため。
+#: The linear families to quantize (the last module name of the fqn). MiniCPM5-1B has 24 layers ×
+#: q/k/v/o/gate/up/down + `lm_head` = 169 tensors, and `tie_word_embeddings: false` makes `lm_head`
+#: an independent weight. Splitting into families separates "where it breaks".
 LINEAR_FAMILIES: tuple[str, ...] = (
     "q_proj",
     "k_proj",
@@ -147,26 +161,28 @@ LINEAR_FAMILIES: tuple[str, ...] = (
     "lm_head",
 )
 
-#: 語彙側の族名（`--only` 相当の除外指定 {@link SweepConfig.include_lm_head} が指す先）。
+#: Family name of the vocabulary side (what the `--only`-like exclusion
+#: {@link SweepConfig.include_lm_head} refers to).
 LM_HEAD = "lm_head"
 
-#: 入力側の embedding の族名（方式グリッドの「非 linear 込み」で増える 1 本）。
-#: `tie_word_embeddings: false` なので `lm_head` とは独立した重み。
+#: Family name of the input-side embedding (the one tensor the method grid's "including
+#: non-linear" adds). `tie_word_embeddings: false`, so it is a weight independent of `lm_head`.
 EMBED_TOKENS = "embed_tokens"
 
-#: 族別 wRMSE 表の列（方式グリッドは `embed_tokens` まで載りうる）。
+#: Columns of the per-family wRMSE table (the method grid can reach `embed_tokens`).
 METHOD_FAMILIES: tuple[str, ...] = (*LINEAR_FAMILIES, EMBED_TOKENS)
 
-#: baseline の config 名（{@link select_configs} が常に先頭へ入れる）。
+#: Config name of the baseline ({@link select_configs} always puts it first).
 BASELINE_NAME = "baseline"
 
 
 @dataclass(frozen=True)
 class SweepConfig:
-    """1 実行ぶんの指定。
+    """The spec of one run.
 
-    `group_size is None` は量子化しない baseline。`include_lm_head=False` は `lm_head` を
-    対象から外す列で、語彙側 200M 本の寄与を block 側から分離するために置く。
+    `group_size is None` is the unquantized baseline. `include_lm_head=False` is the column that
+    leaves `lm_head` out of the targets, there to separate the contribution of the 200M vocabulary
+    weights from the block side.
     """
 
     name: str
@@ -175,7 +191,8 @@ class SweepConfig:
     include_lm_head: bool = True
 
 
-#: sweep グリッド（この順で走る）。group_size は 2 冪かつ ≥ 16（ADR 0069 決定 2）。
+#: The sweep grid (runs in this order). group_size is a power of two and ≥ 16 (ADR 0069
+#: decision 2).
 SWEEP_CONFIGS: tuple[SweepConfig, ...] = (
     SweepConfig(BASELINE_NAME),
     SweepConfig("g32-sym", group_size=32),
@@ -188,22 +205,24 @@ SWEEP_CONFIGS: tuple[SweepConfig, ...] = (
 )
 
 
-# ---- 方式グリッド（量子化方式スクリーニング）-------------------------------
+# ---- Method grid (quantization-method screening) ---------------------------
 
-#: 方式比較の group 長 = **32 固定**（core の既定 = Phase 0 の実測で確定した値）。g 軸を
-#: 同時に振らないのは、方式の差と g の差が混ざると「どちらが効いたか」が言えなくなるため。
+#: Group length of the method comparison = **fixed at 32** (core's default = the value Phase 0's
+#: measurements settled). The g axis is not swept at the same time because once the method
+#: difference and the g difference mix, "which one had the effect" can no longer be told.
 METHOD_GROUP_SIZE = DEFAULT_GROUP_SIZE
 
-#: k-means の表 1 枚のビット数（16 centroid × f32）。
+#: Bits of one k-means table (16 centroids × f32).
 CODEBOOK_BITS = DEFAULT_CODEBOOK_LEVELS * 32
 
 
 @dataclass(frozen=True)
 class TargetCounts:
-    """量子化対象テンソル集合の計数（サイズ試算の入力）。
+    """Counts of the quantized tensor set (the input of the size estimate).
 
-    `channels` は {@link karume.quantize.channel_rows} の行数の総和 = per-channel の表を
-    張る単位の数で、`modules` は層数（per-tensor の表の枚数）。
+    `channels` is the sum of the row counts of {@link karume.quantize.channel_rows} = the number of
+    units a per-channel table spans, and `modules` is the layer count (the number of per-tensor
+    tables).
     """
 
     modules: int
@@ -212,38 +231,44 @@ class TargetCounts:
 
     @property
     def groups(self) -> int:
-        """g32 group の総数（group ごとに scale 1 個が要る方式のサイズ試算に使う）。"""
+        """Total number of g32 groups (used by the size estimate of methods that need one scale per
+        group)."""
         return self.elements // METHOD_GROUP_SIZE
 
 
 @dataclass(frozen=True)
 class QuantMethod:
-    """丸め方式 1 種 — 名前・丸めの当て方・サイズ試算の式を 1 行に束ねる。
+    """One rounding method — name, how the rounding is applied, and the size-estimate formula
+    bundled in one row.
 
-    3 つを別表に散らすと「品質を測った方式」と「サイズを試算した方式」が黙って割れる
-    （方式を 1 種足したときに片方だけ更新される形になる）。
+    Scattering the three across separate tables would let "the method whose quality was measured"
+    and "the method whose size was estimated" silently diverge (adding a method would update only
+    one of them).
     """
 
-    #: 表と JSON に出る方式名。
+    #: Method name shown in the tables and the JSON.
     name: str
-    #: config 名の接頭（`<slug>-linear` / `<slug>-embed`）。
+    #: Prefix of the config names (`<slug>-linear` / `<slug>-embed`).
     slug: str
-    #: 丸めを model へ in-place で当てる（`(model, op_types, group_size)`）。
+    #: Applies the rounding to the model in place (`(model, op_types, group_size)`).
     round_weights: Callable[[nn.Module, tuple[type[nn.Module], ...], int], object]
-    #: 量子化対象集合の投影ビット数。
+    #: Projected bit count of the quantized set.
     projected_bits: Callable[[TargetCounts], float]
-    #: `projected_bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
+    #: The formula of `projected_bits` (**put into the output as is** — so the projection's
+    #: assumptions can be traced from the table).
     formula: str
 
 
-#: RTN（= 格納形 `i4`）の方式名。方式列の**基準** — 他の 6 種はこれとの差で読む。
+#: Method name of RTN (= the storage form `i4`). **The baseline** of the method columns — the
+#: other 6 are read as differences from it.
 RTN_METHOD = "rtn-g32-sym"
 
-#: k-means 方式名の接頭（`kmeans:<粒度>` — core の {@link
-#: karume.quant_methods.KMEANS_GRANULARITIES} と同じ綴り）。
+#: Prefix of the k-means method names (`kmeans:<granularity>` — the same spelling as core's
+#: {@link karume.quant_methods.KMEANS_GRANULARITIES}).
 KMEANS_PREFIX = "kmeans:"
 
-#: 方式 7 種（この順で走る）。丸めは全て core の共有実装で、ここは呼び分けだけを持つ。
+#: The 7 methods (run in this order). Every rounding is core's shared implementation; this only
+#: dispatches between them.
 QUANT_METHODS: tuple[QuantMethod, ...] = (
     QuantMethod(
         RTN_METHOD,
@@ -280,7 +305,7 @@ QUANT_METHODS: tuple[QuantMethod, ...] = (
             model, "per_tensor", group, op_types=op_types
         ),
         lambda counts: 4 * counts.elements + CODEBOOK_BITS * counts.modules,
-        "4bit + 表 16×f32 毎層（scale 無し）",
+        "4bit + 16×f32 table per layer (no scale)",
     ),
     QuantMethod(
         f"{KMEANS_PREFIX}per_channel",
@@ -289,26 +314,27 @@ QUANT_METHODS: tuple[QuantMethod, ...] = (
             model, "per_channel", group, op_types=op_types
         ),
         lambda counts: 4 * counts.elements + CODEBOOK_BITS * counts.channels,
-        "4bit + 表 16×f32 毎チャネル（scale 無し）",
+        "4bit + 16×f32 table per channel (no scale)",
     ),
     QuantMethod(
         f"{KMEANS_PREFIX}shared",
         "kmeans-shared",
         lambda model, op_types, group: fake_quant_kmeans(model, "shared", group, op_types=op_types),
         lambda counts: 4 * counts.elements + 32 * counts.groups + CODEBOOK_BITS,
-        "4bit + g32 f32 scale + 表 16×f32 を全体で 1 枚",
+        "4bit + g32 f32 scale + one 16×f32 table overall",
     ),
 )
 
 
 @dataclass(frozen=True)
 class MethodConfig:
-    """方式グリッドの 1 実行ぶん（方式 × 対象 2 形）。
+    """One run of the method grid (method × 2 target sets).
 
-    `include_embedding` は「非 linear 込み」の列 — `embed_tokens` を対象へ足す。i4 の適格 op
-    は ADR 0069 追記 6 で embedding にも開いた（`karume.emit.I4_WEIGHT_OPS`）ので、RTN i4
-    ならこの形も格納できる。語彙側を丸めたときの品質とサイズの取り分は、どの席を i4 に
-    するかの判断材料になる（RTN 以外の方式は格納形を持たない測定専用）。
+    `include_embedding` is the "including non-linear" column — it adds `embed_tokens` to the
+    targets. ADR 0069 addendum 6 opened the i4-eligible ops to embedding too
+    (`karume.emit.I4_WEIGHT_OPS`), so with RTN i4 this form can be stored as well. The quality and
+    size share of rounding the vocabulary side informs which tensors to make i4 (methods other than
+    RTN have no storage form and are measurement only).
     """
 
     name: str
@@ -316,7 +342,7 @@ class MethodConfig:
     include_embedding: bool
 
 
-#: 方式グリッド = 7 方式 × 対象 2 形（linear 限定 / `embed_tokens` 込み）。
+#: Method grid = 7 methods × 2 target sets (linear only / including `embed_tokens`).
 METHOD_CONFIGS: tuple[MethodConfig, ...] = tuple(
     MethodConfig(
         name=f"{method.slug}-{'embed' if include_embedding else 'linear'}",
@@ -328,64 +354,71 @@ METHOD_CONFIGS: tuple[MethodConfig, ...] = tuple(
 )
 
 
-# ---- 校正グリッド（校正付き丸め）-------------------------------------------
+# ---- Calibration grid (calibrated rounding) ---------------------------------
 
-#: 校正付き丸めの group 長 = 方式グリッドと同じ 32 固定。校正は**格子を 1 バイトも変えない**
-#: （同じ格子の中で丸め先を選び直すだけ — `karume.quant_calib` のモジュール docstring）ので、
-#: g 軸を振らない理由も {@link METHOD_GROUP_SIZE} と同文。
+#: Group length of calibrated rounding = fixed at 32, the same as the method grid. Calibration
+#: **does not change a single byte of the grid** (it only re-chooses rounding targets within the
+#: same grid — the module docstring of `karume.quant_calib`), so the reason for not sweeping the g
+#: axis is the same as for {@link METHOD_GROUP_SIZE}.
 CALIB_GROUP_SIZE = METHOD_GROUP_SIZE
 
 
 def group_scale_bits(counts: TargetCounts) -> float:
-    """4bit ペイロード + group ごとの f32 scale（RTN / NF4 の格納そのもの）。"""
+    """4-bit payload + one f32 scale per group (exactly the storage of RTN / NF4)."""
     return 4 * counts.elements + 32 * counts.groups
 
 
 def layer_table_bits(counts: TargetCounts) -> float:
-    """上に**層ごと 1 枚**の k-means 表を足した式。
+    """The formula above plus **one k-means table per layer**.
 
-    core の `kmeans_shared` は「group absmax で正規化した値空間に 1 枚の表」を張るが、
-    その射程は**層内**に閉じる（stage 逐次の駆動と全層を跨ぐ表が噛み合わない —
-    {@link karume.quant_calib.GridSpec} の NOTE）。方式グリッドの `kmeans:shared`
-    （全体で 1 枚）と式が違うのはこのため。
+    Core's `kmeans_shared` spans "one table over the value space normalized by the group absmax",
+    but its reach is confined **within a layer** (the stage-sequential driver and a table across all
+    layers do not fit together — the NOTE of {@link karume.quant_calib.GridSpec}). This is why the
+    formula differs from the method grid's `kmeans:shared` (one table overall).
     """
     return group_scale_bits(counts) + CODEBOOK_BITS * counts.modules
 
 
-#: group absmax scale を持つ 4bit 格子の投影式（表を持たない方式で共有する文言）。
+#: Projection formula of a 4-bit grid with group-absmax scales (the wording shared by the methods
+#: without tables).
 GROUP_SCALE_FORMULA = "4bit + g32 f32 scale = 5.0 bpw"
 
-#: AWQ 系の投影式に付ける注記 — 等価倍率 `s` は `W_eff` に畳み込んだ形でしか持てず、
-#: 格納するには fold か companion が要る（`karume.quant_calib` のモジュール docstring）。
-AWQ_FORMULA_NOTE = "（等価倍率 s の fold / companion は未計上）"
+#: The note attached to the projection formulas of the AWQ family — the equivalent scale `s` can
+#: only be held folded into `W_eff`, and storing it needs a fold or a companion (the module
+#: docstring of `karume.quant_calib`).
+AWQ_FORMULA_NOTE = " (the fold / companion of the equivalent scale s is not counted)"
 
 
 @dataclass(frozen=True)
 class CalibConfig:
-    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+    """The spec of one calibrated rounding (method × storage grid).
 
-    対象は **decoder 内の `nn.Linear` 限定**（{@link karume.quant_calib.calibrate_stages} が
-    stage 内の linear しか見ない）。`lm_head` と `embed_tokens` は stage の外なので入らず、
-    方式グリッドの「対象 2 形」とは**対象集合が違う** — サイズ試算も校正が実際に丸めた
-    集合の計数から出す（{@link calib_targets}）。
+    The targets are **limited to the `nn.Linear` inside the decoder**
+    ({@link karume.quant_calib.calibrate_stages} looks only at the linears inside a stage).
+    `lm_head` and `embed_tokens` are outside the stages and not included, so **the target set
+    differs** from the method grid's "2 target sets" — the size estimate is also computed from the
+    counts of the set the calibration actually rounded ({@link calib_targets}).
     """
 
     name: str
     method: CalibMethod
     grid: GridSpec
-    #: 量子化対象集合の投影ビット数（{@link QuantMethod.projected_bits} と同じ器）。
+    #: Projected bit count of the quantized set (the same holder as
+    #: {@link QuantMethod.projected_bits}).
     projected_bits: Callable[[TargetCounts], float]
-    #: `projected_bits` の式（**出力へそのまま載せる**）。
+    #: The formula of `projected_bits` (**put into the output as is**).
     formula: str
-    #: GPTQ の掃引軸（既定 = core 既定でビット同一 — {@link karume.quant_calib} の実験軸）。
+    #: GPTQ sweep axes (the defaults are bit-identical to core's defaults — the experiment axes of
+    #: {@link karume.quant_calib}).
     static_groups: bool = False
     act_order: bool = False
-    #: 振った値は出力へ明記する MUST（core 側 docstring）— {@link label} が担う。
+    #: A swept value MUST be stated in the output (core-side docstring) — {@link label} does that.
     damping: float = GPTQ_DAMPING
 
     @property
     def label(self) -> str:
-        """表と JSON に出る方式名（`<方式>/<格納グリッド>` + 非既定の掃引軸）。"""
+        """Method name shown in the tables and the JSON (`<method>/<storage grid>` + the non-default
+        sweep axes)."""
         axes = ""
         if self.act_order:
             axes += "+act"
@@ -396,10 +429,10 @@ class CalibConfig:
         return f"{self.method}/{self.grid.kind}{axes}"
 
 
-#: 校正グリッド = 5 本（この順で走る）。丸めは全て core の共有実装
-#: （`karume.quant_calib`）で、ここは呼び分けと投影式だけを持つ。**対象は linear 限定の
-#: 1 形のみ** — `embed_tokens` 込みの組は作らない（`calibrate_stages` は `nn.Linear` 限定で、
-#: 語彙表は stage の外）。
+#: Calibration grid = 5 runs (in this order). Every rounding is core's shared implementation
+#: (`karume.quant_calib`); this only holds the dispatch and the projection formulas. **The target is
+#: a single set, linear only** — no set including `embed_tokens` is built (`calibrate_stages` is
+#: limited to `nn.Linear`, and the vocabulary table is outside the stages).
 CALIB_CONFIGS: tuple[CalibConfig, ...] = (
     CalibConfig(
         "gptq-rtn",
@@ -413,14 +446,14 @@ CALIB_CONFIGS: tuple[CalibConfig, ...] = (
         "gptq",
         GridSpec(kind="nf4", group_size=CALIB_GROUP_SIZE),
         group_scale_bits,
-        f"{GROUP_SCALE_FORMULA}（格子は NF4 の固定表）",
+        f"{GROUP_SCALE_FORMULA} (the grid is NF4's fixed table)",
     ),
     CalibConfig(
         "gptq-kmeans",
         "gptq",
         GridSpec(kind="kmeans_shared", group_size=CALIB_GROUP_SIZE),
         layer_table_bits,
-        "4bit + g32 f32 scale + 表 16×f32 を層ごと 1 枚",
+        "4bit + g32 f32 scale + one 16×f32 table per layer",
     ),
     CalibConfig(
         "awq-rtn",
@@ -438,15 +471,16 @@ CALIB_CONFIGS: tuple[CalibConfig, ...] = (
     ),
 )
 
-#: `--only` が選べる config の型（Phase 0 / 方式 / 校正の 3 系統）。
+#: The type of config `--only` can choose (the 3 lines: Phase 0 / method / calibration).
 AnyConfig = SweepConfig | MethodConfig | CalibConfig
 
-#: `--only` が選べる全 config（宣言順 = 実行順）。
+#: Every config `--only` can choose (declaration order = run order).
 ALL_CONFIGS: tuple[AnyConfig, ...] = (*SWEEP_CONFIGS, *METHOD_CONFIGS, *CALIB_CONFIGS)
 
-#: GPTQ 掃引軸の実験点（2026-08-31 起票 — upstream --static-groups × --act-order の移植と
-#: damping 感度）。**`--only` 指定でだけ走る** — 既定の全掃引（引数なし）には載せない
-#: （1 構成 ≈ フル校正 1 回ぶんの追加コストで、既定の掃引時間を黙って倍にしない）。
+#: Experiment points of the GPTQ sweep axes (filed 2026-08-31 — the port of upstream
+#: --static-groups × --act-order and the damping sensitivity). **They run only when named with
+#: `--only`** — not part of the default full sweep (no arguments) (one configuration ≈ the extra
+#: cost of one full calibration, and the default sweep time is not silently doubled).
 EXPERIMENT_CONFIGS: tuple[CalibConfig, ...] = (
     CalibConfig(
         "gptq-rtn-static",
@@ -478,26 +512,30 @@ EXPERIMENT_CONFIGS: tuple[CalibConfig, ...] = (
     ),
 )
 
-#: `--only` の名前解決の母集合（既定実行 = ALL_CONFIGS / 実験点は明示選択のみ）。
+#: The population `--only` resolves names in (the default run = ALL_CONFIGS / experiment points
+#: only by explicit selection).
 SELECTABLE_CONFIGS: tuple[AnyConfig, ...] = (*ALL_CONFIGS, *EXPERIMENT_CONFIGS)
 
 
-# ---- 量子化式（ADR 0069 決定 3）--------------------------------------------
+# ---- Quantization formulas (ADR 0069 decision 3) ----------------------------
 
 
 def grouped_view(weight: torch.Tensor, group_size: int) -> torch.Tensor:
-    """量子化軸（**最終次元 = linear の in 軸**）を `[…, groups, group_size]` へ割る。
+    """Split the quantization axis (**the last dimension = the in axis of the linear**) into
+    `[…, groups, group_size]`.
 
-    MUST: 割り切れない形は fail loudly。`i4` は in 軸が `group_size` で割り切れることを
-    MUST とする（ADR 0069 決定 2 — 端数 group を作らない制約で行境界・group 境界のバイト
-    整列を保証している）ので、端数を黙って作った形の品質を測ると「格納できない形の数値」を
-    根拠に既定を決めることになる。
+    MUST: a shape that does not divide fails loudly. `i4` requires (MUST) that the in axis be
+    divisible by `group_size` (ADR 0069 decision 2 — the constraint against partial groups
+    guarantees byte alignment at row and group boundaries), so measuring the quality of a form that
+    silently built partial groups would mean choosing the default on "numbers of a form that cannot
+    be stored".
     """
     in_axis = int(weight.shape[-1])
     if in_axis % group_size:
         raise QuantizeError(
-            f"in 軸 {in_axis} が group_size {group_size} で割り切れない"
-            "（`i4` は量子化軸が group_size で割り切れることを MUST とする — ADR 0069 決定 2）"
+            f"the in axis {in_axis} is not divisible by group_size {group_size}"
+            " (`i4` requires (MUST) the quantization axis to be divisible by group_size — ADR 0069"
+            " decision 2)"
         )
     return weight.reshape(*weight.shape[:-1], in_axis // group_size, group_size)
 
@@ -505,14 +543,15 @@ def grouped_view(weight: torch.Tensor, group_size: int) -> torch.Tensor:
 def symmetric_components(
     weight: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """group 対称量子化の `(q, scale)` を group 形（`[…, groups, *]`）で返す。
+    """Return `(q, scale)` of grouped symmetric quantization in group form (`[…, groups, *]`).
 
-    `scale = clamp(amax / 7, f32 tiny)` / `q = clamp(round(w / scale), ±7)`。下限 clamp が
-    要るのは全ゼロ group（`amax == 0`）— そのまま割ると NaN になる。clamp 後は `q = 0` に
-    落ちて `q·scale = 0` が厳密に元値へ戻る（`quantize.channel_scale` と同文の 4bit 版）。
+    `scale = clamp(amax / 7, f32 tiny)` / `q = clamp(round(w / scale), ±7)`. The lower clamp is
+    needed for an all-zero group (`amax == 0`) — dividing as is would give NaN. After the clamp it
+    falls to `q = 0` and `q·scale = 0` restores the original value exactly (the 4-bit version of
+    the same reasoning as `quantize.channel_scale`).
 
-    fq（{@link fake_quant_symmetric}）と別に成分を返すのは、値域（**−8 が出ないこと**）と
-    group ごとに scale が分かれていることをテストが直接縛れるようにするため。
+    The components are returned separately from the fq ({@link fake_quant_symmetric}) so the tests
+    can directly constrain the value range (**no −8**) and that the scales are separate per group.
     """
     grouped = grouped_view(weight, group_size)
     amax = grouped.abs().amax(dim=-1, keepdim=True)
@@ -521,11 +560,12 @@ def symmetric_components(
 
 
 def fake_quant_symmetric(weight: torch.Tensor, group_size: int) -> torch.Tensor:
-    """対称 15 準位の fake-quant（`q·scale` を weight と同じ形で返す）。
+    """Symmetric 15-level fake-quant (returns `q·scale` in the same shape as the weight).
 
-    MUST: **冪等**（再適用でビット不変）。amax 要素が `q = ±7` に乗って厳密復元されることの
-    帰結で、崩れると「丸め済みのはずの重みが再量子化のたびに動く」= 格納形と参照の対応が
-    切れる（ADR 0019 / 0069 決定 3）。`tests/test_sweep_w4.py` が固定する。
+    MUST: **idempotent** (bit-identical when reapplied). It follows from the amax element landing
+    on `q = ±7` and being restored exactly; if it broke, "weights that should already be rounded
+    move with every requantization" = the correspondence between the storage form and the reference
+    breaks (ADR 0019 / 0069 decision 3). `tests/test_sweep_w4.py` pins it.
     """
     q, scale = symmetric_components(weight, group_size)
     return (q * scale).reshape(weight.shape)
@@ -534,16 +574,19 @@ def fake_quant_symmetric(weight: torch.Tensor, group_size: int) -> torch.Tensor:
 def asymmetric_components(
     weight: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """非対称（**連続** zero-point）の `(u, scale, zero)` を group 形で返す — 測定専用。
+    """Return `(u, scale, zero)` of asymmetric quantization (**continuous** zero-point) in group
+    form — measurement only.
 
     `scale = clamp((max − min) / 14, f32 tiny)` / `zero = 1 − min/scale` /
-    `u = clamp(round(w/scale + zero), 1, 15)`。zero を丸めも格納もしないので、これは
-    「zero-point 欄を足したときに届きうる品質の**上界**」であって格納形ではない
-    （ADR 0069 決定 3 の予約 3 — 対称の品質不足を実装前に検知するための測定列）。
+    `u = clamp(round(w/scale + zero), 1, 15)`. The zero is neither rounded nor stored, so this is
+    "the **upper bound** of the quality reachable by adding a zero-point field", not a storage form
+    (reservation 3 of ADR 0069 decision 3 — a measurement column to detect a quality shortfall of
+    symmetric before implementing it).
 
-    MUST: 縮退 group（`max == min`）は**対称式へ落とす**（`scale = clamp(|c|/7, tiny)` /
-    `zero = 8`）。min-max 式では `scale` が下限 clamp に張り付いて `w/scale` が発散し、
-    定数 group が clamp で ~0 へ潰れる（0 でない定数 group が黙って 0 になる沈黙誤値）。
+    MUST: a degenerate group (`max == min`) **falls back to the symmetric formula**
+    (`scale = clamp(|c|/7, tiny)` / `zero = 8`). With the min-max formula `scale` sticks to the
+    lower clamp, `w/scale` diverges, and a constant group is crushed to ~0 by the clamp (a silent
+    wrong value where a non-zero constant group quietly becomes 0).
     """
     grouped = grouped_view(weight, group_size)
     tiny = torch.finfo(torch.float32).tiny
@@ -562,32 +605,36 @@ def asymmetric_components(
 
 
 def fake_quant_asymmetric(weight: torch.Tensor, group_size: int) -> torch.Tensor:
-    """非対称 15 準位の fake-quant（`(u − zero)·scale` を weight と同じ形で返す）。
+    """Asymmetric 15-level fake-quant (returns `(u − zero)·scale` in the same shape as the weight).
 
-    NOTE: 対称と違い**冪等は保証しない** — min / max 要素の復元は f32 の丸めの分だけ緩く、
-    再適用で `scale` が 1ulp 動きうる。測定列なので冪等は要求しない（格納形は対称のみで
-    始める — ADR 0069 決定 3）。
+    NOTE: unlike symmetric, **idempotence is not guaranteed** — restoring the min / max elements is
+    looser by f32 rounding, and reapplying can move `scale` by 1ulp. It is a measurement column, so
+    idempotence is not required (the storage form starts with symmetric only — ADR 0069
+    decision 3).
     """
     u, scale, zero = asymmetric_components(weight, group_size)
     return ((u - zero) * scale).reshape(weight.shape)
 
 
-# ---- 量子化対象 -------------------------------------------------------------
+# ---- Quantization targets ---------------------------------------------------
 
 
 def family_of(fqn: str) -> str:
-    """重みの fqn（`….q_proj.weight`）→ 族名（末尾のモジュール名）。"""
+    """The fqn of a weight (`….q_proj.weight`) → the family name (the last module name)."""
     return fqn.split(".")[-2]
 
 
 def linear_weights(model: nn.Module) -> dict[str, torch.Tensor]:
-    """全 `nn.Linear` の `weight` を fqn 引きで集める（bias / norm / embedding は触らない）。
+    """Collect the `weight` of every `nn.Linear` keyed by fqn (bias / norm / embedding are not
+    touched).
 
-    fqn は `named_modules` で引く（`quantize.fake_quant_int8` と同じ流儀 — `id(tensor)` で
-    突き合わせない。パラメータ同一性は正規化で簡単に崩れ、崩れても黙って対象が減るだけ）。
+    The fqn comes from `named_modules` (the same way as `quantize.fake_quant_int8` — not matched by
+    `id(tensor)`. Parameter identity breaks easily under normalization, and when it breaks the
+    targets just shrink silently).
 
-    MUST: 族が {@link LINEAR_FAMILIES} に無い linear は fail loudly。transformers 側の構成が
-    変わって対象が増減したことを黙って測り続けると、族別の表が別のモデルの数値になる。
+    MUST: a linear whose family is not in {@link LINEAR_FAMILIES} fails loudly. If the transformers
+    side's structure changed and the targets grew or shrank, measuring on silently would make the
+    per-family table the numbers of another model.
     """
     weights: dict[str, torch.Tensor] = {}
     for name, module in model.named_modules():
@@ -596,21 +643,23 @@ def linear_weights(model: nn.Module) -> dict[str, torch.Tensor]:
         fqn = f"{name}.weight"
         if family_of(fqn) not in LINEAR_FAMILIES:
             raise QuantizeError(
-                f"'{fqn}': 未知の linear 族（対象は {list(LINEAR_FAMILIES)}）"
-                "— 模型の構成が sweep の想定と違う"
+                f"'{fqn}': unknown linear family (the targets are {list(LINEAR_FAMILIES)})"
+                " — the model's structure differs from what the sweep assumes"
             )
         weights[fqn] = module.weight
     if not weights:
-        raise QuantizeError("nn.Linear が 1 本も無い（模型の構成が sweep の想定と違う）")
+        raise QuantizeError(
+            "no nn.Linear at all (the model's structure differs from what the sweep assumes)"
+        )
     return weights
 
 
 def method_op_types(include_embedding: bool) -> tuple[type[nn.Module], ...]:
-    """方式グリッドの対象 2 形 → `iter_quant_targets` の `op_types`。
+    """The method grid's 2 target sets → the `op_types` of `iter_quant_targets`.
 
-    非 linear 込みの列で足すのを `nn.Embedding` だけに絞るのは、MiniCPM5-1B に他の量子化
-    可能型（conv 系）が 1 本も無いから — i8 の 5 種を丸ごと渡しても対象は同じで、「広い型を
-    渡した」という見かけだけが増える。
+    The "including non-linear" column adds only `nn.Embedding` because MiniCPM5-1B has no other
+    quantizable type (conv family) at all — passing all 5 i8 types would give the same targets and
+    only add the appearance of "passing a wide set of types".
     """
     return (nn.Linear, nn.Embedding) if include_embedding else (nn.Linear,)
 
@@ -618,10 +667,12 @@ def method_op_types(include_embedding: bool) -> tuple[type[nn.Module], ...]:
 def collect_targets(
     model: nn.Module, op_types: tuple[type[nn.Module], ...]
 ) -> tuple[dict[str, torch.Tensor], TargetCounts]:
-    """量子化対象を fqn 引きの重みと計数で返す（対象選択は core の共有）。
+    """Return the quantization targets as weights keyed by fqn plus counts (the target selection is
+    shared with core).
 
-    MUST: 族が {@link METHOD_FAMILIES} に無い対象は fail loudly（{@link linear_weights} と
-    同文）。対象が黙って増減すると、族別の表もサイズ試算も別のモデルの数値になる。
+    MUST: a target whose family is not in {@link METHOD_FAMILIES} fails loudly (the same reasoning
+    as {@link linear_weights}). If the targets silently grew or shrank, the per-family table and
+    the size estimate would be the numbers of another model.
     """
     weights: dict[str, torch.Tensor] = {}
     channels = 0
@@ -629,25 +680,27 @@ def collect_targets(
     for fqn, weight, axis in iter_quant_targets(model, op_types):
         if family_of(fqn) not in METHOD_FAMILIES:
             raise QuantizeError(
-                f"'{fqn}': 未知の族（対象は {list(METHOD_FAMILIES)}）"
-                "— 模型の構成が sweep の想定と違う"
+                f"'{fqn}': unknown family (the targets are {list(METHOD_FAMILIES)})"
+                " — the model's structure differs from what the sweep assumes"
             )
         weights[fqn] = weight
         channels += int(weight.shape[axis])
         elements += int(weight.numel())
     if not weights:
         raise QuantizeError(
-            f"量子化対象が 1 本も無い（対象の型: {', '.join(cls.__name__ for cls in op_types)}）"
+            "no quantization targets at all (target types:"
+            f" {', '.join(cls.__name__ for cls in op_types)})"
         )
     return weights, TargetCounts(modules=len(weights), channels=channels, elements=elements)
 
 
-# ---- サイズ試算 -------------------------------------------------------------
+# ---- Size estimate ----------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class SizeProjection:
-    """方式 × 対象集合の**投影**サイズ（実測ではない — 式は {@link QuantMethod.formula}）。"""
+    """The **projected** size of method × target set (not a measurement — the formula is
+    {@link QuantMethod.formula})."""
 
     counts: TargetCounts
     bits: float
@@ -663,25 +716,27 @@ class SizeProjection:
 
     @property
     def f32_mib(self) -> float:
-        """同じ対象集合を f32 で持ったときの MiB（投影の分母 — 圧縮率を表から読めるように）。"""
+        """MiB of the same target set held in f32 (the denominator of the projection — so the
+        compression ratio can be read from the table)."""
         return self.counts.elements * 4 / 1024**2
 
 
 def project_size(method: QuantMethod, counts: TargetCounts) -> SizeProjection:
-    """方式の式を対象集合の計数へ当てる。"""
+    """Apply the method's formula to the counts of the target set."""
     return SizeProjection(counts=counts, bits=method.projected_bits(counts), formula=method.formula)
 
 
-# ---- 方式の適用 -------------------------------------------------------------
+# ---- Applying a method ------------------------------------------------------
 
 
 def apply_method(model: nn.Module, config: MethodConfig, shared_stride: int) -> None:
-    """方式グリッド 1 本の丸めを model へ in-place で当てる。
+    """Apply the rounding of one method-grid run to the model in place.
 
-    `shared_stride > 1` のときだけ `kmeans:shared` の**表の fit** が等間隔部分標本になる
-    （core の `fit_stride` — 適用は常に全量・他の方式には効かない）。全量 fit は 1B 級で
-    実メモリを超えるための逃げ道で、使った事実は JSON と markdown の脚注へそのまま出る
-    （{@link karume.quant_methods.fake_quant_kmeans} の MUST）。
+    Only when `shared_stride > 1` does **the table fit** of `kmeans:shared` use an evenly spaced
+    subsample (core's `fit_stride` — the application is always over everything, and it has no
+    effect on the other methods). A full fit exceeds real memory at the 1B scale, so this is the
+    escape hatch, and the fact that it was used goes into the JSON and the markdown footnote as is
+    (the MUST of {@link karume.quant_methods.fake_quant_kmeans}).
     """
     op_types = method_op_types(config.include_embedding)
     if config.method.name == f"{KMEANS_PREFIX}shared" and shared_stride > 1:
@@ -692,36 +747,40 @@ def apply_method(model: nn.Module, config: MethodConfig, shared_stride: int) -> 
     config.method.round_weights(model, op_types, METHOD_GROUP_SIZE)
 
 
-# ---- 校正付き丸めの駆動（Catcher + stage 分解）-------------------------------
+# ---- Driving calibrated rounding (Catcher + stage split) --------------------
 
-#: decoder 層のモデル内 FQN 接頭辞（`CausalLmWrapper.model` = `LlamaForCausalLM` →
-#: `.model` = `LlamaModel` → `.layers`）。接頭辞を `calibrate_stages` へ渡すのは、scale 台帳の
-#: キーを {@link karume.quantize.Int4Report} と同じ**モデル内 FQN** の空間へ揃えるため
-#: （core の `StageSpec` 契約）。
+#: The in-model FQN prefix of the decoder layers (`CausalLmWrapper.model` = `LlamaForCausalLM` →
+#: `.model` = `LlamaModel` → `.layers`). The prefix is passed to `calibrate_stages` so that the
+#: keys of the scale ledger live in the same **in-model FQN** space as
+#: {@link karume.quantize.Int4Report} (core's `StageSpec` contract).
 DECODER_PREFIX = "model.model.layers"
 
 
-class _FirstStageReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図なので Error と呼ばない
-    """先頭 stage へ入力が届いた合図（校正 forward を打ち切るための番兵）。"""
+class _FirstStageReached(Exception):  # noqa: N818 — a stop signal, not an error, so not named Error
+    """Signal that input reached the first stage (a sentinel to cut the calibration forward
+    short)."""
 
 
 def decoder_stages(wrapper: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の decoder layer を `(モデル内 FQN 接頭辞, モジュール)` で返す。
+    """Return the decoder layers in execution order as `(in-model FQN prefix, module)`.
 
-    最終段の `norm` と `lm_head` は**入れない** — 校正の対象は decoder 内の linear だけで、
-    `lm_head` を stage として足すと「その入力が最終 norm を通っていない」形になる。方式
-    グリッドの 169 本と対象集合が違うのはこのため（{@link CalibConfig}）。
+    The final `norm` and `lm_head` are **not included** — the calibration targets only the linears
+    inside the decoder, and adding `lm_head` as a stage would give the form "its input has not gone
+    through the final norm". This is why the target set differs from the method grid's 169 tensors
+    ({@link CalibConfig}).
     """
     layers = wrapper.model.model.layers
     return tuple((f"{DECODER_PREFIX}.{index}", layer) for index, layer in enumerate(layers))
 
 
 def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], TargetCounts]:
-    """stage 内の量子化対象を fqn 引きの重みと計数で返す（校正の**走査** = 門の基準）。
+    """Return the quantization targets inside the stages as weights keyed by fqn plus counts (the
+    calibration's **scan** = the reference of the check).
 
-    対象選択は core の `iter_quant_targets` の共有（{@link collect_targets} と同文 — 写した
-    別実装にすると「測った対象」と「丸めた対象」が黙って割れる）。ここで数えた本数と、
-    校正が実際に丸めた本数を {@link assert_calib_covers_scan} が突き合わせる。
+    The target selection is shared with core's `iter_quant_targets` (the same reasoning as
+    {@link collect_targets} — a copied implementation would let "the targets measured" and "the
+    targets rounded" silently diverge). {@link assert_calib_covers_scan} compares the count taken
+    here with the count the calibration actually rounded.
     """
     weights: dict[str, torch.Tensor] = {}
     channels = 0
@@ -731,26 +790,30 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
             fqn = f"{prefix}.{local}"
             if family_of(fqn) not in LINEAR_FAMILIES:
                 raise QuantizeError(
-                    f"'{fqn}': 未知の linear 族（対象は {list(LINEAR_FAMILIES)}）"
-                    "— 模型の構成が sweep の想定と違う"
+                    f"'{fqn}': unknown linear family (the targets are {list(LINEAR_FAMILIES)})"
+                    " — the model's structure differs from what the sweep assumes"
                 )
             weights[fqn] = weight
             channels += int(weight.shape[axis])
             elements += int(weight.numel())
     if not weights:
-        raise QuantizeError("decoder stage に nn.Linear が 1 本も無い（模型の構成が想定と違う）")
+        raise QuantizeError(
+            "no nn.Linear at all in the decoder stages (the model's structure differs from what"
+            " is assumed)"
+        )
     return weights, TargetCounts(modules=len(weights), channels=channels, elements=elements)
 
 
 def calib_inputs(model_dir: Path, limit: int | None) -> tuple[torch.Tensor, ...]:
-    """校正コーパスを**既存の tokenizer 経路**（{@link minicpm5.export.load_tokenizer}）で
-    `[1,T]` の id 列へ落とす。
+    """Lower the calibration corpus to `[1,T]` id sequences through **the existing tokenizer path**
+    ({@link minicpm5.export.load_tokenizer}).
 
-    `limit` は先頭 N 文の上限（縮小 smoke 用 — `None` は全 48 文）。並びの先頭から採るのは
-    {@link minicpm5.calib_texts.CALIB_TEXTS} が言語とスタイルを混ぜて並べてあるため。
+    `limit` caps the number of leading texts (for a reduced smoke run — `None` means all 48 texts).
+    They are taken from the start because {@link minicpm5.calib_texts.CALIB_TEXTS} is ordered with
+    languages and styles mixed.
     """
     if limit is not None and limit < 1:
-        raise ValueError(f"校正文数の上限は 1 以上（実測 {limit}）")
+        raise ValueError(f"the cap on calibration texts must be 1 or more (got {limit})")
     texts = CALIB_TEXTS if limit is None else CALIB_TEXTS[:limit]
     tokenizer = one_shot.load_tokenizer(model_dir)
     return tuple(torch.tensor([tokenizer.encode(text).ids], dtype=torch.int64) for text in texts)
@@ -759,18 +822,21 @@ def calib_inputs(model_dir: Path, limit: int | None) -> tuple[torch.Tensor, ...]
 def capture_stage_batches(
     wrapper: nn.Module, first: nn.Module, inputs: Sequence[torch.Tensor]
 ) -> tuple[StageBatch, ...]:
-    """先頭 decoder layer への `(args, kwargs)` を forward_pre_hook で捕まえる（Catcher）。
+    """Capture the `(args, kwargs)` into the first decoder layer with a forward_pre_hook
+    (Catcher).
 
-    校正入力は「embedding・RoPE 表・加算 causal mask を通った後の hidden とその付随引数」で、
-    自前で組み直すと transformers 側の前段（と `export.py` のラッパが渡す mask の形）と黙って
-    割れる。**先頭 stage の呼び出しそのもの**を捕まえ、番兵例外で forward を打ち切るのが、
-    前段を写さずに同じ入力を採る形。
+    The calibration input is "the hidden after embedding, the RoPE table and the additive causal
+    mask, plus its accompanying arguments"; rebuilding it by hand would silently diverge from the
+    transformers-side front end (and from the mask form the wrapper of `export.py` passes).
+    Capturing **the call into the first stage itself** and cutting the forward short with a
+    sentinel exception is the way to get the same input without copying the front end.
 
-    kwargs（mask / position_ids / position_embeddings …）は Llama では**全層で同一**なので、
-    `calibrate_stages` の既定（stage 間で不変として運ぶ）にそのまま乗る。
+    The kwargs (mask / position_ids / position_embeddings …) are **identical for every layer** in
+    Llama, so they ride on `calibrate_stages`'s default (carried as invariant across stages) as is.
 
-    MUST: 捕まえずに forward が完走したら fail loudly — stage の綴りが模型の構成と食い違って
-    いる合図で、黙って進むと「校正入力ゼロ」の診断が core 側で出るだけになる。
+    MUST: if the forward runs to completion without a capture, fail loudly — it is the sign that
+    the stage spelling disagrees with the model's structure, and going on silently would only
+    produce a "zero calibration inputs" diagnostic on the core side.
     """
     captured: list[StageBatch] = []
 
@@ -787,8 +853,8 @@ def capture_stage_batches(
             except _FirstStageReached:
                 continue
             raise AssertionError(
-                f"校正入力 {index} で先頭 decoder layer が呼ばれずに forward が完走した"
-                "（stage の綴りが模型の構成と食い違っている）"
+                f"with calibration input {index} the forward ran to completion without calling the"
+                " first decoder layer (the stage spelling disagrees with the model's structure)"
             )
     finally:
         handle.remove()
@@ -797,11 +863,12 @@ def capture_stage_batches(
 
 @dataclass(frozen=True)
 class CalibRig:
-    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+    """The scaffolding the calibrated configurations share (stage sequence, scan, inputs to the
+    first stage).
 
-    config ごとに作り直さない — 先頭 stage の入力は `embed_tokens` を通っただけの hidden で、
-    校正が丸めるのは decoder 内の linear だけなので、pristine 復元を挟んでも動かない
-    （**丸めを 1 本も当てる前**に 1 回だけ採る）。
+    Not rebuilt per config — the input of the first stage is a hidden that has only gone through
+    `embed_tokens`, and calibration rounds only the linears inside the decoder, so restoring the
+    pristine weights in between does not move it (taken **once, before any rounding is applied**).
     """
 
     stages: tuple[StageSpec, ...]
@@ -816,18 +883,21 @@ def assert_stage_split(
     batch: StageBatch,
     stages: Sequence[StageSpec],
 ) -> None:
-    """stage 列の逐次 forward が本体の最終 hidden と**ビット一致**することを見る。
+    """Check that the sequential forward of the stage sequence is **bit-identical** to the model's
+    final hidden.
 
-    `probe` は捕捉に使った id 列そのもの、`batch` は**同じ入力**で捕まえた先頭 stage への入力。
-    stage 列は最終 `norm` と `lm_head` を含まない（{@link decoder_stages}）ので、逐次結果へ
-    `norm` を当ててから `LlamaModel` の `last_hidden_state` と比べる（wrapper の出力は logits
-    なので直接は比べられない）。stage の駆動は core（`_advance_batch`）と同じ形 — 位置引数は
-    hidden 1 本だけ、kwargs は stage 間で不変。
+    `probe` is the very id sequence used for the capture, and `batch` is the input to the first
+    stage captured with **the same input**. The stage sequence does not include the final `norm`
+    and `lm_head` ({@link decoder_stages}), so `norm` is applied to the sequential result before
+    comparing with `LlamaModel`'s `last_hidden_state` (the wrapper's output is logits and cannot be
+    compared directly). The stages are driven the same way as core (`_advance_batch`) — the only
+    positional argument is the hidden, and the kwargs are invariant across stages.
 
-    MUST: 丸める前に実測し、近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを
-    同じ順で呼んでいる以上、一致しないなら分解が本物と違う経路を通っている。校正は「その層に
-    実際に流れる活性」から丸め先を選ぶ方式なので、分解がずれると方式の採否を別経路の測定で
-    決めることになる（数値は普通に出るので表からは読めない）。
+    MUST: measured before rounding, and compared with `torch.equal`, not an approximate tolerance —
+    with the same modules called in the same order, a mismatch means the split takes a path
+    different from the real one. Calibration chooses rounding targets from "the activations that
+    actually flow into the layer", so a drifting split would decide the adoption of a method by a
+    measurement of a different path (the numbers come out normally, so the table does not show it).
     """
     inner = wrapper.model.model
     args, kwargs = batch
@@ -843,14 +913,16 @@ def assert_stage_split(
         hidden = inner.norm(hidden)
     if not torch.equal(hidden, reference):
         raise AssertionError(
-            "stage 分解の最終 hidden が本体の last_hidden_state とビット一致しない"
-            f"（最大絶対差 {float((hidden - reference).abs().max()):.4e}）"
-            " — decoder stage 列が LlamaModel.forward の経路とずれている"
+            "the final hidden of the stage split is not bit-identical to the model's"
+            " last_hidden_state (max absolute difference"
+            f" {float((hidden - reference).abs().max()):.4e})"
+            " — the decoder stage sequence has drifted from the path of LlamaModel.forward"
         )
 
 
 def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> CalibRig:
-    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher → 分解一致門）。"""
+    """Build the calibration scaffolding (stage split → scan → tokenize → Catcher → split
+    check)."""
     stages = decoder_stages(wrapper)
     scan, counts = calib_targets(stages)
     inputs = calib_inputs(model_dir, limit)
@@ -860,11 +932,13 @@ def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> C
 
 
 def apply_calib(config: CalibConfig, rig: CalibRig, shared_stride: int) -> CalibReport:
-    """校正付き丸め 1 本を model へ in-place で当てる（stage 逐次の駆動は core 側）。
+    """Apply one calibrated rounding to the model in place (the stage-sequential driving is on the
+    core side).
 
-    `shared_stride > 1` のときだけ `kmeans_shared` の**表の fit** が等間隔部分標本になる
-    （{@link apply_method} と同じ逃げ道・同じノブ）。使った事実は
-    {@link karume.quant_calib.CalibReport.describe} が拾って出力へ出る。
+    Only when `shared_stride > 1` does **the table fit** of `kmeans_shared` use an evenly spaced
+    subsample (the same escape hatch and the same knob as {@link apply_method}). The fact that it
+    was used is picked up by {@link karume.quant_calib.CalibReport.describe} and goes into the
+    output.
     """
     spec = config.grid
     if spec.kind == "kmeans_shared" and shared_stride > 1:
@@ -883,27 +957,29 @@ def apply_calib(config: CalibConfig, rig: CalibRig, shared_stride: int) -> Calib
 def assert_calib_covers_scan(
     report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
 ) -> None:
-    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+    """Check that the layers the calibration rounded match the stage scan **exactly**.
 
-    MUST: fail loudly。stage の綴りや対象型が変わって decoder の一部が校正に載らなくなっても
-    表には行が残り、しかも丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。
+    MUST: fail loudly. If the stage spelling or the target types change and part of the decoder
+    drops out of the calibration, the table still has its row, and the quality even comes out on
+    **the good side** by the unrounded share (a pass-through cannot be read from the numbers).
     """
     rounded = {layer.fqn for layer in report.layers}
     missing = sorted(set(scan) - rounded)
     extra = sorted(rounded - set(scan))
     if missing or extra or report.modules != len(scan):
         raise AssertionError(
-            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"[{name}] the {report.modules} tensors the calibration rounded do not match the"
+            f" {len(scan)} of the scan (not rounded {missing[:3]} / not in the scan {extra[:3]})"
         )
 
 
-# ---- 期待列（export_decode の greedy 資産）------------------------------------
+# ---- Expected sequences (the greedy assets of export_decode) -----------------
 
 
 @dataclass(frozen=True)
 class GreedyCase:
-    """`export_decode` の greedy 期待列 1 ケース（`prompt[1,T]` / `expected[K]` — 共に i64）。"""
+    """One case of `export_decode`'s greedy expected sequences (`prompt[1,T]` / `expected[K]` —
+    both i64)."""
 
     name: str
     prompt: torch.Tensor
@@ -915,15 +991,16 @@ class GreedyCase:
 
 
 def load_cases(decode_dir: Path) -> tuple[GreedyCase, ...]:
-    """`greedy.<case>.safetensors` を glob で読む（tokenizer は通さない）。
+    """Read `greedy.<case>.safetensors` by glob (no tokenizer involved).
 
-    資産が無ければ**実行手順つきで**落とす — 60 分級の実行の入口で、直せる形の失敗を
-    「ファイルが無い」だけで返さない。
+    Without the assets it fails **with the steps to produce them** — at the entrance of a
+    60-minute-class run, a failure that can be fixed is not returned as a bare "file not found".
     """
     paths = sorted(decode_dir.glob(f"{GREEDY_PREFIX}*{GREEDY_SUFFIX}"))
     if not paths:
         raise FileNotFoundError(
-            f"greedy 期待列が {decode_dir} に 1 件も無い — 先に decode 資産を作ること:\n"
+            f"no greedy expected sequences at all in {decode_dir} — build the decode assets"
+            " first:\n"
             "  cd tools/export-recipes && "
             "uv run --with 'transformers==5.14.1' python -m minicpm5.export_decode"
         )
@@ -941,12 +1018,12 @@ def load_cases(decode_dir: Path) -> tuple[GreedyCase, ...]:
     return tuple(cases)
 
 
-# ---- 測定 -------------------------------------------------------------------
+# ---- Measurement ------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CaseResult:
-    """1 config × 1 ケースの測定値。"""
+    """The measurements of 1 config × 1 case."""
 
     steps: int
     matches: int
@@ -956,12 +1033,12 @@ class CaseResult:
 
 @dataclass(frozen=True)
 class ConfigResult:
-    """1 config の測定値（族別 wRMSE は量子化した族だけが載る）。
+    """The measurements of one config (the per-family wRMSE holds only the quantized families).
 
-    `overall_rmse` は対象集合を丸ごと 1 本にした `‖w − fq‖₂ / ‖w‖₂`（族平均ではない —
-    族ごとの要素数が 20 倍違うので平均だと重み付けが恣意的になる）。`size` は方式グリッドと
-    校正グリッドだけが持つ（Phase 0 の config は格納形が i4 の 1 通りで、試算しても同じ数が
-    並ぶ）。
+    `overall_rmse` is `‖w − fq‖₂ / ‖w‖₂` over the whole target set as one (not a family average —
+    the element counts of the families differ 20-fold, so an average would weight them
+    arbitrarily). Only the method and calibration grids have `size` (the Phase 0 configs have a
+    single storage form, i4, so an estimate would list the same number).
     """
 
     name: str
@@ -969,21 +1046,24 @@ class ConfigResult:
     cases: Mapping[str, CaseResult]
     seconds: float = 0.0
     overall_rmse: float | None = None
-    #: 表と JSON に出る方式名（Phase 0 の config は方式軸を持たないので `None`）。
+    #: Method name shown in the tables and the JSON (`None` for Phase 0 configs, which have no
+    #: method axis).
     method: str | None = None
     size: SizeProjection | None = None
-    #: 校正付き構成の 1 行要約（{@link karume.quant_calib.CalibReport.describe} —
-    #: `fit_stride` を使った事実や AWQ の α の範囲もここに出る）。
+    #: One-line summary of a calibrated configuration
+    #: ({@link karume.quant_calib.CalibReport.describe} — the fact that `fit_stride` was used and
+    #: the range of AWQ's α also appear here).
     calib: str | None = None
 
 
 def teacher_forced(wrapper: nn.Module, case: GreedyCase) -> tuple[int, float]:
-    """`cat(prompt, expected)` を 1 forward して `(一致数, NLL 平均)` を返す。
+    """Run `cat(prompt, expected)` in one forward and return `(matches, mean NLL)`.
 
-    読むのは位置 `T−1 … T+K−2` の K 行 —「prompt の末尾から expected を 1 つずつ与えたときの
-    次トークン」で、自由走行と違い**発散しても列がずれない**ので config 間で同じ位置の劣化を
-    比べられる。NLL は同じ K 行の `−log softmax(logits)[expected]` の平均で、1 位が変わる
-    手前の劣化（順位は保つが確信が薄れる）まで拾う。
+    The K rows read are positions `T−1 … T+K−2` — "the next token when expected is fed one at a
+    time from the end of the prompt"; unlike free running, **the sequence does not shift after a
+    divergence**, so the loss at the same positions can be compared across configs. The NLL is the
+    mean of `−log softmax(logits)[expected]` over the same K rows and picks up the loss before the
+    top-1 changes (the rank holds but the confidence thins).
     """
     ids = torch.cat([case.prompt, case.expected.unsqueeze(0)], dim=1)
     with torch.no_grad():
@@ -997,12 +1077,14 @@ def teacher_forced(wrapper: nn.Module, case: GreedyCase) -> tuple[int, float]:
 
 
 def greedy_prefix(wrapper: nn.Module, case: GreedyCase) -> int:
-    """自由走行 greedy で expected と一致し続けた先頭 step 数（全一致なら K）。
+    """The number of leading steps for which free-running greedy keeps matching expected (K when
+    all match).
 
-    MUST: full re-forward（毎 step 先頭から標準 causal で計算 — `export_decode
-    .greedy_continuation` と同じ流儀）。KV cache 経路で採ると、量子化の劣化と cache 実装の
-    影響が混ざる。発散した時点で打ち切る — 以後の列は「別の文」なので比べる意味が無く、
-    劣化した config ほど速く終わる。
+    MUST: full re-forward (every step computed from the start with standard causal — the same way
+    as `export_decode .greedy_continuation`). Taking it through the KV cache path would mix the
+    quantization loss with the effect of the cache implementation. It stops at the divergence — the
+    sequence after that is "a different text" and meaningless to compare, and the more degraded a
+    config, the sooner it finishes.
     """
     current = case.prompt
     for step in range(case.steps):
@@ -1018,12 +1100,12 @@ def greedy_prefix(wrapper: nn.Module, case: GreedyCase) -> int:
 def restore_pristine(
     weights: Mapping[str, torch.Tensor], pristine: Mapping[str, torch.Tensor]
 ) -> None:
-    """全対象を pristine（素の f32）へ戻す。
+    """Restore every target to pristine (the plain f32).
 
-    MUST: **config ごとに毎回**戻す。戻さずに当てると測っているのが「RTN の上の NF4」に
-    なり、config 間の比較そのものが意味を失う（方式は積み重ねない）。戻す範囲は
-    Phase 0 と方式グリッドの**和集合**（linear + `embed_tokens`）— 片方のグリッドが触った
-    重みがもう片方の測定に残らないように。
+    MUST: restore **for every config**. Applying without restoring would measure "NF4 on top of
+    RTN", and the comparison between configs would lose its meaning (methods are not stacked). The
+    restored range is **the union** of Phase 0 and the method grid (linear + `embed_tokens`) — so
+    that weights one grid touched do not remain in the other's measurements.
     """
     with torch.no_grad():
         for fqn, weight in weights.items():
@@ -1031,7 +1113,7 @@ def restore_pristine(
 
 
 def apply_config(weights: Mapping[str, torch.Tensor], config: SweepConfig) -> list[str]:
-    """Phase 0 の fake-quant を当て、量子化した fqn を返す（復元は呼び出し側）。"""
+    """Apply Phase 0's fake-quant and return the quantized fqns (the caller restores)."""
     if config.group_size is None:
         return []
     quantize = fake_quant_asymmetric if config.asymmetric else fake_quant_symmetric
@@ -1050,11 +1132,11 @@ def measure_rmse(
     pristine: Mapping[str, torch.Tensor],
     touched: Sequence[str],
 ) -> tuple[dict[str, float], float | None]:
-    """丸め後の重みと pristine から族別 + 全体の相対 RMSE を採る。
+    """Take the per-family + overall relative RMSE from the rounded weights and pristine.
 
-    相対 RMSE は族内の全層をまとめた `‖w − fq‖₂ / ‖w‖₂`（要素数が約分されるので層の大きさで
-    重み付けされない）。総和は f64 で採る — 族によっては 2 億要素を足すので f32 累算では
-    桁落ちが数値の意味を食う。
+    The relative RMSE is `‖w − fq‖₂ / ‖w‖₂` over all layers of a family (the element counts cancel,
+    so it is not weighted by layer size). The sums are taken in f64 — some families add 200 million
+    elements, and with f32 accumulation the cancellation would eat the meaning of the numbers.
     """
     errors: dict[str, float] = defaultdict(float)
     norms: dict[str, float] = defaultdict(float)
@@ -1073,11 +1155,13 @@ def measure_rmse(
 def assert_baseline_reproduces(
     cases: Sequence[GreedyCase], measured: Mapping[str, CaseResult]
 ) -> None:
-    """baseline（f32 のまま）が期待列を teacher-forced で**完全に**再現することを見る。
+    """Check that the baseline (still f32) reproduces the expected sequences **completely** under
+    teacher forcing.
 
-    MUST: fail loudly。ここが割れるのは量子化の話ではなく**ハーネスが壊れている**合図
-    （重みの取り違え・位置のずれ・期待列と模型の不一致）で、以後の全 config の数値の意味が
-    消える。部分再実行（`--only`）でも baseline を必ず先に走らせるのはこの門のため。
+    MUST: fail loudly. A split here is not a quantization matter but the sign that **the harness is
+    broken** (mixed-up weights, shifted positions, expected sequences that do not match the model),
+    and the numbers of every later config lose their meaning. This check is why the baseline always
+    runs first even in a partial rerun (`--only`).
     """
     wrong = {
         case.name: f"{measured[case.name].matches}/{case.steps}"
@@ -1086,17 +1170,19 @@ def assert_baseline_reproduces(
     }
     if wrong:
         raise AssertionError(
-            f"baseline の teacher-forced 一致が完全でない {wrong}"
-            "（量子化以前の問題 — 模型・期待列・位置の対応を疑う）"
+            f"the baseline's teacher-forced agreement is not complete {wrong}"
+            " (a problem before quantization — suspect the correspondence of model, expected"
+            " sequences and positions)"
         )
 
 
 def select_configs(only: Sequence[str]) -> tuple[AnyConfig, ...]:
-    """`--only` で選んだ config を宣言順で返す（**baseline は常に先頭で走る**）。
+    """Return the configs chosen with `--only` in declaration order (**the baseline always runs
+    first**).
 
-    baseline を外せないのは、部分再実行でも sanity 門（{@link assert_baseline_reproduces}）を
-    必ず通すため — 60 分級の実行を刻んで回すときほど、「壊れた模型で測り続ける」経路を
-    残さないことが効く。
+    The baseline cannot be left out so that even a partial rerun always goes through the sanity
+    check ({@link assert_baseline_reproduces}) — the more a 60-minute-class run is cut into pieces,
+    the more it matters to leave no path that "keeps measuring with a broken model".
     """
     if not only:
         return ALL_CONFIGS
@@ -1113,29 +1199,32 @@ def run_sweep(
     calib_limit: int | None = None,
     json_path: Path | None = None,
 ) -> list[ConfigResult]:
-    """模型を 1 回だけ読み、config を順に当てて測る。
+    """Load the model once, then apply and measure the configs in order.
 
-    pristine クローン（CPU・linear 169 本で ~3.5GB・`embed_tokens` 込みで ~4.3GB）を先に
-    採るので、config ごとの丸めは常に元の重みから始まる。退避の範囲を**常に和集合**に
-    するのは、Phase 0 の config が embedding を戻さない形を作らないため。
+    A pristine clone (CPU, ~3.5GB for the 169 linears, ~4.3GB including `embed_tokens`) is taken
+    first, so each config's rounding always starts from the original weights. The saved range is
+    **always the union** so that a Phase 0 config cannot create a form that leaves the embedding
+    unrestored.
 
-    校正付き構成の足場（{@link CalibRig}）は**最初に要求されたときに 1 回だけ**組む —
-    pristine 復元は config ごとの先頭で済んでいるので、そこで採る先頭 stage の入力は素の
-    重みのものになる。校正 config を 1 本も選ばなければ tokenizer も Catcher も走らない。
+    The scaffolding of the calibrated configurations ({@link CalibRig}) is built **only once, the
+    first time it is requested** — the pristine restore has already run at the start of each
+    config, so the first-stage input taken there belongs to the plain weights. If no calibration
+    config is chosen, neither the tokenizer nor the Catcher runs.
 
-    進捗は 1 ケース / 1 config ごとに stderr へ即 flush し、`json_path` があれば config
-    1 本ごとに書き直す（k-means の数十分級の実行が途中で落ちても測定値が残る）。
+    Progress is flushed to stderr after every case / config, and with `json_path` the JSON is
+    rewritten after every config (if a k-means run of tens of minutes dies halfway, the
+    measurements remain).
     """
     cases = load_cases(decode_dir)
     lengths = " ".join(f"{case.name}(T={case.prompt.shape[1]},K={case.steps})" for case in cases)
-    print(f"[sweep] 期待列 {len(cases)} ケース: {lengths}", file=sys.stderr, flush=True)
+    print(f"[sweep] expected sequences, {len(cases)} cases: {lengths}", file=sys.stderr, flush=True)
 
     wrapper = one_shot.load_wrapper(model_dir)
     linear = linear_weights(wrapper)
     union, counts = collect_targets(wrapper, method_op_types(include_embedding=True))
     print(
-        f"[sweep] 量子化対象 linear {len(linear)} 本 / 和集合 {counts.modules} 本"
-        f"（{counts.elements:,} 要素）を pristine 退避",
+        f"[sweep] saving pristine copies of {len(linear)} target linears / a union of"
+        f" {counts.modules} tensors ({counts.elements:,} elements)",
         file=sys.stderr,
         flush=True,
     )
@@ -1144,9 +1233,10 @@ def run_sweep(
     results: list[ConfigResult] = []
     rig: CalibRig | None = None
     for config in configs:
-        # 前の config の一時領域（k-means は f64 で対象と同オーダー）を次の丸めの前に手放す。
-        # 参照循環に載った GB 級のテンソルが世代 GC 待ちで残ると、次の config が実メモリを
-        # 踏み抜く（refcount だけでは足りない場所があるので明示する）。
+        # Release the previous config's scratch space (k-means works in f64 on the order of the
+        # targets) before the next rounding. If GB-class tensors caught in reference cycles wait for
+        # generational GC, the next config breaks through real memory (refcounting alone is not
+        # enough in places, so it is explicit).
         gc.collect()
         started = time.perf_counter()
         restore_pristine(union, pristine)
@@ -1167,9 +1257,9 @@ def run_sweep(
             if rig is None:
                 rig = build_calib_rig(wrapper, model_dir, calib_limit)
                 print(
-                    f"[sweep] 校正 {len(rig.batches)} 文 / stage {len(rig.stages)} 段 /"
-                    f" 対象 linear {rig.counts.modules} 本"
-                    "（decoder 内のみ — lm_head / embed_tokens は含まない）",
+                    f"[sweep] calibration: {len(rig.batches)} texts / {len(rig.stages)} stages /"
+                    f" {rig.counts.modules} target linears"
+                    " (inside the decoder only — lm_head / embed_tokens not included)",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -1188,7 +1278,7 @@ def run_sweep(
         rounded = time.perf_counter() - started
         overall_text = "-" if overall is None else f"{overall:.4g}"
         print(
-            f"[{config.name}] 丸め {len(touched)} 本 {rounded:.1f}s wRMSE {overall_text}",
+            f"[{config.name}] rounded {len(touched)} tensors {rounded:.1f}s wRMSE {overall_text}",
             file=sys.stderr,
             flush=True,
         )
@@ -1220,7 +1310,7 @@ def run_sweep(
             )
         )
         print(
-            f"[{config.name}] 完了 {time.perf_counter() - started:.1f}s",
+            f"[{config.name}] done {time.perf_counter() - started:.1f}s",
             file=sys.stderr,
             flush=True,
         )
@@ -1231,7 +1321,7 @@ def run_sweep(
     return results
 
 
-# ---- 表 ---------------------------------------------------------------------
+# ---- Tables -----------------------------------------------------------------
 
 
 def _markdown(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -1241,11 +1331,11 @@ def _markdown(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 
 
 def quality_table(results: Sequence[ConfigResult]) -> str:
-    """config × ケース別［teacher 一致 / NLL / 発散 step］の表。"""
+    """Table of config × per-case [teacher agreement / NLL / divergence step]."""
     names = list(results[0].cases)
     header = ["config"]
     for name in names:
-        header += [f"{name} 一致", f"{name} NLL", f"{name} 発散"]
+        header += [f"{name} match", f"{name} NLL", f"{name} diverge"]
     rows = []
     for result in results:
         row = [result.name]
@@ -1261,7 +1351,7 @@ def quality_table(results: Sequence[ConfigResult]) -> str:
 
 
 def rmse_table(results: Sequence[ConfigResult]) -> str:
-    """config × 族別 weight 相対 RMSE の表（量子化しなかった族は `-`）。"""
+    """Table of config × per-family relative weight RMSE (`-` for families not quantized)."""
     rows = [
         [result.name]
         + [
@@ -1274,12 +1364,23 @@ def rmse_table(results: Sequence[ConfigResult]) -> str:
 
 
 def summary_table(results: Sequence[ConfigResult]) -> str:
-    """方式 × 対象 2 形を 1 行 1 config で読む要約表（ケース合算）。
+    """Summary table reading method × 2 target sets one config per row (cases summed).
 
-    合算は「3 ケース × 16 位置 = 48 点の一致数」「NLL の 3 ケース単純和」「自由走行の
-    接頭辞長の 3 ケース和」— ケース別の内訳は {@link quality_table} に残る。
+    The sums are "the matches over 3 cases × 16 positions = 48 points", "the plain sum of NLL over
+    the 3 cases" and "the sum over the 3 cases of the free-running prefix length" — the per-case
+    breakdown stays in {@link quality_table}.
     """
-    header = ["config", "方式", "対象", "bpw", "投影 MiB", "wRMSE", "teacher", "NLL 和", "greedy"]
+    header = [
+        "config",
+        "method",
+        "targets",
+        "bpw",
+        "projected MiB",
+        "wRMSE",
+        "teacher",
+        "NLL sum",
+        "greedy",
+    ]
     rows = []
     for result in results:
         cases = list(result.cases.values())
@@ -1288,7 +1389,7 @@ def summary_table(results: Sequence[ConfigResult]) -> str:
             [
                 result.name,
                 result.method or "-",
-                "-" if result.size is None else f"{result.size.counts.modules} 本",
+                "-" if result.size is None else f"{result.size.counts.modules} tensors",
                 "-" if result.size is None else f"{result.size.bits_per_weight:.4g}",
                 "-" if result.size is None else f"{result.size.projected_mib:.1f}",
                 "-" if result.overall_rmse is None else f"{result.overall_rmse:.4g}",
@@ -1301,8 +1402,17 @@ def summary_table(results: Sequence[ConfigResult]) -> str:
 
 
 def size_table(results: Sequence[ConfigResult]) -> str:
-    """方式 × 対象集合のサイズ試算（**式による投影**・実測ではない）。"""
-    header = ["config", "本数", "チャネル", "要素", "式", "bpw", "投影 MiB", "f32 MiB"]
+    """Size estimate of method × target set (**a projection by formula**, not a measurement)."""
+    header = [
+        "config",
+        "tensors",
+        "channels",
+        "elements",
+        "formula",
+        "bpw",
+        "projected MiB",
+        "f32 MiB",
+    ]
     rows = [
         [
             result.name,
@@ -1326,10 +1436,11 @@ def results_json(
     kmeans_shared_stride: int,
     calib_limit: int | None = None,
 ) -> str:
-    """機械可読の測定値（markdown 表の全列 + 表に出さない計数）。
+    """Machine-readable measurements (every column of the markdown tables + counts the tables do
+    not show).
 
-    `calib_limit` は**校正が縮小実行だったか**の記録（`None` = 全量）— 縮小した数値を
-    全量の数値として読まれないように、測定値と同じファイルへ残す。
+    `calib_limit` records **whether the calibration was a reduced run** (`None` = full) — kept in
+    the same file as the measurements so that reduced numbers are not read as full ones.
     """
     payload = {
         "group_size": METHOD_GROUP_SIZE,
@@ -1383,23 +1494,28 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="append",
         default=[],
         choices=[config.name for config in SELECTABLE_CONFIGS],
-        help="この config だけ走らせる（複数可・部分再実行用）。baseline は常に先行する。"
-        "GPTQ 掃引軸の実験点（EXPERIMENT_CONFIGS）はここで名指ししたときだけ走る。",
+        help="Run only this config (repeatable, for partial reruns). The baseline always runs"
+        " first. The GPTQ sweep-axis experiment points (EXPERIMENT_CONFIGS) run only when named"
+        " here.",
     )
-    parser.add_argument("--json", type=Path, default=None, help="機械可読の測定値の書き出し先。")
+    parser.add_argument(
+        "--json", type=Path, default=None, help="Where to write the machine-readable measurements."
+    )
     parser.add_argument(
         "--kmeans-shared-stride",
         type=int,
         default=0,
-        help="kmeans:shared の表の fit だけを等間隔 stride の部分標本で採る（0 / 1 = 全量）。"
-        "全量が実メモリに載らない機体のための逃げ道で、丸めは常に全量へ当たる。",
+        help="Take only the table fit of kmeans:shared from an evenly strided subsample (0 / 1 ="
+        " everything). An escape hatch for machines where the full set does not fit in real"
+        " memory; the rounding is always applied to everything.",
     )
     parser.add_argument(
         "--calib-limit",
         type=int,
         default=None,
-        help=f"校正コーパスの先頭 N 文だけを使う（既定は全 {len(CALIB_TEXTS)} 文）。"
-        "縮小 smoke 用のノブで、校正付き構成にだけ効く。",
+        help="Use only the first N texts of the calibration corpus (default: all"
+        f" {len(CALIB_TEXTS)})."
+        " A knob for reduced smoke runs; it affects only the calibrated configurations.",
     )
     args = parser.parse_args(argv)
     results = run_sweep(
@@ -1411,11 +1527,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         json_path=args.json,
     )
     if args.kmeans_shared_stride > 1:
-        print(f"> kmeans:shared の表は 1/{args.kmeans_shared_stride} 部分標本で fit（適用は全量）")
+        print(
+            f"> the kmeans:shared table is fit on a 1/{args.kmeans_shared_stride} subsample"
+            " (applied to everything)"
+        )
         print()
     if args.calib_limit is not None:
         print(
-            f"> 校正コーパスは先頭 {args.calib_limit} 文のみ（全 {len(CALIB_TEXTS)} 文の縮小実行）"
+            f"> calibration corpus: first {args.calib_limit} texts only (a reduced run of all"
+            f" {len(CALIB_TEXTS)})"
         )
         print()
     print(summary_table(results))
@@ -1428,7 +1548,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     notes = [f"> {result.name}: {result.calib}" for result in results if result.calib]
     if notes:
         print()
-        print("校正付き構成の内訳（`CalibReport.describe`）:")
+        print("Breakdown of the calibrated configurations (`CalibReport.describe`):")
         print("\n".join(notes))
 
 

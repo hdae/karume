@@ -1,96 +1,106 @@
-"""軽量な母音認識 CRNN（音声 → リップシンク用の母音クラス列）を IR v2 の容器（`krm`）+
-golden io へ書き出す台本。**長さは記号軸なので、グラフは 1 本だけ**。
+"""Script that writes the lightweight vowel-recognition CRNN (audio → vowel class sequence for
+lip-sync) into the IR v2 container (`krm`) + golden io. **Length is a symbolic axis, so there is
+only one graph**.
 
     uv run python -m vowel_detector.export
-    uv run python -m vowel_detector.export --verify  # nn.GRU との同値（差し替えの A/B）
+    uv run python -m vowel_detector.export --verify  # equivalence with nn.GRU (replacement A/B)
 
-生成物は `outputs/series/` 配下で、リポジトリ直下の `.gitignore` によりコミット対象外。
+The output goes under `outputs/series/` and is kept out of commits by the root `.gitignore`.
 
-## 依存グループを足さない理由（モデル定義を逐語で写す）
+## Why no dependency group is added (the model definition is copied verbatim)
 
-追加の依存グループは**要らない**（torch は基本依存）。上流のモデル定義
-`training/src/vowel_detector/crnn.py` は 20 行の `nn.Module` だが、import すると
-`vowel_detector.phonemes` 経由で pyopenjtalk（OpenJTalk のネイティブビルド）を、
-`vowel_detector.features` 経由で librosa を引き込む — どちらも G2P と特徴抽出のためのもので、
-この台本には 1 行も要らない。したがって**モデル定義はここへ逐語で写す**（{@link Crnn}）。
+**No** extra dependency group is needed (torch is a base dependency). The upstream model definition
+`training/src/vowel_detector/crnn.py` is a 20-line `nn.Module`, but importing it pulls in
+pyopenjtalk (a native OpenJTalk build) through `vowel_detector.phonemes` and librosa through
+`vowel_detector.features` — both are for G2P and feature extraction, and this script needs not one
+line of them. The **model definition is therefore copied here verbatim** ({@link Crnn}).
 
-写しが上流とずれる危険は `load_state_dict(strict=True)` が受け持つ: 重みは 22 本の
-state_dict なので、層の並び・名前・形のどれが食い違っても読み込みが落ちる（値だけが静かに
-変わる書き換えは、モデル定義の**構造**の写しでは起こせない）。
+The risk of the copy drifting from upstream is covered by `load_state_dict(strict=True)`: the
+weights are a state_dict of 22 tensors, so a mismatch in any of layer order, names or shapes fails
+the load (a rewrite that only changes values silently cannot come from copying the **structure** of
+the model definition).
 
-## 長さ軸（記号 `T` = 20ms フレーム数）
+## The length axis (symbol `T` = number of 20 ms frames)
 
-グラフ入力は 10ms フレーム列 `features f32 [1, 2T, 83]`、出力は 20ms フレームの
-ロジット `[1, T, 8]`（conv の stride 2 が時間を半分に畳む）。
+The graph input is the 10 ms frame sequence `features f32 [1, 2T, 83]` and the output is the logits
+of the 20 ms frames `[1, T, 8]` (conv stride 2 halves the time axis).
 
-**記号は入力側ではなく出力側の格子に置く**（`2*Dim("T")`）。素の `Dim("T")` を入力へ置くと
-conv1d(stride=2, pad=2, k=5) の出力 extent が `((T−1)//2)+1` の**床除算**になり、
-karume の次元言語（`coeff·sym+offset` — ADR 0010）に載らない。`2*Dim("T")` なら出力 extent は
-ちょうど `T` のアフィン式になる。
+**The symbol is placed on the output-side grid, not the input side** (`2*Dim("T")`). With a plain
+`Dim("T")` on the input, the output extent of conv1d(stride=2, pad=2, k=5) becomes the **floor
+division** `((T−1)//2)+1`, which does not fit karume's dimension language (`coeff·sym+offset` —
+ADR 0010). With `2*Dim("T")` the output extent is exactly the affine expression `T`.
 
-その帰結として **グラフ入力の 10ms フレーム数は常に偶数**（= `2T`）がランタイム契約になる。
-奇数フレームは**末尾 1 本を切り捨てて**渡す（`packages/models/src/vowel-detector/pipeline.ts`
-と実重み E2E が既に採っている規約 — 半端フレームは入力 1 本分しか持たない出力になり、
-後処理の「1 フレーム = 20ms」が末尾だけ崩れる）。
+As a consequence, **the number of 10 ms frames of the graph input is always even** (= `2T`) as a
+runtime contract. An odd frame count is passed **with its last frame dropped** (the convention that
+`packages/models/src/vowel-detector/pipeline.ts` and the real-weight E2E already follow — a
+leftover frame would become an output with only one input frame's worth, and the post-processing's
+"1 frame = 20 ms" would break at the end only).
 
-記号を通せるのは `nn.GRU` を `karume::gru_scan` へ差し替えているから（下の「差し替え層」）。
-`aten.gru.input` の分解は `run_decompositions` が**時間方向へ完全展開**するので、
-`Dim("T")` は `Specializations unexpectedly required (T)` で落ちる（T10=200 で 8,434 ノード）。
-差し替え後は **T 非依存の 18 ノード**で、長さバケットも右ゼロ pad も要らない。
+The symbol can be passed through because `nn.GRU` is replaced with `karume::gru_scan` (see
+"Replacement layer" below). `run_decompositions` **fully unrolls** the decomposition of
+`aten.gru.input` along time, so `Dim("T")` fails with `Specializations unexpectedly required (T)`
+(8,434 nodes at T10=200). After the replacement it is **18 nodes independent of T**, and neither
+length buckets nor right zero padding are needed.
 
-`--length` は emit する golden ケースと**トレースの例**の長さで、グラフの受理集合ではない
-（**2 の倍数**だけを受けるのは上と同じ理由）。
+`--length` is the length of the emitted golden cases and of the **tracing example**, not the set of
+lengths the graph accepts (it accepts **only multiples of 2** for the same reason as above).
 
-## 差し替え層（`vowel_detector/patch.py`）
+## Replacement layer (`vowel_detector/patch.py`)
 
-`Crnn.forward` は `nn.GRU.forward` を通さず、双方向 2 層を**単方向 1 層 × 4 本の
-`gru_scan{,_reverse}` + `cat` 2 本**へ割る（入力側 GEMM は素の `linear`）。差し替えが
-`nn.GRU` と**ビット一致**することは `vowel_detector/tests/test_patch.py` が実測で固定し、
-実重みでは `--verify`（複数長）と emit ごとの常設門（{@link _write_io}）が毎回踏む。
+`Crnn.forward` does not go through `nn.GRU.forward`; it splits the 2-layer bidirectional GRU into
+**4 unidirectional single-layer `gru_scan{,_reverse}` + 2 `cat`** (the input-side GEMM is a plain
+`linear`). That the replacement is **bit-identical** to `nn.GRU` is pinned by measurement in
+`vowel_detector/tests/test_patch.py`, and with the real weights `--verify` (several lengths) and the
+standing check on every emit ({@link _write_io}) exercise it every time.
 
-`nn.GRU` モジュール自体は**残す** — `load_state_dict(strict=True)` が受け持つ写しの検査
-（`weight_ih_l{k}` / `bias_hh_l{k}_reverse` … の 22 本）はパラメータの所属ごと変えると
-効かなくなる。差し替えるのは forward の経路だけ。
+The `nn.GRU` module itself is **kept** — the copy check that `load_state_dict(strict=True)` performs
+(the 22 tensors `weight_ih_l{k}` / `bias_hh_l{k}_reverse` …) would stop working if the parameters'
+ownership changed too. Only the forward path is replaced.
 
-MUST: 呼び出し側は**右ゼロ pad で長さを合わせない**。逆方向 GRU が pad 側から状態を持ち
-帰るので、T_true=137 を T=500 まで右ゼロ pad した実測で max abs diff 5.91 / argmax 一致率
-0.971（誤差は末尾に集中 — 先頭 0.138 / 末尾 5.915）。{@link build_cases} の `voiced` を
-T10=138 → 500 で pad しても同型（max abs diff 5.50 / 先頭 0.59 / 末尾 5.50）。単方向なら
-conv の窓端だけで 5.1e-03 に収まるが、この形は双方向なので**成立しない**。記号長にした今、
-pad する理由は 1 つも残っていない（丸める先の格子が無い）。
+MUST: callers **do not match lengths by right zero padding**. The reverse GRU carries state back
+from the padded side, so right-zero-padding T_true=137 to T=500 measured max abs diff 5.91 / argmax
+agreement 0.971 (the error concentrates at the end — 0.138 at the start / 5.915 at the end).
+Padding {@link build_cases}'s `voiced` from T10=138 → 500 gives the same pattern (max abs diff
+5.50 / 0.59 at the start / 5.50 at the end). A unidirectional GRU would stay at 5.1e-03 from the
+conv window edges alone, but this model is bidirectional, so **that does not hold**. Now that the
+length is symbolic, there is no reason left to pad (there is no grid to round up to).
 
-## 何をグラフに載せるか
+## What goes into the graph
 
-`Crnn.forward` そのもの（conv 2 段 → 2 層 BiGRU → Linear）。出す値は **log_softmax 前の
-ロジット**で、後処理（log_softmax → 遷移ペナルティ付き Viterbi → 短区間マージ → cons 吸収
-→ `.lab`）も、特徴抽出（80 次元 log-mel + DSP 3 次元）もホスト側の責務。前者はロジットの
-まま置くと golden の数値回帰の感度が落ちないため、後者はグラフに載せる理由が無いため。
+`Crnn.forward` itself (2 conv stages → 2-layer BiGRU → Linear). The output is the **logits before
+log_softmax**; both the post-processing (log_softmax → Viterbi with transition penalties → merging
+of short runs → cons absorption → `.lab`) and the feature extraction (80-dimensional log-mel + 3
+DSP dimensions) are the host's job. The former, because keeping the output as logits keeps the
+sensitivity of the golden numeric regression; the latter, because there is no reason to put it in
+the graph.
 
-batch は**静的 1**。動的軸は時間 `T` の 1 本だけ（`symbol_names=("T",)`）。
+The batch is **a static 1**. The only dynamic axis is time `T` (`symbol_names=("T",)`).
 
-## 入力の約束（特徴抽出はグラフに載せない）
+## The input contract (feature extraction is not in the graph)
 
-`features` の 83 次元の内訳（正本は上流 `training/src/vowel_detector/features.py`）:
+Breakdown of the 83 dimensions of `features` (source of truth: upstream's
+`training/src/vowel_detector/features.py`):
 
-- 0..79 — log-mel（16kHz / n_fft 512 / win 400 / hop 160 / n_mels 80）を**発話内 mean/std で
-  z 化**したもの
-- 80 — 有声性（自己相関のピーク比・`[0, 1]`）
-- 81 — 発話ピーク比の log エネルギーを 10 で割ったもの（0 以下）
-- 82 — 零交差率（`[0, 1]`）
+- 0..79 — log-mel (16 kHz / n_fft 512 / win 400 / hop 160 / n_mels 80) **z-normalized with the
+  per-utterance mean/std**
+- 80 — voicing (peak ratio of the autocorrelation, `[0, 1]`)
+- 81 — log energy relative to the utterance peak, divided by 10 (0 or below)
+- 82 — zero-crossing rate (`[0, 1]`)
 
-{@link build_cases} の合成ケースはこの値域に収める（実測レンジは同関数の docstring）。
+The synthetic cases of {@link build_cases} stay within these ranges (the measured ranges are in
+that function's docstring).
 
-## 出力レイアウト
+## Output layout
 
-系列名は `vowel-detector-<チェックポイント名>`（既定の `crnn_epoch3.pt` なら
-`vowel-detector-crnn-epoch3`）。**長さは綴りに入らない** — グラフが 1 本だからで、
-系列を分けるのはチェックポイントの世代だけ:
+The series name is `vowel-detector-<checkpoint name>` (`vowel-detector-crnn-epoch3` for the
+default `crnn_epoch3.pt`). **The length is not part of the name** — because there is one graph;
+only the checkpoint generation separates series:
 
-    outputs/series/<系列名>/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
+    outputs/series/<series name>/model.krm             weights, constants + the 2 descriptors
+    outputs/series/<series name>/io.<case>.safetensors input and torch CPU expected output
 
-io のテンソルキー規約は tiny golden / DeBERTa / SigLIP2 と同じ
-（`input.<グラフ入力名>` / `output.<位置>`）。
+The tensor key convention of io is the same as tiny golden / DeBERTa / SigLIP2
+(`input.<graph input name>` / `output.<position>`).
 """
 
 from __future__ import annotations
@@ -119,101 +129,112 @@ from .card import VOWEL_DETECTOR_LICENSE
 from .distribution import VOWEL_DETECTOR_GRAPH_ROLE
 from .patch import gru_forward
 
-#: 実重みの親（手置きの入力素材 — docs/assets-layout.md）。
+#: Parent of the real weights (input material placed by hand — docs/assets-layout.md).
 MODELS_ROOT = INPUTS_ROOT / "vowel-detector"
 
-#: 既定のチェックポイント（`--ckpt` 未指定のとき）。
+#: Default checkpoint (when `--ckpt` is not given).
 DEFAULT_CKPT = MODELS_ROOT / "crnn_epoch3.pt"
 
-#: golden とトレース例の長さ（T10 = 10ms フレーム数 — 200 で 2.0 秒）。**グラフの受理集合では
-#: ない**（記号軸なので任意長が 1 本のグラフで通る）。
+#: Length of the golden cases and the tracing example (T10 = number of 10 ms frames — 200 is 2.0
+#: seconds). **Not the set of lengths the graph accepts** (the axis is symbolic, so any length runs
+#: through the one graph).
 DEFAULT_LENGTH = 200
 
-#: 長さの刻み（出力の 20ms 格子 — モジュール docstring の「長さ軸」）。
+#: Length step (the 20 ms output grid — "The length axis" in the module docstring).
 LENGTH_MULTIPLE = 2
 
-#: 最小の長さ。出力 2 フレーム = 逆方向 GRU が状態を 1 度は運ぶ最小形（1 フレームだと
-#: 時間方向の再帰が消え、展開の誤りが値に出ない）。
+#: Minimum length. Two output frames = the smallest shape in which the reverse GRU carries state at
+#: least once (with one frame the recurrence along time vanishes, and an unrolling error does not
+#: show in the values).
 MIN_LENGTH = 4
 
-#: 記号 `T`（= 20ms フレーム数）の下限。`MIN_LENGTH` と同じ事実の記号側の綴りで、
-#: 0 / 1 特殊化を避ける線でもある（convert の 2 点評価は下限 2 以上を要求する）。
+#: Lower bound of the symbol `T` (= number of 20 ms frames). The symbol-side spelling of the same
+#: fact as `MIN_LENGTH`, and also the line that avoids 0 / 1 specialization (convert's two-point
+#: evaluation requires a lower bound of 2 or more).
 SYM_MIN = MIN_LENGTH // LENGTH_MULTIPLE
 
-#: 記号 `T` の上限 = **配布形が宣言する運用上限**（`vowel_detector/distribution.py` の
-#: `VOWEL_DETECTOR_MAX_FRAMES` が 10ms フレームへ直したものを配り、パイプラインが
-#: 超過を fail loudly にする）。
+#: Upper bound of the symbol `T` = **the operating upper bound the distribution declares**
+#: (`VOWEL_DETECTOR_MAX_FRAMES` in `vowel_detector/distribution.py` ships it converted into 10 ms
+#: frames, and the pipeline fails loudly on an overrun).
 #:
-#: 30,000 × 20ms = **10 分**の音声。導出は最大中間テンソルの大きさ: GRU の入力側 GEMM の
-#: 出力 `gates = [T, 1, 3H] = [T, 1, 384]` f32（{@link vowel_detector.patch.gru_forward} —
-#: 層 × 方向で 4 本作られる）で 1,536 B / 20ms フレームなので、10 分で **46.1 MB**。WebGPU の
-#: 仕様既定 `maxStorageBufferBindingSize` 128 MiB = 134.2 MB に対して 2.9 倍の余裕がある
-#: （karume はアダプタの実測値を要求するので実機ではさらに広い — `gpu/device.ts`）。
+#: 30,000 × 20 ms = **10 minutes** of audio. It is derived from the size of the largest intermediate
+#: tensor: the output of the GRU's input-side GEMM, `gates = [T, 1, 3H] = [T, 1, 384]` f32
+#: ({@link vowel_detector.patch.gru_forward} — 4 of them are built, layer × direction), is 1,536 B
+#: per 20 ms frame, so **46.1 MB** for 10 minutes. That leaves 2.9× headroom against the WebGPU spec
+#: default `maxStorageBufferBindingSize` of 128 MiB = 134.2 MB (karume requests the adapter's
+#: actual value, so on real devices it is wider still — `gpu/device.ts`).
 #:
-#: NOTE: conv 段の実形は入力 `[1, 83, 2T]`（19.2 MB）と conv 出力 `[1, 160, T]`（19.2 MB）で、
-#: どちらも gates より小さい（conv は時間方向を 1/2 に畳むので、出力の長さは `2T` ではない）。
+#: NOTE: the actual shapes of the conv stage are the input `[1, 83, 2T]` (19.2 MB) and the conv
+#: output `[1, 160, T]` (19.2 MB), both smaller than gates (conv halves the time axis, so the
+#: output length is not `2T`).
 #:
-#: MUST: 上げるときは中間テンソルの上限を測り直す。宣言だけ伸ばすと、超過は配布形の門ではなく
-#: **利用者の手元の確保失敗**として出る。
+#: MUST: when raising it, re-measure the upper bound of the intermediate tensors. If only the
+#: declaration grows, an overrun shows up not as a check of the distribution but as **an allocation
+#: failure on the user's machine**.
 SYM_MAX = 30_000
 
 MODEL_FILE = "model.krm"
 
-#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
-#: （{@link vowel_detector.card.VOWEL_DETECTOR_LICENSE}）から引く — 2 表が独立に動く形にしない。
+#: Provenance baked into the container (container-v1 §2.3). The license identifier is taken from the
+#: card side's source of truth ({@link vowel_detector.card.VOWEL_DETECTOR_LICENSE}) — the two tables
+#: must not move independently.
 PROVENANCE = Provenance(license=VOWEL_DETECTOR_LICENSE)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: グラフ入力の名前（= {@link Crnn.forward} の引数名）。export 後に突合してずれていたら
-#: 止める — 位置で渡す以上、黙ってずれると golden の入力だけが入れ替わる。
+#: Name of the graph input (= the parameter name of {@link Crnn.forward}). It is checked after
+#: export and stops on a mismatch — inputs are passed by position, so a silent drift would swap only
+#: the golden inputs.
 INPUT_NAME = "features"
 
-#: `.pt` の外側ラッパに期待する鍵（学習台本が `{"model": state_dict, "epoch": int}` で書く）。
-#: 増減は上流の変更なので fail loudly。
+#: Keys expected in the outer wrapper of the `.pt` (the training script writes
+#: `{"model": state_dict, "epoch": int}`). Any key added or removed is an upstream change, so it
+#: fails loudly.
 WRAPPER_KEYS = ("model", "epoch")
-#: state_dict を持つ鍵。
+#: The key holding the state_dict.
 STATE_DICT_KEY = "model"
 
-#: 畳み込み定数の格納キーの接頭辞（`karume.convert` が焼いた定数に付ける）。重み由来の
-#: initializer と区別するために持つ。
+#: Prefix of the storage keys of folded constants (`karume.convert` gives it to the constants it
+#: bakes). Held to tell them apart from initializers that come from the weights.
 CONST_PREFIX = "const."
 
-#: 特徴の次元（log-mel 80 + DSP 3 — モジュール docstring の「入力の約束」）。
+#: Feature dimensions (log-mel 80 + DSP 3 — "The input contract" in the module docstring).
 N_MELS = 80
 DSP_DIM = 3
 FEATURE_DIM = N_MELS + DSP_DIM
 
-#: モデル形（上流 `crnn.py` の既定値そのまま）。
+#: Model shape (upstream `crnn.py`'s defaults as they are).
 CONV_HIDDEN = 160
 GRU_HIDDEN = 128
 GRU_LAYERS = 2
 
-#: 出力クラス（上流 `phonemes.LIPSYNC_CLASSES` と `assets/feature_config.json` の `classes`）。
+#: Output classes (upstream's `phonemes.LIPSYNC_CLASSES` and `classes` of
+#: `assets/feature_config.json`).
 CLASSES: tuple[str, ...] = ("a", "i", "u", "e", "o", "N", "pau", "cons")
 
-#: 無音クラスの位置と母音クラスの本数（{@link _sanity} が確率質量を引く先）。
+#: Position of the silence class and number of vowel classes (where {@link _sanity} reads the
+#: probability mass).
 PAU_INDEX = CLASSES.index("pau")
 VOWEL_COUNT = 5
 
-#: 合成ケースの乱数（`noise` ケース）。グローバル seed に依存しない。
+#: Random seed of the synthetic cases (the `noise` case). Independent of the global seed.
 SEED = 20260813
 
-#: {@link _sanity} が順序を見るケース名（無音らしい 1 本と有声らしい 1 本）。
+#: Case names whose order {@link _sanity} checks (one silence-like and one voiced-like case).
 SILENCE_CASE = "silence"
 VOICED_CASE = "voiced"
 
 
 class Crnn(nn.Module):
-    """上流 `training/src/vowel_detector/crnn.py` の逐語の写し（モジュール docstring の
-    「依存グループを足さない理由」）。
+    """Verbatim copy of upstream's `training/src/vowel_detector/crnn.py` ("Why no dependency group
+    is added" in the module docstring).
 
-    conv で時間方向を 1/2 に畳み（10ms → 20ms）、2 層 BiGRU（オフライン前提なので双方向）を
-    通して 8 クラスのロジットを出す。既定の寸法は上流と同じで、pytest が tiny な合成重みで
-    同じ経路を回せるように**引数で受ける**（実重みは `load_state_dict(strict=True)` が
-    形ごと検査する）。
+    conv halves the time axis (10 ms → 20 ms), then a 2-layer BiGRU (bidirectional because it is
+    offline) produces logits over 8 classes. The default dimensions are upstream's, and they are
+    **taken as arguments** so that pytest can run the same path with tiny synthetic weights
+    (`load_state_dict(strict=True)` checks the real weights, shapes included).
     """
 
     def __init__(
@@ -241,69 +262,74 @@ class Crnn(nn.Module):
         self.head = nn.Linear(gru_hidden * 2, classes)
 
     def _encode(self, features: torch.Tensor) -> torch.Tensor:
-        """conv 2 段（10ms → 20ms 格子）。差し替え経路と参照経路が共有する前段。"""
+        """The 2 conv stages (10 ms → 20 ms grid). The front end shared by the replacement path and
+        the reference path."""
         return self.conv(features.transpose(1, 2)).transpose(1, 2)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """`[B, T10, feature_dim]` → `[B, T10//2, classes]` のロジット。
+        """`[B, T10, feature_dim]` → logits `[B, T10//2, classes]`.
 
-        GRU は `karume::gru_scan` の並びへ差し替えて通す（モジュール docstring の
-        「差し替え層」）— これが export される経路。
+        The GRU is replaced with a sequence of `karume::gru_scan` ("Replacement layer" in the
+        module docstring) — this is the path that is exported.
         """
         return self.head(gru_forward(self.gru, self._encode(features)))
 
     def reference_forward(self, features: torch.Tensor) -> torch.Tensor:
-        """`nn.GRU` をそのまま通す参照経路（export はしない）。
+        """Reference path that runs `nn.GRU` as is (not exported).
 
-        {@link forward} との差はまさに差し替えぶんなので、両者の**ビット一致**が差し替えの
-        正しさの主張そのものになる（{@link _write_io} の常設門と `--verify`）。
+        The difference from {@link forward} is exactly the replacement, so the **bit identity** of
+        the two is the very claim that the replacement is correct (the standing check of
+        {@link _write_io} and `--verify`).
         """
         hidden, _ = self.gru(self._encode(features))
         return self.head(hidden)
 
 
 def default_out_dir(ckpt: Path) -> Path:
-    """生成物の既定の置き場（`outputs/series/vowel-detector-<ckpt 名>/`）。
+    """Default location of the output (`outputs/series/vowel-detector-<ckpt name>/`).
 
-    綴りへ焼くのは**チェックポイント名だけ** — 長さは記号軸なのでグラフは 1 本きりで、
-    系列を分ける軸は epoch の世代しか残っていない（別の epoch を同じ席へ書くと先の重みが
-    黙って上書きされる）。系列名は既存の流儀（小文字ハイフン）へ倒す。
+    **Only the checkpoint name** goes into the spelling — length is a symbolic axis, so there is
+    only one graph, and the only axis left to separate series is the epoch generation (writing
+    another epoch to the same location would silently overwrite the earlier weights). The series
+    name is normalized to the existing convention (lowercase with hyphens).
     """
     return SERIES_ROOT / f"{MODELS_ROOT.name}-{ckpt.stem.lower().replace('_', '-')}"
 
 
 def assert_length(length: int) -> None:
-    """長さが刻みに乗っていることを見る（モジュール docstring の「長さ軸」）。"""
+    """Check that the length is on the step ("The length axis" in the module docstring)."""
     if length < MIN_LENGTH or length % LENGTH_MULTIPLE:
         raise SystemExit(
-            f"--length {length} は {MIN_LENGTH} 以上の {LENGTH_MULTIPLE} の倍数でない"
-            "（出力は 20ms 格子 = 入力 2 フレームで 1 本）"
+            f"--length {length} is not at least {MIN_LENGTH} and a multiple of {LENGTH_MULTIPLE}"
+            " (the output is on the 20 ms grid = one per two input frames)"
         )
 
 
 def load_checkpoint(ckpt: Path) -> dict[str, torch.Tensor]:
-    """`.pt` の外側ラッパを検査して state_dict を返す。
+    """Check the outer wrapper of the `.pt` and return the state_dict.
 
-    MUST: `map_location="cpu"` — 上流の学習台本は CUDA で保存しているので、指定が無い環境
-    では CUDA デバイスを掴もうとして落ちる。
+    MUST: `map_location="cpu"` — the upstream training script saves on CUDA, so without it an
+    environment tries to grab a CUDA device and fails.
     """
     if not ckpt.is_file():
-        raise SystemExit(f"チェックポイントが見つからない: {ckpt}")
+        raise SystemExit(f"checkpoint not found: {ckpt}")
     obj = torch.load(ckpt, map_location="cpu", weights_only=True)
     if not isinstance(obj, dict) or set(obj) != set(WRAPPER_KEYS):
         keys = sorted(obj) if isinstance(obj, dict) else type(obj).__name__
         raise SystemExit(
-            f"{ckpt}: 外側ラッパの鍵が期待と違う（期待 {sorted(WRAPPER_KEYS)} / 実際 {keys}）"
+            f"{ckpt}: the outer wrapper keys differ from the expected ones"
+            f" (expected {sorted(WRAPPER_KEYS)} / actual {keys})"
         )
     state_dict = obj[STATE_DICT_KEY]
     non_tensor = [key for key, value in state_dict.items() if not torch.is_tensor(value)]
     if non_tensor:
-        raise SystemExit(f"{ckpt}: state_dict にテンソルでない値がある: {sorted(non_tensor)}")
+        raise SystemExit(f"{ckpt}: the state_dict has non-tensor values: {sorted(non_tensor)}")
     return {key: value.detach().contiguous() for key, value in state_dict.items()}
 
 
 def load_module(state_dict: Mapping[str, torch.Tensor]) -> Crnn:
-    """写したモデル定義へ実重みを読み込む（`strict=True` — 写しのずれはここで落ちる）。"""
+    """Load the real weights into the copied model definition (`strict=True` — a drifted copy fails
+    here)."""
     module = Crnn()
     module.load_state_dict(dict(state_dict), strict=True)
     return module.eval()
@@ -312,33 +338,39 @@ def load_module(state_dict: Mapping[str, torch.Tensor]) -> Crnn:
 def _features(
     length: int, mel: torch.Tensor, voicing: float, log_energy: float, zcr: float
 ) -> torch.Tensor:
-    """log-mel 面と定数 DSP 3 次元を繋いで `[1, T10, 83]` にする。"""
+    """Concatenate the log-mel plane and the 3 constant DSP dimensions into `[1, T10, 83]`."""
     dsp = torch.tensor([[voicing, log_energy, zcr]]).expand(length, DSP_DIM)
     return torch.cat([mel, dsp], dim=1).unsqueeze(0)
 
 
 def build_cases(length: int) -> tuple[tuple[str, torch.Tensor], ...]:
-    """golden 4 ケースの `(名前, features)`（合成の特徴 `[1, T10, 83]`）。
+    """`(name, features)` of the 4 golden cases (synthetic features `[1, T10, 83]`).
 
-    実音声を使わないのは、特徴抽出（log-mel + DSP）がグラフの外だから — この台本の主張は
-    「同じ特徴を入れたら同じロジットが出る」で、音声の decode は含まない。
+    No real audio is used because feature extraction (log-mel + DSP) is outside the graph — this
+    script's claim is "the same features in give the same logits out", and audio decoding is not
+    part of it.
 
-    DSP 3 次元は 4 ケースとも実発話（1.1 秒）の実測レンジに収める: 有声性 0.08〜0.90 /
-    log エネルギー比 −0.73〜0 / 零交差率 0.04〜0.85。log-mel の z 値についても
-    {@link SILENCE_CASE} / {@link VOICED_CASE} / `noise` の 3 本は実測レンジ（−1.04〜3.72）の
-    内側で、これが「学習時と同じ分布での突合」を担う。
+    The 3 DSP dimensions of all 4 cases stay within the ranges measured on a real utterance (1.1
+    seconds): voicing 0.08–0.90 / log energy ratio −0.73–0 / zero-crossing rate 0.04–0.85. For the
+    log-mel z values too, the 3 cases {@link SILENCE_CASE} / {@link VOICED_CASE} / `noise` stay
+    inside the measured range (−1.04–3.72), and they carry the "comparison on the same distribution
+    as training".
 
-    `ramp` だけは例外で、値域 **−2.0〜4.0** と実測レンジの**両端の外側まで踏む**回帰用。
-    分布の外を通す 1 本を残すのは、勾配と飽和側の丸めが動く退行を捕まえるため（判別の主張は
-    `ramp` に載せない）。
+    `ramp` alone is the exception: a regression case with the range **−2.0–4.0** that **goes
+    beyond both ends** of the measured range. One case outside the distribution is kept to catch
+    regressions that move the gradient and the rounding on the saturating side (no discrimination
+    claim rests on `ramp`).
 
-    {@link SILENCE_CASE} と {@link VOICED_CASE} は {@link _sanity} の順序が恒真にならない
-    ための対で、`noise` / `ramp` は数値回帰の検出用（値域の端と勾配を踏む）。
+    {@link SILENCE_CASE} and {@link VOICED_CASE} are the pair that keeps the order check of
+    {@link _sanity} from being vacuous, and `noise` / `ramp` detect numeric regressions (they
+    exercise the ends of the range and the gradient).
     """
     generator = torch.Generator().manual_seed(SEED)
-    # 無音: log-mel が一様に下限、有声性も零交差率も低く、エネルギーは発話ピークの −7.2 桁。
+    # Silence: log-mel uniformly at the floor, low voicing and zero-crossing rate, energy −7.2
+    # orders of magnitude below the utterance peak.
     silence = torch.full((length, N_MELS), -1.0)
-    # 有声: 低域 20 本が強く、中域 30 本で下がり、高域 30 本は下限（母音のスペクトル傾斜）。
+    # Voiced: the 20 low bands are strong, the 30 mid bands fall off, the 30 high bands sit at the
+    # floor (the spectral tilt of a vowel).
     voiced = torch.cat(
         [
             torch.full((20,), 2.0),
@@ -364,17 +396,19 @@ def _write_io(
     cases: Sequence[tuple[str, torch.Tensor]],
     out_dir: Path,
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+    """Write each case's input and torch CPU expected output to `io.<case>.safetensors`.
 
-    MUST: 期待値は**参照経路**（`nn.GRU` そのもの — {@link Crnn.reference_forward}）から採り、
-    export される差し替え経路とのビット一致を毎ケース見る。差し替えの誤りが期待値の側へ
-    そのまま乗ると、E2E は「エクスポータとランタイムが一致して両方間違っている」状態で緑に
-    なる（`karume/custom_ops.py` の docstring と同じ罠）。
+    MUST: the expected values are taken from the **reference path** (`nn.GRU` itself —
+    {@link Crnn.reference_forward}), and bit identity with the exported replacement path is checked
+    for every case. If an error of the replacement carried straight into the expected values, the
+    E2E would go green with "the exporter and the runtime agree and both are wrong" (the same trap
+    as the `karume/custom_ops.py` docstring).
 
-    戻り値の 2 本目は sanity 記録用の期待出力（`[1, T10//2, 8]` の形のまま渡す）。
+    The second return value is the expected output for the sanity record (passed in its
+    `[1, T10//2, 8]` shape).
     """
     if len(graph.outputs) != 1:
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（ロジットは 1 本）")
+        raise AssertionError(f"the IR has {len(graph.outputs)} outputs (logits are one output)")
     written: list[str] = []
     logits: dict[str, torch.Tensor] = {}
     for name, features in cases:
@@ -383,17 +417,18 @@ def _write_io(
             patched = module(features)
         if not torch.equal(patched, output):
             raise AssertionError(
-                f"{name}: gru_scan への差し替えが nn.GRU とビット一致しない"
-                f"（maxdiff {float((patched - output).abs().max())}）"
+                f"{name}: the replacement with gru_scan is not bit-identical to nn.GRU"
+                f" (maxdiff {float((patched - output).abs().max())})"
             )
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（ADR 0009 の境界正規化）。ランタイムが
-        # 受け取る形と揃っていないと Deno 側 E2E が golden を読めない。
+        # MUST: io is also lowered to the concrete representation of the IR's semantic dtype (the
+        # boundary normalization of ADR 0009). Unless it matches what the runtime receives, the
+        # Deno-side E2E cannot read the golden.
         tensors = {
             f"{INPUT_PREFIX}{INPUT_NAME}": normalize_boundary_tensor(
-                features, f"{name} の入力 '{INPUT_NAME}'"
+                features, f"{name}: input '{INPUT_NAME}'"
             ),
             f"{OUTPUT_PREFIX}0": normalize_boundary_tensor(
-                output.detach().contiguous(), f"{name} の出力 0"
+                output.detach().contiguous(), f"{name}: output 0"
             ),
         }
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
@@ -404,20 +439,24 @@ def _write_io(
 
 
 def _sanity(logits: Mapping[str, torch.Tensor]) -> dict[str, Any]:
-    """無音らしい入力と有声らしい入力の**順序**を見る（閾値は置かない）。
+    """Check the **order** between a silence-like input and a voiced-like input (no thresholds).
 
-    MUST: 恒真な sanity にしない。ロジットの値域検査も「同じ入力どうしが一致する」も何も
-    検証しない。①無音ケースの平均 P(pau) が全ケース中で最大 ②有声ケースの平均母音質量
-    （a/i/u/e/o の和）が全ケース中で最大、の 2 つの順序で見れば、重みのレイアウト取り違え
-    （時間軸と特徴軸の転置・GRU のゲート順の誤り）も、入力に依存しなくなった出力も落ちる。
+    MUST: do not make the sanity check vacuous. A range check on the logits, or "the same inputs
+    agree", verifies nothing. Checking two orders — (1) the silence case's mean P(pau) is the
+    largest of all cases, (2) the voiced case's mean vowel mass (the sum of a/i/u/e/o) is the
+    largest of all cases — catches a mixed-up weight layout (a transposed time and feature axis, a
+    wrong GRU gate order) as well as an output that no longer depends on its input.
 
-    ケースどうしが**互いに違う**ことも見る（同じ出力が 4 本並ぶのは入力が届いていない形）。
+    It also checks that the cases **differ from each other** (four identical outputs mean the input
+    is not getting through).
     """
     names = sorted(logits)
     for index, name in enumerate(names):
         for other in names[index + 1 :]:
             if torch.equal(logits[name], logits[other]):
-                raise AssertionError(f"{name} と {other} の出力が同一（入力が効いていない）")
+                raise AssertionError(
+                    f"{name} and {other} have identical outputs (the input has no effect)"
+                )
 
     probabilities = {name: tensor.softmax(dim=-1) for name, tensor in logits.items()}
     pause = {name: float(tensor[..., PAU_INDEX].mean()) for name, tensor in probabilities.items()}
@@ -425,8 +464,8 @@ def _sanity(logits: Mapping[str, torch.Tensor]) -> dict[str, Any]:
         name: float(tensor[..., :VOWEL_COUNT].sum(dim=-1).mean())
         for name, tensor in probabilities.items()
     }
-    _assert_largest(SILENCE_CASE, pause, "無音ケースの平均 P(pau) が最大でない")
-    _assert_largest(VOICED_CASE, vowel, "有声ケースの平均母音質量が最大でない")
+    _assert_largest(SILENCE_CASE, pause, "the silence case's mean P(pau) is not the largest")
+    _assert_largest(VOICED_CASE, vowel, "the voiced case's mean vowel mass is not the largest")
     return {
         "pau_mean": {name: round(value, 4) for name, value in pause.items()},
         "vowel_mass_mean": {name: round(value, 4) for name, value in vowel.items()},
@@ -434,7 +473,7 @@ def _sanity(logits: Mapping[str, torch.Tensor]) -> dict[str, Any]:
 
 
 def _assert_largest(expected: str, values: Mapping[str, float], claim: str) -> None:
-    """`expected` が `values` の最大でなければ `claim` を掲げて落とす（順序だけを見る）。"""
+    """Fail with `claim` unless `expected` is the largest in `values` (checks only the order)."""
     winner = max(values, key=lambda name: values[name])
     if winner != expected:
         raise AssertionError(
@@ -443,50 +482,54 @@ def _assert_largest(expected: str, values: Mapping[str, float], claim: str) -> N
 
 
 def assert_checkpoint_bytes(path: Path, state_dict: Mapping[str, torch.Tensor]) -> int:
-    """据えた容器の initializer が上流 `.pt` の state_dict と**バイト一致**することを見る。
+    """Check that the initializers of the published container are **byte-identical** to the
+    state_dict of the upstream `.pt`.
 
-    重みの変換は「読んで書くだけ」なので、値が変われば変換が壊れている。格納形・shape だけ
-    でなく生バイト列で突き合わせる（NaN のビット列や −0.0 まで含めて「値が変わっていない」を
-    主張するため）。この系列は f32 格納しか焼かないので、payload はそのまま上流のバイト列と
-    同じ並びになる。
+    Converting the weights is "read and write only", so changed values mean the conversion is
+    broken. The comparison is on the raw bytes, not just the storage and shape (to claim "the values
+    did not change" down to NaN bit patterns and −0.0). This series bakes only f32 storage, so the
+    payload is laid out exactly like the upstream bytes.
 
-    重み由来でない initializer（畳み込みで焼かれた定数）は `const.` 接頭辞を持つので、
-    それ以外の余剰キーは「重みが黙って書き換えられて別名で入った」形として落とす。
-    一致した本数を返す。
+    Initializers that do not come from the weights (constants baked by folding) carry the `const.`
+    prefix, so any other extra key fails as "a weight silently rewritten and stored under another
+    name". Returns the number of tensors that matched.
 
-    MUST: 読むのは**part 列の和**（{@link _shared.container_read.read_stored}）— 代表 path
-    1 本だけを開く形にすると、テンソルを 1 本も持たない part 0 を読んで「全部欠けている」に
-    なる。piece 分割された席も供給計画が行の順に畳むので、突合の意味は分割の有無で変わらない。
+    MUST: read **the union of the part sequence** ({@link _shared.container_read.read_stored}) —
+    opening only the one representative path would read part 0, which holds no tensors at all, and
+    report "everything is missing". Entries split into pieces are folded back in row order by the
+    supply plan, so the meaning of the comparison does not depend on whether there is a split.
     """
     stored = read_stored(path)
     missing = sorted(set(state_dict) - set(stored))
     if missing:
-        raise AssertionError(f"{path}: state_dict の鍵が initializer に無い: {missing}")
+        raise AssertionError(f"{path}: state_dict keys missing from the initializers: {missing}")
     extra = sorted(key for key in set(stored) - set(state_dict) if not key.startswith(CONST_PREFIX))
     if extra:
-        raise AssertionError(f"{path}: 重み由来でない initializer がある: {extra}")
+        raise AssertionError(f"{path}: initializers that do not come from the weights: {extra}")
     for name in sorted(set(stored) & set(state_dict)):
         source = state_dict[name]
         found = stored[name]
         if found.layout != "f32" or found.shape != tuple(source.shape):
             raise AssertionError(
-                f"テンソル '{name}': 格納 / shape 不一致"
-                f"（元 {source.dtype} {tuple(source.shape)} /"
-                f" 読み直し {found.layout} {found.shape}）"
+                f"tensor '{name}': storage / shape mismatch"
+                f" (source {source.dtype} {tuple(source.shape)} /"
+                f" read back {found.layout} {found.shape})"
             )
         if found.payload != source.numpy().tobytes():
-            raise AssertionError(f"テンソル '{name}': バイト列が一致しない")
+            raise AssertionError(f"tensor '{name}': the bytes do not match")
     return len(state_dict)
 
 
 def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。
+    """Write the IR container and the golden io, and return a summary.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（入力の並び・ckpt バイト一致・sanity）を通してから
-    据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は
-    同じ壊れたモジュールから採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開して
-    よいか」の綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の
-    原語 {@link karume.artifacts.staged_publication}）。
+    MUST: the output is written to a staging directory and published only after passing **every
+    check** (input order, ckpt byte identity, sanity). Placing it in the final location before the
+    checks lets a failed run leave behind "assets that pass the acceptance checks" — the io golden
+    is taken from the same broken module, so they agree with each other and the TS-side comparison
+    **goes green** ("when it may be published" is spelled out in
+    {@link _shared.decode_series._publish}; the discipline of the swap and the clean-up is the core
+    primitive {@link karume.artifacts.staged_publication}).
     """
     assert_length(length)
     state_dict = load_checkpoint(ckpt)
@@ -497,29 +540,35 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
     _, example = cases[0]
     started = time.monotonic()
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory (the primitive does not create it — it only hands over a
+        # path).
         staged.mkdir()
         graph = export_to_file(
             module,
             (example,),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
-            # （`vowel-detector-<チェックポイント名>`）であって部品名ではない（container-v1 §2.1）。
+            # The graph name is the **component name** (= the weights key of karume.json). It is not
+            # derived from the directory name — this family's container sits directly in the series,
+            # so the directory name is the series name (`vowel-detector-<checkpoint name>`), not the
+            # component name (container-v1 §2.1).
             graph_name=VOWEL_DETECTOR_GRAPH_ROLE,
-            # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
-            # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。
+            # MUST: the symbol goes on the 20 ms output grid (`2*Dim("T")` — "The length axis" in
+            # the module docstring). With a plain `Dim("T")` the conv output becomes a floor
+            # division, which does not fit the dimension language.
             dynamic_shapes={INPUT_NAME: {1: 2 * Dim("T", min=SYM_MIN, max=SYM_MAX)}},
             symbol_names=("T",),
         )
         elapsed = time.monotonic() - started
         declared = tuple(item.name for item in graph.inputs)
         if declared != (INPUT_NAME,):
-            raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
+            raise AssertionError(
+                f"the graph inputs are {declared}, not the expected {(INPUT_NAME,)}"
+            )
         matched = assert_checkpoint_bytes(staged / MODEL_FILE, state_dict)
         written, logits = _write_io(module, graph, cases, staged)
-        # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        # MUST: evaluate before publishing (the only non-vacuous check of this series — on failure
+        # the whole staging directory is removed).
         sanity = _sanity(logits)
     return {
         "dir": str(out_dir),
@@ -547,9 +596,10 @@ def _diff_entry(
     got: Mapping[str, torch.Tensor],
     expected: Mapping[str, torch.Tensor],
 ) -> dict[str, Any]:
-    """1 段分の同値レポート（ケース名 → maxdiff と、全ケースのビット一致）。
+    """Equivalence report for one stage (case name → maxdiff, and bit identity over all cases).
 
-    `bit_exact` は「差 0」より強い主張（`0.0 == -0.0` は差 0 だがビットは違う）。
+    `bit_exact` is a stronger claim than "difference 0" (`0.0 == -0.0` has difference 0, but the
+    bits differ).
     """
     return {
         "stage": stage,
@@ -561,21 +611,23 @@ def _diff_entry(
     }
 
 
-#: `--verify` が踏む長さ（`--length` に加えて**複数長**を見る）。差し替えの誤りの中には
-#: 長さに依存して現れるもの（逆方向の走査境界・層間の連結順）があり、1 長だけでは踏めない。
+#: Lengths `--verify` exercises (**several lengths** on top of `--length`). Some errors of the
+#: replacement appear only at certain lengths (the scan boundary of the reverse direction, the
+#: concatenation order between layers), and one length alone cannot hit them.
 VERIFY_LENGTHS: tuple[int, ...] = (MIN_LENGTH, 6, 18, 137 * 2)
 
 
 def verify_patch(ckpt: Path, length: int) -> list[dict[str, Any]]:
-    """`gru_scan` への差し替えが `nn.GRU` と同値であることを実測する（`--verify`）。
+    """Measure that the replacement with `gru_scan` is equivalent to `nn.GRU` (`--verify`).
 
-    他の台本の `--verify`（差し替え前後の eager 同値）と同じ主張で、相手は
-    {@link Crnn.reference_forward} = 上流そのままの `nn.GRU` 経路。ここが崩れると
-    「グラフは焼けるが数値が別物」になるので、**bit_exact が主張の中身**（差 0 より強い —
-    {@link _diff_entry}）。
+    The same claim as the other scripts' `--verify` (eager equivalence before and after the
+    replacement), against {@link Crnn.reference_forward} = upstream's `nn.GRU` path as is. If this
+    breaks, "the graph bakes but the numbers are something else", so **bit_exact is the substance of
+    the claim** (stronger than difference 0 — {@link _diff_entry}).
 
-    NOTE: emit しないのは他の台本と同じ形に揃えるためで、こちらにプロセス汚染の危険は無い
-    （クラス属性の差し替えを一切しない — 差し替えは `Crnn.forward` の中だけ）。
+    NOTE: it does not emit only to match the shape of the other scripts; there is no risk of process
+    contamination here (no class attribute is replaced at all — the replacement lives only inside
+    `Crnn.forward`).
     """
     assert_length(length)
     module = load_module(load_checkpoint(ckpt))
@@ -588,7 +640,7 @@ def verify_patch(ckpt: Path, length: int) -> list[dict[str, Any]]:
         entry = _diff_entry(f"gru-scan-t{probe}", "bit-exact", got, reference)
         if not entry["bit_exact"]:
             raise AssertionError(
-                f"T10={probe}: gru_scan への差し替えが nn.GRU とビット同一でない:"
+                f"T10={probe}: the replacement with gru_scan is not bit-identical to nn.GRU:"
                 f" maxdiff={entry['maxdiff']}"
             )
         entries.append(entry)
@@ -602,20 +654,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--length",
         type=int,
         default=DEFAULT_LENGTH,
-        help=f"golden ケースの 10ms フレーム数 T10（{LENGTH_MULTIPLE} の倍数・既定"
-        f" {DEFAULT_LENGTH}）。**グラフの受理集合ではない** — 時間軸は記号なので、"
-        "焼かれる 1 本のグラフが任意長を受ける",
+        help=f"number of 10 ms frames T10 of the golden cases (a multiple of {LENGTH_MULTIPLE},"
+        f" default {DEFAULT_LENGTH}). **Not the set of lengths the graph accepts** — the time axis"
+        " is symbolic, so the one baked graph accepts any length",
     )
     parser.add_argument(
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は outputs/series/vowel-detector-<ckpt 名>/）",
+        help="output directory (default: outputs/series/vowel-detector-<ckpt name>/)",
     )
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="gru_scan への差し替えと nn.GRU の同値を実測する（emit はしない）",
+        help="measure the equivalence of the gru_scan replacement and nn.GRU (does not emit)",
     )
     args = parser.parse_args(argv)
     if args.verify:

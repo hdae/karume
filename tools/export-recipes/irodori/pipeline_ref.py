@@ -1,9 +1,11 @@
-r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop latent golden）。
+r"""Numeric source of truth for the **host-side algorithm** of Irodori-TTS v4 (full-loop latent
+golden).
 
-`irodori/export.py` がグラフを、`irodori/tokenizer_ref.py` がテキスト前処理の資産を出すのに対し、
-こちらが出すのは「グラフを 7 本回して latent を作るまで」の**最終値**。W3 のホスト実装
-（TS のパイプライン）が突き合わせる統合門の参照値そのもので、値は
-**export したグラフ基準**（= `irodori/export.py` の Graph ラッパ = eager 同値実装）で採る。
+Where `irodori/export.py` emits the graphs and `irodori/tokenizer_ref.py` the text-preprocessing
+assets, this emits the **final values** of "running the 7 graphs until a latent is produced". It
+is the reference for the integration check that W3's host implementation (the TS pipeline)
+compares against, and the values are taken **on the exported graphs** (= the Graph wrappers of
+`irodori/export.py` = the eager-equivalent implementation).
 
     cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref
@@ -11,58 +13,71 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i8
     uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i4
 
-`--dtype f16` / `--dtype i8` / `--dtype i4` は**別系列**
-（`outputs/series/irodori-v4-small-{f16,i8,i4}/pipeline/`）へ書く。丸めは
-`irodori.export.fake_quant` を load 直後に当てるので、golden も上流突合の参照も**同じ丸めた
-重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
+`--dtype f16` / `--dtype i8` / `--dtype i4` write to **separate series**
+(`outputs/series/irodori-v4-small-{f16,i8,i4}/pipeline/`). Rounding applies
+`irodori.export.fake_quant` right after load, so both the golden and the upstream reference are
+computed **with the same rounded weights** (ADR 0018 / 0019 / 0027 / 0050 — the golden is rebaked
+per series).
 
-`--dtype i4`（配布の quant 席 `i8+dit4`）だけは丸めが 2 段になる: 段 1 は全役割を **i8 席と同一の
-fake-quant**、段 2 は **`--dtype i4` で export 済みの DiT の 2 コンテナ（`dit` / `dit-context`）を
-読み戻して**ラッパ所有パラメタを上書きする（{@link restore_dit_from_i4_series}）。したがってこの
-系列は**export を先に走らせてある**ことが前提。
+Only `--dtype i4` (the distribution's quant preset `i8+dit4`) rounds in two stages: stage 1 is
+**the same fake-quant as the i8 preset** for every role, and stage 2 **reads back the two DiT
+containers (`dit` / `dit-context`) exported with `--dtype i4`** and overwrites the parameters
+the wrappers own ({@link restore_dit_from_i4_series}). This series therefore assumes **the
+export has already been run**.
 
-出力（既定 `outputs/series/irodori-v4-small{,-f16,-i8,-i4}/pipeline/`・`.gitignore` 配下）:
+Output (default `outputs/series/irodori-v4-small{,-f16,-i8,-i4}/pipeline/`, under `.gitignore`):
 
-    meta.json                入力テキスト / caption / S / seed / CFG scale / forward 数 /
-                             t スケジュール / 供給源、および常設門の実測値
-    case.<name>.safetensors  参照 latent・初期ノイズ・token id・最終 z
-    t-embed.safetensors      40 step で実際に使う t と、そのホスト式 `t_embed` 表 `[40,512]`
+    meta.json                input text / caption / S / seed / CFG scale / forward count /
+                             t schedule / sources, and the measured values of the standing checks
+    case.<name>.safetensors  reference latent, initial noise, token ids, final z
+    t-embed.safetensors      the t actually used over 40 steps and its host-formula `t_embed`
+                             table `[40,512]`
 
-## ホストが担う段（このファイルが写している唯一のもの）
+## The stages the host owns (the only thing this file copies)
 
-1. 前処理 → tokenize → BOS 前置（body は `max_*_len - 1` で切る）。前処理は種別で違い、
-   text は `normalize_text` → strip・caption は **strip のみ**（上流 `_synthesize` の綴り）
-2. `backbone` → `text-proj` / `caption-proj`（**列を詰めたまま**呼ぶ = 静的方式）
-3. 参照 latent を `speaker_patch_size` で patch → `speaker` → 平均トークン前置
-4. `duration` の 5 入力を組む（`speaker_vec` = 平均トークン / `caption_vec` =
-   **`caption-proj` の第 2 出力**の masked mean）
-5. S 決定: `expm1(log_frames)` → 銀行家丸め → `[min_frames, max_frames]` へ clamp
-6. 条件 state を Tmax へ右 pad ・区間マスクを組む（ADR 0047）→ `dit-context` を**1 回だけ**回して
-   条件側 K/V を作る（ADR 0114 — 以降の全 forward がこの値を共有する）
-7. Euler 40 step + CFG independent（`t ∈ [0.5, 1.0]` の step だけ・uncond は
-   **該当区間のマスクを全 False にするだけ** — ADR 0047 決定 1）
+1. preprocessing → tokenize → prepend BOS (the body is cut at `max_*_len - 1`). Preprocessing
+   differs by kind: text is `normalize_text` → strip, caption is **strip only** (the spelling of
+   upstream `_synthesize`)
+2. `backbone` → `text-proj` / `caption-proj` (called **with the sequence kept packed** = the
+   static scheme)
+3. patch the reference latent by `speaker_patch_size` → `speaker` → prepend the mean token
+4. build the 5 inputs of `duration` (`speaker_vec` = the mean token / `caption_vec` = the masked
+   mean of **the second output of `caption-proj`**)
+5. decide S: `expm1(log_frames)` → banker's rounding → clamp to `[min_frames, max_frames]`
+6. right-pad the condition states to Tmax and build the segment mask (ADR 0047) → run
+   `dit-context` **only once** to build the condition-side K/V (ADR 0114 — every later forward
+   shares these values)
+7. Euler 40 steps + independent CFG (only at steps with `t ∈ [0.5, 1.0]`; uncond **only sets the
+   mask of the affected segment to all False** — ADR 0047 decision 1)
 
-`t_embed` はホスト生成（`cos` が IR の語彙に無い — ADR 0043）。**式は写さず上流の
-`get_timestep_embedding` を呼ぶ**。平均トークン前置・latent の patch・caption の masked mean も
-同じ理由で上流の関数／メソッドを呼ぶ。写しているのは 5 と 7（上流では `_synthesize` /
-`sample_euler_rf_cfg` の内側に埋まっていて関数として取り出せない）だけで、その 2 つは
-**上流の正本経路との突合**で守る（下の門）。
+`t_embed` is generated on the host (`cos` is not in the IR vocabulary — ADR 0043). **The formula
+is not copied; upstream's `get_timestep_embedding` is called.** For the same reason the mean
+token prefix, the latent patching and the caption's masked mean also call upstream functions /
+methods. Only 5 and 7 are copied (upstream buries them inside `_synthesize` /
+`sample_euler_rf_cfg`, so they cannot be called as functions), and those two are guarded by
+**comparison against upstream's canonical path** (the checks below).
 
-## 何を門にするか
+## What the checks are
 
-emit の前に全て実測し、1 つでも外れたら**何も書かない**（ADR 0005 の fail loudly）:
+Everything is measured before emit, and if any one fails **nothing is written** (ADR 0005's fail
+loudly):
 
-- **S の決定が上流と一致**すること（上流 `predict_duration_log_frames` から独立に S を出す）
-- **最終 z が上流の `sample_euler_rf_cfg` と一致**すること（2 段判定）。
-  グラフ経路は「条件 KV を cond の state から 1 組だけ作る（上流は変種ごとのキャッシュを batch で
-  作る）・列を詰めて backbone を呼ぶ・uncond をマスク還元」の 3 点で上流と実装が違うので
-  **ビット一致はしない**。1 段目は固定閾値
-  {@link EULER_REFERENCE_ATOL}。誤差の蓄積・増幅のされ方はモデル × 入力 × 丸めで桁ごと
-  動く（v4.1 f16 で実測 37,107 倍 — 定数コメントの追記 2026-09-01）ので、超過時は増幅率を
-  実測し {@link euler_reference_within_sensitivity} で正規化判定する。それでも落ちたら
-  CFG の合成式・t スケジュール・マスクの区間割りのどれかが違っている
-- CFG が**実際に効いている**こと（cond のみで回した z との差 — 恒真化の遮断）
-- 初期ノイズが上流と**ビット一致**すること（同じ seed・同じ生成順）
+- **S is decided as upstream decides it** (S is computed independently from upstream
+  `predict_duration_log_frames`)
+- **the final z matches upstream's `sample_euler_rf_cfg`** (a two-stage judgement).
+  The graph path differs from upstream's implementation in three points — "the condition KV is
+  built once from the cond state (upstream builds a cache per variant in a batch), the backbone
+  is called on the packed sequence, uncond is reduced to masking" — so it is **not bit-identical**.
+  The first stage is the fixed threshold
+  {@link EULER_REFERENCE_ATOL}. How the error accumulates and is amplified moves by orders of
+  magnitude with model × input × rounding (37,107× measured for v4.1 f16 — the addendum of
+  2026-09-01 in the constant's comment), so when it is exceeded the amplification factor is
+  measured and the result is judged normalized by {@link euler_reference_within_sensitivity}. If
+  it still fails, the CFG combination formula, the t schedule or the segment split of the mask
+  differs
+- CFG **actually has an effect** (the difference from the z run with cond only — blocks the check
+  from becoming vacuous)
+- the initial noise is **bit-identical** to upstream's (same seed, same generation order)
 """
 
 from __future__ import annotations
@@ -95,91 +110,106 @@ CASE_PREFIX = "case."
 CASE_SUFFIX = ".safetensors"
 T_EMBED_FILE = "t-embed.safetensors"
 
-#: Euler の step 数（上流 `SamplingRequest.num_steps` の既定）。
+#: Number of Euler steps (the default of upstream `SamplingRequest.num_steps`).
 NUM_STEPS = 40
 
-#: t スケジュールの初期倍率（`rf.sample_euler_rf_cfg` の `init_scale`）。
+#: Initial factor of the t schedule (`init_scale` of `rf.sample_euler_rf_cfg`).
 INIT_SCALE = 0.999
 
-#: CFG を掛ける t の範囲（上流 `SamplingRequest.cfg_min_t` / `cfg_max_t` の既定）。
+#: The t range where CFG applies (the defaults of upstream `SamplingRequest.cfg_min_t` /
+#: `cfg_max_t`).
 CFG_MIN_T, CFG_MAX_T = 0.5, 1.0
 
-#: CFG の強さ（同 `cfg_scale_text` / `cfg_scale_speaker` / `cfg_scale_caption` の既定）。
-#: 並びは ADR 0047 の uncond 変種と同じ（`DIT_UNCOND_VARIANTS`）。
+#: CFG strength (the defaults of `cfg_scale_text` / `cfg_scale_speaker` / `cfg_scale_caption`
+#: there). The order is that of ADR 0047's uncond variants (`DIT_UNCOND_VARIANTS`).
 CFG_SCALES: Mapping[str, float] = {"text": 3.0, "speaker": 5.0, "caption": 3.0}
 
-#: S の clamp 範囲を決める秒数（上流 `SamplingRequest.min_seconds` / `max_seconds` の既定）。
-#: フレーム数への換算は `CODEC_FRAME_RATE`（= sample_rate / hop_length）で行う。
+#: Seconds that set the clamp range of S (the defaults of upstream
+#: `SamplingRequest.min_seconds` / `max_seconds`). Conversion to frames uses `CODEC_FRAME_RATE`
+#: (= sample_rate / hop_length).
 MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
 
-#: 最終 z が上流 `sample_euler_rf_cfg` と一致すると見なす最大絶対差。
+#: The largest absolute difference at which the final z counts as matching upstream
+#: `sample_euler_rf_cfg`.
 #:
-#: 実測（下の常設門が毎回出す・40 step）は **full = 1.03e-4 / no-ref = 1.80e-5** で、z の
-#: 値域は \|z\| 上端 5.10 / 4.33。閾値 1e-3 は実測最悪の約 9.7 倍で、値域の 1/5000。
-#: 差の出どころは 3 つとも**構造的**: ①グラフ経路は条件 KV を cond の state から 1 組だけ
-#: 作る（上流は変種ごとのキャッシュを cond / uncond の batch で作る）②backbone を詰めた列で呼ぶ
-#: （上流は 256 へ pad —
-#: `_static_scheme_evidence` が 1e-5 台と実測）③uncond をマスク還元で表す（上流は
-#: state 0 + マスク 0）。いずれも数学的には恒等で、残るのは f32 の縮約順序差だけ。
-#: 40 step の Euler がそれを増幅した結果がこの桁で（1 step では 1.4e-5 / 4.5e-6 と実測）、
-#: **式の取り違え**（CFG の符号・スケール・t スケジュール・マスクの区間割り）は値域と
-#: 同じ O(1) で出る — 実際、CFG の有無だけで z は 5.56 / 3.23 動く（`cfgEffectMaxAbs`）。
+#: Measured (the standing check below prints it on every run; 40 steps): **full = 1.03e-4 /
+#: no-ref = 1.80e-5**, with z's range topping out at \|z\| 5.10 / 4.33. The threshold 1e-3 is
+#: about 9.7× the measured worst and 1/5000 of the range. All three sources of the difference are
+#: **structural**: ① the graph path builds the condition KV once from the cond state (upstream
+#: builds a cache per variant in the cond / uncond batch) ② the backbone is called on the packed
+#: sequence (upstream pads to 256 —
+#: `_static_scheme_evidence` measured it in the 1e-5 range) ③ uncond is expressed by masking
+#: (upstream uses state 0 + mask 0). Each is mathematically an identity; what remains is only the
+#: difference in f32 reduction order. 40 Euler steps amplify that to this order (1.4e-5 / 4.5e-6
+#: measured for 1 step), while **a mistaken formula** (the CFG sign or scale, the t schedule, the
+#: mask's segment split) shows up at O(1), the same as the range — indeed, CFG alone moves z by
+#: 5.56 / 3.23 (`cfgEffectMaxAbs`).
 #:
-#: **圧縮系列（`--dtype f16` / `i8` / `i4`）でも同じ閾値を掛ける**: 丸めはグラフ経路と上流経路の
-#: **両方**へ同じ 1 回だけ当たる（`fake_quant` が丸めた `dit` を上流 `sample_euler_rf_cfg` も
-#: そのまま使う。i4 の読み戻しも同じ `dit` の Parameter を上書きするので同様）ので、ここで測る
-#: 差は f32 系列と同じ「実装差だけ」であり、量子化誤差は両辺で相殺する。
-#: 桁が変わりうるのは丸めが条件数の悪い領域を踏んだ場合だけで、それは**実測で決着させる**
-#: （閾値を系列ごとに割るのは、実測が実際に外れてからにする — 先回りして緩めると、外れた
-#: ことが分からなくなる）。
+#: **The compressed series (`--dtype f16` / `i8` / `i4`) use the same threshold**: rounding hits
+#: **both** the graph path and the upstream path exactly once and identically (upstream
+#: `sample_euler_rf_cfg` uses the `dit` that `fake_quant` rounded as is; the i4 read-back
+#: overwrites the Parameters of that same `dit`, so likewise), so the difference measured here is
+#: "the implementation difference only", as in the f32 series, and the quantization error cancels
+#: on both sides.
+#: The order of magnitude can change only when rounding lands in an ill-conditioned region, and
+#: that is **settled by measurement** (split the threshold per series only after a measurement
+#: actually fails — loosening it in advance would hide the failure).
 #:
-#: 追記（2026-09-01）: v4.1-small の f16 で実際に外れた（full = 1.33e-2）。実測で決着させた
-#: 結果は「実装差の種は従来水準のまま、40 step の反復がそれを 37,107 倍に蓄積・増幅する
-#: 入力だった」（v4-small f16 は 353 倍 —
-#: docs/research/2026-09-01-irodori-v41-euler-sensitivity.md）。
-#: 蓄積後の値はモデル × 入力 × 丸めで桁ごと動くため、この定数は**1 段目（fast path）**に
-#: 格下げし、超過時は増幅率を実測して正規化する 2 段目（下の
-#: {@link euler_reference_within_sensitivity}）で合否を決める。
+#: Addendum (2026-09-01): v4.1-small f16 actually failed (full = 1.33e-2). Settled by measurement:
+#: "the seed of the implementation difference is at the usual level, and this input made the
+#: 40-step iteration accumulate and amplify it 37,107×" (v4-small f16 is 353× —
+#: docs/research/2026-09-01-irodori-v41-euler-sensitivity.md).
+#: The accumulated value moves by orders of magnitude with model × input × rounding, so this
+#: constant was demoted to **the first stage (fast path)**; when it is exceeded, the second stage
+#: measures the amplification factor and normalizes by it to decide pass or fail
+#: ({@link euler_reference_within_sensitivity} below).
 EULER_REFERENCE_ATOL = 1e-3
 
-#: 2 段目: 増幅率で正規化した実装差の上限。実測（2026-09-01・v4 / v4.1 × f32 / f16 / i8 の
-#: 10 セル）の worst / amp は 1.6e-8〜2.2e-6 に収まる — ここはその上限の約 2 倍。
+#: Second stage: the ceiling of the implementation difference normalized by the amplification
+#: factor. Measured (2026-09-01, 10 cells of v4 / v4.1 × f32 / f16 / i8), worst / amp falls in
+#: 1.6e-8 to 2.2e-6 — this is about twice that upper end.
 EULER_NOISE_PER_AMP = 5e-6
 
-#: 2 段目: 増幅率と無関係に掛ける絶対上限。式の取り違え（CFG の符号・スケール・t スケジュール・
-#: マスク区間）は O(1) で出る（`cfgEffectMaxAbs` 実測 3〜5）ので、その遥か下で止める。
+#: Second stage: an absolute ceiling applied regardless of the amplification factor. A mistaken
+#: formula (the CFG sign or scale, the t schedule, the mask segments) shows up at O(1)
+#: (`cfgEffectMaxAbs` measures 3 to 5), so this stops far below that.
 EULER_REFERENCE_ABS_CEILING = 5e-2
 
-#: 増幅率実測の摂動幅。実装差の種（f32 の縮約順序差 ~1e-7）より十分大きく、
-#: 線形応答が読める大きさ。
+#: Perturbation size for measuring the amplification factor. Large enough relative to the seed
+#: of the implementation difference (f32 reduction-order differences ~1e-7) for the linear
+#: response to be readable.
 SENSITIVITY_EPS = 1e-6
 
 
 def euler_reference_within_sensitivity(worst: float, amp: float) -> bool:
-    """2 段目の合否 — 増幅率 `amp` で正規化した実装差が種の水準か、かつ絶対上限内か。
+    """Second-stage pass / fail — whether the implementation difference normalized by the
+    amplification factor `amp` is at the seed level, and within the absolute ceiling.
 
-    `worst` は上流との最終 z の最大絶対差、`amp` は初期 noise への微小摂動が最終 z へ届く
-    倍率（{@link run_case} の `sensitivity_probe`）。1 段目（{@link EULER_REFERENCE_ATOL}）を
-    超えた場合にだけ呼ばれる。
+    `worst` is the largest absolute difference of the final z from upstream, `amp` is the factor
+    by which a tiny perturbation of the initial noise reaches the final z (the
+    `sensitivity_probe` of {@link run_case}). Called only when the first stage
+    ({@link EULER_REFERENCE_ATOL}) is exceeded.
     """
     return worst <= amp * EULER_NOISE_PER_AMP and worst <= EULER_REFERENCE_ABS_CEILING
 
 
-#: CFG が実際に効いていることを見る下限（cond のみで回した z との最大絶対差）。
-#: MUST: 恒真にしない — スケールを 0 にしたり uncond のマスクを間違えて cond と同じにすると、
-#: 上流との突合は**両方が同じ間違いをする**限り通ってしまう（上流も同じ入力で回すため）。
+#: The lower bound for CFG actually having an effect (the largest absolute difference from the
+#: z run with cond only).
+#: MUST: not vacuous — setting the scale to 0, or getting the uncond mask wrong so that it equals
+#: cond, would still pass the comparison with upstream **as long as both make the same mistake**
+#: (upstream is run on the same inputs).
 CFG_EFFECT_MIN = 1e-2
 
 
 class ReferenceSpec(NamedTuple):
-    """参照 latent の供給元（**合成のまま維持** — 第 4 波で実音声 latent は採れるように
-    なった〈`irodori/dacvae/host.py`〉が、この golden を差し替えると突合値が全て動くので既存を守る。
-    実音声の値域は speaker 単体門の実 latent ケース〈`irodori.export.SPEAKER_REAL_CASES`〉が
-    受け持つ）。
+    """Source of the reference latent (**kept synthetic** — wave 4 made real-speech latents
+    available [`irodori/dacvae/host.py`], but replacing this golden would move every compared
+    value, so the existing one is kept. The real-speech range is covered by the real-latent cases
+    of the standalone speaker check [`irodori.export.SPEAKER_REAL_CASES`]).
 
-    `frames` は patch 前のフレーム数で、`speaker_patch_size` で割り切れる値にする
-    （割り切れない端は上流 `patch_sequence_with_mask` が捨てるので、golden の入力と
-    実際に使われた列がずれる）。
+    `frames` is the frame count before patching and must be divisible by `speaker_patch_size`
+    (upstream `patch_sequence_with_mask` drops a remainder, so the golden's input and the sequence
+    actually used would diverge).
     """
 
     frames: int
@@ -187,7 +217,7 @@ class ReferenceSpec(NamedTuple):
 
 
 class PipelineCase(NamedTuple):
-    """full-loop の 1 ケース。`reference` が `None` なら参照なし（`no_ref`）経路。"""
+    """One full-loop case. `reference` of `None` means the no-reference (`no_ref`) path."""
 
     name: str
     why: str
@@ -197,16 +227,16 @@ class PipelineCase(NamedTuple):
     seed: int
 
 
-#: full-loop の 2 ケース。
+#: The two full-loop cases.
 #:
-#: - `full` — 実テキスト + 参照 latent + caption あり。CFG は 3 本とも有効（1 step あたり
-#:   4 forward）
-#: - `no-ref` — 参照なし（speaker はホストがゼロを置く・speaker CFG off）+ caption 空文字
-#:   （caption CFG off・マスク全 0）。1 step あたり 2 forward
+#: - `full` — real text + reference latent + caption. All three CFGs are active (4 forwards per
+#:   step)
+#: - `no-ref` — no reference (the host puts zeros for speaker, speaker CFG off) + empty caption
+#:   (caption CFG off, mask all 0). 2 forwards per step
 PIPELINE_CASES: tuple[PipelineCase, ...] = (
     PipelineCase(
         name="full",
-        why="参照あり + caption あり（CFG 3 本・1 step 4 forward）",
+        why="with reference + caption (3 CFGs, 4 forwards per step)",
         text="今日は近くの店まで歩いて行きました。とても良い天気でしたね。",
         caption="若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
         reference=ReferenceSpec(frames=124, seed=201),
@@ -214,7 +244,7 @@ PIPELINE_CASES: tuple[PipelineCase, ...] = (
     ),
     PipelineCase(
         name="no-ref",
-        why="参照なし（speaker ゼロ短絡・CFG off）+ caption 空（マスク全 0・CFG off）",
+        why="no reference (speaker zero short-circuit, CFG off) + empty caption (mask 0, CFG off)",
         text="本日はお越しいただき、誠にありがとうございます。",
         caption="",
         reference=None,
@@ -224,23 +254,26 @@ PIPELINE_CASES: tuple[PipelineCase, ...] = (
 
 
 def t_schedule(num_steps: int) -> torch.Tensor:
-    """`[num_steps+1]` の t 列（上流 `sample_euler_rf_cfg` の linear スケジュールそのもの）。
+    """The t sequence `[num_steps+1]` (exactly the linear schedule of upstream
+    `sample_euler_rf_cfg`).
 
-    MUST: 上流と同じ式（`(1 - linspace(0,1,n+1)) * 0.999`）で作る。TS 側は閉形式
-    `0.999 * (1 - i/n)` で作る想定なので、**両者がビット一致するか**を
-    {@link closed_form_matches} が毎回実測する（外れたら TS 側の式を合わせる）。
+    MUST: built with the same formula as upstream (`(1 - linspace(0,1,n+1)) * 0.999`). The TS
+    side is expected to use the closed form `0.999 * (1 - i/n)`, so
+    {@link closed_form_matches} measures on every run **whether the two are bit-identical** (if
+    not, the TS formula is adjusted).
     """
     return (1.0 - torch.linspace(0.0, 1.0, num_steps + 1)) * INIT_SCALE
 
 
 def closed_form_matches(schedule: torch.Tensor, num_steps: int) -> float:
-    """閉形式 `0.999 * (1 - i/n)` と上流スケジュールの最大絶対差（0 ならビット一致）。
+    """Largest absolute difference between the closed form `0.999 * (1 - i/n)` and the upstream
+    schedule (0 means bit-identical).
 
-    実測: `num_steps=40` では **5.96e-8**（ビット一致ではない — `linspace` は
-    `start + i*step` を f32 で積むので、閉形式の `1 - i/n` と最終 ulp が割れる点がある）。
-    t は `t_embed` と刻み幅 `t_next - t` にしか入らず、この差が最終 z に効く量は
-    {@link EULER_REFERENCE_ATOL} の 3 桁下。**値は meta に載せる** — ホスト実装が
-    どちらの式を使うかの判断材料になる。
+    Measured: **5.96e-8** at `num_steps=40` (not bit-identical — `linspace` accumulates
+    `start + i*step` in f32, so at some points the last ulp splits from the closed form's
+    `1 - i/n`). t enters only `t_embed` and the step size `t_next - t`, and the effect of this
+    difference on the final z is three orders below {@link EULER_REFERENCE_ATOL}. **The value is
+    recorded in meta** — input for the host implementation's choice of formula.
     """
     closed = torch.tensor(
         [INIT_SCALE * (1.0 - index / num_steps) for index in range(num_steps + 1)],
@@ -250,21 +283,23 @@ def closed_form_matches(schedule: torch.Tensor, num_steps: int) -> float:
 
 
 def banker_round_frames(frames: float) -> int:
-    """`int(round(x))` — Python の**銀行家丸め**（`inference_runtime._synthesize`）。
+    """`int(round(x))` — Python's **banker's rounding** (`inference_runtime._synthesize`).
 
-    MUST: 「四捨五入」と読み替えない。0.5 ちょうどのとき偶数側へ丸まるので、TS 側で
-    `Math.round`（常に上へ）を使うと 1 フレームずれる。上流の綴りは `int(round(x))` で、
-    `round` が既に int を返すので `int(...)` は形を揃えるためだけの写し。
+    MUST: do not read it as "round half up". Exactly 0.5 rounds to the even side, so using
+    `Math.round` (always up) on the TS side is off by one frame. The upstream spelling is
+    `int(round(x))`; `round` already returns an int, so `int(...)` is copied only to keep the
+    shape.
     """
     return round(frames)
 
 
 def sequence_length(log_frames: torch.Tensor, frame_rate: int) -> tuple[int, dict[str, Any]]:
-    """duration の出力（log frames）から latent 長 S を決める。
+    """Decide the latent length S from duration's output (log frames).
 
-    上流 `inference_runtime._synthesize` の 5 行（`expm1` → 平均 → `duration_scale` 倍 →
-    銀行家丸め → `[min_frames, max_frames]` clamp）と同じ。`duration_scale` は既定 1.0。
-    `latent_patch_size` は 1 なので patched 長 = latent 長（値は config から確かめる）。
+    The same as the 5 lines of upstream `inference_runtime._synthesize` (`expm1` → mean → times
+    `duration_scale` → banker's rounding → clamp to `[min_frames, max_frames]`).
+    `duration_scale` defaults to 1.0. `latent_patch_size` is 1, so the patched length = the
+    latent length (the value is checked against the config).
     """
     frames = float(torch.expm1(log_frames).float().mean())
     min_frames = max(1, math.ceil(MIN_SECONDS * frame_rate))
@@ -278,11 +313,12 @@ def sequence_length(log_frames: torch.Tensor, frame_rate: int) -> tuple[int, dic
 
 
 def _pack_body(tokenizer: Any, body: str, bos_id: int, max_length: int) -> torch.Tensor:
-    """前処理済みの本文 → `[1,T]` の**詰めた** token 列（BOS + `max_length-1` で切ったもの）。
+    """Preprocessed body → a **packed** `[1,T]` token sequence (BOS + the body cut at
+    `max_length-1`).
 
-    上流 `PretrainedTextTokenizer.batch_encode` は同じ列を右 pad して返す。静的方式では
-    ホストが pad を消して呼ぶので（`irodori/export.py` のモジュール docstring）、ここでは
-    pad しない列を作る。
+    Upstream `PretrainedTextTokenizer.batch_encode` returns the same sequence right-padded. In
+    the static scheme the host removes the padding before the call (the module docstring of
+    `irodori/export.py`), so this builds the unpadded sequence.
     """
     ids = list(tokenizer.encode(body, add_special_tokens=False).ids)[: max_length - 1]
     return torch.tensor([[bos_id, *ids]], dtype=torch.int64)
@@ -291,35 +327,38 @@ def _pack_body(tokenizer: Any, body: str, bos_id: int, max_length: int) -> torch
 def _packed_ids(
     tokenizer: Any, text: str, bos_id: int, max_length: int, normalize_text: Any
 ) -> torch.Tensor:
-    """**text 側**の token 列（`normalize_text` → `strip` → 詰めた列）。"""
+    """The **text-side** token sequence (`normalize_text` → `strip` → packed sequence)."""
     normalized = normalize_text(text).strip()
     if not normalized:
-        raise SystemExit("正規化後の本文が空")
+        raise SystemExit("the body is empty after normalization")
     return _pack_body(tokenizer, normalized, bos_id, max_length)
 
 
 def _packed_caption_ids(tokenizer: Any, caption: str, bos_id: int, max_length: int) -> torch.Tensor:
-    """**caption 側**の token 列（`strip` のみ → 詰めた列）。
+    """The **caption-side** token sequence (`strip` only → packed sequence).
 
-    MUST: `normalize_text` を掛けない。上流 `inference_runtime._synthesize` が caption に
-    掛けるのは `str(...).strip()` だけ（`normalize_text` は text 専用）で、正規化を足すと
-    外側括弧の剥がし・NFKC・記号削除のぶんだけ conditioning が黙って別物になる。
+    MUST: `normalize_text` is not applied. Upstream `inference_runtime._synthesize` applies only
+    `str(...).strip()` to the caption (`normalize_text` is text-only); adding normalization would
+    silently change the conditioning by the stripping of outer brackets, NFKC and symbol
+    removal.
     """
     stripped = caption.strip()
     if not stripped:
-        raise SystemExit("strip 後の caption が空")
+        raise SystemExit("the caption is empty after strip")
     return _pack_body(tokenizer, stripped, bos_id, max_length)
 
 
 class HostGraphs(NamedTuple):
-    """ホストが回す 7 本のグラフ（`irodori/export.py` の eager 同値ラッパそのもの）。"""
+    """The 7 graphs the host runs (exactly the eager-equivalent wrappers of
+    `irodori/export.py`)."""
 
     backbone: nn.Module
     text_proj: nn.Module
     caption_proj: nn.Module
     speaker: nn.Module
     duration: nn.Module
-    #: 条件側 K/V 射影（生成 1 回 — ADR 0114）。出力は `dit` の 4 本目以降の入力そのもの。
+    #: Condition-side K/V projection (once per generation — ADR 0114). Its outputs are exactly
+    #: `dit`'s inputs from the 4th on.
     dit_context: nn.Module
     dit: nn.Module
 
@@ -327,9 +366,9 @@ class HostGraphs(NamedTuple):
 def _segment_masks(
     length: int, used: Mapping[str, int], caps: Mapping[str, int], uncond: str | None
 ) -> torch.Tensor:
-    """`[1,1,1,S+1519]` の連結マスク（self / text / speaker / caption の順）。
+    """The concatenated mask `[1,1,1,S+1519]` (in the order self / text / speaker / caption).
 
-    `uncond` を指定した区間だけ全 False にする = ADR 0047 決定 1 の uncond。
+    Only the segment named by `uncond` is set to all False = the uncond of ADR 0047 decision 1.
     """
     segments = [torch.ones((1, length), dtype=torch.bool)]
     for name in ex.DIT_UNCOND_VARIANTS:
@@ -348,15 +387,16 @@ def _euler(
     embed_dim: int,
     schedule: torch.Tensor,
 ) -> tuple[torch.Tensor, int]:
-    """Euler 40 step + CFG independent。戻りは `(最終 z, forward 数)`。
+    """Euler 40 steps + independent CFG. Returns `(final z, forward count)`.
 
-    上流 `rf.sample_euler_rf_cfg` の写しは 3 点だけ（残りは全て上流の関数を呼ぶ）:
-    `v = v_cond + Σ scale_k (v_cond - v_k)` / `x += v (t_next - t)` /
-    CFG を掛ける区間 `cfg_min_t ≤ t ≤ cfg_max_t`。突合は {@link EULER_REFERENCE_ATOL}。
+    Only 3 points of upstream `rf.sample_euler_rf_cfg` are copied (everything else calls upstream
+    functions): `v = v_cond + Σ scale_k (v_cond - v_k)` / `x += v (t_next - t)` / the CFG range
+    `cfg_min_t ≤ t ≤ cfg_max_t`. The comparison uses {@link EULER_REFERENCE_ATOL}.
 
-    `context` は `dit-context` の出力（条件側 K/V・{@link run_case} が 1 回だけ作る）で、cond も
-    uncond も同じ値を使う（uncond はマスクだけで表す — ADR 0047 決定 1）。forward 数は `dit` の
-    回数で、`dit-context` の 1 回は数えない（TS 側の数え方と同じ）。
+    `context` is the output of `dit-context` (the condition-side K/V, built once by
+    {@link run_case}), and cond and uncond use the same values (uncond is expressed by the mask
+    alone — ADR 0047 decision 1). The forward count is the number of `dit` runs; the single
+    `dit-context` run is not counted (the same as the TS side's count).
     """
     x_t = noise
     masks = {
@@ -393,29 +433,31 @@ def run_case(
     frames_override: int | None = None,
     sensitivity_probe: bool = False,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    """1 ケースぶんのホスト経路を回して `(保存テンソル, meta)` を返す。
+    """Run the host path of one case and return `(tensors to save, meta)`.
 
-    `frames_override` は **S を外から固定する**ための注入口（既定 `None` = duration の予測
-    どおり）。golden の emit は必ず `None` で呼ぶ（S も golden の一部）。使うのは
-    `irodori/measure_quant.py` で、量子化構成の間で波形長を揃えないと SNR / LSD が定義
-    できないため（`measure_quant_sbv2.py` が dump 側 `w_ceil` で時間グリッドを固定するのと
-    同じ理由）。**予測そのもの**は `meta["predictedS"]` に残す — S ドリフトはこの台本が測る
-    量ではなく、測る側が読む診断値。
+    `frames_override` is the injection point that **fixes S from outside** (default `None` = as
+    duration predicts). The golden emit always calls it with `None` (S is part of the golden).
+    It is used by `irodori/measure_quant.py`, because SNR / LSD are not defined unless the
+    waveform length is the same across quantization configurations (the same reason
+    `measure_quant_sbv2.py` fixes the time grid with the dump side's `w_ceil`). **The prediction
+    itself** stays in `meta["predictedS"]` — S drift is not a quantity this script measures but a
+    diagnostic the measuring side reads.
 
-    `sensitivity_probe=True` は Euler ループをもう 1 周（noise + {@link SENSITIVITY_EPS}）
-    走らせ、増幅率を `meta["sensitivityAmp"]` に載せる。emit の 2 段目
-    （{@link euler_reference_within_sensitivity}）専用 — 常時は測らない（コスト倍化）。
+    `sensitivity_probe=True` runs the Euler loop once more (noise + {@link SENSITIVITY_EPS}) and
+    puts the amplification factor in `meta["sensitivityAmp"]`. Only for emit's second stage
+    ({@link euler_reference_within_sensitivity}) — not measured by default (it doubles the cost).
     """
     bos_id = int(text_config["bos_token_id"])
     embed_dim = int(config.timestep_embed_dim)
     latent_dim = int(config.patched_latent_dim)
     if int(config.latent_patch_size) != 1:
         raise SystemExit(
-            f"latent_patch_size が {config.latent_patch_size} — S = latent 長の前提が崩れる"
+            f"latent_patch_size is {config.latent_patch_size} — breaks the assumption"
+            " S = latent length"
         )
 
     with torch.no_grad():
-        # ---- ①〜② テキスト系（列を詰めたまま backbone → projector）----
+        # ---- ①–② text side (backbone → projector with the sequence kept packed) ----
         text_ids = _packed_ids(tokenizer, case.text, bos_id, caps["text"], source.normalize_text)
         text_state = graphs.text_proj(graphs.backbone(text_ids))
         caption_ids = None
@@ -435,7 +477,8 @@ def run_case(
                 has_caption=torch.ones((1,), dtype=torch.bool),
             )
 
-        # ---- ③ speaker（参照なしはホストがゼロを置く — `_no_reference_evidence` が根拠）----
+        # ---- ③ speaker (with no reference the host puts zeros — `_no_reference_evidence` is the
+        # evidence) ----
         reference_latent = torch.zeros((1, int(config.speaker_patch_size), int(config.latent_dim)))
         if case.reference is not None:
             generator = torch.Generator().manual_seed(case.reference.seed)
@@ -457,7 +500,7 @@ def run_case(
                 graphs.speaker(patched), patched_mask
             )
 
-        # ---- ④ duration の 5 入力 ----
+        # ---- ④ the 5 inputs of duration ----
         has_speaker = case.reference is not None
         speaker_vec = (
             speaker_state[:, 0] if has_speaker else torch.zeros((1, int(config.speaker_dim)))
@@ -475,31 +518,33 @@ def run_case(
             torch.tensor([[caption_pooled is not None]], dtype=torch.bool),
         )
 
-    # ---- ⑤ S 決定 ----
+    # ---- ⑤ decide S ----
     predicted, duration_meta = sequence_length(log_frames, ex.CODEC_FRAME_RATE)
     steps = predicted if frames_override is None else frames_override
 
-    # ---- ⑥ 条件の右 pad と区間長 ----
-    # caption が空のときは state をゼロのまま置き、マスクを全 0 にする（上流
-    # `_synthesize` の `caption_mask.zero_()` と同値 — 区間の寄与は exp(−inf)=0 で厳密に 0）。
+    # ---- ⑥ right-pad the conditions and segment lengths ----
+    # With an empty caption the state stays zero and the mask is all 0 (equivalent to upstream
+    # `_synthesize`'s `caption_mask.zero_()` — the segment contributes exp(−inf)=0, exactly 0).
     used = {
         "text": int(text_state.shape[1]),
         "speaker": int(speaker_state.shape[1]) if has_speaker else 0,
         "caption": caption_length,
     }
     states = (
-        ex._right_pad(text_state, caps["text"], f"{case.name} の text 条件"),
-        ex._right_pad(speaker_state, caps["speaker"], f"{case.name} の speaker 条件"),
-        ex._right_pad(caption_state, caps["caption"], f"{case.name} の caption 条件"),
+        ex._right_pad(text_state, caps["text"], f"the text condition of {case.name}"),
+        ex._right_pad(speaker_state, caps["speaker"], f"the speaker condition of {case.name}"),
+        ex._right_pad(caption_state, caps["caption"], f"the caption condition of {case.name}"),
     )
-    # 条件側 K/V は生成 1 回だけ作り、下の Euler（CFG あり / なし / 感度の摂動走行）が全て共有する
-    # — TS 側が常駐テンソルで渡す値と同じ位置で同じ回数だけ作る（ADR 0114）。
+    # The condition-side K/V is built once per generation and shared by all the Euler runs below
+    # (with / without CFG / the sensitivity perturbation run) — built at the same place and the
+    # same number of times as the values the TS side passes as resident tensors (ADR 0114).
     with torch.no_grad():
         context = graphs.dit_context(*states)
 
     # ---- ⑦ Euler + CFG ----
-    # 有効な CFG は上流 `resolve_cfg_scales` / `sample_euler_rf_cfg` の条件どおり:
-    # text は常に / speaker は参照ありのときだけ / caption は非空のときだけ。
+    # The active CFGs follow the conditions of upstream `resolve_cfg_scales` /
+    # `sample_euler_rf_cfg`: text always / speaker only with a reference / caption only when
+    # non-empty.
     enabled = ["text"]
     if has_speaker:
         enabled.append("speaker")
@@ -520,8 +565,8 @@ def run_case(
     cfg_effect = float((latent - cond_only).abs().max())
     if cfg_effect < CFG_EFFECT_MIN:
         raise SystemExit(
-            f"{case.name}: CFG 有無の差が {cfg_effect} — CFG が効いていない疑い"
-            "（スケール 0 / uncond マスクが cond と同じ）"
+            f"{case.name}: the difference with and without CFG is {cfg_effect} — CFG seems to have"
+            " no effect (scale 0 / the uncond mask equals cond)"
         )
     sensitivity_amp = None
     if sensitivity_probe:
@@ -538,8 +583,9 @@ def run_case(
         )
         sensitivity_amp = float((perturbed - latent).abs().max()) / SENSITIVITY_EPS
 
-    # MUST: id 列は保存時に IR の実表現（i64 → i32）へ落とす — TS 側が同じ境界規約
-    # （ADR 0009）で読むため。ここでは int64 のまま持ち、上流突合にもこの列を渡す。
+    # MUST: the id sequences are lowered to the IR's actual representation (i64 → i32) when saved
+    # — the TS side reads them under the same boundary convention (ADR 0009). Here they stay int64,
+    # and the upstream comparison is given these sequences too.
     tensors = {
         "noise": noise,
         "z": latent.detach().contiguous(),
@@ -570,8 +616,9 @@ def run_case(
             if case.reference is None
             else {
                 "kind": "synthetic-standard-normal",
-                "why": "合成のまま維持（golden の安定のため — 実音声の値域は speaker 単体門の"
-                " SPEAKER_REAL_CASES が受け持つ。ReferenceSpec の docstring 参照）",
+                "why": "kept synthetic (for golden stability — the real-speech range is covered"
+                " by SPEAKER_REAL_CASES of the standalone speaker check; see the ReferenceSpec"
+                " docstring)",
                 "frames": case.reference.frames,
                 "seed": case.reference.seed,
                 "patchedTokens": int(patched.shape[1]),
@@ -580,7 +627,7 @@ def run_case(
         "zAbsMax": float(f"{float(latent.abs().max()):.6f}"),
     }
     if frames_override is not None:
-        # MUST: 固定したときだけ足す（golden の meta.json を系列間で動かさない）。
+        # MUST: added only when fixed (does not move the golden meta.json across series).
         meta["predictedS"] = predicted
     return tensors, meta
 
@@ -588,10 +635,12 @@ def run_case(
 def _right_pad_ids(
     ids: torch.Tensor | None, length: int, pad_id: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """`[1,length]` へ右詰め pad した token 列とマスク（上流 `batch_encode` の最終形）。
+    """Token sequence and mask right-padded to `[1,length]` (the final form of upstream
+    `batch_encode`).
 
-    `ids` が `None` なら全 pad + マスク全 0（上流 `caption_mask.zero_()` と同じ形）。caption は
-    {@link upstream_caption_condition} が上流の入口から作るので、今の呼び出し元は text だけ。
+    `ids` of `None` gives all padding + an all-0 mask (the same form as upstream
+    `caption_mask.zero_()`). The caption is built from upstream's entry point by
+    {@link upstream_caption_condition}, so the only current caller is text.
     """
     padded = torch.full((1, length), pad_id, dtype=torch.int64)
     mask = torch.zeros((1, length), dtype=torch.bool)
@@ -603,9 +652,10 @@ def _right_pad_ids(
 
 
 def upstream_caption_tokenizer(model_dir: Path, add_bos: bool) -> Any:
-    """上流 `_synthesize` が caption に使うのと**同じ**トークナイザ（`caption_tokenizer`）。
+    """The **same** tokenizer upstream `_synthesize` uses for the caption
+    (`caption_tokenizer`).
 
-    `add_bos` は上流 `ModelConfig.caption_add_bos_resolved` から採る（直書きしない）。
+    `add_bos` comes from upstream `ModelConfig.caption_add_bos_resolved` (not hard-coded).
     """
     from irodori_tts.tokenizer import PretrainedTextTokenizer
     from transformers import AutoTokenizer
@@ -617,12 +667,14 @@ def upstream_caption_tokenizer(model_dir: Path, add_bos: bool) -> Any:
 def upstream_caption_condition(
     caption_tokenizer: Any, caption: str, max_length: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """caption の条件入力 `[1,max_caption_len]`（token 列 + マスク）を**上流の入口から**作る。
+    """Build the caption's condition input `[1,max_caption_len]` (token sequence + mask) **from
+    upstream's entry point**.
 
-    MUST: ホストが作った `caption_ids` を上流ループへ渡し直さない — 渡し直すと前処理の
-    取り違えが両辺へ同じだけ乗って突合が恒真化し、caption の綴りが割れても z が一致する。
-    ここは上流 `inference_runtime._synthesize` の caption 経路（`str(...).strip()` →
-    `caption_tokenizer.batch_encode` → 空なら `caption_mask.zero_()`）をそのまま呼ぶ。
+    MUST: do not pass the host-built `caption_ids` back into the upstream loop — doing so puts a
+    preprocessing mistake equally on both sides, the comparison becomes vacuous, and z matches
+    even when the caption spellings diverge. This calls upstream `inference_runtime._synthesize`'s
+    caption path (`str(...).strip()` → `caption_tokenizer.batch_encode` → `caption_mask.zero_()`
+    if empty) as is.
     """
     caption_text = str(caption).strip()
     ids, mask = caption_tokenizer.batch_encode([caption_text], max_length=max_length)
@@ -643,11 +695,13 @@ def upstream_latent(
     model_config: Mapping[str, Any],
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """上流の正本経路（`rf.sample_euler_rf_cfg`）で同じ条件を回す。戻りは `(z, 初期ノイズ)`。
+    """Run the same conditions through upstream's canonical path (`rf.sample_euler_rf_cfg`).
+    Returns `(z, initial noise)`.
 
-    MUST: 入力は上流の呼び方に揃える — text の token 列は `max_text_len` へ右 pad（静的方式で
-    ホストが消した pad を戻す）、caption は {@link upstream_caption_condition} が上流の入口で
-    作った列をそのまま受ける、参照なしは `no_ref` と同じゼロ latent + 全 0 マスク。
+    MUST: the inputs follow upstream's calling convention — the text token sequence is
+    right-padded to `max_text_len` (restoring the padding the host removed in the static scheme),
+    the caption takes the sequence {@link upstream_caption_condition} built at upstream's entry
+    point as is, and no reference is the same zero latent + all-0 mask as `no_ref`.
     """
     from irodori_tts.rf import sample_euler_rf_cfg
 
@@ -693,7 +747,8 @@ def upstream_sequence_length(
     model_config: Mapping[str, Any],
     config: Any,
 ) -> int:
-    """上流の `encode_conditions` + `predict_duration_log_frames` から S を独立に出す。"""
+    """Compute S independently from upstream's `encode_conditions` +
+    `predict_duration_log_frames`."""
     reference_mask = torch.full(reference_latent.shape[:2], has_speaker, dtype=torch.bool)
     pad_id = int(text_config["pad_token_id"])
     text_padded, text_mask = _right_pad_ids(text_ids, int(model_config["max_text_len"]), pad_id)
@@ -729,97 +784,111 @@ def upstream_sequence_length(
 
 
 def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) -> torch.Tensor:
-    """40 step で**実際に使う** t に対する `[40, dim]` の `t_embed` 表（W3 の host unit test 用）。
+    """The `[40, dim]` `t_embed` table for the t **actually used** over 40 steps (for W3's host
+    unit test).
 
-    MUST: 式は写さず上流 `get_timestep_embedding` を呼ぶ（θ の割り方が変われば写した式は
-    黙って古いまま通る）。
+    MUST: the formula is not copied; upstream `get_timestep_embedding` is called (if the θ split
+    changed, a copied formula would silently stay at the old one).
     """
     with torch.no_grad():
         rows = [source.timestep_embedding(t.reshape(1), dim) for t in schedule[:-1]]
     return torch.cat(rows, dim=0).contiguous()
 
 
-#: i4 系列の読み戻しで受け付ける格納の layout → 生バイトを載せる器。
+#: Storage layouts accepted when reading back the i4 series → the holder dtype for the raw bytes.
 #:
-#: i4 は packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）なので器は uint8 で、論理形へ戻すのは
-#: `karume.emit.unpack_int4`。i8 が並ぶのは `dit` の容器の **block 外の 5 本**（`in_proj` /
-#: `out_proj` / `cond_module.{0,2,4}`）と **adaLN 144 本**（`attention_adaln` / `mlp_adaln`）の計
-#: 149 本（どちらも聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）で、
-#: `dit-context` の容器は i4（条件側 K/V 射影 72 本）と f32（norm）だけ。
-#: ここに無い格納（f16 / bf16）が DiT の容器に現れたら、i8+dit4 席の混成が想定と違う形で
-#: 出荷されている（{@link restore_dit_from_i4_series} が落とす）。
+#: i4 is packed 4-bit (2 elements per byte — ADR 0069 decision 2), so the holder is uint8 and
+#: `karume.emit.unpack_int4` restores the logical shape. i8 appears in the `dit` container for
+#: **the 5 weights outside the blocks** (`in_proj` / `out_proj` / `cond_module.{0,2,4}`) and **the
+#: 144 adaLN weights** (`attention_adaln` / `mlp_adaln`), 149 in total (both taken out of i4 by the
+#: listening ruling of 2026-08-23; `irodori.export._fake_quant_i4`); the `dit-context` container
+#: holds only i4 (the 72 condition-side K/V projections) and f32 (norms).
+#: A storage not listed here (f16 / bf16) appearing in a DiT container means the mix of the
+#: i8+dit4 preset is shipping in an unexpected form ({@link restore_dit_from_i4_series} fails).
 _RESTORE_STORAGE: Mapping[str, torch.dtype] = {
     "f32": torch.float32,
     "i8": torch.int8,
     "i4": torch.uint8,
 }
 
-#: 逆変換に scale が要る格納（宣言に scale が無ければ読み戻せない = 即エラー）。
+#: Storages whose inverse transform needs a scale (no scale in the declaration = cannot be read
+#: back = immediate error).
 _SCALED_STORAGE = frozenset({"i8", "i4"})
 
 
 class RestoredDit(NamedTuple):
-    """i4 系列の容器 1 本から読み戻した記録（meta.json の `i4Source` にターゲットごとに載る）。"""
+    """The record of reading back one container of the i4 series (one per target in meta.json's
+    `i4Source`)."""
 
-    #: 読んだコンテナ（= 配布へ入るバイトそのもの）。
+    #: The container read (= the very bytes that go into the distribution).
     container: Path
-    #: その系列の校正条件（`calib_provenance.json` — 方式・格子・ケース数・step 数）。
+    #: The series' calibration conditions (`calib_provenance.json` — method, grid, case count,
+    #: step count).
     calib: Mapping[str, Any]
-    #: i4 格納だったパラメタの本数（コンテナが正 — 期待値をコードに焼かない）。
+    #: Number of parameters stored as i4 (the container is the source of truth — no expected
+    #: value is baked into code).
     int4: int
-    #: i8 格納だったパラメタの本数（`dit` の block 外の `in_proj` / `out_proj` / `cond_module` と
-    #: block 内の adaLN — 実重みでは 149 本。`dit-context` は 0 本）。
+    #: Number of parameters stored as i8 (`in_proj` / `out_proj` / `cond_module` outside the
+    #: blocks of `dit` and adaLN inside the blocks — 149 with the real weights; 0 for
+    #: `dit-context`).
     int8: int
-    #: f32 格納のまま読み戻したパラメタの本数（bias / norm）。
+    #: Number of parameters read back still stored as f32 (bias / norm).
     plain: int
-    #: 読み戻しで**値が動いた** i4 パラメタの本数（席の効き門の実測値）。
+    #: Number of i4 parameters whose **value changed** on read-back (the measured value of the
+    #: check that the preset takes effect).
     changed: int
 
 
 def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
-    """i4 系列の校正条件を読み、**配布して良い条件**（GPTQ × 下限以上の予算）であることを
-    確かめて返す。
+    """Read the calibration conditions of an i4 series, check that they are **conditions fit
+    for distribution** (GPTQ × a budget at or above the floor) and return them.
 
-    MUST: `--no-calib`（素の RTN）や `--calib-steps 1`（smoke 予算）の生成物から golden を
-    焼かない。校正の方式も予算も格納形を 1 バイトも変えない（格子は RTN i4 g32 のまま）ので、
-    コンテナのどこを見ても判別できず、出るのは音の劣化だけ — 配布の組み立てが
-    `irodori.distribution.assert_irodori_calib_provenance` で張っているのと**同じ判定**
-    （`_shared.calib_provenance` が正本）を、golden の焼き直しにも張る（golden だけが smoke 用の
-    丸めで採られていると、配布資産との突合が「両辺が違う重み」のまま緑になる）。
+    MUST: no golden is baked from the output of `--no-calib` (plain RTN) or `--calib-steps 1` (a
+    smoke budget). Neither the calibration method nor the budget changes a single byte of the
+    storage form (the grid stays RTN i4 g32), so nothing in the container tells them apart and
+    the only symptom is degraded audio — the **same predicate** that the distribution build
+    applies in `irodori.distribution.assert_irodori_calib_provenance` (`_shared.calib_provenance`
+    is the source of truth) is applied to rebaking the golden too (if only the golden were taken
+    with a smoke rounding, the comparison with the distributed assets would be green while "the
+    two sides are different weights").
     """
     path = series_dir / CALIB_PROVENANCE_FILE
     if not path.is_file():
         raise SystemExit(
-            f"i4 系列の校正条件の記録が無い: {path}"
-            "（`python -m irodori.export --dtype i4` で書かれる）"
+            f"no record of the i4 series' calibration conditions: {path}"
+            " (written by `python -m irodori.export --dtype i4`)"
         )
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as cause:
-        raise SystemExit(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+        raise SystemExit(
+            f"cannot parse the calibration conditions record: {path} — {cause}"
+        ) from cause
     complaint = calib_complaint(
         record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
     )
     if complaint is not None:
         raise SystemExit(
-            f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
-            " — `--no-calib` / smoke 予算の生成物から golden を焼かない"
+            f"the i4 series' calibration conditions do not meet the distribution's: {path}:"
+            f" {complaint} — no golden is baked from the output of `--no-calib` / a smoke budget"
         )
     return record
 
 
 def _restored_tensor(container: Path, key: str, entry: StoredTensor) -> torch.Tensor:
-    """容器の格納 payload を論理形の torch テンソルへ（i4 は nibble 展開まで）。
+    """A container's stored payload → a torch tensor of the logical shape (i4 includes nibble
+    unpacking).
 
-    展開そのものは**書き下ろさず** core（`karume.emit.unpack_int4`）を呼ぶ。payload の長さが
-    宣言（shape × codec）と食い違う形は容器側の検証（`karume.verify.verify_container`）が
-    先に落とすので、ここが見るのは「読み戻せる格納か」だけである。
+    The unpacking itself is **not written here**; it calls the core (`karume.emit.unpack_int4`).
+    A payload whose length disagrees with the declaration (shape × codec) is rejected earlier by
+    the container-side verification (`karume.verify.verify_container`), so all this looks at is
+    "whether the storage can be read back".
     """
     holder = _RESTORE_STORAGE.get(entry.layout)
     if holder is None:
         raise SystemExit(
-            f"{container}: '{key}' の格納 {entry.layout!r} は読み戻せない"
-            f"（i8+dit4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
+            f"{container}: '{key}' has the storage {entry.layout!r}, which cannot be read back"
+            f" (the dit of the i8+dit4 preset holds only {' / '.join(sorted(_RESTORE_STORAGE))})"
         )
     flat = torch.frombuffer(bytearray(entry.payload), dtype=holder)
     shape = list(entry.shape)
@@ -827,13 +896,13 @@ def _restored_tensor(container: Path, key: str, entry: StoredTensor) -> torch.Te
 
 
 def _restored_scale(container: Path, key: str, entry: StoredTensor) -> torch.Tensor:
-    """companion scale を逆変換が要る形（`[行, group 数]`）へ。
+    """The companion scale → the shape the inverse transform needs (`[rows, groups]`).
 
-    per-channel（i8）は group 数 1 なので `[行, 1]` の keepdim 形になり、ブロードキャストが
-    そのまま軸に乗る（{@link _dequantize_stored} の NOTE）。
+    Per-channel (i8) has 1 group, so it becomes the keepdim form `[rows, 1]` and broadcasting
+    lands on the right axis as is (the NOTE of {@link _dequantize_stored}).
     """
     if entry.scale is None or entry.group_size is None:
-        raise SystemExit(f"{container}: {entry.layout} 格納の '{key}' に scale の宣言が無い")
+        raise SystemExit(f"{container}: the {entry.layout}-stored '{key}' has no scale declaration")
     rows = entry.shape[0] if entry.shape else 1
     row_length = math.prod(entry.shape[1:]) if len(entry.shape) > 1 else 1
     return torch.frombuffer(bytearray(entry.scale), dtype=torch.float32).reshape(
@@ -842,15 +911,16 @@ def _restored_scale(container: Path, key: str, entry: StoredTensor) -> torch.Ten
 
 
 def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """出荷バイト（i4 packed / i8）を scale で f32 の論理形へ戻す。
+    """Shipped bytes (i4 packed / i8) → the f32 logical form via the scale.
 
-    i4 は core の `karume.quantize.dequantize_int4` をそのまま呼ぶ（`karume.emit` が格納前に
-    「書くバイトから戻してビット一致」を実測しているのと**同じ経路** — ADR 0069 決定 4 ③）。
+    i4 calls the core's `karume.quantize.dequantize_int4` as is (**the same path** by which
+    `karume.emit` measures "restored from the bytes it writes, bit-identical" before storing —
+    ADR 0069 decision 4 ③).
 
-    NOTE: i8 側に相当する関数は core に無い（`karume.quantize` は `quantize_to_int8` だけを
-    持ち、逆変換は `karume.emit._convert_for_storage` がビット一致検査の中で `quantized *
-    scale` と直に書いている）。ここも同じ 1 式で、per-channel scale は keepdim 形なので
-    ブロードキャストがそのまま軸に乗る。
+    NOTE: the core has no counterpart function for i8 (`karume.quantize` has only
+    `quantize_to_int8`, and `karume.emit._convert_for_storage` writes the inverse directly as
+    `quantized * scale` inside its bit-identity check). This is the same single expression, and the
+    per-channel scale has the keepdim form, so broadcasting lands on the right axis as is.
     """
     if dtype == "i4":
         return dequantize_int4(raw, scale)
@@ -860,49 +930,59 @@ def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> to
 def restore_dit_from_i4_series(
     wrappers: Mapping[str, nn.Module], series_root: Path
 ) -> dict[str, RestoredDit]:
-    """i4 系列の**出荷バイト**で、DiT の配布ラッパの所有パラメタを丸ごと上書きする（丸めの段 2）。
+    """Overwrite every parameter the DiT distribution wrappers own with the **shipped bytes** of
+    the i4 series (rounding stage 2).
 
-    段 1（{@link emit}）は全役割を **i8 席と同一の fake-quant** で丸める — quant 席 `i8+dit4` は
-    他 7 役に i8 席の i8 バイトを共有させる混成席（`irodori.distribution.IRODORI_QUANT_SEATS`）
-    なので、条件エンコーダ側の丸めは i8 golden と同一が正しい。ここはその上に DiT だけを
-    重ねる段で、**校正をもう 1 度走らせない**: GPTQ の丸め先は捕捉した活性に依るので「2 回の
-    校正が同じ丸めを出す」ことはどこも保証していない。golden が見た重みは配布バイトそのもの、
-    を機械で言い切れる唯一の形が「エクスポート済みの系列を読み戻す」。
+    Stage 1 ({@link emit}) rounds every role with **the same fake-quant as the i8 preset** — the
+    quant preset `i8+dit4` is a mixed preset in which the other 7 roles share the i8 preset's i8
+    bytes (`irodori.distribution.IRODORI_QUANT_SEATS`), so the condition encoders' rounding is
+    correctly identical to the i8 golden. This stage layers only the DiT on top, and **does not
+    run calibration again**: GPTQ's rounding targets depend on the captured activations, so
+    nothing guarantees that "two calibrations produce the same rounding". The only form that can
+    state mechanically that "the weights the golden saw are the distributed bytes themselves" is
+    "read back the exported series".
 
-    `wrappers` はターゲット名 → ラッパ（`irodori.export.DitWrappers.by_target` — `dit` と
-    `dit-context`）で、容器は `series_root/<ターゲット>/model.krm`。ラッパの所有パラメタは
-    `TextToLatentRFDiT` の Parameter そのもの（張り替えずに同じ属性名で抱える）なので、ラッパ
-    経由の上書きが DiT 本体にも通る。2 本の所有は `k_norm` だけが重なる（ADR 0114）。
+    `wrappers` maps target name → wrapper (`irodori.export.DitWrappers.by_target` — `dit` and
+    `dit-context`), and the container is `series_root/<target>/model.krm`. The parameters a
+    wrapper owns are the Parameters of `TextToLatentRFDiT` themselves (held under the same
+    attribute names without rebinding), so overwriting through the wrapper reaches the DiT itself.
+    The two wrappers' ownership overlaps only in `k_norm` (ADR 0114).
 
-    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（`dit` の i8 格納 149 本も、f32
-    格納の bias / norm も、コンテナの値で書く）。元値と一致するはずの側もコンテナから書くことで、
-    「golden が見た重み = 配布バイト」に例外席を作らない。
+    The overwrite covers not only the i4 storage but **every parameter the wrapper owns** (the
+    149 i8-stored weights of `dit` and the f32-stored bias / norm are written from the container
+    too). Writing from the container even the side that should match the original values leaves
+    no exception to "the weights the golden saw = the distributed bytes".
 
-    門（どれも fail loudly・1 つでも外れたら golden を 1 バイトも書かせない）— 容器ごとに:
+    Checks (every one fails loudly; if any fails, not one byte of the golden is written) — per
+    container:
 
-    - **provenance**: 系列が GPTQ 校正付きで丸められたこと（{@link _shippable_calib}）
-    - **形**: 上書き対象の FQN がラッパ所有パラメタと過不足なく一致すること（コンテナに在るのに
-      モジュールに無い / 逆、どちらも即エラー）。ずれたまま通すと、上書きされなかった重みだけが
-      i8 の値で golden に載る
-    - **本数**: i4 格納のテンソルが 1 本でも在ること（本数はコンテナが正 — 期待値を焼かない）。
-      **i8 は数えない** — 段 1 と同じ丸めなので「i4 系列を読んでいる」の証拠にならない
-    - **席の効き**: 上書きで値が動いた i4 パラメタが 1 本も無い、を落とす（読み戻しが効いて
-      いないのに i8 golden を i8+dit4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも
-      掛からない）
+    - **provenance**: the series was rounded with GPTQ calibration ({@link _shippable_calib})
+    - **shape**: the FQNs to overwrite match the parameters the wrapper owns exactly (in the
+      container but not in the module, or the reverse, is an immediate error). Letting a mismatch
+      through would put only the weights that were not overwritten into the golden with their i8
+      values
+    - **count**: at least one tensor is stored as i4 (the container is the source of truth for
+      the count — no expected value is baked in). **i8 is not counted** — it is the same rounding
+      as stage 1, so it is no evidence that "the i4 series is being read"
+    - **preset takes effect**: fail when no i4 parameter changed value on overwrite (the accident
+      of calling an i8 golden an i8+dit4 golden while the read-back has no effect matches in both
+      numbers and shapes, so no other check catches it)
 
-    2 本の間で:
+    Between the two:
 
-    - **校正条件の記録が同一**であること — 2 本は 1 回の export で同じ丸めを書き分けたもの。
-      違えば別々の実行の系列が並んでいる
-    - **両方の容器に在るテンソル（共有の `k_norm`）の格納が同一**であること — 後から読んだ側が
-      先の値を黙って上書きする形にしない
+    - **the calibration conditions records are identical** — the two are the same rounding written
+      out by one export. If they differ, series from separate runs sit side by side
+    - **the storage of tensors present in both containers (the shared `k_norm`) is identical** —
+      the side read later must not silently overwrite the earlier values
 
-    NOTE: `karume/4` には「ヘッダの I4 集合 = IR 宣言の i4 集合」という突合があったが、容器では
-    格納の正本が束縛表 1 本（宣言と実体が別々に動けない — container-v1 §5）になったので、
-    その突合は恒真になった。宣言と payload の噛み合わせは `verify_container` が受ける。
+    NOTE: `karume/4` had a comparison "the I4 set of the header = the i4 set of the IR
+    declaration", but in the container the storage has a single source of truth, the binding
+    table (the declaration and the payload cannot move separately — container-v1 §5), so that
+    comparison became vacuous. The fit between declaration and payload is covered by
+    `verify_container`.
     """
     if not wrappers:
-        raise SystemExit("i4 系列の読み戻し先のラッパが 1 本も無い")
+        raise SystemExit("no wrapper to read the i4 series back into")
     seen: dict[str, tuple[str, str]] = {}
     restored = {
         target: _restore_container(target, wrapper, series_root / target, seen)
@@ -911,15 +991,15 @@ def restore_dit_from_i4_series(
     calibs = {target: dict(record.calib) for target, record in restored.items()}
     if len({json.dumps(calib, sort_keys=True) for calib in calibs.values()}) > 1:
         raise SystemExit(
-            f"i4 系列の校正条件の記録がターゲットごとに違う（{calibs}）— DiT の 2 本は 1 回の"
-            " export で書き分けたものでなければならない（`python -m irodori.export --dtype i4`"
-            " で両方を書き直す）"
+            f"the i4 series' calibration conditions records differ per target ({calibs}) — the"
+            " two DiT graphs must have been written by one export (rewrite both with"
+            " `python -m irodori.export --dtype i4`)"
         )
     return restored
 
 
 def _stored_digest(entry: StoredTensor) -> str:
-    """格納 1 本の同一性の鍵（layout・形・payload・scale の sha256）。"""
+    """The identity key of one stored tensor (sha256 of layout, shape, payload and scale)."""
     digest = hashlib.sha256()
     digest.update(f"{entry.layout}:{list(entry.shape)}:{entry.group_size}".encode())
     digest.update(entry.payload)
@@ -930,16 +1010,18 @@ def _stored_digest(entry: StoredTensor) -> str:
 def _restore_container(
     target: str, wrapper: nn.Module, series_dir: Path, seen: dict[str, tuple[str, str]]
 ) -> RestoredDit:
-    """容器 1 本ぶんの読み戻し（門の中身は {@link restore_dit_from_i4_series}）。
+    """Read back one container (the checks are described in
+    {@link restore_dit_from_i4_series}).
 
-    `seen` は先に読んだ容器のテンソルキー → `(ターゲット, 格納の鍵)`。同じキーが 2 本目に
-    現れたら格納の同一を見てから上書きする。
+    `seen` maps the tensor keys of the containers read so far → `(target, storage key)`. When the
+    same key appears in the second container, the storage is checked for identity before it is
+    overwritten.
     """
     container = series_dir / ex.MODEL_FILE
     if not all(part.is_file() for part in container_parts(container)):
         raise SystemExit(
-            f"i4 系列のコンテナが無い: {container}"
-            "（`python -m irodori.export --dtype i4` を先に走らせる）"
+            f"no container of the i4 series: {container}"
+            " (run `python -m irodori.export --dtype i4` first)"
         )
     calib = _shippable_calib(series_dir)
     stored = weight_tensors(read_stored(container))
@@ -948,27 +1030,29 @@ def _restore_container(
     extra = sorted(set(stored) - set(owned))
     if absent or extra:
         raise SystemExit(
-            f"{container}: 上書き対象がラッパ所有パラメタと一致しない —"
-            f" コンテナに無い {absent[:3]} / モジュールに無い {extra[:3]}"
-            "（DiT のラッパの構成と export した系列のどちらかが動いている）"
+            f"{container}: the overwrite targets do not match the parameters the wrapper owns —"
+            f" missing from the container {absent[:3]} / missing from the module {extra[:3]}"
+            " (either the DiT wrappers' structure or the exported series has moved)"
         )
     int4_keys = frozenset(key for key, entry in stored.items() if entry.layout == "i4")
     if not int4_keys:
-        raise SystemExit(f"{container}: i4 格納のテンソルが 1 本も無い（i4 系列ではない）")
+        raise SystemExit(f"{container}: no tensor is stored as i4 (not an i4 series)")
     for key, entry in stored.items():
         digest = _stored_digest(entry)
         previous = seen.get(key)
         if previous is not None and previous[1] != digest:
             raise SystemExit(
-                f"{container}: '{key}' の格納が {previous[0]} の容器と違う — 2 本の容器が別々の"
-                " export 実行から来ている（共有のテンソルは同じバイトのはず）"
+                f"{container}: the storage of '{key}' differs from the {previous[0]} container —"
+                " the two containers come from separate export runs (shared tensors should be"
+                " the same bytes)"
             )
         seen[key] = (target, digest)
 
-    # 1 本ずつ「戻して → 比べて → 書いて → 捨てる」。全部を f32 で持ってから書くと、`dit` の
-    # f32 一式（1.4GB 級）と同じ大きさの複製がもう 1 つ同時に生きる（`karume.emit` が格納側で
-    # 同じ理由の逐次化をしているのと対）。門に落ちた時点で例外なので、途中まで上書きされた
-    # モジュールが golden を書くことはない。
+    # One tensor at a time: "restore → compare → write → discard". Holding everything as f32
+    # before writing would keep alive a second copy as large as `dit`'s f32 set (1.4 GB class) at
+    # the same time (the counterpart of `karume.emit` serializing the storage side for the same
+    # reason). A failed check raises at that point, so a partly overwritten module never writes a
+    # golden.
     changed = 0
     with torch.no_grad():
         for key in sorted(stored):
@@ -982,27 +1066,28 @@ def _restore_container(
             parameter = owned[key]
             if tuple(value.shape) != tuple(parameter.shape):
                 raise SystemExit(
-                    f"{container}: '{key}' の形が コンテナ {list(value.shape)} /"
-                    f" モジュール {list(parameter.shape)} で食い違う"
+                    f"{container}: the shape of '{key}' disagrees: container"
+                    f" {list(value.shape)} / module {list(parameter.shape)}"
                 )
-            # MUST: 効き門に数えるのは **i4 の席だけ**。i8 の 149 本は段 1 の i8 丸めと
-            # 同じ scale・同じ格子なので値が動かないのが正常で、数に入れると「i4 が 1 本も
-            # 効いていない」を i8 の一致が埋め合わせて隠す。
+            # MUST: only **the i4 entries** count toward the takes-effect check. The 149 i8
+            # weights share stage 1's i8 scale and grid, so their values not moving is normal;
+            # counting them would let the i8 matches cover up "not a single i4 took effect".
             if entry.layout == "i4" and not torch.equal(parameter.detach(), value):
                 changed += 1
             parameter.copy_(value)
             del raw, value
     if changed == 0:
         raise SystemExit(
-            f"{container}: 読み戻した i4 {len(int4_keys)} 本が段 1（i8 丸め）の値と全て同じ"
-            " — i4 の読み戻しが効いていない（i8 golden を i8+dit4 golden と呼ぶ事故）"
+            f"{container}: all {len(int4_keys)} read-back i4 tensors equal the stage-1 (i8"
+            " rounding) values — the i4 read-back has no effect (the accident of calling an i8"
+            " golden an i8+dit4 golden)"
         )
     int8 = sum(1 for entry in stored.values() if entry.layout == "i8")
     plain = len(stored) - len(int4_keys) - int8
     print(
-        f"[fake-quant] {target}: i4 系列の出荷バイトで上書きした —"
-        f" i4 {len(int4_keys)} 本（うち段 1 と値が違うもの {changed} 本）/"
-        f" i8 {int8} 本 / f32 {plain} 本・校正 {calib}",
+        f"[fake-quant] {target}: overwritten with the i4 series' shipped bytes —"
+        f" i4 {len(int4_keys)} ({changed} of them differ from stage 1) /"
+        f" i8 {int8} / f32 {plain}, calibration {calib}",
         flush=True,
     )
     return RestoredDit(
@@ -1016,7 +1101,8 @@ def _restore_container(
 
 
 def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -> dict[str, Any]:
-    """full-loop golden を書き、要約を返す（検証に落ちたら 1 バイトも書かない）。"""
+    """Write the full-loop golden and return a summary (writes not one byte if verification
+    fails)."""
     from tokenizers import Tokenizer
 
     source = ex.IrodoriSource(source_dir)
@@ -1053,17 +1139,19 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     duration_predictor = ex.load_duration_predictor(source, state, config)
     dit = ex.load_dit(source, state, config, text_config)
 
-    # MUST: 丸めは load の直後・golden の採取より前（`irodori.export.fake_quant` の順序 MUST）。
-    # `dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker / duration の
-    # コピーを内側に持つ）なので、上流突合（`sample_euler_rf_cfg` / `predict_duration_log_frames`）
-    # もここで丸めた重みで回る = グラフ経路と上流経路の両辺が同じ丸めを受ける。
+    # MUST: rounding happens right after load and before the golden is taken (the ordering MUST of
+    # `irodori.export.fake_quant`). `dit` is the **whole** `TextToLatentRFDiT` (it holds copies of
+    # backbone / projector / speaker / duration inside), so the upstream comparisons
+    # (`sample_euler_rf_cfg` / `predict_duration_log_frames`) also run on the weights rounded here
+    # = both the graph path and the upstream path receive the same rounding.
     #
-    # MUST（i4 = 配布の quant 席 `i8+dit4`）: 丸めを 2 段に割る。段 1 はここで **i8 席と同一の
-    # fake-quant**（i8+dit4 席は他 7 役に i8 席の i8 バイトを共有させるので、条件エンコーダ側の
-    # 丸めは i8 golden と同一が正しい）、段 2 は {@link restore_dit_from_i4_series} が DiT の 2 本
-    # （`dit` / `dit-context`）のラッパ所有パラメタだけを出荷バイトで上書きする。
-    # `irodori.export.fake_quant` の i4 経路を呼んで校正をここでもう 1 度走らせない理由は段 2 の
-    # docstring。
+    # MUST (i4 = the distribution's quant preset `i8+dit4`): rounding is split into two stages.
+    # Stage 1 is **the same fake-quant as the i8 preset** here (the i8+dit4 preset has the other 7
+    # roles share the i8 preset's i8 bytes, so the condition encoders' rounding is correctly
+    # identical to the i8 golden); stage 2 has {@link restore_dit_from_i4_series} overwrite only the
+    # parameters the wrappers of the two DiT graphs (`dit` / `dit-context`) own with the shipped
+    # bytes. Why this does not call the i4 path of `irodori.export.fake_quant` and run calibration
+    # once more here: see stage 2's docstring.
     quantized = ex.fake_quant(
         "i8" if dtype == "i4" else dtype,
         {
@@ -1080,8 +1168,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
     restored = (
         restore_dit_from_i4_series(
-            # ラッパ所有パラメタは `dit` の Parameter そのもの（DiT のラッパは張り替えずに
-            # 同じ属性名で抱える）なので、ラッパ経由の上書きが `dit` 側にも通る。
+            # The parameters the wrappers own are `dit`'s Parameters themselves (the DiT wrappers
+            # hold them under the same attribute names without rebinding), so overwriting through
+            # the wrappers reaches `dit` too.
             ex.dit_wrappers(dit, ex.dit_sym_max(config)).by_target(),
             ex.default_out_root(model_dir, dtype),
         )
@@ -1089,9 +1178,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         else None
     )
 
-    # MUST: グラフラッパは**パッチ後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
-    # このファイルは「パッチ前の参照」を採らない（採る側は irodori/export.py）ので、
-    # ここで当てて構わない。
+    # MUST: the graph wrappers work correctly only **after patching** (they pass the real-valued
+    # RoPE table). This file does not take the "unpatched reference" (irodori/export.py does), so
+    # applying the patches here is fine.
     patch.apply_patches()
     speaker_max = ex.speaker_sym_max(model_config)
     dit_graphs = ex.dit_wrappers(dit, ex.dit_sym_max(config))
@@ -1127,10 +1216,11 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             config,
             caps,
         )
-        # ---- 常設門: S と最終 z を上流の正本経路と突き合わせる ----
+        # ---- standing check: compare S and the final z with upstream's canonical path ----
         text_ids = tensors["text_ids"]
-        # MUST: caption の条件入力は上流の入口から独立に作る（ホストの列を渡し直さない —
-        # {@link upstream_caption_condition}）。両者が同じ列になることは直下で実測する。
+        # MUST: the caption's condition input is built independently from upstream's entry point
+        # (the host's sequence is not passed back — {@link upstream_caption_condition}). That the
+        # two are the same sequence is measured right below.
         caption_padded, caption_mask = upstream_caption_condition(
             caption_tokenizer, case.caption, caps["caption"]
         )
@@ -1142,8 +1232,9 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             and not torch.equal(host_caption_ids[0], caption_padded[0, :upstream_used])
         ):
             raise SystemExit(
-                f"{case.name}: caption の token 列がホスト（{host_used} token）と"
-                f"上流（{upstream_used} token）で食い違う — 前処理の綴りが割れている"
+                f"{case.name}: the caption token sequences disagree between the host ({host_used}"
+                f" tokens) and upstream ({upstream_used} tokens) — the preprocessing spellings"
+                " have diverged"
             )
         upstream_steps = upstream_sequence_length(
             dit,
@@ -1158,8 +1249,8 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         )
         if upstream_steps != meta["S"]:
             raise SystemExit(
-                f"{case.name}: S がホスト {meta['S']} / 上流 {upstream_steps} で食い違う"
-                "（expm1 → 銀行家丸め → clamp のどこかが違う）"
+                f"{case.name}: S disagrees: host {meta['S']} / upstream {upstream_steps}"
+                " (something in expm1 → banker's rounding → clamp differs)"
             )
         reference, upstream_noise = upstream_latent(
             dit,
@@ -1174,12 +1265,17 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             config,
         )
         if not torch.equal(upstream_noise, tensors["noise"]):
-            raise SystemExit(f"{case.name}: 初期ノイズが上流と一致しない（seed の使い方が違う）")
+            raise SystemExit(
+                f"{case.name}: the initial noise does not match upstream (seed is used differently)"
+            )
         worst = float((reference - tensors["z"]).abs().max())
         if worst > EULER_REFERENCE_ATOL:
-            # ---- 2 段目: 増幅率を実測して正規化判定（定数コメントの追記 2026-09-01） ----
-            # run_case は決定的なので再実行 + 摂動走行で増幅率だけを足す。z の同一性は
-            # 判定の前提（違えば「同じ軌道の感度」を測れていない）なので明示的に確かめる。
+            # ---- second stage: measure the amplification factor and judge normalized (the
+            # addendum of 2026-09-01 in the constant's comment) ----
+            # run_case is deterministic, so a rerun + a perturbation run add only the amplification
+            # factor. The identity of z is a precondition of the judgement (otherwise "the
+            # sensitivity of the same trajectory" is not what is measured), so it is checked
+            # explicitly.
             probed_tensors, probed_meta = run_case(
                 case,
                 graphs,
@@ -1194,18 +1290,19 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
             )
             if not torch.equal(probed_tensors["z"], tensors["z"]):
                 raise SystemExit(
-                    f"{case.name}: 再実行の z が一致しない — ホスト経路が非決定的で、"
-                    "増幅率の実測が成立しない"
+                    f"{case.name}: the rerun's z does not match — the host path is"
+                    " non-deterministic, so the amplification measurement does not hold"
                 )
             amp = float(probed_meta["sensitivityAmp"])
             meta["sensitivityAmp"] = probed_meta["sensitivityAmp"]
             if not euler_reference_within_sensitivity(worst, amp):
                 raise SystemExit(
-                    f"{case.name}: 最終 z が上流と {worst} 違う（1 段目の許容"
-                    f" {EULER_REFERENCE_ATOL} を超過）。増幅率 {amp:.4g} で正規化しても"
-                    f" {worst / amp:.4g} > {EULER_NOISE_PER_AMP}、または絶対上限"
-                    f" {EULER_REFERENCE_ABS_CEILING} 超え — 誤差の蓄積では説明できない差で、"
-                    " CFG 合成式 / t スケジュール / マスク区間のどれかが崩れている疑い"
+                    f"{case.name}: the final z differs from upstream by {worst} (exceeds the"
+                    f" first-stage tolerance {EULER_REFERENCE_ATOL}). Normalized by the"
+                    f" amplification factor {amp:.4g} it is still {worst / amp:.4g} >"
+                    f" {EULER_NOISE_PER_AMP}, or it exceeds the absolute ceiling"
+                    f" {EULER_REFERENCE_ABS_CEILING} — a difference error accumulation cannot"
+                    " explain; the CFG combination formula / t schedule / mask segments seem broken"
                 )
         meta["upstreamMaxAbs"] = float(f"{worst:.4e}")
         cases[case.name] = meta
@@ -1217,7 +1314,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         path = out_dir / f"{CASE_PREFIX}{name}{CASE_SUFFIX}"
         save_file(
             {
-                key: normalize_boundary_tensor(value.contiguous(), f"{name} の '{key}'")
+                key: normalize_boundary_tensor(value.contiguous(), f"{name} '{key}'")
                 for key, value in tensors.items()
             },
             str(path),
@@ -1245,9 +1342,10 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
         "cases": cases,
     }
     if restored is not None:
-        # MUST: 既存キーを 1 つも動かさない（deno 側の latent 門が読む）。i4 のときだけ足す
-        # 1 本で、`fakeQuant` が段 1（i8）しか語らないぶんの出所をここが受け持つ。中身は
-        # ターゲット（DiT の 2 本）ごとの記録で、読み手は人間だけ（機械の突合は読み戻しの門）。
+        # MUST: no existing key moves (the deno-side latent check reads them). This is the one
+        # key added only for i4, covering the provenance that `fakeQuant`, which only speaks of
+        # stage 1 (i8), leaves out. Its content is a record per target (the two DiT graphs), read
+        # by humans only (the machine comparison is the read-back checks).
         meta_payload["i4Source"] = {
             target: {
                 "container": str(record.container),
@@ -1267,10 +1365,11 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
 
 
 def default_out_dir(model_dir: Path, dtype: str = "f32") -> Path:
-    """既定の置き場（`outputs/series/irodori-<実重みのディレクトリ名>{,-f16,-i8,-i4}/pipeline/`）。
+    """The default location (`outputs/series/irodori-<the real-weight directory
+    name>{,-f16,-i8,-i4}/pipeline/`).
 
-    系列 root の綴りは `irodori.export.default_out_root` と同一 —
-    `pipeline/` はその下の 1 段（グラフのターゲットと並ぶ席）。
+    The spelling of the series root is identical to `irodori.export.default_out_root` —
+    `pipeline/` is one level below it (alongside the graph targets).
     """
     return ex.default_out_root(model_dir, dtype) / "pipeline"
 
@@ -1284,10 +1383,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--dtype",
         choices=ex.WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（f16 / i8 は golden を fake-quant 後の重みで焼き直す"
-        " — ADR 0018 / 0019 / 0027 / 0050。i4 は i8 席と同じ丸めの上に、export 済みの"
-        " i4 系列（--model-dir から導く）の出荷バイトで DiT の 2 本（dit / dit-context）を"
-        "上書きする — ADR 0069 / 0114）",
+        help="storage dtype of the weights (f16 / i8 rebake the golden with the weights after"
+        " fake-quant — ADR 0018 / 0019 / 0027 / 0050. i4 starts from the same rounding as the i8"
+        " preset and overwrites the two DiT graphs (dit / dit-context) with the shipped bytes"
+        " of the exported i4 series (derived from --model-dir) — ADR 0069 / 0114)",
     )
     args = parser.parse_args(argv)
     out_dir = default_out_dir(args.model_dir, args.dtype) if args.out is None else args.out

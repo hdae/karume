@@ -1,24 +1,28 @@
-"""`wan/vae_patch.py` の Wan2.2 の分岐の約束事（ADR 0121 決定 6 / 段 4 の検収）。
+"""The contract of the Wan2.2 branch of `wan/vae_patch.py` (ADR 0121 decision 6, the acceptance of
+step 4).
 
-2 層で固定する:
+Pinned on two levels:
 
-- **合成の 2.2 VAE**（常に走る — conftest の `ti2v_synthetic_vae`。上流 `AutoencoderKLWan` を 5B と
-  同じ構造〈residual の up block・patch 2・ショートカット 3 本〉の小さなチャネルで乱数初期化した
-  もの）: ショートカット（最初の chunk の slice を含む）の上流との一致・cache の表・cache の正規化の
-  ビット一致・最終形の帯・故障注入・世代の門。
-- **実重み**（pin した 5B の snapshot が無い機では SKIP — 2.1 の実重みのテストと同じ規律）:
-  タイル 16 の cache の表（架構の表）と要素数・タイル 8 で 5 chunk の正規化のビット一致と
-  最終形の帯。
+- **The synthetic 2.2 VAE** (always runs — conftest's `ti2v_synthetic_vae`; the upstream
+  `AutoencoderKLWan` randomly initialized with the 5B's structure — residual up blocks, patch 2,
+  three shortcuts — at small channel counts): agreement of the shortcuts (the first chunk's slice
+  included) with the upstream, the cache table, bit identity of cache normalization, the final
+  form's band, fault injection, the generation checks.
+- **Real weights** (SKIP on a machine without the pinned 5B snapshot — the same discipline as the
+  2.1 real-weights tests): the cache table at tile 16 (the architecture table) and the element
+  counts, bit identity of the normalization and the final form's band at tile 8 with 5 chunks.
 
-5 chunk は、最初の chunk・`time_conv` の `'Rep'` 経路を通る 2 chunk 目・通常の cache が 2 フレーム
-揃う 3 chunk 目・1 本目の `time_conv`（潜在 1 フレームを受ける）が使う cache が 2 フレームとも
-非ゼロになる 4 chunk 目を通り、全ての cache が揃った後の chunk を 1 本含む本数（全てを通る最小は
-4）。実寸（タイル 16・9 chunk）の値は
-`python -m wan.export_vae --model ti2v-5b --verify --chunks 9` が測る。
+5 chunks is the count that goes through the first chunk, the second chunk on the `'Rep'` path of
+`time_conv`, the third chunk where the regular cache holds 2 frames, and the fourth chunk where the
+cache used by the first `time_conv` (which takes 1 latent frame) has both frames nonzero, and that
+includes one chunk after every cache is filled (the smallest that goes through all of them is 4).
+The real-size values (tile 16, 9 chunks) are measured by
+`python -m wan.export_vae --model ti2v-5b --verify --chunks 9`.
 
-実重みのテストは VAE 全体（encoder を含む f32 約 2.82 GB）を読む。2026-10-05 の実測（別の重い CPU
-作業と同居）で RSS の山は約 3.5 GiB、このファイルの実重みの部分は約 2 分。長い CPU 作業と同居させて
-RAM が足りないときは、そのテストを `-k 'not RealWeights'` で外して後で回す。
+The real-weights tests read the whole VAE (f32 including the encoder, about 2.82 GB). Measured on
+2026-10-05 (sharing the machine with other heavy CPU work), the RSS peak is about 3.5 GiB and the
+real-weights part of this file takes about 2 minutes. When RAM runs short alongside long CPU work,
+leave those tests out with `-k 'not RealWeights'` and run them later.
 """
 
 from __future__ import annotations
@@ -31,21 +35,23 @@ from torch import nn
 
 from wan import vae_patch
 
-#: 合成の VAE の潜在タイル（空間）・実重みの潜在タイル・chunk 数。
+#: The synthetic VAE's latent tile (spatial), the real weights' latent tile, the chunk count.
 SYNTHETIC_TILE = 4
 REAL_TILE = 8
 CHUNKS = 5
 
-#: Wan2.2 の patchify の倍率（上流 config の `patch_size`）。
+#: Wan2.2's patchify factor (`patch_size` of the upstream config).
 PATCH_SIZE = 2
 
-#: 書き直しの最終形（chunk ループ全体）と上流の差の帯（参照の最大絶対値に対する比）。どちらも
-#: 決定用の実測（このテストの潜在 — seed 7・5 chunk）の 5 倍を有効数字 2 桁で切り上げた値。差の
-#: 出所は 2.1 と同じ RMS_norm の縮約形と conv の padding の attrs 化（`test_vae_patch.py`）で、
-#: ショートカットはデータ移動だけ。
-#: - 合成（タイル 4）: 実測 1.05e-6（最後の chunk は 9.09e-7）。
-#: - 実重み f32（タイル 8・2026-10-05）: 実測 5.31e-6（最後の chunk は 4.20e-6）。2.1 の同じ寸法
-#:   （1.95e-6）より大きいのは、縮約するチャネルが 2.7〜4 倍あるため（推測）。
+#: The band of the difference between the final form of the rewrite (the whole chunk loop) and the
+#: upstream (ratio to the reference's maximum absolute value). Both are 5 times the measurement of
+#: the decision case (this test's latent — seed 7, 5 chunks), rounded up to two significant digits.
+#: The difference comes from the same reduced form of RMS_norm and the conv padding moved into attrs
+#: as in 2.1 (`test_vae_patch.py`); the shortcuts only move data.
+#: - Synthetic (tile 4): measured 1.05e-6 (the last chunk is 9.09e-7).
+#: - Real weights f32 (tile 8, 2026-10-05): measured 5.31e-6 (the last chunk is 4.20e-6). It is
+#:   larger than 2.1 at the same size (1.95e-6) because there are 2.7 to 4 times as many channels to
+#:   reduce (a guess).
 SYNTHETIC_FINAL_RATIO_BAND = 5.3e-6
 REAL_FINAL_RATIO_BAND = 2.7e-5
 
@@ -55,7 +61,8 @@ def _ratio(got: torch.Tensor, want: torch.Tensor) -> float:
 
 
 def _latents(vae, tile: int) -> torch.Tensor:
-    """逆正規化した固定 seed の乱数潜在 `[1, 48, 5, t, t]`（実運用と同じ値域）。"""
+    """A fixed-seed random latent `[1, 48, 5, t, t]`, denormalized (the same value range as in real
+    use)."""
     generator = torch.Generator().manual_seed(7)
     mean = torch.tensor(vae.config.latents_mean).view(1, 48, 1, 1, 1)
     std = torch.tensor(vae.config.latents_std).view(1, 48, 1, 1, 1)
@@ -75,17 +82,20 @@ def _upstream_decode(vae, latents: torch.Tensor) -> torch.Tensor:
 
 
 def _unpatchify(frames: torch.Tensor) -> torch.Tensor:
-    """上流の `unpatchify` そのもの（自前の写しで縛ると参照の素性の主張が恒真になる）。"""
+    """The upstream `unpatchify` itself (pinning against a copy of our own would make the claim
+    about the reference's origin tautological)."""
     from diffusers.models.autoencoders.autoencoder_kl_wan import unpatchify
 
     return unpatchify(frames, patch_size=PATCH_SIZE)
 
 
 class TestAvgShortcut:
-    """ショートカットの wan 側（`avg_shortcut` — 最初の chunk の slice を持つ）と上流 `DupUp3D`。
+    """The wan side of the shortcut (`avg_shortcut` — it holds the first chunk's slice) against the
+    upstream `DupUp3D`.
 
-    `importorskip` は各テストの中で受ける（fixture を経ないので、diffusers の無い既定の sync で
-    FAIL にせず SKIP にする — `test_vae_tiling.py` と同じ流儀）。
+    `importorskip` is taken inside each test (it does not go through a fixture, so under the default
+    sync without diffusers it becomes SKIP rather than FAIL — the same style as
+    `test_vae_tiling.py`).
     """
 
     @pytest.mark.parametrize("first_chunk", [False, True])
@@ -107,7 +117,7 @@ class TestAvgShortcut:
 
     def test_an_input_of_other_channels_is_refused(self):
         wan_vae = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="入力チャネル"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="input channels"):
             vae_patch.avg_shortcut(
                 wan_vae.DupUp3D(8, 8, factor_t=2, factor_s=2),
                 torch.zeros(4, 1, 2, 2),
@@ -116,8 +126,9 @@ class TestAvgShortcut:
 
 
 class TestCacheTableTi2v:
-    #: 合成の VAE の表（潜在タイル 4 のとき）。(キー, 形, time_conv)。並びは 5B の架構の表と同じで、
-    #: チャネルだけが 1/16（5B は 48 / 1024 / 512 / 256）。
+    #: The synthetic VAE's table (at latent tile 4). (key, shape, time_conv). The order is the same
+    #: as the 5B's architecture table, with only the channels at 1/16 (the 5B has 48 / 1024 / 512 /
+    #: 256).
     SYNTHETIC_TABLE = (
         [("00", (48, 2, 4, 4), False)]
         + [(f"{index:02d}", (64, 2, 4, 4), False) for index in range(1, 11)]
@@ -203,7 +214,8 @@ class TestChunkDecodeTi2v:
     def test_a_shortcut_with_its_h_and_w_digits_swapped_is_outside_the_band(
         self, ti2v_synthetic_vae, synthetic_latents, synthetic_reference, monkeypatch
     ):
-        """故障注入: up2（rep 2）のショートカットで、チャネルの添字の H と W の桁を取り違える。"""
+        """Fault injection: in the shortcut of up2 (rep 2), swap the H and W digits of the channel
+        index."""
         original = vae_patch.dup_up_3d
 
         def swapped(x: torch.Tensor, **factors: int) -> torch.Tensor:
@@ -216,11 +228,13 @@ class TestChunkDecodeTi2v:
 
 
 class TestTheFirstChunkSlice:
-    """故障注入: ショートカットの最初の chunk の slice を落とすと、first のグラフは形で落ちる。
+    """Fault injection: dropping the first chunk's slice from the shortcut makes the first graph
+    fail on shapes.
 
-    up0 は `[C,1,…] + [C,2,…]` の broadcast で黙って通るが、up1 で 2 枚 + 4 枚になり加算できない —
-    値が通ってしまう形は無い。GPU の照合ではなく eager と export の形の失敗で確かめる（欠けた
-    グラフは export できない）。
+    up0 gets through silently by the broadcast of `[C,1,…] + [C,2,…]`, but at up1 it becomes
+    2 frames + 4 frames, which cannot be added — there is no shape where the values get through.
+    It is checked through shape failures in eager and in export rather than through a GPU
+    comparison (a graph with a piece missing cannot be exported).
     """
 
     @pytest.fixture
@@ -267,7 +281,7 @@ class TestGenerationGate:
 
         vae = AutoencoderKLWan.from_config(ti2v_synthetic_vae.config, **overrides)
 
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="未対応"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="unsupported"):
             vae_patch.assert_supported(vae)
 
     def test_an_exit_that_is_not_the_patchify_space_is_refused(self, ti2v_synthetic_vae):
@@ -275,23 +289,23 @@ class TestGenerationGate:
 
         vae = AutoencoderKLWan.from_config(ti2v_synthetic_vae.config, out_channels=3)
 
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="出口のチャネル"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="output channels"):
             vae_patch.assert_supported(vae)
 
     def test_a_block_whose_shortcut_and_upsampler_disagree_is_refused(self, ti2v_synthetic_vae):
         vae = copy.deepcopy(ti2v_synthetic_vae)
         vae.decoder.up_blocks[0].avg_shortcut = None
 
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="有無"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="disagree on presence"):
             vae_patch.assert_supported(vae)
 
     def test_a_shortcut_with_another_time_factor_is_refused(self, ti2v_synthetic_vae):
-        """up2 の upsampler は upsample2d（時間 ×1）— ショートカットだけ ×2 だと 1 枚 / 4 枚が
-        崩れる。"""
+        """up2's upsampler is upsample2d (time ×1) — with ×2 only in the shortcut, the 1 frame /
+        4 frames break."""
         vae = copy.deepcopy(ti2v_synthetic_vae)
         vae.decoder.up_blocks[2].avg_shortcut.factor_t = 2
 
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="倍率"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="scale factors"):
             vae_patch.assert_supported(vae)
 
     def test_the_reference_also_refuses_an_unsupported_generation(self, ti2v_synthetic_vae):
@@ -299,16 +313,17 @@ class TestGenerationGate:
 
         vae = AutoencoderKLWan.from_config(ti2v_synthetic_vae.config, patch_size=None)
 
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="未対応"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="unsupported"):
             vae_patch.reference_decode_unclamped(vae, torch.zeros(1, 48, 1, 2, 2))
 
 
-# ---- 実重み（pin した 5B の snapshot が無ければ SKIP）---------------------------------
+# ---- Real weights (SKIP without the pinned 5B snapshot) ------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def vae(wan22_snapshot):
-    """pin した revision の 5B の VAE（CPU f32・丸め無し — 同値の主張は重みの値に依らない）。"""
+    """The 5B VAE of the pinned revision (CPU f32, no rounding — the equivalence claim does not
+    depend on the weight values)."""
     pytest.importorskip("diffusers")
     from diffusers import AutoencoderKLWan
 
@@ -329,7 +344,8 @@ def reference(vae, latents) -> torch.Tensor:
 
 
 class TestCacheTableRealWeights:
-    #: 架構の表（潜在タイル 16 のとき — ADR 0121 段 4 の設計の表）。(キー, 形, time_conv)。
+    #: The architecture table (at latent tile 16 — the design table of ADR 0121 step 4).
+    #: (key, shape, time_conv).
     TABLE = (
         [("00", (48, 2, 16, 16), False)]
         + [(f"{index:02d}", (1024, 2, 16, 16), False) for index in range(1, 11)]

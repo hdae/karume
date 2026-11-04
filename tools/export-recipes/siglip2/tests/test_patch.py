@@ -1,16 +1,20 @@
-"""`siglip2.patch` の書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
+"""Regression tests that the rewrites of `siglip2.patch` are equivalent to the original
+implementation (the part that needs no real weights).
 
-実重みでの端から端までの同値検証は `siglip2.export.py --verify`（2 点評価）。ここでは
-transformers を持たない環境でも回る単体レベルの同値を、**上流の forward を逐語で写した
-骨格**（{@link StubEmbeddings} / {@link StubMapHead}）に対して固定する。
+The end-to-end equivalence check with real weights is `siglip2.export.py --verify` (evaluated at
+two points). Here, unit-level equivalence that also runs in environments without transformers is
+pinned against **skeletons that copy the upstream forward verbatim** ({@link StubEmbeddings} /
+{@link StubMapHead}).
 
-主張の強さは段ごとに違う（`siglip2.patch` の docstring）:
+The strength of the claim differs per step (the `siglip2.patch` docstring):
 
-- 形の畳み込み（conv padding / 位置埋め込み）は **ビット一致**。演算列が 1 対 1 なので
-  「差が小さい」で通す形にすると、位置埋め込みの並びの取り違えが素通りしうる。
-- MAP head の q/k/v 明示化は **近い値**まで。`nn.MultiheadAttention` は q にだけ 1/√d を
-  掛け、SDPA は q と k に対称に割るため。ただし tolerance は f32 の丸め幅（1e-5）に留めて、
-  q/k/v の順序違いや head 分割の取り違えが通らないようにする。
+- The shape folds (conv padding / position embedding) are **bit-identical**. The operation
+  sequences correspond one to one, so accepting "the difference is small" could let a mix-up in
+  the order of the position embedding through.
+- Making the MAP head's q/k/v explicit is only **close in value**, because
+  `nn.MultiheadAttention` multiplies only q by 1/√d while SDPA scales q and k symmetrically. The
+  tolerance stays at f32 rounding width (1e-5), though, so that a q/k/v order swap or a wrong head
+  split cannot pass.
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ from torch import nn
 
 from siglip2 import patch as patch_siglip2
 
-#: MAP head の同値許容差。`nn.MultiheadAttention` と SDPA のスケールの割り方の違いだけを
-#: 許す幅で、q/k/v の入れ替えや head 分割の取り違えはこの桁に収まらない。
+#: Equivalence tolerance of the MAP head. Wide enough only for the difference in how
+#: `nn.MultiheadAttention` and SDPA apply the scale; a q/k/v swap or a wrong head split does not fit
+#: within this magnitude.
 MAP_HEAD_ATOL = 1e-5
 
 EMBED_DIM = 24
@@ -31,7 +36,8 @@ SEQUENCE = 7
 
 
 class StubMapHead(nn.Module):
-    """`SiglipMultiheadAttentionPoolingHead` の骨格（forward は上流の逐語写し）。"""
+    """Skeleton of `SiglipMultiheadAttentionPoolingHead` (forward is a verbatim copy of
+    upstream)."""
 
     def __init__(self, embed_dim: int = EMBED_DIM, num_heads: int = NUM_HEADS) -> None:
         super().__init__()
@@ -55,7 +61,7 @@ class StubMapHead(nn.Module):
 
 
 class StubEmbeddings(nn.Module):
-    """`SiglipVisionEmbeddings` の骨格（forward は上流の逐語写し）。"""
+    """Skeleton of `SiglipVisionEmbeddings` (forward is a verbatim copy of upstream)."""
 
     def __init__(self, image_size: int = 8, patch_size: int = 4, embed_dim: int = 6) -> None:
         super().__init__()
@@ -83,7 +89,8 @@ class StubEmbeddings(nn.Module):
 
 @pytest.fixture(autouse=True)
 def restore_patched_attributes():
-    """差し替えを全て戻す（クラス属性の差し替えはプロセス全域 — 次のケースの参照が汚れる）。"""
+    """Undo every replacement (class attribute replacements are process-wide — they would
+    contaminate the next case's reference)."""
     forwards = (StubMapHead.forward, StubEmbeddings.forward)
     flags = (patch_siglip2._SHAPE_APPLIED, patch_siglip2._MAP_HEAD_APPLIED)
     try:
@@ -94,7 +101,7 @@ def restore_patched_attributes():
 
 
 class Config:
-    """`SiglipVisionConfig` のうち `assert_supported` が見る欄だけ。"""
+    """Only the fields of `SiglipVisionConfig` that `assert_supported` reads."""
 
     def __init__(self, **overrides: object) -> None:
         self.hidden_act = patch_siglip2.EXPECTED_HIDDEN_ACT
@@ -111,10 +118,12 @@ class TestAssertSupported:
         patch_siglip2.assert_supported(Config())
 
     def test_accepts_a_resolution_that_is_not_a_multiple_of_the_patch_size(self):
-        """so400m は 384 / 14 = 27 グリッドで右下 6 画素が落ちる（上流ごと）— 書かれた経路。
+        """so400m is a 384 / 14 = 27 grid that drops the bottom-right 6 pixels (upstream as well)
+        — a supported path.
 
-        パッチ数も位置埋め込みの行数も `image_size // patch_size` の floor から決まるので、
-        割り切れなくても両側が一致する（`_assert_position_ids_are_arange` の NOTE）。
+        Both the patch count and the row count of the position embedding follow from the floor of
+        `image_size // patch_size`, so the two sides agree even when it does not divide evenly
+        (the NOTE of `_assert_position_ids_are_arange`).
         """
         patch_siglip2.assert_supported(
             Config(image_size=384, patch_size=14, hidden_size=1152, num_attention_heads=16)
@@ -125,7 +134,7 @@ class TestAssertSupported:
         [
             ({"hidden_act": "gelu"}, "hidden_act"),
             ({"num_channels": 1}, "num_channels"),
-            ({"num_attention_heads": 7}, "割り切れない"),
+            ({"num_attention_heads": 7}, "is not divisible by num_attention_heads"),
         ],
     )
     def test_fails_loudly_outside_the_written_path(self, overrides, message):
@@ -134,7 +143,8 @@ class TestAssertSupported:
 
 
 class TestShapePatchesAreBitExact:
-    """MUST: 主張はビット一致（`--verify` の 1 点目が実重みで同じ主張を採る）。"""
+    """MUST: the claim is bit-identity (point 1 of `--verify` measures the same claim with real
+    weights)."""
 
     @pytest.fixture
     def pixels(self):
@@ -160,7 +170,7 @@ class TestShapePatchesAreBitExact:
         assert embeddings.patch_embedding.padding == (0, 0)
 
     def test_interpolate_pos_encoding_is_refused(self, pixels):
-        """固定解像度でしか同値でない経路は黙って通さない。"""
+        """A path that is equivalent only at a fixed resolution is not let through silently."""
         embeddings = StubEmbeddings().eval()
         patch_siglip2.apply_shape_patches(embeddings)
 
@@ -168,7 +178,8 @@ class TestShapePatchesAreBitExact:
             embeddings(pixels, interpolate_pos_encoding=True)
 
     def test_shuffled_position_ids_fail_loudly(self):
-        """並びが `arange` でなければ直加算は別の位置埋め込みになる（shape は合ったまま）。"""
+        """If the order is not `arange`, the direct addition becomes a different position
+        embedding (with the shape still matching)."""
         embeddings = StubEmbeddings().eval()
         embeddings.position_ids = embeddings.position_ids.flip(-1)
 
@@ -194,7 +205,8 @@ class TestMapHeadSplit:
         assert torch.allclose(patched, reference, atol=MAP_HEAD_ATOL, rtol=0.0)
 
     def test_the_packed_projection_is_split_in_qkv_order(self):
-        """MUST: 3 等分の順序は q → k → v（入れ替えても shape は合う）。"""
+        """MUST: the order of the three-way split is q → k → v (a swap would still match in
+        shape)."""
         head = StubMapHead().eval()
         packed = head.attention.in_proj_weight.detach().clone()
 
@@ -205,7 +217,8 @@ class TestMapHeadSplit:
             assert torch.equal(projection.weight, packed[rows])
 
     def test_the_packed_attention_module_is_gone(self):
-        """差し替え後に元の経路が残っていると、外れたことが誰にも見えなくなる。"""
+        """If the original path remained after the replacement, nobody could see that it was
+        bypassed."""
         head = StubMapHead().eval()
 
         patch_siglip2.apply_map_head_patch(head)
@@ -214,10 +227,11 @@ class TestMapHeadSplit:
         assert patch_siglip2.patches_applied()
 
     def test_probe_is_broadcast_not_repeated(self, hidden):
-        """MUST: `expand` で広げる（`repeat` は batch>1 で未対応 op として残る）。
+        """MUST: broadcast with `expand` (`repeat` remains as an unsupported op with batch>1).
 
-        `expand` は入力を読むだけなので、`probe` を書き換えると出力が変わる — 定数へ
-        畳まれていないことを値で見る（形だけでは `repeat` との差が出ない）。
+        `expand` only reads its input, so rewriting `probe` changes the output — this checks by
+        value that it was not folded into a constant (the shape alone shows no difference from
+        `repeat`).
         """
         head = StubMapHead().eval()
         patch_siglip2.apply_map_head_patch(head)

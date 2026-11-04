@@ -1,41 +1,44 @@
-"""系列出力（`outputs/series/`）の旧 shard 列を容器（`krm`）へ移す — recipe 側のドライバ。
+"""Moves the old shard lists of the series outputs (`outputs/series/`) into containers (`krm`) — the
+recipe-side driver.
 
-    uv run python -m migrate_series                          # 参照されている系列を全部
+    uv run python -m migrate_series                          # every referenced series
     uv run python -m migrate_series --only deberta --dry-run
     uv run python -m migrate_series --series-dir /path/to/series
 
-core の `karume migrate` に系列モードを**足さない**のは、「どのディレクトリがどの部品名か」を
-知っているのが family の `distribution.py` だけだから（ADR 0065 — core は家族を知らない）。
-系列のレイアウトは family ごとに違い、しかも**ディレクトリ名は部品名ではない**:
+The series mode is **not added** to core's `karume migrate` because only a family's
+`distribution.py` knows "which directory is which component name" (ADR 0065 — core does not know
+the families). The series layout differs per family, and **a directory name is not a component
+name**:
 
-- 系列直下に 1 部品（siglip2 / birefnet / depth-anything / vowel-detector / gemma4 /
-  gemma4-qat / minicpm5 / embeddinggemma）— ディレクトリ名は系列名。
-- サブディレクトリに部品が並ぶ（anima / sbv2 / irodori / dacvae / deberta）— 綴りが一致
-  しないものがある（`caption-proj` → `caption_proj`・`decoder` → `codec_decoder`・deberta の
-  `full-24layer` → SBV2 が消費する `text_encoder` 席）。
+- one component directly under the series (siglip2 / birefnet / depth-anything / vowel-detector /
+  gemma4 / gemma4-qat / minicpm5 / embeddinggemma) — the directory name is the series name.
+- components side by side in subdirectories (anima / sbv2 / irodori / dacvae / deberta) — some
+  spellings do not match (`caption-proj` → `caption_proj`, `decoder` → `codec_decoder`, deberta's
+  `full-24layer` → the `text_encoder` role SBV2 consumes).
 
-**旧入力は読むだけ**で、`krm` は同じディレクトリに並べる（旧 shard と sidecar は消さない —
-退避はディレクトリ単位で別に行う）。触らないものは golden（`io.*` / `io-i8a8.*` / `greedy.*` /
-`drafter-golden.*` / `case.*` / `t-embed.*` / `pipeline.*` / `trim.*`）・`ple.probe.safetensors`・
-`*.json` / `*.txt` / `*.md`・資産ディレクトリ（`text/` / `tokenizer/` / `pipeline/` /
-`host/`）である。
+**The old inputs are only read**, and the `krm` goes into the same directory (old shards and
+sidecars are not deleted — backups are made separately per directory). Left untouched are the
+goldens (`io.*` / `io-i8a8.*` / `greedy.*` / `drafter-golden.*` / `case.*` / `t-embed.*` /
+`pipeline.*` / `trim.*`), `ple.probe.safetensors`, `*.json` / `*.txt` / `*.md` and the asset
+directories (`text/` / `tokenizer/` / `pipeline/` / `host/`).
 
-**例外が 1 つある**: QAT 系列の `reference.json` は書き換える（{@link rewrite_qat_reference}）—
-記録が名乗る PLE の本数は旧 sidecar の shard 本数で、畳んだ後はどこにも存在しない数になる。
-移行は記録が指す実体を作り直しているので、記録も追随させる。
+**There is one exception**: a QAT series' `reference.json` is rewritten
+({@link rewrite_qat_reference}) — the PLE count the record states is the old sidecar's shard count,
+a number that exists nowhere once folded. The migration rebuilds what the record points to, so the
+record follows.
 
-sidecar（重みではないが同じ容器で配るバイト列）は 2 種だけ実在する:
+Only 2 kinds of sidecar (bytes that are not weights but ship in the same container) exist:
 
-- `rope_base.safetensors`（anima の `-dyn` 系列）→ 資産 `rope_base`
-  （`karume.migrate.EXTRA_ASSETS` の写し先）。
-- `ple.json` + `ple-NNNNN-of-NNNNN.safetensors`（gemma4 / gemma4-qat の製品系列）→ 索引
-  `ple_index` + `ple.values.<k>` / `ple.scales.<k>`（`karume.migrate.ple_sidecar_assets` —
-  リポ丸ごとモードと同じ 1 本）。
+- `rope_base.safetensors` (anima's `-dyn` series) → the asset `rope_base`
+  (the target of `karume.migrate.EXTRA_ASSETS`).
+- `ple.json` + `ple-NNNNN-of-NNNNN.safetensors` (the product series of gemma4 / gemma4-qat) → the
+  index `ple_index` + `ple.values.<k>` / `ple.scales.<k>` (`karume.migrate.ple_sidecar_assets` —
+  the same single path as the whole-repository mode).
 
-MUST: 1 部品でも落ちたらそこで止まる（残りを移して最後にまとめない）。落ちた系列は**部分的に
-据わったまま残る**ので、手で消してから回し直す（消すのは移行 CLI の仕事ではない — 移行は
-「出力先は空から作る」が成立条件で、次の実行は `MigrateError: 出力先に前回の成果物が残っている`
-で止まる）。
+MUST: stop as soon as one component fails (do not migrate the rest and report at the end). A failed
+series **is left partly placed**, so delete it by hand and run again (deleting is not the
+migration CLI's job — the migration requires "the output directory is built from empty", and the
+next run stops with `MigrateError: Artifacts of a previous run remain in the output directory`).
 """
 
 from __future__ import annotations
@@ -81,26 +84,28 @@ from siglip2.distribution import SIGLIP2_ROLE
 from vowel_detector import export as vowel_detector_export
 from vowel_detector.distribution import VOWEL_DETECTOR_GRAPH_ROLE
 
-#: 旧 shard 列の代表名（どの family も `model` — 書き手の `MODEL_FILE` の stem）。
+#: The representative name of an old shard list (`model` in every family — the stem of the
+#: writer's `MODEL_FILE`).
 SHARD_STEM = "model"
 
-#: 旧 shard の拡張子と、据える容器の拡張子。
+#: The extension of the old shards and that of the container placed.
 SHARD_SUFFIX = ".safetensors"
 MODEL_SUFFIX = ".krm"
 
-#: 容器の資産へ畳む sidecar のファイル名（core の写し先と 1:1）。
+#: The file names of the sidecars folded into container assets (1:1 with core's targets).
 ROPE_BASE_FILE = f"{ROPE_BASE_ASSET}{SHARD_SUFFIX}"
 PLE_INDEX_FILE = "ple.json"
 
-#: 系列のどのディレクトリにも同居してよい `.safetensors` の接頭辞（golden と検収用の参照）。
-#: **表に無い `.safetensors` は fail loudly** — 新しい sidecar が生えた日に「移したつもりで
-#: 資産が 1 つ落ちた容器」を黙って作らないための門（移行は 1 度きりなので、落ちたことに
-#: 気づく機会が後から来ない）。
+#: Prefixes of the `.safetensors` files that may sit in any directory of a series (goldens and
+#: references for acceptance). **A `.safetensors` not in this table fails loudly** — the check
+#: that keeps the day a new sidecar appears from silently producing "a container that lost an
+#: asset while we thought it was migrated" (the migration runs once, so no later chance to notice
+#: the loss comes).
 #:
-#: 後ろの 4 つは**部品ディレクトリの外**に居る golden で、読み手は全て TS 側のテスト:
-#: `case.*`（irodori の pipeline / dacvae の host 参照）・`t-embed.*`
-#: （`irodori.pipeline_ref.T_EMBED_FILE`）・`pipeline.*`（anima / irodori の段ごとの参照）・
-#: `trim.*`（`irodori.dacvae.host.TRIM_FILE`）。
+#: The last 4 are goldens **outside the component directories**, all read by TS-side tests:
+#: `case.*` (irodori's pipeline / dacvae's host references), `t-embed.*`
+#: (`irodori.pipeline_ref.T_EMBED_FILE`), `pipeline.*` (per-stage references of anima / irodori),
+#: `trim.*` (`irodori.dacvae.host.TRIM_FILE`).
 GOLDEN_PREFIXES: tuple[str, ...] = (
     "io.",
     "io-i8a8.",
@@ -113,81 +118,97 @@ GOLDEN_PREFIXES: tuple[str, ...] = (
     "trim.",
 )
 
-#: QAT family の名前（{@link FAMILIES} の要素と {@link rewrite_qat_reference} の引き当てで
-#: 綴りを割らないための 1 本）。
+#: The QAT family's name (one constant so that the {@link FAMILIES} entry and the lookup in
+#: {@link rewrite_qat_reference} do not split the spelling).
 QAT_FAMILY = "gemma4-qat"
 
-#: QAT 系列が持つ検収記録（移行が schema を上げて書き換える唯一のファイル）。
+#: The acceptance record a QAT series holds (the only file the migration rewrites, raising its
+#: schema).
 QAT_REFERENCE_FILE = "reference.json"
 
-#: 旧 sidecar 世代の記録が名乗る PLE の本数 → 畳んだ資産の block 本数。綴りの正本は**読み手**
-#: （`gemma4_qat.distribution` の突合）— 写しを持つと、片方だけ動いた日に「書き換えたのに
-#: 配布側が見ていない欄」ができる。
+#: The PLE count stated by a record of the old sidecar generation → the block count of the folded
+#: assets. The spelling's source of truth is **the reader** (the matching in
+#: `gemma4_qat.distribution`) — holding a copy would, the day only one side moves, leave "a field
+#: rewritten that the distribution side does not look at".
 QAT_SHARDS_FIELD = REFERENCE_SHARDS_FIELD
 QAT_BLOCKS_FIELD = REFERENCE_BLOCKS_FIELD
 
-#: 変換しない系列の接尾（実験の記録と棄却の記録）。**読み手がいない**ので移さない — 配布にも
-#: TS 側の検収にも入らず、`tools/llm-baseline/data.py` の profile も 2026-09-23 に外した
-#: （llm-speed は配布形専用になった）。実測そのものは `docs/research/` に文章として残る。
+#: Suffixes of series that are not converted (records of experiments and of rejections). They have
+#: **no reader**, so they are not migrated — they enter neither the distribution nor the TS-side
+#: acceptance, and their profiles were removed from `tools/llm-baseline/data.py` on 2026-09-23
+#: (llm-speed became distribution-form only). The measurements themselves remain as prose in
+#: `docs/research/`.
 UNREFERENCED_SUFFIXES: tuple[str, ...] = ("-probe", "-rejected")
 
 
 class SeriesMigrationError(ValueError):
-    """系列の移行の前提が破れた（分類できない系列・表に無い部品・畳み先の無い sidecar）。
+    """A premise of the series migration is broken (a series that cannot be classified, a component
+    not in the table, a sidecar with nowhere to fold into).
 
-    リポの流儀は専用の `Error` サブクラス（`DistError` / `Sbv2FamilyError`）— 素の
-    `ValueError` だと、呼び手の `except` がこの門と「引数が変」一般を区別できない。
+    The repository's convention is a dedicated `Error` subclass (`DistError` /
+    `Sbv2FamilyError`) — with a plain `ValueError`, the caller's `except` cannot tell this check
+    from a generic "bad argument".
     """
 
 
 @dataclass(frozen=True)
 class Component:
-    """移す部品 1 つ（旧 shard 列 1 本 + 同じ容器へ畳む sidecar）。"""
+    """One component to migrate (one old shard list + the sidecars folded into the same
+    container)."""
 
-    #: 旧 shard 列が並ぶディレクトリ（`krm` もここへ据わる）。
+    #: The directory holding the old shard list (the `krm` is placed here too).
     directory: Path
-    #: 容器のグラフ名 = 配布形の部品名 = `karume.json` の weights のキー（container-v1 §2.1）。
+    #: The container's graph name = the component name of the distributed form = the key of
+    #: `karume.json`'s weights (container-v1 §2.1).
     graph_name: str
 
     @property
     def representative(self) -> Path:
-        """旧 shard 列の代表 path（`karume.legacy.resolve_shards` が連番へ解決する）。"""
+        """The representative path of the old shard list (`karume.legacy.resolve_shards` resolves it
+        to the numbered files)."""
         return self.directory / f"{SHARD_STEM}{SHARD_SUFFIX}"
 
     @property
     def container(self) -> Path:
-        """据わる `krm` の代表 path（現物は連番の part 列）。"""
+        """The representative path of the placed `krm` (the actual files are a numbered part
+        list)."""
         return self.directory / f"{SHARD_STEM}{MODEL_SUFFIX}"
 
 
 @dataclass(frozen=True)
 class Family:
-    """1 family の系列レイアウト（系列名の判定・部品名・出所）。
+    """The series layout of one family (series name matching, component names, provenance).
 
-    `roles` が空なら**系列直下に 1 部品**で、部品名は {@link flat_role} が系列名から決める。
-    空でなければ**サブディレクトリ名 → 部品名**の表で、表に無いディレクトリは fail loudly。
+    An empty `roles` means **one component directly under the series**, whose component name
+    {@link flat_role} derives from the series name. Otherwise it is a table of **subdirectory name →
+    component name**, and a directory not in the table fails loudly.
     """
 
     name: str
-    #: 系列名 → この family か（綴りの正本は各 family の distribution / export の定数）。
+    #: Series name → whether it belongs to this family (the spellings' source of truth is each
+    #: family's distribution / export constants).
     matches: Callable[[str], bool]
-    #: 系列名 → 出所（容器へ焼く `provenance`。recipe の export が渡す値と同じ）。
+    #: Series name → provenance (the `provenance` written into the container; the same value the
+    #: recipe's export passes).
     provenance: Callable[[str], Provenance]
-    #: サブディレクトリ名 → 部品名。
+    #: Subdirectory name → component name.
     roles: Mapping[str, str] = field(default_factory=dict)
-    #: 系列直下に 1 部品を置く family の「系列名 → 部品名」。
+    #: "Series name → component name" for a family with one component directly under the series.
     flat_role: Callable[[str], str] | None = None
 
 
 def input_checkpoint(root: Path, series: str) -> Path:
-    """系列名 → その系列を焼いた実重みの置き場（系列直下形の台本の既定出力先の逆引き）。
+    """Series name → where the real weights that produced the series live (the reverse lookup of the
+    default output path of the scripts with one component directly under the series).
 
-    siglip2 / birefnet / depth-anything / minicpm5 の台本は、既定の出力先を `--model-dir` の
-    ディレクトリ名から組む（小文字化・`_` → `-`、後ろに `-<解像度>` などの接尾が付きうる）。
-    容器の出所（ライセンスと revision）はその checkpoint の実物から導く（各台本の
-    `upstream_provenance`）ので、移行も同じ置き場を引く。
+    The siglip2 / birefnet / depth-anything / minicpm5 scripts build the default output path from
+    the directory name of `--model-dir` (lowercased, `_` → `-`, possibly followed by a suffix such
+    as `-<resolution>`). The container's provenance (license and revision) is derived from that
+    checkpoint itself (each script's `upstream_provenance`), so the migration looks up the same
+    place.
 
-    MUST: 一意に決まらなければ fail loudly — 別の checkpoint の出所を名乗る容器を作らない。
+    MUST: fail loudly unless it is unique — never produce a container that claims another
+    checkpoint's provenance.
     """
     candidates = (
         sorted(entry for entry in root.iterdir() if entry.is_dir()) if root.is_dir() else []
@@ -206,10 +227,11 @@ def input_checkpoint(root: Path, series: str) -> Path:
 
 
 def sbv2_model(series: str) -> str:
-    """sbv2 の系列名 → 話者名（`sbv2-F1-i8` → `F1`）。
+    """sbv2 series name → speaker name (`sbv2-F1-i8` → `F1`).
 
-    出所（ライセンスと上流の版）は声のファミリーごとに違い、引けるのは話者名からだけなので
-    ここで剥がす（`sbv2.export.default_out_root` の逆向き）。
+    The provenance (license and upstream version) differs per voice family and can only be looked
+    up from the speaker name, so it is stripped here (the reverse of
+    `sbv2.export.default_out_root`).
     """
     stem = series.removeprefix(f"{SBV2_SERIES_PREFIX}-")
     for dtype in ("f16", "i8", "i4"):
@@ -217,13 +239,14 @@ def sbv2_model(series: str) -> str:
     return stem
 
 
-#: deberta の variant ディレクトリ → 部品名（3 つともは SBV2 の `text_encoder` 席を焼く）。
+#: deberta's variant directories → component name (all three produce SBV2's `text_encoder` role).
 DEBERTA_ROLES: Mapping[str, str] = {
     variant.name: deberta_export.GRAPH_NAME for variant in deberta_export.VARIANTS.values()
 }
 
-#: sbv2 のターゲットディレクトリ → 部品名。配布に載る 2 席は `distribution.py` の定数で、
-#: golden 専用の 3 本（`dp` / `flow` / `dec`）は部品名を持たないのでターゲット名そのもの。
+#: sbv2's target directories → component name. The 2 roles in the distribution are constants of
+#: `distribution.py`; the 3 golden-only ones (`dp` / `flow` / `dec`) have no component name, so
+#: they use the target name itself.
 SBV2_ROLES: Mapping[str, str] = {
     sbv2_export.TARGET_FRONT: SBV2_FRONT_ROLE,
     sbv2_export.TARGET_VOICE: SBV2_VOICE_ROLE,
@@ -232,21 +255,22 @@ SBV2_ROLES: Mapping[str, str] = {
     sbv2_export.TARGET_DEC: sbv2_export.TARGET_DEC,
 }
 
-#: family の表。判定の順序が意味を持つのは gemma4-qat / gemma4 だけ（前者が後者の接頭辞を
-#: 共有する）なので、**qat を先に置く**。
+#: The family table. The matching order matters only for gemma4-qat / gemma4 (the former shares
+#: the latter's prefix), so **qat comes first**.
 FAMILIES: tuple[Family, ...] = (
     Family(
         "anima",
-        # `anima-f16`（共有の text 経路 + VAE）・`<モデル>-f16`（自前の text_conditioner）・
-        # `<モデル>-<格納>-dyn`（transformer）。tokenizer / pipeline 系列は旧 shard 列を持たない。
+        # `anima-f16` (the shared text path + VAE), `<model>-f16` (its own text_conditioner),
+        # `<model>-<storage>-dyn` (transformer). The tokenizer / pipeline series have no old shard
+        # list.
         lambda name: name.startswith("anima-"),
         lambda _: anima_export.PROVENANCE,
         roles={role: role for role in ANIMA_WEIGHTS},
     ),
     Family(
         "birefnet",
-        # 系列名は `birefnet_series_name(checkpoint, model, dtype)` = 上流リポ名の小文字 + 解像度
-        # （f32 以外は格納 dtype の接尾も）。
+        # The series name is `birefnet_series_name(checkpoint, model, dtype)` = the upstream
+        # repository name lowercased + resolution (plus a storage dtype suffix for non-f32).
         lambda name: name.startswith(("birefnet-", "lucida-")),
         lambda name: birefnet_export.upstream_provenance(
             input_checkpoint(birefnet_export.MODELS_ROOT, name)
@@ -277,7 +301,7 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "deberta",
-        # `deberta{,-i8,-i4}`（`deberta.export.DEFAULT_OUT_ROOTS` の綴り）。
+        # `deberta{,-i8,-i4}` (the spellings of `deberta.export.DEFAULT_OUT_ROOTS`).
         lambda name: name == "deberta" or name.startswith("deberta-"),
         lambda _: deberta_export.PROVENANCE,
         roles=DEBERTA_ROLES,
@@ -298,7 +322,8 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "dacvae",
-        # コーデックは別リポ・別重み（`IRODORI_CODEC_NAME` + dtype 接尾）。
+        # The codec is a separate repository with separate weights (`IRODORI_CODEC_NAME` + a dtype
+        # suffix).
         lambda name: name.startswith("dacvae-"),
         lambda _: dacvae_export.PROVENANCE,
         roles=IRODORI_CODEC_ROLES,
@@ -313,7 +338,8 @@ FAMILIES: tuple[Family, ...] = (
         "gemma4",
         lambda name: name.startswith("gemma4-"),
         lambda _: gemma4_export.PROVENANCE,
-        # MTP drafter だけが別の席（系列接尾 = `gemma4.export_drafter` の既定出力先）。
+        # Only the MTP drafter has another role (series suffix = the default output path of
+        # `gemma4.export_drafter`).
         flat_role=lambda name: (
             GEMMA4_DRAFTER_ROLE if name.endswith(f"-{GEMMA4_DRAFTER_SUFFIX}") else GEMMA4_ROLE
         ),
@@ -329,8 +355,9 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "embeddinggemma",
         lambda name: name.startswith("embeddinggemma-"),
-        # 系列名は checkpoint を名指さない（台本の既定出力先は `--model-dir` に追随しない固定の
-        # 綴り）ので、その既定出力先を焼く既定の checkpoint から導く。
+        # The series name does not name the checkpoint (the script's default output path is a fixed
+        # spelling that does not follow `--model-dir`), so derive it from the default checkpoint
+        # that produces that default output.
         lambda _: embeddinggemma_export.upstream_provenance(
             embeddinggemma_export.DEFAULT_MODEL_DIR
         ),
@@ -341,7 +368,7 @@ FAMILIES: tuple[Family, ...] = (
 
 @dataclass(frozen=True)
 class SeriesPlan:
-    """1 系列ぶんの移行計画（この段は 1 バイトも書かない）。"""
+    """The migration plan of one series (this stage writes not a single byte)."""
 
     name: str
     family: str
@@ -350,59 +377,64 @@ class SeriesPlan:
 
 
 def classify(name: str) -> Family:
-    """系列名 → family（表に無ければ fail loudly — 部品名が決まらない）。"""
+    """Series name → family (fails loudly when not in the table — the component name cannot be
+    decided)."""
     for family in FAMILIES:
         if family.matches(name):
             return family
     raise SeriesMigrationError(
-        f"系列 '{name}' がどの family の綴りにも当たらない"
-        f"（既知: {', '.join(entry.name for entry in FAMILIES)}）— 部品名が決まらない"
+        f"series '{name}' matches no family's spelling"
+        f" (known: {', '.join(entry.name for entry in FAMILIES)}) — the component name cannot be"
+        " decided"
     )
 
 
 def is_unreferenced(name: str) -> bool:
-    """変換しない系列か（{@link UNREFERENCED_SUFFIXES}）。"""
+    """Whether the series is one that is not converted ({@link UNREFERENCED_SUFFIXES})."""
     return name.endswith(UNREFERENCED_SUFFIXES)
 
 
 def shard_paths(directory: Path) -> tuple[Path, ...]:
-    """そのディレクトリに在る旧 shard の現物（無ければ空）。"""
+    """The old shard files present in the directory (empty when there are none)."""
     return sequence_siblings(directory / f"{SHARD_STEM}{SHARD_SUFFIX}")
 
 
 def component_directories(series: Path) -> list[Path]:
-    """旧 shard 列を持つディレクトリ（系列直下とその 1 段下）。"""
+    """The directories holding an old shard list (the series directory and one level below)."""
     candidates = [series, *sorted(entry for entry in series.iterdir() if entry.is_dir())]
     return [directory for directory in candidates if shard_paths(directory)]
 
 
 def series_directories(series: Path) -> list[Path]:
-    """系列の**全ディレクトリ**（系列直下から深さ無制限）。
+    """**Every directory** of the series (from the series directory down, unlimited depth).
 
-    取りこぼしの門（{@link _assert_nothing_unaccounted}）が見る範囲。部品ディレクトリだけを
-    見ると、sidecar 専用のサブディレクトリ（`<系列>/pipeline/` / `<系列>/host/`）と、旧 shard
-    列を持たない系列まるごと（`anima-pipeline*`）が門の外に落ちる。
+    The range the leftover check ({@link _assert_nothing_unaccounted}) covers. Looking only at the
+    component directories would leave outside the check the sidecar-only subdirectories
+    (`<series>/pipeline/` / `<series>/host/`) and whole series without an old shard list
+    (`anima-pipeline*`).
     """
     return [series, *sorted(entry for entry in series.rglob("*") if entry.is_dir())]
 
 
 def plan_series(series: Path) -> SeriesPlan:
-    """1 系列の移行計画を組む（部品名の割り当てと sidecar の取りこぼしをここで全部落とす）。"""
+    """Builds the migration plan of one series (every component-name assignment failure and every
+    left-behind sidecar fails here)."""
     name = series.name
     family = classify(name)
     components = [
         Component(directory, _graph_name(family, name, directory, series))
         for directory in component_directories(series)
     ]
-    # MUST: 門は**系列の全ディレクトリ**に掛ける（部品が 0 本の系列でも通す）— 畳み先の無い
-    # `.safetensors` を置き去りにしたことに気づく機会は、移行が 1 度きりなので後から来ない。
+    # MUST: apply the check to **every directory of the series** (even a series with 0 components
+    # goes through it) — the migration runs once, so no later chance comes to notice a
+    # `.safetensors` left behind with nowhere to fold into.
     for directory in series_directories(series):
         _assert_nothing_unaccounted(directory, series)
     return SeriesPlan(name, family.name, family.provenance(name), tuple(components))
 
 
 def _graph_name(family: Family, name: str, directory: Path, series: Path) -> str:
-    """部品ディレクトリ → 部品名（= 容器のグラフ名）。"""
+    """Component directory → component name (= the container's graph name)."""
     if directory == series:
         if family.flat_role is None:
             raise SeriesMigrationError(
@@ -413,17 +445,19 @@ def _graph_name(family: Family, name: str, directory: Path, series: Path) -> str
     role = family.roles.get(directory.name)
     if role is None:
         raise SeriesMigrationError(
-            f"{name}: 部品ディレクトリ '{directory.name}' が family '{family.name}' の表に無い"
-            f"（既知: {', '.join(sorted(family.roles))}）"
+            f"{name}: component directory '{directory.name}' is not in family '{family.name}''s"
+            f" table (known: {', '.join(sorted(family.roles))})"
         )
     return role
 
 
 def _assert_nothing_unaccounted(directory: Path, series: Path) -> None:
-    """そのディレクトリの `.safetensors` が「旧 shard / golden / 畳む sidecar」で尽きること。
+    """The directory's `.safetensors` files are exhausted by "old shards / goldens / sidecars to
+    fold".
 
-    MUST: 知らない `.safetensors` で止まる — 移行は 1 度きりなので、新種の sidecar を黙って
-    置き去りにすると「資産が 1 つ足りない容器」が配布形まで通る（実行時に初めて分かる）。
+    MUST: stop on an unknown `.safetensors` — the migration runs once, so silently leaving a new
+    kind of sidecar behind lets "a container one asset short" through to the distributed form
+    (found only at run time).
     """
     accounted = {path.name for path in shard_paths(directory)}
     accounted.add(ROPE_BASE_FILE)
@@ -433,17 +467,20 @@ def _assert_nothing_unaccounted(directory: Path, series: Path) -> None:
         if path.name in accounted or path.name.startswith(GOLDEN_PREFIXES):
             continue
         raise SeriesMigrationError(
-            f"{where}: '{path.name}' の畳み先が無い"
-            f"（旧 shard でも golden〈{' / '.join(GOLDEN_PREFIXES)}〉でも sidecar でもない）"
+            f"{where}: '{path.name}' has nowhere to fold into"
+            f" (neither an old shard, nor a golden <{' / '.join(GOLDEN_PREFIXES)}>, nor a sidecar)"
         )
 
 
 def ple_shard_names(directory: Path) -> tuple[str, ...]:
-    """PLE sidecar の shard 名を**索引の宣言から**引く（索引が無ければ空）。
+    """Takes the PLE sidecar's shard names **from the index's declaration** (empty without an
+    index).
 
-    MUST: 勘定は宣言から引く（現物の glob ではない）— 畳むのは {@link ple_sidecar_assets} が
-    索引から引く列なので、glob で勘定すると「索引に載っていない現物」（版を変えた再生成の
-    残骸など）が**畳まれないのに門も通る**。索引と現物の食い違いは畳む側が落とす。
+    MUST: count from the declaration (not a glob of the files) — what is folded is the list
+    {@link ple_sidecar_assets} takes from the index, so counting by glob would let "files not in
+    the index" (leftovers of a regeneration with another version, for example) **pass the check
+    without being folded**. A disagreement between the index and the files fails on the folding
+    side.
     """
     index_path = directory / PLE_INDEX_FILE
     if not index_path.is_file():
@@ -455,14 +492,16 @@ def ple_shard_names(directory: Path) -> tuple[str, ...]:
 def component_assets(
     component: Component, *, block_bytes: int = BLOCK_MAX_BYTES
 ) -> dict[str, AssetInput]:
-    """部品に同居する sidecar を容器の資産へ（実在は PLE と `rope_base` の 2 種）。
+    """The sidecars sitting with a component, as container assets (only 2 kinds exist: PLE and
+    `rope_base`).
 
-    並びがそのまま物理配置の順になる（PLE は token 順 — container-v1 §4.2 の走査型取得元）
-    ので、区間読みを要する PLE を先に置く。
+    The order becomes the physical layout order (PLE is in token order — the scanning source of
+    container-v1 §4.2), so the PLE, which needs range reads, comes first.
 
-    `block_bytes` は資産の block 分割の刻みで、**容器側の刻みと同じ値** MUST（呼び手は
-    {@link migrate_series} の 1 本から両方へ回す）— 別々に決まる形だと、寸法を差し込んだ
-    実行で資産だけが既定の刻みのまま据わる。
+    `block_bytes` is the step of the assets' block split and MUST be **the same value as the
+    container side's step** (the caller passes one value from {@link migrate_series} to both) —
+    if they were decided separately, a run with an injected size would place only the assets at
+    the default step.
     """
     assets: dict[str, AssetInput] = {}
     index = component.directory / PLE_INDEX_FILE
@@ -478,7 +517,7 @@ def component_assets(
 
 
 def migrate_series(plan: SeriesPlan, *, block_bytes: int = BLOCK_MAX_BYTES) -> None:
-    """計画どおり 1 部品ずつ移す（自己検査は `migrate_component` のもの）。"""
+    """Migrates component by component as planned (the self-check is `migrate_component`'s)."""
     for component in plan.components:
         assets = component_assets(component, block_bytes=block_bytes)
         result = migrate_component(
@@ -501,19 +540,21 @@ def migrate_series(plan: SeriesPlan, *, block_bytes: int = BLOCK_MAX_BYTES) -> N
 
 
 def rewrite_qat_reference(directory: Path, assets: Mapping[str, AssetInput]) -> None:
-    """QAT 系列の `reference.json` を schema 3（`pleBlocks`）へ書き換える。
+    """Rewrites a QAT series' `reference.json` to schema 3 (`pleBlocks`).
 
-    「触らないもの」の**唯一の例外**。旧記録が名乗る `pleShards` は sidecar の shard 本数で、
-    畳んだ後はどこにも存在しない数になる（block の切り方は shard 境界を無視する）。移行は
-    記録が指す実体を作り直しているので、記録も追随させる MUST — 追随させないと、配布側の突合
-    （`gemma4_qat.distribution.qat_plan`）が「欄が無い」で落ちるだけの系列が残る。
+    **The only exception** to "left untouched". The `pleShards` an old record states is the
+    sidecar's shard count, a number that exists nowhere once folded (the block cut ignores shard
+    boundaries). The migration rebuilds what the record points to, so the record MUST follow —
+    otherwise a series remains that only fails the distribution side's matching
+    (`gemma4_qat.distribution.qat_plan`) with "field missing".
 
-    他の欄（`fixedWeights` / `storageCounts` / `checkpoint` …）は**据え置き**: 移行は値を
-    1 ビットも変えないので、現物と突き合わせる数はそのまま正しい。
+    The other fields (`fixedWeights` / `storageCounts` / `checkpoint` …) **stay as they are**: the
+    migration changes no value by a single bit, so the numbers matched against the files stay
+    correct.
     """
     path = directory / QAT_REFERENCE_FILE
     if not path.is_file():
-        raise SeriesMigrationError(f"{directory}: QAT 系列に {QAT_REFERENCE_FILE} が無い")
+        raise SeriesMigrationError(f"{directory}: the QAT series has no {QAT_REFERENCE_FILE}")
     record = json.loads(path.read_text(encoding="utf-8"))
     if QAT_SHARDS_FIELD not in record or QAT_BLOCKS_FIELD in record:
         raise SeriesMigrationError(
@@ -523,12 +564,12 @@ def rewrite_qat_reference(directory: Path, assets: Mapping[str, AssetInput]) -> 
         )
     if PLE_INDEX_ASSET not in assets:
         raise SeriesMigrationError(
-            f"{directory}: PLE を畳んでいないのに {QAT_REFERENCE_FILE} が在る"
+            f"{directory}: {QAT_REFERENCE_FILE} is present although no PLE was folded"
         )
     index = json.loads(bytes(assets[PLE_INDEX_ASSET].payload))
     blocks = len(index["values"]["blocks"])
-    # 欄の並びは据え置く（`pleShards` の席に `pleBlocks` が入る）— 再 export が書く記録と
-    # 同じ並びになるので、2 つの記録を逐語で突き合わせられる。
+    # Keep the field order (`pleBlocks` takes the place of `pleShards`) — it is the same order as
+    # the record a re-export writes, so the two records can be compared verbatim.
     rewritten = {
         (QAT_BLOCKS_FIELD if key == QAT_SHARDS_FIELD else key): (
             blocks if key == QAT_SHARDS_FIELD else value
@@ -546,38 +587,47 @@ def total_bytes(paths: Sequence[Path]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="系列出力の旧 shard 列を krm へ移す（旧入力は読むだけ・krm は隣に並べる）"
+        description="Moves the old shard lists of the series outputs to krm (the old inputs are"
+        " only read, the krm goes next to them)"
     )
-    parser.add_argument("--series-dir", type=Path, default=SERIES_ROOT, help="系列の親ディレクトリ")
     parser.add_argument(
-        "--only", action="append", default=[], metavar="SERIES", help="この系列だけを移す（複数可）"
+        "--series-dir", type=Path, default=SERIES_ROOT, help="parent directory of the series"
     )
-    parser.add_argument("--dry-run", action="store_true", help="計画だけ出して 1 バイトも書かない")
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="SERIES",
+        help="migrate only this series (repeatable)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print the plan only and write not a single byte"
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """参照されている系列を全部移す（落ちたところで止まる）。"""
+    """Migrates every referenced series (stops where one fails)."""
     args = build_parser().parse_args(argv)
     root: Path = args.series_dir
     if not root.is_dir():
-        raise SeriesMigrationError(f"系列の親ディレクトリが無い: {root}")
+        raise SeriesMigrationError(f"no parent directory of the series: {root}")
     names = sorted(entry.name for entry in root.iterdir() if entry.is_dir())
     wanted = set(args.only)
     if wanted - set(names):
         raise SeriesMigrationError(
-            f"--only が指す系列が {root} に無い: {', '.join(sorted(wanted - set(names)))}"
+            f"series named by --only not in {root}: {', '.join(sorted(wanted - set(names)))}"
         )
     plans: list[SeriesPlan] = []
     for name in names:
         if wanted and name not in wanted:
             continue
         if is_unreferenced(name):
-            print(f"skip {name}（実験 / 棄却の記録）")
+            print(f"skip {name} (record of an experiment / rejection)")
             continue
         plan = plan_series(root / name)
         if not plan.components:
-            print(f"skip {name}（旧 shard 列が無い）")
+            print(f"skip {name} (no old shard list)")
             continue
         plans.append(plan)
     for plan in plans:

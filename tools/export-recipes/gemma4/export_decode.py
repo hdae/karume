@@ -1,124 +1,139 @@
-"""実重み Gemma 4 E2B / E4B（`--model e2b|e4b`・既定 e2b）を **states 形の chunk グラフ**
-（`model.krm`〈IR v2〉+ golden）へ書き出す台本。
+"""Script that writes the real-weight Gemma 4 E2B / E4B (`--model e2b|e4b`, default e2b) as a
+**states-form chunk graph** (`model.krm` (IR v2) + goldens).
 
-ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（GenerationContext と
-名前付き state スロット）/
-[0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) 決定 4〜5b
-（state 参照つき attention と `state_append`）/
-[0068](../../../docs/decisions/0068-decode-exit-multi-output.md) 決定 4（decode 出口）/
-[0069](../../../docs/decisions/0069-packed-w4-storage.md)（packed w4）を、**sliding + KV 共有 +
-混成量子化**を同時に持つ実モデルで検収する足場。同じ枠の KV 共有なし版が
-`minicpm5/export_decode.py`。モデル非依存の門（greedy の採り方・余裕門・容量門）の正本は
-{@link _shared.decode_series}、1-shot 形のヘルパは {@link gemma4.export} で、どちらも import
-して再利用する（同じ規律を 2 箇所に書かない）。
+The scaffold that verifies ADR
+[0066](../../../docs/decisions/0066-generation-context-state-slots.md) (GenerationContext and
+named state slots) /
+[0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) decisions 4–5b
+(attention with state references and `state_append`) /
+[0068](../../../docs/decisions/0068-decode-exit-multi-output.md) decision 4 (the decode exit) /
+[0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed w4) on a real model that has
+**sliding + KV sharing + mixed quantization** at once. The same frame without KV sharing is
+`minicpm5/export_decode.py`. The model-independent checks (how greedy is taken, the margin check,
+the capacity check) have their source of truth in {@link _shared.decode_series}, and the one-shot
+helpers are in {@link gemma4.export}; both are imported and reused (one rule is not written in two
+places).
 
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode              # E2B
     uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b  # E4B
 
-## この台本は chunk 系列 2 本の中核でもある
+## This script is also the core of the two chunk series
 
-states 形の chunk グラフは出口が 2 種類ある — logits opt-in 形（この台本の系列）と
-token-only 既定出口（{@link gemma4.export_token} の系列 / ADR 0068 決定 4）。両者で違うのは
-**出口の形と golden を採るかどうかだけ**で、素材の読み方・RoPE のホスト供給・KV 共有の手術・
-混成量子化・門の順序は同一なので、経路は {@link ChunkVariant} 駆動の 1 本
-（{@link load_wrapper} / {@link export_series} / {@link run_variant_cli}）に閉じる。
-token-only 台本が持つのはラッパ 1 つと variant 記述と入口だけ。
+The states-form chunk graph has two kinds of exit — the logits opt-in form (this script's series)
+and the token-only default exit (the series of {@link gemma4.export_token} / ADR 0068 decision 4).
+The two differ **only in the exit's form and in whether goldens are taken**; reading the material,
+host-supplied RoPE, the KV-sharing surgery, mixed quantization and the order of the checks are the
+same, so the path is closed into one, driven by {@link ChunkVariant}
+({@link load_wrapper} / {@link export_series} / {@link run_variant_cli}).
+The token-only script holds only one wrapper, the variant descriptor and the entry point.
 
-MUST: 差分は variant の 4 欄に載る形だけにする。台本側へ経路を戻すと、片方にだけ門を足した
-ときにもう片方が黙って弱くなる（`_shared.decode_series` の module docstring と同じ理由で、
-実際に逐語コピーだった時期に margin 床の MUST が片方にしか無い状態が生まれた）。
+MUST: the differences take only the form of the variant's four fields. Moving the path back into
+the scripts would let adding a check to one silently weaken the other (the same reason as the
+module docstring of `_shared.decode_series`; when they really were verbatim copies, a state arose
+in which only one of them had the margin floor's MUST).
 
-## 何をグラフに載せるか
+## What goes into the graph
 
+One **chunk wrapper**:
 `(input_ids[1,M], rope_{sliding,full}_attention_{cos,sin}[1,M,headDim]) →
-(logits[1,M,262144], token[1,M,1])` の **chunk ラッパ** 1 本（token-only 変種はさらに
-`last_row` を取る）。位置そのものは入力に無い（下の節）。`M` は物理 chunk 次元
-（ADR 0067 決定 4 — prefill は `chunkLength` / decode は 1）で、
-有効行は先頭 `queryLength` 行の compact-prefix。`token` は `logits.argmax(-1, keepdim=True)`
-（ADR 0068 決定 4 の decode 出口）。**出力順は `[logits, token]` 固定**で、ランタイム側の
-slot 番号がこの順を読む。
+(logits[1,M,262144], token[1,M,1])` (the token-only variant also takes `last_row`). The positions
+themselves are not an input (the section below). `M` is the physical chunk dimension
+(ADR 0067 decision 4 — `chunkLength` for prefill / 1 for decode), and
+the valid rows are the compact prefix of the first `queryLength` rows. `token` is
+`logits.argmax(-1, keepdim=True)` (the decode exit of ADR 0068 decision 4). **The output order is
+fixed as `[logits, token]`**, and the runtime's slot numbers read that order.
 
-## 位置はグラフに無い・RoPE はホストが渡す派生入力（1-shot 形との構造差 その 1）
+## No positions in the graph; RoPE is a derived input from the host (difference 1 from one-shot)
 
-1-shot 形は `position_ids` を持たない — 位置は常に `0..T-1` なので cos / sin は `arange` の
-定数畳み込みで Tmax 表 + `sym_prefix_slice` に落ちる（ADR 0010）。decode では位置が
-`pastLength + row` で**実行時にしか決まらない**ので、この畳み込みは成立しない。
+The one-shot form has no `position_ids` — positions are always `0..T-1`, so cos / sin fall through
+the constant folding of `arange` into a Tmax table + `sym_prefix_slice` (ADR 0010). In decode the
+position is `pastLength + row` and **is decided only at run time**, so this folding does not hold.
 
-そこで `model.model.rotary_emb` を {@link RopeInputs}（受け渡し口）へ差し替える（上流の
-モデリングコードは 1 行も触らない）。Gemma 4 の rotary は Llama 系と違い
-**`forward(x, position_ids, layer_type)`** で層種別ごとに呼ばれる（modeling_gemma4.py:1713）
-ので、受け口も層種別ごとに 1 組ずつ受ける。ラッパの forward が受け取った cos / sin を
-`RopeInputs` へ束ね、上流はその値をそのまま `position_embeddings` として使う。結果として
-グラフ入力は `input_ids` + **RoPE 4 本**（層種別 2 × cos / sin・f32 `[1, M, headDim]`）になり、
-`position_ids` 入力も表の初期化子も出荷 IR から消える。表を組むのはホスト（TS 側）で、
-配布形が宣言するのは**式のパラメータ**（theta / headDim / rotaryDim）と位置の上限だけ
-（{@link gemma4.rope}）。full 層の RoPE は `proportional`（`partial_rotary_factor` 0.25）で
-零周波数が 192 本あるが、それは cos = 1 / sin = 0 の列として行に入るだけなので特別扱いは
-要らない。
+So `model.model.rotary_emb` is replaced with {@link RopeInputs} (an inlet; not a line of the
+upstream modeling code is touched). Unlike the Llama family, Gemma 4's rotary is called per layer
+type as **`forward(x, position_ids, layer_type)`** (modeling_gemma4.py:1713), so the inlet takes
+one pair per layer type as well. The wrapper's forward binds the cos / sin it receives into
+`RopeInputs`, and upstream uses those values as `position_embeddings` as is. As a result the graph
+inputs become `input_ids` + **4 RoPE inputs** (2 layer types × cos / sin, f32 `[1, M, headDim]`),
+and both the `position_ids` input and the table initializers disappear from the shipped IR. The
+host (TS side) builds the tables; the distribution declares only **the formula's parameters**
+(theta / headDim / rotaryDim) and the position limit ({@link gemma4.rope}). The full layers' RoPE
+is `proportional` (`partial_rotary_factor` 0.25) with 192 zero frequencies, but they only enter the
+rows as columns with cos = 1 / sin = 0, so they need no special handling.
 
-台本自身が要る表（例示入力・io / greedy golden・sanity）は TS と**同じ式**で組む
-（{@link rope_args}）— 別の式で採った期待列を検収門が読む形にしないため。
+The tables the script itself needs (example inputs, io / greedy goldens, sanity) are built with
+**the same formula** as TS ({@link rope_args}) — so that the acceptance checks never read expected
+sequences taken with another formula.
 
-MUST: `karume.rope.assert_rope_lifted` は**適用しない** — あれは `inv_freq` バッファを
-畳み込みの葉へ降格する門で、本台本は rotary モジュールを丸ごと差し替えるため `inv_freq` は
-模型から消える。代わりに {@link assert_ir_form_decode} が **`sin` 系 op の不在**を直接見る
-（`cos` は IR 語彙に無いので、RoPE が残ったグラフは export 自体が落ちる — 到達しうる残骸は
-`sin` の側だけ）。
+MUST: `karume.rope.assert_rope_lifted` is **not applied** — that check demotes the `inv_freq`
+buffers to folding leaves, and this script replaces the whole rotary module, so `inv_freq`
+disappears from the model. Instead {@link assert_ir_form_decode} checks **the absence of `sin`
+ops** directly (`cos` is not in the IR vocabulary, so a graph with RoPE left in fails export
+itself — the only reachable residue is on the `sin` side).
 
-## KV 共有層は「所有層のスロットを読む」（1-shot 形との構造差 その 2）
+## KV-shared layers "read the owner layer's slot" (difference 2 from the one-shot form)
 
-後ろ `num_kv_shared_layers` 層が KV を共有する（E2B は 35 層のうち後ろ 20 層・E4B は 42 層の
-うち後ろ 18 層）。上流は共有開始より前の層のうち **その layer_type で最後の層**の k / v を
-`shared_kv_states[layer_type]` に置き、共有層はそれをそのまま使う（modeling_gemma4.py:1287 /
-1735）。よってスロットは**所有層ぶん**（E2B は層 0..14 × k/v の 30 本・E4B は層 0..23 の 48 本）
-だけで、共有層は sliding なら E2B 層 13 / E4B 層 22 の・full なら E2B 層 14 / E4B 層 23 の
-スロットを読む（{@link kv_owner_layers} — 番号は config から導き、台本は持たない）。
+The last `num_kv_shared_layers` layers share KV (the last 20 of E2B's 35 layers, the last 18 of
+E4B's 42). Upstream puts the k / v of **the last layer of that layer_type** among the layers before
+the sharing start into `shared_kv_states[layer_type]`, and the shared layers use it as is
+(modeling_gemma4.py:1287 / 1735). So there are slots **for the owner layers** only (layers 0..14 ×
+k/v, 30 slots, for E2B; layers 0..23, 48 slots, for E4B), and a shared layer reads the slot of
+layer 13 for E2B / 22 for E4B if sliding, of layer 14 for E2B / 23 for E4B if full
+({@link kv_owner_layers} — the numbers are derived from the config; the script holds none).
 
-手術（`karume.states.to_states_form`）は同じスロットへの複数登録を受理し、導出 shape /
-`window` / **append の入力名**の完全一致を検査する（states.py の `_register`）。共有層の k / v が
-所有層の**同じ値テンソル**であることは traced グラフが持っている事実なので、この検査が
-「割り当てを間違えていない」ことの実証になる（間違えれば入力名が食い違って落ちる）。
-`state_append` は所有層ぶんの本数（E2B 30 / E4B 48）で、それぞれ**そのスロットの最後の読者の
-直後**に置かれる（順序と window 宣言の一致は `verify._assert_state_order` の担当 —
-ここでは写さない）。
+The surgery (`karume.states.to_states_form`) accepts several registrations for one slot and checks
+that the derived shape / `window` / **the append's input name** match exactly (`_register` in
+states.py). That a shared layer's k / v are **the same value tensors** as the owner layer's is a
+fact the traced graph holds, so this check proves "the assignment is not wrong" (if it were, the
+input names would disagree and it would fail).
+There are as many `state_append` as owner-layer slots (E2B 30 / E4B 48), each placed **right after
+the last reader of its slot** (the consistency of the order and the window declarations is the job
+of `verify._assert_state_order` — not copied here).
 
-## 窓幅 512 はそのまま宣言できる（意味論が厳密同値）
+## The window width 512 can be declared as is (the semantics are strictly equivalent)
 
-karume の sliding 述語は `in_window(col, limit) = col <= limit && (limit - col) < params.window`
-（packages/runtime/src/kernels/state-attention.ts:234-235・`limit = pastLength + row`）。HF 側の
-`sliding_window_mask_function` は causal と `kv_idx > q_idx - sliding_window` の AND
-（masking_utils.py:98-99）で、どちらも「距離 `limit - col` が `0 <= dist < 512`」— **self を含む
-幅 512 で厳密同値**。1-shot 形の帯 mask（`(cols <= rows) & ((rows - cols) < window)`）とも同じ
-包含なので、`config.sliding_window` をそのまま `window` attrs へ宣言する。
+karume's sliding predicate is
+`in_window(col, limit) = col <= limit && (limit - col) < params.window`
+(packages/runtime/src/kernels/state-attention.ts:234-235, `limit = pastLength + row`). HF's
+`sliding_window_mask_function` is causal AND `kv_idx > q_idx - sliding_window`
+(masking_utils.py:98-99), and both mean "the distance `limit - col` is `0 <= dist < 512`" —
+**strictly equivalent at width 512, self included**. It is the same inclusion as the one-shot
+form's band mask (`(cols <= rows) & ((rows - cols) < window)`), so `config.sliding_window` is
+declared as the `window` attrs as is.
 
-容量は層種別で分ける（ADR 0066 追記 9）: full スロットは記号 `C`（context 生成時に選ぶ —
-決定 3）・sliding スロットは `window + SLIDING_SLACK_ROWS` の実数（{@link sliding_capacity}）。
-ring はこの容量で閉じるので、記号のままだと `C - (window + SLIDING_SLACK_ROWS)` 行が常に死蔵になる
-（C=8192 で約 180MiB）。余裕行の理由は {@link SLIDING_SLACK_ROWS}、詳細は {@link states_plan}。
+The capacity is split per layer type (ADR 0066 addendum 9): the full slots take the symbol `C`
+(chosen when the context is created — decision 3), the sliding slots the number
+`window + SLIDING_SLACK_ROWS` ({@link sliding_capacity}). The ring closes at this capacity, so left
+as a symbol, `C - (window + SLIDING_SLACK_ROWS)` rows would always lie dead (about 180MiB at
+C=8192). The reason for the slack rows is in {@link SLIDING_SLACK_ROWS}, the details in
+{@link states_plan}.
 
-## mask は「trace を通すためだけ」に居る
+## The mask is there "only to get through the trace"
 
-`attention` の第 4 入力は 1-shot 形と同じ層種別 2 本の加算 mask 辞書
-（{@link gemma4.export.additive_causal_mask} / `additive_sliding_mask`）だが、states 形では
-causal も窓も**述語計算**になるので mask tensor は要らない。手術が全層の attention から mask 入力を
-落とし、Tmax² 定数 2 本と `sym_prefix_slice` を刈る。{@link assert_ir_form_decode} はその残骸が
-1 本も残っていないことを見る（残ると「誰も読まない 4.5MiB」が配布物に居座る）。
+The fourth input of `attention` is the same two-layer-type additive mask dictionary as in the
+one-shot form ({@link gemma4.export.additive_causal_mask} / `additive_sliding_mask`), but in the
+states form both causality and the window become **predicate computations**, so no mask tensor is
+needed. The surgery drops the mask input from every layer's attention and prunes the two Tmax²
+constants and `sym_prefix_slice`. {@link assert_ir_form_decode} checks that not one of those
+residues remains (if one did, "4.5MiB nobody reads" would sit in the distribution).
 
-## 混成量子化は 1-shot と同じ（embedding i8 × linear i4）
+## Mixed quantization is the same as one-shot (embeddings i8 × linears i4)
 
-丸めは**参照・golden の採取より前**（ADR 0006）で、対象の割り付けも格納の指定も
-{@link gemma4.export.quantize_wrapper} をそのまま使う。{@link DecodeChunkWrapper} が 1-shot
-ラッパの**派生**なのはこのため — モジュール FQN 空間が同一でないと、対象述語
-（`is_int8_module` / `is_int4_module`）も scale 台帳のキーも流用できない。
+Rounding comes **before the reference and the goldens are taken** (ADR 0006), and both the target
+assignment and the storage overrides use {@link gemma4.export.quantize_wrapper} as is. That is why
+{@link DecodeChunkWrapper} **derives** from the one-shot wrapper — unless the module FQN space is
+identical, neither the target predicates (`is_int8_module` / `is_int4_module`) nor the scale
+ledger's keys can be reused.
 
-## 出力レイアウト
+## Output layout
 
-    outputs/series/gemma4-<model>-decode/model.krm                 重み・定数 + 2 文書の記述
-    outputs/series/gemma4-<model>-decode/io.<case>.safetensors     無 pad 全長の入出力
-    outputs/series/gemma4-<model>-decode/greedy.<case>.safetensors greedy 継続 K step の期待列
+    outputs/series/gemma4-<model>-decode/model.krm                 weights, constants, descriptors
+    outputs/series/gemma4-<model>-decode/io.<case>.safetensors     unpadded full-length io
+    outputs/series/gemma4-<model>-decode/greedy.<case>.safetensors expected greedy K-step sequence
 
-`io.*` は 1-shot 形と同じキー規約（`input.<グラフ入力名>` / `output.<位置>`）。`greedy.*` は
-**decode 検収の正本**で、`prompt` i32 `[T]` / `expected` i32 `[K]` / `margin` f32 `[K]` を持つ。
+`io.*` uses the same key convention as the one-shot form (`input.<graph input name>` /
+`output.<position>`). `greedy.*` is **the source of truth of decode acceptance**, holding `prompt`
+i32 `[T]` / `expected` i32 `[K]` / `margin` f32 `[K]`.
 """
 
 from __future__ import annotations
@@ -150,56 +165,68 @@ from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
 from karume.states import StateAttentionSpec, StatesPlan, to_states_form
 
-#: この台本の系列の接尾（`gemma4-<model>-decode/` — 1-shot 系列とは別ディレクトリ・グラフの
-#: 形が違う別資産）。golden を採らない系列（token-only / 製品）が流用する greedy 期待列の
-#: 置き場でもある（`--reference` の既定）。
+#: This script's series suffix (`gemma4-<model>-decode/` — a directory apart from the one-shot
+#: series, a separate asset with another graph form). It is also where the series that take no
+#: goldens (token-only / product) find the greedy expected sequences they reuse (the default of
+#: `--reference`).
 DECODE_SUFFIX = "decode"
 
-#: 既定モデル（E2B）の生成物の既定の置き場。素材（`--model-dir` の既定）は 1-shot 形と同じで、
-#: 綴りは共通の CLI 骨組みが持つ（{@link gemma4.export.series_parser}）。
+#: The default location of the default model's (E2B) outputs. The material (the default of
+#: `--model-dir`) is the same as for the one-shot form, and the shared CLI skeleton holds the
+#: spelling ({@link gemma4.export.series_parser}).
 DEFAULT_OUT_DIR = one_shot.series_dir(GEMMA4_DEFAULT_MODEL, DECODE_SUFFIX)
 
-#: グラフ入力の名前（chunk ラッパの forward 引数名）。{@link assert_ir_form_decode} が
-#: 「この綴りだけ」を見るための正本。
+#: The graph input's name (the chunk wrapper's forward argument name). The source of truth
+#: {@link assert_ir_form_decode} uses to check "only this spelling".
 INPUT_IDS = one_shot.INPUT_IDS
 
-#: RoPE 派生入力の綴り（`rope_<層種別>_<cos|sin>`）と、並びを決める層種別の順。
-#: **ラッパの forward 引数名そのもの**（torch.export がグラフ入力名に採る）で、TS 側の
-#: `gemma.Pipeline` が名前で束ねる。
+#: The spelling of the derived RoPE inputs (`rope_<layer type>_<cos|sin>`) and the order of layer
+#: types that fixes their order. **They are the wrapper's forward argument names themselves**
+#: (torch.export takes them as the graph input names), and the TS side's `gemma.Pipeline` binds
+#: them by name.
 ROPE_INPUT_PREFIX = "rope_"
 ROPE_PARTS: tuple[str, ...] = ("cos", "sin")
 ROPE_LAYER_TYPES: tuple[str, ...] = (one_shot.SLIDING_ATTENTION, one_shot.FULL_ATTENTION)
 
 
 def rope_input_name(layer_type: str, part: str) -> str:
-    """RoPE 派生入力 1 本の綴り（{@link ROPE_INPUTS} と forward の引数名の唯一の出どころ）。"""
+    """The spelling of one derived RoPE input (the only source of {@link ROPE_INPUTS} and of the
+    forward argument names)."""
     return f"{ROPE_INPUT_PREFIX}{layer_type}_{part}"
 
 
-#: RoPE 派生入力 4 本（順序は {@link DecodeChunkWrapper.forward} の引数順と同一 MUST）。
+#: The four derived RoPE inputs (the order MUST equal the argument order of
+#: {@link DecodeChunkWrapper.forward}).
 ROPE_INPUTS: tuple[str, ...] = tuple(
     rope_input_name(layer_type, part) for layer_type in ROPE_LAYER_TYPES for part in ROPE_PARTS
 )
 
-#: 物理 chunk 次元の記号名（IR 上の名前は `symbol_names` が決める — Dim 名と同じ綴りにする）。
+#: The physical chunk dimension's symbol name (the IR name is decided by `symbol_names` — spelled
+#: the same as the Dim name).
 SEQ_SYMBOL = "M"
 
-#: state スロットの容量記号（ADR 0066 決定 2 / 追記 7 — 束縛点は `createGenerationContext`）。
-#: **値 shape には現れない states 専用記号**で、export 時に容量を焼かないための席。
+#: The state slots' capacity symbol (ADR 0066 decision 2 / addendum 7 — bound at
+#: `createGenerationContext`). **A states-only symbol that never appears in a value shape**, the
+#: slot that keeps the capacity from being baked at export time.
 CAPACITY_SYMBOL = "C"
 
-#: sliding スロットの物理行数を `window` から積み増す余裕（= 投機 verify の draft 上限 kmax）。
+#: The slack added to `window` for the sliding slots' physical rows (= the draft limit kmax of
+#: speculative verification).
 #:
-#: WHY: 投機デコードの verify run は論理長より**先**の行を ring へ書く。棄却された行は論理長を
-#: 進めないので、その物理行は次の run が同じ位置へ上書きするまで残る。行写像は
-#: `slot_row(col) = col % capacity`（runtime 側も capacity 基準 — window ではない）なので、
-#: 容量が window ちょうどだと棄却行 `P+i` が潰す論理列 `P+i−window` が live 窓
-#: `[P+a+2−window, …)` の内側に入りうる（a = 受理数）。容量を `window + kmax` にすると潰れる
-#: 列は常に `P+i−window−kmax < P+a+2−window` で窓の外になり、読める行集合が変わらない。
-#: MUST: `window` attrs は据え置き（余裕は物理行だけの話で、読む窓幅は不変）。
+#: WHY: a speculative-decoding verify run writes rows **ahead of** the logical length into the
+#: ring. Rejected rows do not advance the logical length, so their physical rows remain until the
+#: next run overwrites the same positions. The row mapping is `slot_row(col) = col % capacity` (the
+#: runtime also uses capacity — not window), so with a capacity of exactly window, the logical
+#: column `P+i−window` that a rejected row `P+i` overwrites can fall inside the live window
+#: `[P+a+2−window, …)` (a = the accepted count). With a capacity of `window + kmax`, the
+#: overwritten column is always `P+i−window−kmax < P+a+2−window`, outside the window, and the set
+#: of readable rows is unchanged.
+#: MUST: the `window` attrs stay as they are (the slack concerns the physical rows only; the width
+#: of the window read is unchanged).
 SLIDING_SLACK_ROWS = 8
 
-#: greedy golden の継続 step 数（ADR 0068 決定 4 の出口を多 step で踏む）。
+#: The number of continuation steps of the greedy golden (exercising ADR 0068 decision 4's exit
+#: over several steps).
 #: Per model: E4B stops at 10 because capital-ja's 11th step has margin 0.0205, under
 #: {@link MARGIN_FLOOR} (steps 1-10 stay >= 0.31; measured 2026-10-30). Dropping the case instead
 #: would leave only " Paris" expectations, which the constant-output check forbids (ruling 47).
@@ -207,63 +234,67 @@ SLIDING_SLACK_ROWS = 8
 #: same table and the same `--steps` knob, and its margin gate names every offending step).
 GREEDY_STEPS: Mapping[str, int] = {"e2b": 16, "e4b": 10, "12b": 16}
 
-#: 各 step の top1 − top2 logit 差の下限。GPU 実行の偏差で greedy の列が割れないことの保証で、
-#: **恒真でない**（強く決まらない継続を持つケースはここで落ちる）。落ちたケースは K を下げずに
-#: {@link GREEDY_CASES} から外す — 余裕の無い列を golden にすると「GPU 側が正しくても赤」の
-#: 門になる。
+#: The lower bound of the top1 − top2 logit difference at each step. It guarantees that GPU
+#: execution's deviation does not split the greedy sequence, and it is **not tautological** (a
+#: case whose continuation is not strongly determined fails here). A failing case is removed from
+#: {@link GREEDY_CASES} instead of lowering K — a sequence without margin as a golden makes a check
+#: that is "red even when the GPU side is right".
 #:
-#: MUST: 検収門の前提（`e2e_gemma4_greedy_test.ts` — `minMargin > 2 × atol`・atol = 1e-2）
-#: **より上**に置く。下だと「台本は採るが門の前提で落ちる」ケースが作れてしまい、門の
-#: 「ここが落ちるのは台本と資産が食い違ったときだけ」が成立しない（Codex 波 H 指摘 H-04）。
+#: MUST: it sits **above** the acceptance check's premise (`e2e_gemma4_greedy_test.ts` —
+#: `minMargin > 2 × atol`, atol = 1e-2). Below it, a case "the script takes but the check's
+#: premise fails" becomes possible, and the check's "this fails only when the script and the
+#: asset disagree" no longer holds (Codex review round H, finding H-04).
 MARGIN_FLOOR = 2.5e-2
 
-#: greedy golden を採るケース（{@link gemma4.export.GOLDEN_CASES} の部分集合）。
-#: io golden は 3 ケース全部で採る（こちらは 1 step ぶんなので余裕門が要らない）。
+#: The cases greedy goldens are taken for (a subset of {@link gemma4.export.GOLDEN_CASES}).
+#: io goldens are taken for all three cases (they cover one step, so they need no margin check).
 #:
-#: NOTE: 現状は**全ケース採用の暫定**（minicpm5 は実測後の確定集合）。w4 込みの実走で
-#: {@link assert_greedy_margins} が落としたケースをここから外して再走する — 門は全ケースを
-#: 測り終えてから 1 度に掛かるので、1 回の実走で外す対象が揃う。
-#: MUST: 外した結果 `GREEDY_EXPECTATIONS` の期待が 1 種類になる集合にはしない
-#: （`_sanity` の定数出力検出線が恒真化する — tests が固定）。
+#: NOTE: currently **a provisional all-cases selection** (minicpm5 has a set fixed after
+#: measurement). Cases {@link assert_greedy_margins} rejects in a real run with w4 are removed
+#: from here and the run repeated — the check applies once after every case is measured, so one
+#: real run collects every case to remove.
+#: MUST: never a set whose `GREEDY_EXPECTATIONS` expectations reduce to one kind after removal
+#: (`_sanity`'s constant-output detection line would become tautological — pinned by the tests).
 GREEDY_CASES: tuple[str, ...] = ("capital-en", "capital-ja", "context-en")
 
-#: 手術で死ぬべき残骸 op。`sym_prefix_slice` は mask の Tmax 畳み込み（ADR 0010）で、`sin` は
-#: RoPE が畳み込みにも派生入力にも落ちなかったときの生き残り。
-#: NOTE: `cos` は IR 語彙に無い（ops.py の UNARY_OPS は `sin` だけ）ので、cos が残る形は
-#: export が落ちて here まで来ない — 検査に載せるのは実際に到達しうる 2 本だけ。
+#: Residue ops the surgery must kill. `sym_prefix_slice` is the mask's Tmax folding (ADR 0010),
+#: and `sin` the survivor when RoPE fell neither into folding nor into the derived inputs.
+#: NOTE: `cos` is not in the IR vocabulary (ops.py's UNARY_OPS has `sin` only), so a form with cos
+#: left fails export and never reaches here — the check lists only the two that can be reached.
 RESIDUE_OPS = (one_shot.SYM_PREFIX_SLICE_OP, "sin")
 
 
 def slot_name(layer: int, part: str) -> str:
-    """層番号つきの state スロット名（`l0.k` / `l0.v` …）。
+    """A state slot name with the layer number (`l0.k` / `l0.v` …).
 
-    綴りを 1 箇所に閉じる — 手術の指定（{@link states_plan}）と形検査
-    （{@link assert_ir_form_decode}）が別々に組み立てると、綴りのズレが
-    「スロットは在るが誰も読まない」形で通ってしまう。
+    The spelling is closed in one place — if the surgery's specification ({@link states_plan}) and
+    the form check ({@link assert_ir_form_decode}) built it separately, a spelling drift would pass
+    as "the slot exists but nobody reads it".
     """
     return f"l{layer}.{part}"
 
 
 class RopeInputs(nn.Module):
-    """`Gemma4TextRotaryEmbedding` と同じ呼び出し規約を持つ**受け渡し口**。
+    """**An inlet** with the same calling convention as `Gemma4TextRotaryEmbedding`.
 
-    上流は `self.rotary_emb(hidden_states, position_ids, layer_type)` を層種別ごとに呼び
-    （modeling_gemma4.py:1713）、`(cos, sin)` の 2 タプル（各 `[B, seq, head_dim]`）を受ける。
-    ここはその規約だけを満たし、`inv_freq` からの三角関数計算を**ラッパが受け取った派生入力
-    そのもの**に置き換える。層種別で `head_dim` が違う（sliding 256 / full 512）ので、束ねる
-    のも種別ごとに 1 組ずつ。
+    Upstream calls `self.rotary_emb(hidden_states, position_ids, layer_type)` per layer type
+    (modeling_gemma4.py:1713) and receives a 2-tuple `(cos, sin)` (each `[B, seq, head_dim]`).
+    This module satisfies only that convention, and replaces the trigonometry from `inv_freq` with
+    **the derived inputs the wrapper received, as they are**. `head_dim` differs per layer type
+    (sliding 256 / full 512), so they are bound one pair per type too.
 
-    受け渡しが属性の一時束縛（{@link bound}）なのは、上流の呼び出し規約が
-    `(x, position_ids, layer_type)` 固定で、ホスト供給の値を引数で通す隙間が無いため。
-    export は `strict=False`（`karume.pipeline.export_module`）なので Python がそのまま走り、
-    束ねた入力テンソルは通常のデータフローとして辿られる。
+    The handover is a temporary attribute binding ({@link bound}) because upstream's calling
+    convention is fixed as `(x, position_ids, layer_type)`, with no gap to pass host-supplied
+    values as arguments. export runs with `strict=False` (`karume.pipeline.export_module`), so
+    Python runs as is and the bound input tensors are traced as ordinary data flow.
 
-    MUST: パラメータもバッファも持たない — 表は**もう配布物に入らない**（初期化子が残ると
-    量子化の適格判定と `maxPosition` の意味が両方戻る）。
-    MUST: 束縛は 1 回の forward のあいだだけ（`finally` で必ず外す）。持ち越すと、次の呼び
-    出しが**前の位置の表**で回る形が形も型も合ったまま通る。
-    MUST: 未束縛・未知の層種別は fail loudly。既定へ落とすと「full 層が sliding の周波数で
-    回る」（値は出るが角度が別物）形が黙って通る。
+    MUST: no parameters and no buffers — the tables **are no longer part of the distribution** (a
+    remaining initializer would bring back both the quantization eligibility and the meaning of
+    `maxPosition`).
+    MUST: the binding lasts one forward only (always removed in `finally`). Carried over, a next
+    call running on **the previous positions' tables** would pass with shape and type matching.
+    MUST: unbound or unknown layer types fail loudly. Falling back to a default would silently pass
+    "full layers rotating at the sliding frequencies" (values come out, but at other angles).
     """
 
     def __init__(self, layer_types: Sequence[str]) -> None:
@@ -273,10 +304,10 @@ class RopeInputs(nn.Module):
 
     @contextmanager
     def bound(self, tables: Mapping[str, tuple[torch.Tensor, torch.Tensor]]) -> Iterator[None]:
-        """1 回の forward のあいだだけ層種別 → `(cos, sin)` を束ねる。"""
+        """Bind layer type → `(cos, sin)` for the duration of one forward."""
         missing = sorted(set(self.layer_types) - set(tables))
         if missing:
-            raise KeyError(f"層種別 {missing} の cos / sin が渡されていない")
+            raise KeyError(f"cos / sin not passed for layer types {missing}")
         self._tables = dict(tables)
         try:
             yield
@@ -286,37 +317,39 @@ class RopeInputs(nn.Module):
     def forward(
         self, x: torch.Tensor, position_ids: torch.Tensor, layer_type: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """束ねた `(cos, sin)` を返す（`x` / `position_ids` は規約上の引数 — 値は読まない）。"""
+        """Return the bound `(cos, sin)` (`x` / `position_ids` are arguments of the convention —
+        their values are not read)."""
         del x, position_ids
         tables = self._tables.get(layer_type)
         if tables is None:
             raise KeyError(
-                f"layer_type '{layer_type}' の cos / sin が束ねられていない"
-                f"（束ねてあるのは {sorted(self._tables)}）"
+                f"cos / sin of layer_type '{layer_type}' are not bound"
+                f" (bound: {sorted(self._tables)})"
             )
         return tables
 
 
 def unique_layer_types(config: Any) -> tuple[str, ...]:
-    """`config.layer_types` の**出現順**の重複除去（入力と検査の走査順を 1 箇所に閉じる）。"""
+    """`config.layer_types` deduplicated **in order of appearance** (closes the traversal order of
+    the inputs and the checks in one place)."""
     return tuple(dict.fromkeys(config.layer_types))
 
 
 def rope_specs(config: Any) -> dict[str, rope_math.RopeLayerSpec]:
-    """層種別 → RoPE の式（{@link gemma4.rope.rope_specs} に、幅の突合を足したもの）。
+    """Layer type → RoPE formula ({@link gemma4.rope.rope_specs} plus a width match).
 
-    MUST: 導いた `head_dim` が attention の head_dim（{@link gemma4.export._attention_depth}）
-    と一致することまで見る。上流の rotary は full + `proportional` のときだけ
-    `global_head_dim` を読む枝を持つので、rope_type が変わると表の幅だけが黙って 256 に落ちて
-    「幅は合わないが宣言は書ける」形になる。
+    MUST: check that the derived `head_dim` equals the attention head_dim
+    ({@link gemma4.export._attention_depth}). Upstream's rotary reads `global_head_dim` only on the
+    branch for full + `proportional`, so a changed rope_type silently drops only the table width to
+    256 — "the width does not fit, but the declaration can be written".
     """
     specs = rope_math.rope_specs(config)
     for layer_type, spec in specs.items():
         depth = one_shot._attention_depth(config, layer_type)
         if spec.head_dim != depth:
             raise AssertionError(
-                f"層種別 '{layer_type}' の RoPE 幅 {spec.head_dim} が attention の head_dim"
-                f" {depth} と違う（rotary の head_dim の引き先がずれている）"
+                f"layer type '{layer_type}': RoPE width {spec.head_dim} differs from the attention"
+                f" head_dim {depth} (rotary reads its head_dim from the wrong place)"
             )
     return specs
 
@@ -324,14 +357,16 @@ def rope_specs(config: Any) -> dict[str, rope_math.RopeLayerSpec]:
 def rope_args(
     specs: Mapping[str, rope_math.RopeLayerSpec], positions: torch.Tensor
 ) -> tuple[torch.Tensor, ...]:
-    """位置列 `[1, T]` → forward が受ける派生入力 4 本（{@link ROPE_INPUTS} と同じ並び）。
+    """Positions `[1, T]` → the four derived inputs forward takes (in the order of
+    {@link ROPE_INPUTS}).
 
-    式は TS 正本の鏡像（{@link gemma4.rope.rope_rows}）— 台本が採る golden / io / 例示入力も
-    配布形が実行時に組む表と同じ式で作る。
+    The formula mirrors the TS source of truth ({@link gemma4.rope.rope_rows}) — the goldens / io /
+    example inputs the script takes are built with the same formula as the tables the distribution
+    builds at run time.
     """
     unknown = sorted(set(ROPE_LAYER_TYPES) - set(specs))
     if unknown:
-        raise AssertionError(f"層種別 {unknown} の RoPE の式が無い（持っているのは {list(specs)}）")
+        raise AssertionError(f"no RoPE formula for layer types {unknown} (present: {list(specs)})")
     rows = [int(value) for value in positions.reshape(-1).tolist()]
     tables: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for layer_type in ROPE_LAYER_TYPES:
@@ -353,10 +388,11 @@ def bound_rope(
     cos_full: torch.Tensor,
     sin_full: torch.Tensor,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-    """派生入力 4 本 → {@link RopeInputs.bound} が受ける層種別ごとの組。
+    """The four derived inputs → the per-layer-type pairs {@link RopeInputs.bound} takes.
 
-    綴りを 1 箇所に閉じる — chunk ラッパ 3 本が別々に組み立てると、cos と sin を取り違えた
-    配線が 1 本だけ書ける（形も型も合うので数値の門にしか映らない）。
+    The spelling is closed in one place — if the three chunk wrappers each built it, one of them
+    could swap cos and sin in its wiring (shape and type match, so only the numeric checks would
+    show it).
     """
     return {
         one_shot.SLIDING_ATTENTION: (cos_sliding, sin_sliding),
@@ -365,36 +401,41 @@ def bound_rope(
 
 
 def max_position(config: Any) -> int:
-    """モデルが宣言する位置の上限（`text_config.max_position_embeddings`）。
+    """The position limit the model declares (`text_config.max_position_embeddings`).
 
-    RoPE を表で焼かなくなった以上、「引ける絶対位置の上限」を決めるのは資産ではなくモデルの
-    宣言だけになる（配布形の `pipelineConfig.maxPosition` と同じ出どころ —
-    `gemma4.distribution.gemma4_max_position`）。
+    Now that RoPE is no longer baked into tables, "the largest absolute position that can be looked
+    up" is decided by the model's declaration alone, not by an asset (the same source as the
+    distribution's `pipelineConfig.maxPosition` — `gemma4.distribution.gemma4_max_position`).
     """
     declared = int(config.max_position_embeddings)
     if declared < 1:
-        raise AssertionError(f"config.max_position_embeddings が {declared}（正整数でない）")
+        raise AssertionError(
+            f"config.max_position_embeddings is {declared} (not a positive integer)"
+        )
     return declared
 
 
 class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
-    """1-shot ラッパ（{@link gemma4.export.Gemma4Wrapper}）の chunk 形
-    （`(input_ids, RoPE 4 本) → (logits, token)`）版。
+    """The chunk-form version (`(input_ids, 4 RoPE inputs) → (logits, token)`) of the one-shot
+    wrapper ({@link gemma4.export.Gemma4Wrapper}).
 
-    MUST: **派生**で持つ（同じ構成を書き直さない）— 量子化の対象述語
-    （`is_int8_module` / `is_int4_module`）も scale 台帳のキーもモジュール FQN 空間の上に
-    載っているので、`model` / `per_layer` の綴りが 1-shot と同一であることが再利用の条件。
-    MUST: RoPE 派生入力の**引数名と並び**は {@link ROPE_INPUTS} と一致させる（torch.export が
-    引数名をグラフ入力名に採るので、綴りがずれるとホストが束ねられない）。
-    MUST: `position_ids` は渡さない（`None`）。渡すと出荷 IR に位置入力が戻る。上流は
-    `None` のとき `arange` を組むが、rotary は受け渡し口に差し替わっていて誰も読まないので、
-    その `arange` は export の到達解析で落ちる（残れば IR 語彙外の op として fail loudly）。
-    MUST: `attention_mask` は 1-shot と同じ層種別 2 本の辞書（省略すると transformers 側で
-    mask が組まれ、`cache_position` 由来の値が畳み込みの葉に混ざる）。trace を通すためだけの
-    存在で、手術が落とす。
-    MUST: `use_cache=False`。True だと `DynamicCache` が生えて KV を出力へ返す形になり、
-    「state はグラフの通常 I/O にしない」（ADR 0066 決定 1）と正面から食い違う。
-    MUST: 出力順は `[logits, token]`。ランタイム側は slot 番号でこの 2 本を読む。
+    MUST: held as **a subclass** (the same structure is not rewritten) — the quantization target
+    predicates (`is_int8_module` / `is_int4_module`) and the scale ledger's keys sit on the module
+    FQN space, so the `model` / `per_layer` spellings being identical to one-shot is the condition
+    for reuse.
+    MUST: the derived RoPE inputs' **argument names and order** equal {@link ROPE_INPUTS}
+    (torch.export takes argument names as graph input names, so a spelling drift leaves the host
+    unable to bind them).
+    MUST: `position_ids` is not passed (`None`). Passing it brings a position input back into the
+    shipped IR. With `None` upstream builds an `arange`, but the rotary has been replaced by the
+    inlet and nobody reads it, so that `arange` falls away in export's reachability analysis (if it
+    remained, it would fail loudly as an op outside the IR vocabulary).
+    MUST: `attention_mask` is the same two-layer-type dictionary as for one-shot (omitted,
+    transformers builds the mask and values derived from `cache_position` mix into the folding's
+    leaves). It exists only to get through the trace, and the surgery drops it.
+    MUST: `use_cache=False`. With True a `DynamicCache` appears and KV is returned as outputs,
+    directly contradicting "state is not the graph's ordinary I/O" (ADR 0066 decision 1).
+    MUST: the output order is `[logits, token]`. The runtime reads the two by slot number.
     """
 
     def forward(  # type: ignore[override]
@@ -430,15 +471,17 @@ class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
 
 
 class GreedyRopeView(nn.Module):
-    """`_shared.decode_series` が呼ぶ `(input_ids, position_ids) → (logits, token)` の面。
+    """The `(input_ids, position_ids) → (logits, token)` surface `_shared.decode_series` calls.
 
-    greedy 継続と io 参照は「位置列を与えて全長で引く」形で採る（`_shared` は family の
-    グラフ入力を知らない）。RoPE がグラフ入力になった以上、その位置列から表を組む席がどこかに
-    要る — chunk ラッパの引数を増やす代わりにここで覆う（`_shared` の規律を family 都合で
-    書き換えない）。
+    The greedy continuations and the io reference are taken as "given positions, look up the full
+    length" (`_shared` does not know a family's graph inputs). Now that RoPE is a graph input, the
+    tables must be built from those positions somewhere — this wraps it here instead of adding
+    arguments to the chunk wrapper (the `_shared` rules are not rewritten for one family).
 
-    MUST: 表は配布形と**同じ式**（{@link rope_args}）で組む。別の式で採った期待列を検収門が
-    読むと、門が「台本と資産の食い違い」ではなく「表の作り方の違い」で赤になる。
+    MUST: the tables are built with **the same formula** as the distribution ({@link rope_args}).
+    If the acceptance checks read expected sequences taken with another formula, a check would turn
+    red over "a different way of building the tables", not over "the script and the asset
+    disagree".
     """
 
     def __init__(
@@ -456,45 +499,52 @@ class GreedyRopeView(nn.Module):
 
 @dataclass(frozen=True)
 class ChunkVariant:
-    """chunk 系列 2 本（logits opt-in / token-only）の**差分だけ**を持つ記述子。
+    """A descriptor holding **only the differences** of the two chunk series (logits opt-in /
+    token-only).
 
-    載せるのは {@link export_series} が実際に分岐する 4 点 — 系列の置き場・組むラッパ・出口の
-    形・自分の golden を採るか。手術も混成量子化も門の順序も両系列で同一なので、それ以外の席は
-    作らない（席を作ると「片方だけ違う経路」が書けるようになる）。
+    It carries the four points where {@link export_series} actually branches — the series
+    location, the wrapper to build, the exit's form, and whether its own goldens are taken. The
+    surgery, mixed quantization and the order of the checks are the same for both series, so no
+    other field exists (a field would make "a path different for only one" writable).
     """
 
-    #: 系列名の接尾（`gemma4-<model>-<suffix>/` — 系列ごとに別ディレクトリ・グラフの形が
-    #: 違う別資産）。置き場はモデルで決まるので、ここはモデルに依らない接尾だけを持つ。
+    #: The series name suffix (`gemma4-<model>-<suffix>/` — a separate directory per series, a
+    #: separate asset with another graph form). The location depends on the model, so this holds
+    #: only the model-independent suffix.
     suffix: str
-    #: 組む chunk ラッパ（{@link DecodeChunkWrapper} の継承鎖のどれか）。
+    #: The chunk wrapper to build (one of {@link DecodeChunkWrapper}'s inheritance chain).
     wrapper: type[DecodeChunkWrapper]
-    #: 出口が token-only（`last_row` 入力が増え、出力が token 1 本 — ADR 0068 決定 4）か。
+    #: Whether the exit is token-only (one more input `last_row`, one output token — ADR 0068
+    #: decision 4).
     token_only: bool
-    #: 自分の golden（io + greedy）を採るか。token-only 系列は logits opt-in 系列の greedy
-    #: 記録を検収門がそのまま流用するので採らない（{@link gemma4.export_token} の docstring）。
-    #: NOTE: `token_only` とは別欄だが、現状は 2 通りの組でしか成立しない — `goldens=True` かつ
-    #: `token_only=True` は `_write_io` が `last_row` を `args` から引けず `KeyError` で落ちる。
-    #: 逆の組（`goldens=False` かつ `token_only=False`）は {@link gemma4.export_product} が
-    #: 実際に使っているが、そちらは `export_series` を通らずラッパ欄だけを読む。
+    #: Whether its own goldens (io + greedy) are taken. The token-only series takes none, as the
+    #: acceptance checks reuse the greedy record of the logits opt-in series as is (the docstring
+    #: of {@link gemma4.export_token}).
+    #: NOTE: a field apart from `token_only`, but today only two combinations work — `goldens=True`
+    #: with `token_only=True` fails with a `KeyError`, as `_write_io` cannot take `last_row` from
+    #: `args`. The reverse combination (`goldens=False` with `token_only=False`) is actually used by
+    #: {@link gemma4.export_product}, which reads only the wrapper field and does not go through
+    #: `export_series`.
     goldens: bool
 
     @property
     def out_dir(self) -> Path:
-        """既定モデル（E2B）の置き場（`--model` で選ぶ置き場は `gemma4.export.series_dir`）。"""
+        """The default model's (E2B) location (the location `--model` chooses is
+        `gemma4.export.series_dir`)."""
         return one_shot.series_dir(GEMMA4_DEFAULT_MODEL, self.suffix)
 
 
-#: この台本の系列（logits opt-in 形 — 全 M 行の logits と token を出す）。
+#: This script's series (the logits opt-in form — emits the logits and token of all M rows).
 DECODE = ChunkVariant(
     suffix=DECODE_SUFFIX, wrapper=DecodeChunkWrapper, token_only=False, goldens=True
 )
 
 
 def swap_rope_inputs(model: nn.Module) -> RopeInputs:
-    """`model.model.rotary_emb` を受け渡し口（{@link RopeInputs}）へ差し替える。
+    """Replace `model.model.rotary_emb` with the inlet ({@link RopeInputs}).
 
-    層種別は config の**出現順**そのままで受ける — 未宣言の層種別で呼ばれたら
-    `RopeInputs.bound` / `forward` が落とす（既定へ落とす枝を作らない）。
+    The layer types are taken in the config's **order of appearance** — a call with an undeclared
+    layer type is failed by `RopeInputs.bound` / `forward` (no branch falls back to a default).
     """
     receiver = RopeInputs(unique_layer_types(model.config))
     model.model.rotary_emb = receiver
@@ -502,33 +552,38 @@ def swap_rope_inputs(model: nn.Module) -> RopeInputs:
 
 
 def load_wrapper(variant: ChunkVariant, model_dir: Path) -> DecodeChunkWrapper:
-    """実重みを f32 で読み、RoPE を受け渡し口へ差し替えた export 可能な chunk ラッパを返す。
+    """Read the real weights in f32 and return an exportable chunk wrapper with RoPE replaced by
+    the inlet.
 
-    variant で変わるのは最後に組むラッパ型だけ — 素材の読み方（3 つの等価検査を含む）と
-    RoPE の差し替えは chunk 系列で同一。
+    Only the wrapper type built at the end changes with the variant — reading the material (the
+    three equivalence checks included) and the RoPE replacement are the same for the chunk series.
     """
     model, tables = one_shot.load_model_and_tables(model_dir)
-    # 検査席の PLE 表を落とす理由は {@link gemma4.export.build_wrapper} と同じ
-    # （分割 35 本を PLE の唯一の正本にして、量子化の対象網羅を言える形にする）。
+    # The check slot's PLE table is dropped for the same reason as in
+    # {@link gemma4.export.build_wrapper} (the 35 split tables become the PLE's only source of
+    # truth, so the quantization targets' coverage can be claimed).
     del model.model.embed_tokens_per_layer
     swap_rope_inputs(model)
     return variant.wrapper(model, tables).eval()
 
 
 def first_shared_layer(config: Any) -> int:
-    """KV 共有が始まる層番号（上流 `Gemma4TextAttention.__init__` と同じ式）。"""
+    """The layer number where KV sharing starts (the same formula as upstream
+    `Gemma4TextAttention.__init__`)."""
     return int(config.num_hidden_layers) - int(getattr(config, "num_kv_shared_layers", 0))
 
 
 def kv_owner_layers(config: Any) -> dict[str, int]:
-    """layer_type → その型の KV を書き出す層（上流 `store_full_length_kv` と同じ規則）。
+    """layer_type → the layer that writes that type's KV (the same rule as upstream
+    `store_full_length_kv`).
 
-    上流は「共有開始より前の層のうち、その layer_type で**最後**の層」の k / v を
-    `shared_kv_states[layer_type]` へ置き、共有層はそれを読む（modeling_gemma4.py:1287）。
-    E2B は sliding → 層 13 / full → 層 14、E4B は sliding → 層 22 / full → 層 23。
+    Upstream puts the k / v of "the **last** layer of that layer_type among the layers before the
+    sharing start" into `shared_kv_states[layer_type]`, and the shared layers read it
+    (modeling_gemma4.py:1287). For E2B sliding → layer 13 / full → layer 14, for E4B sliding →
+    layer 22 / full → layer 23.
 
-    MUST: 所有層の無い layer_type が共有側に居たら落とす（上流なら `shared_kv_states` の
-    KeyError になる形で、層構成の前提そのものが崩れている）。
+    MUST: fail when a layer_type on the shared side has no owner layer (upstream would hit a
+    KeyError on `shared_kv_states`; the layering premise itself has broken).
     """
     layer_types = list(config.layer_types)
     boundary = first_shared_layer(config)
@@ -538,16 +593,17 @@ def kv_owner_layers(config: Any) -> dict[str, int]:
     orphans = sorted(set(layer_types[boundary:]) - set(owners))
     if orphans:
         raise AssertionError(
-            f"共有層の layer_type {orphans} を書き出す層が共有開始 {boundary} より前に無い"
-            "（層構成の前提が崩れている）"
+            f"the shared layers' layer_type {orphans} has no layer writing it before the sharing"
+            f" start {boundary} (the layering premise has broken)"
         )
     return owners
 
 
 def slot_layers(config: Any) -> tuple[int, ...]:
-    """層 → その層が読む KV スロットの**所有層**番号。
+    """Layer → the number of the **owner layer** of the KV slot that layer reads.
 
-    共有開始より前は自分自身、以後は layer_type ごとの所有層（{@link kv_owner_layers}）。
+    Before the sharing start it is the layer itself, from it on the owner layer per layer_type
+    ({@link kv_owner_layers}).
     """
     owners = kv_owner_layers(config)
     boundary = first_shared_layer(config)
@@ -558,27 +614,33 @@ def slot_layers(config: Any) -> tuple[int, ...]:
 
 
 def attention_nodes(graph: IrGraph, config: Any) -> list[IrNode]:
-    """nodes 順の attention を返す（**出現順 = 層順**という前提そのものを検査してから）。
+    """The attention nodes in nodes order (after checking the premise itself that **order of
+    appearance = layer order**).
 
-    検査は q の D 軸と `config.layer_types` の突合。Gemma 4 は層種別で head_dim が違う
-    （sliding 256 / full 512）ので、並びが層順でなければ 5 層ごとの 512 が別の位置に出る。
+    The check matches q's D axis against `config.layer_types`. Gemma 4's head_dim differs per layer
+    type (sliding 256 / full 512), so if the order is not the layer order, the 512 of every fifth
+    layer shows up at another position.
 
-    MUST: 前提が崩れたまま spec を組むと、別層の KV を読むスロット割りが**形も型も合ったまま**
-    通る（沈黙誤値）。本数の食い違いも同じ理由で落とす — 取りこぼした層は手術されずに
-    mask 形のまま残り、その層だけが chunk 局所の causal になる。
+    MUST: building the spec with the premise broken lets through a slot assignment that reads
+    another layer's KV **with shape and type matching** (a silent wrong value). A count mismatch
+    fails for the same reason — a layer left out is not operated on and stays in mask form, and
+    that layer alone becomes causal within the chunk only.
     """
     layer_types = list(config.layer_types)
     nodes = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(nodes) != len(layer_types):
-        raise AssertionError(f"attention が {len(nodes)} 本（{len(layer_types)} 層と一致しない）")
+        raise AssertionError(
+            f"{len(nodes)} attention nodes (not matching the {len(layer_types)} layers)"
+        )
     for layer, (node, layer_type) in enumerate(zip(nodes, layer_types, strict=True)):
         depth = one_shot._attention_depth(config, layer_type)
         found = declared_shape(graph, node.ins[0])[3]
         if found != depth:
             raise AssertionError(
-                f"attention[{layer}] ({layer_type}): q の D 軸が {found} —"
-                f" この層種別の head_dim {depth} と違う"
-                "（nodes 順が層順でない可能性 — スロット割りの前提が崩れる）"
+                f"attention[{layer}] ({layer_type}): q's D axis is {found} —"
+                f" not this layer type's head_dim {depth}"
+                " (possibly the nodes order is not the layer order — the slot assignment's premise"
+                " breaks)"
             )
     return nodes
 
@@ -598,11 +660,12 @@ def kv_heads(config: Any, layer_type: str) -> int:
 
 
 def sliding_capacity(config: Any) -> int:
-    """sliding スロットの物理行数（`window + SLIDING_SLACK_ROWS`）。
+    """The physical row count of the sliding slots (`window + SLIDING_SLACK_ROWS`).
 
-    手術指定（{@link states_plan}）と形検査（{@link assert_ir_form_common}）が同じ数を読む
-    ための 1 箇所。式を 2 箇所に綴ると、余裕を動かした日に片方だけが古びて「検査が実物と
-    別の容量を期待する」形になる。
+    The one place where the surgery's specification ({@link states_plan}) and the form check
+    ({@link assert_ir_form_common}) read the same number. Spelling the formula in two places would
+    let one go stale on the day the slack moves, as "a check that expects a capacity other than the
+    real one".
     """
     return int(config.sliding_window) + SLIDING_SLACK_ROWS
 
@@ -610,19 +673,22 @@ def sliding_capacity(config: Any) -> int:
 def states_plan(
     graph: IrGraph, config: Any, *, capacity_symbol: str = CAPACITY_SYMBOL
 ) -> StatesPlan:
-    """層種別と KV 共有を反映した手術指定（スロットは**所有層ぶんだけ**）。
+    """The surgery's specification reflecting layer types and KV sharing (slots **for the owner
+    layers only**).
 
-    - 共有開始より前の層（自前 KV — E2B は 0..14・E4B は 0..23）: 自分の k / v スロット。
-      sliding は `window = sliding_window`・full は window 無し。
-    - 共有開始以後の層（共有読者 — E2B は 15..34・E4B は 24..41）: 自分のスロットを作らず、
-      layer_type の所有層のスロットを読む。
-      sliding の読者は同じ `window` を宣言する（states.py の `_register` が完全一致を検査）。
+    - Layers before the sharing start (own KV — E2B 0..14, E4B 0..23): their own k / v slots.
+      Sliding gets `window = sliding_window`, full no window.
+    - Layers from the sharing start on (shared readers — E2B 15..34, E4B 24..41): no slot of their
+      own; they read the slot of the layer_type's owner layer.
+      The sliding readers declare the same `window` (`_register` in states.py checks the exact
+      match).
 
-    容量は層種別で分ける: **sliding スロットは `window + SLIDING_SLACK_ROWS` の実数**（ring は
-    window ではなくこの容量で閉じる — 余裕そのものの理由は {@link SLIDING_SLACK_ROWS}。記号の
-    ままだと容量 C ぶんの行を確保して余裕を超えた行が死蔵になるだけで、読める行集合は
-    変わらない）・**full スロットは記号のまま**（全 context を保持する側だけが「容量を実行時に
-    選ぶ」自由 — ADR 0066 決定 3 — を必要とする）。
+    The capacity is split per layer type: **the sliding slots are the number
+    `window + SLIDING_SLACK_ROWS`** (the ring closes at this capacity, not at window — the reason
+    for the slack itself is in {@link SLIDING_SLACK_ROWS}; left as a symbol, C rows would be
+    reserved and the rows beyond the slack would only lie dead, without changing the set of readable
+    rows), **the full slots stay a symbol** (only the side that keeps the whole context needs the
+    freedom to "choose the capacity at run time" — ADR 0066 decision 3).
     """
     nodes = attention_nodes(graph, config)
     window = int(config.sliding_window)
@@ -644,53 +710,61 @@ def states_plan(
     )
 
 
-#: token-only 既定出口（ADR 0068 決定 4）の last_row 入力名。綴りは wrapper の forward 引数名
-#: そのもの（torch.export がグラフ入力名に採る）— 正本はここで、`export_token` と
-#: `assert_ir_form_decode(token_only=True)` の両方が参照する。
+#: The last_row input name of the token-only default exit (ADR 0068 decision 4). The spelling is
+#: the wrapper's forward argument name itself (torch.export takes it as the graph input name) — the
+#: source of truth is here, referenced by both `export_token` and
+#: `assert_ir_form_decode(token_only=True)`.
 TOKEN_ONLY_LAST_ROW = "last_row"
 
 
 def last_rows_for(ids: torch.Tensor, rows: int) -> torch.Tensor:
-    """無 pad 全長 prompt の**末尾 `rows` 行**の添字 `[T−rows, …, T−1]`（`last_row` 入力）。
+    """The indices `[T−rows, …, T−1]` of **the last `rows` rows** of an unpadded full-length prompt
+    (the `last_row` input).
 
-    {@link positions_for} と対の「1 chunk で全 prompt を食う」形の値で、例示入力にも sanity の
-    全長 forward にも同じものが要る（綴りが 2 箇所に割れると、行選択が最後の行を指さない形が
-    片方だけで作れてしまう）。製品形の投機 verify は複数行を選ぶので、行数を引数で受ける。
+    The value of the "one chunk eats the whole prompt" form paired with {@link positions_for}; the
+    example input and the full-length sanity forward both need the same one (if the spelling split
+    in two, one side alone could build a row selection that does not point at the last row). The
+    product form's speculative verification selects several rows, so the row count is an argument.
     """
     length = int(ids.shape[1])
     if not 1 <= rows <= length:
-        raise AssertionError(f"選択行数 {rows} が prompt 長 {length} に収まらない")
+        raise AssertionError(f"selected row count {rows} does not fit the prompt length {length}")
     return torch.arange(length - rows, length, dtype=torch.int64)
 
 
 def last_row_for(ids: torch.Tensor) -> torch.Tensor:
-    """最終有効行 1 本の添字 `[T−1]`（token-only 出口の `last_row` 入力）。
+    """The index `[T−1]` of the one last valid row (the `last_row` input of the token-only exit).
 
-    行数 1 の {@link last_rows_for} — 添字の算術を 2 箇所に綴らないために委譲する。
+    {@link last_rows_for} with one row — delegated so that the index arithmetic is not spelled in
+    two places.
     """
     return last_rows_for(ids, 1)
 
 
 def assert_layer_type_count(config: Any) -> None:
-    """層種別の宣言本数を確かめる（形検査の**前口上** — 3 形すべてが最初に通る）。
+    """Check the declared count of layer types (the **preamble** of the form checks — all three
+    forms pass it first).
 
-    ここが崩れていると後段の `zip(..., strict=True)` が「本数が違う」という真因から遠い
-    例外で落ちるので、入口・出口の検査より前に置く（{@link assert_ir_form_decode} /
-    {@link gemma4.export_product.assert_ir_form_product} の並び）。
+    If this is broken, a later `zip(..., strict=True)` fails with an exception far from the real
+    cause, "the counts differ", so it comes before the entry / exit checks (the order of
+    {@link assert_ir_form_decode} / {@link gemma4.export_product.assert_ir_form_product}).
     """
     layers = int(config.num_hidden_layers)
     declared = len(list(config.layer_types))
     if declared != layers:
-        raise AssertionError(f"config.layer_types が {declared} 本（{layers} 層と違う）")
+        raise AssertionError(f"config.layer_types has {declared} entries (not the {layers} layers)")
 
 
 def assert_rope_inputs(graph: IrGraph, config: Any, *, seq_symbol: str = SEQ_SYMBOL) -> None:
-    """RoPE 派生入力 4 本が f32 `[1, M, headDim]` で、層種別の幅どおりであることを見る。
+    """Check that the four derived RoPE inputs are f32 `[1, M, headDim]`, with each layer type's
+    width.
 
-    MUST: 幅まで見る。sliding（256）と full（512）を取り違えた配線は、ホストが渡す表の幅で
-    しか露見しない — グラフの側は入力の宣言 shape が食い違って初めて落ちる。
-    MUST: 表の initializer が 1 本も残っていないことも見る。派生入力を足したのに表も残って
-    いる形（両方通る配線）は、常駐 6MiB が戻るうえ `maxPosition` の意味が資産へ逆戻りする。
+    MUST: check the width too. Wiring that swaps sliding (256) and full (512) shows only in the
+    width of the tables the host passes — the graph side fails only once the declared input shapes
+    disagree.
+    MUST: also check that no table initializer remains. A form that added the derived inputs but
+    kept the tables (wiring where both work) brings 6MiB of resident memory back, and the meaning
+    of `maxPosition` moves back to the asset.
     """
     declared = {spec.name: spec for spec in graph.inputs}
     specs = rope_specs(config)
@@ -700,12 +774,12 @@ def assert_rope_inputs(graph: IrGraph, config: Any, *, seq_symbol: str = SEQ_SYM
             name = rope_input_name(layer_type, part)
             spec = declared.get(name)
             if spec is None:
-                raise AssertionError(f"グラフ入力 '{name}' が無い（RoPE がホスト供給でない）")
+                raise AssertionError(f"graph input '{name}' is missing (RoPE is not host-supplied)")
             expected = [1, seq_symbol, depth]
             if spec.dtype != "f32" or list(spec.shape) != expected:
                 raise AssertionError(
-                    f"グラフ入力 '{name}' が {spec.dtype} {list(spec.shape)} —"
-                    f" f32 {expected} でない（層種別の headDim と食い違う）"
+                    f"graph input '{name}' is {spec.dtype} {list(spec.shape)} —"
+                    f" not f32 {expected} (disagrees with the layer type's headDim)"
                 )
     residue = sorted(
         name
@@ -714,8 +788,8 @@ def assert_rope_inputs(graph: IrGraph, config: Any, *, seq_symbol: str = SEQ_SYM
     )
     if residue:
         raise AssertionError(
-            f"RoPE 表の initializer が {len(residue)} 本残っている: {residue[:4]}"
-            "（ホスト生成へ外に出し切れていない）"
+            f"{len(residue)} RoPE table initializers remain: {residue[:4]}"
+            " (not yet moved fully to host generation)"
         )
 
 
@@ -726,35 +800,39 @@ def assert_row_selected_lm_head(
     *,
     rows: int | str = 1,
 ) -> None:
-    """**行選択済み lm_head の固定**（Codex 波 H 指摘 H-01）。
+    """**Pinning the row-selected lm_head** (Codex review round H, finding H-01).
 
-    行ごとの lm_head と行選択は可換なので「全行 lm_head → softcap → 行選択」でも token 列は
-    一致する — ADR 0068 の実効（lm_head を選択済みの行だけに掛ける・`[M,V]` バッファ消滅）は
-    この構造検査でしか固定できない。`start`（token-only なら argmax ノード / 製品形なら
-    logits 出力の生産者）から softcap 鎖（div/tanh/mul — いずれも `ins[0]` が本流）を遡って
-    最初の linear が lm_head で、その入力が `[1, rows, H]` かつ祖先に `last_row` 入力を持つこと。
+    The per-row lm_head and the row selection commute, so even "lm_head on every row → softcap →
+    row selection" gives the same token sequence — what ADR 0068 achieves (applying lm_head only to
+    the selected rows, the `[M,V]` buffer gone) can be pinned only by this structural check. From
+    `start` (the argmax node for token-only / the producer of the logits output for the product
+    form) it walks back along the softcap chain (div/tanh/mul — `ins[0]` is the main stream in
+    each) and requires that the first linear is lm_head, and that its input is `[1, rows, H]` and
+    has the `last_row` input among its ancestors.
 
-    `rows` は期待する選択行数。token-only 出口は常に 1 行（`last_row[1]`）で、製品形は
-    投機 verify の記号 R 行（`last_row[R]`）— 数え方が違うだけで「行選択が lm_head より前に
-    居る」という規律は同一なので、検査は 1 本のまま引数で受ける。
+    `rows` is the expected number of selected rows. The token-only exit always has one row
+    (`last_row[1]`), the product form the R rows of the speculative verification's symbol
+    (`last_row[R]`) — only the counting differs, and the rule "the row selection sits before
+    lm_head" is the same, so the check stays one and takes it as an argument.
     """
     node = start
     for _ in range(8):
         source = producer.get(node.ins[0])
         if source is None:
             raise AssertionError(
-                f"出力の祖先（'{node.ins[0]}'）が途切れた — lm_head（linear）に届かない"
+                f"the output's ancestry ('{node.ins[0]}') breaks off — lm_head (linear) is not"
+                " reached"
             )
         node = source
         if node.op == LINEAR_OP:
             break
     else:
-        raise AssertionError(f"出力の 8 段以内に lm_head（{LINEAR_OP}）が無い")
+        raise AssertionError(f"no lm_head ({LINEAR_OP}) within 8 steps of the output")
     row_shape = declared_shape(graph, node.ins[0])
     if list(row_shape[:2]) != [1, rows]:
         raise AssertionError(
-            f"lm_head の入力が {row_shape} — [1,{rows},H]（選択済みの {rows} 行）でない"
-            "（全行 lm_head へ退行している）"
+            f"lm_head's input is {row_shape} — not [1,{rows},H] (the {rows} selected rows)"
+            " (it has regressed to lm_head on every row)"
         )
     input_names = {spec.name for spec in graph.inputs}
     frontier = [node.ins[0]]
@@ -773,8 +851,9 @@ def assert_row_selected_lm_head(
             frontier.extend(upstream.ins)
     if TOKEN_ONLY_LAST_ROW not in reachable:
         raise AssertionError(
-            f"lm_head の入力が `{TOKEN_ONLY_LAST_ROW}` に依存しない"
-            f"（到達した入力: {sorted(reachable)}）— 行選択が lm_head より前に居ない"
+            f"lm_head's input does not depend on `{TOKEN_ONLY_LAST_ROW}`"
+            f" (inputs reached: {sorted(reachable)})"
+            " — the row selection does not sit before lm_head"
         )
 
 
@@ -787,34 +866,43 @@ def assert_ir_form_common(
     capacity_symbol: str,
     extra_symbols: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """入口・出口**以外**の全規律（3 形が共有する本体）。
+    """Every rule **except** the entry / exit (the body shared by the three forms).
 
-    decode 系列は入口 / 出口が 3 形ある（logits opt-in / token-only / 製品）が、states の
-    形・層種別との対応・スロット割り・記号・手術の残骸・格納内訳は**どの形でも同一**である。
-    ここを 1 本にしておかないと、片方だけ検査が痩せていく（実際に製品形の追加時、同じ規律を
-    独立に綴った結果 90 行が二重化していた）。
+    The decode series has three entry / exit forms (logits opt-in / token-only / product), but the
+    states form, the correspondence with the layer types, the slot assignment, the symbols, the
+    surgery's residues and the storage breakdown are **the same in every form**. Unless this is one
+    function, the checks of one form thin out (when the product form was added, the same rules were
+    in fact spelled independently and 90 lines were duplicated).
 
-    golden の突合では捕まらない性質だけを並べる:
+    It lists only properties the golden match does not catch:
 
-    - attention が 1 本でも従来形（mask 込み 4 本）で残ると、その層だけ過去を見ない
-    - `window` の有無が層種別と食い違うと、full 層が窓外を捨てる / sliding 層が窓を無視する
-    - スロットの割り当てを間違えると、共有層が別の層の KV を読む（形も型も合う）
-    - full スロットの容量が記号でなく数値だと、context 生成時に容量を選べない（ADR 0066
-      決定 3）。sliding スロットは逆に `window + SLIDING_SLACK_ROWS` の実数ちょうどでないと、
-      余裕が足りなければ投機 verify の棄却行が live 窓を潰し、余りが増えれば死蔵行が戻る
-      （{@link states_plan} / {@link SLIDING_SLACK_ROWS} — 層種別で理由が違うので検査も分けている）
-    - `sym_prefix_slice` / `sin` が残ると、誰も読まない Tmax 定数や畳み残しが配布物に居座る
-    - 圧縮の適格判定を外した重みは**黙って f32 のまま**残る（`emit._plan_weight_dtype` の
-      既定側は静かに落とす経路を持つ）ので、格納 dtype の本数を数えないと気づけない
+    - if even one attention remains in the old form (4 inputs with the mask), that layer alone does
+      not see the past
+    - if the presence of `window` disagrees with the layer type, a full layer drops what is outside
+      the window / a sliding layer ignores the window
+    - a wrong slot assignment makes a shared layer read another layer's KV (shape and type match)
+    - a full slot capacity that is a number instead of a symbol cannot be chosen when the context
+      is created (ADR 0066 decision 3). Conversely, unless the sliding slots are exactly the number
+      `window + SLIDING_SLACK_ROWS`, too little slack lets speculative verification's rejected rows
+      overwrite the live window, and too much brings dead rows back
+      ({@link states_plan} / {@link SLIDING_SLACK_ROWS} — the reasons differ per layer type, so the
+      checks are split too)
+    - a remaining `sym_prefix_slice` / `sin` leaves Tmax constants nobody reads or unfolded residues
+      in the distribution
+    - a weight that misses the compression eligibility stays **silently f32** (the default side of
+      `emit._plan_weight_dtype` has a path that drops it quietly), so it goes unnoticed unless the
+      storage dtypes are counted
 
-    MUST: head_dim は層種別で引く（`hidden_size / num_attention_heads` = 192 はどちらとも
-    違う）。片方の値で全層を見ると、もう片方の層が丸ごと無検査になる。
-    MUST: 呼び手は {@link assert_layer_type_count} を**先に**通していること（本数が合って
-    いる前提で `zip(..., strict=True)` を張る）。
+    MUST: look up head_dim per layer type (`hidden_size / num_attention_heads` = 192 is neither).
+    Checking every layer with one of the values leaves the layers of the other type entirely
+    unchecked.
+    MUST: the caller has run {@link assert_layer_type_count} **first** (`zip(..., strict=True)` is
+    set up on the premise that the counts match).
 
-    `extra_symbols` は形ごとに増える記号（製品形の行数記号 R — 投機 verify の
-    `last_row[R]`）。記号の集合は**完全一致**で見るので、形ごとの差は引数で受けるほかない
-    （集合の検査を部分集合へ緩めると、束縛できない記号が紛れ込んでも素通りする）。
+    `extra_symbols` are the symbols a form adds (the product form's row symbol R — the speculative
+    verification's `last_row[R]`). The symbol set is checked for an **exact match**, so a per-form
+    difference can only come in as an argument (loosening the set check to a subset would let a
+    symbol that cannot be bound slip through).
     """
     heads = int(config.num_attention_heads)
     layer_types = list(config.layer_types)
@@ -828,38 +916,42 @@ def assert_ir_form_common(
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(attentions) != layers:
-        raise AssertionError(f"attention が {len(attentions)} 本（{layers} 層と一致しない）")
+        raise AssertionError(
+            f"{len(attentions)} attention nodes (not matching the {layers} layers)"
+        )
     for layer, (node, layer_type, owner) in enumerate(
         zip(attentions, layer_types, owners, strict=True)
     ):
         where = f"attention[{layer}] ({layer_type})"
         if len(node.ins) != 3:
             raise AssertionError(
-                f"{where}: ins が {len(node.ins)} 本 — states 形は q / k / v の 3 本ちょうど"
-                "（4 本なら mask 込みの従来形が残っている）"
+                f"{where}: {len(node.ins)} ins — the states form takes exactly q / k / v"
+                " (4 means the old form with the mask remains)"
             )
         expected_states = {"k": slot_name(owner, "k"), "v": slot_name(owner, "v")}
         if node.states != expected_states:
-            raise AssertionError(f"{where}: states 欄が {node.states}（期待 {expected_states}）")
+            raise AssertionError(
+                f"{where}: states field is {node.states} (expected {expected_states})"
+            )
         expected_window = window if layer_type == one_shot.SLIDING_ATTENTION else None
         if node.attrs.get("window") != expected_window:
             raise AssertionError(
-                f"{where}: attrs の window が {node.attrs.get('window')}"
-                f"（期待 {expected_window}）— 層種別と窓の対応が崩れている"
+                f"{where}: the window attr is {node.attrs.get('window')}"
+                f" (expected {expected_window}) — the layer type / window correspondence broke"
             )
         query, key, value = (declared_shape(graph, name) for name in node.ins)
         kv = kv_by_type[layer_type]
         if query[1] != heads or key[1] != kv or value[1] != kv:
             raise AssertionError(
-                f"{where}: head 軸が {[query[1], key[1], value[1]]} —"
-                f" 真の GQA 形 {[heads, kv, kv]} でない"
-                "（k / v が H まで広がっていれば repeat_kv が実体化している）"
+                f"{where}: head axes are {[query[1], key[1], value[1]]} —"
+                f" not the true GQA form {[heads, kv, kv]}"
+                " (k / v widened to H means repeat_kv was materialized)"
             )
         depth = one_shot._attention_depth(config, layer_type)
         if query[3] != depth or key[3] != depth or value[3] != depth:
             raise AssertionError(
-                f"{where}: D 軸が {[query[3], key[3], value[3]]} — この層種別の head_dim"
-                f" {depth} と違う"
+                f"{where}: D axes are {[query[3], key[3], value[3]]} — not this layer type's"
+                f" head_dim {depth}"
             )
 
     boundary = first_shared_layer(config)
@@ -870,22 +962,23 @@ def assert_ir_form_common(
     written = sorted(node.states["slot"] for node in appends)
     if written != expected_slots:
         raise AssertionError(
-            f"`{STATE_APPEND_OP}` の書き先が {len(written)} 本 — 所有層のスロット"
-            f" {len(expected_slots)} 本を 1 本ずつでない"
-            f"（欠落 {sorted(set(expected_slots) - set(written))} /"
-            f" 余剰 {sorted(set(written) - set(expected_slots))}）"
+            f"`{STATE_APPEND_OP}` writes {len(written)} slots — not one each of the"
+            f" {len(expected_slots)} owner-layer slots"
+            f" (missing {sorted(set(expected_slots) - set(written))} /"
+            f" surplus {sorted(set(written) - set(expected_slots))})"
         )
     if sorted(graph.states) != expected_slots:
         raise AssertionError(
-            f"states 宣言が {sorted(graph.states)} — 所有層 {boundary} 本の k / v"
-            f" {len(expected_slots)} 本でない"
+            f"states declarations are {sorted(graph.states)} — not the k / v of the {boundary}"
+            f" owner layers ({len(expected_slots)} slots)"
         )
     for layer in range(boundary):
         layer_type = layer_types[layer]
         depth = one_shot._attention_depth(config, layer_type)
-        # 容量の検査は層種別で分ける MUST — 記号一色に緩めると「全部数値に焼かれた資産」
-        # （容量を実行時に選べない — ADR 0066 決定 3）が素通りし、数値一色に緩めると full の
-        # 容量自由が黙って消える。sliding は window + 余裕の実数（{@link sliding_capacity}）。
+        # The capacity check is split per layer type, a MUST — loosening it to all-symbol lets "an
+        # asset with every capacity baked as a number" (the capacity cannot be chosen at run time —
+        # ADR 0066 decision 3) through, and loosening it to all-number silently removes full's
+        # capacity freedom. Sliding is the number window + slack ({@link sliding_capacity}).
         sliding = layer_type == one_shot.SLIDING_ATTENTION
         slot_shape = [1, kv_by_type[layer_type], capacity if sliding else capacity_symbol, depth]
         for part in ("k", "v"):
@@ -893,24 +986,24 @@ def assert_ir_form_common(
             slot = graph.states[name]
             if slot.dtype != "f32" or list(slot.shape) != slot_shape:
                 kind = (
-                    f"sliding は window {window} + 余裕 {SLIDING_SLACK_ROWS} の実数ちょうど"
+                    f"sliding is exactly window {window} + slack {SLIDING_SLACK_ROWS} as a number"
                     if sliding
-                    else "full の容量は記号のまま残す MUST"
+                    else "full capacity stays a symbol, a MUST"
                 )
                 raise AssertionError(
-                    f"states['{name}'] が {slot.dtype} {list(slot.shape)} —"
-                    f" f32 {slot_shape} でない（{kind}）"
+                    f"states['{name}'] is {slot.dtype} {list(slot.shape)} —"
+                    f" not f32 {slot_shape} ({kind})"
                 )
 
     symbols = sorted(graph.symbols)
     expected_symbols = sorted({seq_symbol, capacity_symbol, *extra_symbols})
     if symbols != expected_symbols:
-        raise AssertionError(f"symbols が {symbols} — {expected_symbols} でない")
+        raise AssertionError(f"symbols are {symbols} — not {expected_symbols}")
     residue = sorted(set(graph.required_ops) & set(RESIDUE_OPS))
     if residue:
         raise AssertionError(
-            f"手術で死ぬはずの op が残っている: {residue}"
-            "（mask の Tmax 畳み込み残骸 / 畳み残した RoPE）"
+            f"ops the surgery should have removed remain: {residue}"
+            " (residue of the mask's Tmax folding / RoPE left unfolded)"
         )
 
     storage: dict[str, int] = {}
@@ -924,7 +1017,8 @@ def assert_ir_form_common(
     }
     if wrong:
         raise AssertionError(
-            f"格納 dtype の本数が想定と違う（実測, 想定）: {wrong} / 全内訳 {storage}"
+            f"storage dtype counts differ from the expectation (measured, expected): {wrong}"
+            f" / full breakdown {storage}"
         )
     triples = {
         layer_type: [heads, kv_by_type[layer_type], kv_by_type[layer_type]]
@@ -956,20 +1050,25 @@ def assert_ir_form_decode(
     capacity_symbol: str = CAPACITY_SYMBOL,
     token_only: bool = False,
 ) -> dict[str, Any]:
-    """states 形 decode グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
+    """Check the form of a states-form decode graph (every property that **breaks silently with
+    the numbers still matching**).
 
-    `token_only` は ADR 0068 決定 4 の**既定出口形**（`export_token` — 入力に `last_row` が
-    増え、出力が argmax token 1 本になる）。入口・出口以外の検査（states / 層種別 / 残骸 /
-    格納内訳）は両形で同一なので、この 1 関数が両方を受ける（別関数に割ると片方だけ検査が
-    痩せていく）。本体は {@link assert_ir_form_common} で、製品形
-    （{@link gemma4.export_product.assert_ir_form_product}）とも共有する。
+    `token_only` is ADR 0068 decision 4's **default exit form** (`export_token` — the inputs gain
+    `last_row` and the output becomes one argmax token). The checks other than entry / exit
+    (states / layer types / residues / storage breakdown) are the same for both forms, so this one
+    function takes both (split into separate functions, the checks of one would thin out). The
+    body is {@link assert_ir_form_common}, shared with the product form too
+    ({@link gemma4.export_product.assert_ir_form_product}).
 
-    ここが見るのは入口・出口だけ:
+    What this looks at is only the entry / exit:
 
-    - グラフ入力に mask が残ると「ホストが毎 chunk T² を作って渡す」別物になる
-    - `position_ids` が残ると位置がグラフの内側へ戻る（RoPE の外出しが半端）
-    - 出口が argmax でなければ decode 出口（ADR 0068 決定 4）ではない
-    - `token_only` では行選択が lm_head より**前**に居ること（{@link assert_row_selected_lm_head}）
+    - a mask left in the graph inputs is a different thing: "the host builds T² per chunk and
+      passes it"
+    - a remaining `position_ids` brings the positions back inside the graph (RoPE only half moved
+      out)
+    - an exit that is not argmax is not the decode exit (ADR 0068 decision 4)
+    - with `token_only`, the row selection sits **before** lm_head
+      ({@link assert_row_selected_lm_head})
     """
     assert_layer_type_count(config)
 
@@ -977,25 +1076,25 @@ def assert_ir_form_decode(
     expected_inputs = [INPUT_IDS, *ROPE_INPUTS, *([TOKEN_ONLY_LAST_ROW] if token_only else [])]
     if names != expected_inputs:
         raise AssertionError(
-            f"グラフ入力が {names} — {expected_inputs} でない"
-            "（mask や position_ids が畳み込まれずに入力へ残っている可能性）"
+            f"graph inputs are {names} — not {expected_inputs}"
+            " (mask or position_ids may have stayed inputs instead of being folded)"
         )
     assert_rope_inputs(graph, config, seq_symbol=seq_symbol)
     expected_outputs = 1 if token_only else 2
     if len(graph.outputs) != expected_outputs:
         kind = (
-            "token-only 出口は token の 1 本"
+            "the token-only exit is one output, token"
             if token_only
-            else "decode 出口は logits / token の 2 本"
+            else "the decode exit is the two outputs logits / token"
         )
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（{kind}）")
+        raise AssertionError(f"{len(graph.outputs)} IR outputs ({kind})")
     producer = {out: node for node in graph.nodes for out in node.outs}
     token_source = producer.get(graph.outputs[-1])
     if token_source is None or token_source.op != ARGMAX_OP:
-        found = "ノード出力でない" if token_source is None else token_source.op
+        found = "not a node output" if token_source is None else token_source.op
         raise AssertionError(
-            f"出力 {len(graph.outputs) - 1} の供給元が {found} — `{ARGMAX_OP}` でない"
-            "（ADR 0068 決定 4 の decode 出口）"
+            f"output {len(graph.outputs) - 1} comes from {found} — not `{ARGMAX_OP}`"
+            " (the decode exit of ADR 0068 decision 4)"
         )
     if token_only:
         assert_row_selected_lm_head(graph, producer, token_source)
@@ -1020,17 +1119,19 @@ def _write_container(
     weight_dtype_overrides: Mapping[str, str],
     assets: Mapping[str, AssetInput] = {},
 ) -> IrGraph:
-    """手術済みグラフを書いて検証する（公開の 3 段は `pipeline.publish_model` に預ける）。
+    """Write and verify the operated graph (the three publishing steps are left to
+    `pipeline.publish_model`).
 
-    `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、書き出し以降
-    だけを core の入口から呼ぶ。**規則も原子性も再実装しない** — states 節・順序・shape の
-    検査も、part 分割（container-v1 §4.2）とその据え替え・後始末も core が持つ。
+    `export_to_file` runs export → write as one path with no gap to insert the surgery, so only the
+    part from writing on is called through the core's entry point. **Neither the rules nor the
+    atomicity are reimplemented** — the checks of the states section, order and shapes, the part
+    split (container-v1 §4.2) and its swapping into place and cleanup are all the core's.
 
-    刈り込みで死んだ initializer（mask の Tmax² 定数）は格納テンソルからも落とす —
-    `stored_model` は宣言と格納の**完全一致**を要求する。scale 台帳（`weight_scales`）は
-    刈られた重みの分が残っていてもよい（emit は計画した本数しか引かない）が、
-    `weight_dtype_overrides` の側は**未知キーで fail loudly** になる — linear の重みが手術で
-    消える形は起きてはならないので、その門はそのまま効かせる。
+    Initializers killed by pruning (the mask's Tmax² constants) are dropped from the stored tensors
+    too — `stored_model` requires an **exact match** of declarations and storage. The scale ledger
+    (`weight_scales`) may keep entries for pruned weights (emit only looks up the planned ones), but
+    `weight_dtype_overrides` **fails loudly on unknown keys** — a linear weight vanishing in the
+    surgery must never happen, so that check stays in effect.
     """
     declared = {init.tensor for init in graph.initializers.values()}
     stored = {name: tensor for name, tensor in tensors.items() if name in declared}
@@ -1054,14 +1155,15 @@ def _write_io(
     out_dir: Path,
     specs: Mapping[str, rope_math.RopeLayerSpec],
 ) -> list[str]:
-    """各ケースの**無 pad 全長**の入出力を `io.<case>.safetensors` へ書く。
+    """Write each case's **unpadded full-length** inputs and outputs to `io.<case>.safetensors`.
 
-    NOTE: これは「同じ重み・同じ位置で torch が出す値」の**参照表**であって、ランタイムの
-    実行台本ではない。decode 系列のグラフは chunk 形（`M = chunkLength`）で走るので、Deno 側は
-    全長 T を chunk へ割って実行し、**有効行だけ**をここの `output.0` / `output.1` の対応行と
-    突き合わせる。pad 行で 0 に固定されるのは **states 形 attention の出力だけ**（ADR 0066
-    追記 8）で、後段の MLP / lm_head は pad 行にも意味のない値を書く — pad 行のグラフ出力は
-    **読んではならない**（参照側に対応物も無い）。
+    NOTE: this is **a reference table** of "the values torch gives for the same weights at the same
+    positions", not the runtime's execution script. The decode series' graph runs in chunk form
+    (`M = chunkLength`), so the Deno side splits the full length T into chunks, runs them, and
+    matches **only the valid rows** against the corresponding rows of `output.0` / `output.1` here.
+    What is pinned to 0 on pad rows is **only the output of states-form attention** (ADR 0066
+    addendum 8), and the later MLP / lm_head write meaningless values on pad rows too — the graph
+    outputs of pad rows **must not be read** (the reference has no counterpart either).
     """
     written: list[str] = []
     for name, ids in cases:
@@ -1071,13 +1173,13 @@ def _write_io(
             outputs = wrapper(ids, *rope_inputs)
         tensors = {
             f"{one_shot.INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
-                args[declared.name], f"{name} の入力 '{declared.name}'"
+                args[declared.name], f"{name}: input '{declared.name}'"
             )
             for declared in graph.inputs
         }
         for slot, output in enumerate(outputs):
             tensors[f"{one_shot.OUTPUT_PREFIX}{slot}"] = normalize_boundary_tensor(
-                output.detach().contiguous(), f"{name} の出力 {slot}"
+                output.detach().contiguous(), f"{name}: output {slot}"
             )
         path = out_dir / f"{one_shot.IO_PREFIX}{name}{one_shot.IO_SUFFIX}"
         save_file(tensors, str(path))
@@ -1091,12 +1193,13 @@ def _export_args(
     seq: Dim,
     specs: Mapping[str, rope_math.RopeLayerSpec],
 ) -> tuple[tuple[torch.Tensor, ...], tuple[Any, ...]]:
-    """例示入力と `dynamic_shapes` の組（token-only は `last_row` が 1 本増える）。
+    """The example inputs and the matching `dynamic_shapes` (token-only adds one `last_row`).
 
-    RoPE 派生入力は `[1, M, headDim]` — 行数が chunk 行数そのものなので、`input_ids` と同じ
-    記号次元を与える（別の記号にすると「行数の違う表を渡せる」形が宣言できてしまう）。
-    `last_row` は静的 `[1]`（動的次元なし）— 実行時スカラだが形は 1 要素で固定なので、
-    記号次元を与えると M と紐づいた別物になる。
+    The derived RoPE inputs are `[1, M, headDim]` — their row count is the chunk row count itself,
+    so they get the same symbolic dimension as `input_ids` (another symbol would make "tables with a
+    different row count can be passed" declarable). `last_row` is a static `[1]` (no dynamic
+    dimension) — a run-time scalar whose form is fixed at one element, so a symbolic dimension would
+    make it something else, tied to M.
     """
     args: tuple[torch.Tensor, ...] = (ids, *rope_args(specs, positions_for(ids)))
     shapes: tuple[Any, ...] = tuple({1: seq} for _ in args)
@@ -1114,40 +1217,50 @@ def export_series(
     steps: int = GREEDY_STEPS[GEMMA4_DEFAULT_MODEL],
     reference: Path = DEFAULT_OUT_DIR,
 ) -> dict[str, Any]:
-    """variant の states 形 IR コンテナ（golden を採る系列なら io / greedy も）を書き、要約を返す。
+    """Write the variant's states-form IR container (with io / greedy for a series that takes
+    goldens), and return a summary.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（形検査・margin 門・1-shot 期待表との sanity）を
-    通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す
-    （据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
-    MUST: `steps` を読むのは golden を採る系列だけ（token-only 系列には greedy 記録が無い）。
-    MUST: `reference` を読むのは golden を**採らない**系列だけ — 流用する greedy golden の
-    置き場で、出所記録（{@link gemma4.provenance}）がその digest を容器と束ねる。
+    MUST: the outputs are written to a staging slot and put in place only after **every check**
+    (the form checks, the margin check, the sanity check against the one-shot expectation table)
+    passes. Placed at final before the checks, a failed run leaves "an asset that can pass the
+    acceptance checks" (the rules of swapping into place and cleaning up are the core primitive
+    {@link karume.artifacts.staged_publication}).
+    MUST: only a series that takes goldens reads `steps` (the token-only series has no greedy
+    record).
+    MUST: only a series that **takes no** goldens reads `reference` — the location of the greedy
+    goldens it reuses, whose digest the provenance record ({@link gemma4.provenance}) binds to the
+    container.
     """
     wrapper = load_wrapper(variant, model_dir)
-    # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
+    # MUST: rounding comes before the reference and the goldens are taken (ADR 0006) — afterwards,
+    # only the reference would run on the original weights.
     int8, int4, scales = one_shot.quantize_wrapper(wrapper)
     specs = rope_specs(wrapper.model.config)
     greedy_view = GreedyRopeView(wrapper, specs)
     cases = one_shot.build_cases(model_dir, sym_max, wrapper.sliding_window)
     greedy_cases = tuple(case for case in cases if case[0] in GREEDY_CASES)
-    # 位置の上限はモデルの宣言（表を焼かなくなったので資産では決まらない）。
-    # io / sanity は prompt を丸ごと 1 回引くだけ（継続分の位置は要らない）ので steps=0 で見る。
+    # The position limit is the model's declaration (no longer baked into tables, so the asset
+    # does not decide it). io / sanity look up each prompt once as a whole (no positions for the
+    # continuation are needed), so they are checked with steps=0.
     limit = max_position(wrapper.model.config)
     assert_case_room(cases, 0, limit)
     if variant.goldens:
         assert_case_room(greedy_cases, steps, limit)
-    # MUST: 流用する golden の検めは席へ入る**前**（席の外に掛かる前提 — 落ちるなら
-    # 数十分の export を始める前に落とす）。読むだけで、参照系列には 1 バイトも書かない。
+    # MUST: the reused goldens are checked **before** entering the staging slot (a premise outside
+    # the slot — if it fails, fail before starting an export of tens of minutes). It only reads;
+    # not a byte is written to the reference series.
     reference_goldens = (
         {} if variant.goldens else provenance.assert_reference_goldens(reference, greedy_cases)
     )
 
-    # 例示入力は最長ケース（記号次元の 0/1 特殊化から遠い）。min=2 は同じ理由、max は
-    # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
+    # The example input is the longest case (far from the symbolic dimension's 0/1
+    # specialization). min=2 for the same reason; max is the evaluation point of the mask's Tmax
+    # folding (the surgery prunes it, so it does not remain in the distribution, but the trace
+    # goes through it).
     _, example_ids = max(cases, key=lambda case: case[1].shape[1])
     seq = Dim(SEQ_SYMBOL, min=2, max=sym_max)
     args, shapes = _export_args(variant, example_ids, seq, specs)
-    print("[export] torch.export → 変換", file=sys.stderr, flush=True)
+    print("[export] torch.export → convert", file=sys.stderr, flush=True)
     graph, tensors = export_module(
         wrapper,
         args,
@@ -1156,27 +1269,30 @@ def export_series(
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
     config = wrapper.model.config
-    print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
+    print("[export] surgery to the states form → write", file=sys.stderr, flush=True)
     surgical = to_states_form(graph, states_plan(graph, config))
 
-    # 据える単位は**どちらの系列も「系列ディレクトリ丸ごと」**。golden を採る系列は
-    # 新 model + 旧 greedy の混成を作れない形にするため、採らない系列は容器と出所記録
-    # （{@link gemma4.provenance}）が食い違った組を作れない形にするため。
+    # The unit put in place is **"the whole series directory" for both series**. For the series
+    # that takes goldens, so that a mix of a new model + old greedy cannot be produced; for the
+    # one that takes none, so that a pair whose container and provenance record
+    # ({@link gemma4.provenance}) disagree cannot be produced.
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory (the primitive creates none — it is only handed a
+        # path).
         staged.mkdir()
         container = staged / one_shot.MODEL_FILE
-        # 格納は既定 i8 + linear を 1 本ずつ i4（向きの根拠は 1-shot 台本の docstring —
-        # tied 実体の FQN を書く前に知らずに済む側）。RoPE の f32 明示席はもう無い
-        # （表が initializer でなくなったので、圧縮の適格集合に入らない）。
+        # Storage is the default i8 + each linear i4 (the reason for this direction is in the
+        # one-shot script's docstring — the side that need not know the tied entity's FQN before
+        # writing). There is no explicit f32 entry for RoPE any more (the tables are no longer
+        # initializers, so they are outside the compression-eligible set).
         verified = _write_container(
             surgical,
             tensors,
             container,
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
-            # （container-v1 §2.1）。
+            # The graph name is **the component name** (= the key in karume.json's weights). It is
+            # not derived from the directory name — neither the series name (`gemma4-e2b-product`)
+            # nor the staging slot's name matches the component name (container-v1 §2.1).
             graph_name=GEMMA4_ROLE,
             weight_dtype="i8",
             weight_scales=scales,
@@ -1190,24 +1306,26 @@ def export_series(
         )
 
         if variant.goldens:
-            print("[io] 全長 forward", file=sys.stderr, flush=True)
+            print("[io] full-length forward", file=sys.stderr, flush=True)
             io_written = _write_io(wrapper, verified, cases, staged, specs)
             greedy_written, tokens, margins = _write_greedy(
                 greedy_view, greedy_cases, staged, steps=steps, floor=MARGIN_FLOOR
             )
             first = {name: continuation[0] for name, continuation in tokens.items()}
         else:
-            # golden を採らない系列は sanity のためだけに全長を 1 回引く（行選択は T−1）。
-            print("[sanity] 全長 forward", file=sys.stderr, flush=True)
+            # A series that takes no goldens looks up the full length once, for the sanity check
+            # only (the row selection is T−1).
+            print("[sanity] full-length forward", file=sys.stderr, flush=True)
             first = {}
             for name, ids in cases:
                 with torch.no_grad():
                     token = wrapper(ids, *rope_args(specs, positions_for(ids)), last_row_for(ids))
                 first[name] = int(token[0, 0, 0])
 
-        # 第 1 継続 token を 1-shot 台本の期待表と突き合わせる（機構横断の突合 — 1-shot 形と
-        # chunk 形の台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の
-        # 交差検証になる）。MUST: 公開より前に評価する（落ちたら作業席ごと消える）。
+        # Match the first continuation token against the one-shot script's expectation table (a
+        # cross-mechanism match — the one-shot and chunk scripts are separate, so the top token
+        # agreeing for the same weights and the same prompt cross-validates them). MUST: evaluated
+        # before publication (if it fails, the staging slot goes with it).
         tokenizer = one_shot.load_tokenizer(model_dir)
         expected = {
             name: token
@@ -1221,14 +1339,17 @@ def export_series(
         sanity = one_shot._sanity(first, expected, labels)
 
         if not variant.goldens:
-            # 出所記録は容器と**同じ席**へ置く（据え替えが 1 回なので、新しい容器 + 古い
-            # 記録という組が作れない）。名乗る系列名は据えた後の名前 — 席の名前ではない。
-            print("[provenance] チェックポイント指紋 → reference.json", file=sys.stderr, flush=True)
+            # The provenance record goes into **the same staging slot** as the container (one swap
+            # into place, so a pair of a new container + an old record cannot arise). The series
+            # name it states is the name after placement — not the staging slot's name.
+            print(
+                "[provenance] checkpoint fingerprint → reference.json", file=sys.stderr, flush=True
+            )
             record = provenance.build_record(out_dir, model_dir, reference_goldens)
             provenance.write_record(staged, record)
 
-    # 刈り込み本数と golden 3 種は golden を採る系列だけの欄（token-only の要約はコンテナ
-    # 1 本ぶんなので増やさない）。
+    # The pruned count and the three golden kinds are fields only of a series that takes goldens
+    # (the token-only summary covers one container, so it does not grow).
     pruned: dict[str, Any] = (
         {"pruned_initializers": len(graph.initializers) - len(verified.initializers)}
         if variant.goldens
@@ -1250,7 +1371,8 @@ def export_series(
         if variant.goldens
         else {}
     )
-    # 逆に出所記録は golden を採らない系列だけの欄（束ねた golden が要約からも見える）。
+    # Conversely, the provenance record is a field only of a series that takes no goldens (the
+    # bound goldens are visible in the summary too).
     bound: dict[str, Any] = {} if variant.goldens else {"reference": record["reference"]}
     return {
         "dir": str(out_dir),
@@ -1274,11 +1396,12 @@ def export_series(
 
 
 def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str] | None) -> None:
-    """variant の CLI を組んで走らせる（chunk 系列 2 本の入口はこれ 1 本）。
+    """Build and run the variant's CLI (the one entry point of the two chunk series).
 
-    骨組みは 1-shot 台本と共有する（{@link gemma4.export.series_parser}）— chunk 系列が足すのは
-    golden を採る系列だけの `--steps` と、採らない系列だけの `--reference`（流用する golden
-    系列の置き場）だけ。位置の上限はモデルの宣言なので、ノブにしない。
+    The skeleton is shared with the one-shot script ({@link gemma4.export.series_parser}) — the
+    chunk series add only `--steps`, for the series that takes goldens, and `--reference` (the
+    location of the reused golden series), for the one that takes none. The position limit is the
+    model's declaration, so it is not a knob.
     """
     parser = one_shot.series_parser(
         description, partial(one_shot.series_dir, suffix=variant.suffix)
@@ -1287,8 +1410,8 @@ def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str]
         parser.add_argument("--steps", type=int, default=None)
         one_shot.add_model_default(parser, "steps", GREEDY_STEPS.__getitem__)
     else:
-        # 流用先は**同じモデル**の logits opt-in 系列（別モデルの golden は prompt の突合では
-        # 落ちない — トークナイザが同一なので prompt は一致してしまう）。
+        # The reuse target is the logits opt-in series of **the same model** (another model's
+        # goldens do not fail the prompt match — the tokenizer is the same, so the prompts agree).
         parser.add_argument("--reference", type=Path, default=None)
         one_shot.add_model_default(
             parser, "reference", partial(one_shot.series_dir, suffix=DECODE_SUFFIX)

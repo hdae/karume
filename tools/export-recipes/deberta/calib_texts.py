@@ -1,38 +1,46 @@
-"""DeBERTa（SBV2 の text front）の校正コーパス（GPTQ が見る活性を作る 48 文）。
+"""Calibration corpus of DeBERTa (the text front of SBV2) (48 sentences that produce the
+activations GPTQ sees).
 
-`karume.quant_calib` の校正付き丸めは「その層に実際に流れる活性」から丸め先を選び直す方式
-なので、コーパスの性格がそのまま丸めの偏りになる。読み手は 2 つあり、**どちらも同じ 48 文を
-見る**のが要（測って良かった丸めと、配って出す丸めが別のコーパスから決まると、計測が配布形の
-予測にならない）:
+The calibrated rounding of `karume.quant_calib` re-picks rounding targets from "the activations
+that actually flow through the layer", so the character of the corpus becomes the bias of the
+rounding directly. There are two readers, and the key point is that **both see the same 48
+sentences** (if the rounding that measured well and the rounding that ships were decided from
+different corpora, the measurement would not predict the distribution):
 
-- `deberta.export` の i4 系列（校正付き丸めの**出荷経路** — {@link deberta.calib}）
-- `sbv2.measure_quant` の校正付き構成（`CALIB_CONFIGS` — 品質の**計測**）
+- the i4 series of `deberta.export` (the **shipping path** of calibrated rounding —
+  {@link deberta.calib})
+- the calibrated configurations of `sbv2.measure_quant` (`CALIB_CONFIGS` — **measuring** quality)
 
-模型を持つ側がコーパスを持つので置き場はここ（`deberta`）で、`sbv2` 側が名指しで import する。
-選定方針は次の 3 点:
+The side that owns the model owns the corpus, so it lives here (`deberta`), and `sbv2` imports it
+by name. The selection policy has three points:
 
-- **評価文と分離する** — dump の発話（`meta["text"]` / `meta["bertText"]`）と 1 文も
-  重ねない（部分一致まで {@link sbv2.measure_quant.assert_calib_disjoint} が fail loudly に
-  する）。重ねると SNR / LSD が「校正で見た文をそのまま出せたか」を測る数になり、校正の質
-  ではなく漏れを測ることになる。評価文の写しをここへ置かないのは、dump を録り直したときに
-  片方だけ古くなるため。
-- **TTS の実運用の読み上げ分布へ寄せる** — 模型は日本語 char-wwm の DeBERTa で、SBV2 が
-  食わせるのは読み上げ対象の日本語そのものなので、校正も日本語の散文だけで採る。朗読調・
-  会話調（問いかけと応答）・数字や記号の読みを混ぜ、話題は互いに離す（1 話題へ寄せると
-  活性の偏りがその話題の形に張り付く）。
-- **長さを散らす** — 短文（5 文字級）から長い一文（40 文字級）まで。GPTQ の `H = Σ XᵀX` は
-  トークン数で重み付くので、長文だけだと長文の活性が、短文だけだと文頭の活性が支配する
-  （char-wwm なので文字数がほぼトークン数）。
+- **Keep it disjoint from the evaluation sentences** — not one sentence overlaps the utterances of
+  the dump (`meta["text"]` / `meta["bertText"]`) (down to partial matches,
+  {@link sbv2.measure_quant.assert_calib_disjoint} fails loudly). With an overlap, SNR / LSD would
+  measure "whether the sentences seen in calibration could be reproduced as is", i.e. a leak rather
+  than the quality of the calibration. No copy of the evaluation sentences is kept here because
+  re-recording the dump would leave only one side stale.
+- **Lean towards the read-aloud distribution of real TTS use** — the model is a Japanese char-wwm
+  DeBERTa, and what SBV2 feeds it is the Japanese text to be read aloud itself, so the calibration
+  uses Japanese prose only. It mixes narration, conversation (questions and answers) and readings
+  of numbers and symbols, and keeps the topics apart from one another (leaning towards one topic
+  pins the bias of the activations to the shape of that topic).
+- **Spread the lengths** — from short sentences (about 5 characters) to long single sentences
+  (about 40 characters). GPTQ's `H = Σ XᵀX` is weighted by token count, so with only long
+  sentences the activations of long sentences dominate, and with only short ones the activations
+  at the start of a sentence dominate (with char-wwm the character count is about the token count).
 
-固有の人名・実在組織は書かない（校正の入力が特定の固有名の活性を引き当てるのを避ける —
-一般語彙の分布だけを見たい）。
+No proper names of people or real organisations are written (so the calibration input does not
+pull up the activations of specific proper nouns — only the distribution of general vocabulary is
+wanted).
 """
 
 from __future__ import annotations
 
-#: 校正入力の 48 文（この順で先頭から使う — `--calib-limit N` は**先頭 N 文**を採る）。
-#: 順序は朗読 → 会話 → 数字ではなく**混ぜて**並べる: 上限を掛けた縮小実行でも役割の混合が
-#: 保たれる（先頭 4 文だけで朗読調 / 問いかけ / 数字読みが揃う）。
+#: The 48 calibration sentences (used from the start in this order — `--calib-limit N` takes **the
+#: first N sentences**). The order is **mixed** rather than narration → conversation → numbers: a
+#: reduced run with a limit keeps the mix of roles (the first 4 sentences alone cover narration /
+#: question / number reading).
 CALIB_TEXTS: tuple[str, ...] = (
     "春の日差しが川面に散らばり、対岸の桜並木は満開の枝を水の上へ低く伸ばしていた。",
     "ねえ、その話をもう一度だけ聞かせてくれる？",

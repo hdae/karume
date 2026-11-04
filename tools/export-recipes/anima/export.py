@@ -1,94 +1,116 @@
-"""Anima の 4 コンポーネントを IR v2 + golden io へ書き出す台本（ADR 0016 の emit ターゲット）。
+"""The script that writes the four Anima components out as IR v2 + golden io (the emit targets of
+ADR 0016).
 
-起点は diffusers 版 `circlestone-labs/Anima-Base-v1.0-Diffusers`（recon は
-docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは rank5〜8・feat_cache・
-ホストへ出すべき埋め込みを含むので、キュレーションは `anima.patch`
-（パッチ層 + ラッパ）が担う。
+The starting point is the diffusers version `circlestone-labs/Anima-Base-v1.0-Diffusers` (recon in
+docs/research/2026-08-02-anima-recon.md). The plain diffusers modules include rank5–8, feat_cache
+and embeddings that belong on the host, so the curation is done by `anima.patch` (the patch layer +
+wrappers).
 
-ターゲットは 4 本（ADR 0016 の全量。融合ターゲットは作らない — コンポーネント間にホスト処理が
-挟まるため構造的に不可能）:
+There are four targets (all of ADR 0016; no fused target is built — host processing sits between
+the components, so it is structurally impossible):
 
-- **`text_encoder`** — Qwen3 の `last_hidden_state`。動的 `T`（プロンプト長 ≤ 512）。
-- **`text_conditioner`** — `Tsrc`（Qwen3 出力長）/ `Ttgt`（T5 id 列長）の**独立 2 シンボル**。
-  ケースは両方の長さを変えて取り、片方の束縛でもう片方を代用する取り違えを数で暴く。
-- **`transformer`** — CosmosDiT の 1 denoise step。既定は**解像度固定の静的グラフ**（512px）。
-  `--dit-graph dyn` で**トークン長 1 シンボル `S` の追加系列**（#21 波 T2）。
-- **`vae_decoder`** — T=1 の画像 decode。**静的**（既定 512px）。
+- **`text_encoder`** — Qwen3's `last_hidden_state`. Dynamic `T` (prompt length ≤ 512).
+- **`text_conditioner`** — **two independent symbols**, `Tsrc` (Qwen3 output length) / `Ttgt` (T5
+  id sequence length). The cases vary both lengths, so a mix-up that binds one in place of the other
+  is exposed by the numbers.
+- **`transformer`** — one denoise step of CosmosDiT. The default is **a static graph at a fixed
+  resolution** (512px). `--dit-graph dyn` gives **an additional series with the single token-length
+  symbol `S`** (#21 phase T2).
+- **`vae_decoder`** — image decode at T=1. **Static** (512px by default).
 
-    uv sync --all-groups                                        # tools/ で 1 回
+    uv sync --all-groups                                        # once in tools/
     uv run python -m anima.export --out /path/to/out
     uv run python -m anima.export --target vae_decoder --out /path/to/out
     uv run python -m anima.export --verify vae_decoder
     uv run python -m anima.export --dtype f16   # → outputs/series/anima-f16/
-    uv run python -m anima.export --dtype i8    # → …/anima-i8/（DiT のみ）
-    uv run python -m anima.export --dtype i4    # → …/anima-i4/（DiT のみ・混成）
+    uv run python -m anima.export --dtype i8    # → …/anima-i8/ (DiT only)
+    uv run python -m anima.export --dtype i4    # → …/anima-i4/ (DiT only, mixed)
     uv run python -m anima.export --dtype f16 --dit-graph dyn  # → …-f16-dyn/
-    uv run python -m anima.export --dtype bf16  # → …/anima-bf16/（4 役・上流の BF16 そのまま）
+    uv run python -m anima.export --dtype bf16  # → …/anima-bf16/ (4 roles, upstream's BF16 as is)
 
-MUST: `--dit-graph dyn` は **transformer 専用の追加系列**で、静的系列を置き換えない
-（既存資産・E2E・tolerance を 1 つも動かさないのが波 T2 の前提）。patchify /
-unpatchify / rope 表の構築はホストへ出るので、容器には重みに加えて **資産 `rope_base`**
-（ホストが rope 表を組むための軸別素表 — ADR 0109 決定 4）が入る。
+MUST: `--dit-graph dyn` is **an additional series for the transformer only** and does not replace
+the static series (the premise of phase T2 is that not one existing asset, E2E test or tolerance
+moves). Building patchify / unpatchify / the rope tables moves to the host, so besides the weights
+the container holds **the asset `rope_base`** (the per-axis base tables from which the host builds
+the rope tables — ADR 0109 decision 4).
 
-MUST: `--dtype i8` は **transformer 専用**（ADR 0019 の系列設計）。DiT の −1.87GiB が支配項で、
-text / cond / VAE は `outputs/series/anima-f16/` を共有する。加えて VAE は「CausalConv3d の時間方向
-スライス」をパッチ適用時に行うため、丸めを先に当てると per-channel scale が**捨てられる要素の
-amax**まで数えた値になる（f16 の要素ごとの丸めと違い、scale は全要素の値を動かす）。他ターゲット
-への `--dtype i8` は CLI が機械的に拒否する。
+MUST: `--dtype i8` is **for the transformer only** (the series design of ADR 0019). The DiT's
+−1.87GiB is the dominant term, and text / cond / VAE share `outputs/series/anima-f16/`. Moreover the
+VAE takes "the temporal slice of CausalConv3d" at patch time, so rounding first would give a
+per-channel scale whose amax counts **the elements that are thrown away** (unlike f16's per-element
+rounding, a scale moves the value of every element). The CLI mechanically rejects `--dtype i8` for
+the other targets.
 
-MUST: `--dtype i4` も **transformer 専用**（i8 と同じ理由・同じ表 — {@link DTYPE_TARGETS}）で、
-中身は**混成**（{@link I4_MODULE_TYPES} の適格な重み = i4 group32・残り = i8 per-channel）。
-i4 の実行経路は linear / embedding / conv1d の重みスロット限定（ADR 0069 決定 5 と追補）なので、
-単一 dtype の i4 系列は原理的に作れない — 系列の**既定**格納は i8 で（{@link BASE_WEIGHT_DTYPES}）、
-適格な 1 本ずつを `weight_dtype_overrides` で i4 へ振る（deberta / gemma4 の混成と同形）。
+MUST: `--dtype i4` is **for the transformer only** too (the same reason and the same table as i8 —
+{@link DTYPE_TARGETS}), and its content is **mixed** (the eligible weights of {@link
+I4_MODULE_TYPES} = i4 group32, the rest = i8 per-channel). The i4 execution path is limited to the
+weight slots of linear / embedding / conv1d (ADR 0069 decision 5 and its supplement), so a
+single-dtype i4 series cannot be built in principle — the series' **default** storage is i8 ({@link
+BASE_WEIGHT_DTYPES}), and each eligible weight is switched to i4 through `weight_dtype_overrides`
+(the same form as the mixed deberta / gemma4 series).
 
-DiT block 内の linear は **GPTQ 校正付きで丸める**（既定 — perf-ledger Q-6 / `anima.calib`）。
-格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）で、変わるのは丸め値と scale 台帳の
-中身だけ。校正入力は {@link anima.calib_prompts.CALIB_PROMPTS} の先頭
-`--calib-prompts` 本（既定 {@link DEFAULT_CALIB_PROMPTS} 本）を**参照 denoise**（512²・seed 固定・
-step 数と CFG は `--model` の配布既定から導く — {@link anima.calib.calib_conditions}）へ通して
-先頭 block の入力を step 横断で捕まえたもの（CFG > 1 では cond / uncond の両分岐）。block の
-**外**に居る i4 適格（{@link NON_STAGE_I4_WEIGHTS}）は校正の駆動が届かないので**先に**素の RTN で
-丸める（配布実行時の条件へ校正入力を合わせる）。校正の失敗は fail loudly で、素の RTN へ黙って
-落ちる分岐は持たない — 明示の `--no-calib` だけが opt-out（配布資産には使わない）。
+The linears inside the DiT blocks are **rounded with GPTQ calibration** (the default — perf-ledger
+Q-6 / `anima.calib`). The storage form does not change by a byte (the grid stays RTN i4 g32); only
+the rounded values and the contents of the scale ledger change. The calibration inputs are the
+first `--calib-prompts` prompts of {@link anima.calib_prompts.CALIB_PROMPTS} (default
+{@link DEFAULT_CALIB_PROMPTS}) passed through **a reference denoise** (512², fixed seed, step count
+and CFG derived from the distribution defaults of `--model` — {@link anima.calib.calib_conditions}),
+capturing the input of the first block across steps (both the cond / uncond branches when CFG > 1).
+The i4-eligible weights **outside** the blocks ({@link NON_STAGE_I4_WEIGHTS}) are out of reach of
+the calibration driver, so they are rounded with plain RTN **first** (matching the calibration
+inputs to the conditions at distribution run time). A calibration failure fails loudly, and there is
+no branch that silently falls back to plain RTN — only an explicit `--no-calib` opts out (not used
+for distribution assets).
 
-`--i4-adaln-i8`（既定 OFF）は**量子化感度の実験変種**で、block 内 adaLN（`norm1` / `norm2` /
-`norm3` の `linear_1` / `linear_2` = anima-v1.0 で 168 本）と block 外の 5 本を i8 格納へ回し、
-残る block 内 linear だけを GPTQ i4 にする（{@link _adaln_i8_names}）。素版 3 モデルの i4 が
-視認裁定で配布スキップになった（research `2026-08-24-gptq-expansion-quality.md` §5）ときの
-改善候補で、irodori の w4 席では同型の構成が聴感を回復させている（同 §1 の R3）。系列名にも
-`calib_provenance.json` の `method` にも `-adaln8` が付き、**配布の一致検査に落ちる**
-（視認評価専用 — 組み立ては `python -m anima.eval_dist`）。
+`--i4-adaln-i8` (OFF by default) is **an experimental variant for quantization sensitivity**: it
+moves the adaLN inside the blocks (`linear_1` / `linear_2` of `norm1` / `norm2` / `norm3` = 168
+layers in anima-v1.0) and the 5 outside the blocks to i8 storage, and applies GPTQ i4 only to the
+remaining linears inside the blocks ({@link _adaln_i8_names}). It was the improvement candidate when
+the i4 of the three base models was skipped from distribution by the visual review ruling (research
+`2026-08-24-gptq-expansion-quality.md` §5), and the same kind of configuration recovered the
+listening quality in irodori's w4 preset (R3 of §1 there). Both the series name and the `method` of
+`calib_provenance.json` get `-adaln8`, so it **fails the distribution consistency check** (for
+visual evaluation only — assembled with `python -m anima.eval_dist`).
 
-`--calib-device`（既定 `cpu`）は校正の**捕捉 + GPTQ だけ**を別デバイスへ出すノブ。`cuda` は
-感度実験の回転を上げるための経路で、**丸め解が CPU と変わる**（f64 縮約の順序も linalg の実装も
-違う）ため配布には使わない — `calib_provenance.json` の `method` にデバイス名が付き
-（`gptq-cuda`）、`-adaln8` と同じく配布の一致検査に落ちる。stage 分解一致門・block 外の RTN・
-i8 の丸めは CPU のまま（デバイス差の交絡を丸めの側だけに閉じる）。
+`--calib-device` (default `cpu`) is the knob that moves **only the capture + GPTQ** of the
+calibration to another device. `cuda` is a path for turning sensitivity experiments around faster,
+and **its rounding solution differs from the CPU's** (both the order of the f64 reductions and the
+linalg implementation differ), so it is not used for distribution — the `method` of
+`calib_provenance.json` carries the device name (`gptq-cuda`) and, like `-adaln8`, it fails the
+distribution consistency check. The stage-decomposition match check, the RTN outside the blocks and
+the i8 rounding stay on the CPU (confining the confound of the device difference to the rounding
+side).
 
-MUST: `--dtype f16` は**重みを f16 表現可能値へ丸めてから**（fake-quant — ADR 0006）参照と
-golden を採り、適格な重みスロットだけを f16 で格納する（ADR 0018）。丸めは各 builder が
-モデルを組んだ直後に掛かる — 参照より後ろへ動かすと「参照だけ元の重み」になり、E2E の差が
-量子化誤差と実装誤差の合成になって tolerance の意味が消える。出力先は f32 系列と**別**
-（既定 `outputs/series/anima-f16/`）。
+MUST: `--dtype f16` takes the reference and the golden **after rounding the weights to
+f16-representable values** (fake-quant — ADR 0006), and stores only the eligible weight slots in
+f16 (ADR 0018). The rounding is applied by each builder right after it builds the model — moving it
+after the reference would give "only the reference has the original weights", the E2E difference
+would become a combination of quantization error and implementation error, and the tolerance would
+lose its meaning. The output goes somewhere **separate** from the f32 series (default
+`outputs/series/anima-f16/`).
 
-MUST: `--verify` と emit は**同一プロセスで併用できない**（CLI が機械的に拒否する）。VAE の
-パッチはクラス属性のプロセス全域差し替えなので、emit 側が先にパッチを当てると「パッチ前の
-参照」が採れなくなり、同値検証が恒真化して偽 PASS する（ADR 0013 / 0016）。
+MUST: `--verify` and emit **cannot be combined in one process** (the CLI mechanically rejects it).
+The VAE patch replaces class attributes process-wide, so if the emit side applied the patch first,
+the "pre-patch reference" could no longer be taken, and the equivalence check would pass vacuously
+as a false PASS (ADR 0013 / 0016).
 
-MUST: `--verify` は**ターゲットを 1 つだけ取る**。複数を並べられる形にすると対ごとの排他表を
-CLI が持つことになり、表の穴がそのまま偽 PASS になる（export_sbv2 の先例）。
+MUST: `--verify` **takes exactly one target**. Allowing several would make the CLI hold a table of
+pairwise exclusions, and every hole in the table would become a false PASS (the precedent of
+export_sbv2).
 
-MUST: `--lora` は **DiT の層切り詰め（`--num-layers`）より前**に焼き込む。後にすると切った層に
-対応する LoRA が「対象が無い」まま黙って捨てられ、取りこぼし検査（`fuse_lora` の fail loudly）が
-縮小モデルでは効かなくなる。
+MUST: `--lora` is merged **before the DiT's layer truncation (`--num-layers`)**. Merging after it
+would silently discard the LoRA entries for the truncated layers as "no target", and the check
+against dropped entries (`fuse_lora`'s fail loudly) would not work on the reduced model.
 
-出力レイアウト（tiny golden / SBV2 と同じ規約）:
+Output layout (the same convention as tiny golden / SBV2):
 
-    <out>/<target>/model.krm              重み・定数 + 2 文書の記述（+ 資産 `rope_base`）
-    <out>/<target>/io.<case>.safetensors  入力と torch CPU での期待出力
-    <out>/<target>/lora_provenance.json   焼き込んだ LoRA の帰属（`--lora` を焼いた対象のみ）
-    <out>/<target>/calib_provenance.json  i4 の丸め条件（`--dtype i4` の transformer のみ）
+    <out>/<target>/model.krm              weights, constants + the description in two documents
+                                          (+ the asset `rope_base`)
+    <out>/<target>/io.<case>.safetensors  inputs and the expected outputs from torch CPU
+    <out>/<target>/lora_provenance.json   attribution of the merged LoRA (only for targets with
+                                          `--lora` merged)
+    <out>/<target>/calib_provenance.json  the i4 rounding conditions (only for the transformer of
+                                          `--dtype i4`)
 """
 
 from __future__ import annotations
@@ -148,31 +170,36 @@ from . import calib, patch
 from .calib_prompts import CALIB_PROMPTS, DEFAULT_CALIB_PROMPTS, calibration_prompts
 from .card import ANIMA_METADATA
 
-#: この recipe が扱う格納 dtype（irodori / deberta と同じく **recipe 固有の集合**）。
-#: core の `karume.emit.WEIGHT_DTYPES` から引かない — core が書ける集合（i4 追加 —
-#: ADR 0069）と anima が系列・検収を持つ集合は別の判断で、結合すると core 側の拡張が
-#: そのままこの CLI の受理に化ける。
+#: The storage dtypes this recipe handles (like irodori / deberta, **a recipe-specific set**). Not
+#: taken from core's `karume.emit.WEIGHT_DTYPES` — the set core can write (i4 added — ADR 0069) and
+#: the set for which anima has series and acceptance checks are separate decisions, and coupling
+#: them would turn an extension on the core side straight into something this CLI accepts.
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "bf16", "i8", "i4")
 
-#: i4 group32 で丸める**モジュール型**（= i4 の実行経路を持つ op と対 — `karume.emit` の
-#: `I4_WEIGHT_OPS`）。DiT に実在する量子化可能型は `nn.Linear` だけ（patchify も
-#: `CosmosPatchEmbed.proj` = `nn.Linear`・埋め込み表も conv も無い — `anima/measure_quant.py` の
-#: `W4_OP_TYPES` と同じ事実）だが、型で書くのは名前で書かないため。`nn.Embedding` を併記して
-#: あるのは、上流が表引きを持ち込んでも**適格判定の一般形のまま**拾うため（表引きされない
-#: `nn.Embedding` が現れた場合は emit の明示指定の門が「適格でない」でその FQN を挙げて落ちる
-#: ので、deberta の `NON_LOOKUP_EMBEDDINGS` のような名指しの除外は先回りで置かない）。
-#: conv 系は入れない — DiT に conv は実在しないため。core 側では conv1d も i4 適格
-#: （`groups == 1` ∧ 行長整除 — ADR 0069 追記 7）だが、ここに `nn.Conv1d` を足す実需が無い。
+#: The **module types** rounded to i4 group32 (= paired with the ops that have an i4 execution path
+#: — `I4_WEIGHT_OPS` of `karume.emit`). The only quantizable type present in the DiT is `nn.Linear`
+#: (patchify is `CosmosPatchEmbed.proj` = `nn.Linear` too, and there is no embedding table and no
+#: conv — the same fact as `W4_OP_TYPES` of `anima/measure_quant.py`), but it is written by type so
+#: as not to write it by name. `nn.Embedding` is listed too so that, if upstream brings in a lookup
+#: table, it is picked up **by the general form of the eligibility rule** (if an `nn.Embedding` that
+#: is not looked up appears, emit's explicit-assignment check fails naming that FQN as "not
+#: eligible", so no named exclusion like deberta's `NON_LOOKUP_EMBEDDINGS` is placed in advance).
+#: Conv types are not included — the DiT has no conv. On the core side conv1d is i4-eligible too
+#: (`groups == 1` ∧ the row length divisible — ADR 0069 addendum 7), but there is no actual need to
+#: add `nn.Conv1d` here.
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
 
-#: DiT block の**外**に居る i4 適格の重み（ラッパ内 FQN）。校正付き丸めは stage 逐次の駆動
-#: なので block の中しか丸められず、外の適格は素の RTN i4 が担う（{@link _round_i4_calibrated}）。
+#: The i4-eligible weights **outside** the DiT blocks (FQNs inside the wrapper). Calibrated rounding
+#: drives stage by stage, so it can round only inside the blocks, and the eligible ones outside are
+#: handled by plain RTN i4 ({@link _round_i4_calibrated}).
 #:
-#: 名前で宣言するのは「黙った分類替え」を作らないため — 実測（実重み・28 block）で block 外の
-#: i4 適格はこの 5 本（`patch_embed.proj` は量子化軸 68 が g32 非整除で適格外・rope は重み無し）。
-#: 上流の構成が変わって適格が増減したら、{@link _round_i4_calibrated} の門がその FQN を挙げて
-#: 落ちる（黙って RTN 側へ流す = 校正が痩せる、も黙って i8 へ落とす = サイズだけ戻る、も
-#: 数字からは読めない）。
+#: They are declared by name so as not to create "a silent reclassification" — measured (real
+#: weights, 28 blocks), the i4-eligible weights outside the blocks are these 5 (`patch_embed.proj`
+#: is not eligible because its quantization axis 68 is not divisible by g32, and rope has no
+#: weights). If an upstream configuration change adds or removes eligible weights, the check in
+#: {@link _round_i4_calibrated} fails naming the FQN (neither silently sending it to the RTN side =
+#: a thinner calibration, nor silently dropping it to i8 = only the size reverts, can be read from
+#: the numbers).
 NON_STAGE_I4_WEIGHTS: frozenset[str] = frozenset(
     {
         "model.time_embed.t_embedder.linear_1",
@@ -183,8 +210,9 @@ NON_STAGE_I4_WEIGHTS: frozenset[str] = frozenset(
     }
 )
 
-#: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な重みは
-#: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の `BASE_WEIGHT_DTYPES` と同形）。
+#: Series name → the **default** storage dtype passed to `export_to_file`. Only the i4 series
+#: defaults to i8, and the eligible weights are switched to i4 one by one with
+#: `weight_dtype_overrides` (the same form as deberta's `BASE_WEIGHT_DTYPES`).
 BASE_WEIGHT_DTYPES: Mapping[str, str] = {
     "f32": "f32",
     "f16": "f16",
@@ -193,14 +221,16 @@ BASE_WEIGHT_DTYPES: Mapping[str, str] = {
     "i4": "i8",
 }
 
-#: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
+#: Where the real weights come from (HF Hub, cached locally — recon §7).
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: 生成物の既定の置き場（格納 dtype 別の**系列**）。ターゲット名のサブディレクトリを 1 段掘る。
-#: 親は `SERIES_ROOT`（= outputs/series/）— models/ は配布形だけの場所（_shared.paths）。
+#: The default location of the outputs (a **series** per storage dtype). One more level of
+#: subdirectory per target name. The parent is `SERIES_ROOT` (= outputs/series/) — models/ holds
+#: only distributions (_shared.paths).
 #:
-#: MUST: f16 系列は**別ディレクトリ**（ADR 0018）。f32 系列（`anima/`）は
-#: 「量子化なしの実装誤差」を測る網として独立に残り、f16 系列がその上へ量子化の実装誤差を
-#: 上乗せで検証する。同じ場所に上書きすると片方の網が消える。
+#: MUST: the f16 series is **a separate directory** (ADR 0018). The f32 series (`anima/`) stays
+#: independent as the net that measures "implementation error without quantization", and the f16
+#: series checks the implementation error of quantization on top of it. Overwriting the same place
+#: would lose one of the nets.
 DEFAULT_OUT_ROOTS = {
     "f32": SERIES_ROOT / "anima",
     "f16": SERIES_ROOT / "anima-f16",
@@ -209,9 +239,11 @@ DEFAULT_OUT_ROOTS = {
     "i4": SERIES_ROOT / "anima-i4",
 }
 
-#: ターゲット名 = **部品名**（= karume.json の weights のキー = 容器のグラフ名）。綴りの
-#: 正本は torch を要らない側（`anima/distribution.py`）— 系列ディレクトリ名も同じ綴りに
-#: なるが、書き手は作業席へ書くのでディレクトリからは導かない（container-v1 §2.1）。
+#: Target name = **component name** (= the key of weights in karume.json = the container's graph
+#: name). The source of truth for the spelling is the side that does not need torch
+#: (`anima/distribution.py`) — the series directory names use the same spelling, but the writer
+#: writes into a staging location, so the name is not derived from the directory (container-v1
+#: §2.1).
 TARGET_TEXT_ENCODER = ANIMA_TEXT_ENCODER_ROLE
 TARGET_TEXT_CONDITIONER = ANIMA_TEXT_CONDITIONER_ROLE
 TARGET_TRANSFORMER = ANIMA_TRANSFORMER_ROLE
@@ -223,21 +255,25 @@ TARGETS = (
     TARGET_VAE_DECODER,
 )
 
-#: 格納 dtype ごとに emit するターゲット（ADR 0019 — i8 / i4 系列は DiT のみ）。
-#: MUST: 既定を絞るだけでなく `--target` の明示も拒否する（モジュール docstring の理由）。
+#: The targets emitted per storage dtype (ADR 0019 — the i8 / i4 series are DiT only).
+#: MUST: besides narrowing the default, an explicit `--target` is rejected too (the reason is in the
+#: module docstring).
 DTYPE_TARGETS = {
     "f32": TARGETS,
     "f16": TARGETS,
-    # 忠実プリセット `bf16` は 4 役とも bf16（ADR 0131 決定 3 — 上流が 4 部品とも BF16）。
+    # The original-weights preset `bf16` is bf16 for all 4 roles (ADR 0131 decision 3 — upstream is
+    # BF16 for all 4 components).
     "bf16": TARGETS,
     "i8": (TARGET_TRANSFORMER,),
     "i4": (TARGET_TRANSFORMER,),
 }
 
-#: DiT のグラフ形。`dyn` = トークン長 1 シンボル `S` の**追加系列**（#21 波 T2）。
+#: The shape of the DiT graph. `dyn` = **the additional series** with the single token-length symbol
+#: `S` (#21 phase T2).
 DIT_GRAPHS = ("static", "dyn")
 
-#: `--dit-graph dyn` の系列ディレクトリ接尾辞（既定 out を静的系列と分けるため）。
+#: The series directory suffix of `--dit-graph dyn` (to keep the default out apart from the static
+#: series).
 DYN_SUFFIX = "-dyn"
 
 MODEL_FILE = "model.krm"
@@ -259,32 +295,38 @@ IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: 記号次元の上限。text 系は 2 本とも 512（パイプラインの `max_length`）。
+#: The upper bound of the symbolic dimensions. Both text ones are 512 (the pipeline's `max_length`).
 SYM_MAX = 512
 
-#: DiT が受け取る `encoder_hidden_states` の行数。**`SYM_MAX` とは別の量**で、由来は
-#: `AnimaTextConditioner.config.min_sequence_length`（conditioner の出力をホスト側で
-#: ここまでゼロ詰めする — ADR 0016 / anima.pipeline_ref.MIN_SEQUENCE_LENGTH と同じ値）。
-#: 記号次元の上限に相乗りさせると、`--sym-max` を動かした瞬間に DiT の**静的な**グラフ形が
-#: 黙って変わる（そちらは記号ではないので、束縛では吸収されない）。
+#: The number of rows of `encoder_hidden_states` the DiT receives. **A different quantity from
+#: `SYM_MAX`**, coming from `AnimaTextConditioner.config.min_sequence_length` (the host zero-pads
+#: the conditioner's output up to this — the same value as ADR 0016 / anima.pipeline_ref.
+#: MIN_SEQUENCE_LENGTH). Piggybacking it on the upper bound of the symbolic dimensions would
+#: silently change the DiT's **static** graph shape the moment `--sym-max` moved (that one is not a
+#: symbol, so binding does not absorb it).
 MIN_SEQUENCE_LENGTH = 512
 
-#: 生成解像度（px）。DiT / VAE は解像度固定の静的グラフなので、値がグラフ形そのものになる。
+#: The generation resolution (px). The DiT / VAE are static graphs at a fixed resolution, so the
+#: value is the graph shape itself.
 RESOLUTION = 512
-#: VAE の空間圧縮率（latent 解像度 = 解像度 / これ）。
+#: The VAE's spatial compression ratio (latent resolution = resolution / this).
 SPATIAL_COMPRESSION = 8
 
-#: S 形（`--dit-graph dyn`）の golden ケースが取る解像度。**2 点評価**（DeBERTa T /
-#: SBV2 P と同じ流儀）で、実運用の 2 解像度をそのまま踏む。先頭が export の例示入力。
+#: The resolutions the golden cases of the S form (`--dit-graph dyn`) take. **Two-point evaluation**
+#: (the same approach as DeBERTa T / SBV2 P), covering the two resolutions used in practice. The
+#: first is the example input of the export.
 DIT_DYN_RESOLUTIONS = (512, 1024)
-#: `Dim("S")` の上限。**グラフ側にはトークン長の制約が無い**（rope 表を入力へ出したので
-#: S 依存の焼き込み定数がゼロ）ため、ここは「素表の行数 128 × 128 = 2048px 相当」という
-#: モデル側の天井をそのまま宣言する。上限を持たせるのは ADR 0010 の定数畳み込み要件。
+#: The upper bound of `Dim("S")`. **The graph side has no token-length constraint** (the rope tables
+#: moved to inputs, so there are zero S-dependent baked constants), so this declares the model-side
+#: ceiling "128 rows of the base table × 128 = 2048px" as is. Having an upper bound at all is the
+#: constant-folding requirement of ADR 0010.
 DIT_SYM_MAX = 16384
-#: 同下限。0 / 1 特殊化を避ける線（text 系の `Dim("T", min=2)` と同じ）。
+#: The lower bound of the same. The line that avoids 0 / 1 specialisation (the same as `Dim("T",
+#: min=2)` of the text ones).
 DIT_SYM_MIN = 2
 
-#: 乱数はここから派生させる（グローバル seed に依存しない — 再生成でバイト一致させる）。
+#: Random numbers are derived from here (independent of the global seed — so that regeneration is
+#: byte-identical).
 SEED = 20260802
 
 
@@ -294,11 +336,12 @@ def _generator(salt: int) -> torch.Generator:
 
 @dataclass(frozen=True)
 class Component:
-    """1 ターゲットのキュレーション済み export 材料。
+    """The curated export material of one target.
 
-    `cases` は golden のケース名と入力タプル（`input_names` と同じ位置）。`reference` は
-    **パッチ前** eager の出力で、`--verify` のときだけ採る（VAE パッチはクラス属性の
-    プロセス全域差し替えなので、参照はパッチ適用前に採らなければ恒真化する — ADR 0013）。
+    `cases` are the golden case names and input tuples (in the same positions as `input_names`).
+    `reference` is the output of eager **before the patch**, taken only for `--verify` (the VAE
+    patch replaces class attributes process-wide, so a reference not taken before the patch is
+    applied makes the check vacuous — ADR 0013).
     """
 
     module: nn.Module
@@ -307,23 +350,29 @@ class Component:
     cases: tuple[tuple[str, tuple[torch.Tensor, ...]], ...]
     reference: tuple[tuple[torch.Tensor, ...], ...] | None
     symbol_names: tuple[str, ...] = ("T",)
-    #: i8 / i4 の scale 台帳（FQN → scale）。キーは **`module` から見た FQN** で、
-    #: 容器の initializer 名（= 束縛表の鍵）と同じ空間になる（`--dtype i8` / `i4` 以外では空）。
+    #: The i8 / i4 scale ledger (FQN → scale). The keys are **FQNs as seen from `module`**, the same
+    #: space as the container's initializer names (= the keys of the binding table) (empty except
+    #: for `--dtype i8` / `i4`).
     weight_scales: Mapping[str, torch.Tensor] = field(default_factory=dict)
-    #: 1 本単位の格納 dtype 指定（テンソルキー → dtype）。混成 i4 系列だけが埋める
-    #: （既定の {@link BASE_WEIGHT_DTYPES} に優先する — `karume.emit._plan_weight_dtype`）。
+    #: Per-weight storage dtype assignments (tensor key → dtype). Only the mixed i4 series fills it
+    #: (it takes precedence over the default {@link BASE_WEIGHT_DTYPES} —
+    #: `karume.emit._plan_weight_dtype`).
     weight_dtype_overrides: Mapping[str, str] = field(default_factory=dict)
-    #: `--verify` の突合に入る前にグラフ出力へ掛ける後段（**ホストへ出した段**の逐語再現）。
-    #: S 形 DiT は unpatchify がホストなので、参照（パッチ前 diffusers の latent）と比べるには
-    #: ここを通す必要がある。第 2 引数は**ケース番号** — ケースごとに解像度が違う系列では
-    #: 後段の形もケースで変わるので、1 本の恒等な関数では足りない。既定は恒等。
+    #: A post-stage applied to the graph output before the `--verify` comparison (a verbatim
+    #: reproduction of **the stage moved to the host**). The S-form DiT has unpatchify on the host,
+    #: so the output has to pass through here to be compared with the reference (the latent of
+    #: diffusers before the patch). The second argument is **the case index** — in a series whose
+    #: resolution differs per case, the shape of the post-stage changes per case too, so one
+    #: identity function is not enough. The default is the identity.
     verify_adapter: Callable[[torch.Tensor, int], torch.Tensor] | None = None
-    #: グラフの外でホストが使う素表（容器の資産 `rope_base` に載せる。既定では空）。
+    #: The base tables the host uses outside the graph (carried in the container's asset
+    #: `rope_base`; empty by default).
     host_tables: Mapping[str, torch.Tensor] = field(default_factory=dict)
 
     @property
     def example(self) -> tuple[torch.Tensor, ...]:
-        """export の例示入力（**最初のケース**）。dynamic_shapes は位置で対応する。"""
+        """The example input of the export (**the first case**). dynamic_shapes correspond by
+        position."""
         return self.cases[0][1]
 
 
@@ -334,7 +383,7 @@ def _eval_cases(
         return tuple((run(*inputs),) for _, inputs in cases)
 
 
-# ---- ① Qwen3 テキストエンコーダ --------------------------------------------
+# ---- ① Qwen3 text encoder -----------------------------------------------------
 
 
 def build_text_encoder(args: argparse.Namespace, verify: bool) -> Component:
@@ -347,12 +396,14 @@ def build_text_encoder(args: argparse.Namespace, verify: bool) -> Component:
     if args.num_layers is not None:
         model.layers = model.layers[: args.num_layers]
     model.eval()
-    # マスクを渡さないラッパの前提（トレース中の packed sequence 検出を eager と同じ None に）。
+    # The premise of the wrapper that passes no mask (pin packed sequence detection during tracing
+    # to None, the same as eager).
     patch.disable_packed_sequence_detection()
     _fake_quant(args, model, TARGET_TEXT_ENCODER)
     generator = _generator(0)
-    # 長さは下限（2 — 0/1 特殊化の回避線）から上限 512 の間に散らす。Tmax ちょうどの
-    # ケースを 1 本置いて、宣言上限に依存した実装（プランを Tmax で組む等）を踏む。
+    # Spread the lengths between the lower bound (2 — the line that avoids 0/1 specialisation) and
+    # the upper bound of 512. One case at exactly Tmax exercises implementations that depend on the
+    # declared upper bound (building a plan at Tmax and the like).
     cases = tuple(
         (
             f"t{length:03d}",
@@ -366,7 +417,7 @@ def build_text_encoder(args: argparse.Namespace, verify: bool) -> Component:
     )
     reference = None
     if verify:
-        # 参照は全 1 マスクを渡した原経路（ラッパはマスクを渡さない）。
+        # The reference is the original path given an all-ones mask (the wrapper passes no mask).
         reference = _eval_cases(
             lambda ids: (
                 model(
@@ -385,7 +436,7 @@ def build_text_encoder(args: argparse.Namespace, verify: bool) -> Component:
     )
 
 
-# ---- ② テキストコンディショナ ----------------------------------------------
+# ---- ② Text conditioner -------------------------------------------------------
 
 
 def build_text_conditioner(args: argparse.Namespace, verify: bool) -> Component:
@@ -396,8 +447,9 @@ def build_text_conditioner(args: argparse.Namespace, verify: bool) -> Component:
     _apply_lora(args, model, TARGET_TEXT_CONDITIONER)
     _fake_quant(args, model, TARGET_TEXT_CONDITIONER)
     generator = _generator(1)
-    # MUST: Tsrc と Ttgt を**ケースごとに別々の値**にする。同じ長さを配ると「片方の束縛で
-    # もう片方を代用する」取り違えが数に出ない（ADR 0016 の 2 シンボル取り違え検出）。
+    # MUST: give Tsrc and Ttgt **different values in each case**. With equal lengths, a mix-up that
+    # "binds one in place of the other" does not show in the numbers (the two-symbol mix-up
+    # detection of ADR 0016).
     cases = tuple(
         (
             f"case{index}",
@@ -427,18 +479,20 @@ def build_text_conditioner(args: argparse.Namespace, verify: bool) -> Component:
 
 # ---- ③ CosmosDiT -----------------------------------------------------------
 
-#: 校正の stage 分解一致門（`anima.calib.assert_stage_split`）へ流すラッパ入力の乱数 salt。
-#: golden ケースの乱数列（salt 2）とは**別**にする — probe は資産に 1 バイトも出ない診断用の
-#: 入力なので、混ぜると golden の値が probe の有無（= `--dtype`）で動く。
+#: The random salt of the wrapper inputs fed to the stage-decomposition match check of the
+#: calibration (`anima.calib.assert_stage_split`). Kept **separate** from the random sequence of the
+#: golden cases (salt 2) — the probe is a diagnostic input that never reaches an asset, so mixing
+#: them would make the golden values move with the presence of the probe (= with `--dtype`).
 PROBE_SALT = 5
 
-#: probe の timestep（0〜1 の sigma スケール — 値そのものに意味は無い。門は同じ入力で
-#: 2 経路を比べるだけなので、golden の 2 点とは独立でよい）。
+#: The timestep of the probe (on the 0–1 sigma scale — the value itself means nothing. The check
+#: only compares two paths on the same input, so it can be independent of the two golden points).
 PROBE_TIMESTEP = 0.5
 
 
 def _dit_probe(model: nn.Module, latent: int) -> tuple[torch.Tensor, ...]:
-    """静的形ラッパ（{@link patch.AnimaDit}）の probe 入力（`--dtype i4` のときだけ使う）。"""
+    """The probe input of the static-shape wrapper ({@link patch.AnimaDit}) (used only with
+    `--dtype i4`)."""
     generator = _generator(PROBE_SALT)
     return (
         torch.randn(1, model.config.in_channels, latent, latent, generator=generator),
@@ -448,10 +502,11 @@ def _dit_probe(model: nn.Module, latent: int) -> tuple[torch.Tensor, ...]:
 
 
 def _dit_tokens_probe(model: nn.Module, patch_size: tuple[int, ...]) -> tuple[torch.Tensor, ...]:
-    """S 形ラッパ（{@link patch.AnimaDitTokens}）の probe 入力。
+    """The probe input of the S-form wrapper ({@link patch.AnimaDitTokens}).
 
-    解像度は S 形 golden の**小さい方**（= 校正の解像度でもある）— 門は block 列の経路一致を
-    見るだけなので 1 点で足り、大きい方を選ぶと門だけで数分伸びる。
+    The resolution is **the smaller one** of the S-form golden (= also the calibration resolution) —
+    the check only looks at the path match of the block list, so one point is enough, and choosing
+    the larger one would add minutes to the check alone.
     """
     generator = _generator(PROBE_SALT)
     side = DIT_DYN_RESOLUTIONS[0] // SPATIAL_COMPRESSION
@@ -469,25 +524,28 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
 
     model = CosmosTransformer3DModel.from_pretrained(args.repo, subfolder="transformer")
     model.to(torch.float32).eval()
-    # MUST: 層を切る**前**に焼き込む（縮小モデルでも全層ぶんの取りこぼし検査を効かせる）。
+    # MUST: merge **before** truncating the layers (so that the check against dropped entries covers
+    # all layers even on a reduced model).
     _apply_lora(args, model, TARGET_TRANSFORMER)
     if args.num_layers is not None:
         model.transformer_blocks = model.transformer_blocks[: args.num_layers]
     if args.dit_graph == "dyn":
         return _build_transformer_tokens(args, verify, model)
     latent = args.resolution // SPATIAL_COMPRESSION
-    # MUST: 丸めは **export するラッパ経由**で当てる（i8 の scale 台帳のキーを
-    # `torch.export` が見る FQN と同じ空間に揃えるため — `_fake_quant` の docstring）。
-    # ラッパは同じ Parameter を参照するので、下の参照採取（生の `model`）にも同じ丸めが効く。
-    # 丸めは切り詰めの後で足りる（切った層は export にも参照にも現れない）。LoRA と違い
-    # 「全層ぶんの取りこぼしを検査する」性質が無いので、順序の MUST は無い。
+    # MUST: apply the rounding **through the wrapper that is exported** (to align the keys of the i8
+    # scale ledger with the FQN space `torch.export` sees — the docstring of `_fake_quant`). The
+    # wrapper references the same Parameters, so the same rounding also applies to the reference
+    # taken below (from the raw `model`). Rounding after the truncation is enough (truncated layers
+    # appear in neither the export nor the reference). Unlike the LoRA, it does not "check for
+    # dropped entries across all layers", so there is no ordering MUST.
     module = patch.AnimaDit(model, latent, latent)
     scales, dtype_overrides = _fake_quant(
         args, module, TARGET_TRANSFORMER, calib_probe=_dit_probe(model, latent)
     )
     generator = _generator(2)
-    # timestep は 0〜1 の連続値（FlowMatch の sigma スケール）。2 点とも別の値にして、
-    # timestep 埋め込みがグラフ入力として本当に効いていることを golden の数で踏む。
+    # The timestep is a continuous value in 0–1 (FlowMatch's sigma scale). Give the two points
+    # different values so that the golden numbers exercise the timestep embedding really taking
+    # effect as a graph input.
     raw = [
         (
             torch.randn(1, model.config.in_channels, latent, latent, generator=generator),
@@ -521,20 +579,22 @@ def build_transformer(args: argparse.Namespace, verify: bool) -> Component:
 def _build_transformer_tokens(
     args: argparse.Namespace, verify: bool, model: nn.Module
 ) -> Component:
-    """S 形（トークン長 1 シンボル）の DiT — **追加系列**（#21 波 T2）。
+    """The S-form DiT (a single token-length symbol) — **an additional series** (#21 phase T2).
 
-    静的形との差は入口と出口だけ（`anima.patch.AnimaDitTokens` の doc）。ここで決めるのは
-    ケースの取り方 3 点:
+    It differs from the static form only at the entry and the exit (the doc of
+    `anima.patch.AnimaDitTokens`). What is decided here are three points about the cases:
 
-    - **2 点評価は解像度 × timestep の両方を変える**（`DIT_DYN_RESOLUTIONS`）。同じ S を
-      2 本並べると「S の束縛が効いていない」実装が数に出ない（conditioner の 2 シンボルで
-      同じ長さを配らない規律と同型）。
-    - 例示入力（= `cases[0]`）は**小さい方**にする。`torch.export` はトレースで 1 回
-      forward を回すので、大きい方を先頭にすると export だけで数分伸びる。
-    - `--verify` の参照は**パッチ前 diffusers の latent**（`reference_dit`）で、突合は
-      「ホスト patchify → S 形 → ホスト unpatchify」の合成に対して行う（`verify_adapter`）。
-      静的ラッパを相手にすると、静的ラッパ自身の同値が別プロセスでしか採れないぶん
-      検証が 1 段浅くなる。
+    - **The two-point evaluation varies both resolution and timestep** (`DIT_DYN_RESOLUTIONS`).
+      Two cases with the same S would not show in the numbers an implementation in which "the
+      binding of S has no effect" (the same discipline as not giving the conditioner's two symbols
+      the same length).
+    - The example input (= `cases[0]`) is **the smaller one**. `torch.export` runs one forward while
+      tracing, so putting the larger one first would add minutes to the export alone.
+    - The reference of `--verify` is **the latent of diffusers before the patch** (`reference_dit`),
+      and the comparison is made against the composition "host patchify → S form → host
+      unpatchify" (`verify_adapter`). Comparing against the static wrapper would make the
+      verification one level shallower, since the static wrapper's own equivalence can only be
+      taken in a separate process.
     """
     patch_size = tuple(int(size) for size in model.config.patch_size)
     module = patch.AnimaDitTokens(model)
@@ -584,8 +644,8 @@ def _build_transformer_tokens(
     sides = [side for side, *_ in latents]
     return Component(
         module=module,
-        # rope 表も同じ `S` で宣言する（別シンボルにすると「表と本体の長さがずれた」形が
-        # 受理されてしまい、沈黙誤値になる）。
+        # The rope tables are declared with the same `S` too (separate symbols would accept a form
+        # where "the tables and the body have different lengths", a silent wrong value).
         dynamic_shapes=({1: tokens}, None, None, {2: tokens}, {2: tokens}),
         input_names=("tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin"),
         cases=cases,
@@ -617,8 +677,9 @@ def build_vae_decoder(args: argparse.Namespace, verify: bool) -> Component:
     )
     reference = None
     if verify:
-        # MUST: パッチはクラス属性のプロセス全域差し替え — 参照はパッチ前に採る。
-        _assert_vae_unpatched("vae_decoder の参照採取")
+        # MUST: the patch replaces class attributes process-wide — take the reference before the
+        # patch.
+        _assert_vae_unpatched("taking the vae_decoder reference")
         reference = _eval_cases(lambda latents: patch.reference_vae_decode(vae, latents), cases)
     patch.apply_vae_decoder_patch(vae)
     return Component(
@@ -637,17 +698,18 @@ BUILDERS: dict[str, Callable[[argparse.Namespace, bool], Component]] = {
     TARGET_VAE_DECODER: build_vae_decoder,
 }
 
-#: ターゲット別の「分解を止める高位 op」（ADR 0023）。
+#: Per target, "the high-level ops at which decomposition stops" (ADR 0023).
 #:
-#: **DiT（transformer）と VAE decoder だけ** SDPA を保存して融合 `attention` 1 ノードにする。
-#: 両者の attention は実測で全て **マスク無し・非因果・dropout 0・GQA 無し・rank-4**（融合の
-#: 設計 recon §1）。
+#: **Only the DiT (transformer) and the VAE decoder** keep SDPA as one fused `attention` node. Their
+#: attention calls are all, as measured, **mask-free, non-causal, dropout 0, no GQA, rank-4** (§1 of
+#: the fusion design recon).
 #:
-#: MUST: `text_encoder` は従来どおり**分解**する — −inf 折り込みの因果マスクを持つので
-#: `_h_attention` の fail loudly に当たり、保存すると export できなくなる。ADR 0016 の
-#: safe-softmax ガード除去パスもこの分解経路に掛かっている。
-#: NOTE: `text_conditioner` はマスク無しで融合可能だが、GPU 時間が 0.10ms/18.7ms（測定限界
-#: 以下）なので v1 のスコープ外（設計 recon §1.3）。広げるときはここに 1 行足すだけ。
+#: MUST: `text_encoder` is **decomposed** as before — it has a causal mask with −inf folded in,
+#: which hits the fail loudly of `_h_attention`, so preserving it would make the export fail. The
+#: safe-softmax guard removal pass of ADR 0016 also runs on this decomposed path.
+#: NOTE: `text_conditioner` has no mask and could be fused, but its GPU time is 0.10ms/18.7ms (below
+#: the measurement limit), so it is outside the scope of v1 (design recon §1.3). Widening it takes
+#: just one line here.
 TARGET_PRESERVED: dict[str, tuple[str, ...]] = {
     TARGET_TEXT_ENCODER: PRESERVED_OP_PREFIXES,
     TARGET_TEXT_CONDITIONER: PRESERVED_OP_PREFIXES,
@@ -655,21 +717,25 @@ TARGET_PRESERVED: dict[str, tuple[str, ...]] = {
     TARGET_VAE_DECODER: PRESERVED_OP_PREFIXES_WITH_ATTENTION,
 }
 
-#: `--lora` が効くターゲット（recon §1 — 蒸留 LoRA の対象は DiT と conditioner のみ）。
+#: The targets `--lora` applies to (recon §1 — the distillation LoRA targets only the DiT and the
+#: conditioner).
 LORA_PREFIXES = {
     TARGET_TRANSFORMER: "transformer",
     TARGET_TEXT_CONDITIONER: "text_conditioner",
 }
 
-#: `--num-layers`（層の切り詰め）が効くターゲット（Qwen3 の層列と DiT の block 列だけ）。
+#: The targets `--num-layers` (layer truncation) applies to (only Qwen3's layer list and the DiT's
+#: block list).
 NUM_LAYERS_TARGETS = (TARGET_TEXT_ENCODER, TARGET_TRANSFORMER)
 
 
 def _assert_vae_unpatched(where: str) -> None:
-    """参照採取が VAE パッチ適用**前**であることを固定する（恒真化の門 — ADR 0013）。
+    """Pin that the reference is taken **before** the VAE patch is applied (the guard against a
+    vacuous pass — ADR 0013).
 
-    パッチ後に採った「参照」はパッチ後の値そのものになり、同値検証が恒真化して偽 PASS する。
-    **差が常に 0 になる**方向の壊れ方なので、検証が緑であること自体は何の証拠にもならない。
+    A "reference" taken after the patch is the patched value itself, and the equivalence check
+    passes vacuously as a false PASS. It breaks in the direction of **the difference always being
+    0**, so a green check is no evidence at all on its own.
     """
     if patch.vae_patches_applied():
         raise RuntimeError(
@@ -679,21 +745,26 @@ def _assert_vae_unpatched(where: str) -> None:
 
 
 def _i4_module_names(model: nn.Module) -> frozenset[str]:
-    """i4 group32 で丸めるモジュールの FQN 集合（混成 i8+i4 の**排他割り**の唯一の源）。
+    """The FQN set of the modules rounded to i4 group32 (the single source of the **exclusive
+    split** of the mixed i8+i4).
 
-    適格は 2 条件の積: ① {@link I4_MODULE_TYPES} であること（emit の i4 適格 = linear /
-    embedding の重みスロット限定 — ADR 0069 決定 5 と追補。外れたテンソルへ i4 を明示指定すると
-    emit が fail loudly する）② 量子化軸が group 長で割り切れること（i4 は端数 group を作らない
-    MUST — 同決定 2。外れた重みは**構成ごと落とすのではなく対象から外す**ので i8 側へ落ちる）。
+    Eligibility is the conjunction of two conditions: ① the module is one of
+    {@link I4_MODULE_TYPES} (emit's i4 eligibility = the weight slots of linear / embedding only —
+    ADR 0069 decision 5 and its supplement; explicitly assigning i4 to a tensor outside it makes
+    emit fail loudly) ② the quantization axis is divisible by the group length (MUST: i4 makes no
+    partial group — decision 2 of the same ADR; a weight that fails it is **excluded from the
+    targets instead of dropping the whole configuration**, so it falls to the i8 side).
 
-    DiT で ② に落ちるのは patchify の入口 1 本だけ（`patch_embed.proj` の in 軸 = 17ch × 2×2 =
-    68 は g32 で割り切れない）だが、**名前で外さない** MUST — 解像度・patch_size・入力チャネルが
-    動けば整除も動くので、名指しの除外は上流が変わった瞬間に嘘になる。
+    In the DiT only the patchify entry fails ② (the in axis of `patch_embed.proj` = 17ch × 2×2 = 68
+    is not divisible by g32), but MUST: **it is not excluded by name** — divisibility moves when the
+    resolution, patch_size or input channels move, so a named exclusion becomes a lie the moment
+    upstream changes.
 
-    対象列挙を core（`iter_quant_targets`）に通すのは、丸めが見る集合とここが数える集合を
-    1 本の実装のままにするため。i8 側の述語を「この集合に居ない」で書くのも同じ理由で、
-    2 つの述語を別々の綴りから作ると、どちらにも入らない重みが**黙って f32 のまま残る**
-    （値は正しいままサイズだけが戻るので、数字を見ない限り気づけない）。
+    The target enumeration goes through core (`iter_quant_targets`) to keep the set the rounding
+    sees and the set counted here a single implementation. The i8-side predicate is written as "not
+    in this set" for the same reason: building the two predicates from separate spellings would
+    leave the weights that fall into neither **silently in f32** (the values stay correct and only
+    the size reverts, so it goes unnoticed unless one looks at the numbers).
     """
     return frozenset(
         fqn.removesuffix(".weight")
@@ -703,31 +774,35 @@ def _i4_module_names(model: nn.Module) -> frozenset[str]:
 
 
 def _adaln_i8_names(model: nn.Module) -> frozenset[str]:
-    """感度実験変種（`--i4-adaln-i8`）が i4 から外して **i8 で丸める**重みの FQN 集合。
+    """The FQN set of the weights that the sensitivity-experiment variant (`--i4-adaln-i8`) takes
+    out of i4 and **rounds to i8**.
 
-    中身は 2 群の和で、どちらも「modulation を作る側」= 量子化感度が高いと目された役割:
+    It is the union of two groups, both "on the side that produces the modulation" = the roles
+    considered highly sensitive to quantization:
 
-    1. **block 内の adaLN**（`norm1` / `norm2` / `norm3` の `linear_1` / `linear_2` —
-       anima-v1.0 で 28 block × 6 = 168 本）。判定はセグメント一致
-       （{@link anima.calib.is_adaln}）で、名指しの一覧は持たない。
-    2. **block の外の 5 本**（{@link NON_STAGE_I4_WEIGHTS}）。うち 4 本は modulation の
-       系譜そのもの（`time_embed.t_embedder` が全 adaLN へ渡る temb を作り、`norm_out` は
-       最終段の `CosmosAdaLayerNorm`）で、残る `proj_out` は校正の駆動が stage 単位である
-       都合で GPTQ に載らず素の RTN i4 で丸まっていた側 — irodori の w4 席では**この 2 群を
-       まとめて i8 へ戻した構成**（research `2026-08-24-gptq-expansion-quality.md` §1 の R3）が
-       採用されており、片方だけを動かした構成はどこでも検証されていない。
+    1. **The adaLN inside the blocks** (`linear_1` / `linear_2` of `norm1` / `norm2` / `norm3` —
+       28 blocks × 6 = 168 in anima-v1.0). Matched by segment ({@link anima.calib.is_adaln}); no
+       named list is kept.
+    2. **The 5 outside the blocks** ({@link NON_STAGE_I4_WEIGHTS}). Four of them are the modulation
+       lineage itself (`time_embed.t_embedder` produces the temb passed to every adaLN, and
+       `norm_out` is the final `CosmosAdaLayerNorm`), and the remaining `proj_out` is the one that,
+       because the calibration driver works per stage, never went through GPTQ and was rounded with
+       plain RTN i4 — irodori's w4 preset adopted **the configuration that moved these two groups
+       back to i8 together** (R3 of §1 in research `2026-08-24-gptq-expansion-quality.md`), and a
+       configuration that moves only one of them has not been verified anywhere.
 
-    MUST: adaLN の綴りが 1 つでも見つからなければ fail loudly（{@link
-    anima.calib.adaln_segments_seen}）— 上流が一部だけを改名すると、除外したはずの本数だけが
-    黙って i4 へ戻り、格納形も本数の門も自己整合したまま緑になる。
+    MUST: fail loudly if even one adaLN spelling is not found ({@link
+    anima.calib.adaln_segments_seen}) — if upstream renamed only some of them, just the ones meant
+    to be excluded would silently return to i4, and the storage form and the count check would stay
+    self-consistent and green.
     """
     stage_names = calib.stage_linear_names(calib.dit_stages(model))
     missing = sorted(calib.ADALN_SEGMENTS - calib.adaln_segments_seen(stage_names))
     if missing:
         raise AssertionError(
-            f"DiT block 内に adaLN の linear が 1 本も無い綴り: {missing}"
-            f"（探した綴り: {sorted(calib.ADALN_SEGMENTS)}）— 上流が modulation の属性名を"
-            "変えている"
+            f"adaLN linear spellings with no match in the DiT blocks: {missing}"
+            f" (spellings searched: {sorted(calib.ADALN_SEGMENTS)}) — upstream has changed the"
+            " attribute names of the modulation"
         )
     return frozenset(name for name in stage_names if calib.is_adaln(name)) | NON_STAGE_I4_WEIGHTS
 
@@ -735,13 +810,15 @@ def _adaln_i8_names(model: nn.Module) -> frozenset[str]:
 def _round_i4_plain(
     model: nn.Module, names: frozenset[str], target: str, label: str
 ) -> Mapping[str, torch.Tensor]:
-    """名指しの集合を素の RTN i4 g32 で丸める（校正を通さない 1 段目の格子そのもの）。
+    """Round the named set with plain RTN i4 g32 (the grid of the first stage itself, without
+    calibration).
 
-    `label` は診断行の主語（助詞まで込み — 「〜を i4 group へ丸めた」に嵌まる形）。
+    `label` is the object of the diagnostic line (the form that fits "rounded <label> to i4
+    groups").
     """
     report = fake_quant_int4(model, include=lambda name: name in names, op_types=I4_MODULE_TYPES)
     print(
-        f"[fake-quant] {target}: {label} i4 group へ丸めた（RTN） — {report.describe()}",
+        f"[fake-quant] {target}: rounded {label} to i4 groups (RTN) — {report.describe()}",
         flush=True,
     )
     return report.scales
@@ -756,38 +833,47 @@ def _round_i4_calibrated(
     probe: Sequence[torch.Tensor],
     round_int8: Callable[[], Int8Report],
 ) -> tuple[Mapping[str, torch.Tensor], Int8Report]:
-    """i4 で格納する重みを「block 外 = 素の RTN」「block 内 = GPTQ」へ排他に割って丸める。
+    """Round the weights stored as i4, split exclusively into "outside the blocks = plain RTN" and
+    "inside the blocks = GPTQ".
 
-    `i4_names` は**格納 i4 の全量**、`excluded` は i4 適格でありながら i8 へ回す側
-    （既定は空・感度実験変種では {@link _adaln_i8_names} の 173 本）。適格の全量は 2 つの和で、
-    下の 2 つの門はそちら（= グラフが決める事実）に対して掛かる — 変種で動くのは割り方だけで、
-    「上流の構成が変わっていないか」を見る網は 1 つも緩めない。
+    `i4_names` is **everything stored as i4**, and `excluded` is the ones that are i4-eligible but
+    go to i8 (empty by default; the 173 of {@link _adaln_i8_names} in the sensitivity-experiment
+    variant). Everything eligible is the union of the two, and the two checks below apply to that
+    (= the facts the graph decides) — the variant only moves the split, and not one of the nets that
+    watch "whether the upstream configuration changed" is loosened.
 
-    順序（① → ② → ③ → ④。**②〜④ は MUST・① は SHOULD**）:
+    Order (① → ② → ③ → ④; **②–④ are MUST, ① is SHOULD**):
 
-    1. **stage 分解一致門を丸める前に通す**（`anima.calib.assert_stage_split`）— ずれた分解で
-       丸めると「別の経路の GPTQ」を出荷することになり、しかも数値は普通に出る。SHOULD どまり
-       なのは、この門が読み取り専用で**位置を後ろへ動かしても出荷バイトが変わらない**ため
-       （先頭に置く得は、数時間の校正を回す前に落ちること）。
-    2. **block 外を先に丸める** — 既定はここが RTN i4（配布実行時に block へ入るのは i4 の
-       `time_embed` が作った temb で、step をまたぐ latent も i4 の `norm_out` / `proj_out` を
-       通った値）。後に回すと「f32 の周辺を通った活性」で選んだ丸め先を、丸めた周辺と組んで
-       配ることになる。**i8 側も同じ理由で校正入力の捕捉より前に丸める**
-       （{@link _fake_quant_i4} の `round_int8` をここで呼ぶ）— 既定では `patch_embed.proj`
-       1 本（patchify 入口 = block 0 の入力そのもの）、変種ではそこへ除外した 173 本が加わり、
-       block 内の adaLN もこの時点で i8 になる（配布実行時に modulation を作るのは i8 の
-       adaLN だから、その状態で校正入力を採る）。
-    3. 校正入力の生成（参照 denoise の捕捉）と付随引数一致門。
-    4. block 内の linear を GPTQ × RTN 格子で丸める。**除外は core の `include` で排他に**
-       （`anima.calib.is_adaln` — 丸めた集合と i4 格納の集合を 1 実装で決める）。
+    1. **Pass the stage-decomposition match check before rounding**
+       (`anima.calib.assert_stage_split`) — rounding with a misaligned decomposition would ship
+       "GPTQ of a different path", and the numbers would still come out normally. It is only a
+       SHOULD because the check is read-only and **moving it later does not change the shipped
+       bytes** (the gain of putting it first is failing before hours of calibration).
+    2. **Round outside the blocks first** — by default that is RTN i4 (at distribution run time,
+       what enters the blocks is the temb made by the i4 `time_embed`, and the latent carried across
+       steps has passed through the i4 `norm_out` / `proj_out`). Doing it later would ship rounding
+       targets chosen from "activations that passed through an f32 surrounding", combined with a
+       rounded surrounding. **The i8 side is also rounded before capturing the calibration inputs,
+       for the same reason** (`round_int8` of {@link _fake_quant_i4} is called here) — by default
+       that is `patch_embed.proj` alone (the patchify entry = the input of block 0 itself); in the
+       variant the 173 excluded ones join it, and the adaLN inside the blocks becomes i8 at this
+       point too (at distribution run time the modulation is produced by the i8 adaLN, so the
+       calibration inputs are taken in that state).
+    3. Generating the calibration inputs (capturing the reference denoise) and the check that the
+       accompanying arguments match.
+    4. Round the linears inside the blocks with GPTQ × the RTN grid. **The exclusion is made
+       exclusive through core's `include`** (`anima.calib.is_adaln` — one implementation decides
+       both the rounded set and the set stored as i4).
 
-    MUST: block 外の適格は {@link NON_STAGE_I4_WEIGHTS} と一致し、block 内の linear は 1 本
-    残らず i4 適格であること — どちらも外れたら上流の構成が変わっている。
+    MUST: the eligible weights outside the blocks match {@link NON_STAGE_I4_WEIGHTS}, and every
+    linear inside the blocks is i4-eligible — a violation of either means the upstream configuration
+    changed.
 
-    NOTE（デバイス）: `--calib-device` が動かすのは ③④（捕捉 + GPTQ）だけで、①② は CPU のまま
-    回す（デバイス差の交絡を丸め方式の側だけに閉じ込める）。戻りは try/finally で必ず CPU —
-    emit も golden も CPU 経路で、GPU に残った重みは後続の診断を別の形で壊す。既定 `cpu` では
-    `Module.to` も `Tensor.to` も no-op なので、配布経路のバイトは 1 つも動かない。
+    NOTE (device): `--calib-device` moves only ③④ (capture + GPTQ); ①② run on the CPU (confining the
+    confound of the device difference to the rounding method). The return always goes back to the
+    CPU through try/finally — emit and the golden are on the CPU path, and weights left on the GPU
+    would break the later diagnostics in another way. With the default `cpu`, both `Module.to` and
+    `Tensor.to` are no-ops, so not one byte of the distribution path moves.
     """
     stages = calib.dit_stages(wrapper)
     stage_names = calib.stage_linear_names(stages)
@@ -795,26 +881,31 @@ def _round_i4_calibrated(
     unaligned = sorted(stage_names - eligible)
     if unaligned:
         raise AssertionError(
-            f"DiT block 内の linear {unaligned[:3]} が i4 適格でない（量子化軸が g"
-            f"{DEFAULT_GROUP_SIZE} 非整除）— 校正は stage を丸ごと駆動するので 1 本だけ外す"
-            "逃げ道が無い"
+            f"DiT block linears {unaligned[:3]} are not i4-eligible (quantization axis not"
+            f" divisible by g{DEFAULT_GROUP_SIZE}) — calibration drives whole stages, so there is"
+            " no way out by leaving out one layer"
         )
     non_stage = eligible - stage_names
     if non_stage != NON_STAGE_I4_WEIGHTS:
         raise AssertionError(
-            f"DiT block の外の i4 適格が {sorted(non_stage)} で、宣言"
-            f"（NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)}）と違う"
-            " — 上流の構成が変わって i4 の割り方が動いている"
+            f"the i4-eligible weights outside the DiT blocks are {sorted(non_stage)}, which differs"
+            f" from the declaration (NON_STAGE_I4_WEIGHTS = {sorted(NON_STAGE_I4_WEIGHTS)})"
+            " — the upstream configuration changed and the i4 split has moved"
         )
     graph_batch = calib.assert_stage_split(wrapper, probe, stages)
     plain_names = non_stage - excluded
-    plain = _round_i4_plain(wrapper, plain_names, target, "block 外の適格を") if plain_names else {}
+    plain = (
+        _round_i4_plain(wrapper, plain_names, target, "the eligible weights outside the blocks")
+        if plain_names
+        else {}
+    )
     int8 = round_int8()
     prompts = calibration_prompts(args.calib_prompts)
     conditions = calib.calib_conditions(args.model)
-    # デバイスの継ぎ目は**ここ**（i8 丸めの直後）— 上の ①②（stage 分解一致門・block 外 RTN・
-    # i8 丸め）は CPU のまま回す。GPTQ の丸め解はデバイスで変わるので、デバイス差が混ざる範囲を
-    # 「捕捉 + GPTQ」だけに隔離しておかないと、視認 A/B が何の差を見ているのか言えなくなる。
+    # The device seam is **here** (right after the i8 rounding) — ①② above (the stage-decomposition
+    # match check, the RTN outside the blocks, the i8 rounding) run on the CPU. GPTQ's rounding
+    # solution changes with the device, so unless the range where the device difference mixes in is
+    # isolated to "capture + GPTQ", one cannot say what difference a visual A/B is looking at.
     wrapper.to(args.calib_device)
     try:
         batches = calib.capture_stage_batches(
@@ -822,39 +913,44 @@ def _round_i4_calibrated(
         )
         calib.assert_calib_batches_match_graph(graph_batch, batches)
         rig = calib.CalibRig(stages=stages, batches=batches)
-        # MUST: 述語が選ぶ集合 = i4 で格納する block 内の集合。既定（除外なし）は `None` を渡して
-        # **述語そのものを持たない** — 「全部」を綴り直した述語は、走査の定義が動いた日に片側だけ
-        # 追随して黙ってずれる。
+        # MUST: the set the predicate selects = the set inside the blocks stored as i4. The default
+        # (no exclusions) passes `None` and **has no predicate at all** — a predicate that re-spells
+        # "everything" would drift silently the day the definition of the scan moves, following
+        # only on one side.
         stage_i4 = stage_names - excluded
         report, ledger = calib.calibrate_i4(
             rig, None if not excluded else lambda local: not calib.is_adaln(local)
         )
     finally:
-        # MUST: emit へ渡すのは CPU の重み（グラフ採取も golden も CPU 経路）。例外で抜けた
-        # ときも戻す — 失敗したまま GPU に残ると、後続の診断が「重みが無い」形で化ける。
+        # MUST: what goes to emit are CPU weights (both the graph capture and the golden are on the
+        # CPU path). Restore on an exception as well — left on the GPU after a failure, the later
+        # diagnostics would turn into a "the weights are missing" shape.
         wrapper.to("cpu")
         if args.calib_device == "cuda":
             torch.cuda.empty_cache()
     calib.assert_calib_covers_scan(report, stage_i4)
-    # 台帳は丸めが走ったデバイスに載って返る — 格納側（emit）は CPU のテンソルを前提にするので
-    # ここで回収する（`plain` は CPU 産のまま）。
+    # The ledger comes back on the device where the rounding ran — the storage side (emit) assumes
+    # CPU tensors, so it is collected here (`plain` was produced on the CPU as is).
     calibrated = {fqn: scale.cpu() for fqn, scale in ledger.scales.items()}
-    # MUST: 2 経路は互いに素（重なれば同じ重みを 2 度丸めたことになり、値だけが静かに狂う）。
+    # MUST: the two paths are disjoint (an overlap would mean rounding the same weight twice, and
+    # only the values would silently go wrong).
     overlap = sorted(set(plain) & set(calibrated))
     if overlap:
-        raise AssertionError(f"i4 の 2 経路が同じ重みを丸めている（二重丸め）: {overlap[:3]}")
+        raise AssertionError(
+            f"the two i4 paths round the same weights (double rounding): {overlap[:3]}"
+        )
     scope = (
-        "DiT block の linear"
+        "the DiT block linears"
         if not excluded
-        else f"DiT block の adaLN 以外 {len(stage_i4)} 本"
-        f"（adaLN {len(excluded - NON_STAGE_I4_WEIGHTS)} 本 + block 外"
-        f" {len(NON_STAGE_I4_WEIGHTS)} 本は i8 格納 — --i4-adaln-i8）"
+        else f"the {len(stage_i4)} non-adaLN linears of the DiT blocks"
+        f" (the {len(excluded - NON_STAGE_I4_WEIGHTS)} adaLN + the"
+        f" {len(NON_STAGE_I4_WEIGHTS)} outside the blocks are stored as i8 — --i4-adaln-i8)"
     )
     print(
-        f"[fake-quant] {target}: {scope}を GPTQ 校正付きで丸めた"
-        f" — {report.describe()} / 校正プロンプト {len(prompts)} 本・バッチ {len(batches)} 本"
-        f"・{rig.tokens:,} トークン（{args.model}: {conditions.steps} step"
-        f"・CFG {conditions.guidance:g}・分岐 {conditions.branches}）",
+        f"[fake-quant] {target}: rounded {scope} with GPTQ calibration"
+        f" — {report.describe()} / {len(prompts)} calibration prompts, {len(batches)} batches"
+        f", {rig.tokens:,} tokens ({args.model}: {conditions.steps} steps"
+        f", CFG {conditions.guidance:g}, {conditions.branches} branches)",
         flush=True,
     )
     return {**plain, **calibrated}, int8
@@ -866,30 +962,36 @@ def _fake_quant_i4(
     target: str,
     probe: Sequence[torch.Tensor] | None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
-    """混成 i4 系列の丸め（格納 i4 = 適格 − 除外・残り = i8 per-channel）。
+    """The rounding of the mixed i4 series (stored as i4 = eligible − excluded; the rest = i8
+    per-channel).
 
-    2 つの述語は {@link _i4_module_names} の適格から**排他に**割る（`quantize.py` の混成
-    MUST）。返す override は「i4 の scale 台帳のキー全部を i4 に振る」写像で、emit 側は明示
-    指定を満たせなければ fail loudly する（系列の既定格納は i8 なので、i8 へ回した側は
-    override に載せない = 既定のまま）。
+    The two predicates split the eligible set of {@link _i4_module_names} **exclusively** (the mixed
+    MUST of `quantize.py`). The returned override is the map "assign every key of the i4 scale
+    ledger to i4", and the emit side fails loudly if it cannot satisfy an explicit assignment (the
+    series' default storage is i8, so what went to i8 is not in the override = stays at the
+    default).
 
-    `--i4-adaln-i8`（既定 OFF）は適格から {@link _adaln_i8_names} を**引いて** i4 の集合を
-    決める感度実験変種で、引いた側は i8 の述語（`name not in i4_names`）が自動で拾う。
-    既定では除外が空なので、この関数が通る経路も丸める集合も従来と 1 バイトも変わらない。
+    `--i4-adaln-i8` (OFF by default) is the sensitivity-experiment variant that decides the i4 set
+    by **subtracting** {@link _adaln_i8_names} from the eligible set, and the i8 predicate
+    (`name not in i4_names`) picks up what was subtracted automatically. By default the exclusion is
+    empty, so neither the path this function takes nor the rounded set changes by a single byte.
 
-    適格の丸めは既定で校正付き（{@link _round_i4_calibrated}）。`--no-calib` のときだけ
-    格納 i4 の全量を素の RTN で丸める — **配布資産には使わない**テスト / smoke 用の opt-out
-    で、「校正付きのつもりで校正なしを配った」が資産から読めないので診断行で明示する。
+    The eligible weights are rounded with calibration by default ({@link _round_i4_calibrated}).
+    Only with `--no-calib` is everything stored as i4 rounded with plain RTN — a test / smoke
+    opt-out that is **not used for distribution assets**; "shipped uncalibrated while meaning to
+    calibrate" cannot be read from the assets, so the diagnostic line states it.
     """
     eligible = _i4_module_names(model)
-    # MUST: 除外は**適格を計算した後**に引く（適格判定より前に名前で削ると、上流の構成が
-    # 変わって適格から落ちた重みと「意図して外した重み」が区別できなくなる）。
+    # MUST: subtract the exclusions **after computing eligibility** (trimming by name before the
+    # eligibility check would make the weights that dropped out of eligibility because the upstream
+    # configuration changed indistinguishable from "the weights left out on purpose").
     excluded = _adaln_i8_names(model) if args.i4_adaln_i8 else frozenset()
     outside = sorted(excluded - eligible)
     if outside:
         raise AssertionError(
-            f"i8 へ回す指定 {outside[:3]} が i4 適格に無い（適格 {len(eligible)} 本 /"
-            f" 除外 {len(excluded)} 本）— 上流の構成が変わって除外の綴りが空振りしている"
+            f"weights assigned to i8, {outside[:3]}, are not i4-eligible ({len(eligible)}"
+            f" eligible / {len(excluded)} excluded) — the upstream configuration changed and the"
+            " exclusion spellings match nothing"
         )
     i4_names = eligible - excluded
 
@@ -898,41 +1000,45 @@ def _fake_quant_i4(
 
     if args.no_calib:
         print(
-            f"[fake-quant] {target}: --no-calib — 校正なしの素の RTN"
-            "（配布資産にしないこと・品質は perf-ledger Q-6 の基線より下）",
+            f"[fake-quant] {target}: --no-calib — plain RTN without calibration"
+            " (not for distribution assets; quality is below the baseline of perf-ledger Q-6)",
             flush=True,
         )
-        int4_scales = _round_i4_plain(model, i4_names, target, "格納 i4 の重みを")
+        int4_scales = _round_i4_plain(model, i4_names, target, "the weights stored as i4")
         int8 = round_int8()
     else:
         if probe is None:
             raise AssertionError(
-                f"{target}: 校正付き i4 には stage 分解一致門の probe が要る"
-                "（builder が渡していない — 校正なしへ黙って落ちる分岐は持たない）"
+                f"{target}: calibrated i4 needs the probe of the stage-decomposition match check"
+                " (the builder did not pass one — there is no branch that silently falls back to no"
+                " calibration)"
             )
-        # 校正経路では i8 の丸めを**校正入力の捕捉より前**に差し込む（順序 MUST ② — 呼ぶ位置は
-        # {@link _round_i4_calibrated} が持つ）。適格判定の門より前に呼ぶと、適格の綻びより先に
-        # 「i8 の対象が 1 本も無い」で落ちて診断が入れ替わる。
+        # On the calibration path the i8 rounding is inserted **before capturing the calibration
+        # inputs** (ordering MUST ② — where it is called is owned by {@link _round_i4_calibrated}).
+        # Calling it before the eligibility check would swap the diagnostics, failing on "no i8
+        # target at all" before the eligibility breakage.
         int4_scales, int8 = _round_i4_calibrated(
             args, model, target, i4_names, excluded, probe, round_int8
         )
-    print(f"[fake-quant] {target}: 残りは i8 per-channel — {int8.describe()}", flush=True)
-    # MUST: 丸めた集合 = 格納集合（override のキー）。ずれるのは「i4 と数えたのに丸まって
-    # いない」形で、i4 席に i8 の重みが混ざったまま緑になる（サイズだけが静かに戻る）。
+    print(f"[fake-quant] {target}: the rest are i8 per-channel — {int8.describe()}", flush=True)
+    # MUST: the rounded set = the stored set (the keys of the override). A mismatch takes the form
+    # "counted as i4 but not rounded", and an i4 preset turns green with i8 weights mixed in (only
+    # the size silently reverts).
     expected = {f"{name}.weight" for name in i4_names}
     if set(int4_scales) != expected:
         raise AssertionError(
             f"格納 i4 の {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
             f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
         )
-    # MUST: 除外した側は i8 で丸まっていること。i8 の述語は `i4_names` の否定なので構造上は
-    # 落ちないが、ここが空振りすると「i4 からも i8 からも漏れて f32 のまま」— 値は正しく
-    # サイズだけが戻る壊れ方で、格納指定にも本数の門にも出ない。
+    # MUST: the excluded ones are rounded as i8. The i8 predicate is the negation of `i4_names`, so
+    # structurally it cannot miss, but if this misfires they "leak from both i4 and i8 and stay f32"
+    # — a breakage where the values are correct and only the size reverts, which shows in neither
+    # the storage assignment nor the count check.
     unrounded = sorted(f"{name}.weight" for name in excluded if f"{name}.weight" not in int8.scales)
     if unrounded:
         raise AssertionError(
-            f"i4 から外した {len(excluded)} 本のうち {unrounded[:3]} が i8 でも丸まっていない"
-            "（i4 側にも i8 側にも入らず f32 のまま残っている）"
+            f"of the {len(excluded)} weights taken out of i4, {unrounded[:3]} are not rounded as i8"
+            " either (they are on neither the i4 nor the i8 side and remain f32)"
         )
     return {**int8.scales, **int4_scales}, dict.fromkeys(int4_scales, "i4")
 
@@ -944,55 +1050,70 @@ def _fake_quant(
     *,
     calib_probe: Sequence[torch.Tensor] | None = None,
 ) -> tuple[Mapping[str, torch.Tensor], Mapping[str, str]]:
-    """格納 dtype の表現可能値へ重みを丸め、scale 台帳と 1 本単位の格納指定を返す（ADR 0006）。
+    """Round the weights to values representable in the storage dtype, and return the scale ledger
+    and the per-weight storage assignments (ADR 0006).
 
-    MUST: 各 builder で **`reference` の採取より前**・`--lora` の焼き込みより**後**に呼ぶ。
-    前後を逆にすると①参照だけが元の重みで計算されて E2E の差に量子化誤差が混ざる
-    ②焼き込んだ ΔW が丸めを外して格納時の再丸めが golden との対応を壊す。
+    MUST: each builder calls this **before taking `reference`** and **after** merging `--lora`.
+    Reversing the order would ① compute only the reference with the original weights and mix
+    quantization error into the E2E difference ② leave the merged ΔW outside the rounding, so that
+    re-rounding at storage time breaks the correspondence with the golden.
 
-    MUST（i8 / i4 のみ）: **export する `nn.Module` そのもの**に当てる。scale 台帳のキーは
-    ここで見た FQN で、容器の initializer 名（= 束縛表の鍵 = `torch.export` が見る FQN）と同じで
-    なければ emit 側の突合が空振りする（`id()` 突合は禁止 — ADR 0006）。
+    MUST (i8 / i4 only): apply it to **the very `nn.Module` that is exported**. The keys of the
+    scale ledger are the FQNs seen here, and unless they equal the container's initializer names (=
+    the keys of the binding table = the FQNs `torch.export` sees) the matching on the emit side
+    misses (matching by `id()` is forbidden — ADR 0006).
 
-    `calib_probe` は i4 の校正付き丸めが stage 分解一致門に流すラッパの入力（golden ケースの
-    乱数列を動かさないよう、builder が**別 salt**で組んだもの）。校正するのに欠けていたら
-    fail loudly — 「probe が無いから校正なし」で黙って落ちる分岐は作らない。
+    `calib_probe` is the wrapper input that i4's calibrated rounding feeds to the
+    stage-decomposition match check (built by the builder with **a separate salt** so as not to move
+    the random sequence of the golden cases). If it is missing when calibrating, fail loudly — no
+    branch silently falls back to "no probe, so no calibration".
     """
     if args.dtype == "f32":
         return {}, {}
     if args.dtype == "i8":
         report = fake_quant_int8(model)
-        print(f"[fake-quant] {target}: i8 per-channel へ丸めた — {report.describe()}", flush=True)
+        print(f"[fake-quant] {target}: rounded to i8 per-channel — {report.describe()}", flush=True)
         return report.scales, {}
     if args.dtype == "i4":
         return _fake_quant_i4(args, model, target, calib_probe)
     if args.dtype == "bf16":
         rounded = round_weights_to_bf16(model)
-        print(f"[fake-quant] {target}: bf16 表現可能値へ丸めた — {rounded.describe()}", flush=True)
+        print(
+            f"[fake-quant] {target}: rounded to bf16-representable values — {rounded.describe()}",
+            flush=True,
+        )
         return {}, {}
     rounded = round_weights_to_f16(model)
-    print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {rounded.describe()}", flush=True)
+    print(
+        f"[fake-quant] {target}: rounded to f16-representable values — {rounded.describe()}",
+        flush=True,
+    )
     return {}, {}
 
 
 def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
-    """焼き込んだ LoRA の帰属（ファイル名 + sha256）を系列へ書き、ファイル名を返す。
+    """Write the attribution of the merged LoRA (file name + sha256) into the series, and return the
+    file name.
 
-    融合後の重みからは「どの LoRA を焼いたか」が復元できないので、**焼いた側が事実を書き残す**
-    のが唯一の道。モデルの宣言（`anima/distribution.py` の `AnimaModel.lora_sha256`）は
-    同ファイルの `assert_lora_provenance` がこの記録と突き合わせる。
+    "Which LoRA was merged" cannot be recovered from the fused weights, so **the side that merged it
+    writing the fact down** is the only way. The model's declaration (`AnimaModel.lora_sha256` in
+    `anima/distribution.py`) is checked against this record by `assert_lora_provenance` in the same
+    file.
 
-    書くのは実際に焼いたターゲットだけ（`LORA_PREFIXES` に無いターゲットの系列に置くと
-    「このモデルにも焼いた」という事実でない主張になる）。配布形には入らない —
-    `anima/distribution.py` の配置表が許可した役割だけが出力へ渡る。
+    It is written only for targets that were actually merged (placing it in the series of a target
+    not in `LORA_PREFIXES` would make the untrue claim "this model was merged too"). It does not go
+    into the distribution — only the roles the placement table of `anima/distribution.py` allows
+    reach the output.
 
-    MUST: 焼いていない側で**古い記録を消す**（全域関数）。`--lora` 付きで採った系列へ `--lora`
-    無しで採り直したとき、重みだけ素に戻って記録が前回のまま生き残ると、
-    `assert_lora_provenance` は「記録が在る × sha 一致」しか見ないので「取り下げ」を素通しして
-    配布 README に嘘の帰属を印字させる。記録の存在が「今の `model.krm` に焼いた」と
-    同値であることが、この機構の唯一の拠り所。NOTE: `emit_target` が作業席ごと据え替えるように
-    なった今、CLI 経路では席が毎回まっさらなのでここは実質空振りする — それでも全域関数のまま
-    残すのは、直接呼ぶ書き手（テスト・将来の別入口）にとって不変条件が変わらないため。
+    MUST: **delete a stale record** on the side that was not merged (a total function). When a
+    series taken with `--lora` is re-taken without `--lora`, if only the weights went back to plain
+    and the record survived from the previous run, `assert_lora_provenance` — which only looks at
+    "record present × sha matches" — would let the "withdrawal" through and have the distribution
+    README print a false attribution. That the record exists exactly when "the current `model.krm`
+    was merged" is the only thing this mechanism rests on. NOTE: now that `emit_target` swaps in the
+    whole staging location, on the CLI path the location is fresh every time and this effectively
+    does nothing — it still stays a total function because the invariant must not change for writers
+    that call it directly (tests, a future entry point).
     """
     if args.lora is None or target not in LORA_PREFIXES:
         (out_dir / LORA_PROVENANCE_FILE).unlink(missing_ok=True)
@@ -1005,43 +1126,49 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
 
 
 def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path) -> str | None:
-    """i4 系列の丸め条件（方式・格子・コーパス・解像度・step・CFG・デバイス）を系列へ書き、
-    ファイル名を返す。
+    """Write the rounding conditions of the i4 series (method, grid, corpus, resolution, steps, CFG,
+    device) into the series, and return the file name.
 
-    校正の有無は**格納形を 1 バイトも変えない**ので、資産からは復元できない — `--lora` と同じ形で
-    「書き出した側が事実を書き残す」しかない。`anima/distribution.py` の
-    `assert_calib_provenance` が組み立て時にこの記録と突き合わせ、`--no-calib` の生成物が配布へ
-    紛れるのを止める。
+    Calibration or its absence **does not change the storage form by a byte**, so it cannot be
+    recovered from the assets — as with `--lora`, the only way is "the side that wrote it out writes
+    the fact down". `assert_calib_provenance` in `anima/distribution.py` checks this record at
+    assembly time and stops outputs of `--no-calib` from slipping into a distribution.
 
-    MUST: i4 以外では**古い記録を消す**（全域関数 — `_write_lora_provenance` と同じ理由・
-    据え替えで空振りする点も同じ）。i4 で採った系列を別 dtype で採り直したとき記録だけが前回の
-    まま生き残ると、「校正付き」という事実でない主張が残る。
+    MUST: outside i4, **delete a stale record** (a total function — the same reason as
+    `_write_lora_provenance`, and the same in that the swap makes it a no-op). When a series taken
+    as i4 is re-taken with another dtype and only the record survives from the previous run, the
+    untrue claim "calibrated" would remain.
     """
     if args.dtype != "i4" or target != TARGET_TRANSFORMER:
         (out_dir / CALIB_PROVENANCE_FILE).unlink(missing_ok=True)
         return None
-    # `--no-calib` でも**書く**（消すのではなく `rtn` と記録する）— 不在は「古い export」とも
-    # 読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
+    # Write it **even** with `--no-calib` (record `rtn` instead of deleting) — an absence could also
+    # read as "an old export", and the assembly side could not reject "tried to ship uncalibrated"
+    # by name.
     #
-    # `guidance` は校正条件をモデル別化した 2026-08-23（波 J-4 ②）に足した欄。読み手
-    # （`distribution.assert_calib_provenance` → `_shared.calib_provenance.calib_complaint`）は
-    # 記録に在る欄だけを判定し、欄の不在は受理する（同モジュールの MUST）ので、欄の追加は
-    # 既にある turbo 系列の記録（追加前の形）の受理を 1 つも変えない — 既存資産へ再 export を
-    # 要求しない形に留める MUST（記録は資産と違って作り直しの費用が丸め時間そのもの）。
+    # `guidance` is the field added on 2026-08-23 (phase J-4 ②), when the calibration conditions
+    # became per model. The reader (`distribution.assert_calib_provenance` →
+    # `_shared.calib_provenance.calib_complaint`) judges only the fields present in the record and
+    # accepts an absent field (the MUST of that module), so adding the field changes not one
+    # acceptance of the existing turbo series' records (the form before the addition) — MUST: keep
+    # it to a form that does not require re-exporting existing assets (unlike assets, the cost of
+    # rebuilding a record is the rounding time itself).
     conditions = None if args.no_calib else calib.calib_conditions(args.model)
-    # 感度実験変種は**方式の綴りごと**変える（`gptq` → `gptq-adaln8`）。丸め方式が同じでも
-    # 「どの重みに当てたか」が違えば別の丸め方で、格納形からは 1 バイトも判別できない —
-    # 配布側の一致検査（`distribution.CALIB_SHIPPABLE_METHOD`）がそのまま名指しで拒否する
-    # 綴りにしておくのが、視認用に焼いた変種を配布経路から締め出す唯一の手（{@link
-    # ADALN_I8_TAG}）。
+    # The sensitivity-experiment variant changes **the method's spelling itself** (`gptq` →
+    # `gptq-adaln8`). Even with the same rounding method, a different "which weights it was applied
+    # to" is a different way of rounding, and not one byte of the storage form tells them apart —
+    # making it a spelling that the distribution side's consistency check
+    # (`distribution.CALIB_SHIPPABLE_METHOD`) rejects by name as is is the only way to keep variants
+    # baked for visual review out of the distribution path ({@link ADALN_I8_TAG}).
     method = "rtn" if args.no_calib else calib.CALIB_METHOD
     if args.i4_adaln_i8:
         method = f"{method}-{ADALN_I8_TAG}"
-    # 校正デバイスも**方式の綴りごと**変える（`gptq` → `gptq-cuda`）。GPTQ の丸め解は
-    # デバイスで変わる（f64 縮約の順序も linalg の実装も違う）ので、cuda で焼いた i4 は
-    # 「配布条件で焼いた i4」ではない — しかも格納形からは 1 バイトも判別できない。
-    # `device` 欄は人と後の突き合わせのための事実で、配布を止めるのは綴りの側（{@link
-    # anima.distribution.CALIB_SHIPPABLE_DEVICE}）。
+    # The calibration device also changes **the method's spelling itself** (`gptq` → `gptq-cuda`).
+    # GPTQ's rounding solution changes with the device (both the order of the f64 reductions and the
+    # linalg implementation differ), so i4 baked on cuda is not "i4 baked under the distribution
+    # conditions" — and not one byte of the storage form tells them apart. The `device` field is a
+    # fact for people and for later cross-checks; what stops distribution is the spelling ({@link
+    # anima.distribution.CALIB_SHIPPABLE_DEVICE}).
     if args.calib_device != CALIB_SHIPPABLE_DEVICE:
         method = f"{method}-{args.calib_device}"
     record: dict[str, object] = {
@@ -1075,11 +1202,11 @@ def _apply_lora(args: argparse.Namespace, model: nn.Module, target: str) -> None
 
 
 def _write_io(component: Component, graph: IrGraph, out_dir: Path) -> list[str]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+    """Write each case's inputs and the expected torch CPU outputs to `io.<case>.safetensors`.
 
-    MUST: グラフ入力の宣言名がラッパの引数名と一致していることを先に固定する（IR の入力名は
-    forward の引数名がそのまま出る）。ずれたまま位置で書くと、golden のキーだけが黙って
-    別の入力を指す。
+    MUST: first pin that the declared names of the graph inputs match the wrapper's argument names
+    (the IR's input names are forward's argument names as is). Writing by position while they
+    disagree would make only the golden keys silently point at a different input.
     """
     declared = [entry.name for entry in graph.inputs]
     if declared != list(component.input_names):
@@ -1093,16 +1220,17 @@ def _write_io(component: Component, graph: IrGraph, out_dir: Path) -> list[str]:
         outputs = (result,) if isinstance(result, torch.Tensor) else tuple(result)
         if len(outputs) != len(graph.outputs):
             raise AssertionError(
-                f"{name}: eager 出力 {len(outputs)} 本が IR 出力 {len(graph.outputs)} 本と違う"
+                f"{name}: {len(outputs)} eager outputs vs {len(graph.outputs)} IR outputs"
             )
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（ADR 0009 の境界正規化）。
+        # MUST: io is also lowered to the actual representation of the IR's semantic dtype (the
+        # boundary normalisation of ADR 0009).
         tensors = {
-            f"{INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{name} の入力 '{key}'")
+            f"{INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{name}: input '{key}'")
             for key, value in zip(component.input_names, inputs, strict=True)
         }
         for index, value in enumerate(outputs):
             tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
-                value.detach().contiguous(), f"{name} の出力 {index}"
+                value.detach().contiguous(), f"{name}: output {index}"
             )
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
         save_file(tensors, str(path))
@@ -1111,11 +1239,12 @@ def _write_io(component: Component, graph: IrGraph, out_dir: Path) -> list[str]:
 
 
 def _host_table_assets(component: Component) -> dict[str, AssetInput]:
-    """ホスト素表を容器の資産へ（持たないターゲットは空）。
+    """The host base tables into the container's assets (empty for targets without any).
 
-    payload は素表 1 本ぶんの **safetensors のバイト列そのもの**。テンソルの器を外さないのは、
-    読み手（models 側の rope 組み立て）が軸ごとの名前と shape を要るため — 資産は「重みでは
-    ないが同じ容器で配るバイト列」の席で、容器はその中身を解釈しない（ADR 0109 決定 4）。
+    The payload is **the safetensors bytes themselves** of one base table. The tensor container is
+    kept because the reader (the rope assembly on the models side) needs the per-axis names and
+    shapes — an asset is the slot for "bytes that are not weights but ship in the same container",
+    and the container does not interpret their content (ADR 0109 decision 4).
     """
     if not component.host_tables:
         return {}
@@ -1124,18 +1253,22 @@ def _host_table_assets(component: Component) -> dict[str, AssetInput]:
 
 
 def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[str, Any]:
-    """1 ターゲットの IR コンテナと golden io を書き、要約を返す。
+    """Write the IR container and the golden io of one target, and return a summary.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（出力本数・境界正規化）を通してから据える。門より
-    前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れた
-    コンポーネントから採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の
-    綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。据える単位が**ターゲットのディレクトリ丸ごと**
-    なので、容器と出所記録（LoRA / 校正）が食い違った組も作れない。
+    MUST: the outputs are written to a staging location and put in place only after passing **every
+    check** (output count, boundary normalisation). Placing them at the final location before the
+    checks would let a failed run leave "assets that can pass the acceptance check" — the io golden
+    is taken from the same broken component, so they are consistent with each other and the TS-side
+    comparison **turns green** (the spelling of "when publishing is allowed" is
+    {@link _shared.decode_series._publish}; the discipline of the swap and the cleanup is core's
+    primitive {@link karume.artifacts.staged_publication}). The unit put in place is **the whole
+    target directory**, so a set whose container and provenance records (LoRA / calibration)
+    disagree cannot be created either.
 
-    MUST: `target` は {@link TARGETS} の要素（= 部品名 = `karume.json` の weights のキー）。
-    ここで名乗る綴りがそのまま容器のグラフ名になるので、表の外の文字列を受けると**ランタイムが
-    引けない容器**が黙って焼ける（`BUILDERS` に表外の席が生えた日に、綴りの門は緑のまま）。
+    MUST: `target` is an element of {@link TARGETS} (= component name = the key of weights in
+    `karume.json`). The spelling named here becomes the container's graph name as is, so accepting a
+    string outside the table would silently bake **a container the runtime cannot look up** (the day
+    an off-table entry appeared in `BUILDERS`, the spelling check would stay green).
     """
     if target not in TARGETS:
         raise AssertionError(
@@ -1146,15 +1279,17 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
     component = BUILDERS[target](args, False)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory slot (the primitive does not create it — it only passes a
+        # path).
         staged.mkdir()
         graph = export_to_file(
             component.module,
             component.example,
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ターゲット名が
-            # そのまま部品名なので、ディレクトリ名からは導かない（container-v1 §2.1）。
+            # The graph name is **the component name** (= the key of weights in karume.json). The
+            # target name is the component name as is, so it is not derived from the directory name
+            # (container-v1 §2.1).
             graph_name=target,
             assets=_host_table_assets(component),
             dynamic_shapes=component.dynamic_shapes,
@@ -1177,23 +1312,26 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
         "dir": str(out_dir),
         "dtype": args.dtype,
         "dit_graph": args.dit_graph if target == TARGET_TRANSFORMER else "static",
-        # 校正付き丸めの条件（i4 以外・`--no-calib` は 0）— この要約は stdout にしか出ないので
-        # **人が読むため**のもの。機械の突き合わせは `calib_provenance.json`
-        # （{@link _write_calib_provenance} → `distribution.assert_calib_provenance`）が持つ。
+        # The conditions of the calibrated rounding (0 outside i4 and with `--no-calib`) — this
+        # summary goes only to stdout, so it is **for people to read**. Machine cross-checks are
+        # owned by `calib_provenance.json` ({@link _write_calib_provenance} →
+        # `distribution.assert_calib_provenance`).
         "calib_prompts": 0 if args.dtype != "i4" or args.no_calib else args.calib_prompts,
         "calib_resolution": 0 if args.dtype != "i4" or args.no_calib else calib.CALIB_RESOLUTION,
-        # 役割別の格納割り（感度実験変種）。数時間の export の記録が要約 1 枚で読めるように
-        # 出す — 機械の突き合わせは `calib_provenance.json` の `method` が持つ。
+        # The per-role storage split (the sensitivity-experiment variant). Emitted so that the
+        # record of an export lasting hours can be read from one summary — machine cross-checks are
+        # owned by the `method` of `calib_provenance.json`.
         "i4_adaln_i8": args.dtype == "i4" and args.i4_adaln_i8,
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        # 適格 = 圧縮のまま GPU 常駐する重み / 適格外 = ロード時に f32 展開（ADR 0006 の診断）。
+        # Eligible = weights resident on the GPU still compressed / not eligible = expanded to f32
+        # at load time (the diagnostics of ADR 0006).
         "compressed_tensors": breakdown.compressed_tensors,
         "compressed_bytes": breakdown.compressed_bytes,
         "plain_tensors": breakdown.plain_tensors,
         "plain_bytes": breakdown.plain_bytes,
-        # i8 の companion scale（ランタイムの residentCompressedBytes も同じものを足す）。
+        # The i8 companion scales (the runtime's residentCompressedBytes adds the same thing).
         "scale_bytes": breakdown.scale_bytes,
         "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
@@ -1206,18 +1344,20 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
     }
 
 
-# ---- パッチ前後の eager 同値 -----------------------------------------------
+# ---- Eager equivalence before and after the patch ------------------------------
 
 
 def verify_target(target: str, args: argparse.Namespace) -> list[dict[str, Any]]:
-    """パッチ層適用前後の eager 同値を実重みで実測する（ADR 0016）。
+    """Measure the eager equivalence before and after the patch layer with the real weights
+    (ADR 0016).
 
-    `bit_exact` は「差 0」より強い主張（`0.0 == -0.0` は差 0 だがビットは違う）で、Qwen3 /
-    conditioner のマスク落としのように**ビット一致が主張の中身**である検証で意味を持つ。
+    `bit_exact` is a stronger claim than "difference 0" (`0.0 == -0.0` has difference 0 but
+    different bits), and it matters for checks where **bit identity is the content of the claim**,
+    such as dropping the masks of Qwen3 / the conditioner.
     """
     component = BUILDERS[target](args, True)
     if component.reference is None:
-        raise AssertionError(f"{target}: --verify なのに参照が採られていない")
+        raise AssertionError(f"{target}: --verify, but no reference was taken")
     report: list[dict[str, Any]] = []
     for index, ((name, inputs), expected) in enumerate(
         zip(component.cases, component.reference, strict=True)
@@ -1250,18 +1390,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 —"
-        " outputs/series/anima{,-f16,-bf16,-i8,-i4}/・ADR 0018）",
+        help="output directory (default: the series for each --dtype —"
+        " outputs/series/anima{,-f16,-bf16,-i8,-i4}/, ADR 0018)",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
         help=(
-            "重みの格納 dtype（f16 / i8 / i4 は fake-quant してから適格スロットだけ圧縮格納する。"
-            "i4 は混成で、適格な重みが group32 の i4・残りは i8 — ADR 0069。"
-            "i4 の DiT block 内 linear は GPTQ 校正付きで丸める（perf-ledger Q-6）。"
-            "i8 / i4 は transformer 専用 — ADR 0019）"
+            "storage dtype of the weights (f16 / i8 / i4 are fake-quantized and then only the"
+            " eligible slots are stored compressed. i4 is mixed: eligible weights are group32 i4,"
+            " the rest i8 — ADR 0069. The linears inside the DiT blocks are rounded to i4 with GPTQ"
+            " calibration (perf-ledger Q-6). i8 / i4 are transformer only — ADR 0019)"
         ),
     )
     parser.add_argument(
@@ -1269,200 +1409,230 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="append",
         choices=TARGETS,
         default=None,
-        help=f"emit するターゲット（繰り返し可・既定は全て: {', '.join(TARGETS)}）",
+        help=f"target to emit (repeatable; default all: {', '.join(TARGETS)})",
     )
     parser.add_argument(
         "--verify",
         choices=TARGETS,
         default=None,
-        help="パッチ前後の eager 同値を検証する（emit はしない・1 プロセス 1 ターゲット）",
+        help="verify eager equivalence before and after the patch (no emit; one target per"
+        " process)",
     )
     parser.add_argument(
         "--dit-graph",
         choices=DIT_GRAPHS,
         default=DIT_GRAPHS[0],
         help=(
-            "DiT のグラフ形（dyn = トークン長 1 シンボル S の追加系列・transformer 専用。"
-            "既定 out に -dyn が付く — #21 波 T2）"
+            "shape of the DiT graph (dyn = the additional series with the single token-length"
+            " symbol S, transformer only. -dyn is appended to the default out — #21 phase T2)"
         ),
     )
-    parser.add_argument("--sym-max", type=int, default=SYM_MAX, help="text 系の記号次元の上限")
-    parser.add_argument("--resolution", type=int, default=RESOLUTION, help="生成解像度（px）")
+    parser.add_argument(
+        "--sym-max", type=int, default=SYM_MAX, help="upper bound of the text symbolic dimensions"
+    )
+    parser.add_argument(
+        "--resolution", type=int, default=RESOLUTION, help="generation resolution (px)"
+    )
     parser.add_argument(
         "--num-layers",
         type=int,
         default=None,
-        help="DiT / Qwen3 の層切り詰め（開発イテレーション用 — LoRA は切り詰め前に焼く）",
+        help="layer truncation of the DiT / Qwen3 (for development iterations — the LoRA is merged"
+        " before truncation)",
     )
     parser.add_argument(
         "--lora",
         type=Path,
         default=None,
-        help="export 前に重みへ焼き込む LoRA（transformer / text_conditioner に効く）",
+        help="LoRA merged into the weights before export (applies to transformer /"
+        " text_conditioner)",
     )
-    parser.add_argument("--lora-scale", type=float, default=1.0, help="LoRA の倍率")
+    parser.add_argument("--lora-scale", type=float, default=1.0, help="scale of the LoRA")
     parser.add_argument(
         "--calib-prompts",
         type=int,
         default=DEFAULT_CALIB_PROMPTS,
-        help=f"i4 の GPTQ 校正に使うプロンプト本数（先頭 N 本・既定 {DEFAULT_CALIB_PROMPTS}・"
-        f"上限 {len(CALIB_PROMPTS)} — 本数は品質の上振れ軸で、export の CPU 時間に線形に効く）",
+        help=f"number of prompts for the i4 GPTQ calibration (the first N; default"
+        f" {DEFAULT_CALIB_PROMPTS}, at most {len(CALIB_PROMPTS)} — the count is an axis for raising"
+        " quality and scales the export's CPU time linearly)",
     )
     parser.add_argument(
         "--no-calib",
         action="store_true",
-        help="i4 を校正なしの素の RTN で丸める（テスト / smoke 用 — 配布資産にしないこと）",
+        help="round i4 with plain RTN without calibration (for tests / smoke — not for distribution"
+        " assets)",
     )
     parser.add_argument(
         "--calib-device",
         choices=CALIB_DEVICES,
         default=CALIB_SHIPPABLE_DEVICE,
-        help="GPTQ 校正（捕捉 + 丸め）を回すデバイス"
-        f"（既定 {CALIB_SHIPPABLE_DEVICE}）。cuda は感度実験用 — 丸め解が CPU と変わるので"
-        "配布経路には使わない（calib_provenance の method にデバイス名が付き、"
-        "配布の一致検査に落ちる）",
+        help="device on which the GPTQ calibration (capture + rounding) runs"
+        f" (default {CALIB_SHIPPABLE_DEVICE}). cuda is for sensitivity experiments — its rounding"
+        " solution differs from the CPU's, so it is not used on the distribution path (the method"
+        " in calib_provenance carries the device name and fails the distribution consistency"
+        " check)",
     )
     parser.add_argument(
         "--i4-adaln-i8",
         action="store_true",
-        help="i4 の量子化感度実験変種: block 内 adaLN（norm1/2/3 の linear_1/2）と block 外の"
-        f" {len(NON_STAGE_I4_WEIGHTS)} 本を i8 格納へ回し、残りだけを i4 にする"
-        f"（既定 OFF・系列名と calib_provenance の method に -{ADALN_I8_TAG} が付き、"
-        "配布の一致検査に落ちる = 視認評価専用）",
+        help="quantization-sensitivity experiment variant of i4: moves the adaLN inside the blocks"
+        " (linear_1/2 of norm1/2/3) and the"
+        f" {len(NON_STAGE_I4_WEIGHTS)} outside the blocks to i8 storage, and makes only the rest i4"
+        f" (default OFF; the series name and the method in calib_provenance get -{ADALN_I8_TAG},"
+        " which fails the distribution consistency check = for visual evaluation only)",
     )
     parser.add_argument(
         "--model",
         choices=tuple(ANIMA_MODELS),
         default=None,
-        help="校正条件（step 数 / CFG / negative prompt）を引く配布モデル名"
-        "（--dtype i4 の校正で必須 — 既定値は置かない）",
+        help="distribution model name from which the calibration conditions (steps / CFG / negative"
+        " prompt) are taken (required for the --dtype i4 calibration — no default)",
     )
     args = parser.parse_args(argv)
     if args.out is None:
-        # MUST: 変種は既定 out でも**別ディレクトリ**（配布条件で焼いた i4 系列を、視認用の
-        # 変種が同じ path へ上書きしない）。校正デバイスも同じ穴 — cuda で焼いた i4 は丸め解が
-        # 別物なのに、既定 out を共有すると配布条件の系列を黙って潰す。接尾辞の順は
-        # `-adaln8` → `-cuda` → `-dyn` で、grep したときグラフ形が末尾に揃う。
+        # MUST: a variant goes to **a separate directory** even with the default out (so that a
+        # variant for visual review never overwrites, at the same path, the i4 series baked under
+        # the distribution conditions). The calibration device is the same hole — i4 baked on cuda
+        # has a different rounding solution, yet sharing the default out would silently clobber the
+        # series of the distribution conditions. The suffix order is `-adaln8` → `-cuda` → `-dyn`,
+        # so that the graph shape lines up at the end when grepping.
         root = DEFAULT_OUT_ROOTS[args.dtype]
         name = root.name + (f"-{ADALN_I8_TAG}" if args.i4_adaln_i8 else "")
         if args.calib_device != CALIB_SHIPPABLE_DEVICE:
             name += f"-{args.calib_device}"
         args.out = root.with_name(name + (DYN_SUFFIX if args.dit_graph == "dyn" else ""))
 
-    # MUST: 同一プロセスでの併用を機械的に拒否する。VAE パッチはプロセス全域の差し替えなので、
-    # emit 側が先に当てると「パッチ前の参照」が汚染され、同値検証が恒真化して偽 PASS する
-    # （ADR 0013 / 0016）。順序を main の中で気をつける規律にはしない。
+    # MUST: mechanically reject combining them in one process. The VAE patch is a process-wide
+    # replacement, so if the emit side applied it first, "the pre-patch reference" would be
+    # contaminated and the equivalence check would pass vacuously as a false PASS (ADR 0013 / 0016).
+    # Keeping the order right inside main is not left to discipline.
     if args.verify is not None and args.target is not None:
         parser.error(
-            "--verify と --target は同一プロセスで併用できない"
-            "（VAE パッチのプロセス全域差し替えで参照が汚染され、同値検証が恒真化する）"
+            "--verify and --target cannot be combined in one process (the process-wide replacement"
+            " of the VAE patch contaminates the reference and makes the equivalence check vacuous)"
         )
 
-    # MUST: 格納 dtype が扱えないターゲットは**明示指定でも**拒否する（既定を絞るだけだと
-    # `--target vae_decoder --dtype i8` が通ってしまい、ADR 0019 が排除した形の資産が
-    # 黙って生える）。`--verify` も同じ表で見る（検証だけ通る dtype を作らない）。
+    # MUST: reject a target the storage dtype cannot handle **even when given explicitly** (only
+    # narrowing the default would let `--target vae_decoder --dtype i8` through, and assets of a
+    # form ADR 0019 ruled out would silently appear). `--verify` is checked against the same table
+    # (no dtype that passes only for verification).
     allowed = DTYPE_TARGETS[args.dtype]
     requested = [*(args.target or []), *([args.verify] if args.verify is not None else [])]
     outside = sorted({name for name in requested if name not in allowed})
     if outside:
         parser.error(
-            f"--dtype {args.dtype} が扱えるターゲットは {', '.join(allowed)} だけ"
-            f"（指定: {', '.join(outside)} — ADR 0019 の系列設計）"
+            f"--dtype {args.dtype} handles only the targets {', '.join(allowed)}"
+            f" (given: {', '.join(outside)} — the series design of ADR 0019)"
         )
 
-    # MUST: 校正のノブは i4 だけに効く。他系列で受けると「校正を外したつもりの f16 資産」の
-    # ような読めない指定が通る（f16 / i8 / f32 に校正の経路は 1 本も無い）。
+    # MUST: the calibration knobs apply only to i4. Accepting them for another series would let
+    # through an unreadable request such as "an f16 asset meant to be without calibration" (f16 /
+    # i8 / f32 have no calibration path at all).
     if args.dtype != "i4" and (args.no_calib or args.calib_prompts != DEFAULT_CALIB_PROMPTS):
         parser.error(
-            f"--calib-prompts / --no-calib は --dtype i4 だけに効く（指定は {args.dtype}）"
-            " — 校正付き丸めは i4 系列の経路（perf-ledger Q-6）"
+            f"--calib-prompts / --no-calib apply only to --dtype i4 (given {args.dtype})"
+            " — calibrated rounding is the path of the i4 series (perf-ledger Q-6)"
         )
 
-    # MUST: 役割別の格納割りも i4 だけに効く（他系列に i4 / i8 の割り方は 1 通りも無い）。
-    # 受けてしまうと「adaLN を i8 にしたつもりの f16 資産」という読めない指定が通る。
+    # MUST: the per-role storage split also applies only to i4 (other series have no i4 / i8 split
+    # at all). Accepting it would let through an unreadable request: "an f16 asset meant to have its
+    # adaLN in i8".
     if args.dtype != "i4" and args.i4_adaln_i8:
-        parser.error(f"--i4-adaln-i8 は --dtype i4 だけに効く（指定は {args.dtype}）")
+        parser.error(f"--i4-adaln-i8 applies only to --dtype i4 (given {args.dtype})")
 
-    # MUST: 校正条件は**モデル別**に名指しさせる（既定を置かない）。step 数と CFG は配布形の
-    # 既定から導く（`calib.calib_conditions`）ので、`--model` を忘れた素版の i4 が turbo の
-    # 条件（8 step・CFG 1）で黙って校正される形にはできない — 出来上がる資産は格納形も本数も
-    # 正しく、`verify_dist` もヘッダ検査も素通りし、`calib_provenance.json` にはその条件が
-    # 事実として書かれる（記録が嘘をつくと突き合わせの機構ごと無意味になる）。
+    # MUST: the calibration conditions have to be named **per model** (no default). The step count
+    # and CFG are derived from the distribution defaults (`calib.calib_conditions`), so a base-model
+    # i4 that forgot `--model` must not be silently calibrated under turbo's conditions (8 steps,
+    # CFG 1) — the resulting assets would have the right storage form and count, pass `verify_dist`
+    # and the header checks, and `calib_provenance.json` would record those conditions as fact (a
+    # record that lies makes the whole cross-check mechanism meaningless).
     calibrating = args.dtype == "i4" and not args.no_calib
     if calibrating and args.model is None:
         parser.error(
-            f"--dtype i4 の校正は --model が要る（選択肢: {', '.join(ANIMA_MODELS)}）"
-            " — 校正の step 数 / CFG は配布形の既定から引く（anima.calib.calib_conditions）"
+            f"the --dtype i4 calibration needs --model (choices: {', '.join(ANIMA_MODELS)})"
+            " — the calibration steps / CFG come from the distribution defaults"
+            " (anima.calib.calib_conditions)"
         )
     if args.model is not None and not calibrating:
-        knob = f"--dtype {args.dtype}" + ("・--no-calib" if args.no_calib else "")
-        parser.error(f"--model は --dtype i4 の校正条件を引くためだけのノブ（指定は {knob}）")
-
-    # MUST: 校正デバイスも校正するときだけ効くノブ（`--calib-prompts` / `--no-calib` と同文）。
-    # 受けてしまうと「GPU で焼いたつもりの f16 資産」という読めない指定が通る。
-    if args.calib_device != CALIB_SHIPPABLE_DEVICE and not calibrating:
-        knob = f"--dtype {args.dtype}" + ("・--no-calib" if args.no_calib else "")
-        parser.error(f"--calib-device は --dtype i4 の校正だけに効く（指定は {knob}）")
-
-    # MUST: 使えないデバイスは**校正を始める前**に落とす。校正は数十分〜数時間の経路で、
-    # 途中の `Module.to` で落ちると block 外 RTN と i8 丸めまで済んだ状態を捨てることになる。
-    if args.calib_device == "cuda" and not torch.cuda.is_available():
+        knob = f"--dtype {args.dtype}" + (", --no-calib" if args.no_calib else "")
         parser.error(
-            "--calib-device cuda を指定したが torch から CUDA が見えない"
-            "（CPU 版 torch / ドライバ未検出 — CPU へ黙って落ちる分岐は持たない）"
+            f"--model is a knob only for taking the --dtype i4 calibration conditions"
+            f" (given {knob})"
         )
 
-    # MUST: 効かないノブを黙って受けない。S 形は transformer 専用（他 3 ターゲットは解像度に
-    # 依らないので共有）で、解像度はケース表 DIT_DYN_RESOLUTIONS が決める（`--resolution` は
-    # 1 本も効かない）。受けてしまうと「512 のつもりの資産が実は無関係に生えた」形になる。
+    # MUST: the calibration device is also a knob that applies only when calibrating (the same as
+    # `--calib-prompts` / `--no-calib`). Accepting it would let through an unreadable request: "an
+    # f16 asset meant to be baked on the GPU".
+    if args.calib_device != CALIB_SHIPPABLE_DEVICE and not calibrating:
+        knob = f"--dtype {args.dtype}" + (", --no-calib" if args.no_calib else "")
+        parser.error(f"--calib-device applies only to the --dtype i4 calibration (given {knob})")
+
+    # MUST: fail on an unusable device **before the calibration starts**. Calibration is a path of
+    # tens of minutes to hours, and failing at a `Module.to` midway would throw away the state in
+    # which the RTN outside the blocks and the i8 rounding are already done.
+    if args.calib_device == "cuda" and not torch.cuda.is_available():
+        parser.error(
+            "--calib-device cuda was given but torch sees no CUDA (CPU build of torch / no driver"
+            " found — there is no branch that silently falls back to the CPU)"
+        )
+
+    # MUST: do not silently accept a knob that has no effect. The S form is transformer only (the
+    # other 3 targets do not depend on the resolution, so they are shared), and the resolutions are
+    # decided by the case table DIT_DYN_RESOLUTIONS (`--resolution` has no effect at all).
+    # Accepting it would produce "an asset meant to be 512 that actually appeared unrelated".
     if args.dit_graph == "dyn":
         others = sorted({name for name in requested if name != TARGET_TRANSFORMER})
         if others:
             parser.error(
-                f"--dit-graph dyn は {TARGET_TRANSFORMER} 専用（指定: {', '.join(others)}）"
+                f"--dit-graph dyn is for {TARGET_TRANSFORMER} only (given: {', '.join(others)})"
             )
         if args.resolution != RESOLUTION:
             parser.error(
-                "--dit-graph dyn では --resolution が効かない"
-                f"（golden の解像度は {DIT_DYN_RESOLUTIONS} 固定 — グラフは解像度を持たない）"
+                "--resolution has no effect with --dit-graph dyn"
+                f" (the golden resolutions are fixed at {DIT_DYN_RESOLUTIONS} — the graph has no"
+                " resolution)"
             )
         if args.target is None and args.verify is None:
             args.target = [TARGET_TRANSFORMER]
 
-    # 実際に走る対象。`--target` 省略時は dtype の既定集合（`allowed`）なので、下のノブ検査は
-    # `requested` ではなくこの集合で判定する（省略時に LoRA の対象が在るのに拒否する形にしない）。
+    # The targets that actually run. Without `--target` it is the dtype's default set (`allowed`),
+    # so the knob checks below judge by this set, not by `requested` (so as not to reject when the
+    # default includes a LoRA target).
     targets = (
         [args.verify]
         if args.verify is not None
         else list(dict.fromkeys(args.target if args.target is not None else allowed))
     )
 
-    # MUST: 効かないノブを黙って受けない（`--dit-graph dyn` / 校正ノブと同じ強さ）。対象に
-    # LoRA の効くターゲットが 1 本も無い `--lora` は何も焼かず、記録も書かれない — 「LoRA を
-    # 焼いたつもりの系列」が記録なしで生える。`--lora-scale` は `--lora` 無しでは効かず、
-    # `--num-layers` も層列を持つターゲットが無ければ 1 本も切らない。
+    # MUST: do not silently accept a knob that has no effect (the same strength as `--dit-graph dyn`
+    # / the calibration knobs). A `--lora` with no LoRA-capable target among the targets merges
+    # nothing and writes no record — "a series meant to have the LoRA merged" would appear without a
+    # record. `--lora-scale` has no effect without `--lora`, and `--num-layers` truncates nothing
+    # without a target that has a layer list.
     if args.lora is not None and not any(name in LORA_PREFIXES for name in targets):
         parser.error(
-            f"--lora が効くターゲットは {', '.join(LORA_PREFIXES)} だけ"
-            f"（対象: {', '.join(targets)}）"
+            f"--lora applies only to the targets {', '.join(LORA_PREFIXES)}"
+            f" (targets: {', '.join(targets)})"
         )
     if args.lora is None and args.lora_scale != 1.0:
-        parser.error(f"--lora-scale は --lora と一緒にだけ効く（指定は {args.lora_scale}）")
+        parser.error(f"--lora-scale applies only together with --lora (given {args.lora_scale})")
     if args.num_layers is not None and not any(name in NUM_LAYERS_TARGETS for name in targets):
         parser.error(
-            f"--num-layers が効くターゲットは {', '.join(NUM_LAYERS_TARGETS)} だけ"
-            f"（対象: {', '.join(targets)}）"
+            f"--num-layers applies only to the targets {', '.join(NUM_LAYERS_TARGETS)}"
+            f" (targets: {', '.join(targets)})"
         )
 
-    # MUST: 校正の解像度はグラフの解像度と揃っていること。校正入力は
-    # `calib.CALIB_RESOLUTION` 固定（品質裁定が採られた条件を動かさないための設計 — あちらの
-    # NOTE）なので、`--resolution` を振ると「別の解像度で選んだ丸め先」を焼き込んだグラフが
-    # 黙って生える（活性のトークン数が変わるだけで数値は普通に出る）。dyn は `--resolution` を
-    # 上で既に弾いているので、ここに掛かるのは静的形だけ。
+    # MUST: the calibration resolution matches the graph resolution. The calibration inputs are
+    # fixed at `calib.CALIB_RESOLUTION` (a design that keeps the conditions under which the quality
+    # ruling was made from moving — the NOTE there), so varying `--resolution` would silently
+    # produce a graph baked with "rounding targets chosen at another resolution" (only the
+    # activation token count changes, and the numbers come out normally). dyn already rejected
+    # `--resolution` above, so this applies only to the static form.
     if args.dtype == "i4" and not args.no_calib and args.resolution != calib.CALIB_RESOLUTION:
         parser.error(
-            f"--dtype i4 の校正は {calib.CALIB_RESOLUTION}px 固定（指定は {args.resolution}px）"
-            " — 品質裁定が採られた条件を動かすと根拠の採り直しになる（calib.CALIB_RESOLUTION）"
+            f"the --dtype i4 calibration is fixed at {calib.CALIB_RESOLUTION}px (given"
+            f" {args.resolution}px) — moving the conditions under which the quality ruling was made"
+            " means re-collecting the evidence (calib.CALIB_RESOLUTION)"
         )
 
     if args.verify is not None:

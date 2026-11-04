@@ -1,23 +1,26 @@
-"""`vowel_detector/export.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contract of `vowel_detector/export.py` (the part that needs no real weights).
 
-実重みの emit は手動（既存 `siglip2/export.py` / `birefnet/export.py` のテストと同じ規律）。
-ここは **tiny な合成重み**（{@link tiny_module} — 寸法だけ小さくした同じ `Crnn`）で同じ経路を
-一周し、壊れると**偽 PASS** になる側の規律を固定する:
+Emitting with the real weights is manual (the same discipline as the existing tests of
+`siglip2/export.py` / `birefnet/export.py`). Here **tiny synthetic weights** ({@link tiny_module}
+— the same `Crnn` with only the dimensions shrunk) run the same path once, pinning the rules whose
+breakage would produce a **false PASS**:
 
-- 写したモデル定義が上流の state_dict と同じ鍵・同じ形を持つこと（実重みが無い環境で
-  「写しのずれ」を落とせる唯一の門 — {@link TestTranscription}）
-- emit した initializer が state_dict と**バイト一致**すること、および重み由来でない
-  initializer が紛れないこと（{@link TestCheckpointBytes}）
-- 長さが 20ms 格子に乗ること（奇数長は末尾に半端フレームを作る）
-- **時間軸が記号のまま焼かれる**こと（`2T` — この台本の存在理由。ADR 0056 / 0057）
-- golden の期待値が**参照経路**（`nn.GRU`）から採られ、差し替え経路とのビット一致が
-  emit ごとに見られていること（{@link TestWriteIo}）
-- golden の合成ケースが**互いに違う**こと（同じ入力を 2 度使うと sanity が恒真）
-- `_sanity` が確率質量の**順序**を見ること（値域検査も自己一致も恒真）
-- `--verify` が emit しないこと
+- the copied model definition has the same keys and shapes as the upstream state_dict (the only
+  check that can catch "a drifted copy" in an environment without the real weights —
+  {@link TestTranscription})
+- the emitted initializers are **byte-identical** to the state_dict, and no initializer that does
+  not come from the weights slips in ({@link TestCheckpointBytes})
+- the length is on the 20 ms grid (an odd length leaves a partial frame at the end)
+- **the time axis is baked as a symbol** (`2T` — the reason this script exists; ADR 0056 / 0057)
+- the golden expected values are taken from the **reference path** (`nn.GRU`), and bit identity
+  with the replacement path is checked on every emit ({@link TestWriteIo})
+- the golden synthetic cases **differ from each other** (using the same input twice makes the
+  sanity check vacuous)
+- `_sanity` checks the **order** of probability mass (a range check or self-agreement is vacuous)
+- `--verify` does not emit
 
-差し替え層そのもの（`nn.GRU` とのビット一致・対応外の fail loudly）は
-`vowel_detector/tests/test_patch.py` が持つ。
+The replacement layer itself (bit identity with `nn.GRU`, unsupported shapes failing loudly) is
+covered by `vowel_detector/tests/test_patch.py`.
 """
 
 from __future__ import annotations
@@ -36,22 +39,26 @@ from karume.verify import verify_container
 from vowel_detector import export as vd
 from vowel_detector.distribution import VOWEL_DETECTOR_GRAPH_ROLE, VOWEL_DETECTOR_WEIGHTS
 
-#: tiny な合成重みの寸法（特徴 83 次元だけは {@link vd.build_cases} と揃える）。
+#: Dimensions of the tiny synthetic weights (only the 83 feature dimensions match
+#: {@link vd.build_cases}).
 TINY_HIDDEN = 4
 TINY_GRU_HIDDEN = 3
 
-#: tiny な export で使う長さ（`MIN_LENGTH` より上で、GRU の展開が数十ノードに収まる）。
+#: Length used by the tiny export (above `MIN_LENGTH`, and the GRU unrolling stays within a few
+#: dozen nodes).
 TINY_LENGTH = 8
 
-#: 実発話（1.1 秒）で実測した log-mel z 値のレンジ（{@link vd.build_cases} の docstring）。
+#: Range of log-mel z values measured on a real utterance (1.1 seconds; the docstring of
+#: {@link vd.build_cases}).
 MEASURED_LOG_MEL_MIN = -1.04
 MEASURED_LOG_MEL_MAX = 3.72
 
-#: 値域の外側まで踏む回帰用ケース（上のレンジの主張から名指しで外れる唯一の 1 本）。
+#: Regression case that goes beyond the range (the only case explicitly exempt from the range claim
+#: above).
 RAMP_CASE = "ramp"
 
-#: 上流 `training/src/vowel_detector/crnn.py` + 学習済み `.pt` が持つ 22 本の重み
-#: （鍵と形）。**写しの契約表**で、写しが構造ごとずれたらここで落ちる。
+#: The 22 weights (keys and shapes) of upstream's `training/src/vowel_detector/crnn.py` + the
+#: trained `.pt`. **The contract table of the copy**: if the copy's structure drifts, it fails here.
 UPSTREAM_PARAMETERS: dict[str, tuple[int, ...]] = {
     "conv.0.weight": (160, 83, 5),
     "conv.0.bias": (160,),
@@ -77,15 +84,15 @@ UPSTREAM_PARAMETERS: dict[str, tuple[int, ...]] = {
     "head.bias": (8,),
 }
 
-#: 上流のパラメタ総数（`crnn_epoch3.pt` の実測）。
+#: Total number of upstream parameters (measured on `crnn_epoch3.pt`).
 UPSTREAM_PARAMETER_COUNT = 664_744
 
 
 def _probabilities(pau: float, vowel: float) -> torch.Tensor:
-    """平均 P(pau) と平均母音質量が指定値になる `[1, 2, 8]` のロジット。
+    """Logits `[1, 2, 8]` whose mean P(pau) and mean vowel mass are the given values.
 
-    softmax を通した後の質量で `_sanity` が判定するので、log を取って戻す
-    （残りは N / cons の 2 クラスへ均等に配る）。
+    `_sanity` judges by the mass after softmax, so the log is taken to go back
+    (the rest is split evenly between the 2 classes N / cons).
     """
     rest = (1.0 - pau - vowel) / 2.0
     row = [vowel / vd.VOWEL_COUNT] * vd.VOWEL_COUNT + [rest, pau, rest]
@@ -93,7 +100,7 @@ def _probabilities(pau: float, vowel: float) -> torch.Tensor:
 
 
 def _pooled(silence_pau: float, voiced_vowel: float) -> dict[str, torch.Tensor]:
-    """4 ケース分のロジット（無音の P(pau) と有声の母音質量だけを動かす）。"""
+    """Logits for the 4 cases (only silence's P(pau) and voiced's vowel mass vary)."""
     return {
         vd.SILENCE_CASE: _probabilities(silence_pau, 0.3),
         vd.VOICED_CASE: _probabilities(0.02, voiced_vowel),
@@ -104,18 +111,18 @@ def _pooled(silence_pau: float, voiced_vowel: float) -> dict[str, torch.Tensor]:
 
 @pytest.fixture
 def tiny_module() -> vd.Crnn:
-    """寸法だけ小さくした同じ `Crnn`（実重みは要らない）。"""
+    """The same `Crnn` with only the dimensions shrunk (no real weights needed)."""
     torch.manual_seed(0)
     return vd.Crnn(hidden=TINY_HIDDEN, gru_hidden=TINY_GRU_HIDDEN).eval()
 
 
 def _tiny_shapes() -> dict[str, dict[int, Dim]]:
-    """台本と**同じ宣言**（記号長 `2T`）。"""
+    """**The same declaration** as the script (symbolic length `2T`)."""
     return {vd.INPUT_NAME: {1: 2 * Dim("T", min=vd.SYM_MIN, max=vd.SYM_MAX)}}
 
 
 def _export_tiny(module: vd.Crnn, out_dir: Path):
-    """台本と**同じ宣言**で 1 本 export する。"""
+    """Export one graph with **the same declaration** as the script."""
     example = vd.build_cases(TINY_LENGTH)[0][1]
     return export_to_file(
         module,
@@ -130,13 +137,14 @@ def _export_tiny(module: vd.Crnn, out_dir: Path):
 
 @pytest.fixture
 def exported(tmp_path: Path, tiny_module: vd.Crnn):
-    """tiny なモジュールを 1 本 export して `(module, graph, out_dir)` を返す。"""
+    """Export the tiny module once and return `(module, graph, out_dir)`."""
     return tiny_module, _export_tiny(tiny_module, tmp_path), tmp_path
 
 
 class TestTranscription:
     def test_the_transcribed_definition_has_the_upstream_parameters(self) -> None:
-        """MUST: 写しの鍵と形が上流と一致する（ずれると実重みが読めない）。"""
+        """MUST: the copy's keys and shapes match upstream (if they drift, the real weights cannot
+        be loaded)."""
         state_dict = vd.Crnn().state_dict()
 
         assert {name: tuple(tensor.shape) for name, tensor in state_dict.items()} == (
@@ -145,7 +153,8 @@ class TestTranscription:
         assert sum(tensor.numel() for tensor in state_dict.values()) == UPSTREAM_PARAMETER_COUNT
 
     def test_the_output_grid_is_half_the_input(self, tiny_module: vd.Crnn) -> None:
-        """conv の stride 2 が 10ms を 20ms へ畳む（後処理の frame_sec 0.02 の根拠）。"""
+        """conv stride 2 folds 10 ms into 20 ms (the basis of the post-processing's frame_sec
+        0.02)."""
         features = vd.build_cases(TINY_LENGTH)[0][1]
 
         with torch.no_grad():
@@ -154,7 +163,8 @@ class TestTranscription:
         assert tuple(logits.shape) == (1, TINY_LENGTH // 2, len(vd.CLASSES))
 
     def test_the_class_table_matches_the_upstream_order(self) -> None:
-        """クラスの並びは後処理と共有の規約（pau の位置がずれると sanity が別物を見る）。"""
+        """The class order is a convention shared with post-processing (if pau moves, sanity looks
+        at something else)."""
         assert vd.CLASSES == ("a", "i", "u", "e", "o", "N", "pau", "cons")
         assert vd.CLASSES[vd.PAU_INDEX] == "pau"
         assert vd.CLASSES[: vd.VOWEL_COUNT] == ("a", "i", "u", "e", "o")
@@ -162,25 +172,28 @@ class TestTranscription:
 
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self) -> None:
-        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — _shared.paths）。"""
+        """Series output goes under `outputs/series/` (not the distribution's `models/` —
+        _shared.paths)."""
         assert vd.default_out_dir(vd.DEFAULT_CKPT).parent == SERIES_ROOT
 
     def test_the_series_name_does_not_carry_a_length(self) -> None:
-        """グラフは 1 本（時間軸は記号）— 長さを綴ると「長さごとの資産」に見える。"""
+        """There is one graph (the time axis is symbolic) — spelling a length would make it look
+        like "an asset per length"."""
         assert vd.default_out_dir(vd.DEFAULT_CKPT).name == "vowel-detector-crnn-epoch3"
 
     def test_each_checkpoint_gets_its_own_series(self) -> None:
-        """MUST: epoch 違いは別系列（同じ席へ書くと先の重みが消える）。"""
+        """MUST: a different epoch is a different series (writing to the same location would erase
+        the earlier weights)."""
         other = vd.MODELS_ROOT / "crnn_epoch2.pt"
 
         assert vd.default_out_dir(other) != vd.default_out_dir(vd.DEFAULT_CKPT)
 
 
 class TestSymbolicLength:
-    """この台本の存在理由 — 長さが**グラフの受理集合に含まれない**こと。"""
+    """The reason this script exists — length is **not part of what the graph accepts**."""
 
     def test_the_time_axis_is_symbolic(self, exported) -> None:
-        """入力は `2T`（10ms 格子）・出力は `T`（20ms 格子）。"""
+        """The input is `2T` (10 ms grid) and the output is `T` (20 ms grid)."""
         _module, graph, _out_dir = exported
 
         assert graph.symbols == ["T"]
@@ -190,10 +203,10 @@ class TestSymbolicLength:
     def test_the_graph_does_not_grow_with_the_traced_length(
         self, exported, tmp_path: Path, tiny_module: vd.Crnn
     ) -> None:
-        """MUST: ノード数がトレース例の長さに依存しない。
+        """MUST: the node count does not depend on the length of the tracing example.
 
-        依存していたら GRU がまだ時間方向へ展開されている（= 記号が保たれていない）。
-        以前の形は入力 1 フレームあたり 38 ノードで、T10=200 で 8,434 ノードだった。
+        If it did, the GRU would still be unrolled along time (= the symbol is not preserved).
+        The earlier form had 38 nodes per input frame, 8,434 nodes at T10=200.
         """
         _module, short, _out_dir = exported
         long_dir = tmp_path / "long"
@@ -212,21 +225,23 @@ class TestSymbolicLength:
         assert [node.op for node in long.nodes] == [node.op for node in short.nodes]
 
     def test_the_scan_ops_are_one_node_per_layer_and_direction(self, exported) -> None:
-        """多層・双方向は**ノードを並べて**表す（ADR 0056 決定 7 — 可変アリティを使わない）。"""
+        """Multiple layers and both directions are expressed **as a sequence of nodes** (ADR 0056
+        decision 7 — no variable arity)."""
         _module, graph, _out_dir = exported
         ops = [node.op for node in graph.nodes]
 
         assert ops.count("gru_scan") == vd.GRU_LAYERS
         assert ops.count("gru_scan_reverse") == vd.GRU_LAYERS
-        # 層ごとに両方向を連結する `cat` が 1 本ずつ。
+        # One `cat` per layer joining both directions.
         assert ops.count("cat") == vd.GRU_LAYERS
 
 
 class TestLength:
     @pytest.mark.parametrize("length", [201, 3, 0, -2])
     def test_a_length_off_the_grid_fails_loudly(self, length: int) -> None:
-        """奇数長は末尾に 10ms 分しか持たない半端フレームを作る（20ms 格子が崩れる）。"""
-        with pytest.raises(SystemExit, match="20ms 格子"):
+        """An odd length leaves a partial frame holding only 10 ms at the end (breaking the 20 ms
+        grid)."""
+        with pytest.raises(SystemExit, match="20 ms grid"):
             vd.assert_length(length)
 
     @pytest.mark.parametrize("length", [vd.MIN_LENGTH, 200, 1000])
@@ -236,19 +251,20 @@ class TestLength:
 
 class TestCheckpoint:
     def test_a_missing_checkpoint_fails_loudly(self, tmp_path: Path) -> None:
-        with pytest.raises(SystemExit, match="チェックポイントが見つからない"):
+        with pytest.raises(SystemExit, match="checkpoint not found"):
             vd.load_checkpoint(tmp_path / "absent.pt")
 
     def test_an_unexpected_wrapper_fails_loudly(self, tmp_path: Path) -> None:
-        """MUST: 外側の形が変わったら止める（黙って別の鍵を state_dict と見なさない）。"""
+        """MUST: stop when the outer shape changes (do not silently treat another key as the
+        state_dict)."""
         path = tmp_path / "ckpt.pt"
         torch.save({"state_dict": {}, "epoch": 0}, path)
 
-        with pytest.raises(SystemExit, match="外側ラッパの鍵"):
+        with pytest.raises(SystemExit, match="the outer wrapper keys"):
             vd.load_checkpoint(path)
 
     def test_it_loads_on_cpu(self, tmp_path: Path, tiny_module: vd.Crnn) -> None:
-        """MUST: `map_location="cpu"`（上流の学習台本は CUDA で保存する）。"""
+        """MUST: `map_location="cpu"` (the upstream training script saves on CUDA)."""
         path = tmp_path / "ckpt.pt"
         torch.save({vd.STATE_DICT_KEY: tiny_module.state_dict(), "epoch": 3}, path)
 
@@ -258,7 +274,7 @@ class TestCheckpoint:
         assert all(tensor.device.type == "cpu" for tensor in state_dict.values())
 
     def test_a_shape_mismatch_is_caught_by_strict_loading(self, tiny_module: vd.Crnn) -> None:
-        """MUST: 写しのずれは `strict=True` が落とす（黙って一部だけ読まない）。"""
+        """MUST: `strict=True` catches a drifted copy (it does not silently load only a part)."""
         with pytest.raises(RuntimeError, match=r"size mismatch|Missing key"):
             vd.load_module(tiny_module.state_dict())
 
@@ -272,32 +288,35 @@ class TestCheckpointBytes:
         assert matched == len(module.state_dict())
 
     def test_a_changed_byte_fails_loudly(self, exported) -> None:
-        """MUST: 値が変わったら落とす（変換は「読んで書くだけ」— 値は変わらない）。"""
+        """MUST: fail when a value changes (conversion is "read and write only" — values do not
+        change)."""
         module, _graph, out_dir = exported
         state_dict = dict(module.state_dict())
         tampered = state_dict["head.bias"].clone()
         tampered[0] += 1.0
         state_dict["head.bias"] = tampered
 
-        with pytest.raises(AssertionError, match="バイト列が一致しない"):
+        with pytest.raises(AssertionError, match="the bytes do not match"):
             vd.assert_checkpoint_bytes(out_dir / vd.MODEL_FILE, state_dict)
 
     def test_a_missing_initializer_fails_loudly(self, exported) -> None:
-        """MUST: ckpt の鍵が容器に 1 本でも無ければ落とす（黙って一部だけ突き合わせない）。"""
+        """MUST: fail if even one ckpt key is missing from the container (do not silently compare
+        only a part)."""
         module, _graph, out_dir = exported
         state_dict = dict(module.state_dict())
         state_dict["conv.0.absent"] = state_dict["conv.0.bias"].clone()
 
-        with pytest.raises(AssertionError, match="initializer に無い"):
+        with pytest.raises(AssertionError, match="missing from the initializers"):
             vd.assert_checkpoint_bytes(out_dir / vd.MODEL_FILE, state_dict)
 
     def test_a_weight_that_is_not_in_the_checkpoint_fails_loudly(self, exported) -> None:
-        """MUST: 重みが別名で入る形を落とす（畳み込み定数だけが `const.` を名乗れる）。"""
+        """MUST: catch a weight stored under another name (only folded constants may carry
+        `const.`)."""
         module, _graph, out_dir = exported
         state_dict = dict(module.state_dict())
         del state_dict["head.bias"]
 
-        with pytest.raises(AssertionError, match="重み由来でない initializer"):
+        with pytest.raises(AssertionError, match="initializers that do not come from the weights"):
             vd.assert_checkpoint_bytes(out_dir / vd.MODEL_FILE, state_dict)
 
 
@@ -308,7 +327,8 @@ class TestGoldenCases:
             assert features.dtype is torch.float32, name
 
     def test_the_dsp_dimensions_stay_in_the_measured_range(self) -> None:
-        """MUST: 実発話のレンジを外れた特徴で golden を採らない（別の分布の突合になる）。"""
+        """MUST: do not take the golden with features outside the range of real speech (that would
+        compare on another distribution)."""
         for name, features in vd.build_cases(TINY_LENGTH):
             voicing, log_energy, zcr = (features[0, 0, vd.N_MELS + i].item() for i in range(3))
             assert 0.0 <= voicing <= 1.0, name
@@ -316,10 +336,11 @@ class TestGoldenCases:
             assert 0.0 <= zcr <= 1.0, name
 
     def test_the_log_mel_plane_stays_in_the_measured_range_except_for_the_ramp(self) -> None:
-        """log-mel も同じ主張の対象（DSP 3 次元だけ見ていると 80 次元が野放しになる）。
+        """log-mel is subject to the same claim (checking only the 3 DSP dimensions would leave the
+        80 dimensions unchecked).
 
-        `ramp` だけは値域の外側まで踏む回帰用ケースなので名指しで除く
-        （{@link vowel_detector.export.build_cases} の docstring と同じ切り分け）。
+        `ramp` alone is a regression case that goes beyond the range, so it is excluded by name
+        (the same split as the docstring of {@link vowel_detector.export.build_cases}).
         """
         for name, features in vd.build_cases(TINY_LENGTH):
             if name == RAMP_CASE:
@@ -329,19 +350,20 @@ class TestGoldenCases:
             assert float(log_mel.max()) <= MEASURED_LOG_MEL_MAX, name
 
     def test_the_ramp_case_deliberately_leaves_the_measured_range(self) -> None:
-        """除外が「実は全部内側だった」に退化していないこと（上の除外を恒真にしない）。"""
+        """The exclusion has not degenerated into "it was all inside anyway" (keeps the exclusion
+        above from being vacuous)."""
         ramp = dict(vd.build_cases(TINY_LENGTH))[RAMP_CASE][0, :, : vd.N_MELS]
 
         assert float(ramp.min()) < MEASURED_LOG_MEL_MIN
         assert float(ramp.max()) > MEASURED_LOG_MEL_MAX
 
     def test_every_case_is_a_different_input(self) -> None:
-        """MUST: 同じ特徴を 2 度使わない — sanity の順序が恒真になる。"""
+        """MUST: do not use the same features twice — the sanity order would become vacuous."""
         cases = vd.build_cases(TINY_LENGTH)
 
         for index, (name, features) in enumerate(cases):
             for other_name, other in cases[index + 1 :]:
-                assert not torch.equal(features, other), f"{name} と {other_name} が同一"
+                assert not torch.equal(features, other), f"{name} and {other_name} are identical"
 
     def test_the_sanity_cases_exist(self) -> None:
         names = {name for name, _ in vd.build_cases(TINY_LENGTH)}
@@ -362,9 +384,10 @@ class TestWriteIo:
         assert tuple(logits[vd.SILENCE_CASE].shape) == (1, TINY_LENGTH // 2, len(vd.CLASSES))
 
     def test_the_expected_values_come_from_the_reference_path(self, exported) -> None:
-        """MUST: 期待値は `nn.GRU` 経路（差し替え経路ではない）。
+        """MUST: the expected values come from the `nn.GRU` path (not the replacement path).
 
-        両者はビット一致するので値では区別できない — **どちらを呼んだか**を差し替えて見る。
+        The two are bit-identical, so values cannot tell them apart — the method is swapped to see
+        **which one was called**.
         """
         module, graph, out_dir = exported
         seen: list[str] = []
@@ -378,16 +401,18 @@ class TestWriteIo:
         assert seen == ["reference"]
 
     def test_a_patched_path_that_diverges_fails_loudly(self, exported) -> None:
-        """MUST: 差し替えが `nn.GRU` とビット一致しない emit を止める（常設門）。"""
+        """MUST: stop an emit whose replacement is not bit-identical to `nn.GRU` (the standing
+        check)."""
         module, graph, out_dir = exported
         original = module.forward
         module.forward = lambda features: original(features) + 1e-6  # type: ignore[method-assign]
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match=r"not bit-identical to nn\.GRU"):
             vd._write_io(module, graph, vd.build_cases(TINY_LENGTH)[:1], out_dir)
 
     def test_more_than_one_graph_output_fails_loudly(self, tmp_path: Path) -> None:
-        """MUST: 出力はロジット 1 本 — 2 本目が生えると io の位置規約が黙ってずれる。"""
+        """MUST: the output is one logits tensor — a second one would silently shift io's positional
+        convention."""
 
         class TwoOutputs(vd.Crnn):
             def forward(self, features: torch.Tensor):  # type: ignore[override]
@@ -398,7 +423,7 @@ class TestWriteIo:
         module = TwoOutputs(hidden=TINY_HIDDEN, gru_hidden=TINY_GRU_HIDDEN).eval()
         graph = _export_tiny(module, tmp_path)
 
-        with pytest.raises(AssertionError, match="ロジットは 1 本"):
+        with pytest.raises(AssertionError, match="logits are one output"):
             vd._write_io(module, graph, vd.build_cases(TINY_LENGTH), tmp_path)
 
 
@@ -410,20 +435,21 @@ class TestSanity:
         assert result["vowel_mass_mean"][vd.VOICED_CASE] > result["vowel_mass_mean"]["noise"]
 
     def test_fails_loudly_when_silence_is_not_the_most_paused(self) -> None:
-        """MUST: 無音で pau が立たないなら、重みのレイアウトか入力の届き方が壊れている。"""
-        with pytest.raises(AssertionError, match=r"平均 P\(pau\) が最大でない"):
+        """MUST: if pau does not rise on silence, the weight layout or the way input arrives is
+        broken."""
+        with pytest.raises(AssertionError, match=r"mean P\(pau\) is not the largest"):
             vd._sanity(_pooled(silence_pau=0.01, voiced_vowel=0.7))
 
     def test_fails_loudly_when_voiced_is_not_the_most_vowel_like(self) -> None:
-        with pytest.raises(AssertionError, match="平均母音質量が最大でない"):
+        with pytest.raises(AssertionError, match="mean vowel mass is not the largest"):
             vd._sanity(_pooled(silence_pau=0.2, voiced_vowel=0.05))
 
     def test_fails_loudly_when_every_case_collapses_to_one_output(self) -> None:
-        """MUST: 入力が効いていない形を落とす（4 本が同じ値なら何も検証していない）。"""
+        """MUST: catch an input that has no effect (4 identical values verify nothing)."""
         same = _probabilities(0.2, 0.3)
         pooled = dict.fromkeys((vd.SILENCE_CASE, vd.VOICED_CASE, "noise", "ramp"), same)
 
-        with pytest.raises(AssertionError, match="入力が効いていない"):
+        with pytest.raises(AssertionError, match="the input has no effect"):
             vd._sanity(pooled)
 
 
@@ -445,9 +471,7 @@ class TestCli:
                 ]
             ),
         )
-        monkeypatch.setattr(
-            vd, "export_series", lambda *_a, **_kw: pytest.fail("--verify で emit された")
-        )
+        monkeypatch.setattr(vd, "export_series", lambda *_a, **_kw: pytest.fail("--verify emitted"))
 
         vd.main(["--verify"])
 
@@ -458,9 +482,7 @@ class TestCli:
         monkeypatch.setattr(
             vd, "export_series", lambda *_a, **_kw: seen.append("emit") or {"dir": "x"}
         )
-        monkeypatch.setattr(
-            vd, "verify_patch", lambda *_a: pytest.fail("emit で --verify が走った")
-        )
+        monkeypatch.setattr(vd, "verify_patch", lambda *_a: pytest.fail("an emit ran --verify"))
 
         vd.main([])
 
@@ -469,7 +491,8 @@ class TestCli:
     def test_the_output_dir_does_not_follow_the_golden_length(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """MUST: 系列は `--length` に**追随しない** — グラフは 1 本で、長さは golden の話。"""
+        """MUST: the series **does not follow** `--length` — there is one graph, and the length is
+        about the golden only."""
         seen: list[Path] = []
         monkeypatch.setattr(
             vd, "export_series", lambda _ckpt, out, _length: seen.append(out) or {"dir": str(out)}
@@ -481,15 +504,16 @@ class TestCli:
 
 
 class TestCheckpointBytesOfASplitComponent:
-    """分割テンソル（piece — container-v1 §4.2）を含む配布形でも突合は成立する。
+    """The comparison holds for a distribution that contains split tensors (pieces —
+    container-v1 §4.2) too.
 
-    block 上限を人工的に下げて conv の重み（tiny でも 1 行 1,660 バイト）を行で割らせる。畳まない
-    リーダなら state_dict の鍵が全部「欠けている」に化けるので、この 1 本で読み替えの有無が
-    決まる。
+    The block limit is lowered artificially so that the conv weight (1,660 bytes per row even when
+    tiny) is split by rows. A reader that does not fold them back would turn every state_dict key
+    into "missing", so this one test decides whether the reassembly happens.
     """
 
     def split_export(self, tmp_path: Path, module: vd.Crnn) -> Path:
-        """block 上限を 2KiB に差し込んで書く（`publish_model` の寸法の席）。"""
+        """Write with the block limit set to 2 KiB (the size parameter of `publish_model`)."""
         example = vd.build_cases(TINY_LENGTH)[0][1]
         graph, tensors = export_module(
             module, (example,), dynamic_shapes=_tiny_shapes(), symbol_names=("T",)
@@ -505,7 +529,7 @@ class TestCheckpointBytesOfASplitComponent:
         return tmp_path / vd.MODEL_FILE
 
     def test_the_component_really_carries_pieces(self, tmp_path, tiny_module) -> None:
-        """前提の観測点 — piece が 1 本も無ければこのテストは空振りになる。"""
+        """Observing the precondition — without a single piece this test would check nothing."""
         path = self.split_export(tmp_path, tiny_module)
 
         verified = verify_container(container_parts(path))
@@ -525,28 +549,30 @@ class TestCheckpointBytesOfASplitComponent:
         assert matched == len(tiny_module.state_dict())
 
     def test_a_changed_byte_still_fails_loudly(self, tmp_path, tiny_module) -> None:
-        """畳んだ実体で突き合わせている（分割で門が緩まない）。"""
+        """The comparison is on the folded data (splitting does not loosen the check)."""
         path = self.split_export(tmp_path, tiny_module)
         state_dict = dict(tiny_module.state_dict())
         tampered = state_dict["conv.0.weight"].clone()
         tampered[0, 0, 0] += 1.0
         state_dict["conv.0.weight"] = tampered
 
-        with pytest.raises(AssertionError, match="バイト列が一致しない"):
+        with pytest.raises(AssertionError, match="the bytes do not match"):
             vd.assert_checkpoint_bytes(path, state_dict)
 
 
 class TestStagedPublication:
-    """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。
+    """MUST: publish only after every check passes (a failed run is removed together with its
+    staging directory).
 
-    `staged_publication` 単体の規律は core が実測で持つが、family 側の配線
-    （`staged.mkdir()` の位置・門の評価順）はここでしか踏まない。落ちた実走が final に
-    資産を残すと、io golden が同じ壊れたモジュールから採られるので TS 側の突合は緑になる。
+    The core measures the discipline of `staged_publication` on its own, but the family-side wiring
+    (where `staged.mkdir()` sits, the order in which the checks are evaluated) is exercised only
+    here. If a failed run left assets in the final location, the io golden would be taken from the
+    same broken module, and the TS-side comparison would go green.
     """
 
     @staticmethod
     def _stage_tiny(monkeypatch, module: vd.Crnn) -> None:
-        """実重み無しで `export_series` を 1 本通せる状態にする。"""
+        """Set things up so that `export_series` can run once without real weights."""
         monkeypatch.setattr(vd, "load_checkpoint", lambda _ckpt: {})
         monkeypatch.setattr(vd, "load_module", lambda _state: module)
         monkeypatch.setattr(vd, "assert_checkpoint_bytes", lambda _path, _state: 0)
@@ -554,7 +580,8 @@ class TestStagedPublication:
     def test_a_passing_run_leaves_the_series_in_place(
         self, monkeypatch, tmp_path: Path, tiny_module: vd.Crnn
     ) -> None:
-        """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
+        """The counterpart that shows it is not vacuous (passing the checks publishes) — without it
+        the assertions below would be vacuous."""
         self._stage_tiny(monkeypatch, tiny_module)
         monkeypatch.setattr(vd, "_sanity", lambda _logits: {})
         out_dir = tmp_path / "series"
@@ -570,12 +597,12 @@ class TestStagedPublication:
         self._stage_tiny(monkeypatch, tiny_module)
 
         def _reject(_logits):
-            raise AssertionError("順序が壊れている")
+            raise AssertionError("the order is broken")
 
         monkeypatch.setattr(vd, "_sanity", _reject)
         out_dir = tmp_path / "series"
 
-        with pytest.raises(AssertionError, match="順序が壊れている"):
+        with pytest.raises(AssertionError, match="the order is broken"):
             vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
 
         assert not out_dir.exists()
@@ -583,33 +610,37 @@ class TestStagedPublication:
     def test_a_failing_checkpoint_byte_gate_leaves_nothing_behind(
         self, monkeypatch, tmp_path: Path, tiny_module: vd.Crnn
     ) -> None:
-        """ビット一致門（写しが値を変えていないこと）も据える前に評価する。"""
+        """The bit-identity check (the copy did not change the values) is also evaluated before
+        publishing."""
         self._stage_tiny(monkeypatch, tiny_module)
 
         def _reject(_path, _state):
-            raise AssertionError("バイト列が一致しない")
+            raise AssertionError("the bytes do not match")
 
         monkeypatch.setattr(vd, "assert_checkpoint_bytes", _reject)
         monkeypatch.setattr(vd, "_sanity", lambda _logits: {})
         out_dir = tmp_path / "series"
 
-        with pytest.raises(AssertionError, match="バイト列が一致しない"):
+        with pytest.raises(AssertionError, match="the bytes do not match"):
             vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
 
         assert not out_dir.exists()
 
 
 class TestGraphNameIsThePartName:
-    """据えた容器のグラフ名が**部品名**（= `karume.json` の weights のキー）であること。
+    """The graph name of the published container is the **component name** (= the weights key of
+    `karume.json`).
 
-    ランタイムは `prepareContainer(opened, <weights キー>)` でグラフを名前で引く
-    （container-v1 §2.1）。この family の容器は系列直下に据わるので**ディレクトリ名は
-    系列名**であって部品名ではなく、書き手がディレクトリから導くと「ランタイムが引けない
-    容器」が黙って焼ける（書き手はグラフ名を weights のキーと突き合わせない — 突き合わせる
-    のは `karume dist` の組み立ての門で、実重みで export を回した後にしか届かない）。
+    The runtime looks a graph up by name with `prepareContainer(opened, <weights key>)`
+    (container-v1 §2.1). This family's container sits directly in the series, so **the directory
+    name is the series name**, not the component name, and a writer that derived it from the
+    directory would silently bake "a container the runtime cannot look up" (the writer does not
+    check the graph name against the weights key — that check is the assembly check of
+    `karume dist`, which is reached only after running the export with the real weights).
 
-    綴りの門は全 family 横断で `tests/test_graph_names.py` が AST で掛けるが、**実物を書いて
-    読み直す**のはここだけ — 置き場の名前を部品名と違う綴りにしてあるので、導出に戻ると落ちる。
+    The spelling check across all families is applied on the AST by `tests/test_graph_names.py`,
+    but **writing the real thing and reading it back** happens only here — the location is spelled
+    differently from the component name, so going back to deriving it fails.
     """
 
     def test_the_published_container_names_the_weights_key(
@@ -617,7 +648,8 @@ class TestGraphNameIsThePartName:
     ) -> None:
         TestStagedPublication._stage_tiny(monkeypatch, tiny_module)
         monkeypatch.setattr(vd, "_sanity", lambda _logits: {})
-        # 部品名（`crnn`）とは違う綴りの置き場 — 実物の系列名と同じ形。
+        # A location spelled differently from the component name (`crnn`) — the same shape as the
+        # real series name.
         out_dir = tmp_path / "vowel-detector-jsut-crnn"
 
         vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)

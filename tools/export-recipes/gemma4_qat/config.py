@@ -1,4 +1,5 @@
-"""QAT の取得元と系列名。dist から torch を import しないための小さな正本。"""
+"""The QAT sources and series names. A small source of truth so that dist does not import
+torch."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -80,38 +81,42 @@ SOURCES: Mapping[str, QatSource] = {
     ),
 }
 
-#: モデル → PLE の格納ビット数（一次情報は上流 `QuantizedEmbedding.num_bits`）。上流検査
-#: （`checkpoint.py`）と配布の突合（`distribution.py`）は同じ期待値を別々に綴っていたので、
-#: Python 側の綴りをここ 1 箇所にする（TS 側は `packages/models/src/gemma/qat.ts` が持つ —
-#: 言語境界は越えられないので到達点は「各言語 1 箇所」）。
+#: Model → PLE storage bit width (the primary source is upstream's `QuantizedEmbedding.num_bits`).
+#: The upstream check (`checkpoint.py`) and the distribution comparison (`distribution.py`) used
+#: to spell the same expectation separately, so the Python-side spelling lives in this one place
+#: (the TS side has it in `packages/models/src/gemma/qat.ts` — the language boundary cannot be
+#: crossed, so the goal is "one place per language").
 PLE_BITS: Mapping[str, int] = {"e2b": 4, "e4b": 2}
 
-#: 記号 `M`（prefill 1 回の行数）の trace 時の上限。`trace.py` の `Dim` と、配布形が宣言する
-#: `pipelineConfig.maxChunkLength` の出どころ。
+#: The trace-time upper bound of the symbol `M` (rows per prefill). The source of `trace.py`'s
+#: `Dim` and of the `pipelineConfig.maxChunkLength` the distribution declares.
 MAX_CHUNK_LENGTH = 768
 MAX_SELECTED_ROWS = 9
 
-#: 既定の会話容量（`capacity`）と prefill 1 回の行数（`chunkLength`）。**通常 Gemma と同じ値**
-#: （2026-09-19 裁定・ADR 0097 追記 7）— 初期値 128 / 32 は trace 上限の定数を会話容量に
-#: 使い回したもので、モデルの位置上限（公式 config は 131,072）ではなく変換側の都合だった。
-#: どちらも実行時ノブなので、利用者は `--capacity` / `--chunk-length` で上書きできる。
+#: The default conversation capacity (`capacity`) and rows per prefill (`chunkLength`). **The
+#: same values as the regular Gemma** (decision of 2026-09-19; ADR 0097 addendum 7) — the initial
+#: 128 / 32 reused the trace-bound constants as the conversation capacity, a convenience of the
+#: conversion rather than the model's position limit (131,072 in the official config). Both are
+#: run-time knobs, so users can override them with `--capacity` / `--chunk-length`.
 DEFAULT_CAPACITY = 4096
 DEFAULT_CHUNK_LENGTH = 768
 
-#: `reference.json` の schema 版。schema 2 で「常に True の bytes 一致フラグ」を落とし、
-#: 照合した固定重みの本数・格納内訳・PLE の本数を配布側が現物と突き合わせる形にした。
+#: The schema version of `reference.json`. Schema 2 dropped "the bytes-match flag that is always
+#: True" and made the distribution side compare the number of checked fixed weights, the storage
+#: breakdown and the PLE count with the actual ones.
 #:
-#: schema 3 は**PLE の数え方の繰り上げ**: sidecar の shard 本数（`pleShards`）から容器の資産の
-#: block 本数（`pleBlocks`）へ変わった。block の切り方は旧 shard 境界を無視するので 2 つは
-#: 別の数で、schema を据え置くと旧世代の記録が版の門を素通りして「欄が無い」でだけ落ちる
-#: （何が食い違っているか綴られない）。移行は記録も schema 3 へ追随させる
-#: （`migrate_series.rewrite_qat_reference`）。
+#: Schema 3 is **a promotion of how PLE is counted**: from the sidecar's shard count
+#: (`pleShards`) to the block count of the container's asset (`pleBlocks`). Blocks are cut
+#: ignoring the old shard boundaries, so the two are different numbers; had the schema stayed,
+#: an old-generation record would pass the version check and fail only as "a missing field"
+#: (without spelling out what disagrees). The migration brings records to schema 3 too
+#: (`migrate_series.rewrite_qat_reference`).
 REFERENCE_SCHEMA = 3
 
 
 def checkpoint_name(model: str) -> str:
     if model not in CHECKPOINTS:
-        raise ValueError(f"未対応 QAT model: {model}")
+        raise ValueError(f"unsupported QAT model: {model}")
     return CHECKPOINTS[model]
 
 

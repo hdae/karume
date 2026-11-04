@@ -1,4 +1,5 @@
-"""既存 Gemma wrapper / states 変換を使い、固定整数を値として保つ QAT trace。"""
+"""The QAT trace that keeps the fixed integers as the values, using the existing Gemma wrapper /
+states conversion."""
 
 from __future__ import annotations
 
@@ -28,9 +29,12 @@ class TracedQat:
 
 
 def trace_qat(loaded: LoadedQat, ids: torch.Tensor) -> TracedQat:
-    """固定 payload を退避してから shape-only trace。通常推論と混ぜない単方向の処理。"""
+    """A shape-only trace after setting the fixed payloads aside. A one-way process never mixed
+    with ordinary inference."""
     if ids.ndim != 2 or ids.shape[0] != 1 or not 2 <= ids.shape[1] <= MAX_CHUNK_LENGTH:
-        raise ValueError(f"QAT trace の例示入力は [1,M]、2<=M<={MAX_CHUNK_LENGTH} が必要")
+        raise ValueError(
+            f"the QAT trace's example input must be [1,M] with 2<=M<={MAX_CHUNK_LENGTH}"
+        )
     with torch.inference_mode():
         ple = loaded.ple(ids).reshape(
             1,
@@ -65,17 +69,19 @@ def trace_qat(loaded: LoadedQat, ids: torch.Tensor) -> TracedQat:
     graph, tensors = convert(exported, symbol_names=("M", "R"))
     meta = {key for key, value in tensors.items() if value.is_meta}
     if not meta.issubset(fixed):
-        raise ValueError("QAT trace が出した meta 重みに固定 payload が無い")
-    # tied の別名を converter が1本へ畳む。直前に全 bytes 一致を検査した2名だけを許可する。
+        raise ValueError("a meta weight emitted by the QAT trace has no fixed payload")
+    # The converter folds the tied aliases into one. Only the two names whose bytes were all
+    # checked to match just before are allowed.
     aliases = {"model.model.embed_tokens.weight", "model.lm_head.weight"}
     missing = set(fixed) - meta
     if len(missing) != 1 or not missing.issubset(aliases) or not (aliases - missing).issubset(meta):
-        raise ValueError("QAT trace で証明済みの共有以外の固定重みが消えた")
+        raise ValueError("the QAT trace lost a fixed weight other than the proven shared one")
     surgical = to_states_form(graph, decode.states_plan(graph, loaded.config))
     declared = {entry.tensor for entry in surgical.initializers.values()}
     if not meta.issubset(declared):
-        raise ValueError("states 変換で QAT 固定重みが消えた")
-    # states 変換が消した mask 定数を格納しない。既存 decode writer と同じ契約。
+        raise ValueError("the states conversion lost a QAT fixed weight")
+    # The mask constants the states conversion removed are not stored. The same contract as the
+    # existing decode writer.
     return TracedQat(
         surgical,
         {key: value for key, value in tensors.items() if key in declared},

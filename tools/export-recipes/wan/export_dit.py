@@ -1,171 +1,198 @@
-"""Wan2.1 の DiT を S 形の IR（`krm`）+ golden へ書き出す台本（ADR 0118 決定 3 / 8・段 2）。
+"""The script that writes the Wan2.1 DiT out as an S-shaped IR (`krm`) + goldens (ADR 0118
+decisions 3 / 8, step 2).
 
-起点は pin した revision の diffusers 版（`wan.sources.local_snapshot`）。グラフは
-{@link wan.dit_patch.WanDitTokens}（入口は patchify の後・出口は unpatchify の前・次元はトークン長
-`S` の 1 シンボル）。格納は f16 席（重みを f16 表現可能値へ丸めてから参照と golden を採り、
-適格な重みスロットだけを f16 で格納する — ADR 0006 / 0018）。容器には重みに加えて**資産
-`rope_base`**（ホストが RoPE の表を組むための軸別素表 — 役割 `rope-base`・ADR 0109 決定 4）が入る。
+The starting point is the diffusers version at the pinned revision (`wan.sources.local_snapshot`).
+The graph is {@link wan.dit_patch.WanDitTokens} (entry after patchify, exit before unpatchify, one
+dimension symbol: the token length `S`). Storage is the f16 preset (the weights are rounded to
+f16-representable values before the reference and the goldens are taken, and only eligible weight
+slots are stored in f16 — ADR 0006 / 0018). Besides the weights, the container holds **the
+`rope_base` asset** (per-axis base tables from which the host builds the RoPE table — role
+`rope-base`, ADR 0109 decision 4).
 
-    uv run --group wan --inexact python -m wan.export_dit            # 製品のグラフ + golden
-    uv run --group wan --inexact python -m wan.export_dit --layers   # 計測用（層別の出口）
-    uv run --group wan --inexact python -m wan.export_dit --verify   # パッチ前後の eager 同値だけ
-    uv run --group wan --inexact python -m wan.export_dit --dtype i8            # i8 系列（下の節）
-    uv run --group wan --inexact python -m wan.export_dit --dtype i8 --no-full  # 同・実寸を除く
-    uv run --group wan --inexact python -m wan.export_dit --dtype i8 --check    # 書き直して照合
+    uv run --group wan --inexact python -m wan.export_dit            # product graph + goldens
+    uv run --group wan --inexact python -m wan.export_dit --layers   # measurement (per-layer exits)
+    uv run --group wan --inexact python -m wan.export_dit --verify   # eager equivalence only
+    uv run --group wan --inexact python -m wan.export_dit --dtype i8            # i8 series (below)
+    uv run --group wan --inexact python -m wan.export_dit --dtype i8 --no-full  # same, no full size
+    uv run --group wan --inexact python -m wan.export_dit --dtype i8 --check    # rewrite + compare
 
-出力（既定 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`・`--dtype i8` は
-`outputs/series/wan2.1-t2v-1.3b-i8-dyn/transformer/`）:
+Output (default `outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`; with `--dtype i8`
+`outputs/series/wan2.1-t2v-1.3b-i8-dyn/transformer/`):
 
-    model-NNNNN-of-NNNNN.krm      重み・定数 + 2 文書の記述 + 資産 `rope_base`
-    io.<case>.safetensors         グラフの入力（`input.*`）とパッチ後の torch CPU の出力
-                                  （`output.0`）
-    reference.<case>.safetensors  上流の素の diffusers（CPU f32・同じ f16 丸めの重み）の
-                                  `latents` / `timestep`（i32）/ `output`（`[1,16,F,H,W]`）/
-                                  `block.NN`（各ブロックの出力 `[1,S,1536]` —
-                                  `CaseSpec.blocks` のケースだけ）。実寸のケースは加えて
-                                  `output.f64`（活性も f64 で回した上流の出力を f32 へ丸めた値
-                                  — 1 ブロックずつ f64 にする層逐次の
-                                  `wan.dit_reference.LayerwiseDit`・ADR 0121 決定 7）
+    model-NNNNN-of-NNNNN.krm      weights, constants + the descriptions of the 2 documents + the
+                                  `rope_base` asset
+    io.<case>.safetensors         the graph inputs (`input.*`) and the patched torch CPU output
+                                  (`output.0`)
+    reference.<case>.safetensors  from plain upstream diffusers (CPU f32, the same f16-rounded
+                                  weights): `latents` / `timestep` (i32) / `output`
+                                  (`[1,16,F,H,W]`) / `block.NN` (each block's output
+                                  `[1,S,1536]` — only for cases with `CaseSpec.blocks`).
+                                  Full-size cases add `output.f64` (upstream's output with
+                                  activations also in f64, rounded to f32 — the layer-by-layer
+                                  `wan.dit_reference.LayerwiseDit` that makes one block at a
+                                  time f64, ADR 0121 decision 7)
 
-`--layers` は層別の出口を足した計測用のグラフ（{@link wan.dit_patch.WanDitTokensLayers}）を
-`…-f16-dyn-probe/transformer/` へ書く。golden は書かない（入力は製品の系列の `io.*`、期待値は同じ
-`reference.*` の `block.NN` を使う — 入力と重みが同じなので）。
+`--layers` writes the graph for measurement with per-layer exits added
+({@link wan.dit_patch.WanDitTokensLayers}) to `…-f16-dyn-probe/transformer/`. It writes no goldens
+(the inputs are the product series' `io.*` and the expected values the `block.NN` of the same
+`reference.*` — the inputs and weights are the same).
 
-## ケース（決定 8 と追記 2026-10-02 の「帯の決定と受入れを分ける」）
+## Cases (decision 8 and the addendum of 2026-10-02, "separate the band decision from acceptance")
 
-| 役割 | 潜在 `[1,16,F,H,W]` | S | timestep | 有効長 | seed |
+| Role | Latent `[1,16,F,H,W]` | S | timestep | Valid length | seed |
 | --- | --- | --: | --: | --: | --: |
-| `band`（帯の決定） | `[1,16,3,16,16]` | 192 | 999 | 24 | `SEED` + 0 |
+| `band` (sets the band) | `[1,16,3,16,16]` | 192 | 999 | 24 | `SEED` + 0 |
 | `band` | `[1,16,2,16,24]` | 192 | 750 | 50 | `SEED` + 3 |
 | `band` | `[1,16,3,16,16]` | 192 | 500 | 12 | `SEED` + 4 |
 | `band` | `[1,16,1,16,48]` | 192 | 250 | 80 | `SEED` + 5 |
 | `band` | `[1,16,2,16,24]` | 192 | 600 | 30 | `SEED` + 8 |
 | `band` | `[1,16,3,16,16]` | 192 | 113 | 60 | `SEED` + 6 |
-| `accept`（受入れ） | `[1,16,2,16,24]` | 192 | 600 | 45 | 777001 |
+| `accept` (acceptance) | `[1,16,2,16,24]` | 192 | 600 | 45 | 777001 |
 | `accept` | `[1,16,4,8,16]` | 128 | 30 | 9 | 777002 |
 | `accept` | `[1,16,2,24,16]` | 192 | 400 | 70 | 777003 |
-| `growth`（S に対する伸び） | `[1,16,3,32,32]` | 768 | 999 | 24 | `SEED` + 2 |
+| `growth` (growth with S) | `[1,16,3,32,32]` | 768 | 999 | 24 | `SEED` + 2 |
 | `growth` | `[1,16,3,32,32]` | 768 | 500 | 37 | `SEED` + 7 |
-| `full-band`（実寸の帯の決定） | `[1,16,9,60,104]` | 14,040 | 999 | 40 | `SEED` + 10 |
-| `full-band`（名前の接尾辞 `-2`） | `[1,16,9,60,104]` | 14,040 | 999 | 112 | `SEED` + 11 |
+| `full-band` (sets the full-size band) | `[1,16,9,60,104]` | 14,040 | 999 | 40 | `SEED` + 10 |
+| `full-band` (name suffix `-2`) | `[1,16,9,60,104]` | 14,040 | 999 | 112 | `SEED` + 11 |
 | `full-band` | `[1,16,9,60,104]` | 14,040 | 750 | 23 | `SEED` + 12 |
 | `full-band` | `[1,16,9,60,104]` | 14,040 | 500 | 64 | `SEED` + 9 |
 | `full-band` | `[1,16,9,60,104]` | 14,040 | 250 | 91 | `SEED` + 13 |
 | `full-band` | `[1,16,9,60,104]` | 14,040 | 113 | 7 | `SEED` + 14 |
-| `full-accept`（実寸の受入れ） | `[1,16,9,60,104]` | 14,040 | 999 | 28 | 777006 |
+| `full-accept` (full-size acceptance) | `[1,16,9,60,104]` | 14,040 | 999 | 28 | 777006 |
 | `full-accept` | `[1,16,9,60,104]` | 14,040 | 600 | 77 | 777007 |
-| `full-band`（81 フレームの帯の決定） | `[1,16,21,60,104]` | 32,760 | 999 | 40 | `SEED` + 20 |
-| `full-band`（名前の接尾辞 `-2`） | `[1,16,21,60,104]` | 32,760 | 999 | 112 | `SEED` + 21 |
+| `full-band` (sets the 81-frame band) | `[1,16,21,60,104]` | 32,760 | 999 | 40 | `SEED` + 20 |
+| `full-band` (name suffix `-2`) | `[1,16,21,60,104]` | 32,760 | 999 | 112 | `SEED` + 21 |
 | `full-band` | `[1,16,21,60,104]` | 32,760 | 750 | 23 | `SEED` + 22 |
 | `full-band` | `[1,16,21,60,104]` | 32,760 | 500 | 64 | `SEED` + 23 |
 | `full-band` | `[1,16,21,60,104]` | 32,760 | 250 | 91 | `SEED` + 24 |
 | `full-band` | `[1,16,21,60,104]` | 32,760 | 113 | 7 | `SEED` + 25 |
-| `full-accept`（81 フレームの受入れ） | `[1,16,21,60,104]` | 32,760 | 999 | 28 | 777008 |
+| `full-accept` (81-frame acceptance) | `[1,16,21,60,104]` | 32,760 | 999 | 28 | 777008 |
 | `full-accept` | `[1,16,21,60,104]` | 32,760 | 600 | 77 | 777009 |
 
-帯の指標は「最大絶対差 ÷ 参照の最大絶対値」（決定 8 の目安の形）で、帯 = `band` の 6 ケースの
-最悪の比 × 5（TS 側 `e2e_wan_dit_test.ts` の `DIT_RATIO_BAND`）。`accept` の 3 ケースは `band` と
-seed が違い、timestep も 1 本（600）を除いて違う（600 の 1 本は、旧帯 `atol` 3.2e-4 を超えた検証の
-未見ケース — seed 777001・有効長 45 — をそのまま再現したもの）。
+The band metric is "max absolute difference ÷ max absolute value of the reference" (the shape of
+the guideline in decision 8), and the band = the worst ratio of the 6 `band` cases × 5
+(`DIT_RATIO_BAND` in the TS `e2e_wan_dit_test.ts`). The 3 `accept` cases differ from `band` in seed
+and, except for one (600), in timestep too (the one at 600 reproduces as is the unseen case of the
+check that exceeded the old band `atol` 3.2e-4 — seed 777001, valid length 45).
 
-MUST: `accept` の結果を見て `band` のケースを足し引きしない（帯の決定と受入れの独立が崩れる）。
-受入れが帯を外れたら、帯を広げずに原因を調べる。
+MUST: do not add or remove `band` cases after looking at the `accept` results (that breaks the
+independence of the band decision from acceptance). If acceptance falls outside the band,
+investigate the cause instead of widening the band.
 
-S = 14,040 の `full-band` / `full-accept` は実寸（832×480・33 フレーム — ADR 0118 段 3）の帯を、
-S = 192 の帯とは**独立に**導くためのケース（決定 8 の外挿の規律）。帯 = `full-band` 6 ケースの
-最悪の正規化した比 × 5（TS 側の `DIT_FULL_NORMALIZED_BAND`）で、`full-accept` 2 ケースで受け
-入れる。決定用は timestep を 999（生成の最初のステップ — seed 2 本）/ 750 / 500 / 250 / 113 に
-散らす。受入れは 999 と 600 で、seed（777006 / 777007）は段 2 のどのケースとも、決定用とも別。
-受入れの seed は指標を正規化した比に変えたときに新しくした（旧 777004 / 777005 は指標を決める
-前に結果を見ていたので、受入れの独立が崩れていた）。
-MUST: `full-accept` の結果を見て `full-band` のケースも指標も変えない。
+The `full-band` / `full-accept` cases at S = 14,040 derive the band at full size (832×480,
+33 frames — ADR 0118 step 3) **independently** of the S = 192 band (the extrapolation discipline of
+decision 8). The band = the worst normalized ratio of the 6 `full-band` cases × 5
+(`DIT_FULL_NORMALIZED_BAND` on the TS side), accepted on the 2 `full-accept` cases. The band cases
+spread their timesteps over 999 (the first generation step — 2 seeds) / 750 / 500 / 250 / 113.
+Acceptance is at 999 and 600, and its seeds (777006 / 777007) differ from every step-2 case and
+from the band cases. The acceptance seeds were renewed when the metric changed to the normalized
+ratio (the old 777004 / 777005 had been seen before the metric was decided, which broke the
+independence of acceptance).
+MUST: do not change the `full-band` cases or the metric after looking at the `full-accept` results.
 
-S = 32,760（832×480・81 フレーム = `Dim("S")` の上限ちょうど — ADR 0118 段 8）の 8 本は、帯を
-S = 14,040 の帯とも**独立に**導く（決定 8 — S ごとに帯を導き、S = 14,040 の帯を持ち込まない）。
-timestep と有効長は S = 14,040 の 8 本と同じ並びで、seed だけを新しくする（決定用 `SEED` + 20〜25・
-受入れ 777008 / 777009 — どのケースとも別）。帯の形（決定用 6 本の最悪の正規化した比 × 5・受入れ
-2 本）と上の MUST は S = 14,040 と同じ。
+The 8 cases at S = 32,760 (832×480, 81 frames = exactly the upper bound of `Dim("S")` — ADR 0118
+step 8) derive the band **independently** of the S = 14,040 band too (decision 8 — a band is derived
+per S, and the S = 14,040 band is not carried over). Timesteps and valid lengths follow the same
+order as the 8 cases at S = 14,040; only the seeds are new (band cases `SEED` + 20–25, acceptance
+777008 / 777009 — different from every other case). The shape of the band (the worst normalized
+ratio of 6 band cases × 5, 2 acceptance cases) and the MUST above are the same as for S = 14,040.
 
-実寸の参照は 2 本: **f64 の参照**（`output.f64` — 活性も f64・重みは同じ f16 丸め）を正とし、CPU
-f32 の参照（`output`）は正規化の分母に使う。指標は「GPU の f64 に対する比 ÷ CPU f32 の参照の f64
-に対する比」（GPU の誤差が CPU f32 の何倍か）。比そのものは入力で 240 倍動く（丸めを増幅する入力
-では CPU f32 の参照も同じだけ f64 から離れる）ので、CPU f32 の誤差で割って入力による増幅を打ち
-消す。所要は f64 が f32 の約 2.7 倍（`[case]` 行に出す — S = 14,040 の 1 ケースで f64 約 370 s・
-f32 約 136 s）。参照（f32 / f64）とパッチ後の eager の attention は CPU の flash 経路に固定する
-（`dit_patch.flash_attention_only` — MATH へ落ちると S = 32,760 でスコア行列 1 枚が 51.5 GB に
-なり OOM）。
+There are 2 full-size references: **the f64 reference** (`output.f64` — activations also in f64,
+weights with the same f16 rounding) is the truth, and the CPU f32 reference (`output`) is used as
+the denominator of the normalization. The metric is "the GPU's ratio against f64 ÷ the CPU f32
+reference's ratio against f64" (how many times the CPU f32 error the GPU error is). The ratio itself
+moves by a factor of 240 with the input (on inputs that amplify rounding the CPU f32 reference also
+moves just as far from f64), so dividing by the CPU f32 error cancels the amplification by the
+input. f64 takes about 2.7 times as long as f32 (printed in the `[case]` lines — for one S = 14,040
+case about 370 s in f64 and 136 s in f32). The attention of the references (f32 / f64) and of the
+patched eager is pinned to the CPU flash path (`dit_patch.flash_attention_only` — falling back to
+MATH makes one score matrix 51.5 GB at S = 32,760 and OOMs).
 
-各ブロックの出力（`block.NN` — S = 14,040 の 1 ケースで 2.6 GB）は S = 192 / 768 の全ケースと、
-実寸では決定用 `full-band-s14040-t0999` と受入れ `full-accept-s14040-t0999` の 2 本だけが持つ
-（`CaseSpec.blocks` — 層ごとの記録はこの 2 本で足り、残りは最終出力だけで判定できる）。
-S = 32,760 のケースは 1 本も持たない: 突き合わせる相手の層別の出口（`--layers` の probe）が、
-30 ブロック分の readback staging（約 6 GB）で B570 に載らない。
+Each block's output (`block.NN` — 2.6 GB for one S = 14,040 case) is held by every S = 192 / 768
+case and, at full size, only by the 2 cases band `full-band-s14040-t0999` and acceptance
+`full-accept-s14040-t0999` (`CaseSpec.blocks` — these 2 suffice for the per-layer record, and the
+rest can be judged on the final output alone). No S = 32,760 case holds them: the per-layer exits
+they would be compared against (the `--layers` probe) do not fit on the B570 with the readback
+staging of 30 blocks (about 6 GB).
 
-決定用を 1 ケースにしないのは、誤差が入力で 1 桁近く動くため（実測: t = 999 の 1 ケースで決めた帯を
-t = 500 の未見ケースが 1.6 倍超えた。中ほどの timestep は CPU の eager でも入力の 1e-5 級の揺れを
-約 4 倍に増幅する — 移植の誤りではなく入力の感度）。決定用は timestep を参照の設定の列
-（999 → 60）の全域に散らし、seed と格子も変える。最大絶対差でなく比を見るのは、12,288 要素の裾の
-1 要素で決まる絶対値が参照の振れ幅ごと動くため。
+The band is not decided on a single case because the error moves by nearly an order of magnitude
+with the input (measured: a band decided on one t = 999 case was exceeded 1.6-fold by an unseen
+t = 500 case. Mid-range timesteps amplify a 1e-5-level input jitter about 4-fold even in CPU eager —
+a sensitivity of the input, not a porting error). The band cases spread their timesteps across the
+whole reference schedule (999 → 60) and vary the seed and the grid too. A ratio is used instead of
+the max absolute difference because the absolute value, set by a single element in the tail of
+12,288 elements, moves with the reference's amplitude.
 
-格子は正方（F'·H'·W' = 3·8·8）と非正方（2·8·12 / 1·8·24 / 2·12·8 / 4·4·8）を混ぜる。h と w を
-取り違えたホスト実装は正方の格子では値が一致してしまうので、非正方で初めて割れる。テキスト文脈は
-固定 seed の乱数 `[有効長, 4096]` を上流と同じ形（後ろをゼロで 512 行まで埋める —
-`wan.pipeline_ref.pad_text_embeds`）にしたもの。
+The grids mix square (F'·H'·W' = 3·8·8) and non-square (2·8·12 / 1·8·24 / 2·12·8 / 4·4·8). A host
+implementation that swaps h and w still matches on a square grid, so it first breaks on a
+non-square one. The text context is a fixed-seed random `[valid length, 4096]` put into upstream's
+shape (zero-padded at the end to 512 rows — `wan.pipeline_ref.pad_text_embeds`).
 
-MUST: 参照は**上流の素の forward**（`dit_patch.reference_dit_layers`）で採る。attn1 の processor の
-差し替えは素の経路を変えない（`dit_patch` のモジュール docstring）ので、参照を採る順序の門は要らな
-い。
-MUST: 重みの丸め（f16 系列の f16 丸め・i8 系列の fake-quant）は参照より**前**（ADR 0006 / 0019）。
-丸めは S 形のラッパに掛け、共有している上流の部品にも同じ値が届く（patch 埋め込みは conv の重みの
-view — `dit_patch.patch_embedding_linear`）。RoPE の表（`model.rope` のバッファ）は丸めない — 製品は
-f32 の素表を焼き、参照もその値で回す。
-MUST: 書き手の eager 同値の門（{@link eager_failures}）は**丸めた後**の重みで見る。参照とパッチ後の
-eager は同じ丸め済みの重みを共有して回る。パッチの同値（trunk のビット一致・patch 埋め込みの
-上界）は重みの値に依らない主張（RoPE の書き換えは重みを読まない）なので、丸めた後に見ても門の
-意味は変わらない。加えて、参照が丸め済みの重みで採られたことも同じ門が縛る — 丸めが参照側へ
-届いていなければ trunk がビット一致しない。丸める前（素の f32 の重み）の同値は
-`--verify --no-f16` と pytest の実重みのテスト（`wan/tests/test_dit_patch.py` の
-`TestRealWeights`）が見る。
+MUST: take the reference with **upstream's plain forward** (`dit_patch.reference_dit_layers`).
+Replacing the attn1 processor does not change the plain path (module docstring of `dit_patch`), so
+no check on the order in which the reference is taken is needed.
+MUST: the weight rounding (f16 rounding of the f16 series, fake-quant of the i8 series) comes
+**before** the reference (ADR 0006 / 0019). The rounding is applied to the S-shaped wrapper and
+reaches the shared upstream components with the same values (the patch embedding is a view of the
+conv weights — `dit_patch.patch_embedding_linear`). The RoPE table (the buffers of `model.rope`)
+is not rounded — the product bakes the f32 base tables, and the reference runs on those values too.
+MUST: the writer's eager-equivalence check ({@link eager_failures}) looks at the weights **after**
+rounding. The reference and the patched eager share the same rounded weights. The patch's
+equivalence (bit-exact trunk, the bound on the patch embedding) is a claim independent of the weight
+values (the RoPE rewrite reads no weights), so checking after rounding does not change what the
+check means. The same check also pins that the reference was taken with the rounded weights — if
+the rounding had not reached the reference side, the trunk would not be bit-identical. The
+equivalence before rounding (on the plain f32 weights) is covered by `--verify --no-f16` and by the
+pytest real-weight test (`TestRealWeights` in `wan/tests/test_dit_patch.py`).
 
-## i8 系列（ADR 0120 決定 2 / 3）
+## i8 series (ADR 0120 decisions 2 / 3)
 
-`--dtype i8` は参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` の重みの系列を書く。対象は
-transformer だけで、VAE は f16 系列のまま（決定 2）。
+`--dtype i8` writes the weight series of the reference preset `f16+dit8` and the practical preset
+`f16+dit8-a8-attn8-s16`. Only the transformer is covered; the VAE stays in the f16 series
+(decision 2).
 
-- 重み: linear 307 本（patch 埋め込みの Linear を含む）の `weight` を per-channel symmetric i8 の
-  RTN（最近接丸め）で丸める（`karume.quantize.fake_quant_int8` を S 形のラッパへ —
-  {@link fake_quant_i8}）。格納は i8 + 出力チャネルごとの f32 scale。校正は無い（重みは RTN で、
-  活性は実行時の per-token の動的量子化）。
-- bias・norm の weight・`scale_shift_table` は**上流の f32 の値のまま**。f16 系列の
-  {@link round_to_f16} は掛けない（決定 2 — i8 の席に f16 の丸めを混ぜない。計算と格納の形は同じで
-  値だけが違い、混ぜると配布の改変告知が増える）。
-- ケース: f16 系列の S = 192 の組（`band` / `accept` — S = 128 の 1 本を含む）と S = 14,040 の組
-  （`full-band` / `full-accept`）を、同じ seed・timestep のまま i8 の重みで採り直す
-  （{@link I8_CASE_ROLES} / {@link I8_FULL_LATENTS}）。`growth`（S = 768）と S = 32,760 は採らない
-  （決定 3 — S = 32,760 での伸びは f16 系列の門が見ている）。
-- 参照: 正規化比 r の門を S = 192 でも持つので、**全ケースが f64 の参照**（`output.f64`）を持つ
-  （f16 系列は実寸のケースだけ — {@link wants_float64}）。
-- `--no-full` は S = 14,040 の 8 本を除いて書く（段の分割用 — S = 14,040 は CPU で約 1.5 時間）。
-  系列は作業席ごと据え替わるので、揃った系列は `--no-full` 無しの実走で書き直す（ケースの乱数は
-  seed から派生するので、S = 192 の golden は同じ値で書き直される）。
+- Weights: the `weight` of the 307 linears (including the Linear of the patch embedding) is rounded
+  with per-channel symmetric i8 RTN (round to nearest) (`karume.quantize.fake_quant_int8` on the
+  S-shaped wrapper — {@link fake_quant_i8}). Stored as i8 + an f32 scale per output channel. There
+  is no calibration (weights use RTN and activations per-token dynamic quantization at run time).
+- Biases, norm weights and `scale_shift_table` stay **upstream's f32 values**. The
+  {@link round_to_f16} of the f16 series is not applied (decision 2 — no f16 rounding mixed into
+  the i8 preset. The computation and the storage shapes are the same and only the values differ;
+  mixing them would add modification notices to the distribution).
+- Cases: the S = 192 set of the f16 series (`band` / `accept` — including the one at S = 128) and
+  the S = 14,040 set (`full-band` / `full-accept`) are re-taken with the i8 weights at the same
+  seeds and timesteps ({@link I8_CASE_ROLES} / {@link I8_FULL_LATENTS}). `growth` (S = 768) and
+  S = 32,760 are not taken (decision 3 — the growth at S = 32,760 is covered by the f16 series'
+  check).
+- References: the check on the normalized ratio r also exists at S = 192, so **every case has an
+  f64 reference** (`output.f64`) (in the f16 series only the full-size cases do —
+  {@link wants_float64}).
+- `--no-full` writes everything except the 8 S = 14,040 cases (for splitting the work into steps —
+  S = 14,040 takes about 1.5 hours on CPU). The series is replaced as a whole through the staging
+  directory, so a complete series is rewritten by a real run without `--no-full` (the cases'
+  random numbers derive from their seeds, so the S = 192 goldens are rewritten with the same
+  values).
 
-## 既存の系列との照合（`--check` — ADR 0121 決定 10）
+## Comparison with the existing series (`--check` — ADR 0121 decision 10)
 
-`--check` は同じ書き手で部品ディレクトリを**系列の中の一時ディレクトリ**（`<系列>/.check-*/` —
-umT5 の `write --check` と同じ置き方）へ書き直し、既存の部品ディレクトリと**全ファイルの sha256**
-（容器の全 part と `io.*` / `reference.*`）で突き合わせる（{@link series_mismatches}）。系列は
-置き換えない。違えば違うファイルを名指しして非 0 で終わる（一時ディレクトリは消える）。
+`--check` rewrites the component directory with the same writer into **a temporary directory inside
+the series** (`<series>/.check-*/` — placed the same way as umT5's `write --check`), and compares
+it with the existing component directory by **the sha256 of every file** (every container part and
+`io.*` / `reference.*`) ({@link series_mismatches}). The series is not replaced. On a difference it
+names the differing files and exits non-zero (the temporary directory is removed).
 
-守るもの: Wan2.1 と共有する書き手（`dit_patch` / `dit_reference` / この台本）を Wan2.2 のために
-変えたとき、1.3B の容器と golden が 1 バイトも動いていないこと。書き手の門（eager 同値）は書き直した
-側の内部の整合しか見ないので、既存の系列との突き合わせが別に要る。
+What it protects: when the writers shared with Wan2.1 (`dit_patch` / `dit_reference` / this script)
+change for Wan2.2, the 1.3B containers and goldens have not moved by a single byte. The writer's
+check (eager equivalence) only sees the internal consistency of the rewritten side, so a comparison
+with the existing series is needed separately.
 
-- `--dtype i8 --no-full --check` は実寸（S = 14,040）の 8 ケースを書かず、既存のそのファイルは
-  照合から外す（{@link check_absent} — 外したケースのファイルが既存に無ければそれも名指す）。容器は
-  全 part を見る。
-- `--layers --check` は計測用の系列（容器だけ）を照合する。
-- 実寸の golden の値の再現は `wan.dit_reference compare`（層逐次の参照で採り直してテンソルごとに
-  比べる）が別に見る。
+- `--dtype i8 --no-full --check` does not write the 8 full-size (S = 14,040) cases and leaves those
+  existing files out of the comparison ({@link check_absent} — a left-out case file missing from
+  the existing series is named too). Every container part is checked.
+- `--layers --check` compares the measurement series (container only).
+- Reproducing the values of the full-size goldens is checked separately by
+  `wan.dit_reference compare` (re-taken with the layer-by-layer reference and compared tensor by
+  tensor).
 """
 
 from __future__ import annotations
@@ -208,59 +235,71 @@ from wan import dit_patch
 from wan.pipeline_ref import TEXT_DIM, assert_no_mps, pad_text_embeds
 from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, local_snapshot
 
-#: 系列（ADR 0118 決定 7 — 接尾辞 `-dyn` は ADR 0077 の慣例）と、計測用の層別出口の系列。
+#: The series (ADR 0118 decision 7 — the `-dyn` suffix is the convention of ADR 0077) and the series
+#: of per-layer exits for measurement.
 SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-f16-dyn"
 PROBE_SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-f16-dyn-probe"
-#: i8 系列（ADR 0120 決定 2 — transformer だけ。綴りは anima の `<model>-i8-dyn` に倣う）。
+#: The i8 series (ADR 0120 decision 2 — transformer only; the spelling follows anima's
+#: `<model>-i8-dyn`).
 I8_SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-i8-dyn"
 
-#: 書き出せる格納 dtype（= `export_to_file` の `weight_dtype`）。
+#: The storage dtypes that can be written (= `weight_dtype` of `export_to_file`).
 DTYPES = ("f16", "i8")
 
-#: 部品名（= 容器のグラフ名 = 配布 manifest の weights のキー — container-v1 §2.1）。
+#: The component name (= the container's graph name = the key under weights of the distribution
+#: manifest — container-v1 §2.1).
 TARGET = "transformer"
 MODEL_FILE = "model.krm"
 
-#: 資産の名前と役割（Anima の S 形 DiT と同じ綴り — ADR 0109 決定 4）。
+#: The asset's name and role (the same spelling as Anima's S-shaped DiT — ADR 0109 decision 4).
 ROPE_BASE_ASSET = "rope_base"
 ROPE_BASE_ROLE = "rope-base"
 
 IO_PREFIX = "io."
 REFERENCE_PREFIX = "reference."
-#: 実寸のケースの `reference.<case>` に入れる f64 の参照のキー（TS 側の `REFERENCE_F64_KEY`）。
+#: The key of the f64 reference in `reference.<case>` of full-size cases (`REFERENCE_F64_KEY` on the
+#: TS side).
 REFERENCE_F64_KEY = "output.f64"
 CASE_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
-#: `--check` の一時ディレクトリの接頭辞（系列の中 — umT5 の `write --check` と同じ綴り）。
+#: The prefix of the `--check` temporary directory (inside the series — the same spelling as umT5's
+#: `write --check`).
 CHECK_PREFIX = ".check-"
 
-#: グラフ入力の名前（ラッパの forward の引数名がそのまま IR の入力名になる）。
+#: The graph input names (the argument names of the wrapper's forward become the IR input names as
+#: is).
 INPUT_NAMES = ("tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin")
 
-#: `Dim("S")` の上限 = 81 フレーム（潜在 `[16,21,60,104]` → 21·30·52）。グラフ側にトークン長の制約は
-#: 無い（RoPE の表を入力へ出したので S 依存の焼き込みが無い）ので、ここは受理集合の最大を宣言する。
+#: The upper bound of `Dim("S")` = 81 frames (latent `[16,21,60,104]` → 21·30·52). The graph has no
+#: constraint on the token length (the RoPE tables were moved to the inputs, so nothing S-dependent
+#: is baked in), so this declares the maximum of the accepted set.
 DIT_SYM_MAX = 32_760
-#: 同下限（0 / 1 特殊化を避ける線 — Anima の `DIT_SYM_MIN` と同じ）。
+#: The lower bound likewise (the line that avoids 0 / 1 specialization — the same as Anima's
+#: `DIT_SYM_MIN`).
 DIT_SYM_MIN = 2
 
-#: 決定用と伸びの記録のケースの乱数はここから派生させる（グローバル seed に依存しない — 再生成で
-#: バイト一致させる）。受入れのケースは別系統の seed（777001〜）を直に持つ。
+#: The random numbers of the band cases and of the growth record derive from this (independent of
+#: the global seed — regeneration is byte-identical). The acceptance cases carry seeds of a separate
+#: line (777001 and up) directly.
 SEED = 20261002
 
 
 @dataclass(frozen=True)
 class CaseSpec:
-    """golden 1 ケースの条件（潜在の形・timestep・テキストの有効長・乱数の seed）。"""
+    """The conditions of one golden case (latent shape, timestep, valid text length, random
+    seed)."""
 
     role: str
     latent_shape: tuple[int, int, int]
     timestep: int
     text_length: int
     seed: int
-    #: 役割・S・timestep が同じケースを名前で分ける接尾辞（実寸の t = 999 の 2 本目）。
+    #: A suffix that tells apart cases with the same role, S and timestep (the second full-size
+    #: t = 999 case).
     variant: str = ""
-    #: 各ブロックの出力（`block.NN`）を golden に持つか（層ごとの記録の相手 — 実寸は 2 本だけ）。
+    #: Whether the golden holds each block's output (`block.NN`) (the counterpart of the per-layer
+    #: record — only 2 at full size).
     blocks: bool = True
 
     def name(self, patch_size: tuple[int, int, int]) -> str:
@@ -271,15 +310,16 @@ class CaseSpec:
 
     @property
     def full_size(self) -> bool:
-        """実寸（ADR 0118 段 3 の 33 フレーム・段 8 の 81 フレーム）のケース — f32 に加えて f64 の
-        参照も採る。"""
+        """A full-size case (33 frames of ADR 0118 step 3, 81 frames of step 8) — takes an f64
+        reference in addition to f32."""
         return self.role.startswith("full-")
 
 
-#: ケースの表（モジュール docstring の表と同じ）。先頭が export の例示入力（小さい方 —
-#: `torch.export` はトレースで 1 回 forward を回す）。
-#: MUST: `band`（帯の決定）と `accept`（受入れ）は固定する — `accept` の結果を見て `band` を
-#: 変えない（モジュール docstring）。実寸の `full-band` / `full-accept` も同じ。
+#: The case table (the same as the table of the module docstring). The first is the export's example
+#: input (the smaller one — `torch.export` runs one forward while tracing).
+#: MUST: `band` (sets the band) and `accept` (acceptance) are fixed — do not change `band` after
+#: looking at the `accept` results (module docstring). The same holds for the full-size
+#: `full-band` / `full-accept`.
 CASES: tuple[CaseSpec, ...] = (
     CaseSpec("band", (3, 16, 16), 999, 24, SEED + 0),
     CaseSpec("band", (2, 16, 24), 750, 50, SEED + 3),
@@ -310,21 +350,22 @@ CASES: tuple[CaseSpec, ...] = (
     CaseSpec("full-accept", (21, 60, 104), 600, 77, 777009, blocks=False),
 )
 
-#: i8 系列が採るケース（ADR 0120 決定 3 — 参照席 `f16+dit8` の r 門は S = 192 と S = 14,040）:
-#: 実寸でない役割のうち S = 192 の組（`band` / `accept`）と、実寸のうち 33 フレームの格子
-#: （S = 14,040）。{@link CASES} の行をそのまま使う（seed・timestep・有効長を f16 系列と揃える）。
+#: The cases the i8 series takes (ADR 0120 decision 3 — the r check of the reference preset
+#: `f16+dit8` is at S = 192 and S = 14,040): among the non-full-size roles the S = 192 set
+#: (`band` / `accept`), and among the full-size ones the 33-frame grid (S = 14,040). The rows of
+#: {@link CASES} are used as they are (seed, timestep and valid length match the f16 series).
 I8_CASE_ROLES = ("band", "accept")
 I8_FULL_LATENTS: tuple[tuple[int, int, int], ...] = ((9, 60, 104),)
 
 
 def series_dir(dtype: str) -> Path:
-    """格納 dtype → 系列のディレクトリ。"""
+    """Storage dtype → the series directory."""
     return {"f16": SERIES, "i8": I8_SERIES}[dtype]
 
 
 def series_cases(dtype: str, *, full: bool = True) -> tuple[CaseSpec, ...]:
-    """格納 dtype の系列が採るケース（先頭は {@link CASES} と同じ例示入力）。`full=False` は実寸の
-    ケースを除く（`--no-full`）。"""
+    """The cases the series of a storage dtype takes (the first is the same example input as in
+    {@link CASES}). `full=False` drops the full-size cases (`--no-full`)."""
     if dtype == "f16":
         cases = CASES
     else:
@@ -341,17 +382,18 @@ def series_cases(dtype: str, *, full: bool = True) -> tuple[CaseSpec, ...]:
 
 
 def wants_float64(dtype: str, spec: CaseSpec) -> bool:
-    """そのケースが f64 の参照（`output.f64`）を持つか。
+    """Whether the case has an f64 reference (`output.f64`).
 
-    f16 系列は実寸のケースだけ（S = 192 の帯は最大絶対差の比 — ADR 0118 決定 8）、i8 系列は
-    全ケース（r 門を S = 192 でも持つ — ADR 0120 決定 3）。
+    In the f16 series only the full-size cases (the S = 192 band is a ratio of max absolute
+    differences — ADR 0118 decision 8); in the i8 series every case (the r check also exists at
+    S = 192 — ADR 0120 decision 3).
     """
     return dtype == "i8" or spec.full_size
 
 
 @dataclass(frozen=True)
 class Case:
-    """組み上がった 1 ケース（グラフ入力・上流の参照・パッチ後の eager 出力）。"""
+    """One assembled case (graph inputs, upstream reference, patched eager output)."""
 
     name: str
     spec: CaseSpec
@@ -359,9 +401,10 @@ class Case:
     latents: torch.Tensor
     timestep: torch.Tensor
     reference: torch.Tensor
-    #: 各ブロックの出力（`spec.blocks` でないケースは空）。
+    #: Each block's output (empty for cases without `spec.blocks`).
     reference_blocks: list[torch.Tensor]
-    #: 上流の素の forward（参照）の所要（秒・CPU f32 — 実寸のケースの所要の記録）。
+    #: The time taken by upstream's plain forward (the reference) (seconds, CPU f32 — recorded for
+    #: the full-size cases).
     reference_seconds: float
 
 
@@ -370,7 +413,8 @@ def _generator(seed: int) -> torch.Generator:
 
 
 def load_transformer(model_name: str = DEFAULT_MODEL) -> nn.Module:
-    """pin した revision の DiT を CPU f32 で読む（MPS の見える機では止める — 決定 3）。"""
+    """Loads the DiT of the pinned revision on CPU f32 (stops on a machine where MPS is visible —
+    decision 3)."""
     assert_no_mps()
     from diffusers import WanTransformer3DModel
 
@@ -381,14 +425,16 @@ def load_transformer(model_name: str = DEFAULT_MODEL) -> nn.Module:
 
 
 def unrounded_weights(dtype: str, model: nn.Module) -> list[str]:
-    """系列の格納 dtype の丸めの不動点に無い上流の重みの名前（空なら丸め済み）。
+    """The names of upstream weights that are not at the fixed point of the series storage dtype's
+    rounding (empty means already rounded).
 
-    - `f16`: 全パラメータが f16 の表現可能値（f16 → f32 の往復でビット不変）
-    - `i8`: 上流の重みスロット（linear と patch 埋め込み）が per-channel の i8 の表現可能値（もう
-      1 度丸めてビット不変 — `karume.quantize.INT8_MAX` の注記）
+    - `f16`: every parameter is an f16-representable value (bit-unchanged by an f16 → f32 round
+      trip)
+    - `i8`: upstream's weight slots (linear and patch embedding) are per-channel i8-representable
+      values (bit-unchanged by rounding once more — the note on `karume.quantize.INT8_MAX`)
 
-    丸めの書き手（{@link round_to_f16} / {@link fake_quant_i8}）と、丸め済みのモデルを受ける側
-    （{@link float64_references}）が同じ判定を通る。
+    The rounding writers ({@link round_to_f16} / {@link fake_quant_i8}) and the side that receives
+    the rounded model ({@link float64_references}) go through the same check.
     """
     with torch.no_grad():
         if dtype == "f16":
@@ -405,53 +451,60 @@ def unrounded_weights(dtype: str, model: nn.Module) -> list[str]:
                 if not torch.equal(rounded, weight):
                     missed.append(name)
             return missed
-    raise ValueError(f"格納 dtype {dtype!r} の丸めは知らない（{' / '.join(DTYPES)}）")
+    raise ValueError(f"unknown rounding for storage dtype {dtype!r} ({' / '.join(DTYPES)})")
 
 
 def round_to_f16(model: nn.Module, wrapper: nn.Module) -> str:
-    """S 形のラッパ経由で重みを f16 表現可能値へ丸め、上流の全パラメータに届いたことを確かめる。
+    """Rounds the weights to f16-representable values through the S-shaped wrapper and checks that
+    the rounding reached every upstream parameter.
 
-    ラッパが持つのは上流の部品への参照と、conv の重みの view の Linear だけ（`rope` は持たない）。
-    だから丸めは上流のパラメータ全部に届き、`rope` のバッファ（RoPE の表）には届かない。
-    MUST: 両方を確かめる — 片方でも外れると「参照だけ別の重み」か「参照の表だけ f16」になり、差に
-    量子化誤差が混ざって帯の意味が消える。
+    The wrapper holds only references to upstream's components and the Linear that is a view of the
+    conv weights (it does not hold `rope`). So the rounding reaches every upstream parameter and
+    does not reach the buffers of `rope` (the RoPE table).
+    MUST: check both — if either fails, it becomes "only the reference has other weights" or "only
+    the reference's table is f16", quantization error mixes into the difference and the band loses
+    its meaning.
     """
     rope_before = {name: buffer.clone() for name, buffer in model.rope.named_buffers()}
     report = round_weights_to_f16(wrapper)
     missed = unrounded_weights("f16", model)
     if missed:
-        raise AssertionError(f"f16 の丸めが上流のパラメータに届いていない: {missed[:5]}")
+        raise AssertionError(f"the f16 rounding did not reach upstream parameters: {missed[:5]}")
     moved = [
         name
         for name, buffer in model.rope.named_buffers()
         if not torch.equal(buffer, rope_before[name])
     ]
     if moved:
-        raise AssertionError(f"RoPE の表（rope のバッファ）が丸められた: {moved}")
+        raise AssertionError(f"the RoPE table (the rope buffers) was rounded: {moved}")
     return report.describe()
 
 
 def fake_quant_i8(model: nn.Module, wrapper: nn.Module) -> Int8Report:
-    """S 形のラッパ経由で linear の重みを per-channel symmetric i8 の表現可能値へ丸め（RTN —
-    ADR 0019）、上流の重みスロット全部に届いたことを確かめる（ADR 0120 決定 2 の i8 系列）。
+    """Rounds the linear weights to per-channel symmetric i8-representable values through the
+    S-shaped wrapper (RTN — ADR 0019) and checks that the rounding reached every upstream weight
+    slot (the i8 series of ADR 0120 decision 2).
 
-    ラッパの linear は上流の Linear そのものと、conv の重みの view の patch 埋め込みだけ。だから
-    丸めは上流の全 Linear と patch 埋め込みの Conv3d に届く。bias・norm の weight・
-    `scale_shift_table`・`rope` のバッファは `fake_quant_int8` が触らない（上流の f32 の値のまま —
-    決定 2）。
-    MUST: 上流側に届いたことを確かめる — 届かない重みが 1 本でもあると「参照だけ別の重み」になり、
-    差に量子化誤差が混ざって帯の意味が消える（{@link round_to_f16} と同じ理由）。確かめ方は冪等性:
-    i8 の表現可能値は per-channel の量子化の不動点（`karume.quantize.INT8_MAX` の注記）なので、
-    もう 1 度丸めてビット不変なら届いている。本数も上流の重みスロットの本数と一致させる。
+    The wrapper's linears are only upstream's Linears themselves and the patch embedding that is a
+    view of the conv weights. So the rounding reaches every upstream Linear and the Conv3d of the
+    patch embedding. Biases, norm weights, `scale_shift_table` and the buffers of `rope` are not
+    touched by `fake_quant_int8` (they stay upstream's f32 values — decision 2).
+    MUST: check that the rounding reached the upstream side — if even one weight is missed, it
+    becomes "only the reference has other weights", quantization error mixes into the difference
+    and the band loses its meaning (the same reason as {@link round_to_f16}). The check is
+    idempotence: an i8-representable value is a fixed point of per-channel quantization (the note on
+    `karume.quantize.INT8_MAX`), so bit-unchanged after rounding once more means it was reached. The
+    count must also equal the number of upstream weight slots.
     """
     report = fake_quant_int8(wrapper)
     upstream = list(iter_quant_targets(model, op_types=QUANT_MODULE_TYPES))
     missed = unrounded_weights("i8", model)
     if missed:
-        raise AssertionError(f"i8 の丸めが上流の重みに届いていない: {missed[:5]}")
+        raise AssertionError(f"the i8 rounding did not reach upstream weights: {missed[:5]}")
     if len(upstream) != report.modules:
         raise AssertionError(
-            f"ラッパで丸めた重み {report.modules} 本が上流の重みスロット {len(upstream)} 本と違う"
+            f"{report.modules} weights rounded through the wrapper differ from the"
+            f" {len(upstream)} upstream weight slots"
         )
     return report
 
@@ -459,36 +512,39 @@ def fake_quant_i8(model: nn.Module, wrapper: nn.Module) -> Int8Report:
 def fake_quant(
     dtype: str, model: nn.Module, wrapper: nn.Module
 ) -> tuple[str, Mapping[str, torch.Tensor] | None]:
-    """系列の格納 dtype の表現可能値へ重みを丸める（参照の採取より前 MUST — ADR 0006）。
+    """Rounds the weights to the representable values of the series storage dtype (MUST come before
+    taking the reference — ADR 0006).
 
-    戻りは要約の 1 行と、i8 の scale 台帳（emit へそのまま渡す — f16 は None）。
+    Returns a one-line summary and the i8 scale ledger (passed to emit as is — None for f16).
     """
     if dtype == "i8":
         report = fake_quant_i8(model, wrapper)
-        return f"i8 per-channel へ丸めた — {report.describe()}", report.scales
+        return f"rounded to i8 per-channel — {report.describe()}", report.scales
     if dtype == "f16":
-        return f"f16 表現可能値へ丸めた — {round_to_f16(model, wrapper)}", None
-    raise ValueError(f"格納 dtype {dtype!r} の系列は書けない（{' / '.join(DTYPES)}）")
+        return f"rounded to f16-representable values — {round_to_f16(model, wrapper)}", None
+    raise ValueError(f"cannot write a series of storage dtype {dtype!r} ({' / '.join(DTYPES)})")
 
 
 def case_inputs(
     model: nn.Module, spec: CaseSpec
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """1 ケースの上流の入力（潜在 `[1,16,F,H,W]`・timestep・テキスト文脈 `[1,512,4096]`）。
+    """The upstream inputs of one case (latent `[1,16,F,H,W]`, timestep, text context
+    `[1,512,4096]`).
 
-    f32 と f64 の参照が同じ値を受けるよう、乱数はここ 1 か所で引く。
+    The random numbers are drawn in this one place so that the f32 and f64 references receive the
+    same values.
     """
     generator = _generator(spec.seed)
     latents = torch.randn(1, model.config.in_channels, *spec.latent_shape, generator=generator)
     text = torch.randn(spec.text_length, TEXT_DIM, generator=generator)
-    # 上流のパイプラインは scheduler の int64 の timestep を `expand(batch)` して渡す。
+    # Upstream's pipeline passes the scheduler's int64 timestep after `expand(batch)`.
     timestep = torch.tensor([spec.timestep], dtype=torch.int64)
     return latents, timestep, pad_text_embeds(text)
 
 
 def build_case(model: nn.Module, spec: CaseSpec) -> Case:
-    """1 ケースの入力を作り、上流の素の forward で参照（最終出力と、`spec.blocks` なら各ブロックの
-    出力）を採る。"""
+    """Builds the inputs of one case and takes the reference with upstream's plain forward (the
+    final output and, with `spec.blocks`, each block's output)."""
     patch_size = tuple(int(size) for size in model.config.patch_size)
     latents, timestep, encoder_hidden_states = case_inputs(model, spec)
     with torch.no_grad():
@@ -501,7 +557,10 @@ def build_case(model: nn.Module, spec: CaseSpec) -> Case:
             reference = dit_patch.reference_dit(model, latents, timestep, encoder_hidden_states)
             blocks = []
         reference_seconds = time.perf_counter() - started
-        print(f"[case] {spec.name(patch_size)}: 上流の参照 {reference_seconds:.1f} s", flush=True)
+        print(
+            f"[case] {spec.name(patch_size)}: upstream reference {reference_seconds:.1f} s",
+            flush=True,
+        )
         rope_cos, rope_sin = dit_patch.dit_rope_tables(model.rope, spec.latent_shape)
         inputs = (
             dit_patch.dit_patchify(latents, patch_size),
@@ -524,26 +583,30 @@ def build_case(model: nn.Module, spec: CaseSpec) -> Case:
 
 @dataclass(frozen=True)
 class Float64Reference:
-    """実寸の 1 ケースの f64 の参照（最終出力 `[1,16,F,H,W]` は f64 のまま — 書くときに丸める）。"""
+    """The f64 reference of one full-size case (the final output `[1,16,F,H,W]` stays f64 — it is
+    rounded when written)."""
 
     output: torch.Tensor
-    #: 所要（秒・CPU f64）。
+    #: Time taken (seconds, CPU f64).
     seconds: float
 
 
 def float64_references(
     model: nn.Module, specs: Sequence[CaseSpec], dtype: str
 ) -> dict[str, Float64Reference]:
-    """f64 の参照を持つケース（{@link wants_float64}）の f64 の参照（上流の素の forward を活性も
-    f64 で — 層逐次の `wan.dit_reference.LayerwiseDit`・ADR 0121 決定 7）。
+    """The f64 references of the cases that have one ({@link wants_float64}) (upstream's plain
+    forward with activations also in f64 — the layer-by-layer `wan.dit_reference.LayerwiseDit`,
+    ADR 0121 decision 7).
 
-    `model` は系列の格納 dtype の丸め（{@link fake_quant}）を掛けた後の f32 のモデル。重みはその
-    f32 の値を 1 ブロックずつ f64 へ広げ、入力も {@link case_inputs} の同じ値を広げる。丸めは f32 の
-    うちに掛ける（f64 で丸めると scale と丸めの値が f32 の参照と食い違う）。モデル全体を f64 に
-    しない — 同時に持つ f64 はブロックの外と 1 ブロックだけ（5B では f64 の全量 37.25 GiB が
-    31 GiB 機に載らない。1.3B もこの 1 本の経路を通す — 全体 f64 の経路は残さない）。
-    MUST: `model` が丸め済みであることをここで確かめる（{@link unrounded_weights}）— 呼ぶ順が
-    崩れて丸める前のモデルが渡ると、丸めていない重みの f64 golden が黙って書かれる。
+    `model` is the f32 model after the series storage dtype's rounding ({@link fake_quant}). The
+    weights widen those f32 values to f64 one block at a time, and the inputs widen the same values
+    from {@link case_inputs}. The rounding is applied while still in f32 (rounding in f64 would make
+    the scale and the rounded values disagree with the f32 reference). The whole model is not made
+    f64 — the f64 held at once is the part outside the blocks and one block (for 5B the full f64
+    37.25 GiB does not fit a 31 GiB machine. 1.3B also goes through this single path — no
+    whole-model f64 path is kept).
+    MUST: check here that `model` is rounded ({@link unrounded_weights}) — if the call order breaks
+    and an unrounded model is passed, f64 goldens of unrounded weights would be written silently.
     """
     from wan import dit_reference
 
@@ -563,20 +626,25 @@ def float64_references(
         latents, timestep, encoder_hidden_states = case_inputs(model, spec)
         result = writer.forward(source, torch.float64, latents, timestep, encoder_hidden_states)
         name = spec.name(writer.patch_size)
-        print(f"[case] {name}: 上流の f64 参照（層逐次）{result.seconds:.1f} s", flush=True)
+        print(
+            f"[case] {name}: upstream f64 reference (layer by layer) {result.seconds:.1f} s",
+            flush=True,
+        )
         references[name] = Float64Reference(output=result.output, seconds=result.seconds)
     return references
 
 
 def dynamic_shapes() -> tuple[Any, ...]:
-    """入力ごとの記号次元。RoPE の表も同じ `S` で宣言する（別シンボルにすると「表と本体の長さが
-    ずれた」形が受理されて沈黙誤値になる — Anima と同じ）。"""
+    """The symbolic dimensions per input. The RoPE tables are declared with the same `S` too (with a
+    separate symbol, a shape where "the table and the body have different lengths" would be
+    accepted and give silently wrong values — the same as Anima)."""
     tokens = Dim("S", min=DIT_SYM_MIN, max=DIT_SYM_MAX)
     return ({1: tokens}, None, None, {1: tokens}, {1: tokens})
 
 
 def provenance(model_name: str) -> Provenance:
-    """容器へ焼く出所（上流のライセンス識別子と pin した revision — `wan.sources` が正本）。"""
+    """The provenance baked into the container (upstream's license identifier and the pinned
+    revision — `wan.sources` is the source of truth)."""
     source = SOURCES[model_name]
     return Provenance(
         license=source.license, notice=NOTICE_FILENAME, upstream_revision=source.revision
@@ -584,24 +652,27 @@ def provenance(model_name: str) -> Provenance:
 
 
 def rope_base_asset(model: nn.Module) -> dict[str, AssetInput]:
-    """資産 `rope_base`（軸別素表の safetensors のバイト列そのもの — Anima と同じ席）。"""
+    """The `rope_base` asset (the bytes of the per-axis base tables' safetensors themselves — the
+    same slot as Anima)."""
     payload = save(dit_patch.dit_rope_base_tables(model.rope))
     return {ROPE_BASE_ASSET: AssetInput(ROPE_BASE_ROLE, len(payload), payload)}
 
 
 class EagerEquivalenceError(AssertionError):
-    """パッチ後の eager が ADR 0118 の主張（trunk のビット一致・Linear 化の差の上界・有限）から
-    外れた。"""
+    """The patched eager departs from the claims of ADR 0118 (bit-exact trunk, the bound on the
+    difference of the Linear form, finite)."""
 
 
 def patch_embedding_error_bound(tokens: torch.Tensor, linear: nn.Linear) -> torch.Tensor:
-    """patch 埋め込みの Linear 化と上流の conv3d の差の、縮約順の違いだけで生じうる上界
-    （要素ごと）。
+    """The upper bound (per element) on the difference between the Linear form of the patch
+    embedding and upstream's conv3d that the different reduction order alone can produce.
 
-    `2·γ_{K+1}·(|x|·|W|ᵀ + |b|)`（`γ_n = n·u / (1 − n·u)`・`u = 2⁻²⁴`・K = 窓の要素数で、bias の
-    加算が項を 1 つ増やす）。2 つの縮約順のどちらも真値から `γ_{K+1}·Σ|項|` 以内に収まるので、
-    差はその 2 倍以内。Linear 化はビット一致を期待しない（ADR 0118 — 差を記録する）が、並びの
-    取り違えのような実装の誤りは値そのものの大きさで出て、この上界を超える。
+    `2·γ_{K+1}·(|x|·|W|ᵀ + |b|)` (`γ_n = n·u / (1 − n·u)`, `u = 2⁻²⁴`, K = the number of window
+    elements, and the bias addition adds one term). Both reduction orders stay within
+    `γ_{K+1}·Σ|terms|` of the true value, so the difference is within twice that. The Linear form
+    is not expected to be bit-exact (ADR 0118 — the difference is recorded), but an implementation
+    error such as a swapped layout shows up in the size of the values themselves and exceeds this
+    bound.
     """
     weight = linear.weight
     magnitude = tokens.abs() @ weight.abs().T
@@ -613,8 +684,8 @@ def patch_embedding_error_bound(tokens: torch.Tensor, linear: nn.Linear) -> torc
     return 2 * (terms * unit / (1 - terms * unit)) * magnitude
 
 
-#: 要約の数値の欄のうち、有限でなければならないもの（`reference_f32_vs_f64_ratio` は実寸の
-#: ケースだけが持つ — 下の {@link eager_failures}）。
+#: The numeric summary fields that must be finite (`reference_f32_vs_f64_ratio` exists only for the
+#: full-size cases — {@link eager_failures} below).
 _FINITE_FIELDS = (
     "reference_max_abs",
     "trunk_max_abs_diff",
@@ -624,47 +695,57 @@ _FINITE_FIELDS = (
 
 
 def eager_failures(report: Mapping[str, Any]) -> list[str]:
-    """eager の要約 1 本が ADR 0118 の主張から外れた点（空なら合格）。
+    """The points where one eager summary departs from the claims of ADR 0118 (empty means pass).
 
-    MUST: emit は 1 つでもあれば公開しない（{@link emit}）・`--verify` は非 0 で終わる。見るのは
-    trunk のビット一致（パッチの eager 同値 MUST）・patch 埋め込みの差が縮約順の上界の内
-    （{@link patch_embedding_error_bound}）・パッチ後の出力と数値の欄が有限であること。
+    MUST: if there is even one, emit does not publish ({@link emit}) and `--verify` exits non-zero.
+    It checks that the trunk is bit-exact (the patch's eager equivalence MUST), that the
+    patch-embedding difference is within the reduction-order bound
+    ({@link patch_embedding_error_bound}), and that the patched output and the numeric fields are
+    finite.
     """
     failures = []
     if report.get("trunk_bit_exact") is not True:
-        failures.append("trunk（patch 埋め込み以外の書き換え）が上流とビット一致しない")
+        failures.append(
+            "the trunk (the rewrites other than the patch embedding) is not bit-identical to"
+            " upstream"
+        )
     if report.get("patch_embedding_within_bound") is not True:
-        failures.append("patch 埋め込みの Linear 化と conv3d の差が縮約順の上界を超える")
+        failures.append(
+            "the difference between the patch embedding's Linear form and conv3d exceeds the"
+            " reduction-order bound"
+        )
     if report.get("output_finite") is not True:
-        failures.append("パッチ後のグラフ出力に非有限値がある")
+        failures.append("the patched graph output has non-finite values")
     fields = [*_FINITE_FIELDS]
     if "reference_f32_vs_f64_ratio" in report:
         fields.append("reference_f32_vs_f64_ratio")
     for field in fields:
         value = report.get(field)
         if not isinstance(value, float) or not math.isfinite(value):
-            failures.append(f"{field} が有限の数でない（{value!r}）")
+            failures.append(f"{field} is not a finite number ({value!r})")
     return failures
 
 
 def eager_report(
     wrapper: dit_patch.WanDitTokens, model: nn.Module, case: Case
 ) -> tuple[dict[str, Any], torch.Tensor]:
-    """パッチ後の eager（ホストの unpatchify まで）と上流の素の出力の差（ケース 1 本）と、パッチ後の
-    グラフ出力 `[1,S,pt·ph·pw·C]`（golden の `output.0` — 書き手が回し直さずに使う）。
+    """The difference between the patched eager (up to the host unpatchify) and upstream's plain
+    output (one case), and the patched graph output `[1,S,pt·ph·pw·C]` (the golden's `output.0` —
+    the writer uses it without running again).
 
-    `trunk` は patch 埋め込みを上流の conv3d の出力に差し替えた経路（RoPE の書き換えを含む本体だけの
-    比較 — ビット一致が主張）、`full` は Linear 化した patch 埋め込みを含む製品の経路
-    （差を記録する — 判定は patch 埋め込みの差が {@link patch_embedding_error_bound} の内か）。
-    判定の欄の読み方は {@link eager_failures}。
+    `trunk` is the path with the patch embedding replaced by upstream's conv3d output (a comparison
+    of the body alone, including the RoPE rewrite — the claim is bit-exactness); `full` is the
+    product path including the Linear form of the patch embedding (the difference is recorded — the
+    verdict is whether the patch-embedding difference is within
+    {@link patch_embedding_error_bound}). How to read the verdict fields: {@link eager_failures}.
 
-    patch 埋め込みの出力が上流の conv3d とビット一致するなら、trunk は full と同じ入力で同じ計算を
-    する（`forward` は `forward_hidden(patch_embedding(tokens), …)`）ので回し直さない
-    （`trunk_from_full`）。実寸（S = 14,040）では 1 forward が CPU で分単位なので、ケースあたりの
-    forward をこの 1 本に絞る。
+    If the patch embedding's output is bit-identical to upstream's conv3d, trunk does the same
+    computation on the same input as full (`forward` is `forward_hidden(patch_embedding(tokens),
+    …)`), so it is not run again (`trunk_from_full`). At full size (S = 14,040) one forward takes
+    minutes on CPU, so the forwards per case are cut down to this one.
 
-    attention は参照と同じく {@link dit_patch.flash_attention_only} の下で回す（S = 32,760 で MATH
-    へ落ちると OOM）。
+    Attention runs under {@link dit_patch.flash_attention_only} as for the reference (falling back
+    to MATH at S = 32,760 OOMs).
     """
     patch_size = wrapper.patch_size
     with torch.no_grad(), dit_patch.flash_attention_only():
@@ -704,7 +785,8 @@ def eager_report(
 
 
 def _ratio(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    """帯の指標（最大絶対差 ÷ 参照の最大絶対値 — TS 側の `ratioOf` と同じ形）を f64 で。"""
+    """The band metric (max absolute difference ÷ max absolute value of the reference — the same
+    shape as `ratioOf` on the TS side), in f64."""
     expected = expected.double()
     return float((actual.double() - expected).abs().max() / expected.abs().max())
 
@@ -718,16 +800,17 @@ def reference_tensors(
     blocks: Sequence[torch.Tensor],
     output_f64: torch.Tensor | None,
 ) -> dict[str, torch.Tensor]:
-    """`reference.<case>` の中身（`latents` / `timestep`〈i32〉/ `output` / `block.NN` /
-    `output.f64`）。
+    """The contents of `reference.<case>` (`latents` / `timestep` (i32) / `output` / `block.NN` /
+    `output.f64`).
 
-    書き手（{@link _write_case_files}）と層逐次の参照の突き合わせ（`wan.dit_reference compare` —
-    `output` を採らない `--f64-only` は `output=None`）が同じ組み方を通る — 2 か所で綴ると、
-    突き合わせが書き手と違う形を「一致」と言いうる。
+    The writer ({@link _write_case_files}) and the comparison against the layer-by-layer reference
+    (`wan.dit_reference compare` — `--f64-only`, which does not take `output`, passes
+    `output=None`) go through the same assembly — spelling it in two places would let the comparison
+    call a shape that differs from the writer's "identical".
     """
     reference = {
         "latents": latents.contiguous(),
-        "timestep": normalize_boundary_tensor(timestep, f"{name} の timestep"),
+        "timestep": normalize_boundary_tensor(timestep, f"timestep of {name}"),
     }
     if output is not None:
         reference["output"] = output.contiguous()
@@ -735,20 +818,23 @@ def reference_tensors(
         {f"block.{index:02d}": block.contiguous() for index, block in enumerate(blocks)}
     )
     if output_f64 is not None:
-        # 格納は f32 へ丸めた値（TS の safetensors は F64 を読まない）。丸めの差は要素ごとに
-        # 2⁻²⁴·|x| 以下で、比にして 6e-8 以下。正規化の分母（CPU f32 の参照の f64 に対する比）を
-        # 動かす割合は分母の最小で決まる: 決定用（`full-band`）だけなら S = 14,040 の最小 3.72e-6 で
-        # 2% 未満・S = 32,760 の最小 2.07e-6 で約 2.9%、受入れを含めると最小 1.83e-6
-        # （`full-accept-s14040-t0600`）で約 3.3%。帯（最悪 × 5）の判定には効かない（実測の表は
-        # TS 側 `e2e_wan_dit_test.ts` の `REFERENCE_F64_KEY` と `DIT_FULL_NORMALIZED_BAND`）。
+        # Stored as values rounded to f32 (the TS safetensors reader does not read F64). The
+        # rounding difference is at most 2⁻²⁴·|x| per element, at most 6e-8 as a ratio. How much it
+        # moves the normalization's denominator (the CPU f32 reference's ratio against f64) is set
+        # by the smallest denominator: for the band cases (`full-band`) alone, under 2% with the
+        # S = 14,040 minimum of 3.72e-6 and about 2.9% with the S = 32,760 minimum of 2.07e-6;
+        # including acceptance, about 3.3% with the minimum 1.83e-6 (`full-accept-s14040-t0600`).
+        # It does not affect the band verdict (worst × 5) (the measured table is at
+        # `REFERENCE_F64_KEY` and `DIT_FULL_NORMALIZED_BAND` in the TS `e2e_wan_dit_test.ts`).
         reference[REFERENCE_F64_KEY] = output_f64.to(torch.float32).contiguous()
     return reference
 
 
 def case_file_names(name: str) -> tuple[str, str]:
-    """ケース 1 本の golden のファイル名（`io.<case>` と `reference.<case>`）。
+    """The golden file names of one case (`io.<case>` and `reference.<case>`).
 
-    書き手（{@link _write_case_files}）と照合の除外（{@link check_absent}）が同じ綴りを通る。
+    The writer ({@link _write_case_files}) and the comparison's exclusion ({@link check_absent}) go
+    through the same spelling.
     """
     return f"{IO_PREFIX}{name}{CASE_SUFFIX}", f"{REFERENCE_PREFIX}{name}{CASE_SUFFIX}"
 
@@ -756,14 +842,15 @@ def case_file_names(name: str) -> tuple[str, str]:
 def _write_case_files(
     case: Case, output: torch.Tensor, reference_f64: Float64Reference | None, out_dir: Path
 ) -> list[str]:
-    """`io.<case>`（グラフ入力 + パッチ後の eager 出力 `output`）と `reference.<case>`（上流の値）を
-    書く。実寸のケースは `reference.<case>` に f64 の参照 `output.f64` も入れる。"""
+    """Writes `io.<case>` (graph inputs + the patched eager output `output`) and `reference.<case>`
+    (upstream's values). For full-size cases `reference.<case>` also holds the f64 reference
+    `output.f64`."""
     io = {
-        f"{INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{case.name} の入力 '{key}'")
+        f"{INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{case.name}: input '{key}'")
         for key, value in zip(INPUT_NAMES, case.inputs, strict=True)
     }
     io[f"{OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
-        output.detach().contiguous(), f"{case.name} の出力"
+        output.detach().contiguous(), f"output of {case.name}"
     )
     reference = reference_tensors(
         case.name,
@@ -780,13 +867,13 @@ def _write_case_files(
 
 
 class SeriesMismatchError(AssertionError):
-    """`--check` で書き直した部品ディレクトリが既存の系列とバイトで違った（または照合の相手が
-    無い）。"""
+    """The component directory rewritten by `--check` differs bytewise from the existing series (or
+    there is nothing to compare against)."""
 
 
 def file_digests(directory: Path) -> dict[str, str]:
-    """部品ディレクトリ直下のファイル名 → sha256（ファイルでない項目は fail loudly — 照合が
-    見ないものを残さない）。"""
+    """File name → sha256 directly under the component directory (anything that is not a file fails
+    loudly — nothing the comparison does not look at is left behind)."""
     digests: dict[str, str] = {}
     for path in sorted(directory.iterdir()):
         if not path.is_file():
@@ -799,12 +886,12 @@ def file_digests(directory: Path) -> dict[str, str]:
 def series_mismatches(
     written: Path, existing: Path, *, absent: Collection[str] = ()
 ) -> dict[str, str]:
-    """書き直した部品ディレクトリと既存の部品ディレクトリの食い違い（ファイル名 → 理由。空なら
-    全ファイルがバイト一致）。
+    """The discrepancies between the rewritten and the existing component directory (file name →
+    reason; empty means every file is byte-identical).
 
-    `absent` は今回は書かない既存のファイル（`--no-full` が除く実寸のケース —
-    {@link check_absent}）。書いていれば・既存に無ければ、それも食い違いとして名指す
-    （除外が黙って空振りしない）。
+    `absent` are the existing files not written this time (the full-size cases `--no-full` drops —
+    {@link check_absent}). If they were written, or are missing from the existing directory, that
+    is named as a discrepancy too (the exclusion never silently misses).
     """
     actual = file_digests(written)
     expected = file_digests(existing)
@@ -827,9 +914,10 @@ def series_mismatches(
 def check_absent(
     dtype: str, patch_size: tuple[int, int, int], *, full: bool, layers: bool
 ) -> frozenset[str]:
-    """`--check` で照合から外す既存のファイル（`--no-full` が書かない実寸のケースの golden）。
+    """The existing files `--check` leaves out of the comparison (the goldens of the full-size cases
+    `--no-full` does not write).
 
-    計測用の系列（`--layers`）は golden を持たないので外すものは無い。
+    The measurement series (`--layers`) has no goldens, so nothing is left out.
     """
     if full or layers:
         return frozenset()
@@ -839,10 +927,11 @@ def check_absent(
 
 @contextmanager
 def _write_root(series: Path, *, check: bool) -> Iterator[Path]:
-    """部品ディレクトリの親（`check` なら系列の中の一時ディレクトリ — 抜けるときに消える）。
+    """The parent of the component directory (with `check`, a temporary directory inside the series
+    — removed on exit).
 
-    作業席（`staged_publication`）はこの下に開くので、`check` の回の書き込みは系列の部品
-    ディレクトリに 1 バイトも届かない。
+    The staging directory (`staged_publication`) opens below it, so the writes of a `check` run
+    never reach the series' component directory by a single byte.
     """
     if not check:
         yield series
@@ -852,26 +941,28 @@ def _write_root(series: Path, *, check: bool) -> Iterator[Path]:
 
 
 def emit(args: argparse.Namespace) -> dict[str, Any]:
-    """製品のグラフ（または `--layers` の計測用グラフ）を書き、要約を返す。
+    """Writes the product graph (or the measurement graph of `--layers`) and returns a summary.
 
-    ケースは 1 本ずつ組んで書いて捨てる（実寸のケースは各ブロックの出力を持つものだけで
-    2.6 GB あり、全ケースを同時に持つとメモリに載らない）。グラフの export は全ケースの eager の後
-    （例示入力は先頭）。
+    Cases are built, written and dropped one at a time (at full size the ones holding each block's
+    output are 2.6 GB each, and holding all cases at once does not fit in memory). The graph export
+    comes after the eager of every case (the example input is the first case).
 
-    MUST: eager の要約が 1 本でも {@link eager_failures} に掛かれば、作業席の中で止める — 系列の
-    既存の final は 1 バイトも変わらない。止めずに据えると、壊れたラッパの golden（`io.*` も同じ
-    ラッパから採る）が TS 側の突合に届くのは公開の後になる。
+    MUST: if even one eager summary trips {@link eager_failures}, stop inside the staging directory
+    — the series' existing final does not change by a single byte. Publishing without stopping would
+    let the goldens of a broken wrapper (`io.*` is taken from the same wrapper) reach the TS-side
+    comparison only after publication.
 
-    MUST: `args.check` の回は部品ディレクトリを系列の中の一時ディレクトリへ書き、既存の部品
-    ディレクトリと全ファイルの sha256 で突き合わせるだけ（{@link series_mismatches} — 系列は置き換え
-    ない）。照合の相手が無ければ、上流を読む前に止める。
+    MUST: a run with `args.check` only writes the component directory into a temporary directory
+    inside the series and compares it with the existing component directory by the sha256 of every
+    file ({@link series_mismatches} — the series is not replaced). If there is nothing to compare
+    against, it stops before reading upstream.
     """
     started = time.perf_counter()
     series = PROBE_SERIES if args.layers else series_dir(args.dtype)
     existing = series / TARGET
     if args.check and not existing.is_dir():
         raise SeriesMismatchError(f"照合の相手の部品ディレクトリが無い（{existing}）")
-    # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
+    # The measurement graph writes no goldens, so only the example input (the first case) is built.
     specs = CASES[:1] if args.layers else series_cases(args.dtype, full=not args.no_full)
     model = load_transformer(args.model)
     wrapper_class = dit_patch.WanDitTokensLayers if args.layers else dit_patch.WanDitTokens
@@ -921,7 +1012,8 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
             declared = [entry.name for entry in graph.inputs]
             if not args.layers and declared != list(INPUT_NAMES):
                 raise AssertionError(
-                    f"グラフ入力名が宣言と不一致: {declared} vs {list(INPUT_NAMES)}"
+                    f"graph input names do not match the declaration: {declared} vs"
+                    f" {list(INPUT_NAMES)}"
                 )
         model_bytes = sum(part.stat().st_size for part in container_parts(out_dir / MODEL_FILE))
         check: dict[str, Any] | None = None
@@ -931,7 +1023,7 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
             mismatches = series_mismatches(out_dir, existing, absent=absent)
             if mismatches:
                 raise SeriesMismatchError(
-                    f"書き直した {out_dir.name} が既存の系列（{existing}）と違う:"
+                    f"the rewritten {out_dir.name} differs from the existing series ({existing}):"
                     f" {json.dumps(mismatches, ensure_ascii=False)}"
                 )
             check = {
@@ -965,8 +1057,8 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def verify(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """パッチ前後の eager 同値だけを実重みで実測する（容器は書かない — 判定は {@link main} が
-    {@link eager_failures} で掛ける）。"""
+    """Measures only the pre/post-patch eager equivalence on the real weights (writes no container
+    — {@link main} applies the verdict with {@link eager_failures})."""
     model = load_transformer(args.model)
     wrapper = dit_patch.WanDitTokens(model)
     if not args.no_f16:
@@ -984,45 +1076,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dtype",
         default="f16",
         choices=DTYPES,
-        help="系列の格納（i8 は transformer だけの …-i8-dyn/ — ADR 0120 決定 2）",
+        help="the series storage (i8 is the transformer-only …-i8-dyn/ — ADR 0120 decision 2)",
     )
     parser.add_argument(
         "--layers",
         action="store_true",
-        help="層別の出口を足した計測用のグラフを …-probe/ へ書く（golden は書かない）",
+        help="write the measurement graph with per-layer exits to …-probe/ (writes no goldens)",
     )
     parser.add_argument(
-        "--verify", action="store_true", help="パッチ前後の eager 同値だけを測る（容器は書かない）"
+        "--verify",
+        action="store_true",
+        help="measure only the pre/post-patch eager equivalence (writes no container)",
     )
     parser.add_argument(
         "--no-f16",
         action="store_true",
-        help="--verify で f16 の丸めを掛けない（素の f32 の重みで測る）",
+        help="do not apply the f16 rounding with --verify (measure on the plain f32 weights)",
     )
     parser.add_argument(
         "--no-full",
         action="store_true",
-        help="i8 系列の実寸（S = 14,040）のケースを採らない（段の分割用 — 後で無しで書き直す）",
+        help=(
+            "do not take the full-size (S = 14,040) cases of the i8 series (for splitting the work"
+            " into steps — rewrite later without it)"
+        ),
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="系列の中の一時ディレクトリへ書き直し、既存の部品ディレクトリと全ファイルの sha256 で"
-        "突き合わせるだけ（系列は置き換えない）",
+        help="rewrite into a temporary directory inside the series and only compare it with the"
+        " existing component directory by the sha256 of every file (the series is not replaced)",
     )
     args = parser.parse_args(argv)
     if args.no_f16 and (not args.verify or args.dtype != "f16"):
-        parser.error("--no-f16 は f16 の --verify とだけ使う（素の f32 の重みで同値だけを測る口）")
+        parser.error(
+            "--no-f16 goes only with the f16 --verify (the way to measure only the equivalence on"
+            " the plain f32 weights)"
+        )
     if args.no_full and args.dtype != "i8":
-        # f16 系列は 27 ケースの揃った golden を据えている（ADR 0118 段 3 / 8）。欠けた golden で
-        # 据え替える口を作らない。
-        parser.error("--no-full は --dtype i8 とだけ使う")
+        # The f16 series has a complete set of 27 golden cases in place (ADR 0118 steps 3 / 8).
+        # No way is provided to replace it with incomplete goldens.
+        parser.error("--no-full goes only with --dtype i8")
     if args.layers and args.dtype != "f16":
-        parser.error("--layers は f16 系列だけ（計測用の層別出口 …-f16-dyn-probe/）")
+        parser.error("--layers is for the f16 series only (per-layer exits …-f16-dyn-probe/)")
     if args.verify and args.layers:
-        parser.error("--verify と --layers は併用しない")
+        parser.error("--verify and --layers cannot be combined")
     if args.verify and args.check:
-        parser.error("--verify と --check は併用しない（--verify は容器を書かない）")
+        parser.error("--verify and --check cannot be combined (--verify writes no container)")
     if args.verify:
         reports = verify(args)
         print(json.dumps(reports, indent=1, ensure_ascii=False))
@@ -1031,7 +1131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         if failures:
             print(
-                f"eager 同値が崩れた: {json.dumps(failures, ensure_ascii=False)}", file=sys.stderr
+                f"eager equivalence broke: {json.dumps(failures, ensure_ascii=False)}",
+                file=sys.stderr,
             )
             return 1
         return 0

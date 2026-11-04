@@ -1,16 +1,18 @@
-"""`nn.GRU` → `karume::gru_scan` の差し替え層の約束事（ADR 0056 決定 7）。
+"""Contract of the `nn.GRU` → `karume::gru_scan` replacement layer (ADR 0056 decision 7).
 
-主張は 1 つきり: **差し替えは `nn.GRU` とビット一致する**。ここが崩れると「グラフは焼けるが
-数値が別物」になり、golden の期待値も差し替え経路から採ると*両方一致して両方間違っている*
-状態が緑になる（`karume/custom_ops.py` の docstring が名指しする罠）。
+There is exactly one claim: **the replacement is bit-identical to `nn.GRU`**. If it breaks, "the
+graph bakes but the numbers are something else", and if the golden expected values were also taken
+from the replacement path, the state *both agree and both are wrong* would go green (the trap the
+`karume/custom_ops.py` docstring names).
 
-踏むべき形:
+Shapes to exercise:
 
-- **長さを振る**（T=1 も含む）— 逆方向の走査境界と層間の連結順の誤りは、短い T でしか
-  現れないもの / 長い T でしか現れないものの両方がある。
-- **多層**（層間の `cat` の並びが `nn.GRU` の出力レイアウトと一致していること）。
-- **バッチ > 1**（`h0` の batch 軸と時間軸の取り違え）。
-- **対応外の形は fail loudly**（黙って別の経路を選ぶと数値が静かに変わる）。
+- **Varying lengths** (T=1 included) — errors in the reverse scan boundary and in the
+  concatenation order between layers include some that appear only at short T and some only at
+  long T.
+- **Multiple layers** (the order of `cat` between layers matches the output layout of `nn.GRU`).
+- **Batch > 1** (mixing up `h0`'s batch axis and the time axis).
+- **Unsupported shapes fail loudly** (silently choosing another path changes the numbers quietly).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from torch import nn
 
 from vowel_detector.patch import assert_supported, gru_forward
 
-#: 母音認識 CRNN と同じ形（双方向 2 層・batch_first）を小さくしたもの。
+#: The same shape as the vowel-recognition CRNN (bidirectional, 2 layers, batch_first), scaled down.
 IN_FEATURES = 4
 HIDDEN = 5
 
@@ -52,7 +54,8 @@ def _gru(
 class TestEquivalence:
     @pytest.mark.parametrize("length", [1, 2, 3, 16, 137])
     def test_it_is_bit_identical_to_nn_gru(self, length: int) -> None:
-        """MUST: 差 0 ではなく `torch.equal`（`0.0 == -0.0` は差 0 でもビットが違う）。"""
+        """MUST: `torch.equal`, not difference 0 (`0.0 == -0.0` has difference 0 but different
+        bits)."""
         gru = _gru()
         x = torch.randn(1, length, IN_FEATURES)
 
@@ -64,7 +67,8 @@ class TestEquivalence:
 
     @pytest.mark.parametrize("layers", [1, 2, 3])
     def test_every_layer_count_is_bit_identical(self, layers: int) -> None:
-        """層間は「両方向の連結」を次の層へ渡す — 並びが逆だと値が静かに変わる。"""
+        """Between layers, "the concatenation of both directions" goes to the next layer — a
+        reversed order would change the values quietly."""
         gru = _gru(layers=layers)
         x = torch.randn(1, 9, IN_FEATURES)
 
@@ -75,7 +79,7 @@ class TestEquivalence:
         assert torch.equal(got, expected)
 
     def test_a_batch_of_more_than_one_is_bit_identical(self) -> None:
-        """`h0` は `[N, H]`。batch 軸と時間軸を取り違えると N=1 では気づけない。"""
+        """`h0` is `[N, H]`. A mix-up of the batch axis and the time axis goes unnoticed at N=1."""
         gru = _gru()
         x = torch.randn(3, 7, IN_FEATURES)
 
@@ -86,11 +90,12 @@ class TestEquivalence:
         assert torch.equal(got, expected)
 
     def test_the_forward_half_comes_first(self) -> None:
-        """出力の前半が順方向・後半が逆方向（`cat` の並びが `nn.GRU` と同じ）。
+        """The first half of the output is the forward direction and the second half the reverse
+        (the order of `cat` is the same as `nn.GRU`).
 
-        `nn.GRU` との一致だけだと「両方向とも同じ式で回してしまった」形が
-        （重みが違うので）落ちるとは限らない。逆方向だけを単方向 GRU として作り直し、
-        後半がその**時間反転**であることを直接見る。
+        Agreement with `nn.GRU` alone does not necessarily catch "both directions were run with the
+        same equation" (the weights differ). The reverse direction alone is rebuilt as a
+        unidirectional GRU, and the second half is checked directly to be its **time reversal**.
         """
         gru = _gru(layers=1)
         x = torch.randn(1, 6, IN_FEATURES)
@@ -113,7 +118,7 @@ class TestEquivalence:
 
 class TestSupportedShapes:
     def test_it_refuses_a_module_that_is_not_a_gru(self) -> None:
-        with pytest.raises(TypeError, match=re.escape("nn.GRU でない")):
+        with pytest.raises(TypeError, match=re.escape("not an nn.GRU")):
             assert_supported(nn.LSTM(IN_FEATURES, HIDDEN))  # type: ignore[arg-type]
 
     def test_it_refuses_time_first_input(self) -> None:
@@ -125,7 +130,7 @@ class TestSupportedShapes:
             assert_supported(_gru(bidirectional=False))
 
     def test_it_refuses_a_bias_free_gru(self) -> None:
-        """`gru_scan` の契約は bias 必須（ADR 0056 決定 6）。"""
+        """The `gru_scan` contract requires bias (ADR 0056 decision 6)."""
         with pytest.raises(ValueError, match="bias=False"):
             assert_supported(_gru(bias=False))
 
@@ -134,6 +139,7 @@ class TestSupportedShapes:
             assert_supported(_gru(layers=2, dropout=0.5))
 
     def test_the_forward_path_runs_the_same_gate(self) -> None:
-        """{@link gru_forward} 自身が検査を通す（呼び手が忘れても対応外は落ちる）。"""
+        """{@link gru_forward} itself runs the check (unsupported shapes fail even if the caller
+        forgets it)."""
         with pytest.raises(ValueError, match="bidirectional=False"):
             gru_forward(_gru(bidirectional=False), torch.randn(1, 4, IN_FEATURES))

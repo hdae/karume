@@ -1,49 +1,56 @@
-"""SigLIP2 の export で実測した数（**torch を読まない側**に置く）。
+"""Numbers measured during the SigLIP2 export (kept on the **side that does not load torch**).
 
-置き場を patch 層から分けているのは import 連鎖のため。実測幅を語る綴りは配布側
-（`siglip2.card` のモデルカード / `siglip2.distribution` の改変告知）が引くが、それらは
-`dist.py` ドライバの import 連鎖に乗っている。数を `siglip2.patch` が持つと、配布側の import
-連鎖に patch 層（torch 依存）が入る。exporter core の `karume/__init__` は公開面を初回参照で
-解決する（PEP 562）ので、`import dist` は torch を読まない（2026-09-24 実測）。ここで patch 層を
-配布経路の連鎖から外しておかないと、その性質がこのファイル経由で崩れる。もう 1 つの狙いは
-実測幅の綴りを 1 か所にすること。
-ここは定数と文字列化だけの葉モジュールで、
-`gemma4.distribution` が `SYM_MAX` を torch を読まない側へ写しているのと同じ向き
-（あちらは写しで同値をテストが見るが、こちらは**正本ごと**こちらに置くので写しにならない）。
+They live apart from the patch layer because of the import chain. The text that states the
+measured range is pulled in by the distribution side (the model card in `siglip2.card` and the
+modification notice in `siglip2.distribution`), and those sit on the import chain of the `dist.py`
+driver. If `siglip2.patch` held the numbers, the patch layer (which depends on torch) would join the
+distribution side's import chain. The exporter core's `karume/__init__` resolves its public surface
+on first access (PEP 562), so `import dist` does not load torch (measured 2026-09-24). Unless the
+patch layer is kept off the distribution path's chain here, that property breaks through this file.
+The other aim is to spell the measured range in one place.
+This is a leaf module of constants and their string forms only, in the same direction as
+`gemma4.distribution` copying `SYM_MAX` to the side that does not load torch
+(there a test checks that the copy holds the same value; here **the source of truth itself** lives
+here, so there is no copy).
 
-MUST: 実測幅を語る綴りはこのファイルの 1 つだけ。モデルカードと `NOTICE.md`（改変告知）が
-同じ数を名乗るので、2 箇所に持つと片方だけ動いた日に「告知だけが古い数を主張する」形が
-黙って作れる — 散文としては妥当なままなので、配ってからでないと誰も気づけない。
+MUST: the text that states the measured range exists only once, in this file. The model card and
+`NOTICE.md` (the modification notice) state the same number, so keeping it in two places silently
+allows the day when only one moves and "only the notice claims a stale number" — it still reads as
+valid prose, so nobody can notice until after it has shipped.
 """
 
 from __future__ import annotations
 
-#: MAP head の q/k/v 明示化（`siglip2.patch` の段 ③）が持ち込む pooler_output の差の実測幅
-#: （下限・上限）。出どころは `siglip2/export.py --verify` の golden 4 ケース × 2 系列。
+#: Measured range (lower, upper) of the pooler_output difference that making the MAP head's q/k/v
+#: explicit (step ③ of `siglip2.patch`) introduces. Source: the 4 golden cases × 2 series of
+#: `siglip2/export.py --verify`.
 MAP_HEAD_MAXDIFF: tuple[float, float] = (7.75e-07, 2.38e-06)
 
 
-#: 差を割るスケール = pooled ベクトルの L2 ノルムの実測幅（下限・上限）。同じ `--verify` の
-#: 実走から採る対で、**この数が無いと maxdiff の大小が読めない**（相対 ~1e-7 の根拠）。
+#: Scale the difference is divided by = the measured range (lower, upper) of the pooled vector's
+#: L2 norm. Taken as a pair from the same `--verify` run; **without this number the size of the
+#: maxdiff cannot be read** (the basis of the relative ~1e-7).
 MAP_HEAD_VECTOR_NORM: tuple[float, float] = (12.7, 13.1)
 
 
 def map_head_diff_text() -> str:
-    """{@link MAP_HEAD_MAXDIFF} を散文へ埋める綴り（`"7.75e-07 to 2.38e-06"`）。
+    """{@link MAP_HEAD_MAXDIFF} as text to embed in prose (`"7.75e-07 to 2.38e-06"`).
 
-    書式を関数にしているのは、モデルカードと `NOTICE.md` が**同じ文字列**を名乗るため
-    （`f"{low:g} to {high:g}"` を各所で書くと、書式だけが片側で動いても誰も落ちない）。
+    The format is a function because the model card and `NOTICE.md` state **the same string**
+    (writing `f"{low:g} to {high:g}"` in each place means nothing fails when only one side's format
+    moves).
     """
     low, high = MAP_HEAD_MAXDIFF
     return f"{low:g} to {high:g}"
 
 
 def map_head_norm_text() -> str:
-    """{@link MAP_HEAD_VECTOR_NORM} を配布テキストへ埋める綴り（`"around 13"`）。
+    """{@link MAP_HEAD_VECTOR_NORM} as text to embed in the distributed text (`"around 13"`).
 
-    内部は幅（対）で持ち、配布文では丸めたスカラで語る — 幅のまま出すと「差が無視できる」と
-    いう主張に要らない精度が付く。{@link map_head_diff_text} と同じ 2 段（定数 + 文字列化）に
-    してあるので、カードと `NOTICE.md` は同じ 1 語を引く。
+    Internally it is kept as a range (a pair); the distributed text states a rounded scalar —
+    printing the range would attach precision that the claim "the difference is negligible" does
+    not need. It has the same two layers as {@link map_head_diff_text} (constant + string form), so
+    the card and `NOTICE.md` pull the same single word.
     """
     low, high = MAP_HEAD_VECTOR_NORM
     return f"around {round((low + high) / 2):g}"

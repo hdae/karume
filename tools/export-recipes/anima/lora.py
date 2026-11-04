@@ -1,14 +1,15 @@
-"""LoRA を **export 前に重みへ焼き込む**（ADR 0016）。
+"""Bake a LoRA **into the weights before export** (ADR 0016).
 
-Karume の成果物は torch.export が出す静的グラフなので、LoRA は実行時の機構ではなく
-**エクスポート時の重み変換**として扱う。焼き込んでも IR は 1 ノードも変わらず、ランタイム側の
-実装は一切要らない（アダプタ切り替えが要るようになったら、そのときに初めて設計をやり直す）。
+A Karume artifact is the static graph torch.export emits, so a LoRA is handled as a **weight
+transform at export time**, not as a runtime mechanism. Merging it changes no IR node and needs no
+runtime-side implementation at all (if adapter switching is ever needed, the design is redone then).
 
-対象は Anima の蒸留（turbo 等）LoRA。配布形式は非 diffusers 命名なので、**diffusers 同梱の
-変換関数**で diffusers 命名へ直してから使う（命名対応表を自前で持たない — 上流が正）。変換後は
-`transformer.*` と `text_conditioner.*` の 2 系統に分かれる。
+The target is Anima's distillation LoRAs (turbo and the like). The distributed format uses
+non-diffusers naming, so it is converted to diffusers naming with **the conversion function shipped
+in diffusers** before use (no naming table of our own — upstream is authoritative). After the
+conversion the keys split into two groups: `transformer.*` and `text_conditioner.*`.
 
-alpha を持たない配布形式なので倍率は 1.0 が既定（`scale` で上書きできる）。
+The distributed format carries no alpha, so the default scale is 1.0 (`scale` overrides it).
 """
 
 from __future__ import annotations
@@ -25,17 +26,17 @@ _B_SUFFIX = ".lora_B.weight"
 
 @dataclass(frozen=True)
 class FuseReport:
-    """焼き込みの結果。呼び出し側がログに出して人が異常に気づけるようにする。"""
+    """The result of a merge. The caller logs it so that a person can notice an anomaly."""
 
     merged: int
-    """焼き込んだ Linear の本数。"""
+    """The number of Linear layers merged."""
 
     max_relative_delta: float
-    """`‖ΔW‖ / ‖W‖` の最大値。極端に大きければ倍率がおかしい。"""
+    """The maximum of `‖ΔW‖ / ‖W‖`. An extreme value means the scale is wrong."""
 
     @property
     def is_noop(self) -> bool:
-        """この成分は重みが 1 つも動かなかった（`lora_B` が全て 0）。"""
+        """No weight of this component moved (every `lora_B` is 0)."""
         return self.max_relative_delta == 0.0
 
     def describe(self) -> str:
@@ -44,16 +45,16 @@ class FuseReport:
                 f"{self.merged} 層は ΔW=0 — LoRA に含まれるが学習されていない"
                 "（この成分は再エクスポート不要）"
             )
-        return f"{self.merged} 層に焼き込み（‖ΔW‖/‖W‖ の最大 {self.max_relative_delta:.3f}）"
+        return f"merged into {self.merged} layers (max ‖ΔW‖/‖W‖ {self.max_relative_delta:.3f})"
 
 
 def load_lora_state_dict(path: Path) -> dict[str, torch.Tensor]:
-    """LoRA ファイルを読み、diffusers 命名へ変換する。
+    """Read a LoRA file and convert it to diffusers naming.
 
-    MUST: **ファイル全体が無効**（どの `lora_B` も 0）なら例外にする。LoRA は B を 0 で
-    初期化するので、学習されていないファイルや取り違えたファイルは「読めるが何も起きない」形に
-    なる — 気づかずに base と同じ絵を出し続ける。成分ごとの 0 は正常でありうるので、そちらは
-    {@link fuse_lora} の戻り値で呼び出し側が判断する。
+    MUST: raise if **the whole file is inert** (every `lora_B` is 0). LoRA initialises B to 0, so an
+    untrained file or a mixed-up file takes the shape "readable, but does nothing" — it keeps
+    producing the same image as the base without anyone noticing. A zero component can be normal,
+    so that case is left to the caller through the return value of {@link fuse_lora}.
     """
     from diffusers.loaders.lora_conversion_utils import (
         _convert_non_diffusers_anima_lora_to_diffusers as convert,
@@ -62,7 +63,7 @@ def load_lora_state_dict(path: Path) -> dict[str, torch.Tensor]:
 
     raw = load_file(str(path))
     if not raw:
-        raise ValueError(f"{path}: テンソルが 1 件も無い")
+        raise ValueError(f"{path}: the file holds no tensor")
     converted = convert(raw)
     live = sum(
         1
@@ -70,7 +71,9 @@ def load_lora_state_dict(path: Path) -> dict[str, torch.Tensor]:
         if key.endswith(_B_SUFFIX) and float(value.abs().max()) > 0
     )
     if live == 0:
-        raise ValueError(f"{path}: lora_B が全て 0 — 適用しても base と同じ結果になる")
+        raise ValueError(
+            f"{path}: every lora_B is 0 — applying it gives the same result as the base"
+        )
     return converted
 
 
@@ -80,16 +83,17 @@ def fuse_lora(
     prefix: str,
     scale: float = 1.0,
 ) -> FuseReport:
-    """`prefix` 配下の LoRA を `model` の重みへ加算する（in-place）。
+    """Add the LoRA under `prefix` into the weights of `model` (in place).
 
-    ΔW = (B @ A)·scale を **f32 で計算**してから元 dtype へ足す（低精度で B@A を組むと、
-    rank の小さい積で桁落ちしたぶんがそのまま重みの誤差になる）。
+    ΔW = (B @ A)·scale is **computed in f32** and then added in the original dtype (building B@A in
+    low precision turns the cancellation of the small-rank product straight into weight error).
 
-    MUST: 解決できない対象・形の食い違いは**必ず例外**にする。黙って読み飛ばすと「一部の層
-    だけ LoRA が乗った劣化モデル」が何事もなく出力され、絵が微妙に悪いだけの状態が続く —
-    蒸留 LoRA では特に気づきにくい。**prefix 配下のキーは 1 本残らず A/B ペアとして消費**
-    することもここで見る（`lora_A` を起点に走査するだけだと、`.alpha` や別サフィックスの
-    重みが黙って捨てられる = 宣言と実装が食い違う）。
+    MUST: an unresolvable target or a shape mismatch **always raises**. Skipping it silently outputs
+    "a degraded model with the LoRA on only some layers" as if nothing happened, and the images stay
+    just slightly worse — especially hard to notice with a distillation LoRA. This also checks that
+    **every key under prefix is consumed as an A/B pair** (scanning from `lora_A` alone would
+    silently drop `.alpha` or weights with another suffix = the declaration and the implementation
+    disagree).
     """
     head = f"{prefix}."
     unconsumed = {key for key in state_dict if key.startswith(head)}

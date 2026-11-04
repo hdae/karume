@@ -1,154 +1,188 @@
-"""Irodori-TTS v4 の量子化構成別 品質劣化を torch CPU で実測する（波 2 の測定台本）。
+"""Measure the quality loss of Irodori-TTS v4 per quantization configuration on torch CPU (the
+measurement script of wave 2).
 
-`measure_quant_sbv2.py` / `measure_quant_anima.py` と同じ思想の品質ゲート — GPU コードは 0 行で、
-ここで測るのは**量子化そのものの質**（ADR 0006 の fake-quant 方法論では E2E は実装誤差しか
-測らないため、品質は別軸で測る必要がある）。答えを出したい問いは 1 つ:
+A quality gate in the same spirit as `measure_quant_sbv2.py` / `measure_quant_anima.py` — zero
+lines of GPU code; what it measures is **the quality of the quantization itself** (under ADR
+0006's fake-quant methodology the E2E tests measure only implementation error, so quality has to
+be measured on a separate axis). The question it wants to answer is one:
 
-    **S（フレーム数）は動くか** — duration を i8 にすると発話長が動きうる（SBV2 w8 の
-    w_ceil 198→196 と同じ軸・ADR 0029）。latent 門の「S / forwards 完全一致」が壊れるなら、
-    配布形の i8 席は混成（duration だけ据え置き）にする必要がある（ADR 0050 決定 6）。
+    **Does S (the frame count) move?** — putting duration in i8 can move the utterance length
+    (the same axis as SBV2 w8's w_ceil 198→196, ADR 0029). If the latent check's "S / forwards
+    match exactly" breaks, the distribution's i8 preset has to be mixed (keeping only duration
+    unquantized) (ADR 0050 decision 6).
 
     cd tools/export-recipes
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \
         python -m irodori.measure_quant --config f32
     uv run ... python -m irodori.measure_quant --config i8-all
     uv run ... python -m irodori.measure_quant --config i4-all
-    uv run ... python -m irodori.measure_quant --config gptq-rtn   # 校正付き（波 J-2）
-    uv run ... python -m irodori.measure_quant --scan   # w4 の対象規模と試算だけ（実測なし）
-    uv run ... python -m irodori.measure_quant          # 実測はせずレポートだけ組み直す
+    uv run ... python -m irodori.measure_quant --config gptq-rtn   # calibrated (wave J-2)
+    uv run ... python -m irodori.measure_quant --scan   # w4 target scale and estimates only
+    uv run ... python -m irodori.measure_quant          # no measurement; rebuild the report
 
-**1 実行 = 1 構成**（`--config`）。full-loop は DiT を 1 ケースあたり 240 forward 回す torch CPU
-実行なので、9 構成を 1 プロセスに詰めると数時間の不可分な塊になる。構成ごとに独立に呼べる形に
-して、`--out` の下に per-config の JSON / WAV / z を残し、最後の実行が全部を突き合わせて
-`report.json` と Markdown 表を出す（基準 `f32` を先に回すこと — 他構成はその成果物を読む）。
+**One run = one configuration** (`--config`). The full loop is a torch CPU run that does 240 DiT
+forwards per case, so packing 9 configurations into one process makes an indivisible block of
+several hours. Each configuration can be invoked independently: per-config JSON / WAV / z are
+left under `--out`, and the last run compares them all and writes `report.json` and a Markdown
+table (run the baseline `f32` first — the other configurations read its outputs).
 
-## 構成（`--config` の綴り）
+## Configurations (the spellings of `--config`)
 
-| 構成             | 重み                 | 何を答える                                      |
-| ---------------- | -------------------- | ----------------------------------------------- |
-| `f32`            | 丸めなし（**基準**） | 恒真化防止（full-loop golden の z とバイト一致）|
-| `f16`            | 全役割 f16           | ADR 0050 波 1 の系列の対応物                    |
-| `i8-all`         | 全役割 i8            | 配布 `i8` 席（配布 25.2%）                      |
-| `i8-mixed`       | duration 以外 i8     | 混成表の候補（ADR 0050 決定 6 の (i) 案）       |
-| `w8a8`           | 全役割 i8 + 活性 i8  | 配布 `i8-a8` 席（DiT の Linear だけ活性も i8）  |
-| `i8-<役割>-only` | その役割だけ i8      | **直交分解 5 本**（境界 = `load_*` と 1:1）     |
+| Configuration    | Weights             | What it answers                                         |
+| ---------------- | ------------------- | ------------------------------------------------------- |
+| `f32`            | none (**baseline**) | no vacuous check (byte-identical to the golden's z)     |
+| `f16`            | every role f16      | counterpart of the series of ADR 0050 wave 1            |
+| `i8-all`         | every role i8       | the distribution's `i8` preset (25.2% of it)            |
+| `i8-mixed`       | i8 but duration     | mixed-table candidate (ADR 0050 decision 6, option (i)) |
+| `w8a8`           | every role i8 + a8  | the `i8-a8` preset (i8 activations: DiT Linear only)    |
+| `i8-<role>-only` | that role in i8     | **5 orthogonal decompositions** (1:1 with `load_*`)     |
 
-w4（ADR 0069 追記 5）の 5 構成は**スクリーニングの勝者 4 方式**（g=32 固定）を全役割へ当てた
-もので、丸めの対象 op を i8 と同じ 5 種へ広げる（`op_types` の明示 opt-in — linear / conv 系 /
-embedding）。**出荷できる形ではない**（i4 の実行経路は linear 限定 = 決定 5・conv 系の scale は
-emit へ構造的に渡せない）— ここで測るのは「非 linear まで丸めたときに品質がどこまで戻るか」
-の上限で、格納の受理集合も runtime も 1 行も触らない。
+The 5 w4 configurations (ADR 0069 addendum 5) apply **the 4 methods that won the screening**
+(g=32 fixed) to every role, widening the rounded ops to the same 5 kinds as i8 (an explicit
+opt-in through `op_types` — linear / the conv family / embedding). **This is not a shippable
+form** (the i4 execution path is linear-only = decision 5, and the conv family's scales cannot
+structurally reach emit) — what is measured here is the upper bound of "how far quality recovers
+when even non-linear ops are rounded"; not one line of the storage acceptance set or the runtime
+is touched.
 
-| 構成                | 方式          | 何を答える                                        |
-| ------------------- | ------------- | ------------------------------------------------- |
-| `i4-all`            | `rtn-i4-g32`  | 全役割 w4 で **S が動くか**（第一の門）+ 品質      |
-| `i4-mixed`          | `rtn-i4-g32`  | `i8-mixed` と同じ軸の受け皿（duration だけ据え置き）|
-| `nf4-all`           | `nf4`         | 正規分位点の格子でどこまで戻るか                  |
-| `mxfp4-all`         | `mxfp4`       | 2 のべき scale（E8M0）の取り分 — 4.25 bpw         |
-| `kmeans-shared-all` | `kmeans:shared` | 学習した共有表の取り分（表 16×f32 が別途要る）  |
+| Configuration       | Method          | What it answers                                   |
+| ------------------- | --------------- | ------------------------------------------------- |
+| `i4-all`            | `rtn-i4-g32`    | **does S move** in all-w4 (first check) + quality |
+| `i4-mixed`          | `rtn-i4-g32`    | fallback on the axis of `i8-mixed` (duration f32) |
+| `nf4-all`           | `nf4`           | how far a normal-quantile grid recovers           |
+| `mxfp4-all`         | `mxfp4`         | what power-of-two scales (E8M0) buy — 4.25 bpw    |
+| `kmeans-shared-all` | `kmeans:shared` | what a learned shared table buys (+16×f32 table)  |
 
-`i4-mixed` を RTN にだけ置くのは、S が動くかどうかが**丸めの粗さ**で決まるから（4 方式ぶんの
-混成を並べても同じ問いを 4 回聞くだけになる。RTN で受け皿の形が立てば他方式へ横展開できる）。
+`i4-mixed` exists only for RTN because whether S moves is decided by **the coarseness of the
+rounding** (mixed versions of all 4 methods would only ask the same question 4 times; once RTN
+settles the shape of the fallback, it carries over to the other methods).
 
-`kmeans-shared-all` は表を張る前に対象の正規化値を 1 本へ連結するので、dit 役割（丸める木で
-7.5 億要素）の全量 fit は f64 の作業領域まで含めて 20GB 超になる。`--kmeans-fit-stride` が
-core の逃げ道（**表の fit だけ**等間隔部分標本・適用は常に全量）で、使った値は出力へ載る。
+`kmeans-shared-all` concatenates the normalized values of its targets into one before fitting
+the table, so a full fit of the dit role (750 million elements in the rounded tree) exceeds
+20 GB including the f64 work area. `--kmeans-fit-stride` is the core's escape hatch (**only the
+table fit** uses an evenly spaced subsample; application is always to everything), and the value
+used is recorded in the output.
 
-## 校正付き丸め（{@link CALIB_CONFIGS}・波 J-2）
+## Calibrated rounding ({@link CALIB_CONFIGS}, wave J-2)
 
-上の w4 5 構成は重みだけを見て丸める（RTN 系）。**校正付き丸め**（GPTQ — core の
-`karume.quant_calib`）は「その層に実際に流れる活性」から**同じ格子の中で**丸め先を選び直す
-側で、格納グリッド 3 種を同じ測定列へ足す:
+The 5 w4 configurations above round by looking at the weights alone (the RTN family).
+**Calibrated rounding** (GPTQ — the core's `karume.quant_calib`) re-chooses rounding targets
+**within the same grid** from "the activations that actually flow through the layer"; it adds 3
+storage grids to the same measurement series:
 
-| 構成          | 方式 / 格子 | 何を答える                                        |
-| ------------- | ----------- | ------------------------------------------------- |
-| `gptq-rtn`    | `gptq/rtn`  | 出荷可能な格子のまま校正でどこまで戻るか（本命）  |
-| `gptq-nf4`    | `gptq/nf4`  | 正規分位点の格子 × 校正                           |
-| `gptq-kmeans` | `gptq/kmeans_shared` | 学習した表（**射程は層内**）× 校正        |
+| Configuration | Method / grid        | What it answers                                     |
+| ------------- | -------------------- | --------------------------------------------------- |
+| `gptq-rtn`    | `gptq/rtn`           | recovery on the shippable grid (the main candidate) |
+| `gptq-nf4`    | `gptq/nf4`           | normal-quantile grid × calibration                  |
+| `gptq-kmeans` | `gptq/kmeans_shared` | learned table (**scoped per layer**) × calibration  |
 
-対象は **DiT block 列の `nn.Linear` 限定**（{@link CALIB_TARGET}）で、`i4-linear`（全役割の
-linear）とは**集合が違う** — 校正の駆動（`calibrate_stages`）は stage 内の `nn.Linear` に
-閉じており、backbone / projector / speaker / duration / codec も、DiT の `in_proj` /
-`out_proj` / `cond_module` も stage の外にあるため。
+The targets are **limited to the `nn.Linear` of the DiT block sequence** ({@link CALIB_TARGET}),
+**a different set** from `i4-linear` (the linears of every role) — the calibration driver
+(`calibrate_stages`) is closed over the `nn.Linear` inside the stages, and backbone / projector /
+speaker / duration / codec, as well as the DiT's `in_proj` / `out_proj` / `cond_module`, are
+outside the stages.
 
-校正入力は **{@link irodori.pipeline_ref.PIPELINE_CASES} 2 件の参照ループ（f32・CFG 込み）の
-全 step**で、step ごとに先頭 DiT block への `(hidden, 付随引数)` を捕まえて 1 バッチにする
-（{@link capture_case_batches}）。拡散モデルの活性は t で分布が動くので、**step を横断して**
-採らないと後半 step の分布だけ校正から漏れる。付随引数（`cond_embed` / norm 済みの条件 state /
-マスク / RoPE 表）は block ループの**前**に 1 回作られて全 block へ同じものが渡るので、stage 間で
-不変にできる（`advance_kwargs` は要らない）。条件 state は `dit-context`（`DitContextGraph`）が
-生成 1 回だけ norm を掛け、`cond_embed` / マスク / RoPE 表は `DitGraph.forward` が作る — stage は
-条件側 K/V 射影を**block の中で**計算し直す（GPTQ がその 72 本の入力を見るため — ADR 0114 で
-配布グラフを割った後も、校正の stage は block 丸ごと）。
+The calibration input is **every step of the reference loops (f32, CFG included) of the 2
+{@link irodori.pipeline_ref.PIPELINE_CASES}**; at each step the `(hidden, accompanying
+arguments)` into the first DiT block is captured as one batch ({@link capture_case_batches}).
+The activation distribution of a diffusion model moves with t, so unless it is captured **across
+steps**, the distribution of the later steps escapes calibration. The accompanying arguments
+(`cond_embed` / the normalized condition states / masks / the RoPE table) are built once
+**before** the block loop and the same ones are passed to every block, so they can be invariant
+across stages (no `advance_kwargs` needed). The condition states get their norm once per
+generation in `dit-context` (`DitContextGraph`), and `cond_embed` / masks / the RoPE table are
+built by `DitGraph.forward` — the stages recompute the condition-side K/V projections **inside the
+block** (so that GPTQ sees the inputs of those 72 weights — even after ADR 0114 split the shipped
+graph, a calibration stage is the whole block).
 
-MUST: 捕捉は**丸めを 1 本も当てる前**（pristine）に 1 回だけ。stage 分解が配布ラッパ 2 本の
-1 forward と**ビット一致**することも、丸める前にその場で実測する
-（{@link assert_stage_split_matches_graph}）— block 本体の写しが上流とずれると、値が静かに
-別物になったまま表だけ出る。
+MUST: the capture happens only once, **before any rounding is applied** (pristine). That the
+stage split is **bit-identical** to one forward of the two distribution wrappers is also measured
+on the spot before rounding ({@link assert_stage_split_matches_graph}) — if the copy of the block
+body drifted from upstream, the values would quietly become something else while the table still
+came out.
 
-**linear 限定形は構成として置かない** — `--scan` が対象規模（本数・チャネル・要素・縮小率）を
-数えて出す。conv 主体なら linear だけ丸めても配布サイズがほとんど動かず、full-loop を数十分
-回す価値が無いため、回すかどうかをこの表で決める。
+**The linear-only form is not a configuration** — `--scan` counts and prints the target scale
+(count, channels, elements, reduction ratio). If the model is conv-dominated, rounding only the
+linears barely moves the distribution size and is not worth tens of minutes of full loop, so this
+table decides whether to run it.
 
-量子化軸（`channel_rows` で畳んだ最終次元）が g32 で割り切れない重みは `include` で対象から
-外す（端数 group を作らない = ADR 0069 決定 2）。**除外一覧は毎回出力へ載せる** — 黙って外すと
-「全役割を丸めた」と読める表の裏で、割り切れない層だけ f32 のまま残る。
+Weights whose quantization axis (the last dimension folded by `channel_rows`) is not divisible
+by g32 are excluded from the targets with `include` (no partial groups = ADR 0069 decision 2).
+**The exclusion list is written to the output every time** — excluding silently would leave only
+the non-divisible layers in f32 behind a table that reads as "every role was rounded".
 
-サイズ列（実効 bpw / 投影 MiB / 式）は**式による投影**で実測ではない。計数は**配布グラフに
-載る重みだけ**（`irodori.export.load_dit` はグラフに載らない backbone のコピーまで抱えるので、
-丸めた木で数えると出荷しない重みのぶんだけ膨らむ）。丸める木のほうは i8 と同じ役割モジュール
-に据え置く — 「何を丸めたか」が i8 と食い違うと方式間の比較が成立しない。
+The size columns (effective bpw / projected MiB / formula) are **projections by formula**, not
+measurements. The counts cover **only the weights in the shipped graphs**
+(`irodori.export.load_dit` also holds the copy of the backbone that is not in the graph, so
+counting the rounded tree would inflate it by weights that do not ship). The rounded tree itself
+stays on the same role modules as i8 — if "what was rounded" disagrees with i8, the comparison
+between methods does not hold.
 
-`w8a8` は `i8-all` と**同じ丸めの重み**に、DiT の `nn.Linear` 入力へ per-token i8 の
-fake-quant（`karume.act_quant.quantize_rows` — ランタイム `quantize-rows.ts` の数値鏡像）を
-モジュールフックで足したもの。フックで安全なのは `patch.py` が `functional` で呼ぶのが
-`rms_norm` / `silu` だけで、量子化対象の Linear が実モジュールのまま残るため（SBV2 では
-`functional.conv1d` 直呼びのせいでフックが沈黙で取りこぼした — ADR 0029 の検出限界）。
-**適用本数は毎回出力し、0 本なら fail loudly**（「w8a8 のつもりで w8 の数を採った」に気づけない
-形を作らない）。活性量子化を DiT に限るのは配布形の席と揃えるため（`session` は `dit` の
-Session にだけ降りる — models 側 `pipeline.ts`）。
+`w8a8` adds, through module hooks, a per-token i8 fake-quant of the inputs of the DiT's
+`nn.Linear` (`karume.act_quant.quantize_rows` — the numeric mirror of the runtime's
+`quantize-rows.ts`) on top of **the same rounded weights** as `i8-all`. Hooks are safe because
+the only things `patch.py` calls through `functional` are `rms_norm` / `silu`, so the Linears to
+quantize remain real modules (in SBV2 the direct `functional.conv1d` calls made the hooks silently
+miss them — the detection limit of ADR 0029). **The number applied is printed every time, and 0
+fails loudly** (no shape in which "numbers for w8 were taken while meaning w8a8" goes unnoticed).
+Activation quantization is limited to the DiT to match the distribution's preset (`session`
+reaches only the `dit` Session — `pipeline.ts` on the models side).
 
-直交分解の 5 本は `dit` / `backbone` / `speaker` / `duration` / `codec`。**5 本の和は `i8-all`
-にならない** — projector 2 本（各 6.83MB）は単独の軸に立てていない（桁が 2 つ小さく、単独で
-量子化する動機が無い — 量子化 recon の sizeBreakdown）。`i8-all` / `i8-mixed` には入る。
+The 5 orthogonal decompositions are `dit` / `backbone` / `speaker` / `duration` / `codec`. **The
+sum of the 5 is not `i8-all`** — the 2 projectors (6.83 MB each) do not get an axis of their own
+(two orders of magnitude smaller, with no motivation to quantize them alone — the sizeBreakdown
+of the quantization recon). They are included in `i8-all` / `i8-mixed`.
 
-## 時間グリッドの固定（SNR / LSD を意味のある量にするための MUST）
+## Fixing the time grid (a MUST that makes SNR / LSD meaningful quantities)
 
-duration の出力は S を決めるので、量子化で銀行家丸めが 1 つ飛ぶだけで **latent 長そのものが
-変わり**、波形長が構成間で食い違って SNR が定義できなくなる。そこで基準以外の構成は
-**`f32` の S を外から固定して**回す（`irodori.pipeline_ref.run_case(frames_override=…)` —
-`measure_quant_sbv2.py` が dump 側 `w_ceil` で時間グリッドを固定するのと同じ選択）。
+duration's output decides S, so if quantization flips a single banker's rounding, **the latent
+length itself changes**, the waveform lengths disagree between configurations and SNR is
+undefined. So every configuration but the baseline runs **with the `f32` S fixed from outside**
+(`irodori.pipeline_ref.run_case(frames_override=…)` — the same choice as `measure_quant_sbv2.py`
+fixing the time grid with the dump side's `w_ceil`).
 
-**構成が自分で予測した S** は `predictedS` として別に残す。これが**この台本の主成果**で、
-品質指標は「同じ時間グリッド上での比較」として読む — 実運用では発話長も動く。
+**The S each configuration predicts itself** is kept separately as `predictedS`. This is **the
+main result of this script**, and the quality metrics read as "a comparison on the same time
+grid" — in production the utterance length moves too.
 
-## 直交性の門（恒真化の遮断）
+## Orthogonality checks (blocking vacuous checks)
 
-役割の効き方は構造的に決まっているので、**「変わること」だけでなく「変わらないこと」も**
-門にする（片側だけだと、丸めが素通りしても scope が漏れても緑になる）:
+How each role acts is structurally determined, so **"does not change" is a check as well as
+"changes"** (with only one side, both a rounding that passes through and a leaking scope would be
+green):
 
-- `duration` は **S にしか効かない**（`log_frames` → 銀行家丸め → S。他の段は読まない）
-  ⇒ グリッドを固定した `i8-duration-only` の z と波形は基準と**ビット一致**するのが正しい
-- `codec` は **波形にしか効かない**（latent の後段）⇒ z はビット一致・波形は変わる
-- `speaker` は**参照のあるケースだけ** z に効く（参照なしはホストのゼロ供給短絡で encoder が
-  走らない — ADR 0048）⇒ `i8-speaker-only` は full で変わり・no-ref でビット一致、が緑の条件
-- それ以外（backbone / projector / dit）は z が変わる
-- `w8a8` は**重みだけの `i8-all` とも z が違う**（活性シムの素通り検出 — 素通りしたら
-  z は `i8-all` とビット一致してしまい、基準との差だけ見ていると「効いている」と誤読する）
+- `duration` **acts only on S** (`log_frames` → banker's rounding → S; no other stage reads it)
+  ⇒ with the grid fixed, `i8-duration-only`'s z and waveform are correctly **bit-identical** to
+  the baseline
+- `codec` **acts only on the waveform** (after the latent) ⇒ z is bit-identical, the waveform
+  changes
+- `speaker` acts on z **only in cases with a reference** (without one, the host's zero-supply
+  short-circuit means the encoder does not run — ADR 0048) ⇒ green means `i8-speaker-only`
+  changes in full and is bit-identical in no-ref
+- everything else (backbone / projector / dit) changes z
+- `w8a8` **has a z different from the weight-only `i8-all` too** (detects the activation shim
+  passing through — if it passed through, z would be bit-identical to `i8-all`, and looking only
+  at the difference from the baseline would misread it as "it has an effect")
 
-## 出力
+## Output
 
-    <--out>/<config>.json               構成 1 本ぶんの実測（S / forwards / 秒 / 品質指標）
-    <--out>/<config>.<case>.safetensors z と波形（次の構成が基準として読む f32 の正本）
-    <--out>/<config>.<case>.wav         聴き比べ用（16bit PCM・最終裁定は聴感 = ユーザー）
-    <--out>/report.json                 全構成の突き合わせ（Markdown 表は stdout）
+    <--out>/<config>.json               one configuration's measurements (S / forwards /
+                                        seconds / quality metrics)
+    <--out>/<config>.<case>.safetensors z and waveform (for f32, the baseline that later
+                                        configurations read)
+    <--out>/<config>.<case>.wav         for listening (16-bit PCM; the final ruling is by ear
+                                        = the user)
+    <--out>/report.json                 comparison of all configurations (the Markdown table
+                                        goes to stdout)
 
-NOTE: 末尾トリム（`find_flattening_point`）と秒指定の切り出しは**通さない** — 構成ごとに
-切る位置が動くと波形長が揃わず SNR が定義できない。実運用の長さは `predictedSeconds` が持つ。
+NOTE: the tail trim (`find_flattening_point`) and the cut by seconds are **not applied** — if the
+cut position moved per configuration, the waveform lengths would not line up and SNR would be
+undefined. The production length is kept by `predictedSeconds`.
 
-NOTE: 指標の実装（`snr_db` / `log_spectral_distance` / `rel_rms`）は `measure_quant_sbv2.py`
-からの**複製**。共有モジュール化は exporter の io 共通化波（Gemma 直前）の領分で、そこまでは
-台本ごとに閉じた形を保つ（2026-08-12 網羅レビューの D3 裁定）。
+NOTE: the metric implementations (`snr_db` / `log_spectral_distance` / `rel_rms`) are
+**duplicated** from `measure_quant_sbv2.py`. Turning them into a shared module belongs to the
+exporter's io-sharing wave (just before Gemma); until then each script stays self-contained (the
+D3 ruling of the exhaustive review of 2026-08-12).
 """
 
 from __future__ import annotations
@@ -199,18 +233,22 @@ from . import patch
 from . import pipeline_ref as ip
 from .dacvae import export as dv
 
-#: ベンチの生成物置き場（資産と分離する — `rm -rf outputs/bench` が系列を巻き込まない）。
-#: NOTE: 日付はプロセス起動時に決まる。**1 実行 = 1 構成**なので、構成を跨いで突き合わせる
-#: 実行が日付を跨ぐときは `--out` を明示して同じ席へ揃える。
+#: Where the bench outputs go (kept apart from the assets — `rm -rf outputs/bench` does not take
+#: the series with it).
+#: NOTE: the date is fixed at process start. **One run = one configuration**, so when the runs to
+#: be compared across configurations span a date change, pass `--out` explicitly to keep them in
+#: the same place.
 DEFAULT_OUT = BENCH_ROOT / "karume-irodori-v4-small" / f"{date.today().isoformat()}_quant-sim"
 
-#: 恒真化防止の突合先（`irodori/pipeline_ref.py` が f32 系列へ書く full-loop golden）。
+#: The comparison target that guards against a vacuous check (the full-loop golden
+#: `irodori/pipeline_ref.py` writes to the f32 series).
 DEFAULT_GOLDEN_DIR = SERIES_ROOT / "irodori-v4-small" / "pipeline"
 
-#: 基準構成の綴り（他構成はこの成果物を読んで比較する）。
+#: The spelling of the baseline configuration (other configurations read its outputs to
+#: compare).
 BASE_CONFIG = "f32"
 
-#: 役割 = グラフ境界（`irodori.export.load_*` と 1:1）+ コーデック。
+#: Roles = graph boundaries (1:1 with `irodori.export.load_*`) + the codec.
 ROLE_CODEC = "codec"
 ROLES: tuple[str, ...] = (
     ex.TARGET_BACKBONE,
@@ -222,43 +260,48 @@ ROLES: tuple[str, ...] = (
     ROLE_CODEC,
 )
 
-#: latent（z）を動かしうる役割。`duration` は S にしか効かず、`codec` は latent の後段なので、
-#: どちらもグリッドを固定した比較では z をビット単位で動かさない（モジュール docstring の
-#: 「直交性の門」）。
+#: Roles that can move the latent (z). `duration` acts only on S and `codec` comes after the
+#: latent, so neither moves z by a single bit in the grid-fixed comparison (the "orthogonality
+#: checks" of the module docstring).
 LATENT_ROLES: frozenset[str] = frozenset(ROLES) - {ex.TARGET_DURATION, ROLE_CODEC}
 
-#: **ケースに参照があるときだけ** z に効く役割。参照なしのケースでは speaker encoder が
-#: 走らない（ホストのゼロ供給短絡 — ADR 0048）ので、`speaker` を丸めても z は不変が正しい
-#: （実測 2026-08-12: `i8-speaker-only` の no-ref は z も波形も基準とビット一致）。
+#: Roles that act on z **only when the case has a reference**. In cases without a reference
+#: the speaker encoder does not run (the host's zero-supply short-circuit — ADR 0048), so z is
+#: correctly unchanged when `speaker` is rounded (measured 2026-08-12: `i8-speaker-only`'s no-ref
+#: is bit-identical to the baseline in both z and waveform).
 REFERENCE_ONLY_ROLES: frozenset[str] = frozenset({ex.TARGET_SPEAKER})
 
-#: ケース名 → 参照音声の有無（直交性の門がケース条件で期待を割るための表）。
+#: Case name → whether it has a reference voice (the table that lets the orthogonality checks
+#: split expectations by case condition).
 CASE_HAS_REFERENCE: Mapping[str, bool] = MappingProxyType(
     {case.name: case.reference is not None for case in ip.PIPELINE_CASES}
 )
 
 
-# ---- w4 の方式（スクリーニングの勝者 4 種）----------------------------------
+# ---- w4 methods (the 4 winners of the screening) ------------------------------
 
-#: w4 の group 長 = **32 固定**（core の既定 = ADR 0069 追記 1 で確定した値）。方式比較で g を
-#: 同時に振らないのは、方式の差と g の差が混ざると「どちらが効いたか」が言えなくなるため
-#: （g 軸の再評価は方式確定後 — ADR 0069 追記 5 の 3）。
+#: The w4 group length = **fixed at 32** (the core's default = the value settled in ADR 0069
+#: addendum 1). g is not varied together with the method because once a method difference and a
+#: g difference mix, "which one had the effect" cannot be told (re-evaluating the g axis comes
+#: after the method is settled — item 3 of ADR 0069 addendum 5).
 W4_GROUP_SIZE = DEFAULT_GROUP_SIZE
 
-#: w4 の丸め対象 op 種 = i8 と同じ 5 種（`fake_quant_int4` の `op_types` 明示 opt-in —
-#: ADR 0069 追記 5 の 1）。**出荷経路ではない** — i4 の実行経路は linear 限定（決定 5）で、
-#: conv 系の scale は受容野平坦化の rank 2 になり emit へ構造的に渡せない。ここで広げるのは
-#: 「非 linear まで丸めたときに品質がどこまで戻るか」を runtime 非接触で測る側。
+#: The op kinds w4 rounds = the same 5 kinds as i8 (an explicit opt-in through `op_types` of
+#: `fake_quant_int4` — item 1 of ADR 0069 addendum 5). **Not the shipping path** — the i4
+#: execution path is linear-only (decision 5), and the conv family's scales become rank 2 from the
+#: receptive-field flattening and cannot structurally reach emit. Widening here measures "how far
+#: quality recovers when even non-linear ops are rounded" without touching the runtime.
 W4_OP_TYPES: tuple[type[nn.Module], ...] = QUANT_MODULE_TYPES
 
-#: k-means の表 1 枚のビット数（16 centroid × f32）。
+#: Bits of one k-means table (16 centroids × f32).
 CODEBOOK_BITS = DEFAULT_CODEBOOK_LEVELS * 32
 
 
 class TargetCounts(NamedTuple):
-    """w4 対象テンソル集合の計数（サイズ試算の入力）。
+    """Counts of the w4 target tensor set (the input of the size estimate).
 
-    `channels` は `karume.quantize.channel_rows` の行数の総和、`modules` は層数。
+    `channels` is the sum of the row counts of `karume.quantize.channel_rows`, `modules` the
+    number of layers.
     """
 
     modules: int
@@ -267,12 +310,13 @@ class TargetCounts(NamedTuple):
 
     @property
     def groups(self) -> int:
-        """g32 group の総数（group ごとに scale 1 個が要る方式のサイズ試算に使う）。"""
+        """Total number of g32 groups (used by the size estimates of methods that need one scale
+        per group)."""
         return self.elements // W4_GROUP_SIZE
 
 
 def total_counts(counts: Sequence[TargetCounts]) -> TargetCounts:
-    """役割ごとの計数を 1 本へ足す（サイズ試算はモデル全体で読む）。"""
+    """Add the per-role counts into one (size estimates read the whole model)."""
     return TargetCounts(
         modules=sum(item.modules for item in counts),
         channels=sum(item.channels for item in counts),
@@ -281,7 +325,8 @@ def total_counts(counts: Sequence[TargetCounts]) -> TargetCounts:
 
 
 class Excluded(NamedTuple):
-    """量子化軸が g32 で割り切れず対象から外した重み（一覧は出力へ必ず載せる）。"""
+    """A weight excluded from the targets because its quantization axis is not divisible by g32
+    (the list always goes into the output)."""
 
     module: str
     fqn: str
@@ -290,27 +335,30 @@ class Excluded(NamedTuple):
 
 
 def group_axis_length(weight: torch.Tensor, axis: int) -> int:
-    """`karume.quantize.channel_rows` で畳んだときの量子化軸長（= 要素数 / チャネル数）。
+    """The quantization axis length when folded by `karume.quantize.channel_rows` (= elements /
+    channels).
 
-    実際に `channel_rows` を呼ばないのは `ConvTranspose1d` の平坦化が `reshape` の**コピー**
-    になるため（形だけ知りたい計数で重み 1 本ぶんの一時領域を作らない）。
+    `channel_rows` is not actually called because flattening a `ConvTranspose1d` is a **copy** via
+    `reshape` (a count that only needs the shape should not allocate a weight-sized temporary).
     """
     return weight.numel() // int(weight.shape[axis])
 
 
 class RoleScan(NamedTuple):
-    """1 つの木の w4 対象規模（g32 に載った側と、割り切れず外した側）。"""
+    """The w4 target scale of one tree (the side that fits g32 and the side excluded as not
+    divisible)."""
 
     counts: TargetCounts
     excluded: tuple[Excluded, ...]
 
 
 def scan_targets(model: nn.Module, op_types: tuple[type[nn.Module], ...]) -> RoleScan:
-    """`iter_quant_targets` の対象を「g32 に載る側 / 割り切れず外す側」へ割る。
+    """Split the targets of `iter_quant_targets` into "fits g32 / excluded as not divisible".
 
-    対象選択は core（格納経路と同じ `iter_quant_targets`）を通す — 写した別実装にすると
-    「測った対象」と「丸めた対象」が黙って割れる。端数 group を作らないのは格納側の制約
-    そのもの（ADR 0069 決定 2）なので、割り切れない重みは丸めずに**一覧で出す**。
+    Target selection goes through the core (the same `iter_quant_targets` as the storage path) —
+    a separately copied implementation would silently split "the targets measured" from "the
+    targets rounded". Making no partial group is the storage side's own constraint (ADR 0069
+    decision 2), so non-divisible weights are not rounded but **listed**.
     """
     modules = channels = elements = 0
     excluded: list[Excluded] = []
@@ -326,36 +374,42 @@ def scan_targets(model: nn.Module, op_types: tuple[type[nn.Module], ...]) -> Rol
 
 
 def aligned_include(excluded: Sequence[Excluded]) -> Callable[[str], bool]:
-    """g32 で割り切れないモジュールを落とす `include` 述語（モジュール FQN で引く）。"""
+    """An `include` predicate that drops the modules not divisible by g32 (looked up by module
+    FQN)."""
     dropped = {item.module for item in excluded}
     return lambda name: name not in dropped
 
 
 @dataclass(frozen=True)
 class W4Method:
-    """w4 の丸め方式 1 種 — 名前・丸めの当て方・サイズ試算の式を 1 行に束ねる。
+    """One w4 rounding method — binds the name, how the rounding is applied and the size-estimate
+    formula into one row.
 
-    3 つを別表に散らすと「品質を測った方式」と「サイズを試算した方式」が黙って割れる
-    （方式を 1 種足したときに片方だけ更新される形になる）。丸めの実装は core の共有
-    （`karume.quantize` / `karume.quant_methods`）で、ここが持つのは呼び分けと式だけ。
+    Scattering the three over separate tables would silently split "the method whose quality was
+    measured" from "the method whose size was estimated" (adding a method would update only one
+    of them). The rounding implementations are shared in the core (`karume.quantize` /
+    `karume.quant_methods`); all this holds is the dispatch and the formula.
     """
 
-    #: スクリーニングと同じ方式名（表・JSON にそのまま出る）。
+    #: The same method name as in the screening (appears as is in the tables and JSON).
     name: str
-    #: 丸めを model へ in-place で当てる（`(model, op_types, include, fit_stride)` →
-    #: `describe()` を持つ報告）。`op_types` は構成側（{@link Recipe.op_types}）が決める —
-    #: ここへ焼くと「数えた対象」と「丸めた対象」が構成ごとに割れうる。`fit_stride` を
-    #: 読むのは {@link W4_KMEANS_SHARED} だけ。
+    #: Applies the rounding to the model in place (`(model, op_types, include, fit_stride)` → a
+    #: report with `describe()`). `op_types` is decided by the configuration
+    #: ({@link Recipe.op_types}) — baking it in here could split "the targets counted" from "the
+    #: targets rounded" per configuration. Only {@link W4_KMEANS_SHARED} reads `fit_stride`.
     round_model: Callable[[nn.Module, tuple[type[nn.Module], ...], Callable[[str], bool], int], Any]
-    #: 対象集合の投影ビット数（`(計数, 表の枚数)`）。
+    #: Projected bits of the target set (`(counts, number of tables)`).
     projected_bits: Callable[[TargetCounts, int], float]
-    #: `projected_bits` の式（**出力へそのまま載せる** — 投影の前提を表から追えるように）。
+    #: The formula of `projected_bits` (**written to the output as is** — so that the
+    #: projection's assumptions can be traced from the table).
     formula: str
-    #: 表の fit を部分標本にできるか（`--kmeans-fit-stride` が効く方式か）。
+    #: Whether the table fit can use a subsample (whether `--kmeans-fit-stride` applies to the
+    #: method).
     samples_fit: bool = False
 
 
-#: RTN（= 格納形 `i4`・ADR 0069 決定 3）。w4 列の**基準**で、他の 3 方式はこれとの差で読む。
+#: RTN (= the storage form `i4`, ADR 0069 decision 3). **The baseline** of the w4 columns; the
+#: other 3 methods read as differences from it.
 W4_RTN = W4Method(
     "rtn-i4-g32",
     lambda model, op_types, include, _stride: fake_quant_int4(
@@ -383,93 +437,102 @@ W4_MXFP4 = W4Method(
     "4bit + g32 E8M0 scale = 4.25 bpw",
 )
 
-#: k-means の共有表。**表は役割ごとに 1 枚**（`tables` = 対象を持つ役割数）— 配布は役割ごとに
-#: 別の IR 成果物なので、成果物をまたいで 1 枚の表を共有する席が格納側に無い。丸めも役割
-#: ごとに閉じて当てる（`apply_weight_quant`）ので、試算と実際の表の枚数が一致する。
+#: The k-means shared table. **One table per role** (`tables` = the number of roles with
+#: targets) — the distribution ships each role as a separate IR artifact, so the storage side has
+#: no place for one table shared across artifacts. Rounding is also applied closed per role
+#: (`apply_weight_quant`), so the estimated and actual table counts agree.
 #:
-#: NOTE: `shared` は表を張る前に対象の正規化値を 1 本へ連結するので、dit 役割（丸める木で
-#: 7.5 億要素）では f64 の作業領域まで含めて 20GB 超になる。`--kmeans-fit-stride` が core の
-#: 逃げ道（**表の fit だけ**等間隔部分標本・適用は常に全量）。
+#: NOTE: `shared` concatenates the normalized values of its targets into one before fitting the
+#: table, so for the dit role (750 million elements in the rounded tree) it exceeds 20 GB
+#: including the f64 work area. `--kmeans-fit-stride` is the core's escape hatch (**only the
+#: table fit** uses an evenly spaced subsample; application is always to everything).
 W4_KMEANS_SHARED = W4Method(
     "kmeans:shared",
     lambda model, op_types, include, stride: fake_quant_kmeans(
         model, "shared", W4_GROUP_SIZE, include=include, op_types=op_types, fit_stride=stride
     ),
     lambda counts, tables: 4 * counts.elements + 32 * counts.groups + CODEBOOK_BITS * tables,
-    "4bit + g32 f32 scale + 表 16×f32 を役割ごとに 1 枚",
+    "4bit + g32 f32 scale + one 16×f32 table per role",
     samples_fit=True,
 )
 
 
-# ---- 校正付き丸めの構成（波 J-2）--------------------------------------------
+# ---- calibrated rounding configurations (wave J-2) -------------------------------
 
-#: 校正付き構成の対象名（JSON の `w4.opTypes` と並ぶ「何を丸めたか」の綴り）。w4 方式の
-#: `i4-linear`（全役割の linear）とは**集合が違う** — 校正の駆動は stage 内の `nn.Linear` に
-#: 閉じるので、DiT block の外（`in_proj` / `out_proj` / `cond_module`）も他役割も入らない。
+#: The target name of the calibrated configurations (the spelling of "what was rounded", next to
+#: `w4.opTypes` in the JSON). **A different set** from the w4 methods' `i4-linear` (the linears of
+#: every role) — the calibration driver is closed over the `nn.Linear` inside the stages, so
+#: neither the outside of the DiT blocks (`in_proj` / `out_proj` / `cond_module`) nor other roles
+#: are included.
 CALIB_TARGET = "dit:blocks-linear"
 
-#: DiT block 列の**モデル内 FQN 接頭辞**（`load_dit` が組む `TextToLatentRFDiT` の `.blocks`）。
-#: scale 台帳のキーを `Int4Report` と同じ FQN 空間へ揃えるために stage へ渡す
-#: （core の `StageSpec` の契約）。
+#: The **in-model FQN prefix** of the DiT block sequence (`.blocks` of the `TextToLatentRFDiT`
+#: that `load_dit` builds). Passed to the stages to put the scale ledger's keys in the same FQN
+#: space as `Int4Report` (the contract of the core's `StageSpec`).
 DIT_BLOCK_PREFIX = "blocks"
 
 
 @dataclass(frozen=True)
 class CalibConfig:
-    """校正付き丸め 1 本ぶんの指定（方式 × 格納グリッド）。
+    """The specification of one calibrated rounding (method × storage grid).
 
-    `projected_bits` / `formula` は {@link W4Method} と同じ器で、{@link project_size} が
-    両方を受ける — 校正は**格子を 1 バイトも変えない**（同じ格子の中で丸め先を選び直すだけ）
-    ので、格納形の式は方式側と共有できる。
+    `projected_bits` / `formula` are the same holders as in {@link W4Method}, and
+    {@link project_size} accepts both — calibration **does not change the grid by a single byte**
+    (it only re-chooses rounding targets within the same grid), so the storage-form formula can be
+    shared with the methods.
     """
 
-    #: 構成名（`--config` の綴り・表と JSON にそのまま出る）。
+    #: Configuration name (the spelling of `--config`; appears as is in the tables and JSON).
     name: str
-    #: core の校正方式（`karume.quant_calib`）。
+    #: The core's calibration method (`karume.quant_calib`).
     method: CalibMethod
-    #: 丸め先の格納グリッド。
+    #: The storage grid of the rounding targets.
     grid: GridSpec
-    #: 対象集合の投影ビット数（`(計数, 表の枚数)`）。
+    #: Projected bits of the target set (`(counts, number of tables)`).
     projected_bits: Callable[[TargetCounts, int], float]
-    #: `projected_bits` の式（**出力へそのまま載せる**）。
+    #: The formula of `projected_bits` (**written to the output as is**).
     formula: str
 
 
 def _calib_group_scaled_bits(counts: TargetCounts, _tables: int) -> float:
-    """group ごとに f32 scale 1 個を持つ格子の総 bit（`rtn` / `nf4` 共通）。"""
+    """Total bits of a grid with one f32 scale per group (shared by `rtn` / `nf4`)."""
     return 4 * counts.elements + 32 * counts.groups
 
 
 def _calib_codebook_bits(counts: TargetCounts, tables: int) -> float:
-    """`kmeans_shared` の総 bit — 表は**層ごとに 1 枚**（`tables` = 対象の層数）。"""
+    """Total bits of `kmeans_shared` — **one table per layer** (`tables` = the number of target
+    layers)."""
     return _calib_group_scaled_bits(counts, tables) + CODEBOOK_BITS * tables
 
 
-#: 校正付き構成 3 本（この順で表に並ぶ）。丸めは core の `karume.quant_calib` の共有で、
-#: ここが持つのは呼び分けと投影式だけ。AWQ を置かないのは、等価倍率 `s` が単独で格納できず
-#: （fold か companion が要る）出口の無い列になるため（core のモジュール docstring の MUST）。
+#: The 3 calibrated configurations (listed in this order in the table). The rounding is shared in
+#: the core's `karume.quant_calib`; all this holds is the dispatch and the projection formulas.
+#: AWQ is not included because its equivalence factor `s` cannot be stored on its own (it needs a
+#: fold or a companion), making a column with no way out (the MUST of the core's module
+#: docstring).
 CALIB_CONFIGS: tuple[CalibConfig, ...] = (
     CalibConfig(
         "gptq-rtn",
         "gptq",
         GridSpec(kind="rtn", group_size=W4_GROUP_SIZE),
         _calib_group_scaled_bits,
-        "4bit + g32 f32 scale = 5.0 bpw（格納は RTN i4 そのもの — 校正は丸め先だけを変える）",
+        "4bit + g32 f32 scale = 5.0 bpw (stored as RTN i4 itself — calibration changes only the"
+        " rounding targets)",
     ),
     CalibConfig(
         "gptq-nf4",
         "gptq",
         GridSpec(kind="nf4", group_size=W4_GROUP_SIZE),
         _calib_group_scaled_bits,
-        "4bit + g32 f32 scale = 5.0 bpw（格子は NF4 の固定表）",
+        "4bit + g32 f32 scale = 5.0 bpw (the grid is NF4's fixed table)",
     ),
     CalibConfig(
         "gptq-kmeans",
         "gptq",
         GridSpec(kind="kmeans_shared", group_size=W4_GROUP_SIZE),
         _calib_codebook_bits,
-        "4bit + g32 f32 scale + 表 16×f32 を**層ごと**に 1 枚"
-        "（射程が層内 — 役割ごとに 1 枚の kmeans:shared とは別式）",
+        "4bit + g32 f32 scale + one 16×f32 table **per layer**"
+        " (scoped per layer — a different formula from kmeans:shared with one table per role)",
     ),
 )
 
@@ -477,24 +540,27 @@ CALIB_NAMES: tuple[str, ...] = tuple(config.name for config in CALIB_CONFIGS)
 
 
 def check_fit_stride(recipe: Recipe, fit_stride: int) -> None:
-    """`--kmeans-fit-stride` が効かない構成へ渡されたら fail loudly（黙って無視しない）。"""
+    """Fail loudly when `--kmeans-fit-stride` is passed to a configuration it has no effect on
+    (do not silently ignore it)."""
     if fit_stride == 1:
         return
     if recipe.calib is not None:
         raise SystemExit(
-            f"--kmeans-fit-stride {fit_stride} は校正付き構成には効かない"
-            f"（{recipe.weight} の表は**層ごと**に張るので全量 fit でも作業領域が小さい）"
+            f"--kmeans-fit-stride {fit_stride} has no effect on calibrated configurations"
+            f" ({recipe.weight} fits its tables **per layer**, so even a full fit has a small work"
+            " area)"
         )
     if recipe.method is None or not recipe.method.samples_fit:
         raise SystemExit(
-            f"--kmeans-fit-stride {fit_stride} は表の fit を部分標本にする方式専用"
-            f"（この構成の丸めは {recipe.weight}）"
+            f"--kmeans-fit-stride {fit_stride} is only for methods that fit the table on a"
+            f" subsample (this configuration rounds with {recipe.weight})"
         )
 
 
 @dataclass(frozen=True)
 class SizeProjection:
-    """方式 × 対象集合の**投影**サイズ（実測ではない — 式は {@link W4Method.formula}）。"""
+    """The **projected** size of method × target set (not measured — the formula is
+    {@link W4Method.formula})."""
 
     counts: TargetCounts
     tables: int
@@ -511,37 +577,44 @@ class SizeProjection:
 
     @property
     def f32_mib(self) -> float:
-        """同じ対象集合を f32 で持ったときの MiB（投影の分母 — 縮小率を表から読めるように）。"""
+        """MiB of the same target set held as f32 (the projection's denominator — so the
+        reduction ratio can be read from the table)."""
         return self.counts.elements * 4 / 1024**2
 
 
 def project_size(
     method: W4Method | CalibConfig, counts: TargetCounts, tables: int
 ) -> SizeProjection:
-    """方式の式を対象集合の計数へ当てる（`tables` = 表を張る成果物の数）。
+    """Apply a method's formula to the counts of a target set (`tables` = the number of
+    artifacts that carry a table).
 
-    校正付き構成（{@link CalibConfig}）も同じ器で受ける — 校正は格子を 1 バイトも変えないので、
-    格納形の式は方式側と共有できる。
+    Calibrated configurations ({@link CalibConfig}) are accepted by the same holder — calibration
+    does not change the grid by a single byte, so the storage-form formula can be shared with the
+    methods.
     """
     return SizeProjection(counts, tables, method.projected_bits(counts, tables), method.formula)
 
 
 @dataclass(frozen=True)
 class Recipe:
-    """1 構成の量子化レシピ（`weight` が `None` なら丸めない）。"""
+    """The quantization recipe of one configuration (`weight` of `None` means no rounding)."""
 
-    #: 丸めの綴り（格納 dtype `f16` / `i8`、または w4 の方式名）。
+    #: The spelling of the rounding (storage dtype `f16` / `i8`, or a w4 method name).
     weight: str | None
     roles: tuple[str, ...]
-    #: DiT の `nn.Linear` 入力へ per-token i8 の fake-quant を掛けるか（w8a8 の活性側）。
+    #: Whether to apply a per-token i8 fake-quant to the inputs of the DiT's `nn.Linear` (the
+    #: activation side of w8a8).
     act_quant: bool = False
-    #: w4 方式（`None` = `weight` が格納 dtype の綴りで `irodori.export.fake_quant` を通る側）。
+    #: The w4 method (`None` = `weight` is a storage-dtype spelling and goes through
+    #: `irodori.export.fake_quant`).
     method: W4Method | None = None
-    #: w4 の丸め対象 op 種（`method` があるときだけ意味を持つ）。既定は測定用に広げた 5 種で、
-    #: `(nn.Linear,)` に絞った形が**今日の配布対応形**（i4 の実行経路 — ADR 0069 決定 5）。
+    #: The op kinds w4 rounds (meaningful only with `method`). The default is the 5 kinds widened
+    #: for measurement; narrowed to `(nn.Linear,)` it is **today's distribution-compatible form**
+    #: (the i4 execution path — ADR 0069 decision 5).
     op_types: tuple[type[nn.Module], ...] = W4_OP_TYPES
-    #: 校正付き丸め（`None` = 重みだけを見て丸める側）。`method` とは**排他** — 校正は
-    #: stage 逐次で駆動するので、`apply_weight_quant` の役割一括の経路を通らない。
+    #: Calibrated rounding (`None` = rounding by looking at the weights alone). **Exclusive** with
+    #: `method` — calibration is driven stage by stage, so it does not go through the per-role
+    #: batch path of `apply_weight_quant`.
     calib: CalibConfig | None = None
 
 
@@ -550,31 +623,36 @@ def w4_recipe(
     roles: tuple[str, ...],
     op_types: tuple[type[nn.Module], ...] = W4_OP_TYPES,
 ) -> Recipe:
-    """w4 方式 1 本ぶんのレシピ（`weight` の綴りは方式名 — 二重管理を作らない）。"""
+    """The recipe of one w4 method (the `weight` spelling is the method name — no duplicated
+    bookkeeping)."""
     return Recipe(method.name, roles, method=method, op_types=op_types)
 
 
-#: 活性シムの比較相手（**同じ重みで活性だけ素の**構成）。素通り検出はこの 1 本との差で見る。
+#: The comparison partner of the activation shim (the configuration with **the same weights and
+#: plain activations**). Pass-through detection looks at the difference from this one.
 WEIGHT_ONLY_BASE = "i8-all"
 
-#: 混成形の役割（duration だけ f32 据え置き — ADR 0050 決定 6 の (i) 案）。i8 と w4 で
-#: **同じ軸**にする（別々に書くと片方だけ動いたときに 2 つの混成が黙って別物になる）。
+#: The roles of the mixed form (only duration stays f32 — option (i) of ADR 0050 decision 6). i8
+#: and w4 use **the same axis** (written separately, the two mixes would silently diverge when
+#: only one of them moves).
 MIXED_ROLES: tuple[str, ...] = tuple(role for role in ROLES if role != ex.TARGET_DURATION)
 
-#: 主要 5 構成（聴き比べと配布形の裁定に載る側）。
+#: The 5 main configurations (the ones in the listening comparison and the distribution
+#: ruling).
 CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     {
         BASE_CONFIG: Recipe(None, ()),
         "f16": Recipe("f16", ROLES),
         WEIGHT_ONLY_BASE: Recipe("i8", ROLES),
-        # ADR 0050 決定 6 の (i) 案 — duration だけ f32 据え置き。
+        # Option (i) of ADR 0050 decision 6 — only duration stays f32.
         "i8-mixed": Recipe("i8", MIXED_ROLES),
-        # 配布形の `i8-a8` 席 — 重みは `i8-all` と 1 バイトも変わらず、DiT の活性だけが i8。
+        # The distribution's `i8-a8` preset — the weights are byte-identical to `i8-all`; only
+        # the DiT's activations are i8.
         "w8a8": Recipe("i8", ROLES, act_quant=True),
     }
 )
 
-#: 直交分解（グラフ境界ごとに 1 本ずつ i8 にする — 劣化の帰属先を割る）。
+#: Orthogonal decomposition (one graph boundary at a time in i8 — attributes the degradation).
 DECOMPOSED_ROLES: tuple[str, ...] = (
     ex.TARGET_DIT,
     ex.TARGET_BACKBONE,
@@ -586,22 +664,28 @@ DIAGNOSTICS: Mapping[str, Recipe] = MappingProxyType(
     {f"i8-{role}-only": Recipe("i8", (role,)) for role in DECOMPOSED_ROLES}
 )
 
-#: w4 スクリーニングの勝者 4 種 × 全役割形 + RTN の duration 据え置き混成。
+#: The 4 winners of the w4 screening × the every-role form + RTN's mix that keeps duration
+#: unquantized.
 #:
-#: 第一の門は i8 と**同じ軸** — S が動くか（ADR 0050 決定 6）。動いた場合の受け皿として
-#: RTN にだけ混成形を置く（S が動くかどうかは丸めの粗さで決まるので、4 方式ぶんの混成を
-#: 並べても同じ問いを 4 回聞くだけになる。RTN で受け皿の形が立てば他方式へ横展開できる）。
+#: The first check is on **the same axis** as i8 — does S move (ADR 0050 decision 6). As the
+#: fallback in case it moves, only RTN gets a mixed form (whether S moves is decided by the
+#: coarseness of the rounding, so mixed versions of all 4 methods would only ask the same
+#: question 4 times; once RTN settles the shape of the fallback, it carries over to the other
+#: methods).
 #:
-#: 全役割形の対象 op 種は {@link W4_OP_TYPES}（linear / conv 系 / embedding）。
+#: The op kinds of the every-role form are {@link W4_OP_TYPES} (linear / the conv family /
+#: embedding).
 #:
-#: `i4-linear` は**今日の配布対応形**（RTN i4 × linear 限定 = 実際に出荷できる唯一の形 —
-#: ADR 0069 決定 5）。`--scan` の実測で linear が対象要素の 81.8% を覆い「conv 主体なら
-#: 省略」の前提が成立しなかったため、品質構成として置く（2026-08-19 全体レビュー後の追補）。
-#: roles から codec を外すのは codec に linear が 1 本も無いから（対象 0 の役割を回さない —
-#: 除外ではなく恒等なので構成の意味は「全役割の linear」のまま）。linear の混成形（duration
-#: 除外）は置かない — 全役割の実測で S ドリフトの原因が duration の重みでなく上流特徴の
-#: 変形だと確定した（i4-mixed の強制グリッド品質が i4-all とビット一致）ため、混成しても
-#: S は救えない。
+#: `i4-linear` is **today's distribution-compatible form** (RTN i4 × linear only = the only form
+#: that can actually ship — ADR 0069 decision 5). The `--scan` measurement showed linears cover
+#: 81.8% of the target elements, so the premise "skip it if the model is conv-dominated" did not
+#: hold, and it is kept as a quality configuration (a follow-up after the full review of
+#: 2026-08-19). codec is left out of the roles because codec has not a single linear (no role with
+#: zero targets is run — that is an identity, not an exclusion, so the configuration still means
+#: "the linears of every role"). There is no mixed linear form (duration excluded) — the
+#: every-role measurement established that the S drift comes from the deformation of upstream
+#: features rather than duration's weights (i4-mixed's forced-grid quality is bit-identical to
+#: i4-all), so mixing cannot save S.
 W4_LINEAR_ROLES: tuple[str, ...] = tuple(role for role in ROLES if role != ROLE_CODEC)
 W4_CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     {
@@ -614,9 +698,10 @@ W4_CONFIGS: Mapping[str, Recipe] = MappingProxyType(
     }
 )
 
-#: 校正付き構成（波 J-2）— 役割は `dit` だけ（丸めるのは DiT block 列の linear で、他役割は
-#: 1 ビットも動かない）。`weight` の綴りは構成名そのもの（二重管理を作らない — {@link w4_recipe}
-#: と同じ流儀）。
+#: Calibrated configurations (wave J-2) — the only role is `dit` (what is rounded is the linears
+#: of the DiT block sequence; the other roles do not move by a single bit). The `weight` spelling
+#: is the configuration name itself (no duplicated bookkeeping — the same convention as
+#: {@link w4_recipe}).
 CALIB_RECIPES: Mapping[str, Recipe] = MappingProxyType(
     {
         config.name: Recipe(config.name, (ex.TARGET_DIT,), op_types=(nn.Linear,), calib=config)
@@ -624,27 +709,29 @@ CALIB_RECIPES: Mapping[str, Recipe] = MappingProxyType(
     }
 )
 
-#: 構成名 → レシピの全表。
+#: The full table of configuration name → recipe.
 RECIPES: Mapping[str, Recipe] = MappingProxyType(
     {**CONFIGS, **DIAGNOSTICS, **W4_CONFIGS, **CALIB_RECIPES}
 )
 
-#: LSD の STFT 設定（48kHz の解析グリッド — hop 512 ≈ 10.7ms）。
+#: STFT settings of the LSD (an analysis grid at 48 kHz — hop 512 ≈ 10.7 ms).
 STFT_N_FFT = 2048
 STFT_HOP = 512
-#: 振幅の床（参照の最大振幅に対する相対値 = −100dB）。無音区間の対数が −inf へ落ちるのを
-#: 防ぐためだけの下限で、両系列に**同じ床**を当てる（片側だけに当てると差が床に依存する）。
+#: The amplitude floor (relative to the reference's maximum amplitude = −100 dB). A lower bound
+#: only to keep the log of silent regions from falling to −inf, and **the same floor** is applied
+#: to both series (applied to only one side, the difference would depend on the floor).
 STFT_FLOOR = 1e-5
 
 CASE_SUFFIX = ".safetensors"
 REPORT_FILE = "report.json"
 
 
-# ---- 指標（`measure_quant_sbv2.py` からの複製 — モジュール docstring の NOTE）----------
+# ---- metrics (duplicated from `measure_quant_sbv2.py` — the NOTE of the module docstring) ----
 
 
 def snr_db(value: torch.Tensor, reference: torch.Tensor) -> float:
-    """`10·log10(Σref² / Σ(value−ref)²)`（構成間の音質比較の主指標）。"""
+    """`10·log10(Σref² / Σ(value−ref)²)` (the main metric of audio-quality comparison between
+    configurations)."""
     err = float((value - reference).double().square().sum())
     ref = float(reference.double().square().sum())
     if err == 0.0:
@@ -655,11 +742,13 @@ def snr_db(value: torch.Tensor, reference: torch.Tensor) -> float:
 
 
 def log_spectral_distance(value: torch.Tensor, reference: torch.Tensor) -> float:
-    """対数スペクトル距離 `sqrt(mean((20log10|X| − 20log10|Y|)²))` [dB]。
+    """Log-spectral distance `sqrt(mean((20log10|X| − 20log10|Y|)²))` [dB].
 
-    波形 SNR は位相が少しずれるだけで崩れる（flow-matching の軌道が変われば、聴感上同じ音でも
-    残差が信号と同オーダーになる）。LSD は振幅スペクトルだけを見るので**位相ずれに鈍く**、
-    「音色・帯域の壊れ方」を測る側の指標として併記する。どちらか一方では判断しない。
+    Waveform SNR collapses with even a small phase shift (once the flow-matching trajectory
+    changes, the residual reaches the order of the signal even for audio that sounds the same).
+    LSD looks only at the magnitude spectrum, so it is **insensitive to phase shifts**, and is
+    reported alongside as the metric of "how timbre and bandwidth break". Neither one is judged
+    alone.
     """
     window = torch.hann_window(STFT_N_FFT)
     spectra = [
@@ -685,7 +774,8 @@ def sha256(data: bytes) -> str:
 
 
 def write_wav(path: Path, audio: torch.Tensor, sample_rate: int) -> None:
-    """モノラル 16bit PCM で書く（`decodeWav` の逆 — 書きは ×32767 が Karume の規約）。"""
+    """Write mono 16-bit PCM (the inverse of `decodeWav` — writing with ×32767 is Karume's
+    convention)."""
     clipped = audio.detach().reshape(-1).to(torch.float32).clamp(-1.0, 1.0)
     pcm = torch.floor(clipped * 32767.0 + 0.5).to(torch.int16)
     with wave.open(str(path), "wb") as handle:
@@ -695,17 +785,18 @@ def write_wav(path: Path, audio: torch.Tensor, sample_rate: int) -> None:
         handle.writeframes(pcm.numpy().tobytes())
 
 
-# ---- 構成の組み立て ---------------------------------------------------------
+# ---- assembling the configurations ------------------------------------------------
 
 
 def role_modules(modules: Mapping[str, nn.Module], roles: Sequence[str]) -> dict[str, nn.Module]:
-    """役割 → その役割の丸め対象モジュール（`irodori.export.fake_quant` へ渡す形）。
+    """Role → the modules that role rounds (the form passed to `irodori.export.fake_quant`).
 
-    MUST: 3 つの norm を**消費側の役割**へ束ねる（`speaker_norm` は speaker グラフ・
-    `text_norm` は duration グラフ・`caption_norm` は caption-proj グラフの内側 — 所在は
-    ADR 0048 決定 1）。全役割を選ぶと `irodori.export.export_series` /
-    `irodori.pipeline_ref.emit` が丸める 9 本と**同じ集合**になり、f16 構成が配布系列の
-    対応物であることが集合として保証される。
+    MUST: the 3 norms are bundled with **the role that consumes them** (`speaker_norm` inside the
+    speaker graph, `text_norm` inside the duration graph, `caption_norm` inside the caption-proj
+    graph — where they live is ADR 0048 decision 1). Selecting every role gives **the same set**
+    as the 9 that `irodori.export.export_series` / `irodori.pipeline_ref.emit` round, which
+    guarantees as a set that the f16 configuration is the counterpart of the distribution
+    series.
     """
     grouped: dict[str, dict[str, nn.Module]] = {
         ex.TARGET_BACKBONE: {ex.TARGET_BACKBONE: modules[ex.TARGET_BACKBONE]},
@@ -733,19 +824,22 @@ def role_modules(modules: Mapping[str, nn.Module], roles: Sequence[str]) -> dict
 def apply_weight_quant(
     recipe: Recipe, scoped: Mapping[str, nn.Module], fit_stride: int = 1
 ) -> dict[str, str]:
-    """構成ぶんの重みの丸めを役割モジュールへ当て、役割 → 要約を返す。
+    """Apply a configuration's weight rounding to the role modules and return role → summary.
 
-    f16 / i8 はこれまでどおり `irodori.export.fake_quant`（配布経路と同じ関数）へ委ねる。
-    w4 は方式ごとに core の丸めを呼び、量子化軸が g32 で割り切れない重みだけ `include` で
-    落とす（端数 group を作らない — ADR 0069 決定 2）。
+    f16 / i8 are delegated to `irodori.export.fake_quant` as before (the same function as the
+    distribution path). w4 calls the core's rounding per method and drops with `include` only the
+    weights whose quantization axis is not divisible by g32 (no partial groups — ADR 0069
+    decision 2).
 
-    MUST: 丸めの対象は w4 でも**役割モジュールの木**（= i8 と同じ集合）にする。配布グラフに
-    載る部分木だけ丸めると i8 の測定値と「何を丸めたか」が食い違い、方式間の比較が成立
-    しなくなる（グラフに載らない内側のコピーまで丸まるが、forward に出てこないので品質には
-    効かない）。サイズ試算の計数だけは配布グラフ側から採る（{@link graph_scans}）。
+    MUST: even for w4 the rounding target is **the tree of the role module** (= the same set as
+    i8). Rounding only the subtree in the shipped graph would make "what was rounded" disagree
+    with the i8 measurements and the comparison between methods would not hold (the inner copies
+    not in the graph get rounded too, but they never appear in the forward, so they do not affect
+    quality). Only the counts of the size estimate are taken from the shipped graph side
+    ({@link graph_scans}).
 
-    MUST: 役割に w4 の候補があるのに全部が g32 で落ちたら fail loudly — その役割だけ f32 の
-    まま回すと「丸めたつもりの構成」を測ってしまう。
+    MUST: when a role has w4 candidates but all of them drop out on g32, fail loudly — running
+    that role alone in f32 would measure "a configuration believed to be rounded".
     """
     if recipe.method is None:
         return dict(ex.fake_quant(recipe.weight, scoped).reports)
@@ -755,35 +849,36 @@ def apply_weight_quant(
         if scan.counts.modules == 0:
             if scan.excluded:
                 raise SystemExit(
-                    f"{name}: w4 の対象 {len(scan.excluded)} 本が全て量子化軸を"
-                    f" g32 で割り切れず 0 本になった（{scan.excluded[0].fqn} の軸長"
-                    f" {scan.excluded[0].axis_length} 他）"
+                    f"{name}: all {len(scan.excluded)} w4 targets have a quantization axis"
+                    f" not divisible by g32, leaving 0 ({scan.excluded[0].fqn} with axis length"
+                    f" {scan.excluded[0].axis_length} and others)"
                 )
-            reports[name] = "格納 f32 のまま（w4 の対象型を持たない）"
+            reports[name] = "kept as f32 storage (no w4 target types)"
             continue
         rounded = recipe.method.round_model(
             module, recipe.op_types, aligned_include(scan.excluded), fit_stride
         )
         if rounded.modules != scan.counts.modules:
             raise SystemExit(
-                f"{name}: 丸めた本数 {rounded.modules} が対象 {scan.counts.modules} と違う"
-                "（op_types か include が scan と割れている — 数えた対象と丸めた対象は"
-                "同じ集合でなければならない）"
+                f"{name}: the rounded count {rounded.modules} differs from the"
+                f" {scan.counts.modules} targets (op_types or include diverged from the scan — the"
+                " targets counted and the targets rounded must be the same set)"
             )
-        skipped = f" / g32 非整列 {len(scan.excluded)} 本を除外" if scan.excluded else ""
-        sampled = f" / 表の fit は 1/{fit_stride} 部分標本" if fit_stride > 1 else ""
-        reports[name] = f"{recipe.method.name} へ丸めた — {rounded.describe()}{skipped}{sampled}"
+        skipped = f" / excluded {len(scan.excluded)} not aligned to g32" if scan.excluded else ""
+        sampled = f" / table fit on a 1/{fit_stride} subsample" if fit_stride > 1 else ""
+        reports[name] = f"rounded to {recipe.method.name} — {rounded.describe()}{skipped}{sampled}"
     for name, report in reports.items():
         print(f"[fake-quant] {name}: {report}", flush=True)
     return reports
 
 
 def role_graphs(graphs: ip.HostGraphs) -> dict[str, nn.Module]:
-    """役割 → **配布グラフ**（`irodori.export.export_series` が emit する 7 本のラッパ）。
+    """Role → its **shipped graph** (the 7 wrappers `irodori.export.export_series` emits).
 
-    DiT の役割は 2 本のラッパ（`dit-context` / `dit` — ADR 0114）を 1 つの木に束ねて返す — 丸めの
-    役割（`TextToLatentRFDiT` 丸ごと）と配布グラフが 1 対 2 になったので、サイズ試算の計数は
-    2 本の和で採る（共有の `k_norm` は `named_modules` の重複除去で 1 度だけ数えられる）。
+    The DiT role returns its two wrappers (`dit-context` / `dit` — ADR 0114) bundled into one
+    tree — the rounding role (the whole `TextToLatentRFDiT`) and the shipped graphs became one to
+    two, so the size-estimate counts are taken over the union of the two (the shared `k_norm` is
+    counted once thanks to the deduplication of `named_modules`).
     """
     return {
         ex.TARGET_BACKBONE: graphs.backbone,
@@ -800,12 +895,15 @@ def graph_scans(
     roles: Sequence[str],
     op_types: tuple[type[nn.Module], ...],
 ) -> dict[str, RoleScan]:
-    """役割 → 配布グラフに載る w4 対象の規模（サイズ試算と除外一覧の入力）。
+    """Role → the scale of the w4 targets in the shipped graph (the input of the size estimate
+    and the exclusion list).
 
-    丸めた木ではなくラッパを数えるのは、`irodori.export.load_dit` が組む DiT が**グラフに
-    載らない backbone のコピー**まで抱えるため（`export.TARGET_SCALE_SOURCES` の NOTE）。
-    丸めた集合で試算すると、出荷しない重みのぶんだけ投影 MiB が膨らむ。op 種は丸めと同じ
-    ものを受ける（別々に動くと「丸めた対象」と「試算した対象」が黙って割れる）。
+    The wrappers are counted instead of the rounded tree because the DiT that
+    `irodori.export.load_dit` builds also holds **a copy of the backbone that is not in the
+    graph** (the NOTE of `export.TARGET_SCALE_SOURCES`). Estimating on the rounded set would
+    inflate the projected MiB by weights that do not ship. The op kinds are the same ones the
+    rounding receives (if they moved separately, "the targets rounded" and "the targets estimated"
+    would silently split).
     """
     return {
         role: scan_targets(graph, op_types) for role, graph in graphs.items() if role in set(roles)
@@ -813,7 +911,7 @@ def graph_scans(
 
 
 class Loaded(NamedTuple):
-    """`load_modules` の戻り（丸めを当てる前の素の一式）。"""
+    """The return value of `load_modules` (the plain set before any rounding is applied)."""
 
     source: Any
     modules: dict[str, nn.Module]
@@ -823,7 +921,7 @@ class Loaded(NamedTuple):
 
 
 def load_modules(model_dir: Path, source_dir: Path) -> Loaded:
-    """`irodori.pipeline_ref.emit` と同じ 9 本を組む（丸めはまだ当てない）。"""
+    """Build the same 9 modules as `irodori.pipeline_ref.emit` (no rounding applied yet)."""
     source = ex.IrodoriSource(source_dir)
     text_config, model_config = ex.read_configs(model_dir)
     state = load_file(str(model_dir / ex.CHECKPOINT_FILE))
@@ -871,9 +969,10 @@ def load_modules(model_dir: Path, source_dir: Path) -> Loaded:
 def build_graphs(
     modules: Mapping[str, nn.Module], config: Any, model_config: Mapping[str, Any]
 ) -> ip.HostGraphs:
-    """`irodori.pipeline_ref.emit` と同じ 7 本のグラフラッパ。
+    """The same 7 graph wrappers as `irodori.pipeline_ref.emit`.
 
-    MUST: **パッチ適用後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
+    MUST: they work correctly only **after the patches are applied** (they pass the real-valued
+    RoPE table).
     """
     speaker_max = ex.speaker_sym_max(model_config)
     dit_graphs = ex.dit_wrappers(modules[ex.TARGET_DIT], ex.dit_sym_max(config))
@@ -891,7 +990,8 @@ def build_graphs(
 
 
 class DecoderStage(NamedTuple):
-    """{@link build_decoder} の戻り。`scan` は w4 構成でコーデックを丸めたときだけ埋まる。"""
+    """The return value of {@link build_decoder}. `scan` is filled only when a w4 configuration
+    rounds the codec."""
 
     graph: nn.Module
     sample_rate: int
@@ -902,20 +1002,24 @@ class DecoderStage(NamedTuple):
 def build_decoder(
     source_dir: Path, model_dir: Path, recipe: Recipe, fit_stride: int = 1
 ) -> DecoderStage:
-    """コーデックの decode 経路（`DecoderGraph`）とサンプリング周波数・丸めの要約を返す。
+    """Return the codec's decode path (`DecoderGraph`), the sampling rate and the rounding
+    summary.
 
-    MUST（順序）: 丸めは `fold_weight_norm` / `lift_snake_alphas` の**後**（`irodori.dacvae.export`
-    の `_fake_quant` の順序 MUST — ここは同じ前処理を同じ順で通してから丸めを当てる）。
-    切り詰めた `in_proj` は decode 経路に出てこないので組まない。
+    MUST (ordering): rounding comes **after** `fold_weight_norm` / `lift_snake_alphas` (the ordering
+    MUST of `_fake_quant` in `irodori.dacvae.export` — this runs the same preprocessing in the same
+    order before applying the rounding). The truncated `in_proj` does not appear on the decode
+    path, so it is not built.
 
-    w4 は `dv._fake_quant`（格納 dtype の綴りしか受けない）を通らず、方式の丸めを**コーデック
-    モデル全体**へ当てる。計数と除外一覧は decode 経路のラッパから採る（{@link graph_scans}
-    と同じ理由 — encoder は配布されない）。
+    w4 does not go through `dv._fake_quant` (which accepts only storage-dtype spellings); it
+    applies the method's rounding to **the whole codec model**. The counts and the exclusion list
+    are taken from the decode path's wrapper (the same reason as {@link graph_scans} — the
+    encoder is not distributed).
 
-    NOTE: `DecoderGraph` の木には透かし枝の未使用層が残る（`bypass_watermark` は forward を
-    差し替えるだけでモジュールは外さない）ので、計数は decode が実際に通る集合より
-    **6,266,080 要素（24MiB 相当・コーデックの 8.8%）多い**。`dv.main_path` で正確に割れるが、
-    あちらは「門でのみ使う写し」なので計数へは持ち込まない（モデル全体では 0.8% の上振れ）。
+    NOTE: the `DecoderGraph` tree keeps the unused layers of the watermark branch
+    (`bypass_watermark` only replaces the forward and does not remove the modules), so the count
+    is **6,266,080 elements (about 24 MiB, 8.8% of the codec) more** than the set decode actually
+    goes through. `dv.main_path` would split it exactly, but that is "a copy used only by the
+    checks", so it is not brought into the counts (0.8% over for the whole model).
     """
     source = dv.DacvaeSource(source_dir)
     model = dv.load_codec(source, model_dir)
@@ -931,14 +1035,14 @@ def build_decoder(
         scan = scan_targets(model, recipe.op_types)
         if scan.counts.modules == 0:
             raise SystemExit(
-                f"codec: w4 の対象 {len(scan.excluded)} 本が全て量子化軸を g32 で"
-                "割り切れず 0 本になった"
+                f"codec: all {len(scan.excluded)} w4 targets have a quantization axis not"
+                " divisible by g32, leaving 0"
             )
         rounded = recipe.method.round_model(
             model, recipe.op_types, aligned_include(scan.excluded), fit_stride
         )
-        sampled = f" / 表の fit は 1/{fit_stride} 部分標本" if fit_stride > 1 else ""
-        report = f"{recipe.method.name} へ丸めた — {rounded.describe()}{sampled}"
+        sampled = f" / table fit on a 1/{fit_stride} subsample" if fit_stride > 1 else ""
+        report = f"rounded to {recipe.method.name} — {rounded.describe()}{sampled}"
         print(f"[fake-quant] codec: {report}", flush=True)
     graph = dv.DecoderGraph(model.quantizer.out_proj, model.decoder)
     return DecoderStage(
@@ -949,32 +1053,36 @@ def build_decoder(
     )
 
 
-# ---- 校正付き丸めの駆動（stage 分解 + Catcher）-------------------------------
+# ---- driving calibrated rounding (stage split + Catcher) ---------------------------
 
 
-class _CalibStepsReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図
-    """必要な step 数ぶん捕まえた合図（参照ループを途中で畳むための番兵）。"""
+class _CalibStepsReached(Exception):  # noqa: N818 — a signal to stop, not an error
+    """The signal that the needed number of steps has been captured (a sentinel that winds the
+    reference loop down early)."""
 
 
 class DitBlockStage(nn.Module):
-    """DiT block 1 枚を「hidden を位置引数で受ける」形へ包む stage ラッパ。
+    """A stage wrapper that wraps one DiT block in the form "takes the hidden state as a
+    positional argument".
 
-    block 本体は `irodori.export.DitGraph.forward` のループ 4 行と**同じ順序**で組む —
-    `TextToLatentRFDiT` の block は `DiffusionBlock.forward` を持つが、`DitGraph` は
-    それを呼ばずに attention の同値実装（{@link irodori.export.DitGraph._attention}）へ
-    展開するので、block をそのまま stage にすると**測っている経路が別物**になる。attention は
-    その staticmethod を直に借りて写しを増やさない。条件側 K/V は配布では `dit-context` が
-    生成 1 回だけ作る（ADR 0114）が、stage は同じ 1 実装
-    （{@link irodori.export.DitContextGraph.block_context}）を**block の中で**呼ぶ — 条件側の射影
-    72 本も block の重みで、GPTQ がその入力（norm 済みの条件 state）を見る必要があるため。値は
-    配布の経路とビット単位で同じ（同じモジュールを同じ入力で呼ぶ）。
+    The block body is built in **the same order** as the 4 loop lines of
+    `irodori.export.DitGraph.forward` — the blocks of `TextToLatentRFDiT` have
+    `DiffusionBlock.forward`, but `DitGraph` does not call it and expands into the equivalent
+    attention implementation ({@link irodori.export.DitGraph._attention}), so using the block as is
+    for the stage would make **the measured path a different one**. The attention borrows that
+    staticmethod directly instead of adding another copy. In the distribution the condition-side
+    K/V is built once per generation by `dit-context` (ADR 0114), but the stage calls the same
+    single implementation ({@link irodori.export.DitContextGraph.block_context}) **inside the
+    block** — the 72 condition-side projections are block weights too, and GPTQ needs to see their
+    inputs (the normalized condition states). The values are bit-identical to the distribution's
+    path (the same modules called on the same inputs).
 
-    MUST: 写しが上流とずれていないことは {@link assert_stage_split_matches_graph} が丸める前に
-    ビット一致で実測する（`nn.Dropout(p=0.0)` を落とすのは `DitGraph` と同じ厳密恒等）。
+    MUST: that the copy has not drifted from upstream is measured bit-exactly by
+    {@link assert_stage_split_matches_graph} before rounding (dropping `nn.Dropout(p=0.0)` is the
+    same exact identity as in `DitGraph`).
 
-    子モジュールの名前を**block 番号**にしてあるのは、stage 内の局所 FQN
-    （`0.attention.wq.weight`）へ {@link DIT_BLOCK_PREFIX} を足すだけでモデル内 FQN へ
-    戻すため。
+    The child module is named with **the block index** so that adding {@link DIT_BLOCK_PREFIX} to
+    a stage's local FQN (`0.attention.wq.weight`) is all it takes to get back the in-model FQN.
     """
 
     def __init__(self, index: int, block: nn.Module) -> None:
@@ -1005,11 +1113,11 @@ class DitBlockStage(nn.Module):
 
 
 def dit_stages(graph: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の DiT block を `(モデル内 FQN 接頭辞, stage)` で返す。
+    """Return the DiT blocks in execution order as `(in-model FQN prefix, stage)`.
 
-    stage が抱えるのは**実モジュールの block 丸ごと**（`DitGraph.source_blocks`）— `DitGraph` の
-    `blocks` は条件側の射影を除いた器（配布の所有の範囲）なので、そちらを包むと条件側の 72 本が
-    校正から漏れる。
+    A stage holds **the whole real block module** (`DitGraph.source_blocks`) — `DitGraph`'s
+    `blocks` is a holder without the condition-side projections (the range the distribution owns),
+    so wrapping that would let the 72 condition-side weights escape calibration.
     """
     return tuple(
         (DIT_BLOCK_PREFIX, DitBlockStage(index, block))
@@ -1018,13 +1126,15 @@ def dit_stages(graph: nn.Module) -> tuple[StageSpec, ...]:
 
 
 def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor], TargetCounts]:
-    """stage 内の校正対象を fqn 引きの重みと計数で返す（**走査** = 過不足一致門の基準）。
+    """Return the calibration targets inside the stages as weights keyed by FQN plus counts (**the
+    scan** = the basis of the exact-coverage check).
 
-    対象選択は core の `iter_quant_targets` の共有（{@link scan_targets} と同文）。
+    Target selection shares the core's `iter_quant_targets` (same as {@link scan_targets}).
 
-    MUST: g32 非整列は**除外せず fail loudly** — 校正は stage を丸ごと駆動する形なので、
-    途中の 1 本だけ `include` で外すと「走査の本数 = 丸めた本数」の門が張れなくなる
-    （w4 方式側は層ごとに独立なので除外一覧を出す運用でよい）。
+    MUST: a weight not aligned to g32 **fails loudly instead of being excluded** — calibration
+    drives whole stages, so dropping a single weight in the middle with `include` would break the
+    check "scanned count = rounded count" (the w4 methods are independent per layer, so printing
+    an exclusion list is fine there).
     """
     weights: dict[str, torch.Tensor] = {}
     modules = channels = elements = 0
@@ -1034,15 +1144,18 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
             length = group_axis_length(weight, axis)
             if length % W4_GROUP_SIZE:
                 raise SystemExit(
-                    f"{fqn}: 量子化軸 {length} が g{W4_GROUP_SIZE} で割り切れない"
-                    "（校正は stage 単位で駆動するので 1 本だけ外す逃げ道が無い）"
+                    f"{fqn}: quantization axis {length} is not divisible by g{W4_GROUP_SIZE}"
+                    " (calibration is driven per stage, so there is no escape hatch that drops a"
+                    " single weight)"
                 )
             weights[fqn] = weight
             modules += 1
             channels += int(weight.shape[axis])
             elements += int(weight.numel())
     if not modules:
-        raise SystemExit(f"校正対象 '{CALIB_TARGET}' に量子化できる重みが 1 本も無い")
+        raise SystemExit(
+            f"the calibration target '{CALIB_TARGET}' has not a single quantizable weight"
+        )
     return weights, TargetCounts(modules, channels, elements)
 
 
@@ -1052,22 +1165,26 @@ def capture_case_batches(
     run_reference: Callable[[], object],
     limit: int,
 ) -> tuple[list[StageBatch], tuple[torch.Tensor, ...]]:
-    """1 ケースの参照ループ（f32・CFG 込み）から **step ごとに 1 バッチ**捕まえる。
+    """Capture **one batch per step** from one case's reference loop (f32, CFG included).
 
-    戻りは `(バッチ列, 先頭 forward の DitGraph 引数)`。後者は
-    {@link assert_stage_split_matches_graph} が stage 分解の同値を実測するのに使う。
+    Returns `(batches, the DitGraph arguments of the first forward)`. The latter is used by
+    {@link assert_stage_split_matches_graph} to measure the equivalence of the stage split.
 
-    1 step は cond 1 回 + CFG の uncond n 回の forward になるが、その全てが**同じ `x_t`**
-    を受ける（`irodori.pipeline_ref._euler` は step ごとに 1 本の `x_t` しか作らない）ので、
-    `x_t` の**同一性**で step 境界を割り、新しくなった直後の 1 forward = cond 側だけを採る。
+    One step is one cond forward + n uncond forwards for CFG, and all of them receive **the same
+    `x_t`** (`irodori.pipeline_ref._euler` builds only one `x_t` per step), so step boundaries are
+    split by the **identity** of `x_t`, and only the one forward right after it changes = the cond
+    side is taken.
 
-    捕まえるのは block ループの**前**に作られる一式 — norm 済みの text・caption と speaker state は
-    `context_graph`（`dit-context`・生成 1 回 — ADR 0114）から、`cond_embed` / 連結マスク /
-    RoPE 表と先頭 block への hidden は `graph`（`dit`）の forward から。自前で組み直さないのは、
-    組み直した瞬間にラッパの綴りと黙って割れうるから（EG の Catcher と同じ規律）。
+    What is captured is the set built **before** the block loop — the normalized text and caption
+    and the speaker state from `context_graph` (`dit-context`, once per generation — ADR 0114), and
+    `cond_embed` / the concatenated mask / the RoPE table and the hidden state into the first block
+    from the forward of `graph` (`dit`). They are not rebuilt here because the moment they are
+    rebuilt they can silently diverge from the wrappers' spelling (the same discipline as EG's
+    Catcher).
 
-    `limit` を捕まえ切ったら番兵で参照ループを畳む — `run_case` は CFG ありのループの**後**に
-    CFG 無しのループをもう 1 周回すので、畳まないと「同じ step の別軌道」まで混ざる。
+    Once `limit` is captured, the sentinel winds the reference loop down — `run_case` runs one
+    more loop without CFG **after** the loop with CFG, so without winding down "another trajectory
+    of the same step" would be mixed in.
     """
     batches: list[StageBatch] = []
     probe: list[tuple[torch.Tensor, ...]] = []
@@ -1093,8 +1210,8 @@ def capture_case_batches(
         missing = sorted({"text", "speaker", "caption"} - set(conditions))
         if missing:
             raise SystemExit(
-                f"dit が dit-context より先に回った（条件 {missing} を捕まえていない）"
-                " — 参照ループの綴りが台本の想定と食い違っている"
+                f"dit ran before dit-context (conditions {missing} were not captured)"
+                " — the reference loop's spelling disagrees with what this script assumes"
             )
         state["x_t"] = args[0]
         state["take"] = True
@@ -1137,7 +1254,8 @@ def capture_case_batches(
             handle.remove()
     if not batches or not probe:
         raise SystemExit(
-            "校正入力を 1 step も捕まえられなかった（DitGraph の綴りが台本の想定と食い違っている）"
+            "could not capture calibration input for even 1 step (the DitGraph spelling disagrees"
+            " with what this script assumes)"
         )
     return batches, probe[0]
 
@@ -1148,14 +1266,16 @@ def assert_stage_split_matches_graph(
     batch: StageBatch,
     stages: Sequence[StageSpec],
 ) -> None:
-    """stage 分解 + 尾（`out_norm` → `out_proj`）が `DitGraph` の 1 forward と**ビット一致**。
+    """The stage split + the tail (`out_norm` → `out_proj`) is **bit-identical** to one forward
+    of `DitGraph`.
 
-    `probe` はその forward の `DitGraph` 引数、`batch` は**同じ forward**で捕まえた先頭
-    stage への入力。
+    `probe` holds that forward's `DitGraph` arguments, and `batch` the input to the first stage
+    captured in **the same forward**.
 
-    MUST: 丸める前に実測する。{@link DitBlockStage} は block ループの写しなので、上流の
-    `DitGraph.forward` が変わると黙ってずれる — ずれた側で丸めると「別の経路の GPTQ」を
-    測っていることになり、しかも数値は普通に出る（表からは読めない）。
+    MUST: measured before rounding. {@link DitBlockStage} is a copy of the block loop, so it
+    silently drifts when upstream's `DitGraph.forward` changes — rounding on the drifted side
+    would measure "GPTQ along another path", and the numbers would still come out normally (it
+    cannot be read off the table).
     """
     args, kwargs = batch
     with torch.no_grad():
@@ -1166,34 +1286,37 @@ def assert_stage_split_matches_graph(
         rebuilt = graph.out_proj(graph.out_norm(hidden))
     if not torch.equal(rebuilt, reference):
         raise SystemExit(
-            "stage 分解の再構成が DitGraph の出力とビット一致しない"
-            f"（最大絶対差 {float((rebuilt - reference).abs().max()):.4e}）"
-            " — DitBlockStage の写しが irodori.export.DitGraph.forward とずれている"
+            "the stage-split reconstruction is not bit-identical to the DitGraph output"
+            f" (max abs difference {float((rebuilt - reference).abs().max()):.4e})"
+            " — DitBlockStage's copy has drifted from irodori.export.DitGraph.forward"
         )
 
 
 @dataclass(frozen=True)
 class CalibRig:
-    """校正付き構成が共有する足場（stage 列・走査・先頭 stage への入力）。
+    """The scaffolding the calibrated configurations share (the stage list, the scan, the input to
+    the first stage).
 
-    構成ごとに作り直さない — 校正入力は**丸めを 1 本も当てる前**に 1 回だけ採る（`restore`
-    に当たる pristine の作法は「1 実行 = 1 構成」で担保されている）。
+    It is not rebuilt per configuration — the calibration input is taken only once, **before any
+    rounding is applied** (the pristine discipline that `restore` stands for is guaranteed by
+    "one run = one configuration").
     """
 
     stages: tuple[StageSpec, ...]
     scan: Mapping[str, torch.Tensor]
     counts: TargetCounts
     batches: tuple[StageBatch, ...]
-    #: ケース名 → 捕まえた step 数（縮小実行を数値の横に残す）。
+    #: Case name → the number of steps captured (keeps a reduced run next to the numbers).
     steps: Mapping[str, int]
-    #: 校正に積んだ hidden の総トークン数（= Σ step ごとの S）。
+    #: Total tokens of the hidden states stacked for calibration (= Σ S over steps).
     tokens: int
 
 
 def build_calib_rig(
     graphs: ip.HostGraphs, run_reference: Callable[[ip.PipelineCase], object], limit: int
 ) -> CalibRig:
-    """校正の足場を組む（stage 分解 → 走査 → 参照ループ捕捉 → 同値門）。"""
+    """Build the calibration scaffolding (stage split → scan → reference-loop capture →
+    equivalence check)."""
     graph = graphs.dit
     stages = dit_stages(graph)
     scan, counts = calib_targets(stages)
@@ -1204,16 +1327,17 @@ def build_calib_rig(
             graphs.dit_context, graph, lambda case=case: run_reference(case), limit
         )
         if not batches:
-            # `probe` と `caught[0]` は**同じ forward**（先頭 step の cond 側）。
+            # `probe` and `caught[0]` are **the same forward** (the cond side of the first step).
             assert_stage_split_matches_graph(graph, probe, caught[0], stages)
         steps[case.name] = len(caught)
         batches += caught
-        print(f"[calib] {case.name}: 校正 {len(caught)} step を捕捉", flush=True)
+        print(f"[calib] {case.name}: captured {len(caught)} calibration steps", flush=True)
     tokens = sum(int(args[0].shape[1]) for args, _kwargs in batches)
     print(
-        f"[calib] stage {len(stages)} 段 / 対象 linear {counts.modules} 本"
-        f" / バッチ {len(batches)} 本 / hidden 合計 {tokens:,} token"
-        f"（対象は {CALIB_TARGET} — DiT block の外と他役割は含まない）",
+        f"[calib] {len(stages)} stages / {counts.modules} target linears"
+        f" / {len(batches)} batches / {tokens:,} hidden tokens in total"
+        f" (the target is {CALIB_TARGET} — the outside of the DiT blocks and other roles are not"
+        " included)",
         flush=True,
     )
     return CalibRig(
@@ -1227,10 +1351,11 @@ def build_calib_rig(
 
 
 def apply_calib(config: CalibConfig, rig: CalibRig) -> tuple[dict[str, str], CalibReport]:
-    """校正付き丸め 1 本を DiT へ in-place で当てる（stage 逐次の駆動は core 側）。"""
+    """Apply one calibrated rounding to the DiT in place (the stage-by-stage driving is on the
+    core side)."""
     report = calibrate_stages(rig.stages, rig.batches, method=config.method, spec=config.grid)
     assert_calib_covers_scan(report, rig.scan, config.name)
-    summary = f"{config.name} へ校正付きで丸めた — {report.describe()}"
+    summary = f"rounded to {config.name} with calibration — {report.describe()}"
     print(f"[fake-quant] {ex.TARGET_DIT}: {summary}", flush=True)
     return {ex.TARGET_DIT: summary}, report
 
@@ -1238,88 +1363,98 @@ def apply_calib(config: CalibConfig, rig: CalibRig) -> tuple[dict[str, str], Cal
 def assert_calib_covers_scan(
     report: CalibReport, scan: Mapping[str, torch.Tensor], name: str
 ) -> None:
-    """校正が丸めた層が stage の走査と**過不足なく**一致することを見る。
+    """Check that the layers calibration rounded match the stage scan **exactly**.
 
-    MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても
-    表には行が残り、しかも丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。
+    MUST: fail loudly. Even if a change in the stage spelling or the target types leaves part of
+    a block out of calibration, the table keeps its rows, and the missed rounding makes quality
+    come out **better** (passing through cannot be read off the numbers).
     """
     rounded = {layer.fqn for layer in report.layers}
     missing = sorted(set(scan) - rounded)
     extra = sorted(rounded - set(scan))
     if missing or extra or report.modules != len(scan):
         raise SystemExit(
-            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"[{name}] calibration rounded {report.modules}, which does not match the"
+            f" {len(scan)} in the scan (missed {missing[:3]} / not in the scan {extra[:3]})"
         )
 
 
-# ---- 1 構成の実行 ------------------------------------------------------------
+# ---- running one configuration ----------------------------------------------------
 
 
 def golden_z(golden_dir: Path, case: str) -> torch.Tensor:
-    """full-loop golden の最終 z（`f32` 構成の恒真化を遮断する唯一の突合先）。"""
+    """The final z of the full-loop golden (the only comparison target that keeps the `f32`
+    configuration from being vacuous)."""
     path = golden_dir / f"{ip.CASE_PREFIX}{case}{ip.CASE_SUFFIX}"
     if not path.is_file():
         raise SystemExit(
-            f"full-loop golden が無い: {path}"
-            "（`uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref` で作る）"
+            f"no full-loop golden: {path}"
+            " (built with `uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref`)"
         )
     return load_file(str(path))["z"].to(torch.float32)
 
 
 def base_payload(out_dir: Path, case: str) -> dict[str, torch.Tensor]:
-    """基準構成（`f32`）の z と波形。"""
+    """The z and waveform of the baseline configuration (`f32`)."""
     path = out_dir / f"{BASE_CONFIG}.{case}{CASE_SUFFIX}"
     if not path.is_file():
         raise SystemExit(
-            f"基準構成の成果物が無い: {path}"
-            f"（先に `--config {BASE_CONFIG}` を回す — 比較の基準は f32）"
+            f"no outputs of the baseline configuration: {path}"
+            f" (run `--config {BASE_CONFIG}` first — the comparison baseline is f32)"
         )
     return load_file(str(path))
 
 
 def weight_only_path(out_dir: Path, case: str) -> Path:
-    """活性シムの比較相手（{@link WEIGHT_ONLY_BASE} — 同じ重み・活性は素）の成果物。
+    """The outputs of the activation shim's comparison partner ({@link WEIGHT_ONLY_BASE} — same
+    weights, plain activations).
 
-    存在検査だけを分けてあるのは、full-loop を回す**前**に確かめるため（回し切ってから
-    「比較相手が無い」で落ちると数十分ぶんの計算が捨てになる）。
+    The existence check is separate so that it can run **before** the full loop (failing with
+    "no comparison partner" after running it through would throw away tens of minutes of
+    compute).
     """
     path = out_dir / f"{WEIGHT_ONLY_BASE}.{case}{CASE_SUFFIX}"
     if not path.is_file():
         raise SystemExit(
-            f"活性シムの比較相手が無い: {path}"
-            f"（先に `--config {WEIGHT_ONLY_BASE}` を回す — 素通り検出は重みだけの構成との差）"
+            f"no comparison partner for the activation shim: {path}"
+            f" (run `--config {WEIGHT_ONLY_BASE}` first — pass-through detection is the difference"
+            " from the weight-only configuration)"
         )
     return path
 
 
 def weight_only_payload(out_dir: Path, case: str) -> dict[str, torch.Tensor]:
-    """{@link weight_only_path} の z と波形。"""
+    """The z and waveform of {@link weight_only_path}."""
     return load_file(str(weight_only_path(out_dir, case)))
 
 
 class LatentResult(NamedTuple):
-    """{@link latent_stage} の戻り。`act_quant_linears` は活性シムを掛けた `nn.Linear` の本数。"""
+    """The return value of {@link latent_stage}. `act_quant_linears` is the number of
+    `nn.Linear` the activation shim is attached to."""
 
     metas: dict[str, dict[str, Any]]
     latents: dict[str, torch.Tensor]
     reports: dict[str, str]
     act_quant_linears: int
-    #: 役割 → 配布グラフ側の w4 対象規模（w4 構成のみ・他は空）。
+    #: Role → the w4 target scale on the shipped graph side (w4 configurations only; empty
+    #: otherwise).
     scans: dict[str, RoleScan]
-    #: 校正付き構成の足場と丸めの計数（校正付き構成のみ・他は `None`）。
+    #: The scaffolding and rounding counts of a calibrated configuration (calibrated
+    #: configurations only; `None` otherwise).
     calib: tuple[CalibRig, CalibReport] | None = None
 
 
 def attach_dit_act_quant(
     recipe: Recipe, modules: Mapping[str, nn.Module]
 ) -> tuple[list[object], int]:
-    """w8a8 構成で DiT の `nn.Linear` 入力へ per-token i8 の fake-quant を掛ける。
+    """In the w8a8 configuration, apply a per-token i8 fake-quant to the inputs of the DiT's
+    `nn.Linear`.
 
-    MUST: **0 本は fail loudly** — 掛からないまま回すと `i8-all` と同じ数が `w8a8` の名前で
-    レポートに載り、しかも品質は「良い」側に出る（活性量子化は誤差を増やすので、素通りは
-    常に緑寄りの嘘になる）。掛ける先を DiT に限るのは配布形の席と揃えるため（`session` は
-    `dit` の Session にだけ降りる）。
+    MUST: **0 fails loudly** — running without the shim attached would put the same numbers as
+    `i8-all` into the report under the name `w8a8`, with quality on the "better" side
+    (activation quantization adds error, so a pass-through is always a lie leaning green). It is
+    limited to the DiT to match the distribution's preset (`session` reaches only the `dit`
+    Session).
     """
     if not recipe.act_quant:
         return [], 0
@@ -1327,9 +1462,9 @@ def attach_dit_act_quant(
     if attached == 0:
         act_quant.detach_act_quant(handles)
         raise SystemExit(
-            "活性量子化シムを掛けた nn.Linear が 0 本"
-            f"（`{ex.TARGET_DIT}` の Linear が適格条件 k % {act_quant.PACK_ALIGN} == 0 を"
-            "満たしていない、またはモジュール構成が変わった）"
+            "the activation-quantization shim is attached to 0 nn.Linear"
+            f" (the Linears of `{ex.TARGET_DIT}` do not meet the eligibility condition"
+            f" k % {act_quant.PACK_ALIGN} == 0, or the module structure changed)"
         )
     return handles, attached
 
@@ -1340,21 +1475,22 @@ def latent_stage(
     args: argparse.Namespace,
     base_frames: Mapping[str, int] | None,
 ) -> LatentResult:
-    """テキスト → latent（構成ぶんの丸めを当てて full-loop を回す）。"""
+    """Text → latent (apply the configuration's rounding and run the full loop)."""
     from tokenizers import Tokenizer
 
     source, modules, config, text_config, model_config = load_modules(
         args.model_dir, args.source_dir
     )
-    # MUST: 丸めは load の直後・golden の採取より前（`irodori.export.fake_quant` の順序 MUST）。
-    # 対象が空になるのは `i8-codec-only`（latent 側の役割を 1 つも含まない）だけで、そのときは
-    # 丸めそのものを呼ばない — `fake_quant` の「0 本は fail loudly」は正しい規律なので、
-    # ここで例外にせず**呼ばない**ことで満たす。
+    # MUST: rounding happens right after load and before the golden is taken (the ordering MUST of
+    # `irodori.export.fake_quant`). The targets are empty only for `i8-codec-only` (it includes no
+    # latent-side role), and then the rounding is not called at all — `fake_quant`'s "0 fails
+    # loudly" is the right discipline, so it is satisfied here by **not calling** rather than by
+    # making an exception.
     #
-    # 校正付き構成だけは順序が違う（丸めがグラフより後）— 校正入力は「素の f32 で回した参照
-    # ループ」から採るので、グラフを組んでその上で pristine の full-loop を 1 周してからで
-    # ないと丸められない。**丸めより前**という MUST は保たれている（このブロックまでは
-    # どの重みも 1 ビットも動いていない）。
+    # Only the calibrated configurations have a different order (rounding after the graphs) — the
+    # calibration input is taken from "the reference loop run in plain f32", so rounding is only
+    # possible after the graphs are built and one pristine full loop has run on them. The MUST
+    # **before rounding** is kept (up to this block no weight has moved by a single bit).
     scoped = role_modules(modules, recipe.roles)
     reports = (
         apply_weight_quant(recipe, scoped, args.kmeans_fit_stride)
@@ -1362,14 +1498,18 @@ def latent_stage(
         else {}
     )
     patch.apply_patches()
-    # 活性シムは重みの丸めの**後**（重みは実行前に決まり、活性は実行時に決まる — 両者は独立
-    # だが、報告の順序を「重み → 活性」で揃えると素通りの切り分けが 1 本の出力で済む）。
+    # The activation shim comes **after** the weight rounding (weights are fixed before execution,
+    # activations at execution time — the two are independent, but ordering the report as
+    # "weights → activations" lets a pass-through be isolated from a single output).
     handles, act_quant_linears = attach_dit_act_quant(recipe, modules)
     if act_quant_linears:
-        print(f"[{name}] 活性量子化シム: nn.Linear {act_quant_linears} 本（dit）", flush=True)
+        print(
+            f"[{name}] activation-quantization shim: {act_quant_linears} nn.Linear (dit)",
+            flush=True,
+        )
     graphs = build_graphs(modules, config, model_config)
-    # サイズ試算の計数は**配布グラフ**から採る（{@link graph_scans}）— ラッパは丸め済みの
-    # モジュールを抱えるだけなので、ここで数えても値には触れない。
+    # The size-estimate counts are taken from **the shipped graphs** ({@link graph_scans}) — the
+    # wrappers only hold the rounded modules, so counting here does not touch the values.
     scans = (
         graph_scans(role_graphs(graphs), recipe.roles, recipe.op_types)
         if recipe.method is not None
@@ -1383,8 +1523,9 @@ def latent_stage(
     }
     tokenizer = Tokenizer.from_file(str(args.model_dir / ex.TOKENIZER_FILE))
 
-    # グラフ一式を**既定引数で束ねる**のは、下の `del` が同名の局所を外すため（素の
-    # クロージャだと、消えた後に呼ばれたとき NameError になる形が残る）。
+    # The graph set is **bound through default arguments** because the `del` below removes the
+    # locals of the same name (a plain closure would leave the shape of a NameError when called
+    # after they are gone).
     def run_case(
         case: ip.PipelineCase,
         graphs: ip.HostGraphs = graphs,
@@ -1431,15 +1572,20 @@ def latent_stage(
 
 
 def w4_payload(recipe: Recipe, scans: Mapping[str, RoleScan], fit_stride: int) -> dict[str, Any]:
-    """w4 構成の対象規模・除外一覧・サイズ試算（JSON へそのまま載る形）。
+    """The target scale, exclusion list and size estimate of a w4 configuration (in the form that
+    goes into the JSON as is).
 
-    `tables` は表を張る成果物の数 = 対象を持つ役割数（`kmeans:shared` の表は役割ごとに
-    1 枚 — {@link W4_KMEANS_SHARED}）。他の 3 方式では式に効かない。**校正付き構成では
-    表の射程が層内**なので、代わりに対象の層数を渡す（{@link _calib_codebook_bits}）。
+    `tables` is the number of artifacts that carry a table = the number of roles with targets
+    (`kmeans:shared` has one table per role — {@link W4_KMEANS_SHARED}). It has no effect on the
+    formulas of the other 3 methods. **For calibrated configurations the table is scoped per
+    layer**, so the number of target layers is passed instead ({@link _calib_codebook_bits}).
     """
     spec: W4Method | CalibConfig | None = recipe.method or recipe.calib
     if spec is None:
-        raise SystemExit(f"w4 構成でないレシピ（weight={recipe.weight}）の試算を求められた")
+        raise SystemExit(
+            "asked for an estimate of a recipe that is not a w4 configuration"
+            f" (weight={recipe.weight})"
+        )
     counts = {role: scan.counts for role, scan in scans.items()}
     total = total_counts(list(counts.values()))
     tables = (
@@ -1452,8 +1598,8 @@ def w4_payload(recipe: Recipe, scans: Mapping[str, RoleScan], fit_stride: int) -
         "method": spec.name,
         "groupSize": W4_GROUP_SIZE,
         "opTypes": [cls.__name__ for cls in recipe.op_types],
-        # MUST: 部分標本の表と全量の表は別物になりうるので、使った事実を数値の横へ出す
-        # （`karume.quant_methods.fake_quant_kmeans` の MUST）。
+        # MUST: a subsampled table and a full table can differ, so the fact of using one goes next
+        # to the numbers (the MUST of `karume.quant_methods.fake_quant_kmeans`).
         "fitStride": fit_stride,
         "roles": {
             role: {"modules": item.modules, "channels": item.channels, "elements": item.elements}
@@ -1484,28 +1630,29 @@ def w4_payload(recipe: Recipe, scans: Mapping[str, RoleScan], fit_stride: int) -
 
 
 def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
-    """1 構成ぶんを走らせ、per-config の JSON を書いて返す。"""
+    """Run one configuration, write its per-config JSON and return it."""
     started = time.perf_counter()
     recipe = RECIPES[name]
     check_fit_stride(recipe, args.kmeans_fit_stride)
     base_frames = None
     goldens = None
     if name == BASE_CONFIG:
-        # MUST: 突合先の有無は**走らせる前**に確かめる（full-loop を回し切った後に
-        # 「golden が無い」で落ちると、数十分ぶんの計算が捨てになる）。
+        # MUST: the comparison target is checked **before running** (failing with "no golden"
+        # after running the full loop through would throw away tens of minutes of compute).
         goldens = {case.name: golden_z(args.golden_dir, case.name) for case in ip.PIPELINE_CASES}
     else:
         base_json = args.out / f"{BASE_CONFIG}.json"
         if not base_json.is_file():
             raise SystemExit(
-                f"基準構成の成果物が無い: {base_json}"
-                f"（先に `--config {BASE_CONFIG}` を回す — 比較の基準は f32）"
+                f"no outputs of the baseline configuration: {base_json}"
+                f" (run `--config {BASE_CONFIG}` first — the comparison baseline is f32)"
             )
         base_meta = json.loads(base_json.read_text(encoding="utf-8"))
         base_frames = {case: entry["S"] for case, entry in base_meta["cases"].items()}
     if recipe.act_quant:
-        # MUST: ここも**走らせる前**に確かめる（活性シムの素通り検出は重みだけの構成との差で
-        # しか出せないので、無ければこの構成を回しても答えが出ない）。
+        # MUST: this too is checked **before running** (pass-through detection of the activation
+        # shim can only come from the difference with the weight-only configuration, so without it
+        # running this configuration gives no answer).
         for case in ip.PIPELINE_CASES:
             weight_only_path(args.out, case.name)
 
@@ -1556,9 +1703,10 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
             base_z, base_audio = base["z"].to(torch.float32), base["audio"].to(torch.float32)
             if latent.shape != base_z.shape or audio.shape != base_audio.shape:
                 raise SystemExit(
-                    f"{case}: 基準と形が違う（z {tuple(latent.shape)} vs"
-                    f" {tuple(base_z.shape)} / 波形 {tuple(audio.shape)} vs"
-                    f" {tuple(base_audio.shape)}）— 基準を焼き直したなら全構成を回し直す"
+                    f"{case}: the shape differs from the baseline (z {tuple(latent.shape)} vs"
+                    f" {tuple(base_z.shape)} / waveform {tuple(audio.shape)} vs"
+                    f" {tuple(base_audio.shape)}) — if the baseline was rebaked, rerun every"
+                    " configuration"
                 )
             entry["vsBase"] = {
                 "zBitEqual": bool(torch.equal(latent, base_z)),
@@ -1571,16 +1719,17 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
                 "wavMaxAbsDiff": float((audio - base_audio).abs().max()),
             }
         if recipe.act_quant:
-            # 素通り検出の観測（評定は {@link run_gates} が持つ）— **重みが同じ構成との差**を
-            # 見るので、ここが 0 なら活性シムが 1 本も効いていない。
+            # Observation for pass-through detection (the verdict lives in {@link run_gates}) — it
+            # looks at **the difference from the configuration with the same weights**, so 0 here
+            # means not a single activation shim had an effect.
             weight_only = weight_only_payload(args.out, case)
             other_z = weight_only["z"].to(torch.float32)
             other_audio = weight_only["audio"].to(torch.float32)
             if latent.shape != other_z.shape or audio.shape != other_audio.shape:
                 raise SystemExit(
-                    f"{case}: {WEIGHT_ONLY_BASE} と形が違う（z {tuple(latent.shape)} vs"
-                    f" {tuple(other_z.shape)} / 波形 {tuple(audio.shape)} vs"
-                    f" {tuple(other_audio.shape)}）— 時間グリッドの固定が効いていない"
+                    f"{case}: the shape differs from {WEIGHT_ONLY_BASE} (z {tuple(latent.shape)}"
+                    f" vs {tuple(other_z.shape)} / waveform {tuple(audio.shape)} vs"
+                    f" {tuple(other_audio.shape)}) — fixing the time grid has no effect"
                 )
             entry["vsWeightOnly"] = {
                 "config": WEIGHT_ONLY_BASE,
@@ -1628,7 +1777,7 @@ def run_config(name: str, args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-# ---- 検証ゲート -------------------------------------------------------------
+# ---- verification gates ----------------------------------------------------------
 
 
 def run_gates(
@@ -1638,15 +1787,18 @@ def run_gates(
     entries: Mapping[str, Mapping[str, Any]],
     goldens: Mapping[str, torch.Tensor] | None,
 ) -> dict[str, Any]:
-    """恒真化と scope 漏れの検出器（赤は最後にまとめて上げる）。
+    """Detectors for vacuous checks and scope leaks (the reds are raised together at the end).
 
-    ① `f32` の z が full-loop golden と**バイト一致**（この台本の経路が本物と同じ計算である
-       ことの実証 — 外れたら測定値は全部意味を失う）
-    ② 各構成の z / 波形が**変わるべきところだけ変わる**（モジュール docstring の直交性の門）。
-       「変わること」だけを門にすると丸めの素通りしか捕まらず、「変わらないこと」だけを
-       門にすると scope 漏れしか捕まらない — 両方を期待値表から出す
-    ③ 活性シムを持つ構成は**重みだけの構成とも z が違う**（素通り検出）。基準との差だけでは
-       重みの丸めで説明が付いてしまい、活性シムが 1 本も効いていなくても緑になる
+    ① the `f32` z is **byte-identical** to the full-loop golden (proof that this script's path is
+       the same computation as the real one — if it fails, every measurement loses its meaning)
+    ② each configuration's z / waveform **changes only where it should** (the orthogonality
+       checks of the module docstring). Checking only "changes" catches only a rounding that
+       passes through, and checking only "does not change" catches only a scope leak — both come
+       from the expectation table
+    ③ a configuration with the activation shim **has a z different from the weight-only
+       configuration too** (pass-through detection). The difference from the baseline alone can
+       be explained by the weight rounding, and would be green even with not a single shim in
+       effect
     """
     gates: dict[str, Any] = {}
     failures: list[str] = []
@@ -1656,7 +1808,8 @@ def run_gates(
         }
         gates["z_bit_exact_vs_golden"] = {"cases": matched}
         failures += [
-            f"{case}: f32 の z が full-loop golden とバイト一致しない（経路の恒真化検査）"
+            f"{case}: the f32 z is not byte-identical to the full-loop golden (the check that the"
+            " path is not vacuous)"
             for case, ok in matched.items()
             if not ok
         ]
@@ -1670,8 +1823,9 @@ def run_gates(
         }
         expectations: dict[str, dict[str, bool]] = {}
         for case in observed:
-            # 期待は**ケース条件**で割る — 参照なしのケースでは speaker 経路が走らない
-            # （{@link REFERENCE_ONLY_ROLES}）ので、その分の役割を期待から外す。
+            # Expectations are split **by case condition** — in cases without a reference the
+            # speaker path does not run ({@link REFERENCE_ONLY_ROLES}), so those roles are taken
+            # out of the expectation.
             effective = set(recipe.roles) & LATENT_ROLES
             if not CASE_HAS_REFERENCE[case]:
                 effective -= REFERENCE_ONLY_ROLES
@@ -1686,13 +1840,15 @@ def run_gates(
             expect_wav = expectations[case]["wavChanged"]
             if seen["zChanged"] != expect_z:
                 failures.append(
-                    f"{case}: z が「{'変わる' if expect_z else '変わらない'}」期待に反した"
-                    f"（役割 {list(recipe.roles)} — 丸めの素通りか scope 漏れ）"
+                    f"{case}: z went against the expectation that it"
+                    f" {'changes' if expect_z else 'does not change'}"
+                    f" (roles {list(recipe.roles)} — a rounding passing through or a scope leak)"
                 )
             if seen["wavChanged"] != expect_wav:
                 failures.append(
-                    f"{case}: 波形が「{'変わる' if expect_wav else '変わらない'}」期待に反した"
-                    f"（役割 {list(recipe.roles)}）"
+                    f"{case}: the waveform went against the expectation that it"
+                    f" {'changes' if expect_wav else 'does not change'}"
+                    f" (roles {list(recipe.roles)})"
                 )
         if recipe.act_quant:
             moved = {
@@ -1700,8 +1856,9 @@ def run_gates(
             }
             gates["act_quant_changes_the_latent"] = {"versus": WEIGHT_ONLY_BASE, "cases": moved}
             failures += [
-                f"{case}: z が {WEIGHT_ONLY_BASE} とビット一致した（活性シムが素通りしている"
-                " — 重みだけの構成と同じ数を w8a8 の名前で測っている）"
+                f"{case}: z is bit-identical to {WEIGHT_ONLY_BASE} (the activation shim passes"
+                " through — the same numbers as the weight-only configuration are measured under"
+                " the name w8a8)"
                 for case, ok in moved.items()
                 if not ok
             ]
@@ -1711,17 +1868,20 @@ def run_gates(
     return gates
 
 
-# ---- レポート ---------------------------------------------------------------
+# ---- report ----------------------------------------------------------------------
 
 
 def collect(out_dir: Path) -> dict[str, dict[str, Any]]:
-    """`--out` に残っている per-config の JSON を構成順に集める。
+    """Collect the per-config JSON left in `--out`, in configuration order.
 
-    MUST: 直交性の門は**ここで評定し直す**（保存 JSON の `gates` を再掲しない）— 門の期待は
-    コードが正本で、測定後に期待側の誤りを直したとき、保存済みの評定が古い期待のまま
-    レポートへ蘇るため（実例: speaker のケース条件 — no-ref はゼロ短絡で不変が正しい）。
-    基準 `f32` の golden ビット一致だけはテンソル比較（測定時にしかできない）なので保存値を
-    使う。観測（`vsBase` / `vsWeightOnly` のビット等値）は測定の事実で、評定と違い保存してよい側。
+    MUST: the orthogonality checks are **re-evaluated here** (the saved JSON's `gates` are not
+    replayed) — the code is the source of truth for the checks' expectations, and when a mistake
+    on the expectation side is fixed after measuring, the saved verdicts would come back into the
+    report with the old expectations (a real case: the case condition of speaker — no-ref is
+    correctly unchanged because of the zero short-circuit). Only the golden bit identity of the
+    baseline `f32` is a tensor comparison (possible only at measurement time), so its saved value
+    is used. The observations (the bit equality of `vsBase` / `vsWeightOnly`) are facts of the
+    measurement and, unlike verdicts, may be saved.
     """
     found: dict[str, dict[str, Any]] = {}
     for name in RECIPES:
@@ -1735,8 +1895,8 @@ def collect(out_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def drift_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
-    """**最上段の表** — S が動いたか（混成表の裁定はこの 1 枚で決まる）。"""
-    header = ["config", "case", "predicted S", "基準 S", "S ドリフト", "forwards", "発話長 (s)"]
+    """**The top table** — did S move (the ruling on the mixed table rests on this one table)."""
+    header = ["config", "case", "predicted S", "base S", "S drift", "forwards", "utterance (s)"]
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     base = collected.get(BASE_CONFIG, {}).get("cases", {})
     for name, payload in collected.items():
@@ -1751,7 +1911,7 @@ def drift_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
                         case,
                         str(entry["predictedS"]),
                         "—" if reference is None else str(reference),
-                        "一致" if drift == "+0" else drift,
+                        "match" if drift == "+0" else drift,
                         str(entry["forwards"]),
                         f"{entry['predictedSeconds']:.2f}",
                     ]
@@ -1762,14 +1922,14 @@ def drift_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def quality_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
-    """品質（**基準と同じ時間グリッド上**での比較）。"""
-    header = ["config", "case", "latent relRMS", "latent max|Δ|", "SNR (dB)", "LSD (dB)", "秒"]
+    """Quality (a comparison **on the same time grid as the baseline**)."""
+    header = ["config", "case", "latent relRMS", "latent max|Δ|", "SNR (dB)", "LSD (dB)", "s"]
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     for name, payload in collected.items():
         for case, entry in payload["cases"].items():
             versus = entry.get("vsBase")
             if versus is None:
-                row = ["0（基準）", "0", "inf（基準）", "0（基準）"]
+                row = ["0 (base)", "0", "inf (base)", "0 (base)"]
             else:
                 snr = versus["wavSnrDb"]
                 row = [
@@ -1783,12 +1943,22 @@ def quality_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def size_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
-    """w4 構成のサイズ試算（**式による投影**・実測ではない）。
+    """Size estimates of the w4 configurations (**projections by formula**, not measurements).
 
-    品質だけ並べると表のコストが見えない（`kmeans:shared` は成果物ごとに 16×f32 の表が要る）
-    ので、同じレポートに式ごと載せる。
+    Listing quality alone hides the cost of the tables (`kmeans:shared` needs a 16×f32 table per
+    artifact), so the formulas go into the same report.
     """
-    header = ["config", "方式", "本数", "要素", "式", "bpw", "投影 MiB", "f32 MiB", "縮小率"]
+    header = [
+        "config",
+        "method",
+        "count",
+        "elements",
+        "formula",
+        "bpw",
+        "projected MiB",
+        "f32 MiB",
+        "ratio",
+    ]
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     for name, payload in collected.items():
         size = payload.get("w4", {}).get("size")
@@ -1815,9 +1985,11 @@ def size_table(collected: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def excluded_lines(collected: Mapping[str, Mapping[str, Any]]) -> list[str]:
-    """g32 非整列で対象から外した重みの一覧（構成ごと・**必ず出力へ載せる**）。
+    """The list of weights excluded from the targets as not aligned to g32 (per configuration;
+    **always written to the output**).
 
-    黙って外すと「全役割を丸めた」と読める表の裏で、割り切れない層だけ f32 のまま残る。
+    Excluding silently would leave only the non-divisible layers in f32 behind a table that reads
+    as "every role was rounded".
     """
     lines: list[str] = []
     for name, payload in collected.items():
@@ -1825,12 +1997,12 @@ def excluded_lines(collected: Mapping[str, Mapping[str, Any]]) -> list[str]:
         if excluded is None:
             continue
         if not excluded:
-            lines.append(f"- {name}: g32 非整列による除外なし")
+            lines.append(f"- {name}: no exclusions for g32 misalignment")
             continue
-        lines.append(f"- {name}: g32 非整列 {len(excluded)} 本を除外")
+        lines.append(f"- {name}: excluded {len(excluded)} not aligned to g32")
         lines += [
-            f"    - {item['role']} / {item['fqn']} 軸長 {item['axisLength']}"
-            f"（{item['elements']:,} 要素）"
+            f"    - {item['role']} / {item['fqn']} axis length {item['axisLength']}"
+            f" ({item['elements']:,} elements)"
             for item in excluded
         ]
     return lines
@@ -1843,27 +2015,35 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "torch": torch.__version__,
         "base": BASE_CONFIG,
         "method": {
-            "time_grid": "基準以外は f32 の S を外から固定（波形長を揃えて SNR を定義可能に"
-            "する）。構成自身の予測は predictedS",
+            "time_grid": "every configuration but the baseline fixes the f32 S from outside (lines"
+            " up the waveform lengths so SNR is defined). The configuration's own prediction is"
+            " predictedS",
             "roles": list(ROLES),
             "latent_roles": sorted(LATENT_ROLES),
-            "metrics": "SNR は波形の残差（位相ずれに弱い）/ LSD は対数振幅スペクトルの距離"
-            f"（n_fft={STFT_N_FFT} hop={STFT_HOP}・床 −100dB・位相ずれに鈍い）。両方で読む",
-            "trim": "末尾トリムと秒切り出しは通さない（構成間で長さを揃えるため）",
-            "act_quant": f"w8a8 は DiT の nn.Linear 入力へ per-token i8 の fake-quant を掛ける"
-            f"（karume.act_quant — ランタイム quantize-rows.ts の鏡像）。素通り検出は"
-            f" {WEIGHT_ONLY_BASE} との z ビット等値",
-            "w4": f"方式は g={W4_GROUP_SIZE} 固定で比較（ADR 0069 追記 5 の 3）。対象 op は"
-            "構成ごと（正本は各 config JSON の w4.opTypes — 全役割形 = i8 と同じ 5 種 /"
-            " i4-linear = Linear のみ）。i4 の実行経路は linear 限定（決定 5）なので全役割形は"
-            "出荷できる形ではなく品質の上限を測る側、i4-linear が今日の配布対応形。サイズ列は"
-            "**式による投影**で、計数は配布グラフに載る重みだけ",
-            "calib": f"校正付き構成（{' / '.join(CALIB_NAMES)}）は core の `karume.quant_calib`"
-            f" で DiT block 列の linear（{CALIB_TARGET}）だけを stage 逐次に丸める。校正入力は"
-            "参照ループ（f32・CFG 込み）の step 横断で、step ごとに先頭 block への入力を"
-            "捕まえたもの（使った step 数は各 config JSON の calib.steps）。**対象集合は"
-            " i4-linear と違う**ので、bpw は同じでも品質の行は直接は比較できない",
-            "verdict": "最終裁定は聴感（ユーザー）— WAV は同一テキスト・同一 seed で並ぶ",
+            "metrics": "SNR is the waveform residual (sensitive to phase shifts) / LSD is the"
+            f" log-magnitude spectral distance (n_fft={STFT_N_FFT} hop={STFT_HOP}, floor −100 dB,"
+            " insensitive to phase shifts). Read both",
+            "trim": "no tail trim or cut by seconds (to keep the lengths equal across"
+            " configurations)",
+            "act_quant": "w8a8 applies a per-token i8 fake-quant to the inputs of the DiT's"
+            " nn.Linear (karume.act_quant — the mirror of the runtime's quantize-rows.ts)."
+            f" Pass-through detection is z bit equality with {WEIGHT_ONLY_BASE}",
+            "w4": f"methods are compared with g={W4_GROUP_SIZE} fixed (item 3 of ADR 0069 addendum"
+            " 5). The target ops are per configuration (the source of truth is w4.opTypes in each"
+            " config JSON — the every-role form = the same 5 kinds as i8 / i4-linear = Linear"
+            " only). The i4 execution path is linear-only (decision 5), so the every-role form is"
+            " not shippable and measures the upper bound of quality; i4-linear is today's"
+            " distribution-compatible form. The size columns are **projections by formula**, and"
+            " the counts cover only the weights in the shipped graphs",
+            "calib": f"the calibrated configurations ({' / '.join(CALIB_NAMES)}) round only the"
+            f" linears of the DiT block sequence ({CALIB_TARGET}) stage by stage with the core's"
+            " `karume.quant_calib`. The calibration input spans the steps of the reference loop"
+            " (f32, CFG included), capturing the input to the first block at each step (the"
+            " number of steps used is calib.steps in each config JSON). **The target set differs"
+            " from i4-linear**, so even at the same bpw the quality rows are not directly"
+            " comparable",
+            "verdict": "the final ruling is by ear (the user) — the WAVs line up with the same"
+            " text and the same seed",
         },
         "configs": dict(collected),
         "failures": {
@@ -1874,24 +2054,26 @@ def build_report(collected: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-# ---- 対象規模の下見（`--scan`）----------------------------------------------
+# ---- previewing the target scale (`--scan`) -----------------------------------------
 
-#: 下見で並べる対象 op 集合。`linear` は i4 の実行経路がそのまま受けられる形（ADR 0069
-#: 決定 5）、`all` は測定用に広げた {@link W4_OP_TYPES}。**linear 限定形は品質を測らない**
-#: — 数えれば conv 主体かどうかが分かり、conv 主体なら linear だけ丸めても配布サイズが
-#: 動かないので、full-loop を数十分回す価値が無い（回すかどうかはこの表で決める）。
+#: The target op sets the preview lists. `linear` is the form the i4 execution path can take as is
+#: (ADR 0069 decision 5), `all` is {@link W4_OP_TYPES} widened for measurement. **The linear-only
+#: form does not measure quality** — counting tells whether the model is conv-dominated, and if
+#: it is, rounding only the linears does not move the distribution size, so running the full
+#: loop for tens of minutes is not worth it (this table decides whether to run it).
 SCAN_OP_SETS: Mapping[str, tuple[type[nn.Module], ...]] = MappingProxyType(
     {"linear": (nn.Linear,), "all": W4_OP_TYPES}
 )
 
 SCAN_FILE = "w4-scan.json"
 
-#: 下見で試算を並べる方式（構成表の 4 種と同じ順・同じ実体）。
+#: The methods whose estimates the preview lists (the same order and the same objects as the 4
+#: in the configuration table).
 SCAN_METHODS: tuple[W4Method, ...] = (W4_RTN, W4_NF4, W4_MXFP4, W4_KMEANS_SHARED)
 
 
 def scan_graphs(args: argparse.Namespace) -> dict[str, nn.Module]:
-    """配布グラフ 7 本（6 役割 + コーデックの decode 経路）を**丸めずに**組む。"""
+    """Build the 7 shipped graphs (6 roles + the codec's decode path) **without rounding**."""
     source, modules, config, _text_config, model_config = load_modules(
         args.model_dir, args.source_dir
     )
@@ -1903,7 +2085,8 @@ def scan_graphs(args: argparse.Namespace) -> dict[str, nn.Module]:
 
 
 def scan_report(args: argparse.Namespace) -> dict[str, Any]:
-    """役割 × op 集合の対象規模とサイズ試算（full-loop を 1 回も回さない）。"""
+    """The target scale and size estimates of role × op set (without running the full loop even
+    once)."""
     graphs = scan_graphs(args)
     op_sets: dict[str, Any] = {}
     for label, op_types in SCAN_OP_SETS.items():
@@ -1955,18 +2138,19 @@ def scan_report(args: argparse.Namespace) -> dict[str, Any]:
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "script": "tools/export-recipes/irodori/measure_quant.py --scan",
         "groupSize": W4_GROUP_SIZE,
-        "note": "計数は配布グラフに載る重みだけ（丸める木は役割モジュール = i8 と同じ集合）。"
-        "サイズは式による投影で、実測ではない",
+        "note": "the counts cover only the weights in the shipped graphs (the rounded tree is the"
+        " role modules = the same set as i8). The sizes are projections by formula, not"
+        " measurements",
         "opSets": op_sets,
     }
 
 
 def scan_scale_table(payload: Mapping[str, Any]) -> str:
-    """役割 × op 集合の対象規模（**本数・チャネル・要素**）。"""
-    header = ["op 集合", "役割", "本数", "チャネル", "要素", "f32 MiB"]
+    """The target scale of role × op set (**count, channels, elements**)."""
+    header = ["op set", "role", "count", "channels", "elements", "f32 MiB"]
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     for label, entry in payload["opSets"].items():
-        rows = [*entry["roles"].items(), ("合計", entry["total"])]
+        rows = [*entry["roles"].items(), ("total", entry["total"])]
         lines += [
             "| "
             + " | ".join(
@@ -1986,8 +2170,8 @@ def scan_scale_table(payload: Mapping[str, Any]) -> str:
 
 
 def scan_size_table(payload: Mapping[str, Any]) -> str:
-    """op 集合 × 方式のサイズ試算（**式による投影**・実測ではない）。"""
-    header = ["op 集合", "方式", "式", "bpw", "投影 MiB", "f32 MiB", "縮小率"]
+    """Size estimates of op set × method (**projections by formula**, not measurements)."""
+    header = ["op set", "method", "formula", "bpw", "projected MiB", "f32 MiB", "ratio"]
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     for label, entry in payload["opSets"].items():
         lines += [
@@ -2010,36 +2194,36 @@ def scan_size_table(payload: Mapping[str, Any]) -> str:
 
 
 def scan_excluded_lines(payload: Mapping[str, Any]) -> list[str]:
-    """g32 非整列で対象から外れる重みの一覧（op 集合ごと）。"""
+    """The list of weights excluded from the targets as not aligned to g32 (per op set)."""
     lines: list[str] = []
     for label, entry in payload["opSets"].items():
         if not entry["excluded"]:
-            lines.append(f"- {label}: g32 非整列による除外なし")
+            lines.append(f"- {label}: no exclusions for g32 misalignment")
             continue
-        lines.append(f"- {label}: g32 非整列 {len(entry['excluded'])} 本")
+        lines.append(f"- {label}: {len(entry['excluded'])} not aligned to g32")
         lines += [
-            f"    - {item['role']} / {item['fqn']} 軸長 {item['axisLength']}"
-            f"（{item['elements']:,} 要素）"
+            f"    - {item['role']} / {item['fqn']} axis length {item['axisLength']}"
+            f" ({item['elements']:,} elements)"
             for item in entry["excluded"]
         ]
     return lines
 
 
 def run_scan(args: argparse.Namespace) -> None:
-    """{@link scan_report} を走らせて JSON を書き、markdown 表を stdout へ出す。"""
+    """Run {@link scan_report}, write the JSON and print the markdown tables to stdout."""
     payload = scan_report(args)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / SCAN_FILE).write_text(
         json.dumps(payload, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print()
-    print("w4 対象規模（配布グラフに載る重みだけ・丸めていない）:")
+    print("w4 target scale (only the weights in the shipped graphs, unrounded):")
     print(scan_scale_table(payload))
     print()
-    print("g32 非整列の除外:")
+    print("exclusions for g32 misalignment:")
     print("\n".join(scan_excluded_lines(payload)))
     print()
-    print("サイズ試算（式による投影・実測ではない）:")
+    print("size estimates (projections by formula, not measurements):")
     print(scan_size_table(payload))
     print()
     print(f"scan → {args.out / SCAN_FILE}")
@@ -2057,33 +2241,35 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--config",
         choices=tuple(RECIPES),
         default=None,
-        help="走らせる構成（1 実行 = 1 構成）。省略すると実測はせず、"
-        f"--out に残っている成果物から {REPORT_FILE} と表を組み直すだけ",
+        help="the configuration to run (one run = one configuration). When omitted nothing is"
+        f" measured; {REPORT_FILE} and the tables are only rebuilt from the outputs left in --out",
     )
     parser.add_argument(
         "--scan",
         action="store_true",
-        help="w4 の対象規模とサイズ試算だけを出して終わる（full-loop は回さない）",
+        help="print only the w4 target scale and size estimates and exit (no full loop)",
     )
     parser.add_argument(
         "--calib-steps",
         type=int,
         default=ip.NUM_STEPS,
-        help=f"校正付き構成が 1 ケースあたり使う step 数（既定 = 参照ループ全 {ip.NUM_STEPS}"
-        " step）。捕まえ切った時点で参照ループを畳むので、縮小 smoke ではここを下げる。"
-        "使った値は出力へ載る",
+        help="steps per case used by the calibrated configurations (default = all"
+        f" {ip.NUM_STEPS} steps of the reference loop). The reference loop is wound down once they"
+        " are captured, so lower this for a reduced smoke run. The value used is recorded in the"
+        " output",
     )
     parser.add_argument(
         "--kmeans-fit-stride",
         type=int,
         default=1,
-        help="kmeans:shared の**表の fit だけ**を等間隔部分標本にする（適用は常に全量）。"
-        "dit 役割の全量 fit は f64 の作業領域まで含めて 20GB 超になるので、"
-        "kmeans-shared-all は実メモリに合わせてここを上げる。使った値は出力へ載る",
+        help="use an evenly spaced subsample for **only the table fit** of kmeans:shared"
+        " (application is always to everything). A full fit of the dit role exceeds 20 GB"
+        " including the f64 work area, so raise this for kmeans-shared-all to fit the real memory."
+        " The value used is recorded in the output",
     )
     args = parser.parse_args(argv)
     if not 1 <= args.calib_steps <= ip.NUM_STEPS:
-        parser.error(f"--calib-steps は 1〜{ip.NUM_STEPS}（参照ループの step 数）")
+        parser.error(f"--calib-steps must be 1 to {ip.NUM_STEPS} (the reference loop's step count)")
 
     if args.scan:
         run_scan(args)
@@ -2095,33 +2281,33 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     collected = collect(args.out)
     if not collected:
-        raise SystemExit(f"{args.out} に構成の成果物が 1 つも無い（--config で走らせる）")
+        raise SystemExit(f"{args.out} has no configuration outputs at all (run with --config)")
     report = build_report(collected)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / REPORT_FILE).write_text(
         json.dumps(report, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print()
-    print("S ドリフト（混成表の裁定はこの表）:")
+    print("S drift (the mixed-table ruling rests on this table):")
     print(drift_table(collected))
     print()
-    print("品質（基準と同じ時間グリッド上）:")
+    print("quality (on the same time grid as the baseline):")
     print(quality_table(collected))
     exclusions = excluded_lines(collected)
     if exclusions:
         print()
-        print("w4 サイズ試算（式による投影・実測ではない）:")
+        print("w4 size estimates (projections by formula, not measurements):")
         print(size_table(collected))
         print()
-        print("g32 非整列の除外:")
+        print("exclusions for g32 misalignment:")
         print("\n".join(exclusions))
     print()
     print(f"report → {args.out / REPORT_FILE}")
     if report["failures"]:
         raise AssertionError(
-            "検証ゲートが赤: "
+            "verification gates are red: "
             + " / ".join(
-                f"{name}: {'・'.join(items)}" for name, items in report["failures"].items()
+                f"{name}: {'; '.join(items)}" for name, items in report["failures"].items()
             )
         )
     print("gates: all green")

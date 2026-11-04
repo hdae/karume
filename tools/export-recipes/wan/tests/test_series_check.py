@@ -1,19 +1,26 @@
-"""`wan/series_check.py`（書き直した成果物を既存の系列と比べる CLI — ADR 0121 段 4）の約束事。
+"""The contract of `wan/series_check.py` (the CLI that compares rewritten outputs with an existing
+series — ADR 0121 step 4).
 
-門なので守るのは「違うのに一致と言わない」こと:
+Because it is a check, what it guards is never saying "match" when the two differ:
 
-- 同じ系列は一致（終了コード 0）。safetensors の `__metadata__` のキー順だけの違いは一致
-  （safetensors 0.8.0 はキー順がプロセスごとに変わる — ADR 0118 追記）
-- テンソルの 1 ビット・dtype・形・名前の集合・メタの値、krm 風のバイナリの 1 バイトの違いは
-  食い違いとして名指す（-0.0 と 0.0・payload の違う NaN も — 値の比較なら等しくなる組）
-- どちらかの側に無い項目・必須ディレクトリの中の余分なファイル・リンク・FIFO・種類の違い・
-  自分自身との比較・ファイルを 1 つも比べない必須ディレクトリも食い違い（skip しない）
-- データ域の隙間・重なり・重複したキー・知らない dtype・収まらないヘッダ長は読めない
-  safetensors として食い違い（テンソルの外のバイトを見落とさない）
-- `--require` 無し・根の外を指す名前・重複・入れ子・NUL・ディレクトリでない根は引数の誤り（2）、
-  読めないファイルは 3（食い違いの 1 と分ける）
+- The same series matches (exit code 0). A difference only in the key order of a safetensors
+  `__metadata__` matches (in safetensors 0.8.0 the key order changes from process to process — ADR
+  0118 addendum)
+- One bit of a tensor, a dtype, a shape, the set of names, a metadata value, or one byte of a
+  krm-like binary is named as a mismatch (-0.0 vs 0.0 and NaNs with different payloads too — pairs
+  that a value comparison would call equal)
+- An item missing on either side, an extra file inside a required directory, a link, a FIFO, a kind
+  difference, a self-comparison and a required directory with no file to compare are mismatches
+  too (not skipped)
+- A gap or an overlap in the data area, duplicate keys, an unknown dtype or a header length that
+  does not fit make the file unreadable as safetensors, which is a mismatch (bytes outside the
+  tensors are not missed)
+- No `--require`, a name pointing outside the root, a duplicate, nesting, NUL and a root that is
+  not a directory are argument errors (2), and an unreadable file is 3 (kept apart from the 1 of a
+  mismatch)
 
-小さな合成ファイルだけで回す（実物の照合のコマンドは `wan/README.md`）。
+Runs only on small synthetic files (the commands for checking the real outputs are in
+`wan/README.md`).
 """
 
 from __future__ import annotations
@@ -31,7 +38,8 @@ from safetensors.numpy import save_file
 
 from wan import series_check
 
-#: 合成の系列の項目（krm の part 風のディレクトリ 1 つ + 系列の根の safetensors 1 本）。
+#: The items of the synthetic series (one directory like a krm part + one safetensors file at the
+#: root of the series).
 GRAPH = "graph"
 FIXTURE = "fixture.safetensors"
 
@@ -45,7 +53,8 @@ def _write_safetensors(
     tensors: dict[str, tuple[str, list[int], bytes]],
     metadata: dict[str, str] | None = None,
 ) -> Path:
-    """safetensors を手で書く（メタのキー順・テンソルの生バイトを指定どおりに置く）。"""
+    """Write a safetensors file by hand (the metadata key order and the raw tensor bytes are placed
+    exactly as given)."""
     header: dict[str, Any] = {} if metadata is None else {"__metadata__": metadata}
     data = b""
     for name, (dtype, shape, raw) in tensors.items():
@@ -59,7 +68,7 @@ def _write_safetensors(
 
 
 def _write_raw_safetensors(path: Path, header: str, data: bytes) -> Path:
-    """ヘッダの JSON を文字列のまま置く（重複したキー・壊れた data_offsets を作るため）。"""
+    """Write the header JSON as a raw string (to produce duplicate keys and broken data_offsets)."""
     encoded = header.encode()
     encoded += b" " * (-len(encoded) % 8)
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data)
@@ -67,7 +76,7 @@ def _write_raw_safetensors(path: Path, header: str, data: bytes) -> Path:
 
 
 def _series(root: Path) -> Path:
-    """合成の系列（容器の part 2 つ + safetensors 本体が書いたフィクスチャ）。"""
+    """A synthetic series (two container parts + a fixture written by safetensors itself)."""
     graph = root / GRAPH
     graph.mkdir(parents=True)
     (graph / "model-00001-of-00002.krm").write_bytes(b"KRM2" + bytes(range(64)))
@@ -85,7 +94,7 @@ def _series(root: Path) -> Path:
 
 @pytest.fixture
 def pair(tmp_path: Path) -> tuple[Path, Path]:
-    """同じ中身を別のファイルとして持つ（書いた側, 既存）の組。"""
+    """A (written side, existing) pair holding the same contents as separate files."""
     existing = _series(tmp_path / "existing")
     written = tmp_path / "written"
     shutil.copytree(existing, written)
@@ -174,7 +183,7 @@ class TestTensorDifferences:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert mismatch["reason"] == "値のビットが違う"
+        assert mismatch["reason"] == "value bits differ"
         assert mismatch["tensor"] == "frames"
         assert mismatch["first_differing_byte_in_tensor"] == 21
         assert mismatch["first_differing_element"] == 5
@@ -187,8 +196,9 @@ class TestTensorDifferences:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # 8 バイトずつ読ませる。先頭の chunk は同じ・要素 2 は 3 バイト・要素 6 は後の chunk で
-        # 2 バイト違う（バイト数で数えると 5・chunk 内の位置だけなら先頭は 1）。
+        # Read 8 bytes at a time. The first chunk is the same; element 2 differs in 3 bytes and
+        # element 6, in a later chunk, in 2 bytes (5 when counted in bytes; the first position
+        # would be 1 if only the position within the chunk were counted).
         monkeypatch.setattr(series_check, "CHUNK_BYTES", 8)
         base = _raw("float32", [float(i) for i in range(8)])
         changed = bytearray(base)
@@ -216,7 +226,7 @@ class TestTensorDifferences:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert (mismatch["reason"], mismatch["tensor"]) == ("dtype が違う", "frames")
+        assert (mismatch["reason"], mismatch["tensor"]) == ("dtype differs", "frames")
         assert (mismatch["written"], mismatch["existing"]) == ("I32", "F32")
 
     def test_a_different_shape_mismatches_even_with_equal_bytes(
@@ -229,7 +239,7 @@ class TestTensorDifferences:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert (mismatch["reason"], mismatch["tensor"]) == ("形が違う", "frames")
+        assert (mismatch["reason"], mismatch["tensor"]) == ("shape differs", "frames")
         assert (mismatch["written"], mismatch["existing"]) == ([3, 4], [4, 3])
 
     def test_tensor_name_set_differences_are_named_both_ways(
@@ -244,15 +254,15 @@ class TestTensorDifferences:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         assert [(entry["reason"], entry["tensor"]) for entry in summary["mismatches"]] == [
-            ("テンソルが既存に無い", "extra"),
-            ("テンソルが書いた側に無い", "frames_full"),
+            ("tensor missing on the existing side", "extra"),
+            ("tensor missing on the written side", "frames_full"),
         ]
 
     @pytest.mark.parametrize(
         ("written_bits", "existing_bits"),
         [
-            pytest.param(0x80000000, 0x00000000, id="-0.0と0.0"),
-            pytest.param(0x7FC00001, 0x7FC00000, id="payloadの違うNaN"),
+            pytest.param(0x80000000, 0x00000000, id="-0.0 vs 0.0"),
+            pytest.param(0x7FC00001, 0x7FC00000, id="NaN with a different payload"),
         ],
     )
     def test_values_equal_by_comparison_still_mismatch_by_bits(
@@ -286,7 +296,7 @@ class TestTensorDifferences:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert mismatch["reason"].startswith("書いた側が safetensors として読めない")
+        assert mismatch["reason"].startswith("written side is not readable as safetensors")
 
 
 def _entry(dtype: str, shape: list[int], begin: int, end: int) -> str:
@@ -294,7 +304,8 @@ def _entry(dtype: str, shape: list[int], begin: int, end: int) -> str:
 
 
 class TestUnreadableSafetensors:
-    """既存は正しいファイル・書いた側だけ取り決めから外れる（検査を外すと中身は一致してしまう組）。"""
+    """The existing side is a valid file and only the written side breaks the format (pairs whose
+    contents would match if the checks were removed)."""
 
     DATA = bytes(range(12))
 
@@ -305,29 +316,29 @@ class TestUnreadableSafetensors:
                 f'{{"a": {_entry("F32", [2], 0, 8)}, "b": {_entry("F32", [2], 16, 24)}}}',
                 DATA[:8] + b"\xee" * 8 + DATA[4:12],
                 {"a": DATA[:8], "b": DATA[4:12]},
-                "隙間か重なり",
-                id="データ域の隙間",
+                "gap or overlap",
+                id="gap in the data area",
             ),
             pytest.param(
                 f'{{"a": {_entry("F32", [2], 0, 8)}, "b": {_entry("F32", [2], 4, 12)}}}',
                 DATA,
                 {"a": DATA[:8], "b": DATA[4:12]},
-                "隙間か重なり",
-                id="データ域の重なり",
+                "gap or overlap",
+                id="overlap in the data area",
             ),
             pytest.param(
                 f'{{"a": {_entry("F32", [1], 0, 4)}, "a": {_entry("F32", [1], 0, 4)}}}',
                 DATA[:4],
                 {"a": DATA[:4]},
-                "重複したキー",
-                id="重複したキー",
+                "duplicate keys",
+                id="duplicate keys",
             ),
             pytest.param(
                 f'{{"a": {_entry("F4", [8], 0, 4)}}}',
                 DATA[:4],
                 {"a": DATA[:4]},
-                "知らない",
-                id="知らないdtype",
+                "unknown",
+                id="unknown dtype",
             ),
         ],
     )
@@ -351,7 +362,7 @@ class TestUnreadableSafetensors:
         code, summary = _run(capsys, written_root, existing_root, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert mismatch["reason"].startswith("書いた側が safetensors として読めない")
+        assert mismatch["reason"].startswith("written side is not readable as safetensors")
         assert phrase in mismatch["reason"]
 
     def test_a_header_length_beyond_the_file_is_unreadable(
@@ -364,7 +375,7 @@ class TestUnreadableSafetensors:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert "収まらない" in mismatch["reason"]
+        assert "does not fit" in mismatch["reason"]
 
 
 class TestMetadataDifferences:
@@ -382,7 +393,7 @@ class TestMetadataDifferences:
         code, summary = _run(capsys, written, existing, FIXTURE)
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert (mismatch["reason"], mismatch["key"]) == ("メタの値が違う", "tile")
+        assert (mismatch["reason"], mismatch["key"]) == ("metadata value differs", "tile")
         assert (mismatch["written"], mismatch["existing"]) == ("32", "24")
 
     @pytest.mark.parametrize(
@@ -391,14 +402,14 @@ class TestMetadataDifferences:
             pytest.param(
                 {"seed": "1", "tile": "32"},
                 {"seed": "1"},
-                ("メタのキーが既存に無い", "tile", "written", "32"),
-                id="書いた側だけのキー",
+                ("metadata key missing on the existing side", "tile", "written", "32"),
+                id="key only on the written side",
             ),
             pytest.param(
                 {"seed": "1"},
                 {"seed": "1", "tile": "32"},
-                ("メタのキーが書いた側に無い", "tile", "existing", "32"),
-                id="既存だけのキー",
+                ("metadata key missing on the written side", "tile", "existing", "32"),
+                id="key only on the existing side",
             ),
         ],
     )
@@ -427,8 +438,12 @@ class TestMetadataDifferences:
     @pytest.mark.parametrize(
         ("written_metadata", "existing_metadata", "reason"),
         [
-            pytest.param(None, {}, "__metadata__ が書いた側に無い", id="書いた側に無い"),
-            pytest.param({}, None, "__metadata__ が既存に無い", id="既存に無い"),
+            pytest.param(
+                None, {}, "__metadata__ missing on the written side", id="missing on written"
+            ),
+            pytest.param(
+                {}, None, "__metadata__ missing on the existing side", id="missing on existing"
+            ),
         ],
     )
     def test_absent_metadata_is_not_the_same_as_an_empty_one(
@@ -463,12 +478,13 @@ class TestBinaryDifferences:
         part.write_bytes(bytes(data))
         code, summary = _run(capsys, written, existing, GRAPH)
         assert code == 1
-        assert _reasons(summary) == [("graph/model-00002-of-00002.krm", "sha256 が違う")]
+        assert _reasons(summary) == [("graph/model-00002-of-00002.krm", "sha256 differs")]
 
 
 class TestPresence:
     @pytest.mark.parametrize(
-        ("side", "reason"), [("written", "書いた側に無い"), ("existing", "既存に無い")]
+        ("side", "reason"),
+        [("written", "missing on the written side"), ("existing", "missing on the existing side")],
     )
     def test_an_item_missing_on_either_side_mismatches(
         self,
@@ -492,8 +508,8 @@ class TestPresence:
         code, summary = _run(capsys, written, existing, GRAPH)
         assert code == 1
         assert _reasons(summary) == [
-            ("graph/sub", "既存に無い"),
-            ("graph/sub/extra.krm", "既存に無い"),
+            ("graph/sub", "missing on the existing side"),
+            ("graph/sub/extra.krm", "missing on the existing side"),
         ]
 
     def test_a_symlink_is_not_followed_and_mismatches(
@@ -506,14 +522,16 @@ class TestPresence:
         code, summary = _run(capsys, written, existing, GRAPH)
         assert code == 1
         assert _reasons(summary) == [
-            ("graph/model-00001-of-00002.krm", "書いた側がシンボリックリンク（辿らない）")
+            ("graph/model-00001-of-00002.krm", "written side is a symbolic link (not followed)")
         ]
 
     @pytest.mark.parametrize(
         ("link", "required"),
         [
-            pytest.param(FIXTURE, FIXTURE, id="項目そのもの"),
-            pytest.param(GRAPH, f"{GRAPH}/model-00001-of-00002.krm", id="途中の成分"),
+            pytest.param(FIXTURE, FIXTURE, id="the item itself"),
+            pytest.param(
+                GRAPH, f"{GRAPH}/model-00001-of-00002.krm", id="an intermediate component"
+            ),
         ],
     )
     def test_a_symlink_in_the_required_path_is_not_followed(
@@ -524,7 +542,8 @@ class TestPresence:
         link: str,
         required: str,
     ) -> None:
-        # リンク先は既存とは別の実体の同じ中身 — 辿れば一致になってしまう組。
+        # The link target is a different file from the existing side with the same contents — a
+        # pair that would match if the link were followed.
         written, existing = pair
         target = tmp_path / "elsewhere" / link
         target.parent.mkdir()
@@ -537,13 +556,13 @@ class TestPresence:
         (written / link).symlink_to(target)
         code, summary = _run(capsys, written, existing, required)
         assert code == 1
-        assert _reasons(summary) == [(link, "書いた側がシンボリックリンク（辿らない）")]
+        assert _reasons(summary) == [(link, "written side is a symbolic link (not followed)")]
 
     @pytest.mark.parametrize(
         "path",
         [
-            pytest.param(FIXTURE, id="項目"),
-            pytest.param(f"{GRAPH}/model-00001-of-00002.krm", id="ディレクトリの中"),
+            pytest.param(FIXTURE, id="the item"),
+            pytest.param(f"{GRAPH}/model-00001-of-00002.krm", id="inside a directory"),
         ],
     )
     def test_a_directory_where_the_other_side_has_a_file_mismatches(
@@ -555,7 +574,7 @@ class TestPresence:
         code, summary = _run(capsys, written, existing, path.split("/")[0])
         assert code == 1
         [mismatch] = summary["mismatches"]
-        assert (mismatch["path"], mismatch["reason"]) == (path, "種類が違う")
+        assert (mismatch["path"], mismatch["reason"]) == (path, "kind differs")
         assert (mismatch["written"], mismatch["existing"]) == ("dir", "file")
 
     def test_a_fifo_on_both_sides_is_not_compared_and_mismatches(
@@ -567,8 +586,8 @@ class TestPresence:
         code, summary = _run(capsys, written, existing, GRAPH)
         assert code == 1
         assert _reasons(summary) == [
-            ("graph/pipe", "書いた側が通常ファイルでもディレクトリでもない"),
-            ("graph/pipe", "既存が通常ファイルでもディレクトリでもない"),
+            ("graph/pipe", "written side is neither a regular file nor a directory"),
+            ("graph/pipe", "existing side is neither a regular file nor a directory"),
         ]
 
     def test_a_required_directory_without_any_file_mismatches(
@@ -579,7 +598,7 @@ class TestPresence:
             (root / "empty" / "sub").mkdir(parents=True)
         code, summary = _run(capsys, written, existing, "empty")
         assert code == 1
-        assert _reasons(summary) == [("empty", "必須ディレクトリに比べるファイルが無い")]
+        assert _reasons(summary) == [("empty", "required directory has no file to compare")]
         assert summary["items"][0]["files"] == 0
 
     def test_the_same_root_on_both_sides_mismatches_as_a_self_comparison(
@@ -612,8 +631,8 @@ class TestArguments:
     @pytest.mark.parametrize(
         "required",
         [
-            pytest.param([FIXTURE, FIXTURE], id="重複"),
-            pytest.param([GRAPH, f"{GRAPH}/model-00001-of-00002.krm"], id="入れ子"),
+            pytest.param([FIXTURE, FIXTURE], id="duplicate"),
+            pytest.param([GRAPH, f"{GRAPH}/model-00001-of-00002.krm"], id="nested"),
             pytest.param([f"{GRAPH}\0x"], id="NUL"),
         ],
     )
@@ -643,7 +662,7 @@ class TestArguments:
             )
         assert raised.value.code == 2
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root は権限を無視して読める")
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads regardless of permissions")
     def test_an_unreadable_file_exits_three_with_no_summary(
         self, pair: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -659,4 +678,4 @@ class TestArguments:
         captured = capsys.readouterr()
         assert code == 3
         assert captured.out == ""
-        assert "読めない" in captured.err
+        assert "cannot read" in captured.err

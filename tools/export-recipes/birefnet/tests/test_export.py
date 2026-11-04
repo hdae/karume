@@ -1,23 +1,29 @@
-"""`birefnet/export.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contracts of `birefnet/export.py` (the part that needs no real weights).
 
-実重みの emit は手動（既存 `deberta/export.py` / `siglip2/export.py` のテストと同じ規律）。
-ここで固定するのは、壊れると**偽 PASS** になる側の規律だけ:
+Emitting with the real weights is manual (the same discipline as the existing tests of
+`deberta/export.py` / `siglip2/export.py`). This file pins only the rules whose breakage would
+give a **false PASS**:
 
-- グラフ出力が**最終段のマット 1 本**であること（multi-scale の中間予測が混ざったら io の
-  位置規約が黙ってずれる = 学習モードのグラフを推論用として書き出した形）
-- 系列の綴りが**モデル名と解像度の両方**に追随すること（片方でも欠けると別解像度の資産が
-  同じ席へ黙って上書きされる）
-- 解像度の刻み（64 の倍数）が**入口で**落ちること（途中の reshape エラーにしない）
-- `_sanity` が顕著物体の分離を**順序**で見ること（値域も同一入力の一致も恒真）
-- 実画像 golden（`--real-images`）が**欠けを黙って許さない**こと、元画像の sha256 を
-  `__metadata__` に載せること、判別を**前景比の順序**で見ること
-- `--verify` が emit しないこと（同一プロセスでは参照が汚染される）
-- 系列名の綴りと正規化定数が**配布 recipe（`birefnet.distribution`）と一致**すること
-  （上流に機械可読な前処理 config が無く両側が宣言を持つので、独立に動くと golden と
-  利用者の前処理がずれる）
-- 格納 dtype の系列（ADR 0113）: `--dtype` が系列を分けること・`--verify` と排他なこと・
-  丸めが `load_model` の直後で `patch.apply` の前にあること（後に動かすと ⑦ の α / β が動く —
-  故障注入）・品質計測の器と無損失の門が恒真でないこと
+- The graph output is **one matte from the last stage** (if multi-scale intermediate predictions
+  get mixed in, the io positional convention shifts silently = a training-mode graph written out
+  as an inference graph)
+- The series name follows **both the model name and the resolution** (missing either one lets an
+  asset of another resolution silently overwrite the same seat)
+- The resolution step (a multiple of 64) fails **at the entry** (not as a reshape error halfway)
+- `_sanity` checks the separation of the salient object by **order** (the value range and the
+  agreement of identical inputs both hold trivially)
+- The real-image golden (`--real-images`) **does not silently tolerate a missing image**, puts
+  the source image's sha256 in `__metadata__`, and discriminates by **the order of the
+  foreground ratios**
+- `--verify` does not emit (in the same process the reference gets contaminated)
+- The series-name spelling and the normalization constants **agree with the distribution recipe
+  (`birefnet.distribution`)** (the upstream has no machine-readable preprocessing config and both
+  sides hold declarations, so if they move independently the golden and the user's preprocessing
+  drift apart)
+- Storage-dtype series (ADR 0113): `--dtype` separates the series, it is exclusive with
+  `--verify`, the rounding sits right after `load_model` and before `patch.apply` (moving it
+  later moves ⑦'s α / β — fault injection), and neither the quality measurement nor the lossless
+  gate holds trivially
 """
 
 from __future__ import annotations
@@ -38,10 +44,12 @@ from birefnet import export as bn
 from karume.container import Provenance
 from karume.pipeline import export_to_file
 
-#: tiny な export に焼く出所（値は突合されない — 台本の出所の導出は `_shared.upstream` の席）。
+#: The provenance baked into the tiny export (the value is not checked — deriving the script's
+#: provenance is `_shared.upstream`'s job).
 TINY_PROVENANCE = Provenance(license="fixture")
 
-#: tiny な合成モデルの解像度（`disc_mask` が 2×2 の円内を持つ最小の形）。
+#: The resolution of the tiny synthetic model (the smallest shape where `disc_mask` has a 2×2
+#: inside).
 TINY_SIZE = 8
 
 CASES = (
@@ -51,7 +59,8 @@ CASES = (
 
 
 class TinyMatte(nn.Module):
-    """`MatteLogits` の最小の骨格（`[B,3,S,S] → [B,1,S,S]`・引数名まで同じ）。"""
+    """A minimal skeleton of `MatteLogits` (`[B,3,S,S] → [B,1,S,S]`, down to the argument
+    name)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -62,7 +71,7 @@ class TinyMatte(nn.Module):
 
 
 class TwoOutputMatte(TinyMatte):
-    """出力が 2 本ある形（`_write_io` が拒否することの確認用）。"""
+    """A shape with two outputs (to check that `_write_io` refuses it)."""
 
     def forward(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         matte = super().forward(pixel_values)
@@ -70,7 +79,8 @@ class TwoOutputMatte(TinyMatte):
 
 
 class ScaledPreds(nn.Module):
-    """`scaled_preds`（list）を返す BiRefNet 側の骨格。要素数だけを外から決める。"""
+    """A skeleton of the BiRefNet side that returns `scaled_preds` (a list). Only the number of
+    elements is set from outside."""
 
     def __init__(self, outputs: int) -> None:
         super().__init__()
@@ -83,7 +93,7 @@ class ScaledPreds(nn.Module):
 
 
 def _disc_matte(inside: float, outside: float) -> torch.Tensor:
-    """円内 / 円外をそれぞれ定数で塗ったマット（分離の順序だけを動かす）。"""
+    """A matte with constants inside / outside the disc (only the order of separation moves)."""
     mask = bn.disc_mask(TINY_SIZE)
     return torch.where(mask, torch.tensor(inside), torch.tensor(outside)).reshape(
         1, 1, TINY_SIZE, TINY_SIZE
@@ -91,7 +101,7 @@ def _disc_matte(inside: float, outside: float) -> torch.Tensor:
 
 
 def _mattes(disc: torch.Tensor) -> dict[str, torch.Tensor]:
-    """`disc` 以外は互いに違う適当な値で埋めた 4 ケース分。"""
+    """Four cases; all but `disc` are filled with arbitrary values that differ from each other."""
     return {
         "disc": disc,
         "ramp": torch.full((1, 1, TINY_SIZE, TINY_SIZE), 0.25),
@@ -101,10 +111,11 @@ def _mattes(disc: torch.Tensor) -> dict[str, torch.Tensor]:
 
 
 def _ratio_matte(ratio: float, jitter: int) -> torch.Tensor:
-    """前景比がちょうど `ratio` になるマット。
+    """A matte whose foreground ratio is exactly `ratio`.
 
-    `jitter` は背景値だけをケースごとにずらす（前景比を変えずに**テンソルとしては別物**に
-    する — `_sanity` の「全ケースが互いに違う」検査を先に踏んで判別まで届かなくなるのを避ける）。
+    `jitter` shifts only the background value per case (the foreground ratio stays, but the
+    tensors **differ** — so the check never stops at `_sanity`'s "every case differs" check
+    before it reaches the discrimination).
     """
     pixels = TINY_SIZE * TINY_SIZE
     flat = torch.full((pixels,), -1.0 - 0.01 * jitter)
@@ -115,7 +126,7 @@ def _ratio_matte(ratio: float, jitter: int) -> torch.Tensor:
 def _real_mattes(
     person: tuple[float, float], scene: tuple[float, float]
 ) -> dict[str, torch.Tensor]:
-    """実画像 4 ケース分のマット（群ごとに前景比を指定する）。"""
+    """Mattes for the 4 real-image cases (foreground ratios given per group)."""
     ratios = dict(
         zip((*bn.REAL_PERSON_CASES, *bn.REAL_SCENE_CASES), (*person, *scene), strict=True)
     )
@@ -126,7 +137,7 @@ def _real_mattes(
 
 
 def _real_array(index: int) -> torch.Tensor:
-    """tiny な実画像 1 枚の画素（`[S, S, 3]` の u8）。ケースとチャネルで値をずらす。"""
+    """The pixels of one tiny real image (`[S, S, 3]` u8). Values vary by case and channel."""
     array = torch.zeros((TINY_SIZE, TINY_SIZE, 3), dtype=torch.uint8)
     for channel in range(3):
         array[:, :, channel] = 10 * index + 30 * channel + 7
@@ -134,7 +145,7 @@ def _real_array(index: int) -> torch.Tensor:
 
 
 def _write_real_images(root: Path) -> dict[str, bytes]:
-    """`REAL_CASES` の綴りで tiny な PNG を書き、ケース名 → 生バイトを返す。"""
+    """Write tiny PNGs under the `REAL_CASES` names and return case name → raw bytes."""
     from PIL import Image
 
     written: dict[str, bytes] = {}
@@ -147,7 +158,7 @@ def _write_real_images(root: Path) -> dict[str, bytes]:
 
 @pytest.fixture
 def exported(tmp_path):
-    """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
+    """Export one tiny wrapper and return `(wrapper, graph, out_dir)`."""
     torch.manual_seed(0)
     wrapper = TinyMatte()
     graph = export_to_file(
@@ -163,14 +174,16 @@ def exported(tmp_path):
 
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self):
-        """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — _shared.paths）。"""
+        """Series output goes under `outputs/series/` (not the distribution's `models/` —
+        _shared.paths)."""
         assert (
             bn.default_out_dir(bn.DEFAULT_MODEL_DIR, bn.DEFAULT_RESOLUTION, "f16").parent
             == SERIES_ROOT
         )
 
     def test_each_resolution_gets_its_own_series(self):
-        """MUST: 解像度も綴りへ — 焼く定数が変わるので、同じ席に置くと先の資産が消える。"""
+        """MUST: the resolution goes into the name too — the baked constants change, so sharing a
+        seat would erase the earlier asset."""
         low = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024, "f16")
         high = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 2048, "f16")
 
@@ -185,11 +198,12 @@ class TestSeriesLayout:
         )
 
     def test_the_distribution_looks_for_the_same_series_name(self):
-        """MUST: 系列名の綴りが**書く側と読む側で一致**する。
+        """MUST: the series name is spelled **the same by the writer and the reader**.
 
-        配布 recipe は「checkpoint → 上流リポ名 → 系列ディレクトリ名 + 解像度」で系列を探す。
-        式が片方だけ動くと、組み立ては「系列が無い」で落ちる（それ自体は安全）が、**別の
-        モデルの系列を掴む**綴りにずれた場合は誰も気づけない。
+        The distribution recipe finds a series by "checkpoint → upstream repository name →
+        series directory name + resolution". If only one side's formula moves, assembly fails
+        with "no series" (safe in itself), but if it drifts to a spelling that **picks up another
+        model's series**, nobody can notice.
         """
         from birefnet.card import BIREFNET_UPSTREAM
         from birefnet.distribution import (
@@ -214,8 +228,9 @@ class TestResolution:
 
     @pytest.mark.parametrize("resolution", [0, -1024, 224, 1000, 1056])
     def test_anything_else_fails_loudly(self, resolution: int):
-        """MUST: 入口で落とす — 通すと Swin の途中で形が合わなくなるだけで理由が残らない。"""
-        with pytest.raises(SystemExit, match="の倍数でない"):
+        """MUST: fail at the entry — passed on, the shapes merely stop matching inside Swin and
+        no reason is left."""
+        with pytest.raises(SystemExit, match="is not a multiple of 64"):
             bn.assert_resolution(resolution)
 
 
@@ -229,16 +244,17 @@ class TestMatteLogits:
             assert torch.equal(wrapper(pixel_values), wrapper.model(pixel_values)[0])
 
     def test_more_than_one_prediction_fails_loudly(self):
-        """MUST: 中間予測が付くのは学習モード — 黙って `[-1]` を採らない。"""
+        """MUST: intermediate predictions mean training mode — do not silently take `[-1]`."""
         wrapper = bn.MatteLogits(ScaledPreds(4)).eval()
 
-        with pytest.raises(ValueError, match="学習モードのグラフは書き出さない"):
+        with pytest.raises(ValueError, match="a training-mode graph is not written out"):
             wrapper(CASES[0][1])
 
 
 class TestPreprocessing:
     def test_normalize_matches_the_reference_transform(self):
-        """MUST: 正規化は handler.py の逐語 — torchvision の実装を独立オラクルに使う。"""
+        """MUST: the normalization is handler.py's verbatim — torchvision's implementation is the
+        independent oracle."""
         from torchvision import transforms
 
         torch.manual_seed(1)
@@ -248,17 +264,20 @@ class TestPreprocessing:
         assert torch.equal(bn.normalize_image(image), expected)
 
     def test_the_statistics_are_per_channel(self):
-        """3 チャネルが同じ定数だと、前処理の順序違いが値に出ない。"""
+        """With the same constant on all 3 channels, a wrong preprocessing order would not show
+        in the values."""
         assert len(set(bn.IMAGENET_MEAN)) == 3
         assert len(set(bn.IMAGENET_STD)) == 3
 
     def test_the_distribution_declares_the_same_constants(self):
-        """MUST: 配布形が宣言する数と、golden を焼く数が一致する。
+        """MUST: the numbers the distribution declares equal the numbers the golden is baked
+        with.
 
-        BiRefNet 系の上流には `preprocessor_config.json` に当たる機械可読な出どころが無く、
-        正規化定数は同梱 `handler.py` の中にしか書かれていない。そのため台本（ここ）と
-        組み立て（`birefnet.distribution`）の両方が宣言を持たざるを得ない — 2 表が独立に動くと、
-        **golden は片方の統計で焼かれ、利用者はもう片方で前処理する**形が黙って作れる。
+        The BiRefNet upstreams have no machine-readable source like `preprocessor_config.json`;
+        the normalization constants are written only inside the bundled `handler.py`. So both the
+        script (here) and the assembly (`birefnet.distribution`) have to hold declarations — if
+        the two tables move independently, **a golden baked with one set of statistics while
+        users preprocess with the other** can be produced silently.
         """
         from birefnet.distribution import BIREFNET_IMAGE_MEAN, BIREFNET_IMAGE_STD
 
@@ -273,15 +292,19 @@ class TestGoldenCases:
             assert pixel_values.dtype is torch.float32, name
 
     def test_every_case_is_a_different_image(self):
-        """MUST: 同じ画像を 2 度使わない — 出力どうしの差分を見る sanity が恒真になる。"""
+        """MUST: no image is used twice — the sanity check that compares outputs would hold
+        trivially."""
         cases = bn.build_cases(TINY_SIZE)
 
         for index, (name, pixel_values) in enumerate(cases):
             for other_name, other in cases[index + 1 :]:
-                assert not torch.equal(pixel_values, other), f"{name} と {other_name} が同一"
+                assert not torch.equal(pixel_values, other), (
+                    f"{name} and {other_name} are identical"
+                )
 
     def test_the_disc_case_actually_has_a_disc(self):
-        """判別の土台 — 円内と円外が同じ色なら {@link bn._sanity} は意味を失う。"""
+        """The basis of the discrimination — if inside and outside the disc had the same colour,
+        {@link bn._sanity} would lose its meaning."""
         cases = dict(bn.build_cases(TINY_SIZE))
         image = cases[bn.DISC_CASE][0]
         mask = bn.disc_mask(TINY_SIZE)
@@ -308,7 +331,8 @@ class TestWriteIo:
         assert tuple(mattes["disc"].shape) == (1, 1, TINY_SIZE, TINY_SIZE)
 
     def test_more_than_one_graph_output_fails_loudly(self, tmp_path):
-        """MUST: 出力はマット 1 本 — 2 本目が生えると io の位置規約が黙ってずれる。"""
+        """MUST: the output is one matte — a second one would silently shift the io positional
+        convention."""
         torch.manual_seed(0)
         wrapper = TwoOutputMatte()
         graph = export_to_file(
@@ -320,11 +344,11 @@ class TestWriteIo:
             symbol_names=(),
         )
 
-        with pytest.raises(AssertionError, match="マットは 1 本"):
+        with pytest.raises(AssertionError, match="the final matte is 1"):
             bn._write_io(wrapper, graph, CASES, tmp_path)
 
     def test_metadata_is_written_only_for_the_cases_that_have_it(self, exported):
-        """実画像ケースだけが `__metadata__`（元画像の同定）を持つ。"""
+        """Only the real-image cases carry `__metadata__` (identifying the source image)."""
         wrapper, graph, out_dir = exported
         metadata = {CASES[0][0]: {bn.SOURCE_IMAGE_KEY: "photo.png", bn.SOURCE_SHA256_KEY: "ab"}}
 
@@ -345,34 +369,36 @@ class TestSanity:
         assert result["foreground_ratio"][bn.DISC_CASE] == pytest.approx(covered)
 
     def test_fails_loudly_when_the_order_is_inverted(self):
-        """MUST: 顕著物体が背景より暗いなら、セグメンテーションとして壊れている。"""
-        with pytest.raises(AssertionError, match="顕著物体を分離できていない"):
+        """MUST: a salient object darker than the background is a broken segmentation."""
+        with pytest.raises(AssertionError, match="the salient object is not separated"):
             bn._sanity(_mattes(_disc_matte(inside=-4.0, outside=3.0)))
 
     def test_fails_loudly_when_the_matte_is_uniform(self):
-        """一様に潰れた出力（円内と円外が同値）も落とす。"""
-        with pytest.raises(AssertionError, match="顕著物体を分離できていない"):
+        """An output collapsed to a constant (inside and outside the disc equal) fails too."""
+        with pytest.raises(AssertionError, match="the salient object is not separated"):
             bn._sanity(_mattes(_disc_matte(inside=0.5, outside=0.5)))
 
     def test_fails_loudly_when_two_cases_share_an_output(self):
-        """MUST: 入力が届いていない形（同じ出力が並ぶ）を落とす。"""
+        """MUST: fail when the input does not reach the output (identical outputs side by side)."""
         mattes = _mattes(_disc_matte(inside=3.0, outside=-4.0))
         mattes["checker"] = mattes["ramp"].clone()
 
-        with pytest.raises(AssertionError, match="入力が効いていない"):
+        with pytest.raises(AssertionError, match="the input has no effect"):
             bn._sanity(mattes)
 
     def test_it_reports_the_shape_mismatch_instead_of_broadcasting(self):
-        """円の形と出力の形が食い違ったら黙って broadcast させない（H ≠ W のマット）。"""
+        """When the disc's shape and the output's shape disagree, do not broadcast silently (an
+        H ≠ W matte)."""
         mattes = _mattes(torch.zeros(1, 1, 2, TINY_SIZE))
 
-        with pytest.raises(AssertionError, match="円の形と違う"):
+        with pytest.raises(AssertionError, match="differs from the disc's shape"):
             bn._sanity(mattes)
 
 
 class TestRealImageCases:
     def test_the_two_groups_partition_the_cases(self):
-        """MUST: 群の綴りがケース名から外れたら落とす（判別が黙って別の 2 枚を見る）。"""
+        """MUST: fail when a group's names leave the case names (the discrimination would
+        silently look at two other images)."""
         names = {name for name, _file, _why in bn.REAL_CASES}
 
         assert set(bn.REAL_PERSON_CASES).isdisjoint(bn.REAL_SCENE_CASES)
@@ -384,7 +410,8 @@ class TestRealImageCases:
         assert len(set(files)) == len(files)
 
     def test_it_normalizes_with_the_handler_statistics(self, tmp_path):
-        """前処理は handler.py の逐語 — 値を独立に組み直して突き合わせる。"""
+        """The preprocessing is handler.py's verbatim — the values are rebuilt independently and
+        compared."""
         raw = _write_real_images(tmp_path)
 
         cases = bn.build_real_cases(TINY_SIZE, tmp_path)
@@ -395,13 +422,15 @@ class TestRealImageCases:
         for index, (name, pixel_values, _md) in enumerate(cases):
             assert tuple(pixel_values.shape) == (1, 3, TINY_SIZE, TINY_SIZE), name
             assert pixel_values.dtype is torch.float32, name
-            # 期待値は書いた画素から組み直す（`ToTensor` / `Normalize` を写経せず「planar へ
-            # 並べ替えて 255 で割り、統計を引く」だけを別経路で置く）。
+            # The expectation is rebuilt from the written pixels (`ToTensor` / `Normalize` are
+            # not copied; only "reorder to planar, divide by 255, subtract the statistics" is
+            # spelled out as a separate path).
             planar = _real_array(index).permute(2, 0, 1).to(torch.float32)
             assert torch.equal(pixel_values[0], ((planar / 255.0) - mean) / std), name
 
     def test_it_records_the_source_image_and_its_digest(self, tmp_path):
-        """MUST: 焼き直した画像で golden を採り直し忘れた環境を、突合の前に落とすための欄。"""
+        """MUST: the fields that fail an environment whose images were re-baked without
+        re-recording the golden, before the comparison."""
         raw = _write_real_images(tmp_path)
 
         cases = bn.build_real_cases(TINY_SIZE, tmp_path)
@@ -412,17 +441,18 @@ class TestRealImageCases:
             assert metadata[bn.SOURCE_SHA256_KEY] == hashlib.sha256(raw[name]).hexdigest()
 
     def test_a_missing_image_fails_loudly(self, tmp_path):
-        """MUST: 黙って 3 枚で書かない（`--real-images` は明示の意思表示）。"""
+        """MUST: do not silently write three images (`--real-images` is an explicit request)."""
         _write_real_images(tmp_path)
         (tmp_path / bn.REAL_CASES[-1][1]).unlink()
 
-        with pytest.raises(SystemExit, match=r"実画像 .* が無い"):
+        with pytest.raises(SystemExit, match=r"real image .* is missing"):
             bn.build_real_cases(TINY_SIZE, tmp_path)
 
 
 class TestRealSanity:
     def test_synthetic_only_emits_have_no_real_verdict(self):
-        """既定の emit（合成 4 ケース）でも sanity は通る（実画像は追加の群）。"""
+        """The default emit (4 synthetic cases) passes the sanity check too (the real images are
+        an extra group)."""
         assert "real_foreground" not in bn._sanity(_mattes(_disc_matte(inside=3.0, outside=-4.0)))
 
     def test_it_passes_when_the_salient_cases_have_more_foreground(self):
@@ -437,33 +467,41 @@ class TestRealSanity:
         assert result["real_foreground"][bn.REAL_SCENE_CASES[0]] == 0.0
 
     def test_it_fails_loudly_when_a_scene_has_more_foreground(self):
-        """MUST: 顕著物体の無い 1 枚が人物より広いなら、マットは意味を捉えていない。"""
+        """MUST: if an image without a salient object covers more than a person, the matte has
+        not captured the meaning."""
         mattes = {
             **_mattes(_disc_matte(inside=3.0, outside=-4.0)),
             **_real_mattes(person=(0.5, 0.0625), scene=(0.0, 0.25)),
         }
 
-        with pytest.raises(AssertionError, match="実画像の前景比の順序が逆"):
+        with pytest.raises(
+            AssertionError, match="the order of the real images' foreground ratios is reversed"
+        ):
             bn._sanity(mattes)
 
     def test_it_fails_loudly_when_every_case_covers_the_same_area(self):
-        """MUST: 面積が入力に依存しなくなった出力を落とす（値は違っても順序が並ぶ）。
+        """MUST: fail an output whose area no longer depends on the input (the values differ but
+        the order ties).
 
-        値まで同一なら手前の「全ケースが互いに違う」検査が先に落とすので、ここは**面積だけ**を
-        揃える（前景比を見る側の穴が残っていないことの確認）。
+        Identical values would be caught first by the earlier "every case differs" check, so
+        only **the area** is equalized here (checking that the foreground-ratio side has no hole
+        left).
         """
         mattes = {
             **_mattes(_disc_matte(inside=3.0, outside=-4.0)),
             **_real_mattes(person=(0.5, 0.5), scene=(0.5, 0.5)),
         }
 
-        with pytest.raises(AssertionError, match="実画像の前景比の順序が逆"):
+        with pytest.raises(
+            AssertionError, match="the order of the real images' foreground ratios is reversed"
+        ):
             bn._sanity(mattes)
 
 
 class TestVerifyCli:
     def test_verify_does_not_emit(self, monkeypatch):
-        """MUST: 同一プロセスで emit と併用しない（クラス差し替えが参照を汚染する）。"""
+        """MUST: never combined with emit in one process (the class replacement contaminates the
+        reference)."""
         seen: list[str] = []
         monkeypatch.setattr(
             bn,
@@ -473,9 +511,7 @@ class TestVerifyCli:
                 or [{"stage": "layout", "claim": "bit-exact", "bit_exact": True, "maxdiff": {}}]
             ),
         )
-        monkeypatch.setattr(
-            bn, "export_series", lambda *_a, **_kw: pytest.fail("--verify で emit された")
-        )
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("--verify emitted"))
 
         bn.main(["--verify"])
 
@@ -486,16 +522,14 @@ class TestVerifyCli:
         monkeypatch.setattr(
             bn, "export_series", lambda *_a, **_kw: seen.append("emit") or {"dir": "x"}
         )
-        monkeypatch.setattr(
-            bn, "verify_patches", lambda *_a: pytest.fail("emit で --verify が走った")
-        )
+        monkeypatch.setattr(bn, "verify_patches", lambda *_a: pytest.fail("emit ran --verify"))
 
         bn.main([])
 
         assert seen == ["emit"]
 
     def test_the_output_dir_follows_the_model_dir_and_the_resolution(self, monkeypatch, tmp_path):
-        """MUST: `--out` 未指定なら系列は両軸に追随する（固定だと上書きになる）。"""
+        """MUST: without `--out` the series follows both axes (a fixed one would be overwritten)."""
         seen: list[tuple[Path, int]] = []
         monkeypatch.setattr(
             bn,
@@ -511,7 +545,8 @@ class TestVerifyCli:
 
     @pytest.mark.parametrize(("argv", "expected"), [([], False), (["--real-images"], True)])
     def test_real_images_is_opt_in(self, monkeypatch, argv: list[str], expected: bool):
-        """実画像 golden は明示の意思表示でだけ書く（既定は合成 4 ケース）。"""
+        """The real-image golden is written only on explicit request (the default is the 4
+        synthetic cases)."""
         seen: list[bool] = []
         monkeypatch.setattr(
             bn,
@@ -527,10 +562,11 @@ class TestVerifyCli:
 
 
 class _RecordingMatte(nn.Module):
-    """呼び出しの段（参照 / 段 1 / 段 2 / 段 3）を記録するだけの骨格。
+    """A skeleton that only records the stage of each call (reference / stage 1 / stage 2 /
+    stage 3).
 
-    出力は入力から決まる（段によらず同一）ので、`verify_patches` の 1 段目のビット一致
-    assert は通る — ここで見たいのは**順序**だけ。
+    The output is decided by the input (identical at every stage), so the first-stage
+    bit-identity assert of `verify_patches` passes — all this wants to see is **the order**.
     """
 
     def __init__(self, calls: list[str]) -> None:
@@ -545,19 +581,21 @@ class _RecordingMatte(nn.Module):
 
 
 class TestVerifyOrder:
-    """`verify_patches` の順序不変条件（参照 → 段 1 → 段 2 → 段 3）。"""
+    """The ordering invariant of `verify_patches` (reference → stage 1 → stage 2 → stage 3)."""
 
     RESOLUTION = 64
 
     def test_a_patched_process_cannot_take_the_reference(self, monkeypatch):
-        """MUST: パッチ適用済みのプロセスでは参照を採らない（差 0 の恒真化）。"""
+        """MUST: a process with the patches applied does not take the reference (a zero
+        difference that holds trivially)."""
         monkeypatch.setattr(bn.patch, "patches_applied", lambda: True)
 
-        with pytest.raises(SystemExit, match="恒真化"):
+        with pytest.raises(SystemExit, match="trivially true"):
             bn.verify_patches(Path("/nonexistent"), self.RESOLUTION)
 
     def test_the_reference_is_taken_once_before_any_patch(self, monkeypatch):
-        """段ごとに参照を採り直す退行（2 段目の参照がパッチ後の値になる）を落とす。"""
+        """Catch the regression that re-takes the reference per stage (the second stage's
+        reference would be a patched value)."""
         calls: list[str] = []
         recorder = _RecordingMatte(calls)
         monkeypatch.setattr(bn.patch, "patches_applied", lambda: False)
@@ -601,33 +639,38 @@ class TestVerifyOrder:
 
 
 class TestProvenance:
-    """容器の出所は `--model-dir` の実物から導く（`_shared.upstream.snapshot_provenance`）。"""
+    """The container's provenance is derived from the actual `--model-dir`
+    (`_shared.upstream.snapshot_provenance`)."""
 
     def test_a_checkpoint_without_the_download_record_is_refused_before_the_weights(
         self, monkeypatch, tmp_path
     ) -> None:
-        """出所を名乗れない checkpoint は、重みを読む前に落ちる（何も据わらない）。"""
+        """A checkpoint that cannot state its provenance fails before the weights are read
+        (nothing gets written)."""
         monkeypatch.setattr(
-            bn, "load_wrapper", lambda *_a: pytest.fail("出所の検査より先に重みを読んだ")
+            bn,
+            "load_wrapper",
+            lambda *_a: pytest.fail("read the weights before the provenance check"),
         )
         out_dir = tmp_path / "series"
 
-        with pytest.raises(UpstreamProvenanceError, match="が無い"):
+        with pytest.raises(UpstreamProvenanceError, match="is missing"):
             bn.export_series(tmp_path / "BiRefNet_HR", out_dir, bn.DEFAULT_RESOLUTION, dtype="f16")
 
         assert not out_dir.exists()
 
 
-# ---- 格納 dtype の系列（ADR 0113）----------------------------------------------
+# ---- Storage-dtype series (ADR 0113) --------------------------------------------
 
 
 class TestWeightDtypeSeries:
     def test_the_f32_series_keeps_its_existing_name(self):
-        """f32 は接尾なし — 既存系列（配布済みの資産）の綴りを動かさない。"""
+        """f32 has no suffix — the names of existing series (shipped assets) do not move."""
         assert bn.default_out_dir(bn.MODELS_ROOT / "lucida", 1024, "f32").name == "lucida-1024"
 
     def test_each_storage_dtype_gets_its_own_series(self):
-        """MUST: 同居させると f32 系列の網（系列ごとの tolerance）が圧縮資産へ黙って掛かる。"""
+        """MUST: sharing a series would silently apply the f32 series' net (the per-series
+        tolerance) to compressed assets."""
         plain = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024, "f32")
         half = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024, "f16")
 
@@ -635,13 +678,15 @@ class TestWeightDtypeSeries:
         assert half.name == "birefnet-hr-1024-f16"
 
     def test_the_distribution_offers_exactly_the_dtypes_the_recipe_writes(self):
-        """書き手（台本）と読み手（配布 recipe）の dtype 表が独立に動くと、焼けない席を配る。"""
+        """If the writer's (script's) and the reader's (distribution recipe's) dtype tables move
+        independently, a seat that cannot be baked gets shipped."""
         from birefnet.distribution import BIREFNET_WEIGHT_DTYPES
 
         assert bn.WEIGHT_DTYPES == BIREFNET_WEIGHT_DTYPES
 
     def test_the_distribution_looks_for_the_same_series_name_per_dtype(self):
-        """MUST: 系列名の綴りが dtype の接尾まで書く側と読む側で一致する。"""
+        """MUST: the writer and the reader spell the series name the same, down to the dtype
+        suffix."""
         from birefnet.card import BIREFNET_UPSTREAM
         from birefnet.distribution import BIREFNET_MODELS, birefnet_series_name
 
@@ -655,7 +700,7 @@ class TestWeightDtypeSeries:
 
 
 def _record_emit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
-    """`export_series` を差し替え、渡った `(out_dir, dtype)` を積む。"""
+    """Replace `export_series` and collect the `(out_dir, dtype)` it receives."""
     seen: list[tuple[Path, str]] = []
     monkeypatch.setattr(
         bn,
@@ -668,8 +713,8 @@ def _record_emit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
 
 
 def _downloaded(model_dir: Path, revision: str) -> Path:
-    """`hf download --local-dir` の取得記録（`_shared.upstream.snapshot_revision` が読む形）だけを
-    置いた `--model-dir`。"""
+    """A `--model-dir` holding only the download record of `hf download --local-dir` (the form
+    `_shared.upstream.snapshot_revision` reads)."""
     from _shared.upstream import SNAPSHOT_RECORD_DIR, SNAPSHOT_RECORD_FILE
 
     record = model_dir / SNAPSHOT_RECORD_DIR / f"{SNAPSHOT_RECORD_FILE}.metadata"
@@ -680,7 +725,8 @@ def _downloaded(model_dir: Path, revision: str) -> Path:
 
 class TestDtypeCli:
     def test_the_default_is_the_checkpoints_own_storage(self, monkeypatch):
-        """既定は上流の格納と同じ型（ADR 0113 追記 2026-10-11）— HR は f16・Lucida は f32。"""
+        """The default is the upstream storage type (ADR 0113 addendum 2026-10-11) — f16 for
+        HR, f32 for Lucida."""
         seen = _record_emit(monkeypatch)
 
         bn.main([])
@@ -692,16 +738,17 @@ class TestDtypeCli:
         ]
 
     def test_hr_refuses_f32(self, monkeypatch, capsys):
-        """HR の上流は f16 だけ — f32 系列は値を正確に広げるだけで情報が増えず、配りもしない。"""
-        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emit された"))
+        """HR's upstream is f16 only — an f32 series only widens the values exactly, adds no
+        information, and is not shipped."""
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emitted"))
 
         with pytest.raises(SystemExit):
             bn.main(["--dtype", "f32"])
 
-        assert "上流 checkpoint の格納より広い dtype" in capsys.readouterr().err
+        assert "a dtype wider than the upstream checkpoint's storage" in capsys.readouterr().err
 
     def test_lucida_writes_both_dtypes(self, monkeypatch):
-        """Lucida の上流は f32 — f32（既定）と、丸めた f16 の両方を書ける。"""
+        """Lucida's upstream is f32 — both f32 (the default) and a rounded f16 can be written."""
         seen = _record_emit(monkeypatch)
         lucida = str(bn.MODELS_ROOT / "lucida")
 
@@ -714,10 +761,12 @@ class TestDtypeCli:
         ]
 
     def test_the_script_writes_exactly_the_seats_the_distribution_ships(self):
-        """書く側と配る側の規則は 1 つ（配れない系列を焼かない・配る席の系列は全部焼ける）。
+        """The writer and the shipper share one rule (no series is baked that cannot ship, and
+        every shipped seat's series can be baked).
 
-        checkpoint は `--model-dir` の取得記録の revision が固定値に当たればそれ、当たらなければ
-        （記録が無い・読めない場合も）ディレクトリ名から引く（`model_dir_checkpoint`）。
+        The checkpoint is the one whose pinned value matches the revision in `--model-dir`'s
+        download record; otherwise (also when the record is missing or unreadable) it is looked
+        up from the directory name (`model_dir_checkpoint`).
         """
         from birefnet.card import BIREFNET_CHECKPOINTS
         from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
@@ -730,14 +779,15 @@ class TestDtypeCli:
             )
 
     def test_a_renamed_hr_directory_still_refuses_f32(self, monkeypatch, tmp_path, capsys):
-        """MUST: checkpoint は取得記録の revision から先に引く — ディレクトリ名を変えた HR も
-        実験の checkpoint へ落ちず、退役した f32 系列を書けない。
+        """MUST: the checkpoint is looked up from the download record's revision first — an HR
+        with a renamed directory does not fall back to an experimental checkpoint and cannot
+        write the retired f32 series.
         """
         from birefnet.card import BIREFNET_CHECKPOINTS
         from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
 
         model_dir = _downloaded(tmp_path / "hr-renamed", BIREFNET_CHECKPOINTS["hr"].revision)
-        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emit された"))
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emitted"))
 
         assert bn.export_dtypes(model_dir) == (
             birefnet_seat_dtypes("hr"),
@@ -745,19 +795,21 @@ class TestDtypeCli:
         )
         with pytest.raises(SystemExit):
             bn.main(["--model-dir", str(model_dir), "--dtype", "f32"])
-        assert "上流 checkpoint の格納より広い dtype" in capsys.readouterr().err
+        assert "a dtype wider than the upstream checkpoint's storage" in capsys.readouterr().err
 
     def test_a_revision_and_a_name_that_disagree_are_refused(self, tmp_path):
-        """MUST: 中身（revision）は HR・名前は Lucida — 食い違いは黙ってどちらかへ倒さない。"""
+        """MUST: the content (revision) is HR, the name is Lucida — the disagreement is not
+        silently resolved to either side."""
         from birefnet.card import BIREFNET_CHECKPOINTS
 
         model_dir = _downloaded(tmp_path / "lucida", BIREFNET_CHECKPOINTS["hr"].revision)
 
-        with pytest.raises(SystemExit, match="食い違う"):
+        with pytest.raises(SystemExit, match="disagree"):
             bn.export_dtypes(model_dir)
 
     def test_an_unpinned_revision_falls_back_to_the_directory_name(self, tmp_path):
-        """固定値に当たらない revision（上流の更新など）はディレクトリ名で引く。"""
+        """A revision matching no pinned value (an upstream update, say) is looked up by the
+        directory name."""
         from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
 
         model_dir = _downloaded(tmp_path / "BiRefNet_HR", "0" * 40)
@@ -776,27 +828,30 @@ class TestDtypeCli:
 
     @pytest.mark.parametrize("dtype", ["f32", "f16"])
     def test_dtype_and_verify_are_exclusive(self, monkeypatch, dtype: str):
-        """MUST: `--verify` の参照はパッチ前の f32 eager — 明示の `--dtype` は f32 でも拒む
-        （ADR 0027 決定 3 と同じ構造理由）。どちらの経路も走らない。
+        """MUST: `--verify`'s reference is the unpatched f32 eager model — an explicit `--dtype`
+        is refused even when it is f32 (the same structural reason as ADR 0027 decision 3).
+        Neither path runs.
         """
-        monkeypatch.setattr(bn, "verify_patches", lambda *_a: pytest.fail("--verify が走った"))
-        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emit された"))
+        monkeypatch.setattr(bn, "verify_patches", lambda *_a: pytest.fail("--verify ran"))
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emitted"))
 
         with pytest.raises(SystemExit):
             bn.main(["--verify", "--dtype", dtype])
 
     def test_i8_is_not_offered_yet(self, monkeypatch):
-        """i8 は BiRefNet 固有の i8 計画と一緒に段 2 で足す — 写しの i8 は黙って壊れる。"""
-        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emit された"))
+        """i8 is added in stage 2 together with a BiRefNet-specific i8 plan — a copied i8 would
+        break silently."""
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emitted"))
 
         with pytest.raises(SystemExit):
             bn.main(["--dtype", "i8"])
 
 
 class TinyBatchNormMatte(nn.Module):
-    """`load_model` が返す形の骨格（list を返す）に BatchNorm を 1 本挟んだもの。
+    """A skeleton of what `load_model` returns (it returns a list) with one BatchNorm in between.
 
-    ⑦（`BatchNorm2d` → `ChannelAffine`）の α / β が丸めの位置でどう動くかを見る最小形。
+    The minimal shape for seeing how ⑦'s (`BatchNorm2d` → `ChannelAffine`) α / β move with the
+    position of the rounding.
     """
 
     def __init__(self) -> None:
@@ -810,7 +865,7 @@ class TinyBatchNormMatte(nn.Module):
 
 
 def _f16_checkpoint_model() -> TinyBatchNormMatte:
-    """HR 相当（全ての重みと BatchNorm 統計が f16 で表せる値）の eval モデル。"""
+    """An eval model like HR (every weight and BatchNorm statistic is representable in f16)."""
     torch.manual_seed(7)
     model = TinyBatchNormMatte().eval()
     with torch.no_grad():
@@ -824,16 +879,18 @@ def _f16_checkpoint_model() -> TinyBatchNormMatte:
 
 
 def _affine(model: nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
-    """⑦ で生えた `ChannelAffine` の α / β。"""
+    """The α / β of the `ChannelAffine` that ⑦ added."""
     affines = [module for module in model.modules() if isinstance(module, bn.patch.ChannelAffine)]
     assert len(affines) == 1
     return affines[0].alpha.clone(), affines[0].beta.clone()
 
 
 def _f32_checkpoint_model() -> TinyBatchNormMatte:
-    """Lucida 相当（重みと BatchNorm 統計が f16 で表せない f32 の値）の eval モデル。
+    """An eval model like Lucida (weights and BatchNorm statistics are f32 values not
+    representable in f16).
 
-    seed を固定するので、基準用と丸め用の 2 回の読み込みが同じ重みを返す。
+    The seed is fixed, so the two loads (for the reference and for the rounding) return the same
+    weights.
     """
     torch.manual_seed(11)
     model = TinyBatchNormMatte().eval()
@@ -847,11 +904,13 @@ def _f32_checkpoint_model() -> TinyBatchNormMatte:
 
 @pytest.fixture
 def tiny_load(monkeypatch: pytest.MonkeyPatch) -> list[str | tuple[str, str]]:
-    """`load_wrapper` の外部（重みの読み込み・パッチ・焼き）を tiny へ差し替え、呼び順を積む。
+    """Replace what `load_wrapper` calls out to (loading weights, patching, baking) with tiny
+    versions and collect the call order.
 
-    パッチは ⑦⑧（`apply_module_patches` — 任意のモジュールへ当たる段）だけを当てる。①〜⑥ は
-    上流の動的モジュールのクラス属性を差し替えるので tiny には当たらない。丸めは
-    `("round", dtype)` で積む（基準と丸め側の取り違えを呼び順で見分けるため）。
+    Only patches ⑦⑧ are applied (`apply_module_patches` — the stage that applies to any module).
+    ①–⑥ replace class attributes of the upstream dynamic module, so they do not apply to tiny.
+    Rounding is recorded as `("round", dtype)` (so the call order tells the reference side from
+    the rounding side).
     """
     calls: list[str | tuple[str, str]] = []
 
@@ -882,7 +941,8 @@ def tiny_load(monkeypatch: pytest.MonkeyPatch) -> list[str | tuple[str, str]]:
 
 
 class TestRoundingPoint:
-    """丸めは `load_model` の直後・`patch.apply` の前（モジュール docstring の MUST）。"""
+    """Rounding comes right after `load_model` and before `patch.apply` (the MUST of the module
+    docstring)."""
 
     def test_the_weights_are_rounded_between_the_load_and_the_patches(self, tiny_load):
         bn.load_wrapper(Path("/nonexistent"), TINY_SIZE, "f16")
@@ -895,7 +955,8 @@ class TestRoundingPoint:
         assert rounding is None
 
     def test_an_f16_checkpoint_comes_out_bit_identical(self, tiny_load):
-        """HR 相当（checkpoint が f16）: 丸めは恒等で、α / β も出力も f32 系列とビット一致する。"""
+        """Like HR (an f16 checkpoint): the rounding is the identity, and α / β and the outputs
+        are bit-identical to the f32 series."""
         plain, _ = bn.load_wrapper(Path("/nonexistent"), TINY_SIZE, "f32")
         half, rounding = bn.load_wrapper(Path("/nonexistent"), TINY_SIZE, "f16")
         pixel_values = CASES[0][1]
@@ -907,11 +968,13 @@ class TestRoundingPoint:
             assert bn._bit_exact(half(pixel_values), plain(pixel_values))
 
     def test_rounding_after_the_patches_moves_alpha_and_beta(self):
-        """故障注入: apply の**後**に丸めると、f32 格納の派生定数 α / β まで f16 の値へ動く。
+        """Fault injection: rounding **after** apply moves even the derived constants α / β,
+        stored in f32, to f16 values.
 
-        f16 で表せる BatchNorm 統計から導いた α = w·rsqrt(var+eps) は一般に f16 で表せないので、
-        後から丸めると値が動く — 格納は f32 のままなので VRAM は減らず数値だけが動く形。
-        HR 相当の checkpoint ではこの差が品質の門（無損失 = ビット一致）で落ちることも見る。
+        α = w·rsqrt(var+eps), derived from BatchNorm statistics representable in f16, is in
+        general not representable in f16, so rounding afterwards moves the value — storage stays
+        f32, so VRAM does not shrink and only the numbers move. For an HR-like checkpoint this
+        also checks that the difference fails the quality gate (lossless = bit-identical).
         """
         before = _f16_checkpoint_model()
         bn.round_to_storage(before, "f16")
@@ -930,14 +993,14 @@ class TestRoundingPoint:
             reference = {"disc": before(pixel_values)[0]}
             misplaced = {"disc": after(pixel_values)[0]}
         quality = bn.measure_quality("f16", {"F16": 5}, reference, misplaced)
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="does not match f32 bit for bit"):
             bn.assert_quality_gate(quality)
 
     def test_an_unknown_dtype_is_refused_before_touching_the_weights(self):
         model = _f16_checkpoint_model()
         snapshot = {name: tensor.clone() for name, tensor in model.state_dict().items()}
 
-        with pytest.raises(SystemExit, match="書き出せない"):
+        with pytest.raises(SystemExit, match="cannot write"):
             bn.round_to_storage(model, "i8")
         for name, tensor in model.state_dict().items():
             assert torch.equal(tensor, snapshot[name]), name
@@ -967,7 +1030,8 @@ class TestCheckpointCensus:
             ({"F32": 687, "I64": 67}, False),
             ({"F16": 1, "F32": 1}, False),
             ({"F16": 1, "BF16": 1}, False),
-            # 知らない綴りは浮動小数とみなす（無損失の主張を立てない側へ倒す）。
+            # An unknown spelling counts as floating point (leaning towards not claiming
+            # lossless).
             ({"F16": 1, "F8_E8M0": 1}, False),
             ({"I64": 3}, False),
             ({}, False),
@@ -980,26 +1044,29 @@ class TestCheckpointCensus:
         assert bn.lossless_under("f32", {"F32": 1})
 
     def test_another_compressed_dtype_has_no_lossless_verdict(self):
-        """「全て F16 なら無損失」は f16 だけの判定。
+        """The verdict "lossless when everything is F16" is for f16 only.
 
-        段 2 の i8 へ流用すると、HR の i8 系列にビット一致を要求する門になる。
+        Reused for stage 2's i8, it would become a gate demanding bit identity from HR's i8
+        series.
         """
         with pytest.raises(ValueError, match="i8"):
             bn.lossless_under("i8", {"F16": 687, "I64": 67})
 
     @pytest.mark.parametrize("checkpoint", ["hr", "lucida"])
     def test_the_card_names_the_same_storage_as_the_real_header(self, checkpoint: str):
-        """カードの `stored_dtype`（manifest に無い事実）と、export の門が読むヘッダの一致。
+        """The card's `stored_dtype` (a fact not in the manifest) agrees with the header the
+        export gate reads.
 
-        実重みの無い機では SKIP（`inputs/` はリポ管理外）。食い違うと、カードと NOTICE が
-        「無損失」と名乗る席を品質の門は有損失として扱う（またはその逆）。
+        SKIP on a machine without the real weights (`inputs/` is outside the repository). If they
+        disagree, the quality gate treats a seat the card and NOTICE call "lossless" as lossy (or
+        the other way round).
         """
         from birefnet.card import BIREFNET_CHECKPOINTS
 
         entry = BIREFNET_CHECKPOINTS[checkpoint]
         model_dir = bn.MODELS_ROOT / entry.repo.split("/", 1)[1]
         if not (model_dir / bn.CHECKPOINT_FILE).is_file():
-            pytest.skip(f"{model_dir} に実重みが無い")
+            pytest.skip(f"{model_dir} has no real weights")
 
         census = bn.checkpoint_dtypes(model_dir)
 
@@ -1010,11 +1077,13 @@ class TestCheckpointCensus:
 
     @pytest.mark.parametrize("checkpoint", ["hr", "lucida"])
     def test_the_pinned_revision_is_the_one_the_script_bakes(self, checkpoint: str):
-        """帰属表の固定 revision（組み立てが容器の出所を突き合わせる値）と、台本が容器へ焼く
-        手元の取得記録の revision の一致。
+        """The pinned revision of the attribution table (the value assembly checks the
+        container's provenance against) agrees with the revision of the local download record the
+        script bakes into the container.
 
-        取得記録の無い機では SKIP（`inputs/` はリポ管理外）。食い違うと、手元で焼いた系列が
-        全て組み立ての出所の門で落ちる（上流の更新を取り込むなら固定値を動かす）。
+        SKIP on a machine without the download record (`inputs/` is outside the repository). If
+        they disagree, every locally baked series fails assembly's provenance gate (to take an
+        upstream update, move the pinned value).
         """
         from _shared.upstream import SNAPSHOT_RECORD_DIR, SNAPSHOT_RECORD_FILE, snapshot_revision
         from birefnet.card import BIREFNET_CHECKPOINTS
@@ -1022,7 +1091,7 @@ class TestCheckpointCensus:
         entry = BIREFNET_CHECKPOINTS[checkpoint]
         model_dir = bn.MODELS_ROOT / entry.repo.split("/", 1)[1]
         if not (model_dir / SNAPSHOT_RECORD_DIR / f"{SNAPSHOT_RECORD_FILE}.metadata").is_file():
-            pytest.skip(f"{model_dir} に取得記録が無い")
+            pytest.skip(f"{model_dir} has no download record")
 
         assert snapshot_revision(model_dir) == entry.revision
 
@@ -1044,7 +1113,7 @@ class TestQualityMeasure:
         assert case["alpha_max_lsb"] == 0
 
     def test_it_measures_the_logit_mask_and_alpha_differences(self):
-        """符号の反転（境界画素）と、8 bit α の段数の動きを別々に数える。"""
+        """Sign flips (boundary pixels) and steps of the 8-bit α are counted separately."""
         reference = {"disc": _logits(-0.01, 2.0, 0.0, 5.0)}
         rounded = {"disc": _logits(0.01, 2.0, 0.0, 5.5)}
 
@@ -1052,15 +1121,15 @@ class TestQualityMeasure:
 
         assert case["bit_exact"] is False
         assert case["max_abs"] == pytest.approx(0.5)
-        # 4 画素中 1 画素（-0.01 → 0.01）だけマスクが反転する。
+        # Only 1 of the 4 pixels (-0.01 → 0.01) flips in the mask.
         assert case["mask_mismatch"] == pytest.approx(0.25)
-        # 8 bit α: 反転した画素は 127 → 128 の 1 段、5.0 → 5.5 は 254 → 255 の 1 段。
+        # 8-bit α: the flipped pixel moves one step 127 → 128, and 5.0 → 5.5 one step 254 → 255.
         assert case["alpha_max_lsb"] == 1
         assert case["alpha_lsb_changed"] == pytest.approx(0.5)
         assert case["rel_rms"] > 0.0
 
     def test_signed_zero_is_not_bit_exact(self):
-        """`torch.equal` は `0.0 == -0.0` を真にする — 無損失の門はビット列で見る。"""
+        """`torch.equal` holds `0.0 == -0.0` true — the lossless gate compares bits."""
         case = bn.measure_quality(
             "f16", {"F16": 1}, {"disc": _logits(0.0, 1.0)}, {"disc": _logits(-0.0, 1.0)}
         )["cases"]["disc"]
@@ -1079,15 +1148,17 @@ class TestQualityMeasure:
         assert quality["cases"]["ramp"]["bit_exact"] is True
 
     def test_the_case_sets_must_match(self):
-        """片方だけのケースを黙って落とすと、落ちたケースの劣化が記録から消える。"""
-        with pytest.raises(AssertionError, match="ケースが食い違う"):
+        """Silently dropping a case present on one side only would erase its degradation from the
+        record."""
+        with pytest.raises(AssertionError, match="cases disagree"):
             bn.measure_quality("f16", {"F32": 1}, {"disc": _logits(1.0)}, {"ramp": _logits(1.0)})
 
     @pytest.mark.parametrize(
         ("census", "gate"), [({"F16": 1, "I64": 1}, "bit-exact"), ({"F32": 1}, "recorded")]
     )
     def test_the_expectation_comes_from_the_checkpoint_not_from_the_result(self, census, gate):
-        """期待（無損失か）は上流の格納から引く — 丸めた結果から導くと門が恒真になる。"""
+        """The expectation (lossless or not) comes from the upstream storage — deriving it from
+        the rounded result would make the gate hold trivially."""
         reference = {"disc": _logits(1.0)}
 
         quality = bn.measure_quality("f16", census, reference, {"disc": _logits(1.5)})
@@ -1103,19 +1174,22 @@ class TestQualityGate:
         bn.assert_quality_gate(bn.measure_quality("f16", {"F16": 1}, reference, dict(reference)))
 
     def test_a_lossless_series_fails_on_any_moved_case(self):
-        """HR 相当で 1 ケースでも動いたら公開しない（丸めの位置の退行を捕まえる）。"""
+        """Like HR, if even one case moved it is not published (catches a regression in where
+        the rounding sits)."""
         reference = {"disc": _logits(1.0, -2.0), "ramp": _logits(0.5)}
         rounded = {"disc": _logits(1.0, -2.0), "ramp": _logits(0.5000001)}
 
-        with pytest.raises(AssertionError, match=r"ビット一致しない: \['ramp'\]"):
+        with pytest.raises(AssertionError, match=r"bit for bit: \['ramp'\]"):
             bn.assert_quality_gate(bn.measure_quality("f16", {"F16": 1}, reference, rounded))
 
     def test_the_lossy_limit_is_half_an_8bit_alpha_step(self):
-        """暫定線は 8 bit α の 0.5 段（深掘り E1 §6 の kill 基準・ADR 0113 決定 5）。"""
+        """The provisional limit is 0.5 step of the 8-bit α (the kill criterion of deep-dive E1
+        §6, ADR 0113 decision 5)."""
         assert pytest.approx(0.5 / 255) == bn.ALPHA_MAE_LIMIT
 
     def test_a_lossy_series_below_the_alpha_limit_passes(self):
-        """logit 0 の近傍（α の傾き 1/4）で 0.004 動かす — α は約 1e-3 動く（線の約半分）。"""
+        """Move by 0.004 near logit 0 (α slope 1/4) — α moves about 1e-3 (about half the
+        limit)."""
         reference = {"disc": _logits(0.0, 0.0), "ramp": _logits(0.0)}
         rounded = {"disc": _logits(0.004, 0.004), "ramp": _logits(0.0)}
         quality = bn.measure_quality("f16", {"F32": 1}, reference, rounded)
@@ -1124,44 +1198,49 @@ class TestQualityGate:
         bn.assert_quality_gate(quality)
 
     def test_a_lossy_series_over_the_alpha_limit_fails(self):
-        """同じ形で 0.02 動かす — α は約 5e-3 動き、線（≈ 1.96e-3）を超える。"""
+        """Move by 0.02 in the same shape — α moves about 5e-3, over the limit (≈ 1.96e-3)."""
         reference = {"disc": _logits(0.0, 0.0), "ramp": _logits(0.0)}
         rounded = {"disc": _logits(0.02, 0.02), "ramp": _logits(0.0)}
         quality = bn.measure_quality("f16", {"F32": 1}, reference, rounded)
         assert quality["worst"]["alpha_mae"] > bn.ALPHA_MAE_LIMIT
 
-        with pytest.raises(AssertionError, match=r"暫定線 .*: \['disc'\]"):
+        with pytest.raises(AssertionError, match=r"provisional line .*: \['disc'\]"):
             bn.assert_quality_gate(quality)
 
     def test_a_lossy_series_that_did_not_move_at_all_fails(self):
-        """対照: 有損失のはずの丸めで 1 ビットも動かないのは、器が同じ重みを見ている形。"""
+        """Control: a rounding that should be lossy moving not a single bit means the harness is
+        looking at the same weights."""
         reference = {"disc": _logits(1.0, -2.0)}
 
-        with pytest.raises(AssertionError, match="恒真"):
+        with pytest.raises(AssertionError, match="trivially true"):
             bn.assert_quality_gate(
                 bn.measure_quality("f16", {"F32": 1}, reference, dict(reference))
             )
 
 
 class TestExportSeriesQuality:
-    """`export_series` の配線: 基準を丸めの前に採り、品質の門を公開の前に掛ける。
+    """The wiring of `export_series`: the reference is taken before the rounding, and the quality
+    gate runs before publishing.
 
-    重い段（実重みの読み込み・Swin 向けのパッチ）は tiny へ差し替える（{@link tiny_load}）。
+    The heavy stages (loading the real weights, the Swin patches) are replaced with tiny ones
+    ({@link tiny_load}).
     """
 
-    #: `export_series` は入口で解像度の刻み（64）を見るので、tiny でも 64² で回す。
+    #: `export_series` checks the resolution step (64) at the entry, so tiny runs at 64² too.
     SIZE = 64
 
     @pytest.fixture
     def wired(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tiny_load):
-        """出所・census・実画像を tiny に差し替えた `export_series` の実走環境。"""
+        """A real run of `export_series` with provenance, census and real images replaced by
+        tiny ones."""
         monkeypatch.setattr(bn, "upstream_provenance", lambda _dir: TINY_PROVENANCE)
         monkeypatch.setattr(bn, "checkpoint_dtypes", lambda _dir: {"F16": 5, "I64": 1})
         corpus = tmp_path / "corpus"
         corpus.mkdir()
         _write_real_images(corpus)
-        # tiny は `disc` の円も実画像の前景も分離できない（判別の sanity は実物の領分）ので、
-        # 順序の検査は外す（実画像の順序検査が**呼ばれること**は個別のテストが見る）。
+        # tiny cannot separate the `disc` circle or the real images' foreground (the
+        # discriminating sanity check belongs to the real model), so the order checks are
+        # removed (that the real-image order check **is called** is checked by its own test).
         monkeypatch.setattr(bn, "_sanity", lambda mattes: {"cases": sorted(mattes)})
         monkeypatch.setattr(bn, "_real_sanity", lambda ratios: dict(ratios))
         return tmp_path, corpus
@@ -1175,7 +1254,8 @@ class TestExportSeriesQuality:
         )
 
         quality = json.loads((out_dir / bn.QUALITY_FILE).read_text(encoding="utf-8"))
-        # 品質計測は `--real-images` 無しでも合成 4 + 実画像 4 の 8 ケース。
+        # The quality measurement has 8 cases, 4 synthetic + 4 real images, even without
+        # `--real-images`.
         expected = sorted(
             [name for name, _ in bn.build_cases(self.SIZE)]
             + [name for name, _file, _why in bn.REAL_CASES]
@@ -1183,7 +1263,7 @@ class TestExportSeriesQuality:
         assert sorted(quality["cases"]) == expected
         assert quality["gate"] == "bit-exact"
         assert quality["worst"]["bit_exact"] is True
-        # golden には実画像を入れない（`real_images` 無し）。
+        # The golden holds no real images (no `real_images`).
         assert all(not name.startswith(f"{bn.IO_PREFIX}photo-") for name in summary["io"])
         assert summary["dtype"] == "f16"
         assert summary["quality"]["gate"] == "bit-exact"
@@ -1200,7 +1280,8 @@ class TestExportSeriesQuality:
             dtype="f16",
         )
 
-        # 1 本目（基準）は丸めを通らない f32 のラッパ、2 本目が丸める側。
+        # The first (the reference) is an f32 wrapper that skips the rounding; the second is
+        # the rounding side.
         assert tiny_load == [
             "load",
             ("round", "f32"),
@@ -1213,9 +1294,11 @@ class TestExportSeriesQuality:
         ]
 
     def test_a_failed_quality_gate_publishes_nothing(self, wired, monkeypatch):
-        """MUST: 門は公開の前 — 落ちた実走が「検収門を通れる資産」を残さない。"""
+        """MUST: the gate comes before publishing — a failed run leaves no "asset that would pass
+        the acceptance gate"."""
         tmp_path, corpus = wired
-        # 故障注入: 基準だけ別の重みで採る（HR 相当なのに差が出る形）。
+        # Fault injection: only the reference is taken with other weights (a difference shows up
+        # although it is HR-like).
         real_reference = bn.reference_outputs
         monkeypatch.setattr(
             bn,
@@ -1224,7 +1307,7 @@ class TestExportSeriesQuality:
         )
         out_dir = tmp_path / "series-f16"
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="does not match f32 bit for bit"):
             bn.export_series(
                 Path("/nonexistent"), out_dir, self.SIZE, corpus_root=corpus, dtype="f16"
             )
@@ -1232,10 +1315,11 @@ class TestExportSeriesQuality:
         assert not out_dir.exists()
 
     def test_a_lossy_checkpoint_is_recorded_and_published(self, wired, monkeypatch):
-        """有損失の配線: census が F32・重みが f16 で表せない tiny（Lucida 相当）。
+        """The lossy wiring: a tiny with an F32 census and weights not representable in f16
+        (like Lucida).
 
-        門は `recorded`（ビット一致を期待しない）で、差は線の内側なので公開され、
-        `quality.json` にビット不一致が残る。
+        The gate is `recorded` (no bit identity expected), the difference is inside the limit, so
+        it is published, and `quality.json` keeps the bit mismatch.
         """
         tmp_path, corpus = wired
         monkeypatch.setattr(bn, "checkpoint_dtypes", lambda _dir: {"F32": 5, "I64": 1})
@@ -1254,7 +1338,8 @@ class TestExportSeriesQuality:
         assert summary["quality"]["gate"] == "recorded"
 
     def test_the_real_images_are_checked_without_real_images(self, wired, monkeypatch):
-        """圧縮系列は `--real-images` 無しでも、丸めた実画像 4 枚の出力へ前景比の順序を掛ける。"""
+        """A compressed series applies the foreground-ratio order check to the rounded outputs of
+        the 4 real images even without `--real-images`."""
         tmp_path, corpus = wired
         seen: list[set[str]] = []
 
@@ -1277,12 +1362,12 @@ class TestExportSeriesQuality:
         tmp_path, corpus = wired
 
         def _broken(_ratios):
-            raise AssertionError("実画像の前景比の順序が逆")
+            raise AssertionError("the real images' foreground ratios are in the wrong order")
 
         monkeypatch.setattr(bn, "_real_sanity", _broken)
         out_dir = tmp_path / "series-f16"
 
-        with pytest.raises(AssertionError, match="順序が逆"):
+        with pytest.raises(AssertionError, match="wrong order"):
             bn.export_series(
                 Path("/nonexistent"), out_dir, self.SIZE, corpus_root=corpus, dtype="f16"
             )

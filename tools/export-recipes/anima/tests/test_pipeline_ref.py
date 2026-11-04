@@ -1,12 +1,15 @@
-"""`anima/pipeline_ref.py` のうち**実重みが要らない**部分の約束事。
+"""The contracts of the part of `anima/pipeline_ref.py` that **needs no real weights**.
 
-ここで固定するのは、壊れても実行時に例外が出ず**数だけが静かにずれる**側だけ:
+Only the side where a breakage raises nothing at run time and **only the numbers silently drift**
+is pinned here:
 
-- sigma スケジュールの形（shift が本当に効いている / 終端 0 / 単調減少 / f32）
-- 逆正規化のチャネル軸（rank5 の軸 1 — 取り違えても要素数が合うので shape 検査を素通りする）
-- プロンプト定数が conditioner の受理集合（`Dim("Ttgt", min=2)`）から外れないこと
+- the shape of the sigma schedule (shift really takes effect / terminal 0 / strictly decreasing /
+  f32)
+- the channel axis of denormalization (axis 1 of rank 5 — a mix-up still matches the element
+  count, so it slips past shape checks)
+- the prompt constants stay inside the conditioner's accepted set (`Dim("Ttgt", min=2)`)
 
-実重みを要する emit / フィクスチャ生成は手動（README 参照）。
+The emit / fixture generation that needs real weights is manual (see the README).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from anima import pipeline_ref as anima_pipeline
 
 class TestSigmaSchedule:
     def test_shape_and_terminal_zero(self):
-        """`step()` が `sigmas[i+1]` を読むので終端 0 が 1 つ余分に要る。"""
+        """`step()` reads `sigmas[i+1]`, so one extra terminal 0 is needed."""
         sigmas = anima_pipeline.sigma_schedule(32, anima_pipeline.SHIFT)
 
         assert sigmas.dtype == np.float32
@@ -34,10 +37,11 @@ class TestSigmaSchedule:
         assert np.all(np.diff(sigmas) < 0)
 
     def test_shift_bends_the_schedule_upward(self):
-        """shift>1 は sigma を**押し上げる**（`shift·s/(1+(shift−1)s) ≥ s`）。
+        """shift>1 **pushes sigma up** (`shift·s/(1+(shift−1)s) ≥ s`).
 
-        乗除を取り違える / shift を分母だけに掛ける類の誤りは、この向きが反転して落ちる。
-        端点（s=1 と終端 0）は shift に依らず不動なので内側だけを見る。
+        Errors such as swapping multiplication and division / applying shift to the denominator
+        only flip this direction and fail. The end points (s=1 and the terminal 0) do not move
+        with shift, so only the interior is checked.
         """
         plain = anima_pipeline.sigma_schedule(32, 1.0)
         shifted = anima_pipeline.sigma_schedule(32, 3.0)
@@ -46,7 +50,7 @@ class TestSigmaSchedule:
         assert shifted[0] == plain[0]
 
     def test_two_steps_is_the_smallest_usable_schedule(self):
-        """`linspace` は num=1 で 0 除算になる。下限が 2 であることを踏んでおく。"""
+        """`linspace` divides by zero with num=1. This exercises the lower bound of 2."""
         sigmas = anima_pipeline.sigma_schedule(2, anima_pipeline.SHIFT)
 
         assert len(sigmas) == 3
@@ -67,10 +71,10 @@ class _FakeVae:
 
 class TestDenormalizeLatents:
     def test_channel_axis_is_one(self):
-        """MUST: per-channel 定数はチャネル軸（rank5 の軸 1）に当たる。
+        """MUST: the per-channel constants apply to the channel axis (axis 1 of rank 5).
 
-        軸を取り違えても要素数は合う（broadcast が通ってしまう）ので、**チャネルごとに
-        違う値**を配って初めて検出できる。
+        A mixed-up axis still matches the element count (the broadcast goes through), so it is
+        detected only by handing out **a different value per channel**.
         """
         vae = _FakeVae([0.0, 10.0], [1.0, 1.0])
         latents = torch.zeros(1, 2, 3, 3)
@@ -82,7 +86,8 @@ class TestDenormalizeLatents:
         assert torch.all(out[:, 1] == 10.0)
 
     def test_std_scales_before_the_mean_is_added(self):
-        """`z/(1/std) + mean` — mean を先に足す実装は倍率が mean にも掛かってずれる。"""
+        """`z/(1/std) + mean` — an implementation that adds mean first also scales mean and
+        drifts."""
         vae = _FakeVae([1.0], [4.0])
         latents = torch.full((1, 1, 1, 1), 2.0)
 
@@ -93,16 +98,19 @@ class TestDenormalizeLatents:
 
 class TestPromptConstants:
     def test_neither_prompt_is_empty(self):
-        """空プロンプトの T5 id 列は長さ 1 になり conditioner の `Dim(min=2)` から外れる。"""
+        """An empty prompt's T5 id sequence has length 1, outside the conditioner's
+        `Dim(min=2)`."""
         assert anima_pipeline.PROMPT.strip() != ""
         assert anima_pipeline.NEGATIVE_PROMPT.strip() != ""
 
 
 class TestComponentDtype:
-    """系列ごとのコンポーネント別格納 dtype（ADR 0019 — 資産系列と 1 対 1）。
+    """The per-component storage dtype of each series (ADR 0019 — one to one with the asset
+    series).
 
-    ずれると「フィクスチャの参照だけ別のモデルの数」になり、通しチェーンの差が
-    量子化誤差と実装誤差の合成に化ける（tolerance を緩める方向にしか効かない）。
+    If they drift, "only the fixture's reference holds another model's numbers", and the
+    difference of the end-to-end chain turns into a mix of quantization error and implementation
+    error (which only ever pushes toward loosening the tolerance).
     """
 
     LABELS = ("text_encoder", "text_conditioner", "transformer", "vae")
@@ -117,11 +125,13 @@ class TestComponentDtype:
 
     @pytest.mark.parametrize("label", LABELS)
     def test_bf16_series_rounds_every_component_to_bf16(self, label):
-        """忠実プリセットは 4 役とも bf16（ADR 0131 決定 3 — 資産は `anima-bf16/`）。"""
+        """The faithful preset is bf16 for all four roles (ADR 0131 decision 3 — the assets are
+        `anima-bf16/`)."""
         assert anima_pipeline.component_dtype("bf16", label) == "bf16"
 
     def test_i8_series_quantizes_only_the_transformer(self):
-        """資産は `outputs/series/anima-i8/transformer` + `outputs/series/anima-f16/` の他 3 つ。"""
+        """The assets are `outputs/series/anima-i8/transformer` + the other three of
+        `outputs/series/anima-f16/`."""
         assert anima_pipeline.component_dtype("i8", "transformer") == "i8"
         for label in ("text_encoder", "text_conditioner", "vae"):
             assert anima_pipeline.component_dtype("i8", label) == "f16", label
@@ -133,10 +143,12 @@ class TestComponentDtype:
         assert len(set(roots.values())) == len(roots)
 
     def test_the_cli_only_accepts_series_that_have_a_seat_in_every_table(self):
-        """受理集合 = 3 表のキー集合。ずれると `--dtype` が素の KeyError まで落ちる。
+        """The accepted set = the key set of the three tables. If they drift, `--dtype` falls
+        through to a bare KeyError.
 
-        `export.py` 側の格納 dtype（i4 のような参照経路を持たない系列を含む）を argparse の
-        choices へ直結すると、text_encoder のロードまで走った末に診断文言ゼロで死ぬ。
+        Wiring `export.py`'s storage dtypes (including series without a reference path, such as
+        i4) straight into argparse's choices would run as far as loading the text_encoder and
+        then die without a single diagnostic.
         """
         accepted = set(anima_pipeline.REF_DTYPES)
 

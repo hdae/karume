@@ -1,14 +1,15 @@
-"""母音検出配布形のモデルカード描画（`vowel_detector.card`）— カード側にしか無い門。
+"""Model card rendering of the vowel-detection distribution (`vowel_detector.card`) — the checks
+that exist only on the card side.
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。
+The real distribution's `karume.json` is not used — the job here is to see that the fake
+manifest's values appear in the body as they are (= that not a single hand-written number is mixed
+in), so building it with values **different** from the real ones detects more.
 
-manifest からの導出（表・数・使い方）は `vowel_detector/tests/test_distribution.py` の
-`TestVowelDetectorModelCard` が**組み立て 1 周ぶん**で見る。これまで母音検出のテンプレートは
-core の `tests/test_modelcard.py` に固有の節を持っていなかったので `test_card.py` を作って
-いなかったが、「案内するロード入口」は組み立てを 1 周しなくても観測できるカード側だけの門なので
-ここに置く（2026-08-30）。
+The derivation from the manifest (tables, numbers, usage) is checked **over one assembly pass** by
+`TestVowelDetectorModelCard` in `vowel_detector/tests/test_distribution.py`. Until now the
+vowel-detection template had no section of its own in the core's `tests/test_modelcard.py`, so no
+`test_card.py` existed; but "the advertised load entry point" is a card-only check that can be
+observed without a full assembly pass, so it goes here (2026-08-30).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from vowel_detector.card import (
     render_vowel_detector_model_card,
 )
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: Repository ID spelled in the usage snippet (dist passes it from the pipeline's declaration).
 REPO = "hdae/fake-repo"
 
 
@@ -29,9 +30,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of weights (`container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so only its shape follows the real one (the lengths and
+    sha256 of the 2 descriptors).
     """
     return {
         "container": {
@@ -45,7 +47,7 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _vowel_detector_manifest() -> dict[str, Any]:
-    """母音検出の最小 manifest（値は実物と重ならない偽値）。"""
+    """Minimal vowel-detection manifest (fake values that do not overlap with the real ones)."""
     return {
         "format": "karume/5",
         "generator": "karume/9.9.9",
@@ -74,15 +76,16 @@ def _vowel_detector_manifest() -> dict[str, Any]:
 
 
 class TestVowelDetectorEntryPoint:
-    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+    """The load entry point the card advertises — `fromPretrained` only."""
 
     def test_it_does_not_advertise_the_local_asset_entry_point(self) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）。
+        """`fromAssets` is not advertised (ruling of 2026-08-29).
 
-        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
-        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
-        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
-        見るのは、Usage ごと消えても通る門にしないため。
+        The split distribution form can be read as well now (X2-101), but that surface is meant
+        for local debugging and assumes the caller holds the bytes; the ordinary entry point for a
+        reader using HF is `fromPretrained`. Listing both would leave the reader to decide which
+        one to use. `fromPretrained` is checked as well so that the check does not pass when the
+        whole Usage section disappears.
         """
         card = render_vowel_detector_model_card(_vowel_detector_manifest(), REPO)
         assert "fromAssets" not in card
@@ -90,7 +93,8 @@ class TestVowelDetectorEntryPoint:
 
 
 class TestVowelDetectorLengthRange:
-    """カードが名乗る長さの範囲 — 下限も上限も manifest の `minFrames` / `maxFrames` 由来。"""
+    """The length range the card states — both bounds come from the manifest's `minFrames` /
+    `maxFrames`."""
 
     @staticmethod
     def _card(min_frames: int) -> str:
@@ -101,7 +105,8 @@ class TestVowelDetectorLengthRange:
         return render_vowel_detector_model_card(manifest, REPO)
 
     def test_it_states_the_lower_bound_the_pipeline_enforces(self) -> None:
-        """`minFrames` 未満はパイプラインが拒む — カードが「任意長」と言うと約束を超える。"""
+        """The pipeline refuses anything below `minFrames` — a card saying "any length" would
+        promise more than it delivers."""
         card = self._card(4)
 
         assert "any length" not in card

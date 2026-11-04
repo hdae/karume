@@ -1,17 +1,22 @@
-"""Gemma 系トークナイザの compile（`_shared/gemma_tokenizer.py`）— 受理集合と畳み方。
+"""The compile of the Gemma tokenizers (`_shared/gemma_tokenizer.py`) — the accepted set and how
+it is folded.
 
-固定するのは、**通してしまうと実行時まで表面化しない**側だけ:
+Only what **would not surface until run time if let through** is pinned here:
 
-- 受理集合の外を **compile 時に落とす**こと（ADR 0084 決定 1 — 実行時に散らさないのが
-  compile-to-asset を採る理由そのもの）。normalizer / pre_tokenizer / decoder /
-  model のフラグは 1 欄でも違えば別のトークナイザで、通せば id 列だけが静かに変わる
-- byteIds を **256 本明示**で引き、欠落を落とすこと（`base + byte` の連番を仮定しない）
-- merge の対の重複・語彙に無い側を落とすこと（上流は HashMap なので後勝ちで沈黙する）
-- 部分集合の切り出し（{@link subset_keys}）が、走査中に現れうる対を覆うこと
+- anything outside the accepted set **fails at compile time** (ADR 0084 decision 1 — not
+  scattering failures over run time is the very reason for compile-to-asset). A normalizer /
+  pre_tokenizer / decoder / model flag that differs in even one field is a different tokenizer;
+  let through, only the id sequence changes, silently
+- byteIds are looked up as **256 explicit entries** and a missing one fails (no `base + byte`
+  numbering is assumed)
+- a duplicated merge pair or a side not in the vocabulary fails (upstream is a HashMap, so the
+  later entry wins silently)
+- the subset extraction ({@link subset_keys}) covers every pair that can appear while scanning
 
-実資産（32MB の `tokenizer.json` × 2）はローカルにしか無いので、ここは**合成の最小資産**で
-回す。合成資産は `tokenizers.Tokenizer.from_str` にそのまま食わせられる形なので、期待値の
-採取経路（{@link build_fixture}）まで同じ台本で通る。
+The real assets (2 × a 32 MB `tokenizer.json`) exist only locally, so this runs on a **synthetic
+minimal asset**. The synthetic asset is in a form `tokenizers.Tokenizer.from_str` accepts as is,
+so the same script runs all the way through the path that captures the expected values
+({@link build_fixture}).
 """
 
 from __future__ import annotations
@@ -50,7 +55,8 @@ class TestAcceptance:
         assert compiled.merges == [(260, 261), (264, 262), (263, 260), (266, 261)]
 
     def test_a_wrapping_post_processor_is_recognised(self) -> None:
-        """EmbeddingGemma 側の形（`<bos>` … `<eos>`）— gemma4 と同じ実装で受ける。"""
+        """The EmbeddingGemma shape (`<bos>` … `<eos>`) — accepted by the same implementation as
+        gemma4."""
         wrapped = _tokenizer_json(
             post_processor={
                 "type": "TemplateProcessing",
@@ -86,7 +92,8 @@ class TestAcceptance:
             compile_tokenizer(_tokenizer_json(**{field: value}))
 
     def test_a_different_normalizer_is_rejected(self) -> None:
-        """metaspace の入り方が変われば id 列が丸ごと変わる（例外にはならない）。"""
+        """A change in how the metaspace is inserted changes the whole id sequence (it raises no
+        exception)."""
         with pytest.raises(UnsupportedTokenizerError):
             compile_tokenizer(
                 _tokenizer_json(
@@ -99,7 +106,7 @@ class TestAcceptance:
             compile_tokenizer(_tokenizer_json(pre_tokenizer={"type": "Metaspace"}))
 
     def test_a_reordered_decoder_chain_is_rejected(self) -> None:
-        """`ByteFallback` と `Replace` の順が入れ替わると byte run の畳み方が変わる。"""
+        """Swapping the order of `ByteFallback` and `Replace` changes how a byte run is folded."""
         reordered = {
             "type": "Sequence",
             "decoders": [
@@ -133,16 +140,18 @@ class TestAcceptance:
 
 class TestByteFallbackTable:
     def test_a_missing_byte_token_is_rejected(self) -> None:
-        """`base + byte` の連番は**この資産の実測事実**であって schema の保証ではない。"""
+        """The `base + byte` numbering is **a measured fact of this asset**, not a guarantee of the
+        schema."""
         raw = _tokenizer_json()
         removed = raw["model"]["vocab"].pop(byte_token(0x7F))
-        raw["model"]["vocab"]["<0x7f>"] = removed  # 小文字綴りは上流の綴りではない
+        raw["model"]["vocab"]["<0x7f>"] = removed  # the lower-case spelling is not upstream's
 
         with pytest.raises(UnsupportedTokenizerError, match="0x7F"):
             compile_tokenizer(raw)
 
     def test_a_byte_shaped_token_beyond_the_256_is_rejected(self) -> None:
-        """decode の byte 判定（id 集合）と上流の判定（綴りの形）が食い違う形を塞ぐ。"""
+        """Closes the case where decode's byte test (an id set) and upstream's test (the shape of
+        the spelling) disagree."""
         raw = _tokenizer_json()
         raw["model"]["vocab"]["<0xZZ>"] = len(raw["model"]["vocab"])
 
@@ -152,18 +161,19 @@ class TestByteFallbackTable:
 
 class TestMerges:
     def test_a_duplicated_pair_is_rejected(self) -> None:
-        """上流は HashMap なので重複対は後勝ちで沈黙し、分割規則だけが別物になる。"""
+        """Upstream is a HashMap, so a duplicated pair silently lets the later entry win and only
+        the split rule becomes something else."""
         raw = _tokenizer_json()
         raw["model"]["merges"].append(["a", "b"])
 
-        with pytest.raises(UnsupportedTokenizerError, match="重複"):
+        with pytest.raises(UnsupportedTokenizerError, match="duplicated"):
             compile_tokenizer(raw)
 
     def test_a_pair_whose_join_is_not_in_the_vocabulary_is_rejected(self) -> None:
         raw = _tokenizer_json()
         raw["model"]["merges"].append(["c", "a"])
 
-        with pytest.raises(UnsupportedTokenizerError, match="語彙に無い"):
+        with pytest.raises(UnsupportedTokenizerError, match="not in the vocabulary"):
             compile_tokenizer(raw)
 
     def test_the_old_string_form_is_rejected(self) -> None:
@@ -200,7 +210,8 @@ class TestSubsetKeys:
         assert keys == {"a", "b", "c", "ab", "bc", "abc"}
 
     def test_spaces_are_folded_to_metaspace_before_slicing(self) -> None:
-        """記号は**正規化後**の文字列の部分列になる — 生のまま切ると `▁a` を取り落とす。"""
+        """The symbols are substrings of the **normalized** string — slicing the raw string would
+        miss `▁a`."""
         assert "▁a" in subset_keys([" a"], max_token_chars=2)
 
     def test_longer_substrings_than_the_limit_are_not_needed(self) -> None:
@@ -212,9 +223,11 @@ class TestSubsetKeys:
 
 class TestFixture:
     def test_expectations_come_from_the_upstream_tokenizer(self, tmp_path: Any) -> None:
-        """期待値の経路に compile を通さない（通すと突合が恒真化する — ADR 0084 決定 7）。"""
-        # 上流参照の `tokenizers` は家族グループ（transformers）の推移依存で、既定 sync の CI には
-        # 無い — 他の家族依存テストと同じく SKIP で守る（`test_optional_group_imports.py` の作法）。
+        """The path of the expected values does not go through compile (if it did, the match would
+        become vacuous — ADR 0084 decision 7)."""
+        # The upstream reference `tokenizers` is a transitive dependency of a family group
+        # (transformers) and is absent from the default-sync CI — guarded by a SKIP like the other
+        # family-dependent tests (the convention of `test_optional_group_imports.py`).
         pytest.importorskip("tokenizers")
         from _shared.gemma_tokenizer import EncodeCase
 
@@ -226,22 +239,23 @@ class TestFixture:
         fixture = build_fixture(
             tokenizer_json=path,
             compiled=compiled,
-            encode_cases=[EncodeCase("abc", "merge が 2 段掛かる", "abc")],
+            encode_cases=[EncodeCase("abc", "two merge steps apply", "abc")],
             decode_cases=[],
             source={},
         )
 
         [case] = fixture["encode"]
-        # "abc" は ("a","b") → ("ab","c") の 2 段で 1 トークンへ畳まれる。
+        # "abc" folds into one token in 2 steps: ("a","b") → ("ab","c").
         assert case["ids"] == [compiled.vocab.index("abc")]
-        # 部分集合には走査中に現れる記号と対が揃っている。
+        # The subset holds every symbol and pair that appears while scanning.
         assert [row for row in fixture["asset"]["merges"] if row[2] == 0]
         assert fixture["decode"][0]["name"] == "roundtrip-abc"
         assert fixture["decode"][0]["text"] == "abc"
 
 
 class TestEmit:
-    """`emit` は資産とフィクスチャを**揃ってからだけ**書く（片方だけ新しくなる口を開けない）。"""
+    """`emit` writes the asset and the fixture **only once both are ready** (no path where only one
+    of them gets newer)."""
 
     def test_a_failing_fixture_capture_leaves_no_asset_behind(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -254,7 +268,8 @@ class TestEmit:
         def _failing_capture(**_: Any) -> dict[str, Any]:
             raise RuntimeError("upstream capture failed")
 
-        # 出所はリポジトリ相対で書くので、合成資産の置き場を根に見立てる。
+        # The source is written relative to the repository, so the synthetic asset's directory
+        # stands in for the root.
         monkeypatch.setattr(shared_tokenizer, "REPO_ROOT", tmp_path)
         monkeypatch.setattr(shared_tokenizer, "build_fixture", _failing_capture)
 
@@ -269,9 +284,11 @@ class TestEmit:
         assert not fixture_path.exists()
 
 
-#: 異体字セレクタ（`Mn` だが結合クラスは 0 — 幅ゼロで、目でも隣の絵文字と区別できない）。
-#: `SHARED_ENCODE_CASES` を綴っているソース（門はランタイムの文字列ではなく**綴り**を見る —
-#: `\u200d` は実行時には生の U+200D になるので、`case.text` を見ても書き分けは判らない）。
+#: Variation selectors (`Mn` but combining class 0 — zero width, and visually indistinguishable
+#: from the emoji next to them).
+#: The source that spells `SHARED_ENCODE_CASES` (the check looks at the **spelling**, not the
+#: run-time string — `\u200d` becomes a raw U+200D at run time, so `case.text` cannot tell how it
+#: was written).
 SHARED_CASES_SOURCE = Path(shared_tokenizer.__file__)
 
 VARIATION_SELECTORS = frozenset(
@@ -280,15 +297,16 @@ VARIATION_SELECTORS = frozenset(
 
 
 def _must_be_escaped(char: str) -> bool:
-    """ソースへ生で書いたら「編集で消えても気づけない」文字か。
+    """Whether a character, written raw into the source, "could vanish in an edit unnoticed".
 
-    3 分類で切る（`Cf`/`Mn` の一括ではない — タイ語の `U+0E31` のように、`Mn` でも**字形と
-    して見える**印は生で書いてよい）:
+    Split into 3 classes (not `Cf`/`Mn` as a whole — a mark that is `Mn` but **visible as a
+    glyph**, like Thai `U+0E31`, may be written raw):
 
-    1. `Cf`（書式制御 — ZWJ / ZWNJ など。幅ゼロ）
-    2. 結合クラスが 0 でない結合文字（`A` + `U+0301` は `U+00C1` と**視覚的に完全に同一**で、
-       どちらが書かれているか目視で判定できない = ケースの主張が検証不能になる）
-    3. 異体字セレクタ（1 の親戚で、`Mn` かつ結合クラス 0 なので 1・2 では拾えない）
+    1. `Cf` (format controls — ZWJ / ZWNJ and the like; zero width)
+    2. combining characters with a non-zero combining class (`A` + `U+0301` is **visually
+       identical** to `U+00C1`, and which one is written cannot be told by eye = the case's claim
+       becomes unverifiable)
+    3. variation selectors (a relative of 1; `Mn` with combining class 0, so 1 and 2 miss them)
     """
     return (
         unicodedata.category(char) == "Cf"
@@ -298,18 +316,19 @@ def _must_be_escaped(char: str) -> bool:
 
 
 class TestCaseSpelling:
-    """MUST: 目に見えない文字は `\\uXXXX` で書く（`SHARED_ENCODE_CASES` の注記）。
+    """MUST: invisible characters are written as `\\uXXXX` (the note on `SHARED_ENCODE_CASES`).
 
-    生で書くと、編集の途中で 1 文字消えても**赤くならない**: 期待値は常に上流 `tokenizers`
-    から採り直すので、fixture はその弱くなったケースで焼き直され、`zwj` という名前のケースが
-    ZWJ を 1 つも踏まないまま緑で回り続ける（ケース名と `why` だけが元の主張を名乗る）。
+    Written raw, losing one character during an edit **does not turn anything red**: the expected
+    values are always recaptured from upstream `tokenizers`, so the fixture is rebuilt with the
+    weakened case, and a case named `zwj` keeps running green without a single ZWJ in it (only the
+    case name and `why` still claim the original point).
     """
 
     def test_the_source_spells_invisible_characters_as_escapes(self) -> None:
         source = SHARED_CASES_SOURCE.read_text(encoding="utf-8")
         raw = sorted({f"U+{ord(char):04X}" for char in source if _must_be_escaped(char)})
 
-        assert raw == [], f"生の不可視文字がソースに居る: {raw}"
+        assert raw == [], f"raw invisible characters in the source: {raw}"
 
     @pytest.mark.parametrize(
         ("name", "codepoint", "count"),
@@ -323,7 +342,8 @@ class TestCaseSpelling:
     def test_the_cases_still_carry_the_boundary_they_name(
         self, name: str, codepoint: int, count: int
     ) -> None:
-        """エスケープへ書き換えたことで境界が消えていないこと（上の門を恒真にしない対）。"""
+        """Rewriting into escapes did not remove the boundary (the counterpart that keeps the check
+        above from being vacuous)."""
         case = next(entry for entry in SHARED_ENCODE_CASES if entry.name == name)
 
         assert case.text.count(chr(codepoint)) == count

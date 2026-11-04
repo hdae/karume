@@ -1,53 +1,64 @@
-"""Irodori の i4 系列の**校正付き丸め**（GPTQ × RTN 格子）を回すリグ（perf-ledger Q-2 / Q-3）。
+"""Rig that runs the **calibrated rounding** (GPTQ × RTN grid) of Irodori's i4 series
+(perf-ledger Q-2 / Q-3).
 
-`karume.quant_calib.calibrate_stages` は「stage を 1 つずつ進めながら、その層に実際に流れる
-活性から丸め先を選び直す」駆動で、格納グリッドは {@link karume.quantize.quantize_to_int4} と
-**1 バイトも変わらない**（`scale = group amax / 7`・`q ∈ [−7,+7]`）。変わるのは丸め値と
-scale 台帳の中身だけで、emit 側の格納経路も配布形のバイト構造も一切動かない。
+`karume.quant_calib.calibrate_stages` is a driver that "advances one stage at a time and re-picks
+the rounding targets from the activations that actually flow into that layer", and its storage grid
+is **byte-for-byte the same** as {@link karume.quantize.quantize_to_int4}
+(`scale = group amax / 7`, `q ∈ [−7,+7]`). Only the rounded values and the contents of the scale
+ledger change; neither the storage path on the emit side nor the byte structure of the
+distribution moves at all.
 
-ここが用意するのは core の駆動が要求する 3 つと、Irodori 固有の門 2 つ:
+This module provides the three things the core driver requires, plus two Irodori-specific checks:
 
-1. **stage 列** — DiT の `blocks` をそのまま並べたもの（{@link dit_stages}）。上流の
-   `DiffusionBlock.forward` が「hidden を第 1 位置引数で受けて hidden を返す」形なので
-   **包まない**。接頭辞 {@link STAGE_PREFIX} は `blocks` で、これは
-   **配布ラッパ（`irodori.export.DitGraph` / `DitContextGraph`）の FQN 空間でもある** —
-   ラッパは DiT の部分木を `blocks.<b>.…` / `in_proj` / `out_proj` / `cond_module` と**同じ
-   属性名**で抱える（`irodori.export.TARGET_SCALE_SOURCES` の DiT 2 行が張り替え無しなのは
-   このため）。1 つの block の重みは 2 本のラッパに分かれて載る（条件側 K/V 射影は
-   `dit-context`・残りは `dit` — ADR 0114）が、stage は block 丸ごとのまま（校正の駆動は割る前と
-   同じ）。ここが外れると scale 台帳のキーが容器の initializer 名（= 束縛表の鍵）と空振りする。
-2. **先頭 stage への入力** — {@link capture_stage_batches} が**参照 denoise を実際に回して**
-   先頭 block への `(args, kwargs)` を forward_pre_hook で捕まえる。自前で組み直さないのは
-   計測リグ（`irodori.measure_quant`）と同文で、拡散モデルでは加えて「活性が t で動く」ので
-   **step を横断して**採る。
-3. **stage 分解一致門** — {@link assert_stage_split}。「stage 逐次で回した結果が、同じ
-   forward で `out_norm` へ入った hidden とビット一致する」を見る（丸めを 1 本も当てる前に
-   実測する MUST）。
-4. **過不足一致門** — {@link assert_calib_covers_scan}。校正が丸めた層 = i4 で格納する集合
-   （stage の走査から adaLN を除いた 168 本 — {@link ADALN_SEGMENTS}）。
+1. **The stage sequence** — the DiT's `blocks` laid out as they are ({@link dit_stages}). Upstream
+   `DiffusionBlock.forward` already "takes hidden as the first positional argument and returns
+   hidden", so it is **not wrapped**. The prefix {@link STAGE_PREFIX} is `blocks`, which is
+   **also the FQN space of the distribution wrappers (`irodori.export.DitGraph` /
+   `DitContextGraph`)** — the wrappers hold the DiT's subtrees under **the same attribute names**
+   `blocks.<b>.…` / `in_proj` / `out_proj` / `cond_module` (which is why the two DiT rows of
+   `irodori.export.TARGET_SCALE_SOURCES` need no remapping). The weights of one block are split
+   across the two wrappers (the condition-side K/V projections in `dit-context`, the rest in
+   `dit` — ADR 0114), but a stage stays a whole block (the calibration driver is the same as
+   before the split). If this drifts, the scale ledger's keys miss the containers' initializer
+   names (= the keys of the binding table).
+2. **The input to the first stage** — {@link capture_stage_batches} **actually runs the reference
+   denoise** and captures the `(args, kwargs)` of the first block with a forward_pre_hook. It does
+   not rebuild them itself, for the same reason as the measurement rig (`irodori.measure_quant`);
+   in a diffusion model "the activations also move with t", so they are taken **across steps**.
+3. **The stage-split identity check** — {@link assert_stage_split}. It checks that "the result of
+   running the stages one by one is bit-identical to the hidden that entered `out_norm` in the same
+   forward" (a MUST measured before a single rounding is applied).
+4. **The coverage check** — {@link assert_calib_covers_scan}. The layers the calibration rounded =
+   the set stored as i4 (the 168 found by scanning the stages, minus adaLN —
+   {@link ADALN_SEGMENTS}).
 
-MUST（駆動が**素の DiT** である理由 — この recipe 固有の制約）: `irodori.export` の丸めは
-「`load_*` の直後・パッチ前の参照より前」に置かれ（`irodori.export.fake_quant` の順序 MUST）、
-一方で配布ラッパ（`DitContextGraph` / `DitGraph`）は**パッチ後でしか動かない**（実数形 RoPE 表を
-渡すため — `irodori.patch` のモジュール docstring）。両方は同時に満たせないので、校正の参照
-ループは**上流の正本経路**（`irodori_tts.rf.sample_euler_rf_cfg` が素の `TextToLatentRFDiT` を
-回す形）で採る。素の経路と配布ラッパ 2 本の合成が同じ値を出すことは、**同じ export 実行の中で**
-`irodori.export` の eager 同値門（`EAGER_EQUIV_ATOL = 0`・分割の同値門を含む）が全 golden
-ケースについて実測する — 「stage 逐次 ≡ 素の block ループ」（ここの門）と合わせて、stage 分解が
-配布グラフの経路と一致することが 2 本の実測で閉じる。
+MUST (why the driver runs **the bare DiT** — a constraint specific to this recipe): the rounding
+of `irodori.export` happens "right after `load_*`, before the pre-patch reference" (the ordering
+MUST of `irodori.export.fake_quant`), while the distribution wrappers (`DitContextGraph` /
+`DitGraph`) **only work after patching** (they pass a real-valued RoPE table — the module docstring
+of `irodori.patch`). Both cannot hold at once, so the calibration's reference loop is taken on
+**upstream's canonical path** (`irodori_tts.rf.sample_euler_rf_cfg` running the bare
+`TextToLatentRFDiT`). That the bare path and the composition of the two distribution wrappers give
+the same values is measured **within the same export run** on every golden case by the eager
+equivalence check of `irodori.export` (`EAGER_EQUIV_ATOL = 0`, including the equivalence check of
+the split) — together with "stages one by one ≡ the bare block loop" (the check here), two
+measurements close the claim that the stage split matches the path of the distributed graphs.
 
-MUST: 参照ループは `use_context_kv_cache=False` で回す（{@link capture_stage_batches}）—
-上流の既定（True）は条件 K/V を**block ごとに別のキャッシュ**で渡すので、1 つの kwargs を
-全 stage で使い回す core の駆動と噛み合わず、しかも stage 分解一致門より前に静かに壊れる。
-配布グラフは条件側 K/V を別グラフ（`dit-context`）で 1 回だけ作る（ADR 0114 — 上流のキャッシュと
-同じ意味論）が、値は同じ `project_context_kv` の出力なので、False で採った活性とビット単位で同じ。
-条件側の射影が stage の**中**で走ることは、その 72 本が GPTQ で自分の入力を見るための要件でもある。
+MUST: the reference loop runs with `use_context_kv_cache=False` ({@link capture_stage_batches}) —
+upstream's default (True) passes the condition K/V in **a separate cache per block**, which does
+not fit the core driver that reuses one kwargs for every stage, and it breaks silently before the
+stage-split identity check. The distributed graphs build the condition-side K/V once in a separate
+graph (`dit-context`) (ADR 0114 — the same semantics as upstream's cache), but the values are the
+output of the same `project_context_kv`, so they are bit-identical to the activations taken with
+False. Running the condition-side projections **inside** the stage is also what lets those 72
+modules see their own inputs in GPTQ.
 
-NOTE（`irodori.measure_quant` のリグと共有しない理由）: あちらは 3 グリッド × 品質計測のための
-足場で、駆動は**パッチ後の配布ラッパ**（`DitBlockStage` という写しを持つ）に閉じている。
-export 側はパッチ前の素の経路・配布条件（stage 外を先に丸める）・出荷可能な台帳の取り出しが
-要る。写しを 1 本にまとめると、片方の前提が動いたときにもう片方が黙って追随する — 各リグが
-自前の一致門で独立に自己検証する形にしてある。
+NOTE (why this is not shared with the rig of `irodori.measure_quant`): that one is scaffolding for
+3 grids × quality measurement, and its driver is confined to **the patched distribution wrappers**
+(it keeps a copy called `DitBlockStage`). The export side needs the bare pre-patch path, the
+distribution conditions (round what is outside the stages first) and extraction of a shippable
+ledger. Merging the copies into one would let one side silently follow when the other side's
+premise moves — instead each rig verifies itself independently with its own identity check.
 """
 
 from __future__ import annotations
@@ -73,25 +84,29 @@ from karume.quantize import DEFAULT_GROUP_SIZE, Int4Report, channel_rows, iter_q
 from . import export as ex
 from . import pipeline_ref as ip
 
-#: stage 列の FQN 接頭辞（`TextToLatentRFDiT.blocks` — 配布ラッパの属性名と同じ）。
+#: FQN prefix of the stage sequence (`TextToLatentRFDiT.blocks` — the same as the attribute name
+#: in the distribution wrappers).
 STAGE_PREFIX = "blocks"
 
-#: 校正付き丸めの方式。GPTQ 以外は scale 台帳を返さない（`karume.quant_calib` の MUST）。
+#: Method of the calibrated rounding. Methods other than GPTQ return no scale ledger (the MUST of
+#: `karume.quant_calib`).
 CALIB_METHOD = "gptq"
 
-#: 丸め先の格納グリッド。**`rtn` × g32 = 既存 i4 格子そのもの**（唯一の出荷経路）で、
-#: `irodori.measure_quant.CALIB_CONFIGS` の `gptq-rtn` と同じ指定。
+#: Storage grid of the rounding targets. **`rtn` × g32 = the existing i4 grid itself** (the only
+#: shipping path), the same setting as `gptq-rtn` in `irodori.measure_quant.CALIB_CONFIGS`.
 CALIB_GRID = GridSpec(kind="rtn", group_size=DEFAULT_GROUP_SIZE)
 
-#: 校正で捕捉する step 数の既定（1 ケースあたり）。**波 J-2 の計測既定と同じ**
-#: （`irodori.measure_quant` の `--calib-steps` 既定 = 参照ループ全長）— 品質裁定が採られた
-#: 条件を下回らせないため。`--calib-steps` で下げられるのは smoke 用で、使った値は
-#: `calib_provenance.json` に残る。
+#: Default number of steps captured for calibration (per case). **The same as the measurement
+#: default of iteration J-2** (the `--calib-steps` default of `irodori.measure_quant` = the full
+#: reference loop) — so as not to fall below the conditions the quality ruling was made under.
+#: Lowering it with `--calib-steps` is for smoke runs, and the value used is recorded in
+#: `calib_provenance.json`.
 CALIB_STEPS = ip.NUM_STEPS
 
-#: `DiffusionBlock.forward` の引数のうち**batch 軸を持つ**もの（cond 側 = 行 0 を切り出す）。
-#: 上流の independent CFG は cond と uncond を**1 forward へ束ねて**回す（`x_t` を
-#: `cfg_batch_mult` 本 cat する）ので、捕捉したバッチの行 0 だけが cond 側になる。
+#: The arguments of `DiffusionBlock.forward` that **have a batch axis** (the cond side = row 0 is
+#: sliced out). Upstream's independent CFG runs cond and uncond **batched into one forward** (it
+#: concatenates `cfg_batch_mult` copies of `x_t`), so only row 0 of the captured batch is the cond
+#: side.
 BATCHED_BLOCK_ARGS = frozenset(
     {
         "x",
@@ -105,31 +120,37 @@ BATCHED_BLOCK_ARGS = frozenset(
     }
 )
 
-#: 同 forward 引数のうち batch 軸を持たないもの（そのまま次 stage へ渡る）。
-#: `context_kv` は {@link capture_stage_batches} の MUST により常に `None`。
+#: The arguments of the same forward without a batch axis (passed on to the next stage as they
+#: are). `context_kv` is always `None` by the MUST of {@link capture_stage_batches}.
 UNBATCHED_BLOCK_ARGS = frozenset({"freqs_cis", "self_mask", "context_kv"})
 
-#: hidden を運ぶ引数名（core の駆動は hidden を**位置引数**で渡すので kwargs から抜く）。
+#: Name of the argument that carries hidden (the core driver passes hidden as a **positional
+#: argument**, so it is removed from kwargs).
 HIDDEN_ARG = "x"
 
-#: adaLN（modulation の scale / shift / gate を作る層）を指す FQN セグメント。
+#: FQN segments that point at adaLN (the layers that produce the modulation's scale / shift /
+#: gate).
 #:
-#: i8+dit4 席はここに載る block 内 144 本（12 block × 12 本）を i4 から外して **i8 で丸める** —
-#: 聴感裁定 2026-08-23: modulation の scale / shift / gate は量子化感度が高く、i8 へ戻すと
-#: 読み上げ方が f32 へ寄る（コスト +13.1 MiB = dit i4 payload +6.0%）。
+#: The i8+dit4 slot takes the 144 in-block modules found here (12 blocks × 12) out of i4 and
+#: **rounds them to i8** — listening ruling of 2026-08-23: the modulation's scale / shift / gate
+#: are highly sensitive to quantization, and moving them back to i8 brings the delivery closer to
+#: f32 (cost +13.1 MiB = dit i4 payload +6.0%).
 ADALN_SEGMENTS = frozenset({"attention_adaln", "mlp_adaln"})
 
 
-class _CalibStepsReached(Exception):  # noqa: N818 — 異常ではなく打ち切りの合図
-    """必要な step 数ぶん捕まえた合図（参照ループを途中で畳むための番兵）。"""
+class _CalibStepsReached(Exception):  # noqa: N818 — a stop signal, not an error
+    """Signal that the required number of steps has been captured (a sentinel that cuts the
+    reference loop short)."""
 
 
 @dataclass(frozen=True)
 class CalibContext:
-    """校正が要る「重み以外」の一切（`irodori.export.export_series` が組んで渡す）。
+    """Everything "other than the weights" that calibration needs (built and passed in by
+    `irodori.export.export_series`).
 
-    トークナイザと条件の作り方は `irodori.pipeline_ref` の関数をそのまま呼ぶ — 写しを作ると
-    「校正で見る活性」と「評価で流れる活性」が別の前処理で作られはじめる。
+    The tokenizers and the conditions are built by calling the functions of `irodori.pipeline_ref`
+    as they are — a copy would start producing "the activations seen in calibration" and "the
+    activations that flow in evaluation" through different preprocessing.
     """
 
     model_dir: Path
@@ -148,12 +169,13 @@ class CalibContext:
 
 
 class CapturedRun(NamedTuple):
-    """1 ケースぶんの捕捉。
+    """The capture of one case.
 
-    `batches` は cond 側（行 0）へ切り出した校正入力、`graph_batch` は**先頭 forward の生**
-    （batch 軸そのまま）、`block_loop_output` は**同じ forward** で `out_norm` へ入った
-    hidden。後ろの 2 つが {@link assert_stage_split} の突合の両辺で、同じ forward から採る
-    ので「別条件どうしを比べている」余地が無い。
+    `batches` is the calibration input sliced to the cond side (row 0), `graph_batch` is **the raw
+    first forward** (batch axis as is), and `block_loop_output` is the hidden that entered
+    `out_norm` in **the same forward**. The last two are the two sides of the comparison in
+    {@link assert_stage_split}; both come from the same forward, so there is no room for "comparing
+    different conditions".
     """
 
     batches: tuple[StageBatch, ...]
@@ -162,20 +184,21 @@ class CapturedRun(NamedTuple):
 
 
 def dit_stages(dit: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の DiT block を `(モデル内 FQN 接頭辞, block)` で返す。
+    """Return the DiT blocks in execution order as `(in-model FQN prefix, block)`.
 
-    接頭辞に block 番号まで入れてあるので、stage 内の局所 FQN（`attention.wq.weight`）は
-    そのままモデル内 FQN（`blocks.0.attention.wq.weight`）へ戻る。
+    The prefix includes the block index, so a local FQN within a stage (`attention.wq.weight`)
+    maps straight back to the in-model FQN (`blocks.0.attention.wq.weight`).
     """
     return tuple((f"{STAGE_PREFIX}.{index}", block) for index, block in enumerate(dit.blocks))
 
 
 def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
-    """stage 列が抱える `nn.Linear` の FQN（`.weight` を落とした**モジュール名**）。
+    """FQNs of the `nn.Linear` modules the stage sequence holds (**module names**, with
+    `.weight` dropped).
 
-    対象選択は core の `iter_quant_targets` の共有 — 「校正が丸める対象」と「呼び出し側が
-    stage 内と数える対象」を写した別実装にすると、どちらにも入らない重みが黙って f32 のまま
-    残る。
+    Target selection shares core's `iter_quant_targets` — copying "what calibration rounds" and
+    "what the caller counts as inside the stages" into separate implementations would leave weights
+    that fall into neither silently in f32.
     """
     return frozenset(
         f"{prefix}.{local}".removesuffix(".weight")
@@ -185,25 +208,28 @@ def stage_linear_names(stages: Sequence[StageSpec]) -> frozenset[str]:
 
 
 def is_adaln(name: str) -> bool:
-    """モジュール FQN が adaLN 配下か（{@link ADALN_SEGMENTS} を**セグメントとして**含むか）。
+    """Whether a module FQN is under adaLN (whether it contains {@link ADALN_SEGMENTS} **as a
+    segment**).
 
-    判定を `.` で割った要素の一致で採るのは、部分文字列一致だと `attention` が
-    `attention_adaln` を巻き込み、逆に接尾辞一致だと adaLN 配下の子（`attention_adaln.1`）を
-    取りこぼすため。stage 内の局所 FQN（`attention_adaln.1`）とモデル内 FQN
-    （`blocks.0.attention_adaln.1`）のどちらにも同じ答えを返すので、校正の `include` と
-    export 側の集合分割が 1 実装で決まる（写すと i4 に丸めた集合と i4 で格納する集合が割れる）。
+    The test matches the elements split at `.` because a substring match would let `attention`
+    catch `attention_adaln`, and a suffix match would miss the children under adaLN
+    (`attention_adaln.1`). It gives the same answer for a local FQN within a stage
+    (`attention_adaln.1`) and for the in-model FQN (`blocks.0.attention_adaln.1`), so the
+    calibration's `include` and the export side's set split are decided by one implementation (a
+    copy would split the set rounded to i4 from the set stored as i4).
     """
     return not ADALN_SEGMENTS.isdisjoint(name.split("."))
 
 
 def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
-    """`names` の中に**セグメントとして**現れた {@link ADALN_SEGMENTS} の綴り。
+    """The spellings of {@link ADALN_SEGMENTS} that appear **as segments** in `names`.
 
-    {@link is_adaln} が「どれか 1 つでも当たったか」を返すのに対し、こちらは**どれが当たったか**
-    を返す。両方を数える理由は、i8 へ戻す 144 本が 2 セグメントの**和**で決まるから — 上流が
-    片側（例: `mlp_adaln`）だけを改名すると、`is_adaln` は残る側で真を返し続けるので「adaLN が
-    1 本も無い」門は素通りし、i4 の本数の門も同じ分類器から両辺を作るので自己整合したまま
-    緑になる（= 聴感裁定で棄却した構成が黙って配られる）。
+    Where {@link is_adaln} returns "did any of them match", this returns **which ones matched**.
+    Both are counted because the 144 modules moved back to i8 are decided by the **union** of the
+    two segments — if upstream renamed only one side (e.g. `mlp_adaln`), `is_adaln` would keep
+    returning true on the remaining side, so the "no adaLN at all" check would pass, and the i4
+    count check, which builds both sides from the same classifier, would stay self-consistent and
+    green (= a configuration rejected by the listening ruling would ship silently).
     """
     seen: set[str] = set()
     for name in names:
@@ -212,32 +238,37 @@ def adaln_segments_seen(names: Iterable[str]) -> frozenset[str]:
 
 
 def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
-    """DiT の i4 適格（= 配布グラフに載る `nn.Linear` 全部）のモジュール FQN。
+    """Module FQNs of the DiT that are i4-eligible (= every `nn.Linear` in the distributed
+    graphs).
 
-    NOTE: i4 系列が実際に **i4 で格納するのは block 内から adaLN を除いた 168 本だけ**（block 外の
-    5 本と adaLN 144 本は i8 格納 — 聴感裁定 2026-08-23 の帰属結果。{@link ADALN_SEGMENTS} /
-    `irodori.export._fake_quant_i4`）。ここが返すのはそれらを合わせた「配布グラフに載る linear の
-    全量」で、下の g32 整除条件は i8 へ回る 149 本にも掛かる — 格納が要求する以上に厳しいが、
-    **緩めない**: 緩めると「i8 へ回す側のどれかが g32 非整除になった」構成変化が黙って通り、
-    i4 席の中身が実行のたびに上流の適格率で決まることになる。
+    NOTE: what the i4 series actually **stores as i4 is only the 168 in-block modules minus adaLN**
+    (the 5 outside the blocks and the 144 adaLN modules are stored as i8 — the attribution result of
+    the listening ruling of 2026-08-23; {@link ADALN_SEGMENTS} / `irodori.export._fake_quant_i4`).
+    This returns "all the linears in the distributed graphs", those included, and the g32
+    divisibility condition below applies to the 149 that go to i8 as well — stricter than storage
+    requires, but it is **not relaxed**: relaxing it would let a configuration change in which
+    "one of the modules sent to i8 became non-divisible by g32" pass silently, and the contents of
+    the i4 slot would be decided by upstream's eligibility rate on every run.
 
-    適格は 2 条件の積で決まる:
+    Eligibility is the conjunction of two conditions:
 
-    1. **配布グラフに載る重みであること** — 判定は DiT の配布ラッパ 2 本
-       （`irodori.export.dit_wrappers` — `dit-context` / `dit`）の `named_parameters` の**和**との
-       交差で採る（割る前の `DitGraph` 1 本の所有と同じ集合 — ADR 0114）。素の
-       `TextToLatentRFDiT` は backbone / projector / speaker / duration の**コピーを内側に持つ**
-       （`irodori.pipeline_ref` の NOTE）ので、名前で絞らないと他役割の linear まで i4 に化ける。
-       名指しの一覧（`blocks` / `in_proj` / `out_proj` / `cond_module`）を持たないのは、上流が
-       DiT の構成を変えた日に一覧だけが古いまま通るのを避けるため。
-    2. **量子化軸が group 長で割り切れること** — i4 は端数 group を作らない MUST
-       （ADR 0069 決定 2）。実重み（12 block）では linear 317 本すべてが g32 整除だが
-       （`docs/research/2026-08-12-irodori-quant-recon.md` の k ヒストグラム）、**前提にせず
-       fail loudly** する — 校正は stage を丸ごと駆動するので 1 本だけ外す逃げ道が無く、
-       外れた 1 本を黙って i8 へ落とすと「走査の本数 = 丸めた本数」の門が張れなくなる。
+    1. **The weight is in the distributed graphs** — decided by intersecting with the **union** of
+       the `named_parameters` of the DiT's two distribution wrappers
+       (`irodori.export.dit_wrappers` — `dit-context` / `dit`) (the same set as owned by the single
+       `DitGraph` before the split — ADR 0114). The bare `TextToLatentRFDiT` **holds copies of**
+       backbone / projector / speaker / duration **inside it** (the NOTE of
+       `irodori.pipeline_ref`), so without filtering by name, linears of other roles would turn
+       into i4 too. There is no explicit list (`blocks` / `in_proj` / `out_proj` / `cond_module`)
+       so that, on the day upstream changes the DiT's structure, a stale list does not pass.
+    2. **The quantization axis is divisible by the group length** — i4 MUST NOT create a partial
+       group (ADR 0069 decision 2). In the real weights (12 blocks) all 317 linears are divisible
+       by g32 (the k histogram of `docs/research/2026-08-12-irodori-quant-recon.md`), but this is
+       **not assumed; it fails loudly** — calibration drives whole stages, so there is no way to
+       leave out a single module, and silently dropping that one to i8 would make the "scanned
+       count = rounded count" check impossible.
 
-    MUST: 適格 0 本は fail loudly（`--dtype i4` を指定したのに i4 が 1 本も無い、を沈黙させ
-    ない — ADR 0006 と同じ規律）。
+    MUST: zero eligible modules fail loudly (do not silence "`--dtype i4` was requested but there
+    is no i4 at all" — the same discipline as ADR 0006).
     """
     owned = {
         name.removesuffix(".weight")
@@ -252,39 +283,42 @@ def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
         length = int(channel_rows(weight, axis).shape[-1])
         if length % DEFAULT_GROUP_SIZE:
             raise AssertionError(
-                f"{fqn}: 量子化軸 {length} が g{DEFAULT_GROUP_SIZE} で割り切れない"
-                "（校正は stage 単位で駆動するので 1 本だけ外す逃げ道が無い）"
+                f"{fqn}: quantization axis {length} is not divisible by g{DEFAULT_GROUP_SIZE}"
+                " (calibration is driven per stage, so there is no way to leave out a single"
+                " module)"
             )
         names.add(name)
     if not names:
         raise AssertionError(
-            "DiT に i4 適格な linear が 1 本も無い"
-            "（DiT のラッパの構成が台本の想定と食い違っている）"
+            "the DiT has no i4-eligible linear at all"
+            " (the structure of the DiT wrappers disagrees with what the script assumes)"
         )
     return frozenset(names)
 
 
 def _split_block_kwargs(kwargs: Mapping[str, Any], batch_rows: int) -> StageBatch:
-    """block の呼び出し引数を `(hidden 1 本, 残りの kwargs)` へ割り、cond 側の行を切り出す。
+    """Split the block's call arguments into `(one hidden, the remaining kwargs)` and slice out
+    the cond-side rows.
 
-    MUST: 引数の顔ぶれを実測で固定する（fail loudly）— 上流が `DiffusionBlock.forward` の
-    引数を増減させると、batch 軸の有無の判定が黙って外れて「別条件で選んだ丸め先」を出荷する
-    ことになる（数値は普通に出るので golden も緑のまま通る）。
+    MUST: pin the set of arguments as observed (fail loudly) — if upstream added or removed
+    arguments of `DiffusionBlock.forward`, the batch-axis classification would silently go wrong
+    and ship "rounding targets chosen under different conditions" (the numbers come out normally,
+    so the golden stays green too).
 
-    `batch_rows` は cond 側として残す行数（**常に 1** — 上流の independent CFG は
-    `[cond, uncond…]` を 1 forward へ束ね、cond は行 0）。
+    `batch_rows` is the number of rows kept as the cond side (**always 1** — upstream's independent
+    CFG batches `[cond, uncond…]` into one forward, with cond in row 0).
     """
     wanted = BATCHED_BLOCK_ARGS | UNBATCHED_BLOCK_ARGS
     if set(kwargs) != wanted:
         raise AssertionError(
-            f"block の呼び出し引数が {sorted(kwargs)} で、想定の {sorted(wanted)} と違う"
-            "（上流 DiffusionBlock.forward の綴りが動いている）"
+            f"the block call arguments are {sorted(kwargs)}, not the expected {sorted(wanted)}"
+            " (the spelling of upstream DiffusionBlock.forward has moved)"
         )
     if kwargs["context_kv"] is not None:
         raise AssertionError(
-            "block へ条件 K/V キャッシュが渡っている"
-            "（参照ループは use_context_kv_cache=False で回す MUST — block ごとに別の"
-            "キャッシュを 1 つの kwargs で使い回すことになる）"
+            "a condition K/V cache is being passed to the block"
+            " (the reference loop MUST run with use_context_kv_cache=False — otherwise one"
+            " kwargs would reuse a cache that is separate per block)"
         )
     sliced = {
         name: (value[:batch_rows] if name in BATCHED_BLOCK_ARGS and value is not None else value)
@@ -299,7 +333,7 @@ def _detached(value: Any) -> Any:
 
 
 def _reference_latent(case: ip.PipelineCase, config: Any) -> torch.Tensor:
-    """参照 latent（`irodori.pipeline_ref.run_case` の ③ と同じ作り方）。"""
+    """The reference latent (built the same way as ③ of `irodori.pipeline_ref.run_case`)."""
     if case.reference is None:
         return torch.zeros((1, int(config.speaker_patch_size), int(config.latent_dim)))
     generator = torch.Generator().manual_seed(case.reference.seed)
@@ -307,7 +341,7 @@ def _reference_latent(case: ip.PipelineCase, config: Any) -> torch.Tensor:
 
 
 def _load_tokenizers(context: CalibContext) -> tuple[Any, Any]:
-    """text 側と caption 側のトークナイザ（`irodori.pipeline_ref` と同じ出どころ）。"""
+    """The text-side and caption-side tokenizers (the same source as `irodori.pipeline_ref`)."""
     from tokenizers import Tokenizer
 
     return (
@@ -326,15 +360,15 @@ def _capture_case(
     steps: int,
     label: str,
 ) -> CapturedRun:
-    """1 ケースの参照 denoise を回し、**step ごとに 1 バッチ**（cond 側）捕まえる。
+    """Run the reference denoise of one case and capture **one batch per step** (cond side).
 
-    上流の independent CFG は 1 step = **1 forward**（cond と uncond を batch へ束ねる）なので、
-    先頭 block の呼び出し回数がそのまま step 数になる。行 0 だけを採るのが「cond 側 1 forward
-    のみ」の意味で、波 J-2 の計測（`irodori.measure_quant.capture_case_batches`）と同じ
-    捕捉セマンティクス。
+    Upstream's independent CFG is 1 step = **1 forward** (cond and uncond batched together), so
+    the number of calls to the first block is the step count. Taking only row 0 is what "the cond
+    side's forward only" means, the same capture semantics as the measurement of iteration J-2
+    (`irodori.measure_quant.capture_case_batches`).
 
-    `steps` を捕まえ切ったら番兵で参照ループを畳む — 上流ループは残りの step も回すので、
-    畳まないと縮小実行が成立しない。
+    Once `steps` have been captured, a sentinel cuts the reference loop short — the upstream loop
+    would run the remaining steps too, so without cutting it a reduced run would not work.
     """
     from irodori_tts.rf import sample_euler_rf_cfg
 
@@ -370,8 +404,8 @@ def _capture_case(
     def on_block(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         if args:
             raise AssertionError(
-                f"先頭 block が位置引数 {len(args)} 本で呼ばれた"
-                "（上流 forward_with_encoded_conditions は全て keyword で渡す）"
+                f"the first block was called with {len(args)} positional arguments"
+                " (upstream forward_with_encoded_conditions passes everything as keywords)"
             )
         if len(batches) >= steps:
             raise _CalibStepsReached
@@ -424,11 +458,12 @@ def _capture_case(
             handle.remove()
     if len(batches) != steps or not tail:
         raise AssertionError(
-            f"{case.name}: 校正入力を {len(batches)} step しか捕まえられなかった"
-            f"（要求 {steps} step / block ループの尾 {len(tail)} 本）"
-            " — 上流 sample_euler_rf_cfg の綴りが台本の想定と食い違っている"
+            f"{case.name}: captured calibration input for only {len(batches)} steps"
+            f" (requested {steps} steps / block loop tails {len(tail)})"
+            " — the spelling of upstream sample_euler_rf_cfg disagrees with what the script"
+            " assumes"
         )
-    print(f"[{label}] {case.name}: S={sequence} / {len(batches)} step を捕捉", flush=True)
+    print(f"[{label}] {case.name}: S={sequence} / captured {len(batches)} steps", flush=True)
     return CapturedRun(tuple(batches), graph_batch[0], tail[0])
 
 
@@ -440,35 +475,40 @@ def capture_stage_batches(
     steps: int = CALIB_STEPS,
     label: str = "calib",
 ) -> tuple[CapturedRun, ...]:
-    """校正ケースごとに参照 denoise を回して先頭 block への入力を集める。
+    """Run the reference denoise for each calibration case and collect the inputs to the first
+    block.
 
-    MUST: 呼び出し側は**GPTQ の対象（block 内 168 本）の丸めを 1 本も当てる前**に呼ぶ（当てた
-    後だと、丸めた重みが作った活性から同じ重みの丸め先を選ぶ循環になる）。逆に **i8 で配る側は
-    先に丸めておく**（block 外 5 本・adaLN 144 本・内側の他役割コピー）— 配布実行時に block へ
-    入るのは i8 の `in_proj` が作った hidden と i8 の `cond_module` が作った条件埋め込みで、
-    block 内でも adaLN が作る modulation は i8 の値で掛かる。後に回すと「f32 の周辺で選んだ
-    丸め先」を i8 の周辺と組んで配ることになる（`irodori.export._round_i4_calibrated` の
-    順序 MUST）。
+    MUST: the caller calls this **before a single rounding of the GPTQ targets (the 168 in-block
+    modules) is applied** (afterwards, the rounding targets of a weight would be chosen from
+    activations produced by that same rounded weight — a cycle). Conversely, **what ships as i8 is
+    rounded first** (the 5 outside the blocks, the 144 adaLN modules, the inner copies of other
+    roles) — at distribution run time, what enters the blocks is the hidden produced by the i8
+    `in_proj` and the condition embedding produced by the i8 `cond_module`, and inside the blocks
+    the modulation produced by adaLN is applied with i8 values too. Rounding them later would ship
+    "rounding targets chosen around f32 neighbours" combined with i8 neighbours (the ordering MUST
+    of `irodori.export._round_i4_calibrated`).
     """
     if not cases:
-        raise AssertionError("校正ケースが 1 件も無い（校正付き i4 は入力ゼロでは成立しない）")
+        raise AssertionError("no calibration cases (calibrated i4 cannot work with zero inputs)")
     if steps < 1:
-        raise AssertionError(f"捕捉 step 数は 1 以上（実測 {steps}）")
+        raise AssertionError(f"the captured step count must be at least 1 (got {steps})")
     tokenizers = _load_tokenizers(context)
     return tuple(_capture_case(dit, case, context, tokenizers, steps, label) for case in cases)
 
 
 def assert_stage_split(stages: Sequence[StageSpec], run: CapturedRun) -> None:
-    """stage 逐次の block ループが**素の DiT 1 回の forward とビット一致**することを見る。
+    """Check that the stage-by-stage block loop is **bit-identical to one forward of the bare
+    DiT**.
 
-    突合先は `out_norm` への入力（block ループの出力そのもの）で、両辺とも
-    {@link CapturedRun} が**同じ forward** から採ったもの。
+    What is compared is the input to `out_norm` (the output of the block loop itself), and both
+    sides were taken by {@link CapturedRun} from **the same forward**.
 
-    MUST: 近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを同じ順で呼んで
-    いる以上、一致しないなら分解が本物と違う経路を通っている。
+    MUST: compare with `torch.equal`, not an approximate tolerance — the same modules are called in
+    the same order, so a mismatch means the split goes down a different path from the real one.
 
-    MUST: 丸めを 1 本も当てる前に呼ぶ。ずれた分解で丸めると「別の経路の GPTQ」を出荷する
-    ことになり、しかも数値は普通に出る（golden も緑のまま通る）。
+    MUST: call it before a single rounding is applied. Rounding through a drifted split would ship
+    "GPTQ for a different path", and the numbers would still come out normally (the golden stays
+    green too).
     """
     args, kwargs = run.graph_batch
     with torch.no_grad():
@@ -477,18 +517,21 @@ def assert_stage_split(stages: Sequence[StageSpec], run: CapturedRun) -> None:
             hidden = stage(hidden, **kwargs)
     if not torch.equal(hidden, run.block_loop_output):
         raise AssertionError(
-            "stage 分解の最終 hidden が素の DiT の block ループの出力とビット一致しない"
-            f"（最大絶対差 {float((hidden - run.block_loop_output).abs().max()):.4e}）"
-            " — stage 列が上流の経路とずれている"
+            "the final hidden of the stage split is not bit-identical to the output of the bare"
+            " DiT's block loop"
+            f" (max abs diff {float((hidden - run.block_loop_output).abs().max()):.4e})"
+            " — the stage sequence has drifted from upstream's path"
         )
 
 
 def _announce_stages(stages: Sequence[StageSpec]) -> list[RemovableHandle]:
-    """各 stage の**初回** forward で進捗を 1 行出す hook を張る（戻り値は外す用の handle）。
+    """Install hooks that print one progress line on the **first** forward of each stage (the
+    return value is the handles to remove them).
 
-    `karume.quant_calib` は 1 行も印字しないので、既定運用の校正は開始行から最終診断行まで
-    時間単位で無出力になり、ハングと区別がつかない。core は境界（ADR 0065）なので触らず、
-    呼び出し側から覗く（`anima.calib._announce_stages` と同じ手）。
+    `karume.quant_calib` prints nothing, so a calibration in the default setup is silent for hours
+    between the start line and the final diagnostics line and cannot be told apart from a hang.
+    Core is a boundary (ADR 0065), so it is not touched; the caller peeks in instead (the same
+    approach as `anima.calib._announce_stages`).
     """
     total = len(stages)
 
@@ -515,24 +558,26 @@ def calibrate_i4(
     batches: Sequence[StageBatch],
     include: Callable[[str], bool] | None = None,
 ) -> tuple[CalibReport, Int4Report]:
-    """stage 逐次の GPTQ を当て、`(レポート, scale 台帳)` を返す（丸めは in-place）。
+    """Apply stage-by-stage GPTQ and return `(report, scale ledger)` (the rounding is in place).
 
-    `include` は**stage 内の局所モジュール FQN** の述語で、core の `calibrate_stages` へ
-    そのまま渡る（None = stage 内の `nn.Linear` 全部）。i8+dit4 席は adaLN 144 本を i8 へ戻すので、
-    呼び出し側（`irodori.export._round_i4_calibrated`）は {@link is_adaln} の否定を渡して
-    block 内 168 本だけを GPTQ に載せる。
+    `include` is a predicate on **local module FQNs within a stage**, passed straight to core's
+    `calibrate_stages` (None = every `nn.Linear` in the stage). The i8+dit4 slot moves the 144
+    adaLN modules back to i8, so the caller (`irodori.export._round_i4_calibrated`) passes the
+    negation of {@link is_adaln} and puts only the 168 in-block modules through GPTQ.
 
-    MUST: 渡した述語が選ぶ集合と i4 で格納する集合は**同一**であること — ずれると「走査の
-    本数 = 丸めた本数」の門が意味を失い、丸めていない重みに i4 の格納指定が付く。実測は
-    {@link assert_calib_covers_scan}（呼び出し側が i4 格納の集合を渡して突き合わせる）。
+    MUST: the set the predicate selects and the set stored as i4 are **identical** — if they drift,
+    the "scanned count = rounded count" check loses its meaning and an unrounded weight gets an i4
+    storage spec. It is measured by {@link assert_calib_covers_scan} (the caller passes the set
+    stored as i4 and compares).
 
-    MUST: 台帳の無いレポートは fail loudly — 出荷経路を持つのは `gptq` × `rtn` だけで
-    （`karume.quant_calib` の MUST）、台帳が無いまま進むと i4 席に scale の無い重みが載る。
+    MUST: a report without a ledger fails loudly — only `gptq` × `rtn` has a shipping path (the
+    MUST of `karume.quant_calib`), and going on without a ledger would put weights without scales
+    into the i4 slot.
     """
     tokens = sum(int(args[0].shape[1]) for args, _kwargs in batches)
     print(
-        f"[calib] GPTQ 校正を開始 — stage {len(stages)} 段 × バッチ {len(batches)} 本"
-        f"・hidden 合計 {tokens:,} token",
+        f"[calib] starting GPTQ calibration — {len(stages)} stages × {len(batches)} batches"
+        f", {tokens:,} hidden tokens in total",
         flush=True,
     )
     handles = _announce_stages(stages)
@@ -546,21 +591,24 @@ def calibrate_i4(
     ledger = report.int4
     if ledger is None:
         raise AssertionError(
-            f"校正が scale 台帳を返さなかった（{report.describe()}）"
-            " — 出荷できるのは gptq × rtn だけ（karume.quant_calib の MUST）"
+            f"calibration returned no scale ledger ({report.describe()})"
+            " — only gptq × rtn can ship (the MUST of karume.quant_calib)"
         )
     return report, ledger
 
 
 def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
-    """校正が丸めた層が **i4 で格納する集合**と過不足なく一致することを見る。
+    """Check that the layers the calibration rounded match **the set stored as i4** exactly, with
+    nothing missing or extra.
 
-    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形で、
-    i8+dit4 席では adaLN を除いた 168 本 — {@link calibrate_i4} の `include` が選ぶ集合と同一）。
+    `scan` is a set of module names with `.weight` dropped (in the form of
+    {@link stage_linear_names}; for the i8+dit4 slot, the 168 without adaLN — identical to the set
+    the `include` of {@link calibrate_i4} selects).
 
-    MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても、
-    丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。しかも漏れた重みは
-    その後 i8 側にも i4 側にも入らないまま格納指定だけが i4 を要求する形になる。
+    MUST: fail loudly. If the spelling of the stages or the target types changed and part of a block
+    dropped out of calibration, the missed rounding would show up on the **better** side of quality
+    (the pass-through cannot be read from the numbers). Moreover, the missed weights would then go
+    into neither the i8 side nor the i4 side, while only the storage spec demands i4.
     """
     rounded = {layer.fqn for layer in report.layers}
     wanted = {f"{name}.weight" for name in scan}
@@ -568,6 +616,7 @@ def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
     extra = sorted(rounded - wanted)
     if missing or extra or report.modules != len(wanted):
         raise AssertionError(
-            f"校正が丸めた {report.modules} 本が走査の {len(wanted)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"the {report.modules} modules the calibration rounded do not match the"
+            f" {len(wanted)} of the scan"
+            f" (not rounded {missing[:3]} / not in the scan {extra[:3]})"
         )

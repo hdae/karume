@@ -1,16 +1,17 @@
-"""据えたコンテナ（`krm`）を**格納のまま**読み戻す（recipe 側の読み手・ADR 0065 決定 2）。
+"""Read a written container (`krm`) back **as stored** (the recipe-side reader; ADR 0065
+decision 2).
 
-台本や配布 recipe が自分の書き出しを検算する（代表例: 上流 checkpoint とのバイト一致
-〈vowel_detector〉・i4 系列からの重み読み戻し〈irodori〉・QAT の格納監査〈gemma4_qat〉 —
-呼び手の全量は rg で引く）。どれも要るのは「テンソルキー → 宣言した格納形と生 payload」で、
-意味論 f32 へ戻す前の姿である。
+Scripts and distribution recipes cross-check their own output (typical cases: byte equality with
+the upstream checkpoint ⟨vowel_detector⟩, reading weights back from an i4 series ⟨irodori⟩, the
+QAT storage audit ⟨gemma4_qat⟩ — find every caller with rg). All of them need "tensor key →
+declared storage form and raw payload", the shape before it is turned back into semantic f32.
 
-core（`karume.verify.verify_container`）が合流まで済ませた供給計画をそのまま畳むだけなので、
-規則の写しは 1 行も持たない。block の sha256 は取り出しのたびに `ReadContainer.block` が
-突き合わせる（container-v1 §7）ので、ここを通った payload は宣言と一致している。
+It only folds the supply plan that core (`karume.verify.verify_container`) has already merged, so
+it holds no copy of the rules. `ReadContainer.block` checks a block's sha256 on every read
+(container-v1 §7), so a payload that went through here matches its declaration.
 
-MUST: 読むのは**配布形そのもの**（part 列）。代表 path 1 本を開く形にすると、分割形では
-part 0（2 文書だけ）を読んで「テンソルが 1 本も無い」になる。
+MUST: read **the distribution form itself** (the part list). Opening a single representative path
+would, for the split form, read part 0 (only the two documents) and find "no tensors at all".
 """
 
 from __future__ import annotations
@@ -25,57 +26,62 @@ from karume.verify import VerifiedContainer, verify_container
 
 
 class ContainerReadError(ValueError):
-    """容器から読みたいものが無い（資産の不在・`krg` を渡した）。
+    """What the caller wants to read is not in the container (the asset is absent, or a `krg`
+    was passed).
 
-    リポの流儀は `Error` サブクラス（`DistError` / `PleError` / `ContainerFormatError`）。
-    `KeyError` は `repr` が二重引用符で包まれて診断が読みにくいうえ、呼び手の `except` が
-    「辞書の引き損ない」と区別できない。
+    The repository's convention is an `Error` subclass (`DistError` / `PleError` /
+    `ContainerFormatError`). A `KeyError`'s `repr` wraps the message in double quotes, which makes
+    the diagnostic hard to read, and the caller's `except` cannot tell it from "a failed dict
+    lookup".
     """
 
 
-#: 読み手の入口（代表 path か、{@link open_container} で開いた容器）。
+#: The readers' entry (a representative path, or a container opened by {@link open_container}).
 Source = Path | VerifiedContainer
 
 
 def open_container(path: Path) -> VerifiedContainer:
-    """部品 1 つを開いて合流まで通す（**開いた結果を使い回す**ための入口）。
+    """Open one component and run it through the merge (the entry for **reusing the opened
+    result**).
 
-    MUST: 同じ容器から何度も読む呼び手はここで 1 度だけ開く — 下の読み口へ代表 path を渡すと
-    1 回ごとに `verify_container` が descriptor の parse と合流をやり直す（PLE の検収門は
-    block ごとに読むので、block 数ぶん繰り返す形になっていた）。
+    MUST: a caller that reads the same container many times opens it here once — passing the
+    representative path to the readers below makes `verify_container` redo the descriptor parse
+    and the merge on every call (the PLE acceptance check reads per block, so it repeated this
+    once per block).
     """
     return verify_container(component_parts(path))
 
 
 def _opened(source: Source) -> VerifiedContainer:
-    """代表 path なら開き、開いた容器ならそのまま返す。"""
+    """Open a representative path; return an opened container as is."""
     return source if isinstance(source, VerifiedContainer) else open_container(source)
 
 
 @dataclass(frozen=True)
 class StoredTensor:
-    """initializer 1 本の格納実体（宣言 + 連結済みの payload）。"""
+    """The stored form of one initializer (declaration + concatenated payload)."""
 
-    #: codec の layout（`f32` / `f16` / `bf16` / `i32` / `i8` / `i4` / `i2`）。
+    #: The codec's layout (`f32` / `f16` / `bf16` / `i32` / `i8` / `i4` / `i2`).
     layout: str
-    #: 宣言の具体 shape（論理形 — packed 格納でもここは要素数のまま）。
+    #: The declared concrete shape (the logical shape — the element count even for packed
+    #: storage).
     shape: tuple[int, ...]
-    #: 格納の生バイト（piece 列は行の順に連結済み）。
+    #: The raw stored bytes (pieces already concatenated in row order).
     payload: bytes
-    #: companion scale の生バイト（f32・量子化 codec のみ）。
+    #: The raw bytes of the companion scale (f32; quantized codecs only).
     scale: bytes | None = None
-    #: 量子化 codec の group 長（per-channel は行長そのもの）。
+    #: The group length of a quantized codec (per-channel: the row length itself).
     group_size: int | None = None
-    #: 持ち上げ定数（`const.` 接頭辞のテンソルキー）か。
+    #: Whether this is a hoisted constant (a tensor key with the `const.` prefix).
     constant: bool = False
 
 
 def read_stored(source: Source) -> dict[str, StoredTensor]:
-    """コンテナ 1 本の initializer を**テンソルキー**で引ける表にする。
+    """Turn the initializers of one container into a table keyed by **tensor key**.
 
-    IR v2 では initializer の名前がテンソルキーそのものなので（docs/ir-v2.md）、返る鍵は
-    書き手が `tensors` へ渡した鍵と同じである。共有宣言（貸し手を指す席）は供給を持たないので
-    現れない — 実体は貸し手のキーで 1 本だけ並ぶ。
+    In IR v2 an initializer's name is the tensor key itself (docs/ir-v2.md), so the returned keys
+    are the keys the writer passed to `tensors`. Shared declarations (slots pointing at a lender)
+    have no supply and do not appear — the data is listed once, under the lender's key.
     """
     verified = _opened(source)
     read = verified.read
@@ -103,16 +109,17 @@ def read_stored(source: Source) -> dict[str, StoredTensor]:
 
 
 def weight_tensors(stored: Mapping[str, StoredTensor]) -> dict[str, StoredTensor]:
-    """持ち上げ定数を除いた席（= 上流の重みに対応するテンソルキーだけ）。"""
+    """The entries without hoisted constants (= only the tensor keys that map to upstream
+    weights)."""
     return {key: value for key, value in stored.items() if not value.constant}
 
 
 def read_layouts(source: Source) -> dict[str, str]:
-    """テンソルキー → 格納の layout（**宣言だけ** — 実体は 1 バイトも読まない）。
+    """Tensor key → storage layout (**declarations only** — not one byte of data is read).
 
-    「貸し手の主表が i8 で常駐しているか」のような、実体を要らない突合の席。IR v2 のグラフ
-    記述は `storage` を持たない（正本は束縛表の codec — docs/ir-v2.md）ので、格納を知る道は
-    合流結果 1 本きりである。
+    For comparisons that need no data, such as "is the lender's main table resident as i8". The
+    IR v2 graph description has no `storage` (the source of truth is the binding table's codec —
+    docs/ir-v2.md), so the merge result is the only way to learn the storage.
     """
     verified = _opened(source)
     return {
@@ -123,40 +130,45 @@ def read_layouts(source: Source) -> dict[str, str]:
 
 
 def read_asset_declarations(source: Source) -> dict[str, tuple[str, int]]:
-    """資産名 → `(役割, 論理長)`（**宣言だけ** — payload は 1 バイトも読まない）。
+    """Asset name → `(role, logical length)` (**declarations only** — not one byte of payload is
+    read).
 
-    索引が名指しする block が実際に容器へ入っているかを、実体を読まずに突き合わせる席
-    （PLE の `values` / `scales` は合計数 GB になるので、組み立ての門で読む形にはできない）。
+    For checking, without reading data, that the blocks an index names really are in the
+    container (PLE's `values` / `scales` total several GB, so the assembly check cannot read
+    them).
     """
     model = _opened(source).read.model
     if model is None:
-        raise ContainerReadError(f"{source}: krg には資産が無い")
+        raise ContainerReadError(f"{source}: a krg has no assets")
     return {name: (record.role, record.length) for name, record in model.assets.items()}
 
 
 def read_asset(source: Source, name: str) -> bytes:
-    """容器の資産 1 本の payload（宣言の論理長で切る — 末尾の詰め物は剥がして返す）。
+    """The payload of one asset of the container (cut to the declared logical length — trailing
+    padding is stripped).
 
-    資産は「重みではないが同じ容器で配るバイト列」の席（PLE 索引・`rope_base` — ADR 0109
-    決定 4）で、宣言の `length` が先に来る。消費側が末尾の 0x00 を推測で剥がさないための
-    規律なので、読み手もここ 1 本を通す。
+    Assets are "byte strings that are not weights but ship in the same container" (the PLE index,
+    `rope_base` — ADR 0109 decision 4), and the declared `length` comes first. The rule exists so
+    that consumers never strip trailing 0x00 by guessing, so readers go through this one function
+    too.
     """
     read = _opened(source).read
     model = read.model
     if model is None:
-        raise ContainerReadError(f"{source}: krg には資産が無い")
+        raise ContainerReadError(f"{source}: a krg has no assets")
     record = model.assets.get(name)
     if record is None:
-        raise ContainerReadError(f"{source}: 資産 '{name}' が無い（宣言: {sorted(model.assets)}）")
+        raise ContainerReadError(f"{source}: no asset '{name}' (declared: {sorted(model.assets)})")
     return read.block(record.block)[: record.length]
 
 
 def read_provenance(source: Source) -> Provenance:
-    """容器が名乗る出所（`provenance` — container-v1 §2.3。**宣言だけ**を読む）。
+    """The provenance the container claims (`provenance` — container-v1 §2.3; reads
+    **declarations only**).
 
-    `krg` は出所を引き継がない（container-v1 §9）ので、渡されたら落とす。
+    A `krg` does not carry provenance (container-v1 §9), so passing one fails.
     """
     model = _opened(source).read.model
     if model is None:
-        raise ContainerReadError(f"{source}: krg は provenance を持たない")
+        raise ContainerReadError(f"{source}: a krg has no provenance")
     return model.provenance

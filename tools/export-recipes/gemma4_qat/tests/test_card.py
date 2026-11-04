@@ -1,12 +1,12 @@
-"""QAT 配布形のモデルカード描画（`gemma4_qat.distribution.render_card`）。
+"""Rendering the model card of the QAT distribution (`gemma4_qat.distribution.render_card`).
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。
+The real distribution's `karume.json` is not used — the job here is to see that the fake
+manifest's values show up in the text as they are (= not a single hand-written number mixed in),
+so building it with values **different** from the real ones detects more.
 
-ここが持つのはカード側にしか無い門 — テンプレートの pipeline 固有性、帰属が上流の
-mobile QAT チェックポイントを名指ししていること、そして「固定値の保持を再量子化と呼ばない」
-という本文の主張である。
+What lives here are the checks only the card side has — the template's pipeline specificity, the
+attribution naming the upstream mobile QAT checkpoint, and the text's claim "keeping the fixed
+values is never called requantization".
 """
 
 from __future__ import annotations
@@ -21,15 +21,18 @@ from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
 from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, render_card
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: The repository ID spelled in the usage snippet (dist passes it from the pipeline's
+#: declaration).
 REPO = "hdae/fake-repo"
 
-#: 別 family の pipeline 契約（**綴りをそのまま持つ** — recipe 間のコード結合を作らないため）。
+#: Another family's pipeline contract (**the spelling held as is** — so no code coupling between
+#: recipes is created).
 FOREIGN_PIPELINE = "gemma4/1"
 
 QAT_PIPELINE = "gemma4-qat/1"
 
-#: quant の表示欄（**実物と重ならない綴り** — 手書きが混ざっていれば表に出ない）。
+#: The quant's display field (**a spelling that does not overlap the real one** — if hand-written
+#: text were mixed in, it would not show in the table).
 FAKE_QUANT_LABEL = "Fake fixed seat"
 FAKE_QUANT_DESCRIPTION = "Only this sentence may appear in the quant table."
 
@@ -39,9 +42,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of weights (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so only its shape follows the real one (the lengths and
+    sha256 of the two documents).
     """
     return {
         "container": {
@@ -55,7 +59,7 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _qat_manifest(model: str = "e2b") -> dict[str, Any]:
-    """QAT の最小 manifest（値は実物と重ならない偽値）。"""
+    """The minimal QAT manifest (fake values that do not overlap the real ones)."""
     return {
         "format": "karume/5",
         "generator": "karume/9.9.9",
@@ -90,8 +94,9 @@ class TestQatCardGate:
             render_card(manifest, REPO)
 
     def test_it_refuses_a_model_it_cannot_attribute(self) -> None:
-        """帰属表に無いモデル名で描くと、上流を名乗っていない再配布が黙って出る。"""
-        with pytest.raises(ValueError, match="未対応"):
+        """Rendering with a model name not in the attribution table would silently ship a
+        redistribution that names no upstream."""
+        with pytest.raises(ValueError, match="unsupported"):
             render_card(_qat_manifest("12b"), REPO)
 
     def test_it_renders_the_same_bytes_for_the_same_manifest(self) -> None:
@@ -110,14 +115,16 @@ class TestQatCardBody:
         assert "gemma-4-E2B-it-qat-mobile-transformers" in card
 
     def test_it_does_not_call_preserved_integers_a_requantization(self) -> None:
-        """固定値の保持を再量子化と呼ばない（`render_card` の docstring の主張）。"""
+        """Keeping the fixed values is never called requantization (the claim of `render_card`'s
+        docstring)."""
         card = render_card(_qat_manifest(), REPO)
 
         assert "re-quantized" not in card
         assert "Fixed integers and scales are preserved" in card
 
     def test_it_takes_the_quant_presentation_from_the_manifest(self) -> None:
-        """席の説明は manifest の値がそのまま出る（カード側に写しを持たない）。"""
+        """The presets' descriptions are the manifest's values as they are (the card side keeps no
+        copy)."""
         card = render_card(_qat_manifest(), REPO)
 
         assert FAKE_QUANT_LABEL in card

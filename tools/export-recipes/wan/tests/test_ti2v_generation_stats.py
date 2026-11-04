@@ -1,15 +1,16 @@
-"""Wan2.2 TI2V-5B の逆正規化の統計の写し（ADR 0121 段 5）。
+"""A copy of the Wan2.2 TI2V-5B inverse-normalization statistics (ADR 0121 step 5).
 
-TS の `packages/models/src/wan/latents.ts` の `WAN22_LATENTS_MEAN` /
-`WAN22_LATENTS_STD`（48 本ずつ）は、上流の VAE の config にしか無い値の手写し。追跡する
-fixture `packages/models/tests/fixtures/wan-latents/wan22-ti2v.json` を挟んで両側から縛る:
-TS のホストテスト（`wan_ti2v_vae_tiles_host_test.ts`）が定数と fixture のビット一致を、
-ここが pin した revision の `vae/config.json` を `np.float32` にした値と fixture の一致を
-見る。片側だけの書き換えはどちらかが赤にする。
+`WAN22_LATENTS_MEAN` / `WAN22_LATENTS_STD` (48 values each) in the TS
+`packages/models/src/wan/latents.ts` are hand copies of values that exist only in the upstream VAE
+config. They are bound from both sides through the tracked fixture
+`packages/models/tests/fixtures/wan-latents/wan22-ti2v.json`: the TS host test
+(`wan_ti2v_vae_tiles_host_test.ts`) checks that the constants and the fixture are bit-identical,
+and this file checks that the fixture equals the `vae/config.json` of the pinned revision converted
+to `np.float32`. Rewriting only one side turns one of them red.
 
-config を読むテストは pin した snapshot が手元に無い機では SKIP
-（`conftest.wan22_snapshot` — 実重みのテストと同じ規律）。fixture の出所（repo と
-revision が `wan.sources` の pin と同じこと）は snapshot が無くても見る。
+The tests that read the config SKIP on a machine without the pinned snapshot
+(`conftest.wan22_snapshot` — the same discipline as the real-weight tests). The provenance of the
+fixture (repo and revision equal the pin of `wan.sources`) is checked even without the snapshot.
 """
 
 from __future__ import annotations
@@ -22,10 +23,10 @@ import pytest
 from _shared.paths import REPO_ROOT
 from wan.sources import SOURCES
 
-#: TS と recipe が挟む fixture。
+#: The fixture shared by the TS side and the recipe.
 _FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-latents/wan22-ti2v.json"
 
-#: 潜在のチャネル数（上流 config の `z_dim`）。
+#: The number of latent channels (`z_dim` of the upstream config).
 _LATENT_CHANNELS = 48
 
 
@@ -40,7 +41,7 @@ def test_the_fixture_names_the_pinned_revision(fixture) -> None:
         "repo": source.repo,
         "revision": source.revision,
         "reference": "AutoencoderKLWan.config",
-    }, "wan.sources の pin を変えたら fixture の統計を新しい config から取り直す"
+    }, "after changing the pin of wan.sources, re-derive the fixture statistics from the new config"
 
 
 @pytest.mark.parametrize("key", ["mean", "std"])
@@ -57,9 +58,11 @@ def test_the_fixture_matches_the_pinned_config_as_float32(
     config = json.loads((wan22_snapshot / "vae" / "config.json").read_text(encoding="utf-8"))
     upstream = np.asarray(config[f"latents_{key}"], dtype=np.float32)
     assert upstream.shape == (_LATENT_CHANNELS,)
-    # f32 → f64 は厳密なので、fixture（f32 の最短 10 進表記を f64 で読んだ値）と完全一致するはず。
+    # f32 → f64 is exact, so this must exactly match the fixture (the shortest decimal form of the
+    # f32 read as f64).
     np.testing.assert_array_equal(
         np.asarray(fixture[key], dtype=np.float64),
         upstream.astype(np.float64),
-        err_msg=f"latents_{key}: fixture と pin の config（f32）が違う — latents.ts の定数も揃える",
+        err_msg=f"latents_{key}: the fixture and the pinned config (f32) differ"
+        " — align the constants of latents.ts too",
     )

@@ -1,10 +1,11 @@
-"""`wan/umt5_xxl_tokenizer.py` の約束事 — `karume-umt5-xxl` の単体のトークナイザ資産と TS の
-フィクスチャ。
+"""The contract of `wan/umt5_xxl_tokenizer.py` — the standalone tokenizer asset of `karume-umt5-xxl`
+and the TS fixture.
 
-拒否の判定そのもの（空白の形・拒否の順）は合成の正本で叩く。上流のトークナイザを読むテストは、本家の
-pin したトークナイザのファイルが HF キャッシュに無ければ SKIP（取得は
-`uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer --fetch`）。Wan のトークナイザと
-突き合わせるテストは Wan の pin の `tokenizer/` も要る（無ければ SKIP）。
+The rejection rules themselves (the whitespace shapes, the rejection order) are exercised against a
+synthetic source of truth. Tests that read the upstream tokenizer SKIP when the pinned tokenizer
+files of the original model are not in the HF cache (fetch them with
+`uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer --fetch`). Tests that compare with
+the Wan tokenizer also need `tokenizer/` of Wan's pin (SKIP when absent).
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ from wan.umt5_distribution import (
     UMT5_TOKENIZER_ROLE,
 )
 
-#: `WhitespaceSplit` の空白集合の一部（合成 — タブから CR・U+0020・NBSP・全角空白）。
+#: Part of the `WhitespaceSplit` whitespace set (synthetic — tab through CR, U+0020, NBSP, the
+#: ideographic space).
 SPACE = pc.RangeSet([[9, 13], [32, 32], [160, 160], [12288, 12288]])
 
 ADDED = ["</s>", "<s>"]
@@ -37,7 +39,8 @@ ADDED = ["</s>", "<s>"]
 def fake_truth(
     transformers_ids: dict[str, list[int]], tokenizer_json_ids: dict[str, list[int]] | None = None
 ) -> ut.Truth:
-    """文字列 → id 列の表で答える合成の正本（2 経路を別々に与えられる）。"""
+    """A synthetic source of truth that answers from a string → id-sequence table (the two paths can
+    be given separately)."""
     plain = tokenizer_json_ids if tokenizer_json_ids is not None else transformers_ids
     return ut.Truth(
         transformers=lambda text: transformers_ids[text],
@@ -50,7 +53,8 @@ def fake_truth(
 
 
 class TestTheWhitespaceRule:
-    """前処理が無いと 2 経路が割れる空白の形（U+0020 以外の空白・末尾の U+0020）。"""
+    """Whitespace shapes that split the two paths without preprocessing (whitespace other than
+    U+0020, a trailing U+0020)."""
 
     @pytest.mark.parametrize(
         "text", ["a\tcat", "a cat\nsits", "a\r\nb", "a cat", "猫　犬", "a cat ", "   "]
@@ -81,19 +85,21 @@ class TestExpectation:
         }
 
     def test_added_tokens_and_space_metaspace_come_before_whitespace(self) -> None:
-        """拒否の順は TS と同じ（追加語彙 → 空白の直後の ▁ → 空白の形）— 正本には聞かない。"""
+        """The rejection order is the same as on the TS side (added tokens → ▁ right after
+        whitespace → whitespace shape) — the source of truth is not consulted."""
         truth = fake_truth({})
 
         assert xt.expectation(truth, ADDED, SPACE, "a </s>\tb") == {"reject": "added-token"}
         assert xt.expectation(truth, ADDED, SPACE, "a ▁b\t") == {"reject": "metaspace"}
 
     def test_the_rest_is_judged_by_the_shared_wan_path(self) -> None:
-        """語彙外（2 と 3 の割れ）と、それ以外の割れ方で落とす門は Wan と同じ 1 本。"""
+        """Out-of-vocabulary (a 2 versus 3 split) and the check that fails any other split are the
+        same single path as Wan's."""
         oov = fake_truth({"a 𠀋": [289, 273, 2, 1]}, {"a 𠀋": [289, 273, 3, 1]})
         broken = fake_truth({"x": [4, 5, 1]}, {"x": [4, 6, 1]})
 
         assert xt.expectation(oov, ADDED, SPACE, "a 𠀋") == {"reject": "oov"}
-        with pytest.raises(ValueError, match="割れ方"):
+        with pytest.raises(ValueError, match="in a way other than out-of-vocabulary"):
             xt.expectation(broken, ADDED, SPACE, "x")
 
 
@@ -113,14 +119,15 @@ class TestTheSpelling:
 
 @pytest.fixture(scope="module")
 def truth(tmp_path_factory: pytest.TempPathFactory) -> ut.Truth:
-    """本家の pin したトークナイザの正本（照合済みの 2 本だけの置き場から — 無ければ SKIP）。"""
+    """The source of truth of the original model's pinned tokenizer (from a directory holding only
+    the two verified files — SKIP when absent)."""
     pytest.importorskip("transformers")
     pytest.importorskip("tokenizers")
     pytest.importorskip("huggingface_hub")
     try:
         return xt.load_pinned_truth(xt.DEFAULT_MODEL, tmp_path_factory.mktemp("umt5-tokenizer"))
     except WanSourceError as error:
-        pytest.skip(f"本家 umT5 のトークナイザが手元に無い: {error}")
+        pytest.skip(f"the original umT5 tokenizer is not available locally: {error}")
 
 
 def _committed() -> dict[str, Any]:
@@ -129,8 +136,8 @@ def _committed() -> dict[str, Any]:
 
 class TestAgainstUpstream:
     def test_the_backend_has_the_shape_the_typescript_copies(self, truth: ut.Truth) -> None:
-        """正規化なし・WhitespaceSplit → Metaspace・unk_id 2 — Wan と同じ形（TS の T5 層がそのまま
-        再現する）。"""
+        """No normalizer, WhitespaceSplit → Metaspace, unk_id 2 — the same shape as Wan's (the TS
+        T5 layer reproduces it as is)."""
         ut.check_upstream_shape(truth)
         assert truth.transformers("a </s> b") == [289, 1, 748, 1]
         assert truth.tokenizer_json("a </s> b") == [289, 273, 1, 748, 1]
@@ -140,7 +147,7 @@ class TestAgainstUpstream:
         try:
             pinned_umt5_tokenizer(xt.DEFAULT_MODEL, tmp_path)
         except WanSourceError as error:
-            pytest.skip(f"本家 umT5 のトークナイザが手元に無い: {error}")
+            pytest.skip(f"the original umT5 tokenizer is not available locally: {error}")
 
         assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
             UMT5_SOURCES[xt.DEFAULT_MODEL].tokenizer
@@ -161,7 +168,9 @@ class TestAgainstUpstream:
             "vocabText",
             "scores",
         ]
-        assert set(asset) == UMT5_TOKENIZER_FIELDS  # 配布の門が要求する欄の集合
+        assert (
+            set(asset) == UMT5_TOKENIZER_FIELDS
+        )  # the set of fields the distribution gate requires
         assert asset["format"] == xt.ASSET_FORMAT == "karume-umt5-tokenizer/1"
         assert asset["source"] == {
             "repo": "google/umt5-xxl",
@@ -197,8 +206,8 @@ class TestAgainstUpstream:
         assert rebuilt.encode("utf-8") == shipped.read_bytes()
 
     def test_the_committed_fixture_is_what_the_generator_makes(self, truth: ut.Truth) -> None:
-        """commit 済みのフィクスチャを上流から作り直して一致を見る（境界のケースの狙いの決着も
-        生成器が見る）。"""
+        """Rebuild the committed fixture from upstream and check that it matches (the generator
+        also checks that each boundary case lands where it aims)."""
         committed = _committed()
         asset = xt.build_asset(truth, xt.DEFAULT_MODEL, committed["versions"])
 
@@ -220,11 +229,12 @@ class TestAgainstUpstream:
         }
 
     def test_the_ids_equal_the_wan_tokenizer_ids(self, truth: ut.Truth) -> None:
-        """本家と Wan のトークナイザはスコアの表記だけが違う — 受理したケースの id 列は同じ。"""
+        """The original and the Wan tokenizers differ only in how the scores are spelled — the id
+        sequences of the accepted cases are the same."""
         try:
             wan = ut.load_truth(ut.tokenizer_snapshot())
         except WanSourceError as error:
-            pytest.skip(f"Wan のトークナイザが手元に無い: {error}")
+            pytest.skip(f"the Wan tokenizer is not available locally: {error}")
         accepted = [case for case in _committed()["cases"] if "ids" in case]
 
         assert accepted

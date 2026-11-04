@@ -1,19 +1,22 @@
-"""`wan/export_vae_encoder.py` の約束事 — encoder の 3 グラフの IR と golden の書き手
-（ADR 0121 段 9a）。
+"""The contract of `wan/export_vae_encoder.py` — the IR of the three encoder graphs and the golden
+writer (ADR 0121 step 9a).
 
-グラフは合成の 2.2 VAE（conftest の `ti2v_synthetic_vae` — 5B と同じ構造でチャネルだけを縮めた
-もの）で export する（グラフの構造は寸法とチャネル数に依らず、宣言 shape のチャネルだけが変わる）。
-実寸の要約は `python -m wan.export_vae_encoder` が出す。
+The graphs are exported from the synthetic 2.2 VAE (`ti2v_synthetic_vae` of conftest — the 5B
+structure with only the channels shrunk) (the graph structure does not depend on the sizes and the
+channel counts; only the channels of the declared shapes change). The full-size summary comes from
+`python -m wan.export_vae_encoder`.
 
-見るもの:
+What it checks:
 
-- 各グラフの op の集合・記号（pre / post は `[h, w]`・attn は `[S]`）・入出力の宣言 shape・値の
-  rank（4 以下。rank 5 は conv3d の重みだけ）・conv / pad / attention の本数
-- 検査関数（{@link wan.export_vae_encoder.assert_encoder_graph}）自身が、語彙外の op・rank 6・
-  記号の違い・入力の形の違いを落とすこと
-- golden のケースの表（3 寸法 × 決定用 2 枚 + 受入れ 1 枚・stretch は前処理だけ）
-- 書き手が 3 グラフと golden を一組で据えること（合成の VAE と合成の画像で）・来歴の sha256 が
-  違う画像では 1 バイトも書かないこと
+- per graph, the op set, the symbols (pre / post are `[h, w]`, attn is `[S]`), the declared input
+  and output shapes, the rank of the values (4 or less; rank 5 only for the conv3d weights) and
+  the counts of conv / pad / attention
+- the check function itself ({@link wan.export_vae_encoder.assert_encoder_graph}) rejects an op
+  outside the vocabulary, rank 6, a symbol difference and an input shape difference
+- the golden case table (3 sizes × 2 decision images + 1 acceptance image; stretch only in the
+  preprocessing)
+- the writer puts the three graphs and the goldens in place as one set (with the synthetic VAE and
+  synthetic images), and writes not a single byte for an image whose provenance sha256 differs
 - the goldens the writer put into the series (read from the fetched goldens,
   `outputs/test-assets/goldens/` — ADR 0139 decision 2; SKIP without them) are bit-identical to the
   preprocessing chain and the normalization rebuilt with today's Pillow (a golden that drifted
@@ -51,7 +54,7 @@ from wan.export_vae_encoder import (
     GoldenImage,
 )
 
-#: 合成の VAE の mid のチャネル（`base_dim 8 × dim_mult[-1] 4`）。
+#: The mid channels of the synthetic VAE (`base_dim 8 × dim_mult[-1] 4`).
 SYNTHETIC_HIDDEN = 32
 
 
@@ -82,7 +85,8 @@ class TestEncoderGraphs:
         assert set(exported[target].required_ops) == export_vae_encoder.EXPECTED_OPS[target]
 
     def test_the_symbols_and_shapes_are_the_declared_ones(self, exported):
-        """記号は潜在の h, w（pre の入力は 8h / 8w）と系列長 S — 積 h·w はどの値にも現れない。"""
+        """The symbols are the latent h, w (the pre input is 8h / 8w) and the sequence length S —
+        the product h·w appears in no value."""
         io = {
             target: (
                 graph.symbols,
@@ -107,9 +111,9 @@ class TestEncoderGraphs:
             assert rank5 <= set(graph.initializers)
 
     def test_the_node_counts_follow_the_structure(self, exported):
-        """pre: conv3d = conv_in 1 + down の resnets 16 + 1×1×1 のショートカット 2 + mid 2・
-        down の Conv2d 3（pad は各 2 本）・時間倍率 2 のショートカット 2 本が cat / slice を持つ。
-        post: conv3d = mid 2 + conv_out + quant_conv・mu の切り出し 1。"""
+        """pre: conv3d = conv_in 1 + down resnets 16 + 1×1×1 shortcuts 2 + mid 2; down Conv2d 3
+        (each with 2 pads); the 2 shortcuts with time factor 2 carry cat / slice.
+        post: conv3d = mid 2 + conv_out + quant_conv; 1 slice extracting mu."""
         counts = {
             target: Counter(node.op for node in graph.nodes) for target, graph in exported.items()
         }
@@ -121,7 +125,8 @@ class TestEncoderGraphs:
 
 
 class TestTheCheckItself:
-    """検査が緩むと書き直しの漏れや記号の取り違えが素通りする — 故障注入で赤を確かめる。"""
+    """If the check loosened, a missed rewrite or a symbol mix-up would slip through — fault
+    injection confirms the red."""
 
     def test_an_op_outside_the_set_is_caught(self, exported, ti2v_synthetic_vae):
         broken = copy.deepcopy(exported[TARGET_POST])
@@ -180,7 +185,7 @@ class TestGoldenCases:
         assert all(case.width % 16 == 0 and case.height % 16 == 0 for case in cases)
 
 
-# ---- 書き手（合成の VAE と合成の画像）-------------------------------------------------
+# ---- the writer (synthetic VAE and synthetic images) -------------------------------------
 
 
 def _sha256(path: Path) -> str:
@@ -189,7 +194,8 @@ def _sha256(path: Path) -> str:
 
 @pytest.fixture
 def synthetic_images(tmp_path, monkeypatch) -> tuple[GoldenImage, ...]:
-    """テスト画像の代わりの合成の 832×480 PNG（sha256 を来歴として差し替える）。"""
+    """Synthetic 832×480 PNGs in place of the test images (their sha256 replaces the
+    provenance)."""
     from PIL import Image
 
     directory = tmp_path / "inputs"
@@ -207,7 +213,8 @@ def synthetic_images(tmp_path, monkeypatch) -> tuple[GoldenImage, ...]:
 
 @pytest.fixture(scope="module")
 def rounded_vae(ti2v_synthetic_vae):
-    """f16 表現可能値へ丸めた合成の VAE（f16 席の書き出しの前提 — fake-quant）。"""
+    """The synthetic VAE rounded to f16-representable values (the premise of exporting the f16
+    preset — fake-quant)."""
     vae = copy.deepcopy(ti2v_synthetic_vae)
     round_weights_to_f16(vae)
     return vae
@@ -285,7 +292,7 @@ class TestTheSeriesIsPublishedTogether:
         self, rounded_vae, synthetic_images, tmp_path, monkeypatch
     ):
         def fails(*args, **kwargs):
-            raise RuntimeError("golden の途中で落ちる")
+            raise RuntimeError("fails in the middle of the goldens")
 
         monkeypatch.setattr(export_vae_encoder, "golden_tensors", fails)
         out_root = tmp_path / "series"
@@ -323,7 +330,8 @@ def series_goldens() -> dict[str, Path]:
         absent_test_asset(f"every encoder golden under {root}")
     missing = sorted(set(paths) - set(present))
     assert not missing, (
-        f"golden が一部だけある（欠け: {missing}）— 一組で据える書き手の外で消された"
+        f"only some of the goldens exist (missing: {missing}) — deleted outside the writer that"
+        " places them as one set"
     )
     return paths
 

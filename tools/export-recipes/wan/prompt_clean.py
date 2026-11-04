@@ -1,58 +1,65 @@
-r"""Wan2.1 の前処理 `prompt_clean` を「表 + NFC」へ畳み、TS の鏡像を検証する
-（ADR 0119 決定 2・案 b'）。
+r"""Folds the Wan2.1 preprocessing `prompt_clean` into "tables + NFC" and verifies the TS mirror
+(ADR 0119 decision 2, option b').
 
-上流（diffusers 0.39.0 `pipelines/wan/pipeline_wan.py:78-93`）の `prompt_clean` は
+Upstream's `prompt_clean` (diffusers 0.39.0 `pipelines/wan/pipeline_wan.py:78-93`) is
 
-    ftfy.fix_text → html.unescape × 2 → strip → `regex` の `\s+` → U+0020 → strip
+    ftfy.fix_text → html.unescape × 2 → strip → `regex` `\s+` → U+0020 → strip
 
-で、ftfy 6.3.1 の `fix_text`（`ftfy/__init__.py:290-361`）は入力を「改行の直後」と
-「1,000,000 コードポイントごと」で区切り、区切りごとに次の 1 周を**不動点まで**回す
-（`fix_and_explain` — `:364-421`）:
+and `fix_text` of ftfy 6.3.1 (`ftfy/__init__.py:290-361`) splits the input "right after each line
+break" and "every 1,000,000 code points", and runs the following round on each segment **until a
+fixed point** (`fix_and_explain` — `:364-421`):
 
-    unescape_html → fix_encoding（ヒューリスティック）→ fix_c1_controls →
+    unescape_html → fix_encoding (heuristic) → fix_c1_controls →
     fix_latin_ligatures → fix_character_width → uncurl_quotes → fix_line_breaks →
     fix_surrogates → remove_terminal_escapes → remove_control_chars → NFC
 
-## 何を TS へ移し、何を拒むか
+## What moves to TS and what is rejected
 
-決定的な処理（表引きの 4 本・改行・端末エスケープ・NFC）だけを移す。表を持たない処理と
-ヒューリスティックは、**それが効く入力を拒む**ことで no-op に固定する — 拒んだ入力では
-上流の処理が何もしないので、残りの処理だけで上流と同じ文字列になる（黙って近似しない）:
+Only the deterministic steps (the 4 table lookups, line breaks, terminal escapes, NFC) move. The
+steps without a table and the heuristics are pinned to a no-op by **rejecting the inputs they act
+on** — on a rejected input the upstream step does nothing, so the remaining steps alone produce the
+same string as upstream (no silent approximation):
 
-  * **C1 制御文字（U+0080〜009F）** — `fix_c1_controls` は C1 にだけ効く。表の出力と
-    NFC は C1 を作らない（{@link check_table_ranges}）ので、入口で 1 度見れば各周でも no-op。
-  * **HTML の文字参照になりうる並び** — 各周の先頭で ftfy の `HTML_ENTITY_RE`
-    （`&#?[0-9A-Za-z]{1,24};` — `ftfy/chardata.py:82`）が当たれば拒む（当たらなければ
-    `unescape_html` は no-op）。`fix_text` の後で `html.unescape` の `_charref`
-    （`html/__init__.py:118-120` — `&` の直後が `#数字`・`#x16 進`・
-    `\t \n \f 空白 < & # ;` 以外の文字）が当たれば拒む（当たらなければ 2 回の unescape は
-    no-op）。どちらも**正規表現の一致**で判定し、entity の名前表は持たない。帰結として
-    `R&D` や `B&W` のように entity にならない並びも拒む（`a & b` と空白を挟めば通る）。
-  * **mojibake の判定** — 各周の先頭で「ASCII でなく、`BADNESS_RE` が当たる」なら拒む
-    （当たらなければ `fix_encoding` は no-op — `_fix_encoding_one_step_and_explain` の
-    `:482`）。`BADNESS_RE` は構文木から JS の正規表現へ機械翻訳する（{@link badness_terms}）。
-  * **孤立サロゲート** — TS の入口（`assertEncodableText`）が拒む。`fix_surrogates` は
-    Python の str のサロゲート（対も孤立も）にだけ効き、JS の正当な文字列を UTF-8 で渡した
-    str には現れない。
-  * **UCD 16.0.0 で未割り当てのコードポイント** — ftfy の処理ではなく NFC の版差の防壁。
-    TS の NFC は JS エンジンの `normalize` に任せる。割り当て済みの文字の NFC は Unicode の
-    安定性方針で版をまたいで変わらないが、Python（UCD 16.0.0）で未割り当ての文字は、
-    新しいエンジンが分解・結合クラスを持ちうる（語彙にも 60 個ある — U+0378 など）。
-    そこで割れないよう拒む。
+  * **C1 control characters (U+0080–009F)** — `fix_c1_controls` acts only on C1. The table outputs
+    and NFC never produce C1 ({@link check_table_ranges}), so checking once at the entrance makes
+    it a no-op in every round.
+  * **Sequences that could be HTML character references** — at the start of each round, reject if
+    ftfy's `HTML_ENTITY_RE` (`&#?[0-9A-Za-z]{1,24};` — `ftfy/chardata.py:82`) matches (if it does
+    not, `unescape_html` is a no-op). After `fix_text`, reject if `_charref` of `html.unescape`
+    (`html/__init__.py:118-120` — `&` followed by `#digits`, `#x hex`, or a character other than
+    `\t \n \f space < & # ;`) matches (if it does not, the two unescapes are no-ops). Both are
+    decided by **a regular-expression match**, without a table of entity names. As a consequence,
+    sequences that are not entities, such as `R&D` or `B&W`, are rejected too (`a & b` with spaces
+    passes).
+  * **Mojibake detection** — at the start of each round, reject if "not ASCII and `BADNESS_RE`
+    matches" (if not, `fix_encoding` is a no-op — `:482` of `_fix_encoding_one_step_and_explain`).
+    `BADNESS_RE` is machine-translated from its syntax tree into a JS regular expression
+    ({@link badness_terms}).
+  * **Lone surrogates** — the TS entrance (`assertEncodableText`) rejects them. `fix_surrogates`
+    acts only on surrogates in a Python str (paired or lone), which never appear in a str made from
+    a valid JS string passed as UTF-8.
+  * **Code points unassigned in UCD 16.0.0** — not an ftfy step but a guard against NFC version
+    differences. The TS NFC is left to the JS engine's `normalize`. The NFC of assigned characters
+    does not change across versions under Unicode's stability policy, but a character unassigned in
+    Python (UCD 16.0.0) may get a decomposition or a combining class in a newer engine (the
+    vocabulary has 60 of them too — U+0378 and others). They are rejected so that the two cannot
+    disagree there.
 
-## 表の焼き方
+## How the tables are baked
 
-判定の正本は Python 側（ftfy の表・`re` / `regex` の文字クラス・`unicodedata` 16.0.0）で、
-TS で Unicode 判定を再実装しない（anima の `anima/text.py` と同じ規律）。全コードポイントを
-実評価して閉区間表・写像表に畳み、{@link PromptCleanTables.to_json} が TS の読む形にする。
+The source of truth of every decision is the Python side (ftfy's tables, the character classes of
+`re` / `regex`, `unicodedata` 16.0.0); Unicode decisions are not reimplemented in TS (the same
+discipline as anima's `anima/text.py`). Every code point is evaluated for real and folded into
+closed-range tables and mapping tables, and {@link PromptCleanTables.to_json} turns them into the
+form TS reads.
 
-TS の実装（`packages/models/src/wan/text/prompt-clean.ts`）は {@link clean}（焼いた表だけを
-引く Python の鏡像）の写経で、鏡像と上流 `prompt_clean` の一致は {@link verify_fuzz} と
-{@link sweep_records} が網羅 + 乱択で検査する。外れたら何も書かない
-（`wan.umt5_tokenizer` の main）。
+The TS implementation (`packages/models/src/wan/text/prompt-clean.ts`) is a transcription of
+{@link clean} (the Python mirror that looks up only the baked tables), and the agreement between the
+mirror and upstream `prompt_clean` is checked exhaustively and randomly by {@link verify_fuzz} and
+{@link sweep_records}. On a mismatch nothing is written (main of `wan.umt5_tokenizer`).
 
-MUST: ftfy / regex / diffusers は関数の中で import する（`wan` グループは既定の sync に
-入らない — `tests/test_optional_group_imports.py`）。
+MUST: import ftfy / regex / diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -69,10 +76,11 @@ from typing import Any
 
 Ranges = list[list[int]]
 
-#: サロゲートを除く全コードポイント（Python の str に載る評価範囲）。
+#: Every code point except surrogates (the range a Python str can hold).
 ALL_CODEPOINTS = [cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
 
-#: 正本の版（表はこの版の実挙動から焼く — 版が違えば焼かない）。
+#: The versions of the source of truth (the tables are baked from their actual behavior — with
+#: another version nothing is baked).
 FTFY_VERSION = "6.3.1"
 UNIDATA_VERSION = "16.0.0"
 
@@ -84,32 +92,36 @@ UNIDATA_VERSION = "16.0.0"
 #: as a red TS test. When the translation changes on purpose, update both values together.
 FTFY_BADNESS_SHA256 = "7da149647fdaad8c293f44706c67b5649a6f76593cbcf9f23d9613680466312e"
 
-#: ftfy の `TextFixerConfig.max_decode_length`（区切りの最大コードポイント数）。
+#: ftfy's `TextFixerConfig.max_decode_length` (the maximum number of code points per segment).
 MAX_DECODE_LENGTH = 1_000_000
 
-#: C1 制御文字（ADR 0119 決定 2 の拒否の範囲）。
+#: C1 control characters (the rejected range of ADR 0119 decision 2).
 C1_FIRST, C1_LAST = 0x80, 0x9F
 
-#: 不動点の周回の上限（TS と同じ値）。上流の表では 2 周で止まる（{@link verify_fuzz} が
-#: 観測の最大を記録する）。届かないのは表が壊れているときだけなので、TS は素の Error で落とす。
+#: The limit on fixed-point rounds (the same value as TS). With the upstream tables it stops after 2
+#: rounds ({@link verify_fuzz} records the observed maximum). It is reached only when the tables are
+#: broken, so TS fails with a plain Error.
 MAX_FIX_ROUNDS = 8
 
-#: ftfy の `HTML_ENTITY_RE`（`ftfy/chardata.py:82`）。各周の先頭で当たれば拒む。
+#: ftfy's `HTML_ENTITY_RE` (`ftfy/chardata.py:82`). Rejected when it matches at the start of a
+#: round.
 FTFY_ENTITY_PATTERN = r"&#?[0-9A-Za-z]{1,24};"
 
-#: `html.unescape` の `_charref`（Python 3.14 `html/__init__.py:118-120`）。
+#: `_charref` of `html.unescape` (Python 3.14 `html/__init__.py:118-120`).
 HTML_CHARREF_PATTERN = r"&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)"
 
-#: {@link HTML_CHARREF_PATTERN} が**当たるかどうか**だけを見る同値形（TS はこの形を持つ）。
-#: `+` / `{1,32}` / `;?` は 1 文字目が当たれば必ず満たせるので、存在判定には 1 文字目だけでよい。
+#: An equivalent form of {@link HTML_CHARREF_PATTERN} that only tells **whether it matches** (TS
+#: holds this form). `+` / `{1,32}` / `;?` can always be satisfied once the first character matches,
+#: so the first character alone decides existence.
 HTML_CHARREF_PROBE = r"&(?:#[0-9]|#[xX][0-9a-fA-F]|[^\t\n\f <&#;])"
 
-#: ftfy の `ANSI_RE`（`ftfy/fixes.py:142`）。`\d` は Unicode の Nd（`re` の str パターン）。
+#: ftfy's `ANSI_RE` (`ftfy/fixes.py:142`). `\d` is Unicode Nd (a `re` str pattern).
 ANSI_PATTERN = "\033\\[((?:\\d|;)*)([a-zA-Z])"
 
 
 class PromptRejectedError(ValueError):
-    """鏡像が受けない入力（TS の `PromptCleanError` と同じ理由の語彙）。"""
+    """An input the mirror does not accept (the same reason vocabulary as the TS
+    `PromptCleanError`)."""
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(f"{reason}: {detail}")
@@ -117,12 +129,12 @@ class PromptRejectedError(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# 閉区間表
+# Closed-range tables
 # ---------------------------------------------------------------------------
 
 
 def to_ranges(codepoints: Iterable[int]) -> Ranges:
-    """昇順の閉区間リストへ畳む。"""
+    """Folds into an ascending list of closed ranges."""
     out: Ranges = []
     for cp in sorted(set(codepoints)):
         if out and out[-1][1] == cp - 1:
@@ -133,13 +145,14 @@ def to_ranges(codepoints: Iterable[int]) -> Ranges:
 
 
 def ranges_where(predicate: Callable[[str], bool], *, surrogates: bool = False) -> Ranges:
-    """述語が真になるコードポイントの閉区間表（正本に 1 文字ずつ聞いて畳む）。"""
+    """The closed-range table of the code points where the predicate holds (asks the source of
+    truth one character at a time and folds)."""
     domain = range(0x110000) if surrogates else ALL_CODEPOINTS
     return to_ranges(cp for cp in domain if predicate(chr(cp)))
 
 
 class RangeSet:
-    """閉区間表の所属判定（TS の `inCodeRanges` の鏡像 — 二分探索）。"""
+    """Membership in a closed-range table (the mirror of TS `inCodeRanges` — binary search)."""
 
     def __init__(self, ranges: Ranges) -> None:
         self.ranges = ranges
@@ -173,39 +186,40 @@ def _union(*parts: Ranges) -> Ranges:
 
 
 # ---------------------------------------------------------------------------
-# BADNESS_RE の翻訳（構文木 → 中間表現 → JS / Python の正規表現）
+# Translation of BADNESS_RE (syntax tree → intermediate representation → JS / Python regex)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CharClass:
-    r"""1 文字の集合（字面の文字・範囲・`\s` / `\w`・否定・`.` を全てここへ畳む）。"""
+    r"""A set of single characters (literal characters, ranges, `\s` / `\w`, negation and `.` all
+    fold into this)."""
 
     ranges: tuple[tuple[int, int], ...]
 
 
 @dataclass(frozen=True)
 class OptionalChar:
-    """直前の 1 文字の省略可（`?`）。"""
+    """The preceding single character is optional (`?`)."""
 
     item: CharClass
 
 
 @dataclass(frozen=True)
 class LineStart:
-    """文字列の先頭（MULTILINE なしの `^`）。"""
+    """The start of the string (`^` without MULTILINE)."""
 
 
 Term = CharClass | OptionalChar | LineStart
 
 
 def _category_ranges(category: Any) -> Ranges:
-    r"""`re` の str パターンの文字カテゴリを全コードポイントで実評価する（`\s` / `\w`）。"""
+    r"""Evaluates a character category of a `re` str pattern over every code point (`\s` / `\w`)."""
     import re._constants as sre
 
     pattern = {sre.CATEGORY_SPACE: r"\s", sre.CATEGORY_WORD: r"\w"}.get(category)
     if pattern is None:
-        raise ValueError(f"BADNESS_RE に想定外の文字カテゴリ {category} がある")
+        raise ValueError(f"BADNESS_RE has an unexpected character category {category}")
     compiled = re.compile(pattern)
     return ranges_where(lambda ch: compiled.fullmatch(ch) is not None, surrogates=True)
 
@@ -225,7 +239,7 @@ def _class_ranges(items: Sequence[tuple[Any, Any]]) -> Ranges:
         elif op is sre.CATEGORY:
             parts.append(_category_ranges(av))
         else:
-            raise ValueError(f"BADNESS_RE の文字クラスに想定外の要素 {op} がある")
+            raise ValueError(f"BADNESS_RE has an unexpected element {op} in a character class")
     ranges = _union(*parts)
     return _complement(ranges) if negate else ranges
 
@@ -238,29 +252,31 @@ def _term(op: Any, av: Any) -> Term:
     if op is sre.IN:
         return CharClass(tuple((a, b) for a, b in _class_ranges(av)))
     if op is sre.ANY:
-        # MUST: Python の `.`（DOTALL なし）は `\n` だけを除く。JS の `.` は `\r` と
-        # U+2028 / 2029 も除くので、素の `.` へ訳すと改行の周りだけ判定が割れる。集合として
-        # 書き下す。
+        # MUST: Python's `.` (without DOTALL) excludes only `\n`. JS `.` also excludes `\r` and
+        # U+2028 / 2029, so translating to a bare `.` would split the decision only around line
+        # breaks. Spell it out as a set.
         return CharClass(tuple((a, b) for a, b in _complement([[0x0A, 0x0A]])))
     if op is sre.MAX_REPEAT:
         low, high, inner = av
         if (low, high) != (0, 1) or len(inner) != 1:
-            raise ValueError(f"BADNESS_RE に `?` 以外の繰り返し {low},{high} がある")
+            raise ValueError(f"BADNESS_RE has a repetition {low},{high} other than `?`")
         item = _term(*inner[0])
         if not isinstance(item, CharClass):
-            raise ValueError("BADNESS_RE の `?` が 1 文字の集合に掛かっていない")
+            raise ValueError("a `?` of BADNESS_RE does not apply to a single-character set")
         return OptionalChar(item)
     if op is sre.AT and av is sre.AT_BEGINNING:
         return LineStart()
-    raise ValueError(f"BADNESS_RE に想定外の要素 {op} {av!r} がある")
+    raise ValueError(f"BADNESS_RE has an unexpected element {op} {av!r}")
 
 
 def badness_terms() -> list[list[Term]]:
-    r"""`ftfy.badness.BADNESS_RE` の構文木を「選択肢 × 項の列」の中間表現へ畳む。
+    r"""Folds the syntax tree of `ftfy.badness.BADNESS_RE` into the intermediate representation
+    "alternatives × sequences of terms".
 
-    TS へ正規表現の**ソース文字列**を写すと、`re.VERBOSE` の空白・`\w` / `\s` の Unicode の範囲・
-    `.` の改行の扱いが JS と黙って割れる。構文木から集合を実評価して書き下せば、JS 側は
-    `\u{…}` の字面と範囲だけを見る（エンジンの Unicode の版に依らない）。
+    Copying the regular expression's **source string** to TS would make `re.VERBOSE` whitespace, the
+    Unicode ranges of `\w` / `\s` and the line-break handling of `.` silently disagree with JS.
+    Evaluating the sets from the syntax tree and spelling them out leaves JS looking only at
+    `\u{…}` literals and ranges (independent of the engine's Unicode version).
     """
     import re._constants as sre
     import re._parser as sre_parse
@@ -269,16 +285,17 @@ def badness_terms() -> list[list[Term]]:
 
     tree = sre_parse.parse(BADNESS_RE.pattern, BADNESS_RE.flags)
     if len(tree) != 1 or tree[0][0] is not sre.BRANCH:
-        raise ValueError("BADNESS_RE の最上位が 1 つの選択（BRANCH）でない")
+        raise ValueError("the top level of BADNESS_RE is not a single alternation (BRANCH)")
     _, branches = tree[0][1]
     return [[_term(op, av) for op, av in branch] for branch in branches]
 
 
 def badness_literals() -> list[int]:
-    r"""`BADNESS_RE` の字面に現れる非 ASCII の文字（`\s` / `\w`・否定・`.` 由来は含めない）。
+    r"""The non-ASCII characters that appear literally in `BADNESS_RE` (not those from `\s` / `\w`,
+    negation or `.`).
 
-    fuzz の池の境界（調査 §3.3 の「449 文字」）。字面の集合だけを数えるので、カテゴリ由来の
-    広い集合（`\w` など）はここに入らない。
+    The boundary of the fuzz pool (the "449 characters" of research §3.3). Only the literal sets are
+    counted, so the wide sets from categories (`\w` and so on) are not included.
     """
     import re._constants as sre
     import re._parser as sre_parse
@@ -328,46 +345,51 @@ def _emit(terms: Sequence[Sequence[Term]], escape: Callable[[int], str]) -> str:
 
 
 def emit_js(terms: Sequence[Sequence[Term]]) -> str:
-    """JS の正規表現ソース（`u` フラグで使う — 全ての文字を `\\u{…}` で書く）。"""
+    """The JS regular-expression source (used with the `u` flag — every character is written as
+    `\\u{…}`)."""
     return _emit(terms, lambda cp: f"\\u{{{cp:X}}}")
 
 
 def emit_python(terms: Sequence[Sequence[Term]]) -> str:
-    """同じ中間表現の Python 版（JS 版と同じ形で、エスケープの綴りだけが違う）。
+    """The Python version of the same intermediate representation (the same shape as the JS one;
+    only the spelling of the escapes differs).
 
-    pytest がこれを `BADNESS_RE` と突き合わせる — 中間表現への畳み込みの同値を Python の中で
-    確かめ、JS 側は綴りの写像（`\\u{…}`）だけを TS の parity テストが縛る。
+    pytest checks it against `BADNESS_RE` — the equivalence of folding into the intermediate
+    representation is confirmed within Python, and the TS parity test pins only the spelling map
+    (`\\u{…}`) on the JS side.
     """
     return _emit(terms, lambda cp: f"\\U{cp:08x}")
 
 
 # ---------------------------------------------------------------------------
-# 表
+# Tables
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PromptCleanTables:
-    """TS が引く表一式（{@link to_json} が資産・フィクスチャの `promptClean` になる）。"""
+    """The full set of tables TS looks up ({@link to_json} becomes `promptClean` of the asset and
+    the fixture)."""
 
-    #: `fix_latin_ligatures`（`ftfy/chardata.py:207-230` の LIGATURES）。
+    #: `fix_latin_ligatures` (LIGATURES of `ftfy/chardata.py:207-230`).
     ligatures: dict[int, str]
-    #: `fix_character_width`（WIDTH_MAP — 全角・半角形の NFKC と U+3000 → U+0020）。
+    #: `fix_character_width` (WIDTH_MAP — NFKC of the full-width and half-width forms, and U+3000 →
+    #: U+0020).
     width: dict[int, str]
-    #: `uncurl_quotes` の SINGLE_QUOTE_RE / DOUBLE_QUOTE_RE が当たる文字。
+    #: The characters that SINGLE_QUOTE_RE / DOUBLE_QUOTE_RE of `uncurl_quotes` match.
     single_quotes: Ranges
     double_quotes: Ranges
-    #: `remove_control_chars` が消す文字（CONTROL_CHARS）。
+    #: The characters `remove_control_chars` removes (CONTROL_CHARS).
     control_chars: Ranges
-    #: `remove_terminal_escapes` の `\d`（`re` の Unicode の Nd）。
+    #: `\d` of `remove_terminal_escapes` (Unicode Nd of `re`).
     ansi_digits: Ranges
-    #: UCD 16.0.0 で割り当て済み（`unicodedata.category != "Cn"`）。
+    #: Assigned in UCD 16.0.0 (`unicodedata.category != "Cn"`).
     assigned: Ranges
-    #: `str.strip()` が落とす文字（`str.isspace`）。
+    #: The characters `str.strip()` drops (`str.isspace`).
     strip_space: Ranges
-    #: `whitespace_clean` の `regex` の `\s`。
+    #: `\s` of `regex` in `whitespace_clean`.
     collapse_space: Ranges
-    #: `BADNESS_RE` の中間表現。
+    #: The intermediate representation of `BADNESS_RE`.
     badness: list[list[Term]]
 
     def to_json(self) -> dict[str, Any]:
@@ -389,23 +411,27 @@ class PromptCleanTables:
             "assigned": self.assigned,
             "stripSpace": self.strip_space,
             "collapseSpace": self.collapse_space,
-            # JS の正規表現ソース（`new RegExp(source, "u")`）。
+            # The JS regular-expression source (`new RegExp(source, "u")`).
             "badness": badness,
         }
 
 
 def check_versions() -> dict[str, str]:
-    """正本の版を確かめる（違えば焼かない — 表は版の実挙動そのもの）。"""
+    """Checks the versions of the source of truth (with other versions nothing is baked — the
+    tables are those versions' actual behavior)."""
     import sys
 
     import ftfy
     import regex
 
     if ftfy.__version__ != FTFY_VERSION:
-        raise ValueError(f"ftfy {ftfy.__version__} — 表は {FTFY_VERSION} の実挙動から焼く")
+        raise ValueError(
+            f"ftfy {ftfy.__version__} — the tables are baked from the behavior of {FTFY_VERSION}"
+        )
     if unicodedata.unidata_version != UNIDATA_VERSION:
         raise ValueError(
-            f"unicodedata {unicodedata.unidata_version} — NFC の正本は UCD {UNIDATA_VERSION}"
+            f"unicodedata {unicodedata.unidata_version} — the source of truth of NFC is UCD"
+            f" {UNIDATA_VERSION}"
         )
     return {
         "ftfy": ftfy.__version__,
@@ -416,19 +442,21 @@ def check_versions() -> dict[str, str]:
 
 
 def check_upstream_shape() -> None:
-    """鏡像が前提にしている上流の綴りを固定する（版を上げて変われば焼かない）。
+    """Pins the upstream spellings the mirror relies on (if a version bump changes them, nothing is
+    baked).
 
-    表に落とせない部分（正規表現の形・既定の設定）を字面で縛る。振る舞いの同値は
-    {@link verify_fuzz} と {@link sweep_records} が別に見る。
+    Pins the parts that cannot go into tables (the shape of the regular expressions, the default
+    settings) by their literal text. The behavioral equivalence is checked separately by
+    {@link verify_fuzz} and {@link sweep_records}.
     """
     from ftfy import TextFixerConfig, chardata, fixes
 
     if chardata.HTML_ENTITY_RE.pattern != FTFY_ENTITY_PATTERN:
-        raise ValueError(f"ftfy の HTML_ENTITY_RE が変わった: {chardata.HTML_ENTITY_RE.pattern!r}")
+        raise ValueError(f"ftfy's HTML_ENTITY_RE changed: {chardata.HTML_ENTITY_RE.pattern!r}")
     if html._charref.pattern != HTML_CHARREF_PATTERN:  # type: ignore[attr-defined]
-        raise ValueError(f"html._charref が変わった: {html._charref.pattern!r}")  # type: ignore[attr-defined]
+        raise ValueError(f"html._charref changed: {html._charref.pattern!r}")  # type: ignore[attr-defined]
     if fixes.ANSI_RE.pattern != ANSI_PATTERN:
-        raise ValueError(f"ftfy の ANSI_RE が変わった: {fixes.ANSI_RE.pattern!r}")
+        raise ValueError(f"ftfy's ANSI_RE changed: {fixes.ANSI_RE.pattern!r}")
     config = TextFixerConfig()
     expected = {
         "unescape_html": "auto",
@@ -446,11 +474,11 @@ def check_upstream_shape() -> None:
     }
     actual = {key: getattr(config, key) for key in expected}
     if actual != expected:
-        raise ValueError(f"ftfy の既定の設定が変わった: {actual}")
+        raise ValueError(f"ftfy's default settings changed: {actual}")
 
 
 def build_tables() -> PromptCleanTables:
-    """ftfy 6.3.1・`re` / `regex`・`unicodedata` 16.0.0 から表を焼く。"""
+    """Bakes the tables from ftfy 6.3.1, `re` / `regex` and `unicodedata` 16.0.0."""
     import regex
     from ftfy import chardata
 
@@ -475,34 +503,36 @@ def build_tables() -> PromptCleanTables:
 
 
 def check_table_ranges(tables: PromptCleanTables) -> None:
-    """表の値域の前提（入口で 1 度見れば各周でも成り立つ、の根拠）を検査する。
+    """Checks the premises on the tables' output ranges (the grounds for "checking once at the
+    entrance holds in every round").
 
-    表引きの出力が C1・未割り当て・サロゲートを作れば、入口の検査だけでは各周の no-op が
-    言えなくなる。引用符の 2 集合が交わったり出力が自分に当たれば、2 本の置換を 1 回の写像で
-    書いた TS と順序が割れる。
+    If a table lookup produced C1, an unassigned code point or a surrogate, the entrance check alone
+    would no longer prove the no-op in every round. If the two quote sets intersected or an output
+    matched itself, the order would disagree with TS, which writes the two replacements as one
+    mapping.
     """
     assigned = RangeSet(tables.assigned)
     outputs = "".join(tables.ligatures.values()) + "".join(tables.width.values()) + "'\"\n"
     for ch in outputs:
         cp = ord(ch)
         if C1_FIRST <= cp <= C1_LAST or 0xD800 <= cp <= 0xDFFF or cp not in assigned:
-            raise ValueError(f"表の出力 U+{cp:04X} が C1 / サロゲート / 未割り当て")
+            raise ValueError(f"table output U+{cp:04X} is C1 / a surrogate / unassigned")
     single, double = RangeSet(tables.single_quotes), RangeSet(tables.double_quotes)
     if any(cp in double for start, end in tables.single_quotes for cp in range(start, end + 1)):
-        raise ValueError("SINGLE_QUOTE_RE と DOUBLE_QUOTE_RE の集合が交わる")
+        raise ValueError("the sets of SINGLE_QUOTE_RE and DOUBLE_QUOTE_RE intersect")
     if ord("'") in single or ord("'") in double or ord('"') in single or ord('"') in double:
         raise ValueError("引用符の置換先が引用符の集合に入っている")
 
 
 # ---------------------------------------------------------------------------
-# 鏡像（TS 実装の写経元 — 焼いた表だけを引く）
+# The mirror (the source the TS implementation is transcribed from — looks up only the baked tables)
 # ---------------------------------------------------------------------------
 
 
 class CompiledTables:
-    """{@link PromptCleanTables} を引きやすい形にしたもの。
+    """{@link PromptCleanTables} in a form that is easy to look up.
 
-    TS の `parsePromptCleanTables` の鏡像。
+    The mirror of TS `parsePromptCleanTables`.
     """
 
     def __init__(self, tables: PromptCleanTables) -> None:
@@ -522,7 +552,8 @@ class CompiledTables:
 
 
 def split_segments(text: str) -> list[str]:
-    """`fix_text` の区切り（改行の直後で切る・1 区切りは最大 {@link MAX_DECODE_LENGTH}）。"""
+    """The segments of `fix_text` (split right after each line break; at most
+    {@link MAX_DECODE_LENGTH} per segment)."""
     out: list[str] = []
     pos = 0
     while pos < len(text):
@@ -558,7 +589,7 @@ def _fix_line_breaks(text: str) -> str:
 
 
 def _remove_terminal_escapes(compiled: CompiledTables, text: str) -> str:
-    """`ESC [ (\\d|;)* 英字` を消す（`re.sub` と同じく左から・重ならずに）。"""
+    """Removes `ESC [ (\\d|;)* letter` (left to right and non-overlapping, like `re.sub`)."""
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
@@ -602,9 +633,9 @@ def _collapse(compiled: CompiledTables, text: str) -> str:
 
 
 def fix_segment(compiled: CompiledTables, segment: str, rounds: Counter[int] | None = None) -> str:
-    """1 区切りを不動点まで回す。
+    """Runs one segment to a fixed point.
 
-    `fix_and_explain` の 1 周から、拒んで no-op にした処理を除いたもの。
+    One round of `fix_and_explain` minus the steps pinned to a no-op by rejection.
     """
     text = segment
     for round_index in range(1, MAX_FIX_ROUNDS + 1):
@@ -627,11 +658,14 @@ def fix_segment(compiled: CompiledTables, segment: str, rounds: Counter[int] | N
             if rounds is not None:
                 rounds[round_index] += 1
             return text
-    raise RuntimeError(f"{MAX_FIX_ROUNDS} 周で不動点に届かない（表が壊れている）: {segment!r}")
+    raise RuntimeError(
+        f"no fixed point within {MAX_FIX_ROUNDS} rounds (the tables are broken): {segment!r}"
+    )
 
 
 def clean(compiled: CompiledTables, text: str, rounds: Counter[int] | None = None) -> str:
-    """`prompt_clean` の鏡像。受けない入力は {@link PromptRejectedError}。"""
+    """The mirror of `prompt_clean`. An input it does not accept raises
+    {@link PromptRejectedError}."""
     for ch in text:
         cp = ord(ch)
         if 0xD800 <= cp <= 0xDFFF:
@@ -648,13 +682,13 @@ def clean(compiled: CompiledTables, text: str, rounds: Counter[int] | None = Non
 
 
 def upstream_prompt_clean() -> Callable[[str], str]:
-    """上流の `prompt_clean`（ftfy が入っていることを確かめてから返す）。"""
+    """Upstream's `prompt_clean` (returned after checking that ftfy is installed)."""
     from diffusers.pipelines.wan.pipeline_wan import prompt_clean
     from diffusers.utils import is_ftfy_available
 
     check_versions()
     if not is_ftfy_available():
-        raise ValueError("diffusers が ftfy を見つけない — prompt_clean が fix_text を飛ばす")
+        raise ValueError("diffusers does not find ftfy — prompt_clean would skip fix_text")
     return prompt_clean
 
 
@@ -664,10 +698,12 @@ def record(
     text: str,
     rounds: Counter[int] | None = None,
 ) -> str:
-    """1 入力の決着（受理なら `A` + 上流の出力・拒否なら `R` + 理由）。
+    """The outcome of one input (`A` + upstream's output when accepted, `R` + the reason when
+    rejected).
 
-    MUST: 受理した入力では鏡像と上流の一致を必ず確かめてから**上流の出力**を記録する — 期待値は
-    常に上流から採り、鏡像は「どれを拒むか」だけを決める。
+    MUST: for an accepted input, always check that the mirror equals upstream before recording
+    **upstream's output** — the expected value always comes from upstream, and the mirror decides
+    only "which inputs to reject".
     """
     try:
         mirrored = clean(compiled, text, rounds)
@@ -683,16 +719,16 @@ def record(
 
 
 # ---------------------------------------------------------------------------
-# 乱択（TS と同じ列を再生できる PRNG）と池
+# Randomized testing (a PRNG that reproduces the same sequence as TS) and pools
 # ---------------------------------------------------------------------------
 
 
 class XorShift32:
-    """32 ビットの xorshift（Marsaglia 13/17/5）。TS の `xorshift32` と同じ列を出す。"""
+    """32-bit xorshift (Marsaglia 13/17/5). Produces the same sequence as TS `xorshift32`."""
 
     def __init__(self, seed: int) -> None:
         if not 0 < seed < 2**32:
-            raise ValueError(f"xorshift32 の seed は 1..2^32-1（{seed}）")
+            raise ValueError(f"the xorshift32 seed must be in 1..2^32-1 (got {seed})")
         self.state = seed
 
     def next(self) -> int:
@@ -709,49 +745,53 @@ def expand(ranges: Ranges) -> list[int]:
 
 
 def fuzz_strings(pool: Sequence[int], seed: int, count: int, max_length: int) -> Iterator[str]:
-    """長さ 1..max_length の乱択列（長さ → 各文字の順に PRNG を引く — TS と同じ手順）。"""
+    """Random strings of length 1..max_length (the PRNG is drawn for the length, then for each
+    character — the same procedure as TS)."""
     rng = XorShift32(seed)
     for _ in range(count):
         length = 1 + rng.next() % max_length
         yield "".join(chr(pool[rng.next() % len(pool)]) for _ in range(length))
 
 
-#: 安全な池の素材（調査 §3.3 の池と同じ構成 — 普通のプロンプトに出る文字と、決定的な処理が
-#: 効く文字）。ここから `BADNESS_RE` の字面の文字・`&`・未割り当てを除く。
+#: The material of the safe pool (the same composition as the pool of research §3.3 — characters
+#: that appear in ordinary prompts and characters the deterministic steps act on). The literal
+#: characters of `BADNESS_RE`, `&` and unassigned code points are removed from it.
 SAFE_POOL_BLOCKS: tuple[tuple[int, int, str], ...] = (
-    (0x0000, 0x007F, "ASCII（制御文字・ESC を含む）"),
-    (0x00A0, 0x017F, "Latin-1 補助・Latin 拡張 A（ĳ・ŉ を含む）"),
-    (0x01C4, 0x01CC, "Latin の二重字（fix_latin_ligatures）"),
-    (0x02BC, 0x02BC, "修飾字のアポストロフィ（uncurl_quotes）"),
-    (0x0300, 0x036F, "結合文字"),
-    (0x0370, 0x04FF, "ギリシャ・キリル"),
-    (0x0600, 0x06FF, "アラビア"),
-    (0x0900, 0x097F, "デーヴァナーガリー"),
-    (0x0E00, 0x0E7F, "タイ"),
-    (0x1100, 0x11FF, "ハングル字母"),
-    (0x2000, 0x206F, "一般句読点（曲がった引用符・U+2028 / 2029・206A-206F）"),
-    (0x3000, 0x30FF, "CJK 記号・仮名"),
-    (0x4E00, 0x51FF, "CJK 統合漢字（先頭 1,024）"),
-    (0xAC00, 0xADFF, "ハングル音節（先頭 512）"),
-    (0xFB00, 0xFB06, "Latin の合字"),
-    (0xFE00, 0xFE0F, "異体字セレクタ"),
+    (0x0000, 0x007F, "ASCII (including control characters and ESC)"),
+    (0x00A0, 0x017F, "Latin-1 Supplement, Latin Extended-A (including ĳ and ŉ)"),
+    (0x01C4, 0x01CC, "Latin digraphs (fix_latin_ligatures)"),
+    (0x02BC, 0x02BC, "modifier letter apostrophe (uncurl_quotes)"),
+    (0x0300, 0x036F, "combining characters"),
+    (0x0370, 0x04FF, "Greek, Cyrillic"),
+    (0x0600, 0x06FF, "Arabic"),
+    (0x0900, 0x097F, "Devanagari"),
+    (0x0E00, 0x0E7F, "Thai"),
+    (0x1100, 0x11FF, "Hangul Jamo"),
+    (0x2000, 0x206F, "General Punctuation (curly quotes, U+2028 / 2029, 206A-206F)"),
+    (0x3000, 0x30FF, "CJK symbols, kana"),
+    (0x4E00, 0x51FF, "CJK Unified Ideographs (first 1,024)"),
+    (0xAC00, 0xADFF, "Hangul Syllables (first 512)"),
+    (0xFB00, 0xFB06, "Latin ligatures"),
+    (0xFE00, 0xFE0F, "variation selectors"),
     (0xFEFF, 0xFEFF, "BOM"),
-    (0xFF00, 0xFFEF, "全角・半角形"),
-    (0xFFF9, 0xFFFC, "注釈・置換オブジェクト"),
-    (0x1F1E6, 0x1F1FF, "地域表示子"),
-    (0x1F300, 0x1F64F, "絵文字"),
+    (0xFF00, 0xFFEF, "Halfwidth and Fullwidth Forms"),
+    (0xFFF9, 0xFFFC, "interlinear annotation, object replacement"),
+    (0x1F1E6, 0x1F1FF, "regional indicators"),
+    (0x1F300, 0x1F64F, "emoji"),
 )
 
-#: entity の門を叩く池の追加分（`&` の周りに来うる空白・全角の記号）。
+#: The additions to the pool that exercises the entity check (whitespace and full-width symbols
+#: that can surround `&`).
 ENTITY_POOL_EXTRA = (0x09, 0x0A, 0x0C, 0x0D, 0xA0, 0x3000, 0xFF03, 0xFF06, 0xFF1B)
 
 
 def fuzz_pools(tables: PromptCleanTables) -> dict[str, Ranges]:
-    """fuzz の池（TS はフィクスチャの区間表を展開して同じ列を引く）。
+    """The fuzz pools (TS expands the range tables of the fixture and draws the same sequences).
 
-    安全な池は「`&` と `BADNESS_RE` の字面の文字を含まない」だけでなく、表引きの出力にも
-    それらを出さない文字に絞る（全角の `＆` `￠` は `fix_character_width` で `&` `¢` になり、
-    次の周で entity / mojibake の門に当たる — 安全な池の意味が崩れる）。
+    The safe pool is restricted not only to "contains neither `&` nor the literal characters of
+    `BADNESS_RE`" but also to characters whose table-lookup output does not produce them either
+    (the full-width `＆` `￠` become `&` `¢` through `fix_character_width` and hit the entity /
+    mojibake checks in the next round — that would break what the safe pool means).
     """
     assigned = RangeSet(tables.assigned)
     literals = set(badness_literals())
@@ -771,28 +811,29 @@ def fuzz_pools(tables: PromptCleanTables) -> dict[str, Ranges]:
 
 
 # ---------------------------------------------------------------------------
-# フィクスチャ（TS が同じ列を再生して突き合わせる — 期待値は digest で持つ）
+# Fixture (TS replays the same sequences and compares — the expected values are kept as digests)
 # ---------------------------------------------------------------------------
 
-#: 区切り（記録の中には現れない — 受理の出力は制御文字を持たず、理由は ASCII の語）。
+#: The separator (it never appears inside a record — an accepted output has no control characters,
+#: and a reason is an ASCII word).
 RECORD_SEPARATOR = "\x00"
 
 
 def digest(records: Iterable[str]) -> str:
-    """記録の列の SHA-256（各記録の後に {@link RECORD_SEPARATOR} を置いた UTF-8）。"""
+    """SHA-256 of a sequence of records (UTF-8 with {@link RECORD_SEPARATOR} after each record)."""
     hasher = hashlib.sha256()
     for item in records:
         hasher.update((item + RECORD_SEPARATOR).encode("utf-8"))
     return hasher.hexdigest()
 
 
-#: 塊ごとの digest の桁数（16 進 16 桁 = 64 ビット）。回帰の検出には十分で、フィクスチャを
-#: 塊の数だけ太らせない。
+#: The number of digits of each chunk's digest (16 hex digits = 64 bits). Enough to detect
+#: regressions, without bloating the fixture by the number of chunks.
 BLOCK_DIGEST_HEX = 16
 
 
 def chunked_digests(records: Sequence[str], chunk: int) -> list[str]:
-    """`chunk` 件ごとの digest（外れたときに TS がどの塊かを言えるように分ける）。"""
+    """A digest per `chunk` records (split so that on a mismatch TS can say which chunk)."""
     return [
         digest(records[i : i + chunk])[:BLOCK_DIGEST_HEX] for i in range(0, len(records), chunk)
     ]
@@ -800,7 +841,8 @@ def chunked_digests(records: Sequence[str], chunk: int) -> list[str]:
 
 @dataclass(frozen=True)
 class FuzzRun:
-    """乱択 1 本の定義（TS はこの定義とフィクスチャの池から同じ列を作る）。"""
+    """The definition of one random run (TS builds the same sequence from this definition and the
+    fixture's pools)."""
 
     name: str
     pool: str
@@ -810,17 +852,20 @@ class FuzzRun:
     chunk: int = 1000
 
 
-#: 前処理の鏡像の fuzz（調査 §3.3 の池と本数以上 — 安全な池 200,000 本・全池 50,000 本）。
+#: Fuzzing of the preprocessing mirror (at least the pools and counts of research §3.3 — 200,000
+#: strings from the safe pool, 50,000 from the full pool).
 CLEAN_RUNS = (
     FuzzRun("safe", "safe", seed=1, count=200_000),
     FuzzRun("full", "full", seed=2, count=50_000),
     FuzzRun("entity", "entity", seed=3, count=20_000),
 )
 
-#: `BADNESS_RE` の翻訳の fuzz（449 文字を混ぜた池 — 判定そのものを `is_bad` と比べる）。
+#: Fuzzing of the `BADNESS_RE` translation (a pool mixing in the 449 characters — the decision
+#: itself is compared with `is_bad`).
 BADNESS_RUNS = (FuzzRun("full", "full", seed=4, count=50_000),)
 
-#: `BADNESS_RE` の Unicode 依存の構文（`\w`・`\s`・`.`・`[^…]`・`^`）を全コードポイントで叩く文脈。
+#: Contexts that exercise the Unicode-dependent syntax of `BADNESS_RE` (`\w`, `\s`, `.`, `[^…]`,
+#: `^`) over every code point.
 BADNESS_PROBES: tuple[tuple[str, str], ...] = (
     ("word", "à«{}"),
     ("space", "{}À€"),
@@ -830,11 +875,13 @@ BADNESS_PROBES: tuple[tuple[str, str], ...] = (
     ("line-start", "{}Ã "),
 )
 
-#: 前処理の鏡像を全コードポイントで叩く文脈（端の strip と中の畳み込みの両方）。
+#: Contexts that exercise the preprocessing mirror over every code point (both the strip at the
+#: ends and the collapse in the middle).
 CLEAN_SWEEPS: tuple[tuple[str, str], ...] = (("alone", "{}"), ("inner", "a{}b"))
 
-#: NFC の版差の掃引（UCD 16.0.0 で割り当て済みのコードポイントだけ — 未割り当ては入口で拒む）。
-#: 並べ替え（ccc 1 / 230）・合成・ハングル・二重の文脈を混ぜる。
+#: The sweep for NFC version differences (only code points assigned in UCD 16.0.0 — unassigned ones
+#: are rejected at the entrance). Mixes reordering (ccc 1 / 230), composition, Hangul and doubled
+#: contexts.
 NFC_SWEEPS: tuple[tuple[str, str], ...] = (
     ("alone", "{}"),
     ("before-acute", "a{}́"),
@@ -846,14 +893,16 @@ NFC_SWEEPS: tuple[tuple[str, str], ...] = (
     ("double-acute", "{}{}́"),
 )
 
-#: 全コードポイントの掃引を区切る塊（外れたブロックを TS が名指しできるように）。
+#: The chunk that divides the sweep over every code point (so that TS can name the block that
+#: mismatched).
 SWEEP_BLOCK = 0x1000
 
 
 def sweep_blocks(
     domain: Sequence[int], record_of: Callable[[int], str], block: int = SWEEP_BLOCK
 ) -> list[str]:
-    """`domain` を `block` 単位の塊に分け、塊ごとの digest を返す（空の塊も 1 本）。"""
+    """Splits `domain` into chunks of `block` and returns a digest per chunk (an empty chunk also
+    gets one)."""
     buckets: list[list[str]] = [[] for _ in range(0x110000 // block)]
     for cp in domain:
         buckets[cp // block].append(record_of(cp))
@@ -863,7 +912,8 @@ def sweep_blocks(
 def sweep_records(
     compiled: CompiledTables, truth: Callable[[str], str], template: str
 ) -> list[str]:
-    """前処理の全コードポイント掃引（`template` の `{}` に 1 文字を入れる）。"""
+    """The sweep of the preprocessing over every code point (one character goes into `{}` of
+    `template`)."""
     return sweep_blocks(
         ALL_CODEPOINTS, lambda cp: record(compiled, truth, template.replace("{}", chr(cp)))
     )
@@ -872,9 +922,9 @@ def sweep_records(
 def verify_fuzz(
     compiled: CompiledTables, truth: Callable[[str], str], run: FuzzRun, pool: Sequence[int]
 ) -> dict[str, Any]:
-    """乱択 1 本を回し、塊ごとの digest と決着の内訳を返す。
+    """Runs one random run and returns the digest per chunk and the breakdown of outcomes.
 
-    鏡像と上流が食い違えば {@link record} が落ちる。
+    If the mirror and upstream disagree, {@link record} fails.
     """
     rounds: Counter[int] = Counter()
     records: list[str] = []
@@ -895,7 +945,7 @@ def verify_fuzz(
 
 
 def badness_bits(pattern: re.Pattern[str], texts: Iterable[str]) -> str:
-    """各入力に `search` が当たるかを `0` / `1` の列にしたもの。"""
+    """Whether `search` matches each input, as a string of `0` / `1`."""
     return "".join("1" if pattern.search(text) else "0" for text in texts)
 
 

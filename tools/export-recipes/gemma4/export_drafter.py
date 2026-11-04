@@ -1,58 +1,64 @@
-"""Gemma 4 E2B の **MTP drafter**（HF `google/gemma-4-E2B-it-assistant`）を借り手グラフへ書き出す。
+"""Writes Gemma 4 E2B's **MTP drafter** (HF `google/gemma-4-E2B-it-assistant`) as a borrower graph.
 
-ADR [0096](../../../docs/decisions/0096-speculative-decoding.md) 段 2。
+ADR [0096](../../../docs/decisions/0096-speculative-decoding.md) step 2.
 
     uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter
 
-## 借り手グラフとは（3 つの宣言）
+## What a borrower graph is (three declarations)
 
-drafter は自前の KV を持たず、**target（製品グラフ）の l13〈sliding・window 512〉/ l14〈full〉の
-k/v をそのまま読む**。出力ヘッドの手前で食う埋め込み表も target の主表を借りる。したがって
-このグラフだけでは実行できず、実行時に貸し手 Session / context と束ねられる:
+The drafter owns no KV; it **reads the k/v of the target's (the product graph's) l13 (sliding,
+window 512) / l14 (full) as they are**. The embedding table it consumes before the output head is
+also borrowed from the target's main table. So this graph cannot run on its own; at run time it is
+bound to the lender's Session / context:
 
-- `states` の 4 スロットは **external**（実体は貸し手の context）。`state_append` は 0 本
-- attention は **readonly 形**（`ins` は q の 1 本・今 step の k/v も mask も持たない）
-- 主表の initializer は **shared**（バイトを 1 つも書かず、貸し手のテンソルキーを名指す）
+- the 4 slots of `states` are **external** (the data lives in the lender's context). No
+  `state_append`
+- attention is in **readonly form** (`ins` is just q; no k/v of the current step and no mask)
+- the main table's initializer is **shared** (not a single byte written; it names the lender's
+  tensor key)
 
-trace 上は KV を**通常の入力テンソル**として受け（torch.export は state を辿れない）、
-`karume.states.to_external_states_form` がその 4 本の入力を落として readonly 形へ書き換える
-（target 側の `to_states_form` と同じ規律 — 純関数・検査は verify）。
+At trace time the KV comes in as **ordinary input tensors** (torch.export cannot follow state), and
+`karume.states.to_external_states_form` drops those 4 inputs and rewrites to the readonly form
+(the same discipline as `to_states_form` on the target side — a pure function, checked by verify).
 
-## 1 段の中身と k 段展開
+## What one step contains, and the k-step unrolling
 
     x       = cat(target_embed(token) * sqrt(1536), hidden)        [1,1,3072]
     state   = pre_projection(x)                                    [1,1,256]
-    4 層     = q_proj → q_norm → RoPE（ホスト供給の 1 行）→ SDPA(q, K, V, scale=1.0, mask 0)
-              → o_proj / 4 RMSNorm + 残差 + layer_scalar / MLP gelu_tanh
+    4 layers = q_proj → q_norm → RoPE (one host-supplied row) → SDPA(q, K, V, scale=1.0, mask 0)
+              → o_proj / 4 RMSNorm + residual + layer_scalar / MLP gelu_tanh
     state   = norm(state)
     hidden  = post_projection(state)                               [1,1,1536]
     token   = argmax(lm_head(state))                               [1,1,1]
 
-これを **k = 3 段** Python ループで展開する（段間の唯一の状態は `(token, hidden)` — drafter に
-KV は無い）。段ごとに 1 本ずつ、計 3 本の token をグラフ出力にする（IR の `cat` は f32 限定で
-i32 を連結できない）。
+This is unrolled **k = 3 steps** in a Python loop (the only state between steps is
+`(token, hidden)` — the drafter has no KV). Each step contributes one token, 3 in total, as graph
+outputs (the IR's `cat` is f32 only and cannot concatenate i32).
 
-MUST: `use_ordered_embeddings=False` で読む。配布 checkpoint の centroid 疎 softmax
-（topk → 4096 候補 → scatter）は IR 語彙に無い（`topk` は `NON_EMITTABLE_OPS`）ので、
-**全語彙の lm_head + argmax** に落とす。`masked_embedding` は `__init__` が config を見て作るので、
-読み込んだ後に落とすのではなく**読む前に config を倒す**（`Gemma4AssistantForCausalLM.__init__`）。
+MUST: load with `use_ordered_embeddings=False`. The distributed checkpoint's sparse centroid softmax
+(topk → 4096 candidates → scatter) is not in the IR vocabulary (`topk` is in `NON_EMITTABLE_OPS`),
+so it is lowered to **lm_head + argmax over the full vocabulary**. `masked_embedding` is created by
+`__init__` from the config, so instead of dropping it after loading, **the config is switched off
+before loading** (`Gemma4AssistantForCausalLM.__init__`).
 
-## 量子化（席は i8 の 1 つだけ）
+## Quantization (i8 only)
 
-| 席 | 格納 | 理由 |
+| Weights | Storage | Reason |
 | --- | --- | --- |
-| `nn.Linear` 全部（`drafter.lm_head` 込み） | i8 per-channel | 下の実測 — i4 は受理率を削る |
+| all `nn.Linear` (incl. `drafter.lm_head`) | i8 per-channel | see below — i4 cuts acceptance |
 | `target_embed` (shared, no bytes) | bf16, not rounded | declared as the lender stores it (MUST) |
-| norm / q_norm / layer_scalar | f32 | `fake_quant_int8` は `weight` を持つ 5 型しか見ない |
+| norm / q_norm / layer_scalar | f32 | `fake_quant_int8` sees only the 5 types with a `weight` |
 
-**drafter に i4 の席は無い**。2026-09-08 の実測（同一 target 軌跡・N = 200 cycle × 3 ケースの
-逐次受理から E[a](k=3) を採る）で、drafter の linear（pre / post projection・q_proj・
-o_proj・gate/up/down = 22 本・10.1M 要素）を i4 g32 に落とすと E[a] が丸め無し比で
-**−33% / −21% / −15%**（ケース順）まで落ちた。同じ 22 本を i8 per-channel にすると **−2〜−3%**
-に収まり、共有主表を i8 にする影響は **±0**。丸めの重い側は出力ヘッド（262,144×256 = 67.1M
-要素）で、そちらは i8 のまま — linear 22 本を i4 g32（半バイト + group ごとの f32 scale）から
-i8 per-channel（1 バイト + 行ごとの f32 scale）へ上げても配布形の増分は 4MB 弱で、受理率
-1 〜 3 割の目減りと釣り合う量ではない（E[a] は投機 1 サイクルあたりの確定 token 数そのもの）。
+**The drafter has no i4 option.** Measured on 2026-09-08 (E[a](k=3) taken from sequential
+acceptance on the same target trajectory, N = 200 cycles × 3 cases): dropping the drafter's linears
+(pre / post projection, q_proj, o_proj, gate/up/down = 22 tensors, 10.1M elements) to i4 g32
+lowered E[a] to **−33% / −21% / −15%** (in case order) relative to no rounding. The same 22 tensors
+in i8 per-channel stay within **−2 to −3%**, and making the shared main table i8 has an effect of
+**±0**. The heavily rounded side is the output head (262,144×256 = 67.1M elements), which stays
+i8 — raising the 22 linears from i4 g32 (half a byte + an f32 scale per group) to i8 per-channel
+(1 byte + an f32 scale per row) grows the distribution by just under 4MB, an amount not comparable
+with losing 10 to 30 percent of the acceptance rate (E[a] is exactly the number of tokens
+confirmed per speculation cycle).
 
 `target_embed` is **not rounded**: the lender (the product series, `gemma4.export_product`) stores
 the checkpoint's bf16 values, which the loaded f32 table already is, so the drafter's goldens see
@@ -60,20 +66,21 @@ the values the lender's resident table decodes to. No bytes are written for it. 
 the rounded `wrapper` as it is ({@link export_series}'s order), so the distributed weights and the
 goldens' weights are one object (MUST).
 
-## golden の呼び出し規約（ホストが 1 サイクルで渡す組）
+## Calling convention of the goldens (the set the host passes in one cycle)
 
-貸し手の論理長を `P`（KV に入っている行数）、最後に確定した token を `b`（位置 `P`・**KV には
-未投入**）とすると、drafter に渡すのは `token = b` / `hidden = h@(P−1)`（`b` を出した行の
-最終 norm 後 hidden）/ RoPE の 1 行 = 位置 `P` / KV の列 `[P−min(P,W), P)`・`[0, P)`。
-これは drafter 自身の段間再帰（`token` と「それを出した行の hidden」の組）と同じ組み方で、
-段 3 の投機ループが 1 サイクル目に渡す組でもある。したがって `draft[t][j]`（`j` は 0 始まり）が
-当てるのは `tokens[t + 1 + j]` — `d₁` は bonus token の**次**を当てる。
+With the lender's logical length `P` (the rows in the KV) and the last confirmed token `b`
+(position `P`, **not yet in the KV**), the drafter is passed `token = b` / `hidden = h@(P−1)` (the
+post-final-norm hidden of the row that produced `b`) / one RoPE row = position `P` / the KV columns
+`[P−min(P,W), P)` and `[0, P)`. This is the same pairing as the drafter's own recursion between
+steps (`token` and "the hidden of the row that produced it"), and also the set the step-3
+speculative loop passes in its first cycle. So `draft[t][j]` (`j` from 0) predicts
+`tokens[t + 1 + j]` — `d₁` predicts the token **after** the bonus token.
 
-## 出力レイアウト
+## Output layout
 
-    outputs/series/gemma4-e2b-drafter/model.krm                重み + 2 文書の記述
-    outputs/series/gemma4-e2b-drafter/drafter-golden.<case>.safetensors  期待 draft 列
-    outputs/series/gemma4-e2b-drafter/reference.json           出所記録（target / drafter の指紋）
+    outputs/series/gemma4-e2b-drafter/model.krm                weights + 2 descriptors
+    outputs/series/gemma4-e2b-drafter/drafter-golden.<case>.safetensors  expected draft sequences
+    outputs/series/gemma4-e2b-drafter/reference.json           provenance (target / drafter)
 """
 
 from __future__ import annotations
@@ -117,69 +124,78 @@ from karume.pipeline import publish_model
 from karume.quantize import fake_quant_int8
 from karume.states import ExternalAttentionSpec, ExternalStatesPlan, to_external_states_form
 
-#: 生成物の既定の置き場（製品系列とは別ディレクトリ — 単独では実行できない別資産）。
+#: Default location of the outputs (a directory separate from the product series — a separate asset
+#: that cannot run on its own).
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-drafter"
 
-#: 貸し手（target）の製品系列。共有 initializer のテンソルキーと external スロットの実形は
-#: **ここから読む**（写経すると、target を焼き直した日に借り手だけが古びる）。
+#: The lender's (target's) product series. The tensor key of the shared initializer and the real
+#: shapes of the external slots are **read from here** (copied by hand, only the borrower would go
+#: stale on the day the target is rebuilt).
 DEFAULT_PRODUCT_DIR = product.DEFAULT_OUT_DIR
 
-#: drafter のチェックポイント（HF ハブ — 手置き素材ではない）。
+#: The drafter's checkpoint (the HF hub — not hand-placed source files).
 ASSISTANT_REPO = "google/gemma-4-E2B-it-assistant"
 
-#: 1 forward に展開する draft 段数（配布形の drafter はこの 3 段で焼かれている。実行時の k は
-#: `k <= 3` の範囲で選べ、それより多い段数が要るなら再 export — ADR 0096）。
+#: Number of draft steps unrolled in one forward (the distributed drafter is baked with these 3
+#: steps. The run-time k can be chosen within `k <= 3`; more steps need a re-export — ADR 0096).
 DRAFT_STEPS = 3
 
-# NOTE: 貸し手が読む KV の層（E2B は sliding 13 / full 14）は**定数で持たない** —
-# `decode.kv_owner_layers(target_config)` が上流の層構成から導く（{@link lender_slots}）。
+# NOTE: the layers whose KV the lender reads (E2B: sliding 13 / full 14) are **not held as
+# constants** — `decode.kv_owner_layers(target_config)` derives them from the upstream layer layout
+# ({@link lender_slots}).
 
-#: trace 用に置く K / V 入力の行数。手術で入力ごと落ちるので配布形には残らない — 小さければ何でも
-#: よく、`1` だと softmax の縮約軸が退化しうるので余裕のある固定値にする。
+#: Row count of the K / V inputs placed for the trace. The surgery drops them together with the
+#: inputs, so they do not remain in the distribution — any small value works, but `1` could make
+#: softmax's reduction axis degenerate, so a fixed value with some room is used.
 TRACE_KV_ROWS = 8
 
-#: グラフ入力の名前（**ラッパの forward 引数名そのもの** — torch.export がグラフ入力名に採る）。
-#: 手術後に残るのは前半 6 本で、後半 4 本は落ちる。
+#: Graph input names (**the wrapper's forward argument names themselves** — torch.export takes them
+#: as the graph input names). The first 6 remain after the surgery, the last 4 are dropped.
 DRAFTER_TOKEN = "token"
 DRAFTER_HIDDEN = "hidden"
 DRAFTER_KV_INPUTS: tuple[str, ...] = ("sliding_k", "sliding_v", "full_k", "full_v")
 
-#: 手術後に残るグラフ入力の並び（ホストは名前で束ねる）。
+#: The order of the graph inputs that remain after the surgery (the host binds them by name).
 DRAFTER_INPUTS: tuple[str, ...] = (DRAFTER_TOKEN, DRAFTER_HIDDEN, *decode.ROPE_INPUTS)
 
-#: golden のファイル名とテンソルキー。
+#: File name and tensor keys of the goldens.
 GOLDEN_PREFIX = "drafter-golden."
 GOLDEN_SUFFIX = ".safetensors"
 TOKENS_KEY = "tokens"
 DRAFT_KEY = "draft"
 
-#: golden の 1 ケースあたりの cycle 数（各 cycle が `(token, hidden)` 1 組 → k 本の draft）。
+#: Cycles per golden case (each cycle is one `(token, hidden)` pair → k drafts).
 GOLDEN_CYCLES = 200
 
-#: golden の prefill を割る行数。**karume の既定 chunkLength と同じ**にする（貸し手の実行が
-#: 同じ割り方で積むので、積和の順序を揃えられる唯一のノブ）。綴りの正本は配布 recipe。
+#: Rows per chunk of the golden's prefill. **The same as karume's default chunkLength** (the
+#: lender's run accumulates with the same split, so it is the only knob that aligns the order of the
+#: sums). The source of truth for the spelling is the distribution recipe.
 GOLDEN_PREFILL_CHUNK = GEMMA4_CHUNK_LENGTH
 
-#: 短いケースの本文（E-4 の a と同じ会話 — 1 ターンの依頼文）。**窓 512 の内側**で終わる長さで、
-#: `P < window` の側（列が窓より少ない）を踏む唯一のケース。
+#: Text of the short case (the same conversation as a of E-4 — a one-turn request). A length that
+#: ends **inside the 512 window**, the only case that exercises the `P < window` side (fewer
+#: columns than the window).
 SHORT_PROMPT = (
     "Write a short story (about 300 words) about a lighthouse keeper who discovers a message "
     "in a bottle."
 )
 
-#: 長いケースの本文は**リポ内の git 追跡下の文書**から採る（`(ケース名, 相対 path, 文字数上限)`）。
+#: The texts of the long cases are taken from **documents tracked by git inside the repository**
+#: (`(case name, relative path, character limit)`).
 #:
-#: MUST: 素材をリポの中に置く — bench の作業席（`outputs/`）は git 追跡外なので、そこから読むと
-#: 「同じ台本を回しても別の golden が出る」形になる。
-#: MUST: 切るのは**段落境界**（上限の手前の最後の空行）。token 数で切ると文の途中で終わり、継続が
-#: 同じ数語を繰り返す退化列になって golden が痩せる（実測: 途中切りの 2,560 token で
-#: 「matmul, matmul, matmul」の 3 語ループ）。段落境界なら上限を跨がない限り長さも動かない。
+#: MUST: keep the source text inside the repository — bench's working area (`outputs/`) is not
+#: tracked by git, so reading from there gives "the same script yields a different golden".
+#: MUST: cut at a **paragraph boundary** (the last blank line before the limit). Cutting by token
+#: count ends mid-sentence, and the continuation degenerates into repeating the same few words,
+#: thinning the golden (measured: a 3-word loop "matmul, matmul, matmul" on a 2,560-token cut).
+#: At a paragraph boundary the length does not move either, unless the limit is crossed.
 CASE_DOCUMENTS: tuple[tuple[str, str, int], ...] = (
     ("readme-recipes", "tools/export-recipes/README.md", 12000),
     ("readme-exporter", "tools/exporter/README.md", 20000),
 )
 
-#: 長いケースの前置き（文書の**前**に置く指示）と、後ろに置く依頼文。
+#: Preamble of the long cases (the instruction placed **before** the document), and the request
+#: placed after it.
 DOCUMENT_INSTRUCTION = "Read the following project document.\n\n"
 DOCUMENT_QUESTION = (
     "\n\nBased on the document above, explain in your own words what this project is for and "
@@ -188,49 +204,54 @@ DOCUMENT_QUESTION = (
 
 
 def truncate_paragraph(text: str, limit: int) -> str:
-    """`limit` 文字を超えない範囲で、**最後の段落境界**（空行）まで切り詰める。"""
+    """Truncate to the **last paragraph boundary** (a blank line) within `limit` characters."""
     if len(text) <= limit:
         return text.rstrip()
     cut = text.rfind("\n\n", 0, limit)
     if cut <= 0:
-        raise AssertionError(f"上限 {limit} 文字の手前に段落境界が無い")
+        raise AssertionError(f"no paragraph boundary before the {limit}-character limit")
     return text[:cut].rstrip()
 
 
-# ---- 素材 ------------------------------------------------------------------
+# ---- Source material -------------------------------------------------------
 
 
 def _open_mask(key: torch.Tensor) -> torch.Tensor:
-    """`[1, 1, 1, N]` の全列許可（0）の加算 mask（N = K の列数）。
+    """Additive mask `[1, 1, 1, N]` allowing every column (0) (N = the column count of K).
 
-    trace 時は N が静的な整数なので**定数**として畳まれ、手術がノードの入力から外した時点で
-    刈られる。golden を採るときは実長の K が来るので、同じ式がそのまま実長の mask を返す
-    （`register_buffer` で固定長を持つと、実長で回した瞬間に軸が合わない）。
+    At trace time N is a static integer, so it is folded as **a constant** and pruned once the
+    surgery removes it from the node's inputs. When the goldens are taken, K of the real length
+    comes in, so the same expression returns a mask of the real length (holding a fixed length with
+    `register_buffer` would mismatch the axis the moment it runs at the real length).
     """
     return torch.zeros(1, 1, 1, key.shape[2], dtype=key.dtype, device=key.device)
 
 
 class DrafterWrapper(nn.Module):
-    """`(token, hidden, RoPE 4 本, K/V 4 本) → (token_0 … token_{k-1})` の export 用ラッパ。
+    """Export wrapper `(token, hidden, 4 RoPE inputs, 4 K/V inputs) → (token_0 … token_{k-1})`.
 
-    MUST: forward の**引数名と並び**は {@link DRAFTER_INPUTS} + {@link DRAFTER_KV_INPUTS} と
-    一致させる（torch.export が引数名をグラフ入力名に採るので、綴りがずれるとホストが
-    束ねられない）。
-    MUST: `hidden` は target の**最終 norm 後**の 1 行（製品グラフの出力 1）。lm_head を通す前の
-    値であることが drafter 側の入力条件で、別の中間値でも shape は `[1,1536]` のまま合う。
-    MUST: K / V は `[1, Hkv, T, D]`（貸し手スロットと同じ物理形）。trace 用の入力で、手術が
-    external スロットへ置き換える。
-    MUST: mask は**全列許可の 0 行**（q_len 1 の bidirectional は「全列を見る」— 列の絞りは
-    window と論理長が持つ）。列数は K の軸 2 から採る（{@link _open_mask}）ので、golden を採る
-    実長でもそのまま回る — 手術が落とす席なので、配布形には 1 バイトも残らない。
-    MUST: `use_cache=False`・`position_ids=None`。位置は RoPE の受け渡し口（{@link
-    decode.RopeInputs}）が持つので、上流が組む `arange` は誰にも読まれず export の到達解析で死ぬ。
+    MUST: the forward's **argument names and order** match {@link DRAFTER_INPUTS} +
+    {@link DRAFTER_KV_INPUTS} (torch.export takes the argument names as the graph input names, so a
+    different spelling would leave the host unable to bind them).
+    MUST: `hidden` is the target's one row **after the final norm** (output 1 of the product graph).
+    Being the value before lm_head is the drafter side's input condition, and another intermediate
+    value would still match the shape `[1,1536]`.
+    MUST: K / V are `[1, Hkv, T, D]` (the same physical shape as the lender's slots). They are
+    trace inputs that the surgery replaces with external slots.
+    MUST: the mask is **a 0 row allowing every column** (bidirectional with q_len 1 means "see every
+    column" — narrowing the columns is the job of the window and the logical length). The column
+    count is taken from axis 2 of K ({@link _open_mask}), so it also runs as is at the real length
+    when the goldens are taken — the surgery drops it, so not a byte of it remains in the
+    distribution.
+    MUST: `use_cache=False`, `position_ids=None`. The positions are held by the RoPE hand-over
+    inputs ({@link decode.RopeInputs}), so the `arange` upstream builds is read by nobody and dies
+    in the export's reachability analysis.
     """
 
     def __init__(self, drafter: nn.Module, target_embed: nn.Module, steps: int) -> None:
         super().__init__()
         if steps < 1:
-            raise ValueError(f"draft 段数 {steps} が 1 以上でない")
+            raise ValueError(f"draft step count {steps} is not at least 1")
         self.drafter = drafter
         self.target_embed = target_embed
         self.steps = steps
@@ -306,21 +327,24 @@ def target_embedding_class(config: Any) -> type[nn.Module]:
 
 
 def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
-    """target の主埋め込み表を f32 で読み、上流と同じ**スケール付き**埋め込みとして返す。
+    """Read the target's main embedding table in f32 and return it as the same **scaled** embedding
+    as upstream.
 
-    MUST: 上流の target のスケール付き埋め込みクラスそのものを使う（{@link
-    target_embedding_class} — `nn.Embedding` + 自前のスカラ倍に置き換えない）—
-    `embed_scale = sqrt(hidden_size)` の値も掛ける位置も上流のものであることが、
-    貸し手が同じ表を同じ意味で使っていることの根拠になる。
+    MUST: use upstream's scaled embedding class of the target itself ({@link
+    target_embedding_class} — do not replace it with `nn.Embedding` + a hand-written scalar
+    multiply) — that both the value of `embed_scale = sqrt(hidden_size)` and where it is applied are
+    upstream's is the basis for the lender using the same table with the same meaning.
     """
     key = one_shot.PLE_CHECKPOINT_KEY.replace("embed_tokens_per_layer", "embed_tokens")
     with safe_open(str(model_dir / one_shot.CHECKPOINT_FILE), framework="pt") as handle:
         if key not in set(handle.keys()):
-            raise AssertionError(f"target チェックポイントに '{key}' が無い: {model_dir}")
+            raise AssertionError(f"the target checkpoint has no '{key}': {model_dir}")
         weight = handle.get_tensor(key).to(torch.float32)
     vocab, hidden = int(config.vocab_size), int(config.hidden_size)
     if list(weight.shape) != [vocab, hidden]:
-        raise AssertionError(f"主埋め込み表が {list(weight.shape)} — [{vocab}, {hidden}] でない")
+        raise AssertionError(
+            f"main embedding table is {list(weight.shape)} — not [{vocab}, {hidden}]"
+        )
     module = target_embedding_class(config)(
         vocab, hidden, int(config.pad_token_id), embed_scale=hidden**0.5
     )
@@ -351,17 +375,20 @@ def assistant_class(config: Any) -> type[nn.Module]:
 def load_drafter(
     steps: int, model_dir: Path, *, source: str | Path = ASSISTANT_REPO
 ) -> DrafterWrapper:
-    """drafter を f32 で読み、疎 softmax を外して RoPE を受け渡し口へ差し替えたラッパを返す。
+    """Read the drafter in f32 and return the wrapper with the sparse softmax removed and RoPE
+    replaced by the hand-over inputs.
 
     `source` is what `from_pretrained` reads the drafter from: the regular E2B assistant's
     repository id by default, or a pinned snapshot directory (`gemma4.export_drafter_qat`). The
     class is the one the config names ({@link assistant_class} — 12B's assistant is
     `Gemma4UnifiedAssistantForCausalLM`).
 
-    MUST: `use_ordered_embeddings` は**読み込む前に**倒す（`masked_embedding` は `__init__` が
-    config を見て作るので、後から属性を消しても forward の分岐は疎 softmax 側に倒れたまま）。
-    MUST: 内側の `model.embed_tokens` は落とす。tied なので実体は `lm_head` が保持し続け、
-    落としておかないと同じ重みが 2 つの FQN から見えて i8 の丸めが二重に掛かる。
+    MUST: switch `use_ordered_embeddings` off **before loading** (`masked_embedding` is created by
+    `__init__` from the config, so deleting the attribute afterwards leaves the forward's branch on
+    the sparse softmax side).
+    MUST: drop the inner `model.embed_tokens`. It is tied, so `lm_head` keeps holding the data;
+    without dropping it, the same weight is visible from two FQNs and the i8 rounding is applied
+    twice.
     """
     from transformers import AutoConfig
 
@@ -376,8 +403,8 @@ def load_drafter(
     )
     if drafter.masked_embedding is not None:
         raise AssertionError(
-            "疎 softmax（masked_embedding）が残っている"
-            " — use_ordered_embeddings を読み込み前に倒せていない"
+            "the sparse softmax (masked_embedding) is still there"
+            " — use_ordered_embeddings was not switched off before loading"
         )
     del drafter.model.embed_tokens
     drafter.model.rotary_emb = decode.RopeInputs(decode.unique_layer_types(text))
@@ -385,23 +412,26 @@ def load_drafter(
     return DrafterWrapper(drafter, load_target_embed(model_dir, target_config), steps).eval()
 
 
-#: 共有する主表のモジュール FQN（{@link DrafterWrapper} の組み立てが決める綴り）— the one module
-#: with a weight slot that {@link quantize_wrapper} leaves unrounded.
+#: Module FQN of the shared main table (the spelling the assembly of {@link DrafterWrapper}
+#: decides) — the one module with a weight slot that {@link quantize_wrapper} leaves unrounded.
 TARGET_EMBED_MODULE = "target_embed"
 
 
 def int8_seats(wrapper: nn.Module) -> set[str]:
-    """i8 で丸まる**べき**重みの FQN — `nn.Linear` 全部（他は 1 本も丸めない — the shared table
-    stays the lender's bf16 values).
+    """FQNs of the weights that **should** be rounded to i8 — every `nn.Linear` (nothing else is
+    rounded — the shared table stays the lender's bf16 values).
 
-    {@link quantize_wrapper} が実際に丸めた台帳と突き合わせるための、**別の規則で引いた**
-    期待集合（丸める側は `quantize.QUANT_CHANNEL_AXES` の 5 型で選ぶ）。2 つの集合が食い違う
-    現場は 2 通りで、どちらも値にしか出ない:
+    The expected set, **drawn by a different rule**, for comparing with the ledger of what
+    {@link quantize_wrapper} actually rounded (the rounding side selects by the 5 types of
+    `quantize.QUANT_CHANNEL_AXES`). There are two situations in which the two sets disagree, and
+    both show only in the values:
 
-    - 落としたはずの `drafter.model.embed_tokens` が生き返った — tied なので `lm_head` と
-      同じ実体を指し、`fake_quant_int8` が 1 周で**同じ重みを 2 度**丸める（scale 台帳は
-      後勝ちの 1 本しか残らないので、宣言した scale で戻らない重みが配布形に載る）
-    - drafter の構造が変わって conv や新しい embedding が入った — 黙って i8 に落ちる
+    - the `drafter.model.embed_tokens` that should have been dropped came back — it is tied, so it
+      points at the same data as `lm_head`, and `fake_quant_int8` rounds **the same weight twice**
+      in one pass (the scale ledger keeps only the last one, so a weight that does not restore with
+      the declared scale goes into the distribution)
+    - the drafter's structure changed and a conv or a new embedding came in — it silently drops to
+      i8
     """
     return {
         f"{name}.weight"
@@ -411,12 +441,13 @@ def int8_seats(wrapper: nn.Module) -> set[str]:
 
 
 def quantize_wrapper(wrapper: nn.Module) -> tuple[Any, dict[str, torch.Tensor]]:
-    """重みスロットを持つモジュールを、共有する主表を除いて全部 i8 per-channel で丸め、scale
-    台帳を返す。
+    """Round every module with a weight slot to i8 per-channel, except the shared main table, and
+    return the scale ledger.
 
-    MUST: 丸めは i8 の 1 周だけ（モジュール docstring の実測 — i4 は受理率を削る）。丸め方が
-    1 つになっても「同じ実体を指す 2 つの FQN」は 1 周で 2 度丸まるので、実際に丸めた台帳を
-    {@link int8_seats} と突き合わせる（`load_drafter` の `del` が落ちた日の検出線）。
+    MUST: the rounding is a single i8 pass (measured in the module docstring — i4 cuts the
+    acceptance rate). Even with a single rounding method, "two FQNs pointing at the same data" are
+    rounded twice in one pass, so the ledger actually rounded is compared with {@link int8_seats}
+    (the detection line for the day the `del` in `load_drafter` goes missing).
     MUST: the shared table is not rounded — the lender stores the checkpoint's bf16 values, which
     the loaded f32 table already is, so the goldens see what the lender's resident table decodes to.
     """
@@ -424,34 +455,37 @@ def quantize_wrapper(wrapper: nn.Module) -> tuple[Any, dict[str, torch.Tensor]]:
     rounded, expected = set(report.scales), int8_seats(wrapper)
     if rounded != expected:
         raise AssertionError(
-            f"i8 で丸めた重みが期待の席と違う（余剰 {sorted(rounded - expected)} /"
-            f" 欠落 {sorted(expected - rounded)}）"
+            f"the weights rounded to i8 differ from the expected ones"
+            f" (extra {sorted(rounded - expected)} / missing {sorted(expected - rounded)})"
         )
     return report, dict(report.scales)
 
 
-# ---- 貸し手（target 製品系列）から読む ---------------------------------------
+# ---- Read from the lender (the target's product series) --------------------
 
 
 @dataclass(frozen=True)
 class LenderSlots:
-    """貸し手の external スロットの実形と、共有 initializer の指し先。"""
+    """The real shapes of the lender's external slots, and what the shared initializer points at."""
 
-    #: スロット名 → 宣言 shape（`[1, Hkv, capacity, D]`）。
+    #: Slot name → declared shape (`[1, Hkv, capacity, D]`).
     shapes: Mapping[str, list[Any]]
-    #: 層種別 → (k スロット名, v スロット名)。
+    #: Layer type → (k slot name, v slot name).
     slots: Mapping[str, tuple[str, str]]
-    #: 共有する主表の**貸し手コンテナのテンソルキー**（IR v2 では initializer 名そのもの）。
+    #: **The lender container's tensor key** of the shared main table (in IR v2 the initializer name
+    #: itself).
     shared_tensor: str
 
 
 def lender_container(product_dir: Path) -> Path:
-    """製品コンテナの代表 path（part 列の解決は読み手が持つ）。"""
+    """Representative path of the product container (resolving the part list is the reader's
+    job)."""
     return product_dir / one_shot.MODEL_FILE
 
 
 def lender_graph(product_dir: Path) -> Mapping[str, Any]:
-    """製品コンテナのグラフ記述（**IR v2 の文書**）を読む — 重みは 1 バイトも触らない。"""
+    """Read the product container's graph descriptor (**the IR v2 document**) — not a byte of the
+    weights is touched."""
     return ir_graph(lender_container(product_dir))
 
 
@@ -463,21 +497,25 @@ def lender_slots(
     *,
     shared_storage: IrStorage | None = None,
 ) -> LenderSlots:
-    """貸し手のスロット実形と共有テンソルキーを、製品コンテナの宣言から引く。
+    """Take the lender's real slot shapes and the shared tensor key from the product container's
+    declarations.
 
     `shared_storage` is the borrower's declaration of the shared table (default
     {@link drafter_shared_storage} — the regular product's bf16); the lender's layout must match its
     dtype.
 
-    MUST: 形も名前も**貸し手から読む**（drafter の config からは導かない）。借り手の宣言は
-    「貸し手と一致していること」だけが正しさで、独立に組むと target を焼き直した日に借り手だけが
-    古びる — 形が合っている限り沈黙する。
+    MUST: read both shapes and names **from the lender** (do not derive them from the drafter's
+    config). The borrower's declaration is correct only in "matching the lender"; built
+    independently, only the borrower goes stale on the day the target is rebuilt — and stays silent
+    as long as the shapes match.
 
-    MUST: 共有する主表は「embedding の重みスロットで消費される `[V, H]` の initializer」を
-    **構造で**引く（キーの綴りを写経しない）。1 本に決まらなければ fail loudly。
+    MUST: the shared main table is found **structurally** as "the `[V, H]` initializer consumed by
+    the embedding's weight slot" (the key's spelling is not copied). If it is not exactly one, fail
+    loudly.
 
-    `layouts` はテンソルキー → 格納の layout（{@link _shared.container_read.read_layouts}）—
-    IR v2 のグラフ記述は格納を持たない（正本は束縛表）ので、常駐形の突合はそちらから引く。
+    `layouts` is tensor key → storage layout ({@link _shared.container_read.read_layouts}) — the
+    IR v2 graph descriptor holds no storage (the source of truth is the binding table), so the
+    resident form is compared from there.
     """
     owners = decode.kv_owner_layers(target_config)
     states = graph.get("states") or {}
@@ -487,14 +525,14 @@ def lender_slots(
     shapes: dict[str, list[Any]] = {}
     for layer_type in decode.ROPE_LAYER_TYPES:
         if layer_type not in owners:
-            raise AssertionError(f"貸し手に層種別 '{layer_type}' の KV 所有層が無い")
+            raise AssertionError(f"the lender has no KV-owning layer of layer type '{layer_type}'")
         owner = owners[layer_type]
         pair = (decode.slot_name(owner, "k"), decode.slot_name(owner, "v"))
         for name in pair:
             slot = states.get(name)
             if slot is None:
                 raise AssertionError(
-                    f"貸し手グラフに state スロット '{name}' が無い（宣言 {sorted(states)}）"
+                    f"the lender graph has no state slot '{name}' (declared {sorted(states)})"
                 )
             shapes[name] = list(slot["shape"])
         slots[layer_type] = pair
@@ -510,28 +548,31 @@ def lender_slots(
     )
     if len(candidates) != 1:
         raise AssertionError(
-            f"貸し手グラフの主埋め込み表（embedding の重みスロット・[{vocab}, {hidden}]）が"
-            f" {len(candidates)} 本: {candidates}"
+            f"main embedding tables of the lender graph (embedding weight slot,"
+            f" [{vocab}, {hidden}]): {len(candidates)} found: {candidates}"
         )
     key = candidates[0]
     if initializers[key].get("shared") is True:
-        raise AssertionError(f"貸し手の主表 '{key}' が実体を持たない（共有宣言）")
+        raise AssertionError(
+            f"the lender's main table '{key}' holds no data (a shared declaration)"
+        )
     layout = layouts.get(key)
     declared = drafter_shared_storage(config) if shared_storage is None else shared_storage
     if layout != declared.dtype:
         raise AssertionError(
-            f"貸し手の主表の格納が '{layout}' — 借り手の宣言 '{declared.dtype}' と違う"
+            f"the lender's main table is stored as '{layout}' — not the borrower's declared"
+            f" '{declared.dtype}'"
         )
     return LenderSlots(shapes=shapes, slots=slots, shared_tensor=key)
 
 
 def drafter_shared_storage(_config: Any) -> IrStorage:
-    """共有 initializer の格納宣言（貸し手と一致 MUST・scale は書かない）— the regular product's
-    bf16 table (`gemma4.export_product.BF16_STORAGE`)."""
+    """Storage declaration of the shared initializer (MUST match the lender; no scale is
+    written) — the regular product's bf16 table (`gemma4.export_product.BF16_STORAGE`)."""
     return IrStorage(dtype=product.BF16_STORAGE)
 
 
-# ---- 手術 -------------------------------------------------------------------
+# ---- Surgery ---------------------------------------------------------------
 
 
 def external_states_plan(
@@ -541,19 +582,23 @@ def external_states_plan(
     *,
     capacity_symbol: str = decode.CAPACITY_SYMBOL,
 ) -> ExternalStatesPlan:
-    """attention ノード（層順 = 出現順）を貸し手のスロットへ割り付ける手術指定。
+    """Surgery plan that assigns the attention nodes (layer order = order of appearance) to the
+    lender's slots.
 
-    層種別ごとに読むスロットが決まる（sliding 層 3 本 → 貸し手の sliding 所有層 / full 層 1 本 →
-    full 所有層）。k 段展開しているので、同じスロットへ `steps × 層数` 本の読者が付く。
+    The slot read is determined per layer type (3 sliding layers → the lender's sliding-owning
+    layer / 1 full layer → the full-owning layer). The unrolling is k steps, so each slot gets
+    `steps × layer count` readers.
 
-    MUST: スロットの形は**貸し手の宣言から**引く（{@link lender_slots}）。窓は借り手 config の
-    `sliding_window`（読む窓幅は借り手の意味論で、貸し手の物理容量とは別の数）。
+    MUST: the slots' shapes are taken **from the lender's declaration** ({@link lender_slots}). The
+    window is the borrower config's `sliding_window` (the window width read is the borrower's
+    semantics, a different number from the lender's physical capacity).
     """
     layer_types = list(config.layer_types)
     nodes = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(nodes) % len(layer_types):
         raise AssertionError(
-            f"attention が {len(nodes)} 本 — 層数 {len(layer_types)} の整数倍でない（k 段展開）"
+            f"{len(nodes)} attention nodes — not a multiple of the layer count {len(layer_types)}"
+            " (k-step unrolling)"
         )
     window = int(config.sliding_window)
     specs: list[ExternalAttentionSpec] = []
@@ -591,15 +636,17 @@ def share_target_embedding(
     *,
     storage: IrStorage | None = None,
 ) -> tuple[IrGraph, dict[str, torch.Tensor], str]:
-    """主表の initializer を **shared 宣言**へ置き換え、その実体を格納から外す。
+    """Replace the main table's initializer with a **shared declaration** and remove its data from
+    the stored tensors.
 
     `storage` is the shared declaration's storage (default {@link drafter_shared_storage}; the
     same value the caller handed {@link lender_slots}).
 
-    MUST: 対象は「embedding の重みスロットで消費される `[V, H]` の initializer」1 本ちょうど
-    （借り手側でも構造で引く — FQN 由来のテンソルキーは torch.export の内部順序で決まる）。
-    MUST: 実体を `tensors` から落とす。残すと `write_model` の宣言 / 格納の完全一致で
-    「余剰」として落ちる（= 検出線はあるが、落とすのはこちらの仕事）。
+    MUST: the target is exactly one "`[V, H]` initializer consumed by the embedding's weight slot"
+    (found structurally on the borrower side too — the FQN-derived tensor keys depend on
+    torch.export's internal order).
+    MUST: drop the data from `tensors`. Left in, it fails as "extra" in `write_model`'s exact match
+    of declarations / storage (= there is a detection line, but dropping it is this function's job).
     """
     vocab, hidden = int(config.vocab_size), int(config.hidden_size)
     consumed = {node.ins[0] for node in graph.nodes if node.op == EMBEDDING_OP and node.ins}
@@ -610,7 +657,7 @@ def share_target_embedding(
     )
     if len(candidates) != 1:
         raise AssertionError(
-            f"借り手グラフの主埋め込み表（[{vocab}, {hidden}]）が {len(candidates)} 本:"
+            f"main embedding tables of the borrower graph ([{vocab}, {hidden}]): {len(candidates)}:"
             f" {candidates}"
         )
     name = candidates[0]
@@ -622,7 +669,7 @@ def share_target_embedding(
     )
     remaining = {tensor: value for tensor, value in tensors.items() if tensor != key}
     if len(remaining) != len(tensors) - 1:
-        raise AssertionError(f"主表の実体 '{key}' が格納テンソルに無い")
+        raise AssertionError(f"the main table's data '{key}' is not among the stored tensors")
     shared_graph = IrGraph(
         symbols=list(graph.symbols),
         inputs=list(graph.inputs),
@@ -635,7 +682,7 @@ def share_target_embedding(
     return shared_graph, remaining, name
 
 
-# ---- 形検査 ------------------------------------------------------------------
+# ---- Form checks -----------------------------------------------------------
 
 
 def assert_ir_form_drafter(
@@ -646,33 +693,35 @@ def assert_ir_form_drafter(
     *,
     capacity_symbol: str = decode.CAPACITY_SYMBOL,
 ) -> dict[str, Any]:
-    """借り手グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
+    """Check the borrower graph's form (every property that **breaks silently while the numbers
+    still match**).
 
-    - グラフ入力が `token` / `hidden` / RoPE 4 本ちょうど（K/V の placeholder が残っていれば、
-      呼び手が渡す値をどのノードも読まない形になる）
-    - 出力が k 本で、いずれも `argmax` 由来の i32 `[1,1,1]`（順序 = 段順 MUST）
-    - state スロットが**全部 external**で、名前も形も貸し手の l13 / l14 と一致
-    - `state_append` が **0 本**（借り手は貸し手の ring を 1 行も書かない）
-    - attention が全部 readonly 形で、本数が `層数 × 段数`
-    - initializer に共有宣言が 1 本（バイト無し）で、指し先が貸し手のテンソルキー
-    - 記号は容量記号 1 本ちょうど（K/V を落としたので、束縛点は states shape だけ）
+    - the graph inputs are exactly `token` / `hidden` / the 4 RoPE inputs (if a K/V placeholder
+      remained, no node would read the value the caller passes)
+    - there are k outputs, each an i32 `[1,1,1]` from `argmax` (order = step order, MUST)
+    - the state slots are **all external**, matching the lender's l13 / l14 in name and shape
+    - **no** `state_append` (the borrower writes not a single row of the lender's ring)
+    - every attention is in readonly form, `layer count × step count` of them
+    - the initializers hold one shared declaration (no bytes) pointing at the lender's tensor key
+    - the symbols are exactly the one capacity symbol (K/V were dropped, so the only binding point
+      is the states' shapes)
     """
     names = [spec.name for spec in graph.inputs]
     if names != list(DRAFTER_INPUTS):
         raise AssertionError(
-            f"グラフ入力が {names} — {list(DRAFTER_INPUTS)} でない"
-            "（K/V の placeholder が手術で落ちていない可能性）"
+            f"graph inputs are {names}, not {list(DRAFTER_INPUTS)}"
+            " (the K/V placeholders may not have been dropped by the surgery)"
         )
     token_spec, hidden_spec = graph.inputs[0], graph.inputs[1]
     backbone = int(config.backbone_hidden_size)
     if token_spec.dtype != "i32" or list(token_spec.shape) != [1, 1]:
         raise AssertionError(
-            f"'{DRAFTER_TOKEN}' が {token_spec.dtype} {list(token_spec.shape)} — i32 [1, 1] でない"
+            f"'{DRAFTER_TOKEN}' is {token_spec.dtype} {list(token_spec.shape)} — not i32 [1, 1]"
         )
     if hidden_spec.dtype != "f32" or list(hidden_spec.shape) != [1, backbone]:
         raise AssertionError(
-            f"'{DRAFTER_HIDDEN}' が {hidden_spec.dtype} {list(hidden_spec.shape)} —"
-            f" f32 [1, {backbone}] でない（target の最終 norm 後 hidden）"
+            f"'{DRAFTER_HIDDEN}' is {hidden_spec.dtype} {list(hidden_spec.shape)} —"
+            f" not f32 [1, {backbone}] (the target's post-final-norm hidden)"
         )
     text = config.get_text_config()
     specs = decode.rope_specs(text)
@@ -683,55 +732,56 @@ def assert_ir_form_drafter(
             spec = next(item for item in graph.inputs if item.name == name)
             if spec.dtype != "f32" or list(spec.shape) != expected:
                 raise AssertionError(
-                    f"グラフ入力 '{name}' が {spec.dtype} {list(spec.shape)} —"
-                    f" f32 {expected} でない"
+                    f"graph input '{name}' is {spec.dtype} {list(spec.shape)} — not f32 {expected}"
                 )
 
     if len(graph.outputs) != steps:
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（draft {steps} 段の 1 本ずつ）")
+        raise AssertionError(f"{len(graph.outputs)} IR outputs (one per draft step, {steps} steps)")
     producer = {out: node for node in graph.nodes for out in node.outs}
     for index, output in enumerate(graph.outputs):
         source = producer.get(output)
         if source is None or source.op != ARGMAX_OP:
-            found = "ノード出力でない" if source is None else source.op
-            raise AssertionError(f"出力 {index} の供給元が {found} — `{ARGMAX_OP}` でない")
+            found = "not a node output" if source is None else source.op
+            raise AssertionError(f"the producer of output {index} is {found} — not `{ARGMAX_OP}`")
         value = graph.values[output]
         if value.dtype != "i32" or list(value.shape) != [1, 1, 1]:
             raise AssertionError(
-                f"出力 {index} が {value.dtype} {list(value.shape)} — i32 [1, 1, 1] でない"
+                f"output {index} is {value.dtype} {list(value.shape)} — not i32 [1, 1, 1]"
             )
 
     expected_slots = {name: shape for name, shape in lender.shapes.items()}
     if sorted(graph.states) != sorted(expected_slots):
         raise AssertionError(
-            f"states 宣言が {sorted(graph.states)} — 貸し手の {sorted(expected_slots)} でない"
+            f"states declared are {sorted(graph.states)} — not the lender's"
+            f" {sorted(expected_slots)}"
         )
     for name, shape in sorted(expected_slots.items()):
         slot = graph.states[name]
         if not slot.external:
-            raise AssertionError(f"states['{name}'] が external でない（借り手は実体を持たない）")
+            raise AssertionError(f"states['{name}'] is not external (the borrower holds no data)")
         if slot.dtype != "f32" or list(slot.shape) != shape:
             raise AssertionError(
-                f"states['{name}'] が {slot.dtype} {list(slot.shape)} — 貸し手の f32 {shape} と違う"
+                f"states['{name}'] is {slot.dtype} {list(slot.shape)} — differs from the lender's"
+                f" f32 {shape}"
             )
     appends = [node for node in graph.nodes if node.op == STATE_APPEND_OP]
     if appends:
         raise AssertionError(
-            f"`{STATE_APPEND_OP}` が {len(appends)} 本残っている"
-            "（借り手は貸し手の ring を 1 行も書かない）"
+            f"`{STATE_APPEND_OP}` still appears {len(appends)} time(s)"
+            " (the borrower writes not a single row of the lender's ring)"
         )
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     expected_attentions = int(text.num_hidden_layers) * steps
     if len(attentions) != expected_attentions:
         raise AssertionError(
-            f"attention が {len(attentions)} 本 — 層数 {text.num_hidden_layers} × 段数 {steps} ="
-            f" {expected_attentions} 本でない"
+            f"{len(attentions)} attention nodes — not {text.num_hidden_layers} layers ×"
+            f" {steps} steps = {expected_attentions}"
         )
     plain = [index for index, node in enumerate(attentions) if not attention_readonly(node.attrs)]
     if plain:
         raise AssertionError(
-            f"readonly でない attention が {len(plain)} 本残っている（添字 {plain[:4]}）"
+            f"{len(plain)} attention node(s) that are not readonly remain (indices {plain[:4]})"
         )
     window = int(text.sliding_window)
     for index, node in enumerate(attentions):
@@ -739,33 +789,35 @@ def assert_ir_form_drafter(
         expected_states = dict(zip(("k", "v"), lender.slots[layer_type], strict=True))
         if node.states != expected_states:
             raise AssertionError(
-                f"attention[{index}] ({layer_type}): states 欄が {node.states}"
-                f"（期待 {expected_states}）"
+                f"attention[{index}] ({layer_type}): the states field is {node.states}"
+                f" (expected {expected_states})"
             )
         expected_window = window if layer_type == one_shot.SLIDING_ATTENTION else None
         if node.attrs.get("window") != expected_window:
             raise AssertionError(
-                f"attention[{index}] ({layer_type}): attrs の window が"
-                f" {node.attrs.get('window')}（期待 {expected_window}）"
+                f"attention[{index}] ({layer_type}): the window in attrs is"
+                f" {node.attrs.get('window')} (expected {expected_window})"
             )
 
     shared = sorted(name for name, init in graph.initializers.items() if init.is_shared)
     if len(shared) != 1:
-        raise AssertionError(f"共有 initializer が {len(shared)} 本: {shared}（1 本ちょうど）")
+        raise AssertionError(f"{len(shared)} shared initializers: {shared} (exactly 1 expected)")
     declaration = graph.initializers[shared[0]]
     if declaration.shared.tensor != lender.shared_tensor:
         raise AssertionError(
-            f"共有 initializer の指し先が '{declaration.shared.tensor}' —"
-            f" 貸し手の '{lender.shared_tensor}' でない"
+            f"the shared initializer points at '{declaration.shared.tensor}' —"
+            f" not the lender's '{lender.shared_tensor}'"
         )
     if declaration.storage.scale is not None:
-        raise AssertionError("共有 initializer が scale を宣言している（貸し手の常駐重みが持つ）")
+        raise AssertionError(
+            "the shared initializer declares a scale (the lender's resident weight holds it)"
+        )
 
     if sorted(graph.symbols) != [capacity_symbol]:
-        raise AssertionError(f"symbols が {sorted(graph.symbols)} — ['{capacity_symbol}'] でない")
+        raise AssertionError(f"symbols are {sorted(graph.symbols)} — not ['{capacity_symbol}']")
     residue = sorted(set(graph.required_ops) & set(decode.RESIDUE_OPS))
     if residue:
-        raise AssertionError(f"手術で死ぬはずの op が残っている: {residue}")
+        raise AssertionError(f"ops that the surgery should have killed remain: {residue}")
 
     storage: dict[str, int] = {}
     for initializer in graph.initializers.values():
@@ -786,11 +838,13 @@ def assert_ir_form_drafter(
 
 
 def build_cases(model_dir: Path) -> tuple[tuple[str, torch.Tensor], ...]:
-    """golden ケースの `(名前, input_ids)`（`<bos>` はここで足す — `gemma4.export` と同じ規約）。
+    """`(name, input_ids)` of the golden cases (`<bos>` is added here — the same convention as
+    `gemma4.export`).
 
-    素材は短い依頼文 1 本 + **リポ内の git 追跡下の文書** 2 本（{@link CASE_DOCUMENTS}）。
-    短いケースは窓 512 の内側で終わり、長い 2 本は窓を大きく跨ぐ — sliding スロットが
-    `[P − W, P)` を巻きながら返す側と、巻かない側の両方を踏む。
+    The source texts are one short request + 2 **documents tracked by git inside the repository**
+    ({@link CASE_DOCUMENTS}). The short case ends inside the 512 window and the 2 long ones cross
+    the window by far — exercising both the side where the sliding slot returns `[P − W, P)` while
+    wrapping around and the side where it does not wrap.
     """
     tokenizer = one_shot.load_tokenizer(model_dir)
     bos = one_shot.bos_token_id(model_dir, tokenizer)
@@ -803,7 +857,7 @@ def build_cases(model_dir: Path) -> tuple[tuple[str, torch.Tensor], ...]:
     for name, relative, limit in CASE_DOCUMENTS:
         path = REPO_ROOT / relative
         if not path.is_file():
-            raise AssertionError(f"ケース '{name}' の素材 {path} が無い")
+            raise AssertionError(f"case '{name}': source text {path} is missing")
         document = truncate_paragraph(path.read_text(encoding="utf-8"), limit)
         cases.append((name, encode(DOCUMENT_INSTRUCTION + document + DOCUMENT_QUESTION)))
     return tuple(cases)
@@ -811,7 +865,8 @@ def build_cases(model_dir: Path) -> tuple[tuple[str, torch.Tensor], ...]:
 
 @dataclass
 class _Lender:
-    """golden を採るときの貸し手（実重みの target）— cache と共有 KV を持ち回る器。
+    """The lender when taking goldens (the target with real weights) — a holder that carries the
+    cache and the shared KV along.
 
     `tables` / `scale` are the host's PLE lookup — `None` for a target without per-layer
     embeddings (12B), whose decoder takes no `per_layer_inputs` ({@link _new_lender}).
@@ -826,7 +881,7 @@ class _Lender:
     length: int = 0
 
     def step(self, ids: torch.Tensor) -> torch.Tensor:
-        """`ids[1, L]` を cache へ流し、最終行の post-norm hidden `[1, H]` を返す。"""
+        """Feed `ids[1, L]` into the cache and return the last row's post-norm hidden `[1, H]`."""
         positions = torch.arange(self.length, self.length + int(ids.shape[1]))
         rope = decode.rope_args(self.specs, positions.unsqueeze(0))
         device = self.model.device
@@ -860,24 +915,25 @@ class _Lender:
             return self.model.lm_head(hidden)
 
     def kv(self, layer_type: str, columns: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """`shared_kv_states` から**末尾 `columns` 列ちょうど**を切り出す。
+        """Cut **exactly the last `columns` columns** out of `shared_kv_states`.
 
-        MUST: 切り出しを台本が持つ（cache の保持本数に預けない）。HF の sliding 層は
-        「直前 `window − 1` 本 + 今回ぶん」を返すので本数が step 形と chunk 形で違い、そのまま
-        渡すと golden だけが別の列集合を見る。ランタイム側の契約は
-        `[P − min(P, W), P)`（sliding）/ `[0, P)`（full）なので、そこへ揃える。
+        MUST: the script owns the cut (it is not left to how many rows the cache keeps). HF's
+        sliding layers return "the previous `window − 1` rows + this call's", so the row count
+        differs between the step form and the chunk form, and passing them as they are would let
+        only the goldens see a different set of columns. The runtime's contract is
+        `[P − min(P, W), P)` (sliding) / `[0, P)` (full), so this aligns to it.
         """
         key, value = self.shared[layer_type]
         held = int(key.shape[2])
         if held < columns:
             raise AssertionError(
-                f"共有 KV '{layer_type}' が {held} 列しか無い（{columns} 列が要る）"
+                f"shared KV '{layer_type}' has only {held} columns ({columns} needed)"
             )
         return key[:, :, held - columns :], value[:, :, held - columns :]
 
 
 def _new_lender(wrapper: Any, specs: Mapping[str, Any]) -> _Lender:
-    """1 ケースぶんの貸し手（cache と共有 KV はケースごとに作り直す）。
+    """The lender for one case (the cache and the shared KV are rebuilt per case).
 
     Whether the host's PLE lookup runs is read from the target's config
     (`gemma4.distribution.gemma4_ple_dim` — never from whether the wrapper happens to hold the
@@ -909,7 +965,7 @@ def draft_case(
     chunk: int = GOLDEN_PREFILL_CHUNK,
     suppress: Sequence[int] = (),
 ) -> dict[str, torch.Tensor]:
-    """1 ケースぶんの golden（`prompt` / `tokens` / `draft`）を採る。
+    """Take one case's golden (`prompt` / `tokens` / `draft`).
 
     `suppress` are the ids the host's greedy selection never picks
     (`pipelineConfig.suppressTokens` — 12B's `generation_config.json` declares two, E2B / E4B
@@ -918,24 +974,26 @@ def draft_case(
     drafter's own unmasked argmax — what the graph emits and what upstream's candidate generator
     takes.
 
-    貸し手を prompt で prefill（`chunk` 行ずつ）してから、`cycles` 回の greedy 継続を回す。
-    各 cycle の入り口は貸し手の論理長 `P`（= KV に入っている行数）で、drafter へ渡すのは
+    The lender is prefilled with the prompt (`chunk` rows at a time), then `cycles` greedy
+    continuations are run. Each cycle starts at the lender's logical length `P` (= the rows in the
+    KV), and the drafter is passed these four:
 
-    - `token` = `b`（**最後に確定した token** — 位置 `P` に居るが KV には未投入）
-    - `hidden` = `h@(P−1)`（`b` を出した行の最終 norm 後 hidden）
-    - RoPE の 1 行 = 位置 **`P`**（`b` の位置）
-    - 貸し手の l13 / l14 の列 `[P − min(P, W), P)` / `[0, P)`
+    - `token` = `b` (**the last confirmed token** — at position `P` but not yet in the KV)
+    - `hidden` = `h@(P−1)` (the post-final-norm hidden of the row that produced `b`)
+    - one RoPE row = position **`P`** (the position of `b`)
+    - the lender's l13 / l14 columns `[P − min(P, W), P)` / `[0, P)`
 
-    の 4 つ。drafter 自身の段間再帰（`token` と「それを出した行の hidden」の組を次段へ送る）と
-    同じ組で、投機ループが 1 サイクル目に渡す組でもある。したがって `draft[t][j]`（0 始まりの
-    `j`）が当てるのは位置 `P+1+j` の token = `tokens[t + 1 + j]` で、`d₁` は bonus token の
-    次を当てる。
+    This is the same pairing as the drafter's own recursion between steps (sending `token` and "the
+    hidden of the row that produced it" to the next step), and also the set the speculative loop
+    passes in its first cycle. So `draft[t][j]` (`j` from 0) predicts the token at position
+    `P+1+j` = `tokens[t + 1 + j]`, and `d₁` predicts the token after the bonus token.
 
-    MUST: `tokens` は `cycles + k` 本採る（最後の cycle の draft にも比較相手が要る）。
+    MUST: take `cycles + k` `tokens` (the last cycle's drafts also need something to compare with).
 
-    MUST: 貸し手へ流す token は **drafter の draft ではなく greedy 継続**（teacher forcing）—
-    受理・棄却のループを回すと golden がその実装に依存し、段 3 の投機ループを変えるたびに
-    採り直しになる。
+    MUST: the tokens fed to the lender are **the greedy continuation, not the drafter's drafts**
+    (teacher forcing) — running the accept / reject loop would make the goldens depend on that
+    implementation, and they would have to be retaken every time the step-3 speculative loop
+    changes.
     """
     window = int(drafter.drafter.config.get_text_config().sliding_window)
     lender = _new_lender(wrapper, specs)
@@ -945,7 +1003,8 @@ def draft_case(
     drafts: list[list[int]] = []
     for cycle in range(cycles + drafter.steps):
         past = lender.length
-        # 位置 P の frontier token（貸し手が h@(P−1) から選んだ 1 本 — まだ KV に無い）。
+        # The frontier token at position P (the one the lender chose from h@(P−1) — not in the KV
+        # yet).
         nxt = int(unified.suppressed_logits(lender.logits(hidden), suppress).argmax(-1))
         tokens.append(nxt)
         if cycle < cycles:
@@ -970,19 +1029,19 @@ def draft_case(
 
 
 def acceptance_stats(tensors: Mapping[str, torch.Tensor]) -> dict[str, Any]:
-    """golden が示す受理の見込み（`per_step` = 位置別一致率・`tokens_per_cycle` = 逐次受理）。
+    """The acceptance outlook the goldens show (`per_step` = per-position match rate,
+    `tokens_per_cycle` = sequential acceptance).
 
-    `draft[t][j]` が当てるのは `tokens[t + 1 + j]`（{@link draft_case}）。位置別一致率は段 `j`
-    を独立に見た当たり率で、逐次受理は **先頭から一致が続く長さ `a`** から採る — 投機ループが
-    1 サイクルで確定させるのは `1 + a` 本（棄却行にも bonus token が 1 本乗る）なので、
-    `tokens_per_cycle` = `1 + mean(a)` がそのまま「1 サイクルあたりの確定 token 数」になる。
+    `draft[t][j]` predicts `tokens[t + 1 + j]` ({@link draft_case}). The per-position match rate is
+    the hit rate of step `j` taken on its own, and the sequential acceptance is taken from **the
+    length `a` of the run of matches from the start** — the speculative loop confirms `1 + a`
+    tokens per cycle (a rejected row also carries one bonus token), so
+    `tokens_per_cycle` = `1 + mean(a)` is exactly "the tokens confirmed per cycle".
     """
     tokens, draft = tensors[TOKENS_KEY], tensors[DRAFT_KEY]
     cycles, steps = int(draft.shape[0]), int(draft.shape[1])
     if int(tokens.shape[0]) != cycles + steps:
-        raise AssertionError(
-            f"tokens が {int(tokens.shape[0])} 本 — cycles {cycles} + steps {steps} でない"
-        )
+        raise AssertionError(f"{int(tokens.shape[0])} tokens — not cycles {cycles} + steps {steps}")
     per_step = [0] * steps
     prefixes = 0
     for cycle in range(cycles):
@@ -1006,7 +1065,7 @@ def write_goldens(
     cycles: int,
     device: str,
 ) -> dict[str, Any]:
-    """全ケースの golden を採って書き、要約を返す（貸し手はここでだけ読む）。
+    """Take and write every case's golden and return the summary (the lender is loaded only here).
 
     MUST: the lender holds **the product series' values** (`export_product.load_wrapper` alone —
     the series stores the checkpoint's bf16 values, nothing rounded). Expectations taken against
@@ -1033,18 +1092,21 @@ def goldens_against(
     holds — and return the summary ({@link write_goldens} loads the regular product's; the QAT
     line hands its own, `gemma4.export_drafter_qat`). `suppress` is {@link draft_case}'s.
     """
-    # MUST: 貸し手だけ上流既定の SDPA へ戻す。`karume_gqa`
-    # （{@link gemma4.export.gqa_sdpa_attention}）は「mask 無しは非因果に化ける」ので mask を
-    # 必須にするが、KV cache を使う経路では上流が「causal は is_causal に任せる」判断で
-    # mask を **None** にすることがある（`create_causal_mask`）。
-    # ここで mask を自前で組むと、sliding 層の cache 切り詰め（`DynamicSlidingWindowLayer` は
-    # 直前 `window − 1` 本しか残さない）に合わせた kv_offset の再実装まで抱えることになる。
-    # 数値は同じ SDPA で、違いは repeat_kv を実体化するかどうかだけ（借り手側は export と同じ
-    # `karume_gqa` のまま — golden の対象はそちら）。
+    # MUST: only the lender goes back to upstream's default SDPA. `karume_gqa`
+    # ({@link gemma4.export.gqa_sdpa_attention}) requires a mask because "no mask silently turns
+    # non-causal", but on the path with a KV cache upstream may make the mask **None**, deciding to
+    # "leave causal to is_causal" (`create_causal_mask`).
+    # Building the mask here would also mean re-implementing a kv_offset matching the sliding
+    # layers' cache truncation (`DynamicSlidingWindowLayer` keeps only the previous `window − 1`
+    # rows).
+    # The numbers come from the same SDPA; the only difference is whether repeat_kv is
+    # materialized (the borrower side stays on `karume_gqa` as in the export — that is what the
+    # goldens are about).
     wrapper.model.config._attn_implementation = "sdpa"
     specs = decode.rope_specs(wrapper.model.config)
-    # PLE 35 表（9.4GB）は CPU に残す MUST — GPU へ載せると 12GB 級のカードでは
-    # 塔を外しても入らない。`wrapper.model` だけを移すので、兄弟属性の `per_layer` は動かない。
+    # The 35 PLE tables (9.4GB) MUST stay on the CPU — on the GPU they do not fit a 12GB-class card
+    # even with the tower removed. Only `wrapper.model` is moved, so the sibling attribute
+    # `per_layer` stays.
     wrapper.model.to(device)
     drafter.to(device)
 
@@ -1063,11 +1125,11 @@ def goldens_against(
             **stats,
         }
         print(
-            f"[golden] {name}: 位置別一致率 "
+            f"[golden] {name}: per-position match rate "
             + " / ".join(
                 f"d{step + 1} {rate * 100:.1f}%" for step, rate in enumerate(stats["per_step"])
             )
-            + f" / 逐次受理 {stats['tokens_per_cycle']:.3f} token/cycle",
+            + f" / sequential acceptance {stats['tokens_per_cycle']:.3f} token/cycle",
             file=sys.stderr,
             flush=True,
         )
@@ -1075,14 +1137,16 @@ def goldens_against(
     return summary
 
 
-# ---- 系列 --------------------------------------------------------------------
+# ---- Series ----------------------------------------------------------------
 
 
 def drafter_reference(out_dir: Path, model_dir: Path, goldens: Mapping[str, Any]) -> dict[str, Any]:
-    """出所記録（target と drafter の**両方**の指紋 + 採った golden の digest）。
+    """Provenance record (the fingerprints of **both** the target and the drafter + the digests of
+    the goldens taken).
 
-    貸し手 / 借り手の 2 つのチェックポイントから出た資産なので、片方だけ差し替えた組み合わせが
-    作れないよう両方を名指す（{@link gemma4.provenance} の 1 系列版の拡張）。
+    The assets come from two checkpoints, the lender's and the borrower's, so both are named, so
+    that a combination with only one of them replaced cannot be built (an extension of the
+    single-series {@link gemma4.provenance}).
     """
     assistant = _assistant_snapshot_dir()
     return {
@@ -1102,7 +1166,7 @@ def drafter_reference(out_dir: Path, model_dir: Path, goldens: Mapping[str, Any]
 
 
 def _assistant_snapshot_dir() -> Path:
-    """HF cache 上の drafter スナップショット（指紋を採る実体の在処）。"""
+    """The drafter snapshot in the HF cache (where the fingerprinted data lives)."""
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(ASSISTANT_REPO, allow_patterns=["*.json", "*.safetensors"]))
@@ -1118,13 +1182,16 @@ def export_series(
     goldens: bool = True,
     device: str = "cuda:0",
 ) -> dict[str, Any]:
-    """借り手コンテナ + golden + 出所記録を書き、要約を返す。
+    """Write the borrower container + goldens + provenance record, and return the summary.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（形検査・golden）を通してから据える
-    （{@link karume.artifacts.staged_publication}）。
-    MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと golden だけが元の重みで動く。
+    MUST: the outputs are written into the staging directory and placed only after passing **every
+    gate** (the form check, the goldens) ({@link karume.artifacts.staged_publication}).
+    MUST: the rounding comes before taking the reference and the goldens (ADR 0006) — after it, only
+    the goldens would run on the original weights.
     """
-    print("[load] drafter（疎 softmax 無し）+ target の主表", file=sys.stderr, flush=True)
+    print(
+        "[load] drafter (no sparse softmax) + the target's main table", file=sys.stderr, flush=True
+    )
     wrapper = load_drafter(steps, model_dir)
     config = wrapper.drafter.config
     text = config.get_text_config()
@@ -1148,9 +1215,9 @@ def export_series(
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
         staged.mkdir()
-        print("[export] torch.export → 変換", file=sys.stderr, flush=True)
+        print("[export] torch.export → conversion", file=sys.stderr, flush=True)
         graph, tensors = export_module_with_attention(wrapper, example)
-        print("[export] 手術 → 共有宣言 → 書き出し", file=sys.stderr, flush=True)
+        print("[export] surgery → shared declaration → write", file=sys.stderr, flush=True)
         surgical = to_external_states_form(graph, external_states_plan(graph, text, lender))
         shared_graph, remaining, shared_name = share_target_embedding(
             surgical, tensors, lender, one_shot.load_text_config(model_dir)
@@ -1160,9 +1227,9 @@ def export_series(
             shared_graph,
             {name: value for name, value in remaining.items() if name in _declared(shared_graph)},
             provenance=one_shot.PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
-            # （container-v1 §2.1）。
+            # The graph name is **the component name** (= the weights key of karume.json). It is
+            # not derived from the directory name — neither the series name (`gemma4-e2b-product`)
+            # nor the staging directory's name matches the component name (container-v1 §2.1).
             graph_name=GEMMA4_DRAFTER_ROLE,
             weight_dtype="i8",
             weight_scales=scales,
@@ -1173,7 +1240,7 @@ def export_series(
         if goldens:
             cases = build_cases(model_dir)
             golden_summary = write_goldens(wrapper, model_dir, cases, staged, cycles, device)
-        print("[provenance] チェックポイント指紋 → reference.json", file=sys.stderr, flush=True)
+        print("[provenance] checkpoint fingerprint → reference.json", file=sys.stderr, flush=True)
         provenance.write_record(staged, drafter_reference(out_dir, model_dir, golden_summary))
 
     return {
@@ -1195,10 +1262,11 @@ def export_series(
 
 
 def _declared(graph: IrGraph) -> set[str]:
-    """このコンテナに実体を書く initializer のテンソルキー（共有宣言を除く）。
+    """Tensor keys of the initializers whose data this container writes (excluding shared
+    declarations).
 
-    除外の規則そのものは core（{@link karume.emit.bakeable_initializers}）が持つ — ここは
-    「名前 → テンソルキー」へ射影するだけで、規則を写さない。
+    The exclusion rule itself is owned by the core ({@link karume.emit.bakeable_initializers}) —
+    this only projects "name → tensor key" and does not copy the rule.
     """
     return {graph.initializers[name].tensor for name in bakeable_initializers(graph)}
 
@@ -1206,9 +1274,11 @@ def _declared(graph: IrGraph) -> set[str]:
 def export_module_with_attention(
     wrapper: nn.Module, example: tuple[torch.Tensor, ...]
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """SDPA を保存したまま export する（`attention` op が残る形 — ADR 0023 の opt-in）。
+    """Export with SDPA preserved (the form where the `attention` op remains — the opt-in of
+    ADR 0023).
 
-    記号は 1 本も宣言しない（K/V の placeholder は固定長で、容量記号は手術が足す）。
+    Not a single symbol is declared (the K/V placeholders have fixed length, and the surgery adds
+    the capacity symbol).
     """
     from karume.pipeline import export_module
 
@@ -1222,7 +1292,8 @@ def export_module_with_attention(
 
 
 def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[torch.Tensor, ...]:
-    """trace の例示入力（K / V は固定 {@link TRACE_KV_ROWS} 行の placeholder）。
+    """Example inputs of the trace (K / V are placeholders with a fixed {@link TRACE_KV_ROWS}
+    rows).
 
     The K / V placeholders carry the drafter's KV heads per layer type
     (`gemma4.export_decode.kv_heads` — upstream's rule): E2B 1 / E4B 2 on both types; 12B 8 on the
@@ -1249,9 +1320,10 @@ def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[t
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # MUST: `--model` は E2B だけを受ける — drafter の上流（{@link ASSISTANT_REPO}）も貸し手の
-    # 既定（`--product-dir`）も E2B 専用の綴りなので、別モデルを受理すると E2B の drafter を
-    # 別モデルの貸し手へ黙って焼く（E4B の drafter は未対応）。
+    # MUST: `--model` accepts E2B only — both the drafter's upstream ({@link ASSISTANT_REPO}) and
+    # the lender's default (`--product-dir`) are spelled for E2B only, so accepting another model
+    # would silently bake E2B's drafter against another model's lender (E4B's drafter is not
+    # supported).
     parser = one_shot.series_parser(
         __doc__.split("\n\n")[0],
         partial(one_shot.series_dir, suffix=GEMMA4_DRAFTER_SUFFIX),

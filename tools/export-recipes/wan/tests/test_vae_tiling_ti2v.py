@@ -1,24 +1,29 @@
-"""`wan/vae_tiling.py` の Wan2.2 の経路の約束事（ADR 0121 段 5 — patchify 空間のタイル参照）。
+"""The contract of the Wan2.2 path of `wan/vae_tiling.py` (ADR 0121 step 5 — the tile reference in
+patchify space).
 
-ここで固定するのは、壊れても例外が出ず**値だけが静かにずれる**側:
+What is pinned here is the side where a break raises no exception and **only the values drift
+quietly**:
 
-- 2.2 のタイル計画（タイル 16・重なり潜在 4）の開始位置が TS 側と一致すること
-  （{@link MIRRORED_STARTS_TI2V} — TS 側 `packages/models/tests/wan_ti2v_vae_tiles_host_test.ts` の
-  `AXIS_STARTS_TI2V` と同じ値の二重凍結）と、4 寸法の枚数・ブレンド幅
-- unpatchify の並び（{@link UNPATCHIFY_SOURCE_CHANNEL} — TS 側の表と二重凍結）が上流 diffusers の
-  `unpatchify` と一致すること
-- 縮退（タイル 1 枚）のタイル参照が上流の非タイル chunk ループと**ビット一致**し、unpatchify →
-  クランプを当てると上流の `_decode` そのものと**ビット一致**すること（参照の素性を上流に結ぶ）。
-  合成の 2.2 VAE（常に走る）と実重み（pin した 5B の snapshot がある機だけ）の 2 層
-- `accept` の `frames_rgb` が `frames` に上流の unpatchify → クランプを当てたものであること・メタに
-  足すのが `patch_size` と `reference` の 2 つだけであること
-- CLI の `--model` と `--case` の組（表に無い組は VAE を読む前に落ちる）と、モデルごとの既定値・
-  読んだ VAE と系列の前提の照合
-- 2.1 の `write_fixture` のメタ全体とテンソル名の組（decode は差し替える — 値は R0 の担当）
+- the start positions of the 2.2 tile plan (tile 16, overlap 4 latents) equal the TS side's
+  ({@link MIRRORED_STARTS_TI2V} — frozen twice with the same values as `AXIS_STARTS_TI2V` of the TS
+  side's `packages/models/tests/wan_ti2v_vae_tiles_host_test.ts`), and the tile counts and blend
+  widths of the four sizes
+- the unpatchify order ({@link UNPATCHIFY_SOURCE_CHANNEL} — frozen twice with the TS side's table)
+  equals the upstream diffusers `unpatchify`
+- the tile reference in the degenerate case (one tile) is **bit-identical** to the upstream untiled
+  chunk loop, and with unpatchify → clamp applied it is **bit-identical** to the upstream `_decode`
+  itself (tying the reference's origin to the upstream). Two levels: the synthetic 2.2 VAE (always
+  runs) and real weights (only on a machine with the pinned 5B snapshot)
+- `frames_rgb` of `accept` is `frames` with the upstream unpatchify → clamp applied, and the only
+  two things added to the metadata are `patch_size` and `reference`
+- the CLI pair of `--model` and `--case` (a pair not in the table fails before the VAE is read), the
+  per-model defaults, and the check of the loaded VAE against the series' premises
+- the whole metadata of 2.1's `write_fixture` and the set of tensor names (decode is swapped out —
+  the values are R0's job)
 
-2.1 の経路（`test_vae_tiling.py`）は変えない — 2.1 のフィクスチャの不変は、書き出し直した
-`vae_tiles.{band,accept}` を `wan.series_check` で既存と突き合わせて確かめる（CPU で長いので
-pytest には入れない）。
+The 2.1 path (`test_vae_tiling.py`) does not change — that 2.1's fixture is unchanged is confirmed
+by rewriting `vae_tiles.{band,accept}` and comparing them with the existing ones through
+`wan.series_check` (it is long on the CPU, so it is not in pytest).
 """
 
 from __future__ import annotations
@@ -32,21 +37,23 @@ import torch
 from _shared.paths import SERIES_ROOT
 from wan import export_vae, vae_patch, vae_tiling
 
-#: Wan2.2 の潜在タイル（`export_vae.TI2V_TILE`）と patchify の倍率（上流 config の `patch_size`）。
+#: Wan2.2's latent tile (`export_vae.TI2V_TILE`) and patchify factor (`patch_size` of the upstream
+#: config).
 TILE = 16
 PATCH_SIZE = 2
 
-#: Wan2.2 の重なりの下限（潜在）= 64 px ÷ (グラフの比 8 × unpatchify 2) = 4。
+#: Wan2.2's lower bound of the overlap (latent) = 64 px ÷ (the graph's ratio 8 × unpatchify 2) = 4.
 OVERLAP = vae_tiling.min_overlap_latent(export_vae.SPATIAL_SCALE, PATCH_SIZE)
 
-#: タイル辺 16・重なりの下限 4 の開始位置（潜在の全長 → 開始位置列）。TS 側
-#: （`packages/models/tests/wan_ti2v_vae_tiles_host_test.ts` の `AXIS_STARTS_TI2V`）と**同じ値**で
-#: 凍結する — 両実装を機械で突き合わせる経路は GPU の照合（フィクスチャのメタ）だけなので、GPU の
-#: 無い機でも鏡像のずれを捕まえる。
+#: Start positions at tile edge 16 and overlap lower bound 4 (the latent's full length → the
+#: sequence of start positions). Frozen with **the same values** as the TS side (`AXIS_STARTS_TI2V`
+#: of `packages/models/tests/wan_ti2v_vae_tiles_host_test.ts`) — the only path that compares the two
+#: implementations by machine is the GPU comparison (the fixture's metadata), so this catches a
+#: mirror drift on a machine without a GPU too.
 #:
-#: - 16: 縮退（1 枚 — 縮退門の形）
-#: - 30 / 52: 832×480 / 480×832 の 2 辺（潜在 = 画素 ÷ 16）
-#: - 44 / 80: 1280×704 / 704×1280 の 2 辺（対ごとにブレンド幅が違う）
+#: - 16: degenerate (one tile — the shape of the degenerate check)
+#: - 30 / 52: the two edges of 832×480 / 480×832 (latent = pixels ÷ 16)
+#: - 44 / 80: the two edges of 1280×704 / 704×1280 (the blend width differs per pair)
 MIRRORED_STARTS_TI2V = {
     16: (0,),
     30: (0, 7, 14),
@@ -55,8 +62,8 @@ MIRRORED_STARTS_TI2V = {
     80: (0, 11, 21, 32, 43, 53, 64),
 }
 
-#: 4 寸法（幅 × 高さの画素）→ (枚数, 行のブレンド幅, 列のブレンド幅)。ブレンド幅は patchify 空間の
-#: 画素（= 重なりの潜在 × グラフの比 8）。
+#: The four sizes (width × height in pixels) → (tile count, row blend width, column blend width).
+#: The blend widths are pixels in patchify space (= the overlap in latents × the graph's ratio 8).
 SIZES = {
     (832, 480): (12, [72, 72], [32, 32, 32]),
     (480, 832): (12, [32, 32, 32], [72, 72]),
@@ -64,10 +71,11 @@ SIZES = {
     (704, 1280): (28, [40, 48, 40, 40, 48, 40], [56, 48, 56]),
 }
 
-#: unpatchify の並び: `[dy][dx]` → patchify 空間のチャネル内のずれ（dy = 高さ方向・dx = 幅方向の
-#: 画素のずれ）。`out[c, f, y·2 + dy, x·2 + dx] = in[c·4 + 表[dy][dx], f, y, x]`
-#: （ずれは dx·2 + dy）。
-#: TS 側（`packages/models/tests/wan_vae_tiles_test.ts` の `UNPATCHIFY_SOURCE_CHANNEL`）と同じ値。
+#: The unpatchify order: `[dy][dx]` → the offset within the channel in patchify space (dy = the
+#: pixel offset along the height, dx = along the width).
+#: `out[c, f, y·2 + dy, x·2 + dx] = in[c·4 + table[dy][dx], f, y, x]` (the offset is dx·2 + dy).
+#: The same values as the TS side (`UNPATCHIFY_SOURCE_CHANNEL` of
+#: `packages/models/tests/wan_vae_tiles_test.ts`).
 UNPATCHIFY_SOURCE_CHANNEL = ((0, 2), (1, 3))
 
 
@@ -77,7 +85,8 @@ def _upstream_unpatchify(frames: torch.Tensor) -> torch.Tensor:
 
 
 def _table_matches(table, patchified: torch.Tensor, pixels: torch.Tensor) -> bool:
-    """`pixels [1, C, F, 2h, 2w]` の各ずれが `patchified [1, 4C, F, h, w]` の表の示すチャネルか。"""
+    """Whether each offset of `pixels [1, C, F, 2h, 2w]` is the channel of
+    `patchified [1, 4C, F, h, w]` that the table points to."""
     batch, channels, frames, height, width = patchified.shape
     grouped = patchified.view(batch, channels // 4, 4, frames, height, width)
     return all(
@@ -89,7 +98,8 @@ def _table_matches(table, patchified: torch.Tensor, pixels: torch.Tensor) -> boo
 
 class TestPlanTi2v:
     def test_the_overlap_is_four_latents_and_the_tile_is_sixteen(self):
-        """凍結表を作った値（タイル 16・重なり 4）が recipe の宣言値と同じ。"""
+        """The values the frozen table was built from (tile 16, overlap 4) are the same as the
+        recipe's declared values."""
         assert OVERLAP == 4
         assert export_vae.TI2V_TILE == TILE
         assert export_vae.VAE_SERIES["ti2v-5b"].patch_size == PATCH_SIZE
@@ -123,14 +133,16 @@ class TestUnpatchifyOrder:
         assert _table_matches(UNPATCHIFY_SOURCE_CHANNEL, patchified, pixels)
 
     def test_the_table_with_dx_and_dy_swapped_does_not_match(self):
-        """対照: 縦横のずれを入れ替えた表は一致しない（上の照合が取り違えを捕まえられる）。"""
+        """The control: a table with the vertical and horizontal offsets swapped does not match (the
+        check above can catch a mix-up)."""
         patchified = torch.arange(12 * 2 * 3 * 5, dtype=torch.float32).view(1, 12, 2, 3, 5)
         swapped = ((0, 1), (2, 3))
 
         assert not _table_matches(swapped, patchified, _upstream_unpatchify(patchified))
 
     def test_unpatchify_frames_is_the_upstream_function(self):
-        # 被験関数も上流の unpatchify を import する — 比較相手の importorskip より先に評価される。
+        # The function under test also imports the upstream unpatchify — it is evaluated before the
+        # importorskip of the reference it is compared with.
         pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
         frames = torch.randn(1, 12, 3, 4, 6, generator=torch.Generator().manual_seed(5))
 
@@ -151,8 +163,8 @@ class TestFixtureCasesTi2v:
         assert vae_tiling.FIXTURE_CASES_BY_MODEL["ti2v-5b"] is vae_tiling.TI2V_FIXTURE_CASES
 
     def test_the_cases_are_the_three_sizes_of_the_design(self):
-        """band = 832×480×81・accept = 480×832×9・wide = 1280×704×5（潜在は画素 ÷ 16・フレームは
-        1 + 4(chunk − 1)）。"""
+        """band = 832×480×81, accept = 480×832×9, wide = 1280×704×5 (latents are pixels ÷ 16, frames
+        are 1 + 4(chunk − 1))."""
         cases = {case.name: case for case in vae_tiling.TI2V_FIXTURE_CASES}
 
         assert list(cases) == ["band", "accept", "wide"]
@@ -160,8 +172,8 @@ class TestFixtureCasesTi2v:
         assert (band.height, band.width, band.chunks, band.role) == (30, 52, 21, "band")
         assert (accept.height, accept.width, accept.chunks, accept.role) == (52, 30, 3, "accept")
         assert (wide.height, wide.width, wide.chunks, wide.role) == (44, 80, 2, "accept")
-        # seed は設計の表の値（フィクスチャが潜在を持つので e2e の自己整合はずれても保たれる —
-        # 表からのずれはここでだけ捕まる）。
+        # The seeds are the values of the design table (the fixture holds the latents, so e2e's
+        # self-consistency survives a drift — a drift from the table is caught only here).
         assert (band.seed, accept.seed, wide.seed) == (20261051, 20261052, 20261053)
 
     def test_acceptance_differs_from_the_band_in_seed_chunks_and_placement(self):
@@ -174,7 +186,8 @@ class TestFixtureCasesTi2v:
             assert (case.height, case.width) != (band.height, band.width), name
 
     def test_seeds_are_distinct_from_every_other_fixture(self):
-        """2.1 のタイル参照・段 4 の chunk 列（2.1 / 2.2）とも潜在を共有しない。"""
+        """No latent is shared with the 2.1 tile reference or with step 4's chunk sequences (2.1 /
+        2.2)."""
         seeds = [case.seed for case in vae_tiling.TI2V_FIXTURE_CASES]
         others = {
             case.seed
@@ -189,7 +202,8 @@ class TestFixtureCasesTi2v:
         assert not set(seeds) & others
 
     def test_only_accept_of_ti2v_carries_rgb_and_the_untiled_reference(self):
-        """RGB は patchify する世代の accept だけ（裁定 F-11）・2.1 の表は RGB を持たない。"""
+        """RGB is only in accept of the generation that patchifies (ruling F-11); the 2.1 table has
+        no RGB."""
         flags = {
             (model, case.name): (case.full, case.rgb)
             for model, cases in vae_tiling.FIXTURE_CASES_BY_MODEL.items()
@@ -202,7 +216,8 @@ class TestFixtureCasesTi2v:
         assert flags[("ti2v-5b", "wide")] == (False, False)
 
     def test_the_wan21_reference_string_is_unchanged(self):
-        """2.1 のメタ `reference` は 2.2 の経路を足す前と同じ文字列（R0 のメタの一致の前提）。"""
+        """The 2.1 metadata `reference` is the same string as before the 2.2 path was added (the
+        premise of R0's metadata match)."""
         assert vae_tiling.FIXTURE_REFERENCE == (
             "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)"
         )
@@ -214,9 +229,10 @@ def _seeded(seed: int, height: int, width: int, chunks: int = 3) -> torch.Tensor
 
 
 def _assert_degenerate_tile_is_upstream(vae, latents: torch.Tensor) -> None:
-    """1 枚のタイル参照 ≡ 非タイル chunk ループ（クランプ前）、clamp(unpatchify) ≡ 上流 `_decode`。
+    """A one-tile reference ≡ the untiled chunk loop (before clamping), clamp(unpatchify) ≡ the
+    upstream `_decode`.
 
-    `latents` は正方（タイル辺 = 潜在の辺）。
+    `latents` is square (tile edge = latent edge).
     """
     _, _, chunks, height, width = latents.shape
     plan = vae_tiling.plan_tiles(height, width, tile=height, min_overlap=OVERLAP)
@@ -236,23 +252,26 @@ class TestDegenerateTileSynthetic:
     def test_one_tile_is_the_untiled_chunk_loop_and_the_upstream_decode_bitwise(
         self, ti2v_synthetic_vae
     ):
-        """潜在がタイル 1 枚ちょうど（8×8・3 chunk）。post-quant の 1×1×1 conv の掛け方（タイルは
-        フレームごと・非タイルは全フレームに 1 度）の違いも含めて値が変わらないことを見る。"""
+        """The latent is exactly one tile (8×8, 3 chunks). It checks that the values do not change,
+        including the difference in how the post-quant 1×1×1 conv is applied (per frame for the
+        tiles, once over all frames untiled)."""
         _assert_degenerate_tile_is_upstream(ti2v_synthetic_vae, _seeded(11, 8, 8))
 
     def test_a_generation_the_chunk_graph_does_not_take_is_refused(self, ti2v_synthetic_vae):
-        """残差あり・patchify 無しは chunk グラフの書き直しが受けない世代。門が無ければ decode は
-        そのまま通る（形も計画も正しい）ので、例外はこの門からしか出ない。"""
+        """With residuals and without patchify is a generation the chunk-graph rewrite does not
+        take. Without the check, decode would go through as is (the shapes and the plan are right),
+        so the exception can come only from this check."""
         from diffusers import AutoencoderKLWan
 
         vae = AutoencoderKLWan.from_config(ti2v_synthetic_vae.config, patch_size=None).eval()
         plan = vae_tiling.plan_tiles(8, 8, tile=8, min_overlap=OVERLAP)
 
-        with pytest.raises(vae_patch.UnsupportedVaeError, match="未対応"):
+        with pytest.raises(vae_patch.UnsupportedVaeError, match="unsupported"):
             vae_tiling.decode_tiles(vae, _seeded(11, 8, 8, chunks=1), plan)
 
 
-#: 合成の VAE で書く小さなケース（潜在 8×12・タイル 8 → 列 0 / 4 の 2 枚・2 chunk）。
+#: A small case written with the synthetic VAE (latent 8×12, tile 8 → 2 tiles at columns 0 / 4,
+#: 2 chunks).
 SYNTHETIC_CASE = vae_tiling.FixtureCase(
     "accept", seed=3, chunks=2, height=8, width=12, role="accept", full=True, rgb=True
 )
@@ -260,7 +279,8 @@ SYNTHETIC_CASE = vae_tiling.FixtureCase(
 
 @pytest.fixture(scope="module")
 def written(ti2v_synthetic_vae, tmp_path_factory):
-    """合成の VAE で {@link SYNTHETIC_CASE} を書いて読み戻した (要約, テンソル, メタ)。"""
+    """(summary, tensors, metadata) of {@link SYNTHETIC_CASE} written with the synthetic VAE and
+    read back."""
     from safetensors import safe_open
 
     out = tmp_path_factory.mktemp("ti2v-tiles")
@@ -283,18 +303,21 @@ class TestWriteFixtureTi2v:
         assert tensors["frames_rgb"].shape == (3, 5, 128, 192)
 
     def test_frames_rgb_is_the_upstream_unpatchify_then_clamp_of_frames(self, written):
-        """表（上流の `unpatchify(arange)` で確かめた並び）で `frames` から独立に組み直して比べ、
-        上流の関数そのものとも比べる。"""
+        """Rebuild independently from `frames` with the table (the order confirmed with the
+        upstream `unpatchify(arange)`) and compare, and compare with the upstream function itself
+        too."""
         _, tensors, _ = written
         frames, rgb = tensors["frames"], tensors["frames_rgb"]
-        # 前提: クランプ前に [-1, 1] の外の要素がある（無いとクランプ抜けがこの照合で割れない）。
+        # Premise: some elements are outside [-1, 1] before clamping (otherwise a missing clamp
+        # would not split this check).
         assert bool((frames.abs() > 1.0).any())
 
         assert _table_matches(UNPATCHIFY_SOURCE_CHANNEL, frames.clamp(-1.0, 1.0)[None], rgb[None])
         assert torch.equal(rgb, _upstream_unpatchify(frames[None])[0].clamp(-1.0, 1.0))
 
     def test_the_metadata_adds_only_patch_size_and_the_reference(self, written):
-        """統計は足さない（48 本の写しは追跡する fixture が縛る — 裁定 F-04）。"""
+        """No statistics are added (the 48 copied values are pinned by the tracked fixture —
+        ruling F-04)."""
         _, _, metadata = written
 
         assert metadata == {
@@ -321,7 +344,7 @@ class TestWriteFixtureTi2v:
     def test_a_patch_size_that_disagrees_with_the_config_is_rejected(
         self, ti2v_synthetic_vae, tmp_path: Path
     ):
-        with pytest.raises(ValueError, match="上流 config の 2 と違う"):
+        with pytest.raises(ValueError, match="differs from the upstream config's 2"):
             vae_tiling.write_fixture(
                 ti2v_synthetic_vae,
                 SYNTHETIC_CASE,
@@ -335,19 +358,19 @@ class TestWriteFixtureTi2v:
     def test_rgb_is_refused_for_a_generation_without_patchify(self, tmp_path: Path):
         vae = SimpleNamespace(config=SimpleNamespace(patch_size=None))
 
-        with pytest.raises(ValueError, match="patchify する世代だけ"):
+        with pytest.raises(ValueError, match="only for a generation that patchifies"):
             vae_tiling.write_fixture(
                 vae, SYNTHETIC_CASE, 8, tmp_path, min_overlap=OVERLAP, patch_size=None
             )
 
     def test_the_overlap_and_the_patch_size_are_required(self, ti2v_synthetic_vae, tmp_path: Path):
-        """渡し忘れは TypeError — 2.1 の値で黙って書かない。"""
+        """Forgetting to pass it is a TypeError — no silent writing with the 2.1 value."""
         with pytest.raises(TypeError):
             vae_tiling.write_fixture(ti2v_synthetic_vae, SYNTHETIC_CASE, 8, tmp_path)  # type: ignore[call-arg]
 
 
-#: 2.1 のフィクスチャのメタ（2.2 の経路を足す前の書き出し物 `outputs/series/` の
-#: `wan2.1-t2v-1.3b-f16-dyn/vae_tiles.{band,accept}.safetensors` から写した値）。
+#: The metadata of the 2.1 fixture (values copied from the output written before the 2.2 path was
+#: added, `wan2.1-t2v-1.3b-f16-dyn/vae_tiles.{band,accept}.safetensors` under `outputs/series/`).
 WAN21_REFERENCE = "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)"
 WAN21_METADATA = {
     "band": {
@@ -385,10 +408,12 @@ WAN21_TENSORS = {
 
 
 class TestWriteFixtureWan21:
-    """2.1 の経路（`patch_size` が None）のメタ全体とテンソル名の組を凍結する。
+    """Freeze the whole metadata and the set of tensor names of the 2.1 path (`patch_size` is
+    None).
 
-    decode は差し替える（値の不変は R0 — 書き出し直した実物を `wan.series_check` で既存と
-    突き合わせる — の担当）。ここが捕まえるのは、2.2 の経路を足したことによるメタの退行だけ。
+    decode is swapped out (that the values are unchanged is R0's job — comparing the rewritten real
+    outputs with the existing ones through `wan.series_check`). What this catches is only a
+    metadata regression caused by adding the 2.2 path.
     """
 
     @pytest.fixture
@@ -426,13 +451,14 @@ class TestWriteFixtureWan21:
 
 
 class _LoadedError(Exception):
-    """CLI の検査が VAE を読む段まで進んだ印（読まずに止める）。"""
+    """A marker that the CLI checks got as far as reading the VAE (it stops without reading)."""
 
 
 class TestCli:
     @pytest.fixture
     def recorded(self, monkeypatch):
-        """VAE を読まずに `main` の配線（モデル・タイル・置き場・重なり・ケース）を記録する。"""
+        """Record the wiring of `main` (model, tile, location, overlap, cases) without reading the
+        VAE."""
         calls: dict[str, list] = {"load": [], "vaes": [], "series": [], "write": []}
 
         def load_vae(model: str, *, round_f16: bool):
@@ -455,8 +481,8 @@ class TestCli:
 
     @staticmethod
     def _assert_the_series_config_is_checked(recorded, model: str) -> None:
-        """読んだ VAE がそのモデルの系列の前提と 1 回だけ照合される（外すと世代違いを黙って
-        書く）。"""
+        """The loaded VAE is checked against the premises of that model's series exactly once
+        (without it, a different generation would be written silently)."""
         [(vae, series)] = recorded["series"]
         [loaded] = recorded["vaes"]
         assert vae is loaded
@@ -489,12 +515,16 @@ class TestCli:
     def test_a_tile_not_above_the_overlap_is_rejected_before_loading(
         self, recorded, capsys, model: str, tile: int
     ):
-        """重なりの下限ちょうどのタイルは計画が受けない — VAE を読む前に落ちる。"""
+        """A tile exactly at the overlap's lower bound is not accepted by the plan — it fails before
+        the VAE is read."""
         with pytest.raises(SystemExit) as exited:
             vae_tiling.main(["--model", model, "--tile", str(tile)])
 
         assert exited.value.code == 2
-        assert f"--tile {tile} が重なりの下限 {tile}（潜在）以下" in capsys.readouterr().err
+        assert (
+            f"--tile {tile} is not above the minimum overlap {tile} (latents)"
+            in capsys.readouterr().err
+        )
         assert recorded["load"] == []
 
     def test_a_case_of_another_model_is_rejected_before_loading(self, monkeypatch, capsys):
@@ -507,10 +537,10 @@ class TestCli:
             vae_tiling.main(["--model", "t2v-1.3b", "--case", "wide"])
 
         assert exited.value.code == 2
-        assert "--case ['wide'] は --model t2v-1.3b の表に無い" in capsys.readouterr().err
+        assert "--case ['wide'] is not in the table of --model t2v-1.3b" in capsys.readouterr().err
 
     def test_case_choices_are_the_union_of_the_models(self, recorded):
-        """`wide` は 2.2 の表にだけあるが、`--case` の choices としては受ける。"""
+        """`wide` is only in the 2.2 table, but it is accepted as a `--case` choice."""
         assert vae_tiling.main(["--model", "ti2v-5b", "--case", "wide"]) == 0
         assert [call[0] for call in recorded["write"]] == ["wide"]
 
@@ -519,12 +549,13 @@ class TestCli:
         assert exited.value.code == 2
 
 
-# ---- 実重み（pin した 5B の snapshot が無ければ SKIP）---------------------------------
+# ---- Real weights (SKIP without the pinned 5B snapshot) ------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def vae(wan22_snapshot):
-    """pin した revision の 5B の VAE（CPU f32・丸め無し — 恒等の主張は重みの値に依らない）。"""
+    """The 5B VAE of the pinned revision (CPU f32, no rounding — the identity claim does not depend
+    on the weight values)."""
     pytest.importorskip("diffusers")
     from diffusers import AutoencoderKLWan
 
@@ -535,8 +566,8 @@ def vae(wan22_snapshot):
 
 class TestDegenerateTileRealWeights:
     def test_one_tile_is_the_untiled_chunk_loop_and_the_upstream_decode_bitwise(self, vae):
-        """実重みでも同じ 2 点（潜在 8×8・3 chunk — 実寸のタイル 16 より小さいが、主張は形に
-        依らない）。"""
+        """The same two points with real weights (latent 8×8, 3 chunks — smaller than the real tile
+        16, but the claim does not depend on the shape)."""
         mean = torch.tensor(vae.config.latents_mean).view(1, 48, 1, 1, 1)
         std = torch.tensor(vae.config.latents_std).view(1, 48, 1, 1, 1)
 

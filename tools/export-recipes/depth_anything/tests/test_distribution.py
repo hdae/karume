@@ -1,15 +1,18 @@
-"""Depth Anything V2 の配布 recipe（`depth_anything.distribution`）— 組み立て 1 周ぶんの単体テスト。
+"""The Depth Anything V2 distribution recipe (`depth_anything.distribution`) — unit tests over
+one full assembly run.
 
-実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小コンテナ**（`ir_fixtures`）で、
-門に落とされることを見るケースも同じ器で作る（{@link _depth_anything_container}）。
-前処理定数の出どころ（`preprocessor_config.json`）も合成 JSON で足りる。
+No real assets are used. The input reaching the assembly is a **valid minimal container** of a
+few KB (`ir_fixtures`), and the cases that check that a check rejects something are built from
+the same container ({@link _depth_anything_container}). The source of the preprocessing constants
+(`preprocessor_config.json`) is a synthetic JSON as well.
 
-manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
-`shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
+Since manifest v2 (`karume/2` — ADR 0041) the layout inside the repository is uniformly "per-model
+subtree + `shared/`", so every expected path starts with `<model name>/…`.
 
-core だけで観測できる層（合成計画で足りる規模上限・quant 完全写像・staging/swap の不変条件・
-帰属プロファイルの解決規則）は `tools/exporter/tests/test_dist.py` が持つ（ADR 0065 段 3+4 の
-分割）。テンプレート単位の門は `depth_anything/tests/test_card.py`。
+The layers observable from the core alone (size limits a synthetic plan can cover, the complete
+quant mapping, the staging/swap invariants, the resolution rules of attribution profiles) live in
+`tools/exporter/tests/test_dist.py` (the split of ADR 0065 steps 3+4). The per-template checks are
+in `depth_anything/tests/test_card.py`.
 """
 
 from __future__ import annotations
@@ -62,7 +65,8 @@ from karume.dist import (
     verify_dist,
 )
 
-#: 台本（`depth_anything/export.py`）が Small を焼いたときに容器が名乗る出所の形。
+#: The shape of the provenance the container states when the script (`depth_anything/export.py`)
+#: bakes Small.
 _SMALL_PROVENANCE = Provenance(
     license=DEPTH_ANYTHING_LICENSE, notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
 )
@@ -70,7 +74,8 @@ _SMALL_PROVENANCE = Provenance(
 
 @pytest.fixture(autouse=True)
 def _small_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """フィクスチャ容器に「台本が Small を焼いた」出所を名乗らせる（出所の門の正常形）。"""
+    """Make the fixture containers state the provenance "the script baked Small" (the passing
+    form of the provenance check)."""
     stamp_fixture_provenance(monkeypatch, _SMALL_PROVENANCE)
 
 
@@ -80,12 +85,13 @@ def _write(path: Path, payload: bytes) -> None:
 
 
 def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
-    """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
+    """The expected paths inside the model subtree (the uniform layout of ADR 0041 §9)."""
     return [f"{model}/{rel}" for rel in paths]
 
 
 def _placed_paths() -> list[str]:
-    """配布形に現れる相対 path（weights の席は part 連番に展開される — container-v1 §8）。"""
+    """The relative paths that appear in the distribution (weights slots expand into numbered
+    parts — container-v1 §8)."""
     return placed_paths(DEPTH_ANYTHING_OUTPUT_PATHS, DEPTH_ANYTHING_WEIGHTS)
 
 
@@ -95,13 +101,15 @@ def _present(out_dir: Path) -> list[str]:
 
 # ---- Depth Anything V2（depth-estimation）------------------------------------
 #
-# 偽資産は**実物と違う数**にする（96×64 の非正方・mean/std は ImageNet 統計でない）— 前処理
-# 定数や寸法を焼き込んでいれば落ちる。非正方なのは、`imageWidth` / `imageHeight` の取り違えが
-# 正方形では原理的に検出できないため。
+# The fake assets use **numbers that differ from the real ones** (non-square 96×64; mean/std are
+# not the ImageNet statistics) — hard-coded preprocessing constants or dimensions would fail. It is
+# non-square because a mix-up of `imageWidth` / `imageHeight` cannot in principle be detected on a
+# square.
 
-#: `pipelineConfig` の欄名（TS 側 `packages/models/src/depth-anything/config.ts` の `ROOT_KEYS` の
-#: 写し）。**ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は
-#: 完全一致が要る。
+#: The field names of `pipelineConfig` (a copy of `ROOT_KEYS` in the TS-side
+#: `packages/models/src/depth-anything/config.ts`). **The loader rejects both unknown and missing
+#: keys at parse time**, so the field names of the baking side and the loading side must match
+#: exactly.
 _DEPTH_ANYTHING_CONFIG_KEYS = (
     "imageWidth",
     "imageHeight",
@@ -113,8 +121,9 @@ _DEPTH_ANYTHING_CONFIG_KEYS = (
 _DEPTH_ANYTHING_HEIGHT = 96
 _DEPTH_ANYTHING_WIDTH = 64
 
-#: 偽の `preprocessor_config.json`（実物と同じ欄・違う値。`keep_aspect_ratio` /
-#: `ensure_multiple_of` は実物どおり載せておく — 宣言へ写していないことを見るため）。
+#: A fake `preprocessor_config.json` (the same fields as the real one, different values.
+#: `keep_aspect_ratio` / `ensure_multiple_of` are included as in the real one — to see that they
+#: are not copied into the declaration).
 _DEPTH_ANYTHING_PREPROCESSOR: Mapping[str, Any] = {
     "do_normalize": True,
     "do_pad": False,
@@ -139,15 +148,19 @@ def _depth_anything_container(
     depth_shape: Sequence[Any] | None = None,
     outputs: int = 1,
 ) -> list[bytes]:
-    """系列に置く深度推定グラフの中身（part 列 — 先頭が part 0）。
+    """The contents of the depth-estimation graph placed in the series (a part sequence — part 0
+    first).
 
-    組み立てへ届く形は**正当なコンテナ**でなければならない（組み立ては入力を開いて宣言の全
-    規則で見る — `karume.dist.assert_weight_components_verified`）ので、門に落とす側も同じ器で
-    作り、**宣言だけを実物とずらす**。
+    What reaches the assembly must be a **valid container** (the assembly opens its input and
+    checks it against every rule of the declaration —
+    `karume.dist.assert_weight_components_verified`), so the cases a check must reject are built
+    from the same container, with **only the declaration shifted from the real one**.
 
-    `storage` は実物どおりの混成コンポーネントの格納形（f16 / i8 / i4 は適格外の重みと bias が
-    f32 で残り、i4 はさらに i8 が混ざる）— 禁止表（{@link DEPTH_ANYTHING_STORAGE_FORBIDDEN}）の門は
-    この形でしか試せない。残りの引数はグラフ宣言の各軸で、既定は実物どおり。
+    `storage` is the storage of a mixed component as in the real thing (in f16 / i8 / i4 the
+    ineligible weights and the biases stay f32, and i4 additionally mixes in i8) — the check of
+    the forbidden table ({@link DEPTH_ANYTHING_STORAGE_FORBIDDEN}) can only be exercised in this
+    form. The remaining arguments are the axes of the graph declaration, defaulting to the real
+    values.
     """
     shape: Shape = (
         list(input_shape)
@@ -157,8 +170,9 @@ def _depth_anything_container(
     depth: Shape = list(depth_shape) if depth_shape is not None else [1, shape[2], shape[3]]
     return ir_container(
         mark="depth-anything",
-        # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
-        # MUST・container-v1 §2.1 — 組み立ての門がこの一致を見る）。
+        # The fake series also **names itself by the component name** (container graph name =
+        # the manifest's weights key, a MUST of container-v1 §2.1 — the assembly's check looks at
+        # this match).
         named=DEPTH_ANYTHING_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
@@ -173,24 +187,26 @@ def _build_depth_anything_sources(
     preprocessor: Mapping[str, Any] | None = _DEPTH_ANYTHING_PREPROCESSOR,
     **container: Any,
 ) -> DepthAnythingSources:
-    """系列 + 実重みの置き場を偽資産で再現する（配布しない `io.*` の混入込み）。
+    """Reproduce the series + the location of the real weights with fake assets (including the
+    `io.*` files that must not be distributed).
 
-    並びは `_shared.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
-    テストが root を差し替えるだけで同じ木を指せる形。
+    The arrangement follows the real layout of `_shared.paths` (`outputs/series/` and `inputs/`) —
+    so the CLI-path tests can point at the same tree just by swapping the root.
     """
     sources = DepthAnythingSources(
         series=root / "outputs" / "series" / depth_anything_series_name(model),
         model=root / "inputs" / "depth-anything" / depth_anything_checkpoint(model),
     )
     write_component(sources.series / "model.krm", _depth_anything_container(**container))
-    # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+    # An E2E fixture that must not enter the distribution (the series really does contain these).
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     if preprocessor is not None:
         _write(
             sources.model / "preprocessor_config.json",
             json.dumps(preprocessor, ensure_ascii=False).encode("utf-8"),
         )
-    # 前処理を読む checkpoint の取得記録（容器の revision の突合先）。
+    # The download record of the checkpoint the preprocessing is read from (what the container's
+    # revision is compared with).
     write_snapshot(sources.model, license=DEPTH_ANYTHING_LICENSE)
     return sources
 
@@ -218,7 +234,7 @@ class TestDepthAnythingLayout:
     ) -> None:
         out_dir, _ = depth_anything_assembled
         expected = _in_subtree(DEPTH_ANYTHING_DEFAULT_MODEL, _placed_paths())
-        # 法的テキスト 2 本（Apache 2.0 §4）は manifest が宣言しないメタ席。
+        # The 2 legal texts (Apache 2.0 §4) are meta slots the manifest does not declare.
         assert _present(out_dir) == sorted(
             [*expected, MANIFEST_FILENAME, "LICENSE.md", "NOTICE.md"]
         )
@@ -228,7 +244,7 @@ class TestDepthAnythingLayout:
         assert list(out_dir.rglob("io.*")) == []
 
     def test_it_declares_one_graph_and_no_assets(self, depth_anything_assembled) -> None:
-        """実行に要るのはグラフ 1 本だけ（tokenizer も表も無い = `assets` は空）。"""
+        """Running needs only the one graph (no tokenizer and no table = `assets` is empty)."""
         _, manifest = depth_anything_assembled
         model = _depth_anything_model(manifest)
         assert model["pipeline"] == "depth-anything/1"
@@ -254,12 +270,13 @@ class TestDepthAnythingLayout:
     def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
         self, tmp_path: Path, storage: str, intruder: str
     ) -> None:
-        """実物どおりの圧縮系列は**要求検査を満たす** — 禁止表だけが系列 root の取り違えを見る。
+        """A compressed series shaped like the real one **satisfies the requirement check** —
+        only the forbidden table catches a mix-up of the series root.
 
-        圧縮系列も適格外の重みと bias を F32 で持つので「F32 を含む」は真になり、上の
-        単一 dtype の偽資産と違って要求検査では 1 バイトも落ちない。落ちるべき理由は
-        「f32 席に別系列の資産が居る」で、数値の門では原理的に検出できない
-        （ADR 0027 / 0029）。
+        A compressed series also keeps its ineligible weights and biases in F32, so "contains
+        F32" holds, and unlike the single-dtype fake assets above the requirement check rejects
+        nothing. The reason it must fail is "an asset of another series sits in the f32 slot",
+        which a numeric check cannot in principle detect (ADR 0027 / 0029).
         """
         sources = _build_depth_anything_sources(tmp_path, storage=storage)
         with pytest.raises(
@@ -268,23 +285,26 @@ class TestDepthAnythingLayout:
             depth_anything_plan(sources)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
-        """正常対 — 素の f32 系列は要求検査も禁止表も通る（禁止表が恒真に倒れていない）。"""
+        """The passing counterpart — a plain f32 series passes both the requirement check and the
+        forbidden table (the forbidden table has not collapsed into always failing)."""
         sources = _build_depth_anything_sources(tmp_path, storage="f32")
 
         assert depth_anything_plan(sources).name == DEPTH_ANYTHING_DEFAULT_MODEL
 
     def test_the_forbidden_table_names_every_compressed_layout_in_the_codec_ledger(self) -> None:
-        """禁止表は格納検査の語彙（codec 台帳の layout）から f32 / i32 を除いた**全部**を持つ。
+        """The forbidden table holds **every** layout of the storage check's vocabulary (the
+        codec ledger's layouts) except f32 / i32.
 
-        1 つでも抜けると、抜けた格納形の系列 root だけが f32 席を黙って通る。i32 は素の格納
-        （添字表）なので禁じない。
+        If even one is missing, a series root of that storage alone passes the f32 slot silently.
+        i32 is plain storage (index tables), so it is not forbidden.
         """
         compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32"}
 
         assert set(DEPTH_ANYTHING_STORAGE_FORBIDDEN[DEPTH_ANYTHING_ROLE]) == compressed
 
     def test_it_refuses_an_i2_series_in_the_f32_seat(self, tmp_path: Path) -> None:
-        """`ir_container` では書けない i2（QAT 系列の固定 packed 値）も、束縛表の現物で落ちる。"""
+        """i2 (the fixed packed values of a QAT series), which `ir_container` cannot write, also
+        fails on the actual binding table."""
         sources = _build_depth_anything_sources(tmp_path)
         replace_component(sources.series / "model.krm", i2_container(named=DEPTH_ANYTHING_ROLE))
 
@@ -293,14 +313,16 @@ class TestDepthAnythingLayout:
 
 
 class TestTheContainerProvenance:
-    """容器が名乗る出所で門を閉じる（名前の表だけだと、Base を焼いた容器が Small の系列で通る）。"""
+    """The check closes on the provenance the container states (with the name table alone, a
+    container baked from Base would pass as Small's series)."""
 
     def test_it_refuses_a_container_that_names_another_license(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Base / Large（CC BY-NC 4.0）を焼いた容器を Small の系列 path へ置いた形。
+        """A container baked from Base / Large (CC BY-NC 4.0) placed at Small's series path.
 
-        格納・入出力形・前処理は Small と同じ形なので、出所の突合より前の門は全て通る。
+        Storage, input / output shapes and preprocessing have the same shape as Small, so every
+        check before the provenance comparison passes.
         """
         stamp_fixture_provenance(
             monkeypatch,
@@ -310,41 +332,45 @@ class TestTheContainerProvenance:
         )
         sources = _build_depth_anything_sources(tmp_path)
 
-        with pytest.raises(DistError, match=r"provenance\.license が 'cc-by-nc-4.0'"):
+        with pytest.raises(DistError, match=r"provenance\.license is 'cc-by-nc-4.0'"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_container_without_an_upstream_revision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """revision を焼く前の台本の容器（出所を辿れない）は配らない。"""
+        """A container from the script before it baked the revision (provenance cannot be traced)
+        is not shipped."""
         stamp_fixture_provenance(
             monkeypatch, Provenance(license=DEPTH_ANYTHING_LICENSE, notice=NOTICE_FILENAME)
         )
         sources = _build_depth_anything_sources(tmp_path)
 
-        with pytest.raises(DistError, match="upstreamRevision を持たない"):
+        with pytest.raises(DistError, match="has no provenance.upstreamRevision"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_container_baked_from_another_revision(self, tmp_path: Path) -> None:
-        """前処理を読む checkpoint と、容器を焼いた checkpoint の revision が違う形。"""
+        """The checkpoint the preprocessing is read from and the checkpoint the container was
+        baked from have different revisions."""
         sources = _build_depth_anything_sources(tmp_path)
         write_snapshot(sources.model, license=DEPTH_ANYTHING_LICENSE, revision=OTHER_REVISION)
 
-        with pytest.raises(DistError, match="別の revision"):
+        with pytest.raises(DistError, match="from a different revision"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_checkpoint_without_the_download_record(self, tmp_path: Path) -> None:
-        """取得記録が無い checkpoint では突合先が決まらない — 省かずに落とす。"""
+        """Without a download record the checkpoint offers nothing to compare with — fail rather
+        than skip."""
         sources = _build_depth_anything_sources(tmp_path)
         for record in (sources.model / ".cache").rglob("*.metadata"):
             record.unlink()
 
-        with pytest.raises(UpstreamProvenanceError, match="metadata が無い"):
+        with pytest.raises(UpstreamProvenanceError, match=r"\.metadata is missing"):
             depth_anything_plan(sources)
 
 
 class TestDepthAnythingPipelineConfig:
-    """`pipelineConfig` はロード側（`src/depth-anything/config.ts`）のスキーマと欄名まで一致。"""
+    """`pipelineConfig` matches the loader's schema (`src/depth-anything/config.ts`) down to the
+    field names."""
 
     def test_it_declares_exactly_the_fields_the_loader_accepts(
         self, depth_anything_assembled
@@ -357,7 +383,7 @@ class TestDepthAnythingPipelineConfig:
     def test_it_derives_the_preprocessing_constants_from_the_checkpoint(
         self, depth_anything_assembled
     ) -> None:
-        """焼き込んでいれば実物（518² / ImageNet 統計）の数が出てくる。"""
+        """Hard-coded constants would show the real numbers (518² / the ImageNet statistics)."""
         _, manifest = depth_anything_assembled
         config = _depth_anything_model(manifest)["pipelineConfig"]
         assert config["imageWidth"] == _DEPTH_ANYTHING_WIDTH
@@ -368,18 +394,20 @@ class TestDepthAnythingPipelineConfig:
     def test_it_declares_bicubic_not_the_bilinear_the_other_towers_use(
         self, depth_anything_assembled
     ) -> None:
-        """`resample: 3` = PIL の BICUBIC。SigLIP2 / BiRefNet の bilinear と取り違えると、
-        `pixel_values` が uint8 1 LSB の 34 倍ずれたままロードも実行も通る。"""
+        """`resample: 3` = PIL's BICUBIC. Mixed up with the bilinear of SigLIP2 / BiRefNet,
+        `pixel_values` would be off by 34 uint8 LSBs and still load and run."""
         _, manifest = depth_anything_assembled
         assert _depth_anything_model(manifest)["pipelineConfig"]["interpolation"] == "bicubic"
 
     def test_it_does_not_carry_the_aspect_ratio_knobs_into_the_declaration(
         self, depth_anything_assembled
     ) -> None:
-        """上流 config の `keep_aspect_ratio` / `ensure_multiple_of` は宣言へ写さない。
+        """`keep_aspect_ratio` / `ensure_multiple_of` of the upstream config are not copied into
+        the declaration.
 
-        焼かれたグラフは正方 1 点でしか受け取らないので、保つ経路には行き先が無い。素通しで
-        写すと TS 側の parse が未知キーで落ちる（= 配布形はできるのにロードできない）。
+        The baked graph accepts only one square size, so a path that keeps the ratio has nowhere
+        to go. Copied through, they would make the TS-side parse fail on unknown keys (= the
+        distribution builds but cannot be loaded).
         """
         _, manifest = depth_anything_assembled
         config = _depth_anything_model(manifest)["pipelineConfig"]
@@ -388,13 +416,13 @@ class TestDepthAnythingPipelineConfig:
 
     def test_it_refuses_a_missing_preprocessor_config(self, tmp_path: Path) -> None:
         sources = _build_depth_anything_sources(tmp_path, preprocessor=None)
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
+        with pytest.raises(DistError, match="missing assembly input"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_checkpoint_that_asks_for_another_interpolation(
         self, tmp_path: Path
     ) -> None:
-        """`resample` 2（BILINEAR）を黙って bicubic として宣言しない。"""
+        """`resample` 2 (BILINEAR) is not silently declared as bicubic."""
         sources = _build_depth_anything_sources(
             tmp_path, preprocessor={**_DEPTH_ANYTHING_PREPROCESSOR, "resample": 2}
         )
@@ -402,7 +430,8 @@ class TestDepthAnythingPipelineConfig:
             depth_anything_plan(sources)
 
     def test_it_refuses_a_rescale_factor_the_host_cannot_express(self, tmp_path: Path) -> None:
-        """TS 側は 8bit 画素を 255 で割る形で閉じている（除数は宣言に無い）。"""
+        """The TS side is fixed to dividing 8-bit pixels by 255 (the divisor is not in the
+        declaration)."""
         sources = _build_depth_anything_sources(
             tmp_path, preprocessor={**_DEPTH_ANYTHING_PREPROCESSOR, "rescale_factor": 1.0 / 127.5}
         )
@@ -423,7 +452,7 @@ class TestDepthAnythingPipelineConfig:
     def test_it_refuses_a_checkpoint_that_wants_a_crop_or_a_pad(
         self, tmp_path: Path, flag: str
     ) -> None:
-        """この前処理層は crop も pad も持たない（伸縮 1 本）。"""
+        """This preprocessing layer has neither crop nor pad (a single resize)."""
         sources = _build_depth_anything_sources(
             tmp_path, preprocessor={**_DEPTH_ANYTHING_PREPROCESSOR, flag: True}
         )
@@ -442,7 +471,8 @@ class TestDepthAnythingPipelineConfig:
     def test_it_refuses_constants_outside_the_loader_value_range(
         self, tmp_path: Path, patch: Mapping[str, Any]
     ) -> None:
-        """値域はロード側（`config.ts`）と同じ — std 0 は 0 除算で ±Infinity を静かに作る。"""
+        """The value ranges equal the loader's (`config.ts`) — a std of 0 would quietly produce
+        ±Infinity through division by zero."""
         sources = _build_depth_anything_sources(
             tmp_path, preprocessor={**_DEPTH_ANYTHING_PREPROCESSOR, **patch}
         )
@@ -451,59 +481,72 @@ class TestDepthAnythingPipelineConfig:
 
 
 class TestDepthAnythingGraphGate:
-    """組み立て門 — ずれても配布形としては成立してしまう組み合わせを、配置の前に落とす。"""
+    """The assembly check — rejects, before placement, combinations that would still form a valid
+    distribution despite the mismatch."""
 
     def test_it_refuses_a_graph_baked_for_another_resolution(self, tmp_path: Path) -> None:
-        """サイズが違えば事前学習解像度も違う（Small 518² / 別サイズの組み合わせ）。"""
+        """A different size has a different pretraining resolution (Small 518² / a combination
+        with another size)."""
         sources = _build_depth_anything_sources(tmp_path, input_shape=(1, 3, 518, 518))
-        with pytest.raises(DistError, match="前処理の寸法と焼かれた解像度が別の版"):
+        with pytest.raises(
+            DistError,
+            match="preprocessing dimensions and the baked resolution come from different versions",
+        ):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_whose_axes_are_transposed(self, tmp_path: Path) -> None:
-        """非正方の寸法だけが検出できる取り違え（`[1,3,W,H]`）。"""
+        """A mix-up only non-square dimensions can detect (`[1,3,W,H]`)."""
         sources = _build_depth_anything_sources(
             tmp_path, input_shape=(1, 3, _DEPTH_ANYTHING_WIDTH, _DEPTH_ANYTHING_HEIGHT)
         )
-        with pytest.raises(DistError, match="前処理の寸法と焼かれた解像度が別の版"):
+        with pytest.raises(
+            DistError,
+            match="preprocessing dimensions and the baked resolution come from different versions",
+        ):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_depth_map_with_a_channel_axis(self, tmp_path: Path) -> None:
-        """`[1, 1, H, W]` は要素数では `[1, H, W]` と区別できない（階数まで見る）。"""
+        """`[1, 1, H, W]` cannot be told apart from `[1, H, W]` by element count (the rank is
+        checked too)."""
         sources = _build_depth_anything_sources(
             tmp_path, depth_shape=(1, 1, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH)
         )
-        with pytest.raises(DistError, match="チャネル軸なし"):
+        with pytest.raises(DistError, match="no channel axis"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
-        """中間段まで出す別 export は、位置で引く後段が別の値を深度として読む。"""
+        """Another export that also emits intermediate stages would make the later stages that
+        look up by position read a different value as the depth."""
         sources = _build_depth_anything_sources(tmp_path, outputs=2)
-        with pytest.raises(DistError, match="深度マップ 1 本だけ"):
+        with pytest.raises(DistError, match="exactly one depth map"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_with_a_symbolic_axis(self, tmp_path: Path) -> None:
-        """解像度もパッチ数も固定なので、動かす軸は 1 本も無い（高さを動的に export した形）。"""
+        """The resolution and the patch count are fixed, so no axis varies (here the height was
+        exported as dynamic)."""
         sources = _build_depth_anything_sources(
             tmp_path, input_shape=(1, 3, "T", _DEPTH_ANYTHING_WIDTH)
         )
-        with pytest.raises(DistError, match="記号次元"):
+        with pytest.raises(DistError, match="symbolic dimensions"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
-        """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
+        """The runtime binds by name, so a changed spelling cannot be bound."""
         sources = _build_depth_anything_sources(tmp_path, input_name="px")
-        with pytest.raises(DistError, match="グラフ入力"):
+        with pytest.raises(DistError, match="graph inputs"):
             depth_anything_plan(sources)
 
 
 class TestDepthAnythingModelCard:
     def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """偽資産だけで CLI を 1 周回す（実重みの置き場も tmp へ寄せる）。"""
+        """Run the CLI once with fake assets only (the location of the real weights moves to tmp
+        too)."""
         from depth_anything import distribution
 
         sources = _build_depth_anything_sources(tmp_path)
-        # `INPUTS_ROOT`（系列の外にある実重み）を引くのは recipe 側 — ドライバの `dist`
-        # ではなくこちらの束縛を外す（`DIST_ROOT` は逆でドライバ側）。
+        # It is the recipe that reads `INPUTS_ROOT` (the real weights outside the series) — so
+        # this module's binding is replaced, not the driver `dist`'s (`DIST_ROOT` is the opposite,
+        # on the driver side).
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
         out_dir = tmp_path / "dist"
         main(
@@ -526,23 +569,26 @@ class TestDepthAnythingModelCard:
         assert "pipeline_tag: depth-estimation" in card
         assert f"license: {DEPTH_ANYTHING_LICENSE}" in card
         assert f"base_model: {DEPTH_ANYTHING_UPSTREAM['small']}" in card
-        # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
+        # A distribution that keeps the storage unchanged is none of the 4 values (left to the
+        # Hub's inference).
         assert "base_model_relation" not in card
-        # 相対深度であること（metric depth でないこと）は、利用者が最初に確かめる制約そのもの。
+        # Being relative depth (not metric depth) is the very constraint users check first.
         assert "**Relative depth has no unit and no origin**" in card
-        # 前処理は同梱（利用者が渡すのは生の RGB8）。数は manifest から降りてくる。
+        # Preprocessing is included (users pass raw RGB8). The numbers come from the manifest.
         assert f"resized to {_DEPTH_ANYTHING_WIDTH} × {_DEPTH_ANYTHING_HEIGHT} (bicubic" in card
-        # カードは**検証を通った**配布形から描かれる。
+        # The card is rendered from a distribution that **passed verification**.
         assert verify_dist(out_dir)
 
     def test_the_usage_snippet_enumerates_the_choices_from_the_manifest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """裁定 2026-08-12 の形: optional はコメント併記で、選べる値は manifest 由来の列挙。
+        """The form of the 2026-08-12 ruling: options appear as comments, and the selectable
+        values are enumerated from the manifest.
 
-        `estimate()` に実行時ノブは無いので、この pipeline の optional は model / quant だけ。
-        1 席しか無くても「available:」で綴るのは、席が増えたときに文面が自動で追従するため
-        （「the only one this repository ships」のような焼き込みは、増えた瞬間に嘘になる）。
+        `estimate()` has no run-time knobs, so this pipeline's options are only model / quant.
+        It is spelled "available:" even with a single slot so that the text follows automatically
+        when slots are added (hard-coded text like "the only one this repository ships" becomes a
+        lie the moment one is added).
         """
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert (
@@ -555,7 +601,7 @@ class TestDepthAnythingModelCard:
     def test_it_states_that_only_the_apache_licensed_size_is_redistributed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Base / Large は CC BY-NC 4.0。「無いこと」は読み手が最初に探す事実。"""
+        """Base / Large are CC BY-NC 4.0. "What is absent" is the fact readers look for first."""
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "Only the Small checkpoint is Apache-2.0." in card
         assert "CC BY-NC 4.0" in card
@@ -563,7 +609,8 @@ class TestDepthAnythingModelCard:
     def test_the_title_comes_from_the_upstream_checkpoint_name(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """サイズの綴りは帰属表 1 本から導く（2 表にすると別サイズとして売れてしまう）。"""
+        """The size is spelled from the one attribution table (with two tables a card could sell
+        one size as another)."""
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "# Depth Anything V2 Small — Karume" in card
 
@@ -576,13 +623,16 @@ class TestDepthAnythingModelCard:
 
 
 class TestDepthAnythingLegalText:
-    """配布リポ直下の Apache 2.0 原文と改変告知（ADR 0092 決定 7）。"""
+    """The Apache 2.0 text and the modification notice at the distribution repository's root
+    (ADR 0092 decision 7)."""
 
     def test_it_ships_the_license_text_byte_identical(self, depth_anything_assembled) -> None:
-        """§4(a) — 提供するのは**このライセンスのコピー**（要約でも整形でもない）。
+        """§4(a) — what is provided is **a copy of this licence** (neither a summary nor a
+        reformatted version).
 
-        原本は `_shared/licenses/apache_license_2_0.txt`。組み立ての経路のどこかで整形や
-        改行変換が入ると 1 バイト動くが、散文としては妥当なままなので他の門は素通りする。
+        The original is `_shared/licenses/apache_license_2_0.txt`. Reformatting or a newline
+        conversion anywhere on the assembly path would move a byte, but the prose would stay
+        plausible, so every other check would pass it.
         """
         out_dir, _ = depth_anything_assembled
         assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
@@ -590,7 +640,8 @@ class TestDepthAnythingLegalText:
     def test_it_ships_the_modification_notice(self, depth_anything_assembled) -> None:
         out_dir, _ = depth_anything_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
-        # 非ビット同一の書き換えと、その実測幅がカードと同じ数で出る。
+        # The non-bit-identical rewrite and its measured width appear with the same number as in
+        # the card.
         assert "pixel shuffle" in notice
         assert DEPTH_ANYTHING_CONVT_DIFF in notice
         assert "No quantization" in notice
@@ -598,7 +649,8 @@ class TestDepthAnythingLegalText:
 
 class TestDepthAnythingCli:
     def test_the_default_output_directory_is_the_generation_repository(self) -> None:
-        """リポは世代 1 つ（ADR 0092 決定 2）— サイズは綴りに出ない。"""
+        """The repository is per generation (ADR 0092 decision 2) — the size does not appear in
+        the name."""
         assert (
             default_out_dir(PIPELINE, [DEPTH_ANYTHING_DEFAULT_MODEL]).name
             == "karume-depth-anything-v2"
@@ -612,7 +664,8 @@ class TestDepthAnythingCli:
     def test_the_series_name_is_the_lowercased_upstream_repository_name(
         self, tmp_path: Path
     ) -> None:
-        """系列名 / 入力素材のディレクトリ名は上流リポ名そのもの（表を 2 つ持たない）。"""
+        """The series name and the input directory name are the upstream repository name itself
+        (no second table)."""
         for model, repo in DEPTH_ANYTHING_UPSTREAM.items():
             checkpoint = repo.split("/", 1)[1]
             sources = depth_anything_sources(tmp_path, model)
@@ -621,12 +674,14 @@ class TestDepthAnythingCli:
 
     @pytest.mark.parametrize("model", ["base", "large"])
     def test_it_refuses_a_size_it_may_not_redistribute(self, tmp_path: Path, model: str) -> None:
-        """上流で CC BY-NC 4.0 のサイズは帰属表に載っていない = 系列を探す前に落ちる。
+        """Sizes that are CC BY-NC 4.0 upstream are not in the attribution table = they fail
+        before the series is looked up.
 
-        台本は `--model-dir` でどのサイズでも焼けるので、「焼けたものは配れる」と読める形に
-        しないための唯一の門（`karume.dist` の Depth Anything 節の MUST）。
+        The script can bake any size via `--model-dir`, so this is the only check that keeps
+        things from reading as "whatever was baked can be shipped" (the MUST of the Depth
+        Anything section of `karume.dist`).
         """
-        with pytest.raises(DistError, match="知らない"):
+        with pytest.raises(DistError, match="unknown Depth Anything V2 model"):
             depth_anything_sources(tmp_path, model)
 
     def test_it_assembles_into_the_pipeline_default_directory(
@@ -636,8 +691,9 @@ class TestDepthAnythingCli:
         from depth_anything import distribution
 
         sources = _build_depth_anything_sources(tmp_path)
-        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`INPUTS_ROOT` は
-        # 系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
+        # `DIST_ROOT` is on the driver side, which decides the default output location
+        # (`dist.default_out_dir`); `INPUTS_ROOT` is on the recipe side, which reads the inputs
+        # outside the series — the bindings of the two modules are replaced separately.
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
 

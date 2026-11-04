@@ -1,82 +1,93 @@
-"""Wan2.1 の umT5（i8 系列）の層逐次の CPU 参照と、移植の門の golden
-（ADR 0119 決定 8 ①・段 10c）。
+"""The layer-by-layer CPU reference of Wan2.1 umT5 (the i8 series) and the goldens of the port
+check (ADR 0119 decision 8 ①, step 10c).
 
-CLI は `wan.umt5_export reference`（容器は書かない — 既に書かれた i8 系列の容器から
-重みを読む）。
+The CLI is `wan.umt5_export reference` (it writes no container — it reads the weights from an i8
+series container already written).
 
-## 参照の形（決定 8 ① — 同じ i8 の fake-quant 重みで回した CPU の層逐次の参照）
+## The reference (decision 8 ① — layer by layer on CPU with the same i8 fake-quant weights)
 
-移植の門の参照（`output.f64` / `output.f32`）は i8 の重みで、品質の記録の基準（受入れだけ —
-`output.unquantized.*`）は量子化しない重み（{@link CheckpointWeights}）で採る。計算はどちらも
-同じ書き下しで、重みの読み口だけが違う。
+The port check's reference (`output.f64` / `output.f32`) is taken with the i8 weights, and the
+baseline of the quality record (acceptance only — `output.unquantized.*`) with unquantized
+weights ({@link CheckpointWeights}). Both use the same spelled-out computation; only the way the
+weights are read differs.
 
-- **重み**: i8 系列の容器から 1 本ずつ読む（{@link ContainerWeights}）。i8 の重みは
-  packed × scale を f32 で掛けた値で、export の fake-quant（`umt5_export.quantize_rows`
-  の `rounded`）と同じ値 — GPU が回すのと同じ重み。F32 の表（相対位置の表・RMSNorm）は
-  そのまま。f64 の参照はこの f32 の値を f64 へ広げる（f64 で丸め直すと scale と丸めの値が
-  f32 の参照と食い違う — DiT の `export_dit.float64_references` と同じ規則）。
-- **計算**: 上流の forward を**書き下す**（{@link encode_layerwise}）: 語彙埋め込み →
-  層ごとに〈RMSNorm → 自己 attention（相対位置のバイアス・スケール無し・softmax）→
-  残差 → RMSNorm → ゲート付き GELU（tanh 近似 — 10c の準備の裁定 (a)）の FFN → 残差〉
-  → 最後の RMSNorm。dropout とマスクは持たない（有効長だけ — 決定 4）。
-- **f64 と f32 は同じ書き下しで dtype だけが違う**。上流は RMSNorm の分散と softmax を
-  f32 に落とす（`.to(torch.float32)` / `.float()`）ので、上流のモデルを `.double()` しても
-  f64 の参照にならない（ADR 0119 追記「10c の準備」）。書き下しはその寄せを持たない。
-  f32 では上流の寄せが恒等なので、上流の eager（活性を tanh に差し替え・fake-quant 済み）と
-  ビット一致する（pytest が小模型で縛る）。
-- **層逐次**: 全ケースの活性 `[1, L, 4096]` を持ったまま層を 1 枚ずつ進める。重みは
-  1 層ぶん（f32 約 0.77 GB + f64 約 1.55 GB）しか同時に持たない — fake-quant 後の f32 で
-  全体を 1 回 forward すると匿名メモリが約 21 GiB になる（ADR 0119 追記「10b の結果」）。
-  語彙埋め込みは使う行の入った block だけを容器から読む。
-- 層の中の演算は上流と同じ形（`[1, L, d]` のまま `functional.linear`・ケースごと）で
-  回す。ケースを行方向に連結すると GEMM の分割が変わり、f32 の参照が上流の eager と
-  ビットで割れうる。
+- **Weights**: read one tensor at a time from the i8 series container ({@link ContainerWeights}).
+  An i8 weight is packed × scale multiplied in f32, the same value as the export's fake-quant
+  (`rounded` of `umt5_export.quantize_rows`) — the same weights the GPU runs. F32 tables
+  (relative-position tables, RMSNorm) are taken as is. The f64 reference widens these f32 values
+  to f64 (re-rounding in f64 would make the scale and the rounded values disagree with the f32
+  reference — the same rule as the DiT's `export_dit.float64_references`).
+- **Computation**: the upstream forward is **spelled out** ({@link encode_layerwise}): token
+  embedding → per layer [RMSNorm → self-attention (relative-position bias, no scale, softmax) →
+  residual → RMSNorm → FFN with gated GELU (tanh approximation — ruling (a) of the 10c
+  preparation) → residual] → final RMSNorm. There is no dropout and no mask (valid length only —
+  decision 4).
+- **f64 and f32 use the same spelled-out code and differ only in dtype.** Upstream drops the
+  RMSNorm variance and the softmax to f32 (`.to(torch.float32)` / `.float()`), so calling
+  `.double()` on the upstream model does not give an f64 reference (ADR 0119 addendum "10c
+  preparation"). The spelled-out code has no such cast. In f32 the upstream cast is the identity,
+  so it is bit-exact with the upstream eager (activation replaced with tanh, fake-quant applied)
+  (pinned by pytest on a small model).
+- **Layer by layer**: the activations `[1, L, 4096]` of every case are kept while the layers
+  advance one at a time. Only one layer's weights are held at once (about 0.77 GB f32 + about
+  1.55 GB f64) — one whole forward in f32 after fake-quant takes about 21 GiB of anonymous memory
+  (ADR 0119 addendum "10b results"). For the token embedding, only the blocks holding the rows in
+  use are read from the container.
+- The operations inside a layer run in the same form as upstream (`functional.linear` on
+  `[1, L, d]` as is, per case). Concatenating cases along the rows would change the GEMM split,
+  and the f32 reference could then differ from the upstream eager in bits.
 
-## golden（`reference.<case>.safetensors` — 1 ケース 1 ファイル）
+## golden (`reference.<case>.safetensors` — one file per case)
 
-- `input_ids`（I32 `[L]`）: 上流の経路（`prompt_clean` → transformers 5.14.1 — 10a の
-  `umt5_tokenizer.build_case`）の id 列
-- `relative_position_buckets`（I32 `[L, L]`）: 上流の式
-  （`umt5_patch.relative_position_buckets`）
-- `output.f64`（F32 `[1, L, 4096]`）: f64 の参照を f32 へ丸めた値（TS の safetensors は
-  F64 を読まない — 丸めの影響はメタの `ratios`）
-- `output.f32`（F32 `[1, L, 4096]`）: f32 の参照（正規化比 r の分母）
-- `output.unquantized.f64` / `output.unquantized.f32`（F32 `[1, L, 4096]`・**受入れだけ**）: 量子化
-  しない重み（pin した checkpoint の F32 をそのまま — {@link CheckpointWeights}）で回した同じ
-  書き下し（f64 は格納で f32 へ丸める）。品質の記録の基準（ADR 0119 追記「10b の結果」の
-  「f32 参照を基準にする」— i8 の丸めと bf16 の影響を同じ基準で分けて測る）で、門には使わない
+- `input_ids` (I32 `[L]`): the id sequence of the upstream path (`prompt_clean` → transformers
+  5.14.1 — `umt5_tokenizer.build_case` of 10a)
+- `relative_position_buckets` (I32 `[L, L]`): the upstream formula
+  (`umt5_patch.relative_position_buckets`)
+- `output.f64` (F32 `[1, L, 4096]`): the f64 reference rounded to f32 (the TS safetensors reader
+  does not read F64 — the effect of the rounding is in the meta's `ratios`)
+- `output.f32` (F32 `[1, L, 4096]`): the f32 reference (the denominator of the normalized ratio r)
+- `output.unquantized.f64` / `output.unquantized.f32` (F32 `[1, L, 4096]`, **acceptance only**):
+  the same spelled-out computation run with unquantized weights (the F32 of the pinned checkpoint
+  as is — {@link CheckpointWeights}) (f64 is rounded to f32 for storage). The baseline of the
+  quality record ("use the f32 reference as the baseline" in ADR 0119 addendum "10b results" —
+  the effects of i8 rounding and of bf16 are measured separately against the same baseline); not
+  used by the check
 
-メタはキー 1 つ（{@link METADATA_KEY}）に JSON（キー整列・区切りの空白なし —
-safetensors はメタを HashMap で書くので、キーが複数だと同じ入力でバイトが割れる —
-`wan.text_embeds` と同じ理由）。中身はプロンプトの原文と前処理後・L・役割・出所・軸の記録
-（`axes` — umT5 の上流と、id 列を採った Wan のトークナイザの pin）・容器の part 0 の sha256
-（容器を書き直したら golden も書き直す — TS が突き合わせる）・重みと活性の規則・分母と丸めの
-影響（{@link reference_ratios}）・受入れは量子化なしの参照の同じ比。
+The meta is JSON under a single key ({@link METADATA_KEY}) (sorted keys, no whitespace after
+separators — safetensors writes the meta through a HashMap, so with several keys the same input
+can give different bytes — the same reason as `wan.text_embeds`). It holds the prompt's original
+text and the preprocessed text, L, the role, the provenance, the axis record (`axes` — the pins of
+the umT5 upstream and of the Wan tokenizer the id sequence came from), the sha256 of the
+container's part 0 (when the container is rewritten, the golden is rewritten too — TS checks it),
+the rules for the weights and the activation, the denominator and the rounding effect
+({@link reference_ratios}), and for acceptance cases the same ratios of the unquantized reference.
 
-TS の e2e（`packages/models/tests/e2e_wan_umt5_test.ts`）は、golden の原文を TS の
-トークナイザに通した id 列と TS のバケット表が golden の入力とビット一致することを
-見てから（TS と Python の両経路）、GPU の出力を正規化比
-r = (GPU の f64 に対する比) ÷ (CPU f32 の f64 に対する比) で判定する。
+The TS e2e (`packages/models/tests/e2e_wan_umt5_test.ts`) first checks that the id sequence from
+passing the golden's original text through the TS tokenizer, and the TS bucket table, are
+bit-identical to the golden's inputs (both the TS and the Python paths), then judges the GPU
+output by the normalized ratio
+r = (GPU's ratio against f64) ÷ (CPU f32's ratio against f64).
 
-## ケース（決定 8 ① — 帯の決定と受入れを分ける）
+## Cases (decision 8 ① — deciding the band and acceptance are kept apart)
 
-- **決定用（`band`）6 本**: 10a のパリティ fixture
-  （`packages/models/tests/fixtures/wan-text/parity.json`）の受理した乱択（`random-*` —
-  受理集合の文字の乱択・3〜42 トークン）から seed {@link BAND_SEED} で選ぶ。
-  - 単体 3 本: 長さの帯 {@link BAND_SINGLE_LENGTHS}（短・中・長）ごとに 1 本。
-  - 合成 3 本: 乱択に 512 付近が無いので、単体に選ばなかった乱択を同じ seed で並べ替え、
-    空白で連ねて長さの帯 {@link BAND_COMPOSITE_LENGTHS}（max_distance 128 を越える・
-    中ほど・上限 512 の手前）に入るまで先頭から足す（帯を越える 1 本は飛ばす）。連ねた
-    文字列も上流の経路で id 列を採り直す。
-- **受入れ（`accept`）4 本**: 固定 4 プロンプト（`wan.prompts.FIXED_PROMPTS` —
-  長さ 28 / 118 / 50 / 126）。bf16 の事前計算資産があるのはこの 4 本だけ（品質の記録の
-  3 点目 — 決定 8 ②）。
+- **Deciding cases (`band`), 6**: chosen with seed {@link BAND_SEED} from the accepted random
+  cases (`random-*` — random characters from the accepted set, 3 to 42 tokens) of the 10a parity
+  fixture (`packages/models/tests/fixtures/wan-text/parity.json`).
+  - 3 single cases: one per length band {@link BAND_SINGLE_LENGTHS} (short, medium, long).
+  - 3 composite cases: the random cases have nothing near 512, so the random cases not chosen as
+    single ones are shuffled with the same seed and joined with spaces from the front until the
+    length falls in a band {@link BAND_COMPOSITE_LENGTHS} (beyond max_distance 128, the middle,
+    just below the upper bound 512) (a case that would overshoot the band is skipped). The joined
+    text is also re-tokenized through the upstream path.
+- **Acceptance (`accept`), 4**: the four fixed prompts (`wan.prompts.FIXED_PROMPTS` — lengths
+  28 / 118 / 50 / 126). Only these four have precomputed bf16 assets (the third point of the
+  quality record — decision 8 ②).
 
-MUST: 受入れの結果を見て決定用のケースも選び方も変えない（帯の決定と受入れの独立 —
-ADR 0118 決定 8）。
+MUST: the acceptance results never change the deciding cases or how they are chosen (deciding the
+band and acceptance stay independent — ADR 0118 decision 8).
 
-MUST: transformers / diffusers は関数の中で import する（`wan` グループは既定の sync に
-入らない — `tests/test_optional_group_imports.py`）。
+MUST: transformers / diffusers are imported inside functions (the `wan` group is not in the
+default sync — `tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -101,57 +112,60 @@ from karume.verify import InitializerSupply, verify_container
 from wan import umt5_patch
 from wan.umt5_tokenizer import FIXED_PROMPT_LENGTHS, FIXTURE_DIR, MAX_LENGTH, PARITY_FIXTURE
 
-#: golden のファイル名（`reference.<case>.safetensors` — DiT の golden と同じ綴り）。
+#: golden file names (`reference.<case>.safetensors` — the same spelling as the DiT goldens).
 REFERENCE_PREFIX = "reference."
 CASE_SUFFIX = ".safetensors"
 
-#: golden のキー（入力はグラフ入力と同じ名前 — TS 側 `tests/helpers/umt5-golden.ts` と同じ綴り）。
+#: golden keys (the inputs use the graph input names — the same spelling as the TS side
+#: `tests/helpers/umt5-golden.ts`).
 INPUT_IDS_KEY, BUCKETS_KEY = umt5_patch.INPUT_NAMES
 OUTPUT_F64_KEY = "output.f64"
 OUTPUT_F32_KEY = "output.f32"
-#: 量子化なしの参照（受入れだけ — 品質の記録の基準）。
+#: The unquantized reference (acceptance only — the baseline of the quality record).
 OUTPUT_UNQUANTIZED_F64_KEY = "output.unquantized.f64"
 OUTPUT_UNQUANTIZED_F32_KEY = "output.unquantized.f32"
 
-#: メタのキー（1 つだけ — モジュール doc）と形式の版。
+#: The meta key (a single one — module doc) and the format version.
 METADATA_KEY = "karume.wan.umt5_reference"
-#: /2 = 受入れに量子化なしの参照を足した形（TS は受入れでこのキーを必須にする）。
+#: /2 = acceptance cases gain the unquantized reference (TS requires these keys for acceptance).
 REFERENCE_FORMAT = "karume-wan-umt5-reference/2"
 
-#: 容器のテンソルキー（容器の initializer 名 = ラッパ `Umt5EncoderTokens` のテンソルキー）。
+#: Container tensor keys (the container's initializer names = the tensor keys of the wrapper
+#: `Umt5EncoderTokens`).
 EMBED_KEY = "encoder.embed_tokens.weight"
 FINAL_NORM_KEY = "encoder.final_layer_norm.weight"
 
-#: 量子化の codec（i8 per-channel・行ごとの scale — 決定 5）。
+#: The quantization codec (i8 per-channel, one scale per row — decision 5).
 I8_CODEC = "int8-sym"
 
-#: 決定用のケースを選ぶ seed（`random.Random`）。
+#: Seed for choosing the deciding cases (`random.Random`).
 BAND_SEED = 20261003
 
-#: 決定用の単体の長さの帯（両端を含む）。パリティ fixture の受理した乱択は 3〜42 トークン。
+#: Length bands of the single deciding cases (both ends inclusive). The accepted random cases of
+#: the parity fixture are 3 to 42 tokens.
 BAND_SINGLE_LENGTHS: tuple[tuple[int, int], ...] = ((2, 8), (16, 24), (34, MAX_LENGTH))
 
-#: 決定用の合成の長さの帯（両端を含む）: max_distance 128（バケットの対数の区間の上限）を
-#: 越える・中ほど・上限 512 の手前。
+#: Length bands of the composite deciding cases (both ends inclusive): beyond max_distance 128
+#: (the end of the bucket's logarithmic range), the middle, and just below the upper bound 512.
 BAND_COMPOSITE_LENGTHS: tuple[tuple[int, int], ...] = ((160, 200), (300, 360), (480, MAX_LENGTH))
 
-#: パリティ fixture の乱択ケースの id の接頭辞。
+#: id prefix of the parity fixture's random cases.
 RANDOM_PREFIX = "random-"
 
 Role = Literal["band", "accept"]
 
 
 class Umt5ReferenceError(RuntimeError):
-    """容器・ケース・参照が想定（決定 5 / 8）から外れた。"""
+    """The container, a case or the reference differs from what is assumed (decisions 5 / 8)."""
 
 
 # ---------------------------------------------------------------------------
-# 重み（容器から 1 本ずつ）
+# Weights (one tensor at a time from the container)
 # ---------------------------------------------------------------------------
 
 
 class WeightSource(Protocol):
-    """参照の重みの読み口（値は f32 — i8 は packed × scale）。"""
+    """How the reference reads weights (values in f32 — i8 is packed × scale)."""
 
     def tensor(self, key: str) -> torch.Tensor: ...
 
@@ -159,30 +173,34 @@ class WeightSource(Protocol):
 
 
 def _f32_of(raw: bytes) -> torch.Tensor:
-    # bytearray で写す — 読み取り専用のバッファに frombuffer を張ると torch が警告を出す。
+    # Copy through a bytearray — frombuffer on a read-only buffer makes torch warn.
     return torch.frombuffer(bytearray(raw), dtype=torch.float32)
 
 
 class ContainerWeights:
-    """i8 系列の容器（`krm` の part 列）から重みを 1 本ずつ読む。
+    """Read weights one tensor at a time from an i8 series container (the parts of a `krm`).
 
-    block は取るたびに sha256 を宣言と突き合わせる（`ReadContainer.block`）。i8 は
-    packed × 行ごとの scale を f32 で掛けた値を返す — export の fake-quant と同じ値
-    （ビット一致は pytest が小模型の容器で縛る）。MUST: codec は `f32` と `int8-sym`
-    （軸 0・行ごとに scale 1 つ）だけを受ける — ほかは参照が黙って別の重みになる。
+    Each block's sha256 is checked against the declaration every time it is read
+    (`ReadContainer.block`). For i8 it returns packed × per-row scale multiplied in f32 — the same
+    value as the export's fake-quant (bit-exactness is pinned by pytest on a small model's
+    container). MUST: only the codecs `f32` and `int8-sym` (axis 0, one scale per row) are accepted
+    — anything else would silently turn the reference into different weights.
     """
 
     def __init__(self, path: Path) -> None:
         parts = container_parts(path)
         verified = verify_container(list(parts))
         if len(verified.graphs) != 1:
-            raise Umt5ReferenceError(f"{path}: グラフが {sorted(verified.graphs)}（1 本のはず）")
+            raise Umt5ReferenceError(
+                f"{path}: the graphs are {sorted(verified.graphs)} (there should be one)"
+            )
         (graph,) = verified.graphs
         self.graph = graph
         self.parts = len(parts)
         with parts[0].open("rb") as stream:
-            #: part 0（ヘッダ + 2 文書 — 全 block と part の sha256 を宣言する）の sha256。
-            #: 容器の中身を推移的に名指すので、golden と容器の取り違えを TS がこれで拾う。
+            #: sha256 of part 0 (the header + the 2 documents — declares the sha256 of every block
+            #: and part). It names the container's contents transitively, so TS catches a golden
+            #: paired with the wrong container through it.
             self.part0_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
         self._read = verified.read
         self._values = verified.read.graph.graphs[graph]["values"]
@@ -191,7 +209,7 @@ class ContainerWeights:
     def _supply(self, key: str) -> InitializerSupply:
         supply = self._supplies.get(key)
         if supply is None:
-            raise Umt5ReferenceError(f"容器に '{key}' の実体が無い")
+            raise Umt5ReferenceError(f"the container has no data for '{key}'")
         return supply
 
     def _shape(self, key: str) -> list[int]:
@@ -202,22 +220,25 @@ class ContainerWeights:
         return self._read.block(block.id)[: block.payload_bytes]
 
     def _scale(self, key: str, supply: InitializerSupply, rows: int, cols: int) -> torch.Tensor:
-        """行ごとの scale `[rows, 1]`（f32）。codec の宣言が行ごとの i8 であることも見る。"""
+        """The per-row scale `[rows, 1]` (f32). Also checks that the codec declaration is per-row
+        i8."""
         encoding = supply.encoding
         if encoding.codec != I8_CODEC or encoding.row_axis != 0 or encoding.group_size != cols:
             raise Umt5ReferenceError(
-                f"'{key}': codec {encoding.codec}・rowAxis {encoding.row_axis}・groupSize "
-                f"{encoding.group_size}（{I8_CODEC}・0・{cols} だけを読む）"
+                f"'{key}': codec {encoding.codec}, rowAxis {encoding.row_axis}, groupSize "
+                f"{encoding.group_size} (only {I8_CODEC}, 0, {cols} is read)"
             )
         if supply.scale is None:
-            raise Umt5ReferenceError(f"'{key}': i8 なのに scale が無い")
+            raise Umt5ReferenceError(f"'{key}': i8 but no scale")
         scale = _f32_of(self._read.block(supply.scale.id)[: supply.scale.payload_bytes])
         if scale.numel() != rows:
-            raise Umt5ReferenceError(f"'{key}': scale {scale.numel()} 個が行数 {rows} と違う")
+            raise Umt5ReferenceError(
+                f"'{key}': {scale.numel()} scales differ from the row count {rows}"
+            )
         return scale.reshape(rows, 1)
 
     def tensor(self, key: str) -> torch.Tensor:
-        """1 本を丸ごと f32 で（i8 は packed × scale）。"""
+        """One whole tensor in f32 (i8 is packed × scale)."""
         supply = self._supply(key)
         shape = self._shape(key)
         raw = b"".join(self._payload(supply, index) for index in range(len(supply.blocks)))
@@ -225,27 +246,30 @@ class ContainerWeights:
         if layout == "f32":
             return _f32_of(raw).reshape(shape)
         if layout != "i8" or len(shape) != 2:
-            raise Umt5ReferenceError(f"'{key}': 格納 {layout}・形 {shape} は読まない")
+            raise Umt5ReferenceError(f"'{key}': storage {layout} with shape {shape} is not read")
         rows, cols = shape
         packed = torch.frombuffer(bytearray(raw), dtype=torch.int8).reshape(rows, cols)
         return packed.to(torch.float32) * self._scale(key, supply, rows, cols)
 
     def rows(self, key: str, indices: torch.Tensor) -> torch.Tensor:
-        """i8 の表の行 `indices`（昇順・重複なし）だけを f32 で（語彙埋め込み — 要る block
-        だけを読む）。"""
+        """Only rows `indices` (ascending, no duplicates) of an i8 table, in f32 (the token
+        embedding — reads only the blocks needed)."""
         supply = self._supply(key)
         rows, cols = self._shape(key)
         wanted = indices.tolist()
         if wanted != sorted(set(wanted)) or not wanted or wanted[0] < 0 or wanted[-1] >= rows:
-            raise Umt5ReferenceError(f"'{key}': 行の添字は 0〜{rows - 1} の昇順・重複なしで渡す")
+            raise Umt5ReferenceError(
+                f"'{key}': pass row indices within 0 to {rows - 1}, in ascending order without"
+                " duplicates"
+            )
         if codec_entry(supply.encoding.codec).layout != "i8":
-            raise Umt5ReferenceError(f"'{key}': 行の読み出しは i8 の表だけ")
+            raise Umt5ReferenceError(f"'{key}': rows can only be read from an i8 table")
         scale = self._scale(key, supply, rows, cols)
         gathered = torch.empty((len(wanted), cols), dtype=torch.float32)
         covered = torch.zeros(len(wanted), dtype=torch.bool)
         for index, block in enumerate(supply.blocks):
             begin, end = block.rows
-            # (gathered の中の位置, block の中の行) — block の並びに依らず置く。
+            # (position in gathered, row in the block) — placed regardless of the block order.
             inside = [(at, row - begin) for at, row in enumerate(wanted) if begin <= row < end]
             if not inside:
                 continue
@@ -255,12 +279,14 @@ class ContainerWeights:
             gathered[positions] = packed.reshape(end - begin, cols)[local].to(torch.float32)
             covered[positions] = True
         if not bool(covered.all()):
-            raise Umt5ReferenceError(f"'{key}': block の行範囲が要る行を覆わない")
+            raise Umt5ReferenceError(
+                f"'{key}': the blocks' row ranges do not cover the rows needed"
+            )
         return gathered * scale[indices]
 
 
 class CheckpointReader(Protocol):
-    """上流の checkpoint の読み口（`umt5_export.Checkpoint` — F32 だけを返す）。"""
+    """How the upstream checkpoint is read (`umt5_export.Checkpoint` — returns F32 only)."""
 
     def read(self, key: str) -> torch.Tensor: ...
 
@@ -268,14 +294,15 @@ class CheckpointReader(Protocol):
 
 
 class CheckpointWeights:
-    """量子化しない重み（pin した checkpoint の F32 をそのまま）を 1 本ずつ読む（品質の記録の
-    基準）。
+    """Read unquantized weights (the F32 of the pinned checkpoint as is) one tensor at a time (the
+    baseline of the quality record).
 
-    {@link ContainerWeights} と同じ読み口で、書き下しは同じものを使う。`keys` は容器のテンソル
-    キー → checkpoint のキー（tied な語彙埋め込みは checkpoint に片方の名前でしか無い —
-    `umt5_export.checkpoint_weights` が組む）。checkpoint の safetensors は mmap で開くので、
-    全体を f32 で持たない（層逐次 — 決定 8 ①）。MUST: 対応の無いキーは fail loudly（黙って
-    容器の値に落とさない）。
+    The same interface as {@link ContainerWeights}, so the same spelled-out code is used. `keys`
+    maps container tensor keys → checkpoint keys (the tied token embedding is in the checkpoint
+    under one of its names only — `umt5_export.checkpoint_weights` builds the map). The
+    checkpoint's safetensors are opened with mmap, so the whole model is never held in f32 (layer
+    by layer — decision 8 ①). MUST: a key without a mapping fails loudly (it never silently falls
+    back to the container's value).
     """
 
     def __init__(self, checkpoint: CheckpointReader, keys: Mapping[str, str]) -> None:
@@ -285,17 +312,19 @@ class CheckpointWeights:
     def _key(self, key: str) -> str:
         mapped = self._keys.get(key)
         if mapped is None:
-            raise Umt5ReferenceError(f"'{key}' の checkpoint のキーが無い")
+            raise Umt5ReferenceError(f"no checkpoint key for '{key}'")
         return mapped
 
     def tensor(self, key: str) -> torch.Tensor:
         return self._checkpoint.read(self._key(key))
 
     def rows(self, key: str, indices: torch.Tensor) -> torch.Tensor:
-        """行 `indices`（昇順・重複なし）だけ — 連続する行の区間ごとに読む。"""
+        """Only rows `indices` (ascending, no duplicates) — read per run of consecutive rows."""
         wanted = indices.tolist()
         if wanted != sorted(set(wanted)) or not wanted or wanted[0] < 0:
-            raise Umt5ReferenceError(f"'{key}': 行の添字は 0 以上の昇順・重複なしで渡す")
+            raise Umt5ReferenceError(
+                f"'{key}': pass row indices ≥ 0 in ascending order without duplicates"
+            )
         mapped = self._key(key)
         runs: list[tuple[int, int]] = []
         for row in wanted:
@@ -306,18 +335,18 @@ class CheckpointWeights:
         chunks = [self._checkpoint.read_rows(mapped, start, stop) for start, stop in runs]
         gathered = torch.cat(chunks)
         if gathered.shape[0] != len(wanted):
-            raise Umt5ReferenceError(f"'{key}': 行 {wanted[-1]} が表の外")
+            raise Umt5ReferenceError(f"'{key}': row {wanted[-1]} is outside the table")
         return gathered
 
 
 # ---------------------------------------------------------------------------
-# forward の書き下し（f64 / f32 共通）
+# The spelled-out forward (shared by f64 / f32)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class EncoderShape:
-    """書き下しに要る構成（上流の `UMT5Config` から）。"""
+    """The configuration the spelled-out code needs (from the upstream `UMT5Config`)."""
 
     layers: int
     heads: int
@@ -336,7 +365,8 @@ class EncoderShape:
 
 
 def layer_keys(index: int) -> dict[str, str]:
-    """層 `index` の重みのテンソルキー（書き下しの中の名前 → 容器の名前）。"""
+    """Tensor keys of layer `index`'s weights (name in the spelled-out code → name in the
+    container)."""
     prefix = f"encoder.block.{index}.layer"
     attention = f"{prefix}.0.SelfAttention"
     dense = f"{prefix}.1.DenseReluDense"
@@ -355,7 +385,8 @@ def layer_keys(index: int) -> dict[str, str]:
 
 
 def rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """`UMT5LayerNorm` の書き下し（上流の分散の f32 への寄せは持たない — f32 では恒等）。"""
+    """`UMT5LayerNorm` spelled out (without upstream's cast of the variance to f32 — the identity
+    in f32)."""
     variance = hidden.pow(2).mean(-1, keepdim=True)
     return weight * (hidden * torch.rsqrt(variance + eps))
 
@@ -366,8 +397,8 @@ def self_attention(
     buckets: torch.Tensor,
     shape: EncoderShape,
 ) -> torch.Tensor:
-    """`UMT5LayerSelfAttention` の書き下し（スケール無し・バイアスは表の gather・softmax は
-    活性の dtype のまま）。"""
+    """`UMT5LayerSelfAttention` spelled out (no scale, the bias is a gather from the table, softmax
+    in the activation's dtype)."""
     normed = rms_norm(hidden, weights["attention_norm"], shape.eps)
     batch, length = normed.shape[:2]
 
@@ -386,7 +417,7 @@ def self_attention(
 def feed_forward(
     hidden: torch.Tensor, weights: Mapping[str, torch.Tensor], shape: EncoderShape
 ) -> torch.Tensor:
-    """`UMT5LayerFF`（ゲート付き・活性は tanh 近似の GELU — 決定の形）の書き下し。"""
+    """`UMT5LayerFF` spelled out (gated, with the tanh-approximated GELU — the decided form)."""
     normed = rms_norm(hidden, weights["ffn_norm"], shape.eps)
     gate = functional.gelu(functional.linear(normed, weights["wi_0"]), approximate="tanh")
     gated = gate * functional.linear(normed, weights["wi_1"])
@@ -401,18 +432,20 @@ def encode_layerwise(
     *,
     on_layer: Callable[[int, float], None] | None = None,
 ) -> dict[torch.dtype, list[torch.Tensor]]:
-    """全ケースの出力 `[1, L, d]` を dtype ごとに層逐次で作る（重みは 1 層ずつ読んで捨てる）。
+    """Build every case's output `[1, L, d]` per dtype, layer by layer (the weights are read one
+    layer at a time and dropped).
 
-    `inputs` はケースごとの token id `[1, L]` とバケット表 `[L, L]`（どちらも int64）。
+    `inputs` holds each case's token ids `[1, L]` and bucket table `[L, L]` (both int64).
     """
     for ids, buckets in inputs:
         length = ids.shape[1]
         if ids.shape[0] != 1 or tuple(buckets.shape) != (length, length):
-            raise Umt5ReferenceError(f"入力の形 {tuple(ids.shape)} / {tuple(buckets.shape)}")
+            raise Umt5ReferenceError(f"input shapes {tuple(ids.shape)} / {tuple(buckets.shape)}")
     with torch.no_grad():
         vocabulary = torch.unique(torch.cat([ids.flatten() for ids, _ in inputs]))
         table = source.rows(EMBED_KEY, vocabulary)
-        # 引くのは dtype へ広げた後 — f64 の経路に f32 の演算を 1 つも置かない（pytest の監視）。
+        # The lookup happens after widening to dtype — not a single f32 operation on the f64 path
+        # (watched by pytest).
         hidden = {
             dtype: [table.to(dtype)[torch.searchsorted(vocabulary, ids)] for ids, _ in inputs]
             for dtype in dtypes
@@ -438,45 +471,49 @@ def encode_layerwise(
 
 
 # ---------------------------------------------------------------------------
-# ケース
+# Cases
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ReferenceCase:
-    """golden 1 本のケース（id 列は上流の経路で採ったもの）。"""
+    """The case of one golden (the id sequence taken through the upstream path)."""
 
     name: str
     role: Role
-    #: 前処理の前の原文（TS は golden のこの値をトークナイザに通す）。
+    #: The original text before preprocessing (TS passes this value of the golden through the
+    #: tokenizer).
     prompt: str
-    #: 上流の `prompt_clean` の出力。
+    #: The output of upstream `prompt_clean`.
     cleaned: str
     ids: tuple[int, ...]
-    #: 出所（パリティ fixture のケース id・固定プロンプトの名前）。
+    #: Provenance (the parity fixture's case ids, the fixed prompt's name).
     source: Mapping[str, Any] = field(default_factory=dict)
 
 
-#: 原文 → 上流の経路の決着（受理なら `cleaned` と `ids`・拒否なら `reject` —
-#: 10a の `umt5_tokenizer.build_case` の形）。
+#: Original text → the outcome of the upstream path (`cleaned` and `ids` when accepted, `reject`
+#: when rejected — the form of `umt5_tokenizer.build_case` of 10a).
 Encode = Callable[[str], Mapping[str, Any]]
 
 
 def upstream_encoder(model: str) -> Encode:
-    """10a の fixture と同じ経路で原文を id 列にする口（上流の `prompt_clean` と鏡像の一致 →
-    transformers 5.14.1 と `tokenizer.json` の 2 経路の一致）。"""
+    """Turns original text into an id sequence through the same path as the 10a fixture (upstream
+    `prompt_clean` agreeing with its mirror → transformers 5.14.1 agreeing with `tokenizer.json`
+    on both paths)."""
     from wan import prompt_clean as pc
     from wan import umt5_tokenizer as ut
 
     truth = ut.load_truth(ut.tokenizer_snapshot(model))
     compiled = pc.CompiledTables(pc.build_tables())
     clean_truth = pc.upstream_prompt_clean()
-    return lambda text: ut.build_case(truth, compiled, clean_truth, "reference", text, "参照")
+    return lambda text: ut.build_case(truth, compiled, clean_truth, "reference", text, "reference")
 
 
 def _accepted(outcome: Mapping[str, Any], where: str) -> tuple[str, tuple[int, ...]]:
     if "ids" not in outcome:
-        raise Umt5ReferenceError(f"{where}: 上流の経路が拒んだ（{outcome.get('reject')}）")
+        raise Umt5ReferenceError(
+            f"{where}: the upstream path rejected it ({outcome.get('reject')})"
+        )
     return str(outcome["cleaned"]), tuple(int(token) for token in outcome["ids"])
 
 
@@ -487,8 +524,9 @@ def _join(members: Sequence[Mapping[str, Any]]) -> str:
 def band_cases(
     parity_cases: Sequence[Mapping[str, Any]], encode: Encode, seed: int = BAND_SEED
 ) -> list[ReferenceCase]:
-    """決定用 6 本（選び方はモジュール doc）。単体の id 列がパリティ fixture の値と一致する
-    ことも見る（fixture と上流の経路の取り違えを拾う）。"""
+    """The 6 deciding cases (how they are chosen is in the module doc). Also checks that the id
+    sequences of the single cases match the parity fixture (catches a mix-up between the fixture
+    and the upstream path)."""
     pool = [case for case in parity_cases if case["id"].startswith(RANDOM_PREFIX) and "ids" in case]
     rng = random.Random(seed)
     singles: list[Mapping[str, Any]] = []
@@ -497,7 +535,7 @@ def band_cases(
             case for case in pool if low <= len(case["ids"]) <= high and case not in singles
         ]
         if not candidates:
-            raise Umt5ReferenceError(f"長さ {low}〜{high} の受理した乱択が無い")
+            raise Umt5ReferenceError(f"no accepted random case of length {low} to {high}")
         singles.append(rng.choice(candidates))
     rest = [case for case in pool if case not in singles]
     rng.shuffle(rest)
@@ -509,7 +547,9 @@ def band_cases(
         while len(outcome["ids"]) < low:
             candidate = next(feed, None)
             if candidate is None:
-                raise Umt5ReferenceError(f"乱択が尽きて長さ {low}〜{high} に届かない")
+                raise Umt5ReferenceError(
+                    f"the random cases ran out before reaching length {low} to {high}"
+                )
             trial = encode(_join([*members, candidate]))
             if "ids" in trial and len(trial["ids"]) <= high:
                 members.append(candidate)
@@ -519,14 +559,16 @@ def band_cases(
     for single in singles:
         cleaned, ids = _accepted(encode(single["text"]), single["id"])
         if list(ids) != list(single["ids"]):
-            raise Umt5ReferenceError(f"{single['id']}: 上流の id 列がパリティ fixture と違う")
+            raise Umt5ReferenceError(
+                f"{single['id']}: the upstream id sequence differs from the parity fixture"
+            )
         cases.append(_band_case(single["text"], cleaned, ids, [single["id"]], seed))
     for members, outcome in composites:
-        cleaned, ids = _accepted(outcome, "合成")
+        cleaned, ids = _accepted(outcome, "composite")
         cases.append(_band_case(_join(members), cleaned, ids, [m["id"] for m in members], seed))
     names = [case.name for case in cases]
     if len(set(names)) != len(names):
-        raise Umt5ReferenceError(f"決定用の名前（長さ）が重なった: {names}")
+        raise Umt5ReferenceError(f"the names (lengths) of deciding cases collide: {names}")
     return cases
 
 
@@ -544,14 +586,15 @@ def _band_case(
 
 
 def accept_cases(encode: Encode) -> list[ReferenceCase]:
-    """受入れ 4 本（固定プロンプト — 長さが 10a の値と一致することも見る）。"""
+    """The 4 acceptance cases (the fixed prompts — also checks that the lengths match the 10a
+    values)."""
     from wan.prompts import FIXED_PROMPTS
 
     cases = []
     for prompt in FIXED_PROMPTS:
         cleaned, ids = _accepted(encode(prompt.text), prompt.name)
         if len(ids) != FIXED_PROMPT_LENGTHS[prompt.name]:
-            raise Umt5ReferenceError(f"{prompt.name}: 長さ {len(ids)} が 10a の値と違う")
+            raise Umt5ReferenceError(f"{prompt.name}: length {len(ids)} differs from the 10a value")
         cases.append(
             ReferenceCase(
                 name=f"accept-{prompt.name}",
@@ -568,7 +611,7 @@ def accept_cases(encode: Encode) -> list[ReferenceCase]:
 def reference_cases(
     encode: Encode, parity: Path = FIXTURE_DIR / PARITY_FIXTURE
 ) -> list[ReferenceCase]:
-    """決定用 6 本 + 受入れ 4 本。"""
+    """6 deciding cases + 4 acceptance cases."""
     fixture = json.loads(parity.read_text(encoding="utf-8"))
     return [*band_cases(fixture["cases"], encode), *accept_cases(encode)]
 
@@ -579,12 +622,15 @@ def reference_cases(
 
 
 def reference_ratios(f64: torch.Tensor, f32: torch.Tensor) -> dict[str, float]:
-    """正規化の分母と、f64 を f32 へ丸めて格納した影響（比はどれも
-    `umt5_patch.max_ratio` = 最大絶対差 ÷ 参照の最大絶対値 — TS の `ratioOf` と同じ形）。
+    """The normalization denominator and the effect of storing f64 rounded to f32 (every ratio is
+    `umt5_patch.max_ratio` = max absolute difference ÷ max absolute value of the reference — the
+    same form as TS `ratioOf`).
 
-    - `f32VsF64`: CPU f32 の参照の f64 の参照に対する比（真の分母）
-    - `f32VsStoredF64`: 同じ比を格納した値（f32 へ丸めた f64）で採ったもの（TS が割る分母）
-    - `storedF64Rounding`: 格納の丸めそのものの比（≤ 2⁻²⁴ ≈ 6e-8）
+    - `f32VsF64`: the ratio of the CPU f32 reference against the f64 reference (the true
+      denominator)
+    - `f32VsStoredF64`: the same ratio taken against the stored value (f64 rounded to f32) (the
+      denominator TS divides by)
+    - `storedF64Rounding`: the ratio of the storage rounding itself (≤ 2⁻²⁴ ≈ 6e-8)
     """
     stored = f64.to(torch.float32)
     return {
@@ -595,8 +641,8 @@ def reference_ratios(f64: torch.Tensor, f32: torch.Tensor) -> dict[str, float]:
 
 
 def row_quality(actual: torch.Tensor, base: torch.Tensor) -> dict[str, float]:
-    """品質の記録の 3 指標（決定 8 ② — 行ごとのコサイン類似度の最小・相対フロベニウス・
-    最大絶対差）。"""
+    """The 3 metrics of the quality record (decision 8 ② — minimum per-row cosine similarity,
+    relative Frobenius norm, max absolute difference)."""
     left = actual.double().reshape(-1, actual.shape[-1])
     right = base.double().reshape(-1, base.shape[-1])
     cosine = functional.cosine_similarity(left, right, dim=-1)
@@ -608,10 +654,11 @@ def row_quality(actual: torch.Tensor, base: torch.Tensor) -> dict[str, float]:
 
 
 def _check_unquantized(case: ReferenceCase, unquantized: object | None) -> None:
-    """量子化なしの参照は受入れにだけ在る（決定用に混ぜない・受入れで欠かさない）。"""
+    """The unquantized reference exists for acceptance cases only (never mixed into deciding
+    cases, never missing from acceptance cases)."""
     if (case.role == "accept") != (unquantized is not None):
         raise Umt5ReferenceError(
-            f"{case.name}: 量子化なしの参照は受入れだけが持つ（役割 {case.role}）"
+            f"{case.name}: only acceptance cases have the unquantized reference (role {case.role})"
         )
 
 
@@ -622,15 +669,17 @@ def golden_tensors(
     f32: torch.Tensor,
     unquantized: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """1 ケースの golden のテンソル（境界の i64 → i32 は `normalize_boundary_tensor` で）。
+    """The golden tensors of one case (the boundary i64 → i32 goes through
+    `normalize_boundary_tensor`).
 
-    `unquantized` は量子化なしの参照の (f64, f32)（受入れだけ — {@link _check_unquantized}）。
+    `unquantized` is the (f64, f32) of the unquantized reference (acceptance only —
+    {@link _check_unquantized}).
     """
     _check_unquantized(case, unquantized)
     ids = torch.tensor(case.ids, dtype=torch.long)
     tensors = {
-        INPUT_IDS_KEY: normalize_boundary_tensor(ids, f"{case.name} の {INPUT_IDS_KEY}"),
-        BUCKETS_KEY: normalize_boundary_tensor(buckets, f"{case.name} の {BUCKETS_KEY}"),
+        INPUT_IDS_KEY: normalize_boundary_tensor(ids, f"{case.name}: {INPUT_IDS_KEY}"),
+        BUCKETS_KEY: normalize_boundary_tensor(buckets, f"{case.name}: {BUCKETS_KEY}"),
         OUTPUT_F64_KEY: f64.to(torch.float32).contiguous(),
         OUTPUT_F32_KEY: f32.to(torch.float32).contiguous(),
     }
@@ -650,8 +699,9 @@ def golden_metadata(
     *,
     axes: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """1 ケースの golden のメタ。`axes` はどの上流の値を使ったか（umT5 の上流と、ケースの id 列を
-    採った Wan の text 側の snapshot — `wan.umt5_export.reference_axes`・ADR 0122 決定 3）。"""
+    """The golden meta of one case. `axes` records which upstream values were used (the umT5
+    upstream and the Wan text-side snapshot the case's id sequence came from —
+    `wan.umt5_export.reference_axes`, ADR 0122 decision 3)."""
     _check_unquantized(case, unquantized_ratios)
     unquantized = (
         {}
@@ -703,7 +753,7 @@ def _versions() -> dict[str, str]:
     return {"torch": torch.__version__, "transformers": transformers.__version__}
 
 
-#: 段を測る口（`umt5_export.MemoryMonitor.stage`）。
+#: The hook that measures a stage (`umt5_export.MemoryMonitor.stage`).
 Stage = Callable[[str], AbstractContextManager[Any]]
 
 
@@ -718,17 +768,19 @@ def write_references(
     axes: Mapping[str, Any],
     embeddings: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, Any]:
-    """層逐次の f64 / f32 の参照を採り、golden を `out_dir` に書く（容器は書かない）。
+    """Take the layer-by-layer f64 / f32 references and write the goldens to `out_dir` (no
+    container is written).
 
-    `axes` は golden のメタに残す軸の記録（{@link golden_metadata}）。
+    `axes` is the axis record kept in the golden meta ({@link golden_metadata}).
 
-    i8 の参照（容器の重み）は全ケースで、量子化なしの参照（`unquantized` — {@link
-    CheckpointWeights}）は受入れだけで採る。i8 の回は全ケースを 1 回の層逐次で回す（受入れを
-    足す前と同じ呼び方 — 既存の値をバイトで変えない）。
+    The i8 reference (the container's weights) is taken for every case, the unquantized reference
+    (`unquantized` — {@link CheckpointWeights}) for acceptance cases only. The i8 run takes every
+    case through one layer-by-layer pass (the same call as before acceptance was added — existing
+    values do not change by a byte).
 
-    `embeddings` は bf16 の事前計算資産（固定プロンプトの名前 → `[L, 4096]`）。渡すと
-    受入れのケースの要約に量子化なしの f32 の参照との差を足す（記録だけ — 品質の記録の正本は
-    TS の e2e）。
+    `embeddings` are the precomputed bf16 assets (fixed prompt name → `[L, 4096]`). When given, the
+    summaries of the acceptance cases gain the difference from the unquantized f32 reference
+    (record only — the source of truth for the quality record is the TS e2e).
     """
     shape = EncoderShape.of(config)
     attention = umt5_patch.bucket_attention(config)
@@ -789,13 +841,16 @@ def write_references(
             }
             if pair is not None:
                 row["unquantizedRatios"] = plain_ratios
-                # i8 の丸めの影響（CPU — GPU の誤差を含まない）。
+                # The effect of the i8 rounding (CPU — no GPU error included).
                 row["i8F32VsUnquantizedF32"] = row_quality(f32[0], pair[1][0])
             fixed = case.source.get("fixedPrompt")
             if embeddings is not None and fixed is not None:
                 if pair is None:
-                    raise Umt5ReferenceError(f"{case.name}: 固定プロンプトなのに受入れでない")
-                # bf16 の影響（資産の経路）と、i8 の f32 の参照との差（10c の記録の続き）。
+                    raise Umt5ReferenceError(
+                        f"{case.name}: a fixed prompt that is not an acceptance case"
+                    )
+                # The effect of bf16 (the asset path) and the difference from the i8 f32
+                # reference (continuing the 10c record).
                 row["bf16AssetVsUnquantizedF32"] = row_quality(embeddings[fixed], pair[1][0])
                 row["bf16AssetVsF32"] = row_quality(embeddings[fixed], f32[0])
             rows.append(row)

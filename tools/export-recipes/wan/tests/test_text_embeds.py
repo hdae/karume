@@ -1,4 +1,5 @@
-"""`wan/text_embeds.py` の約束事 — 固定プロンプト・正規化・資産の形式と再現性。
+"""The contract of `wan/text_embeds.py` — fixed prompts, normalization, and the asset format and
+its reproducibility.
 
 No test runs umT5 (bf16, about 11 GiB, 2.5 minutes a prompt). The generated asset is checked
 (shapes, valid lengths, normalized strings) as the Wan2.1 distribution ships it — read from the
@@ -26,7 +27,8 @@ RECIPES_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _fake_asset(rows: dict[str, int]) -> tuple[dict[str, torch.Tensor], dict]:
-    """固定プロンプトの表どおりの名前で、行数だけ与えた乱数の埋め込みとメタ。"""
+    """Random embeddings with only the row counts given, named after the fixed-prompt table, plus
+    the metadata."""
     generator = torch.Generator().manual_seed(7)
     embeds = {
         name: torch.randn(length, TEXT_DIM, generator=generator) for name, length in rows.items()
@@ -54,7 +56,7 @@ class TestFixedPrompts:
         assert len(set(names)) == len(names)
 
     def test_every_source_url_pins_a_commit(self):
-        """ブランチ名の URL は先頭が動くと別の文面を指しうる。"""
+        """A URL with a branch name can point at different text once the branch head moves."""
         for prompt in text_embeds.FIXED_PROMPTS:
             assert re.search(r"/blob/[0-9a-f]{40}/", prompt.url), prompt.url
 
@@ -63,7 +65,8 @@ class TestFixedPrompts:
             text_embeds.prompt_by_name("no-such-prompt")
 
     def test_the_pipeline_example_is_the_one_in_the_pinned_diffusers(self):
-        """`cat-dog-baking` は pin した diffusers の `WanPipeline.__call__` の例文そのもの。"""
+        """`cat-dog-baking` is exactly the example sentence of `WanPipeline.__call__` in the pinned
+        diffusers."""
         pytest.importorskip("diffusers")
         from diffusers.pipelines.wan.pipeline_wan import EXAMPLE_DOC_STRING
 
@@ -87,7 +90,8 @@ class TestNormalize:
         assert "  " not in normalized
 
     def test_ftfy_folds_the_fullwidth_commas_of_the_negative(self):
-        """ftfy の有無で変わるのはこの形 — 決定 4 が ftfy を固定する理由そのもの。"""
+        """This is the shape that changes with or without ftfy — the very reason decision 4 pins
+        ftfy."""
         text = text_embeds.prompt_by_name("negative").text
 
         normalized = text_embeds.normalize(text)
@@ -124,7 +128,8 @@ class TestAssetFormat:
             assert torch.equal(tensors[name], tensor)
 
     def test_two_processes_write_the_same_bytes(self, tmp_path: Path):
-        """メタを複数キーにすると、プロセスごとに safetensors のヘッダのキー順が変わって割れる。"""
+        """With several metadata keys, the key order of the safetensors header changes from process
+        to process and the bytes split."""
         script = (
             "import sys, torch\n"
             "from pathlib import Path\n"
@@ -194,7 +199,7 @@ class TestGeneratedAsset:
             assert tensor.shape == (entry["tokens"], TEXT_DIM)
             assert 0 < entry["tokens"] < MAX_SEQUENCE_LENGTH
             assert bool(tensor.isfinite().all())
-            # 有効長の最後の行（EOS）もゼロでない — 切り詰めの取り違えを掴む。
+            # The last row of the valid length (EOS) is non-zero too — catches a truncation mix-up.
             assert torch.count_nonzero(tensor[-1]) > 0
             assert entry["prompt"] == prompt.text
             assert entry["role"] == prompt.role
@@ -208,7 +213,8 @@ class TestGeneratedAsset:
         assert meta["versions"]["diffusers"] == "0.39.0"
 
     def test_bf16_outputs_survive_the_f32_storage_exactly(self, generated_asset):
-        """umT5 の出力は bf16 — f32 へ広げた値は下位 16 ビットが全部ゼロ（丸めを足していない）。"""
+        """The umT5 output is bf16 — widened to f32, the low 16 bits are all zero (no rounding was
+        added)."""
         tensors, _ = generated_asset
 
         for tensor in tensors.values():
@@ -231,7 +237,7 @@ class TestGeneratedAsset:
         try:
             snapshot = text_snapshot()
         except WanSourceError as error:
-            pytest.skip(f"umT5 のトークナイザが手元に無い: {error}")
+            pytest.skip(f"the umT5 tokenizer is not available locally: {error}")
         tokenizer = AutoTokenizer.from_pretrained(snapshot, subfolder="tokenizer")
         _, meta = generated_asset
 

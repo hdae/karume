@@ -1,18 +1,21 @@
-"""packed PLE の合成 fixture を作る（実モデルの値は複製しない）。
+"""Builds the synthetic packed PLE fixture (no values of a real model are copied).
 
     cd tools/export-recipes && uv run python -m gemma4.tests.ple_fixture
 
-期待値は符号付き整数と Torch の二段 f32 乗算から作る。packed reader と同じ
-ビット展開式で期待値を作らず、全符号値・層別 scale・行境界を独立に検査する。
+The expected values come from signed integers and Torch's two-step f32 multiplication. They are
+not built with the same bit-unpacking formula as the packed reader; every signed value, the
+per-layer scales and the row boundaries are checked independently.
 
-MUST: 資産は**recipe の本番経路と同じ関数**で焼く（{@link karume.ple.ple_assets} が索引と
-block の切り方を持ち、{@link karume.pipeline.publish_model} が容器を据える）。fixture 専用の
-書き出しを別に綴ると、読み手側のテストは「fixture の書き方」を検査するだけになり、実際に
-配布される容器の形とずれたまま緑になる。
+MUST: the assets are baked with **the same functions as the recipe's production path**
+({@link karume.ple.ple_assets} owns the index and how blocks are cut, and
+{@link karume.pipeline.publish_model} places the container). A separate fixture-only writer would
+make the reader-side tests check only "how the fixture was written", and they would stay green
+while drifting from the shape of the containers actually distributed.
 
-MUST: 2 度回してバイト同一であること（生成器タグも時刻も焼かない — `_PROVENANCE` は
-`karume.goldens.GOLDEN_PROVENANCE` と同じ理由で `license` だけ）。git 追跡下の fixture なので、
-回すたびに差分が出る形にすると「資産が変わった」の意味が消える。
+MUST: two runs are byte-identical (no generator tag and no timestamp are baked in — `_PROVENANCE`
+is `license` only, for the same reason as `karume.goldens.GOLDEN_PROVENANCE`). The fixture is
+tracked by git, so a form that produces a diff on every run would erase the meaning of "the asset
+changed".
 """
 
 from __future__ import annotations
@@ -29,40 +32,46 @@ from karume.container import Provenance
 from karume.pipeline import export_module, publish_model
 from karume.ple import ple_assets
 
-#: fixture の置き場（読み手は `packages/models/tests/gemma4_ple_packed_test.ts`）。
+#: Location of the fixture (the reader is `packages/models/tests/gemma4_ple_packed_test.ts`).
 FIXTURE_ROOT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma4-ple-packed"
 
-#: 容器の代表 path（TS 側 `helpers/ple-series.ts` の `SERIES_MODEL_FILE` と同じ綴り）。
+#: Representative path of the container (the same spelling as `SERIES_MODEL_FILE` in
+#: `helpers/ple-series.ts` on the TS side).
 MODEL_FILE = "model.krm"
 
-#: 容器の中のグラフ名（= 配布 manifest の weights キー — container-v1 §2.1）。
+#: Graph name inside the container (= the weights key of the distribution manifest —
+#: container-v1 §2.1).
 GRAPH_NAME = "model"
 
-#: 出所。`writer` は**書かない** — 生成器タグを焼くと、パッケージ版を上げただけで fixture の
-#: バイト列が動き、「資産が変わった」と読める再生成の前提が壊れる（goldens と同じ扱い）。
+#: Provenance. `writer` is **not written** — baking a generator tag would move the fixture's bytes
+#: just by bumping the package version, breaking the premise that a regeneration reads as "the
+#: asset changed" (the same treatment as goldens).
 _PROVENANCE = Provenance(license="mit")
 
-#: 合成の寸法（token / 層 / 次元）。小さいまま**行境界と block 境界の両方**を踏ませる。
+#: Synthetic dimensions (tokens / layers / dim). Small, yet made to cross **both row and block
+#: boundaries**.
 TOKENS, LAYERS, DIM = 9, 3, 32
 
-#: 全層に掛かる後段の係数（索引 `embedScale`）。
+#: Downstream factor applied to every layer (the index's `embedScale`).
 EMBED_SCALE = 3.5
 
-#: PLE の block を切る上限（**PLE の資産だけに掛ける** — 容器全体の block 上限は既定のまま。
-#: 索引の JSON はここより大きいので、全体へ掛けると `_plan_asset_parts` が落ちる）。
+#: Limit for cutting the PLE blocks (**applied to the PLE assets only** — the block limit of the
+#: container as a whole stays at its default; the index JSON is larger than this, so applying it to
+#: the whole container would make `_plan_asset_parts` fail).
 #:
-#: **values と scales で切り目がずれる**値を選ぶ（144 = values i4 で 3 行・i2 で 6 行・
-#: scales で 12 行 = 1 block）。両表が同じ境界で切れる fixture では、表ごとに別の block を
-#: 引く読み手の誤り（scales を values の block 番号で引く類）が素通りする。
+#: A value is chosen **at which values and scales are cut at different points** (144 = 3 rows of
+#: values in i4, 6 rows in i2, and 12 rows of scales = 1 block). In a fixture where both tables are
+#: cut at the same boundaries, a reader error that looks up a different block per table (looking up
+#: scales by the values' block number, and the like) would pass unnoticed.
 BLOCK_BYTES = 144
 
 
 class PleFixtureGraph(nn.Module):
-    """資産を載せるための最小グラフ。
+    """Minimal graph that carries the assets.
 
-    この fixture の門が読むのは PLE の資産だけだが、容器は**グラフを持つ模型容器**
-    （`krm` の kind = model）なので、重みが 1 本ある実際の形で焼く。値は決定的
-    （`arange`）— 乱数を引くと 2 度回したときにバイトが動く。
+    This fixture's gate reads only the PLE assets, but the container is **a model container with a
+    graph** (`krm` kind = model), so it is baked in the real form with one weight. The values are
+    deterministic (`arange`) — drawing random numbers would move the bytes between two runs.
     """
 
     def __init__(self, dim: int) -> None:
@@ -74,7 +83,7 @@ class PleFixtureGraph(nn.Module):
 
 
 def _packed_values(bits: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """符号付きの素の値 `[tokens, layers, dim]` と、詰めた `[tokens, layers, dim/factor]`。"""
+    """Signed raw values `[tokens, layers, dim]` and packed `[tokens, layers, dim/factor]`."""
     factor = 8 // bits
     values = (
         torch.arange(TOKENS * LAYERS * DIM, dtype=torch.int32) * 7
@@ -88,21 +97,24 @@ def _packed_values(bits: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _reader(payload: bytes, stride: int) -> Callable[[int, int], bytes]:
-    """連結した行優先 payload の区間読み（{@link ple_assets} の受け口）。
+    """Range read of the concatenated row-major payload (the input of {@link ple_assets}).
 
-    MUST: 同じ区間からは同じバイト列を返す（書き手は sha256 を採るときと書くときの 2 度引く）。
+    MUST: return the same bytes for the same range (the writer reads twice: once to take the sha256
+    and once to write).
     """
 
     def read(begin: int, end: int) -> bytes:
         if begin % stride or end % stride:
-            raise AssertionError(f"PLE の区間 [{begin}, {end}) が 1 行 {stride} バイトの倍数でない")
+            raise AssertionError(
+                f"PLE range [{begin}, {end}) is not a multiple of the {stride}-byte row"
+            )
         return payload[begin:end]
 
     return read
 
 
 def write_fixture(out: Path) -> None:
-    """I2 / I4 の packed PLE を**容器の資産**として書き、CPU 参照を隣に置く。"""
+    """Write the I2 / I4 packed PLE as **assets of a container** with a CPU reference beside it."""
     for bits in (2, 4):
         storage = f"i{bits}"
         destination = out / storage

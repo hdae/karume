@@ -1,63 +1,68 @@
-"""実重み MiniCPM5-1B（causal LM）を **1-shot 形**で IR v2 の容器 + golden io へ書き出す台本。
+"""Script that writes the real-weight MiniCPM5-1B (causal LM) in **one-shot form** to an IR v2
+container + golden io.
 
-ADR [0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) 決定 1（GQA を
-`attention` の整除 broadcast として受理）を**実モデルで検収する足場**。KV cache は載せない —
-`input_ids[1,T]` を丸ごと食って `logits[1,T,vocab]` を返す prefill 相当の 1 本道で、
-state スロット（ADR 0066）と decode 経路は後続の波が受け持つ。
+The **scaffold for accepting**
+ADR [0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) decision 1
+(GQA accepted as the divisible broadcast of `attention`) **on a real model**. No KV cache — a
+single prefill-like path that takes all of `input_ids[1,T]` and returns `logits[1,T,vocab]`; the
+state slots (ADR 0066) and the decode path are left to later iterations.
 
     uv run --with 'transformers==5.14.1' python -m minicpm5.export
 
-transformers は **5.14.1 でピン**する（`embeddinggemma/export.py` と同じ理由 — モデリング
-コードが変わるとグラフ形が変わる）。pyproject.toml / uv.lock には入れず `--with` で一時的に
-足す。
+transformers is **pinned to 5.14.1** (for the same reason as `embeddinggemma/export.py` — a change
+in the modeling code changes the graph's shape). It is not added to pyproject.toml / uv.lock but
+added temporarily with `--with`.
 
-## 何をグラフに載せるか
+## What goes into the graph
 
-`LlamaForCausalLM` の forward 丸ごと 1 本（24 層 + `lm_head`）。トークナイズと chat template の
-適用はホスト側。出力は `[1, T, 130560]` の生 logits（softmax もサンプリングも載せない）。
+The whole forward of `LlamaForCausalLM` as one graph (24 layers + `lm_head`). Tokenizing and
+applying the chat template happen on the host. The output is the raw logits `[1, T, 130560]` (no
+softmax and no sampling in the graph).
 
-MUST: config の **`head_dim` は独立フィールド**（128 — `hidden_size / num_attention_heads` =
-1536 / 16 = 96 とは別物）。head_dim を hidden/heads から導出する形は書かない。参照する必要が
-あるときは常に `config.head_dim` を読む。
+MUST: **`head_dim` is an independent field** of the config (128 — not the same thing as
+`hidden_size / num_attention_heads` = 1536 / 16 = 96). Do not write anything that derives head_dim
+from hidden/heads. Whenever it is needed, always read `config.head_dim`.
 
-## GQA を「真の形」で出す（決定 1 の検収点）
+## Emitting GQA in its "true form" (the acceptance point of decision 1)
 
-MiniCPM5-1B は 16:2 の GQA。transformers 5.14.1 の `sdpa_attention_forward` は
-`use_gqa_in_sdpa`（integrations/sdpa_attention.py:38）が **`attention_mask is None` を条件に
-持つ**ので、加算マスクを渡す本台本の形では必ず偽になり、`repeat_kv` が k / v を
-`[1,2,T,128]` → `[1,16,T,128]` へ**実体化してから** SDPA を呼ぶ（同 99-100 行）。実測でも
-素の `sdpa` は attention の ins が 3 本とも H=16 になり、GQA が消える。
+MiniCPM5-1B is 16:2 GQA. In transformers 5.14.1, `sdpa_attention_forward` has `use_gqa_in_sdpa`
+(integrations/sdpa_attention.py:38) **conditioned on `attention_mask is None`**, so with this
+script's form, which passes an additive mask, it is always false, and `repeat_kv` **materializes**
+k / v from `[1,2,T,128]` to `[1,16,T,128]` **before** calling SDPA (lines 99-100 of the same
+file). Measured as well: with plain `sdpa`, all three attention ins have H=16 and the GQA is gone.
 
-そこで **transformers の公開拡張点**（`AttentionInterface.register` — 上流コードは 1 行も
-差し替えない）へ {@link gqa_sdpa_attention} を登録し、`repeat_kv` を通さず
-`enable_gqa=True` で SDPA を呼ぶ。IR の attention は
-`q[1,16,T,128] / k[1,2,T,128] / v[1,2,T,128]` になる。
+So {@link gqa_sdpa_attention} is registered through **transformers' public extension point**
+(`AttentionInterface.register` — not one line of upstream code is replaced), and it calls SDPA
+with `enable_gqa=True` without going through `repeat_kv`. The IR's attention becomes
+`q[1,16,T,128] / k[1,2,T,128] / v[1,2,T,128]`.
 
-MUST: 出た IR の形は {@link assert_ir_form} が**必ず検査**する。`repeat_kv` 実体化形
-（Hkv=16）は「数値は合っているが検収の意味が消えた」資産なので、黙って書かない。
+MUST: {@link assert_ir_form} **always checks** the shape of the emitted IR. The `repeat_kv`
+materialized form (Hkv=16) is an asset where "the numbers agree but the acceptance has lost its
+meaning", so it is never written silently.
 
-## causal は加算 mask の定数畳み込みで表す
+## causal is expressed by constant folding of an additive mask
 
-ランタイムの attention に causal 欄は無く、エクスポータは `is_causal=True` を拒否する
-（aten_handlers.py の `_h_attention`）。本台本は **`is_causal` が SDPA へ届く経路を構造的に
-持たない** — {@link gqa_sdpa_attention} は常に `is_causal=False` を渡し、マスクが `None` なら
-（= 非因果に化ける形なら）fail loudly にする。
+The runtime's attention has no causal field, and the exporter rejects `is_causal=True`
+(`_h_attention` in aten_handlers.py). This script **structurally has no path by which `is_causal`
+reaches SDPA** — {@link gqa_sdpa_attention} always passes `is_causal=False` and fails loudly when
+the mask is `None` (= the form that would silently turn non-causal).
 
-因果性は {@link additive_causal_mask} が作る加算 f32 `[1,1,T,T]`（0 / −inf）で表す。葉は
-`arange` と `full` だけ・T はスライス長にしか現れないので、エクスポータの定数畳み込みが
-**Tmax×Tmax の f32 initializer + `sym_prefix_slice`** に落とす（ADR 0010 — EmbeddingGemma の
-帯マスクと同じ機構）。4D で渡すので transformers 側の `create_causal_mask` は
-`_preprocess_mask_arguments`（masking_utils.py:818）でそのまま返し、`sdpa_mask` の
-`is_causal` 省略経路には入らない。結果として **グラフ入力は `input_ids` 1 本だけ**になる。
+Causality is expressed by the additive f32 `[1,1,T,T]` (0 / −inf) built by
+{@link additive_causal_mask}. Its leaves are only `arange` and `full`, and T appears only as a
+slice length, so the exporter's constant folding lowers it to **a Tmax×Tmax f32 initializer +
+`sym_prefix_slice`** (ADR 0010 — the same mechanism as EmbeddingGemma's band mask). Because it is
+passed as 4D, transformers' `create_causal_mask` returns it unchanged in
+`_preprocess_mask_arguments` (masking_utils.py:818) and never enters the `is_causal` shortcut of
+`sdpa_mask`. As a result **the only graph input is `input_ids`**.
 
-## 出力レイアウト
+## Output layout
 
-    outputs/series/minicpm5-1b/model-NNNNN-of-NNNNN.krm 重み・定数 + 2 文書の記述
-    outputs/series/minicpm5-1b/io.<case>.safetensors    入力と torch CPU での期待出力
+    outputs/series/minicpm5-1b/model-NNNNN-of-NNNNN.krm weights / constants + the 2 documents
+    outputs/series/minicpm5-1b/io.<case>.safetensors    inputs and the expected outputs on torch CPU
 
-io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma と同じ
-（`input.<グラフ入力名>` / `output.<位置>`）。logits は語彙 130560 なので 1 ケースあたり
-`T × 522KB` — golden の T は 128 以下に抑える（{@link GOLDEN_CASES}）。
+The tensor key convention of io is the same as tiny golden / DeBERTa / EmbeddingGemma
+(`input.<graph input name>` / `output.<position>`). The logits have a 130560 vocabulary, so one
+case is `T × 522KB` — the golden T is kept at 128 or less ({@link GOLDEN_CASES}).
 """
 
 from __future__ import annotations
@@ -83,33 +88,38 @@ from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
 from karume.shapes import declared_shape
 
-#: 公式重みの置き場（`hf download openbmb/MiniCPM5-1B` の展開先）。
+#: Where the official weights live (the target of `hf download openbmb/MiniCPM5-1B`).
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "minicpm5" / "MiniCPM5-1B"
 
-#: 生成物の既定の置き場。格納 dtype は f32 のみ（f16 / i8 / w4 は別系列で決める話）。
+#: Default location of the artifacts. The storage dtype is f32 only (f16 / i8 / w4 are matters
+#: for other series).
 DEFAULT_OUT_DIR = SERIES_ROOT / "minicpm5-1b"
 
 MODEL_FILE = "model.krm"
 
-#: 容器のグラフ名 = **配布形の部品名**（= `karume.json` の weights のキー —
-#: container-v1 §2.1）。この recipe は配布形を組まない（`distribution.py` が無い）が、グラフ名は
-#: ランタイムが `prepareContainer(opened, <weights キー>)` で引く綴りなので、組む日が来た
-#: ときに据わっている容器がそのまま使えるよう、**部品 1 つの系列の慣例**（`model`）で
-#: 名乗っておく。系列ディレクトリ名（`minicpm5-1b`）とは一致しない。
+#: The container's graph name = **the part name of the distribution** (= the key of `weights` in
+#: `karume.json` — container-v1 §2.1). This recipe builds no distribution (there is no
+#: `distribution.py`), but the graph name is the spelling the runtime looks up with
+#: `prepareContainer(opened, <weights key>)`, so it takes **the convention of a single-part
+#: series** (`model`) so that the container in place can be used as is on the day one is built.
+#: It does not match the series directory name (`minicpm5-1b`).
 GRAPH_NAME = "model"
 
-#: 容器へ焼くライセンス識別子（container-v1 §2.3）。この recipe は配布形を組まない（カードも
-#: `distribution.py` も無い）ので、出どころは上流モデルカードの宣言そのもので、
-#: `THIRD_PARTY_NOTICES.md` が「使った revision に対しては未確認」と記録している値である。
+#: The license identifier baked into the container (container-v1 §2.3). This recipe builds no
+#: distribution (neither a card nor `distribution.py`), so its source is the upstream model card's
+#: declaration itself — the value `THIRD_PARTY_NOTICES.md` records as "not verified against the
+#: revision used".
 LICENSE = "apache-2.0"
 
 
 def upstream_provenance(model_dir: Path) -> Provenance:
-    """容器へ焼く出所。revision は `--model-dir` の取得記録から導く。
+    """The provenance baked into the container. The revision is derived from the download record of
+    `--model-dir`.
 
-    直書きしない（{@link _shared.upstream.snapshot_revision}）— 定数だと `--model-dir` が別の
-    スナップショットを指しても、容器は同じ revision を名乗る。decode 形の台本
-    （`minicpm5.export_decode`）と系列の移行（`migrate_series`）も同じ 1 本を引く。
+    Not hard-coded ({@link _shared.upstream.snapshot_revision}) — with a constant, the container
+    would claim the same revision even when `--model-dir` points at another snapshot. The
+    decode-form script (`minicpm5.export_decode`) and the series migration (`migrate_series`) use
+    the same function.
     """
     return Provenance(license=LICENSE, upstream_revision=snapshot_revision(model_dir))
 
@@ -119,30 +129,34 @@ IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: グラフ入力の名前（ラッパの forward 引数名）。{@link assert_ir_form} が「これ 1 本だけ」を
-#: 見るための綴り — mask や position_ids が入力に増えたら畳み込みが効いていない。
+#: Name of the graph input (the wrapper's forward argument name). The spelling
+#: {@link assert_ir_form} uses to check "this one and nothing else" — if a mask or position_ids
+#: shows up among the inputs, the folding is not working.
 INPUT_IDS = "input_ids"
 
-#: 検査に使う IR op 名。
+#: IR op names used by the checks.
 ATTENTION_OP = "attention"
 SYM_PREFIX_SLICE_OP = "sym_prefix_slice"
 
-#: 記号次元 T の上限。causal 定数が Tmax² で焼かれる（512² × 4B = 1MiB）ので、上げるなら
-#: その代償を承知の上で上げる（ADR 0010 — 畳み込みの評価点そのもの）。モデルの
-#: `max_position_embeddings` は 131072 だが、1-shot 検収に要る長さとは別の話。
+#: Upper bound of the symbolic dimension T. The causal constant is baked at Tmax² (512² × 4B =
+#: 1MiB), so raise it only knowing that cost (ADR 0010 — it is the very evaluation point of the
+#: folding). The model's `max_position_embeddings` is 131072, but that is a separate matter from
+#: the length the one-shot acceptance needs.
 SYM_MAX = 512
 
-#: 加算マスクの遮断値。`normalize._additive_attn_mask` が bool マスクを落とす先と同じ値で、
-#: 融合 attention の mask 契約（ADR 0023）そのまま。
+#: The blocking value of the additive mask. The same value `normalize._additive_attn_mask` lowers a
+#: bool mask to, exactly the mask contract of fused attention (ADR 0023).
 NEG_INF = float("-inf")
 
-#: `AttentionInterface` へ登録する名前。**`sdpa` / `flash_attention` / `flex_attention` の
-#: いずれも部分文字列に含めない** — transformers の `get_correct_attn_implementation` が
-#: 名前の部分一致でバックエンド固有の dispatch 検査へ分岐する（modeling_utils.py:2086-2091）。
+#: The name registered with `AttentionInterface`. **It MUST NOT contain `sdpa` /
+#: `flash_attention` / `flex_attention` as a substring** — transformers'
+#: `get_correct_attn_implementation` branches into backend-specific dispatch checks by partial
+#: name matching (modeling_utils.py:2086-2091).
 ATTENTION_NAME = "karume_gqa"
 
-#: 長め（T=87）の英語ケースの本文。末尾が「強く決まる継続」になる段落で、短文ケースと
-#: 十分に離れた T で prefix スライスと RoPE 表が実長で効いていることを見る。
+#: Body of the longer (T=87) English case. A paragraph whose end is a "strongly determined
+#: continuation", to see that the prefix slice and the RoPE table act at their real length at a T
+#: far enough from the short cases.
 CONTEXT_EN = (
     "France is a country in Western Europe with a long written history. Its cities grew along "
     "the rivers that carried grain and stone, and the largest of them sits on the Seine, where "
@@ -151,24 +165,26 @@ CONTEXT_EN = (
     "ministries, and the residence of the head of state. The capital of France is"
 )
 
-#: 中くらい（T=61）の日本語ケースの本文。CJK の byte-level BPE でも同じ形が通ることと、
-#: 英語ケースと違う T を踏むためのもの。
+#: Body of the medium (T=61) Japanese case. It shows that the same form works with CJK byte-level
+#: BPE, and it exercises a T different from the English case.
 CONTEXT_JA = (
     "日本は東アジアの島国で、四つの大きな島と多くの小さな島から成る。国会と中央官庁、"
     "そして皇居が置かれているのは関東平野の都市で、江戸と呼ばれていた時代から政治の"
     "中心だった。日本の首都は"
 )
 
-#: golden の固定文（`(ケース名, 本文)`）。トークナイズは `tokenizers` で公式
-#: `tokenizer.json` を直接読む（`<s>` は post_processor が付ける — `tokenizer_config.json` の
-#: `add_bos_token: false` は「テンプレート側で付ける」の意で、encode の結果は先頭が id 0）。
-#: T は 6 / 12 / 61 / 87 に散らす（記号次元の 0/1 特殊化から遠く、上限 512 より十分内側）。
-#: 4 ケース合計の logits は 86MB（1 ケース = T × 522KB）。
+#: The fixed texts of the golden (`(case name, body)`). Tokenizing reads the official
+#: `tokenizer.json` directly with `tokenizers` (`<s>` is added by the post_processor —
+#: `add_bos_token: false` in `tokenizer_config.json` means "the template adds it", and the encode
+#: result starts with id 0). T is spread over 6 / 12 / 61 / 87 (far from the 0/1 specialization of
+#: symbolic dimensions, and well inside the upper bound of 512). The logits of the 4 cases total
+#: 86MB (one case = T × 522KB).
 #:
-#: capital-ja は**対構造**（「フランスの首都はパリ、」の前置き）で書く — 素の
-#: 「日本の首都は」は greedy 1 位が読点 `、`（「〜は、東京」の頻出形）で期待が立たず、
-#: 逆順の「日本の首都は東京、フランスの首都は」は 1 位が中文の `巴黎` になる（2026-08-17
-#: 実測 — OpenBMB 系は中文優勢）。この語順だけが `東京` を 1 位で返す。
+#: capital-ja is written as a **pair** (with the lead-in 「フランスの首都はパリ、」) — with the bare
+#: 「日本の首都は」 the greedy top-1 is the comma `、` (the frequent form 「〜は、東京」) and no
+#: expectation holds, and the reversed order 「日本の首都は東京、フランスの首都は」 gives the
+#: Chinese `巴黎` as top-1 (measured 2026-08-17 — the OpenBMB models lean Chinese). Only this
+#: word order returns `東京` as top-1.
 GOLDEN_CASES: tuple[tuple[str, str], ...] = (
     ("capital-en", "The capital of France is"),
     ("capital-ja", "フランスの首都はパリ、日本の首都は"),
@@ -176,11 +192,13 @@ GOLDEN_CASES: tuple[tuple[str, str], ...] = (
     ("context-ja", CONTEXT_JA),
 )
 
-#: 各ケースの**最終位置の greedy トークン**に期待する継続（恒真でない sanity — ADR 0005 の
-#: fail loudly）。いずれも「強く決まる継続」で、①重みの取り違え ②mask の向き（未来を見る）
-#: ③RoPE 表の位置ずれ ④GQA の head 写像違い のどれかが起きれば最終位置の 1 位が変わる。
-#: MUST: 期待継続は**単一トークン**でなければならない（{@link expected_token_ids} が検査）—
-#: 複数トークンだと「1 位の一致」の意味が定まらない。
+#: The expected continuation of each case's **greedy token at the last position** (a sanity check
+#: that is not vacuous — ADR 0005's fail loudly). Each is a "strongly determined continuation", and
+#: if any of ① mixed-up weights ② the wrong mask direction (looking at the future) ③ a position
+#: offset in the RoPE table ④ a wrong GQA head mapping happens, the top-1 at the last position
+#: changes.
+#: MUST: each expected continuation MUST be a **single token** (checked by
+#: {@link expected_token_ids}) — with several tokens, "top-1 agreement" has no defined meaning.
 GREEDY_EXPECTATIONS: Mapping[str, str] = {
     "capital-en": " Paris",
     "capital-ja": "東京",
@@ -190,15 +208,17 @@ GREEDY_EXPECTATIONS: Mapping[str, str] = {
 
 
 def additive_causal_mask(length: int) -> torch.Tensor:
-    """`[1,1,length,length]` の加算 causal マスク（許可 0 / 遮断 −inf）を作る。
+    """Build the additive causal mask `[1,1,length,length]` (0 allowed / −inf blocked).
 
-    MUST: 葉は `arange` と `full` だけで、`length` は **arange の長さ**にしか現れない形で
-    書く（`convert.SYMBOL_EXTENT_ARGS` の extent 位置）。値の側に T が入ると Tmax 畳み込みが
-    prefix と可換でなくなり、`_check_prefix_commutes` の 2 点評価で落ちる（ADR 0010 追記）。
-    MUST: 比較は `cols <= rows`（`le.Tensor`）で書く — `rows >= cols`（`ge.Tensor`）は
-    `convert.FOLDABLE_OPS` に無いので畳めず、IR 語彙に無い op として export ごと落ちる。
+    MUST: write it so that the leaves are only `arange` and `full`, and `length` appears **only as
+    the length of an arange** (the extent position of `convert.SYMBOL_EXTENT_ARGS`). If T enters
+    the values, the Tmax folding stops commuting with the prefix and fails the two-point evaluation
+    of `_check_prefix_commutes` (ADR 0010 addendum).
+    MUST: write the comparison as `cols <= rows` (`le.Tensor`) — `rows >= cols` (`ge.Tensor`) is
+    not in `convert.FOLDABLE_OPS`, so it cannot be folded and the whole export fails on an op that
+    is not in the IR vocabulary.
 
-    NOTE: `length` は export 中は `torch.SymInt`（int として振る舞う）。
+    NOTE: during export, `length` is a `torch.SymInt` (it behaves as an int).
     """
     rows = torch.arange(length).unsqueeze(-1)
     cols = torch.arange(length).unsqueeze(0)
@@ -217,31 +237,36 @@ def gqa_sdpa_attention(
     scaling: float | None = None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, None]:
-    """`repeat_kv` を通さず `enable_gqa=True` で SDPA を呼ぶ attention 実装（GQA 形の保存）。
+    """An attention implementation that calls SDPA with `enable_gqa=True` without going through
+    `repeat_kv` (preserving the GQA form).
 
-    transformers の `AttentionInterface` が要求する呼び出し規約そのまま
-    （`(module, q, k, v, attention_mask, dropout=…, scaling=…, **kwargs)` →
-    `(attn_output[B,M,H,D], attn_weights)`）。上流の `sdpa_attention_forward` から落とすのは
-    ① `repeat_kv` の実体化 ② `is_causal` の自動判定 ③ NPU / paged 系の分岐 の 3 つだけ。
+    It follows the calling convention transformers' `AttentionInterface` requires as is
+    (`(module, q, k, v, attention_mask, dropout=…, scaling=…, **kwargs)` →
+    `(attn_output[B,M,H,D], attn_weights)`). Only three things are dropped from upstream's
+    `sdpa_attention_forward`: ① the `repeat_kv` materialization ② the automatic `is_causal`
+    decision ③ the NPU / paged branches.
 
-    MUST: `attention_mask is None` は fail loudly。上流はこの形を「`is_causal=True` に任せる」
-    合図として使うが、ここで素通しすると**非因果**の attention が黙って出る（IR には causal の
-    欄が無いので、後段のどの検査にも掛からない）。
-    MUST: 数値の意味を変える kwargs（`is_causal` / `position_bias`）は受理しない — 無視すると
-    eager 側と別の数値経路になったことが export でも golden でも見えない。
+    MUST: `attention_mask is None` fails loudly. Upstream uses that form as the signal to "leave it
+    to `is_causal=True`", and passing it through here would silently emit **non-causal** attention
+    (the IR has no causal field, so no later check would catch it).
+    MUST: kwargs that change numerical semantics (`is_causal` / `position_bias`) are not accepted —
+    ignoring them would hide, in both the export and the golden, that the numerical path differs
+    from eager.
     """
     if attention_mask is None:
         raise ValueError(
-            f"{type(module).__name__}: attn_mask 無しで attention が呼ばれた"
-            "（因果性は加算 mask で表す — mask 無しは非因果に化ける）"
+            f"{type(module).__name__}: attention was called without attn_mask"
+            " (causality is expressed by an additive mask — no mask silently turns non-causal)"
         )
     if float(dropout) != 0.0:
-        raise ValueError(f"dropout={dropout} の attention は未対応（推論のみ）")
+        raise ValueError(f"attention with dropout={dropout} is not supported (inference only)")
     unsupported = sorted(
         name for name in ("is_causal", "position_bias") if kwargs.get(name) is not None
     )
     if unsupported:
-        raise ValueError(f"kwargs {unsupported} を伴う attention は未対応（数値経路が変わる）")
+        raise ValueError(
+            f"attention with kwargs {unsupported} is not supported (the numerical path changes)"
+        )
     output = torch.nn.functional.scaled_dot_product_attention(
         query,
         key,
@@ -256,10 +281,10 @@ def gqa_sdpa_attention(
 
 
 def register_attention() -> None:
-    """{@link gqa_sdpa_attention} を transformers の attention registry へ登録する（冪等）。
+    """Register {@link gqa_sdpa_attention} in transformers' attention registry (idempotent).
 
-    `AttentionInterface.register` はクラス属性の辞書を更新するので、同じ名前で何度呼んでも
-    最後の 1 本が残る（上流の `sdpa` エントリには触らない）。
+    `AttentionInterface.register` updates a class-attribute dict, so calling it any number of times
+    under the same name leaves the last one (upstream's `sdpa` entry is not touched).
     """
     from transformers import AttentionInterface
 
@@ -267,12 +292,13 @@ def register_attention() -> None:
 
 
 class CausalLmWrapper(nn.Module):
-    """`LlamaForCausalLM` を 1-shot 形（`input_ids → logits`）に固定した export 用ラッパ。
+    """Export wrapper that fixes `LlamaForCausalLM` to the one-shot form (`input_ids → logits`).
 
-    MUST: `attention_mask` は**必ず自前の 4D 加算マスク**を渡す。省略すると transformers が
-    `is_causal` 任せの経路へ入り、{@link gqa_sdpa_attention} の mask 門で落ちる。
-    MUST: `use_cache=False`。True だと `DynamicCache` が生えて KV を返す形になり、1-shot の
-    契約（出力 1 本）から外れる。
+    MUST: `attention_mask` is **always our own 4D additive mask**. Omitting it sends transformers
+    down the path that leaves things to `is_causal`, which fails at the mask check of
+    {@link gqa_sdpa_attention}.
+    MUST: `use_cache=False`. With True a `DynamicCache` appears and the form returns KV, which
+    breaks the one-shot contract (a single output).
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -285,7 +311,8 @@ class CausalLmWrapper(nn.Module):
 
 
 def load_wrapper(model_dir: Path) -> CausalLmWrapper:
-    """実重みを f32 で読み、RoPE バッファを降格した export 可能なラッパを返す。"""
+    """Load the real weights in f32 and return an exportable wrapper with the RoPE buffers
+    demoted."""
     from transformers import LlamaForCausalLM
 
     register_attention()
@@ -293,16 +320,18 @@ def load_wrapper(model_dir: Path) -> CausalLmWrapper:
         model_dir, dtype=torch.float32, attn_implementation=ATTENTION_NAME
     )
     model.eval()
-    # inv_freq がバッファのままだと定数畳み込みの葉にならず、sin / cos が IR に残る。
+    # While inv_freq stays a buffer it is not a leaf of the constant folding, and sin / cos remain
+    # in the IR.
     assert_rope_lifted(model, "minicpm5")
     return CausalLmWrapper(model).eval()
 
 
 def load_tokenizer(model_dir: Path) -> Any:
-    """公式 `tokenizer.json` を `tokenizers` で直接読む（transformers の tokenizer 層は通さない）。
+    """Read the official `tokenizer.json` directly with `tokenizers` (not through transformers'
+    tokenizer layer).
 
-    戻りは `tokenizers.Tokenizer`。型を `Any` にしてあるのは遅延 import のため（モジュール
-    先頭で import すると台本の import だけで tokenizers が要る）。
+    Returns a `tokenizers.Tokenizer`. The type is `Any` because of the lazy import (importing at
+    module top would make merely importing the script require tokenizers).
     """
     from tokenizers import Tokenizer
 
@@ -310,29 +339,34 @@ def load_tokenizer(model_dir: Path) -> Any:
 
 
 def build_cases(model_dir: Path, sym_max: int) -> tuple[tuple[str, torch.Tensor], ...]:
-    """golden 4 ケースの `(名前, input_ids)`。長さが記号次元の範囲外なら fail loudly。"""
+    """`(name, input_ids)` of the 4 golden cases. Fails loudly when a length is outside the range
+    of the symbolic dimension."""
     tokenizer = load_tokenizer(model_dir)
     cases: list[tuple[str, torch.Tensor]] = []
     for name, text in GOLDEN_CASES:
         ids = torch.tensor([tokenizer.encode(text).ids], dtype=torch.int64)
         length = int(ids.shape[1])
         if not 2 <= length <= sym_max:
-            raise ValueError(f"{name}: T={length} が記号次元の範囲 [2, {sym_max}] の外")
+            raise ValueError(
+                f"{name}: T={length} is outside the symbolic dimension's range [2, {sym_max}]"
+            )
         cases.append((name, ids))
     return tuple(cases)
 
 
 def assert_ir_form(graph: IrGraph, config: Any, sym_max: int) -> dict[str, Any]:
-    """IR が「真の GQA 形」かつ「causal が T 非依存の定数」であることを検査する。
+    """Check that the IR has "the true GQA form" and that "causal is a constant independent of T".
 
-    どちらも**数値は合ったまま静かに壊れる**種類の性質で、golden io の突合では捕まらない:
+    Both are properties that **break quietly while the numbers still agree**, and comparing against
+    the golden io does not catch them:
 
-    - `repeat_kv` が実体化すると attention の Hkv が H に化ける（= 決定 1 の検収対象が消える）
-    - mask がグラフ入力に残ると「ホストが毎回 T² を作って渡す」形になる（ADR 0010 の趣旨に反し、
-      ランタイム側の資産としても別物）
+    - when `repeat_kv` materializes, the attention's Hkv turns into H (= the subject of decision 1's
+      acceptance disappears)
+    - when the mask remains a graph input, the form becomes "the host builds T² and passes it every
+      time" (against the intent of ADR 0010, and a different asset on the runtime side too)
 
-    MUST: `config.head_dim` を読む（`hidden_size // num_attention_heads` から導出しない —
-    MiniCPM5-1B は 96 ≠ 128 で食い違う）。
+    MUST: read `config.head_dim` (do not derive it from `hidden_size // num_attention_heads` —
+    MiniCPM5-1B disagrees, 96 ≠ 128).
     """
     heads = int(config.num_attention_heads)
     kv_heads = int(config.num_key_value_heads)
@@ -342,53 +376,62 @@ def assert_ir_form(graph: IrGraph, config: Any, sym_max: int) -> dict[str, Any]:
     names = [spec.name for spec in graph.inputs]
     if names != [INPUT_IDS]:
         raise AssertionError(
-            f"グラフ入力が {names} — `{INPUT_IDS}` 1 本でない"
-            "（mask が畳み込まれずに入力へ残っている可能性）"
+            f"graph inputs are {names} — not `{INPUT_IDS}` alone"
+            " (the mask may have stayed an input instead of being folded)"
         )
     if len(graph.outputs) != 1:
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（1-shot の logits は 1 本）")
+        raise AssertionError(
+            f"the IR has {len(graph.outputs)} outputs (the one-shot form has one: the logits)"
+        )
 
     producer = {out: node for node in graph.nodes for out in node.outs}
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(attentions) != layers:
-        raise AssertionError(f"attention が {len(attentions)} 本（{layers} 層と一致しない）")
+        raise AssertionError(
+            f"{len(attentions)} attention nodes (does not match the {layers} layers)"
+        )
 
     mask_constants: set[str] = set()
     for index, node in enumerate(attentions):
         where = f"attention[{index}]"
         if len(node.ins) != 4:
-            raise AssertionError(f"{where}: ins が {len(node.ins)} 本（q / k / v / mask の 4 本）")
+            raise AssertionError(f"{where}: {len(node.ins)} ins (expected 4: q / k / v / mask)")
         query, key, value, _ = (declared_shape(graph, name) for name in node.ins)
         if query[1] != heads or key[1] != kv_heads or value[1] != kv_heads:
             raise AssertionError(
-                f"{where}: head 軸が {[query[1], key[1], value[1]]} —"
-                f" 真の GQA 形 {[heads, kv_heads, kv_heads]} でない"
-                "（k / v が H まで広がっていれば repeat_kv が実体化している）"
+                f"{where}: the head axes are {[query[1], key[1], value[1]]} —"
+                f" not the true GQA form {[heads, kv_heads, kv_heads]}"
+                " (if k / v are widened to H, repeat_kv has materialized)"
             )
         if query[3] != depth or key[3] != depth or value[3] != depth:
             raise AssertionError(
-                f"{where}: D 軸が {[query[3], key[3], value[3]]} — config.head_dim {depth} と違う"
+                f"{where}: the D axes are {[query[3], key[3], value[3]]} —"
+                f" not config.head_dim {depth}"
             )
         source = producer.get(node.ins[3])
         if source is None or source.op != SYM_PREFIX_SLICE_OP:
             found = (
-                "ノード出力でない（グラフ入力か initializer 直結）" if source is None else source.op
+                "not a node output (a graph input or an initializer directly)"
+                if source is None
+                else source.op
             )
             raise AssertionError(
-                f"{where}: mask の供給元が {found} — Tmax 定数の {SYM_PREFIX_SLICE_OP} でない"
+                f"{where}: the mask comes from {found} — not the {SYM_PREFIX_SLICE_OP} of a Tmax"
+                " constant"
             )
         constant = source.ins[0]
         if constant not in graph.initializers:
-            raise AssertionError(f"{where}: mask の元 '{constant}' が initializer でない")
+            raise AssertionError(f"{where}: the mask's source '{constant}' is not an initializer")
         shape = declared_shape(graph, constant)
         if shape != [1, 1, sym_max, sym_max]:
             raise AssertionError(
-                f"{where}: mask 定数の shape {shape} が Tmax 形 [1, 1, {sym_max}, {sym_max}] と違う"
+                f"{where}: the mask constant's shape {shape} is not the Tmax shape"
+                f" [1, 1, {sym_max}, {sym_max}]"
             )
         mask_constants.add(constant)
     if len(mask_constants) != 1:
         raise AssertionError(
-            f"mask 定数が {len(mask_constants)} 本（全層で 1 本を共有するはず）:"
+            f"{len(mask_constants)} mask constants (all layers should share one):"
             f" {sorted(mask_constants)}"
         )
     return {
@@ -405,9 +448,10 @@ def _write_io(
     cases: Sequence[tuple[str, torch.Tensor]],
     out_dir: Path,
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+    """Write each case's inputs and torch CPU expected outputs to `io.<case>.safetensors`.
 
-    戻り値の 2 本目は sanity 用の logits（`[1, T, vocab]` のまま — 最終位置を引く形が要る）。
+    The second return value is the logits for the sanity check (kept as `[1, T, vocab]` — the last
+    position has to be picked from it).
     """
     written: list[str] = []
     logits: dict[str, torch.Tensor] = {}
@@ -415,16 +459,17 @@ def _write_io(
         with torch.no_grad():
             output = wrapper(ids)
         args = {INPUT_IDS: ids}
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → i32）。ランタイムが受け取る
-        # 形と揃っていないと Deno 側 E2E が golden を読めない（ADR 0009 の境界正規化）。
+        # MUST: the io is also lowered to the concrete representation of the IR's semantic dtype
+        # (i64 → i32). If it does not match what the runtime receives, the Deno-side E2E cannot
+        # read the golden (ADR 0009's boundary normalization).
         tensors = {
             f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
-                args[declared.name], f"{name} の入力 '{declared.name}'"
+                args[declared.name], f"{name}: input '{declared.name}'"
             )
             for declared in graph.inputs
         }
         tensors[f"{OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
-            output.detach().contiguous(), f"{name} の出力 0"
+            output.detach().contiguous(), f"{name}: output 0"
         )
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
         save_file(tensors, str(path))
@@ -434,22 +479,23 @@ def _write_io(
 
 
 def greedy_tokens(logits: Mapping[str, torch.Tensor]) -> dict[str, int]:
-    """各ケースの**最終位置**の 1 位トークン id。"""
+    """The top-1 token id at the **last position** of each case."""
     return {name: int(value[0, -1].argmax()) for name, value in logits.items()}
 
 
 def expected_token_ids(tokenizer: Any) -> dict[str, int]:
-    """{@link GREEDY_EXPECTATIONS} の期待継続 → トークン id（単一トークンでなければ落とす）。
+    """The expected continuations of {@link GREEDY_EXPECTATIONS} → token ids (fails unless each is
+    a single token).
 
-    `add_special_tokens=False` で引く — 継続の話なので `<s>` は付かない。
+    Looked up with `add_special_tokens=False` — it is about a continuation, so no `<s>` is added.
     """
     expected: dict[str, int] = {}
     for name, continuation in GREEDY_EXPECTATIONS.items():
         ids = tokenizer.encode(continuation, add_special_tokens=False).ids
         if len(ids) != 1:
             raise AssertionError(
-                f"{name}: 期待継続 {continuation!r} が {len(ids)} トークン {ids}"
-                "（単一トークンでないと「1 位の一致」の意味が定まらない）"
+                f"{name}: the expected continuation {continuation!r} is {len(ids)} tokens {ids}"
+                ' (unless it is a single token, "top-1 agreement" has no defined meaning)'
             )
         expected[name] = int(ids[0])
     return expected
@@ -458,16 +504,18 @@ def expected_token_ids(tokenizer: Any) -> dict[str, int]:
 def _sanity(
     greedy: Mapping[str, int], expected: Mapping[str, int], labels: Mapping[int, str]
 ) -> dict[str, Any]:
-    """最終位置の 1 位が期待継続と一致し、かつケース間で定数化していないことを見る。
+    """Check that the top-1 at the last position equals the expected continuation, and that it is
+    not constant across cases.
 
-    MUST: 不一致は落とす。ノルムや形だけの検査では「数値は動いているが言語モデルとして
-    壊れている」（層の取り違え・mask の向き・RoPE のずれ）を検出できない。
-    MUST: 全ケースの 1 位が同一なら落とす。期待の一致検査と重なるが、こちらは期待表を
-    緩めても残る「定数出力」の検出線として独立に置く。
+    MUST: a mismatch fails. Checks of norms or shapes alone cannot detect "the numbers move but it
+    is broken as a language model" (mixed-up layers, the mask direction, a RoPE offset).
+    MUST: fail when the top-1 of every case is the same. It overlaps the expectation check, but it
+    stands on its own as the detection line for "constant output", which remains even if the
+    expectation table is loosened.
     """
     if set(greedy) != set(expected):
         raise AssertionError(
-            f"ケース集合が食い違う: greedy={sorted(greedy)} 期待={sorted(expected)}"
+            f"the case sets differ: greedy={sorted(greedy)} expected={sorted(expected)}"
         )
 
     def show(token: int) -> str:
@@ -479,42 +527,52 @@ def _sanity(
         if token != expected[name]
     }
     if wrong:
-        raise AssertionError(f"最終位置の 1 位が期待継続と違う（実測, 期待）: {wrong}")
+        raise AssertionError(
+            "the top-1 at the last position differs from the expected continuation"
+            f" (measured, expected): {wrong}"
+        )
     if len(set(greedy.values())) == 1:
         raise AssertionError(
-            f"全ケースの最終位置の 1 位が同一 {show(next(iter(greedy.values())))} — 定数出力"
+            f"the top-1 at the last position is the same {show(next(iter(greedy.values())))}"
+            " for every case — constant output"
         )
     return {name: show(token) for name, token in sorted(greedy.items())}
 
 
 def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。
+    """Write the IR container and the golden io, and return a summary.
 
-    MUST: 生成物は作業席へ書き、**全ての門**（形検査・sanity）を通してから据える。門より前に
-    final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから
-    採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
-    {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。
+    MUST: the artifacts are written to a staging directory and put in place only after passing
+    **every check** (the shape check and the sanity check). Placing them in final before the checks
+    would let a failed run leave "an asset that can pass the acceptance check" — the io golden is
+    taken from the same broken wrapper, so the two agree with each other and the TS-side comparison
+    **goes green** (the spelling of "when publishing is allowed" is
+    {@link _shared.decode_series._publish}; the rules of the swap and of cleanup belong to the core
+    primitive {@link karume.artifacts.staged_publication}).
     """
-    # 出所は重みより先に読む（取得記録が無い checkpoint は重みを読む前に落とす）。
+    # The provenance is read before the weights (a checkpoint without a download record fails
+    # before the weights are loaded).
     provenance = upstream_provenance(model_dir)
     wrapper = load_wrapper(model_dir)
     cases = build_cases(model_dir, sym_max)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    # 例示入力は最長ケース（T が上限に近いほど 0/1 特殊化から遠い）。min=2 は 0/1 特殊化を
-    # 避けるため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
+    # The example input is the longest case (the closer T is to the upper bound, the further from
+    # the 0/1 specialization). min=2 avoids the 0/1 specialization, and max is the very evaluation
+    # point of the Tmax folding (ADR 0010 — not managed twice through a separate knob).
     _, example_ids = max(cases, key=lambda case: case[1].shape[1])
     seq = Dim("T", min=2, max=sym_max)
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory itself (the primitive does not create it — it only
+        # passes a path).
         staged.mkdir()
         graph = export_to_file(
             wrapper,
             (example_ids,),
             staged / MODEL_FILE,
             provenance=provenance,
-            # グラフ名は**部品名**（{@link GRAPH_NAME}）— ディレクトリ名から導かない。
+            # The graph name is the **part name** ({@link GRAPH_NAME}) — not derived from the
+            # directory name.
             graph_name=GRAPH_NAME,
             dynamic_shapes=({1: seq},),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -526,7 +584,8 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         labels = {token: tokenizer.id_to_token(token) for token in set(greedy.values())}
         expected = expected_token_ids(tokenizer)
         labels.update({token: tokenizer.id_to_token(token) for token in set(expected.values())})
-        # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        # MUST: evaluated before publication (the only non-vacuous check of this series — when it
+        # fails, the staging directory goes with it).
         sanity = _sanity(greedy, expected, labels)
     return {
         "dir": str(out_dir),

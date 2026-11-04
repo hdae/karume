@@ -1,26 +1,34 @@
-"""`wan/dit_patch.py`（DiT の S 形化）と `wan/export_dit.py` の約束事。
+"""The contract of `wan/dit_patch.py` (the S form of the DiT) and `wan/export_dit.py`.
 
-固定するのは、壊れても例外が出ず**数だけが静かにずれる**側（ADR 0118 決定 3・検収 段 2）:
+It pins the side where a breakage raises no exception and **only the numbers drift silently** (ADR
+0118 decision 3, acceptance step 2):
 
-- RoPE の実数化（interleave 形を rank 4 のまま）が上流の processor と**ビット一致**すること
-- attn1 の processor の差し替えが上流の素の forward を変えないこと（参照の恒真化の門）
-- patch 埋め込みの Linear 化と conv3d の差が縮約順の差の上界に収まること
-- ホストの patchify / unpatchify / RoPE の素表が上流の並びとビット一致すること
-- トークン形のラッパがホストの段と合成して上流の forward に戻ること
-- S 形の export の形（記号 `S` 1 つ・入力名・op 集合・S 依存の焼き込みが無いこと）
-- CPU の参照とパッチ後の eager の attention が flash 経路に固定されていること（S = 32,760 で MATH
-  へ落ちると OOM — 黙って落ちずに止まる形）
-- i8 系列（ADR 0120 決定 2 / 3）: 丸めが上流の重みスロット全部に届き、bias / norm は上流の f32 の
-  値のまま・束縛表に i8 があり f16 が無い・ケースの組と全ケースの f64 の参照
+- the real form of RoPE (the interleaved form kept at rank 4) is **bit-identical** to the upstream
+  processor
+- swapping the attn1 processor does not change upstream's plain forward (the check against a
+  vacuous reference)
+- the difference between the Linear form of the patch embedding and conv3d stays within the bound
+  of a difference in reduction order
+- the host patchify / unpatchify / base RoPE tables are bit-identical to upstream's ordering
+- the token-form wrapper composed with the host steps gives back the upstream forward
+- the shape of the S-form export (one symbol `S`, the input names, the op set, nothing baked in
+  that depends on S)
+- the attention of the CPU reference and of the patched eager is pinned to the flash path (falling
+  back to MATH at S = 32,760 means OOM — it stops instead of falling back silently)
+- the i8 series (ADR 0120 decisions 2 / 3): rounding reaches every upstream weight slot, bias /
+  norm keep upstream's f32 values, the binding table has i8 and no f16, and the case set and the
+  f64 references of every case
 
-合成モデル（乱数初期化の小さな `WanTransformer3DModel`）で回すものと、実重み（フィクスチャ
-`wan_snapshot` — 無い機では SKIP）で回すものがある。合成モデルの形は **3 軸と C が全部違う値**にする
-（軸の取り違えは正方では対合になって隠れる）。
+Some tests run on a synthetic model (a small randomly initialised `WanTransformer3DModel`), others
+on the real weights (fixture `wan_snapshot` — SKIP on a machine without it). The synthetic model's
+shape uses **a different value for each of the 3 axes and C** (with square shapes an axis mix-up is
+an involution and stays hidden).
 
-`importorskip("diffusers")` は diffusers に依るテストの中（合成モデル・上流の部品を作る helper と
-fixture）で受ける — モジュール直下に置くと、ケースの表・ホストの並び・flash の固定のような
-diffusers に依らない不変条件まで既定の sync（`wan` グループ無し）で 1 本も回らない
-（`test_vae_tiling.py` と同じ判断）。
+`importorskip("diffusers")` is taken inside the tests that depend on diffusers (the helpers and
+fixtures that build the synthetic model and upstream parts) — at module level, not even the
+invariants that do not depend on diffusers, such as the case table, the host ordering and the
+flash pinning, would run under the default sync (without the `wan` group) (the same judgement as
+`test_vae_tiling.py`).
 """
 
 from __future__ import annotations
@@ -39,7 +47,7 @@ from torch.nn.attention import SDPBackend
 from _shared.paths import REPO_ROOT
 from wan import dit_patch, export_dit
 
-#: 合成 DiT の形（head_dim 24 → RoPE の t / h / w は 8 / 8 / 8 次元）。
+#: The shape of the synthetic DiT (head_dim 24 → RoPE t / h / w of 8 / 8 / 8 dimensions).
 TINY_DIT = {
     "patch_size": (1, 2, 2),
     "num_attention_heads": 2,
@@ -55,12 +63,13 @@ TINY_DIT = {
     "eps": 1e-6,
     "rope_max_seq_len": 32,
 }
-#: 合成の潜在 `(F, H, W)` → 格子 F'·H'·W' = 2·3·5（3 軸とも違う値）。
+#: The synthetic latent `(F, H, W)` → grid F'·H'·W' = 2·3·5 (a different value on each of the 3
+#: axes).
 TINY_LATENT = (2, 6, 10)
 
-#: 製品の export（実重み）で観測した op 集合（`wan.export_dit` の要約の `ops`）。
-#: 合成モデルも同じ構造なので同じ集合になる — op が増えたら語彙の判断が要る変更なので、
-#: ここで止める。
+#: The op set observed in the product export (real weights) (`ops` of the `wan.export_dit`
+#: summary). The synthetic model has the same structure, so it gives the same set — a new op is a
+#: change that needs a vocabulary decision, so it stops here.
 EXPECTED_OPS = frozenset(
     {
         "add",
@@ -81,7 +90,7 @@ EXPECTED_OPS = frozenset(
 
 
 def _transformer_wan():
-    """上流の `transformer_wan` モジュール（diffusers が無ければ呼んだテストを SKIP）。"""
+    """The upstream `transformer_wan` module (SKIPs the calling test when diffusers is absent)."""
     return pytest.importorskip("diffusers.models.transformers.transformer_wan")
 
 
@@ -111,7 +120,7 @@ def _token_inputs(model: nn.Module, latents: torch.Tensor, timestep: torch.Tenso
 
 
 class TestRealPairRotary:
-    """interleave 形の RoPE の実数化（`real_pair_rotary` / 差し替えた processor）。"""
+    """The real form of the interleaved RoPE (`real_pair_rotary` / the swapped processor)."""
 
     def _attention_and_tables(self, dim: int, heads: int, latent: tuple[int, int, int]):
         upstream = _transformer_wan()
@@ -134,9 +143,9 @@ class TestRealPairRotary:
     def test_the_real_pair_form_matches_the_upstream_processor_bit_for_bit(
         self, dim: int, heads: int, latent: tuple[int, int, int]
     ) -> None:
-        """`a − b = a + (−b)` と加算の可換で**ビット一致**。
+        """**Bit-identical** by `a − b = a + (−b)` and the commutativity of addition.
 
-        Wan2.1 の head_dim 128（RoPE の t / h / w = 44 / 42 / 42 次元）でも見る。
+        Also checked with the head_dim 128 of Wan2.1 (RoPE t / h / w = 44 / 42 / 42 dimensions).
         """
         attention, cos, sin, hidden = self._attention_and_tables(dim, heads, latent)
         with torch.no_grad():
@@ -144,13 +153,14 @@ class TestRealPairRotary:
             dit_patch.install_real_pair_processors(nn.ModuleList([_Holder(attention)]))
             got = attention(hidden, None, None, dit_patch.RealPairRope(cos, sin))
 
-        # 恒真化の門: 差し替えが効いていないと `RealPairRope`（tuple）が上流の経路をそのまま通り、
-        # 比較が自分自身との比較になる。
+        # The check against a vacuous comparison: if the swap had no effect, `RealPairRope` (a
+        # tuple) would go through the upstream path as is, and the comparison would be with itself.
         assert type(attention.processor).__name__ == "WanRealPairAttnProcessor"
         assert torch.equal(got, expected)
 
     def test_real_pair_rotary_matches_the_upstream_formula_and_a_sign_fault_breaks_it(self) -> None:
-        """独立オラクル: 上流の式（偶数 / 奇数列への strided 代入）と実数形をビットで比べる。"""
+        """Independent oracle: compares the upstream formula (strided assignment to the even / odd
+        columns) and the real form bit for bit."""
         _, cos, sin, _ = self._attention_and_tables(48, 2, (2, 6, 10))
         x = torch.randn(1, cos.shape[1], 2, 24)
         x1, x2 = x[..., 0::2], x[..., 1::2]
@@ -162,8 +172,9 @@ class TestRealPairRotary:
         assert not torch.allclose(dit_patch.real_pair_rotary(x, cos, -sin), expected)
 
     def test_tables_in_another_dtype_than_x_are_rejected(self) -> None:
-        """上流は `.type_as(x)` で x の dtype へ戻すが、実数形はその変換を写していない — dtype が
-        割れた呼び出しは上流と違う dtype の値を黙って返す代わりに止まる。"""
+        """Upstream converts back to the dtype of x with `.type_as(x)`, but the real form does not
+        copy that conversion — a call with split dtypes stops instead of silently returning values
+        in a different dtype from upstream."""
         x = torch.randn(1, 3, 2, 8, dtype=torch.bfloat16)
         table = torch.ones(1, 3, 1, 8)
 
@@ -172,7 +183,8 @@ class TestRealPairRotary:
         assert dit_patch.real_pair_rotary(x, table.bfloat16(), table.bfloat16()).dtype == x.dtype
 
     def test_the_upstream_path_is_untouched_after_the_swap(self) -> None:
-        """差し替え後も素の tuple の表は上流の実装へ委ねる（参照を採る順序を問わない根拠）。"""
+        """After the swap, plain tuple tables are still delegated to the upstream implementation
+        (the reason the order of taking references does not matter)."""
         attention, cos, sin, hidden = self._attention_and_tables(48, 2, (2, 6, 10))
         with torch.no_grad():
             before = attention(hidden, None, None, (cos, sin))
@@ -198,7 +210,7 @@ class TestRealPairRotary:
 
 
 class _Holder(nn.Module):
-    """`install_real_pair_processors` が受ける「`attn1` を持つブロック」の最小形。"""
+    """The minimal form of "a block with `attn1`" that `install_real_pair_processors` accepts."""
 
     def __init__(self, attention: nn.Module) -> None:
         super().__init__()
@@ -207,9 +219,10 @@ class _Holder(nn.Module):
 
 class TestPatchEmbedding:
     def test_the_linear_shares_storage_with_the_conv(self) -> None:
-        """丸め（fake-quant）をラッパへ掛けると上流の conv にも届く（参照だけ元の重みにしない）。
+        """Rounding (fake-quant) applied to the wrapper reaches the upstream conv too (the reference
+        is not left on the original weights).
 
-        Linear の重みは conv の重みの view・bias は同じ Parameter。
+        The Linear weight is a view of the conv weight, and the bias is the same Parameter.
         """
         model = _tiny_dit()
         linear = dit_patch.patch_embedding_linear(model.patch_embedding)
@@ -227,7 +240,8 @@ class TestPatchEmbedding:
 
 class TestHostFunctions:
     def test_patchify_matches_the_upstream_patch_embedding_order(self) -> None:
-        """独立オラクル: 上流と同じ `Conv3d(k = s)` に 1-hot の重み → 窓の並び `(c,pt,ph,pw)`。"""
+        """Independent oracle: the same `Conv3d(k = s)` as upstream with 1-hot weights → the window
+        order `(c,pt,ph,pw)`."""
         from wan.dit_host_fixture import onehot_patchify
 
         latents = torch.randn(1, 3, *TINY_LATENT)
@@ -236,9 +250,10 @@ class TestHostFunctions:
         assert torch.equal(got, onehot_patchify(latents, (1, 2, 2)))
 
     def test_unpatchify_matches_an_index_level_oracle(self) -> None:
-        """出口の最終次元は `(pt, ph, pw, c)`・トークン添字は `(f·H' + h)·W' + w`。
+        """The last dimension of the exit is `(pt, ph, pw, c)`, and the token index is
+        `(f·H' + h)·W' + w`.
 
-        添字の式で独立に置く（view 連鎖の写しではない）。
+        Placed independently by the index formula (not a copy of the view chain).
         """
         frames, height, width = TINY_LATENT
         patch_t, patch_h, patch_w = (1, 2, 2)
@@ -261,9 +276,10 @@ class TestHostFunctions:
                         assert got[0, c, f, h, w] == tokens[0, token, inner * channels + c]
 
     def test_the_base_tables_rebuild_the_upstream_rope_table_bit_exactly(self) -> None:
-        """素表（偶数列）を並べ替えて 2 回ずつ並べると、上流 `WanRotaryPosEmbed` の表に戻る。
+        """Reordering the base tables (even columns) and repeating each twice gives back the table
+        of upstream `WanRotaryPosEmbed`.
 
-        設定は実寸（head_dim 128・位置 1024）。
+        The settings are full size (head_dim 128, position 1024).
         """
         WanRotaryPosEmbed = _transformer_wan().WanRotaryPosEmbed  # noqa: N806
 
@@ -307,20 +323,22 @@ class TestHostFunctions:
         }
 
     def test_a_misaligned_base_slice_is_rejected(self) -> None:
-        """恒真化の門: ブロック境界をずらした切り出しは「その軸で動かない」ので落ちる。"""
+        """The check against a vacuous comparison: a slice with shifted block boundaries "does not
+        move along that axis", so it fails."""
         WanRotaryPosEmbed = _transformer_wan().WanRotaryPosEmbed  # noqa: N806
 
         base = dit_patch.dit_rope_base_tables(WanRotaryPosEmbed(24, (1, 2, 2), 32))
         broken = dict(base)
         broken["sin_h"] = torch.zeros_like(base["sin_h"])
 
-        with pytest.raises(AssertionError, match="動いていない"):
+        with pytest.raises(AssertionError, match="does not move on this axis"):
             dit_patch._assert_rope_base(broken, 32, (4, 4, 4))
 
 
 class TestDitTokens:
     def test_the_token_form_composes_back_to_the_upstream_forward_bit_exactly(self) -> None:
-        """`unpatchify ∘ S 形 ∘ patchify` が上流の forward とビット同一（合成モデル）。"""
+        """`unpatchify ∘ S form ∘ patchify` is bit-identical to the upstream forward (synthetic
+        model)."""
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)
         with torch.no_grad():
@@ -337,7 +355,8 @@ class TestDitTokens:
         assert torch.allclose(got, expected, rtol=0, atol=1e-5)
 
     def test_the_layers_form_ends_with_the_product_output(self) -> None:
-        """計測用（層別の出口）の最後の出力は製品のラッパと同じで、前の出力は上流の各ブロックの出力。"""
+        """The last output of the measurement form (per-layer exits) is the same as the product
+        wrapper, and the earlier outputs are the outputs of each upstream block."""
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)
         inputs = _token_inputs(model, latents, timestep, embeds)
@@ -354,9 +373,10 @@ class TestDitTokens:
             assert torch.allclose(got, want, rtol=0, atol=1e-5)
 
     def test_rounding_reaches_every_parameter_but_not_the_rope_tables(self) -> None:
-        """f16 の丸めはラッパ経由で上流の全パラメータに届き、RoPE の表には届かない。
+        """f16 rounding reaches every upstream parameter through the wrapper, but not the RoPE
+        tables.
 
-        全パラメータには conv の patch 埋め込み（ラッパの Linear はその view）も入る。
+        Every parameter includes the conv patch embedding (the wrapper's Linear is a view of it).
         """
         from wan.export_dit import round_to_f16
 
@@ -372,10 +392,12 @@ class TestDitTokens:
 
 class TestExport:
     def test_the_token_graph_has_one_symbol_and_no_resolution_dependent_constant(self) -> None:
-        """S 形の IR: 記号は `S` 1 つ・入力名と形・op 集合・S 依存の焼き込みが 1 本も無いこと。
+        """The S-form IR: one symbol `S`, the input names and shapes, the op set, and not a single
+        S-dependent baked-in value.
 
-        rank ≥ 3 の initializer は変調の表（`scale_shift_table` `[1,6,dim]` / `[1,2,dim]`）だけ。
-        RoPE の表や潜在の形に依る定数が畳み込まれたら（`Dim` の上限で焼かれるので）ここで破れる。
+        The only initializers of rank ≥ 3 are the modulation tables (`scale_shift_table`
+        `[1,6,dim]` / `[1,2,dim]`). If the RoPE tables or constants depending on the latent shape
+        were folded in (they would be baked at the upper bound of `Dim`), this breaks.
         """
         from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
         from karume.pipeline import export_module
@@ -423,13 +445,15 @@ class TestExport:
             "full-band",
             "full-accept",
         }
-        # 例示入力（先頭）は小さい方（`torch.export` はトレースで 1 回 forward を回す）。
+        # The example input (the first) is the smaller one (`torch.export` runs one forward while
+        # tracing).
         assert names[0].startswith("band-s00192")
 
     def test_full_size_cases_have_their_own_seeds(self) -> None:
-        """実寸のケースは 832×480 の 33 フレーム（S = 14,040 — ADR 0118 段 3）と 81 フレーム
-        （S = 32,760 — 段 8）の 8 本ずつで、帯を S ごとに独立に導くため seed が段 2 のどのケースとも
-        違う（決定用と受入れの間でも、S の間でも違う）。"""
+        """The full-size cases are 8 each at 832×480 with 33 frames (S = 14,040 — ADR 0118 step 3)
+        and with 81 frames (S = 32,760 — step 8), and to derive the band independently per S their
+        seeds differ from every step 2 case (and also between decision and acceptance, and between
+        the S values)."""
         from wan.export_dit import CASES
 
         full = [spec for spec in CASES if spec.full_size]
@@ -456,10 +480,10 @@ class TestExport:
         assert not others & {spec.seed for spec in full}
 
     def test_only_two_full_size_cases_keep_block_outputs(self) -> None:
-        """実寸の各ブロックの出力（S = 14,040 の 1 ケース 2.6 GB）は S = 14,040 の決定用 1 本と
-        受入れ 1 本（どちらも t = 999）だけが持つ。S = 32,760 は 1 本も持たない（層別の probe が
-        readback staging 約 6 GB で B570 に載らない）。S = 192 / 768 は全ケースが持つ（層ごとの
-        記録の相手）。"""
+        """The per-block outputs at full size (2.6 GB per case at S = 14,040) are kept only by one
+        decision case and one acceptance case at S = 14,040 (both t = 999). S = 32,760 keeps none
+        (the per-layer probe would need about 6 GB of readback staging, which does not fit on the
+        B570). S = 192 / 768 keep them for every case (the counterpart of the per-layer record)."""
         from wan.export_dit import CASES
 
         assert [spec.name((1, 2, 2)) for spec in CASES if spec.full_size and spec.blocks] == [
@@ -469,11 +493,12 @@ class TestExport:
         assert all(spec.blocks for spec in CASES if not spec.full_size)
 
     def test_the_largest_case_sits_exactly_on_the_declared_ceiling_of_s(self) -> None:
-        """`Dim("S")` の上限 32,760 は 81 フレームの格子 21·30·52 ちょうど。全ケースの S が
-        export の値域に入り、最大のケースが上限そのもの（受理集合の端を golden が覆う）。
+        """The upper bound 32,760 of `Dim("S")` is exactly the 81-frame grid 21·30·52. Every case's
+        S is within the export's range, and the largest case is the bound itself (the goldens cover
+        the edge of the accepted set).
 
-        値域は宣言の定数ではなく ExportedProgram の `range_constraints`（export が実際に受けた
-        制約）から読む。
+        The range is read from `range_constraints` of the ExportedProgram (the constraints the
+        export actually received), not from the declared constant.
         """
         from wan.export_dit import CASES, DIT_SYM_MAX, dynamic_shapes
 
@@ -499,15 +524,16 @@ class TestExport:
 
 
 class TestFlashAttentionOnly:
-    """CPU の参照とパッチ後の eager の attention を flash 経路に固定すること
-    （`dit_patch.flash_attention_only` — S = 32,760 で MATH へ落ちるとスコア行列 1 枚が
-    51.5 GB）。"""
+    """Pins the attention of the CPU reference and of the patched eager to the flash path
+    (`dit_patch.flash_attention_only` — falling back to MATH at S = 32,760 makes one score matrix
+    51.5 GB)."""
 
     @staticmethod
     def _diffusers_layout(sequence: int, dtype: torch.dtype) -> torch.Tensor:
-        """Wan2.1 の attention の形（heads 12・head_dim 128）を diffusers の native backend と同じ
-        並び（`[B,S,H,D]` を permute した `[B,H,S,D]` — 最終次元だけが連続）で。値は選択に効かない
-        ので未初期化（実寸でもページを触らない）。"""
+        """The shape of the Wan2.1 attention (12 heads, head_dim 128) in the same layout as the
+        diffusers native backend (`[B,H,S,D]` permuted from `[B,S,H,D]` — only the last dimension
+        is contiguous). The values do not affect the selection, so they are left uninitialised (no
+        pages are touched even at full size)."""
         return torch.empty(1, sequence, 12, 128, dtype=dtype).permute(0, 2, 1, 3)
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["f32", "f64"])
@@ -515,16 +541,18 @@ class TestFlashAttentionOnly:
     def test_the_default_choice_is_flash_for_the_wan_attention_shapes(
         self, dtype: torch.dtype, sequence: int
     ) -> None:
-        """固定が数値を変えない前提: 固定しなくても既定の選択は flash（self-attention `S×S` と
-        cross-attention `S×512`）。torch の更新でここが崩れたら、既存の golden は MATH の値で、固定
-        すると数値が変わる — golden の作り直しが要る。"""
+        """The premise that pinning does not change the numbers: even without pinning, the default
+        selection is flash (self-attention `S×S` and cross-attention `S×512`). If a torch update
+        broke this, the existing goldens would hold MATH values, and pinning would change the
+        numbers — the goldens would need to be rebuilt."""
         query = self._diffusers_layout(sequence, dtype)
         for key in (query, self._diffusers_layout(512, dtype)):
             assert torch._fused_sdp_choice(query, key, key) == int(SDPBackend.FLASH_ATTENTION)
 
     def test_an_input_flash_cannot_take_raises_instead_of_falling_back_to_math(self) -> None:
-        """故障注入: 最終次元が非連続の q（flash が受けない）は、既定では MATH へ黙って落ちて通り、
-        固定の下では RuntimeError で止まる。"""
+        """Fault injection: a q whose last dimension is non-contiguous (which flash does not take)
+        silently falls back to MATH and passes by default, and stops with a RuntimeError under the
+        pinning."""
         query = torch.randn(1, 2, 24, 30).transpose(-1, -2)
 
         assert torch._fused_sdp_choice(query, query, query) == int(SDPBackend.MATH)
@@ -533,7 +561,8 @@ class TestFlashAttentionOnly:
             functional.scaled_dot_product_attention(query, query, query)
 
     def test_the_fixation_leaves_the_reference_bit_identical(self) -> None:
-        """既定が flash の間は、固定した参照と素の forward がビット一致（合成モデル）。"""
+        """While the default is flash, the pinned reference and the plain forward are bit-identical
+        (synthetic model)."""
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)
         with torch.no_grad():
@@ -548,8 +577,9 @@ class TestFlashAttentionOnly:
         assert torch.equal(fixed, plain)
 
     def test_every_reference_and_eager_attention_runs_with_math_disabled(self, monkeypatch) -> None:
-        """f32 の参照・f64 の参照・パッチ後の eager（`export_dit.eager_report`）の SDPA の呼び出しが
-        全部、MATH を切った状態で走る（固定を外すとここで破れる）。"""
+        """The SDPA calls of the f32 reference, the f64 reference and the patched eager
+        (`export_dit.eager_report`) all run with MATH disabled (removing the pinning breaks
+        this)."""
         from wan.export_dit import Case, CaseSpec, eager_report, round_to_f16
 
         states: list[bool] = []
@@ -579,15 +609,15 @@ class TestFlashAttentionOnly:
             eager_report(wrapper, model, case)
             dit_patch.reference_dit_f64(model.double(), latents, timestep, embeds)
 
-        # 1 forward で self / cross の 2 本 × 2 層。3 経路で 12 本以上（eager の trunk の回し直し
-        # 分だけ増える）。
+        # One forward has 2 calls (self / cross) × 2 layers. 12 or more over the 3 paths (more for
+        # the re-runs of the eager trunk).
         assert len(states) >= 12
         assert not any(states)
         assert torch.backends.cuda.math_sdp_enabled()
 
 
 class TestFloat64Reference:
-    """実寸の f64 の参照（`dit_patch.float64_forward`）— 活性が全部 f64 で回ること。"""
+    """The full-size f64 reference (`dit_patch.float64_forward`) — all activations run in f64."""
 
     def _rounded_f64(self) -> nn.Module:
         from wan.export_dit import round_to_f16
@@ -597,8 +627,8 @@ class TestFloat64Reference:
         return model.double()
 
     def test_the_f64_forward_stays_in_f64_and_restores_tensor_float(self) -> None:
-        """出力は f64・f32 の参照とは丸めの差だけ違い、抜けた後の `Tensor.float()` は元の
-        f32 化。"""
+        """The output is f64, differs from the f32 reference only by rounding, and after leaving,
+        `Tensor.float()` is the original f32 conversion again."""
         model = self._rounded_f64()
         latents, timestep, embeds = _tiny_inputs(model)
         with torch.no_grad():
@@ -611,27 +641,31 @@ class TestFloat64Reference:
         assert "float" not in vars(torch.Tensor)
 
     def test_upstream_f32_casts_left_in_place_are_caught(self, monkeypatch) -> None:
-        """`.float()` の素通しを外すと（上流の FP32LayerNorm と残差の f32 化がそのまま走ると）
-        止まる。"""
+        """Removing the `.float()` pass-through (so that upstream's FP32LayerNorm and the f32
+        conversion of the residuals run as is) stops it."""
         from contextlib import nullcontext
 
         model = self._rounded_f64()
         latents, timestep, embeds = _tiny_inputs(model)
         monkeypatch.setattr(dit_patch, "_float_keeps_float64", nullcontext)
-        with torch.no_grad(), pytest.raises(AssertionError, match="f64 でない値"):
+        with torch.no_grad(), pytest.raises(AssertionError, match="non-f64 values were created"):
             dit_patch.reference_dit_f64(model, latents, timestep, embeds)
 
     @pytest.mark.parametrize("shape", [(2, 3), (16,), (1, 4)], ids=["2x3", "freq_dim", "1x4"])
     def test_a_small_f32_value_outside_the_timestep_sinusoid_is_caught(
         self, shape: tuple[int, ...]
     ) -> None:
-        """許すのは時刻の sinusoid の形（`[1,1]` / `[half]` / `[1,half]` / `[1,freq_dim]`）だけ。
+        """Only the shapes of the time sinusoid (`[1,1]` / `[half]` / `[1,half]` / `[1,freq_dim]`)
+        are allowed.
 
-        合成モデルの freq_dim は 16 — 要素数 16 以下でも形が違えば止まる（大きさで許すと素通り
-        する）。
+        The synthetic model's freq_dim is 16 — even 16 elements or fewer stop if the shape differs
+        (allowing by size would let things slip through).
         """
         model = self._rounded_f64()
-        with pytest.raises(AssertionError, match="f64 でない値"), dit_patch.float64_forward(model):
+        with (
+            pytest.raises(AssertionError, match="non-f64 values were created"),
+            dit_patch.float64_forward(model),
+        ):
             torch.ones(shape)
 
     def test_a_model_left_in_f32_is_rejected(self) -> None:
@@ -641,7 +675,7 @@ class TestFloat64Reference:
             dit_patch.reference_dit_f64(model, latents, timestep, embeds)
 
 
-#: 主張を全部満たす eager の要約（`export_dit.eager_report` と同じ欄）。
+#: An eager summary that satisfies every assertion (the same fields as `export_dit.eager_report`).
 _PASSING_REPORT = {
     "case": "tiny",
     "reference_max_abs": 1.5,
@@ -655,7 +689,8 @@ _PASSING_REPORT = {
 
 
 class TestTheEagerGate:
-    """書き手の eager 同値の門（`export_dit.eager_failures`）— 外れた要約は公開に至らない。"""
+    """The eager-equivalence check of the writers (`export_dit.eager_failures`) — a summary that
+    fails it never reaches publication."""
 
     def test_a_report_that_keeps_every_claim_passes(self) -> None:
         assert export_dit.eager_failures(_PASSING_REPORT) == []
@@ -666,12 +701,12 @@ class TestTheEagerGate:
     @pytest.mark.parametrize(
         ("change", "named"),
         [
-            ({"trunk_bit_exact": False}, "ビット一致しない"),
-            ({"patch_embedding_within_bound": False}, "上界を超える"),
-            ({"output_finite": False}, "非有限値"),
+            ({"trunk_bit_exact": False}, "is not bit-identical to upstream"),
+            ({"patch_embedding_within_bound": False}, "exceeds the reduction-order bound"),
+            ({"output_finite": False}, "non-finite values"),
             ({"full_max_abs_diff": float("nan")}, "full_max_abs_diff"),
             ({"reference_f32_vs_f64_ratio": float("inf")}, "reference_f32_vs_f64_ratio"),
-            ({"trunk_bit_exact": None}, "ビット一致しない"),
+            ({"trunk_bit_exact": None}, "is not bit-identical to upstream"),
         ],
         ids=["trunk", "patch-bound", "output", "nan-diff", "inf-ratio", "missing-claim"],
     )
@@ -686,10 +721,13 @@ class TestTheEagerGate:
             key: value for key, value in _PASSING_REPORT.items() if key != "trunk_max_abs_diff"
         }
 
-        assert export_dit.eager_failures(report) == ["trunk_max_abs_diff が有限の数でない（None）"]
+        assert export_dit.eager_failures(report) == [
+            "trunk_max_abs_diff is not a finite number (None)"
+        ]
 
     def test_the_patch_embedding_bound_holds_and_a_misordered_window_breaks_it(self) -> None:
-        """Linear 化と conv3d の差は上界の内。窓の並びを取り違えた入力は上界を大きく超える。"""
+        """The difference between the Linear form and conv3d is within the bound. An input with a
+        mixed-up window order exceeds the bound by far."""
         model = _tiny_dit()
         latents, *_ = _tiny_inputs(model)
         linear = dit_patch.patch_embedding_linear(model.patch_embedding)
@@ -704,7 +742,8 @@ class TestTheEagerGate:
         assert not bool(misordered.any())
 
 
-#: 合成モデルで回す書き手のケース（役割ごとの書き分けを 1 本ずつ — 実寸の役割は f64 の参照を持つ）。
+#: The writer cases run on the synthetic model (one per role-specific writing path — the full-size
+#: role has the f64 reference).
 _TINY_CASES = (
     export_dit.CaseSpec("band", TINY_LATENT, 500, 7, 1),
     export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False),
@@ -714,33 +753,35 @@ _TINY_NAMES = [spec.name((1, 2, 2)) for spec in _TINY_CASES]
 
 
 def _tiny_writer(monkeypatch: pytest.MonkeyPatch, series: Path) -> None:
-    """`export_dit` の emit / verify を合成モデルで回せるように差し替える（重みを読まない）。
+    """Stub `export_dit`'s emit / verify so they run on the synthetic model (no weights are read).
 
-    差し替えるのは入力の大きさ（テキストの幅 4096・512 行）と取得元・置き場とケースの表だけで、
-    参照・eager・書き出し・export は本物を通す。
+    Only the input sizes (text width 4096, 512 rows), the source, the location and the case table
+    are replaced; the reference, eager, writing and export are the real ones.
     """
     monkeypatch.setattr(export_dit, "CASES", _TINY_CASES)
     monkeypatch.setattr(export_dit, "load_transformer", lambda _name: _tiny_dit())
     monkeypatch.setattr(export_dit, "SERIES", series)
     monkeypatch.setattr(export_dit, "PROBE_SERIES", series.with_name("probe"))
     monkeypatch.setattr(export_dit, "I8_SERIES", series.with_name("i8"))
-    # i8 系列の実寸の格子（実物は 33 フレーム）を合成の格子へ — 実寸の役割の書き分けも 1 周で踏む。
+    # The full-size grid of the i8 series (33 frames for real) is pointed at the synthetic grid —
+    # one round also covers the role-specific writing of the full-size role.
     monkeypatch.setattr(export_dit, "I8_FULL_LATENTS", (TINY_LATENT,))
     monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
     monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
 
 
 def _emit_args(dtype: str = "f16", *, no_full: bool = False) -> argparse.Namespace:
-    """`emit` の引数（CLI の `main` が組むのと同じ欄）。"""
+    """The arguments of `emit` (the same fields as the CLI's `main` builds)."""
     return argparse.Namespace(
         model=export_dit.DEFAULT_MODEL, dtype=dtype, layers=False, no_full=no_full, check=False
     )
 
 
 def _break_the_rope(monkeypatch: pytest.MonkeyPatch) -> None:
-    """故障注入: 実数形 RoPE の値を 1 ULP 級ずらす（移植の誤りの代役）。
+    """Fault injection: move the values of the real-form RoPE by about 1 ULP (a stand-in for a
+    porting error).
 
-    trunk のビット一致が崩れる。
+    It breaks the bit identity of the trunk.
     """
     original = dit_patch.real_pair_rotary
     monkeypatch.setattr(
@@ -750,7 +791,8 @@ def _break_the_rope(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(scope="module")
 def emitted(tmp_path_factory) -> tuple[Path, dict]:
-    """合成モデルで emit を 1 周回した系列の部品ディレクトリと要約。"""
+    """The component directory and the summary of a series written by one emit round on the
+    synthetic model."""
     series = tmp_path_factory.mktemp("emit") / "series"
     with pytest.MonkeyPatch.context() as monkeypatch:
         _tiny_writer(monkeypatch, series)
@@ -759,10 +801,12 @@ def emitted(tmp_path_factory) -> tuple[Path, dict]:
 
 
 class TestTheCaseWriters:
-    """書き手（`_write_case_files` / `float64_references` / `emit`）が役割どおりに golden を書く。
+    """The writers (`_write_case_files` / `float64_references` / `emit`) write goldens according to
+    the role.
 
-    実寸の生成（数時間）の後の GPU の e2e で初めて割れる退行（f64 の参照の書き漏らし・f64 のまま
-    の格納・`blocks=False` のケースへの `block.NN`）を、合成モデルの 1 周で先に落とす。
+    Regressions that would first split in the GPU e2e after the full-size generation (hours) — a
+    missing f64 reference, storage left in f64, `block.NN` for a `blocks=False` case — fail first in
+    one round on the synthetic model.
     """
 
     def test_every_case_gets_an_io_and_a_reference_file(self, emitted) -> None:
@@ -788,7 +832,8 @@ class TestTheCaseWriters:
             }, name
 
     def test_block_outputs_and_the_f64_reference_follow_the_case_role(self, emitted) -> None:
-        """`block.NN` は `blocks` のケースだけ・`output.f64` は実寸の役割のケースだけ。"""
+        """`block.NN` only for the `blocks` cases; `output.f64` only for the cases of the full-size
+        role."""
         out_dir, _ = emitted
         layers = TINY_DIT["num_layers"]
         for spec, name in zip(_TINY_CASES, _TINY_NAMES, strict=True):
@@ -803,8 +848,9 @@ class TestTheCaseWriters:
     def test_the_f64_reference_is_stored_as_f32_and_differs_from_the_f32_reference(
         self, emitted
     ) -> None:
-        """TS の safetensors は F64 を読まない — f32 へ丸めて書く。中身は活性も f64 の forward で、
-        CPU f32 の参照の写しではない（丸めの差の分だけ離れる）。"""
+        """The TS safetensors does not read F64 — it is rounded to f32 and written. Its contents
+        come from a forward whose activations are also f64, not a copy of the CPU f32 reference
+        (they differ by the rounding)."""
         out_dir, _ = emitted
         for spec, name in zip(_TINY_CASES, _TINY_NAMES, strict=True):
             if not spec.full_size:
@@ -831,7 +877,8 @@ class TestTheCaseWriters:
 
 
 class TestTheWriterStopsBeforePublication:
-    """eager 同値が崩れたら公開しない（emit）・非 0 で終わる（--verify）。"""
+    """If the eager equivalence breaks, nothing is published (emit), and it exits non-zero
+    (--verify)."""
 
     def test_a_broken_rope_leaves_the_existing_series_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -842,7 +889,9 @@ class TestTheWriterStopsBeforePublication:
         _tiny_writer(monkeypatch, series)
         _break_the_rope(monkeypatch)
 
-        with pytest.raises(export_dit.EagerEquivalenceError, match="ビット一致しない"):
+        with pytest.raises(
+            export_dit.EagerEquivalenceError, match="is not bit-identical to upstream"
+        ):
             export_dit.emit(_emit_args())
 
         assert sorted(path.name for path in series.iterdir()) == [export_dit.TARGET]
@@ -859,11 +908,12 @@ class TestTheWriterStopsBeforePublication:
         assert export_dit.main(["--verify"]) == (1 if broken else 0)
 
 
-# ---- i8 系列（ADR 0120 決定 2 / 3） ---------------------------------------------------
+# ---- the i8 series (ADR 0120 decisions 2 / 3) --------------------------------------------
 
 
 def _weight_slots(model: nn.Module) -> dict[str, torch.Tensor]:
-    """上流の重みスロット（Linear と patch 埋め込みの Conv3d の `weight`）を FQN で。"""
+    """The upstream weight slots (the `weight` of the Linears and of the patch-embedding Conv3d) by
+    FQN."""
     return {
         f"{name}.weight": module.weight
         for name, module in model.named_modules()
@@ -872,8 +922,8 @@ def _weight_slots(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 class TestTheI8Rounding:
-    """`export_dit.fake_quant_i8` — 丸めは上流の重みスロット全部に届き、それ以外は上流の f32 の
-    値のまま（決定 2 — f16 の丸めを混ぜない）。"""
+    """`export_dit.fake_quant_i8` — rounding reaches every upstream weight slot, and everything else
+    keeps upstream's f32 values (decision 2 — no f16 rounding mixed in)."""
 
     def test_it_reaches_every_weight_slot_and_leaves_everything_else_at_the_source_value(
         self,
@@ -892,7 +942,7 @@ class TestTheI8Rounding:
             assert torch.equal(requantized, weight), name
             assert not torch.equal(weight, before[name]), name
         untouched = {name for name in before if name not in slots}
-        # bias・norm の weight・scale_shift_table・RoPE の表（rope のバッファ）。
+        # bias, norm weights, scale_shift_table and the RoPE tables (the rope buffers).
         assert any(name.endswith(".bias") for name in untouched)
         assert "scale_shift_table" in untouched
         for name, tensor in model.state_dict().items():
@@ -902,8 +952,8 @@ class TestTheI8Rounding:
     def test_a_patch_embedding_copied_instead_of_viewed_is_caught(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """故障注入: ラッパの patch 埋め込みが conv の重みの複製だと、参照（上流の conv）だけが
-        丸めの外に残る。"""
+        """Fault injection: if the wrapper's patch embedding were a copy of the conv weights, only
+        the reference (the upstream conv) would stay outside the rounding."""
         original = dit_patch.patch_embedding_linear
 
         def copied(conv: nn.Conv3d) -> nn.Linear:
@@ -919,8 +969,8 @@ class TestTheI8Rounding:
 
 class TestTheI8Cases:
     def test_the_i8_series_retakes_the_s192_and_s14040_cases_of_the_f16_series(self) -> None:
-        """決定 3: S = 192 の組（S = 128 の受入れ 1 本を含む）と S = 14,040 の 8 本を同じ行のまま。
-        `growth`（S = 768）と S = 32,760 は採らない。"""
+        """Decision 3: the S = 192 set (including the one S = 128 acceptance case) and the 8 cases
+        at S = 14,040, with the same rows. `growth` (S = 768) and S = 32,760 are not taken."""
         names = [spec.name((1, 2, 2)) for spec in export_dit.series_cases("i8")]
 
         assert names == [
@@ -968,14 +1018,16 @@ class TestTheI8Cases:
         ids=["no-full-on-f16", "i8-layers", "i8-no-f16", "no-f16-without-verify"],
     )
     def test_the_cli_refuses_flags_outside_their_series(self, argv: list[str]) -> None:
-        """`--no-full` は f16 系列の揃った golden を欠けた組で据え替える口になるので i8 だけ。"""
+        """`--no-full` would be a way to replace the complete goldens of the f16 series with an
+        incomplete set, so it is i8 only."""
         with pytest.raises(SystemExit):
             export_dit.main(argv)
 
 
 @pytest.fixture(scope="module")
 def emitted_i8(tmp_path_factory) -> tuple[Path, dict]:
-    """合成モデルで i8 系列の emit を 1 周回した系列の部品ディレクトリと要約。"""
+    """The component directory and the summary of a series written by one i8 emit round on the
+    synthetic model."""
     series = tmp_path_factory.mktemp("emit-i8") / "series"
     with pytest.MonkeyPatch.context() as monkeypatch:
         _tiny_writer(monkeypatch, series)
@@ -984,7 +1036,8 @@ def emitted_i8(tmp_path_factory) -> tuple[Path, dict]:
 
 
 class TestTheI8Writer:
-    """i8 系列の書き手（`emit --dtype i8`）— 置き場・格納・golden の形。"""
+    """The writer of the i8 series (`emit --dtype i8`) — location, storage and the shape of the
+    goldens."""
 
     def test_it_writes_its_own_series_and_leaves_the_f16_series_alone(self, emitted_i8) -> None:
         out_dir, summary = emitted_i8
@@ -994,7 +1047,8 @@ class TestTheI8Writer:
         assert not (out_dir.parent.with_name("series")).exists()
 
     def test_the_linear_weights_are_stored_as_i8_and_nothing_as_f16(self, emitted_i8) -> None:
-        """束縛表に i8 があり f16 / i4 が無い。i8 の本数は linear の本数（scale は companion）。"""
+        """The binding table has i8 and no f16 / i4. The number of i8 entries is the number of
+        linears (the scales are companions)."""
         from _shared.container_read import read_layouts
 
         out_dir, summary = emitted_i8
@@ -1007,7 +1061,8 @@ class TestTheI8Writer:
         assert summary["compressed_tensors"] == linears
 
     def test_biases_keep_the_source_float32_values(self, emitted_i8) -> None:
-        """決定 2: i8 系列は f16 の丸めを掛けない — bias は上流の f32 の値がビットのまま入る。"""
+        """Decision 2: the i8 series applies no f16 rounding — the biases hold upstream's f32
+        values bit for bit."""
         from _shared.container_read import read_stored
 
         out_dir, _ = emitted_i8
@@ -1052,12 +1107,13 @@ class TestTheI8Writer:
         assert export_dit.main(["--verify", "--dtype", "i8"]) == (1 if broken else 0)
 
 
-# ---- 実重み（pin した revision — 無い機では SKIP） ----------------------------------
+# ---- real weights (pinned revision — SKIP on a machine without them) --------------------------
 
 
 @pytest.fixture(scope="module")
 def wan_transformer(wan_snapshot) -> nn.Module:
-    """実重みの DiT（CPU f32・素のまま）。テストの間で丸め等の書き換えをしない MUST。"""
+    """The real-weight DiT (CPU f32, untouched). MUST: tests do not rewrite it (rounding and so
+    on)."""
     pytest.importorskip("diffusers")
     from wan.export_dit import load_transformer
 
@@ -1066,12 +1122,15 @@ def wan_transformer(wan_snapshot) -> nn.Module:
 
 class TestRealWeights:
     def test_the_patched_path_matches_the_upstream_forward(self, wan_transformer) -> None:
-        """実重み・S = 192（非正方 2·8·12）で、patch 埋め込み以外の書き換えは上流と**ビット一致**。
+        """With the real weights at S = 192 (non-square 2·8·12), every rewrite other than the patch
+        embedding is **bit-identical** to upstream.
 
-        patch 埋め込みの Linear 化だけは縮約順が conv3d と違いうる（実測はこの機の torch CPU で差
-        0）ので、差は縮約順の違いの上界 `2·γ_{K+1}·Σ|w·x|`（`γ_n = n·u / (1 − n·u)`・`u = 2⁻²⁴`・K =
-        64 と bias — 書き手の門と同じ {@link wan.export_dit.patch_embedding_error_bound}）で押さえる
-        — 実装の誤り（並びの取り違え）は値そのものの大きさで出る。
+        Only the Linear form of the patch embedding may differ from conv3d in reduction order (the
+        measured difference is 0 with torch CPU on this machine), so the difference is bounded by
+        the reduction-order bound `2·γ_{K+1}·Σ|w·x|` (`γ_n = n·u / (1 − n·u)`, `u = 2⁻²⁴`, K = 64
+        plus the bias — the same {@link wan.export_dit.patch_embedding_error_bound} as the writer's
+        check) — an implementation error (a mixed-up ordering) shows in the magnitude of the values
+        themselves.
         """
         from wan.pipeline_ref import pad_text_embeds
 
@@ -1093,11 +1152,13 @@ class TestRealWeights:
         assert bool(((embedded - hidden).abs() <= bound).all())
 
     def test_the_i8_series_quantizes_the_307_linear_weights(self, wan_transformer) -> None:
-        """i8 の対象（ラッパの重みスロット）は linear 307 本・出力チャネル 700,480。
+        """The i8 targets (the wrapper's weight slots) are 307 linears with 700,480 output
+        channels.
 
-        数は ADR 0120 決定 2・調査 §2.2 / §2.3（上流のヘッダ）。patch 埋め込みは conv の重みの
-        view の Linear 1 本で、Conv3d はラッパに無い（二重に数えない）。数えるだけで重みは
-        書き換えない（fixture の MUST）。
+        The counts come from ADR 0120 decision 2 and survey §2.2 / §2.3 (the upstream headers). The
+        patch embedding is one Linear that is a view of the conv weights, and the Conv3d is not in
+        the wrapper (no double counting). It only counts and does not rewrite the weights (the MUST
+        of the fixture).
         """
         from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
 

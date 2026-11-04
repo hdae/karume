@@ -62,27 +62,28 @@ from typing import Any
 
 from _shared.qwen2_tokenizer import ALL_CODEPOINTS, Ranges, in_ranges, split_added_tokens, to_ranges
 
-#: `Precompiled` が丸ごと置換を試みる上限（spm_precompiled の `grapheme.len() < 6`）。
+#: The limit under which `Precompiled` tries a whole-cluster replacement (spm_precompiled's
+#: `grapheme.len() < 6`).
 CLUSTER_BYTE_LIMIT = 6
 
-#: Unigram の未知文字ペナルティ（`tokenizers` の `K_UNK_PENALTY`）。
+#: Unigram's unknown-character penalty (`tokenizers`' `K_UNK_PENALTY`).
 UNK_PENALTY = 10.0
 
 # ---------------------------------------------------------------------------
-# ① DARTS トライの復号と規則の最小化
+# ① Decoding the DARTS trie and minimising the rules
 # ---------------------------------------------------------------------------
 
 
 def decode_charsmap(blob: bytes) -> dict[str, str]:
-    """`precompiled_charsmap` の Darts-clone 二重配列から全ての（鍵, 値）を取り出す。
+    """Extract every (key, value) from the Darts-clone double array of `precompiled_charsmap`.
 
-    形式は spm_precompiled と同じ: u32 LE のトライバイト長 + トライ本体 + NUL 区切りの
-    正規化文字列プール。単位の意味（has_leaf / value / label / offset）は Darts-clone 0.32
-    に従う。
+    The format is the same as spm_precompiled's: the trie byte length as u32 LE + the trie body +
+    a pool of NUL-separated normalized strings. The meaning of a unit (has_leaf / value / label /
+    offset) follows Darts-clone 0.32.
     """
     trie_size = struct.unpack_from("<I", blob, 0)[0]
     if trie_size % 4 != 0 or 4 + trie_size > len(blob):
-        raise ValueError(f"charsmap のトライ長 {trie_size} が不正")
+        raise ValueError(f"invalid charsmap trie length {trie_size}")
     units = struct.unpack(f"<{trie_size // 4}I", blob[4 : 4 + trie_size])
     pool = blob[4 + trie_size :]
 
@@ -93,7 +94,8 @@ def decode_charsmap(blob: bytes) -> dict[str, str]:
         return pool[index:end].decode("utf-8")
 
     out: dict[str, str] = {}
-    # 再帰は最長鍵のバイト長しか深くならないが、明示スタックで回す。
+    # Recursion would only go as deep as the longest key's byte length, but an explicit stack is
+    # used.
     root = 0 ^ ((units[0] >> 10) << ((units[0] & (1 << 9)) >> 6))
     stack: list[tuple[int, bytes]] = [(root, b"")]
     while stack:
@@ -117,17 +119,19 @@ def decode_charsmap(blob: bytes) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class SpmTables:
-    """`Precompiled` を TS が引くだけの形に畳んだもの。"""
+    """`Precompiled` folded into a form the TS side only looks up."""
 
-    #: 1 コードポイント鍵の写像（鍵 = 1 文字）。
+    #: The mapping of one-code-point keys (key = one character).
     single: dict[str, str]
-    #: 2 コードポイント鍵の写像（真の接頭辞に規則が無いものだけ = 発火しうる分）。
+    #: The mapping of two-code-point keys (only those with no rule on a proper prefix = the ones
+    #: that can fire).
     multi: dict[str, str]
-    #: 直前の文字と同じクラスタに合流する文字（UAX#29 の Extend / ZWJ / SpacingMark 相当）。
+    #: Characters that join the preceding character's cluster (UAX#29's Extend / ZWJ /
+    #: SpacingMark).
     extend: Ranges
-    #: この文字の直後で必ずクラスタが切れる（UAX#29 GB4 の Control 相当）。
+    #: The cluster always breaks right after these characters (UAX#29 GB4's Control).
     break_after: Ranges
-    #: 後続をクラスタに引き込む文字（UAX#29 GB9b の Prepend 相当）。
+    #: Characters that pull what follows into their cluster (UAX#29 GB9b's Prepend).
     prepend: Ranges
 
     def to_json(self) -> dict[str, Any]:
@@ -151,11 +155,11 @@ class SpmTables:
 
 
 def build_spm_tables(blob: bytes) -> SpmTables:
-    """charsmap と正本（`normalizers.Precompiled`）から表を作る。
+    """Build the tables from the charsmap and the source of truth (`normalizers.Precompiled`).
 
-    規則の最小化: 丸ごと置換は「最短の一致接頭辞」を採るので、真の接頭辞に規則を持つ鍵は
-    永久に発火しない。加えてクラスタが 6 バイト以上だと丸ごと置換の経路自体が使われないので、
-    6 バイト以上の鍵も落とす。
+    Rule minimisation: the whole replacement takes "the shortest matching prefix", so a key that
+    has a rule on a proper prefix never fires. In addition, a cluster of 6 bytes or more never
+    takes the whole-replacement path at all, so keys of 6 bytes or more are dropped too.
     """
     from tokenizers import normalizers
 
@@ -168,10 +172,13 @@ def build_spm_tables(blob: bytes) -> SpmTables:
     single = {k: v for k, v in minimal.items() if len(k) == 1}
     multi = {k: v for k, v in minimal.items() if len(k) > 1}
     if any(len(k) != 2 for k in multi):
-        raise ValueError("2 コードポイントを超える発火可能規則がある — 畳み方の前提が崩れた")
+        raise ValueError(
+            "a rule that can fire spans more than two code points — the folding's premise broke"
+        )
 
-    # --- 探り針: 「規則が発火する 2cp クラスタ」に x を足して 6 バイト以上へ押し上げる。
-    # x が同じクラスタに入れば丸ごと置換の経路が使えなくなり、規則が発火しないことで判る。
+    # --- Probe: append x to "a 2cp cluster whose rule fires" to push it to 6 bytes or more.
+    # If x joins the same cluster, the whole-replacement path becomes unusable, which shows as
+    # the rule not firing.
     probe_short = next(k for k in multi if len(k.encode()) == 3)
     probe_long = next(k for k in multi if len(k.encode()) == 5)
 
@@ -184,7 +191,9 @@ def build_spm_tables(blob: bytes) -> SpmTables:
             return True
         if got == minimal[probe] + tail:
             return False
-        raise ValueError(f"延長探り針が想定外の出力: {got!r}（probe={probe!r} x={x!r}）")
+        raise ValueError(
+            f"unexpected output of the extend probe: {got!r} (probe={probe!r} x={x!r})"
+        )
 
     extend: list[int] = []
     for cp in ALL_CODEPOINTS:
@@ -195,8 +204,8 @@ def build_spm_tables(blob: bytes) -> SpmTables:
         if verdict:
             extend.append(cp)
 
-    # --- prepend: c + "o" + U+0303 で õ が合成されるか。合成されなければ c が後続を
-    # 引き込んでクラスタ化している（= 丸ごと置換の経路が使えず規則が不発火）。
+    # --- prepend: does c + "o" + U+0303 compose õ? If not, c pulls what follows into its
+    # cluster (= the whole-replacement path is unusable and the rule does not fire).
     prepend_tail = "o" + chr(0x0303)
     prepend: list[int] = []
     for cp in ALL_CODEPOINTS:
@@ -206,11 +215,11 @@ def build_spm_tables(blob: bytes) -> SpmTables:
         if got == head + prepend_tail:
             prepend.append(cp)
         elif got != head + chr(0x00F5):
-            raise ValueError(f"prepend 探り針が想定外の出力: {got!r}（U+{cp:04X}）")
+            raise ValueError(f"unexpected output of the prepend probe: {got!r} (U+{cp:04X})")
 
-    # --- break_after: 「延長かつ規則あり」の U+0EB3 と「延長かつ規則なし」の U+0337 を
-    # 後ろに置く。切れれば [U+0EB3, U+0337] が 5 バイトのクラスタになり U+0337 が捨てられ、
-    # 切れなければ合計 6 バイト以上で 1 文字ずつの経路になり U+0337 が残る。
+    # --- break_after: append U+0EB3 ("extend, with a rule") and U+0337 ("extend, without a
+    # rule"). With a break, [U+0EB3, U+0337] becomes a 5-byte cluster and U+0337 is dropped;
+    # without one, the total is 6 bytes or more, the per-character path is taken and U+0337 stays.
     break_tail = chr(0x0EB3) + chr(0x0337)
     break_cluster = single[chr(0x0EB3)]
     break_perchar = single[chr(0x0EB3)] + chr(0x0337)
@@ -222,7 +231,7 @@ def build_spm_tables(blob: bytes) -> SpmTables:
         if got == head + break_cluster:
             break_after.append(cp)
         elif got != head + break_perchar:
-            raise ValueError(f"break-after 探り針が想定外の出力: {got!r}（U+{cp:04X}）")
+            raise ValueError(f"unexpected output of the break-after probe: {got!r} (U+{cp:04X})")
 
     return SpmTables(
         single=single,
@@ -234,14 +243,15 @@ def build_spm_tables(blob: bytes) -> SpmTables:
 
 
 def normalize_with_tables(tables: SpmTables, text: str) -> str:
-    """焼いた表だけで `Precompiled` を再現する（TS 実装 `normalizeSpm` の鏡像）。"""
+    """Reproduce `Precompiled` from the baked tables alone (the mirror of the TS implementation
+    `normalizeSpm`)."""
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
         j = i
         while j < n and in_ranges(tables.prepend, ord(text[j])):
             j += 1
-        # prepend の直後が制御文字ならそこで切れる（引き込まない）。
+        # A control character right after a prepend breaks there (it is not pulled in).
         if j < n and not (j > i and in_ranges(tables.break_after, ord(text[j]))):
             if text[j] == "\r" and j + 1 < n and text[j + 1] == "\n":
                 j += 2  # GB3: CR × LF
@@ -254,7 +264,7 @@ def normalize_with_tables(tables: SpmTables, text: str) -> str:
         cluster = text[i:j]
         replacement: str | None = None
         if len(cluster.encode()) < CLUSTER_BYTE_LIMIT:
-            # 最短の一致接頭辞が勝つ。残りは捨てられる。
+            # The shortest matching prefix wins. The rest is dropped.
             for length in (1, 2):
                 if length <= len(cluster):
                     hit = (tables.single if length == 1 else tables.multi).get(cluster[:length])
@@ -279,8 +289,9 @@ def _sample_ranges(ranges: Ranges, limit: int) -> list[int]:
     return out
 
 
-#: 乱択試験に必ず混ぜる文字（ハングル字母 / 地域表示子 / 肌色 / 異体字 / タイ / インド系）。
-#: 「6 バイト境界のおかげで境界規則を実装せずに済んでいる」側を実際に踏ませるための種。
+#: Characters always mixed into the random test (Hangul jamo / regional indicators / skin tones /
+#: variation selectors / Thai / Indic). Seeds that make the test actually exercise the side where
+#: "the 6-byte boundary spares us implementing the boundary rules".
 _FUZZ_SEEDS = (
     0x3053,
     0x4E16,
@@ -307,10 +318,11 @@ _FUZZ_SEEDS = (
 
 
 def verify_spm_tables(tables: SpmTables, blob: bytes, *, fuzz: int = 200_000) -> dict[str, Any]:
-    """畳み込みが正本と同値であることを網羅 + 乱択で確かめる。
+    """Check exhaustively + randomly that the folding is equivalent to the source of truth.
 
-    (a) 全コードポイント単体 (b) 発火規則の鍵そのもの (c) 表由来の文字を混ぜた乱択列。
-    seed は固定なので、同じ表なら同じ列を検査する（再現しない検証にしない）。
+    (a) every code point alone (b) the keys of the rules that fire (c) random strings mixing
+    characters taken from the tables. The seed is fixed, so the same tables check the same
+    strings (the check is never unreproducible).
     """
     import random
 
@@ -322,12 +334,12 @@ def verify_spm_tables(tables: SpmTables, blob: bytes, *, fuzz: int = 200_000) ->
         c = chr(cp)
         got, want = norm.normalize_str(c), normalize_with_tables(tables, c)
         if got != want:
-            raise ValueError(f"単一 cp 不一致 U+{cp:04X}: 正本={got!r} 表={want!r}")
+            raise ValueError(f"single cp mismatch U+{cp:04X}: truth={got!r} tables={want!r}")
 
     for key in list(tables.single) + list(tables.multi):
         got, want = norm.normalize_str(key), normalize_with_tables(tables, key)
         if got != want:
-            raise ValueError(f"規則鍵で不一致 {key!r}: 正本={got!r} 表={want!r}")
+            raise ValueError(f"mismatch on rule key {key!r}: truth={got!r} tables={want!r}")
 
     alphabet = [chr(c) for c in range(0x00, 0x7F)]
     alphabet += [chr(c) for c in _sample_ranges(tables.extend, 400)]
@@ -343,8 +355,8 @@ def verify_spm_tables(tables: SpmTables, blob: bytes, *, fuzz: int = 200_000) ->
         got, want = norm.normalize_str(s), normalize_with_tables(tables, s)
         if got != want:
             raise ValueError(
-                f"乱択列で不一致 {[hex(ord(c)) for c in s]}: "
-                f"正本={[hex(ord(c)) for c in got]} 表={[hex(ord(c)) for c in want]}"
+                f"mismatch on random string {[hex(ord(c)) for c in s]}: "
+                f"truth={[hex(ord(c)) for c in got]} tables={[hex(ord(c)) for c in want]}"
             )
     return {
         "codepoints": len(ALL_CODEPOINTS),
@@ -360,9 +372,10 @@ def verify_spm_tables(tables: SpmTables, blob: bytes, *, fuzz: int = 200_000) ->
 
 
 def verify_char_classes(classes: dict[str, Ranges]) -> dict[str, Any]:
-    r"""`\s` が `WhitespaceSplit`（T5 側の分割）の空白集合と一致することを確かめる。
+    r"""Check that `\s` equals the whitespace set of `WhitespaceSplit` (the T5 side's split).
 
-    一致するなら T5 側は同じ表を使い回せる。ずれたら別の表が要るので落とす。
+    If they match, the T5 side can reuse the same table. If they drift, a separate table is
+    needed, so it fails.
     """
     from tokenizers import pre_tokenizers
 
@@ -370,21 +383,21 @@ def verify_char_classes(classes: dict[str, Ranges]) -> dict[str, Any]:
     for cp in ALL_CODEPOINTS:
         splits = len(ws.pre_tokenize_str("a" + chr(cp) + "b")) > 1
         if splits != in_ranges(classes["space"], cp):
-            raise ValueError(f"U+{cp:04X}: WhitespaceSplit と \\s の判定が食い違う")
+            raise ValueError(f"U+{cp:04X}: WhitespaceSplit and \\s disagree")
     return {name: len(r) for name, r in classes.items()}
 
 
 # ---------------------------------------------------------------------------
-# ② 参照実装 — T5（Unigram + Metaspace）
+# ② Reference implementation — T5 (Unigram + Metaspace)
 # ---------------------------------------------------------------------------
 
 METASPACE = "▁"
 
 
 def t5_pre_tokenize(text: str, space: Ranges) -> list[str]:
-    """WhitespaceSplit → Metaspace（replacement=▁ / prepend_scheme=always / split）。
+    """WhitespaceSplit → Metaspace (replacement=▁ / prepend_scheme=always / split).
 
-    `split=true` は MergedWithNext なので、区切りの `▁` は**次の**断片の先頭に付く。
+    `split=true` is MergedWithNext, so a separating `▁` goes at the start of the **next** piece.
     """
     out: list[str] = []
     for word in _split_on_space(text, space):
@@ -416,7 +429,8 @@ def _split_on_space(text: str, space: Ranges) -> list[str]:
 
 
 class T5Reference:
-    """T5（Unigram）トークナイザの参照実装（TS 実装の鏡像）。"""
+    """Reference implementation of the T5 (Unigram) tokenizer (the mirror of the TS
+    implementation)."""
 
     def __init__(
         self,
@@ -439,15 +453,16 @@ class T5Reference:
         self.used_vocab: set[str] = set()
 
     def viterbi_pieces(self, piece: str) -> list[str]:
-        """`tokenizers` の `Lattice::viterbi` をコードポイント位置で写す。
+        """Port `tokenizers`' `Lattice::viterbi` onto code-point positions.
 
-        同点は「end_nodes に先に積まれた方」が勝つ。積む順は begin 昇順（= 同じ位置で終わる
-        なら長い方が先）なので、同点では長い断片が採られる — 比較は**厳密な `>`** でなければ
-        ならない（`>=` にすると短い方が勝ち、稀に別の分割になって id 列が静かに変わる）。
+        On a tie, "the one pushed onto end_nodes first" wins. They are pushed in ascending begin
+        order (= of those ending at the same position, the longer comes first), so a tie takes
+        the longer piece — the comparison MUST be a **strict `>`** (with `>=` the shorter wins,
+        occasionally giving another split and silently changing the id sequence).
         """
         n = len(piece)
         unk_score = self.min_score - UNK_PENALTY
-        # begin[pos] = そこから始まるノードの長さ列（挿入順 = 長さ昇順）
+        # begin[pos] = the lengths of the nodes starting there (insertion order = ascending length)
         begin: list[list[int]] = []
         scores: list[list[float]] = []
         for pos in range(n):
@@ -463,7 +478,7 @@ class T5Reference:
                 node_scores.insert(0, unk_score)
             begin.append(lengths)
             scores.append(node_scores)
-        # end[e] = そこで終わるノード（開始位置, スロット）。begin 昇順に積む。
+        # end[e] = the nodes ending there (start position, slot), pushed in ascending begin order.
         end: list[list[tuple[int, int]]] = [[] for _ in range(n + 1)]
         for pos in range(n):
             for slot, length in enumerate(begin[pos]):
@@ -473,7 +488,7 @@ class T5Reference:
         prev: list[list[tuple[int, int] | None]] = [[None] * len(begin[p]) for p in range(n)]
 
         def best_left(pos: int) -> tuple[float, tuple[int, int] | None] | None:
-            """pos で終わる最良ノード。pos=0 は bos（スコア 0）。到達不能なら None。"""
+            """The best node ending at pos. pos=0 is bos (score 0). None if unreachable."""
             if pos == 0:
                 return 0.0, None
             found: tuple[float, tuple[int, int] | None] | None = None
@@ -502,12 +517,12 @@ class T5Reference:
         return [piece[p : p + begin[p][s]] for p, s in path]
 
     def encode_piece(self, piece: str) -> list[int]:
-        """連続する未知ノードは 1 トークンに融合される（`fuse_unk`）。
+        """Consecutive unknown nodes are fused into one token (`fuse_unk`).
 
-        NOTE: `tokenizer.json` の `fuse_unk` は `null` だが、`tokenizers` の Unigram は
-        **未指定でも融合する**（Rust 側の既定）。融合しない実装にすると日本語プロンプトで
-        unk が 1 文字ずつ並び、`AutoTokenizer` との突合（`anima/tests/test_demo.py`）が
-        `japanese` ケースで落ちる。
+        NOTE: `fuse_unk` in `tokenizer.json` is `null`, but `tokenizers`' Unigram **fuses even
+        when it is unspecified** (the Rust-side default). An implementation that does not fuse
+        lists one unk per character on Japanese prompts, and the comparison with `AutoTokenizer`
+        (`anima/tests/test_demo.py`) fails on the `japanese` case.
         """
         out: list[int] = []
         pending = ""
@@ -526,10 +541,11 @@ class T5Reference:
         return out
 
     def encode(self, text: str, max_length: int | None = None) -> list[int]:
-        """MUST: 切り詰めは `</s>` を足す**前**（正本の truncation は post_processor の前）。
+        """MUST: truncate **before** appending `</s>` (the source of truth truncates before the
+        post_processor).
 
-        `max_length` の後に足すと 513 個になる。結果として T5 の id 列は常に `</s>` で
-        終わり、長さは必ず 1 以上。
+        Appending after `max_length` would give 513 ids. As a result, T5's id sequence always
+        ends with `</s>` and is always at least 1 long.
         """
         ids: list[int] = []
         for chunk, is_added in split_added_tokens(text, sorted(self.added, key=len, reverse=True)):
@@ -545,7 +561,7 @@ class T5Reference:
 
 
 # ---------------------------------------------------------------------------
-# tokenizer.json の読み出し
+# Reading tokenizer.json
 # ---------------------------------------------------------------------------
 
 
@@ -564,7 +580,7 @@ class AnimaTokenizerSource:
 def t5_charsmap(t5: dict[str, Any]) -> bytes:
     normalizer = t5["normalizer"]
     if normalizer.get("type") != "Precompiled":
-        raise ValueError(f"T5 の normalizer が Precompiled でない: {normalizer.get('type')}")
+        raise ValueError(f"the T5 normalizer is not Precompiled: {normalizer.get('type')}")
     return base64.b64decode(normalizer["precompiled_charsmap"])
 
 

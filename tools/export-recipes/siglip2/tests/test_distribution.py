@@ -1,15 +1,17 @@
-"""SigLIP2 の配布 recipe（`siglip2.distribution`）— 組み立て 1 周ぶんの単体テスト。
+"""SigLIP2 distribution recipe (`siglip2.distribution`) — unit tests over one assembly pass.
 
-実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小コンテナ**（`ir_fixtures`）で、
-門に落とされることを見るケースも同じ器で作る（{@link _siglip2_container}）。
-前処理定数の出どころ（`preprocessor_config.json`）も合成 JSON で足りる。
+No real assets are used. The input that reaches the assembly is a **valid minimal container** of a
+few KB (`ir_fixtures`), and the cases that check a rejection by a check are built in the same
+container ({@link _siglip2_container}). Synthetic JSON is enough for the source of the
+preprocessing constants (`preprocessor_config.json`) too.
 
-manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
-`shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
+Since manifest v2 (`karume/2` — ADR 0041), the in-repository layout is uniformly "per-model
+subtrees + `shared/`", so every expected path starts with `<model name>/…`.
 
-core だけで観測できる層（合成計画で足りる規模上限・quant 完全写像・staging/swap の不変条件・
-帰属プロファイルの解決規則）は `tools/exporter/tests/test_dist.py` が持つ（ADR 0065 段 3+4 の
-分割）。テンプレート単位の門は `siglip2/tests/test_card.py`。
+The layers observable from the core alone (the size limits a synthetic plan can cover, the complete
+quant mapping, the staging/swap invariants, the resolution rules of attribution profiles) live in
+`tools/exporter/tests/test_dist.py` (the split of ADR 0065 steps 3+4). Per-template checks are in
+`siglip2/tests/test_card.py`.
 """
 
 from __future__ import annotations
@@ -65,7 +67,8 @@ from siglip2.distribution import (
 
 @pytest.fixture(autouse=True)
 def _baked_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """フィクスチャ容器に「台本が焼いた」出所を名乗らせる（出所の門の正常形）。"""
+    """Make the fixture container claim the provenance "baked by the script" (the passing form of
+    the provenance check)."""
     stamp_fixture_provenance(
         monkeypatch,
         Provenance(
@@ -80,12 +83,13 @@ def _write(path: Path, payload: bytes) -> None:
 
 
 def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
-    """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。"""
+    """Expected paths inside the model subtree (the uniform layout of ADR 0041 §9)."""
     return [f"{model}/{rel}" for rel in paths]
 
 
 def _placed_paths() -> list[str]:
-    """配布形に現れる相対 path（weights の席は part 連番に展開される — container-v1 §8）。"""
+    """Relative paths that appear in the distribution (a weights slot expands into numbered parts
+    — container-v1 §8)."""
     return placed_paths(SIGLIP2_OUTPUT_PATHS, SIGLIP2_WEIGHTS)
 
 
@@ -95,12 +99,13 @@ def _present(out_dir: Path) -> list[str]:
 
 # ---- SigLIP2（image-feature-extraction）--------------------------------------
 #
-# 偽資産は**実物と違う数**にする（96×64 の非正方・mean/std は 0.5 でない・hidden 7）— 前処理
-# 定数や寸法を焼き込んでいれば落ちる。非正方なのは、`imageWidth` / `imageHeight` の取り違えが
-# 正方形では原理的に検出できないため。
+# The fake assets use **numbers different from the real ones** (non-square 96×64, mean/std not
+# 0.5, hidden 7) — hard-coded preprocessing constants or dimensions would fail. Non-square because
+# a mix-up of `imageWidth` / `imageHeight` cannot in principle be detected with a square.
 
-#: `pipelineConfig` の欄名（TS 側 `packages/models/src/siglip2/config.ts` の `ROOT_KEYS` の写し）。
-#: **ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は完全一致が要る。
+#: Field names of `pipelineConfig` (a copy of `ROOT_KEYS` in the TS-side
+#: `packages/models/src/siglip2/config.ts`). **The loader rejects both unknown and missing keys at
+#: parse time**, so the field names of the baking side and the loading side must match exactly.
 _SIGLIP2_CONFIG_KEYS = (
     "imageWidth",
     "imageHeight",
@@ -114,11 +119,12 @@ _SIGLIP2_HEIGHT = 96
 _SIGLIP2_WIDTH = 64
 _SIGLIP2_HIDDEN = 7
 
-#: 2 モデル目（so400m）の寸法。**base と 1 つも重ねない** — 1 リポ 2 モデルの器で
-#: `pipelineConfig` がモデルごとに宣言されていることは、値が違うときしか観測できない。
+#: Dimensions of the second model (so400m). **None overlaps base** — that `pipelineConfig` is
+#: declared per model in a one-repository, two-model layout can only be observed when the values
+#: differ.
 _SIGLIP2_SO400M_DIMS = (48, 80, 5)
 
-#: 偽の `preprocessor_config.json`（実物と同じ欄・違う値）。
+#: Fake `preprocessor_config.json` (the same fields as the real one, different values).
 _SIGLIP2_PREPROCESSOR: Mapping[str, Any] = {
     "do_normalize": True,
     "do_rescale": True,
@@ -133,7 +139,8 @@ _SIGLIP2_PREPROCESSOR: Mapping[str, Any] = {
 
 
 def _siglip2_preprocessor(height: int, width: int) -> dict[str, Any]:
-    """同じ欄・違う寸法の `preprocessor_config.json`（2 モデル目の入力素材）。"""
+    """`preprocessor_config.json` with the same fields and different dimensions (the second
+    model's input)."""
     return {**_SIGLIP2_PREPROCESSOR, "size": {"height": height, "width": width}}
 
 
@@ -145,7 +152,8 @@ def _siglip2_graph(
     outputs: int = 1,
     symbols: Sequence[str] = (),
 ) -> str:
-    """門が読む最小の IR メタデータ（入力 1 本・出力の宣言・記号次元）。"""
+    """Minimal IR metadata the checks read (one input, the output declaration, symbolic
+    dimensions)."""
     names = [f"out_{index}" for index in range(outputs)]
     return json.dumps(
         {
@@ -165,22 +173,25 @@ def _siglip2_container(
     input_shape: Sequence[Any] | None = None,
     outputs: int = 1,
 ) -> list[bytes]:
-    """系列に置くvision towerの中身（part 列 — 先頭が part 0）。
+    """Contents of the vision tower placed in the series (a part sequence — part 0 first).
 
-    組み立てへ届く形は**正当なコンテナ**でなければならない（組み立ては入力を開いて宣言の全
-    規則で見る — `karume.dist.assert_weight_components_verified`）ので、門に落とす側も同じ器で
-    作り、**宣言だけを実物とずらす**。
+    What reaches the assembly must be a **valid container** (the assembly opens its input and
+    checks it against every rule of the declaration —
+    `karume.dist.assert_weight_components_verified`), so the cases meant to fail a check are built
+    in the same container too and **only the declaration is shifted from the real thing**.
 
-    `storage` は実物どおりの混成コンポーネントの格納形（f16 / i8 / i4 は適格外の重みと bias が
-    f32 で残り、i4 はさらに i8 が混ざる）— 禁止表（{@link SIGLIP2_STORAGE_FORBIDDEN}）の門は
-    この形でしか試せない。残りの引数はグラフ宣言の各軸で、既定は実物どおり。
+    `storage` is the storage form of a mixed component as in the real thing (for f16 / i8 / i4 the
+    ineligible weights and the biases stay f32, and i4 additionally mixes in i8) — the check of the
+    forbidden table ({@link SIGLIP2_STORAGE_FORBIDDEN}) can only be exercised in this form. The
+    remaining arguments are the axes of the graph declaration, defaulting to the real values.
     """
     height, width, hidden = dims
     shape: Shape = list(input_shape) if input_shape is not None else [1, 3, height, width]
     return ir_container(
         mark="siglip2-vision",
-        # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
-        # MUST・container-v1 §2.1 — 組み立ての門がこの一致を見る）。
+        # The fake series also **names itself by the component name** (container graph name =
+        # the manifest's weights key, a MUST of container-v1 §2.1 — the assembly check verifies
+        # that they match).
         named=SIGLIP2_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
@@ -196,10 +207,11 @@ def _build_siglip2_sources(
     dims: tuple[int, int, int] = (_SIGLIP2_HEIGHT, _SIGLIP2_WIDTH, _SIGLIP2_HIDDEN),
     **container: Any,
 ) -> Siglip2Sources:
-    """系列 + 実重みの置き場を偽資産で再現する（配布しない `io.*` の混入込み）。
+    """Reproduce the series + the real-weight location with fake assets (including stray `io.*`
+    files that are not distributed).
 
-    並びは `_shared.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
-    テストが root を差し替えるだけで同じ木を指せる形。
+    The arrangement follows the real layout of `_shared.paths` (`outputs/series/` and `inputs/`) —
+    so the CLI-path tests can point at the same tree just by swapping the root.
     """
     checkpoint = siglip2_checkpoint(model)
     sources = Siglip2Sources(
@@ -207,24 +219,26 @@ def _build_siglip2_sources(
         model=root / "inputs" / "siglip2" / checkpoint,
     )
     write_component(sources.series / "model.krm", _siglip2_container(dims=dims, **container))
-    # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+    # E2E fixture that must not enter the distribution (the series really does contain these).
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     if preprocessor is not None:
         _write(
             sources.model / "preprocessor_config.json",
             json.dumps(preprocessor, ensure_ascii=False).encode("utf-8"),
         )
-    # 前処理を読む checkpoint の取得記録（容器の revision の突合先）。
+    # Download record of the checkpoint the preprocessing is read from (what the container's
+    # revision is compared with).
     write_snapshot(sources.model, license=SIGLIP2_LICENSE)
     return sources
 
 
-#: 2 モデル目の綴り（帰属表に載っているもう 1 つ）。
+#: Spelling of the second model (the other one listed in the attribution table).
 _SIGLIP2_SECOND_MODEL = "so400m"
 
 
 def _build_siglip2_family(root: Path) -> None:
-    """1 リポ 2 モデル（base + so400m）の入力素材を並べる — 寸法は 1 つも重ねない。"""
+    """Lay out the inputs of one repository with two models (base + so400m) — no dimension
+    overlaps."""
     _build_siglip2_sources(root)
     _build_siglip2_sources(
         root,
@@ -255,7 +269,7 @@ class TestSiglip2Layout:
     def test_it_places_the_single_graph_under_the_model_subtree(self, siglip2_assembled) -> None:
         out_dir, _ = siglip2_assembled
         expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, _placed_paths())
-        # 法的テキスト 2 本（Apache 2.0 §4）は manifest が宣言しないメタ席。
+        # The two legal texts (Apache 2.0 §4) are meta files the manifest does not declare.
         assert _present(out_dir) == sorted(
             [*expected, MANIFEST_FILENAME, "LICENSE.md", "NOTICE.md"]
         )
@@ -265,13 +279,13 @@ class TestSiglip2Layout:
         assert list(out_dir.rglob("io.*")) == []
 
     def test_it_declares_one_graph_and_no_assets(self, siglip2_assembled) -> None:
-        """実行に要るのはグラフ 1 本だけ（tokenizer も表も無い = `assets` は空）。"""
+        """Running needs only the one graph (no tokenizer, no table = `assets` is empty)."""
         _, manifest = siglip2_assembled
         model = _siglip2_model(manifest)
         assert model["pipeline"] == "siglip2/1"
         assert list(model["weights"]) == [SIGLIP2_ROLE]
         assert model["assets"] == {}
-        # 席は 1 つ（f32 系列 1 本きり）。dtype ラベルは自動補完で完全写像になる。
+        # One slot (a single f32 series). The dtype labels are filled into a complete mapping.
         assert list(model["quants"]) == ["f32"]
         assert model["defaultQuant"] == "f32"
         assert model["quants"]["f32"]["weights"] == {SIGLIP2_ROLE: "f32"}
@@ -288,35 +302,39 @@ class TestSiglip2Layout:
     def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
         self, tmp_path: Path, storage: str, intruder: str
     ) -> None:
-        """実物どおりの圧縮系列は**要求検査を満たす** — 禁止表だけが系列 root の取り違えを見る。
+        """A realistic compressed series **satisfies the requirement check** — only the forbidden
+        table catches a mixed-up series root.
 
-        圧縮系列も適格外の重みと bias を F32 で持つので「F32 を含む」は真になり、上の
-        単一 dtype の偽資産と違って要求検査では 1 バイトも落ちない。落ちるべき理由は
-        「f32 席に別系列の資産が居る」で、数値の門では原理的に検出できない
-        （ADR 0027 / 0029）。
+        A compressed series also keeps its ineligible weights and biases in F32, so "contains F32"
+        is true and, unlike the single-dtype fake assets above, the requirement check rejects
+        nothing. The reason it must fail is "an asset of another series sits in the f32 slot",
+        which the numeric checks cannot detect in principle (ADR 0027 / 0029).
         """
         sources = _build_siglip2_sources(tmp_path, storage=storage)
         with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* has .*{intruder} \(actual"):
             siglip2_plan(sources)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
-        """正常対 — 素の f32 系列は要求検査も禁止表も通る（禁止表が恒真に倒れていない）。"""
+        """Passing counterpart — a plain f32 series passes both the requirement check and the
+        forbidden table (the forbidden table has not degenerated into always failing)."""
         sources = _build_siglip2_sources(tmp_path, storage="f32")
 
         assert siglip2_plan(sources).name == SIGLIP2_DEFAULT_MODEL
 
     def test_the_forbidden_table_names_every_compressed_layout_in_the_codec_ledger(self) -> None:
-        """禁止表は格納検査の語彙（codec 台帳の layout）から f32 / i32 を除いた**全部**を持つ。
+        """The forbidden table holds **all** of the storage check's vocabulary (the layouts of the
+        codec ledger) except f32 / i32.
 
-        1 つでも抜けると、抜けた格納形の系列 root だけが f32 席を黙って通る。i32 は素の格納
-        （添字表）なので禁じない。
+        If even one is missing, a series root in that storage form alone passes the f32 slot
+        silently. i32 is plain storage (index tables), so it is not forbidden.
         """
         compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32"}
 
         assert set(SIGLIP2_STORAGE_FORBIDDEN[SIGLIP2_ROLE]) == compressed
 
     def test_it_refuses_an_i2_series_in_the_f32_seat(self, tmp_path: Path) -> None:
-        """`ir_container` では書けない i2（QAT 系列の固定 packed 値）も、束縛表の現物で落ちる。"""
+        """i2 (the fixed packed values of a QAT series), which `ir_container` cannot write, also
+        fails on the actual binding table."""
         sources = _build_siglip2_sources(tmp_path)
         replace_component(sources.series / "model.krm", i2_container(named=SIGLIP2_ROLE))
 
@@ -325,7 +343,8 @@ class TestSiglip2Layout:
 
 
 class TestSiglip2ContainerProvenance:
-    """容器が名乗る出所を帰属表と手元の checkpoint へ突き合わせる（depth_anything と同じ形）。"""
+    """Compare the provenance the container claims with the attribution table and the local
+    checkpoint (the same shape as depth_anything)."""
 
     def test_it_refuses_a_container_that_names_another_license(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -336,7 +355,7 @@ class TestSiglip2ContainerProvenance:
         )
         sources = _build_siglip2_sources(tmp_path)
 
-        with pytest.raises(DistError, match=r"provenance\.license が 'mit'"):
+        with pytest.raises(DistError, match=r"provenance\.license is 'mit'"):
             siglip2_plan(sources)
 
     def test_it_refuses_a_container_without_an_upstream_revision(
@@ -347,19 +366,20 @@ class TestSiglip2ContainerProvenance:
         )
         sources = _build_siglip2_sources(tmp_path)
 
-        with pytest.raises(DistError, match="upstreamRevision を持たない"):
+        with pytest.raises(DistError, match=r"has no provenance\.upstreamRevision"):
             siglip2_plan(sources)
 
     def test_it_refuses_a_container_baked_from_another_revision(self, tmp_path: Path) -> None:
         sources = _build_siglip2_sources(tmp_path)
         write_snapshot(sources.model, license=SIGLIP2_LICENSE, revision=OTHER_REVISION)
 
-        with pytest.raises(DistError, match="別の revision"):
+        with pytest.raises(DistError, match="built from a different revision"):
             siglip2_plan(sources)
 
 
 class TestSiglip2PipelineConfig:
-    """`pipelineConfig` はロード側（`src/siglip2/config.ts`）のスキーマと欄名まで一致する。"""
+    """`pipelineConfig` matches the loader's schema (`src/siglip2/config.ts`) down to the field
+    names."""
 
     def test_it_declares_exactly_the_fields_the_loader_accepts(self, siglip2_assembled) -> None:
         _, manifest = siglip2_assembled
@@ -368,7 +388,8 @@ class TestSiglip2PipelineConfig:
     def test_it_derives_the_preprocessing_constants_from_the_checkpoint(
         self, siglip2_assembled
     ) -> None:
-        """焼き込んでいれば実物（224 / 384・mean = std = 0.5）の数が出てくる。"""
+        """If the values were hard-coded, the real numbers (224 / 384, mean = std = 0.5) would
+        come out."""
         _, manifest = siglip2_assembled
         config = _siglip2_model(manifest)["pipelineConfig"]
         assert config["imageWidth"] == _SIGLIP2_WIDTH
@@ -378,19 +399,21 @@ class TestSiglip2PipelineConfig:
         assert config["interpolation"] == "bilinear"
 
     def test_it_derives_the_hidden_width_from_the_exported_graph(self, siglip2_assembled) -> None:
-        """`hiddenDim` の出どころはグラフの出力宣言 1 つきり（config.json は幅を持たない）。"""
+        """The only source of `hiddenDim` is the graph's output declaration (config.json does not
+        hold the width)."""
         _, manifest = siglip2_assembled
         assert _siglip2_model(manifest)["pipelineConfig"]["hiddenDim"] == _SIGLIP2_HIDDEN
 
     def test_it_refuses_a_missing_preprocessor_config(self, tmp_path: Path) -> None:
         sources = _build_siglip2_sources(tmp_path, preprocessor=None)
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
+        with pytest.raises(DistError, match="missing assembly input"):
             siglip2_plan(sources)
 
     def test_it_refuses_a_checkpoint_that_asks_for_another_interpolation(
         self, tmp_path: Path
     ) -> None:
-        """`resample` 3（BICUBIC）は TS 側に実装が無い — 黙って bilinear で通さない。"""
+        """`resample` 3 (BICUBIC) has no implementation on the TS side — do not silently let it
+        through as bilinear."""
         sources = _build_siglip2_sources(
             tmp_path, preprocessor={**_SIGLIP2_PREPROCESSOR, "resample": 3}
         )
@@ -398,7 +421,8 @@ class TestSiglip2PipelineConfig:
             siglip2_plan(sources)
 
     def test_it_refuses_a_rescale_factor_the_host_cannot_express(self, tmp_path: Path) -> None:
-        """TS 側は 8bit 画素を 255 で割る形で閉じている（除数は宣言に無い）。"""
+        """The TS side is fixed to dividing 8-bit pixels by 255 (the divisor is not in the
+        declaration)."""
         sources = _build_siglip2_sources(
             tmp_path, preprocessor={**_SIGLIP2_PREPROCESSOR, "rescale_factor": 1.0 / 127.5}
         )
@@ -419,7 +443,8 @@ class TestSiglip2PipelineConfig:
     def test_it_refuses_a_checkpoint_that_wants_a_crop_or_a_pad(
         self, tmp_path: Path, flag: str
     ) -> None:
-        """この前処理層は crop も pad も持たない（アスペクト比を保たない伸縮 1 本）。"""
+        """This preprocessing layer has neither crop nor pad (a single stretch that does not keep
+        the aspect ratio)."""
         sources = _build_siglip2_sources(
             tmp_path, preprocessor={**_SIGLIP2_PREPROCESSOR, flag: True}
         )
@@ -438,60 +463,74 @@ class TestSiglip2PipelineConfig:
     def test_it_refuses_constants_outside_the_loader_value_range(
         self, tmp_path: Path, patch: Mapping[str, Any]
     ) -> None:
-        """値域はロード側（`config.ts`）と同じ — std 0 は 0 除算で ±Infinity を静かに作る。"""
+        """The value range is the same as the loader's (`config.ts`) — std 0 silently produces
+        ±Infinity through division by zero."""
         sources = _build_siglip2_sources(tmp_path, preprocessor={**_SIGLIP2_PREPROCESSOR, **patch})
         with pytest.raises(DistError):
             siglip2_plan(sources)
 
 
 class TestSiglip2GraphGate:
-    """組み立て門 — ずれても配布形としては成立してしまう組み合わせを、配置の前に落とす。"""
+    """Assembly check — rejects, before placement, combinations that would still form a valid
+    distribution despite the mismatch."""
 
     def test_it_refuses_a_graph_baked_for_another_resolution(self, tmp_path: Path) -> None:
-        """前処理の寸法（preprocessor_config）と焼かれた解像度は別々に決まる。
+        """The preprocessing dimensions (preprocessor_config) and the baked resolution are decided
+        separately.
 
-        base の前処理 config と so400m のグラフを組み合わせても、ここが無ければ配布形は
-        成立し、利用者の手元で Session の shape 検査が「どちらが正か」を伝えないまま落ちる。
+        Without this check, pairing base's preprocessing config with so400m's graph would still
+        form a distribution, and the Session's shape check would fail on the user's machine
+        without saying "which one is right".
         """
         sources = _build_siglip2_sources(tmp_path, input_shape=(1, 3, 384, 384))
-        with pytest.raises(DistError, match="前処理の寸法と焼かれた解像度が別の版"):
+        with pytest.raises(
+            DistError,
+            match="preprocessing dimensions and the baked resolution come from different versions",
+        ):
             siglip2_plan(sources)
 
     def test_it_refuses_a_graph_whose_axes_are_transposed(self, tmp_path: Path) -> None:
-        """非正方の寸法だけが検出できる取り違え（`[1,3,W,H]`）。"""
+        """A mix-up only non-square dimensions can detect (`[1,3,W,H]`)."""
         sources = _build_siglip2_sources(
             tmp_path, input_shape=(1, 3, _SIGLIP2_WIDTH, _SIGLIP2_HEIGHT)
         )
-        with pytest.raises(DistError, match="前処理の寸法と焼かれた解像度が別の版"):
+        with pytest.raises(
+            DistError,
+            match="preprocessing dimensions and the baked resolution come from different versions",
+        ):
             siglip2_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
-        """`last_hidden_state` 込みの別 export は `hiddenDim` の出どころごと別物になる。"""
+        """Another export that includes `last_hidden_state` changes even the source of
+        `hiddenDim`."""
         sources = _build_siglip2_sources(tmp_path, outputs=2)
-        with pytest.raises(DistError, match="pooler_output 1 本だけ"):
+        with pytest.raises(DistError, match="exactly one pooler_output"):
             siglip2_plan(sources)
 
     def test_it_refuses_a_graph_with_a_symbolic_axis(self, tmp_path: Path) -> None:
-        """解像度もパッチ数も固定なので、動かす軸は 1 本も無い（高さを動的に export した形）。"""
+        """The resolution and the patch count are fixed, so no axis varies at all (the form of a
+        height exported as dynamic)."""
         sources = _build_siglip2_sources(tmp_path, input_shape=(1, 3, "T", _SIGLIP2_WIDTH))
-        with pytest.raises(DistError, match="記号次元"):
+        with pytest.raises(DistError, match="symbolic dimensions"):
             siglip2_plan(sources)
 
     def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
-        """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
+        """The runtime binds by name, so a changed spelling cannot be bound."""
         sources = _build_siglip2_sources(tmp_path, input_name="pixels")
-        with pytest.raises(DistError, match="グラフ入力"):
+        with pytest.raises(DistError, match="graph inputs"):
             siglip2_plan(sources)
 
 
 class TestSiglip2ModelCard:
     def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str) -> Path:
-        """偽資産だけで CLI を 1 周回す（実重みの置き場も tmp へ寄せる）。"""
+        """Run the CLI once on fake assets only (the real-weight location is moved to tmp as
+        well)."""
         from siglip2 import distribution
 
         sources = _build_siglip2_sources(tmp_path, model=model)
-        # `INPUTS_ROOT`（系列の外にある実重み）を引くのは recipe 側 — ドライバの `dist`
-        # ではなくこちらの束縛を外す（`DIST_ROOT` は逆でドライバ側）。
+        # The recipe side resolves `INPUTS_ROOT` (the real weights outside the series) — so this
+        # module's binding is replaced, not the driver `dist`'s (`DIST_ROOT` is the reverse, on
+        # the driver side).
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
         out_dir = tmp_path / "dist"
         main(
@@ -515,24 +554,28 @@ class TestSiglip2ModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "pipeline_tag: image-feature-extraction" in card
         assert "license: apache-2.0" in card
-        # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
+        # A distribution that keeps the storage form is none of the 4 values (left to the Hub's
+        # inference).
         assert "base_model_relation" not in card
-        # text tower を持たない事実は、利用者が最初に確かめたい制約そのもの。
+        # Lacking the text tower is exactly the constraint a user wants to check first.
         assert "The text tower is not here." in card
-        # 前処理は同梱（利用者が渡すのは生の RGB8）。数は manifest から降りてくる。
+        # Preprocessing is included (the user passes raw RGB8). The numbers come from the
+        # manifest.
         assert f"resizes to {_SIGLIP2_WIDTH} × {_SIGLIP2_HEIGHT}" in card
         assert f"`pooler_output`, {_SIGLIP2_HIDDEN} f32 values, not L2-normalized" in card
-        # カードは**検証を通った**配布形から描かれる。
+        # The card is rendered from a distribution **that passed verification**.
         assert verify_dist(out_dir)
 
     def test_the_usage_snippet_enumerates_the_choices_from_the_manifest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """裁定 2026-08-12 の形: optional はコメント併記で、選べる値は manifest 由来の列挙。
+        """The form of the 2026-08-12 ruling: optionals as comments, with the selectable values
+        enumerated from the manifest.
 
-        `embed()` に実行時ノブは無いので、この pipeline の optional は model / quant だけ。
-        1 席しか無くても「available:」で綴るのは、席が増えたときに文面が自動で追従するため
-        （「the only one this repository ships」のような焼き込みは、増えた瞬間に嘘になる）。
+        `embed()` has no run-time knobs, so this pipeline's optionals are only model / quant. It
+        says "available:" even with a single slot so the text follows automatically when slots
+        are added (a hard-coded phrase like "the only one this repository ships" becomes false the
+        moment one is added).
         """
         out_dir = self._run(tmp_path, monkeypatch, SIGLIP2_DEFAULT_MODEL)
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
@@ -546,7 +589,8 @@ class TestSiglip2ModelCard:
     def test_the_attribution_follows_the_model_name(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """帰属はモデル名から一意に決まる（選ばせる軸にしない = 取り違えようがない）。"""
+        """Attribution is determined uniquely by the model name (not an axis to choose = it cannot
+        be mixed up)."""
         card = (self._run(tmp_path, monkeypatch, "so400m") / MODEL_CARD_FILENAME).read_text(
             encoding="utf-8"
         )
@@ -555,7 +599,8 @@ class TestSiglip2ModelCard:
 
 
 class TestSiglip2Family:
-    """1 リポ 2 モデル（ADR 0092 決定 8）— base と so400m が同じリポに同居する。"""
+    """One repository, two models (ADR 0092 decision 8) — base and so400m live in the same
+    repository."""
 
     def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         from siglip2 import distribution
@@ -582,7 +627,8 @@ class TestSiglip2Family:
     def test_both_models_live_in_one_repository_with_base_as_the_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """既定は**先頭の `--model`**（`karume.dist.main`）— 綴りの順序が既定を決める。"""
+        """The default is **the first `--model`** (`karume.dist.main`) — the order of the
+        arguments decides the default."""
         out_dir = self._run(tmp_path, monkeypatch)
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert sorted(manifest["models"]) == sorted([SIGLIP2_DEFAULT_MODEL, _SIGLIP2_SECOND_MODEL])
@@ -592,7 +638,8 @@ class TestSiglip2Family:
     def test_each_model_keeps_its_own_preprocessing_declaration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """同居しても寸法はモデルごと — 1 つの宣言を共有していれば片方が別の数になる。"""
+        """Even living together the dimensions are per model — with one shared declaration, one
+        of them would get the other's numbers."""
         out_dir = self._run(tmp_path, monkeypatch)
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         base = manifest["models"][SIGLIP2_DEFAULT_MODEL]["pipelineConfig"]
@@ -609,7 +656,8 @@ class TestSiglip2Family:
     def test_the_card_attributes_both_upstream_checkpoints(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """再配布する上流を 1 つでも落とすと、出所を名乗っていないカードになる。"""
+        """Dropping even one redistributed upstream gives a card that does not name its
+        source."""
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         for repo in SIGLIP2_UPSTREAM.values():
             assert repo in card
@@ -619,11 +667,13 @@ class TestSiglip2Family:
     def test_the_layout_keeps_each_models_graph_in_its_own_subtree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """part 0（グラフ記述を持つ part）は寸法の宣言なので、**共有席へ畳まれてはいけない**。
+        """Part 0 (the part carrying the graph descriptor) declares the dimensions, so it **must
+        not be folded into a shared slot**.
 
-        バイト単位で同じコンポーネントは `shared/` へ畳まれる（ADR 0041 §9）ので、期待は
-        「モデル別サブツリー + shared のどれか」— 合成資産では重みの part が偶然一致するが、
-        寸法の違う part 0 が畳まれたらそれは器の側のバグになる。
+        Byte-identical components are folded into `shared/` (ADR 0041 §9), so the expectation is
+        "the per-model subtrees + shared, nothing else" — with synthetic assets the weight parts
+        happen to match, but if part 0, whose dimensions differ, were folded, that would be a bug
+        on the container side.
         """
         out_dir = self._run(tmp_path, monkeypatch)
         placed = sorted(verify_dist(out_dir))
@@ -638,13 +688,16 @@ class TestSiglip2Family:
 
 
 class TestSiglip2LegalText:
-    """配布リポ直下の Apache 2.0 原文と改変告知（ADR 0092 決定 7）。"""
+    """The Apache 2.0 full text and the modification notice at the distribution repository's root
+    (ADR 0092 decision 7)."""
 
     def test_it_ships_the_license_text_byte_identical(self, siglip2_assembled) -> None:
-        """§4(a) — 提供するのは**このライセンスのコピー**（要約でも整形でもない）。
+        """§4(a) — what is provided is **a copy of this license** (neither a summary nor a
+        reformatting).
 
-        原本は `_shared/licenses/apache_license_2_0.txt`。組み立ての経路のどこかで整形や
-        改行変換が入ると 1 バイト動くが、散文としては妥当なままなので他の門は素通りする。
+        The original is `_shared/licenses/apache_license_2_0.txt`. Reformatting or newline
+        conversion anywhere on the assembly path would move a byte, but it would still read as
+        valid prose, so the other checks would let it through.
         """
         out_dir, _ = siglip2_assembled
         assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
@@ -652,17 +705,20 @@ class TestSiglip2LegalText:
     def test_it_ships_the_modification_notice(self, siglip2_assembled) -> None:
         out_dir, _ = siglip2_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
-        # 「text tower は入っていない」と、ビット同一でない書き換えの実測幅が告知に出る。
+        # The notice states "the text tower is not included" and the measured range of the
+        # rewrite that is not bit-identical.
         assert "vision tower only" in notice
         assert SIGLIP2_MAP_HEAD_DIFF in notice
-        # 差に意味を与えるスケール（L2 ノルム）も、カードと同じ 1 語を名乗る。
+        # The scale that gives the difference its meaning (the L2 norm) also states the same
+        # single word as the card.
         assert f"L2 norm is {SIGLIP2_MAP_HEAD_NORM}" in notice
         assert "No quantization" in notice
 
 
 class TestSiglip2Cli:
     def test_the_default_output_directory_is_the_family_repository(self) -> None:
-        """家族 1 リポ（ADR 0092 決定 1）— 行き先はモデル名を見ない 1 つ。"""
+        """One repository per family (ADR 0092 decision 1) — a single destination that ignores the
+        model name."""
         assert default_out_dir(PIPELINE, [SIGLIP2_DEFAULT_MODEL]).name == "karume-siglip2"
         assert default_out_dir(PIPELINE, [_SIGLIP2_SECOND_MODEL]).name == "karume-siglip2"
 
@@ -672,15 +728,17 @@ class TestSiglip2Cli:
         assert resolve_card_renderer(PIPELINE, None) is next(iter(profiles.values()))
 
     def test_the_series_name_is_the_upstream_repository_name(self, tmp_path: Path) -> None:
-        """系列名 / 入力素材のディレクトリ名は上流リポ名そのもの（表を 2 つ持たない）。"""
+        """The series name and the input directory name are the upstream repository name itself
+        (no second table)."""
         for model, repo in SIGLIP2_UPSTREAM.items():
             sources = siglip2_sources(tmp_path, model)
             assert sources.series.name == repo.split("/", 1)[1]
             assert sources.model.name == sources.series.name
 
     def test_it_refuses_a_model_it_has_no_attribution_for(self, tmp_path: Path) -> None:
-        """帰属表に無いモデル名は「出所を名乗れない」ので、系列を探す前に落とす。"""
-        with pytest.raises(DistError, match="知らない"):
+        """A model name missing from the attribution table "cannot name its source", so it fails
+        before the series is looked up."""
+        with pytest.raises(DistError, match="unknown SigLIP2 model 'large'"):
             siglip2_sources(tmp_path, "large")
 
     def test_it_assembles_into_the_pipeline_default_directory(
@@ -690,8 +748,9 @@ class TestSiglip2Cli:
         from siglip2 import distribution
 
         sources = _build_siglip2_sources(tmp_path)
-        # `DIST_ROOT` は既定の出力先を決めるドライバ側（`dist.default_out_dir`）、`INPUTS_ROOT` は
-        # 系列の外の入力を引く recipe 側 — 別モジュールの束縛を別々に外す。
+        # `DIST_ROOT` is on the driver side, which decides the default output directory
+        # (`dist.default_out_dir`); `INPUTS_ROOT` is on the recipe side, which resolves the inputs
+        # outside the series — the bindings of the two modules are replaced separately.
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
 
@@ -703,10 +762,11 @@ class TestSiglip2Cli:
 
 
 class TestSiglip2HiddenDim:
-    """出力宣言の**構造**が壊れているときに `DistError` で止まること。
+    """It stops with `DistError` when the **structure** of the output declaration is broken.
 
-    幅は `pipelineConfig` の `hiddenSize` と weights の形の両方へ効くので、ここが緩いと
-    「幅だけが静かに別の意味の数」になった配布形が組み上がる。
+    The width affects both `hiddenSize` in `pipelineConfig` and the shape of the weights, so if
+    this were loose, a distribution would be assembled in which "only the width silently became a
+    number with another meaning".
     """
 
     @staticmethod
@@ -722,16 +782,18 @@ class TestSiglip2HiddenDim:
 
     @pytest.mark.parametrize("shape", [[768], [2, 768], [1, 768, 1], "1,768"])
     def test_a_shape_that_is_not_one_by_hidden_is_rejected(self, shape: object) -> None:
-        with pytest.raises(DistError, match=r"\[1, hidden\] でない"):
+        with pytest.raises(DistError, match=r"is not \[1, hidden\]"):
             siglip2_hidden_dim(self._graph(shape), Path("g"))
 
     @pytest.mark.parametrize("hidden", [True, 0, -768, 768.0, "768"])
     def test_a_width_that_is_not_a_positive_integer_is_rejected(self, hidden: object) -> None:
-        """`True` は Python では `int` の部分型 — 型検査が緩いと bool が幅として通る。"""
-        with pytest.raises(DistError, match="正の整数でない"):
+        """`True` is a subtype of `int` in Python — with a loose type check a bool would pass as
+        the width."""
+        with pytest.raises(DistError, match="is not a positive integer"):
             siglip2_hidden_dim(self._graph([1, hidden]), Path("g"))
 
     def test_more_than_one_output_is_rejected(self) -> None:
-        """`last_hidden_state` 込みの別 export が混ざると、幅が別の意味の数になる。"""
-        with pytest.raises(DistError, match="pooler_output 1 本だけ"):
+        """If another export that includes `last_hidden_state` slips in, the width becomes a
+        number with another meaning."""
+        with pytest.raises(DistError, match="exactly one pooler_output"):
             siglip2_hidden_dim(self._graph([1, 768], outputs=2), Path("g"))

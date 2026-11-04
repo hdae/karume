@@ -1,1 +1,1 @@
-"""固定 QAT recipe の検証。"""
+"""Tests of the fixed QAT recipe."""

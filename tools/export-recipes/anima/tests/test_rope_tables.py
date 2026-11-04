@@ -1,18 +1,21 @@
-"""rope の**軸別素表からの再構成**が非正方（H'≠W'）でも上流の表と一致すること（#23）。
+"""Rebuilding rope **from the per-axis base tables** matches upstream's table even for a
+non-square grid (H'≠W') (#23).
 
-## なぜ非正方で見るのか
+## Why look at a non-square grid
 
-ホスト（TS）は `[1,1,S,head_dim]` の rope 表を「軸別の素表を `[t,h,w,t,h,w]` に並べる」
-だけで作る（ADR 0034）。**正方ではこの並べ方の h ↔ w 取り違えが原理的に検出できない** —
-Anima の `rope_scale` は h と w が同値なので `cos_h` と `cos_w` がバイト単位で一致し、
-H'=W' なら表そのものが同じ値になる（ADR 0034 の検出限界 1）。
+The host (TS) builds the `[1,1,S,head_dim]` rope table only by "laying out the per-axis base
+tables as `[t,h,w,t,h,w]`" (ADR 0034). **On a square grid an h ↔ w mix-up in this layout is
+undetectable in principle** — Anima's `rope_scale` has equal h and w, so `cos_h` and `cos_w`
+match byte for byte, and with H'=W' the table itself holds the same values (detection limit 1 of
+ADR 0034).
 
-ここでは①**H'≠W'** の格子で②**h と w の周波数が違う** rope（`rope_scale` の h と w を
-別の値にした合成構成）を使い、素表からの再構成が上流 `CosmosRotaryPosEmbed` の出力と
-`torch.equal` で一致することを固定する。実重みは要らない（rope はパラメータもバッファも
-持たない純計算）。TS 側の鏡像（`ropeTables`）は
-`packages/models/tests/anima_dit_tokens_test.ts` が合成素表での `[t,h,w,t,h,w]` の並べ方と
-天井の拒否で押さえる（焼いたフィクスチャとの突合は**まだこのリポへ移植されていない**）。
+Here a rope with (1) an **H'≠W'** grid and (2) **different h and w frequencies** (a synthetic
+configuration whose `rope_scale` has different h and w) pins that the rebuild from the base
+tables matches upstream `CosmosRotaryPosEmbed`'s output under `torch.equal`. No real weights are
+needed (rope is a pure computation with no parameters or buffers). The TS-side mirror
+(`ropeTables`) is covered by `packages/models/tests/anima_dit_tokens_test.ts`, with the
+`[t,h,w,t,h,w]` layout on synthetic base tables and the rejection at the ceiling (the comparison
+with a baked fixture has **not been ported to this repository yet**).
 """
 
 from __future__ import annotations
@@ -26,19 +29,19 @@ from anima.patch import dit_rope_base_tables, dit_rope_tables
 transformer_cosmos = pytest.importorskip("diffusers.models.transformers.transformer_cosmos")
 CosmosRotaryPosEmbed = transformer_cosmos.CosmosRotaryPosEmbed
 
-#: 合成 rope の構成。`rope_scale` の **h と w を別の値**にするのが要点（Anima 実機は
-#: `[1.0, 4.0, 4.0]` で h と w が同値 = 取り違えが検出できない構成）。
+#: The synthetic rope configuration. The point is **different h and w** in `rope_scale` (the real
+#: Anima has `[1.0, 4.0, 4.0]`, equal h and w = a configuration where a mix-up is undetectable).
 HIDDEN_SIZE = 48
 MAX_SIZE = (16, 16, 16)
 PATCH_SIZE = (1, 2, 2)
 ROPE_SCALE = (2.0, 1.0, 3.0)
-#: 非正方の latent（トークン格子 6×4）。**縦横が違う**ことがこのテストの前提。
+#: A non-square latent (token grid 6×4). **Different height and width** is this test's premise.
 LATENT_HEIGHT = 12
 LATENT_WIDTH = 8
 
 
 class _RopeOnly(nn.Module):
-    """`dit_rope_tables` / `dit_rope_base_tables` が触るのは `.rope` だけ。"""
+    """`dit_rope_tables` / `dit_rope_base_tables` touch only `.rope`."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -53,10 +56,11 @@ class _RopeOnly(nn.Module):
 def rebuild_from_base(
     tables: dict[str, torch.Tensor], kind: str, rows: int, cols: int
 ) -> torch.Tensor:
-    """素表から `[S, head_dim]` を組む（TS 側 `ropeTables` の鏡像）。
+    """Build `[S, head_dim]` from the base tables (the mirror of the TS side's `ropeTables`).
 
-    1 行は `[t, h, w]` を 2 回並べたブロック連結（上流の `cat([emb_t, emb_h, emb_w] * 2)`）で、
-    トークン添字は `h·W' + w`。t は画像なので常に位置 0。
+    One row is the block concatenation of `[t, h, w]` laid out twice (upstream's
+    `cat([emb_t, emb_h, emb_w] * 2)`), and the token index is `h·W' + w`. t is always position 0
+    for an image.
     """
     axis_t, axis_h, axis_w = (tables[f"{kind}_{axis}"] for axis in ("t", "h", "w"))
     lines = []
@@ -74,29 +78,31 @@ def model() -> nn.Module:
 
 class TestNonSquareRopeParity:
     def test_the_axis_tables_differ_so_a_swap_is_detectable(self, model):
-        """この合成構成では `cos_h != cos_w`（= 取り違えが数に出る）。
+        """In this synthetic configuration `cos_h != cos_w` (= a mix-up shows in the numbers).
 
-        実機（Anima）ではここが**一致する**ため、同じ検査が空虚になる — 非正方の
-        フィクスチャ突合が要る理由そのもの（ADR 0034 の検出限界 1）。
+        On the real model (Anima) these **match**, so the same check is vacuous — the very
+        reason a non-square fixture comparison is needed (detection limit 1 of ADR 0034).
         """
         tables = dit_rope_base_tables(model)
 
         assert not torch.equal(tables["cos_h"], tables["cos_w"])
 
     def test_rebuilding_from_the_axis_tables_matches_upstream(self, model):
-        """MUST: ビット一致（`torch.equal`）。素表の写しなので誤差の余地が無い。"""
+        """MUST: bit-identical (`torch.equal`). It copies the base tables, so there is no room for
+        error."""
         tables = dit_rope_base_tables(model)
         cos, sin = dit_rope_tables(model, LATENT_HEIGHT, LATENT_WIDTH)
         rows = LATENT_HEIGHT // PATCH_SIZE[1]
         cols = LATENT_WIDTH // PATCH_SIZE[2]
 
-        # 1 行の幅 = `[t,h,w]` を 2 回並べたもの = `hidden_size`（= attention の head_dim）。
+        # The width of one row = `[t,h,w]` laid out twice = `hidden_size` (= attention's
+        # head_dim).
         assert list(cos.shape) == [1, 1, rows * cols, HIDDEN_SIZE]
         assert torch.equal(rebuild_from_base(tables, "cos", rows, cols), cos[0, 0])
         assert torch.equal(rebuild_from_base(tables, "sin", rows, cols), sin[0, 0])
 
     def test_swapping_the_two_axes_breaks_the_match(self, model):
-        """恒真化の門: 上の一致が「何を検出するのか」を注入で示す（h と w の取り違え）。"""
+        """Vacuity check: injection shows "what the match above detects" (an h and w mix-up)."""
         tables = dit_rope_base_tables(model)
         swapped = dict(tables)
         swapped["cos_h"], swapped["cos_w"] = tables["cos_w"], tables["cos_h"]
@@ -107,7 +113,8 @@ class TestNonSquareRopeParity:
         assert not torch.equal(rebuild_from_base(swapped, "cos", rows, cols), cos[0, 0])
 
     def test_transposing_the_grid_breaks_the_match(self, model):
-        """同じく恒真化の門: 格子の縦横を入れ替えると別の表になる（要素数は同じ）。"""
+        """Also a vacuity check: swapping the grid's height and width gives another table (with
+        the same element count)."""
         tables = dit_rope_base_tables(model)
         cos, _ = dit_rope_tables(model, LATENT_HEIGHT, LATENT_WIDTH)
         rows = LATENT_HEIGHT // PATCH_SIZE[1]

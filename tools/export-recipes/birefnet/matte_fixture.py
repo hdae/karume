@@ -1,68 +1,84 @@
-r"""BiRefNet の α マットの後処理の**上流の手順の golden**（裁定 4・ADR 0125 — git 管理の fixture）。
+r"""**Golden of the upstream procedures** for BiRefNet's α-matte post-processing (ruling 4, ADR
+0125 — a fixture tracked in git).
 
-TS 側の後処理（`packages/models/src/birefnet/matte.ts` の 2 つの手順）を、系列ごとの上流の関数
-そのものが出す最終 α と突き合わせるための入出力の組。上流の関数をそのまま呼び、**量子化だけを
-四捨五入へ差し替える**（ADR 0125 — 上流の切り捨ては `astype(uint8)` の慣用であって意図ではない）:
+Input / output pairs for checking the TS-side post-processing (the 2 procedures of
+`packages/models/src/birefnet/matte.ts`) against the final α produced by each series' upstream
+functions themselves. The upstream functions are called as they are, and **only the quantization is
+replaced with round-half-up** (ADR 0125 — the upstream truncation is the `astype(uint8)` idiom, not
+an intent):
 
-- **HR**（`u8-pil-bicubic` — 同梱 `handler.py:131-137` の段の順序）: numpy の f64 で
-  `σ = 1 / (1 + exp(−x))` → `floor(255σ + 0.5)` で uint8 → Pillow の `Image.fromarray(q)`（L）
-  `.resize(size)`（resample 省略 = BICUBIC — `PIL/Image.py:2368`・同寸なら写し）。上流の半精度は
-  写さない（速度のための選択で、karume の logit はもともと f32 のグラフの出力）。
-- **Lucida**（`float-bilinear` — モデルカード `README.md:86-89`）: torch の f32 の `sigmoid` →
-  `transforms.functional.resize(preds[0], (H, W))`（テンソル枝・bilinear・antialias の既定のまま）→
-  `alpha.numpy() * 255`（f32）。丸める前の `255α` を残し、最終 α はその `floor(x + 0.5)`。
+- **HR** (`u8-pil-bicubic` — the step order of the bundled `handler.py:131-137`): in numpy f64,
+  `σ = 1 / (1 + exp(−x))` → uint8 by `floor(255σ + 0.5)` → Pillow's `Image.fromarray(q)` (L)
+  `.resize(size)` (resample omitted = BICUBIC — `PIL/Image.py:2368`; a copy when the size is the
+  same). Upstream's half precision is not copied (it is a choice for speed, and karume's logits are
+  an f32 graph output to begin with).
+- **Lucida** (`float-bilinear` — the model card's `README.md:86-89`): torch f32 `sigmoid` →
+  `transforms.functional.resize(preds[0], (H, W))` (the tensor branch, bilinear, antialias left at
+  its default) → `alpha.numpy() * 255` (f32). The `255α` before rounding is kept, and the final α is
+  its `floor(x + 0.5)`.
 
     cd tools/export-recipes
     uv run --group birefnet python -m birefnet.matte_fixture \
-        --logits-dir <リポ>/outputs/verify/<環境キー>/<日付>_birefnet
+        --logits-dir <repository>/outputs/verify/<environment key>/<date>_birefnet
 
-`--logits-dir` は実画像の logit の切り出し（入力）を採り直すときだけ渡す。省くと git にある
-fixture の切り出しをそのまま入力にして、期待値だけを作り直す（`outputs/` が無い機でも回る —
-`birefnet/tests/test_matte_fixture.py` もこの経路で今のライブラリと突き合わせる）。
+`--logits-dir` is passed only when re-taking the real-image logit crops (the inputs). Without it the
+crops of the fixture in git are used as inputs as they are, and only the expected values are
+regenerated (it runs on machines without `outputs/` — `birefnet/tests/test_matte_fixture.py` also
+checks against the current libraries through this path).
 
-出力は 2 本（**git 管理**）:
+Two outputs (**tracked in git**):
 
-    packages/models/tests/fixtures/birefnet-matte/matte.json         — 説明・来歴・ε・入力・ケース
-    packages/models/tests/fixtures/birefnet-matte/matte.safetensors  — 入力の logit と期待値
+    packages/models/tests/fixtures/birefnet-matte/matte.json
+        — description, provenance, ε, inputs, cases
+    packages/models/tests/fixtures/birefnet-matte/matte.safetensors
+        — input logits and expected values
 
-生成後は `deno fmt packages/models/tests/fixtures/birefnet-matte/matte.json` を掛ける（commit 形は
-フォーマッタが正）。safetensors のテンソルは入力ごとに `<input>.logits`（F32 `[h, w]`）、ケース
-ごとに `<case>.hr`（U8 `[H, W]` — HR の最終 α）と `<case>.lucida`（F32 `[H, W]` — Lucida の丸める
-前の `255α`）。
+After generating, run `deno fmt packages/models/tests/fixtures/birefnet-matte/matte.json` (the
+formatter decides the committed form). The safetensors tensors are `<input>.logits` (F32 `[h, w]`)
+per input, and `<case>.hr` (U8 `[H, W]` — HR's final α) and `<case>.lucida` (F32 `[H, W]` —
+Lucida's `255α` before rounding) per case.
 
-## 入力（2 種類）
+## Inputs (2 kinds)
 
-- **実画像の logit の切り出し**: `e2e_birefnet_real_test.ts` が書いた既定席のマット logits（HR は
-  f16 席・Lucida は f32 席 — {@link REAL_SERIES}。`<系列>-photo-{portrait,street}-matte.safetensors`
-  — 1024² の karume のグラフ出力）から、輪郭の画素（`|logit| < SOFT_LOGIT`）を最も多く含む
-  `CROP_WIDTH × CROP_HEIGHT` の窓を両系列の 2 枚ずつ切り出す。portrait からは窓の中心を通る 1 行と
-  幅 2 の列（長さ 1024）も採り、実運用の係数表（1024 → 832 / 480 / 2048）を掃く。来歴（ファイル・
-  sha256・窓）を入力表に残す。
-- **合成の境界ケース**: 素朴な移植が落ちる境界を 1 件ずつ（段差・細線・滑らかな斜面・飽和の帯・
-  市松の overshoot・端の切り詰め・台が大きく伸びる縮小）。logit は有限の値を明示する。
+- **Crops of real-image logits**: from the default preset's matte logits written by
+  `e2e_birefnet_real_test.ts` (the f16 preset for HR, the f32 preset for Lucida —
+  {@link REAL_SERIES}; `<series>-photo-{portrait,street}-matte.safetensors` — karume's graph output
+  at 1024²), cut a `CROP_WIDTH × CROP_HEIGHT` window holding the most edge pixels
+  (`|logit| < SOFT_LOGIT`) from 2 images of each series. From portrait, one row and a 2-wide column
+  (length 1024) through the window's center are also taken, to sweep the production coefficient
+  tables (1024 → 832 / 480 / 2048). The provenance (file, sha256, window) is kept in the input
+  table.
+- **Synthetic boundary cases**: one case per boundary where a naive port fails (step, thin line,
+  smooth slope, saturation band, checkerboard overshoot, edge truncation, downscale with a much
+  wider support). The logits are explicit finite values.
 
-目標寸法は 1024² 以外（拡大・縮小・非正方・片軸だけ・恒等）。
+The target sizes are other than 1024² (upscale, downscale, non-square, one axis only, identity).
 
-## 丸めの境界の扱い
+## Handling of the rounding boundaries
 
-- HR: JS の `Math.exp` と numpy の `exp` は最終 ulp が割れうる。`|255σ − (k + 0.5)| < TIE_MARGIN`
-  の標本は丸めの向きが実装で割れうるので、**生成器が拒む**（入力を選び直す）。それ以外は TS の写しと
-  0 不一致が契約。
-- Lucida: torch の f32 の積和と TS の f64 の resize は丸めが違う。TS の経路の `255α`（f64 の写し —
-  {@link _ts_float_bilinear_scaled}）と torch の `255α` の差の最大値を実測し、`LUCIDA_EPSILON` を
-  超えたら生成器が落ちる。TS の門は「一致する、または golden の `255α` が `k + 0.5` から ε 以内」の
-  画素だけを許す。
+- HR: JS's `Math.exp` and numpy's `exp` can differ in the last ulp. For samples with
+  `|255σ − (k + 0.5)| < TIE_MARGIN` the rounding direction can split between implementations, so
+  **the generator rejects them** (pick other inputs). Otherwise the contract is 0 mismatches with
+  the TS port.
+- Lucida: torch's f32 multiply-accumulate and TS's f64 resize round differently. The maximum
+  difference between the TS path's `255α` (an f64 port — {@link _ts_float_bilinear_scaled}) and
+  torch's `255α` is measured, and the generator fails when it exceeds `LUCIDA_EPSILON`. The TS check
+  allows only pixels that "match, or where the golden's `255α` is within ε of `k + 0.5`".
 
-Pillow は関数の中で import する。理由は recipe の作法（依存グループが宣言するパッケージは要る
-関数の中で import する — `tests/test_optional_group_imports.py` が機械の門にしている）に揃える
-ためで、Pillow が無いからではない — Pillow 自体は torchvision（exporter の core の依存）経由で
-既定の sync にも入る（ADR 0125 決定 6）。NOTE: 門は配布名から import 名を導く（`pillow`）ので、
-`PIL` を module 直下で import しても門では掴めない。関数内の import は門に頼らず作法として守る。
+Pillow is imported inside the functions. The reason is to follow the recipe convention (packages a
+dependency group declares are imported inside the functions that need them —
+`tests/test_optional_group_imports.py` makes it a mechanical check), not that Pillow is missing —
+Pillow itself is in the default sync too, through torchvision (a core dependency of the exporter)
+(ADR 0125 decision 6). NOTE: the check derives the import name from the distribution name
+(`pillow`), so importing `PIL` at module level would not be caught by it. The in-function import is
+kept as a convention, without relying on the check.
 
-値は torch / torchvision / Pillow / numpy の版で決まるので、版を来歴に記録する
-（`birefnet/tests/test_matte_fixture.py` が今の版で作り直して突き合わせ、版の更新で黙ってずれた
-fixture を赤にする）。lucida の最終 bit は CPU の命令セット（torch が選ぶ SIMD の kernel）でも
-変わるので、作り直すのは参照環境（開発機）で — 他の機で作ると lucida だけが ulp でずれる。
+The values are determined by the versions of torch / torchvision / Pillow / numpy, so the versions
+are recorded in the provenance (`birefnet/tests/test_matte_fixture.py` regenerates with the current
+versions and compares, turning a fixture that drifted silently with a version update red). Lucida's
+last bit also changes with the CPU's instruction set (the SIMD kernel torch picks), so regenerate on
+the reference environment (the development machine) — generated elsewhere, only lucida drifts by an
+ulp.
 """
 
 from __future__ import annotations
@@ -83,74 +99,82 @@ from _shared.paths import REPO_ROOT
 from .card import BIREFNET_CHECKPOINTS
 from .distribution import BIREFNET_MODELS, BIREFNET_WEIGHT_DTYPES, birefnet_series_name
 
-#: fixture の置き場（git 管理）。
+#: Location of the fixture (tracked in git).
 FIXTURE_DIR = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "birefnet-matte"
 FIXTURE_JSON = "matte.json"
 FIXTURE_TENSORS = "matte.safetensors"
 
-#: fixture の合計の上限（git 管理の小さな fixture — バイト）。
+#: Upper limit of the fixture's total size (a small fixture tracked in git — bytes).
 MAX_TOTAL_BYTES = 1 << 20
 
-#: HR の丸めの境界の余白（`|255σ − (k + 0.5)|` がこれ未満の標本を拒む）。exp の最終 ulp の差は
-#: 255σ で 1e-13 程度なので、桁に十分な余裕を持たせる。
+#: Margin at HR's rounding boundary (samples with `|255σ − (k + 0.5)|` below this are rejected). A
+#: last-ulp difference of exp is about 1e-13 at 255σ, so this leaves ample orders of magnitude.
 TIE_MARGIN = 1e-9
 
-#: Lucida の許す差（torch の f32 の `255α` と TS の f64 の経路の `255α` の差の上限）。実測
-#: （{@link measure_lucida_delta} — 2026-10-11 は 4.2e-3・最大は 1024 → 480 の縮小の列）の
-#: 2 倍以上になる最小の 10 の冪（ADR 0125）。差の主因は torch が座標と重みを f32 で計算すること
-#: （添字が大きいほど効く）。
+#: Lucida's allowed difference (upper bound of the difference between torch's f32 `255α` and the
+#: TS f64 path's `255α`). The smallest power of 10 that is at least twice the measurement
+#: ({@link measure_lucida_delta} — 4.2e-3 on 2026-10-11, the largest on the 1024 → 480 downscaled
+#: column) (ADR 0125). The main cause of the difference is that torch computes the coordinates and
+#: weights in f32 (it matters more at larger indices).
 LUCIDA_EPSILON = 1e-2
 
-#: 実画像の切り出しの窓（幅 × 高さ — 非正方にして軸の取り違えを掴む）。
+#: Crop window of the real images (width × height — non-square to catch mixed-up axes).
 CROP_WIDTH = 40
 CROP_HEIGHT = 32
 
-#: 輪郭の画素とみなす logit の絶対値の上限（σ が 0.2% 〜 99.8% の帯）。
+#: Upper bound of |logit| for a pixel to count as an edge pixel (the band where σ is 0.2%–99.8%).
 SOFT_LOGIT = 6.0
 
-#: 飽和した前景とみなす logit の下限（窓の選び方 — {@link select_crop}）。目的は、飽和した前景を
-#: 確実に含む窓を選ぶこと。四捨五入の量子化で α が 255 になる境目 6.23（ln 509 — ADR 0125）より
-#: 十分に上に置き、窓の前景が境目の近くの値だけで埋まらないようにする。8.32 は境目より約 2 上
-#: （1 − σ が境目の約 1/8）。変えると窓の選び方が変わりうるので、変えるなら fixture を作り直す。
+#: Lower bound of the logit for saturated foreground (window selection — {@link select_crop}). The
+#: aim is to pick a window that surely contains saturated foreground. It sits well above 6.23 (ln
+#: 509 — ADR 0125), the boundary where round-half-up quantization makes α 255, so that the window's
+#: foreground is not filled only with values near the boundary. 8.32 is about 2 above the boundary
+#: (1 − σ is about 1/8 of its value at the boundary). Changing it can change the window choice, so
+#: regenerate the fixture if you change it.
 SATURATED_LOGIT = 8.32
 
-#: 窓が前景・背景のそれぞれについて最低限含む画素の数（窓の 1 行ぶん）。
+#: Minimum number of foreground and of background pixels a window contains (one window row).
 MIN_SIDE_PIXELS = CROP_WIDTH
 
-#: 窓の探索の歩幅（画素）。
+#: Stride of the window search (pixels).
 CROP_STRIDE = 4
 
-#: 実画像の切り出しの元 = (e2e が書く系列の綴り — `e2e_birefnet_real_test.ts` の `artifactName`,
-#: ケース名の頭)。各 checkpoint の配布の既定席の系列（HR は f16 席だけ — ADR 0113 追記
-#: 2026-10-11。HR の f16 席の logit は退役した f32 席と sha256 まで同じ）。席は系列名から導く
-#: （{@link real_series_seat}）。
+#: Sources of the real-image crops = (spelling of the series the e2e writes — `artifactName` of
+#: `e2e_birefnet_real_test.ts`, prefix of the case names). The series of each checkpoint's default
+#: distribution preset (HR has only the f16 preset — ADR 0113 addendum 2026-10-11; the logits of
+#: HR's f16 preset are identical, down to the sha256, to those of the retired f32 preset). The
+#: preset is derived from the series name ({@link real_series_seat}).
 #:
-#: ケース名の頭を系列名から導かないのは、ケース名が fixture の来歴の外の名前だから — 元の系列
-#: （席）を替えても `real-birefnet-hr-*` のまま動かさず、作り直しの差分を来歴（ファイル名）に
-#: 留める。
+#: The case-name prefix is not derived from the series name because case names lie outside the
+#: fixture's provenance — when the source series (preset) changes they stay `real-birefnet-hr-*`,
+#: keeping the regeneration diff within the provenance (file names).
 REAL_SERIES: tuple[tuple[str, str], ...] = (
     ("birefnet-hr-1024-f16", "birefnet-hr"),
     ("lucida-1024", "lucida"),
 )
 REAL_IMAGES = ("photo-portrait", "photo-street")
 
-#: 行と列の切り出し（実運用の係数表を掃く 1 行・1 列）を採る画像。
+#: The image the row and column crops (one row and one column sweeping the production coefficient
+#: tables) are taken from.
 LINE_IMAGE = "photo-portrait"
 
-#: 列の切り出しの幅（幅 1 は torch の不具合を踏む — 下の `REAL_TARGETS`）。
+#: Width of the column crop (width 1 hits a torch bug — `REAL_TARGETS` below).
 COLUMN_WIDTH = 2
 
-#: 目標寸法の 1 行（名前・幅・高さ・意図）。
+#: One target-size row (name, width, height, intent).
 Target = tuple[str, int, int, str]
 
-#: 実画像の切り出しの種類 → 目標寸法。
+#: Kind of real-image crop → target sizes.
 #:
-#: - `crop`（窓 `CROP_WIDTH × CROP_HEIGHT`）: 拡大・縮小・非正方・片軸だけ・恒等。
-#: - `row` / `column`（窓の中心を通る 1 行と幅 2 の列 — 長さ 1024）: 実運用の係数表（1024 → 832 /
-#:   480 の縮小と 1024 → 2048 の拡大）。torch の f32 の座標の丸めは添字が大きいほど効くので、ε は
-#:   実運用の長さで測る（窓の大きさだけで測ると小さく出る）。列を幅 2 にするのは、torch 2.13.0 の
-#:   CPU の antialias bilinear が**幅 1 の入力**で縦の補間を壊すため（全行が先頭の値になる — 実測。
-#:   上流の不具合で写す対象ではない — ADR 0125。{@link lucida_scaled} が拒む）。
+#: - `crop` (window `CROP_WIDTH × CROP_HEIGHT`): upscale, downscale, non-square, one axis only,
+#:   identity.
+#: - `row` / `column` (one row and a 2-wide column through the window's center — length 1024): the
+#:   production coefficient tables (the 1024 → 832 / 480 downscales and the 1024 → 2048 upscale).
+#:   Rounding of torch's f32 coordinates matters more at larger indices, so ε is measured at
+#:   production lengths (measured only at window size it comes out small). The column is 2 wide
+#:   because torch 2.13.0's CPU antialiased bilinear breaks the vertical interpolation on a
+#:   **width-1 input** (every row becomes the first value — measured; an upstream bug, not something
+#:   to copy — ADR 0125; {@link lucida_scaled} rejects it).
 REAL_TARGETS: dict[str, tuple[Target, ...]] = {
     "crop": (
         ("up", 97, 83, "両軸とも非整数倍の拡大"),
@@ -173,7 +197,7 @@ REAL_TARGETS: dict[str, tuple[Target, ...]] = {
 
 @dataclass(frozen=True)
 class MatteInput:
-    """fixture の入力 1 本（logit の地図 `[h, w]`・当てる目標寸法・来歴）。"""
+    """One fixture input (logit map `[h, w]`, the target sizes applied, provenance)."""
 
     name: str
     why: str
@@ -184,7 +208,7 @@ class MatteInput:
 
 @dataclass(frozen=True)
 class MatteCase:
-    """fixture の 1 ケース（入力 × 目標寸法）。"""
+    """One fixture case (input × target size)."""
 
     name: str
     why: str
@@ -203,28 +227,30 @@ def _checker(height: int, width: int, value: float) -> np.ndarray:
 
 
 def _disc(height: int, width: int, radius: float, slope: float) -> np.ndarray:
-    """中心の円盤（logit = `slope · (radius − 中心からの距離)` — 輪郭が柔らかい前景）。"""
+    """A centered disc (logit = `slope · (radius − distance from the center)` — foreground with a
+    soft edge)."""
     yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
     distance = np.hypot(xx - (width - 1) / 2, yy - (height - 1) / 2)
     return (slope * (radius - distance)).astype(np.float32)
 
 
 def _saturation_band(height: int, width: int) -> np.ndarray:
-    """logit 5.5〜18 を行優先に敷き詰めた地図（四捨五入で 255 になる境目 6.23 と、上流の
-    半精度・f32 の切り捨ての境目 8.32 / 16.64 を跨ぐ）。"""
+    """A map tiled row-major with logits 5.5–18 (crossing 6.23, the boundary where round-half-up
+    gives 255, and 8.32 / 16.64, the truncation boundaries of upstream's half precision / f32)."""
     band = np.linspace(5.5, 18.0, height * width, dtype=np.float64)
     return band.reshape(height, width).astype(np.float32)
 
 
 def _wide_ramp(width: int) -> np.ndarray:
-    """横 `width` の 2 行（段差のある斜面 — 台が大きく伸びる縮小の総和を見る）。"""
+    """2 rows of width `width` (a slope with a step — checks the sums of a downscale with a much
+    wider support)."""
     xs = np.arange(width, dtype=np.float64)
     row = np.where(xs < width / 2, -9.0 + xs * 0.05, 7.5 - (xs - width / 2) * 0.03)
     return np.stack([row, row[::-1]]).astype(np.float32)
 
 
 def synthetic_inputs() -> tuple[MatteInput, ...]:
-    """合成の境界ケース（logit は有限の値を明示する）。"""
+    """Synthetic boundary cases (the logits are explicit finite values)."""
     return (
         MatteInput(
             "step",
@@ -296,11 +322,14 @@ def _sha256(path: Path) -> str:
 
 
 def select_crop(logits: np.ndarray) -> tuple[int, int]:
-    """輪郭の画素を最も多く含む窓の左上 `(x, y)`（同点は行優先で先）。
+    """Top-left `(x, y)` of the window with the most edge pixels (ties go to the first in row-major
+    order).
 
-    MUST: 飽和した前景（logit が {@link SATURATED_LOGIT} を超える画素）と背景がどちらも
-    {@link MIN_SIDE_PIXELS} 以上ある窓だけを候補にする — 輪郭の画素の数だけで選ぶと、柔らかい
-    だけで飽和を持たない窓（髪の先の霞など）に寄り、飽和の帯の丸めを fixture が掃かない。
+    MUST: only windows with at least {@link MIN_SIDE_PIXELS} each of saturated foreground (pixels
+    with a logit above {@link SATURATED_LOGIT}) and of background are candidates — choosing by the
+    number of edge pixels alone drifts to windows that are merely soft without saturation (haze at
+    the tips of hair and the like), and the fixture would not sweep the rounding of the saturation
+    band.
     """
     soft = (np.abs(logits) < SOFT_LOGIT).astype(np.int64)
     foreground = (logits > SATURATED_LOGIT).astype(np.int64)
@@ -318,7 +347,10 @@ def select_crop(logits: np.ndarray) -> tuple[int, int]:
         window_sums(background) >= MIN_SIDE_PIXELS
     )
     if not eligible.any():
-        raise ValueError("飽和した前景と背景の両方を含む窓が無い（輪郭の無いマットを渡した）")
+        raise ValueError(
+            "no window contains both saturated foreground and background"
+            " (a matte without edges was passed)"
+        )
     score = np.where(eligible, window_sums(soft), -1)
     row, column = np.unravel_index(int(np.argmax(score)), score.shape)
     return int(column) * CROP_STRIDE, int(row) * CROP_STRIDE
@@ -338,10 +370,12 @@ def _real_input(
 
 
 def real_series_seat(series: str) -> tuple[str, str, str]:
-    """系列名 → (checkpoint, モデル名 = 解像度, 席の格納 dtype)。
+    """Series name → (checkpoint, model name = resolution, storage dtype of the preset).
 
-    系列名の綴りの正本（`birefnet.distribution.birefnet_series_name`）を全ての組で引いて逆に
-    辿る — 席を {@link REAL_SERIES} に別に持つと、系列を替えた日に来歴の席だけが古いまま残る。
+    It is traced back by evaluating the source of truth of series-name spelling
+    (`birefnet.distribution.birefnet_series_name`) for every combination — keeping the preset
+    separately in {@link REAL_SERIES} would leave only the provenance's preset stale on the day the
+    series changes.
     """
     matches = [
         (checkpoint, model, dtype)
@@ -352,13 +386,13 @@ def real_series_seat(series: str) -> tuple[str, str, str]:
     ]
     if len(matches) != 1:
         raise ValueError(
-            f"系列名 '{series}' が BiRefNet の系列の綴りに 1 つで当たらない: {matches}"
+            f"series name '{series}' does not match exactly one BiRefNet series spelling: {matches}"
         )
     return matches[0]
 
 
 def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
-    """e2e が書いたマット logits から実画像の切り出しを作る（来歴つき）。"""
+    """Make the real-image crops from the matte logits the e2e wrote (with provenance)."""
     from safetensors.numpy import load_file
 
     inputs = []
@@ -368,12 +402,10 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
             path = logits_dir / f"{series}-{image}-matte.safetensors"
             tensors = load_file(path)
             if len(tensors) != 1:
-                raise ValueError(f"{path}: テンソルが {len(tensors)} 本（グラフ出力 1 本のはず）")
+                raise ValueError(f"{path}: {len(tensors)} tensors (expected the one graph output)")
             ((tensor_name, tensor),) = tensors.items()
             if tensor.dtype != np.float32 or tensor.ndim != 4 or tensor.shape[:2] != (1, 1):
-                raise ValueError(
-                    f"{path}: {tensor_name} が F32 [1, 1, H, W] でない（{tensor.shape}）"
-                )
+                raise ValueError(f"{path}: {tensor_name} is not F32 [1, 1, H, W] ({tensor.shape})")
             logits = tensor[0, 0]
             height, width = logits.shape
             source = {
@@ -421,7 +453,8 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
 
 
 def committed_real_inputs(fixture_dir: Path = FIXTURE_DIR) -> tuple[MatteInput, ...]:
-    """git にある fixture の実画像の切り出し（入力表の来歴と `<input>.logits`）。"""
+    """The real-image crops of the fixture in git (the input table's provenance and
+    `<input>.logits`)."""
     from safetensors.numpy import load_file
 
     document = json.loads((fixture_dir / FIXTURE_JSON).read_text(encoding="utf-8"))
@@ -442,7 +475,8 @@ def committed_real_inputs(fixture_dir: Path = FIXTURE_DIR) -> tuple[MatteInput, 
 def build_cases(
     real_inputs: Sequence[MatteInput],
 ) -> tuple[tuple[MatteInput, ...], tuple[MatteCase, ...]]:
-    """入力表とケース表（実画像 → 合成の順 — 作り直しても同じ並び）。"""
+    """The input table and the case table (real images, then synthetic — the same order on every
+    regeneration)."""
     inputs = (*real_inputs, *synthetic_inputs())
     cases = tuple(
         MatteCase(f"{entry.name}.{label}", why, entry.name, width, height)
@@ -451,36 +485,39 @@ def build_cases(
     )
     names = [entry.name for entry in inputs] + [case.name for case in cases]
     if len(set(names)) != len(names):
-        raise AssertionError(f"名前が重複している: {names}")
+        raise AssertionError(f"duplicate names: {names}")
     return inputs, cases
 
 
-# ---- 上流の手順（量子化だけを四捨五入へ差し替える）-----------------------------------------
+# ---- Upstream procedures (only the quantization replaced with round-half-up) ---------------------
 
 
 def round_half_up(scaled: np.ndarray) -> np.ndarray:
-    """`floor(x + 0.5)` を uint8 へ（0.5 は切り上げ — ADR 0125 の量子化）。"""
+    """`floor(x + 0.5)` to uint8 (0.5 rounds up — ADR 0125's quantization)."""
     return np.floor(scaled.astype(np.float64) + 0.5).astype(np.uint8)
 
 
 def truncate(scaled: np.ndarray) -> np.ndarray:
-    """上流の量子化そのもの（`(x * 255).astype(uint8)` の切り捨て — 比較のためだけに持つ）。"""
+    """Upstream's quantization itself (the truncation of `(x * 255).astype(uint8)` — kept only for
+    comparison)."""
     return scaled.astype(np.uint8)
 
 
 def sigmoid_f64(logits: np.ndarray) -> np.ndarray:
-    """f64 の `1 / (1 + exp(−x))`（TS の `1 / (1 + Math.exp(-raw))` と同じ式）。"""
+    """f64 `1 / (1 + exp(−x))` (the same formula as TS's `1 / (1 + Math.exp(-raw))`)."""
     return 1.0 / (1.0 + np.exp(-logits.astype(np.float64)))
 
 
 def assert_no_ties(scaled: np.ndarray, where: str) -> None:
-    """丸めの向きが exp の実装で割れうる標本（`k + 0.5` から {@link TIE_MARGIN} 未満）を拒む。"""
+    """Reject samples whose rounding direction can split between exp implementations (less than
+    {@link TIE_MARGIN} from `k + 0.5`)."""
     distance = np.abs(scaled - (np.floor(scaled) + 0.5))
     near = np.argwhere(distance < TIE_MARGIN)
     if near.size:
         raise ValueError(
-            f"{where}: 255σ が k + 0.5 から {TIE_MARGIN} 未満の標本がある（{near[:4].tolist()}）"
-            " — 丸めの向きが exp の実装で割れうるので入力を選び直す"
+            f"{where}: samples where 255σ is less than {TIE_MARGIN} from k + 0.5"
+            f" ({near[:4].tolist()})"
+            " — the rounding direction can split between exp implementations, so pick other inputs"
         )
 
 
@@ -492,10 +529,11 @@ def hr_alpha(
     *,
     allow_ties: bool = False,
 ) -> np.ndarray:
-    """HR の上流の手順（f64 の σ → 8bit → Pillow の `resize(size)` の既定 = BICUBIC）。
+    """HR's upstream procedure (f64 σ → 8 bit → Pillow's `resize(size)` default = BICUBIC).
 
-    `allow_ties` は同点の標本（{@link assert_no_ties}）を拒まずに四捨五入する — 同点の標本が届く
-    出力画素を呼び手が自分で外す場合だけに使う（`birefnet.matte_ab_check`）。
+    `allow_ties` rounds tie samples ({@link assert_no_ties}) half up instead of rejecting them —
+    used only when the caller excludes the output pixels tie samples reach itself
+    (`birefnet.matte_ab_check`).
     """
     from PIL import Image
 
@@ -504,33 +542,34 @@ def hr_alpha(
         assert_no_ties(scaled, "HR")
     image = Image.fromarray(quantize(scaled))
     if image.mode != "L":
-        raise AssertionError(f"8bit の 1 バンドが L で開かれない（{image.mode}）")
+        raise AssertionError(f"the 8-bit single band does not open as L ({image.mode})")
     return np.asarray(image.resize((out_width, out_height)), dtype=np.uint8)
 
 
 def lucida_scaled(logits: np.ndarray, out_width: int, out_height: int) -> np.ndarray:
-    """Lucida の上流の手順の丸める前の `255α`（torch の f32 の σ → TF.resize → `× 255`）。"""
+    """`255α` before rounding of Lucida's upstream procedure (torch f32 σ → TF.resize → `× 255`)."""
     import torch
     from torchvision.transforms import functional as transforms_functional
 
     height, width = logits.shape
     if width == 1 and height > 1:
-        # torch 2.13.0 の CPU の antialias bilinear は幅 1・高さ 2 以上の入力の縦を壊す（全行が
-        # 先頭の行の値 — 実測）。上流の不具合を golden に焼かない（ADR 0125 — バグは写さない）。
-        raise ValueError(f"幅 1・高さ {height} の入力は torch の antialias の不具合を踏む")
+        # torch 2.13.0's CPU antialiased bilinear breaks the vertical axis of inputs of width 1 and
+        # height 2 or more (every row gets the first row's value — measured). The upstream bug is
+        # not baked into the golden (ADR 0125 — bugs are not copied).
+        raise ValueError(f"an input of width 1 and height {height} hits torch's antialias bug")
     preds = torch.from_numpy(np.ascontiguousarray(logits, dtype=np.float32))[None, None].sigmoid()
     alpha = transforms_functional.resize(preds[0], [out_height, out_width]).squeeze(0)
     scaled = alpha.numpy() * 255
     if scaled.dtype != np.float32:
-        raise AssertionError(f"255α が f32 でない（{scaled.dtype}）")
+        raise AssertionError(f"255α is not f32 ({scaled.dtype})")
     return scaled
 
 
-# ---- TS の float-bilinear の経路の写し（ε の実測だけに使う）------------------------------
+# ---- Port of the TS float-bilinear path (used only to measure ε) -------------------------------
 
 
 def _bilinear_taps(in_size: int, out_size: int) -> list[tuple[int, np.ndarray]]:
-    """`preprocess.ts` の `buildTaps`（三角フィルタ）の写し。"""
+    """Port of `buildTaps` (triangle filter) in `preprocess.ts`."""
     scale = in_size / out_size
     filter_scale = max(scale, 1.0)
     support = 1.0 * filter_scale
@@ -546,10 +585,10 @@ def _bilinear_taps(in_size: int, out_size: int) -> list[tuple[int, np.ndarray]]:
 
 
 def _ts_float_bilinear_scaled(logits: np.ndarray, out_width: int, out_height: int) -> np.ndarray:
-    """`matte.ts` の `float-bilinear` の丸める前の `255α`。
+    """`255α` before rounding of `float-bilinear` in `matte.ts`.
 
-    σ を f64 で計算して f32 に格納 → f64 の resize → f32 に格納 → f64 で × 255（`resizePlaneF32`
-    は f32 の配列を返す）。
+    σ computed in f64 and stored as f32 → f64 resize → stored as f32 → × 255 in f64
+    (`resizePlaneF32` returns an f32 array).
     """
     sigma = sigmoid_f64(logits).astype(np.float32).astype(np.float64)
     height, width = sigma.shape
@@ -565,7 +604,7 @@ def _ts_float_bilinear_scaled(logits: np.ndarray, out_width: int, out_height: in
 def measure_lucida_delta(
     inputs: Sequence[MatteInput], cases: Sequence[MatteCase], scaled: dict[str, np.ndarray]
 ) -> float:
-    """torch の `255α` と TS の経路の `255α` の差の最大値（全ケース）。"""
+    """Maximum difference between torch's `255α` and the TS path's `255α` (all cases)."""
     by_name = {entry.name: entry for entry in inputs}
     worst = 0.0
     for case in cases:
@@ -580,14 +619,16 @@ def measure_lucida_delta(
 
 
 def library_versions() -> dict[str, str]:
-    """期待値を決めるライブラリの版（fixture の来歴 — テストが今の環境と突き合わせる）。"""
+    """Versions of the libraries that determine the expected values (the fixture's provenance — the
+    test compares them with the current environment)."""
     return {name: version(name) for name in ("torch", "torchvision", "pillow", "numpy")}
 
 
 def build_fixture(
     real_inputs: Sequence[MatteInput],
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """fixture の JSON（説明・来歴・ε・入力表・ケース表）と safetensors のテンソル。"""
+    """The fixture's JSON (description, provenance, ε, input table, case table) and the safetensors
+    tensors."""
     inputs, cases = build_cases(real_inputs)
     by_name = {entry.name: entry for entry in inputs}
     tensors: dict[str, np.ndarray] = {}
@@ -602,8 +643,8 @@ def build_fixture(
     measured = measure_lucida_delta(inputs, cases, scaled)
     if not measured <= LUCIDA_EPSILON / 2:
         raise AssertionError(
-            f"torch と TS の経路の 255α の差 {measured} が ε {LUCIDA_EPSILON} の半分を超えた"
-            "（ε を決め直す — ADR 0125）"
+            f"the 255α difference {measured} between torch and the TS path exceeds half of ε"
+            f" {LUCIDA_EPSILON} (choose ε again — ADR 0125)"
         )
     document = {
         "_doc": [
@@ -659,17 +700,21 @@ def build_fixture(
 
 
 def emit(fixture_dir: Path, real_inputs: Sequence[MatteInput]) -> dict[str, Any]:
-    """fixture を書き、要約を返す（合計が {@link MAX_TOTAL_BYTES} を超えたら何も書かない）。"""
+    """Write the fixture and return a summary (nothing is written when the total exceeds
+    {@link MAX_TOTAL_BYTES})."""
     from safetensors.numpy import save
 
     document, tensors = build_fixture(real_inputs)
-    # NOTE: 版は JSON の `source.versions` にだけ書く — safetensors の metadata は鍵の並びが
-    # 書くたびに変わり（2 鍵以上で実測）、作り直しのバイト一致が崩れる。
+    # NOTE: the versions are written only to the JSON's `source.versions` — the key order of
+    # safetensors metadata changes on every write (measured with 2 or more keys), which would break
+    # the byte equality of regeneration.
     payload = save(tensors)
     text = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
     total = len(payload) + len(text.encode("utf-8"))
     if total > MAX_TOTAL_BYTES:
-        raise AssertionError(f"fixture の合計 {total} バイトが上限 {MAX_TOTAL_BYTES} を超える")
+        raise AssertionError(
+            f"the fixture's total of {total} bytes exceeds the limit {MAX_TOTAL_BYTES}"
+        )
     fixture_dir.mkdir(parents=True, exist_ok=True)
     (fixture_dir / FIXTURE_TENSORS).write_bytes(payload)
     (fixture_dir / FIXTURE_JSON).write_text(text, encoding="utf-8")
@@ -690,8 +735,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--logits-dir",
         type=Path,
         default=None,
-        help="実画像の logit を採り直すときの e2e の出力"
-        "（outputs/verify/<環境キー>/<日付>_birefnet）",
+        help="the e2e output to re-take the real-image logits from"
+        " (outputs/verify/<environment key>/<date>_birefnet)",
     )
     args = parser.parse_args(argv)
     real_inputs = (

@@ -1,102 +1,118 @@
-"""Wan2.2 TI2V-5B の I2V の 2 ステップの通しの CPU 参照（ADR 0121 段 9b）。
+"""CPU reference of the two-step end-to-end I2V run of Wan2.2 TI2V-5B (ADR 0121 step 9b).
 
-条件画像 1 枚から 1280×704・9 フレーム（潜在 `[48,3,44,80]`・S = 2,640・条件のトークン P = 880）を
-2 ステップ（CFG あり・guidance 5.0・shift 5.0）回した潜在と、それをタイル decode → unpatchify →
-クランプした RGB のフレームを、diffusers の `WanImageToVideoPipeline` の `expand_timesteps` の分岐
-（Wan2.2 5B の I2V）を CPU f32 で回して作る。GPU の通し（`wan.Ti2vPipeline` の I2V）はこの値と帯で
-照合する。T2V の `wan/ti2v_few_step_ref.py` は変えずに部品を流用する（重みの読み手・scheduler・
-プロンプトの行の引き方・タイル decode・2 相の順）。
+From one condition image it builds, at 1280×704 and 9 frames (latent `[48,3,44,80]`, S = 2,640,
+condition tokens P = 880), the latents of 2 steps (with CFG, guidance 5.0, shift 5.0) and the RGB
+frames obtained from them by tiled decode → unpatchify → clamp, by running the `expand_timesteps`
+branch of diffusers' `WanImageToVideoPipeline` (the I2V of Wan2.2 5B) on CPU in f32. The GPU
+end-to-end run (the I2V of `wan.Ti2vPipeline`) is checked against these values within a band. The
+parts of the T2V `wan/ti2v_few_step_ref.py` are reused unchanged (the weight reader, the scheduler,
+how the prompt rows are looked up, the tiled decode, the two-phase order).
 
-## 条件づけ（diffusers の `expand_timesteps` の分岐そのもの）
+## Conditioning (exactly the `expand_timesteps` branch of diffusers)
 
-- 条件の潜在: 上流の非タイル encode の mu を `(mu − mean)·f32(1/f32(std))` で正規化した値
-  （`prepare_latents` — `[48,1,44,80]`）。
-- 各 step: DiT の入力だけ先頭の潜在フレームを条件で置き換える（`(1 − m)·cond + m·latents`・m は
-  先頭フレームが 0）。スケジューラは置き換えない潜在で進む（callback が受けるのもこの値）。
-- ループの後に 1 回置き換えてから VAE へ（`latents_final`）。
-- 時刻: 条件のトークン（先頭 P 個）は t = 0、残りは生成側の t。
+- Condition latent: the mu of the upstream non-tiled encode normalized as
+  `(mu − mean)·f32(1/f32(std))` (`prepare_latents` — `[48,1,44,80]`).
+- Each step: only the DiT input has its first latent frame replaced by the condition
+  (`(1 − m)·cond + m·latents`, with m 0 on the first frame). The scheduler advances on the
+  unreplaced latents (which is also what the callback receives).
+- After the loop it is replaced once more before going to the VAE (`latents_final`).
+- Timesteps: the condition tokens (the first P) get t = 0, the rest the generation-side t.
 
-公式（Wan2.2 の `textimage2video.py` の i2v）は初めと各 step の後にスケジューラの状態そのものを
-置き換える。DiT の入力は 2 つの形でビット一致し、UniPC（thresholding なし）は要素ごとに進むので、
-最終出力もビット一致する（{@link sample} が 2 つの形を 1 本の経路で書く。
-`wan/tests/test_ti2v_i2v_few_step_ref.py` が pin の UniPC と擬似モデルで常設し、実走では記録した
-DiT の出力から公式の形を再生して要約に書く — 観測であって門ではない）。
+The official code (the i2v of Wan2.2's `textimage2video.py`) replaces the scheduler state itself
+at the start and after every step. The DiT input is bit-identical between the two forms, and UniPC
+(without thresholding) advances element by element, so the final output is bit-identical too
+({@link sample} writes both forms as one path; `wan/tests/test_ti2v_i2v_few_step_ref.py` keeps this
+in place with the pinned UniPC and a mock model, and a real run replays the official form from the
+recorded DiT outputs and puts it in the summary — an observation, not a check).
 
-## 時刻の形（ADR 0121 決定 4）
+## The timestep form (ADR 0121 decision 4)
 
-上流の forward は `[1,S]` の timestep を受けると時刻の MLP を S 行（M = S）で回す。参照は Karume の
-グラフと同じ意味論 — 値ごとに M = 1 で 2 回（生成側 t・条件側 0）— で採る。DiT の
-`condition_embedder` を呼び出しの間だけ {@link _PerStepTokenwiseEmbedder} に差し替え、各 forward の
-平坦の timestep から生成側の t を読んで DiT の参照ラッパ（`dit_patch._TokenwiseTimeEmbedder` —
-DiT の golden と同じもの）へ委ねる。決定用の 2 本は差し替えずに（diffusers の pipeline そのもの・
-M = S）も回して観測する（門ではない）。
+Given a `[1,S]` timestep, the upstream forward runs the time MLP over S rows (M = S). The reference
+is taken with the same semantics as Karume's graph — twice with M = 1, once per value (the
+generation-side t and the condition side's 0). For the duration of the call, the DiT's
+`condition_embedder` is replaced with {@link _PerStepTokenwiseEmbedder}, which reads the
+generation-side t from each forward's flat timestep and delegates to the DiT reference wrapper
+(`dit_patch._TokenwiseTimeEmbedder` — the same one as the DiT golden). The two deciding cases are
+also run without the replacement (the diffusers pipeline as is, M = S) as an observation (not a
+check).
 
-## 入力
+## Inputs
 
-- 条件画像: `inputs/wan-i2v/<name>-832x480.png`（git 追跡外・sha256 は
-  `export_vae_encoder.IMAGES` — 段 9a の golden の来歴と同じ）を公式の前処理
-  （`i2v_preprocess_ref.crop_resize` — 覆う側の倍率で LANCZOS → 中央クロップ）で切った exact-size の
-  PIL を渡す。上流の `VideoProcessor` はこの寸法の画像の画素を変えない（Pillow は同寸法の resize を
-  写しで返す）— pipeline が encoder へ渡す [-1, 1] の画像が公式の `to_signed_unit` とビット一致する
-  ことを確かめる（外れたら fail loudly）。
-- テキスト文脈・初期ノイズ・重み・scheduler: T2V の参照と同じ（`ti2v_few_step_ref` のモジュール
-  doc）。プロンプトは画像と同じ名前の固定プロンプト。negative は明示する（diffusers の既定 `""` にも
-  公式の既定 `sample_neg_prompt` にも預けない — T2V と同じ扱い）。
-- pipeline: pin の snapshot から `WanImageToVideoPipeline.from_pretrained` で組む
-  （`expand_timesteps` は model_index の値 — 読めた値が真であることを確かめる）。重い部品は全て
-  渡すので、snapshot から読むのは config だけ（repo id + `local_files_only` は未取得のファイルの
-  ために `IncompleteSnapshotError` になるので、取得済みの snapshot のパスを渡す）。
+- Condition image: `inputs/wan-i2v/<name>-832x480.png` (git-untracked; the sha256 is in
+  `export_vae_encoder.IMAGES` — the same provenance as the step 9a goldens), cropped by the
+  official preprocessing (`i2v_preprocess_ref.crop_resize` — LANCZOS at the covering scale →
+  center crop), passed as an exact-size PIL image. The upstream `VideoProcessor` does not change
+  the pixels of an image of this size (Pillow returns a copy for a same-size resize) — it is
+  checked that the [-1, 1] image the pipeline passes to the encoder is bit-identical to the
+  official `to_signed_unit` (fails loudly otherwise).
+- Text context, initial noise, weights, scheduler: the same as the T2V reference (the module doc of
+  `ti2v_few_step_ref`). The prompt is the fixed prompt with the same name as the image. The
+  negative is given explicitly (left neither to diffusers' default `""` nor to the official
+  default `sample_neg_prompt` — the same treatment as T2V).
+- pipeline: built from the pinned snapshot with `WanImageToVideoPipeline.from_pretrained`
+  (`expand_timesteps` is the model_index value — it is checked that the value read is true). All
+  heavy components are passed in, so only the configs are read from the snapshot (repo id +
+  `local_files_only` raises `IncompleteSnapshotError` for files not fetched, so the path of the
+  fetched snapshot is passed).
 
-## 組み方（単一プロセス・2 相 — T2V の参照と同じ）
+## How it is put together (single process, two phases — the same as the T2V reference)
 
-1. 第 1 相（DiT）: 全ケースを 2 ステップ回す（VAE の encode は pipeline の中）。DiT の出力は
-   forward の hook で記録し、cond / uncond の振り分けは hook が受けたテキスト文脈の値で決める。
-   決定用の 2 本は M = S の経路でも回す。
-2. 第 2 相（VAE）: DiT を手放し（参照が残っていたら fail loudly）、置き換えた潜在を段 5 の 2.2 の
-   経路（`vae_tiling` — patchify 空間でブレンド → 上流の unpatchify → clamp）でフレームにする。
+1. Phase 1 (DiT): every case runs 2 steps (the VAE encode happens inside the pipeline). The DiT
+   outputs are recorded by a forward hook, and cond / uncond are told apart by the value of the
+   text context the hook received. The two deciding cases also run on the M = S path.
+2. Phase 2 (VAE): the DiT is released (fails loudly if a reference remains), and the replaced
+   latents are turned into frames through the 2.2 path of step 5 (`vae_tiling` — blend in patchify
+   space → upstream unpatchify → clamp).
 
-## 出力（i8 の DiT の系列の根の `pipeline_steps_i2v.<case>.safetensors`）
+## Output (`pipeline_steps_i2v.<case>.safetensors` at the root of the i8 DiT series)
 
-テンソル（f32 — 画像の 2 本だけ u8）:
+Tensors (f32 — only the two image ones are u8):
 
-- `latents_init` `[48,3,44,80]` — 注入した初期ノイズ（先頭フレームもノイズのまま — 置き換えは
-  pipeline の中）。
-- `condition_latents` `[48,1,44,80]` — 条件の潜在（正規化の後）。
-- `noise_cond.<i>` / `noise_uncond.<i>` — 各 step の DiT の出力。
-- `latents.<i>` — 各 step の後のスケジューラの潜在（置き換える前 — diffusers の callback と同じ
-  値）。
-- `latents_final` — ループの後に先頭フレームを置き換えた潜在（VAE へ渡す値）。
-- `frames` `[3,9,704,1280]` — unpatchify とクランプの後。
-- `latents_mean` / `latents_std` `[48]`。
-- `source` `[480,832,3]` u8 — 元画像の RGB8（来歴の sha256 の PNG の画素 — GPU のテストが PNG の
-  decode にも別の資産にも頼らずに前処理の鎖を回せる）・`rgb8` `[704,1280,3]` u8 — 切った RGB8。
-- 決定用だけ `observed_m_s.latents.<i>` / `observed_m_s.latents_final`（M = S の観測）。
+- `latents_init` `[48,3,44,80]` — the injected initial noise (the first frame is still noise too —
+  the replacement happens inside the pipeline).
+- `condition_latents` `[48,1,44,80]` — the condition latent (after normalization).
+- `noise_cond.<i>` / `noise_uncond.<i>` — the DiT outputs of each step.
+- `latents.<i>` — the scheduler latents after each step (before replacement — the same values as
+  diffusers' callback).
+- `latents_final` — the latents with the first frame replaced after the loop (what goes to the
+  VAE).
+- `frames` `[3,9,704,1280]` — after unpatchify and clamp.
+- `latents_mean` / `latents_std` `[48]`.
+- `source` `[480,832,3]` u8 — the source image's RGB8 (the pixels of the PNG with the provenance
+  sha256 — so the GPU test can run the preprocessing chain without relying on PNG decoding or
+  another asset), `rgb8` `[704,1280,3]` u8 — the cropped RGB8.
+- Deciding cases only: `observed_m_s.latents.<i>` / `observed_m_s.latents_final` (the M = S
+  observation).
 
-メタ: T2V の参照の欄（`expand_timesteps` は `"true"`）に加えて、`timestep_mlp`
-（{@link TIMESTEP_MLP}）・`condition_tokens`（P）・`condition_timestep`（`"0"`）・`image`・
-`image_sha256`（PNG）・`source_rgb8_sha256` / `rgb8_sha256`（u8 の生バイト列）・`width`・`height`・
-`fit`（`"crop"`）・`resample`（`"LANCZOS"`）・`version_<lib>`（値を決めるライブラリの版）。
+Meta: the fields of the T2V reference (`expand_timesteps` is `"true"`) plus `timestep_mlp`
+({@link TIMESTEP_MLP}), `condition_tokens` (P), `condition_timestep` (`"0"`), `image`,
+`image_sha256` (PNG), `source_rgb8_sha256` / `rgb8_sha256` (the raw u8 bytes), `width`, `height`,
+`fit` (`"crop"`), `resample` (`"LANCZOS"`) and `version_<lib>` (the versions of the libraries that
+determine the values).
 
-## ケース（決定用 2 本 + 受入れ 1 本 — 3 本とも同じ形）
+## Cases (2 deciding + 1 acceptance — all three the same form)
 
-役割は段 9a の encoder の golden と同じ割り振り（決定用 = boxing-cats / cat-dog-baking・受入れ =
-ferret）。MUST: `accept` の結果を見て決定用のケースも帯も変えない。受入れの形を決定用と変えない。
+The roles are assigned as for the step 9a encoder goldens (deciding = boxing-cats / cat-dog-baking,
+acceptance = ferret). MUST: the `accept` results never change the deciding cases or the band. The
+acceptance case keeps the same form as the deciding ones.
 
-    uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref                       # 全部
-    uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref --case accept-ferret  # 1 本
+    uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref                       # all
+    uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref --case accept-ferret  # one
 
-## RAM と所要（実測 2026-10-09・Ryzen 5 7600・torch のスレッド 6）
+## RAM and run time (measured 2026-10-09, Ryzen 5 7600, 6 torch threads)
 
-- RAM の門の見込みは T2V の参照の見込み（`ti2v_few_step_ref.memory_estimate` 23.7 GiB）に
-  I2V の上乗せ 0.5 GiB を足した約 24.2 GiB（{@link memory_estimate} — `require_available` が
-  余白 1 GiB を足す）。プロセスの RSS の山は 24.07 GiB で、T2V の見込みを 0.37 GiB 上回った
-  （上乗せはその実測から）。S は T2V より短いが山は下がらなかった。
-- 所要は 3 ケースで 41 分 48 秒: 第 1 相 約 16 分（M = 1 が 1 ケース 179〜202 s・M = S の観測が
-  190〜202 s）+ タイル decode 28 枚 × 3 chunk が 1 ケース 503〜506 s。
-- 第 1 相の結果はメモリにだけ持つ（第 2 相の途中で落ちたら第 1 相から回し直す）。
+- The RAM check's estimate is the T2V reference's estimate (`ti2v_few_step_ref.memory_estimate`
+  23.7 GiB) plus the I2V excess of 0.5 GiB, about 24.2 GiB ({@link memory_estimate} —
+  `require_available` adds a 1 GiB margin). The process's RSS peak was 24.07 GiB, 0.37 GiB above
+  the T2V estimate (the excess comes from that measurement). S is shorter than for T2V, but the peak
+  did not drop.
+- The run time is 41 min 48 s for the 3 cases: phase 1 about 16 min (M = 1 takes 179 to 202 s per
+  case, the M = S observation 190 to 202 s) + the tiled decode of 28 tiles × 3 chunks, 503 to
+  506 s per case.
+- The phase 1 results are kept in memory only (if phase 2 fails midway, rerun from phase 1).
 
-MUST: diffusers / Pillow は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: diffusers / Pillow are imported inside functions (the `wan` group is not in the default sync
+— `tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -136,41 +152,48 @@ if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline
     from PIL import Image
 
-#: 上流のモデル（`wan.sources.SOURCES` のキー）。
+#: The upstream model (a key of `wan.sources.SOURCES`).
 MODEL = ti2v_few_step_ref.MODEL
 
-#: 少ステップの通しのステップ数・shift・CFG の強さ（T2V の参照と同じ値）。
+#: The step count, shift and CFG strength of the few-step run (the same values as the T2V
+#: reference).
 STEPS = ti2v_few_step_ref.STEPS
 FLOW_SHIFT = ti2v_few_step_ref.FLOW_SHIFT
 GUIDANCE_SCALE = ti2v_few_step_ref.GUIDANCE_SCALE
 
-#: 潜在 `[C, F, H, W]`（1280×704・9 フレーム — 条件 1 + 生成 2 の潜在フレームで、置き換えの
-#: フレームの添字のずれ〈例: 1 つおきに置き換える〉まで観測点に出る）。
+#: Latent `[C, F, H, W]` (1280×704, 9 frames — 1 condition + 2 generated latent frames, so even an
+#: off-by-one in the replaced frame's index (e.g. replacing every other frame) shows at the
+#: observation points).
 LATENT_SHAPE = (48, 3, 44, 80)
 
-#: 縦横の合わせ方（公式の前処理 — `i2v_preprocess_ref.crop_resize`）と、その resample。
+#: How width and height are fitted (the official preprocessing — `i2v_preprocess_ref.crop_resize`)
+#: and its resample.
 FIT: i2v_preprocess_ref.Fit = "crop"
 RESAMPLE = "LANCZOS"
 
-#: 条件のトークンの時刻（上流の `first_frame_mask` が先頭の潜在フレームを 0 にする）。
+#: The timestep of the condition tokens (the upstream `first_frame_mask` sets the first latent frame
+#: to 0).
 CONDITION_TIMESTEP = 0
 
-#: 系列の根（i8 の DiT が参照席を特徴づけるので、T2V の参照と同じ i8 の DiT の系列に置く）。
+#: The series root (the i8 DiT characterizes the reference preset, so it goes in the same i8 DiT
+#: series as the T2V reference).
 SERIES = ti2v_few_step_ref.SERIES
 
-#: 参照のファイル名（系列の根に置く — `pipeline_steps_i2v.<case>.safetensors`。T2V の
-#: `pipeline_steps.<case>` と同じ根に並ぶ。配布形は許可リスト〈`distribution.wan_placements`〉なので
-#: ここに足しても配布へは入らない）。
+#: The reference's file name (at the series root — `pipeline_steps_i2v.<case>.safetensors`, next to
+#: the T2V `pipeline_steps.<case>` at the same root; the distribution uses an allow-list
+#: (`distribution.wan_placements`), so adding it here does not put it into the distribution).
 FIXTURE_PREFIX = "pipeline_steps_i2v."
 FIXTURE_SUFFIX = ".safetensors"
 
-#: メタの `weights`（T2V の参照と同じ — DiT は i8 の RTN の fake-quant・VAE は f16 表現可能値）。
+#: The meta's `weights` (the same as the T2V reference — the DiT is i8 RTN fake-quant, the VAE f16
+#: representable values).
 WEIGHTS = ti2v_few_step_ref.WEIGHTS
 
-#: メタの `timestep_mlp`（時刻の MLP の回し方 — 決定 4: 値ごとに M = 1・生成側 t と条件側 0）。
+#: The meta's `timestep_mlp` (how the time MLP is run — decision 4: M = 1 per value, generation t
+#: and condition 0).
 TIMESTEP_MLP = "per-value-m1"
 
-#: メタの `reference`（参照の素性）。
+#: The meta's `reference` (what the reference is).
 REFERENCE = (
     "diffusers WanImageToVideoPipeline (expand_timesteps=True read from the pinned model_index) CPU"
     " f32, umT5 embeddings injected, the time MLP run once per value at M=1 (generation t,"
@@ -179,7 +202,7 @@ REFERENCE = (
     " blend_v / blend_h in patchify space, upstream unpatchify and clamp"
 )
 
-#: 決定用のメタの `observed_m_s`（観測の素性 — 門ではない）。
+#: The deciding cases' meta `observed_m_s` (what the observation is — not a check).
 OBSERVED_M_S = (
     "scheduler latents after each step and the final replaced latents of the plain diffusers"
     " WanImageToVideoPipeline (timestep [1,S], the time MLP over all S tokens); observation only,"
@@ -189,15 +212,16 @@ OBSERVED_M_S = (
 
 @dataclass(frozen=True)
 class FixtureCase(ti2v_few_step_ref.FixtureCase):
-    """I2V の少ステップの通し 1 本（T2V のケースに条件画像の名前を足したもの）。"""
+    """One few-step I2V run (a T2V case plus the name of the condition image)."""
 
-    #: 条件画像の名前（`export_vae_encoder.IMAGES` の `name`）。
+    #: The condition image's name (`name` of `export_vae_encoder.IMAGES`).
     image: str
 
 
-#: 決定用 2 本（帯を決める）+ 受入れ 1 本。プロンプトは画像と同じ名前の固定プロンプト。seed は
-#: T2V の参照（20262101〜03）とも 2.1 の参照とも違う値。
-#: MUST: `accept` の結果を見て決定用のケースも帯も変えない。
+#: 2 deciding cases (they decide the band) + 1 acceptance case. The prompt is the fixed prompt with
+#: the same name as the image. The seeds differ from both the T2V reference (20262101 to 03) and
+#: the 2.1 reference.
+#: MUST: the `accept` results never change the deciding cases or the band.
 FIXTURE_CASES = (
     FixtureCase(
         "band-boxing-cats", role="band", seed=20262111, prompt="boxing-cats", image="boxing-cats"
@@ -217,28 +241,31 @@ def fixture_path(out_root: Path, case: FixtureCase) -> Path:
     return out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
 
 
-#: I2V の山が T2V の見込み（`ti2v_few_step_ref.memory_estimate`）を上回った分の上乗せ。
-#: 実測（2026-10-09・3 ケース）の山 24.07 GiB は T2V の見込み 23.70 GiB を 0.37 GiB 上回った —
-#: 切り上げて 0.5 GiB。出所は未特定（推測: pipeline の中の VAE の encode と M = S の観測の活性）。
+#: The excess by which the I2V peak exceeded the T2V estimate (`ti2v_few_step_ref.memory_estimate`).
+#: The measured peak (2026-10-09, 3 cases) of 24.07 GiB exceeded the T2V estimate of 23.70 GiB by
+#: 0.37 GiB — rounded up to 0.5 GiB. The source is not identified (speculation: the VAE encode
+#: inside the pipeline and the activations of the M = S observation).
 I2V_EXCESS_BYTES = int(0.5 * 2**30)
 
 
 def memory_estimate(model: str = MODEL) -> int:
-    """I2V の参照の RAM の見込み（バイト）= T2V の見込み + {@link I2V_EXCESS_BYTES}（5B で約
-    24.2 GiB — 実測の山 24.07 GiB を覆う。`require_available` が余白 1 GiB を足す）。
+    """The RAM estimate of the I2V reference (bytes) = the T2V estimate + {@link I2V_EXCESS_BYTES}
+    (about 24.2 GiB for 5B — covers the measured peak of 24.07 GiB; `require_available` adds a
+    1 GiB margin).
 
-    MUST: 実測の山を下回る見込みにしない — 余白 1 GiB が見込みの誤差に食われ、他の作業と並べたときに
-    42 分の走行の途中で OOM かスワップに入る。
+    MUST: never estimate below the measured peak — the 1 GiB margin would be eaten by the
+    estimate's error, and run alongside other work the 42-minute run would hit OOM or swap midway.
     """
     return ti2v_few_step_ref.memory_estimate(model) + I2V_EXCESS_BYTES
 
 
-# ---- 条件画像 ------------------------------------------------------------------------
+# ---- Condition image ------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class SourceImage:
-    """条件画像の元 1 枚（来歴の名前と PNG の sha256・開いた RGB の画像）。"""
+    """One source condition image (the provenance name, the PNG's sha256 and the opened RGB
+    image)."""
 
     name: str
     sha256: str
@@ -247,7 +274,8 @@ class SourceImage:
 
 @dataclass(frozen=True)
 class ConditionImage:
-    """1 ケースの条件画像（元画像と、公式の前処理で切った exact-size の画像）。"""
+    """The condition image of one case (the source image and the exact-size image cropped by the
+    official preprocessing)."""
 
     source: SourceImage
     cropped: Image.Image
@@ -262,27 +290,29 @@ class ConditionImage:
 
     @property
     def signed(self) -> torch.Tensor:
-        """公式の [-1, 1]（`to_signed_unit`）の `[1, 3, H, W]` — pipeline が encoder へ渡す画像の
-        照合の相手。"""
+        """The official [-1, 1] (`to_signed_unit`) `[1, 3, H, W]` — what the image the pipeline
+        passes to the encoder is checked against."""
         return i2v_preprocess_ref.to_signed_unit(self.cropped)[:, :, 0]
 
 
 def condition_image(source: SourceImage, width: int, height: int) -> ConditionImage:
-    """元画像を公式の前処理（`crop`）で `width × height` に切る。"""
+    """Crop the source image to `width × height` with the official preprocessing (`crop`)."""
     return ConditionImage(
         source=source, cropped=i2v_preprocess_ref.preprocess(source.image, width, height, FIT)
     )
 
 
 def load_sources(cases: Sequence[FixtureCase]) -> dict[str, SourceImage]:
-    """ケースが使う条件画像を開く（sha256 と寸法が来歴と違えば fail loudly — 重い読み込みの前に
-    呼ぶ）。"""
+    """Open the condition images the cases use (fails loudly if the sha256 or the size differs
+    from the provenance — call before the heavy loading)."""
     images = {image.name: image for image in export_vae_encoder.IMAGES}
     sources: dict[str, SourceImage] = {}
     for name in sorted({case.image for case in cases}):
         image = images.get(name)
         if image is None:
-            raise ValueError(f"条件画像 {name!r} が来歴の表に無い（{sorted(images)}）")
+            raise ValueError(
+                f"condition image {name!r} is not in the provenance table ({sorted(images)})"
+            )
         sources[name] = SourceImage(name, image.sha256, export_vae_encoder.load_image(image))
     return sources
 
@@ -291,7 +321,7 @@ def _bytes_sha256(tensor: torch.Tensor) -> str:
     return hashlib.sha256(tensor.contiguous().numpy().tobytes()).hexdigest()
 
 
-# ---- 条件づけ（置き換えの式・2 つの形）-------------------------------------------------
+# ---- Conditioning (the replacement formula, two forms) -------------------------------------
 
 
 # Third-party code notice. `first_frame_mask`, `replace_first_frame` and `sample` below reproduce
@@ -314,7 +344,8 @@ def _bytes_sha256(tensor: torch.Tensor) -> str:
 #
 #     Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 def first_frame_mask(latent_shape: Sequence[int]) -> torch.Tensor:
-    """上流の `first_frame_mask` `[1, 1, F, H, W]`（f32 — 先頭の潜在フレームが 0・残りが 1）。"""
+    """The upstream `first_frame_mask` `[1, 1, F, H, W]` (f32 — 0 on the first latent frame, 1 on
+    the rest)."""
     _, frames, height, width = latent_shape
     mask = torch.ones(1, 1, frames, height, width, dtype=torch.float32)
     mask[:, :, 0] = 0
@@ -324,32 +355,34 @@ def first_frame_mask(latent_shape: Sequence[int]) -> torch.Tensor:
 def replace_first_frame(
     latents: torch.Tensor, condition: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
-    """先頭の潜在フレームを条件で置き換える `(1 − m)·cond + m·latents`（diffusers と公式の同じ式）。
+    """Replace the first latent frame with the condition, `(1 − m)·cond + m·latents` (the same
+    formula in diffusers and the official code).
 
-    `condition` は `[1, C, 1, H, W]`（フレーム軸で放送）。式のまま書く — 0·cond は ±0 を足すだけで
-    先頭以外のフレームは `latents` とビット一致するが、cond の ±Inf は 0·Inf = NaN として全
-    フレームへ広がる（だから条件の潜在は有限であることを先に確かめる）。
+    `condition` is `[1, C, 1, H, W]` (broadcast over the frame axis). Written as the formula —
+    0·cond only adds ±0, so the frames other than the first are bit-identical to `latents`, but a
+    ±Inf in cond spreads to every frame as 0·Inf = NaN (which is why the condition latent is
+    checked to be finite first).
     """
     return (1 - mask) * condition + mask * latents
 
 
-#: 置き換えの形（{@link sample}）。
+#: The replacement form ({@link sample}).
 Form = Literal["diffusers", "official"]
 FORMS: tuple[Form, ...] = ("diffusers", "official")
 
-#: 1 step の速度（`index`・timestep・DiT の入力 → CFG の後の DiT の出力）。
+#: The velocity of one step (`index`, timestep, DiT input → DiT output after CFG).
 Velocity = Callable[[int, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 @dataclass(frozen=True)
 class Sampled:
-    """{@link sample} の戻り（`[1, C, F, H, W]` の列）。"""
+    """What {@link sample} returns (sequences of `[1, C, F, H, W]`)."""
 
-    #: 各 step の DiT の入力。
+    #: The DiT input of each step.
     model_inputs: list[torch.Tensor]
-    #: 各 step の scheduler の出力（その形の置き換えの前）。
+    #: The scheduler output of each step (before that form's replacement).
     states: list[torch.Tensor]
-    #: VAE へ渡す潜在（先頭フレームが条件）。
+    #: The latents passed to the VAE (the first frame is the condition).
     final: torch.Tensor
 
 
@@ -362,18 +395,20 @@ def sample(
     *,
     form: Form,
 ) -> Sampled:
-    """I2V の denoise のループを 2 つの置き換えの形のどちらかで回す（`scheduler` は
-    `set_timesteps` 済みの新しいもの）。
+    """Run the I2V denoising loop in one of the two replacement forms (`scheduler` is a new one
+    with `set_timesteps` already applied).
 
-    - `diffusers`（`WanImageToVideoPipeline` の `expand_timesteps` の分岐）: DiT の入力だけを
-      置き換え、scheduler は置き換えない潜在で進め、ループの後に 1 回置き換える。
-    - `official`（公式 Wan2.2 の i2v）: 初めと各 step の後に scheduler の状態そのものを置き換える。
+    - `diffusers` (the `expand_timesteps` branch of `WanImageToVideoPipeline`): replace only the
+      DiT input, advance the scheduler on the unreplaced latents, and replace once after the loop.
+    - `official` (the i2v of the official Wan2.2): replace the scheduler state itself at the start
+      and after every step.
 
-    DiT の入力は 2 つの形で同じ値になる（先頭フレームはどちらも条件・残りは同じ scheduler の
-    出力）。scheduler の状態は先頭フレームの領域だけが違い、最後の置き換えでその違いが消える。
+    The DiT input has the same values in both forms (the first frame is the condition in both, the
+    rest the same scheduler output). The scheduler states differ only in the first frame's region,
+    and the final replacement removes that difference.
     """
     if form not in FORMS:
-        raise ValueError(f"置き換えの形 {form!r} は未知（{', '.join(FORMS)}）")
+        raise ValueError(f"unknown replacement form {form!r} ({', '.join(FORMS)})")
     official = form == "official"
     latents = replace_first_frame(latents_init, condition, mask) if official else latents_init
     model_inputs: list[torch.Tensor] = []
@@ -391,8 +426,8 @@ def sample(
 
 
 def fresh_scheduler(config: Mapping[str, Any], steps: int) -> UniPCMultistepScheduler:
-    """同じ config の新しい UniPC を `steps` で `set_timesteps` したもの（再生用 — pipeline と
-    状態を共有しない）。"""
+    """A new UniPC with the same config, `set_timesteps` with `steps` (for replay — it shares no
+    state with the pipeline)."""
     from diffusers import UniPCMultistepScheduler
 
     scheduler = UniPCMultistepScheduler.from_config(config)
@@ -404,8 +439,9 @@ def fresh_scheduler(config: Mapping[str, Any], steps: int) -> UniPCMultistepSche
 def recorded_velocity(
     noise_cond: Sequence[torch.Tensor], noise_uncond: Sequence[torch.Tensor], guidance: float
 ) -> Velocity:
-    """記録した DiT の出力（`[C, F, H, W]`）から上流と同じ CFG を組む速度（DiT の入力は読まない —
-    2 つの形で DiT の入力が同じであることは呼び手が `model_inputs` で確かめる）。"""
+    """A velocity that builds the same CFG as upstream from the recorded DiT outputs
+    (`[C, F, H, W]`) (it does not read the DiT input — the caller checks through `model_inputs` that
+    the DiT input is the same in both forms)."""
 
     def velocity(index: int, _timestep: torch.Tensor, _model_input: torch.Tensor) -> torch.Tensor:
         uncond = noise_uncond[index][None]
@@ -414,27 +450,30 @@ def recorded_velocity(
     return velocity
 
 
-# ---- 時刻の形（決定 4 の参照ラッパを pipeline の各 forward に当てる）------------------------
+# ---- The timestep form (applying decision 4's reference wrapper to each pipeline forward) ----
 
 
 def condition_token_mask(transformer: nn.Module, latent_shape: Sequence[int]) -> torch.Tensor:
-    """条件のトークンのマスク `[1, S]`（bool — 先頭の潜在フレームの P = H'·W' トークンが真 —
-    グラフ入力 `condition_mask` と同じ `dit_patch.dit_condition_mask`）。"""
+    """The condition-token mask `[1, S]` (bool — true for the P = H'·W' tokens of the first latent
+    frame — `dit_patch.dit_condition_mask`, the same as the graph input `condition_mask`)."""
     _, frames, height, width = latent_shape
     patch = tuple(transformer.config.patch_size)
     return dit_patch.dit_condition_mask((frames, height, width), patch, conditioned=True)[..., 0]
 
 
 class _PerStepTokenwiseEmbedder(nn.Module):
-    """各 forward の平坦の timestep `[S]` から生成側の t を読み、DiT の参照ラッパ
-    （`dit_patch._TokenwiseTimeEmbedder` — 時刻の MLP を値ごとに M = 1 で 2 回）へ委ねる差し替え。
+    """A replacement that reads the generation-side t from each forward's flat timestep `[S]` and
+    delegates to the DiT reference wrapper (`dit_patch._TokenwiseTimeEmbedder` — the time MLP twice
+    with M = 1, once per value).
 
-    pipeline は step ごとに t を変えるが、参照ラッパは生成側の t を構築時に受ける — ここが forward
-    ごとにそれを組む。生成側の t は int64 で渡す（T2V の参照の M = 1 の経路の `t.expand(1)` と同じ
-    dtype — sinusoidal は `.float()` するので値も同じ）。
+    The pipeline changes t every step, but the reference wrapper takes the generation-side t at
+    construction — this builds one per forward. The generation-side t is passed as int64 (the same
+    dtype as `t.expand(1)` on the M = 1 path of the T2V reference — the sinusoidal embedding calls
+    `.float()`, so the values are the same too).
 
-    MUST: 生成側のトークンの timestep が 1 値でなければ・整数でなければ fail loudly。条件側が 0 で
-    あることとマスクとの対応は参照ラッパが確かめる（`where(mask, 0, t)` との一致）。
+    MUST: fail loudly unless the timestep of the generation-side tokens is a single value and an
+    integer. That the condition side is 0 and matches the mask is checked by the reference wrapper
+    (agreement with `where(mask, 0, t)`).
     """
 
     def __init__(self, embedder: nn.Module, mask: torch.Tensor, seen: list[int]) -> None:
@@ -453,17 +492,19 @@ class _PerStepTokenwiseEmbedder(nn.Module):
         tokens = self.mask.shape[1]
         if tuple(timestep.shape) != (tokens,) or timestep_seq_len != tokens:
             raise AssertionError(
-                f"上流が渡した timestep の形 {tuple(timestep.shape)}・seq_len {timestep_seq_len} が"
-                f" トークンごとの ({tokens},) でない（expand_timesteps の分岐のはず）"
+                f"the timestep shape {tuple(timestep.shape)} and seq_len {timestep_seq_len}"
+                f" upstream passed are not the per-token ({tokens},) (it should be the"
+                " expand_timesteps branch)"
             )
         values = timestep[~self.mask[0]].unique()
         if values.numel() != 1:
             raise AssertionError(
-                f"生成側のトークンの timestep が {values.numel()} 値（1 値のはず）"
+                f"the timestep of the generation-side tokens takes {values.numel()} values"
+                " (it should be one)"
             )
         value = float(values[0])
         if not value.is_integer():
-            raise AssertionError(f"生成側の timestep {value} が整数でない")
+            raise AssertionError(f"the generation-side timestep {value} is not an integer")
         self.seen.append(int(value))
         condition = dit_patch.TimestepCondition(
             torch.tensor([CONDITION_TIMESTEP], dtype=torch.int64), self.mask
@@ -478,8 +519,9 @@ class _PerStepTokenwiseEmbedder(nn.Module):
 
 @contextmanager
 def tokenwise_time_embedding(transformer: nn.Module, mask: torch.Tensor) -> Iterator[list[int]]:
-    """この間だけ DiT の `condition_embedder` を {@link _PerStepTokenwiseEmbedder} に差し替える
-    （戻り = forward ごとの生成側の t の列）。抜けるときは例外でも元へ戻す。"""
+    """Replace the DiT's `condition_embedder` with {@link _PerStepTokenwiseEmbedder} for the
+    duration (yields the list of generation-side t per forward). It is restored on exit, even on
+    an exception."""
     original = transformer.condition_embedder
     seen: list[int] = []
     transformer.condition_embedder = _PerStepTokenwiseEmbedder(original, mask, seen)
@@ -498,11 +540,12 @@ def build_pipeline(
     vae: AutoencoderKLWan,
     scheduler: UniPCMultistepScheduler,
 ) -> WanImageToVideoPipeline:
-    """pin の snapshot から umT5 無しの `WanImageToVideoPipeline` を組む（重い部品は全て渡す）。
+    """Build a `WanImageToVideoPipeline` without umT5 from the pinned snapshot (every heavy
+    component is passed in).
 
-    `expand_timesteps` は model_index の値（pin は真）— 偽なら Wan2.1 の I2V（チャネル連結）の分岐に
-    なるので止まる。2 段の DiT（`boundary_ratio`）と画像 encoder（Wan2.1 の I2V の CLIP）は
-    使わない。
+    `expand_timesteps` is the model_index value (true at the pin) — false would select the branch
+    of Wan2.1's I2V (channel concatenation), so it stops. The two-stage DiT (`boundary_ratio`) and
+    the image encoder (the CLIP of Wan2.1's I2V) are not used.
     """
     pipeline_ref.assert_no_mps()
     from diffusers import WanImageToVideoPipeline
@@ -517,19 +560,19 @@ def build_pipeline(
     )
     if pipeline.config.expand_timesteps is not True:
         raise AssertionError(
-            f"model_index の expand_timesteps が {pipeline.config.expand_timesteps}（Wan2.2 5B の"
-            " I2V の分岐は真）"
+            f"expand_timesteps of model_index is {pipeline.config.expand_timesteps} (true for the"
+            " I2V branch of Wan2.2 5B)"
         )
     if pipeline.config.boundary_ratio is not None or pipeline.transformer_2 is not None:
-        raise AssertionError("2 段の DiT（boundary_ratio / transformer_2）は使わない")
+        raise AssertionError("the two-stage DiT (boundary_ratio / transformer_2) is not used")
     if pipeline.image_encoder is not None or transformer.config.image_dim is not None:
-        raise AssertionError("画像 encoder（Wan2.1 の I2V の CLIP の経路）は使わない")
+        raise AssertionError("the image encoder (the CLIP path of Wan2.1's I2V) is not used")
     if (
         pipeline.transformer is not transformer
         or pipeline.vae is not vae
         or pipeline.scheduler is not scheduler
     ):
-        raise AssertionError("pipeline が渡した部品と別のものを持っている")
+        raise AssertionError("the pipeline holds components other than the ones passed")
     pipeline.set_progress_bar_config(disable=True)
     return pipeline
 
@@ -538,11 +581,13 @@ def build_pipeline(
 def captured_condition(
     pipeline: WanImageToVideoPipeline, image: ConditionImage, mask: torch.Tensor
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """この間の `prepare_latents` の戻りの条件の潜在を写し取る（戻り = `{"condition": …}`）。
+    """Copy the condition latent `prepare_latents` returns during the block (yields
+    `{"condition": …}`).
 
-    MUST（どれも fail loudly）: pipeline が encoder へ渡す [-1, 1] の画像が公式の前処理とビット
-    一致すること・上流の `first_frame_mask` が {@link first_frame_mask} と同じこと・条件の潜在が
-    有限であること（cond の ±Inf は置き換えの式で全フレームへ NaN として広がる）。
+    MUST (each fails loudly): the [-1, 1] image the pipeline passes to the encoder is bit-identical
+    to the official preprocessing, the upstream `first_frame_mask` is the same as
+    {@link first_frame_mask}, and the condition latent is finite (a ±Inf in cond spreads to every
+    frame as NaN through the replacement formula).
     """
     captured: dict[str, torch.Tensor] = {}
     prepare = pipeline.prepare_latents
@@ -551,13 +596,16 @@ def captured_condition(
     def capture(sample: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
         if not torch.equal(sample, expected_image):
             raise AssertionError(
-                f"{image.source.name}: pipeline の前処理の画像が公式の [-1, 1] とビット一致しない"
+                f"{image.source.name}: the pipeline's preprocessed image is not bit-identical to"
+                " the official [-1, 1]"
             )
         latents, condition, upstream_mask = prepare(sample, *args, **kwargs)
         if not torch.equal(upstream_mask, mask):
-            raise AssertionError(f"上流の first_frame_mask {tuple(upstream_mask.shape)} が違う")
+            raise AssertionError(
+                f"the upstream first_frame_mask {tuple(upstream_mask.shape)} differs"
+            )
         if not bool(condition.isfinite().all()):
-            raise AssertionError(f"{image.source.name}: 条件の潜在に非有限値がある")
+            raise AssertionError(f"{image.source.name}: the condition latent has non-finite values")
         captured["condition"] = condition.detach().clone()
         return latents, condition, upstream_mask
 
@@ -598,28 +646,31 @@ def _call(
 
 @dataclass
 class Denoised:
-    """第 1 相の 1 ケースぶん（第 2 相と書き出しへ渡す — 潜在は `[C, F, H, W]`）。"""
+    """One case of phase 1 (passed to phase 2 and to the writer — latents are `[C, F, H, W]`)."""
 
     case: FixtureCase
     names: ti2v_few_step_ref.PromptNames
     image: ConditionImage
     latents_init: torch.Tensor
-    #: 条件の潜在 `[C, 1, H, W]`（正規化の後）。
+    #: The condition latent `[C, 1, H, W]` (after normalization).
     condition: torch.Tensor
-    #: 条件のトークンの数 P（DiT の patch で数えた先頭の潜在フレームのトークン）。
+    #: The number of condition tokens P (the tokens of the first latent frame, counted with the
+    #: DiT's patch).
     condition_tokens: int
-    #: 各 step の DiT の入力 `[1, C, F, H, W]`（書き出さない — 公式の形の再生の照合用）。
+    #: The DiT input `[1, C, F, H, W]` of each step (not written — for checking the replay of the
+    #: official form).
     model_inputs: list[torch.Tensor]
     noise_cond: list[torch.Tensor]
     noise_uncond: list[torch.Tensor]
-    #: 各 step の後の scheduler の潜在（置き換える前）。
+    #: The scheduler latents after each step (before replacement).
     latents: list[torch.Tensor]
-    #: ループの後に置き換えた潜在（VAE へ渡す値）。
+    #: The latents replaced after the loop (what goes to the VAE).
     latents_final: torch.Tensor
     timesteps: list[int]
     sigmas: list[float]
     seconds: dict[str, float]
-    #: M = S の経路の各 step の潜在・置き換えた潜在・条件の潜在が M = 1 と同じか（決定用だけ）。
+    #: The per-step latents and the replaced latents of the M = S path, and whether its condition
+    #: latent is the same as for M = 1 (deciding cases only).
     observed: list[torch.Tensor] | None = None
     observed_final: torch.Tensor | None = None
     observed_condition_equal: bool | None = None
@@ -632,13 +683,14 @@ def denoise_case(
     names: ti2v_few_step_ref.PromptNames,
     image: ConditionImage,
 ) -> Denoised:
-    """決定 4 の時刻の形（値ごとに M = 1）で 1 ケースを 2 ステップ回す。"""
+    """Run one case for 2 steps with decision 4's timestep form (M = 1 per value)."""
     generator = torch.Generator().manual_seed(case.seed)
     latents_init = torch.randn(1, *LATENT_SHAPE, generator=generator)
     tokens = condition_token_mask(pipeline.transformer, LATENT_SHAPE)
     mask = first_frame_mask(LATENT_SHAPE)
 
-    # 上流へ渡す文脈と同じ値（`_call` が同じ関数で埋める）— hook はこれと値で突き合わせる。
+    # The same values as the contexts passed upstream (`_call` fills them with the same function) —
+    # the hook compares against these by value.
     contexts = {
         "cond": pipeline_ref.pad_text_embeds(embeds[names.positive]),
         "uncond": pipeline_ref.pad_text_embeds(embeds[names.negative]),
@@ -650,19 +702,21 @@ def denoise_case(
             timestep = kwargs["timestep"]
             if tuple(timestep.shape) != (1, tokens.shape[1]):
                 raise AssertionError(
-                    f"{case.name}: timestep の形 {tuple(timestep.shape)} が"
-                    f" (1, {tokens.shape[1]}) でない（expand_timesteps の分岐のはず）"
+                    f"{case.name}: the timestep shape {tuple(timestep.shape)} is not"
+                    f" (1, {tokens.shape[1]}) (it should be the expand_timesteps branch)"
                 )
             hidden = kwargs["hidden_states"]
-            # 置き換えが DiT の入力に届いていること（先頭フレーム = 条件の潜在）。
+            # The replacement reaches the DiT input (first frame = the condition latent).
             if not torch.equal(hidden[:, :, :1], captured["condition"]):
-                raise AssertionError(f"{case.name}: DiT の入力の先頭フレームが条件の潜在でない")
+                raise AssertionError(
+                    f"{case.name}: the first frame of the DiT input is not the condition latent"
+                )
             context = kwargs["encoder_hidden_states"]
             labels = [label for label, value in contexts.items() if torch.equal(context, value)]
             if len(labels) != 1:
                 raise AssertionError(
-                    f"{case.name}: DiT の文脈が cond / uncond の埋め込みの {len(labels)} 本と"
-                    "一致する（1 本のはず）— 振り分けを決められない"
+                    f"{case.name}: the DiT context matches {len(labels)} of the cond / uncond"
+                    " embeddings (it should be one) — cannot tell them apart"
                 )
             generation = int(timestep[0][~tokens[0]].max())
             forwards.append(
@@ -699,12 +753,12 @@ def denoise_case(
     expected = [t for t in timesteps for _ in range(2)]
     if len(forwards) != 2 * STEPS or len(steps) != STEPS:
         raise AssertionError(
-            f"forward {len(forwards)} 回・step {len(steps)} 回（CFG あり 2 ステップ）"
+            f"{len(forwards)} forwards, {len(steps)} steps (2 steps with CFG expected)"
         )
     if [t for t, _, _, _ in forwards] != expected or seen != expected:
         raise AssertionError(
-            f"forward の timestep {[t for t, _, _, _ in forwards]}・時刻の MLP の t {seen} が"
-            f" {timesteps} と合わない"
+            f"the forward timesteps {[t for t, _, _, _ in forwards]} and the time-MLP t {seen} do"
+            f" not match {timesteps}"
         )
     outputs: dict[tuple[int, str], torch.Tensor] = {}
     model_inputs: dict[tuple[int, str], torch.Tensor] = {}
@@ -713,12 +767,12 @@ def denoise_case(
         model_inputs[(index // 2, label)] = hidden
     if sorted(outputs) != [(step, label) for step in range(STEPS) for label in sorted(contexts)]:
         raise AssertionError(
-            "ステップごとの cond / uncond が 1 本ずつでない"
-            f"（{[label for _, label, _, _ in forwards]}）"
+            "not exactly one cond and one uncond per step"
+            f" ({[label for _, label, _, _ in forwards]})"
         )
     for step in range(STEPS):
         if not torch.equal(model_inputs[(step, "cond")], model_inputs[(step, "uncond")]):
-            raise AssertionError(f"{case.name}: step {step} の cond / uncond の DiT の入力が違う")
+            raise AssertionError(f"{case.name}: the cond / uncond DiT inputs of step {step} differ")
     return Denoised(
         case=case,
         names=names,
@@ -742,16 +796,19 @@ def observe_m_s(
     denoised: Denoised,
     embeds: Mapping[str, torch.Tensor],
 ) -> None:
-    """diffusers の pipeline そのもの（時刻の MLP を S 行で回す M = S の経路）で同じ要求を回し、
-    `denoised` の観測の欄を埋める（観測 — 門ではない）。
+    """Run the same request through the diffusers pipeline as is (the M = S path, the time MLP over
+    S rows) and fill the observation fields of `denoised` (an observation — not a check).
 
-    hook は M = 1 とは別のもの: 時刻の差し替えが無いこと、timestep `[1,S]` が条件のトークンで 0・
-    生成側で 1 値であることを確かめ、M = 1 と同じ時刻の列かを見る。
+    The hook is a different one from M = 1: it checks that there is no timestep replacement, that
+    the timestep `[1,S]` is 0 on the condition tokens and a single value on the generation side, and
+    whether the timestep sequence is the same as for M = 1.
     """
     case = denoised.case
     transformer = pipeline.transformer
     if isinstance(transformer.condition_embedder, _PerStepTokenwiseEmbedder):
-        raise AssertionError(f"{case.name}: M = S の観測に時刻の差し替えが残っている")
+        raise AssertionError(
+            f"{case.name}: the timestep replacement is still in place for the M = S observation"
+        )
     tokens = condition_token_mask(transformer, LATENT_SHAPE)
     seen: list[int] = []
 
@@ -759,13 +816,14 @@ def observe_m_s(
         timestep = kwargs["timestep"]
         if tuple(timestep.shape) != (1, tokens.shape[1]):
             raise AssertionError(
-                f"{case.name}: M = S の経路の timestep の形 {tuple(timestep.shape)} が"
-                f" (1, {tokens.shape[1]}) でない"
+                f"{case.name}: the timestep shape {tuple(timestep.shape)} on the M = S path is"
+                f" not (1, {tokens.shape[1]})"
             )
         values = timestep[0][~tokens[0]].unique()
         if values.numel() != 1 or bool(timestep[0][tokens[0]].any()):
             raise AssertionError(
-                f"{case.name}: M = S の timestep が条件のトークンで 0・生成側で 1 値でない"
+                f"{case.name}: the M = S timestep is not 0 on the condition tokens and a single"
+                " value on the generation side"
             )
         seen.append(int(values[0]))
 
@@ -791,8 +849,8 @@ def observe_m_s(
     denoised.seconds["observe_m_s"] = round(time.perf_counter() - started, 1)
     if seen != [t for t in denoised.timesteps for _ in range(2)] or len(steps) != STEPS:
         raise AssertionError(
-            f"{case.name}: M = S の forward の timestep {seen}・step {len(steps)} 回が"
-            f" M = 1 の {denoised.timesteps} と合わない"
+            f"{case.name}: the M = S forward timesteps {seen} and {len(steps)} steps do not match"
+            f" {denoised.timesteps} of M = 1"
         )
     denoised.observed = [state[0] for state in steps]
     denoised.observed_final = final[0]
@@ -809,10 +867,11 @@ def denoise_phase(
     names: Mapping[str, ti2v_few_step_ref.PromptNames],
     sources: Mapping[str, SourceImage],
 ) -> tuple[list[Denoised], weakref.ref[nn.Module]]:
-    """第 1 相: DiT を読み、全ケースを回す。DiT への参照はこの関数の中だけに置く（戻ると手放す）。
+    """Phase 1: load the DiT and run every case. References to the DiT live only inside this
+    function (released on return).
 
-    戻りの弱参照は、第 2 相の前に DiT が回収されたことを確かめるため
-    （`ti2v_few_step_ref.assert_released`）。
+    The returned weak reference is for checking that the DiT was collected before phase 2
+    (`ti2v_few_step_ref.assert_released`).
     """
     transformer = load_transformer()
     released = weakref.ref(transformer)
@@ -829,16 +888,18 @@ def denoise_phase(
     return results, released
 
 
-# ---- 再生と観測 ------------------------------------------------------------------------
+# ---- Replay and observation ------------------------------------------------------------------
 
 
 def replay(denoised: Denoised, scheduler_config: Mapping[str, Any]) -> dict[str, Any]:
-    """記録した DiT の出力から 2 つの形を再生する。
+    """Replay both forms from the recorded DiT outputs.
 
-    MUST（fail loudly）: diffusers の形が pipeline の記録（DiT の入力・各 step の潜在・置き換えた
-    潜在）をビット一致で作り直すこと — 記録した cond / uncond と CFG・置き換えの式の自己整合。
-    公式の形は観測（DiT の入力が diffusers の形と同じ値なら、記録した出力で公式の形を正しく
-    再生できる — その前提と、最終出力の一致を要約に書く）。
+    MUST (fail loudly): the diffusers form reproduces the pipeline's record (the DiT inputs, the
+    per-step latents, the replaced latents) bit for bit — the self-consistency of the recorded
+    cond / uncond, the CFG and the replacement formula. The official form is an observation (if the
+    DiT inputs have the same values as in the diffusers form, the official form can be replayed
+    correctly from the recorded outputs — that premise and the agreement of the final output go
+    into the summary).
     """
     condition = denoised.condition[None]
     mask = first_frame_mask(LATENT_SHAPE)
@@ -858,11 +919,15 @@ def replay(denoised: Denoised, scheduler_config: Mapping[str, Any]) -> dict[str,
     name = denoised.case.name
     for index in range(STEPS):
         if not torch.equal(upstream.model_inputs[index], denoised.model_inputs[index]):
-            raise AssertionError(f"{name}: 再生した step {index} の DiT の入力が記録と違う")
+            raise AssertionError(
+                f"{name}: the replayed DiT input of step {index} differs from the record"
+            )
         if not torch.equal(upstream.states[index][0], denoised.latents[index]):
-            raise AssertionError(f"{name}: 再生した step {index} の潜在が記録と違う")
+            raise AssertionError(
+                f"{name}: the replayed latents of step {index} differ from the record"
+            )
     if not torch.equal(upstream.final[0], denoised.latents_final):
-        raise AssertionError(f"{name}: 再生した置き換えた潜在が記録と違う")
+        raise AssertionError(f"{name}: the replayed replaced latents differ from the record")
     official = runs["official"]
     return {
         "model_inputs_bit_exact": all(
@@ -878,7 +943,8 @@ def replay(denoised: Denoised, scheduler_config: Mapping[str, Any]) -> dict[str,
     }
 
 
-#: 段 9a の encoder の golden と突き合わせるテンソル（golden のキー → この参照の値の取り出し）。
+#: The tensors checked against the step 9a encoder golden (golden key → how this reference's value
+#: is taken).
 _ENCODER_GOLDEN_KEYS: Mapping[str, Callable[[Denoised], torch.Tensor]] = {
     "source": lambda denoised: denoised.image.source_rgb8,
     "rgb8": lambda denoised: denoised.image.rgb8,
@@ -887,13 +953,14 @@ _ENCODER_GOLDEN_KEYS: Mapping[str, Callable[[Denoised], torch.Tensor]] = {
 
 
 def check_encoder_golden(denoised: Denoised, root: Path | None) -> dict[str, Any] | str:
-    """元画像・切った画像・条件の潜在を段 9a の encoder の golden（同じ画像・寸法の `source` /
-    `rgb8` / `latent`）と突き合わせる。
+    """Check the source image, the cropped image and the condition latent against the step 9a
+    encoder golden (`source` / `rgb8` / `latent` of the same image and size).
 
-    MUST（fail loudly）: golden があればビット一致すること。外れたまま書くと、TS の通しの e2e の
-    帯と条件の潜在の門（9a の encoder の帯を当てる）が、9a の golden とずれた参照に対して導かれる。
-    golden の無い機では観測として `missing <path>` を返す（golden は別の台本
-    `wan.export_vae_encoder` が書く — 無くても参照は作れる）。
+    MUST (fail loudly): bit-identical whenever the golden exists. Writing despite a mismatch would
+    derive the band of the TS end-to-end e2e and the condition-latent check (which applies the 9a
+    encoder band) against a reference that drifted from the 9a golden. On a machine without the
+    golden it returns `missing <path>` as an observation (the golden is written by another script,
+    `wan.export_vae_encoder` — the reference can be built without it).
     """
     if root is None:
         return "not-checked"
@@ -913,34 +980,38 @@ def check_encoder_golden(denoised: Denoised, root: Path | None) -> dict[str, Any
     }
     if mismatched:
         raise AssertionError(
-            f"{denoised.case.name}: 段 9a の encoder の golden {path} とビット一致しない"
-            f"（{mismatched}）— 参照を書かずに止まる"
+            f"{denoised.case.name}: not bit-identical to the step 9a encoder golden {path}"
+            f" ({mismatched}) — stopping without writing the reference"
         )
     return {"bit_exact": True, "keys": sorted(_ENCODER_GOLDEN_KEYS), "path": str(path)}
 
 
 def _golden_difference(expected: torch.Tensor, got: torch.Tensor) -> str:
-    """golden との食い違いの要約（形・dtype が違えばそれを、同じなら最大絶対差を言う）。"""
+    """A summary of the mismatch with the golden (the shape and dtype if they differ, else the max
+    absolute difference)."""
     if expected.shape != got.shape or expected.dtype != got.dtype:
         return (
-            f"golden {tuple(expected.shape)} {expected.dtype} / 参照 {tuple(got.shape)} {got.dtype}"
+            f"golden {tuple(expected.shape)} {expected.dtype} / reference {tuple(got.shape)}"
+            f" {got.dtype}"
         )
     return f"max_abs {float((expected.double() - got.double()).abs().max())}"
 
 
 def first_frame_difference(frames: torch.Tensor, image: ConditionImage) -> dict[str, float]:
-    """出力の先頭フレームと条件画像（[-1, 1]）の差（観測 — VAE の往復の誤差の大きさ）。"""
+    """The difference between the output's first frame and the condition image ([-1, 1]) (an
+    observation — the size of the VAE round-trip error)."""
     difference = (frames[:, 0] - image.signed[0]).abs()
     return {"max_abs": float(difference.max()), "mean_abs": float(difference.mean())}
 
 
-# ---- 書き出し --------------------------------------------------------------------------
+# ---- Writing ---------------------------------------------------------------------------
 
 
 def case_tensors(
     denoised: Denoised, frames: torch.Tensor, vae: AutoencoderKLWan
 ) -> dict[str, torch.Tensor]:
-    """書き出すテンソル（画像の 2 本は u8・他は f32・非有限があれば fail loudly）。"""
+    """The tensors to write (the two image ones u8, the rest f32; fails loudly on non-finite
+    values)."""
     tensors: dict[str, torch.Tensor] = {
         "latents_init": denoised.latents_init,
         "condition_latents": denoised.condition,
@@ -959,9 +1030,9 @@ def case_tensors(
     tensors["latents_std"] = torch.tensor(vae.config.latents_std, dtype=torch.float32)
     for name, tensor in tensors.items():
         if tensor.dtype != torch.float32:
-            raise AssertionError(f"{denoised.case.name}: {name} が f32 でない（{tensor.dtype}）")
+            raise AssertionError(f"{denoised.case.name}: {name} is not f32 ({tensor.dtype})")
         if not bool(tensor.isfinite().all()):
-            raise AssertionError(f"{denoised.case.name}: {name} に非有限値がある")
+            raise AssertionError(f"{denoised.case.name}: {name} has non-finite values")
     tensors["source"] = denoised.image.source_rgb8
     tensors["rgb8"] = denoised.image.rgb8
     return tensors
@@ -974,7 +1045,7 @@ def case_metadata(
     flow_shift: float,
     common: Mapping[str, str],
 ) -> dict[str, str]:
-    """書き出すメタ（safetensors のメタは文字列だけ）。"""
+    """The meta to write (safetensors meta holds strings only)."""
     case = denoised.case
     image = denoised.image
     width, height = image.cropped.size
@@ -1012,8 +1083,8 @@ def case_metadata(
 
 
 def common_metadata(embeds_sha256: str, model: str = MODEL) -> dict[str, str]:
-    """全ケースに共通のメタ（T2V の参照の欄 + 値を決めるライブラリの版 — LANCZOS は Pillow の版で
-    決まる）。"""
+    """The meta common to every case (the fields of the T2V reference + the versions of the
+    libraries that determine the values — LANCZOS depends on the Pillow version)."""
     versions = export_vae_encoder.library_versions()
     return {
         **ti2v_few_step_ref.common_metadata(embeds_sha256, model),
@@ -1036,20 +1107,22 @@ def generate(
     common: Mapping[str, str],
     encoder_golden_root: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """2 相で全ケースを回して書く（staging → 置換）。要約を返す。
+    """Run and write every case in two phases (staging → replace). Returns the summaries.
 
-    MUST: 第 2 相は DiT を手放してから（`ti2v_few_step_ref.assert_released`）— 第 1 相の山に VAE の
-    decode を重ねない。
+    MUST: phase 2 starts only after the DiT is released (`ti2v_few_step_ref.assert_released`) —
+    the VAE decode is never stacked on the phase 1 peak.
     """
     patch_size = vae.config.patch_size
     if patch_size is None:
-        raise ValueError("VAE の patch_size が None — Wan2.2（patchify する世代）の VAE を渡す")
+        raise ValueError(
+            "the VAE's patch_size is None — pass a Wan2.2 VAE (the generation that patchifies)"
+        )
     denoised_cases, released = denoise_phase(
         load_transformer, snapshot, vae, scheduler, cases, embeds, names, sources
     )
     ti2v_few_step_ref.assert_released(released)
-    # 9a の golden との照合は第 2 相（1 ケース約 8 分の decode）の前に全ケースぶん — 外れたら
-    # 1 本も書かない。
+    # The check against the 9a golden runs for every case before phase 2 (about 8 minutes of
+    # decode per case) — on a mismatch nothing is written.
     goldens = {
         denoised.case.name: check_encoder_golden(denoised, encoder_golden_root)
         for denoised in denoised_cases
@@ -1073,7 +1146,7 @@ def generate(
         expected = (3, *ti2v_few_step_ref.video_size(decoder, final.shape[1:]))
         if tuple(frames.shape) != expected:
             raise AssertionError(
-                f"{case.name}: frames の形 {tuple(frames.shape)} が {expected} でない"
+                f"{case.name}: the frames shape {tuple(frames.shape)} is not {expected}"
             )
         tensors = case_tensors(denoised, frames, vae)
         metadata = case_metadata(denoised, plan, patch_size, flow_shift, common)
@@ -1125,28 +1198,29 @@ def generate(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
-        "--out", type=Path, default=SERIES, help="系列の根（既定は i8 の DiT の系列）"
+        "--out", type=Path, default=SERIES, help="the series root (default: the i8 DiT series)"
     )
     parser.add_argument(
         "--embeds",
         type=Path,
         default=SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME,
-        help="テキスト埋め込み資産（wan.text_embeds の出力）",
+        help="the text-embedding asset (the output of wan.text_embeds)",
     )
     parser.add_argument(
         "--case",
         action="append",
         choices=[case.name for case in FIXTURE_CASES],
         default=None,
-        help="書くケース（既定は全部）",
+        help="the cases to write (default: all)",
     )
     args = parser.parse_args(argv)
     if not args.embeds.is_file():
-        parser.error(f"{args.embeds} が無い — 先に `python -m wan.text_embeds` で作る")
+        parser.error(f"{args.embeds} is missing — build it first with `python -m wan.text_embeds`")
 
     embeds, asset_metadata = text_embeds.read_asset(args.embeds)
     selected = [case for case in FIXTURE_CASES if args.case is None or case.name in args.case]
-    # 重い読み込みの前に、資産の行と役割・条件画像の来歴を全ケースぶん確かめる。
+    # Before the heavy loading, check the asset rows and roles and the condition images'
+    # provenance for every case.
     names = {case.name: ti2v_few_step_ref.prompt_names(asset_metadata, case) for case in selected}
     sources = load_sources(selected)
     embeds_sha256 = hashlib.sha256(args.embeds.read_bytes()).hexdigest()

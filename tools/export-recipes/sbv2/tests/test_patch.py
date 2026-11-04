@@ -1,12 +1,14 @@
-"""SBV2 パッチ層の単体テスト（M1-P3 波 6）。
+"""Unit tests of the SBV2 patch layer (M1-P3 iteration 6).
 
-各パッチは「原実装と eager 同値」であることが存在条件（ADR 0013）。実重みを使う貫通検証は
-`test_export.py` と `sbv2.export --verify` が受け持ち、ここは**合成の小さいモジュール**
-で個別のパッチを 1 つずつ切り分ける。`style_bert_vits2` パッケージが無い環境では SKIP。
+Each patch exists only on condition that it is "eager-equivalent to the original implementation"
+(ADR 0013). The end-to-end checks with real weights belong to `test_export.py` and
+`sbv2.export --verify`; here **small synthetic modules** isolate the patches one by one. SKIPs in
+an environment without the `style_bert_vits2` package.
 
-MUST: クラス属性を差し替えるテストは `pristine_classes` フィクスチャを取る。差し替えは
-プロセス全域に効くので、①入口で**原実装へ戻さない**と「原実装のつもりでパッチ後を掴む」
-恒真な比較になり、②出口で元へ戻さないとこの後のテストが黙って別の実装を検証する。
+MUST: a test that replaces class attributes takes the `pristine_classes` fixture. Replacements
+affect the whole process, so ① **not restoring the original implementation** on entry makes a
+vacuous comparison that "grabs the patched version believing it is the original", and ② not
+restoring the previous state on exit makes later tests silently check another implementation.
 """
 
 from __future__ import annotations
@@ -22,21 +24,23 @@ _PACKAGE_PRESENT = importlib.util.find_spec("style_bert_vits2") is not None
 
 requires_package = pytest.mark.skipif(
     not _PACKAGE_PRESENT,
-    reason="style_bert_vits2 が無い（`uv sync --group sbv2` が前提）",
+    reason="no style_bert_vits2 (requires `uv sync --group sbv2`)",
 )
 
-#: 同値判定の許容差。パッチは「同じ式を別の順序で組む」書き換えなので、差は f32 の
-#: 縮約順序差（数 ulp）に留まるはず。値域 O(1) に対して 1e-5 なら実装の取り違え
-#: （添字ずれ・軸取り違え）の O(1) 誤差とは 5 桁離れている。
+#: The tolerance of the equivalence check. A patch is a rewrite that "builds the same formula in
+#: another order", so the difference should stay within f32 reduction-order differences (a few
+#: ulp). For an O(1) value range, 1e-5 is 5 orders of magnitude away from the O(1) error of an
+#: implementation mix-up (index slip, swapped axis).
 EQUIVALENCE_ATOL = 1e-5
 
-#: **収集時に採った原実装**。pytest は全テストモジュールを収集してから実行するので、
-#: ここはどのテストも走っていない = まだ誰もパッチを当てていない時点になる。
+#: **The original implementation taken at collection time**. pytest collects every test module
+#: before running, so this is a point where no test has run = nobody has applied a patch yet.
 #:
-#: MUST: 「テスト開始時の値」を退避するだけでは足りない — 同一プロセスの別テスト
-#: （`test_export.py` の front export）が先にパッチを当てていると、原実装のつもりで
-#: **パッチ後の実装**を掴み、同値テストが patched vs patched の**恒真な比較**になる
-#: （実際にファイル単独では緑・全体実行でも緑、という形で一度これを踏んだ）。
+#: MUST: saving "the value at test start" is not enough — if another test in the same process
+#: (the front export of `test_export.py`) applied the patch first, it grabs **the patched
+#: implementation** believing it is the original, and the equivalence test becomes a **vacuous
+#: comparison** of patched vs patched (this actually happened once, green alone and green in the
+#: full run).
 if _PACKAGE_PRESENT:
     from style_bert_vits2.models import attentions as _sbv2_attentions
     from style_bert_vits2.models import modules as _sbv2_modules
@@ -48,11 +52,13 @@ if _PACKAGE_PRESENT:
 
 @pytest.fixture
 def pristine_classes():
-    """パッチ対象を**原実装**に戻してからテストへ入り、抜けるとき元の状態へ復す。
+    """Enters the test after restoring the patch targets to **the original implementation**, and
+    restores the previous state on leaving.
 
-    入口で原実装へ戻すのは恒真化の防止（上の MUST）。出口で「入ってきたときの状態」へ
-    復すのは、このテストが他のテストの前提（front の export はパッチ済みを前提にする）を
-    壊さないため — 入口と出口で戻す先が違うのは意図的。
+    Restoring the original on entry prevents a vacuous check (the MUST above). Restoring "the
+    state on entry" on exit keeps this test from breaking other tests' premises (the front export
+    assumes the patches are applied) — restoring to different states on entry and exit is
+    intentional.
     """
     from style_bert_vits2.models import modules
     from style_bert_vits2.models.attentions import FFN, MultiHeadAttention
@@ -77,10 +83,10 @@ def pristine_classes():
 
 
 def _spline_arguments(seed: int, num_bins: int = 10, tail_bound: float = 5.0):
-    """ConvFlow が spline に渡す形 `[b, c, t, ?]` の合成入力。
+    """A synthetic input of the shape `[b, c, t, ?]` that ConvFlow passes to the spline.
 
-    `inputs` は tail_bound の**外側も内側も**踏む値域にする（区間外を入力そのままへ戻す
-    経路と spline 本体の両方を 1 ケースで通すため）。
+    `inputs` covers a value range **both outside and inside** tail_bound (so that one case goes
+    through both the path that returns out-of-range inputs as they are and the spline body).
     """
     generator = torch.Generator().manual_seed(seed)
     shape = (1, 1, 7)
@@ -96,7 +102,7 @@ def _spline_arguments(seed: int, num_bins: int = 10, tail_bound: float = 5.0):
 
 @requires_package
 class TestSplineEquivalence:
-    """① spline の分岐フリー・非破壊化。"""
+    """① The spline made branch-free and non-destructive."""
 
     @pytest.mark.parametrize("inverse", [False, True])
     @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -105,8 +111,8 @@ class TestSplineEquivalence:
 
         args = _spline_arguments(seed)
         tail_bound = args.pop("tail_bound")
-        # 原実装は unnormalized_derivatives を in-place で書き換えるので clone を渡す
-        # （渡さないと 2 回目以降の比較が別の入力になる）。
+        # The original rewrites unnormalized_derivatives in place, so pass clones (otherwise the
+        # second and later comparisons get other inputs).
         expected = transforms.piecewise_rational_quadratic_transform(
             **{key: value.clone() for key, value in args.items()},
             inverse=inverse,
@@ -124,14 +130,16 @@ class TestSplineEquivalence:
             assert torch.allclose(a, b, atol=EQUIVALENCE_ATOL, rtol=0), index
 
     def test_the_case_actually_crosses_the_tail_bound(self):
-        """恒真化の門番 — 区間内と区間外の**両方**を含む入力でないと where 経路が空振りする。"""
+        """Guard against a vacuous check — unless the input holds **both** in-range and out-of-range
+        values, the where path is never exercised."""
         args = _spline_arguments(0)
         inside = (args["inputs"].abs() <= args["tail_bound"]).sum().item()
 
         assert 0 < inside < args["inputs"].numel()
 
     def test_it_does_not_destroy_its_arguments(self):
-        """非破壊化そのものの検査（原実装は `bin_locations[..., -1] += eps` で破壊する）。"""
+        """The check of non-destructiveness itself (the original destroys its input with
+        `bin_locations[..., -1] += eps`)."""
         args = _spline_arguments(0)
         tail_bound = args.pop("tail_bound")
         before = {key: value.clone() for key, value in args.items()}
@@ -147,19 +155,21 @@ class TestSplineEquivalence:
         from style_bert_vits2.models import transforms
 
         generator = torch.Generator().manual_seed(3)
-        # 実使用と同じ形: 境界は [b, c, t, bins+1]、値は [b, c, t]（最終軸だけが bin 軸）。
+        # The same shapes as in real use: boundaries [b, c, t, bins+1], values [b, c, t] (only the
+        # last axis is the bin axis).
         locations = torch.cumsum(torch.rand(2, 5, 3, 6, generator=generator), dim=-1)
         values = torch.rand(2, 5, 3, generator=generator) * float(locations.max())
 
         got = patch_sbv2.searchsorted_free(locations, values)
-        # 原実装は第 1 引数を破壊するので、比較用に clone を渡す（破壊された列で比べると
-        # 「同じ破壊を受けた者どうし」の恒真な比較になる）。
+        # The original destroys its first argument, so pass a clone for comparison (comparing with
+        # the destroyed list would be a vacuous comparison "between two equally destroyed ones").
         expected = transforms.searchsorted(locations.clone(), values)
 
         assert torch.equal(got, expected)
 
     def test_tails_none_is_rejected_after_patching(self, pristine_classes):
-        """`tails=None` は原実装の定義域検査を外した spline へ直行する経路なので受けない。"""
+        """`tails=None` goes straight to the spline without the original's domain check, so it is
+        not accepted."""
         from style_bert_vits2.models import modules
 
         patch_sbv2.apply_spline_patch()
@@ -170,7 +180,8 @@ class TestSplineEquivalence:
             modules.piecewise_rational_quadratic_transform(**args, tails=None)
 
     def test_the_patch_replaces_the_symbol_modules_actually_calls(self, pristine_classes):
-        """差し替え先は modules（transforms 側を替えても modules の束縛には効かない）。"""
+        """The replaced binding is in modules (replacing the transforms side does not affect the
+        binding in modules)."""
         from style_bert_vits2.models import modules, transforms
 
         original = modules.piecewise_rational_quadratic_transform
@@ -201,20 +212,21 @@ def _attention_case(length: int, channels: int = 24, seed: int = 11):
 
 @requires_package
 class TestGatherRelativeAttention:
-    """② 相対位置注意の gather 化。"""
+    """② Relative-position attention rewritten with gather."""
 
     @pytest.mark.parametrize("length", [2, 4, 5, 9, 17])
     def test_it_matches_the_original_forward(self, pristine_classes, length):
-        """窓幅 4 に対し P < w+1 / P == w+1 / P > w+1 の 3 領域を踏む。
+        """For window size 4, exercises the 3 regions P < w+1 / P == w+1 / P > w+1.
 
-        原実装の `_get_relative_embeddings` は `P ≤ window_size` で埋め込みを**別の位置から
-        切り出す**（pad するか slice するかが切り替わる）ため、大きい P だけで比べると
-        小さい P の切り出し規則の取り違えを見逃す。
+        The original `_get_relative_embeddings` **cuts the embeddings from another position**
+        when `P ≤ window_size` (it switches between pad and slice), so comparing only with large P
+        would miss a mix-up in the cutting rule for small P.
         """
         from style_bert_vits2.models.attentions import MultiHeadAttention
 
-        # 恒真化の門番: 参照値は**原実装**で採る（フィクスチャが保証するが、外れたら
-        # patched vs patched の比較になって静かに意味が消えるのでここでも見る）。
+        # Guard against a vacuous check: the reference is taken with **the original implementation**
+        # (the fixture guarantees it, but if that broke the comparison would become patched vs
+        # patched and quietly lose its meaning, so it is checked here too).
         assert MultiHeadAttention.forward is PRISTINE_MHA_FORWARD
         attn = _attention(seed=5)
         x, attn_mask = _attention_case(length)
@@ -229,10 +241,12 @@ class TestGatherRelativeAttention:
         assert torch.allclose(got, expected, atol=EQUIVALENCE_ATOL, rtol=0)
 
     def test_the_relative_embeddings_actually_move_the_result(self, pristine_classes):
-        """恒真化の門番 — 相対位置の埋め込みを変えれば出力も変わる。
+        """Guard against a vacuous check — changing the relative-position embeddings changes the
+        output.
 
-        これが無いと、上の同値テストは「gather 経路の寄与が丸ごと 0」でも緑になる
-        （実重みの emb_rel_* は小さいので、寄与が消えていても値がそれらしく見える）。
+        Without it, the equivalence test above would be green even if "the gather path contributes
+        exactly 0" (the real weights' emb_rel_* are small, so the values look plausible even with
+        the contribution gone).
         """
         attn = _attention(seed=5)
         x, attn_mask = _attention_case(9)
@@ -246,7 +260,8 @@ class TestGatherRelativeAttention:
         assert not torch.allclose(before, after, atol=EQUIVALENCE_ATOL, rtol=0)
 
     def test_the_masked_columns_are_excluded(self, pristine_classes):
-        """attn_mask=0 の列が softmax から外れる（マスク経路が gather 化で消えていない）。"""
+        """Columns with attn_mask=0 are excluded from the softmax (the mask path did not disappear
+        in the gather rewrite)."""
         attn = _attention(seed=5)
         x, _ = _attention_case(9)
         mask = torch.ones(1, 1, 9)
@@ -262,7 +277,8 @@ class TestGatherRelativeAttention:
         assert torch.allclose(got, expected, atol=EQUIVALENCE_ATOL, rtol=0)
 
     def test_heads_share_false_is_rejected(self, pristine_classes):
-        """head ごとに別の埋め込みを持つ構成は、head 軸 1 本の expand では表せない。"""
+        """A configuration with separate embeddings per head cannot be expressed by expanding one
+        head axis."""
         attn = _attention(seed=5)
         attn.heads_share = False
         x, attn_mask = _attention_case(9)
@@ -283,14 +299,16 @@ class TestGatherRelativeAttention:
 
 @requires_package
 class TestRelattnTableThreading:
-    """② の表スレッディング（flow / voice 経路 — 表をグラフ入力から注意層まで運ぶ形）。"""
+    """Table threading of ② (the flow / voice path — carrying the tables from the graph inputs to
+    the attention layers)."""
 
     @pytest.mark.parametrize("length", [2, 4, 5, 9, 17])
     def test_supplied_tables_match_the_original_forward(self, pristine_classes, length):
-        """外部供給の表で組んだ注意が**原実装**と同値（front と同じ 3 領域を踏む）。"""
+        """Attention built from externally supplied tables is equivalent to **the original**
+        (exercises the same 3 regions as front)."""
         from style_bert_vits2.models.attentions import MultiHeadAttention
 
-        assert MultiHeadAttention.forward is PRISTINE_MHA_FORWARD  # 恒真化の門番
+        assert MultiHeadAttention.forward is PRISTINE_MHA_FORWARD  # guard against a vacuous check
         attn = _attention(seed=5)
         x, attn_mask = _attention_case(length)
         with torch.no_grad():
@@ -305,11 +323,12 @@ class TestRelattnTableThreading:
 
     @pytest.mark.parametrize("length", [2, 5, 17])
     def test_the_two_table_sources_are_bit_identical(self, pristine_classes, length):
-        """front（in-graph 構築 = 焼き込み）と flow（グラフ入力）が**同じ数**を出す。
+        """front (built in-graph = baked) and flow (graph inputs) produce **the same numbers**.
 
-        表の式は 1 箇所（`build_relattn_tables`）にしか無い、という設計の実測。ここが
-        割れると、front は焼き込んだ表で・flow はホストが作った表で、**どちらも
-        shape は合ったまま別のモデル**になる（ADR 0013 の沈黙誤値クラス）。
+        A measurement of the design where the table formula exists in one place only
+        (`build_relattn_tables`). If this split, front with its baked table and flow with the
+        host-built table would **both become a different model with the shapes still matching**
+        (the silent-wrong-value class of ADR 0013).
         """
         attn = _attention(seed=5)
         x, attn_mask = _attention_case(length)
@@ -322,11 +341,12 @@ class TestRelattnTableThreading:
         assert torch.equal(in_graph, supplied)
 
     def test_a_table_shifted_by_one_changes_the_result(self, pristine_classes):
-        """故障注入 — 添字表を 1 ずらすと出力が変わる。
+        """Fault injection — shifting the index table by 1 changes the output.
 
-        窓幅の取り違えは `idx_k` を 1 ずらすのと同じ形で、**要素数は合うので shape
-        エラーにならない**。上の同値テストがこのクラスの誤りを実際に検出できること
-        （= 表の寄与が丸ごと 0 に潰れていないこと）をここで固定する。
+        A window-size mix-up has the same form as shifting `idx_k` by 1, and **the element count
+        matches, so there is no shape error**. This pins that the equivalence test above can
+        actually detect this class of error (= the table's contribution is not collapsed to
+        exactly 0).
         """
         attn = _attention(seed=5)
         x, attn_mask = _attention_case(17)
@@ -340,11 +360,12 @@ class TestRelattnTableThreading:
         assert not torch.allclose(correct, wrong, atol=EQUIVALENCE_ATOL, rtol=0)
 
     def test_a_wider_window_runs_off_the_embedding(self, pristine_classes):
-        """窓幅が**大きい**側へずれた表は添字が埋め込みの外へ出て torch が落ちる。
+        """A table whose window size drifted **larger** has indices outside the embedding, and torch
+        fails.
 
-        小さい側へずれた場合は範囲内の別の行を読むので黙って誤る（上の 1 ずらしが
-        その形）。両側で挙動が違うことを記録しておかないと「落ちなかった＝正しい」と
-        読み違える。
+        Drifting smaller reads another row within range and is silently wrong (the shift by 1
+        above is that form). Without recording that the two sides behave differently, one would
+        misread "did not fail = correct".
         """
         attn = _attention(seed=5)
         x, attn_mask = _attention_case(17)
@@ -355,8 +376,8 @@ class TestRelattnTableThreading:
 
 
 class TestRelattnTableBuilder:
-    """表生成器そのもの
-    （ホスト TS 鏡像 `packages/models/src/sbv2/relattn-tables.ts` の正本）。
+    """The table generator itself
+    (the source of truth of the host TS mirror `packages/models/src/sbv2/relattn-tables.ts`).
     """
 
     def test_the_tables_have_the_square_shape_and_dtypes(self):
@@ -368,7 +389,8 @@ class TestRelattnTableBuilder:
         assert valid.dtype == torch.float32
 
     def test_the_indices_stay_inside_the_embedding(self):
-        """clamp 済みなので gather の範囲外規約（NaN 汚染）には抵触しない（ADR 0013）。"""
+        """Already clamped, so the gather out-of-range rule (NaN pollution) is not violated (ADR
+        0013)."""
         idx_k, _ = patch_sbv2.build_relattn_tables(64)
 
         assert int(idx_k.min()) == 0
@@ -383,7 +405,8 @@ class TestRelattnTableBuilder:
         assert torch.equal(valid, expected.to(torch.float32))
 
     def test_a_different_window_gives_different_tables(self):
-        """恒真化の門番（TS 側パリティテストと対）— 窓幅が効いていることの実測。"""
+        """Guard against a vacuous check (paired with the TS-side parity test) — measures that the
+        window size takes effect."""
         narrow = patch_sbv2.build_relattn_tables(9, 4)
         wide = patch_sbv2.build_relattn_tables(9, 5)
 
@@ -394,13 +417,15 @@ class TestRelattnTableBuilder:
 
 @requires_package
 class TestFfnPaddingFold:
-    """③ FFN の明示 pad → conv の padding 引数。"""
+    """③ FFN's explicit pad → conv's padding argument."""
 
     @pytest.mark.parametrize("kernel_size", [1, 3, 5])
     def test_it_matches_the_original_forward_for_odd_kernels(self, pristine_classes, kernel_size):
         from style_bert_vits2.models.attentions import FFN
 
-        assert FFN.forward is PRISTINE_FFN_FORWARD  # 恒真化の門番（上の gather 版と同じ）
+        assert (
+            FFN.forward is PRISTINE_FFN_FORWARD
+        )  # guard against a vacuous check (as in gather above)
         torch.manual_seed(7)
         ffn = FFN(16, 16, 32, kernel_size)
         ffn.eval()
@@ -417,7 +442,7 @@ class TestFfnPaddingFold:
         assert torch.allclose(got, expected, atol=EQUIVALENCE_ATOL, rtol=0)
 
     def test_an_even_kernel_is_rejected(self, pristine_classes):
-        """偶数 kernel の `_same_padding` は左右非対称で、conv の padding と等価でない。"""
+        """For an even kernel `_same_padding` is asymmetric, not equivalent to conv's padding."""
         from style_bert_vits2.models.attentions import FFN
 
         torch.manual_seed(7)
@@ -441,11 +466,13 @@ class TestFfnPaddingFold:
 
     @pytest.mark.parametrize("kernel_size", [2, 4])
     def test_an_even_kernel_really_differs(self, kernel_size):
-        """恒真化の門番 — 偶数 kernel では原実装のパディングと conv の padding が実際に違う。
+        """Guard against a vacuous check — for an even kernel, the original's padding and conv's
+        padding really differ.
 
-        原実装 `_same_padding` は左 `(k−1)//2` / 右 `k//2` の**非対称** pad で、conv1d の
-        padding 引数（左右同数）では作れない。上の拒否 assert が「念のため」ではなく実害を
-        止めていることの実測（偶数では出力長からしてずれる）。
+        The original `_same_padding` is an **asymmetric** pad, left `(k−1)//2` / right `k//2`,
+        which conv1d's padding argument (equal on both sides) cannot produce. A measurement that the
+        rejection assert above stops real harm and is not "just in case" (with an even kernel even
+        the output length differs).
         """
         from torch.nn import functional
 
@@ -457,7 +484,8 @@ class TestFfnPaddingFold:
 
 
 class TestConstantColumn:
-    """定数列の作り方（`full_like` を IR に持ち込まないための定型手筋）。"""
+    """How a constant column is built (the standard technique for keeping `full_like` out of the
+    IR)."""
 
     def test_it_has_the_leading_shape_with_a_single_trailing_column(self):
         source = torch.randn(2, 3, 4)
@@ -468,7 +496,7 @@ class TestConstantColumn:
         assert torch.equal(column, torch.full((2, 3, 1), 1.5))
 
     def test_a_negative_zero_source_still_yields_the_exact_constant(self):
-        """`x * 0.0` は x = −0.0 でも −0.0 で、`+ value` が厳密に value を返す。"""
+        """`x * 0.0` is −0.0 even for x = −0.0, and `+ value` returns exactly value."""
         source = torch.full((1, 1, 2), -0.0)
 
         assert torch.equal(patch_sbv2._constant_column(source, -5.0), torch.full((1, 1, 1), -5.0))
@@ -476,10 +504,11 @@ class TestConstantColumn:
 
 @requires_package
 class TestPatchApplicationFlag:
-    """パッチのプロセス汚染を可視化するフラグ（恒真化の遮断に使う）。"""
+    """The flag that makes the process-wide effect of the patches visible (used to block vacuous
+    checks)."""
 
     def test_it_flips_only_after_applying(self, pristine_classes):
-        # フィクスチャが未適用状態にして入る。
+        # The fixture enters with nothing applied.
         assert not patch_sbv2.patches_applied()
 
         patch_sbv2.apply_all_patches()
@@ -489,7 +518,7 @@ class TestPatchApplicationFlag:
 
 @requires_package
 class TestWrapperShapes:
-    """export 用ラッパの形（実重みを使わない範囲の固定）。"""
+    """The form of the export wrappers (pinned as far as possible without real weights)."""
 
     def test_the_forward_signature_is_the_ir_input_order(self):
         import inspect
@@ -498,8 +527,9 @@ class TestWrapperShapes:
 
         names = list(inspect.signature(patch_sbv2.Sbv2Front.forward).parameters)[1:]
 
-        # IR の入力名は forward の引数名がそのまま出る。台本側の並びと食い違うと
-        # dynamic_shapes が別の入力に付く（P が付かない入力は静的に焼かれて壊れる）。
+        # The IR's input names are the forward's argument names as they are. If they disagree with
+        # the script's order, dynamic_shapes attaches to another input (an input without P is baked
+        # statically and breaks).
         assert names == list(export_sbv2.FRONT_INPUT_ORDER)
 
     def test_the_sdp_wrapper_takes_the_noise_as_an_input(self):
@@ -511,7 +541,7 @@ class TestWrapperShapes:
 
     @pytest.mark.parametrize("wrapper", [patch_sbv2.FlowReverse, patch_sbv2.Sbv2Voice])
     def test_the_flow_family_takes_the_tables_as_inputs(self, wrapper):
-        """flow / voice は表を**グラフ入力**で受ける（front の焼き込みと違う — ADR 0013）。"""
+        """flow / voice take the tables as **graph inputs** (unlike front's baking — ADR 0013)."""
         import inspect
 
         from sbv2 import export as export_sbv2
@@ -522,7 +552,8 @@ class TestWrapperShapes:
         assert names[-2:] == ["idx_k", "valid"]
 
 
-# NOTE: 添字表そのもの（`idx_k = clamp(w + j − i, 0, 2w)` / `idx_v = i + c`）を式のまま
-# 再掲して検査するテストは**置かない** — パッチのコードを写した式を検査しても、写しの側が
-# 正しいことしか言えない（原実装との突合こそが検査）。向きの取り違えも範囲外添字も、上の
-# `test_it_matches_the_original_forward` が拾う（範囲外の gather は torch 自身が例外にする）。
+# NOTE: there is **no** test that restates the index tables themselves
+# (`idx_k = clamp(w + j − i, 0, 2w)` / `idx_v = i + c`) as formulas and checks them — checking a
+# formula copied from the patch's code only says the copy is right (the comparison with the
+# original is the check). Both a reversed direction and an out-of-range index are caught by
+# `test_it_matches_the_original_forward` above (torch itself raises on an out-of-range gather).

@@ -618,8 +618,8 @@ class TestQatCard:
         assert "per-layer embeddings of" not in card
 
     def test_a_session_boolean_is_spelled_as_the_manifest_spells_it(self, tmp_path: Path) -> None:
-        """session の boolean は manifest と同じ JSON 表記で綴る — Python の `True` が出ると
-        読み手がそのまま貼った TypeScript と綴りが食い違う。"""
+        """A session boolean is spelled in the same JSON notation as the manifest — a Python `True`
+        would disagree with the spelling of TypeScript that a reader pastes as is."""
         out_dir, _ = _assemble(tmp_path)
         card = (out_dir / "README.md").read_text(encoding="utf-8")
 

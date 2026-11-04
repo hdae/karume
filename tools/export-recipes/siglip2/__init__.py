@@ -1,15 +1,17 @@
-"""SigLIP2 vision tower（image-feature-extraction）の export recipe（ADR 0065 決定 2）。
+"""Export recipe for the SigLIP2 vision tower (image-feature-extraction) (ADR 0065 decision 2).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: 上流モデル由来のパッチ層
-（{@link siglip2.patch}）・export 台本・前処理パリティの参照実装（{@link siglip2.preprocess}）・
-配布 recipe（{@link siglip2.distribution}）とカードテンプレート（{@link siglip2.card}）。
-依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
-が機械で守る）。
+Only what **cannot live in the general-purpose exporter core** goes here: the patch layer for the
+upstream model ({@link siglip2.patch}), the export script, the reference implementation for
+preprocessing parity ({@link siglip2.preprocess}), the distribution recipe
+({@link siglip2.distribution}) and the card template ({@link siglip2.card}). Dependencies run
+**one way only, recipe → core** (enforced mechanically by
+`tools/exporter/tests/test_architecture_boundary.py`).
 
-MUST: **再輸出しない**（`from siglip2 import X` で family の中身が芋づるに import される形に
-しない）。台本は重い上流 import を持つので、`import siglip2` が transformers を引き込む形に
-なると、配布 recipe を触るだけの経路まで巻き添えになる。呼び出し側はサブモジュールを名指しで
-import すること。
+MUST: **do not re-export** (no `from siglip2 import X` that drags the family's contents in
+transitively). The script carries heavy upstream imports, so if `import siglip2` pulled in
+transformers, even paths that only touch the distribution recipe would be dragged along. Callers
+import the submodule by name.
 
-台本の起動は export-recipes ルートから（例: `uv run --group siglip2 python -m siglip2.export`）。
+Run the script from the export-recipes root (e.g.
+`uv run --group siglip2 python -m siglip2.export`).
 """

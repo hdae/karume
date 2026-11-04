@@ -1,16 +1,19 @@
-"""`embeddinggemma/measure_quant.py` の pure 部分（実重み不要分）。
+"""The pure part of `embeddinggemma/measure_quant.py` (what needs no real weights).
 
-実測そのものは手動（1.2GB の実重みを 15 構成ぶん丸めて回す）。ここで固定するのは、壊れると
-**測定値が静かに嘘になる**側だけ:
+The measurement itself is manual (rounding the 1.2 GB of real weights for 15 configs). What is
+pinned here is only the side whose breakage makes **the measurements silently lie**:
 
-- **方式を積み重ねない** — 構成ごとに pristine へ戻すこと（戻さないと「NF4 の上の MXFP4」を
-  測ることになり、方式比較そのものが成立しない）
-- サイズ試算の式 — g=32 の group scale 込みで i4 / FP4 / NF4 が 5.0 bpw・MXFP4 が 4.25 bpw・
-  codebook が表のコスト込み（表に載る数字の出どころ）
-- 指標 — cosine の境界値とスケール不変性、ペア行列が上三角 10 対、意味順序の崩壊の検出
-- 対象集合の素性 — group 数を「丸めが group を割る軸」と同じ軸で数えること・整除違反が
-  fail loudly
-- 恒真化の遮断 — 丸めの素通りと `op_types` の効き目の門が**実際に落ちる**こと
+- **Do not stack methods** — each config goes back to pristine (without it the run measures "MXFP4
+  on top of NF4", and the comparison of methods itself does not hold)
+- The size projection formulas — with the g=32 group scale, i4 / FP4 / NF4 come to 5.0 bpw, MXFP4
+  to 4.25 bpw, and the codebooks include the cost of their tables (where the numbers in the table
+  come from)
+- The metrics — the boundary values and scale invariance of the cosine, the pair matrix being the
+  10 pairs of the upper triangle, the detection of a collapsed semantic order
+- The properties of the target set — the group count is taken on the same axis "the rounding splits
+  groups on", and a divisibility violation fails loudly
+- Blocking vacuity — the gates on rounding passing through and on whether `op_types` takes effect
+  **actually fail**
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from karume.quantize import fake_quant_int4, iter_quant_targets
 
 
 class TinyModel(nn.Module):
-    """linear 1 本 + embedding 1 本（in 軸はどちらも group 32 で割り切れる）。"""
+    """One linear + one embedding (both in axes are divisible by group 32)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -37,7 +40,7 @@ class TinyModel(nn.Module):
 
 
 def _stats(**overrides: int) -> mq.TargetStats:
-    """既定は「32 要素 = 1 group・1 テンソル・1 チャネル」の最小形。"""
+    """The default is the smallest form "32 elements = 1 group, 1 tensor, 1 channel"."""
     base = {"modules": 1, "elements": 32, "groups": 1, "channels": 1}
     return mq.TargetStats(**{**base, **overrides})
 
@@ -47,23 +50,24 @@ def _method(name: str) -> mq.Method:
 
 
 class TestSizeProjection:
-    """表に載る bpw の出どころ（`docs/container-v1.md` §6.3 の `int4-sym-g` と OCP MX の逐語）。"""
+    """Where the bpw in the table comes from (verbatim `int4-sym-g` of `docs/container-v1.md` §6.3
+    and OCP MX)."""
 
     @pytest.mark.parametrize("name", ["rtn-i4-g32", "fp4", "nf4"])
     def test_group_absmax_methods_land_on_five_bits(self, name):
-        """4bit ペイロード + group 32 ごとの F32 scale = 4 + 32/32 = 5.0 bpw。"""
+        """4-bit payload + an F32 scale per group of 32 = 4 + 32/32 = 5.0 bpw."""
         projection = mq.size_projection(_method(name), _stats(elements=3200, groups=100))
 
         assert projection["bitsPerWeight"] == pytest.approx(5.0)
 
     def test_mxfp4_lands_on_four_and_a_quarter_bits(self):
-        """共有 scale が E8M0（8bit）なので 4 + 8/32 = 4.25 bpw。"""
+        """The shared scale is E8M0 (8 bits), so 4 + 8/32 = 4.25 bpw."""
         projection = mq.size_projection(_method("mxfp4"), _stats(elements=3200, groups=100))
 
         assert projection["bitsPerWeight"] == pytest.approx(4.25)
 
     def test_the_per_tensor_codebook_costs_one_table_per_tensor(self):
-        """scale が無い代わりに層ごとの表（16 centroid × F32）が乗る。"""
+        """No scale, but a table per layer (16 centroids × F32) is added instead."""
         stats = _stats(modules=10, elements=3200, groups=100, channels=40)
 
         projection = mq.size_projection(_method("kmeans:per_tensor"), stats)
@@ -71,7 +75,8 @@ class TestSizeProjection:
         assert projection["bitsPerWeight"] == pytest.approx(4.0 + 32 * 16 * 10 / 3200)
 
     def test_the_per_channel_codebook_costs_one_table_per_channel(self):
-        """表のコストが**チャネル数**に比例する（per_tensor との違いはここだけ）。"""
+        """The table cost is proportional to **the number of channels** (the only difference from
+        per_tensor)."""
         stats = _stats(modules=10, elements=3200, groups=100, channels=40)
 
         projection = mq.size_projection(_method("kmeans:per_channel"), stats)
@@ -79,7 +84,7 @@ class TestSizeProjection:
         assert projection["bitsPerWeight"] == pytest.approx(4.0 + 32 * 16 * 40 / 3200)
 
     def test_the_shared_codebook_costs_one_table_for_the_whole_model(self):
-        """表は 1 枚だが group scale が要る（= i4 と同じ 5.0 bpw + 表 1 枚ぶん）。"""
+        """One table, but a group scale is needed (= the same 5.0 bpw as i4 + one table)."""
         stats = _stats(modules=10, elements=3200, groups=100, channels=40)
 
         projection = mq.size_projection(_method("kmeans:shared"), stats)
@@ -87,7 +92,8 @@ class TestSizeProjection:
         assert projection["bitsPerWeight"] == pytest.approx(5.0 + 32 * 16 / 3200)
 
     def test_the_ratio_is_the_bpw_against_f32(self):
-        """比は「f32 格納に対する何 %」— MiB の 2 系列と同じ数から出ていること。"""
+        """The ratio is "what % of f32 storage" — derived from the same numbers as the two MiB
+        columns."""
         projection = mq.size_projection(_method("nf4"), _stats(elements=3200, groups=100))
 
         assert projection["ratio"] == pytest.approx(5.0 / 32.0)
@@ -96,36 +102,39 @@ class TestSizeProjection:
 
 class TestTargetStats:
     def test_it_counts_groups_on_the_axis_the_rounding_splits(self):
-        """group 数は `channel_rows` の平坦形（= 丸めが group を割る軸）から数える。"""
+        """The group count is taken from the flattened form of `channel_rows` (= the axis the
+        rounding splits groups on)."""
         model = TinyModel()
 
         linear = mq.target_stats(model, mq.TARGET_LINEAR)
         widened = mq.target_stats(model, mq.TARGET_WITH_EMBEDDING)
 
-        # linear `[4,32]` … 4 行 × (32/32) group / embedding `[8,32]` … 8 行 × 1 group。
+        # linear `[4,32]` … 4 rows × (32/32) group / embedding `[8,32]` … 8 rows × 1 group.
         assert (linear.modules, linear.elements, linear.groups, linear.channels) == (1, 128, 4, 4)
         assert (widened.modules, widened.elements) == (2, 128 + 256)
         assert (widened.groups, widened.channels) == (4 + 8, 4 + 8)
 
     def test_an_indivisible_quantization_axis_fails_loudly(self):
-        """MUST: 端数 group は格納できない形（ADR 0069 決定 2）— その bpw を出さない。"""
+        """MUST: a partial group is a shape that cannot be stored (ADR 0069 decision 2) — no bpw for
+        it."""
 
         class Odd(nn.Module):
             def __init__(self) -> None:
                 super().__init__()
                 self.fc = nn.Linear(30, 2, bias=False)
 
-        with pytest.raises(AssertionError, match="割り切れない"):
+        with pytest.raises(AssertionError, match="is not divisible"):
             mq.target_stats(Odd(), mq.TARGET_LINEAR)
 
     def test_an_empty_target_fails_loudly(self):
-        with pytest.raises(AssertionError, match="1 本も無い"):
+        with pytest.raises(AssertionError, match="no quantizable weight"):
             mq.target_stats(nn.Module(), mq.TARGET_LINEAR)
 
 
 class TestTargets:
     def test_the_narrow_target_leaves_the_vocabulary_table_alone(self):
-        """対象 2 形の差は `embed_tokens` 1 本ぶん（門 ② の期待値そのもの）。"""
+        """The 2 target forms differ by the one `embed_tokens` (exactly the expected value of gate
+        ②)."""
         model = TinyModel()
 
         narrow = [fqn for fqn, _w, _a in iter_quant_targets(model, mq.TARGET_LINEAR.op_types)]
@@ -136,7 +145,8 @@ class TestTargets:
 
 
 class TestMethodsAreNotStacked:
-    """MUST: 構成ごとに pristine へ戻す（戻さないと方式間の比較が成立しない）。"""
+    """MUST: each config goes back to pristine (without it the comparison between methods does not
+    hold)."""
 
     def _pristine(self, model: nn.Module) -> tuple[dict, dict]:
         weights = {fqn: w for fqn, w, _a in iter_quant_targets(model, mq.WIDEST_OP_TYPES)}
@@ -153,7 +163,8 @@ class TestMethodsAreNotStacked:
         assert all(torch.equal(weights[fqn], pristine[fqn]) for fqn in pristine)
 
     def test_a_restored_run_matches_a_fresh_one(self):
-        """別方式の後に戻して当てた i4 が、素の重みへ当てた i4 とビット一致する。"""
+        """i4 applied after restoring from another method is bit-identical to i4 applied to the
+        plain weights."""
         torch.manual_seed(0)
         model = TinyModel()
         weights, pristine = self._pristine(model)
@@ -169,7 +180,8 @@ class TestMethodsAreNotStacked:
         assert torch.equal(after_restore, weights["fc.weight"])
 
     def test_stacking_the_two_methods_would_have_changed_the_answer(self):
-        """恒真化の防止 — 戻さずに重ねた場合は実際に別の値になる（上のテストが効く条件）。"""
+        """Guard against vacuity — stacking without restoring really gives other values (the
+        condition under which the test above means something)."""
         torch.manual_seed(0)
         model = TinyModel()
         weights, pristine = self._pristine(model)
@@ -196,19 +208,20 @@ class TestCosine:
         assert mq.cosine(-vector, vector) == pytest.approx(-1.0)
 
     def test_it_is_scale_invariant(self):
-        """MUST: ノルムの崩れを cosine へ混ぜない（ノルムは別列で見る）。"""
+        """MUST: do not let norm breakage leak into the cosine (the norm is a separate column)."""
         vector = torch.tensor([1.0, 2.0, 3.0])
 
         assert mq.cosine(vector * 7.0, vector) == pytest.approx(1.0)
 
     def test_a_zero_vector_fails_loudly(self):
-        """全ゼロは丸めの話ではなく経路が壊れている合図 — NaN を返して測り続けない。"""
-        with pytest.raises(AssertionError, match="全ゼロ"):
+        """All zeros is not about rounding but a sign of a broken path — do not return NaN and keep
+        measuring."""
+        with pytest.raises(AssertionError, match="all zeros"):
             mq.cosine(torch.zeros(3), torch.ones(3))
 
 
 def _vectors(**overrides: torch.Tensor) -> dict[str, torch.Tensor]:
-    """5 ケースぶんの合成埋め込み（既定は互いに直交する単位ベクトル）。"""
+    """Synthetic embeddings for the 5 cases (by default mutually orthogonal unit vectors)."""
     base = {name: torch.eye(len(mq.CASE_NAMES))[index] for index, name in enumerate(mq.CASE_NAMES)}
     return {**base, **overrides}
 
@@ -229,7 +242,7 @@ class TestPairCosines:
 
 class TestMeasure:
     def _near_beats_far(self) -> dict[str, torch.Tensor]:
-        """近い対（query-en × document-en）だけが揃った合成埋め込み。"""
+        """Synthetic embeddings in which only the near pair (query-en × document-en) is aligned."""
         near_partner = (
             torch.eye(len(mq.CASE_NAMES))[0] * 0.8 + torch.eye(len(mq.CASE_NAMES))[1] * 0.6
         )
@@ -254,7 +267,8 @@ class TestMeasure:
         assert result["margin"] == pytest.approx(0.8)
 
     def test_it_reports_a_collapsed_order(self):
-        """MUST: 基準比 cosine とは独立に見る — 全ベクトルが近ければ cos は高いまま崩れる。"""
+        """MUST: checked independently of the cosine against the baseline — when every vector is
+        close the cos stays high while the order collapses."""
         base = self._near_beats_far()
         collapsed = _vectors(**{eg.FAR_PAIR[1]: base[eg.NEAR_PAIR[0]]})
 
@@ -273,7 +287,7 @@ class TestMeasure:
         assert result["pairDriftMaxAbs"] == pytest.approx(1.0)
 
     def test_the_case_cosine_ignores_a_pure_norm_change(self):
-        """ノルムだけ動いた場合に cosine が 1 のままであること（`l2Norms` 側で見る量）。"""
+        """When only the norm moves the cosine stays 1 (a quantity `l2Norms` covers)."""
         base = self._near_beats_far()
         scaled = {name: vector * 0.5 for name, vector in base.items()}
 
@@ -306,7 +320,7 @@ def _failures(configs: dict[str, dict[str, object]]) -> list[str]:
 
 
 class TestGates:
-    """MUST: 素通りは常に「品質が良い」側の嘘になる — 沈黙させない。"""
+    """MUST: a pass-through always lies on the "good quality" side — never let it go silent."""
 
     def test_a_well_formed_pair_of_configs_is_green(self):
         assert _failures(_configs()) == []
@@ -315,10 +329,11 @@ class TestGates:
         configs = _configs()
         configs[mq.config_name(_method("nf4"), mq.TARGET_LINEAR)] = _entry(modules=170, moved=False)
 
-        assert any("素通り" in message for message in _failures(configs))
+        assert any("passed through" in message for message in _failures(configs))
 
     def test_a_widened_target_that_did_not_add_the_embedding_is_red(self):
-        """`op_types` の切り替えが効かないと、語彙表を測ったことになっている表が出る。"""
+        """If the `op_types` switch has no effect, a table that claims to have measured the
+        vocabulary table comes out."""
         configs = _configs()
         configs[mq.config_name(_method("nf4"), mq.TARGET_WITH_EMBEDDING)] = _entry(
             modules=170, cosine=0.98
@@ -327,11 +342,12 @@ class TestGates:
         assert any("op_types" in message for message in _failures(configs))
 
     def test_a_widened_target_with_identical_embeddings_is_red(self):
-        """本数だけ増えて値が同じなら、語彙表の丸めが出力へ届いていない。"""
+        """If only the count grows and the values stay the same, the rounding of the vocabulary
+        table does not reach the output."""
         configs = _configs()
         configs[mq.config_name(_method("nf4"), mq.TARGET_WITH_EMBEDDING)] = _entry(modules=171)
 
-        assert any("届いていない" in message for message in _failures(configs))
+        assert any("does not reach the output" in message for message in _failures(configs))
 
 
 class TestMethodTable:
@@ -340,7 +356,8 @@ class TestMethodTable:
         assert [target.name for target in mq.TARGETS] == ["linear", "linear+embedding"]
 
     def test_the_group_size_is_pinned_for_every_method(self):
-        """方式比較の軸は「格子の張り方」だけ — group 長は動かさない（ユーザー裁定）。"""
+        """The axis of the method comparison is only "the grid layout" — the group length does not
+        move (the maintainer's ruling)."""
         assert mq.GROUP_SIZE == 32
 
     def test_selecting_a_subset_keeps_the_declaration_order(self):
@@ -376,13 +393,13 @@ class TestTables:
     def test_the_quality_table_carries_the_order_verdict(self):
         table = mq.quality_table(self._report())
 
-        assert "| nf4 | linear | 170 | 0.998700 | 0.999100 | 0.7100 | 0.3200 | 保持 |" in table
+        assert "| nf4 | linear | 170 | 0.998700 | 0.999100 | 0.7100 | 0.3200 | held |" in table
 
     def test_a_collapsed_order_is_marked_up(self):
         report = self._report()
         report["configs"]["nf4/linear"]["order"]["holds"] = False
 
-        assert "**崩壊**" in mq.quality_table(report)
+        assert "**collapsed**" in mq.quality_table(report)
 
     def test_the_size_table_shows_the_formula(self):
         table = mq.size_table(self._report())
@@ -392,16 +409,16 @@ class TestTables:
 
 class TestMibConversion:
     def test_one_mebibyte_is_the_binary_one(self):
-        """`MiB` 表記どおり 2^20（10^6 と混ぜると表の数字が 5% ずれる）。"""
+        """2^20, as the `MiB` notation says (mixing in 10^6 shifts the table's numbers by 5%)."""
         assert mq.MIB == 2**20
         assert math.log2(mq.MIB) == 20
 
 
-# ---- 校正付き丸め（波 J-2）--------------------------------------------------
+# ---- Calibrated rounding (work item J-2) ---------------------------------------------
 
 
 class TinyAttention(nn.Module):
-    """量子化対象の linear 2 本（in 軸は group 32 で割り切れる）。"""
+    """2 linear quantization targets (the in axis is divisible by group 32)."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -413,7 +430,8 @@ class TinyAttention(nn.Module):
 
 
 class TinyDecoderLayer(nn.Module):
-    """decoder layer 相当。`bias` は「layer_type ごとに違う kwargs」の代役（加算で観測）。"""
+    """A decoder layer stand-in. `bias` stands in for "kwargs that differ per layer_type" (observed
+    through addition)."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -424,7 +442,7 @@ class TinyDecoderLayer(nn.Module):
 
 
 class TinyConfig:
-    """`Gemma3TextConfig` の代役（`layer_types` だけを持つ）。"""
+    """A stand-in for `Gemma3TextConfig` (holds only `layer_types`)."""
 
     def __init__(self, layer_types: tuple[str, ...]) -> None:
         self.layer_types = layer_types
@@ -432,16 +450,17 @@ class TinyConfig:
 
 @dataclass(frozen=True)
 class TinyTextOutput:
-    """`BaseModelOutputWithPast` の代役（`last_hidden_state` だけを持つ）。"""
+    """A stand-in for `BaseModelOutputWithPast` (holds only `last_hidden_state`)."""
 
     last_hidden_state: torch.Tensor
 
 
 class TinyText(nn.Module):
-    """`Gemma3TextModel` 相当（`.config.layer_types` / `.layers` / `.embed_tokens` / `.norm`）。
+    """A `Gemma3TextModel` stand-in (`.config.layer_types` / `.layers` / `.embed_tokens` / `.norm`).
 
-    `forward` は上流と同じ「embedding → 層を順に → 最終 norm」で、返り値も同じ席
-    （`last_hidden_state`）— {@link mq.assert_stage_split} の突合先がこれ。
+    `forward` is the same "embedding → the layers in turn → final norm" as upstream, and the return
+    value has the same field (`last_hidden_state`) — this is what {@link mq.assert_stage_split}
+    compares against.
     """
 
     def __init__(self, vocab: int, features: int, layer_types: tuple[str, ...]) -> None:
@@ -458,15 +477,17 @@ class TinyText(nn.Module):
         return TinyTextOutput(self.norm(hidden))
 
 
-#: layer_type ごとの kwargs（Gemma3 の sliding / full 2 系統の代役）。
+#: kwargs per layer_type (a stand-in for Gemma3's two kinds, sliding / full).
 TINY_BIAS = {"sliding_attention": 0.5, "full_attention": -0.25}
 
-#: 先頭が sliding・途中に full が 1 枚（`capture_stage_batches` が 2 種類を捕まえる形）。
+#: sliding first and one full in between (the form in which `capture_stage_batches` captures 2
+#: kinds).
 TINY_LAYER_TYPES = ("sliding_attention", "sliding_attention", "full_attention")
 
 
 class TinyWrapper(nn.Module):
-    """`EmbeddingWrapper` 相当 — decoder の**外**に Dense を 1 本持つ（校正対象外の席）。"""
+    """An `EmbeddingWrapper` stand-in — holds one Dense **outside** the decoder (outside the
+    calibration targets)."""
 
     def __init__(self, vocab: int = 8, features: int = 32) -> None:
         super().__init__()
@@ -480,7 +501,7 @@ class TinyWrapper(nn.Module):
 
 
 def tiny_inputs(count: int = 2) -> tuple[torch.Tensor, ...]:
-    """長さの違う id 列（校正入力の代役 — tokenizer は通さない）。"""
+    """id sequences of different lengths (a stand-in for calibration inputs — no tokenizer)."""
     return tuple(
         torch.arange(2 + index, dtype=torch.int64).unsqueeze(0) % 8 for index in range(count)
     )
@@ -510,7 +531,7 @@ class TestCalibConfigs:
         assert mq.select_calib([]) == mq.CALIB_CONFIGS
 
     def test_selecting_only_a_method_leaves_no_calib_config(self):
-        """`--only nf4` は方式だけ — 校正付き構成を巻き込まない。"""
+        """`--only nf4` is the method only — it does not drag in the calibrated configs."""
         assert mq.select_calib(["nf4"]) == ()
 
     def test_the_group_size_is_pinned_for_every_calib_config(self):
@@ -526,7 +547,8 @@ class TestCalibConfigs:
         assert labels["awq-gptq-rtn"] == "awq+gptq/rtn"
 
     def test_the_size_projection_takes_a_calib_config(self):
-        """校正は格子を変えない — RTN グリッドの bpw は方式側と同じ 5.0。"""
+        """Calibration does not change the grid — the bpw of the RTN grid is the same 5.0 as on the
+        method side."""
         config = next(c for c in mq.CALIB_CONFIGS if c.name == "gptq-rtn")
 
         projection = mq.size_projection(config, _stats(elements=3200, groups=100))
@@ -534,7 +556,8 @@ class TestCalibConfigs:
         assert projection["bitsPerWeight"] == pytest.approx(5.0)
 
     def test_the_calibrated_codebook_costs_one_table_per_layer(self):
-        """core の `kmeans_shared` は**層内**の表（全体 1 枚の kmeans:shared とは式が違う）。"""
+        """Core's `kmeans_shared` has a table **within a layer** (a different formula from
+        kmeans:shared with one table overall)."""
         config = next(c for c in mq.CALIB_CONFIGS if c.name == "gptq-kmeans")
         stats = _stats(modules=4, elements=3200, groups=100)
 
@@ -546,7 +569,8 @@ class TestCalibConfigs:
 
 class TestCalibStages:
     def test_the_stage_fqns_are_model_wide(self):
-        """台帳のキーを `Int4Report` と同じ FQN 空間へ揃える（core の `StageSpec` 契約）。"""
+        """Align the ledger keys with the same FQN space as `Int4Report` (core's `StageSpec`
+        contract)."""
         scan, stats = mq.calib_targets(mq.decoder_stages(TinyWrapper()))
 
         assert sorted(scan)[:2] == [
@@ -556,7 +580,8 @@ class TestCalibStages:
         assert stats.modules == 2 * len(TINY_LAYER_TYPES)
 
     def test_the_dense_outside_the_decoder_is_not_in_the_scan(self):
-        """Dense 2 段は decoder の外 — 校正の対象集合に入らない（表の対象名の由来）。"""
+        """The 2 Dense stages are outside the decoder — not in the calibration target set (where the
+        table's target name comes from)."""
         scan, _stats = mq.calib_targets(mq.decoder_stages(TinyWrapper()))
 
         assert not any("dense" in fqn for fqn in scan)
@@ -570,11 +595,12 @@ class TestCalibStages:
         wrapper = TinyWrapper()
         wrapper.model.config.layer_types = TINY_LAYER_TYPES[:-1]
 
-        with pytest.raises(AssertionError, match="食い違う"):
+        with pytest.raises(AssertionError, match="disagree with"):
             mq.decoder_stages(wrapper)
 
     def test_a_stage_applies_the_keyword_arguments_of_its_own_layer_type(self):
-        """MUST: 層ごとに違う mask / RoPE 表を取り違えない（`LayerStage` の存在理由）。"""
+        """MUST: do not mix up the mask / RoPE table that differ per layer (why `LayerStage`
+        exists)."""
         torch.manual_seed(0)
         wrapper = TinyWrapper()
         stages = mq.decoder_stages(wrapper)
@@ -598,7 +624,7 @@ class TestCatcher:
         assert [int(args[0].shape[1]) for args, _kwargs in batches] == [2, 3, 4]
 
     def test_it_captures_the_keyword_arguments_of_every_layer_type(self):
-        """片方の layer_type しか捕まえないと、その種類の層が再実行できない。"""
+        """Capturing only one layer_type leaves the layers of the other kind unable to rerun."""
         wrapper = TinyWrapper()
 
         _args, kwargs = mq.capture_stage_batches(wrapper, tiny_inputs(1))[0]
@@ -617,7 +643,8 @@ class TestCatcher:
 
 
 class TestStageSplit:
-    """分解一致門（{@link mq.assert_stage_split}）— 校正が「本物と同じ活性」を見る前提。"""
+    """The split agreement check ({@link mq.assert_stage_split}) — the premise that calibration sees
+    "the same activations as the real model"."""
 
     def test_the_sequential_stages_reproduce_the_model_bit_for_bit(self):
         torch.manual_seed(6)
@@ -628,18 +655,20 @@ class TestStageSplit:
         mq.assert_stage_split(wrapper, inputs[0], batches[0], mq.decoder_stages(wrapper))
 
     def test_a_dropped_stage_is_caught(self):
-        """段が 1 枚落ちても数値は普通に出る — 一致門だけがそれを落とす。"""
+        """With one stage dropped the numbers still come out ordinary — only the agreement check
+        fails it."""
         torch.manual_seed(7)
         wrapper = TinyWrapper()
         inputs = tiny_inputs(1)
         batches = mq.capture_stage_batches(wrapper, inputs)
         stages = mq.decoder_stages(wrapper)
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="not bit-identical"):
             mq.assert_stage_split(wrapper, inputs[0], batches[0], stages[:-1])
 
     def test_a_stage_carrying_the_wrong_layer_type_is_caught(self):
-        """embeddinggemma 固有 — 層ごとに違う kwargs を取り違えた列を落とす。"""
+        """Specific to embeddinggemma — reject a sequence that mixed up the kwargs differing per
+        layer."""
         torch.manual_seed(8)
         wrapper = TinyWrapper()
         inputs = tiny_inputs(1)
@@ -653,7 +682,7 @@ class TestStageSplit:
             for index, (prefix, stage) in enumerate(mq.decoder_stages(wrapper))
         )
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="not bit-identical"):
             mq.assert_stage_split(wrapper, inputs[0], batches[0], stages)
 
 
@@ -671,7 +700,8 @@ class TestCalibrationRun:
         assert all(not torch.equal(rig.scan[fqn], value) for fqn, value in before.items())
 
     def test_the_dense_outside_the_decoder_is_left_alone(self):
-        """校正は decoder 内だけ — 外の Dense は 1 ビットも動かない。"""
+        """Calibration is inside the decoder only — the Dense outside does not move by a single
+        bit."""
         torch.manual_seed(2)
         wrapper = TinyWrapper()
         rig = tiny_rig(wrapper, tiny_inputs(2))
@@ -694,7 +724,7 @@ class TestCalibrationRun:
             assert report.grid == config.grid.kind
 
     def test_a_subsampled_table_is_reported(self):
-        """MUST: `fit_stride` を使ったら出力へ明記（`describe` が拾う）。"""
+        """MUST: when `fit_stride` is used, the output says so (`describe` picks it up)."""
         torch.manual_seed(4)
         wrapper = TinyWrapper()
         rig = tiny_rig(wrapper, tiny_inputs(2))
@@ -711,5 +741,5 @@ class TestCalibrationRun:
         report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
         widened = {**rig.scan, "model.layers.9.self_attn.q_proj.weight": torch.zeros(1)}
 
-        with pytest.raises(AssertionError, match="一致しない"):
+        with pytest.raises(AssertionError, match="does not match"):
             mq.assert_calib_covers_scan(report, widened, "gptq-rtn")

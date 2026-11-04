@@ -1,55 +1,62 @@
-"""Wan2.1 のテキスト埋め込み資産（第 1 段 = 事前計算した埋め込み — ADR 0118 決定 4・段 6）。
+"""The Wan2.1 text embedding asset (stage 1 = precomputed embeddings — ADR 0118 decision 4, step 6).
 
-固定プロンプト（正 3 本 + negative 1 本）を umT5-XXL に通した出力 `[L_valid, 4096]` を f32 で
-safetensors に書く。DiT の入力 `[1, 512, 4096]`（有効長の後ろをゼロで埋めた形）はホストが作る —
-資産は有効長ぶんだけを持つ（`L_valid` = トークナイザのマスクが 1 の長さ）。
+Writes the output `[L_valid, 4096]` of the fixed prompts (3 positive + 1 negative) passed through
+umT5-XXL to safetensors in f32. The host builds the DiT input `[1, 512, 4096]` (zero-padded after
+the valid length) — the asset holds only the valid length (`L_valid` = the length where the
+tokenizer's mask is 1).
 
-## 作り方（上流の経路をそのまま呼ぶ）
+## How it is made (the upstream path is called as is)
 
-- 埋め込みは diffusers 0.39.0 の `WanPipeline._get_t5_prompt_embeds` をそのまま呼んで作る
-  （`prompt_clean` → トークナイザ `padding="max_length"`・`max_length=512` → `UMT5EncoderModel` →
-  有効長で切ってゼロで 512 まで埋める）。ここは返った `[1, 512, 4096]` を有効長で切るだけで、
-  式を写さない。
-- umT5 は**上流と同じ dtype（bf16）**で読む（公式 `t5_dtype` = bfloat16・Diffusers ドキュメントの
-  例も `torch_dtype=torch.bfloat16`）。出力の bf16 → f32 は値を変えない（bf16 は f32 の上位
-  16 ビット）。
-- **別プロセス・CPU**。DiT / VAE は読まない（ホスト RAM 31 GiB に umT5 と DiT を同居させない —
-  決定 4）。重みは fp32 の safetensors 5 分割（約 22.7 GB）を bf16 で読む（約 11.4 GB）。
-  transformers 5 の `from_pretrained` は常に省メモリの読み込みで、`low_cpu_mem_usage` は無視される
-  （渡さない）。
-- 正規化は `prompt_clean`（ftfy が入っているときだけ `ftfy.fix_text` — `pipeline_wan.py:78-81`）。
-  ftfy は wan の依存群で `==6.3.1` に固定（決定 4 の「固定」）。正規化前の原文と正規化後の文字列を
-  両方メタに書く。
+- The embeddings are made by calling diffusers 0.39.0's `WanPipeline._get_t5_prompt_embeds` as is
+  (`prompt_clean` → the tokenizer with `padding="max_length"`, `max_length=512` →
+  `UMT5EncoderModel` → cut at the valid length and zero-padded to 512). This module only cuts the
+  returned `[1, 512, 4096]` at the valid length and copies no formula.
+- umT5 is loaded **in the upstream's dtype (bf16)** (the official `t5_dtype` = bfloat16; the
+  Diffusers documentation's example also uses `torch_dtype=torch.bfloat16`). Converting the output
+  from bf16 to f32 does not change the values (bf16 is the upper 16 bits of f32).
+- **A separate process, on the CPU.** The DiT / VAE are not loaded (umT5 and the DiT do not share
+  the 31 GiB of host RAM — decision 4). The weights, fp32 safetensors in 5 shards (about 22.7 GB),
+  are loaded as bf16 (about 11.4 GB). transformers 5's `from_pretrained` always loads in the
+  memory-saving way, and `low_cpu_mem_usage` is ignored (it is not passed).
+- Normalization is `prompt_clean` (`ftfy.fix_text` only when ftfy is installed —
+  `pipeline_wan.py:78-81`). ftfy is pinned to `==6.3.1` in the wan dependency group (the "pinned" of
+  decision 4). Both the original text before normalization and the string after it go into the
+  metadata.
 
-## 資産の形式（`text_embeds.safetensors`）
+## The asset format (`text_embeds.safetensors`)
 
-- テンソルはプロンプトごとに 1 本（名前 = {@link wan.prompts.FixedPrompt.name}・`F32`・
-  `[L_valid, 4096]`）。
-- メタは**キー 1 つ**（{@link METADATA_KEY}）に JSON（キー整列・区切りの空白なし）を入れる。
-  MUST: キーを複数にしない — safetensors（Rust）はメタを HashMap で書き、プロセスごとにキーの
-  並びが変わる（2026-10-02 実測: 同じ入力の 3 回の書き出しで sha256 が 2 通り）。キー 1 つなら
-  同じ入力で同じバイトになる。
-- 置き場は系列の席 `outputs/series/wan2.1-t2v-1.3b-text-embeds/`（グラフを持たない compile
-  生成物 — docs/assets-layout.md）。配布形ではモデル単位の `assets`（quant 非依存 — 決定 4）。
+- One tensor per prompt (name = {@link wan.prompts.FixedPrompt.name}, `F32`, `[L_valid, 4096]`).
+- The metadata puts JSON (sorted keys, no whitespace in the separators) under **a single key**
+  ({@link METADATA_KEY}). MUST: do not use several keys — safetensors (Rust) writes the metadata
+  from a HashMap, and the key order changes per process (measured 2026-10-02: three writes of the
+  same input gave two different sha256 values). With a single key, the same input gives the same
+  bytes.
+- The location is the series directory `outputs/series/wan2.1-t2v-1.3b-text-embeds/` (a compile
+  output without a graph — docs/assets-layout.md). In the distribution it is a model-level `assets`
+  entry (independent of the quant — decision 4).
 
-## 固定プロンプト（利用者裁定 2026-10-02: 公式 README / Diffusers ドキュメントの例文から取る）
+## Fixed prompts (maintainer's ruling 2026-10-02: examples of the official README / Diffusers docs)
 
-表の正本は {@link wan.prompts.FIXED_PROMPTS}（カードと組み立ての門も同じ表を引く）。
+The table's source of truth is {@link wan.prompts.FIXED_PROMPTS} (the card and the assembly gate
+read the same table).
 
-- `boxing-cats`（positive）: 公式 README の t2v-1.3B の例（`generate.py` の `EXAMPLE_PROMPT` と
-  同文）。
-- `ferret`（positive）: Diffusers ドキュメントの Wan の T2V の例（複数行の文字列のまま）。
-- `cat-dog-baking`（positive）: Diffusers の `WanPipeline.__call__` の例（API リファレンスに出る
-  docstring）。
-- `negative`（negative）: 公式 `wan/configs/shared_config.py` の `sample_neg_prompt`（中国語）。
+- `boxing-cats` (positive): the t2v-1.3B example of the official README (the same text as
+  `EXAMPLE_PROMPT` in `generate.py`).
+- `ferret` (positive): the Wan T2V example of the Diffusers documentation (kept as a multi-line
+  string).
+- `cat-dog-baking` (positive): the example of Diffusers' `WanPipeline.__call__` (the docstring that
+  appears in the API reference).
+- `negative` (negative): `sample_neg_prompt` of the official `wan/configs/shared_config.py`
+  (Chinese).
 
-動きの量: 格闘（大）・カメラの突進と跳躍（大・カメラ移動）・台所の作業（小）。
+Amount of motion: fighting (large), the camera's charge and leap (large, camera movement), kitchen
+work (small).
 
-    uv run --group wan --inexact python -m wan.text_embeds --fetch   # umT5 とトークナイザを取得
-    uv run --group wan --inexact python -m wan.text_embeds           # 資産を書く
+    uv run --group wan --inexact python -m wan.text_embeds --fetch   # fetch umT5 and the tokenizer
+    uv run --group wan --inexact python -m wan.text_embeds           # write the asset
 
-MUST: diffusers / transformers / ftfy は関数の中で import する（`wan` グループは既定の sync に
-入らない — `tests/test_optional_group_imports.py`）。
+MUST: diffusers / transformers / ftfy are imported inside functions (the `wan` group is not part of
+the default sync — `tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -73,48 +80,52 @@ from wan.pipeline_ref import MAX_SEQUENCE_LENGTH, TEXT_DIM
 from wan.prompts import FIXED_PROMPTS, FixedPrompt
 from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, text_snapshot
 
-#: 系列の席（決定 4・決定 7）。
+#: The series directory (decision 4, decision 7).
 SERIES_NAME = "wan2.1-t2v-1.3b-text-embeds"
 
-#: 資産のファイル名。
+#: The asset's file name.
 ASSET_NAME = "text_embeds.safetensors"
 
-#: メタの唯一のキー（値は JSON — モジュール doc の MUST）。
+#: The only metadata key (its value is JSON — the MUST of the module doc).
 METADATA_KEY = "karume.wan.text_embeds"
 
-#: umT5 の dtype（上流と同じ — 公式 `t5_dtype`）。
+#: The umT5 dtype (the same as the upstream's — the official `t5_dtype`).
 TEXT_ENCODER_DTYPE = torch.bfloat16
 
 
 class TextEmbedsError(ValueError):
-    """埋め込み資産の形・メタが決定 4 の取り決めから外れた。"""
+    """The embedding asset's shape or metadata departed from the agreement of decision 4."""
 
 
 def prompt_by_name(name: str) -> FixedPrompt:
-    """名前で固定プロンプトを引く（無ければ fail loudly）。"""
+    """Look up a fixed prompt by name (fail loudly when absent)."""
     for prompt in FIXED_PROMPTS:
         if prompt.name == name:
             return prompt
-    raise TextEmbedsError(f"固定プロンプト {name!r} は無い（{[p.name for p in FIXED_PROMPTS]}）")
+    raise TextEmbedsError(f"no fixed prompt {name!r} ({[p.name for p in FIXED_PROMPTS]})")
 
 
 def normalize(text: str) -> str:
-    """上流の `prompt_clean`（ftfy が入っていれば `fix_text` → html の unescape → 空白の畳み込み）。
+    """The upstream `prompt_clean` (`fix_text` when ftfy is installed → html unescape → collapsing
+    whitespace).
 
-    MUST: ftfy が import できない環境では止める — 上流は ftfy が無いと黙って `fix_text` を飛ばし、
-    同じプロンプトが別の文字列（別の埋め込み）になる（決定 4）。
+    MUST: stop in an environment where ftfy cannot be imported — without ftfy the upstream silently
+    skips `fix_text`, and the same prompt becomes a different string (a different embedding)
+    (decision 4).
     """
-    import ftfy  # noqa: F401 — 有無の検査（上流は `is_ftfy_available()` で分岐する）
+    import ftfy  # noqa: F401 — presence check (the upstream branches on `is_ftfy_available()`)
     from diffusers.pipelines.wan.pipeline_wan import prompt_clean
     from diffusers.utils import is_ftfy_available
 
     if not is_ftfy_available():
-        raise TextEmbedsError("diffusers が ftfy を見つけない — 正規化が上流と変わる")
+        raise TextEmbedsError(
+            "diffusers does not find ftfy — normalization would differ from upstream"
+        )
     return prompt_clean(text)
 
 
 def load_text_encoder(model: str = DEFAULT_MODEL) -> tuple[Any, Any]:
-    """pin した revision のトークナイザと umT5（bf16・CPU・eval）を読む。"""
+    """Load the tokenizer and umT5 (bf16, CPU, eval) of the pinned revision."""
     from transformers import AutoTokenizer, UMT5EncoderModel
 
     snapshot = text_snapshot(model)
@@ -123,15 +134,17 @@ def load_text_encoder(model: str = DEFAULT_MODEL) -> tuple[Any, Any]:
         snapshot, subfolder="text_encoder", dtype=TEXT_ENCODER_DTYPE
     ).eval()
     if encoder.dtype != TEXT_ENCODER_DTYPE:
-        raise TextEmbedsError(f"umT5 が {encoder.dtype} で読まれた（{TEXT_ENCODER_DTYPE} を指定）")
+        raise TextEmbedsError(
+            f"umT5 was loaded as {encoder.dtype} ({TEXT_ENCODER_DTYPE} was requested)"
+        )
     return tokenizer, encoder
 
 
 def valid_length(tokenizer: Any, normalized: str) -> int:
-    """上流と同じ引数でトークナイズしたマスクの長さ（= `L_valid`）。
+    """The length of the mask from tokenizing with the upstream's arguments (= `L_valid`).
 
-    MUST: 512 を超えて切り詰められたプロンプトは拒む — 上流は黙って切るが、固定プロンプトが切れて
-    いれば原文と埋め込みが対応しない。
+    MUST: a prompt truncated beyond 512 is refused — the upstream truncates silently, but a fixed
+    prompt that was cut would no longer correspond to its embedding.
     """
     inputs = tokenizer(
         [normalized],
@@ -145,18 +158,18 @@ def valid_length(tokenizer: Any, normalized: str) -> int:
     length = int(inputs.attention_mask.gt(0).sum())
     unpadded = tokenizer([normalized], add_special_tokens=True).input_ids[0]
     if len(unpadded) > MAX_SEQUENCE_LENGTH:
-        raise TextEmbedsError(f"トークン数 {len(unpadded)} が {MAX_SEQUENCE_LENGTH} を超える")
+        raise TextEmbedsError(f"{len(unpadded)} tokens exceed {MAX_SEQUENCE_LENGTH}")
     if length != len(unpadded):
-        raise TextEmbedsError(f"マスクの長さ {length} がトークン数 {len(unpadded)} と違う")
+        raise TextEmbedsError(f"mask length {length} differs from the token count {len(unpadded)}")
     return length
 
 
 def encode(tokenizer: Any, encoder: Any, text: str) -> torch.Tensor:
-    """上流 `_get_t5_prompt_embeds` で `[1, 512, 4096]` を作り、有効長 `[L_valid, 4096]` f32 で
-    返す。
+    """Build `[1, 512, 4096]` with the upstream `_get_t5_prompt_embeds` and return the valid length
+    `[L_valid, 4096]` in f32.
 
-    有効長の後ろが厳密にゼロであること（上流が `new_zeros` で埋めた行）を確かめる — 有効長の
-    取り違えはここで落ちる。
+    It checks that everything after the valid length is exactly zero (the rows the upstream filled
+    with `new_zeros`) — a wrong valid length fails here.
     """
     from diffusers import WanPipeline
 
@@ -172,15 +185,19 @@ def encode(tokenizer: Any, encoder: Any, text: str) -> torch.Tensor:
             dtype=torch.float32,
         )
     if padded.shape != (1, MAX_SEQUENCE_LENGTH, TEXT_DIM) or padded.dtype != torch.float32:
-        raise TextEmbedsError(f"上流の埋め込みが想定外の形 {tuple(padded.shape)} / {padded.dtype}")
+        raise TextEmbedsError(
+            f"unexpected upstream embedding shape {tuple(padded.shape)} / {padded.dtype}"
+        )
     length = valid_length(tokenizer, normalize(text))
     if torch.count_nonzero(padded[0, length:]) != 0:
-        raise TextEmbedsError(f"有効長 {length} の後ろにゼロでない行がある")
+        raise TextEmbedsError(f"a nonzero row after the valid length {length}")
     if torch.count_nonzero(padded[0, length - 1]) == 0:
-        raise TextEmbedsError(f"有効長 {length} の最後の行がゼロ — 有効長の取り違え")
+        raise TextEmbedsError(
+            f"the last row of the valid length {length} is zero — wrong valid length"
+        )
     embeds = padded[0, :length].contiguous()
     if not bool(embeds.isfinite().all()):
-        raise TextEmbedsError("埋め込みに非有限値がある")
+        raise TextEmbedsError("the embedding has non-finite values")
     return embeds
 
 
@@ -205,7 +222,7 @@ def asset_metadata(
     model: str,
     versions: Mapping[str, str],
 ) -> dict[str, Any]:
-    """資産のメタ（JSON に落とす前の形）。"""
+    """The asset's metadata (the shape before it is dumped to JSON)."""
     source = SOURCES[model]
     return {
         "source": {"repo": source.repo, "revision": source.revision},
@@ -235,23 +252,26 @@ def asset_metadata(
 def write_asset(
     path: Path, embeds: Mapping[str, torch.Tensor], metadata: Mapping[str, Any]
 ) -> None:
-    """資産を書く（staging → 置換）。形・dtype・メタの対応を書く前に確かめる。"""
+    """Write the asset (staging → replace). The correspondence of shapes, dtypes and metadata is
+    checked before writing."""
     entries = metadata["prompts"]
     names = [entry["name"] for entry in entries]
     if sorted(names) != sorted(embeds) or len(set(names)) != len(names):
-        raise TextEmbedsError(f"メタのプロンプト {names} とテンソル {sorted(embeds)} が対応しない")
+        raise TextEmbedsError(
+            f"the metadata's prompts {names} do not match the tensors {sorted(embeds)}"
+        )
     for entry in entries:
         tensor = embeds[entry["name"]]
         if tensor.dtype != torch.float32:
-            raise TextEmbedsError(f"{entry['name']}: f32 で書く（{tensor.dtype}）")
+            raise TextEmbedsError(f"{entry['name']}: must be written as f32 ({tensor.dtype})")
         if tensor.dim() != 2 or tensor.shape[1] != TEXT_DIM:
             raise TextEmbedsError(
                 f"{entry['name']}: [L_valid, {TEXT_DIM}]（{tuple(tensor.shape)}）"
             )
         if tensor.shape[0] != entry["tokens"] or not 0 < tensor.shape[0] <= MAX_SEQUENCE_LENGTH:
             raise TextEmbedsError(
-                f"{entry['name']}: 行数 {tensor.shape[0]} が"
-                f"メタのトークン数 {entry['tokens']} と違う"
+                f"{entry['name']}: {tensor.shape[0]} rows differ from"
+                f" the metadata's token count {entry['tokens']}"
             )
     payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,25 +285,27 @@ def write_asset(
 
 
 def read_asset(path: Path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    """資産を読む（テンソルとメタ）。
+    """Read the asset (tensors and metadata).
 
-    メタのキーが {@link METADATA_KEY} 1 つでなければ fail loudly。
+    Fail loudly unless the metadata has exactly the one key {@link METADATA_KEY}.
     """
     with safe_open(str(path), framework="pt") as handle:
         raw = handle.metadata() or {}
         if set(raw) != {METADATA_KEY}:
-            raise TextEmbedsError(f"{path}: メタのキー {sorted(raw)} が {METADATA_KEY} 1 つでない")
+            raise TextEmbedsError(
+                f"{path}: metadata keys {sorted(raw)} are not just {METADATA_KEY}"
+            )
         tensors = {name: handle.get_tensor(name) for name in handle.keys()}  # noqa: SIM118
     return tensors, json.loads(raw[METADATA_KEY])
 
 
 def _peak_rss_gib() -> float:
-    """このプロセスの RSS の最大（GiB — Linux の `ru_maxrss` は KiB）。"""
+    """This process's peak RSS (GiB — Linux's `ru_maxrss` is in KiB)."""
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
 
 
 def generate(model: str, out: Path) -> dict[str, Any]:
-    """固定プロンプト全部を埋め込んで資産を書き、要約を返す。"""
+    """Embed all the fixed prompts, write the asset, and return a summary."""
     started = time.perf_counter()
     tokenizer, encoder = load_text_encoder(model)
     loaded = time.perf_counter()
@@ -332,7 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--fetch",
         action="store_true",
-        help="umT5 とトークナイザを pin した revision で取得するだけ",
+        help="only fetch umT5 and the tokenizer at the pinned revision",
     )
     args = parser.parse_args(argv)
     if args.fetch:

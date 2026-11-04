@@ -1,46 +1,54 @@
-"""Wan の配布 recipe（Wan2.1 / Wan2.2）— 系列レイアウト・出力 path 表・quant 表・カードの選択
-（ADR 0118 決定 7・ADR 0121 決定 2 / 9 / 10）。
+"""The Wan distribution recipe (Wan2.1 / Wan2.2) — series layout, output path table, quant table
+and the choice of card (ADR 0118 decision 7, ADR 0121 decisions 2 / 9 / 10).
 
-汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **Wan 固有の事実**だけ: どの系列ディレクトリから何を
-拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+The general-purpose assembly engine (placement, folding of shared entries, sha256, manifest,
+staging/swap, verification) lives in `karume.dist`. This module owns only **the facts specific to
+Wan**: what to pick up from which series directory, at which distribution path and under which
+dtype label to lay it out, and which quant is the default.
 
-世代ごとに違う事実（配布リポ名・pipeline 契約・配るモデル・DiT と VAE の系列・transformer の
-格納ラベル・テキスト資産の出所の pin・quant 表と既定席・`pipelineConfig`・NOTICE・カード）は世代の表
-{@link WanGeneration}（{@link WAN21} / {@link WAN22}）に集め、計画関数は 1 本（{@link wan_plan}）で
-両方を組む。配置表・格納の要求 / 禁止表・weights の宣言は、世代が持つ transformer の格納ラベルから
-導く（Wan2.2 は i8 の 1 本だけで、f16 の DiT は無い — ADR 0121 決定 2）。以下の段落は Wan2.1 の
-配布形の説明で、Wan2.2 の違いは {@link WAN22} の doc にまとめる。
+The facts that differ per generation (distribution repository name, pipeline contract, shipped
+models, the DiT and VAE series, the transformer's storage labels, the pin of the text assets'
+provenance, the quant table and default preset, `pipelineConfig`, NOTICE, card) are collected in
+the generation table {@link WanGeneration} ({@link WAN21} / {@link WAN22}), and a single plan
+function ({@link wan_plan}) builds both. The placement table, the storage requirement / prohibition
+tables and the weights declaration are derived from the transformer storage labels the generation
+holds (Wan2.2 has only i8 and no f16 DiT — ADR 0121 decision 2). The paragraphs below describe the
+Wan2.1 distribution; the differences of Wan2.2 are summarized in the doc of {@link WAN22}.
 
-配布するのはグラフ 3 本（DiT の S 形 `transformer`・VAE の chunk グラフ `vae_decoder_first` /
-`vae_decoder_next` — 系列 `wan2.1-t2v-1.3b-f16-dyn`）と、モデル単位の資産 2 本（第 1 段の
-テキスト埋め込み `text_embeds` — 決定 4・umT5 のトークナイザと前処理の表 `umt5_tokenizer` — ADR 0119
-追記「段 10d の設計」C。どちらも quant 非依存の席・ADR 0109 決定 4）。`transformer` だけは格納ラベル
-ごとに容器が 2 本ある（f16 と、系列 `wan2.1-t2v-1.3b-i8-dyn` の i8 — ADR 0120 決定 1）。RoPE の
-軸別素表 `rope_base` は `transformer` の**容器の資産**（役割 `rope-base`）なので manifest の
-`assets` には載らない（ADR 0109 決定 4 — Anima と同じ席）。
+The distribution ships 3 graphs (the DiT's S-shaped `transformer` and the VAE's chunk graphs
+`vae_decoder_first` / `vae_decoder_next` — series `wan2.1-t2v-1.3b-f16-dyn`) and 2 per-model assets
+(the step-1 text embeddings `text_embeds` — decision 4; the umT5 tokenizer and preprocessing tables
+`umt5_tokenizer` — ADR 0119 addendum "Design of step 10d" C; both quant-independent, ADR 0109
+decision 4). Only `transformer` has 2 containers, one per storage label (f16, and the i8 of series
+`wan2.1-t2v-1.3b-i8-dyn` — ADR 0120 decision 1). The per-axis RoPE base table `rope_base` is a
+**container asset** of `transformer` (role `rope-base`), so it is not in the manifest's `assets`
+(ADR 0109 decision 4 — the same placement as Anima).
 
-4 本目の部品 `text_encoder`（umT5-XXL encoder の i8 — 系列 `umt5-xxl-i8-dyn`）は計画には
-自分の artifact として載るが、公開する配布形では**別リポ `karume-umt5-xxl` への越境参照**として
-組む（ADR 0119 追記 A — dist の `--ref-*` 5 指定で、参照元は `--pipeline umt5` が組んだ配布形）。
-容器の門（出所・束縛表・入出力の契約）は umT5 の配布 recipe と同じ 1 本
-（`wan.umt5_distribution.assert_umt5_encoder`）を通す。
+The fourth component, `text_encoder` (the umT5-XXL encoder in i8 — series `umt5-xxl-i8-dyn`), is in
+the plan as an artifact of its own, but the published distribution builds it as **a
+cross-repository reference to the separate repository `karume-umt5-xxl`** (ADR 0119 addendum A —
+dist's 5 `--ref-*` options, the referenced side being the distribution built by
+`--pipeline umt5`). The container checks (provenance, binding table, input / output contract) go
+through the same single function as umT5's distribution recipe
+(`wan.umt5_distribution.assert_umt5_encoder`).
 
-**リポは家族 1 つ・世代は別リポ**（`karume-wan2.1` — ADR 0092 決定 1 / 2）。モデルは世代の中の
-軸で、今は `t2v-1.3b` 1 本。quant 席は 3 つ（{@link WAN_QUANTS}）: `f16`（DiT と VAE の重みを
-f16 格納・活性 f32 — ADR 0118 決定 7・明示の指定で使う元の重みにいちばん近い席）と、DiT の重みを
-i8 にした参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（ADR 0120 決定 1）。既定は実用席
-（ADR 0120 裁定 2026-10-04 の 4 — {@link WAN_DEFAULT_QUANT}）。
+**One repository per family, a separate repository per generation** (`karume-wan2.1` — ADR 0092
+decisions 1 / 2). A model is an axis within a generation; today there is only `t2v-1.3b`. There are
+3 quant presets ({@link WAN_QUANTS}): `f16` (DiT and VAE weights stored as f16, f32 activations —
+ADR 0118 decision 7; the preset closest to the original weights, used when asked for explicitly),
+and with the DiT weights in i8, the reference preset `f16+dit8` and the practical preset
+`f16+dit8-a8-attn8-s16` (ADR 0120 decision 1). The default is the practical preset (ADR 0120 ruling
+2026-10-04 item 4 — {@link WAN_DEFAULT_QUANT}).
 
-公開面は {@link PIPELINE}（`--pipeline wan` — Wan2.1）と {@link TI2V_PIPELINE}
-（`--pipeline wan-ti2v` — Wan2.2）の 2 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）が
-これを core の PIPELINES へ合成する。
+The public surface is the 2 pipelines {@link PIPELINE} (`--pipeline wan` — Wan2.1) and
+{@link TI2V_PIPELINE} (`--pipeline wan-ti2v` — Wan2.2) — the repository's dist driver
+(`tools/export-recipes/dist.py`) merges them into the core's PIPELINES.
 
-MUST: このモジュールは torch を import しない（`import dist` が torch を読まない —
-`tests/test_dist_driver.py` の `TestImportingTheDriver`）。書き手（`wan.export_dit` /
-`wan.ti2v_export_dit` / `wan.export_vae` / `wan.text_embeds`）は torch を読むので、綴り（系列名・
-資産名・メタのキー・グラフ入力名）はここに置き、書き手の綴りとの一致は
-`wan/tests/test_distribution.py` の門が見る。
+MUST: this module does not import torch (`import dist` does not load torch —
+`TestImportingTheDriver` in `tests/test_dist_driver.py`). The writers (`wan.export_dit` /
+`wan.ti2v_export_dit` / `wan.export_vae` / `wan.text_embeds`) load torch, so the spellings (series
+names, asset names, metadata keys, graph input names) live here, and the checks in
+`wan/tests/test_distribution.py` confirm that they match the writers' spellings.
 """
 
 from __future__ import annotations
@@ -91,68 +99,76 @@ from wan.umt5_distribution import (
     umt5_container,
 )
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は `WAN_PIPELINE_NAME` /
-#: `WAN_PIPELINE_MAJOR`（`packages/models/src/wan/config.ts`）。
+#: The pipeline contract (ADR 0041 §2 — per model). The TS side's accepted set is
+#: `WAN_PIPELINE_NAME` / `WAN_PIPELINE_MAJOR` (`packages/models/src/wan/config.ts`).
 WAN_PIPELINE = "wan/1"
 
-#: 配布リポ名（ADR 0092 決定 1 / 2 — 家族 1 リポ・世代は別リポ。Wan2.2 は `karume-wan2.2`）。
+#: The distribution repository name (ADR 0092 decisions 1 / 2 — one repository per family, a
+#: separate one per generation; Wan2.2 is `karume-wan2.2`).
 WAN_REPO_NAME = "karume-wan2.1"
 
-#: DiT と VAE の系列（決定 7 — 接尾辞 `-dyn` は ADR 0077 の慣例）。書き手の綴りは
-#: `wan.export_dit.SERIES` / `wan.export_vae.SERIES_NAME`。
+#: The DiT and VAE series (decision 7 — the `-dyn` suffix is ADR 0077's convention). The writers'
+#: spellings are `wan.export_dit.SERIES` / `wan.export_vae.SERIES_NAME`.
 WAN_SERIES = "wan2.1-t2v-1.3b-f16-dyn"
 
-#: DiT の i8 系列（ADR 0120 決定 2 — transformer だけ）。書き手の綴りは `wan.export_dit.I8_SERIES`。
+#: The DiT's i8 series (ADR 0120 decision 2 — transformer only). The writer's spelling is
+#: `wan.export_dit.I8_SERIES`.
 WAN_I8_SERIES = "wan2.1-t2v-1.3b-i8-dyn"
 
-#: テキスト埋め込みの系列（グラフを持たない compile 生成物の席 — docs/assets-layout.md）と
-#: その資産のファイル名・メタの唯一のキー。書き手の綴りは `wan.text_embeds` の
-#: `SERIES_NAME` / `ASSET_NAME` / `METADATA_KEY`。
+#: The text-embeddings series (the place of a compile product without a graph —
+#: docs/assets-layout.md), its asset's file name and the only metadata key. The writer's spellings
+#: are `SERIES_NAME` / `ASSET_NAME` / `METADATA_KEY` of `wan.text_embeds`.
 WAN_TEXT_EMBEDS_SERIES = "wan2.1-t2v-1.3b-text-embeds"
 WAN_TEXT_EMBEDS_FILE = "text_embeds.safetensors"
 WAN_TEXT_EMBEDS_METADATA_KEY = "karume.wan.text_embeds"
 
-#: 埋め込みを作った umT5 の dtype（メタの `text_encoder.dtype` — 決定 4。NOTICE とカードが
-#: 「bfloat16 の上流の encoder で作った」と名乗る根拠）。書き手の綴りは
-#: `wan.text_embeds.asset_metadata`（`TEXT_ENCODER_DTYPE` から作る）。
+#: The umT5 dtype the embeddings were made with (the metadata's `text_encoder.dtype` — decision 4;
+#: the grounds on which the NOTICE and the card say "made with the upstream encoder in bfloat16").
+#: The writer's spelling is `wan.text_embeds.asset_metadata` (built from `TEXT_ENCODER_DTYPE`).
 WAN_TEXT_ENCODER_DTYPE = "bfloat16"
 
-#: 埋め込みの値を決める依存の版（メタの `versions` — 決定 4 の「固定」）。diffusers は上流の
-#: `_get_t5_prompt_embeds` / `prompt_clean`、ftfy は正規化の規則、transformers は UMT5 の実装と
-#: トークナイザ（版で語彙外の id の扱いが変わる — research 2026-10-03 umT5）を持つ。値は
-#: pyproject の `wan` グループの `==` ピンと同じ（`wan/tests/test_distribution.py` の門が両方を
-#: 突き合わせる）。
+#: The versions of the dependencies that determine the embedding values (the metadata's `versions` —
+#: the "fixed" of decision 4). diffusers holds the upstream `_get_t5_prompt_embeds` /
+#: `prompt_clean`, ftfy the normalization rules, transformers the UMT5 implementation and the
+#: tokenizer (the handling of out-of-vocabulary ids changes between versions — research 2026-10-03
+#: umT5). The values are the same as the `==` pins of pyproject's `wan` group (a check in
+#: `wan/tests/test_distribution.py` compares both).
 WAN_TEXT_EMBEDS_VERSIONS: Mapping[str, str] = {
     "diffusers": "0.39.0",
     "ftfy": "6.3.1",
     "transformers": "5.14.1",
 }
 
-#: 系列の部品ディレクトリに置かれる容器の代表名（分割形は `model-0000N-of-0000M.krm`）。
+#: The representative name of the container in a series component directory (the split form is
+#: `model-0000N-of-0000M.krm`).
 WAN_MODEL_FILE = "model.krm"
 
-#: グラフを持つ部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1 —
-#: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。系列の部品
-#: ディレクトリ名も同じ綴りだが、それは規約であって導出ではない（書き手は `TARGET` /
-#: `TARGETS` / `GRAPH_NAME` を名乗る — `tests/test_graph_names.py` の門）。`text_encoder` は
-#: umT5 の配布形と同じキー（越境参照の先の容器のグラフ名 — 綴りの正本は
-#: `wan.umt5_distribution.UMT5_ROLE`）。並びは生成の段の順（I2V の VAE encoder → text → DiT →
-#: VAE decoder）で、全世代の和（世代ごとの部品は {@link WanGeneration.weights} のキー）。
+#: The component names that have a graph = the keys of the manifest's weights = **the container's
+#: graph names** (container-v1 §2.1 — the runtime looks them up by name with
+#: `prepareContainer(opened, <weights key>)`). The series component directories use the same
+#: spelling, but that is a convention, not a derivation (the writers state `TARGET` / `TARGETS` /
+#: `GRAPH_NAME` — the check in `tests/test_graph_names.py`). `text_encoder` is the same key as in
+#: the umT5 distribution (the graph name of the referenced container — the source of truth for the
+#: spelling is `wan.umt5_distribution.UMT5_ROLE`). The order is the order of the generation stages
+#: (the I2V VAE encoder → text → DiT → VAE decoder), and it is the union over all generations (the
+#: components of each generation are the keys of {@link WanGeneration.weights}).
 WAN_TEXT_ENCODER_ROLE = UMT5_ROLE
 WAN_TRANSFORMER_ROLE = "transformer"
 WAN_VAE_FIRST_ROLE = "vae_decoder_first"
 WAN_VAE_NEXT_ROLE = "vae_decoder_next"
 
-#: VAE の decoder の 32 潜在タイルの組（ADR 0134 — Wan2.2 だけ）のグラフ名 = weights のキー
-#: （書き手 `wan.export_vae --tile 32 --shared` の `shared_target`）。重みのバイトを持たない容器で、
-#: initializer は全部、同じ系列の根の既定タイルの組（貸し手）の重みを共有宣言で名指す。
+#: The graph names = weights keys of the VAE decoder's 32-latent tile pair (ADR 0134 — Wan2.2 only)
+#: (`shared_target` of the writer `wan.export_vae --tile 32 --shared`). Containers without weight
+#: bytes: every initializer names, through a shared declaration, the weights of the default-tile
+#: pair (the lender) at the root of the same series.
 WAN_VAE_FIRST_32_ROLE = "vae_decoder_first_32"
 WAN_VAE_NEXT_32_ROLE = "vae_decoder_next_32"
 
-#: I2V の条件画像（1 枚）を潜在へ写す VAE encoder の 3 グラフ（ADR 0121 決定 11 の改訂・段 9a —
-#: mid の attention の前後で切った記号長のグラフ: pre / attn / post）。書き手の綴りは
-#: `wan.export_vae_encoder.TARGETS`。配るのは encoder を持つ世代だけ（Wan2.2 —
-#: {@link WanGeneration.vae_encoder}）。並びは書き手と同じ実行の順。
+#: The 3 graphs of the VAE encoder that maps the I2V conditioning image (one) to the latent (ADR
+#: 0121 decision 11 as revised, step 9a — graphs of symbolic length cut before and after the mid
+#: attention: pre / attn / post). The writer's spelling is `wan.export_vae_encoder.TARGETS`. Only a
+#: generation that has the encoder ships it (Wan2.2 — {@link WanGeneration.vae_encoder}). The order
+#: is the execution order, as in the writer.
 WAN_VAE_ENCODER_PRE_ROLE = "vae_encoder_pre"
 WAN_VAE_ENCODER_ATTN_ROLE = "vae_encoder_attn"
 WAN_VAE_ENCODER_POST_ROLE = "vae_encoder_post"
@@ -172,28 +188,31 @@ WAN_GRAPH_ROLES: tuple[str, ...] = (
     WAN_VAE_NEXT_32_ROLE,
 )
 
-#: `transformer` の容器の配置の役割（格納ラベルごとに 1 本 — ADR 0120 決定 1。anima の
-#: `transformer_f16` / `transformer_i8` と同じ綴り）。配置表と格納の要求 / 禁止表の鍵で、manifest の
-#: weights のキーは容器のグラフ名 {@link WAN_TRANSFORMER_ROLE} のまま。
+#: The placement roles of the `transformer` containers (one per storage label — ADR 0120 decision 1;
+#: the same spelling as anima's `transformer_f16` / `transformer_i8`). They key the placement table
+#: and the storage requirement / prohibition tables; the manifest's weights key stays the
+#: container's graph name {@link WAN_TRANSFORMER_ROLE}.
 WAN_TRANSFORMER_F16_ROLE = "transformer_f16"
 WAN_TRANSFORMER_I8_ROLE = "transformer_i8"
 WAN_TRANSFORMER_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
 
-#: transformer の格納ラベル → 配置の役割（世代の表 {@link WanGeneration} の `transformer_labels`
-#: からその世代の役割を引く）。
+#: Transformer storage label → placement role (the roles of a generation are looked up from the
+#: `transformer_labels` of the generation table {@link WanGeneration}).
 WAN_TRANSFORMER_LABEL_ROLES: Mapping[str, str] = {
     "f16": WAN_TRANSFORMER_F16_ROLE,
     "i8": WAN_TRANSFORMER_I8_ROLE,
 }
 
-#: VAE の decoder の i8 の容器の配置の役割（ADR 0133 決定 7 — Wan2.2 だけ）。f16 の役割は容器の
-#: グラフ名 {@link WAN_VAE_FIRST_ROLE} / {@link WAN_VAE_NEXT_ROLE} のまま（改名すると Wan2.1 の
-#: 配布形が変わる）。manifest の weights のキーはどちらもグラフ名。
+#: The placement roles of the VAE decoder's i8 containers (ADR 0133 decision 7 — Wan2.2 only). The
+#: f16 roles stay the container graph names {@link WAN_VAE_FIRST_ROLE} / {@link WAN_VAE_NEXT_ROLE}
+#: (renaming them would change the Wan2.1 distribution). The manifest's weights keys are the graph
+#: names in both cases.
 WAN_VAE_FIRST_I8_ROLE = "vae_decoder_first_i8"
 WAN_VAE_NEXT_I8_ROLE = "vae_decoder_next_i8"
 
-#: decoder のグラフ 2 本の格納ラベル → 配置の役割（世代の表 {@link WanGeneration} の `vae_labels`
-#: からその世代の役割を引く — transformer の {@link WAN_TRANSFORMER_LABEL_ROLES} と同じ形）。
+#: Storage label of the 2 decoder graphs → placement role (the roles of a generation are looked up
+#: from the `vae_labels` of the generation table {@link WanGeneration} — the same form as the
+#: transformer's {@link WAN_TRANSFORMER_LABEL_ROLES}).
 WAN_VAE_FIRST_LABEL_ROLES: Mapping[str, str] = {
     "f16": WAN_VAE_FIRST_ROLE,
     "i8": WAN_VAE_FIRST_I8_ROLE,
@@ -203,13 +222,15 @@ WAN_VAE_NEXT_LABEL_ROLES: Mapping[str, str] = {
     "i8": WAN_VAE_NEXT_I8_ROLE,
 }
 
-#: 32 潜在タイルの組の i8 の配置の役割（decoder と同じ規則 — f16 の役割はグラフ名のまま）。
+#: The i8 placement roles of the 32-latent tile pair (the same rule as the decoder — the f16 roles
+#: stay the graph names).
 WAN_VAE_FIRST_32_I8_ROLE = "vae_decoder_first_32_i8"
 WAN_VAE_NEXT_32_I8_ROLE = "vae_decoder_next_32_i8"
 
-#: 貸し手の組から重みを借りる組の潜在タイル → (first の格納ラベル → 役割, next の格納ラベル →
-#: 役割)（ADR 0134 決定 5 — 格納ラベルごとに 1 組）。重みを持つ既定タイルの組は
-#: {@link WAN_VAE_FIRST_LABEL_ROLES} / {@link WAN_VAE_NEXT_LABEL_ROLES}。
+#: Latent tile of a pair that borrows weights from the lender pair → (first's storage label → role,
+#: next's storage label → role) (ADR 0134 decision 5 — one pair per storage label). The default-tile
+#: pair that holds the weights is {@link WAN_VAE_FIRST_LABEL_ROLES} /
+#: {@link WAN_VAE_NEXT_LABEL_ROLES}.
 WAN_VAE_SHARED_LABEL_ROLES: Mapping[int, tuple[Mapping[str, str], Mapping[str, str]]] = {
     32: (
         {"f16": WAN_VAE_FIRST_32_ROLE, "i8": WAN_VAE_FIRST_32_I8_ROLE},
@@ -217,8 +238,9 @@ WAN_VAE_SHARED_LABEL_ROLES: Mapping[int, tuple[Mapping[str, str], Mapping[str, s
     ),
 }
 
-#: 借りる組の役割 → 貸し手の役割（同じ系列の根・同じ格納ラベルの既定タイルの容器 — 書き手は
-#: `<系列の根>/<グラフ名>/model.krm` を貸し手に読む）。
+#: Role of a borrowing pair → role of the lender (the default-tile container at the same series root
+#: with the same storage label — the writer reads `<series root>/<graph name>/model.krm` as the
+#: lender).
 WAN_VAE_LENDER_ROLES: Mapping[str, str] = {
     WAN_VAE_FIRST_32_ROLE: WAN_VAE_FIRST_ROLE,
     WAN_VAE_FIRST_32_I8_ROLE: WAN_VAE_FIRST_I8_ROLE,
@@ -226,11 +248,13 @@ WAN_VAE_LENDER_ROLES: Mapping[str, str] = {
     WAN_VAE_NEXT_32_I8_ROLE: WAN_VAE_NEXT_I8_ROLE,
 }
 
-#: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer と VAE の decoder は格納ラベル
-#: ごとに 1 本・VAE の encoder は f16 の 1 本ずつ）。全世代の役割の和。各世代は自分の格納ラベルの
-#: 役割と、encoder を持つ世代だけが encoder の役割を使う（{@link WanGeneration.container_roles} —
-#: Wan2.1 は encoder の 3 本を持たない）。以下の格納の要求 / 禁止表・出力の path・weights の宣言も
-#: 同じく全世代の表で、世代はそこから自分の役割を引く。
+#: The placement roles that have a container (text_encoder has one, in i8; the transformer and the
+#: VAE decoder one per storage label; the VAE encoder one each, in f16). The union of the roles of
+#: all generations. Each generation uses the roles of its own storage labels, and only a generation
+#: with the encoder uses the encoder roles ({@link WanGeneration.container_roles} — Wan2.1 does not
+#: have the 3 encoder graphs). The storage requirement / prohibition tables, the output paths and
+#: the weights declaration below are likewise tables over all generations, from which each
+#: generation looks up its own roles.
 WAN_CONTAINER_ROLES: tuple[str, ...] = (
     *WAN_VAE_ENCODER_ROLES,
     WAN_TEXT_ENCODER_ROLE,
@@ -245,46 +269,52 @@ WAN_CONTAINER_ROLES: tuple[str, ...] = (
     WAN_VAE_NEXT_32_I8_ROLE,
 )
 
-#: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `text-stage.ts` の
-#: `TEXT_EMBEDS`）。
+#: The per-model assets (the keys of the manifest's `assets` = role names — `TEXT_EMBEDS` in the TS
+#: side's `text-stage.ts`).
 WAN_TEXT_EMBEDS_ROLE = "text_embeds"
 
-#: umT5 のトークナイザと前処理の表の資産（manifest の `assets` のキー = 役割名 — TS 側の読み手は
-#: `parseWanTokenizerAsset`）。資産は quant にも経路にも依らず全数を取るので、umT5 のリポではなく
-#: このリポに置く（越境にすると、umT5 を取らない precomputed の経路まで umT5 のリポに触る —
-#: ADR 0119 追記 C）。
+#: The asset of the umT5 tokenizer and preprocessing tables (the key of the manifest's `assets` =
+#: role name — the TS side's reader is `parseWanTokenizerAsset`). The asset is fetched in full
+#: regardless of quant and path, so it lives in this repository rather than the umT5 one (as a
+#: cross-repository reference, even the precomputed path, which does not fetch umT5, would touch the
+#: umT5 repository — ADR 0119 addendum C).
 WAN_TOKENIZER_ROLE = "umt5_tokenizer"
 
-#: トークナイザ資産が名乗る上流の部品（書き手 `wan.umt5_tokenizer.build_asset` の
-#: `source.subfolder`）。
+#: The upstream component the tokenizer asset names (`source.subfolder` of the writer
+#: `wan.umt5_tokenizer.build_asset`).
 WAN_TOKENIZER_SUBFOLDER = "tokenizer"
 
-#: トークナイザ資産の版のうち、id 列と前処理の結果を決めるもの（`wan` グループの `==` ピン —
-#: {@link WAN_TEXT_EMBEDS_VERSIONS} と同じ値を引く。transformers は id 列の正本・ftfy は前処理の表の
-#: 出所 — ADR 0119 決定 1 / 2）。
+#: The versions of the tokenizer asset that determine the id sequence and the preprocessing results
+#: (the `==` pins of the `wan` group — the same values as {@link WAN_TEXT_EMBEDS_VERSIONS}.
+#: transformers is the source of truth for the id sequence, ftfy the origin of the preprocessing
+#: tables — ADR 0119 decisions 1 / 2).
 WAN_TOKENIZER_VERSIONS: tuple[str, ...] = ("ftfy", "transformers")
 
-#: `transformer` の容器が宣言する RoPE 素表の資産名と役割（書き手は `wan.export_dit` の
-#: `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE`・読み手は TS 側 `dit-loop.ts` の `ROPE_BASE`）。
+#: The asset name and role of the RoPE base table the `transformer` container declares (the writer
+#: is `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE` of `wan.export_dit`, the reader `ROPE_BASE` in the TS
+#: side's `dit-loop.ts`).
 WAN_ROPE_BASE_ASSET = "rope_base"
 WAN_ROPE_BASE_ROLE = "rope-base"
 
-#: VAE の chunk グラフの潜在入力（先頭の入力 `[C, 1, t, t]` — 残りの入力は cache）。書き手の綴りは
-#: `wan.export_vae.LATENT_INPUT`・読み手は TS 側 `vae-chunks.ts` の `WAN_VAE_LATENT_INPUT`。
+#: The latent input of the VAE chunk graphs (the first input `[C, 1, t, t]` — the remaining inputs
+#: are the cache). The writer's spelling is `wan.export_vae.LATENT_INPUT`, the reader's
+#: `WAN_VAE_LATENT_INPUT` in the TS side's `vae-chunks.ts`.
 WAN_VAE_LATENT_INPUT = "latent"
 
-#: DiT の文脈入力（`[1, rows, width]` — 埋め込み資産の行の幅と有効長の上限をここから引く）。
-#: 書き手の綴りは `wan.export_dit.INPUT_NAMES`。
+#: The DiT's context input (`[1, rows, width]` — the row width and the upper bound on the valid
+#: length of the embedding asset are taken from it). The writer's spelling is
+#: `wan.export_dit.INPUT_NAMES`.
 WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
 
-#: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。重みの path に
-#: 格納ラベル（`f16` / `i8`）を入れるのは、格納の席を足した日に既存の path を動かさないため
-#: （Depth Anything の `model.f32.krm` と同じ綴り — i8 の席を足した ADR 0120 で f16 の path は
-#: 動いていない）。
+#: The relative output paths (**inside the model subtree**) — the one place the placement table and
+#: the manifest share. The weight paths include the storage label (`f16` / `i8`) so that adding a
+#: storage preset does not move an existing path (the same spelling as Depth Anything's
+#: `model.f32.krm` — ADR 0120, which added the i8 preset, did not move the f16 path).
 #:
-#: MUST: `text_encoder` は umT5 の配布形の同じ部品の path（`UMT5_OUTPUT_PATHS`）を引く — 越境参照は
-#: 参照元の `karume.json` が宣言する `<モデル名>/<この path>` の part を引き当てる
-#: （`karume.dist.external_refs`）ので、綴りが割れると組み立てが「参照元に無い」で落ちる。
+#: MUST: `text_encoder` takes the path of the same component in the umT5 distribution
+#: (`UMT5_OUTPUT_PATHS`) — a cross-repository reference resolves the part `<model name>/<this path>`
+#: that the referenced `karume.json` declares (`karume.dist.external_refs`), so diverging spellings
+#: make the assembly fail with "not in the referenced distribution".
 WAN_OUTPUT_PATHS: Mapping[str, str] = {
     **{role: f"{role}/model.f16.krm" for role in WAN_VAE_ENCODER_ROLES},
     WAN_TEXT_ENCODER_ROLE: UMT5_OUTPUT_PATHS[UMT5_ROLE],
@@ -302,16 +332,19 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
     WAN_TOKENIZER_ROLE: f"{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}",
 }
 
-#: 格納 dtype の要求（素の f32 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した
-#: 実測事故 — Anima / SBV2 / Depth Anything と同じ根拠）。f16 系列は fake-quant 対象だけが f16 に
-#: なる（bias / norm は f32 のまま）ので「f16 を含む」を、i8 系列は linear の重みだけが i8 になる
-#: （scale・bias・norm は f32）ので「i8 を含む」を要求する。umT5 の i8 系列の種類ごとの格納は
-#: 束縛表の門（`wan.umt5_distribution.assert_umt5_bindings`）が別に見る。VAE の encoder は
-#: decoder と同じ f16 系列（書き手 `wan.export_vae_encoder` — f16 席だけ）。decoder の i8 系列は
-#: 畳み込みの重みだけが i8（ADR 0133 決定 7 — 書き手 `wan.export_vae --dtype i8`）。32 潜在タイルの
-#: 組（ADR 0134）は束縛表を持たない（共有宣言には供給が無く、容器は宣言の格納も残さない）ので、
-#: 要求 / 禁止は貸し手の容器（{@link WAN_VAE_LENDER_ROLES}）の束縛表で見る — 借りる組が走る格納は
-#: 貸し手の常駐重みの格納である（{@link wan_plan}）。
+#: Storage dtype requirements (a measured incident where a plain f32 asset passed assembly, loading
+#: and execution silently all the way to the reference-match check — the same grounds as Anima /
+#: SBV2 / Depth Anything). In an f16 series only the fake-quant targets become f16 (bias / norm stay
+#: f32), so "contains f16" is required; in an i8 series only the linear weights become i8 (scale,
+#: bias and norm are f32), so "contains i8" is required. The per-kind storage of umT5's i8 series is
+#: checked separately by the binding-table check (`wan.umt5_distribution.assert_umt5_bindings`). The
+#: VAE encoder is the same f16 series as the decoder (writer `wan.export_vae_encoder` — f16 preset
+#: only). In the decoder's i8 series only the convolution weights are i8 (ADR 0133 decision 7 —
+#: writer `wan.export_vae --dtype i8`). The 32-latent tile pair (ADR 0134) has no binding table (a
+#: shared declaration has no supply, and the container does not keep the declared storage either),
+#: so the requirement / prohibition is checked on the lender container's binding table
+#: ({@link WAN_VAE_LENDER_ROLES}) — the storage a borrowing pair runs on is the storage of the
+#: lender's resident weights ({@link wan_plan}).
 WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
     WAN_TEXT_ENCODER_ROLE: "i8",
@@ -327,28 +360,31 @@ WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     WAN_VAE_NEXT_32_I8_ROLE: "i8",
 }
 
-#: codec 台帳の layout のうち圧縮格納の全部（`karume.container.CODEC_LEDGER` から f32 / i32 を
-#: 除いたもの — 台帳との一致は `wan/tests/test_distribution.py` が見る）。
+#: Every compressed storage among the codec ledger's layouts (`karume.container.CODEC_LEDGER` minus
+#: f32 / i32 — `wan/tests/test_distribution.py` checks that it matches the ledger).
 _COMPRESSED_LAYOUTS = ("bf16", "f16", "i8", "i4", "i2")
 
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。存在検査だけ
-#: では、要求の格納を含む混成の系列を挿す取り違えが素通りする — 例えば i4 の混成系列（既定の
-#: 格納が i8 — anima の i4 系列の形）は「i8 を含む」を満たすので、i8 の席へ挿しても要求検査を
-#: 通る。f16 系列を i8 の席へ・i8 系列を f16 の席へ挿す取り違えは、要求の不在と禁止の両側で落ちる。
+#: The storage vocabulary that **must not** be in each role's binding table
+#: ({@link assert_storage_absent}). A presence check alone lets through a mix-up that plugs in a
+#: mixed series containing the required storage — for example, an i4 mixed series (default storage
+#: i8 — the shape of anima's i4 series) satisfies "contains i8", so plugged into an i8 preset it
+#: passes the requirement check. Plugging an f16 series into an i8 preset, or an i8 series into an
+#: f16 preset, fails on both sides: the requirement is missing and a prohibition is hit.
 #:
-#: MUST: 役割ごとに、圧縮格納のうち要求する 1 つを除いた**全部**を名指しする — 1 つでも抜けると、
-#: 抜けた格納形だけが黙って素通りする（Depth Anything と同じ規律）。
+#: MUST: name, per role, **every** compressed storage except the one required — leave out even one
+#: and exactly that storage form slips through silently (the same discipline as Depth Anything).
 WAN_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     role: tuple(layout for layout in _COMPRESSED_LAYOUTS if layout != required)
     for role, required in WAN_STORAGE_REQUIREMENTS.items()
 }
 
-#: weights の宣言（容器のグラフ名 → dtype ラベル → 配置の役割）。ラベルは格納 dtype 語彙で、
-#: {@link WAN_STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`text_encoder` は
-#: ラベルが i8 の 1 つなので、{@link complete_quant_weights} が全席へ埋める（席の weights は完全
-#: 写像 — umT5 を持たない席は表せない。経路の選択は構築時のオプション — ADR 0119 追記 B）。VAE の
-#: encoder もラベルが f16 の 1 つなので全席が取る（T2V だけの利用でも取る — ADR 0121 追記「段 9 の
-#: 計画の裁定と段 9a の結果」の裁定）。
+#: The weights declaration (container graph name → dtype label → placement role). The labels use the
+#: storage dtype vocabulary and are 1:1 with the storage forms {@link WAN_STORAGE_REQUIREMENTS}
+#: requires (ADR 0041 §3). `text_encoder` has the single label i8, so {@link complete_quant_weights}
+#: fills it into every preset (a preset's weights is a complete mapping — a preset without umT5
+#: cannot be expressed; the path is chosen by a construction option — ADR 0119 addendum B). The VAE
+#: encoder also has the single label f16, so every preset takes it (even for T2V-only use — the
+#: ruling of ADR 0121 addendum "Ruling on the plan of step 9 and the results of step 9a").
 WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     **{role: {"f16": WeightFiles(role)} for role in WAN_VAE_ENCODER_ROLES},
     WAN_TEXT_ENCODER_ROLE: {"i8": WeightFiles(WAN_TEXT_ENCODER_ROLE)},
@@ -374,39 +410,43 @@ WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     },
 }
 
-#: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3・決定 4）。
+#: The assets declaration (unconditional files independent of the quant choice — ADR 0041 §3,
+#: decision 4).
 WAN_ASSETS: Mapping[str, str] = {
     WAN_TEXT_EMBEDS_ROLE: WAN_TEXT_EMBEDS_ROLE,
     WAN_TOKENIZER_ROLE: WAN_TOKENIZER_ROLE,
 }
 
-#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が持ち、
-#: 生成モデルカードの quant 表に対応を必ず出す**）。Wan の基底格納は `f16`（VAE は f16 固定）で、
-#: 圧縮が掛かるのは transformer だけなので席名は `f16+dit8…` になる（anima と同じ略称 — ADR 0120
-#: 決定 1）。
+#: Component-override token of a preset name → its weights name (ADR 0074 decision 4 — **the recipe
+#: owns the definition of the abbreviations, and the generated model card's quant table always shows
+#: the mapping**). Wan's base storage is `f16` (the VAE is fixed at f16) and only the transformer is
+#: compressed, so preset names are `f16+dit8…` (the same abbreviation as anima — ADR 0120 decision
+#: 1).
 WAN_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": WAN_TRANSFORMER_ROLE}
 
-#: quant 表（ADR 0118 決定 7・ADR 0120 決定 1）。VAE は格納ラベルが 1 つなので weights に
-#: 書かない（{@link complete_quant_weights} が完全写像へ埋める）。transformer は f16 / i8 の 2 つ
-#: なので席ごとに書く。`session` の 3 キーは TS 側の受理表（`WAN_SESSION_POLICY`）が受ける欄で、
-#: 実用席の宣言は anima の同名の席と同じ。
+#: The quant table (ADR 0118 decision 7, ADR 0120 decision 1). The VAE has one storage label, so it
+#: is not written in weights ({@link complete_quant_weights} fills it into a complete mapping). The
+#: transformer has two, f16 / i8, so it is written per preset. The 3 `session` keys are the fields
+#: the TS side's acceptance table (`WAN_SESSION_POLICY`) takes, and the practical preset's
+#: declaration is the same as anima's preset of the same name.
 #:
-#: - `f16+dit8` は参照席（`session` が空 — 実用席と同じ i8 の重みで、自機 A/B 門の比較相手。
-#:   ADR 0110 決定 5 ②）。
-#: - 中間の席（`f16+dit8-a8` / `f16+dit8-a8-attn8`）は作らない（決定 1 — ノブ単位の切り分けは
-#:   テストの manifest 上書きで足りる）。
+#: - `f16+dit8` is the reference preset (`session` is empty — the same i8 weights as the practical
+#:   preset, the counterpart of the on-machine A/B check; ADR 0110 decision 5 ②).
+#: - No intermediate presets (`f16+dit8-a8` / `f16+dit8-a8-attn8`) are made (decision 1 — isolating
+#:   one knob at a time is covered by manifest overrides in the tests).
 #:
-#: 席名のノブのトークン（ADR 0074 §3 / ADR 0133 決定 6）: `a8` = `linearCompute: "a8"`・
-#: `attn8` = `attentionCompute: "a8"`・`s16` = `attentionScoreStorage: "f16"`・`online` =
-#: `attentionScoreStorage: "none"`（Wan2.2 — ADR 0132）・`conv8` = `convCompute: "a8"`（Wan2.2 の
-#: VAE の decoder の conv3d — ADR 0133）。
+#: The knob tokens of preset names (ADR 0074 §3 / ADR 0133 decision 6): `a8` = `linearCompute:
+#: "a8"`, `attn8` = `attentionCompute: "a8"`, `s16` = `attentionScoreStorage: "f16"`, `online` =
+#: `attentionScoreStorage: "none"` (Wan2.2 — ADR 0132), `conv8` = `convCompute: "a8"` (the conv3d of
+#: Wan2.2's VAE decoder — ADR 0133).
 #:
-#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。速度と
-#: 品質は書かない — a8 の席の速度は B570 の実測（1 forward で −50% — ADR 0120 段 4）しか無く、
-#: Metal では a8 が速くならない（調査 §3.1）ので、GPU を問わない表示欄には書けない。品質（段 6 の
-#: 視認で `f16` と比べて明確な劣化なし — ADR 0120 裁定 2026-10-04 の 1）と席ごとの所要は、カード
-#: （`wan/card.py`）が席を名乗って書く。既定であることも書かない（`defaultQuant` が指している —
-#: ADR 0075 決定 3）。
+#: `label` / `description` are display fields for a selection UI (ADR 0075 decision 1 — English, 64
+#: / 200 characters at most). They say nothing about speed or quality — the only speed measurement
+#: of the a8 presets is on the B570 (−50% per forward — ADR 0120 step 4), and on Metal a8 is not
+#: faster (investigation §3.1), so it cannot go into GPU-independent display fields. The quality (no
+#: clear degradation compared with `f16` in step 6's visual check — ADR 0120 ruling 2026-10-04 item
+#: 1) and the per-preset cost are written by the card (`wan/card.py`), which names the preset. Being
+#: the default is not written either (`defaultQuant` points to it — ADR 0075 decision 3).
 WAN_QUANTS: Mapping[str, Any] = {
     "f16": {
         "weights": {WAN_TRANSFORMER_ROLE: "f16"},
@@ -434,32 +474,37 @@ WAN_QUANTS: Mapping[str, Any] = {
         " and attention (integer dot products), and attention scores held in f16.",
     },
 }
-#: 既定席は実用席（ADR 0120 裁定 2026-10-04 の 4 — 既定は今いちばん実用的な席: 軽く、品質の劣化が
-#: 小さい。段 6 の視認で `f16` と比べて明確な劣化は無かった）。`f16` 席は明示の指定で使う参照側の
-#: 席。
+#: The default preset is the practical preset (ADR 0120 ruling 2026-10-04 item 4 — the default is
+#: the most practical preset today: light, with little quality loss; step 6's visual check showed no
+#: clear degradation compared with `f16`). The `f16` preset is the reference-side preset used when
+#: asked for explicitly.
 WAN_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 
-#: パイプライン所有の設定（hub は素通し — ADR 0041 §2・TS 側のスキーマは
-#: `packages/models/src/wan/config.ts`）。値は参照出力を作る設定（決定 5）:
+#: Pipeline-owned settings (the hub passes them through — ADR 0041 §2; the TS side's schema is
+#: `packages/models/src/wan/config.ts`). The values are the settings that produce the reference
+#: outputs (decision 5):
 #:
-#: - `scheduler.shift` 3.0 — 上流 Diffusers 版の `scheduler/scheduler_config.json` の `flow_shift`
-#:   （docstring「3.0 for 480P」）。製品の既定はこの値で起こし、視認の A/B で変えるかを決める
-#:   （決定 5・裁定 2）。
-#: - `defaults.steps` 50 / `defaults.guidance` 5.0 — 上流 `WanPipeline.__call__` の既定（決定 5）。
+#: - `scheduler.shift` 3.0 — the `flow_shift` of `scheduler/scheduler_config.json` in the upstream
+#:   Diffusers version (docstring "3.0 for 480P"). The product default starts from this value, and
+#:   the visual A/B decides whether to change it (decision 5, ruling 2).
+#: - `defaults.steps` 50 / `defaults.guidance` 5.0 — the defaults of the upstream
+#:   `WanPipeline.__call__` (decision 5).
 #:
-#: UniPC の構造（solver の次数・bh2・`num_train_timesteps`）は宣言しない — TS の移植が実装している
-#: 分岐はそれ 1 つで（`scheduler.ts` の `WAN_UNIPC_CONFIG`）、宣言できるようにすると検証していない
-#: 組み合わせを配布側が選べてしまう。
+#: The UniPC structure (solver order, bh2, `num_train_timesteps`) is not declared — the TS port
+#: implements just that one branch (`WAN_UNIPC_CONFIG` in `scheduler.ts`), and making it declarable
+#: would let the distribution side choose combinations that were never verified.
 WAN_PIPELINE_CONFIG: Mapping[str, Any] = {
     "scheduler": {"shift": 3.0},
     "defaults": {"steps": 50, "guidance": 5.0},
 }
 
 
-#: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
+#: The notice of modifications (Apache 2.0 §4(b)). Lists **the changes this repository made to the
+#: upstream weights**.
 #:
-#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
-#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。
+#: MUST: the text matches the contents of the distribution — as values it is plausible prose, so
+#: `verify_dist` and the manifest checks let it through, and a mismatch would only be noticed after
+#: shipping.
 WAN_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the Wan2.1 T2V 1.3B checkpoint listed in
@@ -504,29 +549,32 @@ following changes were made:
 No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
 """
 
-#: Wan2.2 の配布リポ名と、パイプライン契約（ADR 0121 決定 10 — TS 側の受理集合は
-#: `WAN_TI2V_PIPELINE_NAME` / `WAN_TI2V_PIPELINE_MAJOR`〈`packages/models/src/wan/config.ts`〉）。
+#: Wan2.2's distribution repository name and pipeline contract (ADR 0121 decision 10 — the TS side's
+#: accepted set is `WAN_TI2V_PIPELINE_NAME` / `WAN_TI2V_PIPELINE_MAJOR`
+#: (`packages/models/src/wan/config.ts`)).
 WAN22_REPO_NAME = "karume-wan2.2"
 WAN22_PIPELINE = "wan-ti2v/1"
 
-#: Wan2.2 の VAE の系列（f16 — VAE の chunk グラフ 2 本だけで、f16 の DiT は持たない）と DiT の
-#: i8 系列。書き手の綴りは `wan.export_vae.TI2V_SERIES_NAME`（= `VAE_SERIES["ti2v-5b"].series`）/
-#: `wan.ti2v_export_dit.SERIES_NAME`。
+#: Wan2.2's VAE series (f16 — only the 2 VAE chunk graphs, no f16 DiT) and the DiT's i8 series. The
+#: writers' spellings are `wan.export_vae.TI2V_SERIES_NAME` (= `VAE_SERIES["ti2v-5b"].series`) /
+#: `wan.ti2v_export_dit.SERIES_NAME`.
 WAN22_SERIES = "wan2.2-ti2v-5b-f16-dyn"
 WAN22_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn"
 
-#: Wan2.2 の quant 表（ADR 0121 決定 2 — 参照席と実用席・f16 席は作らない。実用席は s16 と online の
-#: 2 つ — ADR 0132。VAE の decoder を i8 にした参照席 `i8` と実用席 `i8-a8-attn8-online-conv8` —
-#: ADR 0133 決定 6）。transformer は
-#: 格納ラベルが i8 の 1 つなので、weights は書かない（{@link complete_quant_weights} が完全写像へ
-#: 埋める — 書くと導出できる状態の二重化になる）。VAE の decoder は f16 / i8 の 2 つなので席ごとに
-#: 書く（{@link _WAN22_VAE_F16} / {@link _WAN22_VAE_I8}）。実用席の `session` / `label` /
-#: `description` は 2.1 の同名の席と同じ 1 つを引く（ADR 0121 決定 2「2.1 の実用席と同じ名前と
-#: 束」）。参照席の表示欄は 2.1 の文（「f16 席の約半分」）が 2.2 では成り立たないので、2.2 の文を
-#: 持つ。
-#: 基底の格納は VAE の decoder の格納で決まる（ADR 0074 §1 — 全役割に共通の格納: decoder が f16 の
-#: 席は `f16+dit8…`・i8 の席は `i8…`）。32 潜在タイルの組（ADR 0134 決定 5）は decoder と同じ
-#: ラベルを名指す — 借りる組は同じラベルの貸し手の重みで走るので、席の中でラベルが割れない。
+#: Wan2.2's quant table (ADR 0121 decision 2 — reference and practical presets, no f16 preset. There
+#: are 2 practical presets, s16 and online — ADR 0132. With the VAE decoder in i8, the reference
+#: preset `i8` and the practical preset `i8-a8-attn8-online-conv8` — ADR 0133 decision 6). The
+#: transformer has the single storage label i8, so weights does not name it
+#: ({@link complete_quant_weights} fills it into a complete mapping — writing it would duplicate
+#: derivable state). The VAE decoder has two, f16 / i8, so it is written per preset
+#: ({@link _WAN22_VAE_F16} / {@link _WAN22_VAE_I8}). The practical preset's `session` / `label` /
+#: `description` take the same single entry as 2.1's preset of the same name (ADR 0121 decision 2
+#: "the same name and bundle as 2.1's practical preset"). The reference preset's display fields have
+#: their own 2.2 text, since 2.1's ("about half the f16 preset") does not hold for 2.2. The base
+#: storage is set by the VAE decoder's storage (ADR 0074 §1 — the storage common to all roles:
+#: presets with an f16 decoder are `f16+dit8…`, those with an i8 decoder `i8…`). The 32-latent tile
+#: pair (ADR 0134 decision 5) names the same label as the decoder — a borrowing pair runs on the
+#: lender's weights of the same label, so the labels within a preset do not diverge.
 _WAN22_VAE_F16: Mapping[str, str] = dict.fromkeys(
     (WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE, WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE), "f16"
 )
@@ -604,25 +652,29 @@ WAN22_QUANTS: Mapping[str, Any] = {
 #: as siblings. The default can change with a quality ruling, so it is held in this one place only.
 WAN22_DEFAULT_QUANT = "i8-a8-attn8-online-conv8"
 
-#: Wan2.2 の `pipelineConfig`（スキーマは 2.1 と同じ — `packages/models/src/wan/config.ts`）:
+#: Wan2.2's `pipelineConfig` (the schema is the same as 2.1's —
+#: `packages/models/src/wan/config.ts`):
 #:
-#: - `scheduler.shift` 5.0 — pin の scheduler の `flow_shift`（公式の 720P の値 — ADR 0121 追記
-#:   「受理寸法を公式の 2 寸法へ」の決定）。
-#: - `defaults.steps` 50 / `defaults.guidance` 5.0 — 公式・Diffusers 版の README と同じ（決定 8）。
+#: - `scheduler.shift` 5.0 — the `flow_shift` of the pinned scheduler (the official 720P value — the
+#:   decision of ADR 0121 addendum "Accepted sizes to the 2 official sizes").
+#: - `defaults.steps` 50 / `defaults.guidance` 5.0 — the same as the official and Diffusers-version
+#:   READMEs (decision 8).
 WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
     "scheduler": {"shift": 5.0},
     "defaults": {"steps": 50, "guidance": 5.0},
 }
 
-#: Wan2.2 の改変告知（Apache 2.0 §4(b)）。事実の根拠は ADR 0121（決定 2 / 3 / 6 / 9 / 11・追記
-#: 「段 1 の結果」「段 4 の結果」「段 5 の結果」「段 9 の計画の裁定と段 9a の結果」〈VAE encoder の
-#: 書き直し — `wan.vae_encoder_patch` の 5 つ〉）と ADR 0122 決定 8（umT5 は本家の encoder と書き、
-#: この checkpoint の bf16 の `text_encoder` はその丸め）。トークナイザのファイルが 2 つの
-#: checkpoint で同じことは、pin した 2 つの revision の `tokenizer/` の 4 ファイルの sha256 の一致で
-#: 確かめた（2026-10-06）。
+#: Wan2.2's notice of modifications (Apache 2.0 §4(b)). The facts rest on ADR 0121 (decisions 2 / 3
+#: / 6 / 9 / 11, addenda "Results of step 1", "Results of step 4", "Results of step 5", "Ruling on
+#: the plan of step 9 and the results of step 9a" (the rewrite of the VAE encoder — the 5 of
+#: `wan.vae_encoder_patch`)) and ADR 0122 decision 8 (umT5 is described as the original encoder, and
+#: this checkpoint's bf16 `text_encoder` as its rounding). That the tokenizer files are the same in
+#: the 2 checkpoints was confirmed by matching sha256 of the 4 files in `tokenizer/` at the 2 pinned
+#: revisions (2026-10-06).
 #:
-#: MUST: 文面は配布形の中身と対応していること（{@link WAN_NOTICE_MARKDOWN} と同じ理由）。2.1 の文の
-#: 写しで事実が違う箇所（f16 の transformer・f16 席・1 系統の VAE の出口）を残さない。
+#: MUST: the text matches the contents of the distribution (the same reason as
+#: {@link WAN_NOTICE_MARKDOWN}). No place copied from 2.1's text where the facts differ (the f16
+#: transformer, the f16 preset, a single VAE exit) may remain.
 WAN22_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint listed in
@@ -700,72 +752,84 @@ No retraining and no fine-tuning were performed. The original checkpoint is not 
 
 @dataclass(frozen=True)
 class WanGeneration:
-    """配布の世代の表 — 世代ごとに違う事実を 1 つに集める。
+    """The distribution's generation table — the facts that differ per generation, in one place.
 
-    計画関数 {@link wan_plan} は 1 本で、配置表・格納の要求 / 禁止表・weights の宣言はこの表の
-    transformer の格納ラベルと encoder の有無から導く（全世代の表 {@link WAN_STORAGE_REQUIREMENTS} /
-    {@link WAN_STORAGE_FORBIDDEN} / {@link WAN_WEIGHTS} から自分の役割を引く）。
+    The plan function {@link wan_plan} is a single one; the placement table, the storage requirement
+    / prohibition tables and the weights declaration are derived from this table's transformer
+    storage labels and whether it has the encoder (each generation looks up its own roles from the
+    all-generation tables {@link WAN_STORAGE_REQUIREMENTS} / {@link WAN_STORAGE_FORBIDDEN} /
+    {@link WAN_WEIGHTS}).
     """
 
-    #: 配布リポ名（ADR 0092 決定 1 / 2 — 家族 1 リポ・世代は別リポ）。
+    #: The distribution repository name (ADR 0092 decisions 1 / 2 — one repository per family, a
+    #: separate one per generation).
     repo_name: str
-    #: パイプライン契約（ADR 0041 §2 — モデル単位）。
+    #: The pipeline contract (ADR 0041 §2 — per model).
     pipeline: str
-    #: 既定のモデル（Pipeline の `default_model`・計画の `model` の省略時）。
+    #: The default model (the Pipeline's `default_model`, used when the plan's `model` is omitted).
     default_model: str
-    #: f16 系列（VAE の decoder の chunk グラフ 2 本と、encoder を配る世代の encoder の 3 グラフ・
-    #: 格納ラベルに f16 を持つ世代の f16 の DiT）。
+    #: The f16 series (the VAE decoder's 2 chunk graphs, the encoder's 3 graphs for a generation
+    #: that ships the encoder, and the f16 DiT for a generation with f16 among its storage labels).
     series: str
-    #: DiT の i8 系列（どの世代も持つ — 参照席と実用席の重み）。
+    #: The DiT's i8 series (every generation has one — the weights of the reference and practical
+    #: presets).
     i8_series: str
-    #: transformer の格納ラベル（並びは manifest の weights の並び — {@link WAN_WEIGHTS} の順）。
+    #: The transformer's storage labels (in the order of the manifest's weights — the order of
+    #: {@link WAN_WEIGHTS}).
     transformer_labels: tuple[str, ...]
-    #: VAE の decoder（グラフ 2 本）の格納ラベル（同じ並びの規則）。i8 は {@link i8_series} の
-    #: 系列から引く（ADR 0133 決定 7）。
+    #: The storage labels of the VAE decoder (2 graphs) (the same ordering rule). i8 is taken from
+    #: the {@link i8_series} series (ADR 0133 decision 7).
     vae_labels: tuple[str, ...]
-    #: VAE の decoder の組の潜在タイル。先頭は重みを持つ既定タイルの組（役割に接尾辞が無い —
-    #: Wan2.1 は 32・Wan2.2 は 16 — 書き手 `wan.export_vae.VAE_SERIES` のタイル）、残りはその組から
-    #: 重みを借りる組（{@link WAN_VAE_SHARED_LABEL_ROLES} — ADR 0134・格納ラベルごとに 1 組）。
+    #: The latent tiles of the VAE decoder pairs. The first is the default-tile pair that holds the
+    #: weights (its roles have no suffix — 32 for Wan2.1, 16 for Wan2.2 — the tiles of the writer's
+    #: `wan.export_vae.VAE_SERIES`); the rest are pairs that borrow weights from it
+    #: ({@link WAN_VAE_SHARED_LABEL_ROLES} — ADR 0134, one pair per storage label).
     vae_tiles: tuple[int, ...]
-    #: I2V の条件画像の VAE encoder（{@link WAN_VAE_ENCODER_ROLES} の 3 グラフ — f16 系列）を
-    #: 配るか。Wan2.2 だけ（ADR 0121 決定 11）。全世代の表 {@link WAN_WEIGHTS} は Wan2.1 の計画にも
-    #: 回るので、ここで絞らないと Wan2.1 の manifest に encoder の席が漏れる（2.1 は T2V だけの
-    #: checkpoint で、2.1 の配布形はバイト不変に保つ）。
+    #: Whether the VAE encoder of the I2V conditioning image (the 3 graphs of
+    #: {@link WAN_VAE_ENCODER_ROLES} — f16 series) is shipped. Wan2.2 only (ADR 0121 decision 11).
+    #: The all-generation table {@link WAN_WEIGHTS} also reaches the Wan2.1 plan, so without
+    #: narrowing it here encoder entries would leak into the Wan2.1 manifest (2.1 is a T2V-only
+    #: checkpoint, and the 2.1 distribution is kept byte-identical).
     vae_encoder: bool
-    #: テキスト資産 2 本（埋め込み・トークナイザ）の出所の pin を引くモデル名（`SOURCES` のキー）。
-    #: DiT / VAE の容器の出所は計画のモデル名の pin で見る — 2 つの欄を分けるのは、Wan2.2 の資産が
-    #: Wan2.1 の checkpoint の umT5 から作ったもので、その出所を名乗ったまま門を通すため（ADR 0121
-    #: 決定 9）。
+    #: The model name (a key of `SOURCES`) whose pin gives the provenance of the 2 text assets
+    #: (embeddings, tokenizer). The provenance of the DiT / VAE containers is checked against the
+    #: pin of the plan's model name — the 2 fields are separate because Wan2.2's assets were made
+    #: from the umT5 of the Wan2.1 checkpoint and pass the check while stating that provenance (ADR
+    #: 0121 decision 9).
     text_model: str
-    #: quant 表（席名 → weights / session / 表示欄 — weights は {@link complete_quant_weights} が
-    #: 完全写像へ埋める）と既定席。
+    #: The quant table (preset name → weights / session / display fields —
+    #: {@link complete_quant_weights} fills weights into a complete mapping) and the default preset.
     quants: Mapping[str, Any]
     default_quant: str
-    #: パイプライン所有の設定（hub は素通し — ADR 0041 §2）。
+    #: Pipeline-owned settings (the hub passes them through — ADR 0041 §2).
     pipeline_config: Mapping[str, Any]
-    #: 改変告知（Apache 2.0 §4(b) — 配布リポ直下の `NOTICE.md`）。
+    #: The notice of modifications (Apache 2.0 §4(b) — `NOTICE.md` at the distribution repository's
+    #: root).
     notice: str
-    #: DiT / VAE の容器を焼き直すコマンド（共有の門 {@link assert_rope_base} /
-    #: {@link assert_vae_chunk_pair} が落ちたときの案内 — その世代の系列を書く書き手を名指しする）。
+    #: The commands that rebuild the DiT / VAE containers (the hint when the shared checks
+    #: {@link assert_rope_base} / {@link assert_vae_chunk_pair} fail — they name the writer of that
+    #: generation's series).
     dit_writer: str
     vae_writer: str
-    #: カードの世代の表（配るモデルの集合もここが持つ — カードの帰属の門と計画の門が共有する）。
+    #: The card's generation table (it also holds the set of shipped models — shared by the card's
+    #: attribution check and the plan's check).
     card: WanCard
 
     @property
     def models(self) -> tuple[str, ...]:
-        """この世代の配布が配るモデル（計画の門 — 取得元の表の全モデルは通さない）。"""
+        """The models this generation's distribution ships (the plan's check — not every model of
+        the sources table passes)."""
         return self.card.models
 
     @property
     def transformer_roles(self) -> tuple[str, ...]:
-        """transformer の容器の配置の役割（格納ラベルごとに 1 本）。"""
+        """The placement roles of the transformer containers (one per storage label)."""
         return tuple(WAN_TRANSFORMER_LABEL_ROLES[label] for label in self.transformer_labels)
 
     @property
     def vae_decoder_roles(self) -> tuple[str, ...]:
-        """VAE の decoder の容器の配置の役割（first の格納ラベルごと、次に next の格納ラベル
-        ごと。重みを借りる組はその後ろにタイルの順で同じ並び）。"""
+        """The placement roles of the VAE decoder containers (per storage label of first, then per
+        storage label of next; the borrowing pairs follow in the same order, by tile)."""
         pairs = [
             (WAN_VAE_FIRST_LABEL_ROLES, WAN_VAE_NEXT_LABEL_ROLES),
             *(WAN_VAE_SHARED_LABEL_ROLES[tile] for tile in self.vae_tiles[1:]),
@@ -781,12 +845,14 @@ class WanGeneration:
 
     @property
     def vae_encoder_roles(self) -> tuple[str, ...]:
-        """VAE の encoder の容器の配置の役割（配らない世代では空）。"""
+        """The placement roles of the VAE encoder containers (empty for a generation that does not
+        ship it)."""
         return WAN_VAE_ENCODER_ROLES if self.vae_encoder else ()
 
     @property
     def container_roles(self) -> tuple[str, ...]:
-        """容器を持つ配置の役割（並びは {@link WAN_CONTAINER_ROLES} と同じ — 生成の段の順）。"""
+        """The placement roles that have a container (in the order of {@link WAN_CONTAINER_ROLES} —
+        the order of the generation stages)."""
         return (
             *self.vae_encoder_roles,
             WAN_TEXT_ENCODER_ROLE,
@@ -796,18 +862,21 @@ class WanGeneration:
 
     @property
     def storage_requirements(self) -> Mapping[str, str]:
-        """この世代の役割の格納の要求（全世代の表から引く）。"""
+        """The storage requirements of this generation's roles (looked up from the all-generation
+        table)."""
         return {role: WAN_STORAGE_REQUIREMENTS[role] for role in self.container_roles}
 
     @property
     def storage_forbidden(self) -> Mapping[str, tuple[str, ...]]:
-        """この世代の役割の格納の禁止表（全世代の表から引く）。"""
+        """The storage prohibition table of this generation's roles (looked up from the
+        all-generation table)."""
         return {role: WAN_STORAGE_FORBIDDEN[role] for role in self.container_roles}
 
     @property
     def weights(self) -> Mapping[str, Mapping[str, WeightFiles]]:
-        """weights の宣言（この世代の配置の役割を指すラベルだけ — transformer はこの世代の格納
-        ラベルだけ・encoder は配る世代だけ。無い役割を宣言すると、それを選ぶ席が組めてしまう）。"""
+        """The weights declaration (only the labels pointing at this generation's placement roles —
+        for the transformer only this generation's storage labels, the encoder only for a generation
+        that ships it. Declaring a missing role would let a preset that selects it be built)."""
         roles = set(self.container_roles)
         declared = {
             name: {label: files for label, files in labels.items() if files.file in roles}
@@ -816,7 +885,7 @@ class WanGeneration:
         return {name: labels for name, labels in declared.items() if labels}
 
 
-#: Wan2.1 T2V 1.3B（`--pipeline wan` → `karume-wan2.1`）。transformer は f16 / i8 の 2 本。
+#: Wan2.1 T2V 1.3B (`--pipeline wan` → `karume-wan2.1`). The transformer has 2 containers, f16 / i8.
 WAN21 = WanGeneration(
     repo_name=WAN_REPO_NAME,
     pipeline=WAN_PIPELINE,
@@ -837,20 +906,24 @@ WAN21 = WanGeneration(
     card=WAN21_CARD,
 )
 
-#: Wan2.2 TI2V 5B（`--pipeline wan-ti2v` → `karume-wan2.2`・モデル `ti2v-5b`）。2.1 との違い:
+#: Wan2.2 TI2V 5B (`--pipeline wan-ti2v` → `karume-wan2.2`, model `ti2v-5b`). Differences from 2.1:
 #:
-#: - transformer は **i8 の 1 本だけ**（f16 の DiT は無い — ADR 0121 決定 2）。DiT は I2V 対応の
-#:   グラフ 1 本（決定 3 — 入力 7 本。組み立てが見るのは文脈入力と RoPE 素表だけで、2.1 と同じ門）。
-#: - VAE は Wan2.2-VAE の chunk グラフ 2 本（決定 6 — 潜在 48 ch・出口は patchify 空間）。decoder は
-#:   f16 / i8 の 2 本ずつ（i8 は DiT と同じ i8 系列 — ADR 0133 決定 7）。加えて 32 潜在タイルの組
-#:   （ADR 0134）を格納ラベルごとに 1 組配る — 重みのバイトを持たず、同じ系列の根・同じラベルの
-#:   16 の組の重みを借りる（追加の重みのダウンロードは無い）。
-#: - I2V の条件画像の VAE encoder の 3 グラフ（決定 11・段 9a — decoder と同じ f16 系列）を配る。
-#:   どの席も f16 の 1 本を取る（T2V だけの利用でも取る — 追記「段 9 の計画の裁定と段 9a の
-#:   結果」の裁定）。
-#: - テキスト資産 2 本は **2.1 の系列のファイルそのもの**で、出所は Wan2.1 の pin（決定 9 —
-#:   {@link WanGeneration.text_model}）。DiT / VAE の容器の出所は Wan2.2 の pin で見る。
-#: - umT5 は 2.1 と同じ `karume-umt5-xxl` の越境参照。
+#: - The transformer is **i8 only** (no f16 DiT — ADR 0121 decision 2). The DiT is a single
+#:   I2V-capable graph (decision 3 — 7 inputs; assembly looks only at the context input and the RoPE
+#:   base table, the same checks as 2.1).
+#: - The VAE is the 2 chunk graphs of Wan2.2-VAE (decision 6 — 48 latent channels, the exit in
+#:   patchified space). The decoder has 2 of each, f16 / i8 (i8 from the same i8 series as the DiT
+#:   — ADR 0133 decision 7). In addition, a 32-latent tile pair (ADR 0134) is shipped per storage
+#:   label — it holds no weight bytes and borrows the weights of the 16 pair with the same label at
+#:   the same series root (no extra weight download).
+#: - The 3 graphs of the VAE encoder for the I2V conditioning image are shipped (decision 11, step
+#:   9a — the same f16 series as the decoder). Every preset takes the single f16 one (even for
+#:   T2V-only use — the ruling of the addendum "Ruling on the plan of step 9 and the results of step
+#:   9a").
+#: - The 2 text assets are **the very files of the 2.1 series**, and their provenance is the Wan2.1
+#:   pin (decision 9 — {@link WanGeneration.text_model}). The provenance of the DiT / VAE containers
+#:   is checked against the Wan2.2 pin.
+#: - umT5 is the same cross-repository reference to `karume-umt5-xxl` as in 2.1.
 WAN22 = WanGeneration(
     repo_name=WAN22_REPO_NAME,
     pipeline=WAN22_PIPELINE,
@@ -874,23 +947,24 @@ WAN22 = WanGeneration(
 
 @dataclass(frozen=True)
 class WanSources:
-    """組み立ての入力 = 系列ディレクトリ 3 本（f16 系列〈VAE の decoder・2.2 では VAE の encoder・
-    2.1 では f16 の DiT〉・DiT の i8 系列・テキスト埋め込みの系列）と、umT5 の容器（i8 系列）・
-    トークナイザ資産。テキスト埋め込みとトークナイザ資産はどの世代も Wan2.1 の系列を指す（ADR 0121
-    決定 9）。"""
+    """The assembly inputs = 3 series directories (the f16 series (VAE decoder; in 2.2 also the
+    VAE encoder; in 2.1 the f16 DiT), the DiT's i8 series, the text-embeddings series), the umT5
+    container (i8 series) and the tokenizer asset. For every generation the text embeddings and the
+    tokenizer asset point at the Wan2.1 series (ADR 0121 decision 9)."""
 
     series: Path
     i8_series: Path
     text_embeds: Path
-    #: umT5 の容器の代表 path（系列 `umt5-xxl-i8-dyn` —
-    #: `wan.umt5_distribution.umt5_container`）。
+    #: The representative path of the umT5 container (series `umt5-xxl-i8-dyn` —
+    #: `wan.umt5_distribution.umt5_container`).
     text_encoder: Path
-    #: トークナイザ資産（系列 `wan2.1-umt5-tokenizer` — 書き手は `wan.umt5_tokenizer`）。
+    #: The tokenizer asset (series `wan2.1-umt5-tokenizer` — the writer is `wan.umt5_tokenizer`).
     tokenizer: Path
 
 
 def wan_sources(series_dir: Path, generation: WanGeneration = WAN21) -> WanSources:
-    """系列の親ディレクトリ（`outputs/series/`）から、その世代の入力を引く。"""
+    """Look up the generation's inputs from the parent directory of the series
+    (`outputs/series/`)."""
     return WanSources(
         series=series_dir / generation.series,
         i8_series=series_dir / generation.i8_series,
@@ -901,12 +975,13 @@ def wan_sources(series_dir: Path, generation: WanGeneration = WAN21) -> WanSourc
 
 
 def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> dict[str, Path]:
-    """配置の役割 → 出所のファイル。出力の path は {@link WAN_OUTPUT_PATHS} が持つ。
+    """Placement role → source file. The output paths live in {@link WAN_OUTPUT_PATHS}.
 
-    この表に無いものは出力へ入らない（系列に並ぶ `io.*` / `reference.*` / `vae_*.safetensors` /
-    `pipeline_steps.*` の golden はこれで落ちる — encoder の golden `vae_encoder.*` も同じ）。
-    transformer と VAE の decoder はその世代の格納ラベルの容器だけ（f16 は f16 系列・i8 は i8
-    系列）、VAE の encoder は配る世代だけ（f16 系列）。
+    Anything not in this table does not reach the output (the goldens `io.*` / `reference.*` /
+    `vae_*.safetensors` / `pipeline_steps.*` in the series are dropped this way — and so is the
+    encoder's golden `vae_encoder.*`). The transformer and the VAE decoder take only the containers
+    of the generation's storage labels (f16 from the f16 series, i8 from the i8 series); the VAE
+    encoder only for a generation that ships it (f16 series).
     """
     transformers = {
         WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
@@ -917,7 +992,7 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
         WAN_VAE_FIRST_I8_ROLE: sources.i8_series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_I8_ROLE: sources.i8_series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
-        # 重みを借りる組は貸し手と同じ系列の根（ADR 0134 決定 5）。
+        # A borrowing pair lives at the same series root as its lender (ADR 0134 decision 5).
         WAN_VAE_FIRST_32_ROLE: sources.series / WAN_VAE_FIRST_32_ROLE / WAN_MODEL_FILE,
         WAN_VAE_FIRST_32_I8_ROLE: sources.i8_series / WAN_VAE_FIRST_32_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_32_ROLE: sources.series / WAN_VAE_NEXT_32_ROLE / WAN_MODEL_FILE,
@@ -934,19 +1009,22 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
 
 
 def wan_repo_name(_model: str, generation: WanGeneration = WAN21) -> str:
-    """配布リポ名（家族 1 リポ・世代は別リポなので、その世代のどのモデルでも同じ 1 つ — ADR 0092
-    決定 1 / 2）。"""
+    """The distribution repository name (one repository per family and a separate one per
+    generation, so it is the same for every model of the generation — ADR 0092 decisions 1 / 2)."""
     return generation.repo_name
 
 
 def assert_rope_base(container: Path, writer: str) -> None:
-    """`transformer` の容器が RoPE 素表の資産を宣言していることを見る（payload は読まない）。
+    """Check that the `transformer` container declares the RoPE base table asset (the payload is not
+    read).
 
-    `writer` は焼き直しの案内に出すその世代の DiT の書き手（{@link WanGeneration.dit_writer}）。
+    `writer` is the generation's DiT writer shown in the rebuild hint
+    ({@link WanGeneration.dit_writer}).
 
-    MUST: 組み立てで落とす。素表を持たない DiT（静的形の別 export・資産を足す前の書き手）を
-    transformer 席へ挿すと、組み立ても `verify_dist` も通り、利用者の `fromPretrained` が重みを
-    落とした後で「資産 'rope_base' が無い」になる。
+    MUST: fail at assembly. A DiT without the base table (a separate static-shape export, a writer
+    from before the asset was added) plugged into the transformer entry passes assembly and
+    `verify_dist`, and the user's `fromPretrained` hits "asset 'rope_base' is missing" only after
+    downloading the weights.
     """
     try:
         declared = read_asset_declarations(container)
@@ -955,28 +1033,33 @@ def assert_rope_base(container: Path, writer: str) -> None:
     asset = declared.get(WAN_ROPE_BASE_ASSET)
     if asset is None:
         raise DistError(
-            f"{container}: 資産 '{WAN_ROPE_BASE_ASSET}' が無い（宣言: {sorted(declared)}）—"
-            f" RoPE の素表を持たない DiT は配らない（`{writer}` で焼き直す）"
+            f"{container}: asset '{WAN_ROPE_BASE_ASSET}' is missing (declared:"
+            f" {sorted(declared)}) — a DiT without the RoPE base table is not shipped (rebuild it"
+            f" with `{writer}`)"
         )
     if asset[0] != WAN_ROPE_BASE_ROLE:
         raise DistError(
-            f"{container}: 資産 '{WAN_ROPE_BASE_ASSET}' の役割が {asset[0]!r}"
-            f"（期待 {WAN_ROPE_BASE_ROLE!r}）"
+            f"{container}: asset '{WAN_ROPE_BASE_ASSET}' has role {asset[0]!r}"
+            f" (expected {WAN_ROPE_BASE_ROLE!r})"
         )
 
 
 def assert_shared_rope_base(containers: Sequence[Path]) -> None:
-    """`transformer` の容器（格納ラベルごと — f16 / i8）の RoPE 素表がバイト同一であることを見る。
+    """Check that the RoPE base tables of the `transformer` containers (one per storage label — f16
+    / i8) are byte-identical.
 
-    MUST: 組み立てで落とす。素表は容器ごとに 1 本入り、TS 側は選んだ席の容器から読む。食い違ったまま
-    配ると、片方の席だけが別の幾何の RoPE で走り、ロードも実行も通って映像だけが静かに壊れる
-    （anima の `assert_shared_rope_base` と同じ理由）。i8 の容器の素表の誤りは、同じ i8 の容器
-    どうしを比べる自機 A/B 門（ADR 0120 決定 4）では掴めない。
+    MUST: fail at assembly. Each container carries one base table, and the TS side reads it from the
+    container of the chosen preset. Shipped while they disagree, one preset alone would run with
+    RoPE of another geometry: loading and execution pass, and only the video quietly breaks (the
+    same reason as anima's `assert_shared_rope_base`). An error in the base table of the i8
+    container cannot be caught by the on-machine A/B check (ADR 0120 decision 4), which compares i8
+    containers with each other.
 
-    容器が 1 本の世代（Wan2.2 — i8 だけ）では比べる相手が無く、必ず通る。その素表の幾何は組み立て
-    では照合せず、GPU の門が見る — ADR 0121 段 6 の 2 ステップの通しは製品の経路（容器の素表から
-    ホストが RoPE の表を組む — `packages/models/src/wan/family.ts`）で走り、CPU の上流参照と照合
-    する。
+    A generation with a single container (Wan2.2 — i8 only) has nothing to compare against and
+    always passes. The geometry of its base table is not checked at assembly but by the GPU checks —
+    the 2-step end-to-end run of ADR 0121 step 6 runs on the product path (the host builds the RoPE
+    tables from the container's base table — `packages/models/src/wan/family.ts`) and is compared
+    with the upstream reference on CPU.
     """
     digests: dict[Path, str] = {}
     for path in containers:
@@ -988,13 +1071,15 @@ def assert_shared_rope_base(containers: Sequence[Path]) -> None:
     if len(set(digests.values())) != 1:
         listing = "\n".join(f"  {digest}  {path}" for path, digest in digests.items())
         raise DistError(
-            f"資産 '{WAN_ROPE_BASE_ASSET}' が transformer の容器の間でバイト同一でない — 同じ幾何で"
-            f"配れない。どちらが正かはここでは決められないので組み立てを止める:\n{listing}"
+            f"asset '{WAN_ROPE_BASE_ASSET}' is not byte-identical across the transformer"
+            " containers — they cannot ship with the same geometry. Which one is right cannot be"
+            f" decided here, so assembly stops:\n{listing}"
         )
 
 
 def dit_context(container: Path) -> tuple[int, int]:
-    """DiT の文脈入力 `[1, rows, width]` の `(rows, width)`（静的次元 — 記号なら落とす）。"""
+    """`(rows, width)` of the DiT's context input `[1, rows, width]` (static dimensions — fails if
+    symbolic)."""
     shape = graph_inputs(ir_graph(container), container).get(WAN_DIT_CONTEXT_INPUT)
     if (
         shape is None
@@ -1002,38 +1087,42 @@ def dit_context(container: Path) -> tuple[int, int]:
         or not all(isinstance(dim, int) and not isinstance(dim, bool) for dim in shape)
     ):
         raise DistError(
-            f"{container}: グラフ入力 '{WAN_DIT_CONTEXT_INPUT}' が静的な [1, rows, width] でない"
-            f"（{shape!r}）"
+            f"{container}: graph input '{WAN_DIT_CONTEXT_INPUT}' is not a static [1, rows, width]"
+            f" ({shape!r})"
         )
     return shape[1], shape[2]
 
 
 def assert_vae_chunk_pair(first: Path, following: Path, writer: str) -> None:
-    """`vae_decoder_first` / `vae_decoder_next` の 2 本が同じ組の chunk グラフであることを見る。
+    """Check that `vae_decoder_first` / `vae_decoder_next` are chunk graphs of the same pair.
 
-    `writer` は焼き直しの案内に出すその世代の VAE の書き手（{@link WanGeneration.vae_writer}）。
+    `writer` is the generation's VAE writer shown in the rebuild hint
+    ({@link WanGeneration.vae_writer}).
 
-    規則は TS の `wanVaeChunkLayout`（`packages/models/src/wan/vae-chunks.ts`）と同じ: 潜在入力の
-    形が 2 本で同じ（= タイル辺が同じ）で、first の cache 入力が next の cache 入力の部分列（同じ
-    名前・同じ形・同じ順）。
+    The rule is the same as TS's `wanVaeChunkLayout` (`packages/models/src/wan/vae-chunks.ts`): the
+    latent input has the same shape in both (= the same tile edge), and first's cache inputs are a
+    subsequence of next's cache inputs (same names, same shapes, same order).
 
-    MUST: 組み立てで落とす。書き手は 2 本を別の容器へ書くので、片方だけを焼き直した系列（`--target`
-    の部分更新・途中で落ちた旧版の書き手の実走）は、各容器の検査を全部通ったまま配布形に据わり、
-    利用者の `fromPretrained` が admission で初めて拒む。同じ形で中身の世代だけが違う組は形からは
-    見分けられない（GPU の chunk 列の照合だけが捕まえる）。
+    MUST: fail at assembly. The writer writes the 2 graphs to separate containers, so a series where
+    only one was rebuilt (a partial update with `--target`, a run of an old writer that died midway)
+    settles into the distribution while passing every per-container check, and the user's
+    `fromPretrained` rejects it only at admission. A pair with the same shapes whose contents come
+    from different builds cannot be told apart by shape (only the GPU check of the chunk sequence
+    catches it).
     """
     first_inputs = graph_inputs(ir_graph(first), first)
     next_inputs = graph_inputs(ir_graph(following), following)
     for path, inputs in ((first, first_inputs), (following, next_inputs)):
         if next(iter(inputs), None) != WAN_VAE_LATENT_INPUT:
             raise DistError(
-                f"{path}: 先頭のグラフ入力が '{WAN_VAE_LATENT_INPUT}' でない（{list(inputs)}）"
+                f"{path}: the first graph input is not '{WAN_VAE_LATENT_INPUT}' ({list(inputs)})"
             )
     if first_inputs[WAN_VAE_LATENT_INPUT] != next_inputs[WAN_VAE_LATENT_INPUT]:
         raise DistError(
-            f"{first} / {following}: 潜在入力の形が first {first_inputs[WAN_VAE_LATENT_INPUT]} と"
-            f" next {next_inputs[WAN_VAE_LATENT_INPUT]} で違う — 別のタイル辺で焼いた 2 本を"
-            f" 組にしない（`{writer}` で両方を焼き直す）"
+            f"{first} / {following}: the latent input shape differs between first"
+            f" {first_inputs[WAN_VAE_LATENT_INPUT]} and next {next_inputs[WAN_VAE_LATENT_INPUT]}"
+            " — 2 graphs built with different tile edges do not form a pair (rebuild both with"
+            f" `{writer}`)"
         )
     next_caches = [name for name in next_inputs if name != WAN_VAE_LATENT_INPUT]
     cursor = 0
@@ -1042,33 +1131,36 @@ def assert_vae_chunk_pair(first: Path, following: Path, writer: str) -> None:
             continue
         if next_inputs.get(name) != shape:
             raise DistError(
-                f"{first}: cache 入力 '{name}' {shape} が next に同じ形で無い"
-                f"（{next_inputs.get(name)}）— 別の組の chunk グラフを組にしない"
+                f"{first}: cache input '{name}' {shape} is not in next with the same shape"
+                f" ({next_inputs.get(name)}) — chunk graphs of different pairs do not form a pair"
             )
         position = next_caches.index(name)
         if position < cursor:
-            raise DistError(f"{first}: cache 入力の順が next と違う（'{name}'）")
+            raise DistError(f"{first}: the order of the cache inputs differs from next ('{name}')")
         cursor = position + 1
 
 
 def assert_shared_decoder(borrower: Path, lender: Path) -> None:
-    """重みを借りる組の容器（ADR 0134 決定 1）が、貸し手の容器から全部の重みを借りることを見る。
+    """Check that the container of a borrowing pair (ADR 0134 decision 1) borrows all its weights
+    from the lender's container.
 
-    見るのは 3 つ: 借り手が part 0（2 文書）の外に 1 バイトも持たない・initializer が全部共有宣言・
-    各共有宣言が名指すテンソルキー（IR v2 では initializer の名前そのもの）を貸し手が実体
-    （束縛表の供給）として持ち、値の dtype と形が貸し手と同じ。借り手の格納の宣言は容器に残らない
-    （共有宣言には供給が無い）ので、借り手が走る格納は貸し手の束縛表の格納で、{@link wan_plan} が
-    貸し手の容器へ格納の門を掛ける。
+    Three things are checked: the borrower holds not one byte outside part 0 (the 2 documents);
+    every initializer is a shared declaration; and the lender holds each tensor key a shared
+    declaration names (in IR v2, the initializer's name itself) as a real entry (a supply in the
+    binding table), with the same dtype and shape of the value as the lender. The borrower's storage
+    declaration does not survive in the container (a shared declaration has no supply), so the
+    storage the borrower runs on is the storage of the lender's binding table, and {@link wan_plan}
+    applies the storage checks to the lender's container.
 
-    MUST: 組み立てで落とす。貸し手だけを焼き直した系列では、借り手が名指すキーが消えるか形が
-    変わる — ランタイムの共有の検査はセッションを組むときまで（利用者が重みを落とした後まで）
-    走らない。
+    MUST: fail at assembly. In a series where only the lender was rebuilt, a key the borrower names
+    disappears or changes shape — the runtime's sharing check does not run until a session is built
+    (after the user has downloaded the weights).
     """
     carried = sum(part.stat().st_size for part in component_parts(borrower)[1:])
     if carried:
         raise DistError(
-            f"{borrower}: 記述の外に {carried} バイトを持つ — 重みを借りる組は重みのバイトを"
-            " 持たない（`python -m wan.export_vae … --shared` で焼き直す）"
+            f"{borrower}: holds {carried} bytes outside the descriptors — a borrowing pair holds"
+            " no weight bytes (rebuild it with `python -m wan.export_vae … --shared`)"
         )
     graph = ir_graph(borrower)
     opened = open_container(lender)
@@ -1082,81 +1174,89 @@ def assert_shared_decoder(borrower: Path, lender: Path) -> None:
     )
     if owned:
         raise DistError(
-            f"{borrower}: 共有宣言でない initializer {owned[:4]}（全部が貸し手 {lender} を名指す）"
+            f"{borrower}: initializers that are not shared declarations {owned[:4]} (all of them"
+            f" must name the lender {lender})"
         )
     values, lent_values = graph.get("values") or {}, lent.get("values") or {}
     for name in sorted(initializers):
         if name not in supplied:
             raise DistError(
-                f"{borrower}: 共有 initializer '{name}' の実体が貸し手 {lender} に無い"
-                "（貸し手を焼き直した世代と噛み合っていない）"
+                f"{borrower}: the shared initializer '{name}' has no real entry in the lender"
+                f" {lender} (out of step with a rebuilt lender)"
             )
         if values.get(name) != lent_values.get(name):
             raise DistError(
-                f"{borrower}: 共有 initializer '{name}' が {values.get(name)} — 貸し手 {lender} の"
-                f" {lent_values.get(name)} と違う"
+                f"{borrower}: shared initializer '{name}' is {values.get(name)} — differs from the"
+                f" lender {lender}'s {lent_values.get(name)}"
             )
 
 
 def _safetensors_header(path: Path) -> tuple[dict[str, Any], dict[str, str]]:
-    """safetensors のヘッダ（テンソルの宣言・メタ）だけを読む（本体は読まない・torch 不使用）。"""
+    """Read only the safetensors header (tensor declarations, metadata — not the body, no torch)."""
     try:
         with path.open("rb") as stream:
             (length,) = struct.unpack("<Q", stream.read(8))
             header = json.loads(stream.read(length))
     except (OSError, struct.error, ValueError) as cause:
-        raise DistError(f"{path}: safetensors のヘッダを読めない — {cause}") from cause
+        raise DistError(f"{path}: cannot read the safetensors header — {cause}") from cause
     if not isinstance(header, dict):
-        raise DistError(f"{path}: safetensors のヘッダがオブジェクトでない")
+        raise DistError(f"{path}: the safetensors header is not an object")
     metadata = header.pop("__metadata__", {})
     if not isinstance(metadata, dict):
-        raise DistError(f"{path}: safetensors のメタがオブジェクトでない")
+        raise DistError(f"{path}: the safetensors metadata is not an object")
     return header, metadata
 
 
 def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None:
-    """テキスト埋め込み資産が、上流の pin・固定プロンプトの表・DiT の文脈入力と噛み合うことを見る。
+    """Check that the text-embeddings asset fits the upstream pin, the fixed prompt table and the
+    DiT's context input.
 
-    MUST: 組み立てで落とす。資産はグラフでも重みでもない表なので `verify_dist` の容器検査には
-    掛からず、別の revision の umT5 で作った資産・プロンプトの表と食い違う資産・幅の違う資産が
-    そのまま配布形に据わる。読み手（TS の `parseWanTextEmbeds`）が見るのは形だけなので、出所の
-    食い違いは利用者の手元で「別の文脈で生成された動画」として沈黙する。
+    MUST: fail at assembly. The asset is a table, neither a graph nor weights, so `verify_dist`'s
+    container checks do not see it, and an asset made with umT5 of another revision, an asset that
+    disagrees with the prompt table or an asset of another width would settle into the distribution
+    as is. The reader (TS's `parseWanTextEmbeds`) looks only at the shapes, so a provenance mismatch
+    stays silent on the user's side as "a video generated with a different context".
 
-    見るのは 6 つ: メタのキーが 1 つ（書き手の MUST — バイト同一の前提）・出所（repo / revision）が
-    {@link SOURCES} の pin と一致・encoder の dtype と依存の版が決定 4 の固定値
-    （{@link WAN_TEXT_ENCODER_DTYPE} / {@link WAN_TEXT_EMBEDS_VERSIONS} — NOTICE とカードの記述の
-    根拠）・プロンプトの並び（名前・役割・原文）が {@link FIXED_PROMPTS} と一致（カードが同じ表から
-    本文を描く）・各行の正規化後の文字列 `normalized` が空でない文字列で、原文と正規化後の文字列が
-    2 つの行に当たらない（TS の `parseWanTextEmbeds` が同じ規則で拒む — 配る前に落とす）・テンソルが
-    `F32 [tokens, width]` で `tokens` はメタのトークン数と一致し DiT の文脈の行数以下・`width` は
-    文脈の幅。`normalize(prompt) == normalized` の一致は見ない（ここは ftfy を読まない — 書き手の
-    テストが見る）。
+    Six things are checked: the metadata has exactly one key (the writer's MUST — the premise of
+    byte identity); the provenance (repo / revision) matches the pin in {@link SOURCES}; the encoder
+    dtype and the dependency versions are the fixed values of decision 4
+    ({@link WAN_TEXT_ENCODER_DTYPE} / {@link WAN_TEXT_EMBEDS_VERSIONS} — the grounds of what the
+    NOTICE and the card say); the prompt list (names, roles, original texts) matches
+    {@link FIXED_PROMPTS} (the card draws its text from the same table); each row's normalized
+    string `normalized` is a non-empty string, and no original or normalized string belongs to 2
+    rows (TS's `parseWanTextEmbeds` rejects it by the same rule — fail before shipping); the tensors
+    are `F32 [tokens, width]` with `tokens` equal to the metadata's token count and at most the DiT
+    context's row count, and `width` the context's width. `normalize(prompt) == normalized` is not
+    checked (this module does not load ftfy — the writer's tests check it).
     """
     assert_component_present(path)
     tensors, metadata = _safetensors_header(path)
     if set(metadata) != {WAN_TEXT_EMBEDS_METADATA_KEY}:
         raise DistError(
-            f"{path}: メタのキー {sorted(metadata)} が {WAN_TEXT_EMBEDS_METADATA_KEY} 1 つでない"
+            f"{path}: the metadata keys {sorted(metadata)} are not exactly"
+            f" {WAN_TEXT_EMBEDS_METADATA_KEY}"
         )
     try:
         meta = json.loads(metadata[WAN_TEXT_EMBEDS_METADATA_KEY])
     except ValueError as cause:
-        raise DistError(f"{path}: メタが JSON として読めない — {cause}") from cause
+        raise DistError(f"{path}: the metadata cannot be read as JSON — {cause}") from cause
     if not isinstance(meta, dict):
-        raise DistError(f"{path}: メタがオブジェクトでない")
+        raise DistError(f"{path}: the metadata is not an object")
     source = SOURCES[model]
     expected_source = {"repo": source.repo, "revision": source.revision}
     if meta.get("source") != expected_source:
         raise DistError(
-            f"{path}: 埋め込みの出所 {meta.get('source')!r} が上流の pin {expected_source!r} と違う"
-            " — 別の checkpoint の umT5 で作った資産は配らない（`python -m wan.text_embeds`）"
+            f"{path}: the embeddings' provenance {meta.get('source')!r} differs from the upstream"
+            f" pin {expected_source!r} — an asset made with umT5 of another checkpoint is not"
+            " shipped (`python -m wan.text_embeds`)"
         )
     encoder = meta.get("text_encoder")
     encoder_dtype = encoder.get("dtype") if isinstance(encoder, dict) else None
     if encoder_dtype != WAN_TEXT_ENCODER_DTYPE:
         raise DistError(
-            f"{path}: 埋め込みを作った umT5 の dtype {encoder_dtype!r} が決定 4 の"
-            f" {WAN_TEXT_ENCODER_DTYPE!r} でない — NOTICE とカードの記述と食い違う資産は配らない"
+            f"{path}: the dtype {encoder_dtype!r} of the umT5 that made the embeddings is not"
+            f" decision 4's {WAN_TEXT_ENCODER_DTYPE!r} — an asset that disagrees with the NOTICE"
+            " and the card is not shipped"
         )
     versions = meta.get("versions")
     pinned = (
@@ -1166,39 +1266,44 @@ def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None
     )
     if pinned != WAN_TEXT_EMBEDS_VERSIONS:
         raise DistError(
-            f"{path}: 埋め込みを作った版 {pinned!r} が決定 4 の固定"
-            f" {dict(WAN_TEXT_EMBEDS_VERSIONS)!r} と違う — 正規化と埋め込みの経路が版で変わる"
+            f"{path}: the versions that made the embeddings {pinned!r} differ from decision 4's"
+            f" fixed {dict(WAN_TEXT_EMBEDS_VERSIONS)!r} — the normalization and the embedding"
+            " path change between versions"
         )
     prompts = meta.get("prompts")
     if not isinstance(prompts, list) or not all(isinstance(entry, dict) for entry in prompts):
-        raise DistError(f"{path}: メタの prompts が並びでない")
+        raise DistError(f"{path}: the metadata's prompts is not a list")
     declared = [(entry.get("name"), entry.get("role"), entry.get("prompt")) for entry in prompts]
     expected = [(prompt.name, prompt.role, prompt.text) for prompt in FIXED_PROMPTS]
     if declared != expected:
         raise DistError(
-            f"{path}: プロンプトの並び {[name for name, _, _ in declared]} が固定プロンプトの表"
-            f"（wan.prompts.FIXED_PROMPTS — {[name for name, _, _ in expected]}）と名前・役割・"
-            "原文で一致しない — カードは表から本文を描くので、食い違ったまま配らない"
+            f"{path}: the prompt list {[name for name, _, _ in declared]} does not match the fixed"
+            f" prompt table (wan.prompts.FIXED_PROMPTS — {[name for name, _, _ in expected]}) in"
+            " names, roles and original texts — the card draws its text from the table, so it is"
+            " not shipped while they disagree"
         )
     owners: dict[str, str] = {}
     for entry in prompts:
         name, normalized = entry["name"], entry.get("normalized")
         if not isinstance(normalized, str) or not normalized:
             raise DistError(
-                f"{path}: '{name}' の normalized が空でない文字列でない（{normalized!r}）— TS の"
-                " parseWanTextEmbeds が利用者の手元で拒む"
+                f"{path}: '{name}'s normalized is not a non-empty string ({normalized!r}) — TS's"
+                " parseWanTextEmbeds rejects it on the user's side"
             )
-        # 同じ行の原文と正規化後の文字列が等しいのは許す（集合で 1 つに畳む — TS と同じ）。
+        # The original and the normalized string of the same row may be equal (folded into one by
+        # the set — as in TS).
         for text in {entry["prompt"], normalized}:
             owner = owners.setdefault(text, name)
             if owner != name:
                 raise DistError(
-                    f"{path}: '{name}' の文字列が '{owner}' と同じ — どちらの埋め込みを使うかが"
-                    " 決まらない（TS の parseWanTextEmbeds が拒む）"
+                    f"{path}: the string of '{name}' is the same as '{owner}''s — which embedding"
+                    " to use is undecidable (TS's parseWanTextEmbeds rejects it)"
                 )
     rows, width = context
     if sorted(tensors) != sorted(name for name, _, _ in expected):
-        raise DistError(f"{path}: テンソル {sorted(tensors)} がメタのプロンプトと対応しない")
+        raise DistError(
+            f"{path}: the tensors {sorted(tensors)} do not correspond to the metadata's prompts"
+        )
     for entry in prompts:
         name, tokens = entry["name"], entry.get("tokens")
         tensor = tensors[name]
@@ -1211,36 +1316,38 @@ def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None
             or not 0 < tokens <= rows
         ):
             raise DistError(
-                f"{path}: '{name}' が F32 [{tokens}, {width}]（有効長 1〜{rows}）でない"
-                f"（{tensor!r}）— DiT の文脈入力 [1, {rows}, {width}] と噛み合わない"
+                f"{path}: '{name}' is not F32 [{tokens}, {width}] (valid length 1 to {rows})"
+                f" ({tensor!r}) — it does not fit the DiT's context input [1, {rows}, {width}]"
             )
 
 
 def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
-    """トークナイザ資産が、TS の読む形式・上流の pin・依存の版・DiT の文脈の行数と噛み合うことを
-    見る。
+    """Check that the tokenizer asset fits the format TS reads, the upstream pin, the dependency
+    versions and the row count of the DiT's context.
 
-    MUST: 組み立てで落とす。資産は表なので `verify_dist` の容器検査には掛からず、読み手
-    （`parseWanTokenizerAsset`）が見るのは形式と形だけ — 別の revision のトークナイザ・別の版の
-    ftfy で焼いた前処理の表は、利用者の手元で「別の id 列」として沈黙する。
+    MUST: fail at assembly. The asset is a table, so `verify_dist`'s container checks do not see it,
+    and the reader (`parseWanTokenizerAsset`) looks only at the format and the shapes — a tokenizer
+    of another revision, or preprocessing tables built with another ftfy version, stay silent on the
+    user's side as "a different id sequence".
 
-    見るのは 4 つ: 形式の版（`wan.umt5_tokenizer.ASSET_FORMAT`）・出所（repo / revision /
-    subfolder）が {@link SOURCES} の pin と一致・版（{@link WAN_TOKENIZER_VERSIONS}）が `wan`
-    グループのピンと一致・`maxLength`（TS が受ける token 数の上限）が DiT の文脈の行数以下（GPU
-    経路の出力をその行数まで詰める — ADR 0119 決定 4）。
+    Four things are checked: the format version (`wan.umt5_tokenizer.ASSET_FORMAT`); the provenance
+    (repo / revision / subfolder) matches the pin in {@link SOURCES}; the versions
+    ({@link WAN_TOKENIZER_VERSIONS}) match the pins of the `wan` group; and `maxLength` (the upper
+    bound on the token count TS accepts) is at most the DiT context's row count (the output of the
+    GPU path is packed up to that row count — ADR 0119 decision 4).
     """
     assert_component_present(path)
     try:
         asset = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as cause:
-        raise DistError(f"{path}: トークナイザ資産が JSON として読めない — {cause}") from cause
+        raise DistError(f"{path}: the tokenizer asset cannot be read as JSON — {cause}") from cause
     if not isinstance(asset, dict):
-        raise DistError(f"{path}: トークナイザ資産がオブジェクトでない")
+        raise DistError(f"{path}: the tokenizer asset is not an object")
     if asset.get("format") != umt5_tokenizer.ASSET_FORMAT:
         raise DistError(
-            f"{path}: 形式 {asset.get('format')!r} が {umt5_tokenizer.ASSET_FORMAT!r} でない"
-            " — TS の parseWanTokenizerAsset は知らない版を読まない"
-            "（`python -m wan.umt5_tokenizer`）"
+            f"{path}: the format {asset.get('format')!r} is not {umt5_tokenizer.ASSET_FORMAT!r}"
+            " — TS's parseWanTokenizerAsset does not read a version it does not know"
+            " (`python -m wan.umt5_tokenizer`)"
         )
     source = SOURCES[model]
     expected_source = {
@@ -1250,8 +1357,8 @@ def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
     }
     if asset.get("source") != expected_source:
         raise DistError(
-            f"{path}: トークナイザの出所 {asset.get('source')!r} が上流の pin {expected_source!r}"
-            " と違う — 別の checkpoint のトークナイザは配らない"
+            f"{path}: the tokenizer's provenance {asset.get('source')!r} differs from the"
+            f" upstream pin {expected_source!r} — a tokenizer of another checkpoint is not shipped"
         )
     versions = asset.get("versions")
     pinned = (
@@ -1262,8 +1369,9 @@ def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
     expected_versions = {name: WAN_TEXT_EMBEDS_VERSIONS[name] for name in WAN_TOKENIZER_VERSIONS}
     if pinned != expected_versions:
         raise DistError(
-            f"{path}: トークナイザ資産を焼いた版 {pinned!r} が `wan` グループのピン"
-            f" {expected_versions!r} と違う — id 列と前処理の表が版で変わる"
+            f"{path}: the versions that built the tokenizer asset {pinned!r} differ from the"
+            f" `wan` group's pins {expected_versions!r} — the id sequence and the preprocessing"
+            " tables change between versions"
         )
     max_length = asset.get("maxLength")
     if (
@@ -1272,29 +1380,31 @@ def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
         or not 0 < max_length <= rows
     ):
         raise DistError(
-            f"{path}: maxLength {max_length!r} が DiT の文脈の行数 1〜{rows} に収まらない"
-            " — GPU 経路の出力を文脈へ詰められない"
+            f"{path}: maxLength {max_length!r} does not fit the DiT context's row count 1 to {rows}"
+            " — the output of the GPU path cannot be packed into the context"
         )
 
 
 def wan_plan(
     sources: WanSources, model: str | None = None, generation: WanGeneration = WAN21
 ) -> ModelPlan:
-    """その世代の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる — 何も書かない）。
+    """Build the plan for one model of the generation (every check and read happens here — nothing
+    is written).
 
-    `sources` は同じ世代の {@link wan_sources} が引いたもの。`model` を省くとその世代の既定の
-    モデル。
+    `sources` is what {@link wan_sources} looked up for the same generation. Without `model`, the
+    generation's default model.
     """
     model = generation.default_model if model is None else model
     name = generation.card.generation
     assert_model_name(model)
-    # 門は取得元の表（`SOURCES` — 両方の世代の行を持つ）ではなく、その世代のモデルの表で閉じる。
-    # 配布リポ名はモデルによらず世代ごとに 1 つ（{@link wan_repo_name}）なので、表の全モデルを
-    # 通すと別の世代の出所を名乗る配布形がその世代の配布を置き換えうる。
+    # The check closes over the generation's model table, not over the sources table (`SOURCES` — it
+    # has rows of both generations). The distribution repository name is one per generation whatever
+    # the model ({@link wan_repo_name}), so letting every model of the table through would let a
+    # distribution stating another generation's provenance replace that generation's distribution.
     if model not in generation.models:
         raise DistError(
-            f"{name} のモデル {model!r} は知らない（既知: {' / '.join(generation.models)}）—"
-            f" {name} の配布（{generation.repo_name}）は {name} のモデルだけを配る"
+            f"unknown {name} model {model!r} (known: {' / '.join(generation.models)}) —"
+            f" the {name} distribution ({generation.repo_name}) ships only {name} models"
         )
     placements = wan_placements(sources, generation)
     upstream = SOURCES[model]
@@ -1303,19 +1413,23 @@ def wan_plan(
     for role in generation.container_roles:
         container = placements[role]
         assert_component_present(container)
-        # 重みを借りる組（ADR 0134）は束縛表を持たないので、格納は貸し手の容器で見る（借りる組が
-        # 貸し手から全部を借りることは下の {@link assert_shared_decoder} が見る）。
+        # A borrowing pair (ADR 0134) has no binding table, so its storage is checked on the
+        # lender's container (that the borrowing pair borrows everything from the lender is checked
+        # by {@link assert_shared_decoder} below).
         stored = placements[WAN_VAE_LENDER_ROLES.get(role, role)]
         assert_storage(role, stored, requirements)
         assert_storage_absent(role, stored, forbidden)
         if role == WAN_TEXT_ENCODER_ROLE:
-            # umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（ADR 0122 決定 1）— 出所は
-            # 下の umT5 の門（`wan.sources.UMT5_SOURCES` の行）が突き合わせる。
+            # The upstream of the umT5 container is not Wan but the original `google/umt5-xxl` (ADR
+            # 0122 decision 1) — its provenance is compared by the umT5 check below (the row of
+            # `wan.sources.UMT5_SOURCES`).
             continue
-        # 容器が名乗る出所を上流の pin（`wan.sources` が正本）へ突き合わせる — モデル名の表だけで
-        # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。DiT と
-        # VAE の容器はその世代の checkpoint から焼くので、計画のモデル名の pin で見る（テキスト
-        # 資産の pin {@link WanGeneration.text_model} とは別の欄 — ADR 0121 決定 9）。
+        # Compare the provenance the container states with the upstream pin (`wan.sources` is the
+        # source of truth) — a check closed over the model-name table alone lets through a container
+        # built from another revision and placed at the series path. The DiT and VAE containers are
+        # built from the generation's checkpoint, so they are checked against the pin of the plan's
+        # model name (a field separate from the text assets' pin {@link WanGeneration.text_model} —
+        # ADR 0121 decision 9).
         assert_upstream_provenance(container, license=upstream.license, revision=upstream.revision)
     assert_vae_chunk_pair(
         placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE], generation.vae_writer
@@ -1342,26 +1456,28 @@ def wan_plan(
         lender = WAN_VAE_LENDER_ROLES.get(role)
         if lender is not None:
             assert_shared_decoder(placements[role], placements[lender])
-    # umT5 の容器は umT5 の配布形と同じ門（出所・束縛表・入出力の契約）を通す（越境参照の先は
-    # この容器とバイト同一 — `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の
-    # 名前。
+    # The umT5 container passes the same checks as the umT5 distribution (provenance, binding table,
+    # input / output contract) (the reference target is byte-identical to this container —
+    # `karume.dist.external_refs` checks it). The model name is the one on the umT5 repository's
+    # side.
     encoder_width = assert_umt5_encoder(placements[WAN_TEXT_ENCODER_ROLE], UMT5_DEFAULT_MODEL)
     transformers = [placements[role] for role in generation.transformer_roles]
     for transformer in transformers:
         assert_rope_base(transformer, generation.dit_writer)
         context = dit_context(transformer)
-        # 埋め込み資産・トークナイザ・text_encoder は quant 非依存の 1 本なので、どの席の DiT の
-        # 文脈入力とも噛み合う必要がある。資産 2 本の出所はテキスト資産の pin で見る（Wan2.2 でも
-        # Wan2.1 の checkpoint の umT5 から作った資産 — ADR 0121 決定 9）。
+        # The embeddings asset, the tokenizer and the text_encoder are single quant-independent
+        # entries, so they must fit the context input of every preset's DiT. The provenance of the 2
+        # assets is checked against the text assets' pin (even in Wan2.2 they are assets made from
+        # the umT5 of the Wan2.1 checkpoint — ADR 0121 decision 9).
         assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], generation.text_model, context)
         assert_umt5_tokenizer(placements[WAN_TOKENIZER_ROLE], generation.text_model, context[0])
         if encoder_width != context[1]:
             raise DistError(
-                f"{placements[WAN_TEXT_ENCODER_ROLE]}: umT5 の出力の幅 {encoder_width} が"
-                f" {transformer} の文脈入力の幅 {context[1]} と違う — text 段の出力を DiT へ"
-                " 渡せない"
+                f"{placements[WAN_TEXT_ENCODER_ROLE]}: the umT5 output width {encoder_width}"
+                f" differs from {transformer}'s context input width {context[1]} — the text"
+                " stage's output cannot be passed to the DiT"
             )
-    # transformer の容器が 1 本の世代（Wan2.2）では 1 本の集合で通る。
+    # A generation with a single transformer container (Wan2.2) passes with a one-element set.
     assert_shared_rope_base(transformers)
     weights = generation.weights
     return ModelPlan(
@@ -1380,7 +1496,8 @@ def wan_plan(
 
 
 def wan_dist_plan(series_dir: Path, model: str, generation: WanGeneration = WAN21) -> ModelPlan:
-    """`--series` の親からその世代の 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    """Build the plan for one model of the generation from the parent of `--series` (the CLI's
+    dispatch target)."""
     return wan_plan(wan_sources(series_dir, generation), model, generation)
 
 
@@ -1397,18 +1514,20 @@ def wan_references(_model: str) -> tuple[CrossRepoReference, ...]:
     return (WAN_TEXT_ENCODER_REFERENCE,)
 
 
-#: 上流ライセンス（Apache 2.0）の原文。再配布条件 §4 は配布リポ 1 つに掛かり、Wan2.1 / Wan2.2 の
-#: どちらの配布リポも同じ原文を置くので、読みは組み立ての回数・世代の数によらずここで 1 回
-#: （ADR 0092 決定 7）。
+#: The original text of the upstream license (Apache 2.0). The redistribution terms of §4 apply per
+#: distribution repository, and both the Wan2.1 and the Wan2.2 distribution repositories carry the
+#: same text, so it is read once here whatever the number of assemblies or generations (ADR 0092
+#: decision 7).
 _APACHE_LICENSE = apache_license_2_0()
 
-#: `--pipeline wan` の 1 行（ドライバが core の PIPELINES へ合成する）。
+#: The `--pipeline wan` entry (the driver merges it into the core's PIPELINES).
 PIPELINE = Pipeline(
     default_model=DEFAULT_MODEL,
     repo_name=wan_repo_name,
     plan=wan_dist_plan,
-    # 帰属（上流リポ・ライセンス）はモデル名から一意に決まる（`wan.sources.SOURCES`）ので、
-    # 選ばせる軸にしない。略称の対応表は manifest に無い事実なので、ここから渡す（anima と同じ形）。
+    # Attribution (upstream repository, license) is determined uniquely by the model name
+    # (`wan.sources.SOURCES`), so it is not an axis to choose. The abbreviation table is a fact not
+    # in the manifest, so it is passed from here (the same form as anima).
     card_profiles={
         "wan": partial(
             render_wan_model_card, abbreviations=WAN_QUANT_ABBREVIATIONS, card=WAN21.card
@@ -1421,9 +1540,9 @@ PIPELINE = Pipeline(
     references=wan_references,
 )
 
-#: `--pipeline wan-ti2v` の 1 行（Wan2.2 TI2V 5B → `karume-wan2.2`）。形は {@link PIPELINE} と
-#: 同じで、世代の表 {@link WAN22} を束ねる。上流ライセンスは同じ Apache 2.0 で、NOTICE は 2.2 の
-#: 改変。
+#: The `--pipeline wan-ti2v` entry (Wan2.2 TI2V 5B → `karume-wan2.2`). The same form as
+#: {@link PIPELINE}, bundling the generation table {@link WAN22}. The upstream license is the same
+#: Apache 2.0, and the NOTICE is 2.2's modifications.
 TI2V_PIPELINE = Pipeline(
     default_model=WAN22.default_model,
     repo_name=partial(wan_repo_name, generation=WAN22),

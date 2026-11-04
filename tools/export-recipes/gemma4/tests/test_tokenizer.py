@@ -1,20 +1,23 @@
-"""トークナイザ資産の台本（`gemma4/tokenizer.py`）の台本レベルの約束事（実資産不要分）。
+"""Script-level contract of the tokenizer asset script (`gemma4/tokenizer.py`) (the part that
+needs no real asset).
 
-実資産（32MB の `tokenizer.json`）はローカルにしか無いので、ここが見るのは**定数と path
-だけ**で成立する規律（transformers も torch も要らない）。`chat.py` の同役は
-{@link gemma4.tests.test_chat} の `TestScopeGate`。
+The real asset (the 32MB `tokenizer.json`) exists only locally, so what is checked here are rules
+that hold **on constants and paths alone** (neither transformers nor torch is needed). The
+counterpart for `chat.py` is `TestScopeGate` of {@link gemma4.tests.test_chat}.
 
-固定するのは、壊れると**偽 PASS** になる側だけ:
+Only what turns into a **false PASS** when broken is pinned:
 
-- 名前が共有電池（{@link _shared.gemma_tokenizer.SHARED_ENCODE_CASES}）と合わせて一意で
-  あること。`emit` は 2 つの列を連結するだけで一意性を見ないので、名前が衝突するとパリティ
-  フィクスチャに同名 2 件が並ぶ。TS 側は名前で 1 件を引く場所があり
-  （`packages/models/tests/gemma4_tokenizer_test.ts` の `fixture.encode.find(…)`）、`find` は
-  黙って先頭を返す — **別のケースを測って緑になる**（落ちて読めなくなるのではない）
-- 出力先の綴りが配布 recipe の系列名と一致すること（書き手と読み手が同じ 1 語から組む —
-  `gemma4/distribution.py` の宣言）
-- パリティフィクスチャの出力先が git 管理の実在ファイルであること（消えると TS 側が読む先を
-  失う）
+- names are unique together with the shared battery
+  ({@link _shared.gemma_tokenizer.SHARED_ENCODE_CASES}). `emit` only concatenates the two lists
+  and does not check uniqueness, so a name collision puts two entries of the same name into the
+  parity fixture. The TS side looks up one entry by name in places
+  (`fixture.encode.find(…)` in `packages/models/tests/gemma4_tokenizer_test.ts`), and `find`
+  silently returns the first — **it measures another case and goes green** (rather than failing
+  as unreadable)
+- the spelling of the output path matches the distribution recipe's series name (writer and reader
+  build it from the same one word — the declaration in `gemma4/distribution.py`)
+- the parity fixture's output path is an existing file tracked in git (if it disappears, the TS
+  side loses what it reads)
 """
 
 from __future__ import annotations
@@ -37,16 +40,18 @@ from gemma4.distribution import (
 
 class TestScopeGate:
     def test_the_case_names_are_unique_against_the_shared_battery(self) -> None:
-        """名前が衝突すると TS 側の `find` が別のケースを黙って測る（偽 PASS）。"""
+        """On a name collision the TS side's `find` silently measures another case (false PASS)."""
         names = [case.name for case in (*SHARED_ENCODE_CASES, *tokenizer.CASES)]
 
         assert sorted(names) == sorted(set(names))
 
     def test_every_shipped_case_carries_a_name_and_a_text(self) -> None:
-        """名前はフィクスチャの索引・本文は測る対象そのもの（空だと門が恒真になる）。
+        """The name is the fixture's index, the text is the very thing measured (empty, the check
+        becomes vacuous).
 
-        NOTE: 共有電池は `empty`（空文字列）を意図して持つが、family 固有の追加分は
-        「この checkpoint の綴りを踏む」ためのケースなので本文が空になる理由が無い。
+        NOTE: the shared battery holds `empty` (the empty string) on purpose, but the
+        family-specific additions are cases that "exercise this checkpoint's spellings", so there
+        is no reason for their text to be empty.
         """
         for case in tokenizer.CASES:
             assert case.name
@@ -56,14 +61,16 @@ class TestScopeGate:
 
 class TestOutputPaths:
     def test_the_asset_path_is_the_series_name_the_distribution_reads(self) -> None:
-        """書き手（台本）と読み手（配布 recipe）が同じ 1 語から系列名を組む。"""
+        """The writer (script) and the reader (distribution recipe) build the series name from the
+        same one word."""
         expected = gemma4_series_name(GEMMA4_DEFAULT_MODEL, GEMMA4_TOKENIZER_SUFFIX)
 
         assert tokenizer.ASSET_PATH.parent.name == expected
         assert tokenizer.ASSET_PATH.name == GEMMA4_TOKENIZER_FILE
 
     def test_the_parity_fixture_is_a_tracked_file(self) -> None:
-        """フィクスチャは git 管理（TS 側 `gemma4_tokenizer_test.ts` が読む現物）。"""
+        """The fixture is tracked in git (the file the TS side's `gemma4_tokenizer_test.ts`
+        reads)."""
         assert tokenizer.FIXTURE_PATH.is_file()
 
 

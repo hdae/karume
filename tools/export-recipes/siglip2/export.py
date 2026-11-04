@@ -1,87 +1,96 @@
-"""実重み SigLIP2 の **vision tower** をコンテナ（`krm`）+ golden io へ書き出す台本。
+"""Script that writes the real-weight SigLIP2 **vision tower** to a container (`krm`) + golden io.
 
-`embeddinggemma/export.py` と同じ役割（実重み・単一ベクトル出力の数値一致）を、画像側で
-受け持つ。生成物は `outputs/series/` 配下で、リポジトリ直下の `.gitignore` によりコミット
-対象外（重み 350MB〜1.7GB）。
+It plays the role of `embeddinggemma/export.py` (real weights, numeric match of a single vector
+output) on the image side. The output goes under `outputs/series/` and is kept out of commits by
+the `.gitignore` at the repository root (weights of 350MB to 1.7GB).
 
     uv run --group siglip2 python -m siglip2.export
-    uv run --group siglip2 python -m siglip2.export --verify  # パッチ前 eager との同値検証
+    uv run --group siglip2 python -m siglip2.export --verify  # equivalence with pre-patch eager
 
-transformers は **5.14.1 でピン**する（`siglip2.patch` がモデリングコードのクラス
-属性を差し替えるため — pyproject.toml の `siglip2` グループ）。
+transformers is **pinned at 5.14.1** (`siglip2.patch` replaces class attributes of the modeling
+code — the `siglip2` group of pyproject.toml).
 
-## モデル軸
+## Model axis
 
-対象は `--model-dir` の 1 軸で、系列名はそのディレクトリ名から導く（`sbv2/export.py` /
-`irodori/export.py` と同じ持ち方）— 出力先を固定にすると、別のモデルを書き出した瞬間に先の
-系列が黙って上書きされる。
+The target is the single axis `--model-dir`, and the series name is derived from that directory's
+name (the same arrangement as `sbv2/export.py` / `irodori/export.py`) — with a fixed output
+directory, exporting another model would silently overwrite the earlier series.
 
     uv run --group siglip2 python -m siglip2.export \
         --model-dir ../../inputs/siglip2/siglip2-so400m-patch14-384
 
-規模の差（hidden / 層数 / head 数 / intermediate / patch / 解像度）は**全て config.json 由来**
-で、台本はどこにも焼かない。合成画像の寸法も `config.image_size` / `config.patch_size` から
-組む（{@link build_cases}）。
+The differences in scale (hidden / layer count / head count / intermediate / patch / resolution)
+**all come from config.json**; the script hard-codes none of them. The dimensions of the synthetic
+images are also built from `config.image_size` / `config.patch_size` ({@link build_cases}).
 
-## 何をグラフに載せるか
+## What goes into the graph
 
-`SiglipVisionModel` の **pooler_output 1 本だけ**（MAP head を通した `[B, hidden]`）。
-`last_hidden_state` は出さない — 読み戻しが `[B, パッチ数, hidden]` と 2 桁大きく、埋め込み
-用途では使われない（ADR 0026 の「出力を絞る」と同じ判断）。text tower は載せない。
+**Only the pooler_output** of `SiglipVisionModel` (`[B, hidden]` after the MAP head).
+`last_hidden_state` is not emitted — its readback, `[B, patch count, hidden]`, is two orders of
+magnitude larger and is not used for embeddings (the same call as "narrow the outputs" in
+ADR 0026). The text tower is not included.
 
-batch は **静的 1**。画像側は解像度も系列長（= パッチ数）も固定で、動かす軸が無い。
+batch is **static 1**. On the image side both the resolution and the sequence length (= patch count)
+are fixed, so no axis varies.
 
-MUST: SDPA は**保存しない**（既定の `PRESERVED_OP_PREFIXES` 11 本のまま）。attention は
-エンコーダの層数 + MAP head の 1 本とも mul×2 + bmm + softmax + bmm へ分解される
-（base は 12 + 1 / so400m は 27 + 1）。ADR 0023 の融合 attention はこの系列では opt-in しない。
+MUST: SDPA is **not preserved** (the default 11 `PRESERVED_OP_PREFIXES` stay as they are). The
+attention of every encoder layer and of the MAP head is decomposed into mul×2 + bmm + softmax + bmm
+(12 + 1 for base / 27 + 1 for so400m). This series does not opt in to the fused attention of
+ADR 0023.
 
-MUST: モデルは `siglip2.patch` の 2 段パッチを当ててから export する（当てないと
-`aten.conv2d.padding` / `aten.select.int` / `aten.embedding` の i64 initializer が残る）。
-golden の期待値は**差し替え後**のモジュールから採る — 差し替え前後の差はパッチ層の責務で、
-`--verify` が 2 点評価で実測する（1 点目 = 形の畳み込みだけ・ビット同一が主張の中身、
-2 点目 = MAP head まで・maxdiff を報告）。
+MUST: the model is exported after applying the two-step patch of `siglip2.patch` (without it, the
+i64 initializers of `aten.conv2d.padding` / `aten.select.int` / `aten.embedding` remain). The golden
+expected values are taken from the module **after the replacement** — the difference before and
+after the replacement is the patch layer's responsibility, and `--verify` measures it at two points
+(point 1 = the shape folds only, where bit-identity is the claim itself; point 2 = up to the MAP
+head, reporting the maxdiff).
 
-MUST: `--verify` は emit しない（同一プロセスでは併用できない）。パッチはクラス属性の
-プロセス全域差し替えなので、emit のために当てた後では「当てる前の参照」が採れない。
+MUST: `--verify` does not emit (the two cannot be combined in one process). The patch replaces
+class attributes process-wide, so once it has been applied for the emit, "the reference before
+patching" can no longer be taken.
 
-## 入力の約束（前処理はグラフに載せない）
+## Input contract (preprocessing is not in the graph)
 
-グラフ入力は **正規化済みの** `pixel_values f32 [1, 3, 解像度, 解像度]`（base 224 /
-so400m 384）。画像の decode はホストの責務、resize（`config.image_size` へ bilinear）/
-rescale（1/255）/ normalize（mean = std = 0.5 → `[-1, 1]`）は karume 側
-（`packages/models/src/image/preprocess.ts`・パリティ台本は `siglip2/preprocess.py`）。
-定数の正本は重みと同じ場所の `preprocessor_config.json`（2 モデルとも mean = std = 0.5・
-**resample 2 = PIL の BILINEAR**〈BICUBIC は 3〉で、違うのは寸法だけ）。
+The graph input is the **normalized** `pixel_values f32 [1, 3, resolution, resolution]` (base 224 /
+so400m 384). Decoding the image is the host's job; resize (bilinear to `config.image_size`) /
+rescale (1/255) / normalize (mean = std = 0.5 → `[-1, 1]`) are on the karume side
+(`packages/models/src/image/preprocess.ts`; the parity script is `siglip2/preprocess.py`).
+The source of truth for the constants is `preprocessor_config.json` next to the weights (mean =
+std = 0.5 for both models, **resample 2 = PIL's BILINEAR** (BICUBIC is 3); only the dimensions
+differ).
 
-## golden の 2 群（合成画像 + 実画像）
+## Two groups of goldens (synthetic images + real images)
 
-既定の 4 ケースは**合成画像**（{@link build_cases}）で、値域の端や勾配を踏むので数値回帰の
-検出が鋭い。`--real-images` を付けると、それに加えて `outputs/misc/corpus/` の**実画像** 4 枚
-（{@link REAL_CASES}）を通した golden も書く。実画像の側は穏やかな値しか踏まないかわりに、
-**前処理を含めた鎖**（TS 側は PNG → `preprocess.ts` → karume 推論、こちら側は PIL →
-`TorchvisionBackend` → torch 推論）の突合になる。どちらも残す（片方が他方を代替しない）。
+The default 4 cases are **synthetic images** ({@link build_cases}); they hit the ends of the value
+range and gradients, so they detect numeric regressions sharply. With `--real-images`, goldens of
+4 **real images** from `outputs/misc/corpus/` ({@link REAL_CASES}) are written as well. The real
+images hit only moderate values, but in exchange they compare **the chain including
+preprocessing** (on the TS side PNG → `preprocess.ts` → karume inference, on this side PIL →
+`TorchvisionBackend` → torch inference). Both are kept (neither replaces the other).
 
     uv run --group siglip2-preprocess python -m siglip2.export --real-images
 
-MUST: `--real-images` は **`siglip2-preprocess` グループ**で回す。実画像の前処理は
-`AutoImageProcessor` の fast 側（`TorchvisionBackend`）が正本で、torchvision と pillow が要る
-（`siglip2` グループは export に要らないその 2 つを持たない — pyproject.toml）。
+MUST: run `--real-images` with the **`siglip2-preprocess` group**. The source of truth for the
+real images' preprocessing is the fast side of `AutoImageProcessor` (`TorchvisionBackend`), which
+needs torchvision and pillow (the `siglip2` group does not have those two, which the export does not
+need — pyproject.toml).
 
-MUST: 実画像 golden には**元画像の sha256** を `__metadata__` に載せる。画像は
-`examples/anima/eval-images.ts` が焼いた出力を `outputs/misc/corpus/` へ**人手で凍結コピー**
-したものなので、コーパスを差し替えたのに golden を採り直していない環境では、突合ではなく
-**入力が違う**（そして値は一見それらしく出る）。
+MUST: real-image goldens carry **the source image's sha256** in `__metadata__`. The images are
+output baked by `examples/anima/eval-images.ts` and **frozen by hand as copies** in
+`outputs/misc/corpus/`, so in an environment where the corpus was replaced but the goldens were not
+re-taken, the comparison is not a comparison: **the inputs differ** (and the values look plausible
+at first sight).
 
-## 出力レイアウト
+## Output layout
 
-系列名は `--model-dir` のディレクトリ名（既定の `inputs/siglip2/siglip2-base-patch16-224/`
-なら `siglip2-base-patch16-224`）:
+The series name is the directory name of `--model-dir` (`siglip2-base-patch16-224` for the default
+`inputs/siglip2/siglip2-base-patch16-224/`):
 
-    outputs/series/<系列名>/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
+    outputs/series/<series name>/model.krm             weights, constants + the two descriptors
+    outputs/series/<series name>/io.<case>.safetensors inputs and torch CPU expected outputs
 
-io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma と同じ
-（`input.<グラフ入力名>` / `output.<位置>`）。
+The tensor key convention of io is the same as tiny golden / DeBERTa / EmbeddingGemma
+(`input.<graph input name>` / `output.<position>`).
 """
 
 from __future__ import annotations
@@ -111,37 +120,42 @@ from karume.pipeline import export_to_file
 from . import patch
 from .distribution import SIGLIP2_ROLE
 
-#: 実重みの親（`hf download google/<名前> --local-dir inputs/siglip2/<名前>` の展開先）。
+#: Parent of the real weights (where `hf download google/<name> --local-dir inputs/siglip2/<name>`
+#: unpacks).
 MODELS_ROOT = INPUTS_ROOT / "siglip2"
 
-#: 実画像コーパスの置き場（凍結コピー = ホスト資産なので、消すと焼き直しが要る —
-#: docs/assets-layout.md）。
+#: Location of the real-image corpus (a frozen copy = a host asset, so deleting it means re-baking —
+#: docs/assets-layout.md).
 CORPUS_ROOT = MISC_ROOT / "corpus"
 
-#: 既定のモデル（`--model-dir` 未指定のとき）。
+#: Default model (when `--model-dir` is not given).
 DEFAULT_MODEL_DIR = MODELS_ROOT / "siglip2-base-patch16-224"
 
 
 def default_out_dir(model_dir: Path) -> Path:
-    """生成物の既定の置き場（`outputs/series/<実重みのディレクトリ名>/`）。
+    """Default location of the output (`outputs/series/<directory name of the real weights>/`).
 
-    モデル名を系列の綴りへ焼くのは `sbv2/export.py` の `default_out_root` と同じ理由 —
-    固定の綴りを共有すると、別のモデルを書き出した瞬間に先の資産が黙って上書きされる。
+    The model name goes into the series spelling for the same reason as `default_out_root` in
+    `sbv2/export.py` — with a shared fixed spelling, exporting another model would silently
+    overwrite the earlier assets.
 
-    格納 dtype は f32 のみなので dtype 別の枝は無い（f16 / i8 は別系列で決める話）。
+    The storage dtype is f32 only, so there is no per-dtype branch (f16 / i8 would be decided as
+    separate series).
     """
     return SERIES_ROOT / model_dir.name
 
 
 def upstream_provenance(model_dir: Path) -> Provenance:
-    """容器へ焼く出所（container-v1 §2.3）を `--model-dir` の実物から導く。
+    """Derive the provenance baked into the container (container-v1 §2.3) from the actual
+    `--model-dir`.
 
-    ライセンス識別子は README の front matter、revision は `hf download --local-dir` の取得記録
-    （{@link _shared.upstream.snapshot_provenance}）。系列の移行（`migrate_series`）も同じ 1 本を
-    引く。
+    The license identifier comes from the README front matter, the revision from the download
+    record of `hf download --local-dir` ({@link _shared.upstream.snapshot_provenance}). Series
+    migration (`migrate_series`) calls the same function.
 
-    定数にしないのは、別の checkpoint を焼いた容器も帰属表のライセンスを名乗る形になるから。
-    帰属表（カード側の正本）との突合は組み立て側（`siglip2.distribution`）が持つ。
+    It is not a constant because then a container baked from another checkpoint would also claim
+    the attribution table's license. The comparison with the attribution table (the card side's
+    source of truth) belongs to the assembly side (`siglip2.distribution`).
     """
     return snapshot_provenance(model_dir, notice=NOTICE_FILENAME)
 
@@ -153,65 +167,71 @@ IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: グラフ入力の名前（= `VisionPooler.forward` の引数名）。export 後に突合してずれていたら
-#: 止める — 位置で渡す以上、黙ってずれると golden の入力だけが入れ替わる。
+#: Name of the graph input (= the parameter name of `VisionPooler.forward`). It is compared after
+#: the export and stops on a mismatch — inputs are passed by position, so a silent shift would swap
+#: only the golden inputs.
 INPUT_NAME = "pixel_values"
 
-#: 合成画像の乱数（`noise` ケース）。グローバル seed に依存しない。
+#: Random seed of the synthetic images (the `noise` case). Independent of the global seed.
 SEED = 20260813
 
-#: チャネルごとの明度オフセット。3 チャネルが同一の面だと、チャネルの取り違え（patch
-#: 埋め込みの重みレイアウト誤り）が値に出ない。
+#: Per-channel brightness offsets. If the 3 channels were identical planes, a channel mix-up (a
+#: wrong weight layout of the patch embedding) would not show in the values.
 CHANNEL_OFFSETS: tuple[float, ...] = (-0.2, 0.0, 0.2)
 
-#: `ramp-dim` のコントラスト比（`ramp` と**構造は同じで強度だけ違う**近い対を作る）。
+#: Contrast ratio of `ramp-dim` (makes a near pair with `ramp` that **has the same structure and
+#: differs only in intensity**).
 DIM_SCALE = 0.5
 
-#: sanity で見る cosine の対（近い対, 遠い対）。近い対が遠い対を上回らなければ、
-#: 「数値は動いているが画像埋め込みとして壊れている」— 生成時に fail loudly にする。
+#: The cosine pairs the sanity check looks at (near pair, far pair). If the near pair does not
+#: exceed the far pair, "the numbers move but the image embedding is broken" — fail loudly at
+#: generation time.
 NEAR_PAIR = ("ramp", "ramp-dim")
 FAR_PAIR = ("ramp", "checker")
 
-#: 実画像ケース = (ケース名, `outputs/misc/corpus/` のファイル名, 内容)。**画像の正本は
-#: `examples/anima/eval-images.ts`**（プロンプト / seed / 解像度を持つのはあちらで、
-#: `deno task demo:eval-images` で同じ 4 枚が焼き直せる — 採用分を人手で凍結コピーする）。
+#: Real-image cases = (case name, file name in `outputs/misc/corpus/`, content). **The source of
+#: truth for the images is `examples/anima/eval-images.ts`** (it holds the prompts / seeds /
+#: resolution, and `deno task demo:eval-images` re-bakes the same 4 images — the chosen ones are
+#: frozen by hand as copies).
 REAL_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "photo-portrait",
         "anima-default-1024x1024-defaultstep-seed42.png",
-        "人物アップ + 桜並木（前景と背景が明確）",
+        "close-up of a person + a row of cherry trees (clear foreground and background)",
     ),
     (
         "photo-landscape",
         "anima-default-1024x1024-defaultstep-seed43.png",
-        "風景（山・湖・森・人物なし）",
+        "landscape (mountains, lake, forest, no people)",
     ),
     (
         "photo-corridor",
         "anima-default-1024x1024-defaultstep-seed44.png",
-        "校舎の廊下（強い遠近・消失点）",
+        "school corridor (strong perspective, vanishing point)",
     ),
     (
         "photo-street",
         "anima-default-1024x1024-defaultstep-seed45.png",
-        "全身人物 + 街並み（背景が複雑）",
+        "full-body person + a street (busy background)",
     ),
 )
 
-#: 実画像の判別で見る 2 群（人物が写っている 2 枚 / 写っていない 2 枚）。**人物どうしの
-#: cosine が、人物と風景の 4 対のどれよりも高い**ことを見る（合成画像の NEAR/FAR より
-#: 意味のある判別 — 閾値は置かず順序そのものを見る）。TS 側の
-#: `packages/runtime/tests/e2e_siglip2_test.ts` が同じ群を実 GPU 出力に掛ける。
+#: The two groups of the real-image discrimination check (2 images with people / 2 without). It
+#: checks that **the cosine between the two people is higher than any of the 4 person × scene
+#: pairs** (a more meaningful discrimination than the synthetic NEAR/FAR — no threshold, only the
+#: order itself). The TS-side `packages/runtime/tests/e2e_siglip2_test.ts` applies the same groups
+#: to real GPU output.
 REAL_PERSON_CASES = ("photo-portrait", "photo-street")
 REAL_SCENE_CASES = ("photo-landscape", "photo-corridor")
 
-#: 実画像 golden の `__metadata__` の欄（元画像の同定 — モジュール docstring の MUST）。
+#: Fields of the real-image golden's `__metadata__` (identifying the source image — the MUST of the
+#: module docstring).
 SOURCE_IMAGE_KEY = "source_image"
 SOURCE_SHA256_KEY = "source_sha256"
 
 
 class VisionPooler(nn.Module):
-    """pooler_output（MAP head 経由の `[B, hidden]`）1 本だけを返す export 用ラッパ。"""
+    """Export wrapper that returns only the pooler_output (`[B, hidden]` through the MAP head)."""
 
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
@@ -222,30 +242,31 @@ class VisionPooler(nn.Module):
 
 
 def _stack_channels(plane: torch.Tensor, channels: int) -> torch.Tensor:
-    """`[S, S]` の 1 面をチャネルごとにずらして `[1, C, S, S]` にする。"""
+    """Turn one `[S, S]` plane into `[1, C, S, S]`, offset per channel."""
     offsets = torch.tensor(CHANNEL_OFFSETS[:channels]).reshape(channels, 1, 1)
     return (plane.unsqueeze(0) + offsets).clamp(-1.0, 1.0).unsqueeze(0)
 
 
 def _ramp_plane(size: int) -> torch.Tensor:
-    """左上から右下への対角ランプ（`[S, S]`・値域 `[-1, 1]`）。"""
+    """Diagonal ramp from top left to bottom right (`[S, S]`, value range `[-1, 1]`)."""
     axis = torch.linspace(-1.0, 1.0, size)
     return (axis.reshape(1, size) + axis.reshape(size, 1)) / 2.0
 
 
 def _checker_plane(size: int, cell: int) -> torch.Tensor:
-    """パッチ格子に揃えた市松（`[S, S]`・値は ±1）。"""
+    """Checkerboard aligned to the patch grid (`[S, S]`, values ±1)."""
     index = torch.arange(size) // cell
     parity = (index.reshape(1, size) + index.reshape(size, 1)) % 2
     return parity.to(torch.float32) * 2.0 - 1.0
 
 
 def build_cases(config: Any) -> tuple[tuple[str, torch.Tensor], ...]:
-    """golden 4 ケースの `(名前, pixel_values)`（**正規化済み**の合成画像）。
+    """`(name, pixel_values)` of the 4 golden cases (**normalized** synthetic images).
 
-    合成 4 ケースは数値回帰の感度用（値域の端と勾配を踏む）。実画像は `--real-images` が足す。
-    構造だけを変えた対を持たせて、{@link _sanity} の cosine 順序が恒真にならないようにする:
-    `ramp` と `ramp-dim` は同じ構造で強度だけ違い、`checker` は構造ごと違う。
+    The 4 synthetic cases are for sensitivity to numeric regressions (they hit the ends of the value
+    range and gradients). `--real-images` adds the real images. Pairs that differ only in structure
+    keep the cosine order of {@link _sanity} from being vacuous: `ramp` and `ramp-dim` have the
+    same structure and differ only in intensity, while `checker` differs in structure altogether.
     """
     size = int(config.image_size)
     channels = int(config.num_channels)
@@ -261,12 +282,14 @@ def build_cases(config: Any) -> tuple[tuple[str, torch.Tensor], ...]:
 
 
 def load_image_processor(model_dir: Path) -> Any:
-    """実画像の前処理に使う image processor を、実体検査ごと**正本から**借りる。
+    """Borrow the image processor for the real images' preprocessing, together with its type
+    checks, **from the source of truth**.
 
-    MUST: 検査を書き直さない（`siglip2/preprocess.py` が前処理の正本で、TS 側のパリティ門も
-    あちらのフィクスチャで閉じている）— 2 本目の検査を持つと、片方だけ直したときに黙って
-    食い違う。import が関数内なのは、あちらがこの台本から既定パスを取っており、モジュール
-    先頭で読むと循環になるため。
+    MUST: do not rewrite the checks (`siglip2/preprocess.py` is the source of truth for
+    preprocessing, and the TS-side parity check is closed against its fixture) — with a second copy
+    of the checks, fixing only one would make them diverge silently. The import is inside the
+    function because that module takes its default paths from this script, and importing it at the
+    top of the module would be circular.
     """
     from .preprocess import check_processor_shape, load_processor
 
@@ -278,22 +301,24 @@ def load_image_processor(model_dir: Path) -> Any:
 def build_real_cases(
     model_dir: Path, config: Any, corpus_root: Path
 ) -> tuple[tuple[str, torch.Tensor, dict[str, str]], ...]:
-    """実画像 4 枚の `(名前, pixel_values, __metadata__)`（{@link REAL_CASES}）。
+    """`(name, pixel_values, __metadata__)` of the 4 real images ({@link REAL_CASES}).
 
-    前処理は **TS 側と同じ経路**（`AutoImageProcessor` の fast 側 = `TorchvisionBackend`）を
-    通す。この golden の主張は「TS 前処理 + karume 推論」対「Python 前処理 + torch 推論」の
-    突合なので、ここで別の resize を使うと主張の中身が消える。
+    Preprocessing goes through **the same path as the TS side** (the fast side of
+    `AutoImageProcessor` = `TorchvisionBackend`). What this golden claims is a comparison of "TS
+    preprocessing + karume inference" against "Python preprocessing + torch inference", so using a
+    different resize here would void the claim.
 
-    MUST: 画像が 1 枚でも欠けていたら、重い import より**先に**止める（`--real-images` は
-    明示の意思表示なので、黙って 3 枚で書くと golden の欠けに気づけない）。
+    MUST: if even one image is missing, stop **before** the heavy imports (`--real-images` is an
+    explicit request, so silently writing 3 images would leave the missing golden unnoticed).
     """
     paths: list[tuple[str, str, Path]] = []
     for name, file_name, _why in REAL_CASES:
         path = corpus_root / file_name
         if not path.is_file():
             raise SystemExit(
-                f"実画像 {path} が無い（焼く: deno task demo:eval-images"
-                " --source <Anima 配布形のパス> → 採用分を outputs/misc/corpus/ へ凍結コピー）"
+                f"real image {path} is missing (bake it: deno task demo:eval-images"
+                " --source <path of the Anima distribution> → freeze a copy of the chosen ones"
+                " in outputs/misc/corpus/)"
             )
         paths.append((name, file_name, path))
 
@@ -309,12 +334,13 @@ def build_real_cases(
         pixel_values = processor(
             images=array, input_data_format="channels_last", return_tensors="pt"
         )["pixel_values"]
-        # MUST: 前処理の寸法が vision config と一致することを見る（`preprocessor_config.json`
-        # と `config.json` は別ファイルで、食い違えば golden だけが別解像度で焼かれる）。
+        # MUST: check that the preprocessing dimensions match the vision config
+        # (`preprocessor_config.json` and `config.json` are separate files; if they disagree,
+        # only the golden is baked at another resolution).
         if tuple(pixel_values.shape) != expected_shape:
             raise AssertionError(
-                f"{name} の pixel_values が {tuple(pixel_values.shape)}"
-                f"（config 由来の {expected_shape} と違う）"
+                f"the pixel_values of {name} are {tuple(pixel_values.shape)}"
+                f" (differs from {expected_shape}, which comes from the config)"
             )
         cases.append(
             (
@@ -330,10 +356,11 @@ def build_real_cases(
 
 
 def load_model(model_dir: Path) -> nn.Module:
-    """vision tower の実重みを読み、差し替え版が前提にする config を検査する（パッチ前）。
+    """Load the real weights of the vision tower and check the config the replacements assume
+    (before patching).
 
-    MUST: `attn_implementation="sdpa"` — エンコーダ 12 層の attention を SDPA として出させる
-    （既定の分解表がそれを mul×2 + bmm + softmax + bmm に開く）。
+    MUST: `attn_implementation="sdpa"` — makes the attention of the 12 encoder layers come out as
+    SDPA (the default decomposition table expands it into mul×2 + bmm + softmax + bmm).
     """
     from transformers import SiglipVisionModel
 
@@ -346,10 +373,11 @@ def load_model(model_dir: Path) -> nn.Module:
 
 
 def load_wrapper(model_dir: Path) -> VisionPooler:
-    """パッチを 2 段とも当てた export 可能なラッパを返す。
+    """Return an exportable wrapper with both patch steps applied.
 
-    MUST: 差し替えは golden を採る**前**（`siglip2.patch` の docstring）— 後に当てると
-    期待値だけが元の経路で計算され、グラフと食い違ったまま緑になる。
+    MUST: the replacement comes **before** the goldens are taken (the `siglip2.patch` docstring) —
+    applied afterwards, only the expected values would be computed on the original path and the
+    run would go green while disagreeing with the graph.
     """
     model = load_model(model_dir)
     patch.apply_shape_patches(model.embeddings)
@@ -364,27 +392,32 @@ def _write_io(
     out_dir: Path,
     metadata: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+    """Write each case's input and torch CPU expected output to `io.<case>.safetensors`.
 
-    `metadata` はケース名 → `__metadata__`（実画像ケースだけが持つ — 元画像の同定）。
+    `metadata` maps case name → `__metadata__` (only real-image cases have one — identifying the
+    source image).
 
-    戻り値の 2 本目は sanity 記録用の期待出力（`[B, H]` の形のまま渡す）。
+    The second return value is the expected outputs for the sanity record (passed in their
+    `[B, H]` shape).
     """
     if len(graph.outputs) != 1:
-        raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（pooler_output は 1 本）")
+        raise AssertionError(
+            f"the IR has {len(graph.outputs)} outputs (pooler_output is exactly one)"
+        )
     written: list[str] = []
     pooled: dict[str, torch.Tensor] = {}
     for name, pixel_values in cases:
         with torch.no_grad():
             output = wrapper(pixel_values)
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（ADR 0009 の境界正規化）。ランタイムが
-        # 受け取る形と揃っていないと Deno 側 E2E が golden を読めない。
+        # MUST: io is also lowered to the concrete representation of the IR's semantic dtypes
+        # (the boundary normalization of ADR 0009). Unless it matches what the runtime receives,
+        # the Deno-side E2E cannot read the golden.
         tensors = {
             f"{INPUT_PREFIX}{INPUT_NAME}": normalize_boundary_tensor(
-                pixel_values, f"{name} の入力 '{INPUT_NAME}'"
+                pixel_values, f"{name}: input '{INPUT_NAME}'"
             ),
             f"{OUTPUT_PREFIX}0": normalize_boundary_tensor(
-                output.detach().contiguous(), f"{name} の出力 0"
+                output.detach().contiguous(), f"{name}: output 0"
             ),
         }
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
@@ -396,12 +429,13 @@ def _write_io(
 
 
 def _sanity(pooled: dict[str, torch.Tensor]) -> dict[str, Any]:
-    """構造の近い対の cosine が、構造ごと違う対を上回ることを見る。
+    """Check that the cosine of the pair with similar structure exceeds that of the pair whose
+    structure differs.
 
-    MUST: 恒真な sanity にしない。pooler_output は L2 正規化されていないのでノルム検査は
-    使えず、「同一入力どうしの cosine = 1」も何も検証しない。**別々の入力**どうしの順序で
-    見れば、埋め込みが 1 点へ潰れた場合（近い対も遠い対も cosine 1）も、パッチ埋め込みや
-    MAP head が死んだ場合も落ちる。
+    MUST: do not make the sanity check vacuous. pooler_output is not L2-normalized, so a norm check
+    is useless, and "the cosine of an input with itself = 1" verifies nothing. Checking the order
+    between **different inputs** fails both when the embedding collapses to one point (cosine 1 for
+    the near and the far pair alike) and when the patch embedding or the MAP head is dead.
     """
     vectors = {name: output.reshape(-1) for name, output in pooled.items()}
 
@@ -412,7 +446,8 @@ def _sanity(pooled: dict[str, torch.Tensor]) -> dict[str, Any]:
     near, far = cosine(NEAR_PAIR), cosine(FAR_PAIR)
     if near <= far:
         raise AssertionError(
-            f"cosine の順序が構造と逆: {NEAR_PAIR}={near:.4f} <= {FAR_PAIR}={far:.4f}"
+            f"the cosine order contradicts the structure: {NEAR_PAIR}={near:.4f}"
+            f" <= {FAR_PAIR}={far:.4f}"
         )
     report: dict[str, Any] = {
         "l2_norms": {name: round(float(vector.norm()), 5) for name, vector in vectors.items()},
@@ -428,11 +463,13 @@ def _sanity(pooled: dict[str, torch.Tensor]) -> dict[str, Any]:
 
 
 def _real_sanity(cosine: Callable[[tuple[str, str]], float]) -> dict[str, float]:
-    """実画像の判別（人物どうし > 人物と風景）を見る（{@link REAL_PERSON_CASES}）。
+    """Check the real-image discrimination (person × person > person × scene)
+    ({@link REAL_PERSON_CASES}).
 
-    MUST: 閾値を置かず**順序**で見る（合成画像側と同じ流儀）。人物 2 枚は構図
-    （アップ / 全身）も背景（桜並木 / 街並み）も違うので、この順序が成り立つのは
-    「人が写っている」という意味を捉えている場合だけになる。
+    MUST: check the **order**, with no threshold (the same approach as the synthetic side). The two
+    person images differ in composition (close-up / full body) and in background (cherry trees /
+    street), so the order holds only when the embedding captures the meaning "a person is in the
+    picture".
     """
     person = cosine(REAL_PERSON_CASES)
     cross = {
@@ -443,7 +480,7 @@ def _real_sanity(cosine: Callable[[tuple[str, str]], float]) -> dict[str, float]
     worst_name, worst = max(cross.items(), key=lambda item: item[1])
     if person <= worst:
         raise AssertionError(
-            f"実画像の cosine の順序が逆: {REAL_PERSON_CASES}={person:.4f}"
+            f"the real-image cosine order is inverted: {REAL_PERSON_CASES}={person:.4f}"
             f" <= {worst_name}={worst:.4f}"
         )
     return {
@@ -455,23 +492,26 @@ def _real_sanity(cosine: Callable[[tuple[str, str]], float]) -> dict[str, float]
 def export_series(
     model_dir: Path, out_dir: Path, real_images: bool = False, corpus_root: Path = CORPUS_ROOT
 ) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。
+    """Write the IR container and the golden io, and return a summary.
 
-    `real_images` を立てると合成 4 ケースに実画像 4 ケースを**足す**（置き換えない —
-    モジュール docstring の「golden の 2 群」）。
+    Setting `real_images` **adds** the 4 real-image cases to the 4 synthetic ones (it does not
+    replace them — "Two groups of goldens" in the module docstring).
 
-    MUST: 生成物は作業席へ書き、**全ての門**（入力の並び・sanity）を通してから据える。門より前に
-    final へ置くと、落ちた実走が「検収門を通れる資産」を残す — io golden は同じ壊れたラッパから
-    採るので互いに整合し、TS 側の突合は**緑になる**（「いつ公開してよいか」の綴りは
-    {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
-    {@link karume.artifacts.staged_publication}）。
+    MUST: write the output to a staging directory and put it in place only after **every check**
+    (input order, sanity) has passed. Putting it in the final location before the checks would let
+    a failed run leave behind "assets that pass the acceptance checks" — the io goldens are taken
+    from the same broken wrapper, so they agree with each other and the TS-side comparison **goes
+    green** (the rule for "when it may be published" is {@link _shared.decode_series._publish};
+    the discipline of swapping in and cleaning up is the core primitive
+    {@link karume.artifacts.staged_publication}).
     """
-    # 出所は重みより先に読む（記録が無い checkpoint は重みを読む前に落とす）。
+    # Read the provenance before the weights (a checkpoint without a record fails before its
+    # weights are read).
     provenance = upstream_provenance(model_dir)
     wrapper = load_wrapper(model_dir)
     synthetic = build_cases(wrapper.model.config)
-    # MUST: 実画像は emit より先に組む（画像が欠けているなら、1.7GB を書き切ってから落とすの
-    # ではなくここで止める）。
+    # MUST: build the real images before the emit (if an image is missing, stop here instead of
+    # failing after writing 1.7GB).
     real = build_real_cases(model_dir, wrapper.model.config, corpus_root) if real_images else ()
     cases = [*synthetic, *((name, pixel_values) for name, pixel_values, _md in real)]
     metadata = {name: md for name, _pixel_values, md in real}
@@ -479,25 +519,30 @@ def export_series(
 
     _, example = synthetic[0]
     with staged_publication(out_dir) as staged:
-        # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+        # The writer creates the directory (the primitive does not create it — it only hands
+        # over the path).
         staged.mkdir()
-        # 動的軸は無い（解像度もパッチ数も固定 — モジュール docstring）。
+        # No dynamic axes (the resolution and the patch count are fixed — module docstring).
         graph = export_to_file(
             wrapper,
             (example,),
             staged / MODEL_FILE,
             provenance=provenance,
-            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
-            # （`siglip2-so400m-patch14-384`）であって部品名ではない（container-v1 §2.1）。
+            # The graph name is the **component name** (= the weights key of karume.json). It is
+            # not derived from the directory name — this family's container sits directly in the
+            # series, so the directory name is the series name (`siglip2-so400m-patch14-384`),
+            # not the component name (container-v1 §2.1).
             graph_name=SIGLIP2_ROLE,
             symbol_names=(),
         )
         declared = tuple(item.name for item in graph.inputs)
         if declared != (INPUT_NAME,):
-            raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
+            raise AssertionError(
+                f"the graph inputs are {declared}, not the expected {(INPUT_NAME,)}"
+            )
         written, pooled = _write_io(wrapper, graph, cases, staged, metadata)
-        # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        # MUST: evaluate before publishing (the only non-vacuous check of this series — if it
+        # fails, the staging directory is removed with everything in it).
         sanity = _sanity(pooled)
     return {
         "dir": str(out_dir),
@@ -520,10 +565,11 @@ def _diff_entry(
     got: dict[str, torch.Tensor],
     expected: dict[str, torch.Tensor],
 ) -> dict[str, Any]:
-    """1 段分の同値レポート（ケース名 → maxdiff と、全ケースのビット一致）。
+    """Equivalence report for one step (case name → maxdiff, and bit-identity across all cases).
 
-    `bit_exact` は「差 0」より強い主張（`0.0 == -0.0` は差 0 だがビットは違う）で、形の
-    畳み込みのように**ビット一致が主張の中身**である段で意味を持つ。
+    `bit_exact` is a stronger claim than "difference 0" (`0.0 == -0.0` has difference 0 but
+    different bits), and it matters for a step whose **claim is bit-identity itself**, like the
+    shape folds.
     """
     return {
         "stage": stage,
@@ -536,21 +582,25 @@ def _diff_entry(
 
 
 def verify_patches(model_dir: Path) -> list[dict[str, Any]]:
-    """パッチ前 eager との同値を **2 点**で実測する（`sbv2/export.py --verify` と同じ形）。
+    """Measure equivalence with eager before patching at **two points** (the same shape as
+    `sbv2/export.py --verify`).
 
-    1. 形の畳み込みだけ（conv padding + 位置埋め込み）→ **bit_exact が主張の中身**。演算列が
-       1 対 1 で対応するので差は 0 でなければならず、外れたらここで落とす。
-    2. MAP head の q/k/v 明示化まで → **maxdiff を報告**。`nn.MultiheadAttention` は q にだけ
-       1/√d を掛けるのに対し SDPA は q と k に対称に割るのでビット一致にはならない
-       （実測幅の綴りは `siglip2.measurements.MAP_HEAD_MAXDIFF`・差を割るスケールは
-       同じモジュールの `MAP_HEAD_VECTOR_NORM`）。
+    1. Shape folds only (conv padding + position embedding) → **bit_exact is the claim itself**.
+       The operation sequences correspond one to one, so the difference must be 0; if not, fail
+       here.
+    2. Up to making the MAP head's q/k/v explicit → **report the maxdiff**. `nn.MultiheadAttention`
+       multiplies only q by 1/√d, while SDPA scales q and k symmetrically, so the result is not
+       bit-identical (the measured range is spelled in `siglip2.measurements.MAP_HEAD_MAXDIFF`, and
+       the scale the difference is divided by in `MAP_HEAD_VECTOR_NORM` of the same module).
 
-    MUST: 順序は「**全ケースの参照値を確定** → 1 → 2」。パッチはクラス属性のプロセス全域
-    差し替えなので、段ごとに参照を採り直すと 2 段目の参照がパッチ後の値になる（恒真化）。
+    MUST: the order is "**fix the reference values of all cases** → 1 → 2". The patch replaces
+    class attributes process-wide, so re-taking the reference per step would make the second
+    step's reference a patched value (vacuous).
     """
     if patch.patches_applied():
         raise SystemExit(
-            "パッチ適用済みのプロセスでは参照を採れない（同値検証が差 0 で恒真化する）"
+            "cannot take the reference in a process that is already patched (the equivalence"
+            " check would become vacuous with a difference of 0)"
         )
     model = load_model(model_dir)
     cases = build_cases(model.config)
@@ -569,8 +619,8 @@ def verify_patches(model_dir: Path) -> list[dict[str, Any]]:
     folds = _diff_entry("shape-folds", "bit-exact", pooled(), reference)
     if not folds["bit_exact"]:
         raise AssertionError(
-            f"形の畳み込みがビット同一でない: maxdiff={folds['maxdiff']} —"
-            " conv padding / 位置埋め込みの書き換えが同値でない"
+            f"the shape folds are not bit-identical: maxdiff={folds['maxdiff']} —"
+            " the rewrite of conv padding / the position embedding is not equivalent"
         )
     patch.apply_map_head_patch(model.head)
     return [folds, _diff_entry("map-head", "max-abs-diff", pooled(), reference)]
@@ -583,19 +633,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は outputs/series/<--model-dir のディレクトリ名>/）",
+        help="output directory (default: outputs/series/<directory name of --model-dir>/)",
     )
     parser.add_argument(
         "--real-images",
         action="store_true",
-        help="outputs/misc/corpus/ の実画像 4 枚の golden も書く（合成 4 ケースに足す）。"
-        "torchvision / pillow が要るので `uv run --group siglip2-preprocess` で回す",
+        help="also write goldens of the 4 real images in outputs/misc/corpus/ (added to the 4"
+        " synthetic cases). Needs torchvision / pillow, so run it with"
+        " `uv run --group siglip2-preprocess`",
     )
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="パッチ前 eager との同値を 2 点で実測する（emit はしない — 同一プロセスでは"
-        "クラス属性の差し替えが参照を汚染するので併用できない）",
+        help="measure equivalence with eager before patching at 2 points (does not emit — in"
+        " one process the class attribute replacement contaminates the reference, so the two"
+        " cannot be combined)",
     )
     args = parser.parse_args(argv)
     if args.verify:

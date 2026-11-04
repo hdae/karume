@@ -1,29 +1,36 @@
-"""校正付き i4（GPTQ）の結線の約束事（実重み不要分）。
+"""The rules of the wiring of calibrated i4 (GPTQ) (the part that needs no real weights).
 
-実重みの校正は手動（README / `anima.export --dtype i4`）。ここで固定するのは、壊れると
-**偽 PASS** になる側だけ:
+Calibration with real weights is manual (README / `anima.export --dtype i4`). What is pinned here
+is only what gives a **false PASS** when broken:
 
-- stage 逐次の block ループがラッパ 1 回の forward とビット一致すること（ずれた経路で
-  丸めても数値は普通に出る）
-- i4 適格が「block 内 = 校正」「block 外 = 素の RTN」へ**過不足なく排他に**割れること
-- 感度実験変種（`--i4-adaln-i8`）が adaLN + block 外を i8 へ役割で割ること、そして
-  **既定 OFF が集合も経路も値も従来と 1 ビットも変わらない**こと
-- scale 台帳のキーがラッパの FQN 空間（= 容器の initializer 名）に居ること
-- 校正が**実際に別の丸め**を産むこと（素通りしたら格納形が同じなので資産からは読めない）
-- 校正入力とグラフで block の呼ばれ方が同じこと
-- 校正入力を**配布条件と同じ状態の重み**から採ること（block 外は丸めた後・block 内は丸める前）
-- `--no-calib` が opt-out として本当に校正を回さないこと
+- the stage-by-stage block loop is bit-identical to one forward of the wrapper (rounding on a
+  drifted path still produces ordinary numbers)
+- the i4-eligible set splits into "inside blocks = calibrated" and "outside blocks = plain RTN"
+  **exactly and exclusively**
+- the sensitivity-experiment variant (`--i4-adaln-i8`) moves adaLN + the outside of the blocks to
+  i8 by role, and **the default (off) does not change the set, the path or the values by a single
+  bit**
+- the keys of the scale ledger live in the wrapper's FQN space (= the container's initializer
+  names)
+- calibration **actually produces a different rounding** (if it passed through, the storage form
+  would be the same, so it could not be read from the assets)
+- the calibration inputs and the graph call the blocks the same way
+- the calibration inputs are taken from **weights in the same state as the shipping
+  conditions** (outside the blocks after rounding, inside the blocks before rounding)
+- `--no-calib`, the opt-out, really does not run calibration
 
-模型は tiny な骨格で、**実物と同じ FQN**（`model.transformer_blocks.<i>` /
-`model.time_embed.t_embedder.linear_1` / `model.norm_out.linear_1` / `model.proj_out`）と
-**同じ呼び出しの形**（block は hidden を位置引数で受けて hidden を返す・`patch_embed.proj` の
-量子化軸は g32 非整除）を写す。名前まで写すのは、実物向けの定数
-（{@link anima.export.NON_STAGE_I4_WEIGHTS}）を差し替えずに門を試すため。
+The model is a tiny skeleton that copies **the same FQNs as the real one**
+(`model.transformer_blocks.<i>` / `model.time_embed.t_embedder.linear_1` /
+`model.norm_out.linear_1` / `model.proj_out`) and **the same call shapes** (a block takes hidden
+as a positional argument and returns hidden; the quantization axis of `patch_embed.proj` is not
+divisible by g32). The names are copied too so that the checks can be exercised without replacing
+the constants meant for the real model ({@link anima.export.NON_STAGE_I4_WEIGHTS}).
 
-模型は実物と同じく **block ループを 2 本**持つ（{@link TinyRawDit} = 素のモデルの forward /
-{@link TinyWrapper} = export するラッパ）。1 本にまとめると、捕捉元とグラフが同じコードパスに
-なって {@link anima.calib.assert_calib_batches_match_graph} が守っている継ぎ目そのものが
-テストから消える（実物では捕捉は素のモデル・丸めるのはラッパ）。
+Like the real one, the model has **two block loops** ({@link TinyRawDit} = the plain model's
+forward / {@link TinyWrapper} = the exported wrapper). Merging them into one would put the capture
+source and the graph on the same code path, and the very seam that
+{@link anima.calib.assert_calib_batches_match_graph} guards would vanish from the tests (in the
+real model the capture uses the plain model and the rounding uses the wrapper).
 """
 
 from __future__ import annotations
@@ -47,11 +54,12 @@ from anima.distribution import (
 )
 from karume.quantize import fake_quant_int4, fake_quant_int8
 
-#: CFG を使うモデル（= guidance 1 の蒸留系以外の全量）。**列挙を書き下さずに宣言から導く**
-#: のは、モデルが増えた日に「この門を 1 度も踏まないモデル」が黙って生えないため
-#: （2026-09-01 の再構造で公式 Aesthetic と v1.0 世代が増えた実例 — ADR 0087）。名前でなく
-#: pipeline_config の guidance で分けるのは、turbo が複数版になった（anima-turbo-v1.0 /
-#: v1.1）ため。
+#: The models that use CFG (= everything except the guidance 1 distilled ones). They are
+#: **derived from the declarations instead of being listed** so that, the day models are added,
+#: "a model that never goes through this check" cannot appear silently (the restructuring of
+#: 2026-09-01 added the official Aesthetic and the v1.0 generation — ADR 0087). They are split by
+#: the guidance of pipeline_config rather than by name because turbo now has several versions
+#: (anima-turbo-v1.0 / v1.1).
 CFG_MODELS = tuple(
     name
     for name, spec in ANIMA_MODELS.items()
@@ -59,24 +67,27 @@ CFG_MODELS = tuple(
 )
 TURBO_LIKE_MODELS = tuple(name for name in ANIMA_MODELS if name not in CFG_MODELS)
 
-#: 量子化軸（= group 長）。i4 は端数 group を作らない（ADR 0069 決定 2）。
+#: The quantization axis (= the group length). i4 makes no partial groups (ADR 0069 decision 2).
 HIDDEN = 32
-#: patchify 入口の入力チャネル（実 DiT と同じ 17ch × 2×2 = 68 — g32 非整除で i4 適格外）。
+#: Input channels of the patchify entry (17ch × 2×2 = 68, as in the real DiT — not divisible by
+#: g32, so not i4-eligible).
 PATCH_IN = 68
-#: トークン数（校正の hidden は `[1, TOKENS, HIDDEN]`）。
+#: Token count (the calibration hidden is `[1, TOKENS, HIDDEN]`).
 TOKENS = 4
-#: 捕捉テストの latent 辺と、それを産む解像度（実物の 512px は 64² トークンで、ここでは
-#: 8² で足りる — 見るのは分岐の数え方であって活性の分布ではない）。
+#: The latent side of the capture tests and the resolution that produces it (the real 512px is
+#: 64² tokens; 8² is enough here — what is checked is how branches are counted, not the
+#: distribution of activations).
 CAPTURE_LATENT = 8
 CAPTURE_RESOLUTION = CAPTURE_LATENT * pipeline_ref.SPATIAL_COMPRESSION
 
 
 class TinyAdaLayerNormZero(nn.Module):
-    """block の `norm1` / `norm2` / `norm3`（`CosmosAdaLayerNormZero`）の席。
+    """Stands in for a block's `norm1` / `norm2` / `norm3` (`CosmosAdaLayerNormZero`).
 
-    実物と同じく `linear_1` / `linear_2` の **2 本**を持ち、入力は hidden ではなく
-    `embedded_timestep`（rank2）— 感度実験変種（`--i4-adaln-i8`）が i4 から外すのはこの綴りで、
-    GPTQ が見る `H = Σ XᵀX` の標本も block あたり 1 本ぶんしか積まれない側。
+    Like the real one it has **two** linears, `linear_1` / `linear_2`, and its input is
+    `embedded_timestep` (rank2), not hidden — this is the spelling the sensitivity-experiment
+    variant (`--i4-adaln-i8`) removes from i4, and the side where the samples of `H = Σ XᵀX` that
+    GPTQ sees accumulate only one row per block.
     """
 
     def __init__(self) -> None:
@@ -91,14 +102,15 @@ class TinyAdaLayerNormZero(nn.Module):
 
 
 class TinyBlock(nn.Module):
-    """`CosmosTransformerBlock` の**呼び出しの形**だけを写した block。
+    """A block that copies only **the call shape** of `CosmosTransformerBlock`.
 
-    位置引数 8 本（hidden + 付随 7 本）で呼ばれ hidden を返す — 実物と同じなので、stage は
-    包まずにそのまま並べられる（`anima.calib.dit_stages`）。
+    It is called with 8 positional arguments (hidden + 7 companions) and returns hidden — the
+    same as the real one, so the stages can be listed as they are, without wrapping
+    (`anima.calib.dit_stages`).
 
-    modulation（`norm1` / `norm2` / `norm3`）まで写すのは、実物向けのセグメント定数
-    （{@link anima.calib.ADALN_SEGMENTS}）を差し替えずに変種の割り方を試すため — block 内の
-    linear は adaLN 6 本 + それ以外 2 本になる。
+    The modulation (`norm1` / `norm2` / `norm3`) is copied too so that the variant's split can
+    be exercised without replacing the segment constants meant for the real model
+    ({@link anima.calib.ADALN_SEGMENTS}) — the linears inside a block are 6 adaLN + 2 others.
     """
 
     def __init__(self) -> None:
@@ -138,7 +150,8 @@ class TinyTimestepEmbedding(nn.Module):
 
 
 class TinyEmbedding(nn.Module):
-    """`CosmosEmbedding` の席（`t_embedder` が temb・`norm` が embedded_timestep）。"""
+    """Stands in for `CosmosEmbedding` (`t_embedder` gives temb, `norm` gives
+    embedded_timestep)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -147,7 +160,7 @@ class TinyEmbedding(nn.Module):
 
 
 class TinyAdaLayerNorm(nn.Module):
-    """`CosmosAdaLayerNorm`（= `norm_out`）の席。"""
+    """Stands in for `CosmosAdaLayerNorm` (= `norm_out`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -169,11 +182,13 @@ class TinyPatchEmbed(nn.Module):
 
 
 class TinyRawDit(nn.Module):
-    """`CosmosTransformer3DModel` の骨格と**素の forward**（校正入力の捕捉元）。
+    """The skeleton of `CosmosTransformer3DModel` and **the plain forward** (the source the
+    calibration inputs are captured from).
 
-    実物の捕捉は参照 denoise が素のモデルを回して採る（`export._round_i4_calibrated` が
-    `wrapper.model` を渡す）ので、block ループはラッパとは**別実装**で持つ — 上流がここの
-    引数を増減させた日に、ラッパとの食い違いが門に掛かることをテストでも踏めるようにする。
+    In the real model the capture runs the plain model through the reference denoise
+    (`export._round_i4_calibrated` passes `wrapper.model`), so the block loop is held as **a
+    separate implementation** from the wrapper — so that the tests can exercise the check
+    catching a disagreement with the wrapper the day upstream adds or removes arguments here.
     """
 
     def __init__(self, blocks: int) -> None:
@@ -209,10 +224,12 @@ class TinyRawDit(nn.Module):
 
 
 class DriftingRawDit(TinyRawDit):
-    """上流が block の付随引数を 1 本減らした日の素のモデル（ラッパは 8 本のまま）。
+    """The plain model on the day upstream drops one companion argument of the block (the wrapper
+    keeps 8).
 
-    実物でこれが起きると、校正だけが `controlnet_residual` を見ない条件で丸め先を選び、
-    数値は普通に出る（golden も緑のまま通る）。
+    If this happened to the real model, only the calibration would choose rounding targets under
+    a condition that does not see `controlnet_residual`, and the numbers would come out as usual
+    (the goldens stay green too).
     """
 
     def forward(
@@ -233,7 +250,7 @@ class DriftingRawDit(TinyRawDit):
 
 
 class TinyWrapper(nn.Module):
-    """`patch.AnimaDit` の骨格（patchify → block ループ → norm_out → proj_out）。"""
+    """The skeleton of `patch.AnimaDit` (patchify → block loop → norm_out → proj_out)."""
 
     def __init__(self, model: TinyRawDit) -> None:
         super().__init__()
@@ -265,16 +282,17 @@ class TinyWrapper(nn.Module):
 
 
 class DenoiseDit(nn.Module):
-    """参照 denoise から**本物のまま**呼ばれる縮図（`CosmosTransformer3DModel` の呼ばれ方）。
+    """A miniature called **as the real thing** by the reference denoise (the way
+    `CosmosTransformer3DModel` is called).
 
-    {@link TinyRawDit} と別に要るのは、{@link anima.calib.capture_stage_batches} が
-    `pipeline_ref.reference_steps` を通して DiT を回すため — 入口は keyword 5 本、latent は
-    rank5 `[1, LATENT_CHANNELS, 1, h, w]` で、出力も同じ形（Euler 更新 `x + Δσ·pred` が成立
-    する形）である必要がある。
+    It is needed besides {@link TinyRawDit} because {@link anima.calib.capture_stage_batches}
+    runs the DiT through `pipeline_ref.reference_steps` — the entry takes 5 keywords, the latent
+    is rank5 `[1, LATENT_CHANNELS, 1, h, w]`, and the output must have the same shape (the shape
+    for which the Euler update `x + Δσ·pred` holds).
 
-    MUST: `reference_steps` を写しに差し替えない。CFG の分岐（`skip_uncond`）を写すと、
-    捕捉バッチ数の検算門が**テスト側の写し**を検算するだけになり、上流の分岐が変わった日に
-    テストも一緒にずれる。
+    MUST: do not replace `reference_steps` with a copy. Copying the CFG branch (`skip_uncond`)
+    would make the cross-check of the captured batch count only check **the test's copy**, and
+    the test would drift along with it the day upstream's branch changes.
     """
 
     def __init__(self, blocks: int = 2, seed: int = 11) -> None:
@@ -311,10 +329,11 @@ class DenoiseDit(nn.Module):
 
 
 def embed_for(text: str) -> torch.Tensor:
-    """プロンプト → テキスト条件（決定的・文字列ごとに別のテンソル）。
+    """Prompt → text condition (deterministic; a different tensor per string).
 
-    cond と uncond が**別の埋め込み**であることを捕捉の中身から言うための足場 — 同じ値を
-    返す stub にすると、「uncond に cond をそのまま流す」壊れ方がテストから見えなくなる。
+    Scaffolding to tell from the captured contents that cond and uncond are **different
+    embeddings** — a stub returning the same value would hide the breakage "feed cond to uncond
+    as is" from the tests.
     """
     seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
     return torch.randn(1, TOKENS, HIDDEN, generator=torch.Generator().manual_seed(seed))
@@ -328,7 +347,8 @@ def make_wrapper(blocks: int = 3, seed: int = 0, dit: type[TinyRawDit] = TinyRaw
 
 
 def make_probes(count: int = 3, seed: int = 7) -> tuple[tuple[torch.Tensor, ...], ...]:
-    """ラッパの位置引数（実物では 1 本目が probe・残りは参照 denoise が作る条件に相当）。"""
+    """The wrapper's positional arguments (in the real model the 1st is the probe and the rest
+    correspond to the conditions the reference denoise builds)."""
     generator = torch.Generator().manual_seed(seed)
     return tuple(
         (
@@ -341,11 +361,12 @@ def make_probes(count: int = 3, seed: int = 7) -> tuple[tuple[torch.Tensor, ...]
 
 
 def capture_batches(raw: nn.Module, probes) -> tuple:
-    """**素のモデル**を回して先頭 block への `(args, kwargs)` を採る。
+    """Run **the plain model** and take the `(args, kwargs)` passed to the first block.
 
-    実物では `calib.capture_stage_batches` が参照 denoise で同じことをする（駆動されるのは
-    `wrapper.model` = 素の `CosmosTransformer3DModel`）— ここでラッパを回してしまうと捕捉元と
-    グラフが同一コードパスになり、付随引数一致門が自明に通る入力しか作れない。
+    In the real model `calib.capture_stage_batches` does the same in the reference denoise (what
+    gets driven is `wrapper.model` = the plain `CosmosTransformer3DModel`) — running the wrapper
+    here would put the capture source and the graph on the same code path, and only inputs that
+    trivially pass the companion-argument check could be built.
     """
     blocks = raw.transformer_blocks
     names = tuple(inspect.signature(blocks[0].forward).parameters)
@@ -384,12 +405,15 @@ def i4_args(
 
 @pytest.fixture
 def stub_capture(monkeypatch):
-    """`capture_stage_batches` を差し替える（実物はテキスト前段 + 参照 denoise を回す）。
+    """Replace `capture_stage_batches` (the real one runs the text front end + the reference
+    denoise).
 
-    差し替え先は**素のモデル**（`wrapper.model`）を実際に走らせて採るので、`(args, kwargs)` の
-    形も捕捉元も実物と同じまま。返すのは `(呼び出しごとのプロンプト本数, 捕捉時点の重み)` で、
-    後者は「どの重みが丸まった状態で校正入力を採ったか」を呼び出し側が主張するための写し
-    （バッチ自体は install 時に採るが、スタブは**校正が呼ぶその瞬間**に写す）。
+    The replacement actually runs **the plain model** (`wrapper.model`) to capture, so both the
+    shape of `(args, kwargs)` and the capture source stay the same as the real ones. It returns
+    `(prompt count per call, weights at capture time)`; the latter is a copy that lets the caller
+    claim "which weights were already rounded when the calibration inputs were taken" (the
+    batches themselves are taken at install time, but the stub copies the weights **at the very
+    moment the calibration calls it**).
     """
     calls: list[int] = []
     at_capture: dict[str, torch.Tensor] = {}
@@ -410,10 +434,11 @@ def stub_capture(monkeypatch):
 
 @pytest.fixture
 def stub_text_stack(monkeypatch):
-    """テキスト前段（Qwen3 + conditioner）**だけ**を差し替える（参照 denoise は本物を回す）。
+    """Replace **only** the text front end (Qwen3 + conditioner) (the reference denoise runs for
+    real).
 
-    戻り値は `encode_prompt` が受け取ったプロンプトの並び — uncond 側の埋め込みが本当に
-    negative prompt から作られているかを、呼ばれ方の側からも見るため。
+    The return value is the sequence of prompts `encode_prompt` received — to check, from the
+    call side too, that the uncond embedding really is built from the negative prompt.
     """
     seen: list[str] = []
 
@@ -430,7 +455,8 @@ def stub_text_stack(monkeypatch):
 
 
 def capture(model: nn.Module, prompts, conditions: calib.CalibConditions):
-    """縮図の DiT に対する {@link anima.calib.capture_stage_batches}（解像度だけ縮める）。"""
+    """{@link anima.calib.capture_stage_batches} on the miniature DiT (only the resolution is
+    reduced)."""
     return calib.capture_stage_batches(
         model, prompts, repo="unused", conditions=conditions, resolution=CAPTURE_RESOLUTION
     )
@@ -446,31 +472,33 @@ def quantize(wrapper: nn.Module, args: argparse.Namespace | None = None):
 
 
 class TestCalibConditions:
-    """校正条件は配布形の既定から**導く**（波 J-4 ② — 2026-08-23）。
+    """The calibration conditions are **derived** from the distribution's defaults (iteration J-4
+    (2) — 2026-08-23).
 
-    turbo 前提のモジュール定数（8 step / CFG 1）だった頃は、素版の i4 席がこの 1 点で
-    塞がっていた。導出へ移した以上、見るべきは「turbo が 1 ビットも動いていないこと」と
-    「素版が自分の既定で回ること」の 2 つ。
+    When they were module constants assuming turbo (8 steps / CFG 1), this one point blocked the
+    base model's i4 entry. Now that they are derived, two things matter: "turbo has not moved by
+    a single bit" and "the base model runs with its own defaults".
     """
 
     def test_turbo_derives_what_the_module_constants_used_to_hold(self) -> None:
-        """MUST: turbo 系の校正条件は据え置き（丸め結果が動くと配布済みの資産と食い違う）。"""
-        assert TURBO_LIKE_MODELS, "蒸留系のモデルが 1 つも無い（テストが空振りしている）"
+        """MUST: the calibration conditions of the turbo line stay as they are (if the rounding
+        results moved, they would disagree with the shipped assets)."""
+        assert TURBO_LIKE_MODELS, "no distilled model at all (the test checks nothing)"
         for model in TURBO_LIKE_MODELS:
             conditions = calib.calib_conditions(model)
 
             assert (conditions.steps, conditions.guidance) == (8, 1.0), model
-            assert conditions.branches == 1, "CFG=1 は uncond 分岐を計算しない"
+            assert conditions.branches == 1, "CFG=1 does not compute the uncond branch"
 
     def test_the_cfg_models_derive_their_cfg_conditions(self) -> None:
-        """Turbo 以外は多 step + CFG — 1 step が forward 2 本になる。
+        """Everything but Turbo is many steps + CFG — one step is 2 forwards.
 
-        step 数は視認裁定の写し（base 系 = 20〈2026-08-22〉/ aesthetic 系 = 30
-        〈2026-09-01〉）— 導出元の pipeline_config から引き直すと恒真化するので、
-        期待値はここに固定で書く。
+        The step counts copy the visual rulings (base line = 20 (2026-08-22) / aesthetic line =
+        30 (2026-09-01)) — reading them again from the pipeline_config they are derived from
+        would make the test vacuous, so the expected values are written here as constants.
         """
         expected_steps = {name: 30 if "aesthetic" in name else 20 for name in CFG_MODELS}
-        assert CFG_MODELS, "CFG を使うモデルが 1 つも無い（テストが空振りしている）"
+        assert CFG_MODELS, "no model uses CFG (the test checks nothing)"
         for model in CFG_MODELS:
             conditions = calib.calib_conditions(model)
 
@@ -479,7 +507,8 @@ class TestCalibConditions:
             assert conditions.negative_prompt, model
 
     def test_every_model_reads_its_own_pipeline_config(self) -> None:
-        """MUST: 校正条件と配布既定を独立に持たない（写しがあれば片方だけ古くなる）。"""
+        """MUST: the calibration conditions and the shipping defaults are not held independently
+        (with a copy, one of them would go stale)."""
         for model, spec in ANIMA_MODELS.items():
             defaults = spec.pipeline_config["defaults"]
             conditions = calib.calib_conditions(model)
@@ -489,7 +518,8 @@ class TestCalibConditions:
             assert conditions.negative_prompt == defaults["negativePrompt"], model
 
     def test_it_follows_a_change_to_the_shipped_defaults(self, monkeypatch) -> None:
-        """故障注入: 配布既定を動かすと校正条件も動く（定数へ戻したら緑にならない）。"""
+        """Fault injection: moving the shipping defaults moves the calibration conditions too (going
+        back to constants would not be green)."""
         spec = ANIMA_MODELS[ANIMA_TURBO_MODEL_NAME]
         moved = replace(
             spec,
@@ -505,11 +535,13 @@ class TestCalibConditions:
 
 
 class TestCaptureBranches:
-    """CFG > 1 の捕捉 — 配布実行時に DiT を通る活性は cond / uncond の**両方**。
+    """Capture with CFG > 1 — the activations that go through the DiT when the distribution runs
+    are **both** cond and uncond.
 
-    cond に絞ると「実際に流れる活性の半分」で丸め先を選ぶことになり、しかも本数の帳尻は
-    合うので資産からも診断行からも読めない。分岐を作るのは `pipeline_ref.reference_steps`
-    （本物を回す）で、ここが見るのはその結果を捕捉と検算門がどう数えるか。
+    Narrowing to cond would choose rounding targets from "half of the activations that actually
+    flow", and since the counts still add up, it could be read neither from the assets nor from
+    the diagnostic lines. The branches are made by `pipeline_ref.reference_steps` (run for real);
+    what this checks is how the capture and the cross-check count its result.
     """
 
     def test_cfg_one_captures_one_batch_per_step(self, stub_text_stack) -> None:
@@ -518,7 +550,7 @@ class TestCaptureBranches:
         batches = capture(DenoiseDit(), ("a", "b"), conditions)
 
         assert len(batches) == 2 * 3
-        assert stub_text_stack == ["a", "b", "neg"], "uncond 用の埋め込みは常に用意する"
+        assert stub_text_stack == ["a", "b", "neg"], "the uncond embedding is always prepared"
 
     def test_cfg_above_one_captures_both_branches(self, stub_text_stack) -> None:
         conditions = calib.CalibConditions(steps=3, guidance=4.0, negative_prompt="neg")
@@ -528,10 +560,11 @@ class TestCaptureBranches:
         assert len(batches) == 2 * 3 * 2
 
     def test_the_uncond_branch_carries_the_negative_prompt(self, stub_text_stack) -> None:
-        """MUST: uncond へ cond と同じ埋め込みを流さない。
+        """MUST: do not feed uncond the same embedding as cond.
 
-        流すと `uncond == cond` になって CFG が恒等に退化し、**本数だけ 2 倍**の H に同じ
-        活性が積まれる。バッチ数の検算門は通り、丸めも完走し、記録にも CFG 4 と書かれる。
+        Doing so makes `uncond == cond`, CFG degenerates into the identity, and the same
+        activations pile up in an H with **only the count doubled**. The batch-count cross-check
+        passes, the rounding completes, and the record says CFG 4.
         """
         conditions = calib.CalibConditions(steps=2, guidance=4.0, negative_prompt="neg")
 
@@ -542,7 +575,8 @@ class TestCaptureBranches:
         assert sum(torch.equal(embed, embed_for("neg")) for embed in embeds) == 2
 
     def test_the_turbo_conditions_capture_the_same_batches_as_before(self, stub_text_stack) -> None:
-        """導出後も turbo は プロンプト × 8 step × 1 分岐（定数だった頃と同じ本数）。"""
+        """After the derivation, turbo is still prompts × 8 steps × 1 branch (the same count as when
+        they were constants)."""
         batches = capture(DenoiseDit(), ("a", "b"), calib.calib_conditions(ANIMA_TURBO_MODEL_NAME))
 
         assert len(batches) == 2 * 8
@@ -550,10 +584,12 @@ class TestCaptureBranches:
     def test_a_branch_count_that_disagrees_with_the_capture_fails_loudly(
         self, monkeypatch, stub_text_stack
     ) -> None:
-        """検算門: 想定の分岐数と実際の forward 本数が食い違ったら止まる。
+        """Cross-check: it stops when the expected branch count and the actual number of forwards
+        disagree.
 
-        壊れ方は「CFG > 1 でも uncond を回さなくなる」— H に積まれる標本が半分になるだけで、
-        丸めは普通に完走し格納形も本数も変わらない。
+        The breakage is "uncond stops running even with CFG > 1" — only the samples accumulated
+        in H halve; the rounding completes as usual and neither the storage form nor the counts
+        change.
         """
         conditions = calib.CalibConditions(steps=2, guidance=4.0, negative_prompt="neg")
         genuine = calib.pipeline_ref.reference_steps
@@ -561,24 +597,27 @@ class TestCaptureBranches:
             calib.pipeline_ref, "reference_steps", lambda *args: genuine(*args[:-1], 1.0)
         )
 
-        with pytest.raises(AssertionError, match="校正バッチが"):
+        with pytest.raises(AssertionError, match="calibration batches, not prompts"):
             capture(DenoiseDit(), ("a",), conditions)
 
 
 class TestModelSelection:
-    """`--model` は校正条件の引き先（既定を置かない — 黙って turbo の条件で回さない）。"""
+    """`--model` is where the calibration conditions come from (no default — it does not silently
+    run with turbo's conditions)."""
 
     def test_the_calibration_refuses_to_run_without_a_named_model(self, monkeypatch, capsys):
-        """MUST: 既定を置くと `--model` 忘れが「turbo の条件で校正した素版」を静かに産む。"""
+        """MUST: with a default, a forgotten `--model` would quietly produce "a base model
+        calibrated with turbo's conditions"."""
         monkeypatch.setattr("sys.argv", ["export.py", "--dtype", "i4"])
 
         with pytest.raises(SystemExit):
             export_anima.main()
 
-        assert "--model が要る" in capsys.readouterr().err
+        assert "needs --model" in capsys.readouterr().err
 
     def test_the_knob_is_refused_where_no_calibration_runs(self, monkeypatch, capsys):
-        """効かないノブを黙って受けない（`--no-calib` に引くべき条件は無い）。"""
+        """A knob with no effect is not silently accepted (`--no-calib` has no conditions to
+        take)."""
         monkeypatch.setattr(
             "sys.argv",
             ["export.py", "--dtype", "i4", "--no-calib", "--model", ANIMA_TURBO_MODEL_NAME],
@@ -587,10 +626,11 @@ class TestModelSelection:
         with pytest.raises(SystemExit):
             export_anima.main()
 
-        assert "--model は" in capsys.readouterr().err
+        assert "--model is a knob only" in capsys.readouterr().err
 
     def test_the_export_path_hands_the_models_conditions_to_the_capture(self, monkeypatch):
-        """MUST: 捕捉が受け取る条件は `--model` のもの（turbo 固定へ戻ったら緑にならない）。"""
+        """MUST: the conditions the capture receives are those of `--model` (going back to fixed
+        turbo values would not be green)."""
         wrapper = make_wrapper()
         batches = capture_batches(wrapper.model, make_probes())
         seen: dict = {}
@@ -608,7 +648,8 @@ class TestModelSelection:
 
 class TestStageSplit:
     def test_the_stage_chain_reproduces_the_block_loop_bit_exactly(self):
-        """MUST: 分解が本物の経路と 1bit も違わない（違えば別経路の GPTQ を出荷する）。"""
+        """MUST: the decomposition does not differ from the real path by a single bit (otherwise
+        GPTQ of another path ships)."""
         wrapper = make_wrapper()
 
         batch = calib.assert_stage_split(
@@ -626,24 +667,27 @@ class TestStageSplit:
         }
 
     def test_a_dropped_stage_is_caught(self):
-        """段を 1 つ落とすと最終 hidden が変わる（門が素通りしないことの実測）。"""
+        """Dropping one stage changes the final hidden (measures that the check does not let it
+        through)."""
         wrapper = make_wrapper()
         stages = calib.dit_stages(wrapper)
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="is not bit-identical"):
             calib.assert_stage_split(wrapper, make_probes(count=1)[0], stages[:-1])
 
     def test_a_reordered_stage_chain_is_caught(self):
-        """順序が入れ替わっても形は合う（値だけが静かに変わる壊れ方）。"""
+        """A swapped order still has matching shapes (a breakage where only the values change,
+        silently)."""
         wrapper = make_wrapper()
         stages = calib.dit_stages(wrapper)
         swapped = (stages[1], stages[0], *stages[2:])
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="is not bit-identical"):
             calib.assert_stage_split(wrapper, make_probes(count=1)[0], swapped)
 
     def test_the_stage_prefix_lands_in_the_wrapper_fqn_space(self):
-        """接頭辞つきの局所 FQN がラッパの実 FQN と一致する（台帳キーの空間が決まる場所）。"""
+        """The prefixed local FQNs match the wrapper's real FQNs (the place that decides the space
+        of the ledger keys)."""
         wrapper = make_wrapper(blocks=2)
 
         names = calib.stage_linear_names(calib.dit_stages(wrapper))
@@ -662,10 +706,12 @@ class TestStageSplit:
 
 class TestBatchesMatchGraph:
     def test_the_raw_model_and_the_wrapper_call_the_block_alike(self):
-        """素のモデル（捕捉元）とラッパ（丸める対象）が block を同じ顔ぶれで呼ぶ。
+        """The plain model (the capture source) and the wrapper (what gets rounded) call the blocks
+        with the same set of arguments.
 
-        2 経路が**同じ関数の別実装**であること（出力のビット一致）も一緒に見る — ここが
-        崩れていると、下の drift 注入が「本物の食い違い」を写していない。
+        It also checks that the 2 paths are **separate implementations of the same function**
+        (bit-identical outputs) — if this broke, the drift injection below would not mirror "a
+        real disagreement".
         """
         wrapper = make_wrapper()
         probe = make_probes(count=1)[0]
@@ -680,7 +726,8 @@ class TestBatchesMatchGraph:
             assert torch.equal(wrapper(*probe), wrapper.model(*probe))
 
     def test_a_batch_with_a_different_keyword_set_is_caught(self):
-        """参照 denoise とラッパで block の呼ばれ方が違うと、別条件で選んだ丸め先を出荷する。"""
+        """If the reference denoise and the wrapper call the blocks differently, rounding targets
+        chosen under other conditions ship."""
         wrapper = make_wrapper()
         stages = calib.dit_stages(wrapper)
         graph_batch = calib.assert_stage_split(wrapper, make_probes(count=1)[0], stages)
@@ -688,50 +735,60 @@ class TestBatchesMatchGraph:
         args, kwargs = batches[0]
         drifted = ((args, {**kwargs, "img_context": None}),)
 
-        with pytest.raises(AssertionError, match="block の呼び方が違う"):
+        with pytest.raises(AssertionError, match="call the blocks differently"):
             calib.assert_calib_batches_match_graph(graph_batch, drifted)
 
     def test_the_export_path_runs_the_gate(self, stub_capture):
-        """MUST: 門が `_round_i4_calibrated` に本当に嵌まっていること（関数単体では足りない）。
+        """MUST: the check is really wired into `_round_i4_calibrated` (the function alone is not
+        enough).
 
-        壊れ方は「素のモデルが block の付随引数を 1 本落とす」— 数値は普通に出るので、門が
-        外れていると別条件で選んだ丸め先がそのまま出荷される。
+        The breakage is "the plain model drops one companion argument of the block" — the
+        numbers come out as usual, so without the check, rounding targets chosen under other
+        conditions would ship as they are.
         """
         wrapper = make_wrapper(dit=DriftingRawDit)
         stub_capture(wrapper)
 
-        with pytest.raises(AssertionError, match="block の呼び方が違う"):
+        with pytest.raises(AssertionError, match="call the blocks differently"):
             quantize(wrapper)
 
 
 class TestCalibratedI4:
     def test_the_ledger_keys_live_in_the_wrapper_fqn_space(self, stub_capture):
-        """MUST: 台帳のキー = 容器の initializer 名（emit の突合はここで決まる）。"""
+        """MUST: ledger keys = the container's initializer names (emit's comparison is decided
+        here)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
 
         scales, overrides = quantize(wrapper)
 
         parameters = dict(wrapper.named_parameters())
-        assert set(overrides) <= set(parameters), "i4 席のキーがラッパの FQN 空間に無い"
+        assert set(overrides) <= set(parameters), (
+            "the keys of the i4 entries are not in the wrapper's FQN space"
+        )
         assert set(scales) <= set(parameters)
         assert set(overrides) == {
             f"{name}.weight" for name in export_anima._i4_module_names(wrapper)
         }
 
     def test_the_eligible_set_is_split_exclusively_between_the_two_paths(self):
-        """block 内（校正）と block 外（RTN）で**過不足なく排他**（`quantize.py` の混成 MUST）。"""
+        """Inside blocks (calibrated) and outside blocks (RTN) are **exact and exclusive** (the
+        mixing MUST of `quantize.py`)."""
         wrapper = make_wrapper()
         stage_names = calib.stage_linear_names(calib.dit_stages(wrapper))
         i4_names = export_anima._i4_module_names(wrapper)
 
         assert i4_names - stage_names == export_anima.NON_STAGE_I4_WEIGHTS
-        assert stage_names <= i4_names, "block 内の linear が i4 適格から漏れている"
-        # patchify 入口は量子化軸が g32 非整除 — i4 側に入らない（i8 の担当のまま）
+        assert stage_names <= i4_names, (
+            "a linear inside a block is missing from the i4-eligible set"
+        )
+        # The quantization axis of the patchify entry is not divisible by g32 — it does not go
+        # to i4 (it stays with i8)
         assert "model.patch_embed.proj" not in i4_names
 
     def test_calibration_produces_a_different_rounding_from_plain_rtn(self, stub_capture):
-        """校正が素通りしたら格納形が同じなので資産からは読めない — 値差で実測する。"""
+        """If calibration passed through, the storage form would be the same and could not be read
+        from the assets — measured by the difference in values."""
         calibrated = make_wrapper()
         plain = make_wrapper()
         stub_capture(calibrated)
@@ -745,15 +802,17 @@ class TestCalibratedI4:
             for name, weight in plain.named_parameters()
             if not torch.equal(weight, after[name])
         )
-        assert differing, "GPTQ が RTN と同じ値を出した（校正が効いていない）"
+        assert differing, "GPTQ gave the same values as RTN (the calibration had no effect)"
         assert all(name.startswith("model.transformer_blocks.") for name in differing)
 
     def test_the_capture_sees_the_shipped_condition(self, stub_capture):
-        """MUST: block 外は丸めた**後**・block 内は丸める**前**に校正入力を採る。
+        """MUST: the calibration inputs are taken **after** rounding outside the blocks and
+        **before** rounding inside them.
 
-        後半（block 内が素のまま）が「丸めた重みが作った活性から同じ重みの丸め先を選ぶ
-        循環」を、前半（block 外が丸まっている）が「f32 の周辺で選んだ丸め先を i4 の周辺と
-        組んで配る」を、それぞれ捕まえる。
+        The second half (inside the blocks still original) catches "the circularity of choosing
+        a weight's rounding targets from activations those rounded weights produced"; the first
+        half (outside the blocks already rounded) catches "shipping rounding targets chosen
+        around f32 surroundings together with i4 surroundings".
         """
         wrapper = make_wrapper()
         before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
@@ -763,17 +822,23 @@ class TestCalibratedI4:
 
         for name in export_anima.NON_STAGE_I4_WEIGHTS:
             key = f"{name}.weight"
-            assert not torch.equal(before[key], at_capture[key]), f"{key} が捕捉時に素のまま"
+            assert not torch.equal(before[key], at_capture[key]), (
+                f"{key} was still original at capture time"
+            )
         for key in (name for name in before if name.startswith("model.transformer_blocks.")):
-            assert torch.equal(before[key], at_capture[key]), f"{key} が捕捉前に丸まっている"
+            assert torch.equal(before[key], at_capture[key]), (
+                f"{key} was rounded before the capture"
+            )
 
     def test_the_capture_sees_the_i8_side_already_rounded(self, stub_capture):
-        """MUST: i8 側（patchify 入口）も捕捉より**前**に丸まっていること。
+        """MUST: the i8 side (the patchify entry) is also rounded **before** the capture.
 
-        `patch_embed.proj` は量子化軸が g32 非整除で i4 に載らない唯一の linear（実 DiT でも
-        1 本）だが、**block 0 の入力そのものを作る**。捕捉より後に丸めると「f32 の patchify を
-        通った活性」で選んだ丸め先を i8 の patchify と組んで配ることになり、block 外の i4 を
-        先に丸める理由（順序 MUST ②）がこの 1 本にだけ効いていない状態になる。
+        `patch_embed.proj` is the only linear that does not go to i4 because its quantization
+        axis is not divisible by g32 (one in the real DiT too), but **it builds the very input
+        of block 0**. Rounding it after the capture would ship rounding targets chosen from
+        "activations that went through an f32 patchify" together with an i8 patchify — the
+        reason for rounding the out-of-block i4 first (ordering MUST (2)) would fail to apply to
+        this one linear only.
         """
         wrapper = make_wrapper()
         before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
@@ -782,13 +847,15 @@ class TestCalibratedI4:
         quantize(wrapper)
 
         key = "model.patch_embed.proj.weight"
-        assert key in before, "i8 側の重みが縮図に無い（テストが空振りしている）"
-        assert not torch.equal(before[key], at_capture[key]), f"{key} が捕捉時に素のまま"
+        assert key in before, "the miniature has no i8-side weight (the test checks nothing)"
+        assert not torch.equal(before[key], at_capture[key]), (
+            f"{key} was still original at capture time"
+        )
 
     def test_the_out_of_block_weights_are_rounded_by_the_plain_path_in_both_modes(
         self, stub_capture
     ):
-        """block 外はどちらの経路でも素の RTN（丸め値はビット一致）。"""
+        """Outside the blocks both paths use plain RTN (the rounded values are bit-identical)."""
         calibrated = make_wrapper()
         plain = make_wrapper()
         stub_capture(calibrated)
@@ -802,27 +869,30 @@ class TestCalibratedI4:
             assert torch.equal(dict(plain.named_parameters())[key], after[key]), key
 
     def test_an_unexpected_non_stage_eligible_fails_loudly(self, monkeypatch, stub_capture):
-        """block 外の適格が宣言と違う = 上流の構成が動いた合図（黙って分類を変えない）。"""
+        """Out-of-block eligibles differing from the declaration = a sign that upstream's
+        architecture moved (the classification does not change silently)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         monkeypatch.setattr(export_anima, "NON_STAGE_I4_WEIGHTS", frozenset())
 
-        with pytest.raises(AssertionError, match="block の外の i4 適格"):
+        with pytest.raises(AssertionError, match="i4-eligible weights outside the DiT blocks"):
             quantize(wrapper)
 
     def test_a_block_linear_outside_the_i4_set_fails_loudly(self, monkeypatch, stub_capture):
-        """block 内に非適格が混じると「走査の本数 = 丸めた本数」の門が張れない。"""
+        """A non-eligible linear inside a block makes the check "scanned count = rounded count"
+        impossible."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         full = export_anima._i4_module_names(wrapper)
         dropped = frozenset(full - {"model.transformer_blocks.0.attn"})
         monkeypatch.setattr(export_anima, "_i4_module_names", lambda model: dropped)
 
-        with pytest.raises(AssertionError, match="i4 適格でない"):
+        with pytest.raises(AssertionError, match=r"are not i4-eligible \(quantization axis"):
             quantize(wrapper)
 
     def test_a_ledger_that_overlaps_the_plain_path_fails_loudly(self, monkeypatch, stub_capture):
-        """同じ重みを 2 経路で丸めると値だけが静かに狂う（格納形も本数も正しく見える）。"""
+        """Rounding the same weight on 2 paths silently corrupts only the values (the storage form
+        and the counts look right)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         genuine = calib.calibrate_i4
@@ -835,11 +905,12 @@ class TestCalibratedI4:
 
         monkeypatch.setattr(calib, "calibrate_i4", overlapping)
 
-        with pytest.raises(AssertionError, match="二重丸め"):
+        with pytest.raises(AssertionError, match="double rounding"):
             quantize(wrapper)
 
     def test_a_report_short_of_the_scan_fails_loudly(self, monkeypatch, stub_capture):
-        """丸め漏れは品質を**良い側**に見せる（素通りを数字から読めない）。"""
+        """A missed rounding makes the quality look **better** (the pass-through cannot be read from
+        the numbers)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         genuine = calib.calibrate_i4
@@ -850,20 +921,21 @@ class TestCalibratedI4:
 
         monkeypatch.setattr(calib, "calibrate_i4", short)
 
-        with pytest.raises(AssertionError, match="走査の"):
+        with pytest.raises(AssertionError, match="of the scan"):
             quantize(wrapper)
 
     def test_zero_calibration_prompts_fail_loudly(self):
-        """MUST: 素の RTN へ黙って落ちる分岐は持たない。"""
+        """MUST: there is no branch that silently falls back to plain RTN."""
         wrapper = make_wrapper()
 
-        with pytest.raises(AssertionError, match="校正プロンプトが 1 件も無い"):
+        with pytest.raises(AssertionError, match="No calibration prompts"):
             capture(wrapper.model, (), calib.calib_conditions(ANIMA_TURBO_MODEL_NAME))
 
 
 class TestOptOut:
     def test_the_i4_series_is_calibrated_by_default(self, monkeypatch):
-        """MUST: CLI の `--dtype i4` はフラグ無しで校正付き（`--no-calib` だけが opt-out）。"""
+        """MUST: the CLI's `--dtype i4` is calibrated without any flag (`--no-calib` is the only
+        opt-out)."""
         captured: dict[str, argparse.Namespace] = {}
 
         def stub(target, args, out_dir):
@@ -881,7 +953,8 @@ class TestOptOut:
         assert captured["transformer"].calib_prompts == export_anima.DEFAULT_CALIB_PROMPTS
 
     def test_no_calib_never_touches_the_calibration_path(self, stub_capture):
-        """opt-out は「校正が痩せる」ではなく**回らない**こと（費用も品質も別物になる）。"""
+        """The opt-out means calibration **does not run**, not "calibration gets thinner" (both cost
+        and quality are different things)."""
         wrapper = make_wrapper()
         calls, _at_capture = stub_capture(wrapper)
 
@@ -890,14 +963,15 @@ class TestOptOut:
         assert calls == []
 
     def test_the_calibration_knobs_are_refused_outside_i4(self, monkeypatch):
-        """効かないノブを黙って受けない（f16 に校正の経路は 1 本も無い）。"""
+        """A knob with no effect is not silently accepted (f16 has no calibration path at all)."""
         monkeypatch.setattr("sys.argv", ["export.py", "--dtype", "f16", "--no-calib"])
 
         with pytest.raises(SystemExit):
             export_anima.main()
 
     def test_a_resolution_off_the_calibration_condition_is_refused(self, monkeypatch, capsys):
-        """MUST: 512px で選んだ丸め先を別解像度のグラフへ焼かない（数値は普通に出る壊れ方）。"""
+        """MUST: rounding targets chosen at 512px are not baked into a graph of another resolution
+        (a breakage where the numbers come out as usual)."""
         monkeypatch.setattr(
             "sys.argv",
             [
@@ -914,10 +988,11 @@ class TestOptOut:
         with pytest.raises(SystemExit):
             export_anima.main()
 
-        assert f"{calib.CALIB_RESOLUTION}px 固定" in capsys.readouterr().err
+        assert f"fixed at {calib.CALIB_RESOLUTION}px" in capsys.readouterr().err
 
     def test_no_calib_leaves_the_resolution_free(self, monkeypatch):
-        """縛りは校正経路のもの — 素の RTN（`--no-calib`）は解像度に何も要求しない。"""
+        """The constraint belongs to the calibration path — plain RTN (`--no-calib`) requires
+        nothing of the resolution."""
         captured: dict[str, argparse.Namespace] = {}
 
         def stub(target, args, out_dir):
@@ -935,24 +1010,27 @@ class TestOptOut:
 
 
 class TestAdalnSegments:
-    """adaLN の判定は**セグメント一致**（`.` で割った要素）— 部分文字列でも接尾辞でもない。"""
+    """adaLN is decided by **segment match** (the elements split by `.`) — neither substring nor
+    suffix."""
 
     def test_it_matches_a_segment_and_not_a_substring(self):
         assert calib.is_adaln("norm1.linear_1")
         assert calib.is_adaln("norm3.linear_2")
-        # 部分文字列一致だと `norm1x` のような綴りを巻き込み、接尾辞一致だと adaLN 配下の子を
-        # 取りこぼす — どちらも「除外したつもりの本数」が黙ってずれる。
+        # A substring match would pull in spellings like `norm1x`, and a suffix match would miss
+        # children under adaLN — either way "the count meant to be excluded" drifts silently.
         assert not calib.is_adaln("norm1x.linear_1")
         assert not calib.is_adaln("norm_out.linear_1")
         assert not calib.is_adaln("attn")
 
     def test_it_answers_alike_for_stage_local_and_wrapper_fqns(self):
-        """MUST: 校正の `include`（局所名）と export の集合分割（ラッパ内 FQN）が同じ 1 実装。"""
+        """MUST: the calibration's `include` (local names) and export's set split (FQNs within the
+        wrapper) share one implementation."""
         assert calib.is_adaln("norm2.linear_1")
         assert calib.is_adaln("model.transformer_blocks.7.norm2.linear_1")
 
     def test_it_reports_which_spellings_were_seen(self):
-        """片側だけの改名を捕まえる網 — 「1 本も無い」だけを見る門は素通りする。"""
+        """A net that catches a rename on one side only — a check that looks only at "none at all"
+        lets it through."""
         names = {"model.transformer_blocks.0.norm1.linear_1", "model.transformer_blocks.0.attn"}
 
         assert calib.adaln_segments_seen(names) == frozenset({"norm1"})
@@ -960,23 +1038,26 @@ class TestAdalnSegments:
 
 
 class TestAdalnI8Variant:
-    """`--i4-adaln-i8`（既定 OFF）= adaLN + block 外を i8 格納へ回す感度実験変種。
+    """`--i4-adaln-i8` (off by default) = the sensitivity-experiment variant that moves adaLN + the
+    outside of the blocks to i8 storage.
 
-    既定を 1 ビットも動かさないこと（集合・経路・値）と、変種が**本当に**役割で割れている
-    ことの両方を見る。格納形は変種でも「i4 と i8 が混ざった系列」のままなので、資産からは
-    どちらで焼いたか読めない — 割り方の綻びは全部ここで捕まえるしかない。
+    Checks both that the default does not move by a single bit (set, path, values) and that the
+    variant **really** splits by role. Even in the variant the storage form stays "a series that
+    mixes i4 and i8", so the assets cannot tell which way it was baked — every flaw in the split
+    has to be caught here.
     """
 
     @staticmethod
     def _split(wrapper: nn.Module) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-        """`(適格, block 内 adaLN, block 内 adaLN 以外)`。"""
+        """`(eligible, adaLN inside blocks, non-adaLN inside blocks)`."""
         eligible = export_anima._i4_module_names(wrapper)
         stage_names = calib.stage_linear_names(calib.dit_stages(wrapper))
         adaln = frozenset(name for name in stage_names if calib.is_adaln(name))
         return eligible, adaln, stage_names - adaln
 
     def test_the_default_stores_every_eligible_weight_as_i4(self, stub_capture):
-        """既定 OFF の格納集合 = 適格の全量（変種の配管が既定の割り方へ触っていない）。"""
+        """The storage set of the default (off) = all eligibles (the variant's plumbing does not
+        touch the default split)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         eligible, _adaln, _rest = self._split(wrapper)
@@ -986,8 +1067,9 @@ class TestAdalnI8Variant:
         assert set(overrides) == {f"{name}.weight" for name in eligible}
 
     def test_the_default_hands_no_include_predicate_to_the_calibration(self, stub_capture):
-        """MUST: 既定は述語を**持たない**（`None`）— 「全部」を綴り直した述語は走査の定義が
-        動いた日に片側だけ追随して黙ってずれる。"""
+        """MUST: the default has **no** predicate (`None`) — a predicate that re-spells "everything"
+        would, the day the scan's definition moves, follow on one side only and drift
+        silently."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         genuine = calib.calibrate_i4
@@ -1004,11 +1086,13 @@ class TestAdalnI8Variant:
         assert seen == [None]
 
     def test_the_default_matches_an_independently_expressed_plain_rounding(self):
-        """既定 OFF（`--no-calib`）が「適格全部を素の RTN → 残りを i8」と**ビット一致**する。
+        """The default (off, `--no-calib`) is **bit-identical** to "all eligibles by plain RTN → the
+        rest to i8".
 
-        変種の配管は集合の引き算を 1 つ挟むだけで、既定では引く側が空 — それが値の側でも
-        成り立っていることを、台本を通さない直接の丸めと突き合わせて実測する
-        （格納形は変種でも同じなので、ずれたら資産からは読めない）。
+        The variant's plumbing inserts just one set subtraction, and by default the subtracted
+        side is empty — this measures that it holds on the values too, by comparing with a
+        direct rounding that does not go through the script (the storage form is the same in the
+        variant, so a drift could not be read from the assets).
         """
         through_export = make_wrapper()
         direct = make_wrapper()
@@ -1038,10 +1122,12 @@ class TestAdalnI8Variant:
         assert all(dtype == "i4" for dtype in overrides.values())
 
     def test_the_excluded_count_is_the_adaln_rows_plus_the_out_of_block_five(self):
-        """勘定: block 数 × (セグメント 3 × linear 2) + block 外 {@link NON_STAGE_I4_WEIGHTS}。
+        """The count: blocks × (3 segments × 2 linears) + the out-of-block
+        {@link NON_STAGE_I4_WEIGHTS}.
 
-        実物（anima-v1.0 = 28 block）ではこれが 28 × 6 + 5 = **173 本**（adaLN 168 + 5）。
-        本数を焼き込まないのは `--num-layers` の縮小 export でも同じ式で通るため。
+        In the real model (anima-v1.0 = 28 blocks) this is 28 × 6 + 5 = **173** (adaLN 168 +
+        5). The count is not hard-coded so that the same formula holds for a reduced export with
+        `--num-layers`.
         """
         blocks = 4
         wrapper = make_wrapper(blocks=blocks)
@@ -1054,7 +1140,8 @@ class TestAdalnI8Variant:
         assert len(excluded - export_anima.NON_STAGE_I4_WEIGHTS) == blocks * per_block
 
     def test_the_variant_rounds_the_excluded_weights_as_i8(self, stub_capture):
-        """MUST: 外した側は i8 で丸まる（i4 からも i8 からも漏れて f32 のまま、を潰す）。"""
+        """MUST: the excluded side is rounded as i8 (rules out slipping through both i4 and i8 and
+        staying f32)."""
         wrapper = make_wrapper()
         before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
         stub_capture(wrapper)
@@ -1064,14 +1151,15 @@ class TestAdalnI8Variant:
         after = dict(wrapper.named_parameters())
         for name in export_anima._adaln_i8_names(wrapper):
             key = f"{name}.weight"
-            assert key in scales, f"{key} の scale が台帳に無い"
-            assert key not in overrides, f"{key} が i4 の格納指定を持っている"
-            # per-channel の scale は行ごと 1 本（group scale は行 × group 数）。
+            assert key in scales, f"{key} has no scale in the ledger"
+            assert key not in overrides, f"{key} has an i4 storage spec"
+            # A per-channel scale is one per row (a group scale is rows × groups).
             assert list(scales[key].shape) == [after[key].shape[0], 1]
-            assert not torch.equal(before[key], after[key]), f"{key} が丸まっていない"
+            assert not torch.equal(before[key], after[key]), f"{key} is not rounded"
 
     def test_the_calibration_rounds_only_the_non_adaln_block_linears(self, stub_capture):
-        """GPTQ に載る集合が「block 内 − adaLN」と過不足なく一致する（述語と格納集合の同一性）。"""
+        """The set that goes to GPTQ equals "inside blocks − adaLN" exactly (the predicate and the
+        storage set are the same)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         _eligible, adaln, rest = self._split(wrapper)
@@ -1088,14 +1176,15 @@ class TestAdalnI8Variant:
             quantize(wrapper, i4_args(adaln_i8=True))
 
         assert rounded == [frozenset(f"{name}.weight" for name in rest)]
-        assert adaln, "縮図に adaLN が無い（テストが空振りしている）"
+        assert adaln, "the miniature has no adaLN (the test checks nothing)"
 
     def test_the_capture_sees_the_adaln_side_already_rounded(self, stub_capture):
-        """MUST: 変種では adaLN も**捕捉より前**に i8 で丸まっていること。
+        """MUST: in the variant, adaLN is also rounded to i8 **before the capture**.
 
-        配布実行時に modulation を作るのは i8 の adaLN なので、後に回すと「f32 の
-        modulation を通った活性」で選んだ丸め先を i8 の modulation と組んで配ることになる
-        （block 外を先に丸める理由と同じ — 順序 MUST ②）。
+        When the distribution runs, the modulation is built by the i8 adaLN, so rounding it later
+        would ship rounding targets chosen from "activations that went through an f32
+        modulation" together with the i8 modulation (the same reason the outside of the blocks
+        is rounded first — ordering MUST (2)).
         """
         wrapper = make_wrapper()
         before = {name: p.detach().clone() for name, p in wrapper.named_parameters()}
@@ -1106,13 +1195,18 @@ class TestAdalnI8Variant:
 
         for name in adaln:
             key = f"{name}.weight"
-            assert not torch.equal(before[key], at_capture[key]), f"{key} が捕捉時に素のまま"
+            assert not torch.equal(before[key], at_capture[key]), (
+                f"{key} was still original at capture time"
+            )
         for name in rest:
             key = f"{name}.weight"
-            assert torch.equal(before[key], at_capture[key]), f"{key} が捕捉前に丸まっている"
+            assert torch.equal(before[key], at_capture[key]), (
+                f"{key} was rounded before the capture"
+            )
 
     def test_the_plain_rtn_mode_splits_the_same_way(self):
-        """`--no-calib` でも割り方は同じ（変種は格納の割りであって校正の有無とは直交）。"""
+        """`--no-calib` splits the same way (the variant is a storage split, orthogonal to whether
+        calibration runs)."""
         wrapper = make_wrapper()
         _eligible, _adaln, rest = self._split(wrapper)
 
@@ -1121,27 +1215,30 @@ class TestAdalnI8Variant:
         assert set(overrides) == {f"{name}.weight" for name in rest}
 
     def test_a_renamed_adaln_segment_fails_loudly(self, monkeypatch, stub_capture):
-        """MUST: 綴りが 1 つでも見つからなければ落ちる — 片側だけの改名は本数の門を素通りする。"""
+        """MUST: it fails if even one spelling is not found — a rename on one side only gets past
+        the count check."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         monkeypatch.setattr(calib, "ADALN_SEGMENTS", calib.ADALN_SEGMENTS | {"norm4"})
 
-        with pytest.raises(AssertionError, match="adaLN の linear が 1 本も無い綴り"):
+        with pytest.raises(AssertionError, match="adaLN linear spellings with no match"):
             quantize(wrapper, i4_args(adaln_i8=True))
 
     def test_an_exclusion_outside_the_eligible_set_fails_loudly(self, monkeypatch, stub_capture):
-        """除外の綴りが適格に無い = 上流の構成が動いた合図（黙って引き算を空振りさせない）。"""
+        """An excluded spelling not in the eligible set = a sign that upstream's architecture moved
+        (the subtraction must not silently hit nothing)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         monkeypatch.setattr(
             export_anima, "_adaln_i8_names", lambda model: frozenset({"model.nowhere"})
         )
 
-        with pytest.raises(AssertionError, match="が i4 適格に無い"):
+        with pytest.raises(AssertionError, match="weights assigned to i8"):
             quantize(wrapper, i4_args(adaln_i8=True))
 
     def test_the_out_of_block_weights_leave_the_plain_i4_path_entirely(self, stub_capture):
-        """変種では素の RTN i4 の経路が**1 本も丸めない**（block 外は全部 i8 へ移る）。"""
+        """In the variant the plain RTN i4 path **rounds nothing** (everything outside the blocks
+        moves to i8)."""
         wrapper = make_wrapper()
         stub_capture(wrapper)
         calls: list[frozenset[str]] = []

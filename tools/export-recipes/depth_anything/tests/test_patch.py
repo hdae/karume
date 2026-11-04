@@ -1,18 +1,22 @@
-"""`depth_anything.patch` の書き換えが原実装と同値であることの回帰テスト（実重み不要分）。
+"""Regression tests that the rewrites of `depth_anything.patch` are equivalent to the original
+implementation (the part that needs no real weights).
 
-実重み 518² での端から端までの同値は export 台本（`depth_anything.export.py --verify`）の
-責務で、ここは「どの書き換えがどの強さで同値か」を単体で固定する。
+End-to-end equivalence with the real weights at 518² is the job of the export script
+(`depth_anything.export.py --verify`); this file pins, unit by unit, "which rewrite is
+equivalent at which strength".
 
-主張の強さは 2 段（`depth_anything.patch` の docstring と対応）:
+The claims come at 2 strengths (matching the docstring of `depth_anything.patch`):
 
-- **添字の同値**（`ConvTranspose2d` → 1×1 conv + pixel shuffle）は **整数値データでの
-  `torch.equal`**。整数値なら f32 の積和が丸めを持たないので、縮約順序が違っても差は出ない
-  — つまり「差 0」がそのまま**添字の写像が厳密に一致している**という主張になる
-  （Cin / Cout / H / W を全て別の長さにして、軸の取り違えが素通りしないようにする）。
-  実データ相当（乱数 f32）の側は縮約順序のぶんだけ動くので、丸め幅の tolerance で見る。
-- **演算列の同値**（最終融合段の倍率 → 寸法指定 / 位置埋め込み補間の門）は
-  **`torch.equal` = ビット一致**。演算を 1 つも増減させないので、「差が小さい」で通す形に
-  すると寸法の取り違えが素通りする。
+- **Index equivalence** (`ConvTranspose2d` → 1×1 conv + pixel shuffle) is **`torch.equal` on
+  integer-valued data**. With integer values the f32 multiply-adds do not round, so a different
+  reduction order makes no difference — that is, "difference 0" directly claims that **the index
+  mapping matches exactly** (Cin / Cout / H / W all get different lengths so that an axis mix-up
+  does not slip through). Realistic data (random f32) moves by the reduction order, so it is
+  checked with a tolerance of the rounding width.
+- **Operation-sequence equivalence** (last fusion stage scale factor → explicit size / the check
+  of the position-embedding interpolation) is **`torch.equal` = bit match**. Not a single
+  operation is added or removed, so letting it pass on "the difference is small" would let a size
+  mix-up slip through.
 """
 
 from __future__ import annotations
@@ -26,20 +30,23 @@ from torch import nn
 from depth_anything import patch as patch_depth_anything
 from depth_anything.patch import SubPixelUpsample
 
-#: 乱数 f32 での `ConvTranspose2d` 分解の許容差（Cin 方向の縮約順序の差の丸め幅）。
+#: The tolerance of the `ConvTranspose2d` decomposition on random f32 (the rounding width of the
+#: different reduction order along Cin).
 #:
-#: MUST: 実重み 518² 端から端の実測幅をここで名乗らない — その綴りは
-#: {@link depth_anything.measurements.CONVT_MAXDIFF} の 1 つだけ（同ファイルの MUST。カードと
-#: `NOTICE.md` が名乗る数と分かれると、片方だけ動いても散文としては妥当なままになる）。ここは
-#: **合成モジュール**での上限で、実重みの実測幅を上回るよう余裕を取ってある。
+#: MUST: do not state the measured end-to-end width with the real weights at 518² here — that is
+#: spelled only in {@link depth_anything.measurements.CONVT_MAXDIFF} (the MUST of that file. If it
+#: split from the number the card and `NOTICE.md` state, the prose would stay plausible when only
+#: one moves). This is the bound on a **synthetic module**, with headroom above the width measured
+#: with the real weights.
 SUB_PIXEL_ATOL = 1e-5
 
 
 def _integer_transposed_conv(in_channels: int, out_channels: int, scale: int) -> nn.ConvTranspose2d:
-    """重み・bias が**整数値**の `ConvTranspose2d(kernel == stride)`。
+    """A `ConvTranspose2d(kernel == stride)` whose weights and bias are **integer-valued**.
 
-    整数値にするのは、f32 の積和が丸めを持たない領域に留めるため（縮約順序が違っても
-    ビット一致するので、差 0 が添字の同値そのものを意味する）。
+    Integer values keep the f32 multiply-adds in the range where they do not round (they match
+    bit for bit even with a different reduction order, so difference 0 means index equivalence
+    itself).
     """
     module = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=scale, stride=scale)
     generator = torch.Generator().manual_seed(20260814 + scale)
@@ -50,15 +57,15 @@ def _integer_transposed_conv(in_channels: int, out_channels: int, scale: int) ->
 
 
 class TestSubPixelUpsample:
-    """`ConvTranspose2d(kernel == stride)` → 1×1 conv + pixel shuffle の同値。"""
+    """Equivalence of `ConvTranspose2d(kernel == stride)` → 1×1 conv + pixel shuffle."""
 
     @pytest.mark.parametrize("scale", [2, 3, 4])
     def test_integer_data_matches_the_transposed_convolution_bit_for_bit(self, scale: int) -> None:
-        """整数値データでは**ビット一致**（= 添字の写像が厳密に一致している）。
+        """On integer-valued data it is a **bit match** (= the index mapping matches exactly).
 
-        Cin / Cout / H / W / batch を全て別の長さにする — 正方や Cin == Cout だけで見ると、
-        重みの軸の取り違え（`[Cin, Cout, r, r]` の先頭 2 軸の入れ替え）や H/W の入れ替えが
-        差 0 のまま通る。
+        Cin / Cout / H / W / batch all get different lengths — checked only with square shapes
+        or Cin == Cout, a mix-up of the weight axes (swapping the first 2 axes of
+        `[Cin, Cout, r, r]`) or of H/W would pass with difference 0.
         """
         source = _integer_transposed_conv(3, 5, scale)
         generator = torch.Generator().manual_seed(7)
@@ -72,7 +79,7 @@ class TestSubPixelUpsample:
         assert torch.equal(got, expected)
 
     def test_random_float_data_stays_within_the_rounding_width(self) -> None:
-        """乱数 f32 では縮約順序のぶんだけ動く（丸め幅に留まる）。"""
+        """On random f32 it moves by the reduction order (staying within the rounding width)."""
         source = nn.ConvTranspose2d(48, 48, kernel_size=4, stride=4).eval()
         generator = torch.Generator().manual_seed(11)
         x = torch.randn((1, 48, 37, 37), generator=generator)
@@ -81,22 +88,27 @@ class TestSubPixelUpsample:
             expected = source(x)
             got = SubPixelUpsample(source)(x)
 
-        assert not torch.equal(got, expected), "丸めが動かないなら tolerance の根拠が消える"
+        assert not torch.equal(got, expected), (
+            "if the rounding does not move, the tolerance loses its justification"
+        )
         assert float((got - expected).abs().max()) < SUB_PIXEL_ATOL
 
     @pytest.mark.parametrize("scale", [2, 3])
     def test_the_shuffle_matches_pixel_shuffle(self, scale: int) -> None:
-        """並べ替えの部分は `F.pixel_shuffle` そのもの（rank-4 に割っても写像は同じ）。
+        """The rearrangement part is `F.pixel_shuffle` itself (splitting it into rank-4 keeps the
+        mapping).
 
-        {@link SubPixelUpsample} の 1×1 conv を恒等（単位行列・bias 0）にすると、残るのは
-        並べ替えだけになる。独立な参照（ATen の `pixel_shuffle`）と突き合わせる。
+        With the 1×1 conv of {@link SubPixelUpsample} made the identity (identity matrix, bias 0),
+        only the rearrangement remains. It is compared with an independent reference (ATen's
+        `pixel_shuffle`).
         """
         channels = 3
         source = nn.ConvTranspose2d(channels * scale * scale, channels, scale, stride=scale)
         with torch.no_grad():
             source.weight.zero_()
             source.bias.zero_()
-            # weight は [Cin, Cout, r, r] — Cin = c·r² を (c, ki, kj) と読んで単位写像を作る。
+            # weight is [Cin, Cout, r, r] — read Cin = c·r² as (c, ki, kj) to build the identity
+            # mapping.
             for out_channel in range(channels):
                 for row in range(scale):
                     for column in range(scale):
@@ -115,40 +127,42 @@ class TestSubPixelUpsample:
         [
             (
                 {"kernel_size": 3, "stride": 2},
-                "kernel != stride は窓が重なる",
-                r"kernel_size=\(3, 3\) と stride=\(2, 2\)",
+                "kernel != stride makes the windows overlap",
+                r"kernel_size=\(3, 3\) and stride=\(2, 2\)",
             ),
             (
                 {"kernel_size": 2, "stride": 2, "padding": 1},
-                "padding は端を落とす",
+                "padding drops the edges",
                 r"padding=\(1, 1\)",
             ),
             (
                 {"kernel_size": 2, "stride": 2, "output_padding": 1},
-                "output_padding は端を伸ばす",
+                "output_padding extends the edges",
                 r"output_padding=\(1, 1\)",
             ),
             (
                 {"kernel_size": 2, "stride": 2, "dilation": 2},
-                "dilation は窓を飛ばす",
+                "dilation spreads the window",
                 r"dilation=\(2, 2\)",
             ),
-            ({"kernel_size": 2, "stride": 2, "groups": 2}, "groups は Cin を分ける", r"groups=2"),
+            ({"kernel_size": 2, "stride": 2, "groups": 2}, "groups splits Cin", r"groups=2"),
             (
                 {"kernel_size": 2, "stride": 2, "bias": False},
-                "bias 無しは実測に無い形",
-                r"bias 無し",
+                "no bias is a form not seen in practice",
+                r"without a bias",
             ),
         ],
     )
     def test_forms_outside_the_decomposition_are_rejected(
         self, kwargs: dict[str, object], why: str, match: str
     ) -> None:
-        """分解が成り立たない形は fail loudly（黙って別の数値へ落とさない）。
+        """Forms where the decomposition does not hold fail loudly (no silent drop to different
+        numbers).
 
-        文言まで見るのは、拒否理由が**上流の実値**を名乗ることが読み手の次の一手を決めるから。
-        型だけを見ていると、検査の側で値を変換してから報告する退行（`dilation=(2, 2)` を
-        `dilation=(1, 1)` と報告する形）が素通りする。
+        The message is checked too because a rejection reason that states **the actual upstream
+        value** decides the reader's next move. Checking only the type would let a regression
+        slip through in which the check converts the value before reporting it (reporting
+        `dilation=(2, 2)` as `dilation=(1, 1)`).
         """
         source = nn.ConvTranspose2d(4, 4, **kwargs)
         with pytest.raises(NotImplementedError, match=match):
@@ -156,7 +170,7 @@ class TestSubPixelUpsample:
 
 
 class TestFeatureFusionStage:
-    """最終融合段の `scale_factor=2` → `size=(2H, 2W)` の同値。"""
+    """Equivalence of the last fusion stage's `scale_factor=2` → `size=(2H, 2W)`."""
 
     @staticmethod
     def _stage(fusion_hidden_size: int) -> nn.Module:
@@ -177,7 +191,8 @@ class TestFeatureFusionStage:
 
     @staticmethod
     def _features(channels: int) -> list[torch.Tensor]:
-        """reassemble 相当の 4 本（解像度は降順・**非正方**で H/W の取り違えを落とす）。"""
+        """4 reassemble-like tensors (descending resolution, **non-square** to catch an H/W
+        mix-up)."""
         generator = torch.Generator().manual_seed(19)
         return [
             torch.randn((1, channels, height, width), generator=generator)
@@ -185,7 +200,7 @@ class TestFeatureFusionStage:
         ]
 
     def test_the_rewritten_stage_is_bit_exact(self) -> None:
-        """差し替え版と原実装の出力が**ビット一致**（4 段とも）。"""
+        """The replacement's output and the original's are a **bit match** (all 4 stages)."""
         stage = self._stage(6)
         features = self._features(6)
 
@@ -199,7 +214,8 @@ class TestFeatureFusionStage:
             assert torch.equal(left, right), index
 
     def test_the_last_stage_doubles_the_spatial_size(self) -> None:
-        """最終段だけは入力の 2 倍の寸法になる（原実装の `scale_factor=2` と同じ）。"""
+        """Only the last stage doubles the input size (the same as `scale_factor=2` in the
+        original)."""
         stage = self._stage(6)
         features = self._features(6)
 
@@ -209,11 +225,13 @@ class TestFeatureFusionStage:
         assert [tuple(item.shape[2:]) for item in got] == [(10, 14), (20, 28), (40, 56), (80, 112)]
 
     def test_the_residual_resize_branch_stays_dead(self) -> None:
-        """残差 resize 枝（原実装の `align_corners=False`）が**構造的に**死んでいること。
+        """The residual resize branch (`align_corners=False` in the original) is
+        **structurally** dead.
 
-        段 `i` の出力は `hidden_states[i+1]` の寸法へ揃うので、段 `i+1` の残差とは必ず同形に
-        なる。入力側の解像度を崩しても同じ（寸法は残差そのものから採るので一緒に動く）—
-        `patch_depth_anything._feature_fusion_stage_forward` がガードを持たない根拠。
+        The output of stage `i` is resized to the size of `hidden_states[i+1]`, so it always has
+        the same shape as the residual of stage `i+1`. The same holds when the input resolutions
+        are distorted (the size is taken from the residual itself, so they move together) — the
+        reason `patch_depth_anything._feature_fusion_stage_forward` has no guard.
         """
         stage = self._stage(6)
         features = self._features(6)
@@ -226,11 +244,12 @@ class TestFeatureFusionStage:
 
     @pytest.mark.parametrize(("height", "width"), [(5, 7), (1, 3), (13, 13)])
     def test_size_and_scale_factor_agree_bit_for_bit(self, height: int, width: int) -> None:
-        """書き換えの土台（`align_corners=True` では倍率が使われない）を直に実測する。
+        """Measure the premise of the rewrite directly (with `align_corners=True` the scale
+        factor is not used).
 
-        aten の `area_pixel_compute_scale` は `align_corners=True` のとき入出力の寸法から
-        `(in−1)/(out−1)` を作るので、倍率指定と寸法指定は**同じ座標式**になる。ここが崩れると
-        差し替え版のビット一致の主張ごと崩れる。
+        aten's `area_pixel_compute_scale` builds `(in−1)/(out−1)` from the input and output sizes
+        when `align_corners=True`, so a scale factor and an explicit size give **the same
+        coordinate formula**. If this breaks, the replacement's bit-match claim breaks with it.
         """
         generator = torch.Generator().manual_seed(23)
         x = torch.randn((1, 3, height, width), generator=generator)
@@ -242,7 +261,7 @@ class TestFeatureFusionStage:
 
 
 class TestInterpolatePosEncoding:
-    """位置埋め込み補間の門（恒等 or 落とす）。"""
+    """The check of the position-embedding interpolation (identity or fail)."""
 
     @staticmethod
     def _embeddings(num_positions: int, dim: int = 4) -> nn.Module:
@@ -251,7 +270,8 @@ class TestInterpolatePosEncoding:
         return module
 
     def test_the_matching_shape_returns_the_table_itself(self) -> None:
-        """パッチ数が一致する形では位置埋め込みを**そのまま**返す（原実装の枝と同一）。"""
+        """When the patch count matches, the position embeddings are returned **as is** (the same
+        as the original's branch)."""
         module = self._embeddings(9)
         embeddings = torch.zeros((1, 10, 4))
 
@@ -266,7 +286,8 @@ class TestInterpolatePosEncoding:
     def test_shapes_that_would_need_interpolation_are_rejected(
         self, patches: int, height: int, width: int
     ) -> None:
-        """補間が要る形（原実装が bicubic を出す形）は落とす — 語彙に無い op を作らせない。"""
+        """Shapes that need interpolation (where the original emits bicubic) fail — no op outside
+        the vocabulary gets created."""
         module = self._embeddings(9)
         embeddings = torch.zeros((1, patches + 1, 4))
 
@@ -275,7 +296,8 @@ class TestInterpolatePosEncoding:
 
 
 class TestAssertSupported:
-    """差し替え版が前提にする構成の検査（外れても shape エラーにならないものだけ）。"""
+    """The check of the configuration the replacements assume (only what deviates without a
+    shape error)."""
 
     @staticmethod
     def _config(**overrides: object) -> object:
@@ -320,11 +342,13 @@ class TestAssertSupported:
 
 
 class TestPretrainedResolution:
-    """位置埋め込みの補間が起きない唯一の入力解像度（正方 1 点）の読み取り。"""
+    """Reading the only input resolution at which no position-embedding interpolation happens
+    (one square size)."""
 
     @staticmethod
     def _model(image_size: object) -> nn.Module:
-        """`config.backbone_config.image_size` だけを持つ最小の骨格（合成で足りる）。"""
+        """A minimal skeleton holding only `config.backbone_config.image_size` (synthetic is
+        enough)."""
         model = nn.Module()
         model.config = SimpleNamespace(backbone_config=SimpleNamespace(image_size=image_size))
         return model
@@ -337,10 +361,12 @@ class TestPretrainedResolution:
 
     @pytest.mark.parametrize("image_size", [[518, 392], (518, 392), [518, 518]])
     def test_a_pair_shaped_image_size_is_rejected(self, image_size: object) -> None:
-        """MUST: 非正方は差し替え版が持たない経路 — 対の綴りは値が揃っていても落とす。
+        """MUST: non-square is a path the replacements do not have — a pair spelling fails even
+        when its values are equal.
 
-        list / tuple で来た時点で「補間が起きない 1 点」の前提が別の経路（上流の
-        `interpolate_pos_encoding`）へ移るので、値が正方でも受けない。
+        Once it arrives as a list / tuple, the premise of "the one size without interpolation"
+        moves to a different path (the upstream `interpolate_pos_encoding`), so it is not
+        accepted even when the values are square.
         """
-        with pytest.raises(ValueError, match="正方のみ"):
+        with pytest.raises(ValueError, match="square only"):
             patch_depth_anything.pretrained_resolution(self._model(image_size))

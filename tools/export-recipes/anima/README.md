@@ -303,7 +303,7 @@ fake-quant after the reference capture" gave the following.
 
 | Injection                                                         | Result                                                                                                                                |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| ① remove `_fake_quant` from the builder                           | **emit fails loudly** (`EmitError: initializer 'p_vae_decoder_conv_in_weight' … fake-quant が未適用か、参照採取より後に掛かっている`) |
+| ① remove `_fake_quant` from the builder                           | **emit fails loudly** (`EmitError: initializer 'p_vae_decoder_conv_in_weight' … fake-quant was not applied, or was applied after the reference was taken`) |
 | ② ① plus removing the eligibility check (round-trip bit equality) | the assets are written but **the E2E stays green** (vae_decoder maxAbs 6.85e-6 / text_encoder 4.40e-4 — both inside the tolerance)    |
 
 ② failing to turn red is a consequence of the BF16 fact above: the difference in torch's own output
@@ -437,7 +437,7 @@ Breaking exactly one thing and then running `uv run pytest` and `python -m karum
 | ② recomputing the scale (axis fixed to 0)                         | pytest **2 failed** / golden generation stops with `EmitError: … is not bit-identical after the inverse i8 × per-channel scale` (the failure is `up.weight` = transposed axis 1) |
 | ③ recomputing the scale (**correct axis**)                        | pytest **2 failed** (the negative tests detect that the gate itself is gone). **The goldens regenerate byte-identically**                       |
 | ④ letting −128 in (`scale = amax/128`, −128 on the negative side) | pytest **5 failed** (±127 / idempotence / scale definition / golden determinism / scale fixed point)                                            |
-| ⑤ broken write order (I8 moved into the leading group)            | pytest **3 failed** / golden generation stops with `ContainerError: … 絶対 offset 4175 が F32 の要素サイズ 4 に整列していない`                  |
+| ⑤ broken write order (I8 moved into the leading group)            | pytest **3 failed** / golden generation stops with `ContainerError: … absolute offset 4175 is not aligned to the F32 alignment unit of 4 bytes` |
 
 **③ is the important one (not what was expected)**: "re-deriving the scale from an
 already-fake-quantized weight on the correct axis" **changes nothing in the data**. Because `q` is

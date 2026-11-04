@@ -1,18 +1,20 @@
-"""recipe のテストが共有するテストヘルパ（`ir_fixtures` / `container_series`）への path 張り。
+"""Puts the test helpers shared by the recipe tests (`ir_fixtures` / `container_series`) on the
+path.
 
-`ir_fixtures`（正当な最小コンテナの合成 — `tools/exporter/tests/ir_fixtures.py`）は core と
-recipe の**両方**のテストが使う。置き場を 1 つに保つのは、容器の綴りと IR の規則の写しを 2 つ
-持たないため（片方だけ古びると「テストは緑・実物だけ落ちる」に戻る）。依存の向きは
-recipe → core の一方向のままで（ADR 0065 決定 3）、wheel（`src/karume/`）には 1 バイトも
-入れない。
+`ir_fixtures` (synthesis of valid minimal containers — `tools/exporter/tests/ir_fixtures.py`) is
+used by the tests of **both** core and the recipes. It is kept in one place so that there are not
+two copies of the container spellings and the IR rules (if one went stale we would be back to
+"the tests are green, only the real thing fails"). The dependency direction stays recipe → core
+only (ADR 0065 decision 3), and not one byte of it goes into the wheel (`src/karume/`).
 
-`container_series`（`tools/export-recipes/tests/container_series.py`）は recipe 側だけの糊で、
-part 列を系列 / 配布形として扱う 3 手（書く / 期待 path を並べる / 読む）を 7 家族で共有する。同じ
-ディレクトリの test モジュールは pytest が自力で解決するが、family サブパッケージ配下
-（`<family>/tests/` は `__init__.py` を持つ）からは解決されないので、ここで明示的に張る。
+`container_series` (`tools/export-recipes/tests/container_series.py`) is recipe-only glue that
+shares across seven families the three moves of treating a part list as a series / distribution
+(write / list the expected paths / read). pytest resolves test modules of the same directory on
+its own, but not from under the family subpackages (`<family>/tests/` has an `__init__.py`), so the
+path is added here explicitly.
 
-MUST: 追加は**末尾**（`insert(0, …)` にしない）— recipe 側の綴り（`dist` / `_shared` /
-family パッケージ）を core 側のテストディレクトリが先に解決してしまう形を作らない。
+MUST: append **at the end** (not `insert(0, …)`) — never let core's test directory resolve the
+recipe-side names (`dist` / `_shared` / the family packages) first.
 """
 
 from __future__ import annotations
@@ -20,10 +22,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-#: `tools/export-recipes/conftest.py` → `tools/` → core のテスト置き場。
+#: `tools/export-recipes/conftest.py` → `tools/` → core's test directory.
 CORE_TESTS = Path(__file__).resolve().parent.parent / "exporter" / "tests"
 
-#: recipe 側の共有テストヘルパ（`container_series`）の置き場。
+#: Where the recipe-side shared test helpers (`container_series`) live.
 RECIPE_TESTS = Path(__file__).resolve().parent / "tests"
 
 for helpers in (CORE_TESTS, RECIPE_TESTS):

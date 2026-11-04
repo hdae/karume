@@ -1,46 +1,56 @@
-"""第三者の umT5-XXL 互換 encoder（HF のリポの safetensors 1 本）を取り込む（ADR 0122 決定 5 / 6 —
-段 b。ADR 0088 の Civitai 取り込みの umT5 版）。
+"""Take in a third-party umT5-XXL-compatible encoder (one safetensors file of an HF repository)
+(ADR 0122 decisions 5 / 6 — step b; the umT5 counterpart of ADR 0088's Civitai intake).
 
     uv run --group wan --inexact python -m wan.umt5_intake \\
-        --repo <owner/name> --revision <40 桁の commit> --file <名前>.safetensors --name <名前>
+        --repo <owner/name> --revision <40-digit commit> --file <name>.safetensors --name <name>
 
-責務は**取得・照合・記録まで**の 1 段。容器への変換は `wan.umt5_export`（`--intake`）、手元の
-実験用ミラーの組み立ては `dist.py --pipeline umt5 --intake`（`wan.umt5_distribution`）が持つ。
+Its responsibility is the single step **up to fetching, checking and recording**. Conversion to a
+container belongs to `wan.umt5_export` (`--intake`), and assembling the local experimental mirror
+to `dist.py --pipeline umt5 --intake` (`wan.umt5_distribution`).
 
-1. HF API の値（pin した revision の LFS の sha256・`cardData` のライセンスとベース）を読む。
-2. `config.json` を置く。上流が持っていれば構成の欄（{@link CONFIG_FIELDS} — グラフに効く欄と
-   相対位置のバケットの構成）を本家の pin の config と突き合わせ、違えば fail loudly（TS が
-   バケットの構成を固定しているため）。持たなければ本家の pin の config を写し、「構成は推定
-   （本家の写し）」と記録する（その場合の照合は空 — `relative_attention_max_distance` は重みの
-   形から導けない）。置いたバイト列の sha256 を記録し、{@link load_intake} が読むたびに照合する
-   （取り込みの後の書き換えを、本家と照合していない構成として拒む）。
-3. 指定の 1 本を pin した revision で取り、sha256 を API の値と突き合わせる（`.part` → 一致で
-   rename）。受けるのは safetensors だけ（pickle の `.bin` を開くのは本家の pin の行だけ —
-   決定 2）。取ったファイルは**名前も中身もそのまま** `inputs/umt5/<名前>/` に置く（F32 の写しは
-   作らない —
-   sha256 とファイル名が上流と一致したまま残り、後から API の値と突き合わせ直せる）。取り込み先
-   （`--out` の下の `<名前>`）が `models/` の下なら、API を引く前に落とす（実 path どうし —
-   {@link assert_outside_distribution_root}）。
-4. ヘッダを読み、dtype（全テンソルが同じ BF16 か F32 — FP8・混在は拒む）・キー集合（Wan の
-   `text_encoder` と同じ形 — tied な別名の対は 1 本と数え、両方を持つなら決定 2 の規則）・形を
-   見る（`wan.umt5_export.inspect_intake_checkpoint`）。取り込み先に置いてよいファイル（{@link
-   assert_only_intake_files} の許可の一覧）の外のものがあれば、記録を書く前に落とす。
-5. 出所の記録 {@link INTAKE_FILE}（機械専有 — 人は追記しない）を書く。
+1. Read the HF API values (the LFS sha256 at the pinned revision, the license and base from
+   `cardData`).
+2. Place `config.json`. If the upstream has one, check its configuration fields
+   ({@link CONFIG_FIELDS} — the fields that affect the graph and the relative-position bucket
+   configuration) against the config of the original's pin, and fail loudly if they differ
+   (because TS fixes the bucket configuration). If it has none, copy the config of the original's
+   pin and record "configuration assumed (copy of the original)" (the check is then empty —
+   `relative_attention_max_distance` cannot be derived from the weight shapes). The sha256 of the
+   placed bytes is recorded, and {@link load_intake} checks it on every read (a rewrite after the
+   intake is refused as a configuration not checked against the original).
+3. Fetch the one named file at the pinned revision and check its sha256 against the API value
+   (`.part` → renamed on a match). Only safetensors is accepted (only the row of the original's pin
+   opens a pickle `.bin` — decision 2). The fetched file is placed in `inputs/umt5/<name>/` **with
+   its name and content as is** (no F32 copy is made —
+   the sha256 and file name stay identical to upstream and can be checked against the API values
+   again later). If the intake directory (`<name>` under `--out`) is under `models/`, it fails
+   before calling the API (comparing real paths — {@link assert_outside_distribution_root}).
+4. Read the header and check the dtype (every tensor the same BF16 or F32 — FP8 or a mix is
+   refused), the key set (the same form as Wan's `text_encoder` — the tied alias pair counts as
+   one, and with both present the rule of decision 2 applies) and the shapes
+   (`wan.umt5_export.inspect_intake_checkpoint`). If the intake directory holds anything outside
+   the allowed files (the allow-list of {@link assert_only_intake_files}), it fails before the
+   record is written.
+5. Write the provenance record {@link INTAKE_FILE} (machine-owned — people do not add to it).
 
-**ライセンスの判定はしない**（ADR 0088 決定 5）。宣言されたライセンスを写すだけで、宣言が無いか、
-再配布の条件を識別しない値（`unknown`・空・`license_name` の無い `other` など —
-{@link UNIDENTIFIED_LICENSES}）なら未宣言の印 {@link UNDECLARED_LICENSE} を記録する。
-未宣言の重みから容器や実験用ミラーを作るのは、書き手と組み立ての門で明示の引数
-{@link ALLOW_UNDECLARED_LICENSE_FLAG} を付けたときだけ（決定 6）。
-取り込みを行う人・エージェントが確認した内容は同じディレクトリの `license-review.md` に残す
-（このコマンドはそちらに触らない — 機械の記録に人の追記を混ぜると、取り直しのたびに片方が消える）。
+**It does not judge licenses** (ADR 0088 decision 5). It only copies the declared license, and when
+there is no declaration or the value does not identify the redistribution terms (`unknown`, empty,
+`other` without `license_name` and so on — {@link UNIDENTIFIED_LICENSES}), it records the
+undeclared mark {@link UNDECLARED_LICENSE}. A container or an experimental mirror is built from
+undeclared weights only when the explicit argument {@link ALLOW_UNDECLARED_LICENSE_FLAG} is given
+at the checks of the writer and of the assembly (decision 6).
+What the person or agent doing the intake verified goes into `license-review.md` in the same
+directory (this command does not touch it — mixing people's notes into the machine record would
+lose one of them on every re-fetch).
 
-MUST: module 直下で torch / transformers / huggingface_hub を import しない — 配布 recipe
-（`wan.umt5_distribution` — `import dist` は torch を読まない）がここから記録の読み口を引く。
-重い依存は使う関数の中で import する（`tests/test_optional_group_imports.py`）。
+MUST: torch / transformers / huggingface_hub are not imported at module level — the distribution
+recipe (`wan.umt5_distribution` — `import dist` does not load torch) takes the record reader from
+here. Heavy dependencies are imported inside the functions that use them
+(`tests/test_optional_group_imports.py`).
 
-MUST: 第三者のリポ名・commit を追跡されるファイルに書かない（ADR 0122 制約）— 固有名は実行時の
-引数と、git 追跡外の `inputs/umt5/<名前>/intake.json` にだけ現れる。
+MUST: third-party repository names and commits are never written to tracked files (ADR 0122
+constraint) — the proper names appear only in the runtime arguments and in the git-untracked
+`inputs/umt5/<name>/intake.json`.
 """
 
 from __future__ import annotations
@@ -60,49 +70,56 @@ from _shared.paths import DIST_ROOT, INPUTS_ROOT
 from karume.dist import REPO_RE, DistError, assert_model_name
 from wan.sources import UMT5_CONFIG, UMT5_SOURCES
 
-#: 取り込み先の親（`inputs/umt5/<名前>/` — docs/assets-layout.md の入力素材の席）。
+#: Parent of the intake directories (`inputs/umt5/<name>/` — the input-material location of
+#: docs/assets-layout.md).
 INTAKE_ROOT = INPUTS_ROOT / "umt5"
 
-#: 機械が専有する出所の記録（人の確認記録は `license-review.md` へ）。
+#: The machine-owned provenance record (people's verification notes go to `license-review.md`).
 INTAKE_FILE = "intake.json"
 
-#: 記録の形式の綴り（形を変えたら版を上げる — 読み口は知らない版を fail loudly で拒む）。
-#: `/2` で `config.sha256` を足した。古い版の記録は移行せずに拒む（未公開の道具 — 取り込みを同じ
-#: 引数でやり直せば今の版で書き直る）。
+#: Spelling of the record format (bump the version when the shape changes — the reader refuses an
+#: unknown version loudly). `/2` added `config.sha256`. Records of older versions are refused, not
+#: migrated (an unreleased tool — redoing the intake with the same arguments rewrites the record in
+#: the current version).
 INTAKE_FORMAT = "karume-umt5-intake/2"
 
-#: 取り込みを行う人・エージェントの確認の記録（このコマンドは書かない — モジュール doc）。
+#: The verification notes of the person or agent doing the intake (this command does not write it
+#: — module doc).
 LICENSE_REVIEW_FILE = "license-review.md"
 
-#: ライセンス未宣言の印（SPDX の `NOASSERTION` — ADR 0122 決定 6・未解決「未宣言の印の綴り」の
-#: 決定）。記録の `license`・容器の `provenance.license`・実験用ミラーのカードの frontmatter で
-#: 同じ綴りを使う。公開前の門（`tools/release/container_license.ts`）も同じ綴りで拒む。
+#: The undeclared-license mark (SPDX `NOASSERTION` — ADR 0122 decision 6, resolving the open point
+#: "spelling of the undeclared mark"). The record's `license`, the container's `provenance.license`
+#: and the frontmatter of the experimental mirror's card use the same spelling. The pre-publication
+#: check (`tools/release/container_license.ts`) refuses the same spelling.
 UNDECLARED_LICENSE = "NOASSERTION"
 
-#: 再配布の条件を識別しない値（{@link license_unidentified} — 前後の空白と大文字小文字を無視して
-#: 比べる）。HF の `license: unknown` は公式の選択肢だが条件を何も名乗らないので、宣言が無いのと
-#: 同じ扱いにする。公開前の門（`tools/release/container_license.ts` の `UNIDENTIFIED_LICENSES`）も
-#: 同じ集合で拒む。
+#: Values that do not identify the redistribution terms ({@link license_unidentified} — compared
+#: ignoring surrounding whitespace and case). HF's `license: unknown` is an official choice but
+#: states no terms, so it is treated like no declaration. The pre-publication check
+#: (`UNIDENTIFIED_LICENSES` in `tools/release/container_license.ts`) refuses the same set.
 #:
-#: NOTE: `other` は入れない — 既存の配布形（anima）の容器が `other` を名乗り、条件を NOTICE に書く
-#: 形で公開している。取り込みでは `license_name` の無い `other` を {@link _card_license} が未宣言の
-#: 印にし、記録の素の `other` は {@link load_intake} が拒む（どちらもこの集合とは別の検査）。
+#: NOTE: `other` is not included — the containers of an existing distribution (anima) declare
+#: `other` and are published with the terms written in the NOTICE. In an intake, {@link
+#: _card_license} turns `other` without `license_name` into the undeclared mark, and
+#: {@link load_intake} refuses a bare `other` in the record (both separate checks from this set).
 UNIDENTIFIED_LICENSES = frozenset({"", "noassertion", "unknown", "none"})
 
-#: HF の `license: other`（識別子は `license_name` が持つ — 素の `other` は条件を名指さない）。
+#: HF's `license: other` (the identifier is in `license_name` — a bare `other` names no terms).
 _OTHER_LICENSE = "other"
 
-#: 未宣言の印を焼いた容器と実験用ミラーを作ることの明示（書き手と dist ドライバが同じ綴りで
-#: 受ける）。
+#: The explicit permission to build a container and an experimental mirror that carry the
+#: undeclared mark (the writer and the dist driver accept the same spelling).
 ALLOW_UNDECLARED_LICENSE_FLAG = "--allow-undeclared-license"
 
-#: 受ける元の dtype（safetensors のヘッダの綴り）。BF16 は書き手が読みの時点で F32 へ広げる
-#: （無損失）。FP8 などは情報を失った派生なので受けない。
+#: Accepted source dtypes (the safetensors header spelling). The writer widens BF16 to F32 when
+#: reading (lossless). FP8 and the like are derivatives that lost information, so they are not
+#: accepted.
 INTAKE_DTYPES: tuple[str, ...] = ("BF16", "F32")
 
-#: 構成の照合の欄（グラフに効く欄と相対位置のバケットの構成）。バケットの構成はグラフ記述に
-#: 入らない（TS が `numBuckets` 32・`maxDistance` 128 を固定する）ので、違えば容器がバイト同一の
-#: まま出力だけが変わりうる — 取り込みで本家の config と突き合わせる。
+#: The configuration fields checked (those that affect the graph and the relative-position bucket
+#: configuration). The bucket configuration is not in the graph descriptor (TS fixes `numBuckets`
+#: 32 and `maxDistance` 128), so a difference could change only the output while the container
+#: stays byte-identical — the intake checks them against the original's config.
 CONFIG_FIELDS: tuple[str, ...] = (
     "d_model",
     "d_kv",
@@ -118,23 +135,25 @@ CONFIG_FIELDS: tuple[str, ...] = (
     "relative_attention_max_distance",
 )
 
-#: config の出所（`upstream` = 上流が持つ config を本家と照合して置いた / `base-copy` = 上流が
-#: 持たないので本家の pin の config を写した — 構成は推定）。
+#: Where the config came from (`upstream` = the upstream's config, placed after checking it
+#: against the original / `base-copy` = the upstream has none, so the config of the original's pin
+#: was copied — the configuration is assumed).
 CONFIG_SOURCES: tuple[str, ...] = ("upstream", "base-copy")
 
-#: 構成の照合と写しの基準にする本家の行（`wan.sources.UMT5_SOURCES` のキー — umT5 の配布形の
-#: モデル名 `wan.umt5_distribution.UMT5_DEFAULT_MODEL` と同じ綴り。あちらがこのモジュールを
-#: import するので、こちらからは import できない — 一致はテストが見る）。
+#: The original's row used as the baseline of the configuration check and the copy (a key of
+#: `wan.sources.UMT5_SOURCES` — spelled like the umT5 distribution's model name
+#: `wan.umt5_distribution.UMT5_DEFAULT_MODEL`; that module imports this one, so it cannot be
+#: imported from here — a test checks they match).
 BASE_UPSTREAM = "xxl"
 
-#: HF の commit SHA（40 桁の小文字 16 進）。ブランチ名やタグは pin にならない。
+#: An HF commit SHA (40 lowercase hex digits). Branch names and tags are not pins.
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
-#: 読み書きの刻み（11 GB 級の safetensors を写しながら sha256 を取る）。
+#: The read / write chunk (the sha256 is taken while copying an 11 GB-class safetensors).
 _CHUNK_BYTES = 8 << 20
 
-#: 記録の欄（多くも少なくもない — 知らない欄は fail loudly）。
+#: The record's fields (no more and no fewer — an unknown field fails loudly).
 _RECORD_KEYS = frozenset(
     {
         "format",
@@ -152,17 +171,18 @@ _RECORD_KEYS = frozenset(
 
 
 class Umt5IntakeError(RuntimeError):
-    """取り込みの入力・上流の値・取り込んだ記録が想定（ADR 0122 決定 5）から外れた。"""
+    """The intake's input, an upstream value or an intake record differs from what is assumed (ADR
+    0122 decision 5)."""
 
 
 # ---------------------------------------------------------------------------
-# 出所の記録
+# The provenance record
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class IntakeFile:
-    """取り込んだ safetensors 1 本（上流のファイル名・バイト数・LFS の sha256）。"""
+    """One intake safetensors file (the upstream file name, byte size and LFS sha256)."""
 
     name: str
     size: int
@@ -171,8 +191,9 @@ class IntakeFile:
 
 @dataclass(frozen=True)
 class ConfigOrigin:
-    """`config.json` の出所（{@link CONFIG_SOURCES}）と、照合した / 写した本家の pin、置いた
-    バイト列の sha256（{@link load_intake} が読むたびに照合する）。"""
+    """Where `config.json` came from ({@link CONFIG_SOURCES}), the original's pin it was checked
+    against / copied from, and the sha256 of the placed bytes ({@link load_intake} checks it on
+    every read)."""
 
     source: str
     base_repo: str
@@ -182,9 +203,10 @@ class ConfigOrigin:
 
 @dataclass(frozen=True)
 class Umt5Intake:
-    """`intake.json` の中身（{@link load_intake} が検査して組む）。
+    """The contents of `intake.json` ({@link load_intake} checks and builds it).
 
-    `directory` は記録を読んだ置き場（記録には書かない — 取り込んだファイルと config の在処）。
+    `directory` is where the record was read from (not written into the record — where the intake
+    file and the config are).
     """
 
     directory: Path
@@ -192,26 +214,28 @@ class Umt5Intake:
     repo: str
     revision: str
     file: IntakeFile
-    #: 元の dtype（{@link INTAKE_DTYPES}）— 書き手はこの dtype だけを受ける。
+    #: The source dtype ({@link INTAKE_DTYPES}) — the writer accepts only this dtype.
     dtype: str
-    #: 宣言されたライセンスの識別子、宣言が無ければ {@link UNDECLARED_LICENSE}。
+    #: The declared license identifier, or {@link UNDECLARED_LICENSE} without a declaration.
     license: str
-    #: 宣言されたベース（宣言が無ければ `None`）。
+    #: The declared base (`None` without a declaration).
     base_model: tuple[str, ...] | None
     config: ConfigOrigin
     fetched_at: str
 
     @property
     def undeclared(self) -> bool:
-        """上流がライセンスを宣言していない（未宣言の印を記録した）か。
+        """Whether the upstream declares no license (the undeclared mark was recorded).
 
-        {@link load_intake} は識別しない値を印の綴りだけに絞るが、ここも同じ述語で判定する
-        （記録を経ずに組んだ値でも、識別しない値を宣言済みとして扱わない）。"""
+        {@link load_intake} narrows unidentified values to the mark's spelling only, but this uses
+        the same predicate too (even a value built without a record never treats an unidentified
+        value as declared)."""
         return license_unidentified(self.license)
 
     @property
     def config_assumed(self) -> bool:
-        """構成が推定（上流が config を持たず、本家の pin の config を写した）か。"""
+        """Whether the configuration is assumed (the upstream has no config, and the config of the
+        original's pin was copied)."""
         return self.config.source == "base-copy"
 
     @property
@@ -238,42 +262,46 @@ class Umt5Intake:
 
 
 def license_unidentified(value: str) -> bool:
-    """`value` が再配布の条件を識別しない値（{@link UNIDENTIFIED_LICENSES}）か。"""
+    """Whether `value` does not identify redistribution terms ({@link UNIDENTIFIED_LICENSES})."""
     return value.strip().lower() in UNIDENTIFIED_LICENSES
 
 
 def assert_outside_distribution_root(path: Path, *, root: Path) -> None:
-    """`path` が `models/`（`root`）の下なら落とす（取り込み由来のファイル — ADR 0122 決定 5）。
+    """Fail if `path` is under `models/` (`root`) (files that come from an intake — ADR 0122
+    decision 5).
 
-    取り込み（`--out`）と実験用ミラーの組み立て（`dist.py --intake` の `--out`）が共有する 1 本。
+    The one check shared by the intake (`--out`) and the assembly of the experimental mirror
+    (`--out` of `dist.py --intake`).
 
-    MUST: 実 path（symlink と `..` を解いた path）どうしで比べる — 綴りで比べると、`models/` を
-    指す symlink や `..` を含む相対の path が素通りする。`models/` は公開の台本が
-    `models/<repo>` をそのまま上げる席で、公開の経路を持たない取り込み由来のファイル（生の第三者の
-    safetensors も、そこから書いた容器も）が居る理由が無い（ライセンスの宣言の有無によらない）。
+    MUST: compare real paths (with symlinks and `..` resolved) — comparing spellings lets a
+    symlink to `models/` or a relative path containing `..` slip through. `models/` is where the
+    publication script uploads `models/<repo>` as is, and files from an intake have no publication
+    path, so they (neither the raw third-party safetensors nor a container written from it) have no
+    reason to be there (whether or not a license is declared).
     """
     resolved = path.resolve()
     real_root = root.resolve()
     if resolved.is_relative_to(real_root):
         raise Umt5IntakeError(
-            f"{path}（実 path {resolved}）が {real_root} の下 — 取り込み由来のファイルは"
-            " models/ に置かない"
+            f"{path} (real path {resolved}) is under {real_root} — files that come from an"
+            " intake are not placed in models/"
         )
 
 
 def assert_only_intake_files(directory: Path, file: str) -> None:
-    """取り込み先 `directory` の直下に、置いてよいファイル（記録が名指すファイル `file`・
-    `config.json`・{@link INTAKE_FILE}・{@link LICENSE_REVIEW_FILE}）の外のものが無いことを見る
-    （サブディレクトリも外のものとして数える）。
+    """Check that directly under the intake directory `directory` there is nothing outside the
+    allowed files (the file `file` the record names, `config.json`, {@link INTAKE_FILE},
+    {@link LICENSE_REVIEW_FILE}) (subdirectories also count as outside).
 
-    MUST: 在れば fail loudly — 読み口は記録のファイルだけを開くが、記録の外の重みが同じ席に
-    居ると、どれが照合したものかを人も道具も取り違える（索引があれば `weight_map` の先を読む
-    読み口に渡った時点で、照合していないファイルが黙って読まれる）。
-    MUST: 許可の一覧で閉じる（名前どおりに比べる — 大文字小文字も区別する）— 重みの拡張子の
-    一覧で開くと、大文字の拡張子・一覧に無い形式（`.pkl`・`.npz` など）・書きかけの `.part` が
-    素通りする。
-    MUST: symlink は許可の名前でも拒む — `is_file()` は symlink を辿るので、許可の名前の symlink で
-    記録の外の重みを同じ席に置ける。
+    MUST: fail loudly if there is — the reader opens only the record's file, but with weights
+    outside the record in the same directory both people and tools can mistake which one was
+    checked (with an index, the moment it reaches a reader that follows `weight_map`, an unchecked
+    file is silently read).
+    MUST: closed by an allow-list (names compared exactly — case-sensitive) — an open list of
+    weight extensions would let uppercase extensions, formats not on the list (`.pkl`, `.npz` and
+    so on) and a half-written `.part` slip through.
+    MUST: symlinks are refused even with an allowed name — `is_file()` follows symlinks, so a
+    symlink with an allowed name could put weights outside the record in the same directory.
     """
     allowed = {file, UMT5_CONFIG, INTAKE_FILE, LICENSE_REVIEW_FILE}
     foreign = sorted(
@@ -283,36 +311,41 @@ def assert_only_intake_files(directory: Path, file: str) -> None:
     )
     if foreign:
         raise Umt5IntakeError(
-            f"{directory} に記録の外のファイルがある: {foreign} — 置いてよいのは"
-            f" {sorted(allowed)} だけ（記録の外の重みのファイルを取り違えないよう、種類によらず"
-            "取り込み先には置かない）"
+            f"{directory} holds files outside the record: {foreign} — only {sorted(allowed)} may"
+            " be there (so that a weight file outside the record is never mistaken for it,"
+            " nothing else is placed in the intake directory, whatever its kind)"
         )
 
 
 def _assert_config_pinned(directory: Path, sha256: str, where: str) -> None:
-    """取り込み先の `config.json` が記録の sha256（取り込みの時点に置いたバイト列）と同じか。
+    """Whether the intake directory's `config.json` matches the record's sha256 (the bytes placed
+    at intake time).
 
-    MUST: 違えば・無ければ fail loudly — 書き手と参照はグラフとバケットの構成をこのファイルから
-    読み直すので、取り込みの後に書き換えると（例 `relative_attention_max_distance`）本家との照合を
-    経ていない構成で容器と golden ができる。
+    MUST: fail loudly when it differs or is missing — the writer and the reference re-read the
+    graph and bucket configuration from this file, so a rewrite after the intake (e.g.
+    `relative_attention_max_distance`) would produce a container and goldens with a configuration
+    never checked against the original.
     """
     path = directory / UMT5_CONFIG
     if not path.is_file():
-        raise Umt5IntakeError(f"{where}: {path} が無い — 取り込みをやり直す")
+        raise Umt5IntakeError(f"{where}: {path} is missing — redo the intake")
     actual = _sha256(path)
     if actual != sha256:
         raise Umt5IntakeError(
-            f"{where}: {path} の sha256 {actual} が記録の {sha256} と違う — 取り込みの後に"
-            " config を書き換えた（構成は本家と照合した取り込みの時点の値だけを受ける。直すなら"
-            "取り込みをやり直す）"
+            f"{where}: {path}: the sha256 {actual} differs from the record's {sha256} — the"
+            " config was rewritten after the intake (only the configuration at intake time,"
+            " checked against the original, is accepted; to change it, redo the intake)"
         )
 
 
 def assert_intake_name(name: str) -> str:
-    """取り込みの名前（系列名 `umt5-xxl-<名前>-i8-dyn` と実験用ミラーのモデル名になる）を検査する。
+    """Check the intake's name (it becomes the series name `umt5-xxl-<name>-i8-dyn` and the model
+    name of the experimental mirror).
 
-    配布のモデル名の受理集合（ADR 0077）に縛り、本家の行の名前（`wan.sources.UMT5_SOURCES` の
-    キー）とは重ねない — 重ねると配布の門が本家の行として扱い、出所の照合先が入れ替わる。
+    It is restricted to the accepted set of distribution model names (ADR 0077) and never overlaps
+    the names of the original's rows (the keys of `wan.sources.UMT5_SOURCES`) — an overlap would
+    make the distribution check treat it as the original's row and swap what the provenance is
+    checked against.
     """
     try:
         assert_model_name(name)
@@ -320,20 +353,21 @@ def assert_intake_name(name: str) -> str:
         raise Umt5IntakeError(str(cause)) from cause
     if name in UMT5_SOURCES:
         raise Umt5IntakeError(
-            f"名前 '{name}' は本家の行（wan.sources.UMT5_SOURCES）と同じ — 取り込みには別の"
-            "名前を付ける"
+            f"the name '{name}' is the same as the original's row (wan.sources.UMT5_SOURCES) —"
+            " give the intake another name"
         )
     return name
 
 
 def _assert_file_name(name: str) -> str:
-    """取り込むファイル名（リポ直下の safetensors 1 本 — 区切り・`..`・pickle を受けない）。"""
+    """The file name to take in (one safetensors at the repository root — no separators, `..` or
+    pickles)."""
     if not name or name in {".", ".."} or "/" in name or "\\" in name or ":" in name:
-        raise Umt5IntakeError(f"ファイル名 {name!r} がリポ直下の basename でない")
+        raise Umt5IntakeError(f"the file name {name!r} is not a basename at the repository root")
     if not name.endswith(".safetensors"):
         raise Umt5IntakeError(
-            f"ファイル {name!r} は safetensors でない — 取り込みは safetensors だけを受ける"
-            "（pickle の .bin を開くのは本家の pin の行だけ — ADR 0122 決定 2）"
+            f"the file {name!r} is not safetensors — an intake accepts safetensors only (only"
+            " the row of the original's pin opens a pickle .bin — ADR 0122 decision 2)"
         )
     return name
 
@@ -341,70 +375,76 @@ def _assert_file_name(name: str) -> str:
 def _require(mapping: Mapping[str, Any], key: str, kind: type, where: str) -> Any:
     value = mapping.get(key)
     if not isinstance(value, kind) or (isinstance(value, bool) and kind is not bool):
-        raise Umt5IntakeError(f"{where}: '{key}' が {kind.__name__} でない（{value!r}）")
+        raise Umt5IntakeError(f"{where}: '{key}' is not {kind.__name__} ({value!r})")
     return value
 
 
 def load_intake(directory: Path) -> Umt5Intake:
-    """取り込み済みのディレクトリから記録を読み、形を検査して返す。
+    """Read the record from an intake directory, check its shape and return it.
 
-    MUST: 知らない形式・欄の過不足・綴りの外れは fail loudly — 書き手は記録の `dtype` だけを受け、
-    容器と配布の門は記録の `license` / `revision` を出所の正本にするので、壊れた記録を黙って
-    読むと出所を偽る容器ができる。
+    MUST: an unknown format, missing or extra fields, or spellings out of range fail loudly — the
+    writer accepts only the record's `dtype`, and the container and distribution checks take the
+    record's `license` / `revision` as the source of truth for provenance, so silently reading a
+    broken record would produce a container with false provenance.
     """
     path = directory / INTAKE_FILE
     if not path.is_file():
         raise Umt5IntakeError(
-            f"{path} が無い — 先に `python -m wan.umt5_intake` で取り込む（記録の無い重みは"
-            "読まない）"
+            f"{path} is missing — take the intake first with `python -m wan.umt5_intake`"
+            " (weights without a record are not read)"
         )
     document = json.loads(path.read_text(encoding="utf-8"))
     where = str(path)
     if not isinstance(document, dict):
-        raise Umt5IntakeError(f"{where}: JSON の object でない")
+        raise Umt5IntakeError(f"{where}: not a JSON object")
     if document.get("format") != INTAKE_FORMAT:
         raise Umt5IntakeError(
-            f"{where}: format {document.get('format')!r} が {INTAKE_FORMAT} でない（古い版の記録は"
-            " 移行しない — `python -m wan.umt5_intake` を同じ引数でやり直す）"
+            f"{where}: format {document.get('format')!r} is not {INTAKE_FORMAT} (records of older"
+            " versions are not migrated — redo `python -m wan.umt5_intake` with the same"
+            " arguments)"
         )
     if set(document) != _RECORD_KEYS:
         raise Umt5IntakeError(
-            f"{where}: 欄が違う（不足 {sorted(_RECORD_KEYS - set(document))} /"
-            f" 余剰 {sorted(set(document) - _RECORD_KEYS)}）"
+            f"{where}: the fields differ (missing {sorted(_RECORD_KEYS - set(document))} /"
+            f" extra {sorted(set(document) - _RECORD_KEYS)})"
         )
     name = assert_intake_name(_require(document, "name", str, where))
     repo = _require(document, "repo", str, where)
     if REPO_RE.fullmatch(repo) is None:
-        raise Umt5IntakeError(f"{where}: repo {repo!r} が '<owner>/<name>' の形でない")
+        raise Umt5IntakeError(f"{where}: repo {repo!r} is not of the form '<owner>/<name>'")
     revision = _require(document, "revision", str, where)
     if _COMMIT_SHA.fullmatch(revision) is None:
-        raise Umt5IntakeError(f"{where}: revision {revision!r} が 40 桁の commit SHA でない")
+        raise Umt5IntakeError(f"{where}: revision {revision!r} is not a 40-digit commit SHA")
     file = _require(document, "file", dict, where)
     if set(file) != {"name", "size", "sha256"}:
-        raise Umt5IntakeError(f"{where}: file の欄が name / size / sha256 でない（{sorted(file)}）")
+        raise Umt5IntakeError(
+            f"{where}: the fields of file are not name / size / sha256 ({sorted(file)})"
+        )
     sha256 = _require(file, "sha256", str, f"{where} file")
     if _SHA256.fullmatch(sha256) is None:
-        raise Umt5IntakeError(f"{where}: file.sha256 {sha256!r} が小文字 16 進 64 桁でない")
+        raise Umt5IntakeError(f"{where}: file.sha256 {sha256!r} is not 64 lowercase hex digits")
     size = _require(file, "size", int, f"{where} file")
     if size <= 0:
-        raise Umt5IntakeError(f"{where}: file.size {size} が正でない")
+        raise Umt5IntakeError(f"{where}: file.size {size} is not positive")
     dtype = _require(document, "dtype", str, where)
     if dtype not in INTAKE_DTYPES:
-        raise Umt5IntakeError(f"{where}: dtype {dtype!r} は {list(INTAKE_DTYPES)} の外")
+        raise Umt5IntakeError(f"{where}: dtype {dtype!r} is outside {list(INTAKE_DTYPES)}")
     license_id = _require(document, "license", str, where)
     if not license_id.strip():
-        raise Umt5IntakeError(f"{where}: license が空（未宣言なら {UNDECLARED_LICENSE}）")
+        raise Umt5IntakeError(f"{where}: license is empty ({UNDECLARED_LICENSE} when undeclared)")
     if license_unidentified(license_id) and license_id != UNDECLARED_LICENSE:
-        # 取り込みは識別しない値を印の綴りへ寄せて書く。それ以外の綴りは手で書き換えた記録で、
-        # 容器へそのまま焼くと公開前の門が綴りの違いで読み落としうる（ここで 1 通りに絞る）。
+        # The intake writes unidentified values as the mark's spelling. Any other spelling is a
+        # hand-edited record, and written into the container as is, the pre-publication check
+        # could miss it over the spelling difference (narrowed to one form here).
         raise Umt5IntakeError(
-            f"{where}: license {license_id!r} は再配布の条件を識別しない値 — 未宣言の印は"
-            f" {UNDECLARED_LICENSE} の綴りだけを受ける"
+            f"{where}: license {license_id!r} is a value that does not identify the"
+            f" redistribution terms — the undeclared mark is accepted only as {UNDECLARED_LICENSE}"
         )
     if license_id.strip().lower() == _OTHER_LICENSE:
         raise Umt5IntakeError(
-            f"{where}: license {license_id!r} は再配布の条件を識別しない値 — 取り込みは"
-            f" license_name の識別子を記録する（無ければ {UNDECLARED_LICENSE}）"
+            f"{where}: license {license_id!r} is a value that does not identify the"
+            " redistribution terms — the intake records the identifier from license_name"
+            f" ({UNDECLARED_LICENSE} when there is none)"
         )
     base_model = document["base_model"]
     if base_model is not None and (
@@ -412,7 +452,9 @@ def load_intake(directory: Path) -> Umt5Intake:
         or not base_model
         or not all(isinstance(item, str) and item for item in base_model)
     ):
-        raise Umt5IntakeError(f"{where}: base_model が null か空でない文字列の並びでない")
+        raise Umt5IntakeError(
+            f"{where}: base_model is neither null nor a list of non-empty strings"
+        )
     config = _require(document, "config", dict, where)
     base = _require(config, "base", dict, f"{where} config")
     source = _require(config, "source", str, f"{where} config")
@@ -422,13 +464,13 @@ def load_intake(directory: Path) -> Umt5Intake:
         or source not in CONFIG_SOURCES
     ):
         raise Umt5IntakeError(
-            f"{where}: config が {{source: {list(CONFIG_SOURCES)},"
-            " base: {repo, revision}, sha256} でない"
+            f"{where}: config is not of the form {{source: {list(CONFIG_SOURCES)},"
+            " base: {repo, revision}, sha256}"
         )
     config_sha256 = _require(config, "sha256", str, f"{where} config")
     if _SHA256.fullmatch(config_sha256) is None:
         raise Umt5IntakeError(
-            f"{where}: config.sha256 {config_sha256!r} が小文字 16 進 64 桁でない"
+            f"{where}: config.sha256 {config_sha256!r} is not 64 lowercase hex digits"
         )
     _assert_config_pinned(directory, config_sha256, where)
     return Umt5Intake(
@@ -453,27 +495,29 @@ def load_intake(directory: Path) -> Umt5Intake:
 
 
 def assert_license_intent(intake: Umt5Intake, *, allowed: bool) -> None:
-    """未宣言の印の取り込みなら、明示（{@link ALLOW_UNDECLARED_LICENSE_FLAG}）を要求する。
+    """For an intake with the undeclared mark, require the explicit permission
+    ({@link ALLOW_UNDECLARED_LICENSE_FLAG}).
 
-    MUST: 明示が無ければ 1 バイトも書く前に落とす（ADR 0122 決定 6）。判定するのは「上流が
-    ライセンスを宣言していない」という機械で決まる事実だけで、許諾の解釈はしない。
+    MUST: without it, fail before a single byte is written (ADR 0122 decision 6). The only thing
+    judged is the machine-determined fact that "the upstream declares no license"; the license
+    terms are not interpreted.
     """
     if intake.undeclared and not allowed:
         raise Umt5IntakeError(
-            f"取り込み '{intake.name}' の上流はライセンスを宣言していない（{UNDECLARED_LICENSE}）—"
-            f" 手元の実験用に限って作るなら {ALLOW_UNDECLARED_LICENSE_FLAG} を明示する"
-            "（ADR 0122 決定 6）"
+            f"the upstream of intake '{intake.name}' declares no license ({UNDECLARED_LICENSE}) —"
+            f" to build it for local experiments only, pass {ALLOW_UNDECLARED_LICENSE_FLAG}"
+            " explicitly (ADR 0122 decision 6)"
         )
 
 
 # ---------------------------------------------------------------------------
-# HF API（差し替えの席 — テストは模擬の応答を渡す）
+# HF API (replaceable — tests pass mock responses)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class HubFile:
-    """revision の中のファイル 1 本（バイト数と LFS の sha256 — LFS でなければ `None`）。"""
+    """One file in a revision (byte size and LFS sha256 — `None` when it is not LFS)."""
 
     size: int
     sha256: str | None
@@ -481,15 +525,15 @@ class HubFile:
 
 @dataclass(frozen=True)
 class HubRevision:
-    """取り込みが使う HF API の値（`model_info(revision=…, files_metadata=True)` から）。"""
+    """The HF API values the intake uses (from `model_info(revision=…, files_metadata=True)`)."""
 
-    #: API が返した commit（指定の revision と同じであることを見る）。
+    #: The commit the API returned (checked to be the same as the requested revision).
     sha: str
     files: Mapping[str, HubFile]
-    #: `cardData` の `license`（`other` なら `license_name`）。宣言が無い・再配布の条件を識別しない
-    #: 値（{@link license_unidentified}）なら `None`。
+    #: `license` of `cardData` (`license_name` for `other`). `None` when there is no declaration or
+    #: the value does not identify the redistribution terms ({@link license_unidentified}).
     license: str | None
-    #: `cardData` の `base_model`（宣言が無ければ `None`）。
+    #: `base_model` of `cardData` (`None` without a declaration).
     base_model: tuple[str, ...] | None
 
 
@@ -500,22 +544,23 @@ class Hub(Protocol):
 
 
 def _card_license(license_id: Any, license_name: Any, repo: str) -> str | None:
-    """`cardData` の `license` / `license_name` → 識別子。
+    """`license` / `license_name` of `cardData` → identifier.
 
-    宣言が無い・再配布の条件を識別しない値（`unknown`・空・`license_name` の無い `other` など —
-    {@link license_unidentified}）は `None`（記録は未宣言の印になる）。文字列でない値は形の壊れで、
-    fail loudly。
+    No declaration or a value that does not identify the redistribution terms (`unknown`, empty,
+    `other` without `license_name` and so on — {@link license_unidentified}) gives `None` (the
+    record gets the undeclared mark). A value that is not a string is a broken shape and fails
+    loudly.
     """
     if license_id is None:
         return None
     if not isinstance(license_id, str):
-        raise Umt5IntakeError(f"{repo}: cardData の license {license_id!r} が文字列でない")
+        raise Umt5IntakeError(f"{repo}: cardData license {license_id!r} is not a string")
     if license_id.strip().lower() != _OTHER_LICENSE:
         return None if license_unidentified(license_id) else license_id
     if license_name is None:
         return None
     if not isinstance(license_name, str):
-        raise Umt5IntakeError(f"{repo}: cardData の license_name {license_name!r} が文字列でない")
+        raise Umt5IntakeError(f"{repo}: cardData license_name {license_name!r} is not a string")
     return None if license_unidentified(license_name) else license_name
 
 
@@ -529,14 +574,14 @@ def _card_base_model(value: Any, repo: str) -> tuple[str, ...] | None:
         or not all(isinstance(v, str) and v for v in values)
     ):
         raise Umt5IntakeError(
-            f"{repo}: cardData の base_model {value!r} が文字列か文字列の並びでない"
+            f"{repo}: cardData base_model {value!r} is neither a string nor a list of strings"
         )
     return tuple(values)
 
 
 class HfHub:
-    """huggingface_hub で読む既定の口（取得は HF の既定キャッシュを通す — 取得済みなら
-    落とさない）。"""
+    """The default implementation, reading through huggingface_hub (fetches go through HF's
+    default cache — nothing is downloaded again once fetched)."""
 
     def revision(self, repo: str, revision: str) -> HubRevision:
         from huggingface_hub import HfApi
@@ -566,7 +611,7 @@ class HfHub:
 
 
 # ---------------------------------------------------------------------------
-# 取り込み
+# Intake
 # ---------------------------------------------------------------------------
 
 
@@ -576,18 +621,21 @@ def _sha256(path: Path) -> str:
 
 
 def _place_checkpoint(source: Path, dest: Path, expected: HubFile) -> None:
-    """取ったファイルを `dest` へ写して据える（既に同じ sha256 で在れば何もしない — 再実行安全）。
+    """Copy the fetched file to `dest` and put it in place (nothing happens if it is already there
+    with the same sha256 — safe to re-run).
 
-    書くのは `<dest>.part` で、sha256 とバイト数が API の値と合ってから rename する — 途中で
-    切れたファイルが完成品の名前で残ると、次の実行がそれを「取り込み済み」と読む。
+    It writes `<dest>.part` and renames only once the sha256 and byte size match the API values —
+    a truncated file left under the final name would be read as "already taken in" by the next
+    run.
     """
     assert expected.sha256 is not None
     if dest.exists():
         actual = _sha256(dest)
         if actual != expected.sha256:
             raise Umt5IntakeError(
-                f"同名で別物が置かれている: {dest} — API {expected.sha256} / 実測 {actual}"
-                "（上流が差し替えたか手置きの別ファイル。確かめてから消す）"
+                f"a different file is in place under the same name: {dest} — API"
+                f" {expected.sha256} / measured {actual} (the upstream replaced it, or it is a"
+                " different file placed by hand; check before deleting it)"
             )
         return
     part = dest.with_name(f"{dest.name}.part")
@@ -601,8 +649,9 @@ def _place_checkpoint(source: Path, dest: Path, expected: HubFile) -> None:
     actual = digest.hexdigest()
     if actual != expected.sha256 or written != expected.size:
         raise Umt5IntakeError(
-            f"取ったファイルが API の値と違う: sha256 API {expected.sha256} / 実測 {actual}・"
-            f"バイト数 API {expected.size} / 実測 {written}（{part} は残す — 確かめてから消す）"
+            f"the fetched file differs from the API values: sha256 API {expected.sha256} /"
+            f" measured {actual}, bytes API {expected.size} / measured {written} ({part} is kept"
+            " — check before deleting it)"
         )
     part.rename(dest)
 
@@ -610,10 +659,10 @@ def _place_checkpoint(source: Path, dest: Path, expected: HubFile) -> None:
 def _place_config(
     hub: Hub, info: HubRevision, repo: str, revision: str, dest: Path
 ) -> ConfigOrigin:
-    """`config.json` を置き、その出所を返す（モジュール doc の手順 2）。
+    """Place `config.json` and return where it came from (step 2 of the module doc).
 
-    記録する sha256 は照合した（写した）バイト列そのものから取る — 置いた後に読み直して取ると、
-    その間の書き換えを記録が追認する。
+    The recorded sha256 is taken from the very bytes that were checked (copied) — re-reading after
+    placing would make the record endorse a rewrite in between.
     """
     base = UMT5_SOURCES[BASE_UPSTREAM].source
     base_bytes = hub.download(base.repo, base.revision, UMT5_CONFIG).read_bytes()
@@ -630,9 +679,10 @@ def _place_config(
         }
         if differing:
             raise Umt5IntakeError(
-                f"{repo}@{revision} の {UMT5_CONFIG} が本家 {base.repo}@{base.revision} と構成の"
-                f"欄で違う（上流, 本家）: {differing} — グラフかバケットの構成が違う umT5 は互換の"
-                " encoder でない"
+                f"{repo}@{revision}: {UMT5_CONFIG} differs from the original"
+                f" {base.repo}@{base.revision} in the configuration fields (upstream, original):"
+                f" {differing} — a umT5 with a different graph or bucket configuration is not a"
+                " compatible encoder"
             )
     (dest / UMT5_CONFIG).write_bytes(placed)
     return ConfigOrigin(
@@ -652,30 +702,30 @@ def intake(
     hub: Hub,
     out_root: Path = INTAKE_ROOT,
 ) -> Umt5Intake:
-    """上流の safetensors 1 本を `<out_root>/<name>/` へ取り込み、記録を書いて返す。"""
+    """Take one upstream safetensors into `<out_root>/<name>/`, write the record and return it."""
     if REPO_RE.fullmatch(repo) is None:
-        raise Umt5IntakeError(f"--repo {repo!r} が '<owner>/<name>' の形でない")
+        raise Umt5IntakeError(f"--repo {repo!r} is not of the form '<owner>/<name>'")
     if _COMMIT_SHA.fullmatch(revision) is None:
         raise Umt5IntakeError(
-            f"--revision {revision!r} が 40 桁の commit SHA でない（ブランチ名やタグは pin に"
-            "ならない）"
+            f"--revision {revision!r} is not a 40-digit commit SHA (branch names and tags are not"
+            " pins)"
         )
     _assert_file_name(file)
     assert_intake_name(name)
     destination = out_root / name
-    # API を引く前・1 バイトも置く前に落とす。
+    # Fails before calling the API and before placing a single byte.
     assert_outside_distribution_root(destination, root=DIST_ROOT)
     info = hub.revision(repo, revision)
     if info.sha != revision:
-        raise Umt5IntakeError(f"API の commit {info.sha} が指定の revision {revision} と違う")
+        raise Umt5IntakeError(
+            f"the API commit {info.sha} differs from the requested revision {revision}"
+        )
     entry = info.files.get(file)
     if entry is None:
-        raise Umt5IntakeError(
-            f"{repo}@{revision} に {file!r} が無い（在るもの: {sorted(info.files)}）"
-        )
+        raise Umt5IntakeError(f"{repo}@{revision} has no {file!r} (present: {sorted(info.files)})")
     if entry.sha256 is None:
         raise Umt5IntakeError(
-            f"{repo}@{revision} の {file!r} が LFS でない — sha256 を API から取れない"
+            f"{repo}@{revision}: {file!r} is not LFS — its sha256 cannot be taken from the API"
         )
 
     record_path = destination / INTAKE_FILE
@@ -691,9 +741,9 @@ def intake(
             file,
         ):
             raise Umt5IntakeError(
-                f"{destination} は別の取り込み"
-                f"（{previous.get('repo')}@{previous.get('revision')}）の"
-                " 置き場 — 別の名前を付けるか、確かめてから消す"
+                f"{destination} is the directory of another intake"
+                f" ({previous.get('repo')}@{previous.get('revision')})"
+                " — give another name, or check before deleting it"
             )
     destination.mkdir(parents=True, exist_ok=True)
     config = _place_config(hub, info, repo, revision, destination)
@@ -721,22 +771,28 @@ def intake(
     record_path.write_text(
         json.dumps(record.to_document(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    # 書いた記録は読み口の検査を通ること（書き手と読み手で形を割らない）。
+    # The written record must pass the reader's checks (the writer and the reader never disagree
+    # on the shape).
     return load_intake(destination)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--repo", required=True, help="上流の HF リポ（<owner>/<name>）")
-    parser.add_argument("--revision", required=True, help="pin する commit SHA（40 桁）")
-    parser.add_argument("--file", required=True, help="取り込む safetensors（リポ直下の 1 本）")
+    parser.add_argument("--repo", required=True, help="the upstream HF repository (<owner>/<name>)")
+    parser.add_argument("--revision", required=True, help="the commit SHA to pin (40 digits)")
+    parser.add_argument(
+        "--file", required=True, help="the safetensors to take in (one at the repository root)"
+    )
     parser.add_argument(
         "--name",
         required=True,
-        help="取り込みの名前（inputs/umt5/<名前>/・系列 umt5-xxl-<名前>-i8-dyn）",
+        help="the intake's name (inputs/umt5/<name>/, series umt5-xxl-<name>-i8-dyn)",
     )
     parser.add_argument(
-        "--out", type=Path, default=INTAKE_ROOT, help="取り込み先の親（models/ の下は受けない）"
+        "--out",
+        type=Path,
+        default=INTAKE_ROOT,
+        help="parent of the intake directory (nothing under models/ is accepted)",
     )
     args = parser.parse_args(argv)
     record = intake(args.repo, args.revision, args.file, args.name, hub=HfHub(), out_root=args.out)
@@ -744,14 +800,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[umt5-intake] {record.directory / INTAKE_FILE}", flush=True)
     if record.undeclared:
         print(
-            f"[umt5-intake] 上流はライセンスを宣言していない（{UNDECLARED_LICENSE}）— 書き手と"
-            f"組み立ては {ALLOW_UNDECLARED_LICENSE_FLAG} を明示したときだけ手元の実験用に作れる。"
-            "確認した内容は"
-            f" {record.directory / LICENSE_REVIEW_FILE} に残す",
+            f"[umt5-intake] the upstream declares no license ({UNDECLARED_LICENSE}) — the writer"
+            f" and the assembly build it for local experiments only when"
+            f" {ALLOW_UNDECLARED_LICENSE_FLAG} is given explicitly. Record what you verified in"
+            f" {record.directory / LICENSE_REVIEW_FILE}",
             flush=True,
         )
     print(
-        "[umt5-intake] 次: uv run --group wan --inexact python -m wan.umt5_export write"
+        "[umt5-intake] next: uv run --group wan --inexact python -m wan.umt5_export write"
         f" --intake {record.directory}",
         flush=True,
     )

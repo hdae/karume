@@ -1,18 +1,20 @@
-"""MiniCPM5-1B（causal LM・1-shot 形）の export recipe（ADR 0065 決定 2 — wheel 外・リポ専用）。
+"""Export recipe for MiniCPM5-1B (causal LM, one-shot form) (ADR 0065 decision 2 — outside the
+wheel, repository only).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: export 台本
-（{@link minicpm5.export}）1 本。独立したパッチ層は持たない — 上流のモデリングコードは
-差し替えず、transformers の公開拡張点（`AttentionInterface.register`）へ GQA を保つ
-attention 実装を 1 本足すだけで済む（台本内に同居 — `minicpm5.export.gqa_sdpa_attention`）。
-配布 recipe も持たない: この系列は ADR 0067 決定 1（GQA 整除 broadcast）を実重みで検収する
-ための資産で、HF へ配る形は今のところ無い。
+Only **what cannot go into the general-purpose exporter core** belongs here: one export script
+({@link minicpm5.export}). There is no separate patch layer — the upstream modeling code is not
+replaced; adding one GQA-preserving attention implementation through transformers' public
+extension point (`AttentionInterface.register`) is enough (it lives in the script —
+`minicpm5.export.gqa_sdpa_attention`). There is no distribution recipe either: this series is an
+asset for accepting ADR 0067 decision 1 (GQA as divisible broadcast) on real weights, and there is
+no form to publish to HF for now.
 
-依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
-が機械で守る）。
+Dependencies point **one way only, recipe → core**
+(`tools/exporter/tests/test_architecture_boundary.py` enforces it mechanically).
 
-MUST: **再輸出しない**（`from minicpm5 import X` で transformers が芋づるに入る形にしない）。
-呼び出し側はサブモジュールを名指しで import すること。
+MUST: **do not re-export** (do not make `from minicpm5 import X` pull transformers in
+transitively). Callers import the submodules by name.
 
-台本の起動は export-recipes ルートから（例:
-`uv run --with 'transformers==5.14.1' python -m minicpm5.export`）。
+Run the scripts from the export-recipes root (for example
+`uv run --with 'transformers==5.14.1' python -m minicpm5.export`).
 """

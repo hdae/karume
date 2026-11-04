@@ -1,20 +1,23 @@
-"""`depth_anything/export.py` の台本レベルの約束事（実重み不要分）。
+"""Script-level contracts of `depth_anything/export.py` (the part that needs no real weights).
 
-実重みを要する部分（IR の中身・パッチ前後の同値）は台本の実行と
-`depth_anything/tests/test_patch.py` が受け持つ。ここで固定するのは、**実重みが無くても壊れうる**
-約束:
+The parts that need real weights (the IR's contents, equivalence before and after the patches)
+are covered by running the script and by `depth_anything/tests/test_patch.py`. This file pins the
+contracts that **can break even without real weights**:
 
-- 系列の綴り（`outputs/series/<モデル名>/`）が `--model-dir` に追随する
-- golden 4 ケースの性格（正規化済み・互いに違う・正方）
-- sanity（{@link depth_anything.export._sanity}）が**恒真でない** — 一様な出力・入力非依存の
-  出力・幾何を追えていない出力を実際に落とす
-- 実画像の sanity（{@link depth_anything.export._real_sanity}）も同じく恒真でない — 近い領域と
-  遠い領域が並ぶ / 逆転する出力を実際に落とす
-- 前処理の正本の同定（{@link depth_anything.export.check_processor}）— **resample 3 =
-  BICUBIC** をはじめ、1 欄ずらすだけで落ちること
-- golden io の書き出し（{@link depth_anything.export._write_io}）— **tiny な合成重み**を
-  実際に export して、キー規約と「出力は深度マップ 1 本」の門を通す（実重み不要）
-- `--verify` が emit しないこと（同一プロセスではクラス属性の差し替えが参照を汚染する）
+- the series spelling (`outputs/series/<model name>/`) follows `--model-dir`
+- the nature of the 4 golden cases (normalized, different from each other, square)
+- sanity ({@link depth_anything.export._sanity}) is **not vacuous** — it really rejects uniform
+  outputs, input-independent outputs and outputs that do not follow the geometry
+- the real-image sanity ({@link depth_anything.export._real_sanity}) is not vacuous either — it
+  really rejects outputs where the near and far regions are equal / reversed
+- identification of the preprocessing source of truth
+  ({@link depth_anything.export.check_processor}) — starting with **resample 3 = BICUBIC**,
+  shifting a single field makes it fail
+- writing the golden io ({@link depth_anything.export._write_io}) — a **tiny synthetic weight
+  set** is actually exported and run through the key convention and the "the output is one depth
+  map" check (no real weights needed)
+- `--verify` does not emit (in one process the class-attribute replacements contaminate the
+  reference)
 """
 
 from __future__ import annotations
@@ -38,16 +41,20 @@ from karume.container import Provenance
 from karume.dist import NOTICE_FILENAME
 from karume.pipeline import export_to_file
 
-#: tiny な export に焼く出所（値は突合されない — 台本の出所の導出は `_shared.upstream` の席）。
+#: The provenance baked into the tiny export (its value is not compared — deriving the script's
+#: provenance is the job of `_shared.upstream`).
 TINY_PROVENANCE = Provenance(license="fixture")
 
-#: 合成 golden の解像度（実重みの 518 は重いので、性格だけを見るここでは小さく取る）。
+#: The resolution of the synthetic goldens (the real weights' 518 is heavy, so it is small here,
+#: where only the nature of the cases is checked).
 SMALL = 28
 
-#: tiny な合成モデルの解像度（export を 1 本通すだけなので最小で足りる）。
+#: The resolution of the tiny synthetic model (it only runs one export, so the minimum is
+#: enough).
 TINY_SIZE = 6
 
-#: tiny な合成重みへ流す 2 ケース（`_write_io` は名前と本数しか見ない）。
+#: The 2 cases fed to the tiny synthetic weights (`_write_io` looks only at the names and the
+#: count).
 TINY_CASES = (
     ("disc", torch.linspace(-1.0, 1.0, 3 * TINY_SIZE * TINY_SIZE).reshape(1, 3, TINY_SIZE, -1)),
     ("ramp", torch.linspace(1.0, -1.0, 3 * TINY_SIZE * TINY_SIZE).reshape(1, 3, TINY_SIZE, -1)),
@@ -55,7 +62,7 @@ TINY_CASES = (
 
 
 class TinyDepth(nn.Module):
-    """{@link depth_anything.export.DepthMap} の最小の骨格（`[B,3,S,S] → [B,S,S]`）。"""
+    """The minimal skeleton of {@link depth_anything.export.DepthMap} (`[B,3,S,S] → [B,S,S]`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,7 +73,7 @@ class TinyDepth(nn.Module):
 
 
 class TwoOutputDepth(TinyDepth):
-    """出力が 2 本ある形（`_write_io` が拒否することの確認用）。"""
+    """A form with 2 outputs (to confirm that `_write_io` rejects it)."""
 
     def forward(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         depth = super().forward(pixel_values)
@@ -75,7 +82,7 @@ class TwoOutputDepth(TinyDepth):
 
 @pytest.fixture
 def exported(tmp_path):
-    """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
+    """Export one tiny wrapper and return `(wrapper, graph, out_dir)`."""
     torch.manual_seed(0)
     wrapper = TinyDepth()
     graph = export_to_file(
@@ -90,15 +97,16 @@ def exported(tmp_path):
 
 
 def _depth_from(plane: torch.Tensor) -> torch.Tensor:
-    """`[H, W]` の平面を深度マップ `[1, H, W]`（非負）に均す。"""
+    """Turn an `[H, W]` plane into a depth map `[1, H, W]` (non-negative)."""
     return (plane - plane.min()).unsqueeze(0)
 
 
 def _depths(ramp_weight: float, other_weight: float) -> dict[str, torch.Tensor]:
-    """`ramp` だけが対角ランプに強く相関する 4 ケース分の合成出力。
+    """Synthetic outputs for the 4 cases in which only `ramp` correlates strongly with the
+    diagonal ramp.
 
-    `other_weight` を上げると相関の最大が `ramp` から移る（sanity の判別が実際に効くことを
-    示すための軸）。
+    Raising `other_weight` moves the largest correlation away from `ramp` (the axis that shows
+    the sanity discrimination really works).
     """
     plane = da.ramp_plane(SMALL)
     generator = torch.Generator().manual_seed(3)
@@ -112,11 +120,13 @@ def _depths(ramp_weight: float, other_weight: float) -> dict[str, torch.Tensor]:
 
 
 def _real_depths(near: float, far: float) -> dict[str, torch.Tensor]:
-    """実画像 4 ケース分の合成深度（近側の矩形に `near`・遠側に `far` を置いた地図）。
+    """Synthetic depths for the 4 real-image cases (maps with `near` in the near rectangle and
+    `far` in the far one).
 
-    `near` と `far` を入れ替えると判別が裏返り、揃えると一様になる — sanity が恒真でないことは
-    その 2 軸で見る。ケースごとに背景の定数をずらしてあるのは、`_assert_distinct`（同一の
-    地図が並ぶのは入力が届いていない形）に引っかからないようにするため。
+    Swapping `near` and `far` flips the discrimination, and making them equal makes it uniform —
+    those 2 axes show that the sanity check is not vacuous. The background constant is shifted per
+    case so that `_assert_distinct` (identical maps mean the input is not getting through) does
+    not trip.
     """
     depths: dict[str, torch.Tensor] = {}
     for index, (name, regions) in enumerate(sorted(da.REAL_REGIONS.items())):
@@ -134,13 +144,15 @@ def _real_depths(near: float, far: float) -> dict[str, torch.Tensor]:
 
 class TestSeriesLayout:
     def test_the_series_name_is_the_model_directory_name(self) -> None:
-        """系列名はモデルのディレクトリ名（小文字）— 解像度は軸ではないので綴らない。"""
+        """The series name is the model's directory name (lower-cased) — the resolution is not an
+        axis, so it is not spelled."""
         assert da.default_out_dir(da.DEFAULT_MODEL_DIR) == (
             SERIES_ROOT / "depth-anything-v2-small-hf"
         )
 
     def test_each_model_gets_its_own_series(self) -> None:
-        """サイズ軸（Small / Base / Large）は綴りで分かれる — 同じ席だと先の資産が消える。"""
+        """The size axis (Small / Base / Large) is separated by the name — a shared location would
+        erase the earlier assets."""
         names = {
             (da.MODELS_ROOT / f"Depth-Anything-V2-{size}-hf").name: da.default_out_dir(
                 da.MODELS_ROOT / f"Depth-Anything-V2-{size}-hf"
@@ -152,14 +164,15 @@ class TestSeriesLayout:
         assert names["Depth-Anything-V2-Base-hf"] == SERIES_ROOT / "depth-anything-v2-base-hf"
 
     def test_the_graph_input_name_matches_the_wrapper_signature(self) -> None:
-        """`INPUT_NAME` はラッパの引数名そのもの（export 後の突合が意味を持つ前提）。"""
+        """`INPUT_NAME` is the wrapper's argument name itself (the premise that makes the
+        comparison after export meaningful)."""
         parameters = list(inspect.signature(da.DepthMap.forward).parameters)
         assert parameters == ["self", da.INPUT_NAME]
 
 
 class TestCases:
     def test_the_four_cases_are_normalized_images_of_the_requested_size(self) -> None:
-        """4 ケースとも `[1, 3, S, S]` で、逆正規化すると `[0, 1]` の画像に戻る。"""
+        """All 4 cases are `[1, 3, S, S]` and return to `[0, 1]` images when denormalized."""
         mean = torch.tensor(da.IMAGENET_MEAN).reshape(1, 3, 1, 1)
         std = torch.tensor(da.IMAGENET_STD).reshape(1, 3, 1, 1)
         cases = da.build_cases(SMALL)
@@ -172,14 +185,15 @@ class TestCases:
             assert float(raw.max()) <= 1.0 + 1e-6, name
 
     def test_the_cases_differ_from_each_other(self) -> None:
-        """同じ画像が 2 枚混じると、出力の相違検査（sanity）が恒真になる。"""
+        """If the same image appeared twice, the output distinctness check (sanity) would become
+        vacuous."""
         images = [pixel_values for _name, pixel_values in da.build_cases(SMALL)]
         for index, left in enumerate(images):
             for right in images[index + 1 :]:
                 assert not torch.equal(left, right)
 
     def test_the_noise_case_does_not_depend_on_the_global_seed(self) -> None:
-        """`noise` は専用 Generator で作る（グローバル seed で golden が動かない）。"""
+        """`noise` is made with its own Generator (the global seed does not move the golden)."""
         torch.manual_seed(1)
         first = da.build_cases(SMALL)[3][1]
         torch.manual_seed(2)
@@ -194,23 +208,24 @@ class TestSanity:
         assert set(report["depth_range"]) == {"disc", "ramp", "checker", "noise"}
 
     def test_identical_outputs_are_rejected(self) -> None:
-        """入力が効いていない（2 ケースの出力が同一）形を落とす。"""
+        """Rejects the form where the input has no effect (2 cases with identical outputs)."""
         depths = _depths(ramp_weight=4.0, other_weight=0.0)
         depths["checker"] = depths["noise"]
 
-        with pytest.raises(AssertionError, match="入力が効いていない"):
+        with pytest.raises(AssertionError, match="the input has no effect"):
             da._sanity(depths)
 
     def test_a_uniform_output_is_rejected(self) -> None:
-        """一様に潰れた出力を落とす（min == max）。"""
+        """Rejects a uniformly collapsed output (min == max)."""
         depths = _depths(ramp_weight=4.0, other_weight=0.0)
         depths["disc"] = torch.full((1, SMALL, SMALL), 2.5)
 
-        with pytest.raises(AssertionError, match="一様"):
+        with pytest.raises(AssertionError, match="uniform"):
             da._sanity(depths)
 
     def test_a_negative_output_is_rejected(self) -> None:
-        """head 末尾の ReLU と矛盾する負値を落とす（head の配線違い）。"""
+        """Rejects negative values that contradict the ReLU at the end of the head (a miswired
+        head)."""
         depths = _depths(ramp_weight=4.0, other_weight=0.0)
         depths["noise"] = depths["noise"] - 1.0
 
@@ -218,13 +233,15 @@ class TestSanity:
             da._sanity(depths)
 
     def test_an_output_that_does_not_follow_the_geometry_is_rejected(self) -> None:
-        """単調な手掛かりの無いケースの方が強く相関する形を落とす（判別が効いている証拠）。"""
-        with pytest.raises(AssertionError, match="幾何"):
+        """Rejects the form where a case without a monotonic cue correlates more strongly (proof
+        that the discrimination works)."""
+        with pytest.raises(AssertionError, match="geometry"):
             da._sanity(_depths(ramp_weight=0.0, other_weight=4.0))
 
 
 class TestWriteIo:
-    """tiny な合成重みでの golden 書き出し（実重み無しで通る唯一の export 経路）。"""
+    """Writing goldens with tiny synthetic weights (the only export path that runs without real
+    weights)."""
 
     def test_writes_one_file_per_case_with_the_declared_keys(self, exported) -> None:
         wrapper, graph, out_dir = exported
@@ -243,7 +260,8 @@ class TestWriteIo:
         assert tuple(depths["disc"].shape) == (1, TINY_SIZE, TINY_SIZE)
 
     def test_more_than_one_graph_output_fails_loudly(self, tmp_path) -> None:
-        """MUST: 出力は深度マップ 1 本 — 2 本目が生えると io の位置規約が黙ってずれる。"""
+        """MUST: the output is one depth map — a second one would silently shift io's positional
+        convention."""
         torch.manual_seed(0)
         wrapper = TwoOutputDepth()
         graph = export_to_file(
@@ -255,13 +273,14 @@ class TestWriteIo:
             symbol_names=(),
         )
 
-        with pytest.raises(AssertionError, match="深度マップは 1 本"):
+        with pytest.raises(AssertionError, match="exactly one depth map"):
             da._write_io(wrapper, graph, TINY_CASES, tmp_path)
 
 
 class TestVerifyCli:
     def test_verify_does_not_emit(self, monkeypatch) -> None:
-        """MUST: 同一プロセスで emit と併用しない（クラス差し替えが参照を汚染する）。"""
+        """MUST: not combined with emit in one process (the class replacements contaminate the
+        reference)."""
         seen: list[str] = []
         monkeypatch.setattr(
             da,
@@ -271,9 +290,7 @@ class TestVerifyCli:
                 or [{"stage": "layout", "claim": "bit-exact", "bit_exact": True, "maxdiff": {}}]
             ),
         )
-        monkeypatch.setattr(
-            da, "export_series", lambda *_a, **_kw: pytest.fail("--verify で emit された")
-        )
+        monkeypatch.setattr(da, "export_series", lambda *_a, **_kw: pytest.fail("--verify emitted"))
 
         da.main(["--verify"])
 
@@ -284,16 +301,15 @@ class TestVerifyCli:
         monkeypatch.setattr(
             da, "export_series", lambda *_a, **_kw: seen.append("emit") or {"dir": "x"}
         )
-        monkeypatch.setattr(
-            da, "verify_patches", lambda *_a: pytest.fail("emit で --verify が走った")
-        )
+        monkeypatch.setattr(da, "verify_patches", lambda *_a: pytest.fail("the emit ran --verify"))
 
         da.main([])
 
         assert seen == ["emit"]
 
     def test_the_output_dir_follows_the_model_dir(self, monkeypatch) -> None:
-        """MUST: `--out` 未指定なら系列はサイズ軸に追随する（固定だと上書きになる）。"""
+        """MUST: without `--out` the series follows the size axis (a fixed location would be
+        overwritten)."""
         seen: list[Path] = []
         monkeypatch.setattr(
             da, "export_series", lambda _dir, out, **_kw: seen.append(out) or {"dir": str(out)}
@@ -305,7 +321,8 @@ class TestVerifyCli:
 
     @pytest.mark.parametrize(("argv", "expected"), [([], False), (["--real-images"], True)])
     def test_real_images_reaches_the_series(self, monkeypatch, argv, expected) -> None:
-        """`--real-images` が emit まで届く（届かないと実画像 golden が黙って書かれない）。"""
+        """`--real-images` reaches the emit (otherwise the real-image goldens would silently not
+        be written)."""
         seen: list[bool] = []
         monkeypatch.setattr(
             da,
@@ -319,10 +336,11 @@ class TestVerifyCli:
 
 
 class TestRealRegions:
-    """実画像の判別（構図から言える近い領域 > 遠い領域）。"""
+    """The real-image discrimination (near region > far region, as the composition says)."""
 
     def test_every_real_case_has_a_near_far_pair(self) -> None:
-        # 対が欠けたケースは `_real_sanity` で KeyError になる前に、ここで名指しで落とす。
+        # A case missing its pair fails here by name, before it becomes a KeyError in
+        # `_real_sanity`.
         assert set(da.REAL_REGIONS) == {name for name, _file, _why in da.REAL_CASES}
         for name, regions in da.REAL_REGIONS.items():
             assert len(regions) == 2, name
@@ -330,7 +348,8 @@ class TestRealRegions:
                 assert 0.0 <= top < bottom <= 1.0 and 0.0 <= left < right <= 1.0, name
 
     def test_the_near_region_is_lower_in_the_frame_than_the_far_region(self) -> None:
-        # 構図の主張そのもの（手前は画面下方にある）。矩形を書き換えて主張が裏返ると落ちる。
+        # The claim of the composition itself (the near side is in the lower part of the frame).
+        # Rewriting the rectangles so that the claim flips makes this fail.
         for name, (
             (_near, near_top, _nb, _nl, _nr),
             (_far, far_top, *_rest),
@@ -344,22 +363,23 @@ class TestRealRegions:
         assert report["photo-corridor"]["floor"] > report["photo-corridor"]["vanishing-point"]
 
     def test_a_flipped_ordering_is_rejected(self) -> None:
-        with pytest.raises(AssertionError, match="遠近"):
+        with pytest.raises(AssertionError, match="near/far"):
             da._real_sanity(_real_depths(near=0.5, far=3.0))
 
     def test_a_uniform_output_is_rejected(self) -> None:
-        # 一様な地図は「近側 <= 遠側」になり、恒真な sanity ならここが素通りする。
+        # A uniform map gives "near <= far", and a vacuous sanity check would let it through
+        # here.
         with pytest.raises(AssertionError):
             da._real_sanity(_real_depths(near=1.0, far=1.0))
 
     def test_an_empty_region_fails_loudly(self) -> None:
         tiny = torch.zeros((1, 4, 4))
-        with pytest.raises(AssertionError, match="空になった"):
+        with pytest.raises(AssertionError, match="became empty"):
             da._region_mean(tiny, ("sliver", 0.10, 0.12, 0.0, 1.0))
 
 
 def _processor(**overrides):
-    """既定を上書きした `DPTImageProcessor`（transformers が無い環境では skip）。"""
+    """A `DPTImageProcessor` with overridden defaults (skipped where transformers is missing)."""
     pytest.importorskip("torchvision")
     transformers = pytest.importorskip("transformers")
     processor = transformers.DPTImageProcessor(
@@ -384,8 +404,8 @@ class TestCheckProcessor:
         assert shape["ensure_multiple_of"] == 14
 
     def test_bilinear_is_rejected(self) -> None:
-        # 一番の勘所。`resample` は PIL の定数で 2 = BILINEAR / 3 = BICUBIC で、SigLIP2 の
-        # 2 を当てると TS 側は「参照と別のフィルタ」に合わせたまま緑になる。
+        # The crux. `resample` is a PIL constant, 2 = BILINEAR / 3 = BICUBIC, and with SigLIP2's
+        # 2 the TS side would stay green while matching "a different filter than the reference".
         with pytest.raises(SystemExit, match="resample"):
             da.check_processor(_processor(resample=2))
 
@@ -415,17 +435,19 @@ class TestCheckProcessor:
 
 class TestRealCases:
     def test_a_missing_image_stops_before_the_heavy_imports(self, tmp_path) -> None:
-        """MUST: `--real-images` は明示の意思表示 — 3 枚で黙って書かない。"""
+        """MUST: `--real-images` is an explicit request — it does not silently write 3 images."""
         with pytest.raises(SystemExit, match="demo:eval-images"):
             da.build_real_cases(da.DEFAULT_MODEL_DIR, 518, tmp_path)
 
 
 class TestRealCasesMetadata:
-    """実画像 golden の `__metadata__`（元画像の同定）と入力形の門。"""
+    """The `__metadata__` of real-image goldens (identifying the source image) and the input-shape
+    check."""
 
     @staticmethod
     def _real_array(index: int) -> torch.Tensor:
-        """tiny な実画像 1 枚の画素（`[S, S, 3]` の u8）。ケースとチャネルで値をずらす。"""
+        """The pixels of one tiny real image (`[S, S, 3]` u8). The values shift with the case and
+        the channel."""
         array = torch.zeros((8, 8, 3), dtype=torch.uint8)
         for channel in range(3):
             array[:, :, channel] = 10 * index + 30 * channel + 7
@@ -433,7 +455,7 @@ class TestRealCasesMetadata:
 
     @classmethod
     def _write_real_images(cls, root: Path) -> dict[str, bytes]:
-        """`REAL_CASES` の綴りで tiny な PNG を書き、ケース名 → 生バイトを返す。"""
+        """Write tiny PNGs under the `REAL_CASES` names and return case name → raw bytes."""
         image_module = pytest.importorskip("PIL.Image")
         written: dict[str, bytes] = {}
         for index, (name, file_name, _why) in enumerate(da.REAL_CASES):
@@ -444,17 +466,19 @@ class TestRealCasesMetadata:
 
     @staticmethod
     def _install_processor(monkeypatch, processor) -> None:
-        """`build_real_cases` が引く `AutoImageProcessor` を合成 processor へ差し替える。"""
+        """Replace the `AutoImageProcessor` that `build_real_cases` uses with a synthetic
+        processor."""
         transformers = pytest.importorskip("transformers")
         monkeypatch.setattr(
             transformers.AutoImageProcessor, "from_pretrained", staticmethod(lambda _dir: processor)
         )
 
     def test_it_records_the_source_image_and_its_digest(self, monkeypatch, tmp_path) -> None:
-        """MUST: 焼き直した画像で golden を採り直し忘れた環境を、突合の前に落とすための欄。
+        """MUST: the fields that make an environment fail before the comparison when the images
+        were baked again but the goldens were not retaken.
 
-        TS 側 `packages/models/tests/e2e_depth_anything_real_test.ts` がこの 2 欄を
-        突き合わせるので、欄が欠けると突合そのものが黙って恒真になる。
+        The TS-side `packages/models/tests/e2e_depth_anything_real_test.ts` compares these 2
+        fields, so missing fields would silently make the comparison itself vacuous.
         """
         raw = self._write_real_images(tmp_path)
         self._install_processor(monkeypatch, _processor())
@@ -471,7 +495,8 @@ class TestRealCasesMetadata:
     def test_a_processor_that_returns_another_size_fails_loudly(
         self, monkeypatch, tmp_path
     ) -> None:
-        """前処理の出力形がグラフの入力形と違うなら、1 枚も書かずに落とす。"""
+        """If the preprocessing's output shape differs from the graph's input shape, it fails
+        without writing a single image."""
         self._write_real_images(tmp_path)
         self._install_processor(monkeypatch, _processor(size={"height": 28, "width": 28}))
 
@@ -481,11 +506,11 @@ class TestRealCasesMetadata:
 
 class TestSeriesNameAgreement:
     def test_the_distribution_looks_for_the_same_series_name(self) -> None:
-        """MUST: 系列名の綴りが**書く側と読む側で一致**する。
+        """MUST: the series name is spelled **the same on the writing and the reading side**.
 
-        今は両側とも「小文字化」だけで一致しているが、片方に `_` → `-` の置換が入った日に、
-        組み立てが**別のモデルの系列**を掴む綴りへずれても誰も気づけない
-        （birefnet 側の同名テストの移植）。
+        Today both sides agree just by lower-casing, but the day one of them gains a `_` → `-`
+        replacement, nobody would notice the spelling drifting so that the assembly picks up
+        **another model's series** (a port of the birefnet test of the same name).
         """
         from depth_anything.card import DEPTH_ANYTHING_UPSTREAM
         from depth_anything.distribution import depth_anything_series_name
@@ -496,10 +521,10 @@ class TestSeriesNameAgreement:
 
 
 class _RecordingDepth(nn.Module):
-    """呼び出しの段（参照 / 段 1 / 段 2）を記録するだけの骨格。
+    """A skeleton that only records the step of each call (reference / step 1 / step 2).
 
-    出力は入力から決まる（段によらず同一）ので、`verify_patches` の 1 段目の
-    ビット一致 assert は通る — ここで見たいのは**順序**だけ。
+    The output is determined by the input (the same in every step), so the bit-match assert of
+    `verify_patches`' first step passes — all this wants to see is the **order**.
     """
 
     def __init__(self, calls: list[str]) -> None:
@@ -514,17 +539,19 @@ class _RecordingDepth(nn.Module):
 
 
 class TestVerifyOrder:
-    """`verify_patches` の順序不変条件（参照 → 段 1 → 段 2）。"""
+    """The order invariant of `verify_patches` (reference → step 1 → step 2)."""
 
     def test_a_patched_process_cannot_take_the_reference(self, monkeypatch) -> None:
-        """MUST: パッチ適用済みのプロセスでは参照を採らない（差 0 の恒真化）。"""
+        """MUST: no reference is taken in a process with patches applied (difference 0 would make
+        the check vacuous)."""
         monkeypatch.setattr(da.patch, "patches_applied", lambda: True)
 
-        with pytest.raises(SystemExit, match="恒真化"):
+        with pytest.raises(SystemExit, match="vacuous"):
             da.verify_patches(Path("/nonexistent"))
 
     def test_the_reference_is_taken_once_before_any_patch(self, monkeypatch) -> None:
-        """段ごとに参照を採り直す退行（2 段目の参照がパッチ後の値になる）を落とす。"""
+        """Catches the regression of retaking the reference per step (the second step's reference
+        would be a patched value)."""
         calls: list[str] = []
         recorder = _RecordingDepth(calls)
         monkeypatch.setattr(da.patch, "patches_applied", lambda: False)
@@ -549,11 +576,13 @@ class TestVerifyOrder:
 
 
 class TestStagedPublication:
-    """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。"""
+    """MUST: put in place only after every check passes (a failed run disappears with its staging
+    location)."""
 
     @staticmethod
     def _stage_tiny(monkeypatch, tmp_path: Path) -> Path:
-        """実重み無しで `export_series` を 1 本通せる状態にし、偽 checkpoint の置き場を返す。"""
+        """Set things up so `export_series` runs once without real weights, and return the
+        location of the fake checkpoint."""
         torch.manual_seed(0)
         wrapper = TinyDepth()
         monkeypatch.setattr(da, "load_wrapper", lambda _dir: (wrapper, TINY_SIZE))
@@ -575,7 +604,8 @@ class TestStagedPublication:
         return model_dir
 
     def test_a_passing_run_leaves_the_series_in_place(self, monkeypatch, tmp_path) -> None:
-        """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
+        """The counterpart that shows the check is not vacuous (when the checks pass, the series
+        is put in place) — without it the claims below would be vacuous."""
         model_dir = self._stage_tiny(monkeypatch, tmp_path)
         monkeypatch.setattr(da, "_real_sanity", lambda _depths: {"photo-portrait": {}})
         out_dir = tmp_path / "series"
@@ -586,9 +616,11 @@ class TestStagedPublication:
         assert "real_sanity" in summary
 
     def test_a_base_checkpoint_names_its_own_license(self, monkeypatch, tmp_path) -> None:
-        """MUST: 容器の出所は `--model-dir` の実物から — Base は CC BY-NC 4.0 を名乗る。
+        """MUST: the container's provenance comes from the actual `--model-dir` — Base states
+        CC BY-NC 4.0.
 
-        定数（帰属表の Apache-2.0）を焼くと、Base の容器が Small のライセンスを名乗る。
+        Baking a constant (the Apache-2.0 of the attribution table) would make Base's container
+        state Small's licence.
         """
         model_dir = self._stage_tiny(monkeypatch, tmp_path)
         write_snapshot(model_dir, license="cc-by-nc-4.0", revision=OTHER_REVISION)
@@ -603,28 +635,32 @@ class TestStagedPublication:
     def test_a_checkpoint_without_the_download_record_is_refused_before_the_weights(
         self, monkeypatch, tmp_path
     ) -> None:
-        """出所を名乗れない checkpoint は、重みを読む前に落ちる（何も据わらない）。"""
+        """A checkpoint that cannot state its provenance fails before the weights are read
+        (nothing is put in place)."""
         monkeypatch.setattr(
-            da, "load_wrapper", lambda _dir: pytest.fail("出所の検査より先に重みを読んだ")
+            da,
+            "load_wrapper",
+            lambda _dir: pytest.fail("read the weights before the provenance check"),
         )
         out_dir = tmp_path / "series"
 
-        with pytest.raises(UpstreamProvenanceError, match="が無い"):
+        with pytest.raises(UpstreamProvenanceError, match="is missing"):
             da.export_series(tmp_path / "Depth-Anything-V2-Small-hf", out_dir)
 
         assert not out_dir.exists()
 
     def test_a_failing_real_image_gate_leaves_nothing_behind(self, monkeypatch, tmp_path) -> None:
-        """実画像の遠近門が落ちたら `out_dir` は存在しない（据えてから評価しない）。"""
+        """When the real-image near/far check fails, `out_dir` does not exist (no evaluation after
+        putting it in place)."""
         model_dir = self._stage_tiny(monkeypatch, tmp_path)
 
         def _reject(_depths):
-            raise AssertionError("遠近の順序が逆")
+            raise AssertionError("the near/far ordering is reversed")
 
         monkeypatch.setattr(da, "_real_sanity", _reject)
         out_dir = tmp_path / "series"
 
-        with pytest.raises(AssertionError, match="遠近"):
+        with pytest.raises(AssertionError, match="near/far"):
             da.export_series(model_dir, out_dir, real_images=True)
 
         assert not out_dir.exists()

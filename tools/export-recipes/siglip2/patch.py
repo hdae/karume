@@ -1,48 +1,53 @@
-"""SigLIP2 vision tower を torch.export 可能にするパッチ層。
+"""Patch layer that makes the SigLIP2 vision tower exportable with torch.export.
 
-対象は `google/siglip2-base-patch16-224` の画像側だけ（text tower は載せない）。config が
-`model_type="siglip"` なので transformers が組むのは **`Siglip*`** のクラス群
-（`SiglipVisionModel` / `SiglipVisionEmbeddings` / `SiglipMultiheadAttentionPoolingHead`）で、
-`Siglip2*`（naflex 系）ではない。transformers 5.x では `vision_model` の中間ラッパが無く、
-`SiglipVisionModel` が `embeddings` / `encoder` / `post_layernorm` / `head` を直接持つ。
+The target is only the image side of `google/siglip2-base-patch16-224` (the text tower is not
+included). The config has `model_type="siglip"`, so transformers builds the **`Siglip*`** classes
+(`SiglipVisionModel` / `SiglipVisionEmbeddings` / `SiglipMultiheadAttentionPoolingHead`), not
+`Siglip2*` (the naflex variants). In transformers 5.x there is no intermediate `vision_model`
+wrapper; `SiglipVisionModel` holds `embeddings` / `encoder` / `post_layernorm` / `head` directly.
 
-パッチは**同値の強さで 2 段**に分かれる:
+The patches come in **two steps by strength of equivalence**:
 
-- **形の畳み込み（{@link apply_shape_patches}）— ビット同一**
-  ① `patch_embedding` の `padding="valid"`（文字列）は `aten.conv2d.padding` 過負荷を選ぶ。
-     変換段の HANDLERS が持つのは `aten.conv2d.default` だけなので、同値な `(0, 0)` に直す。
-  ② `position_embedding(position_ids)` は `position_ids = arange(N)` の i64 バッファ相手の
-     行 gather なので、出力は weight そのもの。直加算へ書き換えると **i64 の initializer**
-     （IR の意味論 dtype は f32 / i32 / bool で i64 は無い — docs/ir-v2.md）と
-     `aten.embedding` ノードが同時に消える。
-- **MAP head の q/k/v 明示化（{@link apply_map_head_patch}）— ビット同一ではない**
-  ③ `SiglipMultiheadAttentionPoolingHead` は `torch.nn.MultiheadAttention` をそのまま持ち、
-     `need_weights` 既定 True で呼ぶので手動経路（q に 1/√d を掛けてから bmm）へ落ちる。
-     パック `in_proj_weight` からアクティベーション側の k/v を取り出す形が長さ 2 の軸の
-     `aten.select.int` になり、`normalize._select_to_squeeze` は「静的で長さ 2 以上の軸は
-     書き換えずに残す」ので未対応 op として残る。`probe.repeat(B,1,1)` も同様に
-     `aten.repeat.default` として残る（`probe` は Parameter なので lifted 定数にならない）。
-     `in_proj_weight` を 3 等分した明示 linear + `scaled_dot_product_attention` に書き直すと
-     両方が同時に消え、12 層のエンコーダ層と同じ分解経路（mul×2 + bmm + softmax + bmm）に揃う。
+- **Shape folds ({@link apply_shape_patches}) — bit-identical**
+  ① `padding="valid"` (a string) on `patch_embedding` selects the `aten.conv2d.padding` overload.
+     The conversion stage's HANDLERS have only `aten.conv2d.default`, so it becomes the equivalent
+     `(0, 0)`.
+  ② `position_embedding(position_ids)` is a row gather against the i64 buffer
+     `position_ids = arange(N)`, so its output is the weight itself. Rewriting it as a direct
+     addition removes **the i64 initializer** (the IR's semantic dtypes are f32 / i32 / bool,
+     with no i64 — docs/ir-v2.md) and the `aten.embedding` node at the same time.
+- **Making the MAP head's q/k/v explicit ({@link apply_map_head_patch}) — not bit-identical**
+  ③ `SiglipMultiheadAttentionPoolingHead` holds a `torch.nn.MultiheadAttention` as is and calls
+     it with `need_weights` defaulting to True, so it drops to the manual path (multiply q by 1/√d,
+     then bmm). Extracting the activation-side k/v from the packed `in_proj_weight` becomes an
+     `aten.select.int` on an axis of length 2, and `normalize._select_to_squeeze` "leaves static
+     axes of length 2 or more unrewritten", so it remains as an unsupported op.
+     `probe.repeat(B,1,1)` likewise remains as `aten.repeat.default` (`probe` is a Parameter, so it
+     does not become a lifted constant). Rewriting it as explicit linears from `in_proj_weight`
+     split into thirds + `scaled_dot_product_attention` removes both at once and aligns it with the
+     decomposition path of the 12 encoder layers (mul×2 + bmm + softmax + bmm).
 
-MUST: パッチはどちらも fallback を持たない（`deberta.patch` と同じ規律）。前提を外した
-モデルは黙って別の数値経路へ落ちるのではなく、その場で落ちる。
+MUST: neither patch has a fallback (the same discipline as `deberta.patch`). A model that breaks
+the assumptions fails on the spot rather than silently dropping to another numeric path.
 
-MUST: ③ は式としては同値だが**ビット一致ではない** — `nn.MultiheadAttention` は q にだけ
-1/√d を掛けるのに対し、SDPA は q と k に √(1/√d) を対称に割る。実測の幅は
-{@link siglip2.measurements.MAP_HEAD_MAXDIFF} が唯一の綴りで持つ（**torch を読まない側**に
-置いてある — 配布側がそこから引く。差を割るスケール〈ベクトルの L2 ノルム〉も同じ側の
-{@link siglip2.measurements.MAP_HEAD_VECTOR_NORM} が持つ。相対では ~1e-7）。
-golden の期待値は**差し替え後**のモジュールから採る（`siglip2/export.py`）ので、e2e の門は
-この差を跨がない。差し替え前後の実測は `siglip2.export.py --verify` が
-2 点評価で毎回採る。
+MUST: ③ is equivalent as a formula but **not bit-identical** — `nn.MultiheadAttention` multiplies
+only q by 1/√d, while SDPA scales q and k symmetrically by √(1/√d). The measured range is spelled
+only in {@link siglip2.measurements.MAP_HEAD_MAXDIFF} (kept on **the side that does not load
+torch** — the distribution side pulls it from there. The scale the difference is divided by (the
+vector's L2 norm) is on the same side, in {@link siglip2.measurements.MAP_HEAD_VECTOR_NORM}.
+Relative, it is ~1e-7).
+The golden expected values are taken from the module **after the replacement**
+(`siglip2/export.py`), so the e2e checks do not span this difference. The measurement before and
+after the replacement is taken on every run by `siglip2.export.py --verify`, which evaluates at
+two points.
 
-MUST: パッチはクラス属性の**プロセス全域**差し替えなので、「パッチ前の参照」を採れるのは
-1 プロセスにつき 1 回だけ。適用済みかどうかは {@link patches_applied} が答え、順序違反は
-呼び出し側（`siglip2/export.py`）が fail loudly で拒否する（恒真化 = 偽 PASS の遮断）。
+MUST: the patches replace class attributes **process-wide**, so "the reference before patching"
+can be taken only once per process. {@link patches_applied} answers whether they have been
+applied, and the caller (`siglip2/export.py`) refuses an order violation by failing loudly
+(blocking the vacuous check = a false PASS).
 
-NOTE: transformers のモデリングコードを差し替えるので、版は `transformers==5.14.1` に
-ピンして使う（pyproject.toml の `siglip2` グループ）。
+NOTE: this replaces transformers' modeling code, so the version is pinned to
+`transformers==5.14.1` (the `siglip2` group of pyproject.toml).
 """
 
 from __future__ import annotations
@@ -52,57 +57,63 @@ from typing import Any
 import torch
 from torch import nn
 
-#: 期待する活性（`hidden_act`）。MAP head の MLP もエンコーダの MLP もここから決まるので、
-#: 外れると台本が約束する op 表（`gelu_tanh`）が黙って別の op に変わる。
+#: Expected activation (`hidden_act`). Both the MAP head's MLP and the encoder's MLP follow from
+#: it, so if it differs, the op table the script promises (`gelu_tanh`) silently changes to
+#: another op.
 EXPECTED_HIDDEN_ACT = "gelu_pytorch_tanh"
 
-#: 形の畳み込み（① + ②）を当てたか。
+#: Whether the shape folds (① + ②) have been applied.
 _SHAPE_APPLIED = False
-#: MAP head の q/k/v 明示化（③）を当てたか。
+#: Whether making the MAP head's q/k/v explicit (③) has been applied.
 _MAP_HEAD_APPLIED = False
 
 
 def patches_applied() -> bool:
-    """このプロセスで（どちらの段でも）クラス属性の差し替えを当てたか。
+    """Whether this process has applied a class attribute replacement (in either step).
 
-    参照値を採る側（`siglip2.export.py --verify`）が「まだ当てていない」ことを assert する
-    ための門 — 当てた後に「当てる前の参照」を採ると、同値検証が差 0 で恒真化する。
+    The check that lets the side taking the reference values (`siglip2.export.py --verify`) assert
+    "not yet applied" — taking "the reference before patching" after patching would make the
+    equivalence check vacuous with a difference of 0.
     """
     return _SHAPE_APPLIED or _MAP_HEAD_APPLIED
 
 
 def assert_supported(config: Any) -> None:
-    """差し替え版が前提にしている vision config を検査する。
+    """Check the vision config the replacements assume.
 
-    ここで見るのは**外れても shape エラーにならずに別の数値経路へ落ちる**ものだけ。
+    This checks only what **would drop to another numeric path without a shape error** if it
+    differed.
     """
     if config.hidden_act != EXPECTED_HIDDEN_ACT:
         raise ValueError(
-            f"hidden_act が {EXPECTED_HIDDEN_ACT} でない（{config.hidden_act}）—"
-            " 台本が約束する op 表が変わる"
+            f"hidden_act is not {EXPECTED_HIDDEN_ACT} ({config.hidden_act}) —"
+            " the op table the script promises would change"
         )
     if config.num_channels != 3:
-        raise ValueError(f"num_channels が 3 でない（{config.num_channels}）— 前処理の規約外")
+        raise ValueError(
+            f"num_channels is not 3 ({config.num_channels}) — outside the preprocessing contract"
+        )
     if config.hidden_size % config.num_attention_heads:
         raise ValueError(
-            f"hidden_size {config.hidden_size} が num_attention_heads"
-            f" {config.num_attention_heads} で割り切れない"
+            f"hidden_size {config.hidden_size} is not divisible by num_attention_heads"
+            f" {config.num_attention_heads}"
         )
 
 
 def _folded_embeddings_forward(
     self: nn.Module, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False
 ) -> torch.Tensor:
-    """`SiglipVisionEmbeddings.forward` の同値実装（位置埋め込みを weight の直加算にする）。
+    """Equivalent implementation of `SiglipVisionEmbeddings.forward` (the position embedding
+    becomes a direct addition of the weight).
 
-    元実装との差は `self.position_embedding(self.position_ids)` を
-    `self.position_embedding.weight` へ置き換えた 1 点だけ（先頭の 1 軸は broadcast で同値）。
-    `position_ids` が `arange(N)` であることは {@link apply_shape_patches} が実測で確かめる。
+    The only difference from the original is replacing `self.position_embedding(self.position_ids)`
+    with `self.position_embedding.weight` (the leading axis of 1 is equivalent through broadcast).
+    {@link apply_shape_patches} checks on the actual buffer that `position_ids` is `arange(N)`.
     """
     if interpolate_pos_encoding:
         raise NotImplementedError(
-            "interpolate_pos_encoding は差し替え版が持たない経路 —"
-            " weight の直加算が gather と同値なのは固定解像度のときだけ"
+            "interpolate_pos_encoding is a path the replacement does not have —"
+            " the direct addition of the weight equals the gather only at a fixed resolution"
         )
     target_dtype = self.patch_embedding.weight.dtype
     patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
@@ -110,15 +121,17 @@ def _folded_embeddings_forward(
 
 
 def _map_head_forward(self: nn.Module, hidden_state: torch.Tensor) -> torch.Tensor:
-    """`SiglipMultiheadAttentionPoolingHead.forward` の同値実装（q/k/v を明示 linear で持つ）。
+    """Equivalent implementation of `SiglipMultiheadAttentionPoolingHead.forward` (q/k/v as
+    explicit linears).
 
-    元実装との差は attention の呼び方だけで、残り（residual + layernorm + mlp と先頭行の
-    取り出し）は逐語。`nn.MultiheadAttention` の内部と同じく q は probe（長さ 1 の系列）、
-    k / v は入力系列から採る。
+    The only difference from the original is how the attention is called; the rest (residual +
+    layernorm + mlp and taking the first row) is verbatim. As inside `nn.MultiheadAttention`, q
+    comes from the probe (a sequence of length 1) and k / v from the input sequence.
     """
     batch = hidden_state.shape[0]
-    # MUST: `repeat` ではなく `expand` — probe は Parameter なので lifted 定数にならず、
-    # `aten.repeat.default` は畳まれずに batch>1 で未対応 op のまま残る（実測）。
+    # MUST: `expand`, not `repeat` — probe is a Parameter, so it does not become a lifted
+    # constant, and `aten.repeat.default` is not folded and remains an unsupported op with
+    # batch>1 (measured).
     probe = self.probe.expand(batch, -1, -1)
     shape = (batch, -1, self.num_heads, self.head_dim)
     query = self.q_proj(probe).reshape(shape).transpose(1, 2)
@@ -135,37 +148,42 @@ def _map_head_forward(self: nn.Module, hidden_state: torch.Tensor) -> torch.Tens
 
 
 def _assert_position_ids_are_arange(embeddings: nn.Module) -> None:
-    """`position_ids` が `arange(N)` を `[1, N]` に広げたものであることを実測で確かめる。
+    """Check on the actual buffer that `position_ids` is `arange(N)` broadcast to `[1, N]`.
 
-    weight の直加算が行 gather と同値なのはこの形のときだけ — 並びが違えば、書き換えは
-    通ったまま**別の位置埋め込み**になる（shape は変わらないので何も落ちない）。
+    The direct addition of the weight equals the row gather only in this form — with a different
+    order, the rewrite still passes but becomes **a different position embedding** (the shape does
+    not change, so nothing fails).
 
-    NOTE: `image_size` が `patch_size` で割り切れる必要は無い。行数は上流が
-    `(image_size // patch_size) ** 2` で決め、padding='valid' の conv も
-    `floor((image_size - patch_size) / patch_size) + 1 = image_size // patch_size` なので、
-    端が捨てられても両側が同じ floor を踏む（実例 = so400m の 384 / 14 = 27 グリッド・
-    右下 6 画素は上流ごと捨てられる）。行数が食い違えば直加算が shape エラーで落ちる。
+    NOTE: `image_size` need not be divisible by `patch_size`. Upstream sets the row count to
+    `(image_size // patch_size) ** 2`, and the conv with padding='valid' gives
+    `floor((image_size - patch_size) / patch_size) + 1 = image_size // patch_size`, so even when the
+    edge is dropped both sides take the same floor (example = so400m's 384 / 14 = 27 grid; the
+    bottom-right 6 pixels are dropped upstream as well). If the row counts disagreed, the direct
+    addition would fail with a shape error.
     """
     positions = int(embeddings.position_embedding.weight.shape[0])
     expected = torch.arange(positions).reshape(1, positions)
     actual = embeddings.position_ids
     if actual.shape != expected.shape or not torch.equal(actual.cpu(), expected):
         raise ValueError(
-            f"position_ids が arange({positions}) の [1, N] 形でない（shape"
-            f" {tuple(actual.shape)}）— weight の直加算が gather と同値にならない"
+            f"position_ids is not arange({positions}) in [1, N] form (shape"
+            f" {tuple(actual.shape)}) — the direct addition of the weight would not equal the"
+            " gather"
         )
 
 
 def apply_shape_patches(embeddings: nn.Module) -> None:
-    """① conv の文字列 padding と ② 位置埋め込みの畳み込みを当てる（**ビット同一**の段）。
+    """Apply ① the conv's string padding fix and ② the position embedding fold (the
+    **bit-identical** step).
 
-    ① はインスタンス属性、② はクラス属性の差し替え。どちらも演算列が 1 対 1 で対応するので
-    pooler_output はビット同一（`siglip2.export.py --verify` の 1 点目が毎回実測する）。
+    ① replaces an instance attribute, ② a class attribute. In both the operation sequences
+    correspond one to one, so pooler_output is bit-identical (point 1 of
+    `siglip2.export.py --verify` measures it on every run).
     """
     global _SHAPE_APPLIED
     padding = embeddings.patch_embedding.padding
     if padding != "valid":
-        raise ValueError(f"patch_embedding.padding が 'valid' でない（{padding!r}）")
+        raise ValueError(f"patch_embedding.padding is not 'valid' ({padding!r})")
     embeddings.patch_embedding.padding = (0, 0)
     _assert_position_ids_are_arange(embeddings)
     type(embeddings).forward = _folded_embeddings_forward
@@ -173,28 +191,34 @@ def apply_shape_patches(embeddings: nn.Module) -> None:
 
 
 def apply_map_head_patch(head: nn.Module) -> None:
-    """③ MAP head の `nn.MultiheadAttention` を q/k/v 明示 linear へ割る（**非**ビット同一）。
+    """③ Split the MAP head's `nn.MultiheadAttention` into explicit q/k/v linears (**not**
+    bit-identical).
 
-    パック `in_proj_weight` `[3E, E]` / `in_proj_bias` `[3E]` を E ごとに 3 等分して
-    `nn.Linear(E, E)` 3 本に載せ替え、`out_proj` を `o_proj` として引き継ぐ。等分の順序
-    （q → k → v）は `nn.MultiheadAttention` の `_in_projection_packed` の逐語。
+    The packed `in_proj_weight` `[3E, E]` / `in_proj_bias` `[3E]` are split into three parts of E
+    each and moved onto three `nn.Linear(E, E)`, and `out_proj` is carried over as `o_proj`. The
+    order of the split (q → k → v) follows `_in_projection_packed` of `nn.MultiheadAttention`
+    verbatim.
     """
     global _MAP_HEAD_APPLIED
     attention = head.attention
     if not isinstance(attention, nn.MultiheadAttention):
-        raise TypeError(
-            f"head.attention が nn.MultiheadAttention でない（{type(attention).__name__}）"
-        )
+        raise TypeError(f"head.attention is not nn.MultiheadAttention ({type(attention).__name__})")
     if attention.in_proj_weight is None or attention.in_proj_bias is None:
-        raise ValueError("q/k/v が別々の重みを持つ形は差し替え版が持たない経路")
+        raise ValueError("q/k/v with separate weights is a path the replacement does not have")
     if not attention.batch_first:
-        raise ValueError("batch_first=False は差し替え版が持たない経路（形が seq-first になる）")
+        raise ValueError(
+            "batch_first=False is a path the replacement does not have (the shapes become"
+            " seq-first)"
+        )
     if attention.bias_k is not None or attention.bias_v is not None or attention.add_zero_attn:
-        raise ValueError("add_bias_kv / add_zero_attn は差し替え版が持たない経路（式が変わる）")
+        raise ValueError(
+            "add_bias_kv / add_zero_attn is a path the replacement does not have (the formula"
+            " changes)"
+        )
     embed_dim = int(attention.embed_dim)
     num_heads = int(attention.num_heads)
     if embed_dim % num_heads:
-        raise ValueError(f"embed_dim {embed_dim} が num_heads {num_heads} で割り切れない")
+        raise ValueError(f"embed_dim {embed_dim} is not divisible by num_heads {num_heads}")
 
     weight = attention.in_proj_weight.detach()
     bias = attention.in_proj_bias.detach()

@@ -1,26 +1,29 @@
-"""**非正方**の rope 表フィクスチャ（#23 — 任意解像度・非正方形の配線）。
+"""Rope table fixtures for **non-square** shapes (#23 — wiring for arbitrary and non-square
+resolutions).
 
-S 形の DiT（`--dit-graph dyn` — ADR 0034）はホストが rope の cos / sin 表を組む。ホストが
-持つのは**軸別の素表**（容器の資産 `rope_base`）だけで、`[1,1,S,128]` の
-表は「素表を `[t,h,w,t,h,w]` に並べる」だけで作る。正方の解像度ではこの並べ方の
-**h ↔ w 取り違えが原理的に検出できない** — Anima の `rope_scale` は h と w が同値
-（`[1.0, 4.0, 4.0]`）なので `cos_h` と `cos_w` がバイト単位で一致し、H'=W' なら表そのものが
-同じ値になる（ADR 0034 の検出限界 1）。
+For the S-shaped DiT (`--dit-graph dyn` — ADR 0034) the host builds the rope cos / sin tables.
+The host holds only the **per-axis base tables** (the container asset `rope_base`), and the
+`[1,1,S,128]` table is built only by "laying out the base tables as `[t,h,w,t,h,w]`". At a square
+resolution an **h ↔ w mix-up in this layout cannot be detected in principle** — Anima's
+`rope_scale` has equal h and w (`[1.0, 4.0, 4.0]`), so `cos_h` and `cos_w` match byte for byte,
+and with H'=W' the tables themselves hold the same values (detection limit 1 of ADR 0034).
 
-**非正方では位置の取り違えが割れる**（H'≠W' だと `[h の位置 i]` と `[w の位置 i]` が別の行を
-指す）。そこで上流の `model.rope` が出す表を 4 幾何ぶん焼き、TS 側（`ropeTables`）の再構成と
-**Uint32 完全一致**で突き合わせる。焼くのは `anima.patch.dit_rope_tables` の出力そのもの
-（式は写さない — 素表と同じ規律）。
+**A non-square shape exposes a position mix-up** (with H'≠W', `[h position i]` and `[w position
+i]` point to different rows). So the tables that upstream's `model.rope` produces are baked for
+4 geometries and compared with the TS-side reconstruction (`ropeTables`) by **exact Uint32
+equality**. What is baked is the output of `anima.patch.dit_rope_tables` itself (the formula is
+not copied — the same discipline as the base tables).
 
-出力（既定 `<repo>/outputs/series/anima-rope-nonsquare/`）:
+Output (default `<repo>/outputs/series/anima-rope-nonsquare/`):
 
-    rope.safetensors   幾何ごとの `cos_<WxH>` / `sin_<WxH>`（各 `[1,1,S,head_dim]`）
-    rope.json          幾何の索引（latent 寸法・トークン格子・S・素表の行数）
+    rope.safetensors   `cos_<WxH>` / `sin_<WxH>` per geometry (each `[1,1,S,head_dim]`)
+    rope.json          index of the geometries (latent dimensions, token grid, S, base-table rows)
 
     uv run python -m anima.rope_tables
 
-**重みは要らない**（`CosmosRotaryPosEmbed` はパラメータもバッファも持たない純計算）ので、
-モデルは `meta` デバイス上に config から組む — 7.3GiB のロードを 1 バイトも行わない。
+**No weights are needed** (`CosmosRotaryPosEmbed` is pure computation with neither parameters nor
+buffers), so the model is built from the config on the `meta` device — not a single byte of the
+7.3GiB load happens.
 """
 
 from __future__ import annotations
@@ -41,10 +44,12 @@ DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 DEFAULT_OUT = SERIES_ROOT / "anima-rope-nonsquare"
 SPATIAL_COMPRESSION = 8
 
-#: 焼く幾何（ピクセル・`(幅, 高さ)`）。**16:9 と 3:4 の縦横 4 パターン**（#23 のユーザー指示）。
+#: Geometries to bake (pixels, `(width, height)`). **16:9 and 3:4, each in both orientations: 4
+#: patterns** (the user's instruction for #23).
 #:
-#: MUST: 縦横の対を必ず両方入れる。片方だけだと「h と w を入れ替えた実装」がもう一方の幾何の
-#: 表と一致してしまい、対応表のキーが違うだけで数は合う — 対で焼いて初めて取り違えが割れる。
+#: MUST: always include both members of each landscape / portrait pair. With only one, "an
+#: implementation that swaps h and w" matches the other geometry's table and the numbers agree
+#: with only the lookup key differing — baking the pair is what exposes the mix-up.
 GEOMETRIES: tuple[tuple[int, int], ...] = (
     (1344, 768),
     (768, 1344),
@@ -54,11 +59,12 @@ GEOMETRIES: tuple[tuple[int, int], ...] = (
 
 
 def load_rope_model(repo: str) -> torch.nn.Module:
-    """rope だけが要るので **meta デバイス**に config から組む（重みは読まない）。
+    """Only rope is needed, so the model is built from the config on the **meta device** (no
+    weights are read).
 
-    `CosmosRotaryPosEmbed` はパラメータもバッファも持たず、`forward` は入力テンソルの
-    デバイス上に表を作る（実測: 上流 `transformer_cosmos.py`）。したがって本体が meta でも、
-    CPU のプローブを渡せば表は CPU の実数で出る。
+    `CosmosRotaryPosEmbed` has neither parameters nor buffers, and `forward` builds the tables on
+    the device of its input tensor (measured: upstream `transformer_cosmos.py`). So even with the
+    body on meta, passing a CPU probe yields the tables as real CPU values.
     """
     from diffusers import CosmosTransformer3DModel
 
@@ -74,7 +80,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if any(width == height for width, height in GEOMETRIES):
-        raise SystemExit("GEOMETRIES に正方が混ざっている（正方では h↔w 取り違えを検出できない）")
+        raise SystemExit(
+            "GEOMETRIES contains a square shape (a square cannot detect an h↔w mix-up)"
+        )
 
     model = load_rope_model(args.repo)
     patch = tuple(int(size) for size in model.rope.patch_size)
@@ -110,7 +118,8 @@ def main() -> None:
         "repo": args.repo,
         "spatial_compression": SPATIAL_COMPRESSION,
         "patch_size": list(patch),
-        # 素表の行数（= 上流 `seq = arange(max(max_size))` の長さ）。ホスト側の天井の正本。
+        # Rows of the base tables (= the length of upstream's `seq = arange(max(max_size))`). The
+        # source of truth for the host-side ceiling.
         "rope_base_rows": max(int(size) for size in model.rope.max_size),
         "geometries": entries,
         "tensors": {name: list(value.shape) for name, value in tensors.items()},

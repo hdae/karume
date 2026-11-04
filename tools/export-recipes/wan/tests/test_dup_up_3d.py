@@ -1,15 +1,17 @@
-"""`_shared.vae_rank4.dup_up_3d` の約束事 — 上流 `DupUp3D.forward` とビット一致すること
-（ADR 0121 段 4）。
+"""The contract of `_shared.vae_rank4.dup_up_3d` — bit-identical to upstream `DupUp3D.forward`
+(ADR 0121 step 4).
 
-相手は上流のモジュールそのもの（diffusers 0.39.0 の `DupUp3D` — 重みを持たないので直接組む）。
-構成は Wan2.2 の decoder のショートカット 3 本と同じ形（up0 / up1 = 1024 → 1024・ft 2・rep 8、
-up2 = 1024 → 512・ft 1・rep 2）と、チャネルだけを縮めた同じ形の版、時間の桁の並びを値に出す
-rep 2・ft 2 の版（{@link CONFIGS}）。空間は 3×5（縦横を変えて
-H と W の取り違えを値に出す）、時間は T = 1（chunk の mid は潜在 1 フレーム）と T = 2
-（up1 の入力）。
+The counterpart is the upstream module itself (`DupUp3D` of diffusers 0.39.0 — it has no weights,
+so it is built directly). The configurations are the shape of the three shortcuts of the Wan2.2
+decoder (up0 / up1 = 1024 → 1024, ft 2, rep 8; up2 = 1024 → 512, ft 1, rep 2), versions of the
+same shape with only the channels shrunk, and a rep 2, ft 2 version that makes the order of the
+time digits show in the values ({@link CONFIGS}). The spatial size is 3×5 (different height and
+width, so that mixing up H and W shows in the values), and the time size is T = 1 (the mid of a
+chunk is 1 latent frame) and T = 2 (the input of up1).
 
-最初の chunk で時間の先頭を捨てる slice は wan 側（`wan.vae_patch.avg_shortcut`）が持つので、
-ここは上流の `first_chunk=False` と比べる（slice を含めた比較は `test_vae_patch_ti2v.py`）。
+The slice that drops the first time step in the first chunk belongs to the wan side
+(`wan.vae_patch.avg_shortcut`), so this file compares against upstream with `first_chunk=False`
+(the comparison including the slice is `test_vae_patch_ti2v.py`).
 """
 
 from __future__ import annotations
@@ -22,9 +24,11 @@ from _shared.vae_rank4 import dup_up_3d
 
 autoencoder_kl_wan = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
 
-#: (Cin, Cout, ft)。空間の倍率 fs は 3 本とも 2（`WanResidualUpBlock` の `factor_s=2`）。
-#: (16, 4, 2) は decoder に無い形（rep 2・ft 2）で、時間の桁 a がチャネルを選ぶ並びを値に出す —
-#: ft 2 の実在の形は rep 8 で、8 個が全て同じ入力チャネルの写しなので a の並びが値に出ない。
+#: (Cin, Cout, ft). The spatial factor fs is 2 for all three (`factor_s=2` of
+#: `WanResidualUpBlock`). (16, 4, 2) is a shape the decoder does not have (rep 2, ft 2) and makes
+#: the order in which the time digit a selects the channel show in the values — the real shape with
+#: ft 2 has rep 8, and its 8 copies are all of the same input channel, so the order of a does not
+#: show in the values.
 CONFIGS = [(8, 8, 2), (8, 4, 1), (1024, 1024, 2), (1024, 512, 1), (16, 4, 2)]
 SPATIAL_SCALE = 2
 
@@ -48,10 +52,12 @@ class TestMatchesTheUpstreamModule:
         assert torch.equal(got, _upstream(x, out_channels, factor_t))
 
     def test_swapping_the_h_and_w_digits_is_caught(self):
-        """故障注入: チャネルの添字の H の桁と W の桁を入れ替えた変種は一致しない。
+        """Fault injection: a variant that swaps the H digit and the W digit of the channel index
+        does not match.
 
-        rep 2（up2 の形）では H の桁だけがチャネルを選ぶので値に出る。rep 8（up0 / up1）は 8 個が
-        全て同じ入力チャネルの写しで、桁の取り違えは値に出ない（だから注入は (8, 4, 1) で行う）。
+        With rep 2 (the shape of up2) only the H digit selects the channel, so the swap shows in
+        the values. With rep 8 (up0 / up1) the 8 copies are all of the same input channel and a
+        digit mix-up does not show in the values (hence the injection uses (8, 4, 1)).
         """
         x = torch.randn(8, 2, 3, 5, generator=torch.Generator().manual_seed(3))
 
@@ -77,7 +83,7 @@ class TestStaysWithinRank4:
         assert self._max_rank(Shortcut(), torch.randn(8, 2, 3, 5)) <= 4
 
     def test_the_upstream_forward_is_rank8(self):
-        """検査が落ちうること: 上流の forward は rank 8 の view を通る。"""
+        """The check can fail: the upstream forward goes through a rank-8 view."""
 
         class Upstream(nn.Module):
             def __init__(self) -> None:
@@ -92,5 +98,5 @@ class TestStaysWithinRank4:
 
 class TestFailsLoudly:
     def test_channels_that_do_not_divide_are_refused(self):
-        with pytest.raises(ValueError, match="割り切れない"):
+        with pytest.raises(ValueError, match="is not divisible"):
             dup_up_3d(torch.zeros(3, 1, 2, 2), out_channels=2, factor_t=1, factor_s=2)

@@ -1,26 +1,30 @@
-"""Wan2.2 TI2V の I2V の画像の前処理の**参照**（ADR 0121 決定 11・段 9a）。
+"""**Reference** for the image preprocessing of I2V in Wan2.2 TI2V (ADR 0121 decision 11, step 9a).
 
-画像 1 枚（RGB8）→ 出力寸法の RGB8 → [-1, 1] → patchify → VAE encoder の入力、の鎖を上流と同じ
-Pillow / torch の呼び出しで作る。TS 側の前処理（LANCZOS の 22 bit 固定小数点の写し・寸法の丸め・
-クロップ）を**ビット一致**で縛る golden の正本（`wan.export_vae_encoder` が書く）。
+Builds the chain image (RGB8) → RGB8 at the output size → [-1, 1] → patchify → VAE encoder input
+with the same Pillow / torch calls as upstream. It is the source of truth of the goldens
+(`wan.export_vae_encoder` writes them) that pin the TS preprocessing (a copy of LANCZOS in 22-bit
+fixed point, the size rounding, the crop) **bit-exactly**.
 
-縦横の合わせ方（fit）は 2 つ:
+There are two ways to fit the aspect ratio (fit):
 
-- `crop`（既定 — 公式 Wan2.2 の i2v・`textimage2video.py:462-477`）: `scale = max(ow/iw, oh/ih)` →
-  寸法は Python の `round`（.5 は偶数側）→ LANCZOS → 中央クロップ（起点 `(rw − ow) // 2`）。
-- `stretch`（diffusers の `WanImageToVideoPipeline` の `VideoProcessor.preprocess`）: `(ow, oh)` へ
-  直接 LANCZOS（縦横比を保たない）。
+- `crop` (default — the official Wan2.2 i2v, `textimage2video.py:462-477`): `scale = max(ow/iw,
+  oh/ih)` → the size with Python's `round` (.5 to even) → LANCZOS → center crop (origin
+  `(rw − ow) // 2`).
+- `stretch` (`VideoProcessor.preprocess` of diffusers' `WanImageToVideoPipeline`): LANCZOS straight
+  to `(ow, oh)` (does not keep the aspect ratio).
 
-[-1, 1] は公式の `TF.to_tensor(img).sub_(0.5).div_(0.5)`（= `f32(2·f32(x/255) − 1)` — 2 倍は
-丸めと可換なので diffusers の `2·x − 1` とビット一致する）。patchify は上流 diffusers の
-`patchify`（チャネル = c·p² + 幅の副添字·p + 高さの副添字 — 幅が先）。
+[-1, 1] is the official `TF.to_tensor(img).sub_(0.5).div_(0.5)` (= `f32(2·f32(x/255) − 1)` —
+doubling commutes with rounding, so it is bit-identical to diffusers' `2·x − 1`). patchify is
+upstream diffusers' `patchify` (channel = c·p² + width sub-index·p + height sub-index — width
+first).
 
-出力寸法の選び方（受理集合から縦横比の比で最も近いもの）は TS のパイプラインの責務で、ここは
-寸法を明示して受ける（golden は縦長の 704×1280 を横長の画像に明示して作る）。
+Choosing the output size (the closest aspect ratio in the accepted set) is the job of the TS
+pipeline; here the size is given explicitly (the goldens make the portrait 704×1280 from a landscape
+image, given explicitly).
 
-MUST: Pillow / torchvision / diffusers は関数の中で import する（`wan` グループは既定の sync に
-入らない — `tests/test_optional_group_imports.py`）。値は Pillow の版で決まる（LANCZOS の
-実装）ので、golden は版を来歴に記録する。
+MUST: import Pillow / torchvision / diffusers inside functions (the `wan` group is not in the
+default sync — `tests/test_optional_group_imports.py`). The values depend on the Pillow version (the
+LANCZOS implementation), so the goldens record the version in their provenance.
 """
 
 from __future__ import annotations
@@ -33,17 +37,19 @@ import torch
 if TYPE_CHECKING:
     from PIL import Image
 
-#: 縦横の合わせ方（モジュールの doc の 2 つ）。
+#: The ways to fit the aspect ratio (the two in the module doc).
 Fit = Literal["crop", "stretch"]
 FITS: tuple[Fit, ...] = ("crop", "stretch")
 
-#: diffusers の I2V パイプラインの `VideoProcessor` の空間の倍率（`vae_scale_factor_spatial` —
-#: Wan2.2 の VAE の `scale_factor_spatial`）。resize の値には効かない（16 の倍数の検査に使う）。
+#: The spatial factor of the `VideoProcessor` of diffusers' I2V pipeline (`vae_scale_factor_spatial`
+#: — the `scale_factor_spatial` of the Wan2.2 VAE). It does not affect the resize values (it is used
+#: for the multiple-of-16 check).
 VAE_SCALE_FACTOR_SPATIAL = 16
 
 
 def load_rgb(path: Path) -> Image.Image:
-    """画像を RGB で開く（公式 `generate.py:376` の `Image.open(...).convert("RGB")`）。"""
+    """Opens an image as RGB (`Image.open(...).convert("RGB")` of the official
+    `generate.py:376`)."""
     from PIL import Image
 
     with Image.open(path) as opened:
@@ -59,10 +65,10 @@ def load_rgb(path: Path) -> Image.Image:
 #
 #   Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 def crop_resize(image: Image.Image, width: int, height: int) -> Image.Image:
-    """公式の i2v の前処理: 覆う側の倍率で LANCZOS → 中央クロップ（fit = `crop`）。
+    """The official i2v preprocessing: LANCZOS at the covering scale → center crop (fit = `crop`).
 
-    寸法 `round(iw · scale)` は Python の `round`（.5 は偶数側 — JS の `Math.round` とは割れる）。
-    クロップの起点は floor の `//`。
+    The size `round(iw · scale)` uses Python's `round` (.5 to even — it disagrees with JS
+    `Math.round`). The crop origin is the floor `//`.
     """
     from PIL import Image
 
@@ -73,20 +79,22 @@ def crop_resize(image: Image.Image, width: int, height: int) -> Image.Image:
     y1 = (resized.height - height) // 2
     cropped = resized.crop((x1, y1, x1 + width, y1 + height))
     if cropped.size != (width, height):
-        raise AssertionError(f"クロップの結果 {cropped.size} が ({width}, {height}) でない")
+        raise AssertionError(f"the crop result {cropped.size} is not ({width}, {height})")
     return cropped
 
 
 def stretch_resize(image: Image.Image, width: int, height: int) -> Image.Image:
-    """diffusers の I2V の前処理の resize（fit = `stretch` — `(ow, oh)` へ直接 LANCZOS）。
+    """The resize of diffusers' I2V preprocessing (fit = `stretch` — LANCZOS straight to
+    `(ow, oh)`).
 
-    上流の `VideoProcessor.resize`（`resize_mode="default"`・`resample="lanczos"`・
-    `reducing_gap=None` の既定）をそのまま呼ぶ — 写しで縛ると参照の素性の主張が恒真になる。
+    Calls upstream `VideoProcessor.resize` as is (defaults `resize_mode="default"`,
+    `resample="lanczos"`, `reducing_gap=None`) — pinning it with a copy would make the claim about
+    the reference's provenance a tautology.
     """
     if width % VAE_SCALE_FACTOR_SPATIAL or height % VAE_SCALE_FACTOR_SPATIAL:
         raise ValueError(
-            f"寸法 {width}×{height} は {VAE_SCALE_FACTOR_SPATIAL} の倍数でない（パイプラインの"
-            " check_inputs が拒む）"
+            f"size {width}×{height} is not a multiple of {VAE_SCALE_FACTOR_SPATIAL} (the pipeline's"
+            " check_inputs rejects it)"
         )
     from diffusers.video_processor import VideoProcessor
 
@@ -95,37 +103,37 @@ def stretch_resize(image: Image.Image, width: int, height: int) -> Image.Image:
 
 
 def preprocess(image: Image.Image, width: int, height: int, fit: Fit) -> Image.Image:
-    """fit に応じた resize（とクロップ）で出力寸法の RGB 画像を作る。"""
+    """Makes the RGB image at the output size with the resize (and crop) of the given fit."""
     if fit == "crop":
         return crop_resize(image, width, height)
     if fit == "stretch":
         return stretch_resize(image, width, height)
-    raise ValueError(f"fit {fit!r} は未知（{', '.join(FITS)}）")
+    raise ValueError(f"unknown fit {fit!r} ({', '.join(FITS)})")
 
 
 def rgb8(image: Image.Image) -> torch.Tensor:
-    """RGB 画像の画素 `[H, W, 3]` uint8（行優先・画素あたり 3 バイト — TS の `Rgb8Image` の
-    並び）。"""
+    """The pixels of an RGB image, `[H, W, 3]` uint8 (row-major, 3 bytes per pixel — the layout of
+    the TS `Rgb8Image`)."""
     import numpy as np
 
     if image.mode != "RGB":
-        raise ValueError(f"RGB の画像だけを受ける（mode {image.mode}）")
+        raise ValueError(f"only RGB images are accepted (mode {image.mode})")
     return torch.from_numpy(np.asarray(image, dtype=np.uint8).copy())
 
 
 def to_signed_unit(image: Image.Image) -> torch.Tensor:
-    """公式の `TF.to_tensor(img).sub_(0.5).div_(0.5)` → `[1, 3, 1, H, W]` f32（VAE の encode の
-    入力）。"""
+    """The official `TF.to_tensor(img).sub_(0.5).div_(0.5)` → `[1, 3, 1, H, W]` f32 (the input of
+    the VAE encode)."""
     import torchvision.transforms.functional as tf
 
     return tf.to_tensor(image).sub_(0.5).div_(0.5).unsqueeze(1).unsqueeze(0)
 
 
 def encoder_input(sample: torch.Tensor, patch_size: int) -> torch.Tensor:
-    """`[1, 3, 1, H, W]` → 上流 `patchify` → unbatched の `[3·p², 1, H/p, W/p]`（pre のグラフの
-    入力）。"""
+    """`[1, 3, 1, H, W]` → upstream `patchify` → unbatched `[3·p², 1, H/p, W/p]` (the input of the
+    pre graph)."""
     from diffusers.models.autoencoders.autoencoder_kl_wan import patchify
 
     if sample.dim() != 5 or sample.shape[:3] != (1, 3, 1):
-        raise ValueError(f"[1, 3, 1, H, W] で渡す（{tuple(sample.shape)}）")
+        raise ValueError(f"pass [1, 3, 1, H, W] (got {tuple(sample.shape)})")
     return patchify(sample, patch_size=patch_size)[0].contiguous()

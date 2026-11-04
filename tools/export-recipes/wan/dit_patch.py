@@ -1,46 +1,57 @@
-"""Wan2.1 の DiT（diffusers `WanTransformer3DModel`）を S 形の IR にするパッチ層（ADR 0118）。
+"""The patch layer that turns the Wan2.1 DiT (diffusers `WanTransformer3DModel`) into S-shaped IR
+(ADR 0118).
 
-グラフは Anima と同じ **S 形**（ADR 0034）: 入口は patchify の後・出口は unpatchify の前で、
-次元はトークン長 S の 1 シンボルだけ。上流 forward のうち次の段をホストへ出す。
+The graph is **S-shaped** like Anima's (ADR 0034): the entry is after the patchify, the exit before
+the unpatchify, and the only dimension symbol is the token length S. The following steps of the
+upstream forward move to the host.
 
-- **patchify / patch 埋め込み**: ホストが潜在 `[1,C,F,H,W]` を `tokens [1,S,C·pt·ph·pw]`（最終次元の
-  並びは `(c, pt, ph, pw)`）にする（{@link dit_patchify}）。`Conv3d(k = s = patch)` は窓が重ならない
-  ので、重みを平坦化した `Linear` と同じ計算になる（{@link patch_embedding_linear}）。
-- **unpatchify**: 出力は `proj_out` の直後 `[1,S,pt·ph·pw·C]`。並びは `(pt, ph, pw, c)` で patchify
-  と **違う**（{@link dit_unpatchify} — 上流の rank 8 の permute をグラフに出さない）。
-- **時刻埋め込みの sinusoidal**: ホストがグラフ入力 `timesteps_proj [1,256]` にする
-  （{@link dit_timesteps_proj}）。MLP（256→1536→1536→9216）はグラフの中。
-- **3D RoPE の表**: ホストが軸別の素表（資産 `rope_base` — {@link dit_rope_base_tables}）
-  から並べ替えてグラフ入力 `rope_cos` / `rope_sin [1,S,1,head_dim]` にする
-  （{@link dit_rope_tables}）。
+- **patchify / patch embedding**: the host turns the latent `[1,C,F,H,W]` into
+  `tokens [1,S,C·pt·ph·pw]` (the last dimension ordered `(c, pt, ph, pw)`) ({@link dit_patchify}).
+  The windows of `Conv3d(k = s = patch)` do not overlap, so it computes the same as a `Linear` with
+  flattened weights ({@link patch_embedding_linear}).
+- **unpatchify**: the output is `[1,S,pt·ph·pw·C]` right after `proj_out`. Its order is
+  `(pt, ph, pw, c)`, **unlike** patchify ({@link dit_unpatchify} — the upstream rank-8 permute
+  stays out of the graph).
+- **The sinusoidal of the time embedding**: the host turns it into the graph input
+  `timesteps_proj [1,256]` ({@link dit_timesteps_proj}). The MLP (256→1536→1536→9216) is inside the
+  graph.
+- **The 3D RoPE tables**: the host reorders the per-axis base tables (the asset `rope_base` —
+  {@link dit_rope_base_tables}) into the graph inputs `rope_cos` / `rope_sin [1,S,1,head_dim]`
+  ({@link dit_rope_tables}).
 
-グラフの中に残る書き換えは 1 つだけで、interleave 形の RoPE の適用を「隣接ペアの入れ替え + cos / sin
-の要素積」で rank 4 のまま書く（{@link real_pair_rotary} — irodori の実数化と同じ形）。上流は
-`unflatten(-1, (-1, 2)).unbind(-1)` で rank 5 を作り、`out[..., 0::2] = …` の strided 代入で戻す。
+Only one rewrite stays inside the graph: the interleaved RoPE is applied as "swap adjacent pairs +
+elementwise product with cos / sin" at rank 4 ({@link real_pair_rotary} — the same form as irodori's
+real-valued version). Upstream builds rank 5 with `unflatten(-1, (-1, 2)).unbind(-1)` and writes it
+back with the strided assignment `out[..., 0::2] = …`.
 
-adaLN・qk-norm（1536 次元全体の `nn.RMSNorm`）・テキスト文脈（`[1,512,4096]`
-をマスク無しで全行に射影し、cross-attn もマスク無し）は**上流のまま**通す（ADR 0118 決定 3 の表）。
+adaLN, qk-norm (`nn.RMSNorm` over all 1536 dimensions) and the text context (`[1,512,4096]`
+projected on every row without a mask, cross-attn also without a mask) pass through **as upstream
+has them** (the table of ADR 0118 decision 3).
 
-MUST: パッチ後の経路は上流と **eager 同値**であること。RoPE の書き換えはビット一致
-（`a − b = a + (−b)` と加算の可換 — {@link real_pair_rotary}）。patch 埋め込みの Linear 化は縮約順が
-conv3d と違いうるので差を記録する（実測 2026-10-02: torch 2.13 CPU では 8 ケースとも差 0 —
-`wan/tests/test_dit_patch.py` が実重みで縮約順の差の上界と突き合わせる）。
+MUST: the patched path is **eager-equivalent** to upstream. The RoPE rewrite is bit-identical (`a −
+b = a + (−b)` and commutativity of addition — {@link real_pair_rotary}). The Linear form of the
+patch embedding can differ from conv3d in reduction order, so the difference is recorded (measured
+2026-10-02: 0 in all 8 cases on torch 2.13 CPU — `wan/tests/test_dit_patch.py` compares it with the
+bound of the reduction-order difference on the real weights).
 
-MUST: 上流の素の経路を変えない。attn1 の processor を差し替えるが、差し替え後の processor は
-{@link RealPairRope} で呼ばれたときだけ実数形を通り、上流の forward（素の tuple の表）が来たら上流の
-実装へそのまま委ねる。だから差し替えの前後どちらで参照を採っても参照は上流の値のまま（Anima の VAE
-パッチのような「参照は差し替えの前に採る」順序の門は要らない）。
+MUST: do not change the plain upstream path. attn1's processor is replaced, but the replacement
+takes the real-valued form only when called with {@link RealPairRope}; when the upstream forward
+(a plain tuple of tables) arrives it delegates to the upstream implementation as is. So the
+reference is the upstream value whether it is taken before or after the replacement (no ordering
+check like "take the reference before the replacement" of Anima's VAE patch is needed).
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 
-## Wan2.2 TI2V（ADR 0121 決定 3 / 4）
+## Wan2.2 TI2V (ADR 0121 decisions 3 / 4)
 
-同じクラスの 5B は {@link WanDitTokensTi2v}（I2V 対応の 1 本 — 時刻入力 2 本・条件マスク・変調の
-`where`）で書き出す。2.1 の {@link WanDitTokens} の forward は変えない（1.3B の容器と golden の
-バイト不変 — 決定 10）。上流との照合の相手は時刻の表し方ごとに 2 つ: T2V は上流の 1 次元 timestep の
-forward（{@link reference_dit}）、I2V は時刻の MLP を値ごとに M = 1 で回してトークンごとの表を上流の
-ブロックへ渡す参照ラッパ（{@link reference_dit} の `condition` — {@link _TokenwiseTimeEmbedder}）。
+The 5B of the same class is written out with {@link WanDitTokensTi2v} (a single I2V-capable graph —
+2 time inputs, a condition mask, a `where` on the modulation). The forward of 2.1's
+{@link WanDitTokens} is not changed (the 1.3B containers and goldens stay byte-identical — decision
+10). There are 2 upstream counterparts to compare with, one per time representation: T2V is the
+upstream forward with a 1-D timestep ({@link reference_dit}); I2V is a reference wrapper that runs
+the time MLP per value with M = 1 and hands per-token tables to the upstream blocks (the
+`condition` of {@link reference_dit} — {@link _TokenwiseTimeEmbedder}).
 """
 
 from __future__ import annotations
@@ -56,17 +67,19 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_leaves
 
-#: ホストの軸別素表のテンソルキー（`t → h → w` のブロック順）。Anima の資産 `rope_base` と同じ綴り・
-#: 同じ意味（軸 × 位置 × 周波数の cos / sin。値は上流の表そのもの）。
+#: The tensor keys of the host's per-axis base tables (block order `t → h → w`). The same spelling
+#: and meaning as Anima's asset `rope_base` (cos / sin per axis × position × frequency; the values
+#: are the upstream tables themselves).
 ROPE_BASE_KEYS = ("cos_t", "sin_t", "cos_h", "sin_h", "cos_w", "sin_w")
 
 
 class RealPairRope(NamedTuple):
-    """実数形 RoPE の表（ホストが組んだグラフ入力）。
+    """The real-valued RoPE tables (graph inputs built by the host).
 
-    `cos` / `sin` は `[1,S,1,head_dim]` で、隣接ペアの 2 成分に同じ値が入る（上流
-    `WanRotaryPosEmbed` の `repeat_interleave` 形そのもの）。型で包むのは、差し替えた processor が
-    「上流の素の tuple」と区別するため（{@link WanRealPairAttnProcessor}）。
+    `cos` / `sin` are `[1,S,1,head_dim]`, with the same value in the 2 components of an adjacent
+    pair (exactly the `repeat_interleave` form of upstream `WanRotaryPosEmbed`). They are wrapped in
+    a type so that the replaced processor can tell them from "the plain upstream tuple"
+    ({@link WanRealPairAttnProcessor}).
     """
 
     cos: torch.Tensor
@@ -74,31 +87,39 @@ class RealPairRope(NamedTuple):
 
 
 def real_pair_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """interleave 形の RoPE を rank 4 のまま適用する（`x [B,S,H,D]`・表 `[1,S,1,D]`）。
+    """Apply the interleaved RoPE at rank 4 (`x [B,S,H,D]`, tables `[1,S,1,D]`).
 
-    上流（`WanAttnProcessor.__call__` の `apply_rotary_emb`）は `x1 = x[..., 0::2]`・
-    `x2 = x[..., 1::2]` に対し `out[0::2] = x1·cos − x2·sin`・`out[1::2] = x1·sin + x2·cos` を書く
-    （表は偶数列の cos と奇数列の sin — 隣接ペアで同じ値）。ここでは同じ `x` に対し
+    Upstream (`apply_rotary_emb` in `WanAttnProcessor.__call__`) writes, for `x1 = x[..., 0::2]` and
+    `x2 = x[..., 1::2]`, `out[0::2] = x1·cos − x2·sin` and `out[1::2] = x1·sin + x2·cos` (the tables
+    are the cos of the even columns and the sin of the odd ones — the same value within an adjacent
+    pair). Here, for the same `x`,
 
-    - `x · cos` が `(x1·c, x2·c)`
-    - 隣接ペアを入れ替えて前半を符号反転した `(−x2, x1)` に `sin` を掛けたものが `(−x2·s, x1·s)`
+    - `x · cos` is `(x1·c, x2·c)`
+    - `(−x2, x1)`, the adjacent pairs swapped with the first half negated, times `sin` is
+      `(−x2·s, x1·s)`
 
-    で、和は `(x1·c − x2·s, x2·c + x1·s)`。f32 の丸めも同じ: 乗算は正確丸めなので
-    `(−x2)·s == −(x2·s)`、`a + (−b)` は `a − b` と同じ丸め、`x2·c + x1·s` は加算の可換で
-    `x1·s + x2·c` と同じ値になる（**ビット一致**が主張 — `wan/tests/test_dit_patch.py`）。
+    and the sum is `(x1·c − x2·s, x2·c + x1·s)`. The f32 rounding is the same too: multiplication is
+    correctly rounded, so `(−x2)·s == −(x2·s)`; `a + (−b)` rounds the same as `a − b`; and
+    `x2·c + x1·s` has the same value as `x1·s + x2·c` by commutativity of addition (the claim is
+    **bit identity** — `wan/tests/test_dit_patch.py`).
 
-    MUST: 中間を rank 5 にしない — strided カーネルの rank 上限（`ops.STRIDED_RANK` = 4）に当たる。
-    head 軸を潰した `[B,S,H·D/2,2]` で入れ替えてから元形へ戻す（要素順は変わらない）。
-    MUST: 長さ 2 の軸の取り出しは長さ 1 の `slice`（`select` は IR 語彙に無い — irodori と同じ）。
-    MUST: `x` と表は同じ dtype で渡す。上流は結果を `.type_as(x)` で `x` の dtype へ戻すが、ここは
-    その変換を写していない（f32 の export では恒等で、グラフにノードを足さないため）。上の「差は
-    RoPE の掛け方 1 点」は dtype が同じときだけ成り立つので、違えば fail loudly（S 形のラッパを
-    通る経路は f32 の export と eager だけで、x も表も f32 — f64 の参照は上流の素の経路を通る）。
+    MUST: the intermediate is not rank 5 — that hits the rank limit of the strided kernels
+    (`ops.STRIDED_RANK` = 4). The swap is done on `[B,S,H·D/2,2]` with the head axis collapsed, then
+    the original shape is restored (the element order does not change).
+    MUST: an axis of length 2 is taken with a length-1 `slice` (`select` is not in the IR vocabulary
+    — as in irodori).
+    MUST: pass `x` and the tables in the same dtype. Upstream casts the result back to `x`'s dtype
+    with `.type_as(x)`, but that cast is not copied here (it is the identity in an f32 export, and
+    it would add a node to the graph). The claim above that "the only difference is how RoPE is
+    applied" holds only when the dtypes are the same, so a mismatch fails loudly (the paths through
+    the S-shaped wrapper are only the f32 export and eager, with x and the tables in f32 — the f64
+    reference goes through the plain upstream path).
     """
     if cos.dtype != x.dtype or sin.dtype != x.dtype:
         raise NotImplementedError(
-            f"RoPE の表の dtype（cos {cos.dtype}・sin {sin.dtype}）が x の {x.dtype} と違う —"
-            " 上流の `.type_as(x)` を写していないので、上流と同じ値にならない"
+            f"the dtype of the RoPE tables (cos {cos.dtype}, sin {sin.dtype}) differs from x's"
+            f" {x.dtype} — upstream's `.type_as(x)` is not copied, so the values would not match"
+            " upstream"
         )
     pairs = x.reshape(x.shape[0], x.shape[1], -1, 2)
     swapped = torch.cat([-pairs[..., 1:2], pairs[..., 0:1]], dim=-1).reshape(x.shape)
@@ -106,7 +127,8 @@ def real_pair_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> t
 
 
 def _processor_base() -> type:
-    """上流の `WanAttnProcessor`（diffusers は関数の中で import する — モジュール docstring）。"""
+    """The upstream `WanAttnProcessor` (diffusers is imported inside functions — the module
+    docstring)."""
     from diffusers.models.transformers.transformer_wan import WanAttnProcessor
 
     return WanAttnProcessor
@@ -129,12 +151,14 @@ def _real_pair_call(
     attention_mask: torch.Tensor | None = None,
     rotary_emb: Any = None,
 ) -> torch.Tensor:
-    """`WanAttnProcessor.__call__` の同値実装（RoPE を {@link real_pair_rotary} で掛ける）。
+    """An equivalent implementation of `WanAttnProcessor.__call__` (applies RoPE with
+    {@link real_pair_rotary}).
 
-    {@link RealPairRope} 以外の表（上流の素の tuple・None）で呼ばれたら**上流の実装へそのまま委ね
-    る**。実数形の経路は self-attention（`encoder_hidden_states is None`）だけで、上流との差は RoPE
-    の掛け方 1 点だけ（q / k / v の射影・qk-norm・head 分割・attention の呼び方・出力の射影は逐
-    語）。
+    Called with tables other than {@link RealPairRope} (the plain upstream tuple, None), it
+    **delegates to the upstream implementation as is**. The real-valued path is only for
+    self-attention (`encoder_hidden_states is None`), and its only difference from upstream is how
+    RoPE is applied (the q / k / v projections, qk-norm, head split, the attention call and the
+    output projection are verbatim).
     """
     base = _processor_base()
     if not isinstance(rotary_emb, RealPairRope):
@@ -143,8 +167,8 @@ def _real_pair_call(
         )
     if encoder_hidden_states is not None or attn.add_k_proj is not None:
         raise NotImplementedError(
-            "実数形 RoPE は self-attention（image 条件の add_k_proj 無し）だけ"
-            " — Wan2.1 T2V の attn1"
+            "real-valued RoPE is for self-attention only (without the image condition's add_k_proj)"
+            " — attn1 of Wan2.1 T2V"
         )
     from diffusers.models.attention_dispatch import dispatch_attention_fn
     from diffusers.models.transformers.transformer_wan import _get_qkv_projections
@@ -181,21 +205,24 @@ def _real_pair_call(
 
 @cache
 def _real_pair_processor_class() -> type:
-    """`WanAttnProcessor` の派生（`__call__` だけを {@link _real_pair_call} にしたもの）。
+    """A subclass of `WanAttnProcessor` (with only `__call__` replaced by {@link _real_pair_call}).
 
-    派生にするのは、上流のクラス属性（`_attention_backend` / `_parallel_config`）
-    をそのまま引き継ぐため。クラスは diffusers を import してから作る（モジュール docstring の
-    MUST）。1 プロセスで 1 つだけ作る（差し替えの冪等の判定がクラスの同一性で済むように）。
+    It is a subclass so that it inherits the upstream class attributes (`_attention_backend` /
+    `_parallel_config`) as they are. The class is created after diffusers is imported (the MUST of
+    the module docstring). Only one is created per process (so that the idempotence check of the
+    replacement reduces to class identity).
     """
     base = _processor_base()
     return type("WanRealPairAttnProcessor", (base,), {"__call__": _real_pair_call})
 
 
 def install_real_pair_processors(blocks: Iterable[nn.Module]) -> None:
-    """各ブロックの attn1（self-attention）の processor を実数形 RoPE の版へ差し替える（冪等）。
+    """Replace the processor of each block's attn1 (self-attention) with the real-valued RoPE
+    version (idempotent).
 
-    差し替えはインスタンス単位（クラス属性には触らない）。差し替え後も上流の素の forward
-    は上流の値を返す（{@link _real_pair_call} の委譲）。
+    The replacement is per instance (class attributes are not touched). After the replacement the
+    plain upstream forward still returns the upstream values (the delegation of
+    {@link _real_pair_call}).
     """
     processor_class = _real_pair_processor_class()
     for block in blocks:
@@ -204,16 +231,19 @@ def install_real_pair_processors(blocks: Iterable[nn.Module]) -> None:
 
 
 def patch_embedding_linear(conv: nn.Conv3d) -> nn.Linear:
-    """窓が重ならない `Conv3d(k = s = patch)` と同じ計算の `Linear(C·pt·ph·pw → Cout)`。
+    """A `Linear(C·pt·ph·pw → Cout)` that computes the same as a non-overlapping `Conv3d(k = s =
+    patch)`.
 
-    重みは conv の重み `[Cout, C, pt, ph, pw]` を `[Cout, C·pt·ph·pw]` に平坦化した
-    **view**（記憶域を共有する）で、bias は同じ Parameter。共有にするのは、f16 の丸め（fake-quant —
-    ADR 0006）を S 形のラッパへ掛けたときに、参照を採る上流の conv にも同じ丸めが届くようにするため
-    （別の複製だと参照だけが元の重みで計算され、差に量子化誤差が混ざる）。
+    The weight is a **view** (sharing storage) of the conv weight `[Cout, C, pt, ph, pw]` flattened
+    to `[Cout, C·pt·ph·pw]`, and the bias is the same Parameter. They are shared so that when the
+    f16 rounding (fake-quant — ADR 0006) is applied to the S-shaped wrapper, the same rounding
+    reaches the upstream conv the reference is taken from (with a separate copy, only the reference
+    would compute with the original weights, and quantization error would mix into the difference).
 
-    入力の並び `(c, pt, ph, pw)` は平坦化の C 順そのもの（{@link dit_patchify}）。
-    MUST: k = s・padding 0・dilation 1・groups 1 以外は fail loudly（窓が重なる / 欠ける conv は
-    reshape + Linear で書けない）。
+    The input order `(c, pt, ph, pw)` is exactly the C order of the flattening
+    ({@link dit_patchify}).
+    MUST: anything other than k = s, padding 0, dilation 1, groups 1 fails loudly (a conv whose
+    windows overlap or leave gaps cannot be written as reshape + Linear).
     """
     kernel = tuple(int(size) for size in conv.kernel_size)
     if (
@@ -224,13 +254,15 @@ def patch_embedding_linear(conv: nn.Conv3d) -> nn.Linear:
         or conv.padding_mode != "zeros"
     ):
         raise NotImplementedError(
-            f"patch 埋め込みの Conv3d が k = s・padding 0・dilation 1・groups 1 の外"
-            f"（k={kernel} s={tuple(conv.stride)} p={conv.padding} d={conv.dilation}"
-            f" g={conv.groups}）— Linear と同じ計算にならない"
+            f"the patch embedding's Conv3d is outside k = s, padding 0, dilation 1, groups 1"
+            f" (k={kernel} s={tuple(conv.stride)} p={conv.padding} d={conv.dilation}"
+            f" g={conv.groups}) — it would not compute the same as a Linear"
         )
     weight = conv.weight
     if not weight.is_contiguous():
-        raise NotImplementedError("patch 埋め込みの重みが連続でない（平坦化 view が作れない）")
+        raise NotImplementedError(
+            "the patch embedding's weight is not contiguous (no flattened view can be made)"
+        )
     out_channels = int(weight.shape[0])
     linear = nn.Linear(int(weight[0].numel()), out_channels, bias=conv.bias is not None)
     linear.weight = nn.Parameter(weight.view(out_channels, -1), requires_grad=False)
@@ -240,15 +272,17 @@ def patch_embedding_linear(conv: nn.Conv3d) -> nn.Linear:
 
 
 def _assert_supported_config(model: nn.Module) -> None:
-    """S 形のラッパが前提にする構成（Wan2.1 T2V）を確かめる。外れたら fail loudly。"""
+    """Check the configuration the S-shaped wrapper assumes (Wan2.1 T2V). Fail loudly otherwise."""
     config = model.config
     if config.image_dim is not None or config.added_kv_proj_dim is not None:
-        raise NotImplementedError("image 条件（I2V）の構成は未対応 — Wan2.1 T2V だけ")
+        raise NotImplementedError(
+            "image-conditioned (I2V) configurations are not supported — Wan2.1 T2V only"
+        )
     if config.pos_embed_seq_len is not None:
-        raise NotImplementedError("pos_embed_seq_len 付きの構成は未対応")
+        raise NotImplementedError("configurations with pos_embed_seq_len are not supported")
     if config.qk_norm != "rms_norm_across_heads":
         raise NotImplementedError(
-            f"qk_norm={config.qk_norm} は未対応（rms_norm_across_heads だけ）"
+            f"qk_norm={config.qk_norm} is not supported (only rms_norm_across_heads)"
         )
 
 
@@ -263,35 +297,42 @@ def _assert_supported_config(model: nn.Module) -> None:
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 class WanDitTokens(nn.Module):
-    """`WanTransformer3DModel` の 1 forward の**トークン形**（S 形グラフ — ADR 0118 決定 3）。
+    """The **token form** of one forward of `WanTransformer3DModel` (S-shaped graph — ADR 0118
+    decision 3).
 
-    上流 forward との差は入口と出口だけで、30 ブロックの本体は上流のモジュールをそのまま呼ぶ:
+    It differs from the upstream forward only at the entry and the exit; the body of 30 blocks calls
+    the upstream modules as they are:
 
-    - 入力が `hidden_states [1,C,F,H,W]` ではなく **`tokens [1,S,C·pt·ph·pw]`**（ホストが patchify
-      したもの — {@link dit_patchify}）。patch 埋め込みは平坦化した Linear
-      （{@link patch_embedding_linear}）
-    - 時刻は整数の `timestep` ではなく **`timesteps_proj [1,freq_dim]`**（ホストの sinusoidal —
-      {@link dit_timesteps_proj}）
-    - RoPE の cos / sin 表を**グラフ入力**にする（`[1,S,1,head_dim]` — ホストが素表から組む）。
-      attn1 の processor は実数形の版（{@link install_real_pair_processors}）
-    - 出力は unpatchify **前**のトークン `[1,S,pt·ph·pw·C]`（逆並べ替えはホスト —
-      {@link dit_unpatchify}）
+    - The input is **`tokens [1,S,C·pt·ph·pw]`** rather than `hidden_states [1,C,F,H,W]` (patchified
+      by the host — {@link dit_patchify}). The patch embedding is the flattened Linear
+      ({@link patch_embedding_linear})
+    - The time is **`timesteps_proj [1,freq_dim]`** rather than the integer `timestep` (the host's
+      sinusoidal — {@link dit_timesteps_proj})
+    - The RoPE cos / sin tables become **graph inputs** (`[1,S,1,head_dim]` — built by the host from
+      the base tables). attn1's processor is the real-valued version
+      ({@link install_real_pair_processors})
+    - The output is the tokens `[1,S,pt·ph·pw·C]` **before** the unpatchify (the inverse reordering
+      is on the host — {@link dit_unpatchify})
 
-    結果としてグラフ内に F / H / W が 1 つも現れず、トークン長 1 シンボル `S` だけで書ける。
+    As a result, not one of F / H / W appears in the graph, and it can be written with the single
+    token-length symbol `S`.
 
-    `encoder_hidden_states` は umT5 の出力を有効長で切ってからゼロで 512 行まで埋めた `[1,512,4096]`
-    （ホスト — `wan.pipeline_ref.pad_text_embeds`）。`text_embedder` は 512 行すべてに掛かり、
-    cross-attn はマスク無し（上流と同じ — パディング位置は射影後に非ゼロの定数ベクトルになる）。
+    `encoder_hidden_states` is `[1,512,4096]`: umT5's output cut at the valid length, then padded
+    with zeros to 512 rows (on the host — `wan.pipeline_ref.pad_text_embeds`). `text_embedder` is
+    applied to all 512 rows, and cross-attn has no mask (as upstream — the padded positions become a
+    non-zero constant vector after the projection).
 
-    保持するのは上流の部品への参照だけ（`patch_embedding` の Linear は conv の重みの view）。`rope`
-    は持たない — 表はグラフ入力なので、`rope` のバッファ（float64 から落とした f32 の表）
-    を初期値として運ばない。
+    It holds only references to the upstream components (the `patch_embedding` Linear is a view of
+    the conv weights). It does not hold `rope` — the tables are graph inputs, so the buffers of
+    `rope` (f32 tables lowered from float64) are not carried as initial values.
 
-    `blocks` を渡すと、その部分列だけを回す（層数に対する誤差の伸びを測る切り詰め用。既定は全層）。
+    Passing `blocks` runs only that subsequence (for truncation to measure how the error grows with
+    the number of layers; the default is all layers).
 
-    `install_processors=False` は attn1 の processor の差し替えを呼び手に任せる（層逐次の CPU 参照
-    `wan.dit_reference.LayerwiseDit` — 列を回すと重みを読むので、組む時点では回さず、開いた
-    ブロックごとに {@link install_real_pair_processors} を掛ける）。
+    `install_processors=False` leaves the replacement of attn1's processors to the caller (the
+    layer-by-layer CPU reference `wan.dit_reference.LayerwiseDit` — iterating the list reads the
+    weights, so it is not iterated at construction; {@link install_real_pair_processors} is applied
+    to each block as it is opened).
     """
 
     def __init__(
@@ -337,11 +378,12 @@ class WanDitTokens(nn.Module):
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
     ) -> torch.Tensor:
-        """patch 埋め込みの**後**から（`hidden_states [1,S,dim]`）。
+        """From **after** the patch embedding (`hidden_states [1,S,dim]`).
 
-        {@link forward} との差は patch 埋め込み 1 段だけ。上流の conv3d の出力をここへ入れると、
-        上流の forward と**ビット一致**する（patch 埋め込み以外の書き換えがビット一致であることの実
-        測口 — `wan/tests/test_dit_patch.py`）。
+        It differs from {@link forward} only by the patch-embedding step. Fed the output of the
+        upstream conv3d, it is **bit-identical** to the upstream forward (the measurement point
+        showing that every rewrite other than the patch embedding is bit-identical —
+        `wan/tests/test_dit_patch.py`).
         """
         output, _ = self._trunk(
             hidden_states, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin, collect=False
@@ -358,12 +400,12 @@ class WanDitTokens(nn.Module):
         *,
         collect: bool,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """本体（条件の埋め込み → ブロック列 → 出力の norm / 射影）。
+        """The body (condition embedding → block list → output norm / projection).
 
-        `collect` で各ブロックの出力も返す。
+        With `collect`, it also returns the output of each block.
         """
         embedder = self.condition_embedder
-        # 上流 `WanTimeTextImageEmbedding.forward`（sinusoidal の段だけがホストへ出た）。
+        # Upstream `WanTimeTextImageEmbedding.forward` (only the sinusoidal step moved to the host).
         time_embedder_dtype = next(iter(embedder.time_embedder.parameters())).dtype
         if timesteps_proj.dtype != time_embedder_dtype and time_embedder_dtype != torch.int8:
             timesteps_proj = timesteps_proj.to(time_embedder_dtype)
@@ -390,11 +432,13 @@ class WanDitTokens(nn.Module):
 
 
 class WanDitTokensLayers(WanDitTokens):
-    """{@link WanDitTokens} に**層別の出口を足した**計測用の形（層数に対する誤差の伸び — 決定 8）。
+    """A measurement form of {@link WanDitTokens} **with a per-layer exit added** (the growth of the
+    error with the number of layers — decision 8).
 
-    出力は各ブロックの出力 `[1,S,dim]`（ブロック順）と、最後に {@link WanDitTokens} と同じ最終出力
-    `[1,S,pt·ph·pw·C]`。製品のグラフではない（配布しない）— 入力も重みも同じなので、同じ golden
-    の入力で回して、上流の各ブロックの出力（forward hook で採った値）と層ごとに突き合わせる。
+    The outputs are the output of each block `[1,S,dim]` (in block order) and, last, the same final
+    output `[1,S,pt·ph·pw·C]` as {@link WanDitTokens}. It is not a product graph (not shipped) — the
+    inputs and weights are the same, so it runs on the same golden inputs and is compared layer by
+    layer with the output of each upstream block (values taken with a forward hook).
     """
 
     def forward(  # type: ignore[override]
@@ -419,13 +463,14 @@ class WanDitTokensLayers(WanDitTokens):
 def _time_embedding(
     embedder: nn.Module, timesteps_proj: torch.Tensor, like: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """時刻の MLP（`time_embedder` → SiLU → `time_proj`）を 1 行で回す（`temb [1,dim]` と
-    `timestep_proj [1,6·dim]`）。
+    """Run the time MLP (`time_embedder` → SiLU → `time_proj`) on one row (`temb [1,dim]` and
+    `timestep_proj [1,6·dim]`).
 
-    上流 `WanTimeTextImageEmbedding.forward` の時刻の段の逐語（sinusoidal はホスト）。
-    {@link WanDitTokens._trunk} の同じ 5 行と同じ式で、2.1 のラッパのグラフを 1 バイトも動かさない
-    ために向こうはこの関数を通さない（ADR 0121 決定 10 — 2.1 と共有する recipe の変更は 1.3B の
-    容器のバイト不変で確かめる）。
+    The time step of upstream `WanTimeTextImageEmbedding.forward`, verbatim (the sinusoidal is on
+    the host). It is the same formula as the same 5 lines of {@link WanDitTokens._trunk}; that one
+    does not go through this function so that 2.1's wrapper graph does not move by a single byte
+    (ADR 0121 decision 10 — a change to the recipe shared with 2.1 is confirmed by the 1.3B
+    containers staying byte-identical).
     """
     time_embedder_dtype = next(iter(embedder.time_embedder.parameters())).dtype
     if timesteps_proj.dtype != time_embedder_dtype and time_embedder_dtype != torch.int8:
@@ -437,12 +482,14 @@ def _time_embedding(
 def _two_time_embeddings(
     embedder: nn.Module, generation: torch.Tensor, condition: torch.Tensor, like: torch.Tensor
 ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-    """生成側と条件側の時刻の MLP を **M = 1 で 2 回**回す（ADR 0121 決定 3 — 戻りは
-    `(temb, timestep_proj)` の組を生成側・条件側の順に）。
+    """Run the time MLPs of the generated side and the conditioned side **twice with M = 1** (ADR
+    0121 decision 3 — returns the `(temb, timestep_proj)` pairs, generated side first, then
+    conditioned side).
 
-    MUST: 2 行を連結して M = 2 の 1 回にしない。torch CPU の linear は M = 1 と M ≥ 2 で最終ビットを
-    割る（差分調査 §6.1）— まとめると T2V の生成側の行が 2.1 と同じ形の計算でなくなる。IR では同じ
-    重みの linear のノードが 3 本増える（`wan.ti2v_export_dit.inspect_structure` が本数で縛る）。
+    MUST: do not concatenate the 2 rows into one run with M = 2. torch CPU's linear differs in the
+    last bit between M = 1 and M ≥ 2 (difference investigation §6.1) — combined, the generated-side
+    row of T2V would no longer be computed in the same form as 2.1. In the IR this adds 3 linear
+    nodes with the same weights (`wan.ti2v_export_dit.inspect_structure` pins the count).
     """
     return (
         _time_embedding(embedder, generation, like),
@@ -468,25 +515,27 @@ def _ti2v_block(
     condition_mask: torch.Tensor,
     rotary_emb: RealPairRope,
 ) -> torch.Tensor:
-    """上流のブロック 1 枚を、変調を 2 つの時刻の値から**トークンごとに選んで**回す
-    （ADR 0121 決定 3）。
+    """Run one upstream block with the modulation **selected per token** from 2 time values
+    (ADR 0121 decision 3).
 
-    `generation` / `condition` は時刻の MLP の出力 `[1,6,dim]`（生成側の t と条件側の t = 0）。
-    6 成分は時刻の値ごとに `[1,1,dim]` で作り（上流の 1 次元 timestep の分岐と同じ
-    `scale_shift_table + timestep_proj` の和）、`where(condition_mask, 条件側, 生成側)` で
-    `[1,S,dim]` に選ぶ。
+    `generation` / `condition` are the outputs `[1,6,dim]` of the time MLP (the generated side's t
+    and the conditioned side's t = 0). The 6 components are built per time value as `[1,1,dim]` (the
+    same sum `scale_shift_table + timestep_proj` as the upstream branch for a 1-D timestep) and
+    selected into `[1,S,dim]` with `where(condition_mask, conditioned side, generated side)`.
 
-    MUST: 各成分の `where` はその成分の消費（self-attention の前の変調・その残差のゲート・FFN の
-    前の変調・FFN のゲート）の**直前**に書く。上流の順（ブロックの先頭で 6 成分をまとめて作る）に
-    倣うと、torch.export はその順を保つので、最大 6 本の `[1,S,dim]` が attention をまたいで生きる
-    （S = 27,280 で 1 本 f32 0.31 GiB — 決定 3 の「where の置き場所」）。Python の評価順
-    （`a * (1 + where(…)) + where(…)` は左から）がそのまま IR のノードの順になる
-    （`wan.ti2v_export_dit.where_placement` が IR で縛る）。
+    MUST: write each component's `where` **right before** its use (the modulation before
+    self-attention, the gate of its residual, the modulation before the FFN, the FFN's gate).
+    Following upstream's order (building the 6 components together at the top of the block),
+    torch.export keeps that order, so up to 6 `[1,S,dim]` tensors stay alive across the attention
+    (one is 0.31 GiB in f32 at S = 27,280 — "where to place the where" in decision 3). Python's
+    evaluation order (`a * (1 + where(…)) + where(…)` is left to right) becomes the IR node order as
+    is (`wan.ti2v_export_dit.where_placement` pins it on the IR).
 
-    値の同値: `where` は選択なので値を変えない。T2V（マスクが全て偽）では上流の 1 次元 timestep の
-    分岐（`[1,1,dim]` の broadcast）と、I2V では上流の `temb.ndim == 4` の分岐（トークンごとの
-    表 — 決定 4 の参照ラッパ）と、要素ごとに同じ演算になる（**ビット一致**が主張 —
-    `wan/tests/test_dit_patch_ti2v.py` の `TestTheTi2vGraphForm`）。
+    Value equivalence: `where` is a selection, so it does not change values. In T2V (the mask all
+    false) it is elementwise the same computation as the upstream branch for a 1-D timestep (a
+    broadcast of `[1,1,dim]`), and in I2V as upstream's `temb.ndim == 4` branch (per-token tables —
+    the reference wrapper of decision 4) (the claim is **bit identity** — `TestTheTi2vGraphForm` in
+    `wan/tests/test_dit_patch_ti2v.py`).
     """
     table = block.scale_shift_table
     shift_g, scale_g, gate_g, c_shift_g, c_scale_g, c_gate_g = (table + generation.float()).chunk(
@@ -534,21 +583,25 @@ def _ti2v_block(
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 class WanDitTokensTi2v(WanDitTokens):
-    """Wan2.2 TI2V の I2V 対応の S 形グラフ（ADR 0121 決定 3 — T2V と I2V を 1 本で）。
+    """The I2V-capable S-shaped graph of Wan2.2 TI2V (ADR 0121 decision 3 — T2V and I2V in one
+    graph).
 
-    {@link WanDitTokens} の入力 5 本の後ろに 2 本を足す（先頭 5 本の位置は 2.1 と同じ）:
+    It adds 2 inputs after the 5 inputs of {@link WanDitTokens} (the positions of the first 5 are
+    the same as 2.1's):
 
-    - `timesteps_proj_condition [1,freq_dim]`: 条件側の時刻の sinusoidal（I2V は t = 0・T2V は
-      生成側と同じ値 — ホスト {@link dit_timesteps_proj}）
-    - `condition_mask [1,S,1]`（bool）: トークンが条件フレーム（先頭の潜在フレーム）のものか
-      （I2V は先頭 P = H'·W' トークンが真・T2V は全て偽 — ホスト {@link dit_condition_mask}）
+    - `timesteps_proj_condition [1,freq_dim]`: the time sinusoidal of the conditioned side (t = 0
+      for I2V, the same value as the generated side for T2V — host {@link dit_timesteps_proj})
+    - `condition_mask [1,S,1]` (bool): whether a token belongs to the conditioning frame (the first
+      latent frame) (for I2V the first P = H'·W' tokens are true, for T2V all false — host
+      {@link dit_condition_mask})
 
-    時刻の MLP は **M = 1 で 2 回**回す（同じ重みの linear のノードが 3 本増える — 決定 2 の
-    dispatch 310 本）。M = 2 の 1 回にしないのは、torch CPU の linear が M = 1 と M ≥ 2 で最終ビット
-    を割るため（T2V の生成側の行を 2.1 と同じ形の計算に保つ — 決定 3 の「なぜ」）。変調はブロック
-    ごとに {@link _ti2v_block} が、出力の変調はここが、消費の直前の `where` で選ぶ。
+    The time MLP is run **twice with M = 1** (3 more linear nodes with the same weights — the 310
+    dispatches of decision 2). It is not one run with M = 2 because torch CPU's linear differs in
+    the last bit between M = 1 and M ≥ 2 (keeping the generated-side row of T2V computed in the same
+    form as 2.1 — the "why" of decision 3). The per-block modulation is selected by
+    {@link _ti2v_block}, the output modulation here, each with a `where` right before its use.
 
-    MUST: `WanDitTokens.forward`（2.1 の 5 入力）は使わない — このラッパの入力は 7 本。
+    MUST: do not use `WanDitTokens.forward` (2.1's 5 inputs) — this wrapper has 7 inputs.
     """
 
     def forward(  # type: ignore[override]
@@ -581,7 +634,8 @@ class WanDitTokensTi2v(WanDitTokens):
         timesteps_proj_condition: torch.Tensor,
         condition_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """patch 埋め込みの**後**から（{@link WanDitTokens.forward_hidden} の TI2V 版）。"""
+        """From **after** the patch embedding (the TI2V version of
+        {@link WanDitTokens.forward_hidden})."""
         embedder = self.condition_embedder
         (temb_g, proj_g), (temb_c, proj_c) = _two_time_embeddings(
             embedder, timesteps_proj, timesteps_proj_condition, encoder_hidden_states
@@ -615,15 +669,16 @@ class WanDitTokensTi2v(WanDitTokens):
         return self.proj_out(hidden_states)
 
 
-# ---- ホストへ出した段の Python 側の正本（TS の鏡像の突き合わせ相手） ----------------
+# ---- The Python-side source of truth for the steps moved to the host (what the TS mirrors are
+# checked against) ----
 
 
 def dit_patchify(latents: torch.Tensor, patch_size: tuple[int, int, int]) -> torch.Tensor:
-    """`latents [1,C,F,H,W]` → `tokens [1,S,C·pt·ph·pw]`（最終次元は `(c, pt, ph, pw)`）。
+    """`latents [1,C,F,H,W]` → `tokens [1,S,C·pt·ph·pw]` (last dimension `(c, pt, ph, pw)`).
 
-    トークン添字は `(f·H' + h)·W' + w`（上流の `conv3d(…).flatten(2).transpose(1, 2)` の並び）、
-    最終次元は conv3d の重み `[Cout, C, pt, ph, pw]` の平坦化と同じ C 順
-    （{@link patch_embedding_linear} と対）。
+    The token index is `(f·H' + h)·W' + w` (the order of upstream `conv3d(…).flatten(2).transpose(1,
+    2)`), and the last dimension is in the same C order as the flattening of the conv3d weight
+    `[Cout, C, pt, ph, pw]` (the counterpart of {@link patch_embedding_linear}).
     """
     patch_t, patch_h, patch_w = patch_size
     batch, channels, frames, height, width = latents.shape
@@ -651,11 +706,11 @@ def dit_unpatchify(
     latent_shape: tuple[int, int, int],
     patch_size: tuple[int, int, int],
 ) -> torch.Tensor:
-    """`tokens [1,S,pt·ph·pw·C]` → `latents [1,C,F,H,W]`（上流の出口の逐語）。
+    """`tokens [1,S,pt·ph·pw·C]` → `latents [1,C,F,H,W]` (the upstream exit, verbatim).
 
-    MUST: **patchify の逆順ではない** — 最終次元の並びは `(pt, ph, pw, c)` で、patchify 側の
-    `(c, pt, ph, pw)` と別物（上流 `reshape(…, p_t, p_h, p_w, -1)` →
-    `permute(0, 7, 1, 4, 2, 5, 3, 6)`）。
+    MUST: **not the reverse of patchify** — the last dimension is ordered `(pt, ph, pw, c)`,
+    distinct from patchify's `(c, pt, ph, pw)` (upstream `reshape(…, p_t, p_h, p_w, -1)` →
+    `permute(0, 7, 1, 4, 2, 5, 3, 6)`).
     """
     frames, height, width = latent_shape
     p_t, p_h, p_w = patch_size
@@ -671,10 +726,12 @@ def dit_unpatchify(
 
 
 def dit_timesteps_proj(model: nn.Module, timestep: torch.Tensor) -> torch.Tensor:
-    """ホストで計算する時刻の sinusoidal（上流 `condition_embedder.timesteps_proj` そのもの）。
+    """The time sinusoidal computed on the host (exactly upstream
+    `condition_embedder.timesteps_proj`).
 
-    `timestep` は上流のパイプラインが渡す整数の timestep（`[1]`・int64）。式は写さず上流のモジュール
-    を呼ぶ（`Timesteps(freq_dim, flip_sin_to_cos=True, downscale_freq_shift=0)` — cos 先・sin 後）。
+    `timestep` is the integer timestep the upstream pipeline passes (`[1]`, int64). The formula is
+    not copied; the upstream module is called (`Timesteps(freq_dim, flip_sin_to_cos=True,
+    downscale_freq_shift=0)` — cos first, sin second).
     """
     return model.condition_embedder.timesteps_proj(timestep)
 
@@ -682,19 +739,21 @@ def dit_timesteps_proj(model: nn.Module, timestep: torch.Tensor) -> torch.Tensor
 def dit_condition_mask(
     latent_shape: tuple[int, int, int], patch_size: tuple[int, int, int], *, conditioned: bool
 ) -> torch.Tensor:
-    """グラフ入力 `condition_mask [1,S,1]`（bool — ADR 0121 決定 3）。
+    """The graph input `condition_mask [1,S,1]` (bool — ADR 0121 decision 3).
 
-    I2V（`conditioned`）は先頭の潜在フレームの P = H'·W' トークンが真、T2V は全て偽。トークン
-    添字は `(f·H' + h)·W' + w`（{@link dit_patchify}）なので、先頭の潜在フレームのトークンは先頭に
-    連続して並ぶ。上流の diffusers の I2V（`WanImageToVideoPipeline` の `expand_timesteps` の分岐）
-    は、先頭の潜在フレームを 0 にした `[1,1,F,H,W]` のマスクを `[:, ::2, ::2]` で間引いて平坦化し、
-    t に掛ける — 同じトークンが t = 0 になる。
+    For I2V (`conditioned`) the P = H'·W' tokens of the first latent frame are true; for T2V all are
+    false. The token index is `(f·H' + h)·W' + w` ({@link dit_patchify}), so the tokens of the first
+    latent frame come first, contiguously. Upstream diffusers' I2V (the `expand_timesteps` branch of
+    `WanImageToVideoPipeline`) thins out a `[1,1,F,H,W]` mask with the first latent frame set to 0
+    by `[:, ::2, ::2]`, flattens it and multiplies it into t — the same tokens get t = 0.
 
-    MUST: 時間方向の patch が 1 のときだけ（先頭の潜在フレーム = 先頭のトークンフレーム）。
+    MUST: only for a temporal patch of 1 (first latent frame = first token frame).
     """
     patch_t, patch_h, patch_w = patch_size
     if patch_t != 1:
-        raise NotImplementedError(f"時間方向の patch {patch_t} の条件マスクは未対応（1 だけ）")
+        raise NotImplementedError(
+            f"a condition mask with temporal patch {patch_t} is not supported (only 1)"
+        )
     frames, height, width = latent_shape
     per_frame = (height // patch_h) * (width // patch_w)
     mask = torch.zeros(1, frames * per_frame, 1, dtype=torch.bool)
@@ -706,40 +765,45 @@ def dit_condition_mask(
 def dit_rope_tables(
     rope: nn.Module, latent_shape: tuple[int, int, int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """S 形グラフへ渡す RoPE の cos / sin 表 `[1,S,1,head_dim]`（上流 `WanRotaryPosEmbed` の出力）。
+    """The RoPE cos / sin tables `[1,S,1,head_dim]` passed to the S-shaped graph (the output of
+    upstream `WanRotaryPosEmbed`).
 
-    `rope` は上流の `model.rope`、`latent_shape` は潜在の `(F, H, W)`。上流の `rope` は入力の形しか
-    見ないので、ゼロの probe を渡す。
-    MUST: MPS が見える機では呼ばない（表が float32 で作られて機に依って変わる —
-    `pipeline_ref.assert_no_mps` が組む前に止める）。
+    `rope` is upstream's `model.rope` and `latent_shape` the latent's `(F, H, W)`. Upstream's `rope`
+    looks only at the input's shape, so a zero probe is passed.
+    MUST: do not call it on a machine that sees MPS (the tables would be built in float32 and vary
+    by machine — `pipeline_ref.assert_no_mps` stops it before building).
     """
     probe = torch.zeros(1, 1, *latent_shape)
     return rope(probe)
 
 
 def dit_rope_base_tables(rope: nn.Module) -> dict[str, torch.Tensor]:
-    """ホスト（TS）が RoPE の表を組むための**軸別の素表**を上流の表（`model.rope`）から切り出す。
+    """Cut **the per-axis base tables** out of the upstream tables (`model.rope`) for the host (TS)
+    to build the RoPE tables from.
 
-    返すのは `cos_t` / `sin_t` / `cos_h` / … の 6 本で、各 `[rows, 軸のブロック幅 / 2]`（行 =
-    位置・列 = その軸の周波数）。値は上流 `model.rope` の出力そのもので、上流の表は隣接ペアに同じ値
-    を `repeat_interleave` した形なので、偶数列だけを取れば素表になる（奇数列が偶数列と同じことは
-    {@link _assert_rope_base} が確かめる）。
+    It returns the 6 tables `cos_t` / `sin_t` / `cos_h` / …, each `[rows, block width of the axis /
+    2]` (row = position, column = that axis's frequency). The values are the output of upstream
+    `model.rope` itself; the upstream tables are `repeat_interleave`d with the same value in each
+    adjacent pair, so taking only the even columns gives the base table ({@link _assert_rope_base}
+    confirms that the odd columns equal the even ones).
 
-    ## なぜ表を焼くのか
+    ## Why the tables are baked
 
-    上流は float64 で角度と三角関数を計算してから f32 に落とす（MPS の無い機 —
-    `transformer_wan.py:375`）。TS で式を写すと、`pow` / 除算 / `cos` の f64
-    の実装差で最終ビットが割れうる。素表を焼いてホストは並べ替えだけをすれば、
-    表は上流とビット同一になる（Anima の `rope-base.ts` と同じ判断 — TS で三角関数を計算しない
-    MUST）。
+    Upstream computes the angles and the trigonometric functions in float64 and then lowers them to
+    f32 (on a machine without MPS — `transformer_wan.py:375`). Copying the formula into TS, the last
+    bit can diverge through implementation differences of f64 `pow` / division / `cos`. With baked
+    base tables the host only reorders, and the tables are bit-identical to upstream (the same
+    judgement as Anima's `rope-base.ts` — the MUST that TS does not compute trigonometric
+    functions).
 
-    ## 行数
+    ## Row count
 
-    上流の位置表の天井 `rope_max_seq_len`（1024）そのもの。F' / H' / W' のどれかがこれを超える潜在は
-    上流でも組めない。
+    Exactly upstream's ceiling on the position table, `rope_max_seq_len` (1024). A latent where any
+    of F' / H' / W' exceeds it cannot be built upstream either.
 
-    MUST: 切り出しは `model.rope` の**出力から**行う（式を写さない）。1 軸だけを `rows`
-    位置ぶん動かし、他の 2 軸を位置 0 に固定した probe を軸ごとに 1 本ずつ回す。
+    MUST: the cut is made **from the output** of `model.rope` (the formula is not copied). One probe
+    per axis is run, moving only that axis over `rows` positions and fixing the other 2 axes at
+    position 0.
     """
     rows = int(rope.max_seq_len)
     patch_t, patch_h, patch_w = (int(size) for size in rope.patch_size)
@@ -747,7 +811,8 @@ def dit_rope_base_tables(rope: nn.Module) -> dict[str, torch.Tensor]:
     starts = (0, dims[0], dims[0] + dims[1])
 
     def probe(frames: int, height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """`(ppf, pph, ppw) = (frames, height, width)` になる形で上流の rope をそのまま呼ぶ。"""
+        """Call upstream's rope as is with a shape that gives `(ppf, pph, ppw) = (frames, height,
+        width)`."""
         sample = torch.zeros(1, 1, frames * patch_t, height * patch_h, width * patch_w)
         cos, sin = rope(sample)
         return cos[0, :, 0], sin[0, :, 0]
@@ -768,8 +833,9 @@ def dit_rope_base_tables(rope: nn.Module) -> dict[str, torch.Tensor]:
             and torch.equal(block_sin[:, 0::2], block_sin[:, 1::2])
         ):
             raise AssertionError(
-                f"上流の RoPE 表の {axis} ブロックが隣接ペアで同じ値になっていない"
-                "（repeat_interleave 形の前提が崩れた — 偶数列を素表にできない）"
+                f"block {axis} of the upstream RoPE table does not have the same value within"
+                " adjacent pairs (the repeat_interleave premise broke — the even columns cannot"
+                " serve as the base table)"
             )
         tables[f"cos_{axis}"] = block_cos[:, 0::2].contiguous()
         tables[f"sin_{axis}"] = block_sin[:, 0::2].contiguous()
@@ -778,55 +844,64 @@ def dit_rope_base_tables(rope: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _assert_rope_base(tables: dict[str, torch.Tensor], rows: int, widths: tuple[int, ...]) -> None:
-    """素表の切り出しが上流のブロック境界と合っていることを確かめる（恒真化の門）。
+    """Confirm that the cut of the base tables matches the upstream block boundaries (the check
+    against a vacuous pass).
 
-    切り出しが 1 ブロックずれても shape は合う（h と w のブロック幅は等しい）。
-    そこで**その軸だけが位置で動く**ことを見る: 位置 0 の行は角度 0 なので cos = 1 / sin = 0、位置
-    1 の行は sin が 0 でない。別のブロックを切っていれば位置に対して定数のままになり、後者で破れる。
+    A cut off by one block still has matching shapes (the block widths of h and w are equal). So it
+    checks that **only that axis moves with the position**: the row at position 0 has angle 0, so
+    cos = 1 / sin = 0, and at position 1 sin is non-zero. A cut of another block stays constant over
+    the position and breaks the latter.
     """
     if set(tables) != set(ROPE_BASE_KEYS):
         raise AssertionError(
-            f"rope 素表のキーが {sorted(tables)}（期待は {sorted(ROPE_BASE_KEYS)}）"
+            f"the rope base table keys are {sorted(tables)} (expected {sorted(ROPE_BASE_KEYS)})"
         )
     for axis, width in zip(("t", "h", "w"), widths, strict=True):
         for kind in ("cos", "sin"):
             table = tables[f"{kind}_{axis}"]
             if table.dtype != torch.float32 or tuple(table.shape) != (rows, width):
                 raise AssertionError(
-                    f"rope 素表 {kind}_{axis} が {table.dtype} {tuple(table.shape)}"
-                    f"（期待は float32 {(rows, width)}）"
+                    f"rope base table {kind}_{axis} is {table.dtype} {tuple(table.shape)}"
+                    f" (expected float32 {(rows, width)})"
                 )
         if not torch.equal(tables[f"cos_{axis}"][0], torch.ones(width)):
-            raise AssertionError(f"rope 素表 cos_{axis} の位置 0 が全 1 でない（切り出しずれ）")
+            raise AssertionError(
+                f"position 0 of rope base table cos_{axis} is not all 1 (misaligned cut)"
+            )
         if not torch.equal(tables[f"sin_{axis}"][0], torch.zeros(width)):
-            raise AssertionError(f"rope 素表 sin_{axis} の位置 0 が全 0 でない（切り出しずれ）")
+            raise AssertionError(
+                f"position 0 of rope base table sin_{axis} is not all 0 (misaligned cut)"
+            )
         if torch.equal(tables[f"sin_{axis}"][1], torch.zeros(width)):
             raise AssertionError(
-                f"rope 素表 sin_{axis} が位置 1 でも全 0（この軸で動いていない = 切り出しずれ）"
+                f"rope base table sin_{axis} is all 0 at position 1 too (it does not move on this"
+                " axis = misaligned cut)"
             )
 
 
 @contextmanager
 def flash_attention_only() -> Iterator[None]:
-    """この間の SDPA を CPU の flash 経路（`aten._scaled_dot_product_flash_attention_for_cpu`）に
-    固定する（CPU の参照とパッチ後の eager — export のトレースには掛けない）。
+    """Pin SDPA within this block to CPU's flash path
+    (`aten._scaled_dot_product_flash_attention_for_cpu`) (the CPU reference and the patched eager
+    — not applied to export tracing).
 
-    WHY: 実寸 81 フレーム（S = 32,760）の参照が MATH backend に落ちると、スコア行列
-    `[1,12,S,S]` 1 枚で 51.5 GB（f32）/ 103 GB（f64）を確保して OOM で死ぬ（それまでの数十分の
-    計算ごと）。torch 2.13.0+cpu は既定で flash を選ぶ（`torch._fused_sdp_choice` —
-    `wan/tests/test_dit_patch.py` が見る）ので、固定しても数値は変わらない。固定しておけば、flash が
-    受けない入力（最終次元が非連続など）は MATH へ黙って落ちずに RuntimeError で止まる。
+    WHY: if the full-size 81-frame (S = 32,760) reference falls to the MATH backend, one score
+    matrix `[1,12,S,S]` allocates 51.5 GB (f32) / 103 GB (f64) and dies with OOM (taking the tens of
+    minutes of computation so far with it). torch 2.13.0+cpu chooses flash by default
+    (`torch._fused_sdp_choice` — `wan/tests/test_dit_patch.py` checks it), so pinning does not
+    change the numbers. With the pin, inputs flash does not take (a non-contiguous last dimension,
+    for example) stop with a RuntimeError instead of silently falling to MATH.
     """
     with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
         yield
 
 
 class TimestepCondition(NamedTuple):
-    """I2V の条件側の時刻（決定 4 の参照ラッパの入力）。
+    """The conditioned side's time for I2V (the input of the reference wrapper of decision 4).
 
-    `timestep` は条件フレームのトークンの整数の timestep（`[1]`・int64 — I2V は 0）、`mask` は
-    トークンごとの条件マスク `[1,S]`（bool — グラフ入力 `condition_mask [1,S,1]` の最終軸を落とした
-    形・{@link dit_condition_mask}）。
+    `timestep` is the integer timestep of the tokens of the conditioning frame (`[1]`, int64 — 0 for
+    I2V), and `mask` the per-token condition mask `[1,S]` (bool — the graph input
+    `condition_mask [1,S,1]` with its last axis dropped, {@link dit_condition_mask}).
     """
 
     timestep: torch.Tensor
@@ -834,17 +909,19 @@ class TimestepCondition(NamedTuple):
 
 
 class _TokenwiseTimeEmbedder(nn.Module):
-    """上流の `condition_embedder` を時刻の値ごとに **M = 1 で 2 回**呼び、トークンごとの
-    `temb [1,S,dim]` / `timestep_proj [1,S,6·dim]` を組む差し替え（ADR 0121 決定 4 の参照ラッパ）。
+    """A replacement that calls upstream's `condition_embedder` **twice with M = 1**, once per time
+    value, and builds the per-token `temb [1,S,dim]` / `timestep_proj [1,S,6·dim]` (the reference
+    wrapper of ADR 0121 decision 4).
 
-    上流の forward は 2 次元の timestep `[1,S]` を受けると、平坦化した `[S]` と `timestep_seq_len`
-    をここへ渡し、戻りの `timestep_proj` を `[1,S,6,dim]` へ割ってブロックの `temb.ndim == 4` の
-    分岐と head の `ndim == 3` の分岐へ流す。ブロックと head は上流のコードがそのまま走る — ここが
-    変えるのは時刻の MLP の回し方（M = S → 値ごとに M = 1）だけで、グラフ
-    （{@link WanDitTokensTi2v}）と同じ意味論になる。
+    Given a 2-D timestep `[1,S]`, the upstream forward passes the flattened `[S]` and
+    `timestep_seq_len` here, splits the returned `timestep_proj` into `[1,S,6,dim]` and feeds it to
+    the blocks' `temb.ndim == 4` branch and the head's `ndim == 3` branch. The blocks and the head
+    run upstream's code as is — this changes only how the time MLP is run (M = S → M = 1 per value),
+    and the semantics are the same as the graph's ({@link WanDitTokensTi2v}).
 
-    MUST: 渡された平坦の timestep が `where(mask, 条件側, 生成側)` と一致しなければ fail loudly
-    （上流の平坦化の順が変わったら、トークンと変調の対応が黙ってずれる）。
+    MUST: fail loudly if the flat timestep passed in does not match `where(mask, conditioned side,
+    generated side)` (if upstream's flattening order changed, tokens and modulation would silently
+    go out of step).
     """
 
     def __init__(
@@ -866,11 +943,11 @@ class _TokenwiseTimeEmbedder(nn.Module):
         expected = torch.where(mask, self.condition.timestep, self.generation).flatten()
         if timestep_seq_len != mask.shape[1] or not torch.equal(timestep, expected):
             raise AssertionError(
-                "上流が渡したトークンごとの timestep が条件マスクと一致しない"
-                f"（seq_len {timestep_seq_len}・マスク {list(mask.shape)}）"
+                "the per-token timestep upstream passed does not match the condition mask"
+                f" (seq_len {timestep_seq_len}, mask {list(mask.shape)})"
             )
-        # 2 回とも上流の condition_embedder をそのまま呼ぶ（text の射影は 2 回走るが同じ値 —
-        # 使うのは 1 回目の戻り）。
+        # Both runs call upstream's condition_embedder as is (the text projection runs twice with
+        # the same value — the first run's return is used).
         temb_g, proj_g, projected, image = self.embedder(
             self.generation, encoder_hidden_states, encoder_hidden_states_image
         )
@@ -890,14 +967,16 @@ def reference_dit(
     encoder_hidden_states: torch.Tensor,
     condition: TimestepCondition | None = None,
 ) -> torch.Tensor:
-    """**上流の素の** `WanTransformer3DModel.forward` の出力 `[1,C,F,H,W]`（参照値）。
+    """The output `[1,C,F,H,W]` of **the plain upstream** `WanTransformer3DModel.forward` (the
+    reference value).
 
-    attention は {@link flash_attention_only} の下で回す（f32 / f64 の参照とも）。
+    The attention runs under {@link flash_attention_only} (for both the f32 and the f64 reference).
 
-    `condition` を渡すと、上流の forward に 2 次元の timestep `[1,S]` を渡し、`condition_embedder`
-    を呼び出しの間だけ {@link _TokenwiseTimeEmbedder} に差し替える（ADR 0121 決定 4 の I2V の
-    参照ラッパ — 時刻の MLP は値ごとに M = 1）。渡さないと上流の forward そのもの（1 次元の
-    timestep なら 2.1 と同じ経路・2 次元なら diffusers の M = S の経路）。
+    With `condition`, a 2-D timestep `[1,S]` is passed to the upstream forward, and
+    `condition_embedder` is replaced by {@link _TokenwiseTimeEmbedder} for the duration of the call
+    (the I2V reference wrapper of ADR 0121 decision 4 — the time MLP with M = 1 per value). Without
+    it, the upstream forward itself (with a 1-D timestep the same path as 2.1; with a 2-D one
+    diffusers' path with M = S).
     """
     with flash_attention_only():
         if condition is None:
@@ -909,8 +988,8 @@ def reference_dit(
             )[0]
         if timestep.shape != (1,) or condition.timestep.shape != (1,):
             raise ValueError(
-                f"参照ラッパの timestep は生成側・条件側とも [1]（{list(timestep.shape)} /"
-                f" {list(condition.timestep.shape)}）"
+                "the reference wrapper's timestep is [1] on both the generated and the conditioned"
+                f" side ({list(timestep.shape)} / {list(condition.timestep.shape)})"
             )
         original = model.condition_embedder
         model.condition_embedder = _TokenwiseTimeEmbedder(original, timestep, condition)
@@ -932,10 +1011,11 @@ def reference_dit_layers(
     encoder_hidden_states: torch.Tensor,
     condition: TimestepCondition | None = None,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-    """{@link reference_dit} の出力と、上流の各ブロックの出力 `[1,S,dim]`（forward hook で採る）。
+    """The output of {@link reference_dit} and the output `[1,S,dim]` of each upstream block (taken
+    with a forward hook).
 
-    hook は呼び出しの間だけ張る（S 形のラッパも同じブロックを回すので、張りっぱなしにすると向こうの
-    呼び出しまで拾う）。
+    The hooks are attached only for the duration of the call (the S-shaped wrapper runs the same
+    blocks, so hooks left attached would also catch its calls).
     """
     collected: list[torch.Tensor] = []
 
@@ -950,24 +1030,25 @@ def reference_dit_layers(
             handle.remove()
     if len(collected) != len(model.blocks):
         raise AssertionError(
-            f"ブロックの出力を {len(collected)} 本拾った（{len(model.blocks)} 本のはず）"
+            f"collected {len(collected)} block outputs (there should be {len(model.blocks)})"
         )
     return output, collected
 
 
 def _timestep_sinusoid_shapes(freq_dim: int) -> frozenset[tuple[int, ...]]:
-    """上流の時刻の sinusoid（`Timesteps` → `get_timestep_embedding`・batch 1）が f32 で作る値の形。
+    """The shapes of the values that upstream's time sinusoid (`Timesteps` →
+    `get_timestep_embedding`, batch 1) builds in f32.
 
-    `timesteps[:, None].float()` の `[1, 1]`・周波数の `arange` / 除算 / `exp` の `[half]`・
-    角度と sin / cos と flip の切り出しの `[1, half]`・連結の `[1, freq_dim]`
-    （`half = freq_dim // 2`）。
+    `[1, 1]` of `timesteps[:, None].float()`; `[half]` of the frequency `arange` / division / `exp`;
+    `[1, half]` of the angles, sin / cos and the flip slices; `[1, freq_dim]` of the concatenation
+    (`half = freq_dim // 2`).
     """
     half = freq_dim // 2
     return frozenset({(1, 1), (half,), (1, half), (1, freq_dim)})
 
 
 class _NarrowFloatWatch(TorchDispatchMode):
-    """f64 の forward の中で、f64 でない浮動小数の値（形が `allowed` に無いもの）を記録する。"""
+    """Record non-f64 floating-point values (with shapes not in `allowed`) inside an f64 forward."""
 
     def __init__(self, allowed: frozenset[tuple[int, ...]]) -> None:
         super().__init__()
@@ -995,12 +1076,13 @@ class _NarrowFloatWatch(TorchDispatchMode):
 
 @contextmanager
 def _float_keeps_float64() -> Iterator[None]:
-    """この間だけ `Tensor.float()` を f64 のテンソルでは素通しにする（f64 以外は元のまま）。
+    """Within this block, make `Tensor.float()` a pass-through for f64 tensors (others unchanged).
 
-    WHY: 上流は FP32LayerNorm と block の変調・残差を `.float()` で f32 へ寄せる（bf16 / f16 で
-    回すときに norm を f32 で計算するための寄せ）。f32 のモデルではどれも恒等で計算の意味に含まれ
-    ないが、f64 のモデルでそのまま通すと norm と残差だけが f32 に落ち、「活性を f64 で回した参照」に
-    ならない。
+    WHY: upstream moves FP32LayerNorm and the blocks' modulation and residuals to f32 with
+    `.float()` (so that norms are computed in f32 when running in bf16 / f16). In an f32 model all
+    of these are identities and not part of the computation's meaning, but in an f64 model, passed
+    through as is, only the norms and residuals would drop to f32 and it would not be "a reference
+    with activations in f64".
     """
     original = vars(torch.Tensor).get("float")
     narrow = torch.Tensor.float
@@ -1022,30 +1104,38 @@ def _float_keeps_float64() -> Iterator[None]:
 
 @contextmanager
 def float64_forward(model: nn.Module) -> Iterator[None]:
-    """この間の上流の forward を**活性も f64** で回す（ADR 0118 段 3 の誤差の帰属・実寸の参照）。
+    """Run the upstream forward within this block **with activations in f64 too** (the attribution
+    of error of ADR 0118 step 3, the full-size reference).
 
-    `model` は呼び手が `double()` しておく（重みは f16 へ丸めた値をそのまま f64 に広げる — GPU と
-    同じ重み）。入力（f32 の潜在・テキスト文脈）も呼び手が値を変えずに f64 へ広げる。上流の素の
-    forward を回すのは f32 の参照と同じで、違いは次の 2 点だけ:
+    The caller has already called `double()` on `model` (the weights are the f16-rounded values
+    widened to f64 as they are — the same weights as the GPU). The caller also widens the inputs
+    (the f32 latent and text context) to f64 without changing their values. It runs the plain
+    upstream forward like the f32 reference, with only these 2 differences:
 
-    - 上流の `.float()` の寄せを f64 では素通しにする（{@link _float_keeps_float64}）。
-    - f64 でない浮動小数の値が作られたら抜けるときに止める。例外は時刻の sinusoid（上流の
-      `Timesteps` が f32 で組む `[1,freq_dim]` — GPU にも同じ f32 の値が `timesteps_proj` として
-      入り、`time_embedder` の入口で f64 へ広がる）の途中の値だけで、その形
-      （{@link _timestep_sinusoid_shapes}）として許す。要素数の大小で許すと、同じ大きさ以下の別の
-      f32 の値（head ごとのスケールなど）が素通りする。参照は batch 1 なので、形も batch 1 で縛る。
+    - upstream's `.float()` moves are a pass-through for f64 ({@link _float_keeps_float64}).
+    - if a non-f64 floating-point value is created, it stops on exit. The only exception is the
+      intermediate values of the time sinusoid (the `[1,freq_dim]` that upstream `Timesteps`
+      builds in f32 — the GPU gets the same f32 values as `timesteps_proj`, and they widen to f64
+      at the entry of `time_embedder`), allowed by their shapes
+      ({@link _timestep_sinusoid_shapes}). Allowing by element count would let other f32 values of
+      the same size or smaller (per-head scales, for example) slip through. The reference is batch
+      1, so the shapes are pinned to batch 1 too.
     """
     narrow = sorted(
         {str(tensor.dtype) for tensor in (*model.parameters(), *model.buffers())}
         - {str(torch.float64)}
     )
     if narrow:
-        raise AssertionError(f"f64 の参照なのにモデルに {narrow} の重み / バッファが残っている")
+        raise AssertionError(
+            f"an f64 reference, but the model still has {narrow} weights / buffers"
+        )
     watch = _NarrowFloatWatch(_timestep_sinusoid_shapes(int(model.config.freq_dim)))
     with _float_keeps_float64(), watch:
         yield
     if watch.found:
-        raise AssertionError(f"f64 の参照の中で f64 でない値が作られた: {watch.found[:5]}")
+        raise AssertionError(
+            f"non-f64 values were created inside the f64 reference: {watch.found[:5]}"
+        )
 
 
 def reference_dit_f64(
@@ -1054,7 +1144,7 @@ def reference_dit_f64(
     timestep: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    """{@link reference_dit} を {@link float64_forward} の下で回した出力 `[1,C,F,H,W]`（f64 のまま —
-    丸めるかどうかは格納する側が決める）。"""
+    """The output `[1,C,F,H,W]` of {@link reference_dit} run under {@link float64_forward} (kept in
+    f64 — whether to round is up to the side that stores it)."""
     with float64_forward(model):
         return reference_dit(model, latents.double(), timestep, encoder_hidden_states.double())

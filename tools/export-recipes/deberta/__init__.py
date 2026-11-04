@@ -1,16 +1,17 @@
-"""DeBERTa-v2（日本語文字 BERT / SBV2 の text encoder）の export recipe（ADR 0065 決定 2）。
+"""Export recipe for DeBERTa-v2 (the Japanese character BERT / text encoder of SBV2) (ADR 0065
+decision 2).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: 上流モデル由来のパッチ層
-（{@link deberta.patch}）と export 台本（{@link deberta.export}）。配布 recipe は持たない —
-この系列は SBV2 配布形の `text_encoder` 席として配られるので、配布の表は
-`sbv2.distribution` 側が持つ（あちらは系列の出力を **path で**拾うだけで、この package を
-import しない）。
+Only what **cannot live in the general-purpose exporter core** goes here: the patch layer derived
+from the upstream model ({@link deberta.patch}) and the export script ({@link deberta.export}). It
+has no distribution recipe — this series ships as the `text_encoder` component of the SBV2
+distribution, so the distribution table lives in `sbv2.distribution` (that side only picks up this
+series' output **by path** and does not import this package).
 
-依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
-が機械で守る）。
+The dependency direction is **recipe → core only** (enforced mechanically by
+`tools/exporter/tests/test_architecture_boundary.py`).
 
-MUST: **再輸出しない**（`from deberta import X` で transformers が芋づるに入る形にしない）。
-呼び出し側はサブモジュールを名指しで import すること。
+MUST: **do not re-export** (do not let `from deberta import X` drag transformers in with it).
+Callers import submodules by name.
 
-台本の起動は export-recipes ルートから（例: `uv run python -m deberta.export --dtype i8`）。
+Run the scripts from the export-recipes root (e.g. `uv run python -m deberta.export --dtype i8`).
 """

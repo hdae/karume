@@ -1,6 +1,6 @@
-"""母音検出 recipe のテスト。
+"""Tests of the vowel-detection recipe.
 
-パッケージにしてあるのは、family が増えたときに `<family>/tests/test_export.py` の
-**basename が衝突しない**ようにするため（pytest の既定 import mode は `__init__.py` の
-無いディレクトリのテストを basename だけのモジュール名で読む）。
+This is a package so that the **basenames do not collide** as families are added
+(`<family>/tests/test_export.py`): pytest's default import mode loads a test in a directory without
+`__init__.py` under a module name made of its basename alone.
 """

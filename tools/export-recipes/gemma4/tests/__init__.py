@@ -1,6 +1,6 @@
-"""Gemma 4 recipe のテスト。
+"""Tests of the Gemma 4 recipe.
 
-パッケージにしてあるのは、family が増えたときに `<family>/tests/test_export.py` の
-**basename が衝突しない**ようにするため（pytest の既定 import mode は `__init__.py` の
-無いディレクトリのテストを basename だけのモジュール名で読む）。
+This is a package so that, as families are added, the **basenames** of
+`<family>/tests/test_export.py` **do not collide** (pytest's default import mode reads a test in a
+directory without `__init__.py` under a module name made of its basename alone).
 """

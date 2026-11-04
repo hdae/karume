@@ -1,27 +1,36 @@
-"""Gemma 4 の RoPE cos / sin 行を**式から**組む（TS 正本の Python 鏡像）と、その宣言の導出。
+"""Builds Gemma 4's RoPE cos / sin rows **from the formula** (the Python mirror of the TS source of
+truth), and derives their declaration.
 
-RoPE 表はもうグラフに焼かない（初期化子ではなく**派生入力** — `gemma4.export_decode` の
-module docstring）。表を作るのはホスト（TS 側 `packages/models/src/gemma/rope.ts`）で、
-配布形が宣言するのは表そのものではなく**式のパラメータ**（層種別ごとの theta / headDim /
-rotaryDim）と位置の上限だけになる。ここが持つのは 2 つ:
+The RoPE tables are no longer baked into the graph (they are **derived inputs**, not initializers —
+the module docstring of `gemma4.export_decode`). The host builds the tables (on the TS side,
+`packages/models/src/gemma/rope.ts`), and the distribution declares not the tables themselves but
+only **the parameters of the formula** (theta / headDim / rotaryDim per layer type) and the
+position limit. This module owns two things:
 
-- {@link rope_specs} — 上流 config から宣言（`pipelineConfig.rope`）を**導出**する。写経すると
-  チェックポイントを差し替えた日に宣言だけが古びる。
-- {@link rope_rows} — その宣言から cos / sin 行を組む。TS 側と**同じ式**で、計算は f64・
-  格納だけ f32。台本が golden / io / 例示入力に使う表はこの経路で組む（配布形が読む表と
-  同じ式で採る — 別の表で採った期待列を検収門が読む形にしない）。
+- {@link rope_specs} — **derives** the declaration (`pipelineConfig.rope`) from the upstream
+  config. Copying the values by hand would leave only the declaration stale on the day the
+  checkpoint is replaced.
+- {@link rope_rows} — builds cos / sin rows from that declaration. **The same formula** as the TS
+  side, computed in f64 and only stored as f32. The tables the scripts use for goldens / io /
+  example inputs are built by this path (taken with the same formula as the tables the
+  distribution reads — the acceptance gate never reads an expected sequence taken with another
+  table).
 
-MUST: 上流とビット同一にはならない。上流の rotary は inv_freq も角度も cos / sin も**全部
-f32** で通す（modeling_gemma4.py:1170-1179）ので、f64 で通してから丸めた値とは最終 1 ULP から
-先が食い違う（位置が大きいほど角度の f32 表現誤差が効き、実測で位置 0..131,071 の全掃引の
-最大 9.44e-3〈最大点 ≈129,293〉・位置 131,071 ちょうどは 4.77e-3・許容差の帯に対する最悪比 0.756）。
-突合は位置比例の許容差で見る（{@link gemma4.tests.test_rope}）— ここを「ビット一致」に
-締めると、正しい実装が落ちる門になる。
+MUST: this is not bit-identical to upstream. Upstream's rotary runs inv_freq, the angles and cos /
+sin **all in f32** (modeling_gemma4.py:1170-1179), so it differs from values computed in f64 and
+then rounded from the last ULP on (the larger the position, the more the f32 representation error
+of the angle matters; measured over a full sweep of positions 0..131,071 the maximum is 9.44e-3
+(at ≈129,293), exactly at position 131,071 it is 4.77e-3, and the worst ratio to the tolerance
+band is 0.756). The comparison uses a tolerance proportional to the position
+({@link gemma4.tests.test_rope}) — tightening it to "bit-exact" would make a gate that fails the
+correct implementation.
 
-MUST: torch を import しない。`gemma4.distribution`（配布 recipe）がこのモジュールを読むので、
-重い依存を持ち込むと配布側の import と、実重みを要さない CI job の collection がそのぶん重くなる。
-式は numpy だけで書けるので払う理由が無い。NOTE: これを見る門は無い（torch は core `karume` の
-必須依存で常に入るため、`tests/test_optional_group_imports.py` の対象外）。
+MUST: do not import torch. `gemma4.distribution` (the distribution recipe) reads this module, so a
+heavy dependency would make the distribution side's import, and the collection of the CI jobs that
+need no real weights, heavier by that much. The formula can be written with numpy alone, so there
+is no reason to pay for it. NOTE: no gate checks this (torch is a required dependency of the core
+`karume` and is always installed, so it is outside the scope of
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -32,39 +41,43 @@ from typing import Any
 
 import numpy as np
 
-#: 層種別の綴り（上流 `config.layer_types` の語彙）。`gemma4.export` はここを再輸出する
-#: （同じ文字列を 2 箇所で綴らない）。
+#: Spellings of the layer types (the vocabulary of upstream `config.layer_types`). `gemma4.export`
+#: re-exports them (the same string is not spelled in two places).
 FULL_ATTENTION = "full_attention"
 SLIDING_ATTENTION = "sliding_attention"
 
-#: 受理する rope_type。`default` は全周波数、`proportional` は先頭 `rotaryDim/2` 本だけが
-#: 非零で残りが零周波数（= cos 1 / sin 0 の列）。それ以外は式が別物なので fail loudly。
+#: Accepted rope_types. `default` uses every frequency; with `proportional` only the first
+#: `rotaryDim/2` are non-zero and the rest are zero frequencies (= columns of cos 1 / sin 0).
+#: Anything else is a different formula, so it fails loudly.
 DEFAULT_ROPE_TYPE = "default"
 PROPORTIONAL_ROPE_TYPE = "proportional"
 ROPE_TYPES = (DEFAULT_ROPE_TYPE, PROPORTIONAL_ROPE_TYPE)
 
-#: 退役した「表をグラフへ焼く」形が残す initializer 名の断片（`…rotary_emb.<層種>_cos_table`）。
-#: 焼く側（{@link gemma4.export_decode.assert_rope_inputs}）と配る側
-#: （{@link gemma4.distribution.assert_gemma4_graph}）が**同じ綴り**で残骸を落とすための正本。
+#: Fragment of the initializer names left by the retired "bake the tables into the graph" form
+#: (`…rotary_emb.<layer type>_cos_table`). The source of truth that lets the baking side
+#: ({@link gemma4.export_decode.assert_rope_inputs}) and the distributing side
+#: ({@link gemma4.distribution.assert_gemma4_graph}) reject the residue with **the same spelling**.
 BAKED_TABLE_INFIX = "rotary_emb."
 
-#: `pipelineConfig.rope` の欄名（TS 側 `gemma.parsePipelineConfig` の綴り）。
+#: Field names of `pipelineConfig.rope` (spelled as `gemma.parsePipelineConfig` on the TS side).
 THETA_FIELD = "theta"
 HEAD_DIM_FIELD = "headDim"
 ROTARY_DIM_FIELD = "rotaryDim"
 
 
 class RopeSpecError(ValueError):
-    """RoPE の宣言を上流 config から導けない（未知の rope_type・写せない係数）。"""
+    """The RoPE declaration cannot be derived from the upstream config (an unknown rope_type, a
+    coefficient that cannot be mirrored)."""
 
 
 @dataclass(frozen=True)
 class RopeLayerSpec:
-    """層種別 1 つぶんの RoPE の式（`pipelineConfig.rope.<層種別>` の中身）。
+    """The RoPE formula of one layer type (the contents of `pipelineConfig.rope.<layer type>`).
 
-    `head_dim` は 1 行の幅（cos / sin の最終次元）、`rotary_dim` は**実際に回る**幅。
-    `rotary_dim < head_dim` の残りは零周波数で、cos = 1 / sin = 0 の定数列として行に入る
-    （full 層の `proportional` — 上流 `_compute_proportional_rope_parameters` の nope 部分）。
+    `head_dim` is the width of one row (the last dimension of cos / sin), `rotary_dim` the width
+    that **actually rotates**. The rest beyond `rotary_dim < head_dim` is zero frequency and enters
+    the row as constant columns of cos = 1 / sin = 0 (the `proportional` of the full layers — the
+    nope part of upstream `_compute_proportional_rope_parameters`).
     """
 
     theta: float
@@ -73,15 +86,15 @@ class RopeLayerSpec:
 
     def __post_init__(self) -> None:
         if self.theta <= 1.0:
-            raise RopeSpecError(f"theta {self.theta} が 1 より大きくない")
+            raise RopeSpecError(f"theta {self.theta} is not greater than 1")
         for name, value in (("headDim", self.head_dim), ("rotaryDim", self.rotary_dim)):
             if value < 2 or value % 2:
-                raise RopeSpecError(f"{name} {value} が 2 以上の偶数でない")
+                raise RopeSpecError(f"{name} {value} is not an even number of at least 2")
         if self.rotary_dim > self.head_dim:
-            raise RopeSpecError(f"rotaryDim {self.rotary_dim} が headDim {self.head_dim} を超える")
+            raise RopeSpecError(f"rotaryDim {self.rotary_dim} exceeds headDim {self.head_dim}")
 
     def declaration(self) -> dict[str, Any]:
-        """`pipelineConfig.rope` に載る形（欄名は TS 側の綴り）。"""
+        """The form placed in `pipelineConfig.rope` (field names in the TS side's spelling)."""
         return {
             THETA_FIELD: float(self.theta),
             HEAD_DIM_FIELD: int(self.head_dim),
@@ -92,18 +105,19 @@ class RopeLayerSpec:
 def _rope_parameters(config: Any, layer_type: str) -> Mapping[str, Any]:
     parameters = getattr(config, "rope_parameters", None)
     if not isinstance(parameters, Mapping):
-        raise RopeSpecError(f"config.rope_parameters がオブジェクトでない（{parameters!r}）")
+        raise RopeSpecError(f"config.rope_parameters is not an object ({parameters!r})")
     entry = parameters.get(layer_type)
     if not isinstance(entry, Mapping):
-        raise RopeSpecError(f"config.rope_parameters['{layer_type}'] が無い（{entry!r}）")
+        raise RopeSpecError(f"config.rope_parameters['{layer_type}'] is missing ({entry!r})")
     return entry
 
 
 def _head_dim(config: Any, layer_type: str, rope_type: str) -> int:
-    """上流と**同じ引き先**で head_dim を決める（`head_dim_key` の分岐 — 1106-1120 行）。
+    """Decide head_dim from **the same source as upstream** (the `head_dim_key` branch — lines
+    1106-1120).
 
-    full 層かつ `proportional` のときだけ `global_head_dim` を読む。ここを揃えないと、
-    full 層の表が 256 幅で組まれて attention の 512 幅と噛み合わない。
+    Only a full layer with `proportional` reads `global_head_dim`. Without matching this, the full
+    layers' table would be built 256 wide and would not fit attention's 512 width.
     """
     key = (
         "global_head_dim"
@@ -117,22 +131,24 @@ def _head_dim(config: Any, layer_type: str, rope_type: str) -> int:
 
 
 def layer_spec(config: Any, layer_type: str) -> RopeLayerSpec:
-    """層種別 1 つの宣言を上流 config から導く（値は 1 つも写経しない）。
+    """Derive the declaration of one layer type from the upstream config (not a single value is
+    copied by hand).
 
-    MUST: 受理外の rope_type / `factor` / `attention_factor` は fail loudly。式が別物なのに
-    theta と幅だけを写すと、**形も型も合う別の角度**でホストが表を組む（沈黙誤値）。
+    MUST: a rope_type / `factor` / `attention_factor` outside what is accepted fails loudly.
+    Copying only theta and the widths when the formula is different would make the host build the
+    table with **different angles that still match in shape and type** (a silent wrong value).
     """
     parameters = _rope_parameters(config, layer_type)
     rope_type = parameters.get("rope_type", DEFAULT_ROPE_TYPE)
     if rope_type not in ROPE_TYPES:
         raise RopeSpecError(
-            f"層種別 '{layer_type}' の rope_type が '{rope_type}' — 写せるのは {list(ROPE_TYPES)}"
+            f"layer type '{layer_type}': rope_type '{rope_type}' — mirrorable: {list(ROPE_TYPES)}"
         )
     for name in ("factor", "attention_factor"):
         value = parameters.get(name, 1.0)
         if float(value) != 1.0:
             raise RopeSpecError(
-                f"層種別 '{layer_type}' の {name} が {value} — 1 以外は式が別物になる"
+                f"layer type '{layer_type}' has {name} {value} — not 1 means another formula"
             )
     head_dim = _head_dim(config, layer_type, rope_type)
     if rope_type == PROPORTIONAL_ROPE_TYPE:
@@ -142,15 +158,18 @@ def layer_spec(config: Any, layer_type: str) -> RopeLayerSpec:
         rotary_dim = head_dim
     theta = parameters.get("rope_theta")
     if not isinstance(theta, int | float) or isinstance(theta, bool):
-        raise RopeSpecError(f"層種別 '{layer_type}' の rope_theta が数でない（{theta!r}）")
+        raise RopeSpecError(
+            f"layer type '{layer_type}' has a rope_theta that is not a number ({theta!r})"
+        )
     return RopeLayerSpec(theta=float(theta), head_dim=head_dim, rotary_dim=rotary_dim)
 
 
 def rope_specs(config: Any) -> dict[str, RopeLayerSpec]:
-    """`config.layer_types` に現れる層種別（**出現順**）ぶんの宣言。"""
+    """The declarations of the layer types that appear in `config.layer_types` (**in order of
+    appearance**)."""
     layer_types = getattr(config, "layer_types", None)
     if not isinstance(layer_types, Sequence) or isinstance(layer_types, str) or not layer_types:
-        raise RopeSpecError(f"config.layer_types が非空の配列でない（{layer_types!r}）")
+        raise RopeSpecError(f"config.layer_types is not a non-empty array ({layer_types!r})")
     return {
         layer_type: layer_spec(config, layer_type)
         for layer_type in dict.fromkeys(str(name) for name in layer_types)
@@ -158,11 +177,11 @@ def rope_specs(config: Any) -> dict[str, RopeLayerSpec]:
 
 
 def inverse_frequencies(spec: RopeLayerSpec) -> np.ndarray:
-    """周波数種 `[headDim/2]`（f64）。先頭 `rotaryDim/2` 本だけが非零。
+    """Frequency seeds `[headDim/2]` (f64). Only the first `rotaryDim/2` are non-zero.
 
-    `invFreq[i] = theta ** (-(2i) / headDim)`。上流は `1.0 / theta ** ((2i)/headDim)` と
-    書くが、割り算の向きは f64 では最終 1 ULP でしか差が出ない（そもそもビット一致は
-    成立しない — module docstring）ので、TS 正本と**同じ綴り**に揃える。
+    `invFreq[i] = theta ** (-(2i) / headDim)`. Upstream writes `1.0 / theta ** ((2i)/headDim)`,
+    but in f64 the direction of the division differs only in the last ULP (and bit-exactness does
+    not hold anyway — module docstring), so this matches **the spelling** of the TS source of truth.
     """
     half = spec.head_dim // 2
     frequencies = np.zeros(half, dtype=np.float64)
@@ -173,14 +192,16 @@ def inverse_frequencies(spec: RopeLayerSpec) -> np.ndarray:
 
 
 def rope_rows(spec: RopeLayerSpec, positions: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
-    """位置列 → `(cos, sin)` の行（`[len(positions), headDim]` の f32）。
+    """Positions → `(cos, sin)` rows (f32 `[len(positions), headDim]`).
 
-    角度は `pos × invFreq` で、行は `cat(freqs, freqs)`（前半と後半が同一 — 上流
-    `emb = torch.cat((freqs, freqs), dim=-1)`）。`attention_scaling` は受理する 2 つの
-    rope_type ではどちらも 1 なので掛けない（1 以外は {@link layer_spec} が落とす）。
+    The angle is `pos × invFreq`, and a row is `cat(freqs, freqs)` (the first and second halves are
+    identical — upstream `emb = torch.cat((freqs, freqs), dim=-1)`). `attention_scaling` is 1 for
+    both accepted rope_types, so it is not applied (any value but 1 is rejected by
+    {@link layer_spec}).
 
-    MUST: 計算は f64・**丸めは最後の 1 回だけ**。角度を f32 で持つと位置が大きいほど誤差が
-    効く（上流がそうなっている側で、こちらは合わせに行かない — module docstring）。
+    MUST: compute in f64 and **round only once, at the end**. Holding the angles in f32 makes the
+    error grow with the position (upstream is the side that does that; this one does not follow it
+    — module docstring).
     """
     angles = np.asarray(positions, dtype=np.float64).reshape(-1, 1) * inverse_frequencies(spec)
     doubled = np.concatenate((angles, angles), axis=1)

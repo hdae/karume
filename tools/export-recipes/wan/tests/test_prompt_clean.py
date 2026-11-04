@@ -1,7 +1,9 @@
-"""`wan/prompt_clean.py` の約束事 — 前処理の表の焼き方・BADNESS_RE の翻訳・鏡像と上流の一致。
+"""The contract of `wan/prompt_clean.py` — how the preprocessing tables are baked, the translation
+of BADNESS_RE, and the agreement between the mirror and upstream.
 
-ftfy / regex / diffusers が無い環境（`wan` グループを同期していない）では SKIP。全コードポイントの
-掃引と 20 万本の乱択は `wan.umt5_tokenizer` の生成が回す（ここは同じ規則を小さく叩く）。
+SKIPs in an environment without ftfy / regex / diffusers (the `wan` group not synced). The sweep of
+every code point and the 200,000 random samples are run by the generation in `wan.umt5_tokenizer`
+(this file exercises the same rules on a small scale).
 """
 
 from __future__ import annotations
@@ -36,20 +38,22 @@ def truth():
     return pc.upstream_prompt_clean()
 
 
-#: BMP の全コードポイント（サロゲートを除く）— 単体テストの掃引の幅。
+#: Every BMP code point (surrogates excluded) — the sweep range of the unit tests.
 BMP = [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
 
 
 class TestBadnessTranslation:
     def test_the_literal_alphabet_is_the_449_characters_of_the_recon(self, tables):
-        """調査 §3.3 の「字面の非 ASCII 449 文字」（C1 の 32 文字を含む）。"""
+        """The "449 literal non-ASCII characters" of survey §3.3 (including the 32 C1
+        characters)."""
         literals = pc.badness_literals()
 
         assert len(literals) == 449
         assert set(range(0x80, 0xA0)) <= set(literals)
 
     def test_the_python_emission_matches_badness_re_on_every_probe(self, tables):
-        """中間表現への畳み込みの同値（JS 版はエスケープの綴りだけが違う）。"""
+        """Equivalence of the folding into the intermediate representation (the JS version differs
+        only in how the escapes are spelled)."""
         from ftfy.badness import BADNESS_RE
 
         emitted = re.compile(pc.emit_python(tables.badness))
@@ -67,10 +71,11 @@ class TestBadnessTranslation:
         bits = pc.badness_bits(BADNESS_RE, texts)
 
         assert pc.badness_bits(emitted, texts) == bits
-        assert bits.count("1") > 100, "池が判定を叩いていない"
+        assert bits.count("1") > 100, "the pool does not exercise the matcher"
 
     def test_the_js_source_is_ascii_made_of_escapes_classes_and_alternation(self, tables):
-        """JS 側は `\\u{…}` の字面と範囲だけを見る（`\\w` や `.` をエンジンに解釈させない）。"""
+        """The JS side sees only `\\u{…}` literals and ranges (`\\w` and `.` are never left to the
+        engine to interpret)."""
         source = tables.to_json()["badness"]
         skeleton = re.sub(r"\\u\{[0-9A-F]+\}", "", source)
 
@@ -78,7 +83,7 @@ class TestBadnessTranslation:
         assert set(skeleton) <= set("[]-|?^")
 
     def test_dot_becomes_everything_but_newline(self, tables):
-        """JS の `.` は `\\r` と U+2028 / 2029 も除くので、Python の `.` を集合で書き下す。"""
+        """JS `.` also excludes `\\r` and U+2028 / 2029, so Python's `.` is written out as a set."""
         dots = [
             term
             for branch in tables.badness
@@ -129,7 +134,8 @@ class TestTables:
         )
 
     def test_table_outputs_never_make_what_the_entrance_rejects(self, tables):
-        """入口で 1 度見れば各周でも no-op、の根拠（表の出力に C1・未割り当てが無い）。"""
+        """The basis for "checked once at the entrance, a no-op on every round": the table outputs
+        contain no C1 and no unassigned code points."""
         pc.check_table_ranges(tables)
         broken = dataclasses.replace(tables, width={**tables.width, 0xFF21: "\x85"})
 
@@ -148,13 +154,15 @@ class TestTables:
         assert set(pc.expand(tables.collapse_space)) < set(pc.expand(tables.strip_space))
 
     def test_the_upstream_shape_is_pinned(self, tables):
-        """表に落とせない正規表現の形・既定の設定を字面で縛る（版を上げて変われば焼かない）。"""
+        """Binds the regex shapes that cannot become tables and the default settings literally (if
+        a version upgrade changes them, nothing is baked)."""
         pc.check_upstream_shape()
 
 
 class TestEntityGates:
     def test_the_charref_probe_hits_exactly_where_html_unescape_matches(self, tables):
-        """TS が持つ存在判定の形と `html._charref` の一致（全 BMP × 4 文脈）。"""
+        """The presence check the TS side has agrees with `html._charref` (all of the BMP × 4
+        contexts)."""
         probe = re.compile(pc.HTML_CHARREF_PROBE)
         charref = html._charref  # type: ignore[attr-defined]
         for prefix in ("&", "&#", "&#x", "&#X"):
@@ -164,9 +172,10 @@ class TestEntityGates:
                 assert bool(probe.search(text)) == bool(charref.search(text)), (prefix, hex(cp))
 
     def test_text_that_passes_both_gates_is_left_alone_by_both_unescapes(self, tables):
-        """門を通った入力では ftfy の unescape_html も html.unescape も何もしない。
+        """For an input that passed the checks, neither ftfy's unescape_html nor html.unescape does
+        anything.
 
-        拒んだ処理が no-op になる、の根拠。
+        The basis for the rejected processing being a no-op.
         """
         from ftfy.fixes import unescape_html
 
@@ -219,7 +228,8 @@ class TestMirror:
     def test_the_segment_boundary_at_one_million_code_points_blocks_composition(
         self, compiled, truth
     ):
-        """ftfy の区切り（1,000,000 コードポイント）をまたぐ結合文字は合成されない（実測）。"""
+        """A combining character that straddles ftfy's boundary (1,000,000 code points) is not
+        composed (measured)."""
         split = " " * 999_999 + "e\u0301"
         joined = " " * 999_998 + "e\u0301"
 
@@ -250,7 +260,7 @@ class TestMirror:
 
 class TestFuzzMachinery:
     def test_xorshift32_follows_the_13_17_5_recurrence(self):
-        """seed 1 の先頭は手で追える（1 → 8193 → 8193 → 8193 ^ 262176 = 270369）。"""
+        """The start for seed 1 can be traced by hand (1 → 8193 → 8193 → 8193 ^ 262176 = 270369)."""
         rng = pc.XorShift32(1)
 
         assert rng.next() == 270369

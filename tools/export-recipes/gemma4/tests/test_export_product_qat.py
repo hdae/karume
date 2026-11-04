@@ -340,7 +340,7 @@ class TestGroupedPleAssets:
         write_component(container, ir_container(mark="swapped", assets=built.assets))
         index = json.loads(bytes(built.assets[PLE_INDEX_ASSET].payload))
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="not bit-identical"):
             product.assert_ple_assets(container, index, [4], reference[:, 4:5])
 
     def test_the_groups_read_as_one_scale_per_row_fail(self, grouped) -> None:
@@ -445,7 +445,7 @@ class TestRegularPathUnchanged:
         _residue_free_checkpoint(tmp_path)
         monkeypatch.setattr(gx, "load_text_config", lambda _: _full_table_config())
 
-        with pytest.raises(ValueError, match="残骸"):
+        with pytest.raises(ValueError, match="k/v residue"):
             gx.load_model_and_tables(tmp_path)
         model, tables = gx.load_model_and_tables(tmp_path, kv_residues=False)
 

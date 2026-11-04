@@ -9,11 +9,11 @@ of BPE merges (E2B 267 and the vocabulary entry 249788 renamed to `<glitch_prune
     uv run python -m gemma4.tokenizer --model e4b
     uv run python -m gemma4.tokenizer --model 12b
 
-出力は 2 系統（**1 回の実行で必ず両方** — {@link _shared.gemma_tokenizer.emit}）:
+Two outputs (**always both in one run** — {@link _shared.gemma_tokenizer.emit}):
 
-  ① 実行時資産 `outputs/series/gemma4-e2b-tokenizer/tokenizer.json`（`.gitignore` 配下）
-  ② パリティ用フィクスチャ
-     `packages/models/tests/fixtures/gemma-text/gemma4-parity.json`（**git 管理**）
+  ① the runtime asset `outputs/series/gemma4-e2b-tokenizer/tokenizer.json` (under `.gitignore`)
+  ② the parity fixture
+     `packages/models/tests/fixtures/gemma-text/gemma4-parity.json` (**tracked in git**)
 
 E4B's and 12B's series and fixtures carry the model's name (`gemma4-<model>-tokenizer` +
 `gemma4-<model>-parity.json`); E2B's fixture keeps its name `gemma4-parity.json`. 12B's
@@ -23,13 +23,15 @@ another model's split a text differently: E4B's run into merges E4B has and E2B'
 12B's into merges E2B and E4B have and 12B's fix dropped, and E2B's into the vocabulary entry its
 fix renamed.
 
-畳み方・受理集合・部分集合の切り方は `_shared/gemma_tokenizer.py` の docstring が正本。
-ここが持つのは gemma4 固有の綴りだけ: 入力の置き場・出力先・**この checkpoint の chat 綴り**
-を踏む符号化ケース。chat の綴りは Gemma 3 系と違い `<|turn>` / `<turn|>` / `<|channel>` /
-`<|think|>` で（ADR 0084 Context 3）、`<start_of_turn>` は**この語彙に無い**。
+How the asset is folded, the accepted set and how the subset is cut are defined by the docstring
+of `_shared/gemma_tokenizer.py`. This file holds only what is specific to gemma4: where the inputs
+live, where the outputs go, and encode cases that exercise **this checkpoint's chat markup**. Unlike
+the Gemma 3 family, the chat markup is `<|turn>` / `<turn|>` / `<|channel>` / `<|think|>` (ADR 0084
+Context 3), and `<start_of_turn>` is **not in this vocabulary**.
 
-MUST: chat template そのもの（`gemma.chatPrompt`）は本段の射程外（ADR 0084 決定 5 = 段 4）。
-ここで踏むのは「特殊トークンが AddedVocabulary として切り出される」という符号化側の性質だけ。
+MUST: the chat template itself (`gemma.chatPrompt`) is out of scope for this step (ADR 0084
+decision 5 = step 4). What is exercised here is only the encode-side property that special tokens
+are split out as AddedVocabulary.
 """
 
 from __future__ import annotations
@@ -45,18 +47,18 @@ from gemma4 import sources
 #: The models with a tokenizer series of their own (`gemma4.distribution.GEMMA4_TOKENIZER_SERIES`).
 MODELS: tuple[str, ...] = ("e2b", "e4b", "12b")
 
-#: 上流の手置き資産（`inputs/<family>/<name>/` — assets-layout）。
+#: The hand-placed upstream asset (`inputs/<family>/<name>/` — assets-layout).
 TOKENIZER_JSON = sources.tokenizer_dir("e2b") / "tokenizer.json"
 
-#: 実行時資産（系列出力）。
+#: The runtime asset (series output).
 ASSET_PATH = SERIES_ROOT / "gemma4-e2b-tokenizer" / "tokenizer.json"
 
-#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma4_tokenizer_test.ts` が読む）。
+#: The parity fixture (tracked in git — read by `gemma4_tokenizer_test.ts` on the Deno side).
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma-text" / "gemma4-parity.json"
 )
 
-#: gemma4 固有の符号化ケース（共通の電池へ足す分）。
+#: Encode cases specific to gemma4 (added to the shared battery).
 CASES: tuple[EncodeCase, ...] = (
     EncodeCase(
         "chat-turn",

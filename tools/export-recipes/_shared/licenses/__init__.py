@@ -1,15 +1,17 @@
-"""配布リポ直下へ同梱するライセンス原文（`karume.dist.Pipeline.root_files` の `LICENSE.md`）。
+"""License texts bundled at the root of a distribution repository (the `LICENSE.md` of
+`karume.dist.Pipeline.root_files`).
 
-ADR [0092](../../../../docs/decisions/0092-distribution-repos-and-sources.md) 決定 7 —
-Apache-2.0 は「全文 + §4(b) の改変告知」、MIT は「全文 + 著作権行」、CC BY-SA 4.0 は
-「条文 + §3(a) の帰属と改変の表示」を配布リポ直下へ置く。
-原文は family ごとに違わないので、家族の recipe が各自 1 部ずつ持つ形にはしない
-（家族が増えるたびに逐語コピーが増え、どれが原本か言えなくなる）。
+ADR [0092](../../../../docs/decisions/0092-distribution-repos-and-sources.md) decision 7 —
+Apache-2.0 puts "the full text + the §4(b) modification notice", MIT "the full text + the
+copyright lines" and CC BY-SA 4.0 "the legal code + the §3(a) attribution and modification
+notice" at the root of the distribution repository.
+The texts do not differ per family, so each family's recipe does not keep its own copy
+(every new family would add another verbatim copy, and no one could say which is the original).
 
-MUST: **原文は整形しない**。`.txt` の中身をバイトのまま渡す — 整形・改行幅の調整・
-見出しの Markdown 化をした瞬間に「このライセンスのコピー」ではなくなる。MIT だけは
-著作権行が権利者ごとに違うので、その 1 ブロックだけを差し込む
-（{@link mit_license}）。差し込み口以外の本文には触らない。
+MUST: **the texts are never reformatted**. The contents of the `.txt` files are passed byte for
+byte — the moment they are reformatted, rewrapped or given Markdown headings they are no longer
+"a copy of this license". Only MIT's copyright lines differ per rights holder, so that one block
+alone is inserted ({@link mit_license}). The text outside the insertion point is not touched.
 """
 
 from __future__ import annotations
@@ -17,46 +19,53 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-#: 原文の置き場（`Path(__file__)` 基準 — cwd にも系列の置き場にも依存しない）。
+#: Where the texts live (relative to `Path(__file__)` — independent of the cwd and of where
+#: series live).
 LICENSES_DIR = Path(__file__).parent
 
 APACHE_LICENSE_2_0_PATH = LICENSES_DIR / "apache_license_2_0.txt"
 
-#: CC BY-SA 4.0 の条文（creativecommons.org の legalcode の plain-text 版を逐語で）。
-#: §3(a)(1)(C) は「条文そのものか URI」を求める — URI だけでも満たせるが、配布リポが HF の
-#: 外へ写されても条文が一緒に動くよう、Apache と同じく全文を置く。
+#: The CC BY-SA 4.0 legal code (the plain-text version of the creativecommons.org legalcode,
+#: verbatim). §3(a)(1)(C) asks for "the legal code itself or its URI" — the URI alone would do,
+#: but the full text is stored, as with Apache, so it travels with the distribution repository
+#: even when it is copied off HF.
 CC_BY_SA_4_0_PATH = LICENSES_DIR / "cc_by_sa_4_0.txt"
 
-#: MIT の本文テンプレート。著作権行のブロックだけが差し込み口
-#: （{@link MIT_COPYRIGHT_PLACEHOLDER}）で、残りは逐語。
+#: The MIT text template. Only the block of copyright lines is an insertion point
+#: ({@link MIT_COPYRIGHT_PLACEHOLDER}); the rest is verbatim.
 MIT_LICENSE_PATH = LICENSES_DIR / "mit.txt"
 
-#: 差し込み口の綴り。MIT 本文に波括弧は 1 つも現れないので、置換で取り違えようがない。
+#: The spelling of the insertion point. The MIT text has no braces at all, so the replacement
+#: cannot hit the wrong place.
 MIT_COPYRIGHT_PLACEHOLDER = "{copyright}"
 
 
 def apache_license_2_0() -> str:
-    """Apache License 2.0 の原文（逐語）。"""
+    """The text of the Apache License 2.0 (verbatim)."""
     return APACHE_LICENSE_2_0_PATH.read_text(encoding="utf-8")
 
 
 def cc_by_sa_4_0() -> str:
-    """Creative Commons Attribution-ShareAlike 4.0 International の条文（逐語）。"""
+    """The legal code of Creative Commons Attribution-ShareAlike 4.0 International (verbatim)."""
     return CC_BY_SA_4_0_PATH.read_text(encoding="utf-8")
 
 
 def mit_license(copyright_lines: Sequence[str]) -> str:
-    """MIT の原文に著作権行を差し込む。
+    """Insert the copyright lines into the MIT text.
 
-    `copyright_lines` は `Copyright (c) <年> <権利者>` の行。fine-tune の再配布のように
-    権利者が複数居るときは、**配布物に近い順**（その版の著作権者 → 継承した上流）に並べる
-    — MIT の派生物で慣例の並びで、先頭がこのリポの中身の権利者になる。
+    `copyright_lines` are `Copyright (c) <year> <holder>` lines. When there are several holders,
+    as in a redistributed fine-tune, they are ordered **closest to the distributed work first**
+    (that version's copyright holder → the inherited upstream) — the usual order for MIT
+    derivatives, so the first line names the holder of this repository's contents.
 
-    MUST: 空では組まない — 著作権行の無い MIT は「上記の著作権表示」が指す先を持たず、
-    §「著作権表示と許諾表示を含めること」を満たさない。散文としては成立してしまうので、
-    ここが唯一の検出器になる。
+    MUST: never build it empty — an MIT text without copyright lines has nothing for "the above
+    copyright notice" to point at and fails the requirement to "include the copyright notice and
+    the permission notice". It still reads as valid prose, so this is the only detector.
     """
     if not copyright_lines or any(not line.strip() for line in copyright_lines):
-        raise ValueError("MIT の著作権行が空 — 権利者を名乗らないライセンス文は組まない")
+        raise ValueError(
+            "the MIT copyright lines are empty — a license text that names no rights holder is"
+            " not built"
+        )
     template = MIT_LICENSE_PATH.read_text(encoding="utf-8")
     return template.replace(MIT_COPYRIGHT_PLACEHOLDER, "\n".join(copyright_lines))

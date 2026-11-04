@@ -1,25 +1,28 @@
-"""`wan/vae_encoder_patch.py` の約束事（ADR 0121 決定 11・段 9a の検収）。
+"""The contract of `wan/vae_encoder_patch.py` (ADR 0121 decision 11, the acceptance of step 9a).
 
-2 層で固定する:
+Pinned on two levels:
 
-- **合成の 2.2 VAE**（常に走る — conftest の `ti2v_synthetic_vae`。encoder は 5B と同じ構造〈down
-  block 4 本・ショートカット (1,2,4) / (2,2,4) / (2,2,4) / (1,1,1)・mid の Res → Attention →
-  Res〉でチャネルだけを縮めたもの）: 部品ごとの上流との一致（AvgDown3D の閉じた形は 5B の
-  実寸のチャネルでビット一致・ZeroPad2d と down の resample もビット一致・時間スライスへの
-  畳み込みは f64 で恒等）・
-  3 グラフを繋いだ mu の帯・故障注入・構成の門。
-- **実重み**（pin した 5B の snapshot が無い機では SKIP）: 3 グラフを繋いだ mu と上流の非タイル
-  encode の mu の帯（256×160 の乱数画像）・条件の正規化の 1/std が f32 の割り算であること。
+- **The synthetic 2.2 VAE** (always runs — conftest's `ti2v_synthetic_vae`; the encoder has the
+  same structure as the 5B's — four down blocks, shortcuts (1,2,4) / (2,2,4) / (2,2,4) / (1,1,1),
+  a mid of Res → Attention → Res — with only the channels shrunk): per-component agreement with the
+  upstream (the closed form of AvgDown3D is bit-identical at the 5B's real channel counts,
+  ZeroPad2d and the down resample are bit-identical too, the fold onto the time slice is identical
+  in f64), the mu band of the three chained graphs, fault injection, the configuration checks.
+- **Real weights** (SKIP on a machine without the pinned 5B snapshot): the band between the mu of
+  the three chained graphs and the mu of the upstream untiled encode (a 256×160 random image), and
+  that the 1/std of the condition normalization is an f32 division.
 
-ビット一致しない箇所と理由（2026-10-09 の実測 — 帯はそれぞれの決定用の実測の 5 倍を有効数字
-2 桁で切り上げた値）:
+Where it is not bit-identical and why (measured 2026-10-09 — each band is 5 times the measurement
+of its decision case, rounded up to two significant digits):
 
-- 時間スライスへの畳み込み（`LastSliceConv3d`）: f32 では上流の「ゼロ 2 枚を詰めた conv3d」と
-  縮約の順が違う（CPU の conv のカーネルが時間 3 と 1 で別の経路を通る — 相対 5.6e-7）。f64 では
-  相対 8.7e-17 で、消えるのはゼロ × 重みの項だけ（数学的に恒等）。
-- RMS norm の縮約形（`l2_normalize` — decoder の書き直しと同じ）と、attention の 1×1 conv を
-  linear にした系列形も、縮約の順だけが違う。
-- AvgDown3D の閉じた形・ZeroPad2d・down の resample は上流とビット一致（和の順も同じ）。
+- The fold onto the time slice (`LastSliceConv3d`): in f32 the reduction order differs from the
+  upstream "conv3d with two zero frames packed in" (the CPU conv kernel takes different paths for
+  time 3 and 1 — relative 5.6e-7). In f64 it is relative 8.7e-17, and the only terms that vanish
+  are zero × weight (mathematically identical).
+- The reduced form of the RMS norm (`l2_normalize` — the same as the decoder rewrite) and the
+  sequence form that turns attention's 1×1 conv into linear also differ only in reduction order.
+- The closed form of AvgDown3D, ZeroPad2d and the down resample are bit-identical to the upstream
+  (the summation order is the same too).
 """
 
 from __future__ import annotations
@@ -35,33 +38,38 @@ from torch import nn
 
 from wan import vae_encoder_patch
 
-#: 合成の画像の寸法（[-1, 1] の乱数・patchify の前 — 潜在 4×6）と seed。
+#: The size of the synthetic image (random in [-1, 1], before patchify — latent 4×6) and the seed.
 SYNTHETIC_SIZE = (64, 96)
 SYNTHETIC_SEED = 11
 
-#: 実重みの画像の寸法（縮小の経路と同じ 256×160 — 潜在 10×16）と seed。
+#: The size of the real-weights image (256×160, the same as the downscaling path — latent 10×16)
+#: and the seed.
 REAL_SIZE = (160, 256)
 REAL_SEED = 20261009
 
-#: 3 グラフを繋いだ mu と上流の mu の差の帯（参照の最大絶対値に対する比）。
-#: - 合成（64×96・seed 11）: 実測 7.55e-7 × 5 → 3.8e-6。
-#: - 実重み f32（256×160・seed 20261009）: 実測 5.90e-7 × 5 → 3.0e-6（実画像 3 枚 × 3 寸法の
-#:   実測は {@link TestEncodeChunk0RealWeights} の docstring）。
+#: The band of the difference between the mu of the three chained graphs and the upstream mu (ratio
+#: to the reference's maximum absolute value).
+#: - Synthetic (64×96, seed 11): measured 7.55e-7 × 5 → 3.8e-6.
+#: - Real weights f32 (256×160, seed 20261009): measured 5.90e-7 × 5 → 3.0e-6 (the measurements on
+#:   3 real images × 3 sizes are in the docstring of {@link TestEncodeChunk0RealWeights}).
 #:
-#: 測定の条件（帯を導いた値）: 2026-10-09・Ryzen 5 7600・torch 2.13.0+cpu（CPU capability
-#: AVX512）・torch の既定の 6 スレッド。差の出所は縮約の順（畳んだ conv3d と上流の時間 3 の
-#: conv3d・RMS norm の縮約形）で、CPU の conv の経路の分割はスレッド数で変わりうるので、同じ日に
-#: `torch.set_num_threads` を 1 / 3 / 6 / 12 にして測り直した: 合成 7.34e-7〜7.55e-7・実重み
-#: 4.99e-7〜6.35e-7（最悪は 1 スレッド）・attention は 4 通りとも 6.48e-8。どれも帯の 1/4.7 以下。
-#: スレッド数はテストで固定しない（既定の条件で回る門にする）。
+#: Measurement conditions (the values the bands derive from): 2026-10-09, Ryzen 5 7600,
+#: torch 2.13.0+cpu (CPU capability AVX512), torch's default 6 threads. The difference comes from
+#: the reduction order (the folded conv3d against the upstream time-3 conv3d, the reduced form of
+#: the RMS norm), and how the CPU conv path is split can change with the thread count, so on the
+#: same day it was measured again with `torch.set_num_threads` at 1 / 3 / 6 / 12: synthetic
+#: 7.34e-7 to 7.55e-7, real weights 4.99e-7 to 6.35e-7 (worst with 1 thread), attention 6.48e-8 in
+#: all four. All are at most 1/4.7 of the band. The test does not fix the thread count (it is a
+#: check that runs under the default conditions).
 SYNTHETIC_RATIO_BAND = 3.8e-6
 REAL_RATIO_BAND = 3.0e-6
 
-#: 系列形の attention と上流の block の差の帯（合成・seed 4: 実測 6.48e-8 × 5 → 3.3e-7 — 測定の
-#: 条件は上の帯と同じ）。
+#: The band of the difference between the sequence-form attention and the upstream block
+#: (synthetic, seed 4: measured 6.48e-8 × 5 → 3.3e-7 — the measurement conditions are the same as
+#: for the bands above).
 ATTENTION_RATIO_BAND = 3.3e-7
 
-#: AvgDown3D の pin の構成（down block 0〜3 — `(in, out, factor_t, factor_s)`）。
+#: The pinned configuration of AvgDown3D (down blocks 0–3 — `(in, out, factor_t, factor_s)`).
 PIN_SHORTCUTS = ((160, 160, 1, 2), (160, 320, 2, 2), (320, 640, 2, 2), (640, 640, 1, 1))
 
 
@@ -70,18 +78,20 @@ def _ratio(got: torch.Tensor, want: torch.Tensor) -> float:
 
 
 def _bits(tensor: torch.Tensor) -> torch.Tensor:
-    """f32 のビット列（`torch.equal` は −0 と +0 を等しいとみなす — 符号付きゼロまで見る）。"""
+    """The bit pattern of f32 (`torch.equal` treats −0 and +0 as equal — this sees down to the sign
+    of zero)."""
     return tensor.contiguous().view(torch.int32)
 
 
 def _image(size: tuple[int, int], seed: int) -> torch.Tensor:
-    """[-1, 1] の乱数画像 `[1, 3, 1, H, W]`（patchify の前）。"""
+    """A random image `[1, 3, 1, H, W]` in [-1, 1] (before patchify)."""
     generator = torch.Generator().manual_seed(seed)
     return torch.rand(1, 3, 1, *size, generator=generator) * 2 - 1
 
 
 def _patchify(image: torch.Tensor) -> torch.Tensor:
-    """上流の `patchify` そのもの（自前の写しで縛ると参照の素性の主張が恒真になる）。"""
+    """The upstream `patchify` itself (pinning against a copy of our own would make the claim about
+    the reference's origin tautological)."""
     from diffusers.models.autoencoders.autoencoder_kl_wan import patchify
 
     return patchify(image, patch_size=2)[0]
@@ -100,7 +110,8 @@ def _reference(vae, image: torch.Tensor) -> torch.Tensor:
 
 
 class TestAvgDownShortcut:
-    """ショートカットの閉じた形と上流 `AvgDown3D`（T = 1）— 5B の実寸のチャネルで。"""
+    """The closed form of the shortcut against the upstream `AvgDown3D` (T = 1) — at the 5B's real
+    channel counts."""
 
     @pytest.mark.parametrize(("channels", "out_channels", "factor_t", "factor_s"), PIN_SHORTCUTS)
     def test_bit_exact_with_the_upstream_module(
@@ -117,7 +128,8 @@ class TestAvgDownShortcut:
         assert _bits(got).equal(_bits(residual + module(x.unsqueeze(0))[0]))
 
     def test_a_time_factor_2_shortcut_is_zero_on_even_channels_and_a_mean_on_odd_ones(self):
-        """閉じた形の前提を上流の側で縛る: T = 1 の先頭にゼロが 1 枚詰められる。"""
+        """Pin the premise of the closed form on the upstream side: at T = 1 one zero frame is
+        packed in front."""
         wan_vae = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
         module = wan_vae.AvgDown3D(160, 320, factor_t=2, factor_s=2)
         x = torch.randn(1, 160, 1, 6, 10, generator=torch.Generator().manual_seed(3))
@@ -133,7 +145,7 @@ class TestAvgDownShortcut:
         wan_vae = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
         module = wan_vae.AvgDown3D(8, 4, factor_t=1, factor_s=2)
 
-        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="未対応"):
+        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="unsupported"):
             vae_encoder_patch.avg_down_shortcut(module, torch.zeros(8, 1, 4, 4), torch.zeros(4))
 
 
@@ -147,7 +159,8 @@ class TestDownsample:
 
     @pytest.mark.parametrize("mode", ["downsample2d", "downsample3d"])
     def test_chunk0_is_bit_exact_with_the_upstream_resample(self, mode: str):
-        """downsample3d の `time_conv` は chunk 0 で走らない（上流は入力を cache に積むだけ）。"""
+        """downsample3d's `time_conv` does not run in chunk 0 (the upstream only pushes the input
+        onto the cache)."""
         wan_vae = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(0)
@@ -184,7 +197,8 @@ class TestLastSliceConv3d:
         return torch.randn(1, 16, 1, 9, 11, dtype=torch.float64, generator=generator)
 
     def test_the_fold_drops_only_zero_terms_in_f64(self):
-        """数学的な恒等の確かめ（f64 — 残る差は縮約の順だけ・実測 8.7e-17）。"""
+        """Checking the mathematical identity (f64 — the remaining difference is only the reduction
+        order, measured 8.7e-17)."""
         conv = self._causal(torch.float64)
         x = self._input()
 
@@ -195,7 +209,8 @@ class TestLastSliceConv3d:
         assert _ratio(got, want) < 1e-14
 
     def test_folding_the_first_slice_breaks_the_identity_in_f64(self):
-        """故障注入: 畳む時間スライスを取り違える（先頭 = 上流ではゼロのフレームに掛かる側）。"""
+        """Fault injection: fold the wrong time slice (the first — the side that hits the zero frame
+        in the upstream)."""
         conv = self._causal(torch.float64)
         x = self._input()
         folded = vae_encoder_patch.LastSliceConv3d(conv)
@@ -216,13 +231,14 @@ class TestLastSliceConv3d:
         wan_vae = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
         conv = wan_vae.WanCausalConv3d(4, 4, kernel, stride=stride, padding=padding)
 
-        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="畳めない"):
+        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="cannot be folded"):
             vae_encoder_patch.LastSliceConv3d(conv)
 
 
 class TestSequenceAttention:
     def test_the_sequence_form_follows_the_upstream_block(self, ti2v_synthetic_vae):
-        """`[C, S]` の系列形と上流の `[1, C, 1, h, w]` の attention（縮約の順だけが違う）。"""
+        """The `[C, S]` sequence form against the upstream `[1, C, 1, h, w]` attention (only the
+        reduction order differs)."""
         block = ti2v_synthetic_vae.encoder.mid_block.attentions[0]
         x = torch.randn(1, 32, 1, 4, 6, generator=torch.Generator().manual_seed(4))
 
@@ -255,7 +271,8 @@ class TestEncodeChunk0:
     def test_the_reference_is_the_first_half_of_the_upstream_moments(
         self, ti2v_synthetic_vae, synthetic_image, synthetic_reference
     ):
-        """参照の素性: `mode()` は非タイルの `_encode`（quant_conv の後）の前半 48 ch。"""
+        """The reference's origin: `mode()` is the first 48 ch of the untiled `_encode` (after
+        quant_conv)."""
         with torch.no_grad():
             moments = ti2v_synthetic_vae._encode(synthetic_image)
 
@@ -264,7 +281,7 @@ class TestEncodeChunk0:
     def test_the_logvar_half_is_outside_the_band(
         self, ti2v_synthetic_vae, synthetic_image, synthetic_reference, monkeypatch
     ):
-        """故障注入: quant_conv の出力の後半（logvar）を取る。"""
+        """Fault injection: take the second half of quant_conv's output (logvar)."""
         original = vae_encoder_patch.pointwise_conv3d
 
         def logvar_first(conv: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -281,8 +298,9 @@ class TestEncodeChunk0:
     def test_a_patchify_with_the_height_and_width_digits_swapped_is_outside_the_band(
         self, ti2v_synthetic_vae, synthetic_image, synthetic_reference
     ):
-        """故障注入: patchify のチャネル `c·4 + r·2 + q`（r = 幅・q = 高さの副添字）の r と q を
-        取り違える（ホストの patchify が最も取り違えやすい箇所）。"""
+        """Fault injection: swap r and q in the patchify channel `c·4 + r·2 + q` (r = the width
+        sub-index, q = the height sub-index) (the spot where the host's patchify is easiest to get
+        wrong)."""
         patches = _patchify(synthetic_image)
         _, _, height, width = patches.shape
         swapped = patches.reshape(3, 2, 2, 1, height, width).transpose(1, 2).reshape(patches.shape)
@@ -297,7 +315,8 @@ class TestEncodeChunk0:
     def test_a_shortcut_with_its_zero_and_data_halves_swapped_is_outside_the_band(
         self, ti2v_synthetic_vae, synthetic_image, synthetic_reference, monkeypatch
     ):
-        """故障注入: 時間倍率 2 のショートカットで、平均を偶数番（ゼロの側）へ足す。"""
+        """Fault injection: in a shortcut with time factor 2, add the average to the even frames
+        (the zero side)."""
         original = vae_encoder_patch.avg_down_shortcut
 
         def swapped(module: nn.Module, x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -337,25 +356,25 @@ class TestGenerationGate:
             out_channels=3,
         )
 
-        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="未対応"):
+        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="unsupported"):
             vae_encoder_patch.assert_supported(vae)
 
     def test_a_shortcut_group_outside_the_table_is_refused(self, ti2v_synthetic_vae):
         vae = copy.deepcopy(ti2v_synthetic_vae)
         vae.encoder.down_blocks[0].avg_shortcut.group_size = 8
 
-        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="未対応"):
+        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="unsupported"):
             vae_encoder_patch.assert_supported(vae)
 
     def test_a_shortcut_whose_time_factor_disagrees_with_the_downsampler_is_refused(
         self, ti2v_synthetic_vae
     ):
-        """down block 1 は downsample3d（時間 ×2）— ショートカットだけ ×1 だとチャネルの並びが
-        崩れる（表には (1, 2, 4) があるので、表の門だけでは掴めない）。"""
+        """Down block 1 is downsample3d (time ×2) — with ×1 only in the shortcut, the channel order
+        breaks (the table has (1, 2, 4), so the table check alone does not catch it)."""
         vae = copy.deepcopy(ti2v_synthetic_vae)
         vae.encoder.down_blocks[1].avg_shortcut.factor_t = 1
 
-        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="倍率"):
+        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="scale factors"):
             vae_encoder_patch.assert_supported(vae)
 
     def test_a_mid_block_with_two_attentions_is_refused(self, ti2v_synthetic_vae):
@@ -370,16 +389,17 @@ class TestGenerationGate:
         vae = copy.deepcopy(ti2v_synthetic_vae)
         vae.enable_tiling()
 
-        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="非タイル"):
+        with pytest.raises(vae_encoder_patch.UnsupportedVaeError, match="non-tiled"):
             vae_encoder_patch.reference_mu(vae, torch.zeros(1, 3, 1, 32, 32))
 
 
-# ---- 実重み（pin した 5B の snapshot が無ければ SKIP）---------------------------------
+# ---- Real weights (SKIP without the pinned 5B snapshot) ------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def vae(wan22_snapshot):
-    """pin した revision の 5B の VAE（CPU f32・丸め無し — 同値の主張は重みの値に依らない）。"""
+    """The 5B VAE of the pinned revision (CPU f32, no rounding — the equivalence claim does not
+    depend on the weight values)."""
     pytest.importorskip("diffusers")
     from diffusers import AutoencoderKLWan
 
@@ -389,10 +409,11 @@ def vae(wan22_snapshot):
 
 
 class TestEncodeChunk0RealWeights:
-    """実測（2026-10-09・CPU 6 スレッド）: 256×160・seed 20261009 で比 5.90e-7（最大絶対値の差 /
-    参照の最大絶対値）→ × 5 → 3.0e-6。テスト画像 3 枚 × 3 寸法（`python -m wan.export_vae_encoder
-    --verify`）の比は 5.3e-7〜2.09e-6（最悪は cat-dog-baking の 1280×704・最大絶対値の差 5.07e-6）—
-    帯は乱数画像の決定用から導き、実画像の値で広げない。"""
+    """Measured (2026-10-09, CPU 6 threads): at 256×160, seed 20261009 the ratio is 5.90e-7 (maximum
+    absolute difference / the reference's maximum absolute value) → × 5 → 3.0e-6. The ratios on
+    3 test images × 3 sizes (`python -m wan.export_vae_encoder --verify`) are 5.3e-7 to 2.09e-6
+    (worst at cat-dog-baking's 1280×704, maximum absolute difference 5.07e-6) — the band derives
+    from the decision case on a random image and is not widened by the real-image values."""
 
     def test_the_three_graphs_stay_within_the_band(self, vae):
         vae_encoder_patch.assert_supported(vae)
@@ -407,7 +428,7 @@ class TestEncodeChunk0RealWeights:
 
 @pytest.fixture(scope="module")
 def config(wan22_snapshot) -> SimpleNamespace:
-    """pin した 5B の `vae/config.json` の潜在の統計（重みは読まない）。"""
+    """The latent statistics in `vae/config.json` of the pinned 5B (no weights are read)."""
     document = json.loads((wan22_snapshot / "vae" / "config.json").read_text(encoding="utf-8"))
     return SimpleNamespace(
         z_dim=document["z_dim"],
@@ -417,9 +438,9 @@ def config(wan22_snapshot) -> SimpleNamespace:
 
 
 class TestConditionNormalization:
-    """条件の正規化の 1/std は f32 の割り算（上流の `1.0 / torch.tensor(std)`）— f64 の 1/std を
-    f32 へ丸めた値とは一部のチャネルで割れる（TS は `latents.ts` の `f32(1 / f32(std))` を
-    共有）。"""
+    """The 1/std of the condition normalization is an f32 division (the upstream's
+    `1.0 / torch.tensor(std)`) — it splits on some channels from f64 1/std rounded to f32 (the TS
+    side shares `f32(1 / f32(std))` of `latents.ts`)."""
 
     def test_the_inverse_std_is_an_f32_division(self, config):
         mu = torch.ones(1, 48, 1, 1, 1)
@@ -432,7 +453,8 @@ class TestConditionNormalization:
         assert np.array_equal(got.flatten().numpy().view(np.int32), want.view(np.int32))
 
     def test_the_two_spellings_of_the_inverse_std_differ_for_this_config(self, config):
-        """上の門が f64 の 1/std の書き方を見分けられること（同じ値なら門にならない）。"""
+        """The check above can tell the f64 way of writing 1/std apart (if the values were the same,
+        it would not be a check)."""
         as_f32 = np.float32(1) / np.asarray(config.latents_std, dtype=np.float32)
         from_f64 = (1.0 / np.asarray(config.latents_std, dtype=np.float64)).astype(np.float32)
 

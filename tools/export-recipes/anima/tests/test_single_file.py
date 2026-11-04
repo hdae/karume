@@ -1,7 +1,8 @@
-"""単一ファイル checkpoint → diffusers レイアウトの組み直し（`anima.single_file`）。
+"""Rebuilding a single-file checkpoint into the diffusers layout (`anima.single_file`).
 
-実物（4GB）は使わない — ここで観測したいのは**鍵の付け替えと、書く前の突合が実際に落ちるか**
-だけで、どちらも数テンソルの偽 checkpoint で再現できる。
+The real file (4GB) is not used — what we want to observe here is only **the key renaming, and
+whether the comparison before writing really fails**, and both reproduce with a fake checkpoint
+of a few tensors.
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ def _state(prefix: str) -> dict[str, torch.Tensor]:
 
 
 class TestStripPrefix:
-    """civitai 側の包み方は 2 通り（`net.` と `model.diffusion_model.`）— どちらも受ける。"""
+    """civitai wraps checkpoints in two ways (`net.` and `model.diffusion_model.`) — both are
+    accepted."""
 
     @pytest.mark.parametrize("prefix", ["net.", "model.diffusion_model."])
     def test_it_normalizes_a_known_prefix_to_net(self, prefix: str) -> None:
@@ -33,12 +35,14 @@ class TestStripPrefix:
         assert sorted(stripped) == ["net.blocks.0.weight", "net.llm_adapter.blocks.0.weight"]
 
     def test_it_refuses_an_unknown_prefix_with_what_it_saw(self) -> None:
-        """知らない包み方を黙って素通しすると、変換表が何も当たらないまま空を書く。"""
+        """Silently passing an unknown wrapping through would write an empty result with no entry
+        of the conversion table hitting."""
         with pytest.raises(SystemExit, match="知らない鍵の前置"):
             _strip_prefix(_state("diffusion_model."))
 
     def test_it_refuses_a_mixed_checkpoint(self) -> None:
-        """一部だけ前置が違う checkpoint は、剥がす基準を決められない。"""
+        """For a checkpoint where only some prefixes differ, no basis for stripping can be
+        chosen."""
         mixed = {**_state("net."), "model.diffusion_model.blocks.1.weight": torch.zeros(1)}
 
         with pytest.raises(SystemExit, match="知らない鍵の前置"):
@@ -46,7 +50,8 @@ class TestStripPrefix:
 
 
 class TestAssertCovers:
-    """変換表が上流で動いた日に「一部だけ移った重み」を書かないための門。"""
+    """The check that keeps "weights only partly carried over" from being written the day the
+    conversion table moves upstream."""
 
     @pytest.fixture
     def reference(self, tmp_path: Path) -> Path:
@@ -62,20 +67,21 @@ class TestAssertCovers:
             _assert_covers({"a": torch.zeros(2, 3)}, reference, "t")
 
     def test_it_stops_when_an_unexpected_key_is_left_over(self, reference: Path) -> None:
-        """余る鍵は「表が別のモデル向けに当たった」兆候なので、これも落とす。"""
+        """A leftover key is a sign that "the table hit a different model", so this fails too."""
         state = {"a": torch.zeros(2, 3), "b": torch.zeros(4), "c": torch.zeros(1)}
 
         with pytest.raises(SystemExit, match="余る 1 件"):
             _assert_covers(state, reference, "t")
 
     def test_it_stops_when_a_shape_differs(self, reference: Path) -> None:
-        """鍵名が揃っていても形が違えば別アーキテクチャ — ロードは通るが絵が壊れる。"""
+        """Even with matching key names, a different shape means another architecture — it loads,
+        but the picture breaks."""
         with pytest.raises(SystemExit, match="shape が base と違う"):
             _assert_covers({"a": torch.zeros(3, 2), "b": torch.zeros(4)}, reference, "t")
 
 
 class TestLink:
-    """再実行で古い向き先が残らない（組み直しは冪等）。"""
+    """A rerun leaves no stale link target (the rebuild is idempotent)."""
 
     def test_it_replaces_an_existing_link(self, tmp_path: Path) -> None:
         first = tmp_path / "first"
@@ -101,7 +107,7 @@ class TestLink:
         assert link.resolve() == target.resolve()
 
 
-#: `anima.civitai` が checkpoint の隣へ書く取り込み記録（要点だけ）。
+#: The intake record `anima.civitai` writes next to the checkpoint (the essentials only).
 CIVITAI_RECORD = {
     "air": "urn:air:anima:checkpoint:civitai:2544636@2983680",
     "model_id": 2544636,
@@ -118,7 +124,8 @@ CIVITAI_RECORD = {
 
 
 class TestSourceProvenance:
-    """取り込み記録が隣にあれば運ぶ（手置きの checkpoint には無いので、無い形も従来どおり）。"""
+    """An intake record next to the checkpoint is carried along (a hand-placed checkpoint has none,
+    so the shape without one stays as before)."""
 
     @pytest.fixture
     def checkpoint(self, tmp_path: Path) -> Path:
@@ -136,7 +143,8 @@ class TestSourceProvenance:
         }
 
     def test_it_carries_the_civitai_section(self, checkpoint: Path) -> None:
-        """説明本文の HTML は運ばない — 変換の出所を辿るのに要らない。"""
+        """The HTML of the descriptions is not carried — it is not needed to trace the
+        conversion's source."""
         self._write_record(checkpoint, CIVITAI_RECORD)
 
         provenance = _source_provenance(checkpoint, "org/base")
@@ -153,8 +161,9 @@ class TestSourceProvenance:
         }
 
     def test_it_stops_on_a_record_it_cannot_read(self, checkpoint: Path) -> None:
-        """黙って節を落とすと、出所の分からない重みが provenance 付きの体裁で出てくる。"""
-        (checkpoint.parent / "civitai.json").write_text("{壊れている", encoding="utf-8")
+        """Silently dropping the section would ship weights of unknown source dressed up with a
+        provenance."""
+        (checkpoint.parent / "civitai.json").write_text("{broken", encoding="utf-8")
 
         with pytest.raises(SystemExit, match="を読めない"):
             _source_provenance(checkpoint, "org/base")
@@ -175,10 +184,12 @@ class TestSourceProvenance:
 
 
 class TestCivitaiIntakeLayout:
-    """記録の欠落は置き場で意味が変わる — 取り込みの配置なら壊れた取り込み、他所なら手置き。"""
+    """A missing record means different things by location — in the intake layout a broken
+    intake, elsewhere a hand-placed checkpoint."""
 
     def test_it_stops_when_the_intake_directory_lost_its_record(self, tmp_path: Path) -> None:
-        """`civitai-<versionId>/` は取り込みが掘る形なので、記録が無いのは連鎖が切れた跡。"""
+        """`civitai-<versionId>/` is the shape the intake creates, so a missing record is the
+        trace of a broken chain."""
         intake = tmp_path / "civitai-123"
         intake.mkdir()
 
@@ -186,7 +197,8 @@ class TestCivitaiIntakeLayout:
             _source_provenance(intake / "waiANIMA_v10Base10.safetensors", "org/base")
 
     def test_it_keeps_the_old_shape_for_a_hand_placed_checkpoint(self, tmp_path: Path) -> None:
-        """Civitai 以外のソースは `civitai.json` が無いだけ（ADR 0088）— 落としてはいけない。"""
+        """A source other than Civitai just has no `civitai.json` (ADR 0088) — it MUST NOT
+        fail."""
         placed = tmp_path / "anima-hand-placed"
         placed.mkdir()
 

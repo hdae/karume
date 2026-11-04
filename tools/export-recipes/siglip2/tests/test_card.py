@@ -1,12 +1,13 @@
-"""SigLIP2 配布形のモデルカード描画（`siglip2.card`）。
+"""Model card rendering of the SigLIP2 distribution (`siglip2.card`).
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。
+The real distribution's `karume.json` is not used — the job here is to see the fake manifest's
+values appear in the body as they are (= not a single hand-written number mixed in), so building
+it with values **different** from the real ones detects more.
 
-manifest からの導出（表・数・使い方）は `siglip2/tests/test_distribution.py` の
-`TestSiglip2ModelCard` が**組み立て 1 周ぶん**で見る。ここが持つのはカード側にしか無い門 —
-テンプレートの pipeline 固有性と、帰属表に無いモデルを描かないこと、そして案内するロード入口。
+The derivation from the manifest (tables, numbers, usage) is checked over **one assembly pass** by
+`TestSiglip2ModelCard` in `siglip2/tests/test_distribution.py`. This file holds the checks that
+exist only on the card side — the template's pipeline specificity, not rendering a model missing
+from the attribution table, and the load entry point it advertises.
 """
 
 from __future__ import annotations
@@ -23,12 +24,13 @@ from siglip2.card import (
     render_siglip2_model_card,
 )
 
-#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
+#: Repository ID spelled in the usage snippet (dist passes it from the pipeline's declaration).
 REPO = "hdae/fake-repo"
 
-#: 別 family の pipeline 契約（**綴りをそのまま持つ** — recipe 間のコード結合を作らないため）。
-#: 2 つの実在テンプレートが互いの manifest を拒むことは `sbv2/tests/test_card.py` が
-#: 両向きで見る。ここが要るのは「自分の契約以外を拒む」という 1 方向だけ。
+#: Another family's pipeline contract (**the spelling is kept as is** — to avoid code coupling
+#: between recipes). `sbv2/tests/test_card.py` checks in both directions that two real templates
+#: refuse each other's manifest. Here only one direction is needed: "refuse any contract other than
+#: its own".
 FOREIGN_PIPELINE = "birefnet/1"
 
 
@@ -37,9 +39,10 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+    """One dtype of the weights (the `container` of `karume/5` — ADR 0109 decision 3).
 
-    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    The card does not read `descriptor`, so only its shape follows the real thing (the lengths and
+    sha256 of the two documents).
     """
     return {
         "container": {
@@ -53,7 +56,7 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
-    """SigLIP2 の最小 manifest（値は実物と重ならない偽値）。"""
+    """Minimal SigLIP2 manifest (fake values that do not overlap the real ones)."""
     return {
         "format": "karume/5",
         "generator": "karume/9.9.9",
@@ -88,8 +91,9 @@ class TestSiglip2CardGate:
             render_siglip2_model_card(manifest, REPO)
 
     def test_it_refuses_a_model_it_cannot_attribute(self) -> None:
-        """帰属表に無いモデル名で描くと、`base_model` が 1 つ足りないカード（= 出所を名乗って
-        いない再配布）が黙って出る。既知の一覧を添えて落とす。
+        """Rendering for a model name missing from the attribution table would silently produce a
+        card with one `base_model` short (= a redistribution that does not name its source). It
+        fails, listing the known names.
         """
         with pytest.raises(ValueError, match="large"):
             render_siglip2_model_card(_siglip2_manifest("large"), REPO)
@@ -104,7 +108,8 @@ class TestSiglip2CardGate:
 
 
 class TestSiglip2LegalPointers:
-    """リポ直下の法的テキスト（ADR 0092 決定 7）へカード本文から辿れること。"""
+    """The legal texts at the repository root (ADR 0092 decision 7) can be reached from the card
+    body."""
 
     def test_it_points_at_the_bundled_license_and_notice(self) -> None:
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
@@ -112,30 +117,33 @@ class TestSiglip2LegalPointers:
         assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
 
     def test_it_reports_the_measured_map_head_difference(self) -> None:
-        """帰属節が名乗る差は実測の綴り 1 つきり（正本は `siglip2.measurements`）。"""
+        """The difference the attribution section states is the single measured spelling (the
+        source of truth is `siglip2.measurements`)."""
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert SIGLIP2_MAP_HEAD_DIFF in card
 
     def test_it_reports_the_scale_that_gives_the_difference_its_meaning(self) -> None:
-        """差の大小はスケール（L2 ノルム）との比でしか読めない — その数も綴りは 1 つきり。
+        """The size of the difference can only be read as a ratio to the scale (the L2 norm) —
+        that number, too, has a single spelling.
 
-        カードと `NOTICE.md` が別々に直書きすると、片方だけ動いた日に「告知だけが古い数を
-        主張する」形が黙って作れる（`siglip2.measurements` の MUST）。
+        If the card and `NOTICE.md` each wrote it directly, the day only one moves would silently
+        allow "only the notice claims a stale number" (the MUST of `siglip2.measurements`).
         """
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert f"L2 norm is {SIGLIP2_MAP_HEAD_NORM}" in card
 
 
 class TestSiglip2EntryPoint:
-    """カードが案内するロード入口 — `fromPretrained` の 1 本だけ。"""
+    """The load entry point the card advertises — `fromPretrained` only."""
 
     def test_it_does_not_advertise_the_local_asset_entry_point(self) -> None:
-        """`fromAssets` は案内しない（2026-08-29 裁定）。
+        """`fromAssets` is not advertised (ruling of 2026-08-29).
 
-        分割配布形も読めるようになった（X2-101）が、あちらはバイト列を自分で持っている前提の
-        ローカルデバッグ向けの面で、HF から使う読者の普通の入口は `fromPretrained`。両方を
-        並べると「どちらを使うのか」を読者に判断させることになる。`fromPretrained` 側も併せて
-        見るのは、Usage ごと消えても通る門にしないため。
+        The split distribution form became readable too (X2-101), but that surface is meant for
+        local debugging and assumes the caller holds the bytes; the ordinary entry point for a
+        reader using HF is `fromPretrained`. Listing both would leave the reader to decide "which
+        one to use". `fromPretrained` is checked as well so that the check does not pass when the
+        whole Usage section disappears.
         """
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert "fromAssets" not in card

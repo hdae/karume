@@ -1,17 +1,19 @@
-"""EmbeddingGemma-300m（文埋め込み）の export recipe（ADR 0065 決定 2 — wheel 外・リポ専用）。
+"""Export recipe for EmbeddingGemma-300m (sentence embeddings) (ADR 0065 decision 2 — outside the
+wheel, repository only).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: export 台本
-（{@link embeddinggemma.export}）1 本と、トークナイザ資産の compile
-（{@link embeddinggemma.tokenizer} — gemma4 と同じ台本系で回る。実装は共用・**資産は別**）。
-パッチ層は持たない（上流のモデリングコードを差し替えずに export できる）し、配布 recipe も
-持たない — この系列は golden io と性能計測のための資産で、HF へ配る形は今のところ無い。
+Only **what cannot live in the general-purpose exporter core** goes here: one export script
+({@link embeddinggemma.export}) and the compile of the tokenizer asset
+({@link embeddinggemma.tokenizer} — it runs on the same script family as gemma4; the
+implementation is shared, **the asset is not**). There is no patch layer (the model exports without
+replacing the upstream modeling code) and no distribution recipe — this series is an asset for
+golden io and performance measurement, and there is no form to publish on HF for now.
 
-依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
-が機械で守る）。
+The dependency runs **one way only, recipe → core** (enforced mechanically by
+`tools/exporter/tests/test_architecture_boundary.py`).
 
-MUST: **再輸出しない**（`from embeddinggemma import X` で transformers が芋づるに入る形に
-しない）。呼び出し側はサブモジュールを名指しで import すること。
+MUST: **no re-exports** (do not make `from embeddinggemma import X` drag transformers in with it).
+Callers import the submodules by name.
 
-台本の起動は export-recipes ルートから（例:
-`uv run --with 'transformers==5.14.1' python -m embeddinggemma.export`）。
+Run the scripts from the export-recipes root (for example
+`uv run --with 'transformers==5.14.1' python -m embeddinggemma.export`).
 """

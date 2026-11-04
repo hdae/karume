@@ -1,35 +1,41 @@
-"""Anima の**ホスト側**パイプラインの参照フィクスチャを作る（M1-P4 波 3 / ADR 0016 の段②）。
+"""Build the reference fixture of Anima's **host-side** pipeline (M1-P4 iteration 3 / step 2 of
+ADR 0016).
 
-IR に載るのは `anima/export.py` が書き出す 4 グラフだけで、その外側 — トークナイズ /
-スケジューラ（sigmas）/ timestep 埋め込み表 / CFG / Euler 更新 / latent 逆正規化 / 512
-パディング — は全てホストコードになる。**そのホスト側の「数の正」がここ**で、Deno 側の
-通しチェーン E2E（`packages/e2e/tests/e2e_anima_test.ts`）は TS で書いたグルーを
-このフィクスチャの対応値と突き合わせてから使う。
+Only the 4 graphs that `anima/export.py` writes go into the IR; everything around them —
+tokenization / the scheduler (sigmas) / the timestep embedding table / CFG / the Euler update /
+latent denormalization / padding to 512 — is host code. **This is the numeric source of truth for
+that host side**: the end-to-end chain E2E on the Deno side (`packages/e2e/tests/e2e_anima_test.ts`)
+compares the glue written in TS with the corresponding values of this fixture before using it.
 
-正本は diffusers 0.39 の `modular_pipelines/anima/`（encoders.py / before_denoise.py /
-denoise.py / decoders.py）。この台本はその 4 ブロックの逐語的な書き下しで、**パッチ層を
-通さない素の diffusers 経路**で参照を採る（`anima.patch` の同値は
-`anima/export.py --verify` が別に測る — 検証網を独立に保つ。パッチ層をここでも通すと、
-パッチのバグが参照とテスト対象の両方に同じ形で乗り、差 0 のまま素通りする）。
+The source of truth is diffusers 0.39's `modular_pipelines/anima/` (encoders.py /
+before_denoise.py / denoise.py / decoders.py). This script writes those 4 blocks out
+line by line and takes the reference on **the plain diffusers path that does not go through the
+patch layer** (the equivalence of `anima.patch` is measured separately by
+`anima/export.py --verify` — this keeps the checks independent. Going through the patch layer
+here too would put a patch bug into both the reference and the code under test in the same form,
+and it would pass with a difference of 0).
 
-出力（既定 `<repo>/outputs/series/anima-pipeline/`、`--dtype f16` ならその `-f16` 版）:
+Output (default `<repo>/outputs/series/anima-pipeline/`; with `--dtype f16`, its `-f16` variant):
 
-    pipeline.safetensors   各段のテンソル（下の `_TENSOR_ROLES` が用途の索引）
-    pipeline.json          プロンプト・step 数・shift・CFG 係数・LoRA（`lora` / `lora_scale`）
-                           ・shape 一覧
+    pipeline.safetensors   tensors of each step (`_TENSOR_ROLES` below indexes their purpose)
+    pipeline.json          prompt, step count, shift, CFG scale, LoRA (`lora` / `lora_scale`),
+                           list of shapes
 
-MUST: 出力先を `models/<repo>/`（配布形）直下にしない。あちらは manifest が宣言した
-ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
-止まる（音声デモで `outputs/misc/sbv2-demo/` を分けたのと同じ理由）。
+MUST: do not write the output directly under `models/<repo>/` (the distribution layout). That
+tree holds only the files the manifest declares and is **uploaded to HF as is**; a file outside
+the declaration makes `verify_dist` stop (the same reason the audio demo got its own
+`outputs/misc/sbv2-demo/`).
 
-MUST: 圧縮系列のフィクスチャは **4 コンポーネントとも** fake-quant してから採る（ADR 0006）。
-1 つでも素の重みのまま残すと、その段だけ参照が別のモデルの数になり、通しチェーンの差が
-「量子化誤差 + 実装誤差」の合成になる。丸めは各モデルのロード直後に掛ける。
+MUST: a fixture of a compressed series is taken after fake-quantizing **all 4 components**
+(ADR 0006). Leaving even one with the original weights makes that step's reference the numbers of
+a different model, and the difference along the chain becomes a mix of "quantization error +
+implementation error". The rounding is applied right after each model is loaded.
 
-MUST: `--dtype i8` は **DiT だけ i8・他 3 つは f16**（`COMPONENT_DTYPES`）。資産系列が
-`anima-i8/transformer` + `anima-f16/{text_encoder,text_conditioner,vae_decoder}`
-という構成（ADR 0019）なので、フィクスチャの丸めもその構成と 1 対 1 に対応させる。全部を
-i8 にすると text 経路の参照だけが実行される資産と別のモデルの数になる。
+MUST: `--dtype i8` is **i8 for the DiT only, f16 for the other 3** (`COMPONENT_DTYPES`). The asset
+series is laid out as `anima-i8/transformer` +
+`anima-f16/{text_encoder,text_conditioner,vae_decoder}` (ADR 0019), so the fixture's rounding
+maps 1:1 to that layout. Making everything i8 would make only the text path's reference the
+numbers of a model different from the assets that run.
 
     uv run python -m anima.pipeline_ref
     uv run python -m anima.pipeline_ref --steps 32 --ref-steps 2
@@ -39,26 +45,29 @@ i8 にすると text 経路の参照だけが実行される資産と別のモ�
         --guidance-scale 1.0 --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16
 
-`--act-quant` は **w8a8**（`SessionOptions.linearCompute: "a8"`）の鏡像で、DiT の適格
-`nn.Linear` の入力を per-token i8 へ fake-quant してから参照を採る（数値仕様の正本は
-`karume.act_quant`）。重み側の i8 と対なので `--dtype i8` との併用を強制する:
+`--act-quant` mirrors **w8a8** (`SessionOptions.linearCompute: "a8"`): it fake-quantizes the
+inputs of the DiT's eligible `nn.Linear`s to per-token i8 before taking the reference (the source
+of truth for the numeric spec is `karume.act_quant`). It pairs with the i8 weights, so it must be
+combined with `--dtype i8`:
 
     uv run python -m anima.pipeline_ref --dtype i8 --act-quant --steps 10 \
         --ref-steps 10 --guidance-scale 1.0 \
         --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-i8a8
 
-`--resolution` は **WxH**（正方は略記できる）。非正方の参照は `--dit-graph dyn` の DiT と
-`--vae-tiling` の VAE を突き合わせる先で（#23）、綴りはデモの `--resolution` と同じ:
+`--resolution` is **WxH** (a square can use the shorthand). A non-square reference is what the
+DiT of `--dit-graph dyn` and the VAE of `--vae-tiling` are compared against (#23), and the
+spelling is the same as the demo's `--resolution`:
 
     uv run python -m anima.pipeline_ref --dtype f16 --steps 10 --ref-steps 2 \
         --guidance-scale 1.0 --resolution 1344x768 \
         --lora ../../inputs/anima/anima-turbo-lora-v0.2.safetensors \
         --out ../../outputs/series/anima-pipeline-turbo-f16-1344x768
 
-DiT の forward は既定で 4 回（2 step × cond/uncond）、CFG=1 の turbo 系列では uncond を
-畳むので `--ref-steps` と同数（上の例なら 10 回）。CPU f32 なので数分かかる。ピーク RAM は
-DiT の 7.29GiB 常駐 + 活性で 12GiB 級（recon §7）。
+The DiT forward runs 4 times by default (2 steps × cond/uncond); the CFG=1 turbo series drops
+uncond, so it runs as many times as `--ref-steps` (10 in the example above). It is CPU f32, so it
+takes a few minutes. Peak RAM is about 12GiB: the DiT's resident 7.29GiB + activations
+(recon §7).
 """
 
 from __future__ import annotations
@@ -81,13 +90,16 @@ from karume.quantize import fake_quant_int8, round_weights_to_bf16, round_weight
 from .resolution import parse_resolution, resolution_meta
 
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: この台本が参照を採れる系列。**`export.py` の `WEIGHT_DTYPES` から引かない** MUST — あちらは
-#: 「資産として書ける格納 dtype」の集合で、i4 のように**参照経路を持たない**（下の 3 表に席が
-#: 無い）系列が入る。結合すると argparse の受理だけが広がり、`component_dtype` / `DEFAULT_OUTS`
-#: の素の KeyError まで落ちない — text_encoder のロードまで数分走った末に診断文言ゼロで死ぬ形で、
-#: fail loudly（理由を挙げて落ちる）を満たさない。席を足すときは下の 3 表と同時に足す。
+#: The series this script can take references for. MUST **not be taken from `WEIGHT_DTYPES` of
+#: `export.py`** — that is the set of "storage dtypes that can be written as assets", which
+#: includes series that **have no reference path** like i4 (no entry in the 3 tables below).
+#: Coupling them would widen only what argparse accepts, and nothing would fail until the bare
+#: KeyError of `component_dtype` / `DEFAULT_OUTS` — dying with no diagnostic after minutes spent
+#: loading text_encoder, which does not fail loudly (failing with the reason). When adding an
+#: entry, add it to the 3 tables below at the same time.
 REF_DTYPES: tuple[str, ...] = ("f32", "f16", "bf16", "i8")
-#: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/` とは別の系列側**（上の MUST）。
+#: The default location of the outputs (per storage dtype). **On the series side, separate from
+#: the distribution layout `models/`** (the MUST above).
 DEFAULT_OUTS = {
     "f32": SERIES_ROOT / "anima-pipeline",
     "f16": SERIES_ROOT / "anima-pipeline-f16",
@@ -95,25 +107,28 @@ DEFAULT_OUTS = {
     "i8": SERIES_ROOT / "anima-pipeline-i8",
 }
 
-#: 系列 → コンポーネントごとの実効格納 dtype（資産系列との 1 対 1 対応 — 上の MUST）。
-#: キーは `_fake_quant` に渡すラベルで、i8 系列だけが DiT と他 3 つで分かれる。
+#: Series → effective storage dtype per component (1:1 with the asset series — the MUST above).
+#: The keys are the labels passed to `_fake_quant`; only the i8 series splits the DiT from the
+#: other 3.
 COMPONENT_DTYPES = {
     "f32": {},
     "f16": {},
     "bf16": {},
     "i8": {"transformer": "i8"},
 }
-#: `COMPONENT_DTYPES` に載らないコンポーネントの既定（f32 系列は丸めない）。
+#: The default for components not listed in `COMPONENT_DTYPES` (the f32 series does not round).
 _FALLBACK_DTYPE = {"f32": "f32", "f16": "f16", "bf16": "bf16", "i8": "f16"}
 
 
 def component_dtype(dtype: str, label: str) -> str:
-    """コンポーネント 1 つの実効格納 dtype（系列の構成をここ 1 箇所で決める）。"""
+    """The effective storage dtype of one component (the series layout is decided here, in one
+    place)."""
     return COMPONENT_DTYPES[dtype].get(label, _FALLBACK_DTYPE[dtype])
 
 
 def _fake_quant(dtype: str, model: torch.nn.Module, label: str) -> None:
-    """系列に応じて重みを格納表現可能値へ丸める（ADR 0006 — 参照採取より前 MUST）。"""
+    """Round the weights to values the series' storage can represent (ADR 0006 — MUST happen before
+    the reference is taken)."""
     effective = component_dtype(dtype, label)
     if effective == "f32":
         return
@@ -127,11 +142,13 @@ def _fake_quant(dtype: str, model: torch.nn.Module, label: str) -> None:
 
 
 def _apply_lora(path: Path | None, scale: float, model: torch.nn.Module, prefix: str) -> None:
-    """turbo 等の蒸留 LoRA を export 前に焼き込む（`anima/export.py` と同じ規律）。
+    """Bake a distillation LoRA such as turbo in before export (the same discipline as
+    `anima/export.py`).
 
-    MUST: `_fake_quant` より前に呼ぶ（ADR 0016 と同じ順序制約 — 丸め後に焼くと ΔW が丸めの
-    格子を外れ、格納時の再丸めが参照と食い違う）。text_conditioner 側は実測で lora_B が
-    全ゼロ（noop）と確認済みなので、このパイプラインでは transformer にのみ適用する。
+    MUST: call it before `_fake_quant` (the same ordering constraint as ADR 0016 — baking after
+    rounding puts ΔW off the rounding grid, and the re-rounding at storage time disagrees with the
+    reference). On the text_conditioner side lora_B was measured to be all zeros (a no-op), so
+    this pipeline applies it to the transformer only.
     """
     if path is None:
         return
@@ -142,55 +159,59 @@ def _apply_lora(path: Path | None, scale: float, model: torch.nn.Module, prefix:
     print(f"[lora] {prefix}: {report.describe()}", flush=True)
 
 
-#: Anima はアニメ画像特化（danbooru 系タグ）。固定 1 本・英語。
+#: Anima specializes in anime images (danbooru-style tags). One fixed prompt, in English.
 PROMPT = (
     "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, "
     "outdoors, smile, upper body, masterpiece, best quality"
 )
-#: MUST: **空文字列にしてはいけない** — 空プロンプトの T5 id 列は長さ 1 になり、conditioner の
-#: 受理集合（`Dim("Ttgt", min=2)`）から外れて export 済みグラフに食わせられなくなる。
-#: パイプライン既定は `""` だが、モデルカードの推奨も CFG 4〜5 + ネガティブ指定。
+#: MUST: **must not be the empty string** — the T5 ids of an empty prompt have length 1, which
+#: falls outside the conditioner's accepted set (`Dim("Ttgt", min=2)`) and cannot be fed to the
+#: exported graph. The pipeline default is `""`, but the model card also recommends CFG 4–5 + a
+#: negative prompt.
 NEGATIVE_PROMPT = "low quality, worst quality, blurry, bad anatomy, jpeg artifacts"
 
 NUM_TRAIN_TIMESTEPS = 1000  # scheduler_config.json
-SHIFT = 3.0  # 〃（use_dynamic_shifting=false なので静的 shift）
-GUIDANCE_SCALE = 4.0  # ClassifierFreeGuidance の既定（encoders.py / denoise.py）
+SHIFT = 3.0  # ditto (use_dynamic_shifting=false, so a static shift)
+GUIDANCE_SCALE = 4.0  # the ClassifierFreeGuidance default (encoders.py / denoise.py)
 MIN_SEQUENCE_LENGTH = 512  # AnimaTextConditioner.config.min_sequence_length
 SPATIAL_COMPRESSION = 8
 LATENT_CHANNELS = 16
 
-#: `latents_init` の seed。**固定**（再生成でバイト一致させる — golden の規約と同じ）。
+#: Seed of `latents_init`. **Fixed** (a regeneration is byte-identical — the same rule as the
+#: goldens).
 SEED = 20260802
 
-#: フィクスチャのテンソルの用途索引（JSON メタにそのまま載る。Deno 側の読み手向け）。
+#: Index of the purpose of the fixture's tensors (written as is into the JSON metadata, for
+#: readers on the Deno side).
 _TENSOR_ROLES: dict[str, str] = {
-    "sigmas": "FlowMatchEuler の sigma 列（末尾に終端 0）。TS 実装のパリティ対象",
-    "timesteps_proj": "全 step 分の timestep 埋め込み表 [steps, 2048]。DiT の入力 2 本目",
-    "latents_mean": "VAE の per-channel latent 平均（逆正規化の定数）",
-    "latents_std": "VAE の per-channel latent 標準偏差（逆正規化の定数）",
-    "latents_init": "初期ノイズ [1,16,h,w]（seed 固定）。チェーンの起点",
-    "qwen_input_ids": "Qwen2 BPE の id 列。text_encoder の入力",
-    "t5_input_ids": "T5 Unigram の id 列。text_conditioner の入力 2 本目",
-    "qwen_hidden_states": "text_encoder の出力（全 1 マスク乗算後 = 恒等）",
-    "encoder_hidden_states": "conditioner 出力を 512 へゼロパディングしたもの。DiT の入力 3 本目",
-    "noise_cond_stepNNNN": "step NNNN の DiT 出力（cond 側）。CFG グルーのパリティ対象",
-    "noise_uncond_stepNNNN": "step NNNN の DiT 出力（uncond 側）。同上。"
-    "guidance_scale=1.0 の fixture ではキー自体が存在しない（uncond 分岐を計算しない）",
-    "latents_stepNNNN": "step NNNN の Euler 更新後 latent",
-    "latents_denorm": "最終 latent の逆正規化後。VAE decoder の入力",
-    "image": "VAE decode 出力 [1,3,H,W]（`_decode` の clamp(-1,1) 込み = IR 側と同じ位置）",
+    "sigmas": "FlowMatchEuler sigma sequence (terminal 0 at the end). Parity target of the TS code",
+    "timesteps_proj": "timestep embedding table for all steps [steps, 2048]. 2nd input of the DiT",
+    "latents_mean": "VAE per-channel latent mean (denormalization constant)",
+    "latents_std": "VAE per-channel latent standard deviation (denormalization constant)",
+    "latents_init": "initial noise [1,16,h,w] (fixed seed). Start of the chain",
+    "qwen_input_ids": "Qwen2 BPE ids. Input of text_encoder",
+    "t5_input_ids": "T5 Unigram ids. 2nd input of text_conditioner",
+    "qwen_hidden_states": "text_encoder output (after multiplying by the all-ones mask = identity)",
+    "encoder_hidden_states": "conditioner output zero-padded to 512. 3rd input of the DiT",
+    "noise_cond_stepNNNN": "DiT output of step NNNN (cond side). Parity target of the CFG glue",
+    "noise_uncond_stepNNNN": "DiT output of step NNNN (uncond side). Same as above. "
+    "A guidance_scale=1.0 fixture has no such key (the uncond branch is not computed)",
+    "latents_stepNNNN": "latent after the Euler update of step NNNN",
+    "latents_denorm": "final latent after denormalization. Input of the VAE decoder",
+    "image": "VAE decode output [1,3,H,W] (with `_decode`'s clamp(-1,1) = same place as the IR)",
 }
 
 
 def sigma_schedule(steps: int, shift: float) -> np.ndarray:
-    """`AnimaSetTimestepsStep` + `FlowMatchEulerDiscreteScheduler.set_timesteps` の再現。
+    """Reproduces `AnimaSetTimestepsStep` + `FlowMatchEulerDiscreteScheduler.set_timesteps`.
 
-    `sigmas=linspace(1, 1/N, N)` を渡す経路なので `_sigma_to_t` は通らず、静的 shift の
-    `shift·s / (1 + (shift−1)·s)` だけが効く。末尾に終端 0 を 1 つ足すのは `step()` が
-    `sigmas[i+1]` を読むため。
+    This path passes `sigmas=linspace(1, 1/N, N)`, so `_sigma_to_t` is not used and only the
+    static shift `shift·s / (1 + (shift−1)·s)` applies. A terminal 0 is appended because `step()`
+    reads `sigmas[i+1]`.
 
-    MUST: f32 化の位置を scheduler と揃える（`astype` を後ろへ動かすと f64 で計算して
-    最終桁が変わり、TS 側の `Math.fround` 逐次実装とビット一致しなくなる）。
+    MUST: convert to f32 at the same point as the scheduler (moving `astype` later computes in
+    f64, changes the last digit, and is no longer bit-identical to the TS side's sequential
+    `Math.fround` code).
     """
     sigmas = np.linspace(1.0, 1.0 / steps, steps).astype(np.float32)
     sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
@@ -199,10 +220,11 @@ def sigma_schedule(steps: int, shift: float) -> np.ndarray:
 
 @dataclass(frozen=True)
 class TextStack:
-    """テキスト前段のロード済み一式（トークナイザ 2 本 + Qwen3 + conditioner）。
+    """The loaded text front end (2 tokenizers + Qwen3 + conditioner).
 
-    まとめて持つのは「1 回ロードして複数プロンプトを通す」呼び出し（`anima.calib` の校正入力）
-    のため — プロンプトごとに `from_pretrained` を叩くと Qwen3 のロードがその回数だけ走る。
+    They are held together for callers that "load once and run several prompts" (the calibration
+    inputs of `anima.calib`) — calling `from_pretrained` per prompt would load Qwen3 that many
+    times.
     """
 
     tokenizer: Any
@@ -212,9 +234,11 @@ class TextStack:
 
 
 def load_text_stack(repo: str, dtype: str) -> TextStack:
-    """テキスト前段をロードして系列の格納 dtype へ丸める（{@link encode_prompt} の前提）。
+    """Load the text front end and round it to the series' storage dtype (the precondition of
+    {@link encode_prompt}).
 
-    MUST: 丸めはここ（参照を採る前）— 後ろへ動かすと参照だけが元の重みで計算される。
+    MUST: round here (before the reference is taken) — moving it later computes only the reference
+    with the original weights.
     """
     from diffusers import AnimaTextConditioner
     from transformers import AutoTokenizer, Qwen3Model
@@ -234,13 +258,14 @@ def load_text_stack(repo: str, dtype: str) -> TextStack:
 
 
 def encode_prompt(stack: TextStack, max_len: int, text: str) -> dict[str, torch.Tensor]:
-    """1 プロンプトを `AnimaTextEncoderStep` + `AnimaTextConditioningStep` で通す。
+    """Run one prompt through `AnimaTextEncoderStep` + `AnimaTextConditioningStep`.
 
-    トークナイザは repo 同梱の `tokenizer.json`（Qwen2 BPE / T5 Unigram）。`padding="longest"`・
-    単一プロンプトなのでマスクは**全 1** になり、`prompt_embeds * mask` も conditioner の
-    マスク乗算もどちらも恒等 — ラッパ（`anima.patch`）がマスクを持たない根拠がここ。
+    The tokenizers are the repository's bundled `tokenizer.json` (Qwen2 BPE / T5 Unigram). With
+    `padding="longest"` and a single prompt the mask is **all ones**, so both
+    `prompt_embeds * mask` and the conditioner's mask multiplication are the identity — this is
+    why the wrapper (`anima.patch`) has no mask.
 
-    キーは接頭辞なし（`neg_` のような役割の綴りは呼び出し側が付ける）。
+    The keys have no prefix (the caller adds role spellings such as `neg_`).
     """
     qwen = stack.tokenizer(
         [text], padding="longest", max_length=max_len, truncation=True, return_tensors="pt"
@@ -263,20 +288,21 @@ def encode_prompt(stack: TextStack, max_len: int, text: str) -> dict[str, torch.
         )
     if embeds.shape[1] != MIN_SEQUENCE_LENGTH:
         raise ValueError(
-            f"conditioner 出力長 {embeds.shape[1]} が {MIN_SEQUENCE_LENGTH} でない"
-            f"（T5 id 列 {t5.input_ids.shape[1]} が長すぎる）— DiT の入力形と合わない"
+            f"conditioner output length {embeds.shape[1]} is not {MIN_SEQUENCE_LENGTH}"
+            f" (the T5 ids {t5.input_ids.shape[1]} are too long) — does not match the DiT's"
+            " input shape"
         )
-    # MUST: id 列は IR の意味論 dtype（i32）へ落として書く — 変換点は 1 箇所（ADR 0009）。
+    # MUST: write the ids in the IR's semantic dtype (i32) — one conversion point (ADR 0009).
     return {
-        "qwen_input_ids": normalize_boundary_tensor(qwen.input_ids, "qwen id 列"),
-        "t5_input_ids": normalize_boundary_tensor(t5.input_ids, "t5 id 列"),
+        "qwen_input_ids": normalize_boundary_tensor(qwen.input_ids, "qwen ids"),
+        "t5_input_ids": normalize_boundary_tensor(t5.input_ids, "t5 ids"),
         "qwen_hidden_states": hidden.contiguous(),
         "encoder_hidden_states": embeds.contiguous(),
     }
 
 
 def encode_text(repo: str, max_len: int, dtype: str) -> dict[str, torch.Tensor]:
-    """固定プロンプト 2 本（正 / ネガティブ）をフィクスチャのキー空間へ落とす。"""
+    """Map the 2 fixed prompts (positive / negative) into the fixture's key space."""
     stack = load_text_stack(repo, dtype)
     out: dict[str, torch.Tensor] = {}
     for tag, text in (("", PROMPT), ("neg_", NEGATIVE_PROMPT)):
@@ -288,28 +314,30 @@ def encode_text(repo: str, max_len: int, dtype: str) -> dict[str, torch.Tensor]:
 def timesteps_proj_table(
     repo: str, sigmas: np.ndarray, dtype: str, lora: Path | None, lora_scale: float
 ) -> tuple[torch.Tensor, torch.nn.Module]:
-    """全 step 分の timestep 埋め込み表 `[steps, 2048]` と、ロード済み DiT を返す。
+    """Return the timestep embedding table for all steps `[steps, 2048]` and the loaded DiT.
 
-    表は `AnimaDit` の入力 2 本目そのもの（`anima.patch` が timestep 埋め込みをグラフ入力へ
-    昇格させた先）。DiT を一緒に返すのは、直後の参照 denoise で同じインスタンスを使い回して
-    7.29GiB のロードを 1 回で済ませるため。
+    The table is exactly the 2nd input of `AnimaDit` (where `anima.patch` promoted the timestep
+    embedding to a graph input). The DiT is returned too so that the reference denoise right
+    after reuses the same instance and the 7.29GiB load happens once.
 
-    `AnimaLoopBeforeDenoiser` の `timestep = timesteps[i] / num_train_timesteps` をそのまま
-    踏む（`timesteps = sigmas · num_train_timesteps` なので値としては sigma に戻る）。
+    It follows `AnimaLoopBeforeDenoiser`'s `timestep = timesteps[i] / num_train_timesteps` as is
+    (`timesteps = sigmas · num_train_timesteps`, so the value returns to sigma).
 
-    NOTE（実測・当初「f32 の往復で最終桁が変わる」と書いたのは**誤りだったので訂正**）:
-    steps=32 / shift=3 の 32 本とも `f32(f32(s·1000)/1000) == s` で、往復は 1 ビットも
-    変えない。順序を写してあるのは上流の式と 1 対 1 で追えるようにするためで、丸めの実測に
-    基づく制約ではない。
+    NOTE (measured; the earlier statement "the f32 round trip changes the last digit" **was wrong
+    and is corrected**): for all 32 values of steps=32 / shift=3, `f32(f32(s·1000)/1000) == s`, so
+    the round trip changes not a single bit. The order is copied so that it can be followed 1:1
+    against the upstream formula, not as a constraint based on measured rounding.
     """
     from diffusers import CosmosTransformer3DModel
 
     model = CosmosTransformer3DModel.from_pretrained(repo, subfolder="transformer")
     model.to(torch.float32).eval()
-    # MUST: LoRA は丸めより前に焼く（anima/export.py と同じ順序制約 — ADR 0016）。
+    # MUST: bake the LoRA before rounding (the same ordering constraint as anima/export.py —
+    # ADR 0016).
     _apply_lora(lora, lora_scale, model, "transformer")
-    # MUST: 表を作る**前**に丸める。time_proj は素の正弦波で重みを持たないが、順序を
-    # 「参照より前」に統一しておかないと、将来 time_embed 側に重みが増えた時に黙ってずれる。
+    # MUST: round **before** building the table. time_proj is a plain sinusoid with no weights,
+    # but unless the order is uniformly "before the reference", it would drift silently if
+    # time_embed gains weights in the future.
     _fake_quant(dtype, model, "transformer")
     rows = []
     for sigma in sigmas[:-1]:
@@ -329,24 +357,27 @@ def reference_steps(
     ref_steps: int,
     guidance: float,
 ) -> dict[str, torch.Tensor]:
-    """`AnimaDenoiseStep` を `ref_steps` 回。CFG は `uncond + scale·(cond − uncond)`。
+    """`AnimaDenoiseStep`, `ref_steps` times. CFG is `uncond + scale·(cond − uncond)`.
 
-    latent は素の経路では `(B,C,1,h,w)`。`padding_mask` はピクセル解像度のゼロ
-    （パイプライン既定）で、Karume 側は `anima.patch.AnimaDit` がゼロ定数チャネルへ畳む。
+    On the plain path the latent is `(B,C,1,h,w)`. `padding_mask` is zeros at pixel resolution
+    (the pipeline default); on the Karume side `anima.patch.AnimaDit` folds it into a constant-zero
+    channel.
 
-    cond / uncond の生の DiT 出力も残す — これが無いと Deno 側で CFG と Euler の
-    ホストグルーを**単体でパリティ検査できず**、DiT の誤差と混ざった形でしか見られない。
+    The raw cond / uncond DiT outputs are kept too — without them the Deno side **cannot
+    parity-check the CFG and Euler host glue on its own**, and sees it only mixed with the DiT's
+    error.
 
-    MUST: `guidance == 1.0` のとき uncond 分岐を**計算しない**（Turbo LoRA は CFG=1 で運用
-    する設計 — recon L3）。`uncond + 1.0·(cond − uncond)` は数学的には `cond` に退化するが、
-    素朴に両方計算すると①不要な DiT 呼び出しが 1 回増える②浮動小数の丸め順序で `cond` と
-    ビット一致しなくなる。実運用の「単一呼び出し」を忠実に映すため、この場合は
-    `noise_uncond_stepNNNN` キー自体を書かない — fixture のキー構成が「uncond 分岐が消えた」
-    ことを直接示す形になる。
+    MUST: when `guidance == 1.0`, the uncond branch is **not computed** (Turbo LoRA is designed to
+    run at CFG=1 — recon L3). `uncond + 1.0·(cond − uncond)` reduces to `cond` mathematically, but
+    naively computing both (1) adds one unneeded DiT call and (2) is not bit-identical to `cond`
+    because of the floating-point rounding order. To mirror the "single call" of real use, the
+    `noise_uncond_stepNNNN` key itself is not written in this case — the fixture's key set shows
+    directly that "the uncond branch is gone".
     """
-    # MUST: `padding_mask` は**ピクセル解像度**（latent ではない）で、軸は `[1,1,H,W]`。
-    # 非正方では W と H の取り違えが shape 検査を素通りしない側の唯一の場所なので、
-    # `size` を `(width, height)` で受けてここで入れ替える（呼び出し側は WxH の綴り順）。
+    # MUST: `padding_mask` is at **pixel resolution** (not latent), with axes `[1,1,H,W]`. For a
+    # non-square shape this is the only place where a W / H mix-up does not slip past a shape
+    # check, so `size` is taken as `(width, height)` and swapped here (the caller uses the WxH
+    # spelling order).
     width, height = size
     padding_mask = latents.new_zeros(1, 1, height, width)
     skip_uncond = guidance == 1.0
@@ -390,10 +421,10 @@ def reference_steps(
 
 
 def denormalize_latents(vae: torch.nn.Module, latents4: torch.Tensor) -> torch.Tensor:
-    """`AnimaVaeDecoderStep` の逆正規化（rank4 → rank5）。
+    """The denormalization of `AnimaVaeDecoderStep` (rank4 → rank5).
 
-    MUST: decoders.py は std の**逆数を作って割る**。`latents * std` に直すと最終桁が
-    変わる（TS 側の実装も同じ順序で書く）。
+    MUST: decoders.py **builds the reciprocal of std and divides by it**. Rewriting it as
+    `latents * std` changes the last digit (the TS side is written in the same order).
     """
     z = latents4.unsqueeze(2)
     mean = torch.tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
@@ -402,12 +433,13 @@ def denormalize_latents(vae: torch.nn.Module, latents4: torch.Tensor) -> torch.T
 
 
 def decode_latents(repo: str, latents4: torch.Tensor, dtype: str) -> dict[str, torch.Tensor]:
-    """`AnimaVaeDecoderStep` の再現（逆正規化 → decode）。**パッチ前**の素の経路で採る。
+    """Reproduces `AnimaVaeDecoderStep` (denormalize → decode). Taken on the plain **unpatched**
+    path.
 
-    `image` は `vae.decode` の戻り値そのもの。`AutoencoderKLQwenImage._decode` は最後に
-    `torch.clamp(-1, 1)` を掛けており（`AnimaVaeDecoder` が焼き込んでいるのはこの clamp で、
-    postprocess 由来ではない）、**フィクスチャ側も IR 側も同じ位置で clamp 済み**になる —
-    突合にホスト側の clamp 鏡像は要らない。
+    `image` is exactly the return value of `vae.decode`. `AutoencoderKLQwenImage._decode` applies
+    `torch.clamp(-1, 1)` at the end (the clamp that `AnimaVaeDecoder` bakes in is this one, not
+    one from postprocess), so **both the fixture side and the IR side are clamped at the same
+    place** — the comparison needs no host-side mirror of the clamp.
     """
     from diffusers import AutoencoderKLQwenImage
 
@@ -432,43 +464,48 @@ def main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとに outputs/series/anima-pipeline{,-f16,-i8}/）",
+        help="output directory (default per --dtype: outputs/series/anima-pipeline{,-f16,-i8}/)",
     )
     parser.add_argument(
         "--dtype",
         choices=REF_DTYPES,
         default="f32",
-        help="圧縮系列は 4 コンポーネントとも fake-quant してから参照を採る（i8 は DiT のみ i8）",
+        help="a compressed series fake-quantizes all 4 components before taking the reference"
+        " (i8 makes only the DiT i8)",
     )
-    parser.add_argument("--steps", type=int, default=32, help="sigma スケジュールの総 step 数")
+    parser.add_argument("--steps", type=int, default=32, help="total steps of the sigma schedule")
     parser.add_argument(
-        "--ref-steps", type=int, default=2, help="torch で実行して参照 latent を残す step 数"
+        "--ref-steps",
+        type=int,
+        default=2,
+        help="steps to run in torch, keeping the reference latents",
     )
     parser.add_argument(
         "--resolution",
         default="512",
-        help="WxH（例 1344x768）。正方は略記できる（512 = 512x512）"
-        "— 綴りはデモの --resolution と同じ",
+        help="WxH (e.g. 1344x768). A square can use the shorthand (512 = 512x512)"
+        " — the same spelling as the demo's --resolution",
     )
     parser.add_argument("--max-sequence-length", type=int, default=512)
     parser.add_argument(
         "--guidance-scale",
         type=float,
         default=GUIDANCE_SCALE,
-        help="CFG のガイダンス係数（1.0 で uncond 分岐を計算しない — Turbo LoRA の運用値）",
+        help="CFG guidance scale (1.0 skips the uncond branch — the value Turbo LoRA runs at)",
     )
     parser.add_argument(
         "--lora",
         type=Path,
         default=None,
-        help="export 前に DiT へ焼き込む LoRA（text_conditioner 側は既知の noop なので適用しない）",
+        help="LoRA to bake into the DiT before export (not applied to text_conditioner, a known"
+        " no-op)",
     )
-    parser.add_argument("--lora-scale", type=float, default=1.0, help="LoRA の倍率")
+    parser.add_argument("--lora-scale", type=float, default=1.0, help="LoRA scale")
     parser.add_argument(
         "--act-quant",
         action="store_true",
-        help="DiT の適格 linear の入力を per-token i8 へ fake-quant する"
-        "（ランタイムの linearCompute:'a8' の鏡像 — 重み側は --dtype i8 と併用する）",
+        help="fake-quantize the inputs of the DiT's eligible linears to per-token i8"
+        " (mirrors the runtime's linearCompute:'a8' — combine with --dtype i8 for the weights)",
     )
     args = parser.parse_args()
     try:
@@ -477,14 +514,14 @@ def main() -> None:
         raise SystemExit(str(error)) from error
     if args.act_quant and args.dtype != "i8":
         raise SystemExit(
-            f"--act-quant は --dtype i8 と併用する（指定は {args.dtype}）— "
-            "活性 i8 は i8 常駐重みの linear にしか効かない（設計 §4.1）"
+            f"--act-quant must be combined with --dtype i8 (got {args.dtype}) — "
+            "i8 activations apply only to linears with resident i8 weights (design §4.1)"
         )
     if args.out is None:
         args.out = DEFAULT_OUTS[args.dtype]
 
     if args.ref_steps > args.steps:
-        raise SystemExit(f"--ref-steps({args.ref_steps})が --steps({args.steps})を超えている")
+        raise SystemExit(f"--ref-steps ({args.ref_steps}) exceeds --steps ({args.steps})")
 
     sigmas = sigma_schedule(args.steps, SHIFT)
     tensors: dict[str, torch.Tensor] = {"sigmas": torch.from_numpy(sigmas)}
@@ -499,9 +536,10 @@ def main() -> None:
         flush=True,
     )
 
-    # `AnimaPrepareLatentsStep.prepare_latents` と同じ shape・同じ dtype で引く。
-    # MUST: 軸の順は `[..., H, W]`（綴りの WxH とは逆）。非正方でここを入れ替えると
-    # 要素数は合ったまま latent が転置され、参照だけが別の絵になる。
+    # Drawn with the same shape and dtype as `AnimaPrepareLatentsStep.prepare_latents`.
+    # MUST: the axis order is `[..., H, W]` (the reverse of the WxH spelling). Swapping them here
+    # for a non-square shape keeps the element count but transposes the latent, and only the
+    # reference becomes a different image.
     latents = torch.randn(
         (1, LATENT_CHANNELS, 1, height // SPATIAL_COMPRESSION, width // SPATIAL_COMPRESSION),
         generator=torch.Generator().manual_seed(SEED),
@@ -511,17 +549,20 @@ def main() -> None:
 
     proj, model = timesteps_proj_table(args.repo, sigmas, args.dtype, args.lora, args.lora_scale)
     tensors["timesteps_proj"] = proj
-    # w8a8（`SessionOptions.linearCompute: "a8"`）の鏡像。**DiT だけ**に掛ける — ランタイム
-    # 側も transformer の Session にしかノブを立てないので、text / VAE まで掛けると参照だけが
-    # 別のモデルの数になる（`_fake_quant` の COMPONENT_DTYPES と同じ規律）。
+    # Mirrors w8a8 (`SessionOptions.linearCompute: "a8"`). Applied to **the DiT only** — the
+    # runtime also sets the knob only on the transformer's Session, so applying it to text / VAE
+    # too would make only the reference the numbers of a different model (the same discipline as
+    # COMPONENT_DTYPES of `_fake_quant`).
     act_handles: list[object] = []
     if args.act_quant:
         act_handles, attached = attach_act_quant(model)
-        # MUST: 本数を出す。0 本のまま参照を採ると「w8a8 のつもりで w8 の数を採った」ことに
-        # 気づけない（ADR 0006 の診断常設と同じ流儀）。
-        print(f"[act-quant] transformer: 適格 linear {attached} 本に per-token i8 を適用")
+        # MUST: print the count. Taking the reference with 0 would hide that "w8 numbers were
+        # taken while meaning w8a8" (the same practice as the always-on diagnostics of ADR 0006).
+        print(f"[act-quant] transformer: per-token i8 applied to {attached} eligible linears")
         if attached == 0:
-            raise SystemExit("--act-quant を指定したが適格 linear が 0 本（適格判定の破れ）")
+            raise SystemExit(
+                "--act-quant was given but 0 linears are eligible (the eligibility check is broken)"
+            )
     try:
         tensors.update(
             reference_steps(

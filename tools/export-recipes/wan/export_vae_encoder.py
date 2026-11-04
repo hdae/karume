@@ -1,36 +1,44 @@
-"""Wan2.2 TI2V-5B の VAE encoder の chunk 0（I2V の条件の画像 1 枚）を IR v2 の 3 グラフへ書き出し、
-GPU の門の golden を作る台本（ADR 0121 決定 11・段 9a）。
+"""The script that writes chunk 0 of the Wan2.2 TI2V-5B VAE encoder (the single conditioning image
+of I2V) out to 3 IR v2 graphs and makes the goldens of the GPU check (ADR 0121 decision 11,
+step 9a).
 
-書き出すもの（系列 `outputs/series/wan2.2-ti2v-5b-f16-dyn/` — decoder の chunk グラフと同じ系列）:
+What it writes (series `outputs/series/wan2.2-ti2v-5b-f16-dyn/` — the same series as the decoder's
+chunk graphs):
 
-- `vae_encoder_pre/model.krm` — 入力 `image` `[12, 1, 8h, 8w]`（patchify 後の画像）→
-  `[640, 1, h, w]`（記号 h, w）。
-- `vae_encoder_attn/model.krm` — 入力 `tokens` `[640, S]` → `[640, S]`（記号 S = h·w）。
-- `vae_encoder_post/model.krm` — 入力 `hidden` `[640, 1, h, w]` → mu `[48, 1, h, w]`（記号 h, w）。
-- `vae_encoder.<case>.safetensors`（系列の根）— GPU の門の golden（{@link GOLDEN_CASES}）。
+- `vae_encoder_pre/model.krm` — input `image` `[12, 1, 8h, 8w]` (the image after patchify) →
+  `[640, 1, h, w]` (symbols h, w).
+- `vae_encoder_attn/model.krm` — input `tokens` `[640, S]` → `[640, S]` (symbol S = h·w).
+- `vae_encoder_post/model.krm` — input `hidden` `[640, 1, h, w]` → mu `[48, 1, h, w]` (symbols
+  h, w).
+- `vae_encoder.<case>.safetensors` (at the series root) — the goldens of the GPU check
+  ({@link GOLDEN_CASES}).
 
-容器は**グラフ 1 本ずつの 3 本**（部品 3 つ）。容器の形式は 1 容器に複数グラフを載せられるが、
-manifest `karume/5` は「1 容器 1 グラフ・グラフ名 = 部品名 = weights のキー」で使わない
-（ADR 0109 決定 2・追記 1）— 書き手（`karume.container` の `_graph_descriptor`）も 1 グラフしか
-書かない。置き場の綴りは decoder（`vae_decoder_first/` / `vae_decoder_next/`）と同じ
-「系列の根 / 部品名 / model.krm」。3 グラフの重みは互いに重ならない（重複は無い）。
+The containers are **3, one graph each** (3 components). The container format can carry several
+graphs in one container, but manifest `karume/5` does not use that ("one container, one graph;
+graph name = component name = the key under weights" — ADR 0109 decision 2, addendum 1), and the
+writer (`_graph_descriptor` of `karume.container`) writes only one graph either. The location is
+spelled the same as the decoder's (`vae_decoder_first/` / `vae_decoder_next/`): "series root /
+component name / model.krm". The weights of the 3 graphs do not overlap (there are no
+duplicates).
 
-格納は **f16 席だけ**（decoder と同じ — 決定 7）: 重みを f16 表現可能値へ丸めて（fake-quant —
-ADR 0006）から 3 グラフと golden の参照を採る（丸めより前に参照を採ると、照合の差が量子化誤差と
-実装誤差の合成になって帯の意味が消える）。
+Storage is **the f16 preset only** (the same as the decoder — decision 7): the weights are rounded
+to f16-representable values (fake-quant — ADR 0006) before the 3 graphs and the goldens' reference
+are taken (taking the reference before rounding would make the checked difference a mix of
+quantization error and implementation error, and the band would lose its meaning).
 
-golden のケースはテスト画像 3 枚（`inputs/wan-i2v/<name>-832x480.png` — git 追跡外・sha256 を
-{@link IMAGES} で固定）× 3 寸法（1280×704・704×1280〈横長の画像を明示した縦長にクロップ〉・
-256×160〈縮小の経路 — 潜在 10×16〉）を fit = `crop`（公式の前処理）で、帯の決定用 2 枚
-（boxing-cats・cat-dog-baking）と受入れ 1 枚（ferret）に割り振る（decoder の chunk の e2e と同じ
-規律 — 受入れの結果を見て帯を変えない）。加えて fit = `stretch`（diffusers の前処理）の RGB8 だけを
-1 寸法（1280×704）ぶん持つ（TS のホストテスト用・role `host`）。
+The golden cases are 3 test images (`inputs/wan-i2v/<name>-832x480.png` — not tracked in git,
+sha256 pinned in {@link IMAGES}) × 3 sizes (1280×704, 704×1280 (a landscape image cropped to an
+explicitly requested portrait), 256×160 (the downscaling path — latent 10×16)) with fit = `crop`
+(the official preprocessing), split into 2 band images (boxing-cats, cat-dog-baking) and 1
+acceptance image (ferret) (the same discipline as the e2e of the decoder's chunks — the band is not
+changed after looking at the acceptance results). In addition, only the RGB8 of fit = `stretch`
+(diffusers' preprocessing) is kept for 1 size (1280×704) (for the TS host test, role `host`).
 
-    uv run --group wan --inexact python -m wan.export_vae_encoder             # 3 グラフ + golden
-    uv run --group wan --inexact python -m wan.export_vae_encoder --verify    # eager 同値の実測
+    uv run --group wan --inexact python -m wan.export_vae_encoder             # 3 graphs + goldens
+    uv run --group wan --inexact python -m wan.export_vae_encoder --verify    # eager equivalence
 
-MUST: diffusers / Pillow は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers / Pillow inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -64,11 +72,12 @@ from wan.sources import SOURCES
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
 
-#: モデル（`wan.sources.SOURCES` のキー）と系列（decoder と同じ系列 — ADR 0121 決定 7）。
+#: The model (a key of `wan.sources.SOURCES`) and the series (the same series as the decoder — ADR
+#: 0121 decision 7).
 MODEL = "ti2v-5b"
 SERIES_NAME = export_vae.TI2V_SERIES_NAME
 
-#: ターゲット名 = 部品名 = 容器のグラフ名 = 部品ディレクトリ名。
+#: Target name = component name = the container's graph name = the component directory name.
 TARGET_PRE = "vae_encoder_pre"
 TARGET_ATTENTION = "vae_encoder_attn"
 TARGET_POST = "vae_encoder_post"
@@ -76,31 +85,37 @@ TARGETS = (TARGET_PRE, TARGET_ATTENTION, TARGET_POST)
 
 MODEL_FILE = "model.krm"
 
-#: グラフ入力の綴り（各モジュールの forward の引数名がそのまま IR の入力名になる）。
+#: The spelling of the graph inputs (the argument names of each module's forward become the IR
+#: input names as is).
 INPUT_NAMES = {TARGET_PRE: "image", TARGET_ATTENTION: "tokens", TARGET_POST: "hidden"}
 
-#: 記号の名前（pre / post は潜在の高さ・幅、attn は系列長 S = h·w）。
+#: The symbol names (the latent height and width for pre / post, the sequence length S = h·w for
+#: attn).
 LATENT_SYMBOLS = ("h", "w")
 SEQUENCE_SYMBOL = "S"
 
-#: 記号の範囲（export の制約だけに効き、IR には載らない）。下限 2 は torch.export の 0 / 1 の
-#: 特殊化を避ける線（DiT の `Dim("S")` と同じ）。上限は受理集合（潜在の辺 ≤ 80）より広く取る —
-#: 受理寸法の門はパイプラインの側に置く（資産は解像度から独立 — ADR 0038 §4）。
+#: The symbol ranges (they affect only the export constraints and do not go into the IR). The lower
+#: bound 2 is the line that avoids torch.export's 0 / 1 specialization (the same as the DiT's
+#: `Dim("S")`). The upper bound is wider than the accepted set (latent side ≤ 80) — the check on
+#: accepted sizes lives on the pipeline side (the asset is independent of the resolution — ADR 0038
+#: §4).
 LATENT_MIN = 2
 LATENT_MAX = 160
 SEQUENCE_MIN = 2
 SEQUENCE_MAX = LATENT_MAX * LATENT_MAX
 
-#: pre の入力の空間比（潜在 1 に対する patchify 後の画像の辺 — down 3 段で 1/8）。
+#: The spatial ratio of pre's input (the side of the patchified image per latent 1 — 1/8 after 3
+#: down stages).
 PATCH_SCALE = 8
 
-#: export の例示入力の潜在の寸法（1280×704 の横長 — h ≠ w にして記号の取り違えを形で掴む）。
+#: The latent size of the export's example input (landscape 1280×704 — h ≠ w, so a swap of the
+#: symbols shows up in the shapes).
 EXAMPLE_LATENT = (44, 80)
 
-#: グラフごとの IR に現れてよい op の集合（これ以外が出たら書き直しの漏れ — fail loudly）。
-#: SiLU は `x · sigmoid(x)` に分解される・mid の attention は SDPA の保存（ADR 0023）・pad は
-#: down の ZeroPad2d だけ・slice / cat はショートカットのチャネル対（と mu の切り出し・qkv の
-#: 分割）。
+#: The set of ops allowed in each graph's IR (anything else means a missed rewrite — fail loudly).
+#: SiLU decomposes into `x · sigmoid(x)`; the mid attention is SDPA preserved (ADR 0023); pad is
+#: only down's ZeroPad2d; slice / cat are the channel pairs of the shortcuts (and the mu extraction
+#: and the qkv split).
 EXPECTED_OPS: dict[str, frozenset[str]] = {
     TARGET_PRE: frozenset(
         {
@@ -151,20 +166,22 @@ EXPECTED_OPS: dict[str, frozenset[str]] = {
     ),
 }
 
-#: 値の rank の上限（strided コピー族の上限）。rank 5 は conv3d の重みだけに許す。
+#: The upper bound on value rank (the limit of the strided-copy family). Rank 5 is allowed only for
+#: conv3d weights.
 MAX_VALUE_RANK = 4
 
 
 class EncoderGraphError(AssertionError):
-    """export した encoder のグラフが取り決め（rank・op・記号・入出力の形）から外れた。"""
+    """The exported encoder graph departs from the conventions (rank, ops, symbols, input / output
+    shapes)."""
 
 
-# ---- golden のケース ----------------------------------------------------------------
+# ---- golden cases ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class GoldenImage:
-    """テスト画像 1 枚（`inputs/wan-i2v/<name>-832x480.png` — git 追跡外）と、その sha256。"""
+    """One test image (`inputs/wan-i2v/<name>-832x480.png` — not tracked in git) and its sha256."""
 
     name: str
     sha256: str
@@ -174,11 +191,12 @@ class GoldenImage:
         return IMAGE_DIR / f"{self.name}-{IMAGE_SIZE[0]}x{IMAGE_SIZE[1]}.png"
 
 
-#: テスト画像の置き場と寸法（Wan2.1 の視認の先頭フレームの凍結コピー — 3 枚とも 832×480）。
+#: Where the test images live and their size (frozen copies of the first frames of the Wan2.1
+#: visual checks — all 3 are 832×480).
 IMAGE_DIR = INPUTS_ROOT / "wan-i2v"
 IMAGE_SIZE = (832, 480)
 
-#: テスト画像（sha256 は来歴の正本 — 食い違えば fail loudly）。
+#: The test images (the sha256 is the source of truth of the provenance — a mismatch fails loudly).
 IMAGES = (
     GoldenImage("boxing-cats", "4689f815503859b4d08b464f21239b0ab5066b4da06e7130aa32a60ef1fe5888"),
     GoldenImage(
@@ -187,27 +205,28 @@ IMAGES = (
     GoldenImage("ferret", "a6b740a2ec936d2a102839441f9caabd787fc1d4e27126bbed4be429aef7bd54"),
 )
 
-#: 帯の決定用と受入れの割り振り（画像で分ける — 寸法ごとに決定用 2 本・受入れ 1 本）。
+#: The split into band and acceptance (by image — per size, 2 band cases and 1 acceptance case).
 BAND_IMAGES = ("boxing-cats", "cat-dog-baking")
 ACCEPT_IMAGES = ("ferret",)
 
-#: encoder の寸法（幅, 高さ）: 受理集合の 2 寸法（704×1280 は横長の画像を明示した縦長）と、
-#: 縮小の経路（832×480 → 277×160 → 256×160・潜在 10×16 — 受理の外だがグラフは寸法に依らない）。
+#: The encoder sizes (width, height): the 2 sizes of the accepted set (704×1280 is a landscape image
+#: given explicitly as portrait) and the downscaling path (832×480 → 277×160 → 256×160, latent
+#: 10×16 — outside the accepted set, but the graphs do not depend on the size).
 ENCODER_SIZES = ((1280, 704), (704, 1280), (256, 160))
 
-#: fit = `stretch` の RGB8 を作る寸法（TS のホストテスト用 — 1 寸法ぶん）。
+#: The size at which the fit = `stretch` RGB8 is made (for the TS host test — 1 size).
 STRETCH_SIZE = (1280, 704)
 
 
 @dataclass(frozen=True)
 class GoldenCase:
-    """golden 1 本（画像・出力寸法・fit・役割）。"""
+    """One golden (image, output size, fit, role)."""
 
     image: str
     width: int
     height: int
     fit: Fit
-    #: `band` = 帯の決定用・`accept` = 受入れ・`host` = 前処理だけ（GPU を回さない）。
+    #: `band` = band case, `accept` = acceptance, `host` = preprocessing only (no GPU run).
     role: str
 
     @property
@@ -217,7 +236,7 @@ class GoldenCase:
 
     @property
     def encodes(self) -> bool:
-        """encoder の入力と mu を持つか（`stretch` は前処理の RGB8 だけ）。"""
+        """Whether it holds the encoder input and mu (`stretch` has only the preprocessed RGB8)."""
         return self.fit == "crop"
 
 
@@ -233,11 +252,11 @@ def _golden_cases() -> tuple[GoldenCase, ...]:
 
 GOLDEN_CASES = _golden_cases()
 
-#: golden の置き場（系列の根の `vae_encoder.<case>.safetensors`）。
+#: Where the goldens live (`vae_encoder.<case>.safetensors` at the series root).
 GOLDEN_PREFIX = "vae_encoder."
 GOLDEN_SUFFIX = ".safetensors"
 
-#: golden のメタ `reference`（参照の素性）。
+#: The goldens' metadata `reference` (the reference's provenance).
 GOLDEN_REFERENCE = (
     "diffusers AutoencoderKLWan.encode (non-tiled) latent_dist.mode() (CPU f32), normalized as"
     " WanImageToVideoPipeline.prepare_latents"
@@ -254,35 +273,39 @@ def _sha256(path: Path) -> str:
 
 
 def load_image(image: GoldenImage) -> Any:
-    """テスト画像を RGB で開く（sha256 と寸法が来歴と違えば fail loudly）。"""
+    """Opens a test image as RGB (sha256 and size that differ from the provenance fail loudly)."""
     if not image.path.is_file():
         raise FileNotFoundError(
-            f"テスト画像 {image.path} が無い（inputs/ は git 追跡外 — 凍結コピーを置く）"
+            f"test image {image.path} is missing (inputs/ is not tracked in git — put the frozen"
+            " copy there)"
         )
     digest = _sha256(image.path)
     if digest != image.sha256:
-        raise EncoderGraphError(f"{image.path} の sha256 {digest} が来歴 {image.sha256} と違う")
+        raise EncoderGraphError(
+            f"{image.path}: sha256 {digest} differs from the provenance {image.sha256}"
+        )
     opened = i2v_preprocess_ref.load_rgb(image.path)
     if opened.size != IMAGE_SIZE:
-        raise EncoderGraphError(f"{image.path} の寸法 {opened.size} が {IMAGE_SIZE} でない")
+        raise EncoderGraphError(f"{image.path}: size {opened.size} is not {IMAGE_SIZE}")
     return opened
 
 
 def library_versions() -> dict[str, str]:
-    """値を決めるライブラリの版（golden の来歴 — Pillow は LANCZOS の実装を決める）。"""
+    """The versions of the libraries that determine the values (the goldens' provenance — Pillow
+    determines the LANCZOS implementation)."""
     return {name: version(name) for name in ("pillow", "torch", "torchvision", "diffusers")}
 
 
-# ---- グラフ --------------------------------------------------------------------------
+# ---- graphs --------------------------------------------------------------------------
 
 
 def _hidden_channels(vae: AutoencoderKLWan) -> int:
-    """mid block のチャネル数（`base_dim × dim_mult[-1]` — 5B は 640）。"""
+    """The channel count of the mid block (`base_dim × dim_mult[-1]` — 640 for 5B)."""
     return int(vae.config.base_dim) * int(vae.config.dim_mult[-1])
 
 
 def example_inputs(target: str, vae: AutoencoderKLWan) -> tuple[torch.Tensor]:
-    """export の例示入力（値は形にしか効かない）。"""
+    """The export's example input (the values only affect the shapes)."""
     height, width = EXAMPLE_LATENT
     hidden = _hidden_channels(vae)
     if target == TARGET_PRE:
@@ -292,11 +315,11 @@ def example_inputs(target: str, vae: AutoencoderKLWan) -> tuple[torch.Tensor]:
         return (torch.zeros(hidden, height * width),)
     if target == TARGET_POST:
         return (torch.zeros(hidden, 1, height, width),)
-    raise EncoderGraphError(f"未知のターゲット {target}")
+    raise EncoderGraphError(f"unknown target {target}")
 
 
 def dynamic_shapes(target: str) -> tuple[Any, ...]:
-    """記号の宣言（pre は `8h` / `8w`・attn は `S`・post は `h` / `w`）。"""
+    """The symbol declarations (pre is `8h` / `8w`, attn is `S`, post is `h` / `w`)."""
     from torch.export import Dim
 
     if target == TARGET_ATTENTION:
@@ -312,7 +335,8 @@ def symbol_names(target: str) -> tuple[str, ...]:
 
 
 def expected_io(target: str, vae: AutoencoderKLWan) -> tuple[list[Any], list[Any]]:
-    """グラフの入力と出力の宣言 shape（記号は IR の綴り `8h` / `h` / `S`）。"""
+    """The declared shapes of the graph's input and output (symbols in the IR spelling `8h` / `h` /
+    `S`)."""
     hidden = _hidden_channels(vae)
     latent = [hidden, 1, "h", "w"]
     if target == TARGET_PRE:
@@ -322,21 +346,22 @@ def expected_io(target: str, vae: AutoencoderKLWan) -> tuple[list[Any], list[Any
         return [hidden, "S"], [hidden, "S"]
     if target == TARGET_POST:
         return latent, [int(vae.config.z_dim), 1, "h", "w"]
-    raise EncoderGraphError(f"未知のターゲット {target}")
+    raise EncoderGraphError(f"unknown target {target}")
 
 
 def assert_encoder_graph(graph: IrGraph, target: str, vae: AutoencoderKLWan) -> None:
-    """encoder のグラフの IR が取り決めを満たすことを見る（外れたら fail loudly）。
+    """Checks that the encoder graph's IR meets the conventions (fails loudly otherwise).
 
-    - op は {@link EXPECTED_OPS} のそのグラフの集合の中だけ。
-    - 値は rank 4 以下。rank 5 は conv3d の重み（initializer・第 2 入力）だけ。
-    - 記号は宣言どおり（pre / post は `[h, w]`・attn は `[S]`）で、入力は 1 本（名前と形）・出力は
-      1 本（形）。記号の積（`h·w`）は IR の次元式に載らない — 載ったら export が既に落ちている。
+    - ops only from that graph's set in {@link EXPECTED_OPS}.
+    - values of rank 4 or less. Rank 5 only for conv3d weights (initializer, second input).
+    - the symbols are as declared (pre / post `[h, w]`, attn `[S]`), with 1 input (name and shape)
+      and 1 output (shape). The product of the symbols (`h·w`) does not go into the IR's dimension
+      expressions — if it did, the export would already have failed.
     """
     ops = Counter(node.op for node in graph.nodes)
     unexpected = sorted(set(ops) - EXPECTED_OPS[target])
     if unexpected:
-        raise EncoderGraphError(f"{target}: 想定外の op {unexpected}（書き直しの漏れ）")
+        raise EncoderGraphError(f"{target}: unexpected ops {unexpected} (a missed rewrite)")
 
     conv3d_weights = {node.ins[1] for node in graph.nodes if node.op == "conv3d"}
     for name, value in graph.values.items():
@@ -345,7 +370,7 @@ def assert_encoder_graph(graph: IrGraph, target: str, vae: AutoencoderKLWan) -> 
             continue
         if name not in graph.initializers or name not in conv3d_weights or rank != 5:
             raise EncoderGraphError(
-                f"{target}: rank {rank} の値 '{name}'（rank 5 は conv3d の重みだけ）"
+                f"{target}: rank {rank} value '{name}' (rank 5 only for conv3d weights)"
             )
 
     expected_symbols = list(symbol_names(target))
@@ -359,26 +384,27 @@ def assert_encoder_graph(graph: IrGraph, target: str, vae: AutoencoderKLWan) -> 
             " でない"
         )
     if len(graph.outputs) != 1:
-        raise EncoderGraphError(f"{target}: 出力 {len(graph.outputs)} 本（期待 1）")
+        raise EncoderGraphError(f"{target}: {len(graph.outputs)} outputs (expected 1)")
     output_shape = list(graph.values[graph.outputs[0]].shape)
     if output_shape != expected_output:
-        raise EncoderGraphError(f"{target}: 出力の形 {output_shape} が {expected_output} でない")
+        raise EncoderGraphError(f"{target}: output shape {output_shape} is not {expected_output}")
 
 
 def graph_module(target: str, vae: AutoencoderKLWan) -> torch.nn.Module:
-    """ターゲットのモジュール（eval — 重みは今の VAE の値の写し）。"""
+    """The target's module (eval — the weights are a copy of the current VAE values)."""
     builders = {
         TARGET_PRE: vae_encoder_patch.VaeEncoderPre,
         TARGET_ATTENTION: vae_encoder_patch.VaeEncoderAttention,
         TARGET_POST: vae_encoder_patch.VaeEncoderPost,
     }
     if target not in builders:
-        raise EncoderGraphError(f"未知のターゲット {target}（既知: {', '.join(TARGETS)}）")
+        raise EncoderGraphError(f"unknown target {target} (known: {', '.join(TARGETS)})")
     return builders[target](vae).eval()
 
 
 def weight_summary(vae: AutoencoderKLWan) -> dict[str, Any]:
-    """encoder + quant_conv の重みの要素数・最大絶対値・非有限の数（要約の記録用）。"""
+    """Element count, max absolute value and non-finite count of the encoder + quant_conv weights
+    (for the summary record)."""
     tensors = [*vae.encoder.parameters(), *vae.quant_conv.parameters()]
     with torch.no_grad():
         return {
@@ -415,7 +441,7 @@ def _graph_summary(
     }
 
 
-# ---- golden --------------------------------------------------------------------------
+# ---- goldens -------------------------------------------------------------------------
 
 
 def golden_tensors(
@@ -424,16 +450,20 @@ def golden_tensors(
     case: GoldenCase,
     source: Any,
 ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
-    """golden 1 本の中身と、書き直しの eager の差（`graphs` を渡したときだけ — 記録用）。
+    """The contents of one golden, and the eager difference of the rewrite (only when `graphs` is
+    given — for the record).
 
-    テンソル（`stretch` は `source` と `rgb8` だけ）:
+    Tensors (`stretch` has only `source` and `rgb8`):
 
-    - `source` `[480, 832, 3]` u8 — テスト画像の画素（来歴の sha256 の画像そのもの — TS のホスト
-      テストが PNG を decode せずに前処理の鎖を回せる）。
-    - `rgb8` `[H, W, 3]` u8 — fit の前処理の出力。
-    - `encoder_input` `[12, 1, H/2, W/2]` f32 — [-1, 1] と patchify の後（pre のグラフの入力）。
-    - `mu` `[48, 1, h, w]` f32 — 上流の非タイル encode の mu（post のグラフの出力の参照）。
-    - `latent` `[48, 1, h, w]` f32 — mu の正規化 `(mu − mean)·f32(1/f32(std))`（DiT へ渡す条件）。
+    - `source` `[480, 832, 3]` u8 — the pixels of the test image (the very image of the provenance
+      sha256 — lets the TS host test run the preprocessing chain without decoding a PNG).
+    - `rgb8` `[H, W, 3]` u8 — the output of the fit's preprocessing.
+    - `encoder_input` `[12, 1, H/2, W/2]` f32 — after [-1, 1] and patchify (the input of the pre
+      graph).
+    - `mu` `[48, 1, h, w]` f32 — the mu of upstream's non-tiled encode (the reference for the post
+      graph's output).
+    - `latent` `[48, 1, h, w]` f32 — the normalized mu `(mu − mean)·f32(1/f32(std))` (the condition
+      passed to the DiT).
     """
     resized = i2v_preprocess_ref.preprocess(source, case.width, case.height, case.fit)
     tensors = {
@@ -491,11 +521,12 @@ def emit_series(
     *,
     cases: Sequence[GoldenCase],
 ) -> dict[str, Any]:
-    """グラフと golden（`cases` — 空なら書かない）を一組で作業席へ書き、全部の検査を通してから
-    据える。
+    """Writes the graphs and the goldens (`cases` — none when empty) as one set into staging
+    directories, and publishes them after every check has passed.
 
-    MUST: 一組で据える（decoder の `emit_targets` と同じ理由 — 途中で落ちた実走が、別の丸めの世代の
-    グラフと golden の混ざった組を系列に残すと、形が同じなので誰にも見分けられない）。
+    MUST: publish as one set (for the same reason as the decoder's `emit_targets` — if a run that
+    failed midway left a mixed set of graphs and goldens of different rounding generations in the
+    series, nobody could tell them apart, since the shapes are the same).
     """
     unknown = sorted(set(targets) - set(TARGETS))
     if unknown or len(set(targets)) != len(targets):
@@ -556,15 +587,16 @@ def emit_series(
     return summary
 
 
-# ---- eager 同値の実測 ----------------------------------------------------------------
+# ---- measuring the eager equivalence -------------------------------------------------
 
 
 def verify(cases: Sequence[GoldenCase]) -> dict[str, Any]:
-    """書き直しの eager 同値を実重み（f32・丸め無し）で測る（テスト画像 × 寸法）。
+    """Measures the eager equivalence of the rewrite on the real weights (f32, no rounding) (test
+    images × sizes).
 
-    - 3 グラフを繋いだ mu と上流の非タイル encode の mu の差（最大絶対値・参照の最大絶対値に
-      対する比）
-    - 参照と書き直しの所要（CPU）
+    - the difference between the mu of the 3 chained graphs and the mu of upstream's non-tiled
+      encode (max absolute value, ratio to the reference's max absolute value)
+    - the time taken by the reference and by the rewrite (CPU)
     """
     vae = export_vae.load_vae(MODEL, round_f16=False)
     export_vae.assert_series_config(vae, export_vae.VAE_SERIES[MODEL])
@@ -609,13 +641,19 @@ def verify(cases: Sequence[GoldenCase]) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
-        "--out", type=Path, default=None, help=f"系列の根（既定 {SERIES_ROOT / SERIES_NAME}）"
+        "--out", type=Path, default=None, help=f"series root (default {SERIES_ROOT / SERIES_NAME})"
     )
     parser.add_argument(
-        "--target", action="append", choices=TARGETS, default=None, help="書くグラフ（既定は 3 本）"
+        "--target",
+        action="append",
+        choices=TARGETS,
+        default=None,
+        help="graphs to write (default: all 3)",
     )
-    parser.add_argument("--no-goldens", action="store_true", help="golden を書かない")
-    parser.add_argument("--verify", action="store_true", help="eager 同値を測るだけ（書かない）")
+    parser.add_argument("--no-goldens", action="store_true", help="do not write the goldens")
+    parser.add_argument(
+        "--verify", action="store_true", help="only measure the eager equivalence (writes nothing)"
+    )
     args = parser.parse_args(argv)
 
     if args.verify:

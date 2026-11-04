@@ -1,18 +1,20 @@
-"""`anima/demo.py` / `anima.text` / `_shared.qwen2_tokenizer` の約束事。
+"""The rules of `anima/demo.py` / `anima.text` / `_shared.qwen2_tokenizer`.
 
-この層が壊れると **id 列だけが静かに別物**になる（shape は合ったまま画が変わる）。ここで
-固定するのは 2 系統:
+When this layer breaks, **only the ids silently become something else** (the shapes still match
+while the image changes). Two kinds of things are pinned here:
 
-- **commit 済みフィクスチャに対する再検査**（HF 資産があれば走る・無ければ SKIP）
-  `AutoTokenizer`（正本）と Python 参照実装（= TS 実装の鏡像）の両方が、フィクスチャの
-  id 列を再現すること。**再生成しなくても上流の tokenizer.json の変化に気づける**のがここ
-  の存在意義で、emit 側の門（`build_cases`）とは走る時点が違う。
-- **資産に依らない部分**（常に走る）— 焼いた表の引き方、追加語彙の切り出し、pre-token 走査、
-  台本とフィクスチャのケース集合が一致していること。
+- **Re-checks against the committed fixture** (run when the HF assets are present, SKIP
+  otherwise): both `AutoTokenizer` (the source of truth) and the Python reference implementation
+  (= the mirror of the TS implementation) reproduce the fixture's ids. The point of this is
+  **noticing a change in upstream's tokenizer.json without regenerating**; it runs at a different
+  time than the emit-side check (`build_cases`).
+- **The parts that do not depend on assets** (always run) — looking up the baked tables, splitting
+  out added tokens, the pre-token scan, and the script and the fixture having the same set of
+  cases.
 
-網羅検査（全 1,112,064 コードポイント × 11 文脈の pre-token 走査、正規化畳み込みの全 cp +
-乱択 200,000）は**再生成時に必ず走る門**（`anima_demo.build_assets`）で、数分かかるので
-pytest には置かない。
+The exhaustive checks (the pre-token scan over all 1,112,064 code points × 11 contexts; the
+normalization folding over every cp + 200,000 random samples) are **checks that always run on
+regeneration** (`anima_demo.build_assets`); they take minutes, so they are not in pytest.
 """
 
 from __future__ import annotations
@@ -29,8 +31,9 @@ from anima import demo as anima_demo
 from anima import pipeline_ref as anima_pipeline
 from anima import text as at
 
-#: 台本が書く席をそのまま読む（置き場の綴りを 2 箇所で独立に導かない — 深さ違いの
-#: `parents[N]` を自前で持つと、モジュールを 1 階層動かした日に片方だけ別の根を指す）。
+#: Read the location the script writes to as is (the location's spelling is not derived
+#: independently in 2 places — keeping our own `parents[N]` of a different depth would make one
+#: of them point to a different root the day the module moves one level).
 FIXTURE_PATH = anima_demo.DEFAULT_FIXTURE_PATH
 FIXTURE: dict[str, Any] = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
@@ -42,12 +45,13 @@ NFC_SEGMENTS: q2.Ranges = FIXTURE["qwen"]["nfcSegments"]
 
 class TestFixtureShape:
     def test_the_fixture_is_not_empty(self):
-        """取り違え / 生成失敗で cases が空になると、TS 側のループが 0 回になる。"""
+        """If a mix-up / failed generation leaves cases empty, the TS side's loop runs 0 times."""
         assert len(FIXTURE["cases"]) == len(anima_demo.PROMPT_CASES)
         assert FIXTURE["maxLength"] == anima_demo.MAX_LENGTH
 
     def test_the_committed_cases_match_the_script(self):
-        """フィクスチャが台本より古びていないこと（id と本文の両方を見る）。"""
+        """The fixture is not stale relative to the script (both the id and the text are
+        checked)."""
         want = [(name, text) for name, text, _ in anima_demo.PROMPT_CASES]
         got = [(case["id"], case["text"]) for case in FIXTURE["cases"]]
 
@@ -59,11 +63,13 @@ class TestFixtureShape:
         assert len(set(ids)) == len(ids)
 
     def test_the_t5_search_width_comes_from_the_whole_vocabulary(self):
-        """MUST: `minScore` / `maxTokenLength` は語彙**全体**の値（部分集合から導かない）。
+        """MUST: `minScore` / `maxTokenLength` are values of the **whole** vocabulary (not derived
+        from the subset).
 
-        部分集合（実測 124 件）から計算すると未知ノードの重みと探索幅が変わり、別の分割に
-        なる。全体由来なら部分集合の最小 / 最長を**狭義に**超える（等号を許すと「emit が
-        部分集合から算出する」誤りでも緑になる）。
+        Computing them from the subset (124 entries, measured) changes the unknown-node weight and
+        the search width, and gives a different segmentation. Values from the whole vocabulary
+        exceed the subset's minimum / longest **strictly** (allowing equality would let the
+        mistake "emit computes them from the subset" pass too).
         """
         subset = FIXTURE["t5"]["vocab"]
 
@@ -71,9 +77,11 @@ class TestFixtureShape:
         assert FIXTURE["t5"]["maxTokenLength"] > max(len(token) for token, _, _ in subset)
 
     def test_the_pipeline_prompts_are_covered_by_the_cases(self):
-        """`anima_pipeline` の 2 本は Deno 側のクロスチェックが語彙部分集合で引く対象。
+        """The 2 prompts of `anima_pipeline` are what the Deno-side cross-check looks up in the
+        vocabulary subset.
 
-        ここが外れると、あちらは「語彙に無いトークン」という読み取りにくい形で落ちる。
+        If this breaks, that side fails in the hard-to-read form "a token not in the
+        vocabulary".
         """
         texts = {case["text"] for case in FIXTURE["cases"]}
 
@@ -82,10 +90,11 @@ class TestFixtureShape:
 
 
 class TestNormalizerTables:
-    """焼いた表の引き方（Precompiled の最短接頭辞勝ち）。
+    """Looking up the baked tables (Precompiled's shortest prefix wins).
 
-    NOTE: 独立した正本との突合ではなく、commit 済みの凍結値への回帰門（表とケースを
-    再生成すると両辺が同時に動くので、再生成手順を踏むと本クラスは常に緑）。
+    NOTE: this is not a comparison with an independent source of truth but a regression check
+    against committed frozen values (regenerating the tables and the cases moves both sides at
+    once, so after the regeneration procedure this class is always green).
     """
 
     def test_every_case_reproduces_the_recorded_normalization(self):
@@ -95,22 +104,24 @@ class TestNormalizerTables:
             ]
 
     def test_the_shortest_matching_prefix_wins_and_the_rest_is_dropped(self):
-        # A + U+0301 は規則があるので Á。もう 1 つ足しても Á のまま（3 文字目は捨てられる）。
+        # A + U+0301 has a rule, so Á. Adding one more keeps Á (the 3rd character is dropped).
         assert at.normalize_with_tables(TABLES, "Á") == "Á"
         assert at.normalize_with_tables(TABLES, "Á́") == "Á"
-        # 3cp 規則 Ấ ではなく 2cp 接頭辞 Â が勝つ（最長一致で実装するとここで外れる）。
+        # The 2cp prefix Â wins, not the 3cp rule Ấ (a longest-match implementation fails
+        # here).
         assert at.normalize_with_tables(TABLES, "Ấ") == "Â"
 
     def test_clusters_of_six_bytes_or_more_skip_the_whole_replacement(self):
-        text = "Ấ́"  # 1 + 2 + 2 + 2 = 7 バイト
+        text = "Ấ́"  # 1 + 2 + 2 + 2 = 7 bytes
 
         assert at.normalize_with_tables(TABLES, text) == text
 
     def test_a_cluster_of_exactly_six_bytes_still_skips_the_whole_replacement(self):
-        """境界そのもの（`< 6` を `<= 6` にすると結合文字が黙って消える）。
+        """The boundary itself (turning `< 6` into `<= 6` silently drops the combining characters).
 
-        U+00A0(2) + U+0300(2) + U+0300(2) = ちょうど 6 バイト。上の 7 バイトのケースだけでは
-        この 1 文字の書き換えが素通りする（TS 側も同様 — 故障注入で実測）。
+        U+00A0(2) + U+0300(2) + U+0300(2) = exactly 6 bytes. With only the 7-byte case above,
+        this one-character rewrite would slip through (the same holds on the TS side — measured
+        by fault injection).
         """
         text = "\u00a0\u0300\u0300"
 
@@ -144,22 +155,25 @@ class TestAddedTokens:
         ]
 
     def test_a_partial_match_is_not_split_out(self):
-        """`<|endoftext|x` は途中まで一致するだけ — 切り出すと id 列が別物になる。"""
+        """`<|endoftext|x` matches only partway — splitting it out would change the ids."""
         assert q2.split_added_tokens("<|endoftext|x", ["<|endoftext|>"]) == [
             ("<|endoftext|x", False)
         ]
 
     def test_an_empty_added_token_is_rejected(self):
-        """空文字は全位置で一致して走査が進まない（無限ループの芽）。"""
+        """The empty string matches at every position and the scan never advances (a seed of an
+        infinite loop)."""
         with pytest.raises(ValueError, match="empty string"):
             q2.split_added_tokens("abc", ["", "<|a"])
 
 
 class TestNfcSegments:
-    """正本の NFC と素の `unicodedata` が割れる領域（分節表）。"""
+    """The ranges where the source of truth's NFC and plain `unicodedata` disagree (the segment
+    table)."""
 
     def test_the_recorded_cases_are_reproduced_by_the_segment_table(self):
-        """フィクスチャの `[入力, 正本の出力]` を分節表で再現できる（TS 実装と同じ対）。"""
+        """The fixture's `[input, source-of-truth output]` pairs are reproduced by the segment table
+        (the same pairs as the TS implementation)."""
         cases = FIXTURE["qwen"]["nfcCases"]
 
         assert len(cases) >= 200
@@ -167,9 +181,9 @@ class TestNfcSegments:
             assert q2.nfc_with_segments(text, NFC_SEGMENTS) == want, [hex(ord(c)) for c in text]
 
     def test_the_plain_nfc_disagrees_with_the_source_of_truth(self):
-        """実測: 正本は U+089A を結合クラス 0 と見なすので並べ替えない。
+        """Measured: the source of truth treats U+089A as combining class 0, so it does not reorder.
 
-        分節表から該当区間を落とすと素の NFC と同じ（= 別の id 列）に戻る。
+        Dropping that range from the segment table returns to plain NFC (= different ids).
         """
         text = "\u0818\u089a"
 
@@ -189,7 +203,8 @@ class TestByteEncoder:
         assert len(set(table.values())) == 256
 
     def test_no_mapped_character_is_whitespace(self):
-        """merges の鍵は `"左 右"` の 1 本の文字列 — 空白が混ざると分割が壊れる。"""
+        """A merges key is a single string `"left right"` — whitespace mixed in would break the
+        split."""
         table = q2.bytes_to_unicode()
 
         assert not any(ch.isspace() for ch in table.values())
@@ -197,44 +212,49 @@ class TestByteEncoder:
 
 class TestQwenPreTokenize:
     def test_digits_split_one_by_one(self):
-        """`\\p{N}` には `+` が無い（`2024` は 4 トークンになる）。"""
+        """`\\p{N}` has no `+` (`2024` becomes 4 tokens)."""
         assert q2.qwen_pre_tokenize("2024", CLASSES, CASE_FOLD) == ["2", "0", "2", "4"]
 
     def test_a_leading_space_joins_the_following_word(self):
         assert q2.qwen_pre_tokenize("a cat", CLASSES, CASE_FOLD) == ["a", " cat"]
 
     def test_trailing_spaces_keep_the_last_one_for_the_next_word(self):
-        """`\\s+(?!\\S)` — 非空白が続くなら最後の 1 文字を次へ残す。"""
+        """`\\s+(?!\\S)` — if a non-space follows, the last character is left for the next
+        piece."""
         assert q2.qwen_pre_tokenize("a   b", CLASSES, CASE_FOLD) == ["a", "  ", " b"]
 
     def test_the_scan_never_stalls(self):
-        """進めない位置があれば例外（黙って 1 文字進める実装にしない）。"""
+        """A position that cannot advance raises (no implementation that silently advances one
+        character)."""
         for text in ("", " ", "\r\n", "\u00a0", "\U0001f408", "'", "'s", "'S"):
             q2.qwen_pre_tokenize(text, CLASSES, CASE_FOLD)
 
     def test_the_case_fold_table_is_not_ascii_only(self):
-        """実測: 正本の `(?i:)` は simple case folding — U+017F（ſ）が s と同一視される。
+        """Measured: the source of truth's `(?i:)` is simple case folding — U+017F (ſ) is treated
+        as s.
 
-        ASCII の大小反転で済ませると `it\u017fs` の `'\u017f` が切り出されず 1 断片になり、
-        正本の `'\u017f` + `s` と切れ目が変わる。表から U+017F を落とすとここが落ちる。
+        Settling for ASCII case swapping leaves the `'\u017f` of `it\u017fs` unsplit as one piece,
+        and the split points differ from the source of truth's `'\u017f` + `s`. Dropping U+017F
+        from the table makes this fail.
         """
         assert CASE_FOLD[0x017F] == ord("s")
         assert CASE_FOLD[ord("S")] == ord("s")
         assert q2.qwen_pre_tokenize("it'\u017fs", CLASSES, CASE_FOLD) == ["it", "'\u017f", "s"]
 
-        # 表を ASCII だけに削ると（= 移植で最も自然な思い違い）切れ目が変わる。
+        # Cutting the table down to ASCII (= the most natural misconception in a port) changes
+        # the split points.
         ascii_only = {cp: t for cp, t in CASE_FOLD.items() if cp < 0x80}
 
         assert q2.qwen_pre_tokenize("it'\u017fs", CLASSES, ascii_only) == ["it", "'\u017fs"]
 
 
-# ---- 実 tokenizer.json があるときだけ走る突合 --------------------------------
+# ---- comparisons that run only when the real tokenizer.json is present -----------
 
 REPO = anima_demo.DEFAULT_REPO
 
 
 def _cached(filename: str) -> Path | None:
-    """HF キャッシュにあるファイル。無ければ None（**ダウンロードしない**）。"""
+    """A file in the HF cache. None if it is not there (**does not download**)."""
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
@@ -249,17 +269,20 @@ QWEN_JSON = _cached("tokenizer/tokenizer.json")
 T5_JSON = _cached("t5_tokenizer/tokenizer.json")
 needs_tokenizers = pytest.mark.skipif(
     QWEN_JSON is None or T5_JSON is None,
-    reason=f"{REPO} の tokenizer.json が HF キャッシュに無い（再生成: README の anima/demo.py）",
+    reason=f"{REPO}'s tokenizer.json is not in the HF cache (regenerate: anima/demo.py in the"
+    " README)",
 )
 
 
 @pytest.fixture(scope="module")
 def built() -> dict[str, Any]:
-    """フィクスチャの表 + 実 tokenizer.json の語彙で参照実装を組む。
+    """Build the reference implementation from the fixture's tables + the real tokenizer.json's
+    vocabulary.
 
-    表そのものは**再生成しない**（全コードポイント走査で数分かかる）。ここが見たいのは
-    「commit 済みの表と実語彙で正本の id 列が再現できるか」で、表の畳み込みの同値は
-    `anima_demo.build_assets` が emit のたびに検査する。
+    The tables themselves are **not regenerated** (scanning every code point takes minutes).
+    What this wants to see is "whether the committed tables and the real vocabulary reproduce
+    the source of truth's ids"; the equivalence of the table folding is checked by
+    `anima_demo.build_assets` on every emit.
     """
     assert QWEN_JSON is not None and T5_JSON is not None
     source = at.AnimaTokenizerSource(QWEN_JSON, T5_JSON)
@@ -280,7 +303,8 @@ def built() -> dict[str, Any]:
 @needs_tokenizers
 class TestReferenceParity:
     def test_the_reference_implementation_reproduces_the_fixture(self, built):
-        """TS 実装の鏡像がフィクスチャの id 列を出す（TS が写経すべき対象の確認）。"""
+        """The mirror of the TS implementation produces the fixture's ids (confirms what TS should
+        copy)."""
         qwen_ref, t5_ref = anima_demo.references(
             {**built, "t5": {**built["t5"], "addedTokens": FIXTURE["t5"]["addedTokens"]}}
         )
@@ -291,11 +315,13 @@ class TestReferenceParity:
             assert t5_ref.encode(case["text"], anima_demo.MAX_LENGTH) == case["t5Ids"], case["id"]
 
     def test_the_search_width_is_recomputed_from_the_whole_vocabulary(self, built):
-        """探索幅を実 tokenizer.json の**全語彙**から引き直して等値で突き合わせる。
+        """Recompute the search width from the **whole vocabulary** of the real tokenizer.json and
+        compare for equality.
 
-        フィクスチャ内の部分集合に対する不等号門（`TestFixtureShape`）が押さえるのは
-        必要条件だけで、「全体の一部（上位 N 件など）から算出した値」も通してしまう。
-        資産があるときだけは正本そのものから引き直せる。
+        The inequality check on the fixture's subset (`TestFixtureShape`) covers only a necessary
+        condition, and also passes "a value computed from part of the whole (the top N and so
+        on)". Only when the assets are present can it be recomputed from the source of truth
+        itself.
         """
         vocab = built["t5Vocab"]
 
@@ -303,18 +329,19 @@ class TestReferenceParity:
         assert FIXTURE["t5"]["maxTokenLength"] == max(len(token) for token, _ in vocab)
 
     def test_the_fixture_still_matches_the_upstream_tokenizers(self):
-        """正本（AutoTokenizer）が動いていないこと。動いたらフィクスチャの再生成が要る。"""
+        """The source of truth (AutoTokenizer) has not moved. If it has, the fixture needs
+        regenerating."""
         transformers = pytest.importorskip("transformers")
-        # NOTE: `local_files_only=True` は使えない — `special_tokens_map.json` のような
-        # **任意**ファイルの解決に失敗して OSError になる（実測。キャッシュに tokenizer.json も
-        # tokenizer_config.json も在るのに構成できない）。ネットワークが無い環境は SKIP。
+        # NOTE: `local_files_only=True` cannot be used — resolving an **optional** file such as
+        # `special_tokens_map.json` fails with OSError (measured: it cannot be built even with
+        # both tokenizer.json and tokenizer_config.json in the cache). Without a network: SKIP.
         try:
             truth = {
                 "qwen": transformers.AutoTokenizer.from_pretrained(REPO, subfolder="tokenizer"),
                 "t5": transformers.AutoTokenizer.from_pretrained(REPO, subfolder="t5_tokenizer"),
             }
         except OSError as cause:
-            pytest.skip(f"AutoTokenizer を構成できない（オフライン環境）: {cause}")
+            pytest.skip(f"cannot build AutoTokenizer (offline environment): {cause}")
 
         for case in FIXTURE["cases"]:
             assert anima_demo.reference_ids(truth["qwen"], case["text"]) == case["qwenIds"], case[

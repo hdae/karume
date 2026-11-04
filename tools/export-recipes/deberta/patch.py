@@ -1,32 +1,39 @@
-"""DeBERTa-v2 の相対位置の添字表を**グラフ入力**へ出すパッチ層（ADR 0045 波 3）。
+"""Patch layer that turns DeBERTa-v2's relative-position index tables into **graph inputs**
+(ADR 0045 wave 3).
 
-`DisentangledSelfAttention.disentangled_attention_bias` は `relative_pos`（`[1, T, T]`）から
-`c2p_pos` / `p2c_pos` を clamp で作る。この 2 表は **T だけで決まる定数**なので、torch.export は
-Tmax=512 で畳み込んで `[1,512,512]` の i32 を 2 本焼き込む（実測 2,097,152 B = 配布形の 0.68%）。
-中身は Toeplitz でしかも互いに転置なので、実体は 1,023 要素の i32 ベクトルに等しい。
+`DisentangledSelfAttention.disentangled_attention_bias` builds `c2p_pos` / `p2c_pos` from
+`relative_pos` (`[1, T, T]`) with a clamp. These two tables are **constants determined by T
+alone**, so torch.export folds them at Tmax=512 and bakes in two `[1,512,512]` i32 tensors
+(measured 2,097,152 B = 0.68% of the distribution). Their contents are Toeplitz and transposes of
+each other, so the actual information equals an i32 vector of 1,023 elements.
 
-ADR 0013 が flow / voice の `(T,T)` 表で採ったのと同じ理由でこれを外部供給へ移す。副次的に
-**Tmax=512 の上限が消える**（焼き込みが無くなるので、表の大きさが export 時の定数でなくなる）。
+They move to external supply for the same reason ADR 0013 did so for the `(T,T)` tables of flow /
+voice. As a side effect **the Tmax=512 limit disappears** (with nothing baked in, the table size
+is no longer an export-time constant).
 
-MUST: パッチ後は **eager 同値**であること — 表を外から渡す以外の違いを持ち込まない。上流の
-元実装との同値は `deberta/tests/test_patch.py`（tiny config・乱数重みで `torch.equal`）が縛る。
-`deberta.export` の golden はパッチを当ててから採るので差し替え版どうしの一致しか見ず、TS 側
-パリティテストは表の生成（{@link build_rel_pos_tables} との一致）しか見ない。
+MUST: after the patch the model is **eager-equivalent** — it introduces no difference other than
+receiving the tables from outside. Equivalence with the original upstream implementation is pinned
+by `deberta/tests/test_patch.py` (tiny config, random weights, `torch.equal`). The goldens of
+`deberta.export` are taken after the patch is applied, so they only compare patched versions with
+each other, and the TS-side parity test only checks table generation (agreement with
+{@link build_rel_pos_tables}).
 
-MUST: 差し替え版は表をタプルで受ける形しか通さない（**fallback を持たない**）。元の実装へ黙って
-落ちると「2MiB を焼いたまま緑」になり、パッチが外れたことが誰にも見えなくなる。
+MUST: the replacement accepts only the form that receives the tables as a tuple (**no fallback**).
+Silently dropping to the original implementation would mean "green with 2MiB still baked in", and
+nobody would see that the patch came off.
 
-## この表が何であるか（式の正本）
+## What these tables are (the canonical formula)
 
-`build_relative_position(q, k, bucket_size=256, max_position=512)` は `rel[i,j] = i − j` を
-`make_log_bucket_position` で対数バケット化したもの。`att_span = pos_ebd_size = position_buckets`
-= 256 なので:
+`build_relative_position(q, k, bucket_size=256, max_position=512)` is `rel[i,j] = i − j`
+log-bucketed by `make_log_bucket_position`. Since `att_span = pos_ebd_size = position_buckets`
+= 256:
 
     c2p_pos[i,j] = clamp(bucket(i − j) + 256, 0, 511)
     p2c_pos[i,j] = clamp(bucket(j − i) + 256, 0, 511) = c2p_pos[j,i]
 
-`p2c` 側が転置になるのは、`build_rpos` が query_size == key_size のとき `relative_pos` をその
-まま返し、`clamp(-rel + att_span, …)` を掛けるから（バケット化は奇関数）。
+The `p2c` side is the transpose because `build_rpos` returns `relative_pos` as is when
+query_size == key_size and then applies `clamp(-rel + att_span, …)` (the bucketing is an odd
+function).
 """
 
 from __future__ import annotations
@@ -36,22 +43,24 @@ from typing import Any
 import torch
 from torch import nn
 
-#: 差し替えの適用済みフラグ（プロセス全域のクラス属性差し替えなので 1 回だけ）。
+#: Whether the replacement has been applied (it replaces a class attribute process-wide, so once).
 _applied = False
 
 
 def patch_applied() -> bool:
-    """差し替えが適用済みか（呼び出し側の順序違反を fail loudly にするための問い合わせ）。"""
+    """Whether the replacement is applied (a query so callers' ordering mistakes fail loudly)."""
     return _applied
 
 
 def build_rel_pos_tables(
     length: int, *, position_buckets: int, max_position: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """`(c2p_pos, p2c_pos)` を実長 `length` で作る（**TS 鏡像の Python 側正本**）。
+    """Build `(c2p_pos, p2c_pos)` for the actual length `length` (**the Python-side source of
+    truth that the TS mirror follows**).
 
-    どちらも `[length, length]` の int64。`disentangled_attention_bias` が `expand` で
-    `[B*H, T, T]` へ広げるので、先頭に 1 の軸は付けない（元実装の `squeeze(0)` に相当）。
+    Both are `[length, length]` int64. `disentangled_attention_bias` broadcasts them to
+    `[B*H, T, T]` with `expand`, so no leading axis of size 1 is added (the equivalent of the
+    original implementation's `squeeze(0)`).
     """
     from transformers.models.deberta_v2.modeling_deberta_v2 import make_log_bucket_position
 
@@ -72,15 +81,15 @@ def _external_disentangled_attention_bias(
     rel_embeddings: torch.Tensor,
     scale_factor: int,
 ) -> torch.Tensor:
-    """`relative_pos` の位置で `(c2p_pos, p2c_pos)` を受け取る同値実装。
+    """Equivalent implementation that receives `(c2p_pos, p2c_pos)` in place of `relative_pos`.
 
-    元実装との差は「表を作らずに受け取る」ことだけ。clamp / build_rpos / squeeze が消え、
-    残りの bmm → gather → scale は 1 対 1 で対応する。
+    The only difference from the original is "receive the tables instead of building them". The
+    clamp / build_rpos / squeeze go away, and the remaining bmm → gather → scale map one to one.
     """
     if not isinstance(relative_pos, tuple) or len(relative_pos) != 2:
         raise TypeError(
-            "外部供給の (c2p_pos, p2c_pos) 以外は受け付けない — パッチが中途半端に当たっている"
-            f"（受け取ったのは {type(relative_pos).__name__}）"
+            "only an externally supplied (c2p_pos, p2c_pos) pair is accepted — the patch is"
+            f" half-applied (got {type(relative_pos).__name__})"
         )
     from transformers.models.deberta_v2.modeling_deberta_v2 import scaled_size_sqrt
 
@@ -118,10 +127,12 @@ def _external_disentangled_attention_bias(
 
 
 def apply_external_rel_pos_patch() -> None:
-    """`disentangled_attention_bias` を外部供給版へ差し替える（プロセス全域・1 回だけ）。
+    """Replace `disentangled_attention_bias` with the externally supplied version (process-wide,
+    once).
 
-    MUST: モデルを構築する**前**に呼ぶ必要は無い（クラス属性の差し替えなので後でも効く）が、
-    golden を採る前でなければならない — 採ってから差し替えると期待値だけが元の経路で計算される。
+    MUST: it need not be called **before** the model is built (it replaces a class attribute, so it
+    takes effect afterwards too), but it must be called before the goldens are taken — replacing
+    after them computes only the expected values on the original path.
     """
     global _applied
     if _applied:
@@ -135,15 +146,15 @@ def apply_external_rel_pos_patch() -> None:
 
 
 def assert_supported(config: Any) -> None:
-    """差し替え版が前提にしている config を検査する（外れたら黙って別の式になる）。
+    """Check the config the replacement assumes (outside it, a different formula runs silently).
 
-    元実装は `pos_att_type` / `share_att_key` で 4 通りに分岐するが、差し替え版は
-    ku-nlp の char-wwm が使う 1 通り（c2p + p2c・共有射影）しか書いていない。
+    The original implementation branches four ways on `pos_att_type` / `share_att_key`, but the
+    replacement implements only the one ku-nlp's char-wwm uses (c2p + p2c, shared projection).
     """
     pos_att_type = set(getattr(config, "pos_att_type", ()) or ())
     if pos_att_type != {"c2p", "p2c"}:
-        raise ValueError(f"pos_att_type が c2p+p2c でない（{sorted(pos_att_type)}）")
+        raise ValueError(f"pos_att_type is not c2p+p2c ({sorted(pos_att_type)})")
     if not getattr(config, "share_att_key", False):
-        raise ValueError("share_att_key=False は差し替え版が持たない経路")
+        raise ValueError("share_att_key=False is a path the replacement does not implement")
     if int(getattr(config, "position_buckets", 0)) <= 0:
-        raise ValueError(f"position_buckets が正でない（{config.position_buckets}）")
+        raise ValueError(f"position_buckets is not positive ({config.position_buckets})")

@@ -1,44 +1,55 @@
-"""書き直した Wan の成果物を既存の系列と比べる CLI（ADR 0121 段 4 — 2.1 の系列の不変の確かめ）。
+"""CLI that compares rewritten Wan outputs with an existing series (ADR 0121 step 4 — checking
+that the 2.1 series is unchanged).
 
-recipe を変えた後、2.1 の成果物（VAE の chunk グラフ・フィクスチャなど）を scratch へ書き直し、
-既存の系列と `--require` に挙げた項目だけを比べる。門なので、設計で避けるのは「違うのに一致と
-言う」こと（偽の一致）:
+After a recipe change, the 2.1 outputs (the VAE chunk graphs, fixtures and so on) are rewritten
+into a scratch directory and compared with the existing series, only for the items named with
+`--require`. Because this is a check, what the design avoids is saying "match" when the two differ
+(a false match):
 
-- 比べ方は 2 通り。
-  - `*.safetensors`: テンソル名の集合・テンソルごとの dtype / 形 / 生バイト（ビット一致 — NaN の
-    payload も -0.0 も畳まない）と、`__metadata__` の dict の等値（キー順は見ない）。safetensors
-    0.8.0 の `__metadata__` はキー順がプロセスごとに変わるので、ファイルのバイトでは比べられない
-    （ADR 0118 追記「再生成のバイト一致」）。ヘッダは自前で読み（{@link read_header}）、データ域が
-    テンソルで隙間なく埋まっていることも確かめる — テンソルの外のバイトを黙って見落とさない。
-    比較は名前で引いた中身の比較で、データ域でのテンソルの並び（data_offsets）とヘッダの空白の
-    詰め物はわざと見ない（読み出す中身が同じなら同じ成果物）。`"__metadata__": null` は無いのと
-    同じに扱う（safetensors 本体も null を「無い」として読む）。
-  - それ以外（krm の part など）: サイズと sha256。
-- ディレクトリの項目は、両側の相対パスの集合（再帰・ディレクトリも含む）が同じことを見てから
-  各ファイルを比べる。どちらかの側に無い項目は食い違い（skip しない）。比べるファイルが 1 つも
-  無いディレクトリの項目も食い違い — 何も比べていない一致は、両側の用意が壊れている印。
-- シンボリックリンクは辿らない: 項目の中（項目そのもの・途中の成分・ディレクトリの中身）に
-  あれば食い違いとして名指す。系列の書き手はリンクを作らないので、あるなら想定外 — 辿って
-  比べると、両側が同じ先を指すだけで中身が何であれ一致になる。根（`--written` / `--existing`）は
-  利用者が明示したパスなので辿ってよい。通常ファイルでもディレクトリでもない項目（FIFO 等）も
-  同じく食い違い。種類は lstat で見てからパスで開くので、その間にリンクへ差し替える並行の
-  書き手は想定しない（比べている最中の根に書き手は走らせない）。
-- 両側が同じ実体（同じ inode — 同じ根を 2 回渡した・ハードリンク）なら食い違い。自分自身との
-  比較は必ず一致するので門にならない。ただしコピーは別の実体なので一致する — 門が意味を持つのは、
-  書いた側が空の scratch へ書き手を走らせた結果のときだけ（`wan/README.md` の手順）。
+- There are two ways to compare.
+  - `*.safetensors`: the set of tensor names, and per tensor the dtype / shape / raw bytes (a bit
+    match — neither NaN payloads nor -0.0 are folded), plus equality of the `__metadata__` dict
+    (key order is ignored). In safetensors 0.8.0 the key order of `__metadata__` changes from
+    process to process, so the files cannot be compared byte for byte (ADR 0118 addendum
+    "byte-identical regeneration"). The header is read by our own code ({@link read_header}), which
+    also checks that the tensors fill the data area with no gaps — bytes outside the tensors are
+    never silently missed. The comparison looks up the contents by name, and deliberately ignores
+    the order of the tensors in the data area (data_offsets) and the whitespace padding of the
+    header (if the contents read back are the same, the output is the same). `"__metadata__": null`
+    is treated the same as an absent key (safetensors itself reads null as "absent").
+  - Anything else (krm parts and so on): size and sha256.
+- For a directory item, the set of relative paths on both sides (recursive, directories included)
+  must be the same before each file is compared. An item missing on either side is a mismatch (not
+  skipped). A directory item with no file at all to compare is also a mismatch — a match that
+  compared nothing is a sign that the preparation of both sides is broken.
+- Symbolic links are not followed: a link inside an item (the item itself, an intermediate
+  component, the contents of a directory) is named as a mismatch. The writers of a series do not
+  create links, so one is unexpected — following it and comparing would give a match whenever both
+  sides point at the same target, whatever its contents. The roots (`--written` / `--existing`) are
+  paths the user gave explicitly, so they may be followed. An item that is neither a regular file
+  nor a directory (a FIFO and so on) is a mismatch too. The kind is read with lstat and the file is
+  then opened by path, so a concurrent writer that swaps in a link in between is not considered (no
+  writer runs on a root while it is being compared).
+- If both sides are the same file (the same inode — the same root passed twice, a hard link), that
+  is a mismatch. A comparison with itself always matches, so it is no check. A copy, however, is a
+  different file and does match — the check only means something when the written side is the
+  result of running the writers into an empty scratch directory (the procedure in `wan/README.md`).
 
-使い方（`tools/export-recipes` で）:
+Usage (from `tools/export-recipes`):
 
     uv run --group wan --inexact python -m wan.series_check --written <dir> --existing <dir> \\
       --require vae_decoder_first --require vae_chunks.band.safetensors
 
-標準出力に JSON を 1 つ書く（比べた項目・ファイルごとの結果・食い違いと理由）。終了コードは
-食い違いが無いときだけ 0、食い違いがあれば 1、引数の誤り（`--require` 無し・根の外か根そのものを
-指す名前・NUL を含む名前・重複・別の `--require` の中に入れ子の名前・根がディレクトリでない）は 2、
-読めないファイル（権限など — OSError）は 3（標準出力は空・理由は標準エラー）。
+Writes one JSON object to standard output (the items compared, the result per file, the mismatches
+and their reasons). The exit code is 0 only when there is no mismatch, 1 when there is a mismatch,
+2 for an argument error (no `--require`, a name outside the root or naming the root itself, a name
+containing NUL, a duplicate, a name nested inside another `--require`, a root that is not a
+directory), and 3 for an unreadable file (permissions and so on — OSError; standard output stays
+empty and the reason goes to standard error).
 
-export_dit の `--check`（`series_mismatches` — 部品ディレクトリ直下のバイトだけ）とは別の口
-（ADR 0121 段 4 の設計 — export_dit 側は変えない）。
+This is a separate entry point from the `--check` of export_dit (`series_mismatches` — only the
+bytes directly under a component directory) (the design of ADR 0121 step 4 — export_dit itself is
+not changed).
 """
 
 from __future__ import annotations
@@ -59,23 +70,23 @@ from typing import Any, BinaryIO
 
 import numpy as np
 
-#: 項目の種類（lstat の結果 — リンクは辿らない）。
+#: The kind of an item (from lstat — links are not followed).
 FILE = "file"
 DIR = "dir"
 SYMLINK = "symlink"
 OTHER = "other"
 MISSING = "missing"
 
-SIDE_LABELS = {"written": "書いた側", "existing": "既存"}
+SIDE_LABELS = {"written": "written side", "existing": "existing side"}
 
 SAFETENSORS_SUFFIX = ".safetensors"
 
-#: safetensors のヘッダ長の上限（safetensors 本体と同じ 100 MB — 壊れた長さで巨大な読み込みを
-#: しない）。
+#: Upper bound of the safetensors header length (100 MB, the same as safetensors itself — a broken
+#: length does not cause a huge read).
 MAX_HEADER_BYTES = 100_000_000
 
-#: dtype → 1 要素のバイト数（safetensors の dtype 名）。ここに無い dtype（サブバイトの F4 等）は
-#: 読めないものとして fail loudly — 要素数の数え方を推測しない。
+#: dtype → bytes per element (safetensors dtype names). A dtype not listed here (sub-byte F4 and so
+#: on) is treated as unreadable and fails loudly — the element count is never guessed.
 ITEM_BYTES = {
     "BOOL": 1,
     "U8": 1,
@@ -95,18 +106,20 @@ ITEM_BYTES = {
     "F64": 8,
 }
 
-#: テンソルのバイトを読む単位（16 MiB — 全 dtype の要素長の倍数。数百 MB のファイルでも
-#: 同時に持つのは 2 × この大きさだけ）。
+#: The unit in which tensor bytes are read (16 MiB — a multiple of the element size of every dtype.
+#: Even for a file of hundreds of MB, only 2 × this size is held at once).
 CHUNK_BYTES = 1 << 24
 
 
 class SafetensorsFormatError(ValueError):
-    """safetensors として読めない（ヘッダ・dtype・データ域の配置が取り決めから外れた）。"""
+    """Not readable as safetensors (the header, a dtype or the data-area layout breaks the
+    format)."""
 
 
 @dataclass(frozen=True)
 class TensorEntry:
-    """ヘッダのテンソル 1 本（`begin` / `end` はデータ域の先頭からのバイト位置）。"""
+    """One tensor of the header (`begin` / `end` are byte offsets from the start of the data
+    area)."""
 
     dtype: str
     shape: tuple[int, ...]
@@ -116,11 +129,11 @@ class TensorEntry:
 
 @dataclass(frozen=True)
 class SafetensorsHeader:
-    """safetensors のヘッダ（`data_start` はデータ域のファイル内の位置）。"""
+    """A safetensors header (`data_start` is the position of the data area in the file)."""
 
     data_start: int
     tensors: dict[str, TensorEntry]
-    #: `__metadata__` が無い（または null の）ファイルは None（空の dict とは区別する）。
+    #: None for a file without `__metadata__` (or with null) — kept distinct from an empty dict.
     metadata: dict[str, str] | None
 
 
@@ -128,79 +141,80 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     counts = Counter(key for key, _ in pairs)
     duplicated = sorted(key for key, count in counts.items() if count > 1)
     if duplicated:
-        raise SafetensorsFormatError(f"ヘッダに重複したキー {duplicated}")
+        raise SafetensorsFormatError(f"duplicate keys in the header {duplicated}")
     return dict(pairs)
 
 
 def _tensor_entry(name: str, raw: Any) -> TensorEntry:
     if not isinstance(raw, dict) or set(raw) != {"dtype", "shape", "data_offsets"}:
         raise SafetensorsFormatError(
-            f"テンソル '{name}' の項目が dtype / shape / data_offsets でない"
+            f"entry of tensor '{name}' is not dtype / shape / data_offsets"
         )
     dtype, shape, offsets = raw["dtype"], raw["shape"], raw["data_offsets"]
     if dtype not in ITEM_BYTES:
-        raise SafetensorsFormatError(f"テンソル '{name}' の dtype {dtype!r} を知らない")
+        raise SafetensorsFormatError(f"tensor '{name}' has unknown dtype {dtype!r}")
     if not isinstance(shape, list) or not all(type(dim) is int and dim >= 0 for dim in shape):
-        raise SafetensorsFormatError(f"テンソル '{name}' の形 {shape!r} が非負整数の列でない")
+        raise SafetensorsFormatError(
+            f"tensor '{name}' has shape {shape!r}, not a list of non-negative ints"
+        )
     if (
         not isinstance(offsets, list)
         or len(offsets) != 2
         or not all(type(offset) is int for offset in offsets)
         or not 0 <= offsets[0] <= offsets[1]
     ):
-        raise SafetensorsFormatError(f"テンソル '{name}' の data_offsets {offsets!r} が壊れている")
+        raise SafetensorsFormatError(f"tensor '{name}' has broken data_offsets {offsets!r}")
     begin, end = offsets
     expected = math.prod(shape) * ITEM_BYTES[dtype]
     if end - begin != expected:
         raise SafetensorsFormatError(
-            f"テンソル '{name}' のバイト数 {end - begin} が"
-            f"形 {shape} × {dtype} の {expected} と違う"
+            f"tensor '{name}' has {end - begin} bytes, not the shape {shape} × {dtype} = {expected}"
         )
     return TensorEntry(dtype, tuple(shape), begin, end)
 
 
 def read_header(path: Path) -> SafetensorsHeader:
-    """safetensors のヘッダを読んで取り決めを確かめる（テンソルのバイトは読まない）。
+    """Read a safetensors header and check the format (the tensor bytes are not read).
 
-    データ域がテンソルで先頭から隙間なく・重なりなく埋まり、ファイルの末尾で終わることを要求する
-    （safetensors 本体の検査と同じ向き）。テンソルの外にバイトがあると、テンソルとメタだけの
-    比較はそれを見落とすので fail loudly。
+    Requires the tensors to fill the data area from its start with no gaps or overlaps and to end at
+    the end of the file (the same direction as the checks of safetensors itself). Bytes outside the
+    tensors would be missed by a comparison of tensors and metadata alone, so they fail loudly.
     """
     size = path.stat().st_size
     with path.open("rb") as stream:
         prefix = stream.read(8)
         if len(prefix) != 8:
-            raise SafetensorsFormatError(
-                f"ファイルが {len(prefix)} バイトしかない（ヘッダ長が無い）"
-            )
+            raise SafetensorsFormatError(f"file has only {len(prefix)} bytes (no header length)")
         (length,) = struct.unpack("<Q", prefix)
         if length > MAX_HEADER_BYTES or 8 + length > size:
-            raise SafetensorsFormatError(f"ヘッダ長 {length} がファイル {size} バイトに収まらない")
+            raise SafetensorsFormatError(
+                f"header length {length} does not fit in a {size}-byte file"
+            )
         raw = stream.read(length)
     try:
         header = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SafetensorsFormatError(f"ヘッダが UTF-8 の JSON でない: {error}") from error
+        raise SafetensorsFormatError(f"header is not UTF-8 JSON: {error}") from error
     if not isinstance(header, dict):
-        raise SafetensorsFormatError("ヘッダが JSON の object でない")
+        raise SafetensorsFormatError("header is not a JSON object")
     metadata = header.pop("__metadata__", None)
     if metadata is not None and not (
         isinstance(metadata, dict) and all(isinstance(value, str) for value in metadata.values())
     ):
-        raise SafetensorsFormatError("__metadata__ が文字列 → 文字列の object でない")
+        raise SafetensorsFormatError("__metadata__ is not a string → string object")
     tensors = {name: _tensor_entry(name, raw_entry) for name, raw_entry in header.items()}
     position = 0
     for name, entry in sorted(tensors.items(), key=lambda item: (item[1].begin, item[1].end)):
         if entry.begin != position:
             raise SafetensorsFormatError(
-                f"テンソル '{name}' の位置 {entry.begin} の前が {position} で終わっている"
-                "（データ域に隙間か重なり）"
+                f"tensor '{name}' at position {entry.begin} follows data ending at {position}"
+                " (gap or overlap in the data area)"
             )
         position = entry.end
     data_bytes = size - 8 - length
     if position != data_bytes:
         raise SafetensorsFormatError(
-            f"テンソルがデータ域 {data_bytes} バイトのうち {position} バイトまでしか覆わない"
+            f"of the {data_bytes} bytes of the data area, tensors cover only {position}"
         )
     return SafetensorsHeader(8 + length, tensors, metadata)
 
@@ -208,15 +222,15 @@ def read_header(path: Path) -> SafetensorsHeader:
 def _read_exact(stream: BinaryIO, length: int) -> bytes:
     data = stream.read(length)
     if len(data) != length:
-        raise SafetensorsFormatError(f"{length} バイトを読むはずが {len(data)} バイトで終わった")
+        raise SafetensorsFormatError(f"expected to read {length} bytes, got only {len(data)}")
     return data
 
 
 def _diff_tensor_bytes(
     written: BinaryIO, existing: BinaryIO, length: int, item_bytes: int
 ) -> tuple[int | None, int]:
-    """位置を合わせた 2 本のストリームの `length` バイトを比べる（最初に違うバイトの位置・
-    違う要素の数）。全部同じなら `(None, 0)`。"""
+    """Compare `length` bytes of two aligned streams (the position of the first differing byte and
+    the number of differing elements). `(None, 0)` when all are equal."""
     first: int | None = None
     differing = 0
     for position in range(0, length, CHUNK_BYTES):
@@ -239,14 +253,14 @@ def _metadata_mismatches(
         if written is existing:
             return []
         side = "written" if written is None else "existing"
-        return [{"path": path, "reason": f"__metadata__ が{SIDE_LABELS[side]}に無い"}]
+        return [{"path": path, "reason": f"__metadata__ missing on the {SIDE_LABELS[side]}"}]
     mismatches: list[dict[str, Any]] = []
     for key in sorted(written.keys() | existing.keys()):
         if key not in existing:
             mismatches.append(
                 {
                     "path": path,
-                    "reason": "メタのキーが既存に無い",
+                    "reason": "metadata key missing on the existing side",
                     "key": key,
                     "written": written[key],
                 }
@@ -255,7 +269,7 @@ def _metadata_mismatches(
             mismatches.append(
                 {
                     "path": path,
-                    "reason": "メタのキーが書いた側に無い",
+                    "reason": "metadata key missing on the written side",
                     "key": key,
                     "existing": existing[key],
                 }
@@ -264,7 +278,7 @@ def _metadata_mismatches(
             mismatches.append(
                 {
                     "path": path,
-                    "reason": "メタの値が違う",
+                    "reason": "metadata value differs",
                     "key": key,
                     "written": written[key],
                     "existing": existing[key],
@@ -276,7 +290,8 @@ def _metadata_mismatches(
 def compare_safetensors(
     written: Path, existing: Path, path: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """safetensors 2 本をテンソル（名前・dtype・形・生バイト）とメタ（dict の等値）で比べる。"""
+    """Compare two safetensors files by tensors (name, dtype, shape, raw bytes) and metadata (dict
+    equality)."""
     headers: dict[str, SafetensorsHeader] = {}
     mismatches: list[dict[str, Any]] = []
     for side, file in (("written", written), ("existing", existing)):
@@ -286,7 +301,7 @@ def compare_safetensors(
             mismatches.append(
                 {
                     "path": path,
-                    "reason": f"{SIDE_LABELS[side]}が safetensors として読めない: {error}",
+                    "reason": f"{SIDE_LABELS[side]} is not readable as safetensors: {error}",
                 }
             )
     result: dict[str, Any] = {"path": path, "compare": "safetensors"}
@@ -294,9 +309,13 @@ def compare_safetensors(
         return result | {"match": False}, mismatches
     left, right = headers["written"], headers["existing"]
     for name in sorted(left.tensors.keys() - right.tensors.keys()):
-        mismatches.append({"path": path, "reason": "テンソルが既存に無い", "tensor": name})
+        mismatches.append(
+            {"path": path, "reason": "tensor missing on the existing side", "tensor": name}
+        )
     for name in sorted(right.tensors.keys() - left.tensors.keys()):
-        mismatches.append({"path": path, "reason": "テンソルが書いた側に無い", "tensor": name})
+        mismatches.append(
+            {"path": path, "reason": "tensor missing on the written side", "tensor": name}
+        )
     common = sorted(left.tensors.keys() & right.tensors.keys())
     with written.open("rb") as written_stream, existing.open("rb") as existing_stream:
         for name in common:
@@ -305,7 +324,7 @@ def compare_safetensors(
                 mismatches.append(
                     {
                         "path": path,
-                        "reason": "dtype が違う",
+                        "reason": "dtype differs",
                         "tensor": name,
                         "written": mine.dtype,
                         "existing": theirs.dtype,
@@ -316,7 +335,7 @@ def compare_safetensors(
                 mismatches.append(
                     {
                         "path": path,
-                        "reason": "形が違う",
+                        "reason": "shape differs",
                         "tensor": name,
                         "written": list(mine.shape),
                         "existing": list(theirs.shape),
@@ -333,7 +352,7 @@ def compare_safetensors(
                 mismatches.append(
                     {
                         "path": path,
-                        "reason": "値のビットが違う",
+                        "reason": "value bits differ",
                         "tensor": name,
                         "dtype": mine.dtype,
                         "shape": list(mine.shape),
@@ -360,7 +379,7 @@ def _sha256(path: Path) -> str:
 def compare_bytes(
     written: Path, existing: Path, path: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """safetensors 以外のファイル 2 本をサイズと sha256 で比べる。"""
+    """Compare two files other than safetensors by size and sha256."""
     sides = {}
     for side, file in (("written", written), ("existing", existing)):
         sides[side] = {"size": file.stat().st_size, "sha256": _sha256(file)}
@@ -368,7 +387,9 @@ def compare_bytes(
     if sides["written"] == sides["existing"]:
         return result | {"match": True}, []
     reason = (
-        "サイズが違う" if sides["written"]["size"] != sides["existing"]["size"] else "sha256 が違う"
+        "size differs"
+        if sides["written"]["size"] != sides["existing"]["size"]
+        else "sha256 differs"
     )
     return result | {"match": False}, [{"path": path, "reason": reason, **sides}]
 
@@ -384,10 +405,11 @@ def _kind(mode: int) -> str:
 
 
 def _lookup(root: Path, name: PurePosixPath) -> tuple[str, PurePosixPath]:
-    """`root / name` の種類を、途中の成分も含めてリンクを辿らずに引く（種類・止まった位置）。
+    """Look up the kind of `root / name` without following links, intermediate components included
+    (the kind and the position where the lookup stopped).
 
-    途中の成分がリンク・FIFO 等ならその成分で止めて種類を返す。途中が通常ファイルなら項目は
-    無い。
+    If an intermediate component is a link, a FIFO or the like, the lookup stops there and returns
+    its kind. If an intermediate component is a regular file, the item does not exist.
     """
     at = PurePosixPath()
     for index, part in enumerate(name.parts):
@@ -403,7 +425,8 @@ def _lookup(root: Path, name: PurePosixPath) -> tuple[str, PurePosixPath]:
 
 
 def _listing(directory: Path) -> dict[str, str]:
-    """ディレクトリの中身（相対パス → 種類・再帰・リンクは辿らずリンクとして載せる）。"""
+    """The contents of a directory (relative path → kind; recursive; links are listed as links, not
+    followed)."""
     entries: dict[str, str] = {}
     pending = [PurePosixPath()]
     while pending:
@@ -421,10 +444,10 @@ def _listing(directory: Path) -> dict[str, str]:
 def _unexpected_kind(path: str, side: str, kind: str) -> dict[str, Any]:
     label = SIDE_LABELS[side]
     if kind == MISSING:
-        return {"path": path, "reason": f"{label}に無い"}
+        return {"path": path, "reason": f"missing on the {label}"}
     if kind == SYMLINK:
-        return {"path": path, "reason": f"{label}がシンボリックリンク（辿らない）"}
-    return {"path": path, "reason": f"{label}が通常ファイルでもディレクトリでもない"}
+        return {"path": path, "reason": f"{label} is a symbolic link (not followed)"}
+    return {"path": path, "reason": f"{label} is neither a regular file nor a directory"}
 
 
 def _same_inode(written: Path, existing: Path) -> bool:
@@ -435,10 +458,14 @@ def _same_inode(written: Path, existing: Path) -> bool:
 def compare_file(
     written: Path, existing: Path, path: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """通常ファイル 2 本を比べる（`*.safetensors` はテンソルとメタ・それ以外は sha256）。"""
+    """Compare two regular files (`*.safetensors` by tensors and metadata, anything else by
+    sha256)."""
     if _same_inode(written, existing):
         return {"path": path, "compare": "none", "match": False}, [
-            {"path": path, "reason": "両側が同じ実体（同じ inode — 自分自身との比較になる）"}
+            {
+                "path": path,
+                "reason": "both sides are the same file (same inode — a self-comparison)",
+            }
         ]
     if path.endswith(SAFETENSORS_SUFFIX):
         return compare_safetensors(written, existing, path)
@@ -450,7 +477,10 @@ def _compare_tree(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if _same_inode(written, existing):
         return [], [
-            {"path": str(name), "reason": "両側が同じ実体（同じ inode — 自分自身との比較になる）"}
+            {
+                "path": str(name),
+                "reason": "both sides are the same file (same inode — a self-comparison)",
+            }
         ]
     left, right = _listing(written), _listing(existing)
     files: list[dict[str, Any]] = []
@@ -469,7 +499,7 @@ def _compare_tree(
             mismatches.append(
                 {
                     "path": path,
-                    "reason": "種類が違う",
+                    "reason": "kind differs",
                     "written": kinds["written"],
                     "existing": kinds["existing"],
                 }
@@ -482,7 +512,7 @@ def _compare_tree(
 
 
 def compare(written: Path, existing: Path, required: Sequence[PurePosixPath]) -> dict[str, Any]:
-    """`required` の項目だけを比べた要約（`match` が True なら食い違い 0）。"""
+    """Summary of comparing only the items in `required` (`match` True means zero mismatches)."""
     items: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
@@ -498,7 +528,7 @@ def compare(written: Path, existing: Path, required: Sequence[PurePosixPath]) ->
             found.append(
                 {
                     "path": str(name),
-                    "reason": "種類が違う",
+                    "reason": "kind differs",
                     "written": kinds["written"],
                     "existing": kinds["existing"],
                 }
@@ -510,7 +540,7 @@ def compare(written: Path, existing: Path, required: Sequence[PurePosixPath]) ->
         elif not found:
             compared, found = _compare_tree(written / name, existing / name, name)
             if not compared and not found:
-                found = [{"path": str(name), "reason": "必須ディレクトリに比べるファイルが無い"}]
+                found = [{"path": str(name), "reason": "required directory has no file to compare"}]
         files += compared
         items.append({"name": str(name), **kinds, "files": len(compared), "match": not found})
         mismatches += found
@@ -525,44 +555,50 @@ def compare(written: Path, existing: Path, required: Sequence[PurePosixPath]) ->
 
 
 def require_name(text: str) -> PurePosixPath:
-    """`--require` の値（根の中の相対パス — 絶対パス・`..`・根そのもの・NUL は拒む）。"""
+    """A `--require` value (a relative path inside the root — rejects absolute paths, `..`, the root
+    itself and NUL)."""
     name = PurePosixPath(text)
     if name.is_absolute() or ".." in name.parts or not name.parts or "\0" in text:
         raise argparse.ArgumentTypeError(
-            f"{text!r} は根の中の相対パスでない（絶対パス・'..'・根そのもの・NUL は比べない）"
+            f"{text!r} is not a relative path inside the root"
+            " (absolute paths, '..', the root itself and NUL are not compared)"
         )
     return name
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--written", type=Path, required=True, help="書き直した側の根")
-    parser.add_argument("--existing", type=Path, required=True, help="既存の系列の根")
+    parser.add_argument("--written", type=Path, required=True, help="root of the rewritten side")
+    parser.add_argument("--existing", type=Path, required=True, help="root of the existing series")
     parser.add_argument(
         "--require",
         type=require_name,
         action="append",
         required=True,
-        help="比べる項目（根からの相対パス・ファイルかディレクトリ — 繰り返し可）",
+        help="item to compare (path relative to the root, a file or a directory — repeatable)",
     )
     args = parser.parse_args(argv)
     for flag, root in (("--written", args.written), ("--existing", args.existing)):
         if not root.is_dir():
-            parser.error(f"{flag} {root} がディレクトリでない")
+            parser.error(f"{flag} {root} is not a directory")
     counts = Counter(args.require)
     duplicated = sorted(str(name) for name, count in counts.items() if count > 1)
     if duplicated:
-        parser.error(f"--require が重複している: {duplicated}")
-    # 入れ子の項目は同じファイルを 2 回比べて数を水増しするだけなので、引数の誤りとして拒む。
+        parser.error(f"--require is duplicated: {duplicated}")
+    # A nested item only compares the same files twice and inflates the counts, so it is rejected
+    # as an argument error.
     nested = sorted(
-        f"{inner} は {outer} の中" for inner in counts for outer in counts if outer in inner.parents
+        f"{inner} is inside {outer}"
+        for inner in counts
+        for outer in counts
+        if outer in inner.parents
     )
     if nested:
-        parser.error(f"--require が入れ子になっている: {nested}")
+        parser.error(f"--require is nested: {nested}")
     try:
         summary = compare(args.written, args.existing, args.require)
     except OSError as error:
-        print(f"series_check: ファイルが読めない（比較は未完了）: {error}", file=sys.stderr)
+        print(f"series_check: cannot read a file (comparison incomplete): {error}", file=sys.stderr)
         return 3
     print(json.dumps(summary, indent=1, ensure_ascii=False))
     return 0 if summary["match"] else 1

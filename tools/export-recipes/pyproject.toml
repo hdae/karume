@@ -1,7 +1,8 @@
-# モデル別 export recipe の置き場（ADR 0065 決定 2）。**PyPI へは公開しない** — wheel に
-# しない仮想プロジェクトで、上流モデル由来コード（patch / 参照 pipeline / dist recipe /
-# card template）とその依存グループを core（PyPI karume）の外で管理する。
-# 依存方向は recipe → core の一方向のみ（tools/exporter/tests/test_architecture_boundary.py）。
+# Home of the per-model export recipes (ADR 0065 decision 2). **Not published to PyPI** — a virtual
+# project that is not built into a wheel, holding the code derived from upstream models (patch /
+# reference pipeline / dist recipe / card template) and its dependency groups outside core (PyPI
+# karume). Dependencies go one way only, recipe → core
+# (tools/exporter/tests/test_architecture_boundary.py).
 [project]
 name = "karume-export-recipes"
 version = "0.0.0"
@@ -15,64 +16,75 @@ package = false
 
 [tool.uv.sources]
 karume = { workspace = true }
-# 依存グループ（anima / siglip2-preprocess）の torchvision も CPU index へ明示ピン —
-# exporter 側と同じ理由（explicit な index はピンした対象にしか使われない）。
+# The torchvision of the dependency groups (anima / siglip2-preprocess) is pinned to the CPU index
+# explicitly too — for the same reason as on the exporter side (an explicit index is used only for
+# the packages pinned to it).
 torchvision = { index = "pytorch-cpu" }
 
 [dependency-groups]
 dev = ["mypy>=1.15", "pytest>=9.1.1", "ruff>=0.15.0"]
-# Anima の実重み export 用（`uv sync --group anima`）。sbv2 と同じく既定の sync には入れない。
-# 内訳と根拠（4 コンポーネントの素の export に必要なハード依存）:
-#   diffusers — AnimaTextConditioner / AutoencoderKLQwenImage が本体にマージされたのが 0.39
-#     （CosmosTransformer3DModel は以前からある）。
-#   torchvision — CosmosTransformer3DModel.forward が concat_padding_mask 経路で
-#     `transforms.functional.resize` を呼ぶ（import は soft ガードだが export 時に必ず通る）。
-#   accelerate — diffusers の from_pretrained は既定 low_cpu_mem_usage=True で必須。
-#   transformers — text encoder の Qwen3Model。diffusers は transformers を要求しないので明示。
-# MUST: diffusers は `==` でピンする（style-bert-vits2 と同じ理由）— `anima.patch` が
-# `QwenImageRMS_norm` / `QwenImageResample` / `QwenImageUpsample` / `QwenImageAttentionBlock` の
-# forward をクラス属性ごと差し替え、`AnimaTextConditioner` / `CosmosTransformer3DModel` の
-# forward を逐語で書き下したラッパを持つ。マイナー更新で差し替え先の名前や forward の形が
-# 変わると、グラフ形（や eager 同値の前提）が黙って変わる。
-# MUST: transformers も `==` でピンする（diffusers と同型の理由）— `anima.patch` の Qwen3
-# ラッパは「単一プロンプトの全 1 マスクなら `causal & all_true == causal`」という同値主張を
-# `create_causal_mask` の実装に預けており、`lift_rope_buffers` は Qwen3 の RoPE バッファ名
-# （`inv_freq` / `original_inv_freq`）に依存する。どちらもマイナー更新で黙って形が変わる。
-# torchvision / accelerate は `>=` のまま — 差し替え対象を持たず、上限を固定する理由が無い。
+# For the real-weight export of Anima (`uv sync --group anima`). Like sbv2, not in the default sync.
+# What each entry is for (the hard dependencies of a plain export of the 4 components):
+#   diffusers — AnimaTextConditioner / AutoencoderKLQwenImage were merged into the main package in
+#     0.39 (CosmosTransformer3DModel has been there before).
+#   torchvision — CosmosTransformer3DModel.forward calls `transforms.functional.resize` on the
+#     concat_padding_mask path (the import is soft-guarded, but export always goes through it).
+#   accelerate — required by diffusers' from_pretrained (low_cpu_mem_usage=True by default).
+#   transformers — Qwen3Model of the text encoder. diffusers does not require transformers, so it
+#     is declared explicitly.
+# MUST: pin diffusers with `==` (the same reason as style-bert-vits2) — `anima.patch` replaces the
+# forward of `QwenImageRMS_norm` / `QwenImageResample` / `QwenImageUpsample` /
+# `QwenImageAttentionBlock` as class attributes, and holds wrappers that write out the forward of
+# `AnimaTextConditioner` / `CosmosTransformer3DModel` verbatim. If a minor update changes the names
+# of the replaced targets or the shape of a forward, the graph form (or the premise of eager
+# equivalence) changes silently.
+# MUST: pin transformers with `==` too (the same kind of reason as diffusers) — the Qwen3 wrapper of
+# `anima.patch` relies on the implementation of `create_causal_mask` for the equivalence claim "for
+# an all-ones mask of a single prompt, `causal & all_true == causal`", and `lift_rope_buffers`
+# depends on Qwen3's RoPE buffer names (`inv_freq` / `original_inv_freq`). Both can change form
+# silently in a minor update.
+# torchvision / accelerate stay `>=` — they have no replaced targets, so there is no reason to fix
+# an upper bound.
 anima = [
   "accelerate>=1.0",
   "diffusers==0.39.0",
   "torchvision>=0.28",
   "transformers==5.14.1",
 ]
-# Wan2.1 T2V の実重み export・参照用（`uv sync --group wan`）。既定の sync には入れない。
-# 内訳と根拠（ADR 0118 決定 4 / 7）:
+# For the real-weight export and references of Wan2.1 T2V (`uv sync --group wan`). Not in the
+# default sync.
+# What each entry is for (ADR 0118 decisions 4 / 7):
 #   diffusers — `WanTransformer3DModel` / `AutoencoderKLWan` / `WanPipeline` /
-#     `UniPCMultistepScheduler`（参照パイプラインの正本）。
-#   ftfy — `pipeline_wan.prompt_clean` は ftfy が入っているときだけ `ftfy.fix_text` を掛ける。
-#     入っているかで埋め込みが変わらないよう固定で入れる（決定 4）。
-#   accelerate — diffusers の from_pretrained は既定 low_cpu_mem_usage=True で必須。
-#   transformers — `wan.text_embeds` が umT5（`UMT5EncoderModel`）とトークナイザを bf16 で読んで
-#     テキスト埋め込みを作る（`pipeline_wan.py` も module 直下で両方を import する）。
-#   huggingface-hub — `wan.sources` が pin した revision で取得する（diffusers の依存としても
-#     入るが、直接 import するものは宣言する）。
-# MUST: diffusers は `==` でピンする（anima グループと同じ版）— 決定 5 の σ[0] の 1e-6 補正と
-# 決定 3 の RoPE の表（MPS 不在で float64）はこの版の実装に依る。マイナー更新で参照の数が
-# 黙って変わる。
-# MUST: ftfy も `==` でピンする — テキスト埋め込みは `fix_text` の正規化後の文字列から作るので、
-# 正規化の規則が版で変わると同じプロンプトが別の埋め込みになる（決定 4 の「固定」）。
-# diffusers / ftfy / transformers の版を変えるときは配布の門の固定値（`wan.distribution.WAN_TEXT_EMBEDS_VERSIONS`
-# — 資産のメタの版と突き合わせる）も揃える（`wan/tests/test_distribution.py` が両方を見る）。
-# transformers も `==` でピンする — テキスト埋め込みの値は transformers の UMT5 の実装で決まる
-# （版が変わると同じプロンプトが別の埋め込みになりうる）。版は他グループと同じ値（同じ venv に
-# 同居するグループ間で版を割らない）。
-# accelerate / huggingface-hub は差し替え対象を持たないので `>=` のまま。
-# MUST: pillow も `==` でピンする — I2V の条件画像の LANCZOS（`wan.i2v_preprocess_ref` /
-# `wan.lanczos_fixture` / `wan.export_vae_encoder`）は Pillow の `Resample.c` の値そのものが正本で、
-# git 管理の fixture と golden の rgb8 は版で決まる（TS の写しも同じ版に合わせてある）。torchvision の
-# 依存としても入るが、直接 import するものは宣言する（あちらが落としたり版を動かしたりすると黙って
-# 変わる）。版を変えるときは fixture と golden を作り直す（`wan/tests/test_lanczos_fixture.py` が
-# 今の Pillow と突き合わせる）。
+#     `UniPCMultistepScheduler` (the source of truth of the reference pipeline).
+#   ftfy — `pipeline_wan.prompt_clean` applies `ftfy.fix_text` only when ftfy is installed.
+#     It is always installed so that the embeddings do not depend on whether it is (decision 4).
+#   accelerate — required by diffusers' from_pretrained (low_cpu_mem_usage=True by default).
+#   transformers — `wan.text_embeds` reads umT5 (`UMT5EncoderModel`) and the tokenizer in bf16 to
+#     build the text embeddings (`pipeline_wan.py` also imports both at module level).
+#   huggingface-hub — `wan.sources` fetches the pinned revision (it also arrives as a dependency
+#     of diffusers, but what is imported directly is declared).
+# MUST: pin diffusers with `==` (the same version as the anima group) — the 1e-6 correction of σ[0]
+# in decision 5 and the RoPE table of decision 3 (float64 in the absence of MPS) depend on this
+# version's implementation. A minor update can change the reference numbers silently.
+# MUST: pin ftfy with `==` too — the text embeddings are built from the string after `fix_text`
+# normalization, so if the normalization rules change between versions the same prompt becomes
+# another embedding (the "fixed" of decision 4).
+# When changing the versions of diffusers / ftfy / transformers, also update the fixed values of
+# the distribution check (`wan.distribution.WAN_TEXT_EMBEDS_VERSIONS` — matched against the
+# versions in the asset metadata) (`wan/tests/test_distribution.py` checks both).
+# Pin transformers with `==` too — the values of the text embeddings are decided by transformers'
+# UMT5 implementation (a version change can turn the same prompt into another embedding). The
+# version is the same as in the other groups (versions are not split between groups that share one
+# venv).
+# accelerate / huggingface-hub have no replaced targets, so they stay `>=`.
+# MUST: pin pillow with `==` too — the LANCZOS of the I2V conditioning image
+# (`wan.i2v_preprocess_ref` / `wan.lanczos_fixture` / `wan.export_vae_encoder`) takes the values of
+# Pillow's `Resample.c` as the source of truth, and the rgb8 of the git-tracked fixture and golden
+# are decided by the version (the TS copy is matched to the same version too). It also arrives as a
+# dependency of torchvision, but what is imported directly is declared (if that side dropped it or
+# moved its version, things would change silently). When changing the version, regenerate the
+# fixture and the golden (`wan/tests/test_lanczos_fixture.py` matches them against the current
+# Pillow).
 wan = [
   "accelerate>=1.0",
   "diffusers==0.39.0",
@@ -102,110 +114,126 @@ moss = [
   "huggingface-hub>=1.26.0",
   "transformers==5.14.1",
 ]
-# SBV2 の実重み export 用（`uv sync --group sbv2`）。既定の sync には入れない — base deps
-# だけで tiny golden と pytest が回る状態を保つ。
-# MUST: style-bert-vits2 は `==` でピンする — SBV2 のエクスポータは後続の波でパッケージ内部
-# （モデリングコードのクラス属性）を monkeypatch する予定で、マイナー更新で差し替え先の
-# 名前や forward の形が変わるとグラフ形ごと黙って変わる。dp（波 1）自体は無改造で通るが、
-# ピンを緩めると「dp は通るのに後続の波だけ壊れる」形で表面化が遅れる。
-# NOTE: DeBERTa recipe（SBV2 配布形の `text_encoder` 席）は独立した席を持たない — 台本が要る
-# のは transformers だけで、それは style-bert-vits2 の依存として入る。
+# For the real-weight export of SBV2 (`uv sync --group sbv2`). Not in the default sync — keeps the
+# state where the tiny goldens and pytest run on the base deps alone.
+# MUST: pin style-bert-vits2 with `==` — the SBV2 exporter is planned to monkeypatch package
+# internals (class attributes of the modeling code) in a later iteration, and if a minor update
+# changes the names of the replaced targets or the shape of a forward, the whole graph form changes
+# silently. dp (iteration 1) itself passes unmodified, but loosening the pin delays the symptom into
+# the form "dp passes, only the later iterations break".
+# NOTE: the DeBERTa recipe (the `text_encoder` role of the SBV2 distribution) has no group of its
+# own — the script needs only transformers, which arrives as a dependency of style-bert-vits2.
 sbv2 = ["style-bert-vits2==2.5.0", "huggingface-hub>=1.26.0"]
-# SigLIP2 vision tower の実重み export 用（`uv sync --group siglip2`）。既定の sync には
-# 入れない。
-# MUST: transformers は `==` でピンする（anima グループと同型の理由）— `siglip2.patch` が
-# `SiglipVisionEmbeddings` / `SiglipMultiheadAttentionPoolingHead` の forward をクラス属性
-# ごと差し替え、MAP head の `nn.MultiheadAttention` を q/k/v の明示 linear へ割り直す。
-# マイナー更新で差し替え先の名前や forward の形が変わると、グラフ形（や eager 同値の前提）が
-# 黙って変わる。
-# torchvision / pillow は入れない — 画像の前処理はグラフに載せないので、vision tower の
-# export には一切要らない（両方外した実行で同一結果を実測）。
+# For the real-weight export of the SigLIP2 vision tower (`uv sync --group siglip2`). Not in the
+# default sync.
+# MUST: pin transformers with `==` (the same kind of reason as the anima group) — `siglip2.patch`
+# replaces the forward of `SiglipVisionEmbeddings` / `SiglipMultiheadAttentionPoolingHead` as class
+# attributes, and splits the MAP head's `nn.MultiheadAttention` into explicit q/k/v linears.
+# If a minor update changes the names of the replaced targets or the shape of a forward, the graph
+# form (or the premise of eager equivalence) changes silently.
+# torchvision / pillow are not installed — image preprocessing is not part of the graph, so the
+# vision tower export needs neither at all (measured: a run without both gives identical results).
 siglip2 = ["transformers==5.14.1"]
-# 画像前処理のパリティ用フィクスチャ生成用（`uv sync --group siglip2-preprocess`）。
-# `siglip2/preprocess.py` の正本は `AutoImageProcessor` が既定で返す fast 側
-# （`TorchvisionBackend`）なので、export には要らない torchvision と pillow がここでは要る
-# （pillow は `PILImageResampling` の実体 — 無いと resample の対応表が空になり、fast 側へ
-# 解決されない）。export 側の最小依存を保つため siglip2 グループには足さない。
-# `siglip2/export.py --real-images`（実画像 golden）もこのグループで回す — 実画像の前処理は
-# 同じ正本を通す必要があり、PNG を開く pillow も要る。
+# For generating the image preprocessing parity fixtures (`uv sync --group siglip2-preprocess`).
+# The source of truth of `siglip2/preprocess.py` is the fast side `AutoImageProcessor` returns by
+# default (`TorchvisionBackend`), so torchvision and pillow, which export does not need, are needed
+# here (pillow is what `PILImageResampling` is — without it the resample mapping is empty and does
+# not resolve to the fast side). Not added to the siglip2 group, to keep the export side's
+# dependencies minimal.
+# `siglip2/export.py --real-images` (real-image goldens) also runs with this group — real-image
+# preprocessing must go through the same source of truth, and pillow is needed to open the PNGs.
 siglip2-preprocess = ["pillow>=11", "torchvision>=0.28", "transformers==5.14.1"]
-# BiRefNet_HR の実重み export 用（`uv sync --group birefnet`）。既定の sync には入れない。
-# 内訳と根拠（同梱 `birefnet.py` が **import 時**に要求するもの — 実測で確定）:
-#   timm — Swin / PVTv2 の `DropPath` / `to_2tuple` / `trunc_normal_`。
-#   einops — Decoder の `image2patches`（`rearrange`）。
-#   kornia — `from kornia.filters import laplacian`（使うのは学習経路の out_ref だけだが、
-#     import はモジュール先頭なので推論 export でも通る）。
-#   transformers — `PretrainedConfig` / `PreTrainedModel` と、同梱コードを読む
-#     `trust_remote_code=True` の動的モジュール機構。
-#   pillow — `birefnet/export.py --real-images` が実画像 PNG を開く（同梱 `handler.py` の
-#     `ImagePreprocessor` が PIL 経路なので、前処理の正本ごと PIL で通す）。torchvision の
-#     依存としても入るが、**直接 import するものは宣言する**（あちらが落としたら黙って
-#     欠ける）。
-# torchvision（`torchvision.ops.deform_conv2d`）は core の基本依存にあるのでここには書かない。
-# MUST: transformers は `==` でピンする（anima / siglip2 グループと同型の理由）—
-# `birefnet.patch` は `trust_remote_code` が読み込んだ動的モジュールのクラス属性を差し替える
-# ので、動的モジュールの解決規約（キャッシュ先・相対 import の張り方）が変わると差し替え先を
-# 見失う。timm / einops / kornia は差し替え対象を持たないので `>=` のまま。
-# MUST: pillow も `==` でピンする（wan グループと同じ版 — 同じ venv に同居するグループの間で版を
-# 割らない）。α マットの後処理の golden（`birefnet.matte_fixture` — HR の上流の手順は Pillow の
-# 8bit の bicubic）は `Resample.c` の値そのものが正本で、git 管理の fixture は版で決まる（TS の
-# 写しも同じ版に合わせてある）。版を変えるときは fixture を作り直す
-# （`birefnet/tests/test_matte_fixture.py` が今の Pillow と突き合わせる）。
+# For the real-weight export of BiRefNet_HR (`uv sync --group birefnet`). Not in the default sync.
+# What each entry is for (what the bundled `birefnet.py` requires **at import time** — confirmed by
+# measurement):
+#   timm — Swin / PVTv2's `DropPath` / `to_2tuple` / `trunc_normal_`.
+#   einops — the Decoder's `image2patches` (`rearrange`).
+#   kornia — `from kornia.filters import laplacian` (only the training path's out_ref uses it, but
+#     the import is at the top of the module, so inference export goes through it too).
+#   transformers — `PretrainedConfig` / `PreTrainedModel`, and the dynamic module mechanism of
+#     `trust_remote_code=True` that loads the bundled code.
+#   pillow — `birefnet/export.py --real-images` opens real-image PNGs (the bundled `handler.py`'s
+#     `ImagePreprocessor` is a PIL path, so the preprocessing source of truth goes through PIL as
+#     a whole). It also arrives as a dependency of torchvision, but **what is imported directly is
+#     declared** (if that side dropped it, it would go missing silently).
+# torchvision (`torchvision.ops.deform_conv2d`) is in core's base dependencies, so it is not listed
+# here.
+# MUST: pin transformers with `==` (the same kind of reason as the anima / siglip2 groups) —
+# `birefnet.patch` replaces class attributes of the dynamic module loaded by `trust_remote_code`, so
+# if the dynamic module's resolution rules (cache location, how relative imports are wired) change,
+# it loses track of the replaced targets. timm / einops / kornia have no replaced targets, so they
+# stay `>=`.
+# MUST: pin pillow with `==` too (the same version as the wan group — versions are not split between
+# groups that share one venv). The golden of the alpha matte post-processing
+# (`birefnet.matte_fixture` — HR's upstream procedure is Pillow's 8-bit bicubic) takes the values of
+# `Resample.c` as the source of truth, and the git-tracked fixture is decided by the version (the TS
+# copy is matched to the same version too). When changing the version, regenerate the fixture
+# (`birefnet/tests/test_matte_fixture.py` matches it against the current Pillow).
 birefnet = ["einops>=0.8", "kornia>=0.8", "pillow==12.3.0", "timm>=1.0", "transformers==5.14.1"]
-# Depth Anything V2（単一画像の相対深度推定）の実重み export 用（`uv sync --group
-# depth-anything`）。既定の sync には入れない。
-# 内訳と根拠: 対象は transformers 移植版（`depth-anything/Depth-Anything-V2-Small-hf` —
-# `DepthAnythingForDepthEstimation` + `Dinov2Backbone`）なので、要るのは transformers だけ。
-#   timm は要らない（`use_pretrained_backbone=false` で backbone も transformers 実装・
-#   前処理はグラフに載せない）。pillow も入れない（合成画像 golden は PNG を開かない）。
-# MUST: transformers は `==` でピンする（anima / siglip2 / birefnet グループと同型の理由）—
-# `depth_anything.patch` が `DepthAnythingFeatureFusionStage.forward` と
-# `Dinov2Embeddings.interpolate_pos_encoding` をクラス属性ごと差し替え、`nn.ConvTranspose2d` を
-# インスタンスごと置き換える。マイナー更新で差し替え先の名前や forward の形が
-# 変わると、グラフ形（や eager 同値の前提）が黙って変わる。
+# For the real-weight export of Depth Anything V2 (relative depth estimation from a single image)
+# (`uv sync --group depth-anything`). Not in the default sync.
+# What it needs and why: the target is the transformers port
+# (`depth-anything/Depth-Anything-V2-Small-hf` — `DepthAnythingForDepthEstimation` +
+# `Dinov2Backbone`), so only transformers is needed.
+#   timm is not needed (`use_pretrained_backbone=false` makes the backbone a transformers
+#   implementation too, and preprocessing is not part of the graph). pillow is not installed either
+#   (the synthetic-image goldens do not open PNGs).
+# MUST: pin transformers with `==` (the same kind of reason as the anima / siglip2 / birefnet
+# groups) — `depth_anything.patch` replaces `DepthAnythingFeatureFusionStage.forward` and
+# `Dinov2Embeddings.interpolate_pos_encoding` as class attributes and replaces `nn.ConvTranspose2d`
+# per instance. If a minor update changes the names of the replaced targets or the shape of a
+# forward, the graph form (or the premise of eager equivalence) changes silently.
 depth-anything = ["transformers==5.14.1"]
-# `depth_anything/export.py --real-images`（実画像 golden）用（`uv sync --group
-# depth-anything-preprocess`）。siglip2 / siglip2-preprocess と同じ分け方で、export 側の
-# 最小依存を保つために depth-anything グループへは足さない。
-# 足すのは PNG を開く pillow だけ — 前処理の正本 `DPTImageProcessor`（fast 側）が要求する
-# torchvision は既に core の基本依存にある（`deform_conv2d` の op 登録用）。
+# For `depth_anything/export.py --real-images` (real-image goldens) (`uv sync --group
+# depth-anything-preprocess`). Split the same way as siglip2 / siglip2-preprocess, and not added to
+# the depth-anything group, to keep the export side's dependencies minimal.
+# Only pillow, to open the PNGs, is added — the torchvision required by the preprocessing source of
+# truth `DPTImageProcessor` (fast side) is already in core's base dependencies (for registering the
+# `deform_conv2d` op).
 depth-anything-preprocess = ["pillow>=11", "transformers==5.14.1"]
-# Gemma 4 mobile QAT の実重み export 用（`uv sync --group gemma4-qat`）。既定の sync には
-# 入れない。要るのは transformers だけ（固定整数の入れ物 `gemma_quant` は本体に入っている）。
-# MUST: transformers は `==` でピンする（anima / siglip2 / birefnet グループと同型の理由）—
-# recipe は `transformers.integrations.gemma_quant` の `QuantizedLinear` / `QuantizedEmbedding`
-# の属性名（`weight_scale` / `input_activation_scale` / `embedding_quantized`）と forward に
-# 直接依存していて、マイナー更新で綴りや丸めの形が変わると固定値の写しが黙って別物になる。
+# For the real-weight export of Gemma 4 mobile QAT (`uv sync --group gemma4-qat`). Not in the
+# default sync. Only transformers is needed (the fixed-integer container `gemma_quant` is in the
+# main package).
+# MUST: pin transformers with `==` (the same kind of reason as the anima / siglip2 / birefnet
+# groups) — the recipe depends directly on the attribute names (`weight_scale` /
+# `input_activation_scale` / `embedding_quantized`) and the forward of `QuantizedLinear` /
+# `QuantizedEmbedding` in `transformers.integrations.gemma_quant`, and if a minor update changes the
+# spellings or the form of the rounding, the copies of the fixed values silently become something
+# else.
 gemma4-qat = ["transformers==5.14.1"]
-# NOTE: EmbeddingGemma / MiniCPM5 / 母音検出 recipe は依存グループを持たない — 前 2 者は
-# `uv run --with 'transformers==5.14.1' python -m <family>.export` の一時足し
-# （各台本の docstring）、母音検出は core の基本依存（torch / numpy / safetensors）だけで回る。
+# NOTE: the EmbeddingGemma / MiniCPM5 / vowel detector recipes have no dependency group — the
+# former two add it temporarily with
+# `uv run --with 'transformers==5.14.1' python -m <family>.export` (each script's docstring),
+# and the vowel detector runs on core's base dependencies alone (torch / numpy / safetensors).
 
 [tool.pytest.ini_options]
 testpaths = ["."]
 pythonpath = ["."]
 
-# mypy は CI に入れない（uv run mypy の手動実行のみ）。対象は「数値計測レポート系の自前
-# ロジック」に明示的に絞る — recipe 全域へ広げると torch / diffusers 等の型欠落が主語になり、
-# 検査の主眼（自前コードの整合）が薄まる。残指摘の件数と内訳はコミット本文が台帳
-# （2026-08-16 レビュー B15 の裁定で常設）。
+# mypy is not in CI (manual `uv run mypy` only). Its targets are explicitly narrowed to "our own
+# logic of the numeric measurement reports" — widening it to every recipe would make the missing
+# types of torch / diffusers and the like the main subject and dilute the point of the check (the
+# consistency of our own code). The commit body is the ledger of the count and breakdown of the
+# remaining findings (made permanent by the ruling on B15 of the 2026-08-16 review).
 [tool.mypy]
 python_version = "3.12"
 files = ["anima/measure_report.py", "anima/measure_quant.py", "anima/pipeline_ref.py"]
 ignore_missing_imports = true
 
-# core（tools/exporter/pyproject.toml）と同じ設定 — 台本は core と行き来するので、
-# 片方だけ別の整形規則にすると移動のたびに無関係な差分が出る。
+# The same settings as core (tools/exporter/pyproject.toml) — scripts move back and forth with
+# core, so a different formatting rule on one side would produce unrelated diffs at every move.
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
-# RUF001-003: 散文は日本語なので全角約物が「ASCII と紛らわしい」で全行に出る（本文の規約どおり）。
+# RUF001-003: the prose is Japanese, so full-width punctuation would be reported on every line as
+# "ambiguous with ASCII" (as the prose conventions intend).
 ignore = ["RUF001", "RUF002", "RUF003"]
 
-# `karume` は同じ workspace の core パッケージ — 素の依存と同じ塊に混ぜると「core から
-# 何を借りているか」が import の並びから読めなくなる（core 側は src 検出で自然にこうなる）。
+# `karume` is the core package of the same workspace — mixing it into the same block as plain
+# dependencies would make "what is borrowed from core" unreadable from the import order (on the
+# core side this happens naturally through src detection).
 [tool.ruff.lint.isort]
 known-first-party = ["karume"]

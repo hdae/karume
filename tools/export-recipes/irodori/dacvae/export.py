@@ -1,8 +1,9 @@
-"""実重み DACVAE（Semantic-DACVAE-Japanese-32dim）を IR v2 コンテナ + golden io へ書き出す台本。
+"""Script that writes the real-weight DACVAE (Semantic-DACVAE-Japanese-32dim) to IR v2 containers
++ golden io.
 
-recon の G6（decoder）/ G7（encoder）で、Irodori-TTS v4 の**コーデック段**にあたる。テキスト側
-6 ターゲットは `irodori/export.py`、ホスト側の latent までの経路は
-`irodori/pipeline_ref.py` が持つ。
+These are G6 (decoder) / G7 (encoder) of the recon, the **codec stage** of Irodori-TTS v4. The six
+text-side targets live in `irodori/export.py`, and the host-side path up to the latent in
+`irodori/pipeline_ref.py`.
 
     cd tools/export-recipes
     uv run --with descript-audiotools --with einops python -m irodori.dacvae.export
@@ -10,106 +11,121 @@ recon の G6（decoder）/ G7（encoder）で、Irodori-TTS v4 の**コーデッ
     uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16
     uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype i8
 
-依存は `--with` で足す（pyproject.toml には入れない — 既定の sync は base deps だけで回る）。
-`descript-audiotools` は 2 つの理由で要る: ① `dacvae` パッケージが `audiotools.ml.BaseModel` を
-継承する ② encoder の golden 入力が**参照音声を −16 LUFS へ正規化した波形**で、その正規化が
-audiotools の実経路（ITU-R BS.1770-4 の IIR）。`einops` は `dacvae/__init__.py` が
-`BaseModel.EXTERN` へ名前を足すためだけに import する。
+Dependencies are added with `--with` (not in pyproject.toml — the default sync runs on the base
+deps only). `descript-audiotools` is needed for two reasons: ① the `dacvae` package subclasses
+`audiotools.ml.BaseModel` ② the encoder's golden input is **the reference audio normalized to
+−16 LUFS**, and that normalization is audiotools' real path (the IIR of ITU-R BS.1770-4).
+`einops` is imported only because `dacvae/__init__.py` adds a name to `BaseModel.EXTERN`.
 
-モデル実装は GitHub `facebookresearch/dacvae` の clone（既定 `inputs/irodori/dacvae-src/`）から
-**`sys.path` 追加で import** する（`--source-dir`）。固定した版は {@link SOURCE_COMMIT}。
+The model implementation is **imported by adding to `sys.path`** (`--source-dir`) from a clone of
+GitHub `facebookresearch/dacvae` (default `inputs/irodori/dacvae-src/`). The pinned version is
+{@link SOURCE_COMMIT}.
 
-## 何をグラフに載せるか（2 ターゲット・B=1・S / T は記号次元）
+## What goes into the graphs (2 targets, B=1, S / T are symbolic dimensions)
 
-| ターゲット | 入力            | 出力          | 中身                                        |
+| Target     | Input           | Output        | Contents                                    |
 | ---------- | --------------- | ------------- | ------------------------------------------- |
-| `decoder`  | `[1,S,32]`      | `[1,1,1920S]` | `quantizer.out_proj` + decoder 主経路       |
-| `encoder`  | `[1,T,1920]`    | `[1,T,32]`    | encoder + `quantizer.in_proj` の前半 32 行  |
+| `decoder`  | `[1,S,32]`      | `[1,1,1920S]` | `quantizer.out_proj` + decoder main path    |
+| `encoder`  | `[1,T,1920]`    | `[1,T,32]`    | encoder + first 32 rows of `quantizer.in_proj` |
 
-hop は 1920 サンプル（48kHz / 25 フレーム毎秒）で、チェックポイントの `encoder_rates` の積から
-導く（直書きしない）。
+The hop is 1920 samples (48 kHz / 25 frames per second), derived from the product of the
+checkpoint's `encoder_rates` (not hard-coded).
 
-### `decoder`（G6）の境界
+### Boundary of `decoder` (G6)
 
-入力は Irodori の latent と同じ `[1,S,32]`（フレーム軸が記号 S）で、グラフ内で `[1,32,S]` へ
-transpose してから `quantizer.out_proj`（conv1d 32→1024 k=1）へ渡す。上流 `DACVAE.decode` の
-`out_proj` → `decoder` の 2 段そのもので、`_vae_sample` は通らない（Irodori は
-`deterministic_encode=True` で mean をそのまま latent に使う — `codec.py`）。
+The input is `[1,S,32]`, the same as Irodori's latent (the frame axis is the symbol S); inside the
+graph it is transposed to `[1,32,S]` and then passed to `quantizer.out_proj` (conv1d 32→1024
+k=1). This is exactly the two stages `out_proj` → `decoder` of upstream `DACVAE.decode`, and
+`_vae_sample` is not used (Irodori uses the mean as the latent as is with
+`deterministic_encode=True` — `codec.py`).
 
-**透かし枝は上流 README 推奨の②形でバイパスする**（`decoder.alpha = 0.0` に加えて
-`decoder.watermark` を `wm_model.encoder_block.forward_no_conv` へ差し替える）。`alpha = 0.0`
-だけでは `Decoder.watermark` が入力（96ch）をそのまま返し、**波形にならない** — 波形ヘッド
-（`Snake(96)` → `conv1d(96→1,k7)` → `Tanh`）は `wm_model.encoder_block.pre` 側にあるため。
-`bypass_watermark` はこの 2 つを両方当て、呼び出し側が出力チャネル数 1 を実測する。
+**The watermarking branch is bypassed in form ②, which the upstream README recommends**
+(`decoder.alpha = 0.0`, plus replacing `decoder.watermark` with
+`wm_model.encoder_block.forward_no_conv`). With `alpha = 0.0` alone, `Decoder.watermark` returns
+its input (96ch) as is and **produces no waveform** — because the waveform head
+(`Snake(96)` → `conv1d(96→1,k7)` → `Tanh`) sits on the `wm_model.encoder_block.pre` side.
+`bypass_watermark` applies both, and the caller measures that the output has 1 channel.
 
-### `encoder`（G7）の境界
+### Boundary of `encoder` (G7)
 
-`quantizer.in_proj` は conv1d 1024→64（k=1）で、上流は出力を `chunk(2, dim=1)` して前半を
-mean・後半を scale に使う。scale は決定的経路では捨てられるので、**前半 32 行 + bias 前半 32 に
-切り詰めた conv1d** をグラフに載せる（`_in_proj_truncation_evidence` が `chunk(2)[0]` との
-一致を毎回実測する — 許容は `IN_PROJ_TRUNCATION_ATOL`）。
+`quantizer.in_proj` is a conv1d 1024→64 (k=1); upstream splits its output with
+`chunk(2, dim=1)` and uses the first half as the mean and the second half as the scale. The
+deterministic path discards the scale, so the graph carries **a conv1d truncated to the first 32
+rows + the first 32 of the bias** (`_in_proj_truncation_evidence` measures agreement with
+`chunk(2)[0]` every run — the tolerance is `IN_PROJ_TRUNCATION_ATOL`).
 
-MUST: 入力は**フレーム分割済みの `[1,T,1920]`**（グラフ内で `[1,1,1920T]` へ reshape）。
-素直な `[1,1,1920T]` にできないのは、IR の束縛規則が「シンボルは少なくとも 1 つの入力 shape に
-**素の形**で現れる」ことを要求する（`karume.verify._check_symbol_bindability`）ため —
-`1920T` だけでは T を束縛できず、コンテナを書く前に落ちる。フレーム分割は**要素順を変えない
-読み替え**（row-major で フレーム t が サンプル `[1920t, 1920(t+1))` を占める）なので、ホストは
-連続バッファをそのまま渡せる。同時に「グラフは 1920 の倍数だけ受ける」契約が shape に出る。
+MUST: the input is **the framed `[1,T,1920]`** (reshaped to `[1,1,1920T]` inside the graph). A
+plain `[1,1,1920T]` is not possible because the IR's binding rule requires that "a symbol appears
+**bare** in at least one input shape" (`karume.verify._check_symbol_bindability`) — `1920T` alone
+cannot bind T, and it fails before the container is written. Framing is **a reinterpretation that
+keeps the element order** (row-major, frame t occupies samples `[1920t, 1920(t+1))`), so the host
+can pass its contiguous buffer as is. At the same time, the contract "the graph only accepts
+multiples of 1920" shows up in the shape.
 
-reflect pad（`DACVAE._pad`）と LUFS 正規化・リサンプルは**ホスト責務**でグラフに載せない。
-その 2 段の参照値は `irodori/dacvae/host.py` が別に出す。
+Reflect pad (`DACVAE._pad`), LUFS normalization and resampling are **the host's job** and are not
+in the graph. The reference values of those two stages are produced separately by
+`irodori/dacvae/host.py`.
 
-## 前処理（export の前に必ず通す 2 つ）
+## Preprocessing (two steps always applied before export)
 
-- **`nn.utils.remove_weight_norm` を全 `NormConv1d` / `NormConvTranspose1d` へ**。この
-  チェックポイントは旧式の `weight_g` / `weight_v` ペアで持っており、畳まないと `weight` が
-  実効重みでない（`export_sbv2.py` の `dec` と同じ前処理）。出力のビット一致は
-  `_remove_weight_norm_evidence` が毎回実測する。
-- **`Snake1d.alpha` をパラメータから素の属性へ降格**（lifted tensor constant）。Snake は
-  `x + (α+1e-9).reciprocal() · sin(αx)²` で、`(α+1e-9).reciprocal()` は**定数部分木**だが、
-  定数畳み込みの葉として適格なのは lifted 定数だけ（`convert._classify_foldable` —
-  パラメータ/バッファ経由は巨大定数の焼き込みを避けるため不適格）。降格しないと
-  `reciprocal` が実行時 op として IR に残り、語彙に無いので落ちる。`assert_snake_folded` が
-  emit 後の `required_ops` を見て、畳み込みが効いていることを毎回確かめる。
+- **`nn.utils.remove_weight_norm` on every `NormConv1d` / `NormConvTranspose1d`**. This checkpoint
+  holds the old-style `weight_g` / `weight_v` pairs, and without folding them `weight` is not the
+  effective weight (the same preprocessing as `dec` in `export_sbv2.py`). Bit identity of the
+  output is measured by `_remove_weight_norm_evidence` every run.
+- **Demote `Snake1d.alpha` from a parameter to a plain attribute** (lifted tensor constant). Snake
+  is `x + (α+1e-9).reciprocal() · sin(αx)²`, and `(α+1e-9).reciprocal()` is **a constant
+  subtree**, but only lifted constants qualify as leaves for constant folding
+  (`convert._classify_foldable` — values reached through parameters / buffers do not qualify, to
+  avoid baking in huge constants). Without the demotion, `reciprocal` stays in the IR as a
+  run-time op, and since it is not in the vocabulary, the export fails. `assert_snake_folded`
+  looks at `required_ops` after emit and confirms every run that the folding took effect.
 
-## 常設門（emit の前に全部実測し、1 つでも外れたら**何も書かない**）
+## Standing checks (all measured before emit; if any one fails, **nothing is written**)
 
-1. **主経路の抽出**（`main_path`）が**②形パッチ済み `Decoder`** とビット一致すること。
-   グラフに載るのは `Decoder` 本体（写しではない）で、抽出したほうは門でしか使わない —
-   「decode が実際に通る層は 28 本で、透かし枝は波形ヘッド 4 本しか寄与しない」という
-   構造の主張を、次波（タイル化）が前提にするため。
-2. **`in_proj` の切り詰め**が `chunk(2, dim=1)[0]` と一致すること
-   （{@link IN_PROJ_TRUNCATION_ATOL} — ビット一致は conv カーネル選択に依存し保証されない）。
-3. **`remove_weight_norm` の前後**で decoder / encoder の出力がビット一致すること。
-4. **ラッパの eager 同値**（パッチ前の実モジュール出力との差 — {@link EAGER_EQUIV_ATOL} = 0）。
-5. **往復の妥当性**（参照音声 → encoder → decoder が有限で、入力波形と相関すること）。
-   `_roundtrip_evidence` が相関の下限 {@link ROUNDTRIP_CORRELATION_MIN} を実測で守る。
+1. **The main-path extraction** (`main_path`) is bit-identical to **the `Decoder` patched in form
+   ②**. What goes into the graph is the `Decoder` itself (not a copy); the extraction is used only
+   by the check — because the next iteration (tiling) builds on the structural claim that
+   "decode actually goes through 28 layers, and the watermarking branch contributes only the 4
+   layers of the waveform head".
+2. **The `in_proj` truncation** agrees with `chunk(2, dim=1)[0]`
+   ({@link IN_PROJ_TRUNCATION_ATOL} — bit identity depends on the conv kernel selection and is
+   not guaranteed).
+3. **Before and after `remove_weight_norm`**, the decoder / encoder outputs are bit-identical.
+4. **Eager equivalence of the wrappers** (the difference from the real modules' output before
+   patching — {@link EAGER_EQUIV_ATOL} = 0).
+5. **Round-trip sanity** (reference audio → encoder → decoder is finite and correlates with the
+   input waveform). `_roundtrip_evidence` enforces the correlation floor
+   {@link ROUNDTRIP_CORRELATION_MIN} by measurement.
 
-## 格納 dtype の系列（ADR 0018 / 0019 / 0027 / 0050）
+## Storage dtype series (ADR 0018 / 0019 / 0027 / 0050)
 
-`--dtype f16` / `--dtype i8` はそれぞれ**別系列**（`dacvae-32dim-f16/` / `dacvae-32dim-i8/`）へ
-書き出す（同居させると f32 系列の網が圧縮資産へ黙って掛かる）。i8 は per-channel symmetric
-（conv1d は軸 0・`ConvTranspose1d` だけ軸 1 — `karume.quantize.QUANT_CHANNEL_AXES` が正本）で、
-scale 台帳は {@link _target_scales} がラッパ内 FQN へ張り替えて emit へ渡す。
-丸めの順序は `_fake_quant` の MUST — `fold_weight_norm` と
-`lift_snake_alphas` の**後**・参照 / golden の採取の**前**で、そのため圧縮系列では参照を
-畳み込みの後に**採り直す**（門 3 の「畳む前後のビット一致」は畳む前に採った参照で先に
-決着させてから丸める）。
+`--dtype f16` / `--dtype i8` each write to **a separate series** (`dacvae-32dim-f16/` /
+`dacvae-32dim-i8/`) (sharing a directory would silently apply the f32 series' checks to compressed
+assets). i8 is per-channel symmetric (axis 0 for conv1d, axis 1 only for `ConvTranspose1d` —
+`karume.quantize.QUANT_CHANNEL_AXES` is the source of truth), and {@link _target_scales} remaps
+the scale ledger to in-wrapper FQNs before handing it to emit.
+The rounding order is the MUST of `_fake_quant` — **after** `fold_weight_norm` and
+`lift_snake_alphas`, **before** the reference / golden is taken; so for compressed series the
+reference is **taken again** after folding (check 3's "bit identity before and after folding" is
+settled first with the reference taken before folding, and only then is the rounding applied).
 
-**`Snake1d.alpha` は丸めない** — `lift_snake_alphas` がパラメータから素の属性へ降格した
-後に丸めるので `named_parameters` に現れず、emit 側でも重みスロットではない（lifted 定数）
-ので **F32 格納のまま残る**。golden も同じ f32 alpha で計算されるので両者は整合する。
+**`Snake1d.alpha` is not rounded** — rounding happens after `lift_snake_alphas` demoted it from a
+parameter to a plain attribute, so it does not appear in `named_parameters`, and on the emit side
+it is not a weight slot either (a lifted constant), so it **stays stored as F32**. The golden is
+computed with the same f32 alpha, so the two agree.
 
-golden の入力（decoder の実 latent / encoder の正規化済み波形）は**系列を跨いで同じ**にする
-（`--latent-dir` の既定は f32 系列の full-loop golden のまま）— 入力は参照と GPU が同じ
-バイト列を読む側で、格納 dtype の影響を受けない。
+The golden inputs (the decoder's real latents / the encoder's normalized waveform) are **the same
+across series** (the default of `--latent-dir` stays the full-loop golden of the f32 series) —
+inputs are what the reference and the GPU read as the same bytes, and the storage dtype does not
+affect them.
 
-## 出力レイアウト
+## Output layout
 
-    outputs/series/dacvae-32dim/<target>/model.krm              重み・定数 + 2 文書の記述
-    outputs/series/dacvae-32dim/<target>/io.<case>.safetensors  入力と torch CPU 期待出力
+    outputs/series/dacvae-32dim/<target>/model.krm              weights, constants + 2 descriptors
+    outputs/series/dacvae-32dim/<target>/io.<case>.safetensors  inputs + torch CPU expected outputs
 
-io のテンソルキー規約は他系列と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
+The tensor-key convention of io is the same as the other series (`input.<graph input name>` /
+`output.<position>`).
 """
 
 from __future__ import annotations
@@ -138,30 +154,34 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
 
-#: 実重みの置き場（`hf download Aratako/Semantic-DACVAE-Japanese-32dim` の展開先を
-#: `irodori/dacvae/convert.py` で safetensors 化したもの）。
+#: Location of the real weights (the output of `hf download Aratako/Semantic-DACVAE-Japanese-32dim`
+#: converted to safetensors by `irodori/dacvae/convert.py`).
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "dacvae-32dim"
 
-#: モデル実装（GitHub `facebookresearch/dacvae` の clone）の置き場。
+#: Location of the model implementation (a clone of GitHub `facebookresearch/dacvae`).
 DEFAULT_SOURCE_DIR = INPUTS_ROOT / "irodori" / "dacvae-src"
 
-#: 実装 clone の出所と固定した版。`git clone <SOURCE_REPO> inputs/irodori/dacvae-src` で置く。
+#: Origin and pinned version of the implementation clone. Place it with
+#: `git clone <SOURCE_REPO> inputs/irodori/dacvae-src`.
 SOURCE_REPO = "https://github.com/facebookresearch/dacvae"
 SOURCE_COMMIT = "414c20785fc3a28373073ea8ef7a1316eeeaca6e"
 
-#: 書き出せる格納 dtype。`i8` は波 2 で足した（conv 支配ネットの i8 品質は前例が無いので、
-#: 配布形の席に載せる前に `irodori/measure_quant.py` の `i8-codec-only` が単独で測る —
-#: ADR 0050 決定 6 / 量子化 recon の risks）。
+#: Storage dtypes that can be written. `i8` was added in iteration 2 (there is no precedent for the
+#: i8 quality of a conv-dominated network, so before it takes a slot in the distribution,
+#: `i8-codec-only` of `irodori/measure_quant.py` measures it on its own — ADR 0050 decision 6 /
+#: the risks of the quantization recon).
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 
 WEIGHTS_FILE = "weights.safetensors"
 METADATA_FILE = "metadata.json"
 MODEL_FILE = "model.krm"
 
-#: 容器へ焼く出所（container-v1 §2.3）。コーデックは上流 `Aratako/Semantic-DACVAE-Japanese-32dim`
-#: で、元の重みが Apache 2.0 の `facebook/dacvae-watermarked` なので、ライセンス識別子は
-#: カード側の正本 {@link irodori.card.IRODORI_CODEC_LICENSE}（MIT と Apache 2.0 の鎖）を焼く。
-#: `notice` は配布リポ直下の `NOTICE.md`（Apache 2.0 §4(b) の改変告知の在処）。
+#: Provenance baked into the containers (container-v1 §2.3). The codec's upstream is
+#: `Aratako/Semantic-DACVAE-Japanese-32dim`, whose original weights are the Apache 2.0
+#: `facebook/dacvae-watermarked`, so the license identifier baked in is the card side's source of
+#: truth {@link irodori.card.IRODORI_CODEC_LICENSE} (the MIT and Apache 2.0 chain).
+#: `notice` is `NOTICE.md` at the root of the distribution repository (where the modification
+#: notice of Apache 2.0 §4(b) lives).
 PROVENANCE = Provenance(license=IRODORI_CODEC_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
@@ -172,57 +192,70 @@ TARGET_DECODER = "decoder"
 TARGET_ENCODER = "encoder"
 TARGETS = (TARGET_DECODER, TARGET_ENCODER)
 
-#: IR に載る記号次元名（グラフごとに閉じているので、両者が同じ名前でも衝突しない）。
+#: Names of the symbolic dimensions in the IR (scoped per graph, so the two would not collide even
+#: with the same name).
 DECODER_SYMBOL = "S"
 ENCODER_SYMBOL = "T"
 
-#: 記号次元の下限。torch.export の 0/1 特殊化を避けるため 2 で運用する（他系列と同じ）。
+#: Lower bound of the symbolic dimensions. Set to 2 to avoid torch.export's 0/1 specialization
+#: (same as the other series).
 MIN_SYM_LENGTH = 2
 
-#: `decoder` の記号次元 S の上限を決める発話長（秒）。生成できる latent の上限そのもの
-#: （`irodori.export.DIT_MAX_SECONDS` と同じ 30 秒 — ADR 0047）。**この台本には位置表も
-#: マスクも無い**（純粋な畳み込み網）ので、上限を上げてもコンテナは 1 バイトも増えない。
+#: Utterance length (seconds) that sets the upper bound of the `decoder`'s symbolic dimension S.
+#: It is the upper bound of the latents that can be generated (30 s, the same as
+#: `irodori.export.DIT_MAX_SECONDS` — ADR 0047). **This script has no position table and no mask**
+#: (a pure convolutional network), so raising the bound does not grow the container by a single
+#: byte.
 DECODER_MAX_SECONDS = 30.0
 
-#: `encoder` の記号次元 T の上限を決める参照音声長（秒）。チェックポイントの
-#: `ref_max_seconds`（120 秒）に合わせる — 参照音声はこれ以上の長さで呼ばれない。
+#: Reference audio length (seconds) that sets the upper bound of the `encoder`'s symbolic dimension
+#: T. Matches the checkpoint's `ref_max_seconds` (120 s) — reference audio is never longer than
+#: that.
 ENCODER_MAX_SECONDS = 120.0
 
-#: 参照音声（公式サンプルの voice cloning 用リファレンス）。48kHz mono・7.6 秒。
+#: Reference audio (the voice-cloning reference of the official samples). 48 kHz mono, 7.6 s.
 DEFAULT_REFERENCE_WAV = INPUTS_ROOT / "irodori" / "v4-small" / "samples" / "clone_ref1.wav"
 
-#: 参照音声の LUFS 正規化の目標（`inference_runtime.SamplingRequest.ref_normalize_db` の既定）。
+#: Target of the reference audio's LUFS normalization (the default of
+#: `inference_runtime.SamplingRequest.ref_normalize_db`).
 REFERENCE_NORMALIZE_DB = -16.0
 
-#: 実 latent の供給元（`irodori/pipeline_ref.py` が書く full-loop golden の最終 z）。
+#: Source of the real latents (the final z of the full-loop golden written by
+#: `irodori/pipeline_ref.py`).
 DEFAULT_LATENT_DIR = SERIES_ROOT / "irodori-v4-small" / "pipeline"
 LATENT_CASE_PREFIX = "case."
 LATENT_KEY = "z"
 
-#: ラッパと**パッチ前**の実モジュールの eager 同値に許す差。**0 = ビット一致を要求する**。
+#: Difference allowed in the eager equivalence between the wrappers and the real modules **before
+#: patching**. **0 = bit identity is required**.
 #:
-#: ラッパがしているのは ① transpose / reshape の付け足し ② `in_proj` の切り詰め
-#: ③ `remove_weight_norm` ④ `Snake1d.alpha` の降格の 4 つで、いずれも値を変えない操作
-#: （②〜④ は独立した門でもビット一致を実測する）。0 でない値が出たら、どれかの主張が
-#: 崩れている — 近似で通さずに落として、どれが崩れたのかを先に確かめる。
+#: The wrappers do four things — ① add a transpose / reshape ② truncate `in_proj`
+#: ③ `remove_weight_norm` ④ demote `Snake1d.alpha` — none of which changes values (② to ④ also
+#: have bit identity measured by independent checks). A non-zero value means one of these claims
+#: broke — fail instead of passing it approximately, and find out first which one broke.
 EAGER_EQUIV_ATOL = 0.0
 
-#: 往復（encoder → decoder）の再構成波形と入力波形の相関の下限（`_roundtrip_evidence`）。
+#: Lower bound of the correlation between the round-trip (encoder → decoder) reconstruction and the
+#: input waveform (`_roundtrip_evidence`).
 #:
-#: MUST: 恒真にしない — 「有限で非ゼロ」だけでは、チャネル順の取り違えや別経路の混入で
-#: 音になっていない出力が通る。実測は 0.988（参照音声 7.6 秒・遅延 0 サンプル）で、
-#: 0.8 はその 5 分の 4。学習済みコーデックの再構成なので、経路が正しければ相関は 1 に近い。
+#: MUST: do not make it a tautology — "finite and non-zero" alone would pass output that is not
+#: audio because of swapped channel order or a stray path. The measured value is 0.988 (7.6 s of
+#: reference audio, 0 samples of delay), and 0.8 is four fifths of it. This is the reconstruction
+#: of a trained codec, so with the correct path the correlation is close to 1.
 ROUNDTRIP_CORRELATION_MIN = 0.8
 
-#: `decoder` の golden ケース `(名前, latent の供給元ケース, 長さ)`。長さ `None` は供給元そのまま。
+#: Golden cases of `decoder` `(name, source case of the latent, length)`. Length `None` keeps the
+#: source as is.
 #:
-#: 実 latent は `irodori/pipeline_ref.py` の full-loop golden（`case.full` = 参照音声あり 161
-#: フレーム / `case.no-ref` = 参照なし 116 フレーム）から採る。**合成乱数を使わない**のは、
-#: Snake の `sin(αx)` が入力の値域に強く効くためで、tolerance の根拠を実運用の値域と
-#: 対応させるための選択（`export_sbv2.py` の話者埋め込みと同じ理由）。
+#: The real latents come from the full-loop golden of `irodori/pipeline_ref.py` (`case.full` =
+#: with reference audio, 161 frames / `case.no-ref` = without reference, 116 frames). **Synthetic
+#: random values are not used** because Snake's `sin(αx)` is strongly affected by the input's value
+#: range; the choice ties the basis of the tolerance to the value range of real use (the same
+#: reason as the speaker embedding in `export_sbv2.py`).
 #:
-#: 長さの両端: 記号次元の下限 2（先頭 2 フレーム）と、**宣言上限そのもの**の 750。
-#: 750 は実 latent が足りないのでフレーム方向に反復して作る（値域は実 latent のまま）。
+#: Both ends of the length: the symbolic dimension's lower bound 2 (the first 2 frames) and 750,
+#: **the declared upper bound itself**. There are not enough real latents for 750, so it is built
+#: by repeating along the frame axis (the value range stays that of the real latents).
 DECODER_CASES: tuple[tuple[str, str, int | None], ...] = (
     ("z-min", "full", MIN_SYM_LENGTH),
     ("z-no-ref", "no-ref", None),
@@ -230,10 +263,12 @@ DECODER_CASES: tuple[tuple[str, str, int | None], ...] = (
     ("z-max", "full", 750),
 )
 
-#: `encoder` の golden ケース `(名前, フレーム数)`。フレーム数 `None` は参照音声の全長。
+#: Golden cases of `encoder` `(name, frame count)`. Frame count `None` is the full length of the
+#: reference audio.
 #:
-#: 入力は参照音声を **−16 LUFS へ正規化 → reflect pad**した波形（ホスト前処理の出口 =
-#: グラフの入口）。短尺側は記号次元の下限 2（3840 サンプル）を先頭から切り出す。
+#: The input is the reference audio **normalized to −16 LUFS → reflect-padded** (the exit of the
+#: host preprocessing = the entrance of the graph). The short case cuts the symbolic dimension's
+#: lower bound 2 (3840 samples) from the start.
 ENCODER_CASES: tuple[tuple[str, int | None], ...] = (
     ("wav-min", MIN_SYM_LENGTH),
     ("wav-ref", None),
@@ -241,19 +276,20 @@ ENCODER_CASES: tuple[tuple[str, int | None], ...] = (
 
 
 class DacvaeSource:
-    """`dacvae` パッケージから取り出す実装（`sys.path` 追加で import する）。
+    """The implementation taken from the `dacvae` package (imported by adding to `sys.path`).
 
-    MUST: import は**実装 clone から**行う（写しを台本に持たない）。`dacvae/__init__.py` は
-    `audiotools` と `einops` を引くので、`--with` で足した環境でだけ通る。
+    MUST: import **from the implementation clone** (the script keeps no copy).
+    `dacvae/__init__.py` pulls in `audiotools` and `einops`, so it only works in an environment
+    where they were added with `--with`.
     """
 
     def __init__(self, source_dir: Path) -> None:
         model_py = source_dir / "dacvae" / "model" / "dacvae.py"
         if not model_py.is_file():
             raise SystemExit(
-                f"モデル実装が見つからない: {model_py}"
-                f"（`git clone {SOURCE_REPO}` の展開先を --source-dir に指定する。"
-                f" 固定した版は {SOURCE_COMMIT}）"
+                f"model implementation not found: {model_py}"
+                f" (pass the checkout of `git clone {SOURCE_REPO}` as --source-dir."
+                f" The pinned version is {SOURCE_COMMIT})"
             )
         if str(source_dir) not in sys.path:
             sys.path.insert(0, str(source_dir))
@@ -265,40 +301,46 @@ class DacvaeSource:
 
 
 def read_kwargs(model_dir: Path) -> dict[str, Any]:
-    """`irodori/dacvae/convert.py` が書いた `metadata.json` から構成値を読む。
+    """Read the configuration values from the `metadata.json` written by
+    `irodori/dacvae/convert.py`.
 
-    MUST: HF から config を引き直さない — チェックポイントに埋まっていた `kwargs` が、この
-    重みが実際に構成されたときの形の正本。
+    MUST: do not fetch the config from HF again — the `kwargs` embedded in the checkpoint are the
+    source of truth for the shape these weights were actually built with.
     """
     path = model_dir / METADATA_FILE
     if not path.is_file():
-        raise SystemExit(f"{path} が無い（`uv run python -m irodori.dacvae.convert` で作る）")
+        raise SystemExit(
+            f"{path} is missing (create it with `uv run python -m irodori.dacvae.convert`)"
+        )
     raw = json.loads(path.read_text(encoding="utf-8"))
     if "kwargs" not in raw:
-        raise SystemExit(f"{path} に 'kwargs' が無い")
+        raise SystemExit(f"{path} has no 'kwargs'")
     return dict(raw["kwargs"])
 
 
 def load_codec(source: DacvaeSource, model_dir: Path) -> nn.Module:
-    """`metadata.json` の構成で `DACVAE` を組み、safetensors の重みを載せる。
+    """Build `DACVAE` with the configuration of `metadata.json` and load the safetensors weights.
 
-    `load_state_dict(strict=True)` が「317 本を 1 本残らず消費した」ことの門になる
-    （`weight_g` / `weight_v` はこの時点ではまだ畳んでいない）。
+    `load_state_dict(strict=True)` is the check that "all 317 tensors were consumed, none left
+    over" (`weight_g` / `weight_v` are not folded yet at this point).
     """
     weights = model_dir / WEIGHTS_FILE
     if not weights.is_file():
-        raise SystemExit(f"{weights} が無い（`uv run python -m irodori.dacvae.convert` で作る）")
+        raise SystemExit(
+            f"{weights} is missing (create it with `uv run python -m irodori.dacvae.convert`)"
+        )
     model = source.dacvae_cls(**read_kwargs(model_dir))
     model.load_state_dict(load_file(str(weights)), strict=True)
     return model.eval()
 
 
 def bypass_watermark(decoder: nn.Module) -> None:
-    """透かし枝を上流 README 推奨の②形でバイパスする（モジュール docstring の G6 節）。
+    """Bypass the watermarking branch in form ②, which the upstream README recommends (the G6
+    section of the module docstring).
 
-    MUST: `alpha = 0.0` と `watermark` の差し替えを**両方**当てる。前者だけだと
-    `Decoder.watermark` が 96ch の入力をそのまま返し、波形にならない（実測）。後者だけだと
-    上流が `alpha` を読む経路が残る。
+    MUST: apply **both** `alpha = 0.0` and the replacement of `watermark`. With only the former,
+    `Decoder.watermark` returns the 96ch input as is and produces no waveform (measured). With only
+    the latter, the path where upstream reads `alpha` remains.
     """
     decoder.alpha = 0.0
     decoder.watermark = lambda x, message=None, block=decoder.wm_model.encoder_block: (
@@ -307,16 +349,18 @@ def bypass_watermark(decoder: nn.Module) -> None:
 
 
 def main_path(decoder: nn.Module) -> nn.Sequential:
-    """decode が実際に通る層だけを並べた `Sequential`（**門でのみ使う** — 写し）。
+    """A `Sequential` of only the layers decode actually goes through (**used only by the check**
+    — a copy).
 
-    `DecoderBlock.forward` は `block` を `_chunk_size` ごとに切り、**インデックスが
-    `_chunk_size` の倍数のかたまりだけ**を順に通す（残りは透かし枝の up/down サンプラ）。
-    末尾は②形バイパスの `forward_no_conv` = `pre[0]`（Snake 96）/ `pre[1]`（conv1d 96→1 k7）/
-    `pre[2]`（Tanh）で、`pre[3]` は `Identity` に差し替わる。
+    `DecoderBlock.forward` cuts `block` every `_chunk_size` and runs **only the chunks whose index
+    is a multiple of `_chunk_size`**, in order (the rest are the watermarking branch's up/down
+    samplers). The tail is `forward_no_conv` of the form-② bypass = `pre[0]` (Snake 96) /
+    `pre[1]` (conv1d 96→1 k7) / `pre[2]` (Tanh), and `pre[3]` is replaced by `Identity`.
 
-    MUST: この写しをグラフに載せない — 載せるのは `Decoder` 本体で、ここは
-    `_main_path_evidence` が「主経路はこの 28 本で、透かし枝の残り 25 本は寄与しない」ことを
-    実測するためだけに組む（上流が層の並べ方を変えれば、その門が落ちる）。
+    MUST: do not put this copy into the graph — what goes in is the `Decoder` itself; this is built
+    only so that `_main_path_evidence` can measure that "the main path is these 28 layers and the
+    remaining 25 of the watermarking branch contribute nothing" (if upstream reorders its layers,
+    that check fails).
     """
     layers: list[nn.Module] = [decoder.model[0]]
     for block in decoder.model[1:]:
@@ -331,10 +375,11 @@ def main_path(decoder: nn.Module) -> nn.Sequential:
 
 
 def fold_weight_norm(model: nn.Module) -> int:
-    """全 `weight_norm` を実効重みへ畳む（畳んだ本数を返す）。
+    """Fold every `weight_norm` into effective weights (returns how many were folded).
 
-    weight_norm が残っている間、`Conv1d.weight` は**実効重みではない**（`weight_g` /
-    `weight_v` から forward pre-hook が毎回作る）。そのまま IR へ書き出すと別のモデルになる。
+    While weight_norm remains, `Conv1d.weight` is **not the effective weight** (a forward pre-hook
+    builds it from `weight_g` / `weight_v` on every call). Writing it to the IR as is would give a
+    different model.
     """
     folded = 0
     for module in model.modules():
@@ -343,21 +388,22 @@ def fold_weight_norm(model: nn.Module) -> int:
             folded += 1
     if folded == 0:
         raise SystemExit(
-            "weight_norm を持つモジュールが 1 本も無い — チェックポイントが既に畳まれた形か、"
-            "上流が別の正規化に変わっている（実効重みの前提が崩れる）"
+            "no module has weight_norm — either the checkpoint is already folded or upstream"
+            " switched to a different normalization (the effective-weight premise breaks)"
         )
     return folded
 
 
 def lift_snake_alphas(source: DacvaeSource, model: nn.Module) -> int:
-    """`Snake1d.alpha` をパラメータから素の属性（lifted tensor constant）へ降格する。
+    """Demote `Snake1d.alpha` from a parameter to a plain attribute (lifted tensor constant).
 
-    降格の理由はモジュール docstring の前処理節（`(α+1e-9).reciprocal()` を定数畳み込みの
-    frontier に載せるため）。値は変えない（`detach().clone()` するだけ）ので、eager 同値は
-    ビット一致のまま通る。
+    The reason for the demotion is in the preprocessing section of the module docstring (to put
+    `(α+1e-9).reciprocal()` on the constant-folding frontier). Values do not change (it is only
+    `detach().clone()`), so eager equivalence stays bit-identical.
 
-    MUST: 1 本も降格できなければ落とす — 走査が空振りしたまま進むと `reciprocal` が IR に
-    残り、語彙に無いので export が落ちる（原因の遠い場所で落ちる形になる）。
+    MUST: fail if nothing could be demoted — going on after an empty scan would leave
+    `reciprocal` in the IR, and the export would fail because it is not in the vocabulary (failing
+    far from the cause).
     """
     lifted = 0
     for module in model.modules():
@@ -366,22 +412,27 @@ def lift_snake_alphas(source: DacvaeSource, model: nn.Module) -> int:
             module.alpha = tensor.detach().clone()
             lifted += 1
     if lifted == 0:
-        raise SystemExit("Snake1d が 1 本も見つからない — alpha 降格の走査が空振りしている")
+        raise SystemExit("no Snake1d found — the scan for the alpha demotion found nothing")
     return lifted
 
 
 def truncated_in_proj(in_proj: nn.Conv1d) -> nn.Conv1d:
-    """`quantizer.in_proj` を**前半 32 行**へ切り詰めた conv1d を作る（mean 側だけ）。
+    """Build a conv1d of `quantizer.in_proj` truncated to **the first 32 rows** (the mean side
+    only).
 
-    MUST: `fold_weight_norm` の**後**に呼ぶ（`in_proj.weight` が実効重みである必要がある）。
-    `_in_proj_truncation_evidence` が `chunk(2, dim=1)[0]` との一致を実測する
-    （許容は `IN_PROJ_TRUNCATION_ATOL`）。
+    MUST: call it **after** `fold_weight_norm` (`in_proj.weight` must be the effective weight).
+    `_in_proj_truncation_evidence` measures agreement with `chunk(2, dim=1)[0]` (the tolerance is
+    `IN_PROJ_TRUNCATION_ATOL`).
     """
     if hasattr(in_proj, "weight_g"):
-        raise SystemExit("in_proj の weight_norm が畳まれていない — 切り詰めが実効重みにならない")
+        raise SystemExit(
+            "the weight_norm of in_proj is not folded — the truncation would not be of the"
+            " effective weights"
+        )
     if in_proj.out_channels % 2 != 0:
         raise SystemExit(
-            f"in_proj の出力 {in_proj.out_channels} が偶数でない（mean / scale の 2 分割）"
+            f"the output count {in_proj.out_channels} of in_proj is not even (the mean / scale"
+            " split in two)"
         )
     half = in_proj.out_channels // 2
     trimmed = nn.Conv1d(
@@ -399,12 +450,12 @@ def truncated_in_proj(in_proj: nn.Conv1d) -> nn.Conv1d:
 
 
 class DecoderGraph(nn.Module):
-    """`DACVAE.decode`（`out_proj` → ②形パッチ済み `Decoder`）の export 用ラッパ。
+    """Export wrapper of `DACVAE.decode` (`out_proj` → the `Decoder` patched in form ②).
 
-    元の `decode` との差は入口の transpose 1 本だけ（上流は `[B,D,T]` を受け、こちらは
-    Irodori の latent と同じ `[B,T,D]` を受ける — `codec.py` の `decode_latent` が
-    ホスト側でしている転置をグラフへ入れた形）。**主経路の写しは持たない**（`Decoder` 本体を
-    そのまま呼ぶ）。
+    The only difference from the original `decode` is one transpose at the entrance (upstream takes
+    `[B,D,T]`; this takes `[B,T,D]`, the same as Irodori's latent — the transpose that
+    `decode_latent` in `codec.py` does on the host side, moved into the graph). **It keeps no copy
+    of the main path** (it calls the `Decoder` itself).
     """
 
     def __init__(self, out_proj: nn.Module, decoder: nn.Module) -> None:
@@ -417,16 +468,20 @@ class DecoderGraph(nn.Module):
 
 
 class EncoderGraph(nn.Module):
-    """`encoder` + 切り詰めた `in_proj` の export 用ラッパ（モジュール docstring の G7 節）。
+    """Export wrapper of `encoder` + the truncated `in_proj` (the G7 section of the module
+    docstring).
 
-    元の決定的 encode（`codec.py` の `deterministic_encode` 経路）との差は 3 点:
+    It differs from the original deterministic encode (the `deterministic_encode` path of
+    `codec.py`) in three points:
 
-    - 入力を**フレーム分割済み**`[1,T,1920]` で受け、グラフ内で `[1,1,1920T]` へ戻す
-      （要素順を変えない読み替え — 記号 T を素の形で束縛するため）
-    - `in_proj(...).chunk(2, dim=1)[0]` を**切り詰めた conv1d** で置き換える
-    - 出力を `[1,T,32]` へ転置する（上流も `encode_waveform` の最後で同じ転置をしている）
+    - it takes the input **framed** as `[1,T,1920]` and turns it back into `[1,1,1920T]` inside
+      the graph (a reinterpretation that keeps the element order — to bind the symbol T bare)
+    - it replaces `in_proj(...).chunk(2, dim=1)[0]` with **the truncated conv1d**
+    - it transposes the output to `[1,T,32]` (upstream does the same transpose at the end of
+      `encode_waveform`)
 
-    reflect pad（`DACVAE._pad`）は**入らない** — ホストが 1920 の倍数に整えてから呼ぶ。
+    Reflect pad (`DACVAE._pad`) is **not included** — the host aligns to a multiple of 1920 before
+    calling.
     """
 
     def __init__(self, encoder: nn.Module, in_proj: nn.Module) -> None:
@@ -440,42 +495,44 @@ class EncoderGraph(nn.Module):
 
 
 def hop_length(model: nn.Module) -> int:
-    """1 latent フレームあたりのサンプル数（`encoder_rates` の積 — 直書きしない）。"""
+    """Samples per latent frame (the product of `encoder_rates` — not hard-coded)."""
     hop = int(model.hop_length)
     if hop <= 0:
-        raise SystemExit(f"hop_length が {hop} — チェックポイントの encoder_rates が異常")
+        raise SystemExit(f"hop_length is {hop} — the checkpoint's encoder_rates are invalid")
     return hop
 
 
 def frame_rate(model: nn.Module) -> float:
-    """latent のフレームレート（Hz）。48000 / 1920 = 25。"""
+    """Frame rate of the latent (Hz). 48000 / 1920 = 25."""
     return int(model.sample_rate) / hop_length(model)
 
 
 def read_wav(path: Path) -> tuple[torch.Tensor, int]:
-    """WAV を mono の `[N]` f32 として読む（`(波形, サンプリング周波数)`）。
+    """Read a WAV as mono `[N]` f32 (`(waveform, sampling rate)`).
 
-    読み手は soundfile。int16 PCM の正規化は **/32768**（int16 の下端 −32768 が厳密に −1.0
-    へ写る）で、`irodori/dacvae/host.py` がこの規約を合成 WAV で実測して golden の meta へ記録する。
+    The reader is soundfile. int16 PCM is normalized by **/32768** (the int16 low end −32768 maps
+    to exactly −1.0), and `irodori/dacvae/host.py` measures this convention on a synthetic WAV and
+    records it in the golden's meta.
     """
     import soundfile as sf
 
     data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
     wav = torch.from_numpy(data).transpose(0, 1)
     if wav.shape[0] != 1:
-        # `codec.py` の `encode_waveform` と同じ mono 化（チャネル平均）。
+        # The same downmix to mono as `encode_waveform` in `codec.py` (channel average).
         wav = wav.mean(dim=0, keepdim=True)
     return wav[0].contiguous(), int(sample_rate)
 
 
 def normalize_reference_wav(wav: torch.Tensor, sample_rate: int, target_db: float) -> torch.Tensor:
-    """参照音声を LUFS 正規化する（`codec.py` の `_normalize_loudness` と同じ 2 呼び出し）。
+    """LUFS-normalize the reference audio (the same two calls as `_normalize_loudness` in
+    `codec.py`).
 
-    `AudioSignal.normalize(db)` が ITU-R BS.1770-4 の integrated loudness を測って利得を掛け、
-    `ensure_max_of_audio()` が peak > 1 のときだけ縮める。**式を持たずライブラリを呼ぶ**のは、
-    K-weighting の IIR 係数とゲーティングを写さないため。上流の staticmethod との
-    ビット一致は `irodori/dacvae/host.py` が毎回実測する（そちらは `irodori_tts` を
-    import できる）。
+    `AudioSignal.normalize(db)` measures the integrated loudness of ITU-R BS.1770-4 and applies the
+    gain, and `ensure_max_of_audio()` scales down only when peak > 1. **It calls the library instead
+    of holding the formula** so as not to copy the K-weighting IIR coefficients and the gating. Bit
+    identity with the upstream staticmethod is measured every run by `irodori/dacvae/host.py`
+    (which can import `irodori_tts`).
     """
     from audiotools import AudioSignal
 
@@ -486,33 +543,36 @@ def normalize_reference_wav(wav: torch.Tensor, sample_rate: int, target_db: floa
 
 
 def build_decoder_cases(latent_dir: Path, sym_max: int) -> tuple[tuple[str, torch.Tensor], ...]:
-    """`decoder` の golden ケース `(名前, latent [1,S,32])`（{@link DECODER_CASES} の表どおり）。
+    """Golden cases of `decoder` `(name, latent [1,S,32])` (as in the table {@link DECODER_CASES}).
 
-    供給元は `irodori/pipeline_ref.py` の full-loop golden。**足りない長さはフレーム方向の反復**で
-    作る（値域を実 latent のまま伸ばすため — 乱数で埋めると Snake の値域が変わる）。
+    The source is the full-loop golden of `irodori/pipeline_ref.py`. **Missing length is made by
+    repeating along the frame axis** (to extend while keeping the real latents' value range —
+    filling with random values would change Snake's value range).
     """
     sources: dict[str, torch.Tensor] = {}
     for name in {source for _n, source, _l in DECODER_CASES}:
         path = latent_dir / f"{LATENT_CASE_PREFIX}{name}{IO_SUFFIX}"
         if not path.is_file():
             raise SystemExit(
-                f"実 latent が無い: {path}"
-                "（`uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref` で作る）"
+                f"real latent missing: {path}"
+                " (create it with `uv run --with 'transformers==5.14.1' python -m"
+                " irodori.pipeline_ref`)"
             )
         tensors = load_file(str(path))
         if LATENT_KEY not in tensors:
-            raise SystemExit(f"{path} に '{LATENT_KEY}' が無い")
+            raise SystemExit(f"{path} has no '{LATENT_KEY}'")
         sources[name] = tensors[LATENT_KEY].to(torch.float32)
 
     cases: list[tuple[str, torch.Tensor]] = []
     for name, source, length in DECODER_CASES:
         latent = sources[source]
         if latent.ndim != 3 or latent.shape[0] != 1:
-            raise SystemExit(f"{name}: latent の shape {tuple(latent.shape)} が [1,S,D] でない")
+            raise SystemExit(f"{name}: latent shape {tuple(latent.shape)} is not [1,S,D]")
         want = int(latent.shape[1]) if length is None else int(length)
         if not MIN_SYM_LENGTH <= want <= sym_max:
             raise SystemExit(
-                f"{name}: S={want} が記号次元の範囲 [{MIN_SYM_LENGTH}, {sym_max}] の外"
+                f"{name}: S={want} is outside the symbolic dimension range"
+                f" [{MIN_SYM_LENGTH}, {sym_max}]"
             )
         repeats = -(-want // int(latent.shape[1]))
         cases.append((name, latent.repeat(1, repeats, 1)[:, :want].contiguous()))
@@ -522,45 +582,51 @@ def build_decoder_cases(latent_dir: Path, sym_max: int) -> tuple[tuple[str, torc
 def build_encoder_cases(
     model: nn.Module, wav_path: Path, sym_max: int, target_db: float
 ) -> tuple[tuple[str, torch.Tensor], ...]:
-    """`encoder` の golden ケース `(名前, フレーム分割済み波形 [1,T,1920])`。
+    """Golden cases of `encoder` `(name, framed waveform [1,T,1920])`.
 
-    参照音声 → LUFS 正規化 → reflect pad（上流 `DACVAE._pad` を**呼ぶ**）→ `[1,T,1920]` の
-    読み替え、というホスト前処理の出口そのもの。リサンプルは通らない（48kHz 以外は落とす）。
+    Exactly the exit of the host preprocessing: reference audio → LUFS normalization → reflect pad
+    (**calling** upstream `DACVAE._pad`) → reinterpretation as `[1,T,1920]`. There is no
+    resampling (anything other than 48 kHz fails).
     """
     wav, sample_rate = read_wav(wav_path)
     if sample_rate != int(model.sample_rate):
         raise SystemExit(
-            f"{wav_path.name}: {sample_rate}Hz はコーデックの {int(model.sample_rate)}Hz と違う"
-            "（リサンプルはホスト責務で、この台本は通さない）"
+            f"{wav_path.name}: {sample_rate}Hz differs from the codec's {int(model.sample_rate)}Hz"
+            " (resampling is the host's job; this script does not do it)"
         )
     normalized = normalize_reference_wav(wav, sample_rate, target_db)
     with torch.no_grad():
         padded = model._pad(normalized.reshape(1, 1, -1))
     hop = hop_length(model)
     if int(padded.shape[-1]) % hop != 0:
-        raise SystemExit(f"reflect pad 後の長さ {int(padded.shape[-1])} が hop {hop} の倍数でない")
+        raise SystemExit(
+            f"the length after reflect pad, {int(padded.shape[-1])}, is not a multiple of hop {hop}"
+        )
 
     cases: list[tuple[str, torch.Tensor]] = []
     for name, length in ENCODER_CASES:
         frames = int(padded.shape[-1]) // hop if length is None else int(length)
         if not MIN_SYM_LENGTH <= frames <= sym_max:
             raise SystemExit(
-                f"{name}: T={frames} が記号次元の範囲 [{MIN_SYM_LENGTH}, {sym_max}] の外"
+                f"{name}: T={frames} is outside the symbolic dimension range"
+                f" [{MIN_SYM_LENGTH}, {sym_max}]"
             )
         if frames * hop > int(padded.shape[-1]):
-            raise SystemExit(f"{name}: T={frames} が参照音声の長さを超えている")
+            raise SystemExit(f"{name}: T={frames} exceeds the length of the reference audio")
         cases.append((name, padded[..., : frames * hop].reshape(1, frames, hop).contiguous()))
     return tuple(cases)
 
 
 def _decode_reference(model: nn.Module, latent: torch.Tensor) -> torch.Tensor:
-    """上流の decode 経路（`out_proj` → ②形パッチ済み `Decoder`）で参照値を採る。"""
+    """Take the reference values on upstream's decode path (`out_proj` → the `Decoder` patched in
+    form ②)."""
     with torch.no_grad():
         return model.decoder(model.quantizer.out_proj(latent.transpose(1, 2)))
 
 
 def _encode_reference(model: nn.Module, framed: torch.Tensor) -> torch.Tensor:
-    """上流の決定的 encode 経路（`encoder` → `in_proj` の `chunk(2)[0]`）で参照値を採る。"""
+    """Take the reference values on upstream's deterministic encode path (`encoder` →
+    `chunk(2)[0]` of `in_proj`)."""
     with torch.no_grad():
         hidden = model.encoder(framed.reshape(1, 1, -1))
         mean, _scale = model.quantizer.in_proj(hidden).chunk(2, dim=1)
@@ -572,15 +638,18 @@ def _pristine_outputs(
     decoder_cases: Sequence[tuple[str, torch.Tensor]],
     encoder_cases: Sequence[tuple[str, torch.Tensor]],
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """**weight_norm を畳む前**の eager 出力（門 3 の基準であり、f32 系列の golden そのもの）。
+    """Eager outputs **before weight_norm is folded** (the baseline of check 3, and the golden of
+    the f32 series itself).
 
-    MUST: `fold_weight_norm` の前に呼ぶ。畳んだ後で採ると `_remove_weight_norm_evidence` が
-    「畳んだ後どうし」の比較になり、差 0 が自明に成立して偽 PASS する（`export_sbv2.py` の
-    `_assert_weight_norm_present` と同じ向きの汚染）。
+    MUST: call it before `fold_weight_norm`. Taken after folding, `_remove_weight_norm_evidence`
+    would compare "folded against folded", a difference of 0 would hold trivially, and it would
+    falsely PASS (the same kind of contamination as `_assert_weight_norm_present` in
+    `export_sbv2.py`).
     """
     if not any(hasattr(module, "weight_g") for module in model.modules()):
         raise AssertionError(
-            "weight_norm を畳んだ後に参照を採ろうとした（畳み込みの同値検証が恒真化する）"
+            "tried to take the reference after folding weight_norm (the equivalence check of"
+            " the folding would become a tautology)"
         )
     return _eager_outputs(model, decoder_cases, encoder_cases)
 
@@ -590,18 +659,21 @@ def _eager_outputs(
     decoder_cases: Sequence[tuple[str, torch.Tensor]],
     encoder_cases: Sequence[tuple[str, torch.Tensor]],
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """上流の decode / encode 経路の eager 出力（`weight_norm` の有無を見ない素の計算）。
+    """Eager outputs of upstream's decode / encode paths (the plain computation, regardless of
+    whether `weight_norm` is present).
 
-    圧縮系列では丸めの**後**にもう一度ここを通す（{@link _fake_quant} の順序 MUST）— そちらは
-    `weight_g` が既に無いので {@link _pristine_outputs} の門は通せない。門 3（畳む前後の
-    ビット一致）は丸める前に決着済みで、この採り直しはその主張を弱めない。
+    For compressed series this runs once more **after** rounding (the ordering MUST of
+    {@link _fake_quant}) — by then `weight_g` is gone, so the check of {@link _pristine_outputs}
+    cannot be passed. Check 3 (bit identity before and after folding) was settled before rounding,
+    and taking the reference again does not weaken that claim.
     """
     decoded = {name: _decode_reference(model, latent) for name, latent in decoder_cases}
     for name, audio in decoded.items():
         if audio.shape[1] != 1:
             raise AssertionError(
-                f"{name}: decode の出力チャネルが {audio.shape[1]} — 透かしバイパスが②形に"
-                "なっておらず波形になっていない（`alpha = 0.0` だけでは 96ch のまま返る）"
+                f"{name}: decode has {audio.shape[1]} output channels — the watermark bypass is"
+                " not in form ② and the output is not a waveform (with `alpha = 0.0` alone it"
+                " returns 96ch as is)"
             )
     return {
         TARGET_DECODER: decoded,
@@ -610,80 +682,92 @@ def _eager_outputs(
 
 
 class FakeQuantResult(NamedTuple):
-    """{@link _fake_quant} の戻り（丸めの要約と、i8 の per-channel scale 台帳）。"""
+    """Return value of {@link _fake_quant} (the rounding summary and the i8 per-channel scale
+    ledger)."""
 
     report: str | None
-    #: **コーデック本体の FQN** → scale（i8 以外は空）。emit が引くラッパ内 FQN への張り替えは
-    #: {@link _target_scales}。
+    #: **FQN in the codec itself** → scale (empty for anything but i8). Remapping to the
+    #: in-wrapper FQNs emit looks up is done by {@link _target_scales}.
     scales: Mapping[str, torch.Tensor]
 
 
-#: コーデック本体での `in_proj` の FQN（切り詰め後の scale の出どころ）。
+#: FQN of `in_proj` in the codec itself (where the scale of the truncated one comes from).
 FULL_IN_PROJ_KEY = "quantizer.in_proj.weight"
-#: 切り詰めた `in_proj` の**ラッパ内** FQN（`EncoderGraph.in_proj`）。
+#: **In-wrapper** FQN of the truncated `in_proj` (`EncoderGraph.in_proj`).
 TRIMMED_IN_PROJ_KEY = "in_proj.weight"
 
-#: ターゲット → scale の出どころ `(本体の FQN 接頭辞, ラッパ内 FQN 接頭辞)` の並び（i8 のみ）。
+#: Target → sequence of scale sources `(FQN prefix in the codec, in-wrapper FQN prefix)` (i8
+#: only).
 #:
-#: MUST: グラフラッパのコンストラクタと同じ綴りにする — ラッパは本体の部分木を別の属性名で
-#: 抱えるので、台帳のキー（本体内 FQN）は emit が引くキー（export したモジュール内 FQN）と
-#: 一致しない。食い違えば `_target_scales` か emit のどちらかが fail loudly で落ちる。
+#: MUST: use the same spelling as the graph wrappers' constructors — the wrappers hold the codec's
+#: subtrees under other attribute names, so the ledger's keys (FQNs in the codec) do not match the
+#: keys emit looks up (FQNs in the exported module). On a mismatch, either `_target_scales` or
+#: emit fails loudly.
 TARGET_SCALE_SOURCES: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType(
     {
         TARGET_DECODER: (("quantizer.out_proj.", "out_proj."), ("decoder.", "decoder.")),
-        # `in_proj` は切り詰めた別モジュールなので接頭辞では張り替えられない
-        # （{@link _trimmed_in_proj_scale} が軸 0 の前半だけを切り出す）。
+        # `in_proj` is a separate truncated module, so a prefix cannot remap it
+        # ({@link _trimmed_in_proj_scale} cuts out only the first half along axis 0).
         TARGET_ENCODER: (("encoder.", "encoder."),),
     }
 )
 
 
 def _fake_quant(dtype: str, model: nn.Module) -> FakeQuantResult:
-    """格納 dtype の表現可能値へ**実効重み**を丸める（f32 は何もしない）。
+    """Round the **effective weights** to values representable in the storage dtype (nothing for
+    f32).
 
-    ADR 0006 / 0018 / 0019 / 0027 / 0050 の fake-quant。
+    The fake-quant of ADR 0006 / 0018 / 0019 / 0027 / 0050.
 
-    MUST（順序）: ① `fold_weight_norm` の**後**（丸めてから畳むと `weight_g` / `weight_v` を
-    丸めることになり、そこから作られる実効重みは f16 / i8 の格子に乗らない）② `lift_snake_alphas`
-    の**後**（降格済みの `alpha` は `named_parameters` に現れないので**丸めない** — alpha は
-    lifted 定数で emit の重みスロットでもなく F32 格納のまま残るため、golden 側も f32 の
-    alpha で計算されているのが正しい対応）③ `truncated_in_proj` の**前**（切り詰めは重みを
-    コピーするので、丸める前に作ると encoder だけ元の重みを格納する。i8 では**さらに**、
-    scale 台帳が本体側の FQN でしか採れないため、丸めが先でないと台帳（本体の前半行 —
-    {@link _trimmed_in_proj_scale}）と切り詰めコピーの格納重みが別の重みを指す）
-    ④ 参照・golden の採取の**前**（`karume.quantize` の MUST）。
+    MUST (ordering): ① **after** `fold_weight_norm` (rounding before folding would round
+    `weight_g` / `weight_v`, and the effective weights built from them would not sit on the f16 /
+    i8 grid) ② **after** `lift_snake_alphas` (the demoted `alpha` does not appear in
+    `named_parameters`, so it is **not rounded** — alpha is a lifted constant, not a weight slot of
+    emit either, and stays stored as F32, so the golden side being computed with the f32 alpha is
+    the correct correspondence) ③ **before** `truncated_in_proj` (the truncation copies the
+    weights, so building it before rounding would make only the encoder store the original weights.
+    For i8, **in addition**, the scale ledger can only be taken with the codec-side FQNs, so unless
+    rounding comes first, the ledger (the codec's first rows — {@link _trimmed_in_proj_scale}) and
+    the stored weights of the truncated copy would point at different weights)
+    ④ **before** the reference / golden is taken (the MUST of `karume.quantize`).
     """
     if dtype == "f32":
         return FakeQuantResult(None, {})
     if dtype == "i8":
         int8 = fake_quant_int8(model)
-        print(f"[fake-quant] codec: i8 per-channel へ丸めた — {int8.describe()}", flush=True)
+        print(f"[fake-quant] codec: rounded to i8 per-channel — {int8.describe()}", flush=True)
         return FakeQuantResult(int8.describe(), int8.scales)
     report = round_weights_to_f16(model)
     if report.parameters + report.buffers == 0:
-        raise SystemExit(f"格納 {dtype} を指定したが丸めた重みが 1 本も無い")
-    print(f"[fake-quant] codec: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
+        raise SystemExit(f"storage {dtype} was requested but no weights were rounded")
+    print(
+        f"[fake-quant] codec: rounded to f16-representable values — {report.describe()}", flush=True
+    )
     return FakeQuantResult(report.describe(), {})
 
 
 def _trimmed_in_proj_scale(scales: Mapping[str, torch.Tensor], in_proj: nn.Module) -> torch.Tensor:
-    """切り詰めた `in_proj` の per-channel scale（本体の scale の**前半行**そのもの）。
+    """Per-channel scale of the truncated `in_proj` (exactly **the first rows** of the codec's
+    scale).
 
-    `truncated_in_proj` は丸めた後の重みの前半 32 行をコピーするだけなので、per-channel 軸
-    （`Conv1d` は出力チャネル = 軸 0）の scale も前半を切れば厳密に対応する。
+    `truncated_in_proj` only copies the first 32 rows of the rounded weights, so cutting the first
+    half of the scale along the per-channel axis (for `Conv1d`, the output channels = axis 0)
+    corresponds exactly.
 
-    MUST: 切り詰めた重みから scale を**引き直さない** — f32 の割り算で 1ulp 動きうるので、
-    そのときは emit の逆変換ビット一致検査が落ちる（ADR 0019 の「scale は fake-quant が
-    使った値そのまま」）。
+    MUST: do **not recompute** the scale from the truncated weights — the f32 division can move it
+    by 1 ulp, and then emit's inverse-transform bit-identity check fails (ADR 0019's "the scale is
+    exactly the value the fake-quant used").
     """
     source = scales.get(FULL_IN_PROJ_KEY)
     if source is None:
-        raise SystemExit(f"scale 台帳に '{FULL_IN_PROJ_KEY}' が無い（切り詰めの対応が取れない）")
+        raise SystemExit(
+            f"the scale ledger has no '{FULL_IN_PROJ_KEY}' (cannot map the truncation)"
+        )
     rows = int(in_proj.out_channels)
     if int(source.shape[0]) < rows:
         raise SystemExit(
-            f"'{FULL_IN_PROJ_KEY}' の scale 行数 {int(source.shape[0])} が切り詰め後の"
-            f" {rows} に足りない（per-channel 軸の取り違え）"
+            f"'{FULL_IN_PROJ_KEY}' has {int(source.shape[0])} scale rows, fewer than the"
+            f" {rows} after truncation (the per-channel axis is mixed up)"
         )
     return source[:rows]
 
@@ -691,10 +775,11 @@ def _trimmed_in_proj_scale(scales: Mapping[str, torch.Tensor], in_proj: nn.Modul
 def _target_scales(
     target: str, wrapper: nn.Module, scales: Mapping[str, torch.Tensor]
 ) -> dict[str, torch.Tensor]:
-    """scale 台帳をそのターゲットの**ラッパ内 FQN**へ張り替える（{@link TARGET_SCALE_SOURCES}）。
+    """Remap the scale ledger to the target's **in-wrapper FQNs** ({@link TARGET_SCALE_SOURCES}).
 
-    落とすのは**ラッパに無い重み**だけ（透かし枝の残りや反対側のターゲット）。逆向き
-    （ラッパにあるのに台帳に無い）は emit が fail loudly で落とす。
+    Only **weights the wrapper does not have** are dropped (the rest of the watermarking branch and
+    the other target). The reverse (in the wrapper but missing from the ledger) is failed loudly by
+    emit.
     """
     if not scales:
         return {}
@@ -711,8 +796,8 @@ def _target_scales(
         picked[TRIMMED_IN_PROJ_KEY] = _trimmed_in_proj_scale(scales, wrapper.in_proj)
     if not picked:
         raise SystemExit(
-            f"{target}: scale 台帳が 1 本もラッパ内 FQN へ張り替えられなかった"
-            f"（{TARGET_SCALE_SOURCES[target]} の接頭辞がラッパの構成と食い違っている）"
+            f"{target}: not a single scale of the ledger could be remapped to an in-wrapper FQN"
+            f" (the prefixes {TARGET_SCALE_SOURCES[target]} disagree with the wrapper's structure)"
         )
     return picked
 
@@ -720,11 +805,13 @@ def _target_scales(
 def _main_path_evidence(
     decoder: nn.Module, cases: Sequence[tuple[str, torch.Tensor]], out_proj: nn.Module
 ) -> dict[str, float]:
-    """主経路の抽出が②形パッチ済み `Decoder` と**ビット一致**することを実測する（門 1）。
+    """Measure that the main-path extraction is **bit-identical** to the `Decoder` patched in form
+    ② (check 1).
 
-    MUST: 恒真にしない — 抽出（`main_path`）と `Decoder.forward` は別の経路で、前者は
-    `_chunk_size` の倍数だけを拾う写し、後者は上流本体。一致は「透かし枝の残り 25 本が
-    decode に寄与しない」ことの実測であって、自明ではない。
+    MUST: do not make it a tautology — the extraction (`main_path`) and `Decoder.forward` are
+    different paths: the former is a copy that picks only the multiples of `_chunk_size`, the
+    latter is upstream itself. Agreement is a measurement that "the remaining 25 layers of the
+    watermarking branch contribute nothing to decode", not something trivial.
     """
     extracted = main_path(decoder)
     evidence: dict[str, float] = {}
@@ -735,37 +822,41 @@ def _main_path_evidence(
             actual = extracted(embedded)
         if not torch.equal(reference, actual):
             raise AssertionError(
-                f"{name}: 主経路の抽出が Decoder 本体と一致しない"
-                f"（最大絶対差 {float((reference - actual).abs().max())}）"
-                " — 透かし枝の切り分け（`_chunk_size` の倍数だけを通す）が崩れている"
+                f"{name}: the main-path extraction does not match the Decoder itself"
+                f" (max abs diff {float((reference - actual).abs().max())})"
+                " — the separation of the watermarking branch (only multiples of `_chunk_size`"
+                " pass) is broken"
             )
         evidence[name] = 0.0
     return evidence
 
 
-#: 門 2（in_proj 切り詰め）の許容絶対差。
+#: Absolute tolerance of check 2 (in_proj truncation).
 #:
-#: | 系   | 素実測（max abs）       | 採用値（≈10 倍） |
-#: | ---- | ----------------------- | ---------------- |
-#: | 門 2 | 2.9802e-8（2026-08-13） | 3e-7             |
+#: | Check   | Raw measurement (max abs) | Adopted value (≈10×) |
+#: | ------- | ------------------------- | -------------------- |
+#: | Check 2 | 2.9802e-8 (2026-08-13)    | 3e-7                 |
 #:
-#: MUST: ビット一致（`torch.equal`）を要求しない — 比べる 2 辺は「out_channels 2h の conv の
-#: 前半 h」と「out_channels h の conv」で、torch の conv はチャネル数・スレッド数でカーネルの
-#: ブロッキング（= 縮約順）を変えるため、ビット一致は仕様保証の無い実装挙動（実測でも
-#: スレッド数 6 で 1 ulp 差・8 で 0 と揺れる — テスト追加で global RNG 列がずれた途端に
-#: 割れた）。門の目的は mean / scale の取り違え検出で、取り違えの差は O(1) — この許容で
-#: 判別力は落ちない（取り違えが落ち続けることは `irodori/dacvae/tests/test_export.py` が固定する）。
+#: MUST: do not require bit identity (`torch.equal`) — the two sides compared are "the first h of a
+#: conv with out_channels 2h" and "a conv with out_channels h", and torch's conv changes its kernel
+#: blocking (= reduction order) with the channel count and thread count, so bit identity is
+#: implementation behavior without a spec guarantee (measured too: 1 ulp off with 6 threads, 0 with
+#: 8 — it broke as soon as an added test shifted the global RNG sequence). The purpose of the check
+#: is to detect a mean / scale mix-up, whose difference is O(1) — this tolerance does not reduce
+#: its discriminating power (that a mix-up keeps failing is pinned by
+#: `irodori/dacvae/tests/test_export.py`).
 IN_PROJ_TRUNCATION_ATOL = 3e-7
 
 
 def _in_proj_truncation_evidence(
     model: nn.Module, trimmed: nn.Conv1d, cases: Sequence[tuple[str, torch.Tensor]]
 ) -> dict[str, float]:
-    """切り詰めた `in_proj` が `chunk(2, dim=1)[0]` と一致することを実測する（門 2）。
+    """Measure that the truncated `in_proj` agrees with `chunk(2, dim=1)[0]` (check 2).
 
-    MUST: 恒真にしない — 切り詰めは「出力チャネルの前半 = mean」という上流の分割規約に
-    乗っており、後半（scale）を取る取り違えは shape も dtype も一致するのでここでしか出ない。
-    戻り値には実測した最大絶対差をそのまま載せる（許容は {@link IN_PROJ_TRUNCATION_ATOL}）。
+    MUST: do not make it a tautology — the truncation rests on upstream's split convention "the
+    first half of the output channels = mean", and a mix-up that takes the second half (scale)
+    matches in shape and dtype, so only this check reveals it. The return value carries the
+    measured max abs difference as is (the tolerance is {@link IN_PROJ_TRUNCATION_ATOL}).
     """
     evidence: dict[str, float] = {}
     for name, wav in cases:
@@ -776,8 +867,8 @@ def _in_proj_truncation_evidence(
         diff = float((expected - actual).abs().max())
         if diff > IN_PROJ_TRUNCATION_ATOL:
             raise AssertionError(
-                f"{name}: 切り詰めた in_proj が chunk(2)[0] と一致しない"
-                f"（最大絶対差 {diff} > 許容 {IN_PROJ_TRUNCATION_ATOL}）"
+                f"{name}: the truncated in_proj does not match chunk(2)[0]"
+                f" (max abs diff {diff} > tolerance {IN_PROJ_TRUNCATION_ATOL})"
             )
         evidence[name] = diff
     return evidence
@@ -789,14 +880,15 @@ def _remove_weight_norm_evidence(
     encoder_cases: Sequence[tuple[str, torch.Tensor]],
     pristine: Mapping[str, Mapping[str, torch.Tensor]],
 ) -> dict[str, dict[str, float]]:
-    """`remove_weight_norm` の前後で出力がビット一致することを実測する（門 3）。
+    """Measure that the outputs are bit-identical before and after `remove_weight_norm` (check 3).
 
-    畳み込みは `w = g · v/‖v‖` の合成で、数学的には恒等でも**浮動小数では別の丸め**になりうる。
-    ここが 0 でなければ golden の期待値（畳む前に採った値）は畳んだ後のグラフの期待値として
-    使えない — 緩めずに落とす。
+    Folding is the composition `w = g · v/‖v‖`, an identity mathematically but possibly **a
+    different rounding in floating point**. If this is not 0, the golden's expected values (taken
+    before folding) cannot serve as the expected values of the folded graph — fail instead of
+    relaxing.
     """
     if any(hasattr(module, "weight_g") for module in model.modules()):
-        raise AssertionError("weight_norm がまだ残っている（畳んだ後で呼ぶ門）")
+        raise AssertionError("weight_norm is still present (a check to call after folding)")
     evidence: dict[str, dict[str, float]] = {}
     for target, cases, call in (
         (TARGET_DECODER, decoder_cases, _decode_reference),
@@ -808,8 +900,8 @@ def _remove_weight_norm_evidence(
             expected = pristine[target][name]
             if not torch.equal(expected, actual):
                 raise AssertionError(
-                    f"{target}/{name}: remove_weight_norm の前後で出力が変わった"
-                    f"（最大絶対差 {float((expected - actual).abs().max())}）"
+                    f"{target}/{name}: the output changed across remove_weight_norm"
+                    f" (max abs diff {float((expected - actual).abs().max())})"
                 )
             measured[name] = 0.0
         evidence[target] = measured
@@ -819,33 +911,38 @@ def _remove_weight_norm_evidence(
 def _roundtrip_evidence(
     encoder_graph: nn.Module, decoder_graph: nn.Module, framed: torch.Tensor
 ) -> dict[str, float]:
-    """参照音声の往復（encode → decode）が波形として妥当であることを実測する（門 5）。
+    """Measure that the round trip of the reference audio (encode → decode) is a plausible
+    waveform (check 5).
 
-    見るのは ① 出力が全て有限 ② 入力波形との相関が {@link ROUNDTRIP_CORRELATION_MIN} 以上、
-    の 2 点。2 本のグラフを**繋いで**通す唯一の門で、片方だけの取り違え（チャネル順・
-    転置の向き・in_proj の前半後半）はここで相関として落ちる。
+    Two things are checked: ① every output is finite ② the correlation with the input waveform is
+    at least {@link ROUNDTRIP_CORRELATION_MIN}. It is the only check that runs the two graphs
+    **chained**, and a mix-up on one side only (channel order, transpose direction, first / second
+    half of in_proj) fails here as a correlation.
     """
     with torch.no_grad():
         latent = encoder_graph(framed)
         audio = decoder_graph(latent)
     if not bool(torch.isfinite(audio).all()):
-        raise AssertionError("往復の出力に非有限値がある")
+        raise AssertionError("the round-trip output has non-finite values")
     source = framed.reshape(-1)
     restored = audio.reshape(-1)
     if restored.numel() != source.numel():
         raise AssertionError(
-            f"往復の長さが {restored.numel()} で入力 {source.numel()} と違う（hop の取り違え）"
+            f"the round-trip length is {restored.numel()}, not the input's {source.numel()}"
+            " (the hop is mixed up)"
         )
     centered_source = source - source.mean()
     centered_restored = restored - restored.mean()
     denominator = float(centered_source.norm() * centered_restored.norm())
     if denominator == 0.0:
-        raise AssertionError("往復の出力が定数（相関を測れない）")
+        raise AssertionError(
+            "the round-trip output is constant (the correlation cannot be measured)"
+        )
     correlation = float((centered_source * centered_restored).sum()) / denominator
     if correlation < ROUNDTRIP_CORRELATION_MIN:
         raise AssertionError(
-            f"往復の相関 {correlation:.4f} が下限 {ROUNDTRIP_CORRELATION_MIN} を割った"
-            " — 経路のどこかで別の値を通している"
+            f"the round-trip correlation {correlation:.4f} fell below the floor"
+            f" {ROUNDTRIP_CORRELATION_MIN} — somewhere along the path a different value is passed"
         )
     return {
         "correlation": round(correlation, 5),
@@ -858,38 +955,40 @@ def _roundtrip_evidence(
 def _check_wrapper_equivalence(
     wrapper: nn.Module, argument: torch.Tensor, expected: torch.Tensor, where: str, atol: float
 ) -> float:
-    """ラッパの出力が参照の実モジュール出力と一致することを見る（門 4）。
+    """Check that the wrapper's output matches the reference output of the real modules (check 4).
 
-    参照は f32 系列なら**畳む前**、圧縮系列なら**丸めた後に採り直したもの**（どちらの場合も
-    ラッパと同じ重みで計算された値なので、要求は `EAGER_EQUIV_ATOL = 0` のまま）。
+    The reference is taken **before folding** for the f32 series, and **taken again after rounding**
+    for compressed series (in both cases computed with the same weights as the wrapper, so the
+    requirement stays `EAGER_EQUIV_ATOL = 0`).
     """
     with torch.no_grad():
         actual = wrapper(argument)
     if tuple(actual.shape) != tuple(expected.shape):
         raise AssertionError(
-            f"{where}: ラッパの出力 shape {tuple(actual.shape)} が"
-            f"期待 {tuple(expected.shape)} と違う"
+            f"{where}: wrapper output shape {tuple(actual.shape)} differs from"
+            f" the expected {tuple(expected.shape)}"
         )
     diff = float((actual - expected).abs().max())
     if diff > atol:
-        raise AssertionError(f"{where}: eager 同値が崩れた（最大絶対差 {diff} > {atol}）")
+        raise AssertionError(f"{where}: eager equivalence broke (max abs diff {diff} > {atol})")
     return diff
 
 
 def assert_snake_folded(graph: IrGraph, where: str) -> None:
-    """Snake の定数部分木が畳まれていることを emit 後の `required_ops` で確かめる。
+    """Confirm from `required_ops` after emit that Snake's constant subtree was folded.
 
-    `reciprocal` / `pow` が残っていたら `alpha` の降格が効いていない（IR の語彙にも無いので
-    本来は変換段で落ちるが、語彙が増えたときに黙って実行時 op へ落ちる形になりうる）。
+    If `reciprocal` / `pow` remain, the demotion of `alpha` did not take effect (they are not in the
+    IR vocabulary either, so normally the conversion stage fails, but once the vocabulary grows
+    they could silently become run-time ops).
     """
     leaked = sorted({"reciprocal", "pow", "div"} & set(graph.required_ops))
     if leaked:
         raise AssertionError(
-            f"{where}: Snake の定数部分木が畳まれず {leaked} が実行時 op として残っている"
-            " — `Snake1d.alpha` の降格（lifted tensor constant）が効いていない"
+            f"{where}: Snake's constant subtree was not folded and {leaked} remain as run-time"
+            " ops — the demotion of `Snake1d.alpha` (lifted tensor constant) did not take effect"
         )
     if "sin" not in graph.required_ops:
-        raise AssertionError(f"{where}: sin がグラフに無い — Snake が丸ごと消えている疑い")
+        raise AssertionError(f"{where}: no sin in the graph — Snake may have disappeared entirely")
 
 
 def _write_io(
@@ -898,23 +997,25 @@ def _write_io(
     expected: Mapping[str, torch.Tensor],
     out_dir: Path,
 ) -> list[str]:
-    """各ケースの入力と torch CPU 期待出力を `io.<case>.safetensors` へ書く。
+    """Write each case's inputs and torch CPU expected outputs to `io.<case>.safetensors`.
 
-    どちらのターゲットも 1 入力 1 出力なので、名前と本数の突合はグラフ宣言と直接行う。
+    Both targets have one input and one output, so names and counts are checked directly against
+    the graph declaration.
     """
     declared = [spec.name for spec in graph.inputs]
     if len(declared) != 1 or len(graph.outputs) != 1:
         raise AssertionError(
-            f"入力 {declared} / 出力 {list(graph.outputs)} が 1 本ずつでない（io の規約が違う）"
+            f"inputs {declared} / outputs {list(graph.outputs)} are not exactly one each"
+            " (a different io convention)"
         )
     written: list[str] = []
     for name, value in inputs.items():
         tensors = {
             f"{INPUT_PREFIX}{declared[0]}": normalize_boundary_tensor(
-                value.detach().contiguous(), f"{name} の入力 '{declared[0]}'"
+                value.detach().contiguous(), f"{name}: input '{declared[0]}'"
             ),
             f"{OUTPUT_PREFIX}0": normalize_boundary_tensor(
-                expected[name].detach().contiguous(), f"{name} の出力 0"
+                expected[name].detach().contiguous(), f"output 0 of {name}"
             ),
         }
         path = out_dir / f"{IO_PREFIX}{name}{IO_SUFFIX}"
@@ -924,7 +1025,8 @@ def _write_io(
 
 
 class TargetAxis(NamedTuple):
-    """ターゲット別の記号次元の宣言（`dynamic` は記号を載せる入力の軸番号）。"""
+    """Per-target declaration of the symbolic dimension (`dynamic` is the axis index of the input
+    that carries the symbol)."""
 
     symbol: str
     upper: int
@@ -955,17 +1057,20 @@ def export_series(
     normalize_db: float = REFERENCE_NORMALIZE_DB,
     dtype: str = "f32",
 ) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。
+    """Write the IR containers and golden io, and return a summary.
 
-    `targets` が絞るのは**書き出しだけ**。decoder / encoder 両方のケース組み立てと 5 門は
-    `targets` に依らず常に通る（下の MUST と同じ理由 — 鎖を丸ごと通す性質があるからこそ、
-    門を通らない資産が据わる経路が生まれない）。
+    `targets` narrows **only the writing**. Building the cases of both decoder and encoder and the
+    5 checks always run regardless of `targets` (the same reason as the MUST below — because the
+    whole chain always runs, no path arises by which an asset that skipped the checks is put in
+    place).
 
-    MUST: 生成物は**ターゲットごとの作業席**へ書き、全ての門（snake 畳み込み・境界正規化）を
-    通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す —
-    io golden は同じ壊れたグラフから採るので互いに整合し、TS 側の突合は**緑になる**
-    （「いつ公開してよいか」の綴りは {@link _shared.decode_series._publish}・据え替えと
-    後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
+    MUST: artifacts are written to **a staging area per target** and moved into place only after
+    passing every check (snake folding, boundary normalization). Putting them at the final location
+    before the checks would let a failed run leave "assets that pass the acceptance checks" — the
+    io golden is taken from the same broken graph, so they agree with each other and the TS-side
+    comparison **goes green** (the spelling of "when publishing is allowed" is
+    {@link _shared.decode_series._publish}; the discipline of moving into place and cleaning up is
+    the core primitive {@link karume.artifacts.staged_publication}).
     """
     source = DacvaeSource(source_dir)
     model = load_codec(source, model_dir)
@@ -977,23 +1082,28 @@ def export_series(
     decoder_cases = build_decoder_cases(latent_dir, decoder_max)
     encoder_cases = build_encoder_cases(model, reference_wav, encoder_max, normalize_db)
 
-    # ---- ① weight_norm を畳む前の参照（golden の期待値）と主経路の実測 ----
+    # ---- ① The reference before weight_norm is folded (the golden's expected values) and the
+    # main-path measurement ----
     pristine = _pristine_outputs(model, decoder_cases, encoder_cases)
     main_path_evidence = _main_path_evidence(model.decoder, decoder_cases, model.quantizer.out_proj)
 
-    # ---- ② 前処理（畳み込み → alpha 降格）と、それが値を変えていないことの実測 ----
+    # ---- ② Preprocessing (folding → alpha demotion) and the measurement that it did not
+    # change values ----
     folded = fold_weight_norm(model)
     fold_evidence = _remove_weight_norm_evidence(model, decoder_cases, encoder_cases, pristine)
     lifted = lift_snake_alphas(source, model)
-    # MUST: 丸めは畳み込みと alpha 降格の後・切り詰めと参照採り直しの前（`_fake_quant` の順序）。
+    # MUST: rounding comes after folding and the alpha demotion, before the truncation and the
+    # retaken reference (the ordering of `_fake_quant`).
     quantized = _fake_quant(dtype, model)
     if quantized.report is not None:
-        # 圧縮系列の golden は**丸めた重み**で採り直す（丸め前の pristine は門 3 で使い切った）。
+        # The golden of a compressed series is taken again with **the rounded weights** (the
+        # pristine outputs from before rounding were used up by check 3).
         pristine = _eager_outputs(model, decoder_cases, encoder_cases)
     trimmed = truncated_in_proj(model.quantizer.in_proj)
     truncation_evidence = _in_proj_truncation_evidence(model, trimmed, encoder_cases)
 
-    # ---- ③ ラッパの eager 同値（前処理 3 つをまとめてここで実測する） ----
+    # ---- ③ Eager equivalence of the wrappers (measures the three preprocessing steps
+    # together here) ----
     graphs = {
         TARGET_DECODER: DecoderGraph(model.quantizer.out_proj, model.decoder),
         TARGET_ENCODER: EncoderGraph(model.encoder, trimmed),
@@ -1015,7 +1125,7 @@ def export_series(
         graphs[TARGET_ENCODER], graphs[TARGET_DECODER], dict(encoder_cases)[ENCODER_CASES[-1][0]]
     )
 
-    # ---- ④ export と golden の書き出し ----
+    # ---- ④ Export and writing the golden ----
     axes = {
         TARGET_DECODER: TargetAxis(DECODER_SYMBOL, decoder_max, 1),
         TARGET_ENCODER: TargetAxis(ENCODER_SYMBOL, encoder_max, 1),
@@ -1029,16 +1139,17 @@ def export_series(
         longest = max(by_case, key=lambda name: by_case[name].shape[axis.axis])
         sequence = Dim(axis.symbol, min=MIN_SYM_LENGTH, max=axis.upper)
         with staged_publication(target_dir) as staged:
-            # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
+            # The writer creates the directory (the primitive does not create it — it only
+            # hands over a path).
             staged.mkdir()
             graph = export_to_file(
                 graphs[target],
                 (by_case[longest],),
                 staged / MODEL_FILE,
                 provenance=PROVENANCE,
-                # グラフ名は**部品名**（= karume.json の weights のキー）。コーデックの
-                # ディレクトリ名（`decoder`）とキー（`codec_decoder`）は綴りが違うので
-                # 逆引き表を通す（container-v1 §2.1）。
+                # The graph name is **the component name** (= the key in karume.json's weights).
+                # The codec's directory name (`decoder`) and key (`codec_decoder`) are spelled
+                # differently, so it goes through the reverse lookup table (container-v1 §2.1).
                 graph_name=IRODORI_CODEC_ROLES[target],
                 dynamic_shapes=({axis.axis: sequence},),
                 symbol_names=(axis.symbol,),
@@ -1074,12 +1185,15 @@ def export_series(
 
 
 def default_out_root(model_dir: Path, dtype: str = "f32") -> Path:
-    """生成物の既定の置き場（`outputs/series/<実重みのディレクトリ名>{,-f16,-i8}/`）。
+    """Default location of the artifacts (`outputs/series/<directory name of the real
+    weights>{,-f16,-i8}/`).
 
-    ターゲット名のサブディレクトリは `export_series` が 1 段掘る（他系列と同じ形）。
+    `export_series` adds one level of subdirectory named after the target (the same shape as the
+    other series).
 
-    MUST: dtype ごとに別ディレクトリ（ADR 0018 / 0019 / 0027）— 綴りは `karume.dist` の
-    `IRODORI_CODEC_NAME` + dtype 接尾と一致させる（書き手と読み手が同じ 1 語から組む）。
+    MUST: a separate directory per dtype (ADR 0018 / 0019 / 0027) — the spelling must match
+    `IRODORI_CODEC_NAME` + the dtype suffix of `karume.dist` (writer and reader build it from the
+    same word).
     """
     suffix = "" if dtype == "f32" else f"-{dtype}"
     return SERIES_ROOT / f"{model_dir.name}{suffix}"
@@ -1095,22 +1209,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 —"
-        " outputs/series/<--model-dir のディレクトリ名>{,-f16,-i8}/）",
+        help="output directory (default: the series per --dtype —"
+        " outputs/series/<directory name of --model-dir>{,-f16,-i8}/)",
     )
     parser.add_argument(
         "--dtype",
         choices=WEIGHT_DTYPES,
         default="f32",
-        help="重みの格納 dtype（f16 / i8 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019 / 0027 / 0050。**emit 専用**）",
+        help="storage dtype of the weights (f16 / i8 fake-quantize first, then store only the"
+        " eligible slots compressed — ADR 0018 / 0019 / 0027 / 0050. **emit only**)",
     )
     parser.add_argument(
         "--target",
         action="append",
         choices=TARGETS,
-        help="**書き出しだけ**を絞る（繰り返し指定可。既定は全て）。decoder / encoder 両方の"
-        "ケース組み立てと 5 門は常に走る — 所要時間は 1 ターゲットでも変わらない",
+        help="narrows **only the writing** (can be repeated; default: all). Building the cases"
+        " of both decoder and encoder and the 5 checks always run — the run time is the same"
+        " even for one target",
     )
     args = parser.parse_args(argv)
     out_dir = default_out_root(args.model_dir, args.dtype) if args.out is None else args.out

@@ -1,8 +1,10 @@
-"""`wan/umt5_tokenizer.py` の約束事 — 資産の焼き方・2 経路の一致の門・フィクスチャの生成器。
+"""The contract of `wan/umt5_tokenizer.py` — how the asset is baked, the check that the two paths
+agree, and the fixture generator.
 
-上流のトークナイザを読むテストは pin した revision の `tokenizer/` が HF キャッシュに無ければ SKIP
-（取得は `uv run --group wan --inexact python -m wan.text_embeds --fetch`）。期待の決め方そのもの
-（2 経路の割れ方の判定・拒否の順・語彙の部分集合）は合成の正本で叩く。
+Tests that read the upstream tokenizer SKIP when `tokenizer/` of the pinned revision is not in the
+HF cache (fetch it with `uv run --group wan --inexact python -m wan.text_embeds --fetch`). How the
+expectation itself is decided (judging how the two paths split, the rejection order, the vocabulary
+subset) is exercised against a synthetic source of truth.
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ def fake_truth(
     tokenizer_json_ids: dict[str, list[int]] | None = None,
     vocab: list[list[Any]] | None = None,
 ) -> ut.Truth:
-    """文字列 → id 列の表で答える合成の正本（2 経路を別々に与えられる）。"""
+    """A synthetic source of truth that answers from a string → id-sequence table (the two paths can
+    be given separately)."""
     plain = tokenizer_json_ids if tokenizer_json_ids is not None else transformers_ids
     return ut.Truth(
         transformers=lambda text: transformers_ids[text],
@@ -60,14 +63,16 @@ class TestExpectation:
         [([4, 5, 1], [4, 6, 1]), ([4, 5, 1], [4, 273, 5, 1]), ([4, 3, 1], [4, 2, 1])],
     )
     def test_any_other_split_fails_loudly(self, transformers, plain):
-        """2 と 3 以外の割れ方は経路の構成の違い — 期待を焼かずに落とす。"""
+        """A split other than 2 versus 3 is a difference in how the paths are built — fail without
+        baking an expectation."""
         truth = fake_truth({"x": transformers}, {"x": plain})
 
-        with pytest.raises(ValueError, match="割れ方"):
+        with pytest.raises(ValueError, match="in a way other than out-of-vocabulary"):
             ut.expectation(truth, ADDED, "x")
 
     def test_added_tokens_and_space_metaspace_are_rejected_before_tokenizing(self):
-        """本文中の追加語彙と空白の直後の ▁ は 2 経路で割れる — トークナイザに渡す前に拒む。"""
+        """Added tokens inside the text and a ▁ right after whitespace split the two paths — reject
+        them before they reach the tokenizer."""
         truth = fake_truth({})
 
         assert ut.expectation(truth, ADDED, "a </s> b") == {"reject": "added-token"}
@@ -81,12 +86,13 @@ class TestExpectation:
         assert ut.expectation(truth, ADDED, "") == {"reject": "too-short"}
 
     def test_out_of_vocabulary_and_too_long_together_are_not_baked(self):
-        """どちらで落ちるかが位置で決まるケースはフィクスチャに置かない（TS と順が割れうる）。"""
+        """A case where the position decides which check fails is not put in the fixture (the order
+        could differ from the TS side)."""
         transformers = [2] + [4] * ut.MAX_LENGTH + [1]
         plain = [3] + [4] * ut.MAX_LENGTH + [1]
         truth = fake_truth({"x": transformers}, {"x": plain})
 
-        with pytest.raises(ValueError, match="重なる"):
+        with pytest.raises(ValueError, match="both out-of-vocabulary and over the limit"):
             ut.expectation(truth, ADDED, "x")
 
 
@@ -148,7 +154,8 @@ class TestSweepFixtureGenerator:
 
 @pytest.fixture(scope="module")
 def upstream():
-    """pin した revision の上流トークナイザ（無ければ SKIP）と前処理の表。"""
+    """The upstream tokenizer of the pinned revision (SKIP when absent) and the preprocessing
+    tables."""
     pytest.importorskip("transformers")
     pytest.importorskip("tokenizers")
     pytest.importorskip("ftfy")
@@ -158,7 +165,7 @@ def upstream():
     try:
         snapshot = ut.tokenizer_snapshot()
     except WanSourceError as error:
-        pytest.skip(f"umT5 のトークナイザが手元に無い: {error}")
+        pytest.skip(f"the umT5 tokenizer is not available locally: {error}")
     tables = pc.build_tables()
     return ut.load_truth(snapshot), tables, {"test": "versions"}
 
@@ -189,9 +196,9 @@ class TestAgainstUpstream:
         assert len(asset["addedTokens"]) == 304
 
     def test_the_committed_parity_fixture_is_what_the_generator_makes(self, upstream):
-        """commit 済みのフィクスチャを上流から作り直して一致を見る。
+        """Rebuild the committed fixture from upstream and check that it matches.
 
-        上流の動き（版・資産）と生成器の非決定性の両方をここで拾う。
+        This catches both upstream movement (versions, assets) and nondeterminism in the generator.
         """
         truth, tables, _ = upstream
         committed = json.loads((ut.FIXTURE_DIR / ut.PARITY_FIXTURE).read_text(encoding="utf-8"))

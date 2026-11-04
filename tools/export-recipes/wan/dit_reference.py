@@ -1,89 +1,103 @@
-"""Wan の DiT の層逐次の CPU 参照（f64 / f32 — ADR 0121 決定 7・段 0）と、1.3B の既存 golden との
-ビット一致の突き合わせ。
+"""The layer-by-layer CPU reference of the Wan DiT (f64 / f32 — ADR 0121 decision 7, step 0) and
+its bit-exact comparison with the existing 1.3B goldens.
 
     uv run --group wan --inexact python -m wan.dit_reference compare --dtype i8 --max-tokens 192
     uv run --group wan --inexact python -m wan.dit_reference compare --dtype f16
     uv run --group wan --inexact python -m wan.dit_reference compare --dtype i8 --source module
 
-## なぜ層逐次か
+## Why layer by layer
 
-Wan2.1 の f64 の参照は f32 のモデルを読んで `model.double()` で全体を f64 にしていた（1.3B で約
-10.4 GB）。5B では f64 の全量が 37.25 GiB になり、31 GiB 機に載らない（ADR 0121 容量の表）。そこで
-DiT を **1 ブロックずつ** f64 / f32 にして回す（{@link LayerwiseDit}）。同時に持つのは、ブロックの外
-（patch 埋め込み・条件の埋め込み・出力の射影 — 5B の f64 で 0.67 GiB）と 1 ブロック（同 1.22 GiB）
-だけ。上流のブロックの列のループ変数は前のブロックを握ったまま次を求めるので、前のブロックの重みを
-手放してから次を読む（{@link LayerwiseDit._opener}）。
+The Wan2.1 f64 reference loaded the f32 model and made all of it f64 with `model.double()` (about
+10.4 GB for 1.3B). For 5B the full f64 size is 37.25 GiB, which does not fit a 31 GiB machine (the
+capacity table of ADR 0121). So the DiT is made f64 / f32 and run **one block at a time**
+({@link LayerwiseDit}). What is held at once is only the part outside the blocks (patch embedding,
+condition embedding, output projection — 0.67 GiB in f64 for 5B) and one block (1.22 GiB likewise).
+The loop variable of upstream's block loop keeps the previous block while asking for the next, so
+the previous block's weights are released before the next is loaded ({@link LayerwiseDit._opener}).
 
-## 書き下さずに上流の forward を回す
+## Running upstream's forward without rewriting it
 
-上流 `WanTransformer3DModel` を重みを持たない meta で組み、`blocks` を「回すたびに 1 ブロックずつ
-重みを読んで実体化する列」（{@link _LazyBlocks}）に差し替える。上流の forward（RoPE の表・patch
-埋め込み・条件の埋め込み・ブロックの列・出力の norm / 射影・unpatchify）は**上流のコードがそのまま
-走る** — 書き写さないので、写し間違いを持ち込まない。RoPE の表はバッファだけの部品なので、上流の
-初期化を CPU でもう 1 度回して作る（重みではない — `model.rope` の値は config だけから決まる）。
+Upstream `WanTransformer3DModel` is built on meta without weights, and `blocks` is replaced by "a
+sequence that loads and materializes one block's weights each time it is iterated"
+({@link _LazyBlocks}). Upstream's forward (RoPE table, patch embedding, condition embedding, block
+loop, output norm / projection, unpatchify) **runs as upstream's own code** — nothing is copied, so
+no copying mistakes come in. The RoPE table is a buffer-only component, so it is built by running
+upstream's initialization once more on CPU (it is not a weight — the values of `model.rope` depend
+on the config alone).
 
-Wan2.2 の TI2V のトークンごとの時刻は、ADR 0121 決定 4 の参照ラッパ（`condition=` —
-`dit_patch.reference_dit`）で渡す: 上流の `condition_embedder` を時刻の値ごとに M = 1 で回し、
-トークンごとの表を上流のブロックへ渡す。f32 / f64 とも回る（時刻の sinusoid は batch 1 の形のまま
-— f64 の監視が許す形）。2 次元の timestep をそのまま渡す diffusers の M = S の経路は観測用で、f32
-だけ（f64 の監視の外の `[S]` の sinusoid を作るので、入口で止める — {@link LayerwiseDit.forward}）。
+The per-token timesteps of Wan2.2 TI2V are passed through the reference wrapper of ADR 0121
+decision 4 (`condition=` — `dit_patch.reference_dit`): upstream's `condition_embedder` is run with
+M = 1 for each timestep value, and the per-token table is passed to upstream's blocks. It runs in
+both f32 and f64 (the timestep sinusoid keeps its batch-1 shape — the shape the f64 watch allows).
+diffusers' M = S path, which passes a 2-D timestep as is, is for observation and f32 only (it
+builds an `[S]` sinusoid outside what the f64 watch allows, so it is stopped at the entrance —
+{@link LayerwiseDit.forward}).
 
-パッチ後のグラフの eager（`dit_patch.WanDitTokensTi2v`）も同じ層逐次の重みで回せる
-（{@link LayerwiseDit.run} に本体を渡す — 5B の f32 全量 18.63 GiB を持たずに eager 同値を見る口・
-`wan.ti2v_export_dit`）。ただしブロックごとの口（`collect_blocks` / `on_block` / `on_output`）は
-ブロックの forward hook で発火するので、ブロックの部品を直に呼ぶパッチ後の TI2V のグラフには届かない
-（渡すと fail loudly — {@link LayerwiseDit.run}）。
+The eager of the patched graph (`dit_patch.WanDitTokensTi2v`) can also run on the same
+layer-by-layer weights (pass the body to {@link LayerwiseDit.run} — the way to check eager
+equivalence without holding the full 18.63 GiB of 5B f32, `wan.ti2v_export_dit`). The per-block
+hooks (`collect_blocks` / `on_block` / `on_output`), however, fire from the blocks' forward hooks,
+so they do not reach the patched TI2V graph, which calls the block's components directly (passing
+them fails loudly — {@link LayerwiseDit.run}).
 
-## 重みの読み口（{@link WeightSource} — 値はどれも f32）
+## Weight sources ({@link WeightSource} — every value is f32)
 
-- {@link ContainerDitWeights}: 系列の容器（`krm`）から 1 本ずつ。i8 は packed × 行ごとの scale を
-  **f32 で**掛けた値（export の fake-quant と同じ値 — 逆量子化を f64 で行うと、既存の golden〈f32 の
-  fake-quant 値を f64 へ広げた値〉とビットで割れる — ADR 0121 決定 7）。f16 は f16 → f32。
-- {@link ModuleWeights}: 読み込み済み・丸め済みの上流モデル（`wan.export_dit` の 1.3B — f32 全量が
-  載る機）。
-- {@link CheckpointDitWeights}: 上流の checkpoint（F32）から 1 本ずつ読み、系列の丸め（f16 / i8 の
-  fake-quant）を 1 本ずつ掛ける（容器がまだ無い 5B の下見 — `wan.dit_probe`）。丸めは 1 本の中で
-  閉じる（f16 は要素ごと・i8 は行ごとの scale）ので、モデル全体に掛けた値とビット一致する。
+- {@link ContainerDitWeights}: one tensor at a time from the series container (`krm`). i8 is the
+  packed values times the per-row scale multiplied **in f32** (the same values as the export's
+  fake-quant — dequantizing in f64 would split bitwise from the existing goldens, which are f32
+  fake-quant values widened to f64 — ADR 0121 decision 7). f16 is f16 → f32.
+- {@link ModuleWeights}: an upstream model that is already loaded and rounded (the 1.3B of
+  `wan.export_dit` — a machine that holds the full f32 model).
+- {@link CheckpointDitWeights}: reads one tensor at a time from the upstream checkpoint (F32) and
+  applies the series rounding (f16 / i8 fake-quant) to each (a preview of 5B, which has no container
+  yet — `wan.dit_probe`). The rounding is closed within one tensor (f16 per element, i8 with a
+  per-row scale), so it is bit-identical to rounding the whole model.
 
-f64 の参照は、どの読み口でも f32 の値を f64 へ広げる（`.to(float64)` は厳密）。
+The f64 reference widens the f32 values to f64 whichever the source (`.to(float64)` is exact).
 
-## f32 の参照と重みのアドレス（実測 2026-10-04 — torch 2.13.0+cpu・MKL 2024.2・AVX2）
+## The f32 reference and weight addresses (measured 2026-10-04 — torch 2.13.0+cpu, MKL 2024.2, AVX2)
 
-この機の torch CPU の f32 の GEMM（MKL）は、**重みの先頭アドレスの 64 バイト境界からのずれ**で
-最終ビットが変わる。値・形・stride が同じ重みでも、ずれだけを変えると 1.3B の S = 128 で出力が
-最大 4.6e-6 動いた（`compare` の i8 系列 `accept-s00128-t0030`）。f64 の参照は同じケースでビット
-一致した（f64 の重みはどちらの経路も新しい確保 — 64 バイト境界）。
+On this machine the f32 GEMM (MKL) of torch CPU changes the last bits depending on **the offset of
+the weight's start address from a 64-byte boundary**. Weights with the same values, shape and stride
+moved the output by up to 4.6e-6 at S = 128 on 1.3B when only the offset changed (i8 series
+`accept-s00128-t0030` of `compare`). The f64 reference was bit-identical on the same case (the f64
+weights are fresh allocations on both paths — 64-byte aligned).
 
-上流の f32 の eager（`from_pretrained` で読んだモデル）の重みは、checkpoint の safetensors を
-mmap した番地にある。ずれは `(8 + ヘッダ長 + data_offsets[0]) mod 64` で決まる（1.3B の 825 本
-全部で実測と一致）。そこで f32 の参照は、`alignment`（キー → ずれ —
-{@link upstream_alignment}）を渡されたとき、重みをそのずれの番地へ置いてから回す
-（{@link _placed}）。これで容器から読んだ重みでも「上流の f32 の eager」とビット一致する
-（ADR 0121 決定 7 の「層逐次の f32 が上流の f32 eager とビット一致」）。
-NOTE: これは MKL の実装の振る舞いで、仕様の保証ではない（MKL の CNR〈`MKL_CBWR`〉を有効に
-すればずれに依らなくなるが、既存の f32 の golden とビットで割れる）。
+The f32 weights of upstream's eager (a model loaded with `from_pretrained`) sit at addresses that
+mmap the checkpoint's safetensors. The offset is `(8 + header length + data_offsets[0]) mod 64`
+(it matched the measurement for all 825 tensors of 1.3B). So when the f32 reference is given
+`alignment` (key → offset — {@link upstream_alignment}), it places the weights at that offset
+before running ({@link _placed}). This makes even weights read from a container bit-identical to
+"upstream's f32 eager" ("the layer-by-layer f32 is bit-identical to upstream's f32 eager" of
+ADR 0121 decision 7).
+NOTE: this is the behavior of the MKL implementation, not a guarantee of the spec (enabling MKL's
+CNR (`MKL_CBWR`) removes the dependence on the offset, but then results split bitwise from the
+existing f32 goldens).
 
-## f64 の経路で f64 以外の浮動小数を作らない
+## No floating-point value other than f64 on the f64 path
 
-f64 の forward は `dit_patch` の f64 の参照と同じ規則で縛る: 上流の `.float()` の寄せを f64 では
-素通しにし、f64 でない浮動小数の値が作られたら止める（例外は時刻の sinusoid の形だけ —
-`dit_patch.float64_forward`）。ただし重みの読み込み（f32 での逆量子化を含む）は f64 の経路の外で、
-その間だけ監視を止める（{@link _PausableWatch}）。
+The f64 forward is held to the same rule as the f64 reference of `dit_patch`: upstream's `.float()`
+casts pass through unchanged in f64, and it stops if a floating-point value that is not f64 is
+created (the only exception is the shape of the timestep sinusoid — `dit_patch.float64_forward`).
+Weight loading (including dequantization in f32), however, is outside the f64 path, and the watch
+is paused only during it ({@link _PausableWatch}).
 
-## 1.3B の既存 golden との突き合わせ（`compare` — 段 0 の緑の条件）
+## Comparison with the existing 1.3B goldens (`compare` — the pass condition of step 0)
 
-`wan.export_dit` のケースの表（{@link wan.export_dit.series_cases}）を層逐次で採り直す。
-**別の置き場**（既定 {@link DEFAULT_OUT}）へ `reference.<case>.safetensors` を書いてから、
-系列の既存の `reference.<case>` とテンソルごとにビットで比べる（ファイルの sha256 の一致も
-記録する）。既存の golden・容器には書かない（読むだけ）。済んだケースは結果の行
-（`results.jsonl`）を見て飛ばすので、途中で止めても同じ `--out` で続きから回る（{@link _done} —
-行は実行の形〈全量 / f64 だけ〉と比較の版〈{@link COMPARE_VERSION}〉を持ち、合わない行は済みに
-数えない）。終わりに要約を `summary.json` に書く（合否は `differ` が空か）。行と要約は f32 の
-ビット一致が依る実行環境（torch のスレッド数・CPU の命令セット・MKL / OpenMP の環境変数 —
-{@link numeric_environment}）も持つ。
+Re-takes the case table of `wan.export_dit` ({@link wan.export_dit.series_cases}) layer by layer.
+It writes `reference.<case>.safetensors` to **a separate location** (default {@link DEFAULT_OUT})
+and then compares each tensor bitwise with the series' existing `reference.<case>` (whether the
+files' sha256 match is also recorded). It never writes to the existing goldens or containers (read
+only). Finished cases are skipped by looking at the result rows (`results.jsonl`), so after a stop
+the same `--out` continues where it left off ({@link _done} — a row carries the run mode (full / f64
+only) and the comparison version ({@link COMPARE_VERSION}), and rows that do not match are not
+counted as done). At the end a summary goes to `summary.json` (it passes when `differ` is empty).
+Rows and the summary also carry the execution environment the f32 bit-exactness depends on (torch
+thread count, CPU instruction set, MKL / OpenMP environment variables —
+{@link numeric_environment}).
 
-MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。
+MUST: import diffusers inside functions (the `wan` group is not in the default sync —
+`tests/test_optional_group_imports.py`).
 """
 
 from __future__ import annotations
@@ -117,62 +131,69 @@ from wan.pipeline_ref import assert_no_mps
 from wan.umt5_export import Checkpoint
 from wan.umt5_reference import ContainerWeights
 
-#: 突き合わせの既定の出力先（`outputs/bench/<配布名>/<日付>_<目的>/` — `docs/assets-layout.md`。
-#: 既存の系列・golden とは別 — 走行中のジョブが系列を読む）。日付は起動した日なので、日をまたいで
-#: 続きから回すときは前の置き場を `--out` で渡す。
+#: The default output location of the comparison
+#: (`outputs/bench/<distribution name>/<date>_<purpose>/` — `docs/assets-layout.md`; separate from
+#: the existing series and goldens — running jobs read the series). The date is the day of the
+#: start, so to continue across a date change pass the earlier location with `--out`.
 DEFAULT_OUT = BENCH_ROOT / "karume-wan2.1" / f"{date.today().isoformat()}_dit-layerwise"
 
-#: 突き合わせの結果の行（1 ケース 1 行の JSON — 再開の目印）と、終わりに書く要約。
+#: The comparison's result rows (one JSON line per case — the resume markers) and the summary
+#: written at the end.
 RESULTS_FILE = "results.jsonl"
 SUMMARY_FILE = "summary.json"
 
-#: 突き合わせの版。比べる中身（キー・ケースの入力・書く golden の組み方）か行の欄を変えたら上げる —
-#: 版の違う行は再開で「済み」に数えない（{@link _done}）。
+#: The comparison version. Bump it when what is compared (keys, case inputs, how the written goldens
+#: are assembled) or the row fields change — rows of another version are not counted as "done" on
+#: resume ({@link _done}).
 COMPARE_VERSION = 2
 
-#: 実行の形（全量 = f32 の output・block と f64 / f64 だけ = `--f64-only`）。
+#: The run mode (full = f32 output, blocks and f64 / f64 only = `--f64-only`).
 CompareMode = Literal["full", "f64-only"]
 
-#: 実行の形 → 「済み」に数える行の形（全量の行は f64 だけの実行も覆う — 逆は覆わない）。
+#: Run mode → the row modes counted as "done" (a full row also covers an f64-only run — not the
+#: other way round).
 _COVERING_MODES: dict[str, frozenset[str]] = {
     "full": frozenset({"full"}),
     "f64-only": frozenset({"full", "f64-only"}),
 }
 
-#: 記録する環境変数の接頭辞（MKL の CNR〈`MKL_CBWR`〉・スレッド数・OpenMP の割り当て）。
+#: Prefixes of the recorded environment variables (MKL's CNR (`MKL_CBWR`), thread counts, OpenMP
+#: affinity).
 _NUMERIC_ENV_PREFIXES = ("MKL_", "OMP_", "KMP_")
 
-#: 容器が Linear 化した形（`[Cout, C·pt·ph·pw]`）で持つ、上流では Conv3d の重み。
+#: A weight that is a Conv3d upstream, held by the container in its Linear form
+#: (`[Cout, C·pt·ph·pw]`).
 PATCH_EMBEDDING_WEIGHT = "patch_embedding.weight"
 
-#: diffusers の部品の checkpoint のファイル名（分割形の索引・単一形）。
+#: File names of a diffusers component checkpoint (sharded index, single file).
 DIFFUSERS_INDEX = "diffusion_pytorch_model.safetensors.index.json"
 DIFFUSERS_SINGLE = "diffusion_pytorch_model.safetensors"
 
-#: 上流の部品のディレクトリ（snapshot の下）。
+#: The upstream component directory (under the snapshot).
 TRANSFORMER_SUBFOLDER = "transformer"
 
-#: 重みの丸め（系列の格納 dtype — `none` は量子化しない上流の F32 のまま）。
+#: Weight rounding (the series storage dtype — `none` keeps upstream's F32 without quantizing).
 Rounding = Literal["f16", "i8", "none"]
 
 
 class DitReferenceError(RuntimeError):
-    """重み・形・dtype が層逐次の参照の前提から外れた。"""
+    """A weight, shape or dtype departs from the premises of the layer-by-layer reference."""
 
 
 # ---------------------------------------------------------------------------
-# 重みの読み口
+# Weight sources
 # ---------------------------------------------------------------------------
 
 
 class WeightSource(Protocol):
-    """上流の state dict のキー → f32 の値（patch 埋め込みは Linear 化した形でもよい）。"""
+    """Upstream state-dict key → f32 value (the patch embedding may come in its Linear form)."""
 
     def tensor(self, key: str) -> torch.Tensor: ...
 
 
 class ModuleWeights:
-    """読み込み済み・丸め済みの上流モデルの重み（参照を持つだけ — 複製しない）。"""
+    """The weights of an upstream model that is already loaded and rounded (only holds references —
+    no copies)."""
 
     def __init__(self, model: nn.Module) -> None:
         self._state = model.state_dict()
@@ -180,17 +201,18 @@ class ModuleWeights:
     def tensor(self, key: str) -> torch.Tensor:
         value = self._state.get(key)
         if value is None:
-            raise DitReferenceError(f"モデルに '{key}' が無い")
+            raise DitReferenceError(f"the model has no '{key}'")
         return value.detach()
 
 
 class ContainerDitWeights(ContainerWeights):
-    """系列の容器（`krm`）から重みを 1 本ずつ f32 で読む（f32 / f16 / 行ごとの i8）。
+    """Reads weights one tensor at a time in f32 from the series container (`krm`) (f32 / f16 /
+    per-row i8).
 
-    f32 と i8 は `umt5_reference.ContainerWeights` の読み方そのもの（i8 は packed × scale を f32
-    で — fake-quant と同じ値）。f16 は f16 → f32（厳密）。block は取るたびに sha256 を宣言と
-    突き合わせる。
-    MUST: ほかの格納は fail loudly（参照が黙って別の重みになる）。
+    f32 and i8 are read exactly as `umt5_reference.ContainerWeights` reads them (i8 is packed ×
+    scale in f32 — the same values as fake-quant). f16 is f16 → f32 (exact). Each block's sha256 is
+    checked against its declaration every time it is taken.
+    MUST: any other storage fails loudly (the reference would silently become other weights).
     """
 
     def tensor(self, key: str) -> torch.Tensor:
@@ -203,21 +225,23 @@ class ContainerDitWeights(ContainerWeights):
 
 
 class CheckpointDitWeights:
-    """上流の checkpoint（F32）から 1 本ずつ読み、系列の丸めを 1 本ずつ掛ける。
+    """Reads one tensor at a time from the upstream checkpoint (F32) and applies the series rounding
+    to each.
 
-    - `f16`: 全ての重みを f16 の表現可能値へ（`karume.quantize.round_weights_to_f16` と同じ要素
-      ごとの丸め — 有限値が非有限へ飽和したら fail loudly）
-    - `i8`: `quant_keys`（linear と patch 埋め込みの重み — {@link quant_keys}）だけを per-channel
-      symmetric の RTN へ（`fake_quant_int8` と同じ `quantize(w, s)·s` を、出力チャネルを行にした
-      2 次元で）。残り（bias・norm・`scale_shift_table`）は上流の f32 のまま
-    - `none`: 上流の F32 のまま（量子化なしの参照）
+    - `f16`: every weight to f16-representable values (the same per-element rounding as
+      `karume.quantize.round_weights_to_f16` — fails loudly if a finite value saturates to
+      non-finite)
+    - `i8`: only `quant_keys` (the linear and patch-embedding weights — {@link quant_keys}) to
+      per-channel symmetric RTN (the same `quantize(w, s)·s` as `fake_quant_int8`, in 2-D with
+      output channels as rows). The rest (bias, norm, `scale_shift_table`) stays upstream's f32
+    - `none`: upstream's F32 as is (the reference without quantization)
     """
 
     def __init__(
         self, directory: Path, rounding: Rounding, quant_keys: frozenset[str] = frozenset()
     ) -> None:
         if rounding == "i8" and not quant_keys:
-            raise DitReferenceError("i8 の丸めに量子化の対象（quant_keys）が渡されていない")
+            raise DitReferenceError("i8 rounding got no quantization targets (quant_keys)")
         self._checkpoint = Checkpoint(directory, index=DIFFUSERS_INDEX, single=DIFFUSERS_SINGLE)
         self._rounding = rounding
         self._quant_keys = quant_keys
@@ -227,7 +251,9 @@ class CheckpointDitWeights:
         if self._rounding == "f16":
             rounded = value.to(torch.float16).to(torch.float32)
             if bool((torch.isfinite(value) & ~torch.isfinite(rounded)).any()):
-                raise DitReferenceError(f"'{key}': f16 への丸めで有限値が非有限へ飽和した")
+                raise DitReferenceError(
+                    f"'{key}': rounding to f16 saturated a finite value to non-finite"
+                )
             return rounded
         if self._rounding == "i8" and key in self._quant_keys:
             rows = value.reshape(value.shape[0], -1)
@@ -237,36 +263,40 @@ class CheckpointDitWeights:
 
 
 def quant_keys(config: Mapping[str, Any]) -> frozenset[str]:
-    """i8 系列の量子化の対象（S 形のラッパの linear の重み — export と同じ選び方 — の FQN）。
+    """The quantization targets of the i8 series (FQNs of the linear weights of the S-shaped
+    wrapper — the same selection as the export).
 
-    ラッパの FQN は上流の state dict のキーと同じ空間（ラッパは上流の部品への参照を持つ）。
-    patch 埋め込みはラッパでは Linear・上流では Conv3d で、キーは同じ `patch_embedding.weight`。
+    The wrapper's FQNs live in the same space as upstream's state-dict keys (the wrapper holds
+    references to upstream's components). The patch embedding is a Linear in the wrapper and a
+    Conv3d upstream, with the same key `patch_embedding.weight`.
     """
     wrapper = dit_patch.WanDitTokens(meta_model(config))
     return frozenset(fqn for fqn, _, _ in iter_quant_targets(wrapper, op_types=QUANT_MODULE_TYPES))
 
 
 def load_config(directory: Path) -> dict[str, Any]:
-    """上流の DiT の config（`transformer/` のディレクトリ — 重みは読まない）。"""
+    """Upstream's DiT config (the `transformer/` directory — no weights are read)."""
     from diffusers import WanTransformer3DModel
 
     return dict(WanTransformer3DModel.load_config(directory))
 
 
-#: 重みのアドレスのずれを測る境界（バイト — モジュール doc「f32 の参照と重みのアドレス」）。
+#: The boundary the weight-address offset is measured from (bytes — module doc "The f32 reference
+#: and weight addresses").
 ALIGNMENT_BYTES = 64
 
 
 def upstream_alignment(directory: Path) -> dict[str, int]:
-    """上流の checkpoint を `from_pretrained` で読んだときの、各重みの先頭アドレスの
-    {@link ALIGNMENT_BYTES} 境界からのずれ（キー → バイト）。
+    """The offset of each weight's start address from an {@link ALIGNMENT_BYTES} boundary when the
+    upstream checkpoint is loaded with `from_pretrained` (key → bytes).
 
-    safetensors は先頭 8 バイトの長さ + JSON のヘッダの後ろにデータを置き、mmap の先頭はページ境界
-    なので、ずれは `(8 + ヘッダ長 + data_offsets[0]) mod 64`。読むのはヘッダだけ。
+    safetensors places the data after an 8-byte length + the JSON header, and the start of an mmap
+    is page-aligned, so the offset is `(8 + header length + data_offsets[0]) mod 64`. Only the
+    headers are read.
     """
     files = sorted(directory.glob("*.safetensors"))
     if not files:
-        raise DitReferenceError(f"{directory} に safetensors が無い")
+        raise DitReferenceError(f"no safetensors in {directory}")
     alignment: dict[str, int] = {}
     for file in files:
         with file.open("rb") as stream:
@@ -279,27 +309,28 @@ def upstream_alignment(directory: Path) -> dict[str, int]:
 
 
 def _placed(value: torch.Tensor, offset: int) -> torch.Tensor:
-    """`value` の写しを、先頭アドレスが {@link ALIGNMENT_BYTES} 境界から `offset` バイトずれた番地に
-    置いて返す（連続・同じ形 — 値は変えない）。"""
+    """Returns a copy of `value` placed at an address whose start is `offset` bytes away from an
+    {@link ALIGNMENT_BYTES} boundary (contiguous, same shape — the values do not change)."""
     size = value.element_size()
     if offset % size or not 0 <= offset < ALIGNMENT_BYTES:
-        raise DitReferenceError(f"ずれ {offset} バイトに {value.dtype} を置けない")
+        raise DitReferenceError(f"an offset of {offset} bytes cannot hold {value.dtype}")
     buffer = torch.empty(value.numel() + ALIGNMENT_BYTES // size, dtype=value.dtype)
     shift = ((offset - buffer.data_ptr() % ALIGNMENT_BYTES) % ALIGNMENT_BYTES) // size
     placed = buffer[shift : shift + value.numel()].view(value.shape)
     placed.copy_(value)
     if placed.data_ptr() % ALIGNMENT_BYTES != offset:
-        raise DitReferenceError(f"ずれ {offset} バイトの番地に置けなかった")
+        raise DitReferenceError(f"could not place the tensor at an offset of {offset} bytes")
     return placed
 
 
 # ---------------------------------------------------------------------------
-# 層逐次の forward
+# The layer-by-layer forward
 # ---------------------------------------------------------------------------
 
 
 def meta_model(config: Mapping[str, Any]) -> nn.Module:
-    """config だけから組んだ上流の `WanTransformer3DModel`（重みもバッファも meta・eval）。"""
+    """Upstream `WanTransformer3DModel` built from the config alone (weights and buffers on meta,
+    eval)."""
     from diffusers import WanTransformer3DModel
 
     with torch.device("meta"):
@@ -307,7 +338,8 @@ def meta_model(config: Mapping[str, Any]) -> nn.Module:
 
 
 class _PausableWatch(dit_patch._NarrowFloatWatch):
-    """f64 の経路の監視（`dit_patch` と同じ）に、重みの読み込みの間だけ止める口を足したもの。"""
+    """The watch of the f64 path (the same as in `dit_patch`) plus a way to pause it while weights
+    load."""
 
     def __init__(self, allowed: frozenset[tuple[int, ...]]) -> None:
         super().__init__(allowed)
@@ -334,10 +366,12 @@ class _PausableWatch(dit_patch._NarrowFloatWatch):
 
 
 class _LazyBlocks(nn.Module):
-    """上流の `for block in self.blocks:` が回すたびに、1 ブロックずつ実体化して渡す列。
+    """A sequence that materializes and hands out one block each time upstream's
+    `for block in self.blocks:` iterates.
 
-    子モジュールを登録しない（`parameters()` が meta の雛形を拾わない — 外側の dtype の検査が
-    ブロックの外だけを見る）。実体化は {@link LayerwiseDit} が `opener` で渡す。
+    It registers no submodules (`parameters()` does not pick up the meta templates — the outer
+    dtype check sees only the part outside the blocks). {@link LayerwiseDit} supplies the
+    materialization through `opener`.
     """
 
     def __init__(self, count: int) -> None:
@@ -351,58 +385,67 @@ class _LazyBlocks(nn.Module):
     def __iter__(self) -> Iterator[nn.Module]:
         opener = self.opener
         if opener is None:
-            raise DitReferenceError("層逐次の列が重みの読み口なしで回された")
+            raise DitReferenceError(
+                "the layer-by-layer sequence was iterated with no weight source"
+            )
         for index in range(self.count):
             yield opener(index)
 
 
 @dataclass(frozen=True)
 class DitReference:
-    """層逐次の forward 1 回の結果（出力 `[1,C,F,H,W]` は回した dtype のまま）。"""
+    """The result of one layer-by-layer forward (the output `[1,C,F,H,W]` stays in the dtype it ran
+    in)."""
 
     output: torch.Tensor
-    #: 各ブロックの出力 `[1,S,dim]`（`collect_blocks` のときだけ — 回した dtype のまま）。
+    #: Each block's output `[1,S,dim]` (only with `collect_blocks` — in the dtype it ran in).
     blocks: list[torch.Tensor]
     seconds: float
 
 
-#: {@link LayerwiseDit.run} の `body` の戻り。
+#: The return type of `body` of {@link LayerwiseDit.run}.
 _Result = TypeVar("_Result")
 
 
 @dataclass(frozen=True)
 class _BlockHooks:
-    """層逐次のブロック 1 枚ごとに掛ける口（{@link LayerwiseDit._opener}）。"""
+    """The hooks applied to each layer-by-layer block ({@link LayerwiseDit._opener})."""
 
     sink: list[torch.Tensor] | None
     on_block: Callable[[int, float], None] | None
     on_output: Callable[[int, torch.Tensor], None] | None
     prepare: Callable[[nn.Module], None] | None
-    #: ブロックの forward hook が発火したブロックの添字（発火の順 — {@link watched} の検査用）。
+    #: Indices of the blocks whose forward hook fired (in firing order — for the {@link watched}
+    #: check).
     fired: list[int]
 
     @property
     def watched(self) -> bool:
-        """ブロックの forward hook で発火する口（`sink` / `on_block` / `on_output`）があるか。"""
+        """Whether there is a hook that fires from the blocks' forward hook (`sink` / `on_block` /
+        `on_output`)."""
         return self.sink is not None or self.on_block is not None or self.on_output is not None
 
 
 def _unreached(index: int) -> DitReferenceError:
-    """ブロックの forward を通らない `body` に、forward hook で発火する口を渡した。"""
+    """A hook that fires from the forward hook was given to a `body` that does not go through the
+    blocks' forward."""
     return DitReferenceError(
-        f"ブロック {index} の forward が呼ばれていない — collect_blocks / on_block / on_output は"
-        " ブロックの forward hook で発火する。body がブロックの forward を通らず部品を直に呼ぶ形"
-        "（`dit_patch.WanDitTokensTi2v` の `_ti2v_block`）とは併用しない"
+        f"block {index}'s forward was not called — collect_blocks / on_block / on_output fire"
+        " from the blocks' forward hook. Do not combine them with a body that calls the block's"
+        " components directly without going through its forward (`_ti2v_block` of"
+        " `dit_patch.WanDitTokensTi2v`)"
     )
 
 
 class LayerwiseDit:
-    """上流 `WanTransformer3DModel` を 1 ブロックずつ重みを読んで回す CPU 参照（モジュール doc）。
+    """A CPU reference that runs upstream `WanTransformer3DModel` loading one block's weights at a
+    time (module doc).
 
-    `alignment`（キー → ずれ — {@link upstream_alignment}）を渡すと、f32 の forward は重みを上流の
-    `from_pretrained` と同じずれの番地へ置いてから回す（モジュール doc「f32 の参照と重みの
-    アドレス」）。
-    渡さないと読み口の値をそのまま使う（`ModuleWeights` は上流のモデルの番地そのもの）。
+    Given `alignment` (key → offset — {@link upstream_alignment}), the f32 forward places the
+    weights at the same offsets as upstream's `from_pretrained` before running (module doc "The f32
+    reference and weight addresses").
+    Without it, the source's values are used as they are (`ModuleWeights` is the upstream model's
+    own addresses).
     """
 
     def __init__(
@@ -416,8 +459,9 @@ class LayerwiseDit:
         self.config = template.config
         self._blocks = list(template.blocks)
         template.blocks = _LazyBlocks(len(self._blocks))
-        # RoPE の表は config だけから決まるバッファ — 上流の初期化を CPU で回して作る（MPS の
-        # 無い機で float64 から落とした f32 の表 — `from_pretrained` の `model.rope` と同じ値）。
+        # The RoPE table is a buffer determined by the config alone — built by running upstream's
+        # initialization on CPU (the f32 table dropped from float64 on a machine without MPS — the
+        # same values as `model.rope` of `from_pretrained`).
         template.rope = WanRotaryPosEmbed(
             int(self.config.attention_head_dim),
             tuple(self.config.patch_size),
@@ -429,7 +473,7 @@ class LayerwiseDit:
         stray = [name for name, _ in self._blocks[0].named_buffers()]
         stray += [name for name, _ in template.named_buffers() if not name.startswith("rope.")]
         if stray:
-            raise DitReferenceError(f"重みでないバッファ {stray} がある（層逐次は読まない）")
+            raise DitReferenceError(f"non-weight buffers {stray} exist (not loaded layer by layer)")
 
     @property
     def patch_size(self) -> tuple[int, int, int]:
@@ -442,17 +486,18 @@ class LayerwiseDit:
 
     @property
     def rope(self) -> nn.Module:
-        """上流の RoPE の表（config だけから CPU で組んだバッファ — ホストの表と資産 `rope_base` の
-        出どころ）。"""
+        """Upstream's RoPE table (buffers built on CPU from the config alone — where the host table
+        and the `rope_base` asset come from)."""
         return self._outer.rope
 
     def timesteps_proj(self, timestep: torch.Tensor) -> torch.Tensor:
-        """ホストの時刻の sinusoidal（上流の `condition_embedder.timesteps_proj` — 重みを
-        持たない）。"""
+        """The host's timestep sinusoid (upstream's `condition_embedder.timesteps_proj` — it has no
+        weights)."""
         return dit_patch.dit_timesteps_proj(self._outer, timestep)
 
     def weight_keys(self) -> list[str]:
-        """読む重みのキー全部（上流の state dict の綴り — ブロックの外 + 全ブロック）。"""
+        """Every weight key that is read (upstream's state-dict spelling — outside the blocks + all
+        blocks)."""
         inner = [
             f"blocks.{index}.{name}" for index in range(self.layers) for name in self.block_shapes
         ]
@@ -472,14 +517,17 @@ class LayerwiseDit:
         on_output: Callable[[int, torch.Tensor], None] | None = None,
         blocks: int | None = None,
     ) -> DitReference:
-        """上流の素の forward を `dtype`（f32 / f64）で回す（入力の f32 の値を `dtype` へ広げる）。
+        """Runs upstream's plain forward in `dtype` (f32 / f64) (the f32 input values are widened
+        to `dtype`).
 
-        f32 は `dit_patch.reference_dit`、f64 は `dit_patch.reference_dit_f64` と同じ呼び方
-        （attention は CPU の flash 経路に固定）で、違いは重みを 1 ブロックずつ読むことだけ。
-        `condition` は TI2V のトークンごとの時刻（ADR 0121 決定 4 の参照ラッパ — f32 / f64 とも）。
-        `on_output` はブロックの出力を 1 本ずつ受ける（持ち続けずに比べる・書き出す口 — 実寸の
-        ブロックごとの記録）。`blocks` は先頭の N ブロックだけを回す（層に対する誤差の伸びを測る
-        切り詰め — 出力は N ブロック目の後に head を掛けた値で、参照ではない）。
+        f32 is called the same way as `dit_patch.reference_dit` and f64 as
+        `dit_patch.reference_dit_f64` (attention pinned to the CPU flash path); the only difference
+        is that the weights are loaded one block at a time. `condition` is the per-token timestep
+        of TI2V (the reference wrapper of ADR 0121 decision 4 — both f32 and f64). `on_output`
+        receives the blocks' outputs one at a time (a way to compare or write them without holding
+        them — the per-block record at full size). `blocks` runs only the first N blocks (a
+        truncation for measuring how the error grows with depth — the output is the head applied
+        after block N, not a reference).
         """
         if dtype == torch.float64 and timestep.ndim != 1:
             raise DitReferenceError(
@@ -514,26 +562,29 @@ class LayerwiseDit:
         prepare_block: Callable[[nn.Module], None] | None = None,
         blocks: int | None = None,
     ) -> tuple[_Result, list[torch.Tensor], float]:
-        """ブロックの外を `dtype` で実体化した上流のモデル（`blocks` は層逐次の列）を `body` に
-        渡して回す（戻りは `body` の戻り・集めたブロックの出力・所要の秒）。
+        """Hands `body` the upstream model with the part outside the blocks materialized in
+        `dtype` (`blocks` is the layer-by-layer sequence) and runs it (returns `body`'s return
+        value, the collected block outputs and the elapsed seconds).
 
-        {@link forward} は `body` に上流の素の forward を渡す。パッチ後のグラフの eager は
-        `body` で S 形のラッパを組んで回す（ラッパは `install_processors=False` で組み、
-        `prepare_block` に `dit_patch.install_real_pair_processors` を渡す — 列を回すと重みを
-        読むので、組む時点では回さない）。f64 は `.float()` の素通しと f64 の監視の下で回る。
+        {@link forward} passes upstream's plain forward as `body`. The eager of the patched graph
+        builds the S-shaped wrapper in `body` and runs it (the wrapper is built with
+        `install_processors=False` and `dit_patch.install_real_pair_processors` is passed as
+        `prepare_block` — iterating the sequence loads weights, so it is not iterated while
+        building). f64 runs with `.float()` passing through and under the f64 watch.
 
-        `collect_blocks` はブロックの出力を全部集める（`body` が列を 1 回だけ回すときに限る —
-        本数が回したブロックの数と違えば fail loudly）。`blocks` は列を先頭の N ブロックに切り詰める
-        （{@link forward} の doc）。
+        `collect_blocks` collects every block output (only when `body` iterates the sequence once —
+        fails loudly if the count differs from the number of blocks run). `blocks` truncates the
+        sequence to the first N blocks (the doc of {@link forward}).
 
-        MUST: `collect_blocks` / `on_block` / `on_output` はブロックの **forward hook** で発火する。
-        `body` がブロックの forward を通らず部品を直に呼ぶ形（パッチ後の TI2V のグラフ —
-        `dit_patch.WanDitTokensTi2v` の `_ti2v_block`）では届かないので、渡されたら fail loudly
-        （次のブロックを求められた時点で、前のブロックの forward が呼ばれていなければ止まる・
-        終わりに最後のブロックも見る）。黙って空の記録を返さない。
+        MUST: `collect_blocks` / `on_block` / `on_output` fire from the blocks' **forward hook**.
+        They do not reach a `body` that calls the block's components directly without going through
+        its forward (the patched TI2V graph — `_ti2v_block` of `dit_patch.WanDitTokensTi2v`), so
+        passing them fails loudly (it stops when the next block is requested and the previous
+        block's forward was not called, and checks the last block at the end). It never silently
+        returns an empty record.
         """
         if dtype not in (torch.float32, torch.float64):
-            raise DitReferenceError(f"参照の dtype は f32 / f64 だけ（{dtype}）")
+            raise DitReferenceError(f"the reference dtype must be f32 / f64 (got {dtype})")
         count = self.layers if blocks is None else blocks
         if not 0 < count <= self.layers:
             raise DitReferenceError(f"回すブロックの数 {count} が 1〜{self.layers} の外")
@@ -554,7 +605,7 @@ class LayerwiseDit:
                 - {str(dtype)}
             )
             if narrow:
-                raise DitReferenceError(f"ブロックの外に {narrow} の重み / バッファが残っている")
+                raise DitReferenceError(f"{narrow} weights / buffers remain outside the blocks")
             hooks = _BlockHooks(
                 sink=collected if collect_blocks else None,
                 on_block=on_block,
@@ -579,7 +630,7 @@ class LayerwiseDit:
         if hooks.watched and hooks.fired[-1:] != [count - 1]:
             raise _unreached(count - 1)
         if collect_blocks and len(collected) != count:
-            raise DitReferenceError(f"ブロックの出力を {len(collected)} 本拾った（{count}）")
+            raise DitReferenceError(f"collected {len(collected)} block outputs (expected {count})")
         return result, collected, time.perf_counter() - started
 
     def _opener(
@@ -589,16 +640,18 @@ class LayerwiseDit:
         hooks: _BlockHooks,
         watch: _PausableWatch | None,
     ) -> Callable[[int], nn.Module]:
-        """ブロック `index` を実体化する関数（重みの読み込みは f64 の監視の外）。
+        """A function that materializes block `index` (weight loading is outside the f64 watch).
 
-        ブロックの出力は `hooks.sink` があるときだけ写す（S = 32,760 で 30 本持つと f32 で約
-        6 GB）・`hooks.on_output` へは写さずに渡す。`hooks.on_block` には読み込みを含むブロック
-        1 枚の所要を渡す（進捗の 1 行用）。`hooks.prepare` は実体化したブロックに 1 回掛ける。
+        Block outputs are copied only when `hooks.sink` is set (holding 30 of them at S = 32,760 is
+        about 6 GB in f32), and are passed to `hooks.on_output` without a copy. `hooks.on_block`
+        receives the time of one block including its loading (for a one-line progress report).
+        `hooks.prepare` is applied once to the materialized block.
 
-        MUST: 前のブロックの重みを手放してから次を読む。上流の `for block in self.blocks` の
-        ループ変数は前のブロックを握ったまま次を求めるので、手放さないと 2 ブロックが同時に生きる
-        （5B の f64 で 1.22 → 2.44 GiB）。手放すのは前のブロックの forward が済んだ後（次を
-        求められた時点）なので、値は変わらない。
+        MUST: release the previous block's weights before loading the next. The loop variable of
+        upstream's `for block in self.blocks` keeps the previous block while asking for the next,
+        so without releasing, two blocks are alive at once (1.22 → 2.44 GiB in f64 for 5B). The
+        release happens after the previous block's forward has finished (when the next is
+        requested), so the values do not change.
         """
         opened: list[nn.Module] = []
 
@@ -618,7 +671,7 @@ class LayerwiseDit:
                 del state
             wrong = sorted({str(p.dtype) for p in block.parameters()} - {str(dtype)})
             if wrong:
-                raise DitReferenceError(f"ブロック {index} に {wrong} の重みが残っている")
+                raise DitReferenceError(f"block {index} still has {wrong} weights")
             if hooks.prepare is not None:
                 hooks.prepare(block)
 
@@ -627,7 +680,8 @@ class LayerwiseDit:
                 if hooks.sink is not None:
                     hooks.sink.append(output.detach().clone())
                 if hooks.on_output is not None:
-                    # 受け手の計算（f32 の記録との比較など）は f64 の経路の外 — 監視を止める。
+                    # The receiver's computation (comparison with the f32 record and so on) is
+                    # outside the f64 path — pause the watch.
                     with watch.paused() if watch is not None else nullcontext():
                         hooks.on_output(index, output.detach())
                 if hooks.on_block is not None:
@@ -642,14 +696,17 @@ class LayerwiseDit:
     def _read(
         self, source: WeightSource, key: str, shape: list[int], dtype: torch.dtype
     ) -> torch.Tensor:
-        """読み口の値を上流の形・`dtype` で（読み口は f32 だけを受ける・patch 埋め込みだけは
-        Linear 化の形を戻す）。f32 で `alignment` があれば上流のずれの番地へ置く。"""
+        """The source's value in upstream's shape and `dtype` (sources return f32 only; only the
+        patch embedding gets its Linear form reshaped back). In f32 with `alignment`, it is placed
+        at upstream's offset."""
         value = source.tensor(key)
         if value.dtype != torch.float32:
-            raise DitReferenceError(f"'{key}' が {value.dtype}（読み口は f32 を返す）")
+            raise DitReferenceError(f"'{key}' is {value.dtype} (sources return f32)")
         if list(value.shape) != shape:
             if key != PATCH_EMBEDDING_WEIGHT or value.numel() != math.prod(shape):
-                raise DitReferenceError(f"'{key}': 形 {list(value.shape)} が上流の {shape} と違う")
+                raise DitReferenceError(
+                    f"'{key}': shape {list(value.shape)} differs from upstream's {shape}"
+                )
             value = value.reshape(shape)
         if dtype != torch.float32:
             return value.to(dtype)
@@ -662,22 +719,23 @@ class LayerwiseDit:
 
 
 # ---------------------------------------------------------------------------
-# 1.3B の既存 golden との突き合わせ
+# Comparison with the existing 1.3B goldens
 # ---------------------------------------------------------------------------
 
 
 def _tensor_bits(tensor: torch.Tensor) -> torch.Tensor:
-    """ビット列としての比較用（-0.0 と 0.0・NaN の扱いを数値の等号に任せない）。"""
+    """For comparing as bit strings (-0.0 vs 0.0 and NaN are not left to numeric equality)."""
     return tensor.detach().contiguous().flatten().view(torch.uint8)
 
 
 def compare_tensors(
     actual: Mapping[str, torch.Tensor], expected_path: Path, keys: Sequence[str] | None = None
 ) -> dict[str, Any]:
-    """書いた golden（`actual`）と既存の `reference.<case>` をテンソルごとにビットで比べる。
+    """Compares the written golden (`actual`) with the existing `reference.<case>` bitwise, tensor
+    by tensor.
 
-    `keys` を渡すとそのキーだけを比べる（`--f64-only`）。既存に無い・形 / dtype が違う・ビットが
-    違うキーを名指す。
+    With `keys` only those keys are compared (`--f64-only`). Names the keys that are missing from
+    the existing file, differ in shape / dtype, or differ in bits.
     """
     compared = sorted(actual) if keys is None else sorted(keys)
     mismatched: dict[str, str] = {}
@@ -694,7 +752,8 @@ def compare_tensors(
             mine, theirs = actual[key], handle.get_tensor(key)
             if mine.dtype != theirs.dtype or list(mine.shape) != list(theirs.shape):
                 mismatched[key] = (
-                    f"{mine.dtype} {list(mine.shape)} / 既存 {theirs.dtype} {list(theirs.shape)}"
+                    f"{mine.dtype} {list(mine.shape)} / existing {theirs.dtype}"
+                    f" {list(theirs.shape)}"
                 )
             elif not torch.equal(_tensor_bits(mine), _tensor_bits(theirs)):
                 difference = (mine.double() - theirs.double()).abs().max()
@@ -708,8 +767,9 @@ def file_sha256(path: Path) -> str:
 
 
 def numeric_environment() -> dict[str, Any]:
-    """f32 のビット一致が依る実行環境（モジュール doc「f32 の参照と重みのアドレス」— 仕様の保証で
-    なく MKL の振る舞いなので、結果の行に残して後から読めるようにする）。"""
+    """The execution environment the f32 bit-exactness depends on (module doc "The f32 reference
+    and weight addresses" — MKL behavior rather than a spec guarantee, so it is kept in the result
+    rows for later reading)."""
     return {
         "torch": torch.__version__,
         "threads": torch.get_num_threads(),
@@ -723,12 +783,13 @@ def numeric_environment() -> dict[str, Any]:
 
 
 def _done(results: Path, mode: CompareMode) -> dict[str, dict[str, Any]]:
-    """結果の行（再開の目印）— この実行で「済み」に数えるケース名 → 行。
+    """The result rows (resume markers) — case name → row for the cases this run counts as "done".
 
-    数えるのは版が {@link COMPARE_VERSION} と同じで、形がこの実行を覆う行（{@link _COVERING_MODES}）
-    だけ。書きかけで落ちた末尾の行（改行で終わらない — 行は 1 回の write で改行まで書く）は捨てて
-    ファイルからも切り落とし、そのケースは回し直す。末尾でない行が読めないのは書きかけではないので
-    fail loudly。
+    Only rows whose version equals {@link COMPARE_VERSION} and whose mode covers this run
+    ({@link _COVERING_MODES}) are counted. A half-written last row from a crash (no trailing line
+    break — a row is written up to its line break in one write) is dropped and also cut from the
+    file, and that case is run again. A row that is not the last one and cannot be read is not a
+    half-written row, so it fails loudly.
     """
     if not results.is_file():
         return {}
@@ -736,8 +797,8 @@ def _done(results: Path, mode: CompareMode) -> dict[str, dict[str, Any]]:
     partial = lines.pop()
     if partial:
         print(
-            f"[compare] {results}: 末尾の書きかけの行（{len(partial)} 文字）を捨てる"
-            " — そのケースは回し直す",
+            f"[compare] {results}: dropping the half-written last row ({len(partial)} characters)"
+            " — that case runs again",
             flush=True,
         )
         results.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
@@ -757,15 +818,16 @@ def _done(results: Path, mode: CompareMode) -> dict[str, dict[str, Any]]:
             stale += 1
     if stale:
         print(
-            f"[compare] {results}: 比較の版（{COMPARE_VERSION}）か実行の形（{mode}）が合わない行"
-            f" {stale} 本は済みに数えない",
+            f"[compare] {results}: rows whose comparison version ({COMPARE_VERSION}) or run mode"
+            f" ({mode}) does not match are not counted as done ({stale} rows)",
             flush=True,
         )
     return done
 
 
 def _append_row(results: Path, row: Mapping[str, Any]) -> None:
-    """結果の行を 1 回の write で改行まで書いて、ディスクへ落とす（落ちても半端な行は末尾だけ）。"""
+    """Writes a result row up to its line break in one write and flushes it to disk (after a crash
+    only the last row can be partial)."""
     with results.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
         stream.flush()
@@ -781,10 +843,12 @@ def compare_series(
     f64_only: bool = False,
     out: Path = DEFAULT_OUT,
 ) -> dict[str, Any]:
-    """1.3B の系列（`dtype` = f16 / i8）の既存 golden を層逐次で採り直してビットで比べる。
+    """Re-takes the existing goldens of a 1.3B series (`dtype` = f16 / i8) layer by layer and
+    compares them bitwise.
 
-    書くのは `out/<系列名>-<source_kind>/` の下だけ（既存の系列は読むだけ）。ケースは
-    `wan.export_dit.series_cases(dtype)` の順で、`names` / `max_tokens` で絞れる。
+    It writes only under `out/<series name>-<source_kind>/` (the existing series is only read).
+    Cases come in the order of `wan.export_dit.series_cases(dtype)` and can be narrowed with
+    `names` / `max_tokens`.
     """
     from wan import export_dit
     from wan.sources import DEFAULT_MODEL, local_snapshot
@@ -797,32 +861,34 @@ def compare_series(
     done = _done(results, mode)
     environment = numeric_environment()
     upstream = local_snapshot(DEFAULT_MODEL) / TRANSFORMER_SUBFOLDER
-    # 容器の重みは上流の mmap の番地に無い — f32 の参照を上流の eager と同じずれで回す（モジュール
-    # doc）。module の読み口は上流のモデルの番地そのものなので置き直さない。
+    # The container's weights are not at upstream's mmap addresses — run the f32 reference with the
+    # same offsets as upstream's eager (module doc). The module source is the upstream model's own
+    # addresses, so it is not re-placed.
     alignment = upstream_alignment(upstream) if source_kind == "container" else None
     writer = LayerwiseDit(load_config(upstream), alignment=alignment)
     known = {spec.name(writer.patch_size) for spec in export_dit.series_cases(dtype)}
     if set(names) - known:
-        raise DitReferenceError(f"知らないケース名がある: {sorted(set(names) - known)}")
+        raise DitReferenceError(f"unknown case names: {sorted(set(names) - known)}")
     specs = [
         spec
         for spec in export_dit.series_cases(dtype)
         if (not names or spec.name(writer.patch_size) in names)
         and (max_tokens is None or _tokens(spec, writer.patch_size) <= max_tokens)
-        # `--f64-only` は f64 の参照を持つケースだけ（f16 系列の小さい S は f32 の参照だけ）。
+        # `--f64-only` covers only cases with an f64 reference (the small-S cases of the f16
+        # series have only the f32 reference).
         and (not f64_only or export_dit.wants_float64(dtype, spec))
     ]
     source = _source(source_kind, dtype, existing)
     finished = sum(spec.name(writer.patch_size) in done for spec in specs)
     print(
-        f"[compare] {existing} の {len(specs)} ケース（済み {finished}）"
-        f" → {target}（読み口 {source_kind}・形 {mode}・環境 {json.dumps(environment)}）",
+        f"[compare] {existing}: {len(specs)} cases ({finished} done)"
+        f" → {target} (source {source_kind}, mode {mode}, environment {json.dumps(environment)})",
         flush=True,
     )
     for position, spec in enumerate(specs, start=1):
         name = spec.name(writer.patch_size)
         if name in done:
-            print(f"[{position}/{len(specs)}] {name}: 済み（{done[name]['status']}）", flush=True)
+            print(f"[{position}/{len(specs)}] {name}: done ({done[name]['status']})", flush=True)
             continue
         row = {
             **_compare_case(writer, source, dtype, spec, existing, target, f64_only=f64_only),
@@ -846,7 +912,8 @@ def compare_series(
         "cases": len(chosen),
         "equal": sum(row["status"] == "equal" for row in chosen),
         "differ": [row["case"] for row in chosen if row["status"] != "equal"],
-        # 行を採った環境（再開をまたぐと複数になりうる — f32 のビットは環境に依る）。
+        # The environments the rows were taken in (more than one across resumes — f32 bits depend
+        # on the environment).
         "environments": environments,
     }
     (target / SUMMARY_FILE).write_text(
@@ -855,7 +922,7 @@ def compare_series(
     return summary
 
 
-#: ブロックごとの進捗の行を出す S の下限（実寸のケース — 1 forward が分単位）。
+#: The minimum S that prints per-block progress rows (full-size cases — one forward takes minutes).
 PROGRESS_TOKENS = 4096
 
 
@@ -872,7 +939,8 @@ def _tokens(spec: Any, patch_size: tuple[int, int, int]) -> int:
 
 
 def _source(kind: str, dtype: str, existing: Path) -> WeightSource:
-    """突き合わせの読み口（容器 = 5B と同じ経路・module = `export_dit` の 1.3B の経路）。"""
+    """The comparison's weight source (container = the same path as 5B, module = the 1.3B path of
+    `export_dit`)."""
     from wan import export_dit
 
     if kind == "container":
@@ -892,7 +960,8 @@ def _compare_case(
     *,
     f64_only: bool,
 ) -> dict[str, Any]:
-    """1 ケースを採り直して書き、既存の golden と比べた結果の行。"""
+    """Re-takes and writes one case, and returns the result row of the comparison with the
+    existing golden."""
     from wan import export_dit
 
     name = spec.name(writer.patch_size)
@@ -923,7 +992,7 @@ def _compare_case(
         )
         seconds["f64"] = round(reference64.seconds, 1)
     if reference32 is None and reference64 is None:
-        raise DitReferenceError(f"{name}: --f64-only なのに f64 の参照を持たないケース")
+        raise DitReferenceError(f"{name}: --f64-only on a case without an f64 reference")
     tensors = export_dit.reference_tensors(
         name,
         latents=latents,
@@ -949,17 +1018,22 @@ def _compare_case(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("command", choices=("compare",))
-    parser.add_argument("--dtype", required=True, choices=("f16", "i8"), help="1.3B の系列")
+    parser.add_argument("--dtype", required=True, choices=("f16", "i8"), help="the 1.3B series")
     parser.add_argument(
         "--source",
         default="container",
         choices=("container", "module"),
-        help="重みの読み口（container = 系列の容器・module = f32 のモデル + fake-quant）",
+        help="the weight source (container = the series container, module = the f32 model +"
+        " fake-quant)",
     )
-    parser.add_argument("--case", action="append", default=[], help="ケース名で絞る（複数可）")
-    parser.add_argument("--max-tokens", type=int, help="S がこれ以下のケースだけ")
     parser.add_argument(
-        "--f64-only", action="store_true", help="f64 の参照（output.f64）だけを採って比べる"
+        "--case", action="append", default=[], help="narrow by case name (repeatable)"
+    )
+    parser.add_argument("--max-tokens", type=int, help="only cases with S up to this")
+    parser.add_argument(
+        "--f64-only",
+        action="store_true",
+        help="take and compare only the f64 reference (output.f64)",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)

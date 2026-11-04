@@ -1,18 +1,20 @@
-"""BiRefNet 系配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""Model card (`README.md`) of the BiRefNet family distributions — a pure function derived
+mechanically from the manifest.
 
-汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は
-`karume.modelcard` が持つ。ここが持つのは **BiRefNet 系固有の事実**だけ: 帰属（出所・
-ライセンス・引用・学習データ）と、この pipeline のカードに何を書くか。
+The general-purpose rendering parts (frontmatter, model list, quant table, section assembly) live in
+`karume.modelcard`. What lives here is **only the facts specific to the BiRefNet family**: the
+attribution (origin, license, citation, training data) and what this pipeline's card says.
 
-帰属は**checkpoint から一意に決まる**（{@link BIREFNET_CHECKPOINTS}）ので、プロファイルの軸
-には割らない — 分けると「Lucida を BiRefNet_HR の帰属で配る」取り違えを操作者が起こせるように
-なる。checkpoint は配布リポの軸そのもの（1 リポ = 1 checkpoint）なので、manifest からは読まず
-**呼び出し側の pipeline 席が束ねて渡す**（`birefnet.distribution._birefnet_pipeline`）。
-manifest に並ぶモデル名は**解像度**（`"1024"` / `"2048"`）で、帰属の軸ではない。
+The attribution is **determined uniquely by the checkpoint** ({@link BIREFNET_CHECKPOINTS}), so it
+is not split into a profile axis — splitting it would let an operator make the mix-up "ship Lucida
+with BiRefNet_HR's attribution". The checkpoint is the very axis of the distribution repository
+(1 repository = 1 checkpoint), so it is not read from the manifest: **the caller's pipeline entry
+binds it and passes it in** (`birefnet.distribution._birefnet_pipeline`). The model names listed in
+the manifest are **resolutions** (`"1024"` / `"2048"`), not the attribution axis.
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
-**存在しない事実**だけ。
+MUST: **every number, download size, quant table and dtype label is derived from the manifest**
+(the same MUST of `karume.modelcard` applies as is). The only constants allowed here are facts that
+**do not exist in the manifest**.
 """
 
 from __future__ import annotations
@@ -38,63 +40,77 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-#: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
+#: The pipeline contract this template can describe (ADR 0041 §2 — per model).
 BIREFNET_SUPPORTED_PIPELINE = "birefnet/2"
 
-#: HF の pipeline tag（上流 2 リポとも同じ）。出すのは α マット 1 枚で、クラス分類も
-#: インスタンス分割も持たない。
+#: HF pipeline tag (the same for both upstream repositories). The output is a single alpha matte,
+#: with neither class labels nor instance segmentation.
 BIREFNET_PIPELINE_TAG = "image-segmentation"
 
 
 @dataclass(frozen=True)
 class BirefnetResources:
-    """1 モデル（= 1 解像度）ぶんの実行資源の実測。
+    """Measured execution resources of one model (= one resolution).
 
-    冒頭の MUST の例外ではない: `requiredLimits` は常駐分（重み・state）しか数えないので、
-    中間テンソルが要求する binding の大きさも総確保も **manifest に存在しない事実**にあたる
-    （ADR 0089 決定 3 の意味論）。読み手が最初に確かめたい制約なので、カードが持つ。
+    Not an exception to the MUST at the top: `requiredLimits` counts only the resident part
+    (weights, state), so the binding size the intermediate tensors need and the total allocation
+    are **facts that do not exist in the manifest** (the semantics of ADR 0089 decision 3). They are
+    the constraint a reader wants to check first, so the card carries them.
     """
 
-    #: GPU 総確保 = runtime の見積り（`PreparedModel.estimate` の `peakAccountedBytes`）: 常駐の
-    #: 重み + 中間の領域 + 入力 + 出力の readback。
+    #: Total GPU allocation = the runtime's estimate (`peakAccountedBytes` of
+    #: `PreparedModel.estimate`): resident weights + intermediate region + input + output readback.
     total: str
-    #: 中間テンソルに要る領域。**常駐の重みは持たない** — その数は manifest の container
-    #: （part 列）側にあり（quant 表が導出する）、ここに写すと同じ量の正本が 2 つになる。
+    #: The region the intermediate tensors need. **It does not include the resident weights** — that
+    #: number lives on the manifest's container side (the part list; the quant table derives it),
+    #: and
+    #: copying it here would give the same quantity two sources of truth.
     intermediates: str
-    #: WebGPU 既定の `maxStorageBufferBindingSize`（128MiB）を超える binding を 1 本、
-    #: **実測されたその正体ごと**名乗る句（読み手が「既定スペックでは走らない」と読める形）。
+    #: The phrase that names one binding above WebGPU's default `maxStorageBufferBindingSize`
+    #: (128MiB), **together with what it was measured to be** (in a form the reader can read as
+    #: "does
+    #: not run on default limits").
     binding: str
-    #: 画像 1 枚あたりの実行時間。
+    #: Run time per image.
     run: str
 
 
 @dataclass(frozen=True)
 class BirefnetResourceMeasurement:
-    """1 checkpoint ぶんの実行資源の実測 — 測った quant 席・条件・解像度ごとの数。
+    """Measured execution resources of one checkpoint — the measured quant preset, the conditions
+    and the numbers per resolution.
 
-    checkpoint ごとに持つのは、測った席と条件が checkpoint ごとに違うから（HR は f16 席・Lucida は
-    f32 席 — 1 つの表を両方のカードへ写すと、片方が測っていない席の数を名乗る）。
-    値は ADR 0093 の静的 liveness パッキングと recipe のパッチ ⑨（decoder 末尾の 1×1 conv と
-    bilinear upsample の順序交換）の後の実測で、正本は docs/limitations.md の BiRefNet 節。
+    It is kept per checkpoint because the measured preset and conditions differ per checkpoint (HR
+    on the f16 preset, Lucida on the f32 preset — copying one table into both cards would make one
+    of them claim numbers for a preset it did not measure). The values are measured after ADR 0093's
+    static liveness packing and the recipe's patch ⑨ (swapping the order of the decoder tail's 1×1
+    conv and the bilinear upsample); the source of truth is the BiRefNet section of
+    docs/limitations.md.
     """
 
-    #: 実測した quant 席。MUST: カードは総確保を**この席の数として**名乗る — 他の席の総確保は
-    #: 推し量らない（冒頭の MUST）。この席が manifest に無いモデルのカードは描かない。
+    #: The quant preset that was measured. MUST: the card states the total allocation **as this
+    #: preset's number** — it does not extrapolate the total of other presets (the MUST at the top).
+    #: The card of a model whose manifest lacks this preset is not rendered.
     quant: str
-    #: 実測の条件（日付・機 — 実測の性格そのものなので、`pipelineConfig` からは導出しない）。
+    #: Measurement conditions (date, machine — this is the nature of the measurement itself, so it
+    #: is
+    #: not derived from `pipelineConfig`).
     conditions: str
-    #: モデル名（= 解像度）→ 数。MUST: 実測していない解像度の席は置かない — カードが名乗る数は
-    #: 1 つ残らず実測に紐づく。引くのは manifest の `imageWidth` なので
-    #: （{@link _birefnet_resources}）、実測していない解像度で描こうとすると落ちる。
+    #: Model name (= resolution) → numbers. MUST: no entry for an unmeasured resolution — every
+    #: number
+    #: the card states is tied to a measurement. The lookup uses the manifest's `imageWidth`
+    #: ({@link _birefnet_resources}), so rendering at an unmeasured resolution fails.
     by_resolution: Mapping[str, BirefnetResources]
 
 
-#: 後処理の手順（manifest の `pipelineConfig.postprocess` — TS 側 `MATTE_PROCEDURES` の綴り）→
-#: カードの説明（補間・段の順序・量子化）。手順の名前は manifest にあるが、その中身の説明は
-#: manifest に**存在しない事実**なので、ここが持つ（冒頭の MUST の例外ではない）。
+#: Post-processing procedure (the manifest's `pipelineConfig.postprocess` — spelled as the TS side's
+#: `MATTE_PROCEDURES`) → the card's description (interpolation, order of the steps, quantization).
+#: The procedure's name is in the manifest, but the description of what it does is a fact that
+#: **does not exist in the manifest**, so it lives here (not an exception to the MUST at the top).
 #:
-#: MUST: 知らない手順は描かない — 推し量った説明を載せると、配布形の実際の後処理とカードが
-#: 食い違ったまま公開される。手順の正本は ADR 0125 と `packages/models/src/birefnet/matte.ts`。
+#: MUST: do not describe an unknown procedure — publishing an extrapolated description would ship a
+#: card that disagrees with the distribution's actual post-processing. The procedures' source of
+#: truth is ADR 0125 and `packages/models/src/birefnet/matte.ts`.
 BIREFNET_POSTPROCESS_DESCRIPTIONS: Mapping[str, tuple[str, ...]] = {
     "u8-pil-bicubic": (
         "- **post-processing** (`u8-pil-bicubic`, the order upstream uses for this checkpoint):",
@@ -110,47 +126,53 @@ BIREFNET_POSTPROCESS_DESCRIPTIONS: Mapping[str, tuple[str, ...]] = {
     ),
 }
 
-#: 上流の論文（BiRefNet — 系列の共通の出典）。
+#: The upstream paper (BiRefNet — the reference shared by the whole family).
 BIREFNET_PAPER = "arxiv.org/abs/2401.03407"
 
 
 @dataclass(frozen=True)
 class BirefnetCheckpoint:
-    """1 checkpoint ぶんの**manifest に無い事実**（出所・呼び名・帰属の追加行）。
+    """The **facts not in the manifest** for one checkpoint (origin, display name, extra
+    attribution lines).
 
-    **この 1 表が「どのリポが何の重みか」の唯一の事実**で、`birefnet.distribution` は系列名（=
-    上流リポ名から導く綴り — `birefnet/export.py` の流儀）と帰属をここから引く。載っていない
-    checkpoint は出所を名乗れないので、カードは描かずに落ちる。
+    **This one table is the only fact about "which repository holds which weights"**:
+    `birefnet.distribution` takes the series name (= the spelling derived from the upstream
+    repository name — the convention of `birefnet/export.py`) and the attribution from here. A
+    checkpoint that is not listed cannot state its origin, so the card fails instead of rendering.
     """
 
-    #: 上流チェックポイントの HF リポ ID。
+    #: HF repository ID of the upstream checkpoint.
     repo: str
-    #: 配る重みの上流 revision（HF の commit SHA）。系列の容器が名乗る出所
-    #: （`provenance.upstreamRevision` — 台本が `--model-dir` の取得記録から焼く）を組み立てが
-    #: これと突き合わせる（`birefnet.distribution`）。固定値で見るので、別の checkpoint・別の
-    #: revision から焼いた系列は名前が合っていても組めない。値は `inputs/birefnet/<名前>` の
-    #: `hf download` の記録（`_shared.upstream.snapshot_revision`）で確かめた（突合は
-    #: `birefnet/tests/test_export.py` が取得記録のある機で持つ）。
+    #: Upstream revision of the shipped weights (the HF commit SHA). The assembly
+    #: (`birefnet.distribution`) checks the origin the series' container states
+    #: (`provenance.upstreamRevision` — the script bakes it from the download record of
+    #: `--model-dir`) against this value. It is compared with a fixed value, so a series baked from
+    #: another checkpoint or another revision cannot be assembled even if its name matches. The
+    #: value was confirmed from the `hf download` record of `inputs/birefnet/<name>`
+    #: (`_shared.upstream.snapshot_revision`) (the cross-check lives in
+    #: `birefnet/tests/test_export.py`, on machines that have the download record).
     revision: str
-    #: カードの見出し（上流が名前で売っているモデルは、その名前で呼ぶ）。
+    #: The card's heading (a model upstream markets under a name is called by that name).
     title: str
-    #: 概要の 1 行目（何ができる重みか）。
+    #: First line of the overview (what the weights can do).
     tagline: str
-    #: 帰属節の追加行（学習データのライセンス等 — 上流ごとに違う事実）。
+    #: Extra lines of the attribution section (training-data licenses and the like — facts that
+    #: differ per upstream).
     attribution: tuple[str, ...]
-    #: 上流 checkpoint の浮動小数の格納 dtype（safetensors ヘッダの実測 2026-09-25 —
-    #: HR は F16 687 本・Lucida は F32 687 本）。配る quant 席（この格納より広い席は出さない・
-    #: 既定は同じ型の席 — `birefnet.distribution.birefnet_seat_dtypes`）、どの席が値を変えずに
-    #: 持てるか（{@link birefnet_storage_lines}）と `base_model_relation`
-    #: （{@link _birefnet_relation}）がここから決まる。export 時の品質の門は
-    #: 同じ事実をヘッダから直接読む（`birefnet.export.checkpoint_dtypes`）ので、2 つの突合は
-    #: `birefnet/tests/test_export.py` が実重みのある機で持つ。
+    #: Floating-point storage dtype of the upstream checkpoint (measured from the safetensors header
+    #: 2026-09-25 — HR has 687 F16 tensors, Lucida 687 F32). It determines the quant presets that
+    #: are shipped (no preset wider than this storage; the default is the preset of the same type —
+    #: `birefnet.distribution.birefnet_seat_dtypes`), which presets hold the values unchanged
+    #: ({@link birefnet_storage_lines}), and `base_model_relation` ({@link _birefnet_relation}). The
+    #: quality check at export time reads the same fact directly from the header
+    #: (`birefnet.export.checkpoint_dtypes`), so the cross-check of the two lives in
+    #: `birefnet/tests/test_export.py`, on machines that have the real weights.
     stored_dtype: str
-    #: カードが名乗る実行資源の実測（{@link BirefnetResourceMeasurement}）。
+    #: The measured execution resources the card states ({@link BirefnetResourceMeasurement}).
     resources: BirefnetResourceMeasurement
 
 
-#: 実地確認（2026-08-13 — HF の model API）: どちらも `license: mit`。
+#: Checked against the source (2026-08-13 — HF model API): both are `license: mit`.
 BIREFNET_LICENSE = "mit"
 
 BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
@@ -174,10 +196,12 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         # 750.7 / 2,948.0 MiB under first-fit); the run times are the 2026-10-16 measurement.
         # `run` is the range of the 5 runs after the warm-up run (the one that misses the plan); the
         # first of the 5 includes allocating the intermediate region.
-        # 中間の領域と最大の binding は f32 席と同じ（活性値は f16 席でも f32）。Swin の
-        # shifted-window attention のマスクは常駐の重みではなく実行時の中間（窓 4 種の表と窓ごとの
-        # 添字から graph の中で組む — `birefnet.patch`）なので、重みは解像度に依らずほぼ同じで、
-        # 1024² の中間の領域はその分 1.5 MiB 増えた（2048² は生存ピークの内側に収まり変わらない）。
+        # The intermediate region and the largest binding are the same as for the f32 preset
+        # (activations are f32 on the f16 preset too). The mask of Swin's shifted-window attention
+        # is a run-time intermediate, not a resident weight (built inside the graph from a table of
+        # the 4 window kinds and per-window indices — `birefnet.patch`), so the weights are almost
+        # the same at every resolution, and the 1024² intermediate region grew by 1.5 MiB for it
+        # (at 2048² it fits inside the liveness peak and does not change).
         resources=BirefnetResourceMeasurement(
             quant="f16",
             conditions=(
@@ -230,9 +254,10 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         # 750.7 / 2,948.0 MiB under first-fit); the run times are the 2026-10-16 measurement.
         # `run` is the range of the 5 runs after the warm-up run (the one that misses the plan); the
         # first of the 5 includes allocating the intermediate region.
-        # マスクが実行時の中間になったことの効きは HR と同じ。run は GPU を冷ましてから Lucida の
-        # 2 系列だけを続けて測った値（HR の 2 系列の直後に続けて測ると 1024² が 1.69〜2.01 s と
-        # 回ごとに遅れた — 生データは outputs/misc/birefnet-resources-2026-10-16/lucida-rerun/）。
+        # The effect of the mask becoming a run-time intermediate is the same as for HR. `run` was
+        # measured with only Lucida's 2 series run back to back after letting the GPU cool down
+        # (measured straight after HR's 2 series, 1024² slowed down run by run to 1.69–2.01 s —
+        # raw data in outputs/misc/birefnet-resources-2026-10-16/lucida-rerun/).
         resources=BirefnetResourceMeasurement(
             quant="f32",
             conditions=(
@@ -257,42 +282,44 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
     ),
 }
 
-#: checkpoint → 上流リポ ID。**{@link BIREFNET_CHECKPOINTS} からの導出**で、2 表にしない
-#: （片方だけ動いたときに「別のリポの重みを別の上流として帰属する」形が黙って作れる）。
+#: checkpoint → upstream repository ID. **Derived from {@link BIREFNET_CHECKPOINTS}**, not a second
+#: table (if only one of two tables moved, "attribute one repository's weights to another upstream"
+#: could be built silently).
 BIREFNET_UPSTREAM: Mapping[str, str] = {
     name: entry.repo for name, entry in BIREFNET_CHECKPOINTS.items()
 }
 
-#: manifest の weights キー（= `birefnet.distribution.BIREFNET_ROLE`）。distribution がこの
-#: モジュールを import するので、循環を避けてここでも綴る — 一致は
-#: `birefnet/tests/test_card.py` が見る。
+#: The manifest's weights key (= `birefnet.distribution.BIREFNET_ROLE`). distribution imports this
+#: module, so it is spelled here as well to avoid a cycle — `birefnet/tests/test_card.py` checks
+#: that the two agree.
 BIREFNET_MATTE_WEIGHTS = "matte"
 
-#: 格納 dtype → ビット幅。配る席の規則（checkpoint の格納より広い席は出さない —
-#: `birefnet.distribution.birefnet_seat_dtypes`）と、席が checkpoint の値を変えずに持てるかの
-#: 判定（狭い席は丸める）がここから決まる。
-#: MUST: 知らない dtype は描かない（段 2 の i8 は席と一緒にここへ足す — 推し量った文面を
-#: 法的テキストへ載せない）。
+#: Storage dtype → bit width. It determines the rule for the shipped presets (no preset wider than
+#: the checkpoint's storage — `birefnet.distribution.birefnet_seat_dtypes`) and whether a preset
+#: holds the checkpoint's values unchanged (a narrower preset rounds).
+#: MUST: do not describe an unknown dtype (phase 2's i8 is added here together with its preset —
+#: no extrapolated wording goes into legal text).
 _STORAGE_BITS: Mapping[str, int] = {"f32": 32, "f16": 16}
 
 
 def birefnet_storage_bits(dtype: str) -> int:
-    """格納 dtype のビット幅（{@link _STORAGE_BITS} — 知らない dtype は落とす）。"""
+    """Bit width of a storage dtype ({@link _STORAGE_BITS} — an unknown dtype fails)."""
     bits = _STORAGE_BITS.get(dtype)
     if bits is None:
         raise ValueError(
-            f"格納 dtype '{dtype}' の文面を持たない（既知: {' / '.join(_STORAGE_BITS)}）"
-            " — 推し量った文面を NOTICE / カードへ載せない"
+            f"no wording for storage dtype '{dtype}' (known: {' / '.join(_STORAGE_BITS)})"
+            " — extrapolated wording is not put into NOTICE / the card"
         )
     return bits
 
 
-#: 格納の説明を折り返す幅（NOTICE / カードのテンプレートの他の行と同じ約 100 字）。
+#: Width the storage description wraps at (about 100 characters, like the other lines of the NOTICE
+#: / card templates).
 _STORAGE_LINE_WIDTH = 100
 
 
 def _wrapped(text: str, indent: str) -> str:
-    """Markdown の箇条 1 つを折り返す（続きの行は箇条の本文の位置へ字下げする）。"""
+    """Wrap one Markdown list item (continuation lines are indented to the item's text)."""
     return textwrap.fill(
         text,
         width=_STORAGE_LINE_WIDTH,
@@ -303,13 +330,15 @@ def _wrapped(text: str, indent: str) -> str:
     )
 
 
-#: f16 格納になる重み（emit の適格判定が重みスロットとして圧縮する側 — 相対位置表は embedding の
-#: 重みスロット・deform の offset / modulator conv も通常の conv）。
+#: The weights stored as f16 (the side emit's eligibility check compresses as weight slots — the
+#: relative-position table is an embedding weight slot, and deform's offset / modulator convs are
+#: ordinary convs too).
 _F16_STORED = "the linear, convolution and embedding (relative-position) weights"
 
-#: f32 格納に残るもの。deform の sampling weights（`regular_conv` — `deform_conv2d` に渡る重みで、
-#: 重みスロットを持たない）と bias / norm。⑦ の BatchNorm は α / β を統計から f32 で導く派生定数
-#: なので、「広げた値」ではなく「導いた値」と書き分ける（2026-09-26 レビュー A-3 / F4）。
+#: What stays in f32 storage: deform's sampling weights (`regular_conv` — weights passed to
+#: `deform_conv2d`, with no weight slot) and the biases / norms. ⑦'s BatchNorm is a derived constant
+#: whose α / β are computed in f32 from the statistics, so it is described as "derived values", not
+#: "widened values" (2026-09-26 review A-3 / F4).
 _F32_KEPT = (
     "the deformable convolutions' sampling weights (`regular_conv`), the biases and the"
     " remaining normalization parameters"
@@ -318,11 +347,13 @@ _BATCHNORM_AFFINE = "inference-time BatchNorm is a derived per-channel affine in
 
 
 def _seat_storage_line(dtype: str, stored: str) -> str:
-    """quant 席 1 つぶんの格納の説明（checkpoint の格納 `stored` との関係で文面が決まる）。
+    """Storage description of one quant preset (the wording depends on its relation to the
+    checkpoint's storage `stored`).
 
-    checkpoint の格納より広い席（f16 の checkpoint の f32 席）の文面は持たない — 値を正確に
-    広げるだけの席は配らない（`birefnet.distribution.birefnet_seat_dtypes` の規則）ので、
-    そういう席を持つ manifest は描かずに落とす。
+    There is no wording for a preset wider than the checkpoint's storage (an f32 preset of an f16
+    checkpoint) — a preset that only widens the values exactly is not shipped (the rule of
+    `birefnet.distribution.birefnet_seat_dtypes`), so a manifest with such a preset fails instead of
+    rendering.
     """
     if dtype == "f32" and stored == "f32":
         return _wrapped("`f32`: the checkpoint's own f32 values, unchanged.", "  - ")
@@ -339,27 +370,30 @@ def _seat_storage_line(dtype: str, stored: str) -> str:
             f" {_BATCHNORM_AFFINE}, and all computation stays in f32.",
             "  - ",
         )
-    raise ValueError(f"格納 {dtype} の席を {stored} の checkpoint について描く文面を持たない")
+    raise ValueError(f"no wording for an {dtype} storage preset of an {stored} checkpoint")
 
 
 def birefnet_storage_lines(checkpoint: str, dtypes: Sequence[str]) -> list[str]:
-    """quant 席ごとの格納の説明（NOTICE とカードの帰属節が**同じ 1 か所**から引く）。
+    """Storage description per quant preset (NOTICE and the card's attribution section take it from
+    **the same single place**).
 
-    `dtypes` は配布形が持つ席の格納 dtype（カードは manifest から・NOTICE は配布 recipe の表から
-    渡す）。見出しは「全ての席が checkpoint の値を変えずに持つか」で決まる — HR は checkpoint
-    自身が f16 なので f16 席も無損失で **No quantization** のまま、Lucida は f32 なので f16 席が
-    量子化になる（{@link BirefnetCheckpoint.stored_dtype}）。
+    `dtypes` are the storage dtypes of the distribution's presets (the card passes them from the
+    manifest, NOTICE from the distribution recipe's table). The heading depends on "do all presets
+    hold the checkpoint's values unchanged" — HR's checkpoint is itself f16, so its f16 preset is
+    lossless and stays **No quantization**; Lucida's is f32, so its f16 preset is a quantization
+    ({@link BirefnetCheckpoint.stored_dtype}).
 
-    MUST: 文面は配布形の中身と対応していること（NOTICE の MUST — 散文としては妥当なまま
-    `verify_dist` も manifest 検査も素通りするので、事実から組む）。
+    MUST: the wording matches the distribution's contents (the MUST of NOTICE — it stays plausible
+    prose and passes both `verify_dist` and the manifest checks, so it is built from the facts).
     """
     stored = _birefnet_entry(checkpoint).stored_dtype
     if not dtypes:
-        raise ValueError("quant 席が 1 つも無い — 格納の説明を組めない")
+        raise ValueError("no quant presets at all — cannot build the storage description")
     lossless = all(
         birefnet_storage_bits(dtype) >= birefnet_storage_bits(stored) for dtype in dtypes
     )
-    # 席が 1 つ（HR）なら単数で書く — 「every quant seat」は比べる席が無いリポで読み手を迷わせる。
+    # With one preset (HR), write it in the singular — "every quant seat" confuses the reader in a
+    # repository with no preset to compare against.
     seats = "every quant seat stores" if len(dtypes) > 1 else "the quant seat stores"
     heading = (
         f"**No quantization**: {seats} the source checkpoint's own values"
@@ -371,16 +405,17 @@ def birefnet_storage_lines(checkpoint: str, dtypes: Sequence[str]) -> list[str]:
 
 
 def _birefnet_entry(checkpoint: str) -> BirefnetCheckpoint:
-    """このリポが配る checkpoint の帰属を引く（1 リポ 1 checkpoint）。
+    """Look up the attribution of the checkpoint this repository ships (1 repository, 1 checkpoint).
 
-    MUST: 未知の checkpoint では描かない — 帰属の表に無い重みを黙って落とすと、出所を名乗って
-    いない再配布が静かに出る。
+    MUST: do not render for an unknown checkpoint — silently dropping weights missing from the
+    attribution table would quietly ship a redistribution that does not state its origin.
     """
     entry = BIREFNET_CHECKPOINTS.get(checkpoint)
     if entry is None:
         raise ValueError(
-            f"checkpoint '{checkpoint}' の上流が帰属表に無い"
-            f"（既知: {sorted(BIREFNET_CHECKPOINTS)}）— 出所を名乗れないカードは描かない"
+            f"the upstream of checkpoint '{checkpoint}' is not in the attribution table"
+            f" (known: {sorted(BIREFNET_CHECKPOINTS)}) — a card that cannot state its origin is not"
+            " rendered"
         )
     return entry
 
@@ -388,23 +423,25 @@ def _birefnet_entry(checkpoint: str) -> BirefnetCheckpoint:
 def _birefnet_resources(
     measurement: BirefnetResourceMeasurement, config: Mapping[str, Any]
 ) -> BirefnetResources:
-    """このモデルの解像度の実測を引く（{@link BirefnetResourceMeasurement.by_resolution}）。
+    """Look up the measurement for this model's resolution
+    ({@link BirefnetResourceMeasurement.by_resolution}).
 
-    キーは manifest 側の `imageWidth` — モデル名の綴りではなく**宣言された解像度**で引くので、
-    名前を付け替えても実測と対応が切れない。
+    The key is the manifest's `imageWidth` — the lookup goes by the **declared resolution**, not by
+    the spelling of the model name, so renaming does not break the link to the measurement.
     """
     resolution = str(config["imageWidth"])
     resources = measurement.by_resolution.get(resolution)
     if resources is None:
         raise ValueError(
-            f"入力 {resolution}² の実行資源は実測していない"
-            f"（実測済み: {' / '.join(measurement.by_resolution)}）— 実測していない数は名乗らない"
+            f"execution resources for a {resolution}² input were not measured"
+            f" (measured: {' / '.join(measurement.by_resolution)}) — unmeasured numbers are not"
+            " stated"
         )
     return resources
 
 
 def _seat_dtypes(model: Mapping[str, Any]) -> list[str]:
-    """モデルの quant 席が指すマットの格納 dtype（manifest の並び・重複なし）。"""
+    """Matte storage dtypes the model's quant presets point at (manifest order, no duplicates)."""
     seen: list[str] = []
     for quant in model["quants"].values():
         dtype = quant["weights"][BIREFNET_MATTE_WEIGHTS]
@@ -414,11 +451,13 @@ def _seat_dtypes(model: Mapping[str, Any]) -> list[str]:
 
 
 def _birefnet_relation(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -> str | None:
-    """`base_model_relation` を導く（既定 quant の DL 実体が値を丸めているときだけ `quantized`）。
+    """Derive `base_model_relation` (`quantized` only when the default quant's downloaded file
+    rounds the values).
 
-    irodori / sbv2 / anima と同じ「既定 quant の DL 実体」の規則。値を変えない席（f32、HR の
-    f16）が既定なら 4 値のどれでもないので置かない（CardMetadata の doc — 4 値から一番近いものを
-    当てると、カードが事実でない主張を持つ）。
+    The same "default quant's downloaded file" rule as irodori / sbv2 / anima. When the default is a
+    preset that does not change the values (f32, or HR's f16), it is none of the 4 values, so it is
+    left out (the CardMetadata doc — picking the closest of the 4 values would give the card a claim
+    that is not true).
     """
     model = default_model(manifest)
     dtype = model["quants"][model["defaultQuant"]]["weights"][BIREFNET_MATTE_WEIGHTS]
@@ -428,10 +467,10 @@ def _birefnet_relation(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
 
 
 def _birefnet_metadata(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -> CardMetadata:
-    """frontmatter を組む（`base_model` はこのリポが再配布する上流 1 本）。
+    """Build the frontmatter (`base_model` is the one upstream this repository redistributes).
 
-    モデルが 2 つ並んでも上流は 1 つ — 同居しているのは同じ checkpoint の**解像度違い**で、
-    別の重みではない。
+    Even with two models listed there is one upstream — what shares the repository is the same
+    checkpoint **at different resolutions**, not different weights.
     """
     return CardMetadata(
         pipeline_tag=BIREFNET_PIPELINE_TAG,
@@ -479,9 +518,11 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
 
 
 def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list[str]:
-    """帰属節。変更点の列挙と、quant 席ごとの格納（{@link birefnet_storage_lines}）。
+    """Attribution section: the list of changes and the storage per quant preset
+    ({@link birefnet_storage_lines}).
 
-    席の格納 dtype は manifest から引く（モジュール doc の MUST — dtype ラベルは手で持たない）。
+    The presets' storage dtypes are taken from the manifest (the module doc's MUST — dtype labels
+    are not kept by hand).
     """
     entry = _birefnet_entry(checkpoint)
     return [
@@ -507,19 +548,19 @@ def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list
 
 
 def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
-    """Usage 例の方針: 動く最小形は生かし、**普通のユースケースで使いそうな optional は
-    コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
-    ので、モデル / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ
-    進める形。
+    """Policy of the usage example: keep the minimal working form live, and **list the optional
+    arguments an ordinary use case is likely to need as commented-out lines** (the selectable values
+    go in a comment on the same line — derived mechanically from the manifest, so the list follows
+    when models / quants are added). The reader takes the next step just by uncommenting.
 
-    `segment()` は画像 1 枚しか受けない（解像度はグラフに焼かれていて実行時に選べない —
-    `birefnet.Pipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
-    2 つだけである。
+    `segment()` takes only one image (the resolution is baked into the graph and cannot be chosen at
+    run time — the public surface of `birefnet.Pipeline`), so this pipeline's only optional knobs
+    are model and quant.
 
-    NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
-    （X2-101）が、あちらはバイト列を自分で持っている前提のローカルデバッグ向けの面で、HF から
-    使う読者の普通の入口は `fromPretrained`。両方を並べると「どちらを使うのか」を読者に
-    判断させることになる。
+    NOTE: `fromAssets` is **not advertised** (ruling of 2026-08-29). It can read split distributions
+    now (X2-101), but it is a surface for local debugging that assumes you hold the bytes yourself;
+    the ordinary entry point for a reader using HF is `fromPretrained`. Listing both would leave the
+    reader to decide "which one do I use".
     """
     model_name = manifest["defaultModel"]
     model = default_model(manifest)
@@ -563,35 +604,40 @@ def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _birefnet_postprocess(config: Mapping[str, Any]) -> tuple[str, ...]:
-    """このモデルの後処理の手順の説明を引く（{@link BIREFNET_POSTPROCESS_DESCRIPTIONS}）。
+    """Look up the description of this model's post-processing procedure
+    ({@link BIREFNET_POSTPROCESS_DESCRIPTIONS}).
 
-    欄が無い manifest も、説明を持たない手順と同じ文言で落とす（素の `KeyError` では何が欠けたかが
-    読めない）。
+    A manifest without the field fails with the same wording as a procedure without a description (a
+    bare `KeyError` does not say what is missing).
     """
     procedure = config.get("postprocess")
     description = BIREFNET_POSTPROCESS_DESCRIPTIONS.get(procedure)
     if description is None:
         raise ValueError(
-            f"後処理の手順 {procedure!r} の説明を持たない"
-            f"（既知: {' / '.join(BIREFNET_POSTPROCESS_DESCRIPTIONS)}）— 推し量った説明は載せない"
+            f"no description for post-processing procedure {procedure!r}"
+            f" (known: {' / '.join(BIREFNET_POSTPROCESS_DESCRIPTIONS)}) — an extrapolated"
+            " description is not published"
         )
     return description
 
 
 def _birefnet_shape(model: Mapping[str, Any], *, entry: BirefnetCheckpoint) -> list[str]:
-    """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。
+    """Preprocessing constants and input / output shapes (what the user passes in and gets back can
+    be read here).
 
-    実行資源はモデルごと（= 解像度ごと）に別の実測なので、この節に載る — 1024² と 2048² で
-    総確保が 2 倍以上違い、「どちらを選ぶか」の判断材料そのものである。実測はこのリポの
-    checkpoint のもの（{@link BirefnetCheckpoint.resources}）。
+    The execution resources are a separate measurement per model (= per resolution), so they go in
+    this section — the total allocation differs by more than 2× between 1024² and 2048², and that is
+    exactly what decides "which one to pick". The measurement is this repository's checkpoint's
+    ({@link BirefnetCheckpoint.resources}).
     """
     config = model["pipelineConfig"]
     measurement = entry.resources
     resources = _birefnet_resources(measurement, config)
     if measurement.quant not in model["quants"]:
         raise ValueError(
-            f"実行資源を実測した quant '{measurement.quant}' がこのモデルの席に無い"
-            f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
+            f"the quant '{measurement.quant}' the execution resources were measured with is not"
+            f" among this model's presets (presets: {sorted(model['quants'])}) — numbers for an"
+            " unmeasured preset are not stated"
         )
     mean = " / ".join(str(value) for value in config["imageMean"])
     std = " / ".join(str(value) for value in config["imageStd"])
@@ -625,10 +671,12 @@ def render_birefnet_model_card(
     checkpoint: str,
     host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
-    """BiRefNet 系配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+    """Assemble the `README.md` body of a BiRefNet family distribution (pure function, trailing
+    newline).
 
-    `checkpoint` はこのリポが配る重み（`"hr"` / `"lucida"`）— manifest に並ぶモデル名は
-    解像度なので、帰属はそこからは決まらない。渡すのは pipeline 席（モジュール doc）。
+    `checkpoint` is the weights this repository ships (`"hr"` / `"lucida"`) — the model names in the
+    manifest are resolutions, so the attribution cannot be determined from them. The pipeline entry
+    passes it in (module doc).
     """
     require_pipeline(manifest, BIREFNET_SUPPORTED_PIPELINE)
     entry = _birefnet_entry(checkpoint)

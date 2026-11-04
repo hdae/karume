@@ -1,12 +1,14 @@
-"""据えた容器を格納のまま読み戻す recipe 側の読み手（`_shared.container_read`）。
+"""The recipe-side reader that reads a placed container back as stored (`_shared.container_read`).
 
-ここが固定するのは 2 点だけ:
+Only 2 points are pinned here:
 
-- **開いた容器を使い回せる**（`open_container` → 各読み口）。代表 path を渡すたびに
-  `verify_container` が descriptor の parse と合流をやり直すので、block ごとに読む呼び手
-  （gemma4 の PLE 検収門）はその繰り返しを block 数ぶん払っていた。
-- **診断はリポの語彙**（`ContainerReadError`）。`KeyError` は `repr` が二重引用符で包まれて
-  読みにくく、呼び手の `except` が「辞書の引き損ない」と区別できない。
+- **An opened container can be reused** (`open_container` → each reader). Passing the
+  representative path makes `verify_container` redo the descriptor parse and the merge every time,
+  so a caller that reads block by block (the PLE acceptance check of gemma4) paid that repetition
+  once per block.
+- **The diagnostics use the repository's vocabulary** (`ContainerReadError`). A `KeyError` is hard
+  to read because its `repr` wraps the message in double quotes, and the caller's `except` cannot
+  tell it apart from "a dictionary lookup that missed".
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ ASSET_PAYLOAD = bytes(range(64))
 
 @pytest.fixture
 def component(tmp_path: Path) -> Path:
-    """資産を 1 本同梱した正当なコンポーネント（代表 path）。"""
+    """A valid component that bundles one asset (representative path)."""
     path = tmp_path / "series" / "dit" / "model.krm"
     write_component(
         path,
@@ -48,7 +50,8 @@ def component(tmp_path: Path) -> Path:
 
 
 class TestTheOpenedContainerIsReusable:
-    """`open_container` の戻りを渡した読みは、代表 path を渡した読みと同じ答えを返す。"""
+    """A read given the return value of `open_container` answers the same as a read given the
+    representative path."""
 
     def test_the_asset_reads_the_same_bytes_from_either_entry(self, component: Path) -> None:
         opened = open_container(component)
@@ -66,12 +69,13 @@ class TestTheOpenedContainerIsReusable:
     def test_reusing_the_opened_container_opens_nothing_again(
         self, component: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """故障注入 — 開き直す実装へ戻すと、ここで `verify_container` がもう一度呼ばれる。"""
+        """Fault injection — reverting to an implementation that reopens calls `verify_container`
+        once more here."""
         opened = open_container(component)
         from _shared import container_read
 
         def forbidden(*args: object, **kwargs: object) -> None:
-            raise AssertionError("開いた容器を渡したのに verify_container を回した")
+            raise AssertionError("ran verify_container although an opened container was passed")
 
         monkeypatch.setattr(container_read, "verify_container", forbidden)
 
@@ -81,15 +85,17 @@ class TestTheOpenedContainerIsReusable:
 
 class TestTheDiagnosticsUseTheRepositoryVocabulary:
     def test_a_missing_asset_fails_with_the_reader_error(self, component: Path) -> None:
-        with pytest.raises(ContainerReadError, match="資産 'absent' が無い"):
+        with pytest.raises(ContainerReadError, match="no asset 'absent'"):
             read_asset(component, "absent")
 
     def test_the_error_is_not_a_key_error(self, component: Path) -> None:
-        """`KeyError` のままだと呼び手の `except KeyError` が辞書の引き損ないと区別できない。"""
+        """As a `KeyError`, the caller's `except KeyError` could not tell it apart from a
+        dictionary lookup that missed."""
         assert not issubclass(ContainerReadError, KeyError)
 
 
 class TestTheProvenanceIsTheOneTheWriterBaked:
     def test_it_returns_the_provenance_of_the_model_descriptor(self, component: Path) -> None:
-        """出所の突合（`_shared.upstream`）が読む値は、書き手が焼いた `provenance` そのもの。"""
+        """The value the provenance match (`_shared.upstream`) reads is the very `provenance` the
+        writer wrote."""
         assert read_provenance(component) == FIXTURE_PROVENANCE

@@ -1,21 +1,25 @@
-"""上流 checkpoint の出所を**手元の実物から**読む（容器の `provenance` へ焼く値と、その突合）。
+"""Read the provenance of an upstream checkpoint **from the local files** (the values written into
+the container's `provenance`, and the check against them).
 
-容器の `provenance`（container-v1 §2.3）は、単一の `krm` を 1 ファイルとして持ち出しても出所が
-辿れるための席である。ここへ定数を焼くと、`--model-dir` が別の checkpoint を指しても容器は同じ
-出所を名乗る（Base の重みが Small の `apache-2.0` を名乗る形 — 2026-09-24 全域レビュー E-RC6-1）。
-そこで値は `--model-dir` の実物から導く:
+The container's `provenance` (container-v1 §2.3) is there so that the source can be traced even
+when a single `krm` is taken away as one file. Writing a constant into it would make the container
+claim the same source even when `--model-dir` points at another checkpoint (Base weights claiming
+Small's `apache-2.0` — repository-wide review E-RC6-1 of 2026-09-24). So the values are derived
+from the files in `--model-dir`:
 
-- **revision** は `hf download <repo> --local-dir <dir>` が残す記録
-  `<dir>/.cache/huggingface/download/<file>.metadata` の 1 行目（commit SHA — 2 行目は etag・
-  3 行目は取得時刻）。
-- **ライセンス識別子**は同じ取得で落ちた `README.md` の front matter の `license:`
-  （`other` のときは `license_name:` — HF で独自ライセンスを名乗る綴り）。
+- **revision** is the first line of the record `hf download <repo> --local-dir <dir>` leaves at
+  `<dir>/.cache/huggingface/download/<file>.metadata` (the commit SHA — the second line is the
+  etag, the third the fetch time).
+- **license identifier** is `license:` in the front matter of the `README.md` fetched with it
+  (for `other`, `license_name:` — the spelling HF uses for a custom license).
 
-MUST: 記録が無い・読めないときは **fail loudly**（{@link UpstreamProvenanceError}）。
-「分からないので省く」「既定値を名乗る」はどちらも容器の出所を偽る形になる。
+MUST: when the record is missing or unreadable, **fail loudly** ({@link UpstreamProvenanceError}).
+Both "leave it out since it is unknown" and "claim a default" would falsify the container's
+provenance.
 
-組み立ての側は、焼かれた出所を帰属表の値と突き合わせる（{@link assert_upstream_provenance}）—
-配布の門を「モデル名の表」ではなく「容器の中身の出所」で閉じるための 1 本。
+The assembly side checks the written provenance against the attribution table
+({@link assert_upstream_provenance}) — the one function that closes the distribution check on
+"the provenance of the container's contents" rather than on "a table of model names".
 """
 
 from __future__ import annotations
@@ -29,24 +33,26 @@ from karume.container import Provenance
 from karume.dist import DistError
 from karume.modelcard import HF_OWNER, CardMetadata, Upstream
 
-#: `hf download --local-dir` が取得の記録を置く場所（`<model_dir>` からの相対）。
+#: Where `hf download --local-dir` puts its fetch records (relative to `<model_dir>`).
 SNAPSHOT_RECORD_DIR = Path(".cache") / "huggingface" / "download"
 
-#: 既定で revision を読むファイル（HF の checkpoint にはほぼ必ずある 1 本）。
+#: The file whose record gives the revision by default (one that nearly every HF checkpoint has).
 SNAPSHOT_RECORD_FILE = "config.json"
 
-#: HF の commit SHA（40 桁の小文字 16 進）。
+#: An HF commit SHA (40 lower-case hex digits).
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
-#: front matter の最上位キー 1 行（`license: apache-2.0` / `license: "mit"`）。
+#: One top-level front-matter key line (`license: apache-2.0` / `license: "mit"`).
 _FRONT_MATTER_KEY = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*):\s*(?P<value>.*?)\s*$")
 
 
 class UpstreamProvenanceError(ValueError):
-    """容器へ焼く出所（revision / ライセンス識別子）が決まらない。
+    """The provenance to write into the container (revision / license identifier) cannot be
+    determined.
 
-    リポの流儀は `Error` サブクラス（`DistError` / `ContainerReadError`）。素の `ValueError`
-    だと、呼び手の `except` がこの**出所の門**と「引数が変」一般を区別できない。
+    The repository's convention is an `Error` subclass (`DistError` / `ContainerReadError`). With
+    a bare `ValueError`, the caller's `except` could not tell this **provenance check** from "a
+    bad argument" in general.
     """
 
 
@@ -78,27 +84,28 @@ def hub_snapshot_dir(repo: str, revision: str) -> Path:
 
 
 def snapshot_revision(model_dir: Path, file: str = SNAPSHOT_RECORD_FILE) -> str:
-    """`hf download --local-dir` の記録から、手元の checkpoint の commit SHA を読む。"""
+    """Read the commit SHA of the local checkpoint from the `hf download --local-dir` record."""
     record = model_dir / SNAPSHOT_RECORD_DIR / f"{file}.metadata"
     if not record.is_file():
         raise UpstreamProvenanceError(
-            f"{record} が無い — `hf download <repo> --local-dir {model_dir}` で取得した"
-            " checkpoint でないと上流の revision を名乗れない"
+            f"{record} is missing — only a checkpoint fetched with `hf download <repo>"
+            f" --local-dir {model_dir}` can claim an upstream revision"
         )
     lines = record.read_text(encoding="utf-8").splitlines()
     revision = lines[0].strip() if lines else ""
     if _COMMIT_SHA.fullmatch(revision) is None:
         raise UpstreamProvenanceError(
-            f"{record} の 1 行目 {revision!r} が commit SHA（40 桁の 16 進）でない"
+            f"{record}: the first line {revision!r} is not a commit SHA (40 hex digits)"
         )
     return revision
 
 
 def _front_matter(readme: Path) -> dict[str, str]:
-    """`README.md` の front matter の**最上位のスカラー**だけを拾う（入れ子と列は読まない）。"""
+    """Pick up only the **top-level scalars** of a `README.md`'s front matter (nesting and lists
+    are not read)."""
     lines = readme.read_text(encoding="utf-8").splitlines()
     if not lines or lines[0].strip() != "---":
-        raise UpstreamProvenanceError(f"{readme} が front matter（'---' の行）で始まらない")
+        raise UpstreamProvenanceError(f"{readme} does not start with front matter (a '---' line)")
     fields: dict[str, str] = {}
     for line in lines[1:]:
         if line.strip() == "---":
@@ -106,52 +113,56 @@ def _front_matter(readme: Path) -> dict[str, str]:
         matched = _FRONT_MATTER_KEY.match(line)
         if matched is not None and matched["value"]:
             fields[matched["key"]] = matched["value"].strip("\"'")
-    raise UpstreamProvenanceError(
-        f"{readme} の front matter が閉じていない（2 本目の '---' が無い）"
-    )
+    raise UpstreamProvenanceError(f"{readme}: the front matter is not closed (no second '---')")
 
 
 def snapshot_license(model_dir: Path) -> str:
-    """手元の checkpoint の `README.md` の front matter からライセンス識別子を読む。
+    """Read the license identifier from the front matter of the local checkpoint's `README.md`.
 
-    `license: other` は「識別子の無い独自ライセンス」を示す HF の綴りで、識別子そのものは
-    `license_name:` にある（container-v1 §2.3 の `license` は識別子の席 — `other` では持ち出した
-    容器からライセンスが特定できない）。
+    `license: other` is HF's spelling for "a custom license without an identifier", and the
+    identifier itself is in `license_name:` (the `license` of container-v1 §2.3 is the identifier's
+    slot — with `other`, the license cannot be identified from a container taken away).
     """
     readme = model_dir / "README.md"
     if not readme.is_file():
-        raise UpstreamProvenanceError(f"{readme} が無い — 上流のライセンス識別子を読めない")
+        raise UpstreamProvenanceError(
+            f"{readme} is missing — the upstream license identifier cannot be read"
+        )
     fields = _front_matter(readme)
     license_id = fields.get("license")
     if license_id is None:
-        raise UpstreamProvenanceError(f"{readme} の front matter に 'license' が無い")
+        raise UpstreamProvenanceError(f"{readme}: the front matter has no 'license'")
     return _license_identifier(license_id, fields.get("license_name"), str(readme))
 
 
 def _license_identifier(license_id: str, license_name: str | None, where: str) -> str:
-    """HF の `license` / `license_name` の組 → 容器へ焼くライセンス識別子。"""
+    """HF's `license` / `license_name` pair → the license identifier written into the
+    container."""
     if license_id != "other":
         return license_id
     if license_name is None:
         raise UpstreamProvenanceError(
-            f"{where} は 'license: other' で 'license_name' が無い — 識別子が決まらない"
+            f"{where} has 'license: other' and no 'license_name' — no identifier can be determined"
         )
     return license_name
 
 
 def card_license_identifier(metadata: CardMetadata, where: str) -> str:
-    """カードの frontmatter（上流で実地確認した値）から、容器へ焼くライセンス識別子を引く。
+    """Take the license identifier to write into the container from the card's front matter
+    (values confirmed upstream by hand).
 
-    手元に上流の README が無い family（HF キャッシュから直接読む anima・Booth 由来の sbv2 FN）
-    の席。`other` を焼かないのは {@link snapshot_license} と同じ理由 — `other` は「識別子の無い
-    独自ライセンス」を示す HF の綴りで、持ち出した容器からライセンスが特定できない
-    （2026-09-24 全域レビュー W-RC3-6）。
+    For families with no local upstream README (anima, read directly from the HF cache; the sbv2
+    FN models from Booth). `other` is not written for the same reason as in
+    {@link snapshot_license} — `other` is HF's spelling for "a custom license without an
+    identifier", and the license cannot be identified from a container taken away
+    (repository-wide review W-RC3-6 of 2026-09-24).
     """
     return _license_identifier(metadata.license, metadata.license_name, where)
 
 
 def snapshot_provenance(model_dir: Path, *, notice: str | None) -> Provenance:
-    """`--model-dir` の実物から、容器へ焼く出所を組む（ライセンス識別子 + revision）。"""
+    """Build the provenance to write into the container from the files in `--model-dir`
+    (license identifier + revision)."""
     return Provenance(
         license=snapshot_license(model_dir),
         notice=notice,
@@ -160,31 +171,35 @@ def snapshot_provenance(model_dir: Path, *, notice: str | None) -> Provenance:
 
 
 def assert_upstream_provenance(container: Path, *, license: str, revision: str | None) -> None:
-    """配布候補の容器が名乗る出所を、帰属表の値（と取得した revision）へ突き合わせる。
+    """Check the provenance a candidate container claims against the attribution table (and the
+    fetched revision).
 
-    `revision` は期待する上流 revision — 手元の checkpoint の取得記録から導いた値（siglip2・
-    depth_anything）か、帰属表に固定した値（wan・birefnet）。`None` なら「revision を名乗って
-    いること」までを見る。
+    `revision` is the expected upstream revision — derived from the local checkpoint's fetch
+    record (siglip2, depth_anything) or fixed in the attribution table (wan, birefnet). With
+    `None`, only "it claims a revision" is checked.
 
-    MUST: 容器の出所で門を閉じる。モデル名の表だけで閉じると、別の checkpoint を焼いた容器を
-    系列 path へ置いたときに格納・入出力形・前処理の突合がすべて通り、別ライセンスの重みが
-    帰属表のライセンスを名乗る配布形になる（2026-09-24 全域レビュー E-RC6-1）。
+    MUST: close the check on the container's provenance. Closing it on the table of model names
+    alone would let a container built from another checkpoint, placed at the series path, pass
+    every storage, I/O-shape and preprocessing comparison, giving a distribution whose weights,
+    under a different license, claim the attribution table's license (repository-wide review
+    E-RC6-1 of 2026-09-24).
     """
     provenance = read_provenance(container)
     if provenance.license != license:
         raise DistError(
-            f"{container} の provenance.license が {provenance.license!r} で、帰属表の"
-            f" {license!r} と違う — 帰属表に無い checkpoint を焼いた容器は配らない"
+            f"{container}: provenance.license is {provenance.license!r}, not the attribution"
+            f" table's {license!r} — a container built from a checkpoint the table does not list"
+            " is not distributed"
         )
     if provenance.upstream_revision is None:
         raise DistError(
-            f"{container} が provenance.upstreamRevision を持たない — 上流の revision を"
-            "名乗れない容器は配らない（台本で焼き直す）"
+            f"{container} has no provenance.upstreamRevision — a container that cannot claim"
+            " an upstream revision is not distributed (rebuild it with the script)"
         )
     if revision is not None and provenance.upstream_revision != revision:
         raise DistError(
-            f"{container} の provenance.upstreamRevision が {provenance.upstream_revision}、"
-            f"期待する revision は {revision} — 別の revision から焼いた容器"
+            f"{container}: provenance.upstreamRevision is {provenance.upstream_revision}, the"
+            f" expected revision is {revision} — a container built from a different revision"
         )
 
 

@@ -1,43 +1,47 @@
-"""VAE decode の**固定タイル化**の参照フィクスチャを作る（#21 波 T1）。
+"""Build the reference fixture of the VAE decode's **fixed tiling** (#21, iteration T1).
 
-Karume の VAE decoder のグラフは**解像度に対して構造不変**なので（512px 用と 1024px 用の
-`model.safetensors` はノード列・重みバイトまで完全一致 — 当時の safetensors 形での実測・
-`docs/research/2026-08-03-dynres-vae-tiling.md` §1.2）、512px 用資産を latent 64×64 の
-**タイル decoder** としてそのまま使い、切り出し / ブレンド / 貼り付けだけをホストで行える。
-その「ホスト側の数の正」がここで、TS 実装は `packages/models/src/anima/tiling.ts`。
-このフィクスチャと突き合わせる Deno 側の E2E は**まだこのリポへ移植されていない**（幾何の
-一致は Python 側 `MIRRORED_STARTS` と TS 側 `packages/models/tests/anima_tiling_test.ts` の
-`AXIS_STARTS` の二重凍結で守っている）。
+Karume's VAE decoder graph is **structurally invariant to the resolution** (the
+`model.safetensors` for 512px and for 1024px match exactly, down to the node list and the weight
+bytes — measured in the safetensors form of the time;
+`docs/research/2026-08-03-dynres-vae-tiling.md` §1.2), so the 512px asset can be used as is as a
+**tile decoder** over 64×64 latents, with only the cutting / blending / pasting done on the host.
+This is "the ground truth of the host-side numbers"; the TS implementation is
+`packages/models/src/anima/tiling.ts`. The Deno-side E2E that compares against this fixture has
+**not been ported to this repository yet** (the geometry match is guarded by the double freeze of
+`MIRRORED_STARTS` on the Python side and `AXIS_STARTS` in
+`packages/models/tests/anima_tiling_test.ts` on the TS side).
 
-MUST: `vae.enable_tiling()` を**呼ばない**。上流（`autoencoder_kl_qwenimage.tiled_decode`）は
-`range(0, H, stride)` で走査するので最後のタイルが短くなり、固定形のタイル decoder では
-食えない。走査は「最後のタイルの開始位置を `extent − tile` にスナップする丸め等間隔配置」へ
-変えてある（recon §4.2 が予告した意図的逸脱）— したがって幾何は**自前実装**でなければ
-TS 側と一致しない。**ブレンドの式**は上流の `blend_v` / `blend_h` の逐語移植で、同値は
-`anima/tests/test_tiling.py` が本物のメソッドとの突合で固定する。
+MUST: **do not call** `vae.enable_tiling()`. Upstream (`autoencoder_kl_qwenimage.tiled_decode`)
+scans with `range(0, H, stride)`, so the last tile comes out short, which a fixed-shape tile
+decoder cannot take. The scan is changed to "a rounded equal-spacing placement that snaps the last
+tile's start to `extent − tile`" (the deliberate deviation the recon §4.2 announced) — so the
+geometry matches the TS side only with **our own implementation**. **The blend formulas** are
+verbatim ports of upstream's `blend_v` / `blend_h`; `anima/tests/test_tiling.py` pins their
+equivalence by comparing against the real methods.
 
-MUST: 重みは資産系列と同じ dtype へ fake-quant してから参照を採る（ADR 0006 —
-`anima/pipeline_ref.py` と同じ規律）。`--dtype f16` が既定なのは、TS 側が
-`outputs/series/anima-f16/vae_decoder`（= f16 系列）をタイル decoder として開くから。
+MUST: the reference is taken after fake-quantizing the weights to the same dtype as the asset
+series (ADR 0006 — the same rule as `anima/pipeline_ref.py`). `--dtype f16` is the default because
+the TS side opens `outputs/series/anima-f16/vae_decoder` (= the f16 series) as the tile decoder.
 
-出力（既定 `<repo>/outputs/series/anima-tiling-f16-1024/`）:
+Output (default `<repo>/outputs/series/anima-tiling-f16-1024/`):
 
-    tiling.safetensors   latents_denorm（タイル decode の入力）/ image_tiled（出力）
-    tiling.json          タイル幾何（開始位置列・対ごとのブレンド幅）とメタ
+    tiling.safetensors   latents_denorm (input of the tiled decode) / image_tiled (output)
+    tiling.json          tile geometry (start positions, blend width per pair) and metadata
 
     uv run python -m anima.tiling
     uv run python -m anima.tiling --dtype f16 --resolution 1024
     uv run python -m anima.tiling --resolution 1344x768 \
         --latents ../../outputs/series/anima-pipeline-turbo-f16-1344x768/pipeline.safetensors
 
-`--resolution` は **WxH**（正方は略記できる）。非正方では VAE の静的資産が無いので、
-タイル decode が唯一の経路になる（#23 — デモ側も `--vae-tiling` を要求する）。
+`--resolution` is **WxH** (a square can be abbreviated). A non-square resolution has no static VAE
+asset, so the tiled decode is the only path (#23 — the demo side requires `--vae-tiling` too).
 
-入力 latent は既定で `outputs/series/anima-pipeline-turbo-f16-1024/pipeline.safetensors` の
-`latents_denorm`（逆正規化済み = VAE decoder の入力そのもの）を借りる。randn ではなく実
-パイプラインの latent を使うのは、継ぎ目の出方が値の中身に依るため。同じフィクスチャの
-`image`（**非タイル**の torch decode）があれば、タイル化による差もメタに記録する
-（観測であって門ではない — タイル化は近似なので差は 0 にならない）。
+By default the input latent is borrowed from `latents_denorm` of
+`outputs/series/anima-pipeline-turbo-f16-1024/pipeline.safetensors` (denormalized = exactly the
+VAE decoder's input). A real pipeline latent is used rather than randn because how the seams show
+depends on the values. When the same fixture has `image` (the **untiled** torch decode), the
+difference caused by tiling is recorded in the metadata as well (an observation, not a check —
+tiling is an approximation, so the difference is not 0).
 """
 
 from __future__ import annotations
@@ -56,22 +60,25 @@ from karume.quantize import round_weights_to_f16
 from .resolution import format_resolution, parse_resolution, resolution_meta
 
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
-#: 入力 latent を借りる参照フィクスチャ
-#: （`python -m anima.pipeline_ref --dtype f16 --resolution 1024`）。
+#: The reference fixture the input latent is borrowed from
+#: (`python -m anima.pipeline_ref --dtype f16 --resolution 1024`).
 DEFAULT_LATENTS = SERIES_ROOT / "anima-pipeline-turbo-f16-1024" / "pipeline.safetensors"
-#: タイル decoder の latent 幅（= 512px 用資産の入力 `[1,16,64,64]`）。
+#: The tile decoder's latent width (= the input `[1,16,64,64]` of the 512px asset).
 TILE_LATENT = 64
-#: 隣り合うタイルが latent で重なる最小幅（= sample 64px — TS 側 `MIN_TILE_OVERLAP_LATENT`）。
+#: The minimum latent overlap of adjacent tiles (= 64px in sample space — the TS side's
+#: `MIN_TILE_OVERLAP_LATENT`).
 MIN_OVERLAP_LATENT = 8
 SPATIAL_COMPRESSION = 8
 
 
 @dataclass(frozen=True)
 class TileAxis:
-    """latent の 1 軸ぶんのタイル配置（TS 側 `TileAxis` と同じ意味論）。
+    """The tile placement along one latent axis (the same semantics as the TS side's
+    `TileAxis`).
 
-    MUST: 開始位置の差（間隔）を欄として持たない — 丸め等間隔なので対ごとに 1 latent まで
-    動く。要るところで `starts` から引く（`blend_at`）。
+    MUST: the difference of start positions (the spacing) is not a field — with rounded equal
+    spacing it varies by up to 1 latent per pair. Derive it from `starts` where needed
+    (`blend_at`).
     """
 
     extent: int
@@ -79,16 +86,18 @@ class TileAxis:
     starts: tuple[int, ...]
 
     def blend_at(self, scale: int, index: int) -> int:
-        """対 `(index − 1, index)` のブレンド幅（**sample 空間** — 上流と同じ単位）。"""
+        """The blend width of the pair `(index − 1, index)` (**sample space** — upstream's
+        unit)."""
         if not 1 <= index < len(self.starts):
             raise ValueError(
-                f"ブレンド対 {index} が範囲外（開始位置 {len(self.starts)} 本 = "
-                f"対 {len(self.starts) - 1} 組）"
+                f"blend pair {index} is out of range ({len(self.starts)} start positions = "
+                f"{len(self.starts) - 1} pairs)"
             )
         return (self.tile - (self.starts[index] - self.starts[index - 1])) * scale
 
     def blends(self, scale: int) -> list[int]:
-        """全対のブレンド幅（先頭のタイルには対が無いので `本数 − 1` 個）。"""
+        """The blend widths of all pairs (`count − 1` of them, since the first tile has no
+        pair)."""
         return [self.blend_at(scale, index) for index in range(1, len(self.starts))]
 
 
@@ -105,35 +114,40 @@ class TileGeometry:
 
 
 def plan_tile_axis(extent: int, tile: int, min_overlap: int) -> TileAxis:
-    """1 軸ぶんの丸め等間隔スナップ配置（TS 側 `planTileAxis` と同じ規則）。
+    """The rounded equal-spacing snap placement along one axis (the same rule as the TS side's
+    `planTileAxis`).
 
-    本数は「重なりが `min_overlap` 以上」を満たす最小値 `ceil(span / (tile − min_overlap)) + 1`
-    （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`。間隔が整数に
-    割り切れる必要は無く、丸めの誤差が ±0.5 に収まるので間隔は 2 値にしかならない。
+    The count is the smallest that satisfies "overlap ≥ `min_overlap`",
+    `ceil(span / (tile − min_overlap)) + 1` (`span = extent − tile`), and the start positions are
+    `round(i · span / (count − 1))`. The spacing need not divide evenly; the rounding error stays
+    within ±0.5, so the spacing takes only two values.
     """
     if tile < 1:
-        raise ValueError(f"タイル幅 {tile} が 1 未満")
+        raise ValueError(f"tile width {tile} is below 1")
     if extent < tile:
-        raise ValueError(f"latent 全長 {extent} がタイル幅 {tile} より小さい")
+        raise ValueError(f"the latent extent {extent} is smaller than the tile width {tile}")
     if not 0 <= min_overlap < tile:
-        raise ValueError(f"最小の重なり {min_overlap} が [0, {tile}) の外")
+        raise ValueError(f"the minimum overlap {min_overlap} is outside [0, {tile})")
     span = extent - tile
     if span == 0:
-        # 縮退: 1 枚。対が 1 つも無いのでブレンド無し・貼り付けは素の写し。
+        # Degenerate: one tile. There is no pair, so no blending, and pasting is a plain copy.
         return TileAxis(extent=extent, tile=tile, starts=(0,))
     count = -(-span // (tile - min_overlap)) + 1
-    # MUST: 組み込みの `round` を使わない — Python は偶数丸め・TS の `Math.round` は
-    # 0.5 切り上げで、ちょうど半分になる対だけ両者の開始位置が黙って 1 latent ずれる。
-    # 整数演算の floor((2·i·span + (本数 − 1)) / (2·(本数 − 1))) は 0.5 切り上げそのもの。
+    # MUST: do not use the built-in `round` — Python rounds half to even and TS's `Math.round`
+    # rounds half up, so for exactly the pairs that land on a half the two start positions would
+    # silently differ by 1 latent. The integer floor((2·i·span + (count − 1)) / (2·(count − 1)))
+    # is rounding half up itself.
     starts = tuple((2 * index * span + (count - 1)) // (2 * (count - 1)) for index in range(count))
-    # 重なりの下限は本数の式から導けるが、その導出は丸めの誤差評価に依っていて目で追えない。
-    # 破れたら継ぎ目がランプで隠れなくなる（絵にしか出ない沈黙誤り）ので、構造で落とす。
+    # The overlap's lower bound follows from the count formula, but that derivation rests on an
+    # analysis of the rounding error that cannot be followed by eye. If it broke, the ramp would
+    # no longer hide the seams (a silent error that shows only in the picture), so it fails
+    # structurally.
     for index in range(1, count):
         overlap = tile - (starts[index] - starts[index - 1])
         if overlap < min_overlap:
             raise ValueError(
-                f"タイル {index - 1}/{index} の重なり {overlap} が下限 {min_overlap} 未満"
-                f"（latent {extent} / タイル {tile} / 開始位置 {starts}）"
+                f"the overlap of tiles {index - 1}/{index}, {overlap}, is below the floor"
+                f" {min_overlap} (latent {extent} / tile {tile} / start positions {starts})"
             )
     return TileAxis(extent=extent, tile=tile, starts=starts)
 
@@ -144,9 +158,9 @@ def plan_tiling(
     min_overlap: int = MIN_OVERLAP_LATENT,
     scale: int = SPATIAL_COMPRESSION,
 ) -> TileGeometry:
-    """`[1,C,H,W]` の latent に対するタイル幾何。"""
+    """The tile geometry for a `[1,C,H,W]` latent."""
     if len(latent_shape) != 4 or latent_shape[0] != 1:
-        raise ValueError(f"latent の形 {list(latent_shape)} が [1,C,H,W] でない")
+        raise ValueError(f"the latent shape {list(latent_shape)} is not [1,C,H,W]")
     return TileGeometry(
         scale=scale,
         channels=latent_shape[1],
@@ -156,7 +170,8 @@ def plan_tiling(
 
 
 def blend_v(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
-    """上のタイルとの線形ランプ合成（`AutoencoderKLQwenImage.blend_v` の逐語移植・in-place）。"""
+    """Linear-ramp blend with the tile above (verbatim port of `AutoencoderKLQwenImage.blend_v`;
+    in place)."""
     blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)
     for y in range(blend_extent):
         b[:, :, :, y, :] = a[:, :, :, -blend_extent + y, :] * (1 - y / blend_extent) + b[
@@ -166,7 +181,8 @@ def blend_v(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor
 
 
 def blend_h(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
-    """左のタイルとの線形ランプ合成（`AutoencoderKLQwenImage.blend_h` の逐語移植・in-place）。"""
+    """Linear-ramp blend with the tile on the left (verbatim port of
+    `AutoencoderKLQwenImage.blend_h`; in place)."""
     blend_extent = min(a.shape[-1], b.shape[-1], blend_extent)
     for x in range(blend_extent):
         b[:, :, :, :, x] = a[:, :, :, :, -blend_extent + x] * (1 - x / blend_extent) + b[
@@ -176,17 +192,19 @@ def blend_h(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor
 
 
 def tiled_decode(decode, z: torch.Tensor, geometry: TileGeometry) -> torch.Tensor:
-    """rank5 latent `[1,C,1,H,W]` をタイルごとに decode してブレンド合成する。
+    """Decode the rank-5 latent `[1,C,1,H,W]` tile by tile and blend the tiles together.
 
-    `decode` は「rank5 のタイル latent → rank5 の画像タイル」。実行経路（TS）は 1 本の
-    session を使い回し、ここでは同じ `vae.decode` を繰り返し呼ぶ。
+    `decode` is "rank-5 tile latent → rank-5 image tile". The execution path (TS) reuses one
+    session; here the same `vae.decode` is called repeatedly.
 
-    MUST: ブレンドは **縦（上のタイル）→ 横（左のタイル）** の順・タイル配列は in-place に
-    書き換える（上流 `tiled_decode` と同じ — 隣に効くのは**ブレンド済み**のタイル）。
-    MUST: ブレンド幅は**対ごと**に引く（丸め等間隔なので対で 1 latent まで違う）。
-    MUST: 貼り付けは「タイル i の担当領域 = `[starts[i], starts[i+1])`、最後だけ末端まで」の
-    領域割り当て（上流の「間隔ぶんへ切り詰め + 全体 crop」のスナップ版）。素朴に間隔ぶんで
-    切り詰めると総和が `extent − tile` にしかならず末端が欠ける。
+    MUST: blend in the order **vertical (the tile above) → horizontal (the tile on the left)**,
+    rewriting the tile array in place (same as upstream `tiled_decode` — what affects a neighbour
+    is the **already blended** tile).
+    MUST: take the blend width **per pair** (with rounded equal spacing it differs by up to 1
+    latent between pairs).
+    MUST: pasting assigns regions as "tile i owns `[starts[i], starts[i+1])`, the last one up to
+    the end" (the snap version of upstream's "truncate to the spacing + crop the whole").
+    Naively truncating to the spacing would sum to only `extent − tile` and lose the end.
     """
     rows_axis, cols_axis = geometry.rows, geometry.cols
     scale = geometry.scale
@@ -233,7 +251,8 @@ def tiled_decode(decode, z: torch.Tensor, geometry: TileGeometry) -> torch.Tenso
 
 
 def geometry_meta(geometry: TileGeometry) -> dict[str, Any]:
-    """幾何を JSON へ落とす（TS 側はこの表と自分の計算を突き合わせる — 数値だけに頼らない）。"""
+    """Write the geometry as JSON (the TS side compares its own computation with this table — it
+    does not rely on the numbers alone)."""
 
     def axis(value: TileAxis) -> dict[str, Any]:
         return {
@@ -256,19 +275,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument(
-        "--out", type=Path, default=None, help="既定 outputs/series/anima-tiling-<dtype>-<解像度>/"
+        "--out",
+        type=Path,
+        default=None,
+        help="default outputs/series/anima-tiling-<dtype>-<resolution>/",
     )
     parser.add_argument("--dtype", choices=("f32", "f16"), default="f16")
     parser.add_argument(
         "--latents",
         type=Path,
         default=DEFAULT_LATENTS,
-        help="入力 latent を借りる pipeline.safetensors（キー latents_denorm）",
+        help="the pipeline.safetensors the input latent is borrowed from (key latents_denorm)",
     )
     parser.add_argument(
         "--resolution",
         default="1024",
-        help="WxH（例 1344x768）。正方は略記できる — 綴りはデモの --resolution と同じ",
+        help="WxH (e.g. 1344x768). A square can be abbreviated — the same spelling as the demo's"
+        " --resolution",
     )
     args = parser.parse_args()
     try:
@@ -280,25 +303,26 @@ def main() -> None:
 
     if not args.latents.is_file():
         raise SystemExit(
-            f"入力 latent {args.latents} が無い — 先に `python -m anima.pipeline_ref --dtype f16 "
-            f"--resolution {args.resolution} …` でパイプライン参照を採る"
-            "（tools/export-recipes/anima/README.md の tiling 節）"
+            f"no input latent {args.latents} — first take the pipeline reference with `python -m"
+            f" anima.pipeline_ref --dtype f16 --resolution {args.resolution} …`"
+            " (the tiling section of tools/export-recipes/anima/README.md)"
         )
     source = load_file(str(args.latents))
     latents = source["latents_denorm"].to(torch.float32)
-    # MUST: 軸の順は `[..., H, W]`。非正方で入れ替えると要素数が合ったまま転置された latent を
-    # decode することになり、参照だけが別の絵になる（正方では検出不能な取り違え）。
+    # MUST: the axis order is `[..., H, W]`. Swapping them for a non-square resolution would
+    # decode a transposed latent whose element count still matches, and only the reference would
+    # become a different picture (a mix-up undetectable with a square).
     expected = [height // SPATIAL_COMPRESSION, width // SPATIAL_COMPRESSION]
     if list(latents.shape[2:]) != expected:
         raise SystemExit(
-            f"入力 latent の形 {list(latents.shape)} が --resolution {args.resolution}"
-            f"（latent {expected[0]}×{expected[1]}）と合わない"
+            f"the input latent shape {list(latents.shape)} does not match --resolution"
+            f" {args.resolution} (latent {expected[0]}×{expected[1]})"
         )
     geometry = plan_tiling(tuple(latents.shape))
     print(
         f"[geometry] {geometry.rows.starts} × {geometry.cols.starts} / tile {TILE_LATENT} / "
         f"blend(sample) {geometry.rows.blends(geometry.scale)}"
-        f"×{geometry.cols.blends(geometry.scale)} / {geometry.tiles} タイル",
+        f"×{geometry.cols.blends(geometry.scale)} / {geometry.tiles} tiles",
         flush=True,
     )
 
@@ -306,10 +330,13 @@ def main() -> None:
 
     vae = AutoencoderKLQwenImage.from_pretrained(args.repo, subfolder="vae")
     vae.to(torch.float32).eval()
-    # MUST: 上流のタイル化は使わない（走査形が違う — モジュール doc）。既定 False だが、
-    # 将来 config 側で既定が変わったときに黙って別の幾何で参照を採るのを防ぐ。
+    # MUST: upstream's tiling is not used (its scan differs — see the module doc). The default is
+    # False, but this keeps a future change of the config's default from silently taking the
+    # reference with another geometry.
     if vae.use_tiling:
-        raise SystemExit("vae.use_tiling が True — 上流のタイル化は走査形が違うので使わない")
+        raise SystemExit(
+            "vae.use_tiling is True — upstream's tiling scans differently, so it is not used"
+        )
     if args.dtype == "f16":
         report = round_weights_to_f16(vae)
         print(f"[fake-quant] vae (f16): {report.describe()}", flush=True)
@@ -321,7 +348,7 @@ def main() -> None:
         with torch.no_grad():
             out = vae.decode(tile, return_dict=False)[0]
         decoded += 1
-        print(f"[decode] タイル {decoded}/{geometry.tiles} {list(out.shape)}", flush=True)
+        print(f"[decode] tile {decoded}/{geometry.tiles} {list(out.shape)}", flush=True)
         return out
 
     image = tiled_decode(decode, latents.unsqueeze(2), geometry)[:, :, 0].contiguous()
@@ -337,8 +364,9 @@ def main() -> None:
         "image_range": [float(image.min()), float(image.max())],
         "tensors": {name: list(value.shape) for name, value in tensors.items()},
     }
-    # 観測（門ではない）: 同じフィクスチャに非タイルの torch decode があれば差を記録する。
-    # タイル化は attention の受容野をタイル内に閉じる近似なので、差は 0 にならない。
+    # Observation (not a check): if the same fixture has an untiled torch decode, record the
+    # difference. Tiling is an approximation that confines attention's receptive field to the
+    # tile, so the difference is not 0.
     full = source.get("image")
     if full is not None and full.shape == image.shape:
         difference = (image - full.to(torch.float32)).abs()
@@ -346,7 +374,9 @@ def main() -> None:
             "max_abs": float(difference.max()),
             "mean_abs": float(difference.mean()),
         }
-        print(f"[observe] 非タイル decode との差 max {difference.max():.4e}", flush=True)
+        print(
+            f"[observe] difference from the untiled decode: max {difference.max():.4e}", flush=True
+        )
 
     args.out = (
         args.out or SERIES_ROOT / f"anima-tiling-{args.dtype}-{format_resolution(width, height)}"

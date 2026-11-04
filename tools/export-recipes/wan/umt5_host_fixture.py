@@ -1,29 +1,32 @@
-"""Wan2.1 の umT5 の相対位置のバケット表について、TS の生成器
-（`packages/models/src/umt5/relative-position.ts`）と突き合わせる fixture を書く
-（ADR 0119 決定 3・段 10c）。
+"""Write the fixture that checks Wan2.1 umT5's relative-position bucket tables against the TS
+generator (`packages/models/src/umt5/relative-position.ts`) (ADR 0119 decision 3, step 10c).
 
     uv run --group wan --inexact python -m wan.umt5_host_fixture
 
-出力（既定 `packages/models/tests/fixtures/wan-umt5/`）:
+Output (default `packages/models/tests/fixtures/wan-umt5/`):
 
-    relative-position.safetensors  `bucket_by_distance [1023]`（距離 = キーの位置 − クエリの位置
-                                   = −511〜511 のバケット）と代表の有効長の表
-                                   `table.lNNN [L, L]`（I32）
-    relative-position.json         出所・バケットの構成・有効長の範囲・グラフ入力名・代表の有効長・
-                                   全有効長の digest
+    relative-position.safetensors  `bucket_by_distance [1023]` (the bucket of each distance =
+                                   key position − query position = −511 to 511) and the tables
+                                   of the representative valid lengths `table.lNNN [L, L]` (I32)
+    relative-position.json         provenance, bucket configuration, valid-length range, graph
+                                   input names, representative valid lengths and the digest of
+                                   every valid length
 
-期待値は上流の式（`UMT5Attention._relative_position_bucket` を {@link wan.umt5_patch} 経由で
-呼んだもの — 式を写さない）。構成（バケット数・max_distance）は pin した revision の
-`text_encoder/config.json` から読む（config だけ — 重みは読まない。取得は
-`uv run --group wan --inexact python -m wan.text_embeds --fetch`）。
+The expected values come from the upstream formula (`UMT5Attention._relative_position_bucket`
+called through {@link wan.umt5_patch} — the formula is not copied). The configuration (bucket
+count, max_distance) is read from `text_encoder/config.json` of the pinned revision (the config
+only — no weights are read; fetch it with
+`uv run --group wan --inexact python -m wan.text_embeds --fetch`).
 
-digest は有効長 2〜512 の全部の表を縛る: 表ごとに i32 リトルエンディアン・行優先のバイト列の
-SHA-256（32 B）を取り、有効長の昇順に連ねたバイト列の SHA-256（16 進）。表を全部連ねると約 179 MB に
-なり、TS の WebCrypto は 1 回で渡したバイト列しかハッシュできないので、表ごとに畳む。
+The digest pins every table for valid lengths 2 to 512: take the SHA-256 (32 B) of each table's
+i32 little-endian row-major bytes, chain them in ascending valid-length order and take the SHA-256
+(hex) of that. Chaining the tables themselves would be about 179 MB, and TS WebCrypto can only hash
+bytes passed in one call, so each table is folded first.
 
-代表の有効長（{@link REPRESENTATIVE_LENGTHS}）は表を丸ごと持つ（digest が割れたときに要素で
-名指しするため）。バケットの境界（距離 8・12・16・23・32・46・64・91 — 調査 §4.3）を跨ぐ長さと、
-固定 4 プロンプトの長さの一部を選ぶ。
+The representative valid lengths ({@link REPRESENTATIVE_LENGTHS}) keep their whole tables (so a
+digest mismatch can be pinned down to elements). They are lengths that cross bucket boundaries
+(distances 8, 12, 16, 23, 32, 46, 64, 91 — research §4.3) and some of the lengths of the four fixed
+prompts.
 """
 
 from __future__ import annotations
@@ -50,29 +53,30 @@ DEFAULT_OUT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-um
 TENSORS_FILE = "relative-position.safetensors"
 META_FILE = "relative-position.json"
 
-#: 表を丸ごと持つ有効長: 下限 2・距離 7 まで（全部が線形の区間）の 8・初めて対数の区間に入る 9
-#: （距離 8）・境界 16 を跨ぐ 17・固定プロンプトの 28 / 50 / 126・上限のバケット 15 に初めて届く 92
-#: （距離 91）。
+#: Valid lengths whose whole tables are kept: the lower bound 2; 8, up to distance 7 (all in the
+#: linear range); 9, the first to enter the logarithmic range (distance 8); 17, crossing the
+#: boundary 16; 28 / 50 / 126 of the fixed prompts; 92, the first to reach the top bucket 15
+#: (distance 91).
 REPRESENTATIVE_LENGTHS: tuple[int, ...] = (2, 8, 9, 17, 28, 50, 92, 126)
 
-#: 距離ごとのバケットのテンソル名と、その先頭の距離（= −(上限 − 1)）。
+#: Tensor name of the per-distance buckets, and its first distance (= −(upper bound − 1)).
 DISTANCE_KEY = "bucket_by_distance"
 DISTANCE_OFFSET = -(MAX_LENGTH - 1)
 
 
 def table_key(length: int) -> str:
-    """代表の表のテンソル名（`table.l028` — 桁を揃えて並びを長さ順にする）。"""
+    """Tensor name of a representative table (`table.l028` — zero-padded to sort by length)."""
     return f"table.l{length:03d}"
 
 
 def table_bytes(table: torch.Tensor) -> bytes:
-    """表の i32 リトルエンディアン・行優先のバイト列（TS の `Int32Array` の中身と同じ並び）。"""
-    values = normalize_boundary_tensor(table, "バケット表").contiguous()
+    """The table's i32 little-endian row-major bytes (the same order as a TS `Int32Array`)."""
+    values = normalize_boundary_tensor(table, "bucket table").contiguous()
     return values.numpy().astype("<i4", copy=False).tobytes()
 
 
 def tables_digest(attention: nn.Module) -> str:
-    """有効長 2〜512 の全表の digest（モジュールの docstring の形）。"""
+    """Digest of every table for valid lengths 2 to 512 (in the form the module docstring gives)."""
     chained = hashlib.sha256()
     for length in range(MIN_TOKENS, MAX_LENGTH + 1):
         table = umt5_patch.relative_position_buckets(length, attention)
@@ -81,28 +85,34 @@ def tables_digest(attention: nn.Module) -> str:
 
 
 def bucket_by_distance(attention: nn.Module) -> torch.Tensor:
-    """距離 −511〜511 のバケット（上流の式に距離の列をそのまま渡したもの）。"""
+    """Buckets for distances −511 to 511 (the distances passed to the upstream formula as is)."""
     distances = torch.arange(DISTANCE_OFFSET, MAX_LENGTH, dtype=torch.long)
     return attention._relative_position_bucket(distances)
 
 
 def check_consistent(attention: nn.Module, by_distance: torch.Tensor) -> None:
-    """上限の表が距離の列の Toeplitz 展開（`table[i][j] = by_distance[j − i]`）であること。
+    """Check that the table at the upper bound is the Toeplitz expansion of the distance sequence
+    (`table[i][j] = by_distance[j − i]`).
 
-    MUST: 書く前に見る — 距離の列と表が別の向きで焼かれると、TS 側は片方とだけ一致して
-    もう片方で割れ、どちらが正かを fixture から決められなくなる。
+    MUST: checked before writing — if the distance sequence and the tables were written with
+    opposite orientations, the TS side would match one and fail on the other, and the fixture could
+    not tell which one is right.
     """
     table = umt5_patch.relative_position_buckets(MAX_LENGTH, attention)
     positions = torch.arange(MAX_LENGTH)
     expanded = by_distance[positions[None, :] - positions[:, None] - DISTANCE_OFFSET]
     if not torch.equal(table, expanded):
-        raise AssertionError("上限の表が距離の列の Toeplitz 展開と違う（向きか添字の取り違え）")
+        raise AssertionError(
+            "the upper-bound table differs from the Toeplitz expansion of the distance sequence"
+            " (orientation or indices mixed up)"
+        )
 
 
 def build_fixture(
     config: Any, source: Mapping[str, str]
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    """fixture の中身（テンソルとメタ）を作る（ファイルは書かない — pytest が鮮度を見る口）。"""
+    """Build the fixture's contents (tensors and meta) without writing files (the entry point
+    pytest uses to check the fixture is up to date)."""
     import transformers
 
     attention = umt5_patch.bucket_attention(config)
@@ -141,7 +151,7 @@ def build_fixture(
 
 
 def pinned_config(model: str = DEFAULT_MODEL) -> Any:
-    """pin した revision の `text_encoder/config.json`（config だけを読む）。"""
+    """`text_encoder/config.json` of the pinned revision (reads the config only)."""
     from transformers import UMT5Config
 
     return UMT5Config.from_pretrained(text_snapshot(model) / "text_encoder")
@@ -159,12 +169,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args.out.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(args.out / TENSORS_FILE))
-    # 2 字下げ（`deno fmt` の JSON の形 — 追跡対象の fixture なので書き直しで差分を出さない）。
+    # Two-space indent (the JSON shape `deno fmt` writes — the fixture is tracked, so rewriting it
+    # must not produce a diff).
     (args.out / META_FILE).write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     representatives = len(REPRESENTATIVE_LENGTHS)
-    print(f"fixture OK: {args.out}（digest {meta['digest'][:16]}…・代表 {representatives} 本）")
+    print(
+        f"fixture OK: {args.out} (digest {meta['digest'][:16]}…, {representatives} representatives)"
+    )
     return 0
 
 

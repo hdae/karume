@@ -1,19 +1,22 @@
-"""依存グループ側のパッケージを **module 直下で import しない**（リポ全体の作法の門）。
+"""Packages of the dependency groups are **not imported at module level** (a check of a
+repository-wide convention).
 
-`[dependency-groups]` の `dev` 以外（anima / sbv2 / siglip2 / birefnet / …）は**既定の
-`uv sync` に入らない**（pyproject の同 NOTE）。それらを module 直下で import すると、その
-モジュールを**読むだけ**で `ModuleNotFoundError` になり、グループを同期していない環境では
-**pytest が collection ごと落ちる**。
+The `[dependency-groups]` other than `dev` (anima / sbv2 / siglip2 / birefnet / …) **are not part
+of the default `uv sync`** (the NOTE in the pyproject). Importing them at module level makes
+**merely reading** that module raise `ModuleNotFoundError`, and in an environment that has not
+synced the group, **pytest fails at collection as a whole**.
 
-MUST: この門が要る理由は「破っても開発環境では見えない」こと。日常的にグループを同期して
-いる手元では全部通るので、壊したことに気づくのは**既定 sync の誰か**が回した時になる
-（2026-08-22 に実際に踏んだ — `anima/single_file.py` が `diffusers` と `huggingface_hub` を
-module 直下で import し、テストが 1 本 collection error になった）。9 つの recipe すべてが
-関数内 import で揃っていた慣習を、ここで機械の検査に変える。
+MUST: this check is needed because "breaking the rule is invisible in the development
+environment". Everything passes on a machine that routinely syncs the groups, so the breakage is
+noticed only when **someone on the default sync** runs it (this actually happened on 2026-08-22 —
+`anima/single_file.py` imported `diffusers` and `huggingface_hub` at module level, and one test
+became a collection error). The convention all 9 recipes followed, imports inside functions, is
+turned into a mechanical check here.
 
-使う側の作法は「要る関数の中で import する」（`anima/export.py` / `anima/patch.py` /
-`anima/lora.py` / `anima/pipeline_ref.py` などが実例）。テストから触るなら
-`pytest.importorskip` で守る（`anima/tests/test_patch.py` などが実例）。
+The convention for users is "import inside the function that needs it" (`anima/export.py` /
+`anima/patch.py` / `anima/lora.py` / `anima/pipeline_ref.py` and others are examples). A test that
+touches them guards with `pytest.importorskip` (`anima/tests/test_patch.py` and others are
+examples).
 """
 
 from __future__ import annotations
@@ -25,22 +28,24 @@ import re
 import tomllib
 from pathlib import Path
 
-#: recipe の親（`tools/export-recipes/`）。
+#: The parent of the recipes (`tools/export-recipes/`).
 ROOT = Path(__file__).resolve().parent.parent
 
-#: 常に入っている依存（core `karume` の dependencies）と、この検査の対象外グループ。
-#: `dev` は開発ツールで、テスト実行時には必ず入っている。
+#: The dependencies that are always installed (the dependencies of the core `karume`) and the
+#: groups this check leaves out. `dev` is the development tools, always installed when tests run.
 ALWAYS_SYNCED_GROUPS = frozenset({"dev"})
 
-#: core（PyPI `karume`）の pyproject（`[project] dependencies` = 常に同期される依存）。
+#: The pyproject of the core (PyPI `karume`) (`[project] dependencies` = the always-synced
+#: dependencies).
 CORE_PYPROJECT = ROOT.parent / "exporter" / "pyproject.toml"
 
-#: グループの**宣言**には現れないが既定 sync に入らない import 名（推移依存）。
+#: Import names that do not appear in any group's **declaration** but are not in the default sync
+#: (transitive dependencies).
 #:
-#: `tokenizers` は `transformers` の依存として入るだけなので、グループの宣言だけを見る
-#: 導出には現れない — それを module 直下へ書くと、この門は緑のまま既定 sync の環境が
-#: collection error になる（`tests/test_gemma_tokenizer.py` の `importorskip` は人手で
-#: この穴を埋めている側）。
+#: `tokenizers` is installed only as a dependency of `transformers`, so a derivation that reads
+#: only the group declarations misses it — writing it at module level would keep this check green
+#: while the default-sync environment hits a collection error (the `importorskip` of
+#: `tests/test_gemma_tokenizer.py` is the side that fills this hole by hand).
 EXTRA_GATED = frozenset({"tokenizers"})
 
 
@@ -81,12 +86,14 @@ def _import_names(requirement: str) -> frozenset[str]:
 
 
 def _always_synced_modules() -> frozenset[str]:
-    """core の `[project] dependencies`（グループと無関係に必ず同期される import 名）。
+    """The core's `[project] dependencies` (import names always synced, regardless of the
+    groups).
 
-    グループが宣言していても、core の基本依存にある名前は gated ではない — `torchvision` は
-    `anima` / `siglip2-preprocess` グループが宣言しているが、`torchvision::deform_conv2d` の
-    op 登録のために core が常に引く（`tools/exporter/pyproject.toml`）。除かないと、正当な
-    module 直下 `import torchvision` をこの門が誤って落とす。
+    A name in the core's base dependencies is not gated even if a group declares it —
+    `torchvision` is declared by the `anima` / `siglip2-preprocess` groups, but the core always
+    pulls it in to register the `torchvision::deform_conv2d` op (`tools/exporter/pyproject.toml`).
+    Without excluding it, this check would wrongly fail a legitimate module-level
+    `import torchvision`.
     """
     core = tomllib.loads(CORE_PYPROJECT.read_text(encoding="utf-8"))
     return frozenset(
@@ -97,11 +104,13 @@ def _always_synced_modules() -> frozenset[str]:
 
 
 def _gated_modules() -> frozenset[str]:
-    """既定 sync に入らないグループが持ち込む import 名の集合（pyproject から導出）。
+    """The set of import names brought in by the groups outside the default sync (derived from
+    the pyproject).
 
-    表を第 2 の場所に持たない — グループを足した日にこの門が自動で追随する。宣言だけでは
-    足りないぶん（推移依存 = {@link EXTRA_GATED}）と、宣言されていても常に同期されるぶん
-    （core の基本依存）を、それぞれ足し引きする。
+    No table is kept in a second place — this check follows automatically on the day a group is
+    added. What the declarations alone miss (transitive dependencies = {@link EXTRA_GATED}) is
+    added, and what is always synced although declared (the core's base dependencies) is
+    subtracted.
     """
     groups = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     gated: set[str] = set(EXTRA_GATED)
@@ -114,10 +123,11 @@ def _gated_modules() -> frozenset[str]:
 
 
 def _recipe_sources() -> list[Path]:
-    """recipe 本体の `.py`（テストと `__pycache__` は除く）。
+    """The `.py` files of the recipes themselves (tests and `__pycache__` excluded).
 
-    ルート直下（`dist.py` / `conftest.py`）も対象 — とくに `conftest.py` は pytest が必ず
-    読むので、そこに gated import が入れば門が守るはずの collection error がそのまま起きる。
+    The files at the root (`dist.py` / `conftest.py`) are included — `conftest.py` in particular is
+    always read by pytest, so a gated import there would cause exactly the collection error this
+    check is meant to prevent.
     """
     return sorted(
         path
@@ -127,7 +137,7 @@ def _recipe_sources() -> list[Path]:
 
 
 def _module_level_imports(source: Path) -> set[str]:
-    """module 直下（関数・クラスの中ではない）で import している最上位モジュール名。"""
+    """The top-level module names imported at module level (not inside a function or class)."""
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     names: set[str] = set()
     for node in tree.body:
@@ -140,7 +150,8 @@ def _module_level_imports(source: Path) -> set[str]:
 
 class TestOptionalGroupImports:
     def test_the_gated_set_is_not_empty(self) -> None:
-        """導出が空になったら（pyproject の形が変わったら）この門は恒真になる。"""
+        """If the derivation came out empty (the pyproject's shape changed), this check would be
+        vacuous."""
         gated = _gated_modules()
 
         assert "diffusers" in gated
@@ -148,7 +159,8 @@ class TestOptionalGroupImports:
         assert "transformers" in gated
 
     def test_the_gated_set_covers_the_transitive_dependency(self) -> None:
-        """宣言に無い推移依存（`transformers` 経由の `tokenizers`）も gated 側。"""
+        """A transitive dependency missing from the declarations (`tokenizers` through
+        `transformers`) is gated too."""
         assert "tokenizers" in _gated_modules()
 
     def test_the_gated_set_holds_import_names_not_distribution_names(self) -> None:
@@ -161,16 +173,17 @@ class TestOptionalGroupImports:
         assert "pillow" not in gated
 
     def test_a_core_dependency_is_never_gated(self) -> None:
-        """`torchvision` はグループが宣言していても core が常に引く（誤検出の側を閉じる）。"""
+        """`torchvision` is always pulled in by the core even though a group declares it (closes
+        the false-positive side)."""
         assert "torchvision" not in _gated_modules()
 
     def test_it_finds_the_recipe_sources(self) -> None:
-        """走査が 0 本なら、やはり恒真になる。"""
+        """If the scan finds nothing, it is vacuous as well."""
         sources = _recipe_sources()
 
         assert len(sources) > 50
         assert any(path.name == "single_file.py" for path in sources)
-        # ルート直下の 2 本（`conftest.py` は pytest が必ず読む）を取りこぼさない。
+        # The 2 files at the root are not missed (`conftest.py` is always read by pytest).
         assert any(path.name == "dist.py" for path in sources)
         assert any(path.name == "conftest.py" for path in sources)
 
@@ -183,6 +196,7 @@ class TestOptionalGroupImports:
         }
 
         assert offenders == {}, (
-            "既定 sync に入らない依存を module 直下で import している — 要る関数の中へ移す"
-            f"（グループ非同期の環境では読むだけで落ちる）: {offenders}"
+            "a dependency outside the default sync is imported at module level — move it into the"
+            " function that needs it (in an environment without the group, merely reading it"
+            f" fails): {offenders}"
         )

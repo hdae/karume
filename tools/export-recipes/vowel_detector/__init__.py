@@ -1,17 +1,18 @@
-"""母音検出 CRNN（音声 → リップシンク用の母音系列）の export recipe（ADR 0065 決定 2）。
+"""Export recipe of the vowel-detection CRNN (audio → vowel sequence for lip-sync; ADR 0065
+decision 2).
 
-ここに入るのは**汎用 exporter core に載せられないもの**だけ: 上流モデル由来のパッチ層
-（{@link vowel_detector.patch}）・export 台本・配布 recipe
-（{@link vowel_detector.distribution}）とカードテンプレート（{@link vowel_detector.card}）。
-依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
-が機械で守る）。
+Only **what cannot live in the general-purpose exporter core** goes here: the patch layer derived
+from the upstream model ({@link vowel_detector.patch}), the export script, the distribution recipe
+({@link vowel_detector.distribution}) and the card template ({@link vowel_detector.card}).
+Dependencies point **one way only, recipe → core**
+(`tools/exporter/tests/test_architecture_boundary.py` enforces it mechanically).
 
-パッケージ名がハイフンでなく `vowel_detector` なのは Python の識別子制約 — pipeline 名
-（`--pipeline vowel-detector`）と系列名・リポ名の綴りは従来どおりハイフンで、そちらは
-{@link vowel_detector.distribution} が持つ。
+The package is named `vowel_detector` rather than with a hyphen because of Python's identifier
+rules — the pipeline name (`--pipeline vowel-detector`) and the series and repository names keep
+the hyphen as before, and {@link vowel_detector.distribution} holds those.
 
-MUST: **再輸出しない**（`from vowel_detector import X` で family の中身が芋づるに import
-される形にしない）。呼び出し側はサブモジュールを名指しで import すること。
+MUST: **no re-exports** (do not make `from vowel_detector import X` drag in the whole family's
+contents). Callers import the submodules by name.
 
-台本の起動は export-recipes ルートから（例: `uv run python -m vowel_detector.export`）。
+Run the scripts from the export-recipes root (e.g. `uv run python -m vowel_detector.export`).
 """

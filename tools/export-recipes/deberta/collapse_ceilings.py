@@ -1,34 +1,37 @@
-"""DeBERTa w8a8 の崩壊上限を導き直す
-（`packages/models/tests/helpers/collapse-ceilings.ts` の `COLLAPSE_CEILINGS`）。
+"""Re-derive the collapse ceilings of DeBERTa w8a8
+(`COLLAPSE_CEILINGS` in `packages/models/tests/helpers/collapse-ceilings.ts`).
 
-門の第 3 層は output.2〜24 の相対 RMS 誤差 ‖x − golden‖₂ / ‖golden‖₂ を出力ごとの
-上限で見る。上限 = 出力ごと（観測点 = output.k）に、正当な標本（全ケース）の最悪 × 2 を
-有効数字 2 桁で切り上げた値（ADR 0110 決定 5-3「観測点の実測 × 2 程度」・決定 4 の
-MUST NOT〈実測の 5〜10 倍を E2E の帯に使わない〉）。ここは CPU の段だけを持つ。手順の全体
-（GPU の dump と故障注入を含む順序）は ADR 0026 追記「導き直しの手順」が正本。
+The third tier of the check compares the relative RMS error ‖x − golden‖₂ / ‖golden‖₂ of
+output.2 to output.24 against a per-output ceiling. Ceiling = per output (observation point =
+output.k), the worst value over the legitimate samples (all cases) × 2, rounded up to two
+significant digits (ADR 0110 decision 5-3 "about 2 × the measurement at the observation point";
+the MUST NOT of decision 4: do not use 5 to 10 × the measurement as an E2E band). This script
+holds only the CPU steps. The whole procedure (including the order of the GPU dump and the fault
+injection) is canonical in the ADR 0026 addendum on the re-derivation procedure.
 
-起動（tools/export-recipes から — transformers は一時足し）:
+Run (from tools/export-recipes — transformers is added temporarily):
 
     HF_HUB_OFFLINE=1 ATEN_CPU_CAPABILITY=<avx512|avx2|default> \\
         uv run --with 'transformers==5.14.1' \\
-        python -m deberta.collapse_ceilings mirror <作業 dir> <tag> <スレッド数>
+        python -m deberta.collapse_ceilings mirror <work dir> <tag> <threads>
     HF_HUB_OFFLINE=1 uv run --with 'transformers==5.14.1' \\
-        python -m deberta.collapse_ceilings derive <作業 dir>
+        python -m deberta.collapse_ceilings derive <work dir>
 
-- `mirror`: torch 鏡像（export の `--act-quant` と同じ活性 i8 のフック）の全出力を
-  `<作業 dir>/mirror_<tag>.pt` へ書く。命令セットは `ATEN_CPU_CAPABILITY` で選び、
-  tag は `<isa>_t<スレッド数>`。
-- `derive`: 作業 dir の標本から上限を導き `<作業 dir>/derive.json` を書く
-  （`ceilings` がテストの表）。
+- `mirror`: write all outputs of the torch mirror (the same activation-i8 hooks as export's
+  `--act-quant`) to `<work dir>/mirror_<tag>.pt`. The instruction set is chosen with
+  `ATEN_CPU_CAPABILITY`, and the tag is `<isa>_t<threads>`.
+- `derive`: derive the ceilings from the samples in the work dir and write
+  `<work dir>/derive.json` (`ceilings` is the table of the test).
 
-標本（全て保存済み golden `io-i8a8.<case>` に対する相対 RMS 誤差・f64）:
-  - gpu_a8          … GPU の a8 経路の dump（`gpu_a8.<case>.f32` —
-                      `tools/diag/deberta-collapse.ts dump`）
-  - cpu_<isa>_t<n>  … この機の CPU で採り直した鏡像の別標本 6 本（`mirror_<tag>.pt`）
-  - emb_noise_s<k>  … 鏡像の埋め込みの出口に相対 ±2^-23 の乱数を入れた摂動アンサンブル
-                      K=8（`derive` の中で回す）
-参考（上限には入れない）: gpu_f32（`gpu_f32.<case>.f32` — f32 経路は別の関数。第 3 層では
-区別できないことの記録）。
+Samples (all are relative RMS errors against the saved golden `io-i8a8.<case>`, in f64):
+  - gpu_a8          … dump of the GPU's a8 path (`gpu_a8.<case>.f32` —
+                      `tools/diag/deberta-collapse.ts dump`)
+  - cpu_<isa>_t<n>  … 6 further samples of the mirror re-taken on this machine's CPU
+                      (`mirror_<tag>.pt`)
+  - emb_noise_s<k>  … perturbation ensemble with relative ±2^-23 random noise at the exit of the
+                      mirror's embedding, K=8 (run inside `derive`)
+For reference (not used for the ceilings): gpu_f32 (`gpu_f32.<case>.f32` — the f32 path is a
+different function; a record that the third tier cannot tell the two apart).
 """
 
 from __future__ import annotations
@@ -50,20 +53,21 @@ from karume.quantize import fake_quant_int8
 
 from . import export, patch
 
-#: 鏡像 golden の置き場（`export --dtype i8 --act-quant` の 24 層の系列）。
+#: Where the mirror goldens live (the 24-layer series of `export --dtype i8 --act-quant`).
 SERIES = export.DEFAULT_OUT_ROOTS["i8"] / "full-24layer"
 CASES = ("case0", "case1", "case2", "padded")
 CPU_SAMPLES = ("avx512_t1", "avx512_t6", "avx2_t1", "avx2_t6", "default_t1", "default_t6")
 K = 8
-FIRST = 2  # output.2 以降が第 3 層
+FIRST = 2  # output.2 onwards is the third tier
 MULTIPLIER = 2
-SIGNIFICANT = 2  # 上限の有効数字（切り上げ）
-#: 上限に入れない標本（f32 経路は a8 の標本ではない）。
+SIGNIFICANT = 2  # significant digits of a ceiling (rounded up)
+#: The sample left out of the ceilings (the f32 path is not a sample of a8).
 REFERENCE_ONLY = "gpu_f32"
 
 
 def build() -> tuple[nn.Module, Mapping[str, export.InputArgs]]:
-    """export と同じ経路で 24 層の i8 の wrapper（全 hidden_states を出す形）と入力を組む。"""
+    """Build the 24-layer i8 wrapper (the form that outputs every hidden_states) and the inputs on
+    the same path as export."""
     from transformers import AutoTokenizer
 
     model = export.load_model(export.MODEL_ID, 24)
@@ -83,7 +87,8 @@ def run(wrapper: nn.Module, args: export.InputArgs) -> list[torch.Tensor]:
 
 
 def run_mirror(wrapper: nn.Module, args: export.InputArgs) -> list[torch.Tensor]:
-    """活性 i8 のフック（export の `--act-quant` と同じ）を掛けて回す。フックは必ず外す。"""
+    """Run with the activation-i8 hooks (the same as export's `--act-quant`). The hooks are always
+    removed."""
     handles, _ = act_quant.attach_act_quant(wrapper)
     try:
         return run(wrapper, args)
@@ -102,7 +107,8 @@ def nonfinite(x: np.ndarray) -> int:
 
 
 def ceil_significant(x: float, digits: int = SIGNIFICANT) -> float:
-    """x を有効数字 digits 桁で切り上げる（10 進で丸める — 2 進の端数で 1 段ずれないため）。"""
+    """Round x up to `digits` significant digits (rounded in decimal — so a binary fraction does
+    not push it one step up)."""
     quantum = Decimal(1).scaleb(math.floor(math.log10(x)) - digits + 1)
     return float((Decimal(repr(x)) / quantum).to_integral_value(rounding=ROUND_CEILING) * quantum)
 
@@ -206,15 +212,17 @@ def derive(work: Path) -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    mirror = sub.add_parser("mirror", help="CPU の鏡像の別標本を 1 本書く")
+    mirror = sub.add_parser("mirror", help="write one further sample of the CPU mirror")
     mirror.add_argument("work", type=Path)
-    mirror.add_argument("tag", help="<isa>_t<スレッド数>（例 avx512_t6）")
+    mirror.add_argument("tag", help="<isa>_t<threads> (e.g. avx512_t6)")
     mirror.add_argument("threads", type=int)
-    derive_parser = sub.add_parser("derive", help="標本から上限を導いて derive.json を書く")
+    derive_parser = sub.add_parser(
+        "derive", help="derive the ceilings from the samples and write derive.json"
+    )
     derive_parser.add_argument("work", type=Path)
     args = parser.parse_args(argv)
     if not args.work.is_dir():
-        raise SystemExit(f"作業 dir が無い: {args.work}")
+        raise SystemExit(f"work dir does not exist: {args.work}")
     if args.command == "mirror":
         write_mirror(args.work, args.tag, args.threads)
     else:

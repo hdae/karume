@@ -1,4 +1,4 @@
-"""公式 mobile QAT を再量子化せず、text グラフ・PLE・tokenizer として保存する。"""
+"""Save the official mobile QAT, without requantization, as the text graph, PLE and tokenizer."""
 
 from __future__ import annotations
 
@@ -37,10 +37,11 @@ from .config import (
 from .ple import build_ple
 from .trace import trace_qat
 
-#: 上流 checkpoint のうち text 変換が**読まない**テンソル群（ヘッダの綴りで数える）。
-#: KV cache の SRQ scale は f32 の KV を使うので読まず（上流 transformers も同じ）、
-#: vision / audio は text 専用の変換対象外（ADR 0097 決定 1）。未対応が暗黙にならないよう、
-#: 「使わなかった量」を系列の記録に残す。
+#: The tensor groups of the upstream checkpoint the text conversion **does not read** (counted by
+#: their header spellings). The KV cache's SRQ scales are not read because the KV is f32 (as in
+#: upstream transformers), and vision / audio are outside the text-only conversion (ADR 0097
+#: decision 1). So that nothing is unsupported implicitly, "how much went unused" is kept in the
+#: series record.
 UNUSED_UPSTREAM_MARKERS: Mapping[str, tuple[str, ...]] = {
     "kvCacheScales": ("k_cache_scale", "v_cache_scale"),
     "vision": ("vision_tower", "embed_vision"),
@@ -49,10 +50,11 @@ UNUSED_UPSTREAM_MARKERS: Mapping[str, tuple[str, ...]] = {
 
 
 def upstream_unused(model_dir: Path) -> dict[str, int]:
-    """上流 safetensors の**ヘッダだけ**を読み、変換が使わないテンソルを群ごとに数える。"""
+    """Read **only the headers** of the upstream safetensors and count, per group, the tensors the
+    conversion does not use."""
     containers = sorted(model_dir.glob("*.safetensors"))
     if not containers:
-        raise ValueError(f"{model_dir}: safetensors が 1 本も無い")
+        raise ValueError(f"{model_dir}: no safetensors at all")
     names = [name for container in containers for name in _upstream_tensor_names(container)]
     return {
         group: sum(any(marker in name for marker in markers) for name in names)
@@ -61,7 +63,8 @@ def upstream_unused(model_dir: Path) -> dict[str, int]:
 
 
 def _upstream_tensor_names(path: Path) -> list[str]:
-    """上流 safetensors の**ヘッダだけ**からテンソル名を引く（実体は 1 バイトも読まない）。"""
+    """Take the tensor names from **only the header** of an upstream safetensors (not one byte of
+    data is read)."""
     with safe_open(str(path), framework="np") as handle:
         return list(handle.keys())
 
@@ -69,7 +72,7 @@ def _upstream_tensor_names(path: Path) -> list[str]:
 def export_qat(
     model_dir: Path, destination: Path, model: str, *, tokenizer_dir: Path
 ) -> dict[str, Any]:
-    """参照・全 bytes の検査も含めて1回の据え替えにする。
+    """Make it one swap into place, the reference and the all-bytes check included.
 
     `model_dir` holds the mobile QAT weights, `config.json` and `generation_config.json`;
     `tokenizer_dir` the `tokenizer.json` (the regular `-it` repository — `config.SOURCES`). Both
@@ -101,18 +104,21 @@ def export_qat(
                 traced.graph,
                 traced.tensors,
                 provenance=PROVENANCE,
-                # グラフ名は**部品名**（= karume.json の weights のキー）。QAT 系列の部品名は
-                # 通常 Gemma と同じ 1 語（`gemma4_qat.distribution` の weights も同じ定数で名乗る）
-                # で、系列名（`gemma4-qat-<モデル>-product`）とは一致しない（container-v1 §2.1）。
+                # The graph name is **the component name** (= the key of weights in karume.json).
+                # A QAT series' component name is the same single word as the regular Gemma's
+                # (the weights of `gemma4_qat.distribution` use the same constant), not the series
+                # name (`gemma4-qat-<model>-product`) (container-v1 §2.1).
                 graph_name=GEMMA4_ROLE,
                 fixed_weights=traced.fixed,
                 assets=ple.assets,
             )
         finally:
-            # MUST: 一時ファイルは据え替えの前に消す（作業席ごと据わるので、残すと配布物に混ざる）。
+            # MUST: delete the temporary files before the swap (the whole working directory is
+            # swapped in, so leftovers would end up in the distribution).
             ple.discard()
         assert_fixed_bytes(target, traced.fixed)
-        # PLE の逆量子化ビット一致は**据えた容器から読み直して**見る（製品系列と同じ門）。
+        # PLE's bit-exact dequantization is checked **by reading back from the written
+        # container** (the same check as the product series).
         index = json.loads(bytes(ple.assets[PLE_INDEX_ASSET].payload))
         with safe_open(str(staged / PLE_PROBE_FILE), framework="pt") as handle:
             reference = handle.get_tensor(PROBE_INPUTS_KEY)
@@ -122,7 +128,8 @@ def export_qat(
         (staged / "tokenizer.json").write_text(
             json.dumps(asset_payload(compiled, source=source), ensure_ascii=False) + "\n"
         )
-        # dist は元 config を再読せず、同じ据え替えで保存した宣言から構成を導く。
+        # dist does not reread the original config; it derives the configuration from the
+        # declarations saved in the same swap.
         (staged / "config.json").write_bytes((model_dir / "config.json").read_bytes())
         (staged / "generation_config.json").write_bytes(
             (model_dir / "generation_config.json").read_bytes()

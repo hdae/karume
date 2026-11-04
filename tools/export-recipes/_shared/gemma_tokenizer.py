@@ -1,29 +1,33 @@
-"""Gemma 系（gemma4 / EmbeddingGemma）の SPM-BPE トークナイザを compile-to-asset する
-（ADR 0084 決定 1・複数 family で共有する補助なので `_shared` — ADR 0065 決定 2）。
+"""Compile the SPM-BPE tokenizer of the Gemma line (gemma4 / EmbeddingGemma) into an asset
+(ADR 0084 decision 1; a helper shared by several families, hence `_shared` — ADR 0065 decision 2).
 
-持つのは 3 つ:
+It does three things:
 
-  ① **compile** — 上流 `tokenizer.json`（32.2MB）を読み、Deno 側が引くだけで済む小さな
-     schema へ畳む。**未知の構成は compile 時に落とす**（{@link assert_supported}）—
-     実行時に散らさないのがこの形を採る理由そのもの（ADR 0084 検討した代替案 b）。
-     畳んだ先が持つのは「id 順の vocab 行 / merges の id 対 / byteIds 256 本 /
-     added tokens / special id 集合」だけで、Qwen2 で要った焼き表（`code-ranges` /
-     `caseFold` / `nfcSegments`）は 1 つも要らない — Gemma の normalizer は
-     `Replace(" " → "▁")` 1 本、pre_tokenizer は `Split(" ", MergedWithPrevious)` だけで、
-     Unicode 分類にも NFC にも触らないため（ADR 0084 Context 2）。
+  1. **compile** — read the upstream `tokenizer.json` (32.2MB) and fold it into a small schema
+     that the Deno side only has to look up. **An unknown configuration fails at compile time**
+     ({@link assert_supported}) — not scattering the checks over run time is the very reason for
+     this shape (ADR 0084, considered alternative b). The folded form holds only "vocab rows in
+     id order / merges as id pairs / 256 byteIds / added tokens / the set of special ids"; none
+     of the baked tables Qwen2 needed (`code-ranges` / `caseFold` / `nfcSegments`) is needed —
+     Gemma's normalizer is a single `Replace(" " → "▁")` and its pre_tokenizer is only
+     `Split(" ", MergedWithPrevious)`, so neither touches Unicode classes or NFC (ADR 0084
+     Context 2).
 
-  ② **parity fixture** — TS 実装の期待値。**採取は `tokenizers.Tokenizer` を独立に呼ぶ経路
-     だけ**で、①の畳み込みも Python 側の前処理 helper も一切通さない（ADR 0084 決定 7・
-     ADR 0048 の追記 = 前処理を TS と Python で共有すると parity が恒真化する）。
+  2. **parity fixture** — the expected values of the TS implementation. **They are collected
+     only through a path that calls `tokenizers.Tokenizer` independently**, never through the
+     folding of (1) or any Python-side preprocessing helper (ADR 0084 decision 7; the ADR 0048
+     addendum = sharing the preprocessing between TS and Python makes parity vacuous).
 
-  ③ **資産の部分集合** — フィクスチャは git 管理なので、262,144 行の語彙と 514,906 本の
-     merges を丸ごとは載せられない。ケース本文の**部分文字列**に当たるものだけへ絞る
-     （{@link subset_keys}）。絞り方が誤っていても危険側には倒れない: 期待値は常に上流
-     （full 資産）から採るので、部分集合が足りなければ TS 側の突合が**落ちる**。
+  3. **asset subset** — the fixture is tracked in git, so the 262,144-row vocabulary and the
+     514,906 merges cannot be stored whole. It is narrowed to the entries that are **substrings**
+     of the case texts ({@link subset_keys}). A wrong narrowing never errs on the unsafe side:
+     the expected values always come from upstream (the full asset), so a subset that is too
+     small makes the TS-side comparison **fail**.
 
-MUST: 家族固有の綴り（入力の置き場・系列名・ケース）は**呼び手（family recipe）が持つ**。
-ここが知っているのは Gemma の tokenizer 構成だけで、gemma4 と EmbeddingGemma のどちらでも
-同じ関数がそのまま通る（ADR 0084 決定 6 の「1 実装 2 資産」を実際に成り立たせる分割）。
+MUST: family-specific spellings (where the inputs live, series names, cases) are **held by the
+caller (the family recipe)**. This module knows only Gemma's tokenizer configuration, and the
+same functions serve both gemma4 and EmbeddingGemma unchanged (the split that actually makes
+ADR 0084 decision 6's "one implementation, two assets" hold).
 """
 
 from __future__ import annotations
@@ -37,13 +41,16 @@ from typing import Any
 
 from _shared.paths import REPO_ROOT
 
-#: 資産 schema の版（Deno 側が知らない版を黙って読まないための欄）。
+#: The asset schema version (a field so the Deno side never silently reads a version it does
+#: not know).
 ASSET_FORMAT = "karume-gemma-tokenizer/1"
 
-#: SentencePiece の空白置換文字（U+2581）。normalizer と decoder の両方が使う。
+#: SentencePiece's whitespace replacement character (U+2581). Used by both the normalizer and
+#: the decoder.
 METASPACE = "▁"
 
-#: 受理する上流構成（**exact-match** — 1 欄でも違えば別のトークナイザ）。
+#: The accepted upstream configuration (**exact-match** — one differing field means a different
+#: tokenizer).
 EXPECTED_NORMALIZER = {"type": "Replace", "pattern": {"String": " "}, "content": METASPACE}
 EXPECTED_PRE_TOKENIZER = {
     "type": "Split",
@@ -60,48 +67,49 @@ EXPECTED_DECODER = {
     ],
 }
 
-#: `spec` 欄が採る綴り（Deno 側が同じ文字列で exact-match する）。
+#: The spellings the `spec` field takes (the Deno side exact-matches the same strings).
 SPEC_NORMALIZER = "replace-space-with-metaspace"
 SPEC_PRE_TOKENIZER = "split-space-merged-with-previous"
 SPEC_DECODER = "metaspace-byte-fallback-fuse"
 
-#: post_processor の 2 形（実資産の実測 — gemma4 は素通し / EmbeddingGemma は bos…eos）。
+#: The two post_processor shapes (measured on the real assets — gemma4 passes through /
+#: EmbeddingGemma wraps in bos…eos).
 POST_NONE = "none"
 POST_BOS_EOS = "bos-eos"
 
-#: 特殊トークンの綴り（両資産共通）。
+#: Spellings of the special tokens (common to both assets).
 UNK_TOKEN = "<unk>"
 BOS_TOKEN = "<bos>"
 EOS_TOKEN = "<eos>"
 
 
 def byte_token(byte: int) -> str:
-    """byte_fallback 語彙の綴り（`tokenizers` の `format!("<{:#04X}>")` と同じ）。"""
+    """The spelling of a byte_fallback token (same as `tokenizers`' `format!("<{:#04X}>")`)."""
     return f"<0x{byte:02X}>"
 
 
 class UnsupportedTokenizerError(ValueError):
-    """上流 `tokenizer.json` が受理集合の外（compile 時に落とす）。"""
+    """The upstream `tokenizer.json` is outside the accepted set (fails at compile time)."""
 
 
 @dataclass(frozen=True)
 class CompiledTokenizer:
-    """畳んだ結果（JSON へ落とす手前の形）。"""
+    """The folded result (the shape just before it is written as JSON)."""
 
-    #: id 順の語彙（行番号 = id）。
+    #: The vocabulary in id order (row number = id).
     vocab: list[str]
-    #: merges を `(左 id, 右 id)` で持つ。並び順が rank そのもの。
+    #: Merges as `(left id, right id)`. The order is the rank itself.
     merges: list[tuple[int, int]]
-    #: byte 0..255 に対応する id（**256 本明示** — ADR 0084 決定 1 の MUST）。
+    #: The ids for bytes 0..255 (**all 256 explicit** — the MUST of ADR 0084 decision 1).
     byte_ids: list[int]
-    #: 追加語彙 `(綴り, id)`（正規化の手前で切り出される）。
+    #: Added tokens `(spelling, id)` (split off before normalization).
     added_tokens: list[tuple[str, int]]
-    #: `special: true` の追加語彙の id（decode の skip 対象）。
+    #: Ids of the added tokens with `special: true` (skipped by decode).
     special_ids: list[int]
     unk_id: int
     bos_id: int
     eos_id: int
-    #: post_processor の形（{@link POST_NONE} / {@link POST_BOS_EOS}）。
+    #: The post_processor shape ({@link POST_NONE} / {@link POST_BOS_EOS}).
     post_processor: str
 
 
@@ -111,52 +119,54 @@ def _require(condition: bool, message: str) -> None:
 
 
 def assert_supported(raw: Mapping[str, Any]) -> str:
-    """上流 `tokenizer.json` が受理集合に入っていることを検め、post_processor の形を返す。
+    """Check that the upstream `tokenizer.json` is in the accepted set; return the post_processor
+    shape.
 
-    MUST: **exact-match で見る**（欄の有無だけを見ない）。normalizer が 1 文字違えば
-    metaspace の入り方が変わり、pre_tokenizer が変われば BPE に渡る単位が変わる —
-    どちらも例外にならず id 列だけが静かに別物になる。
+    MUST: **compare by exact match** (not only whether a field is present). A normalizer that
+    differs by one character changes how metaspace is inserted, and a different pre_tokenizer
+    changes the units handed to BPE — neither raises; only the id sequence silently changes.
     """
     model = raw.get("model")
-    _require(isinstance(model, Mapping), "model 欄が無い")
-    _require(model.get("type") == "BPE", f"model.type が BPE でない（{model.get('type')!r}）")
-    _require(model.get("dropout") is None, "model.dropout が null でない（学習時の枝刈り）")
+    _require(isinstance(model, Mapping), "no model field")
+    _require(model.get("type") == "BPE", f"model.type is not BPE ({model.get('type')!r})")
+    _require(model.get("dropout") is None, "model.dropout is not null (training-time dropout)")
     _require(
         model.get("continuing_subword_prefix") is None,
-        "model.continuing_subword_prefix が null でない",
+        "model.continuing_subword_prefix is not null",
     )
-    _require(model.get("end_of_word_suffix") is None, "model.end_of_word_suffix が null でない")
-    _require(model.get("unk_token") == UNK_TOKEN, f"model.unk_token が {UNK_TOKEN!r} でない")
-    _require(model.get("byte_fallback") is True, "model.byte_fallback が true でない")
-    _require(model.get("fuse_unk") is True, "model.fuse_unk が true でない")
-    _require(model.get("ignore_merges") is False, "model.ignore_merges が false でない")
-    _require(raw.get("truncation") is None, "truncation が null でない")
-    _require(raw.get("padding") is None, "padding が null でない")
+    _require(model.get("end_of_word_suffix") is None, "model.end_of_word_suffix is not null")
+    _require(model.get("unk_token") == UNK_TOKEN, f"model.unk_token is not {UNK_TOKEN!r}")
+    _require(model.get("byte_fallback") is True, "model.byte_fallback is not true")
+    _require(model.get("fuse_unk") is True, "model.fuse_unk is not true")
+    _require(model.get("ignore_merges") is False, "model.ignore_merges is not false")
+    _require(raw.get("truncation") is None, "truncation is not null")
+    _require(raw.get("padding") is None, "padding is not null")
     _require(
         raw.get("normalizer") == EXPECTED_NORMALIZER,
-        f"normalizer が {EXPECTED_NORMALIZER} でない（{raw.get('normalizer')!r}）",
+        f"normalizer is not {EXPECTED_NORMALIZER} ({raw.get('normalizer')!r})",
     )
     _require(
         raw.get("pre_tokenizer") == EXPECTED_PRE_TOKENIZER,
-        f"pre_tokenizer が {EXPECTED_PRE_TOKENIZER} でない（{raw.get('pre_tokenizer')!r}）",
+        f"pre_tokenizer is not {EXPECTED_PRE_TOKENIZER} ({raw.get('pre_tokenizer')!r})",
     )
     _require(
         raw.get("decoder") == EXPECTED_DECODER,
-        f"decoder が {EXPECTED_DECODER} でない（{raw.get('decoder')!r}）",
+        f"decoder is not {EXPECTED_DECODER} ({raw.get('decoder')!r})",
     )
     return _post_processor_kind(raw.get("post_processor"))
 
 
 def _post_processor_kind(post: Any) -> str:
-    """post_processor を 2 形のどちらかへ判定する（それ以外は落とす）。
+    """Classify the post_processor as one of the two shapes (anything else fails).
 
-    見るのは `single` だけ — 対（`pair`）を組む経路はこの移植の射程外で、そちらの綴りが
-    違っても single の振る舞いは変わらないため（受理を無闇に狭めない）。
+    Only `single` is examined — the path that builds pairs (`pair`) is outside this port's scope,
+    and a different spelling there does not change the behaviour of single (the accepted set is
+    not narrowed needlessly).
     """
-    _require(isinstance(post, Mapping), "post_processor が無い")
+    _require(isinstance(post, Mapping), "no post_processor")
     _require(
         post.get("type") == "TemplateProcessing",
-        f"post_processor.type が TemplateProcessing でない（{post.get('type')!r}）",
+        f"post_processor.type is not TemplateProcessing ({post.get('type')!r})",
     )
     sequence_a = {"Sequence": {"id": "A", "type_id": 0}}
     single = post.get("single")
@@ -169,57 +179,63 @@ def _post_processor_kind(post: Any) -> str:
     ]
     if single == wrapped:
         return POST_BOS_EOS
-    raise UnsupportedTokenizerError(f"post_processor.single が未知の形（{single!r}）")
+    raise UnsupportedTokenizerError(f"post_processor.single has an unknown shape ({single!r})")
 
 
 def compile_tokenizer(raw: Mapping[str, Any]) -> CompiledTokenizer:
-    """上流 `tokenizer.json` を畳む（受理集合の検査つき）。"""
+    """Fold the upstream `tokenizer.json` (with the accepted-set check)."""
     post_processor = assert_supported(raw)
     model = raw["model"]
     vocab_map: Mapping[str, int] = model["vocab"]
-    _require(len(set(vocab_map.values())) == len(vocab_map), "語彙の id に重複がある")
+    _require(len(set(vocab_map.values())) == len(vocab_map), "duplicate ids in the vocabulary")
     vocab = [""] * len(vocab_map)
     for token, token_id in vocab_map.items():
         _require(
             isinstance(token_id, int) and 0 <= token_id < len(vocab_map),
-            f"語彙 {token!r} の id {token_id!r} が 0..{len(vocab_map) - 1} の外",
+            f"token {token!r} has id {token_id!r} outside 0..{len(vocab_map) - 1}",
         )
         vocab[token_id] = token
-    # MUST: byte 256 本を**明示的に引く**。実資産では `<0x00>`..`<0xFF>` が連番だが、それは
-    # この資産の実測事実であって schema の保証ではない（ADR 0084 決定 1）。
+    # MUST: look up the 256 bytes **explicitly**. In the real assets `<0x00>`..`<0xFF>` are
+    # consecutive, but that is a measured fact about these assets, not a schema guarantee
+    # (ADR 0084 decision 1).
     byte_ids: list[int] = []
     for byte in range(256):
         spelling = byte_token(byte)
         if spelling not in vocab_map:
-            raise UnsupportedTokenizerError(f"byte_fallback 語彙 {spelling!r} が語彙に無い")
+            raise UnsupportedTokenizerError(
+                f"byte_fallback token {spelling!r} is not in the vocabulary"
+            )
         byte_ids.append(vocab_map[spelling])
-    _require(len(set(byte_ids)) == 256, "byte_fallback 語彙の id に重複がある")
-    # decode 側は「id が byteIds に入っているか」で byte run を判定する。上流の
-    # `ByteFallback` デコーダは**綴りの形**で判定するので、形が一致する語彙が 256 本ちょうど
-    # であることを compile 時に確かめておかないと 2 つの判定が食い違いうる。
+    _require(len(set(byte_ids)) == 256, "duplicate ids among the byte_fallback tokens")
+    # The decode side decides a byte run by "is the id in byteIds". The upstream `ByteFallback`
+    # decoder decides by **the shape of the spelling**, so unless compile checks that exactly 256
+    # tokens have that shape, the two decisions can disagree.
     shaped = [t for t in vocab_map if len(t) == 6 and t.startswith("<0x") and t.endswith(">")]
     _require(
         len(shaped) == 256,
-        f"`<0xHH>` の形の語彙が 256 本でない（{len(shaped)} 本 — decode の byte 判定が割れる）",
+        f"the vocabulary does not have 256 tokens of the form `<0xHH>` ({len(shaped)} — the"
+        " byte decision of decode would split)",
     )
 
     merges: list[tuple[int, int]] = []
     seen_pairs: set[tuple[int, int]] = set()
     for entry in model["merges"]:
-        # 旧 format の `"左 右"` 文字列は受けない（Gemma の語彙は空白を含まないので一見
-        # 分割できるが、綴りに改行を含む語彙がある以上「行と対」の対応が別物になる）。
+        # The old format's `"left right"` strings are not accepted (Gemma's tokens contain no
+        # space, so they look splittable, but since some spellings contain a newline the
+        # "line and pair" correspondence would be a different thing).
         _require(
             isinstance(entry, list) and len(entry) == 2,
-            f"merge の要素が [左, 右] でない（{entry!r}）",
+            f"a merge entry is not [left, right] ({entry!r})",
         )
         left, right = entry
         for side in (left, right, left + right):
             if side not in vocab_map:
-                raise UnsupportedTokenizerError(f"merge の {side!r} が語彙に無い")
+                raise UnsupportedTokenizerError(f"merge part {side!r} is not in the vocabulary")
         pair = (vocab_map[left], vocab_map[right])
-        # MUST: 後勝ちを許さない。上流は HashMap なので重複対は静かに片方だけが残り、
-        # 分割規則だけが別物になる（`asset-gates.ts` の `setUnique` と同じ理由）。
-        _require(pair not in seen_pairs, f"merge の対 {(left, right)!r} が重複している")
+        # MUST: do not let the later entry win. Upstream is a HashMap, so a duplicate pair
+        # silently keeps only one and only the split rule changes (same reason as `setUnique` in
+        # `asset-gates.ts`).
+        _require(pair not in seen_pairs, f"merge pair {(left, right)!r} is duplicated")
         seen_pairs.add(pair)
         merges.append(pair)
 
@@ -229,8 +245,8 @@ def compile_tokenizer(raw: Mapping[str, Any]) -> CompiledTokenizer:
         for flag in ("single_word", "lstrip", "rstrip", "normalized"):
             _require(
                 entry.get(flag) is False,
-                f"追加語彙 {entry.get('content')!r} の {flag} が false でない"
-                "（切り出し規則が別物になる）",
+                f"added token {entry.get('content')!r} has {flag} not false"
+                " (the split-off rule would be different)",
             )
         content = entry["content"]
         added_tokens.append((content, entry["id"]))
@@ -238,16 +254,16 @@ def compile_tokenizer(raw: Mapping[str, Any]) -> CompiledTokenizer:
             special_ids.append(entry["id"])
     _require(
         len({token for token, _ in added_tokens}) == len(added_tokens),
-        "追加語彙の綴りに重複がある",
+        "duplicate spellings among the added tokens",
     )
 
     ids_by_token = dict(added_tokens)
     for name in (UNK_TOKEN, BOS_TOKEN, EOS_TOKEN):
-        _require(name in vocab_map, f"語彙に {name!r} が無い")
+        _require(name in vocab_map, f"{name!r} is not in the vocabulary")
         if name in ids_by_token:
             _require(
                 ids_by_token[name] == vocab_map[name],
-                f"{name!r} の追加語彙 id と語彙 id が食い違う",
+                f"the added-token id and the vocabulary id of {name!r} disagree",
             )
     return CompiledTokenizer(
         vocab=vocab,
@@ -263,7 +279,8 @@ def compile_tokenizer(raw: Mapping[str, Any]) -> CompiledTokenizer:
 
 
 def spec_of(compiled: CompiledTokenizer) -> dict[str, str]:
-    """Deno 側が exact-match する構成の宣言（畳んだ資産は上流 JSON を持たないため）。"""
+    """The configuration declaration the Deno side exact-matches (the folded asset does not
+    carry the upstream JSON)."""
     return {
         "normalizer": SPEC_NORMALIZER,
         "preTokenizer": SPEC_PRE_TOKENIZER,
@@ -273,10 +290,11 @@ def spec_of(compiled: CompiledTokenizer) -> dict[str, str]:
 
 
 def asset_payload(compiled: CompiledTokenizer, *, source: Mapping[str, Any]) -> dict[str, Any]:
-    """配布形の JSON（`mergesText` は行番号 = rank・`vocab` は行番号 = id）。
+    """The distribution JSON (`mergesText`: row number = rank; `vocab`: row number = id).
 
-    merges を綴りでなく **id 対**で持つのは、Gemma の語彙が改行を含む（実測 31 本）ため —
-    Qwen2 の byte-level 語彙のように「`左 右`」の行へは畳めない。
+    Merges are held as **id pairs** rather than spellings because Gemma's vocabulary contains
+    newlines (31 tokens, measured) — unlike Qwen2's byte-level vocabulary it cannot be folded
+    into "`left right`" lines.
     """
     return {
         "format": ASSET_FORMAT,
@@ -295,7 +313,7 @@ def asset_payload(compiled: CompiledTokenizer, *, source: Mapping[str, Any]) -> 
 
 
 def file_digest(path: Path) -> dict[str, Any]:
-    """`path` の `{bytes, sha256}`（出所記録）。"""
+    """`{bytes, sha256}` of `path` (provenance record)."""
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as handle:
@@ -306,7 +324,7 @@ def file_digest(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, payload: Mapping[str, Any]) -> int:
-    """UTF-8 の JSON を書いてバイト数を返す（親ディレクトリは作る）。"""
+    """Write UTF-8 JSON and return its byte count (creates the parent directory)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     path.write_text(text, encoding="utf-8")
@@ -314,13 +332,13 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# parity fixture（期待値は上流の `tokenizers` から独立に採る）
+# parity fixture (expected values are taken independently from upstream `tokenizers`)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class EncodeCase:
-    """符号化ケース（`why` は「素朴な移植が落ちる境界」を 1 行で述べる）。"""
+    """An encode case (`why` states in one line "the boundary where a naive port fails")."""
 
     name: str
     why: str
@@ -329,16 +347,18 @@ class EncodeCase:
 
 @dataclass(frozen=True)
 class DecodeCase:
-    """復号ケース（id 列を直接叩く — 符号化では作れない byte run を踏むため）。"""
+    """A decode case (drives the id sequence directly — to hit byte runs encoding cannot
+    produce)."""
 
     name: str
     why: str
     ids: list[int]
 
 
-#: 両資産で共通に流す符号化ケース。**素朴な移植が落ちる境界を 1 件ずつ**持たせる設計で、
-#: 目に見えない文字は必ず \uXXXX で書く（編集の途中で消えたり別物が混ざるため）。
-#: 同じ電池を 2 資産へ流すことが「1 実装 2 資産」（ADR 0084 決定 6）の実証そのもの。
+#: Encode cases run on both assets. Designed so that **each case holds one boundary where a
+#: naive port fails**; invisible characters are always written as \uXXXX (they vanish or get
+#: replaced while editing). Running the same battery on two assets is itself the proof of "one
+#: implementation, two assets" (ADR 0084 decision 6).
 SHARED_ENCODE_CASES: tuple[EncodeCase, ...] = (
     EncodeCase("english", "普通の英文 — 空白が metaspace へ落ちる基本形", "The quick brown fox."),
     EncodeCase(
@@ -420,17 +440,20 @@ SHARED_ENCODE_CASES: tuple[EncodeCase, ...] = (
 
 
 def subset_keys(texts: Iterable[str], *, max_token_chars: int) -> set[str]:
-    """ケース本文から、語彙・merges の**部分集合**を切り出すための鍵集合を作る。
+    """Build the key set used to cut a **subset** of the vocabulary and merges out of the case
+    texts.
 
-    BPE の記号はどの時点でも「正規化後の文字列の連続した部分列」なので、`max_token_chars`
-    文字までの部分文字列を全部集めれば、走査中に現れうる記号と対を必ず覆う（byte_fallback
-    の記号だけは部分列にならないが、実資産では byte 語彙を含む merge が 1 本も無いことを
-    {@link assert_no_byte_merges} が確かめる）。
+    At any point a BPE symbol is "a contiguous substring of the normalized string", so collecting
+    every substring of up to `max_token_chars` characters is guaranteed to cover every symbol and
+    pair that can appear during the scan (only byte_fallback symbols are not substrings, but
+    {@link assert_no_byte_merges} checks that the real assets have no merge containing a byte
+    token).
 
-    NOTE: ここで使う正規化は「空白 → metaspace」だけ。追加語彙の切り出しを通す前の全文を
-    使うのは**わざと**で、切り出し後の各断片は必ずこの文字列の部分列になる（Replace は
-    文字ごとの置換なので）— 覆いを広い側へ倒しておけば、絞り方の誤りが「フィクスチャが
-    足りず TS の突合が落ちる」形にしか出ない。
+    NOTE: the only normalization applied here is "space → metaspace". Using the full text before
+    the added tokens are split off is **deliberate**: every fragment after the split is a
+    substring of this string (Replace substitutes per character) — leaning the cover to the wide
+    side means a wrong narrowing can only show up as "the fixture is too small and the TS
+    comparison fails".
     """
     keys: set[str] = set()
     for text in texts:
@@ -444,12 +467,12 @@ def subset_keys(texts: Iterable[str], *, max_token_chars: int) -> set[str]:
 
 
 def assert_no_byte_merges(compiled: CompiledTokenizer) -> None:
-    """byte_fallback 語彙を含む merge が無いことを確かめる（部分集合の覆いの前提）。"""
+    """Check that no merge contains a byte_fallback token (the premise of the subset cover)."""
     byte_id_set = set(compiled.byte_ids)
     for left, right in compiled.merges:
         if left in byte_id_set or right in byte_id_set:
             raise UnsupportedTokenizerError(
-                "byte_fallback 語彙を含む merge がある — フィクスチャの部分集合が覆えない",
+                "a merge contains a byte_fallback token — the fixture subset cannot cover it",
             )
 
 
@@ -459,10 +482,11 @@ def asset_subset(
     texts: Sequence[str],
     required_ids: Iterable[int],
 ) -> dict[str, Any]:
-    """フィクスチャへ載せる語彙・merges の部分集合を作る。
+    """Build the subset of the vocabulary and merges stored in the fixture.
 
-    NOTE: 公開名なのは chat のフィクスチャ（`gemma4/chat.py`）も同じ切り方を使うため —
-    絞り方を 2 実装持つと、片方だけが「足りない部分集合」を作っても気づけない。
+    NOTE: it is a public name because the chat fixture (`gemma4/chat.py`) cuts the same way —
+    with two implementations of the narrowing, one of them producing "a subset that is too small"
+    would go unnoticed.
     """
     assert_no_byte_merges(compiled)
     max_token_chars = max(len(list(token)) for token in compiled.vocab)
@@ -488,8 +512,8 @@ def asset_subset(
             merges.append([left, right, rank])
             kept.update((left, right, ids_by_token[joined]))
 
-    # 追加語彙は「ケース本文に現れうるもの」だけへ絞る。落とした綴りが本文に無い以上、
-    # leftmost-longest の切り出し結果は変わらない。
+    # Narrow the added tokens to "those that can appear in the case texts". Since a dropped
+    # spelling is not in the texts, the leftmost-longest split result does not change.
     added = [
         [token, token_id]
         for token, token_id in compiled.added_tokens
@@ -516,12 +540,14 @@ def build_fixture(
     decode_cases: Sequence[DecodeCase],
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """TS 実装の期待値を上流から独立に採る（ADR 0084 決定 7）。
+    """Take the TS implementation's expected values independently from upstream (ADR 0084
+    decision 7).
 
-    MUST: 期待値の経路に**このモジュールの畳み込みを 1 行も通さない** — 通すと「畳み方が
-    間違っていても両方が同じだけ間違う」形になり、突合が恒真化する（ADR 0048 追記の実例）。
+    MUST: **not one line of this module's folding goes into the expected-value path** — if it
+    did, "a wrong folding makes both sides wrong by the same amount" and the comparison becomes
+    vacuous (the real case in the ADR 0048 addendum).
     """
-    from tokenizers import Tokenizer  # 遅延 import（compile だけなら不要な依存）
+    from tokenizers import Tokenizer  # lazy import (a dependency compile alone does not need)
 
     reference = Tokenizer.from_file(str(tokenizer_json))
 
@@ -536,7 +562,8 @@ def build_fixture(
                 "idsWithSpecials": reference.encode(case.text, add_special_tokens=True).ids,
             }
         )
-    # 往復（符号化の出力をそのまま復号へ）は自動で足す — 手で書き写すと片方だけ古くなる。
+    # Round trips (the encode output fed straight to decode) are added automatically — copying
+    # them by hand lets one side go stale.
     all_decode = [
         DecodeCase(
             name=f"roundtrip-{row['name']}",
@@ -580,21 +607,23 @@ def emit(
     extra_cases: Sequence[EncodeCase] = (),
     source_path: str | None = None,
 ) -> None:
-    """1 資産ぶんの compile とフィクスチャ採取を**必ず両方**行う。
+    """Compile one asset and collect its fixture — **always both**.
 
-    片方だけ出す口を開けないのは、実行時資産とフィクスチャが別々に古びると「テストは緑だが
-    実行だけ別の id 列」になるため（`anima/demo.py` と同じ理由）。
+    There is no entry point that emits only one, because if the runtime asset and the fixture go
+    stale separately, "the tests are green but the run alone produces different ids" (same reason
+    as `anima/demo.py`).
 
     `source_path` names a `tokenizer.json` outside the repository (a hub snapshot) the way the
     git-tracked fixture may record it (e.g. `<repo>@<revision>/tokenizer.json`); by default the
     path is the repository-relative one.
     """
     if not tokenizer_json.is_file():
-        raise SystemExit(f"[karume] 上流の tokenizer.json が無い: {tokenizer_json}")
+        raise SystemExit(f"[karume] no upstream tokenizer.json: {tokenizer_json}")
     raw = json.loads(tokenizer_json.read_text(encoding="utf-8"))
     compiled = compile_tokenizer(raw)
     source = {
-        # フィクスチャは git 管理なので、出所はリポジトリ相対で書く（絶対パスを commit しない）。
+        # The fixture is tracked in git, so the source is written repository-relative (never
+        # commit an absolute path).
         "path": source_path
         if source_path is not None
         else str(tokenizer_json.relative_to(REPO_ROOT)),
@@ -603,8 +632,8 @@ def emit(
         "mergesCount": len(compiled.merges),
         "addedCount": len(compiled.added_tokens),
     }
-    # 両方を組み終えてから書く — 上流の採取（`build_fixture`）が落ちたときに、新しい資産と
-    # 古いフィクスチャが並んで残らないように。
+    # Write only after both are built — so that a failure of the upstream collection
+    # (`build_fixture`) does not leave a new asset next to an old fixture.
     payload = asset_payload(compiled, source=source)
     fixture = build_fixture(
         tokenizer_json=tokenizer_json,
@@ -615,11 +644,11 @@ def emit(
     )
     asset_bytes = write_json(asset_path, payload)
     fixture_bytes = write_json(fixture_path, fixture)
-    print(f"[karume] 資産      {asset_path} ({asset_bytes / 1e6:.1f} MB)")
+    print(f"[karume] asset   {asset_path} ({asset_bytes / 1e6:.1f} MB)")
     print(
-        f"[karume] フィクスチャ {fixture_path} ({fixture_bytes / 1e3:.0f} KB・"
-        f"語彙 {len(fixture['asset']['vocab'])} / merges {len(fixture['asset']['merges'])} / "
-        f"符号化 {len(fixture['encode'])} / 復号 {len(fixture['decode'])} ケース)"
+        f"[karume] fixture {fixture_path} ({fixture_bytes / 1e3:.0f} KB;"
+        f" vocab {len(fixture['asset']['vocab'])} / merges {len(fixture['asset']['merges'])} / "
+        f"encode {len(fixture['encode'])} / decode {len(fixture['decode'])} cases)"
     )
     # The formatter decides the committed form (`vp check` formats the fixtures too).
     print(
@@ -629,7 +658,7 @@ def emit(
 
 
 def byte_run_decode_cases(compiled: CompiledTokenizer) -> list[DecodeCase]:
-    """byte run を直接叩く復号ケース（符号化からは作れない形を含む）。"""
+    """Decode cases that drive byte runs directly (including shapes encoding cannot produce)."""
     byte_ids = compiled.byte_ids
     return [
         DecodeCase(

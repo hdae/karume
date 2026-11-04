@@ -1,15 +1,18 @@
-"""配布 recipe のテストが入力に使う**正当な最小の製品系列**（コンテナ + PLE の資産 + 資産）。
+"""**The minimal valid product series** that the distribution recipe's tests use as input
+(container + PLE assets + assets).
 
-共有の `ir_fixtures.ir_container`（`tools/exporter/tests/`）は state スロットを持てないので、
-gemma4 の門が読む形（full スロットの容量記号 `C` が **states にだけ**現れる = 入力 shape から
-決まらない記号がちょうど 1 本）を作れない。ここが持つのはその差分だけで、書き出しは共有の
-1 本道（`karume.emit.stored_model` → `karume.publish.publish_container`）を通る。
+The shared `ir_fixtures.ir_container` (`tools/exporter/tests/`) cannot hold state slots, so it
+cannot build the form the gemma4 gates read (the capacity symbol `C` of the full slots appears
+**only in states** = exactly one symbol not determined by the input shapes). This module holds only
+that difference, and the writing goes through the shared single path
+(`karume.emit.stored_model` → `karume.publish.publish_container`).
 
-MUST: 容器のバイト列も IR の規則も手で綴らない（`ir_fixtures` の同 MUST）— 規則の写しを
-持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
+MUST: neither the container's bytes nor the IR rules are spelled by hand (the same MUST as
+`ir_fixtures`) — holding a copy of the rules would leave only the fixture stale on the day the
+rules move, giving "tests green, only the real thing fails".
 
-MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・hidden 5・位置上限 37・headDim 4/8）—
-寸法を焼き込んでいれば落ちる。
+MUST: use **numbers different from the real ones** (vocabulary 6, layers 2, dim 3, hidden 5,
+position limit 37, headDim 4/8) — a baked-in dimension then fails.
 """
 
 from __future__ import annotations
@@ -58,22 +61,25 @@ from karume.quantize import (
     quantize_to_int8,
 )
 
-#: フィクスチャの出所（`--license` を落とした配布形は作らない — container-v1 §12）。
+#: Provenance of the fixture (no distribution is built without `--license` — container-v1 §12).
 FIXTURE_PROVENANCE = Provenance(license="apache-2.0", writer="karume-fixture")
 
-#: 合成の寸法（実物は 262144 / 35 / 256 / 2048）。`HIDDEN` は hidden 出口の幅で、**VOCAB とも
-#: DIM とも違う数**にする（logits と hidden を取り違えた組が幅で落ちる）。
-#: MUST: `HIDDEN` は {@link TEXT_CONFIG} の `hidden_size` と同じ数 — 配布 recipe は上流の宣言と
-#: グラフの幅を突き合わせるので、フィクスチャの中で割れていると正当な組が組めない。
+#: Synthetic dimensions (the real ones are 262144 / 35 / 256 / 2048). `HIDDEN` is the width of the
+#: hidden exit and is **a number different from both VOCAB and DIM** (a combination that mixes up
+#: logits and hidden fails on the width).
+#: MUST: `HIDDEN` equals `hidden_size` of {@link TEXT_CONFIG} — the distribution recipe compares
+#: the upstream declaration with the graph's widths, so if they disagree inside the fixture no
+#: valid combination can be built.
 VOCAB = 6
 LAYERS = 2
-#: PLE の 1 行は **4 の倍数**でなければ block を行の倍数で切れない（container-v1 §4.1）ので、
-#: `LAYERS * DIM` が 4 で割り切れる数にする（実物は 35 × 256）。
+#: One PLE row must be **a multiple of 4**, or blocks cannot be cut at multiples of a row
+#: (container-v1 §4.1), so `LAYERS * DIM` is chosen divisible by 4 (the real one is 35 × 256).
 DIM = 10
 HIDDEN = 16
 
-#: 上流 `config.json` の `text_config` のうち、配布 recipe が読む欄だけを持つ最小形。
-#: **実物と違う数**（位置上限 131072 → 37・head_dim 256/512 → 4/8・theta も別値）。
+#: Minimal form holding only the fields of upstream `config.json`'s `text_config` that the
+#: distribution recipe reads. **Numbers different from the real ones** (position limit 131072 → 37,
+#: head_dim 256/512 → 4/8, theta also different).
 MAX_POSITION = 37
 SLIDING_HEAD_DIM = 4
 FULL_HEAD_DIM = 8
@@ -100,41 +106,47 @@ TEXT_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: 層種別 → RoPE 派生入力の幅（{@link TEXT_CONFIG} から導いた値と一致していることが門の前提）。
+#: Layer type → width of the RoPE derived inputs (the gates assume it matches the values derived
+#: from {@link TEXT_CONFIG}).
 ROPE_HEAD_DIMS: Mapping[str, int] = {
     SLIDING_ATTENTION: SLIDING_HEAD_DIM,
     FULL_ATTENTION: FULL_HEAD_DIM,
 }
 
-#: `sym_prefix_slice` の焼き込み定数の長さ（chunk 記号 `M` の上限）と、full スロットの容量。
+#: Length of the baked constant of `sym_prefix_slice` (the upper bound of the chunk symbol `M`), and
+#: the capacity of the full slots.
 SYM_MAX = 4
 CAPACITY_SYMBOL = "C"
 SEQ_SYMBOL = "M"
 
-#: 出口の行数記号（`last_row[R]` が束縛する — `gemma4.export_product.ROW_SYMBOL` の綴り）。
+#: Row-count symbol of the exit (bound by `last_row[R]` — the spelling of
+#: `gemma4.export_product.ROW_SYMBOL`).
 ROW_SYMBOL = "R"
 
-#: i4 の group 長と linear 重みの形（`ir_fixtures` と同じ理由 — 行長が group_size で割り切れる
-#: 最小の形。ADR 0069 決定 2）。
+#: The i4 group length and the shape of the linear weight (the same reason as `ir_fixtures` — the
+#: smallest shape whose row length is divisible by group_size; ADR 0069 decision 2).
 GROUP_SIZE = 16
 _IN = 32
 _OUT = 4
 
-#: 退役した「表を焼く」形の initializer 名（残骸の門に使う — 現行の資産には 1 本も無い）。
+#: Initializer name of the retired "bake the tables" form (used by the residue gate — the current
+#: assets have none).
 BAKED_ROPE_TABLE = "model.model.rotary_emb.full_attention_cos_table"
 
 #: The regular line's storage: the stand-in weights and the default PLE assets (schema 5) of
 #: {@link product_container} — the checkpoint's bf16 values.
 STORAGE = "bf16"
-#: PLE の綴り（`karume.ple` / `packages/models/src/gemma/ple-index.ts` の正本）。
+#: Spelling of the PLE (the source of truth is `karume.ple` /
+#: `packages/models/src/gemma/ple-index.ts`).
 PLE_STORAGE = STORAGE
 PLE_EMBED_SCALE = 2.0
 
-#: 貸し手の主表テンソルキー（{@link product_container} の `declare` が組む綴り — the regular
-#: line's bf16 embedding）。借り手の共有 initializer はこれを名指す — 食い違えば配布の門が落とす。
+#: The lender's main-table tensor key (the spelling `declare` builds in {@link product_container} —
+#: the regular line's bf16 embedding). The borrower's shared initializer names it — if they
+#: disagree, the distribution's gate rejects it.
 LENDER_SHARED_TENSOR = f"gemma4.embed_{STORAGE}"
 
-#: compile 済みトークナイザ資産の形式識別子（`_shared/gemma_tokenizer.py`）。
+#: Format identifier of the compiled tokenizer asset (`_shared/gemma_tokenizer.py`).
 TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
 
 #: The upstream `tokenizer.json` stand-in {@link write_series} places in the checkpoint directory;
@@ -142,7 +154,8 @@ TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
 #: distribution's gate compares the SHA-256 only — `assert_gemma4_tokenizer_source`).
 UPSTREAM_TOKENIZER = b'{"model": "upstream tokenizer.json stand-in"}'
 
-#: 上流 `generation_config.json` の推奨（**実物と違う値** — 写経していれば落ちる）。
+#: Recommendations of upstream `generation_config.json` (**values different from the real ones** — a
+#: hand copy then fails).
 GENERATION_CONFIG: Mapping[str, Any] = {
     "do_sample": True,
     "eos_token_id": [1, 2],
@@ -171,10 +184,12 @@ def _publish(
     named: str = GEMMA4_ROLE,
     provenance: Provenance = FIXTURE_PROVENANCE,
 ) -> list[bytes]:
-    """書いて読み直して検証し、part ごとのバイト列を添字順に返す（実物と同じ 1 本道）。
+    """Write, read back and verify, and return the bytes of each part in index order (the same
+    single path as the real thing).
 
-    `named` は容器のグラフ名 = **部品名**（manifest の weights のキー MUST・container-v1 §2.1）。
-    貸し手は `model`、借り手は `drafter` で、組み立ての門がこの一致を見る。
+    `named` is the container's graph name = **the component name** (MUST be the key of the
+    manifest's weights; container-v1 §2.1). The lender is `model`, the borrower `drafter`, and the
+    assembly gate checks that they match.
     """
     stored = stored_model(
         graph,
@@ -207,13 +222,14 @@ def ple_container_assets(
     storage: str = PLE_STORAGE,
     group_size: int | None = None,
 ) -> dict[str, AssetInput]:
-    """PLE を容器の資産へ — by default the regular line's schema 5 (a bf16 `values` block sequence,
-    no scales).
+    """PLE as the container's assets — by default the regular line's schema 5 (a bf16 `values`
+    block sequence, no scales).
 
-    切り方も索引の綴りも core の {@link karume.ple.ple_assets} が持つ — 写しを綴ると、規則が
-    動いた日にフィクスチャだけが古びる。`block_bytes` を下げると block が複数本へ割れる
-    （索引と資産宣言の突合を複数 block で踏む席）。An integer `storage` writes schema 3 (one
-    scale per row — `"i8"`), or with `group_size` schema 4 (one scale per group — the q4_0 QAT
+    Both how it is cut and the index's spelling are owned by the core {@link karume.ple.ple_assets}
+    — spelling a copy would leave only the fixture stale on the day the rules move. Lowering
+    `block_bytes` splits the data into several blocks (the setup that exercises the comparison of
+    the index with the asset declarations over several blocks). An integer `storage` writes schema 3
+    (one scale per row — `"i8"`), or with `group_size` schema 4 (one scale per group — the q4_0 QAT
     line's form); the bytes are the sizes the writer expects (`karume.ple.ple_row_bytes`), their
     values arbitrary.
     """
@@ -255,15 +271,16 @@ def product_container(
     storage: str = STORAGE,
     embedding_storage: str | None = None,
 ) -> list[bytes]:
-    """製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
+    """The part bytes of one product graph (in read order — part 0 first).
 
-    PLE は容器の**資産**として同梱される（ADR 0109 決定 4）— `assets` を渡さなければ
-    {@link ple_container_assets} の既定を載せる。
+    PLE ships as **assets** of the container (ADR 0109 decision 4) — without `assets`, the
+    defaults of {@link ple_container_assets} are placed.
 
-    `head_dims` は RoPE 派生入力の幅の上書き（宣言と食い違う世代を作る門のため）。
-    `baked_rope` は退役した「表を焼く」形の initializer を 1 本混ぜる（残骸の門）。
-    `free_symbol` を偽にすると容量記号を states から外し、入力 shape が束縛する `M` / `R` の
-    2 本だけにする（記号の割れ方の門 — 自由記号がちょうど 1 本であることを見る側）。
+    `head_dims` overrides the widths of the RoPE derived inputs (for the gate that builds a
+    generation disagreeing with the declaration). `baked_rope` mixes in one initializer of the
+    retired "bake the tables" form (the residue gate). With `free_symbol` false the capacity symbol
+    is removed from the states, leaving only `M` / `R`, the two the input shapes bind (the gate on
+    how the symbols split — the side that checks there is exactly one free symbol).
     `ple=False` is the graph of a model without per-layer embeddings (12B): no
     `per_layer_inputs` input, and no PLE assets unless `assets` names some. `provenance` is the
     container's (a pinned model's names its upstream revision). `storage` is the stand-in
@@ -272,8 +289,8 @@ def product_container(
     line — with an int4 embedding too the container holds no int8 tensor) or `"i8"`. The
     embedding's key is `gemma4.embed_<its storage>` — the table a drafter borrows
     ({@link LENDER_SHARED_TENSOR} for the regular line).
-    `swap_outputs` は出口 2 本の順序だけを入れ替える（行軸まで同型なので、幅の突合以外は
-    素通りする組 — 順序の門）。
+    `swap_outputs` swaps only the order of the two exits (they have the same shape down to the row
+    axis, so this combination passes everything but the width comparison — the order gate).
     """
     widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
@@ -286,12 +303,14 @@ def product_container(
     def declare(name: str, tensor: torch.Tensor, dtype: str = "f32") -> str:
         key = f"gemma4.{name}"
         initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype=dtype))
-        # 記号依存定数だけが i32（`ir_fixtures` と同じ — 他は意味論 f32）。
+        # Only symbol-dependent constants are i32 (the same as `ir_fixtures` — the rest is
+        # semantic f32).
         values[name] = IrValue(dtype="i32" if dtype == "i32" else "f32", shape=list(tensor.shape))
         tensors[key] = tensor
         return key
 
-    # ① 実行の骨（linear 1 本）— a linear stand-in and an embedding stand-in, each in its storage:
+    # ① The execution skeleton (one linear) — a linear stand-in and an embedding stand-in, each in
+    #    its storage:
     #    the header holds the same set of storages as the real container of the line.
     activation = "x"
     bias = "bias"
@@ -322,11 +341,12 @@ def product_container(
         values[out] = IrValue(dtype="f32", shape=[1, _OUT])
         nodes.append(IrNode(op="linear", ins=[activation, name, bias], outs=[out], attrs={}))
 
-    # ② 退役形の残骸（既定では入れない — 門が「1 本も無い」を見るための対照）。
+    # ② Residue of the retired form (not included by default — the control for the gate that checks
+    #    "there is none").
     if baked_rope:
         declare(BAKED_ROPE_TABLE, _ramp(2, 2))
 
-    # ③ 記号次元の席: `M` は入力 shape が束縛し、`C` は states にだけ現れる。
+    # ③ The symbolic dimensions: `M` is bound by the input shapes, `C` appears only in states.
     const = "baked"
     key = declare(const, torch.zeros(1, 1, SYM_MAX, 1, dtype=torch.int32), dtype="i32")
     del key
@@ -341,17 +361,19 @@ def product_container(
         )
     )
 
-    # ④ full スロット（容量記号 `C` が現れる唯一の場所）と、それを触る effect op 1 本。
-    #    宣言だけのスロットは IR が拒否する（`verify._check_state_slots` — 参照完全性）ので、
-    #    実物の attention の代わりに単機能の `state_append`（入力 1 本・出力 0 本）を置く。
+    # ④ The full slots (the only place the capacity symbol `C` appears) and one effect op touching
+    #    them. The IR rejects a slot that is only declared (`verify._check_state_slots` —
+    #    referential integrity), so a single-purpose `state_append` (one input, no outputs) stands
+    #    in for the real attention.
     kv = "kv"
     values[kv] = IrValue(dtype="f32", shape=[1, 1, SEQ_SYMBOL, 1])
     nodes.append(IrNode(op="cast", ins=[prefix], outs=[kv], attrs={"to": "f32"}))
     for slot in ("l0.k", "l0.v"):
         nodes.append(IrNode(op="state_append", ins=[kv], outs=[], attrs={}, states={"slot": slot}))
 
-    # ⑤ 出口は選択行の logits と hidden の 2 本（`[1, R, V]` / `[1, R, H]` — ADR 0083 決定 6 +
-    #    投機 verify の足場）。順序は logits → hidden 固定。
+    # ⑤ The exits are the logits and hidden of the selected rows (`[1, R, V]` / `[1, R, H]` —
+    #    ADR 0083 decision 6 + the groundwork of speculative verify). The order is fixed as
+    #    logits → hidden.
     seed = "logits_seed"
     declare(seed, _ramp(1, 1, 1))
     logits = "logits"
@@ -361,7 +383,7 @@ def product_container(
     values[hidden] = IrValue(dtype="f32", shape=[1, ROW_SYMBOL, hidden_size])
     nodes.append(IrNode(op="expand", ins=[seed], outs=[hidden], attrs={}))
 
-    # `free_symbol` を偽にすると容量が具体数になり、記号は `M` の 1 本だけになる。
+    # With `free_symbol` false the capacity becomes a concrete number and `M` is the only symbol.
     capacity_dim: str | int = CAPACITY_SYMBOL if free_symbol else SYM_MAX
     graph = IrGraph(
         symbols=(
@@ -388,8 +410,8 @@ def product_container(
         outputs=[hidden, logits] if swap_outputs else [logits, hidden],
         initializers=initializers,
         values=values,
-        # k / v の対で持つ — 借り手（drafter）の readonly attention は `{k, v}` ちょうどを
-        # 要求するので、貸し手が k だけを宣言していると正当な組が作れない。
+        # Held as a k / v pair — the borrower's (drafter's) readonly attention requires exactly
+        # `{k, v}`, so a lender that declares only k cannot form a valid combination.
         states={
             name: IrState(dtype="f32", shape=[1, 1, capacity_dim, 1]) for name in ("l0.k", "l0.v")
         },
@@ -423,21 +445,24 @@ def drafter_container(
     shared_storage: str = STORAGE,
     provenance: Provenance = FIXTURE_PROVENANCE,
 ) -> list[bytes]:
-    """**借り手**グラフ 1 本ぶんの part バイト列（ADR 0096 段 2 — 単独では実行できない資産）。
+    """The part bytes of one **borrower** graph (ADR 0096 step 2 — an asset that cannot run on its
+    own).
 
     `head_storage` / `shared_tensor` / `shared_storage` / `provenance` build the q4_0 QAT line's
     drafter: its head int4 too, its shared declaration naming the lender's int4 table
     (`"gemma4.embed_i4"`, declared `"i4"`), and the container naming its drafter's revision.
 
-    貸し手（{@link product_container}）と噛み合う形にする: 同じスロット名 `l0.k` / `l0.v` を
-    **external** で宣言し、共有 initializer が貸し手の主表テンソルキーを名指し、記号は容量の
-    1 本だけ。`external` / `shared` / `capacity_symbol` は配布の門
-    （{@link gemma4.distribution.assert_gemma4_drafter_graph}）の故障注入の口。
+    Shaped to mesh with the lender ({@link product_container}): it declares the same slot names
+    `l0.k` / `l0.v` as **external**, its shared initializer names the lender's main-table tensor
+    key, and its only symbol is the capacity. `external` / `shared` / `capacity_symbol` are the
+    fault-injection inputs of the distribution's gate
+    ({@link gemma4.distribution.assert_gemma4_drafter_graph}).
 
-    実物の drafter は **linear まで i8 の単一格納**（`gemma4/export_drafter.py` の実測 — i4 に
-    落とすと受理率が 1 〜 3 割落ちる）なので、既定の `storage` は `"i8"`。`"i4"` は格納の門
-    （`GEMMA4_STORAGE_FORBIDDEN`）の故障注入の口で、**出力ヘッドだけ i8 のまま linear が i4 に
-    落ちた資産**を作る — 存在検査（I8 が在る）では素通りする側。
+    The real drafter is **a single i8 storage, linears included** (measured in
+    `gemma4/export_drafter.py` — dropping to i4 lowers the acceptance rate by 10 to 30 percent), so
+    the default `storage` is `"i8"`. `"i4"` is the fault-injection input of the storage gate
+    (`GEMMA4_STORAGE_FORBIDDEN`) and builds **an asset whose linears dropped to i4 while only the
+    output head stays i8** — the case a presence check (I8 is there) lets through.
     """
     widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
@@ -454,8 +479,8 @@ def drafter_container(
         tensors[key] = tensor
         return key
 
-    # ① 実物の格納形（linear が `storage`・出力ヘッドは常に i8）— ヘッダの dtype 集合が
-    #    そのまま格納の門の入力になる。
+    # ① The real storage form (linears in `storage`, the output head always i8) — the header's set
+    #    of dtypes is the storage gate's input as it is.
     declare("x", _ramp(1, _IN))
     declare("bias", _ramp(_OUT))
     slots = ((f"linear_{storage}", storage), (f"head_{head_storage}", head_storage))
@@ -475,7 +500,7 @@ def drafter_container(
         values[out] = IrValue(dtype="f32", shape=[1, _OUT])
         nodes.append(IrNode(op="linear", ins=["x", name, "bias"], outs=[out], attrs={}))
 
-    # ② 共有 initializer（バイト無し）— 指し先は貸し手コンテナのテンソルキー。
+    # ② Shared initializer (no bytes) — it points at the lender container's tensor key.
     embedded = "embedded"
     if shared:
         initializers["target_embed"] = IrInitializer(
@@ -492,7 +517,7 @@ def drafter_container(
             )
         )
 
-    # ③ readonly attention（q 1 本・external スロットの k / v を読む）。
+    # ③ readonly attention (one q; reads k / v of the external slots).
     seed = "q_seed"
     declare(seed, _ramp(1, 1, 1, 1))
     query = "q"
@@ -510,7 +535,8 @@ def drafter_container(
         )
     )
 
-    # ④ 出口は draft k 本（実物は argmax の token 3 本 — 本数だけが配布の門の関心事）。
+    # ④ The exits are k drafts (the real one has 3 argmax tokens — only the count concerns the
+    #    distribution's gate).
     outputs: list[str] = []
     for index in range(steps):
         name = f"token_{index}"
@@ -554,7 +580,7 @@ def tokenizer_asset(
     format_id: str = TOKENIZER_FORMAT,
     source: bytes | None = UPSTREAM_TOKENIZER,
 ) -> dict[str, Any]:
-    """compile 済みトークナイザ資産の、門が読む欄だけを持つ最小形。
+    """Minimal form of the compiled tokenizer asset, holding only the fields the gates read.
 
     `source` is the bytes of the `tokenizer.json` the asset says it was compiled from (its
     SHA-256 goes into `source.sha256`, as the compile script writes it); `None` = no recorded
@@ -580,16 +606,17 @@ def write_series(
     """Writes the series and the checkpoint directory (its `tokenizer.json` is
     {@link UPSTREAM_TOKENIZER}, the source the default tokenizer asset records).
 
-    製品系列には**配布へ入らない**同居物（`ple.probe.safetensors` / a greedy golden /
-    `reference.json`）も置く — 出力 path 表に載らないものが混ざらないことの証跡になる。PLE は
-    製品コンテナの**資産**なので、系列に独立したファイルとしては現れない（ADR 0109 決定 4）。
+    The product series also holds companions that **do not go into the distribution**
+    (`ple.probe.safetensors` / a greedy golden / `reference.json`) — evidence that nothing outside
+    the output path table gets mixed in. PLE is an **asset** of the product container, so it does
+    not appear as a separate file of the series (ADR 0109 decision 4).
     """
-    from container_series import write_component  # conftest が張る recipe 共有ヘルパ
+    from container_series import write_component  # recipe-shared helper set up by conftest
 
     parts = list(container if container is not None else product_container())
     write_component(product / "model.krm", parts)
-    # 借り手（drafter）系列は既定で product の隣に置く（既存の呼び出しを 1 つも書き換えずに
-    # 済ませるため — 系列名の綴りは配布 recipe が持つ 1 箇所から組む）。
+    # The borrower (drafter) series goes next to product by default (so that not one existing call
+    # needs rewriting — the series name is built from the one place the distribution recipe owns).
     borrower = (
         drafter
         if drafter is not None
@@ -599,7 +626,8 @@ def write_series(
         borrower / "model.krm",
         list(drafter_bytes if drafter_bytes is not None else drafter_container()),
     )
-    # 配布へ入らない同居物（golden と出所記録）— 出力 path 表に載らないことの証跡。
+    # Companions that do not go into the distribution (golden and provenance record) — evidence
+    # that they are not in the output path table.
     (borrower / "drafter-golden.short-en.safetensors").write_bytes(b"not distributed")
     (borrower / "reference.json").write_text("{}\n", encoding="utf-8")
     (product / "ple.probe.safetensors").write_bytes(b"not distributed")
@@ -617,7 +645,8 @@ def write_series(
         json.dumps(dict(generation_config if generation_config is not None else GENERATION_CONFIG)),
         encoding="utf-8",
     )
-    # 上流の `config.json` は multimodal の器で、text 部は `text_config` 節（実物と同じ形）。
+    # Upstream `config.json` is a multimodal container whose text part is the `text_config` section
+    # (the same shape as the real one).
     (model_dir / "config.json").write_text(
         json.dumps(
             {

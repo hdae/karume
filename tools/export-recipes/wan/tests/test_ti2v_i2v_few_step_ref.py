@@ -1,21 +1,26 @@
-"""`wan/ti2v_i2v_few_step_ref.py`（Wan2.2 の I2V の 2 ステップの通しの CPU 参照 — ADR 0121 段 9b）の
-約束事。
+"""The contract of `wan/ti2v_i2v_few_step_ref.py` (the CPU reference of a full 2-step Wan2.2 I2V run
+— ADR 0121 step 9b).
 
-参照そのもの（5B の DiT の forward 20 回 + 28 タイルの decode × 3 ケース）は回さない。ここで
-固定するのは:
+The reference itself (20 forwards of the 5B DiT + a 28-tile decode × 3 cases) is not run. What is
+pinned here:
 
-- ケースの表（決定用 2 本 + 受入れ 1 本・役割と画像は段 9a の encoder の golden と同じ割り振り・
-  プロンプトは画像と同じ名前）と、潜在の形（1280×704・9 フレーム・S = 2,640・P = 880）
-- **置き換えの形**: 公式 Wan2.2 の形（初めと各 step の後にスケジューラの状態を置き換える）と
-  diffusers の形（DiT の入力だけ置き換え、ループの後に 1 回）の最終出力がビット一致すること
-  （pin の UniPC と要素を跨ぐ擬似モデル・2 / 8 / 50 ステップ）と、その比較が故障を見分けること
-- 時刻の差し替え（決定 4 — 値ごとに M = 1）が DiT の参照ラッパとビット一致し、元へ戻ること
-- 合成の小さな 2.2 モデル（48 ch の DiT + 合成の 2.2 VAE + 合成の画像）で通した書き出し: 2 相の順・
-  テンソルとメタの欄・記録した cond / uncond から上流の CFG + UniPC が潜在を作り直すこと・条件の
-  潜在が段 9a の encoder の参照と同じ値になること・M = S の観測
-- CLI（`--case` で 1 本だけ・重い読み込みの前に落ちる口）と、条件画像の来歴の検査
+- the case table (2 decision cases + 1 acceptance case; roles and images assigned the same way as
+  the encoder goldens of step 9a; prompts named after the images) and the latent shape (1280×704,
+  9 frames, S = 2,640, P = 880)
+- **the replacement forms**: the final output of the official Wan2.2 form (replacing the scheduler
+  state at the start and after each step) and of the diffusers form (replacing only the DiT input,
+  once after the loop) are bit-identical (with the pinned UniPC, a pseudo-model that mixes across
+  elements, and 2 / 8 / 50 steps), and that comparison tells faults apart
+- the time replacement (decision 4 — M = 1 per value) is bit-identical to the DiT reference
+  wrapper and is restored afterwards
+- the export run on a small synthetic 2.2 model (48-ch DiT + synthetic 2.2 VAE + synthetic
+  images): the order of the 2 phases, the fields of the tensors and metadata, upstream CFG + UniPC
+  rebuilding the latents from the recorded cond / uncond, the condition latent equalling the
+  encoder reference of step 9a, and the M = S observation
+- the CLI (`--case` for a single case; the paths that fail before the heavy loading) and the
+  provenance check of the condition images
 
-生成は `uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref`。
+Generate with `uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref`.
 """
 
 from __future__ import annotations
@@ -47,13 +52,15 @@ from wan.tests.test_ti2v_few_step_ref import SCHEDULER_CONFIG, SYNTHETIC_TILE, T
 REF = ti2v_i2v_few_step_ref
 CASES = REF.FIXTURE_CASES
 
-#: 合成の潜在 `[C, F, H, W]`（48 ch・9 フレーム・96×160 — 格子 3·3·5・P = 15）。
+#: The synthetic latent `[C, F, H, W]` (48 ch, 9 frames, 96×160 — grid 3·3·5, P = 15).
 SYNTHETIC_LATENT = (48, 3, 6, 10)
 
-#: 合成の条件画像の元の寸法（幅, 高さ）。96×160 へは横を切る（crop の経路を通す）。
+#: The original size of the synthetic condition image (width, height). It is cropped horizontally
+#: to 96×160 (so the crop path is taken).
 SYNTHETIC_SOURCE = (240, 120)
 
-#: pin の `model_index.json` の値（`_diffusers_version` を除く — `from_pretrained` が読む欄）。
+#: The values of the pinned `model_index.json` (without `_diffusers_version` — the fields
+#: `from_pretrained` reads).
 MODEL_INDEX: dict[str, Any] = {
     "_class_name": "WanPipeline",
     "boundary_ratio": None,
@@ -73,7 +80,7 @@ def _asset_metadata() -> dict[str, Any]:
 
 
 def _embeds() -> dict[str, torch.Tensor]:
-    """正 3 本 + negative（値は互いに違う — hook の値での振り分けが決まる）。"""
+    """3 positives + the negative (all different values — so the hook values decide the sorting)."""
     generator = torch.Generator().manual_seed(20262189)
     lengths = {"boxing-cats": 3, "cat-dog-baking": 4, "ferret": 5, "negative": 6}
     return {name: torch.randn(rows, 4096, generator=generator) for name, rows in lengths.items()}
@@ -87,7 +94,8 @@ def _tiny_dit() -> torch.nn.Module:
 
 
 def _source(name: str = "boxing-cats") -> REF.SourceImage:
-    """合成の条件画像（乱数の RGB8・sha256 は画素の生バイト列の値 — 来歴の欄を埋めるだけ）。"""
+    """A synthetic condition image (random RGB8; the sha256 is that of the raw pixel bytes — it only
+    fills the provenance fields)."""
     image_module = pytest.importorskip("PIL.Image")
     width, height = SYNTHETIC_SOURCE
     generator = torch.Generator().manual_seed(20262187)
@@ -98,7 +106,7 @@ def _source(name: str = "boxing-cats") -> REF.SourceImage:
 
 @pytest.fixture
 def snapshot(tmp_path) -> Path:
-    """`model_index.json` と scheduler の config だけを持つ snapshot（`flow_shift` は 3.0）。"""
+    """A snapshot with only `model_index.json` and the scheduler config (`flow_shift` is 3.0)."""
     root = tmp_path / "snapshot"
     (root / "scheduler").mkdir(parents=True)
     (root / "model_index.json").write_text(json.dumps(MODEL_INDEX))
@@ -122,7 +130,8 @@ class TestCases:
         assert not {case.seed for case in CASES} & others
 
     def test_the_roles_follow_the_encoder_golden_of_stage_9a(self):
-        """決定用と受入れの画像は段 9a の encoder の golden と同じ割り振り。"""
+        """The decision and acceptance images are assigned the same way as the encoder goldens of
+        step 9a."""
         assert tuple(case.image for case in CASES if case.role == "band") == (
             export_vae_encoder.BAND_IMAGES
         )
@@ -150,13 +159,14 @@ class TestCases:
 
         assert REF.SERIES.name == "wan2.2-ti2v-5b-i8-dyn"
         assert path.name == "pipeline_steps_i2v.band-boxing-cats.safetensors"
-        # T2V の参照の綴り（`pipeline_steps.*`）と混ざらない。
+        # Does not mix with the spelling of the T2V references (`pipeline_steps.*`).
         assert not path.name.startswith(few_step_ref.FIXTURE_PREFIX)
 
 
 def _pseudo_velocity(_index: int, timestep: torch.Tensor, model_input: torch.Tensor):
-    """要素を跨ぐ擬似モデル（フレーム軸に巡回し・チャネルとフレームで平均を混ぜる）— 先頭
-    フレームの値が他のフレームの速度に効く。"""
+    """A pseudo-model that mixes across elements (rolls along the frame axis and mixes in the mean
+    over channels and frames) — the values of the first frame affect the velocity of the other
+    frames."""
     mixed = model_input.mean(dim=(1, 2), keepdim=True)
     return torch.tanh(0.7 * model_input.roll(1, dims=2) + 0.3 * mixed) + torch.sin(
         timestep.to(torch.float32) / 1000
@@ -164,7 +174,8 @@ def _pseudo_velocity(_index: int, timestep: torch.Tensor, model_input: torch.Ten
 
 
 class TestReplacementForms:
-    """公式の形と diffusers の形（{@link REF.sample}）の最終出力のビット一致（pin の UniPC）。"""
+    """Bit identity of the final outputs of the official form and the diffusers form
+    ({@link REF.sample}) (with the pinned UniPC)."""
 
     @pytest.fixture
     def parts(self, snapshot):
@@ -198,7 +209,8 @@ class TestReplacementForms:
 
     @pytest.mark.parametrize("steps", [2, 8])
     def test_the_scheduler_states_differ_only_in_the_first_frame(self, parts, steps):
-        """恒真でない: 途中の状態は先頭フレームで実際に割れ、残りのフレームでは一致する。"""
+        """Not vacuous: the intermediate states really split in the first frame and agree in the
+        remaining frames."""
         upstream = self._run(parts, steps, "diffusers")
         official = self._run(parts, steps, "official")
 
@@ -214,15 +226,17 @@ class TestReplacementForms:
         assert torch.equal(upstream.final[:, :, 1:], upstream.states[-1][:, :, 1:])
 
     def test_skipping_the_last_replacement_is_caught(self, parts):
-        """故障注入: ループの後の置き換えを落とすと、公式の形と先頭フレームで割れる。"""
+        """Fault injection: dropping the replacement after the loop splits from the official form
+        in the first frame."""
         upstream = self._run(parts, 2, "diffusers")
         official = self._run(parts, 2, "official")
 
         assert not torch.equal(upstream.states[-1], official.final)
 
     def test_a_mask_on_the_wrong_frame_is_caught_beyond_that_frame(self, parts):
-        """故障注入: 公式の形の置き換えを 2 枚目のフレームへずらすと、DiT の入力が変わり、擬似
-        モデルがフレームを跨ぐので先頭以外のフレームでも割れる。"""
+        """Fault injection: moving the official form's replacement to the second frame changes the
+        DiT input, and because the pseudo-model mixes across frames, frames other than the first
+        split too."""
         _, latents, _, _ = parts
         shifted = torch.ones(1, 1, *latents.shape[2:])
         shifted[:, :, 1] = 0
@@ -232,7 +246,7 @@ class TestReplacementForms:
         assert not torch.equal(upstream.final[:, :, 2:], official.final[:, :, 2:])
 
     def test_an_unknown_form_is_refused(self, parts):
-        with pytest.raises(ValueError, match="置き換えの形"):
+        with pytest.raises(ValueError, match="unknown replacement form"):
             self._run(parts, 2, "every-other-step")
 
 
@@ -244,7 +258,8 @@ def _tiny_three_channel_dit() -> torch.nn.Module:
 
 
 class TestTokenwiseTimeEmbedding:
-    """pipeline の各 forward に当てる時刻の差し替え（決定 4 — 値ごとに M = 1）。"""
+    """The time replacement applied to each forward of the pipeline (decision 4 — M = 1 per
+    value)."""
 
     LATENT = (1, 3, 2, 6, 10)
 
@@ -258,7 +273,8 @@ class TestTokenwiseTimeEmbedding:
         return model, latents, embeds, mask
 
     def _upstream_timestep(self, mask: torch.Tensor, value: int) -> torch.Tensor:
-        """diffusers の `expand_timesteps` の分岐と同じ f32 の `[1, S]`（条件のトークンは 0）。"""
+        """The same f32 `[1, S]` as the `expand_timesteps` branch of diffusers (0 for the condition
+        tokens)."""
         return torch.where(mask, 0.0, float(value)).to(torch.float32)
 
     def test_it_matches_the_reference_wrapper_of_the_dit_golden(self, inputs):
@@ -281,7 +297,8 @@ class TestTokenwiseTimeEmbedding:
         assert torch.equal(got, want)
 
     def test_the_time_mlp_runs_one_row_per_value(self, inputs):
-        """差し替えの中は時刻の MLP が 1 行ずつ 2 回、差し替えの外（diffusers そのもの）は S 行。"""
+        """Inside the replacement the time MLP runs one row twice; outside it (diffusers itself),
+        S rows."""
         model, latents, embeds, mask = inputs
         rows: list[int] = []
         handle = model.condition_embedder.time_embedder.linear_1.register_forward_hook(
@@ -312,23 +329,24 @@ class TestTokenwiseTimeEmbedding:
         assert inputs[0].condition_embedder is original
 
     def test_a_one_dimensional_timestep_is_refused(self, inputs):
-        """T2V の経路（1 次元の timestep）がこの差し替えに来たら止まる。"""
-        with pytest.raises(AssertionError, match="トークンごと"):
+        """If the T2V path (a one-dimensional timestep) reaches this replacement, it stops."""
+        with pytest.raises(AssertionError, match="are not the per-token"):
             self._forward_replaced(inputs, torch.tensor([750]))
 
     def test_two_generation_values_are_refused(self, inputs):
         timestep = self._upstream_timestep(inputs[3], 750)
         timestep[0, -1] = 500.0
 
-        with pytest.raises(AssertionError, match="2 値"):
+        with pytest.raises(AssertionError, match="takes 2 values"):
             self._forward_replaced(inputs, timestep)
 
     def test_a_nonzero_condition_token_is_refused(self, inputs):
-        """条件のトークンの時刻が 0 でなければ参照ラッパが止める（マスクとの対応のずれ）。"""
+        """If the time of a condition token is not 0, the reference wrapper stops it (a shifted
+        mapping to the mask)."""
         timestep = self._upstream_timestep(inputs[3], 750)
         timestep[0, 0] = 750.0
 
-        with pytest.raises(AssertionError, match="条件マスクと一致しない"):
+        with pytest.raises(AssertionError, match="does not match the condition mask"):
             self._forward_replaced(inputs, timestep)
 
 
@@ -361,7 +379,8 @@ def _generate(monkeypatch, tmp_path, snapshot, vae, cases, load, **overrides):
 
 
 class TestSyntheticRun:
-    """合成の 2.2 モデルと合成の画像で 2 相を通して書く（5B の重みも実画像も読まない）。"""
+    """Writes through both phases with a synthetic 2.2 model and synthetic images (reads neither the
+    5B weights nor real images)."""
 
     @pytest.fixture
     def run(self, monkeypatch, tmp_path, snapshot, ti2v_synthetic_vae):
@@ -376,7 +395,7 @@ class TestSyntheticRun:
         decode_tiles = REF.vae_tiling.decode_tiles
 
         def spying(vae, latents, plan):
-            # decode の時点で DiT が回収済みか（2 相の順）。
+            # Whether the DiT has been collected at decode time (the order of the 2 phases).
             decodes.append(refs[0]() is None)
             return decode_tiles(vae, latents, plan)
 
@@ -448,7 +467,8 @@ class TestSyntheticRun:
         )
 
     def test_the_condition_is_the_stage_9a_encoder_reference(self, run):
-        """条件の潜在 = 段 9a の golden と同じ関数（非タイル encode の mu → 正規化）の値。"""
+        """The condition latent = the value of the same function as the step 9a goldens (the mu of
+        an untiled encode → normalization)."""
         tensors, _ = run["written"]["accept-ferret"]
         sample = i2v_preprocess_ref.to_signed_unit(
             i2v_preprocess_ref.crop_resize(_source("ferret").image, 160, 96)
@@ -460,9 +480,9 @@ class TestSyntheticRun:
         assert torch.equal(tensors["condition_latents"], want)
 
     def test_upstream_cfg_and_unipc_rebuild_the_scheduler_latents(self, run):
-        """記録した cond / uncond から上流の CFG + UniPC が、置き換えない潜在を作り直す
-        （cond / uncond の取り違え・step の記録のずれ・スケジューラへ置き換えた潜在を渡す誤りは
-        ここでビットが合わなくなる）。"""
+        """From the recorded cond / uncond, upstream CFG + UniPC rebuild the unreplaced latents (a
+        cond / uncond mix-up, a shifted step record, or passing the replaced latents to the
+        scheduler breaks the bit match here)."""
         from diffusers import UniPCMultistepScheduler
 
         for case, (tensors, _) in run["written"].items():
@@ -484,7 +504,7 @@ class TestSyntheticRun:
 
             assert torch.equal(final[:, :1], tensors["condition_latents"]), case
             assert torch.equal(final[:, 1:], tensors["latents.1"][:, 1:]), case
-            # 恒真でない: スケジューラの潜在の先頭フレームはノイズの軌跡のまま。
+            # Not vacuous: the first frame of the scheduler latents stays on the noise trajectory.
             assert not torch.equal(tensors["latents.1"][:, :1], tensors["condition_latents"])
 
     def test_the_official_form_replays_to_the_same_final_latents(self, run):
@@ -537,8 +557,9 @@ class TestSyntheticRun:
 
 
 def _write_encoder_goldens(root: Path, vae, cases, *, perturb: str | None = None) -> None:
-    """段 9a の encoder の golden（`source` / `rgb8` / `latent`）を合成の画像と合成の VAE で書く。
-    `perturb` のキーだけ 1 要素ずらす（golden と参照の食い違いの再現）。"""
+    """Write the step 9a encoder goldens (`source` / `rgb8` / `latent`) with synthetic images and
+    the synthetic VAE. Only the key `perturb` is moved by one element (reproducing a mismatch
+    between the golden and the reference)."""
     from safetensors.torch import save_file
 
     width, height = SYNTHETIC_LATENT[3] * 16, SYNTHETIC_LATENT[2] * 16
@@ -563,8 +584,8 @@ def _write_encoder_goldens(root: Path, vae, cases, *, perturb: str | None = None
 
 
 class TestEncoderGolden:
-    """段 9a の encoder の golden がある機では、参照の条件画像と条件の潜在がビット一致すること
-    （門）。"""
+    """On a machine with the step 9a encoder goldens, the condition image and the condition latent
+    of the reference are bit-identical to them (a check)."""
 
     def _run(self, monkeypatch, tmp_path, snapshot, vae, root):
         summaries, _ = _generate(
@@ -598,25 +619,27 @@ class TestEncoderGolden:
         root = tmp_path / "goldens"
         _write_encoder_goldens(root, ti2v_synthetic_vae, [CASES[0], CASES[2]], perturb=key)
 
-        with pytest.raises(AssertionError, match=f"ビット一致しない.*'{key}'"):
+        with pytest.raises(
+            AssertionError, match=f"not bit-identical to the step 9a encoder golden.*'{key}'"
+        ):
             self._run(monkeypatch, tmp_path, snapshot, ti2v_synthetic_vae, root)
         assert not (tmp_path / "series").exists()
 
 
 class TestFaults:
-    """順と経路の検査が落ちうること（故障注入）。"""
+    """The order and path checks can fail (fault injection)."""
 
     def test_a_dit_that_is_still_referenced_stops_before_the_decode(
         self, monkeypatch, tmp_path, snapshot, ti2v_synthetic_vae
     ):
         kept = _tiny_dit()
 
-        with pytest.raises(AssertionError, match="DiT への参照が残っている"):
+        with pytest.raises(AssertionError, match="a reference to the DiT remains"):
             _generate(monkeypatch, tmp_path, snapshot, ti2v_synthetic_vae, [CASES[2]], lambda: kept)
         assert not (tmp_path / "series").exists()
 
     def test_a_model_index_without_expand_timesteps_is_refused(self, snapshot, ti2v_synthetic_vae):
-        """偽なら Wan2.1 の I2V（チャネル連結）の分岐になる。"""
+        """If false, it takes the Wan2.1 I2V branch (channel concatenation)."""
         (snapshot / "model_index.json").write_text(
             json.dumps({**MODEL_INDEX, "expand_timesteps": False})
         )
@@ -653,16 +676,17 @@ class TestFaults:
         pipeline.transformer.register_forward_hook(lambda *_: forwards.append(1))
         image = REF.condition_image(_source(), 160, 96)
 
-        with pytest.raises(AssertionError, match="非有限"):
+        with pytest.raises(AssertionError, match="non-finite values"):
             REF.denoise_case(pipeline, CASES[2], _embeds(), self._names(CASES[2]), image)
         assert forwards == []
 
     def test_an_image_the_pipeline_resizes_is_refused(self, pipeline):
-        """exact-size でない画像は上流が resize する — 公式の前処理と画素が変わるので止まる。"""
+        """An image that is not exact-size is resized by upstream — the pixels would differ from
+        the official preprocessing, so it stops."""
         source = _source()
         image = REF.ConditionImage(source=source, cropped=source.image)
 
-        with pytest.raises(AssertionError, match="ビット一致しない"):
+        with pytest.raises(AssertionError, match="preprocessed image is not bit-identical"):
             REF.denoise_case(pipeline, CASES[2], _embeds(), self._names(CASES[2]), image)
 
     def test_the_m_s_observation_refuses_a_left_over_time_replacement(self, pipeline):
@@ -672,7 +696,7 @@ class TestFaults:
 
         with (
             REF.tokenwise_time_embedding(pipeline.transformer, mask),
-            pytest.raises(AssertionError, match="時刻の差し替えが残っている"),
+            pytest.raises(AssertionError, match="the timestep replacement is still in place"),
         ):
             REF.observe_m_s(pipeline, denoised, _embeds())
 
@@ -680,7 +704,8 @@ class TestFaults:
 class TestCli:
     @pytest.fixture
     def heavy(self, monkeypatch, tmp_path):
-        """重い段（条件画像・RAM の確認・読み込み・2 相）を記録だけの代役に差し替える。"""
+        """Replace the heavy steps (condition images, RAM check, loading, the 2 phases) with
+        stand-ins that only record."""
         calls: dict[str, Any] = {}
 
         def called(name: str, value: Any) -> Any:
@@ -766,8 +791,8 @@ class TestCli:
     def test_the_memory_gate_adds_the_measured_i2v_excess_to_the_t2v_estimate(
         self, heavy, tmp_path
     ):
-        """I2V の実測の山（24.07 GiB）は T2V の見込み（23.70 GiB）を上回ったので、門は上乗せを
-        足して見る。"""
+        """The measured I2V peak (24.07 GiB) exceeded the T2V estimate (23.70 GiB), so the check
+        adds an extra margin."""
         assert REF.main(["--embeds", str(self._asset(tmp_path))]) == 0
 
         assert heavy["memory"] == ("load", 123 + REF.I2V_EXCESS_BYTES)
@@ -775,12 +800,13 @@ class TestCli:
 
 
 class TestLoadSources:
-    """条件画像の来歴（段 9a と同じ sha256 の表 — 外れたら重い読み込みの前に止まる）。"""
+    """The provenance of the condition images (the same sha256 table as step 9a — a mismatch stops
+    before the heavy loading)."""
 
     def test_a_missing_image_is_refused(self, monkeypatch, tmp_path):
         monkeypatch.setattr(export_vae_encoder, "IMAGE_DIR", tmp_path)
 
-        with pytest.raises(FileNotFoundError, match="git 追跡外"):
+        with pytest.raises(FileNotFoundError, match="not tracked in git"):
             REF.load_sources([CASES[2]])
 
     def test_an_image_with_another_digest_is_refused(self, monkeypatch, tmp_path):

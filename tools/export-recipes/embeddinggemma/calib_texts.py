@@ -1,32 +1,36 @@
-"""EmbeddingGemma-300m の**校正コーパス**（GPTQ / AWQ が見る活性を作る 48 文）。
+"""The **calibration corpus** of EmbeddingGemma-300m (48 texts that produce the activations GPTQ /
+AWQ see).
 
-`karume.quant_calib` の校正付き丸めは「その層に実際に流れる活性」から丸め先を選び直す方式
-なので、コーパスの性格がそのまま丸めの偏りになる。ここは `measure_quant.py` の校正付き構成
-（{@link embeddinggemma.measure_quant.CALIB_CONFIGS}）が読む唯一の入力で、選定方針は次の
-3 点:
+The calibrated rounding of `karume.quant_calib` re-chooses the rounding targets from "the
+activations that actually flow into that layer", so the character of the corpus becomes the bias of
+the rounding as is. This is the only input read by the calibrated configs of `measure_quant.py`
+({@link embeddinggemma.measure_quant.CALIB_CONFIGS}), and it is chosen by three rules:
 
-- **評価文と分離する** — {@link embeddinggemma.export.GOLDEN_CASES}（= 全 cosine の分母を
-  作る 5 ケース）と 1 文も重ねない。話題も重ねない（「フランスの首都」系と `bare` の
-  pangram は 1 文も入れない）。重ねると校正で見た文をそのまま評価する形になり、cosine は
-  **校正の質ではなく漏れ**を測る数になる。
-- **検索の使われ方へ寄せる** — EG は query / document の非対称なプロンプト接頭辞を持つ
-  （`config_sentence_transformers.json` の `prompts` が正本）。校正入力にも同じ接頭辞を
-  付け、query 風の短い問い合わせ・document 風の説明文・接頭辞なしの素の文を混ぜる。
-  接頭辞を落とすと、実運用で必ず先頭に来るトークン列の活性を 1 度も見ないまま丸めることに
-  なる。
-- **長さと言語を散らす** — 5〜10 語の問い合わせから 30〜40 語の段落まで。英語中心
-  （検索の主用途）に日本語を 10 文だけ混ぜ、CJK のトークン列でも活性を見ておく。
+- **Keep it apart from the evaluation texts** — not a single text overlaps
+  {@link embeddinggemma.export.GOLDEN_CASES} (= the 5 cases that form the denominator of every
+  cosine). The topics do not overlap either (nothing on "the capital of France" and no pangram like
+  `bare`). With an overlap, the evaluation runs on texts the calibration has already seen, and the
+  cosine measures **leakage, not the quality of the calibration**.
+- **Follow how retrieval uses the model** — EG has asymmetric query / document prompt prefixes
+  (`prompts` in `config_sentence_transformers.json` is the source of truth). The calibration inputs
+  carry the same prefixes, mixing short query-style questions, document-style explanations and
+  plain texts without a prefix. Dropping the prefixes would round without ever seeing the
+  activations of the token sequence that always comes first in real use.
+- **Spread lengths and languages** — from 5–10-word queries to 30–40-word paragraphs. Mostly English
+  (the main use of retrieval), with 10 Japanese texts mixed in so that activations of CJK token
+  sequences are seen as well.
 
-内訳は query 20 / document 20 / 接頭辞なし 8、うち日本語 10。固有の人名・実在組織は
-書かない（校正の入力が特定の固有名の活性を引き当てるのを避ける）。
+The split is query 20 / document 20 / no prefix 8, of which 10 are Japanese. No personal names or
+real organisations are written (so that the calibration inputs do not pull in the activations of
+specific proper nouns).
 """
 
 from __future__ import annotations
 
-#: 校正入力の 48 文（`(プロンプト種別 | None, 本文)`）。種別は
-#: {@link embeddinggemma.export.load_prompts} が返す辞書のキー（`query` / `document`）で、
-#: `None` は接頭辞なし。この順で先頭から使う（`--calib-limit N` は**先頭 N 文**）—
-#: 3 種を混ぜて並べるので、上限を掛けた縮小実行でも役割の混合が保たれる。
+#: The 48 calibration inputs (`(prompt kind | None, body)`). The kind is a key of the dict returned
+#: by {@link embeddinggemma.export.load_prompts} (`query` / `document`), and `None` means no prefix.
+#: They are used in this order from the start (`--calib-limit N` takes **the first N texts**) — the
+#: three kinds are interleaved, so a reduced run with a limit still keeps the mix of roles.
 CALIB_TEXTS: tuple[tuple[str | None, str], ...] = (
     ("query", "how do i rotate log files without restarting the service"),
     (

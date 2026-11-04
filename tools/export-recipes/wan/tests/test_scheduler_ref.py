@@ -1,7 +1,9 @@
-"""`wan/scheduler_ref.py` の約束事 — UniPC の σ / timestep の列の性質と fixture の往復。
+"""The contract of `wan/scheduler_ref.py` — the properties of the UniPC σ / timestep sequences and
+the fixture round trip.
 
-列の性質（最初の timestep が 999・単調）は上流の `set_timesteps` が作る値で見る。scheduler の
-config は pin した snapshot のものを使う（{@link wan_snapshot} — 無ければ SKIP）。
+The properties of the sequences (the first timestep is 999, monotonic) are checked on the values
+upstream `set_timesteps` produces. The scheduler config is the one of the pinned snapshot
+({@link wan_snapshot} — SKIP when absent).
 """
 
 from __future__ import annotations
@@ -44,8 +46,8 @@ class TestSchedule:
         assert sigmas[-1] == 0.0
 
     def test_the_first_sigma_carries_the_1e6_correction(self, scheduler):
-        """shift 後の σ[0] は厳密に 1 で、上流は 1e-6 を引く — それが最初の timestep を 999 に
-        する。"""
+        """σ[0] after the shift is exactly 1, and upstream subtracts 1e-6 — that makes the first
+        timestep 999."""
         sigmas = scheduler_ref.sigmas_float64(scheduler.config, NUM_INFERENCE_STEPS)
 
         assert sigmas[0] == 1.0 - scheduler_ref.SIGMA_EPS
@@ -64,7 +66,8 @@ class TestSchedule:
     def test_a_rebuilt_float64_column_that_drifts_is_caught(
         self, scheduler, monkeypatch: pytest.MonkeyPatch
     ):
-        """作り直した f64 の列を縛る検査そのものの故障注入（1 つずらした列は通らない）。"""
+        """Fault injection into the very check that binds the rebuilt f64 sequence (a sequence
+        shifted by one does not pass)."""
         honest = scheduler_ref.sigmas_float64
 
         def shifted(config, steps):
@@ -87,8 +90,8 @@ class TestFixture:
             assert torch.equal(again_tensors[name], tensor), name
 
     def test_the_orders_warm_up_and_lower_at_the_end(self, built):
-        """bh2・order 2・`lower_order_final`: 最初と最後が 1 次・間は 2 次。corrector は 2 本目
-        から。"""
+        """bh2, order 2, `lower_order_final`: first and last steps are first order, the steps in
+        between second order. The corrector starts from the second step."""
         _, meta = built
 
         assert meta["orders"] == [1] + [2] * (NUM_INFERENCE_STEPS - 2) + [1]
@@ -120,12 +123,13 @@ class TestFixture:
             assert torch.equal(loaded[name], tensor), name
 
     def test_the_checked_in_fixture_is_current(self, built):
-        """追跡対象の fixture が今の台本の出力と同じ（台本だけ直して書き直し忘れを掴む）。"""
+        """The tracked fixture equals the output of the current script (catches a script fix whose
+        fixture was not rewritten)."""
         from safetensors.torch import load_file
 
         directory = scheduler_ref.DEFAULT_OUT
         if not (directory / "unipc.safetensors").is_file():
-            pytest.skip(f"{directory} に fixture が無い — `python -m wan.scheduler_ref` で作る")
+            pytest.skip(f"no fixture in {directory} — create it with `python -m wan.scheduler_ref`")
         tensors, meta = built
 
         loaded = load_file(str(directory / "unipc.safetensors"))

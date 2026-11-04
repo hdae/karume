@@ -1,14 +1,17 @@
-"""gemma4 の配布 recipe（`gemma4.distribution`）— 組み立て 1 周ぶんの単体テスト。
+"""gemma4's distribution recipe (`gemma4.distribution`) — unit tests of one assembly pass.
 
-実資産（3.7GiB）は使わない。組み立てへ届く入力は数 KB の**正当な最小の製品系列**
-（{@link gemma4.tests.product_fixture}）で、門に落とされることを見るケースだけがその変種になる。
+The real assets (3.7GiB) are not used. The input reaching the assembly is a **valid minimal product
+series** of a few KB ({@link gemma4.tests.product_fixture}), and only the cases that check a gate
+rejects something use variants of it.
 
-核は「別々の台本が持つ同じ事実を、組み立て時に突き合わせる」— 製品グラフ（`export_product.py`）/
-PLE sidecar（同）/ トークナイザ資産（`tokenizer.py`）/ 上流の生成既定（チェックポイント）は
-4 つとも独立に動けるので、噛み合っていないことは**配布形を並べる前**にしか落とせない。
+The core is "compare, at assembly time, the same facts held by separate scripts" — the product
+graph (`export_product.py`) / the PLE sidecar (same) / the tokenizer asset (`tokenizer.py`) / the
+upstream generation defaults (the checkpoint) can all four move independently, so a mismatch can
+only be rejected **before the distribution is laid out**.
 
-core だけで観測できる層（規模上限・quant 完全写像・staging/swap の不変条件・帰属プロファイルの
-解決規則）は `tools/exporter/tests/test_dist.py` が持つ（ADR 0065 段 3+4 の分割）。
+The layers observable with the core alone (scale limits, the complete quant mapping, the
+staging/swap invariants, the resolution rules of the attribution profiles) are covered by
+`tools/exporter/tests/test_dist.py` (the split of ADR 0065 steps 3+4).
 """
 
 from __future__ import annotations
@@ -63,22 +66,23 @@ from karume.dist import (
 )
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
-#: 役割名 → part 本数（PLE の資産は専用 part を取るので `model` だけ多い）。
+#: Role name → part count (the PLE assets take parts of their own, so only `model` has more).
 _PART_TOTALS: Mapping[str, int] = {GEMMA4_ROLE: len(fixture.product_container())}
 
-#: PLE の寸法（索引を曲げるときの元値）。
+#: PLE dimensions (the original values when bending the index).
 _PLE_DIMS: Mapping[str, int] = {"layers": fixture.LAYERS, "dim": fixture.DIM}
 
 
 def _shift_first_block(index: dict[str, Any]) -> None:
-    """先頭 block の末尾を 1 行縮める（範囲が連続しない索引）— in every table the index has."""
+    """Shrink the end of the first block by one row (an index whose ranges are not contiguous) — in
+    every table the index has."""
     for key in ("values", "scales"):
         if key in index:
             index[key]["blocks"][0]["stop"] -= 1
 
 
 def _rename_first_block(index: dict[str, Any]) -> None:
-    """先頭 block の資産名だけを容器に無い綴りへ差し替える。"""
+    """Replace only the first block's asset name with a spelling that is not in the container."""
     index["values"]["blocks"][0]["asset"] = "ple.values.absent"
 
 
@@ -89,10 +93,10 @@ def _container_with_ple(
     dim: int = fixture.DIM,
     bend: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[bytes]:
-    """製品コンテナ（PLE の索引だけを 1 箇所曲げられる形）。
+    """A product container (in a form where one place of the PLE index can be bent).
 
-    索引は資産 `ple_index` の payload なので、曲げるのは**その JSON だけ** — 資産の block 列は
-    そのままにしておくと「索引だけ古い組み合わせ」がそのまま作れる。
+    The index is the payload of the asset `ple_index`, so only **that JSON** is bent — leaving the
+    asset's block sequence as it is directly builds "a combination where only the index is stale".
     """
     assets = dict(
         fixture.ple_container_assets(
@@ -107,26 +111,30 @@ def _container_with_ple(
     return fixture.product_container(assets=assets)
 
 
-#: tiny な PLE を 2 block 以上へ割る block 上限（block 跨ぎを 1 度は踏む）— half the vocabulary of
-#: the bf16 table's rows.
+#: Block limit that splits the tiny PLE into 2 or more blocks (so a block crossing is exercised at
+#: least once) — half the vocabulary of the bf16 table's rows.
 _PLE_BLOCK_BYTES = fixture.LAYERS * fixture.DIM * 2 * (fixture.VOCAB // 2)
 
-#: 帰属表に**無い**モデル名とその上流の綴り（未知のモデルを落とす門の入力）。E4B が帰属表へ
-#: 入ったので、門の入力は実在しない綴りにしてある。
+#: A model name **not in** the attribution table and its upstream spelling (the input of the gate
+#: that rejects unknown models). E4B entered the attribution table, so the gate's input is a
+#: spelling that does not exist.
 UNLISTED_MODEL = "unlisted"
 UNLISTED_CHECKPOINT = "gemma-4-unlisted-it"
 
-#: 合成の寸法で成立する実行時ノブ（実物は 768 / 4096・合成の位置上限は 37）。
+#: Run-time knobs that hold for the synthetic dimensions (the real ones are 768 / 4096; the
+#: synthetic position limit is 37).
 SMALL_CHUNK = 2
 SMALL_CAPACITY = 4
 
 
 @pytest.fixture(autouse=True)
 def _small_runtime_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """実行時ノブを合成の寸法へ寄せる（`capacity ≤ maxPosition` の門を素通りさせるため）。
+    """Bring the run-time knobs to the synthetic dimensions (to get past the
+    `capacity ≤ maxPosition` gate).
 
-    実物の値そのままだと合成の位置上限（37）に対して容量 4096 が外れる — その組み合わせ自体は
-    {@link TestGemma4Config.test_it_refuses_a_capacity_beyond_the_model_limit} が門として使う。
+    With the real values the capacity 4096 falls outside the synthetic position limit (37) — that
+    combination itself is used as a gate by
+    {@link TestGemma4Config.test_it_refuses_a_capacity_beyond_the_model_limit}.
     """
     monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", SMALL_CHUNK)
     monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", SMALL_CAPACITY)
@@ -178,10 +186,11 @@ def _model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _assert_notice_names(notice: str, repos: Iterable[str]) -> None:
-    """改変告知が上流チェックポイントを名指ししていること（org を落とした綴りで見る）。"""
+    """The modification notice names the upstream checkpoint (checked by the spelling without the
+    org)."""
     for repo in repos:
         checkpoint = repo.split("/", 1)[1]
-        assert checkpoint in notice, f"改変告知が '{checkpoint}' を名指ししていない"
+        assert checkpoint in notice, f"the modification notice does not name '{checkpoint}'"
 
 
 class TestGemma4Layout:
@@ -189,30 +198,33 @@ class TestGemma4Layout:
         self, gemma4_assembled
     ) -> None:
         out_dir, _ = gemma4_assembled
-        # PLE は `model` 容器の資産なので、配布形に独立したファイルとしては現れない。
+        # PLE is an asset of the `model` container, so it does not appear as a separate file of the
+        # distribution.
         expected = _in_subtree(
             GEMMA4_DEFAULT_MODEL,
             placed_paths(GEMMA4_OUTPUT_PATHS, GEMMA4_WEIGHTS, _PART_TOTALS),
         )
-        # 法的テキスト 2 本（Apache 2.0 §4）とカードは manifest が宣言しないメタ席。
+        # The 2 legal texts (Apache 2.0 §4) and the card are metadata files the manifest does not
+        # declare.
         assert _present(out_dir) == sorted(
             [*expected, MANIFEST_FILENAME, "LICENSE.md", "NOTICE.md"]
         )
 
     def test_it_never_carries_the_acceptance_only_files(self, gemma4_assembled) -> None:
-        """`ple.probe.safetensors` / the greedy goldens / `reference.json` は系列に同居するが
-        配布へは入らない。"""
+        """`ple.probe.safetensors` / the greedy goldens / `reference.json` live in the series but
+        do not go into the distribution."""
         out_dir, _ = gemma4_assembled
         assert list(out_dir.rglob("ple.probe.*")) == []
         assert list(out_dir.rglob("greedy.*")) == []
         assert list(out_dir.rglob("reference.json")) == []
 
     def test_it_declares_two_graphs_and_the_sidecar_as_assets(self, gemma4_assembled) -> None:
-        """weights は**製品グラフと drafter の 2 本**（ADR 0096 段 2）— drafter は assets ではない。
+        """weights are **the product graph and the drafter** (ADR 0096 step 2) — the drafter is not
+        an asset.
 
-        並びまで見るのは、quant の `weights` 写像が weights の宣言順で埋まるため
-        （`karume.dist.complete_quant_weights` の MUST）— 入れ替わると manifest の 2 節が
-        別の順に並ぶ。
+        The order is checked too because the quant's `weights` mapping is filled in the declaration
+        order of weights (the MUST of `karume.dist.complete_quant_weights`) — swapped, the 2
+        sections of the manifest would be in another order.
         """
         _, manifest = gemma4_assembled
         model = _model(manifest)
@@ -223,8 +235,9 @@ class TestGemma4Layout:
         assert list(model["weights"][GEMMA4_DRAFTER_ROLE]) == ["i8"]
         assert list(model["quants"]) == ["bf16"]
         assert model["defaultQuant"] == "bf16"
-        # 役割ごとに基底格納が違う（drafter は linear まで i8）ので、自動補完が 2 席とも
-        # それぞれの唯一の dtype ラベルで埋める（in the declaration order of the weights）。
+        # The base storage differs per role (the drafter is i8 down to the linears), so the
+        # auto-completion fills both entries with their own single dtype label (in the declaration
+        # order of the weights).
         assert list(model["quants"]["bf16"]["weights"].items()) == [
             (GEMMA4_ROLE, "bf16"),
             (GEMMA4_DRAFTER_ROLE, "i8"),
@@ -232,12 +245,14 @@ class TestGemma4Layout:
         assert model["quants"]["bf16"]["session"] == {}
 
     def test_it_never_carries_the_drafter_goldens(self, gemma4_assembled) -> None:
-        """drafter 系列の golden は検収専用 — `ple.probe` と同じく配布へは入らない。"""
+        """The drafter series' goldens are for acceptance only — like `ple.probe`, they do not go
+        into the distribution."""
         out_dir, _ = gemma4_assembled
         assert list(out_dir.rglob("drafter-golden.*")) == []
 
     def test_the_ple_blocks_live_inside_the_model_container(self, gemma4_assembled) -> None:
-        """MUST: PLE は容器の資産（ADR 0109 決定 4）— manifest の `assets` には出ない。"""
+        """MUST: PLE is an asset of the container (ADR 0109 decision 4) — it does not appear in the
+        manifest's `assets`."""
         out_dir, manifest = gemma4_assembled
         model = _model(manifest)
         assert list(model["assets"]) == [GEMMA4_TOKENIZER_ROLE]
@@ -246,7 +261,7 @@ class TestGemma4Layout:
         index = json.loads(read_asset(placed, PLE_INDEX_ASSET))
         declared = read_asset_declarations(placed)
         blocks = [block["asset"] for block in index["values"]["blocks"]]
-        assert blocks, "索引が block を 1 本も持たない"
+        assert blocks, "the index holds no block"
         for name in blocks:
             assert name in declared
 
@@ -259,24 +274,26 @@ class TestGemma4Layout:
 
 
 class TestGemma4Config:
-    """`pipelineConfig` の 6 欄 — 導出（`maxPosition` / `rope` / `sampler`）と実行時ノブの関係。"""
+    """The 6 fields of `pipelineConfig` — the derived ones (`maxPosition` / `rope` / `sampler`) and
+    their relation to the run-time knobs."""
 
     def test_it_derives_max_position_from_the_upstream_declaration(self, gemma4_assembled) -> None:
-        """MUST: 写経しない — 出どころは上流 `text_config.max_position_embeddings` だけ。"""
+        """MUST: no hand copy — the only source is upstream
+        `text_config.max_position_embeddings`."""
         _, manifest = gemma4_assembled
         assert _model(manifest)["pipelineConfig"]["maxPosition"] == fixture.MAX_POSITION
 
     def test_it_derives_the_rope_parameters_from_the_upstream_config(
         self, gemma4_assembled
     ) -> None:
-        """層種別ごとの theta / headDim / rotaryDim（full だけ `global_head_dim` を読む）。"""
+        """theta / headDim / rotaryDim per layer type (only full reads `global_head_dim`)."""
         _, manifest = gemma4_assembled
 
         assert _model(manifest)["pipelineConfig"]["rope"] == {
             SLIDING_ATTENTION: {
                 "theta": fixture.SLIDING_THETA,
                 "headDim": fixture.SLIDING_HEAD_DIM,
-                # `default` は全周波数が回る
+                # `default` rotates every frequency
                 "rotaryDim": fixture.SLIDING_HEAD_DIM,
             },
             FULL_ATTENTION: {
@@ -288,7 +305,8 @@ class TestGemma4Config:
         }
 
     def test_it_refuses_a_rope_type_it_cannot_mirror(self, tmp_path: Path) -> None:
-        """MUST: 式が別物なら落とす（ホストが宣言どおりに組めない表を配らない）。"""
+        """MUST: fail if the formula is different (do not distribute a table the host cannot build
+        as declared)."""
         text_config = json.loads(json.dumps(dict(fixture.TEXT_CONFIG)))
         text_config["rope_parameters"][SLIDING_ATTENTION]["rope_type"] = "yarn"
         sources = _sources(tmp_path)
@@ -306,7 +324,8 @@ class TestGemma4Config:
     def test_it_refuses_a_checkpoint_config_without_the_declaration(
         self, tmp_path: Path, dropped: str, message: str
     ) -> None:
-        """MUST: 導出元が欠けたら落とす（既定へ落とすと配布形が勝手な数を名乗る）。"""
+        """MUST: fail if a derivation source is missing (falling back to a default would make the
+        distribution claim an arbitrary number)."""
         text_config = {key: value for key, value in fixture.TEXT_CONFIG.items() if key != dropped}
         sources = _sources(tmp_path)
         fixture.write_series(
@@ -324,7 +343,8 @@ class TestGemma4Config:
             gemma4_plan(sources)
 
     def test_it_copies_the_upstream_sampler_recommendation(self, gemma4_assembled) -> None:
-        """MUST: 値を写経しない（ADR 0083 決定 7 — 出どころは上流の宣言そのもの）。"""
+        """MUST: no hand copy of the values (ADR 0083 decision 7 — the source is the upstream
+        declaration itself)."""
         _, manifest = gemma4_assembled
         assert _model(manifest)["pipelineConfig"]["sampler"] == {
             "temperature": fixture.GENERATION_CONFIG["temperature"],
@@ -341,11 +361,12 @@ class TestGemma4Config:
     def test_it_refuses_a_capacity_beyond_the_model_limit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """実物のノブ（容量 4096）× 合成の位置上限（37）— 長い会話でだけ落ちる形を焼かない。"""
+        """The real knob (capacity 4096) × the synthetic position limit (37) — do not bake a form
+        that fails only in long conversations."""
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", GEMMA4_CHUNK_LENGTH)
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", GEMMA4_CAPACITY)
         sources = _build(tmp_path)
-        with pytest.raises(DistError, match="モデルの位置上限"):
+        with pytest.raises(DistError, match="exceeds the model's position limit"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_capacity_below_one_chunk(
@@ -354,14 +375,15 @@ class TestGemma4Config:
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", 4)
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", 2)
         sources = _build(tmp_path)
-        with pytest.raises(DistError, match="1 chunk すら入らない"):
+        with pytest.raises(DistError, match="not even one chunk fits"):
             gemma4_plan(sources)
 
     @pytest.mark.parametrize("chunk", [1, GEMMA4_MAX_CHUNK_LENGTH + 1])
     def test_it_refuses_a_chunk_length_outside_the_traced_range(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chunk: int
     ) -> None:
-        """記号 `M` は trace 時に `[2, SYM_MAX]` で宣言される — その外は宣言できない。"""
+        """The symbol `M` is declared as `[2, SYM_MAX]` at trace time — nothing outside it can be
+        declared."""
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", chunk)
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", 2048)
         sources = _build(tmp_path)
@@ -369,32 +391,36 @@ class TestGemma4Config:
             gemma4_plan(sources)
 
     def test_the_declared_knobs_are_inside_the_shipped_bounds(self) -> None:
-        """実物の宣言（768 / 4096）そのものが両方の上限の内側にあること。"""
+        """The real declaration (768 / 4096) itself lies inside both limits."""
         assert 2 <= GEMMA4_CHUNK_LENGTH <= GEMMA4_MAX_CHUNK_LENGTH
         assert GEMMA4_CHUNK_LENGTH <= GEMMA4_CAPACITY
 
     def test_it_declares_the_traced_chunk_bound(self, gemma4_assembled) -> None:
-        """MUST: 記号 `M` の trace 上限を配布形が宣言する（読み手は資産から導けない）。
+        """MUST: the distribution declares the trace upper bound of the symbol `M` (the reader
+        cannot derive it from the asset).
 
-        IR の `symbols` は名前の列だけで上限を持たないので、`chunkLength` を上書きした呼び手が
-        trace 範囲の外へ出たことは資産側では検出できない。焼く側が知っている唯一の数を宣言へ
-        載せることで、TS 側（`gemma.parsePipelineConfig` / `assertChunkLength`）が門にできる。
+        The IR's `symbols` is only a list of names with no bounds, so a caller that overrode
+        `chunkLength` going outside the trace range cannot be detected on the asset side.
+        Putting the one number the baking side knows into the declaration lets the TS side
+        (`gemma.parsePipelineConfig` / `assertChunkLength`) make it a gate.
 
-        既定（{@link SMALL_CHUNK} へ寄せてある）とは**別の事実**なので、上限は monkeypatch の
-        影響を受けず実物の値のまま出る。
+        It is **a different fact** from the default (brought to {@link SMALL_CHUNK}), so the upper
+        bound is not affected by monkeypatch and comes out at the real value.
         """
         _, manifest = gemma4_assembled
         assert _model(manifest)["pipelineConfig"]["maxChunkLength"] == GEMMA4_MAX_CHUNK_LENGTH
 
     def test_the_chunk_bound_mirrors_the_export_script(self) -> None:
-        """MUST: 記号 `M` の上限は焼く側（`gemma4.export.SYM_MAX`）と同じ数。
+        """MUST: the upper bound of the symbol `M` is the same number as the baking side's
+        (`gemma4.export.SYM_MAX`).
 
-        配布 recipe は torch を読まない（既定 sync の CI job で collection ごと落とさない）
-        ので写しを持つ。写しが古びると「trace の外の chunk 長を宣言した配布形」が通る。
+        The distribution recipe does not import torch (so the default-sync CI job does not lose
+        the whole collection), so it holds a copy. A stale copy would pass "a distribution that
+        declares a chunk length outside the trace".
 
-        NOTE: 見えるのは 2 つの**既定値**が一致することだけ。系列を `--sym-max 640` などで
-        組み直しても（513 未満は export 自体が拒む）、使った値はどこにも残らないのでこの門は
-        緑のままになる。
+        NOTE: what is visible is only that the 2 **default values** agree. Even if the series is
+        rebuilt with `--sym-max 640` or the like (below 513 the export itself refuses), the value
+        used remains nowhere, so this gate stays green.
         """
         pytest.importorskip("torch")
         from gemma4.export import SYM_MAX
@@ -402,10 +428,12 @@ class TestGemma4Config:
         assert GEMMA4_MAX_CHUNK_LENGTH == SYM_MAX
 
     def test_the_row_symbol_mirrors_the_export_script(self) -> None:
-        """MUST: 出口の行数記号の綴りは焼く側（`export_product.ROW_SYMBOL`）と同じ。
+        """MUST: the spelling of the exit's row-count symbol is the same as the baking side's
+        (`export_product.ROW_SYMBOL`).
 
-        配布 recipe は torch を読まないので写しを持つ（`M` の上限と同じ理由）。綴りが割れると
-        「行軸が記号でない資産」を落とす門（{@link gemma4_vocab_size}）が空振りする。
+        The distribution recipe does not import torch, so it holds a copy (the same reason as the
+        upper bound of `M`). If the spellings split, the gate that rejects "an asset whose row axis
+        is not a symbol" ({@link gemma4_vocab_size}) checks nothing.
         """
         pytest.importorskip("torch")
         from gemma4.export_product import ROW_SYMBOL
@@ -414,10 +442,11 @@ class TestGemma4Config:
 
 
 class TestGemma4Graph:
-    """製品グラフの形 — 入力の並びと、PLE 索引との噛み合い。"""
+    """The product graph's form — the order of the inputs, and the fit with the PLE index."""
 
     def test_it_refuses_a_graph_with_other_inputs(self, tmp_path: Path) -> None:
-        # 入力の綴りが違うコンテナ（`export_decode.py` の token-only 形などの取り違え）。
+        # A container with differently spelled inputs (a mix-up with e.g. the token-only form of
+        # `export_decode.py`).
         wrong = ir_container(
             mark="other",
             storage="bf16",
@@ -426,12 +455,13 @@ class TestGemma4Graph:
                 [1, fixture.ROW_SYMBOL, fixture.VOCAB],
                 [1, fixture.ROW_SYMBOL, fixture.HIDDEN],
             ),
-            # PLE は同じ容器の資産なので、差し替えた容器にも載せる（索引の門で先に落ちない）。
+            # PLE is an asset of the same container, so it is placed on the replacement container
+            # too (so the index gate does not fail first).
             assets=fixture.ple_container_assets(block_bytes=_PLE_BLOCK_BYTES),
         )
         sources = _build(tmp_path)
         replace_component(sources.product / "model.krm", wrong)
-        with pytest.raises(DistError, match="グラフ入力が"):
+        with pytest.raises(DistError, match="graph inputs are"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_graph_whose_exit_is_not_the_last_row(self, tmp_path: Path) -> None:
@@ -440,7 +470,7 @@ class TestGemma4Graph:
             sources.product,
             sources.tokenizer,
             sources.model,
-            # 行軸が記号でない logits（`[1, 4, V]` — 焼いた行数の資産）。
+            # Logits whose row axis is not a symbol (`[1, 4, V]` — an asset with a baked row count).
             container=fixture.product_container(vocab=fixture.VOCAB),
         )
         replace_component(
@@ -453,14 +483,15 @@ class TestGemma4Graph:
                 assets=fixture.ple_container_assets(block_bytes=_PLE_BLOCK_BYTES),
             ),
         )
-        with pytest.raises(DistError, match=r"\[1, R, \*\] でない"):
+        with pytest.raises(DistError, match=r"is not \[1, R, \*\]"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_graph_whose_outputs_are_swapped(self, tmp_path: Path) -> None:
-        """MUST: logits と hidden は行軸まで同型 — 入れ替えは幅でしか捕まらない。
+        """MUST: logits and hidden have the same shape down to the row axis — a swap is caught only
+        by the width.
 
-        取り違えたまま通すと、語彙数のつもりで hidden_size を読んだ manifest が組み上がる
-        （PLE 索引・トークナイザとの相互照合がその数で回る）。
+        Passed through mixed up, a manifest that read hidden_size as the vocabulary size would be
+        assembled (the cross-checks with the PLE index and the tokenizer run with that number).
         """
         sources = _sources(tmp_path)
         fixture.write_series(
@@ -469,13 +500,14 @@ class TestGemma4Graph:
             sources.model,
             container=fixture.product_container(swap_outputs=True),
         )
-        with pytest.raises(DistError, match="出力 1（hidden）の幅"):
+        with pytest.raises(DistError, match=r"the width of output 1 \(hidden\)"):
             gemma4_plan(sources)
 
     def test_it_refuses_rope_inputs_whose_width_is_not_the_declared_head_dim(
         self, tmp_path: Path
     ) -> None:
-        """宣言（config 由来）とグラフ（コンテナ由来）は別々に動く — 噛み合わせはここだけ。"""
+        """The declaration (from the config) and the graph (from the container) move separately —
+        this is the only place they are fitted together."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -489,7 +521,8 @@ class TestGemma4Graph:
             gemma4_plan(sources)
 
     def test_it_refuses_a_graph_that_still_bakes_the_rope_tables(self, tmp_path: Path) -> None:
-        """派生入力も表も両方持つ形（外に出し切れていない世代）を落とす。"""
+        """Rejects a form that has both the derived inputs and the tables (a generation that did not
+        move them out completely)."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -497,11 +530,12 @@ class TestGemma4Graph:
             sources.model,
             container=fixture.product_container(baked_rope=True),
         )
-        with pytest.raises(DistError, match="焼き込んだ RoPE 表"):
+        with pytest.raises(DistError, match="baked RoPE table initializers remain"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_graph_without_a_free_capacity_symbol(self, tmp_path: Path) -> None:
-        """容量記号は states にだけ現れる 1 本（TS 側 `capacitySymbolOf` の鏡像）。"""
+        """The capacity symbol is the one that appears only in states (a mirror of
+        `capacitySymbolOf` on the TS side)."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -509,7 +543,7 @@ class TestGemma4Graph:
             sources.model,
             container=fixture.product_container(free_symbol=False),
         )
-        with pytest.raises(DistError, match="入力 shape から決まらない記号"):
+        with pytest.raises(DistError, match="symbols not determined by the input shapes"):
             gemma4_plan(sources)
 
     @pytest.mark.parametrize(("field", "axis"), [("layers", 2), ("dim", 3)])
@@ -521,18 +555,20 @@ class TestGemma4Graph:
             sources.product,
             sources.tokenizer,
             sources.model,
-            # 2 ずつ動かすのは、PLE の 1 行が 4 の倍数でなければ block を切れないため。
+            # Moved by 2 because blocks cannot be cut unless one PLE row is a multiple of 4.
             container=_container_with_ple(**{field: int(_PLE_DIMS[field]) + 2}),
         )
-        with pytest.raises(DistError, match=f"軸 {axis}"):
+        with pytest.raises(DistError, match=f"axis {axis}"):
             gemma4_plan(sources)
 
 
 class TestGemma4Ple:
-    """PLE の索引（容器の資産 `ple_index`）の形と、資産宣言との噛み合わせ。"""
+    """The form of the PLE index (the container's asset `ple_index`) and its fit with the asset
+    declarations."""
 
     def test_it_refuses_an_index_whose_rows_are_not_the_vocabulary(self, tmp_path: Path) -> None:
-        """MUST: 行数が語彙数と違えば**別 token の有効な行**を引く（ADR 0085 決定 5）。"""
+        """MUST: if the row count differs from the vocabulary size, **a valid row of another token**
+        is read (ADR 0085 decision 5)."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -540,11 +576,12 @@ class TestGemma4Ple:
             sources.model,
             container=_container_with_ple(tokens=fixture.VOCAB - 2),
         )
-        with pytest.raises(DistError, match="製品グラフの語彙数"):
+        with pytest.raises(DistError, match="the product graph's vocabulary size"):
             gemma4_plan(sources)
 
     def test_it_refuses_an_index_that_is_not_a_partition(self, tmp_path: Path) -> None:
-        """範囲が連続しない索引は「引けない id」か「2 本が同じ id」を作る（沈黙誤値）。"""
+        """An index whose ranges are not contiguous makes "ids that cannot be looked up" or "two
+        entries for the same id" (a silent wrong value)."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -552,7 +589,7 @@ class TestGemma4Ple:
             sources.model,
             container=_container_with_ple(bend=_shift_first_block),
         )
-        with pytest.raises(DistError, match="連続しない"):
+        with pytest.raises(DistError, match="does not continue from the previous block's end"):
             gemma4_plan(sources)
 
     def test_it_refuses_an_index_with_unknown_keys(self, tmp_path: Path) -> None:
@@ -565,13 +602,14 @@ class TestGemma4Ple:
                 bend=lambda index: index.__setitem__("strategy", "token-major")
             ),
         )
-        with pytest.raises(DistError, match="未知キー"):
+        with pytest.raises(DistError, match="unknown keys"):
             gemma4_plan(sources)
 
     def test_it_refuses_an_index_that_names_an_asset_the_container_lacks(
         self, tmp_path: Path
     ) -> None:
-        """索引だけ差し替えた組み合わせは**形も dtype も合う**まま別 token の行を引く。"""
+        """A combination where only the index was replaced reads another token's row **with shape
+        and dtype still matching**."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -579,11 +617,11 @@ class TestGemma4Ple:
             sources.model,
             container=_container_with_ple(bend=_rename_first_block),
         )
-        with pytest.raises(DistError, match="容器に無い"):
+        with pytest.raises(DistError, match="is not in the container"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_missing_part(self, tmp_path: Path) -> None:
-        """part 列の 1 本でも欠ければ落とす（容器として開けない）。"""
+        """Fail if even one of the part list is missing (it cannot be opened as a container)."""
         sources = _build(tmp_path)
         container_parts(sources.product / "model.krm")[-1].unlink()
         with pytest.raises(DistError):
@@ -599,11 +637,12 @@ class TestGemma4Tokenizer:
             sources.model,
             tokenizer=fixture.tokenizer_asset(vocab=fixture.VOCAB + 1),
         )
-        with pytest.raises(DistError, match="製品グラフの語彙数"):
+        with pytest.raises(DistError, match="the product graph's vocabulary size"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_raw_upstream_tokenizer_json(self, tmp_path: Path) -> None:
-        """上流の 32MB の `tokenizer.json` を置いた取り違え（compile 台本を通していない）。"""
+        """A mix-up that placed upstream's 32MB `tokenizer.json` (not run through the compile
+        script)."""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
@@ -611,7 +650,7 @@ class TestGemma4Tokenizer:
             sources.model,
             tokenizer={"version": "1.0", "model": {"type": "BPE"}},
         )
-        with pytest.raises(DistError, match="format が"):
+        with pytest.raises(DistError, match="format is"):
             gemma4_plan(sources)
 
     @pytest.mark.parametrize("model", GEMMA4_REGULAR_MODELS)
@@ -640,7 +679,7 @@ class TestGemma4Sampler:
         fixture.write_series(
             sources.product, sources.tokenizer, sources.model, generation_config=config
         )
-        with pytest.raises(DistError, match=f"{dropped} が無い"):
+        with pytest.raises(DistError, match=f"{dropped} is missing"):
             gemma4_plan(sources)
 
     @pytest.mark.parametrize(
@@ -654,7 +693,8 @@ class TestGemma4Sampler:
     def test_it_refuses_a_recommendation_outside_the_accepted_range(
         self, tmp_path: Path, key: str, value: Any, message: str
     ) -> None:
-        """受理集合は TS 側 `gemma.parsePipelineConfig` と同じ — 配ってから落ちる形にしない。"""
+        """The accepted set is the same as `gemma.parsePipelineConfig` on the TS side — no form that
+        fails after distribution."""
         config = {**fixture.GENERATION_CONFIG, key: value}
         sources = _sources(tmp_path)
         fixture.write_series(
@@ -741,7 +781,8 @@ class TestGemma4Sampler:
 
 
 class TestGemma4Storage:
-    """系列 root の取り違え — 数値の門では原理的に検出できないので、ここが唯一の検出器。"""
+    """A mix-up of the series root — numeric gates cannot detect it in principle, so this is the
+    only detector."""
 
     @pytest.mark.parametrize(
         ("storage", "message"), [("f32", "has no bf16"), ("f16", "has no bf16")]
@@ -778,17 +819,19 @@ class TestGemma4Storage:
             gemma4_plan(sources)
 
     def test_it_refuses_a_container_carrying_half_precision(self, tmp_path: Path) -> None:
-        """f16 の混入は「別 family の系列 root を指した」印にしかならない。"""
+        """An f16 creeping in can only mean "pointed at the series root of another family"."""
         sources = _build(tmp_path)
         replace_component(sources.product / "model.krm", ir_container(mark="half", storage="f16"))
         with pytest.raises(DistError):
             gemma4_plan(sources)
 
     def test_it_refuses_a_drafter_whose_linear_weights_fell_to_int4(self, tmp_path: Path) -> None:
-        """drafter に i4 が在れば落とす — 受理率が 1 〜 3 割落ちるだけの資産の唯一の検出器。
+        """Fail if the drafter has i4 — the only detector for an asset that merely loses 10 to 30
+        percent of its acceptance rate.
 
-        出力ヘッドは i8 のままなので存在検査（i8 が在る）では素通りし、shape も manifest も
-        正しいまま配れてしまう（`gemma4/export_drafter.py` の 2026-09-08 実測）。
+        The output head stays i8, so a presence check (i8 is there) lets it through, and it could be
+        distributed with shape and manifest still correct (measured on 2026-09-08 in
+        `gemma4/export_drafter.py`).
         """
         sources = _build(tmp_path, drafter_bytes=fixture.drafter_container(storage="i4"))
 
@@ -801,7 +844,8 @@ class TestGemma4Naming:
         assert gemma4_series_name("e2b", "product") == "gemma4-e2b-product"
         assert gemma4_series_name("e2b", "tokenizer") == "gemma4-e2b-tokenizer"
         assert gemma4_repo_name("e2b") == "karume-gemma4"
-        # 家族 1 リポ（ADR 0092 決定 1）— どのモデルを組んでも行き先は 1 つ。
+        # One repository per family (ADR 0092 decision 1) — whichever model is assembled, there is
+        # one destination.
         assert gemma4_repo_name("e4b") == gemma4_repo_name("e2b")
 
     def test_the_sources_follow_the_repo_topology(self, tmp_path: Path) -> None:
@@ -809,11 +853,11 @@ class TestGemma4Naming:
         # The product series is the bf16 one (`gemma4/export_product.py` writes it).
         assert sources.product == tmp_path / "gemma4-e2b-product-bf16"
         assert sources.tokenizer == tmp_path / "gemma4-e2b-tokenizer"
-        # チェックポイントは帰属表から導く（2 つ目の表を持たない）。
+        # The checkpoint is derived from the attribution table (no second table is held).
         assert sources.model.name == GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL].split("/", 1)[1]
 
     def test_it_refuses_a_model_outside_the_attribution_table(self, tmp_path: Path) -> None:
-        with pytest.raises(DistError, match="知らない"):
+        with pytest.raises(DistError, match="unknown gemma4 model"):
             gemma4_sources(tmp_path, UNLISTED_MODEL)
 
 
@@ -824,12 +868,15 @@ class TestGemma4Card:
         assert resolve_card_renderer(gemma4_distribution.PIPELINE, None) is profiles["gemma4"]
 
     def test_the_card_counts_the_container_assets_as_host_read(self, tmp_path: Path) -> None:
-        """PLE は容器の資産へ移った（ADR 0109 決定 4）— Download の内訳注記がそれを数える。
+        """PLE moved into the container's assets (ADR 0109 decision 4) — the Download breakdown note
+        counts it.
 
-        `karume/4` では PLE が独立したファイル（manifest の `assets`）だったので、path 集合で
-        数えれば足りた。容器の中へ入った今は宣言が `container` 側にしか無いので、組み立てが
-        引いて渡す（{@link karume.dist.container_asset_bytes}）— 数え落とすと「Download の
-        大半が host 読みの表」という、この注記が存在する唯一の実例で注記が黙って消える。
+        In `karume/4` PLE was a separate file (the manifest's `assets`), so counting the path set
+        was enough. Now that it is inside the container, the declaration exists only on the
+        `container` side, so the assembly looks it up and passes it on
+        ({@link karume.dist.container_asset_bytes}) — missing it in the count would silently drop
+        the note in the one real case it exists for: "most of the Download is a table read by the
+        host".
         """
         sources = _build(tmp_path)
         out_dir = tmp_path / "models" / gemma4_repo_name(GEMMA4_DEFAULT_MODEL)
@@ -865,9 +912,10 @@ class TestGemma4Card:
         assert notes <= {f"{tokenizer} B"}, notes
 
     def test_it_names_every_accepted_chat_role(self, gemma4_assembled) -> None:
-        """カードが語る role は受理集合（`gemma4.chat.PLAIN_ROLES` — TS 側と同じ射程）と一致する。
+        """The roles the card talks about match the accepted set (`gemma4.chat.PLAIN_ROLES` — the
+        same scope as the TS side).
 
-        1 つでも落ちると、公開カードの読み手はその role を使えないと誤読する。
+        If even one is missing, readers of the public card misread that they cannot use that role.
         """
         _, manifest = gemma4_assembled
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
@@ -880,10 +928,11 @@ class TestGemma4Card:
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
         assert "license: apache-2.0" in card
         assert GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL] in card
-        # 使われ方は上流カードへ誘導する（2026-09-01 のライセンス方針）。
+        # Usage points to the upstream card (the license policy of 2026-09-01).
         assert "upstream model card" in card
         assert "LICENSE.md" in card and "NOTICE.md" in card
-        # 数は manifest から導出する（推奨サンプラも位置上限も本文に出る）。
+        # The numbers are derived from the manifest (the recommended sampler and the position limit
+        # also appear in the text).
         assert str(fixture.MAX_POSITION) in card
         assert str(fixture.GENERATION_CONFIG["top_k"]) in card
 
@@ -925,15 +974,16 @@ class TestGemma4Card:
         other = json.loads(json.dumps(manifest))
         other["models"][UNLISTED_MODEL] = other["models"].pop(GEMMA4_DEFAULT_MODEL)
         other["defaultModel"] = UNLISTED_MODEL
-        with pytest.raises(ValueError, match="帰属表に無い"):
+        with pytest.raises(ValueError, match="has no upstream in the attribution table"):
             render_gemma4_model_card(other, "hdae/karume-gemma4")
 
     def test_neither_the_title_nor_the_overview_names_a_model(self, gemma4_assembled) -> None:
-        """家族 1 リポ（ADR 0092 決定 1）— 名乗る綴りは manifest から引く。
+        """One repository per family (ADR 0092 decision 1) — the name it states is taken from the
+        manifest.
 
-        モデルの綴りを題や概要へ焼くと、2 つ目のモデルを足した日に「E2B と名乗りながら
-        E4B も配る」カードが黙って出る（`_gemma4_metadata` の帰属表の門はモデルが**既知**なら
-        素通りする）。
+        Baking the model's spelling into the title or the summary would, on the day a second model
+        is added, silently produce a card that "claims to be E2B while also distributing E4B" (the
+        attribution-table gate of `_gemma4_metadata` lets it through when the model is **known**).
         """
         _, manifest = gemma4_assembled
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
@@ -941,13 +991,15 @@ class TestGemma4Card:
         overview = card.split("## What is this", 1)[1].split("\n## ", 1)[0]
 
         assert "E2B" not in title
-        # 概要が名乗る綴りは manifest から引いたもの（焼き込みではない）。
+        # The spelling the summary states is the one taken from the manifest (not baked in).
         assert GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL] in overview
 
     def test_it_names_the_device_limits_a_quant_declares(self, gemma4_assembled) -> None:
-        """`requiredLimits` は「載らない device を先に知る」ための欄なので本文に出す。
+        """`requiredLimits` is a field for "knowing in advance which devices it does not fit", so
+        it appears in the text.
 
-        合成の系列は寸法が小さく core が欄を焼かないので、欄そのものを差し込んで見る。
+        The synthetic series has small dimensions and the core does not bake the field, so the
+        field itself is injected for the check.
         """
         _, manifest = gemma4_assembled
         other = json.loads(json.dumps(manifest))
@@ -976,7 +1028,8 @@ class TestGemma4Card:
         return next(line for line in card.splitlines() if "**device limits**" in line)
 
     def test_a_limit_every_quant_shares_is_named_once(self, gemma4_assembled) -> None:
-        """同じ重みの席が同じ上限を持つとき、上限名は 1 回ずつ（quant ごとに繰り返さない）。"""
+        """When entries of the same weights have the same limit, each limit name appears once (not
+        repeated per quant)."""
         _, manifest = gemma4_assembled
         line = self._device_limits_line(
             manifest,
@@ -992,7 +1045,8 @@ class TestGemma4Card:
         assert " for `" not in line
 
     def test_a_limit_that_differs_between_quants_names_each_quant(self, gemma4_assembled) -> None:
-        """値が割れたら値ごとに quant 名を添える（畳んだ 1 値を全席の上限と読ませない）。"""
+        """If the values split, each value gets its quant names (a single folded value is not to be
+        read as the limit of every entry)."""
         _, manifest = gemma4_assembled
         line = self._device_limits_line(
             manifest,
@@ -1006,7 +1060,8 @@ class TestGemma4Card:
     def test_it_omits_the_device_limits_line_when_no_quant_declares_one(
         self, gemma4_assembled
     ) -> None:
-        """逆枝 — 欄が無いときは節ごと消える（情報が黙って落ちる形の記録）。"""
+        """The reverse branch — without the field the section disappears (a record of the form
+        where information is silently dropped)."""
         _, manifest = gemma4_assembled
         assert not _model(manifest)["quants"]["bf16"].get("requiredLimits")
 
@@ -1017,16 +1072,17 @@ class TestGemma4Card:
 
 class TestGemma4LegalText:
     def test_it_ships_the_license_text_byte_identical(self, gemma4_assembled) -> None:
-        """§4(a) — 提供するのは**このライセンスのコピー**（要約でも整形でもない）。
+        """§4(a) — what is provided is **a copy of this license** (not a summary, not reformatted).
 
-        原本は `_shared/licenses/apache_license_2_0.txt`。組み立ての経路のどこかで整形や
-        改行変換が入ると 1 バイト動くが、散文としては妥当なままなので他の門は素通りする。
+        The original is `_shared/licenses/apache_license_2_0.txt`. A reformat or a line-ending
+        conversion anywhere on the assembly path moves a byte while it stays valid prose, so the
+        other gates let it through.
         """
         out_dir, _ = gemma4_assembled
         assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
 
     def test_it_ships_the_modification_notice(self, gemma4_assembled) -> None:
-        """Apache 2.0 §4(b) の改変告知。"""
+        """The modification notice of Apache 2.0 §4(b)."""
         out_dir, _ = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert "gemma-4-E2B-it" in notice
@@ -1046,10 +1102,12 @@ class TestGemma4LegalText:
         assert "12B" not in notice
 
     def test_the_notice_names_every_model_the_manifest_carries(self, gemma4_assembled) -> None:
-        """§4(b) の告知は「この配布形が実際に再配布した上流」を 1 つ残らず名指しすること。
+        """The §4(b) notice names every upstream "this distribution actually redistributed",
+        without exception.
 
-        告知は `Pipeline.root_files` の席（core の型は `Mapping[str, str]`）なので manifest を
-        見て組めない — 焼き込んだ散文と実際に配ったモデルの対応は、ここでしか見られない。
+        The notice is a `Pipeline.root_files` file (the core's type is `Mapping[str, str]`), so it
+        cannot be built from the manifest — the correspondence between the baked prose and the
+        models actually distributed can be checked only here.
         """
         out_dir, manifest = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
@@ -1057,10 +1115,11 @@ class TestGemma4LegalText:
         _assert_notice_names(notice, [GEMMA4_UPSTREAM[name] for name in manifest["models"]])
 
     def test_the_notice_covers_the_whole_attribution_table(self) -> None:
-        """帰属表へモデルを足した瞬間に赤くする門（`GEMMA4_NOTICE_MARKDOWN` の MUST）。
+        """The gate that turns red the moment a model is added to the attribution table (the MUST
+        of `GEMMA4_NOTICE_MARKDOWN`).
 
-        散文は手で書くほかない（法的テキストの文面レビューは人が読む前提）ので、忘れを
-        組み立て時ではなくここで受ける。
+        The prose can only be written by hand (the wording review of legal text assumes a person
+        reads it), so forgetting it is caught here rather than at assembly time.
         """
         _assert_notice_names(
             gemma4_distribution.GEMMA4_NOTICE_MARKDOWN,
@@ -1068,7 +1127,8 @@ class TestGemma4LegalText:
         )
 
     def test_a_model_the_notice_does_not_mention_is_caught(self, gemma4_assembled) -> None:
-        """恒真でないことの裏取り — 2 件目を足した組で上の 2 本が落ちる。"""
+        """Evidence that it is not a tautology — the 2 above fail on a combination with a second
+        entry added."""
         out_dir, _ = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
@@ -1082,7 +1142,8 @@ class TestGemma4LegalText:
             )
 
 
-#: E4B の上流 `tokenizer.json` の代役（門は中身を読まず sha256 だけを突き合わせる）。
+#: Stand-in for E4B's upstream `tokenizer.json` (the gate does not read the contents and compares
+#: only the sha256).
 _UPSTREAM_TOKENIZER = b'{"model": "upstream tokenizer stand-in"}'
 
 
@@ -1111,14 +1172,16 @@ def _borrow_e2b_series(monkeypatch: pytest.MonkeyPatch) -> None:
 def _build_e4b(
     root: Path, *, upstream: bytes = _UPSTREAM_TOKENIZER, recorded: bytes | None = None
 ) -> Gemma4Sources:
-    """E4B の最小系列（`recorded` = トークナイザ資産が名乗る出所のバイト列・既定は上流と同一）。"""
+    """E4B's minimal series (`recorded` = the bytes of the source the tokenizer asset states;
+    by default identical to upstream)."""
     sources = _e4b_sources(root)
     source_bytes = upstream if recorded is None else recorded
     fixture.write_series(
         sources.product,
         sources.tokenizer,
         sources.model,
-        # 借り手 drafter 系列は fixture が既定で product の隣へ書く（E4B の計画は読まない）。
+        # The fixture writes the borrower drafter series next to product by default (E4B's plan
+        # does not read it).
         tokenizer={
             **fixture.tokenizer_asset(),
             "source": {"sha256": hashlib.sha256(source_bytes).hexdigest()},
@@ -1141,7 +1204,7 @@ def _assemble_e4b(root: Path) -> tuple[Path, dict[str, Any]]:
 
 
 class TestGemma4E4B:
-    """E4B の model entry — drafter 無し・quant は E2B と同じ 1 席 `bf16`（既定）。"""
+    """E4B's model entry — no drafter, and the same single quant `bf16` as E2B (default)."""
 
     def test_the_upstream_and_the_series_names_follow_the_model(self, tmp_path: Path) -> None:
         assert GEMMA4_UPSTREAM["e4b"] == "google/gemma-4-E4B-it"
@@ -1155,8 +1218,8 @@ class TestGemma4E4B:
         assert sources.tokenizer == tmp_path / "gemma4-e4b-tokenizer"
 
     def test_every_model_declares_a_default_quant_and_a_tokenizer_series(self) -> None:
-        """キー集合が the line's models と一致しないと、未宣言のモデルが組み立て時に KeyError で
-        落ちる。"""
+        """If the key set does not match the line's models, an undeclared model fails with a
+        KeyError at assembly time."""
         assert set(gemma4_distribution.GEMMA4_DEFAULT_QUANT) == set(GEMMA4_REGULAR_MODELS)
         assert set(gemma4_distribution.GEMMA4_TOKENIZER_SERIES) == set(GEMMA4_UPSTREAM)
         assert set(GEMMA4_REGULAR_MODELS) == {"e2b", "e4b"}
@@ -1164,9 +1227,11 @@ class TestGemma4E4B:
             assert quant in gemma4_distribution.gemma4_quants(model)
 
     def test_the_entry_declares_no_drafter(self, tmp_path: Path) -> None:
-        """drafter 役が weights に無いことが「投機を張れない」の唯一の表現。
+        """The drafter role being absent from weights is the only expression of "no speculation
+        possible".
 
-        読み手は `speculative` 指定のロードを weights の解決で落とす（部品を 1 つも取る前）。
+        The reader rejects a load that specifies `speculative` at the resolution of weights (before
+        fetching a single component).
         """
         out_dir, manifest = _assemble_e4b(tmp_path)
         entry = manifest["models"]["e4b"]
@@ -1189,7 +1254,8 @@ class TestGemma4E4B:
         assert gemma4_distribution.GEMMA4_DEFAULT_QUANT == {"e2b": "bf16", "e4b": "bf16"}
 
     def test_the_card_names_no_drafter_for_an_e4b_only_manifest(self, tmp_path: Path) -> None:
-        """配っていない drafter の上流を出所に書かない（base_model は manifest から導く）。"""
+        """The upstream of a drafter that is not distributed is not written as a source (base_model
+        is derived from the manifest)."""
         _, manifest = _assemble_e4b(tmp_path)
 
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
@@ -1199,7 +1265,8 @@ class TestGemma4E4B:
         assert "drafter head" not in card
 
     def test_the_card_still_names_the_e2b_drafter_when_e2b_ships_it(self, gemma4_assembled) -> None:
-        """恒真化の門 — drafter を運ぶモデルが居れば drafter の上流は base_model に残る。"""
+        """Gate against tautology — if some model carries a drafter, the drafter's upstream remains
+        in base_model."""
         _, manifest = gemma4_assembled
 
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
@@ -1215,7 +1282,7 @@ class TestGemma4E4B:
             e2b.product,
             e2b.tokenizer,
             e2b.model,
-            # E2B は同じ資産を読む（E4B が書いた出所つきの資産をそのまま使う）。
+            # E2B reads the same asset (it uses the asset with the source E4B wrote as it is).
             tokenizer=json.loads((e4b.tokenizer / "tokenizer.json").read_text(encoding="utf-8")),
         )
         # Sharing holds only while both upstream files are the same bytes (the asset is held to
@@ -1236,13 +1303,14 @@ class TestGemma4E4B:
         }
         assert paths["e2b"] == paths["e4b"]
         assert paths["e4b"].startswith("shared/")
-        # E2B は drafter を運び続ける（E4B を足しても E2B の entry は変わらない）。
+        # E2B keeps carrying the drafter (adding E4B does not change E2B's entry).
         assert GEMMA4_DRAFTER_ROLE in manifest["models"]["e2b"]["weights"]
 
     def test_it_refuses_a_borrowed_tokenizer_compiled_from_another_upstream(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """共有の前提（上流が同一バイト）が崩れた組は落とす — 語彙数が同じでも id 列は割れうる。"""
+        """A combination whose shared premise (byte-identical upstreams) broke is rejected — even
+        with the same vocabulary size the id sequences can split."""
         _borrow_e2b_series(monkeypatch)
         sources = _build_e4b(tmp_path, recorded=b"a different upstream tokenizer")
 
@@ -1264,18 +1332,20 @@ class TestGemma4E4B:
     def test_it_refuses_a_drafter_series_for_a_model_without_a_drafter(
         self, tmp_path: Path
     ) -> None:
-        """drafter を配らないモデルに席があれば、別モデル向けの drafter が紛れ込んだ組。"""
+        """An entry for a model that distributes no drafter means a drafter for another model
+        slipped in."""
         sources = _build_e4b(tmp_path)
         smuggled = replace(sources, drafter=tmp_path / "series" / "gemma4-e2b-drafter")
 
-        with pytest.raises(DistError, match="drafter 系列"):
+        with pytest.raises(DistError, match="the drafter series is"):
             gemma4_plan(smuggled, "e4b")
 
     def test_it_refuses_an_e2b_plan_whose_drafter_series_is_missing(self, tmp_path: Path) -> None:
-        """drafter を配るモデルの席が空なら、黙って投機なしの配布形が出来る形を落とす。"""
+        """An empty entry for a model that distributes a drafter is rejected, since it would
+        silently make a distribution without speculation."""
         sources = replace(_build(tmp_path), drafter=None)
 
-        with pytest.raises(DistError, match="drafter 系列"):
+        with pytest.raises(DistError, match="the drafter series is"):
             gemma4_plan(sources, "e2b")
 
 
@@ -1381,7 +1451,9 @@ class TestGemma4Bf16Product:
             tmp_path, drafter_bytes=fixture.drafter_container(shared_tensor="gemma4.embed_other")
         )
 
-        with pytest.raises(DistError, match=r"指し先.*product-bf16"):
+        with pytest.raises(
+            DistError, match=r"of the shared initializer is not in the lender .*product-bf16"
+        ):
             gemma4_plan(sources, "e2b")
 
     def test_it_refuses_a_schema_5_index_with_a_scales_table(self, tmp_path: Path) -> None:
@@ -1392,7 +1464,7 @@ class TestGemma4Bf16Product:
         assets[PLE_INDEX_ASSET] = AssetInput(PLE_INDEX_ROLE, len(payload), payload)
         sources = _build(tmp_path, container=fixture.product_container(assets=assets))
 
-        with pytest.raises(DistError, match=r"未知キー \['scales'\]"):
+        with pytest.raises(DistError, match=r"unknown keys \['scales'\]"):
             gemma4_plan(sources, "e2b")
 
     def test_it_refuses_an_int8_index_in_the_bf16_container(self, tmp_path: Path) -> None:
@@ -1402,7 +1474,7 @@ class TestGemma4Bf16Product:
         )
 
         # The schema 3 index carries a `scales` table, which a bf16 index does not have.
-        with pytest.raises(DistError, match=r"product-bf16.*未知キー \['scales'\]"):
+        with pytest.raises(DistError, match=r"product-bf16.*unknown keys \['scales'\]"):
             gemma4_plan(sources, "e2b")
 
     def test_the_card_and_the_notice_state_the_bf16_values_unchanged(

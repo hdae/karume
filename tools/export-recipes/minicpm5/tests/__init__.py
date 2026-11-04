@@ -1,6 +1,6 @@
-"""MiniCPM5 recipe のテスト。
+"""Tests of the MiniCPM5 recipe.
 
-パッケージにしてあるのは、family が増えたときに `<family>/tests/test_export.py` の
-**basename が衝突しない**ようにするため（pytest の既定 import mode は `__init__.py` の
-無いディレクトリのテストを basename だけのモジュール名で読む）。
+It is a package so that **basenames do not collide** when more families add
+`<family>/tests/test_export.py` (pytest's default import mode loads a test in a directory without
+`__init__.py` under a module name made of its basename alone).
 """
