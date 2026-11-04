@@ -11,7 +11,7 @@ import { describeReport, gateReport, isGreen } from "../language-gate.ts";
 
 const LIST: readonly Allowance[] = [
   { path: "docs/research/", why: "snapshots" },
-  { path: "packages/models/tests/", why: "tests", until: "0.15.x" },
+  { path: "packages/models/tests/", why: "tests" },
   { path: "packages/models/tests/fixtures/", why: "data" },
   { path: "packages/models/tests/fixtures/notes.json", why: "one note", maxLines: 2 },
 ];

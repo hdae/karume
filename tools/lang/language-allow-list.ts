@@ -7,8 +7,7 @@
  * An entry names one file (exact path) or a directory (a path ending in `/`, a prefix). An exact
  * entry wins over a prefix; among prefixes the longest wins. `maxLines` caps the number of lines
  * with Japanese in that file: data that stays by nature is pinned at its current count, so new
- * Japanese in the file is caught. `until` marks an area that this ADR's staging leaves for a later
- * release; the entry goes when the area is translated.
+ * Japanese in the file is caught.
  *
  * MUST: an entry that no longer matches any Japanese line is reported by the gate as stale — the
  * list ratchets down as the areas are translated and never silently keeps a dead exception.
@@ -19,8 +18,6 @@ export type Allowance = {
   readonly path: string;
   /** Why Japanese stays here. */
   readonly why: string;
-  /** The release that translates the area (a staging exception), or absent (by nature). */
-  readonly until?: "0.15.x";
   /** The number of lines with Japanese this file may carry (only for an exact path). */
   readonly maxLines?: number;
 };
@@ -30,7 +27,13 @@ const SNAPSHOT_HEADER =
 const EXCLUDED_ADR =
   "a superseded ADR excluded from translation; carries an English status line (ADR 0130, 2-9b)";
 const RESEARCH_ANCHORS = "links into the Japanese headings of docs/research snapshots";
-const TEST_COMMENTS = "test comments, names and the tests' own messages (ADR 0130 staging: 0.15.x)";
+const TTS_INPUT =
+  "Japanese TTS inputs (texts and captions) the tests, goldens or sha rows depend on";
+const TOKENIZER_CASES = "tokenizer / text-normaliser inputs and their expected values";
+const MODEL_OUTPUT =
+  "expected Japanese model output (greedy goldens and the records that quote them)";
+const CALIBRATION_TEXT = "the Japanese calibration corpus the quantizer sees";
+const MULTIBYTE_DATA = "multi-byte UTF-8 test data";
 
 export const ALLOW_LIST: readonly Allowance[] = [
   // --- by nature: documents -----------------------------------------------------------------
@@ -101,7 +104,7 @@ export const ALLOW_LIST: readonly Allowance[] = [
   },
   {
     path: "packages/models/tests/fixtures/",
-    why: "vocabularies, sample texts and expected values of the tokenizer and TTS parity fixtures; the notes of the recipe-generated fixtures are translated with the recipes (0.15.x)",
+    why: "vocabularies, sample texts and expected values of the tokenizer and TTS parity fixtures",
   },
   {
     path: "tools/export-recipes/qwen3_5/tokenizer_cases.py",
@@ -147,16 +150,156 @@ export const ALLOW_LIST: readonly Allowance[] = [
     maxLines: 1,
   },
   { path: "tools/lang/tests/", why: "inputs and expected values of the language tools' own tests" },
-  // --- staging: translated in 0.15.x -----------------------------------------------------------
-  { path: "packages/runtime/tests/", why: TEST_COMMENTS, until: "0.15.x" },
-  { path: "packages/hub/tests/", why: TEST_COMMENTS, until: "0.15.x" },
-  { path: "packages/models/tests/", why: TEST_COMMENTS, until: "0.15.x" },
-  { path: "packages/e2e/tests/", why: TEST_COMMENTS, until: "0.15.x" },
+  // --- by nature: test and recipe material (ADR 0130 decision 3 (c)) ----------------------
+  { path: "packages/e2e/tests/e2e_gemma4_chat_test.ts", why: MODEL_OUTPUT, maxLines: 2 },
+  { path: "packages/e2e/tests/e2e_gemma4_pretrained_test.ts", why: MODEL_OUTPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_gemma4_test.ts", why: MODEL_OUTPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_irodori_ab_test.ts", why: TTS_INPUT, maxLines: 3 },
+  { path: "packages/e2e/tests/e2e_irodori_cleanup_test.ts", why: TTS_INPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_irodori_context_test.ts", why: TTS_INPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_irodori_wav_test.ts", why: TTS_INPUT, maxLines: 3 },
+  { path: "packages/e2e/tests/e2e_sbv2_ab_test.ts", why: TTS_INPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_sbv2_wav_test.ts", why: TTS_INPUT, maxLines: 1 },
+  { path: "packages/e2e/tests/e2e_vowel_detector_chain_test.ts", why: TTS_INPUT, maxLines: 3 },
   {
-    path: "tools/export-recipes/",
-    why: "the per-model export recipes, their tests and READMEs (ADR 0130 staging: 0.15.x)",
-    until: "0.15.x",
+    path: "packages/hub/tests/fetch_test.ts",
+    why: "the Japanese error text of the dependency @hdae/fetch-cache, which the test matches",
+    maxLines: 2,
   },
+  { path: "packages/models/tests/bpe_test.ts", why: TOKENIZER_CASES, maxLines: 7 },
+  { path: "packages/models/tests/gemma4_chat_test.ts", why: TOKENIZER_CASES, maxLines: 2 },
+  { path: "packages/models/tests/hub_asset_readers_test.ts", why: MULTIBYTE_DATA, maxLines: 2 },
+  { path: "packages/models/tests/irodori_host_test.ts", why: TOKENIZER_CASES, maxLines: 8 },
+  { path: "packages/models/tests/irodori_pipeline_test.ts", why: TTS_INPUT, maxLines: 5 },
+  { path: "packages/models/tests/irodori_text_test.ts", why: TOKENIZER_CASES, maxLines: 17 },
+  { path: "packages/models/tests/read_if_present_test.ts", why: MULTIBYTE_DATA, maxLines: 3 },
+  { path: "packages/models/tests/sbv2_host_test.ts", why: MULTIBYTE_DATA, maxLines: 2 },
+  { path: "packages/models/tests/sbv2_pipeline_test.ts", why: MULTIBYTE_DATA, maxLines: 3 },
+  { path: "packages/models/tests/sbv2_text_test.ts", why: TOKENIZER_CASES, maxLines: 21 },
+  { path: "packages/models/tests/sbv2_tone_injection_test.ts", why: TTS_INPUT, maxLines: 25 },
+  { path: "packages/models/tests/umt5_tokenizer_test.ts", why: TOKENIZER_CASES, maxLines: 1 },
+  { path: "packages/models/tests/unigram_test.ts", why: TOKENIZER_CASES, maxLines: 7 },
+  {
+    path: "packages/models/tests/wan_pipeline_test.ts",
+    why: "Wan's Chinese default negative prompt, quoted verbatim from upstream",
+    maxLines: 4,
+  },
+  {
+    path: "packages/models/tests/wan_text_prompt_clean_test.ts",
+    why: TOKENIZER_CASES,
+    maxLines: 3,
+  },
+  { path: "packages/models/tests/wan_text_tokenizer_test.ts", why: TOKENIZER_CASES, maxLines: 1 },
+  {
+    path: "packages/runtime/tests/tune_fingerprint_test.ts",
+    why: "multi-byte input of the fingerprint hash, and a Japanese WGSL comment that must not change the fingerprint",
+    maxLines: 2,
+  },
+  { path: "tools/export-recipes/_shared/gemma_tokenizer.py", why: TOKENIZER_CASES, maxLines: 7 },
+  { path: "tools/export-recipes/anima/demo.py", why: TOKENIZER_CASES, maxLines: 4 },
+  { path: "tools/export-recipes/deberta/calib_texts.py", why: CALIBRATION_TEXT, maxLines: 48 },
+  { path: "tools/export-recipes/deberta/export.py", why: TOKENIZER_CASES, maxLines: 3 },
+  {
+    path: "tools/export-recipes/deberta/tests/test_calib_texts.py",
+    why: "the kanji numeral class that finds number readings in the Japanese corpus",
+    maxLines: 1,
+  },
+  { path: "tools/export-recipes/deberta/tests/test_calib.py", why: TOKENIZER_CASES, maxLines: 1 },
+  {
+    path: "tools/export-recipes/embeddinggemma/calib_texts.py",
+    why: CALIBRATION_TEXT,
+    maxLines: 14,
+  },
+  { path: "tools/export-recipes/embeddinggemma/export.py", why: TOKENIZER_CASES, maxLines: 1 },
+  { path: "tools/export-recipes/embeddinggemma/tokenizer.py", why: TOKENIZER_CASES, maxLines: 1 },
+  {
+    path: "tools/export-recipes/gemma4/chat.py",
+    why: "the Japanese conversations of the chat fixture cases (template and tokenizer inputs)",
+    maxLines: 11,
+  },
+  { path: "tools/export-recipes/gemma4/export_unified.py", why: MODEL_OUTPUT, maxLines: 1 },
+  { path: "tools/export-recipes/gemma4/export.py", why: MODEL_OUTPUT, maxLines: 4 },
+  { path: "tools/export-recipes/gemma4/README.md", why: MODEL_OUTPUT, maxLines: 1 },
+  { path: "tools/export-recipes/gemma4/tokenizer.py", why: TOKENIZER_CASES, maxLines: 1 },
+  { path: "tools/export-recipes/irodori/calib_cases.py", why: CALIBRATION_TEXT, maxLines: 24 },
+  {
+    path: "tools/export-recipes/irodori/card.py",
+    why: "the Japanese TTS demo text and caption of the generated card",
+    maxLines: 2,
+  },
+  { path: "tools/export-recipes/irodori/export.py", why: TTS_INPUT, maxLines: 29 },
+  { path: "tools/export-recipes/irodori/pipeline_ref.py", why: TTS_INPUT, maxLines: 3 },
+  { path: "tools/export-recipes/irodori/tests/test_export.py", why: TOKENIZER_CASES, maxLines: 2 },
+  {
+    path: "tools/export-recipes/irodori/tests/test_pipeline_ref.py",
+    why: TOKENIZER_CASES,
+    maxLines: 9,
+  },
+  {
+    path: "tools/export-recipes/irodori/tests/test_tokenizer_ref.py",
+    why: TOKENIZER_CASES,
+    maxLines: 25,
+  },
+  { path: "tools/export-recipes/irodori/tokenizer_ref.py", why: TOKENIZER_CASES, maxLines: 64 },
+  { path: "tools/export-recipes/minicpm5/calib_texts.py", why: CALIBRATION_TEXT, maxLines: 16 },
+  { path: "tools/export-recipes/minicpm5/export.py", why: MODEL_OUTPUT, maxLines: 11 },
+  { path: "tools/export-recipes/minicpm5/README.md", why: MODEL_OUTPUT, maxLines: 1 },
+  {
+    path: "tools/export-recipes/minicpm5/tests/test_calib_texts.py",
+    why: "the kana / kanji class bounds that detect Japanese text",
+    maxLines: 1,
+  },
+  {
+    path: "tools/export-recipes/sbv2/card.py",
+    why: "the Japanese TTS demo sentence of the generated card",
+    maxLines: 1,
+  },
+  { path: "tools/export-recipes/sbv2/demo.py", why: TTS_INPUT, maxLines: 1 },
+  { path: "tools/export-recipes/sbv2/README.md", why: TTS_INPUT, maxLines: 2 },
+  { path: "tools/export-recipes/sbv2/tests/test_demo.py", why: MULTIBYTE_DATA, maxLines: 2 },
+  { path: "tools/export-recipes/sbv2/tests/test_measure_quant.py", why: TTS_INPUT, maxLines: 3 },
+  {
+    path: "tools/export-recipes/tests/test_graph_names.py",
+    why: "the old Japanese pointer spellings and words the scan looks for",
+    maxLines: 4,
+  },
+  {
+    path: "tools/export-recipes/vowel_detector/card.py",
+    why: "upstream's voice-model names, copied verbatim from its NOTICE into the card attribution",
+    maxLines: 1,
+  },
+  {
+    path: "tools/export-recipes/wan/prompts.py",
+    why: "Wan's Chinese negative prompt, quoted verbatim from upstream",
+    maxLines: 4,
+  },
+  {
+    path: "tools/export-recipes/wan/tests/test_prompt_clean.py",
+    why: TOKENIZER_CASES,
+    maxLines: 1,
+  },
+  {
+    path: "tools/export-recipes/wan/tests/test_umt5_reference.py",
+    why: TOKENIZER_CASES,
+    maxLines: 5,
+  },
+  {
+    path: "tools/export-recipes/wan/tests/test_umt5_tokenizer.py",
+    why: TOKENIZER_CASES,
+    maxLines: 2,
+  },
+  {
+    path: "tools/export-recipes/wan/tests/test_umt5_xxl_tokenizer.py",
+    why: TOKENIZER_CASES,
+    maxLines: 3,
+  },
+  {
+    path: "tools/export-recipes/wan/umt5_reference.py",
+    why: "notes written into the umT5 goldens of the pinned test-asset dataset (outside the repository)",
+    maxLines: 7,
+  },
+  { path: "tools/export-recipes/wan/umt5_tokenizer.py", why: TOKENIZER_CASES, maxLines: 6 },
+  { path: "tools/export-recipes/wan/umt5_xxl_tokenizer.py", why: TOKENIZER_CASES, maxLines: 3 },
 ];
 
 /** The entry that covers `file`: an exact path first, then the longest directory prefix. */

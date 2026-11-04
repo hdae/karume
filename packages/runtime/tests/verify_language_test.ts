@@ -1,8 +1,8 @@
 // The language gate (ADR 0130, step 2-9h — the enforcement of the repository language).
 //
 // The repository is English; the files that keep Japanese — dated research snapshots, the Japanese
-// term table, superseded ADRs, data such as vocabularies and TTS inputs, and the areas the ADR's
-// staging leaves for 0.15.x — are listed with their reasons in `tools/lang/language-allow-list.ts`.
+// term table, superseded ADRs, and data such as vocabularies, TTS inputs and expected model output
+// — are listed with their reasons in `tools/lang/language-allow-list.ts`.
 // This test scans every tracked text file (`git ls-files`) and fails on Japanese outside that list,
 // on a file above its line budget, and on an allowance that covers nothing any more, so the list
 // shrinks as the remaining areas are translated and never keeps a dead exception.

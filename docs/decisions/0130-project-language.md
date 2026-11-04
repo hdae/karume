@@ -237,6 +237,24 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
 - **Exact wording of the new `CLAUDE.md` language section — resolved.** Written at step 2-9a; phase 2
   of the language work started on 2026-10-18.
 
+## Addendum (2026-11-04) — the 0.15.x staging is done
+
+The areas the staging left for 0.15.x are English: the comments, docstrings, test titles and
+messages of `packages/{runtime,hub,models,e2e,test-support}/tests` and `tools/export-recipes`
+(about 34,000 lines in about 770 files, as the translation legs counted them), and the notes (`_doc` / `why` / `note`) of the fixtures
+the recipes generate, translated with their writers. A message pinned by a test in another file
+was translated together with its pins. Proofs: `tools/lang/code-skeleton.ts --strings` and
+`tools/lang/py_skeleton.py --strings` (no change beyond comments, docstrings and strings),
+`tools/lang/fixture-notes.ts` (only notes changed), the CPU lanes of `vp test` and both pytest
+suites green; the pins of the GPU-only tests, which could not run, were checked by a script that
+matches each pin against the message text it pins.
+
+The allow-list loses its `until` entries and the `until` field. What stays Japanese in these
+areas is material under decision 3 (c), one exact entry per file with its line budget: TTS inputs,
+tokenizer and normaliser cases, calibration corpora, expected model output, multi-byte test data,
+a dependency's Japanese error text that a hub test matches, and the notes of the umT5 goldens,
+which live in the pinned test-asset dataset outside the repository.
+
 ## Addendum (2026-10-19) — the language gate and its allow-list (step 2-9h)
 
 `packages/runtime/tests/verify_language_test.ts` (core lane) scans every tracked text file

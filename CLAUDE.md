@@ -26,9 +26,9 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
   use its terms); and material that is Japanese by nature (inputs of the Japanese TTS, tokenizer and generation
   tests, and their fixtures). **The language gate** (`packages/runtime/tests/verify_language_test.ts`, core
   lane) fails on Japanese outside the allow-list `tools/lang/language-allow-list.ts` — one entry per file or
-  area with its reason; the areas still to translate (`packages/*/tests`, `tools/export-recipes`) are marked
-  `until: "0.15.x"`. New Japanese needs an entry with a reason; a translated area loses its entry (a stale
-  entry is red too). From the shell: `node tools/lang/language-gate.ts`; counts: `node tools/lang/scan-japanese.ts`.
+  area with its reason (in tests and recipes, one entry per material file with its line budget). New Japanese
+  needs an entry with a reason; a translated area loses its entry (a stale entry is red too). From the shell:
+  `node tools/lang/language-gate.ts`; counts: `node tools/lang/scan-japanese.ts`.
 - Terms: English follows ordinary industry usage (no in-house coinages); the Japanese terms of the
   conversation are chosen from meaning, not by literal translation (ADR 0130 decisions 4 and 5).
 - Checks: `node tools/lang/check-doc-links.ts` (Markdown links and `DECIDED:` pointers resolve) and
