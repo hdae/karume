@@ -126,6 +126,7 @@ import {
 } from "../image/preprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -263,12 +264,15 @@ export const assertStaticDim = (
 ): void => assertGraphInputDim("depth-anything", model, inputName, axis, expected, where);
 
 /**
- * Checks that the graph **output** has shape `[1, imageHeight, imageWidth]`.
+ * Checks that the graph **output** is f32 with shape `[1, imageHeight, imageWidth]`.
  *
  * MUST: do not drop this check. The later steps could check only "element count is H×W", but then a
  * graph baked with the channel axis kept (`[1, 1, S, S]`) or another export that also emits
  * intermediate stages would pass through **with different values read as depth**. The rank is
  * checked too because `[1, S, S]` and `[1, 1, S, S]` cannot be told apart by element count.
+ * MUST: check the dtype too. The postprocessing reads the depth as f32 (`asF32`), so a non-f32
+ * graph of the right shape would otherwise pass construction and fail only after the GPU, the
+ * Session and one full run, with a message that does not point at the mixed-up asset.
  *
  * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
  * `mod.ts` / the subpath surface — ADR 0008).
@@ -291,6 +295,11 @@ export const assertDepthShape = (
     throw new Error(
       `depth-anything: ${where} — graph output '${name}' has shape ` +
         `[${value.shape.map(String).join(", ")}], expected [${expected.join(", ")}]`,
+    );
+  }
+  if (value.dtype !== "f32") {
+    throw new Error(
+      `depth-anything: ${where} — graph output '${name}' dtype is ${value.dtype}, the postprocessing reads f32`,
     );
   }
 };
@@ -558,18 +567,14 @@ const openDepthAnythingState = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `depthAnything.Pipeline: quant '${quantName}'`);
-    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
-    // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
-    // only at Session construction, and a declaration stricter than the real demand is never
-    // matched at all. A shared GPU is checked by `admitDepthAnything`.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        quant.requiredLimits,
-        gpu.limits,
-        `depthAnything.Pipeline: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      quant.requiredLimits,
+      gpu,
+      `depthAnything.Pipeline: quant '${quantName}'`,
+    );
     return {
       gpu,
       ownsGpu,

@@ -98,6 +98,7 @@ import { ModelInputError } from "../errors.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -805,19 +806,14 @@ const buildSbv2State = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `sbv2.Pipeline: quant '${quantName}'`);
-    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
-    // (`fromPretrained` checks with the adapter's values), and without this a shortfall of the
-    // declaration would be delayed until Session construction, and when the declaration is stricter
-    // than the real demand the comparison would never happen at all. A shared GPU is checked by
-    // {@link admitSbv2}.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        quant.requiredLimits,
-        gpu.limits,
-        `sbv2.Pipeline: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      quant.requiredLimits,
+      gpu,
+      `sbv2.Pipeline: quant '${quantName}'`,
+    );
   } catch (error) {
     // A GPU acquired internally can be released by no one if we throw here, so give it back first.
     if (ownsGpu) gpu.destroy();

@@ -39,6 +39,7 @@ import {
 import { settleAbort } from "../concurrency/abort.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -89,6 +90,7 @@ import type {
   Assets,
   FromPretrainedOptions,
   GenerateEvent,
+  GenerateRequest,
   PipelineOptions,
   RunComponent,
 } from "./pipeline.ts";
@@ -640,18 +642,14 @@ const buildWan = async (
     // Declared features can be requested only when the device is created (ADR 0028) — for a device
     // acquired here this is the only check (a shared GPU is checked by {@link admitWan} with the same
     // function).
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `${spec.owner}: quant '${quantName}'`);
-    // The limits of a device acquired here are checked here too — `fromAssets` has no pre-fetch check
-    // point (`fromPretrained` checks with the adapter values), and without this a shortfall in the
-    // declaration would surface only when each stage's Session is built (for the VAE stage, after the
-    // whole DiT stage has run). A shared GPU is checked by {@link admitWan}.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        admitted.quant.requiredLimits,
-        gpu.limits,
-        `${spec.owner}: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      admitted.quant.requiredLimits,
+      gpu,
+      `${spec.owner}: quant '${quantName}'`,
+    );
     return {
       gpu,
       ownsGpu,
@@ -697,9 +695,30 @@ const buildWan = async (
 };
 
 /**
+ * Takes ownership of the caller's initial noise at the entry of the class's `generate`, before the
+ * request waits its turn on the serialization chain (the one place both classes call).
+ *
+ * MUST: copy here, not inside the chain. A generation waits for the ones queued before it, and the
+ * stages after the entry check await the event callback and `settleAbort`, so a copy taken any later
+ * would let values the caller rewrote in between (including NaN that never passed the check) reach
+ * the DiT stage — the call would not generate from the values it was given. The check itself
+ * (`planWanRequest`) runs on this copy, so what it verified is what runs.
+ *
+ * Only a `Float32Array` is copied: anything else is passed through as is so that the check rejects
+ * it by name (`Float32Array.from` would silently turn a `number[]` into a valid-looking array).
+ */
+export const ownWanRequestLatents = <Request extends GenerateRequest>(request: Request): Request =>
+  request.latents instanceof Float32Array
+    ? { ...request, latents: Float32Array.from(request.latents) }
+    : request;
+
+/**
  * Generates one video from a prompt (and the I2V condition image) (the body the class's `generate` puts
  * on the serialization chain — the stage order, Session lifetimes and cancellation are in the doc at
  * the top of `./pipeline.ts`).
+ *
+ * MUST (caller's precondition): `request` is the return value of {@link ownWanRequestLatents} — this
+ * function uses `request.latents` without copying (the DiT stage's precondition in `dit-loop.ts`).
  */
 export const generateWanVideo = async (
   spec: WanFamilySpec,
@@ -753,14 +772,9 @@ export const generateWanVideo = async (
     knobs = plan;
     encodeContexts = () => Promise.resolve(precomputedContexts(plan, dit));
   }
-  // MUST: the caller's latents are copied and owned within this synchronous section, where the check
-  // (`plan.ts`) verified their finiteness. Later stages await the start-notification callback and
-  // `settleAbort` (yielding to a macrotask), so delaying the copy to the DiT stage would run with
-  // values the caller modified in between (including NaN that never passed the check). The DiT stage
-  // uses this copy without copying again.
-  if (knobs.initial.kind === "latents") {
-    knobs = { ...knobs, initial: { kind: "latents", data: Float32Array.from(knobs.initial.data) } };
-  }
+  // NOTE: `request.latents` is already the copy {@link ownWanRequestLatents} took at the entry of the
+  // class's `generate` (outside the chain), so the check above verified the values the DiT stage
+  // uses, and that stage uses them without copying again.
   // The I2V encoder stage comes first (before the text stage — ADR 0121 decision 11). A request
   // without an image has no such stage.
   let condition: Float32Array<ArrayBuffer> | undefined;

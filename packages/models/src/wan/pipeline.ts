@@ -122,6 +122,7 @@ import {
   generateWanVideo,
   loadWanFromAssets,
   loadWanFromPretrained,
+  ownWanRequestLatents,
   WAN21_FAMILY,
   type WanState,
 } from "./family.ts";
@@ -482,7 +483,8 @@ export class Pipeline {
   async generate(request: GenerateRequest): Promise<GeneratedVideo> {
     if (this.#disposal !== undefined)
       throw new Error("wan.Pipeline: cannot generate after dispose");
-    return await this.#chain(() => generateWanVideo(WAN21_FAMILY, this.#state, request));
+    const owned = ownWanRequestLatents(request);
+    return await this.#chain(() => generateWanVideo(WAN21_FAMILY, this.#state, owned));
   }
 
   /**

@@ -163,9 +163,8 @@ import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
-  assertGpuFeaturesGranted,
+  assertAcquiredGpuCapabilities,
   assertRequiredLimitsBeforeDownload,
-  assertRequiredLimitsSatisfied,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
@@ -505,19 +504,14 @@ const buildIrodoriState = async (
     // resolves as a microtask continuation, so an abort task queued by a click during the wait
     // has not run yet.
     await settleAbort(options.signal);
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `irodori.Pipeline: quant '${quantName}'`);
-    // The limits of a device acquired here are also checked here — `fromAssets` has no place for a
-    // pre-acquisition check (`fromPretrained` checks against the adapter values), and without this
-    // a shortfall in the declaration would surface only when the Session is built, and when the
-    // declaration is stricter than the real demand the comparison would never run at all. A shared
-    // GPU is checked by `admitIrodori`.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        quant.requiredLimits,
-        gpu.limits,
-        `irodori.Pipeline: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      quant.requiredLimits,
+      gpu,
+      `irodori.Pipeline: quant '${quantName}'`,
+    );
     return {
       gpu,
       ownsGpu,

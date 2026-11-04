@@ -1193,6 +1193,37 @@ const copyFirstFrame = (
   return out;
 };
 
+describe("Ti2vPipeline.generate: ownership of the caller's latents", () => {
+  /** 5 frames at 1280×704: latents [48, 2, 44, 80] (values vary per element so a mix-up shows). */
+  const initialLatents = () =>
+    new Float32Array(48 * 2 * 44 * 80).map((_, index) => ((index % 97) - 48) / 64);
+
+  it("generates from the values at call time even when the caller rewrites latents while the call waits its turn (finite and NaN)", async () => {
+    // Baseline: the same two calls in order, nothing rewritten.
+    const baseline = mockTi2v();
+    await baseline.generate();
+    const offset = baseline.ditRuns.length;
+    await baseline.generate({ latents: initialLatents() });
+    const expected = baseline.ditRuns[offset].tokens;
+    for (const value of [7, Number.NaN]) {
+      const { generate, ditRuns } = mockTi2v();
+      // The first call holds the serialization chain, so the second waits its turn; the caller
+      // rewrites its array right after the call returns (inside that wait).
+      const first = generate();
+      const latents = initialLatents();
+      const second = generate({ latents });
+      latents.fill(value);
+      await Promise.all([first, second]);
+      const tokens = ditRuns[offset].tokens;
+      assert(tokens.dtype === "f32" && expected.dtype === "f32");
+      const differs = tokens.data.findIndex(
+        (entry, index) => !Object.is(entry, expected.data[index]),
+      );
+      assertEquals(differs, -1, `the DiT ran with the rewritten value ${value}`);
+    }
+  });
+});
+
 describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）", () => {
   it("encoder の 3 Session（実行オプション {}）→ 常駐 3 本 → 1 本の batch で pre → attn → post → Session → 常駐の順に畳む → 解放を待つ → encoder の end → DiT", async () => {
     const { log, diagnosed, generate } = mockTi2v();

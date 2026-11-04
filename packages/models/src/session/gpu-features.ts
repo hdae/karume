@@ -196,6 +196,38 @@ export const assertRequiredLimitsSatisfied = (
 };
 
 /**
+ * The checks of construction once the GPU is in hand (acquired by the family, or the shared
+ * `options.gpu`): the effective features are enabled ({@link assertGpuFeaturesGranted}) and the
+ * declared `requiredLimits` are met ({@link assertRequiredLimitsSatisfied}). The one implementation
+ * every family's construction calls right after `options.gpu ?? acquireGpu(...)`.
+ *
+ * MUST: every family goes through this one function rather than writing the two checks itself.
+ * Written by hand in each family, one family can drop the limits half for a device it acquired
+ * itself, and neither type checking nor the other families notice.
+ * MUST: the limits are matched for a device acquired here too, not only for a shared one —
+ * `fromAssets` has no check before the GPU (`fromPretrained` checks the adapter values), so without
+ * it a shortfall surfaces only at Session construction, and a declaration stricter than the real
+ * demand is never compared at all.
+ *
+ * NOTE: for a shared GPU this repeats the comparison the family's admission already made (that one
+ * also runs before the weights are read). Both checks are pure comparisons, so repeating them has
+ * no side effect — the same trade as {@link assertRequiredLimitsBeforeDownload}.
+ *
+ * @param gpuFeatures The effective features ({@link sessionGpuFeatures} — the quant declaration
+ *   plus what the effective `SessionOptions` need), the same value the request was built from.
+ * @param where Subject of the diagnostic (`"anima.Pipeline: quant 'f16'"`).
+ */
+export const assertAcquiredGpuCapabilities = (
+  gpuFeatures: GpuFeaturesSpec | undefined,
+  requiredLimits: RequiredLimitsSpec | undefined,
+  gpu: GpuContext,
+  where: string,
+): void => {
+  assertGpuFeaturesGranted(gpuFeatures, gpu, where);
+  assertRequiredLimitsSatisfied(requiredLimits, gpu.limits, where);
+};
+
+/**
  * The limits check **before download**, called from the admission step of `fromPretrained`
  * (ADR 0089 decision 5).
  *

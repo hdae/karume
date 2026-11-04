@@ -2142,6 +2142,47 @@ describe("Pipeline.generate の初期ノイズ（latents）の所有", () => {
       assertEquals(differs, -1, `書き換え後の値 ${value} で DiT を回した`);
     }
   });
+
+  it("generates from the values at call time even when the caller rewrites latents while the call waits its turn (finite and NaN)", async () => {
+    // Baseline: the same two calls in order, nothing rewritten (the second call's first DiT run is
+    // index 4 — 2 steps × uncond / cond for the first call).
+    const baseline = mockPipeline({});
+    await baseline.generate();
+    const offset = baseline.ditRuns.length;
+    await baseline.generate(undefined, { latents: initialLatents() });
+    const expected = baseline.ditRuns[offset].tokens;
+    assert(expected.dtype === "f32");
+    for (const value of [7, Number.NaN]) {
+      const { generate, ditRuns } = mockPipeline({});
+      // The first call holds the serialization chain, so the second waits its turn; the caller
+      // rewrites its array right after the call returns (inside that wait).
+      const first = generate();
+      const latents = initialLatents();
+      const second = generate(undefined, { latents });
+      latents.fill(value);
+      await Promise.all([first, second]);
+      const tokens = ditRuns[offset].tokens;
+      assert(tokens.dtype === "f32" && tokens.data.length === expected.data.length);
+      const differs = tokens.data.findIndex(
+        (entry, index) => !Object.is(entry, expected.data[index]),
+      );
+      assertEquals(differs, -1, `the DiT ran with the rewritten value ${value}`);
+    }
+  });
+
+  it("does not turn a latents value that is not a Float32Array into one (the entry check still rejects it by name)", async () => {
+    const { generate, log } = mockPipeline({});
+    const latents = Array.from(initialLatents()) as unknown as Float32Array<ArrayBuffer>;
+    await assertRejects(
+      () => generate(undefined, { latents }),
+      ModelInputError,
+      "latents is not a Float32Array",
+    );
+    assertEquals(
+      log.filter((entry) => entry.startsWith("create:")),
+      [],
+    );
+  });
 });
 
 describe("Pipeline.generate の中断（模擬 Session — signal.reason を包まず・Session を畳んで・次が回る）", () => {

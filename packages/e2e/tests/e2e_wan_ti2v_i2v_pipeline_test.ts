@@ -178,6 +178,7 @@ import type { ModelComponent } from "../../models/src/hub/components.ts";
 import {
   generateWanVideo,
   loadWanFromPretrained,
+  ownWanRequestLatents,
   WAN22_TI2V_FAMILY,
   type WanFamilySpec,
   type WanState,
@@ -962,7 +963,7 @@ type Generate = (request: Ti2vGenerateRequest) => Promise<GeneratedVideo>;
 const viaState =
   (state: WanState, spec: WanFamilySpec = WAN22_TI2V_FAMILY): Generate =>
   (request) =>
-    generateWanVideo(spec, state, request);
+    generateWanVideo(spec, state, ownWanRequestLatents(request));
 
 const viaPipeline =
   (pipeline: Ti2vPipeline): Generate =>

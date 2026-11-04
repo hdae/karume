@@ -111,6 +111,7 @@ import { assertAcceptableSeed } from "../request-gates.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -1147,19 +1148,14 @@ export class Pipeline {
       // resolves as a microtask continuation, so an abort task queued by a click during the wait
       // has not run yet.
       await settleAbort(options.signal);
-      assertGpuFeaturesGranted(gpuFeatures, gpu, `anima.Pipeline: quant '${quantName}'`);
-      // The limits of an internally acquired device are checked here too — `fromAssets` has no
-      // pre-fetch check (`fromPretrained` checks the adapter values); without it a shortfall of the
-      // declaration surfaces only at Session construction, and when the declaration is stricter
-      // than the real need, the comparison never happens at all. {@link Pipeline.#admit}
-      // checks a shared GPU.
-      if (ownsGpu) {
-        assertRequiredLimitsSatisfied(
-          quant.requiredLimits,
-          gpu.limits,
-          `anima.Pipeline: quant '${quantName}'`,
-        );
-      }
+      // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+      // its doc).
+      assertAcquiredGpuCapabilities(
+        gpuFeatures,
+        quant.requiredLimits,
+        gpu,
+        `anima.Pipeline: quant '${quantName}'`,
+      );
       return new Pipeline({
         gpu,
         ownsGpu,

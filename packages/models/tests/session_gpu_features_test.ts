@@ -4,11 +4,13 @@
 // limits checks are pure functions.
 
 import { test } from "vite-plus/test";
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { readTextFile } from "@karume/test-support/fs";
 import type { GpuFeaturesSpec, RequiredLimitsSpec } from "@karume/hub";
 import type { RequiredLimits } from "@karume/runtime";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsSatisfied,
   sessionGpuFeatures,
@@ -224,6 +226,80 @@ test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙�
   for (const fragment of [LIMITS_WHERE, "karumeUnknownLimit", "tests/limit_vocabulary_test.ts"]) {
     if (!error.message.includes(fragment)) {
       throw new Error(`診断に '${fragment}' が無い: ${error.message}`);
+    }
+  }
+});
+
+// ==== The checks after GPU acquisition (one helper for every family) ===================
+
+const ACQUIRED_WHERE = "TestPipeline: quant 'f16'";
+
+test("assertAcquiredGpuCapabilities: names a missing feature with the family's subject", () => {
+  const error = assertThrows(
+    () =>
+      assertAcquiredGpuCapabilities({ shaderF16: true }, undefined, noFeatureGpu(), ACQUIRED_WHERE),
+    Error,
+  );
+  assertStringIncludes(error.message, ACQUIRED_WHERE);
+  assertStringIncludes(error.message, "shader-f16");
+});
+
+test("assertAcquiredGpuCapabilities: matches the declared limits against the GPU in hand (not only a shared one)", () => {
+  // The fake context's limits are all 0, so any declared minimum is a shortfall.
+  const error = assertThrows(
+    () =>
+      assertAcquiredGpuCapabilities(
+        undefined,
+        { maxBufferSize: 1 },
+        noFeatureGpu(),
+        ACQUIRED_WHERE,
+      ),
+    Error,
+  );
+  for (const fragment of [ACQUIRED_WHERE, "maxBufferSize: required 1 / this GPU has 0"]) {
+    assertStringIncludes(error.message, fragment);
+  }
+});
+
+test("assertAcquiredGpuCapabilities: a preset that declares neither passes on any GPU", () => {
+  assertAcquiredGpuCapabilities(undefined, undefined, noFeatureGpu(), ACQUIRED_WHERE);
+  assertAcquiredGpuCapabilities({}, {}, noFeatureGpu(), ACQUIRED_WHERE);
+});
+
+/**
+ * The construction code of the eight families that check the GPU after acquiring it. Each must go
+ * through the helper after `options.gpu ?? (await acquireGpu(...))` — a family that writes the two
+ * checks by hand can drop one of them for a device it acquired itself, and no type check notices.
+ */
+const ACQUIRING_FAMILIES = [
+  "wan/family.ts",
+  "anima/pipeline.ts",
+  "sbv2/pipeline.ts",
+  "irodori/pipeline.ts",
+  "birefnet/pipeline.ts",
+  "depth-anything/pipeline.ts",
+  "siglip2/pipeline.ts",
+  "vowel-detector/pipeline.ts",
+] as const;
+
+test("every family checks the GPU it acquired through assertAcquiredGpuCapabilities, not by hand", async () => {
+  for (const file of ACQUIRING_FAMILIES) {
+    const source = await readTextFile(new URL(`../src/${file}`, import.meta.url));
+    const acquisition = source.indexOf("options.gpu ?? (await acquireGpu(");
+    assert(acquisition !== -1, `${file}: the GPU acquisition expression is not found`);
+    assertEquals(
+      source.indexOf("options.gpu ?? (await acquireGpu(", acquisition + 1),
+      -1,
+      `${file}: more than one GPU acquisition`,
+    );
+    const after = source.slice(acquisition);
+    assertStringIncludes(
+      after,
+      "assertAcquiredGpuCapabilities(",
+      `${file}: the helper is not called after acquisition`,
+    );
+    for (const bare of ["assertGpuFeaturesGranted(", "assertRequiredLimitsSatisfied("]) {
+      assert(!after.includes(bare), `${file}: '${bare}' is written by hand after acquisition`);
     }
   }
 });

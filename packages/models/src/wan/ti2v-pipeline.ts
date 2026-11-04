@@ -43,6 +43,7 @@ import {
   generateWanVideo,
   loadWanFromAssets,
   loadWanFromPretrained,
+  ownWanRequestLatents,
   WAN22_TI2V_FAMILY,
   type WanState,
 } from "./family.ts";
@@ -178,7 +179,8 @@ export class Ti2vPipeline {
     if (this.#disposal !== undefined) {
       throw new Error("wan.Ti2vPipeline: cannot generate after dispose");
     }
-    return await this.#chain(() => generateWanVideo(WAN22_TI2V_FAMILY, this.#state, request));
+    const owned = ownWanRequestLatents(request);
+    return await this.#chain(() => generateWanVideo(WAN22_TI2V_FAMILY, this.#state, owned));
   }
 
   /**

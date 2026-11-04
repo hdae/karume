@@ -110,6 +110,7 @@ import { type LabSegment, logitsToSegments, toLab } from "./postprocess.ts";
 import { ModelInputError } from "../errors.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -568,19 +569,14 @@ const openVowelDetectorState = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `vowelDetector.Pipeline: quant '${quantName}'`);
-    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
-    // (`fromPretrained` checks with the adapter's values), and without this a shortfall of the
-    // declaration would be delayed until Session construction, and when the declaration is stricter
-    // than the real demand the comparison would never happen at all. A shared GPU is checked by
-    // `admitVowelDetector`.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        quant.requiredLimits,
-        gpu.limits,
-        `vowelDetector.Pipeline: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      quant.requiredLimits,
+      gpu,
+      `vowelDetector.Pipeline: quant '${quantName}'`,
+    );
   } catch (error) {
     // A GPU acquired internally can be released by no one if construction fails, so give it back
     // here.

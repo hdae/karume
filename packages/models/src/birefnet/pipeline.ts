@@ -97,6 +97,7 @@ import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../image/preprocess
 import { type AlphaMatte, matteFromLogits } from "./matte.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -224,11 +225,14 @@ export const assertStaticDim = (
 ): void => assertGraphInputDim("birefnet", model, inputName, axis, expected, where);
 
 /**
- * Checks that the graph **output** has shape `[1, 1, imageHeight, imageWidth]`.
+ * Checks that the graph **output** is f32 with shape `[1, 1, imageHeight, imageWidth]`.
  *
  * MUST: do not drop this check. The later steps could check only "element count is H×W", but then a
  * graph baked with the intermediate predictions of multi-scale supervision (`[1, 3, S, S]` or
  * similar) would pass through **with different values read as α**.
+ * MUST: check the dtype too. The postprocessing reads the logits as f32 (`asF32`), so a non-f32
+ * graph of the right shape would otherwise pass construction and fail only after the GPU, the
+ * Session and one full run, with a message that does not point at the mixed-up asset.
  *
  * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
  * `mod.ts` / the subpath surface — ADR 0008).
@@ -251,6 +255,11 @@ export const assertMatteShape = (
     throw new Error(
       `birefnet: ${where} — graph output '${name}' has shape ` +
         `[${value.shape.map(String).join(", ")}], expected [${expected.join(", ")}]`,
+    );
+  }
+  if (value.dtype !== "f32") {
+    throw new Error(
+      `birefnet: ${where} — graph output '${name}' dtype is ${value.dtype}, the postprocessing reads f32`,
     );
   }
 };
@@ -469,18 +478,14 @@ const openBirefnetState = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `birefnet.Pipeline: quant '${quantName}'`);
-    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
-    // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
-    // only at Session construction, and a declaration stricter than the real demand is never
-    // matched at all. A shared GPU is checked by `admitBirefnet`.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        quant.requiredLimits,
-        gpu.limits,
-        `birefnet.Pipeline: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      quant.requiredLimits,
+      gpu,
+      `birefnet.Pipeline: quant '${quantName}'`,
+    );
     return {
       gpu,
       ownsGpu,

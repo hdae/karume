@@ -75,6 +75,7 @@ import {
 import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../image/preprocess.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
+  assertAcquiredGpuCapabilities,
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
@@ -462,18 +463,14 @@ const openSiglip2State = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `siglip2.Pipeline: quant '${quantName}'`);
-    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
-    // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
-    // only at Session construction, and a declaration stricter than the real demand is never
-    // matched at all. A shared GPU is checked by `admitSiglip2`.
-    if (ownsGpu) {
-      assertRequiredLimitsSatisfied(
-        quant.requiredLimits,
-        gpu.limits,
-        `siglip2.Pipeline: quant '${quantName}'`,
-      );
-    }
+    // The features and limits of the GPU in hand — one helper for every family (the reasons are in
+    // its doc).
+    assertAcquiredGpuCapabilities(
+      gpuFeatures,
+      quant.requiredLimits,
+      gpu,
+      `siglip2.Pipeline: quant '${quantName}'`,
+    );
     return {
       gpu,
       ownsGpu,

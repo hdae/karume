@@ -159,6 +159,45 @@ describe("画像 3 家族の構築前検査", () => {
     });
   });
 
+  describe("when the graph output is not f32 (the postprocessing reads f32)", () => {
+    it("BiRefNet rejects the output dtype by name before acquiring the GPU", async () => {
+      await assertRejects(
+        async () =>
+          await birefnet.Pipeline.fromAssets({
+            manifest: manifestOf("birefnet/2", "matte", {
+              ...IMAGE_CONFIG,
+              interpolation: "bilinear",
+              postprocess: "u8-pil-bicubic",
+            }),
+            assets: await assetsOf(
+              "matte",
+              declaration("f32", "logits", [1, 1, SIZE, SIZE], "i32"),
+            ),
+          }),
+        Error,
+        "birefnet: matte shape — graph output 'logits' dtype is i32, the postprocessing reads f32",
+      );
+    });
+
+    it("Depth Anything rejects the output dtype by name before acquiring the GPU", async () => {
+      await assertRejects(
+        async () =>
+          await depthAnything.Pipeline.fromAssets({
+            manifest: manifestOf("depth-anything/1", "depth", {
+              ...IMAGE_CONFIG,
+              interpolation: "bicubic",
+            }),
+            assets: await assetsOf(
+              "depth",
+              declaration("f32", "predicted_depth", [1, SIZE, SIZE], "i32"),
+            ),
+          }),
+        Error,
+        "depth-anything: depth map shape — graph output 'predicted_depth' dtype is i32, the postprocessing reads f32",
+      );
+    });
+  });
+
   describe("SigLIP2 の出力が [1, hiddenDim] でないグラフを受けたとき", () => {
     it("batch 2 で焼いた出力は GPU を取る前に落とす", async () => {
       await assertRejects(

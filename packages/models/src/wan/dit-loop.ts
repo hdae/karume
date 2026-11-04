@@ -455,11 +455,11 @@ export const withWanFirstFrameCondition = (
  * the VAE stage would let the clamp after the VAE turn ±Inf into ±1, beyond detection.
  *
  * MUST (caller's precondition): when `plan.initial` is latents, `plan.initial.data` is an array the
- * caller copied right after the entry check and that only the caller owns — this function uses it
+ * caller copied before the entry check and that only the caller owns — this function uses it
  * without copying, and UniPC keeps the step-0 latent by reference. Copying is the responsibility of the
- * caller (`generateWanVideo` in `family.ts`) and is enforced by neither the type nor the plan. Passing
- * an outside caller's array directly lets modifications during the run (including NaN that never
- * passed the check) reach the corrector.
+ * caller (`ownWanRequestLatents` in `family.ts`, called at the entry of each class's `generate`) and is
+ * enforced by neither the type nor the plan. Passing an outside caller's array directly lets
+ * modifications during the run (including NaN that never passed the check) reach the corrector.
  */
 export const runWanDenoise = async (
   state: WanDenoiseState,
@@ -487,8 +487,8 @@ export const runWanDenoise = async (
   const conditionProj = condition === undefined ? undefined : timestepsProj(0, dit.projWidth);
   const { positive, negative } = contexts;
   const elements = latentShape.reduce((product, dim) => product * dim, 1);
-  // The latents of `plan.initial` are an owned array the caller (`generateWanVideo`) copied right after
-  // the entry check, so they are not copied here (UniPC keeps the step-0 latent by reference — passing
+  // The latents of `plan.initial` are an owned array copied at the entry of the class's `generate`
+  // (`ownWanRequestLatents`), so they are not copied here (UniPC keeps the step-0 latent by reference — passing
   // the caller's array directly would let modifications during the run reach the corrector).
   let current: Float32Array<ArrayBuffer> =
     plan.initial.kind === "latents"
