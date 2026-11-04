@@ -55,7 +55,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from karume.dims import DimError, DimExpr, eval_dim, try_parse_dim
+from karume.dims import MAX_SAFE_INT, DimError, DimExpr, eval_dim, try_parse_dim
+from karume.ops import integral_float_to_int
 
 
 class LimitsError(ValueError):
@@ -136,8 +137,15 @@ def state_bindings(
             f"{where}: state shapes have several symbols {symbols}"
             f" — only the one capacity set by pipelineConfig['{STATE_CAPACITY_KEY}'] can be bound"
         )
-    capacity = pipeline_config.get(STATE_CAPACITY_KEY)
-    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+    # The same accepted set as the TS reader of the field (`Number.isSafeInteger`, at least 1):
+    # an integral float (`640.0`) binds as the integer (the reason is in
+    # {@link karume.ops.integral_float_to_int}).
+    capacity = integral_float_to_int(pipeline_config.get(STATE_CAPACITY_KEY))
+    if (
+        isinstance(capacity, bool)
+        or not isinstance(capacity, int)
+        or not 1 <= capacity <= MAX_SAFE_INT
+    ):
         raise LimitsError(
             f"{where}: state shape symbol '{symbols[0]}' is bound by"
             f" pipelineConfig['{STATE_CAPACITY_KEY}'], which is not a positive integer"

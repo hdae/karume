@@ -241,6 +241,17 @@ class TestSlidingWindow:
 
         assert [node.attrs.get("window") for node in graph.nodes[:3]] == [32, 32, 32]
 
+    def test_an_integral_float_window_is_written_as_the_integer(self):
+        """`32.0` is the runtime's window 32 (`Number.isSafeInteger(32.0)` is true), so the
+        surgery accepts it and writes the integer (kept as float, the IR would carry `32.0`)."""
+        spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=32.0)
+
+        graph = checked(to_states_form(source(), plan(spec)))
+
+        windows = [node.attrs.get("window") for node in graph.nodes[:3]]
+        assert windows == [32, 32, 32]
+        assert all(type(window) is int for window in windows)
+
     def test_a_window_larger_than_the_capacity_is_rejected_by_the_slot_contract(self):
         """Consistency with the slot contract (`window ≤ C`) — a numeric capacity decides it from
         the declaration alone."""
@@ -411,6 +422,15 @@ class TestRejectedSurgery:
     @pytest.mark.parametrize("window", [0, -1, True, 1.5])
     def test_a_window_outside_the_value_range_is_rejected(self, window):
         """bool derives from int but is not a window (`True` would pass silently as width 1)."""
+        spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=window)
+
+        with pytest.raises(StatesFormError, match="is not a positive integer"):
+            to_states_form(source(), plan(spec))
+
+    @pytest.mark.parametrize("window", [2**53, float(2**53), float("inf"), float("nan")])
+    def test_a_window_the_runtime_rejects_is_rejected(self, window):
+        """The upper bound is the safe integer, as in the runtime's `window` attr — a wider one
+        would be an IR the runtime refuses."""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=window)
 
         with pytest.raises(StatesFormError, match="is not a positive integer"):

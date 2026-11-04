@@ -1059,8 +1059,11 @@ SEQUENCE_DIGITS = 5
 #: separate from the part count limit).
 _MAX_SEQUENCE_INDEX = 10**SEQUENCE_DIGITS - 1
 
-#: Inverse of the numbered file name (`<stem>-NNNNN-of-NNNNN` → `<stem>`).
-_SEQUENCE_STEM = re.compile(rf"^(.+)-\d{{{SEQUENCE_DIGITS}}}-of-\d{{{SEQUENCE_DIGITS}}}$")
+#: Inverse of the numbered file name (`<stem>-NNNNN-of-NNNNN` → `<stem>`). MUST: the sequence
+#: numbers are ASCII digits only (here and in {@link _sequence_pattern}) — Python's `\d` also
+#: matches Unicode digits (full-width U+FF11), and `int()` would read such a name as a part
+#: {@link numbered_name} never writes.
+_SEQUENCE_STEM = re.compile(rf"^(.+)-[0-9]{{{SEQUENCE_DIGITS}}}-of-[0-9]{{{SEQUENCE_DIGITS}}}$")
 
 
 def numbered_name(name: str, index: int, total: int) -> str:
@@ -1105,7 +1108,9 @@ def _sequence_pattern(path: Path) -> re.Pattern[str]:
     """
     name = Path(path.name)
     stem, suffix = re.escape(name.stem), re.escape(name.suffix)
-    return re.compile(rf"^{stem}-(\d{{{SEQUENCE_DIGITS}}})-of-(\d{{{SEQUENCE_DIGITS}}}){suffix}$")
+    return re.compile(
+        rf"^{stem}-([0-9]{{{SEQUENCE_DIGITS}}})-of-([0-9]{{{SEQUENCE_DIGITS}}}){suffix}$"
+    )
 
 
 def resolve_sequence(path: Path) -> tuple[Path, ...]:

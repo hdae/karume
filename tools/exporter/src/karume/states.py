@@ -32,9 +32,9 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
-from karume.dims import parse_dim
+from karume.dims import MAX_SAFE_INT, parse_dim
 from karume.ir import IrDim, IrGraph, IrNode, IrState
-from karume.ops import ATTENTION_OP, STATE_APPEND_OP
+from karume.ops import ATTENTION_OP, STATE_APPEND_OP, integral_float_to_int
 from karume.shapes import declared_shape
 
 #: The state slot dtype (ADR 0066 decision 2). The source of truth for the vocabulary is
@@ -302,12 +302,16 @@ def _window(window: int | None, where: str) -> int | None:
 
     MUST: reject bool. Python's bool derives from int, so `True` would silently pass as a window
     width of 1 (the same discipline as `_assert_integer_attr` in the contract layer).
+    MUST: accept the same set as the runtime's `window` attr (`Number.isSafeInteger`, at least 1):
+    an integral float (`4.0`) is written as the integer, and a width beyond 2^53−1 is rejected
+    (the reason is in {@link integral_float_to_int}).
     """
     if window is None:
         return None
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+    value = integral_float_to_int(window)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SAFE_INT:
         raise StatesFormError(f"{where}: window {window!r} is not a positive integer")
-    return window
+    return value
 
 
 def _slot_shape(graph: IrGraph, source: str, capacity: IrDim, where: str) -> list[IrDim]:

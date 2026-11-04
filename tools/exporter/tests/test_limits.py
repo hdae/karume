@@ -256,6 +256,23 @@ class TestStateSlotDemand:
         with pytest.raises(LimitsError, match="maxPosition"):
             max_state_slot_bytes(graph, config, "where")
 
+    def test_an_integral_float_capacity_binds_as_the_integer(self) -> None:
+        """`4096.0` is the TS reader's 4096 (`Number.isSafeInteger(4096.0)` is true)."""
+        states = {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}
+
+        bindings = state_bindings(states, {"maxPosition": 4096.0}, "where")
+
+        assert bindings == {"C": 4096}
+        assert type(bindings["C"]) is int
+
+    @pytest.mark.parametrize("capacity", [4096.5, 2**53, float(2**53), float("nan")])
+    def test_it_refuses_a_capacity_the_ts_reader_rejects(self, capacity: Any) -> None:
+        """Non-integral and unsafe values stay outside the accepted set."""
+        graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
+
+        with pytest.raises(LimitsError, match="maxPosition"):
+            max_state_slot_bytes(graph, {"maxPosition": capacity}, "where")
+
     def test_it_refuses_two_symbols_it_cannot_tell_apart(self) -> None:
         """There is one capacity symbol — with two, the distribution cannot tell which one is the
         capacity."""

@@ -77,6 +77,7 @@ from karume.container import (
     container_bindings,
     sequence_siblings,
 )
+from karume.dims import MAX_SAFE_INT
 from karume.dist import (
     REPO_RE,
     REVISION_RE,
@@ -100,6 +101,7 @@ from karume.legacy import (
     resolve_shards,
     safetensors_header,
 )
+from karume.ops import integral_float_to_int
 from karume.ple import PLE_INDEX_ASSET, PLE_PACK_FACTOR, PleError, ple_assets, ple_row_bytes
 from karume.publish import PublishError, PublishResult, publish_container
 from karume.verify import assert_reader_layout, parse_ir_graph
@@ -490,11 +492,19 @@ def _sha256(value: Any, where: str) -> str:
 
 
 def _count(value: Any, where: str) -> int:
+    """A non-negative count of the manifest (the hub's accepted set: `Number.isSafeInteger`).
+
+    MUST: an integral float (`4.0`) is read — and written to `karume/5` — as the integer, and a
+    count beyond 2^53−1 is rejected (the reason is in {@link integral_float_to_int}).
+    """
+    normalized = integral_float_to_int(value)
     _require(
-        isinstance(value, int) and not isinstance(value, bool) and value >= 0,
+        isinstance(normalized, int)
+        and not isinstance(normalized, bool)
+        and 0 <= normalized <= MAX_SAFE_INT,
         f"{where} is not a non-negative integer: {value!r}",
     )
-    return value
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -555,8 +565,9 @@ class WeightEntry:
 #: Spelling of `pipeline`, `<name>/<major>` (the same accepted form as the hub's `parsePipeline` —
 #: the actual value is a string, not a `{name, major}` object). MUST: match with `.fullmatch` —
 #: Python's `$` also matches just before a trailing newline, so `.match` would accept
-#: `'name/1\n'`, which the hub rejects.
-PIPELINE_RE = re.compile(r"^([A-Za-z0-9_-]+)/(\d+)$")
+#: `'name/1\n'`, which the hub rejects. MUST: the major is ASCII digits only — Python's `\d` also
+#: matches Unicode digits (full-width U+FF11), which the hub's `\d` rejects.
+PIPELINE_RE = re.compile(r"^([A-Za-z0-9_-]+)/([0-9]+)$")
 
 
 @dataclass(frozen=True)
@@ -1296,8 +1307,11 @@ def read_ple_index(path: Path, where: str) -> dict[str, Any]:
         f"{where}.storage is {root['storage']!r}"
         f" (must be one of {' / '.join(sorted(PLE_PACK_FACTOR))})",
     )
+    # The counts are stored back normalized (`4.0` → `4`), so the fold downstream computes with
+    # ints only.
     for key in ("tokens", "layers", "dim"):
-        _require(_count(root[key], f"{where}.{key}") > 0, f"{where}.{key} is not 1 or more")
+        root[key] = _count(root[key], f"{where}.{key}")
+        _require(root[key] > 0, f"{where}.{key} is not 1 or more")
     scale = root["embedScale"]
     _require(
         isinstance(scale, int | float) and not isinstance(scale, bool) and scale > 0,
@@ -1306,6 +1320,7 @@ def read_ple_index(path: Path, where: str) -> dict[str, Any]:
     shards = root["shards"]
     _require(isinstance(shards, list) and shards, f"{where}.shards is not a non-empty array")
     cursor = 0
+    normalized_shards: list[dict[str, Any]] = []
     for index, raw in enumerate(shards):
         entry = _object(raw, f"{where}.shards[{index}]")
         _keys(entry, ["file", "start", "stop"], [], f"{where}.shards[{index}]")
@@ -1318,9 +1333,11 @@ def read_ple_index(path: Path, where: str) -> dict[str, Any]:
             f" continuing from {cursor}",
         )
         cursor = stop
+        normalized_shards.append({**entry, "start": start, "stop": stop})
     _require(
         cursor == root["tokens"], f"{where}: the shard total of {cursor} rows differs from tokens"
     )
+    root["shards"] = normalized_shards
     return root
 
 

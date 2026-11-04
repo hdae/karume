@@ -62,6 +62,7 @@ from karume.legacy import (
     LegacyFormatError,
     SourceTensor,
     StoredEntry,
+    parse_piece_key,
     payload_chunks,
     read_component,
     resolve_shards,
@@ -991,6 +992,13 @@ class TestTheTensorPieces:
         joined = stored["w"]
         assert (joined.entry.dtype, joined.entry.shape, joined.entry.nbytes) == ("F32", (4, 8), 128)
         assert b"".join(payload_chunks(joined)) == self.WHOLE.payload
+
+    def test_a_key_numbered_with_full_width_digits_is_not_a_piece(self) -> None:
+        """The sequence numbers are ASCII digits — Python's `\\d` also matches U+FF11 (full-width
+        one), and `int()` would read such a key as piece 1 of 2."""
+        assert parse_piece_key("w#00001-of-00002") == ("w", 1, 2)
+        assert parse_piece_key("w#0000１-of-00002") is None
+        assert parse_piece_key("w#00001-of-0000２") is None
 
     def test_two_pieces_of_one_parent_in_one_shard_fail_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])

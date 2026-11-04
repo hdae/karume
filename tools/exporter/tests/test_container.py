@@ -66,12 +66,15 @@ from karume.container import (
     Encoding,
     Provenance,
     align_up,
+    base_path,
     canonical_json,
     ir_v2_document,
     joined_scale_id,
     read_container,
     read_descriptor_refs,
     read_header,
+    resolve_sequence,
+    sequence_siblings,
     serialize_graph_descriptor,
     serialize_model_descriptor,
     write_graph_container,
@@ -1784,3 +1787,24 @@ class TestTheReaderRejectsABrokenSplitScale:
 
         with pytest.raises(ContainerFormatError, match="a const cannot have a split scale"):
             read_container(written)
+
+
+class TestTheSequenceNumbersAreAsciiDigits:
+    """The sequence numbers of numbered file names are ASCII digits only.
+
+    Python's `\\d` also matches Unicode digits (U+FF11 = full-width one) and `int()` converts them,
+    so a name `numbered_name` never writes would be folded to its stem or read as part 1.
+    """
+
+    def test_a_full_width_numbered_name_is_not_folded_to_its_stem(self) -> None:
+        assert base_path(Path("model-00001-of-00003.krm")) == Path("model.krm")
+        odd = Path("model-0000１-of-00003.krm")
+
+        assert base_path(odd) == odd
+
+    def test_a_full_width_numbered_file_is_not_read_as_a_part(self, tmp_path: Path) -> None:
+        (tmp_path / "model-0000１-of-0000１.krm").write_bytes(b"part")
+        path = tmp_path / "model.krm"
+
+        assert resolve_sequence(path) == (path,)
+        assert sequence_siblings(path) == ()

@@ -77,8 +77,9 @@ _PIECE_DIGITS = 5
 
 #: Spelling of a piece key (`<parent>#NNNNN-of-NNNNN`). The parent name is taken greedily — parent
 #: names containing `#` never appear in the old writer's output, so only the trailing sequence
-#: number marks the split.
-_PIECE_PATTERN = re.compile(rf"^(.+)#(\d{{{_PIECE_DIGITS}}})-of-(\d{{{_PIECE_DIGITS}}})$")
+#: number marks the split. MUST: ASCII digits only — Python's `\d` also matches Unicode digits
+#: (full-width U+FF11), which the old writer never wrote and `int()` would still convert.
+_PIECE_PATTERN = re.compile(rf"^(.+)#([0-9]{{{_PIECE_DIGITS}}})-of-([0-9]{{{_PIECE_DIGITS}}})$")
 
 
 class LegacyFormatError(ValueError):

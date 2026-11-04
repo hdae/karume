@@ -516,6 +516,48 @@ class TestTheDeclaredFiles:
         with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 is not a sha256"):
             migrated(repo, tmp_path / "out")
 
+    def test_an_integral_float_size_is_read_and_written_as_the_integer(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """`22.0` is the hub's 22 (`Number.isSafeInteger(22.0)` is true) — read, and copied to
+        `karume/5` as the integer (kept as float, the new manifest would carry `22.0`)."""
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        tokenizer = manifest["models"]["alpha"]["assets"]["tokenizer"]
+        size = tokenizer["size"]
+        tokenizer["size"] = float(size)
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        out = tmp_path / "out"
+        migrated(repo, out)
+
+        written = manifest_of(out)["models"]["alpha"]["assets"]["tokenizer"]["size"]
+        assert written == size
+        assert type(written) is int
+
+    def test_a_pipeline_major_in_full_width_digits_fails_loudly(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The major is ASCII digits, as in the hub — Python's `\\d` also matches U+FF11."""
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        manifest["models"]["alpha"]["pipeline"] = "synthetic/１"
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(MigrateError, match="does not have the form '<name>/<major>'"):
+            migrated(repo, tmp_path / "out")
+
+    @pytest.mark.parametrize("size", [22.5, 2**53, float("nan"), True])
+    def test_a_size_the_hub_rejects_fails_loudly(
+        self, repo: Path, tmp_path: Path, size: Any
+    ) -> None:
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        manifest["models"]["alpha"]["assets"]["tokenizer"]["size"] = size
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(
+            MigrateError, match=r"assets\['tokenizer'\]\.size is not a non-negative integer"
+        ):
+            migrated(repo, tmp_path / "out")
+
     def test_a_crossed_descriptor_sha256_is_spelled_like_a_sha256(
         self, borrower: Path, repo: Path, tmp_path: Path
     ) -> None:
@@ -1000,6 +1042,27 @@ class TestThePleFold:
 
         with pytest.raises(MigrateError, match=r"karume_ple\.stop"):
             migrated(gemma_repo, tmp_path / "out")
+
+    def test_integral_float_counts_of_the_index_fold_like_the_integers(
+        self, gemma_repo: Path, tmp_path: Path
+    ) -> None:
+        """An index spelled with `16.0` / `0.0` folds into the same containers as the integer
+        spelling (the hub's accepted set — one JSON number type)."""
+        migrated(gemma_repo, tmp_path / "ints")
+        manifest = json.loads((gemma_repo / "karume.json").read_text(encoding="utf-8"))
+        index_path = gemma_repo / manifest["models"]["e2b"]["assets"]["ple_index"]["path"]
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        for key in ("tokens", "layers", "dim"):
+            index[key] = float(index[key])
+        index["shards"] = [
+            {**shard, "start": float(shard["start"]), "stop": float(shard["stop"])}
+            for shard in index["shards"]
+        ]
+        redeclare_asset(gemma_repo, "e2b", "ple_index", json.dumps(index).encode("utf-8"))
+
+        migrated(gemma_repo, tmp_path / "floats")
+
+        assert manifest_of(tmp_path / "floats") == manifest_of(tmp_path / "ints")
 
     def test_a_dim_that_the_packing_cannot_divide_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path

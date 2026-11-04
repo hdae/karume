@@ -1735,6 +1735,21 @@ class TestReaderIndexRange:
         with pytest.raises(ContainerError, match="non-negative integer"):
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
+    def test_integral_float_indices_are_read_as_the_integers(self, tmp_path):
+        """Another writer's `2.0` / `8.0` read as 2 / 8, as in the TS reader (one JSON number
+        type — `Number.isSafeInteger(8.0)` is true)."""
+        header = {"t": {"dtype": "F32", "shape": [2.0], "data_offsets": [0.0, 8.0]}}
+
+        assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 8))
+
+    @pytest.mark.parametrize("dim", [1.5, float(2**53), float("inf"), float("nan"), True])
+    def test_a_dimension_the_ts_reader_rejects_is_rejected(self, tmp_path, dim):
+        """Non-integral, unsafe and non-finite floats and bool stay outside the accepted set."""
+        header = {"t": {"dtype": "F32", "shape": [0, dim], "data_offsets": [0, 0]}}
+
+        with pytest.raises(ContainerError, match="non-negative integer"):
+            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
+
 
 class TestReaderEntryStructure:
     """The structure of a single header entry also fails with the check's diagnostic (bare indexing

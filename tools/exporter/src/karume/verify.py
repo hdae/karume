@@ -1149,7 +1149,10 @@ def _as_reader_index(value: Any, where: str, what: str) -> int:
     rejected — if the Python side accepted it by looking only at the product of element counts, a
     file where "verify is green but only the browser's reader fails" would remain as a
     distribution. bool derives from int but is not an index.
+    MUST: an integral float (`4.0`) is read as the integer — the TS reader sees one number type
+    (the reason is in {@link integral_float_to_int}).
     """
+    value = integral_float_to_int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > MAX_SAFE_INT:
         raise ContainerError(
             f"{where}: {what} {value!r} is not a non-negative integer (at most 2^53−1)"
