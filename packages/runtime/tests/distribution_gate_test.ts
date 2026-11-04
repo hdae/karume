@@ -83,10 +83,9 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 /**
  * The distribution mirrors the guard **requires to exist** (the roster of the absence check — the
  * reach of the manifest checks is derived from the layout by {@link discoverDistributions}) = the
- * 14 repositories with a published revision (including `karume-umt5-xxl` and `karume-wan2.2`,
- * first published in 0.14.0, and `karume-moss-image` and `karume-gemma4-qat`, first published in
- * 0.15.1) + `karume-wan2.1` (never published) and `karume-gemma4-qat-mobile` (no published revision
- * under this name yet).
+ * 15 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
+ * 0.14.0, `karume-moss-image`, first published in 0.15.1, and `karume-gemma4-qat-mobile`,
+ * published under this name in 0.16.0) + the unpublished `karume-wan2.1`.
  *
  * 公開済みの 2 本は公開前から門番に載っていた: `karume-umt5-xxl` は Wan の GPU 経路の e2e が越境参照の根にし
  * （ADR 0119 段 10d・無いと欠如が無音の SKIP になる）、`karume-wan2.2` は Wan2.2 の通しの e2e
@@ -94,13 +93,10 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * 読む）が根にする（ADR 0121 段 8）。
  *
  * `karume-gemma4-qat-mobile` is the mobile QAT distribution first published in 0.15.1 as
- * `karume-gemma4-qat` and renamed on 2026-11-04 (no published revision under the new name yet): the
- * mobile QAT public-entry e2e and the fusion hit-count check root on it. The local
- * `karume-gemma4-qat` mirror now holds the q4_0 QAT line (E2B / E4B / 12B with their drafters),
- * which the q4_0 QAT mirror e2e, its sha256 rows and the 12B e2e root on. That content has no
- * published revision yet: the HF repository `hdae/karume-gemma4-qat` exists, and its revision
- * pinned by 0.15.1 holds the mobile QAT content, so publishing the q4_0 line adds a revision to a
- * repository whose earlier revision 0.15.1 users still pin.
+ * `karume-gemma4-qat`, renamed on 2026-11-04 and published under the new name in 0.16.0: the
+ * mobile QAT public-entry e2e and the fusion hit-count check root on it. `karume-gemma4-qat` now
+ * holds the q4_0 QAT line (E2B / E4B / 12B with their drafters, published in 0.16.0), which the
+ * q4_0 QAT mirror e2e, its sha256 rows and the 12B e2e root on.
  *
  * `karume-wan2.1` は未公開
  * （HF に公開しない — ADR 0118 追記（2026-10-15））だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と

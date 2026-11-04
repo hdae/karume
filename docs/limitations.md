@@ -2511,8 +2511,8 @@ hub's own received-byte check (the `fetch` wrapper) was removed. The checks on b
 `gemma4-qat` (the manifest's pipeline `gemma4-qat/1`, the subpath `@karume/models/gemma4-qat-mobile`) is a separate family from regular `gemma4` and handles only the text generation of the official mobile Transformers format E2B / E4B.
 It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision and audio are not supported. The distribution is
 `karume-gemma4-qat-mobile` (E2B and E4B): it was published on Hugging Face as `hdae/karume-gemma4-qat` with 0.15.1 (ADR 0097 addendum 9) and renamed
-on 2026-11-04 — that name now holds the q4_0 QAT line, which `@karume/models/gemma` reads — so it has no published revision and no `SOURCES` entry
-under its new name until the next release (ADR 0097 addendum 10).
+on 2026-11-04 — that name now holds the q4_0 QAT line, which `@karume/models/gemma` reads — and it was uploaded under its new name on 2026-11-04, pinned by
+`gemma4QatMobile.SOURCES["gemma4-qat-mobile"]` from 0.16.0 (ADR 0097 addendum 10).
 The local usage example is the QAT CLI (`examples/gemma4-qat/README.md` (removed in 0.15)), the numeric contract is [ADR 0097](decisions/0097-gemma4-qat-integration.md),
 the terms are in the [glossary](glossary.md), and the source of the measurements is the [measurement record of the QAT review](research/2026-09-19-qat-review.md).
 
@@ -2658,5 +2658,5 @@ until the GEMV rows of the 12B shapes are measured. On the RTX 3080 Ti (12 GB) t
 
 12B is an instruction model. Given raw text without the chat template it can degenerate: for "The capital of France
 is" it repeats digits — upstream's own F32 `generate()` on the same weights gives the same 16 tokens. Use `chat` (the
-chat dialect `gemma4-unified`) for ordinary use. The model is not published yet; the human quality review of ADR 0110
+chat dialect `gemma4-unified`) for ordinary use. The model is published in `karume-gemma4-qat` from 0.16.0; the human quality review of ADR 0110
 decision 8 passed on 2026-11-04.

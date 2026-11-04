@@ -28,17 +28,18 @@ name, the `SOURCES` pins move, and 0.15.1 is yanked.
   `lm_head`) and perf-ledger K-45 (integer dot product) as the root fix. Re-measure first and check which GEMV changes
   since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). The mobile QAT distribution,
   published on HF as `hdae/karume-gemma4-qat` on 2026-11-01, is `karume-gemma4-qat-mobile` since 2026-11-04
-  (`@karume/models/gemma4-qat-mobile`; no `SOURCES` until it is published under the new name — ADR 0097 addendum 10).
+  (`@karume/models/gemma4-qat-mobile`; uploaded under the new name on 2026-11-04 and pinned by
+  `gemma4QatMobile.SOURCES["gemma4-qat-mobile"]` from 0.16.0 — ADR 0097 addendum 10).
 - **Gemma 4 expansion — the release after 0.15.1 (maintainer 2026-11-01)**: in this order, (1) the MTP drafter for E4B
   (`google/gemma-4-E4B-it-assistant`; size M — the target series already has the verify exit, the export script and
   the tests are E2B-bound; E4B's default is decided — `bf16`, the original weights, like E2B's: ADR 0128 addendum
   2026-11-04; scoping memos `.claude/reviews/2026-11-02_gemma4-expansion/` (`e4b-drafter.md`, `12b.md`), local, untracked), (2) Gemma 4 12B
   (model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024) — **implemented and in the local
   mirror of the q4_0 QAT line `karume-gemma4-qat` with its QAT drafter (2026-11-04; the regular `karume-gemma4` no longer
-  ships it), not published**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
+  ships it), uploaded to HF on 2026-11-04 for 0.16.0**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
   2026-11-03 — round-to-nearest i4 on `gemma-4-12B-it` ruins it), one preset `i4` (6.9 GiB; e2e greedy goldens equal on
   the RTX 3080 Ti, peak VRAM 8.6 GiB; the human quality review passed 2026-11-04). Left: the GEMV rows of the 12B
-  shapes before `i4-gemvpar` / `i4-fast`, publication and the `gemma.SOURCES["gemma4-qat"]` entry (maintainer). Its QAT drafter ships in
+  shapes before `i4-gemvpar` / `i4-fast` (the `gemma.SOURCES["gemma4-qat"]` entry is in from 0.16.0). Its QAT drafter ships in
   the same mirror (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` — Google's card requires a QAT drafter for a QAT
   target).
 - **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:

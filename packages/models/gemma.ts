@@ -97,9 +97,8 @@ export type { DefaultSampler, PipelineConfig } from "./src/gemma/config.ts";
  * One entry per repository, several models in each (choose a non-default one with `{ model }`):
  *
  * - `SOURCES["gemma4"]` = `hdae/karume-gemma4` — the regular line (E2B / E4B)
- *
- * The q4_0 QAT line (`hdae/karume-gemma4-qat` — E2B / E4B / 12B), which this pipeline reads too,
- * gets its entry `SOURCES["gemma4-qat"]` when that distribution is published.
+ * - `SOURCES["gemma4-qat"]` = `hdae/karume-gemma4-qat` — the q4_0 QAT line (E2B / E4B / 12B, each
+ *   with its QAT MTP drafter)
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
  * is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility

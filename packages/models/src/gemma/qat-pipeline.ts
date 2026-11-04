@@ -22,8 +22,8 @@ export class Pipeline extends GemmaPipeline {
     super(state);
   }
   /**
-   * Builds E2B/E4B from a mobile QAT distribution (`karume-gemma4-qat-mobile`) — any
-   * `{ repo, revision }`, or a local one as a source handle. When model is omitted, the manifest's
+   * Builds E2B/E4B from a mobile QAT distribution — the published `SOURCES["gemma4-qat-mobile"]`,
+   * any `{ repo, revision }`, or a local one as a source handle. When model is omitted, the manifest's
    * default is used.
    */
   static async fromPretrained(

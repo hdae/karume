@@ -26,6 +26,7 @@ import * as anima from "../anima.ts";
 import * as irodori from "../irodori.ts";
 import * as sbv2 from "../sbv2.ts";
 import * as gemma from "../gemma.ts";
+import * as gemma4QatMobile from "../gemma4-qat-mobile.ts";
 import * as siglip2 from "../siglip2.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
@@ -102,9 +103,18 @@ const FAMILIES: readonly Family[] = [
   {
     name: "gemma.SOURCES",
     sources: gemma.SOURCES,
-    // 単一リポの家族もキーは家族名（ADR 0092 決定 3 — 1 本でも表の形を崩さない）。
-    keys: ["gemma4"],
+    // One entry per repository (ADR 0092 decision 3): the regular line and the q4_0 QAT line
+    // (first published in 0.16.0), both read by `gemma.Pipeline`.
+    keys: ["gemma4", "gemma4-qat"],
     load: (ref, options) => gemma.Pipeline.fromPretrained(ref, options),
+  },
+  {
+    name: "gemma4QatMobile.SOURCES",
+    sources: gemma4QatMobile.SOURCES,
+    // The mobile QAT line, renamed from `karume-gemma4-qat` (0.15.1) and republished under its new
+    // name in 0.16.0; E2B and E4B share one self-contained repository (default E2B).
+    keys: ["gemma4-qat-mobile"],
+    load: (ref, options) => gemma4QatMobile.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "siglip2.SOURCES",
@@ -164,7 +174,7 @@ for (const { name, sources, keys } of FAMILIES) {
 
 // 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
 // ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-test("10 families have a source table, with 13 published repositories", () => {
+test("11 families have a source table, with 15 published repositories", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
@@ -172,6 +182,7 @@ test("10 families have a source table, with 13 published repositories", () => {
       "irodori.SOURCES",
       "sbv2.SOURCES",
       "gemma.SOURCES",
+      "gemma4QatMobile.SOURCES",
       "siglip2.SOURCES",
       "depthAnything.SOURCES",
       "birefnet.SOURCES",
@@ -180,7 +191,7 @@ test("10 families have a source table, with 13 published repositories", () => {
       "moss.SOURCES",
     ],
   );
-  assertEquals(Object.keys(KARUME_SOURCES).length, 13);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 15);
 });
 
 for (const { name, sources } of FAMILIES) {

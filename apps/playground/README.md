@@ -79,8 +79,8 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
-| `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` (not published yet; the route computes the revision) | Gemma 4 chat |
-| `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | `hdae/karume-gemma4-qat-mobile` (not published yet; the route computes the revision) | Gemma 4 chat |
+| `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
+| `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | `hdae/karume-gemma4-qat-mobile` | Gemma 4 chat |
 | `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
@@ -1055,9 +1055,8 @@ A decode A/B of regular Gemma 4 and its q4_0 QAT line (`gemma.Pipeline`, mounts 
 `gemma4-qat-mobile`), kept as a page so each measurement wave reuses it
 (ADR 0127 decision 5). An **arm** is a model of any of the three distributions at one preset, with the GPU tap
 on or off. The page builds each arm's pipeline the way the chat page does (`buildGemmaPipeline`),
-always over the **direct route** (the regular mount also has a cached route, which the bench does not
-offer; the two QAT mounts have none until they are published): one route for every arm keeps the
-source out of the comparison.
+always over the **direct route** (the mounts also have a cached route, which the bench does not
+offer): one route for every arm keeps the source out of the comparison.
 
 **The GPU tap** (`src/models/gemma4-bench/tap.ts`). The page acquires its GPU through a wrapper of
 `navigator.gpu` (`acquireGpu({ subgroups: "available", gpu: tap.gpu })`). The wrapper requests

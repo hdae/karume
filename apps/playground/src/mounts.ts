@@ -13,6 +13,7 @@ import * as anima from "@karume/models/anima";
 import * as birefnet from "@karume/models/birefnet";
 import * as depthAnything from "@karume/models/depth-anything";
 import * as gemma from "@karume/models/gemma";
+import * as gemma4QatMobile from "@karume/models/gemma4-qat-mobile";
 import * as irodori from "@karume/models/irodori";
 import * as moss from "@karume/models/moss";
 import * as sbv2 from "@karume/models/sbv2";
@@ -61,14 +62,15 @@ export const MOUNTS = {
   sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: sbv2.SOURCES["sbv2-jvnv"].repo },
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
   // The q4_0 QAT line (read by the regular entry point, with MTP drafters) and the mobile QAT
-  // distribution (gemma4QatMobile.Pipeline). Neither has a published revision under its name yet,
-  // so neither has a SOURCES entry and the repo names are spelled here; the `/hf/` route computes
-  // its revision from the served `karume.json` and needs no published one. MUST keep the route:
-  // on the direct route every PLE row the host gather misses is an HTTP range request per token.
-  "gemma4-qat": { directory: "models/karume-gemma4-qat", hfRepo: "hdae/karume-gemma4-qat" },
+  // distribution (gemma4QatMobile.Pipeline). MUST keep them on the `/hf/` route: on the direct
+  // route every PLE row the host gather misses is an HTTP range request per token.
+  "gemma4-qat": {
+    directory: "models/karume-gemma4-qat",
+    hfRepo: gemma.SOURCES["gemma4-qat"].repo,
+  },
   "gemma4-qat-mobile": {
     directory: "models/karume-gemma4-qat-mobile",
-    hfRepo: "hdae/karume-gemma4-qat-mobile",
+    hfRepo: gemma4QatMobile.SOURCES["gemma4-qat-mobile"].repo,
   },
   "moss-image": {
     directory: "models/karume-moss-image",

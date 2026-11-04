@@ -585,6 +585,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "SOURCES",
+        "kind": "variable"
+      },
+      {
         "name": "SamplerSpec",
         "kind": "typeAlias"
       },

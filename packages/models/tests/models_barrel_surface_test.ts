@@ -253,6 +253,7 @@ const SOURCE_TABLE_SUBPATHS: readonly string[] = [
   "./irodori",
   "./sbv2",
   "./gemma",
+  "./gemma4-qat-mobile",
   "./siglip2",
   "./depth-anything",
   "./birefnet",

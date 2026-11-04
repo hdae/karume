@@ -45,8 +45,8 @@ series; use a new directory to retain previous measurements.
 The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The distribution is
 `karume-gemma4-qat-mobile`, read by `@karume/models/gemma4-qat-mobile`: it was first published
 on Hugging Face as `hdae/karume-gemma4-qat` (0.15.1) and renamed on 2026-11-04, when that name
-went to the q4_0 QAT line (`gemma4/README.md`); it has no published revision under the new name
-yet, so the subpath has no `SOURCES` table. The `i4` quant is
+went to the q4_0 QAT line (`gemma4/README.md`); it was uploaded under the new name on 2026-11-04,
+and the subpath's `SOURCES["gemma4-qat-mobile"]` pins it. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference summation for GEMV and attention. Both models
 default to `i4-fast`, which uses the same weights and declares parallel GEMV, fused parallel
 attention (`parallel-fused`), RMS-add fusion, linear-to-SRQ fusion, the per-layer-input gate

@@ -235,9 +235,9 @@ RELEASE_REPOSITORIES = [
     ("lucida", ["1024", "2048"], None, "karume-lucida"),
     ("depth-anything", ["small"], None, "karume-depth-anything-v2"),
     ("gemma4", ["e2b"], None, "karume-gemma4"),
-    # The q4_0 QAT line (`--pipeline gemma4-qat` → karume-gemma4-qat) and the mobile QAT line
-    # (`--pipeline gemma4-qat-mobile` → karume-gemma4-qat-mobile, renamed 2026-11-04) have no
-    # published revision yet, so neither has a TS table entry.
+    ("gemma4-qat", ["e2b", "e4b", "12b"], None, "karume-gemma4-qat"),
+    # The mobile QAT line, renamed from karume-gemma4-qat on 2026-11-04.
+    ("gemma4-qat-mobile", ["e2b", "e4b"], None, "karume-gemma4-qat-mobile"),
     ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
     ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
     # `--repo` 無しで公開リポを指す（Pipeline がファミリーのリポ名を宣言する — W-RC5-2）。

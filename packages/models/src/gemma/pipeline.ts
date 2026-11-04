@@ -1325,12 +1325,13 @@ export class GemmaPipeline {
     // goes through the same function too, but that is after the GB-scale load).
     resolveGemma4PleResidency(where, options);
     assertGemma4DecodeAheadOptions(where, options);
-    // The mobile QAT family has no source table (its distribution has no published revision —
-    // `@karume/models/gemma4-qat-mobile`), so an omitted ref gets no hint there.
+    // Both families share this load body, so each names its own table in the omitted-ref hint.
     const source = toManifestSource(
       ref,
       where,
-      family === "gemma4" ? 'SOURCES["gemma4"] (@karume/models/gemma)' : undefined,
+      family === "gemma4"
+        ? 'SOURCES["gemma4"] (@karume/models/gemma)'
+        : 'SOURCES["gemma4-qat-mobile"] (@karume/models/gemma4-qat-mobile)',
     );
     const hubOptions: FetchAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -2276,8 +2277,9 @@ export class Pipeline extends GemmaPipeline {
    * {@link FromPretrainedComponentOptions.components} (the roles are `model` and `drafter`).
    *
    * **`ref` is required** (there is no default source — the MUST of `src/hub/repo-ref.ts`). The source
-   * the package release verified is `"gemma4"` of {@link SOURCES} (`./config.ts`) — to pin
-   * reproducibility yourself, the caller gives `{ repo, revision }` explicitly. A string `ref` reads as
+   * the package release verified is `"gemma4"` (the regular line) or `"gemma4-qat"` (the q4_0 QAT
+   * line) of {@link SOURCES} (`./config.ts`) — to pin reproducibility yourself, the caller gives
+   * `{ repo, revision }` explicitly. A string `ref` reads as
    * `{ repo }` (= follows `main`).
    *
    * A distribution in hand is passed as a **source handle** (`localDirectory`, `denoDirectory` of
