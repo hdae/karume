@@ -1041,7 +1041,7 @@ describe("container descriptor", () => {
           OPTIONS,
         ),
       ContainerFormatError,
-      "宣言から決まる",
+      "the declaration determines",
     );
   });
 

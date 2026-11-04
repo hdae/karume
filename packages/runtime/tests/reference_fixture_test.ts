@@ -340,19 +340,19 @@ test("reference fixture: an unreadable fixture throws instead of being treated a
           mode: undefined,
         }),
       Error,
-      "fixture が読めない",
+      "fixture cannot be read",
     );
     writeTextFileSync(fixtureUrl, "{ broken");
     assertThrows(
       () => openReferences(fixtureUrl, { environment: environment(CURRENT), mode: undefined }),
       Error,
-      "JSON として壊れている",
+      "is broken as JSON",
     );
     writeTextFileSync(fixtureUrl, JSON.stringify({ schema: 2, kind: "sha256", cases: {} }));
     assertThrows(
       () => openReferences(fixtureUrl, { environment: environment(CURRENT), mode: undefined }),
       Error,
-      "schema が 2",
+      "schema of the reference-value fixture is 2",
     );
   });
 });
@@ -604,7 +604,11 @@ describe("f32ArtifactBytes", () => {
   });
 
   it("throws when the shape's element count and the data length disagree", () => {
-    assertThrows(() => f32ArtifactBytes("logits", [1, 2, 2], data), Error, "食い違う");
+    assertThrows(
+      () => f32ArtifactBytes("logits", [1, 2, 2], data),
+      Error,
+      "disagrees with the data length",
+    );
   });
 });
 
@@ -658,11 +662,11 @@ describe("referenceMismatchMessage", () => {
       { fixtureUrl },
     );
     assertStringIncludes(message, "case-1");
-    assertStringIncludes(message, `期待 ${SHA_A}`);
-    assertStringIncludes(message, `実際 ${SHA_B}`);
+    assertStringIncludes(message, `expected ${SHA_A}`);
+    assertStringIncludes(message, `actual ${SHA_B}`);
     assertStringIncludes(message, "/verify/case-1.png");
     assertStringIncludes(message, "/repo/fixtures/references/family.json");
-    assertStringIncludes(message, "tolerance に逃げない");
+    assertStringIncludes(message, "do not fall back to a tolerance");
   });
 
   it("throws when given a settlement that is not a mismatch (does not silently turn a caller error into a sentence)", () => {

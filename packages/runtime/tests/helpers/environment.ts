@@ -93,8 +93,8 @@ export const environmentKey = (runtime: EnvironmentRuntime, info: GPUAdapterInfo
   slug = slug.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (slug === "") {
     throw new Error(
-      "GPUAdapterInfo から環境キーを作れない（description / vendor / architecture が全て空）。" +
-        "参照値をこの環境の行として持てないので、アダプタ情報が読めない理由を先に確かめること",
+      "cannot build an environment key from GPUAdapterInfo (description / vendor / architecture are all empty). " +
+        "The reference values cannot be kept as a row of this environment, so first find out why the adapter info cannot be read",
     );
   }
   return `${runtime}-${slug}`;
@@ -154,10 +154,10 @@ export const assertAdapterMatchesEnvironment = (
   const running = environmentKey(environment.runtime.name, context.adapterInfo);
   if (running === environment.key) return;
   throw new Error(
-    `参照値を索くキー（${environment.key ?? "GPU なし"}）と、` +
-      `この走行が実際に取ったアダプタのキー（${running}）が違う。` +
-      "同じ機の複数の GPU から requestAdapter が別のアダプタを選んでいる。" +
-      "数値をどちらの行として扱うか決められないのでここで止める（参照値の書き込みは戻せない）",
+    `the key the reference values are looked up by (${environment.key ?? "no GPU"}) and ` +
+      `the key of the adapter this run actually acquired (${running}) differ. ` +
+      "requestAdapter picked a different adapter among the GPUs of the same machine. " +
+      "Which row the numbers belong to cannot be decided, so this stops here (a reference-value write cannot be undone)",
   );
 };
 

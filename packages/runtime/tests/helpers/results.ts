@@ -255,14 +255,16 @@ export const openResults = (
     artifact: (name: string): URL => {
       // A file: URL resolves backslashes as separators too, so they are rejected like `/`.
       if (/[/\\]/.test(name)) {
-        throw new Error(`実物の名前にディレクトリ区切りを含められない: '${name}'`);
+        throw new Error(`the artifact name must not contain a directory separator: '${name}'`);
       }
       // `%` is decoded during resolution (`%2e%2e` is the parent directory), so the recorded name
       // and the written location would diverge. `?` and `#` diverge the same way, since what
       // follows them moves into the query / fragment and drops out of the path (`a?b.wav` is
       // written to `a`).
       if (name === "" || name === "." || name === ".." || /[%?#]/.test(name)) {
-        throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
+        throw new Error(
+          `the artifact name does not point to one file directly under the results directory: '${name}'`,
+        );
       }
       const dir = ensureDir();
       const resolved = new URL(name, dir);
@@ -272,7 +274,9 @@ export const openResults = (
       // A `?` / `#` in the rest of the href means part of the name sits outside the path (in the
       // query / fragment).
       if (rest === "" || /[/?#]/.test(rest)) {
-        throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
+        throw new Error(
+          `the artifact name does not point to one file directly under the results directory: '${name}'`,
+        );
       }
       return resolved;
     },

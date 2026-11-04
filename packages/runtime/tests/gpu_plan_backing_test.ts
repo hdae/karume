@@ -995,7 +995,7 @@ describe("when finish of a batch discovers a GPU failure (non-fatal OOM) (inject
           "enqueue did not build a backing",
         );
         oom.arm();
-        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
+        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "injected: non-fatal OOM");
         assertEquals(
           oom.fired(),
           1,
@@ -1083,7 +1083,7 @@ describe("when finish of a batch discovers a GPU failure (non-fatal OOM) (inject
         const failed = await gpu.beginBatch();
         await session.enqueue({ x: input(4, 1) }, { batch: failed });
         oom.arm();
-        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
+        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "injected: non-fatal OOM");
         assertEquals(
           oom.fired(),
           1,

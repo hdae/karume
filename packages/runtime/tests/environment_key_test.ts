@@ -77,7 +77,7 @@ test("environment key: throws when no name can be taken at all (no row with an e
   assertThrows(
     () => environmentKey("deno", adapterInfo({ device: "57868" })),
     Error,
-    "環境キーを作れない",
+    "cannot build an environment key",
   );
 });
 
@@ -101,7 +101,7 @@ test("environment key: throws when the adapter the run acquired differs from the
   assertThrows(
     () => assertAdapterMatchesEnvironment(context("NVIDIA GeForce RTX 3080 Ti"), environment),
     Error,
-    "この走行が実際に取ったアダプタのキー",
+    "the key of the adapter this run actually acquired",
   );
 });
 
@@ -154,7 +154,7 @@ test("environment key: the GPU of a real run is checked on every acquisition, an
   assertThrows(
     () => verifyRunningGpu(third, environment),
     Error,
-    "この走行が実際に取ったアダプタのキー",
+    "the key of the adapter this run actually acquired",
   );
   // So that it can be used before the caller's try, a mismatching acquisition is released here
   // before failing.

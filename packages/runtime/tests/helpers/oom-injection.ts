@@ -46,7 +46,7 @@ export const injectOutOfMemory = (device: GPUDevice): OutOfMemoryInjection => {
     if (!armed || filter !== "out-of-memory") return real;
     armed = false;
     fired += 1;
-    return real.then((error) => error ?? new GPUOutOfMemoryError("注入: 非致命 OOM"));
+    return real.then((error) => error ?? new GPUOutOfMemoryError("injected: non-fatal OOM"));
   };
   return {
     arm: (): void => {

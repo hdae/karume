@@ -208,7 +208,7 @@ test("resolveParts fails loudly when single form and numbered parts sit together
     [REPRESENTATIVE, "model-00001-of-00002.krm", "model-00002-of-00002.krm"],
     (dir) => {
       const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
-      assertStringIncludes(error.message, "同居している");
+      assertStringIncludes(error.message, "sit together");
     },
   );
 });
@@ -216,14 +216,14 @@ test("resolveParts fails loudly when single form and numbered parts sit together
 test("resolveParts fails loudly on numbered parts whose `of` totals disagree", async () => {
   await withFiles(["model-00001-of-00003.krm", "model-00002-of-00004.krm"], (dir) => {
     const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
-    assertStringIncludes(error.message, "食い違っている");
+    assertStringIncludes(error.message, "totals of the numbered parts disagree");
   });
 });
 
 test("resolveParts fails loudly on a missing number and names which one is missing", async () => {
   await withFiles(["model-00001-of-00003.krm", "model-00003-of-00003.krm"], (dir) => {
     const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
-    assertStringIncludes(error.message, "2 本目が無い");
+    assertStringIncludes(error.message, "part 2 is missing");
   });
 });
 
@@ -237,7 +237,7 @@ test("resolveParts fails loudly on a number beyond the total", async () => {
     ],
     (dir) => {
       const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
-      assertStringIncludes(error.message, "はみ出した番号 4");
+      assertStringIncludes(error.message, "out-of-range numbers 4");
     },
   );
 });
@@ -250,7 +250,7 @@ test("resolveParts names part 0 as an extra number too", async () => {
     ["model-00000-of-00002.krm", "model-00001-of-00002.krm", "model-00002-of-00002.krm"],
     (dir) => {
       const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
-      assertStringIncludes(error.message, "はみ出した番号 0");
+      assertStringIncludes(error.message, "out-of-range numbers 0");
     },
   );
 });
@@ -333,7 +333,7 @@ test("fileBlockSource fails loudly on a range that runs past the part length", a
       () => source.read(0, written.parts[0].byteLength - 1, 2),
       Error,
     );
-    assertStringIncludes(error.message, "part 長");
+    assertStringIncludes(error.message, "outside the part length");
   });
 });
 
@@ -341,7 +341,7 @@ test("fileBlockSource fails loudly on a part index that does not exist", async (
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     const error = await assertRejects(() => source.read(written.parts.length, 0, 1), Error);
-    assertStringIncludes(error.message, "は無い");
+    assertStringIncludes(error.message, "does not exist");
   });
 });
 
@@ -406,6 +406,6 @@ test("openSeriesContainer fails loudly on a series missing one part", async () =
       () => openSeriesContainer(new URL(REPRESENTATIVE, dir)),
       Error,
     );
-    assertStringIncludes(error.message, "2 本目が無い");
+    assertStringIncludes(error.message, "part 2 is missing");
   });
 });

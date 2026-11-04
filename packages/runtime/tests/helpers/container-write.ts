@@ -226,7 +226,7 @@ const assertPayloadLength = (input: ModelInput, tensor: TensorInput, path: strin
   const expected = payloadBytes(tensor.encoding.codec, numel, path);
   if (tensor.bytes.byteLength !== expected) {
     throw new ContainerFormatError(
-      `${path}: payload ${tensor.bytes.byteLength} バイトが宣言から決まる ${expected} と違う`,
+      `${path}: payload is ${tensor.bytes.byteLength} bytes, not the ${expected} the declaration determines`,
     );
   }
   return shape.length === 0 ? 1 : shape[0];

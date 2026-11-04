@@ -158,13 +158,17 @@ const readDocument = (fixtureUrl: URL): ReferenceDocument => {
   try {
     text = readTextFileSync(fixtureUrl);
   } catch (cause) {
-    throw new Error(`参照値の fixture が読めない: ${fixtureUrl.pathname}`, { cause });
+    throw new Error(`the reference-value fixture cannot be read: ${fixtureUrl.pathname}`, {
+      cause,
+    });
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
-    throw new Error(`参照値の fixture が JSON として壊れている: ${fixtureUrl.pathname}`, { cause });
+    throw new Error(`the reference-value fixture is broken as JSON: ${fixtureUrl.pathname}`, {
+      cause,
+    });
   }
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error(`the reference-value fixture is not an object: ${fixtureUrl.pathname}`);
@@ -172,7 +176,7 @@ const readDocument = (fixtureUrl: URL): ReferenceDocument => {
   const document = parsed as Partial<ReferenceDocument>;
   if (document.schema !== SCHEMA) {
     throw new Error(
-      `参照値の fixture の schema が ${String(document.schema)}（期待 ${SCHEMA}）: ` +
+      `the schema of the reference-value fixture is ${String(document.schema)} (expected ${SCHEMA}): ` +
         fixtureUrl.pathname,
     );
   }
@@ -622,9 +626,9 @@ export const f32ArtifactBytes = (
   const count = shape.reduce((product, dim) => product * dim, 1);
   if (count !== data.length) {
     throw new Error(
-      `実物 '${name}': shape [${shape.join(
+      `artifact '${name}': shape [${shape.join(
         ",",
-      )}] の要素数 ${count} とデータ長 ${data.length} が食い違う`,
+      )}] has ${count} elements, which disagrees with the data length ${data.length}`,
     );
   }
   return new Uint8Array(
@@ -659,11 +663,11 @@ export const referenceMismatchMessage = (
     );
   }
   return (
-    `${label}: 実物の sha256 が参照と一致しない\n` +
-    `  期待 ${check.expected}\n  実際 ${settlement.sha256}\n` +
-    `  実物 ${settlement.artifactUrl.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）\n` +
-    `  参照値 ${references.fixtureUrl.pathname}\n` +
-    "  tolerance に逃げない — 意図した変更なら、何が変わったのかを言えたうえで " +
-    "KARUME_REFERENCE=rewrite で焼き直すこと"
+    `${label}: the artifact's sha256 does not match the reference\n` +
+    `  expected ${check.expected}\n  actual ${settlement.sha256}\n` +
+    `  artifact ${settlement.artifactUrl.pathname} (the reference is only a sha256, not the bytes, so the position of the first difference cannot be reported)\n` +
+    `  reference values ${references.fixtureUrl.pathname}\n` +
+    "  do not fall back to a tolerance — if the change is intended, be able to say what changed, then " +
+    "re-record with KARUME_REFERENCE=rewrite"
   );
 };

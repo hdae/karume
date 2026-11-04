@@ -113,13 +113,13 @@ export const resolveParts = (representative: URL): readonly URL[] => {
   const where = decodeURIComponent(representative.pathname);
   if (isFile(representative)) {
     throw new Error(
-      `${where}: 単一形と part 連番（${found.size} 本）が同居している` +
-        " — 前回の書き出しの残骸を消してから読む",
+      `${where}: the single form and numbered parts (${found.size} files) sit together` +
+        " — delete what an earlier write left behind before reading",
     );
   }
   if (totals.size !== 1) {
     throw new Error(
-      `${where}: part 連番の総数が ${[...totals].sort((a, b) => a - b)} と食い違っている`,
+      `${where}: the totals of the numbered parts disagree: ${[...totals].sort((a, b) => a - b)}`,
     );
   }
   const [total] = totals;
@@ -127,7 +127,7 @@ export const resolveParts = (representative: URL): readonly URL[] => {
   for (let index = 1; index <= total; index += 1) {
     const file = found.get(index);
     if (file === undefined) {
-      throw new Error(`${where}: part 連番 1..${total} のうち ${index} 本目が無い`);
+      throw new Error(`${where}: numbered parts 1..${total}: part ${index} is missing`);
     }
     files.push(file);
   }
@@ -139,7 +139,7 @@ export const resolveParts = (representative: URL): readonly URL[] => {
     const surplus = [...found.keys()]
       .filter((index) => index < 1 || index > total)
       .sort((a, b) => a - b);
-    throw new Error(`${where}: part 連番 1..${total} からはみ出した番号 ${surplus} がある`);
+    throw new Error(`${where}: numbered parts 1..${total}: out-of-range numbers ${surplus}`);
   }
   return files;
 };
@@ -165,7 +165,9 @@ export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
     const url = parts[index];
     const length = lengths[index];
     if (url === undefined || length === undefined) {
-      throw new Error(`test: part ${index} は無い（part 列は ${parts.length} 本）`);
+      throw new Error(
+        `test: part ${index} does not exist (the part list has ${parts.length} parts)`,
+      );
     }
     return { url, length };
   };
@@ -178,9 +180,9 @@ export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
       const { url, length: partBytes } = at(part);
       if (offset < 0 || length < 0 || offset + length > partBytes) {
         throw new Error(
-          `test: ${url.pathname}: 区間 [${offset}, ${
+          `test: ${url.pathname}: range [${offset}, ${
             offset + length
-          }) が part 長 ${partBytes} の外`,
+          }) is outside the part length ${partBytes}`,
         );
       }
       return readRange(url, offset, length);

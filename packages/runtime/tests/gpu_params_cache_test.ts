@@ -244,7 +244,7 @@ describe("after an execution whose params allocation failed with a non-fatal OOM
         await assertRejects(
           () => session.run({ x: input(9) }, { T: 9 }),
           GpuOutOfMemoryError,
-          "注入: 非致命 OOM",
+          "injected: non-fatal OOM",
         );
         assertEquals(
           oom.fired(),
@@ -294,7 +294,7 @@ describe("after an execution whose params allocation failed with a non-fatal OOM
           "the derivation did not run",
         );
         oom.arm();
-        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
+        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "injected: non-fatal OOM");
         assertEquals(
           oom.fired(),
           1,

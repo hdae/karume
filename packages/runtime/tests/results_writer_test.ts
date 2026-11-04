@@ -248,7 +248,7 @@ test("results writer: an artifact name containing a directory separator throws",
       root: new URL(`file://${temporary}/`),
       environment: ENVIRONMENT,
     });
-    assertThrows(() => results.artifact("F1/i8.wav"), Error, "ディレクトリ区切り");
+    assertThrows(() => results.artifact("F1/i8.wav"), Error, "directory separator");
   } finally {
     removeSync(temporary, { recursive: true });
   }
@@ -276,7 +276,7 @@ test("results writer: artifact names that can point outside the directory or to 
       "a?b.wav",
       "a#b.wav",
     ]) {
-      assertThrows(() => results.artifact(name), Error, "実物の名前", JSON.stringify(name));
+      assertThrows(() => results.artifact(name), Error, "the artifact name", JSON.stringify(name));
     }
     // Control: ordinary names (extensions with dots, sequence numbers) resolve directly under the
     // directory.
