@@ -46,14 +46,22 @@ repositories are unchanged.
     on the GPU from the raw logits, while 12B's distribution suppresses tokens (`resolveGemma4DecodeAhead` in
     `packages/models/src/gemma/pipeline.ts`). Using it there needs a run-ahead path without PLE and a GPU selection that
     masks the suppressed ids.
-  - `tools/llm-baseline` reads PLE index schema 3 only (`ContainerPle` in `weights.py`), and its `gemma4-e2b` profile
-    names the preset `i4`, which `karume-gemma4` no longer ships (`bf16` alone, PLE schema 5): `--weights stored` fails
-    loudly there (`--weights source` still scores the original checkpoint). Scoring a shipped Gemma 4 E2B line again
-    needs the tool to read schemas 4 / 5 and a profile that names that line's preset.
-- **Translation remainder of ADR [0130](decisions/0130-project-language.md) (0.15.x)**: the comments under
-  `packages/*/tests` and `tools/export-recipes`, the areas the language allow-list marks `until: "0.15.x"`.
-- **Playground small item (review notes of 2026-10-28)**: the Wan2.2 / SBV2 pipeline hooks swallow a rejection from disposing an aborted build
-  (`use-wan-pipeline.ts` / `use-sbv2-pipeline.ts`).
+  - `tools/llm-baseline`: the mobile QAT profiles score with their checkpoint's own tokenizer, which may differ from the
+    one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed); its README
+    Validation section still says `deno task verify`. No scoring run since the schema 4 / 5 reader (local `inputs/`
+    lacks some checkpoints).
+  - Function calling and thinking (ADR 0084 addendum 2026-11-04): not yet run on a real model (12B first — GPU); the
+    `Pipeline.chat` one-shot entry takes no `tools` / `enableThinking` (only `chatPrompt` and `ChatSession` do); the
+    parser's exact-integer check reads `JSON.parse`'s reviver `context.source`, not verified on Safari.
+  - Vision (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
+    `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
+    V0. Not started.
+  - Longer output and a larger context: memo with a VRAM table, the API options and seven open decisions in
+    `.claude/reviews/2026-11-04_overnight/length-memo.md` (local, untracked). Decided with the maintainer before
+    implementation; its GPU measurement plan is §3.
+- **Unhandled rejection in Depth Anything's pipeline slot (filed 2026-11-04)**: `void track(previous.value.dispose())`
+  in `packages/models/src/depth-anything/pipeline-slot.ts` leaves a failed dispose of the replaced pipeline as an
+  unhandled rejection (the playground hooks had the same shape, fixed in `0448aafc`).
 - **Remainder of the speed / memory wave (filed 2026-09-25; maintainer's ruling = split into two tiers, reference tier / practical tier; within-device determinism MUST hold in the practical tier too)**:
   The finished records of iterations 1 to 3 (contract and groundwork, B3 anima DiT residency, B4 irodori context K/V projection, H-35, K-70, E1 stage 1) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   Candidates for the next iteration = the rest of wave 2 (DiT speed: B1 → B2) / wave 3 (memory: rest of E1 → E2 → E5 → E4) / wave 4 (practical-tier kernels: C2 VAE conv i8a8 → D2 → D1 → D3).
@@ -103,38 +111,27 @@ repositories are unchanged.
 - Re-assessing `err.cause` on Pixel (8 GB class Android Chrome) — [known-issues](known-issues.md).
 - **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
   2026-10-29)**. Items under `packages/runtime` wait until the pending nvidia-blackwell geometry derivation lifts the freeze.
-  - Gate C2 counts `convCompute` (ADR [0128](decisions/0128-default-preset-original-weights.md) open point 5): `defaultPresetViolations` in
-    `packages/runtime/tests/distribution_gate_test.ts` counts only `linearCompute` / `attentionCompute`; add `convCompute: "a8"` (ADR 0133)
-    with fault-injection cases. No GPU; every current mirror already passes.
   - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority), after the pending derivation.
-  - A check that `version` and `exports` agree between each published package's `package.json` and `deno.json` (ADR
-    [0127](decisions/0127-node-dawn-toolchain.md)): JSR publishes from `deno.json`, `published-smoke` reads `packages/models/package.json`.
   - Move the Node read-strategy default into `@hdae/fetch-cache` (ADR 0127 open point, after 0.15); hub's probe in
     `packages/hub/src/sources/hf.ts` can then go.
   - Deno's resource / op sanitizers have no replacement under Vitest (ADRs 0127 / [0129](decisions/0129-test-layout-and-lanes.md) open
     point 5): record the loss in [limitations](limitations.md); file a GPU resource-leak check only if a leak shows up.
   - The order in which the removed 0.14.0 tools and examples (v0.14.0 tag) come back as `apps/playground` pages (ADR 0127 decision 5).
-  - Gate the test import rules of ADR 0129 (open point 4): no runtime / hub / models test imports `packages/e2e`; only the runtime GPU
-    tests and the playground import `@karume/kernel-checks`. Both hold today, but `dependency_graph_test.ts` checks published members only.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
     `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
-  - Run the playground test suite (`pnpm --filter @karume/playground test`, 45 files outside the lanes and `vp test`) in CI and in
-    [release-runbook](release-runbook.md) §1 (ADR 0129 decision 2).
   - Small doc edits: ADR 0001 still says npm publishing is open (settled JSR-only, 0127 addendum 2026-10-28); ADR 0086 quotes 0127
     decision 2's old "read local bytes" wording; ADR 0005 decision 4 names an ADR 0127 open point as the real-browser acceptance home;
     `packages/test-support/package.json` describes "Deno-shaped test and fs helpers"; `packages/e2e/README.md` says every test there needs
-    assets and a GPU (the three core gates and the `*_host*_test.ts` files do not); ADR 0120 points at `WAN_DEFAULT_QUANT` in
+    assets and a GPU (the three core gates and the `*_host*_test.ts` files do not) and names `outputs/series/` (now
+    `outputs/test-assets/` — ADR [0139](decisions/0139-tests-on-distributions-and-test-assets.md)); ADR 0120 points at `WAN_DEFAULT_QUANT` in
     `tools/export-recipes/wan/distribution.py:343` (now `:440`); release-runbook §1 omits the recording mode `KARUME_WGSL_SNAPSHOT=write`.
-- **Barrel imports keep every family's source table (filed 2026-10-28 — found in the naming design of ADR [0136](decisions/0136-models-public-naming.md))**:
-  importing anything from the `@karume/models` barrel, even one shared helper such as `encodeWav`, keeps all nine
-  source tables (twelve `hdae/karume-*` entries) and a few top-level expressions a bundler cannot prove pure — about 1.4–1.7 KB minified
-  (≈0.8 KB gzip) over the same import from a subpath (rolldown 1.2.13, 2026-10-28). Bundle size of barrel consumers only; no
-  behaviour change; independent of the naming. The retained expressions: `Object.freeze([...])` in `src/anima/config.ts`,
-  `src/anima/residency.ts` and `src/gemma/pipeline.ts`, the spread of a call in `src/gemma/speculative.ts`, the
-  `indexOf` / `map` calls in `src/vowel-detector/postprocess.ts` and the object spread of `KARUME_SOURCES` in
-  `src/sources.ts`. Fix: `"sideEffects": false` in `packages/models/package.json` (measured: the barrel then costs
-  within 5 B of the subpath) once its survival through JSR's npm layer is verified (the open point of ADR
-  [0037](decisions/0037-karume-monorepo.md) §4), or `/* @__PURE__ */` on those expressions.
+- **Bundle-size remainders after the models barrel fix (filed 2026-11-04 — ADR [0037](decisions/0037-karume-monorepo.md) §4 addendum)**:
+  - A bare import of the `@karume/runtime` barrel still keeps about 160 KB minified under Rolldown (not investigated).
+  - esbuild still keeps about 3.9 KB of the `@karume/models` barrel that Rolldown drops.
+  - `KARUME_SOURCES`'s type (`packages/models/src/sources.ts`) is spelled by hand next to the pure-annotated build, so a
+    family table added to one and not the other goes unnoticed by the type check — derive one from the other.
+  - `@hdae/yomi` is a dependency of `@karume/models` that only tests use.
+  - The survival of `/* @__PURE__ */` in JSR's npm output is verified through Deno's emit only, not on a published package.
 
 - **MOSS-Image (on `main` since 2026-11-01; a local distribution and the subpath `@karume/models/moss` since the same day, published on Hugging Face as `hdae/karume-moss-image` with 0.15.1 (`moss.SOURCES["moss-image"]`) — ADR [0138](decisions/0138-moss-image-dit-vae.md), proposed)**: the DiT and the untiled FLUX.2 VAE are done (text as precomputed embeddings, the presets `f32+dit8` and `f32+dit8-a8-attn8-online`, an internal family with no subpath or distribution — stages 0–5 of the ADR; the measurements are in [research 2026-10-28](research/2026-10-28-moss-image-dit-vae.md)). It was developed on branch `wip/moss-image` apart from the 0.15.0 release, rebased onto `main` after it (2026-10-31, when the ADR got its number) and taken into `main` 2026-11-01; the full verification after the rebase is pending.
   The text encoder (Qwen3.5-9B — ADR [0137](decisions/0137-qwen3_5-text-encoder.md), with the scan op of ADR [0135](decisions/0135-gated-delta-rule-scan.md)) is wired as the prompt form (2026-10-31 — ADR 0138 addendum; the narrow scope of the maintainer's ruling 53 a: no manifest, distribution, mirror, public surface or default preset). The image A/B of upstream's embeddings against Karume's is done (ruling 51, 2026-10-31 — i8 stays the encoder's default, ADR 0137 decision 5). The distribution step is done (2026-11-01 — ADR 0138 addendum: the recipe `moss/distribution.py`, the local mirror `models/karume-moss-image/`, the subpath with a `Pipeline` over the manifest; the default preset `f32+dit8-a8-attn8-online` is the manifest's `defaultQuant`). Hugging Face publication is done (2026-11-01 — ADR 0138 addendum). Next = other GPUs' sha rows, and the encoder at T = 4,096. Its speed candidates are perf-ledger F-10 to F-12.
@@ -156,36 +153,25 @@ repositories are unchanged.
   reads the environment key synchronously when tests are registered, and `openResults` is also a synchronous API. The fix would split the two into "a body that takes the environment as an argument" and
   "a thin wrapper that binds the default `ENVIRONMENT`", and point only the CPU tests at the body (the GPU tests' callers do not change).
   After the fix, confirm that with `navigator.gpu` undefined, importing the two tests does not call `requestAdapter`.
+  A draft of this split (bodies `results-core.ts` / `reference-core.ts` and a gate test) was made on 2026-11-04 outside
+  the approved scope and kept as a local patch, not applied: `.claude/reviews/2026-11-04_overnight/decouple-results-reference.patch`.
 - **Out-of-scope remainder of the Codex deep-review fix wave (filed 2026-10-11)**: of the observations that the fix wave's implementers and reviewers recorded as out of scope,
   those not in backlog / known-issues and confirmed still present on main on 2026-10-11 (one per line; the IDs in parentheses are
   findings in `.claude/reviews/2026-10-04_de127de1/` (not tracked by git)). The order of work is undecided.
-  - The estimate's copy of the states form (review of ruling 6): `transientSlotBytes` in `packages/runtime/src/runtime/estimate.ts` counts the row statistics with `allocBefore = base + 1`, but execution (`buildStateAttention`) allocates both S and the row statistics before ① QK. Depending on the placement, `workspaceBytes` can disagree with the actual plan (the shapes tried agree).
-  - Row-block estimate of decomposed attention (review of ruling 6): without `maxStorageBufferBindingSize`, the count in `rowBlockAttentionSteps` still divides by the WebGPU core default. As with fused attention, align it with the rule that requires the limit whenever the count depends on it (ADR 0124 decision 7).
-  - Anima's per-stage estimate (review of ruling 6): `stageNeed` in `packages/models/src/anima/pipeline.ts` does not pass the quant preset's `attentionCompute` / `attentionScoreStorage` to `EstimateOptions` (the VAE's fused attention is counted as f32; for today's shapes the total does not differ).
-  - Disposal of the Gemma pipeline and the fork wrapper (review of ruling 8): in `#hand` of `packages/models/src/gemma/pipeline.ts` (shared by `sequence()` and `fork`), the dispose of the inner after the await is not ordered against the stages of the pipeline's dispose (drafter Session → target Session). Today it only gets queued first because of the number of awaits.
-  - safetensors read helpers: `readBuffer` / `viewOf` / `floatsOf` live in `packages/e2e/tests/helpers/wan-ti2v-dit.ts`, made for Wan's DiT (and `helpers/umt5-golden.ts` has its own `readBuffer` / `floatsOf`); nine test files import them from there. Move them to a general `helpers/safetensors.ts`.
-  - `tools/export-recipes/tests/test_optional_group_imports.py` uses the distribution name as the import name, so it cannot catch module-level imports of packages whose names differ, such as pillow → PIL (the check's doc also admits this miss in the loosening direction).
+  - Anima's per-stage estimate (review of ruling 6): `stageNeed` in `packages/models/src/anima/pipeline.ts` estimates the text and VAE stages with no attention knobs, and `withStage` opens those Sessions with `{}`; the two agree only because both default to f32 (the preset's knobs apply to the DiT alone). Candidate: one shared constant for the non-DiT stage options, used by both. Passing the preset's `attentionCompute` / `attentionScoreStorage` there would count a form those Sessions do not run.
+  - Output extent of unbatched GEMM params (filed 2026-11-04): `linearParams` (and the GEMV / i8a8 params that share `gemmParams`) do not check the output `m·n` against u32 (matmul and bmm do). `codegen_wgsl_test` pins `[65, 268435455, 16]` as accepted for linear, so that case needs a ruling first.
+  - Batch-multiplied flat indices of fused attention params (filed 2026-11-04): `attentionQkParams` / `attentionPvParams` and their i8a8 variants do not receive the batch (B·H on `wid.z`), so `B·H·M·K` and the like are not checked against u32.
+  - deform_conv2d i32 coordinates (filed 2026-11-04): the WGSL computes `i32(oy) − i32(dims.padding_h)`, and the params check padding only as u32 (no `assertConvAxisExtent` equivalent); whether the contract layer bounds it is not verified.
+  - The post-acquisition GPU check `assertAcquiredGpuCapabilities` (`packages/models/src/session/gpu-features.ts`, filed 2026-11-04) is not used by moss (`src/moss/pipeline.ts`) or the umT5 encoder (`src/umt5/encoder.ts`), nor by the shared-GPU admission sites of the families; they still write the features + limits pair by hand.
+  - PLE index schema check in Python (filed 2026-11-04): `read_ple_index` in `tools/exporter/src/karume/migrate.py` tests `schema in (1, 2)`, so `true` and `1.0` / `2.0` pass (Python's `True == 1`); align it with `packages/models/src/gemma/ple-index.ts` (reject bool first, as `_require_version` in `container.py` does).
+  - `packages/models/tests/helpers/moss-dit.ts` keeps its own `readBuffer` / `viewOf` / `floatsOf` (the contract of `helpers/safetensors.ts`); fold it in (importers: `e2e_moss_ab_test.ts`, `moss_sampler_test.ts`) (filed 2026-11-04).
+  - A vacuous negative assertion (filed 2026-11-04): `packages/runtime/tests/estimate_test.ts` asserts that the estimate's notes do not include a phrase the estimate never prints (already so before the ADR 0130 translation — the notes were translated in 2-9), so it cannot fail. Pin the phrase the real notes would print instead.
   - Backing difference between Deno and Chrome: the cause of 5.97 GiB vs 4.80 GiB for Wan2.2's 121 frames with the practical preset (ADR 0121) is not investigated. The two candidate explanations are the geometry profile (Deno uses `default`) and `maxBufferSize` (how regions are split) (ADR 0124's risks; material recorded in stage 4b).
-  - Flat indices of the GEMM family (rest of R2B-009): `gemmParams` in `packages/runtime/src/kernels/gemm.ts` only checks m / n / k individually as u32 and does not reject shapes where matmul / bmm's `M·K` or `K·N`, bmm's flat indices multiplied by the batch (`batch·M·K` and so on) or linear's activation-side `m·k` exceed 2^32 (linear's weight side `n·k` is checked by `linearParams`).
-  - Flat indices of deform_conv2d (rest of R2B-009): `deformConv2dParams` in `packages/runtime/src/kernels/deform-conv2d.ts` checks only the output element count as u32 and does not reject shapes where the flat indices of the input, weight, offset or modulator exceed 2^32 (there is no check corresponding to conv3d's `assertConvFlatExtents`).
-  - In-row loops of row kernels (rest of R2B-007): the in-row loop `i = i + workgroup size` of reduce / RMS / softmax / layer_norm and others (for example `packages/runtime/src/kernels/rms-norm.ts`) wraps around and never ends on rows where `dim + workgroup size` exceeds 2^32, and since this does not go through the dispatch count, the `gridStrideWorkgroups` check cannot block it — each row kernel's params need a `dim + workgroup size ≤ 2^32` check.
-  - When Wan copies `latents` (rest of R6A-005 / former P-3): `generate` in `packages/models/src/wan/pipeline.ts` and `ti2v-pipeline.ts` runs its checks and the copy after waiting its turn in the serialization chain, so if the caller rewrites `latents` during the wait, generation uses the rewritten values — to guarantee the values at call time, copy outside the chain (at the entry of `generate`).
-  - Added vocabulary of the T5-family tokenizer: `packages/models/src/text/t5-tokenizer.ts` uses the shared `parseAddedTokens` (which checks only the i32 range) and does not check whether an added token's id is below the vocabulary row count or matches the vocabulary row of the same spelling (it lacks the check that irodori's `parseIrodoriAddedTokens` has; affects both anima's T5 and Wan's umT5; the distributed assets satisfy both).
   - f32 overflow of SBV2's `z_p`: even when `noiseScale` is finite in double precision, `buildZp` in `packages/models/src/sbv2/host/latent.ts` puts products above the f32 maximum (for example `noiseScale = 1e39`) into a `Float32Array`, turning them into ±Inf, and passes them to the voice graph as they are (the same hole as the `z_noise` check; the GPU outputs `m_p` / `logs_p` are mixed in, so a design for which error type is thrown is needed).
-  - Output dtype of BiRefNet / Depth Anything (output side of R6B-013): `packages/models/src/birefnet/pipeline.ts` and `depth-anything/pipeline.ts` check only the output shape before construction, not the dtype, so a non-f32 graph fails only at `asF32` after one run.
-  - A helper for the checks after GPU acquisition (root of R6A-006): 8 families — Wan (`wan/family.ts`) / Anima / SBV2 / Irodori / BiRefNet / Depth Anything / SigLIP2 / vowel-detector — each hold the same check of features and `requiredLimits` after GPU acquisition in their construction code (`pipeline.ts` / `family.ts` / `admission.ts`) — a candidate for one helper (a check missed in one family caused R6A-006).
-  - Quadratic copying in hub's `parseWeightEntry`: `parseWeightEntry` in `packages/hub/src/manifest.ts` copies the accumulated object with a spread for every dtype label, so the work grows with the square of the label count, and the label count of one entry has no count limit (a scale limit in the sense of ADR 0041 decision 7) (only the 1 MiB limit on the whole manifest applies) — build it at once with `Object.fromEntries`, or add a limit on the label count.
-  - Integer-valued floats in Python integer fields (rest of R7-013): `verify._as_reader_index`, `states._window`, `migrate._count` and the `pipelineConfig` capacity in `limits` under `tools/exporter/src/karume/` reject integer-valued floats (for example `4.0`), diverging from the set that the TS parser (`Number.isSafeInteger`) accepts.
-  - Unicode `\d` in Python regular expressions (rest of R7-014): `PIPELINE_RE` in `tools/exporter/src/karume/migrate.py`, `_PIECE_PATTERN` in `legacy.py` and the match of sequence-numbered file names in `container.py` let `\d` accept non-ASCII digits (for example the full-width `１`) — use `[0-9]` or `re.ASCII` (`_REPR_PATTERN` in `container.py` only reads repr output, so it is out of scope).
   - The copy of the repository name rule in models: `REPO_SEGMENT_RE` / `assertRepoSpelling` in `packages/models/src/hub/repo-ref.ts` hold a copy of the same rule as hub's `isRepoName` (`packages/hub/src/manifest.ts`) — making it one requires exporting the predicate from hub's mod.ts (an addition to the public API).
-  - Duplicated range checks of the declared size in hub: `packages/hub/src/sources/local.ts`, `packages/hub/src/container.ts` and `packages/hub/src/fetch.ts` each have a range check of the same form — a candidate for one internal helper.
-  - Dimension checks of the CPU references for state_append / readonly: `referenceStateAppend` and `referenceStateAttentionReadonly` in `packages/runtime/src/reference/state-attention.ts` check dimensions only with a `< 1` comparison, so NaN or non-integer dimensions pass through (the states-form entry `assertShape` has been fixed to check for an integer first).
   - Length 0 in the CPU reference's `allclose`: `packages/runtime/src/reference/allclose.ts` returns `pass: true` for two length-0 inputs — whether to allow empty input or throw has not been ruled on, and `packages/runtime/tests/reference_ops_test.ts` pins only the currently observed value (review L-R3-4).
   - Writes to pad rows in state attention: the variants in `packages/runtime/src/kernels/state-attention.ts` and `state-attention-stats-pv.ts` each write the same guard separately — a candidate for one shared WGSL fragment (today a static test pins the form of all variants, so a recurring mismatch would be detected).
   - Bilinear interpolation weights: unlike torch's `guard_index_and_lambda`, λ in `packages/runtime/src/kernels/upsample-bilinear2d.ts` is not clamped to [0, 1], so only for shapes where one axis exceeds 2^24 and the source coordinate goes past the edge might the end points not be exact (not reproduced; out-of-range index reads are blocked).
-  - Pinned value of Wan's ftfy badness: the TS side (`packages/models/src/wan/text/prompt-clean.ts`) pins the sha256 of the asset's `badness` with `FTFY_BADNESS_SHA256`, but the recipe's writer (`tools/export-recipes/wan/prompt_clean.py`) does not check the same value — after bumping the ftfy version and rebuilding, the first sign is a red TS test.
-  - Test subjects of the exporter: around lines 995 and 1646 of `tools/exporter/tests/test_emit.py` the tests use the graph of `int4_weight_graph(conv=True, conv_groups=2)` with its default Cout 3 (not divisible by groups 2 — a violation of the conv1d contract) — they do not go through the public path, so they stay green.
-  - Random numbers in the tokenizer test: in `nextRandom` of `packages/models/tests/gemma4_tokenizer_test.ts`, the plain multiplication `state * 1103515245` exceeds 2^53 and the low bits are lost, so the random choices vary little — use the `Math.imul` form.
   - Type arguments of DataView / ArrayBufferView (outside the lint rule `karume/typed-array-buffer`): since TS 5.7, `DataView` and `ArrayBufferView` also take a buffer type argument like TypedArray, and omitting it gives the default `ArrayBufferLike`. src still has 4 bare `DataView` type annotations (`packages/runtime/src/gpu/attention-dp4a-canary.ts`, `packages/runtime/src/format/container/header.ts` and 2 in `packages/models/src/audio/wav.ts` — `ArrayBufferView` has 0) — whether to add it to the rule's set of names is a separate ruling.
   - hub: decide whether the form where one manifest puts the same path with the same sha256 at different revisions of the same cross-repository target (two references,
     one cache entity — the hub cache inventory section of [limitations](limitations.md)) is reworked to match by entity key

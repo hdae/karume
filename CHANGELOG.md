@@ -32,6 +32,12 @@ measurements in `docs/research/`.
   (ambiguous results, orphan results, calls without results, unbalanced declarations), the legacy
   `tool_responses` field and content parts fail loudly; so does output that is cut or malformed,
   or that holds a number a double cannot hold exactly. Not yet checked on a real model.
+- `@karume/models`: `KARUME_SOURCES` has a type spelled from the family tables, so its JSR
+  declaration is no longer `{}`.
+- The exporter's model cards (the PyPI package `karume`): one non-endorsement sentence right
+  under every card title, naming each upstream and each distinct author once (the
+  licence-required sentences of anima and MOSS-Image stay). Mirror READMEs change at their next
+  upload.
 
 ### Changed
 
@@ -44,12 +50,37 @@ measurements in `docs/research/`.
   streamed text). In a session with tools or thinking the streamed pieces keep the special
   spellings. `dropOldestTurns` drops the oldest whole exchange (up to the next user message — the
   same user / assistant pair in a plain conversation).
+- `@karume/models`: importing one helper from the barrel no longer keeps every family's source
+  table — the module-scope tables carry `/* @__PURE__ */` (JSR's npm layer emits no
+  `sideEffects` field), so a bare barrel import bundles to its import lines.
+- `@karume/hub`: parsing a weights entry is linear in its dtype labels (it was quadratic).
+
+### Fixed
+
+- `@karume/runtime`: kernel params reject shapes whose u32 indices would wrap — the flat extents
+  of matmul / bmm / linear (`M·K`, `K·N`, `M·N`, batch-multiplied for bmm) and of deform_conv2d,
+  and the in-row loops of the row kernels (rms_norm, layer_norm / adaLN, softmax, argmax, topk,
+  reduce and the others) where `dim + workgroup size` passes 2^32. The CPU references of
+  state_append / readonly attention reject non-integer dimensions.
+- `@karume/models`: the Gemma pipeline's `dispose` waits for a `sequence()` still allocating or a
+  `fork()` still copying, so neither outlives the Sessions it borrows.
+- `@karume/models`: Wan2.1 / Wan2.2 `generate` copies `latents` at the call, so rewriting the
+  array while the call waits for an earlier generation has no effect. BiRefNet / Depth Anything
+  reject a non-f32 graph output at construction. The tokenizers of anima's T5, umT5 and Wan reject
+  an added token whose id is past the vocabulary rows or names the row of another spelling.
+- The exporter (the PyPI package `karume`) accepts the integer-valued floats the TS readers accept
+  (`4.0`) in reader indices, state windows, counts and the `pipelineConfig` capacity, and its file
+  and pipeline patterns match ASCII digits only.
 
 ### Breaking
 
 - `@karume/models/gemma`: `ChatRole` gains `"tool"` and `ChatMessage` becomes a union of
   `ChatTextMessage` / `ChatAssistantMessage` / `ChatToolMessage` (every one with `content:
   string`). Code that switches exhaustively over a message's `role` follows the new branch.
+- `@karume/runtime`: `estimate()` / `estimateGraphMemory()` without `maxStorageBufferBindingSize`
+  fail loudly on a decomposed row-block attention whose score S exceeds the WebGPU core default
+  (128 MiB) unless `attentionRowBlockMaxBytes` is at most that default — the rule fused attention
+  already follows (ADR 0124 decision 7). Pass the device's limit to get a number for such shapes.
 
 ## [0.16.0] - 2026-11-04
 
