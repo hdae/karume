@@ -9,8 +9,9 @@
  * turn loop with its continuation rules, the tool declaration formatters (`format_parameters` /
  * `format_function_declaration` / `format_argument`), tool calls, tool results, the thinking
  * channel and `strip_thinking`, and the generation prompt. The source of truth is the pinned
- * template (E2B / E4B: byte-identical files; 12B: the same text plus one generation-prompt
- * branch); every behaviour is pinned by fixtures harvested from upstream `apply_chat_template`
+ * template (E2B / E4B: byte-identical files; 12B: the same text plus a blank line after line 234,
+ * which renders nothing, and one generation-prompt branch, lines 384-386); every behaviour is
+ * pinned by fixtures harvested from upstream `apply_chat_template`
  * (`tools/export-recipes/gemma4/chat.py`, ADR 0084 decision 7).
  *
  * ## The spelling is not Gemma 3's
@@ -34,8 +35,12 @@
  * field and content-part arrays (text / image / audio / video). Rejected although upstream renders
  * them, because upstream's output would be wrong without an exception: results whose function name
  * the template resolves by accident (several calls without ids, a contradicting `name`, an unmatched
- * id), an orphan tool result (dropped), a tool call without results (a bare `<|tool_response>`), a
- * tool name the output parser cannot read back, and the `thinking` field (not read by the template).
+ * id, a `name` no call of the turn has), an orphan tool result (dropped), a tool call without
+ * results (a bare `<|tool_response>`), a declaration whose braces the template leaves unbalanced, a
+ * tool name, an argument key or an argument string the output parser cannot read back, and fields
+ * that carry meaning the template drops (`thinking`, a speaker `name`, `return`, a `refusal`
+ * text) or prints as Python's `None` (a null `description`). Fields the template ignores and that
+ * mean nothing to the model are accepted and ignored (`strict`, a call's `index`, `refusal: null`).
  * The evidence for each is the `rejectedChat` list of the fixtures.
  *
  * MUST: every module is side-effect free (no table or instance is built at module scope).
@@ -68,6 +73,8 @@ export type ChatToolCall = {
   /** Matched by a result's `tool_call_id` (the template resolves the function name with it). */
   readonly id?: string;
   readonly type?: "function";
+  /** The position of a streamed OpenAI delta (accepted, not rendered — it means nothing to the model). */
+  readonly index?: number;
   readonly function: {
     /** A word (`\w+`, Unicode) — the output parser reads a call's name with that pattern. */
     readonly name: string;
@@ -84,14 +91,19 @@ export type ChatToolCall = {
  * `format_argument`).
  */
 export type ChatTool = {
-  readonly type: "function";
+  /** `"function"`, or absent (the template does not read it). */
+  readonly type?: "function";
   readonly function: {
     /** A word (`\w+`, Unicode) — the output parser reads a call's name with that pattern. */
     readonly name: string;
+    /** Absent renders as empty. MUST NOT be null — the template would print Python's `None`. */
     readonly description?: string;
+    /** MUST carry a top-level `type` when non-empty — the template closes its brace with it. */
     readonly parameters?: ChatJsonObject | null;
-    /** A response declaration (the template renders its `description`, and `type` when `object`). */
-    readonly response?: ChatJsonObject | null;
+    /** A response declaration: an object schema (`type: "object"`, optional `description`). */
+    readonly response?: ChatJsonObject;
+    /** OpenAI's strict decoding flag (accepted, not rendered — it constrains the host, not the model). */
+    readonly strict?: boolean;
   };
 };
 
@@ -111,6 +123,9 @@ export type ChatTextMessage = {
  * `reasoning or reasoning_content`); it is rendered only after the last user message (or, with
  * `preserveThinking`, on a message with tool calls). `content` goes through `strip_thinking` (a
  * spelled thought channel is removed) and is written **after** the tool results of this message.
+ * Untyped input may also carry OpenAI's empty fields `refusal: null`, `tool_calls: null` and
+ * `reasoning: null` (accepted as absent); a speaker `name` or a refusal text fails loudly (the
+ * template does not render them).
  */
 export type ChatAssistantMessage = {
   readonly role: "assistant";
@@ -129,14 +144,16 @@ export type ChatAssistantMessage = {
  * (several results follow it consecutively).
  *
  * The function name comes from the call whose `id` equals `tool_call_id`; without `tool_call_id` it
- * is `name`, or the name of the only call without an id. An object `content` is not accepted (the
+ * is the name of the only call without an id, or `name` (which must be one of the turn's calls; an
+ * empty `name` counts as none, as upstream's `name or 'unknown'` reads it). An object `content` is not accepted (the
  * template reads an object as a content-part array and raises) — serialize it to a string.
  */
 export type ChatToolMessage = {
   readonly role: "tool";
   /**
    * The result as text (`response:NAME{value:<|"|>…<|"|>}`). Untyped input may also pass a number,
-   * a boolean or `null`, which the template writes as that JSON value (`{value:42}`).
+   * a boolean or `null` — or omit it (`null`) — which the template writes as that JSON value
+   * (`{value:42}`).
    */
   readonly content: string;
   readonly tool_call_id?: string;
@@ -192,7 +209,7 @@ const MESSAGE_KEYS: Readonly<Record<ChatRole, readonly string[]>> = {
   system: ["role", "content"],
   developer: ["role", "content"],
   user: ["role", "content"],
-  assistant: ["role", "content", "reasoning", "reasoning_content", "tool_calls"],
+  assistant: ["role", "content", "reasoning", "reasoning_content", "tool_calls", "refusal"],
   tool: ["role", "content", "tool_call_id", "name"],
 };
 
@@ -235,7 +252,13 @@ const assertJsonValue = (value: unknown, where: string): void => {
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJsonValue(item, `${where}[${index}]`));
+    // An index loop, not `forEach`: a hole of a sparse array is skipped by `forEach` and would
+    // render as `[1,,2]`, a value neither JSON nor Python has.
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value))
+        throw new ModelInputError(`${where}[${index}] is a hole of a sparse array`);
+      assertJsonValue(value[index], `${where}[${index}]`);
+    }
     return;
   }
   if (!isPlainObject(value)) {
@@ -461,13 +484,30 @@ const assertToolName = (name: unknown, where: string): string => {
 const formatFunctionDeclaration = (tool: unknown, where: string): string => {
   if (!isPlainObject(tool)) throw new ModelInputError(`${where} is not an object`);
   assertKeys(tool, ["type", "function"], where);
-  if (tool.type !== "function") {
+  // The template does not read `type`; absent is OpenAI's older shape and means the same.
+  if (tool.type !== undefined && tool.type !== "function") {
     throw new ModelInputError(`${where}.type is not 'function' (${JSON.stringify(tool.type)})`);
   }
   const fn = tool.function;
   if (!isPlainObject(fn)) throw new ModelInputError(`${where}.function is not an object`);
-  assertKeys(fn, ["name", "description", "parameters", "response"], `${where}.function`);
+  if (Object.hasOwn(fn, "return")) {
+    throw new ModelInputError(
+      `${where}.function.return is not rendered (the template reads 'response') — the model ` +
+        `would not see the return schema; rename it to 'response' or drop it`,
+    );
+  }
+  // `strict` (OpenAI) constrains the host's decoding, not the prompt — nothing the model misses.
+  assertKeys(fn, ["name", "description", "parameters", "response", "strict"], `${where}.function`);
+  if (fn.strict !== undefined && typeof fn.strict !== "boolean") {
+    throw new ModelInputError(`${where}.function.strict is not a boolean`);
+  }
   const name = assertToolName(fn.name, `${where}.function.name`);
+  if (fn.description === null) {
+    throw new ModelInputError(
+      `${where}.function.description is null — the template prints it as Python's 'None' ` +
+        `(omit it, or pass a string)`,
+    );
+  }
   if (fn.description !== undefined && typeof fn.description !== "string") {
     throw new ModelInputError(`${where}.function.description is not a string`);
   }
@@ -492,17 +532,32 @@ const formatFunctionDeclaration = (tool: unknown, where: string): string => {
     if (truthy(params.required)) {
       out += `required:[${formatRequired(params.required, `${at}.required`)}],`;
     }
-    if (truthy(params.type)) out += `type:${QUOTE}${upperType(params.type, at)}${QUOTE}}`;
+    // The template closes `parameters:{` only through the top-level type: without one the
+    // declaration the model reads has an unbalanced brace.
+    if (!truthy(params.type)) {
+      throw new ModelInputError(
+        `${at} has no top-level type — the template would leave 'parameters:{' unclosed ` +
+          `(add "type": "object")`,
+      );
+    }
+    out += `type:${QUOTE}${upperType(params.type, at)}${QUOTE}}`;
   }
   if (Object.hasOwn(fn, "response")) {
     const at = `${where}.function.response`;
     const response = (fn.response ?? {}) as ChatJsonObject;
+    const type = upperType(response.type, at);
+    // The same for `response:{`, which only an object type closes.
+    if (type !== "OBJECT") {
+      throw new ModelInputError(
+        `${at} is not an object schema (type ${JSON.stringify(response.type ?? null)}) — the ` +
+          `template would leave 'response:{' unclosed`,
+      );
+    }
     out += ",response:{";
     if (truthy(response.description)) {
       out += `description:${QUOTE}${printedString(response.description, `${at}.description`)}${QUOTE},`;
     }
-    const type = upperType(response.type, at);
-    if (type === "OBJECT") out += `type:${QUOTE}${type}${QUOTE}}`;
+    out += `type:${QUOTE}${type}${QUOTE}}`;
   }
   return pythonStrip(`${out}}`);
 };
@@ -527,9 +582,14 @@ const assertKeys = (
 /** Checks one tool call of an assistant message. */
 const assertToolCall = (call: unknown, where: string): ChatToolCall => {
   if (!isPlainObject(call)) throw new ModelInputError(`${where} is not an object`);
-  assertKeys(call, ["id", "type", "function"], where);
+  // `index` (the position of a streamed OpenAI delta) is not read by the template and means nothing
+  // to the model.
+  assertKeys(call, ["id", "type", "function", "index"], where);
   if (call.id !== undefined && typeof call.id !== "string") {
     throw new ModelInputError(`${where}.id is not a string`);
+  }
+  if (call.index !== undefined && typeof call.index !== "number") {
+    throw new ModelInputError(`${where}.index is not a number`);
   }
   if (call.type !== undefined && call.type !== "function") {
     throw new ModelInputError(`${where}.type is not 'function' (${JSON.stringify(call.type)})`);
@@ -548,7 +608,43 @@ const assertToolCall = (call: unknown, where: string): ChatToolCall => {
     throw new ModelInputError(`${where}.function.arguments is neither an object nor null`);
   }
   assertJsonValue(fn.arguments, `${where}.function.arguments`);
+  assertReadableArguments(fn.arguments, `${where}.function.arguments`);
   return call as ChatToolCall;
+};
+
+/**
+ * Checks that rendered arguments read back as themselves: the template writes keys bare (at every
+ * depth), which the output parser reads only as `\w+`, and strings between `<|"|>` delimiters,
+ * so a string holding `<|"|>` (or the call's closer `<tool_call|>`) would read back as other
+ * arguments — the history would tell the model it passed something else.
+ */
+export const assertReadableArguments = (value: unknown, where: string): void => {
+  if (typeof value === "string") {
+    for (const spelling of [QUOTE, END_OF_TOOL_CALL]) {
+      if (value.includes(spelling)) {
+        throw new ModelInputError(
+          `${where} contains ${spelling}, which the rendered call cannot delimit (it would read ` +
+            `back as different arguments)`,
+        );
+      }
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertReadableArguments(item, `${where}[${index}]`));
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  const word = new RegExp(`^${wordCharacterClass()}+$`, "u");
+  for (const key of Object.keys(value)) {
+    if (!word.test(key)) {
+      throw new ModelInputError(
+        `${where}: the key ${JSON.stringify(key)} is not a word (\\w+) — the template writes ` +
+          `argument keys bare, and the output parser reads only \\w+ keys back`,
+      );
+    }
+    assertReadableArguments(value[key], `${where}.${key}`);
+  }
 };
 
 /** Checks one message against its role's allow list (structure across messages is checked later). */
@@ -573,6 +669,17 @@ const assertMessage = (message: unknown, where: string): ChatMessage => {
         `(parseChatResponse returns it as 'thinking'; passing that back unchanged would drop it)`,
     );
   }
+  if (role !== "tool" && Object.hasOwn(message, "name")) {
+    throw new ModelInputError(
+      `${where}.name: the template does not render a speaker name — the model would not see it`,
+    );
+  }
+  if (role === "assistant" && message.refusal !== undefined && message.refusal !== null) {
+    throw new ModelInputError(
+      `${where}.refusal: the template does not render a refusal — the model would not see it ` +
+        `(only refusal: null, OpenAI's empty field, is accepted)`,
+    );
+  }
   assertKeys(message, MESSAGE_KEYS[role as ChatRole], `${where} (role '${role}')`);
   const content = message.content;
   if (Array.isArray(content)) {
@@ -585,29 +692,26 @@ const assertMessage = (message: unknown, where: string): ChatMessage => {
     if (content !== undefined && content !== null && typeof content !== "string") {
       throw new ModelInputError(`${where}.content is neither a string nor null`);
     }
+    // Null (OpenAI's empty field) falls through the template's `reasoning or reasoning_content`.
     for (const key of ["reasoning", "reasoning_content"] as const) {
-      if (message[key] !== undefined && typeof message[key] !== "string") {
-        throw new ModelInputError(`${where}.${key} is not a string`);
+      if (message[key] !== undefined && message[key] !== null && typeof message[key] !== "string") {
+        throw new ModelInputError(`${where}.${key} is neither a string nor null`);
       }
     }
     const calls = message.tool_calls;
-    if (calls !== undefined) {
+    if (calls !== undefined && calls !== null) {
       if (!Array.isArray(calls)) throw new ModelInputError(`${where}.tool_calls is not an array`);
       calls.forEach((call, index) => assertToolCall(call, `${where}.tool_calls[${index}]`));
     }
   } else if (role === "tool") {
-    if (
-      content !== null &&
-      typeof content !== "string" &&
-      typeof content !== "boolean" &&
-      typeof content !== "number"
-    ) {
+    // An absent content is upstream's `None` (`value:null`).
+    if (isPlainObject(content)) {
       throw new ModelInputError(
-        `${where}.content is not a string, number, boolean or null (the template reads an ` +
-          `object as a content-part array and raises — serialize it to a string)`,
+        `${where}.content is an object — the template reads an object as a content-part array ` +
+          `and raises (serialize the result to a string)`,
       );
     }
-    assertJsonValue(content, `${where}.content`);
+    if (content !== undefined) assertJsonValue(content, `${where}.content`);
     for (const key of ["tool_call_id", "name"] as const) {
       if (message[key] !== undefined && typeof message[key] !== "string") {
         throw new ModelInputError(`${where}.${key} is not a string`);
@@ -630,11 +734,12 @@ const callsOf = (message: ChatMessage | undefined): readonly ChatToolCall[] =>
  * The function name of one tool result — the template's resolution, accepted only where it is
  * unambiguous.
  *
- * Upstream: `name or 'unknown'`, then overridden by **every** call whose `id` equals the result's
- * `tool_call_id` — and an absent id equals an absent id (`None == None`), so with several calls
- * without ids every result gets the last call's name. Accepted here: a `tool_call_id` that matches
- * exactly one call (and agrees with `name` if given); without `tool_call_id`, the only call without
- * an id (agreeing with `name`), or `name` when every call has an id.
+ * Upstream: `name or 'unknown'` (an empty name counts as none), then overridden by **every** call
+ * whose `id` equals the result's `tool_call_id` — and an absent id equals an absent id
+ * (`None == None`), so with several calls without ids every result gets the last call's name.
+ * Accepted here: a `tool_call_id` that matches exactly one call (and agrees with a non-empty
+ * `name`); without `tool_call_id`, the only call without an id (agreeing with a non-empty `name`),
+ * or, when every call has an id, a `name` that one of the calls has.
  */
 const resolveToolName = (
   calls: readonly ChatToolCall[],
@@ -643,6 +748,8 @@ const resolveToolName = (
 ): string => {
   const id = result.tool_call_id;
   const matched = calls.filter((call) => call.id === id);
+  // Upstream's `follow.get('name') or 'unknown'`: an empty name is no name.
+  const given = result.name === undefined || result.name === "" ? undefined : result.name;
   let name: string | undefined;
   if (id !== undefined) {
     if (matched.length !== 1) {
@@ -657,19 +764,27 @@ const resolveToolName = (
       `${where} has no tool_call_id and ${matched.length} calls have no id — the template would ` +
         `give every such result the last call's name (give the calls ids and the results tool_call_id)`,
     );
+  } else if (matched.length === 1) {
+    name = matched[0].function.name;
   } else {
-    name = matched[0]?.function.name ?? result.name;
+    if (given === undefined) {
+      throw new ModelInputError(
+        `${where} names no function (no tool_call_id, no name, and every call has an id — the ` +
+          `template would write 'unknown')`,
+      );
+    }
+    if (!calls.some((call) => call.function.name === given)) {
+      throw new ModelInputError(
+        `${where}.name '${given}' is the name of none of the turn's calls (` +
+          `${calls.map((call) => call.function.name).join(" / ")}) — the template would write it as is`,
+      );
+    }
+    name = given;
   }
-  if (name === undefined) {
+  if (given !== undefined && given !== name) {
     throw new ModelInputError(
-      `${where} names no function (no tool_call_id, no name, and every call has an id — the ` +
-        `template would write 'unknown')`,
-    );
-  }
-  if (result.name !== undefined && result.name !== name) {
-    throw new ModelInputError(
-      `${where}.name '${result.name}' contradicts the call it answers ('${name}' — the template ` +
-        `would write '${name}')`,
+      `${where}.name '${given}' contradicts the call it answers (the template would write ` +
+        `'${name}' and ignore it)`,
     );
   }
   return name;
@@ -791,7 +906,7 @@ const formatToolCall = (call: ChatToolCall): string => {
 
 /** One tool result block (`format_tool_response_block` with a non-mapping response). */
 const formatToolResult = (name: string, result: ChatToolMessage): string =>
-  `${TOOL_RESPONSE}response:${name}{value:${formatArgument(result.content, false)}}${END_OF_TOOL_RESPONSE}`;
+  `${TOOL_RESPONSE}response:${name}{value:${formatArgument(result.content ?? null, false)}}${END_OF_TOOL_RESPONSE}`;
 
 /**
  * Conversation → the same string as upstream `apply_chat_template(add_generation_prompt=True)`
@@ -856,9 +971,9 @@ export const renderGemma4Chat = (
     if (!(role === MODEL_ROLE && previousRole === "assistant")) out += `${START_OF_TURN}${role}\n`;
     const calls = callsOf(message);
     if (message.role === "assistant") {
-      const thought = message.reasoning || message.reasoning_content;
+      const thought: unknown = message.reasoning || message.reasoning_content;
       const gate = index > lastUser || (preserveThinking && calls.length > 0);
-      if (thought !== undefined && thought !== "" && gate) {
+      if (typeof thought === "string" && thought !== "" && gate) {
         out += `${THOUGHT_CHANNEL}${thought}\n${END_OF_CHANNEL}`;
       }
     }

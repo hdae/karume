@@ -223,6 +223,8 @@ const INTERNAL_VALUES = [
   "assertChatTemplateOptions",
   "wordCharacterClass",
   "pythonNumber",
+  "assertReadableArguments",
+  "openPrefillOf",
   "gemma4StopTokens",
   "Tokenizer",
   // The chat layer's internals (`gemma4_chat_test.ts` takes them from `src/` directly). The public

@@ -65,6 +65,7 @@ import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemm
 import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
   type ChatAssistantMessage,
+  type ChatJsonValue,
   type ChatMessage,
   chatPrompt,
   type ChatTemplateOptions,
@@ -1290,7 +1291,9 @@ type ResponseRow = {
   readonly why: string;
   readonly prefix: string;
   readonly text: string;
-  readonly expect: "parse" | "upstream-raises" | "ts-rejects";
+  readonly expect: "parse" | "upstream-raises" | "ts-rejects" | "blank-segment";
+  /** `blank-segment` only: the output without its blank segment (what `parsed` is upstream's reading of). */
+  readonly normalized?: string;
   readonly parsed?: ChatResponse;
   readonly error?: string;
   /** Upstream's result as a Python repr (`ts-rejects` only — documentation). */
@@ -1311,6 +1314,71 @@ const optionsOf = (options: UpstreamOptions): ChatTemplateOptions => ({
     ? {}
     : { preserveThinking: options.preserve_thinking }),
 });
+
+/** Why each `rejectedChat` input is refused (a stable fragment of the message). */
+const REJECTION_REASONS: Readonly<Record<string, string>> = {
+  "several-calls-without-ids": "the last call's name",
+  "result-name-contradicts-call": "contradicts the call",
+  "result-id-matches-no-call": "matches 0 of the calls",
+  "orphan-tool-result": "follows no assistant message",
+  "tool-calls-without-results": "no role 'tool' result follows",
+  "tool-calls-awaiting-results": "no role 'tool' result follows",
+  "tool-call-content-at-end": "its results end the conversation",
+  "parameters-without-type": "no top-level type",
+  "response-not-an-object": "is not an object schema",
+  "response-null": "is not an object schema",
+  "description-null": "Python's 'None'",
+  "function-return": "function.return is not rendered",
+  "speaker-name": "speaker name",
+  "refusal-text": "does not render a refusal",
+  "argument-string-with-delimiter": "cannot delimit",
+  "argument-key-not-a-word": "is not a word",
+  "result-name-of-no-call": "none of the turn's calls",
+  "empty-result-name": "names no function",
+  "arguments-as-string": "arguments is a string",
+  "legacy-tool-responses": "tool_responses is out of scope",
+  "content-parts": "content parts",
+  "tool-result-object": "content is an object",
+  "tool-name-not-a-word": "is not a word",
+  "thinking-field": "does not read 'thinking'",
+};
+
+/** Why each `upstream-raises` / `ts-rejects` output is refused (a stable fragment of the message). */
+const PARSE_REASONS: Readonly<Record<string, string>> = {
+  "unterminated-string": "(opened in the output) is not closed",
+  "bare-string-value": "not JSON",
+  "stop-token-inside-call": "(opened in the output) is not closed",
+  "empty-call-body": "not JSON",
+  "space-before-key": "not JSON",
+  "sentinel-character": "reserved characters",
+  "hyphenated-name": "not JSON",
+  "unterminated-call": "tool call get_weather (opened in the output) is not closed",
+  "unterminated-thought": "thought channel (opened in the output) is not closed",
+  "stop-token-inside-thought": "thought channel (opened in the output) is not closed",
+  "no-stop-token": "is not closed by",
+  "text-after-stop-token": "text follows the closing token",
+  "content-overwritten": "more than one segment",
+  "thought-overwritten": "two thought channels",
+  "arguments-not-an-object": "are not an object",
+  // NaN is not a JSON token, so it fails as syntax (the finiteness rule has its own rows).
+  "non-finite-number": "not JSON",
+  "call-without-name": "contains <|tool_call> outside its region",
+  "integer-beyond-2-53": "beyond 2^53",
+  "integer-of-400-digits": "which a double cannot hold",
+  "float-beyond-double": "which a double cannot hold",
+  "quoted-key-not-a-word": "is not a word",
+  "next-turn-in-content": "contains <|turn> outside its region",
+  "result-closer-in-content": "contains <tool_response|> outside its region",
+  "delimiter-in-content": 'contains <|"|> outside its region',
+  "prompt-without-anchor": "the prompt has no",
+};
+
+/** The reason a table names for a row (a row without one fails — every refusal states its why). */
+const reasonOf = (table: Readonly<Record<string, string>>, name: string): string => {
+  const reason = table[name];
+  assert(reason !== undefined, `no reason is pinned for ${name}`);
+  return reason;
+};
 
 const toolFixtures: readonly {
   readonly label: string;
@@ -1355,6 +1423,7 @@ for (const { label, dialect, fixture: source, tokenizer: owner } of toolFixtures
         assertThrows(
           () => renderGemma4Chat(row.messages as ChatMessage[], dialect, optionsOf(row.options)),
           ModelInputError,
+          reasonOf(REJECTION_REASONS, row.name),
         );
       });
     }
@@ -1363,14 +1432,21 @@ for (const { label, dialect, fixture: source, tokenizer: owner } of toolFixtures
   describe(`gemma4 ${label} output parsing: equals upstream parse_response`, () => {
     for (const row of source.responses) {
       it(`${row.name} (${row.expect}) — ${row.why}`, () => {
-        if (row.expect === "parse") {
+        if (row.expect === "parse" || row.expect === "blank-segment") {
+          // `blank-segment`: `parsed` is upstream's reading of the output without the blank
+          // segment (upstream would let it erase the earlier text — its repr is in `upstream`).
           assertEquals(parseGemma4ChatResponse(row.text, row.prefix), row.parsed);
           return;
         }
         // `upstream-raises`: upstream raises too; `ts-rejects`: upstream returns data that would
         // hide a failure (its repr is in the fixture — the doc of `chat-response.ts` lists why).
+        // The reason is pinned too: a throw for another reason would pass a bare assertThrows.
         assert((row.error ?? row.upstream) !== undefined, "upstream's outcome is recorded");
-        assertThrows(() => parseGemma4ChatResponse(row.text, row.prefix), ModelInputError);
+        assertThrows(
+          () => parseGemma4ChatResponse(row.text, row.prefix),
+          ModelInputError,
+          reasonOf(PARSE_REASONS, row.name),
+        );
       });
     }
   });
@@ -1604,8 +1680,9 @@ describe("gemma4 chat options and declarations: the accepted set", () => {
     "not 'function'",
   );
   reject(
-    "an unknown declaration field (OpenAI's strict)",
-    { tools: [{ type: "function", function: { name: "f", strict: true } }] },
+    // `strict` is accepted since the 2026-11-04 review (it constrains the host, not the prompt).
+    "an unknown declaration field (examples — the template drops it)",
+    { tools: [{ type: "function", function: { name: "f", examples: [] } }] },
     "out-of-scope fields",
   );
   reject(
@@ -1682,5 +1759,194 @@ describe("pythonNumber: numbers as Python's str() prints them", () => {
     assertEquals(pythonNumber(-3), "-3");
     assertEquals(pythonNumber(-0), "0");
     assertEquals(pythonNumber(1e21), "1000000000000000000000");
+  });
+});
+
+describe("gemma4 chat review fixes (2026-11-04): reasons, numbers, key order, readable arguments", () => {
+  const source = fixture as ToolFixture;
+
+  it("every refusal table entry names a refused row, and every refused row has one", () => {
+    const refused = source.responses.filter(
+      (row) => row.expect === "upstream-raises" || row.expect === "ts-rejects",
+    );
+    assertEquals(refused.map((row) => row.name).toSorted(), Object.keys(PARSE_REASONS).toSorted());
+    assertEquals(
+      source.rejectedChat.map((row) => row.name).toSorted(),
+      Object.keys(REJECTION_REASONS).toSorted(),
+    );
+  });
+
+  it("blank segments: upstream's own reading differs, TS keeps the earlier text", () => {
+    const rows = source.responses.filter((row) => row.expect === "blank-segment");
+    assertEquals(
+      rows.map((row) => row.name),
+      ["blank-after-call", "blank-second-thought"],
+    );
+    for (const row of rows) {
+      assert(row.normalized !== undefined && row.upstream !== undefined, row.name);
+      // TS reads the output as upstream reads it without the blank segment…
+      assertEquals(
+        parseGemma4ChatResponse(row.text, row.prefix),
+        parseGemma4ChatResponse(row.normalized, row.prefix),
+      );
+    }
+  });
+
+  it("float forms come back as JS numbers and re-render as such (documented)", () => {
+    const row = source.responses.find((candidate) => candidate.name === "float-forms");
+    assert(row !== undefined);
+    const parsed = parseGemma4ChatResponse(row.text, row.prefix);
+    const [call] = parsed.tool_calls ?? [];
+    assert(call !== undefined);
+    assert(Object.is(call.function.arguments.b, -0), "-0.0 is -0");
+    const rendered = renderGemma4Chat(
+      [
+        { role: "user", content: "x" },
+        { role: "assistant", content: "", tool_calls: [call] },
+        { role: "tool", name: "ping", content: "ok" },
+      ],
+      "gemma4",
+    );
+    // Upstream's round trip writes `a:100000.0,b:-0.0,c:2.0` — Python keeps the float type.
+    assert(rendered.includes("call:ping{a:100000,b:0,c:2,d:0.5}"), rendered);
+  });
+
+  it("integer-like keys come back first (JS object order), equal as objects", () => {
+    const row = source.responses.find((candidate) => candidate.name === "integer-like-keys");
+    assert(row !== undefined);
+    const [call] = parseGemma4ChatResponse(row.text, row.prefix).tool_calls ?? [];
+    assert(call !== undefined);
+    assertEquals(Object.keys(call.function.arguments), ["2", "10", "b", "a"]);
+    assertEquals(call.function.arguments, row.parsed?.tool_calls?.[0].function.arguments);
+  });
+
+  it("without the reviver's source text, any integer-valued number beyond 2^53 is refused (never rounded)", () => {
+    const original = JSON.parse;
+    // A runtime without "JSON.parse source text access": the reviver gets no context.
+    JSON.parse = ((
+      text: string,
+      reviver?: (this: unknown, key: string, value: unknown) => unknown,
+    ) =>
+      original(
+        text,
+        reviver === undefined
+          ? undefined
+          : function (this: unknown, key: string, value: unknown): unknown {
+              return reviver.call(this, key, value);
+            },
+      )) as typeof JSON.parse;
+    try {
+      const prefix = "<|turn>model\n";
+      const call = (body: string): string =>
+        `<|tool_call>call:f{${body}}<tool_call|><|tool_response>`;
+      assertThrows(
+        () => parseGemma4ChatResponse(call("n:1e20"), prefix),
+        ModelInputError,
+        "does not pass the number's source text",
+      );
+      assertThrows(
+        () => parseGemma4ChatResponse(call("n:9007199254740993"), prefix),
+        ModelInputError,
+        "beyond 2^53",
+      );
+      assertEquals(
+        parseGemma4ChatResponse(call("n:12,m:0.5"), prefix).tool_calls?.[0].function.arguments,
+        {
+          n: 12,
+          m: 0.5,
+        },
+      );
+    } finally {
+      JSON.parse = original;
+    }
+    // With the source text, a float literal beyond 2^53 is a float, not a rounded integer.
+    assertEquals(
+      parseGemma4ChatResponse(
+        "<|tool_call>call:f{n:1e20}<tool_call|><|tool_response>",
+        "<|turn>model\n",
+      ).tool_calls?.[0].function.arguments,
+      { n: 1e20 },
+    );
+  });
+
+  it("an empty prompt is upstream's opt-out (no anchor needed)", () => {
+    assertEquals(parseGemma4ChatResponse("Sunny.<turn|>", ""), {
+      role: "assistant",
+      content: "Sunny.",
+    });
+  });
+
+  it("a thought channel the prompt opened says so when it is left open", () => {
+    assertThrows(
+      () => parseGemma4ChatResponse("still thinking", "<tool_response|><|channel>thought\n"),
+      ModelInputError,
+      "opened by the prompt's prefill",
+    );
+  });
+
+  it("a sparse array in arguments fails loudly (a hole would render as [1,,2])", () => {
+    // oxlint-disable-next-line no-sparse-arrays -- the hole is the input under test
+    const holed = [1, , 2] as unknown as ChatJsonValue;
+    assertThrows(
+      () =>
+        renderGemma4Chat([
+          { role: "user", content: "x" },
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ type: "function", function: { name: "f", arguments: { a: holed } } }],
+          },
+          { role: "tool", name: "f", content: "ok" },
+        ]),
+      ModelInputError,
+      "hole of a sparse array",
+    );
+  });
+
+  it("an argument string holding the call's closer is refused like the delimiter", () => {
+    assertThrows(
+      () =>
+        renderGemma4Chat([
+          { role: "user", content: "x" },
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { type: "function", function: { name: "f", arguments: { a: ["x<tool_call|>y"] } } },
+            ],
+          },
+          { role: "tool", name: "f", content: "ok" },
+        ]),
+      ModelInputError,
+      "<tool_call|>, which the rendered call cannot delimit",
+    );
+  });
+
+  it("a non-boolean strict and a non-number index are still refused", () => {
+    const user: ChatMessage[] = [{ role: "user", content: "x" }];
+    assertThrows(
+      () =>
+        renderGemma4Chat(user, "gemma4", {
+          tools: [{ function: { name: "f", strict: "yes" as unknown as boolean } }],
+        }),
+      ModelInputError,
+      "strict is not a boolean",
+    );
+    assertThrows(
+      () =>
+        renderGemma4Chat([
+          ...user,
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { index: "0" as unknown as number, function: { name: "f", arguments: {} } },
+            ],
+          },
+          { role: "tool", name: "f", content: "ok" },
+        ]),
+      ModelInputError,
+      "index is not a number",
+    );
   });
 });

@@ -128,7 +128,12 @@ import {
   chatTurn,
   renderGemma4ToolResults,
 } from "./text/chat.ts";
-import { type ChatResponse, type ParsedToolCall, parseChatResponse } from "./text/chat-response.ts";
+import {
+  type ChatResponse,
+  openPrefillOf,
+  type ParsedToolCall,
+  parseChatResponse,
+} from "./text/chat-response.ts";
 import type { Tokenizer } from "./text/tokenizer.ts";
 
 /**
@@ -259,11 +264,13 @@ export type ChatReply =
 /**
  * The stream of one session turn: the {@link ChatStream} of `Pipeline.chat` plus the parsed reply.
  *
- * `reply` settles after the stream has ended (drain it or close it with `break` first). It rejects
- * with the turn's failure, like `done`, and also — with a `ModelInputError` while `done` resolves —
- * when the model's closed turn is malformed (a broken call, tool calls closed by `<turn|>`, a call
- * in a session without tools); the history then keeps the raw text and the KV is rebuilt on the
- * next turn.
+ * MUST: **drain the stream (or close it with `break`) before awaiting `reply`** — `reply` settles
+ * at the end of the stream, so awaiting it first waits forever. It rejects with the turn's failure,
+ * like `done`, and also — while `done` resolves — when the model's closed turn is malformed (a
+ * `ModelInputError`: a broken call, tool calls closed by `<turn|>`, a call in a session without
+ * tools, `<|tool_response>` without a call in a session with tools; the history then keeps the raw
+ * text and the KV is rebuilt on the next turn) or when the session was disposed during the turn (a
+ * plain `Error` — a call from a torn-down turn must not be run). The message is a deep-frozen copy.
  */
 export type ChatSessionStream = ChatStream & { readonly reply: Promise<ChatReply> };
 
@@ -423,16 +430,18 @@ const callsOf = (message: ChatMessage | undefined): readonly ChatToolCall[] =>
  * The history entries of a parsed closed turn (the template's input shape — the doc of
  * {@link ChatSession}, "Tools, tool calls and thinking").
  *
- * The calls get session-assigned ids (`call_1`, `call_2`, … — unique within the turn, which is all a
- * result's `tool_call_id` is resolved against); the template does not render ids.
+ * The calls get session-assigned ids (`call_1`, `call_2`, … from `firstId` — unique within the
+ * session, so a result can never bind to an earlier call of the same id); the template does not
+ * render ids.
  */
 const entriesOf = (
   parsed: ChatResponse,
+  firstId: number,
 ): { readonly entries: ChatAssistantMessage[]; readonly calls: ParsedToolCall[] } => {
   const reasoning = parsed.thinking === undefined ? {} : { reasoning: parsed.thinking };
   const calls = (parsed.tool_calls ?? []).map((call, index): ParsedToolCall => ({
     ...call,
-    id: `call_${index + 1}`,
+    id: `call_${firstId + index}`,
   }));
   if (calls.length === 0) {
     return { entries: [{ role: "assistant", content: parsed.content ?? "", ...reasoning }], calls };
@@ -450,6 +459,53 @@ const entriesOf = (
     ],
     calls,
   };
+};
+
+/** One turn's request, read and copied at issue ({@link ChatSession} `#requestOf`). */
+type TurnRequest = {
+  readonly maxNewTokens: number;
+  readonly sampler: SamplerSpec | undefined;
+  readonly stopTokens: number[] | undefined;
+  readonly signal: AbortSignal | undefined;
+  readonly onPrefill: ((progress: PrefillProgress) => void) | undefined;
+  readonly onToken: ((id: number) => void) | undefined;
+  readonly stopStrings: ReturnType<typeof createStopStringFilter>;
+  readonly detokenizer: ReturnType<Tokenizer["createDetokenizer"]>;
+};
+
+/**
+ * Checks that the results answer every call of the turn exactly once (OpenAI's contract — a call
+ * left unanswered, or answered twice, would put a turn the model never saw into the history).
+ */
+const assertOneResultPerCall = (
+  calls: readonly ChatToolCall[],
+  results: readonly ChatToolMessage[],
+): void => {
+  const where = "gemma.ChatSession.sendToolResults";
+  const answered = new Map<ChatToolCall, number>();
+  results.forEach((result, index) => {
+    const named =
+      result.tool_call_id === undefined
+        ? calls.filter((call) => call.function.name === result.name)
+        : calls.filter((call) => call.id === result.tool_call_id);
+    if (named.length !== 1) {
+      throw new ModelInputError(
+        `${where}: results[${index}] matches ${named.length} of the turn's calls (name the call by ` +
+          `tool_call_id — one result per call)`,
+      );
+    }
+    answered.set(named[0], (answered.get(named[0]) ?? 0) + 1);
+  });
+  const label = (call: ChatToolCall): string => `${call.id ?? "?"} (${call.function.name})`;
+  const missing = calls.filter((call) => !answered.has(call));
+  const twice = calls.filter((call) => (answered.get(call) ?? 0) > 1);
+  if (missing.length > 0 || twice.length > 0) {
+    throw new ModelInputError(
+      `${where}: every call of the turn needs exactly one result` +
+        (missing.length > 0 ? ` — unanswered: ${missing.map(label).join(", ")}` : "") +
+        (twice.length > 0 ? ` — answered more than once: ${twice.map(label).join(", ")}` : ""),
+    );
+  }
 };
 
 /**
@@ -519,6 +575,11 @@ export class ChatSession {
   #committed = 0;
   /** A turn is running (issued, and its stream has not ended yet). */
   #busy = false;
+  /**
+   * The number of the next session-assigned call id (`call_<n>`). Not derivable from the history:
+   * overflow handling drops calls, and their ids must not come back (a host may still hold them).
+   */
+  #nextCallId = 1;
   /** The one dispose. **Not undefined means "disposed"** (no separate derived state). */
   #disposal: Promise<void> | undefined;
 
@@ -595,6 +656,14 @@ export class ChatSession {
    * cannot be rendered.
    */
   send(text: string, options: ChatTurnOptions = {}): ChatSessionStream {
+    if (typeof text !== "string") {
+      throw new ModelInputError(
+        `gemma.ChatSession.send: the message is not a string (${typeof text})`,
+      );
+    }
+    const request = this.#requestOf(options);
+    // MUST: from here to `#busy = true` nothing the caller controls runs (every caller input was
+    // read and copied above) — a getter that called `send` in between would issue two turns.
     this.#assertIdle("send");
     if (callsOf(this.#turns.at(-1)).length > 0) {
       throw new Error(
@@ -602,17 +671,18 @@ export class ChatSession {
           "sendToolResults first (the model turn is still open)",
       );
     }
-    return this.#issue([{ role: "user", content: text }], options);
+    return this.#issue([{ role: "user", content: text }], request);
   }
 
   /**
    * Sends the results of the tool calls the previous turn ended on, and streams the model's
    * continuation of **the same model turn** (another call, or the answer).
    *
-   * Each result is a role `tool` message naming its call by `tool_call_id` (the `id` of
-   * `reply.message.tool_calls`) or by `name`; one call may be answered by several results, in
-   * order. The results are checked and **copied** at issue (a malformed or ambiguous one throws
-   * `ModelInputError` synchronously, before the history moves).
+   * MUST: **exactly one result per call** of that turn (OpenAI's contract), each naming its call by
+   * `tool_call_id` (the `id` of `reply.message.tool_calls` — unique within the session) or by
+   * `name` when no other call of the turn has it. A missing, extra or ambiguous result throws
+   * `ModelInputError` synchronously, before the history moves. The results are **copied** first and
+   * the copy is what is checked and recorded.
    *
    * MUST: `content` is a string here (serialize a structured result) — the history keeps the
    * typed shape of {@link ChatToolMessage}, which `turns` hands out.
@@ -621,6 +691,9 @@ export class ChatSession {
     results: readonly ChatToolMessage[],
     options: ChatTurnOptions = {},
   ): ChatSessionStream {
+    const request = this.#requestOf(options);
+    const copied: ChatToolMessage[] = structuredClone([...results]);
+    // MUST: from here to `#busy = true` nothing the caller controls runs (the checks read the copy).
     this.#assertIdle("sendToolResults");
     const calls = callsOf(this.#turns.at(-1));
     if (calls.length === 0) {
@@ -631,8 +704,8 @@ export class ChatSession {
     }
     // The same checks as the render (shape and name resolution), so nothing invalid enters the
     // history.
-    renderGemma4ToolResults(calls, results, this.#template);
-    results.forEach((result, index) => {
+    renderGemma4ToolResults(calls, copied, this.#template);
+    copied.forEach((result, index) => {
       const content: unknown = result.content;
       if (typeof content !== "string") {
         throw new ModelInputError(
@@ -641,7 +714,8 @@ export class ChatSession {
         );
       }
     });
-    return this.#issue(structuredClone([...results]), options);
+    assertOneResultPerCall(calls, copied);
+    return this.#issue(copied, request);
   }
 
   /** Throws synchronously when no turn can be issued (disposed, or a turn is running). */
@@ -657,8 +731,11 @@ export class ChatSession {
     }
   }
 
-  /** Issues one turn for the messages just sent (`pending` — one user message, or the results). */
-  #issue(pending: readonly ChatMessage[], options: ChatTurnOptions): ChatSessionStream {
+  /**
+   * Reads, copies and checks one turn's options — **before** the session's state is looked at, so
+   * no caller code (a getter, a sampler object) runs between the idle check and `#busy = true`.
+   */
+  #requestOf(options: ChatTurnOptions): TurnRequest {
     // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
     // generator) does not run until the first `next()`, so without reading everything here it would
     // run with "the values at the time draining started".
@@ -689,7 +766,30 @@ export class ChatSession {
       ...(stopTokens === undefined ? {} : { stopTokens }),
       ...(sampler === undefined ? {} : { sampler }),
     });
+    return {
+      maxNewTokens,
+      sampler,
+      stopTokens,
+      signal,
+      onPrefill,
+      onToken,
+      stopStrings,
+      detokenizer,
+    };
+  }
 
+  /** Issues one turn for the messages just sent (`pending` — one user message, or the results). */
+  #issue(pending: readonly ChatMessage[], request: TurnRequest): ChatSessionStream {
+    const {
+      maxNewTokens,
+      sampler,
+      stopTokens,
+      signal,
+      onPrefill,
+      onToken,
+      stopStrings,
+      detokenizer,
+    } = request;
     this.#turns.push(...pending);
     this.#busy = true;
 
@@ -869,6 +969,7 @@ export class ChatSession {
       ...this.#template,
     });
     branch.#turns = turns;
+    branch.#nextCallId = this.#nextCallId;
     if (copying === undefined) return Promise.resolve(branch);
     return copying.then((sequence) => {
       branch.#sequence = sequence;
@@ -901,8 +1002,12 @@ export class ChatSession {
       return chatTurn(this.#host.tokenizer, pending[0], this.#template);
     }
     throw new Error(
-      `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns but the history holds ` +
-        `${this.#turns.length} (${pending.map((message) => message.role).join(", ")} after them)`,
+      `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns and the ` +
+        `history ${this.#turns.length}, so the delta would be ` +
+        (pending.length === 0
+          ? "empty (nothing was sent)"
+          : `${pending.map((message) => message.role).join(", ")} after ${owner?.role ?? "nothing"}`) +
+        ` — neither one message after a closed turn nor the results of a tool call`,
     );
   }
 
@@ -1042,9 +1147,12 @@ export class ChatSession {
     stop: ChatStop | undefined,
   ): Promise<{ readonly reply: ChatReply } | { readonly malformed: unknown } | undefined> {
     try {
-      if (stop?.reason === "eos") {
+      const tokenizer = this.#host.tokenizer;
+      // A thought channel the prompt opened (after a result with thinking on) belongs to this
+      // turn's text: a record without it would let the thought through strip_thinking as content.
+      const opener = openPrefillOf(tokenizer.decode(output.prompt, { skipSpecialTokens: false }));
+      if (stop?.reason === "eos" && this.#disposal === undefined) {
         // Closed with the distribution's EOS = the model turn is closed (or stopped at a tool call).
-        const tokenizer = this.#host.tokenizer;
         let parsed: ChatResponse | undefined;
         let malformed: unknown;
         try {
@@ -1053,42 +1161,61 @@ export class ChatSession {
           malformed = error;
         }
         const calledTool = (parsed?.tool_calls?.length ?? 0) > 0;
-        if (calledTool && (this.#template.tools?.length ?? 0) === 0) {
+        const declared = (this.#template.tools?.length ?? 0) > 0;
+        const toolResponse = tokenizer.addedTokenId("<|tool_response>");
+        if (calledTool && !declared) {
           // Waiting for results nobody can produce would block the conversation.
           malformed = new ModelInputError(
             "gemma.ChatSession: the model wrote a tool call, but the session declares no tools",
           );
-        } else if (calledTool && stop.token !== tokenizer.addedTokenId("<|tool_response>")) {
+        } else if (calledTool && stop.token !== toolResponse) {
           malformed = new ModelInputError(
             `gemma.ChatSession: the model wrote tool calls but closed its turn with ` +
               `${tokenizer.decode([stop.token], { skipSpecialTokens: false })} instead of ` +
               `<|tool_response> (the results could not continue that turn)`,
           );
+        } else if (parsed !== undefined && !calledTool && declared && stop.token === toolResponse) {
+          // With tools, <|tool_response> opens a result; without a call none follows, and carrying
+          // the KV would leave that spelling open in it.
+          malformed = new ModelInputError(
+            "gemma.ChatSession: the model closed its turn with <|tool_response> but wrote no call",
+          );
         }
         if (parsed !== undefined && malformed === undefined) {
-          // The entries are pushed even when the body is empty (the KV holds an empty model turn,
-          // so without them the re-render would be a different conversation from the KV).
-          const { entries, calls } = entriesOf(parsed);
-          this.#turns.push(...entries);
+          if (this.#sequence === undefined) {
+            throw new Error(
+              "gemma.ChatSession internal inconsistency: a closed turn without a sequence to carry",
+            );
+          }
+          const { entries, calls } = entriesOf(parsed, this.#nextCallId);
+          this.#nextCallId += calls.length;
+          // The history and the reply get copies of their own: a host writing into the reply's
+          // arguments would otherwise rewrite the history the next re-render sends (the KV holds
+          // what the model wrote). The entries are pushed even when the body is empty (the KV holds
+          // an empty model turn, so without them the re-render would be a different conversation).
+          this.#turns.push(...structuredClone(entries));
           this.#committed = this.#turns.length;
           return {
             reply: calledTool
-              ? { end: "tool-call", message: { ...parsed, tool_calls: calls }, stop }
-              : { end: "turn", message: parsed, stop },
+              ? { end: "tool-call", message: frozenCopy({ ...parsed, tool_calls: calls }), stop }
+              : { end: "turn", message: frozenCopy(parsed), stop },
           };
         }
         // A closed turn the parser rejects: the history keeps what the model wrote, with its
         // spellings (a re-render shows the model its own output), and the KV is rebuilt from it.
         this.#turns.push({
           role: "assistant",
-          content: tokenizer.decode(output.generated, { skipSpecialTokens: false }),
+          content: opener + tokenizer.decode(output.generated, { skipSpecialTokens: false }),
         });
         await this.#releaseSequence();
         return { malformed };
       }
       // max-tokens / a stop string / an interruption / a failure leave the model turn unclosed = the
-      // premise of a delta is missing.
-      if (output.text !== "") this.#turns.push({ role: "assistant", content: output.text });
+      // premise of a delta is missing. So does a dispose during the turn: its result is not
+      // delivered (a host must not run a call from a turn that was torn down).
+      if (output.text !== "") {
+        this.#turns.push({ role: "assistant", content: opener + output.text });
+      }
       // A turn that emitted no character is **treated as never having happened** (no question
       // without an answer is left in the history). The comparison is by value ({@link sameTurn}) —
       // when overflow handling copies the history, references break.
@@ -1096,6 +1223,14 @@ export class ChatSession {
         this.#turns.splice(this.#turns.length - pending.length, pending.length);
       }
       await this.#releaseSequence();
+      if (stop?.reason === "eos") {
+        return {
+          malformed: new Error(
+            "gemma.ChatSession: the session was disposed during the turn — its result is not " +
+              "delivered (a call from it must not be run)",
+          ),
+        };
+      }
       return stop === undefined ? undefined : { reply: { end: "cut-off", stop } };
     } finally {
       this.#busy = false;
@@ -1161,7 +1296,12 @@ const completeSessionTurn = async (options: {
     throw error;
   }
   if (outcome === undefined) {
-    options.settleReply({ end: "cut-off", stop: { reason: "closed", tokens: 0 } });
+    // `finish` returns nothing only without a stop reason, and then `completeChatTurn` throws.
+    const error = new Error(
+      "gemma.ChatSession internal inconsistency: the turn ended without an outcome",
+    );
+    options.failReply(error);
+    throw error;
   } else if ("reply" in outcome) {
     options.settleReply(outcome.reply);
   } else {

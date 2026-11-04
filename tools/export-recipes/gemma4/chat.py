@@ -313,7 +313,9 @@ TOOL_ROLE_KEYS: Mapping[str, frozenset[str]] = {
     "system": frozenset({"role", "content"}),
     "developer": frozenset({"role", "content"}),
     "user": frozenset({"role", "content"}),
-    "assistant": frozenset({"role", "content", "reasoning", "reasoning_content", "tool_calls"}),
+    "assistant": frozenset(
+        {"role", "content", "reasoning", "reasoning_content", "tool_calls", "refusal"}
+    ),
     "tool": frozenset({"role", "content", "tool_call_id", "name"}),
 }
 
@@ -490,17 +492,21 @@ TRIP_TOOL: Mapping[str, Any] = {
         },
     },
 }
-#: Shapes the template leaves unclosed: `parameters` without a `type`, and a `response` whose type
-#: is not an object (the declaration is rendered as written — mirrored, not repaired).
-LEGACY_TOOL: Mapping[str, Any] = {
-    "type": "function",
+#: OpenAI fields the template ignores and that mean nothing to the model: no `type` on the tool,
+#: `strict` on the function (the TS side accepts and ignores them).
+OPENAI_TOOL: Mapping[str, Any] = {
     "function": {
-        "name": "legacy",
-        "description": "Old style",
-        "parameters": {"properties": {"x": {"type": "string"}}},
-        "response": {"type": "string", "description": "Text"},
+        "name": "lookup",
+        "description": "Look a word up.",
+        "parameters": {"type": "object", "properties": {"word": {"type": "string"}}},
+        "strict": True,
     },
 }
+
+
+def _declaration(**function: Any) -> dict[str, Any]:
+    """A one-off declaration for the rejected battery."""
+    return {"type": "function", "function": {"name": "odd", "description": "Odd.", **function}}
 
 
 def _call(name: str, arguments: Any, call_id: str | None = None) -> dict[str, Any]:
@@ -542,9 +548,9 @@ TOOL_CASES: tuple[ToolChatCase, ...] = (
     ),
     ToolChatCase(
         "tools-schema-branches",
-        "every branch of format_parameters, and the unclosed shapes the template writes as is",
+        "every branch of format_parameters",
         ({"role": "user", "content": "Plan something."},),
-        {"tools": [TRIP_TOOL, LEGACY_TOOL]},
+        {"tools": [TRIP_TOOL]},
     ),
     ToolChatCase(
         "tools-developer-first",
@@ -846,6 +852,30 @@ TOOL_CASES: tuple[ToolChatCase, ...] = (
             ]
         },
     ),
+    ToolChatCase(
+        "openai-shaped-fields",
+        "fields the template ignores and that mean nothing to the model: no tool type, strict, a "
+        "call index, refusal / tool_calls / reasoning null, a result without content, an empty "
+        "result name next to a matching tool_call_id",
+        (
+            {"role": "user", "content": "Define 'karume'."},
+            {"role": "assistant", "content": "Let me see.", "tool_calls": None, "refusal": None},
+            {
+                "role": "assistant",
+                "content": None,
+                "refusal": None,
+                "reasoning": None,
+                "reasoning_content": "look it up",
+                "tool_calls": [
+                    {**_call("lookup", {"word": "karume"}, "c1"), "index": 0},
+                    {**_call("lookup", {"word": "light"}, "c2"), "index": 1},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": ""},
+            {"role": "tool", "tool_call_id": "c2", "content": "not heavy"},
+        ),
+        {"tools": [OPENAI_TOOL]},
+    ),
 )
 
 
@@ -938,6 +968,102 @@ REJECTED_CASES: tuple[RejectedCase, ...] = (
         {"tools": [WEATHER_TOOL]},
     ),
     RejectedCase(
+        "parameters-without-type",
+        "parameters without a top-level type: the template never closes 'parameters:{'",
+        (_ASK_WEATHER,),
+        {"tools": [_declaration(parameters={"properties": {"x": {"type": "string"}}})]},
+    ),
+    RejectedCase(
+        "response-not-an-object",
+        "a response whose type is not object: the template never closes 'response:{'",
+        (_ASK_WEATHER,),
+        {"tools": [_declaration(response={"type": "string", "description": "Text"})]},
+    ),
+    RejectedCase(
+        "response-null",
+        "a null response leaves 'response:{' open too",
+        (_ASK_WEATHER,),
+        {"tools": [_declaration(response=None)]},
+    ),
+    RejectedCase(
+        "description-null",
+        "a null function description is printed as Python's None",
+        (_ASK_WEATHER,),
+        {"tools": [_declaration(description=None)]},
+    ),
+    RejectedCase(
+        "function-return",
+        "transformers' `return` schema is not rendered (the template reads `response`)",
+        (_ASK_WEATHER,),
+        {"tools": [_declaration(**{"return": {"type": "string"}})]},
+    ),
+    RejectedCase(
+        "speaker-name",
+        "a speaker name on a user message is not rendered",
+        ({"role": "user", "content": "hi", "name": "bob"},),
+        {},
+    ),
+    RejectedCase(
+        "refusal-text",
+        "a refusal text on an assistant message is not rendered",
+        (
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "refusal": "I cannot."},
+            {"role": "user", "content": "ok"},
+        ),
+        {},
+    ),
+    RejectedCase(
+        "argument-string-with-delimiter",
+        'a string holding <|"|> renders like two arguments (parse_response reads it back so)',
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [_call("get_weather", {"location": 'a<|"|>,b:<|"|>c'})],
+            },
+            _WEATHER_RESULT,
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "argument-key-not-a-word",
+        "argument keys are written bare; one outside \\w+ cannot be read back",
+        (
+            _ASK_WEATHER,
+            {"role": "assistant", "tool_calls": [_call("get_weather", {"my-key": 1})]},
+            _WEATHER_RESULT,
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "result-name-of-no-call",
+        "with every call holding an id, a result's `name` is written even if no call has it",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [_call("get_weather", {"location": "Paris"}, "call_1")],
+            },
+            {"role": "tool", "name": "get_time", "content": "14:05"},
+        ),
+        {"tools": [WEATHER_TOOL, TIME_TOOL]},
+    ),
+    RejectedCase(
+        "empty-result-name",
+        "an empty name is no name (`name or 'unknown'`): with every call holding an id, the "
+        "template writes 'unknown'",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [_call("get_weather", {"location": "Paris"}, "call_1")],
+            },
+            {"role": "tool", "name": "", "content": "18 degrees"},
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
         "arguments-as-string",
         "OpenAI's JSON-string arguments are refused by the template itself",
         (
@@ -1016,12 +1142,19 @@ class ResponseCase:
     #: The generated text, special spellings included, ending with its stop token.
     text: str
     #: `parse` — TS returns upstream's result; `upstream-raises` — upstream raises and TS throws;
-    #: `ts-rejects` — upstream returns a value but TS throws (the reason is in `why`).
+    #: `ts-rejects` — upstream returns a value but TS throws (the reason is in `why`);
+    #: `blank-segment` — TS returns upstream's result for {@link normalized} (the text without a
+    #: whitespace-only content segment or an empty thought channel, which upstream lets erase the
+    #: earlier text).
     expect: str
+    #: `blank-segment` only: the same output with the blank segment removed.
+    normalized: str | None = None
+    #: A literal prompt in place of the rendered conversation (a caller error case).
+    raw_prefix: str | None = None
 
 
 #: The `expect` labels of {@link ResponseCase}.
-RESPONSE_EXPECTATIONS = frozenset({"parse", "upstream-raises", "ts-rejects"})
+RESPONSE_EXPECTATIONS = frozenset({"parse", "upstream-raises", "ts-rejects", "blank-segment"})
 
 _WEATHER_PROMPT: tuple[Mapping[str, Any], ...] = (_ASK_WEATHER,)
 _AFTER_RESULT: tuple[Mapping[str, Any], ...] = (_ASK_WEATHER, _CALL_WEATHER, _WEATHER_RESULT)
@@ -1320,6 +1453,113 @@ RESPONSE_CASES: tuple[ResponseCase, ...] = (
         f"<|tool_call>{{location:{_Q}Paris{_Q}}}<tool_call|><|tool_response>",
         "ts-rejects",
     ),
+    ResponseCase(
+        "float-forms",
+        "1e5 / -0.0 / 2.0 are Python floats; in JS they are the numbers 100000 / -0 / 2",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{a:1e5,b:-0.0,c:2.0,d:0.5}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "integer-like-keys",
+        "integer-like keys (bare or quoted) — equal as objects; JS lists them first",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:ping{{b:1,2:2,a:3,{_Q}10{_Q}:4}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "call-inside-thought",
+        "a call spelled inside the thought channel is thought text, not a call (upstream too)",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "<|channel>thought\nI will <|tool_call>call:ping{}<tool_call|><channel|>ok<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "blank-after-call",
+        "a newline between a call and the stop token: upstream lets it erase the content before",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "pre<|tool_call>call:ping{}<tool_call|>\n<|tool_response>",
+        "blank-segment",
+        normalized="pre<|tool_call>call:ping{}<tool_call|><|tool_response>",
+    ),
+    ResponseCase(
+        "blank-second-thought",
+        "an empty second thought channel: upstream lets it erase the first",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "<|channel>thought\nA<channel|><|channel>thought\n<channel|>B<turn|>",
+        "blank-segment",
+        normalized="<|channel>thought\nA<channel|>B<turn|>",
+    ),
+    ResponseCase(
+        "integer-beyond-2-53",
+        "TS rejects: 2^53 + 1 — upstream keeps the exact int, JS would round it",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{n:9007199254740993}<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "integer-of-400-digits",
+        "TS rejects: a 400-digit integer — upstream keeps the int, JS reads Infinity",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{n:" + "9" * 400 + "}<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "float-beyond-double",
+        "TS rejects: 1e309 — upstream reads inf, JS Infinity",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{n:1e309}<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "quoted-key-not-a-word",
+        "TS rejects: a quoted key outside \\w+ — the template would write it bare, unreadable",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:ping{{{_Q}my-key{_Q}:1}}<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "next-turn-in-content",
+        "TS rejects: a hallucinated <|turn> in the content (a re-render would write a fake turn)",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "answer<|turn>user\nhi<turn|>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "result-closer-in-content",
+        "TS rejects: a stray <tool_response|> in the content",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "answer<tool_response|><turn|>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "delimiter-in-content",
+        'TS rejects: a string delimiter <|"|> in the content',
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"say {_Q}x{_Q}<turn|>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "prompt-without-anchor",
+        "TS rejects: a prompt with neither start anchor — upstream reads it all as the answer",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{}<tool_call|><|tool_response>",
+        "ts-rejects",
+        raw_prefix="<bos><|turn>user\nHello",
+    ),
 )
 
 
@@ -1460,21 +1700,30 @@ def harvest_responses(tokenizer: Any, cases: Sequence[ResponseCase]) -> list[dic
     thought channel reopened after a result).
 
     MUST: each case's `expect` label is checked against what upstream did — `upstream-raises` must
-    raise and the others must not — so a label cannot drift from the behaviour it documents. For
-    `ts-rejects` the upstream result is kept as a Python repr (documentation only — it can hold
-    values JSON cannot, such as NaN).
+    raise and the others must not, and a `blank-segment` output must read differently from its
+    normalized form — so a label cannot drift from the behaviour it documents. For `ts-rejects`
+    and `blank-segment` the upstream result is kept as a Python repr (documentation only — it can
+    hold values JSON cannot, such as NaN or inf).
     """
     rows: list[dict[str, Any]] = []
     for case in cases:
         if case.expect not in RESPONSE_EXPECTATIONS:
             raise AssertionError(f"{case.name}: unknown expect label {case.expect!r}")
         assert_tool_conversation(case.messages, case.options)
-        prefix = tokenizer.apply_chat_template(
-            [dict(message) for message in case.messages],
-            tokenize=False,
-            add_generation_prompt=True,
-            **dict(case.options),
+        prefix = (
+            case.raw_prefix
+            if case.raw_prefix is not None
+            else tokenizer.apply_chat_template(
+                [dict(message) for message in case.messages],
+                tokenize=False,
+                add_generation_prompt=True,
+                **dict(case.options),
+            )
         )
+        if (case.expect == "blank-segment") != (case.normalized is not None):
+            raise AssertionError(
+                f"{case.name}: `normalized` goes with the blank-segment label only"
+            )
         row: dict[str, Any] = {
             "name": case.name,
             "why": case.why,
@@ -1498,6 +1747,16 @@ def harvest_responses(tokenizer: Any, cases: Sequence[ResponseCase]) -> list[dic
                 )
             if case.expect == "parse":
                 row["parsed"] = parsed
+            elif case.expect == "blank-segment":
+                assert case.normalized is not None
+                normalized = tokenizer.parse_response(case.normalized, prefix=prefix)
+                if normalized == parsed:
+                    raise AssertionError(
+                        f"{case.name}: upstream reads the blank segment as nothing already"
+                    )
+                row["normalized"] = case.normalized
+                row["parsed"] = normalized
+                row["upstream"] = repr(parsed)
             else:
                 row["upstream"] = repr(parsed)
         rows.append(row)

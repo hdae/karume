@@ -16,7 +16,9 @@
  *
  * The prefix (the prompt) is cut past its last `<|turn>model\n` or `<tool_response|>` and read
  * first, so a prefilled `<|channel>thought\n` (after a tool result with thinking on) or 12B's empty
- * thought channel is seen as upstream sees it.
+ * thought channel is seen as upstream sees it. A non-empty prompt with neither anchor fails loudly
+ * (every prompt of `chatPrompt` / `chatTurn` / `chatToolResults` ends past one; upstream would
+ * read the whole prompt as part of the answer).
  *
  * ## MUST: the input is one closed model turn — failures are loud
  *
@@ -31,21 +33,42 @@
  * - **a region still open at the end** (a thought or a call without its closer — the stop token
  *   then lands inside it) — upstream returns the partial region;
  * - **text after the closing token** — upstream keeps only the last segment;
- * - **content or a thought in two segments** — upstream's fields do not repeat, so it keeps only
- *   the last one;
+ * - **content or a thought in two non-empty segments** — upstream's fields do not repeat, so it
+ *   keeps only the last one (an empty or whitespace-only later segment is ignored here, as an empty
+ *   first one is: upstream would let it erase the earlier text);
  * - **arguments that are not an object** — upstream returns them, but the template cannot render
  *   them back (it raises on a non-mapping);
- * - **non-finite numbers** (`NaN`, `Infinity`) — Python's `json.loads` accepts them, JSON does not;
+ * - **numbers a double cannot hold** — `NaN` (not JSON), a literal beyond the double range
+ *   (`1e309`, a 400-digit integer: `Infinity` in JS, upstream's `inf` or a huge `int`), and an
+ *   integer literal beyond 2^53 (upstream keeps it exact, JS would round it — a wrong id would
+ *   reach the caller);
+ * - **an argument key that is not a word** (written quoted in the output) — the template writes
+ *   keys bare and `\w+` could not read it back;
  * - **a structure spelling left in the content** (`<|tool_call>` without `call:NAME`, a stray
- *   `<tool_call|>` / `<|channel>` / `<channel|>`) — upstream returns it as text, so a malformed
- *   call would pass as an answer.
+ *   `<tool_call|>` / `<|channel>` / `<channel|>` / `<tool_response|>` / `<|tool>` / `<tool|>` /
+ *   `<|"|>`, or a `<|turn>` that starts a turn of its own) — upstream returns it as text, so a
+ *   malformed call would pass as an answer and a re-render would write a fake turn.
+ *
+ * NOTE: inside a thought the spellings stay text, as upstream returns them: a call written in the
+ * thought channel is part of the thought, not a call (the model has not made it).
+ *
+ * NOTE: the integer check reads each number's source text through `JSON.parse`'s reviver context
+ * (`context.source`, the "JSON.parse source text access" feature — measured on Node 24 and Deno 2.9
+ * (V8 15.0); shipped in V8 11.4 / Chrome 114 and Firefox 135; Safari not checked here). Where a
+ * runtime does not pass it, every integer-valued number beyond 2^53 is refused, float literals
+ * (`1e20`) included — loud, never rounded.
  *
  * MUST: every module is side-effect free (no table or instance is built at module scope).
  */
 
 import { ModelInputError } from "../../errors.ts";
 import { pythonStrip } from "../../text/python-strip.ts";
-import { type ChatJsonObject, type ChatToolCall, wordCharacterClass } from "./chat.ts";
+import {
+  assertReadableArguments,
+  type ChatJsonObject,
+  type ChatToolCall,
+  wordCharacterClass,
+} from "./chat.ts";
 import type { Tokenizer } from "./tokenizer.ts";
 
 /**
@@ -78,17 +101,68 @@ const STRUCTURE_SPELLINGS: readonly string[] = [
   "<tool_call|>",
   "<|channel>",
   "<channel|>",
+  "<|turn>",
+  "<tool_response|>",
+  "<|tool>",
+  "<tool|>",
+  '<|"|>',
 ];
 const QUOTE = '<|"|>';
 
-/** The prompt cut past its last start anchor (all of it when there is none — as upstream). */
-const pastLastAnchor = (prefix: string): string => {
+/**
+ * The prompt cut past its last start anchor. An empty prompt is upstream's explicit opt-out; a
+ * non-empty one without an anchor is a caller error (upstream would read it all as the answer).
+ */
+const pastLastAnchor = (prefix: string, where: string): string => {
   let end = -1;
   for (const anchor of START_ANCHORS) {
     const at = prefix.lastIndexOf(anchor);
     if (at >= 0) end = Math.max(end, at + anchor.length);
   }
+  if (end < 0 && prefix !== "") {
+    throw new ModelInputError(
+      `${where}: the prompt has no ${START_ANCHORS.map((anchor) => JSON.stringify(anchor)).join(" / ")} ` +
+        `(pass the prompt the output followed — chatPrompt / chatTurn / chatToolResults — or none)`,
+    );
+  }
   return end < 0 ? prefix : prefix.slice(end);
+};
+
+/**
+ * The part of a prompt's tail the output continues inside: `<|channel>thought\n` when the prompt
+ * opened a thought channel it did not close (after a tool result with thinking on), `""` otherwise.
+ * A record of a turn that could not be parsed starts with it, so a re-render's `strip_thinking`
+ * still finds the thought.
+ *
+ * NOTE: internal (not on the public surface); exported for `../chat-session.ts`.
+ */
+export const openPrefillOf = (prompt: string): string =>
+  pastLastAnchor(prompt, "gemma.ChatSession").endsWith(THOUGHT_OPEN) ? THOUGHT_OPEN : "";
+
+/**
+ * Refuses a number a double cannot hold exactly where it matters ({@link parseArguments}): a
+ * non-finite value, and an integer literal beyond 2^53 (`source` = its JSON text, when the runtime
+ * passes it — the module NOTE).
+ */
+const assertHeldNumber = (
+  value: number,
+  source: string | undefined,
+  name: string,
+  where: string,
+): void => {
+  if (!Number.isFinite(value)) {
+    throw new ModelInputError(
+      `${where}: the call ${name} has the number ${source ?? String(value)}, which a double ` +
+        `cannot hold (it parses to ${value})`,
+    );
+  }
+  const integer = source === undefined ? Number.isInteger(value) : /^-?\d+$/.test(source);
+  if (integer && !Number.isSafeInteger(value)) {
+    throw new ModelInputError(
+      `${where}: the call ${name} has the integer ${source ?? String(value)}, beyond 2^53 — JS ` +
+        `would round it (upstream keeps it exact)${source === undefined ? "; this runtime does not pass the number's source text, so any integer-valued number beyond 2^53 is refused" : ""}`,
+    );
+  }
 };
 
 /** One delimiter found in the buffer. */
@@ -161,8 +235,12 @@ const parseArguments = (name: string, body: string, where: string): ChatJsonObje
       })
       .join("");
   let value: unknown;
+  const numbers: { readonly value: number; readonly source: string | undefined }[] = [];
   try {
-    value = JSON.parse(working);
+    value = JSON.parse(working, (_key, raw: unknown, context?: { readonly source?: string }) => {
+      if (typeof raw === "number") numbers.push({ value: raw, source: context?.source });
+      return raw;
+    });
   } catch (error) {
     throw new ModelInputError(
       `${where}: the arguments of the call ${name} are not JSON after the dialect transforms ` +
@@ -175,6 +253,8 @@ const parseArguments = (name: string, body: string, where: string): ChatJsonObje
         `the template cannot render them back)`,
     );
   }
+  for (const number of numbers) assertHeldNumber(number.value, number.source, name, where);
+  assertReadableArguments(value, `${where}: the arguments of the call ${name}`);
   return value as ChatJsonObject;
 };
 
@@ -188,8 +268,11 @@ const parseArguments = (name: string, body: string, where: string): ChatJsonObje
  */
 export const parseGemma4ChatResponse = (text: string, prefix: string): ChatResponse => {
   const where = "gemma.parseChatResponse";
-  const buffer = `${pastLastAnchor(prefix)}${text}`;
+  const prefill = pastLastAnchor(prefix, where);
+  const buffer = `${prefill}${text}`;
   let region: "content" | "thought" | "call" = "content";
+  /** Where the open explicit region started (to say whether the prompt's prefill opened it). */
+  let regionStart = 0;
   let opened = false;
   let body = "";
   let callName = "";
@@ -200,6 +283,11 @@ export const parseGemma4ChatResponse = (text: string, prefix: string): ChatRespo
   const closeContent = (): void => {
     if (!opened) return;
     const value = pythonStrip(body);
+    // An empty (whitespace-only) segment is no text, wherever it sits — the earlier text stays.
+    if (value === "") {
+      content ??= "";
+      return;
+    }
     if (content !== undefined && content !== "") {
       throw new ModelInputError(
         `${where}: the content comes in more than one segment (${JSON.stringify(content)}, then ` +
@@ -230,10 +318,12 @@ export const parseGemma4ChatResponse = (text: string, prefix: string): ChatRespo
           })();
     if (found === undefined) {
       if (region !== "content") {
+        const origin =
+          regionStart < prefill.length ? "opened by the prompt's prefill" : "opened in the output";
         throw new ModelInputError(
           `${where}: the ${region === "thought" ? "thought channel" : `tool call ${callName}`} ` +
-            `is not closed (the turn was cut — upstream would return the partial region): ` +
-            `${JSON.stringify(text)}`,
+            `(${origin}) is not closed (the turn was cut — upstream would return the partial ` +
+            `region): ${JSON.stringify(text)}`,
         );
       }
       throw new ModelInputError(
@@ -251,6 +341,7 @@ export const parseGemma4ChatResponse = (text: string, prefix: string): ChatRespo
     if (region === "content" && found.kind !== "close") {
       closeContent();
       region = found.kind;
+      regionStart = found.start;
       opened = true;
       body = "";
       callName = found.name ?? "";
@@ -268,13 +359,13 @@ export const parseGemma4ChatResponse = (text: string, prefix: string): ChatRespo
     }
     if (region === "thought") {
       const value = pythonStrip(body);
-      if (thinking !== undefined && thinking !== "") {
+      if (value === "") thinking ??= "";
+      else if (thinking !== undefined && thinking !== "") {
         throw new ModelInputError(
           `${where}: two thought channels (${JSON.stringify(thinking)}, then ` +
             `${JSON.stringify(value)}) — upstream would keep only the last`,
         );
-      }
-      thinking = value;
+      } else thinking = value;
     } else {
       calls.push({
         type: "function",

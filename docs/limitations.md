@@ -165,15 +165,47 @@ The chat layer renders tools, tool calls, tool results and thinking as upstream'
   in any message.
 - **Narrower than upstream, rejected loudly:** inputs upstream renders wrongly without an exception
   — several tool calls without ids (every result would get the last call's name), a result whose
-  `name` contradicts its call or whose `tool_call_id` matches none, an orphan result, a call without
-  results, content plus calls on a message whose results end the conversation, a tool name outside
-  `\w+`, an object result (upstream raises; serialize it), the `thinking` field (use `reasoning`).
-  The output parser also throws where upstream returns partial data: a turn without its stop token,
-  a region left open, text after the stop token, content or a thought in two segments, a
-  non-object argument body, `NaN` / `Infinity`, a structure spelling left in the content.
-- **Numbers:** a JS number has no int / float distinction, so an integer-valued number renders as
-  Python's `int` would (`2`) where upstream, given the float `2.0`, writes `2.0`; non-integers
-  match `repr(float)`. Arguments parsed from output lose precision beyond 2^53, as JSON does in JS.
+  `name` contradicts its call, names none of the turn's calls, or is empty where no id resolves it,
+  a `tool_call_id` that matches no call, an orphan result, a call without results, content plus
+  calls on a message whose results end the conversation, a declaration whose braces the template
+  leaves unbalanced (`parameters` without a top-level `type`, a `response` that is not an object
+  schema), a null function `description` (printed as `None`), a tool name or an argument key
+  outside `\w+`, an argument string holding `<|"|>` or `<tool_call|>`, a sparse array, an object
+  result (upstream raises; serialize it), and fields that carry meaning the template drops — the
+  `thinking` field (use `reasoning`), a speaker `name`, a refusal text, a `return` schema (use
+  `response`). Fields it ignores that mean nothing to the model are accepted and ignored: a tool
+  without `type`, `strict`, a call's `index`, `refusal` / `tool_calls` / `reasoning` set to
+  `null`. The output parser also throws where upstream returns partial or wrong data: a turn
+  without its stop token, a region left open, text after the stop token, content or a thought in
+  two non-empty segments, a non-object argument body, a number a double cannot hold (`NaN`, an
+  overflow to `Infinity`, an integer literal beyond 2^53 — upstream keeps it exact), a quoted
+  argument key outside `\w+`, a prompt with neither start anchor, and a structure spelling left in
+  the content (`<|tool_call>`, `<tool_call|>`, `<|channel>`, `<channel|>`, `<|turn>`,
+  `<tool_response|>`, `<|tool>`, `<tool|>`, `<|"|>`). Inside a thought those spellings stay thought
+  text, as upstream returns them: a call written in the thought channel is not reported as a call.
+- **`ChatSession.sendToolResults` takes exactly one result per call** of the turn (OpenAI's
+  contract; upstream renders any number), and the calls carry ids unique within the session.
+- **Wider than upstream:** a whitespace-only content segment or an empty thought channel after a
+  non-empty one is ignored (TS keeps the earlier text; upstream lets the blank segment erase it).
+- **The 2^53 check needs the reviver's source text** (`JSON.parse` source text access — measured on
+  Node 24 and Deno 2.9 / V8 15.0; shipped in V8 11.4 / Chrome 114 and Firefox 135; Safari not
+  checked). A runtime without it refuses every integer-valued number beyond 2^53, float literals
+  such as `1e20` included — loud, never rounded.
+- **Numbers keep their value, not their Python type:** a JS number has no int / float distinction.
+  An integer-valued number renders as Python's `int` would, so a float parsed from output —
+  `2.0`, `1e5`, `-0.0`, `1e20` — comes back as `2` / `100000` / `0` (`-0`) / `1e20` and is
+  re-rendered as `2` / `100000` / `0` / `100000000000000000000` where upstream's own round trip
+  writes `2.0` / `100000.0` / `-0.0` / `1e+20`; a whole re-render after overflow handling can
+  therefore differ from upstream's for the same generated text. A result content of `4.0` renders
+  `{value:4}` (upstream `{value:4.0}`). Non-integers match `repr(float)`.
+- **Integer-like argument keys come back first** (`{b:1,2:2,a:3}` parses with the keys `2`, `b`,
+  `a` — JS object order; upstream keeps `b`, `2`, `a`). Rendering is unaffected (the template
+  sorts keys); a caller that maps arguments to positions by iteration order sees another order.
+- **Unicode case mapping:** the template's key sort (`dictsort`, case-insensitive) and `| upper`
+  run on JS `toLowerCase` / `toUpperCase`. Node 24 has Unicode 17, the recipe's Python 3.14 Unicode
+  16.0: the mappings differ for 28 code points each way (lower: U+A7CE, U+A7D2, U+A7D4,
+  U+16EA0–U+16EB8; upper: U+A7CF, U+A7D3, U+A7D5, U+16EBB–U+16ED3), so keys or types holding them
+  may sort or print differently from upstream.
 - **The KV of a carried conversation is not a whole re-render** in three places (the identity and
   its check are in the doc of `gemma.ChatSession`): 12B (`gemma4-unified`) with thinking off keeps
   the empty thought channel at the start of each past model turn a generation prompt opened; with

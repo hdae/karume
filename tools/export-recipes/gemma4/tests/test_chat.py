@@ -520,3 +520,41 @@ class TestToolDialects:
 
         assert e2b == _model_tokenizer("e4b").response_template
         assert e2b == _twelve_b_tokenizer().response_template
+
+
+class TestBlankSegmentHarvest:
+    def test_the_normalized_output_s_reading_is_the_expectation(self) -> None:
+        case = chat.ResponseCase(
+            "b", "why", ({"role": "user", "content": "q"},), {}, "x \n", "blank-segment", "x"
+        )
+
+        [row] = chat.harvest_responses(_FakeParser(), [case])
+
+        assert row["parsed"] == {"role": "assistant", "content": "PFX:x"}
+        assert row["upstream"] == repr({"role": "assistant", "content": "PFX:x \n"})
+        assert row["normalized"] == "x"
+
+    def test_a_normalized_form_upstream_reads_the_same_fails_the_harvest(self) -> None:
+        """MUST: the case documents a real divergence, not a no-op."""
+        case = chat.ResponseCase(
+            "b", "why", ({"role": "user", "content": "q"},), {}, "x", "blank-segment", "x"
+        )
+        with pytest.raises(AssertionError, match="already"):
+            chat.harvest_responses(_FakeParser(), [case])
+
+    def test_normalized_goes_with_its_label_only(self) -> None:
+        case = chat.ResponseCase(
+            "b", "why", ({"role": "user", "content": "q"},), {}, "x", "parse", "y"
+        )
+        with pytest.raises(AssertionError, match="blank-segment label only"):
+            chat.harvest_responses(_FakeParser(), [case])
+
+    def test_a_raw_prefix_replaces_the_rendered_prompt(self) -> None:
+        case = chat.ResponseCase(
+            "r", "why", ({"role": "user", "content": "q"},), {}, "x", "parse", raw_prefix="RAW"
+        )
+
+        [row] = chat.harvest_responses(_FakeParser(), [case])
+
+        assert row["prefix"] == "RAW"
+        assert row["parsed"] == {"role": "assistant", "content": "RAW:x"}

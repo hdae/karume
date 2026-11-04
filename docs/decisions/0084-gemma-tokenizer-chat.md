@@ -262,21 +262,40 @@ Decisions:
    exception** — each case is harvested with upstream's outcome beside it (`rejectedChat` in the
    fixtures). Rejected: several calls without ids (every result gets the last call's name — the
    template's `None == None`), a result `name` that contradicts its call, a `tool_call_id` that
-   matches no call (the spelling `unknown`), an orphan result (dropped), a call without results (a
-   bare `<|tool_response>`), content plus calls on a message whose results end the conversation (no
-   generation prompt), a tool name outside `\w+` (the parser could never read the call back), an
-   object result (the template raises), JSON-string arguments (the template raises), and the
-   `thinking` field (the template does not read it — it is `parse_response`'s output key).
+   matches no call (the spelling `unknown`), a `name` that none of the turn's calls has, an empty
+   `name` where no id resolves the call (upstream's `name or 'unknown'` writes `unknown`), an
+   orphan result (dropped), a call without results (a bare `<|tool_response>`), content plus calls
+   on a message whose results end the conversation (no generation prompt), a declaration whose
+   braces the template leaves unbalanced (`parameters` without a top-level `type`; a `response`
+   that is not an object schema, `null` and `{}` included), a null function `description`
+   (printed as `None`), a tool name, an argument key or an argument string the parser could not
+   read back (a name or key outside `\w+`; a string holding `<|"|>` or `<tool_call|>`), a sparse
+   array, an object result (the template raises), JSON-string arguments (the template raises), and
+   fields that carry meaning the template drops: `thinking` (`parse_response`'s output key), a
+   speaker `name`, a refusal text, transformers' `return` schema. Accepted and ignored, as
+   upstream ignores them and they mean nothing to the model (review of 2026-11-04): a tool without
+   `type`, `function.strict`, a call's `index`, `refusal: null`, `tool_calls: null`,
+   `reasoning: null`; an empty `name` next to a matching `tool_call_id`, and a result without
+   `content` (`value:null`), render as upstream renders them.
 3. **Still out of scope, rejected loudly:** the legacy `tool_responses` field and content-part
    arrays (text / image / audio / video), for the reason decision 5 gave.
 4. **Output parsing** (`gemma.parseChatResponse(tokenizer, output, prompt)`) takes token ids and
    decodes them **with** their special spellings — `<|channel>`, `<|tool_call>`, `<|"|>` and the
    stop tokens are special tokens that a `ChatStream`'s text drops. It equals upstream on every
-   well-formed golden (19 per fixture) and throws `ModelInputError` where upstream raises (7). It
-   also throws where upstream returns data that would hide a failure (10, labelled `ts-rejects`
+   well-formed golden (22 per fixture) and throws `ModelInputError` where upstream raises (7). It
+   also throws where upstream returns data that would hide a failure (18, labelled `ts-rejects`
    with upstream's result recorded): a turn without its stop token, a region still open at the end,
-   text after the stop token, content or a thought in two segments (upstream keeps the last), a
-   non-object argument body, non-finite numbers, and a structure spelling left in the content.
+   text after the stop token, content or a thought in two non-empty segments (upstream keeps the
+   last), a non-object argument body, a number a double cannot hold (`NaN`, a literal that
+   overflows to `Infinity`, an integer literal beyond 2^53 — detected through `JSON.parse`'s
+   reviver `context.source`, measured on Node 24 and Deno 2.9; without it every integer-valued
+   number beyond 2^53 is refused), a quoted argument key outside `\w+`, a non-empty prompt with
+   no start anchor, and a structure spelling left in the content (`<|tool_call>`, `<tool_call|>`,
+   `<|channel>`, `<channel|>`, `<|turn>`, `<tool_response|>`, `<|tool>`, `<tool|>`, `<|"|>`).
+   A whitespace-only content segment or an empty thought channel after a non-empty one is ignored,
+   as an empty first one is — upstream would let it erase the earlier text (2, labelled
+   `blank-segment`: the expectation is upstream's reading of the output without that segment).
+   Spellings inside a thought stay thought text, as upstream returns them.
    Alternative considered: mirror upstream exactly and leave the checks to the host — rejected,
    because a truncated call that happens to be valid JSON would be executed as a finished call.
 5. **Incremental path.** `gemma.chatToolResults(tokenizer, toolCalls, results, options)` is the
@@ -286,11 +305,18 @@ Decisions:
    12B tail depends on thinking) and rejects a tool message.
 6. **`ChatSession`** takes `tools` / `enableThinking` per session (they shape the system block),
    parses every turn closed by an EOS token (`reply` of the returned stream: `"turn"`,
-   `"tool-call"` or `"cut-off"`), assigns ids to parsed calls, continues a tool-call turn with
-   `sendToolResults`, and records the history in the template's input shape (content written
-   before a call becomes its own assistant message, since the template writes a message's content
-   after its results). A malformed closed turn rejects `reply`, keeps the raw text and rebuilds the
-   KV. The default overflow policy drops the oldest whole exchange (up to the next user message),
+   `"tool-call"` or `"cut-off"`), assigns parsed calls ids unique within the session
+   (`call_<n>`, a counter that a fork carries and overflow handling never resets, so a result can
+   never bind to an earlier call of the same id), continues a tool-call turn with
+   `sendToolResults` — exactly one result per call of the turn (OpenAI's contract), copied and then
+   checked, with every caller input read before the session's state is — and records the history
+   in the template's input shape (content written before a call becomes its own assistant message,
+   since the template writes a message's content after its results). The reply's message is a
+   deep-frozen copy; the history keeps its own. A malformed closed turn (with tools,
+   `<|tool_response>` without a call included) rejects `reply`, keeps the raw text — starting with
+   the thought opener the prompt prefilled, if any, so a re-render still strips the thought — and
+   rebuilds the KV; so does a dispose during the turn. `reply` settles at the end of the stream, so
+   a host drains the stream (or closes it with `break`) before awaiting it. The default overflow policy drops the oldest whole exchange (up to the next user message),
    so a result never loses its call. In a session with tools or thinking the streamed pieces keep
    the special spellings. The identity between the KV and a whole re-render, with its three
    by-design divergences (12B's empty channel, thoughts before the last user message, the parser's

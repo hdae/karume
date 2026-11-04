@@ -27,16 +27,21 @@ measurements in `docs/research/`.
   `{ content, thinking, tool_calls }` as upstream `parse_response` does. `ChatSession` takes
   `tools` / `enableThinking`, its streams carry a parsed `reply` (`"turn"` / `"tool-call"` /
   `"cut-off"`), and `sendToolResults` answers a turn that ended on a call within the same model
-  turn, the KV carried over. What the template renders wrongly (ambiguous results, orphan
-  results, calls without results), the legacy `tool_responses` field and content parts fail
-  loudly; so does output that is cut or malformed. Not yet checked on a real model.
+  turn, the KV carried over — exactly one result per call, each naming its call by the
+  session-unique `tool_call_id` the reply carries (`call_<n>`). What the template renders wrongly
+  (ambiguous results, orphan results, calls without results, unbalanced declarations), the legacy
+  `tool_responses` field and content parts fail loudly; so does output that is cut or malformed,
+  or that holds a number a double cannot hold exactly. Not yet checked on a real model.
 
 ### Changed
 
 - `@karume/models/gemma`: `ChatSession` parses every turn closed by an EOS token and records what
   the parser read: an answer's content is stripped as the template renders it (the re-render is
-  unchanged), and a malformed closed turn rejects `reply`, keeps the raw text and rebuilds the KV
-  on the next turn. In a session with tools or thinking the streamed pieces keep the special
+  unchanged). **This applies to plain sessions too:** a closed turn the parser rejects (a broken
+  or spurious tool call, a structure spelling such as `<|turn>` in the answer) now rejects
+  `reply`, rebuilds the KV on the next turn instead of carrying it, and records the model's raw
+  text with its special spellings in `turns` (previously the KV was carried and `turns` held the
+  streamed text). In a session with tools or thinking the streamed pieces keep the special
   spellings. `dropOldestTurns` drops the oldest whole exchange (up to the next user message — the
   same user / assistant pair in a plain conversation).
 
