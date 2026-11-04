@@ -340,7 +340,9 @@ export type EstimateOptions = {
    * bindings, because ADR 0022 bans run-time autotuning). ② The binding limit of intermediate
    * placement for every graph — used for the row-block count of row-block attention and for the
    * limit check of actual slot sizes (packed with the same granted value as the execution phase —
-   * ADR 0093 decisions 4 / 5). For ②, the WebGPU core default is used when unspecified.
+   * ADR 0093 decisions 4 / 5). For ②, the WebGPU core default is used when unspecified, except
+   * that the row-block count of row-block attention follows ③'s rule
+   * ({@link assertRowBlockWindowCount}).
    * ③ The row-block count of the in-node temporaries of fused attention ops (no states field — ADR
    * 0124 decision 7). When unspecified, only shapes whose count is the same on every device are
    * counted — shapes that fit in one block under the WebGPU core default (128 MiB; a device's
@@ -349,7 +351,8 @@ export type EstimateOptions = {
    * loudly ({@link fusedAttentionBlocks}).
    *
    * MUST: **required** for graphs with states-form attention ({@link stateAttentionTemps} fails
-   * loudly). Also required for fused attention ops whose count depends on the binding limit (③).
+   * loudly). Also required for fused attention ops and row-block attention windows whose count
+   * depends on the binding limit (③).
    * Filling a default would make the estimator alone claim a count that no device actually has.
    * **The range (a positive safe integer) is checked at the entry regardless of the graph's shape**
    * (if an invalid value passed silently only for shapes that do not read ①, the location of the
@@ -1122,6 +1125,36 @@ const fusedAttentionBlocks = (
 };
 
 /**
+ * The row-block count of one decomposed row-block attention window, checked when no binding limit
+ * is passed (ADR 0124 decision 7 — the same rule as {@link fusedAttentionBlocks}).
+ *
+ * MUST: without `limit` (`EstimateOptions.maxStorageBufferBindingSize`) the fusion is planned with
+ * the WebGPU core default, so fail loudly when the count could change with the device's granted
+ * limit — dividing by the core default would let the estimate alone claim a count that no device
+ * produces. A granted limit is at least the core default, so the count is the same on every device
+ * in two cases only: ① the window's whole score S (the first bmm's output) fits in one block under
+ * the core default ② the budget is at most the core default (the limit is then the budget itself on
+ * every device).
+ */
+const assertRowBlockWindowCount = (
+  step: FusedStep,
+  scores: NodePlan,
+  limit: number | undefined,
+  budget: number | undefined,
+): void => {
+  if (limit !== undefined) return;
+  const core = CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
+  if (budget !== undefined && budget <= core) return;
+  const scoreBytes = numel(scores.outputs[0].shape) * 4;
+  if (scoreBytes <= core) return;
+  throw new ExecutionError(
+    `Estimate: row-block attention '${step.outputName}': the score S (${scoreBytes}B) does not fit in one block under the WebGPU core default binding limit (${core}B), so` +
+      " options.maxStorageBufferBindingSize is needed (the row-block count changes with the device's granted" +
+      " limit — ADR 0124 decision 7 / ADR 0060)",
+  );
+};
+
+/**
  * The in-node temporaries and dispatch reads / writes of one fused attention op node (no states
  * field — ADR 0023) (ADR 0124 decision 7). It copies the allocation and dispatch order of execution
  * (`buildAttention` in recipe-builders/attention.ts):
@@ -1341,8 +1374,10 @@ const transientSlotBytes = (
     const dispatches: TransientDispatchSpec[] = [];
     if (isStateAttention(node)) {
       // Copy the execution phase's 2 / 3 dispatches and temporary lifetimes per row block.
-      // scores are allocated right before QK, stats (when not fused) right before the row
-      // statistics, and both are released right after PV.
+      // MUST: scores and stats (when not fused) are both allocated right before QK, in that order,
+      // and both are released right after PV — the order of `buildStateAttention` /
+      // `buildReadonlyStateAttention`. Allocating stats after QK gives the same plan only while no
+      // release falls between QK and the statistics; the copy keeps execution's program instead.
       // The readonly variant (the borrower's cross-attention — ADR 0096; ins is q only) reads K/V
       // from external slots and has no k / v inputs for this step. Read references cover **only the
       // inputs that exist** (referencing a missing name would make the transient plan fail on an
@@ -1378,7 +1413,7 @@ const transientSlotBytes = (
           dispatches.push({ reads: v === undefined ? [scores] : [scores, v], writes: outputRefs });
         } else {
           const stats: TransientRef = { kind: "temp", id: temps.length };
-          temps.push({ byteLength: temp.statsBytes, allocBefore: base + 1, releaseAfter: last });
+          temps.push({ byteLength: temp.statsBytes, allocBefore: base, releaseAfter: last });
           dispatches.push({ reads: [scores], writes: [stats] });
           dispatches.push({
             reads: v === undefined ? [scores, stats] : [scores, stats, v],
@@ -1455,6 +1490,7 @@ const transientSlotBytes = (
       index += nodeStepSpan(step);
       continue;
     }
+    assertRowBlockWindowCount(step, nodes[index], limit, attentionRowBlockMaxBytes);
     program.push(fusedTransientStep(step, uses, outputNames));
     index += step.nodeCount;
   }

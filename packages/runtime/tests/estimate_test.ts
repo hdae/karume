@@ -1304,13 +1304,22 @@ test("融合が掛からない形では estimator の中間総量と実行計画
 // 分解 attention（行ブロック attention の融合 — ADR 0060）
 // ---------------------------------------------------------------------------
 
+// The binding limit of a device granted exactly the WebGPU core default. LARGE_SCORES splits into
+// two row blocks under it, so the count depends on the limit and the estimate needs it passed
+// (ADR 0124 decision 7).
+const CORE_LIMIT = CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
+
 // スコア 1 本 = 4×2048×4200×4 = 137,625,600B > 束縛上限 128 MiB（WebGPU core 既定）。
 const LARGE_SCORES = { heads: 4, queries: 2048, keys: 4200, headDim: 8 } as const;
 
 describe("分解 attention の中間（融合後に束縛するバッファで数える）", () => {
   describe("融合前のスコアが束縛上限を超え、行ブロック attention に融合される形", () => {
     it("例外を投げず、行ブロック 1 枚ぶんの一時と出力で中間を数える", () => {
-      const scenario = runScenario(openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate());
+      const scenario = runScenario(
+        openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
+          maxStorageBufferBindingSize: CORE_LIMIT,
+        }),
+      );
       // 1 行 = 4×4200×4 = 67,200B → 上限に 1,997 行入るので 2 枚（1024 + 1024 行）に等分。
       // 一時 S / mask 加算後 / P は各 4×1024×4200×4 = 68,812,800B で、同時生存は 2 本まで
       // （読む側と書く側は同じ dispatch なので別領域 — 2 枚目は 1 枚目の区間を配り直す）。
@@ -1654,7 +1663,11 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
     });
 
     it("予算なしの値は予算の欄を足す前と同じ（既定は不変）", () => {
-      const scenario = runScenario(openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate());
+      const scenario = runScenario(
+        openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
+          maxStorageBufferBindingSize: CORE_LIMIT,
+        }),
+      );
       assertEquals(scenario.workspaceBytes, 68_812_800 * 2 + 262_144);
     });
   });
