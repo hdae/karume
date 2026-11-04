@@ -62,6 +62,35 @@ TS 側の loader の出力と突き合わせて見る。
     outputs/series/gemma4-<model>-product/model.krm              重み・定数 + 2 文書 + PLE の資産
     outputs/series/gemma4-<model>-product/ple.probe.safetensors  逆量子化ビット一致の参照
     outputs/series/gemma4-<model>-product/reference.json         出所記録（指紋 + 流用 golden）
+
+## bf16 storage (`--storage bf16` — the original-weights preset)
+
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_product --storage bf16
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_product --storage bf16 --model e4b
+
+The same graph, trace, form check and PLE asset; what differs is the storage of the weights:
+
+1. **The linears and the embedding are bf16** (ADR 0131 — the tied head reads the embedding). The
+   checkpoint is BF16, so nothing is rounded: the loader's F32 values are the checkpoint's bits,
+   and the writer stores a weight as bf16 only when the round trip is exact (it fails loudly
+   otherwise). The form check counts every linear and the embedding as bf16, and no i8 / i4.
+2. **The PLE table stays i8 with one scale per row** (schema 3, {@link PLE_STORAGE}): the PLE
+   readers (`packages/models/src/gemma/ple-index.ts`, `ple.ts`, `ple-gpu.ts`) know `i8` / `i4` /
+   `i2` values with f32 scales and no bf16 values (ADR 0131's open point). The series is therefore
+   the original weights everywhere but the PLE table.
+3. **Own goldens**: the borrowed goldens of the logits opt-in series are the i4 model's, so the
+   series takes its own (the q4_0 QAT series' rule — `gemma4.export_product_qat`): greedy
+   continuations of `gemma4.export_decode.GREEDY_CASES` by full re-forward of the stored model,
+   `gemma4.export_decode.GREEDY_STEPS` steps (`--steps`) and the margin floor
+   `gemma4.export_decode.MARGIN_FLOOR`, taken before the trace.
+4. **An upstream reference** (measured, not a gate): the same continuations of the model before the
+   PLE tables are rounded — the checkpoint's weights, computed in f32. The summary's `upstream`
+   gives, per case, how many leading steps of the goldens it shares.
+
+    outputs/series/gemma4-<model>-product-bf16/model.krm                  the container + PLE assets
+    outputs/series/gemma4-<model>-product-bf16/ple.probe.safetensors      the PLE probe reference
+    outputs/series/gemma4-<model>-product-bf16/greedy.<case>.safetensors  the greedy goldens
+    outputs/series/gemma4-<model>-product-bf16/reference.json             provenance (own goldens)
 """
 
 from __future__ import annotations
@@ -80,7 +109,12 @@ from torch.export import Dim
 from torch.nn import functional
 
 from _shared.container_read import open_container, read_asset
-from _shared.decode_series import assert_case_room, positions_for
+from _shared.decode_series import (
+    _write_greedy,
+    assert_case_room,
+    greedy_continuation,
+    positions_for,
+)
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import ple, provenance
@@ -105,7 +139,7 @@ from karume.ple import (
     ple_block_ranges,
     ple_row_bytes,
 )
-from karume.quantize import quantize_to_int8
+from karume.quantize import fake_quant_int8, iter_quant_targets, quantize_to_int8
 from karume.shapes import declared_shape
 from karume.states import to_states_form
 
@@ -142,7 +176,18 @@ EXAMPLE_ROWS = 2
 PLE_PROBE_FILE = "ple.probe.safetensors"
 
 #: PLE の格納（`values` の詰め方 — `scales` は常に f32）。
+#: The same in both storages of the series (module docstring, "bf16 storage").
 PLE_STORAGE = "i8"
+
+#: The storages of the linears and the embedding (`--storage` — module docstring).
+I4_STORAGE = "i4"
+BF16_STORAGE = "bf16"
+STORAGES = (I4_STORAGE, BF16_STORAGE)
+
+#: The bf16 series' suffix (`outputs/series/gemma4-<model>-product-bf16/`). NOTE: no distribution
+#: reads the series yet; when one does, the word moves next to `GEMMA4_PRODUCT_SUFFIX`
+#: (`gemma4.distribution`), where the writer and the reader share it.
+BF16_PRODUCT_SUFFIX = f"{GEMMA4_PRODUCT_SUFFIX}-bf16"
 
 #: 行の種別（索引の欄名でもある — `karume.ple.PLE_ROLES` の綴り）。
 PLE_VALUES_KEY = "values"
@@ -798,24 +843,107 @@ def export_series(
 ) -> dict[str, Any]:
     """製品グラフのコンテナ（PLE を資産として同梱）+ 出所記録を書き、要約を返す。
 
+    The i4 series (linears i4 g32, embedding i8); {@link export_series_bf16} is the bf16 one. Both
+    run {@link _export_series}.
+    """
+    return _export_series(
+        model_dir, out_dir, sym_max=sym_max, storage=I4_STORAGE, reference=reference, steps=None
+    )
+
+
+def export_series_bf16(
+    model_dir: Path,
+    out_dir: Path,
+    *,
+    sym_max: int = one_shot.SYM_MAX,
+    steps: int = decode.GREEDY_STEPS[GEMMA4_DEFAULT_MODEL],
+) -> dict[str, Any]:
+    """The bf16 series (module docstring, "bf16 storage"): the container, the PLE probe, the
+    series' own greedy goldens of `steps` steps and the provenance record, and the summary."""
+    return _export_series(
+        model_dir, out_dir, sym_max=sym_max, storage=BF16_STORAGE, reference=None, steps=steps
+    )
+
+
+def is_ple_table(name: str) -> bool:
+    """Whether a module FQN is one of the PLE tables — the bf16 series' only i8 target (the PLE
+    readers have no bf16 storage — module docstring)."""
+    return name.startswith(one_shot.PER_LAYER_PREFIX)
+
+
+def _export_series(
+    model_dir: Path,
+    out_dir: Path,
+    *,
+    sym_max: int,
+    storage: str,
+    reference: Path | None,
+    steps: int | None,
+) -> dict[str, Any]:
+    """{@link export_series} / {@link export_series_bf16} の本体。
+
+    `reference` (the borrowed goldens) belongs to the i4 series and `steps` (the own goldens) to
+    the bf16 series; each is `None` exactly for the other.
+
     MUST: 生成物は作業席へ書き、**全ての門**（PLE のビット一致・形検査・1-shot 期待表との
-    sanity）を通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を
-    残す（据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
+    sanity・bf16 は golden の margin も）を通してから据える。門より前に final へ置くと、落ちた
+    実走が「検収門を通れる資産」を残す（据え替えと後片付けの規律は core の原語
+    {@link karume.artifacts.staged_publication}）。
     MUST: 流用する golden の検めは席へ入る**前**（落ちるなら数十分の export を始める前に落とす）。
     MUST: PLE を落とす順序は「参照と各ケースの入力を 35 表経路で組む → i8 へ落とす →
     `per_layer` を落とす → export」。逆にすると参照側が i8 経路で作られ、ビット一致の門が
-    「同じ向きに間違った 2 つ」を突き合わせる形になる。
+    「同じ向きに間違った 2 つ」を突き合わせる形になる。bf16 の golden も 35 表経路で採るので、
+    i8 へ落とす前に採る。
     """
+    if storage not in STORAGES:
+        raise ValueError(f"storage '{storage}' is not one of {' / '.join(STORAGES)}")
+    bf16 = storage == BF16_STORAGE
+    if (reference is None) != bf16 or (steps is None) == bf16:
+        raise ValueError(
+            f"storage '{storage}' with reference {reference} and steps {steps}"
+            " (the i4 series borrows goldens, the bf16 series takes its own)"
+        )
     wrapper = load_wrapper(model_dir)
-    # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
-    int8, int4, scales = one_shot.quantize_wrapper(wrapper)
-    specs = decode.rope_specs(wrapper.model.config)
+    config = wrapper.model.config
+    specs = decode.rope_specs(config)
     cases = one_shot.build_cases(model_dir, sym_max, wrapper.sliding_window)
     greedy_cases = tuple(case for case in cases if case[0] in decode.GREEDY_CASES)
-    assert_case_room(cases, 0, decode.max_position(wrapper.model.config))
-    reference_goldens = provenance.assert_reference_goldens(reference, greedy_cases)
+    limit = decode.max_position(config)
+    assert_case_room(cases, 0, limit)
+    if bf16:
+        # Function-scope imports: both modules import this one.
+        from gemma4 import export_product_qat as qat
+        from gemma4 import export_unified as unified
 
-    config = wrapper.model.config
+        assert steps is not None
+        assert_case_room(greedy_cases, steps, limit)
+        suppress = unified.suppress_tokens(model_dir, config)
+        # The upstream reference: the checkpoint's weights as loaded (the PLE tables not yet
+        # rounded), computed in f32 — measured against the goldens, not a gate. MUST: taken
+        # before the PLE rounding below (after it, both sides would hold the i8 tables).
+        print("[upstream] greedy continuations of the unrounded model", file=sys.stderr, flush=True)
+        view = qat.GreedyView(wrapper, specs, suppress)
+        upstream = {
+            name: greedy_continuation(view, ids, steps, label=f"{name} (upstream)")[0]
+            for name, ids in greedy_cases
+        }
+        # The linears and the embedding keep the checkpoint's bf16 values (the writer stores a
+        # weight as bf16 only when the round trip is exact, else fails — ADR 0131 decision 2), so
+        # nothing but the PLE tables is rounded. MUST: before every reference value (ADR 0006).
+        int8 = fake_quant_int8(wrapper, include=is_ple_table)
+        int4 = None
+        scales: dict[str, torch.Tensor] = {}
+        # Every linear but the tied head, plus the embedding (the head reads the same tensor).
+        bf16_weights = (
+            sum(1 for _ in iter_quant_targets(wrapper, include=one_shot.is_int4_module)) + 1
+        )
+        reference_goldens = None
+    else:
+        assert reference is not None
+        # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
+        int8, int4, scales = one_shot.quantize_wrapper(wrapper)
+        reference_goldens = provenance.assert_reference_goldens(reference, greedy_cases)
+
     layers = int(config.num_hidden_layers)
     dim = int(config.hidden_size_per_layer_input)
     # MUST: 行数の正本は読み込んだ分割表（config の欄は検査席の 8 行へ差し替え済み —
@@ -837,17 +965,31 @@ def export_series(
             name: ple.per_layer_inputs(wrapper.per_layer, ids, embed_scale) for name, ids in cases
         }
 
-    print("[ple] 35 表 → i8 値 + per-row scale", file=sys.stderr, flush=True)
-    values, row_scales = quantized_ple_tables(wrapper.per_layer, int8.scales)
-    # 実体は上で手放し済み。席そのものを落として、未使用の 35 表を export へ持ち込まない。
-    del wrapper.per_layer
-
     example_name, example_ids = max(cases, key=lambda case: case[1].shape[1])
 
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
         # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
         staged.mkdir()
+        if bf16:
+            # The goldens of the stored model (the PLE tables rounded, the rest the checkpoint's
+            # values), by full re-forward over the 35-table path — so before the tables go.
+            print(
+                f"[goldens] {[name for name, _ in greedy_cases]}, {steps} steps;"
+                f" suppressed ids {list(suppress)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            written, continuations, margins = _write_greedy(
+                view, greedy_cases, staged, steps=steps, floor=decode.MARGIN_FLOOR
+            )
+            del view
+
+        print("[ple] 35 表 → i8 値 + per-row scale", file=sys.stderr, flush=True)
+        values, row_scales = quantized_ple_tables(wrapper.per_layer, int8.scales)
+        # 実体は上で手放し済み。席そのものを落として、未使用の 35 表を export へ持ち込まない。
+        del wrapper.per_layer
+
         ple_assets_built = ple_container_assets(
             values,
             row_scales,
@@ -881,9 +1023,9 @@ def export_series(
                 # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
                 # （container-v1 §2.1）。
                 graph_name=GEMMA4_ROLE,
-                weight_dtype="i8",
+                weight_dtype=BF16_STORAGE if bf16 else "i8",
                 weight_scales=scales,
-                weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
+                weight_dtype_overrides={} if int4 is None else dict.fromkeys(int4.scales, "i4"),
                 assets=assets,
             )
         finally:
@@ -894,12 +1036,14 @@ def export_series(
         assert_ple_assets(staged / one_shot.MODEL_FILE, index, probe, probe_reference)
         # i8 の initializer は **PLE 35 表を外したぶんだけ減る** — 残るのは主 embedding
         # （tied lm_head と同一実体）1 本。台帳の本数から引くので、外し漏れは本数で落ちる。
-        form = assert_ir_form_product(
-            verified,
-            config,
-            {"i8": len(int8.scales) - layers, "i4": len(int4.scales)},
-            tokens,
+        # bf16: every linear and the embedding are bf16, and nothing is i8 / i4 (the PLE tables,
+        # the only i8 targets, left the graph).
+        storage_expectation = (
+            {BF16_STORAGE: bf16_weights, "i8": 0, "i4": 0}
+            if int4 is None
+            else {"i8": len(int8.scales) - layers, "i4": len(int4.scales)}
         )
+        form = assert_ir_form_product(verified, config, storage_expectation, tokens)
 
         print("[sanity] 全長 forward", file=sys.stderr, flush=True)
         first: dict[str, int] = {}
@@ -933,10 +1077,14 @@ def export_series(
         # 出所記録は容器と**同じ席**へ置く（据え替えが 1 回なので、新しい容器 + 古い記録という
         # 組が作れない）。名乗る系列名は据えた後の名前 — 席の名前ではない。
         print("[provenance] チェックポイント指紋 → reference.json", file=sys.stderr, flush=True)
+        if reference_goldens is None:
+            # The series' own goldens, as the q4_0 QAT series records them.
+            own = provenance.assert_reference_goldens(staged, greedy_cases)
+            reference_goldens = {**own, "series": out_dir.name, "suppressTokens": list(suppress)}
         record = provenance.build_record(out_dir, model_dir, reference_goldens)
         provenance.write_record(staged, record)
 
-    return {
+    summary: dict[str, Any] = {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),
         "outputs": len(verified.outputs),
@@ -952,24 +1100,84 @@ def export_series(
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         "case_lengths": {name: int(ids.shape[1]) for name, ids in cases},
-        "quantized": {"i8": int8.describe(), "i4": int4.describe()},
+        "quantized": (
+            {BF16_STORAGE: bf16_weights, "i8": int8.describe()}
+            if int4 is None
+            else {"i8": int8.describe(), "i4": int4.describe()}
+        ),
         "form": form,
         "reference": record["reference"],
         "sanity": sanity,
     }
+    if bf16:
+        summary.update(
+            {
+                "greedy": written,
+                "greedy_steps": steps,
+                "margin_min": {name: min(values) for name, values in sorted(margins.items())},
+                "continuation": {
+                    name: tokenizer.decode(continuation)
+                    for name, continuation in sorted(continuations.items())
+                },
+                # Per case, how many leading steps of the goldens the upstream reference shares
+                # (out of `greedy_steps`), and its own continuation where they part.
+                "upstream": {
+                    name: {
+                        "agreeing_steps": _leading_agreement(upstream[name], continuation),
+                        "continuation": tokenizer.decode(upstream[name]),
+                    }
+                    for name, continuation in sorted(continuations.items())
+                },
+            }
+        )
+    return summary
+
+
+def _leading_agreement(left: Sequence[int], right: Sequence[int]) -> int:
+    """The number of leading positions at which two token sequences agree."""
+    count = 0
+    for a, b in zip(left, right, strict=True):
+        if a != b:
+            break
+        count += 1
+    return count
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = one_shot.series_parser(
         __doc__.split("\n\n")[0], partial(one_shot.series_dir, suffix=GEMMA4_PRODUCT_SUFFIX)
     )
+    parser.add_argument("--storage", choices=STORAGES, default=I4_STORAGE)
     # 流用先は**同じモデル**の logits opt-in 系列（token-only 台本の `--reference` と同じ規律 —
-    # {@link gemma4.export_decode.run_variant_cli}）。
+    # {@link gemma4.export_decode.run_variant_cli}）。i4 only: the bf16 series takes its own.
     parser.add_argument("--reference", type=Path, default=None)
-    one_shot.add_model_default(
-        parser, "reference", partial(one_shot.series_dir, suffix=decode.DECODE_SUFFIX)
-    )
-    one_shot.run_series_cli(parser, export_series, argv)
+    # The bf16 series' greedy steps (default: the model's `gemma4.export_decode.GREEDY_STEPS`).
+    parser.add_argument("--steps", type=int, default=None)
+    args = parser.parse_args(argv)
+    bf16 = args.storage == BF16_STORAGE
+    # MUST: a knob of the other storage fails instead of being dropped (fail loudly).
+    if bf16 and args.reference is not None:
+        parser.error("--reference is the i4 series' borrowed goldens (bf16 takes its own)")
+    if not bf16 and args.steps is not None:
+        parser.error("--steps is the bf16 series' own goldens (i4 borrows them)")
+    # The defaults that depend on the storage as well as the model are filled here; the rest by
+    # `resolve_series_args` (the model defaults of `series_parser`).
+    if bf16:
+        if args.out is None:
+            args.out = one_shot.series_dir(args.model, BF16_PRODUCT_SUFFIX)
+        if args.steps is None:
+            args.steps = decode.GREEDY_STEPS[args.model]
+        del args.reference
+    else:
+        if args.reference is None:
+            args.reference = one_shot.series_dir(args.model, decode.DECODE_SUFFIX)
+        del args.steps
+    del args.storage
+    options = one_shot.resolve_series_args(args)
+    model_dir = options.pop("model_dir")
+    run = export_series_bf16 if bf16 else export_series
+    summary = run(model_dir, options.pop("out"), **options)
+    print(json.dumps({"model_dir": str(model_dir), **summary}, indent=1, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -33,7 +33,8 @@ from safetensors import safe_open
 from torch import nn
 from torch.export import Dim
 
-from _shared.container_read import read_asset, read_asset_declarations
+from _shared import decode_series as shared
+from _shared.container_read import read_asset, read_asset_declarations, read_stored
 from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
@@ -43,13 +44,20 @@ from gemma4.tests.test_export import HIDDEN, PLE_DIM, TINY_SYM_MAX, VOCAB, WINDO
 from gemma4.tests.test_export_decode import (
     DECODE_LAYER_TYPES,
     OWNER_LAYERS,
+    _StubSeriesTokenizer,
     _tiny_decode_config,
 )
 from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.pipeline import export_module
-from karume.ple import PLE_INDEX_ASSET, PleError, ple_block_ranges, ple_row_bytes
-from karume.quantize import quantize_to_int8
+from karume.ple import (
+    PLE_INDEX_ASSET,
+    PLE_INDEX_SCHEMA,
+    PleError,
+    ple_block_ranges,
+    ple_row_bytes,
+)
+from karume.quantize import quantize_to_int8, round_weights_to_bf16
 from karume.states import to_states_form
 
 #: tiny 系列で **2 本以上**の block を作らせる block 上限（実物は既定の 32 MiB で 9 本 —
@@ -935,6 +943,172 @@ class TestExportSeries:
                 reference=Path(tmp_path / "missing"),
             )
         assert not out_dir.exists()
+
+
+# ---- bf16 storage -----------------------------------------------------------
+
+#: The bf16 series' summary: the i4 series' fields, then the own goldens and the upstream reference.
+BF16_SUMMARY_KEYS = [
+    *PRODUCT_SUMMARY_KEYS,
+    "greedy",
+    "greedy_steps",
+    "margin_min",
+    "continuation",
+    "upstream",
+]
+
+#: The tiny bf16 series' greedy steps.
+BF16_STEPS = 2
+
+
+@pytest.fixture
+def tiny_bf16_series(monkeypatch, tiny_product_series):
+    """{@link tiny_product_series} with a bf16 checkpoint (the tiny model and tables rounded to
+    bf16 as the loader returns them — the real checkpoint is BF16), the loaded 2-D weights
+    recorded, generation defaults in the checkpoint directory and the margin floor at 0."""
+    cases, checkpoint, _reference, seen = tiny_product_series
+    load = gx.load_model_and_tables
+    weights: dict[str, torch.Tensor] = {}
+
+    def materials(model_dir, **options):
+        model, tables = load(model_dir, **options)
+        round_weights_to_bf16(model)
+        round_weights_to_bf16(tables)
+        weights.update(
+            {
+                f"model.{name}": parameter.detach().clone()
+                for name, parameter in model.named_parameters()
+                if parameter.dim() == 2
+            }
+        )
+        return model, tables
+
+    monkeypatch.setattr(gx, "load_model_and_tables", materials)
+    monkeypatch.setattr(decode, "MARGIN_FLOOR", 0.0)
+    (checkpoint / "generation_config.json").write_text(
+        json.dumps({"temperature": 1.0, "top_k": 64, "top_p": 0.95}), encoding="utf-8"
+    )
+    return cases, checkpoint, weights, seen
+
+
+class TestExportSeriesBf16:
+    def test_it_publishes_the_container_the_probe_the_goldens_and_the_record(
+        self, tiny_bf16_series, tmp_path
+    ):
+        cases, checkpoint, _weights, seen = tiny_bf16_series
+        out_dir = tmp_path / "gemma4-e2b-product-bf16"
+
+        summary = product.export_series_bf16(
+            checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS
+        )
+
+        greedy = [f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}" for name, _ in cases]
+        assert sorted(path.name for path in out_dir.iterdir()) == sorted(
+            [product.PLE_PROBE_FILE, provenance_file(), *greedy, *_container_files(out_dir)]
+        )
+        assert list(summary) == BF16_SUMMARY_KEYS
+        assert summary["greedy"] == greedy
+        assert summary["greedy_steps"] == BF16_STEPS
+        assert set(seen["greedy"]) == {name for name, _ in cases}
+        assert list(tmp_path.iterdir()) == [out_dir]
+
+    def test_every_linear_and_the_embedding_hold_the_loaded_bits_as_bf16(
+        self, tiny_bf16_series, tmp_path
+    ):
+        """The checkpoint's values are stored as they are: no i8 / i4 weight, and every bf16
+        tensor decodes to the loaded weight bit for bit."""
+        _, checkpoint, weights, _ = tiny_bf16_series
+        out_dir = tmp_path / "series"
+
+        summary = product.export_series_bf16(
+            checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS
+        )
+
+        stored = read_stored(out_dir / gx.MODEL_FILE)
+        compressed = {key: entry for key, entry in stored.items() if entry.layout != "f32"}
+        assert {entry.layout for entry in compressed.values()} == {product.BF16_STORAGE}
+        assert len(compressed) == summary["quantized"][product.BF16_STORAGE]
+        assert summary["form"]["storage"].get("i8", 0) == 0
+        assert summary["form"]["storage"].get("i4", 0) == 0
+        # The tied pair is one tensor under whichever of its two names the trace kept.
+        embedding, head = f"{gx.EMBED_TOKENS_MODULE}.weight", f"{gx.LM_HEAD_MODULE}.weight"
+        assert any(key in compressed for key in (embedding, head))
+        for key, entry in compressed.items():
+            source = embedding if key == head else key
+            decoded = (
+                torch.frombuffer(bytearray(entry.payload), dtype=torch.int16)
+                .view(torch.bfloat16)
+                .to(torch.float32)
+                .reshape(entry.shape)
+            )
+            assert torch.equal(decoded, weights[source]), key
+
+    def test_the_ple_stays_schema_3_i8_and_reads_back_bit_for_bit(self, tiny_bf16_series, tmp_path):
+        _, checkpoint, _, _ = tiny_bf16_series
+        out_dir = tmp_path / "series"
+
+        product.export_series_bf16(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS)
+
+        index = _published_index(out_dir)
+        assert index["schema"] == PLE_INDEX_SCHEMA
+        assert index["storage"] == product.PLE_STORAGE == "i8"
+        with safe_open(str(out_dir / product.PLE_PROBE_FILE), framework="pt") as handle:
+            probe = [int(token) for token in handle.get_tensor(product.PROBE_TOKENS_KEY)]
+            expected = handle.get_tensor(product.PROBE_INPUTS_KEY)
+        product.assert_ple_assets(out_dir / gx.MODEL_FILE, index, probe, expected)
+
+    def test_the_record_names_the_series_own_goldens(self, tiny_bf16_series, tmp_path):
+        cases, checkpoint, _, _ = tiny_bf16_series
+        out_dir = tmp_path / "gemma4-e4b-product-bf16"
+
+        product.export_series_bf16(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS)
+
+        record = json.loads((out_dir / provenance_file()).read_text(encoding="utf-8"))
+        assert record["series"] == out_dir.name
+        assert record["reference"]["series"] == out_dir.name
+        assert record["reference"]["suppressTokens"] == []
+        assert sorted(record["reference"]["goldens"]) == sorted(
+            f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}" for name, _ in cases
+        )
+
+    def test_the_goldens_are_the_stored_model_s_and_upstream_is_measured_against_them(
+        self, tiny_bf16_series, tmp_path
+    ):
+        """Each golden is the greedy continuation its file records, and `upstream` counts the
+        leading steps the unrounded model shares with it (at most every step)."""
+        cases, checkpoint, _, _ = tiny_bf16_series
+        out_dir = tmp_path / "series"
+
+        summary = product.export_series_bf16(
+            checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS
+        )
+
+        for name, ids in cases:
+            path = out_dir / f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}"
+            with safe_open(str(path), framework="pt") as handle:
+                assert torch.equal(handle.get_tensor(shared.PROMPT_KEY).to(torch.int64), ids[0])
+                expected = handle.get_tensor(shared.EXPECTED_KEY).tolist()
+            assert len(expected) == BF16_STEPS
+            assert summary["continuation"][name] == _StubSeriesTokenizer().decode(expected)
+            assert 0 <= summary["upstream"][name]["agreeing_steps"] <= BF16_STEPS
+
+    def test_a_knob_of_the_other_storage_fails_before_the_load(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            gx, "load_model_and_tables", lambda *args, **kwargs: pytest.fail("loaded")
+        )
+
+        with pytest.raises(SystemExit):
+            product.main(["--storage", "bf16", "--reference", "elsewhere"])
+        with pytest.raises(SystemExit):
+            product.main(["--steps", "3"])
+        assert "--reference" in capsys.readouterr().err
+
+
+class TestLeadingAgreement:
+    def test_it_counts_the_shared_prefix(self):
+        assert product._leading_agreement([1, 2, 3], [1, 2, 4]) == 2
+        assert product._leading_agreement([1, 2], [1, 2]) == 2
+        assert product._leading_agreement([5], [1]) == 0
 
 
 def provenance_file() -> str:
