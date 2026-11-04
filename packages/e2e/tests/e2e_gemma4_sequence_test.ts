@@ -55,7 +55,7 @@
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
-import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import {
@@ -797,7 +797,15 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
       const source = await pipeline.sequence({ speculative: "always" });
       await forkTurn(source, p0);
       const forked = await source.fork();
+      // Hand-outs still allocating when dispose is issued: dispose waits for them before closing
+      // the Sessions they borrow (Pipeline.#inFlight), so it resolves, and each of them is closed
+      // by the hand-out itself and rejects. Without the wait, the target Session's dispose could run
+      // while their contexts still borrow it and dispose would reject with "still lent out".
+      const allocating = pipeline.sequence({ speculative: "always" });
+      const copying = forked.fork();
       await pipeline.dispose();
+      await assertRejects(() => allocating, Error, "cannot create a sequence after dispose");
+      await assertRejects(() => copying, Error, "cannot create a sequence after dispose");
       // 分岐の sequence が dispose 済み（= drafter の借り手 → 複製した context の順に返した）。
       // 巻き取られていなければ、ここは同期に投げず、dispose 済みの Session への run で後から
       // 落ちる。

@@ -1929,16 +1929,47 @@ export class GemmaPipeline {
     const state = this.#state;
     const speculative = speculativeSetup(state, options.speculative);
     const onRun = runDiagnosticsHook(state);
-    const inner = await createGenerationSequence({
-      session: state.greedyOutput?.session ?? state.session,
-      ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
-      ...(state.greedyOutput?.ahead === undefined ? {} : { greedyAhead: state.greedyOutput.ahead }),
-      program: state.wiring,
-      ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
-      ...(speculative === undefined ? {} : { speculative }),
-      ...(onRun === undefined ? {} : { onRun }),
-    });
-    return await this.#hand(inner);
+    // Tracked from the call on: a dispose issued while this allocates waits for it (#inFlight).
+    return await this.#track(
+      (async (): Promise<GenerationSequence> => {
+        const inner = await createGenerationSequence({
+          session: state.greedyOutput?.session ?? state.session,
+          ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
+          ...(state.greedyOutput?.ahead === undefined
+            ? {}
+            : { greedyAhead: state.greedyOutput.ahead }),
+          program: state.wiring,
+          ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
+          ...(speculative === undefined ? {} : { speculative }),
+          ...(onRun === undefined ? {} : { onRun }),
+        });
+        return await this.#hand(inner);
+      })(),
+    );
+  }
+
+  /**
+   * Hand-outs still in flight (a `sequence()` allocating, a branch being copied, or the
+   * `inner.dispose()` that {@link Pipeline.#hand} runs when disposal started meanwhile).
+   *
+   * MUST: `dispose` waits for every one of these before closing the Sessions. Such an inner sequence
+   * borrows the target Session (and the drafter's) but is not in `#handed` yet, so without the wait
+   * its dispose raced the steps of the dispose chain (drafter Session → target Session) and was
+   * queued first only because of how many awaits each side happened to take — reversed, the target
+   * Session's dispose fails loudly ("still lent out") and the borrower is closed after its lender.
+   * Entries are added synchronously at the call (`sequence()` / `fork()` check `#disposal` first, so
+   * none is added after the chain body starts).
+   */
+  readonly #inFlight = new Set<Promise<unknown>>();
+
+  /** Tracks one hand-out in {@link Pipeline.#inFlight} until it settles. */
+  #track<T>(handing: Promise<T>): Promise<T> {
+    this.#inFlight.add(handing);
+    const untrack = (): void => {
+      this.#inFlight.delete(handing);
+    };
+    handing.then(untrack, untrack);
+    return handing;
   }
 
   /**
@@ -1980,7 +2011,7 @@ export class GemmaPipeline {
         if (this.#disposal !== undefined) {
           throw new Error(`${state.entry}: cannot create a sequence after dispose`);
         }
-        return inner.fork().then((forked) => this.#hand(forked));
+        return this.#track(inner.fork().then((forked) => this.#hand(forked)));
       },
       dispose: async (): Promise<void> => {
         await inner.dispose();
@@ -2211,6 +2242,10 @@ export class GemmaPipeline {
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(async () => {
+      // MUST: before walking #handed — a hand-out in flight is in neither set yet, and its inner
+      // sequence borrows the Sessions closed below (#inFlight). Each one either joins #handed or
+      // disposes its inner itself (#hand's re-check), so after this wait #handed is complete.
+      await Promise.allSettled([...this.#inFlight]);
       const handed = [...this.#handed];
       this.#handed.clear();
       await disposeSteps([
