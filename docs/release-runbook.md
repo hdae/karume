@@ -128,11 +128,15 @@ after changing to the repository root, so the pin applies to it too.
       `KARUME_ALLOW_NO_ASSETS` / `KARUME_ALLOW_NO_REFERENCE` / `KARUME_ALLOW_NO_DISTRIBUTION`), but
       **a green run in an environment with any of them set is not used for the release decision** (by default `gpu_gate_test.ts` /
       `e2e_assets_gate_test.ts` / the reference guard of each series / `distribution_gate_test.ts` FAIL it)
-- [ ] **No recording mode is set**: `KARUME_REFERENCE` (`write` / `rewrite`) and
-      `KARUME_SURFACE=write` rewrite the expected values from measurements; they are not checks. In particular the reference guard's green condition is
+- [ ] `pnpm --filter @karume/playground test` green — the playground suite is outside the lanes (its own `vite.config.ts`), so the
+      root `vp test` does not run it (ADR [0129](decisions/0129-test-layout-and-lanes.md) decision 2). It needs no GPU (its GPUs are fakes)
+      and takes a few seconds; CI runs it too (job `check`, step "Test (playground)")
+- [ ] **No recording mode is set**: `KARUME_REFERENCE` (`write` / `rewrite`),
+      `KARUME_SURFACE=write` and `KARUME_WGSL_SNAPSHOT=write` (rewrites every WGSL snapshot from the current generators —
+      `packages/runtime/tests/codegen_wgsl_test.ts`) rewrite the expected values from measurements; they are not checks. In particular the reference guard's green condition is
       "green even with 0 rows in a recording mode" (`packages/runtime/tests/helpers/reference.ts`), so
       leaving `KARUME_REFERENCE` on the release machine makes **every sha256 check green as
-      `written` without comparing anything**. Only a green run with both unset is used for the release decision
+      `written` without comparing anything**. Only a green run with all of them unset is used for the release decision
 - [ ] In a release that changes the WGSL or the selection condition of the subgroup variants (`rmsNormReduce: "subgroup32"` / `linearGemvReduce: "parallel-subgroup32"`)
       or a bit-identical states-attention rewrite (the folded ①′ / unrolled ③′ — perf-ledger K-55 / K-91),
       run the playground's `/kernel-check` page (**Run all**) in Chrome on the D3D12 machine (and on Metal when one is at hand) and keep its record

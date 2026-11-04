@@ -45,6 +45,11 @@ jobs:
           KARUME_ALLOW_NO_ASSETS: "1"
           KARUME_ALLOW_NO_DISTRIBUTION: "1"
         run: pnpm exec vp test --project core
+      - name: Test (playground)
+        # The playground suite is outside the lanes (its own vite.config.ts), so `vp test` at the
+        # root does not run it (ADR 0129 decision 2). It loads no Dawn setup file: every GPU in it
+        # is a fake, so it needs no GPU flag.
+        run: pnpm --filter @karume/playground test
 
   publish-dry-run:
     # `vp check` type-checks with the DOM lib and cannot see where Deno's lib differs (Deno's
