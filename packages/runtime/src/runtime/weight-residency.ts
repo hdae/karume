@@ -239,7 +239,7 @@ const expectedSharedSeat = (
   seat: Extract<WeightResidency, { readonly seat: "shared" }>,
 ): Exclude<WeightResidency["seat"], "shared"> => {
   const layout = codecLayout(codec);
-  if (layout === "f32" || layout === "i32" || layout === "bf16") return "raw";
+  if (layout === "f32" || layout === "i32") return "raw";
   const resident =
     layout === "i4"
       ? seat.eligible && seat.i4Eligible
