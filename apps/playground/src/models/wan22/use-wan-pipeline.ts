@@ -37,6 +37,16 @@ export type PipelineState =
 
 export type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 
+/**
+ * Disposes a pipeline the page no longer uses: the one the cleanup drops, and a build that finished
+ * after the cleanup aborted it. A failure (a flush on a lost device) has no page state left to show
+ * it in, so it goes to the console. Resolves when the dispose has settled; never rejects.
+ */
+const release = (pipeline: Ti2vPipeline, track: TrackGpuWork): Promise<void> =>
+  track(pipeline.dispose()).catch((error: unknown) => {
+    console.error("Wan2.2: releasing the pipeline failed", error);
+  });
+
 export const useWanPipeline = (input: {
   readonly gpu: GpuContext | undefined;
   readonly source: PipelineSource;
@@ -108,7 +118,7 @@ export const useWanPipeline = (input: {
     void track(
       build().then(async (pipeline) => {
         if (controller.signal.aborted) {
-          await pipeline.dispose();
+          await release(pipeline, track);
           return undefined;
         }
         return pipeline;
@@ -136,12 +146,8 @@ export const useWanPipeline = (input: {
     return () => {
       controller.abort();
       // The GPU belongs to the page; dispose only drops the pipeline (it waits for a running
-      // generation first). A failure (a flush on a lost device) has no page left to show it on.
-      if (built !== undefined) {
-        track(built.dispose()).catch((error: unknown) => {
-          console.error("Wan2.2: releasing the pipeline failed", error);
-        });
-      }
+      // generation first).
+      if (built !== undefined) void release(built, track);
     };
   }, [gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics, track]);
 

@@ -34,6 +34,16 @@ export type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiag
 
 const MIB = 2 ** 20;
 
+/**
+ * Disposes a pipeline the page no longer uses: the one the cleanup drops, and a build that finished
+ * after the cleanup aborted it. A failure (a flush on a lost device) has no page state left to show
+ * it in, so it goes to the console. Resolves when the dispose has settled; never rejects.
+ */
+const release = (pipeline: Pipeline, track: TrackGpuWork): Promise<void> =>
+  track(pipeline.dispose()).catch((error: unknown) => {
+    console.error("Style-Bert-VITS2: releasing the pipeline failed", error);
+  });
+
 export const useSbv2Pipeline = (input: {
   readonly gpu: GpuContext | undefined;
   readonly source: PipelineSource;
@@ -79,7 +89,7 @@ export const useSbv2Pipeline = (input: {
     void track(
       build.then(async (pipeline) => {
         if (controller.signal.aborted) {
-          await pipeline.dispose();
+          await release(pipeline, track);
           return undefined;
         }
         return pipeline;
@@ -104,13 +114,8 @@ export const useSbv2Pipeline = (input: {
     );
     return () => {
       controller.abort();
-      // The GPU belongs to the page: dispose drops only the pipeline, after a running synthesis. A
-      // failure (a flush on a lost device) has no page state left to show it in.
-      if (built !== undefined) {
-        track(built.dispose()).catch((error: unknown) => {
-          console.error("Style-Bert-VITS2: releasing the pipeline failed", error);
-        });
-      }
+      // The GPU belongs to the page: dispose drops only the pipeline, after a running synthesis.
+      if (built !== undefined) void release(built, track);
     };
   }, [gpu, source, model, quant, diagnostics, track]);
 
