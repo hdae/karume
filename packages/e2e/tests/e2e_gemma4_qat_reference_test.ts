@@ -12,6 +12,8 @@
  * `session` declares the regular line's flags).
  * The seats run without the drafter — speculation selects the same tokens (the identity is pinned
  * by `e2e_gemma4_qat_mirror_test.ts` ③), so a speculative row would fix the same ids twice.
+ * One more row, `e2b/i4-fast@16k`, runs a long document at capacity 16384, so a later change that
+ * moves only the long positions is caught too.
  *
  * The asset is the local mirror `models/karume-gemma4-qat/` (outside git); without it the
  * cases SKIP explicitly (`mirrorAvailable`).
@@ -25,7 +27,9 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { mirrorDirectory, mirrorRoot } from "../../models/tests/helpers/mirror.ts";
 import {
+  LONG_CONTEXT_PROMPT,
   mirrorSeats,
+  type Seat,
   seatCaseId,
   settleSeatReference,
 } from "../../models/tests/helpers/gemma-reference.ts";
@@ -64,8 +68,30 @@ for (const seat of SEATS) {
   );
 }
 
+/** The preset of the long-position row: E2B's fused preset, the fastest at long positions. */
+const LONG_SEAT: Seat | undefined = SEATS.find(
+  (seat) => seat.model === "e2b" && seat.quant === "i4-fast",
+);
+const LONG_ID = `e2b/i4-fast${LONG_CONTEXT_PROMPT.suffix}`;
+test.skipIf(!RUNNABLE || LONG_SEAT === undefined || references.lacksReference(LONG_ID))(
+  `gemma4-qat ${LONG_ID}: the greedy token ids at a long position equal this machine's reference (real GPU)`,
+  () => {
+    if (LONG_SEAT === undefined) throw new Error("registered without the preset");
+    return settleSeatReference({
+      references,
+      results,
+      seat: LONG_SEAT,
+      prompt: LONG_CONTEXT_PROMPT,
+      open: (choice) => Pipeline.fromPretrained(mirrorDirectory(MIRROR), choice),
+    });
+  },
+);
+
 /** Every case id of this gate (the missing ones are announced once at registration). */
-const CASE_IDS: readonly string[] = SEATS.map(seatCaseId);
+const CASE_IDS: readonly string[] = [
+  ...SEATS.map(seatCaseId),
+  ...(LONG_SEAT === undefined ? [] : [LONG_ID]),
+];
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 // A missing reference of this environment is not a silent green (ADR 0005's rule).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

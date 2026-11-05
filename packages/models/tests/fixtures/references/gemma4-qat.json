@@ -11,6 +11,9 @@
     "e2b/i4-fast": {
       "node-nvidia-geforce-rtx-3080-ti": "df8e40f71e0efbeea138ec9a27eb2ab41a221a5e7760e55be0c15c54caceff12"
     },
+    "e2b/i4-fast@16k": {
+      "node-nvidia-geforce-rtx-3080-ti": "dbd77c9084604c428124a000003769af353009115b0107d166d700f82205e4fe"
+    },
     "e2b/i4-gemvpar": {
       "node-nvidia-geforce-rtx-3080-ti": "df8e40f71e0efbeea138ec9a27eb2ab41a221a5e7760e55be0c15c54caceff12"
     },

@@ -59,6 +59,33 @@ export const REFERENCE_PROMPT = "Explain in about five sentences why the sky is 
  */
 export const REFERENCE_MAX_NEW_TOKENS = 64;
 
+/**
+ * A row at a long position: the fixed prompt is a long document, so the pinned ids also depend on
+ * the attention and RoPE at about 16K tokens, which {@link REFERENCE_PROMPT} never reaches. `capacity`
+ * is above the manifests' 4096, so the row also covers a chat that raises it. The document is built
+ * here rather than read from a file, so editing a tracked document cannot move the row.
+ */
+export const LONG_CONTEXT_PROMPT: SeatPrompt = {
+  suffix: "@16k",
+  capacity: 16384,
+  content: `${Array.from({ length: 263 }, (_, index) => {
+    const day = index + 1;
+    return (
+      `Entry ${day}. On day ${day} the keeper of the northern light wrote that the wind turned ${["east", "west", "south", "north"][day % 4]} ` +
+      `before dawn, that ${3 + (day % 7)} ships passed the reef, and that the lamp oil measured ${(day * 37) % 100} gallons. ` +
+      `He mended the ${["rope", "lens", "door", "stair", "bell"][day % 5]} and noted the tide at ${(day * 13) % 24} hours.\n`
+    );
+  }).join("")}\nWrite a long, detailed story inspired by this logbook. Do not stop early.`,
+};
+
+/** A fixed prompt other than {@link REFERENCE_PROMPT}, with what its row needs. */
+export type SeatPrompt = {
+  /** Appended to the case id and the artifact name. */
+  readonly suffix: string;
+  readonly content: string;
+  readonly capacity: number;
+};
+
 /** The pipeline surface a run needs (common to `gemma.Pipeline` and `gemma4QatMobile.Pipeline`). */
 export type ChatPipeline = {
   chat(messages: readonly ChatMessage[], options: ChatOptions): ChatStream;
@@ -83,8 +110,8 @@ export const seatCaseId = (seat: Pick<Seat, "model" | "quant">): string =>
  * The artifact's file name (relative to the results directory — `/` cannot appear, so the parts are
  * joined with `-`).
  */
-export const seatArtifactName = (seat: Pick<Seat, "model" | "quant">): string =>
-  `${seat.model}-${seat.quant}.json`;
+export const seatArtifactName = (seat: Pick<Seat, "model" | "quant">, suffix = ""): string =>
+  `${seat.model}-${seat.quant}${suffix}.json`;
 
 /**
  * Enumerates **every model × every quant preset** from the mirror's manifest and derives each row's
@@ -127,12 +154,14 @@ export type SeatRun = {
 export const runSeat = async <Model extends string>(
   open: (choice: { readonly model: Model; readonly quant: string }) => Promise<ChatPipeline>,
   seat: Seat<Model>,
+  prompt?: SeatPrompt,
 ): Promise<SeatRun> => {
   const pipeline = await open({ model: seat.model, quant: seat.quant });
   try {
     const ids: number[] = [];
-    const stream = pipeline.chat([{ role: "user", content: REFERENCE_PROMPT }], {
+    const stream = pipeline.chat([{ role: "user", content: prompt?.content ?? REFERENCE_PROMPT }], {
       maxNewTokens: REFERENCE_MAX_NEW_TOKENS,
+      ...(prompt === undefined ? {} : { capacity: prompt.capacity }),
       sampler: { temperature: 0 },
       speculative: false,
       onToken: (id) => ids.push(id),
@@ -176,9 +205,10 @@ export const settleSeatReference = async <Model extends string>(context: {
     readonly model: Model;
     readonly quant: string;
   }) => Promise<ChatPipeline>;
+  readonly prompt?: SeatPrompt;
 }): Promise<void> => {
-  const { references, results, seat, open } = context;
-  const id = seatCaseId(seat);
+  const { references, results, seat, open, prompt } = context;
+  const id = `${seatCaseId(seat)}${prompt?.suffix ?? ""}`;
   /** The sha settlement (taken outside so that a mismatch fails after recording). */
   let settlement: ReferenceSettlement | undefined;
   await runRecordedCase(
@@ -192,7 +222,7 @@ export const settleSeatReference = async <Model extends string>(context: {
       // and the running adapter is checked first (the pipeline calls acquireGpu internally, so we
       // do not hold a GpuContext ourselves).
       await assertRunningAdapter();
-      const run = await runSeat(open, seat);
+      const run = await runSeat(open, seat, prompt);
       // The precondition of the check's strength (it generated up to the limit = the pinned id
       // sequence has {@link REFERENCE_MAX_NEW_TOKENS} ids). Checked before settling — no row is
       // made from a run that closed early with EOS. The text goes into the diagnostic (it becomes
@@ -202,7 +232,7 @@ export const settleSeatReference = async <Model extends string>(context: {
         `${id}: the response closed after ${run.ids.length} tokens (${seatNote(run)}) — ` +
           `the fixed prompt is expected to produce a response longer than ${REFERENCE_MAX_NEW_TOKENS} tokens`,
       );
-      const artifact = seatArtifactName(seat);
+      const artifact = seatArtifactName(seat, prompt?.suffix);
       settlement = await settleReference(references, results, {
         id,
         artifact,
