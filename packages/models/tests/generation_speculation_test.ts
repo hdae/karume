@@ -2520,3 +2520,55 @@ test("T18 fork: the gate is copied, not shared (switching only the fork does not
   await forked.dispose();
   await opened.sequence.dispose();
 });
+
+// ---- a request without maxNewTokens (ADR 0083 addendum 2026-11-05) ----------------------
+
+describe("speculation without maxNewTokens runs to the limit", () => {
+  /** PROMPT is 2 tokens, so the limit is K = 16 − 2 + 1 = 15. */
+  const CAPACITY = 16;
+  const LIMIT = 15;
+  const program = { capacity: CAPACITY };
+
+  for (const [name, drafter] of [
+    ["all accepted", (): FakeDrafter => oracleDrafter()],
+    ["none accepted", (): FakeDrafter => wrongDrafter()],
+    ["partly accepted", (): FakeDrafter => partialDrafter(1)],
+  ] as const) {
+    it(`yields the tokens of an explicit limit and asks for no row past the capacity (${name})`, async () => {
+      const absent = await runSpeculative({
+        drafter: drafter(),
+        request: { prompt: PROMPT },
+        program,
+      });
+      const explicit = await runSpeculative({
+        drafter: drafter(),
+        request: { prompt: PROMPT, maxNewTokens: LIMIT },
+        program,
+      });
+
+      assertEquals(absent.stop.reason, "capacity");
+      assertEquals(absent.stop.tokens, LIMIT);
+      assertEquals(explicit.stop.reason, "max-tokens");
+      assertEquals(tokenIds(absent.events), tokenIds(explicit.events));
+      assertEquals(absent.fake.calls, explicit.fake.calls);
+      assertEquals(absent.fake.commits, explicit.fake.commits);
+      assert(
+        absent.fake.calls.every((call) => call.pastBefore + call.queryLength <= CAPACITY),
+        "a run reached past the capacity",
+      );
+      assertEquals(absent.fake.pastLength(), CAPACITY);
+      assertEquals(absent.fake.pendingCommit(), undefined);
+    });
+  }
+
+  it("a prompt with K = 1 takes no draft", async () => {
+    const run = await runSpeculative({
+      drafter: oracleDrafter(),
+      request: { prompt: Array.from({ length: CAPACITY }, (_unused, index) => (index % 14) + 1) },
+      program,
+    });
+    assertEquals(run.stop.reason, "capacity");
+    assertEquals(run.stop.tokens, 1);
+    assertEquals(run.drafter.calls.length, 0);
+  });
+});

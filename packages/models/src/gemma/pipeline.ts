@@ -635,8 +635,12 @@ export type ChatOptions = {
   /**
    * The upper limit of tokens to sample (at least 1). Stop tokens **count** toward it (the same
    * accounting as `GenerationRequest.maxNewTokens`).
+   *
+   * Omitted = until a stop token or until this turn's sequence is full (`done` then reports
+   * `capacity`). `chat` has no history to keep room for, so nothing is reserved; a prompt that alone
+   * does not fit fails with `GenerationCapacityError`.
    */
-  readonly maxNewTokens: number;
+  readonly maxNewTokens?: number;
   /**
    * Additional stop **tokens** for this turn only (unioned with the distribution's EOS set —
    * `GenerationRequest.stopTokens`). Out-of-vocabulary ids and duplicates fail loudly.
@@ -1797,7 +1801,7 @@ export class GemmaPipeline {
     const sampler = chosen === undefined ? undefined : snapshotSpec(chosen);
     const request: GenerationRequest = {
       prompt,
-      maxNewTokens: options.maxNewTokens,
+      ...(options.maxNewTokens === undefined ? {} : { maxNewTokens: options.maxNewTokens }),
       ...(options.stopTokens === undefined ? {} : { stopTokens: [...options.stopTokens] }),
       ...(sampler === undefined ? {} : { sampler }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),

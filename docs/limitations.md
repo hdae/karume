@@ -2360,6 +2360,13 @@ VRAM grows in proportion to the capacity (full-layer KV
 `gemma.Pipeline.estimateSessionMemory({ capacity, chunkLength })` can estimate it before allocation (only the
 required total — it does not compare with the free side).
 
+- **A turn without `maxNewTokens` can fill the capacity, and the next turn pays a re-prefill** (ADR
+  [0083](decisions/0083-generation-api-surface.md) addendum 2026-11-05): such a turn generates until a stop token or the limit, and at the
+  limit it closes as `capacity`. There is no context shift, so the reply is cut there. On `gemma.ChatSession` it is a cut-off turn like
+  max-tokens: the streamed text stays in the history, the KV is discarded, and the next turn re-renders the history into a new sequence —
+  up to the whole capacity of prefill. That history just filled the capacity, so overflow handling also drops older exchanges first
+  (`reserveNewTokens`, default 1024, is the room it keeps free; a `capacity` smaller than prompt + reserve fails loudly rather than clamping
+  it). A long reply therefore costs one long prefill on the following turn; setting `maxNewTokens` is what avoids reaching the limit.
 - **Changing `chunkLength` can move the greedy token sequence**: the row statistics of the sliding layers assign the columns of S to 256
   lanes with an origin that depends on `past`, so when the chunk stride (= the sequence of `past` values) changes, the way the f32
   partial sums are folded changes (the full layers and linear are unchanged). Measured (RTX 3080 Ti, P=4,096, 24 tokens),
@@ -2412,7 +2419,7 @@ the dedicated type separates out that one case.
 
 **This constraint applies only to the low-level surface (`gemma.Pipeline.sequence()` / `chat()`)**. The high-level
 surface `gemma.ChatSession` **has the same remedy as its default policy** — **before** sending each turn it compares
-`used + prompt + maxNewTokens - 1` with the limit, and if it exceeds it, rebuilds the history with `onOverflow` (default
+`used + prompt + maxNewTokens - 1` (`reserveNewTokens` in place of `maxNewTokens` on a turn without one) with the limit, and if it exceeds it, rebuilds the history with `onOverflow` (default
 `dropOldestTurns` = drop the oldest user / assistant pair, keep system) before
 firing. The policy can be replaced wholesale, and passing a function that throws lets the host side handle it as before. When there is nothing
 left to drop (and when the policy did not shrink the history), it fails with the same `GenerationCapacityError`.

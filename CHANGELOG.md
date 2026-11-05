@@ -17,6 +17,13 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/models`: a Gemma 4 turn can omit `maxNewTokens` and generate until a stop token or
+  until the conversation is full, like llama.cpp's `-n -1` with context shift off
+  (`GenerationRequest`, `ChatOptions`, `ChatSessionOptions`, `ChatTurnOptions`; ADR 0083 addendum
+  of 2026-11-05). Such a turn closes with the new stop reason `capacity`. `ChatSession` keeps
+  `reserveNewTokens` free in its overflow check (default 1024): it decides which history is
+  dropped and does not limit the reply. A `capacity` smaller than prompt + reserve fails loudly,
+  naming that option.
 - `@karume/models`: function calling and thinking in the Gemma 4 chat layer (`gemma.*` and
   `gemma4QatMobile.*`; ADR 0084 addendum of 2026-11-04). `chatPrompt` / `chatTurn` take template
   options `{ tools, enableThinking, preserveThinking }` and messages in the HF / OpenAI shape —
@@ -74,6 +81,9 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/models/gemma`: `GenerationStop` and `ChatStop` gain the reason `"capacity"`. Code that
+  switches exhaustively over `reason` follows the new branch. `maxNewTokens` is optional on
+  `GenerationRequest`, so code that reads it from a request type handles `undefined`.
 - `@karume/models/gemma`: `ChatRole` gains `"tool"` and `ChatMessage` becomes a union of
   `ChatTextMessage` / `ChatAssistantMessage` / `ChatToolMessage` (every one with `content:
   string`). Code that switches exhaustively over a message's `role` follows the new branch.

@@ -119,13 +119,15 @@ const fakeDependencies = (
                 throw error;
               }
               options.onPrefill?.({ chunk: 1, chunks: 1 });
-              for (let token = 0; token < options.maxNewTokens - 1; token += 1) {
+              const maxNewTokens = options.maxNewTokens;
+              if (maxNewTokens === undefined) throw new Error("the runner sets maxNewTokens");
+              for (let token = 0; token < maxNewTokens - 1; token += 1) {
                 options.signal?.throwIfAborted();
                 probe.record();
                 options.onToken?.(100 + token);
               }
               probe.record();
-              settle({ reason: "eos", tokens: options.maxNewTokens, token: 1 });
+              settle({ reason: "eos", tokens: maxNewTokens, token: 1 });
               return "text";
             },
           };

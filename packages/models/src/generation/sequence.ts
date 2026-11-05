@@ -191,7 +191,13 @@ export type GenerationCapacityDetail = {
    * next turn too).
    */
   readonly promptLength: number;
-  /** `maxNewTokens` of the failed request. */
+  /**
+   * `maxNewTokens` of the failed request.
+   *
+   * A request without one fails only when its prompt alone does not fit, and reports 1 (the smallest
+   * turn there is). `ChatSession`'s up-front check of a turn without one reports the reserve it
+   * could not keep (`ChatSessionOptions.reserveNewTokens`).
+   */
   readonly requestedNewTokens: number;
   /** The value of the limit `constraint` points at. */
   readonly limit: number;
@@ -273,6 +279,11 @@ export type GenerationEvent =
  * the conversation = it is the `pendingToken` prepended to the next turn's prefill.
  *
  * `closed` is when the consumer closed with `break` / `return()` (`aborted` is via `AbortSignal`).
+ *
+ * The two limit branches are told apart by the request, not by the numbers, so a UI can say which
+ * one happened: `max-tokens` is a request **with** `maxNewTokens` that drew all of it (even when it
+ * equals the room the conversation had), and `capacity` is a request **without** one that filled the
+ * conversation (the context is full).
  */
 export type GenerationStop = {
   /**
@@ -285,7 +296,8 @@ export type GenerationStop = {
    * for gated turns). For the body-only count (= the number of `token` events), subtract 1 for the
    * two branches that carry a stop token (`"eos"` / `"stop-token"`).
    *
-   * For `max-tokens` it equals the request's `maxNewTokens`; for `closed` / `aborted` it is the
+   * For `max-tokens` it equals the request's `maxNewTokens`; for `capacity` the limit the turn
+   * resolved (the doc of {@link GenerationRequest.maxNewTokens}); for `closed` / `aborted` it is the
    * number produced before the cut (both mean "the conversation advanced by the successful runs" —
    * the same line as the section above. Speculation also commits only up to the delivered tokens,
    * so this number = the generated tokens that entered the conversation).
@@ -305,6 +317,7 @@ export type GenerationStop = {
   | { readonly reason: "eos"; readonly token: number }
   | { readonly reason: "stop-token"; readonly token: number }
   | { readonly reason: "max-tokens" }
+  | { readonly reason: "capacity" }
   | { readonly reason: "aborted" }
   | { readonly reason: "closed" }
 );
@@ -490,8 +503,14 @@ export type GenerationRequest = {
    * Upper limit of tokens to draw (1 or more). Stop tokens are **included** in this count (not
    * emitted as `token` events but counted as one — the same counting as `tokens` of
    * {@link GenerationStop}).
+   *
+   * Omitted = until a stop token or the limit, and such a turn closes as `capacity` when it reaches
+   * the limit. The limit is resolved once, right before the budget check, as the largest request
+   * that check accepts (`min(capacity, maxPosition) − pastLength − prompt length + 1`, `pendingToken`
+   * included in the prompt): the budget is not relaxed, and a prompt that alone does not fit fails
+   * with {@link GenerationCapacityError} before any run.
    */
-  readonly maxNewTokens: number;
+  readonly maxNewTokens?: number;
   /**
    * **Additional** stop tokens for this turn only (checked as the **union** with the set the
    * distribution declared).
@@ -533,8 +552,10 @@ export const assertGenerationRequestValues = (
   vocabSize: number,
   request: Pick<GenerationRequest, "maxNewTokens" | "stopTokens" | "sampler">,
 ): void => {
-  if (!Number.isSafeInteger(request.maxNewTokens) || request.maxNewTokens < 1) {
-    throw new ModelInputError(`maxNewTokens ${request.maxNewTokens} is not a positive integer`);
+  // Only `undefined` means "omitted": `null` and `NaN` are mistakes, not a request for the limit.
+  const maxNewTokens = request.maxNewTokens;
+  if (maxNewTokens !== undefined && (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1)) {
+    throw new ModelInputError(`maxNewTokens ${maxNewTokens} is not a positive integer`);
   }
   // A stop token is "an id that does not appear in the output", so even an out-of-vocabulary one
   // lets generation **run to completion normally** (that id is just never drawn). To avoid quietly
@@ -1474,6 +1495,12 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     };
     const onRun = options.onRun;
 
+    /** The stop of a turn that drew its whole limit (the doc of {@link GenerationStop}). */
+    const limitStop = (tokens: number): GenerationStop =>
+      maxNewTokens === undefined
+        ? { reason: "capacity", tokens }
+        : { reason: "max-tokens", tokens };
+
     /**
      * The stop check (the **union** of the distribution's set and the request's set).
      *
@@ -1521,7 +1548,13 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             "prompt is empty (there is no pendingToken from the previous turn either, so there is no token to feed)",
           );
         }
-        assertBudget(program, capacity, past, promptIds.length, maxNewTokens);
+        // A request without `maxNewTokens` resolves to the largest one `assertBudget` accepts (both
+        // constraints fold into one shape — {@link GenerationCapacityDetail.maxNewTokens}). Below 1
+        // the prompt alone does not fit, and checking 1 throws the same error before any run.
+        const tokenLimit =
+          maxNewTokens ??
+          Math.max(1, Math.min(capacity, program.maxPosition) - past - promptIds.length + 1);
+        assertBudget(program, capacity, past, promptIds.length, tokenLimit);
 
         const chunks = planPrefillChunks(promptIds.length, program.chunkLength);
         // "The token sequence so far" the repetition penalty looks at (the same shape as HF applying
@@ -1603,11 +1636,11 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           let cycle = 0;
           /** Cycles run in this turn (the index used to leave the first one out of observation). */
           let turnCycles = 0;
-          while (generated < maxNewTokens) {
+          while (generated < tokenLimit) {
             await settleAbort(signal);
             // k' = min(k, remaining − 1): at most k'+1 are confirmed, so the budget is not exceeded.
             // k' = 0 is one decode row.
-            const budget = planDraftLength(k, maxNewTokens - generated);
+            const budget = planDraftLength(k, tokenLimit - generated);
             // Only cycles that can take drafts are submitted to the gate (the forced plain at the end
             // of the budget is not about how well speculation does, so it enters neither the
             // decision nor the observations). MUST: `decide()` once per cycle.
@@ -1769,7 +1802,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             settleCommit();
             hidden = nextHidden;
           }
-          stop = { reason: "max-tokens", tokens: generated };
+          stop = limitStop(generated);
           return;
         }
 
@@ -1778,14 +1811,14 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           // `token` to step 0 and each later step the previous step's selection on the GPU, leaves
           // the `n` rows pending, and the walk below hands the tokens out exactly as the per-step
           // loop would — then commits the rows that loop would have committed (`settleCommit`, up to
-          // `frontierRows`). Its decode runs `maxNewTokens - 1` steps too, so the last token stays
+          // `frontierRows`). Its decode runs `tokenLimit - 1` steps too, so the last token stays
           // uncommitted in `pendingToken` (decision 4).
           let step = 0;
-          while (step + 1 < maxNewTokens) {
+          while (step + 1 < tokenLimit) {
             // The stage boundary is the batch (one fence per batch); a token of a batch already run
             // is checked synchronously before it is handed out (below).
             await settleAbort(signal);
-            const count = Math.min(runAhead.depth, maxNewTokens - 1 - step);
+            const count = Math.min(runAhead.depth, tokenLimit - 1 - step);
             const base = context.pastLength;
             const steps: RunInputs[] = [];
             for (let k = 0; k < count; k += 1) {
@@ -1834,14 +1867,14 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             }
             settleCommit();
           }
-          stop = { reason: "max-tokens", tokens: generated };
+          stop = limitStop(generated);
           return;
         }
 
         // Decode has the shape "placing `g_i` at position P yields `g_{i+1}`". It runs
-        // `maxNewTokens - 1` times, and the last token stays uncommitted in `pendingToken`
+        // `tokenLimit - 1` times, and the last token stays uncommitted in `pendingToken`
         // (decision 4).
-        for (let step = 0; step + 1 < maxNewTokens; step += 1) {
+        for (let step = 0; step + 1 < tokenLimit; step += 1) {
           await settleAbort(signal);
           // The wall runs from the step's head (before the derived inputs) to right after the draw
           // — the same span as a speculative cycle, taken before the delivering yield, so the
@@ -1894,7 +1927,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           }
           yield { kind: "token", id: token, position: context.pastLength };
         }
-        stop = { reason: "max-tokens", tokens: generated };
+        stop = limitStop(generated);
       } catch (error) {
         if (isAbortOf(error, signal)) stop = { reason: "aborted", tokens: generated };
         else failure = { error };

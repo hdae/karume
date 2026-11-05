@@ -168,6 +168,8 @@ type FakeHost = ChatSessionHost & {
   disposed(): number;
   /** The prompts `generate` received, in issue order. */
   prompts(): readonly (readonly number[])[];
+  /** The `maxNewTokens` `generate` received, in issue order (`undefined` = not passed). */
+  requestedMaxNewTokens(): readonly (number | undefined)[];
   /** The capacities `sequence()` received, in issue order (whether the session's knob reaches it). */
   capacities(): readonly (number | undefined)[];
   /**
@@ -224,6 +226,7 @@ const fakeHost = (
   hostTokenizer: Tokenizer = tokenizer,
 ): FakeHost => {
   const prompts: number[][] = [];
+  const requestedMaxNewTokens: (number | undefined)[] = [];
   const capacities: (number | undefined)[] = [];
   const speculatives: (boolean | "always" | undefined)[] = [];
   const speculativeKeys: boolean[] = [];
@@ -250,15 +253,27 @@ const fakeHost = (
       generate(request: GenerationRequest): GenerationStream {
         assert(!gone, "generate on a disposed sequence");
         prompts.push([...request.prompt]);
+        requestedMaxNewTokens.push(request.maxNewTokens);
         samplers.push(request.sampler);
         const answer = answers[turn];
         assert(answer !== undefined, `the script has no turn ${turn + 1}`);
         turn += 1;
-        const ids = hostTokenizer.encode(answer.text);
+        const encoded = hostTokenizer.encode(answer.text);
+        // A request without `maxNewTokens` runs into the limit as the real one does: the room is
+        // resolved here, and an answer that outgrows it is cut and closes as `capacity`.
+        const room = Math.min(capacity, program.maxPosition) - used - request.prompt.length + 1;
+        const full =
+          request.maxNewTokens === undefined && encoded.length + (answer.closes ? 1 : 0) > room;
+        assert(
+          request.maxNewTokens !== undefined || answer.closes || full,
+          "the script: an answer without maxNewTokens either closes or outgrows the room",
+        );
+        const closes = answer.closes && !full;
+        const ids = full ? encoded.slice(0, room) : encoded;
         used += request.prompt.length;
-        const stop: GenerationStop = answer.closes
+        const stop: GenerationStop = closes
           ? { reason: "eos", token: answer.stop ?? END_OF_TURN, tokens: ids.length + 1 }
-          : { reason: "max-tokens", tokens: ids.length };
+          : { reason: full ? "capacity" : "max-tokens", tokens: ids.length };
 
         let settle!: (value: GenerationStop) => void;
         const done = new Promise<GenerationStop>((resolve) => {
@@ -278,7 +293,7 @@ const fakeHost = (
               yield { kind: "token", id, position: used };
             }
             // The stop token is not emitted in the sequence but stays in the conversation (the uncommitted frontier).
-            if (answer.closes) used += 1;
+            if (closes) used += 1;
             stopped = stop;
           } catch (error) {
             // MUST: the side that catches the abort sets `aborted` and then rethrows (the same
@@ -323,6 +338,7 @@ const fakeHost = (
     created: () => created,
     disposed: () => disposed,
     prompts: () => prompts,
+    requestedMaxNewTokens: () => requestedMaxNewTokens,
     capacities: () => capacities,
     speculatives: () => speculatives,
     speculativeKeys: () => speculativeKeys,
@@ -2230,5 +2246,216 @@ describe("ChatSession review fixes: each scenario failed before its fix", () => 
 
     assertEquals((await stream.done).reason, "eos");
     await assertRejects(() => stream.reply, Error, "disposed during the turn");
+  });
+});
+
+describe("ChatSession without maxNewTokens: the reserve drives the overflow check, not the reply", () => {
+  const FIRST = { role: "user", content: "Name a color." } as const;
+  const SECOND = { role: "user", content: "Another one." } as const;
+  const BLUE: Answer = { text: "Blue.", closes: true };
+  const RED: Answer = { text: "Red.", closes: true };
+  const RESERVE = 16;
+  /** A reply far longer than any room these checks leave. */
+  const LONG_ANSWER = Array.from({ length: 8 }, () => LONG_ASK).join(" ");
+
+  /** The capacity at which the second turn misses by exactly `missing` with the reserve. */
+  const capacityFor = (missing: number): number =>
+    chatPrompt(tokenizer, [SYSTEM_MESSAGE, FIRST]).length +
+    answerCost(BLUE) +
+    chatTurn(tokenizer, SECOND).length +
+    RESERVE -
+    1 -
+    missing;
+
+  it("a turn that misses by one drops the oldest exchange", async () => {
+    const host = fakeHost([BLUE, RED], programOf(capacityFor(1)));
+    const seen: ChatOverflow[] = [];
+    const session = new ChatSession(host, {
+      system: SYSTEM,
+      reserveNewTokens: RESERVE,
+      onOverflow: (context) => {
+        seen.push(context);
+        return dropOldestTurns(context);
+      },
+    });
+    await session.send(FIRST.content).text();
+    await session.send(SECOND.content).text();
+
+    assertEquals(seen.length, 1);
+    assertEquals(seen[0].needed, seen[0].capacity + 1, "prompt + reserve − 1, short by exactly 1");
+    assertEquals(session.turns, [SYSTEM_MESSAGE, SECOND, { role: "assistant", content: "Red." }]);
+    assertEquals(host.created(), 2);
+  });
+
+  it("a turn that just fits keeps the history and the KV", async () => {
+    const host = fakeHost([BLUE, RED], programOf(capacityFor(0)));
+    const session = new ChatSession(host, { system: SYSTEM, reserveNewTokens: RESERVE });
+    await session.send(FIRST.content).text();
+    await session.send(SECOND.content).text();
+
+    assertEquals(session.turns.length, 5);
+    assertEquals(host.created(), 1);
+  });
+
+  it("the reserve is not passed to generate, and the reply can run past it", async () => {
+    const host = fakeHost([{ text: LONG_ASK, closes: true }], programOf(640));
+    const session = new ChatSession(host, { reserveNewTokens: 1 });
+    const stream = session.send(FIRST.content);
+    assertEquals(await stream.text(), LONG_ASK);
+
+    const stop = await stream.done;
+    assertEquals(stop.reason, "eos");
+    assert(stop.tokens > 1, `the reply stayed within the reserve: ${stop.tokens}`);
+    assertEquals((await stream.reply).end, "turn");
+    assertEquals(host.requestedMaxNewTokens(), [undefined]);
+  });
+
+  it("a capacity stop is cut-off: the text stays in the history and the next send rebuilds", async () => {
+    const host = fakeHost([{ text: LONG_ANSWER, closes: true }, RED], programOf(TIGHT_CAPACITY));
+    const session = new ChatSession(host, { reserveNewTokens: 1 });
+    const prompt = chatPrompt(tokenizer, [FIRST]).length;
+    const stream = session.send(FIRST.content);
+    const text = await stream.text();
+
+    const stop = await stream.done;
+    assertEquals(stop, { reason: "capacity", tokens: TIGHT_CAPACITY - prompt + 1 });
+    assertEquals(await stream.reply, { end: "cut-off", stop });
+    assertEquals(session.turns, [FIRST, { role: "assistant", content: text }]);
+    assertEquals(host.disposed(), 1, "the KV of a turn that did not close is discarded");
+
+    // The history fills the capacity, so the re-render drops the exchange and starts over.
+    assertEquals(await session.send(SECOND.content).text(), "Red.");
+    assertEquals(host.created(), 2);
+    assertEquals(host.prompts()[1], chatPrompt(tokenizer, [SECOND]));
+  });
+
+  it("a re-render that fits keeps the cut-off text", async () => {
+    const third = { role: "user", content: "One more." } as const;
+    const firstAnswer: Answer = { text: LONG_ASK, closes: true };
+    // The second turn has room for exactly 5 tokens, so its answer is cut there.
+    const capacity =
+      chatPrompt(tokenizer, [FIRST]).length +
+      answerCost(firstAnswer) +
+      chatTurn(tokenizer, SECOND).length +
+      4;
+    const host = fakeHost(
+      [firstAnswer, { text: LONG_ANSWER, closes: true }, RED],
+      programOf(capacity),
+    );
+    const session = new ChatSession(host, { reserveNewTokens: 1 });
+    await session.send(FIRST.content).text();
+    const stream = session.send(SECOND.content);
+    const cut = await stream.text();
+    assertEquals(await stream.done, { reason: "capacity", tokens: 5 });
+
+    await session.send(third.content).text();
+
+    assertEquals(
+      host.prompts()[2],
+      chatPrompt(tokenizer, [SECOND, { role: "assistant", content: cut }, third]),
+      "the oldest exchange is dropped, and the cut-off text is what the re-render shows",
+    );
+    assertEquals(host.created(), 2);
+  });
+
+  it("the overflow failure names reserveNewTokens when the reserve did not fit", async () => {
+    const host = fakeHost([], programOf(TIGHT_CAPACITY));
+    const session = new ChatSession(host, { reserveNewTokens: 4 });
+    const error = await assertRejects(
+      () => session.send(LONG_ANSWER).text(),
+      GenerationCapacityError,
+      "lower reserveNewTokens. At this length reserveNewTokens ≤",
+    );
+    assertEquals(error.requestedNewTokens, 4);
+    assertEquals(host.created(), 0);
+  });
+
+  it("the default reserve is 1024 and is not clamped to a small capacity", async () => {
+    const host = fakeHost([], programOf(640));
+    const session = new ChatSession(host, {});
+    const error = await assertRejects(
+      () => session.send(FIRST.content).text(),
+      GenerationCapacityError,
+      "reserveNewTokens",
+    );
+    assertEquals(error.requestedNewTokens, 1024);
+  });
+
+  it("the overflow failure names maxNewTokens when a limit did not fit", async () => {
+    const host = fakeHost([], programOf(TIGHT_CAPACITY));
+    const session = new ChatSession(host, { maxNewTokens: 4 });
+    const error = await assertRejects(
+      () => session.send(LONG_ANSWER).text(),
+      GenerationCapacityError,
+      "lower maxNewTokens. At this length maxNewTokens ≤",
+    );
+    assert(!error.message.includes("reserveNewTokens"));
+  });
+
+  it("an invalid reserve fails at construction", () => {
+    const host = fakeHost([], programOf(640));
+    for (const reserveNewTokens of [0, -1, 1.5, Number.NaN, null as unknown as number]) {
+      assertThrows(
+        () => new ChatSession(host, { reserveNewTokens }),
+        ModelInputError,
+        "is not a positive integer",
+      );
+    }
+  });
+
+  it("a reserve with a session maxNewTokens fails at construction", () => {
+    assertThrows(
+      () => new ChatSession(fakeHost([], programOf(640)), { maxNewTokens: 8, reserveNewTokens: 8 }),
+      ModelInputError,
+      "cannot be combined",
+    );
+  });
+
+  it("a per-turn maxNewTokens overrides the reserve for that turn", async () => {
+    // The default reserve does not fit this capacity, so only the per-turn value lets the turn pass.
+    const host = fakeHost([BLUE], programOf(640));
+    const session = new ChatSession(host, {});
+    assertEquals(await session.send(FIRST.content, { maxNewTokens: 8 }).text(), "Blue.");
+    assertEquals(host.requestedMaxNewTokens(), [8]);
+  });
+
+  it("a per-turn null is an invalid request, not an omitted one", () => {
+    const session = new ChatSession(fakeHost([], programOf(640)), { reserveNewTokens: 8 });
+    assertThrows(
+      () => session.send(FIRST.content, { maxNewTokens: null as unknown as number }),
+      ModelInputError,
+      "maxNewTokens null",
+    );
+  });
+
+  it("fork keeps the reserve", async () => {
+    const host = fakeHost([], programOf(TIGHT_CAPACITY));
+    const session = new ChatSession(host, { reserveNewTokens: 4 });
+    const branch = await session.fork();
+    const error = await assertRejects(
+      () => branch.send(LONG_ANSWER).text(),
+      GenerationCapacityError,
+      "reserveNewTokens",
+    );
+    assertEquals(error.requestedNewTokens, 4);
+  });
+
+  it("fork keeps a session maxNewTokens", async () => {
+    const host = fakeHost([BLUE], programOf(640));
+    const session = new ChatSession(host, { maxNewTokens: 8 });
+    const branch = await session.fork();
+    await branch.send(FIRST.content).text();
+    assertEquals(host.requestedMaxNewTokens(), [8]);
+  });
+
+  it("fork of a session without either keeps the default reserve", async () => {
+    const host = fakeHost([], programOf(640));
+    const branch = await new ChatSession(host, {}).fork();
+    const error = await assertRejects(
+      () => branch.send(FIRST.content).text(),
+      GenerationCapacityError,
+      "reserveNewTokens",
+    );
+    assertEquals(error.requestedNewTokens, 1024);
   });
 });

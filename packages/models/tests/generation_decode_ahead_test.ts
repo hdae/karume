@@ -175,6 +175,33 @@ describe("the decode run-ahead (greedyAhead)", () => {
         }
       }
     });
+
+    it("without maxNewTokens is the limit: the same tokens as an explicit one, no row past the capacity", async () => {
+      const program = { capacity: 8 };
+      const absent = await open("ahead", { depth: 4, program });
+      const explicit = await open("ahead", { depth: 4, program });
+      const plain = await open("per-step", { program });
+      try {
+        const unlimited = await turn(absent, { prompt: [1] });
+        const limited = await turn(explicit, { prompt: [1], maxNewTokens: 8 });
+        const perStep = await turn(plain, { prompt: [1] });
+
+        expect(unlimited.stop).toEqual({ reason: "capacity", tokens: 8 });
+        expect(limited.stop).toEqual({ reason: "max-tokens", tokens: 8 });
+        expect(unlimited.events).toEqual(limited.events);
+        expect(unlimited).toEqual(perStep);
+        // 7 decode steps = a batch of 4 and the 3 the limit leaves.
+        expect(absent.fake.aheadBatches).toEqual([4, 3]);
+        expect(decodeSteps(absent.fake)).toEqual(decodeSteps(plain.fake));
+        for (const call of absent.fake.calls) {
+          expect(call.pastBefore + call.queryLength).toBeLessThanOrEqual(8);
+        }
+      } finally {
+        await absent.sequence.dispose();
+        await explicit.sequence.dispose();
+        await plain.sequence.dispose();
+      }
+    });
   });
 
   describe("an interruption", () => {

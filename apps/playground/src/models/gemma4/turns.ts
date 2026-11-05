@@ -301,6 +301,8 @@ export const stopLabel = (stop: StopFacts): string => {
       return `stop string "${stop.stopString ?? ""}"`;
     case "max-tokens":
       return "max new tokens reached";
+    case "capacity":
+      return "context full";
     case "aborted":
       return "stopped";
     case "closed":

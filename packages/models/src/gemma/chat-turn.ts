@@ -55,7 +55,8 @@ export type RunPhase = GenerationRunPhase;
 /**
  * The stop reason of one chat turn.
  *
- * The sequence layer's reasons (`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`) plus the
+ * The sequence layer's reasons (`eos` / `stop-token` / `max-tokens` / `capacity` / `aborted` /
+ * `closed` — `capacity` is a turn without `maxNewTokens` that filled the conversation) plus the
  * one only this layer can decide (a match of {@link ChatOptions.stopStrings}). `tokens` means
  * the same as in the sequence layer (the number of tokens the turn generated — a stop token counts
  * as 1); for `stop-string` it counts **up to the token that emitted the piece containing the stop

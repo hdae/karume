@@ -50,10 +50,16 @@ import {
   runDiagnosticsHook,
   stopStringOf,
 } from "../src/gemma/chat-turn.ts";
-import { Pipeline, speculativeSetup } from "../src/gemma/pipeline.ts";
+import {
+  type Gemma4State,
+  GemmaPipeline,
+  Pipeline,
+  speculativeSetup,
+} from "../src/gemma/pipeline.ts";
 import type { Gemma4Drafter } from "../src/gemma/speculative.ts";
 import {
   createGenerationSequence,
+  GenerationCapacityError,
   type GenerationEvent,
   type GenerationRequest,
   type GenerationSpeculation,
@@ -64,6 +70,7 @@ import {
   drain,
   type FakeOptions,
   fakeSession,
+  LOGITS,
   programOf,
   runShape,
 } from "./helpers/generation-fake.ts";
@@ -2050,5 +2057,91 @@ describe("gemma4 chat review fixes (2026-11-04): reasons, numbers, key order, re
       ModelInputError,
       "index is not a number",
     );
+  });
+});
+
+// ---- Pipeline.chat without maxNewTokens --------------------------------------------------
+//
+// The real `chat` on the real sequence, with only the Session faked: the fake keeps the logical
+// length, and its logits are widened to the vocabulary the fixture's chat prompt needs.
+
+describe("Pipeline.chat without maxNewTokens generates until a stop token or the limit", () => {
+  const MESSAGES: readonly ChatMessage[] = [{ role: "user", content: "Name a color." }];
+  const PROMPT_LENGTH = chatPrompt(tokenizer, MESSAGES).length;
+  const VOCABULARY = 262144;
+  const ANSWER = tokenizer.encode("Blue")[0];
+
+  /** Exposes the constructor the two public subclasses keep closed. */
+  class SeatedPipeline extends GemmaPipeline {
+    constructor(state: Gemma4State) {
+      super(state);
+    }
+  }
+
+  /** A pipeline whose default capacity leaves room for `room` tokens after the prompt. */
+  const seated = (room: number, stopTokens: readonly number[] = []) => {
+    const fake = fakeSession();
+    const session: typeof fake.session = {
+      ...fake.session,
+      run: async (inputs, bindings, generation) => {
+        await fake.session.run(inputs, bindings, generation);
+        const data = new Float32Array(VOCABULARY);
+        data[ANSWER] = 10;
+        return { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCABULARY], data } };
+      },
+    };
+    const wiring = {
+      ...programOf(fake, { capacity: PROMPT_LENGTH + room - 1 }),
+      vocabSize: VOCABULARY,
+      stopTokens,
+    };
+    // Only what `chat` reads: a real state holds a GPU Session this check has no use for.
+    const state = {
+      entry: "test.Pipeline",
+      session,
+      wiring,
+      tokenizer,
+      config: {},
+    } as unknown as Gemma4State;
+    return { fake, pipeline: new SeatedPipeline(state) };
+  };
+
+  it("runs to the limit and reports capacity", async () => {
+    const { fake, pipeline } = seated(3);
+    const stream = pipeline.chat(MESSAGES, {});
+    assertEquals(await stream.text(), tokenizer.decode([ANSWER, ANSWER, ANSWER]));
+    assertEquals(await stream.done, { reason: "capacity", tokens: 3 });
+    assert(fake.calls.every((call) => call.pastBefore + call.queryLength <= PROMPT_LENGTH + 2));
+  });
+
+  it("stops at a stop token first", async () => {
+    const { pipeline } = seated(3, [ANSWER]);
+    const stream = pipeline.chat(MESSAGES, {});
+    assertEquals(await stream.text(), "");
+    assertEquals(await stream.done, { reason: "eos", token: ANSWER, tokens: 1 });
+  });
+
+  it("forwards a value that is present (an explicit limit closes as max-tokens)", async () => {
+    const { pipeline } = seated(3);
+    const stream = pipeline.chat(MESSAGES, { maxNewTokens: 3 });
+    await stream.text();
+    assertEquals(await stream.done, { reason: "max-tokens", tokens: 3 });
+  });
+
+  it("an invalid value still fails at the call", () => {
+    const { pipeline } = seated(3);
+    for (const maxNewTokens of [0, Number.NaN, null as unknown as number]) {
+      assertThrows(
+        () => pipeline.chat(MESSAGES, { maxNewTokens }),
+        ModelInputError,
+        "is not a positive integer",
+      );
+    }
+  });
+
+  it("a prompt that alone does not fit fails with GenerationCapacityError before any run", async () => {
+    const { fake, pipeline } = seated(0);
+    await assertRejects(() => pipeline.chat(MESSAGES, {}).text(), GenerationCapacityError);
+    assertEquals(fake.calls.length, 0);
   });
 });

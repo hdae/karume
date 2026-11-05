@@ -24,7 +24,7 @@ import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { GenerationContext, RunInputs, Session } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
-import type { GenerationWiring } from "../src/generation/program.ts";
+import type { GenerationProgramSpec, GenerationWiring } from "../src/generation/program.ts";
 import {
   assertGenerationRequestValues,
   createGenerationSequence,
@@ -730,6 +730,119 @@ test("GenerationSequence: exceeding the capacity is a GenerationCapacityError (i
   // A shape that fits exactly passes (peak = 8).
   await drain(sequence.generate({ prompt: [1, 2, 3, 4, 5], maxNewTokens: 4 }));
   assertEquals(fake.pastLength(), 8);
+});
+
+describe("a request without maxNewTokens generates until a stop token or the limit", () => {
+  /** Capacity 8, so a prompt of T tokens on an empty conversation has the limit K = 8 − T + 1. */
+  const openTight = async (override: Partial<GenerationProgramSpec> = {}) => {
+    const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10, 11, 12] });
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: programOf(fake, { capacity: 8, ...override }),
+    });
+    return { fake, sequence };
+  };
+
+  it("runs to exactly the limit and closes as capacity", async () => {
+    const { fake, sequence } = await openTight();
+    const { events, stop } = await drain(sequence.generate({ prompt: [1, 2, 3] }));
+
+    assertEquals(stop, { reason: "capacity", tokens: 6 });
+    assertEquals(tokenIds(events), [5, 6, 7, 8, 9, 10]);
+    // The KV is full. The last token is the uncommitted frontier, so `used` (which counts it) is one
+    // past the capacity — the same as an explicit request of that size.
+    assertEquals(fake.pastLength(), 8);
+    assertEquals(sequence.used, 9);
+  });
+
+  it("closes as eos when a stop token comes first", async () => {
+    const { sequence } = await openTight({ stopTokens: [6] });
+    const { stop } = await drain(sequence.generate({ prompt: [1, 2, 3] }));
+    assertEquals(stop, { reason: "eos", token: 6, tokens: 2 });
+  });
+
+  it("closes as stop-token on a stop token of the request", async () => {
+    const { sequence } = await openTight();
+    const { stop } = await drain(sequence.generate({ prompt: [1, 2, 3], stopTokens: [7] }));
+    assertEquals(stop, { reason: "stop-token", token: 7, tokens: 3 });
+  });
+
+  it("an explicit value equal to the limit runs the same turn and closes as max-tokens", async () => {
+    const absent = await openTight();
+    const explicit = await openTight();
+    const unlimited = await drain(absent.sequence.generate({ prompt: [1, 2, 3] }));
+    const limited = await drain(explicit.sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 6 }));
+
+    assertEquals(limited.stop, { reason: "max-tokens", tokens: 6 });
+    assertEquals(unlimited.events, limited.events);
+    assertEquals(absent.fake.calls, explicit.fake.calls);
+    assertEquals(absent.sequence.used, explicit.sequence.used);
+  });
+
+  it("a prompt that fits with K = 1 draws one token and closes as capacity", async () => {
+    const { fake, sequence } = await openTight();
+    const { events, stop } = await drain(sequence.generate({ prompt: [1, 2, 3, 4, 5, 6, 7, 8] }));
+
+    assertEquals(stop, { reason: "capacity", tokens: 1 });
+    assertEquals(tokenIds(events).length, 1);
+    assertEquals(fake.calls.length, 2, "two prefill chunks and no decode");
+  });
+
+  it("a prompt that does not fit throws GenerationCapacityError before any run", async () => {
+    const { fake, sequence } = await openTight();
+    const stream = sequence.generate({ prompt: [1, 2, 3, 4, 5, 6, 7, 8, 9] });
+    const error = await assertRejects(
+      () => drain(stream),
+      GenerationCapacityError,
+      "exceeds the state capacity",
+    );
+
+    assertEquals(fake.calls.length, 0);
+    assertEquals(error.requestedNewTokens, 1, "the smallest turn there is");
+    assertEquals(error.maxNewTokens, 0, "nothing fits now");
+    assertEquals(error.limit, 8);
+    await assertRejects(() => stream.done, GenerationCapacityError);
+  });
+
+  it("the second turn resolves against the remaining room, the pending token included", async () => {
+    const { fake, sequence } = await openTight();
+    await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 2 }));
+    assertEquals(fake.pastLength(), 3, "two prompt tokens and the first generated one");
+
+    // past 3, prompt 3 (the pending token + 2 new) → K = 8 − 3 − 3 + 1 = 3.
+    const { stop } = await drain(sequence.generate({ prompt: [3, 4] }));
+    assertEquals(stop, { reason: "capacity", tokens: 3 });
+    assertEquals(fake.calls[2].ids.slice(0, 3), [6, 3, 4], "the pending token leads the prefill");
+    assertEquals(fake.pastLength(), 8);
+  });
+
+  it("a conversation that filled up refuses the next turn (the pending token alone does not fit)", async () => {
+    const { fake, sequence } = await openTight();
+    await drain(sequence.generate({ prompt: [1, 2, 3] }));
+    const runs = fake.calls.length;
+
+    await assertRejects(() => drain(sequence.generate({ prompt: [] })), GenerationCapacityError);
+    assertEquals(fake.calls.length, runs);
+  });
+
+  it("the position table stays in range when it is the same size as the capacity", async () => {
+    const { fake, sequence } = await openTight({ maxPosition: 8 });
+    const { stop } = await drain(sequence.generate({ prompt: [1, 2, 3] }));
+
+    assertEquals(stop, { reason: "capacity", tokens: 6 });
+    assert(fake.calls.every((call) => call.positions.every((position) => position < 8)));
+  });
+
+  it("the range check treats only undefined as omitted", () => {
+    assertGenerationRequestValues(VOCAB, {});
+    for (const maxNewTokens of [Number.NaN, 0, null as unknown as number]) {
+      assertThrows(
+        () => assertGenerationRequestValues(VOCAB, { maxNewTokens }),
+        ModelInputError,
+        "is not a positive integer",
+      );
+    }
+  });
 });
 
 test("GenerationSequence: used is derived each time from pastLength + the uncommitted frontier", async () => {

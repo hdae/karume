@@ -38,8 +38,9 @@ export type {
 } from "./src/gemma/pipeline.ts";
 export type {
   /**
-   * The stop reason of `chat` (the sequence layer's reasons + `stop-string`, which only this layer
-   * can decide).
+   * The stop reason of `chat` (the sequence layer's reasons, `capacity` among them for a turn
+   * without `maxNewTokens` that filled the conversation, + `stop-string`, which only this layer can
+   * decide).
    */
   ChatStop,
   ChatStream,
@@ -74,7 +75,10 @@ export type { PleResidency } from "./src/gemma/ple-gpu.ts";
  * the conversation grows); `sequence` hands token ids and the KV lifetime to the caller.
  * {@link ChatSession} covers only the gap between them — it carries the KV over and truncates
  * a turn that does not fit the capacity **before sending it** with
- * {@link ChatSessionOptions.onOverflow} (default {@link dropOldestTurns}).
+ * {@link ChatSessionOptions.onOverflow} (default {@link dropOldestTurns}). Without
+ * {@link ChatSessionOptions.maxNewTokens} a turn generates until a stop token or until the
+ * conversation is full (`capacity`, which the session treats as a cut-off turn), and the check keeps
+ * {@link ChatSessionOptions.reserveNewTokens} free.
  *
  * With {@link ChatSessionOptions.tools} a turn can end on a tool call (`reply.end === "tool-call"`);
  * {@link ChatSession.sendToolResults} continues the same model turn with the results.

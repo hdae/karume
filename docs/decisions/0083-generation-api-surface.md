@@ -483,3 +483,41 @@ layers above it (sequence and chat session).
     doc). Temperature 0 gives the same answer regardless of seed.
 - Public surface: one method each on existing types (`GenerationSequence` / `Gemma4ChatSession`), no
   new export (ADR 0008).
+
+## Addendum (2026-11-05) — a turn without `maxNewTokens`
+
+A caller often has no number to give: it wants the model to finish, and only the conversation's room
+bounds that. Passing `capacity − used − prompt + 1` by hand means every caller re-implements the
+budget formula, with the uncommitted frontier in it. So `maxNewTokens` becomes optional on
+`GenerationRequest`, `ChatOptions`, `ChatSessionOptions` and `ChatTurnOptions`: absent means until a
+stop token or the limit, like llama.cpp's `-n -1` with context shift off.
+
+- **Decision 10 still holds: the budget fails before a single run.** The limit is resolved once, right
+  before `assertBudget`, after the pending token is prepended:
+  `K = min(capacity, maxPosition) − past − prompt + 1`, the largest request the check accepts (both
+  constraints fold into that shape). The invariant is not relaxed. Below 1 the prompt alone does not
+  fit, and `assertBudget` runs with 1, so the same `GenerationCapacityError` is thrown
+  (`requestedNewTokens` is then 1). `K` goes wherever the request's value went (drafting, the
+  run-ahead batches, the decode loop), and nothing allocates in proportion to it up front.
+- **A separate stop reason, `capacity`.** A UI has to tell "you asked for this many" from "the context
+  is full", so the reason follows the request rather than the numbers: an explicit value never yields
+  `capacity`, even when it equals the limit, and an absent one never yields `max-tokens`.
+- **`ChatSession` reserves room up front.** Its overflow check runs before sending, and "prompt + 0"
+  would pass with no room to answer in, so a turn with no `maxNewTokens` is checked with
+  `reserveNewTokens` (default 1024) in its place. The reserve only decides which history is dropped: it
+  is not passed to `generate`, and the reply may run past it up to the limit. It cannot be combined with
+  a session `maxNewTokens` (every turn would then have a limit, and the reserve could never apply); a
+  per-turn `maxNewTokens` overrides it for that turn. It is not clamped: a capacity smaller than the
+  prompt plus the reserve fails loudly and names the option. `Pipeline.chat` has no history to drop, so no reserve
+  applies.
+- **A `capacity` stop is an ordinary cut-off turn.** It takes the path of max-tokens (`reply.end` is
+  `"cut-off"`, the streamed text stays in the history, the KV is discarded, the next turn re-renders),
+  with no new state. The cost is in `docs/limitations.md`.
+
+Rejected:
+
+- **A mid-turn context shift** (drop old rows and keep generating when the limit is reached): it
+  changes the conversation inside a reply, and re-prefills up to `C` tokens within one turn. Truncating
+  between turns (`onOverflow`) stays the only place the conversation changes.
+- **A `remaining()` helper alone**: every caller would re-implement the same call and the same choice
+  of what to do at the limit, and no stop reason could tell the two limits apart.

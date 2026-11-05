@@ -22,8 +22,8 @@
  * "eos"`) does the next turn carry on with a delta ({@link chatTurn}). The closing token was
  * emitted by generation and is held by the sequence as the uncommitted frontier (`pendingToken`);
  * the next `generate` prepends it to the prompt (ADR 0083 decision 4). After a turn cut off by
- * max-tokens / a stop string / an interruption the model turn is not closed, so the sequence is
- * discarded and re-rendered from the history.
+ * max-tokens / a full context (`capacity`) / a stop string / an interruption the model turn is not
+ * closed, so the sequence is discarded and re-rendered from the history.
  *
  * NOTE: the distribution's EOS set contains `<eos>` and `<|tool_response>` as well
  * (`gemma4StopTokens`). Carrying over a turn closed by something other than `<turn|>` without a
@@ -80,6 +80,11 @@
  * oldest user / assistant pair, keep system), replaceable as a whole through
  * {@link ChatSessionOptions.onOverflow}. A host that passes a throwing function can handle it
  * on its side as before.
+ *
+ * A turn without `maxNewTokens` (neither per turn nor per session) generates until a stop token or
+ * until the conversation is full. Its up-front check keeps {@link ChatSessionOptions.reserveNewTokens}
+ * free, which is what makes a reply possible at all after a long history; the reserve does not limit
+ * the reply, which may run past it up to the limit and then closes as `capacity`.
  *
  * ## Branching ({@link ChatSession.fork} — ADR 0083 addendum 2026-10-11, ruling 8)
  *
@@ -166,7 +171,10 @@ export type ChatOverflow = {
   readonly system: string | undefined;
   /** The upper limit of logical positions this conversation can use. */
   readonly capacity: number;
-  /** The number of logical positions needed to pass this turn (prompt + `maxNewTokens` − 1). */
+  /**
+   * The number of logical positions needed to pass this turn (prompt + `maxNewTokens` − 1; a turn
+   * without `maxNewTokens` counts {@link ChatSessionOptions.reserveNewTokens} in its place).
+   */
   readonly needed: number;
 };
 
@@ -193,8 +201,28 @@ export type ChatOverflowPolicy = (
 export type ChatSessionOptions = {
   /** The system message placed at the start of the conversation (none when omitted). */
   readonly system?: string;
-  /** The upper limit of tokens generated in one turn (can be overridden per turn). */
-  readonly maxNewTokens: number;
+  /**
+   * The upper limit of tokens generated in one turn (can be overridden per turn).
+   *
+   * Omitted = a turn without its own value generates until a stop token or until the conversation
+   * is full ({@link ChatSessionOptions.reserveNewTokens} is what its overflow check keeps free).
+   */
+  readonly maxNewTokens?: number;
+  /**
+   * The room the up-front overflow check keeps free for a turn without `maxNewTokens` (a positive
+   * integer, default 1024): the history is dropped ({@link ChatSessionOptions.onOverflow}) until
+   * prompt + reserve fits.
+   *
+   * It does **not** limit the generated length: such a turn may run past the reserve up to the limit,
+   * and it is never passed to generation. A capacity smaller than prompt + reserve fails loudly
+   * (`GenerationCapacityError`, naming this option) rather than clamping the reserve, so a small
+   * `capacity` needs a matching value here.
+   *
+   * MUST: not together with a session {@link ChatSessionOptions.maxNewTokens} (fails loudly at
+   * construction — with a session value every turn has a limit, so the reserve could never apply). A
+   * per-turn `maxNewTokens` overrides the reserve for that turn.
+   */
+  readonly reserveNewTokens?: number;
   /**
    * The capacity this session allocates (default: the distribution's default =
    * `host.program.capacity`).
@@ -249,8 +277,9 @@ export type ChatSessionOptions = {
  * - `"tool-call"` — the turn stopped at `<|tool_response>` after one or more calls; `message`
  *   carries them (each with a session-assigned `id`). The session waits for
  *   {@link ChatSession.sendToolResults}.
- * - `"cut-off"` — the turn did not close (max tokens, a stop string, a host stop token, `break`, an
- *   interruption): nothing is parsed, the streamed text is what the history keeps.
+ * - `"cut-off"` — the turn did not close (max tokens, a full context, a stop string, a host stop
+ *   token, `break`, an interruption): nothing is parsed, the streamed text is what the history keeps
+ *   and the next turn re-renders it.
  */
 export type ChatReply =
   | { readonly end: "turn"; readonly message: ChatResponse; readonly stop: ChatStop }
@@ -283,7 +312,10 @@ export type ChatSessionStream = ChatStream & { readonly reply: Promise<ChatReply
  * running turn.
  */
 export type ChatTurnOptions = {
-  /** Defaults to the session's {@link ChatSessionOptions.maxNewTokens}. */
+  /**
+   * Defaults to the session's {@link ChatSessionOptions.maxNewTokens}; with neither, the turn
+   * generates until a stop token or until the conversation is full.
+   */
   readonly maxNewTokens?: number;
   /** Additional stop tokens for this turn only (unioned with the distribution's EOS set). */
   readonly stopTokens?: readonly number[];
@@ -308,6 +340,9 @@ export type ChatTurnOptions = {
   /** Interruption (throws `signal.reason` as is — ADR 0083 decision 5). */
   readonly signal?: AbortSignal;
 };
+
+/** The default of {@link ChatSessionOptions.reserveNewTokens}. */
+const DEFAULT_RESERVE_NEW_TOKENS = 1024;
 
 /**
  * The default overflow handling — **drop the oldest exchange** (the system message is kept): the
@@ -340,7 +375,7 @@ export const dropOldestTurns: ChatOverflowPolicy = ({ turns, system }): readonly
  * NOTE: the split of the fields is off by one from the sequence layer — this layer's `pastLength` is
  * `used` (including the uncommitted frontier), and `promptLength` is the length of the prompt this
  * layer passes. The total and `maxNewTokens` (= the limit that would pass now) both match the
- * sequence layer's fields.
+ * sequence layer's fields. A turn without `maxNewTokens` is checked with the reserve in its place.
  *
  * MUST: `capacity` is **the capacity this session allocated** (not `program.capacity` = the
  * distribution's default). Deciding truncation on a number other than the capacity actually
@@ -463,7 +498,8 @@ const entriesOf = (
 
 /** One turn's request, read and copied at issue ({@link ChatSession} `#requestOf`). */
 type TurnRequest = {
-  readonly maxNewTokens: number;
+  /** `undefined` = until a stop token or the limit. */
+  readonly maxNewTokens: number | undefined;
   readonly sampler: SamplerSpec | undefined;
   readonly stopTokens: number[] | undefined;
   readonly signal: AbortSignal | undefined;
@@ -550,7 +586,9 @@ const assertOneResultPerCall = (
 export class ChatSession {
   readonly #host: ChatSessionHost;
   readonly #system: string | undefined;
-  readonly #maxNewTokens: number;
+  readonly #maxNewTokens: number | undefined;
+  /** What the overflow check keeps free for a turn without `maxNewTokens` (never sent to generate). */
+  readonly #reserveNewTokens: number;
   readonly #sampler: SamplerSpec | undefined;
   readonly #onOverflow: ChatOverflowPolicy;
   /**
@@ -587,6 +625,20 @@ export class ChatSession {
     this.#host = host;
     this.#system = options.system;
     this.#maxNewTokens = options.maxNewTokens;
+    if (options.reserveNewTokens !== undefined) {
+      if (options.maxNewTokens !== undefined) {
+        throw new ModelInputError(
+          "gemma.ChatSession: reserveNewTokens cannot be combined with a session maxNewTokens " +
+            "(every turn then has a limit, so the reserve could never apply)",
+        );
+      }
+      if (!Number.isSafeInteger(options.reserveNewTokens) || options.reserveNewTokens < 1) {
+        throw new ModelInputError(
+          `gemma.ChatSession: reserveNewTokens ${options.reserveNewTokens} is not a positive integer`,
+        );
+      }
+    }
+    this.#reserveNewTokens = options.reserveNewTokens ?? DEFAULT_RESERVE_NEW_TOKENS;
     this.#sampler = options.sampler;
     this.#onOverflow = options.onOverflow ?? dropOldestTurns;
     this.#capacity = options.capacity ?? host.program.capacity;
@@ -739,7 +791,9 @@ export class ChatSession {
     // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
     // generator) does not run until the first `next()`, so without reading everything here it would
     // run with "the values at the time draining started".
-    const maxNewTokens = options.maxNewTokens ?? this.#maxNewTokens;
+    // Only `undefined` falls through: a `null` must reach the check below, not read as "omitted".
+    const turnMaxNewTokens = options.maxNewTokens;
+    const maxNewTokens = turnMaxNewTokens === undefined ? this.#maxNewTokens : turnMaxNewTokens;
     // The sampling options are copied here as well, like the arrays (the one copy point is
     // {@link snapshotSpec} in `sampler.ts` — `createSampler` copies at the first `next()`, so that
     // alone leaves the window between issue and consumption).
@@ -826,7 +880,7 @@ export class ChatSession {
         prompt = prepared.prompt;
         stream = prepared.sequence.generate({
           prompt: prepared.prompt,
-          maxNewTokens,
+          ...(maxNewTokens === undefined ? {} : { maxNewTokens }),
           ...(stopTokens === undefined ? {} : { stopTokens }),
           ...(sampler === undefined ? {} : { sampler }),
           ...(signal === undefined ? {} : { signal }),
@@ -960,7 +1014,9 @@ export class ChatSession {
     const committed = this.#committed;
     const copying = this.#sequence?.fork();
     const branch = new ChatSession(this.#host, {
-      maxNewTokens: this.#maxNewTokens,
+      ...(this.#maxNewTokens === undefined
+        ? { reserveNewTokens: this.#reserveNewTokens }
+        : { maxNewTokens: this.#maxNewTokens }),
       capacity: this.#capacity,
       onOverflow: this.#onOverflow,
       ...(this.#system === undefined ? {} : { system: this.#system }),
@@ -1018,14 +1074,14 @@ export class ChatSession {
    * and when `#committed` is 0 the KV is empty = `used` is 0, so it can be decided without
    * allocating. In the reverse order, "a turn that truncates allocates a capacity's worth of KV once
    * and immediately discards it" (hit on the first turn of a conversation, and when the previous turn
-   * closed by max-tokens / a stop string / an interruption / a failure = not rare).
+   * closed by max-tokens / a full context / a stop string / an interruption / a failure = not rare).
    *
    * MUST: retries continue only when the history **shrank** (the check in `#shrink`), so the number
    * of attempts does not exceed the number of messages at entry — the guard below exists to fail by
    * name when that invariant breaks, and is never hit while it holds.
    */
   async #prepare(
-    maxNewTokens: number,
+    maxNewTokens: number | undefined,
   ): Promise<{ readonly sequence: GenerationSequence; readonly prompt: number[] }> {
     const attempts = this.#turns.length;
     for (let attempt = 0; ; attempt += 1) {
@@ -1061,7 +1117,7 @@ export class ChatSession {
         this.#capacity,
         used,
         prompt.length,
-        maxNewTokens,
+        maxNewTokens ?? this.#reserveNewTokens,
       );
       if (detail === undefined) {
         if (held !== undefined) return { sequence: held, prompt };
@@ -1088,15 +1144,18 @@ export class ChatSession {
           `gemma.ChatSession internal inconsistency: overflow handling did not converge in ${attempts} attempts`,
         );
       }
-      await this.#shrink(detail);
+      await this.#shrink(detail, maxNewTokens === undefined ? "reserveNewTokens" : "maxNewTokens");
     }
   }
 
   /**
    * Runs overflow handling once (replaces the history and discards the sequence whose mapping to the
-   * KV broke).
+   * KV broke). `knob` is the option that sets the room this turn could not keep.
    */
-  async #shrink(detail: GenerationCapacityDetail): Promise<void> {
+  async #shrink(
+    detail: GenerationCapacityDetail,
+    knob: "maxNewTokens" | "reserveNewTokens",
+  ): Promise<void> {
     const before = this.#turns.length;
     // The messages being answered now (one user message, or the results just sent).
     const asked = this.#turns.slice(
@@ -1124,7 +1183,7 @@ export class ChatSession {
       throw new GenerationCapacityError(
         `The conversation does not fit: the ${detail.constraint} limit is ${detail.limit}, but ${needed} are needed` +
           ` (overflow handling did not shrink the history of ${before} turns — shorten the utterance or lower` +
-          ` maxNewTokens. At this length maxNewTokens ≤ ${detail.maxNewTokens})`,
+          ` ${knob}. At this length ${knob} ≤ ${detail.maxNewTokens})`,
         detail,
       );
     }
@@ -1210,8 +1269,8 @@ export class ChatSession {
         await this.#releaseSequence();
         return { malformed };
       }
-      // max-tokens / a stop string / an interruption / a failure leave the model turn unclosed = the
-      // premise of a delta is missing. So does a dispose during the turn: its result is not
+      // max-tokens / capacity / a stop string / an interruption / a failure leave the model turn
+      // unclosed = the premise of a delta is missing. So does a dispose during the turn: its result is not
       // delivered (a host must not run a call from a turn that was torn down).
       if (output.text !== "") {
         this.#turns.push({ role: "assistant", content: opener + output.text });
