@@ -868,9 +868,21 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
       // while their contexts still borrow it and dispose would reject with "still lent out".
       const allocating = pipeline.sequence({ speculative: "always" });
       const copying = forked.fork();
+      // Both reject while dispose still waits for them, and dispose then awaits GPU work: the
+      // handlers are attached before dispose, or Node reports the rejections as unhandled.
+      const allocatingRejects = assertRejects(
+        () => allocating,
+        Error,
+        "cannot create a sequence after dispose",
+      );
+      const copyingRejects = assertRejects(
+        () => copying,
+        Error,
+        "cannot create a sequence after dispose",
+      );
       await pipeline.dispose();
-      await assertRejects(() => allocating, Error, "cannot create a sequence after dispose");
-      await assertRejects(() => copying, Error, "cannot create a sequence after dispose");
+      await allocatingRejects;
+      await copyingRejects;
       // The fork's sequence is disposed (= it returned the drafter's borrower, then the copied
       // context). Had it not been collected, this would not throw synchronously but fail later
       // in a run against the disposed Session.
