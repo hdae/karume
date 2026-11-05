@@ -394,9 +394,13 @@ def qat_target_tokenizer_dir(model: str) -> Path:
 
 def _digest(path: Path) -> str:
     """The SHA-256 of `path` — the blob's name when the cache links it to an LFS blob, else the
-    bytes (only small files reach the hashing branch in a hub snapshot)."""
-    if path.is_symlink() and _LFS_BLOB.fullmatch(path.resolve().name):
-        return path.resolve().name
+    bytes (only small files reach the hashing branch in a hub snapshot).
+
+    Only the snapshot's own link is read: huggingface_hub 1.33 links `blobs/<sha256>` on to a
+    blob stored under another hash, so the end of the chain does not carry the SHA-256.
+    """
+    if path.is_symlink() and _LFS_BLOB.fullmatch(blob := path.readlink().name):
+        return blob
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 

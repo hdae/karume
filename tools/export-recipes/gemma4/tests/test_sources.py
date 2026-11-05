@@ -163,6 +163,18 @@ class TestSnapshotPin:
         with pytest.raises(sources.SourcePinError, match=r"model\.safetensors"):
             sources.assert_snapshot_pin(snapshot, _wrong(pin, "model.safetensors"))
 
+    def test_a_blob_that_links_on_to_another_blob_passes(self, tmp_path) -> None:
+        # huggingface_hub 1.33 links blobs/<sha256> on to blobs/<shard>/<another 64-hex hash>:
+        # the snapshot's own link still names the SHA-256, the end of the chain does not.
+        snapshot, pin = _snapshot(tmp_path, lfs=("model.safetensors",))
+        blob = tmp_path / "blobs" / pin.sha256["model.safetensors"]
+        shard = tmp_path / "blobs" / "5b"
+        shard.mkdir()
+        blob.rename(shard / ("5b" * 32))
+        blob.symlink_to(Path("5b") / ("5b" * 32))
+
+        sources.assert_snapshot_pin(snapshot, pin)
+
     def test_changed_small_file_bytes_fail_loudly(self, tmp_path) -> None:
         snapshot, pin = _snapshot(tmp_path)
         (snapshot / "config.json").write_bytes(b'{"edited": true}')
