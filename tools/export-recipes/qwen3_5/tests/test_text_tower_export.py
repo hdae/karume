@@ -231,6 +231,45 @@ class TestTheCheckpoint:
         with pytest.raises(CheckpointError, match="SHA-256"):
             assert_pinned_shards(checkpoint_dir, wrong, hash_contents=True)
 
+    def test_a_blob_that_links_on_to_another_blob_passes_the_cheap_pin(
+        self, checkpoint_dir, tmp_path
+    ):
+        # huggingface_hub 1.33 links blobs/<sha256> on to blobs/<shard>/<another 64-hex hash>:
+        # the snapshot's own link still names the SHA-256, the end of the chain does not.
+        blobs = tmp_path / "blobs"
+        snapshot = tmp_path / "snapshots" / ("0" * 40)
+        (blobs / "5b").mkdir(parents=True)
+        snapshot.mkdir(parents=True)
+        (snapshot / "model.safetensors.index.json").write_bytes(
+            (checkpoint_dir / "model.safetensors.index.json").read_bytes()
+        )
+        digests = {}
+        for index, name in enumerate(
+            ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
+        ):
+            payload = (checkpoint_dir / name).read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            stored = f"{index:x}" * 64
+            (blobs / "5b" / stored).write_bytes(payload)
+            (blobs / digest).symlink_to(Path("5b") / stored)
+            (snapshot / name).symlink_to(Path("..") / ".." / "blobs" / digest)
+            digests[name] = digest
+        source = TextTowerSource(
+            name="tiny",
+            repo="tiny/tiny",
+            revision="0" * 40,
+            subfolder="",
+            license="apache-2.0",
+            prefix=PREFIX,
+            ignored_prefixes=("visual.",),
+            shards=digests,
+        )
+
+        assert_pinned_shards(snapshot, source)
+        wrong = replace(source, shards={**digests, next(iter(digests)): "0" * 64})
+        with pytest.raises(CheckpointError, match="resolves to blob"):
+            assert_pinned_shards(snapshot, wrong)
+
 
 class TestTheWriter:
     def test_a_truncated_export_needs_its_own_out(self):

@@ -133,8 +133,10 @@ def assert_pinned_shards(
         path = directory / name
         if not path.is_file():
             raise CheckpointError(f"{path} is missing")
-        if path.is_symlink() and path.resolve().name != expected:
-            raise CheckpointError(f"{path} resolves to blob {path.resolve().name}, pin {expected}")
+        # Only the snapshot's own link is read: huggingface_hub 1.33 links `blobs/<sha256>` on to
+        # a blob stored under another hash, so the end of the chain does not carry the SHA-256.
+        if path.is_symlink() and (blob := path.readlink().name) != expected:
+            raise CheckpointError(f"{path} resolves to blob {blob}, pin {expected}")
         if hash_contents:
             with path.open("rb") as stream:
                 actual = hashlib.file_digest(stream, "sha256").hexdigest()
