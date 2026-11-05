@@ -50,15 +50,23 @@ repositories are unchanged.
     one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed); its README
     Validation section still says `deno task verify`. No scoring run since the schema 4 / 5 reader (local `inputs/`
     lacks some checkpoints).
-  - Function calling and thinking (ADR 0084 addendum 2026-11-04): not yet run on a real model (12B first — GPU); the
-    `Pipeline.chat` one-shot entry takes no `tools` / `enableThinking` (only `chatPrompt` and `ChatSession` do); the
-    parser's exact-integer check reads `JSON.parse`'s reviver `context.source`, not verified on Safari.
+  - Function calling and thinking (ADR 0084 addendum 2026-11-04): run on the real 12B (`e2e_gemma4_12b_chat_tools_test.ts`)
+    and checked in the Playground by the maintainer on 2026-11-05. The `Pipeline.chat` one-shot entry takes no `tools` /
+    `enableThinking` (only `chatPrompt` and `ChatSession` do); the parser's exact-integer check reads `JSON.parse`'s
+    reviver `context.source`, not verified on Safari.
   - Vision (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
     `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
     V0. Not started.
-  - Longer output and a larger context: memo with a VRAM table, the API options and seven open decisions in
-    `.claude/reviews/2026-11-04_overnight/length-memo.md` (local, untracked). Decided with the maintainer before
-    implementation; its GPU measurement plan is §3.
+  - Longer output and a larger context: memo with a VRAM table and the API options in
+    `.claude/reviews/2026-11-04_overnight/length-memo.md` (local, untracked), its seven decisions taken on 2026-11-05 as
+    recommended. Done: `maxNewTokens` optional with the stop reason `capacity` and `reserveNewTokens` (ADR 0083 addendum
+    2026-11-05), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05). The manifests keep
+    capacity 4096. Open, in order: the GPU measurements (memo §3, items 1–5 and the row-block time cost of item 6); a
+    long-context quality check before any model card advertises more than 4K (KL against torch at 4K–32K plus a
+    retrieval test, E2B q4_0 and 12B first, and one sha256 row at a long position); then an opt-in `capacity: "fit"`
+    (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; it
+    needs measurement of the estimate's margin and a Dawn probe check, since ADR 0070's trial allocation was studied on
+    wgpu / Mesa). The f16 KV is K-100 in the perf ledger.
 - **Unhandled rejection in Depth Anything's pipeline slot (filed 2026-11-04)**: `void track(previous.value.dispose())`
   in `packages/models/src/depth-anything/pipeline-slot.ts` leaves a failed dispose of the replaced pipeline as an
   unhandled rejection (the playground hooks had the same shape, fixed in `0448aafc`).
