@@ -154,6 +154,15 @@ drive `sequence()` yourself and want to stop on a string, look at the decoded te
 `break` (the conversation advances "only by the successful runs", and the last token stays in the
 uncommitted frontier = the same state as a `chat` stop string).
 
+## Gemma 4 above capacity 4096 is measured for time and memory, not for quality
+
+The manifests keep capacity 4096, and a larger `capacity` is the caller's explicit choice. Time and memory up to
+P = 128K are in [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). No KL against torch or retrieval
+test has been run at long context yet, so no model card advertises more than 4K. At long positions decode time grows
+linearly on `i4` and `bf16` (370–382 ms per token at P = 128K on the RTX 3080 Ti, under thermal slowdown) and much more
+slowly on `i4-fast` (24.5–25.9 ms), and a sequence's memory can peak about 1 GiB over `estimateSessionMemory` for a
+moment.
+
 ## Gemma 4 chat: what tools / thinking leave out, and where the KV differs from a re-render
 
 The chat layer renders tools, tool calls, tool results and thinking as upstream's

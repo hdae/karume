@@ -549,3 +549,8 @@ default KV type is f16, so per token Karume holds twice that default.
 | Status | ID | Candidate | Preconditions / kill criterion |
 | ------ | --- | --------- | ------------------------------ |
 | 🚧 | K-100 | f16 full-layer KV for Gemma 4 | Filed 2026-11-05. Memory only: decode is latency-bound, not bandwidth-bound (L-10, the K-46 refutation), so no speed gain is expected. **[estimate]** It halves the full-layer KV (12B at capacity 262,144: state 8,837 → 4,741 MiB with the sliding layers unchanged, so its peak with a 128 MiB row-block limit goes 16,447 → 12,351 MiB and fits 16 GB). Needs f16 in the states form (generation-context / state-attention / estimate, the same extension K-46 needs) and a re-export of the graphs, which is worth combining with the graph change for vision. It is a numeric change: a named option under ADR [0058](decisions/0058-numerics-opt-in-contract.md), never a silent default, and it needs the long-context quality check of the backlog first. Kill: the measured KL at long context is worse than the line's acceptance, or the long-context measurements show capacities above 32K are not used in practice |
+
+[Research 2026-11-05](research/2026-11-05-gemma4-long-context.md) measured time and memory up to P = 128K on the RTX 3080 Ti.
+The sustained VRAM follows the estimate, which keeps the K-100 figures usable as estimates. Decode is what limits long
+context on `i4` and `bf16` (370–382 ms per token at P = 128K), while `i4-fast` holds 24.5–25.9 ms, so K-100 does not change
+the speed picture.

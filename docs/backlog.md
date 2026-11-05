@@ -61,12 +61,13 @@ repositories are unchanged.
     `.claude/reviews/2026-11-04_overnight/length-memo.md` (local, untracked), its seven decisions taken on 2026-11-05 as
     recommended. Done: `maxNewTokens` optional with the stop reason `capacity` and `reserveNewTokens` (ADR 0083 addendum
     2026-11-05), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05). The manifests keep
-    capacity 4096. Open, in order: the GPU measurements (memo §3, items 1–5 and the row-block time cost of item 6); a
-    long-context quality check before any model card advertises more than 4K (KL against torch at 4K–32K plus a
+    capacity 4096. The GPU measurements on the RTX 3080 Ti are in
+    [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). Open, in order: the Chrome check on the 5070 Ti (E2B
+    q4_0 at capacity 32K and 128K: the sequence is created and one turn completes); a long-context quality check before any model card advertises more than 4K (KL against torch at 4K–32K plus a
     retrieval test, E2B q4_0 and 12B first, and one sha256 row at a long position); then an opt-in `capacity: "fit"`
-    (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; it
-    needs measurement of the estimate's margin and a Dawn probe check, since ADR 0070's trial allocation was studied on
-    wgpu / Mesa). The f16 KV is K-100 in the perf ledger.
+    (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; the
+    margin has to cover short peaks of about 1 GiB over the estimate, and it needs a Dawn probe check, since ADR 0070's
+    trial allocation was studied on wgpu / Mesa). The f16 KV is K-100 in the perf ledger.
 - **Unhandled rejection in Depth Anything's pipeline slot (filed 2026-11-04)**: `void track(previous.value.dispose())`
   in `packages/models/src/depth-anything/pipeline-slot.ts` leaves a failed dispose of the replaced pipeline as an
   unhandled rejection (the playground hooks had the same shape, fixed in `0448aafc`).
