@@ -925,7 +925,7 @@ One turn runs at a time.
 | Capacity | KV positions the chat allocates (`capacity` of the session). Empty = the distribution's (4096). It must be from `chunkLength` to `maxPosition`. Applies on New chat. |
 | When a turn does not fit | **Drop the oldest turns** (`dropOldestTurns`: the oldest user / assistant pair goes, the system message stays; checked before sending), or **Refuse the turn**: the policy returns the history unchanged, so the session fails the turn with `GenerationCapacityError` and the history stays as it was. Applies on New chat. |
 | New chat | Disposes the session and builds a new one with the chat settings (the record starts over). |
-| Temperature, Top-k, Top-p, Seed, Max new tokens | The turn's sampler and `maxNewTokens`, passed with every send. The form starts from the distribution's sampler (temperature 1, top-k 64, top-p 0.95), seed 0, 512 tokens. Empty top-k / top-p = no narrowing. **Distribution's sampler** resets the form; **Greedy** sets temperature 0. |
+| Temperature, Top-k, Top-p, Seed, Max new tokens | The turn's sampler and `maxNewTokens`, passed with every send. The form starts from the distribution's sampler (temperature 1, top-k 64, top-p 0.95), seed 0, 512 tokens. Empty top-k / top-p = no narrowing. Empty max new tokens = no limit: the turn runs until the model stops or the context is full (stop reason `capacity`), and the session's default `reserveNewTokens` (1,024) decides whether old turns are dropped first. **Distribution's sampler** resets the form; **Greedy** sets temperature 0. |
 | Sample messages | Fill the input (one is Japanese, to exercise multi-byte streaming). |
 | Send / Stop | Enter sends (Shift+Enter is a new line). Stop aborts the turn through the request's `signal`. A partial reply stays in the history and the turn shows "stopped". The status card's Cancel does the same. |
 
@@ -959,11 +959,11 @@ How the figures are measured (from `performance.now()` in the page):
     run that drew the stop token;
   - without: the end of the text stream.
 
-### The record (`format: "karume-playground-gemma4/3"`)
+### The record (`format: "karume-playground-gemma4/4"`)
 
 | Field | What |
 | --- | --- |
-| `format`, `page` | `karume-playground-gemma4/3`, `gemma4` (version 2 recorded the mobile QAT line as mount `gemma4-qat` with pipeline `gemma4Qat.Pipeline` — since version 3 that mount is the q4_0 QAT line and the mobile line is `gemma4-qat-mobile` / `gemma4QatMobile.Pipeline`; version 1 spelled `pipeline` with the 0.14 class names `Gemma4Pipeline` / `Gemma4QatPipeline`) |
+| `format`, `page` | `karume-playground-gemma4/4`, `gemma4` (version 3 always had `request.maxNewTokens` and never the stop reason `capacity`; version 2 recorded the mobile QAT line as mount `gemma4-qat` with pipeline `gemma4Qat.Pipeline` — since version 3 that mount is the q4_0 QAT line and the mobile line is `gemma4-qat-mobile` / `gemma4QatMobile.Pipeline`; version 1 spelled `pipeline` with the 0.14 class names `Gemma4Pipeline` / `Gemma4QatPipeline`) |
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment` |
 | `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of `karume.json`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
@@ -974,7 +974,7 @@ How the figures are measured (from `performance.now()` in the page):
 | `diagnosticsCollected` | whether the pipeline was loaded with `onRunDiagnostics`. When true, greedy turns ran without the on-GPU greedy selection, so their decode rates are not those of an app without diagnostics. |
 | `chat` | `system` (absent = none), `capacity`, `overflow` (`drop-oldest` / `refuse`) |
 | `turns[].index`, `userText`, `replyText` | the turn's number (failed and not-kept turns included), the message, the streamed reply |
-| `turns[].request` | `maxNewTokens` and the `sampler` exactly as passed |
+| `turns[].request` | `maxNewTokens` (absent on a turn without a limit) and the `sampler` exactly as passed |
 | `turns[].outcome` | `{ kind: "stopped", stop: { reason, tokens, token?, stopString?, speculation? } }` or `{ kind: "failed", error }` |
 | `turns[].prefill` | `promptTokens`, `carriedPositions` (positions the carried KV already held; 0 = rendered from the start), `chunks` |
 | `turns[].timing` | `totalSeconds`, `prefillSeconds`, `prefillTokensPerSecond`, `ttftSeconds`, `decodeTokens`, `decodeSeconds`, `decodeTokensPerSecond` (a figure that could not be measured is absent) |

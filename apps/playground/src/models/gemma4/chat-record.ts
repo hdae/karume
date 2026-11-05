@@ -26,8 +26,11 @@ import type { TurnTiming } from "./turns";
  * Version 3: `distribution.mount` `gemma4-qat` names the q4_0 QAT line (read by `gemma.Pipeline`),
  * and the mobile QAT line, which version 2 recorded as mount `gemma4-qat` with pipeline
  * `gemma4Qat.Pipeline`, is mount `gemma4-qat-mobile` with pipeline `gemma4QatMobile.Pipeline`.
+ *
+ * Version 4: `request.maxNewTokens` is absent on a turn sent without a limit, and such a turn can
+ * stop with the reason `capacity`.
  */
-export const RECORD_FORMAT = "karume-playground-gemma4/3";
+export const RECORD_FORMAT = "karume-playground-gemma4/4";
 
 /** How a turn stopped (the stop of the turn's stream, flattened for JSON). */
 export type StopRecord = {
