@@ -24,6 +24,11 @@ measurements in `docs/research/`.
   `reserveNewTokens` free in its overflow check (default 1024): it decides which history is
   dropped and does not limit the reply. A `capacity` smaller than prompt + reserve fails loudly,
   naming that option.
+- `@karume/models`: `gemma.PipelineOptions.attentionRowBlockMaxBytes` caps each row-block temporary
+  of attention below the device's binding limit (ADR 0124 addendum of 2026-11-05), so the prefill score
+  matrix of a large `capacity` can be split further. It reaches the target and drafter Sessions and
+  `estimateSessionMemory`, leaves token sequences unchanged, and trades prefill speed for VRAM. Unset
+  by default, which changes nothing.
 - `@karume/models`: function calling and thinking in the Gemma 4 chat layer (`gemma.*` and
   `gemma4QatMobile.*`; ADR 0084 addendum of 2026-11-04). `chatPrompt` / `chatTurn` take template
   options `{ tools, enableThinking, preserveThinking }` and messages in the HF / OpenAI shape —

@@ -221,3 +221,25 @@ devices were not measured.
   in measurement mode stayed within noise at 1 GiB and 512 MiB and rose by 24.9% at 256 MiB (almost
   all `attention_pv`); wall-clock runs were thermally throttled and not used. Decision 10 records what
   followed.
+
+## Addendum (2026-11-05) — `gemma.PipelineOptions` passes the limit through (update to decision 10)
+
+Decision 10 kept the knob out of models until a problem needed it. Gemma 4 has that problem: the
+prefill score matrix of states-form attention is heads × chunk rows × capacity × 4 bytes, so it grows
+with the capacity a caller chooses (1.5 GiB at 8 heads, 768 chunk rows and capacity 65,536, computed
+from that formula), and the gemma surface had no way to cap it.
+
+- `attentionRowBlockMaxBytes` joins `gemma.PipelineOptions`, unset by default. Unset leaves the
+  Session options byte for byte as they were (the field is absent), so nothing changes for existing
+  callers.
+- The value goes to the target Session and the drafter Session, and
+  `Pipeline.estimateSessionMemory` passes the same value to the estimate of both graphs, so the
+  estimate counts the split the Sessions run. This is the same rule as `planBackingBudgetBytes` there
+  (ADR [0095](0095-plan-backing-budget.md)). A limit below one row therefore fails in the estimate too,
+  before the first run does.
+- It stays a resource policy: it is not a manifest `session` field or part of a quant preset, and token
+  sequences do not change (decision 4 — bit identity comes from row blocks only reassigning rows; no
+  Gemma-specific A/B was run for this addendum). It trades prefill speed for VRAM; that cost was not
+  measured on Gemma, and step 4b measured it only on Wan2.2's DiT.
+- Other families are unchanged: `wan.Ti2vPipeline` and the rest still have no knob, and no default
+  budget is added anywhere.

@@ -815,12 +815,14 @@ by-design properties are as follows.
   machine's RTX 3080 Ti, Deno), the total GPU time in timing mode was within the wobble of the
   no-budget case at budgets of 1 GiB / 512 MiB, and +24.9% at 256 MiB (measured 2026-10-11,
   [research 2026-10-11 (measurements of step 4b)](research/2026-10-11-row-block-budget-stage-4b.md)).
-- **The models pipelines have no knob for it (nor did gpu-lab, removed in 0.15)**: it is a field of
-  the runtime's `SessionOptions` only, and cannot be passed from `wan.Ti2vPipeline` and the like, or
-  from the Wan tab of gpu-lab. It is not put into Wan's default either (ruling 39 = a, the maintainer
-  2026-10-11 — the results section of step 4b in ADR 0124). A knob will be added once a problem that
-  needs solving appears (the policy of the ADR 0005 addendum of 2026-10-11). Callers that use the
-  runtime directly can use `SessionOptions.attentionRowBlockMaxBytes`.
+- **Of the models pipelines, only the Gemma 4 ones have a knob for it (gpu-lab, removed in 0.15, had
+  none)**: `gemma.PipelineOptions.attentionRowBlockMaxBytes` passes it to the target and drafter
+  Sessions and to `estimateSessionMemory`, unset by default (ADR 0124 addendum of 2026-11-05). It
+  cannot be passed from `wan.Ti2vPipeline` and the like, and it is not put into Wan's default either
+  (ruling 39 = a, the maintainer 2026-10-11 — the results section of step 4b in ADR 0124). A knob will
+  be added to another family once a problem that needs solving appears (the policy of the ADR 0005
+  addendum of 2026-10-11). Callers that use the runtime directly can use
+  `SessionOptions.attentionRowBlockMaxBytes`.
 
 ## Budgeted retention of slot backings: a shape that does not fit in the budget is held alone, and disposing a resident input is rejected while it is held
 

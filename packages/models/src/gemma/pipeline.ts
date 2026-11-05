@@ -454,6 +454,18 @@ export type PipelineOptions = {
    */
   readonly planBackingBudgetBytes?: number;
   /**
+   * The limit per row-block temporary of attention (bytes; unset by default = the device's binding
+   * limit alone decides the split). The runtime's `SessionOptions.attentionRowBlockMaxBytes` is the
+   * source of truth for the meaning and value range (ADR 0124), and this pipeline passes it straight
+   * through (the same value applies to the target Session, the drafter Session and
+   * {@link Pipeline.estimateSessionMemory}).
+   * It is a resource policy: the token sequences stay unchanged (row blocks only change the
+   * assignment of rows), and it trades prefill speed for VRAM. The prefill score matrix is heads ×
+   * chunk rows × capacity × 4 bytes (1.5 GiB at 8 heads, 768 rows and capacity 65,536), and a value
+   * below the binding limit splits it into smaller blocks at the cost of more dispatches per prefill.
+   */
+  readonly attentionRowBlockMaxBytes?: SessionOptions["attentionRowBlockMaxBytes"];
+  /**
    * The parallelism target of the row-block gemv (the linear GEMV family, M ≥ 2). The runtime's
    * `SessionOptions.linearGemvRowsThreadTarget` is the source of truth for the meaning, default
    * (16384 = the saturation point of the reference device) and value range, and this pipeline passes
@@ -804,6 +816,15 @@ export type Gemma4State = {
    * would name a different budget from the actual held set.
    */
   readonly planBackingBudgetBytes?: number;
+  /**
+   * The row-block limit passed to the Session ({@link PipelineOptions.attentionRowBlockMaxBytes};
+   * only the binding limit when unspecified).
+   *
+   * MUST: the field exists so that {@link Pipeline.estimateSessionMemory} passes **the same
+   * value** to the estimate — if the two diverged, the reported peak would count a different block
+   * split from the one the Session runs.
+   */
+  readonly attentionRowBlockMaxBytes?: SessionOptions["attentionRowBlockMaxBytes"];
   /** The per-run observation callback ({@link PipelineOptions.onRunDiagnostics}). */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
 };
@@ -1602,6 +1623,9 @@ export class GemmaPipeline {
       ...(options.planBackingBudgetBytes === undefined
         ? {}
         : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
+      ...(options.attentionRowBlockMaxBytes === undefined
+        ? {}
+        : { attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes }),
       ...(options.linearGemvRowsThreadTarget === undefined
         ? {}
         : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
@@ -1698,6 +1722,9 @@ export class GemmaPipeline {
         ...(options.planBackingBudgetBytes === undefined
           ? {}
           : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
+        ...(options.attentionRowBlockMaxBytes === undefined
+          ? {}
+          : { attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes }),
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -2104,13 +2131,17 @@ export class GemmaPipeline {
         `${entry}: capacity ${capacity} exceeds maxPosition ${wiring.maxPosition}`,
       );
     }
-    // MUST: pass the same budget as was passed to the Session (if only one side fell back to the
-    // default, the reported peak would name a different budget from the actual held set). Unspecified
-    // is not passed at all and left to the runtime default.
-    const budget =
-      this.#state.planBackingBudgetBytes === undefined
+    // MUST: pass the same budgets as were passed to the Session (if only one side fell back to the
+    // default, the reported peak would name a different budget from the actual held set, or count a
+    // different row-block split). Unspecified is not passed at all and left to the runtime default.
+    const budget = {
+      ...(this.#state.planBackingBudgetBytes === undefined
         ? {}
-        : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes };
+        : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes }),
+      ...(this.#state.attentionRowBlockMaxBytes === undefined
+        ? {}
+        : { attentionRowBlockMaxBytes: this.#state.attentionRowBlockMaxBytes }),
+    };
     // MUST: pass it (the in-node transients of states-form attention have a row-block count decided by
     // this limit alone, so omitting it makes the estimator fail loudly — it is not filled with a
     // default).
