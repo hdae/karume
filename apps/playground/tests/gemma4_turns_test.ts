@@ -2,6 +2,7 @@ import type { ChatMessage } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  awaitingToolResults,
   contextUsageText,
   deriveTranscript,
   historyOf,
@@ -176,6 +177,173 @@ describe("deriveTranscript (the transcript rebuilt from the session's history)",
       text: "Hello!",
       inContext: true,
     });
+  });
+});
+
+describe("deriveTranscript in a session that streams structure (tools, thinking)", () => {
+  const weatherCall = {
+    id: "call_1",
+    type: "function" as const,
+    function: { name: "get_weather", arguments: { city: "Kyoto" } },
+  };
+  const calling: ChatMessage = { role: "assistant", content: "", tool_calls: [weatherCall] };
+  const result = '{"city":"Kyoto","condition":"sunny"}';
+  const answered: readonly ChatMessage[] = [
+    user("Weather in Kyoto?"),
+    calling,
+    { role: "tool", tool_call_id: "call_1", name: "get_weather", content: result },
+    assistant("It is sunny in Kyoto."),
+  ];
+  const structured = (turn: number, text: string): SentTurn => ({
+    turn,
+    text,
+    reply: undefined,
+    userId: turn * 2 + 1,
+    assistantId: turn * 2 + 2,
+  });
+
+  /** The message that ended on a call (turn 0), then its continuation with the result (turn 1). */
+  const toolTurn = () => {
+    const newId = idSource();
+    const called = deriveTranscript({
+      previous: [],
+      history: answered.slice(0, 2),
+      sent: structured(0, "Weather in Kyoto?"),
+      dropped: 0,
+      newId,
+    });
+    const continued = deriveTranscript({
+      previous: called.entries,
+      history: answered,
+      sent: { turn: 1, toolResults: [result] },
+      dropped: 0,
+      newId,
+    });
+    return { called, continued };
+  };
+
+  it("shows the call by name with its arguments as JSON, attributed to the message's turn", () => {
+    const { called } = toolTurn();
+    expect(called.kept).toBe(true);
+    expect(called.entries).toEqual([
+      { id: 1, role: "user", text: "Weather in Kyoto?", inContext: true, turn: 0 },
+      {
+        id: 2,
+        role: "assistant",
+        text: "",
+        toolCalls: [{ id: "call_1", name: "get_weather", arguments: '{"city":"Kyoto"}' }],
+        inContext: true,
+        turn: 0,
+      },
+    ]);
+  });
+
+  it("adds the result with its tool's name and the answer to the continuation's turn", () => {
+    const { called, continued } = toolTurn();
+    expect(continued.kept).toBe(true);
+    expect(continued.entries.slice(0, 2)).toEqual(called.entries);
+    expect(continued.entries.slice(2)).toEqual([
+      { id: 101, role: "tool", text: result, toolName: "get_weather", inContext: true, turn: 1 },
+      { id: 102, role: "assistant", text: "It is sunny in Kyoto.", inContext: true, turn: 1 },
+    ]);
+  });
+
+  it("resolves a result's tool from the call it names when the result carries no name", () => {
+    const { entries } = deriveTranscript({
+      previous: toolTurn().called.entries,
+      history: [
+        ...answered.slice(0, 2),
+        { role: "tool", tool_call_id: "call_1", content: result },
+        assistant("Sunny."),
+      ],
+      sent: { turn: 1, toolResults: [result] },
+      dropped: 0,
+      newId: idSource(),
+    });
+    expect(entries[2]?.toolName).toBe("get_weather");
+  });
+
+  it("attributes text written before the calls (its own history entry) to the same turn", () => {
+    const { entries } = deriveTranscript({
+      previous: [],
+      history: [user("Weather in Kyoto?"), assistant("Let me check."), calling],
+      sent: structured(0, "Weather in Kyoto?"),
+      dropped: 0,
+      newId: idSource(),
+    });
+    expect(shape(entries)).toEqual([
+      { role: "user", text: "Weather in Kyoto?", inContext: true, turn: 0 },
+      { role: "assistant", text: "Let me check.", inContext: true, turn: 0 },
+      { role: "assistant", text: "", inContext: true, turn: 0 },
+    ]);
+    expect(entries.map(({ id }) => id)).toEqual([1, 2, 101]);
+  });
+
+  it("adds nothing when the continuation was taken back (the results left the history)", () => {
+    const { called } = toolTurn();
+    const takenBack = deriveTranscript({
+      previous: called.entries,
+      history: answered.slice(0, 2),
+      sent: { turn: 1, toolResults: [result] },
+      dropped: 0,
+      newId: idSource(),
+    });
+    expect(takenBack.kept).toBe(false);
+    expect(takenBack.entries).toEqual(called.entries);
+  });
+
+  it("shows a thought above the answer and attributes the reply without its streamed text", () => {
+    const { entries, kept } = deriveTranscript({
+      previous: [],
+      history: [user("2 + 2?"), { role: "assistant", content: "4", reasoning: "Two and two." }],
+      sent: structured(0, "2 + 2?"),
+      dropped: 0,
+      newId: idSource(),
+    });
+    expect(kept).toBe(true);
+    expect(entries.at(-1)).toEqual({
+      id: 2,
+      role: "assistant",
+      text: "4",
+      thinking: "Two and two.",
+      inContext: true,
+      turn: 0,
+    });
+  });
+
+  it("drops a whole tool exchange out of context like a plain one", () => {
+    const { continued } = toolTurn();
+    const { entries } = deriveTranscript({
+      previous: continued.entries,
+      history: [user("Thanks"), assistant("You are welcome.")],
+      sent: structured(2, "Thanks"),
+      dropped: 4,
+      newId: idSource(),
+    });
+    expect(shape(entries).map(({ role, inContext, turn }) => [role, inContext, turn])).toEqual([
+      ["user", false, 0],
+      ["assistant", false, 0],
+      ["tool", false, 1],
+      ["assistant", false, 1],
+      ["user", true, 2],
+      ["assistant", true, 2],
+    ]);
+  });
+});
+
+describe("awaitingToolResults", () => {
+  it("holds while the last entry is a call and not once its result follows", () => {
+    const calling: ChatMessage = {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call_1", function: { name: "calculate", arguments: {} } }],
+    };
+    expect(awaitingToolResults([user("1+1?"), calling])).toBe(true);
+    expect(
+      awaitingToolResults([user("1+1?"), calling, { role: "tool", content: "2" }, assistant("2")]),
+    ).toBe(false);
+    expect(awaitingToolResults([user("Hi"), assistant("Hello.")])).toBe(false);
+    expect(awaitingToolResults([])).toBe(false);
   });
 });
 

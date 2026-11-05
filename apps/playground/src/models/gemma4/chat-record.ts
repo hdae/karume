@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChatJsonObject,
   ChatStop,
   GenerationDecodeAhead,
   GenerationSpeculation,
@@ -64,10 +65,34 @@ export type RunCounts = {
 
 export const NO_RUNS: RunCounts = { prefill: 0, decode: 0, draft: 0, verify: 0 };
 
+/** One tool result a turn sent (`sendToolResults`). */
+export type ToolResultRecord = {
+  readonly toolCallId?: string;
+  readonly name: string;
+  readonly content: string;
+};
+
+/** One tool call a turn ended on (`reply.message.tool_calls`). */
+export type ToolCallRecord = {
+  readonly id?: string;
+  readonly name: string;
+  readonly arguments: ChatJsonObject;
+};
+
+/**
+ * One generation of the session: a user message, or — in a chat with tools — a continuation after
+ * the results of the calls the previous one ended on (one row per `send` / `sendToolResults`, so the
+ * statistics stay those of one prefill and one decode).
+ */
 export type TurnRecord = {
   /** 1-based, in the order sent (failed turns included). */
   readonly index: number;
+  /** The user's message (a continuation repeats the message whose model turn it continues). */
   readonly userText: string;
+  /** Present only on a continuation: the tool results it sent, in order. */
+  readonly toolResults?: readonly ToolResultRecord[];
+  /** Present only on a turn that ended on tool calls: the calls, with their session-assigned ids. */
+  readonly toolCalls?: readonly ToolCallRecord[];
   /** The streamed text (empty for a turn that produced none). */
   readonly replyText: string;
   readonly request: { readonly maxNewTokens: number; readonly sampler: SamplerSpec };
@@ -88,8 +113,9 @@ export type TurnRecord = {
   /** History entries the overflow policy dropped before this turn was sent. */
   readonly droppedEntries: number;
   /**
-   * Whether the session kept the turn (its message and reply) in its history. False when it treated
-   * the turn as never having happened: no text and no EOS (a Stop during prefill, a failure).
+   * Whether the session kept the turn (its message, or its tool results, and the reply) in its
+   * history. False when it treated the turn as never having happened: no text and no EOS (a Stop
+   * during prefill, a failure).
    */
   readonly inHistory: boolean;
   /** Positions the session holds after the turn; absent when it released the sequence. */

@@ -3,11 +3,13 @@ import type { ChatMessage } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  type ChatForm,
   defaultModelKey,
   effectiveModelKey,
   entryPointOf,
   gemmaModelChoices,
   hasDrafter,
+  INITIAL_CHAT_FORM,
   isQatModel,
   modelConfig,
   overflowPolicy,
@@ -15,6 +17,7 @@ import {
   parseModelKey,
   parseTurnForm,
   sameChatSettings,
+  streamsStructure,
   type TurnForm,
   turnFormOf,
 } from "../src/models/gemma4/settings.ts";
@@ -281,6 +284,61 @@ describe("the chat form", () => {
     expect(sameChatSettings(base, { ...base })).toBe(true);
     expect(sameChatSettings(base, { ...base, system: "x" })).toBe(false);
     expect(sameChatSettings(base, { ...base, capacity: 2048 })).toBe(false);
+  });
+
+  describe("thinking and the sample tools", () => {
+    it("start off, so the initial form parses to a plain chat's settings", () => {
+      expect(parseChatForm(INITIAL_CHAT_FORM, limits)).toEqual({
+        ok: true,
+        value: { capacity: 4096, overflow: "drop-oldest" },
+      });
+      const value = parseChatForm(INITIAL_CHAT_FORM, limits);
+      expect(value.ok && streamsStructure(value.value)).toBe(false);
+    });
+
+    it("appear only when chosen, the tools in declaration order", () => {
+      const result = parseChatForm(
+        { ...INITIAL_CHAT_FORM, thinking: true, tools: ["get_weather", "calculate"] },
+        limits,
+      );
+      expect(result).toEqual({
+        ok: true,
+        value: {
+          capacity: 4096,
+          overflow: "drop-oldest",
+          enableThinking: true,
+          tools: ["calculate", "get_weather"],
+        },
+      });
+      expect(result.ok && streamsStructure(result.value)).toBe(true);
+    });
+
+    it("make the session stream structure with either one alone", () => {
+      const base = { capacity: 4096, overflow: "drop-oldest" as const };
+      expect(streamsStructure({ ...base, enableThinking: true })).toBe(true);
+      expect(streamsStructure({ ...base, tools: ["roll_dice"] })).toBe(true);
+    });
+
+    it("are part of the comparison, so changing them asks for a new chat", () => {
+      const base = { capacity: 4096, overflow: "drop-oldest" as const };
+      const tools = ["calculate", "get_weather"] as const;
+      expect(sameChatSettings(base, { ...base, enableThinking: true })).toBe(false);
+      expect(sameChatSettings(base, { ...base, tools: ["calculate"] })).toBe(false);
+      expect(sameChatSettings({ ...base, tools }, { ...base, tools: ["calculate"] })).toBe(false);
+      expect(sameChatSettings({ ...base, tools }, { ...base, tools: [...tools] })).toBe(true);
+      const parsed = (form: Partial<ChatForm>) => {
+        const result = parseChatForm({ ...INITIAL_CHAT_FORM, ...form }, limits);
+        if (!result.ok) throw new Error("the form did not parse");
+        return result.value;
+      };
+      expect(
+        sameChatSettings(
+          parsed({ tools: ["get_weather", "calculate"] }),
+          parsed({ tools: ["calculate", "get_weather"] }),
+        ),
+      ).toBe(true);
+      expect(sameChatSettings(parsed({ thinking: false, tools: [] }), base)).toBe(true);
+    });
   });
 });
 

@@ -2,7 +2,7 @@ import { memo, useSyncExternalStore } from "react";
 
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
-import { Message, MessageContent, MessageFooter } from "@/components/ui/message";
+import { Message, MessageContent, MessageFooter, MessageHeader } from "@/components/ui/message";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -16,6 +16,71 @@ import { Spinner } from "@/components/ui/spinner";
 import type { TurnRecord } from "./chat-record";
 import type { LiveReplyStore } from "./live-reply";
 import { type TranscriptEntry, turnSummary } from "./turns";
+
+/**
+ * The entries that carry their turn's footer: the last assistant entry of each turn (a turn that
+ * wrote text before its calls, or continued after tool results, has several).
+ */
+const footerEntries = (entries: readonly TranscriptEntry[]): ReadonlySet<number> => {
+  const last = new Map<number, number>();
+  for (const entry of entries) {
+    if (entry.role === "assistant" && entry.turn !== undefined) last.set(entry.turn, entry.id);
+  }
+  return new Set(last.values());
+};
+
+/**
+ * An entry's bubbles: a tool result (labelled with its tool), or the text with its thought
+ * (collapsed) above it and its tool calls (name and JSON arguments) below it.
+ */
+const EntryBubbles = ({ entry }: { entry: TranscriptEntry }) => {
+  if (entry.role === "tool") {
+    return (
+      <>
+        <MessageHeader>Result of {entry.toolName ?? "a tool call"}</MessageHeader>
+        <Bubble variant="outline">
+          <BubbleContent className="font-mono text-xs whitespace-pre-wrap">
+            {entry.text}
+          </BubbleContent>
+        </Bubble>
+      </>
+    );
+  }
+  const calls = entry.toolCalls ?? [];
+  return (
+    <>
+      {entry.thinking === undefined ? null : (
+        <details className="px-3 text-xs text-muted-foreground">
+          <summary className="cursor-pointer select-none">Thinking</summary>
+          <p className="mt-1 whitespace-pre-wrap">{entry.thinking}</p>
+        </details>
+      )}
+      {entry.text === "" && calls.length > 0 ? null : (
+        <Bubble variant={entry.role === "user" ? "default" : "muted"}>
+          <BubbleContent className="whitespace-pre-wrap">
+            {entry.text === "" ? (
+              <span className="text-muted-foreground italic">(empty reply)</span>
+            ) : (
+              entry.text
+            )}
+          </BubbleContent>
+        </Bubble>
+      )}
+      {calls.length === 0 ? null : (
+        <MessageHeader>
+          {calls.length === 1 ? "Tool call" : `${calls.length} tool calls`}
+        </MessageHeader>
+      )}
+      {calls.map((call, index) => (
+        <Bubble key={call.id ?? index} variant="outline">
+          <BubbleContent className="font-mono text-xs whitespace-pre-wrap">
+            <span className="font-semibold">{call.name}</span> {call.arguments}
+          </BubbleContent>
+        </Bubble>
+      ))}
+    </>
+  );
+};
 
 /** The footer of an assistant entry: how the turn stopped and its figures. */
 const footerOf = (record: TurnRecord | undefined): string | undefined => {
@@ -57,7 +122,8 @@ const LiveReplyBubble = ({ live }: { live: LiveReplyStore }) => {
 
 /**
  * The conversation: one bubble per history entry (entries the overflow policy dropped are dimmed and
- * say so), the streaming reply while a turn runs, and a scroll-to-end button. The scroller follows
+ * say so; tool calls and results are labelled, a thought is collapsed above its answer), the
+ * streaming reply while a turn runs, and a scroll-to-end button. The scroller follows
  * new text while the view is at the end. Memoized: its props change only when a turn starts or
  * settles, so the page's other re-renders (the status ticker) skip it.
  */
@@ -76,6 +142,7 @@ const ChatTranscriptView = ({
   /** The reply streamed so far in the running turn. */
   live: LiveReplyStore;
 }) => {
+  const withFooter = footerEntries(entries);
   return (
     <MessageScrollerProvider autoScroll>
       <MessageScroller id="gemma4-transcript" className="h-[28rem] rounded-lg border">
@@ -93,7 +160,7 @@ const ChatTranscriptView = ({
             ) : null}
             {entries.map((entry) => {
               const footer =
-                entry.role === "assistant" && entry.turn !== undefined
+                withFooter.has(entry.id) && entry.turn !== undefined
                   ? footerOf(turns[entry.turn])
                   : undefined;
               return (
@@ -107,15 +174,7 @@ const ChatTranscriptView = ({
                     className={entry.inContext ? undefined : "opacity-50"}
                   >
                     <MessageContent>
-                      <Bubble variant={entry.role === "user" ? "default" : "muted"}>
-                        <BubbleContent className="whitespace-pre-wrap">
-                          {entry.text === "" ? (
-                            <span className="text-muted-foreground italic">(empty reply)</span>
-                          ) : (
-                            entry.text
-                          )}
-                        </BubbleContent>
-                      </Bubble>
+                      <EntryBubbles entry={entry} />
                       {footer === undefined && entry.inContext ? null : (
                         <MessageFooter className="flex-wrap gap-x-2 font-mono font-normal tabular-nums">
                           {entry.inContext ? null : <span>dropped from the context ·</span>}

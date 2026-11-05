@@ -17,6 +17,8 @@ import {
 
 import type { Choice } from "@/components/choice-select";
 
+import { SAMPLE_TOOL_NAMES, type SampleToolName } from "./sample-tools";
+
 /**
  * The mounts this page reads, each built with its family's entry point ({@link entryPointOf}):
  * regular Gemma 4 (`karume-gemma4`), the q4_0 QAT line (`karume-gemma4-qat` — a `gemma4/1`
@@ -253,9 +255,19 @@ export type ChatForm = {
   /** Empty = the distribution's capacity. */
   readonly capacity: string;
   readonly overflow: OverflowMode;
+  /** Thinking mode (`enableThinking`); absent = off. */
+  readonly thinking?: boolean;
+  /** The sample tools checked (any order); absent = none. */
+  readonly tools?: readonly SampleToolName[];
 };
 
-export const INITIAL_CHAT_FORM: ChatForm = { system: "", capacity: "", overflow: "drop-oldest" };
+export const INITIAL_CHAT_FORM: ChatForm = {
+  system: "",
+  capacity: "",
+  overflow: "drop-oldest",
+  thinking: false,
+  tools: [],
+};
 
 /** What one `ChatSession` is built with (fixed for the session's life). */
 export type ChatSettings = {
@@ -263,7 +275,19 @@ export type ChatSettings = {
   readonly system?: string;
   readonly capacity: number;
   readonly overflow: OverflowMode;
+  /** Present (true) only when thinking mode is on. */
+  readonly enableThinking?: true;
+  /** The sample tools the session declares, in {@link SAMPLE_TOOL_NAMES} order; absent = none. */
+  readonly tools?: readonly SampleToolName[];
 };
+
+/**
+ * Whether the session streams the template's structure spellings (`<|channel>`, `<|tool_call>`,
+ * `<|"|>`): it does with tools or thinking (the NOTE of `ChatSession.send`). The streamed text is
+ * then not the text the history keeps.
+ */
+export const streamsStructure = (settings: ChatSettings): boolean =>
+  settings.enableThinking === true || settings.tools !== undefined;
 
 /** The limits a capacity is checked against (from the model's `pipelineConfig`). */
 export type CapacityLimits = Pick<PipelineConfig, "capacity" | "chunkLength" | "maxPosition">;
@@ -271,7 +295,9 @@ export type CapacityLimits = Pick<PipelineConfig, "capacity" | "chunkLength" | "
 /**
  * The chat form → the session's settings. A whitespace-only system prompt means none. The capacity
  * must satisfy what the session checks at construction: an integer with `chunkLength ≤ capacity ≤
- * maxPosition`.
+ * maxPosition`. Thinking and the tools appear only when chosen, so a plain chat's settings are what
+ * they were before either existed; the tools come out in {@link SAMPLE_TOOL_NAMES} order (the
+ * declaration order the session renders, and what {@link sameChatSettings} compares).
  */
 export const parseChatForm = (form: ChatForm, limits: CapacityLimits): Parsed<ChatSettings> => {
   let capacity = limits.capacity;
@@ -287,17 +313,30 @@ export const parseChatForm = (form: ChatForm, limits: CapacityLimits): Parsed<Ch
     }
     capacity = parsed;
   }
+  const chosen = form.tools ?? [];
+  const tools = SAMPLE_TOOL_NAMES.filter((name) => chosen.includes(name));
   return {
     ok: true,
     value: {
       ...(form.system.trim() === "" ? {} : { system: form.system }),
       capacity,
       overflow: form.overflow,
+      ...(form.thinking === true ? { enableThinking: true } : {}),
+      ...(tools.length === 0 ? {} : { tools }),
     },
   };
 };
 
+const sameTools = (
+  left: readonly SampleToolName[] | undefined,
+  right: readonly SampleToolName[] | undefined,
+): boolean =>
+  (left ?? []).length === (right ?? []).length &&
+  (left ?? []).every((name, index) => right?.[index] === name);
+
 export const sameChatSettings = (left: ChatSettings, right: ChatSettings): boolean =>
   left.system === right.system &&
   left.capacity === right.capacity &&
-  left.overflow === right.overflow;
+  left.overflow === right.overflow &&
+  (left.enableThinking ?? false) === (right.enableThinking ?? false) &&
+  sameTools(left.tools, right.tools);

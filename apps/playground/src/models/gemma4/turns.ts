@@ -8,43 +8,165 @@
  * (shown dimmed).
  */
 
-import type { ChatMessage, ChatStop } from "@karume/models/gemma";
+import type { ChatJsonObject, ChatMessage, ChatStop } from "@karume/models/gemma";
+
+/** One tool call of an assistant entry: the function and its arguments as JSON text. */
+export type TranscriptToolCall = {
+  readonly id?: string;
+  readonly name: string;
+  readonly arguments: string;
+};
 
 export type TranscriptEntry = {
   readonly id: number;
   readonly role: ChatMessage["role"];
   readonly text: string;
+  /** An assistant entry's thought (`reasoning` of the history message). */
+  readonly thinking?: string;
+  /** The calls of a tool-calling assistant entry. */
+  readonly toolCalls?: readonly TranscriptToolCall[];
+  /** A tool result's tool: the name of the call it answers (absent when that cannot be resolved). */
+  readonly toolName?: string;
   /** Whether the session's history still holds the entry (false = dropped by the overflow policy). */
   readonly inContext: boolean;
   /** Index of the turn (its record) the entry came from; absent when it could not be attributed. */
   readonly turn?: number;
 };
 
-/** What one turn sent, and the reply it streamed. */
-export type SentTurn = {
-  readonly turn: number;
-  readonly text: string;
-  readonly reply: string;
-  /** Ids for the turn's user and assistant entries. */
-  readonly userId: number;
-  readonly assistantId: number;
-};
+/**
+ * What one turn sent: a user message (`text`), or the results of the tool calls the previous turn
+ * ended on (`toolResults`, the contents in the order sent — a continuation of the same model turn).
+ */
+export type SentTurn =
+  | {
+      readonly turn: number;
+      readonly text: string;
+      /**
+       * The streamed reply when it is the text the history keeps (a plain session: one assistant
+       * entry, matched by text). `undefined` when the session streams the structure spellings (tools
+       * or thinking): every entry after the message is then the turn's, by position.
+       */
+      readonly reply: string | undefined;
+      /** Ids for the turn's user entry and its first reply entry. */
+      readonly userId: number;
+      readonly assistantId: number;
+    }
+  | { readonly turn: number; readonly toolResults: readonly string[] };
 
 /** The session's history without the system message (the transcript does not show it). */
 export const historyOf = (turns: readonly ChatMessage[]): readonly ChatMessage[] =>
   turns.filter((turn) => turn.role !== "system");
 
 /**
+ * Whether the session waits for tool results: its last history entry is an assistant message with
+ * tool calls (`send` then throws until `sendToolResults` answers them).
+ */
+export const awaitingToolResults = (turns: readonly ChatMessage[]): boolean => {
+  const last = turns.at(-1);
+  return last?.role === "assistant" && (last.tool_calls?.length ?? 0) > 0;
+};
+
+const argumentsText = (args: ChatJsonObject | null): string => JSON.stringify(args ?? {});
+
+/** What an entry shows of a history message (the history is the source of truth for all of it). */
+const viewOf = (
+  message: ChatMessage,
+  history: readonly ChatMessage[],
+): Pick<TranscriptEntry, "role" | "text" | "thinking" | "toolCalls" | "toolName"> => {
+  switch (message.role) {
+    case "assistant": {
+      const thinking = message.reasoning ?? message.reasoning_content ?? "";
+      const calls = message.tool_calls ?? [];
+      return {
+        role: message.role,
+        text: message.content,
+        ...(thinking === "" ? {} : { thinking }),
+        ...(calls.length === 0
+          ? {}
+          : {
+              toolCalls: calls.map((call) => ({
+                ...(call.id === undefined ? {} : { id: call.id }),
+                name: call.function.name,
+                arguments: argumentsText(call.function.arguments),
+              })),
+            }),
+      };
+    }
+    case "tool": {
+      const named =
+        message.tool_call_id === undefined
+          ? undefined
+          : history
+              .flatMap((entry) => (entry.role === "assistant" ? (entry.tool_calls ?? []) : []))
+              .find((call) => call.id === message.tool_call_id)?.function.name;
+      const toolName = named ?? message.name;
+      return {
+        role: message.role,
+        text: message.content,
+        ...(toolName === undefined || toolName === "" ? {} : { toolName }),
+      };
+    }
+    default:
+      return { role: message.role, text: message.content };
+  }
+};
+
+/**
+ * What a history entry is matched against: a previous entry, or one of the turn's. `role: "reply"`
+ * with no `text` matches any assistant or tool entry (a reply of a session that streams structure);
+ * `id: undefined` takes a fresh id when it lines up.
+ */
+type Candidate = {
+  readonly id: number | undefined;
+  readonly role: ChatMessage["role"] | "reply";
+  readonly text: string | undefined;
+  readonly turn: number | undefined;
+};
+
+const lineUp = (candidate: Candidate | undefined, message: ChatMessage): candidate is Candidate => {
+  if (candidate === undefined) return false;
+  if (candidate.role === "reply") return message.role === "assistant" || message.role === "tool";
+  return candidate.role === message.role && candidate.text === message.content;
+};
+
+/** The turn's own candidates, for `added` new history entries. */
+const turnCandidates = (sent: SentTurn, added: number): readonly Candidate[] => {
+  const replies = (count: number, firstId: number | undefined): Candidate[] =>
+    Array.from({ length: Math.max(0, count) }, (_, index) => ({
+      id: index === 0 ? firstId : undefined,
+      role: "reply",
+      text: undefined,
+      turn: sent.turn,
+    }));
+  if ("toolResults" in sent) {
+    return [
+      ...sent.toolResults.map((content): Candidate => ({
+        id: undefined,
+        role: "tool",
+        text: content,
+        turn: sent.turn,
+      })),
+      ...replies(added - sent.toolResults.length, undefined),
+    ];
+  }
+  const user: Candidate = { id: sent.userId, role: "user", text: sent.text, turn: sent.turn };
+  return sent.reply === undefined
+    ? [user, ...replies(added - 1, sent.assistantId)]
+    : [user, { id: sent.assistantId, role: "assistant", text: sent.reply, turn: sent.turn }];
+};
+
+/**
  * The transcript after a turn, from the session's history after it.
  *
  * `dropped` is what the overflow policy removed during the turn (observed in the policy: its input
  * length minus its output length). With it the lengths alone tell whether the session kept the turn:
- * the history then holds the previous in-context entries minus `dropped`, plus the turn's user
- * message and reply when kept, or neither when the session treated the turn as never having happened.
+ * the history then holds the previous in-context entries minus `dropped`, plus what the turn sent and
+ * its replies when kept, or neither when the session treated the turn as never having happened.
  * Each history entry is attributed, aligned from the end, to the entry it came from (by role and
- * text); the history's text is what is shown either way, and an entry that does not line up keeps no
- * turn. Previous in-context entries in front of the aligned part left the history: they stay, marked
- * out of context.
+ * text — what the page sent is matched by its text; a reply by its streamed text in a plain session,
+ * by position in one that streams structure); the history's content is what is shown either way,
+ * and an entry that does not line up keeps no turn. Previous in-context entries in front of the
+ * aligned part left the history: they stay, marked out of context.
  */
 export const deriveTranscript = (input: {
   readonly previous: readonly TranscriptEntry[];
@@ -57,28 +179,29 @@ export const deriveTranscript = (input: {
   const { previous, history, sent, dropped, newId } = input;
   const archived = previous.filter((entry) => !entry.inContext);
   const inContext = previous.filter((entry) => entry.inContext);
-  const kept = history.length > inContext.length - dropped;
-  const candidates: readonly TranscriptEntry[] = kept
-    ? [
-        ...inContext,
-        { id: sent.userId, role: "user", text: sent.text, inContext: true, turn: sent.turn },
-        {
-          id: sent.assistantId,
-          role: "assistant",
-          text: sent.reply,
-          inContext: true,
-          turn: sent.turn,
-        },
-      ]
-    : inContext;
+  const added = history.length - (inContext.length - dropped);
+  const kept = added > 0;
+  const candidates: readonly Candidate[] = [
+    ...inContext.map((entry): Candidate => ({
+      id: entry.id,
+      role: entry.role,
+      text: entry.text,
+      turn: entry.turn,
+    })),
+    ...(kept ? turnCandidates(sent, added) : []),
+  ];
   const offset = candidates.length - history.length;
   const context = history.map((message, index): TranscriptEntry => {
     const candidate = candidates[offset + index];
-    return candidate !== undefined &&
-      candidate.role === message.role &&
-      candidate.text === message.content
-      ? { ...candidate, inContext: true }
-      : { id: newId(), role: message.role, text: message.content, inContext: true };
+    const view = viewOf(message, history);
+    return lineUp(candidate, message)
+      ? {
+          id: candidate.id ?? newId(),
+          ...view,
+          inContext: true,
+          ...(candidate.turn === undefined ? {} : { turn: candidate.turn }),
+        }
+      : { id: newId(), ...view, inContext: true };
   });
   const left = inContext
     .slice(0, Math.min(inContext.length, Math.max(0, offset)))

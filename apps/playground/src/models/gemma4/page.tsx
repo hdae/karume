@@ -3,10 +3,19 @@
  * model (`gemma4QatMobile.Pipeline`), on the page's GPU, hold one multi-turn conversation in a
  * `ChatSession` (the KV is carried between turns that close with EOS), stream each reply, and
  * save a record of the chat: settings, per-turn statistics and generated token ids, and the Session
- * diagnostics when the pipeline was loaded with them.
+ * diagnostics when the pipeline was loaded with them. A chat can turn on thinking and declare sample
+ * tools; a tool call the model makes is run in the browser and the turn continues with its result.
  */
 
-import { ChatSession, type ChatStop, chatPrompt } from "@karume/models/gemma";
+import {
+  ChatSession,
+  type ChatReply,
+  type ChatSessionStream,
+  type ChatStop,
+  type ChatTemplateOptions,
+  type ChatTurnOptions,
+  chatPrompt,
+} from "@karume/models/gemma";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { SendIcon, SquareIcon } from "lucide-react";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -22,6 +31,7 @@ import { SourcePicker } from "@/components/source-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   InputGroup,
@@ -50,11 +60,19 @@ import {
   NO_RUNS,
   type RunCounts,
   stopRecordOf,
+  type ToolResultRecord,
   type TurnRecord,
 } from "./chat-record";
 import { ChatTranscript } from "./chat-transcript";
 import { createLiveReplyStore, frameScheduler } from "./live-reply";
 import { type GenerateObservation, type ObservedHost, observeHost } from "./observed-host";
+import {
+  SAMPLE_TOOLS,
+  type SampleTool,
+  type SampleToolName,
+  sampleToolsOf,
+  toolResultsOf,
+} from "./sample-tools";
 import { SAMPLE_MESSAGES } from "./samples";
 import {
   type ChatForm,
@@ -77,15 +95,18 @@ import {
   parseModelKey,
   parseTurnForm,
   sameChatSettings,
+  streamsStructure,
   type TurnForm,
   turnFormOf,
 } from "./settings";
 import {
+  awaitingToolResults,
   type ContextUsage,
   contextUsageText,
   deriveTranscript,
   historyOf,
   notKeptNotice,
+  type SentTurn,
   type TranscriptEntry,
   turnTiming,
 } from "./turns";
@@ -105,6 +126,12 @@ const GPU_OPTIONS: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "avail
  */
 const REPORT_INTERVAL_MS = 250;
 
+/**
+ * Tool rounds (run the calls, continue with the results) one message may take before the page stops
+ * answering: a model that keeps calling would otherwise never give the turn back.
+ */
+const MAX_TOOL_ROUNDS = 8;
+
 type ReadyPipeline = Extract<GemmaPipelineState, { kind: "ready" }>;
 
 /** What **Load** / **New chat** ask the session to be built with (a new object per press). */
@@ -118,6 +145,10 @@ type ChatState =
       readonly session: ChatSession;
       readonly observed: ObservedHost;
       readonly settings: ChatSettings;
+      /** The sample tools the session declares (their runners answer its calls). */
+      readonly tools: readonly SampleTool[];
+      /** The session's template options (every render of its history uses them). */
+      readonly template: ChatTemplateOptions;
       /** The pipeline state and the request the session was built for (stale once either changes). */
       readonly pipeline: ReadyPipeline;
       readonly request: ChatRequest;
@@ -144,6 +175,24 @@ type TurnCollected = {
   dropped: number;
 };
 
+/** One generation of a message: the message itself, or a continuation with tool results. */
+type TurnStep =
+  | { readonly kind: "message"; readonly issue: (options: ChatTurnOptions) => ChatSessionStream }
+  | {
+      readonly kind: "tool-results";
+      readonly results: readonly ToolResultRecord[];
+      readonly issue: (options: ChatTurnOptions) => ChatSessionStream;
+    };
+
+/** How a step settled: the parsed reply (when it was delivered) and the failure to show, if any. */
+type StepOutcome = {
+  readonly reply: ChatReply | undefined;
+  readonly failure: { readonly error: unknown } | undefined;
+};
+
+const errorText = (error: unknown): string =>
+  error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+
 const manifestOf = (state: ManifestState) => (state.kind === "ready" ? state.manifest : undefined);
 
 const configOf = (manifests: GemmaManifests, key: ModelKey | undefined) => {
@@ -157,7 +206,9 @@ const configOf = (manifests: GemmaManifests, key: ModelKey | undefined) => {
 };
 
 const settingsText = (settings: ChatSettings): string =>
-  `system prompt: ${settings.system === undefined ? "none" : "set"} · capacity ${settings.capacity} · overflow: ${settings.overflow}`;
+  `system prompt: ${settings.system === undefined ? "none" : "set"} · capacity ${settings.capacity} · overflow: ${settings.overflow}${
+    settings.enableThinking === true ? " · thinking" : ""
+  }${settings.tools === undefined ? "" : ` · tools: ${settings.tools.join(", ")}`}`;
 
 const pipelineText = (state: GemmaPipelineState): string => {
   switch (state.kind) {
@@ -275,6 +326,10 @@ export const Gemma4Page = () => {
       ...(chatParsedLoaded?.ok === false ? chatParsedLoaded.errors : []),
     ]),
   ];
+  const toggleTool = (name: SampleToolName, checked: boolean): void => {
+    const others = (chatForm.tools ?? []).filter((tool) => tool !== name);
+    setChatForm({ ...chatForm, tools: checked ? [...others, name] : others });
+  };
   const [chatRequest, setChatRequest] = useState<ChatRequest | undefined>(undefined);
   const [chat, setChat] = useState<ChatState>({ kind: "none" });
   const turnSink = useRef<TurnSink | undefined>(undefined);
@@ -297,6 +352,8 @@ export const Gemma4Page = () => {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsRecord>({});
   /** Set after a turn the session did not keep (its message left no entry in the history). */
   const [notice, setNotice] = useState<string | undefined>(undefined);
+  /** Why the page left the last tool call unanswered (the round limit, a Stop between the steps). */
+  const [toolNotice, setToolNotice] = useState<string | undefined>(undefined);
   /** The message of the running turn, shown until the turn settles. */
   const [pendingText, setPendingText] = useState<string | undefined>(undefined);
   const [sessionReleaseError, setSessionReleaseError] = useState<unknown>(undefined);
@@ -334,6 +391,7 @@ export const Gemma4Page = () => {
     setTurnRecords([]);
     setDiagnostics({});
     setNotice(undefined);
+    setToolNotice(undefined);
     setPendingText(undefined);
     live.reset();
     diagnosticsAcc.current = {};
@@ -351,6 +409,11 @@ export const Gemma4Page = () => {
     const observed = observeHost(pipeline.pipeline, (observation) =>
       turnSink.current?.onGenerate(observation),
     );
+    const tools = sampleToolsOf(settings.tools ?? []);
+    const template: ChatTemplateOptions = {
+      ...(tools.length === 0 ? {} : { tools: tools.map(({ declaration }) => declaration) }),
+      ...(settings.enableThinking === true ? { enableThinking: true } : {}),
+    };
     let session: ChatSession;
     try {
       session = new ChatSession(observed.host, {
@@ -361,13 +424,23 @@ export const Gemma4Page = () => {
         onOverflow: overflowPolicy(settings.overflow, (dropped) =>
           turnSink.current?.onOverflow(dropped),
         ),
+        ...template,
       });
     } catch (error) {
       setChat({ kind: "error", error });
       return undefined;
     }
     liveSession.current = session;
-    setChat({ kind: "ready", session, observed, settings, pipeline, request: chatRequest });
+    setChat({
+      kind: "ready",
+      session,
+      observed,
+      settings,
+      tools,
+      template,
+      pipeline,
+      request: chatRequest,
+    });
     return () => {
       liveSession.current = undefined;
       gpu.track(session.dispose()).catch((error: unknown) => {
@@ -415,48 +488,66 @@ export const Gemma4Page = () => {
     chat.request === chatRequest
       ? chat
       : undefined;
-  const canSend = readyChat !== undefined && turnParsed.ok && input.trim() !== "" && !running;
+  // Derived from the session's history (the source of truth): the last turn ended on a call the page
+  // did not answer, so the session takes no message until a new chat.
+  const awaitingTools = useMemo(
+    () => readyChat !== undefined && !running && awaitingToolResults(readyChat.session.turns),
+    // turnRecords: every settled step changes the history.
+    [readyChat, running, turnRecords],
+  );
+  const canSend =
+    readyChat !== undefined && turnParsed.ok && input.trim() !== "" && !running && !awaitingTools;
 
   const send = (): void => {
     if (!canSend || !turnParsed.ok) return;
-    const { session, observed } = readyChat;
+    const { session, observed, settings, tools } = readyChat;
     const diagnosticsOn = readyChat.pipeline.request.diagnostics;
     const { maxNewTokens, sampler } = turnParsed.value;
     const text = input;
-    // Only this turn changes the transcript, and a new session (which clears it) makes the turn drop
-    // its results, so the transcript as of the send is the one the turn settles against.
-    const previous = entries;
+    const structured = streamsStructure(settings);
+    // Only this message's steps change the transcript, and a new session (which clears it) makes the
+    // turn drop its results, so each step settles against the transcript the previous step left
+    // (the first against the one as of the send).
+    let previous = entries;
     void task.start(async ({ signal, report }) => {
-      const collected: TurnCollected = {
-        prefillAt: [],
-        chunks: 0,
-        tokenIds: [],
-        runs: NO_RUNS,
-        dropped: 0,
-      };
-      turnSink.current = {
-        onGenerate: ({ promptTokens, usedBefore }) => {
-          collected.promptTokens = promptTokens;
-          collected.carriedPositions = usedBefore;
-        },
-        onRun: (phase) => {
-          collected.runs = { ...collected.runs, [phase.kind]: collected.runs[phase.kind] + 1 };
-          if (phase.kind !== "prefill") collected.lastRunAt = performance.now();
-        },
-        onOverflow: (dropped) => {
-          collected.dropped += dropped;
-        },
-      };
-      // The status card's counter is throttled; the streamed text goes through `live` (per frame).
-      let lastReportAt = Number.NEGATIVE_INFINITY;
-      let reply = "";
-      let stage: string | undefined;
-      const show = (): void =>
-        live.update({ text: reply, ...(stage === undefined ? {} : { stage }) });
-      try {
+      /**
+       * One generation (the message, or a continuation with tool results): streamed through `live`,
+       * then settled into its own record row and the transcript. `undefined` = the session went
+       * away during it (nothing is added to the new one).
+       */
+      const runStep = async (step: TurnStep, round: number): Promise<StepOutcome | undefined> => {
+        const collected: TurnCollected = {
+          prefillAt: [],
+          chunks: 0,
+          tokenIds: [],
+          runs: NO_RUNS,
+          dropped: 0,
+        };
+        turnSink.current = {
+          onGenerate: ({ promptTokens, usedBefore }) => {
+            collected.promptTokens = promptTokens;
+            collected.carriedPositions = usedBefore;
+          },
+          onRun: (phase) => {
+            collected.runs = { ...collected.runs, [phase.kind]: collected.runs[phase.kind] + 1 };
+            if (phase.kind !== "prefill") collected.lastRunAt = performance.now();
+          },
+          onOverflow: (dropped) => {
+            collected.dropped += dropped;
+          },
+        };
+        // The status card's counter is throttled; the streamed text goes through `live` (per frame).
+        let lastReportAt = Number.NEGATIVE_INFINITY;
+        let reply = "";
+        let stage: string | undefined;
+        const note =
+          round === 0 ? {} : { note: `continuing after tool round ${round} / ${MAX_TOOL_ROUNDS}` };
+        const show = (): void =>
+          live.update({ text: reply, ...(stage === undefined ? {} : { stage }) });
         const sentAt = performance.now();
-        // `send` checks the request synchronously (a throw here changes nothing in the session).
-        const stream = session.send(text, {
+        // `send` / `sendToolResults` check the request synchronously (a throw here changes nothing
+        // in the session).
+        const stream = step.issue({
           maxNewTokens,
           sampler,
           signal,
@@ -465,7 +556,11 @@ export const Gemma4Page = () => {
             collected.chunks = chunk;
             stage = `prefill ${chunk} / ${chunks} chunks`;
             show();
-            report({ stage: "prefill", count: { done: chunk, total: chunks, unit: "chunks" } });
+            report({
+              stage: "prefill",
+              count: { done: chunk, total: chunks, unit: "chunks" },
+              ...note,
+            });
           },
           onToken: (id) => {
             const now = performance.now();
@@ -476,15 +571,22 @@ export const Gemma4Page = () => {
             show();
             if (now - lastReportAt >= REPORT_INTERVAL_MS) {
               lastReportAt = now;
-              report({ stage: "decode", count: { done, total: maxNewTokens, unit: "tokens" } });
+              report({
+                stage: "decode",
+                count: { done, total: maxNewTokens, unit: "tokens" },
+                ...note,
+              });
             }
           },
         });
         const turn = turnCount.current;
         turnCount.current += 1;
-        setInput("");
-        setNotice(undefined);
-        setPendingText(text);
+        if (step.kind === "message") {
+          setInput("");
+          setNotice(undefined);
+          setToolNotice(undefined);
+          setPendingText(text);
+        }
         live.reset();
 
         let failure: { readonly error: unknown } | undefined;
@@ -505,12 +607,23 @@ export const Gemma4Page = () => {
         } catch (error) {
           failure ??= { error };
         }
+        // The parsed reply settles right after `done` (both after the stream drained). It rejects
+        // for a malformed closed turn (`ModelInputError`): the step then failed, though it stopped.
+        let parsed: ChatReply | undefined;
+        let replyFailure: { readonly error: unknown } | undefined;
+        if (stop !== undefined && failure === undefined) {
+          try {
+            parsed = await stream.reply;
+          } catch (error) {
+            replyFailure = { error };
+          }
+        }
 
         // The session went away during the turn (a device loss rebuilt the pipeline): its
         // conversation is gone, so nothing is added to the new one.
         if (liveSession.current !== session) {
           if (stop === undefined && failure !== undefined) throw failure.error;
-          return;
+          return undefined;
         }
         const timing = turnTiming(
           {
@@ -531,30 +644,46 @@ export const Gemma4Page = () => {
         );
         const kvUsedAfter = observed.kvUsed();
         // The transcript is rebuilt from the session's history (the source of truth).
-        const userId = (nextEntryId.current += 1);
-        const assistantId = (nextEntryId.current += 1);
+        const sent: SentTurn =
+          step.kind === "message"
+            ? {
+                turn,
+                text,
+                // With tools or thinking the stream keeps the structure spellings, so the replies
+                // line up by position instead of by the streamed text.
+                reply: structured ? undefined : reply,
+                userId: (nextEntryId.current += 1),
+                assistantId: (nextEntryId.current += 1),
+              }
+            : { turn, toolResults: step.results.map(({ content }) => content) };
         const derived = deriveTranscript({
           previous,
           history: historyOf(session.turns),
-          sent: { turn, text, reply, userId, assistantId },
+          sent,
           dropped: collected.dropped,
           newId: () => (nextEntryId.current += 1),
         });
+        previous = derived.entries;
+        const failed = stop === undefined ? failure : replyFailure;
         const record: TurnRecord = {
           index: turn + 1,
           userText: text,
+          ...(step.kind === "tool-results" ? { toolResults: step.results } : {}),
+          ...(parsed?.end === "tool-call"
+            ? {
+                toolCalls: parsed.message.tool_calls.map((call) => ({
+                  ...(call.id === undefined ? {} : { id: call.id }),
+                  name: call.function.name,
+                  arguments: call.function.arguments,
+                })),
+              }
+            : {}),
           replyText: reply,
           request: { maxNewTokens, sampler },
           outcome:
-            stop === undefined
-              ? {
-                  kind: "failed",
-                  error:
-                    failure?.error instanceof Error
-                      ? `${failure.error.name}: ${failure.error.message}`
-                      : String(failure?.error),
-                }
-              : { kind: "stopped", stop: stopRecordOf(stop) },
+            stop !== undefined && failed === undefined
+              ? { kind: "stopped", stop: stopRecordOf(stop) }
+              : { kind: "failed", error: errorText(failed?.error) },
           prefill: {
             ...(collected.promptTokens === undefined
               ? {}
@@ -577,12 +706,52 @@ export const Gemma4Page = () => {
         setPendingText(undefined);
         live.reset();
         if (!derived.kept) {
-          setNotice(notKeptNotice(turn + 1, stop));
-          // The message is not in the history; put it back so it can be sent again.
-          setInput((current) => (current === "" ? text : current));
+          if (step.kind === "message") {
+            setNotice(notKeptNotice(turn + 1, stop));
+            // The message is not in the history; put it back so it can be sent again.
+            setInput((current) => (current === "" ? text : current));
+          } else {
+            setToolNotice(
+              "The continuation after the tool results ended before any text, so the session took the results back.",
+            );
+          }
         }
         // A Stop is an ordinary outcome (the partial reply stays); anything else is shown in full.
-        if (stop === undefined && failure !== undefined) throw failure.error;
+        return { reply: parsed, failure: failed };
+      };
+
+      try {
+        let step: TurnStep = { kind: "message", issue: (options) => session.send(text, options) };
+        for (let round = 0; ; round += 1) {
+          const outcome = await runStep(step, round);
+          if (outcome === undefined) return;
+          if (outcome.failure !== undefined) throw outcome.failure.error;
+          const reply = outcome.reply;
+          if (reply?.end !== "tool-call") return;
+          if (round >= MAX_TOOL_ROUNDS) {
+            setToolNotice(
+              `The model called tools for ${MAX_TOOL_ROUNDS} rounds in a row on this message, so the page stopped running them.`,
+            );
+            return;
+          }
+          // Stop pressed as the step ended: the calls stay unanswered rather than starting a
+          // continuation that would only be aborted.
+          if (signal.aborted) {
+            setToolNotice("Stopped before the tool results were sent.");
+            return;
+          }
+          const calls = reply.message.tool_calls;
+          const results = toolResultsOf(tools, calls);
+          step = {
+            kind: "tool-results",
+            results: results.map((result) => ({
+              ...(result.tool_call_id === undefined ? {} : { toolCallId: result.tool_call_id }),
+              name: result.name,
+              content: result.content,
+            })),
+            issue: (options) => session.sendToolResults(results, options),
+          };
+        }
       } finally {
         turnSink.current = undefined;
       }
@@ -601,8 +770,13 @@ export const Gemma4Page = () => {
     const used = readyChat.observed.kvUsed();
     if (used !== undefined) return { kind: "kv", used, capacity };
     const turns = readyChat.session.turns;
+    // A history that ends on an unanswered call has no generation prompt to render (`chatPrompt`
+    // refuses it); its size is known again once a new chat starts.
+    if (awaitingToolResults(turns)) return undefined;
     const tokens =
-      turns.length === 0 ? 0 : chatPrompt(readyChat.pipeline.pipeline.tokenizer, turns).length;
+      turns.length === 0
+        ? 0
+        : chatPrompt(readyChat.pipeline.pipeline.tokenizer, turns, readyChat.template).length;
     return { kind: "history", tokens, capacity };
     // turnRecords: a finished turn changes the KV or the history.
   }, [readyChat, running, turnRecords]);
@@ -833,6 +1007,46 @@ export const Gemma4Page = () => {
                   disabled={running}
                 />
               </Field>
+              <div className="flex flex-col gap-2">
+                <Label className="flex items-start gap-2 font-normal">
+                  <Checkbox
+                    id="gemma4-thinking"
+                    checked={chatForm.thinking === true}
+                    onCheckedChange={(checked) => setChatForm({ ...chatForm, thinking: checked })}
+                    disabled={running}
+                  />
+                  <span>
+                    Thinking{" "}
+                    <span className="text-muted-foreground">
+                      (enableThinking: the model writes a thought before its answer, shown
+                      collapsed)
+                    </span>
+                  </span>
+                </Label>
+              </div>
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium">Sample tools</p>
+                {SAMPLE_TOOLS.map((tool) => (
+                  <Label key={tool.name} className="flex items-start gap-2 font-normal">
+                    <Checkbox
+                      id={`gemma4-tool-${tool.name}`}
+                      checked={chatForm.tools?.includes(tool.name) === true}
+                      onCheckedChange={(checked) => toggleTool(tool.name, checked)}
+                      disabled={running}
+                    />
+                    <span>
+                      <code>{tool.name}</code>{" "}
+                      <span className="text-muted-foreground">({tool.summary})</span>
+                    </span>
+                  </Label>
+                ))}
+                <p className="text-xs text-muted-foreground">
+                  The session declares the checked tools; a call the model makes is run in this
+                  browser and its result continues the same reply (up to {MAX_TOOL_ROUNDS} rounds
+                  per message). Thinking and tools make the streamed text show the template's
+                  markers; the transcript shows the parsed reply.
+                </p>
+              </div>
               {chatErrors.length > 0 ? (
                 <p className="text-xs text-destructive">{chatErrors.join(" ")}</p>
               ) : null}
@@ -953,6 +1167,17 @@ export const Gemma4Page = () => {
                   <AlertDescription>{notice}</AlertDescription>
                 </Alert>
               )}
+              {awaitingTools ? (
+                <Alert id="gemma4-tool-notice">
+                  <AlertTitle>Waiting for tool results</AlertTitle>
+                  <AlertDescription>
+                    {toolNotice ??
+                      "The last model turn ended on a tool call that was not answered (a Stop or a failure before its continuation wrote any text)."}{" "}
+                    The session takes no new message while a call is open: press New chat to start a
+                    new conversation.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               <div className="flex flex-wrap gap-2">
                 {SAMPLE_MESSAGES.map((sample) => (
                   <Button
