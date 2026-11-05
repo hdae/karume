@@ -423,6 +423,10 @@ describe("labels", () => {
     );
   });
 
+  it("names a stop at the end of the conversation's room", () => {
+    expect(stopLabel({ reason: "capacity", tokens: 3 })).toBe("context full");
+  });
+
   it("summarizes only the measured figures of a turn", () => {
     const timing = turnTiming(
       { sentAt: 0, prefillAt: [200], firstTokenAt: 250, lastRunAt: 1250, endAt: 1300 },

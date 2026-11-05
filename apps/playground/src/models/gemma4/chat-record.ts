@@ -95,7 +95,8 @@ export type TurnRecord = {
   readonly toolCalls?: readonly ToolCallRecord[];
   /** The streamed text (empty for a turn that produced none). */
   readonly replyText: string;
-  readonly request: { readonly maxNewTokens: number; readonly sampler: SamplerSpec };
+  /** As passed: `maxNewTokens` is absent on a turn sent without a limit. */
+  readonly request: { readonly maxNewTokens?: number; readonly sampler: SamplerSpec };
   readonly outcome:
     | { readonly kind: "stopped"; readonly stop: StopRecord }
     | { readonly kind: "failed"; readonly error: string };

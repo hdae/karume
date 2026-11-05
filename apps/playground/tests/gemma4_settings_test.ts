@@ -242,6 +242,23 @@ describe("the per-turn form", () => {
     expect(result.ok ? [] : result.errors).toHaveLength(5);
   });
 
+  it("leaves an empty max new tokens out, so the turn has no limit", () => {
+    for (const maxNewTokens of ["", "  "]) {
+      const result = parseTurnForm({ ...form, maxNewTokens });
+      expect(result.ok).toBe(true);
+      expect(result.ok && Object.hasOwn(result.value, "maxNewTokens")).toBe(false);
+    }
+  });
+
+  it("still refuses a max new tokens that is not an integer ≥ 1", () => {
+    for (const maxNewTokens of ["0", "-1", "1.5", "many"]) {
+      expect(parseTurnForm({ ...form, maxNewTokens })).toEqual({
+        ok: false,
+        errors: ["Max new tokens must be an integer ≥ 1 (or empty)."],
+      });
+    }
+  });
+
   it("accepts top-p 1 and rejects top-p 0", () => {
     expect(parseTurnForm({ ...form, topP: "1" }).ok).toBe(true);
     expect(parseTurnForm({ ...form, topP: "0" }).ok).toBe(false);

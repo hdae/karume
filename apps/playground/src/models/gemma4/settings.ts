@@ -135,7 +135,7 @@ export type TurnForm = {
   readonly maxNewTokens: string;
 };
 
-export const DEFAULT_MAX_NEW_TOKENS = 512;
+const DEFAULT_MAX_NEW_TOKENS = 512;
 
 /**
  * The form filled from the distribution's declared sampler (greedy when it declares none), seed 0
@@ -151,7 +151,11 @@ export const turnFormOf = (sampler: DefaultSampler | undefined): TurnForm => ({
 });
 
 /** What one turn is sent with. */
-export type TurnSettings = { readonly maxNewTokens: number; readonly sampler: SamplerSpec };
+export type TurnSettings = {
+  /** Absent = no limit: the turn generates until the model stops or the context is full. */
+  readonly maxNewTokens?: number;
+  readonly sampler: SamplerSpec;
+};
 
 export type Parsed<Value> =
   | { readonly ok: true; readonly value: Value }
@@ -175,7 +179,8 @@ const numberOf = (text: string): number | undefined => {
  * The per-turn form → the turn's `maxNewTokens` and sampler, or every problem at once. The ranges
  * are the sampler's own (`SamplerSpec`): temperature ≥ 0, top-k an integer ≥ 1, 0 < top-p ≤ 1, seed
  * a non-negative safe integer. An empty top-k / top-p is left out (no narrowing) — never silently
- * replaced by a default, so the record names exactly what ran.
+ * replaced by a default, so the record names exactly what ran. An empty max new tokens is left out
+ * the same way (the turn then has no limit); anything else must be an integer ≥ 1.
  */
 export const parseTurnForm = (form: TurnForm): Parsed<TurnSettings> => {
   const errors: string[] = [];
@@ -197,22 +202,20 @@ export const parseTurnForm = (form: TurnForm): Parsed<TurnSettings> => {
   }
   const seed = integerOf(form.seed);
   if (seed === undefined) errors.push("Seed must be a non-negative integer.");
-  const maxNewTokens = integerOf(form.maxNewTokens);
-  if (maxNewTokens === undefined || maxNewTokens < 1) {
-    errors.push("Max new tokens must be an integer ≥ 1.");
+  let maxNewTokens: number | undefined;
+  if (form.maxNewTokens.trim() !== "") {
+    maxNewTokens = integerOf(form.maxNewTokens);
+    if (maxNewTokens === undefined || maxNewTokens < 1) {
+      errors.push("Max new tokens must be an integer ≥ 1 (or empty).");
+    }
   }
-  if (
-    errors.length > 0 ||
-    temperature === undefined ||
-    seed === undefined ||
-    maxNewTokens === undefined
-  ) {
+  if (errors.length > 0 || temperature === undefined || seed === undefined) {
     return { ok: false, errors };
   }
   return {
     ok: true,
     value: {
-      maxNewTokens,
+      ...(maxNewTokens === undefined ? {} : { maxNewTokens }),
       sampler: {
         temperature,
         ...(topK === undefined ? {} : { topK }),

@@ -77,7 +77,6 @@ import { SAMPLE_MESSAGES } from "./samples";
 import {
   type ChatForm,
   type ChatSettings,
-  DEFAULT_MAX_NEW_TOKENS,
   effectiveModelKey,
   GEMMA_MOUNTS,
   type GemmaManifests,
@@ -418,8 +417,8 @@ export const Gemma4Page = () => {
     try {
       session = new ChatSession(observed.host, {
         ...(settings.system === undefined ? {} : { system: settings.system }),
-        // Every turn passes its own maxNewTokens and sampler; this is only the session's fallback.
-        maxNewTokens: DEFAULT_MAX_NEW_TOKENS,
+        // No session maxNewTokens: every turn passes its own limit when the form has one, and a
+        // turn without one is checked against the session's default reserve.
         capacity: settings.capacity,
         onOverflow: overflowPolicy(settings.overflow, (dropped) =>
           turnSink.current?.onOverflow(dropped),
@@ -548,7 +547,7 @@ export const Gemma4Page = () => {
         // `send` / `sendToolResults` check the request synchronously (a throw here changes nothing
         // in the session).
         const stream = step.issue({
-          maxNewTokens,
+          ...(maxNewTokens === undefined ? {} : { maxNewTokens }),
           sampler,
           signal,
           onPrefill: ({ chunk, chunks }) => {
@@ -567,15 +566,23 @@ export const Gemma4Page = () => {
             collected.firstTokenAt ??= now;
             collected.tokenIds.push(id);
             const done = collected.tokenIds.length;
-            stage = `decode ${done} / ${maxNewTokens} tokens`;
+            stage =
+              maxNewTokens === undefined
+                ? `decode ${done} tokens`
+                : `decode ${done} / ${maxNewTokens} tokens`;
             show();
             if (now - lastReportAt >= REPORT_INTERVAL_MS) {
               lastReportAt = now;
-              report({
-                stage: "decode",
-                count: { done, total: maxNewTokens, unit: "tokens" },
-                ...note,
-              });
+              // Without a limit there is no total for the card's bar: the stage carries the count.
+              report(
+                maxNewTokens === undefined
+                  ? { stage, ...note }
+                  : {
+                      stage: "decode",
+                      count: { done, total: maxNewTokens, unit: "tokens" },
+                      ...note,
+                    },
+              );
             }
           },
         });
@@ -679,7 +686,7 @@ export const Gemma4Page = () => {
               }
             : {}),
           replyText: reply,
-          request: { maxNewTokens, sampler },
+          request: { ...(maxNewTokens === undefined ? {} : { maxNewTokens }), sampler },
           outcome:
             stop !== undefined && failed === undefined
               ? { kind: "stopped", stop: stopRecordOf(stop) }
@@ -997,7 +1004,7 @@ export const Gemma4Page = () => {
               <Field
                 id="gemma4-overflow"
                 label="When a turn does not fit"
-                hint="Checked before the turn is sent: the prompt plus max new tokens must fit the capacity."
+                hint="Checked before the turn is sent: the prompt plus max new tokens (1,024 reserved tokens when that is empty) must fit the capacity."
               >
                 <ChoiceSelect
                   id="gemma4-overflow"
@@ -1105,7 +1112,11 @@ export const Gemma4Page = () => {
                 />
               </Field>
               <div className="col-span-2">
-                <Field id="gemma4-max-new-tokens" label="Max new tokens">
+                <Field
+                  id="gemma4-max-new-tokens"
+                  label="Max new tokens"
+                  hint="Empty = generate until the model stops or the context is full; 1,024 tokens are reserved when deciding whether old turns must be dropped."
+                >
                   <Input
                     id="gemma4-max-new-tokens"
                     inputMode="numeric"
