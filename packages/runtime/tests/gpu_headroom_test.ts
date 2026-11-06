@@ -52,6 +52,35 @@ describe("probePieces (how the probe allocation is split)", () => {
 
 describe("fitsHeadroom (real GPU)", () => {
   it.skipIf(!GPU_AVAILABLE)(
+    "the largest amount that fits still fits on the next probes and can really be allocated",
+    async () => {
+      // Dawn returns a destroyed buffer's memory only when a later submit completes, so a probe that
+      // does not settle that stays on the device: the second probe of this amount gives false, and
+      // the allocation the probe was checking fails.
+      const gpu = await acquireGpu();
+      try {
+        let bytes = 64 * 1024 * MIB;
+        while (bytes > 64 * MIB && !(await fitsHeadroom(gpu, bytes))) bytes /= 2;
+        assert(bytes > 64 * MIB, "not even 64 MiB fits");
+        for (let probe = 0; probe < 3; probe += 1) {
+          assert(await fitsHeadroom(gpu, bytes), `probe ${probe} of ${bytes} bytes`);
+        }
+        const buffers = probePieces(bytes, gpu.limits.maxBufferSize).map((size) =>
+          gpu.device.createBuffer({ size, usage: BUFFER_USAGE.STORAGE }),
+        );
+        gpu.device.pushErrorScope("out-of-memory");
+        const extra = gpu.device.createBuffer({ size: 4, usage: BUFFER_USAGE.STORAGE });
+        const failure = await gpu.device.popErrorScope();
+        assertEquals(failure, null);
+        extra.destroy();
+        for (const buffer of buffers) buffer.destroy();
+      } finally {
+        gpu.destroy();
+      }
+    },
+  );
+
+  it.skipIf(!GPU_AVAILABLE)(
     "a small amount fits, and an amount above the ceiling gives false with the device kept alive",
     async () => {
       const gpu = await acquireGpu();

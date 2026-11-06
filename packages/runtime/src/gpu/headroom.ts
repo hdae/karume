@@ -28,11 +28,14 @@
  *
  * MUST: allocate STORAGE (a check of the device-local heap). A host-visible kind (MAP_*) would
  * bring the system-RAM heap into the check and would not answer for the heap in question.
- * MUST: destroy the allocated buffers at once and return only after `onSubmittedWorkDone` (= a
- * device poll) has settled the release. wgpu's poll runs release (maintain) → the 99% line check,
- * in that order, so this wait does not endanger the device.
- * Do not issue `queue.submit([])` — the submit-side 99% line check runs before the release, so near
- * the ceiling it would hit the check while still holding the trial allocation's usage.
+ * MUST: destroy the allocated buffers at once and return only after the release has settled on both
+ * implementations. wgpu releases at a device poll (`onSubmittedWorkDone`), whose order is release
+ * (maintain) → the 99% line check, so that wait does not endanger the device. Dawn returns a
+ * destroyed buffer's memory only when a **later** submit completes (ADR 0095 addendum of
+ * 2026-10-24), so without that second step the trial allocation stays on the device, and the very
+ * allocation it was checking fails (ADR 0070 addendum of 2026-11-06).
+ * MUST NOT: submit before the poll — wgpu's submit-side 99% line check runs before the release, so
+ * near the ceiling it would hit the check while still holding the trial allocation's usage.
  * MUST NOT: expose the result as "free memory" (binary search for the ceiling stays in diagnostic
  * tools — making an always-moving value the face of the API breeds guesswork: ADR 0070 decision 5).
  */
@@ -117,6 +120,11 @@ export const fitsHeadroom = async (gpu: GpuContext, bytes: number): Promise<bool
   const failure = await popFailureScopes(device, "headroom probe");
   for (const probe of probes) probe.destroy();
   // Settle the release (poll). On an already invalidated device this becomes GpuDeviceLostError.
+  await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+    device.queue.onSubmittedWorkDone(),
+    "headroom probe cleanup",
+  );
+  device.queue.submit([]);
   await gpu[RUNTIME_INTERNAL].raceDeviceLost(
     device.queue.onSubmittedWorkDone(),
     "headroom probe cleanup",
