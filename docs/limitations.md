@@ -154,11 +154,14 @@ drive `sequence()` yourself and want to stop on a string, look at the decoded te
 `break` (the conversation advances "only by the successful runs", and the last token stays in the
 uncommitted frontier = the same state as a `chat` stop string).
 
-## Gemma 4 above capacity 4096 is measured for time and memory, not for quality
+## Gemma 4 above capacity 4096: measured for time, memory and retrieval on one machine
 
 The manifests keep capacity 4096, and a larger `capacity` is the caller's explicit choice. Time and memory up to
-P = 128K are in [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). No KL against torch or retrieval
-test has been run at long context yet, so no model card advertises more than 4K. At long positions decode time grows
+P = 128K are in [research 2026-11-05](research/2026-11-05-gemma4-long-context.md), and the comparison with torch in
+[research 2026-11-06](research/2026-11-06-gemma4-long-context-quality.md): Karume follows upstream up to P = 127,985 on
+E2B and P = 31,762 on 12B, so what is left is the model's own limit. E2B loses facts in a retrieval test at 64K and above
+(52 of 64 at 64K, 48 of 64 at 128K, against 318 of 320 up to 32K), upstream giving the same wrong answers; 12B retrieved
+all of them up to 64K. No model card advertises more than 4K yet. At long positions decode time grows
 linearly on `i4` and `bf16` (370–382 ms per token at P = 128K on the RTX 3080 Ti, under thermal slowdown) and much more
 slowly on `i4-fast` (24.5–25.9 ms), and a sequence's memory can peak about 1 GiB over `estimateSessionMemory` for a
 moment.

@@ -63,8 +63,10 @@ repositories are unchanged.
     2026-11-05), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05). The manifests keep
     capacity 4096. The GPU measurements on the RTX 3080 Ti are in
     [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). Open, in order: the Chrome check on the 5070 Ti (E2B
-    q4_0 at capacity 32K and 128K: the sequence is created and one turn completes); a long-context quality check before any model card advertises more than 4K (KL against torch at 4K–32K plus a
-    retrieval test, E2B q4_0 and 12B first, and one sha256 row at a long position); then an opt-in `capacity: "fit"`
+    q4_0 at capacity 32K and 128K: the sequence is created and one turn completes); whether a model card advertises more
+    than 4K, now that the quality check is done ([research 2026-11-06](research/2026-11-06-gemma4-long-context-quality.md):
+    Karume follows torch up to 128K on E2B and 32K on 12B, E2B itself loses facts at 64K and above, and a sha256 row
+    pins `e2b/i4-fast@16k`); then an opt-in `capacity: "fit"`
     (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; the
     margin has to cover short peaks of about 1 GiB over the estimate, and it needs a Dawn probe check, since ADR 0070's
     trial allocation was studied on wgpu / Mesa). The f16 KV is K-100 in the perf ledger.

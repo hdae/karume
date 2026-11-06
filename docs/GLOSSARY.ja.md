@@ -132,6 +132,7 @@
 | port △ | 移植 | 上流の処理を Karume に書き写すこと | 写す | — |
 | acceptance | 検収 | ステップの完了条件を満たしたことの確認 | — | — |
 | decision | 裁定 | 利用者が選んだ結論（ADR に記録） | — | docs/decisions |
+| retrieval test △ | 検索テスト | 長いプロンプトの決まった位置に事実を置き、それを問う試験（長いコンテキストでの再現率を見る） | — | research 2026-11-06 |
 | recording mode (`KARUME_REFERENCE`) | 作るモード | 参照値の行を実測から作る指定（`write` / `rewrite`） | — | ADR 0106 決定 3 |
 | held row (explicit SKIP per environment key) | held 行 | その機でプロセスごと落ちるファミリーを、環境キーの行で明示 SKIP する表 | — | ADR 0106 追記決定 8 |
 | results directory (`outputs/verify/`) | 結果のディレクトリ | 走行ごとの `results.json` と成果物の置き場（追跡外・消して安全） | 結果の席 | ADR 0106 決定 5 |
