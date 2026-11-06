@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-06
+
 ### Added
 
 - `@karume/models`: a Gemma 4 turn can omit `maxNewTokens` and generate until a stop token or
@@ -2167,7 +2169,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/hdae/karume/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hdae/karume/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/hdae/karume/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/hdae/karume/compare/v0.14.0...v0.15.0
