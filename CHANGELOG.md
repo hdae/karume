@@ -43,7 +43,7 @@ measurements in `docs/research/`.
   session-unique `tool_call_id` the reply carries (`call_<n>`). What the template renders wrongly
   (ambiguous results, orphan results, calls without results, unbalanced declarations), the legacy
   `tool_responses` field and content parts fail loudly; so does output that is cut or malformed,
-  or that holds a number a double cannot hold exactly. Not yet checked on a real model.
+  or that holds a number a double cannot hold exactly. Checked end to end on the 12B q4_0 QAT model.
 - `@karume/models`: `KARUME_SOURCES` has a type spelled from the family tables, so its JSR
   declaration is no longer `{}`.
 - The exporter's model cards (the PyPI package `karume`): one non-endorsement sentence right
