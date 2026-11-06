@@ -161,7 +161,7 @@ P = 128K are in [research 2026-11-05](research/2026-11-05-gemma4-long-context.md
 [research 2026-11-06](research/2026-11-06-gemma4-long-context-quality.md): Karume follows upstream up to P = 127,985 on
 E2B and P = 31,762 on 12B, so what is left is the model's own limit. E2B loses facts in a retrieval test at 64K and above
 (52 of 64 at 64K, 48 of 64 at 128K, against 318 of 320 up to 32K), upstream giving the same wrong answers; 12B retrieved
-all of them up to 64K. No model card advertises more than 4K yet. At long positions decode time grows
+all of them up to 64K. The card of `karume-gemma4-qat` states these limits; the manifests keep capacity 4096. At long positions decode time grows
 linearly on `i4` and `bf16` (370–382 ms per token at P = 128K on the RTX 3080 Ti, under thermal slowdown) and much more
 slowly on `i4-fast` (24.5–25.9 ms), and a sequence's memory can peak about 1 GiB over `estimateSessionMemory` for a
 moment.

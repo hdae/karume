@@ -66,10 +66,9 @@ repositories are unchanged.
     32768 and 131072 with an 18-token prompt: the sequence is created and one turn completes, also with Max new tokens empty.
     Long prompts passed the same day at P = 31,942 and 127,985: no device loss, 8 of 8 facts, and the reply text is identical
     to the Node run ([research 2026-11-06 §7](research/2026-11-06-gemma4-long-context-quality.md#7-chrome-on-the-rtx-5070-ti)).
-    Open, in order: whether a model card advertises more
-    than 4K, now that the quality check is done ([research 2026-11-06](research/2026-11-06-gemma4-long-context-quality.md):
-    Karume follows torch up to 128K on E2B and 32K on 12B, E2B itself loses facts at 64K and above, and a sha256 row
-    pins `e2b/i4-fast@16k`); then an opt-in `capacity: "fit"`
+    The card of `karume-gemma4-qat` now states the long-context results, on main of the HF repository ([research
+    2026-11-06](research/2026-11-06-gemma4-long-context-quality.md): Karume follows torch up to 128K on E2B and 32K on 12B, E2B
+    itself loses facts at 64K and above, and a sha256 row pins `e2b/i4-fast@16k`). Open: an opt-in `capacity: "fit"`
     (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; the
     margin has to cover short peaks of about 1 GiB over the estimate, and it needs a Dawn probe check, since ADR 0070's
     trial allocation was studied on wgpu / Mesa). The f16 KV is K-100 in the perf ledger.

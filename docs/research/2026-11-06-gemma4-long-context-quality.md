@@ -94,6 +94,8 @@ Facts correct, both presets and seeds together for E2B, seeds together for 12B.
 | 64K | 20 / 32 | 32 / 32 | 16 / 16 (256 MiB row block) | 16 / 16 (256 MiB row block) |
 | 128K | 18 / 32 | 30 / 32 | not run | not run |
 
+- E2B `i4-fast` alone, the q4_0 QAT preset: 158 of 160 up to 32K, 25 of 32 at 64K, 23 of 32 at 128K. 12B up to 32K: 160 of
+  160. The model card of `karume-gemma4-qat` quotes these, since `bf16` belongs to another repository.
 - 11 of the 80 runs missed a fact, all E2B. Wrong answers by position in the document: 2%: 4, 15%: 8, 30%: 2, 75%: 5,
   90%: 9, 98%: 2, none at 45% or 60%. Neither end alone explains them.
 - The name that is not in the document: 12B answers `unknown` in all 24 runs. E2B answers `unknown` in 46 of 56, leaves the

@@ -627,6 +627,32 @@ class TestQatCard:
         assert "`fuseRmsNormAdd` = `true`" in fast
         assert "True" not in fast
 
+    def test_a_model_without_long_context_checks_is_stated_as_not_checked(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = _assemble(tmp_path, ("e2b", "e4b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        section = card.split("## Long context")[1].split("\n## ")[0]
+
+        assert "`e4b` was not checked." in section
+        assert "| `e4b`" not in section
+
+    def test_the_long_context_section_needs_both_measured_models(self, tmp_path: Path) -> None:
+        """The section compares `e2b` and `12b`, so a repository carrying one of them would state
+        results about a model it does not ship."""
+        out_dir, _ = _assemble(tmp_path, ("12b",))
+
+        assert "## Long context" not in (out_dir / "README.md").read_text(encoding="utf-8")
+
+    def test_the_long_context_section_sits_between_usage_and_the_models(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+
+        assert card.index("## Usage") < card.index("## Long context") < card.index("## Model: e2b")
+        assert "not checked" not in card
+
     def test_it_refuses_a_model_outside_the_line(self, tmp_path: Path) -> None:
         _, manifest = _assemble(tmp_path)
         renamed = {**manifest, "models": {"unlisted": manifest["models"]["e2b"]}}

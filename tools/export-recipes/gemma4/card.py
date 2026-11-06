@@ -548,6 +548,10 @@ def render_gemma4_model_card(
 GEMMA4_QAT_Q4_0_TITLE = "Gemma 4 q4_0 QAT Text Decoder — Karume"
 
 
+#: The models the long-context section reports on ({@link _qat_q4_0_long_context}).
+GEMMA4_QAT_Q4_0_LONG_CONTEXT_MODELS: frozenset[str] = frozenset({"e2b", "12b"})
+
+
 def _qat_q4_0_weights(name: str) -> str:
     """The QAT checkpoint model `name`'s weights come from; a model the line does not know fails
     the render (a card that cannot name its source is not drawn)."""
@@ -681,6 +685,61 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _qat_q4_0_long_context(manifest: Mapping[str, Any]) -> list[str]:
+    """What the long-context checks found (measured facts the manifest cannot carry: research
+    2026-11-05 and 2026-11-06). A repository without both measured models gets no section, since
+    the text compares them; a carried model that was not measured is stated as not checked rather
+    than left to borrow another model's result."""
+    names = list(manifest["models"])
+    if not set(names) >= GEMMA4_QAT_Q4_0_LONG_CONTEXT_MODELS:
+        return []
+    unchecked = [name for name in names if name not in GEMMA4_QAT_Q4_0_LONG_CONTEXT_MODELS]
+    return [
+        "",
+        "## Long context",
+        "",
+        "`chat()` takes a longer context through `capacity`, for example",
+        "`{ capacity: 32768, maxNewTokens: 256 }`. Measured on an RTX 3080 Ti under Node + Dawn",
+        "with greedy decoding, except where the text says Chrome.",
+        "",
+        "| Model | Quant | Compared with upstream up to | Facts found in a long document |",
+        "| ----- | ----- | ---------------------------- | ------------------------------ |",
+        "| `e2b` | `i4-fast` | 128K prompt tokens |"
+        " 158 of 160 up to 32K, 25 of 32 at 64K, 23 of 32 at 128K |",
+        "| `12b` | `i4` | 32K prompt tokens | 160 of 160 up to 32K |",
+        "",
+        "- **The conversion follows upstream.** Against `transformers` running the same QAT",
+        "  checkpoint in f32, KL on the logits does not grow with position (at most 7.0e-4 on",
+        "  `e2b`, 8.7e-3 on `12b`), the top-1 token agrees on every compared prefill row, and all",
+        "  5 prompts run through both gave the same text.",
+        "- **`e2b` itself loses facts in long documents.** The test places 8 short facts in a",
+        "  document and asks for them. From 64K, `e2b` misses some, mostly on varied prose.",
+        "  Upstream gave the same wrong answers on the 3 such prompts compared, so this is the",
+        "  model, not the conversion. For answers that depend on the whole document, treat 32K as",
+        "  the practical limit of `e2b`.",
+        "- **Not covered**: tasks other than finding short facts, such as summaries or reasoning",
+        "  over a long text; non-greedy sampling; `12b` above 32K."
+        + (f" {_spell_models(unchecked)} was not checked." if unchecked else ""),
+        "",
+        "| Decode, ms per token | 32K prompt | 128K prompt |",
+        "| -------------------- | ---------- | ----------- |",
+        "| `e2b` `i4` | 110 | 385 |",
+        "| `e2b` `i4-fast` | 12 | 26 |",
+        "| `e2b` `i4`, Chrome on an RTX 5070 Ti | 147 | 444 |",
+        "| `12b` `i4` | 183 | not run |",
+        "",
+        "`i4-fast` is the quant to pick for long context: decode time grows far more slowly than",
+        "on `i4`, and it gave the same tokens as `i4` in these runs. It was not run at long",
+        "context in Chrome. The RTX 3080 Ti rows were under thermal slowdown.",
+        "",
+        "Prefill is the wait before the first token: in Chrome on the RTX 5070 Ti, `e2b` `i4` took",
+        "22 s for a 32K prompt and 175 s for a 128K prompt. `12b` `i4` took about 110 s at 32K on",
+        "the RTX 3080 Ti. Whole-GPU memory held about 3,000 MiB on `e2b` `i4` at capacity 32768,",
+        "about 4,900 MiB at capacity 131072, and about 10,500 MiB on `12b` `i4` at capacity 32768;",
+        "short peaks about 550 MiB above that were sampled at capacity 65536.",
+    ]
+
+
 def render_gemma4_qat_q4_0_model_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
@@ -707,6 +766,7 @@ def render_gemma4_qat_q4_0_model_card(
             models(manifest),
             [""],
             _gemma4_usage(manifest, repo, speculative),
+            _qat_q4_0_long_context(manifest),
             *model_sections(
                 manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
             ),
