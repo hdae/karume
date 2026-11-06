@@ -64,7 +64,9 @@ repositories are unchanged.
     capacity 4096. The GPU measurements on the RTX 3080 Ti are in
     [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). The Chrome check on the 5070 Ti passed on 2026-11-06 for E2B q4_0 `i4` at capacity
     32768 and 131072 with an 18-token prompt: the sequence is created and one turn completes, also with Max new tokens empty.
-    A long prompt has not been run in Chrome. Open, in order: whether a model card advertises more
+    Long prompts passed the same day at P = 31,942 and 127,985: no device loss, 8 of 8 facts, and the reply text is identical
+    to the Node run ([research 2026-11-06 §7](research/2026-11-06-gemma4-long-context-quality.md#7-chrome-on-the-rtx-5070-ti)).
+    Open, in order: whether a model card advertises more
     than 4K, now that the quality check is done ([research 2026-11-06](research/2026-11-06-gemma4-long-context-quality.md):
     Karume follows torch up to 128K on E2B and 32K on 12B, E2B itself loses facts at 64K and above, and a sha256 row
     pins `e2b/i4-fast@16k`); then an opt-in `capacity: "fit"`

@@ -1,7 +1,8 @@
 > This document is a point-in-time snapshot (2026-11-06) of the Gemma 4 long-context quality check on the maintainer's RTX
 > 3080 Ti under Node + Dawn: KL against upstream torch on the CPU, and a retrieval test up to P = 128K. It is not a design
-> source of truth. Time and memory are in [research 2026-11-05](2026-11-05-gemma4-long-context.md). Nothing here was run
-> in Chrome. The harness and the raw records are local and untracked (`outputs/diag/long-context-quality-2026-11-05/`).
+> source of truth. Time and memory are in [research 2026-11-05](2026-11-05-gemma4-long-context.md). Only §7 was run in
+> Chrome. The harness and the raw records are local and untracked (`outputs/diag/long-context-quality-2026-11-05/`,
+> `outputs/bench-browser/`).
 
 # Gemma 4 at long context: quality against torch
 
@@ -108,5 +109,22 @@ Facts correct, both presets and seeds together for E2B, seeds together for 12B.
   to `i4-fast` up to P ≈ 32K only).
 - KL at positions between chunk boundaries, and non-greedy sampling.
 - Tasks other than retrieving short facts: this says nothing about summaries or reasoning over a long text.
-- E4B, and Chrome or the 5070 Ti.
+- E4B, and Chrome or the 5070 Ti beyond the two runs in §7.
 - 2 seeds per cell: the counts in §5 show a tendency, not a rate.
+
+## 7. Chrome on the RTX 5070 Ti
+
+The maintainer ran two retrieval prompts through the Playground in Chrome 156 on Windows: E2B q4_0, preset `i4`,
+MTP drafter off, temperature 0, Max new tokens 160, one turn. They are the `logbook` seed 1 prompts of §5, pasted as text.
+The record's `userText` matches the prompt file byte for byte.
+
+| Capacity | Prompt tokens | Chunks | Prefill | Prefill tokens/s | Decode tokens | Decode | ms/token | Total | `kvUsedAfter` |
+|---|---|---|---|---|---|---|---|---|---|
+| 32,768 | 31,942 | 42 | 21.9 s | 1,456.6 | 84 | 12.3 s | 147 | 34.3 s | 32,027 |
+| 131,072 | 127,985 | 167 | 174.5 s | 733.5 | 84 | 37.3 s | 444 | 211.8 s | 128,070 |
+
+- Both turns stopped on `eos` at 85 tokens, with no dropped entries. The maintainer placed the two records; neither holds an
+  error.
+- Both replies are 8 of 8 with the decoy answered `unknown`, and the text is identical to the Node run on the RTX 3080 Ti.
+- That Node run used `i4-fast`, so this compares `i4` in Chrome with `i4-fast` on Node by text only. Logits were not compared.
+- This is one seed on one document. It shows that long positions run in Chrome on this machine, not a retrieval rate.
