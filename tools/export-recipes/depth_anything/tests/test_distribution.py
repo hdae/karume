@@ -345,7 +345,7 @@ class TestTheContainerProvenance:
         )
         sources = _build_depth_anything_sources(tmp_path)
 
-        with pytest.raises(DistError, match="has no provenance.upstreamRevision"):
+        with pytest.raises(DistError, match=r"has no provenance\.upstreamRevision"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_container_baked_from_another_revision(self, tmp_path: Path) -> None:
