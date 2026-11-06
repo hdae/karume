@@ -7,16 +7,21 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.16.0 release (released 2026-11-04)
+## now — after the 0.17.0 release (released 2026-11-06)
 
-0.16.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.16.0 — Gemma 4 in three lines: the regular
+0.17.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.17.0 — Gemma 4 turns without `maxNewTokens` and the
+stop reason `capacity` (ADR 0083 addendum 2026-11-05), function calling and thinking in the chat layer (ADR 0084 addendum
+2026-11-04), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05); published-smoke green on
+Node and Deno). No weights or manifests changed and the `SOURCES` pins stay; `hdae/karume-gemma4` and
+`hdae/karume-gemma4-qat` took a new `README.md` only. The other repositories keep their cards until their next upload.
+
+0.16.0 (2026-11-04) shipped Gemma 4 in three lines: the regular
 `karume-gemma4` ships E2B / E4B as `bf16` alone (its int4 presets removed after the KL measurement — ADR 0128, the
 addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 12B with their QAT drafters; its
 `i4` presets passed the human quality review — ADR 0110 addendum 2026-11-04) and the mobile QAT line, renamed
-`hdae/karume-gemma4-qat-mobile` (`@karume/models/gemma4-qat-mobile` — ADR 0097 addendum 10); the opt-in decode options
-`integerGemv` / `linearGemvPlanes` / `decodeAhead` (ADRs 0140–0142); published-smoke green on Node and Deno).
-0.15.1 is yanked: the revision its `gemma4Qat.SOURCES["gemma4-qat"]` pins is no longer under that name. The other
-repositories are unchanged.
+`hdae/karume-gemma4-qat-mobile` (`@karume/models/gemma4-qat-mobile` — ADR 0097 addendum 10); and the opt-in decode options
+`integerGemv` / `linearGemvPlanes` / `decodeAhead` (ADRs 0140–0142).
+0.15.1 is yanked: the revision its `gemma4Qat.SOURCES["gemma4-qat"]` pins is no longer under that name.
 
 ## later
 
@@ -68,9 +73,8 @@ repositories are unchanged.
     to the Node run ([research 2026-11-06 §7](research/2026-11-06-gemma4-long-context-quality.md#7-chrome-on-the-rtx-5070-ti)).
     The card of `karume-gemma4-qat` now states the long-context results, on main of the HF repository ([research
     2026-11-06](research/2026-11-06-gemma4-long-context-quality.md): Karume follows torch up to 128K on E2B and 32K on 12B, E2B
-    itself loses facts at 64K and above, and a sha256 row pins `e2b/i4-fast@16k`). The recipe's Usage text already describes
-    main (function calling, thinking, the stop reason `capacity`), so the next release uploads the regular and q4_0 QAT cards
-    again; until then HF keeps the text that is true of 0.16.0. Open: an opt-in `capacity: "fit"`
+    itself loses facts at 64K and above, and a sha256 row pins `e2b/i4-fast@16k`). The regular and q4_0 QAT cards describe
+    function calling, thinking and the stop reason `capacity` from 0.17.0. Open: an opt-in `capacity: "fit"`
     (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; the
     margin has to cover short peaks of about 1 GiB over the estimate, and it needs a Dawn probe check, since ADR 0070's
     trial allocation was studied on wgpu / Mesa). The f16 KV is K-100 in the perf ledger.
