@@ -627,6 +627,17 @@ class TestQatCard:
         assert "`fuseRmsNormAdd` = `true`" in fast
         assert "True" not in fast
 
+    def test_the_usage_points_function_calling_and_thinking_at_the_session(
+        self, tmp_path: Path
+    ) -> None:
+        """`Pipeline.chat` takes no `tools`, so the card names the entry point that does."""
+        out_dir, _ = _assemble(tmp_path)
+        usage = (out_dir / "README.md").read_text(encoding="utf-8").split("## Usage")[1]
+
+        assert "`new ChatSession(pipeline, { tools, enableThinking })`" in usage
+        assert "`sendToolResults` continues it" in usage
+        assert "tool calls,\nthinking channels" not in usage
+
     def test_a_model_without_long_context_checks_is_stated_as_not_checked(
         self, tmp_path: Path
     ) -> None:

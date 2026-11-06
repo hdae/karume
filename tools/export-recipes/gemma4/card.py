@@ -448,11 +448,14 @@ def _gemma4_usage(
         "// Fragments arrive as the decoder settles them (multi-byte characters are held back",
         "// until they are complete).",
         "for await (const text of stream) Deno.stdout.write(new TextEncoder().encode(text));",
-        'console.log(await stream.done); // { reason: "eos" | "max-tokens" | "aborted", … }',
+        'console.log(await stream.done); // { reason: "eos" | "max-tokens" | "capacity" | … }',
         "```",
         "",
-        "Messages are plain `system` / `developer` / `user` / `assistant` turns; tool calls,",
-        "thinking channels and image or audio parts are rejected rather than silently dropped.",
+        "Messages are plain `system` / `developer` / `user` / `assistant` turns with text content;",
+        "content parts such as images or audio are rejected rather than silently dropped.",
+        "For function calling and thinking, use",
+        "`new ChatSession(pipeline, { tools, enableThinking })`: a turn can end on a tool call,",
+        "and `sendToolResults` continues it.",
         "With no `sampler` in the request, generation uses this repository's recommended default:"
         f" temperature {knob(sampler['temperature'])}, top-k {knob(sampler['topK'])},"
         f" top-p {knob(sampler['topP'])}.",

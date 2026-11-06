@@ -68,7 +68,9 @@ repositories are unchanged.
     to the Node run ([research 2026-11-06 §7](research/2026-11-06-gemma4-long-context-quality.md#7-chrome-on-the-rtx-5070-ti)).
     The card of `karume-gemma4-qat` now states the long-context results, on main of the HF repository ([research
     2026-11-06](research/2026-11-06-gemma4-long-context-quality.md): Karume follows torch up to 128K on E2B and 32K on 12B, E2B
-    itself loses facts at 64K and above, and a sha256 row pins `e2b/i4-fast@16k`). Open: an opt-in `capacity: "fit"`
+    itself loses facts at 64K and above, and a sha256 row pins `e2b/i4-fast@16k`). The recipe's Usage text already describes
+    main (function calling, thinking, the stop reason `capacity`), so the next release uploads the regular and q4_0 QAT cards
+    again; until then HF keeps the text that is true of 0.16.0. Open: an opt-in `capacity: "fit"`
     (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; the
     margin has to cover short peaks of about 1 GiB over the estimate, and it needs a Dawn probe check, since ADR 0070's
     trial allocation was studied on wgpu / Mesa). The f16 KV is K-100 in the perf ledger.
