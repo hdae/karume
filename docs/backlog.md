@@ -62,8 +62,9 @@ repositories are unchanged.
     recommended. Done: `maxNewTokens` optional with the stop reason `capacity` and `reserveNewTokens` (ADR 0083 addendum
     2026-11-05), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05). The manifests keep
     capacity 4096. The GPU measurements on the RTX 3080 Ti are in
-    [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). Open, in order: the Chrome check on the 5070 Ti (E2B
-    q4_0 at capacity 32K and 128K: the sequence is created and one turn completes); whether a model card advertises more
+    [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). The Chrome check on the 5070 Ti passed on 2026-11-06 for E2B q4_0 `i4` at capacity
+    32768 and 131072 with an 18-token prompt: the sequence is created and one turn completes, also with Max new tokens empty.
+    A long prompt has not been run in Chrome. Open, in order: whether a model card advertises more
     than 4K, now that the quality check is done ([research 2026-11-06](research/2026-11-06-gemma4-long-context-quality.md):
     Karume follows torch up to 128K on E2B and 32K on 12B, E2B itself loses facts at 64K and above, and a sha256 row
     pins `e2b/i4-fast@16k`); then an opt-in `capacity: "fit"`
