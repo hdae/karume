@@ -384,3 +384,7 @@ shard-cache（`~/.cache/huggingface/xet/*/shard-cache`）を退避し、env 4 �
 - anima の `text_conditioner` part 00003（同じく 0.13.0 で細切れになった 2 本）には、この機序は当てはまらない。
   手元のミラー（0.13.0）の 5 変種の part 00003 は、4 KiB のゼロページが 0 で、ゼロ列そのものが無い。原因は未特定
   （backlog の同じ項目）。
+- Re-checked after the 0.15.0 re-upload (2026-10-30, global dedup off, 0 CAS queries): the two anima parts read 3.7 MiB/term
+  (69 terms over 6 xorbs, all written by that upload) and the new `shared/text_conditioner/model.bf16-00003` 2.4 MiB/term —
+  sharing between byte-identical or near-identical parts inside the repository, not cross-repository reuse. Every other
+  part of the five re-uploaded repositories is at 25 MiB/term or more.

@@ -12,156 +12,128 @@
 0.17.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.17.0 — Gemma 4 turns without `maxNewTokens` and the
 stop reason `capacity` (ADR 0083 addendum 2026-11-05), function calling and thinking in the chat layer (ADR 0084 addendum
 2026-11-04), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05); published-smoke green on
-Node and Deno). No weights or manifests changed and the `SOURCES` pins stay; `hdae/karume-gemma4` and
-`hdae/karume-gemma4-qat` took a new `README.md` only. The other repositories keep their cards until their next upload.
+Node and Deno). No weights or manifests changed and the `SOURCES` pins stay. All published repositories took a new
+`README.md` on 2026-11-06 (the title non-endorsement sentence).
 
-0.16.0 (2026-11-04) shipped Gemma 4 in three lines: the regular
-`karume-gemma4` ships E2B / E4B as `bf16` alone (its int4 presets removed after the KL measurement — ADR 0128, the
-addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 12B with their QAT drafters; its
-`i4` presets passed the human quality review — ADR 0110 addendum 2026-11-04) and the mobile QAT line, renamed
-`hdae/karume-gemma4-qat-mobile` (`@karume/models/gemma4-qat-mobile` — ADR 0097 addendum 10); and the opt-in decode options
-`integerGemv` / `linearGemvPlanes` / `decodeAhead` (ADRs 0140–0142).
-0.15.1 is yanked: the revision its `gemma4Qat.SOURCES["gemma4-qat"]` pins is no longer under that name.
+## next — Gemma 4, in the maintainer's order (2026-11-06)
+
+The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
+maintainer's ruling of 2026-11-06).
+
+1. **12B presets**: 12B in `karume-gemma4-qat` has one preset, `i4`. `i4-gemvpar` / `i4-fast` need the GEMV rows of the
+   12B shapes first (the parallel GEMV table has none).
+2. **12B and `decodeAhead`**: the run-ahead (ADR [0142](decisions/0142-decode-run-ahead.md)) refuses 12B on two counts —
+   it feeds its tokens through the GPU-resident PLE's resident-id path, and 12B has no PLE; and it selects each step's
+   token on the GPU from the raw logits, while 12B's distribution suppresses tokens (`resolveGemma4DecodeAhead` in
+   `packages/models/src/gemma/pipeline.ts`). Using it there needs a run-ahead path without PLE and a GPU selection that
+   masks the suppressed ids.
+3. **`capacity: "fit"`**: an opt-in `capacity: "fit"` (candidates descending from `maxPosition`, the first whose
+   estimated peak plus a margin passes `fitsHeadroom`). The margin has to cover the short peaks over the estimate
+   ([research 2026-11-05](research/2026-11-05-gemma4-long-context.md)), and it needs a Dawn probe check, since ADR
+   0070's trial allocation was studied on wgpu. API options: `.claude/reviews/2026-11-04_overnight/length-memo.md`
+   (local, untracked).
+4. **The f16 full-layer KV**: K-100 in the [perf ledger](perf-ledger.md).
+5. **Vision** (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
+   `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
+   V0. Not started. Deferred by the maintainer until after the items above.
 
 ## later
 
-- **Gemma 4 QAT decode speed (0.15.1 — maintainer 2026-10-30)**: QAT E2B decodes slower than regular E2B in the
-  browser. The attribution of 2026-09-19 ([research](research/2026-09-19-qat-speed-recon.md) §6) names four kernel gaps
-  (standalone SRQ dispatches, the occupancy of the INT2 GEMVs, the f32 `per_layer_model_projection`, the sequential INT2
-  `lm_head`) and perf-ledger K-45 (integer dot product) as the root fix. Re-measure first and check which GEMV changes
-  since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). The mobile QAT distribution,
-  published on HF as `hdae/karume-gemma4-qat` on 2026-11-01, is `karume-gemma4-qat-mobile` since 2026-11-04
-  (`@karume/models/gemma4-qat-mobile`; uploaded under the new name on 2026-11-04 and pinned by
-  `gemma4QatMobile.SOURCES["gemma4-qat-mobile"]` from 0.16.0 — ADR 0097 addendum 10).
-- **Gemma 4 expansion — the release after 0.15.1 (maintainer 2026-11-01)**: in this order, (1) the MTP drafter for E4B
-  (`google/gemma-4-E4B-it-assistant`; size M — the target series already has the verify exit, the export script and
-  the tests are E2B-bound; E4B's default is decided — `bf16`, the original weights, like E2B's: ADR 0128 addendum
-  2026-11-04; scoping memos `.claude/reviews/2026-11-02_gemma4-expansion/` (`e4b-drafter.md`, `12b.md`), local, untracked), (2) Gemma 4 12B
-  (model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024) — **implemented and in the local
-  mirror of the q4_0 QAT line `karume-gemma4-qat` with its QAT drafter (2026-11-04; the regular `karume-gemma4` no longer
-  ships it), uploaded to HF on 2026-11-04 for 0.16.0**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
-  2026-11-03 — round-to-nearest i4 on `gemma-4-12B-it` ruins it), one preset `i4` (6.9 GiB; e2e greedy goldens equal on
-  the RTX 3080 Ti, peak VRAM 8.6 GiB; the human quality review passed 2026-11-04). Left: the GEMV rows of the 12B
-  shapes before `i4-gemvpar` / `i4-fast` (the `gemma.SOURCES["gemma4-qat"]` entry is in from 0.16.0). Its QAT drafter ships in
-  the same mirror (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` — Google's card requires a QAT drafter for a QAT
-  target).
+- **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
+  (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
+  [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple
+  M2 (the RTX under Dawn, D3D12), the decision to declare them in a preset (ADR 0110 §8), K-48 step 1, K-98, and QAT
+  E4B's parallel-GEMV rows, which are unmeasured copies (K-59). The filed comparison with regular E2B's int4 presets
+  ended when they were removed on 2026-11-04 (ADR 0128), so the baseline has to be chosen again.
+- **Regular E4B's MTP drafter (maintainer 2026-11-01)**: `karume-gemma4`'s E4B ships no drafter:
+  `google/gemma-4-E4B-it-assistant` is not exported, and `gemma4.export_drafter` accepts E2B only (the q4_0 QAT line's
+  E4B has its QAT drafter from 0.16.0). Scoping memo `.claude/reviews/2026-11-02_gemma4-expansion/e4b-drafter.md`
+  (local, untracked).
 - **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:
-  - 12B and `decodeAhead`: the run-ahead (ADR [0142](decisions/0142-decode-run-ahead.md)) refuses 12B on two counts — it
-    feeds its tokens through the GPU-resident PLE's resident-id path, and 12B has no PLE; and it selects each step's token
-    on the GPU from the raw logits, while 12B's distribution suppresses tokens (`resolveGemma4DecodeAhead` in
-    `packages/models/src/gemma/pipeline.ts`). Using it there needs a run-ahead path without PLE and a GPU selection that
-    masks the suppressed ids.
   - `tools/llm-baseline`: the mobile QAT profiles score with their checkpoint's own tokenizer, which may differ from the
     one `gemma4QatMobile.SOURCES` ships (the regular `-it` repositories' fixed tokenizer — 0.16.0 Changed); its README
     Validation section still says `deno task verify`. No scoring run since the schema 4 / 5 reader (local `inputs/`
     lacks some checkpoints).
-  - Function calling and thinking (ADR 0084 addendum 2026-11-04): run on the real 12B (`e2e_gemma4_12b_chat_tools_test.ts`)
-    and checked in the Playground by the maintainer on 2026-11-05. The `Pipeline.chat` one-shot entry takes no `tools` /
+  - Function calling and thinking (ADR 0084 addendum 2026-11-04): the `Pipeline.chat` one-shot entry takes no `tools` /
     `enableThinking` (only `chatPrompt` and `ChatSession` do); the parser's exact-integer check reads `JSON.parse`'s
     reviver `context.source`, not verified on Safari.
-  - Vision (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
-    `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
-    V0. Not started.
-  - Longer output and a larger context: memo with a VRAM table and the API options in
-    `.claude/reviews/2026-11-04_overnight/length-memo.md` (local, untracked), its seven decisions taken on 2026-11-05 as
-    recommended. Done: `maxNewTokens` optional with the stop reason `capacity` and `reserveNewTokens` (ADR 0083 addendum
-    2026-11-05), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05). The manifests keep
-    capacity 4096. The GPU measurements on the RTX 3080 Ti are in
-    [research 2026-11-05](research/2026-11-05-gemma4-long-context.md). The Chrome check on the 5070 Ti passed on 2026-11-06 for E2B q4_0 `i4` at capacity
-    32768 and 131072 with an 18-token prompt: the sequence is created and one turn completes, also with Max new tokens empty.
-    Long prompts passed the same day at P = 31,942 and 127,985: no device loss, 8 of 8 facts, and the reply text is identical
-    to the Node run ([research 2026-11-06 §7](research/2026-11-06-gemma4-long-context-quality.md#7-chrome-on-the-rtx-5070-ti)).
-    The card of `karume-gemma4-qat` now states the long-context results, on main of the HF repository ([research
-    2026-11-06](research/2026-11-06-gemma4-long-context-quality.md): Karume follows torch up to 128K on E2B and 32K on 12B, E2B
-    itself loses facts at 64K and above, and a sha256 row pins `e2b/i4-fast@16k`). The regular and q4_0 QAT cards describe
-    function calling, thinking and the stop reason `capacity` from 0.17.0. Open: an opt-in `capacity: "fit"`
-    (candidates descending from `maxPosition`, the first whose estimated peak plus a margin passes `fitsHeadroom`; the
-    margin has to cover short peaks of about 1 GiB over the estimate, and it needs a Dawn probe check, since ADR 0070's
-    trial allocation was studied on wgpu / Mesa). The f16 KV is K-100 in the perf ledger.
-- **Unhandled rejection in Depth Anything's pipeline slot (filed 2026-11-04)**: `void track(previous.value.dispose())`
-  in `packages/models/src/depth-anything/pipeline-slot.ts` leaves a failed dispose of the replaced pipeline as an
-  unhandled rejection (the playground hooks had the same shape, fixed in `0448aafc`).
 - **Remainder of the speed / memory wave (filed 2026-09-25; maintainer's ruling = split into two tiers, reference tier / practical tier; within-device determinism MUST hold in the practical tier too)**:
   The finished records of iterations 1 to 3 (contract and groundwork, B3 anima DiT residency, B4 irodori context K/V projection, H-35, K-70, E1 stage 1) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
-  Candidates for the next iteration = the rest of wave 2 (DiT speed: B1 → B2) / wave 3 (memory: rest of E1 → E2 → E5 → E4) / wave 4 (practical-tier kernels: C2 VAE conv i8a8 → D2 → D1 → D3).
+  Candidates for the next iteration = wave 2 (DiT speed: B1 → the rest of B2 = perf-ledger F-6) / wave 3 (memory: rest of E1 → E2 → E5 → E4) / wave 4 (practical-tier kernels: the conv2d half of C2 = perf-ledger K-2 → D1 → the rest of D3 = perf-ledger K-95, K-57).
   The candidates come from `.claude/reviews/2026-09-25_perf-recon/SUMMARY.md` §9.3 (not tracked by git) and the perf-ledger section of 2026-09-26 (K-59 to K-69, L-20 to L-23).
-  Rest of E1 (BiRefNet's f16 series — ADR [0113](decisions/0113-birefnet-weight-series.md)) = golden comparison on a real GPU, derivation of the Lucida f16 tolerance, creation of the sha reference rows for real images, and stage 2 (the i8 plan + i8 series).
+  Rest of E1 (BiRefNet's f16 series — ADR [0113](decisions/0113-birefnet-weight-series.md)) = derivation of the Lucida f16 2048² synthetic tolerance (`LUCIDA_F16_2048_SYNTHETIC_TOLERANCE` in `packages/e2e/tests/e2e_birefnet_test.ts` is still a placeholder taken from the f32 series; the RTX 3080 Ti can run it) and phase 2 (the i8 plan + i8 series).
 - **Remainder of geometry profiles (K-71 — ADR [0115](decisions/0115-geometry-profiles.md) / [0116](decisions/0116-geometry-profile-row-buckets.md) / [0117](decisions/0117-app-geometry-tuning.md)) (filed 2026-09-27 to 10-03)**:
   The finished records (registration of `nvidia-blackwell`, the 7 row-count buckets, integration into applications (ADR 0117, all 7 stages ✅), the Codex review follow-up, 4 small items) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
-  ② Regenerating `apple-metal-3` with Chrome 154 alone happens the next time a sweep is taken on M2 (ruling 2026-10-02)
+  ② Regenerating `apple-metal-3` from the sweeps of one Chrome version (the table mixes Chrome 153 and 154) happens the next time a sweep is taken on M2, on the playground's `/geometry-sweep` page (ruling 2026-10-02)
   ③ The Pixel 10a (Mali-G715) table is not registered; the re-run on the new version has not been done (research K-70 §15)
 - **Remainder of the container-format wave (ADR [0108](decisions/0108-container-format.md)) = stages 4 to 6** (upstream intake of the anima transformer f16 / LoRA runtime A/B / new bit widths, Range fetching and so on —
   the staged-decomposition table of ADR 0108 is the source of truth for what is built and how it is accepted). The records of stages 0 to 3 and up to the 0.13.0 publication (2026-09-25) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
   The acceptance of Qwen3 / MiniCPM5 / E4B / gemma4-qat and the adoption records of K-25 to K-44 are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
-  Remaining = GPU cost attribution on M2; the decision on applying the submission policy and prefill buckets to the model defaults; integration of broad combinations and a cost study of sharing the gate/up input; isolating the cause of the GPU Instance loss in Chrome;
-  distribution recipe / source table; long-text and broad quality evaluation; automatic per-shape numeric acceptance of f16 / f32 / RMS128; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
+  Remaining = the cost study of sharing the gate/up input (perf-ledger K-50, whose step 0 measurement has not run); isolating the cause of the GPU Instance loss in Chrome;
+  distribution recipe / source table and long-text and broad quality evaluation for Qwen3-0.6B and MiniCPM5; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
 - **Continued verification of the 9/11 review** (investigation 2026-09-10, [follow-up record](research/2026-09-10-codex-mtp-optimization.md)):
   Decide whether `artifacts.staged_publication` allows several writers to the same final, and if needed design locking and recovery from interruption.
   The follow-up tests of the GPU edge-channel protection on M2 / browsers and whole-model performance measurement remain.
   Do not turn review suggestions into new kernels without verification.
 - **Move `planBackingBudgetBytes` into the common options** (filed 2026-09-07 — consequence of ADR 0095): every family except gemma4 builds its
-  Session options from the manifest's `session`, so there is no way to change the budget (the default 256 MiB applies). Add it the same way `onRetry` was
-  unified into `FromPretrainedHubOptions`. At the same time, merge the budget range check duplicated in estimate / session-build into one function.
+  Session options from the manifest's `session`, so there is no way to change the budget (the default applies). Add it the same way `onRetry` was
+  unified into `FromPretrainedHubOptions`. At the same time, merge the budget range check duplicated in `estimate.ts` and `session-options-check.ts` into one function.
 - **Anima: add `text+transformer` to the residency values (filed 2026-10-01, maintainer)**: today `transformer` keeps only the DiT Session across generate calls, and
-  text_encoder / text_conditioner (1,396 MiB of weights) redo "read → upload → build the Session → tear down" every time (the default VRAM assumption is "one largest stage" —
+  text_encoder / text_conditioner redo "read → upload → build the Session → tear down" every time (the default VRAM assumption is "one largest stage" —
   ADR [0112](decisions/0112-anima-transformer-residency.md)). The de facto practice in PyTorch / ONNX Runtime is "once loaded, resident until explicitly freed", and
   the maintainer's policy is "the API shape is explicit release; the default is resident as far as VRAM allows; demote automatically when it does not fit". Put the two text Sessions on the existing eviction
-  state machine (trial allocation for the next stage → evict if it does not fit → retry). The default is unchanged. The gain depends on the environment (with local serving on M2,
-  re-reading the text path ≈ 1.7 s / image; the slower the fetch, the larger the gain). Before starting, measure the VRAM peak including the resident part on B570 / M2 / Pixel.
+  state machine (trial allocation for the next stage → evict if it does not fit → retry). The default is unchanged. The gain depends on the environment (the slower the fetch, the larger the gain). Before starting, measure the VRAM peak including the resident part on M2 / Pixel.
 - **Remaining test coverage (filed 2026-09-05)**: the copy branch in `#encodeTimedChunk` of `SubmitScheduler`
   (`packages/runtime/src/gpu/submit.ts`) is still untested.
-- **Isolation experiment for Metal `--diagnostics`**: an A/B of which dominates, the number of query sets alive at once or the
-  backlog of `destroy()`. The relevant section of [known-issues](known-issues.md) is the source of truth for steps ①② and the fix candidates.
+- **Isolation experiment for `gpuTiming: true` on Metal through Deno's wgpu**: an A/B of which dominates, the number of query sets alive at once or the
+  backlog of `destroy()`. The `--diagnostics` flag left with `examples/gemma4` in 0.15, so the run needs a small Deno script. The relevant section of [known-issues](known-issues.md) is the source of truth for steps ①② and the fix candidates.
   It needs real hardware, so the user runs it.
-- **The two medium-priority items of the diff review's deferred table** (source of truth = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`
-  — not tracked by git): ② W-G4-4 record the origin of the chunk limit in the provenance field `sym_max` (**rides along with a re-export** — on the occasion of wave b or a series
-  update) ③ the missing path for ADR [0033](decisions/0033-vae-fixed-tile-decode.md) decision 5 "the TS side compares the geometry
-  itself" (a ruling on whether to emit one geometry JSON or to amend decision 5 to the actual state).
+- **The remaining medium-priority item of the diff review's deferred table** (source of truth = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`
+  — not tracked by git): W-G4-4 record the origin of the chunk limit in the provenance field `sym_max` and have dist compare it (**rides along with the next Gemma 4 re-export**).
 - **Peak VRAM column on the model card (filed 2026-09-04)**: `karume dist` calls the TS-side estimate
   (the `prepareContainer(...).estimate()` family) when generating the card and adds a peak VRAM column to the quant table. Today's
   card shows only the stored bytes, so readers cannot judge whether the model runs on their GPU.
 - Follow-up test of the RAM peak of the HF path in Chrome (measured on the Deno side —
   [research 2026-09-24](research/2026-09-24-part-length-ram-peak.md)).
-  **Browser performance measurement is dropped from this wave (a) (maintainer ruling 2026-09-04)** — what a browser can measure is
-  only the implementation difference between Dawn / wgpu, which does not bear on adopting kernel candidates. Alternative = add a feature to the TS packages that collects
-  performance information, and gather the results of users running a sample collection (name and location undecided) on several environments
-  (**filed only** — the items collected, the location and the opt-in form are not designed).
+- Collecting performance information from users' environments: a feature in the TS packages that collects it, and the
+  results of users running a sample collection on several environments (**filed only** — the items collected, the
+  location and the opt-in form are not designed; the per-run JSON records of `apps/playground` are the nearest existing
+  piece).
 - Re-assessing `err.cause` on Pixel (8 GB class Android Chrome) — [known-issues](known-issues.md).
 - **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
-  2026-10-29)**. Items under `packages/runtime` wait until the pending nvidia-blackwell geometry derivation lifts the freeze.
-  - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority), after the pending derivation.
+  2026-10-29)**.
+  - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority).
   - Move the Node read-strategy default into `@hdae/fetch-cache` (ADR 0127 open point, after 0.15); hub's probe in
     `packages/hub/src/sources/hf.ts` can then go.
   - Deno's resource / op sanitizers have no replacement under Vitest (ADRs 0127 / [0129](decisions/0129-test-layout-and-lanes.md) open
     point 5): record the loss in [limitations](limitations.md); file a GPU resource-leak check only if a leak shows up.
-  - The order in which the removed 0.14.0 tools and examples (v0.14.0 tag) come back as `apps/playground` pages (ADR 0127 decision 5).
+  - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as `apps/playground`
+    pages (ADR 0127 decision 5): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`, `llm-speed`,
+    `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`, `vowel-detector` and `wan`
+    (Wan2.1).
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
     `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
-  - Small doc edits: ADR 0001 still says npm publishing is open (settled JSR-only, 0127 addendum 2026-10-28); ADR 0086 quotes 0127
-    decision 2's old "read local bytes" wording; ADR 0005 decision 4 names an ADR 0127 open point as the real-browser acceptance home;
-    `packages/test-support/package.json` describes "Deno-shaped test and fs helpers"; `packages/e2e/README.md` says every test there needs
-    assets and a GPU (the three core gates and the `*_host*_test.ts` files do not) and names `outputs/series/` (now
-    `outputs/test-assets/` — ADR [0139](decisions/0139-tests-on-distributions-and-test-assets.md)); ADR 0120 points at `WAN_DEFAULT_QUANT` in
-    `tools/export-recipes/wan/distribution.py:343` (now `:440`); release-runbook §1 omits the recording mode `KARUME_WGSL_SNAPSHOT=write`.
+  - Small doc edits: `packages/e2e/README.md` names `outputs/series/` but not `outputs/test-assets/` (ADR
+    [0139](decisions/0139-tests-on-distributions-and-test-assets.md)), where the goldens now live; ADR 0120's pointer at
+    `WAN_DEFAULT_QUANT` in `tools/export-recipes/wan/distribution.py` carries a line number that has drifted again —
+    drop the number.
 - **Bundle-size remainders after the models barrel fix (filed 2026-11-04 — ADR [0037](decisions/0037-karume-monorepo.md) §4 addendum)**:
-  - A bare import of the `@karume/runtime` barrel still keeps about 160 KB minified under Rolldown (not investigated).
-  - esbuild still keeps about 3.9 KB of the `@karume/models` barrel that Rolldown drops.
+  - A bare import of the `@karume/runtime` barrel still keeps a large bundle under Rolldown (not investigated — the size is in the ADR).
+  - esbuild still keeps part of the `@karume/models` barrel that Rolldown drops.
   - `KARUME_SOURCES`'s type (`packages/models/src/sources.ts`) is spelled by hand next to the pure-annotated build, so a
     family table added to one and not the other goes unnoticed by the type check — derive one from the other.
   - `@hdae/yomi` is a dependency of `@karume/models` that only tests use.
-  - The survival of `/* @__PURE__ */` in JSR's npm output is verified through Deno's emit only, not on a published package.
 
-- **MOSS-Image (on `main` since 2026-11-01; a local distribution and the subpath `@karume/models/moss` since the same day, published on Hugging Face as `hdae/karume-moss-image` with 0.15.1 (`moss.SOURCES["moss-image"]`) — ADR [0138](decisions/0138-moss-image-dit-vae.md), proposed)**: the DiT and the untiled FLUX.2 VAE are done (text as precomputed embeddings, the presets `f32+dit8` and `f32+dit8-a8-attn8-online`, an internal family with no subpath or distribution — stages 0–5 of the ADR; the measurements are in [research 2026-10-28](research/2026-10-28-moss-image-dit-vae.md)). It was developed on branch `wip/moss-image` apart from the 0.15.0 release, rebased onto `main` after it (2026-10-31, when the ADR got its number) and taken into `main` 2026-11-01; the full verification after the rebase is pending.
-  The text encoder (Qwen3.5-9B — ADR [0137](decisions/0137-qwen3_5-text-encoder.md), with the scan op of ADR [0135](decisions/0135-gated-delta-rule-scan.md)) is wired as the prompt form (2026-10-31 — ADR 0138 addendum; the narrow scope of the maintainer's ruling 53 a: no manifest, distribution, mirror, public surface or default preset). The image A/B of upstream's embeddings against Karume's is done (ruling 51, 2026-10-31 — i8 stays the encoder's default, ADR 0137 decision 5). The distribution step is done (2026-11-01 — ADR 0138 addendum: the recipe `moss/distribution.py`, the local mirror `models/karume-moss-image/`, the subpath with a `Pipeline` over the manifest; the default preset `f32+dit8-a8-attn8-online` is the manifest's `defaultQuant`). Hugging Face publication is done (2026-11-01 — ADR 0138 addendum). Next = other GPUs' sha rows, and the encoder at T = 4,096. Its speed candidates are perf-ledger F-10 to F-12.
+- **MOSS-Image (the subpath `@karume/models/moss`, published on Hugging Face as `hdae/karume-moss-image` with 0.15.1 — ADRs [0138](decisions/0138-moss-image-dit-vae.md) and [0137](decisions/0137-qwen3_5-text-encoder.md), accepted)**: what remains is other GPUs' sha rows (this family's rows exist for `node-nvidia-geforce-rtx-3080-ti` only — ADR 0106) and the text encoder at T = 4,096 (ADR 0137 open point 2). Its speed candidates are perf-ledger F-10 to F-12.
 
 - **gemma4 prefill in w4a8 (perf-ledger K-60, maintainer 2026-10-17 "in the backlog")**: design of an acceptance table that keeps decode on the M=1 GEMV and puts only prefill (chunks of M=768) on `linearCompute: "a8"` × i4 (switching by M). Today's a8 falls to the GEMM skeleton even at M=1 and is 8.45 times slower than the GEMV ([research 2026-09-19](research/2026-09-19-qat-speed-recon.md)), so opening the acceptance table is not enough.
 
 - **Root fix for the rows that collapse under umT5's a8 (perf-ledger K-81, filed 2026-10-18, maintainer: "root fix first, not even opt-in")**: per-token int8 crushes the remaining components in the rows of function words (spaces, commas, articles, suffixes) ([research 2026-10-18](research/2026-10-18-a8-umt5-sbv2.md) §6; the main cause is token-specific outliers in the input of the FFN exit `wo`; mixing a8 per linear or layer does not remove it). Candidate = per-row mixing (only rows whose crest exceeds a threshold take the f32 path — row routing in the runtime's `linear-i8a8`). An equivalent transform on the export side only helps fixed channels. Once this is closed, re-evaluate umt5's `i8-a8` (the adoption line and the work needed are in K-81).
 
-- **Scope the geometry sweep's `caseSet` per op family (filed 2026-10-27; the maintainer's ruling 2026-10-26: an amendment of ADR 0117 decision 8, better long-term, later)**: `caseSet` (`sweepCaseSetId()` — the provenance field of ADR [0117](decisions/0117-app-geometry-tuning.md) decision 4, carried in the sweep record and checked by the generator under decision 8; the change touches decisions 4 / 8) is one hash over every case of `SWEEP_CASES`, so adding one op family's cases moves it for every table: every embedded table's provenance and every saved table mismatches (`geometryProfileMismatch`) and needs a re-sweep or a re-derivation, and a table whose records have no case of a class still carries the new `caseSet` — after perf-ledger V-5, `nvidia-blackwell` and `apple-metal-3` carry it although their `i8a8.conv3d` is the default by absence ([ADR 0115](decisions/0115-geometry-profiles.md) addendum decision 11).
+- **Scope the geometry sweep's `caseSet` per op family (filed 2026-10-27; the maintainer's ruling 2026-10-26: an amendment of ADR 0117 decision 8, better long-term, later)**: `caseSet` (`sweepCaseSetId()` — the provenance field of ADR [0117](decisions/0117-app-geometry-tuning.md) decision 4, carried in the sweep record and checked by the generator under decision 8; the change touches decisions 4 / 8) is one hash over every case of `SWEEP_CASES`, so adding one op family's cases moves it for every table: every embedded table's provenance and every saved table mismatches (`geometryProfileMismatch`) and needs a re-sweep or a re-derivation, and a table whose records have no case of a class still carries the new `caseSet` — `apple-metal-3` carries it although its `i8a8.conv3d` is the default by absence ([ADR 0115](decisions/0115-geometry-profiles.md) addendum decision 11).
 
-- **Execution form with f16 activations (w16a16) (filed 2026-10-11, maintainer: "will do it next time")**: today the runtime can make only the weight storage f16; compute and activations are f32 (only attention has `attentionCompute: "f16"` — ADR 0006 rejected f16 activations). The value is the intermediate memory, which pays off where intermediate tensors take most of the VRAM, as in BiRefNet's 2048² (ADR 0113). It requires `shader-f16`. Bit-exact agreement with upstream w16a16 is not expected (the kernels differ — handled at the numeric level of the ADR 0005 addendum of 2026-10-11). Preliminary research: [research 2026-08-04](research/2026-08-04-intermediate-f16-design.md).
+- **Execution form with f16 activations (w16a16) (filed 2026-10-11, maintainer: "will do it next time")**: today the runtime can store weights in f16 or bf16, and `linearCompute` / `attentionCompute: "f16"` drop only the kernels' shared tiles to f16 (ADR 0028); the activations between ops stay f32 (ADR 0006 rejected f16 activations). The value is the intermediate memory, which pays off where intermediate tensors take most of the VRAM, as in BiRefNet's 2048² (ADR 0113). It requires `shader-f16`. Bit-exact agreement with upstream w16a16 is not expected (the kernels differ — handled at the numeric level of the ADR 0005 addendum of 2026-10-11). Preliminary research: [research 2026-08-04](research/2026-08-04-intermediate-f16-design.md).
 
 - **Decouple the test helpers results.ts / reference.ts from GPU discovery (filed 2026-10-11, Codex deep review R8-008, maintainer's ruling = file only)**:
   `ENVIRONMENT` in `packages/runtime/tests/helpers/environment.ts` is fixed by calling `requestAdapter()` at module evaluation.
@@ -180,12 +152,12 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   - Anima's per-stage estimate (review of ruling 6): `stageNeed` in `packages/models/src/anima/pipeline.ts` estimates the text and VAE stages with no attention knobs, and `withStage` opens those Sessions with `{}`; the two agree only because both default to f32 (the preset's knobs apply to the DiT alone). Candidate: one shared constant for the non-DiT stage options, used by both. Passing the preset's `attentionCompute` / `attentionScoreStorage` there would count a form those Sessions do not run.
   - Output extent of unbatched GEMM params (filed 2026-11-04): `linearParams` (and the GEMV / i8a8 params that share `gemmParams`) do not check the output `m·n` against u32 (matmul and bmm do). `codegen_wgsl_test` pins `[65, 268435455, 16]` as accepted for linear, so that case needs a ruling first.
   - Batch-multiplied flat indices of fused attention params (filed 2026-11-04): `attentionQkParams` / `attentionPvParams` and their i8a8 variants do not receive the batch (B·H on `wid.z`), so `B·H·M·K` and the like are not checked against u32.
-  - deform_conv2d i32 coordinates (filed 2026-11-04): the WGSL computes `i32(oy) − i32(dims.padding_h)`, and the params check padding only as u32 (no `assertConvAxisExtent` equivalent); whether the contract layer bounds it is not verified.
-  - The post-acquisition GPU check `assertAcquiredGpuCapabilities` (`packages/models/src/session/gpu-features.ts`, filed 2026-11-04) is not used by moss (`src/moss/pipeline.ts`) or the umT5 encoder (`src/umt5/encoder.ts`), nor by the shared-GPU admission sites of the families; they still write the features + limits pair by hand.
+  - deform_conv2d i32 coordinates (filed 2026-11-04): the WGSL computes `i32(oy) − i32(dims.padding_h)`, and neither the params (padding is checked only as u32, with no `assertConvAxisExtent` equivalent) nor the contract layer (the attr is a safe integer ≥ 0, the shape only requires an output length ≥ 1) bounds it.
+  - The post-acquisition GPU check `assertAcquiredGpuCapabilities` (`packages/models/src/session/gpu-features.ts`, filed 2026-11-04) is not used by moss (`src/moss/pipeline.ts`), the umT5 encoder (`src/umt5/encoder.ts`) or Gemma (`src/gemma/pipeline.ts`), nor by the shared-GPU admission sites of the families; they still write the features + limits checks by hand.
   - PLE index schema check in Python (filed 2026-11-04): `read_ple_index` in `tools/exporter/src/karume/migrate.py` tests `schema in (1, 2)`, so `true` and `1.0` / `2.0` pass (Python's `True == 1`); align it with `packages/models/src/gemma/ple-index.ts` (reject bool first, as `_require_version` in `container.py` does).
-  - `packages/models/tests/helpers/moss-dit.ts` keeps its own `readBuffer` / `viewOf` / `floatsOf` (the contract of `helpers/safetensors.ts`); fold it in (importers: `e2e_moss_ab_test.ts`, `moss_sampler_test.ts`) (filed 2026-11-04).
+  - `packages/models/tests/helpers/moss-dit.ts` keeps its own `readBuffer` / `viewOf` / `floatsOf` (the contract of `helpers/safetensors.ts`); fold it in (importers: `e2e_moss_ab_test.ts`, `e2e_moss_dit_test.ts`, `e2e_moss_generate_test.ts`, `moss_sampler_test.ts`, `moss_dit_host_test.ts`, `helpers/moss-text.ts`, `helpers/moss-vae.ts`) (filed 2026-11-04).
   - A vacuous negative assertion (filed 2026-11-04): `packages/runtime/tests/estimate_test.ts` asserts that the estimate's notes do not include a phrase the estimate never prints (already so before the ADR 0130 translation — the notes were translated in 2-9), so it cannot fail. Pin the phrase the real notes would print instead.
-  - Backing difference between Deno and Chrome: the cause of 5.97 GiB vs 4.80 GiB for Wan2.2's 121 frames with the practical preset (ADR 0121) is not investigated. The two candidate explanations are the geometry profile (Deno uses `default`) and `maxBufferSize` (how regions are split) (ADR 0124's risks; material recorded in stage 4b).
+  - Backing difference between runtimes: the cause of the different DiT backing between Deno and Chrome for Wan2.2's 121 frames with the preset `f16+dit8-a8-attn8-s16` (ADR 0124, "Alternatives not taken"; material in [research 2026-10-11](research/2026-10-11-row-block-budget-stage-4b.md)) is not investigated, and Node + Dawn, the development runtime since 0.15, has not been compared. The candidate explanations recorded then are the geometry profile (Deno ran on `default`) and `maxBufferSize` (how regions are split).
   - f32 overflow of SBV2's `z_p`: even when `noiseScale` is finite in double precision, `buildZp` in `packages/models/src/sbv2/host/latent.ts` puts products above the f32 maximum (for example `noiseScale = 1e39`) into a `Float32Array`, turning them into ±Inf, and passes them to the voice graph as they are (the same hole as the `z_noise` check; the GPU outputs `m_p` / `logs_p` are mixed in, so a design for which error type is thrown is needed).
   - The copy of the repository name rule in models: `REPO_SEGMENT_RE` / `assertRepoSpelling` in `packages/models/src/hub/repo-ref.ts` hold a copy of the same rule as hub's `isRepoName` (`packages/hub/src/manifest.ts`) — making it one requires exporting the predicate from hub's mod.ts (an addition to the public API).
   - Length 0 in the CPU reference's `allclose`: `packages/runtime/src/reference/allclose.ts` returns `pass: true` for two length-0 inputs — whether to allow empty input or throw has not been ruled on, and `packages/runtime/tests/reference_ops_test.ts` pins only the currently observed value (review L-R3-4).
@@ -204,29 +176,19 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   `formatDifference`), bit equality (`bitsEqual`), RGB extraction (`rgbBytes`), counting non-finite values (`countNonFinite`), prompt resolution (`textOf`), band derivation
   (`bandOf` / `roundUpTwoDigits`), formatting of observations (`observe` / `formatObserved`). Move them into `helpers/`. After the move, confirm on the GPU that both bands and sha rows are unchanged
   (the same procedure as when stage 7's A/B check was moved into `helpers/wan-ab-gate.ts`).
-- **Return Wan2.2's 121-frame self A/B check to the default lane — dealing with the duration of the full verify (filed 2026-10-09, maintainer's ruling = later)**: ADR 0121 stage 7's
-  self A/B check is held at two points, 33 frames (S = 7,920) and 121 frames (S = 27,280) (the same "default and longest" rule as Wan2.1 — attention's 8-bit error grows
-  with row length). The 121 part takes about 6 minutes per run (estimate), and putting it in the default lane would lengthen the full verify of about 118 minutes, so it is opt-in for now
-  (`KARUME_WAN_TI2V_121F=1`). Collapse on long rows is caught only when the opt-in is run. Measured (2026-10-09, RTX 3080 Ti): the 121 A/B check takes
-  5 min 53 s. The stage 7 parts put in the default lane (the 33 A/B check 2 min 1 s, one submit of the DiT e2e with the practical preset about 55 s, the seed path of the end-to-end e2e with the practical preset about 2 min 30 s)
-  lengthened the default lane by about 5.5 minutes. Measures (shortening the duration, changing where it lives) are to be considered separately.
+- **Return Wan2.2's 121-frame self A/B check to the default lane — dealing with the duration of the full verify (filed
+  2026-10-09, maintainer's ruling = later)**: ADR 0121 stage 7's self A/B check is held at two points, 33 frames and 121
+  frames (the same "default and longest" rule as Wan2.1 — attention's 8-bit error grows with row length). Putting the
+  121-frame part in the default lane would lengthen the full verify, so it is opt-in for now (`KARUME_WAN_TI2V_121F=1`),
+  and collapse on long rows is caught only when the opt-in is run. Measures (shortening the duration, changing where it
+  lives) are to be considered separately.
 - **In-flight submit bound for enqueue in browsers (filed 2026-10-07, maintainer's ruling = later)**: ADR 0123 put the bound on run only
   (if enqueue waits, the call order against another Session's enqueue breaks). To bound enqueue as well, first add a mechanism that runs the bodies of the enqueues in a batch one at a time
   in acceptance order (a per-batch FIFO), then wait at the end. The same mechanism also closes the existing case where the first enqueue (a body with a derivation `await`) can be
   overtaken by a later enqueue of another Session. When to start: when running long batches (video VAE, generation loops) in Chrome
   shows congestion in submission or device lost. There is no actual failure so far (the 121-frame VAE, about 20,000 submits, also completed).
 
-- **Two anima parts fragmented by the 0.13.0 re-upload (filed 2026-09-24; ruling 2026-09-24 = publish as is and act after measuring the real download speed)**: in the fragmentation table of `hf-upload.zsh`,
-  among the 255 MiB-class parts, 2 of anima (`text_conditioner` part 3 of `anima-turbo-v1.1` / `anima-v1.0`, 3.6 MiB/term) fell below 10 MiB/term
-  (the [research](research/2026-08-09-xet-fragmentation.md)). Repositories with a published pin do not use delete → recreate (runbook §2 MUST NOT), so
-  decide whether to accept it based on the measured download speed, or another remedy (whether it resolves itself the next time a re-upload changes the bytes).
-  In the local mirror (0.13.0),
-  part 3 of `text_conditioner` has zero zero-pages in all 5 variants, so the zero-run mechanism does not apply. The two fragmented parts
-  (`anima-turbo-v1.1` / `anima-v1.0`) are byte-identical to each other and differ in content from part 3 of the other 3 variants, which were healthy.
-  Re-checked after the 0.15.0 re-upload (2026-10-30, global dedup off, 0 CAS queries): the two parts read 3.7 MiB/term
-  (69 terms over 6 xorbs, all written by that upload) and the new `shared/text_conditioner/model.bf16-00003` 2.4 MiB/term —
-  sharing between byte-identical or near-identical parts inside the repository, not cross-repository reuse; every other
-  part of the five re-uploaded repositories is at 25 MiB/term or more.
+- **Two anima parts read as fragmented in the upload check (filed 2026-09-24; ruling 2026-09-24 = publish as is and act after measuring the real download speed)**: in the fragmentation table of `tools/release/hf-upload.zsh`, part 3 of `text_conditioner` in `anima-turbo-v1.1` and `anima-v1.0` (byte-identical to each other, different from the same part of the other 3 variants) and `shared/text_conditioner/model.bf16-00003` stay below the 10 MiB/term guideline (the [research](research/2026-08-09-xet-fragmentation.md)). The 0.15.0 re-upload did not clear them: the cause is sharing between byte-identical or near-identical parts inside the repository, not cross-repository reuse. Repositories with a published pin do not use delete → recreate (runbook §2 MUST NOT), so decide whether to accept it once the real download speed has been measured (not measured yet), or find another remedy.
 
 - **Revisit the structure of the manifest (`karume.json`) — make optimization flags and presets easier to handle (filed by the maintainer 2026-10-06)**: today the bundle of execution knobs
   is held in the single `session` of a quant preset, and the preset name doubles as the bundle's name (ADR [0074](decisions/0074-quant-seat-naming.md) /
@@ -235,13 +197,13 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   is to be sorted out later. The material is the open points of the inventory of how fast paths are expressed (2026-10-06, `.claude/reviews/2026-10-06_fast-path-inventory/`, not tracked by git)
   — there is no per-component session (the fast paths of the VAE / text encoder cannot be declared), the keys of new kernel variants, and whether changing a bundle
   changes an existing preset or creates a new one. **Work starts later** (maintainer 2026-10-06 — Wan2.2's optimization proceeds within today's `session`).
-- **Candidate for bringing HTTP Range fetching (ADR 0108 stage 6) forward (filed 2026-09-24; decided after the release)**: the condition for bringing it forward in ADR
-  [0109](decisions/0109-manifest-v5-container.md) decision 7 is "in the RAM peak harness of stage 2, the cold
-  peak exceeds 'part length + overlap'". Stage 3e removed the duplicated holding, but the cold peak of the scan type (Deno via HF)
-  still exceeds part length + the largest block. What remains is hub's single holding slot and the part waiting for GC; the cause has moved to whole-part
-  reads (the fetch granularity). The condition formally still holds ([research record](research/2026-09-24-part-length-ram-peak.md)
-  item 7, ADR 0108 addendum 5). It applies only to Deno via HF. Its motivation differs from that of parked "hub Range parallel + prefetch"
-  (a fragmentation measure).
+- **Candidate for bringing HTTP Range fetching (ADR 0108 stage 6) forward (filed 2026-09-24; not decided yet)**: the
+  condition for bringing it forward in ADR [0109](decisions/0109-manifest-v5-container.md) decision 7 is "in the RAM
+  peak harness of stage 2, the cold peak exceeds 'part length + overlap'". Stage 3e removed the duplicated holding, but
+  the cold peak of the scan type (Deno and Node via HF, the fetch layer's `stream` strategy) still exceeds part length +
+  the largest block. The condition formally still holds ([research record](research/2026-09-24-part-length-ram-peak.md)
+  item 7, ADR 0108 addendum 5). Browsers (Blob = seek) and local sources are not affected. Its motivation differs from
+  that of parked "hub Range parallel + prefetch" (a fragmentation measure).
 - **With an unverified source (local), host PLE row reads apply sha256 to the whole block every time (filed 2026-09-24)**:
   host PLE reopens the reader for every row read, so with an unverified source one row read costs a whole block read and
   sha256 every time (28 × 32 MiB per run). The longer gemma4 run on M2 in stage 3e has been attributed to this and to the cost of memory allocation
@@ -258,52 +220,57 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   Staging then holds two parts alive at once, so running ahead is allowed only when the total bytes are within the limit (ADR 0108 decision 9:
   "limited by both count and total bytes"). With 256 MiB weight parts this would be +256 MiB, more than the +192 MiB of the bundling option, so
   the target is only the PLE preset (32 MiB pieces). Kill: PLE construction improves by less than 0.3 s (the adoption of the candidate is judged together with L-16 in [perf-ledger](perf-ledger.md)).
-- **The 25 `gemma4_qat` fixture tests are skipped wholesale in CI (filed 2026-09-25)**: `series_fixture.py` and `test_fixed.py` under `tools/export-recipes/gemma4_qat/tests/`
-  have a module-level `pytest.importorskip("transformers")`, and `transformers` exists only in the
-  `gemma4-qat` group, so in CI's recipes job, which runs with the default sync, the 25 tests (test_audit 1, test_fixed 12,
-  test_plan 12) are skipped at collection. To decide: a) stub `transformers` and keep 1 to 2 upstream comparisons
-  (mind `isinstance(QuantizedEmbedding)` in `checkpoint.py`), or b) add `--group gemma4-qat` to CI
-  (a trade between CI time and the strength of the upstream comparison).
+- **The `gemma4_qat` fixture tests are skipped wholesale in CI (filed 2026-09-25)**: `series_fixture.py` and
+  `test_fixed.py` under `tools/export-recipes/gemma4_qat/tests/` have a module-level
+  `pytest.importorskip("transformers")`, and `transformers` exists only in the `gemma4-qat` group, so in CI's recipes
+  job, which runs with the default sync, `test_audit.py`, `test_fixed.py` and `test_plan.py` are skipped at collection.
+  To decide: a) stub `transformers` and keep 1 to 2 upstream comparisons (mind `isinstance(QuantizedEmbedding)` in
+  `checkpoint.py`), or b) add `--group gemma4-qat` to CI (a trade between CI time and the strength of the upstream
+  comparison).
 
 - **Leftovers of the code-quality wave (filed 2026-09-22 — source: the same wave in the
   [archived completed section](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md) (after the 0.12.0 release))**:
-  - Where to put the four functions that take `gemma.PipelineOptions` (`assertSpeculative` / `resolveGemma4PleResidency` /
-    `buildGemma4Program` / `speculativeSetup`) (creating `pipeline-options.ts` was postponed by the ruling of 2026-09-21).
-  - The checks of the Unicode range tables differ in wording and remain in each family (only the binary search was moved to `text/code-ranges.ts`).
+  - Where to put the four functions of `packages/models/src/gemma/pipeline.ts` tied to `gemma.PipelineOptions`
+    (`resolveGemma4PleResidency` / `buildGemma4Program` take it, `assertSpeculative` takes its `speculative` field;
+    `speculativeSetup` no longer depends on the type, so it may not belong in the move) (creating `pipeline-options.ts`
+    was postponed by the ruling of 2026-09-21).
+  - sbv2's check of the Unicode range tables (`parseRanges` in `sbv2/text/asset.ts`) differs in wording and stays separate from the shared `parseCodeRanges` in `text/code-ranges.ts`.
   - Splitting `reference/ops.ts` and `ops/shapes.ts` (info — no mutable state and no cycles, zero real harm).
 
-- **Remainder of decode speed (moved from now on 2026-09-20)**: H-27 stage ② (run-ahead, an opt-in exception to ADR 0066, greedy only, expected Deno −5 / Chrome −2.2 ms),
-  small items K-48 stage 1 (rms_norm→SRQ fusion, 70 instances, 0.19 ms) / K-49 (slice aliasing) / K-50 (k+v concatenated GEMV), K-46 (int8 KV — a memory item).
-  Revival condition: when decode speed becomes the topic again (H-27's prerequisite = H-28's GPU-resident preset is done; re-measure the TTFT attribution of research 2026-09-19 §15.2 first
-  — "the prefill arena path" is not in hit runs, as corrected in the addendum of 2026-09-25).
-  The adoption of candidates and the kill criteria are in [perf-ledger](perf-ledger.md), the attribution in [research 2026-09-19](research/2026-09-19-qat-speed-recon.md).
+- **Remainder of decode speed (moved from now on 2026-09-20)**: small items K-48 stage 1 (rms_norm→SRQ fusion) / K-49
+  (slice aliasing) / K-50 (k+v concatenated GEMV), K-46 (int8 KV — a memory item). Revival condition: when decode speed
+  becomes the topic again (re-measure the TTFT attribution of research 2026-09-19 §15.2 first — "the prefill arena path"
+  is not in hit runs, as corrected in the addendum of 2026-09-25). The adoption of candidates and the kill criteria are
+  in [perf-ledger](perf-ledger.md), the attribution in [research 2026-09-19](research/2026-09-19-qat-speed-recon.md).
 
-- **Ruling on the three contracts that block large in-layer fusion (filed 2026-09-19)**: of the dispatch gap to WebML (1,132 → about 316), about 480 are
-  blocked jointly by `windowTouchesState` MUST (ADR 0067), FusedStep single output MUST (ADR 0068 decision 1) and the portability judgment of the atomic last-arriver merge.
-  The individual candidates (attention→SRQ, residual add→SRQ, attention in 1 dispatch, Q/K/V with 3 outputs) were all closed by refutation, so a design ruling on whether to relax the contracts comes first
-  ([research](research/2026-09-19-qat-speed-recon.md) §9.1). Do not file speed candidates before the ruling.
+- **Ruling on the contracts that block large in-layer fusion (filed 2026-09-19)**: part of the dispatch gap to WebML is
+  blocked jointly by `windowTouchesState` MUST (ADR 0067) and the single-output MUST of fused steps
+  (`windowIsSingleOutput`, ADR 0068 addendum 1). The third blocker, the atomic last-arriver merge, is now a MUST NOT of
+  ADR 0110 decision 6. The individual candidates (attention→SRQ, residual add→SRQ, attention in 1 dispatch, Q/K/V with 3
+  outputs) were all closed by refutation, so a design ruling on whether to relax the contracts comes first
+  ([research](research/2026-09-19-qat-speed-recon.md) §9.1). Do not file in-layer fusion candidates before the ruling.
 - **Remaining items of the video-generation foundation (investigation 2026-09-10; ADRs [0118](decisions/0118-wan21-video-generation.md) /
   [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) / [0120](decisions/0120-wan-dit-w8a8-seat.md))**:
   - MiniMax H3 (the maintainer's final goal, 2026-10-02): H3 stays at a structural study + per-component candidates
     ([research](research/2026-10-02-video-gen-recon.md)). H3 exists and is open-weight (HF MiniMaxAI/MiniMax-H3; by the letter of the terms Japan is a licensed region (not legal advice)),
     but with 33B dense + Qwen3-VL-32B + VAE 2.6B it is about 144 GB per task and assumes offload even natively (a measured example of 112 s on an RTX 5090);
     there is no browser WebGPU case.
-  - In safetensors 0.8.0 the key order of `__metadata__` in the header changes per process, so regenerated fixtures are not byte-identical (seen in vae_chunks.band / accept; the tensors are identical) — check regeneration by the tensors' sha, or fold the metadata into one key (filed 2026-10-03).
   - Wan small items (filed 2026-10-03, diff review of the ADR 0118 wave — the IDs in parentheses are items of `.claude/reviews/2026-10-03_diff-review-wan/` and `2026-10-03_codex-review-wan/` (not tracked by git)):
     ① measuring the GPU time per submit with the submit layout of normal execution (M8) (the "1 submit ≤ 1 s" check and its recorded values come from timing mode (`gpuTiming`, 1 dispatch = 1 pass), and the chunk boundaries after backing can differ from normal execution — ADR 0118 stage 8 result "scope of the submit check"; needs a GPU)
     ③ a fourth case in golden `conv3d_block` that exercises the v4 and m-tile 64 variants (F4) (the current 3 cases are Wout 5 / 5 / 6 and Cout 6 / 3 / 2 and hit only the scalar variant and m 32. v4 and m 64 are exercised only by the GPU parity tests; needs golden regeneration and confirmation on the GPU)
     ⑤ the CPU-only DiT host test reads and copies the whole 2.6 GB reference (TG-11) (`reference.full-{band,accept}-s14040-t0999` are 2,598,638,524 B each; `ArrayBuffer.slice` in `readBuffer` temporarily doubles it; RSS not measured)
     ⑥ the note separator " / " in results.json collides with " / " inside labels (TG-18) (labels in general, such as `formatNormalized`; no consumer splits it today; a fix would go on the separator side)
-    ⑦ narrow the entity-candidate check of `prompt_clean` into an exact check that "rejects only when the string actually changes", using the name table (Python's `html.entities.html5`, 2,231 names) (accepting sequences that do not form an entity, such as `R&D` — ADR 0119 ruling 2026-10-03, maintainer: "a workaround if it can be avoided"; once someone asks for it).- **Remaining small items of the Wan2.2 acceptance (ADR [0121](decisions/0121-wan22-ti2v-5b.md))**:
+    ⑦ narrow the entity-candidate check of `prompt_clean` into an exact check that "rejects only when the string actually changes", using the name table (Python's `html.entities.html5`, 2,231 names) (accepting sequences that do not form an entity, such as `R&D` — ADR 0119 ruling 2026-10-03, maintainer: "a workaround if it can be avoided"; once someone asks for it).
+- **Remaining small items of the Wan2.2 acceptance (ADR [0121](decisions/0121-wan22-ti2v-5b.md))**:
   **Adjacent small items of stage 9 (filed 2026-10-10, review)**:
   (a) the distribution assembly (`tools/export-recipes/wan/distribution.py`) does not check the input/output contract of the VAE encoder's 3 containers (input names, symbols, the shape chain pre → attn → post) (the decoder's 2 containers have the pair check `assert_vae_chunk_pair` — a series with only one of them rebuilt passes assembly and is first rejected at admission in the user's `fromPretrained`; filed 2026-10-10, review G4-01, a candidate for the fix wave)
   **Adjacent small items of stages 5 / 6 (filed 2026-10-05)**:
-  (a) the tile reference reader and helper functions (`readTileFixture`, `planMeta`, `compare`, `absMax`, `poisonFrames`, `roundUpTwoDigits`) are duplicated across 3 e2e tests → into a shared test helper
-  (b) helpers such as the recipe's `_peak_rss_gib` are duplicated in 3 places → into `_shared`
+  (a) the tile reference reader and helper functions are duplicated across the Wan VAE e2e tests (`readTileFixture` in `e2e_wan_ti2v_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tile32_test.ts`; `planMeta` in those two and `e2e_wan_vae_tiles_test.ts`; `compare` and `absMax` in `e2e_wan_vae_tiles_test.ts` and `e2e_wan_ti2v_vae_tiles_test.ts`; `poisonFrames` in those two plus `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_a8_test.ts`; `roundUpTwoDigits` — see (d)) → into a shared test helper
+  (b) helpers such as the recipe's `_peak_rss_gib` are duplicated in `tools/export-recipes/wan/` (`text_embeds.py`, `vae_tiling.py`, `few_step_ref.py`, `ti2v_few_step_ref.py`, `export_vae.py`, `export_vae_encoder.py`) → into `_shared`
   (c) the existing 5 DiT inputs have no dtype check (only the 2 inputs added for 2.2 check the dtype)
-  (d) rounding up to 2 significant digits in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts` can round one unit too high because of floating-point error (`roundUpTwoDigits` in the end-to-end e2e `e2e_wan_ti2v_pipeline_test.ts` was fixed by inserting `toPrecision(12)`. `roundUpTwoDigits` in the tile e2e `e2e_wan_ti2v_vae_tiles_test.ts` and in stage 4's chunk e2e `e2e_wan_ti2v_vae_tiles_test.ts` does not have it — it can be fixed together when moving into the shared test helper of (a))
+  (d) rounding up to 2 significant digits can round one unit too high because of floating-point error. `e2e_wan_ti2v_pipeline_test.ts` and `e2e_wan_ti2v_i2v_pipeline_test.ts` are fixed by inserting `toPrecision(12)`. Still without it: `roundUpTwoDigits` in `e2e_wan_ti2v_vae_tiles_test.ts`, `e2e_wan_ti2v_vae_tile32_test.ts` and `e2e_wan_ti2v_vae_encoder_test.ts`, and the same expression inline in `bandCandidate` of `e2e_wan_ti2v_dit_test.ts` and `e2e_wan_dit_test.ts`, in `e2e_wan_umt5_test.ts`, `e2e_moss_generate_test.ts` and `e2e_moss_dit_test.ts` (can be fixed together when moving into the shared test helper of (a))
   (e) the messages of the `pipelineConfig` reader have no owner prefix (the message cannot tell whether the 2.1 or the 2.2 class failed)
-  (f) the 2.1 and 2.2 end-to-end e2e tests hold copies of the same helper functions (`readFixture`, `difference`, the contact-sheet image and so on)
+  (f) the 2.1, 2.2 T2V and 2.2 I2V end-to-end e2e tests (`e2e_wan_pipeline_test.ts`, `e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`) hold copies of the same helper functions (`readFixture`, `difference`), and the 2.1 test keeps its own verbatim copy of the contact sheet that the two 2.2 tests import from `helpers/wan-video-artifacts.ts`
   (g) there is no host test combining the admission of the gpu path (`admitWanText`) with the 48 ch, 7-input DiT (stage 6 results)
   (h) `video_size` in `tools/export-recipes/wan/pipeline_ref.py` hard-codes 16 ch and compression 8 (unusable for 2.2 — stage 6 results)
   (i) `planWanRequest` checks only the element count of the injected `latents`, not the shape (stage 6 results)
@@ -316,25 +283,27 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   (b) add a paragraph "how to swap it into Wan" to the model card of the experimental mirror (the fine-tuned umT5)
   (c) add a check that compares the model card of the local distribution mirror with the card the recipe draws today (to find missed rebuilds)
   (d) make Wan's text stage check the `session` declared by the umT5 preset instead of silently ignoring it (same root as the component replacement item in known-issues)
-  (e) make `e2e_wan_dit_test.ts` emit the VRAM record even for a failed step (to split the in-lane OOM of known-issues into ① leftovers / ② another process)
-  **To add later (filed 2026-10-04, maintainer)**: (a) an f16 preset for TI2V-5B — we want the weights ready even if it does not run on the development machine (material: the f16 export is at the RAM boundary or
-  needs a change in the exporter core; the development machine can hold neither checks nor sha rows — ADR 0121 decision 7 / ruling 2).
+  **To add later (filed 2026-10-04, maintainer)**: (a) a TI2V-5B preset with a non-quantized DiT — we want the weights
+  ready even if it does not run on the development machine. The maintainer's request named f16; under ADR 0128 decision
+  4 the original-weights preset of this upstream is F32 (best effort, opt-in), so settle which one is meant first. The
+  RAM premise of the original material is gone with the current machine (ADR 0121 decision 2 and ruling 2). Whether
+  checks and sha rows fit on the current GPU has not been measured.
   **Related**: the 2 items of ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) "Open points" (the ruling on publishing third-party compatible components,
   agreement of graph descriptors across versions).
   **umT5 / Wan2.2 small items (filed 2026-10-04)**: (a) the original's index (`pytorch_model.bin.index.json`) and `config.json` are not pinned by sha256 (if the index disagrees with the actual files,
   it fails with a bare `KeyError` — there is no path by which values get swapped; ADR 0122 addendum "stage a results") (b) umT5's `write --check` opens a temporary directory inside the series
   (`.check-*`) — it remains if the process is killed (c) loading `ContainerDitWeights` (the layer-sequential entry point that reads the DiT weights from the container) takes 25 s per forward.
-- **Quality improvement of anima base i4 (filed 2026-08-24 — the revival lever of the ruling to skip distribution)**: what remains is only
-  **the list of possibilities left unverified** for the turbo-side i4 preset (dedicated geometry, g16, calibration amount, one more
-  degradation mechanism — all of them "not tried", not "tried and failed"), and the source of truth is
-  [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md) §8.
-  g16 remains as one revival lever in parked "anima g16 evaluation". Making adaLN i8 was rejected by a ruling after a visual
-  sweep (perf-ledger Q-9); for locating the places with high quantization sensitivity, the source of truth is item ④ of
-  "3 known issues + anima base i4 sensitivity" in the [archived completed section](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md),
-  to which the same ruling attaches "the anima DiT i4 line is
-  on hold for a while". The calibrated series are kept as `*-i4-dyn` in `outputs/series/`
-  (source of truth for the measurements =
-  [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5).
+- **Quality improvement of anima base i4 (filed 2026-08-24 — the revival lever of the ruling to skip distribution)**:
+  what remains is only **the list of possibilities left unverified** for the i4 preset of the old fused turbo (dedicated
+  geometry, g16, calibration amount, one more degradation mechanism — all of them "not tried", not "tried and failed"),
+  and the source of truth is [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md)
+  §8. g16 remains as one revival lever in parked "anima g16 evaluation". Making adaLN i8 was rejected by a ruling after
+  a visual sweep (perf-ledger Q-9); for locating the places with high quantization sensitivity, the source of truth is
+  item ④ of "3 known issues + anima base i4 sensitivity" in the
+  [archived completed section](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md), to which the same ruling
+  attaches "the anima DiT i4 line is on hold for a while". The calibrated `*-i4-dyn` series are no longer under
+  `outputs/` on the development machine, so a revival starts from a new calibrated export (source of truth for the
+  measurements = [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5).
 - **irodori adaLN i8 A/B on the shipping rig (filed 2026-08-24)**: whether adaLN i8 (+13.1 MiB), which helped in the sim,
   also improves the reading on the shipping rig is unverified (the transfer limit sim → shipping — same research §2).
   Revival = dissatisfaction with the quality of the `i8+dit4` preset (formerly `w4`), or real demand for size optimization.
@@ -351,25 +320,27 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   **The implementation of the tokenizer (Gemma SPM BPE + byte_fallback) and the EG asset compile rode along with stage 1a
   of the generation API wave** (ruling 9 of 2026-08-31 — ADR [0084](decisions/0084-gemma-tokenizer-chat.md) decision 6. The implementation is
   shared; the assets are compiled separately). The wall in the conversion stage of the batch>1 export is in [known-issues](known-issues.md).
-- **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both regularly, and
-  investigate whether we are too slow and where the bottleneck is. **The practice is already running for gemma4**
-  (the harness was `tools/llm-speed/browser` = `deno task bench:llm-browser`, removed in 0.15; the record is
-  [research 2026-09-12](research/2026-09-12-webml-browser-speed.md)). Remaining targets =
-  EmbeddingGemma (requires completion on the models
-  side) and **KokoroTTS** (corrected 2026-08-16 — the original Irodori was a typo. Kokoro
-  runs on the Transformers stack, so it is easy to compare; requires Kokoro-82M support on the karume side = the model expansion
-  candidate above, waiting for LSTM multi-output). In future, widen it into a comparison
-  matrix that includes browser ONNX + native PyTorch (ruled unnecessary for now). The norms for measurement conditions (graph capture ON /
-  freeDimensionOverrides / IO binding / checking EP partitioning, recording native EP or JSEP) have their source of truth in
+- **Practice of benchmarking against ORT Web** (maintainer ruling 2026-08-16): measure models supported by both
+  regularly, and investigate whether we are too slow and where the bottleneck is. **It has run for gemma4 only**, and
+  the record is [research 2026-09-12](research/2026-09-12-webml-browser-speed.md). Its harness was removed in 0.15 and
+  no ORT comparison harness exists today (the Playground's Gemma 4 bench compares Karume's own arms), so resuming needs
+  one as a browser application (ADR 0127). Remaining targets = EmbeddingGemma (requires completion on the models side)
+  and **KokoroTTS** (corrected 2026-08-16 — the original Irodori was a typo. Kokoro runs on the Transformers stack, so
+  it is easy to compare; requires Kokoro-82M support on the karume side = the model expansion candidate above, waiting
+  for LSTM multi-output). In future, widen it into a comparison matrix that includes browser ONNX + native PyTorch
+  (ruled unnecessary for now). The norms for measurement conditions (graph capture ON / freeDimensionOverrides / IO
+  binding / checking EP partitioning, recording native EP or JSEP) have their source of truth in
   [runtime-landscape §4](research/2026-08-16-runtime-landscape.md).
-- **Rolling generation events out to other families (waiting for demand)**: stage
-  events for sbv2 / birefnet / depth / siglip2 / vowel (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the **generation loop**
-  of anima / irodori (today a throw from onEvent is the step-granular means of cancellation — the slot is kept in reserve).
-  **AbortSignal on the construction path is implemented for anima / irodori** (`anima.PipelineOptions.signal` —
-  checked at stage boundaries, passed through to the fetch layer, `signal.reason` propagated as is), so that is the precedent for the style
-  (the `signal` of the other 6 families is only passed through to the fetch layer, with no checks at stage boundaries). **The generation-loop slot is
-  implemented on the LLM surface** (ADR [0083](decisions/0083-generation-api-surface.md) decision 5 —
-  rolling it out to other families still waits for demand).
+- **Rolling generation events out to other families (waiting for demand)**: stage events for sbv2 / birefnet / depth /
+  siglip2 / vowel (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the
+  **generation loop** of anima / irodori (today a throw from onEvent is the step-granular means of cancellation — the
+  slot is kept in reserve). MOSS-Image's generation entry has neither events nor cancellation. **AbortSignal on the
+  construction path is implemented for anima / irodori / Wan / MOSS** (`anima.PipelineOptions.signal` — checked at stage
+  boundaries, passed through to the fetch layer, `signal.reason` propagated as is), so that is the precedent for the
+  style (the construction `signal` of sbv2 / birefnet / depth / siglip2 / vowel / gemma / umT5 is only passed through to
+  the fetch layer, with no checks at stage boundaries). **The generation-loop slot is implemented on the LLM surface**
+  (ADR [0083](decisions/0083-generation-api-surface.md) decision 5) **and on Wan** (`wan.GenerateRequest.signal`) —
+  rolling it out to other families still waits for demand.
 - **RAM-saving sequential tile assembly for large anima resolutions (filed by the ruling of 2026-08-24)**: if VAE decode tiles
   can be composited sequentially without accumulating them, the peak RAM drops (`decodeTiled` still accumulates all tiles in an array before
   compositing). The original motivation, restoring acceptance of the 8 resolutions, was achieved separately by the evenly spaced snap placement of the ADR
@@ -399,8 +370,9 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
 
 - **Remaining items of GEMV row blocks (filed 2026-09-07, consequence of K-21)**: ① the parallelism target 16384 is the saturation point of the RTX 3080 Ti (limitations) —
   the M2 re-sweep is done (the default 16384 is best); what remains is a sweep on integrated GPUs. The override is the static Session option
-  `linearGemvRowsThreadTarget` ② the shader analysis cost in browsers (Chrome / Tint) is unmeasured (on Deno / naga the first turn costs
-  +85 ms) ③ the Metal u32 check is also unmeasured for the 13 row-block shapes (known-issues).
+  `linearGemvRowsThreadTarget` ② the shader analysis cost on Tint (Chrome, and Dawn under Node) is unmeasured; the only
+  measurement is on naga ([research 2026-09-07](research/2026-09-07-gemv-rows-k21.md)) ③ the Metal u32 check is also
+  unmeasured for the 13 row-block shapes (known-issues).
 
 - **Anima: iteration residency inside the DiT stage only** (filed 2026-09-07 — Codex performance investigation 04 §Anima): keeping the current design that creates and returns a Session per stage
   (a VRAM invariant), patchify the initial latent once inside the DiT stage, reuse the RoPE / cond and uncond embeddings /
@@ -429,8 +401,9 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   16× calibration data** (a new gemma4 calibration rig is also on hold until then).
 
 - **Moving norm's 1/dim to the host is on hold** (a real-GPU probe comes first; low cost-effectiveness. Making the reduce identity's
-  params −inf stays as is = ruled as a set in the same frame as W-2/W-3) / **tolerance option B** (a public API change that adds a reduction-scale term to `allclose`
-  — option A's per-op table is implemented.
+  params −inf stays as is = ruled as a set in the same frame as W-2/W-3) / **tolerance option B** (adds a
+  reduction-scale term to `allclose` and the `Tolerance` type in `packages/runtime/src/reference/allclose.ts`, which are
+  internal but shared by every test tolerance, the e2e ones included — option A's per-op table is implemented.
   [research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §8.2).
 
 - **minicpm5's `export_decode` still bakes the RoPE table** (an asymmetry: only gemma4 moved to host supply, with ADR
@@ -450,7 +423,7 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
   to ①②③ (both dense / i8a8). Both touch kernels shared with linear (`quantize_rows`, the GEMM skeleton), so
   keep the output for existing keys with N % 4 == 0 byte-unchanged (the snapshots are the detector). Start condition: when there is a request to use Anima resolutions that are not
   multiples of 32 px in practice, or when a family that accepts N % 4 != 0 shapes has an a8 / s16 preset.
-  MOSS-Image (an internal family) accepts such shapes with an a8 preset, but its preset runs them on the online
+  MOSS-Image accepts such shapes with an a8 preset, but its preset runs them on the online
   kernel, which pads the key axis (ADR 0132 addendum of 2026-10-27); it meets the condition only on a device with
   neither online form, where the practical preset runs the three dispatches with S in f32 and, where S % 4 != 0,
   ③PV in f32 too (ADR [0138](decisions/0138-moss-image-dit-vae.md) decision 10).
@@ -459,31 +432,22 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
 
 ## release — the release preparation wave (some way off)
 
-- Real-asset CI gate (the problem that GitHub CI does not exercise local assets). **The all-skip guard is done**
-  (`packages/e2e/tests/e2e_assets_gate_test.ts` (moved from `packages/runtime/tests/` in 0.15) + CI env `KARUME_ALLOW_NO_ASSETS=1` —
-  2026-09-05). What remains is the decision on promoting goldens to fixtures / fetching assets in the release gate
+- Real-asset CI gate (GitHub CI does not exercise local assets; the all-skip guard covers the empty case): decide on promoting goldens to fixtures / fetching assets in the release gate
 - Writing up the repository root README; verifying sideEffects of the JSR npm compatibility layer. **Out of scope for 0.8.0
   (ruling 2026-09-03 — replaced with a form whose Status line alone says it is a stub). Revival condition = 1.0 or
   a public announcement**, and starting requires re-measuring the bundle size (the gzip measurement of 2026-08-16
   is outdated by the additions of the gemma4 generation API, the GEMV family and the tokenizer)
-- Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision
-  — the release gate of the reorganization. **Done ahead for the 4 published repositories at the human gate of wave K-4**).
-  **Carried out on 2026-09-25** (the maintainer checked the upstream model pages + transcribed Revision used from `refs/main`
-  of the HF cache). Counted from the distribution mirrors in `models/`, **7 families, 11 repositories** are published (anima 2,
-  birefnet 2 (birefnet-hr / lucida), depth_anything, gemma4, irodori 2, sbv2-jvnv, siglip2).
-  The ledgers filled in are anima / gemma4 (a new block for the drafter `google/gemma-4-E2B-it-assistant`) /
-  irodori / sbv2 / siglip2, 5 in all. Rows left as Unrecorded with a reason = the revision of modernbert-ja-310m
-  (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
+- Licence interview (human confirmation of export-recipes' per-family provenance per upstream revision; it runs at every publication — release-runbook). What the interview of 2026-09-25 left open:
+  rows left as Unrecorded = the revision of modernbert-ja-310m (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the Weights license of depth_anything (before revision matching).
   **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF, so it cannot be published** (until this is clarified).
-  **Ruled (2026-10-29, ruling 37 a)**: anima's licence is v1.2, the only text it bundles — Base's weights are byte-identical
-  to files `circlestone-labs/Anima` publishes under v1.2, and the v1.0 `LICENSE.md` of `Anima-Base-v1.0-Diffusers` is stale
-  (evidence and the v1.0 → v1.2 differences: [anima's THIRD_PARTY_NOTICES](../tools/export-recipes/anima/THIRD_PARTY_NOTICES.md)).
-  anima-copycat-20260610's revision is recorded there too (Civitai version 3020450, with its sha256).
-  The Code license / Attribution of the code-dependency blocks (transformers / PyTorch and so on) were filled in on 2026-09-05 from the actual
-  upstream LICENSE files. The machine-readable place for the upstream revision is the container's
-  `provenance.upstreamRevision` ([container-v1](container-v1.md) §2.3). Today the recipes of sbv2, minicpm5, siglip2, depth_anything, birefnet, embeddinggemma, deberta and wan / umT5 fill it
-  (through `tools/export-recipes/_shared/upstream.py`), so irodori and the others **fill it at their next re-export** (on the same occasion as the `sym_max` field of W-G4-4)
+  The Code license of the code-dependency block is still Unverified in the deberta, minicpm5 and embeddinggemma ledgers
+  (deberta's Attribution too).
+  The machine-readable place for the upstream revision is the container's `provenance.upstreamRevision`
+  ([container-v1](container-v1.md) §2.3). The recipes of anima, irodori (main and dacvae) and vowel_detector, and
+  gemma4's `export.py`, still declare a `PROVENANCE` without it, so they **start filling it at their next re-export**
+  (through `tools/export-recipes/_shared/upstream.py`; on the same occasion as the `sym_max` field of W-G4-4, which
+  `Provenance` does not have yet)
 - **Gate for the first PyPI release of `karume` (tools/exporter): no upstream copy in the core wheel** (ruling 57 a,
   2026-11-01). `custom_ops.py` holds a verbatim copy of transformers 5.14.1's `l2norm` / `torch_chunk_gated_delta_rule`
   as the eager body of `karume::gated_delta_scan` (ADR 0135 decision 5), with a third-party notice comment. That
@@ -527,9 +491,12 @@ addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 
 - **anima g16 evaluation** (deferred 2026-08-23 — maintainer ruling to prioritize extending GPTQ. SBV2's
   g-axis ruling does not generalize across model lines (research 2026-08-22), so the evaluation itself keeps its value.
   Revival = quality dissatisfaction in the visual check of base i4. Bringing it forward as a background run that does not collide with the main work is allowed
-  (maintainer ruling of the same day; safest to run after J-4 ②, which touches the anima calibration rig, has landed))
+  (maintainer ruling of the same day))
 - hub Range parallel + prefetch — revival = fragmented repositories coming back (perf L-3)
-- Making GPU timestamps an estimation source, full f16 (option γ), SBV2 NFC chip, regenerating the f32 anima series
+- Making GPU timestamps an estimation source, full f16 (option γ), SBV2's engine-dependent NFC
+  (`packages/models/src/sbv2/text/tokenizer.ts` uses plain `normalize("NFC")`; first check that DeBERTa's normalizer
+  needs NFC, then take the segment-table method of `packages/models/src/text/qwen2-tokenizer.ts` —
+  [research 2026-08-03](research/2026-08-03-demo-w8-perf-recon.md)), regenerating the f32 anima series
 - The by-design constraints (rank≤4 / OOB NaN / non-finite input / zero-element dimensions / cancellation granularity and others) have their source of truth in
   limitations.md — only items with real demand are promoted here
 - **Prerequisite for the first publication of vowel-detector (filed 2026-09-24)** (first publication on hold — maintainer's ruling 2026-10-15): the recipe reads the upstream `feature_config.json`
