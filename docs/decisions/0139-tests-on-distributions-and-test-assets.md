@@ -1,6 +1,6 @@
 # 0139: Real-weight tests read the distributions and a pinned private test-asset dataset; series are implementation-time intermediates
 
-- Status: proposed (2026-11-02 — the maintainer chose the private dataset for the goldens (D1) and ruled on the families
+- Status: accepted (2026-11-06 — the maintainer; proposed 2026-11-02 — the maintainer chose the private dataset for the goldens (D1) and ruled on the families
   without a published distribution (D2); see Rulings)
 - Date: 2026-11-02
 - Related: [0129](0129-test-layout-and-lanes.md) (test layout and lanes — decision 3's assets gate is replaced here) /

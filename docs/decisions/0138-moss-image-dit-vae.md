@@ -1,6 +1,6 @@
 # 0138: MOSS-Image's DiT and VAE without its text encoder — one S-shaped DiT graph, a separate text-refiner graph, a weight-borrowing skip-22 graph, an untiled three-graph FLUX.2 decoder
 
-- Status: proposed (2026-10-27; the results of stages 2–5 recorded 2026-10-28). The design and
+- Status: accepted (2026-11-06 — the maintainer; proposed 2026-10-27; the results of stages 2–5 recorded 2026-10-28). The design and
   decisions 8, 10 and 12 are ruled (see Rulings); the points settled during implementation were
   taken as the recommended option and reported to the maintainer, and are listed there apart from
   the rulings. The default preset is the practical preset `f32+dit8-a8-attn8-online` (the

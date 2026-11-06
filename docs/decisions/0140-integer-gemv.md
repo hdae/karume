@@ -1,7 +1,7 @@
 # 0140: Integer GEMV for the QAT decode linears — exact integer sums per group (`integerGemv`)
 
-- Status: proposed (2026-11-03 — implemented and measured on the maintainer's Apple M2 under Chrome; the GPU tests on
-  the development machine's RTX 3080 Ti and the sha256 rows of ADR 0110 §7 are pending; opt-in, declared by no preset)
+- Status: accepted (2026-11-06 — the maintainer; proposed 2026-11-03 — implemented and measured on the maintainer's Apple M2
+  under Chrome; its GPU tests pass on the development machine's RTX 3080 Ti; opt-in, declared by no preset)
 - Date: 2026-11-03
 - Related: ADR [0105](0105-packed-static-quantize-activations.md) (packed int8 activations — the only input form this
   kernel reads) / [0098](0098-linear-gemv-parallel.md) (the parallel GEMV it replaces on its shapes; the measured-shape
@@ -191,9 +191,7 @@ takes a linear→SRQ window enters no acceptance condition of the rule, only the
 
 ## Open points
 
-- The GPU tests on the RTX 3080 Ti (`packages/runtime/tests/gpu_linear_gemv_integer_test.ts`: the shared check, and a
-  Session's `static_quantize → linear → static_quantize` at a measured shape against the mirror and the census) and the
-  sha256 rows of ADR 0110 §7 — what keeps this ADR proposed.
+- The sha256 rows of ADR 0110 §7 are not recorded.
 - Speed on backends other than the M2's Metal (the RTX under Dawn, D3D12) — not measured; the shapes and geometries are
   the M2's.
 - The i4 shapes' end-to-end gain (0.93 / 1.68 ms) is below the single-kernel estimate (2.3 ms); not investigated.

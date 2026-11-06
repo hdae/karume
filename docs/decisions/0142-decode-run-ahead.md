@@ -1,8 +1,7 @@
 # 0142: Decode run-ahead — several greedy steps per GPU batch on chained deferred runs (`decodeAhead`, `GenerationRun.chain`)
 
-- Status: proposed (2026-11-04 — implemented and measured on the maintainer's Apple M2 under Chrome; the GPU tests on
-  the development machine's RTX 3080 Ti are pending — that GPU was busy; opt-in, default off; adopting it is the
-  maintainer's decision)
+- Status: accepted (2026-11-06 — the maintainer; proposed 2026-11-04 — implemented and measured on the maintainer's Apple M2
+  under Chrome; its GPU tests pass on the development machine's RTX 3080 Ti; opt-in, default off)
 - Date: 2026-11-04
 - Related: ADR [0066](0066-generation-context-state-slots.md) (the generation context: decision 4 the chunk bound,
   decision 6 one path that moves the logical length; the addenda of 2026-09-08 / 2026-09-09 — deferred commit and the
@@ -212,8 +211,7 @@ off, 4 rounds in ABBA order (8 visits, 2 warm chats × 2 prompts per visit), the
 
 ## Open points
 
-- The GPU tests on the RTX 3080 Ti (`gpu_chained_generation_test.ts`, `e2e_gemma4_qat_decode_ahead_test.ts`) — what
-  keeps this ADR proposed. No speed was measured on any backend other than the M2's Metal.
+- No speed was measured on any backend other than the M2's Metal.
 - Depths other than 4 were measured only in runs confounded by the M2's state drop; depth 2 and 8 have no clean number.
 - Temperature > 0: the next token is drawn on the host, so the run-ahead does not apply; it would need the draw on the
   GPU (perf-ledger H-32).

@@ -512,7 +512,7 @@ material under `outputs/diag/gdn-scan-2026-10-27/` (not tracked), and ADR
 ## 2026-10-28 MOSS-Image DiT and VAE (ADR 0138)
 
 The evidence is the [MOSS-Image record](research/2026-10-28-moss-image-dit-vae.md) §6 and ADR
-[0138](decisions/0138-moss-image-dit-vae.md) (proposed). Measured on the RTX 3080 Ti (Node + Dawn,
+[0138](decisions/0138-moss-image-dit-vae.md). Measured on the RTX 3080 Ti (Node + Dawn,
 measured mode, the minimum of 3 runs per op family), practical preset `f32+dit8-a8-attn8-online` at
 1024²: one positive forward 1,666.9 ms — i8a8 linears 1,021.2 ms, online attention 252.4 ms,
 elementwise 237.0 ms, strided copies 52.8 + 11.8 ms, quantize_rows 50.9 ms, rms_norm 34.4 ms (the

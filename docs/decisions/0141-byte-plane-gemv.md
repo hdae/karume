@@ -1,8 +1,7 @@
 # 0141: Byte-plane GEMV for the QAT lm_head — i2 weights × f32 activations, an exact decode, class R (`linearGemvPlanes`)
 
-- Status: proposed (2026-11-03 — implemented and measured on the maintainer's Apple M2 under Chrome; the GPU tests on
-  the development machine's RTX 3080 Ti are pending — that GPU was busy; opt-in, declared by no preset; adopting it is
-  the maintainer's decision)
+- Status: accepted (2026-11-06 — the maintainer; proposed 2026-11-03 — implemented and measured on the maintainer's Apple M2
+  under Chrome; its GPU tests pass on the development machine's RTX 3080 Ti; opt-in, declared by no preset)
 - Date: 2026-11-03
 - Related: ADR [0098](0098-linear-gemv-parallel.md) (the parallel GEMV — slower here; the measured-shape rule) /
   [0110](0110-practical-tier-numerics-contract.md) (contract classes — this kernel is R; §3 the four-point check; §6
@@ -205,9 +204,7 @@ opt-in GEMVs never compete for a linear.
 
 ## Open points
 
-- The GPU tests on the RTX 3080 Ti (`packages/runtime/tests/gpu_linear_gemv_planes_test.ts`: the shared check, the two
-  mutants and the Session census) — what keeps this ADR proposed. Speed on the RTX is not measured either: K-52 found
-  lm_head parallelisation slower there, and the shape table is the M2's.
+- Speed on the RTX is not measured: K-52 found lm_head parallelisation slower there, and the shape table is the M2's.
 - QAT E4B's lm_head shape was not measured, so it is not eligible.
 - The magic decode might also replace the integer GEMV's per-step `round(255 · s)` (ADR 0140 decision 3) — not measured.
 - Declaring it in a preset — needs the quality verdict of ADR 0110 §8 and the end-to-end result; not ruled.

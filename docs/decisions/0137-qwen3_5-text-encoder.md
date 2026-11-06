@@ -1,6 +1,6 @@
 # 0137: Qwen3.5 text encoder — a shared module, host-built positions and RoPE, one i8 Session per generation
 
-- Status: proposed (2026-10-31; decision 5's default ruled 2026-10-31 — the maintainer's ruling 51)
+- Status: accepted (2026-11-06 — the maintainer; proposed 2026-10-31; decision 5's default ruled 2026-10-31 — the maintainer's ruling 51)
 - Date: 2026-10-31
 - Scope: `packages/models/src/qwen3_5/{rope,session-io,graph-contract,encoder}.ts` (next to the
   tokenizer and chat template already there), the GPU check
