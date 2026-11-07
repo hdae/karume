@@ -345,6 +345,13 @@ full-eligibility check of the census turns red. On those three dispatches ③PV'
 against a running row maximum, so the output is not the three-pass a8 output bit for bit (class Q:
 within the P̃-lattice error model — the same 1/127 grid as the ③PV above).
 
+## Gemma 4 images: 12B only, 280 soft tokens, one machine
+
+Only 12B of the q4_0 QAT line takes images; E2B and E4B need their vision tower first. An image becomes at most 280 soft tokens,
+upstream's default. Each image takes a prefill chunk of its own, and a history keeps its rows on the host (about 4 MiB per image).
+The attention follows upstream's masks with the block on sliding layers only, not transformers' plain `forward` (ADR
+[0144](decisions/0144-gemma4-12b-vision.md) decision 1). Measured on the RTX 3080 Ti under Dawn; Chrome is not measured.
+
 ## The f16 attention scores round differently between backends
 
 `attentionScoreStorage: "f16"` stores S through `pack2x16float`, whose rounding WGSL leaves open. Vulkan on the RTX 3080 Ti rounds to

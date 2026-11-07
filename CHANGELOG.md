@@ -17,6 +17,13 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/models`: image input on Gemma 4 12B of the q4_0 QAT line: `vision: true` on
+  `gemma.PipelineOptions`, `Pipeline.embedImage`, and image parts in a user message of `Pipeline.chat`
+  and `ChatSession.send`. Preprocessing matches upstream's bytes; E2B and E4B come later (ADR 0144).
+  The distribution with the vision component reaches Hugging Face with the next release.
+- `@karume/runtime`: `GenerationRun.bidirectionalRows`, one block of rows that see each other in both
+  directions on the sliding layers; runs without it keep their kernels (ADR 0144 decision 3).
+
 - `@karume/models`: `capacity: "fit"` on `Pipeline.chat` and `Pipeline.sequence`, and
   `Pipeline.fitCapacity()`: the largest capacity this device can hold now, settled by one trial
   allocation per candidate (ADR 0083 addendum of 2026-11-06). Opt-in.

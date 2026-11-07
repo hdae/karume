@@ -51,6 +51,18 @@ E2B and E4B have a real tower and causal attention, and come later. They need th
 5. **The budget is 280 for now.** The embedder's row count is symbolic and the host drops upstream's padding, so 70, 140 and 560 need no
    re-export. 1120 does not fit the 768-row chunk.
 
+## Acceptance (2026-11-07, RTX 3080 Ti, Node + Dawn)
+
+| Check | Result |
+| ----- | ------ |
+| Preprocessing against the upstream processor | byte-identical: 16 synthetic cases, 7 resize cases, the 3 corpus images |
+| Embedder against upstream's module (F32, bf16 weights) | max \|Δ\| / max \|x\| at most 9.8e-6 over 3 images; the e2e band is 5e-5 |
+| Greedy with an image, 16 tokens, `i4` | token for token equal to the torch golden on 2 images (the third fell under the margin floor) |
+| Text goldens over the new graph | the existing greedy goldens are byte-identical, and the same tokens come out |
+| Bidirectional kernel | u32 identity against the always-true predicate with the host's mask, 33 cases, 4 fault injections that mismatch |
+| Weight parts of the re-exported 12B container | 31 of 32 parts byte-identical; only part 1 (the descriptors) changed |
+| Mask A against B on the first step, one image, real weights | max \|Δ logit\| 1.55, KL(A‖B) 8.8e-4, top-1 the same |
+
 ## Consequences
 
 - Pipelines that never see an image run what they ran. The `where` is the one cost they pay.

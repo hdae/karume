@@ -176,6 +176,8 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
+| bidirectional block △ | 双方向ブロック | 1 回の run のうち、sliding 層で互いを前後両方向に見る行の範囲（Gemma 4 12B の画像の soft token）。graph ではなく run が持つ | — | ADR 0144 |
+| soft tokens △ | soft token | 画像が占めるプロンプトの行（id 258880）。embedder のベクトルがその埋め込みを上書きする | — | ADR 0144 |
 | f16 full-layer KV | f16 KV | 全層の KV を f16 で詰めて持つ格納（`fullStateStorage`）。丸めは追記の 1 か所だけ | — | ADR 0143 |
 | capacity | capacity | 1 会話が確保する KV cache の論理位置の数（使える最大の文脈長） | — | ADR 0066 |
 | chunkLength | chunkLength | prefill 1 回に流す行数 | — | ADR 0066 決定 4 |

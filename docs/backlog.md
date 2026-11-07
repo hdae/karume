@@ -20,9 +20,11 @@ Node and Deno). No weights or manifests changed and the `SOURCES` pins stay. All
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
 maintainer's ruling of 2026-11-06).
 
-1. **Vision** (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
-   `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
-   V0. Not started. Deferred by the maintainer until after the items above.
+1. **Vision** (12B first, then E2B / E4B — ADR [0144](decisions/0144-gemma4-12b-vision.md)): V1–V6 for 12B done on main
+   (2026-11-07, unreleased): preprocessing, the embedder container, the product graph's soft inputs, the bidirectional block,
+   chat image parts and the Playground. Left: V7 (upload the 12B distribution with the vision component and the goldens of
+   `gemma4-12b-vision` to the test-asset dataset, cards, re-pin `SOURCES` and the test-asset pin — at the next release), the
+   browser check on the RTX 5070 Ti, and V8 (E2B / E4B, later by the maintainer's ruling of 2026-11-07).
 
 For the next release: upload the `karume-gemma4-qat` manifest with 12B's `i4-gemvpar` and `i4-fast` and re-pin `SOURCES` (the
 local mirror has them).

@@ -325,3 +325,13 @@ Decisions:
 
 Not verified on a real model yet (fixtures and CPU tests only); `Pipeline.chat` takes the widened
 messages but has no `tools` / `enableThinking` options and streams text without special spellings.
+
+## Addendum 2026-11-07 — image parts (12B)
+
+Decision 5 kept content-part arrays out of scope. A user message may now be an array of text and image parts on a pipeline opened
+with `vision: true` (ADR [0144](0144-gemma4-12b-vision.md)); audio and video parts, arrays on other roles, and arrays without vision
+are still refused. Images are placed structurally: text parts are encoded on their own and the image's `<|image>` + N soft tokens +
+`<image|>` are written as ids, so no string carrying the markers travels through the tokenizer, and a text part that encodes to one
+of the three ids is refused, as upstream's count check refuses it. The ids around an image are checked against upstream's template
+and processor (`gemma4-12b-chat.json`, `imageChat`). `ChatSession` embeds an image once and reuses its rows on a re-render and in a
+fork; two different images never compare equal.
