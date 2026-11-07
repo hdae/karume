@@ -15,6 +15,23 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/models`: `capacity: "fit"` on `Pipeline.chat` and `Pipeline.sequence`, and
+  `Pipeline.fitCapacity()`: the largest capacity this device can hold now, settled by one trial
+  allocation per candidate (ADR 0083 addendum of 2026-11-06). Opt-in. Chrome has not been checked.
+- `@karume/models`: `decodeAhead` runs on 12B: on a model without PLE, and with a distribution that
+  suppresses tokens, whose GPU selection now masks them (ADR 0142 addendum of 2026-11-06).
+- `@karume/runtime`: parallel-GEMV rows for 12B, the int4 output head included, and width 3840 in the
+  RMS→add fusion (ADR 0098 and 0099 addenda of 2026-11-06). Recipes: 12B gets `i4-gemvpar` and
+  `i4-fast`, its default staying `i4` (ADR 0104 addendum of 2026-11-06). They reach Hugging Face with
+  the next release.
+
+### Fixed
+
+- `@karume/runtime`: `fitsHeadroom` left its trial allocation on the device under Dawn, so the
+  allocation it had approved could fail (ADR 0070 addendum of 2026-11-06).
+
 ## [0.17.0] - 2026-11-06
 
 ### Added

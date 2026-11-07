@@ -20,22 +20,13 @@ Node and Deno). No weights or manifests changed and the `SOURCES` pins stay. All
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
 maintainer's ruling of 2026-11-06).
 
-1. **12B presets**: 12B in `karume-gemma4-qat` has one preset, `i4`. `i4-gemvpar` / `i4-fast` need the GEMV rows of the
-   12B shapes first (the parallel GEMV table has none).
-2. **12B and `decodeAhead`**: the run-ahead (ADR [0142](decisions/0142-decode-run-ahead.md)) refuses 12B on two counts —
-   it feeds its tokens through the GPU-resident PLE's resident-id path, and 12B has no PLE; and it selects each step's
-   token on the GPU from the raw logits, while 12B's distribution suppresses tokens (`resolveGemma4DecodeAhead` in
-   `packages/models/src/gemma/pipeline.ts`). Using it there needs a run-ahead path without PLE and a GPU selection that
-   masks the suppressed ids.
-3. **`capacity: "fit"`**: an opt-in `capacity: "fit"` (candidates descending from `maxPosition`, the first whose
-   estimated peak plus a margin passes `fitsHeadroom`). The margin has to cover the short peaks over the estimate
-   ([research 2026-11-05](research/2026-11-05-gemma4-long-context.md)), and it needs a Dawn probe check, since ADR
-   0070's trial allocation was studied on wgpu. API options: `.claude/reviews/2026-11-04_overnight/length-memo.md`
-   (local, untracked).
-4. **The f16 full-layer KV**: K-100 in the [perf ledger](perf-ledger.md).
-5. **Vision** (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
+1. **The f16 full-layer KV**: K-100 in the [perf ledger](perf-ledger.md).
+2. **Vision** (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
    `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
    V0. Not started. Deferred by the maintainer until after the items above.
+
+For the next release: upload the `karume-gemma4-qat` manifest with 12B's `i4-gemvpar` and `i4-fast` and re-pin `SOURCES` (the
+local mirror has them); the maintainer's Chrome check of `capacity: "fit"` on the RTX 5070 Ti.
 
 ## later
 
