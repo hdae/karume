@@ -1,7 +1,9 @@
 /**
- * Check 7 — the rounding of the f16 attention scores (`attentionScoreStorage: "f16"`, ADR 0031). Its
- * contract is one rounding point at the store, equal to rounding on the host, and that store is
- * `pack2x16float`, whose rounding WGSL leaves open. So this is the check to run on each backend.
+ * Check 7 — the rounding of the f16 attention scores (`attentionScoreStorage: "f16"`, ADR 0031
+ * addendum 2026-11-07). The store is `pack2x16float`, whose rounding WGSL leaves open: Vulkan on the
+ * RTX 3080 Ti rounds to nearest with ties to even, and D3D12 on the RTX 5070 Ti rounds toward zero. The
+ * contract is that a backend does one of the two on every value, so the check passes on either and
+ * records which one it saw. Any other word fails, and so does a mix of the two.
  *
  * ①QK runs on one-hot keys, so every S element is exactly one q value and the expected words need no
  * GPU reference. The f32 form of ①QK is enough for every S f16 kernel, a8 included, because they
@@ -74,26 +76,50 @@ const inputsOf = (
   return { q, k };
 };
 
-/** What the host's rounding stores, word for word. Column `c` of a row is its q element `c % D`. */
-const expectedWords = (spec: ScoreCase, q: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> => {
+type Rounding = "nearest" | "toward zero";
+
+/** What the host stores in `rounding`, word for word. Column `c` of a row is its q element `c % D`. */
+const expectedWords = (
+  spec: ScoreCase,
+  q: Float32Array<ArrayBuffer>,
+  rounding: Rounding,
+): Uint32Array<ArrayBuffer> => {
   const pair = new Float16Array(1);
   const half = new Uint16Array(pair.buffer);
   const words = new Uint32Array((spec.rows * spec.columns) / 2);
   for (let index = 0; index < spec.rows * spec.columns; index += 1) {
     const column = index % spec.columns;
-    pair[0] = q[Math.floor(index / spec.columns) * DEPTH + (column % DEPTH)];
-    words[index >> 1] += index % 2 === 1 ? half[0] * 2 ** 16 : half[0];
+    const value = q[Math.floor(index / spec.columns) * DEPTH + (column % DEPTH)];
+    pair[0] = value;
+    // One step down in magnitude: the values here are normal, so the bits step with the value.
+    const bits = rounding === "toward zero" && Math.abs(pair[0]) > Math.abs(value) ? -1 : 0;
+    words[index >> 1] += (index % 2 === 1 ? 2 ** 16 : 1) * (half[0] + bits);
   }
   return words;
 };
 
+const failuresAgainst = (
+  rounding: Rounding,
+  stored: readonly {
+    readonly spec: ScoreCase;
+    readonly q: Float32Array<ArrayBuffer>;
+    readonly actual: Uint32Array<ArrayBuffer>;
+  }[],
+): number =>
+  stored.reduce(
+    (sum, { spec, q, actual }) =>
+      sum + compareWords(rounding, actual, expectedWords(spec, q, rounding)).failures,
+    0,
+  );
+
 export const SCORE_F16_CASES = { "score-f16-store": CASES.length };
 
-export const checkScoreF16Store = async (
+const checkStore = async (
   gpu: GpuContext,
-  options: CheckOptions = {},
+  options: CheckOptions,
+  mutate?: (wgsl: string) => string,
 ): Promise<CheckPart> => {
-  const cases: CheckCase[] = [];
+  const stored = [];
   let roundedValues = 0;
   for (const spec of CASES) {
     throwIfAborted(options);
@@ -102,14 +128,26 @@ export const checkScoreF16Store = async (
     roundedValues += q.filter((value) => Math.f16round(value) !== value).length;
     const shape = { rows: spec.rows, columns: spec.columns, depth: DEPTH };
     const actual = await scopedGpuWork(gpu, spec.label, () =>
-      runAttentionQkS16(gpu.device, shape, q, k),
+      runAttentionQkS16(gpu.device, shape, q, k, mutate === undefined ? {} : { mutate }),
     );
-    cases.push({
-      label: spec.label,
-      criteria: [compareWords("S words vs the host's rounding", actual, expectedWords(spec, q))],
-    });
-    options.onProgress?.({ part: "score-f16-store", done: cases.length, total: CASES.length });
+    stored.push({ spec, q, actual });
+    options.onProgress?.({ part: "score-f16-store", done: stored.length, total: CASES.length });
   }
+  // One rounding for every case: a backend that mixes the two fails against the closer one.
+  const rounding: Rounding =
+    failuresAgainst("nearest", stored) <= failuresAgainst("toward zero", stored)
+      ? "nearest"
+      : "toward zero";
+  const cases: CheckCase[] = stored.map(({ spec, q, actual }) => ({
+    label: spec.label,
+    criteria: [
+      compareWords(
+        `S words vs the host rounding ${rounding}`,
+        actual,
+        expectedWords(spec, q, rounding),
+      ),
+    ],
+  }));
   return {
     id: "score-f16-store",
     title: "f16 attention scores vs the host's rounding (S words)",
@@ -121,20 +159,81 @@ export const checkScoreF16Store = async (
         met: roundedValues > 0,
         detail: `${roundedValues} rounded values`,
       },
+      {
+        id: "rounding",
+        name: "which rounding this backend's pack2x16float does",
+        met: true,
+        detail: rounding,
+      },
     ],
   };
 };
 
-/** The words that differ when the store swaps the halves of a word (the comparison can fail). */
-export const scoreF16StoreSwapMutant = async (gpu: GpuContext): Promise<number> => {
+export const checkScoreF16Store = (
+  gpu: GpuContext,
+  options: CheckOptions = {},
+): Promise<CheckPart> => checkStore(gpu, options);
+
+const TOWARD_ZERO_WGSL = `fn toward_zero(v: f32) -> u32 {
+  let f = bitcast<u32>(v);
+  return ((f >> 16u) & 0x8000u) | (((f & 0x7fffffffu) - 0x38000000u) >> 13u);
+}
+
+fn score_store(`;
+
+/**
+ * The check over a store that rounds toward zero in WGSL, for a GPU whose `pack2x16float` rounds to
+ * nearest: the other accepted result has to pass and be named without a D3D12 at hand.
+ */
+export const checkScoreF16TowardZeroStore = (gpu: GpuContext): Promise<CheckPart> =>
+  checkStore(gpu, {}, (wgsl) =>
+    wgsl
+      .replace("fn score_store(", TOWARD_ZERO_WGSL)
+      .replace("pack2x16float(value.xy)", "toward_zero(value.x) | (toward_zero(value.y) << 16u)")
+      .replace("pack2x16float(value.zw)", "toward_zero(value.z) | (toward_zero(value.w) << 16u)"),
+  );
+
+const MUTANTS: readonly { readonly label: string; readonly from: string; readonly to: string }[] = [
+  {
+    label: "the store swaps the two halves of a word",
+    from: "pack2x16float(value.xy)",
+    to: "pack2x16float(value.yx)",
+  },
+  {
+    label: "the store clears the low bit of both halves, which is neither rounding",
+    from: "pack2x16float(value.zw)",
+    to: "(pack2x16float(value.zw) & 0xfffefffeu)",
+  },
+];
+
+/** The words each mutant differs in from the closer rounding (accepting two is not accepting all). */
+export const scoreF16StoreMutants = async (
+  gpu: GpuContext,
+): Promise<readonly { readonly label: string; readonly differingWords: number }[]> => {
   const spec = CASES[0];
   const { q, k } = inputsOf(spec);
-  const actual = await runAttentionQkS16(
-    gpu.device,
-    { rows: spec.rows, columns: spec.columns, depth: DEPTH },
-    q,
-    k,
-    { mutate: (wgsl) => wgsl.replace("pack2x16float(value.xy)", "pack2x16float(value.yx)") },
-  );
-  return compareWords("mutant", actual, expectedWords(spec, q)).failures;
+  const results: { readonly label: string; readonly differingWords: number }[] = [];
+  for (const { label, from, to } of MUTANTS) {
+    const actual = await runAttentionQkS16(
+      gpu.device,
+      { rows: spec.rows, columns: spec.columns, depth: DEPTH },
+      q,
+      k,
+      {
+        mutate: (wgsl) => {
+          if (!wgsl.includes(from)) throw new Error(`mutant anchor is gone: ${label}`);
+          return wgsl.replace(from, to);
+        },
+      },
+    );
+    const stored = [{ spec, q, actual }];
+    results.push({
+      label,
+      differingWords: Math.min(
+        failuresAgainst("nearest", stored),
+        failuresAgainst("toward zero", stored),
+      ),
+    });
+  }
+  return results;
 };

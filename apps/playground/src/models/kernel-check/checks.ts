@@ -106,7 +106,7 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     id: "score-f16-store",
     title: "f16 attention scores (S)",
     summary:
-      'The store of attentionScoreStorage: "f16" against host rounding (u32 identity): whether pack2x16float rounds like the host on this backend.',
+      'The store of attentionScoreStorage: "f16" against host rounding (u32 identity). pack2x16float may round to nearest or toward zero, every value alike; the record names which one this backend does.',
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkScoreF16Store(gpu, options)],
