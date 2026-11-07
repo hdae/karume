@@ -7,9 +7,9 @@
 // table whose scale is split on the table's pieces (ADR 0108 addendum 15). The cases, per model:
 //
 // ① the manifest entry (no GPU): weights `model` + `drafter`, one storage `i4` each; the default
-//    seat `i4` (session {}) and, for E2B / E4B, the regular line's parallel and fused seats
+//    seat `i4` (session {}) and the regular line's parallel and fused seats
 //    `i4-gemvpar` / `i4-fast` (their session flags over the same containers), every seat naming
-//    both roles as `i4`; 12B keeps `i4` alone, its dialect and suppressed ids
+//    both roles as `i4`; 12B keeps its dialect and suppressed ids
 // ② the drafter container (no GPU): the admission the pipeline runs pairs it with its target —
 //    the four external slots are the target's last sliding / full owner layers with the target's
 //    shapes (12B: `l46` [1,8,1032,256] / `l47` [1,1,C,512]), the one shared initializer is the
@@ -109,12 +109,12 @@ const DRAFTER = "drafter";
 const QUANT = "i4";
 /**
  * The seats per model (`gemma4/distribution.py` — `gemma4_qat_q4_0_quants`): the reference seat
- * `i4`, and for E2B / E4B the parallel and fused seats over the same containers.
+ * `i4` and the parallel and fused seats over the same containers.
  */
 const SEATS: Record<Model, readonly string[]> = {
   e2b: [QUANT, "i4-gemvpar", "i4-fast"],
   e4b: [QUANT, "i4-gemvpar", "i4-fast"],
-  "12b": [QUANT],
+  "12b": [QUANT, "i4-gemvpar", "i4-fast"],
 };
 /** The session each seat declares (`GEMMA4_QAT_Q4_0_PARALLEL_QUANTS`). */
 const SEAT_SESSIONS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {

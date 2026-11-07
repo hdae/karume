@@ -8,8 +8,8 @@
  * places — its own fixture, because the case ids (`<model>/<quant>`) are the regular line's
  * spellings, and its own results folder. The seats are enumerated from the mirror's manifest
  * (`mirrorSeats`): the seat `i4` of every model, a reference row (its `session` is empty), and
- * E2B's / E4B's parallel and fused seats `i4-gemvpar` / `i4-fast`, practical rows (their
- * `session` declares the regular line's flags).
+ * the parallel and fused seats `i4-gemvpar` / `i4-fast`, practical rows (their `session` declares
+ * the regular line's flags).
  * The seats run without the drafter — speculation selects the same tokens (the identity is pinned
  * by `e2e_gemma4_qat_mirror_test.ts` ③), so a speculative row would fix the same ids twice.
  * One more row, `e2b/i4-fast@16k`, runs a long document at capacity 16384, so a later change that

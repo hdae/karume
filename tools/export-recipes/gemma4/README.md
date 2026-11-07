@@ -616,13 +616,13 @@ uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/, E2B 
 # both models (~22.6 GiB: each model's bf16 container, E2B's drafter, the tokenizers)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
 # the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters) → models/karume-gemma4-qat/
-uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b
+uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b --out ../../models/karume-gemma4-qat
 ```
 
 The regular line (`karume-gemma4`) ships E2B and E4B; it refuses `--model 12b`. 12B ships in the
 q4_0 QAT line (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line"), its one line: its
 entry reads `gemma4-12b-product`, its own `gemma4-12b-tokenizer` and its QAT drafter
-`gemma4-12b-qat-drafter`, declares the `i4` quant alone and `pipelineConfig.chatDialect`
+`gemma4-12b-qat-drafter`, declares the line's quants and `pipelineConfig.chatDialect`
 `gemma4-unified`, and its container carries no PLE assets; the assembly checks both hub snapshots
 against their pins, that the containers name the weights' and the drafter's revisions, and that the
 tokenizer asset was compiled from the 12B-it snapshot's `tokenizer.json`. Its `pipelineConfig`

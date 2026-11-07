@@ -730,6 +730,7 @@ def _qat_q4_0_long_context(manifest: Mapping[str, Any]) -> list[str]:
         "| `e2b` `i4-fast` | 12 | 26 |",
         "| `e2b` `i4`, Chrome on an RTX 5070 Ti | 147 | 444 |",
         "| `12b` `i4` | 183 | not run |",
+        "| `12b` `i4-fast` | 50 | not run |",
         "",
         "`i4-fast` is the quant to pick for long context: decode time grows far more slowly than",
         "on `i4`, and it gave the same tokens as `i4` in these runs. It was not run at long",

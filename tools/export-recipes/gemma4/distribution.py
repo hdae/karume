@@ -50,9 +50,8 @@ tokenizer and configuration checks are the regular line's; what differs is read 
   so the regular drafter's int8 requirement does not apply — {@link GEMMA4_QAT_Q4_0_STORAGE});
 - the PLE index: schema 4, int4 values with one f32 step per group of
   {@link GEMMA4_QAT_PLE_GROUP_SIZE} ({@link gemma4_ple_index});
-- the quants: `i4` (the default — the reference summation order) for every model, and for E2B /
-  E4B the parallel and fused seats `i4-gemvpar` / `i4-fast` over the same storage
-  ({@link gemma4_qat_q4_0_quants});
+- the quants: `i4` (the default — the reference summation order) and the parallel and fused seats
+  `i4-gemvpar` / `i4-fast` over the same storage ({@link gemma4_qat_q4_0_quants});
 - the pins: every product container names its QAT weights' revision and every drafter container
   its QAT drafter's (`gemma4.sources.QAT_TARGET_PINS` / `QAT_DRAFTER_PINS`).
 
@@ -1850,16 +1849,15 @@ GEMMA4_QAT_Q4_0_QUANTS: Mapping[str, Any] = {
 #: (`[262144, H]` — the parallel GEMV's table has no int4 row of that shape) is on the parallel
 #: GEMV's table (the int4 group-32 rows at the same shapes: E2B's measured ones and E4B's
 #: unmeasured copies of them — ADR 0098 addendum 2026-09-26), the RMS→add fusion takes 106 / 127
-#: pairs, and the drafter has two eligible linears (of 68, as the regular int8 drafter). 12B gets
-#: no such seat: none of its linears is on the table and its width (3840) is not one the fusion
-#: takes, so the seats would change only the attention summation under names that claim a parallel
-#: GEMV and an RMS fusion.
+#: pairs, and the drafter has two eligible linears (of 68, as the regular int8 drafter). Every
+#: linear of the 12B product, the output head included, is on the table with rows measured on 12B,
+#: and the fusion takes its width (ADR 0098 addendum 2026-11-06).
 GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
     "i4-gemvpar": {
         "weights": {},
         "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
         "label": "QAT int4 grid with parallel GEMV and attention",
-        "description": "Same weights as i4; parallel GEMV (not the int4 output head) and attention."
+        "description": "Same weights as i4; parallel GEMV{head} and attention."
         " Rounding and generated tokens can differ. Select i4 for the reference order.",
     },
     "i4-fast": {
@@ -1870,7 +1868,7 @@ GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
             "stateAttentionReduce": "parallel-fused",
         },
         "label": "QAT int4 grid with parallel GEMV, RMS fusion and fused attention",
-        "description": "Same weights as i4; parallel GEMV (not the int4 output head), RMS-add"
+        "description": "Same weights as i4; parallel GEMV{head}, RMS-add"
         " fusion, fused attention. Use i4 for reference summation. Requires fusion-option support.",
     },
 }
@@ -1880,10 +1878,21 @@ GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
 #: `i4` / `i4-gemvpar` / `i4-fast`, with and without the drafter, interleaved in one process
 #: (2026-11-04, RTX 3080 Ti, Node + Dawn — `outputs/diag/gemma4-lines-2026-11-04/legA/`): both seats
 #: were faster than `i4` on every prompt and arm measured (two runs) — without the drafter E2B by
-#: 2.0–2.5× and E4B by 2.1–2.9×, with it both by 1.2–1.5×.
+#: 2.0–2.5× and E4B by 2.1–2.9×, with it both by 1.2–1.5×. 12B (2026-11-06,
+#: `outputs/diag/gemma4-12b-fast-2026-11-06/`, the same protocol): without the drafter both seats by
+#: 1.9–2.1×; with it both are slower than `i4` with it, so its sentence says so.
 GEMMA4_QAT_Q4_0_SPEED_NOTE: Mapping[str, str] = {
     "e2b": " Faster than i4 on the tested E2B device.",
     "e4b": " Faster than i4 on the tested E4B device.",
+    "12b": " Faster than i4 on the tested 12B device, except when speculative.",
+}
+
+#: How the seats' descriptions spell the output head: the int4 head's parallel GEMV row exists only
+#: for 12B ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}).
+GEMMA4_QAT_Q4_0_HEAD_NOTE: Mapping[str, str] = {
+    "e2b": " (not the int4 output head)",
+    "e4b": " (not the int4 output head)",
+    "12b": "",
 }
 
 
@@ -1898,7 +1907,8 @@ def gemma4_qat_q4_0_quants(model: str) -> dict[str, Any]:
             quants[name] = {
                 **quant,
                 "session": dict(quant["session"]),
-                "description": quant["description"] + note,
+                "description": quant["description"].format(head=GEMMA4_QAT_Q4_0_HEAD_NOTE[model])
+                + note,
             }
     return quants
 

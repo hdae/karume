@@ -271,10 +271,9 @@ PARALLEL_SESSIONS: Mapping[str, Mapping[str, Any]] = {
 
 
 class TestQatParallelSeats:
-    """E2B / E4B carry the parallel and fused seats over the line's int4 storage; 12B keeps the
-    reference seat alone (none of its linears is on the parallel GEMV's table)."""
+    """Every model carries the parallel and fused seats over the line's int4 storage."""
 
-    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    @pytest.mark.parametrize("model", ["e2b", "e4b", "12b"])
     def test_the_seats_declare_the_parallel_and_fused_session_flags(self, model: str) -> None:
         quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
 
@@ -290,14 +289,19 @@ class TestQatParallelSeats:
             ), name
             assert model.upper() in quants[name]["description"], name
 
-    def test_12b_has_the_reference_seat_alone(self, tmp_path: Path) -> None:
+    def test_12b_assembles_all_three_seats(self, tmp_path: Path) -> None:
         _, manifest = _assemble(tmp_path, ("12b",))
 
-        assert list(manifest["models"]["12b"]["quants"]) == ["i4"]
-        assert "12b" not in gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE
+        assert list(manifest["models"]["12b"]["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
 
-    def test_only_measured_models_of_the_line_carry_a_speed_note(self) -> None:
-        assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) == {"e2b", "e4b"}
+    def test_the_descriptions_name_the_output_head_only_where_it_stays_sequential(self) -> None:
+        for model, excluded in (("e2b", True), ("e4b", True), ("12b", False)):
+            quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
+            for name in PARALLEL_SESSIONS:
+                assert ("output head" in quants[name]["description"]) is excluded, (model, name)
+
+    def test_every_model_of_the_line_carries_a_measured_speed_note(self) -> None:
+        assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) == {"e2b", "e4b", "12b"}
         assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) <= set(
             GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM
         )

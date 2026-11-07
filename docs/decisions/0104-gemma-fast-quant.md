@@ -130,3 +130,18 @@ QAT E4B was outside the original scope, but on this measurement it gets the same
 as default (ruling: "build `i4-fast` for E4B too and decide by measurement"). Only its description carries
 a measured figure, with the device: "E4B decode time -42% (B570)" (Intel Arc B570, 2026-09-26). ADR 0128
 decision 1 keeps this default as an instance of its procedure.
+
+## Addendum (2026-11-06) — 12B gets `i4-gemvpar` and `i4-fast`; its default stays `i4`
+
+`karume-gemma4-qat` 12B now has the same three presets as E2B and E4B over one set of weights. The reason it had one, no
+GEMV rows and a width outside the fusion, is gone (ADR 0098 and 0099 addenda of 2026-11-06).
+
+- **Default**: `i4`, unchanged. ADR 0128 decision 1 applies to a change of default, which nobody has reviewed for 12B.
+- **Speed** on the RTX 3080 Ti under Node + Dawn, median ms/token of a warm chat
+  ([research 2026-11-06](../research/2026-11-06-gemma4-12b-fast.md)): 64.9 → 22.3 at P ≈ 1K, 121 → 36 at P ≈ 16K,
+  181 → 50 at P ≈ 32K.
+- **With the drafter `i4-fast` is slower than `i4`**: 38.2 against 32.6 on one prompt, 25.9 against 19.1 on the other.
+  On E2B and E4B it is faster with the drafter. The cause is not known (perf-ledger K-102), so 12B's description says
+  "except when speculative".
+- **Not on Hugging Face yet.** The published `hdae/karume-gemma4-qat` still has `i4` alone for 12B; the local mirror has
+  three. The manifest goes up and `SOURCES` is re-pinned at the next release.

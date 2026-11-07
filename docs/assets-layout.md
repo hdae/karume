@@ -112,7 +112,8 @@ uv run python dist.py --pipeline gemma4 \
     --model e2b --model e4b \
     --out ../../models/karume-gemma4                 # the regular line, E2B / E4B, bf16 only (about 23 GiB)
 uv run python dist.py --pipeline gemma4-qat \
-    --model e2b --model e4b --model 12b              # → models/karume-gemma4-qat/ (the q4_0 QAT line; about 15 GiB)
+    --model e2b --model e4b --model 12b \
+    --out ../../models/karume-gemma4-qat             # the q4_0 QAT line (about 15 GiB)
 uv run python dist.py --pipeline gemma4-qat-mobile \
     --model e2b --model e4b \
     --out ../../models/karume-gemma4-qat-mobile      # the mobile QAT line (about 4.8 GiB)

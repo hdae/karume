@@ -342,6 +342,15 @@ const GEMMA4_E2B_STATE_PARALLEL = { variant: 70, reference: 0 } as const;
 const GEMMA4_E2B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const;
 
 /**
+ * 12B (product graph, 48 layers), read from a real run's `lastRunPipelines` at decode rather than
+ * derived from the plan: all 329 linears, the int4 output head included, take the parallel GEMV.
+ * `e2e_gemma4_12b_decode_ahead_test.ts` compares these with the run.
+ */
+const GEMMA4_12B_GEMV = { variant: 329, reference: 0 } as const;
+const GEMMA4_12B_RMS_ADD = { variant: 96 } as const;
+const GEMMA4_12B_STATE_PARALLEL = { variant: 96, reference: 0 } as const;
+
+/**
  * gemma4-qat E4B (product graph, 42 layers): of the 344 linears, 342 take the parallel GEMV — the
  * per-shape breakdown is pinned by the QAT E4B describe of runtime's
  * `gpu_linear_gemv_parallel_test.ts`. The other 2 fall to the sequential path for the same reason
@@ -389,6 +398,7 @@ const GEMMA4_E4B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const
 
 const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
+const TWELVE_B = ["12b"] as const;
 
 /**
  * The irodori v4 DiT: 245 linears (of the 317 before the split, k ∈ {32, 192, 512, 768, 1280, 3680}
@@ -576,6 +586,37 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
           linearGemvReduce: GEMMA4_E4B_DRAFTER_GEMV,
           fuseRmsNormAdd: GEMMA4_E4B_DRAFTER_RMS_ADD,
         },
+      },
+    },
+  },
+  // --- gemma4 12B (the q4_0 mirror; its drafter's rows are not derived) ------
+  {
+    // The distribution mirror's `i4-gemvpar`.
+    family: "gemma4",
+    models: TWELVE_B,
+    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    census: {
+      target: {
+        decode: {
+          linearGemvReduce: GEMMA4_12B_GEMV,
+          stateAttentionReduce: GEMMA4_12B_STATE_PARALLEL,
+        },
+      },
+    },
+  },
+  {
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
+    family: "gemma4",
+    models: TWELVE_B,
+    session: {
+      linearGemvReduce: "parallel",
+      fuseRmsNormAdd: true,
+      stateAttentionReduce: "parallel-fused",
+    },
+    census: {
+      target: {
+        prefill: { fuseRmsNormAdd: GEMMA4_12B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_12B_GEMV, fuseRmsNormAdd: GEMMA4_12B_RMS_ADD },
       },
     },
   },

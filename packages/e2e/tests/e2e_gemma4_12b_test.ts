@@ -83,7 +83,7 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 /** The q4_0 QAT line's distribution mirror (E2B, E4B and 12B — the one that ships 12B). */
 const MIRROR = mirrorRoot("karume-gemma4-qat");
-/** The seat this file reads (the only quant of model 12b). */
+/** The seat this file reads (the reference quant of model 12b). */
 const CHOICE = { model: "12b", quant: "i4" } as const;
 /** The component key, which is also the container's graph name (container-v1 §2.1). */
 const MODEL_GRAPH = "model";
@@ -258,11 +258,11 @@ const entryOf = (manifest: Manifest | undefined, model: string) => {
 };
 
 test.skipIf(!MODEL_PRESENT)(
-  "Gemma 4 12B distribution: the manifest entry declares the 12B pipeline, one i4 seat and its own tokenizer (no GPU)",
+  "Gemma 4 12B distribution: the manifest entry declares the 12B pipeline, its seats and its own tokenizer (no GPU)",
   () => {
     const entry = entryOf(MANIFEST, CHOICE.model);
     assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline contract");
-    assertEquals(entry.available.quants, [CHOICE.quant], "quants (only i4 this round)");
+    assertEquals(entry.available.quants, [CHOICE.quant, "i4-gemvpar", "i4-fast"], "quants");
     assertEquals(entry.defaultQuant, CHOICE.quant, "defaultQuant");
     assertEquals(entry.quants[CHOICE.quant].session, {}, "the i4 seat carries no session knobs");
     // The product graph and its QAT drafter; PLE would be assets of `model`, and there are none (②).

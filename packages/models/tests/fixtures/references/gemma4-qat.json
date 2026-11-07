@@ -5,6 +5,12 @@
     "12b/i4": {
       "node-nvidia-geforce-rtx-3080-ti": "4ebf317e4bed5d48fca3c7c4dc165db73ad7cc2cbed0776d3d93ca33297cc2a2"
     },
+    "12b/i4-fast": {
+      "node-nvidia-geforce-rtx-3080-ti": "4ebf317e4bed5d48fca3c7c4dc165db73ad7cc2cbed0776d3d93ca33297cc2a2"
+    },
+    "12b/i4-gemvpar": {
+      "node-nvidia-geforce-rtx-3080-ti": "4ebf317e4bed5d48fca3c7c4dc165db73ad7cc2cbed0776d3d93ca33297cc2a2"
+    },
     "e2b/i4": {
       "node-nvidia-geforce-rtx-3080-ti": "df8e40f71e0efbeea138ec9a27eb2ab41a221a5e7760e55be0c15c54caceff12"
     },
