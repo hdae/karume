@@ -225,6 +225,8 @@ export type StateBuildContext = {
   readonly shapes: ReadonlyMap<string, readonly number[]>;
   readonly chunkRows: Set<number>;
   readonly fullCapacities: Map<string, number>;
+  /** The plan serves runs with `GenerationRun.bidirectionalRows` (ADR 0144 decision 3). */
+  readonly bidirectional: boolean;
 };
 
 /**
@@ -360,6 +362,7 @@ export class RecipeBuilder {
   async buildRecipes(
     steps: readonly ExecStep[],
     stateShapes?: ReadonlyMap<string, readonly number[]>,
+    bidirectional = false,
   ): Promise<{
     readonly recipes: readonly StepRecipe[];
     readonly generation: GenerationLimits;
@@ -372,6 +375,7 @@ export class RecipeBuilder {
       shapes: stateShapes ?? new Map(),
       chunkRows: new Set(),
       fullCapacities: new Map(),
+      bidirectional,
     };
     const recipes: StepRecipe[] = [];
     // Names are resolved in the original order; only the compilation waits of the steps overlap.

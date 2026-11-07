@@ -124,6 +124,7 @@ import {
 import type {
   EnqueueOptions,
   EnqueueRead,
+  BidirectionalRows,
   GenerationContextSpec,
   GenerationRun,
   ParamsCacheStats,
@@ -139,6 +140,7 @@ export type {
   ComputePrecision,
   EnqueueOptions,
   EnqueueRead,
+  BidirectionalRows,
   GenerationContextSpec,
   GenerationRun,
   I8a8Dot,
@@ -399,6 +401,40 @@ const resolvedShape = (
  * floor.
  */
 const outputByteSize = (count: number): number => Math.max(4, count * 4);
+
+/** The copy taken at issue (a caller's later write must not move the block of a run in flight). */
+const captureBidirectionalRows = (
+  rows: BidirectionalRows | undefined,
+): BidirectionalRows | undefined =>
+  rows === undefined ? undefined : { start: rows.start, end: rows.end };
+
+/** The issue-time rule of {@link GenerationRun.bidirectionalRows}. */
+const assertBidirectionalRows = (run: GenerationRun): void => {
+  const rows = run.bidirectionalRows;
+  if (rows === undefined) return;
+  const where = `run: generation.bidirectionalRows [${rows.start}, ${rows.end})`;
+  if (
+    !Number.isInteger(rows.start) ||
+    !Number.isInteger(rows.end) ||
+    rows.start < 0 ||
+    rows.start >= rows.end ||
+    rows.end > run.queryLength
+  ) {
+    throw new ExecutionError(`${where} is not a block of the run's ${run.queryLength} rows`);
+  }
+  if (run.commit === "deferred" || run.chain === true) {
+    throw new ExecutionError(`${where} needs an immediate run`);
+  }
+  const internal = run.context[RUNTIME_INTERNAL];
+  // A borrower reads through the read-only kernels, which have no such predicate.
+  if (internal.borrowing)
+    throw new ExecutionError(`${where} cannot be given for a borrowing context`);
+  if (internal.slidingSlots.size === 0) throw new ExecutionError(`${where} needs sliding slots`);
+  const window = Math.min(...internal.slidingSlots.values());
+  if (rows.end - rows.start > window) {
+    throw new ExecutionError(`${where} is longer than the sliding window ${window}`);
+  }
+};
 
 const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): void => {
   // MUST: the value range of `commit` is checked in the synchronous section of issue. Falling back
@@ -951,8 +987,10 @@ export class Session {
               queryLength: generation.queryLength,
               commit: generation.commit,
               chain: generation.chain,
+              bidirectionalRows: captureBidirectionalRows(generation.bidirectionalRows),
             };
       assertGenerationCommit(capturedGeneration);
+      if (capturedGeneration !== undefined) assertBidirectionalRows(capturedGeneration);
       lease = capturedGeneration?.context[RUNTIME_INTERNAL];
       // MUST: the input copy comes **before** the lease acquisition (a lease left behind with
       // nobody to return it after a failed copy would reject every later `rewind()` forever).
@@ -1188,6 +1226,7 @@ export class Session {
                 queryLength: generation.queryLength,
                 commit: generation.commit,
                 chain: generation.chain,
+                bidirectionalRows: captureBidirectionalRows(generation.bidirectionalRows),
               },
             }),
         bindings: { ...options.bindings },
@@ -1206,6 +1245,9 @@ export class Session {
       // also instances an accepted enqueue uses, so they need the same lifetime protection as the
       // inputs.
       assertGenerationCommit(capturedOptions.generation);
+      if (capturedOptions.generation !== undefined) {
+        assertBidirectionalRows(capturedOptions.generation);
+      }
       // A reference to an invalid context from outside the type is also resolved before the use
       // reservations on resident outputs.
       lease = capturedOptions.generation?.context[RUNTIME_INTERNAL];
@@ -1653,7 +1695,9 @@ export class Session {
     if (generation !== undefined) {
       assertGenerationBindings(generation.context[RUNTIME_INTERNAL].bindings, resolved);
     }
-    const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
+    const preparedKey = `${this.#preparedKey(resolved, residentInputs, stateShapes)}${
+      generation?.bidirectionalRows === undefined ? "" : "|bidir"
+    }`;
     const prepared = this.#takePrepared(preparedKey);
     // Planning (planGraph) and fusion matching (planFusions) are both pure functions that do not
     // touch the GPU, skipped entirely on a hit (the basis is {@link Session.#preparedKey}). Fusion
@@ -1855,7 +1899,13 @@ export class Session {
               });
             } else {
               this.#bindInputs(captured, shapes, arena, env, boundResidents);
-              const plan = await this.#derivePrepared(preparedKey, derived, stateShapes, additions);
+              const plan = await this.#derivePrepared(
+                preparedKey,
+                derived,
+                stateShapes,
+                additions,
+                generation?.bidirectionalRows !== undefined,
+              );
               recipes = plan.recipes;
               limits = plan.generation;
             }
@@ -1881,6 +1931,7 @@ export class Session {
                 pastLength,
                 generation.queryLength,
                 generation.chained,
+                generation.bidirectionalRows,
               );
             }
             // MUST: the snapshot is taken **before queuing** the writing dispatch
@@ -2191,7 +2242,13 @@ export class Session {
         recipes = derived.recipes;
         limits = derived.generation;
       } else {
-        const plan = await this.#derivePrepared(preparedKey, derived, stateShapes, additions);
+        const plan = await this.#derivePrepared(
+          preparedKey,
+          derived,
+          stateShapes,
+          additions,
+          generation?.bidirectionalRows !== undefined,
+        );
         recipes = plan.recipes;
         limits = plan.generation;
       }
@@ -2240,6 +2297,7 @@ export class Session {
           pastLength,
           generation.queryLength,
           generation.chained,
+          generation.bidirectionalRows,
         );
       }
       executeBakedPlan(
@@ -2592,10 +2650,11 @@ export class Session {
     derived: PlannedSteps,
     stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
     additions: CacheAdditions,
+    bidirectional: boolean,
   ): Promise<PreparedPlan> {
     let built: Awaited<ReturnType<RecipeBuilder["buildRecipes"]>>;
     try {
-      built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
+      built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes, bidirectional);
     } finally {
       additions.params.push(...this.#recipeBuilder.addedParams);
     }

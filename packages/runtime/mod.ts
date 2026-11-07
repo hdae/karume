@@ -277,6 +277,7 @@ export type {
   ComputePrecision,
   EnqueueOptions,
   EnqueueRead,
+  BidirectionalRows,
   FusionCounts,
   GenerationContext,
   GenerationContextSpec,

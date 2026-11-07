@@ -536,11 +536,12 @@ export const stateQkTiledKey = (
   gqa: boolean,
   chunkRows: number,
   storage: StateStorage = "f32",
+  bidirectional = false,
 ): string =>
   `attention_state_qk:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
     sliding,
     gqa,
-  )}${stateStorageKeyPart(storage)}`;
+  )}${stateStorageKeyPart(storage)}${bidirectional ? ":bidir" : ""}`;
 
 /**
  * **Eligibility** of ①ₜ — only plans whose `M` (physical chunk rows) is at least the smallest row
@@ -694,6 +695,18 @@ export const STATE_LENGTHS_STRUCT = `struct Lengths {
 }`;
 
 /**
+ * {@link STATE_LENGTHS_STRUCT} with the two words of `GenerationRun.bidirectionalRows` (ADR 0144
+ * decision 3): the block as absolute logical columns `[block_lo, block_hi)`. The uniform is always
+ * these four words, so the shorter struct binds the same buffer.
+ */
+export const STATE_LENGTHS_BLOCK_STRUCT = `struct Lengths {
+  past: u32,
+  query: u32,
+  block_lo: u32,
+  block_hi: u32,
+}`;
+
+/**
  * Default name of the uniform variable the predicate and geometry fragments read (`params` of ①
  * ①' ② ③ ③' and `state_append`).
  *
@@ -761,6 +774,19 @@ fn live_columns(past: u32, query: u32) -> u32 {
 const stateWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn in_window(col: u32, limit: u32) -> bool {
   return col <= limit${sliding ? ` && (limit - col) < ${uniform}.window` : ""};
+}`;
+
+/**
+ * The sliding predicate of a run with `bidirectionalRows` (ADR 0144 decision 3): the row and the
+ * column inside the block see each other in both directions, and everything else is the predicate
+ * above. Upstream ANDs the window over the OR; the run's block is refused when longer than the
+ * window, so the block's half needs no window of its own.
+ */
+const stateBidirectionalWindowFn = (uniform: string): string =>
+  `fn in_window(col: u32, limit: u32) -> bool {
+  return (col <= limit && (limit - col) < ${uniform}.window) ||
+    (limit >= lengths.block_lo && limit < lengths.block_hi &&
+     col >= lengths.block_lo && col < lengths.block_hi);
 }`;
 
 /**
@@ -857,12 +883,12 @@ const STATE_TILED_UNIFORM = "dims";
  * words of Dims are fixed as `m` / `n` / `k`, so this is the one field whose states name cannot be
  * used as is.
  */
-export const stateTiledGeometryWgsl = (sliding: boolean): string =>
+export const stateTiledGeometryWgsl = (sliding: boolean, bidirectional = false): string =>
   `${stateSlotRowWgsl(sliding, STATE_TILED_UNIFORM)}
 
 ${stateLiveWgsl(sliding, STATE_TILED_UNIFORM)}
 
-${stateWindowFn(sliding, STATE_TILED_UNIFORM)}
+${bidirectional ? stateBidirectionalWindowFn(STATE_TILED_UNIFORM) : stateWindowFn(sliding, STATE_TILED_UNIFORM)}
 
 ${stateEffectiveRowsWgsl(STATE_TILED_UNIFORM, "m")}`;
 

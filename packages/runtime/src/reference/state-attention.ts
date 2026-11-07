@@ -66,6 +66,8 @@ export type StateAttentionRefShape = {
   readonly past: number;
   /** `Q` (queryLength — `1 ≤ Q ≤ M`). */
   readonly query: number;
+  /** `GenerationRun.bidirectionalRows` of a sliding slot (ADR 0144 decision 3). */
+  readonly bidirectionalRows?: { readonly start: number; readonly end: number };
 };
 
 export type StateAttentionRefInput = StateAttentionRefShape & {
@@ -189,6 +191,7 @@ const slotRow = (window: number, capacity: number, col: number): number =>
 export const referenceStateAttention = (input: StateAttentionRefInput): RefTensor => {
   assertShape(input);
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = input;
+  const block = input.bidirectionalRows;
   const repeat = heads / kvHeads;
   assertLength("q", input.q, batch * heads * chunkRows * depth);
   assertLength("insK", input.insK, batch * kvHeads * chunkRows * depth);
@@ -216,7 +219,13 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
       // smaller, so once a column falls out every column below it does too (sliding's P can reach
       // the top of u32, so walking down to 0 would never end the reference).
       const selected: number[] = [];
+      const inBlock = (at: number): boolean =>
+        block !== undefined && at >= past + block.start && at < past + block.end;
       for (let col = columns - 1; col >= 0; col -= 1) {
+        if (inBlock(limit) && inBlock(col)) {
+          selected.push(col);
+          continue;
+        }
         if (col > limit) continue;
         // The lower bound has the same form `limit − col < W` as the GPU side (`in_window`) (the
         // form safe against u32 wraparound)

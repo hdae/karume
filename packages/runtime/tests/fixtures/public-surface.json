@@ -47,6 +47,10 @@
         "kind": "class"
       },
       {
+        "name": "BidirectionalRows",
+        "kind": "typeAlias"
+      },
+      {
         "name": "BlockSource",
         "kind": "typeAlias"
       },

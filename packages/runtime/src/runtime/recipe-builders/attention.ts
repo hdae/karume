@@ -1179,6 +1179,14 @@ export const buildStateAttention = async (
   // fold (the four points key, WGSL, params and workgroups line up here). Scattering it would allow
   // pairs like "key is ①ₜ, dispatch uses ①'s edges", with tiles missing and no exception.
   const qkTiled = !qkParallel && stateQkTiledEligible(chunkRows);
+  // A block is only ever as long as an image's soft tokens, far over ①ₜ's M ≥ 16, so only ①ₜ has the
+  // predicate of `bidirectionalRows` (ADR 0144 decision 3); full layers stay causal.
+  const qkBidirectional = sliding && states.bidirectional;
+  if (qkBidirectional && !qkTiled) {
+    throw new ExecutionError(
+      `${where}: generation.bidirectionalRows needs a plan of at least 16 rows (this one has ${chunkRows})`,
+    );
+  }
   // ③ₜ (V row-tile sharing in the GEMM skeleton — perf-ledger K-13 step 2) is also **bit-identical
   // to ③**, so it does not depend on the option and is chosen by default for plans with `M ≥ 16`.
   // Unlike ①ₜ, the point here is that **it takes priority over the option**: a prefill plan whose
@@ -1195,7 +1203,7 @@ export const buildStateAttention = async (
       ? stateQkFoldedKey(qkFold, storage)
       : stateQkParallelKey(sliding, gqa, storage)
     : qkTiled
-      ? stateQkTiledKey(sliding, gqa, chunkRows, storage)
+      ? stateQkTiledKey(sliding, gqa, chunkRows, storage, qkBidirectional)
       : stateQkKey(sliding, gqa, storage);
   const statsKey = stateStatsKey(sliding);
   const pvKey = fusedStatsPv
@@ -1212,7 +1220,7 @@ export const buildStateAttention = async (
         ? stateQkFoldedWgsl(qkFold, storage)
         : stateQkParallelWgsl(sliding, gqa, storage)
       : qkTiled
-        ? stateQkTiledWgsl(sliding, gqa, chunkRows, storage)
+        ? stateQkTiledWgsl(sliding, gqa, chunkRows, storage, qkBidirectional)
         : stateQkWgsl(sliding, gqa, storage),
   );
   const stats = fusedStatsPv

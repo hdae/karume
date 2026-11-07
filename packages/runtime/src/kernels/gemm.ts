@@ -88,6 +88,7 @@ import {
   STATE_PV_TILED_DIMS_EXTRA,
   STATE_QK_TILED_DIMS_EXTRA,
   stateTiledGeometryWgsl,
+  STATE_LENGTHS_BLOCK_STRUCT,
   stateTiledKvPlaneWgsl,
   stateTiledPvGeometryWgsl,
 } from "./state-attention.ts";
@@ -358,6 +359,8 @@ type GemmSpec =
        * `[live, col_cap)`).
        */
       readonly op: "attention_state_qk";
+      /** The predicate of `GenerationRun.bidirectionalRows` (ADR 0144 decision 3 — sliding only). */
+      readonly bidirectional?: boolean;
       /** Sliding-window variant (`W > 0` — the 1 bit of `stateSliding`). */
       readonly sliding: boolean;
       /** GQA variant (`r > 1`). */
@@ -1717,20 +1720,21 @@ const attentionStateQkTiledWgsl = (
   sliding: boolean,
   gqa: boolean,
   storage: StateStorage,
+  bidirectional: boolean,
 ): string =>
   skeleton(
     geometry,
     `// karume attention_state_qk (states-shaped S materialisation, f32, shared K row tiles of the GEMM skeleton${
       sliding ? ", sliding window" : ""
-    }${gqa ? ", GQA" : ""}, ${gemmGeometryNote(geometry)})
-${STATE_LENGTHS_STRUCT}`,
+    }${gqa ? ", GQA" : ""}${bidirectional ? ", bidirectional block" : ""}, ${gemmGeometryNote(geometry)})
+${bidirectional ? STATE_LENGTHS_BLOCK_STRUCT : STATE_LENGTHS_STRUCT}`,
     `@group(0) @binding(1) var<storage, read> q: array<f32>;
 @group(0) @binding(2) var<storage, read> ins_k: array<f32>;
 @group(0) @binding(3) var<storage, read> slot_k: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(4) var<storage, read_write> s: array<f32>;
 @group(0) @binding(5) var<uniform> lengths: Lengths;`,
     `
-${stateTiledGeometryWgsl(sliding)}${stateSlotLoaderWgsl("slot_k", storage)}
+${stateTiledGeometryWgsl(sliding, bidirectional)}${stateSlotLoaderWgsl("slot_k", storage)}
 ${stateQkKReadWgsl(storage)}`,
     `  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
   // inner workgroupBarrier to meet WGSL's uniformity requirement
@@ -2813,7 +2817,13 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         spec.rowWindow,
       );
     case "attention_state_qk":
-      return attentionStateQkTiledWgsl(geometry, spec.sliding, spec.gqa, spec.storage);
+      return attentionStateQkTiledWgsl(
+        geometry,
+        spec.sliding,
+        spec.gqa,
+        spec.storage,
+        spec.bidirectional === true,
+      );
     case "attention_state_pv":
       return attentionStatePvTiledWgsl(geometry, spec.sliding, spec.gqa, spec.storage);
     case "attention_pv":
@@ -2842,9 +2852,20 @@ export const stateQkTiledWgsl = (
   gqa: boolean,
   chunkRows: number,
   storage: StateStorage = "f32",
+  bidirectional = false,
 ): string => {
   assertStateStorageFull("attention_state_qk (tiled)", sliding, storage);
-  return gemmWgsl({ op: "attention_state_qk", sliding, gqa, rows: chunkRows, storage });
+  if (bidirectional && !sliding) {
+    throw new Error("attention_state_qk (tiled): a bidirectional block needs a sliding slot");
+  }
+  return gemmWgsl({
+    op: "attention_state_qk",
+    sliding,
+    gqa,
+    rows: chunkRows,
+    storage,
+    bidirectional,
+  });
 };
 
 /**

@@ -246,6 +246,7 @@ describe("overallVerdict", () => {
         "gemv-planes": passed,
         "state-kv16": passed,
         "score-f16-store": passed,
+        "state-bidirectional": passed,
       }),
     ).toBe("pass");
     expect(overallVerdict({})).toBe("none");
@@ -260,6 +261,7 @@ describe("overallVerdict", () => {
       "gemv-planes",
       "state-kv16",
       "score-f16-store",
+      "state-bidirectional",
     ]);
   });
 
@@ -273,6 +275,7 @@ describe("overallVerdict", () => {
         "gemv-planes": passed,
         "state-kv16": passed,
         "score-f16-store": passed,
+        "state-bidirectional": passed,
       }),
     ).toBe("incomplete");
   });
@@ -299,6 +302,7 @@ describe("withoutOutcomes", () => {
     "gemv-planes": passed,
     "state-kv16": passed,
     "score-f16-store": passed,
+    "state-bidirectional": passed,
   };
 
   it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
@@ -318,6 +322,7 @@ describe("withoutOutcomes", () => {
       "gemv-planes": passed,
       "state-kv16": passed,
       "score-f16-store": passed,
+      "state-bidirectional": passed,
     });
   });
 });

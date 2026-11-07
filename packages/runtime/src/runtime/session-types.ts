@@ -76,9 +76,23 @@ export type RunOutputs = Readonly<Record<string, Tensor>>;
  * which advances only on the final success of a run or a batch (ADR 0066 decision 6: no double
  * bookkeeping).
  */
+/** The half-open row range of {@link GenerationRun.bidirectionalRows}. */
+export type BidirectionalRows = { readonly start: number; readonly end: number };
+
 export type GenerationRun = {
   readonly context: GenerationContext;
   readonly queryLength: number;
+  /**
+   * Rows of this run that see each other in both directions on the sliding layers (an image's soft
+   * tokens on Gemma 4 12B — ADR 0144 decision 3). Full layers and every other row stay causal, and a
+   * run without it runs the kernels it always ran.
+   *
+   * MUST: one block, `0 ≤ start < end ≤ queryLength`, no longer than the smallest sliding window, on
+   * an immediate run of a context that owns sliding slots. Anything else fails loudly at issue. The
+   * block is the run's and not a graph input for the same reason the logical lengths are the run's:
+   * the kernels compare columns, and no tensor carries them.
+   */
+  readonly bidirectionalRows?: BidirectionalRows;
   /**
    * When the logical length advances (default `"immediate"` = the original behaviour — it
    * advances by `queryLength` rows when the run returns without an exception). With enqueue it

@@ -11,6 +11,7 @@ import {
   checkRmsSubgroup,
   checkStateAttentionRewrites,
   checkScoreF16Store,
+  checkStateBidirectional,
   checkStateKv16,
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
@@ -19,6 +20,7 @@ import {
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
   SCORE_F16_CASES,
+  STATE_BIDIRECTIONAL_CASES,
   STATE_KV16_CASES,
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
@@ -111,6 +113,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: [await checkScoreF16Store(gpu, options)],
       expectedCases: SCORE_F16_CASES,
+    }),
+  },
+  {
+    id: "state-bidirectional",
+    title: "Bidirectional block (Gemma 4 12B images)",
+    summary:
+      "The sliding ①ₜ with GenerationRun.bidirectionalRows against the same kernel keeping every score and a host mirror of the predicate, u32 identity (ADR 0144).",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkStateBidirectional(gpu, options)],
+      expectedCases: STATE_BIDIRECTIONAL_CASES,
     }),
   },
 ];

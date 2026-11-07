@@ -162,8 +162,18 @@ const slotBuffer = (
 /**
  * Logical-length uniform (8 bytes of `{past, query}` — the same shape `GenerationContext` holds).
  */
-const lengthsBuffer = (device: GPUDevice, past: number, query: number): GPUBuffer =>
-  uniformBuffer(device, new Uint32Array([past, query]));
+const lengthsBuffer = (
+  device: GPUDevice,
+  past: number,
+  query: number,
+  block?: { readonly start: number; readonly end: number },
+): GPUBuffer =>
+  uniformBuffer(
+    device,
+    new Uint32Array(
+      block === undefined ? [past, query] : [past, query, past + block.start, past + block.end],
+    ),
+  );
 
 const readRaw = async (
   device: GPUDevice,
@@ -454,9 +464,11 @@ export const runStateQk = async (
     readonly mutate?: StateMutation;
     readonly cache?: StatePipelineCache;
     readonly storage?: StateStorage;
+    /** The tiled form's predicate of `GenerationRun.bidirectionalRows` (ADR 0144 decision 3). */
+    readonly bidirectionalRows?: { readonly start: number; readonly end: number };
   } = {},
 ): Promise<readonly Uint32Array<ArrayBuffer>[]> => {
-  const { mutate, storage = "f32" } = options;
+  const { mutate, storage = "f32", bidirectionalRows } = options;
   const sliding = stateSliding(spec.window);
   const gqa = spec.heads !== spec.kvHeads;
   const colCap = caseColCap(spec);
@@ -464,11 +476,14 @@ export const runStateQk = async (
   const batchHeads = spec.batch * spec.heads;
   const cache = options.cache ?? new Map<string, GPUComputePipeline>();
   const kvRepeat = spec.heads / spec.kvHeads;
+  if (bidirectionalRows !== undefined && variant !== "tiled") {
+    throw new Error(`bidirectionalRows exists on the tiled form only, not ${variant}`);
+  }
   const source =
     variant === "parallel"
       ? stateQkParallelWgsl(sliding, gqa, storage)
       : variant === "tiled"
-        ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows, storage)
+        ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows, storage, bidirectionalRows !== undefined)
         : variant === "folded"
           ? stateQkFoldedWgsl(kvRepeat, storage)
           : stateQkWgsl(sliding, gqa, storage);
@@ -481,7 +496,7 @@ export const runStateQk = async (
     const q = track(storageBuffer(device, inputs.q));
     const insK = track(storageBuffer(device, inputs.insK));
     const slotK = track(slotBuffer(device, inputs.slotK, storage));
-    const lengths = track(lengthsBuffer(device, spec.past, spec.query));
+    const lengths = track(lengthsBuffer(device, spec.past, spec.query, bidirectionalRows));
     const scores = track(
       storageBuffer(
         device,

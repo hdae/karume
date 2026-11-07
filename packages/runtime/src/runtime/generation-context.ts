@@ -34,7 +34,7 @@ import {
 import { numel, stateWindow } from "../ops.ts";
 import { ExecutionError, type SymbolBindings } from "./plan.ts";
 import type { BakedGroups } from "./recipe.ts";
-import type { GenerationContextSpec } from "./session-types.ts";
+import type { BidirectionalRows, GenerationContextSpec } from "./session-types.ts";
 
 /**
  * Byte size of the logical-length uniform (two words, `pastLength` / `queryLength` — ADR 0066
@@ -44,7 +44,7 @@ import type { GenerationContextSpec } from "./session-types.ts";
  * has the same form as the existing params uniform (`struct Params { rows: u32, dim: u32 }` —
  * codegen/reduce.ts), so these 8 bytes satisfy the minimum binding size.
  */
-export const LENGTHS_BYTES: number = 8;
+export const LENGTHS_BYTES: number = 16;
 
 /**
  * Usage of the logical-length uniform.
@@ -298,7 +298,12 @@ type GenerationContextInternals = {
    * `pastLength` is **the value the caller captured at the head of the run** (checked against the
    * current internal value, or against the reservation of a chained run).
    */
-  writeLengths(pastLength: number, queryLength: number, chained?: ChainedRun): void;
+  writeLengths(
+    pastLength: number,
+    queryLength: number,
+    chained?: ChainedRun,
+    bidirectionalRows?: BidirectionalRows,
+  ): void;
   /**
    * Advances the logical length (**only on a successful run** — decision 6). The captured P is
    * checked as in `writeLengths`.
@@ -633,7 +638,7 @@ export class GenerationContext {
    * write could leave a half-updated pair, and dispatches would run with a mixed uniform: "pastLength
    * new, queryLength from the previous step").
    */
-  readonly #lengthValues = new Uint32Array(2);
+  readonly #lengthValues = new Uint32Array(4);
   #pastLength = 0;
   /**
    * The deferred run waiting for commit (kept until {@link GenerationContext.commit} folds it).
@@ -824,8 +829,12 @@ export class GenerationContext {
       dropBakedGroups: (token: number): void => {
         this.#baked.delete(token);
       },
-      writeLengths: (pastLength: number, queryLength: number, chained?: ChainedRun): void =>
-        this.#writeLengths(pastLength, queryLength, chained),
+      writeLengths: (
+        pastLength: number,
+        queryLength: number,
+        chained?: ChainedRun,
+        bidirectionalRows?: BidirectionalRows,
+      ): void => this.#writeLengths(pastLength, queryLength, chained, bidirectionalRows),
       advance: (pastLength: number, queryLength: number): void =>
         this.#advance(pastLength, queryLength),
       defer: (pastLength: number, queryLength: number, chained?: ChainedRun): void =>
@@ -1496,7 +1505,12 @@ export class GenerationContext {
    * MUST: call it **before every run's encode** (`queue.writeBuffer` enters the queue timeline in
    * issue order, so it does not overtake submitted dispatches — ADR 0004 invariant ④).
    */
-  #writeLengths(pastLength: number, queryLength: number, chained?: ChainedRun): void {
+  #writeLengths(
+    pastLength: number,
+    queryLength: number,
+    chained?: ChainedRun,
+    bidirectionalRows?: BidirectionalRows,
+  ): void {
     this.#assertInternalUsable("writeLengths");
     if (chained === undefined) this.#assertCapturedPast(pastLength, "writeLengths");
     else this.#assertChainedRun(chained, pastLength, queryLength, "writeLengths");
@@ -1511,6 +1525,12 @@ export class GenerationContext {
     // the previous run's dispatches on the queue, never before them.
     this.#lengthValues[0] = pastLength;
     this.#lengthValues[1] = queryLength;
+    // Absolute logical columns, so the kernels compare them with `col` and `limit` directly. A run
+    // without a block writes an empty range. Only the `:bidir` kernels read these two words.
+    this.#lengthValues[2] =
+      bidirectionalRows === undefined ? 0 : pastLength + bidirectionalRows.start;
+    this.#lengthValues[3] =
+      bidirectionalRows === undefined ? 0 : pastLength + bidirectionalRows.end;
     this.#host.gpu.device.queue.writeBuffer(this.#lengths, 0, this.#lengthValues);
   }
 

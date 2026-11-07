@@ -16,6 +16,12 @@ export {
   type WordFailure,
 } from "./src/result.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
+export {
+  checkStateBidirectional,
+  STATE_BIDIRECTIONAL_CASES,
+  stateBidirectionalMutants,
+  type StateBidirectionalMutant,
+} from "./src/state-bidirectional.ts";
 export { checkRmsSubgroup, RMS_SUBGROUP_CASES } from "./src/rms-subgroup.ts";
 export {
   benchIntegerGemv,

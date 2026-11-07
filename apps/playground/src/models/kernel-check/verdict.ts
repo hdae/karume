@@ -30,6 +30,7 @@ export const KERNEL_CHECK_IDS = [
   "gemv-planes",
   "state-kv16",
   "score-f16-store",
+  "state-bidirectional",
 ] as const;
 export type KernelCheckId = (typeof KERNEL_CHECK_IDS)[number];
 
