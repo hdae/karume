@@ -912,6 +912,13 @@ Load is pressed. The conversation is one `gemma.ChatSession`. It carries the KV 
 close with the distribution's EOS. After any other stop it re-renders the history on the next send.
 One turn runs at a time.
 
+A model whose manifest has the `vision` weights (12B of the q4_0 QAT line) loads with `vision: true`,
+and only then the composer shows **Attach images**. The page decodes a file itself
+(`createImageBitmap`, `OffscreenCanvas`, the alpha dropped) to the RGB8 the session takes. An
+attachment can be removed before sending, and a user turn shows its images as thumbnails. The session
+embeds each image once and keeps its rows for a re-render (ADR 0144). The record states each image's
+size and soft tokens (`turns[].images`), never its pixels.
+
 | Control | What it does |
 | --- | --- |
 | Model | Every model of the three manifests (`Gemma 4 — e2b` / `e4b`, `Gemma 4 QAT (q4_0) — e2b` / `e4b` / `12b`, `Gemma 4 mobile QAT — e2b` / `e4b`), each manifest's `defaultModel` marked "(default)". Applies on the next Load. |
@@ -972,10 +979,12 @@ How the figures are measured (from `performance.now()` in the page):
 | `model`, `preset` | the model name; `{ quant, label, isDefault }` |
 | `speculative` | whether the MTP drafter was built |
 | `fullStateStorage` | `"f16"` when the page's f16 KV switch was on, absent otherwise |
+| `vision` | `true` when the image embedder was built, absent otherwise |
 | `loadSeconds` | from Load to the pipeline being ready |
 | `diagnosticsCollected` | whether the pipeline was loaded with `onRunDiagnostics`. When true, greedy turns ran without the on-GPU greedy selection, so their decode rates are not those of an app without diagnostics. |
 | `chat` | `system` (absent = none), `capacity`, `overflow` (`drop-oldest` / `refuse`) |
 | `turns[].index`, `userText`, `replyText` | the turn's number (failed and not-kept turns included), the message, the streamed reply |
+| `turns[].images` | on a message with images: `width`, `height` and `softTokens` of each, in the order sent |
 | `turns[].request` | `maxNewTokens` (absent on a turn without a limit) and the `sampler` exactly as passed |
 | `turns[].outcome` | `{ kind: "stopped", stop: { reason, tokens, token?, stopString?, speculation? } }` or `{ kind: "failed", error }` |
 | `turns[].prefill` | `promptTokens`, `carriedPositions` (positions the carried KV already held; 0 = rendered from the start), `chunks` |

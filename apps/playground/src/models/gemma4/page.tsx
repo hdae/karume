@@ -13,8 +13,11 @@ import {
   type ChatSessionStream,
   type ChatStop,
   type ChatTemplateOptions,
+  type ChatContentPart,
+  chatImagePrompt,
   type ChatTurnOptions,
   chatPrompt,
+  type Rgb8Image,
 } from "@karume/models/gemma";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { SendIcon, SquareIcon } from "lucide-react";
@@ -63,7 +66,8 @@ import {
   type ToolResultRecord,
   type TurnRecord,
 } from "./chat-record";
-import { ChatTranscript } from "./chat-transcript";
+import { ChatTranscript, ImageThumbnail } from "./chat-transcript";
+import { decodeImageFile } from "./image-input";
 import { createLiveReplyStore, frameScheduler } from "./live-reply";
 import { type GenerateObservation, type ObservedHost, observeHost } from "./observed-host";
 import {
@@ -84,6 +88,7 @@ import {
   gemmaModelChoices,
   chatSpeculative,
   hasDrafter,
+  hasVision,
   INITIAL_CHAT_FORM,
   MOUNT_LABELS,
   type ModelKey,
@@ -357,6 +362,13 @@ export const Gemma4Page = () => {
   const [toolNotice, setToolNotice] = useState<string | undefined>(undefined);
   /** The message of the running turn, shown until the turn settles. */
   const [pendingText, setPendingText] = useState<string | undefined>(undefined);
+  /** The images of the message being written; each attachment has an id for its Remove button. */
+  const [attachments, setAttachments] = useState<
+    readonly { readonly id: number; readonly image: Rgb8Image }[]
+  >([]);
+  const [attachError, setAttachError] = useState<unknown>(undefined);
+  const nextAttachmentId = useRef(0);
+  const [pendingImages, setPendingImages] = useState<readonly Rgb8Image[]>([]);
   const [sessionReleaseError, setSessionReleaseError] = useState<unknown>(undefined);
   const [fitError, setFitError] = useState<unknown>(undefined);
   const [live] = useState(() => createLiveReplyStore(frameScheduler));
@@ -391,6 +403,8 @@ export const Gemma4Page = () => {
   useEffect(() => {
     setEntries([]);
     setTurnRecords([]);
+    setAttachments([]);
+    setPendingImages([]);
     setDiagnostics({});
     setNotice(undefined);
     setToolNotice(undefined);
@@ -470,6 +484,9 @@ export const Gemma4Page = () => {
       source: sourceChoice.source,
       speculative,
       ...(f16KvChosen ? { fullStateStorage: "f16" as const } : {}),
+      ...(selectedManifest !== undefined && hasVision(selectedManifest, modelKey)
+        ? { vision: true }
+        : {}),
       diagnostics: diagnosticsChosen,
     });
     setChatRequest({ settings: chatParsed.value });
@@ -499,8 +516,26 @@ export const Gemma4Page = () => {
     // turnRecords: every settled step changes the history.
     [readyChat, running, turnRecords],
   );
+  // Read from the loaded pipeline: the control exists exactly when an image can be sent.
+  const visionConfig = readyChat?.pipeline.pipeline.vision;
   const canSend =
-    readyChat !== undefined && turnParsed.ok && input.trim() !== "" && !running && !awaitingTools;
+    readyChat !== undefined &&
+    turnParsed.ok &&
+    (input.trim() !== "" || attachments.length > 0) &&
+    !running &&
+    !awaitingTools;
+  const attachFiles = (files: FileList | null): void => {
+    if (files === null) return;
+    setAttachError(undefined);
+    void Promise.all([...files].map(decodeImageFile)).then(
+      (images) =>
+        setAttachments((current) => [
+          ...current,
+          ...images.map((image) => ({ id: (nextAttachmentId.current += 1), image })),
+        ]),
+      (error: unknown) => setAttachError(error),
+    );
+  };
 
   const send = (): void => {
     if (!canSend || !turnParsed.ok) return;
@@ -508,6 +543,26 @@ export const Gemma4Page = () => {
     const diagnosticsOn = readyChat.pipeline.request.diagnostics;
     const { maxNewTokens, sampler } = turnParsed.value;
     const text = input;
+    const images = attachments.map(({ image }) => image);
+    const message: string | readonly ChatContentPart[] =
+      images.length === 0
+        ? text
+        : [
+            ...images.map((image): ChatContentPart => ({ type: "image", image })),
+            ...(text === "" ? [] : [{ type: "text", text } as const]),
+          ];
+    const imageRecords =
+      images.length === 0 || visionConfig === undefined
+        ? []
+        : chatImagePrompt(
+            readyChat.pipeline.pipeline.tokenizer,
+            [{ role: "user", content: images.map((image) => ({ type: "image", image })) }],
+            visionConfig,
+          ).images.map(({ image, softTokens }) => ({
+            width: image.width,
+            height: image.height,
+            softTokens,
+          }));
     const structured = streamsStructure(settings);
     // Only this message's steps change the transcript, and a new session (which clears it) makes the
     // turn drop its results, so each step settles against the transcript the previous step left
@@ -595,9 +650,11 @@ export const Gemma4Page = () => {
         turnCount.current += 1;
         if (step.kind === "message") {
           setInput("");
+          setAttachments([]);
           setNotice(undefined);
           setToolNotice(undefined);
           setPendingText(text);
+          setPendingImages(images);
         }
         live.reset();
 
@@ -680,6 +737,7 @@ export const Gemma4Page = () => {
         const record: TurnRecord = {
           index: turn + 1,
           userText: text,
+          ...(step.kind === "message" && imageRecords.length > 0 ? { images: imageRecords } : {}),
           ...(step.kind === "tool-results" ? { toolResults: step.results } : {}),
           ...(parsed?.end === "tool-call"
             ? {
@@ -716,12 +774,18 @@ export const Gemma4Page = () => {
         setDiagnostics(diagnosticsAcc.current);
         setEntries(derived.entries);
         setPendingText(undefined);
+        setPendingImages([]);
         live.reset();
         if (!derived.kept) {
           if (step.kind === "message") {
             setNotice(notKeptNotice(turn + 1, stop));
             // The message is not in the history; put it back so it can be sent again.
             setInput((current) => (current === "" ? text : current));
+            setAttachments((current) =>
+              current.length > 0
+                ? current
+                : images.map((image) => ({ id: (nextAttachmentId.current += 1), image })),
+            );
           } else {
             setToolNotice(
               "The continuation after the tool results ended before any text, so the session took the results back.",
@@ -733,7 +797,10 @@ export const Gemma4Page = () => {
       };
 
       try {
-        let step: TurnStep = { kind: "message", issue: (options) => session.send(text, options) };
+        let step: TurnStep = {
+          kind: "message",
+          issue: (options) => session.send(message, options),
+        };
         for (let round = 0; ; round += 1) {
           const outcome = await runStep(step, round);
           if (outcome === undefined) return;
@@ -785,10 +852,13 @@ export const Gemma4Page = () => {
     // A history that ends on an unanswered call has no generation prompt to render (`chatPrompt`
     // refuses it); its size is known again once a new chat starts.
     if (awaitingToolResults(turns)) return undefined;
+    const { tokenizer, vision } = readyChat.pipeline.pipeline;
     const tokens =
       turns.length === 0
         ? 0
-        : chatPrompt(readyChat.pipeline.pipeline.tokenizer, turns, readyChat.template).length;
+        : vision === undefined
+          ? chatPrompt(tokenizer, turns, readyChat.template).length
+          : chatImagePrompt(tokenizer, turns, vision, readyChat.template).prompt.length;
     return { kind: "history", tokens, capacity };
     // turnRecords: a finished turn changes the KV or the history.
   }, [readyChat, running, turnRecords]);
@@ -820,6 +890,7 @@ export const Gemma4Page = () => {
       ...(request.fullStateStorage === undefined
         ? {}
         : { fullStateStorage: request.fullStateStorage }),
+      ...(request.vision === true ? { vision: true as const } : {}),
       loadSeconds: Number(loadSeconds.toFixed(3)),
       chat: readyChat.settings,
       turns: turnRecords,
@@ -1213,6 +1284,7 @@ export const Gemma4Page = () => {
                 turns={turnRecords}
                 running={running}
                 pending={pendingText}
+                pendingImages={pendingImages}
                 live={live}
               />
               {notice === undefined ? null : (
@@ -1245,6 +1317,48 @@ export const Gemma4Page = () => {
                   </Button>
                 ))}
               </div>
+              {visionConfig === undefined ? null : (
+                <div className="flex flex-col gap-2">
+                  <Field label="Attach images" id="gemma4-image">
+                    <Input
+                      id="gemma4-image"
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={(event) => {
+                        attachFiles(event.target.files);
+                        // Cleared so that picking the same file again fires `change`.
+                        event.target.value = "";
+                      }}
+                      disabled={running}
+                    />
+                  </Field>
+                  {attachError === undefined ? null : (
+                    <ErrorAlert title="The image could not be decoded" error={attachError} />
+                  )}
+                  {attachments.length === 0 ? null : (
+                    <div id="gemma4-attachments" className="flex flex-wrap gap-2">
+                      {attachments.map(({ id, image }) => (
+                        <div key={id} className="flex flex-col items-start gap-1">
+                          <ImageThumbnail image={image} />
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            disabled={running}
+                            onClick={() =>
+                              setAttachments((current) =>
+                                current.filter((attachment) => attachment.id !== id),
+                              )
+                            }
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <InputGroup>
                 <InputGroupTextarea
                   id="gemma4-input"

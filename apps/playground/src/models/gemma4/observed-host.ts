@@ -46,6 +46,15 @@ export const observeHost = (
     get defaultSampler() {
       return inner.defaultSampler;
     },
+    // MUST: forwarded, or the session behind this wrapper refuses image parts for a pipeline that
+    // can take them.
+    get vision() {
+      return inner.vision;
+    },
+    embedImage: (image) => {
+      if (inner.embedImage === undefined) throw new Error("This host has no image embedder");
+      return inner.embedImage(image);
+    },
     sequence: async (options) => {
       const sequence = await inner.sequence(options);
       const observed: GenerationSequence = {

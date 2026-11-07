@@ -1,4 +1,5 @@
-import { memo, useSyncExternalStore } from "react";
+import type { Rgb8Image } from "@karume/models/gemma";
+import { memo, useEffect, useRef, useSyncExternalStore } from "react";
 
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
@@ -14,8 +15,35 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 
 import type { TurnRecord } from "./chat-record";
+import { thumbnailOf } from "./image-input";
 import type { LiveReplyStore } from "./live-reply";
 import { type TranscriptEntry, turnSummary } from "./turns";
+
+/** The longest side of a thumbnail on the canvas (CSS pixels stay smaller, for a sharp draw). */
+const THUMBNAIL_SIDE = 256;
+
+/** One image as a small canvas: the composer's attachments and a user turn's images. */
+export const ImageThumbnail = ({ image }: { image: Rgb8Image }) => {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const target = canvas.current;
+    const context = target?.getContext("2d");
+    if (target === null || context === null || context === undefined) return undefined;
+    const { data, width, height } = thumbnailOf(image, THUMBNAIL_SIDE);
+    target.width = width;
+    target.height = height;
+    context.putImageData(new ImageData(data, width, height), 0, 0);
+    return undefined;
+  }, [image]);
+  return (
+    <canvas
+      ref={canvas}
+      role="img"
+      aria-label={`Image, ${image.width}×${image.height}`}
+      className="max-h-32 max-w-48 rounded-md border"
+    />
+  );
+};
 
 /**
  * The entries that carry their turn's footer: the last assistant entry of each turn (a turn that
@@ -47,15 +75,23 @@ const EntryBubbles = ({ entry }: { entry: TranscriptEntry }) => {
     );
   }
   const calls = entry.toolCalls ?? [];
+  const images = entry.images ?? [];
   return (
     <>
+      {images.length === 0 ? null : (
+        <div className="flex flex-wrap justify-end gap-2">
+          {images.map((image, index) => (
+            <ImageThumbnail key={index} image={image} />
+          ))}
+        </div>
+      )}
       {entry.thinking === undefined ? null : (
         <details className="px-3 text-xs text-muted-foreground">
           <summary className="cursor-pointer select-none">Thinking</summary>
           <p className="mt-1 whitespace-pre-wrap">{entry.thinking}</p>
         </details>
       )}
-      {entry.text === "" && calls.length > 0 ? null : (
+      {entry.text === "" && (calls.length > 0 || images.length > 0) ? null : (
         <Bubble variant={entry.role === "user" ? "default" : "muted"}>
           <BubbleContent className="whitespace-pre-wrap">
             {entry.text === "" ? (
@@ -132,6 +168,7 @@ const ChatTranscriptView = ({
   turns,
   running,
   pending,
+  pendingImages,
   live,
 }: {
   entries: readonly TranscriptEntry[];
@@ -139,6 +176,8 @@ const ChatTranscriptView = ({
   running: boolean;
   /** The message of the running turn (not in the history until the turn settles). */
   pending: string | undefined;
+  /** The images of that message. */
+  pendingImages: readonly Rgb8Image[];
   /** The reply streamed so far in the running turn. */
   live: LiveReplyStore;
 }) => {
@@ -190,9 +229,18 @@ const ChatTranscriptView = ({
               <MessageScrollerItem messageId="pending" scrollAnchor>
                 <Message align="end">
                   <MessageContent>
-                    <Bubble variant="default">
-                      <BubbleContent className="whitespace-pre-wrap">{pending}</BubbleContent>
-                    </Bubble>
+                    {pendingImages.length === 0 ? null : (
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {pendingImages.map((image, index) => (
+                          <ImageThumbnail key={index} image={image} />
+                        ))}
+                      </div>
+                    )}
+                    {pending === "" ? null : (
+                      <Bubble variant="default">
+                        <BubbleContent className="whitespace-pre-wrap">{pending}</BubbleContent>
+                      </Bubble>
+                    )}
                   </MessageContent>
                 </Message>
               </MessageScrollerItem>

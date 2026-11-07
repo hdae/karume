@@ -127,6 +127,14 @@ export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): bool
   manifest.models[model]?.weights["drafter"] !== undefined;
 
 /**
+ * Whether the model has the image embedder's weights, i.e. whether the page loads with `vision` and
+ * shows the attach control (ADR 0144; every preset then maps them). The regular entry point only.
+ */
+export const hasVision = (manifest: Manifest, { mount, model }: ModelKey): boolean =>
+  entryPointOf(mount) === "gemma.Pipeline" &&
+  manifest.models[model]?.weights["vision"] !== undefined;
+
+/**
  * The `speculative` a chat passes for what was loaded. MUST: `"always"` with a drafter on f16 full
  * slots, because a turn that leaves it out selects the self-tuning gate, which the pipeline refuses
  * there (ADR 0143 decision 8). Everywhere else the session keeps its default.

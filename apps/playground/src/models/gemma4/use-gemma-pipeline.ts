@@ -31,6 +31,8 @@ export type LoadRequest = {
   readonly speculative: boolean;
   /** Store the full-layer KV in f16 (`fullStateStorage` of `fromPretrained`); absent = f32. */
   readonly fullStateStorage?: "f16";
+  /** Build the image embedder (`vision` of `fromPretrained`; the regular entry point only). */
+  readonly vision?: boolean;
   /**
    * Pass `onRunDiagnostics`. It changes the decode path: the pipeline builds its on-GPU greedy
    * selection only without it, so with it a temperature-0 turn reads the whole logits row back.
@@ -98,9 +100,11 @@ export const buildGemmaPipeline = async (input: {
       ...common,
       model: request.model,
       ...(request.speculative ? { speculative: {} } : {}),
+      ...(request.vision === true ? { vision: true } : {}),
     });
   }
   if (request.speculative) throw new Error("The mobile QAT distribution has no MTP drafter");
+  if (request.vision === true) throw new Error("The mobile QAT distribution has no image embedder");
   const { model } = request;
   if (!isQatModel(model)) {
     throw new Error(`gemma4QatMobile.Pipeline accepts the models e2b and e4b, not '${model}'`);

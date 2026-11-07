@@ -92,3 +92,43 @@ describe("observeHost", () => {
     expect(observed.kvUsed()).toBe(2);
   });
 });
+
+describe("the image input", () => {
+  it("is the inner host's, so a session behind the wrapper can take images", async () => {
+    const vision = {
+      softTokenBudget: 280,
+      imageTokenId: 3,
+      beginImageTokenId: 4,
+      endImageTokenId: 5,
+      hiddenSize: 8,
+    };
+    const image = { data: new Uint8Array(3), width: 1, height: 1 };
+    const embedding = { softTokens: 1, rows: new Float32Array(8) };
+    const seen: unknown[] = [];
+    const inner: ChatSessionHost = {
+      tokenizer: undefined as never,
+      program: undefined as never,
+      defaultSampler: undefined,
+      sequence: () => Promise.reject(new Error("unused")),
+      vision,
+      embedImage: (received) => {
+        seen.push(received);
+        return Promise.resolve(embedding);
+      },
+    };
+    const { host } = observeHost(inner, () => undefined);
+    expect(host.vision).toBe(vision);
+    expect(await host.embedImage?.(image)).toBe(embedding);
+    expect(seen).toEqual([image]);
+  });
+
+  it("a host without one reads as without one", () => {
+    const inner: ChatSessionHost = {
+      tokenizer: undefined as never,
+      program: undefined as never,
+      defaultSampler: undefined,
+      sequence: () => Promise.reject(new Error("unused")),
+    };
+    expect(observeHost(inner, () => undefined).host.vision).toBeUndefined();
+  });
+});

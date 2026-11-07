@@ -8,7 +8,7 @@
  * (shown dimmed).
  */
 
-import type { ChatJsonObject, ChatMessage, ChatStop } from "@karume/models/gemma";
+import type { ChatJsonObject, ChatMessage, ChatStop, Rgb8Image } from "@karume/models/gemma";
 
 /** One tool call of an assistant entry: the function and its arguments as JSON text. */
 export type TranscriptToolCall = {
@@ -21,6 +21,8 @@ export type TranscriptEntry = {
   readonly id: number;
   readonly role: ChatMessage["role"];
   readonly text: string;
+  /** A user entry's images, in the order sent (the history's own objects). */
+  readonly images?: readonly Rgb8Image[];
   /** An assistant entry's thought (`reasoning` of the history message). */
   readonly thinking?: string;
   /** The calls of a tool-calling assistant entry. */
@@ -68,11 +70,17 @@ export const awaitingToolResults = (turns: readonly ChatMessage[]): boolean => {
 
 const argumentsText = (args: ChatJsonObject | null): string => JSON.stringify(args ?? {});
 
+/** The text of a non-assistant message: its content, or its text parts in order. */
+const textOf = (message: Exclude<ChatMessage, { readonly role: "assistant" }>): string =>
+  typeof message.content === "string"
+    ? message.content
+    : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+
 /** What an entry shows of a history message (the history is the source of truth for all of it). */
 const viewOf = (
   message: ChatMessage,
   history: readonly ChatMessage[],
-): Pick<TranscriptEntry, "role" | "text" | "thinking" | "toolCalls" | "toolName"> => {
+): Pick<TranscriptEntry, "role" | "text" | "images" | "thinking" | "toolCalls" | "toolName"> => {
   switch (message.role) {
     case "assistant": {
       const thinking = message.reasoning ?? message.reasoning_content ?? "";
@@ -106,8 +114,17 @@ const viewOf = (
         ...(toolName === undefined || toolName === "" ? {} : { toolName }),
       };
     }
-    default:
-      return { role: message.role, text: message.content };
+    default: {
+      const images =
+        typeof message.content === "string"
+          ? []
+          : message.content.flatMap((part) => (part.type === "image" ? [part.image] : []));
+      return {
+        role: message.role,
+        text: textOf(message),
+        ...(images.length === 0 ? {} : { images }),
+      };
+    }
   }
 };
 
@@ -126,7 +143,10 @@ type Candidate = {
 const lineUp = (candidate: Candidate | undefined, message: ChatMessage): candidate is Candidate => {
   if (candidate === undefined) return false;
   if (candidate.role === "reply") return message.role === "assistant" || message.role === "tool";
-  return candidate.role === message.role && candidate.text === message.content;
+  return (
+    candidate.role === message.role &&
+    candidate.text === (message.role === "assistant" ? message.content : textOf(message))
+  );
 };
 
 /** The turn's own candidates, for `added` new history entries. */

@@ -82,6 +82,13 @@ export type ToolCallRecord = {
   readonly arguments: ChatJsonObject;
 };
 
+/** One image a turn sent. */
+export type ImageRecord = {
+  readonly width: number;
+  readonly height: number;
+  readonly softTokens: number;
+};
+
 /**
  * One generation of the session: a user message, or — in a chat with tools — a continuation after
  * the results of the calls the previous one ended on (one row per `send` / `sendToolResults`, so the
@@ -92,6 +99,11 @@ export type TurnRecord = {
   readonly index: number;
   /** The user's message (a continuation repeats the message whose model turn it continues). */
   readonly userText: string;
+  /**
+   * Present only on a message with images: each one's size and soft tokens, in the order sent. The
+   * pixels are not recorded: a record stays small and shareable.
+   */
+  readonly images?: readonly ImageRecord[];
   /** Present only on a continuation: the tool results it sent, in order. */
   readonly toolResults?: readonly ToolResultRecord[];
   /** Present only on a turn that ended on tool calls: the calls, with their session-assigned ids. */
@@ -151,6 +163,8 @@ export type GemmaRecord = RecordEnvironment & {
   readonly speculative: boolean;
   /** Present only when the full-layer KV was stored in f16 (`fullStateStorage`). */
   readonly fullStateStorage?: "f16";
+  /** Present only when the image embedder was built (`vision` of `fromPretrained`). */
+  readonly vision?: true;
   readonly loadSeconds: number;
   /**
    * Whether the pipeline was loaded with `onRunDiagnostics`. With it the pipeline skips its on-GPU
@@ -174,6 +188,7 @@ export const buildGemmaRecord = (input: {
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   readonly speculative: boolean;
   readonly fullStateStorage?: "f16";
+  readonly vision?: true;
   readonly loadSeconds: number;
   readonly chat: ChatSettings;
   readonly turns: readonly TurnRecord[];
@@ -194,6 +209,7 @@ export const buildGemmaRecord = (input: {
   preset: input.preset,
   speculative: input.speculative,
   ...(input.fullStateStorage === undefined ? {} : { fullStateStorage: input.fullStateStorage }),
+  ...(input.vision === undefined ? {} : { vision: input.vision }),
   loadSeconds: input.loadSeconds,
   diagnosticsCollected: input.diagnostics !== undefined,
   chat: input.chat,
