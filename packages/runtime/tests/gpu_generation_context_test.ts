@@ -65,9 +65,9 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
 
 /**
- * Bytes of the logical-length uniform (2 words, pastLength / queryLength — ADR 0066 addendum 4).
+ * Bytes of the logical-length uniform (4 words: pastLength, queryLength and the two of the bidirectional block — ADR 0144 decision 3).
  */
-const LENGTHS_BYTES = 8;
+const LENGTHS_BYTES = 16;
 
 /** A graph with 2 numeric-capacity state slots (k / v = [1,2,C,4]). y = x·w. */
 const STATE_CAPACITY = 16;
@@ -999,7 +999,8 @@ test.skipIf(!GPU_AVAILABLE)(
         encoder.copyBufferToBuffer(internals(context).lengths, 0, staging, 0, LENGTHS_BYTES);
         gpu.device.queue.submit([encoder.finish()]);
         await staging.mapAsync(GPUMapMode.READ);
-        const words = Array.from(new Uint32Array(staging.getMappedRange().slice(0)));
+        // The first two words are the lengths; the block's words have their own test.
+        const words = Array.from(new Uint32Array(staging.getMappedRange().slice(0, 8)));
         staging.unmap();
         return words;
       } finally {

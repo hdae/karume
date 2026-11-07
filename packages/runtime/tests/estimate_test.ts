@@ -623,8 +623,8 @@ test("state is the slot total with symbolic capacities resolved + the logical-le
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
-  // k 1×2×8×4=64 elements + v 1×2×6×4=48 elements → (64+48)×4 = 448, logical-length uniform 8
-  assertEquals(report.resident.stateBytes, 456);
+  // k 1×2×8×4=64 elements + v 1×2×6×4=48 elements → (64+48)×4 = 448, logical-length uniform 16
+  assertEquals(report.resident.stateBytes, 464);
 });
 
 test("the symbolic capacity of state moves only with generation.bindings", () => {
@@ -634,9 +634,9 @@ test("the symbolic capacity of state moves only with generation.bindings", () =>
       bindings: { T: 2 },
       generation: { chunkLength: 4, bindings: { C: capacity } },
     }).resident.stateBytes;
-  // Only C moves (v's 48 elements + uniform 8 are fixed)
-  assertEquals(at(16), (1 * 2 * 16 * 4 + 48) * 4 + 8);
-  assertEquals(at(1), (1 * 2 * 1 * 4 + 48) * 4 + 8);
+  // Only C moves (v's 48 elements + uniform 16 are fixed)
+  assertEquals(at(16), (1 * 2 * 16 * 4 + 48) * 4 + 16);
+  assertEquals(at(1), (1 * 2 * 1 * 4 + 48) * 4 + 16);
 });
 
 test("state is not counted without generation", () => {
@@ -691,11 +691,11 @@ test("with generation, the two scenarios prefill / decode are derived automatica
     { name: "prefill", ioBytes: 256, workspaceBytes: 256 },
     { name: "decode", ioBytes: 64, workspaceBytes: 64 },
   ]);
-  // k 1×2×8×4=64 elements ×4 = 256 + logical-length uniform 8
-  assertEquals(report.resident.stateBytes, 264);
+  // k 1×2×8×4=64 elements ×4 = 256 + logical-length uniform 16
+  assertEquals(report.resident.stateBytes, 272);
   assertEquals(report.resident.weights.totalBytes, 0);
-  // Resident 264 + max(512, 128) = 776. Adding them up would give 904 (one backing at a time).
-  assertEquals(report.peakAccountedBytes, 776);
+  // Resident 272 + max(512, 128) = 784. Adding them up would give 912 (one backing at a time).
+  assertEquals(report.peakAccountedBytes, 784);
 });
 
 test("in a graph whose chunk rows are a numeric dimension, prefill and decode give the same numbers", () => {
@@ -733,7 +733,7 @@ test("a form whose fixed numeric chunk rows are not a row count the context allo
     bindings: { T: 2 },
     generation: { chunkLength: 8, chunkBuckets: [4], bindings: { C: 8 } },
   });
-  assertEquals(report.resident.stateBytes, 456);
+  assertEquals(report.resident.stateBytes, 464);
 });
 
 test("an estimate without generation has a single scenario (io / intermediates derived as before)", () => {
@@ -1855,8 +1855,8 @@ test("the S / row statistics of the readonly variant (a borrower's cross-attenti
     maxStorageBufferBindingSize: WIDE_LIMIT,
   });
   const { prefill, decode } = bothScenarios(report);
-  // A borrower has no slots of its own — state is only lengths (8 bytes).
-  assertEquals(report.resident.stateBytes, 8);
+  // A borrower has no slots of its own — state is only lengths (16 bytes).
+  assertEquals(report.resident.stateBytes, 16);
   // io is q 128 + o 128 (no k / v inputs). Intermediates are o 128 / S = 4×1×16×4 = 256 / row
   // statistics = 32.
   assertEquals(decode.ioBytes, 256);
@@ -1890,7 +1890,7 @@ test("the column capacity of the sliding variant is W−1+M (raising capacity do
   // The state slots stay proportional to C (only S is capped by the window)
   assertEquals(
     stateAttentionReport({ capacity: 32, chunkLength: 4, window: 6 }).resident.stateBytes,
-    1 * 2 * 32 * 8 * 4 * 2 + 8,
+    1 * 2 * 32 * 8 * 4 * 2 + 16,
   );
 });
 
@@ -2061,8 +2061,8 @@ describe("the peak of an estimate given chunkBuckets", () => {
       // Budget 0 = the peak is the largest scenario itself (a form not hidden by the budget term).
       planBackingBudgetBytes: 0,
     });
-  // k / v slots [1,1,C,1], 4,194,304 each + logical-length uniform 8.
-  const STATE_BYTES = 8_388_616;
+  // k / v slots [1,1,C,1], 4,194,304 each + logical-length uniform 16.
+  const STATE_BYTES = 8_388_624;
 
   describe("when the bucket shape fits in one row block and the prefill shape splits into 2", () => {
     it("the io + intermediates of the bucket shape (M = 32) stand at the peak", () => {

@@ -16,7 +16,7 @@ import {
 import { bothScenarios, openGraph } from "./helpers/estimate-graphs.ts";
 import { fullStateGraph } from "./helpers/full-state-graph.ts";
 
-const LENGTHS = 8;
+const LENGTHS = 16;
 const CAPACITY = 64;
 /** `[1, 2, 64, 8]` in f32. Written out so the expected values do not come from the code under test. */
 const SLOT_F32 = 4096;

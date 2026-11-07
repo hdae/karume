@@ -481,7 +481,7 @@ test("the binding-limit boundary is the same for the estimate and the real const
   const graph = pairedStateGraph();
   // Exactly the limit (32 bytes) passes both — the real construction proceeds to allocation and
   // the estimate returns a number.
-  assertEquals(stateEstimateAt(graph, 32, 1024), 32 + 8, "slot 32 + logical-length uniform 8");
+  assertEquals(stateEstimateAt(graph, 32, 1024), 32 + 16, "slot 32 + logical-length uniform 16");
   assertEquals(
     await createRejectionAt(graph, 32, 1024),
     undefined,
@@ -500,7 +500,7 @@ test("the binding-limit boundary is the same for the estimate and the real const
 
 test("the buffer-limit boundary is also the same for the estimate and the real construction (only one side is undercut, within the binding limit)", async () => {
   const graph = pairedStateGraph();
-  assertEquals(stateEstimateAt(graph, 1024, 32), 32 + 8);
+  assertEquals(stateEstimateAt(graph, 1024, 32), 32 + 16);
   assertEquals(await createRejectionAt(graph, 1024, 32), undefined);
   const rejection = await createRejectionAt(graph, 1024, 31);
   const estimateError = assertThrows(() => stateEstimateAt(graph, 1024, 31), ExecutionError);
@@ -520,7 +520,7 @@ test("an estimate given no limits does not invent default values (callers withou
       bindings: { T: 1 },
       generation: { chunkLength: 1 },
     }).resident.stateBytes,
-    32 + 8,
+    32 + 16,
   );
   assertThrows(
     () =>
