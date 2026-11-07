@@ -4,19 +4,22 @@
  * `SessionOptions.fullStateStorage`.
  *
  * The form is the f16 storage of S ({@link "./score-storage.ts"}) on a longer-lived buffer: the slot
- * is bound as **`array<u32>`** and moves 2 elements at a time with `pack2x16float` /
- * `unpack2x16float` (core WGSL, no optional feature, so it composes with every compute form). The
- * graph keeps declaring its states as f32: this is storage, not the semantic type.
+ * is bound as **`array<u32>`** holding 2 elements per word (core WGSL, no optional feature, so it
+ * composes with every compute form). The graph keeps declaring its states as f32: this is storage,
+ * not the semantic type.
  *
  * ## Rounding happens once, at the append
  *
- * `pack2x16float` in the f16 `state_append` is the only rounding point, and `unpack2x16float` is
- * exact. So the contract is
+ * {@link stateSlotPackWgsl} in the f16 `state_append` is the only rounding point, and
+ * `unpack2x16float` is exact. So the contract is
  *
  *     output(f16) ≡ output(f32 kernel over a slot rounded to f16 on the host)     … not one bit differs
  *
  * and the current step's rows, read from `ins`, stay f32: a token sees its own run in f32 and earlier
  * runs in f16.
+ *
+ * MUST NOT round with `pack2x16float`: WGSL leaves its rounding open, and D3D12 rounds toward zero, so
+ * the slots of the two backends would differ by up to one f16 ulp.
  *
  * ## Only full slots
  *
@@ -57,7 +60,7 @@ export const stateStorageKeyPart = (storage: StateStorage): string =>
 
 /** Note appended to the leading WGSL comment (empty for f32 — keeps the existing bytes). */
 export const stateStorageNote = (storage: StateStorage): string =>
-  storage === "f16" ? ", KV in f16 storage (pack2x16float)" : "";
+  storage === "f16" ? ", KV in f16 storage (unpack2x16float)" : "";
 
 /** WGSL element type of a slot binding (the flat word array for f16). */
 export const stateSlotElementType = (storage: StateStorage): string =>
@@ -81,6 +84,43 @@ fn ${name}_at(i: u32) -> f32 {
   return select(pair.x, pair.y, (i & 1u) == 1u);
 }`
     : "";
+
+/**
+ * The rounding of the f16 `state_append`: f32 bits to f16 bits, to nearest with ties to even, the
+ * same as `Math.f16round`. Integer operations only, on bits the kernel reads as `u32`, so no backend's
+ * float handling (flushed subnormals, a rounding mode) reaches the slot.
+ *
+ * A carry out of the mantissa is the right next value, so rounding up from the largest finite value
+ * gives infinity without a case of its own.
+ */
+export const stateSlotPackWgsl =
+  (): string => `// x >> shift, to nearest with ties to even (shift >= 1)
+fn round_shift(x: u32, shift: u32) -> u32 {
+  let kept = x >> shift;
+  let rest = x & ((1u << shift) - 1u);
+  let half = 1u << (shift - 1u);
+  return kept + u32(rest > half || (rest == half && (kept & 1u) == 1u));
+}
+
+// **The only rounding point** of the slot: f32 bits to f16 bits
+fn f16_bits(f: u32) -> u32 {
+  let sign = (f >> 16u) & 0x8000u;
+  let magnitude = f & 0x7fffffffu;
+  if (magnitude > 0x7f800000u) {
+    return sign | 0x7e00u; // NaN stays a quiet NaN
+  }
+  if (magnitude >= 0x47800000u) {
+    return sign | 0x7c00u; // from 2^16 up, infinity
+  }
+  if (magnitude >= 0x38800000u) {
+    return sign | round_shift(magnitude - 0x38000000u, 13u); // normal: the exponent rebased from 127 to 15
+  }
+  if (magnitude < 0x33000000u) {
+    return sign; // below 2^-25 (f32 subnormals included) rounds to zero
+  }
+  // Subnormal in f16: the f32 significand in units of 2^-24
+  return sign | round_shift((magnitude & 0x7fffffu) | 0x800000u, 126u - (magnitude >> 23u));
+}`;
 
 /** Read expression of one slot element (flat element index). */
 export const stateSlotRead = (name: string, index: string, storage: StateStorage): string =>

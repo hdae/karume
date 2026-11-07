@@ -1,7 +1,7 @@
 # 0143: f16 storage of the full state slots (`fullStateStorage`)
 
 - Status: proposed (2026-11-07 — implemented and measured on the development machine's RTX 3080 Ti under Node + Dawn; opt-in,
-  default f32; Chrome has not been run)
+  default f32; in Chrome the integer rounding of decision 3 has not been run yet)
 - Date: 2026-11-07
 - Related: ADR [0066](0066-generation-context-state-slots.md) (the generation context and its state slots) /
   [0110](0110-practical-tier-numerics-contract.md) (decision 2 the contract classes, decision 6 in-device determinism) /
@@ -25,12 +25,14 @@ and how a slot is laid out in a GPU buffer is the runtime's choice.
    on Gemma 4's `PipelineOptions`. It is not a quant setting and no manifest stores it, so no re-export and no change to a
    distribution. Only this explicit value turns it on (ADR 0058). No preset declares it.
 
-2. **The form.** A slot in f16 is bound as `array<u32>` and moves two elements at a time with `pack2x16float` /
-   `unpack2x16float`. These are core WGSL, so it needs no `shader-f16` and composes with every compute form. The kernels' keys
+2. **The form.** A slot in f16 is bound as `array<u32>`, two elements per word, and read with `unpack2x16float`. This is core
+   WGSL, so it needs no `shader-f16` and composes with every compute form. The kernels' keys
    gain `:kv16` and their WGSL gains a read function. MUST: for f32 the key part and the function are the empty string, and each
    read expression is what it was, so existing keys and bytes do not move (pinned by the WGSL snapshots).
 
-3. **One rounding point, class C.** `pack2x16float` in the f16 `state_append` is the only rounding, and unpacking is exact. So
+3. **One rounding point, class C, in integers.** The f16 `state_append` is the only rounding, and unpacking is exact. It rounds to
+   nearest with ties to even in integer operations on the f32 bits, and MUST NOT use `pack2x16float`: WGSL leaves that function's
+   rounding open, and it rounds toward zero on D3D12 (see below), so the slot would differ between backends. So
    the contract is class C of ADR 0110: atol = 0 against the f32 kernel over a slot rounded to f16 on the host. The current step's
    rows, read from `ins`, stay f32, so a token sees its own run in f32 and earlier runs in f16. The first run therefore matches
    f32 word for word, and prefill chunking moves the numbers deterministically. S, its statistics and the outputs stay f32.
@@ -54,14 +56,17 @@ and how a slot is laid out in a GPU buffer is the runtime's choice.
    clock only between bit-identical paths. A turn MUST say `speculative: "always"` or `false`, which is refused at turn start
    otherwise, and `speculative.gate` is refused before anything is fetched.
 
-9. **Not the default yet.** It changes numbers, and Chrome has not been run. Whether a preset should declare it is a later ruling
+9. **Not the default yet.** It changes numbers, and its speed and numbers in Chrome are not measured. Whether a preset should declare it is a later ruling
    that needs at least the Chrome result.
 
-### What an out-of-range value does
+### Why not `pack2x16float`
 
-`pack2x16float` on a value outside f16's finite range gives an indeterminate word (WGSL), so the other half of that word goes with
-it. This is not checked, like other non-finite values (docs/limitations.md). The largest |k| and |v| measured are 1.41 and 22.1,
-against a limit of 65,504.
+The first implementation used it. Its check passed on Dawn on Vulkan and failed in Chrome on D3D12 on the RTX 5070 Ti (2026-11-07):
+the readers matched and all six append cases mismatched, in 1,393 words. Assuming rounding toward zero predicts the failing word
+count of every case (2 / 5 / 11 / 196 / 392 / 787) and the first failing word (research §6).
+
+Rounding in integers also defines what WGSL leaves open: a value from 65,520 up is infinity and NaN stays NaN, with no effect on the
+other half of the word, and a subnormal f16 is written like any other. The check runs the append on every rounding boundary of f16.
 
 ## Acceptance
 
@@ -75,12 +80,14 @@ K-100 had no line, so this ADR sets it. Measured values are in research §2–§
 | Kill: decode about 10% slower on `i4-fast` at long context (a judgement, not a derived number) | E2B +6% at P ≈ 32K and none at P ≈ 127K; 12B −13% at P ≈ 32K and −22% at P ≈ 62K |
 
 The KL lines bound the rounding itself, measured in torch; Karume's implementation is held to the host rounding at atol = 0 by
-the GPU tests, and its tokens matched f32 in every measured arm.
+the GPU tests, and its tokens matched f32 in every measured arm. Those arms ran on Dawn on Vulkan.
 
 ## Alternatives
 
 - **`f16` as a declared graph type, with a re-export.** It would put a storage choice into the distribution and need the
   `shader-f16` feature. The packed form needs neither, and a user can turn it on over existing distributions.
+- **`pack2x16float`, accepting each backend's rounding.** It would keep the shader short, but it leaves Node and Chrome with
+  different numbers and a contract that holds on one backend, and rounding toward zero biases every stored value toward zero.
 - **Rounding the current step as well**, so a token reads itself in f16. As far as was read, this is the shape of llama.cpp,
   which writes a step into the cache before attention; its source was not read in full. Karume's order keeps the first run
   word-identical to f32, which makes the check simple.

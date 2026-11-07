@@ -1,4 +1,4 @@
-// karume attention_state_pv (states-form O = P @ V, f32, GQA, KV in f16 storage (pack2x16float))
+// karume attention_state_pv (states-form O = P @ V, f32, GQA, KV in f16 storage (unpack2x16float))
 struct Params {
   rows_block: u32,
   row_offset: u32,

@@ -39,6 +39,7 @@ import {
   assertStateStorageFull,
   type StateStorage,
   stateSlotElementType,
+  stateSlotPackWgsl,
   stateStorageKeyPart,
 } from "./state-storage.ts";
 
@@ -75,12 +76,12 @@ struct Params {
 }
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> x: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(2) var<storage, read_write> slot: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(3) var<uniform> lengths: Lengths;
 
 ${stateSlotRowWgsl(sliding)}
-
+${storage === "f16" ? `\n${stateSlotPackWgsl()}\n` : ""}
 @compute @workgroup_size(${STATE_APPEND_WORKGROUP_SIZE})
 fn main(
   @builtin(global_invocation_id) gid: vec3<u32>,
@@ -103,8 +104,7 @@ ${
     let kv_plane = rest / query;
     let src = (kv_plane * params.chunk_rows + row) * params.depth + w * 2u;
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * words + w;
-    // **This pack2x16float is the only rounding point** of the slot
-    slot[dst] = pack2x16float(vec2<f32>(x[src], x[src + 1u]));
+    slot[dst] = f16_bits(x[src]) | (f16_bits(x[src + 1u]) << 16u);
     i = i + stride;
   }
 }

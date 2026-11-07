@@ -4,10 +4,10 @@
  * host, and `state_append` packs what the host's rounding packs, a word at a time, leaving every other
  * word alone.
  *
- * The identity rests on the backend compiling the two forms alike and on `pack2x16float` rounding to
- * nearest even, neither of which WGSL guarantees, so this is the check to run on each backend. The
- * append's values stay inside the finite normal range of f16: subnormals may flush and an out-of-range
- * value makes its whole word indeterminate (limitations).
+ * The readers rest on the backend compiling the two forms alike and on `unpack2x16float` being exact,
+ * subnormals included, which is why one family of cases holds a slot of tiny values. The append rounds
+ * in integers, and one case runs it on every rounding boundary of f16. WGSL guarantees none of the
+ * backend's part, so this is the check to run on each backend.
  */
 
 import type { GpuContext } from "../../runtime/src/gpu/device.ts";
@@ -61,6 +61,9 @@ const ROWS: readonly (readonly [number, number, number])[] = [
   [32, 20, 32],
 ];
 
+/** Most of a slot's values, rounded, are subnormal in f16. */
+const TINY_SCALE = 2 ** -17;
+
 /** The folded ①' exists for r = 4 and 8 at M ≤ 8. */
 const foldable = (spec: StateCase): boolean => {
   const repeat = spec.heads / spec.kvHeads;
@@ -81,6 +84,7 @@ const pvVariantsOf = (spec: StateCase): readonly StatePvVariant[] => [
 type GridCase = {
   readonly spec: StateCase;
   readonly nonFinite: boolean;
+  readonly tiny: boolean;
   readonly seed: number;
 };
 
@@ -102,9 +106,22 @@ const specOf = (shape: Shape, past: number, rows: readonly [number, number, numb
 };
 
 const grid = (): readonly GridCase[] =>
-  SHAPES.flatMap((shape) => PASTS.flatMap((past) => ROWS.map((rows) => specOf(shape, past, rows))))
-    .flatMap((spec) => [false, true].map((nonFinite) => ({ spec, nonFinite })))
-    .map((entry, index) => ({ ...entry, seed: 700_000 + index }));
+  [
+    ...SHAPES.flatMap((shape) =>
+      PASTS.flatMap((past) => ROWS.map((rows) => specOf(shape, past, rows))),
+    ).flatMap((spec) => [false, true].map((nonFinite) => ({ spec, nonFinite, tiny: false }))),
+    ...ROWS.map((rows) => ({
+      spec: specOf(TWELVE_B_FULL, 17, rows),
+      nonFinite: false,
+      tiny: true,
+    })),
+  ].map((entry, index) => ({ ...entry, seed: 700_000 + index }));
+
+const tinyInputs = (inputs: StateInputs): StateInputs => ({
+  ...inputs,
+  slotK: inputs.slotK.map((value) => value * TINY_SCALE),
+  slotV: inputs.slotV.map((value) => value * TINY_SCALE),
+});
 
 /** The slot rounded on the host (the f32 form's input; the harness packs the same rounding). */
 const rounded = (slot: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
@@ -130,10 +147,11 @@ const checkReaders = async (
   const census = emptyCensus();
   const cases: CheckCase[] = [];
   const all = grid();
-  for (const { spec, nonFinite, seed } of all) {
+  for (const { spec, nonFinite, tiny, seed } of all) {
     throwIfAborted(options);
-    const label = `${spec.name}${nonFinite ? " non-finite" : ""}`;
-    const inputs = inputsOf(spec, seed, nonFinite);
+    const label = `${spec.name}${nonFinite ? " non-finite" : ""}${tiny ? " tiny" : ""}`;
+    const generated = inputsOf(spec, seed, nonFinite);
+    const inputs = tiny ? tinyInputs(generated) : generated;
     const reference = roundedInputs(inputs);
     const criteria = await scopedGpuWork(gpu, label, async () => {
       const found: Criterion[] = [];
@@ -203,7 +221,7 @@ const checkReaders = async (
   };
 };
 
-/** Values around f16's rounding boundaries, inside its finite normal range. */
+/** Values around f16's rounding boundaries, inside its finite normal range (the common cases). */
 const APPEND_VALUES: readonly number[] = [
   1,
   -1,
@@ -233,8 +251,35 @@ const APPEND_LENGTHS: readonly (readonly [number, number, number])[] = [
   [5, 4, 4],
 ];
 
-const appendSpecs = (): readonly StateAppendCase[] =>
-  APPEND_SHAPES.flatMap(({ depth, kvPlanes }) =>
+/** The next f32 above (`step` 1) or below (`step` −1) a positive value. */
+const f32Neighbour = (value: number, step: 1 | -1): number => {
+  const word = new Float32Array([value]);
+  new Uint32Array(word.buffer)[0] += step;
+  return word[0];
+};
+
+/**
+ * Every f16 value and, for each pair of neighbours, the midpoint and the f32 values on either side of
+ * it, in both signs: every rounding decision the append can take, overflow and subnormals included.
+ */
+const ROUNDING_BOUNDARIES: readonly number[] = (() => {
+  const halves = new Uint16Array(2);
+  const values = new Float16Array(halves.buffer);
+  const positive: number[] = [65536, 1e30, Infinity, 1e-40, 2 ** -149, 2 ** -26];
+  for (let bits = 0; bits < 0x7c00; bits += 1) {
+    halves[0] = bits;
+    halves[1] = bits + 1;
+    const above = bits === 0x7bff ? 65536 : values[1];
+    const midpoint = (values[0] + above) / 2;
+    positive.push(values[0], f32Neighbour(midpoint, -1), midpoint, f32Neighbour(midpoint, 1));
+  }
+  return [...positive.flatMap((value) => [value, -value]), NaN];
+})();
+
+const BOUNDARY_ROWS = Math.ceil(ROUNDING_BOUNDARIES.length / (2 * 512));
+
+const appendSpecs = (): readonly StateAppendCase[] => [
+  ...APPEND_SHAPES.flatMap(({ depth, kvPlanes }) =>
     APPEND_LENGTHS.map(([past, query, chunkRows]) => ({
       kvPlanes,
       chunkRows,
@@ -244,11 +289,22 @@ const appendSpecs = (): readonly StateAppendCase[] =>
       past,
       query,
     })),
-  );
+  ),
+  {
+    kvPlanes: 2,
+    chunkRows: BOUNDARY_ROWS,
+    depth: 512,
+    capacity: BOUNDARY_ROWS,
+    window: 0,
+    past: 0,
+    query: BOUNDARY_ROWS,
+  },
+];
 
 const appendInput = (spec: StateAppendCase): Float32Array<ArrayBuffer> => {
   const x = new Float32Array(spec.kvPlanes * spec.chunkRows * spec.depth);
-  for (let i = 0; i < x.length; i += 1) x[i] = APPEND_VALUES[i % APPEND_VALUES.length];
+  const values = spec.chunkRows === BOUNDARY_ROWS ? ROUNDING_BOUNDARIES : APPEND_VALUES;
+  for (let i = 0; i < x.length; i += 1) x[i] = values[i % values.length];
   return x;
 };
 
@@ -308,8 +364,8 @@ const checkAppend = async (
 };
 
 export const STATE_KV16_CASES = {
-  "state-kv16-readers": SHAPES.length * PASTS.length * ROWS.length * 2,
-  "state-kv16-append": APPEND_SHAPES.length * APPEND_LENGTHS.length,
+  "state-kv16-readers": SHAPES.length * PASTS.length * ROWS.length * 2 + ROWS.length,
+  "state-kv16-append": APPEND_SHAPES.length * APPEND_LENGTHS.length + 1,
 };
 
 /** A mutant of the check: the words of its output that differ from the correct form's. */
@@ -353,9 +409,19 @@ const APPEND_MUTANTS: readonly { readonly label: string; readonly mutate: StateM
     mutate: (_kernel, wgsl) =>
       replaced(
         wgsl,
-        "vec2<f32>(x[src], x[src + 1u])",
-        "vec2<f32>(x[src + 1u], x[src])",
+        "f16_bits(x[src]) | (f16_bits(x[src + 1u]) << 16u)",
+        "f16_bits(x[src + 1u]) | (f16_bits(x[src]) << 16u)",
         "append swap",
+      ),
+  },
+  {
+    label: "the append rounds toward zero, as pack2x16float does on D3D12",
+    mutate: (_kernel, wgsl) =>
+      replaced(
+        wgsl,
+        "u32(rest > half || (rest == half && (kept & 1u) == 1u))",
+        "0u",
+        "append toward zero",
       ),
   },
   {

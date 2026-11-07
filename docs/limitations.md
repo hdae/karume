@@ -169,11 +169,10 @@ moment.
 ## Gemma 4's `fullStateStorage: "f16"`: measured on one machine, and no self-tuning gate
 
 The option halves the full-layer KV and changes numbers (ADR [0143](decisions/0143-f16-full-state-storage.md)): earlier runs are
-read rounded to f16. It ran on the RTX 3080 Ti under Dawn, on `i4-fast` of 12B and E2B
-([research](research/2026-11-07-gemma4-f16-kv.md)); Chrome has not been run. On 12B it decoded faster at long context, on E2B about
+read rounded to f16. It was measured on the RTX 3080 Ti under Dawn, on `i4-fast` of 12B and E2B
+([research](research/2026-11-07-gemma4-f16-kv.md)); in Chrome it has been run but not measured. On 12B it decoded faster at long context, on E2B about
 6% slower at P ≈ 32K. A pipeline with a drafter MUST say `speculative: "always"` or `false`, because the self-tuning gate only
-chooses between bit-identical paths and these are not. A value outside f16's finite range makes its word indeterminate and is not
-checked; the largest measured is about 22.
+chooses between bit-identical paths and these are not.
 
 ## Gemma 4 chat: what tools / thinking leave out, and where the KV differs from a re-render
 

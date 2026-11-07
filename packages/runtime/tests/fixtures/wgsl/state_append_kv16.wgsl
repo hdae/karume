@@ -11,12 +11,40 @@ struct Lengths {
   query: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> x: array<u32>;
 @group(0) @binding(2) var<storage, read_write> slot: array<u32>;
 @group(0) @binding(3) var<uniform> lengths: Lengths;
 
 fn slot_row(col: u32) -> u32 {
   return col;
+}
+
+// x >> shift, to nearest with ties to even (shift >= 1)
+fn round_shift(x: u32, shift: u32) -> u32 {
+  let kept = x >> shift;
+  let rest = x & ((1u << shift) - 1u);
+  let half = 1u << (shift - 1u);
+  return kept + u32(rest > half || (rest == half && (kept & 1u) == 1u));
+}
+
+// **The only rounding point** of the slot: f32 bits to f16 bits
+fn f16_bits(f: u32) -> u32 {
+  let sign = (f >> 16u) & 0x8000u;
+  let magnitude = f & 0x7fffffffu;
+  if (magnitude > 0x7f800000u) {
+    return sign | 0x7e00u; // NaN stays a quiet NaN
+  }
+  if (magnitude >= 0x47800000u) {
+    return sign | 0x7c00u; // from 2^16 up, infinity
+  }
+  if (magnitude >= 0x38800000u) {
+    return sign | round_shift(magnitude - 0x38000000u, 13u); // normal: the exponent rebased from 127 to 15
+  }
+  if (magnitude < 0x33000000u) {
+    return sign; // below 2^-25 (f32 subnormals included) rounds to zero
+  }
+  // Subnormal in f16: the f32 significand in units of 2^-24
+  return sign | round_shift((magnitude & 0x7fffffu) | 0x800000u, 126u - (magnitude >> 23u));
 }
 
 @compute @workgroup_size(256)
@@ -39,8 +67,7 @@ fn main(
     let kv_plane = rest / query;
     let src = (kv_plane * params.chunk_rows + row) * params.depth + w * 2u;
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * words + w;
-    // **This pack2x16float is the only rounding point** of the slot
-    slot[dst] = pack2x16float(vec2<f32>(x[src], x[src + 1u]));
+    slot[dst] = f16_bits(x[src]) | (f16_bits(x[src + 1u]) << 16u);
     i = i + stride;
   }
 }
