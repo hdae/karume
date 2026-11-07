@@ -118,9 +118,10 @@ GEMMA4_PLE_MODELS: frozenset[str] = frozenset({"e2b", "e4b"})
 GEMMA4_CHECKPOINT_DTYPE = "bf16"
 
 #: Model → what the upstream checkpoint carries besides the text decoder (never read here, never
-#: shipped). E2B / E4B hold vision and audio encoder towers; 12B is encoder-free and projects image
-#: patches and audio frames into the embedding space through lightweight linear layers (upstream
-#: model card at the pinned revision). Key set = {@link GEMMA4_UPSTREAM} (tests).
+#: shipped, unless the manifest declares its {@link GEMMA4_VISION_ROLE} — {@link
+#: _gemma4_front_end_bullet}). E2B / E4B hold vision and audio encoder towers; 12B is encoder-free
+#: and projects image patches and audio frames into the embedding space through lightweight linear
+#: layers (upstream model card at the pinned revision). Key set = {@link GEMMA4_UPSTREAM} (tests).
 GEMMA4_FRONT_ENDS: Mapping[str, str] = {
     "e2b": "vision and audio towers",
     "e4b": "vision and audio towers",
@@ -131,6 +132,9 @@ GEMMA4_FRONT_ENDS: Mapping[str, str] = {
 #: "the models that carry a drafter" from this manifest key, so the canonical spelling lives here
 #: and `gemma4.distribution` imports it (to keep the distribution → card direction one-way).
 GEMMA4_DRAFTER_ROLE = "drafter"
+#: The role name of the encoder-free vision embedder's weights (12B of the q4_0 QAT line —
+#: `gemma4.export_vision`); like the drafter's, the card reads who carries it from the manifest.
+GEMMA4_VISION_ROLE = "vision"
 #: The main model's weights role (the spelling `gemma4.distribution.GEMMA4_ROLE` imports — the card
 #: reads the storage of the main model from it, {@link _gemma4_storage_lines}).
 GEMMA4_MODEL_ROLE = "model"
@@ -268,12 +272,39 @@ def _gemma4_ple_bullet(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _gemma4_vision_models(manifest: Mapping[str, Any]) -> list[str]:
+    """The models whose manifest entry carries the vision embedder (the manifest says which, the
+    {@link _gemma4_drafter_upstreams} rule)."""
+    return [
+        name for name, model in manifest["models"].items() if GEMMA4_VISION_ROLE in model["weights"]
+    ]
+
+
 def _gemma4_front_end_bullet(manifest: Mapping[str, Any]) -> list[str]:
-    """The overview's text-only bullet (one sentence when every model's checkpoint carries the
-    same kind of multimodal front end — the E2B / E4B text — else one clause per kind)."""
+    """The overview's bullet on images and audio (one sentence when every model's checkpoint
+    carries the same kind of multimodal front end — the E2B / E4B text — else one clause per kind;
+    a model whose entry carries the vision embedder gets its own sentence)."""
+    vision = _gemma4_vision_models(manifest)
     by_kind: dict[str, list[str]] = {}
     for name in manifest["models"]:
-        by_kind.setdefault(GEMMA4_FRONT_ENDS[name], []).append(name)
+        if name not in vision:
+            by_kind.setdefault(GEMMA4_FRONT_ENDS[name], []).append(name)
+    if vision:
+        lines = [
+            f"- **Image input ({_spell_models(vision)})**: the encoder-free vision embedder ships"
+            f" as the `{GEMMA4_VISION_ROLE}` weights, in the",
+            "  checkpoint's bf16 values, and is fetched only when asked for. The audio embedder",
+            "  was not read, so audio is not taken.",
+        ]
+        if by_kind:
+            kinds = "; ".join(
+                f"{kind} for {_spell_models(names)}" for kind, names in by_kind.items()
+            )
+            lines += [
+                f"- **Not multimodal for the others.** Their checkpoints also carry {kinds}; this",
+                "  distribution contains none of them, and they cannot take images or audio.",
+            ]
+        return lines
     if len(by_kind) == 1:
         return [
             "- **Not multimodal here.** The published checkpoint also carries"
@@ -618,8 +649,9 @@ def _qat_q4_0_overview_bullets(manifest: Mapping[str, Any]) -> list[str]:
         *([f"the per-layer embeddings of {_spell_models(carriers)}"] if carriers else []),
     ]
     listed = f"{', '.join(stored[:-1])} and {stored[-1]}"
+    subject = "Every text weight keeps" if _gemma4_vision_models(manifest) else "Every weight keeps"
     lines = [
-        "- **Every weight keeps the checkpoint's own 4-bit grid.**"
+        f"- **{subject} the checkpoint's own 4-bit grid.**"
         f" {listed[0].upper()}{listed[1:]} are stored as the q4_0 codes",
         "  with one step per group of 32 values (packed int4) — not rounded again.",
     ]
@@ -671,6 +703,17 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         if carriers
         else ""
     )
+    vision = _gemma4_vision_models(manifest)
+    embedder = (
+        [
+            f"  The encoder-free vision embedder of {_spell_models(vision)} was extracted as its"
+            " own",
+            "  graph with the checkpoint's bf16 values unchanged; its image rows reach the main",
+            "  graph as inputs. The audio embedder was not read.",
+        ]
+        if vision
+        else []
+    )
     lines += [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  decoder was extracted and re-expressed in the Karume container format; the linear",
@@ -679,6 +722,7 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         f"  rather than rounded again;{ple} the exit was narrowed to the selected rows' logits and",
         "  hidden states; rotary cos/sin arrive as host-generated inputs; the drafters' weights",
         "  keep their own grid the same way.",
+        *embedder,
         "  No retraining and no fine-tuning.",
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
         "  evaluations and safety guidance — is documented on the upstream model card, and this",

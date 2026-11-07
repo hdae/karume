@@ -22,7 +22,8 @@ carries the same Apache 2.0 frontmatter.
 per-layer embeddings, no KV sharing, K = V on the full layers), too large to load whole in F32
 here. It has its own tokenizer series (its own glitch-token fix of 2026-10-30 drops 239 merges) and
 its own chat dialect. It ships only in the q4_0 QAT line (`karume-gemma4-qat`), with its QAT MTP
-drafter (`export_drafter_qat.py`).
+drafter (`export_drafter_qat.py`) and its encoder-free vision embedder (`export_vision.py`, see
+"What `export_vision.py` emits" below).
 
 12B is read from two repositories, each from the hub cache at the commit `sources.py` pins. **The
 weights and their `config.json`** come from Google's quantization-aware-trained checkpoint
@@ -314,9 +315,13 @@ the resulting token sequence to match the goldens.
 
 ## What `export_unified.py` emits
 
-The 12B product graph: E2B / E4B's product contract minus PLE — `input_ids[1,M]`, the four RoPE
-inputs and `last_row[R]` in, `logits[1,R,V]` then `hidden[1,R,H]` out, one k / v slot pair per
-layer (96 slots, no KV sharing). Sliding slots hold 8 KV heads in `window + 8` = 1032 rows; full
+The 12B product graph: E2B / E4B's product contract minus PLE — `input_ids[1,M]`,
+`soft_embeds[1,M,H]` f32, `soft_mask[1,M,1]` bool, the four RoPE inputs and `last_row[R]` in,
+`logits[1,R,V]` then `hidden[1,R,H]` out, one k / v slot pair per layer (96 slots, no KV sharing).
+The embeddings of the rows are `where(soft_mask, soft_embeds, embed_tokens(input_ids))`: an image's
+rows take the embedder's vectors, unscaled, as upstream overwrites them; a text run binds zeros and
+an all-false mask, which is the text forward bit for bit. The attention over an image block is not
+a graph input (the host passes it per run). Sliding slots hold 8 KV heads in `window + 8` = 1032 rows; full
 slots hold 1 KV head of width 512 in the capacity symbol. On the full layers the value is the raw
 `k_proj` output through the scale-free `v_norm` (not rotated) and the key is `k_norm` then RoPE of
 the same projection; the script checks that wiring in the written graph. The storage is packed
@@ -358,6 +363,45 @@ prefill spans two 768-row chunks; the export fails if no golden runs past the wi
     outputs/series/gemma4-12b-product/model.krm                  the container (no PLE assets)
     outputs/series/gemma4-12b-product/greedy.<case>.safetensors  greedy goldens (4 cases)
     outputs/series/gemma4-12b-product/reference.json             provenance (own goldens)
+
+## What `export_vision.py` emits
+
+12B's encoder-free vision embedder as its own graph: `pixels[1,N,6912]` f32, `position_x[1,N]` and
+`position_y[1,N]` i32 in, `embeds[1,N,3840]` out, `N` symbolic (the host strips the padding, so the
+budget is the host's: 280 today, no re-export for another). It is upstream's
+`Gemma4UnifiedVisionEmbedder` with its own modules; only the position lookup is rewritten, as
+`functional.embedding` on the two columns of `pos_embedding`. Pytest holds the wrapper to the
+upstream module bit for bit in F32, and the export does the same on the real weights.
+
+The weights are the QAT checkpoint's `model.vision_embedder.*` and `model.embed_vision.*`, which are
+BF16 and not on the q4_0 grid: the linears and the two position tables are stored as bf16 (the
+regular line's writer path, ADR 0131), the norms' affines and the dense bias as F32 holding the same
+values. The audio embedder's keys are never read.
+
+The goldens, taken before the container on the three neutral corpus images
+(`outputs/test-assets/corpus/wan-i2v/`):
+
+- `vision.<image>.safetensors` (`pixels_shape`, `positions`, `embeds`): upstream's
+  `Gemma4UnifiedImageProcessor` at budget 280 and upstream's module. `reference.json` records the
+  SHA-256 of the processor's pixel bytes, for the TS preprocessing.
+- `greedy.<image>.safetensors` (the decode series' `prompt` / `expected` / `margin`, plus `block`
+  and `first_logits`), for two of the images: `reference_wrapper` (F32 over imported i4) by full
+  re-forward with the masks of upstream's `create_masks_for_vision_model` — full layers causal,
+  sliding layers `window AND (causal OR block)`, where a block is the run of one image's soft tokens,
+  `<|image>` and `<image|>` excluded. The prompt is one image part then "Describe this image in one
+  sentence.", and its ids must equal those of upstream's `Gemma4UnifiedProcessor`. An image with a
+  step at or below the margin floor is dropped for the next, never cut.
+- `reference.json`'s `maskPaths` measures one image's first step against upstream's other mask rule
+  (the block ORed onto the full layers too): largest logit difference, KL and top-1 agreement. It
+  is a measurement; nothing ships that rule.
+
+The reference holds about 16 GiB; the embedder itself takes about a second per image, so
+`--embedder-only --out <dir>` is the cheap run of the real weights, and `--plan` reads no weight.
+
+    outputs/series/gemma4-12b-vision/model.krm                   the container (no assets)
+    outputs/series/gemma4-12b-vision/vision.<image>.safetensors  embedder goldens (3 images)
+    outputs/series/gemma4-12b-vision/greedy.<image>.safetensors  greedy goldens (2 images)
+    outputs/series/gemma4-12b-vision/reference.json              provenance, measurements
 
 ## What `export_drafter.py` emits
 
@@ -588,12 +632,15 @@ uv run python -m gemma4.tokenizer --model e4b
 
 12B (the two snapshots come from `hf download google/gemma-4-12B-it-qat-q4_0-unquantized
 --revision <weights pin of sources.py>` and `hf download google/gemma-4-12B-it --revision
-<tokenizer pin> tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json`;
-`export_unified.py` takes `--model-dir` / `--tokenizer-dir` to point elsewhere):
+<tokenizer pin> tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json
+processor_config.json`; `export_unified.py` and `export_vision.py` take `--model-dir` /
+`--tokenizer-dir` to point elsewhere):
 
 ```sh
 uv run --with 'transformers==5.14.1' python -m gemma4.export_unified --model 12b --plan  # trace only
 uv run --with 'transformers==5.14.1' python -m gemma4.export_unified --model 12b         # series + goldens
+uv run --with 'transformers==5.14.1' python -m gemma4.export_vision --model 12b --plan   # no weight read
+uv run --with 'transformers==5.14.1' python -m gemma4.export_vision --model 12b          # series + goldens
 uv run python -m gemma4.tokenizer --model 12b
 uv run --with 'transformers==5.14.1' python -m gemma4.chat --model 12b
 ```
@@ -621,14 +668,21 @@ uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b 
 
 The regular line (`karume-gemma4`) ships E2B and E4B; it refuses `--model 12b`. 12B ships in the
 q4_0 QAT line (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line"), its one line: its
-entry reads `gemma4-12b-product`, its own `gemma4-12b-tokenizer` and its QAT drafter
-`gemma4-12b-qat-drafter`, declares the line's quants and `pipelineConfig.chatDialect`
-`gemma4-unified`, and its container carries no PLE assets; the assembly checks both hub snapshots
-against their pins, that the containers name the weights' and the drafter's revisions, and that the
-tokenizer asset was compiled from the 12B-it snapshot's `tokenizer.json`. Its `pipelineConfig`
-reads the numbers the model decides from the QAT checkpoint's `config.json` and the sampler and
-suppressed ids from 12B-it's `generation_config.json`. The E2B / E4B entries are unchanged by its
-presence.
+entry reads `gemma4-12b-product`, its own `gemma4-12b-tokenizer`, its QAT drafter
+`gemma4-12b-qat-drafter` and its vision embedder `gemma4-12b-vision`, declares the line's quants and
+`pipelineConfig.chatDialect` `gemma4-unified`, and its container carries no PLE assets; the assembly
+checks both hub snapshots against their pins, that the containers name the weights' and the
+drafter's revisions, and that the tokenizer asset was compiled from the 12B-it snapshot's
+`tokenizer.json`. Its `pipelineConfig` reads the numbers the model decides from the QAT checkpoint's
+`config.json` and the sampler and suppressed ids from 12B-it's `generation_config.json`.
+
+The vision embedder is a third `weights` role of 12B, `vision`, at `12b/vision/model.bf16-*.krm`:
+the one bf16 exception of the line's storage gate (its weights are not on the 4-bit grid), mapped to
+`bf16` by every quant, and like the drafter fetched only when a load asks for it.
+`pipelineConfig.vision` holds `softTokenBudget` (`processor_config.json`), `imageTokenId` /
+`beginImageTokenId` / `endImageTokenId` (`config.json`, held to the tokenizer asset through the
+spellings of `tokenizer_config.json`) and `hiddenSize`. E2B and E4B have neither, and their entries
+are unchanged by 12B's presence.
 
 `--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
 so an E4B-only build should name its own `--out`.

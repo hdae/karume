@@ -35,8 +35,9 @@ on the tokenizer side is
 12B (`--model 12b`) is another upstream class (`gemma4_unified`: no per-layer embeddings, no
 KV sharing, K = V on the full layers) and has its own export script,
 {@link gemma4.export_unified} (the product graph and its goldens, in the meta-trace / row-block
-form of `qwen3_5.export`). Where every model's checkpoint is read from — and 12B's hub-snapshot
-pin — is {@link gemma4.sources} (torch-free, like `rope`).
+form of `qwen3_5.export`) and {@link gemma4.export_vision} (its encoder-free vision embedder and the
+goldens with an image). Where every model's checkpoint is read from — and 12B's hub-snapshot pin —
+is {@link gemma4.sources} (torch-free, like `rope`).
 
 E2B / E4B's q4_0 QAT line (Google's `-qat-q4_0-unquantized` checkpoints, every 2-D text weight on a
 4-bit grid) has its own entry, {@link gemma4.export_product_qat}: the product series' graph with the

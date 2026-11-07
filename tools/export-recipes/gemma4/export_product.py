@@ -133,6 +133,13 @@ DEFAULT_OUT_DIR = one_shot.series_dir(GEMMA4_DEFAULT_MODEL, GEMMA4_PRODUCT_BF16_
 #: referenced by {@link assert_ir_form_product} and the acceptance gate on the TS side.
 PER_LAYER_INPUTS = "per_layer_inputs"
 
+#: Graph input names of an image's rows on a model without per-layer embeddings (12B — the arguments
+#: of `gemma4.export_unified.UnifiedProductWrapper`): the embedder's vectors and which rows take
+#: them. The bool mask has width 1 — the IR's `where` broadcasts right-aligned.
+SOFT_EMBEDS = "soft_embeds"
+SOFT_MASK = "soft_mask"
+WHERE_OP = "where"
+
 #: Symbol name of the row selection (`last_row[R]` / the row axis of the two exits). The number of
 #: rows a speculative-decoding verify run scores at once; ordinary prefill / decode bind R = 1 (the
 #: same one-row exit as before).
@@ -666,6 +673,56 @@ def assert_ple_assets(
 # ---- Form checks -----------------------------------------------------------
 
 
+def assert_soft_merge(graph: IrGraph, config: Any, seq_symbol: str = decode.SEQ_SYMBOL) -> None:
+    """The image rows' merge of a model without per-layer embeddings (12B): the declared inputs,
+    and one `where(soft_mask, soft_embeds, <the scaled embedding of input_ids>)` as their only
+    consumer.
+
+    MUST: checked in the graph — image vectors that pass through `embed_scale`, or a mask left
+    unused, keep every shape and every text-only golden.
+    """
+    expected = {
+        SOFT_EMBEDS: ("f32", [1, seq_symbol, int(config.hidden_size)]),
+        SOFT_MASK: ("bool", [1, seq_symbol, 1]),
+    }
+    for spec in graph.inputs:
+        if spec.name in expected and (spec.dtype, list(spec.shape)) != expected[spec.name]:
+            raise AssertionError(
+                f"'{spec.name}' is {spec.dtype} {list(spec.shape)} — not"
+                f" {expected[spec.name][0]} {expected[spec.name][1]}"
+            )
+    merges = [node for node in graph.nodes if node.op == WHERE_OP]
+    if len(merges) != 1 or merges[0].ins[:2] != [SOFT_MASK, SOFT_EMBEDS]:
+        raise AssertionError(
+            f"`{WHERE_OP}` nodes are {[node.ins for node in merges]} — not one"
+            f" `{WHERE_OP}({SOFT_MASK}, {SOFT_EMBEDS}, embedding)`: the image vectors must reach it"
+            " unscaled"
+        )
+    consumers = [
+        name
+        for node in graph.nodes
+        if node is not merges[0]
+        for name in node.ins
+        if name in expected
+    ]
+    if consumers:
+        raise AssertionError(f"{sorted(set(consumers))} have consumers besides the merge")
+    producers = {out: node for node in graph.nodes for out in node.outs}
+    frontier, seen = [merges[0].ins[2]], set[str]()
+    while frontier:
+        value = frontier.pop()
+        if value in seen:
+            continue
+        seen.add(value)
+        node = producers.get(value)
+        if node is not None:
+            frontier.extend(node.ins)
+    if decode.INPUT_IDS not in seen or SOFT_EMBEDS in seen:
+        raise AssertionError(
+            f"the merge's text operand does not come from '{decode.INPUT_IDS}' alone"
+        )
+
+
 def assert_ir_form_product(
     graph: IrGraph,
     config: Any,
@@ -715,9 +772,10 @@ def assert_ir_form_product(
 
     `ple_rows=None` is the form of a model without per-layer embeddings (12B —
     `gemma4.export_unified`): the same contract minus PLE, so `per_layer_inputs` MUST be absent
-    from the inputs and no PLE table can be looked for; every other rule holds unchanged. MUST:
-    `None` exactly when the config declares no PLE (`hidden_size_per_layer_input` 0) — a caller
-    cannot switch the PLE checks off for a model that has one.
+    from the inputs and no PLE table can be looked for; the image rows' inputs are there instead
+    ({@link assert_soft_merge}); every other rule holds unchanged. MUST: `None` exactly when the
+    config declares no PLE (`hidden_size_per_layer_input` 0) — a caller cannot switch the PLE
+    checks off for a model that has one.
     """
     decode.assert_layer_type_count(config)
     layers = int(config.num_hidden_layers)
@@ -730,6 +788,7 @@ def assert_ir_form_product(
 
     expected_inputs = [
         decode.INPUT_IDS,
+        *([SOFT_EMBEDS, SOFT_MASK] if ple_rows is None else []),
         *decode.ROPE_INPUTS,
         *([PER_LAYER_INPUTS] if ple_rows is not None else []),
         decode.TOKEN_ONLY_LAST_ROW,
@@ -749,7 +808,9 @@ def assert_ir_form_product(
             f" not [{row_symbol}] (the only binding point of the symbol {row_symbol})"
         )
     embeddings = [node for node in graph.nodes if node.op == EMBEDDING_OP]
-    if ple_rows is not None:
+    if ple_rows is None:
+        assert_soft_merge(graph, config, seq_symbol)
+    else:
         per_layer_spec = next(spec for spec in graph.inputs if spec.name == PER_LAYER_INPUTS)
         expected_shape = [1, seq_symbol, layers, ple_dim]
         if per_layer_spec.dtype != "f32" or list(per_layer_spec.shape) != expected_shape:

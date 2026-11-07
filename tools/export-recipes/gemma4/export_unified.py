@@ -15,13 +15,30 @@ machine into swap.
 
 ## The graph: E2B / E4B's product contract minus PLE
 
-Inputs `input_ids[1,M]`, the four RoPE inputs (`gemma4.export_decode.ROPE_INPUTS`) and
-`last_row[R]`; outputs `logits[1,R,V]` then `hidden[1,R,H]`, in that order
-({@link UnifiedProductWrapper} — `gemma4.export_product.ProductChunkWrapper` without the
-`per_layer_inputs` input). The class has no per-layer embeddings (`hidden_size_per_layer_input`
-is 0), so there is no PLE input, table or asset; the checks that look for one are inverted (the
-checkpoint carries no `per_layer` tensor, the graph no `per_layer_inputs`, the container no PLE
-asset).
+Inputs `input_ids[1,M]`, `soft_embeds[1,M,H]` f32, `soft_mask[1,M,1]` bool, the four RoPE inputs
+(`gemma4.export_decode.ROPE_INPUTS`) and `last_row[R]`; outputs `logits[1,R,V]` then
+`hidden[1,R,H]`, in that order ({@link UnifiedProductWrapper} —
+`gemma4.export_product.ProductChunkWrapper` without the `per_layer_inputs` input). The class has no
+per-layer embeddings (`hidden_size_per_layer_input` is 0), so there is no PLE input, table or asset;
+the checks that look for one are inverted (the checkpoint carries no `per_layer` tensor, the graph
+no `per_layer_inputs`, the container no PLE asset).
+
+## Image rows
+
+The embeddings of the rows are `where(soft_mask, soft_embeds, embed_tokens(input_ids))`: an image's
+soft-token rows take the embedder's vectors (`gemma4.export_vision`) as they are, after
+`embed_tokens` has applied its `sqrt(hidden)` to the text rows — upstream overwrites the scaled
+embedding with unscaled image vectors the same way (`Gemma4UnifiedModel.forward`, `masked_scatter`).
+With an all-false mask and zeros ({@link no_soft_inputs}) the graph computes the text forward bit
+for bit, so the greedy goldens below keep their numbers. `soft_mask` is `[1,M,1]`, not `[1,M,H]`:
+`where` broadcasts its three inputs right-aligned (`packages/runtime/src/ops/shapes.ts`), so the
+host binds one word per row.
+
+The attention over an image block is **not** a graph input: the traced masks stay the text ones and
+the host passes the block per run. The forward with an image in torch goes through
+{@link UnifiedProductWrapper.run} with {@link image_masks} — upstream's
+`create_masks_for_vision_model` (path A): full layers causal, sliding layers
+`window AND (causal OR block)`, a block being the run of one image's soft tokens.
 
 The states: no KV sharing (`num_kv_shared_layers` 0), so every layer owns a k / v slot pair —
 96 slots for 48 layers (`gemma4.export_decode.states_plan` unchanged). The KV heads differ per
@@ -173,8 +190,9 @@ MODELS: tuple[str, ...] = tuple(
     model for model in GEMMA4_UPSTREAM if model not in GEMMA4_PLE_MODELS
 )
 
-#: Checkpoint key prefixes outside the text decoder, never read (12B's encoder-free vision and
-#: audio embedders — 52.4 M parameters).
+#: Checkpoint key prefixes outside the text decoder, which this script never reads (12B's
+#: encoder-free vision and audio embedders — 52.4 M parameters; `gemma4.export_vision` reads the
+#: vision ones, nothing reads the audio one).
 IGNORED_PREFIXES: tuple[str, ...] = (
     "model.vision_embedder.",
     "model.embed_vision.",
@@ -375,16 +393,89 @@ def load_config(model_dir: Path, layers: int | None = None) -> Any:
     return config
 
 
+def no_soft_inputs(input_ids: torch.Tensor, hidden_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """`(soft_embeds[1,M,H], soft_mask[1,M,1])` of rows without an image: zeros and all false — the
+    inputs of every text run ({@link UnifiedProductWrapper})."""
+    length = int(input_ids.shape[1])
+    return (
+        torch.zeros(1, length, hidden_size, dtype=torch.float32),
+        torch.zeros(1, length, 1, dtype=torch.bool),
+    )
+
+
+def image_soft_inputs(
+    input_ids: torch.Tensor, embeds: torch.Tensor, block: tuple[int, int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`(soft_embeds, soft_mask)` with the rows `[start, stop)` of `block` holding `embeds[N,H]` —
+    {@link no_soft_inputs} elsewhere, so rows appended after the prompt stay text rows.
+
+    MUST: the block is the image's whole run of soft tokens; a count that disagrees with the
+    embeddings fails loudly (upstream's `masked_scatter` check).
+    """
+    start, stop = block
+    if embeds.dim() != 2 or int(embeds.shape[0]) != stop - start:
+        raise UnifiedExportError(
+            f"the block [{start}, {stop}) does not fit embeddings of shape {list(embeds.shape)}"
+        )
+    soft_embeds, soft_mask = no_soft_inputs(input_ids, int(embeds.shape[1]))
+    soft_embeds[0, start:stop] = embeds
+    soft_mask[0, start:stop] = True
+    return soft_embeds, soft_mask
+
+
+def _additive(keep: torch.Tensor) -> torch.Tensor:
+    """A boolean `[T,T]` keep mask as the additive `[1,1,T,T]` form of `gemma4.export`'s masks."""
+    drop = torch.full((), one_shot.NEG_INF, dtype=torch.float32)
+    return torch.where(keep, torch.zeros((), dtype=torch.float32), drop).unsqueeze(0).unsqueeze(0)
+
+
+def _block_grid(length: int, block: tuple[int, int]) -> tuple[torch.Tensor, ...]:
+    """`(rows, cols, causal, within the block)` of a `[T,T]` mask."""
+    start, stop = block
+    rows = torch.arange(length).unsqueeze(-1)
+    cols = torch.arange(length).unsqueeze(0)
+    inside = (rows >= start) & (rows < stop) & (cols >= start) & (cols < stop)
+    return rows, cols, cols <= rows, inside
+
+
+def image_masks(length: int, window: int, block: tuple[int, int]) -> dict[str, torch.Tensor]:
+    """The layer type → additive mask of a forward with an image: upstream's
+    `create_masks_for_vision_model` (path A) — the rule of this repository's goldens and of the
+    host's attention. Full layers causal, sliding layers `window AND (causal OR block)`, the window
+    being upstream's `sliding_window_overlay` (`col > row − window`).
+    """
+    rows, cols, causal, inside = _block_grid(length, block)
+    return {
+        one_shot.FULL_ATTENTION: _additive(causal),
+        one_shot.SLIDING_ATTENTION: _additive(((rows - cols) < window) & (causal | inside)),
+    }
+
+
+def image_masks_or_block(
+    length: int, window: int, block: tuple[int, int]
+) -> dict[str, torch.Tensor]:
+    """The masks of upstream's other path (path B — `Gemma4UnifiedModel.forward` without prebuilt
+    masks): the block ORed onto the full and the sliding layers. For the measurement that compares
+    the two paths only (`gemma4.export_vision`); nothing ships it."""
+    rows, cols, causal, inside = _block_grid(length, block)
+    return {
+        one_shot.FULL_ATTENTION: _additive(causal | inside),
+        one_shot.SLIDING_ATTENTION: _additive((((rows - cols) < window) & causal) | inside),
+    }
+
+
 class UnifiedProductWrapper(nn.Module):
-    """`(input_ids, RoPE ×4, last_row[R]) → (logits[1,R,V], hidden[1,R,H])` of a model without
-    per-layer embeddings.
+    """`(input_ids, soft_embeds, soft_mask, RoPE ×4, last_row[R]) → (logits[1,R,V], hidden[1,R,H])`
+    of a model without per-layer embeddings.
 
     `gemma4.export_product.ProductChunkWrapper` without `per_layer_inputs`, line for line (the
     two masks of the 1-shot recipe, the host RoPE bound for one forward, the row selection by
-    `F.embedding`, the softcapped lm_head) — every MUST of that docstring applies here. MUST:
-    the module paths are the E2B / E4B wrapper's (`model.model.*`, `model.lm_head`), so the
-    quantization predicate `gemma4.export.is_int4_module` selects the same roles. MUST: the
-    outputs stay (logits, hidden).
+    `F.embedding`, the softcapped lm_head) — every MUST of that docstring applies here — plus the
+    image rows' merge (module docstring, "Image rows"). MUST: the module paths are the E2B / E4B
+    wrapper's (`model.model.*`, `model.lm_head`), so the quantization predicate
+    `gemma4.export.is_int4_module` selects the same roles. MUST: the outputs stay (logits, hidden).
+    MUST: `forward` is what is traced — it passes the text masks, so a forward with an image's
+    masks ({@link run} with {@link image_masks}) never changes the graph.
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -395,6 +486,8 @@ class UnifiedProductWrapper(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        soft_embeds: torch.Tensor,
+        soft_mask: torch.Tensor,
         rope_sliding_attention_cos: torch.Tensor,
         rope_sliding_attention_sin: torch.Tensor,
         rope_full_attention_cos: torch.Tensor,
@@ -406,7 +499,35 @@ class UnifiedProductWrapper(nn.Module):
             one_shot.FULL_ATTENTION: one_shot.additive_causal_mask(length),
             one_shot.SLIDING_ATTENTION: one_shot.additive_sliding_mask(length, self.sliding_window),
         }
-        embeds = self.model.model.embed_tokens(input_ids)
+        return self.run(
+            input_ids,
+            soft_embeds,
+            soft_mask,
+            rope_sliding_attention_cos,
+            rope_sliding_attention_sin,
+            rope_full_attention_cos,
+            rope_full_attention_sin,
+            last_row,
+            mask,
+        )
+
+    def run(
+        self,
+        input_ids: torch.Tensor,
+        soft_embeds: torch.Tensor,
+        soft_mask: torch.Tensor,
+        rope_sliding_attention_cos: torch.Tensor,
+        rope_sliding_attention_sin: torch.Tensor,
+        rope_full_attention_cos: torch.Tensor,
+        rope_full_attention_sin: torch.Tensor,
+        last_row: torch.Tensor,
+        mask: Mapping[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The forward over the layer type → additive mask `mask` ({@link forward}'s text masks, or
+        {@link image_masks})."""
+        # `embed_tokens` applies `sqrt(hidden)` itself: the image vectors overwrite the scaled text
+        # embedding and are not scaled.
+        embeds = torch.where(soft_mask, soft_embeds, self.model.model.embed_tokens(input_ids))
         tables = decode.bound_rope(
             rope_sliding_attention_cos,
             rope_sliding_attention_sin,
@@ -472,10 +593,11 @@ def trace(
     rope = decode.rope_args(specs, positions_for(example_ids))
     seq = Dim(decode.SEQ_SYMBOL, min=2, max=sym_max)
     rows = Dim(product.ROW_SYMBOL, min=1, max=product.ROW_SYM_MAX)
+    soft = no_soft_inputs(example_ids, int(wrapper.model.config.hidden_size))
     graph, tensors = export_module(
         wrapper,
-        (example_ids, *rope, decode.last_rows_for(example_ids, product.EXAMPLE_ROWS)),
-        dynamic_shapes=(*({1: seq} for _ in range(1 + len(rope))), {0: rows}),
+        (example_ids, *soft, *rope, decode.last_rows_for(example_ids, product.EXAMPLE_ROWS)),
+        dynamic_shapes=(*({1: seq} for _ in range(1 + len(soft) + len(rope))), {0: rows}),
         symbol_names=(decode.SEQ_SYMBOL, product.ROW_SYMBOL),
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )
@@ -1033,7 +1155,10 @@ class GreedyView(nn.Module):
         self, input_ids: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         logits, hidden = self.wrapper(
-            input_ids, *decode.rope_args(self.specs, position_ids), decode.last_row_for(input_ids)
+            input_ids,
+            *no_soft_inputs(input_ids, int(self.wrapper.model.config.hidden_size)),
+            *decode.rope_args(self.specs, position_ids),
+            decode.last_row_for(input_ids),
         )
         return suppressed_logits(logits, self.suppress), hidden
 

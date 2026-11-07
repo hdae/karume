@@ -32,9 +32,16 @@ from gemma4.distribution import (
     GEMMA4_DRAFT_STEPS,
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_SUFFIX,
+    GEMMA4_POSITION_X,
+    GEMMA4_POSITION_Y,
     GEMMA4_ROLE,
     GEMMA4_ROPE_LAYER_TYPES,
     GEMMA4_ROPE_PARTS,
+    GEMMA4_SOFT_EMBEDS,
+    GEMMA4_SOFT_MASK,
+    GEMMA4_VISION_PIXELS,
+    GEMMA4_VISION_ROLE,
+    GEMMA4_VISION_SYMBOL,
     gemma4_rope_input_name,
     gemma4_series_name,
 )
@@ -76,6 +83,12 @@ LAYERS = 2
 #: (container-v1 §4.1), so `LAYERS * DIM` is chosen divisible by 4 (the real one is 35 × 256).
 DIM = 10
 HIDDEN = 16
+
+#: The stand-in processor's patch and pooling sizes (the real ones are 16 and 3) and the row width
+#: of the vision embedder they give.
+VISION_PATCH_SIZE = 2
+VISION_POOLING = 2
+VISION_PIXEL_WIDTH = (VISION_PATCH_SIZE * VISION_POOLING) ** 2 * 3
 
 #: Minimal form holding only the fields of upstream `config.json`'s `text_config` that the
 #: distribution recipe reads. **Numbers different from the real ones** (position limit 131072 → 37,
@@ -270,6 +283,7 @@ def product_container(
     provenance: Provenance = FIXTURE_PROVENANCE,
     storage: str = STORAGE,
     embedding_storage: str | None = None,
+    soft_mask_width: int = 1,
 ) -> list[bytes]:
     """The part bytes of one product graph (in read order — part 0 first).
 
@@ -282,7 +296,9 @@ def product_container(
     is removed from the states, leaving only `M` / `R`, the two the input shapes bind (the gate on
     how the symbols split — the side that checks there is exactly one free symbol).
     `ple=False` is the graph of a model without per-layer embeddings (12B): no
-    `per_layer_inputs` input, and no PLE assets unless `assets` names some. `provenance` is the
+    `per_layer_inputs` input, the image rows' two inputs instead (`soft_mask` of width
+    `soft_mask_width`, for the gate on their form), and no PLE assets unless `assets` names some.
+    `provenance` is the
     container's (a pinned model's names its upstream revision). `storage` is the stand-in
     linear's storage and `embedding_storage` the embedding stand-in's (default: `storage`):
     `"bf16"` (the regular line — the checkpoint's values, no int8 / int4), `"i4"` (the q4_0 QAT
@@ -391,6 +407,18 @@ def product_container(
         ),
         inputs=[
             IrInput(name="input_ids", dtype="i32", shape=[1, SEQ_SYMBOL]),
+            *(
+                []
+                if ple
+                else [
+                    IrInput(
+                        name=GEMMA4_SOFT_EMBEDS, dtype="f32", shape=[1, SEQ_SYMBOL, hidden_size]
+                    ),
+                    IrInput(
+                        name=GEMMA4_SOFT_MASK, dtype="bool", shape=[1, SEQ_SYMBOL, soft_mask_width]
+                    ),
+                ]
+            ),
             *(
                 IrInput(
                     name=gemma4_rope_input_name(layer_type, part),
@@ -571,6 +599,71 @@ def drafter_container(
     )
     return _publish(
         graph, tensors, storage, scales, overrides, named=GEMMA4_DRAFTER_ROLE, provenance=provenance
+    )
+
+
+def vision_container(
+    *,
+    hidden_size: int = HIDDEN,
+    pixel_width: int = VISION_PIXEL_WIDTH,
+    storage: str = "bf16",
+    provenance: Provenance = FIXTURE_PROVENANCE,
+) -> list[bytes]:
+    """The part bytes of one vision embedder graph (`gemma4.export_vision`'s inputs and output, one
+    weight in `storage` — the distribution's gates read nothing else).
+
+    `hidden_size` / `pixel_width` build a graph of another model, `storage` one that was rounded.
+    """
+    initializers: dict[str, IrInitializer] = {}
+    values: dict[str, IrValue] = {}
+    tensors: dict[str, torch.Tensor] = {}
+    scales: dict[str, torch.Tensor] = {}
+    overrides: dict[str, str] = {}
+
+    def declare(name: str, tensor: torch.Tensor) -> str:
+        key = f"vision.{name}"
+        initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype="f32"))
+        values[name] = IrValue(dtype="f32", shape=list(tensor.shape))
+        tensors[key] = tensor
+        return key
+
+    declare("x", _ramp(1, _IN))
+    declare("bias", _ramp(_OUT))
+    weight = _ramp(_OUT, _IN)
+    if storage == "bf16":
+        overrides[declare("weight", weight.to(torch.bfloat16).to(torch.float32))] = "bf16"
+    elif storage == "i4":
+        scale = group_scale(weight, GROUP_SIZE)
+        key = declare("weight", dequantize_int4(quantize_to_int4(weight, scale), scale))
+        scales[key] = scale
+        overrides[key] = "i4"
+    else:
+        raise ValueError(f"no stand-in storage '{storage}' (bf16 / i4)")
+    values["h"] = IrValue(dtype="f32", shape=[1, _OUT])
+    declare("seed", _ramp(1, 1, 1))
+    values["embeds"] = IrValue(dtype="f32", shape=[1, GEMMA4_VISION_SYMBOL, hidden_size])
+    graph = IrGraph(
+        symbols=[GEMMA4_VISION_SYMBOL],
+        inputs=[
+            IrInput(
+                name=GEMMA4_VISION_PIXELS,
+                dtype="f32",
+                shape=[1, GEMMA4_VISION_SYMBOL, pixel_width],
+            ),
+            IrInput(name=GEMMA4_POSITION_X, dtype="i32", shape=[1, GEMMA4_VISION_SYMBOL]),
+            IrInput(name=GEMMA4_POSITION_Y, dtype="i32", shape=[1, GEMMA4_VISION_SYMBOL]),
+        ],
+        outputs=["embeds"],
+        initializers=initializers,
+        values=values,
+        states={},
+        nodes=[
+            IrNode(op="linear", ins=["x", "weight", "bias"], outs=["h"], attrs={}),
+            IrNode(op="expand", ins=["seed"], outs=["embeds"], attrs={}),
+        ],
+    )
+    return _publish(
+        graph, tensors, storage, scales, overrides, named=GEMMA4_VISION_ROLE, provenance=provenance
     )
 
 

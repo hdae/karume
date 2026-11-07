@@ -46,8 +46,8 @@ PROCESSOR_CASES: tuple[tuple[int, int, int], ...] = (
     (640, 480, 1120),
 )
 
-#: `(height, width, target height, target width)` for `F.resize` alone: downscale and upscale in each
-#: axis, large factors (a wide support and a low precision against a high one).
+#: `(height, width, target height, target width)` for `F.resize` alone: downscale and upscale in
+#: each axis, large factors (a wide support and a low precision against a high one).
 RESIZE_CASES: tuple[tuple[int, int, int, int], ...] = (
     (64, 80, 48, 96),
     (200, 131, 96, 48),
@@ -79,7 +79,9 @@ def sha256(array: np.ndarray) -> str:
     return hashlib.sha256(array.tobytes()).hexdigest()
 
 
-def processor_case(processor: Any, height: int, width: int, budget: int, seed: int) -> dict[str, Any]:
+def processor_case(
+    processor: Any, height: int, width: int, budget: int, seed: int
+) -> dict[str, Any]:
     image = synthetic_rgb(height, width, seed)
     # Channels first: a numpy image is taken as it is, without PIL in between.
     features = processor(

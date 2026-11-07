@@ -47,13 +47,19 @@ tokenizer and configuration checks are the regular line's; what differs is read 
   `gemma4-12b-product` (its one line, already the QAT checkpoint), every drafter
   `gemma4-<model>-qat-drafter` (`gemma4/export_drafter_qat.py`) — {@link gemma4_qat_q4_0_sources};
 - the storage: both roles int4 alone, int8 forbidden in both (the drafters are on their grid too,
-  so the regular drafter's int8 requirement does not apply — {@link GEMMA4_QAT_Q4_0_STORAGE});
+  so the regular drafter's int8 requirement does not apply — {@link GEMMA4_QAT_Q4_0_STORAGE}); 12B's
+  `vision` role is the one bf16 exception (its embedder is not on the grid);
 - the PLE index: schema 4, int4 values with one f32 step per group of
   {@link GEMMA4_QAT_PLE_GROUP_SIZE} ({@link gemma4_ple_index});
 - the quants: `i4` (the default — the reference summation order) and the parallel and fused seats
   `i4-gemvpar` / `i4-fast` over the same storage ({@link gemma4_qat_q4_0_quants});
 - the pins: every product container names its QAT weights' revision and every drafter container
-  its QAT drafter's (`gemma4.sources.QAT_TARGET_PINS` / `QAT_DRAFTER_PINS`).
+  its QAT drafter's (`gemma4.sources.QAT_TARGET_PINS` / `QAT_DRAFTER_PINS`);
+- 12B's image input: a third graph, `vision` — the encoder-free embedder
+  (`gemma4/export_vision.py`, series `gemma4-12b-vision`), one bf16 dtype, so every quant of 12B
+  maps it — and `pipelineConfig.vision` ({@link gemma4_vision_config}). As with the drafter, it is a
+  weights role precisely so that a reader's selection can leave it out: nothing is fetched unless a
+  load asks for image input. E2B / E4B have neither (their tower is not distributed).
 
 `pipelineConfig` splits into two kinds (the same split as Irodori): **the numbers the model
 decides** (`maxPosition` = upstream `text_config.max_position_embeddings`, `rope` = the parameters
@@ -127,6 +133,7 @@ from .card import (
     GEMMA4_QAT_DRAFTER_UPSTREAM,
     GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM,
     GEMMA4_UPSTREAM,
+    GEMMA4_VISION_ROLE,
     render_gemma4_model_card,
     render_gemma4_qat_q4_0_model_card,
 )
@@ -186,6 +193,9 @@ GEMMA4_DRAFTER_SUFFIX = "drafter"
 #: these words, this module reads them).
 GEMMA4_QAT_PRODUCT_SUFFIX = "qat-product"
 GEMMA4_QAT_DRAFTER_SUFFIX = "qat-drafter"
+#: The vision embedder's series suffix (`outputs/series/gemma4-12b-vision/` —
+#: `gemma4/export_vision.py` writes under it, this module reads it).
+GEMMA4_VISION_SUFFIX = "vision"
 
 #: The file names on the series side (the spellings of `gemma4.export.MODEL_FILE` /
 #: `tokenizer.ASSET_PATH`). They are **representative paths**, so a split file is resolved to its
@@ -259,11 +269,32 @@ GEMMA4_GRAPH_INPUTS: tuple[str, ...] = (
     GEMMA4_PER_LAYER_INPUTS,
     GEMMA4_LAST_ROW,
 )
+#: An image's rows on a model without per-layer embeddings (the mirrors of
+#: `gemma4.export_product.SOFT_EMBEDS` / `SOFT_MASK`, held equal by the tests).
+GEMMA4_SOFT_EMBEDS = "soft_embeds"
+GEMMA4_SOFT_MASK = "soft_mask"
 #: The inputs of a model without per-layer embeddings (12B — `gemma4/export_unified.py`): the
-#: same graph contract minus `per_layer_inputs`.
-GEMMA4_PLE_FREE_GRAPH_INPUTS: tuple[str, ...] = tuple(
-    name for name in GEMMA4_GRAPH_INPUTS if name != GEMMA4_PER_LAYER_INPUTS
+#: same graph contract minus `per_layer_inputs`, plus the image rows right after the ids.
+GEMMA4_PLE_FREE_GRAPH_INPUTS: tuple[str, ...] = (
+    GEMMA4_INPUT_IDS,
+    GEMMA4_SOFT_EMBEDS,
+    GEMMA4_SOFT_MASK,
+    *GEMMA4_ROPE_INPUTS,
+    GEMMA4_LAST_ROW,
 )
+
+#: The vision embedder graph's inputs and its row symbol (canonical in `gemma4/export_vision.py` —
+#: the wrapper's forward argument names). The host binds them by name.
+GEMMA4_VISION_PIXELS = "pixels"
+GEMMA4_POSITION_X = "position_x"
+GEMMA4_POSITION_Y = "position_y"
+GEMMA4_VISION_SYMBOL = "N"
+#: The embedder's one storage (the dtype label, also the output file's and the writer's word).
+GEMMA4_VISION_STORAGE = "bf16"
+
+#: Upstream's processor configuration, read from the tokenizer source (the budget of
+#: `pipelineConfig.vision`, the row width of the embedder graph).
+GEMMA4_PROCESSOR_CONFIG_FILE = "processor_config.json"
 
 #: The drafter graph's inputs (canonical in `gemma4/export_drafter.py` — the wrapper's forward
 #: argument names). `token` = the token decided just before, `hidden` = the target's hidden after
@@ -533,7 +564,8 @@ class Gemma4Sources:
     tokenizer asset is held against — {@link assert_gemma4_tokenizer_source}) are read, never the
     weights.
 
-    A model whose `drafter` is `None` ships no drafter ({@link gemma4_has_drafter}).
+    A model whose `drafter` is `None` ships no drafter ({@link gemma4_has_drafter}); a model whose
+    `vision` is `None` ships no vision embedder (`Gemma4Line.has_vision`).
 
     The upstream side is two directories: `model` holds the weights' `config.json` (the numbers the
     model decides — {@link gemma4_text_config}) and `upstream_tokenizer` the `tokenizer.json` and
@@ -549,6 +581,7 @@ class Gemma4Sources:
     tokenizer: Path
     model: Path
     upstream_tokenizer: Path
+    vision: Path | None = None
 
 
 def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
@@ -787,11 +820,15 @@ def gemma4_placements(sources: Gemma4Sources) -> dict[str, Path]:
     and `reference.json` that sit in the product series and the drafter series'
     `drafter-golden.*.safetensors` — all of them serve acceptance and provenance, not running). The
     PLE lives inside the `model` container, so it has no entry. A model that ships no drafter
-    (`sources.drafter is None`) has no drafter entry either.
+    (`sources.drafter is None`) has no drafter entry either, nor a model without a vision embedder
+    (`sources.vision is None`) a vision entry; the vision series' `vision.*.safetensors` and
+    greedy goldens stay behind the same way.
     """
     placements = {GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE}
     if sources.drafter is not None:
         placements[GEMMA4_DRAFTER_ROLE] = sources.drafter / GEMMA4_MODEL_FILE
+    if sources.vision is not None:
+        placements[GEMMA4_VISION_ROLE] = sources.vision / GEMMA4_MODEL_FILE
     placements[GEMMA4_TOKENIZER_ROLE] = sources.tokenizer / GEMMA4_TOKENIZER_FILE
     return placements
 
@@ -1006,6 +1043,18 @@ def assert_gemma4_graph(
             f"{path}: {len(baked)} baked RoPE table initializers remain: {baked[:4]}"
             " — an asset of a generation not yet moved fully to host generation"
         )
+    if index is None:
+        declared = {spec["name"]: spec for spec in graph["inputs"]}
+        for name, dtype, shape in (
+            (GEMMA4_SOFT_EMBEDS, "f32", [1, sequence, hidden_size]),
+            (GEMMA4_SOFT_MASK, "bool", [1, sequence, 1]),
+        ):
+            spec = declared[name]
+            if spec.get("dtype") != dtype or list(spec.get("shape")) != shape:
+                raise DistError(
+                    f"{path}: input '{name}' is {spec.get('dtype')} {spec.get('shape')!r} — not"
+                    f" {dtype} {shape!r} (the host binds the image rows to this form)"
+                )
     if index is not None:
         per_layer = inputs[GEMMA4_PER_LAYER_INPUTS]
         if len(per_layer) != 4:
@@ -1041,6 +1090,116 @@ def assert_gemma4_graph(
             f"{path}: {len(free)} symbols not determined by the input shapes ({free})"
             " — there must be exactly one, the full slots' capacity symbol"
         )
+
+
+def gemma4_processor_config(directory: Path) -> Mapping[str, Any]:
+    """The `image_processor` section of upstream's `processor_config.json` (in the tokenizer
+    source, as the tokenizer and the generation defaults are)."""
+    path = directory / GEMMA4_PROCESSOR_CONFIG_FILE
+    raw = _read_json(path, f"upstream's {GEMMA4_PROCESSOR_CONFIG_FILE}")
+    section = raw.get("image_processor") if isinstance(raw, dict) else None
+    if not isinstance(section, dict):
+        raise DistError(f"{path}: no image_processor section")
+    return section
+
+
+def gemma4_soft_token_budget(directory: Path) -> int:
+    """The image token budget upstream's processor is configured with (`max_soft_tokens`)."""
+    return _positive_int(
+        gemma4_processor_config(directory),
+        "max_soft_tokens",
+        str(directory / GEMMA4_PROCESSOR_CONFIG_FILE),
+    )
+
+
+def _vocab_token(asset: Mapping[str, Any], token: int, path: Path) -> str:
+    vocab = asset.get("vocab")
+    if not isinstance(vocab, list) or not 0 <= token < len(vocab):
+        raise DistError(f"{path}: id {token} is outside the tokenizer asset's vocabulary")
+    return vocab[token]
+
+
+def gemma4_vision_config(
+    model_dir: Path, tokenizer_dir: Path, tokenizer_asset: Path, hidden_size: int
+) -> dict[str, Any]:
+    """`pipelineConfig.vision`: what the host needs to build an image's rows.
+
+    Each number has a reader, so none is a literal here: the ids from the weights' `config.json`,
+    the budget from `processor_config.json`, the width from the text config. MUST: the ids are held
+    to the tokenizer asset the host encodes with, through their spellings in
+    `tokenizer_config.json` — a declared id that is another token stays a valid integer and only
+    shows as wrong rows at run time.
+    """
+    where = model_dir / GEMMA4_CONFIG_FILE
+    raw = _read_json(where, f"upstream's {GEMMA4_CONFIG_FILE}")
+    spelled = _read_json(
+        tokenizer_dir / "tokenizer_config.json", "upstream's tokenizer_config.json"
+    )
+    asset = _read_json(tokenizer_asset, "the tokenizer asset")
+    declared = {}
+    for field, config_key, spelling_key in (
+        ("imageTokenId", "image_token_id", "image_token"),
+        ("beginImageTokenId", "boi_token_id", "boi_token"),
+        ("endImageTokenId", "eoi_token_id", "eoi_token"),
+    ):
+        token = _offset(raw, config_key, str(where))
+        spelling = spelled.get(spelling_key)
+        found = _vocab_token(asset, token, tokenizer_asset)
+        if found != spelling:
+            raise DistError(
+                f"{where}: {config_key} {token} is {found!r} in the tokenizer asset, not the"
+                f" {spelling_key} {spelling!r} of tokenizer_config.json"
+            )
+        declared[field] = token
+    return {
+        "softTokenBudget": gemma4_soft_token_budget(tokenizer_dir),
+        **declared,
+        "hiddenSize": hidden_size,
+    }
+
+
+def assert_gemma4_vision_graph(
+    graph: Mapping[str, Any], path: Path, hidden_size: int, tokenizer_dir: Path
+) -> None:
+    """The vision embedder graph, before placement: `pixels[1,N,P]` f32, `position_x[1,N]` and
+    `position_y[1,N]` i32, one `embeds[1,N,H]` output, one symbol, no state.
+
+    MUST: the row width is the one upstream's processor emits (`(patch_size · pooling)² · 3` from
+    `processor_config.json`) and the output width the main graph's `hidden_size`: the graph comes
+    from another series than the declaration and the main graph, so only this check sees a series of
+    another model.
+    """
+    processor = gemma4_processor_config(tokenizer_dir)
+    where = str(tokenizer_dir / GEMMA4_PROCESSOR_CONFIG_FILE)
+    side = _positive_int(processor, "patch_size", where) * _positive_int(
+        processor, "pooling_kernel_size", where
+    )
+    symbol = GEMMA4_VISION_SYMBOL
+    expected = [
+        {"name": GEMMA4_VISION_PIXELS, "dtype": "f32", "shape": [1, symbol, side * side * 3]},
+        {"name": GEMMA4_POSITION_X, "dtype": "i32", "shape": [1, symbol]},
+        {"name": GEMMA4_POSITION_Y, "dtype": "i32", "shape": [1, symbol]},
+    ]
+    found = [
+        {key: spec.get(key) for key in ("name", "dtype", "shape")}
+        for spec in graph.get("inputs", [])
+    ]
+    if found != expected:
+        raise DistError(f"{path}: the vision graph's inputs are {found}, not {expected}")
+    outputs = graph.get("outputs")
+    values = graph.get("values")
+    if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(values, dict):
+        raise DistError(f"{path}: the vision graph does not have one output ({outputs!r})")
+    shape = (values.get(outputs[0]) or {}).get("shape")
+    if shape != [1, symbol, hidden_size]:
+        raise DistError(
+            f"{path}: the vision graph's output is {shape!r}, not {[1, symbol, hidden_size]!r}"
+            f" — not upstream {GEMMA4_HIDDEN_SIZE_KEY} {hidden_size}"
+        )
+    if graph.get("symbols") != [symbol]:
+        raise DistError(f"{path}: the vision graph's symbols are {graph.get('symbols')!r}")
+    if graph.get("states"):
+        raise DistError(f"{path}: the vision graph holds state slots")
 
 
 def assert_gemma4_drafter_graph(
@@ -1420,6 +1579,7 @@ def gemma4_pipeline_config(
     capacity: int,
     chat_dialect: str = GEMMA4_CHAT_DIALECT,
     suppress_tokens: tuple[int, ...] | None = None,
+    vision: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build `pipelineConfig` (the six fields of the TS-side schema).
 
@@ -1430,7 +1590,8 @@ def gemma4_pipeline_config(
 
     `suppress_tokens` is the optional field `suppressTokens` (ids whose logits are −inf before any
     host token selection — {@link gemma4_generation_defaults}), written only when upstream
-    declares them (12B), for the same byte-identity reason.
+    declares them (12B), for the same byte-identity reason. `vision` is the optional field of the
+    models that ship a vision embedder ({@link gemma4_vision_config}), written only for them.
 
     The three runtime knobs (`chunk_length` / `max_chunk_length` / `capacity`) are **passed by the
     caller** — regular Gemma passes {@link GEMMA4_CHUNK_LENGTH} / {@link GEMMA4_MAX_CHUNK_LENGTH} /
@@ -1492,6 +1653,8 @@ def gemma4_pipeline_config(
                 " unique ids"
             )
         config["suppressTokens"] = list(suppress_tokens)
+    if vision is not None:
+        config["vision"] = dict(vision)
     return config
 
 
@@ -1521,6 +1684,8 @@ class Gemma4Line:
     models: tuple[str, ...]
     #: Whether the model ships an MTP drafter (a weights role of its own).
     has_drafter: Callable[[str], bool]
+    #: Whether the model ships a vision embedder (a weights role of its own).
+    has_vision: Callable[[str], bool]
     #: The storage gates (the same for every model of the line).
     storage: Gemma4StorageTables
     #: The PLE index form (for the models with per-layer embeddings).
@@ -1546,6 +1711,7 @@ class Gemma4Line:
 GEMMA4_REGULAR_LINE = Gemma4Line(
     models=GEMMA4_REGULAR_MODELS,
     has_drafter=gemma4_has_drafter,
+    has_vision=lambda _model: False,
     storage=GEMMA4_STORAGE,
     ple=Gemma4PleForm(storage=GEMMA4_DTYPE),
     output_paths=GEMMA4_OUTPUT_PATHS,
@@ -1570,7 +1736,8 @@ def gemma4_plan(
     Whether a drafter exists is decided by the model (`line.has_drafter`). MUST: fail when the
     drafter entry of `sources` disagrees — an empty entry for a model that ships a drafter would
     quietly produce a distribution without speculative decoding, and an entry for a model that
-    ships none would let a drafter meant for another model slip in.
+    ships none would let a drafter meant for another model slip in. The same MUST holds for the
+    vision embedder (`line.has_vision`).
     """
     assert_model_name(model)
     gemma4_checkpoint(model)
@@ -1583,6 +1750,12 @@ def gemma4_plan(
             f"model '{model}': the drafter series is"
             f" {'missing' if sources.drafter is None else f'given ({sources.drafter})'}"
             f" — this line ships {'a' if line.has_drafter(model) else 'no'} drafter for it"
+        )
+    if (sources.vision is not None) != line.has_vision(model):
+        raise DistError(
+            f"model '{model}': the vision series is"
+            f" {'missing' if sources.vision is None else f'given ({sources.vision})'}"
+            f" — this line ships {'a' if line.has_vision(model) else 'no'} vision embedder for it"
         )
     placements = gemma4_placements(sources)
     for role, source in placements.items():
@@ -1626,6 +1799,11 @@ def gemma4_plan(
         assert_gemma4_drafter_graph(
             ir_graph(drafter_container), drafter_container, graph, container, rope, hidden_size
         )
+    vision_container = placements.get(GEMMA4_VISION_ROLE)
+    if vision_container is not None:
+        assert_gemma4_vision_graph(
+            ir_graph(vision_container), vision_container, hidden_size, sources.upstream_tokenizer
+        )
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     # MUST: every model's asset is held to the upstream `tokenizer.json` this plan reads for it,
     # in every line. A borrowed series whose upstream is other bytes, a model's own series compiled
@@ -1643,6 +1821,11 @@ def gemma4_plan(
         assert_upstream_provenance(
             container, license=GEMMA4_LICENSE, revision=pins.weights.revision
         )
+        # The vision container comes from the same checkpoint (`gemma4/export_vision.py` bakes it).
+        if vision_container is not None:
+            assert_upstream_provenance(
+                vision_container, license=GEMMA4_LICENSE, revision=pins.weights.revision
+            )
     drafter_pin = line.drafter_pins.get(model)
     if drafter_container is not None and drafter_pin is not None:
         # The drafter container names its drafter's commit (`gemma4/export_drafter_qat.py` bakes
@@ -1667,6 +1850,16 @@ def gemma4_plan(
         capacity=GEMMA4_CAPACITY,
         chat_dialect=CHAT_DIALECTS[model],
         suppress_tokens=generation.suppress_tokens,
+        vision=(
+            None
+            if vision_container is None
+            else gemma4_vision_config(
+                sources.model,
+                sources.upstream_tokenizer,
+                placements[GEMMA4_TOKENIZER_ROLE],
+                hidden_size,
+            )
+        ),
     )
     weights = line.weights(model)
     return ModelPlan(
@@ -1797,6 +1990,7 @@ GEMMA4_QAT_PLE_GROUP_SIZE = 32
 GEMMA4_QAT_Q4_0_OUTPUT_PATHS: Mapping[str, str] = {
     GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.{GEMMA4_QAT_Q4_0_DTYPE}.krm",
     GEMMA4_DRAFTER_ROLE: f"{GEMMA4_DRAFTER_ROLE}/model.{GEMMA4_QAT_Q4_0_DTYPE}.krm",
+    GEMMA4_VISION_ROLE: f"{GEMMA4_VISION_ROLE}/model.{GEMMA4_VISION_STORAGE}.krm",
     GEMMA4_TOKENIZER_ROLE: f"{GEMMA4_TOKENIZER_SUFFIX}/{GEMMA4_TOKENIZER_FILE}",
 }
 
@@ -1805,14 +1999,24 @@ GEMMA4_QAT_Q4_0_OUTPUT_PATHS: Mapping[str, str] = {
 #: regular drafter is int8 throughout, and a regular drafter series placed here has the right
 #: graph and manifest (it borrows a table of the same name), so only the storage tells it apart;
 #: an int8 embedding is caught the same way on the `model` role, and the regular line's product by
-#: its bf16.
+#: its bf16. The one exception is the `vision` role: 12B's embedder is not on the q4_0 grid, so it
+#: holds the checkpoint's bf16 values, and no rounded storage. MUST: for that role only.
 GEMMA4_QAT_Q4_0_STORAGE = Gemma4StorageTables(
-    required={GEMMA4_ROLE: GEMMA4_QAT_Q4_0_DTYPE, GEMMA4_DRAFTER_ROLE: GEMMA4_QAT_Q4_0_DTYPE},
+    required={
+        GEMMA4_ROLE: GEMMA4_QAT_Q4_0_DTYPE,
+        GEMMA4_DRAFTER_ROLE: GEMMA4_QAT_Q4_0_DTYPE,
+        GEMMA4_VISION_ROLE: GEMMA4_VISION_STORAGE,
+    },
     forbidden={
         GEMMA4_ROLE: ("f16", "bf16", "i8", "i2"),
         GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i8", "i2"),
+        GEMMA4_VISION_ROLE: ("f16", "i8", "i4", "i2"),
     },
 )
+
+#: The models of the line that ship the vision embedder: 12B, whose embedder is encoder-free.
+#: E2B / E4B's tower is not distributed.
+GEMMA4_QAT_Q4_0_VISION_MODELS: frozenset[str] = frozenset({"12b"})
 
 
 def gemma4_qat_q4_0_has_drafter(model: str) -> bool:
@@ -1820,12 +2024,27 @@ def gemma4_qat_q4_0_has_drafter(model: str) -> bool:
     return model in GEMMA4_QAT_DRAFTER_UPSTREAM
 
 
+def gemma4_qat_q4_0_has_vision(model: str) -> bool:
+    """Whether the model ships the vision embedder ({@link GEMMA4_QAT_Q4_0_VISION_MODELS})."""
+    return model in GEMMA4_QAT_Q4_0_VISION_MODELS
+
+
 def gemma4_qat_q4_0_weights(model: str) -> Mapping[str, Mapping[str, WeightFiles]]:
-    """The weights declaration: `model` and, when it ships, `drafter`, both int4."""
+    """The weights declaration: `model` and, when it ships, `drafter`, both int4; and, when it
+    ships, `vision`, bf16. One label per role, so {@link complete_quant_weights} maps each in every
+    quant of the model (`vision: "bf16"` in `i4`, `i4-gemvpar` and `i4-fast`).
+
+    MUST: `vision` is a weights role, not an asset, for the reason of {@link GEMMA4_WEIGHTS}'s
+    MUST: a container with a graph, and the only axis on which `ResolveOptions.weights` can say "not
+    fetched by default".
+    """
     roles = (
         (GEMMA4_ROLE, GEMMA4_DRAFTER_ROLE) if gemma4_qat_q4_0_has_drafter(model) else (GEMMA4_ROLE,)
     )
-    return {role: {GEMMA4_QAT_Q4_0_DTYPE: WeightFiles(role)} for role in roles}
+    weights = {role: {GEMMA4_QAT_Q4_0_DTYPE: WeightFiles(role)} for role in roles}
+    if gemma4_qat_q4_0_has_vision(model):
+        weights[GEMMA4_VISION_ROLE] = {GEMMA4_VISION_STORAGE: WeightFiles(GEMMA4_VISION_ROLE)}
+    return weights
 
 
 #: The line's reference seat, every model's default: the reference summation order (`session`
@@ -1840,6 +2059,11 @@ GEMMA4_QAT_Q4_0_QUANTS: Mapping[str, Any] = {
         " summation order.",
     },
 }
+
+
+#: The sentence the reference seat of a model with a vision embedder adds: its description says
+#: "every linear weight", and the embedder's are not int4 ({@link GEMMA4_QAT_Q4_0_STORAGE}).
+GEMMA4_QAT_Q4_0_VISION_NOTE = " Vision stays bf16."
 
 
 #: The line's parallel and fused seats over its one int4 storage (ADR 0098 / 0104): `i4-gemvpar`
@@ -1901,6 +2125,8 @@ def gemma4_qat_q4_0_quants(model: str) -> dict[str, Any]:
     and, for a model with a measured speed note ({@link GEMMA4_QAT_Q4_0_SPEED_NOTE}), the parallel
     and fused seats ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}) with that note."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QAT_Q4_0_QUANTS.items()}
+    if gemma4_qat_q4_0_has_vision(model):
+        quants[GEMMA4_QAT_Q4_0_DTYPE]["description"] += GEMMA4_QAT_Q4_0_VISION_NOTE
     note = GEMMA4_QAT_Q4_0_SPEED_NOTE.get(model)
     if note is not None:
         for name, quant in GEMMA4_QAT_Q4_0_PARALLEL_QUANTS.items():
@@ -1923,6 +2149,7 @@ GEMMA4_QAT_Q4_0_DEFAULT_QUANT: Mapping[str, str] = dict.fromkeys(
 GEMMA4_QAT_Q4_0_LINE = Gemma4Line(
     models=tuple(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM),
     has_drafter=gemma4_qat_q4_0_has_drafter,
+    has_vision=gemma4_qat_q4_0_has_vision,
     storage=GEMMA4_QAT_Q4_0_STORAGE,
     ple=Gemma4PleForm(storage=GEMMA4_QAT_Q4_0_DTYPE, group_size=GEMMA4_QAT_PLE_GROUP_SIZE),
     output_paths=GEMMA4_QAT_Q4_0_OUTPUT_PATHS,
@@ -1948,9 +2175,10 @@ def gemma4_qat_q4_0_repo_name(_model: str) -> str:
 
 
 def gemma4_qat_q4_0_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
-    """The inputs of model `model` of the line: its product and QAT drafter series, the regular
-    tokenizer series ({@link GEMMA4_TOKENIZER_SERIES} — the line reads the regular `-it`
-    tokenizers), and the hub snapshots of its QAT target pins (`gemma4.sources.QAT_TARGET_PINS`).
+    """The inputs of model `model` of the line: its product and QAT drafter series, its vision
+    series when it ships one, the regular tokenizer series ({@link GEMMA4_TOKENIZER_SERIES} — the
+    line reads the regular `-it` tokenizers), and the hub snapshots of its QAT target pins
+    (`gemma4.sources.QAT_TARGET_PINS`).
 
     A model outside the line fails loudly.
     """
@@ -1966,6 +2194,11 @@ def gemma4_qat_q4_0_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL)
         / gemma4_series_name(GEMMA4_TOKENIZER_SERIES[model], GEMMA4_TOKENIZER_SUFFIX),
         model=qat_target_checkpoint_dir(model),
         upstream_tokenizer=qat_target_tokenizer_dir(model),
+        vision=(
+            series_dir / gemma4_series_name(model, GEMMA4_VISION_SUFFIX)
+            if gemma4_qat_q4_0_has_vision(model)
+            else None
+        ),
     )
 
 
@@ -2013,8 +2246,11 @@ The models actually included are identified in `README.md` and `karume.json`.
 
 The following changes were made:
 
-- The **text decoder only** was extracted; the vision and audio towers (for the 12B checkpoint,
-  its encoder-free vision and audio embedders) were never read.
+- For the E2B and E4B checkpoints, the **text decoder only** was extracted; their vision and audio
+  towers were never read.
+- For the 12B checkpoint, the **text decoder and the encoder-free vision embedder** were extracted,
+  each as its own graph; its audio embedder was never read. The vision embedder's position table
+  was split into its two columns, and an image's rows reach the text decoder's graph as two inputs.
 - The graphs were re-expressed in the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors) in a states form suited to chunked prefill and
   decode.
@@ -2023,7 +2259,8 @@ The following changes were made:
   weights are stored as packed int4 (group 32: the codes of the grid and one step per group,
   refitted from the stored values) instead of being rounded again. The values are therefore not
   bit-identical to the source checkpoints. The parameters off the grid (the norms, among others)
-  are stored in float32.
+  are stored in float32. The 12B vision embedder is not on that grid and keeps the checkpoint's BF16
+  values (the parameters stored in float32 hold the same values widened).
 - The exit was narrowed to the selected rows' logits and final hidden states. For the E2B and E4B
   checkpoints, the **per-layer embedding tables were moved out of the graph** into container
   assets that the host gathers (the 12B checkpoint has none).
