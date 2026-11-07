@@ -62,6 +62,7 @@ E2B and E4B have a real tower and causal attention, and come later. They need th
 | Bidirectional kernel | u32 identity against the always-true predicate with the host's mask, 33 cases, 4 fault injections that mismatch |
 | Weight parts of the re-exported 12B container | 31 of 32 parts byte-identical; only part 1 (the descriptors) changed |
 | Mask A against B on the first step, one image, real weights | max \|Δ logit\| 1.55, KL(A‖B) 8.8e-4, top-1 the same |
+| Kill line of decision 2: 12B `i4-fast` decode, P = 973, 64 tokens, ABBA × 2, against the graph without the soft inputs | 22.63 against 22.70 ms per token (−0.3%, within the drift between runs); the same token ids in all 8 runs |
 
 ## Consequences
 
