@@ -521,3 +521,31 @@ Rejected:
   between turns (`onOverflow`) stays the only place the conversation changes.
 - **A `remaining()` helper alone**: every caller would re-implement the same call and the same choice
   of what to do at the limit, and no stop reason could tell the two limits apart.
+
+## Addendum (2026-11-06) — `capacity: "fit"`
+
+**Problem.** Choosing a capacity means guessing how much VRAM is free. WebGPU exposes neither the total nor the free amount
+(ADR 0070 decision 5), and a guess that is too large ends in an out-of-memory failure in the middle of a run.
+
+**Decision.** `Pipeline.fitCapacity()` returns the largest capacity this device can hold right now.
+`SequenceOptions.capacity` and `ChatOptions.capacity` accept `"fit"`, which means that result. A `ChatSession` takes the
+number (`capacity: await pipeline.fitCapacity()`), since it holds one capacity for its life.
+
+- **Candidates**: `maxPosition`, then the powers of two below it, then the distribution's default. Nothing below the default
+  is tried: it is what the distribution promises to work, and if even that does not fit the call fails loudly.
+- **Need**: `peakAccountedBytes − resident.weights.totalBytes` of `estimateSessionMemory`, because the weights are already on
+  the GPU when the call runs. A candidate over a limit on one buffer is skipped.
+- **Margin**: 1 GiB on top of the need. The sustained VRAM ran up to about 320 MiB over the estimate, and short peaks 430–670
+  MiB more ([research 2026-11-05](../research/2026-11-05-gemma4-long-context.md) §5).
+- **Check**: one trial allocation per candidate through `fitsHeadroom` (ADR 0070), which needed the Dawn change in that ADR's
+  addendum of 2026-11-06.
+
+The result is a fact of that moment, not a reservation, and it differs across machines and runs. It does not move the
+generated tokens, as capacity does not. An explicit opt-in; the default stays the distribution's.
+
+On the RTX 3080 Ti under Node + Dawn, 12B `i4-fast` fits 32768 and E2B fits 131072, and a 12B chat at the result ran at
+8.9 GiB. Chrome (D3D12) has not been checked (limitations).
+
+Rejected: **making it the default.** A capacity that follows the moment would make a conversation's memory depend on what
+else was running when it began. **Reporting a free-VRAM number**: ADR 0070 decision 5 rejected that face of the API, and this
+answers the question without one.

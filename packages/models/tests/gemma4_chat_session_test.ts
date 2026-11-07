@@ -346,10 +346,13 @@ const fakeHost = (
     forks: () => forks,
     sequence: (options = {}): Promise<GenerationSequence> => {
       created += 1;
-      capacities.push(options.capacity);
+      // The session resolves its capacity at construction, so it always passes a number.
+      const { capacity } = options;
+      if (capacity === "fit") throw new Error('A ChatSession passed capacity "fit"');
+      capacities.push(capacity);
       speculatives.push(options.speculative);
       speculativeKeys.push(Object.hasOwn(options, "speculative"));
-      const sequence = makeSequence(options.capacity ?? program.capacity, 0);
+      const sequence = makeSequence(capacity ?? program.capacity, 0);
       const hold = faults.holdSequence;
       if (hold === undefined) return Promise.resolve(sequence);
       return new Promise<GenerationSequence>((resolve) => hold(() => resolve(sequence)));

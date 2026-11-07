@@ -356,6 +356,7 @@ export const Gemma4Page = () => {
   /** The message of the running turn, shown until the turn settles. */
   const [pendingText, setPendingText] = useState<string | undefined>(undefined);
   const [sessionReleaseError, setSessionReleaseError] = useState<unknown>(undefined);
+  const [fitError, setFitError] = useState<unknown>(undefined);
   const [live] = useState(() => createLiveReplyStore(frameScheduler));
   useEffect(() => () => live.dispose(), [live]);
   const nextEntryId = useRef(0);
@@ -992,14 +993,34 @@ export const Gemma4Page = () => {
                     : "KV positions this chat allocates."
                 }
               >
-                <Input
-                  id="gemma4-capacity"
-                  inputMode="numeric"
-                  value={chatForm.capacity}
-                  placeholder={config?.ok === true ? String(config.config.capacity) : ""}
-                  onChange={(event) => setChatForm({ ...chatForm, capacity: event.target.value })}
-                  disabled={running}
-                />
+                <div className="flex gap-2">
+                  <Input
+                    id="gemma4-capacity"
+                    inputMode="numeric"
+                    value={chatForm.capacity}
+                    placeholder={config?.ok === true ? String(config.config.capacity) : ""}
+                    onChange={(event) => setChatForm({ ...chatForm, capacity: event.target.value })}
+                    disabled={running}
+                  />
+                  <Button
+                    variant="outline"
+                    disabled={running || pipeline.kind !== "ready"}
+                    onClick={() => {
+                      if (pipeline.kind !== "ready") return;
+                      setFitError(undefined);
+                      pipeline.pipeline.fitCapacity().then((capacity) => {
+                        setChatForm((form) => ({ ...form, capacity: String(capacity) }));
+                      }, setFitError);
+                    }}
+                  >
+                    Fit
+                  </Button>
+                </div>
+                {fitError === undefined ? null : (
+                  <p className="text-xs text-destructive">
+                    {fitError instanceof Error ? fitError.message : "Fit failed."}
+                  </p>
+                )}
               </Field>
               <Field
                 id="gemma4-overflow"

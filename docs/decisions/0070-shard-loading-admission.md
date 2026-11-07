@@ -180,3 +180,17 @@ small-output temperature-0 decode).
 - **The co-shard MUST of decision 1 moved to rule ③ of container-v1 §5.**
 - `parseSafetensors` no longer takes a separate file length (`80c4cd74`); it reads the whole
   `ArrayBuffer` passed as the file.
+
+## Addendum (2026-11-06) — `fitsHeadroom` settles its release on Dawn
+
+The trial allocation was studied on wgpu, whose release happens at a device poll. **On Dawn the memory of a destroyed buffer
+comes back only when a later submit completes** (ADR [0095](0095-plan-backing-budget.md) addendum of 2026-10-24). So the probe left its
+own trial allocation on the device, and the allocation it had just approved failed: `capacity: "fit"` (ADR 0083 addendum of
+2026-11-06) hit out-of-memory on a 12B chat on the RTX 3080 Ti.
+
+`fitsHeadroom` now waits for the poll, then submits an empty command list, then waits again. The order is not free. wgpu's
+submit-side 99% check runs before its release, so a submit before the poll would run that check while still holding the trial
+allocation.
+
+The measured boundary of an otherwise empty RTX 3080 Ti under Dawn: 11 GiB true, 12 GiB false, nothing left behind. The largest
+amount repeated is pinned by `packages/runtime/tests/gpu_headroom_test.ts`. Chrome has not been checked.

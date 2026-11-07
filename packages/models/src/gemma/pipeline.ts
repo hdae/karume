@@ -46,6 +46,7 @@ import {
   gemmaSubmitPolicy,
   resolveGemmaSessionOptions,
 } from "./session-options.ts";
+import { fitCapacityCandidates, pickFitCapacity } from "./fit-capacity.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatPle, ropeInputs as qatRopeInputs } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -53,7 +54,9 @@ import {
   acquireGpu,
   type AdmissionReport,
   estimateGraphMemory,
+  ExecutionError,
   type EstimateOptions as GraphEstimateOptions,
+  fitsHeadroom,
   type GenerationContext,
   type GpuContext,
   planWeightResidency,
@@ -89,6 +92,7 @@ import {
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
@@ -591,9 +595,10 @@ export type SequenceOptions = {
    * The capacity of the full slots this conversation allocates (default: the distribution's default
    * — {@link PipelineConfig.capacity}).
    *
-   * MUST: `chunkLength ≤ capacity ≤ maxPosition` (`createGenerationSequence` fails loudly).
+   * MUST: `chunkLength ≤ capacity ≤ maxPosition` (`createGenerationSequence` fails loudly). `"fit"` is
+   * {@link Pipeline.fitCapacity}'s result.
    */
-  readonly capacity?: number;
+  readonly capacity?: number | "fit";
   /**
    * Whether this conversation uses speculative decoding (default = `true` if the pipeline has a
    * drafter).
@@ -685,9 +690,10 @@ export type ChatOptions = {
    * {@link PipelineConfig.capacity}).
    *
    * `chat` is one turn = one sequence, so this is "how much KV to take for this turn". To carry a
-   * long conversation, use `ChatSession` (capacity per session).
+   * long conversation, use `ChatSession` (capacity per session). `"fit"` is
+   * {@link Pipeline.fitCapacity}'s result.
    */
-  readonly capacity?: number;
+  readonly capacity?: number | "fit";
   /**
    * Prefill progress (each time one chunk is committed).
    *
@@ -1841,7 +1847,8 @@ export class GemmaPipeline {
     // the accepted set fails synchronously). With no stop strings it passes everything through, so
     // the path is not split in two.
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
-    const capacity = options.capacity;
+    const capacityOption = options.capacity;
+    const fitCapacity = (): Promise<number> => this.fitCapacity();
     const onPrefill = options.onPrefill;
     const onToken = options.onToken;
     // The speculation DI and the observation hook are also decided **at issue** (the body does not run
@@ -1881,6 +1888,7 @@ export class GemmaPipeline {
           throw new Error(`${state.entry}: cannot generate after dispose`);
         }
         release = await acquire();
+        const capacity = capacityOption === "fit" ? await fitCapacity() : capacityOption;
         sequence = await createGenerationSequence({
           session: state.greedyOutput?.session ?? state.session,
           ...(state.greedyOutput === undefined
@@ -1966,6 +1974,7 @@ export class GemmaPipeline {
     // Tracked from the call on: a dispose issued while this allocates waits for it (#inFlight).
     return await this.#track(
       (async (): Promise<GenerationSequence> => {
+        const capacity = options.capacity === "fit" ? await this.fitCapacity() : options.capacity;
         const inner = await createGenerationSequence({
           session: state.greedyOutput?.session ?? state.session,
           ...(state.greedyOutput === undefined
@@ -1975,7 +1984,7 @@ export class GemmaPipeline {
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
           program: state.wiring,
-          ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
+          ...(capacity === undefined ? {} : { capacity }),
           ...(speculative === undefined ? {} : { speculative }),
           ...(onRun === undefined ? {} : { onRun }),
         });
@@ -2224,6 +2233,46 @@ export class GemmaPipeline {
           " never runs at the same time as a verify run, and the requirement depends on neither k nor capacity)",
       ],
     };
+  }
+
+  /**
+   * The largest capacity this device can hold right now: the position limit, then the powers of two
+   * below it, down to the distribution's default, taking the first whose estimated need plus a
+   * margin passes a trial allocation (`fitsHeadroom` — ADR 0070 decision 5).
+   *
+   * The value is a fact of this moment, not a reservation: other processes move it, and it differs
+   * between machines. It does not move the generated tokens. A larger capacity costs VRAM from the
+   * first token, so take it only for a conversation that needs it. Fails loudly when not even the
+   * default fits. For a `ChatSession`, pass the result as its `capacity`.
+   */
+  async fitCapacity(): Promise<number> {
+    if (this.#disposal !== undefined) {
+      throw new Error(`${this.#state.entry}: cannot fit a capacity after dispose`);
+    }
+    const { gpu, wiring, entry } = this.#state;
+    // The weights are on the GPU already; the rest of the peak is what a conversation adds.
+    const needBytes = (capacity: number): number | undefined => {
+      try {
+        const report = this.estimateSessionMemory({ capacity });
+        return report.peakAccountedBytes - report.resident.weights.totalBytes;
+      } catch (cause) {
+        // A slot over a buffer limit: this candidate cannot exist on this device.
+        if (cause instanceof ExecutionError) return undefined;
+        throw cause;
+      }
+    };
+    await settleReleasedMemory(gpu);
+    const picked = await pickFitCapacity(
+      fitCapacityCandidates(wiring.capacity, wiring.maxPosition),
+      needBytes,
+      (bytes) => fitsHeadroom(gpu, bytes),
+    );
+    if (picked === undefined) {
+      throw new Error(
+        `${entry}: capacity "fit" found nothing this device can allocate now, not even the default ${wiring.capacity}`,
+      );
+    }
+    return picked;
   }
 
   /**
