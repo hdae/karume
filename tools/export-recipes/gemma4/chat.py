@@ -1781,8 +1781,8 @@ def harvest_rejected_image_cases(
 
 
 def vision_tokens(processor: Any) -> dict[str, int]:
-    """The three ids and the budget, as upstream's processor states them (what `pipelineConfig.vision`
-    declares for the TS side)."""
+    """The three ids and the budget, as upstream's processor states them (what
+    `pipelineConfig.vision` declares for the TS side)."""
     tokenizer = processor.tokenizer
     return {
         "softTokenBudget": int(processor.image_processor.max_soft_tokens),

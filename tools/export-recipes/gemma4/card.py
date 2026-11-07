@@ -338,14 +338,26 @@ def _gemma4_overview(
     """The overview; `upstream` names the line's checkpoints ({@link _gemma4_upstream_spellings})
     and `extra` is the line's own bullets, placed after the tokenizer bullet."""
     config = default_model(manifest)["pipelineConfig"]
+    seeing = sorted(
+        name for name, model in manifest["models"].items() if "vision" in model["weights"]
+    )
+    decoder = (
+        "the **text decoder** of"
+        if not seeing
+        else f"the **text decoder** and {_spell_models(seeing)}'s **vision embedder** of"
+    )
+    io = (
+        "string in, string out."
+        if not seeing
+        else f"messages in (images on {_spell_models(seeing)}), text out."
+    )
     return [
         "## What is this",
         "",
-        f"A chat distribution: the **text decoder** of"
-        f" {_gemma4_upstream_spellings(manifest, upstream)},",
+        f"A chat distribution: {decoder} {_gemma4_upstream_spellings(manifest, upstream)},",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
         "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
-        "browser and in Deno — string in, string out.",
+        f"browser and in Deno — {io}",
         "",
         "- **Tokenizer and chat format ship with the weights.** `chat()` renders the turns,",
         "  encodes them, samples, and decodes incrementally, so callers hand over messages and",
