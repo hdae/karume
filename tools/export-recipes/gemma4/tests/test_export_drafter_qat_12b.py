@@ -338,6 +338,7 @@ class TestTheGoldensAgainstAPleFreeTarget:
             with torch.no_grad():
                 return wrapper(
                     ids,
+                    *unified.no_soft_inputs(ids, int(config.hidden_size)),
                     *decode.rope_args(specs, decode.positions_for(ids)),
                     decode.last_row_for(ids),
                 )

@@ -5,7 +5,7 @@
 The line runs the regular plan (`gemma4_plan`) with its own `Gemma4Line`, so the checks both lines
 share keep their tests in `test_distribution.py`; this file holds what the line decides itself —
 the int4 drafter, the schema-4 PLE with its group size, the pins of both containers, the series
-names, the card and the notice.
+names, 12B's vision embedder, the card and the notice.
 """
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
+from container_series import write_component
 
 from _shared.container_read import read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
@@ -36,6 +38,7 @@ from gemma4.distribution import (
     GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN,
     GEMMA4_QAT_Q4_0_REPO_NAME,
     GEMMA4_ROLE,
+    GEMMA4_VISION_ROLE,
     QAT_Q4_0_PIPELINE,
     Gemma4Sources,
     gemma4_ple_index,
@@ -69,6 +72,20 @@ QAT_REPOSITORY_TOKENIZER = b'{"model": "pre-fix tokenizer shipped with the QAT w
 
 #: A revision no pin names.
 OTHER_REVISION = "1" * 40
+
+#: The stand-in's image ids and the budget (**not** the real 258880 / 255999 / 258882 / 280: every
+#: number of `pipelineConfig.vision` must come from a reader).
+IMAGE_TOKEN = 4
+BEGIN_IMAGE_TOKEN = 3
+END_IMAGE_TOKEN = 5
+BUDGET = 70
+SPELLINGS: Mapping[str, str] = {
+    "image_token": "<|image|>",
+    "boi_token": "<|image>",
+    "eoi_token": "<image|>",
+}
+#: The stand-in vocabulary with the three spellings at the declared ids.
+VISION_VOCAB = ("t0", "t1", "t2", "<|image>", "<|image|>", "<image|>")
 
 
 @pytest.fixture(autouse=True)
@@ -126,31 +143,42 @@ def _drafter(model: str, *, head: str = "i4", revision: str | None = None) -> li
     )
 
 
+def _vision(revision: str | None = None, **overrides: Any) -> list[bytes]:
+    """A vision container of the line, naming 12B's QAT weights pin."""
+    return fixture.vision_container(
+        provenance=_provenance(revision or QAT_TARGET_PINS["12b"].weights.revision), **overrides
+    )
+
+
 def _build(
     root: Path,
     model: str = "e2b",
     *,
     product: list[bytes] | None = None,
     drafter: list[bytes] | None = None,
+    vision: list[bytes] | None = None,
     recorded: bytes = UPSTREAM_TOKENIZER,
     ple_dim: int | None = None,
     suppress: list[int] | None = None,
     max_position: int = fixture.MAX_POSITION,
+    config_ids: Mapping[str, int] | None = None,
 ) -> Gemma4Sources:
-    """One model's series of the line under `root`: the product, the drafter and the tokenizer
-    series (its asset recording `recorded` as its source), and the two upstream directories the
-    pins name — the weights' config (next to the QAT repository's own `tokenizer.json`), and the
-    tokenizer and the generation defaults. `ple_dim` / `suppress` / `max_position` replace the
-    model's config values."""
+    """One model's series of the line under `root`: the product, the drafter, 12B's vision and the
+    tokenizer series (its asset recording `recorded` as its source), and the two upstream
+    directories the pins name — the weights' config (next to the QAT repository's own
+    `tokenizer.json`), and the tokenizer, the generation defaults and 12B's processor
+    configuration. `ple_dim` / `suppress` / `max_position` / `config_ids` replace the model's config
+    values."""
     base = model.upper() if model != "12b" else "12B"
+    twelve_b = model == "12b"
     sources = Gemma4Sources(
         product=root / "series" / f"gemma4-{model}-qat-product",
         drafter=root / "series" / f"gemma4-{model}-qat-drafter",
         tokenizer=root / "series" / f"gemma4-{model}-tokenizer",
         model=root / "inputs" / f"gemma-4-{base}-it-qat-q4_0-unquantized",
         upstream_tokenizer=root / "inputs" / f"gemma-4-{base}-it",
+        vision=root / "series" / "gemma4-12b-vision" if twelve_b else None,
     )
-    twelve_b = model == "12b"
     fixture.write_series(
         sources.product,
         sources.tokenizer,
@@ -161,6 +189,7 @@ def _build(
         tokenizer={
             **fixture.tokenizer_asset(),
             "source": {"sha256": hashlib.sha256(recorded).hexdigest()},
+            **({"vocab": list(VISION_VOCAB)} if twelve_b else {}),
         },
         text_config={
             **fixture.TEXT_CONFIG,
@@ -184,6 +213,37 @@ def _build(
     )
     (sources.upstream_tokenizer / "tokenizer.json").write_bytes(UPSTREAM_TOKENIZER)
     (sources.model / "tokenizer.json").write_bytes(QAT_REPOSITORY_TOKENIZER)
+    if twelve_b:
+        assert sources.vision is not None
+        write_component(sources.vision / "model.krm", vision if vision is not None else _vision())
+        (sources.vision / "vision.corpus-image.safetensors").write_bytes(b"not distributed")
+        (sources.vision / "greedy.corpus-image.safetensors").write_bytes(b"not distributed")
+        (sources.vision / "reference.json").write_text("{}\n", encoding="utf-8")
+        declared = json.loads((sources.model / "config.json").read_text(encoding="utf-8"))
+        declared.update(
+            {
+                "image_token_id": IMAGE_TOKEN,
+                "boi_token_id": BEGIN_IMAGE_TOKEN,
+                "eoi_token_id": END_IMAGE_TOKEN,
+                **(config_ids or {}),
+            }
+        )
+        (sources.model / "config.json").write_text(json.dumps(declared), encoding="utf-8")
+        (sources.upstream_tokenizer / "tokenizer_config.json").write_text(
+            json.dumps(dict(SPELLINGS)), encoding="utf-8"
+        )
+        (sources.upstream_tokenizer / "processor_config.json").write_text(
+            json.dumps(
+                {
+                    "image_processor": {
+                        "max_soft_tokens": BUDGET,
+                        "patch_size": fixture.VISION_PATCH_SIZE,
+                        "pooling_kernel_size": fixture.VISION_POOLING,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
     return sources
 
 
@@ -254,7 +314,9 @@ class TestQatLayout:
         _, manifest = _assemble(tmp_path, ("12b",))
         entry = manifest["models"]["12b"]
 
-        assert sorted(entry["weights"]) == [GEMMA4_DRAFTER_ROLE, GEMMA4_ROLE]
+        assert sorted(entry["weights"]) == sorted(
+            [GEMMA4_DRAFTER_ROLE, GEMMA4_ROLE, GEMMA4_VISION_ROLE]
+        )
         assert entry["pipelineConfig"]["chatDialect"] == "gemma4-unified"
         assert entry["pipelineConfig"]["suppressTokens"] == sorted(SUPPRESSED)
 
@@ -583,6 +645,7 @@ class TestQatNaming:
         assert sources.product == tmp_path / product
         assert sources.drafter == tmp_path / f"gemma4-{model}-qat-drafter"
         assert sources.tokenizer == tmp_path / tokenizer
+        assert sources.vision == (tmp_path / "gemma4-12b-vision" if model == "12b" else None)
 
     def test_a_model_outside_the_line_fails_loudly(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="no model 'unlisted'"):
@@ -591,6 +654,118 @@ class TestQatNaming:
     def test_the_repository_is_the_line_s_for_every_model(self) -> None:
         for model in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM:
             assert QAT_Q4_0_PIPELINE.repo_name(model) == "karume-gemma4-qat"
+
+
+class TestQatVision:
+    """12B's vision embedder: a third weights role, one bf16 storage, declared rows."""
+
+    def test_every_quant_of_12b_maps_the_vision_role_to_bf16(self, tmp_path: Path) -> None:
+        _, manifest = _assemble(tmp_path, ("12b",))
+        entry = manifest["models"]["12b"]
+
+        assert sorted(entry["weights"][GEMMA4_VISION_ROLE]) == ["bf16"]
+        assert list(entry["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        for name, quant in entry["quants"].items():
+            assert quant["weights"] == {
+                GEMMA4_ROLE: "i4",
+                GEMMA4_DRAFTER_ROLE: "i4",
+                GEMMA4_VISION_ROLE: "bf16",
+            }, name
+
+    def test_the_container_lands_at_its_storage_s_path_without_the_goldens(
+        self, tmp_path: Path
+    ) -> None:
+        out_dir, _ = _assemble(tmp_path, ("12b",))
+        files = _files(out_dir)
+
+        assert any(path.startswith("12b/vision/model.bf16") for path in files)
+        assert not [path for path in files if "corpus-image" in path]
+
+    def test_the_pipeline_config_reads_every_number_from_its_source(self, tmp_path: Path) -> None:
+        plan = gemma4_qat_q4_0_plan(_build(tmp_path, "12b"), "12b")
+
+        assert plan.pipeline_config["vision"] == {
+            "softTokenBudget": BUDGET,
+            "imageTokenId": IMAGE_TOKEN,
+            "beginImageTokenId": BEGIN_IMAGE_TOKEN,
+            "endImageTokenId": END_IMAGE_TOKEN,
+            "hiddenSize": fixture.HIDDEN,
+        }
+
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_e2b_and_e4b_declare_no_vision(self, tmp_path: Path, model: str) -> None:
+        plan = gemma4_qat_q4_0_plan(_build(tmp_path, model), model)
+
+        assert GEMMA4_VISION_ROLE not in plan.weights
+        assert GEMMA4_VISION_ROLE not in plan.artifacts
+        assert "vision" not in plan.pipeline_config
+
+    def test_it_refuses_12b_without_its_vision_series(self, tmp_path: Path) -> None:
+        sources = replace(_build(tmp_path, "12b"), vision=None)
+
+        with pytest.raises(DistError, match="the vision series is missing"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_a_vision_series_for_a_model_without_one(self, tmp_path: Path) -> None:
+        twelve_b = _build(tmp_path / "12b", "12b")
+        sources = replace(_build(tmp_path / "e2b", "e2b"), vision=twelve_b.vision)
+
+        with pytest.raises(DistError, match="the vision series is given"):
+            gemma4_qat_q4_0_plan(sources, "e2b")
+
+    def test_the_bf16_exception_is_the_vision_role_s_alone(self) -> None:
+        storage = gemma4_distribution.GEMMA4_QAT_Q4_0_STORAGE
+
+        assert storage.required[GEMMA4_VISION_ROLE] == "bf16"
+        assert "bf16" not in storage.forbidden[GEMMA4_VISION_ROLE]
+        assert "bf16" in storage.forbidden[GEMMA4_ROLE]
+        assert "bf16" in storage.forbidden[GEMMA4_DRAFTER_ROLE]
+
+    def test_it_refuses_a_vision_container_on_the_int4_grid(self, tmp_path: Path) -> None:
+        """The embedder is not on the grid: an int4 container would hold rounded weights with the
+        right graph, so only the storage tells it apart."""
+        sources = _build(tmp_path, "12b", vision=_vision(storage="i4"))
+
+        with pytest.raises(DistError, match=f"{GEMMA4_VISION_ROLE}: storage .* has no bf16"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_a_vision_container_from_another_revision(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path, "12b", vision=_vision(OTHER_REVISION))
+
+        with pytest.raises(DistError, match="revision"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_an_embedder_of_another_width(self, tmp_path: Path) -> None:
+        """The output must fit the main graph, and the rows what the processor emits."""
+        wide = _build(tmp_path / "wide", "12b", vision=_vision(hidden_size=fixture.HIDDEN + 1))
+        with pytest.raises(DistError, match="hidden_size"):
+            gemma4_qat_q4_0_plan(wide, "12b")
+
+        rows = _build(tmp_path / "rows", "12b", vision=_vision(pixel_width=6912))
+        with pytest.raises(DistError, match="the vision graph's inputs"):
+            gemma4_qat_q4_0_plan(rows, "12b")
+
+    @pytest.mark.parametrize("config_id", ["image_token_id", "boi_token_id", "eoi_token_id"])
+    def test_it_refuses_an_image_id_that_is_another_token(
+        self, tmp_path: Path, config_id: str
+    ) -> None:
+        sources = _build(tmp_path, "12b", config_ids={config_id: 0})
+
+        with pytest.raises(DistError, match=rf"{config_id} 0 is 't0'"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_a_soft_mask_of_another_form(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path, "12b", product=_product("12b", soft_mask_width=fixture.HIDDEN))
+
+        with pytest.raises(DistError, match="soft_mask"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_the_input_spellings_mirror_the_exports(self) -> None:
+        pytest.importorskip("torch")
+        from gemma4 import export_product as product
+
+        assert product.SOFT_EMBEDS == gemma4_distribution.GEMMA4_SOFT_EMBEDS
+        assert product.SOFT_MASK == gemma4_distribution.GEMMA4_SOFT_MASK
 
 
 class TestQatCard:
@@ -613,6 +788,39 @@ class TestQatCard:
         assert "the per-layer embeddings of `e2b`" in card
         assert "`12b` has no per-layer embeddings" in card
         assert "// speculative: {}, // load the MTP drafter — available for: e2b / 12b" in card
+
+    def test_only_a_model_carrying_the_embedder_is_said_to_take_images(
+        self, tmp_path: Path
+    ) -> None:
+        """The overview tells 12B's image input from the towers E2B / E4B do not ship, and the
+        attribution names what was extracted."""
+        out_dir, _ = _assemble(tmp_path, ("e2b", "12b"))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+
+        assert "- **Image input (`12b`)**: the encoder-free vision embedder ships" in card
+        assert "- **Not multimodal for the others.**" in card
+        assert "vision and audio towers for `e2b`" in card
+        assert "they cannot take images or audio." in card
+        assert "- **Every text weight keeps the checkpoint's own 4-bit grid.**" in card
+        assert "The encoder-free vision embedder of `12b` was extracted" in card
+
+    def test_a_manifest_without_the_embedder_stays_text_only(self, tmp_path: Path) -> None:
+        out_dir, _ = _assemble(tmp_path, ("e2b",))
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+
+        assert "- **Not multimodal here.** The published checkpoint also carries" in card
+        assert "this distribution contains neither, and cannot take images or audio." in card
+        assert "Image input" not in card
+        assert "- **Every weight keeps the checkpoint's own 4-bit grid.**" in card
+        assert "vision embedder" not in card
+
+    def test_the_reference_seat_says_the_embedder_is_not_int4(self) -> None:
+        note = gemma4_distribution.GEMMA4_QAT_Q4_0_VISION_NOTE
+        for model, carries in (("e2b", False), ("e4b", False), ("12b", True)):
+            description = gemma4_distribution.gemma4_qat_q4_0_quants(model)["i4"]["description"]
+            assert description.endswith(note) is carries, model
+        declared = gemma4_distribution.GEMMA4_QAT_Q4_0_QUANTS["i4"]["description"]
+        assert not declared.endswith(note)
 
     def test_a_manifest_without_per_layer_embeddings_states_none(self, tmp_path: Path) -> None:
         out_dir, _ = _assemble(tmp_path, ("12b",))
@@ -684,6 +892,15 @@ class TestQatLegalText:
         assert (out_dir / "NOTICE.md").read_text(encoding="utf-8") == (
             GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
         )
+
+    def test_the_notice_is_true_per_model_about_what_was_read(self) -> None:
+        notice = " ".join(GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN.split())
+
+        assert "For the E2B and E4B checkpoints, the **text decoder only** was extracted" in notice
+        assert "their vision and audio towers were never read" in notice
+        assert "the **text decoder and the encoder-free vision embedder** were extracted" in notice
+        assert "its audio embedder was never read" in notice
+        assert "keeps the checkpoint's BF16 values" in notice
 
     def test_the_notice_names_every_upstream_of_the_line(self) -> None:
         for model, weights in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM.items():

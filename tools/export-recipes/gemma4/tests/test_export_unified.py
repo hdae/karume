@@ -18,6 +18,11 @@ fixed here are the properties that would otherwise pass silently:
 - the export wrapper's logits are upstream `Gemma4UnifiedForCausalLM`'s (eager, F32) at lengths
   on both sides of the sliding window;
 - the PLE-free product graph has no `per_layer_inputs`;
+- with an all-false `soft_mask` the graph's forward is the text forward, byte for byte; a true row
+  takes its `soft_embeds` vector unscaled while the others keep the scaled embedding; the form check
+  catches an image vector that is scaled, or a mask of another form;
+- the mask helpers of a forward with an image leave the traced masks alone: without a block they are
+  those masks, bit for bit (upstream's masks are compared in `test_export_vision`);
 - the R4 reference (resident i4 codes, dequantized at use) equals an F32 load whose linears and
   embedding are codes · steps, weight for weight and output for output, and holds exactly what
   the container's bytes decode to;
@@ -57,7 +62,7 @@ from gemma4 import provenance, sources
 from karume.container import container_parts
 from karume.dist import DistError
 from karume.emit import unpack_int4
-from karume.ir import IrNode
+from karume.ir import IrInput, IrNode
 from karume.ops import ATTENTION_OP, STATE_APPEND_OP
 from karume.quantize import DEFAULT_GROUP_SIZE, dequantize_int4
 
@@ -236,6 +241,7 @@ def _call(wrapper: nn.Module, ids: torch.Tensor, rows: int) -> tuple[torch.Tenso
     with torch.no_grad():
         return wrapper(
             ids,
+            *unified.no_soft_inputs(ids, HIDDEN),
             *decode.rope_args(specs, decode.positions_for(ids)),
             decode.last_rows_for(ids, rows),
         )
@@ -245,6 +251,170 @@ def _call(wrapper: nn.Module, ids: torch.Tensor, rows: int) -> tuple[torch.Tenso
 def small_blocks(monkeypatch) -> None:
     """Row blocks of 16 rows (a 64-wide F32 row is 256 B), so every weight spans several."""
     monkeypatch.setattr(unified, "CHUNK_BYTES", 16 * HIDDEN * 4)
+
+
+def _text_forward(wrapper: unified.UnifiedProductWrapper, ids: torch.Tensor, rows: int) -> Any:
+    """The forward as it was before the image rows: the embedding goes straight to the decoder."""
+    specs = decode.rope_specs(wrapper.model.config)
+    length = ids.shape[1]
+    mask = {
+        one_shot.FULL_ATTENTION: one_shot.additive_causal_mask(length),
+        one_shot.SLIDING_ATTENTION: one_shot.additive_sliding_mask(length, wrapper.sliding_window),
+    }
+    tables = decode.bound_rope(*decode.rope_args(specs, decode.positions_for(ids)))
+    with torch.no_grad(), wrapper.model.model.rotary_emb.bound(tables):
+        hidden = wrapper.model.model(
+            inputs_embeds=wrapper.model.model.embed_tokens(ids),
+            attention_mask=mask,
+            position_ids=None,
+            use_cache=False,
+        ).last_hidden_state
+        rowed = nn.functional.embedding(decode.last_rows_for(ids, rows), hidden[0]).unsqueeze(0)
+        cap = float(wrapper.model.config.final_logit_softcapping)
+        return torch.tanh(wrapper.model.lm_head(rowed) / cap) * cap, rowed
+
+
+class TestImageRows:
+    def test_an_all_false_mask_is_the_text_forward_byte_for_byte(
+        self, checkpoint_dir, config
+    ) -> None:
+        """Both sides of the sliding window: the greedy goldens of the product series keep their
+        numbers because this holds."""
+        wrapper = naive_wrapper(checkpoint_dir, config)
+        for length in (WINDOW, 3 * WINDOW + 5):
+            ids = _ids(length, seed=length)
+            for got, want in zip(
+                _call(wrapper, ids, 2), _text_forward(wrapper, ids, 2), strict=True
+            ):
+                assert torch.equal(got, want), length
+
+    def test_soft_embeds_are_ignored_where_the_mask_is_false(self, checkpoint_dir, config) -> None:
+        wrapper = naive_wrapper(checkpoint_dir, config)
+        ids = _ids(WINDOW + 3)
+        specs = decode.rope_specs(config)
+        _, soft_mask = unified.no_soft_inputs(ids, HIDDEN)
+        with torch.no_grad():
+            noisy = wrapper(
+                ids,
+                torch.randn(1, ids.shape[1], HIDDEN),
+                soft_mask,
+                *decode.rope_args(specs, decode.positions_for(ids)),
+                decode.last_rows_for(ids, 1),
+            )
+
+        for got, want in zip(noisy, _call(wrapper, ids, 1), strict=True):
+            assert torch.equal(got, want)
+
+    def test_a_true_row_takes_its_vector_unscaled_and_the_others_stay_scaled(
+        self, checkpoint_dir, config
+    ) -> None:
+        wrapper = naive_wrapper(checkpoint_dir, config)
+        ids = _ids(WINDOW + 3)
+        block = (1, 4)
+        embeds = torch.randn(block[1] - block[0], HIDDEN)
+        seen: dict[str, torch.Tensor] = {}
+        handle = wrapper.model.model.register_forward_pre_hook(
+            lambda _module, _args, kwargs: seen.__setitem__("embeds", kwargs["inputs_embeds"]),
+            with_kwargs=True,
+        )
+        specs = decode.rope_specs(config)
+        try:
+            with torch.no_grad():
+                wrapper(
+                    ids,
+                    *unified.image_soft_inputs(ids, embeds, block),
+                    *decode.rope_args(specs, decode.positions_for(ids)),
+                    decode.last_rows_for(ids, 1),
+                )
+        finally:
+            handle.remove()
+
+        table = wrapper.model.model.embed_tokens.weight
+        scaled = table[ids[0]] * wrapper.model.model.embed_tokens.embed_scale
+        assert torch.equal(seen["embeds"][0, block[0] : block[1]], embeds)
+        assert torch.equal(seen["embeds"][0, : block[0]], scaled[: block[0]])
+        assert torch.equal(seen["embeds"][0, block[1] :], scaled[block[1] :])
+
+    def test_a_block_that_does_not_fit_the_embeddings_fails_loudly(self) -> None:
+        with pytest.raises(unified.UnifiedExportError, match="does not fit"):
+            unified.image_soft_inputs(_ids(8), torch.zeros(3, HIDDEN), (1, 5))
+
+    def test_the_masks_without_a_block_are_the_traced_masks(self) -> None:
+        """Two helpers and the forward's own masks cannot drift: an empty block gives the additive
+        masks the graph folds, in both paths."""
+        length = 3 * WINDOW + 2
+        traced = {
+            one_shot.FULL_ATTENTION: one_shot.additive_causal_mask(length),
+            one_shot.SLIDING_ATTENTION: one_shot.additive_sliding_mask(length, WINDOW),
+        }
+        for masks in (unified.image_masks, unified.image_masks_or_block):
+            built = masks(length, WINDOW, (2, 2))
+            for kind, mask in traced.items():
+                assert torch.equal(built[kind], mask), kind
+
+    def test_path_a_opens_the_block_on_sliding_layers_only_within_the_window(self) -> None:
+        length, block = 8, (2, 7)
+        masks = unified.image_masks(length, WINDOW, block)
+        full = masks[one_shot.FULL_ATTENTION][0, 0] == 0
+        sliding = masks[one_shot.SLIDING_ATTENTION][0, 0] == 0
+
+        assert torch.equal(full, torch.tril(torch.ones(length, length, dtype=torch.bool)))
+        assert bool(sliding[2, 6])  # forward inside the block
+        assert not bool(sliding[6, 2])  # backward past the window of 4: the window still holds
+        assert not bool(sliding[1, 2])  # a text row before the block does not see into it
+        assert not bool(sliding[6, 7])  # a block row does not see the text after it
+
+    def test_path_b_also_opens_the_full_layers_and_ignores_the_window_in_the_block(self) -> None:
+        length, block = 8, (2, 7)
+        masks = unified.image_masks_or_block(length, WINDOW, block)
+        full = masks[one_shot.FULL_ATTENTION][0, 0] == 0
+        sliding = masks[one_shot.SLIDING_ATTENTION][0, 0] == 0
+
+        assert bool(full[2, 6]) and not bool(full[1, 2])
+        assert bool(sliding[6, 2])
+
+    def test_soft_mask_is_one_word_per_row(self, traced) -> None:
+        inputs = {spec.name: spec for spec in traced.graph.inputs}
+
+        assert inputs[product.SOFT_MASK].dtype == "bool"
+        assert list(inputs[product.SOFT_MASK].shape) == [1, decode.SEQ_SYMBOL, 1]
+        assert inputs[product.SOFT_EMBEDS].dtype == "f32"
+        assert list(inputs[product.SOFT_EMBEDS].shape) == [1, decode.SEQ_SYMBOL, HIDDEN]
+
+    def test_the_form_check_catches_a_scaled_image_vector(self, config, traced) -> None:
+        nodes = list(traced.graph.nodes)
+        index = next(i for i, node in enumerate(nodes) if node.op == product.WHERE_OP)
+        scaled = "scaled_soft_embeds"
+        merge = nodes[index]
+        nodes[index] = _with_ins(merge, [merge.ins[0], scaled, merge.ins[2]])
+        bent = SimpleNamespace(inputs=traced.graph.inputs, nodes=nodes)
+
+        with pytest.raises(AssertionError, match="unscaled"):
+            product.assert_soft_merge(bent, config)
+
+    def test_the_form_check_catches_a_mask_of_another_form(self, config, traced) -> None:
+        inputs = [
+            IrInput(name=spec.name, dtype=spec.dtype, shape=[1, decode.SEQ_SYMBOL, HIDDEN])
+            if spec.name == product.SOFT_MASK
+            else spec
+            for spec in traced.graph.inputs
+        ]
+        bent = SimpleNamespace(inputs=inputs, nodes=traced.graph.nodes)
+
+        with pytest.raises(AssertionError, match="soft_mask"):
+            product.assert_soft_merge(bent, config)
+
+    def test_the_form_check_catches_a_text_operand_that_is_the_image_vector(
+        self, config, traced
+    ) -> None:
+        nodes = list(traced.graph.nodes)
+        index = next(i for i, node in enumerate(nodes) if node.op == product.WHERE_OP)
+        merge = nodes[index]
+        nodes[index] = _with_ins(merge, [merge.ins[0], merge.ins[1], merge.ins[1]])
+        bent = SimpleNamespace(inputs=traced.graph.inputs, nodes=nodes)
+
+        with pytest.raises(AssertionError, match="text operand"):
+            product.assert_soft_merge(bent, config)
 
 
 class TestConfig:
@@ -399,6 +569,8 @@ class TestContainer:
 
         assert [spec.name for spec in verified.inputs] == [
             decode.INPUT_IDS,
+            product.SOFT_EMBEDS,
+            product.SOFT_MASK,
             *decode.ROPE_INPUTS,
             decode.TOKEN_ONLY_LAST_ROW,
         ]
@@ -982,6 +1154,8 @@ class TestPlan:
 
         assert [name for name, _, _ in summary["inputs"]] == [
             decode.INPUT_IDS,
+            product.SOFT_EMBEDS,
+            product.SOFT_MASK,
             *decode.ROPE_INPUTS,
             decode.TOKEN_ONLY_LAST_ROW,
         ]

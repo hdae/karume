@@ -82,6 +82,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("gemma4/export_product.py", "export_series"),
     ("gemma4/export_product_qat.py", "export_series"),
     ("gemma4/export_unified.py", "export_series"),
+    ("gemma4/export_vision.py", "export_series"),
     ("gemma4_qat/export.py", "export_qat"),
     ("gemma4/export_drafter.py", "export_series"),
     ("gemma4/export_drafter_qat.py", "export_series"),

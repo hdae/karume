@@ -67,6 +67,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("gemma4/export_product.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_product_qat.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_unified.py", "write_container", "GEMMA4_ROLE", "GEMMA4_ROLE"),
+    ("gemma4/export_vision.py", "write_container", "GEMMA4_VISION_ROLE", "GEMMA4_VISION_ROLE"),
     ("gemma4_qat/export.py", "export_qat", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     (
         "irodori/dacvae/export.py",
@@ -255,11 +256,19 @@ class TestTheNamesAreTheWeightsKeys:
         table = getattr(distribution, f"{family.upper()}_WEIGHTS")
         return set(table)
 
-    @pytest.mark.parametrize(
-        "family", ["anima", "irodori", "gemma4", "siglip2", "depth_anything", "wan"]
-    )
+    @pytest.mark.parametrize("family", ["anima", "irodori", "siglip2", "depth_anything", "wan"])
     def test_the_scripts_cover_exactly_the_weights_keys(self, family: str) -> None:
         assert self._named(family) == self._weights(family)
+
+    def test_gemma4_covers_exactly_the_weights_keys_of_each_line(self) -> None:
+        """`vision` is 12B's in the q4_0 QAT line alone: the regular line's table is every script's
+        name but that one, and the QAT line's 12B entry all of them."""
+        from gemma4.distribution import GEMMA4_VISION_ROLE, gemma4_qat_q4_0_weights
+
+        named = self._named("gemma4")
+
+        assert named - {GEMMA4_VISION_ROLE} == self._weights("gemma4")
+        assert named == set(gemma4_qat_q4_0_weights("12b"))
 
     def test_birefnet_covers_exactly_the_weights_keys_of_every_checkpoint(self) -> None:
         """BiRefNet's weights are per checkpoint (the slots follow the upstream storage —
