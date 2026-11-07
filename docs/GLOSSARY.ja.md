@@ -176,6 +176,7 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
+| f16 full-layer KV | f16 KV | 全層の KV を f16 で詰めて持つ格納（`fullStateStorage`）。丸めは追記の 1 か所だけ | — | ADR 0143 |
 | capacity | capacity | 1 会話が確保する KV cache の論理位置の数（使える最大の文脈長） | — | ADR 0066 |
 | chunkLength | chunkLength | prefill 1 回に流す行数 | — | ADR 0066 決定 4 |
 | maxChunkLength | maxChunkLength | `chunkLength` の上限（配布形の宣言） | trace 上限 | ADR 0066 |

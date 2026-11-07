@@ -548,12 +548,12 @@ default KV type is f16, so per token Karume holds twice that default.
 
 | Status | ID | Candidate | Preconditions / kill criterion |
 | ------ | --- | --------- | ------------------------------ |
-| 🚧 | K-100 | f16 full-layer KV for Gemma 4 | Filed 2026-11-05. Memory only: decode is latency-bound, not bandwidth-bound (L-10, the K-46 refutation), so no speed gain is expected. **[estimate]** It halves the full-layer KV (12B at capacity 262,144: state 8,837 → 4,741 MiB with the sliding layers unchanged, so its peak with a 128 MiB row-block limit goes 16,447 → 12,351 MiB and fits 16 GB). Needs f16 in the states form (generation-context / state-attention / estimate, the same extension K-46 needs) and a re-export of the graphs, which is worth combining with the graph change for vision. It is a numeric change: a named option under ADR [0058](decisions/0058-numerics-opt-in-contract.md), never a silent default, and it needs the long-context quality check of the backlog first. Kill: the measured KL at long context is worse than the line's acceptance, or the long-context measurements show capacities above 32K are not used in practice |
+| ✅ | K-100 | f16 full-layer KV for Gemma 4 | Filed 2026-11-05, implemented 2026-11-07 as the opt-in `fullStateStorage: "f16"` (ADR [0143](decisions/0143-f16-full-state-storage.md), [research](research/2026-11-07-gemma4-f16-kv.md)). It halves the full-layer KV: 12B 16 KiB per position, E2B 6 KiB. KL against f32 torch is at most 2.07e-7 on E2B and 5.61e-4 on 12B, under the f32 baselines. **Two claims of the filing were wrong.** It needs no re-export: storage is the runtime's choice, not the graph's. And it does change speed on 12B: decode is 13% faster at P ≈ 32K and 22% at P ≈ 62K on the RTX 3080 Ti, cause not known; E2B is 6% slower at P ≈ 32K and unchanged at P ≈ 127K, as filed. Left: Chrome, the speed on the RTX 5070 Ti (more memory, so it can separate VRAM pressure from the rest), and a ruling on whether a preset declares it |
 
 [Research 2026-11-05](research/2026-11-05-gemma4-long-context.md) measured time and memory up to P = 128K on the RTX 3080 Ti.
 The sustained VRAM follows the estimate, which keeps the K-100 figures usable as estimates. Decode is what limits long
 context on `i4` and `bf16` (370–382 ms per token at P = 128K), while `i4-fast` holds 24.5–25.9 ms, so K-100 does not change
-the speed picture.
+the speed picture. That sentence predates the implementation: on 12B it does change it (K-100).
 
 ## 2026-11-06 Gemma 4 12B decode
 

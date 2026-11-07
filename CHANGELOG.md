@@ -27,6 +27,10 @@ measurements in `docs/research/`.
   `i4-fast`, its default staying `i4` (ADR 0104 addendum of 2026-11-06). They reach Hugging Face with
   the next release.
 
+- `@karume/runtime` / `@karume/models`: `fullStateStorage: "f16"` stores the full-layer KV in half the memory
+  (12B 16 KiB per position, E2B 6 KiB), with no re-export and no GPU feature (ADR 0143). Opt-in, and it changes the numbers
+  slightly. It needs an explicit `speculative` on a pipeline with a drafter. Chrome has not been checked.
+
 ### Fixed
 
 - `@karume/runtime`: `fitsHeadroom` left its trial allocation on the device under Dawn, so the

@@ -20,13 +20,12 @@ Node and Deno). No weights or manifests changed and the `SOURCES` pins stay. All
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
 maintainer's ruling of 2026-11-06).
 
-1. **The f16 full-layer KV**: K-100 in the [perf ledger](perf-ledger.md).
-2. **Vision** (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
+1. **Vision** (12B first, then E2B / E4B): research and a staged plan V0–V8 with five open decisions in
    `.claude/reviews/2026-11-05_gemma4-vision/memo.md` (local, untracked); decision 1 (the 12B mask) is settled there by
    V0. Not started. Deferred by the maintainer until after the items above.
 
 For the next release: upload the `karume-gemma4-qat` manifest with 12B's `i4-gemvpar` and `i4-fast` and re-pin `SOURCES` (the
-local mirror has them); the maintainer's Chrome check of `capacity: "fit"` on the RTX 5070 Ti.
+local mirror has them); the maintainer's Chrome checks on the RTX 5070 Ti of `capacity: "fit"` and of `fullStateStorage: "f16"` (the `state-kv16` check on `/kernel-check`; the Gemma 4 page has no switch for it yet, so a chat there needs one), which ADR 0143 needs before a preset can declare it.
 
 ## later
 
