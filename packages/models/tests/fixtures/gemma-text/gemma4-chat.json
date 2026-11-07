@@ -7597,7 +7597,7 @@
     },
     {
       "name": "content-parts",
-      "why": "content-part arrays stay out of scope (text parts included)",
+      "why": "chatPrompt takes no content-part array, text parts included: only the image-capable render does (imageChat)",
       "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }],
       "options": {},
       "rendered": "<bos><|turn>user\nhi<turn|>\n<|turn>model\n"

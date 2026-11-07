@@ -23,8 +23,9 @@
  * diagnosis appears far from the real cause. So {@link createGenerationProgram} checks all of the
  * following **against the graph**:
  *
- * - that the names exist (2 inputs + the derived input names + 2 outputs)
- * - shapes and dtypes (`[1,M]` i32, `[R]` i32, `[1,R,V]` f32, `[1,R,H]` f32)
+ * - that the names exist (2 inputs + the derived input names + the soft inputs + 2 outputs)
+ * - shapes and dtypes (`[1,M]` i32, `[R]` i32, `[1,R,V]` f32, `[1,R,H]` f32, and the soft inputs'
+ *   `[1,M,hidden]` f32 and `[1,M,1]` bool)
  * - **complete coverage of the graph inputs** (no input left unwired by the program, no extra
  *   names)
  * - symbols (exactly one symbol, the capacity symbol, is not determined by input shapes)
@@ -127,6 +128,22 @@ export type DerivedRunInputs = {
    * only on a slot that says so; a slot that reads ids would silently derive from a stand-in.
    */
   readonly positionsOnly?: boolean;
+};
+
+/**
+ * The graph inputs that overwrite a row's token embedding with host vectors (an image's soft tokens
+ * on Gemma 4 12B — ADR 0144 decision 2: `embeds = where(mask, soft, embed(ids))`).
+ *
+ * Only the names and the width are declared: every run of such a program binds both inputs, a run
+ * without a block with zeros and false (`GenerationRequest.softBlocks` of `sequence.ts`).
+ */
+export type GenerationSoftInputs = {
+  /** Name of the `[1,M,hidden]` f32 input. */
+  readonly embeds: string;
+  /** Name of the `[1,M,1]` bool input. */
+  readonly mask: string;
+  /** The vectors' width (cross-checked against the graph). */
+  readonly hidden: number;
 };
 
 /** Specification for {@link createGenerationProgram} (with the graph — all verification is here). */
@@ -241,6 +258,13 @@ export type GenerationProgramSpec = {
    * input). An overlap fails in {@link assertInputCoverage}.
    */
   readonly residentInputs?: readonly string[];
+  /**
+   * The soft inputs of the graph (omitted for a graph without them).
+   *
+   * MUST: do not overlap with the derived or resident names (two producers claiming one input fails
+   * in {@link assertInputCoverage}).
+   */
+  readonly softInputs?: GenerationSoftInputs;
 };
 
 /**
@@ -543,6 +567,36 @@ const assertInputCoverage = (graph: GenerationGraph, wired: readonly string[]): 
 };
 
 /**
+ * Checks the soft inputs against the graph (`[1,M,hidden]` f32 and `[1,M,1]` bool).
+ *
+ * MUST: M is **the symbol of the token id input**. With another symbol the block rows and the token
+ * rows are bound separately, and a shape mix-up surfaces as a symbol conflict on the first run, far
+ * from the wiring.
+ */
+const assertSoftInputs = (
+  graph: GenerationGraph,
+  soft: GenerationSoftInputs,
+  lengthSymbol: string,
+): void => {
+  assertPositiveInteger(soft.hidden, "softInputs.hidden");
+  const embeds = findInput(graph, soft.embeds, "soft embeds input");
+  assertDtype(embeds.dtype, "f32", `soft embeds input '${soft.embeds}'`);
+  const mask = findInput(graph, soft.mask, "soft mask input");
+  assertDtype(mask.dtype, "bool", `soft mask input '${soft.mask}'`);
+  const expected: readonly (readonly [string, readonly (number | string)[], number])[] = [
+    [soft.embeds, embeds.shape, soft.hidden],
+    [soft.mask, mask.shape, 1],
+  ];
+  for (const [name, shape, width] of expected) {
+    if (shape.length !== 3 || shape[0] !== 1 || shape[1] !== lengthSymbol || shape[2] !== width) {
+      throw new Error(
+        `soft input '${name}' has shape ${showShape(shape)}, not [1,${lengthSymbol},${width}]`,
+      );
+    }
+  }
+};
+
+/**
  * Checks that every symbol is determined.
  *
  * Symbols in input shapes are determined by the run's inputs; for the rest (the states' capacity
@@ -627,11 +681,13 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
   }
   assertLogitsOutput(graph, spec.logits, spec.vocabSize, rowSymbol);
   const hiddenSize = assertHiddenOutput(graph, spec.hidden, rowSymbol);
+  if (spec.softInputs !== undefined) assertSoftInputs(graph, spec.softInputs, lengthSymbol);
   assertInputCoverage(graph, [
     spec.inputIds,
     spec.lastRow,
     ...(spec.derivedInputs?.names ?? []),
     ...(spec.residentInputs ?? []),
+    ...(spec.softInputs === undefined ? [] : [spec.softInputs.embeds, spec.softInputs.mask]),
   ]);
   assertSymbols(graph, spec.capacitySymbol);
   // `positionsOnly` admits the run-ahead, so a value outside the type (a truthy string, say) must
@@ -664,5 +720,6 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     capacitySymbol: spec.capacitySymbol,
     ...(spec.derivedInputs === undefined ? {} : { derivedInputs: spec.derivedInputs }),
     ...(spec.residentInputs === undefined ? {} : { residentInputs: [...spec.residentInputs] }),
+    ...(spec.softInputs === undefined ? {} : { softInputs: { ...spec.softInputs } }),
   };
 };

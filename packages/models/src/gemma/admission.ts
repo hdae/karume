@@ -21,11 +21,22 @@ import type { Manifest, ModelEntry, Quant } from "@karume/hub";
 import { ModelInputError } from "../errors.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import { assertSuppressTokens, type GenerationGraph } from "../generation/program.ts";
-import { GEMMA4_PIPELINE_MAJOR, type PipelineConfig, parsePipelineConfig } from "./config.ts";
+import {
+  GEMMA4_PIPELINE_MAJOR,
+  type PipelineConfig,
+  parsePipelineConfig,
+  type PipelineVisionConfig,
+} from "./config.ts";
 import { assertGemma4QatModel, type Gemma4QatModel } from "./qat.ts";
 import { declaredGemma4PleAssets } from "./ple-index.ts";
 import { GEMMA4_ROPE_LAYER_TYPES, GEMMA4_ROPE_PARTS, gemma4RopeInputName } from "./rope.ts";
 import { admitGemma4Drafter, type Gemma4DrafterAdmission } from "./speculative.ts";
+import {
+  IMAGE_ROW_ELEMENTS,
+  VISION_PIXELS,
+  VISION_POSITION_X,
+  VISION_POSITION_Y,
+} from "./vision.ts";
 
 export type GemmaFamily = "gemma4" | "gemma4-qat";
 
@@ -92,6 +103,8 @@ export type Gemma4Admission = {
   readonly drafter?: {
     readonly admission: Gemma4DrafterAdmission;
   };
+  /** The embedder cross-check result, settled only when `vision` is requested. */
+  readonly vision?: ReturnType<typeof assertGemma4Vision>;
 };
 
 /**
@@ -281,6 +294,107 @@ export const admitGemma4 = (
           },
         }),
   };
+};
+
+/** The soft inputs of a product graph that takes image vectors (`export_unified.py`). */
+export const GEMMA4_SOFT_EMBEDS = "soft_embeds";
+export const GEMMA4_SOFT_MASK = "soft_mask";
+
+/**
+ * Checks a `vision: true` load before any weight part is fetched: the declaration, the product graph
+ * and the embedder graph have to describe one model. Returns the checked declaration and what the
+ * pipeline reads of the embedder graph.
+ *
+ * MUST: each mismatch fails here and not on the first image — a width disagreement would otherwise
+ * surface after GB-scale weights, and a declared id outside the vocabulary or a graph without
+ * `soft_embeds` could only ever fail.
+ */
+export const assertGemma4Vision = (
+  product: GraphOwner,
+  embedder: GraphOwner,
+  config: PipelineConfig,
+  vocabSize: number,
+  entry: string,
+): {
+  readonly config: PipelineVisionConfig;
+  readonly output: string;
+  /** The embedder's row symbol, bound by the inputs in a run and by the estimate's caller without one. */
+  readonly symbol: string;
+} => {
+  const declared = config.vision;
+  if (declared === undefined) {
+    throw new Error(
+      `${entry}: vision was requested, but this model's pipelineConfig declares no 'vision'`,
+    );
+  }
+  for (const id of [declared.imageTokenId, declared.beginImageTokenId, declared.endImageTokenId]) {
+    if (id >= vocabSize) {
+      throw new Error(
+        `${entry}: pipelineConfig.vision's token id ${id} is outside the vocabulary 0..${vocabSize - 1}`,
+      );
+    }
+  }
+  const inputOf = (graph: GraphOwner["graph"], name: string) =>
+    graph.inputs.find((input) => input.name === name);
+  const soft = inputOf(product.graph, GEMMA4_SOFT_EMBEDS);
+  if (soft === undefined || inputOf(product.graph, GEMMA4_SOFT_MASK) === undefined) {
+    throw new Error(
+      `${entry}: vision was requested, but the product graph has no '${GEMMA4_SOFT_EMBEDS}' / ` +
+        `'${GEMMA4_SOFT_MASK}' input (a graph exported before image input — no vector could reach it)`,
+    );
+  }
+  if (soft.shape[2] !== declared.hiddenSize) {
+    throw new Error(
+      `${entry}: '${GEMMA4_SOFT_EMBEDS}' has shape [${soft.shape.join(",")}], which disagrees with ` +
+        `pipelineConfig.vision.hiddenSize ${declared.hiddenSize}`,
+    );
+  }
+  const graph = embedder.graph;
+  const pixels = inputOf(graph, VISION_PIXELS);
+  const symbol = pixels?.shape[1];
+  if (
+    pixels === undefined ||
+    pixels.dtype !== "f32" ||
+    typeof symbol !== "string" ||
+    pixels.shape.length !== 3 ||
+    pixels.shape[0] !== 1 ||
+    pixels.shape[2] !== IMAGE_ROW_ELEMENTS
+  ) {
+    throw new Error(
+      `${entry}: the vision graph's '${VISION_PIXELS}' is not f32 [1,<symbol>,${IMAGE_ROW_ELEMENTS}]`,
+    );
+  }
+  for (const name of [VISION_POSITION_X, VISION_POSITION_Y]) {
+    const position = inputOf(graph, name);
+    if (
+      position === undefined ||
+      position.dtype !== "i32" ||
+      position.shape.length !== 2 ||
+      position.shape[0] !== 1 ||
+      position.shape[1] !== symbol
+    ) {
+      throw new Error(`${entry}: the vision graph's '${name}' is not i32 [1,${symbol}]`);
+    }
+  }
+  if (graph.inputs.length !== 3 || graph.outputs.length !== 1) {
+    throw new Error(
+      `${entry}: the vision graph has ${graph.inputs.length} inputs and ${graph.outputs.length} outputs (3 and 1 are needed)`,
+    );
+  }
+  const output = graph.outputs[0];
+  const shape = Object.hasOwn(graph.values, output) ? graph.values[output].shape : undefined;
+  if (
+    shape === undefined ||
+    shape.length !== 3 ||
+    shape[0] !== 1 ||
+    shape[1] !== symbol ||
+    shape[2] !== declared.hiddenSize
+  ) {
+    throw new Error(
+      `${entry}: the vision graph's output '${output}' is not [1,${symbol},${declared.hiddenSize}]`,
+    );
+  }
+  return { config: declared, output, symbol };
 };
 
 /**

@@ -16,6 +16,7 @@
  * sequence**, so it is closed to a single deterministic path).
  */
 
+import { ModelInputError } from "../errors.ts";
 import type {
   GenerationContext,
   GenerationContextSpec,
@@ -137,6 +138,109 @@ export const planPrefillChunks = (
   const chunks: PrefillChunk[] = [];
   for (let position = 0; position < promptLength; position += chunkLength) {
     chunks.push({ position, queryLength: Math.min(chunkLength, promptLength - position) });
+  }
+  return chunks;
+};
+
+/** Where one block of soft rows sits in a prompt ({@link planPrefillChunksWithBlocks}). */
+export type PrefillBlock = {
+  /** The block's first row, as an index of the prompt. */
+  readonly start: number;
+  /** The block's row count. */
+  readonly length: number;
+};
+
+/** One prefill of a prompt with blocks. */
+export type PrefillChunkWithBlock = PrefillChunk & {
+  /**
+   * The chunk's block: its index in the plan's list, and its half-open row range **relative to the
+   * chunk's rows**. Absent on a chunk of text.
+   */
+  readonly block?: { readonly index: number; readonly start: number; readonly end: number };
+};
+
+/**
+ * Checks the blocks of a prompt: inside it, in ascending order, not overlapping, each one fitting a
+ * chunk. Input errors (ADR 0107 decision 2): the blocks come with the request.
+ */
+export const assertPrefillBlocks = (
+  promptLength: number,
+  chunkLength: number,
+  blocks: readonly PrefillBlock[],
+): void => {
+  let floor = 0;
+  blocks.forEach(({ start, length }, index) => {
+    if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length < 1) {
+      throw new ModelInputError(
+        `softBlocks[${index}]: start ${start} with ${length} rows is not a row range`,
+      );
+    }
+    if (start + length > promptLength) {
+      throw new ModelInputError(
+        `softBlocks[${index}]: rows ${start}..${start + length - 1} are outside the prompt of ${promptLength}`,
+      );
+    }
+    if (start < floor) {
+      throw new ModelInputError(
+        `softBlocks[${index}] starts at ${start}, before the previous block's end ${floor} (the blocks are ascending and do not overlap)`,
+      );
+    }
+    // A run holds one block and a block is never split (ADR 0144 decision 3).
+    if (length > chunkLength) {
+      throw new ModelInputError(
+        `softBlocks[${index}]: its ${length} rows exceed chunkLength ${chunkLength} (a block is never split over chunks)`,
+      );
+    }
+    floor = start + length;
+  });
+};
+
+/**
+ * {@link planPrefillChunks} for a prompt with blocks of soft rows: each chunk holds at most one block
+ * and a block is never split, because a run carries one `bidirectionalRows` range (ADR 0144 decision
+ * 3). Chunks are otherwise as long as `chunkLength` allows: the text before a block stays in the
+ * block's chunk when both fit, and the text after it too, up to the next block.
+ *
+ * MUST: without blocks the result is exactly {@link planPrefillChunks}'s, so a prompt without an
+ * image runs the shapes it always ran.
+ */
+export const planPrefillChunksWithBlocks = (
+  promptLength: number,
+  chunkLength: number,
+  blocks: readonly PrefillBlock[],
+): readonly PrefillChunkWithBlock[] => {
+  if (blocks.length === 0) return planPrefillChunks(promptLength, chunkLength);
+  assertPositiveInteger(promptLength, "prompt length");
+  assertPositiveInteger(chunkLength, "chunkLength");
+  assertPrefillBlocks(promptLength, chunkLength, blocks);
+  const chunks: PrefillChunkWithBlock[] = [];
+  let position = 0;
+  let next = 0;
+  while (position < promptLength) {
+    const limit = Math.min(position + chunkLength, promptLength);
+    const block = next < blocks.length ? blocks[next] : undefined;
+    if (block === undefined || block.start >= limit) {
+      chunks.push({ position, queryLength: limit - position });
+      position = limit;
+      continue;
+    }
+    const blockEnd = block.start + block.length;
+    if (blockEnd > limit) {
+      // It does not fit behind this chunk's text, so it opens the next chunk (it fits there:
+      // `length ≤ chunkLength`, which also makes `start > position` here).
+      chunks.push({ position, queryLength: block.start - position });
+      position = block.start;
+      continue;
+    }
+    const following = next + 1 < blocks.length ? blocks[next + 1] : undefined;
+    const end = following !== undefined && following.start < limit ? following.start : limit;
+    chunks.push({
+      position,
+      queryLength: end - position,
+      block: { index: next, start: block.start - position, end: blockEnd - position },
+    });
+    position = end;
+    next += 1;
   }
   return chunks;
 };

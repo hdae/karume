@@ -271,7 +271,15 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ChatContentPart",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatDialect",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatImagePrompt",
         "kind": "typeAlias"
       },
       {
@@ -296,6 +304,14 @@
       },
       {
         "name": "ChatOverflowPolicy",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatPartsMessage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatPromptImage",
         "kind": "typeAlias"
       },
       {
@@ -415,6 +431,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GenerationSoftBlock",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GenerationSpeculation",
         "kind": "typeAlias"
       },
@@ -424,6 +444,10 @@
       },
       {
         "name": "GenerationStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ImageEmbedding",
         "kind": "typeAlias"
       },
       {
@@ -447,11 +471,19 @@
         "kind": "typeAlias"
       },
       {
+        "name": "PipelineVisionConfig",
+        "kind": "typeAlias"
+      },
+      {
         "name": "PleResidency",
         "kind": "typeAlias"
       },
       {
         "name": "PrefillProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Rgb8Image",
         "kind": "typeAlias"
       },
       {
@@ -493,6 +525,14 @@
       {
         "name": "Tokenizer",
         "kind": "class"
+      },
+      {
+        "name": "chatImagePrompt",
+        "kind": "function"
+      },
+      {
+        "name": "chatImageTurn",
+        "kind": "function"
       },
       {
         "name": "chatPrompt",

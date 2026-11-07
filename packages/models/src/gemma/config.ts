@@ -28,6 +28,7 @@ import {
   type RopeSpec,
 } from "./rope.ts";
 import { CHAT_DIALECTS, type ChatDialect, isChatDialect } from "./text/chat-dialect.ts";
+import { SOFT_TOKEN_BUDGETS } from "./vision.ts";
 
 /** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const GEMMA4_PIPELINE_NAME = "gemma4";
@@ -122,6 +123,23 @@ export type DefaultSampler = {
 };
 
 /**
+ * What a host needs to turn an image into prompt rows (`pipelineConfig.vision` — ADR 0144; the
+ * writer's source of truth is `gemma4_vision_config` of `gemma4/distribution.py`).
+ */
+export type PipelineVisionConfig = {
+  /** The most soft tokens one image becomes (upstream's `max_soft_tokens`). */
+  readonly softTokenBudget: number;
+  /** `<|image|>`: the id of every soft token. */
+  readonly imageTokenId: number;
+  /** `<|image>`: the marker in front of an image's soft tokens. */
+  readonly beginImageTokenId: number;
+  /** `<image|>`: the marker behind them. */
+  readonly endImageTokenId: number;
+  /** The width of one soft token's vector (the embedder's output and `soft_embeds`). */
+  readonly hiddenSize: number;
+};
+
+/**
  * The **numbers that change with each asset generation** among the static wiring (declared by the
  * distribution's `pipelineConfig`).
  *
@@ -210,6 +228,12 @@ export type PipelineConfig = {
    * checked at admission, where the vocabulary is first known (`admitGemma4` in `./admission.ts`).
    */
   readonly suppressTokens?: readonly number[];
+  /**
+   * The image input's declaration (gemma-4-12B-it only). Optional, and absent from the parsed value
+   * when not declared (the E2B / E4B manifests stay byte-identical). Having it does not load
+   * anything: `PipelineOptions.vision` asks for the embedder.
+   */
+  readonly vision?: PipelineVisionConfig;
 };
 
 const ROOT_KEYS: readonly string[] = [
@@ -221,6 +245,16 @@ const ROOT_KEYS: readonly string[] = [
   "sampler",
   "chatDialect",
   "suppressTokens",
+  "vision",
+];
+
+/** Accepted fields of `vision` (the type's canonical source is {@link PipelineVisionConfig}). */
+const VISION_KEYS: readonly string[] = [
+  "softTokenBudget",
+  "imageTokenId",
+  "beginImageTokenId",
+  "endImageTokenId",
+  "hiddenSize",
 ];
 
 /**
@@ -367,6 +401,48 @@ const parseSuppressTokens = (raw: unknown, where: string): readonly number[] => 
 };
 
 /**
+ * Reads `vision` (called only when the key is present). The vocabulary bound of the ids is checked
+ * at admission, where the vocabulary is first known (`assertGemma4Vision` in `./admission.ts`).
+ */
+const parseVision = (raw: unknown, where: string): PipelineVisionConfig => {
+  if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
+  assertAllowedKeys(raw, VISION_KEYS, where);
+  const tokenId = (key: string): number =>
+    readNumber(
+      raw,
+      key,
+      where,
+      (value) => Number.isSafeInteger(value) && value >= 0,
+      "not a non-negative integer",
+    );
+  const vision: PipelineVisionConfig = {
+    softTokenBudget: readNumber(
+      raw,
+      "softTokenBudget",
+      where,
+      (value) => SOFT_TOKEN_BUDGETS.includes(value),
+      `not one of ${SOFT_TOKEN_BUDGETS.join(" / ")}`,
+    ),
+    imageTokenId: tokenId("imageTokenId"),
+    beginImageTokenId: tokenId("beginImageTokenId"),
+    endImageTokenId: tokenId("endImageTokenId"),
+    hiddenSize: readNumber(
+      raw,
+      "hiddenSize",
+      where,
+      (value) => Number.isSafeInteger(value) && value >= 1,
+      "not a positive integer",
+    ),
+  };
+  // A soft token that is also its own marker would render a prompt the model never saw.
+  const ids = [vision.imageTokenId, vision.beginImageTokenId, vision.endImageTokenId];
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${where}: the three image token ids are not distinct (${ids.join(", ")})`);
+  }
+  return vision;
+};
+
+/**
  * Checks an `unknown` (the raw declaration hub passed through) and turns it into a
  * {@link PipelineConfig}.
  *
@@ -442,6 +518,9 @@ export const parsePipelineConfig = (raw: unknown): PipelineConfig => {
       : {}),
     ...(Object.hasOwn(raw, "suppressTokens")
       ? { suppressTokens: parseSuppressTokens(raw["suppressTokens"], `${where}.suppressTokens`) }
+      : {}),
+    ...(Object.hasOwn(raw, "vision")
+      ? { vision: parseVision(raw["vision"], `${where}.vision`) }
       : {}),
   };
 };

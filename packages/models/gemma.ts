@@ -101,7 +101,7 @@ export type {
 /**
  * The static wiring declared by the distribution (`pipelineConfig` of `karume.json` — ADR 0038 §1).
  */
-export type { DefaultSampler, PipelineConfig } from "./src/gemma/config.ts";
+export type { DefaultSampler, PipelineConfig, PipelineVisionConfig } from "./src/gemma/config.ts";
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
@@ -150,8 +150,8 @@ export { ropeInputs } from "./src/gemma/rope.ts";
  * Conversation → token ids (including `<bos>`, ending with the generation prompt), with the
  * template options (function declarations, thinking — ADR 0084 decision 5 and its addendum of
  * 2026-11-04). Messages, tool calls, tool results and declarations take the HF / OpenAI shape;
- * what the template cannot take (content parts, the legacy `tool_responses`, ambiguous results)
- * fails loudly.
+ * what the template cannot take (the legacy `tool_responses`, ambiguous results) fails loudly, and
+ * so do content parts here: {@link chatImagePrompt} takes those.
  *
  * `chat` runs this internally, so it is needed only when driving the low-level surface
  * (`sequence`) yourself.
@@ -173,6 +173,26 @@ export { chatTurn } from "./src/gemma/text/chat.ts";
  * {@link chatTurn} for a turn that ended on a call).
  */
 export { chatToolResults } from "./src/gemma/text/chat.ts";
+/**
+ * Conversation → prompt ids and image positions, for a pipeline opened with
+ * {@link PipelineOptions.vision}: {@link chatPrompt} and {@link chatTurn} with content parts on user
+ * messages (ADR 0144). Each image's soft tokens are in the prompt as the id they have upstream; the
+ * rows of {@link Pipeline.embedImage} go to `GenerationRequest.softBlocks` at the returned `start`.
+ */
+export { chatImagePrompt, chatImageTurn } from "./src/gemma/text/chat.ts";
+/** One user-message part, and what the two renders above return. */
+export type {
+  ChatContentPart,
+  ChatImagePrompt,
+  ChatPartsMessage,
+  ChatPromptImage,
+} from "./src/gemma/text/chat.ts";
+/**
+ * Decoded pixels (the argument of {@link Pipeline.embedImage} and of an image part), and what the
+ * embedder makes of them.
+ */
+export type { Rgb8Image } from "./src/image/preprocess.ts";
+export type { ImageEmbedding } from "./src/gemma/vision.ts";
 export type {
   ChatAssistantMessage,
   ChatJsonObject,
@@ -245,6 +265,8 @@ export type {
    */
   GenerationRunPhase,
   GenerationSequence,
+  /** One block of `GenerationRequest.softBlocks` (an image's rows, for a prompt's soft tokens). */
+  GenerationSoftBlock,
   /**
    * The speculation tally (`GenerationStop.speculation` — cycle count, draft run count, accepted
    * count, and a histogram of accepted counts. Present only on turns of a pipeline with a drafter).

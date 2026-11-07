@@ -8,7 +8,11 @@
  * those blocks by patchifying at 16 and merging 3×3; the result is the same raster crop, in the same
  * order, so no 16-pixel step exists here. Its padding to the budget is dropped too: the embedder's
  * row count is the image's own.
+ *
+ * {@link runImageEmbedder} runs those rows through the embedder graph (ADR 0144).
  */
+
+import type { RunInputs, RunOutputs } from "@karume/runtime";
 
 import { ModelInputError } from "../errors.ts";
 import { assertRgb8, type Rgb8Image } from "../image/preprocess.ts";
@@ -27,7 +31,9 @@ const PATCH_AREA = 256;
 export const IMAGE_ROW_ELEMENTS = SOFT_TOKEN_SIDE * SOFT_TOKEN_SIDE * 3;
 
 /** The token budgets upstream accepts (`max_soft_tokens`). */
-const SOFT_TOKEN_BUDGETS: readonly number[] = [70, 140, 280, 560, 1120];
+export const SOFT_TOKEN_BUDGETS: readonly number[] = /* @__PURE__ */ Object.freeze([
+  70, 140, 280, 560, 1120,
+]);
 
 /** Upstream's default, and the only budget a pipeline uses so far (ADR 0144 decision 5). */
 export const DEFAULT_SOFT_TOKEN_BUDGET = 280;
@@ -83,6 +89,19 @@ export type ImageRows = {
   readonly positions: Int32Array<ArrayBuffer>;
 };
 
+/**
+ * The soft tokens an image becomes, from its size alone: what a render reserves for it, and what
+ * {@link imageRows} then produces for the same image and budget.
+ */
+export const imageSoftTokens = (
+  image: Rgb8Image,
+  budget: number = DEFAULT_SOFT_TOKEN_BUDGET,
+): number => {
+  assertRgb8(image);
+  const target = imageTargetSize(image.height, image.width, budget);
+  return (target.height / SOFT_TOKEN_SIDE) * (target.width / SOFT_TOKEN_SIDE);
+};
+
 /** The preprocessing of one image. */
 export const imageRows = (
   image: Rgb8Image,
@@ -113,4 +132,68 @@ export const imageRows = (
     }
   }
   return { softTokens, pixels, positions };
+};
+
+/** The embedder graph's input names (source of truth: `gemma4/distribution.py`). */
+export const VISION_PIXELS = "pixels";
+export const VISION_POSITION_X = "position_x";
+export const VISION_POSITION_Y = "position_y";
+
+/** One image as vectors: what overwrites the embedding of its soft tokens in a prompt. */
+export type ImageEmbedding = {
+  /** The image's soft tokens (N). */
+  readonly softTokens: number;
+  /** `N × hidden` values: the embedder's output as it came, on the host. */
+  readonly rows: Float32Array<ArrayBuffer>;
+};
+
+/** What {@link runImageEmbedder} needs of a Session (a fake stands in for the real one in tests). */
+export type ImageEmbedderSession = {
+  run(inputs: RunInputs): Promise<RunOutputs>;
+};
+
+/**
+ * Runs one image's rows through the embedder graph (`[1,N,6912]` pixels, the two `[1,N]` position
+ * columns → `[1,N,hidden]`).
+ *
+ * MUST: the output is copied. A readback lasts until the Session's next run, and the rows outlive it
+ * (a conversation replays them).
+ * MUST: the shape is checked: an embedder that returned another row count would still fill rows, of
+ * another image's width.
+ */
+export const runImageEmbedder = async (
+  session: ImageEmbedderSession,
+  rows: ImageRows,
+  output: string,
+  hidden: number,
+): Promise<ImageEmbedding> => {
+  const { softTokens, pixels, positions } = rows;
+  const columns = new Int32Array(softTokens);
+  const lines = new Int32Array(softTokens);
+  for (let row = 0; row < softTokens; row += 1) {
+    columns[row] = positions[row * 2];
+    lines[row] = positions[row * 2 + 1];
+  }
+  const outputs = await session.run({
+    [VISION_PIXELS]: { dtype: "f32", shape: [1, softTokens, IMAGE_ROW_ELEMENTS], data: pixels },
+    [VISION_POSITION_X]: { dtype: "i32", shape: [1, softTokens], data: columns },
+    [VISION_POSITION_Y]: { dtype: "i32", shape: [1, softTokens], data: lines },
+  });
+  if (!Object.hasOwn(outputs, output)) {
+    throw new Error(`The vision embedder's output '${output}' is missing`);
+  }
+  const embeds = outputs[output];
+  const shape = embeds.shape;
+  if (
+    embeds.dtype !== "f32" ||
+    shape.length !== 3 ||
+    shape[0] !== 1 ||
+    shape[1] !== softTokens ||
+    shape[2] !== hidden
+  ) {
+    throw new Error(
+      `The vision embedder returned ${embeds.dtype} [${shape.join(",")}], not f32 [1,${softTokens},${hidden}]`,
+    );
+  }
+  return { softTokens, rows: embeds.data.slice() };
 };

@@ -32,7 +32,9 @@
  *
  * Messages, tools and options are checked **with allow lists** (the types protect only TS callers;
  * a value that came from JSON passes straight through). Out of scope: the legacy `tool_responses`
- * field and content-part arrays (text / image / audio / video). Rejected although upstream renders
+ * field and audio / video content parts. Content-part arrays (text and images, on user messages) are
+ * rendered only by {@link chatImagePrompt} and {@link chatImageTurn}, on a pipeline opened with
+ * `vision` (ADR 0144); every other entry refuses them. Rejected although upstream renders
  * them, because upstream's output would be wrong without an exception: results whose function name
  * the template resolves by accident (several calls without ids, a contradicting `name`, an unmatched
  * id, a `name` no call of the turn has), an orphan tool result (dropped), a tool call without
@@ -47,7 +49,10 @@
  */
 
 import { ModelInputError } from "../../errors.ts";
+import { assertRgb8, type Rgb8Image } from "../../image/preprocess.ts";
 import { pythonStrip } from "../../text/python-strip.ts";
+import type { PipelineVisionConfig } from "../config.ts";
+import { imageSoftTokens } from "../vision.ts";
 import { type ChatDialect, DEFAULT_CHAT_DIALECT } from "./chat-dialect.ts";
 import type { Tokenizer } from "./tokenizer.ts";
 
@@ -116,6 +121,22 @@ export type ChatTextMessage = {
   readonly content: string;
 };
 
+/** One part of a user message's content array. */
+export type ChatContentPart =
+  /** Text, trimmed on its own (the template's `item['text'] | trim`). */
+  | { readonly type: "text"; readonly text: string }
+  /** A decoded image: where it sits in the array is where its soft tokens go. */
+  | { readonly type: "image"; readonly image: Rgb8Image };
+
+/**
+ * A user message with images (only {@link chatImagePrompt} / {@link chatImageTurn} and the surfaces
+ * built on them take it). The parts render in order, with nothing between them.
+ */
+export type ChatPartsMessage = {
+  readonly role: "user";
+  readonly content: readonly ChatContentPart[];
+};
+
 /**
  * An assistant message (a model turn, or part of one).
  *
@@ -161,7 +182,11 @@ export type ChatToolMessage = {
 };
 
 /** One message of a conversation (the HF / OpenAI shape — field names as upstream spells them). */
-export type ChatMessage = ChatTextMessage | ChatAssistantMessage | ChatToolMessage;
+export type ChatMessage =
+  | ChatTextMessage
+  | ChatPartsMessage
+  | ChatAssistantMessage
+  | ChatToolMessage;
 
 /**
  * The template options (upstream's `tools` / `enable_thinking` / `preserve_thinking` keyword
@@ -647,8 +672,47 @@ export const assertReadableArguments = (value: unknown, where: string): void => 
   }
 };
 
-/** Checks one message against its role's allow list (structure across messages is checked later). */
-const assertMessage = (message: unknown, where: string): ChatMessage => {
+/** The part types upstream's template spells a marker for and this implementation does not take. */
+const UNSUPPORTED_PART_TYPES: readonly unknown[] = ["image_url", "audio", "input_audio", "video"];
+
+/**
+ * Checks a content array: at least one part, each a text or a decoded image. An index loop for the
+ * reason of {@link assertJsonValue}: `forEach` skips the hole of a sparse array.
+ */
+const assertContentParts = (content: readonly unknown[], where: string): void => {
+  if (content.length === 0) {
+    throw new ModelInputError(`${where}.content is an empty array (nothing to send)`);
+  }
+  for (let index = 0; index < content.length; index += 1) {
+    const at = `${where}.content[${index}]`;
+    const part = content[index];
+    if (!isPlainObject(part)) throw new ModelInputError(`${at} is not an object`);
+    if (part.type === "text") {
+      assertKeys(part, ["type", "text"], at);
+      if (typeof part.text !== "string") throw new ModelInputError(`${at}.text is not a string`);
+    } else if (part.type === "image") {
+      assertKeys(part, ["type", "image"], at);
+      const image = part.image as Rgb8Image | null | undefined;
+      if (!(image?.data instanceof Uint8Array)) {
+        throw new ModelInputError(`${at}.image is not RGB8 pixels (a decoded Rgb8Image)`);
+      }
+      assertRgb8(image);
+    } else if (UNSUPPORTED_PART_TYPES.includes(part.type)) {
+      throw new ModelInputError(
+        `${at}: '${String(part.type)}' parts are not supported (only text and decoded RGB8 images — ` +
+          `this model's pipeline has no audio or video input, and an image is decoded by the caller)`,
+      );
+    } else {
+      throw new ModelInputError(`${at}.type ${JSON.stringify(part.type)} is not 'text' or 'image'`);
+    }
+  }
+};
+
+/**
+ * Checks one message against its role's allow list (structure across messages is checked later).
+ * `parts`: whether the entry calling this takes content arrays ({@link chatImagePrompt}).
+ */
+const assertMessage = (message: unknown, where: string, parts = false): ChatMessage => {
   if (!isPlainObject(message)) throw new ModelInputError(`${where} is not an object`);
   const role = message.role;
   if (typeof role !== "string" || !ROLES.includes(role)) {
@@ -683,10 +747,19 @@ const assertMessage = (message: unknown, where: string): ChatMessage => {
   assertKeys(message, MESSAGE_KEYS[role as ChatRole], `${where} (role '${role}')`);
   const content = message.content;
   if (Array.isArray(content)) {
-    throw new ModelInputError(
-      `${where}.content is an array — content parts (text / image / audio / video) are out of ` +
-        `scope (ADR 0084 decision 5)`,
-    );
+    if (role !== "user") {
+      throw new ModelInputError(
+        `${where}.content is an array — content parts are taken on role 'user' only`,
+      );
+    }
+    if (!parts) {
+      throw new ModelInputError(
+        `${where}.content is an array — content parts need an image-capable render ` +
+          `(gemma.chatImagePrompt / gemma.chatImageTurn, or a pipeline opened with vision: true)`,
+      );
+    }
+    assertContentParts(content, where);
+    return message as ChatMessage;
   }
   if (role === "assistant") {
     if (content !== undefined && content !== null && typeof content !== "string") {
@@ -827,14 +900,14 @@ export const assertChatTemplateOptions = (options: ChatTemplateOptions, where: s
  * MUST: also reject an empty conversation — upstream `apply_chat_template` rejects it with a
  * `ValueError`, so the accepted set is not made wider than upstream's.
  */
-const assertConversation = (messages: readonly unknown[], where: string): void => {
+const assertConversation = (messages: readonly unknown[], where: string, parts: boolean): void => {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new ModelInputError(
       `${where}: the conversation is empty (the upstream apply_chat_template rejects it too)`,
     );
   }
   const checked = messages.map((message, index) =>
-    assertMessage(message, `${where}: messages[${index}]`),
+    assertMessage(message, `${where}: messages[${index}]`, parts),
   );
   let owner: ChatMessage | undefined;
   checked.forEach((message, index) => {
@@ -908,6 +981,20 @@ const formatToolCall = (call: ChatToolCall): string => {
 const formatToolResult = (name: string, result: ChatToolMessage): string =>
   `${TOOL_RESPONSE}response:${name}{value:${formatArgument(result.content ?? null, false)}}${END_OF_TOOL_RESPONSE}`;
 
+/** What a render produces: text, with each image part where upstream's template writes its marker. */
+type ChatSegment = string | Extract<ChatContentPart, { readonly type: "image" }>;
+
+/** The segments of a render that cannot hold an image (`parts: false`) as the one string they are. */
+const textOfSegments = (segments: readonly ChatSegment[]): string =>
+  segments
+    .map((segment) => {
+      if (typeof segment !== "string") {
+        throw new Error("gemma.chatPrompt internal inconsistency: an image part in a text render");
+      }
+      return segment;
+    })
+    .join("");
+
 /**
  * Conversation → the same string as upstream `apply_chat_template(add_generation_prompt=True)`
  * with the same options.
@@ -938,13 +1025,26 @@ export const renderGemma4Chat = (
   messages: readonly ChatMessage[],
   dialect: ChatDialect = DEFAULT_CHAT_DIALECT,
   options: ChatTemplateOptions = {},
-): string => {
-  const where = "gemma.chatPrompt";
+): string =>
+  textOfSegments(renderChatSegments(messages, dialect, options, "gemma.chatPrompt", false));
+
+/**
+ * The body of {@link renderGemma4Chat}, with an image part (`parts: true`) closing the current text
+ * where the template writes `<|image|>`.
+ */
+const renderChatSegments = (
+  messages: readonly ChatMessage[],
+  dialect: ChatDialect,
+  options: ChatTemplateOptions,
+  where: string,
+  parts: boolean,
+): ChatSegment[] => {
   const { tools, enableThinking, preserveThinking } = assertOptions(options, where);
-  assertConversation(messages, where);
+  assertConversation(messages, where, parts);
   const declarations = tools.map((tool, index) =>
     formatFunctionDeclaration(tool, `${where}: options.tools[${index}]`),
   );
+  const segments: ChatSegment[] = [];
   let out = BOS;
   /** The template's `ns.prev_message_type` (only the two tool states are read at the end). */
   let previousType: "tool_call" | "tool_response" | undefined;
@@ -990,6 +1090,16 @@ export const renderGemma4Chat = (
     }
     // Untyped input may carry a null or absent assistant content (OpenAI's shape) — empty.
     const content: unknown = message.content;
+    if (Array.isArray(content)) {
+      for (const part of content as readonly ChatContentPart[]) {
+        if (part.type === "text") {
+          out += pythonStrip(part.text);
+        } else {
+          segments.push(out, part);
+          out = "";
+        }
+      }
+    }
     const captured =
       typeof content !== "string"
         ? ""
@@ -1007,8 +1117,14 @@ export const renderGemma4Chat = (
     }
     previousRole = message.role;
   });
-  if (previousType === "tool_response") return enableThinking ? `${out}${THOUGHT_CHANNEL}` : out;
-  return `${out}${START_OF_TURN}${MODEL_ROLE}\n${generationPromptTail(dialect, enableThinking)}`;
+  if (previousType === "tool_response") {
+    segments.push(enableThinking ? `${out}${THOUGHT_CHANNEL}` : out);
+  } else {
+    segments.push(
+      `${out}${START_OF_TURN}${MODEL_ROLE}\n${generationPromptTail(dialect, enableThinking)}`,
+    );
+  }
+  return segments;
 };
 
 /**
@@ -1079,10 +1195,18 @@ export const renderGemma4ChatTurn = (
   message: ChatMessage,
   dialect: ChatDialect = DEFAULT_CHAT_DIALECT,
   options: ChatTemplateOptions = {},
-): string => {
-  const where = "gemma.chatTurn";
+): string => textOfSegments(renderTurnSegments(message, dialect, options, "gemma.chatTurn", false));
+
+/** The body of {@link renderGemma4ChatTurn} ({@link renderChatSegments} says what `parts` adds). */
+const renderTurnSegments = (
+  message: ChatMessage,
+  dialect: ChatDialect,
+  options: ChatTemplateOptions,
+  where: string,
+  parts: boolean,
+): ChatSegment[] => {
   const { enableThinking } = assertOptions(options, where);
-  const checked = assertMessage(message, `${where}: message`);
+  const checked = assertMessage(message, `${where}: message`, parts);
   if (checked.role === "assistant") {
     throw new ModelInputError(
       `${where}: role 'assistant' cannot be a delta` +
@@ -1099,10 +1223,25 @@ export const renderGemma4ChatTurn = (
   // The leading newline is the one character "right after the `<turn|>` that closed the previous
   // turn" (the `${END_OF_TURN}\n` of `renderGemma4Chat`). `<turn|>` itself is prepended by
   // pendingToken, so it is not here.
-  return (
-    `\n${START_OF_TURN}${checked.role}\n${pythonStrip(checked.content)}${END_OF_TURN}\n` +
-    `${START_OF_TURN}${MODEL_ROLE}\n${generationPromptTail(dialect, enableThinking)}`
+  const segments: ChatSegment[] = [];
+  let out = `\n${START_OF_TURN}${checked.role}\n`;
+  if (typeof checked.content === "string") {
+    out += pythonStrip(checked.content);
+  } else {
+    for (const part of checked.content) {
+      if (part.type === "text") {
+        out += pythonStrip(part.text);
+      } else {
+        segments.push(out, part);
+        out = "";
+      }
+    }
+  }
+  segments.push(
+    `${out}${END_OF_TURN}\n` +
+      `${START_OF_TURN}${MODEL_ROLE}\n${generationPromptTail(dialect, enableThinking)}`,
   );
+  return segments;
 };
 
 /**
@@ -1119,6 +1258,136 @@ export const chatTurn = (
   message: ChatMessage,
   options: ChatTemplateOptions = {},
 ): number[] => tokenizer.encode(renderGemma4ChatTurn(message, tokenizer.chatDialect, options));
+
+/** One image of a rendered prompt ({@link ChatImagePrompt}). */
+export type ChatPromptImage = {
+  /** The image part's image, as it came. */
+  readonly image: Rgb8Image;
+  /** Where its soft tokens start in the prompt (behind the `<|image>` marker). */
+  readonly start: number;
+  /** Its soft tokens (N — the same on every render of the image). */
+  readonly softTokens: number;
+};
+
+/**
+ * A rendered prompt with images: what `GenerationRequest.prompt` takes, and where each image goes
+ * (`softBlocks`, with the rows of `Pipeline.embedImage`). The blocks hold the soft tokens only: the
+ * two markers are ordinary rows.
+ */
+export type ChatImagePrompt = {
+  readonly prompt: number[];
+  readonly images: readonly ChatPromptImage[];
+};
+
+/**
+ * Encodes a render with images: text through the tokenizer, each image as upstream's processor
+ * expands its marker (`<|image>`, N × `<|image|>`, `<image|>`).
+ *
+ * MUST: the expansion is built from ids and never travels through the tokenizer. The added vocabulary
+ * splits around those spellings, so the text on either side encodes as it does inside upstream's whole
+ * string (the fixtures' `imageChat` rows pin it), and no text has to be rewritten to place an image.
+ */
+const encodeSegments = (
+  tokenizer: Tokenizer,
+  segments: readonly ChatSegment[],
+  vision: PipelineVisionConfig,
+): ChatImagePrompt => {
+  const prompt: number[] = [];
+  const images: ChatPromptImage[] = [];
+  for (const segment of segments) {
+    if (typeof segment === "string") {
+      for (const id of tokenizer.encode(segment)) prompt.push(id);
+      continue;
+    }
+    const softTokens = imageSoftTokens(segment.image, vision.softTokenBudget);
+    prompt.push(vision.beginImageTokenId);
+    images.push({ image: segment.image, start: prompt.length, softTokens });
+    for (let row = 0; row < softTokens; row += 1) prompt.push(vision.imageTokenId);
+    prompt.push(vision.endImageTokenId);
+  }
+  return { prompt, images };
+};
+
+/**
+ * Refuses text that encodes to an image id, on the messages the caller writes.
+ *
+ * MUST: a spelled `<|image|>` is not a way to place an image: upstream's processor refuses a prompt
+ * whose marker count disagrees with its images, and here it would be a row of that id with no vector
+ * behind it. Assistant and tool messages are left alone: they hold what the model and the tools wrote,
+ * which a re-render has to reproduce for the KV to stay what it renders to.
+ */
+const assertNoImageSpelling = (
+  tokenizer: Tokenizer,
+  message: ChatMessage,
+  vision: PipelineVisionConfig,
+  where: string,
+): void => {
+  if (message.role === "assistant" || message.role === "tool") return;
+  const reserved = [vision.imageTokenId, vision.beginImageTokenId, vision.endImageTokenId];
+  const texts =
+    typeof message.content === "string"
+      ? [message.content]
+      : message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+  for (const text of texts) {
+    const found = tokenizer.encode(text).find((id) => reserved.includes(id));
+    if (found !== undefined) {
+      throw new ModelInputError(
+        `${where}: the text of a '${message.role}' message encodes to the image token ${found} ` +
+          `(${JSON.stringify(tokenizer.decode([found], { skipSpecialTokens: false }))}) — an image goes ` +
+          `in an image part; upstream's processor refuses such a text too`,
+      );
+    }
+  }
+};
+
+/** The dialect an image can be rendered in (E2B / E4B have no image path yet — ADR 0144 Context). */
+const assertImageDialect = (tokenizer: Tokenizer, where: string): void => {
+  if (tokenizer.chatDialect !== "gemma4-unified") {
+    throw new ModelInputError(
+      `${where}: image input needs the gemma4-unified chat dialect (this model's is ` +
+        `${tokenizer.chatDialect})`,
+    );
+  }
+};
+
+/**
+ * Conversation → token ids and image positions: {@link chatPrompt} for a pipeline opened with
+ * `vision`, content-part messages included. A conversation without an image gives
+ * {@link chatPrompt}'s ids with `images: []`.
+ *
+ * The pass line is an id-sequence match with upstream's processor over the same message
+ * (`imageChat` of the 12B fixture, ADR 0084 decision 7).
+ */
+export const chatImagePrompt = (
+  tokenizer: Tokenizer,
+  messages: readonly ChatMessage[],
+  vision: PipelineVisionConfig,
+  options: ChatTemplateOptions = {},
+): ChatImagePrompt => {
+  const where = "gemma.chatImagePrompt";
+  assertImageDialect(tokenizer, where);
+  const segments = renderChatSegments(messages, tokenizer.chatDialect, options, where, true);
+  for (const message of messages) assertNoImageSpelling(tokenizer, message, vision, where);
+  return encodeSegments(tokenizer, segments, vision);
+};
+
+/**
+ * One new message → the delta and its image positions: {@link chatTurn} for a pipeline opened with
+ * `vision` (the doc of {@link renderGemma4ChatTurn} is the source of truth for the turn-local
+ * contract).
+ */
+export const chatImageTurn = (
+  tokenizer: Tokenizer,
+  message: ChatMessage,
+  vision: PipelineVisionConfig,
+  options: ChatTemplateOptions = {},
+): ChatImagePrompt => {
+  const where = "gemma.chatImageTurn";
+  assertImageDialect(tokenizer, where);
+  const segments = renderTurnSegments(message, tokenizer.chatDialect, options, where, true);
+  assertNoImageSpelling(tokenizer, message, vision, where);
+  return encodeSegments(tokenizer, segments, vision);
+};
 
 /**
  * Tool results → **the delta that continues the model turn after a tool call** (the counterpart of

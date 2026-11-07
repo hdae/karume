@@ -22,9 +22,9 @@ MUST: the expectations are harvested by calling upstream `apply_chat_template` *
 folding. Sharing them makes the parity check tautological (the worked example in the ADR 0048
 addendum).
 
-## Scope: four batteries (ADR 0084 decision 5 and its addendum of 2026-11-04)
+## Scope: five batteries (ADR 0084 decision 5 and its addendum of 2026-11-04, ADR 0144)
 
-The fixture carries four lists, each harvested from upstream on its own:
+The fixture carries up to six lists, each harvested from upstream on its own:
 
 - `chat` ({@link CASES}) — plain conversations: roles `system` / `developer` / `user` /
   `assistant`, string content, no template options. Unchanged since the first scope; its gate
@@ -38,11 +38,16 @@ The fixture carries four lists, each harvested from upstream on its own:
 - `responses` ({@link RESPONSE_CASES}) — model output strings and what upstream
   `tokenizer.parse_response(text, prefix=...)` makes of them (or the error it raises), the
   expectations of the TS output parser.
+- `imageChat` / `rejectedImageChat` ({@link IMAGE_CASES} / {@link REJECTED_IMAGE_CASES} — 12B only)
+  — user messages with text and image parts, through upstream's **processor**
+  (`Gemma4UnifiedProcessor.apply_chat_template`), which renders the template and expands
+  `<|image|>` to `<|image>`, N × `<|image|>`, `<image|>`. An image is named by its size: the soft
+  tokens depend on nothing else, and the pixels are upstream's zero image.
 
 Still out of scope (the TS side rejects them, and no case is harvested): the legacy
-`tool_responses` field on assistant messages, and content-part arrays (`<|image|>` / `<|audio|>` /
-`<|video|>` and text parts). **Nothing is silently ignored** — ignoring `tool_responses` would let
-"I passed the results and they were not used" through without an exception.
+`tool_responses` field on assistant messages, and `<|audio|>` / `<|video|>` parts. **Nothing is
+silently ignored** — ignoring `tool_responses` would let "I passed the results and they were not
+used" through without an exception.
 
 ## Scope of plain conversations (the branches measured)
 
@@ -1107,7 +1112,8 @@ REJECTED_CASES: tuple[RejectedCase, ...] = (
     ),
     RejectedCase(
         "content-parts",
-        "content-part arrays stay out of scope (text parts included)",
+        "chatPrompt takes no content-part array, text parts included: only the image-capable "
+        "render does (imageChat)",
         ({"role": "user", "content": [{"type": "text", "text": "hi"}]},),
         {},
     ),
@@ -1579,6 +1585,213 @@ RESPONSE_CASES: tuple[ResponseCase, ...] = (
 )
 
 
+def _image_part(width: int, height: int) -> dict[str, Any]:
+    """An image part as a case states it: the size is all a render reads."""
+    return {"type": "image", "width": width, "height": height}
+
+
+def _text_part(text: str) -> dict[str, Any]:
+    return {"type": "text", "text": text}
+
+
+@dataclass(frozen=True)
+class ImageChatCase:
+    """A conversation with image parts (`why` names what it pins, in one line)."""
+
+    name: str
+    why: str
+    messages: tuple[Mapping[str, Any], ...]
+
+
+#: The image battery: the boundaries of the expansion. The sizes span the rule for N without
+#: repeating it: a square, the corpus's aspect, a tall one, and one far below the budget's area.
+IMAGE_CASES: tuple[ImageChatCase, ...] = (
+    ImageChatCase(
+        "image-only",
+        "the expansion alone between the turn's opening and closing",
+        ({"role": "user", "content": [_image_part(832, 480)]},),
+    ),
+    ImageChatCase(
+        "image-then-text",
+        "the shape of the goldens: the text follows <image|> directly, with no separator",
+        (
+            {
+                "role": "user",
+                "content": [_image_part(832, 480), _text_part("Describe this image.")],
+            },
+        ),
+    ),
+    ImageChatCase(
+        "text-then-image",
+        "the text before <|image> keeps its tokens",
+        (
+            {
+                "role": "user",
+                "content": [_text_part("What is in this picture?"), _image_part(640, 640)],
+            },
+        ),
+    ),
+    ImageChatCase(
+        "text-around-two-images",
+        "two images with text before, between and after, each part trimmed on its own",
+        (
+            {
+                "role": "user",
+                "content": [
+                    _text_part("  Compare the first  "),
+                    _image_part(100, 100),
+                    _text_part(" with the second: "),
+                    _image_part(300, 900),
+                    _text_part("\nWhich one is brighter?\n"),
+                ],
+            },
+        ),
+    ),
+    ImageChatCase(
+        "two-images-adjacent",
+        "<image|> then <|image> with nothing between them",
+        ({"role": "user", "content": [_image_part(64, 64), _image_part(2000, 500)]},),
+    ),
+    ImageChatCase(
+        "text-parts-only",
+        "text parts without an image render as their concatenation",
+        ({"role": "user", "content": [_text_part("one"), _text_part(" two ")]},),
+    ),
+    ImageChatCase(
+        "images-in-a-conversation",
+        "a system block and a past exchange around messages with images",
+        (
+            {"role": "system", "content": "You describe images."},
+            {"role": "user", "content": [_image_part(832, 480), _text_part("And this?")]},
+            {"role": "assistant", "content": "A cat."},
+            {"role": "user", "content": [_text_part("Now this one:"), _image_part(480, 832)]},
+        ),
+    ),
+    ImageChatCase(
+        "extreme-aspect",
+        "a side that rounds to 0: the processor's own rule for it",
+        ({"role": "user", "content": [_image_part(4000, 10), _text_part("Read it.")]},),
+    ),
+)
+
+#: What the TS side refuses in a conversation with images. Upstream's processor counts `<|image|>`
+#: against the images passed; the markers it does not count are recorded the same way.
+REJECTED_IMAGE_CASES: tuple[ImageChatCase, ...] = (
+    ImageChatCase(
+        "text-part-soft-token",
+        "a text part spelling <|image|>: one marker more than images",
+        (
+            {
+                "role": "user",
+                "content": [_text_part("look <|image|> here"), _image_part(64, 64)],
+            },
+        ),
+    ),
+    ImageChatCase(
+        "text-part-begin-marker",
+        "a text part spelling <|image>: a block that opens with no image behind it",
+        ({"role": "user", "content": [_text_part("a <|image> b"), _image_part(64, 64)]},),
+    ),
+    ImageChatCase(
+        "text-part-end-marker",
+        "a text part spelling <image|>: a block that closes with no image in front of it",
+        ({"role": "user", "content": [_text_part("a <image|> b"), _image_part(64, 64)]},),
+    ),
+    ImageChatCase(
+        "string-message-soft-token",
+        "a string message spelling <|image|> next to a message with an image",
+        (
+            {"role": "user", "content": "see <|image|>"},
+            {"role": "user", "content": [_image_part(64, 64)]},
+        ),
+    ),
+)
+
+
+def _with_pixels(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The case's messages as upstream's processor takes them: each image part holds a PIL image."""
+    from PIL import Image  # lazy import (needed only when harvesting)
+
+    def part(item: Mapping[str, Any]) -> dict[str, Any]:
+        if item["type"] != "image":
+            return dict(item)
+        return {"type": "image", "image": Image.new("RGB", (item["width"], item["height"]))}
+
+    return [
+        {
+            **message,
+            "content": (
+                [part(item) for item in message["content"]]
+                if isinstance(message["content"], (list, tuple))
+                else message["content"]
+            ),
+        }
+        for message in messages
+    ]
+
+
+def harvest_image_cases(processor: Any, cases: Sequence[ImageChatCase]) -> list[dict[str, Any]]:
+    """The expectations of a conversation with images, from upstream's processor (ADR 0084 decision
+    7: not one line goes through an in-house renderer)."""
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        messages = _with_pixels(case.messages)
+        rendered = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = processor.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_dict=True
+        )
+        rows.append(
+            {
+                "name": case.name,
+                "why": case.why,
+                "messages": [dict(message) for message in case.messages],
+                "rendered": rendered,
+                "ids": [int(token) for token in inputs["input_ids"][0]],
+            }
+        )
+    return rows
+
+
+def harvest_rejected_image_cases(
+    processor: Any, cases: Sequence[ImageChatCase]
+) -> list[dict[str, Any]]:
+    """What upstream's processor does with each input the TS side refuses: `ids` (it accepts it) or
+    `error` (it raises). The outcome itself is the record."""
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        row: dict[str, Any] = {
+            "name": case.name,
+            "why": case.why,
+            "messages": [dict(message) for message in case.messages],
+        }
+        try:
+            inputs = processor.apply_chat_template(
+                _with_pixels(case.messages),
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+            )
+            row["ids"] = [int(token) for token in inputs["input_ids"][0]]
+        except ValueError as error:
+            row["error"] = _upstream_error(error)
+        rows.append(row)
+    return rows
+
+
+def vision_tokens(processor: Any) -> dict[str, int]:
+    """The three ids and the budget, as upstream's processor states them (what `pipelineConfig.vision`
+    declares for the TS side)."""
+    tokenizer = processor.tokenizer
+    return {
+        "softTokenBudget": int(processor.image_processor.max_soft_tokens),
+        "imageTokenId": int(tokenizer.convert_tokens_to_ids(processor.image_token)),
+        "beginImageTokenId": int(tokenizer.convert_tokens_to_ids(processor.boi_token)),
+        "endImageTokenId": int(tokenizer.convert_tokens_to_ids(processor.eoi_token)),
+    }
+
+
 def _source(checkpoint_dir: Path, label: str) -> dict[str, Any]:
     """The provenance record (the digests of the four files that bundle the chat format and the EOS
     set — ADR 0084 decision 5).
@@ -1792,6 +2005,9 @@ def build_chat_fixture(
     tool_cases: Sequence[ToolChatCase] = (),
     rejected_cases: Sequence[RejectedCase] = (),
     response_cases: Sequence[ResponseCase] = (),
+    processor: Any = None,
+    image_cases: Sequence[ImageChatCase] = (),
+    rejected_image_cases: Sequence[ImageChatCase] = (),
 ) -> dict[str, Any]:
     """Builds one chat fixture (expectations from upstream, the subset from the compiled asset).
 
@@ -1804,17 +2020,33 @@ def build_chat_fixture(
     tool_chat = harvest_tool_cases(tokenizer, tool_cases)
     rejected = harvest_rejected_cases(tokenizer, rejected_cases)
     responses = harvest_responses(tokenizer, response_cases)
-    required = {token_id for row in [*chat, *tool_chat] for token_id in row["ids"]}
+    image_chat = harvest_image_cases(processor, image_cases)
+    rejected_images = harvest_rejected_image_cases(processor, rejected_image_cases)
+    required = {token_id for row in [*chat, *tool_chat, *image_chat] for token_id in row["ids"]}
     # The EOS set holds ids that never appear in a body (`<|tool_response>`), so they are kept
     # explicitly — the TS side derives this set from the added vocabulary and compares it with
     # `stopTokens` here.
     required.update(stops)
     required.add(compiled.bos_id)
+    if image_cases:
+        # All three markers, whether or not a case's ids hold them (the refusal rows spell them).
+        required.update(
+            token_id
+            for key, token_id in vision_tokens(processor).items()
+            if key != "softTokenBudget"
+        )
     added_by_id = {token_id: token for token, token_id in compiled.added_tokens}
     # The response texts join the subset too: the TS session tests encode model outputs with
     # their special spellings (a spelling missing from the subset would encode as bytes).
-    texts = [row["rendered"] for row in [*chat, *tool_chat]]
+    texts = [row["rendered"] for row in [*chat, *tool_chat, *image_chat]]
     texts.extend(row["prefix"] + row["text"] for row in responses)
+    texts.extend(
+        part["text"]
+        for row in rejected_images
+        for message in row["messages"]
+        for part in (message["content"] if isinstance(message["content"], (list, tuple)) else [])
+        if part["type"] == "text"
+    )
     fixture: dict[str, Any] = {
         "source": dict(source),
         "spec": spec_of(compiled),
@@ -1829,6 +2061,11 @@ def build_chat_fixture(
         fixture["rejectedChat"] = rejected
     if response_cases:
         fixture["responses"] = responses
+    if image_cases:
+        fixture["visionTokens"] = vision_tokens(processor)
+        fixture["imageChat"] = image_chat
+    if rejected_image_cases:
+        fixture["rejectedImageChat"] = rejected_images
     return fixture
 
 
@@ -1848,7 +2085,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     pins = sources.HUB_PINS.get(model)
     if pins is not None:
         sources.assert_snapshot_pin(checkpoint_dir, pins.tokenizer)
-    from transformers import AutoTokenizer  # lazy import (needed only when harvesting)
+    from transformers import AutoProcessor, AutoTokenizer  # lazy import (only when harvesting)
 
     compiled = compile_tokenizer(json.loads(tokenizer_json.read_text(encoding="utf-8")))
     fixture = build_chat_fixture(
@@ -1860,6 +2097,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         tool_cases=TOOL_CASES,
         rejected_cases=REJECTED_CASES,
         response_cases=RESPONSE_CASES,
+        # 12B is the one model of the family with a TS image path (ADR 0144).
+        **(
+            {
+                "processor": AutoProcessor.from_pretrained(str(checkpoint_dir)),
+                "image_cases": IMAGE_CASES,
+                "rejected_image_cases": REJECTED_IMAGE_CASES,
+            }
+            if model == "12b"
+            else {}
+        ),
     )
     written = write_json(fixture_path, fixture)
     print(

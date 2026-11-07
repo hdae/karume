@@ -134,6 +134,7 @@
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import { ModelInputError } from "../errors.ts";
 import type {
+  BidirectionalRows,
   GenerationContext,
   GenerationContextSpec,
   RunInputs,
@@ -144,9 +145,9 @@ import type {
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
-import { planPrefillChunks } from "./greedy.ts";
+import { assertPrefillBlocks, planPrefillChunksWithBlocks } from "./greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "./sampler.ts";
-import type { GenerationWiring } from "./program.ts";
+import type { GenerationSoftInputs, GenerationWiring } from "./program.ts";
 import {
   acceptDrafts,
   createSpeculationTally,
@@ -532,6 +533,27 @@ export type GenerationRequest = {
   readonly sampler?: SamplerSpec;
   /** Abort (checked at stage boundaries; `signal.reason` is thrown as is). */
   readonly signal?: AbortSignal;
+  /**
+   * Host vectors that overwrite the token embedding of rows of this prompt, one entry per block of
+   * rows that see each other in both directions on the sliding layers (an image's soft tokens — ADR
+   * 0144). Only on a program with `softInputs`.
+   *
+   * Each block gets a prefill chunk of its own and is never split ({@link planPrefillChunksWithBlocks}
+   * in `greedy.ts`). `start` is an index of {@link GenerationRequest.prompt}: the prepended
+   * `pendingToken` is this layer's and moves it by itself.
+   *
+   * MUST: ascending, not overlapping, inside the prompt, at most `chunkLength` rows each; anything
+   * else fails synchronously with `ModelInputError`. Copied at issue like the rest of the request.
+   */
+  readonly softBlocks?: readonly GenerationSoftBlock[];
+};
+
+/** One block of {@link GenerationRequest.softBlocks}. */
+export type GenerationSoftBlock = {
+  /** The block's first row, as an index of the request's `prompt`. */
+  readonly start: number;
+  /** `N × hidden` values, the rows in order (N = this block's row count). */
+  readonly rows: Float32Array<ArrayBuffer>;
 };
 
 /**
@@ -743,6 +765,8 @@ export type GenerationSession<C extends GenerationContextFace = GenerationContex
        * once the accepted count is known).
        */
       readonly commit?: "deferred";
+      /** The soft rows of a prefill chunk with a block (`GenerationRun.bidirectionalRows`). */
+      readonly bidirectionalRows?: BidirectionalRows;
     },
   ): Promise<RunOutputs>;
 };
@@ -1149,6 +1173,39 @@ const assertGreedyAheadSetup = (
 };
 
 /**
+ * Copies and checks {@link GenerationRequest.softBlocks} (at issue, synchronously): the row-count
+ * rule here, the placement in `assertPrefillBlocks` (`greedy.ts`). Each error is the request's
+ * (ADR 0107 decision 2).
+ */
+const snapshotSoftBlocks = (
+  blocks: readonly GenerationSoftBlock[] | undefined,
+  promptLength: number,
+  program: GenerationWiring,
+): readonly GenerationSoftBlock[] => {
+  if (blocks === undefined || blocks.length === 0) return [];
+  const soft = program.softInputs;
+  if (soft === undefined) {
+    throw new ModelInputError(
+      "softBlocks were passed, but this program's graph has no soft inputs (no vector can reach it)",
+    );
+  }
+  const copied = blocks.map(({ start, rows }, index): GenerationSoftBlock => {
+    if (!(rows instanceof Float32Array) || rows.length === 0 || rows.length % soft.hidden !== 0) {
+      throw new ModelInputError(
+        `softBlocks[${index}].rows is not a positive multiple of the hidden size ${soft.hidden} of f32 values`,
+      );
+    }
+    return { start, rows: rows.slice() };
+  });
+  assertPrefillBlocks(
+    promptLength,
+    program.chunkLength,
+    copied.map(({ start, rows }) => ({ start, length: rows.length / soft.hidden })),
+  );
+  return copied;
+};
+
+/**
  * A copy of an output row (a readback subarray lasts until the next run — the hidden kept for the
  * next cycle is copied).
  */
@@ -1357,8 +1414,54 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
   };
 
   /**
-   * Host-derived extra inputs (checked every time against the declared names, nothing missing and
-   * nothing extra).
+   * The zeros and false of a run without a block, one pair per physical row count.
+   *
+   * MUST: cached and never written. A decode step binds them on every token, so building them there
+   * would allocate per step; the runtime only reads a host tensor's `data`, so one pair serves every
+   * run of that shape, a run-ahead batch's steps included.
+   */
+  const softZeros = new Map<number, RunInputs>();
+
+  const softZerosOf = (rows: number, soft: GenerationSoftInputs): RunInputs => {
+    const cached = softZeros.get(rows);
+    if (cached !== undefined) return cached;
+    const zeros: RunInputs = {
+      [soft.embeds]: {
+        dtype: "f32",
+        shape: [1, rows, soft.hidden],
+        data: new Float32Array(rows * soft.hidden),
+      },
+      [soft.mask]: { dtype: "bool", shape: [1, rows, 1], data: new Uint32Array(rows) },
+    };
+    softZeros.set(rows, zeros);
+    return zeros;
+  };
+
+  /** The soft inputs of a prefill chunk with a block: its rows and true there, zeros and false elsewhere. */
+  const softBlockOf = (
+    rows: number,
+    soft: GenerationSoftInputs,
+    block: { readonly start: number; readonly end: number },
+    vectors: Float32Array<ArrayBuffer>,
+  ): RunInputs => {
+    const embeds = new Float32Array(rows * soft.hidden);
+    embeds.set(vectors, block.start * soft.hidden);
+    const mask = new Uint32Array(rows);
+    mask.fill(1, block.start, block.end);
+    return {
+      [soft.embeds]: { dtype: "f32", shape: [1, rows, soft.hidden], data: embeds },
+      [soft.mask]: { dtype: "bool", shape: [1, rows, 1], data: mask },
+    };
+  };
+
+  /**
+   * Every per-run input besides the token ids and the row selection: the host-derived ones (checked
+   * every time against the declared names, nothing missing and nothing extra) and the soft inputs.
+   *
+   * MUST: the one place the soft inputs are bound. All four run paths — prefill, verify, the
+   * per-step decode and each step of the run-ahead — get their inputs here, so none can run without
+   * them; `softBlock` is what a chunk with a block replaces the zeros with. The zeros read only the
+   * row count, so a run-ahead step, whose token is still on the GPU, stays `positionsOnly`.
    *
    * `signal` is passed down because some distributions take their derived inputs from GB-scale
    * lazy loads (gemma4's PLE blocks) — it is best-effort, so even an implementation that ignores it
@@ -1368,9 +1471,12 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     ids: Int32Array<ArrayBuffer>,
     positions: Int32Array<ArrayBuffer>,
     signal: AbortSignal | undefined,
+    softBlock?: RunInputs,
   ): Promise<RunInputs> => {
+    const soft = program.softInputs;
+    const softInputs = softBlock ?? (soft === undefined ? {} : softZerosOf(ids.length, soft));
     const derived = program.derivedInputs;
-    if (derived === undefined) return {};
+    if (derived === undefined) return softInputs;
     const extra = await derived.derive(
       [...ids],
       [...positions],
@@ -1385,7 +1491,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           `extra: ${surplus.join(" / ") || "none"})`,
       );
     }
-    return extra;
+    return { ...extra, ...softInputs };
   };
 
   const generate = (request: GenerationRequest): GenerationStream => {
@@ -1421,6 +1527,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         );
       }
     });
+    const softBlocks = snapshotSoftBlocks(request.softBlocks, prompt.length, program);
     // One sampler per generation (it carries RNG state across steps). The spec check and the spec
     // snapshot (copying `logitBias` down to its elements) also happen inside `createSampler`.
     // The distribution's suppressed set rides along, so every selection below — the first token,
@@ -1566,7 +1673,17 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           Math.max(1, Math.min(capacity, program.maxPosition) - past - promptIds.length + 1);
         assertBudget(program, capacity, past, promptIds.length, tokenLimit);
 
-        const chunks = planPrefillChunks(promptIds.length, program.chunkLength);
+        // MUST: a block's `start` is an index of the request's prompt; the prepended frontier moves
+        // every row by one (decided here, because whether there is a frontier is known only now).
+        const promptShift = promptIds.length - prompt.length;
+        const chunks = planPrefillChunksWithBlocks(
+          promptIds.length,
+          program.chunkLength,
+          softBlocks.map(({ start, rows }) => ({
+            start: start + promptShift,
+            length: rows.length / (program.softInputs?.hidden ?? 1),
+          })),
+        );
         // "The token sequence so far" the repetition penalty looks at (the same shape as HF applying
         // it to the whole `input_ids`). **Only this turn's tokens**, past turns excluded (the
         // sequence holds neither a progress counter nor a transcript of the whole conversation —
@@ -1593,7 +1710,15 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             ids[row] = promptIds[chunk.position + row];
             positions[row] = base + row;
           }
-          const extra = await deriveInputs(ids, positions, signal);
+          const block = chunk.block;
+          const extra = await deriveInputs(
+            ids,
+            positions,
+            signal,
+            block === undefined || program.softInputs === undefined
+              ? undefined
+              : softBlockOf(rows, program.softInputs, block, softBlocks[block.index].rows),
+          );
           // MUST: check again after the derived inputs' `await` (the "stage boundary" of ADR 0083
           // decision 5 is **right before issuing** the run). Skipping it lets a whole run proceed
           // after the abort arrived — the first chunk is always a cold miss that reads GB-scale
@@ -1607,7 +1732,13 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
               ...extra,
             },
             undefined,
-            { context, queryLength: chunk.queryLength },
+            {
+              context,
+              queryLength: chunk.queryLength,
+              ...(block === undefined
+                ? {}
+                : { bidirectionalRows: { start: block.start, end: block.end } }),
+            },
           );
           // Once the first chunk has run, the frontier is in the KV (= it must not be prepended
           // again).

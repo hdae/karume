@@ -72,6 +72,8 @@
  *    re-rendered before it.
  *
  * The check is `gemma4_chat_session_test.ts` (a multi-step tool conversation for both dialects).
+ * Images do not move the identity: a render places an image from its size alone, so its soft ids are
+ * the same on every render.
  *
  * ## Overflow handling is **injectable** (the revision of ADR 0083 decision 10)
  *
@@ -94,6 +96,20 @@
  * copy — the branch's first `send` re-renders the whole, like the original). Regeneration is written
  * as this use rather than a `regenerate` (the doc of {@link ChatSession.fork}).
  *
+ * ## Images (ADR 0144)
+ *
+ * `send` takes content parts when the host has an embedder ({@link ChatSessionHost.vision}). A history
+ * that can be re-rendered from the start decides three things:
+ *
+ * - **One copy of the pixels.** `send` copies each image once (the rule "copied at issue"). That frozen
+ *   object is the image's identity, and the history copies — `turns`, an overflow policy's input,
+ *   {@link ChatSession.fork} — hold references to it ({@link copyMessages}); `structuredClone` would
+ *   copy the pixels on every read.
+ * - **One embedding per image.** The rows are kept next to the history, keyed by that object, so a whole
+ *   re-render or a branch runs no embedder. They are released with the last entry that holds the image.
+ * - **Equality looks at the pixels** ({@link sameValue}), because a policy may return deep copies. Two
+ *   different images never compare equal; such a copy embeds once more, as the new image it is.
+ *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).
  */
@@ -107,10 +123,12 @@ import {
   type GenerationCapacityDetail,
   GenerationCapacityError,
   type GenerationSequence,
+  type GenerationSoftBlock,
   type GenerationStream,
 } from "../generation/sequence.ts";
 import { createStopStringFilter } from "../text/detokenizer.ts";
-import type { DefaultSampler } from "./config.ts";
+import type { Rgb8Image } from "../image/preprocess.ts";
+import type { DefaultSampler, PipelineVisionConfig } from "./config.ts";
 import {
   chatStreamOf,
   completeChatTurn,
@@ -123,7 +141,12 @@ import type { SequenceOptions } from "./pipeline.ts";
 import {
   assertChatTemplateOptions,
   type ChatAssistantMessage,
+  type ChatContentPart,
+  chatImagePrompt,
+  type ChatImagePrompt,
+  chatImageTurn,
   type ChatMessage,
+  type ChatPromptImage,
   chatPrompt,
   type ChatTemplateOptions,
   type ChatTool,
@@ -140,6 +163,7 @@ import {
   parseChatResponse,
 } from "./text/chat-response.ts";
 import type { Tokenizer } from "./text/tokenizer.ts";
+import type { ImageEmbedding } from "./vision.ts";
 
 /**
  * The surface the session reads from the pipeline ({@link Pipeline} satisfies it as is).
@@ -154,6 +178,13 @@ export type ChatSessionHost = {
   readonly program: GenerationProgram;
   readonly defaultSampler: DefaultSampler | undefined;
   sequence(options?: SequenceOptions): Promise<GenerationSequence>;
+  /**
+   * The image input's declaration: present on a pipeline opened with `vision: true`. Without it the
+   * session refuses content parts.
+   */
+  readonly vision?: PipelineVisionConfig | undefined;
+  /** One image → its rows (needed with {@link ChatSessionHost.vision}). */
+  embedImage?(image: Rgb8Image): Promise<ImageEmbedding>;
 };
 
 /**
@@ -424,11 +455,22 @@ const neededOf = (detail: GenerationCapacityDetail): number =>
  */
 const sameTurn = (left: ChatMessage, right: ChatMessage): boolean => sameValue(left, right);
 
-/** Structural equality of JSON-like values (messages hold only plain objects, arrays, scalars). */
+/**
+ * Structural equality of what messages hold: plain objects, arrays, scalars, and an image's pixels
+ * (byte by byte, because an array of bytes is not a JSON-like value to walk key by key).
+ */
 const sameValue = (left: unknown, right: unknown): boolean => {
   if (left === right) return true;
   if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
     return false;
+  }
+  if (left instanceof Uint8Array || right instanceof Uint8Array) {
+    if (!(left instanceof Uint8Array && right instanceof Uint8Array)) return false;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] !== right[index]) return false;
+    }
+    return true;
   }
   if (Array.isArray(left) !== Array.isArray(right)) return false;
   const leftRecord = left as Readonly<Record<string, unknown>>;
@@ -445,16 +487,41 @@ const endsWith = (turns: readonly ChatMessage[], tail: readonly ChatMessage[]): 
   turns.length >= tail.length &&
   tail.every((message, index) => sameTurn(turns[turns.length - tail.length + index], message));
 
+/**
+ * Freezes every object under `value`. An image's pixels stay as they are: a typed array with elements
+ * cannot be frozen.
+ */
+const deepFreeze = (value: unknown): void => {
+  if (typeof value !== "object" || value === null || ArrayBuffer.isView(value)) return;
+  Object.values(value).forEach(deepFreeze);
+  Object.freeze(value);
+};
+
 /** A deep copy whose every object is frozen (the history handed out cannot reach the internal one). */
 const frozenCopy = <T>(value: T): T => {
-  const freeze = (item: unknown): void => {
-    if (typeof item !== "object" || item === null) return;
-    Object.values(item).forEach(freeze);
-    Object.freeze(item);
-  };
   const copy = structuredClone(value);
-  freeze(copy);
+  deepFreeze(copy);
   return copy;
+};
+
+/**
+ * Copies of history entries that share the images: a content array is copied part by part with the
+ * image object in place, anything else goes through `structuredClone`.
+ */
+const copyMessages = (messages: readonly ChatMessage[]): ChatMessage[] =>
+  messages.map((message) =>
+    message.role === "user" && typeof message.content !== "string"
+      ? { ...message, role: "user", content: message.content.map((part) => ({ ...part })) }
+      : structuredClone(message),
+  );
+
+/** The session's own copy of one part (the MUST of {@link ChatSession.send}). */
+const snapshotPart = (part: ChatContentPart): ChatContentPart => {
+  // Anything else is not a part: the check that follows names it, and it needs no copy to be refused.
+  if (typeof part !== "object" || part === null) return part;
+  if (part.type !== "image" || !(part.image?.data instanceof Uint8Array)) return { ...part };
+  const { data, width, height } = part.image;
+  return { ...part, image: Object.freeze({ data: data.slice(), width, height }) };
 };
 
 /** The tool calls of a history entry (none for anything but a tool-calling assistant message). */
@@ -607,6 +674,12 @@ export class ChatSession {
    * The conversation history (this layer's only mutable state — the sequence holds no transcript).
    */
   #turns: ChatMessage[];
+  /**
+   * The rows of the images the history holds, keyed by the image object ("Images" of the module doc).
+   * Derived data the embedder is too slow to derive again: {@link ChatSession.#pruneEmbeddings} keeps
+   * its keys inside the history.
+   */
+  #embeddings = new Map<Rgb8Image, ImageEmbedding>();
   /** The current sequence (`undefined` = rebuild on the next turn). */
   #sequence: GenerationSequence | undefined;
   /** The number of history entries in that sequence's KV (0 = empty = re-render the whole). */
@@ -683,16 +756,25 @@ export class ChatSession {
    *
    * Returns a deep-frozen **copy** — exposing the internal array as is would let the consumer's
    * `push` / `splice` (or a write into a call's arguments) silently break the mapping to the KV
-   * ("When the KV is carried over" of {@link ChatSession}).
+   * ("When the KV is carried over" of {@link ChatSession}). Images are the session's own objects, not
+   * copies; their pixels are not read again once embedded.
    */
   get turns(): readonly ChatMessage[] {
-    return frozenCopy(this.#turns);
+    const copy = copyMessages(this.#turns);
+    deepFreeze(copy);
+    return copy;
   }
 
   /**
    * Sends one user message and streams **committed text pieces** (the same stream, the same stop
    * reason and the same `text()` as {@link Pipeline.chat}, plus the parsed
    * {@link ChatSessionStream.reply}).
+   *
+   * The message is a string, or content parts on a host with an embedder
+   * ({@link ChatSessionHost.vision}). MUST: each image is **copied at issue** (one copy, for the life
+   * of its history entry — "Images" of the module doc), and refused parts fail synchronously with
+   * `ModelInputError`: an empty array, audio or video, a text that encodes to an image token. Embedding
+   * happens when the stream starts draining, once per image.
    *
    * If the previous turn closed with EOS, the KV is carried over and **only the delta** is streamed;
    * otherwise the sequence is rebuilt and the history re-rendered. A turn that does not fit goes to
@@ -707,12 +789,11 @@ export class ChatSession {
    * ({@link ChatSession.sendToolResults}) — the model turn is still open, and a user message there
    * cannot be rendered.
    */
-  send(text: string, options: ChatTurnOptions = {}): ChatSessionStream {
-    if (typeof text !== "string") {
-      throw new ModelInputError(
-        `gemma.ChatSession.send: the message is not a string (${typeof text})`,
-      );
-    }
+  send(
+    message: string | readonly ChatContentPart[],
+    options: ChatTurnOptions = {},
+  ): ChatSessionStream {
+    const pending = this.#userMessageOf(message);
     const request = this.#requestOf(options);
     // MUST: from here to `#busy = true` nothing the caller controls runs (every caller input was
     // read and copied above) — a getter that called `send` in between would issue two turns.
@@ -723,7 +804,7 @@ export class ChatSession {
           "sendToolResults first (the model turn is still open)",
       );
     }
-    return this.#issue([{ role: "user", content: text }], request);
+    return this.#issue([pending], request);
   }
 
   /**
@@ -768,6 +849,32 @@ export class ChatSession {
     });
     assertOneResultPerCall(calls, copied);
     return this.#issue(copied, request);
+  }
+
+  /** Reads, copies and checks the message of {@link ChatSession.send}. */
+  #userMessageOf(message: string | readonly ChatContentPart[]): ChatMessage {
+    const { tokenizer, vision } = this.#host;
+    if (typeof message === "string") {
+      const text: ChatMessage = { role: "user", content: message };
+      // On an image-capable host a spelled image token is refused here too, before the history moves.
+      if (vision !== undefined) chatImageTurn(tokenizer, text, vision, this.#template);
+      return text;
+    }
+    if (!Array.isArray(message)) {
+      throw new ModelInputError(
+        `gemma.ChatSession.send: the message is not a string or a content-part array (${typeof message})`,
+      );
+    }
+    if (vision === undefined || this.#host.embedImage === undefined) {
+      throw new ModelInputError(
+        "gemma.ChatSession.send: content parts need a pipeline opened with vision: true, and this " +
+          "one has no image embedder",
+      );
+    }
+    // `[...]` turns a hole of a sparse array into `undefined`, which the check below refuses.
+    const parts: ChatMessage = { role: "user", content: [...message].map(snapshotPart) };
+    chatImageTurn(tokenizer, parts, vision, this.#template);
+    return parts;
   }
 
   /** Throws synchronously when no turn can be issued (disposed, or a turn is running). */
@@ -876,10 +983,11 @@ export class ChatSession {
       const generated: number[] = [];
       let prompt: readonly number[] = [];
       try {
-        const prepared = await prepare(maxNewTokens);
+        const prepared = await prepare(maxNewTokens, signal);
         prompt = prepared.prompt;
         stream = prepared.sequence.generate({
           prompt: prepared.prompt,
+          ...(prepared.softBlocks.length === 0 ? {} : { softBlocks: prepared.softBlocks }),
           ...(maxNewTokens === undefined ? {} : { maxNewTokens }),
           ...(stopTokens === undefined ? {} : { stopTokens }),
           ...(sampler === undefined ? {} : { sampler }),
@@ -1010,7 +1118,7 @@ export class ChatSession {
     }
     // Copy along with the KV-to-history mapping (`#committed`). Between turns, "no sequence ⇔ the KV
     // is empty (`#committed === 0`)", so the KV copy is made only when there is a sequence.
-    const turns = structuredClone(this.#turns);
+    const turns = copyMessages(this.#turns);
     const committed = this.#committed;
     const copying = this.#sequence?.fork();
     const branch = new ChatSession(this.#host, {
@@ -1025,6 +1133,8 @@ export class ChatSession {
       ...this.#template,
     });
     branch.#turns = turns;
+    // The rows are shared with the images: neither session writes them.
+    branch.#embeddings = new Map(this.#embeddings);
     branch.#nextCallId = this.#nextCallId;
     if (copying === undefined) return Promise.resolve(branch);
     return copying.then((sequence) => {
@@ -1043,19 +1153,25 @@ export class ChatSession {
    * while out of step would silently lose part of the conversation, so the premise of carrying over
    * is itself a check.
    */
-  #delta(): number[] {
+  #delta(): ChatImagePrompt {
     const pending = this.#turns.slice(this.#committed);
     const owner = this.#turns[this.#committed - 1];
+    const { tokenizer, vision } = this.#host;
     if (pending.length > 0 && pending.every((message) => message.role === "tool")) {
-      return chatToolResults(
-        this.#host.tokenizer,
-        callsOf(owner),
-        pending as ChatToolMessage[],
-        this.#template,
-      );
+      return {
+        prompt: chatToolResults(
+          tokenizer,
+          callsOf(owner),
+          pending as ChatToolMessage[],
+          this.#template,
+        ),
+        images: [],
+      };
     }
     if (pending.length === 1 && callsOf(owner).length === 0) {
-      return chatTurn(this.#host.tokenizer, pending[0], this.#template);
+      return vision === undefined
+        ? { prompt: chatTurn(tokenizer, pending[0], this.#template), images: [] }
+        : chatImageTurn(tokenizer, pending[0], vision, this.#template);
     }
     throw new Error(
       `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns and the ` +
@@ -1065,6 +1181,61 @@ export class ChatSession {
           : `${pending.map((message) => message.role).join(", ")} after ${owner?.role ?? "nothing"}`) +
         ` — neither one message after a closed turn nor the results of a tool call`,
     );
+  }
+
+  /** The whole history as a prompt (the turn starts from an empty KV). */
+  #renderWhole(): ChatImagePrompt {
+    const { tokenizer, vision } = this.#host;
+    return vision === undefined
+      ? { prompt: chatPrompt(tokenizer, this.#turns, this.#template), images: [] }
+      : chatImagePrompt(tokenizer, this.#turns, vision, this.#template);
+  }
+
+  /**
+   * The soft blocks of a rendered prompt: each image's rows from {@link ChatSession.#embeddings}, or
+   * from the embedder the first time the image is rendered.
+   *
+   * MUST: the render's count equals the embedding's. The prompt's rows were reserved from the image's
+   * size and the rows came from its pixels, and a difference would fill another row count than the
+   * block holds.
+   */
+  async #softBlocksOf(
+    images: readonly ChatPromptImage[],
+    signal: AbortSignal | undefined,
+  ): Promise<GenerationSoftBlock[]> {
+    const blocks: GenerationSoftBlock[] = [];
+    for (const { image, start, softTokens } of images) {
+      let embedding = this.#embeddings.get(image);
+      if (embedding === undefined) {
+        signal?.throwIfAborted();
+        if (this.#host.embedImage === undefined) {
+          throw new Error("gemma.ChatSession internal inconsistency: an image without an embedder");
+        }
+        embedding = await this.#host.embedImage(image);
+        this.#embeddings.set(image, embedding);
+      }
+      if (embedding.softTokens !== softTokens) {
+        throw new Error(
+          `gemma.ChatSession internal inconsistency: the render reserved ${softTokens} soft tokens ` +
+            `for an image the embedder returned ${embedding.softTokens} rows for`,
+        );
+      }
+      blocks.push({ start, rows: embedding.rows });
+    }
+    return blocks;
+  }
+
+  /** Releases the rows of the images no history entry holds any more. */
+  #pruneEmbeddings(): void {
+    if (this.#embeddings.size === 0) return;
+    const held = new Set<Rgb8Image>();
+    for (const message of this.#turns) {
+      if (message.role !== "user" || typeof message.content === "string") continue;
+      for (const part of message.content) if (part.type === "image") held.add(part.image);
+    }
+    for (const image of this.#embeddings.keys()) {
+      if (!held.has(image)) this.#embeddings.delete(image);
+    }
   }
 
   /**
@@ -1082,7 +1253,12 @@ export class ChatSession {
    */
   async #prepare(
     maxNewTokens: number | undefined,
-  ): Promise<{ readonly sequence: GenerationSequence; readonly prompt: number[] }> {
+    signal: AbortSignal | undefined,
+  ): Promise<{
+    readonly sequence: GenerationSequence;
+    readonly prompt: number[];
+    readonly softBlocks: readonly GenerationSoftBlock[];
+  }> {
     const attempts = this.#turns.length;
     for (let attempt = 0; ; attempt += 1) {
       // MUST: re-check after `await` (`send` checks at issue, but the body starts running later).
@@ -1108,10 +1284,7 @@ export class ChatSession {
           `gemma.ChatSession internal inconsistency: the KV is empty but the sequence's used is ${held.used}`,
         );
       }
-      const prompt =
-        this.#committed === 0
-          ? chatPrompt(this.#host.tokenizer, this.#turns, this.#template)
-          : this.#delta();
+      const { prompt, images } = this.#committed === 0 ? this.#renderWhole() : this.#delta();
       const detail = overflowOf(
         this.#host.program,
         this.#capacity,
@@ -1120,7 +1293,13 @@ export class ChatSession {
         maxNewTokens ?? this.#reserveNewTokens,
       );
       if (detail === undefined) {
-        if (held !== undefined) return { sequence: held, prompt };
+        // After the overflow decision (an image of a dropped turn is not embedded for nothing) and
+        // before the allocation (a failing embedder takes no KV).
+        const softBlocks = await this.#softBlocksOf(images, signal);
+        if (this.#disposal !== undefined) {
+          throw new Error("gemma.ChatSession: cannot generate after dispose");
+        }
+        if (held !== undefined) return { sequence: held, prompt, softBlocks };
         const created = await this.#host.sequence({
           capacity: this.#capacity,
           // When unspecified, the field is not passed at all (fall back to the pipeline's default =
@@ -1137,7 +1316,7 @@ export class ChatSession {
         }
         this.#sequence = created;
         this.#committed = 0;
-        return { sequence: created, prompt };
+        return { sequence: created, prompt, softBlocks };
       }
       if (attempt >= attempts) {
         throw new Error(
@@ -1187,7 +1366,8 @@ export class ChatSession {
         detail,
       );
     }
-    this.#turns = structuredClone([...next]);
+    this.#turns = copyMessages(next);
+    this.#pruneEmbeddings();
     // A truncated history is re-rendered from the start, so the context is returned and rebuilt.
     await this.#releaseSequence();
   }
@@ -1292,6 +1472,7 @@ export class ChatSession {
       }
       return stop === undefined ? undefined : { reply: { end: "cut-off", stop } };
     } finally {
+      this.#pruneEmbeddings();
       this.#busy = false;
     }
   }

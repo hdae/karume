@@ -104,11 +104,13 @@ import {
   type DefaultSampler,
   type PipelineConfig,
   parsePipelineConfig,
+  type PipelineVisionConfig,
 } from "./config.ts";
 import {
   createGenerationProgram,
   type GenerationProgram,
   generationProgramFace,
+  type GenerationSoftInputs,
   type GenerationWiring,
 } from "../generation/program.ts";
 import {
@@ -116,6 +118,7 @@ import {
   createGenerationSequence,
   type GenerationRequest,
   type GenerationSequence,
+  type GenerationSoftBlock,
   type GenerationSpeculativeOptions,
   type GenerationStream,
   physicalChunkRows,
@@ -139,14 +142,19 @@ import { GEMMA4_DRAFT_STEPS, type Gemma4Drafter, openGemma4DraftFace } from "./s
 import { createStopStringFilter } from "../text/detokenizer.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { Tokenizer } from "./text/tokenizer.ts";
-import { type ChatMessage, chatPrompt, gemma4StopTokens } from "./text/chat.ts";
+import { assertRgb8, type Rgb8Image } from "../image/preprocess.ts";
+import { type ChatMessage, chatImagePrompt, chatPrompt, gemma4StopTokens } from "./text/chat.ts";
+import { type ImageEmbedding, type ImageRows, imageRows, runImageEmbedder } from "./vision.ts";
 import { DEFAULT_CHAT_DIALECT } from "./text/chat-dialect.ts";
 import {
   admitGemma4,
   admitGemma4Ple,
   assertChunkLength,
+  assertGemma4Vision,
   assertGemma4ChunkBuckets,
   GEMMA4_PER_LAYER_INPUTS,
+  GEMMA4_SOFT_EMBEDS,
+  GEMMA4_SOFT_MASK,
   type Gemma4Admission,
   gemma4ManifestConfig,
   gemmaEntryName,
@@ -188,6 +196,11 @@ const MODEL = "model";
  * descriptor and weight parts even for a load that does not use speculation.
  */
 const DRAFTER = "drafter";
+/**
+ * The weights role of the image embedder (ADR 0144). The same MUST as {@link DRAFTER}: not a byte of
+ * it is fetched unless {@link PipelineOptions.vision} asks for it.
+ */
+const VISION = "vision";
 const TOKENIZER_ASSET = "tokenizer";
 
 /**
@@ -533,6 +546,18 @@ export type PipelineOptions = {
      */
     readonly gate?: SpeculationGateOptions;
   };
+  /**
+   * **Builds the image embedder alongside** (ADR 0144 — not built when omitted or `false`).
+   *
+   * When `true`, the distribution's `vision` weights are fetched as well and one more Session is set
+   * up; {@link Pipeline.embedImage} and image parts in {@link Pipeline.chat} / `ChatSession` work
+   * on it. **Unless it is given, not a byte of those weights is downloaded**, as for the drafter.
+   *
+   * A distribution without the role, a declaration without `pipelineConfig.vision` or a product graph
+   * without `soft_embeds` fails loudly before any weight part is fetched. Only
+   * {@link Pipeline.fromPretrained} accepts it: {@link Assets} holds one product graph.
+   */
+  readonly vision?: boolean;
 };
 
 /**
@@ -832,6 +857,8 @@ export type Gemma4State = {
    * this field only exists "to pass through on every generation", and nothing past here interprets it.
    */
   readonly speculativeGate?: SpeculationGateOptions;
+  /** The image embedder (only when {@link PipelineOptions.vision} was given). */
+  readonly vision?: Gemma4Vision;
   /**
    * The slot-backing budget passed to the Session ({@link PipelineOptions.planBackingBudgetBytes};
    * the runtime default when unspecified).
@@ -852,6 +879,18 @@ export type Gemma4State = {
   readonly attentionRowBlockMaxBytes?: SessionOptions["attentionRowBlockMaxBytes"];
   /** The per-run observation callback ({@link PipelineOptions.onRunDiagnostics}). */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
+};
+
+/** The image embedder of one pipeline. */
+type Gemma4Vision = {
+  readonly session: Session;
+  /** For the estimate only (the same reason as the drafter's). */
+  readonly graph: GraphOwner["graph"];
+  /** The embedder graph's one output. */
+  readonly output: string;
+  /** Its row symbol ({@link Pipeline.estimateSessionMemory} binds it to the budget). */
+  readonly symbol: string;
+  readonly config: PipelineVisionConfig;
 };
 
 /**
@@ -1008,6 +1047,15 @@ const gemma4PlePlan = (
     return { residency: "none" };
   }
   return { residency: resolveGemma4PleResidency(where, options), index };
+};
+
+/** Whether {@link PipelineOptions.vision} asks for the embedder (a non-boolean fails loudly). */
+const wantsGemma4Vision = (where: string, options: PipelineOptions): boolean => {
+  const vision: unknown = options.vision;
+  if (vision !== undefined && typeof vision !== "boolean") {
+    throw new ModelInputError(`${where}: vision ${JSON.stringify(vision)} is not a boolean`);
+  }
+  return vision === true;
 };
 
 /**
@@ -1236,6 +1284,24 @@ export const gemma4EstimateGenerations = (
   };
 };
 
+/** The soft inputs a product graph declares ({@link GenerationProgramSpec.softInputs}). */
+const softInputsOf = (
+  graph: GraphOwner["graph"],
+): { readonly softInputs: GenerationSoftInputs } | Record<string, never> => {
+  const inputOf = (name: string) => graph.inputs.find((input) => input.name === name);
+  const embeds = inputOf(GEMMA4_SOFT_EMBEDS);
+  if (embeds === undefined && inputOf(GEMMA4_SOFT_MASK) === undefined) return {};
+  const hidden = embeds?.shape[2];
+  return {
+    softInputs: {
+      embeds: GEMMA4_SOFT_EMBEDS,
+      mask: GEMMA4_SOFT_MASK,
+      // A symbolic width reads as not an integer, which the program's check refuses by name.
+      hidden: typeof hidden === "number" ? hidden : Number.NaN,
+    },
+  };
+};
+
 /**
  * Builds the static wiring from the material that passed admission + the assets (shared by
  * `fromAssets` and `fromPretrained`).
@@ -1356,8 +1422,22 @@ export const buildGemma4Program = (
             }),
           },
     ...(plePlan.residency === "gpu" ? { residentInputs: [PER_LAYER_INPUTS] } : {}),
+    // MUST: follows the graph, not the `vision` option. A graph with these inputs needs them bound
+    // on every run, so a text-only pipeline over it binds zeros and false like any other run. A graph
+    // with only one of the two fails in the program's check, by name.
+    ...softInputsOf(model.graph),
   });
   return { wiring, tokenizer, ...(ple === undefined ? {} : { ple }) };
+};
+
+/**
+ * One image's rows → vectors on {@link Gemma4State.vision}. The caller holds the pipeline's
+ * serialization slot, and a pipeline without the embedder never reaches here.
+ */
+const embedRows = (state: Gemma4State, rows: ImageRows): Promise<ImageEmbedding> => {
+  const { vision } = state;
+  if (vision === undefined) throw new Error(`${state.entry}: no image embedder is built`);
+  return runImageEmbedder(vision.session, rows, vision.output, vision.config.hiddenSize);
 };
 
 /**
@@ -1401,6 +1481,13 @@ export class GemmaPipeline {
           " QAT line's drafters run through gemma.Pipeline)",
       );
     }
+    const vision = wantsGemma4Vision(where, options);
+    if (family === "gemma4-qat" && vision) {
+      throw new Error(
+        `${where}: vision is not supported for the mobile QAT line (it ships no image embedder; ` +
+          "12B of the q4_0 QAT line runs through gemma.Pipeline)",
+      );
+    }
     if (options.speculative !== undefined) {
       assertSpeculative(where, options.speculative);
     }
@@ -1426,7 +1513,11 @@ export class GemmaPipeline {
     // MUST: narrow the weights to fetch by role (`ResolveOptions.weights`). If the drafter stayed in
     // the table for a load that does not use speculation, its descriptor and weight parts would be
     // downloaded too.
-    const componentKeys = options.speculative === undefined ? [MODEL] : [MODEL, DRAFTER];
+    const componentKeys = [
+      MODEL,
+      ...(options.speculative === undefined ? [] : [DRAFTER]),
+      ...(vision ? [VISION] : []),
+    ];
     const selection = resolveSelection(loaded.manifest, {
       ...choice,
       weights: componentKeys,
@@ -1456,6 +1547,9 @@ export class GemmaPipeline {
           options.speculative === undefined ? undefined : open(DRAFTER),
           entry,
         );
+        const visionAdmission = vision
+          ? assertGemma4Vision(model, open(VISION), config, admitted.vocabSize, entry)
+          : undefined;
         // MUST: **carry, not discard,** the model name settled from the graph (the PLE check does not
         // re-derive it from the layer count).
         const admission: GemmaFamilyAdmission =
@@ -1495,6 +1589,7 @@ export class GemmaPipeline {
         return {
           ...admitted,
           ...(pleIndex === undefined ? {} : { pleIndex }),
+          ...(visionAdmission === undefined ? {} : { vision: visionAdmission }),
           quantSession,
           admission,
           requested: { gpuFeatures, where: quantWhere },
@@ -1536,6 +1631,13 @@ export class GemmaPipeline {
       throw new Error(
         `${where}: speculative is not accepted` +
           ` (gemma.Assets has no drafter container — build speculation from fromPretrained)`,
+      );
+    }
+    // The same for the embedder: "specified but no effect" is refused.
+    if (wantsGemma4Vision(where, options)) {
+      throw new Error(
+        `${where}: vision is not accepted` +
+          ` (gemma.Assets has no vision container — build image input from fromPretrained)`,
       );
     }
     // The placement option is checked before opening a single byte of the assets (the same position
@@ -1705,6 +1807,7 @@ export class GemmaPipeline {
     let session: Session | undefined;
     let pleGpu: Gemma4PleResident | undefined;
     let aheadIds: ResidentTensor | undefined;
+    let visionSession: Session | undefined;
     try {
       // MUST: for a device acquired here, this is the only feature check (a shared GPU goes through
       // the same one at the admission step too). It is inside the try so that, on failure, the
@@ -1758,6 +1861,20 @@ export class GemmaPipeline {
               },
             )
           : undefined;
+      // Stateless and on bf16 weights, which need no device feature (they are expanded inside the
+      // kernel — ADR 0131), so of the Session options only the host policies apply to it.
+      visionSession =
+        admitted.vision === undefined
+          ? undefined
+          : await open(VISION).createSession(gpu, {
+              submitPolicy: sessionOptions.submitPolicy,
+              ...(options.planBackingBudgetBytes === undefined
+                ? {}
+                : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
+              ...(options.linearGemvRowsThreadTarget === undefined
+                ? {}
+                : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
+            });
       const drafter = await GemmaPipeline.#buildDrafter(
         admitted,
         open,
@@ -1786,6 +1903,17 @@ export class GemmaPipeline {
         tokenizer,
         config: admitted.config,
         ...(drafter === undefined ? {} : { drafter }),
+        ...(visionSession === undefined || admitted.vision === undefined
+          ? {}
+          : {
+              vision: {
+                session: visionSession,
+                graph: open(VISION).graph,
+                output: admitted.vision.output,
+                symbol: admitted.vision.symbol,
+                config: admitted.vision.config,
+              },
+            }),
         ...(speculativeK === undefined ? {} : { speculativeK }),
         // The gate's knobs pass straight through with the already checked (`assertSpeculative`) value.
         ...(options.speculative?.gate === undefined
@@ -1806,6 +1934,7 @@ export class GemmaPipeline {
       // is borrower (the drafter was not set up = the borrow count is already back) → lender → PLE's
       // GPU residency → the GPU acquired internally.
       await disposeSteps([
+        () => visionSession?.dispose(),
         () => {
           if (session !== undefined) return session.dispose();
         },
@@ -1860,9 +1989,11 @@ export class GemmaPipeline {
    * Runs one conversation turn and streams **committed text pieces** (the streaming decode of ADR
    * 0084 decision 4).
    *
-   * Rendering and encoding the conversation is `chatPrompt` (out-of-scope input fails loudly
-   * here, **synchronously**), and generation is one `GenerationSequence`; whether drained, `break`-ed
-   * or interrupted, the sequence is returned. **One turn = one sequence**, so past turns do not
+   * Rendering and encoding the conversation is `chatPrompt` (`chatImagePrompt` on a pipeline opened
+   * with {@link PipelineOptions.vision}, where a user message can hold images; out-of-scope input
+   * fails loudly here, **synchronously**), and generation is one `GenerationSequence`; whether
+   * drained, `break`-ed or interrupted, the sequence is returned. An image is read at issue and
+   * embedded when the stream starts draining. **One turn = one sequence**, so past turns do not
    * remain — to run a multi-turn conversation yourself, use {@link Pipeline.sequence}.
    *
    * If incremental display is not needed, {@link ChatStream.text} gives one string (mixing it
@@ -1887,7 +2018,18 @@ export class GemmaPipeline {
       throw new Error(`${this.#state.entry}: cannot generate after dispose`);
     }
     // The accepted set fails synchronously (before entering the GPU or the queue).
-    const prompt = chatPrompt(this.#state.tokenizer, messages);
+    const visionConfig = this.#state.vision?.config;
+    const rendered =
+      visionConfig === undefined
+        ? { prompt: chatPrompt(this.#state.tokenizer, messages), images: [] }
+        : chatImagePrompt(this.#state.tokenizer, messages, visionConfig);
+    const { prompt } = rendered;
+    // The images are read here too, for the rule of the MUST below: the rows are built at issue, so
+    // nothing written into the pixels afterwards reaches this turn.
+    const imageBlocks = rendered.images.map(({ image, start }) => ({
+      start,
+      rows: imageRows(image, visionConfig?.softTokenBudget),
+    }));
     const chosen = options.sampler ?? this.#state.config.sampler;
     // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
     // generator) does not run until the first `next()`, so without reading `options` through here,
@@ -1957,6 +2099,12 @@ export class GemmaPipeline {
         }
         release = await acquire();
         const capacity = capacityOption === "fit" ? await fitCapacity() : capacityOption;
+        const softBlocks: GenerationSoftBlock[] = [];
+        for (const { start, rows } of imageBlocks) {
+          // The embedder's stage boundary: a long list of images stops between two of them.
+          request.signal?.throwIfAborted();
+          softBlocks.push({ start, rows: (await embedRows(state, rows)).rows });
+        }
         sequence = await createGenerationSequence({
           session: state.greedyOutput?.session ?? state.session,
           ...(state.greedyOutput === undefined
@@ -1970,7 +2118,7 @@ export class GemmaPipeline {
           ...(speculative === undefined ? {} : { speculative }),
           ...(onRun === undefined ? {} : { onRun }),
         });
-        stream = sequence.generate(request);
+        stream = sequence.generate(softBlocks.length === 0 ? request : { ...request, softBlocks });
         matched = yield* decodeChatChunks(
           stream,
           state.tokenizer.createDetokenizer(),
@@ -2006,6 +2154,40 @@ export class GemmaPipeline {
       }),
       done,
     );
+  }
+
+  /**
+   * One image → its vectors: the rows {@link GenerationRequest.softBlocks} takes, for the prompt
+   * `chatImagePrompt` / `chatImageTurn` renders. {@link Pipeline.chat} and `ChatSession` call it for
+   * themselves, so only a caller of {@link Pipeline.sequence} needs it.
+   *
+   * The pixels are read at the call (preprocessed in its synchronous part). The run itself waits for
+   * the pipeline's serialization chain, as {@link Pipeline.chat} does, so an embedding issued while a
+   * `chat` stream is open starts when that stream closes.
+   *
+   * MUST: the pipeline was opened with {@link PipelineOptions.vision} (`ModelInputError` otherwise).
+   */
+  async embedImage(image: Rgb8Image): Promise<ImageEmbedding> {
+    const state = this.#state;
+    if (this.#disposal !== undefined) {
+      throw new Error(`${state.entry}: cannot embed an image after dispose`);
+    }
+    if (state.vision === undefined) {
+      throw new ModelInputError(
+        `${state.entry}: embedImage needs a pipeline opened with vision: true`,
+      );
+    }
+    assertRgb8(image);
+    const rows = imageRows(image, state.vision.config.softTokenBudget);
+    const release = await this.#acquire();
+    try {
+      if (this.#disposal !== undefined) {
+        throw new Error(`${state.entry}: cannot embed an image after dispose`);
+      }
+      return await embedRows(state, rows);
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -2187,7 +2369,7 @@ export class GemmaPipeline {
    * constant that depends on neither `k` nor `capacity`.
    */
   estimateSessionMemory(options: EstimateOptions = {}): AdmissionReport {
-    const { wiring, graph, gpu, drafter, entry } = this.#state;
+    const { wiring, graph, gpu, drafter, vision, entry } = this.#state;
     const capacity = options.capacity ?? wiring.capacity;
     const chunkLength = assertChunkLength(
       options.chunkLength ?? wiring.chunkLength,
@@ -2263,31 +2445,48 @@ export class GemmaPipeline {
       ...(auxiliaryBytes === undefined ? {} : { auxiliaryBytes }),
       peakAccountedBytes: baseTarget.peakAccountedBytes + (auxiliaryBytes ?? 0),
     };
-    if (drafter === undefined) return target;
+    if (drafter === undefined && vision === undefined) return target;
     // The borrower's share (resident weights and the context's state) is derived by **running the
     // drafter graph through the same estimator** (the formula is not rebuilt in this layer — excluding
     // borrowed slots and shared initializers is exactly the branching of the runtime's residency
     // planner and `GenerationContext.create`).
-    const borrower = estimateGraphMemory(drafter.graph, planWeightResidency(drafter.graph), {
-      generation: generations.borrower,
-      maxStorageBufferBindingSize,
-      maxBufferSize,
-      ...budget,
-    });
+    const borrower =
+      drafter === undefined
+        ? undefined
+        : estimateGraphMemory(drafter.graph, planWeightResidency(drafter.graph), {
+            generation: generations.borrower,
+            maxStorageBufferBindingSize,
+            maxBufferSize,
+            ...budget,
+          });
+    // The embedder goes through the same estimator, at the most rows one image can have (its row
+    // symbol is bound by the inputs, which an estimate does not have).
+    const embedder =
+      vision === undefined
+        ? undefined
+        : estimateGraphMemory(vision.graph, planWeightResidency(vision.graph), {
+            bindings: { [vision.symbol]: vision.config.softTokenBudget },
+            maxStorageBufferBindingSize,
+            maxBufferSize,
+            ...budget,
+          });
+    const companions = [borrower, embedder].filter((report) => report !== undefined);
+    const sumOf = (read: (report: AdmissionReport) => number): number =>
+      read(target) + companions.reduce((total, report) => total + read(report), 0);
     const weights = {
-      compressedBytes:
-        target.resident.weights.compressedBytes + borrower.resident.weights.compressedBytes,
-      uncompressedBytes:
-        target.resident.weights.uncompressedBytes + borrower.resident.weights.uncompressedBytes,
-      expandedBytes:
-        target.resident.weights.expandedBytes + borrower.resident.weights.expandedBytes,
-      totalBytes: target.resident.weights.totalBytes + borrower.resident.weights.totalBytes,
+      compressedBytes: sumOf((report) => report.resident.weights.compressedBytes),
+      uncompressedBytes: sumOf((report) => report.resident.weights.uncompressedBytes),
+      expandedBytes: sumOf((report) => report.resident.weights.expandedBytes),
+      totalBytes: sumOf((report) => report.resident.weights.totalBytes),
     };
-    const residentBytes = borrower.resident.weights.totalBytes + borrower.resident.stateBytes;
+    const borrowerBytes =
+      borrower === undefined
+        ? 0
+        : borrower.resident.weights.totalBytes + borrower.resident.stateBytes;
     return {
       resident: {
         weights,
-        stateBytes: target.resident.stateBytes + borrower.resident.stateBytes,
+        stateBytes: sumOf((report) => report.resident.stateBytes),
       },
       // The per-shape requirement stays the lender's three shapes (prefill / decode / verify) — a
       // drafter run never runs at the same time as a lender run (the borrower's run takes the lender's
@@ -2295,13 +2494,19 @@ export class GemmaPipeline {
       scenarios: target.scenarios,
       planBackingBudgetBytes: target.planBackingBudgetBytes,
       ...(auxiliaryBytes === undefined ? {} : { auxiliaryBytes }),
-      // Residency is held by two Sessions at once, so it is the sum. The upper limit of the held set
-      // (budget vs the largest scenario) applies on the lender's side as is.
-      peakAccountedBytes: target.peakAccountedBytes + residentBytes,
+      // Residency is held by the Sessions at once, so it is the sum. The upper limit of the held set
+      // (budget vs the largest scenario) applies on the lender's side as is. The embedder's whole
+      // peak counts, not only its weights: its Session keeps the slot backing of its last image.
+      peakAccountedBytes:
+        target.peakAccountedBytes + borrowerBytes + (embedder?.peakAccountedBytes ?? 0),
       unaccounted: [
         ...target.unaccounted,
-        "The inputs, outputs and intermediates of one drafter run (the borrowing Session's slot backing — a draft run" +
-          " never runs at the same time as a verify run, and the requirement depends on neither k nor capacity)",
+        ...(borrower === undefined
+          ? []
+          : [
+              "The inputs, outputs and intermediates of one drafter run (the borrowing Session's slot backing — a draft run" +
+                " never runs at the same time as a verify run, and the requirement depends on neither k nor capacity)",
+            ]),
       ],
     };
   }
@@ -2368,6 +2573,15 @@ export class GemmaPipeline {
   }
 
   /**
+   * The image input's declaration when this pipeline was opened with
+   * {@link PipelineOptions.vision} (`undefined` otherwise, whatever the distribution declares):
+   * what `chatImagePrompt` renders with, and how a `ChatSession` knows it can take image parts.
+   */
+  get vision(): PipelineVisionConfig | undefined {
+    return this.#state.vision?.config;
+  }
+
+  /**
    * The **default** sampler the distribution declared (ADR 0083 decision 7 — `undefined` = greedy
    * when there is no declaration).
    *
@@ -2416,6 +2630,7 @@ export class GemmaPipeline {
         // the remaining steps still go through, but every report would say "still lent out".
         () => this.#state.greedyOutput?.dispose(),
         () => this.#state.drafter?.session.dispose(),
+        () => this.#state.vision?.session.dispose(),
         () => this.#state.session.dispose(),
         // MUST: after the target Session (released once the baked references of the resident input
         // have been returned).
@@ -2470,7 +2685,8 @@ export class Pipeline extends GemmaPipeline {
    * **only the touched blocks** are range-read from the persistent cache (ADR 0109 / 0085 decision 3).
    *
    * To replace a component with the same role from another repository, use
-   * {@link FromPretrainedComponentOptions.components} (the roles are `model` and `drafter`).
+   * {@link FromPretrainedComponentOptions.components} (the roles are `model`, `drafter` and
+   * `vision`).
    *
    * **`ref` is required** (there is no default source — the MUST of `src/hub/repo-ref.ts`). The source
    * the package release verified is `"gemma4"` (the regular line) or `"gemma4-qat"` (the q4_0 QAT
