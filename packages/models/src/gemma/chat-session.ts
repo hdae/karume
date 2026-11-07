@@ -521,7 +521,9 @@ const snapshotPart = (part: ChatContentPart): ChatContentPart => {
   if (typeof part !== "object" || part === null) return part;
   if (part.type !== "image" || !(part.image?.data instanceof Uint8Array)) return { ...part };
   const { data, width, height } = part.image;
-  return { ...part, image: Object.freeze({ data: data.slice(), width, height }) };
+  // MUST: `new Uint8Array(data)`, not `data.slice()`: a Node Buffer is a Uint8Array whose `slice` is
+  // a view of the same memory.
+  return { ...part, image: Object.freeze({ data: new Uint8Array(data), width, height }) };
 };
 
 /** The tool calls of a history entry (none for anything but a tool-calling assistant message). */
@@ -1207,7 +1209,9 @@ export class ChatSession {
     for (const { image, start, softTokens } of images) {
       let embedding = this.#embeddings.get(image);
       if (embedding === undefined) {
-        signal?.throwIfAborted();
+        // An abort is left to the sequence, which settles the turn as aborted before its first run,
+        // as it does for a turn without images; the rows it needs are then none.
+        if (signal?.aborted === true) return [];
         if (this.#host.embedImage === undefined) {
           throw new Error("gemma.ChatSession internal inconsistency: an image without an embedder");
         }

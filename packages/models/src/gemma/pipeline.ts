@@ -2101,8 +2101,10 @@ export class GemmaPipeline {
         const capacity = capacityOption === "fit" ? await fitCapacity() : capacityOption;
         const softBlocks: GenerationSoftBlock[] = [];
         for (const { start, rows } of imageBlocks) {
-          // The embedder's stage boundary: a long list of images stops between two of them.
-          request.signal?.throwIfAborted();
+          // The embedder's stage boundary: a long list of images stops between two of them. An abort
+          // here is left to the sequence, which settles the turn as aborted before its first run, as it
+          // does for a turn without images.
+          if (request.signal?.aborted === true) break;
           softBlocks.push({ start, rows: (await embedRows(state, rows)).rows });
         }
         sequence = await createGenerationSequence({
@@ -2118,7 +2120,11 @@ export class GemmaPipeline {
           ...(speculative === undefined ? {} : { speculative }),
           ...(onRun === undefined ? {} : { onRun }),
         });
-        stream = sequence.generate(softBlocks.length === 0 ? request : { ...request, softBlocks });
+        stream = sequence.generate(
+          softBlocks.length === 0 || request.signal?.aborted === true
+            ? request
+            : { ...request, softBlocks },
+        );
         matched = yield* decodeChatChunks(
           stream,
           state.tokenizer.createDetokenizer(),

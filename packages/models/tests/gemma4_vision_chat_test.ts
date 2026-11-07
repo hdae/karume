@@ -362,6 +362,18 @@ const hostOf = (
       },
       generate(request: GenerationRequest): GenerationStream {
         requests.push(request);
+        // As the real sequence: an abort that arrived before the first run settles the turn as aborted.
+        const signal = request.signal;
+        if (signal?.aborted === true) {
+          const aborted = async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+            yield* [];
+            throw signal.reason;
+          };
+          return {
+            [Symbol.asyncIterator]: aborted,
+            done: Promise.resolve({ reason: "aborted", tokens: 0 }),
+          };
+        }
         const answer = answers[turn];
         assert(answer !== undefined, `the script has no turn ${turn + 1}`);
         turn += 1;
@@ -713,6 +725,14 @@ describe("what send refuses, before the history moves", () => {
     ["a spelled soft token", [{ type: "text", text: "<|image|>" }], "encodes to the image token"],
     ["a spelled marker", [{ type: "text", text: "a<image|>" }], "encodes to the image token"],
     ["a spelled marker in a string", "<|image>", "encodes to the image token"],
+    [
+      "a soft token split over two text parts",
+      [
+        { type: "text", text: "look <|ima" },
+        { type: "text", text: "ge|> here" },
+      ],
+      "encodes to the image token",
+    ],
     ["a number", 3, "not a string or a content-part array"],
   ] as const) {
     it(label, async () => {
@@ -742,6 +762,8 @@ describe("what send refuses, before the history moves", () => {
     controller.abort(reason);
     const stream = session.send(ask(1), { signal: controller.signal });
     assertEquals(await assertRejects(() => stream.text()), reason);
+    // The same settlement as a turn without images: done resolves, it does not reject.
+    assertEquals((await stream.done).reason, "aborted");
     assertEquals(rig.embedded, []);
   });
 });

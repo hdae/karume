@@ -1324,10 +1324,23 @@ const assertNoImageSpelling = (
 ): void => {
   if (message.role === "assistant" || message.role === "tool") return;
   const reserved = [vision.imageTokenId, vision.beginImageTokenId, vision.endImageTokenId];
-  const texts =
-    typeof message.content === "string"
-      ? [message.content]
-      : message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+  // MUST: the texts the render writes, not the parts one by one: adjacent text parts are joined, so a
+  // marker split over two of them would be whole in the prompt.
+  const texts: string[] = [];
+  if (typeof message.content === "string") {
+    texts.push(message.content);
+  } else {
+    let run = "";
+    for (const part of message.content) {
+      if (part.type === "text") {
+        run += pythonStrip(part.text);
+      } else {
+        texts.push(run);
+        run = "";
+      }
+    }
+    texts.push(run);
+  }
   for (const text of texts) {
     const found = tokenizer.encode(text).find((id) => reserved.includes(id));
     if (found !== undefined) {
