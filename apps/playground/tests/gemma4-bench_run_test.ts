@@ -93,7 +93,7 @@ const fakeDependencies = (
       const pipeline: BenchPipeline = {
         encodePrompt: (messages) =>
           Array.from({ length: messages[0].content.length }, (_, index) =>
-            messages[0].content.charCodeAt(index),
+            (messages[0].content as string).charCodeAt(index),
           ),
         chat: (_messages, options) => {
           world.sentOptions.push(options);

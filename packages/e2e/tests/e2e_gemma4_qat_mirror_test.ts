@@ -105,6 +105,8 @@ type Model = (typeof MODELS)[number];
 /** The roles of the manifest (`gemma4/distribution.py`). */
 const MODEL = "model";
 const DRAFTER = "drafter";
+const VISION = "vision";
+const VISION_STORAGE = "bf16";
 /** The line's default seat and its one dtype label. */
 const QUANT = "i4";
 /**
@@ -284,19 +286,29 @@ for (const model of MODELS) {
     `gemma4-qat ${model}: the manifest ships model and drafter as i4 under its seats (no GPU)`,
     () => {
       const entry = entryOf(model);
-      assertEquals(Object.keys(entry.weights).sort(), [DRAFTER, MODEL], "weights roles");
+      // 12B also ships the image embedder, one bf16 container every quant maps (ADR 0144).
+      const vision: Record<string, string> = model === "12b" ? { [VISION]: VISION_STORAGE } : {};
+      assertEquals(
+        Object.keys(entry.weights).sort(),
+        [DRAFTER, MODEL, ...Object.keys(vision)],
+        "weights roles",
+      );
       for (const role of [MODEL, DRAFTER]) {
         assertEquals(Object.keys(entry.weights[role]), [QUANT], `${role}: one storage`);
       }
       assertEquals(Object.keys(entry.quants), [...SEATS[model]], "quants");
       assertEquals(entry.defaultQuant, QUANT, "default quant");
       const quant = entry.quants[QUANT];
-      assertEquals(quant.weights, { [MODEL]: QUANT, [DRAFTER]: QUANT }, "the quant's weights");
+      assertEquals(
+        quant.weights,
+        { [MODEL]: QUANT, [DRAFTER]: QUANT, ...vision },
+        "the quant's weights",
+      );
       assertEquals(quant.session ?? {}, {}, "the reference summation order (session {})");
       for (const name of SEATS[model]) {
         assertEquals(
           entry.quants[name].weights,
-          { [MODEL]: QUANT, [DRAFTER]: QUANT },
+          { [MODEL]: QUANT, [DRAFTER]: QUANT, ...vision },
           `${name}: the same containers`,
         );
         assertEquals(entry.quants[name].session ?? {}, SEAT_SESSIONS[name], `${name}: session`);
@@ -710,6 +722,19 @@ for (const model of MODELS) {
           [LAST_ROW]: { dtype: "i32", shape: [1], data: Int32Array.of(queryLength - 1) },
         };
         if (ple !== undefined) inputs[PER_LAYER_INPUTS] = await ple.gather([...ids]);
+        // A graph with soft inputs takes them on every run: these rows hold no image.
+        if (model === "12b") {
+          inputs["soft_embeds"] = {
+            dtype: "f32",
+            shape: [1, ids.length, shape.hidden],
+            data: new Float32Array(ids.length * shape.hidden),
+          };
+          inputs["soft_mask"] = {
+            dtype: "bool",
+            shape: [1, ids.length, 1],
+            data: new Uint32Array(ids.length),
+          };
+        }
         const outputs = await target.run(inputs, undefined, { context, queryLength });
         return f32Of(outputs[targetOutputs[1]], "hidden");
       };

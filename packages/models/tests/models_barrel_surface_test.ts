@@ -183,6 +183,10 @@ const GEMMA_VALUES = [
   // The delta after a turn that stopped at a tool call (its pending token is `<|tool_response>`,
   // not `<turn|>`) — without it a `sequence` consumer guesses the spelling of a result.
   "chatToolResults",
+  // The renders with images: a `sequence` consumer needs the block positions, and the expansion of
+  // an image is not something to guess (ADR 0144).
+  "chatImagePrompt",
+  "chatImageTurn",
   // Generated ids → content / thinking / tool calls (upstream `parse_response`). The streamed text
   // drops the special spellings the parser needs, so a consumer could not parse it themselves.
   "parseChatResponse",

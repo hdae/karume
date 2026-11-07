@@ -317,7 +317,10 @@ const fromFixture = (name: string): TurnCase => {
   const turns: { answer: string; next: ChatMessage }[] = [];
   for (let index = first; index + 1 < found.messages.length; index += 2) {
     assertEquals(found.messages[index].role, "assistant", `${name}: not alternating`);
-    turns.push({ answer: found.messages[index].content, next: found.messages[index + 1] });
+    turns.push({
+      answer: found.messages[index].content as string,
+      next: found.messages[index + 1],
+    });
   }
   return { name, head: found.messages.slice(0, first), turns };
 };

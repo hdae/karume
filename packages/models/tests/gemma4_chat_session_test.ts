@@ -602,13 +602,15 @@ describe("ChatSession overflow: policy injection takes effect (returning a histo
     const asked = { role: "user", content: "Name a color." } as const;
     const capacity = chatPrompt(tokenizer, [SYSTEM_MESSAGE, asked]).length + MAX_NEW_TOKENS - 2;
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(capacity));
-    let returned: { role: ChatMessage["role"]; content: string }[] = [];
+    let returned: { role: "user"; content: string }[] = [];
     const session = new ChatSession(host, {
       system: SYSTEM,
       maxNewTokens: MAX_NEW_TOKENS,
       onOverflow: ({ turns }) => {
         assertEquals(Reflect.set(turns[0], "content", "changed"), false);
-        returned = turns.slice(-1).map((turn) => ({ ...turn }));
+        returned = turns
+          .slice(-1)
+          .map((turn) => ({ ...turn, role: "user", content: turn.content as string }));
         return returned;
       },
     });

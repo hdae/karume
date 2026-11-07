@@ -8,11 +8,12 @@
 // ① the manifest entry: model `12b` in the q4_0 QAT line's distribution (`karume-gemma4-qat`, the
 //    one distribution that ships 12B), one quant `i4` (session {}), the 12B pipelineConfig
 //    (chatDialect "gemma4-unified", suppressTokens [258882, 258883] — upstream generation_config's
-//    suppress_tokens, sorted — and maxPosition 262144), its own tokenizer asset and its QAT drafter
-//    (`e2e_gemma4_qat_mirror_test.ts` pins the drafter itself); the E2B / E4B entries keep their
-//    configs without either key
-// ② the product graph without PLE: inputs = input_ids / four RoPE / last_row (no per_layer_inputs),
-//    outputs = logits [1,R,V] then hidden [1,R,3840], 96 state slots (48 layers × k / v — no KV
+//    suppress_tokens, sorted — and maxPosition 262144), its own tokenizer asset, its QAT drafter
+//    (`e2e_gemma4_qat_mirror_test.ts` pins the drafter itself) and its vision embedder
+//    (`e2e_gemma4_12b_vision_test.ts` pins it); the E2B / E4B entries keep their configs without
+//    those keys
+// ② the product graph without PLE: inputs = input_ids / soft_embeds / soft_mask / four RoPE /
+//    last_row (no per_layer_inputs), outputs = logits [1,R,V] then hidden [1,R,3840], 96 state slots (48 layers × k / v — no KV
 //    sharing; sliding [1,8,1032,256], full [1,1,C,512]) and no PLE asset in the container
 // ③ the PLE placement options are refused at admission (before the GPU; that no weight part is
 //    fetched first is pinned GPU-free and asset-free by `models/tests/gemma4_ple_free_test.ts`)
@@ -153,6 +154,8 @@ const SAMPLER = { temperature: 1, topK: 64, topP: 0.95 } as const;
 /** Graph input names (source of truth: the constants of `export_product.py`). */
 const INPUT_IDS = "input_ids";
 const LAST_ROW = "last_row";
+const SOFT_EMBEDS = "soft_embeds";
+const SOFT_MASK = "soft_mask";
 /** The row-selection symbol bound by `last_row[R]`. */
 const ROW_SYMBOL = "R";
 /** The capacity symbol of the full slots. */
@@ -265,11 +268,12 @@ test.skipIf(!MODEL_PRESENT)(
     assertEquals(entry.available.quants, [CHOICE.quant, "i4-gemvpar", "i4-fast"], "quants");
     assertEquals(entry.defaultQuant, CHOICE.quant, "defaultQuant");
     assertEquals(entry.quants[CHOICE.quant].session, {}, "the i4 seat carries no session knobs");
-    // The product graph and its QAT drafter; PLE would be assets of `model`, and there are none (②).
+    // The product graph, its QAT drafter and the image embedder; PLE would be assets of `model`, and
+    // there are none (②).
     assertEquals(
       Object.keys(entry.weights).sort(),
-      ["drafter", MODEL_GRAPH],
-      "weights (the product graph and its drafter)",
+      ["drafter", MODEL_GRAPH, "vision"],
+      "weights (the product graph, its drafter and the image embedder)",
     );
     assertEquals(Object.keys(entry.assets), ["tokenizer"], "assets (the tokenizer only)");
 
@@ -299,7 +303,7 @@ test.skipIf(!MODEL_PRESENT)(
         `the 12b tokenizer is not ${other}'s`,
       );
       // The E2B / E4B declarations stay as they were (absent = "gemma4" / nothing suppressed).
-      for (const key of ["chatDialect", "suppressTokens"]) {
+      for (const key of ["chatDialect", "suppressTokens", "vision"]) {
         assertEquals(
           Object.hasOwn(theirs.pipelineConfig, key),
           false,
@@ -315,7 +319,7 @@ const openProductContainer = async () =>
   await openSelectedContainer(await selectMirrorComponent(MIRROR, MODEL_GRAPH, CHOICE));
 
 test.skipIf(!MODEL_PRESENT)(
-  "Gemma 4 12B product graph: no per-layer inputs, logits + hidden exits, 96 owned slots, no PLE assets (no GPU)",
+  "Gemma 4 12B product graph: no per-layer inputs, soft inputs, logits + hidden exits, 96 owned slots, no PLE assets (no GPU)",
   async () => {
     const opened = await openProductContainer();
     assertEquals(
@@ -327,9 +331,13 @@ test.skipIf(!MODEL_PRESENT)(
 
     assertEquals(
       graph.inputs.map((spec) => spec.name).sort(),
-      [INPUT_IDS, LAST_ROW, ...gemma4RopeInputNames()].sort(),
-      "graph inputs (the E2B / E4B product contract minus per_layer_inputs)",
+      [INPUT_IDS, LAST_ROW, SOFT_EMBEDS, SOFT_MASK, ...gemma4RopeInputNames()].sort(),
+      "graph inputs (the E2B / E4B product contract minus per_layer_inputs, plus the soft inputs)",
     );
+    const inputOf = (name: string) => graph.inputs.find((spec) => spec.name === name);
+    assertEquals(inputOf(SOFT_EMBEDS)?.shape, [1, "M", HIDDEN], `'${SOFT_EMBEDS}' shape`);
+    assertEquals(inputOf(SOFT_MASK)?.shape, [1, "M", 1], `'${SOFT_MASK}' shape`);
+    assertEquals(inputOf(SOFT_MASK)?.dtype, "bool", `'${SOFT_MASK}' dtype`);
     for (const spec of graph.inputs.filter((input) => input.name.startsWith("rope_"))) {
       assertEquals(
         spec.shape,
