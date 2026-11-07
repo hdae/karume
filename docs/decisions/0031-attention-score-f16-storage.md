@@ -109,3 +109,26 @@ were unchanged. Full record: commit `99a3c649`, this file.
 - The "non-GPU fixed cost" measured here (695–704 ms per step) was later attributed by
   [ADR 0032](0032-deserialize-submit-and-optin-timing.md) to timing overhead and CPU/GPU
   serialisation, and removed there.
+
+## Addendum 2026-11-07: `pack2x16float` rounds differently between backends
+
+Decision 4 rests on `pack2x16float` rounding to nearest with ties to even, which it does on Vulkan on the RTX 3080 Ti. WGSL leaves
+that rounding open, and on D3D12 on the RTX 5070 Ti (Chrome 156) it rounds toward zero: the
+`score-f16-store` check mismatched in 1,616 words, and rounding toward zero predicts the count and the first failing word of both of
+its cases ([research](../research/2026-11-07-gemma4-f16-kv.md) §6).
+
+**The difference is recorded and accepted.** The contract of decision 4 now reads: the output equals the f32 variant with S rounded on
+the host **in this backend's rounding**. The check passes on either rounding, on every value alike, and records which, and any other
+word fails, a mix of the two included.
+
+**Why not round in integers.** That store passes the check in Chrome and gives every backend the same S, at 3–5% of the attention route
+on both machines measured (research §6). It would not give the same output across backends, because the reference values are rows per
+environment for other reasons as well (ADR [0106](0106-device-keyed-references.md)). What it removes is the bias toward zero of at
+most one f16 step, on an S computed from int8 inputs in the shipped presets. Keeping the store also leaves Chrome's numbers where
+0.17.0 has them, and the geometry tables measured on the kernels that run.
+
+**Not measured.** The effect of rounding toward zero on a final image, and which rounding Metal and other Vulkan drivers do. The check
+covers finite normal f16 values only: subnormals may flush and an out-of-range value makes its word indeterminate, as before.
+
+**Reconsider when** an integer store costs no measurable time, or a use needs the same S on every backend. The full-layer KV took the
+integer store because it costs nothing measurable there (ADR [0143](0143-f16-full-state-storage.md)).

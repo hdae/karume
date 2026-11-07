@@ -66,7 +66,8 @@ default, a three-part check). The review of 2026-09-25 found:
 | **Q (approximation)**  | a band **wider** than the reference path's op band                         | four points + error model (decision 4) | none (reserved)                                        |
 
 - C's atol = 0 relies on f32 → f16 narrowing rounding to nearest even (RTE), implementation-defined
-  in WGSL; a C check holds after a per-device RTE check (ADR 0028 / 0031).
+  in WGSL; a C check holds after a per-device RTE check (ADR 0028 / 0031). s16 is the exception: on D3D12 it
+  rounds toward zero, so its host rounding is the backend's own (ADR 0031 addendum 2026-11-07).
 - MUST: before choosing a weaker class, the ADR states why a stronger class cannot be built (the first
   defence against vacuous checks). IEEE-exact operations (add, subtract, multiply, explicit `fma`)
   can probably give E with a TS mirror; built-in transcendentals (`exp` …) cannot (driver

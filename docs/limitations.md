@@ -345,6 +345,14 @@ full-eligibility check of the census turns red. On those three dispatches ③PV'
 against a running row maximum, so the output is not the three-pass a8 output bit for bit (class Q:
 within the P̃-lattice error model — the same 1/127 grid as the ③PV above).
 
+## The f16 attention scores round differently between backends
+
+`attentionScoreStorage: "f16"` stores S through `pack2x16float`, whose rounding WGSL leaves open. Vulkan on the RTX 3080 Ti rounds to
+nearest with ties to even, and D3D12 on the RTX 5070 Ti rounds toward zero, so the same input gives an S up to one f16 step apart. This
+touches the presets that end in `-s16`, Anima's and Wan2.1's defaults among them. The output within one environment stays deterministic.
+Other backends are not known: `score-f16-store` on `/kernel-check` names the rounding of the one it runs on. An integer store costs
+3–5% of the attention route, so it is not used (ADR [0031](decisions/0031-attention-score-f16-storage.md) addendum 2026-11-07).
+
 ## Fused attention a8 / s16 store ③PV and S in f32 for shapes whose key length N is not a multiple of 4 (in Anima, resolutions whose sides are not multiples of 32 px)
 
 `attentionCompute: "a8"` and `attentionScoreStorage: "f16"` (half-precision storage of S) run as

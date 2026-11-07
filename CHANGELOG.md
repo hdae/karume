@@ -29,7 +29,7 @@ measurements in `docs/research/`.
 
 - `@karume/runtime` / `@karume/models`: `fullStateStorage: "f16"` stores the full-layer KV in half the memory
   (12B 16 KiB per position, E2B 6 KiB), with no re-export and no GPU feature (ADR 0143). Opt-in, and it changes the numbers
-  slightly. It needs an explicit `speculative` on a pipeline with a drafter. Chrome has not been checked.
+  slightly. It needs an explicit `speculative` on a pipeline with a drafter. In Chrome on the RTX 5070 Ti its kernel check passes.
 
 ### Fixed
 

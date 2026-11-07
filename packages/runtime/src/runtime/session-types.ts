@@ -397,7 +397,9 @@ export type SessionOptions = {
    * **does not require `shader-f16`** — it combines with `attentionCompute: "a8"` while keeping ADR
    * 0030 decision 1, "i8a8 does not require shader-f16"; this combination is the main target). The
    * only rounding is the one at storage, and `unpack2x16float` on the read side is exact. The output
-   * therefore matches, bit for bit, "**the f32 variant with S rounded to f16 on the host**".
+   * therefore matches, bit for bit, "**the f32 variant with S rounded to f16 on the host**", in the
+   * rounding of this backend's `pack2x16float` (D3D12 rounds toward zero — ADR 0031 addendum
+   * 2026-11-07).
    *
    * MUST: the default is `"f32"` — dropping the storage form of S automatically would silently
    * change the existing PNG sha256 checks and the E2E tolerances (the same reason ADR 0028 decision

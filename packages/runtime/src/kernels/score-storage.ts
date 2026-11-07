@@ -27,6 +27,11 @@
  *
  *     output(s16) ≡ output(f32 with S rounded to f16 on the host)     … not one bit differs
  *
+ * with the host rounding the way this backend's `pack2x16float` does, which WGSL leaves open: to
+ * nearest on Vulkan on the RTX 3080 Ti, toward zero on D3D12 on the RTX 5070 Ti. DECIDED: ADR 0031
+ * addendum 2026-11-07 (rounding in integers costs 3–5% of the route, and the output differs between
+ * backends anyway).
+ *
  * (a stronger contract than the f16 **tile computation** of ADR 0028 — there the rounding enters in
  * the middle of the dot product).
  * MUST: do not write an `f32 → f16 → f32` round trip in registers (the compiler removes it — a

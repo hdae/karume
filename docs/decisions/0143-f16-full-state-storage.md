@@ -1,7 +1,7 @@
 # 0143: f16 storage of the full state slots (`fullStateStorage`)
 
 - Status: proposed (2026-11-07 — implemented and measured on the development machine's RTX 3080 Ti under Node + Dawn; opt-in,
-  default f32; in Chrome the integer rounding of decision 3 has not been run yet)
+  default f32; in Chrome on the RTX 5070 Ti the check of the integer rounding of decision 3 passes)
 - Date: 2026-11-07
 - Related: ADR [0066](0066-generation-context-state-slots.md) (the generation context and its state slots) /
   [0110](0110-practical-tier-numerics-contract.md) (decision 2 the contract classes, decision 6 in-device determinism) /
@@ -66,7 +66,13 @@ the readers matched and all six append cases mismatched, in 1,393 words. Assumin
 count of every case (2 / 5 / 11 / 196 / 392 / 787) and the first failing word (research §6).
 
 Rounding in integers also defines what WGSL leaves open: a value from 65,520 up is infinity and NaN stays NaN, with no effect on the
-other half of the word, and a subnormal f16 is written like any other. The check runs the append on every rounding boundary of f16.
+other half of the word, and a subnormal f16 is written like any other. The check runs the append on every rounding boundary of f16,
+and it passes in Chrome on that card (2026-11-07).
+
+The attention scores made the opposite choice for the same function (ADR [0031](0031-attention-score-f16-storage.md) addendum of
+2026-11-07). The difference is the cost: S is stored in the hot loop of ①QK, where integers cost 3–5% of the attention route, while
+an append runs once per token and showed no speed change on the RTX 3080 Ti (research §3). The KV path is also unreleased, so
+integers change no number anyone has.
 
 ## Acceptance
 
