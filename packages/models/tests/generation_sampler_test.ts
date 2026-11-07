@@ -910,6 +910,14 @@ describe("sampler: suppressed tokens are never selected", () => {
     assertEquals(samplerDistribution(RAW, {}, [], SUPPRESSED).tokens, Int32Array.of(3));
   });
 
+  it("withdraws the GPU selection unless that selection masks the set, and checks its claim", () => {
+    assertEquals(createSampler({}, SUPPRESSED).greedy, undefined);
+    const masked = createSampler({}, SUPPRESSED, true);
+    assertEquals(masked.greedy?.(4, 3), 3);
+    assertThrows(() => masked.greedy?.(9, 1), Error, "suppressed token 1");
+    assertEquals(createSampler({ temperature: 0.7 }, SUPPRESSED, true).greedy, undefined);
+  });
+
   it("greedy: a tie after masking keeps the smaller id (argmax's tie-break over the masked row)", () => {
     // The two highest are suppressed; 2 and 4 tie at 5 behind them.
     assertEquals(createSampler({}, [0, 1]).next(f32([9, 9, 5, 1, 5]), []), 2);

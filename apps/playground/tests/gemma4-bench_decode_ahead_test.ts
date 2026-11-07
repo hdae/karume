@@ -28,6 +28,12 @@ const manifest = {
   },
 } as unknown as Manifest;
 
+/** The same preset table under the model name that has no PLE. */
+const manifestWith12b = {
+  defaultModel: "12b",
+  models: { "12b": manifest.models.e2b },
+} as unknown as Manifest;
+
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
   id: 0,
   key: { mount: "gemma4-qat-mobile", model: "e2b" },
@@ -61,6 +67,20 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
       const arm = resolveArm(draft({ decodeAhead: "2" }), { "gemma4-qat-mobile": manifest });
       expect(arm.ok).toBe(false);
       expect(!arm.ok && arm.error).toContain("PLE on GPU");
+    });
+
+    it("runs ahead on 12B, which has no PLE, and refuses to place one", () => {
+      const twelve = (extra: Partial<ArmDraft>): ArmDraft => ({
+        id: 0,
+        key: { mount: "gemma4-qat", model: "12b" },
+        tap: false,
+        ...extra,
+      });
+      const qat = { "gemma4-qat": manifestWith12b };
+      const arm = resolveArm(twelve({ decodeAhead: "4" }), qat);
+      expect(arm.ok && arm.arm.pipeline).toEqual({ decodeAhead: 4 });
+      const placed = resolveArm(twelve({ pleOnGpu: true }), qat);
+      expect(!placed.ok && placed.error).toContain("no PLE");
     });
 
     it("is labelled with the placement and the depth, before the tap's own marks", () => {

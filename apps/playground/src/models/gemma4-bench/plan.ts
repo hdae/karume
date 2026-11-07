@@ -203,7 +203,11 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
   }
   const declaredSampler = modelConfig(manifest, model).sampler;
   const decodeAhead = Number(draft.decodeAhead ?? "1");
-  if (decodeAhead >= 2 && draft.pleOnGpu !== true) {
+  // 12B has no PLE: its token id feeds the graph directly, and there is nothing to place.
+  if (model === "12b" && draft.pleOnGpu === true) {
+    return { ok: false, error: "12B has no PLE to place on the GPU." };
+  }
+  if (decodeAhead >= 2 && model !== "12b" && draft.pleOnGpu !== true) {
     return {
       ok: false,
       error:

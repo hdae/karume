@@ -126,9 +126,10 @@ export type Sampler = {
    * Only for temperature 0 without processing: checks and returns the first NaN, or the maximum
    * with its smallest index, selected by the GPU.
    *
-   * MUST: absent while tokens are suppressed. The GPU selection picks the maximum of the **raw**
-   * logits, so a suppressed id that is that maximum would be returned; only the host path
-   * ({@link Sampler.next}) masks it.
+   * MUST: absent while tokens are suppressed, unless the selection is built to mask them
+   * (`selectionMasksSuppressed` of {@link createSampler}): a selection over the **raw** logits
+   * would return a suppressed id that is their maximum. A selection that claims the mask and still
+   * returns a suppressed id fails here.
    */
   readonly greedy?: (value: number, index: number) => number;
   /**
@@ -710,11 +711,12 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
  * `suppressTokens` is the distribution's suppressed set (step (2') of the module doc), passed by
  * the generation surface from the verified wiring; omitted or empty = none, and the sampler is the
  * one it was without the argument. A non-empty set withdraws the GPU selection capability
- * ({@link Sampler.greedy}): that selection reads the raw maximum.
+ * ({@link Sampler.greedy}) unless `selectionMasksSuppressed` says that selection masks the set.
  */
 export const createSampler = (
   spec: SamplerSpec = {},
   suppressTokens: readonly number[] = [],
+  selectionMasksSuppressed = false,
 ): Sampler => {
   // Keep a **copy** of the checked specification ({@link snapshotSpec} checks, then copies — the
   // checked values and the values the draw reads stay the same).
@@ -725,13 +727,20 @@ export const createSampler = (
   const random = new Randu(frozen.seed ?? 0);
   // A copy for the same reason as the spec snapshot (the set is read every step).
   const suppressed = Object.freeze([...suppressTokens]);
-  const rawGreedy =
-    suppressed.length === 0 &&
+  const plainGreedy =
+    (suppressed.length === 0 || selectionMasksSuppressed) &&
     (frozen.temperature ?? 0) === 0 &&
     (frozen.repetitionPenalty ?? 1) === 1 &&
     (frozen.logitBias?.length ?? 0) === 0;
+  const greedy = (value: number, index: number): number => {
+    const token = checkedMaximum(value, index);
+    if (suppressed.includes(token)) {
+      throw new Error(`The GPU selection returned the suppressed token ${token}`);
+    }
+    return token;
+  };
   return {
-    ...(rawGreedy ? { greedy: checkedMaximum } : {}),
+    ...(plainGreedy ? { greedy } : {}),
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {
       const { tokens, probabilities } = samplerDistribution(logits, frozen, history, suppressed);
       // One candidate (temperature 0 / topK 1 / vocabulary 1) makes the draw trivial, so the RNG

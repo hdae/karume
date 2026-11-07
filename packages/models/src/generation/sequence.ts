@@ -820,11 +820,17 @@ export type GenerationGreedyAhead<C extends GenerationContextFace> = {
 
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   /**
-   * Internal capability that returns the maximum of the raw logits. Used only for decode at
-   * temperature 0, without processing, non-speculative, without observation and with an empty
-   * {@link GenerationWiring.suppressTokens} (the raw maximum can be a suppressed id).
+   * Internal capability that returns the maximum of the logits. Used only for decode at
+   * temperature 0, without processing, non-speculative, without observation, and with an empty
+   * {@link GenerationWiring.suppressTokens} unless {@link greedyMasksSuppressed} says the capability
+   * masks that set (the raw maximum can be a suppressed id).
    */
   readonly greedy?: GenerationGreedyRun<C>;
+  /**
+   * The selections of {@link greedy} and {@link greedyAhead} mask
+   * {@link GenerationWiring.suppressTokens} on the GPU, so they stay usable with a non-empty set.
+   */
+  readonly greedyMasksSuppressed?: boolean;
   /**
    * The decode run-ahead (internal capability). It replaces the per-step decode exactly where
    * {@link GenerationSequenceOptions.greedy} would be used — temperature 0 without processing,
@@ -1419,8 +1425,12 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     // snapshot (copying `logitBias` down to its elements) also happen inside `createSampler`.
     // The distribution's suppressed set rides along, so every selection below — the first token,
     // decode and each speculative acceptance row — masks it; a non-empty set also withdraws
-    // `sampler.greedy`, which turns the GPU selection below off.
-    const sampler = createSampler(request.sampler, program.suppressTokens);
+    // `sampler.greedy`, which turns the GPU selection below off, unless that selection masks it too.
+    const sampler = createSampler(
+      request.sampler,
+      program.suppressTokens,
+      options.greedyMasksSuppressed === true,
+    );
     const greedy =
       face === undefined && options.onRun === undefined && sampler.greedy !== undefined
         ? options.greedy

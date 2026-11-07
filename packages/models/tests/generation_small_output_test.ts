@@ -224,6 +224,25 @@ test("the small output also resumes the conversation after an early exit or abor
   }
 });
 
+test("a selection that masks the suppressed set stays on: decode takes its tokens", async () => {
+  const f = fakeSession({ tokens: [5, 5, 5], runnerUp: { id: 6, logit: 6 } });
+  const fast = small(f);
+  const sequence = await createGenerationSequence({
+    session: f.session,
+    program: programOf(f, { suppressTokens: [9] }),
+    greedy: fast.greedy,
+    greedyMasksSuppressed: true,
+  });
+  try {
+    await drain(
+      sequence.generate({ prompt: [1, 2], maxNewTokens: 3, sampler: { temperature: 0 } }),
+    );
+    assertEquals(fast.calls(), 2, "the two decode steps after the first token");
+  } finally {
+    await sequence.dispose();
+  }
+});
+
 test("a suppressed set turns the GPU selection off: decode reads the logits and masks them", async () => {
   // The GPU selection returns the raw maximum, which is the suppressed id here (fake logits: 10 at
   // the run's token, 6 at the runner-up).

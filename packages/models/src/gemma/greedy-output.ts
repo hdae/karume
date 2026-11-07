@@ -38,9 +38,29 @@ const SELECT_GRAPH = "select";
 const NEXT_ID = "next_id";
 
 /**
+ * The selection's mask of a distribution that suppresses tokens: 0 everywhere, −∞ at a suppressed
+ * id. Adding it leaves every other logit as it is (the sign of a zero aside, which the comparison
+ * does not see), so the selection returns what the host's masked argmax returns.
+ */
+const SUPPRESS_MASK = "suppress_mask";
+/** The masked logits (the `topk`'s input when a mask exists). */
+const MASKED_LOGITS = "masked_logits";
+
+const suppressMaskBytes = (
+  vocabSize: number,
+  suppressTokens: readonly number[],
+): Uint8Array<ArrayBuffer> => {
+  const mask = new Float32Array(vocabSize);
+  for (const token of suppressTokens) mask[token] = Number.NEGATIVE_INFINITY;
+  return new Uint8Array(mask.buffer);
+};
+
+/**
  * Gets the maximum and its smallest index with a separate small IR, without changing the stored
  * target graph. `nextId` adds the run-ahead's exit {@link NEXT_ID} (the per-step greedy never copies
  * it, and a reshape costs no dispatch, so both share this one graph when the run-ahead is built).
+ * A non-empty `suppressTokens` masks those ids first (MUST: the selection reads the masked logits,
+ * or it would return a suppressed id that is the raw maximum).
  *
  * MUST: the assembled declaration goes through `parseIrDeclarationValue` — nothing here passes
  * through the exporter or the container reader, so without it none of the rules a graph decides on
@@ -50,28 +70,64 @@ const NEXT_ID = "next_id";
  * MUST NOT: add the optional `states` to the literal below. Leaving it out keeps the literal from
  * typing as an `IrDeclaration`, so only the return value of `parseIrDeclarationValue` can become
  * `graph` (an edit that removes the wrapper fails `vp check`, the typecheck).
+ *
+ * NOTE: `export` is for the GPU test of the mask (not exposed on `mod.ts` / the subpath surface —
+ * ADR 0008).
  */
-const selectionModel = (vocabSize: number, nextId: boolean): PreparedModel => {
+export const gemmaSelectionModel = (
+  vocabSize: number,
+  nextId: boolean,
+  suppressTokens: readonly number[],
+): PreparedModel => {
+  const masked = suppressTokens.length > 0;
   const graph = parseIrDeclarationValue({
     format: "karume-ir",
     version: 2,
-    requires: { ops: nextId ? ["reshape", "topk"] : ["topk"] },
+    requires: {
+      ops: [...(masked ? ["add"] : []), ...(nextId ? ["reshape"] : []), "topk"],
+    },
     symbols: [],
-    initializers: {},
+    initializers: masked ? { [SUPPRESS_MASK]: {} } : {},
     inputs: [{ name: "logits", dtype: "f32", shape: [1, 1, vocabSize] }],
     outputs: nextId ? ["value", "index", NEXT_ID] : ["value", "index"],
     values: {
+      ...(masked
+        ? {
+            [SUPPRESS_MASK]: { dtype: "f32", shape: [1, 1, vocabSize] },
+            [MASKED_LOGITS]: { dtype: "f32", shape: [1, 1, vocabSize] },
+          }
+        : {}),
       value: { dtype: "f32", shape: [1, 1, 1] },
       index: { dtype: "i32", shape: [1, 1, 1] },
       ...(nextId ? { [NEXT_ID]: { dtype: "i32", shape: [1, 1] } } : {}),
     },
     nodes: [
-      { op: "topk", ins: ["logits"], outs: ["value", "index"], attrs: { k: 1 } },
+      ...(masked
+        ? [{ op: "add", ins: ["logits", SUPPRESS_MASK], outs: [MASKED_LOGITS], attrs: {} }]
+        : []),
+      {
+        op: "topk",
+        ins: [masked ? MASKED_LOGITS : "logits"],
+        outs: ["value", "index"],
+        attrs: { k: 1 },
+      },
       ...(nextId ? [{ op: "reshape", ins: ["index"], outs: [NEXT_ID], attrs: {} }] : []),
     ],
   });
   return prepareContainer(
-    openMemoryContainer({ graphs: { [SELECT_GRAPH]: graph }, tensors: {} }),
+    openMemoryContainer({
+      graphs: { [SELECT_GRAPH]: graph },
+      tensors: masked
+        ? {
+            [SELECT_GRAPH]: {
+              [SUPPRESS_MASK]: {
+                encoding: { codec: "f32" },
+                bytes: suppressMaskBytes(vocabSize, suppressTokens),
+              },
+            },
+          }
+        : {},
+    }),
     SELECT_GRAPH,
   );
 };
@@ -199,8 +255,14 @@ const withPleInput = async (
  * Ownership stays with the caller; this only enqueues (the pipeline disposes it after the Session).
  *
  * `decodeAhead` ≥ 2 also builds the decode run-ahead ({@link GemmaGreedyOutput.ahead} — up to that
- * many greedy steps per batch). It needs `ple`'s resident-id form (the token id each step feeds
- * stays on the GPU, and so must the PLE gather that reads it).
+ * many greedy steps per batch). With PLE it needs `ple`'s resident-id form (the token id each step
+ * feeds stays on the GPU, and so must the PLE gather that reads it); a model without PLE passes the
+ * resident id and its input's name in `selection.aheadIds`, and the selection's id feeds it directly.
+ * Ownership stays with the caller, as for `ple` (the target's bind groups hold it, so the pipeline
+ * disposes it after the Session).
+ *
+ * `selection.suppressTokens` is the distribution's suppressed set; the selection masks it, so the
+ * caller's sequence declares `greedyMasksSuppressed`.
  */
 export const createGemmaGreedyOutput = (
   gpu: GpuContext,
@@ -209,16 +271,27 @@ export const createGemmaGreedyOutput = (
   vocabSize: number,
   ple?: Gemma4PleResident,
   decodeAhead = 1,
+  selection: {
+    readonly suppressTokens?: readonly number[];
+    readonly aheadIds?: { readonly name: string; readonly resident: ResidentTensor };
+  } = {},
 ): GemmaGreedyOutput => {
   const residentIds = ple?.residentIds;
-  if (decodeAhead >= 2 && (ple === undefined || residentIds === undefined)) {
+  const aheadIds =
+    ple === undefined
+      ? selection.aheadIds
+      : residentIds === undefined
+        ? undefined
+        : { name: ple.idsName, resident: residentIds.ids };
+  if (decodeAhead >= 2 && aheadIds === undefined) {
     throw new Error(
       `decodeAhead ${decodeAhead} needs the GPU-resident PLE with its resident-id form` +
         " (each step's token id stays on the GPU, so its PLE gather must read it there)",
     );
   }
   const depth = decodeAhead >= 2 ? decodeAhead : undefined;
-  const model = selectionModel(vocabSize, depth !== undefined),
+  const suppressTokens = selection.suppressTokens ?? [];
+  const model = gemmaSelectionModel(vocabSize, depth !== undefined, suppressTokens),
     chain = createOperationChain();
   // The selector's input is resident, so this estimate, which includes the host-input share, is a
   // conservative upper bound. The run-ahead adds one value + index pair per step.
@@ -239,7 +312,7 @@ export const createGemmaGreedyOutput = (
       throw cause;
     }));
   const ahead: GenerationGreedyAhead<GenerationContext> | undefined =
-    depth === undefined || ple === undefined || residentIds === undefined
+    depth === undefined || aheadIds === undefined
       ? undefined
       : {
           depth,
@@ -257,7 +330,7 @@ export const createGemmaGreedyOutput = (
                 throw cause;
               });
               const a = await aheadReady;
-              const { ids } = residentIds;
+              const { name: idsName, resident: ids } = aheadIds;
               // MUST: written before the batch opens. Step 0 feeds `token` from this resident (one
               // fixed resident = one backing for every step — a host id in step 0 alone would be a
               // second backing signature of the decode shape). No enqueue holds it now (the previous
@@ -270,9 +343,12 @@ export const createGemmaGreedyOutput = (
                   // Each step is awaited before the next is issued: the PLE gather of step k reads
                   // the id step k−1's selection copied into `ids`, which needs that copy queued
                   // first (the three Sessions have separate serialization chains).
-                  const perLayer = await residentIds.enqueue(batch);
+                  const perLayer =
+                    ple === undefined || residentIds === undefined
+                      ? {}
+                      : { [ple.inputName]: await residentIds.enqueue(batch) };
                   await target.enqueue(
-                    { ...step, [ple.idsName]: ids, [ple.inputName]: perLayer },
+                    { ...step, [idsName]: ids, ...perLayer },
                     {
                       batch,
                       // Chained deferred: step k sits at `pastLength + k` and the caller commits

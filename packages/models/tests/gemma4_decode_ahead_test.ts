@@ -21,8 +21,8 @@ import {
 } from "../src/gemma/ple-gpu.ts";
 import { pleFixture } from "./helpers/ple-fixture.ts";
 
-/** A model with PLE whose distribution suppresses no token (E2B / E4B). */
-const PLE_MODEL = { ple: true, suppressTokens: [] };
+/** A model with PLE (E2B / E4B). */
+const PLE_MODEL = { ple: true };
 
 const index = pleFixture({ storage: "i4", tokens: 6, layers: 3, dim: 16, embedScale: 16 }).index;
 
@@ -68,23 +68,17 @@ describe("decodeAhead", () => {
       ).toThrow("speculative");
     });
 
-    it("refuses a depth ≥ 2 for a model without PLE, even with pleResidency unset", () => {
-      // 12B: the run-ahead rides the GPU-resident PLE, which a PLE-free model does not have.
-      const model = { ple: false, suppressTokens: [] };
+    it("accepts a depth ≥ 2 for a model without PLE, with pleResidency unset", () => {
+      // 12B: there is no per-layer gather, so the token id feeds the graph directly.
+      const model = { ple: false };
       expect(resolveGemma4DecodeAhead("T", {}, model)).toBe(1);
-      expect(() => resolveGemma4DecodeAhead("T", { decodeAhead: 2 }, model)).toThrow(
-        ModelInputError,
-      );
-      expect(() => resolveGemma4DecodeAhead("T", { decodeAhead: 2 }, model)).toThrow(/has no PLE/);
+      expect(resolveGemma4DecodeAhead("T", { decodeAhead: 4 }, model)).toBe(4);
     });
 
-    it("refuses a depth ≥ 2 for a distribution that suppresses tokens", () => {
-      // The GPU selection reads the raw maximum, which can be a suppressed id.
-      const model = { ple: true, suppressTokens: [258882] };
-      expect(resolveGemma4DecodeAhead("T", { pleResidency: "gpu" }, model)).toBe(1);
+    it("still refuses a depth ≥ 2 next to speculative decoding on a model without PLE", () => {
       expect(() =>
-        resolveGemma4DecodeAhead("T", { decodeAhead: 4, pleResidency: "gpu" }, model),
-      ).toThrow(/suppresses tokens/);
+        resolveGemma4DecodeAhead("T", { decodeAhead: 4, speculative: {} }, { ple: false }),
+      ).toThrow("speculative");
     });
   });
 
@@ -158,6 +152,21 @@ describe("decodeAhead", () => {
       expect(() => createGemmaGreedyOutput(gpu, target, "logits", 32, undefined, 2)).toThrow(
         "resident-id form",
       );
+    });
+
+    it("builds the run-ahead without PLE when the ids input is named", () => {
+      const output = createGemmaGreedyOutput(gpu, target, "logits", 32, undefined, 4, {
+        aheadIds: { name: "input_ids", resident: {} as ResidentTensor },
+      });
+      expect(output.ahead?.depth).toBe(4);
+    });
+
+    it("counts the suppressed set's mask in the extra bytes", () => {
+      const base = createGemmaGreedyOutput(gpu, target, "logits", 32).extraBytes;
+      const masked = createGemmaGreedyOutput(gpu, target, "logits", 32, undefined, 1, {
+        suppressTokens: [3],
+      }).extraBytes;
+      expect(masked).toBeGreaterThanOrEqual(base + 32 * 4);
     });
   });
 });

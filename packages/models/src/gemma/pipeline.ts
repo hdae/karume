@@ -57,6 +57,7 @@ import {
   type GenerationContext,
   type GpuContext,
   planWeightResidency,
+  type ResidentTensor,
   type Session,
   type SessionDiagnostics,
   type SessionOptions,
@@ -272,12 +273,12 @@ export type PipelineOptions = {
    *
    * MUST: an integer ≥ 1 and **at most the KV ring's sliding slack** (the rows one batch leaves
    * uncommitted — 8 for the published Gemma 4 graphs). The slack is a property of the conversation's
-   * context, so a larger value fails loudly when the first conversation is opened. `d ≥ 2` needs
-   * `pleResidency: "gpu"` (with the host PLE, every step's per-layer inputs are gathered on the host
-   * from the step's token, which the run-ahead keeps on the GPU) and cannot be combined with
-   * {@link PipelineOptions.speculative} (refused before anything is fetched); a model without PLE
-   * (gemma-4-12B-it) or a distribution that suppresses tokens refuses it, and so does a missing
-   * `pleResidency: "gpu"`, once admission has read the model, before any weight part is fetched.
+   * context, so a larger value fails loudly when the first conversation is opened. `d ≥ 2` cannot be
+   * combined with {@link PipelineOptions.speculative} (refused before anything is fetched), and a
+   * model with PLE needs `pleResidency: "gpu"` (with the host PLE, every step's per-layer inputs are
+   * gathered on the host from the step's token, which the run-ahead keeps on the GPU — refused once
+   * admission has read the model, before any weight part is fetched). A model without PLE
+   * (gemma-4-12B-it) needs nothing more.
    */
   readonly decodeAhead?: number;
   /**
@@ -780,6 +781,8 @@ export type Gemma4State = {
    * the runtime refuses, by failing loudly, a release while baked references remain).
    */
   readonly pleGpu?: Gemma4PleResident;
+  /** The id a run-ahead step feeds, on a model without PLE (the PLE's resident-id form owns it otherwise). */
+  readonly aheadIds?: ResidentTensor;
   readonly tokenizer: Tokenizer;
   readonly config: PipelineConfig;
   /**
@@ -1012,9 +1015,8 @@ const assertGemma4DecodeAheadOptions = (where: string, options: PipelineOptions)
  * {@link assertGemma4DecodeAheadOptions}, then the model's: called once admission has settled
  * whether the model has PLE, before any weight part is fetched).
  *
- * Every refusal here is decided by the caller's options and the admitted model — whether it has PLE
- * and the tokens its distribution suppresses — so each is an input error (ADR 0107 decision 2). The
- * upper bound — the context's sliding slack — exists only once a conversation's context does, so the
+ * Every refusal here is decided by the caller's options and the admitted model — whether it has
+ * PLE — so each is an input error (ADR 0107 decision 2). The upper bound — the context's sliding slack — exists only once a conversation's context does, so the
  * generation surface checks it there (`assertGreedyAheadSetup`).
  *
  * MUST: a depth ≥ 2 that cannot run fails loudly rather than silently decoding per step — "the
@@ -1026,22 +1028,10 @@ const assertGemma4DecodeAheadOptions = (where: string, options: PipelineOptions)
 export const resolveGemma4DecodeAhead = (
   where: string,
   options: PipelineOptions,
-  model: { readonly ple: boolean; readonly suppressTokens: readonly number[] },
+  model: { readonly ple: boolean },
 ): number => {
   const depth = assertGemma4DecodeAheadOptions(where, options);
-  if (depth === 1) return depth;
-  if (!model.ple) {
-    throw new ModelInputError(
-      `${where}: decodeAhead ${depth} cannot be used with this model` +
-        " (the run-ahead feeds its tokens through the GPU-resident PLE's resident-id path, and this model has no PLE)",
-    );
-  }
-  if (model.suppressTokens.length > 0) {
-    throw new ModelInputError(
-      `${where}: decodeAhead ${depth} cannot be used with this distribution` +
-        " (it suppresses tokens, and the run-ahead selects each step's token on the GPU from the raw logits)",
-    );
-  }
+  if (depth === 1 || !model.ple) return depth;
   if (resolveGemma4PleResidency(where, options) !== "gpu") {
     throw new ModelInputError(
       `${where}: decodeAhead ${depth} needs pleResidency: "gpu"` +
@@ -1568,7 +1558,6 @@ export class GemmaPipeline {
     const plePlan = gemma4PlePlan(entry, options, assets.pleIndex);
     const decodeAhead = resolveGemma4DecodeAhead(entry, options, {
       ple: plePlan.residency !== "none",
-      suppressTokens: admitted.config.suppressTokens ?? [],
     });
     const { wiring, tokenizer, ple } = buildGemma4Program(
       admitted,
@@ -1644,6 +1633,7 @@ export class GemmaPipeline {
     const model = open(MODEL);
     let session: Session | undefined;
     let pleGpu: Gemma4PleResident | undefined;
+    let aheadIds: ResidentTensor | undefined;
     try {
       // MUST: for a device acquired here, this is the only feature check (a shared GPU goes through
       // the same one at the admission step too). It is inside the try so that, on failure, the
@@ -1668,19 +1658,20 @@ export class GemmaPipeline {
               residentIds: decodeAhead >= 2,
             })
           : undefined;
+      aheadIds =
+        decodeAhead >= 2 && pleGpu === undefined
+          ? await gpu.createResident(4, "greedy-ahead-ids")
+          : undefined;
       session = await model.createSession(gpu, sessionOptions);
       // Under GPU residency, runs that do not use greedy (prefill, decode with diagnostics) also go
       // through the wrapper — it is the only place to plug in `per_layer_inputs`. Whether greedy
       // itself is used is decided by the generation surface from the presence of `onRun`, so it is
       // independent of whether the wrapper exists.
-      // A distribution with a suppressed set never uses the GPU selection (it reads the raw
-      // maximum, which can be a suppressed id — `Sampler.greedy`), so it is not built there and its
-      // buffers stay out of the estimate; the GPU-resident PLE still needs the wrapper's runs.
+      // A distribution with a suppressed set masks it inside the GPU selection (`Sampler.greedy`).
       const greedyOutput =
         pleGpu !== undefined ||
-        (!gpu.gpuTimingEnabled &&
-          options.onRunDiagnostics === undefined &&
-          wiring.suppressTokens.length === 0)
+        decodeAhead >= 2 ||
+        (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined)
           ? createGemmaGreedyOutput(
               gpu,
               session,
@@ -1688,6 +1679,12 @@ export class GemmaPipeline {
               wiring.vocabSize,
               pleGpu,
               decodeAhead,
+              {
+                suppressTokens: wiring.suppressTokens,
+                ...(aheadIds === undefined
+                  ? {}
+                  : { aheadIds: { name: INPUT_IDS, resident: aheadIds } }),
+              },
             )
           : undefined;
       const drafter = await GemmaPipeline.#buildDrafter(
@@ -1711,6 +1708,7 @@ export class GemmaPipeline {
         program: generationProgramFace(wiring),
         ...(ple === undefined ? {} : { ple }),
         ...(pleGpu === undefined ? {} : { pleGpu }),
+        ...(aheadIds === undefined ? {} : { aheadIds }),
         tokenizer,
         config: admitted.config,
         ...(drafter === undefined ? {} : { drafter }),
@@ -1738,6 +1736,7 @@ export class GemmaPipeline {
           if (session !== undefined) return session.dispose();
         },
         () => pleGpu?.dispose(),
+        () => aheadIds?.dispose(),
         () => {
           if (ownsGpu) gpu.destroy();
         },
@@ -1884,7 +1883,9 @@ export class GemmaPipeline {
         release = await acquire();
         sequence = await createGenerationSequence({
           session: state.greedyOutput?.session ?? state.session,
-          ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
+          ...(state.greedyOutput === undefined
+            ? {}
+            : { greedy: state.greedyOutput.greedy, greedyMasksSuppressed: true }),
           ...(state.greedyOutput?.ahead === undefined
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
@@ -1967,7 +1968,9 @@ export class GemmaPipeline {
       (async (): Promise<GenerationSequence> => {
         const inner = await createGenerationSequence({
           session: state.greedyOutput?.session ?? state.session,
-          ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
+          ...(state.greedyOutput === undefined
+            ? {}
+            : { greedy: state.greedyOutput.greedy, greedyMasksSuppressed: true }),
           ...(state.greedyOutput?.ahead === undefined
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
@@ -2297,6 +2300,7 @@ export class GemmaPipeline {
         // MUST: after the target Session (released once the baked references of the resident input
         // have been returned).
         () => this.#state.pleGpu?.dispose(),
+        () => this.#state.aheadIds?.dispose(),
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();
         },

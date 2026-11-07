@@ -165,9 +165,8 @@ same inputs; only the batching changes (where the next token comes from, and whe
   assembly in the greedy output.
 - On a GPU: `packages/runtime/tests/gpu_chained_generation_test.ts` (the chained runs of one batch compute what the same
   steps compute one by one — the lengths-uniform ordering; the refusals; a failed member poisons) and
-  `packages/e2e/tests/e2e_gemma4_qat_decode_ahead_test.ts` (QAT E2B, depths 4 and 8 against depth 1: a chat to the token
-  limit, a chat that stops at the end of turn inside a batch, a two-turn sequence; a depth ≥ 2 must report batches run).
-  **Neither has been run** (the development GPU was busy).
+  `packages/e2e/tests/e2e_gemma4_qat_mobile_decode_ahead_test.ts` (QAT E2B, depths 4 and 8 against depth 1: a chat to the token
+  limit, a chat that stops at the end of turn inside a batch, a two-turn sequence; a depth ≥ 2 must report batches run). Both pass (addendum of 2026-11-06).
 - On the M2 (Results below): the bench's `tokenIdsSha256` per prompt was equal across the arms of both runs.
 
 ## Results (2026-11-04, Apple M2, Chrome)
@@ -218,3 +217,31 @@ off, 4 rounds in ABBA order (8 visits, 2 warm chats × 2 prompts per visit), the
 - The M2 bench drops into a slower state after about six visits regardless of arm (research §11); an A/B on it needs a
   short run or the slow visits excluded.
 - Making it a default (a depth in a preset or in code) — not ruled.
+
+## Addendum (2026-11-06) — a model without PLE, a distribution that suppresses tokens, and the GPU checks
+
+**The GPU tests of decision 5 have now been run**, and they pass on the RTX 3080 Ti (the ones of this ADR with those of ADR
+0140 and 0141: 20 of 20).
+
+12B was refused on two counts; both are lifted:
+
+1. **It has no PLE**, so there was no GPU-resident table to drive the resident-id path. `pleResidency: "gpu"` is now
+   required only of a model that has a PLE. Without one the batch's next-token ids go straight into the graph's id input
+   through a resident the pipeline owns (`aheadIds`). The pipeline disposes that resident after the Session, because baked
+   bind groups keep referring to it.
+2. **Its distribution suppresses tokens**, while the selection took the raw maximum. The selection graph
+   (`gemmaSelectionModel`, `packages/models/src/gemma/greedy-output.ts`) now adds −∞ at the suppressed ids before its `topk`,
+   so the GPU picks what the host's masked argmax picks. The host's per-step greedy hook uses the same graph, so
+   `createSampler` takes `selectionMasksSuppressed` and checks that the returned token is not a suppressed one: a graph that
+   lost its mask fails loudly rather than generating a suppressed id.
+
+Checks: `packages/models/tests/gemma4_selection_mask_test.ts` compares the GPU selection with the host's at the real
+vocabulary, with a suppressed id as the raw maximum, a tie and −0, and shows that the graph without the mask returns the
+suppressed id. `packages/e2e/tests/e2e_gemma4_12b_decode_ahead_test.ts` runs 12B `i4` and `i4-fast` at depths 1, 4 and 8
+against a host-selection reference (a chat to the token limit, a stop inside a batch, a two-turn sequence), and a depth ≥ 2
+must report batches run.
+
+Results on the RTX 3080 Ti, decode wall ms per token of two rounds
+([research 2026-11-06](../research/2026-11-06-gemma4-12b-fast.md) §4): on `i4-fast` at P ≈ 1K depth 1 is 26.5 / 26.8,
+depth 4 is 26.7 / 22.4, depth 8 is 22.3 / 22.2; on `i4` depth 1 is 74.5 / 76.5, depth 8 is 65.3 / 66.9. Token ids were
+identical across depths. It stays opt-in; a depth in a preset is still not ruled.
