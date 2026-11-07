@@ -1066,6 +1066,47 @@ const PARALLEL_SHAPES: readonly ParallelShape[] = [
   { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
   // E4B QAT i4 g4096: o (full) — lanes / packed from E2B QAT 1536×4096 g4096 (unmeasured)
   { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+  // ---- 12B q4_0 QAT (added 2026-11-06) — lanes measured as whole-model decode on the RTX 3080 Ti
+  // (ADR 0098 addendum 2026-11-06): 4 beats 16 and 32 on the rows that widen, staged 32 ties 16 and
+  // beats plain 32 on the rows that narrow, and the output head takes 16 (32 does not build).
+  // gate / up
+  { storage: "i4", n: 15360, k: 3840, group: 32, lanes: 4, packedActivations: false },
+  // q (full), q (sliding), k / v (sliding)
+  { storage: "i4", n: 8192, k: 3840, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 4096, k: 3840, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 2048, k: 3840, group: 32, lanes: 4, packedActivations: false },
+  // k (full)
+  { storage: "i4", n: 512, k: 3840, group: 32, lanes: 32, packedActivations: false },
+  // o (sliding), o (full), down
+  {
+    storage: "i4",
+    n: 3840,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  {
+    storage: "i4",
+    n: 3840,
+    k: 8192,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  {
+    storage: "i4",
+    n: 3840,
+    k: 15360,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  // lm_head (tied embedding)
+  { storage: "i4", n: 262144, k: 3840, group: 32, lanes: 16, packedActivations: false },
 ];
 
 /** Row lookup in the measured table (including the M range, in one place). */

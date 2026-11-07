@@ -554,3 +554,12 @@ default KV type is f16, so per token Karume holds twice that default.
 The sustained VRAM follows the estimate, which keeps the K-100 figures usable as estimates. Decode is what limits long
 context on `i4` and `bf16` (370–382 ms per token at P = 128K), while `i4-fast` holds 24.5–25.9 ms, so K-100 does not change
 the speed picture.
+
+## 2026-11-06 Gemma 4 12B decode
+
+[Research 2026-11-06](research/2026-11-06-gemma4-12b-fast.md) added the 12B rows and measured them on the RTX 3080 Ti.
+
+| Status | ID | Candidate | Preconditions / kill criterion |
+| ------ | --- | --------- | ------------------------------ |
+| 🧪 | K-101 | An int4 `[262144, H]` output-head row for E2B / E4B | Filed 2026-11-06. 12B's head row took 1.6 ms/token off 23.9 (lanes 16; research §2). E2B and E4B keep the head in the reference order. Measure as whole-model decode; a row that does not beat that order by more than the noise of its arms is not added. |
+| 🧪 | K-102 | Why `i4-fast` loses to `i4` on 12B with the drafter | Filed 2026-11-06. 38.2 against 32.6 and 25.9 against 19.1 ms/token (research §3), while plain decode gains 1.9–2.1× and E2B / E4B gain with the drafter as well. Not investigated. Closes with an explanation, or with a measured path that makes speculative `i4-fast` no slower than speculative `i4`. |

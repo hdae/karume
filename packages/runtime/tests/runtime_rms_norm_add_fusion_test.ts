@@ -37,7 +37,7 @@ describe("opt-in RMS → add fusion", () => {
     }
   });
   it("accepts both input orders and the measured widths, and keeps the total reference count of external inputs", () => {
-    for (const dim of [256, 1536, 2560]) {
+    for (const dim of [256, 1536, 2560, 3840]) {
       for (const normFirst of [false, true]) {
         const plan = fuse({ dim, normFirst }, true),
           step = plan.steps[0];

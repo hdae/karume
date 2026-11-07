@@ -75,3 +75,10 @@ v1 WGSL kept in `packages/runtime/tests/fixtures/wgsl-baseline/`). The key carri
 (`rms_norm_add:v2:rms_norm:v2:f32:lastdim:wg256:trip<n>:<order>:xor-round`), and the generator
 accepts only the widths of ADR [0017](0017-rms-norm-conv2d-clamp-min.md) addendum 2 — the rule's
 measured widths 256 / 1536 / 2560 are all among them. The subgroup32 form is unchanged.
+
+## Addendum (2026-11-06) — width 3840 for 12B
+
+The rule's widths are now 256 / 1536 / 2560 / 3840. 3840 is among the widths the generator accepts (ADR
+[0017](0017-rms-norm-conv2d-clamp-min.md) addendum 2), and it is covered by the same u32 check against the unfused pair
+(`packages/runtime/tests/gpu_rms_norm_add_fusion_test.ts`). It is part of 12B's `i4-fast`
+([research 2026-11-06](../research/2026-11-06-gemma4-12b-fast.md)); its own gain was not separated from the other rows.

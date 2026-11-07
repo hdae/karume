@@ -57,7 +57,12 @@ describe.skipIf(!GPU_AVAILABLE)("staged-activation parallel GEMV (K-90, real GPU
           { k: 6144, group },
         ];
         if (storage === "i4")
-          shapes.push({ k: 12288, group: 32 }, { k: 4096, group: 512 }, { k: 2048, group: 2048 });
+          shapes.push(
+            { k: 12288, group: 32 },
+            { k: 15360, group: 32 },
+            { k: 4096, group: 512 },
+            { k: 2048, group: 2048 },
+          );
         for (const { k, group: shapeGroup } of shapes) {
           // 36 columns: not a multiple of any lane count's columns per workgroup (edge columns).
           const n = 36;

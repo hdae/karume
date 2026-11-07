@@ -89,3 +89,24 @@ so `parallel` and what builds on it (ADR 0103, 0105) fell back on every E4B line
   `packages/e2e/tests/e2e_gemma4_qat_parallel_gemv_plan_test.ts` (explicit SKIP without the mirror).
 - Speed adoption is open (per-key census and GPU time decide lanes or removal; the flag-bench named
   for it went with the Deno tools, ADR 0127 decision 5).
+
+## Addendum (2026-11-06) — the 12B rows, measured as whole-model decode
+
+12B had no row, so `parallel` fell back on every 12B linear. The rows are in `PARALLEL_SHAPES`
+(`packages/runtime/src/kernels/linear-gemv.ts`), int4 group 32 throughout:
+
+| Role | Shape (n × k) | Lanes |
+| ---- | ------------- | ----- |
+| expanding: gate / up, full q, sliding q, sliding k / v | 15360 / 8192 / 4096 / 2048 × 3840 | 4 |
+| full k | 512 × 3840 | 32 |
+| reducing: o, down | 3840 × 4096 / 8192 / 15360 | 32, staged activations |
+| output head | 262144 × 3840 | 16 |
+
+- **Unlike the E4B copies, these are measured**, as whole-model decode at P ≈ 1K on the RTX 3080 Ti
+  ([research 2026-11-06](../research/2026-11-06-gemma4-12b-fast.md) §2). The rows that widen take 4 lanes where E2B's take
+  more: 4 beat 16 and 32 by 3.4–3.8 ms/token. On the reducing rows staged 32 tied staged 16 and beat unstaged 32 by about
+  4 ms/token.
+- **The output head is the first int4 `[262144, H]` row.** Lanes 16 and 4 tie, and 16 is kept; lanes 32 does not build on
+  this device. E2B and E4B still have no such row (perf-ledger K-101).
+- Generated tokens were identical in every arm of the sweep at this prompt. The rows change rounding, so that is an
+  observation about these prompts, not a guarantee; the quant's description says so (ADR 0104).
