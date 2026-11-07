@@ -45,3 +45,10 @@ export {
   STATE_ATTENTION_MUTANTS,
   type StateAttentionRewritesReport,
 } from "./src/state-attention-rewrites.ts";
+export {
+  checkStateKv16,
+  checkStateKv16Mutants,
+  STATE_KV16_CASES,
+  STATE_KV16_MUTANTS,
+  type StateKv16Mutant,
+} from "./src/state-kv16.ts";

@@ -110,6 +110,7 @@ const rig = async (options: { window?: number; chunkLength: number }): Promise<R
   const host: GenerationContextHost = {
     gpu,
     graph,
+    fullStateStorage: "f32",
     flush: () => Promise.resolve(),
     serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
     forget: () => undefined,

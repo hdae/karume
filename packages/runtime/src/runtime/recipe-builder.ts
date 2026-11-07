@@ -37,6 +37,7 @@ import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import type { StateStorage } from "../kernels/state-storage.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
@@ -154,6 +155,12 @@ export type RecipeBuilderContext = {
   readonly attentionDevice: AttentionDeviceFacts;
   /** The reduction form of states-form attention ③PV (the executor's {@link SessionState} decides the default). */
   readonly stateAttentionReduce: StateAttentionReduce;
+  /**
+   * The storage of full state slots (`SessionOptions.fullStateStorage`). A builder derives a slot's
+   * storage from it and its own `sliding` through `slotStateStorage`, so no per-slot map exists to go
+   * stale.
+   */
+  readonly fullStateStorage: StateStorage;
   readonly linearGemvReduce: LinearGemvReduce;
   /**
    * Whether the eligible decode linears run on the integer GEMV (`SessionOptions.integerGemv`;
@@ -248,6 +255,7 @@ export type RecipeBuildFace = {
     | "attentionScoreStorage"
     | "attentionDevice"
     | "stateAttentionReduce"
+    | "fullStateStorage"
     | "linearGemvReduce"
     | "integerGemv"
     | "linearGemvPlanes"

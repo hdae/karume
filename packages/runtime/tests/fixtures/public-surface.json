@@ -327,6 +327,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "StateStorage",
+        "kind": "typeAlias"
+      },
+      {
         "name": "StorageDiagnostics",
         "kind": "typeAlias"
       },

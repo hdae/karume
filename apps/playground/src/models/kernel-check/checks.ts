@@ -10,12 +10,14 @@ import {
   checkPlanesGemv,
   checkRmsSubgroup,
   checkStateAttentionRewrites,
+  checkStateKv16,
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
+  STATE_KV16_CASES,
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
 
@@ -85,6 +87,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: [await checkPlanesGemv(gpu, options)],
       expectedCases: GEMV_PLANES_CASES,
+    }),
+  },
+  {
+    id: "state-kv16",
+    title: "f16 full state slots",
+    summary:
+      "The f16 append against host rounding (word layout included), and every reader of an f16 slot against its f32 kernel over the same slot rounded on the host, u32 identity (ADR 0143).",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: await checkStateKv16(gpu, options),
+      expectedCases: STATE_KV16_CASES,
     }),
   },
 ];

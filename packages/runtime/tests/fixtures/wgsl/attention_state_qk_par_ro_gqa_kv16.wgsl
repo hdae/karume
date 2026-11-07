@@ -1,0 +1,109 @@
+// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, readonly = past only, GQA, KV in f16 storage (pack2x16float))
+struct Params {
+  rows_block: u32,
+  row_offset: u32,
+  chunk_rows: u32,
+  depth: u32,
+  kv_repeat: u32,
+  window: u32,
+  capacity: u32,
+  col_cap: u32,
+  neg_inf: u32,
+  scale: f32,
+}
+struct Lengths {
+  past: u32,
+  query: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> slot_k: array<u32>;
+@group(0) @binding(3) var<storage, read_write> s: array<f32>;
+@group(0) @binding(4) var<uniform> lengths: Lengths;
+
+fn slot_row(col: u32) -> u32 {
+  return col;
+}
+
+fn column_base(past: u32) -> u32 {
+  return 0u;
+}
+
+fn live_columns(past: u32, query: u32) -> u32 {
+  return past;
+}
+
+fn in_window(col: u32, past: u32) -> bool {
+  return col < past;
+}
+
+fn effective_rows(query: u32) -> u32 {
+  if (query <= params.row_offset) {
+    return 0u;
+  }
+  return min(params.rows_block, query - params.row_offset);
+}
+
+// Decode of f16 storage: element i = unpack2x16float(slot_k[i / 2])[i % 2] (unpack is exact)
+fn slot_k_at(i: u32) -> f32 {
+  let pair = unpack2x16float(slot_k[i >> 1u]);
+  return select(pair.x, pair.y, (i & 1u) == 1u);
+}
+
+fn score_slot(q_base: u32, k_base: u32, lane: u32) -> f32 {
+  var acc = 0.0;
+  for (var d = lane; d < params.depth; d = d + 16u) {
+    acc = acc + (q[q_base + d] * params.scale) * (slot_k_at(k_base + d) * params.scale);
+  }
+  return acc;
+}
+
+var<workgroup> scratch: array<f32, 256>;
+
+@compute @workgroup_size(16, 16)
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let local_row = wid.y;
+  if (local_row >= effective_rows(lengths.query)) {
+    return;
+  }
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let cl = wid.x * 16u + lid.x;
+  let lane = lid.y;
+  let z = wid.z;
+  let col = column_base(past) + cl;
+  let row = params.row_offset + local_row;
+  let q_base = (z * params.chunk_rows + row) * params.depth;
+  let kv_plane = z / params.kv_repeat;
+  // Only the slot (past) is read. The edge tile (cl ≥ live) does not run the dot product and **does
+  // not return either** (the barrier below sits only inside uniform control flow)
+  let inside = cl < live && in_window(col, past);
+  var acc = 0.0;
+  if (inside) {
+    acc = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth, lane);
+  }
+  scratch[lane * 16u + lid.x] = acc;
+  workgroupBarrier();
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
+  var stride = 8u;
+  while (stride > 0u) {
+    if (lane < stride) {
+      let mine = lane * 16u + lid.x;
+      scratch[mine] = scratch[mine] + scratch[(lane + stride) * 16u + lid.x];
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
+  if (lane == 0u && cl < live) {
+    var value = bitcast<f32>(params.neg_inf);
+    if (inside) {
+      value = scratch[lid.x];
+    }
+    s[(z * params.rows_block + local_row) * params.col_cap + cl] = value;
+  }
+}

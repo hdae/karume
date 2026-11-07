@@ -174,10 +174,10 @@ const STATE_DTYPES = ["f32"] as const;
 type IrStateDtype = (typeof STATE_DTYPES)[number];
 
 /**
- * State slot dtypes that are only reserved (ADR 0066, addendum of 2026-08-17, item 5). f16
- * storage changes the numerics contract and so needs an opt-in in the style of ADR 0058 — until
- * that exists, they fail as **unsupported**, not as "outside the vocabulary" (leaving a diagnostic
- * that says the form is coming later).
+ * State slot dtypes that are only reserved (ADR 0066, addendum of 2026-08-17, item 5). The f16
+ * storage of a full slot is the Session's opt-in (`SessionOptions.fullStateStorage`), and the graph
+ * keeps declaring f32 under it. A declared f16 fails as **unsupported**, not as "outside the
+ * vocabulary" (leaving a diagnostic that says the form may come later).
  */
 const RESERVED_STATE_DTYPES = ["f16"] as const;
 

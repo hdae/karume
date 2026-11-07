@@ -92,6 +92,13 @@ import {
   stateTiledPvGeometryWgsl,
 } from "./state-attention.ts";
 import {
+  assertStateStorageFull,
+  type StateStorage,
+  stateSlotElementType,
+  stateSlotLoaderWgsl,
+  stateSlotRead,
+} from "./state-storage.ts";
+import {
   assertScoreStorageSupported,
   scoreArrayType,
   scoreNote,
@@ -357,6 +364,8 @@ type GemmSpec =
       readonly gqa: boolean;
       /** `M` (physical chunk rows — the geometry bucket). */
       readonly rows: number;
+      /** Storage of the slot read here. */
+      readonly storage: StateStorage;
     }
   | {
       /**
@@ -375,6 +384,8 @@ type GemmSpec =
       readonly gqa: boolean;
       /** `M` (physical chunk rows — the geometry bucket). */
       readonly rows: number;
+      /** Storage of the slot read here. */
+      readonly storage: StateStorage;
     }
   | {
       readonly op: "linear";
@@ -1526,12 +1537,12 @@ ${fillBDense(geometry, "v", "attention_pv", v4, compute)}`,
  * ({@link prologueBStateQk}). Bringing the 2-source branch of the row start into the fill would run
  * the same branch once per K tile iteration.
  */
-const STATE_QK_K_READ_WGSL = `
+const stateQkKReadWgsl = (storage: StateStorage): string => `
 // The 2 sources of K (the same split as score_slot / score_ins of ①). Row starts are already folded
 // per column, so this is only the choice of binding
 fn k_read(from_slot: bool, index: u32) -> f32 {
   if (from_slot) {
-    return slot_k[index];
+    return ${stateSlotRead("slot_k", "index", storage)};
   }
   return ins_k[index];
 }
@@ -1705,6 +1716,7 @@ const attentionStateQkTiledWgsl = (
   geometry: GemmGeometry,
   sliding: boolean,
   gqa: boolean,
+  storage: StateStorage,
 ): string =>
   skeleton(
     geometry,
@@ -1714,12 +1726,12 @@ const attentionStateQkTiledWgsl = (
 ${STATE_LENGTHS_STRUCT}`,
     `@group(0) @binding(1) var<storage, read> q: array<f32>;
 @group(0) @binding(2) var<storage, read> ins_k: array<f32>;
-@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(4) var<storage, read_write> s: array<f32>;
 @group(0) @binding(5) var<uniform> lengths: Lengths;`,
     `
-${stateTiledGeometryWgsl(sliding)}
-${STATE_QK_K_READ_WGSL}`,
+${stateTiledGeometryWgsl(sliding)}${stateSlotLoaderWgsl("slot_k", storage)}
+${stateQkKReadWgsl(storage)}`,
     `  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
   // inner workgroupBarrier to meet WGSL's uniformity requirement
   let past = lengths.past;
@@ -1749,12 +1761,12 @@ ${fillBStateQk(geometry)}`,
  * start changes per K tile (folding works only on the ①ₜ side, where "the columns one thread handles
  * are invariant in the K tile loop").
  */
-const STATE_PV_V_READ_WGSL = `
+const statePvVReadWgsl = (storage: StateStorage): string => `
 // The 2 sources of V (the same split as slot_v / ins_v of ③). The fill side builds the row start
 // per K tile
 fn v_read(from_slot: bool, index: u32) -> f32 {
   if (from_slot) {
-    return slot_v[index];
+    return ${stateSlotRead("slot_v", "index", storage)};
   }
   return ins_v[index];
 }
@@ -1878,6 +1890,7 @@ const attentionStatePvTiledWgsl = (
   geometry: GemmGeometry,
   sliding: boolean,
   gqa: boolean,
+  storage: StateStorage,
 ): string =>
   skeleton(
     geometry,
@@ -1888,12 +1901,12 @@ ${STATE_LENGTHS_STRUCT}`,
     `@group(0) @binding(1) var<storage, read> s: array<f32>;
 @group(0) @binding(2) var<storage, read> stats: array<f32>;
 @group(0) @binding(3) var<storage, read> ins_v: array<f32>;
-@group(0) @binding(4) var<storage, read> slot_v: array<f32>;
+@group(0) @binding(4) var<storage, read> slot_v: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 @group(0) @binding(6) var<uniform> lengths: Lengths;`,
     `
-${stateTiledPvGeometryWgsl(sliding)}
-${STATE_PV_V_READ_WGSL}`,
+${stateTiledPvGeometryWgsl(sliding)}${stateSlotLoaderWgsl("slot_v", storage)}
+${statePvVReadWgsl(storage)}`,
     `  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
   // inner workgroupBarrier to meet WGSL's uniformity requirement
   let past = lengths.past;
@@ -2800,9 +2813,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         spec.rowWindow,
       );
     case "attention_state_qk":
-      return attentionStateQkTiledWgsl(geometry, spec.sliding, spec.gqa);
+      return attentionStateQkTiledWgsl(geometry, spec.sliding, spec.gqa, spec.storage);
     case "attention_state_pv":
-      return attentionStatePvTiledWgsl(geometry, spec.sliding, spec.gqa);
+      return attentionStatePvTiledWgsl(geometry, spec.sliding, spec.gqa, spec.storage);
     case "attention_pv":
       return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score, spec.gqa, spec.rowWindow);
     case "bmm":
@@ -2824,8 +2837,15 @@ export const gemmWgsl = (spec: GemmSpec): string => {
  * workgroup computation and switching condition are held by state-attention.ts). No import in the
  * reverse direction is made.
  */
-export const stateQkTiledWgsl = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
-  gemmWgsl({ op: "attention_state_qk", sliding, gqa, rows: chunkRows });
+export const stateQkTiledWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  chunkRows: number,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_qk (tiled)", sliding, storage);
+  return gemmWgsl({ op: "attention_state_qk", sliding, gqa, rows: chunkRows, storage });
+};
 
 /**
  * The WGSL of states-shaped ③ₜ (a thin entry point to the states branch of {@link gemmWgsl} — the
@@ -2836,5 +2856,12 @@ export const stateQkTiledWgsl = (sliding: boolean, gqa: boolean, chunkRows: numb
  * 3 go through the one pure function `gemmGeometryForRows`, so with the same value the geometry
  * always matches.
  */
-export const statePvTiledWgsl = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
-  gemmWgsl({ op: "attention_state_pv", sliding, gqa, rows: chunkRows });
+export const statePvTiledWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  chunkRows: number,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_pv (tiled)", sliding, storage);
+  return gemmWgsl({ op: "attention_state_pv", sliding, gqa, rows: chunkRows, storage });
+};

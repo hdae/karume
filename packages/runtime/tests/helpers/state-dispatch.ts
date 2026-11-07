@@ -42,6 +42,7 @@ import {
   stateStatsWorkgroups,
 } from "../../src/kernels/state-attention.ts";
 import { statePvTiledWgsl, stateQkTiledWgsl } from "../../src/kernels/gemm.ts";
+import type { StateStorage } from "../../src/kernels/state-storage.ts";
 import { BUFFER_USAGE, MAP_MODE } from "../../src/gpu/webgpu-constants.ts";
 import {
   stateAppendParams,
@@ -135,6 +136,23 @@ const storageBuffer = (device: GPUDevice, data: Float32Array<ArrayBuffer>): GPUB
 const uniformBuffer = (device: GPUDevice, data: Uint32Array<ArrayBuffer>): GPUBuffer => {
   const buffer = device.createBuffer({ size: data.byteLength, usage: UNIFORM });
   device.queue.writeBuffer(buffer, 0, data);
+  return buffer;
+};
+
+/**
+ * A slot's buffer: as given, or packed the way f16 storage holds it (element 0 in the low half of the
+ * word). The harness rounds on the host, which is what the f16 readers must be equal to.
+ */
+const slotBuffer = (
+  device: GPUDevice,
+  slot: Float32Array<ArrayBuffer>,
+  storage: StateStorage,
+): GPUBuffer => {
+  if (storage === "f32") return storageBuffer(device, slot);
+  const packed = new Float16Array(slot);
+  const buffer = device.createBuffer({ size: Math.max(4, packed.byteLength), usage: STORAGE });
+  // As bytes: Dawn under Node takes a Float16Array view to an element size of 0 and dies on SIGFPE
+  device.queue.writeBuffer(buffer, 0, new Uint8Array(packed.buffer));
   return buffer;
 };
 
@@ -429,9 +447,13 @@ export const runStateQk = async (
   spec: StateCase,
   inputs: StateInputs,
   variant: StateQkVariant,
-  options: { readonly mutate?: StateMutation; readonly cache?: StatePipelineCache } = {},
+  options: {
+    readonly mutate?: StateMutation;
+    readonly cache?: StatePipelineCache;
+    readonly storage?: StateStorage;
+  } = {},
 ): Promise<readonly Uint32Array<ArrayBuffer>[]> => {
-  const { mutate } = options;
+  const { mutate, storage = "f32" } = options;
   const sliding = stateSliding(spec.window);
   const gqa = spec.heads !== spec.kvHeads;
   const colCap = caseColCap(spec);
@@ -441,12 +463,12 @@ export const runStateQk = async (
   const kvRepeat = spec.heads / spec.kvHeads;
   const source =
     variant === "parallel"
-      ? stateQkParallelWgsl(sliding, gqa)
+      ? stateQkParallelWgsl(sliding, gqa, storage)
       : variant === "tiled"
-        ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows)
+        ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows, storage)
         : variant === "folded"
-          ? stateQkFoldedWgsl(kvRepeat)
-          : stateQkWgsl(sliding, gqa);
+          ? stateQkFoldedWgsl(kvRepeat, storage)
+          : stateQkWgsl(sliding, gqa, storage);
   const buffers: GPUBuffer[] = [];
   const track = <T extends GPUBuffer>(buffer: T): T => {
     buffers.push(buffer);
@@ -455,7 +477,7 @@ export const runStateQk = async (
   try {
     const q = track(storageBuffer(device, inputs.q));
     const insK = track(storageBuffer(device, inputs.insK));
-    const slotK = track(storageBuffer(device, inputs.slotK));
+    const slotK = track(slotBuffer(device, inputs.slotK, storage));
     const lengths = track(lengthsBuffer(device, spec.past, spec.query));
     const scores = track(
       storageBuffer(
@@ -563,9 +585,13 @@ export const runStatePv = async (
   spec: StateCase,
   inputs: StateInputs,
   variant: StatePvVariant,
-  options: { readonly mutate?: StateMutation; readonly cache?: StatePipelineCache } = {},
+  options: {
+    readonly mutate?: StateMutation;
+    readonly cache?: StatePipelineCache;
+    readonly storage?: StateStorage;
+  } = {},
 ): Promise<Uint32Array<ArrayBuffer>> => {
-  const { mutate } = options;
+  const { mutate, storage = "f32" } = options;
   const sliding = stateSliding(spec.window);
   const gqa = spec.heads !== spec.kvHeads;
   const colCap = caseColCap(spec);
@@ -576,10 +602,10 @@ export const runStatePv = async (
     mutate === undefined ? source : mutate(kernel, source);
   const pvSource =
     variant === "parallel"
-      ? statePvParallelWgsl(sliding, gqa)
+      ? statePvParallelWgsl(sliding, gqa, storage)
       : variant === "tiled"
-        ? statePvTiledWgsl(sliding, gqa, spec.chunkRows)
-        : statePvWgsl(sliding, gqa);
+        ? statePvTiledWgsl(sliding, gqa, spec.chunkRows, storage)
+        : statePvWgsl(sliding, gqa, storage);
   const outCount = batchHeads * spec.chunkRows * spec.depth;
   const buffers: GPUBuffer[] = [];
   const track = <T extends GPUBuffer>(buffer: T): T => {
@@ -590,8 +616,8 @@ export const runStatePv = async (
     const q = track(storageBuffer(device, inputs.q));
     const insK = track(storageBuffer(device, inputs.insK));
     const insV = track(storageBuffer(device, inputs.insV));
-    const slotK = track(storageBuffer(device, inputs.slotK));
-    const slotV = track(storageBuffer(device, inputs.slotV));
+    const slotK = track(slotBuffer(device, inputs.slotK, storage));
+    const slotV = track(slotBuffer(device, inputs.slotV, storage));
     const out = track(
       storageBuffer(
         device,
@@ -611,7 +637,7 @@ export const runStatePv = async (
         seeded(batchHeads * rowsBlock * STATE_STATS_STRIDE, () => STATE_S_POISON),
       ),
     );
-    const qk = pipelineOf(device, cache, wgsl("qk", stateQkWgsl(sliding, gqa)));
+    const qk = pipelineOf(device, cache, wgsl("qk", stateQkWgsl(sliding, gqa, storage)));
     const st = pipelineOf(device, cache, wgsl("stats", stateStatsWgsl(sliding)));
     const pv = pipelineOf(device, cache, wgsl("pv", pvSource));
     const limit = device.limits.maxComputeWorkgroupsPerDimension;
@@ -735,6 +761,53 @@ export const runStateAppend = async (
 };
 
 /**
+ * Dispatches the f16 `state_append` directly and reads back **the whole slot as words**, each holding
+ * two elements. `poison` fills the slot first, so a word the kernel must not write shows.
+ */
+export const runStateAppendF16 = async (
+  device: GPUDevice,
+  spec: StateAppendCase,
+  x: Float32Array<ArrayBuffer>,
+  words: number,
+  poison: number,
+  options: { readonly mutate?: StateMutation; readonly cache?: StatePipelineCache } = {},
+): Promise<Uint32Array<ArrayBuffer>> => {
+  const { mutate } = options;
+  const cache = options.cache ?? new Map<string, GPUComputePipeline>();
+  const source = stateAppendWgsl(false, "f16");
+  const buffers: GPUBuffer[] = [];
+  try {
+    const params = uniformBuffer(device, stateAppendParams(spec, "f16"));
+    const xBuffer = storageBuffer(device, x);
+    const slot = device.createBuffer({ size: Math.max(4, words * 4), usage: STORAGE });
+    device.queue.writeBuffer(slot, 0, new Uint32Array(words).fill(poison));
+    const lengths = lengthsBuffer(device, spec.past, spec.query);
+    buffers.push(params, xBuffer, slot, lengths);
+    const pipeline = pipelineOf(
+      device,
+      cache,
+      mutate === undefined ? source : mutate("append", source),
+    );
+    const groups = stateAppendWorkgroups(
+      { kvPlanes: spec.kvPlanes, depth: spec.depth / 2 },
+      spec.query,
+      device.limits.maxComputeWorkgroupsPerDimension,
+      "state_append",
+    );
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bind(device, pipeline, [params, xBuffer, slot, lengths]));
+    pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return await readWords(device, slot, words);
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
+  }
+};
+
+/**
  * Check that the fault-injection replacement **actually took effect**.
  *
  * MUST: if a mutation is a no-op (the replacement target disappeared through a text change), the
@@ -772,6 +845,7 @@ export const runStateAttentionReadonly = async (
   options: {
     readonly mutate?: StateMutation;
     readonly cache?: StatePipelineCache;
+    readonly storage?: StateStorage;
   } = {},
 ): Promise<StateRunResult> => {
   if (spec.chunkRows !== 1 || spec.query !== 1) {
@@ -779,7 +853,7 @@ export const runStateAttentionReadonly = async (
       `readonly is fixed at M = Q = 1 (${spec.name}: M=${spec.chunkRows} Q=${spec.query})`,
     );
   }
-  const { mutate } = options;
+  const { mutate, storage = "f32" } = options;
   const sliding = stateSliding(spec.window);
   const gqa = spec.heads !== spec.kvHeads;
   const colCap = caseColCap(spec);
@@ -795,8 +869,8 @@ export const runStateAttentionReadonly = async (
   };
   try {
     const q = track(storageBuffer(device, inputs.q));
-    const slotK = track(storageBuffer(device, inputs.slotK));
-    const slotV = track(storageBuffer(device, inputs.slotV));
+    const slotK = track(slotBuffer(device, inputs.slotK, storage));
+    const slotV = track(slotBuffer(device, inputs.slotV, storage));
     const out = track(
       storageBuffer(
         device,
@@ -840,9 +914,17 @@ export const runStateAttentionReadonly = async (
     const statsParams = track(
       uniformBuffer(device, stateStatsParams(batchHeads, 1, 0, colCap, spec.window)),
     );
-    const qk = pipelineOf(device, cache, wgsl("qk", stateQkParallelReadonlyWgsl(sliding, gqa)));
+    const qk = pipelineOf(
+      device,
+      cache,
+      wgsl("qk", stateQkParallelReadonlyWgsl(sliding, gqa, storage)),
+    );
     const st = pipelineOf(device, cache, wgsl("stats", stateStatsReadonlyWgsl(sliding)));
-    const pv = pipelineOf(device, cache, wgsl("pv", statePvParallelReadonlyWgsl(sliding, gqa)));
+    const pv = pipelineOf(
+      device,
+      cache,
+      wgsl("pv", statePvParallelReadonlyWgsl(sliding, gqa, storage)),
+    );
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(qk);

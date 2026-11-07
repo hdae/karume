@@ -360,6 +360,7 @@ const stateGraph = (shape: readonly number[]): IrGraph => {
 const stateHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
   gpu,
   graph,
+  fullStateStorage: "f32",
   flush: () => Promise.resolve(),
   serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
   forget: () => {},

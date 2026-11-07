@@ -17,7 +17,20 @@
 
 import { STATE_STATS_STRIDE, stateSliding } from "../kernels/state-attention.ts";
 import { stateStatsPvEligible } from "../kernels/state-attention-stats-pv.ts";
+import type { StateStorage } from "../kernels/state-storage.ts";
 import { planRowBlocks, type RowBlockLimit } from "./fusion.ts";
+import type { StateAttentionReduce } from "./session-types.ts";
+
+/**
+ * Whether the states form asks for the fused stats + PV (the `fuseStatsPv` input of
+ * {@link planStateAttention}; the plan then applies the shape's eligibility).
+ *
+ * MUST: execution and the estimate read this one condition. An f16 slot takes ③': the fused kernel
+ * has no f16 form, because it needs a column limit of at most 1024, and a full slot's column limit is
+ * its capacity, so the two meet only at capacities where halving the slot buys nothing.
+ */
+export const stateFusesStatsPv = (reduce: StateAttentionReduce, storage: StateStorage): boolean =>
+  reduce === "parallel-fused" && storage === "f32";
 
 /**
  * The geometry of one node (only the fields of `StateAttentionGeometry` that size the temporaries).

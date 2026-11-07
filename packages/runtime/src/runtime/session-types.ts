@@ -10,6 +10,7 @@ import type { ArenaStats } from "../gpu/arena.ts";
 import type { BatchScope, ResidentTensor } from "../gpu/device.ts";
 import type { GpuTimingStats, SubmitPolicy, SubmitStats } from "../gpu/submit.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import type { StateStorage } from "../kernels/state-storage.ts";
 import type { FusionCounts } from "./fusion.ts";
 import type { GenerationContext } from "./generation-context.ts";
 import type { SymbolBindings } from "./plan.ts";
@@ -463,6 +464,25 @@ export type SessionOptions = {
    * path. ADR 0102.
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
+  /**
+   * The storage of **full** state slots (default `"f32"`). `"f16"` halves their bytes and needs no
+   * `shader-f16`. The graph keeps declaring f32 states, so nothing is re-exported. Sliding slots never
+   * change: their cost is fixed by the window, not by the capacity.
+   *
+   * The rounding happens once, when a run appends its rows, so it changes the numbers: a token reads
+   * its own run in f32 and earlier runs in f16. The first run has no past and matches f32 word for
+   * word; later runs differ only by that rounding, and two Sessions with the same option stay
+   * byte-identical on one device. S, its statistics and the outputs stay f32, so only the slots
+   * shrink.
+   *
+   * MUST: a full slot's `D` is even (one append invocation owns one word). An odd `D` fails loudly at
+   * `createGenerationContext` and in the estimate. A borrowing Session must use the same value as its
+   * lender, or `createGenerationContext({ borrow })` fails loudly.
+   * `stateAttentionReduce: "parallel-fused"` runs as `"parallel"` on an f16 slot.
+   *
+   * DECIDED: docs/decisions/0143-f16-full-state-storage.md
+   */
+  readonly fullStateStorage?: StateStorage;
   /**
    * The summation order of the quantized GEMV (default sequential). parallel is an optional setting
    * limited to the measured INT2/4/8 shapes and M=1..8. f32 compute only; other shapes and storage

@@ -25,6 +25,12 @@ import { STORAGE_USAGE } from "../gpu/arena.ts";
 import { assertDeviceUsable, type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
+import {
+  assertStateStorageDepth,
+  slotStateStorage,
+  type StateStorage,
+  stateStorageBytes,
+} from "../kernels/state-storage.ts";
 import { numel, stateWindow } from "../ops.ts";
 import { ExecutionError, type SymbolBindings } from "./plan.ts";
 import type { BakedGroups } from "./recipe.ts";
@@ -50,8 +56,24 @@ export const LENGTHS_BYTES: number = 8;
  */
 const LENGTHS_USAGE = BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
-/** State slots are f32 only (`STATE_DTYPES` — an f16 option is reserved by ADR 0066 addendum 5). */
-export const STATE_ELEMENT_BYTES: number = 4;
+/**
+ * The byte length of one state slot (`STATE_DTYPES` declares f32 only; f16 is physical storage chosen
+ * by {@link SessionOptions.fullStateStorage}).
+ *
+ * MUST: the allocation and the estimate both call this, so the estimate's number is the real one. It
+ * is also where an odd `D` fails, so neither returns a size for a slot that cannot be written.
+ * NOTE: `D` is the last axis (`[B,Hkv,C,D]` — the contract of the states-form ops).
+ */
+export const stateSlotBytes = (
+  name: string,
+  shape: readonly number[],
+  sliding: boolean,
+  option: StateStorage,
+): number => {
+  const storage = slotStateStorage(option, sliding);
+  assertStateStorageDepth(`state '${name}'`, shape[shape.length - 1], storage);
+  return numel(shape) * stateStorageBytes(storage);
+};
 
 /**
  * Upper bound of a logical length (carried in a `Uint32Array` / WGSL `u32` — ADR 0066 addendum 4).
@@ -72,6 +94,11 @@ export type StateSlotBacking = {
   /** The binding-resolved concrete shape including capacity (same rank as the declared shape). */
   readonly shape: readonly number[];
   readonly byteLength: number;
+  /**
+   * How the bytes are stored (from {@link slotStateStorage}). The only record a borrower can compare:
+   * the shapes of an f32 and an f16 slot match, so nothing else tells a packed slot from an f32 one.
+   */
+  readonly storage: StateStorage;
 };
 
 /**
@@ -84,6 +111,8 @@ export type StateSlotBacking = {
 export type GenerationContextHost = {
   readonly gpu: GpuContext;
   readonly graph: IrGraph;
+  /** The Session's {@link SessionOptions.fullStateStorage} (the default filled in). */
+  readonly fullStateStorage: StateStorage;
   /**
    * Drains unsubmitted encoding (flush-before-destroy — ADR 0004. Implemented by
    * `SubmitScheduler.flush`).
@@ -302,7 +331,7 @@ type GenerationContextInternals = {
  * the same slot agrees on `window`, so here one sliding declaration is enough to treat the slot as
  * sliding.
  */
-const slidingSlotWindows = (graph: IrGraph): ReadonlyMap<string, number> => {
+export const slidingSlotWindows = (graph: IrGraph): ReadonlyMap<string, number> => {
   const sliding = new Map<string, number>();
   graph.nodes.forEach((node, index) => {
     const slots = Object.values(node.states);
@@ -866,11 +895,13 @@ export class GenerationContext {
       return await GenerationContext.#createBorrowed(host, spec, spec.borrow, names);
     }
     const bindings = resolveBindings(graph, spec.bindings);
+    const windows = slidingSlotWindows(graph);
     const planned = names.map((name) => {
       const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
-      const byteLength = numel(shape) * STATE_ELEMENT_BYTES;
+      const sliding = windows.has(name);
+      const byteLength = stateSlotBytes(name, shape, sliding, host.fullStateStorage);
       assertSlotWithinLimits(name, shape, byteLength, gpu.limits);
-      return { name, shape, byteLength };
+      return { name, shape, byteLength, storage: slotStateStorage(host.fullStateStorage, sliding) };
     });
 
     // MUST: no await between push and **issuing** the pop (the basis that prevents interleaving on
@@ -883,14 +914,14 @@ export class GenerationContext {
     let popped = false;
     let context: GenerationContext | undefined;
     try {
-      for (const { name, shape, byteLength } of planned) {
+      for (const { name, shape, byteLength, storage } of planned) {
         const buffer = gpu.device.createBuffer({
           label: `state '${name}'`,
           size: byteLength,
           usage: STORAGE_USAGE,
         });
         created.push(buffer);
-        slots.set(name, { buffer, shape, byteLength });
+        slots.set(name, { buffer, shape, byteLength, storage });
       }
       const lengths = gpu.device.createBuffer({
         label: "generation lengths",
@@ -908,7 +939,7 @@ export class GenerationContext {
       context = new GenerationContext(
         host,
         slots,
-        slidingSlotWindows(graph),
+        windows,
         lengths,
         chunkLength,
         chunkBuckets,
@@ -1007,6 +1038,15 @@ export class GenerationContext {
             ` the actual shape [${backing.shape.join(",")}] of the lender's slot`,
         );
       }
+      // MUST: the storage agrees with the lender's. The shapes above match either way, so a borrower
+      // compiled for f32 would read the lender's packed words as f32 garbage with no exception.
+      const storage = slotStateStorage(host.fullStateStorage, window !== undefined);
+      if (storage !== backing.storage) {
+        throw new ExecutionError(
+          `state '${name}': this Session stores the slot as ${storage} and the lender as ` +
+            `${backing.storage} (give both Sessions the same fullStateStorage)`,
+        );
+      }
       slots.set(name, backing);
     }
 
@@ -1089,7 +1129,12 @@ export class GenerationContext {
           usage: STORAGE_USAGE,
         });
         created.push(buffer);
-        slots.set(name, { buffer, shape: slot.shape, byteLength: slot.byteLength });
+        slots.set(name, {
+          buffer,
+          shape: slot.shape,
+          byteLength: slot.byteLength,
+          storage: slot.storage,
+        });
         encoder.copyBufferToBuffer(slot.buffer, 0, buffer, 0, slot.byteLength);
       }
       const lengths = gpu.device.createBuffer({

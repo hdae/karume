@@ -1,4 +1,4 @@
-import { GEMV_INTEGER_CASES, GEMV_PLANES_CASES } from "@karume/kernel-checks";
+import { GEMV_INTEGER_CASES, GEMV_PLANES_CASES, STATE_KV16_CASES } from "@karume/kernel-checks";
 import { describe, expect, it } from "vite-plus/test";
 
 import { KERNEL_CHECKS } from "../src/models/kernel-check/checks.ts";
@@ -21,5 +21,12 @@ describe("the kernel-check page's checks", () => {
     expect(check?.title).toBe("Byte-plane GEMV");
     expect(check?.needsSubgroups).toBe(false);
     expect(GEMV_PLANES_CASES).toEqual({ "gemv-planes": 240 });
+  });
+
+  it("runs the f16 full slot check on any device, against the case counts the check exports", () => {
+    const check = KERNEL_CHECKS.find(({ id }) => id === "state-kv16");
+    expect(check?.title).toBe("f16 full state slots");
+    expect(check?.needsSubgroups).toBe(false);
+    expect(Object.keys(STATE_KV16_CASES)).toEqual(["state-kv16-readers", "state-kv16-append"]);
   });
 });

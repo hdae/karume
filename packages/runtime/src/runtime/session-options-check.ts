@@ -11,6 +11,7 @@
  */
 
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import type { StateStorage } from "../kernels/state-storage.ts";
 import { describeInputValue, ExecutionError } from "./plan.ts";
 import {
   type ComputePrecision,
@@ -43,6 +44,7 @@ const ATTENTION_COMPUTES: Readonly<Record<ComputePrecision, true>> = {
   a8: true,
 };
 const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true, none: true };
+const FULL_STATE_STORAGES: Readonly<Record<StateStorage, true>> = { f32: true, f16: true };
 const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
   sequential: true,
   parallel: true,
@@ -81,6 +83,7 @@ export const assertExecutionKnobs = (
   attentionScoreStorage: ScoreStorage,
   stateAttentionReduce: StateAttentionReduce,
   linearGemvReduce: LinearGemvReduce,
+  fullStateStorage: StateStorage = "f32",
 ): void => {
   const violation = executionKnobsViolation(
     linearCompute,
@@ -89,6 +92,7 @@ export const assertExecutionKnobs = (
     attentionScoreStorage,
     stateAttentionReduce,
     linearGemvReduce,
+    fullStateStorage,
   );
   if (violation !== undefined) throw new ExecutionError(violation);
 };
@@ -101,6 +105,7 @@ const executionKnobsViolation = (
   attentionScoreStorage: ScoreStorage,
   stateAttentionReduce: StateAttentionReduce,
   linearGemvReduce: LinearGemvReduce,
+  fullStateStorage: StateStorage,
 ): string | undefined => {
   const knobs: readonly (readonly [string, string, Readonly<Record<string, true>>])[] = [
     ["linearCompute", linearCompute, LINEAR_COMPUTES],
@@ -109,6 +114,7 @@ const executionKnobsViolation = (
     ["attentionScoreStorage", attentionScoreStorage, SCORE_STORAGES],
     ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
     ["linearGemvReduce", linearGemvReduce, LINEAR_GEMV_REDUCES],
+    ["fullStateStorage", fullStateStorage, FULL_STATE_STORAGES],
   ];
   const violations = knobs
     .filter(([, value, accepted]) => typeof value !== "string" || !Object.hasOwn(accepted, value))
@@ -141,6 +147,7 @@ export const executionKnobDefaults = (options: SessionOptions) => ({
   attentionScoreStorage: options.attentionScoreStorage ?? "f32",
   stateAttentionReduce: options.stateAttentionReduce ?? "sequential",
   linearGemvReduce: options.linearGemvReduce ?? "sequential",
+  fullStateStorage: options.fullStateStorage ?? "f32",
   planBackingBudgetBytes: options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES,
 });
 
@@ -204,6 +211,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     attentionScoreStorage,
     stateAttentionReduce,
     linearGemvReduce,
+    fullStateStorage,
     planBackingBudgetBytes,
   } = executionKnobDefaults(options);
   if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
@@ -223,6 +231,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     attentionScoreStorage,
     stateAttentionReduce,
     linearGemvReduce,
+    fullStateStorage,
   );
   if (knobs !== undefined) return knobs;
   if (

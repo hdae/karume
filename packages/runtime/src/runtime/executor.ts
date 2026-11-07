@@ -50,6 +50,8 @@ import { MAP_MODE } from "../gpu/webgpu-constants.ts";
  * surface can name it).
  */
 export type { ScoreStorage } from "../kernels/score-storage.ts";
+/** Storage of a full state slot ({@link SessionOptions.fullStateStorage}). */
+export type { StateStorage } from "../kernels/state-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import { type AdmissionReport, estimateGraphMemory, type EstimateOptions } from "./estimate.ts";
@@ -1339,6 +1341,7 @@ export class Session {
     return {
       gpu: this.#state.gpu,
       graph: this.#state.graph,
+      fullStateStorage: this.#state.fullStateStorage,
       flush: () => this.#state.scheduler.flush(),
       serialize: <T>(body: () => Promise<T>): Promise<T> => this.#serialize(body),
       forget: (context: GenerationContext): void => {

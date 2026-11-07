@@ -38,6 +38,7 @@ import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import type { StateStorage } from "../kernels/state-storage.ts";
 import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
 import { type AttentionDeviceFacts, attentionDeviceFacts } from "./attention-route.ts";
 import type { FusionCounts } from "./fusion.ts";
@@ -488,6 +489,8 @@ export type SessionState = {
    * option — a single option value).
    */
   readonly stateAttentionReduce: StateAttentionReduce;
+  /** The storage of full state slots (opt-in — {@link SessionOptions.fullStateStorage}). */
+  readonly fullStateStorage: StateStorage;
   readonly linearGemvReduce: LinearGemvReduce;
   readonly rmsNormReduce: RmsNormReduce;
   /**
@@ -570,6 +573,7 @@ const snapshotSessionOptions = (
   attentionCompute: requested.attentionCompute,
   attentionScoreStorage: requested.attentionScoreStorage,
   stateAttentionReduce: requested.stateAttentionReduce,
+  fullStateStorage: requested.fullStateStorage,
   linearGemvReduce: requested.linearGemvReduce,
   fuseRmsNormAdd: requested.fuseRmsNormAdd,
   fuseLinearStaticQuantize: requested.fuseLinearStaticQuantize,
@@ -624,6 +628,7 @@ export const buildSessionState = async (
     attentionCompute,
     attentionScoreStorage,
     stateAttentionReduce,
+    fullStateStorage,
     linearGemvReduce,
     planBackingBudgetBytes,
   } = executionKnobDefaults(options);
@@ -1183,6 +1188,7 @@ export const buildSessionState = async (
     attentionScoreStorage,
     attentionDevice: attentionDeviceFacts(gpu),
     stateAttentionReduce,
+    fullStateStorage,
     linearGemvReduce,
     linearGemvRowsThreadTarget,
     planBackingBudgetBytes,

@@ -1027,6 +1027,28 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["attention_state_pv_par_ro_sliding.wgsl", statePvParallelReadonlyWgsl(true, false)],
     ["state_append.wgsl", stateAppendWgsl(false)],
     ["state_append_sliding.wgsl", stateAppendWgsl(true)],
+    // The f16 storage of full slots (`fullStateStorage`): the reader of each form and the append that
+    // packs whole words. A sliding slot has no f16 form, and ② reads no slot, so neither appears. The
+    // fused stats + PV is off for an f16 slot. One tile geometry each: the geometry changes only the
+    // work assignment (the pair above pins that).
+    ["attention_state_qk_kv16.wgsl", stateQkWgsl(false, false, "f16")],
+    ["attention_state_qk_gqa_kv16.wgsl", stateQkWgsl(false, true, "f16")],
+    ["attention_state_qk_par_kv16.wgsl", stateQkParallelWgsl(false, false, "f16")],
+    ["attention_state_qk_par_gqa_kv16.wgsl", stateQkParallelWgsl(false, true, "f16")],
+    ["attention_state_qk_par_fold8_gqa_kv16.wgsl", stateQkFoldedWgsl(8, "f16")],
+    ["attention_state_qk_tiled_kv16.wgsl", stateQkTiledWgsl(false, false, 16, "f16")],
+    ["attention_state_qk_tiled_gqa_kv16.wgsl", stateQkTiledWgsl(false, true, 16, "f16")],
+    ["attention_state_pv_kv16.wgsl", statePvWgsl(false, false, "f16")],
+    ["attention_state_pv_gqa_kv16.wgsl", statePvWgsl(false, true, "f16")],
+    ["attention_state_pv_par_kv16.wgsl", statePvParallelWgsl(false, false, "f16")],
+    ["attention_state_pv_par_gqa_kv16.wgsl", statePvParallelWgsl(false, true, "f16")],
+    ["attention_state_pv_tiled_kv16.wgsl", statePvTiledWgsl(false, false, 16, "f16")],
+    ["attention_state_pv_tiled_gqa_kv16.wgsl", statePvTiledWgsl(false, true, 16, "f16")],
+    ["attention_state_qk_par_ro_kv16.wgsl", stateQkParallelReadonlyWgsl(false, false, "f16")],
+    ["attention_state_qk_par_ro_gqa_kv16.wgsl", stateQkParallelReadonlyWgsl(false, true, "f16")],
+    ["attention_state_pv_par_ro_kv16.wgsl", statePvParallelReadonlyWgsl(false, false, "f16")],
+    ["attention_state_pv_par_ro_gqa_kv16.wgsl", statePvParallelReadonlyWgsl(false, true, "f16")],
+    ["state_append_kv16.wgsl", stateAppendWgsl(false, "f16")],
   ];
   for (const [name, generated] of cases) {
     if (WRITE_SNAPSHOTS) await writeTextFile(fixtureUrl(name), generated);

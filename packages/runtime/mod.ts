@@ -296,6 +296,7 @@ export type {
   SessionOptions,
   SharedWeight,
   StateAttentionReduce,
+  StateStorage,
   StateBackingStats,
   StorageDiagnostics,
   Tensor,

@@ -307,6 +307,15 @@ import { CodegenError } from "../codegen/errors.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
 import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 import {
+  assertStateStorageFull,
+  type StateStorage,
+  stateSlotElementType,
+  stateSlotLoaderWgsl,
+  stateSlotRead,
+  stateStorageKeyPart,
+  stateStorageNote,
+} from "./state-storage.ts";
+import {
   gemmGeometryForRows,
   gemmGeometryTileKeyPart,
   gemmTileM,
@@ -359,11 +368,11 @@ export const stateVariantKeyPart = (sliding: boolean, gqa: boolean): string =>
  */
 export const stateSliding = (window: number): boolean => window > 0;
 
-export const stateQkKey = (sliding: boolean, gqa: boolean): string =>
+export const stateQkKey = (sliding: boolean, gqa: boolean, storage: StateStorage = "f32"): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * D-direction lane count of ①' (workgroup = `TILE_X × D_LANES` = 256 threads — fits the same
@@ -372,11 +381,15 @@ export const stateQkKey = (sliding: boolean, gqa: boolean): string =>
 export const STATE_QK_D_LANES = 16;
 
 /** Key of ①' (`:par` is the marker for the census check — followed by the same variant bits as ①). */
-export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
+export const stateQkParallelKey = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * **Eligibility** of ①' — only plans whose `M` (physical chunk rows) is 8 or less. Even with the
@@ -500,11 +513,11 @@ export const assertStateQkFold = (heads: number, kvRepeat: number, where: string
  * F, while `r` stays out of the key as for every states kernel). Only the full GQA variant exists,
  * so the variant bits are always `:gqa`.
  */
-export const stateQkFoldedKey = (heads: number): string =>
+export const stateQkFoldedKey = (heads: number, storage: StateStorage = "f32"): string =>
   `attention_state_qk:v1:f32:wg${STATE_QK_FOLD_TILE_X}x${STATE_QK_D_LANES}:par:fold${heads}${stateVariantKeyPart(
     false,
     true,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * Key of ①ₜ (the tiled path of the GEMM skeleton — perf-ledger K-13). The geometry is spelled with
@@ -518,11 +531,16 @@ export const stateQkFoldedKey = (heads: number): string =>
  * gemm.ts) (the same wording as the MUST of `gemmKeyPart` in gemm.ts — forgetting to pass it on one
  * side lets cached WGSL of another geometry disagree with the dispatch count and drop output tiles).
  */
-export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
+export const stateQkTiledKey = (
+  sliding: boolean,
+  gqa: boolean,
+  chunkRows: number,
+  storage: StateStorage = "f32",
+): string =>
   `attention_state_qk:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * **Eligibility** of ①ₜ — only plans whose `M` (physical chunk rows) is at least the smallest row
@@ -551,11 +569,11 @@ export const stateStatsKey = (sliding: boolean): string =>
     false,
   )}`;
 
-export const statePvKey = (sliding: boolean, gqa: boolean): string =>
+export const statePvKey = (sliding: boolean, gqa: boolean, storage: StateStorage = "f32"): string =>
   `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * KV-direction lane count of ③' (workgroup = `TILE_X × KV_LANES` = 256 threads — fits the
@@ -570,11 +588,15 @@ export const STATE_PV_KV_LANES = 16;
  * changed, and one key MUST map to byte-identical WGSL). The readonly ③' and ③ keep v1 (their WGSL
  * did not change).
  */
-export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
+export const statePvParallelKey = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string =>
   `attention_state_pv:v2:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * Key of ③ₜ (the tiled path of the GEMM skeleton — perf-ledger K-13 step 2). The spelling rule is
@@ -587,11 +609,16 @@ export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
  * MUST: `chunkRows` is **the same value** passed to generation (`attentionStatePvTiledWgsl` in
  * gemm.ts) and to the dispatch ({@link statePvTiledWorkgroups}).
  */
-export const statePvTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
+export const statePvTiledKey = (
+  sliding: boolean,
+  gqa: boolean,
+  chunkRows: number,
+  storage: StateStorage = "f32",
+): string =>
   `attention_state_pv:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * **Eligibility** of ③ₜ — only plans whose `M` (physical chunk rows) is at least the smallest row
@@ -758,7 +785,8 @@ export const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_blo
 }`;
 
 /** The k side of ①QK's one-term expression: the half-scaled k element `k·scale` at `k_base + d`. */
-const stateScaledKeyWgsl = (array: string): string => `${array}[k_base + d] * params.scale`;
+const stateScaledKeyWgsl = (array: string, storage: StateStorage = "f32"): string =>
+  `${stateSlotRead(array, "k_base + d", storage)} * params.scale`;
 
 /**
  * One term of ①QK's dot product added into `acc`: `acc + (q·scale)·k`, with `k` the half-scaled k
@@ -783,13 +811,18 @@ const stateScoreTermWgsl = (acc: string, qBase: string, scaledKey: string): stri
  * {@link stateScoreTermWgsl}). Its bit identity with ①' rests on the term being the same expression;
  * a copy would let one side's rounding move alone.
  */
-const stateScoreFn = (name: string, array: string, lanes?: number): string =>
+const stateScoreFn = (
+  name: string,
+  array: string,
+  lanes?: number,
+  storage: StateStorage = "f32",
+): string =>
   `fn ${name}(q_base: u32, k_base: u32${lanes === undefined ? "" : ", lane: u32"}) -> f32 {
   var acc = 0.0;
   for (var d = ${lanes === undefined ? "0u" : "lane"}; d < params.depth; d = d + ${
     lanes === undefined ? "1u" : `${lanes}u`
   }) {
-    ${stateScoreTermWgsl("acc", "q_base", `(${stateScaledKeyWgsl(array)})`)}
+    ${stateScoreTermWgsl("acc", "q_base", `(${stateScaledKeyWgsl(array, storage)})`)}
   }
   return acc;
 }`;
@@ -913,16 +946,21 @@ export const STATE_PV_TILED_DIMS_EXTRA = `  row_offset: u32,
  * | 4       | `s` `[B·H, rows_block, col_cap]` (write)  |
  * | 5       | `Lengths` (uniform — owned by context)    |
  */
-export const stateQkWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_qk (states-form S materialisation, f32${sliding ? ", sliding window" : ""}${
+export const stateQkWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_qk", sliding, storage);
+  return `// karume attention_state_qk (states-form S materialisation, f32${sliding ? ", sliding window" : ""}${
     gqa ? ", GQA" : ""
-  })
+  }${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;
 @group(0) @binding(2) var<storage, read> ins_k: array<f32>;
-@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(4) var<storage, read_write> s: array<f32>;
 @group(0) @binding(5) var<uniform> lengths: Lengths;
 
@@ -932,9 +970,9 @@ ${stateLiveWgsl(sliding)}
 
 ${stateWindowFn(sliding)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_k", storage)}
 
-${stateScoreFn("score_slot", "slot_k")}
+${stateScoreFn("score_slot", "slot_k", undefined, storage)}
 
 ${stateScoreFn("score_ins", "ins_k")}
 
@@ -971,6 +1009,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   s[(z * params.rows_block + local_row) * params.col_cap + cl] = value;
 }
 `;
+};
 
 /**
  * ①' D-parallel reduction variant (the section "①' D-parallel reduction variant" at the top of the
@@ -986,16 +1025,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  * workgroup-uniform (the edge tile), so those lanes **do not return**; they run the dot product
  * empty and take part in the barrier.
  */
-export const stateQkParallelWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction${
+export const stateQkParallelWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_qk (parallel)", sliding, storage);
+  return `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction${
     sliding ? ", sliding window" : ""
-  }${gqa ? ", GQA" : ""})
+  }${gqa ? ", GQA" : ""}${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;
 @group(0) @binding(2) var<storage, read> ins_k: array<f32>;
-@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(4) var<storage, read_write> s: array<f32>;
 @group(0) @binding(5) var<uniform> lengths: Lengths;
 
@@ -1005,9 +1049,9 @@ ${stateLiveWgsl(sliding)}
 
 ${stateWindowFn(sliding)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_k", storage)}
 
-${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES)}
+${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES, storage)}
 
 ${stateScoreFn("score_ins", "ins_k", STATE_QK_D_LANES)}
 
@@ -1071,6 +1115,7 @@ fn main(
   }
 }
 `;
+};
 
 /**
  * The folded ①' (the section "①' folded over the query heads of one kv plane" at the top of the
@@ -1088,7 +1133,7 @@ fn main(
  * workgroup-uniform (the edge tile), so those lanes **do not return**; they run the dot product
  * empty and take part in the barriers.
  */
-export const stateQkFoldedWgsl = (heads: number): string => {
+export const stateQkFoldedWgsl = (heads: number, storage: StateStorage = "f32"): string => {
   assertFoldHeads(heads, "attention_state_qk (folded)");
   const tile = STATE_QK_FOLD_TILE_X;
   const lanes = STATE_QK_D_LANES;
@@ -1096,17 +1141,18 @@ export const stateQkFoldedWgsl = (heads: number): string => {
     Array.from({ length: heads }, (_, f) => line(f)).join("\n");
   const scan = (
     array: string,
+    arrayStorage: StateStorage,
   ): string => `      for (var d = lane; d < params.depth; d = d + ${lanes}u) {
-        let kd = ${stateScaledKeyWgsl(array)};
+        let kd = ${stateScaledKeyWgsl(array, arrayStorage)};
 ${eachHead((f) => `        ${stateScoreTermWgsl(`acc${f}`, `q_base${f}`, "kd")}`)}
       }`;
-  return `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, ${heads} query heads per workgroup, GQA)
+  return `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, ${heads} query heads per workgroup, GQA${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;
 @group(0) @binding(2) var<storage, read> ins_k: array<f32>;
-@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(4) var<storage, read_write> s: array<f32>;
 @group(0) @binding(5) var<uniform> lengths: Lengths;
 
@@ -1116,7 +1162,7 @@ ${stateLiveWgsl(false)}
 
 ${stateWindowFn(false)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_k", storage)}
 
 // The partial sum of head f, lane l, column x lives at (f * D_LANES + l) * FOLD_TILE_X + x
 var<workgroup> scratch: array<f32, ${heads * lanes * tile}>;
@@ -1155,11 +1201,11 @@ ${eachHead((f) => `  var acc${f} = 0.0;`)}
       // past (col < P) comes from the slot. The physical row is slot_row (same formula for reads
       // and writes)
       let k_base = (kv_plane * params.capacity + slot_row(col)) * params.depth;
-${scan("slot_k")}
+${scan("slot_k", storage)}
     } else {
       // current (col ≥ P) comes from row col − P of this step's ins
       let k_base = (kv_plane * params.chunk_rows + (col - past)) * params.depth;
-${scan("ins_k")}
+${scan("ins_k", "f32")}
     }
   }
 ${eachHead((f) => `  scratch[(${f * lanes}u + lane) * ${tile}u + lid.x] = acc${f};`)}
@@ -1382,17 +1428,22 @@ export const stateStatsWgsl = (sliding: boolean): string =>
  * column** (① ② cover valid rows only, so there is no S / stats for them + the work stays
  * proportional to Q + empty row → 0 is contained by construction).
  */
-export const statePvWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_pv (states-form O = P @ V, f32${sliding ? ", sliding window" : ""}${
+export const statePvWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_pv", sliding, storage);
+  return `// karume attention_state_pv (states-form O = P @ V, f32${sliding ? ", sliding window" : ""}${
     gqa ? ", GQA" : ""
-  })
+  }${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> s: array<f32>;
 @group(0) @binding(2) var<storage, read> stats: array<f32>;
 @group(0) @binding(3) var<storage, read> ins_v: array<f32>;
-@group(0) @binding(4) var<storage, read> slot_v: array<f32>;
+@group(0) @binding(4) var<storage, read> slot_v: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 @group(0) @binding(6) var<uniform> lengths: Lengths;
 
@@ -1400,7 +1451,7 @@ ${stateSlotRowWgsl(sliding)}
 
 ${stateLiveWgsl(sliding)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_v", storage)}
 
 @compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_ATTENTION_TILE_M})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1435,7 +1486,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = exp(s[s_base + cl] - amax) * inv;
     var value = 0.0;
     if (col < past) {
-      value = slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
+      value = ${stateSlotRead("slot_v", "(kv_plane * params.capacity + slot_row(col)) * params.depth + d", storage)};
     } else {
       value = ins_v[(kv_plane * params.chunk_rows + (col - past)) * params.depth + d];
     }
@@ -1444,6 +1495,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   out[at] = acc;
 }
 `;
+};
 
 /**
  * Columns per batch of the unrolled KV loop of ③' and the fused stats + PV (the section "The unrolled
@@ -1468,14 +1520,14 @@ export const STATE_PV_UNROLL = 8;
  * MUST: one fragment for both kernels. A copy would let them drift apart; the fused kernel's u32
  * equality with ③' (gpu_state_attention_parallel_test.ts) depends on the same scan.
  */
-export const statePvScanWgsl = (): string => {
+export const statePvScanWgsl = (storage: StateStorage = "f32"): string => {
   const lanes = STATE_PV_KV_LANES;
   const unroll = STATE_PV_UNROLL;
   const offset = (u: number): string => (u === 0 ? "" : ` + ${u * lanes}u`);
   const load = (u: number): string => `      let col${u} = base_col + cl${offset(u)};
       var v${u} = 0.0;
       if (col${u} < past) {
-        v${u} = slot_v[(kv_plane * params.capacity + slot_row(col${u})) * params.depth + d];
+        v${u} = ${stateSlotRead("slot_v", `(kv_plane * params.capacity + slot_row(col${u})) * params.depth + d`, storage)};
       } else {
         v${u} = ins_v[(kv_plane * params.chunk_rows + (col${u} - past)) * params.depth + d];
       }`;
@@ -1508,17 +1560,22 @@ ${term(0)}
  * KV_LANES, …` in ascending order ({@link statePvScanWgsl}), puts the result in `scratch[lane][x]`,
  * and folds it with the fixed-order tree.
  */
-export const statePvParallelWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction${
+export const statePvParallelWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_pv (parallel)", sliding, storage);
+  return `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction${
     sliding ? ", sliding window" : ""
-  }${gqa ? ", GQA" : ""})
+  }${gqa ? ", GQA" : ""}${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> s: array<f32>;
 @group(0) @binding(2) var<storage, read> stats: array<f32>;
 @group(0) @binding(3) var<storage, read> ins_v: array<f32>;
-@group(0) @binding(4) var<storage, read> slot_v: array<f32>;
+@group(0) @binding(4) var<storage, read> slot_v: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 @group(0) @binding(6) var<uniform> lengths: Lengths;
 
@@ -1526,7 +1583,7 @@ ${stateSlotRowWgsl(sliding)}
 
 ${stateLiveWgsl(sliding)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_v", storage)}
 
 var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_PV_KV_LANES}>;
 
@@ -1563,7 +1620,7 @@ fn main(
   // scan and contributes 0 (it does not return, so that it takes part in the barrier)
   var acc = 0.0;
   if (in_depth) {
-${statePvScanWgsl()}
+${statePvScanWgsl(storage)}
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
   workgroupBarrier();
@@ -1582,6 +1639,7 @@ ${statePvScanWgsl()}
   }
 }
 `;
+};
 
 /** Static geometry shared by ①③ (the type side of the word order of {@link STATE_PARAMS_STRUCT}). */
 export type StateAttentionGeometry = {
@@ -2157,11 +2215,15 @@ const stateReadonlyWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): strin
 }`;
 
 /** Key of ①' readonly (`:par:ro` — it has one binding fewer, so a key separate from ①' is MUST). */
-export const stateQkParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
+export const stateQkParallelReadonlyKey = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par:ro${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /** Key of ② readonly (the live formula differs, so a key separate from ② is MUST). */
 export const stateStatsReadonlyKey = (sliding: boolean): string =>
@@ -2171,11 +2233,15 @@ export const stateStatsReadonlyKey = (sliding: boolean): string =>
   )}`;
 
 /** Key of ③' readonly (`:par:ro`). */
-export const statePvParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
+export const statePvParallelReadonlyKey = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string =>
   `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par:ro${stateVariantKeyPart(
     sliding,
     gqa,
-  )}`;
+  )}${stateStorageKeyPart(storage)}`;
 
 /**
  * ①' readonly. Bindings (**there is no ins, so they shift up by one** — not the same numbers as
@@ -2192,15 +2258,20 @@ export const statePvParallelReadonlyKey = (sliding: boolean, gqa: boolean): stri
  * The reduction is the same fixed-order tree over D as ①' (the partial sums of
  * {@link stateScoreFn} come from the same single place).
  */
-export const stateQkParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, readonly = past only${
+export const stateQkParallelReadonlyWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_qk (readonly)", sliding, storage);
+  return `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, readonly = past only${
     sliding ? ", sliding window" : ""
-  }${gqa ? ", GQA" : ""})
+  }${gqa ? ", GQA" : ""}${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;
-@group(0) @binding(2) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(2) var<storage, read> slot_k: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(3) var<storage, read_write> s: array<f32>;
 @group(0) @binding(4) var<uniform> lengths: Lengths;
 
@@ -2210,9 +2281,9 @@ ${stateReadonlyLiveWgsl(sliding)}
 
 ${stateReadonlyWindowFn(sliding)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_k", storage)}
 
-${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES)}
+${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES, storage)}
 
 var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_QK_D_LANES}>;
 
@@ -2264,6 +2335,7 @@ fn main(
   }
 }
 `;
+};
 
 /**
  * ② readonly. The same skeleton, bindings and params as ②; only the live formula is the readonly one
@@ -2299,16 +2371,21 @@ export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
  * the same `out[at]`, and unsynchronised writes to the same element are a WGSL data race even with
  * equal values.
  */
-export const statePvParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction, readonly = past only${
+export const statePvParallelReadonlyWgsl = (
+  sliding: boolean,
+  gqa: boolean,
+  storage: StateStorage = "f32",
+): string => {
+  assertStateStorageFull("attention_state_pv (readonly)", sliding, storage);
+  return `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction, readonly = past only${
     sliding ? ", sliding window" : ""
-  }${gqa ? ", GQA" : ""})
+  }${gqa ? ", GQA" : ""}${stateStorageNote(storage)})
 ${STATE_PARAMS_STRUCT}
 ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> s: array<f32>;
 @group(0) @binding(2) var<storage, read> stats: array<f32>;
-@group(0) @binding(3) var<storage, read> slot_v: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_v: array<${stateSlotElementType(storage)}>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 @group(0) @binding(5) var<uniform> lengths: Lengths;
 
@@ -2316,7 +2393,7 @@ ${stateSlotRowWgsl(sliding)}
 
 ${stateReadonlyLiveWgsl(sliding)}
 
-${stateEffectiveRowsWgsl()}
+${stateEffectiveRowsWgsl()}${stateSlotLoaderWgsl("slot_v", storage)}
 
 var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_PV_KV_LANES}>;
 
@@ -2351,7 +2428,7 @@ fn main(
     for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
       let col = base_col + cl;
       let p = exp(s[s_base + cl] - amax) * inv;
-      acc = acc + p * slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
+      acc = acc + p * ${stateSlotRead("slot_v", "(kv_plane * params.capacity + slot_row(col)) * params.depth + d", storage)};
     }
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
@@ -2370,6 +2447,7 @@ fn main(
   }
 }
 `;
+};
 
 /**
  * Start of the readonly resident range (logical col) — the same formula as the WGSL

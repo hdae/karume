@@ -123,9 +123,9 @@ QUANTIZED_STORAGE_DTYPES = ("i8", "i4", "i2")
 
 #: dtype vocabulary of state slots. Only f32 for now (ADR 0066 decision 2).
 STATE_DTYPES = ("f32",)
-#: State slot dtypes that are only reserved (ADR 0066 addendum of 2026-08-17, item 5). f16 storage
-#: changes the numeric contract, so it needs an opt-in in the ADR 0058 style — until that exists it
-#: is **unsupported**, not "outside the vocabulary".
+#: State slot dtypes that are only reserved (ADR 0066 addendum of 2026-08-17, item 5). The f16
+#: storage of a full slot is the Session's opt-in (`SessionOptions.fullStateStorage`), and the graph
+#: keeps declaring f32 under it. A declared f16 is **unsupported**, not "outside the vocabulary".
 RESERVED_STATE_DTYPES = ("f16",)
 #: Rank limit of state slots (ADR 0066 decision 2, "fixed rank (rank ≤ 4)"). The same number as the
 #: strided kernels' limit (ops.STRIDED_RANK), but for a different reason, so the constant is not

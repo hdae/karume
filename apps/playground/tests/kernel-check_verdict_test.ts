@@ -244,6 +244,7 @@ describe("overallVerdict", () => {
         "state-attention-rewrites": passed,
         "gemv-integer": passed,
         "gemv-planes": passed,
+        "state-kv16": passed,
       }),
     ).toBe("pass");
     expect(overallVerdict({})).toBe("none");
@@ -256,6 +257,7 @@ describe("overallVerdict", () => {
       "rms-subgroup32",
       "gemv-integer",
       "gemv-planes",
+      "state-kv16",
     ]);
   });
 
@@ -267,6 +269,7 @@ describe("overallVerdict", () => {
         "state-attention-rewrites": passed,
         "gemv-integer": passed,
         "gemv-planes": passed,
+        "state-kv16": passed,
       }),
     ).toBe("incomplete");
   });
@@ -291,6 +294,7 @@ describe("withoutOutcomes", () => {
     "state-attention-rewrites": passed,
     "gemv-integer": passed,
     "gemv-planes": passed,
+    "state-kv16": passed,
   };
 
   it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
@@ -308,6 +312,7 @@ describe("withoutOutcomes", () => {
       "state-attention-rewrites": passed,
       "gemv-integer": passed,
       "gemv-planes": passed,
+      "state-kv16": passed,
     });
   });
 });

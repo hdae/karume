@@ -56,12 +56,14 @@ import {
 } from "./result.ts";
 
 /** The shapes of the models that run these kernels (head dim, heads per kv plane), with B = 2. */
-type Shape = Pick<StateCase, "heads" | "kvHeads" | "depth" | "window"> & { readonly name: string };
+export type Shape = Pick<StateCase, "heads" | "kvHeads" | "depth" | "window"> & {
+  readonly name: string;
+};
 
-const E2B_FULL: Shape = { name: "e2b-full", heads: 8, kvHeads: 1, depth: 512, window: 0 };
-const E4B_FULL: Shape = { name: "e4b-full", heads: 8, kvHeads: 2, depth: 512, window: 0 };
+export const E2B_FULL: Shape = { name: "e2b-full", heads: 8, kvHeads: 1, depth: 512, window: 0 };
+export const E4B_FULL: Shape = { name: "e4b-full", heads: 8, kvHeads: 2, depth: 512, window: 0 };
 /** MiniCPM5 (16 q / 2 kv heads, r = 8 with two kv planes per batch row). */
-const MINICPM5_FULL: Shape = {
+export const MINICPM5_FULL: Shape = {
   name: "minicpm5-full",
   heads: 16,
   kvHeads: 2,
@@ -71,7 +73,7 @@ const MINICPM5_FULL: Shape = {
 const E2B_SLIDING: Shape = { name: "e2b-sliding", heads: 8, kvHeads: 1, depth: 256, window: 512 };
 const E4B_SLIDING: Shape = { name: "e4b-sliding", heads: 8, kvHeads: 2, depth: 256, window: 512 };
 /** Non-GQA variants (kv plane = z) with a depth that leaves idle lanes in the last tile. */
-const MHA_FULL: Shape = { name: "mha-full", heads: 2, kvHeads: 2, depth: 20, window: 0 };
+export const MHA_FULL: Shape = { name: "mha-full", heads: 2, kvHeads: 2, depth: 20, window: 0 };
 const MHA_SLIDING: Shape = { name: "mha-sliding", heads: 2, kvHeads: 2, depth: 20, window: 32 };
 
 /**
@@ -191,7 +193,7 @@ const NAN_PAYLOAD_BITS = 0x7fc12345;
  *   that plane)
  * - batch row 0: +inf / −inf in single elements of this step's V
  */
-const inputsOf = (spec: StateCase, seed: number, nonFinite: boolean): StateInputs => {
+export const inputsOf = (spec: StateCase, seed: number, nonFinite: boolean): StateInputs => {
   const next = generator(seed);
   const { batch, heads, kvHeads, chunkRows, depth, capacity } = spec;
   const q = filled(batch * heads * chunkRows * depth, next);
@@ -233,9 +235,9 @@ type WordCensus = {
 
 const POISON_BITS = new Uint32Array(new Float32Array([STATE_S_POISON]).buffer)[0];
 
-const emptyCensus = (): WordCensus => ({ nan: 0, negInf: 0, zero: 0, poison: 0, finite: 0 });
+export const emptyCensus = (): WordCensus => ({ nan: 0, negInf: 0, zero: 0, poison: 0, finite: 0 });
 
-const tally = (census: WordCensus, words: Uint32Array<ArrayBuffer>): void => {
+export const tally = (census: WordCensus, words: Uint32Array<ArrayBuffer>): void => {
   for (const w of words) {
     if (w === POISON_BITS) census.poison += 1;
     else if (w === 0xff800000) census.negInf += 1;
@@ -303,7 +305,7 @@ const swapFirstTwoTerms = (wgsl: string): string => {
 const labelOf = (spec: StateCase, nonFinite: boolean): string =>
   `${spec.name}${nonFinite ? " non-finite" : ""}`;
 
-const censusText = (census: WordCensus): string => JSON.stringify(census);
+export const censusText = (census: WordCensus): string => JSON.stringify(census);
 
 /** One class of the folded ①' grid: the product's choice for it and the F the check runs. */
 export type FoldClass = {

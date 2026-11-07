@@ -51,6 +51,7 @@ import {
   stateQkParallelReadonlyKey,
 } from "../../src/kernels/state-attention.ts";
 import { stateStatsPvKey } from "../../src/kernels/state-attention-stats-pv.ts";
+import { stateStorageKeyPart } from "../../src/kernels/state-storage.ts";
 import { STATIC_QUANTIZE_PACKED_KEY } from "../../src/kernels/static-quantize.ts";
 import type { SessionDiagnostics, SessionOptions } from "../../src/runtime/session-types.ts";
 
@@ -102,6 +103,7 @@ export const SEAT_REFERENCE = {
   attentionCompute: "f32",
   attentionScoreStorage: "f32",
   stateAttentionReduce: "sequential",
+  fullStateStorage: "f32",
   linearGemvReduce: "sequential",
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
@@ -200,6 +202,16 @@ const STATE_PARALLEL_KEYS: ReadonlySet<string> = new Set([
   ),
   stateQkFoldedKey(4),
   stateQkFoldedKey(8),
+  // The same forms on an f16 full slot: their keys only gain the storage part, so they still read as
+  // "parallel ran". A sliding slot never has f16.
+  ...[false, true].flatMap((gqa) => [
+    stateQkParallelKey(false, gqa, "f16"),
+    statePvParallelKey(false, gqa, "f16"),
+    stateQkParallelReadonlyKey(false, gqa, "f16"),
+    statePvParallelReadonlyKey(false, gqa, "f16"),
+  ]),
+  stateQkFoldedKey(4, "f16"),
+  stateQkFoldedKey(8, "f16"),
 ]);
 const STATE_STATS_PV_KEYS = stateVariants(stateStatsPvKey);
 const GEMV_PARALLEL_FAMILY = familyOf(GEMV_PARALLEL_SAMPLE);
@@ -253,6 +265,9 @@ export const SEAT_SIGNATURES: SeatSignatures = {
   stateAttentionReduce: {
     parallel: (key) => STATE_PARALLEL_KEYS.has(key),
     "parallel-fused": (key) => STATE_STATS_PV_KEYS.has(key),
+  },
+  fullStateStorage: {
+    f16: (key) => key.endsWith(stateStorageKeyPart("f16")),
   },
   linearGemvReduce: {
     parallel: (key) => isGemvParallel(key) && !hasFragment(key, GEMV_SUBGROUP),

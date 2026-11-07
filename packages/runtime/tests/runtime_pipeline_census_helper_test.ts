@@ -44,6 +44,7 @@ import {
   stateQkParallelReadonlyKey,
   stateStatsKey,
 } from "../src/kernels/state-attention.ts";
+import { stateAppendKey } from "../src/kernels/state-append.ts";
 import { stateStatsPvKey } from "../src/kernels/state-attention-stats-pv.ts";
 import { STATIC_QUANTIZE_KEY, STATIC_QUANTIZE_PACKED_KEY } from "../src/kernels/static-quantize.ts";
 import {
@@ -114,8 +115,23 @@ const REPRESENTATIVES: {
       statePvParallelReadonlyKey(false, false),
       stateQkFoldedKey(4),
       stateQkFoldedKey(8),
+      // On an f16 full slot the same forms still read as "parallel ran".
+      stateQkParallelKey(false, true, "f16"),
+      statePvParallelKey(false, false, "f16"),
+      stateQkParallelReadonlyKey(false, false, "f16"),
+      statePvParallelReadonlyKey(false, true, "f16"),
+      stateQkFoldedKey(8, "f16"),
     ],
     "parallel-fused": [stateStatsPvKey(false, false), stateStatsPvKey(true, true)],
+  },
+  fullStateStorage: {
+    f16: [
+      stateQkKey(false, true, "f16"),
+      stateQkParallelKey(false, false, "f16"),
+      stateQkFoldedKey(8, "f16"),
+      statePvParallelReadonlyKey(false, true, "f16"),
+      stateAppendKey(false, "f16"),
+    ],
   },
   linearGemvReduce: {
     parallel: [linearGemvParallelKey("i4", 32, 4), linearGemvStaticQuantizeKey("i2", undefined, 8)],

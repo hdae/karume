@@ -76,7 +76,8 @@ import {
   resolveBindings,
   resolveSlotShape,
   type SlotLimits,
-  STATE_ELEMENT_BYTES,
+  slidingSlotWindows,
+  stateSlotBytes,
 } from "./generation-context.ts";
 import {
   assertGenerationBindings,
@@ -111,7 +112,11 @@ import {
   topkOneSplitGroups,
 } from "../kernels/argmax.ts";
 import { assertChunkRowsAllowed } from "./recipe.ts";
-import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
+import {
+  planStateAttention,
+  type StateAttentionBlock,
+  stateFusesStatsPv,
+} from "./state-attention-plan.ts";
 import {
   type AttentionDeviceFacts,
   attentionRoute,
@@ -130,6 +135,8 @@ import {
 } from "./recipe-builders/attention.ts";
 import { sessionOptionsViolation } from "./session-options-check.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import { stateSliding } from "../kernels/state-attention.ts";
+import { slotStateStorage, type StateStorage } from "../kernels/state-storage.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
 
 /**
@@ -430,6 +437,14 @@ export type EstimateOptions = {
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**
+   * The storage of full state slots (the same value as `SessionOptions.fullStateStorage`; omitted =
+   * `"f32"`). `"f16"` halves the bytes of the full slots and leaves the sliding slots alone (the same
+   * single function as the allocation), and on an f16 slot `stateAttentionReduce: "parallel-fused"`
+   * counts the temporaries of the unfused kernels, as execution runs them.
+   * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
+   */
+  readonly fullStateStorage?: StateStorage;
+  /**
    * The device facts the online kernel's route reads (ADR 0132 decision 5): whether the device has
    * subgroups (`subgroups` and `subgroup-size-control` enabled and WGSL `subgroup_id` present) and
    * its granted `maxComputeWorkgroupStorageSize`.
@@ -643,6 +658,7 @@ const stateEstimate = (
   graph: IrGraph,
   spec: GenerationContextSpec | undefined,
   limits: SlotLimits,
+  fullStateStorage: StateStorage,
 ): {
   readonly bytes: number;
   readonly shapes: ReadonlyMap<string, readonly number[]> | undefined;
@@ -665,6 +681,7 @@ const stateEstimate = (
   assertChunkBuckets(spec.chunkBuckets, spec.chunkLength);
   const bindings = resolveBindings(graph, spec.bindings);
   const shapes = new Map<string, readonly number[]>();
+  const windows = slidingSlotWindows(graph);
   let bytes = 0;
   for (const name of names) {
     const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
@@ -674,7 +691,7 @@ const stateEstimate = (
     // need it, but no byte is counted (the same branch as `GenerationContext.create`'s allocation =
     // estimate and real construction claim the same number).
     if (graph.states[name].external) continue;
-    const byteLength = numel(shape) * STATE_ELEMENT_BYTES;
+    const byteLength = stateSlotBytes(name, shape, windows.has(name), fullStateStorage);
     // MUST: check the per-slot limits at the same point and with the same check as the real
     // construction (`GenerationContext.create`) (ADR 0066 addendum 5). Without it, a path where a
     // CLI lets the estimate double as the value check of `--capacity` (examples/shared/gemma-main.ts,
@@ -803,6 +820,7 @@ const stateAttentionTemps = (
   limit: number | undefined,
   budget: number | undefined,
   stateAttentionReduce: StateAttentionReduce,
+  fullStateStorage: StateStorage,
 ): readonly StateAttentionBlock[] => {
   const q = node.inputShapes[0];
   const where = `attention (states) [${q.join(",")}]`;
@@ -823,6 +841,7 @@ const stateAttentionTemps = (
         " (an estimate without a GenerationContext cannot count states-form attention)",
     );
   }
+  const window = stateWindow(node.node.attrs, where) ?? 0;
   // `forced`, which sets the row-block count explicitly (the test-only `ROW_BLOCK_SPLIT`), is not
   // passed — `EstimateOptions` has no field for it and production callers do not use it (the
   // estimate claims only the default equal split).
@@ -831,8 +850,13 @@ const stateAttentionTemps = (
       batchHeads: batch * heads,
       chunkRows,
       capacity: slotShape[2],
-      window: stateWindow(node.node.attrs, where) ?? 0,
-      fuseStatsPv: node.node.ins.length === 3 && stateAttentionReduce === "parallel-fused",
+      window,
+      fuseStatsPv:
+        node.node.ins.length === 3 &&
+        stateFusesStatsPv(
+          stateAttentionReduce,
+          slotStateStorage(fullStateStorage, stateSliding(window)),
+        ),
     },
     rowBlockLimit(limit, budget),
   ).blocks;
@@ -1036,6 +1060,7 @@ const fusedTransientStep = (
  */
 type TransientKnobs = {
   readonly stateAttentionReduce: StateAttentionReduce;
+  readonly fullStateStorage: StateStorage;
   /** The budget per row-block temporary (`undefined` = no budget — ADR 0124). */
   readonly attentionRowBlockMaxBytes: number | undefined;
   /**
@@ -1339,7 +1364,7 @@ const transientSlotBytes = (
   maxBufferSize: number | undefined,
   knobs: TransientKnobs,
 ): number => {
-  const { stateAttentionReduce, attentionRowBlockMaxBytes } = knobs;
+  const { stateAttentionReduce, fullStateStorage, attentionRowBlockMaxBytes } = knobs;
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
   const aliases = planAliases(nodes);
@@ -1401,6 +1426,7 @@ const transientSlotBytes = (
         limit,
         attentionRowBlockMaxBytes,
         stateAttentionReduce,
+        fullStateStorage,
       );
       for (const temp of blocks) {
         const base = dispatches.length;
@@ -1628,6 +1654,7 @@ export const estimateGraphMemory = (
     attentionCompute: options.attentionCompute,
     attentionScoreStorage: options.attentionScoreStorage,
     linearCompute: options.linearCompute,
+    fullStateStorage: options.fullStateStorage,
   });
   if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
   const seats: AttentionSeats = {
@@ -1667,7 +1694,8 @@ export const estimateGraphMemory = (
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
-  const state = stateEstimate(graph, options.generation, options);
+  const fullStateStorage = options.fullStateStorage ?? "f32";
+  const state = stateEstimate(graph, options.generation, options, fullStateStorage);
   const weights = weightEstimate(residency);
 
   const chunkLength = options.generation?.chunkLength;
@@ -1774,7 +1802,14 @@ export const estimateGraphMemory = (
         state.shapes,
         options.maxStorageBufferBindingSize,
         options.maxBufferSize,
-        { stateAttentionReduce, attentionRowBlockMaxBytes, seats, attentionDevice, linear },
+        {
+          stateAttentionReduce,
+          fullStateStorage,
+          attentionRowBlockMaxBytes,
+          seats,
+          attentionDevice,
+          linear,
+        },
       ),
     };
   };

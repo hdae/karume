@@ -72,7 +72,7 @@ import {
   type RowBlockLimit,
   rowBlockLimit,
 } from "../fusion.ts";
-import { planStateAttention } from "../state-attention-plan.ts";
+import { planStateAttention, stateFusesStatsPv } from "../state-attention-plan.ts";
 import {
   quantizeRowsBshdKey,
   quantizeRowsBshdParams,
@@ -142,6 +142,7 @@ import {
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../../kernels/state-attention.ts";
+import { slotStateStorage } from "../../kernels/state-storage.ts";
 import { stateStatsPvKey, stateStatsPvWgsl } from "../../kernels/state-attention-stats-pv.ts";
 import type { StorageRoles } from "../../gpu/pipeline-cache.ts";
 import type { ComputePrecision } from "../session-types.ts";
@@ -1100,6 +1101,7 @@ export const buildStateAttention = async (
   const capacity = kSlot.shape[2];
   const window = stateWindow(step.node.attrs, where) ?? 0;
   const sliding = stateSliding(window);
+  const storage = slotStateStorage(face.state.fullStateStorage, sliding);
   const scale = attentionScale(step.node.attrs, where);
   // Numerics variant × states form fails loudly (ADR 0058 decision 3 — the decision is
   // {@link stateAttentionVariantViolation}, shared with the estimate). It is checked **before any
@@ -1125,7 +1127,7 @@ export const buildStateAttention = async (
       chunkRows,
       capacity,
       window,
-      fuseStatsPv: face.state.stateAttentionReduce === "parallel-fused",
+      fuseStatsPv: stateFusesStatsPv(face.state.stateAttentionReduce, storage),
     },
     rowBlockLimit(
       face.state.gpu.limits.maxStorageBufferBindingSize,
@@ -1190,28 +1192,28 @@ export const buildStateAttention = async (
   const pvParallel = parallel && !pvTiled;
   const qkKey = qkParallel
     ? qkFold > 1
-      ? stateQkFoldedKey(qkFold)
-      : stateQkParallelKey(sliding, gqa)
+      ? stateQkFoldedKey(qkFold, storage)
+      : stateQkParallelKey(sliding, gqa, storage)
     : qkTiled
-      ? stateQkTiledKey(sliding, gqa, chunkRows)
-      : stateQkKey(sliding, gqa);
+      ? stateQkTiledKey(sliding, gqa, chunkRows, storage)
+      : stateQkKey(sliding, gqa, storage);
   const statsKey = stateStatsKey(sliding);
   const pvKey = fusedStatsPv
     ? stateStatsPvKey(sliding, gqa)
     : pvTiled
-      ? statePvTiledKey(sliding, gqa, chunkRows)
+      ? statePvTiledKey(sliding, gqa, chunkRows, storage)
       : pvParallel
-        ? statePvParallelKey(sliding, gqa)
-        : statePvKey(sliding, gqa);
+        ? statePvParallelKey(sliding, gqa, storage)
+        : statePvKey(sliding, gqa, storage);
   const qk = await face.state.cache.get(
     qkKey,
     qkParallel
       ? qkFold > 1
-        ? stateQkFoldedWgsl(qkFold)
-        : stateQkParallelWgsl(sliding, gqa)
+        ? stateQkFoldedWgsl(qkFold, storage)
+        : stateQkParallelWgsl(sliding, gqa, storage)
       : qkTiled
-        ? stateQkTiledWgsl(sliding, gqa, chunkRows)
-        : stateQkWgsl(sliding, gqa),
+        ? stateQkTiledWgsl(sliding, gqa, chunkRows, storage)
+        : stateQkWgsl(sliding, gqa, storage),
   );
   const stats = fusedStatsPv
     ? undefined
@@ -1221,10 +1223,10 @@ export const buildStateAttention = async (
     fusedStatsPv
       ? stateStatsPvWgsl(sliding, gqa)
       : pvTiled
-        ? statePvTiledWgsl(sliding, gqa, chunkRows)
+        ? statePvTiledWgsl(sliding, gqa, chunkRows, storage)
         : pvParallel
-          ? statePvParallelWgsl(sliding, gqa)
-          : statePvWgsl(sliding, gqa),
+          ? statePvParallelWgsl(sliding, gqa, storage)
+          : statePvWgsl(sliding, gqa, storage),
   );
 
   for (const block of blocks) {
@@ -1393,6 +1395,9 @@ export const buildReadonlyStateAttention = async (
   const gqa = kvRepeat > 1;
   const window = stateWindow(step.node.attrs, where) ?? 0;
   const sliding = stateSliding(window);
+  // The option comes from this (borrower) Session; `createGenerationContext({ borrow })` has checked
+  // that it gives the same storage as the lender's slot.
+  const storage = slotStateStorage(face.state.fullStateStorage, sliding);
   const scale = attentionScale(step.node.attrs, where);
   // Numerics variant × states form fails loudly (the same guard as `buildStateAttention` — ADR 0058
   // decision 3).
@@ -1409,12 +1414,12 @@ export const buildReadonlyStateAttention = async (
     ),
     face.state.rowBlockSplit,
   );
-  const qkKey = stateQkParallelReadonlyKey(sliding, gqa);
+  const qkKey = stateQkParallelReadonlyKey(sliding, gqa, storage);
   const statsKey = stateStatsReadonlyKey(sliding);
-  const pvKey = statePvParallelReadonlyKey(sliding, gqa);
-  const qk = await face.state.cache.get(qkKey, stateQkParallelReadonlyWgsl(sliding, gqa));
+  const pvKey = statePvParallelReadonlyKey(sliding, gqa, storage);
+  const qk = await face.state.cache.get(qkKey, stateQkParallelReadonlyWgsl(sliding, gqa, storage));
   const stats = await face.state.cache.get(statsKey, stateStatsReadonlyWgsl(sliding));
-  const pv = await face.state.cache.get(pvKey, statePvParallelReadonlyWgsl(sliding, gqa));
+  const pv = await face.state.cache.get(pvKey, statePvParallelReadonlyWgsl(sliding, gqa, storage));
 
   for (const block of blocks) {
     const geometry = {
@@ -1535,21 +1540,32 @@ export const buildStateAppend = async (
   states.chunkRows.add(x[2]);
   if (!sliding) states.fullCapacities.set(slot.name, capacity);
 
-  const key = stateAppendKey(sliding);
-  const { pipeline, layout, roles } = await face.state.cache.get(key, stateAppendWgsl(sliding));
+  const storage = slotStateStorage(face.state.fullStateStorage, sliding);
+  const key = stateAppendKey(sliding, storage);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    stateAppendWgsl(sliding, storage),
+  );
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   builder.dispatch({
     key,
     pipeline,
     layout,
     roles,
-    params: face.writeParams(stateAppendParams(geometry), PARAMS_UNIFORM_USAGE),
+    params: face.writeParams(stateAppendParams(geometry, storage), PARAMS_UNIFORM_USAGE),
     bindings: [
       { binding: 1, source: binds[0] },
       { binding: 2, source: { kind: "state", name: slot.name } },
       { binding: 3, source: { kind: "lengths" } },
     ],
-    workgroups: (_past, query) => stateAppendWorkgroups(geometry, query, limit, where),
+    // The f16 form dispatches words, not elements (one invocation owns one word).
+    workgroups: (_past, query) =>
+      stateAppendWorkgroups(
+        storage === "f16" ? { ...geometry, depth: geometry.depth / 2 } : geometry,
+        query,
+        limit,
+        where,
+      ),
   });
 };
 
