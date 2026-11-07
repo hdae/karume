@@ -160,7 +160,8 @@ const slotBuffer = (
 };
 
 /**
- * Logical-length uniform (8 bytes of `{past, query}` — the same shape `GenerationContext` holds).
+ * Logical-length uniform (`{past, query}`, plus the two block words of a bidirectional run — the
+ * shape `GenerationContext` holds).
  */
 const lengthsBuffer = (
   device: GPUDevice,

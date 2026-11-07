@@ -185,7 +185,7 @@ const CAPACITY_SYMBOL = "C";
  * allocate no byte at all). The source of truth is the runtime's `LENGTHS_BYTES` (copied here, as
  * it is not on the public surface).
  */
-const LENGTHS_BYTES = 8;
+const LENGTHS_BYTES = 16;
 
 const exists = (url: URL): boolean => {
   try {

@@ -307,7 +307,7 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
 export type GenerationEncoding = {
   /** Slot name → context-owned buffer. */
   readonly slots: ReadonlyMap<string, GPUBuffer>;
-  /** The logical-length uniform (8 bytes of `{past, query}`). */
+  /** The logical-length uniform (16 bytes: `{past, query}` and the bidirectional block — ADR 0144). */
   readonly lengths: GPUBuffer;
   readonly past: number;
   readonly query: number;
