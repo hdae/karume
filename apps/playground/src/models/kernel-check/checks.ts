@@ -10,6 +10,7 @@ import {
   checkPlanesGemv,
   checkRmsSubgroup,
   checkStateAttentionRewrites,
+  checkScoreF16Store,
   checkStateKv16,
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
@@ -17,6 +18,7 @@ import {
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
+  SCORE_F16_CASES,
   STATE_KV16_CASES,
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
@@ -98,6 +100,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: await checkStateKv16(gpu, options),
       expectedCases: STATE_KV16_CASES,
+    }),
+  },
+  {
+    id: "score-f16-store",
+    title: "f16 attention scores (S)",
+    summary:
+      'The store of attentionScoreStorage: "f16" against host rounding (u32 identity): whether pack2x16float rounds like the host on this backend.',
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkScoreF16Store(gpu, options)],
+      expectedCases: SCORE_F16_CASES,
     }),
   },
 ];

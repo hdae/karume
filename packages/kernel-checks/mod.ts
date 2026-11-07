@@ -45,6 +45,7 @@ export {
   STATE_ATTENTION_MUTANTS,
   type StateAttentionRewritesReport,
 } from "./src/state-attention-rewrites.ts";
+export { checkScoreF16Store, SCORE_F16_CASES, scoreF16StoreSwapMutant } from "./src/score-f16.ts";
 export {
   checkStateKv16,
   checkStateKv16Mutants,

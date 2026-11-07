@@ -43,6 +43,9 @@ import {
 } from "../../src/kernels/state-attention.ts";
 import { statePvTiledWgsl, stateQkTiledWgsl } from "../../src/kernels/gemm.ts";
 import type { StateStorage } from "../../src/kernels/state-storage.ts";
+import { tiledWorkgroups } from "../../src/codegen/dispatch.ts";
+import { attentionQkParams, attentionQkWgsl } from "../../src/kernels/attention.ts";
+import { defaultGemmGeometry, gemmTileM, gemmTileN } from "../../src/kernels/gemm-geometry.ts";
 import { BUFFER_USAGE, MAP_MODE } from "../../src/gpu/webgpu-constants.ts";
 import {
   stateAppendParams,
@@ -802,6 +805,52 @@ export const runStateAppendF16 = async (
     pass.end();
     device.queue.submit([encoder.finish()]);
     return await readWords(device, slot, words);
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
+  }
+};
+
+/**
+ * The words of S after fused ①QK with f16 S (`attentionQkWgsl`, f32 compute, the default geometry),
+ * filled with a poison value first. Not a states-form kernel, but it needs the same direct dispatch.
+ */
+export const runAttentionQkS16 = async (
+  device: GPUDevice,
+  shape: { readonly rows: number; readonly columns: number; readonly depth: number },
+  q: Float32Array<ArrayBuffer>,
+  k: Float32Array<ArrayBuffer>,
+  options: { readonly mutate?: (wgsl: string) => string } = {},
+): Promise<Uint32Array<ArrayBuffer>> => {
+  const { rows, columns, depth } = shape;
+  const words = (rows * columns) / 2;
+  const source = attentionQkWgsl(true, "f32", "f16");
+  const buffers: GPUBuffer[] = [];
+  try {
+    const params = uniformBuffer(device, attentionQkParams(rows, columns, depth, 1));
+    const qBuffer = storageBuffer(device, q);
+    const kBuffer = storageBuffer(device, k);
+    const scores = device.createBuffer({ size: words * 4, usage: STORAGE });
+    device.queue.writeBuffer(scores, 0, new Uint32Array(words).fill(0xdeadbeef));
+    buffers.push(params, qBuffer, kBuffer, scores);
+    const pipeline = pipelineOf(
+      device,
+      new Map(),
+      options.mutate === undefined ? source : options.mutate(source),
+    );
+    const limit = device.limits.maxComputeWorkgroupsPerDimension;
+    const geometry = defaultGemmGeometry();
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bind(device, pipeline, [params, qBuffer, kBuffer, scores]));
+    pass.dispatchWorkgroups(
+      tiledWorkgroups(columns, gemmTileN(geometry), limit, "score store ①QK"),
+      tiledWorkgroups(rows, gemmTileM(geometry), limit, "score store ①QK"),
+      1,
+    );
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return await readWords(device, scores, words);
   } finally {
     for (const buffer of buffers) buffer.destroy();
   }

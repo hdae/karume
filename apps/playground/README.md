@@ -19,7 +19,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
-| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer GEMV and the f16 full state slots, word for word on the browser's backend | `/kernel-check` | done |
+| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer GEMV, the f16 full state slots and the f16 attention scores, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1292,10 +1292,11 @@ tests, not a copy.
 | States attention rewrites (K-55 / K-91) | `gpu_state_attention_fold_test.ts` | The folded ①′ writes the same S words as ①′ (252 cases), the unrolled ③′ and fused stats + PV the same O words as their v1 WGSL (546 / 490); the reference outputs met the word classes the contract covers and no output word was left unwritten; every class the product folds is in the grid; 5 order-only mutants each change at least one word (else a zero-mismatch result would prove nothing). The page also runs each mutant on every case of its shape (the mutant matrix, not in the node test). | nothing optional |
 | Integer GEMV | `gpu_linear_gemv_integer_test.ts` | The integer GEMV (`integerGemv`) writes every output word of its CPU reference (692 cases: i2 / i4 / i8, the 15 (lanes, rows) variants on small K and on the i2 / i8 widths in use, five of them on the i4 widths in use, plus a saturated fixture at each storage's largest K — every activation code −128 against the largest stored code, the i8 one offset at one element — on 2 variants, each at M = 1 / 8, with and without the SRQ epilogue); rows past M stay unwritten. | nothing optional |
 | Byte-plane GEMV | `gpu_linear_gemv_planes_test.ts` | The byte-plane GEMV (`linearGemvPlanes`) meets contract class R (ADR 0110; 240 cases: the 15 (lanes, rows) variants at K = 16 / 80 / 1536 and at 37 and 1029 columns — multiples of no workgroup's columns — with random codes, plus a saturated fixture at K = 1536 — every code −2 against activations of one sign — each at M = 1 / 8): every output within the GEMM band of an FP64 reference, and at M = 1 and K = 1536 within twice that band of the sequential GEMV; a second dispatch writes the same words; nothing is written past the M × n outputs; a NaN in one activation reaches every output of its row. The node test also shows the band is not vacuous (two WGSL mutants turn it red); the page does not run them. | nothing optional |
-| f16 full state slots | `gpu_state_kv16_test.ts` | With `fullStateStorage: "f16"` (ADR 0143), the append writes what host rounding writes, word layout included (6 cases), and every reader of an f16 slot writes the same words as its f32 kernel over the same slot rounded on the host (240 cases). The node test also shows the check can fail (5 mutants each mismatch); the page does not run them. | nothing optional |
+| f16 full state slots | `gpu_state_kv16_test.ts` | With `fullStateStorage: "f16"` (ADR 0143), the append writes what host rounding writes, word layout included (7 cases, one on every rounding boundary of f16), and every reader of an f16 slot writes the same words as its f32 kernel over the same slot rounded on the host (246 cases, 6 of them with subnormal slots). The node test also shows the check can fail (6 mutants each mismatch, one rounding toward zero); the page does not run them. | nothing optional |
+| f16 attention scores (S) | `gpu_score_f16_store_test.ts` | The store of `attentionScoreStorage: "f16"` writes what host rounding writes (2 cases). It goes through `pack2x16float`, whose rounding WGSL leaves open, so a FAIL here means this backend rounds another way. | nothing optional |
 
 The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
-next to a check runs that check; **Run all** runs the six in order; Cancel stops before the next
+next to a check runs that check; **Run all** runs the seven in order; Cancel stops before the next
 case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
 earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
 linear lane mapping.
@@ -1303,7 +1304,7 @@ linear lane mapping.
 Each check gets a verdict:
 
 - **PASS** — every part ran the number of cases its check exports (`GEMV_SUBGROUP_CASES`,
-  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`, `STATE_KV16_CASES`; the counts in the table above) and the
+  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`; the counts in the table above) and the
   states-attention check its `STATE_ATTENTION_MUTANTS` mutants and matrix rows, every criterion of
   every case has 0 failing words, every requirement is met, every mutant mismatched on its case and
   every mutant matrix row passed;
