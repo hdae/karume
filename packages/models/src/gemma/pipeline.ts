@@ -445,6 +445,20 @@ export type PipelineOptions = {
    */
   readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /**
+   * The storage of the full state slots (`"f16"` halves them; default `"f32"`). The runtime setting
+   * of the same name is the source of truth for its meaning, and it needs no re-export or GPU feature.
+   * Not a quant setting: only this explicit value turns it on. Passed to both target and drafter, and
+   * {@link Pipeline.estimateSessionMemory} and {@link Pipeline.fitCapacity} count the smaller slots.
+   *
+   * It changes the numbers: earlier runs are read rounded to f16 (the first run is unchanged). On a
+   * pipeline with a drafter, a turn MUST say `speculative: "always"` or `false` (the self-tuning gate
+   * is refused, see {@link speculativeSetup}), so `speculative.gate` is refused here too.
+   * An invalid value is refused before anything is fetched.
+   *
+   * DECIDED: docs/decisions/0143-f16-full-state-storage.md
+   */
+  readonly fullStateStorage?: SessionOptions["fullStateStorage"];
+  /**
    * The GPU submission policy. The same value goes to target / drafter; when omitted,
    * {@link gemmaSubmitPolicy} (the runtime default with at most 128 dispatches per submit — H-40).
    */
@@ -746,6 +760,8 @@ export type Gemma4State = {
    * estimate (unspecified = no field = the estimate also reads the runtime default).
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
+  /** Likewise for the storage of the full slots; {@link speculativeSetup} reads it too. */
+  readonly fullStateStorage?: SessionOptions["fullStateStorage"];
   /**
    * The product graph's declaration (input of `estimateSessionMemory` — the estimator of ADR 0070
    * decision 5 is a pure function of `graph + residency plan`).
@@ -1017,6 +1033,40 @@ const assertGemma4DecodeAheadOptions = (where: string, options: PipelineOptions)
 };
 
 /**
+ * The check of {@link PipelineOptions.fullStateStorage}, run **before reading a single byte of the
+ * assets**.
+ *
+ * The option is not on the manifest's session vocabulary, so `resolveSessionOptions` never sees it,
+ * and without this it would first fail at Session construction, after the GB-scale load (and `null`
+ * would silently read as the default there).
+ *
+ * The gate's knobs are refused here because every gate turn is refused under f16
+ * ({@link speculativeSetup}), so they could never be read (the option is not a value to be silently
+ * ignored). Which policy a turn uses is the turn's option, so the turn itself is refused only when it
+ * starts.
+ *
+ * NOTE: `export` is for the test that calls the check directly (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
+ */
+export const assertGemma4FullStateStorage = (where: string, options: PipelineOptions): void => {
+  const storage = options.fullStateStorage;
+  if (storage === undefined) return;
+  if (storage !== "f32" && storage !== "f16") {
+    throw new ModelInputError(
+      `${where}: fullStateStorage ${
+        typeof storage === "string" ? JSON.stringify(storage) : typeof storage
+      } is not supported (accepted: 'f32' / 'f16')`,
+    );
+  }
+  if (storage === "f16" && options.speculative?.gate !== undefined) {
+    throw new ModelInputError(
+      `${where}: speculative.gate has no effect with fullStateStorage: "f16"` +
+        ` (the self-tuning gate is refused there; turns run with speculative: "always" or false)`,
+    );
+  }
+};
+
+/**
  * Settles the decode run-ahead depth ({@link PipelineOptions.decodeAhead} — the option checks of
  * {@link assertGemma4DecodeAheadOptions}, then the model's: called once admission has settled
  * whether the model has PLE, before any weight part is fetched).
@@ -1067,7 +1117,7 @@ export const resolveGemma4DecodeAhead = (
  * (`config.gate`) was removed with the tool).
  */
 export const speculativeSetup = (
-  state: Pick<Gemma4State, "drafter" | "speculativeK" | "speculativeGate">,
+  state: Pick<Gemma4State, "drafter" | "speculativeK" | "speculativeGate" | "fullStateStorage">,
   enabled: boolean | "always" | undefined,
 ): GenerationSpeculativeOptions<GenerationContext> | undefined => {
   const drafter = state.drafter;
@@ -1083,6 +1133,16 @@ export const speculativeSetup = (
       );
     }
     return undefined;
+  }
+  // MUST: under f16 storage the gate is refused, because it would make the output depend on timing
+  // (ADR 0110 decision 6). Verify rows j >= 1 read earlier draft rows from `ins` in f32, while decode
+  // reads them from the slot in f16, so the two shapes the gate switches between on wall time no
+  // longer give the same bits. A pipeline without a drafter never gets here: it has no gate to refuse.
+  if (enabled !== "always" && state.fullStateStorage === "f16") {
+    throw new ModelInputError(
+      `speculative: ${JSON.stringify(enabled)} selects the self-tuning gate, which fullStateStorage: "f16"` +
+        ` refuses (it would make the output depend on timing): pass speculative: "always" or false`,
+    );
   }
   // The gate's knobs are not passed to `"always"` (there is no gate, so nothing reads them) — not
   // adding the field at all is how "this turn has no gate" is spelled.
@@ -1348,6 +1408,7 @@ export class GemmaPipeline {
     // goes through the same function too, but that is after the GB-scale load).
     resolveGemma4PleResidency(where, options);
     assertGemma4DecodeAheadOptions(where, options);
+    assertGemma4FullStateStorage(where, options);
     // Both families share this load body, so each names its own table in the omitted-ref hint.
     const source = toManifestSource(
       ref,
@@ -1481,6 +1542,7 @@ export class GemmaPipeline {
     // as in `loadPretrained`).
     resolveGemma4PleResidency(where, options);
     assertGemma4DecodeAheadOptions(where, options);
+    assertGemma4FullStateStorage(where, options);
     // MUST: the explicit quant execution knobs are checked **here** too. This surface has no manifest
     // and cannot go through `resolveGemmaSessionOptions`; without this the same mistaken option would
     // travel down to Session construction and turn into the runtime's `ExecutionError` = the
@@ -1608,6 +1670,9 @@ export class GemmaPipeline {
         ? {}
         : { linearGemvPlanes: options.linearGemvPlanes }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
+      ...(options.fullStateStorage === undefined
+        ? {}
+        : { fullStateStorage: options.fullStateStorage }),
       submitPolicy: gemmaSubmitPolicy(options.submitPolicy),
       ...(options.stateAttentionReduce === undefined
         ? {}
@@ -1708,6 +1773,9 @@ export class GemmaPipeline {
         ...(sessionOptions.stateAttentionReduce === undefined
           ? {}
           : { stateAttentionReduce: sessionOptions.stateAttentionReduce }),
+        ...(sessionOptions.fullStateStorage === undefined
+          ? {}
+          : { fullStateStorage: sessionOptions.fullStateStorage }),
         ...(greedyOutput === undefined ? {} : { greedyOutput }),
         graph: model.graph,
         wiring,
@@ -2180,6 +2248,9 @@ export class GemmaPipeline {
       ...(this.#state.stateAttentionReduce === undefined
         ? {}
         : { stateAttentionReduce: this.#state.stateAttentionReduce }),
+      ...(this.#state.fullStateStorage === undefined
+        ? {}
+        : { fullStateStorage: this.#state.fullStateStorage }),
       ...budget,
     });
     // The auxiliary Session of small-output decode, and the share of the GPU-resident PLE option (ADR

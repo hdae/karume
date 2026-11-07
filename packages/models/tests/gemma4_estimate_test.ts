@@ -411,6 +411,44 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
     });
   });
 
+  // The neighbouring knob on the same fixture: a real pipeline, a real estimator.
+  describe("fullStateStorage", () => {
+    /** The fixture's two full slots `[1,8,C,32]` in f32. Written out, not derived from the code. */
+    const FULL_SLOTS_F32 = 2 * (8 * CAPACITY * 32 * 4);
+
+    it("the target Session and the drafter Session both get the value", async () => {
+      await load({ speculative: {}, fullStateStorage: "f16" });
+      assertEquals(
+        sessionOptions.map((options) => options.fullStateStorage),
+        ["f16", "f16"],
+      );
+    });
+
+    it("unset, the field does not exist on either Session's options", async () => {
+      await load({ speculative: {} });
+      for (const options of sessionOptions) {
+        assertEquals(Object.hasOwn(options, "fullStateStorage"), false);
+      }
+    });
+
+    it("estimateSessionMemory reports the full slots halved, with and without a drafter", async () => {
+      for (const options of [{}, { speculative: {} }]) {
+        const f32 = (await load(options)).estimateSessionMemory();
+        const f16 = (await load({ ...options, fullStateStorage: "f16" })).estimateSessionMemory();
+        assertEquals(f32.resident.stateBytes - f16.resident.stateBytes, FULL_SLOTS_F32 / 2);
+        // What `fitCapacity` reads: the peak less the weights moves by the same bytes.
+        assertEquals(f32.peakAccountedBytes - f16.peakAccountedBytes, FULL_SLOTS_F32 / 2);
+      }
+    });
+
+    it("the report is the runtime's own estimate, with the option passed down", async () => {
+      assertEquals(
+        (await load({ fullStateStorage: "f32" })).estimateSessionMemory(),
+        (await load({})).estimateSessionMemory(),
+      );
+    });
+  });
+
   describe("estimateSessionMemory", () => {
     it("a limit below the score matrix lowers the peak", async () => {
       const unset = (await load({})).estimateSessionMemory().peakAccountedBytes;

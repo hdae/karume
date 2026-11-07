@@ -51,9 +51,11 @@ import {
   stopStringOf,
 } from "../src/gemma/chat-turn.ts";
 import {
+  assertGemma4FullStateStorage,
   type Gemma4State,
   GemmaPipeline,
   Pipeline,
+  type PipelineOptions,
   speculativeSetup,
 } from "../src/gemma/pipeline.ts";
 import type { Gemma4Drafter } from "../src/gemma/speculative.ts";
@@ -783,6 +785,99 @@ test("speculative gate knobs: an invalid value fails before any weight is read (
     ModelInputError,
     "speculative.k 0 is outside 1..",
   );
+});
+
+describe("fullStateStorage: speculation", () => {
+  const gated = {
+    drafter: fakeDrafter,
+    speculativeK: 2,
+    speculativeGate: undefined,
+    fullStateStorage: "f16",
+  } as const;
+
+  // The two shapes the gate switches between read earlier draft rows differently under f16 (`ins` in
+  // f32, the slot in f16), so a switch on wall time would make the output depend on timing.
+  it("refuses the self-tuning gate, unset or true, naming the ways out", () => {
+    for (const enabled of [undefined, true]) {
+      const error = assertThrows(() => speculativeSetup(gated, enabled), ModelInputError);
+      assert(error.message.includes('"always"') && error.message.includes("false"), error.message);
+    }
+  });
+
+  it('accepts "always" and false', () => {
+    assertEquals(speculativeSetup(gated, "always")?.policy, "always");
+    assertEquals(speculativeSetup(gated, false), undefined);
+  });
+
+  it("does not refuse a pipeline without a drafter: it has no gate", () => {
+    const withoutDrafter = { ...gated, drafter: undefined };
+    assertEquals(speculativeSetup(withoutDrafter, undefined), undefined);
+    assertEquals(speculativeSetup(withoutDrafter, false), undefined);
+    // An explicit request without a drafter keeps its own refusal.
+    assertThrows(() => speculativeSetup(withoutDrafter, true), Error, "without a drafter");
+  });
+
+  it("leaves f32 storage alone: the gate is built as before", () => {
+    assertEquals(
+      speculativeSetup({ ...gated, fullStateStorage: "f32" }, undefined)?.policy,
+      "auto",
+    );
+    assertEquals(
+      speculativeSetup({ ...gated, fullStateStorage: undefined }, undefined)?.policy,
+      "auto",
+    );
+  });
+});
+
+describe("fullStateStorage: the check before anything is fetched", () => {
+  /** Counts the requests, so the position of the check is what is asserted. */
+  const load = async (options: PipelineOptions, expected: string): Promise<void> => {
+    let requests = 0;
+    await assertRejects(
+      () =>
+        Pipeline.fromPretrained("karume/gemma4-e2b", {
+          ...options,
+          fetch: () => {
+            requests += 1;
+            return Promise.reject(new Error("the check should have failed first"));
+          },
+        }),
+      ModelInputError,
+      expected,
+    );
+    assertEquals(requests, 0, "a request went out before the check");
+  };
+
+  it("refuses an invalid spelling, and null, which the Session would read as the default", async () => {
+    await load({ fullStateStorage: "F16" as "f16" }, 'fullStateStorage "F16"');
+    await load({ fullStateStorage: null as unknown as "f16" }, "fullStateStorage object");
+  });
+
+  it("refuses gate knobs under f16: every gate turn is refused, so nothing would read them", async () => {
+    await load(
+      { fullStateStorage: "f16", speculative: { gate: { burstMin: 8 } } },
+      "speculative.gate has no effect",
+    );
+  });
+
+  it("lets the values through, with a drafter too", () => {
+    assertGemma4FullStateStorage("T", {});
+    assertGemma4FullStateStorage("T", { fullStateStorage: "f32" });
+    assertGemma4FullStateStorage("T", { fullStateStorage: "f16" });
+    assertGemma4FullStateStorage("T", { fullStateStorage: "f16", speculative: {} });
+    assertGemma4FullStateStorage("T", {
+      fullStateStorage: "f32",
+      speculative: { gate: { burstMin: 8 } },
+    });
+  });
+
+  it("refuses an invalid spelling on fromAssets too", () => {
+    assertThrows(
+      () => assertGemma4FullStateStorage("gemma.fromAssets", { fullStateStorage: "f8" as "f16" }),
+      ModelInputError,
+      "gemma.fromAssets: fullStateStorage",
+    );
+  });
 });
 
 test("chat prefill: onPrefill receives the progress, and the text sequence does not change by a single character", async () => {
