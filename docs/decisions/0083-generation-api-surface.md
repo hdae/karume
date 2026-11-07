@@ -544,7 +544,7 @@ The result is a fact of that moment, not a reservation, and it differs across ma
 generated tokens, as capacity does not. An explicit opt-in; the default stays the distribution's.
 
 On the RTX 3080 Ti under Node + Dawn, 12B `i4-fast` fits 32768 and E2B fits 131072, and a 12B chat at the result ran at
-8.9 GiB. Chrome (D3D12) has not been checked (limitations).
+8.9 GiB. In Chrome (D3D12) on the RTX 5070 Ti (2026-11-07), with `fullStateStorage: "f16"`, it gave 12B the largest candidate, 262,144, and a chat ran.
 
 Rejected: **making it the default.** A capacity that follows the moment would make a conversation's memory depend on what
 else was running when it began. **Reporting a free-VRAM number**: ADR 0070 decision 5 rejected that face of the API, and this

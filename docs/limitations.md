@@ -2752,7 +2752,7 @@ upstream is 22 GiB). On the RTX 3080 Ti (12 GB) the e2e greedy run peaked at 8.6
 On that device `i4-fast` decodes about 2.9× faster than `i4` without the drafter (22 against 64 ms/token at P ≈ 1K) and is
 slower than `i4` with it (research [2026-11-06](research/2026-11-06-gemma4-12b-fast.md)). The added presets are in the
 recipe and the local mirror, not on Hugging Face until the next release. `capacity: "fit"` (ADR 0083 addendum of 2026-11-06)
-has not been checked in Chrome: it rests on a trial allocation, and its boundary was measured only under Dawn on Node.
+rests on a trial allocation; its boundary was measured only under Dawn on Node, and one run in Chrome gave 12B the largest capacity.
 
 12B is an instruction model. Given raw text without the chat template it can degenerate: for "The capital of France
 is" it repeats digits — upstream's own F32 `generate()` on the same weights gives the same 16 tokens. Use `chat` (the

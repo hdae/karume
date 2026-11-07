@@ -19,7 +19,7 @@ measurements in `docs/research/`.
 
 - `@karume/models`: `capacity: "fit"` on `Pipeline.chat` and `Pipeline.sequence`, and
   `Pipeline.fitCapacity()`: the largest capacity this device can hold now, settled by one trial
-  allocation per candidate (ADR 0083 addendum of 2026-11-06). Opt-in. Chrome has not been checked.
+  allocation per candidate (ADR 0083 addendum of 2026-11-06). Opt-in.
 - `@karume/models`: `decodeAhead` runs on 12B: on a model without PLE, and with a distribution that
   suppresses tokens, whose GPU selection now masks them (ADR 0142 addendum of 2026-11-06).
 - `@karume/runtime`: parallel-GEMV rows for 12B, the int4 output head included, and width 3840 in the

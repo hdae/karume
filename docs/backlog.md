@@ -25,7 +25,7 @@ maintainer's ruling of 2026-11-06).
    V0. Not started. Deferred by the maintainer until after the items above.
 
 For the next release: upload the `karume-gemma4-qat` manifest with 12B's `i4-gemvpar` and `i4-fast` and re-pin `SOURCES` (the
-local mirror has them); the maintainer's Chrome checks on the RTX 5070 Ti of `capacity: "fit"` and of `fullStateStorage: "f16"` (the `state-kv16` check on `/kernel-check`, then a chat with the Gemma 4 page's f16 KV switch), which ADR 0143 needs before a preset can declare it.
+local mirror has them); the maintainer's re-run of `state-kv16` and `score-f16-store` on `/kernel-check` in Chrome on the RTX 5070 Ti, after the f16 KV append moved to integer rounding. `score-f16-store` decides whether S needs the same fix: `pack2x16float` rounds toward zero on D3D12, and S is a shipped path (Wan and Anima presets).
 
 ## later
 
