@@ -29,6 +29,8 @@ export type LoadRequest = {
   readonly source: PipelineSource;
   /** Build the MTP drafter (`speculative` of `fromPretrained`; the regular entry point only). */
   readonly speculative: boolean;
+  /** Store the full-layer KV in f16 (`fullStateStorage` of `fromPretrained`); absent = f32. */
+  readonly fullStateStorage?: "f16";
   /**
    * Pass `onRunDiagnostics`. It changes the decode path: the pipeline builds its on-GPU greedy
    * selection only without it, so with it a temperature-0 turn reads the whole logits row back.
@@ -84,6 +86,9 @@ export const buildGemmaPipeline = async (input: {
     ...pipelineOptions,
     gpu,
     quant: request.quant,
+    ...(request.fullStateStorage === undefined
+      ? {}
+      : { fullStateStorage: request.fullStateStorage }),
     signal,
     ...(onRunDiagnostics === undefined ? {} : { onRunDiagnostics }),
     ...(onProgress === undefined ? {} : { onProgress }),

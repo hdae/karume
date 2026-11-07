@@ -82,6 +82,7 @@ import {
   type GemmaManifests,
   type GemmaMount,
   gemmaModelChoices,
+  chatSpeculative,
   hasDrafter,
   INITIAL_CHAT_FORM,
   MOUNT_LABELS,
@@ -221,7 +222,7 @@ const pipelineText = (state: GemmaPipelineState): string => {
       const { request } = state;
       return `${MOUNT_LABELS[request.mount]} ${request.model} · ${request.quant} · ${request.source.kind}${
         request.speculative ? " · MTP drafter" : ""
-      }${request.diagnostics ? " · diagnostics" : ""} · loaded in ${state.loadSeconds.toFixed(1)} s`;
+      }${request.fullStateStorage === "f16" ? " · f16 KV" : ""}${request.diagnostics ? " · diagnostics" : ""} · loaded in ${state.loadSeconds.toFixed(1)} s`;
     }
   }
 };
@@ -292,6 +293,7 @@ export const Gemma4Page = () => {
     modelKey !== undefined &&
     hasDrafter(selectedManifest, modelKey);
   const speculative = speculativeChosen && speculativeAvailable;
+  const [f16KvChosen, setF16KvChosen] = useState(false);
   const [diagnosticsChosen, setDiagnosticsChosen] = useState(false);
 
   // GPU and pipeline.
@@ -418,6 +420,7 @@ export const Gemma4Page = () => {
     try {
       session = new ChatSession(observed.host, {
         ...(settings.system === undefined ? {} : { system: settings.system }),
+        ...chatSpeculative(pipeline.request),
         // No session maxNewTokens: every turn passes its own limit when the form has one, and a
         // turn without one is checked against the session's default reserve.
         capacity: settings.capacity,
@@ -466,6 +469,7 @@ export const Gemma4Page = () => {
       quant,
       source: sourceChoice.source,
       speculative,
+      ...(f16KvChosen ? { fullStateStorage: "f16" as const } : {}),
       diagnostics: diagnosticsChosen,
     });
     setChatRequest({ settings: chatParsed.value });
@@ -813,6 +817,9 @@ export const Gemma4Page = () => {
         isDefault: request.quant === manifestState.manifest.models[request.model]?.defaultQuant,
       },
       speculative: request.speculative,
+      ...(request.fullStateStorage === undefined
+        ? {}
+        : { fullStateStorage: request.fullStateStorage }),
       loadSeconds: Number(loadSeconds.toFixed(3)),
       chat: readyChat.settings,
       turns: turnRecords,
@@ -831,6 +838,7 @@ export const Gemma4Page = () => {
       quant !== pipeline.request.quant ||
       sourceChoice.source !== pipeline.request.source ||
       speculative !== pipeline.request.speculative ||
+      f16KvChosen !== (pipeline.request.fullStateStorage === "f16") ||
       diagnosticsChosen !== pipeline.request.diagnostics);
   const modelChoices = useMemo(() => gemmaModelChoices(manifests), [manifests]);
 
@@ -927,6 +935,20 @@ export const Gemma4Page = () => {
                 {speculativeAvailable
                   ? "Also reads the drafter weights; the session then speculates with the self-tuning gate. It is designed to emit the same tokens as plain decoding."
                   : "Not available for this model (no drafter weights, or the mobile QAT distribution)."}
+              </p>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="gemma4-f16-kv"
+                  checked={f16KvChosen}
+                  onCheckedChange={(checked) => setF16KvChosen(checked)}
+                  disabled={running}
+                />
+                <Label htmlFor="gemma4-f16-kv">f16 KV (full layers)</Label>
+              </div>
+              <p className="-mt-2 text-xs text-muted-foreground">
+                Halves the full-layer KV, and Fit counts it. It changes the numbers slightly:
+                earlier runs are read rounded to f16. With the MTP drafter the session speculates
+                always, without the self-tuning gate. Applies on the next Load.
               </p>
               <div className="flex items-center gap-2">
                 <Switch

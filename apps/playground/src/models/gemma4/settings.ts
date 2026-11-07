@@ -126,6 +126,17 @@ export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): bool
   entryPointOf(mount) === "gemma.Pipeline" &&
   manifest.models[model]?.weights["drafter"] !== undefined;
 
+/**
+ * The `speculative` a chat passes for what was loaded. MUST: `"always"` with a drafter on f16 full
+ * slots, because a turn that leaves it out selects the self-tuning gate, which the pipeline refuses
+ * there (ADR 0143 decision 8). Everywhere else the session keeps its default.
+ */
+export const chatSpeculative = (loaded: {
+  readonly speculative: boolean;
+  readonly fullStateStorage?: "f16";
+}): { readonly speculative?: "always" } =>
+  loaded.speculative && loaded.fullStateStorage === "f16" ? { speculative: "always" } : {};
+
 /** The per-turn form, as typed (parsed by {@link parseTurnForm}). */
 export type TurnForm = {
   readonly temperature: string;

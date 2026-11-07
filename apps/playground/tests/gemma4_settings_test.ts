@@ -8,6 +8,7 @@ import {
   effectiveModelKey,
   entryPointOf,
   gemmaModelChoices,
+  chatSpeculative,
   hasDrafter,
   INITIAL_CHAT_FORM,
   isQatModel,
@@ -162,6 +163,20 @@ describe("the model the page starts with", () => {
       mount: "gemma4",
       model: "e2b",
     });
+  });
+});
+
+describe("chatSpeculative", () => {
+  it("speculates always with a drafter on f16 full slots, where the gate is refused", () => {
+    expect(chatSpeculative({ speculative: true, fullStateStorage: "f16" })).toEqual({
+      speculative: "always",
+    });
+  });
+
+  it("keeps the session's default everywhere else", () => {
+    expect(chatSpeculative({ speculative: true })).toEqual({});
+    expect(chatSpeculative({ speculative: false, fullStateStorage: "f16" })).toEqual({});
+    expect(chatSpeculative({ speculative: false })).toEqual({});
   });
 });
 

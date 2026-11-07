@@ -149,6 +149,8 @@ export type GemmaRecord = RecordEnvironment & {
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   /** Whether the MTP drafter was built (`speculative` of `fromPretrained`). */
   readonly speculative: boolean;
+  /** Present only when the full-layer KV was stored in f16 (`fullStateStorage`). */
+  readonly fullStateStorage?: "f16";
   readonly loadSeconds: number;
   /**
    * Whether the pipeline was loaded with `onRunDiagnostics`. With it the pipeline skips its on-GPU
@@ -171,6 +173,7 @@ export const buildGemmaRecord = (input: {
   readonly model: string;
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   readonly speculative: boolean;
+  readonly fullStateStorage?: "f16";
   readonly loadSeconds: number;
   readonly chat: ChatSettings;
   readonly turns: readonly TurnRecord[];
@@ -190,6 +193,7 @@ export const buildGemmaRecord = (input: {
   model: input.model,
   preset: input.preset,
   speculative: input.speculative,
+  ...(input.fullStateStorage === undefined ? {} : { fullStateStorage: input.fullStateStorage }),
   loadSeconds: input.loadSeconds,
   diagnosticsCollected: input.diagnostics !== undefined,
   chat: input.chat,

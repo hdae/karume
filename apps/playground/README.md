@@ -918,6 +918,7 @@ One turn runs at a time.
 | Preset | The model's `quants`; `defaultQuant` is preselected and marked "(default)". Applies on the next Load. |
 | Source | **Cached** (the hub's cache over `/hf/`) or **Direct** (`/models/`) — Direct only for the two QAT mounts, which are not on `/hf/`. Applies on the next Load. |
 | MTP drafter | A model of the regular entry point with drafter weights only (regular E2B, every model of the q4_0 QAT line): builds the drafter (`speculative: {}`). The session then speculates with the self-tuning gate. Off by default. Applies on the next Load. |
+| f16 KV (full layers) | Passes `fullStateStorage: "f16"` to `fromPretrained`: the full-layer KV in half the memory, counted by **Fit** (ADR 0143). It changes the numbers slightly. With the MTP drafter the session passes `speculative: "always"`, because the self-tuning gate is refused under it. Off by default. Applies on the next Load. |
 | Collect Session diagnostics | Passes `onRunDiagnostics` to `fromPretrained`. The record then gets per-run counts and the Session diagnostics. **It changes the decode path**: without it the pipeline picks greedy (temperature 0) tokens on the GPU (an 8-byte readback per token). With it every greedy token reads the whole logits row back and is picked on the CPU. Off by default; leave it off to measure decode rates. Applies on the next Load. |
 | Load / Load again | Builds the pipeline for the selection and starts a new chat. A note says when the selection differs from the loaded pipeline. |
 | Cancel load | Shown while loading, in place of Load. Aborts the download (the `signal` of `fromPretrained`). Building the Session after the download cannot be interrupted: a pipeline that finishes after Cancel is released at once. |
@@ -970,6 +971,7 @@ How the figures are measured (from `performance.now()` in the page):
 | `pipeline` | `gemma.Pipeline` or `gemma4QatMobile.Pipeline` |
 | `model`, `preset` | the model name; `{ quant, label, isDefault }` |
 | `speculative` | whether the MTP drafter was built |
+| `fullStateStorage` | `"f16"` when the page's f16 KV switch was on, absent otherwise |
 | `loadSeconds` | from Load to the pipeline being ready |
 | `diagnosticsCollected` | whether the pipeline was loaded with `onRunDiagnostics`. When true, greedy turns ran without the on-GPU greedy selection, so their decode rates are not those of an app without diagnostics. |
 | `chat` | `system` (absent = none), `capacity`, `overflow` (`drop-oldest` / `refuse`) |

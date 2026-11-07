@@ -113,6 +113,13 @@ describe("buildGemmaRecord", () => {
     diagnostics: undefined,
   };
 
+  it("names f16 full slots only when they were asked for", () => {
+    expect(buildGemmaRecord({ ...input, mount: "gemma4" })).not.toHaveProperty("fullStateStorage");
+    expect(
+      buildGemmaRecord({ ...input, mount: "gemma4", fullStateStorage: "f16" }).fullStateStorage,
+    ).toBe("f16");
+  });
+
   it("starts with the format and the environment and names the entry point by mount", () => {
     const record = buildGemmaRecord({ ...input, mount: "gemma4" });
     expect(record.format).toBe(RECORD_FORMAT);

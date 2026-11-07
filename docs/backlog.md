@@ -25,7 +25,7 @@ maintainer's ruling of 2026-11-06).
    V0. Not started. Deferred by the maintainer until after the items above.
 
 For the next release: upload the `karume-gemma4-qat` manifest with 12B's `i4-gemvpar` and `i4-fast` and re-pin `SOURCES` (the
-local mirror has them); the maintainer's Chrome checks on the RTX 5070 Ti of `capacity: "fit"` and of `fullStateStorage: "f16"` (the `state-kv16` check on `/kernel-check`; the Gemma 4 page has no switch for it yet, so a chat there needs one), which ADR 0143 needs before a preset can declare it.
+local mirror has them); the maintainer's Chrome checks on the RTX 5070 Ti of `capacity: "fit"` and of `fullStateStorage: "f16"` (the `state-kv16` check on `/kernel-check`, then a chat with the Gemma 4 page's f16 KV switch), which ADR 0143 needs before a preset can declare it.
 
 ## later
 
