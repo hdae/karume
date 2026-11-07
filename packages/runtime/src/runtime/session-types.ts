@@ -67,6 +67,9 @@ export type RunInput = Tensor | ResidentTensor;
 export type RunInputs = Readonly<Record<string, RunInput>>;
 export type RunOutputs = Readonly<Record<string, Tensor>>;
 
+/** The half-open row range of {@link GenerationRun.bidirectionalRows}. */
+export type BidirectionalRows = { readonly start: number; readonly end: number };
+
 /**
  * The specification of one generation run (the third argument of Session.run, and
  * EnqueueOptions.generation).
@@ -76,9 +79,6 @@ export type RunOutputs = Readonly<Record<string, Tensor>>;
  * which advances only on the final success of a run or a batch (ADR 0066 decision 6: no double
  * bookkeeping).
  */
-/** The half-open row range of {@link GenerationRun.bidirectionalRows}. */
-export type BidirectionalRows = { readonly start: number; readonly end: number };
-
 export type GenerationRun = {
   readonly context: GenerationContext;
   readonly queryLength: number;
@@ -88,7 +88,8 @@ export type GenerationRun = {
    * run without it runs the kernels it always ran.
    *
    * MUST: one block, `0 ≤ start < end ≤ queryLength`, no longer than the smallest sliding window, on
-   * an immediate run of a context that owns sliding slots. Anything else fails loudly at issue. The
+   * an immediate run of a context that owns sliding slots and borrows none. Anything else fails loudly
+   * at issue, and a plan below 16 rows fails when the run builds it (only the tiled QK has the block). The
    * block is the run's and not a graph input for the same reason the logical lengths are the run's:
    * the kernels compare columns, and no tensor carries them.
    */
