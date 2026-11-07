@@ -53,7 +53,10 @@ export const thumbnailOf = (image: Rgb8Image, maxSide: number): Thumbnail => {
 
 /** Decodes one file in the page (`createImageBitmap` + `OffscreenCanvas`). */
 export const decodeImageFile = async (file: Blob): Promise<Rgb8Image> => {
-  const bitmap = await createImageBitmap(file);
+  // The file's bytes, not the display's: no color-space conversion (as PIL reads them). A 2D canvas
+  // stores premultiplied alpha, so a transparent pixel reads back black, not its stored color
+  // (README).
+  const bitmap = await createImageBitmap(file, { colorSpaceConversion: "none" });
   try {
     const { width, height } = bitmap;
     const context = new OffscreenCanvas(width, height).getContext("2d");

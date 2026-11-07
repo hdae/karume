@@ -368,6 +368,8 @@ export const Gemma4Page = () => {
   >([]);
   const [attachError, setAttachError] = useState<unknown>(undefined);
   const nextAttachmentId = useRef(0);
+  // Counts session resets: a decode that settles after one belongs to the chat it was started in.
+  const attachEpoch = useRef(0);
   const [pendingImages, setPendingImages] = useState<readonly Rgb8Image[]>([]);
   const [sessionReleaseError, setSessionReleaseError] = useState<unknown>(undefined);
   const [fitError, setFitError] = useState<unknown>(undefined);
@@ -403,6 +405,7 @@ export const Gemma4Page = () => {
   useEffect(() => {
     setEntries([]);
     setTurnRecords([]);
+    attachEpoch.current += 1;
     setAttachments([]);
     setPendingImages([]);
     setDiagnostics({});
@@ -527,13 +530,18 @@ export const Gemma4Page = () => {
   const attachFiles = (files: FileList | null): void => {
     if (files === null) return;
     setAttachError(undefined);
+    const epoch = attachEpoch.current;
     void Promise.all([...files].map(decodeImageFile)).then(
-      (images) =>
+      (images) => {
+        if (epoch !== attachEpoch.current) return;
         setAttachments((current) => [
           ...current,
           ...images.map((image) => ({ id: (nextAttachmentId.current += 1), image })),
-        ]),
-      (error: unknown) => setAttachError(error),
+        ]);
+      },
+      (error: unknown) => {
+        if (epoch === attachEpoch.current) setAttachError(error);
+      },
     );
   };
 

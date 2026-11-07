@@ -914,7 +914,9 @@ One turn runs at a time.
 
 A model whose manifest has the `vision` weights (12B of the q4_0 QAT line) loads with `vision: true`,
 and only then the composer shows **Attach images**. The page decodes a file itself
-(`createImageBitmap`, `OffscreenCanvas`, the alpha dropped) to the RGB8 the session takes. An
+(`createImageBitmap` without color-space conversion, `OffscreenCanvas`, the alpha dropped) to the RGB8
+the session takes. The browser applies a JPEG's EXIF orientation, and a canvas stores premultiplied alpha, so a
+transparent pixel arrives black where Pillow's `convert("RGB")` would keep its stored color. An
 attachment can be removed before sending, and a user turn shows its images as thumbnails. The session
 embeds each image once and keeps its rows for a re-render (ADR 0144). The record states each image's
 size and soft tokens (`turns[].images`), never its pixels.
