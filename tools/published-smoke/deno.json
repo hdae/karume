@@ -1,8 +1,8 @@
 {
   "lock": false,
   "imports": {
-    "@karume/hub": "jsr:@karume/hub@0.17.0",
-    "@karume/models": "jsr:@karume/models@0.17.0"
+    "@karume/hub": "jsr:@karume/hub@0.18.0",
+    "@karume/models": "jsr:@karume/models@0.18.0"
   },
   "fmt": {
     "lineWidth": 100,
