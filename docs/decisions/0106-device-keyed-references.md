@@ -336,3 +336,20 @@ without alpha, which is always 255 and checked by `encodePng`). The PNG stays as
   `deno-nvidia-geforce-rtx-3080-ti` and `node-nvidia-geforce-rtx-3080-ti` rows then agreed on all 11 cases
   (Dawn and wgpu produce bit-identical pixels on this GPU). A Deno upgrade can no longer break PNG rows.
 - `tools/verify-diff` compares `actual` and is unaffected.
+
+## Addendum (2026-11-08) — a held row also covers a model that does not fit the machine's GPU
+
+### Addendum decision 10: a load that fails with `GpuOutOfMemoryError` because the model's resident weights exceed the GPU may be held
+
+Decision 8 admits a held row only when running the case crashes the whole process. A case whose model cannot be resident on the
+machine's GPU at all is the same kind of fact about the machine, not about the numbers, even when the runtime stops it loudly
+instead of crashing: Gemma 4 26B A4B's text weights are 13.4 GiB, and on the RTX 3080 Ti (12 GB) the load fails after about 14 s
+with `GpuOutOfMemoryError` (`vkAllocateMemory` … `VK_ERROR_OUT_OF_DEVICE_MEMORY`, observed 2026-11-08) — the case can never
+have a row there (maintainer's ruling, 2026-11-08).
+
+- A held row MAY be added when the load fails with `GpuOutOfMemoryError` while making the weights resident, and the model's
+  resident weights exceed the machine's GPU memory. The reason names that size, the GPU and the observed error, and where the
+  model's numbers are checked on that machine instead (for 26B, the cut model of ADR
+  [0145](0145-gemma4-26b-moe-resident.md) decision 6).
+- Everything else of decision 8 holds: cases whose numbers disagree stay red; a held case is not run in any mode on that
+  machine; the row is removed when the case gets a row there.

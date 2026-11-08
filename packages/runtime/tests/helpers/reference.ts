@@ -330,9 +330,10 @@ export const openReferences = (
  *
  * The place that tells the reference check about cases that "are not run on that machine, so have
  * no reference row for the current environment". As with decision 8, a row may be added only for
- * cases that **crash the whole process** when run on that machine (cases whose numbers do not match
- * stay red and get fixed). The reason states the evidence and the condition for lifting it; once it
- * is resolved, the held row is removed.
+ * cases that **crash the whole process** when run on that machine, or whose model's resident weights
+ * exceed that machine's GPU so the load fails with `GpuOutOfMemoryError` (ADR 0106 addendum decision
+ * 10) — cases whose numbers do not match stay red and get fixed. The reason states the evidence and
+ * the condition for lifting it; once it is resolved, the held row is removed.
  */
 export type ReferenceHolds = Readonly<Record<string, Readonly<Record<string, string>>>>;
 

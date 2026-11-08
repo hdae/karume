@@ -21,7 +21,11 @@
 
 import { test } from "vite-plus/test";
 import { Pipeline } from "../../models/gemma.ts";
-import { openReferences, registerReferenceGate } from "../../runtime/tests/helpers/reference.ts";
+import {
+  openReferences,
+  type ReferenceHolds,
+  registerReferenceGate,
+} from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -54,9 +58,28 @@ const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
 /** Every seat of the mirror (empty without the mirror). */
 const SEATS = mirrorSeats(MIRROR);
 
+/**
+ * Seats whose model cannot be resident on a machine's GPU (ADR 0106 addendum decision 10): case id →
+ * environment key → reason. Such a seat runs in no mode there, and the reference check counts it as
+ * held. Remove a row when that machine gets the seat's row.
+ */
+const HOLDS: ReferenceHolds = {
+  "26b/i4": {
+    "node-nvidia-geforce-rtx-3080-ti":
+      "26B A4B's 13.4 GiB of text weights exceed this 12 GB GPU: the load fails with GpuOutOfMemoryError" +
+      " (VK_ERROR_OUT_OF_DEVICE_MEMORY, observed 2026-11-08); its numbers are checked here on the" +
+      " 12-layer cut (e2e_gemma4_26b_cut_test.ts — ADR 0145 decision 6)",
+  },
+};
+/** Whether seat `id` is held for this machine's environment key. */
+const heldHere = (id: string): boolean => {
+  const key = references.environmentKey;
+  return key !== undefined && Object.hasOwn(HOLDS, id) && Object.hasOwn(HOLDS[id], key);
+};
+
 for (const seat of SEATS) {
   const id = seatCaseId(seat);
-  test.skipIf(!RUNNABLE || references.lacksReference(id))(
+  test.skipIf(!RUNNABLE || heldHere(id) || references.lacksReference(id))(
     `gemma4-qat ${id} (${seat.row} row): the greedy token ids of the fixed prompt equal this machine's reference (real GPU)`,
     () =>
       settleSeatReference({
@@ -92,6 +115,21 @@ const CASE_IDS: readonly string[] = [
   ...SEATS.map(seatCaseId),
   ...(LONG_SEAT === undefined ? [] : [LONG_ID]),
 ];
-if (RUNNABLE) references.warnMissing(CASE_IDS);
+if (RUNNABLE) references.warnMissing(CASE_IDS.filter((id) => !heldHere(id)));
+
+test.skipIf(!AVAILABLE)(
+  "gemma4-qat held seats: every held id is a seat of the mirror, and every inner key has the environment-key format",
+  () => {
+    // A misspelled case id or environment key silently disables the row (ADR 0106 addendum decision 8).
+    const ids = new Set(CASE_IDS);
+    const malformed = Object.entries(HOLDS).flatMap(([id, byEnvironment]) => [
+      ...(ids.has(id) ? [] : [`${id} is not a seat`]),
+      ...Object.keys(byEnvironment)
+        .filter((key) => !/^(node|deno|chrome)-[a-z0-9]+(-[a-z0-9]+)*$/.test(key))
+        .map((key) => `${id} / ${key}`),
+    ]);
+    if (malformed.length > 0) throw new Error(`malformed held rows: ${malformed.join(", ")}`);
+  },
+);
 // A missing reference of this environment is not a silent green (ADR 0005's rule).
-registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS, holds: HOLDS });
