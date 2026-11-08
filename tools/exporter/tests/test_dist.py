@@ -30,6 +30,7 @@ from typing import Any, ClassVar
 
 import pytest
 from conftest import REPO_ROOT
+from container_fixture import write_f16_steps_container
 from ir_fixtures import ir_container as _ir_container
 from ir_fixtures import ir_parts, with_an_unknown_op
 
@@ -656,6 +657,24 @@ class TestDtypeLabelVocabulary:
         dtype is assembled** (the mismatch that actually happened with ADR 0097's `i2`).
         """
         assert set(verify.STORAGE_DTYPES) <= STORAGE_DTYPE_LABELS
+
+
+class TestStorageOfF16Steps:
+    """The f16 steps of `int4-sym-g-f16` are the `i4f16` layout's own, not an f16 weight
+    ({@link karume.dist.storage_dtypes} — ADR 0145 decision 3): a role that forbids an f16 series
+    (the q4_0 QAT line's model role) still accepts a container whose experts are `i4f16`."""
+
+    def test_the_steps_add_no_f16_to_the_storage(self, tmp_path: Path) -> None:
+        (path,) = write_f16_steps_container(tmp_path / "model.krm")
+
+        assert dist.storage_dtypes(path) == {"i4f16"}
+
+    def test_an_f16_prohibition_passes_and_an_i4f16_one_still_fails(self, tmp_path: Path) -> None:
+        (path,) = write_f16_steps_container(tmp_path / "model.krm")
+
+        dist.assert_storage_absent("model", path, {"model": ("f16",)})
+        with pytest.raises(DistError, match="has i4f16"):
+            dist.assert_storage_absent("model", path, {"model": ("i4f16",)})
 
 
 class TestPlanGates:

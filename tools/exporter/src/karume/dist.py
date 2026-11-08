@@ -304,10 +304,12 @@ def storage_dtypes(path: Path) -> set[str]:
         for supply in bound.supplies.values():
             entry = codec_entry(supply.encoding.codec)
             found.add(entry.layout)
-            if supply.scale is not None and entry.scale_dtype is not None:
-                # A companion scale's dtype is the codec's (f32, or the f16 steps of
-                # `int4-sym-g-f16` — container-v1 §6.1) — this is the basis for mixed assets
-                # "containing f32", so it is added explicitly from the binding table.
+            if supply.scale is not None and entry.scale_dtype == "f32":
+                # A companion f32 scale (container-v1 §6.1) is the basis for mixed assets
+                # "containing f32", so it is added explicitly from the binding table. The f16
+                # steps of `int4-sym-g-f16` are not an f16 weight: their dtype is part of the
+                # codec's own layout (`i4f16`, already added — ADR 0145 decision 3), and counting
+                # them as `f16` would trip every role that forbids an f16 series.
                 found.add(entry.scale_dtype)
     return found
 
