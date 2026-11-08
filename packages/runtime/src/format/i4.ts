@@ -13,7 +13,8 @@
  * implementations TS / Python / WGSL produce the same numbers.
  */
 
-import { groupScaleShape } from "./container/codecs.ts";
+import { groupScaleShape, scaleBytes } from "./container/codecs.ts";
+import { f16BitsToF32 } from "./f16.ts";
 
 /**
  * Element count (the format layer does not depend on src/ops.ts — keeps this one line for the same
@@ -106,4 +107,38 @@ export const decodeI4 = (
     }
   }
   return out;
+};
+
+/**
+ * {@link decodeI4} with **f16 steps** (`int4-sym-g-f16` — ADR 0145 decision 3): the same packed
+ * bytes, and a step table of `numel(scaleShape)` f16 values, little endian, two per u32 word (step
+ * `2i` in the low half, `2i+1` in the high half — what `unpack2x16float` reads), padded to a whole
+ * word (`scaleBytes`).
+ *
+ * Each step is widened to f32 by {@link f16BitsToF32} — exact (ADR 0069 decision 3), so this is
+ * {@link decodeI4} with the widened steps, value for value, and the GPU's `unpack2x16float` gives
+ * the same f32 step.
+ */
+export const decodeI4F16Steps = (
+  bytes: Uint8Array<ArrayBuffer>,
+  shape: readonly number[],
+  steps: Uint8Array<ArrayBuffer>,
+  scaleShape: readonly number[],
+  groupSize: number,
+): Float32Array<ArrayBuffer> => {
+  const count = numel(scaleShape);
+  const expected = scaleBytes("int4-sym-g-f16", count, "decodeI4F16Steps");
+  if (steps.byteLength !== expected) {
+    throw new I4Error(
+      `f16 step table of ${steps.byteLength} bytes does not match scale [${scaleShape.join(",")}]` +
+        ` (${count} steps padded to whole u32 words = ${expected} bytes are needed)`,
+    );
+  }
+  // A DataView reads at any byte offset (a Uint16Array view needs a 2-byte aligned one).
+  const view = new DataView(steps.buffer, steps.byteOffset, steps.byteLength);
+  const widened = new Float32Array(count);
+  for (let step = 0; step < count; step += 1) {
+    widened[step] = f16BitsToF32(view.getUint16(step * 2, true));
+  }
+  return decodeI4(bytes, shape, widened, scaleShape, groupSize);
 };

@@ -20,7 +20,9 @@
  *   is fixed to axis 0)
  * - Group granularity: for a per-channel codec `groupSize` = row length; for the group codec a power
  *   of two ≥ 16 that divides the row length
- * - Scale block length = `shape[rowAxis] · (row length / groupSize) · 4` (+ padding)
+ * - Scale block length = `shape[rowAxis] · (row length / groupSize)` steps of the codec's scale
+ *   dtype (4 bytes per f32 step; 2 per f16 step, padded to a whole u32 word — `scaleBytes`)
+ *   (+ padding)
  * - A split scale goes with a piece list only: one scale piece per data piece, each covering the
  *   same rows, middle pieces without padding (rule ③ — ADR 0108 addendum 15)
  * - The declared shape for the i2 path (`int2-off` / `ternary`) is positive rank 2 with a row length
@@ -37,6 +39,7 @@ import {
   perChannelGroupSize,
   quantizedRowLength,
   scaleBytes,
+  scaleStepBytes,
 } from "./codecs.ts";
 import type {
   ConstantBinding,
@@ -156,7 +159,11 @@ function fail(message: string): never {
  * and types").
  */
 const allowedLayouts = (dtype: IrDtype): readonly CodecEntry["layout"][] =>
-  dtype === "f32" ? ["f32", "f16", "bf16", "i8", "i4", "i2"] : dtype === "i32" ? ["i32"] : [];
+  dtype === "f32"
+    ? ["f32", "f16", "bf16", "i8", "i4", "i4f16", "i2"]
+    : dtype === "i32"
+      ? ["i32"]
+      : [];
 
 const isPowerOfTwo = (value: number): boolean => 2 ** Math.round(Math.log2(value)) === value;
 
@@ -190,9 +197,9 @@ const declaredPayloadBytes = (codec: CodecName, numel: number, where: string): n
  * Companion scale byte length from the declaration (rethrows the bare error of {@link scaleBytes}
  * as this layer's type).
  */
-const declaredScaleBytes = (count: number, where: string): number => {
+const declaredScaleBytes = (codec: CodecName, count: number, where: string): number => {
   try {
-    return scaleBytes(count, where);
+    return scaleBytes(codec, count, where);
   } catch (cause) {
     return fail(cause instanceof Error ? cause.message : String(cause));
   }
@@ -225,16 +232,22 @@ const rowBytesOfPayload = (payload: number, shape: readonly number[], where: str
 
 /**
  * The plan of a split scale (§5 rule ③ — ADR 0108 addendum 15): one scale block per data piece,
- * piece k covering exactly the rows of data piece k, its length `rows · (rowLength / groupSize) · 4`
- * (middle pieces exactly, the last one with padding under 4). The descriptor parse has already
- * checked that the list has 2 or more entries continuing from row 0 without gaps.
+ * piece k covering exactly the rows of data piece k, its length `rows · rowBytes` with `rowBytes =
+ * (rowLength / groupSize) · step bytes` (middle pieces exactly, the last one with padding under 4).
+ * The descriptor parse has already checked that the list has 2 or more entries continuing from row
+ * 0 without gaps.
  */
 const planSplitScale = (
   where: string,
   dataIsPieced: boolean,
   data: readonly SupplyBlock[],
   pieces: readonly WeightPiece[],
-  scale: { readonly rowCount: number; readonly payload: number; readonly locate: Locator },
+  scale: {
+    readonly rowCount: number;
+    readonly rowBytes: number;
+    readonly payload: number;
+    readonly locate: Locator;
+  },
 ): ScaleSupply => {
   const by = `${where} scale`;
   // A split scale follows the data's pieces, so data in one block has no boundaries to split it on
@@ -248,8 +261,9 @@ const planSplitScale = (
     );
   }
   // The data's piece list exists only for rowAxis 0 (rule ④), so the scale's rows are the data's
-  // leading dimension and one scale row is `payload / rowCount` bytes.
-  const rowBytes = scale.payload / scale.rowCount;
+  // leading dimension. One scale row is its steps' bytes, not `payload / rowCount`: an f16 payload
+  // carries the word padding of the whole scale, which belongs to no row.
+  const rowBytes = scale.rowBytes;
   const planned = pieces.map((piece, i): SupplyBlock => {
     const pieceBy = `${by} piece[${i}]`;
     const rows = data[i].rows;
@@ -476,10 +490,8 @@ const planSupply = (
   }
   const scaleRef = encoding.scale;
   if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' requires a scale`);
-  const scalePayload = declaredScaleBytes(
-    numelOf(groupScaleShape(shape, rowAxis, groupSize)),
-    `${where} scale`,
-  );
+  const scaleShape = groupScaleShape(shape, rowAxis, groupSize);
+  const scalePayload = declaredScaleBytes(encoding.codec, numelOf(scaleShape), `${where} scale`);
   let scale: ScaleSupply;
   if (scaleRef.pieces === undefined) {
     const scaleFound = locate(scaleRef.block, `${where} scale`);
@@ -495,6 +507,7 @@ const planSupply = (
   } else {
     scale = planSplitScale(where, supply.pieces !== undefined, blocks, scaleRef.pieces, {
       rowCount,
+      rowBytes: scaleShape[1] * scaleStepBytes(encoding.codec),
       payload: scalePayload,
       locate,
     });

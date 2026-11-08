@@ -24,6 +24,7 @@ import {
 import { readHeader } from "../src/format/container/header.ts";
 import { HEADER_BYTES } from "../src/format/container/limits.ts";
 import { openContainer } from "../src/format/container/open.ts";
+import { decodeI4, decodeI4F16Steps } from "../src/format/i4.ts";
 
 const FIXTURE = new URL("./fixtures/container/synthetic.krm", import.meta.url);
 
@@ -280,5 +281,44 @@ describe("split-scale container fixture (Python writer — ADR 0108 addendum 15)
 
     assertEquals(serializeGraphDescriptor(parseGraphDescriptor(documents.graph)), documents.graph);
     assertEquals(serializeModelDescriptor(parseModelDescriptor(documents.model)), documents.model);
+  });
+});
+
+const F16_STEPS_FIXTURE = new URL("./fixtures/container/synthetic-f16-steps.krm", import.meta.url);
+
+describe("f16-step container fixture (Python writer and emit's step table — ADR 0145 decision 3)", () => {
+  it("opens int4-sym-g-f16 with its odd f16 step table padded to a whole u32 word", async () => {
+    const bytes = (await readFile(F16_STEPS_FIXTURE)) as Uint8Array<ArrayBuffer>;
+    const container = await openContainer({ kind: "bytes", bytes });
+    for (const block of container.model?.blocks ?? []) {
+      assertEquals(await sha256Hex(await container.readBlock(block.id)), block.sha256, block.id);
+    }
+    const w = container.graphs["synthetic-f16-steps"].supplies.get("w.weight");
+    assertEquals(w?.encoding.codec, "int4-sym-g-f16");
+    assertEquals(w?.encoding.scale?.dtype, "f16");
+    assertEquals(w?.scale?.payloadBytes, 8);
+    // 0.5, 1.5 and 0.125 as f16 (0x3800 / 0x3e00 / 0x3000), little endian, step 2i in the low half
+    // of a word, and one zero step of padding.
+    assertEquals(
+      await container.readBlock(w?.scale?.id ?? ""),
+      Uint8Array.from([0x00, 0x38, 0x00, 0x3e, 0x00, 0x30, 0x00, 0x00]),
+    );
+    assertEquals(await container.readBlock(w?.blocks[0].id ?? ""), patternBytes(24, 71));
+  });
+
+  it("decodes through the CPU decode of f16 steps to the codes times the steps", async () => {
+    const bytes = (await readFile(F16_STEPS_FIXTURE)) as Uint8Array<ArrayBuffer>;
+    const container = await openContainer({ kind: "bytes", bytes });
+    const w = container.graphs["synthetic-f16-steps"].supplies.get("w.weight");
+    const payload = await container.readBlock(w?.blocks[0].id ?? "");
+    const steps = (await container.readBlock(w?.scale?.id ?? "")).subarray(
+      0,
+      w?.scale?.payloadBytes,
+    );
+
+    assertEquals(
+      [...decodeI4F16Steps(payload, [3, 16], steps, [3, 1], 16)],
+      [...decodeI4(payload, [3, 16], Float32Array.from([0.5, 1.5, 0.125]), [3, 1], 16)],
+    );
   });
 });

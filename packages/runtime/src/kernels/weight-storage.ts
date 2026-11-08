@@ -42,7 +42,13 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 
-/** Storage dtype of a weight slot. The semantics are always f32 (compute is f32 — ADR 0006). */
+/**
+ * Storage dtype of a weight slot. The semantics are always f32 (compute is f32 — ADR 0006).
+ *
+ * NOTE: the codec layout `i4f16` (`int4-sym-g-f16`) is deliberately not a member — its f16 steps are
+ * read by `expert_linear` only (ADR 0145 decision 3), and the residency planner refuses it for every
+ * consumer of this type (`planWeightResidency` in runtime/weight-residency.ts).
+ */
 export type WeightStorage = "f32" | "f16" | "bf16" | "i8" | "i4" | "i2";
 
 /**

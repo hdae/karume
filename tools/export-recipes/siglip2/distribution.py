@@ -136,7 +136,7 @@ SIGLIP2_STORAGE_REQUIREMENTS: Mapping[str, str] = {SIGLIP2_ROLE: "f32"}
 #: sbv2). I32 is not listed because i32 is plain storage, not compression (the plain side of
 #: `karume.emit`), and normally appears in plain series as index tables.
 SIGLIP2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    SIGLIP2_ROLE: ("f16", "bf16", "i8", "i4", "i2")
+    SIGLIP2_ROLE: ("f16", "bf16", "i8", "i4", "i4f16", "i2")
 }
 
 #: Declaration of the weights (dtype label → role name). There is only one dtype, so the quant table

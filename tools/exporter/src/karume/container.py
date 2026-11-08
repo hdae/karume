@@ -311,7 +311,7 @@ class CodecEntry:
     #: Kind of decode path (derived from the codec — the consumer branches on it). The spelling is
     #: the same vocabulary as the old `storage.dtype`, and `ternary` shares the same i2 path as
     #: `int2-off` (§6.2 / ADR 0108 decision 13).
-    layout: Literal["f32", "f16", "bf16", "i32", "i8", "i4", "i2"]
+    layout: Literal["f32", "f16", "bf16", "i32", "i8", "i4", "i4f16", "i2"]
     packing: CodecPacking
     #: `"required"` = quantized (`rowAxis` / `groupSize` / `scale` required), `"forbidden"` = not
     #: quantized.
@@ -323,10 +323,14 @@ class CodecEntry:
     #: `1` (the conv_transpose1d shape) — the i4 / i2 / ternary decode paths only have row-wise
     #: quantization (§6.3).
     row_axes: tuple[int, ...]
+    #: The dtype of the companion scale, implied by the codec (`encoding.scale.dtype` MUST equal
+    #: it): `f32` for every quantized codec but `int4-sym-g-f16`, whose steps are f16 (ADR 0145
+    #: decision 3). `None` when not quantized.
+    scale_dtype: Literal["f32", "f16"] | None
 
 
 def _raw(layout: Literal["f32", "f16", "bf16", "i32"], block_bytes: int) -> CodecEntry:
-    return CodecEntry(layout, CodecPacking(1, block_bytes, 4), "forbidden", None, ())
+    return CodecEntry(layout, CodecPacking(1, block_bytes, 4), "forbidden", None, (), None)
 
 
 #: The first-edition ledger (§6.3). Registered names are **baked into assets**, so the values of
@@ -341,19 +345,24 @@ CODEC_LEDGER: Mapping[str, CodecEntry] = {
     "f16": _raw("f16", 2),
     "bf16": _raw("bf16", 2),
     "i32": _raw("i32", 4),
-    "int8-sym": CodecEntry("i8", CodecPacking(1, 1, 4), "required", "channel", (0, 1)),
-    "int4-sym-g": CodecEntry("i4", CodecPacking(8, 4, 4), "required", "group", (0,)),
-    "int2-off": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel", (0,)),
-    "ternary": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel", (0,)),
+    "int8-sym": CodecEntry("i8", CodecPacking(1, 1, 4), "required", "channel", (0, 1), "f32"),
+    "int4-sym-g": CodecEntry("i4", CodecPacking(8, 4, 4), "required", "group", (0,), "f32"),
+    # ADR 0145 decision 3: the bytes of `int4-sym-g` with one f16 step per group (two per u32
+    # word, step 2i in the low half), under its own layout. Only `expert_linear` reads it.
+    "int4-sym-g-f16": CodecEntry("i4f16", CodecPacking(8, 4, 4), "required", "group", (0,), "f16"),
+    "int2-off": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel", (0,), "f32"),
+    "ternary": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel", (0,), "f32"),
 }
 
 #: Lower limit of the group length of group quantization (ADR 0069 decision 2).
 MIN_GROUP_SIZE = 16
 
-#: Accepted set of scale dtypes (only f32 in the first edition — §6.1).
-SCALE_DTYPES = ("f32",)
+#: Accepted set of scale dtypes (§6.1). Each quantized codec takes exactly one of them
+#: ({@link CodecEntry.scale_dtype}); f16 only for `int4-sym-g-f16` (ADR 0145 decision 3).
+SCALE_DTYPES = ("f32", "f16")
 
-#: Old `storage.dtype` → registered ledger name (the "old `storage.dtype`" row of §6.3).
+#: IR v1 `storage.dtype` → registered ledger name (the "old `storage.dtype`" row of §6.3, plus
+#: `i4f16` — the layout of `int4-sym-g-f16`, which no old asset carries).
 #:
 #: MUST: nothing maps to `ternary` — even when the value range is a subset of `int2-off`, the claim
 #: "this is ternary" is the quantizer's to make, and the old assets' i2 actually has `q = -2` in
@@ -365,6 +374,7 @@ CODEC_FOR_STORAGE: Mapping[str, str] = {
     "i32": "i32",
     "i8": "int8-sym",
     "i4": "int4-sym-g",
+    "i4f16": "int4-sym-g-f16",
     "i2": "int2-off",
 }
 
@@ -419,6 +429,22 @@ def payload_bytes(codec: str, numel: int, where: str) -> int:
             f" ({packing.block_elements} elements / block)"
         )
     return numel // packing.block_elements * packing.block_bytes
+
+
+def scale_step_bytes(codec: str) -> int:
+    """Bytes of one scale step of a quantized codec (f32 = 4, f16 = 2 — mirrors TS
+    `scaleStepBytes`). A run of whole scale rows is `rows · steps per row ·` this bytes."""
+    dtype = codec_entry(codec).scale_dtype
+    if dtype is None:
+        raise ContainerFormatError(f"codec '{codec}' is not quantized, so it has no scale")
+    return 2 if dtype == "f16" else 4
+
+
+def scale_bytes(codec: str, count: int) -> int:
+    """Payload byte length of a companion scale of `count` steps (mirrors TS `scaleBytes`): 4
+    bytes per f32 step, and 2 per f16 step **padded to a whole u32 word** (an odd step count
+    rounds up — the kernel binds f16 steps as `array<u32>`, two per word)."""
+    return align_up(count * scale_step_bytes(codec), 4)  # whole u32 words
 
 
 # ---------------------------------------------------------------------------
@@ -616,12 +642,13 @@ class BlockEncoding:
             raise ContainerFormatError("A scale has exactly one of `block` and `pieces`")
         document["rowAxis"] = self.row_axis
         document["groupSize"] = self.group_size
+        # The codec implies the scale dtype (the ledger's `scale_dtype` — §6.1).
         if self.scale_pieces is None:
-            document["scale"] = {"block": self.scale_block, "dtype": SCALE_DTYPES[0]}
+            document["scale"] = {"block": self.scale_block, "dtype": entry.scale_dtype}
         else:
             document["scale"] = {
                 "pieces": _pieces_document(self.scale_pieces, "scale"),
-                "dtype": SCALE_DTYPES[0],
+                "dtype": entry.scale_dtype,
             }
         return document
 
@@ -1368,6 +1395,7 @@ def _cut_rows(
 
 def _cut_scale(
     scale_payload: int,
+    row_bytes: int,
     rows: int,
     cuts: Sequence[tuple[tuple[int, int], int, int, bool]],
     block_bytes: int,
@@ -1376,6 +1404,10 @@ def _cut_scale(
     """The scale's blocks: one when it fits the block limit, otherwise one per data piece covering
     the same rows (rule ③ — ADR 0108 addendum 15). Fails loudly at planning time when no split
     fits.
+
+    `row_bytes` is one scale row's steps (`steps per row · step bytes`), not `scale_payload /
+    rows`: an f16 payload carries the word padding of the whole scale, which belongs to no row (the
+    last piece takes it as its tail padding).
 
     MUST: a scale that fits stays one block (only then is the container byte-identical to a writer
     without split scales — the descriptor's `scale` keeps `block`).
@@ -1389,7 +1421,6 @@ def _cut_scale(
         )
     # Pieces exist only for rowAxis 0 (rule ④ — checked by the caller first), so the scale's rows
     # are the data's leading dimension.
-    row_bytes = scale_payload // rows
     scale_cuts: list[tuple[tuple[int, int], int, int, bool]] = []
     for index, ((begin, end), _, _, last) in enumerate(cuts):
         length = (end - begin) * row_bytes
@@ -1413,6 +1444,8 @@ class _TensorPlan:
     payload: int
     rows: int
     scale_payload: int | None
+    #: Bytes of one scale row (its steps — `None` without a scale).
+    scale_row_bytes: int | None = None
 
 
 def _numel(shape: Sequence[Any], where: str) -> int:
@@ -1473,8 +1506,10 @@ def _plan_tensor(
             raise ContainerFormatError(
                 f"{where}: row length {row_length} is not divisible by groupSize {size}"
             )
-    scale_payload = row_count * group_count(row_length, encoding.group_size) * 4
-    return _TensorPlan(name, encoding, payload, rows, scale_payload)
+    steps = group_count(row_length, encoding.group_size)
+    scale_payload = scale_bytes(encoding.codec, row_count * steps)
+    row_bytes = steps * scale_step_bytes(encoding.codec)
+    return _TensorPlan(name, encoding, payload, rows, scale_payload, row_bytes)
 
 
 class _Serial:
@@ -1596,8 +1631,10 @@ def _plan_data_parts(
             )
         scale_cuts = (
             None
-            if plan.scale_payload is None
-            else _cut_scale(plan.scale_payload, plan.rows, cuts, block_bytes, where)
+            if plan.scale_payload is None or plan.scale_row_bytes is None
+            else _cut_scale(
+                plan.scale_payload, plan.scale_row_bytes, plan.rows, cuts, block_bytes, where
+            )
         )
         piece_ids = [next_id("w", "weight") for _ in cuts]
         head: list[tuple[str, _Chunk]] = [
@@ -2276,6 +2313,13 @@ def _parse_encoding(value: Any, where: str) -> BlockEncoding:
         scale["dtype"] in SCALE_DTYPES,
         f"{where}.scale.dtype is not in the accepted set ({' / '.join(SCALE_DTYPES)}):"
         f" {scale['dtype']!r}",
+    )
+    # The codec implies the step dtype (mirrors TS `parseEncoding`) — a mismatch would decode f16
+    # steps as f32 or the reverse, a silent wrong value with a plausible byte count.
+    _require(
+        scale["dtype"] == entry.scale_dtype,
+        f"{where}.scale.dtype is not in the accepted set of codec '{codec}'"
+        f" ({entry.scale_dtype} steps): {scale['dtype']!r}",
     )
     _require(
         ("block" in scale) != ("pieces" in scale),

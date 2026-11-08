@@ -937,7 +937,8 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
   // 1 — ADR 0069 decision 5 and its addenda, `i4EligibleInitializers` in runtime/plan.ts; ineligible
   // ones fall back to CPU decode). i2 eligibility is the weight slots of linear / embedding. bf16
   // (ADR 0131) uses the same path as f16 (eligible: the same 6 slots as f16, `WEIGHT_SLOTS`;
-  // ineligible ones are decoded on the CPU).
+  // ineligible ones are decoded on the CPU). `i4f16` (`int4-sym-g-f16`) is absent: no op here reads
+  // its f16 steps (ADR 0145 decision 3 binds it to `expert_linear`).
   storage: new Set(["f32", "f16", "bf16", "i8", "i4", "i2", "i32"]),
   io: new Set(IO_DTYPES),
 };

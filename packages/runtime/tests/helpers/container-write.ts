@@ -17,7 +17,12 @@
  * - An asset that needs range reads (`dedicatedPart`) is placed alone in a part of its own.
  */
 
-import { codecEntry, type CodecName, payloadBytes } from "../../src/format/container/codecs.ts";
+import {
+  codecEntry,
+  type CodecName,
+  payloadBytes,
+  type ScaleDtype,
+} from "../../src/format/container/codecs.ts";
 import {
   type AssetBinding,
   type ConstantBinding,
@@ -59,7 +64,8 @@ export type EncodingInput = {
   readonly rowAxis?: 0 | 1;
   /** Quantized codecs only. The row length for per-channel. */
   readonly groupSize?: number;
-  readonly scale?: { readonly bytes: Uint8Array<ArrayBuffer>; readonly dtype: "f32" };
+  /** The declared scale dtype is passed through as is (a test may declare one its codec refuses). */
+  readonly scale?: { readonly bytes: Uint8Array<ArrayBuffer>; readonly dtype: ScaleDtype };
 };
 
 export type TensorInput = {

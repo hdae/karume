@@ -359,7 +359,8 @@ IO_DTYPES = SEMANTIC_DTYPES
 #: load, so either path executes (the mirror of RuntimeSupport.storage on the TS side). i4 and i2
 #: have narrow eligibility — i4 only in the weight slots of linear / embedding / conv1d
 #: (`groups == 1`) (`emit.I4_WEIGHT_OPS`), i2 only in the weight slots of linear / embedding, as a
-#: fixed packed form (ADR 0097).
+#: fixed packed form (ADR 0097). `i4f16` (`int4-sym-g-f16`) is absent: no op here reads its f16
+#: steps (ADR 0145 decision 3 binds it to `expert_linear`).
 M0_STORAGE_DTYPES = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
 
 OpKind = Literal[

@@ -49,7 +49,7 @@ const encodingOf = (
         ? spec
         : spec.codec;
   const entry = codecEntry(codec);
-  if (entry.scale === "forbidden") return { codec };
+  if (entry.scale === "forbidden" || entry.scaleDtype === undefined) return { codec };
   const rowAxis = typeof spec === "object" ? (spec.rowAxis ?? 0) : 0;
   const rowLength = quantizedRowLength(shape, rowAxis);
   const groupSize =
@@ -65,11 +65,12 @@ const encodingOf = (
     scale: {
       bytes: zeros(
         scaleBytes(
+          codec,
           groupScaleShape(shape, rowAxis, groupSize).reduce((count, dim) => count * dim, 1),
           `scale of ${name}`,
         ),
       ),
-      dtype: "f32",
+      dtype: entry.scaleDtype,
     },
   };
 };

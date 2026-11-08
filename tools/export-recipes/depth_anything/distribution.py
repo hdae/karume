@@ -152,7 +152,7 @@ DEPTH_ANYTHING_STORAGE_REQUIREMENTS: Mapping[str, str] = {DEPTH_ANYTHING_ROLE: "
 #: sbv2). I32 is not listed because i32 is plain storage, not compression (the plain side of
 #: `karume.emit`), and it routinely appears in plain series as index tables.
 DEPTH_ANYTHING_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    DEPTH_ANYTHING_ROLE: ("f16", "bf16", "i8", "i4", "i2")
+    DEPTH_ANYTHING_ROLE: ("f16", "bf16", "i8", "i4", "i4f16", "i2")
 }
 
 #: The weights declaration (dtype label → role name). There is only one dtype, so the quant table

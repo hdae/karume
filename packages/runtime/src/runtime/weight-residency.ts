@@ -39,6 +39,16 @@ import {
 } from "./plan.ts";
 
 /**
+ * The refusal of `int4-sym-g-f16` (layout `i4f16`) by every consumer this planner knows (ADR 0145
+ * decision 3). The layout maps to no residency class and no `WeightStorage`: its step words are
+ * f16 pairs, and every kernel that takes a `WeightStorage` (and the CPU expansion of the `expanded`
+ * class, `scaleTensor` in session-build.ts) reads a scale as f32 — a silent wrong value with a
+ * plausible byte count.
+ */
+const f16StepsRefusal = (where: string): string =>
+  `${where}: int4-sym-g-f16 (f16 steps) is read by expert_linear only — ADR 0145`;
+
+/**
  * One weight resident on the GPU in compressed form (the index paired with the Session's weight
  * ledger — kernel-variant selection and extra bindings are decided from here alone).
  *
@@ -167,6 +177,9 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     }
     const { codec, groupSize, rowAxis } = initializer.storage;
     const layout = codecLayout(codec);
+    // MUST: before any residency class — not even `expanded` (the CPU expansion reads the scale as
+    // f32), and the i4 class below would bind the f16 step words to an f32 scale binding.
+    if (layout === "i4f16") throw new ExecutionError(f16StepsRefusal(where));
     let bytes: number;
     try {
       bytes = payloadBytes(codec, count, where);
@@ -208,10 +221,16 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     if (rows === undefined) {
       throw new ExecutionError(`${where}: weight [${shape.join(",")}] has no row axis ${axis}`);
     }
-    const scale = scaleBytes(numel(groupScaleShape(shape, axis, groupSize)), where);
+    const scale = scaleBytes(codec, numel(groupScaleShape(shape, axis, groupSize)), where);
     if (layout === "i8" || layout === "i2") {
       plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes: scale, rowAxis: axis });
       continue;
+    }
+    if (layout !== "i4") {
+      // Unreachable by type: every layout is handled above. A layout added to the ledger turns
+      // this red at compile time instead of being planned as i4.
+      const unhandled: never = layout;
+      throw new ExecutionError(`${where}: unhandled codec layout ${JSON.stringify(unhandled)}`);
     }
     // The i4 group form takes the leading dimension as rows (the premise of the decode kernels and
     // of `decodeI4` — ADR 0069 decision 3).
@@ -240,6 +259,7 @@ const expectedSharedSeat = (
 ): Exclude<WeightResidency["seat"], "shared"> => {
   const layout = codecLayout(codec);
   if (layout === "f32" || layout === "i32") return "raw";
+  if (layout === "i4f16") throw new ExecutionError(f16StepsRefusal(`lender codec '${codec}'`));
   const resident =
     layout === "i4"
       ? seat.eligible && seat.i4Eligible

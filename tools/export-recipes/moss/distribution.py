@@ -153,7 +153,7 @@ MOSS_OUTPUT_PATHS: Mapping[str, str] = {
 
 #: Every compressed layout of the codec ledger (`karume.container.CODEC_LEDGER` without f32 / i32 —
 #: the test checks the ledger).
-_COMPRESSED_LAYOUTS = ("bf16", "f16", "i8", "i4", "i2")
+_COMPRESSED_LAYOUTS = ("bf16", "f16", "i8", "i4", "i4f16", "i2")
 
 #: The storage each container's binding table must hold (the presence check — a plain f32 container
 #: in an i8 seat passed assembly, load and run up to a reference check in the precedent's measured

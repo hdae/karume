@@ -190,7 +190,7 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 #: vocabulary" ({@link karume.modelcard.quants}). The source of truth for storage is the
 #: descriptor's `encoding.codec`, and labels are a vocabulary for selection and display (ADR 0071
 #: decision 3) — the label's accepted set pins that line.
-STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
+STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i4f16", "i2", "i32"})
 
 #: Character limits of a quant's display fields (ADR 0075 decision 1). `label` is a short display
 #: name for a choice, `description` a one-line explanation; both optional. The hub checks bounds
@@ -290,9 +290,9 @@ def storage_dtypes(path: Path) -> set[str]:
     the binding table).
 
     The vocabulary is the codec ledger's `layout` (`f32` / `f16` / `bf16` / `i32` / `i8` / `i4` /
-    `i2`); the safetensors-dialect dtype names (`F16` / `I4`) were retired. The union is taken
-    because mixed assets put several codecs in one container (in an `i4` series the scales are f32
-    and the weights i4).
+    `i4f16` / `i2`); the safetensors-dialect dtype names (`F16` / `I4`) were retired. The union is
+    taken because mixed assets put several codecs in one container (in an `i4` series the scales
+    are f32 and the weights i4).
 
     MUST: the source of truth is **the binding table** (the descriptor's `encoding.codec`), not
     the dtype label (ADR 0071 decision 3's "a label does not claim the storage" — labels are a
@@ -304,10 +304,11 @@ def storage_dtypes(path: Path) -> set[str]:
         for supply in bound.supplies.values():
             entry = codec_entry(supply.encoding.codec)
             found.add(entry.layout)
-            if supply.scale is not None:
-                # companion scales are fixed to f32 (container-v1 §6.1) — this is the basis for
-                # mixed assets "containing f32", so it is added explicitly from the binding table.
-                found.add("f32")
+            if supply.scale is not None and entry.scale_dtype is not None:
+                # A companion scale's dtype is the codec's (f32, or the f16 steps of
+                # `int4-sym-g-f16` — container-v1 §6.1) — this is the basis for mixed assets
+                # "containing f32", so it is added explicitly from the binding table.
+                found.add(entry.scale_dtype)
     return found
 
 

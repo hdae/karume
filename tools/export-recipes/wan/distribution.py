@@ -362,7 +362,7 @@ WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 
 #: Every compressed storage among the codec ledger's layouts (`karume.container.CODEC_LEDGER` minus
 #: f32 / i32 — `wan/tests/test_distribution.py` checks that it matches the ledger).
-_COMPRESSED_LAYOUTS = ("bf16", "f16", "i8", "i4", "i2")
+_COMPRESSED_LAYOUTS = ("bf16", "f16", "i8", "i4", "i4f16", "i2")
 
 #: The storage vocabulary that **must not** be in each role's binding table
 #: ({@link assert_storage_absent}). A presence check alone lets through a mix-up that plugs in a

@@ -79,11 +79,13 @@ from typing import Literal
 import torch
 
 from karume.container import (
+    CODEC_FOR_STORAGE,
     Encoding,
     bakeable_initializers,
     container_bindings,
     weight_channel_axes,
 )
+from karume.container import scale_bytes as codec_scale_bytes
 from karume.ir import MIN_GROUP_SIZE, IrGraph, IrInitializer, IrNode, IrStorage
 from karume.ops import (
     CONV1D_OP,
@@ -404,11 +406,86 @@ def _unrounded(name: str, tensor_key: str, detail: str) -> EmitError:
 @dataclass(frozen=True)
 class FixedQuantizedWeight:
     """Packed data and scale of fixed integers. The logical shape is carried by the matching
-    f32/meta Tensor."""
+    f32/meta Tensor.
 
-    dtype: Literal["i2", "i4", "i8"]
+    `i4f16` is `int4-sym-g-f16` (ADR 0145 decision 3): the codes of `i4` and its F32 steps, stored
+    as f16 steps ({@link f16_step_table}). Only `expert_linear` reads it, so no consumer admits it
+    yet — linear / embedding / conv1d MUST NOT.
+    """
+
+    dtype: Literal["i2", "i4", "i4f16", "i8"]
     packed: torch.Tensor
     scale: torch.Tensor
+
+
+#: The smallest positive normal f16, `2^-14` — the floor of an all-zero group's f16 step (ADR 0069
+#: decision 3: the f32 floor `f32 tiny` rounds to a zero f16, which is refused).
+F16_MIN_NORMAL = 2.0**-14
+
+
+def f16_step_table(packed: torch.Tensor, steps: torch.Tensor, where: str) -> torch.Tensor:
+    """The f16 step table `int4-sym-g-f16` stores for packed i4 codes and their F32 steps (ADR
+    0145 decision 3, under ADR 0069 decision 3's conditions for an f16 scale).
+
+    `packed` is the `[rows, width / 2]` uint8 codes ({@link pack_int4}'s order), `steps` the
+    `[rows, groups]` F32 steps. Each step is rounded to f16 **once**, here (round to nearest even —
+    the reference and the goldens use the rounded step, ADR 0006):
+
+    - a group whose codes are all 0 takes `max(step, F16_MIN_NORMAL)` first (its values are 0 for
+      any finite step, and `clamp(amax / 7, f32 tiny)` would round to a zero f16);
+    - a rounded step that is zero or not finite fails loudly (the same family as the f16 emit's
+      inf rejection);
+    - the round trip traces back **from the table's bytes** (ADR 0069 decision 4 ③): read as the
+      runtime reads them (u32 words, step `2i` in the low half, `2i+1` in the high half) and widened
+      to f32, they decode the codes to the values of the rounded steps.
+
+    Returns the steps flat in row-major order as F16, padded with one zero step to a whole u32
+    word when their count is odd — exactly the payload `container.scale_bytes` declares.
+    """
+    if (
+        packed.device.type != "cpu"
+        or packed.dtype != torch.uint8
+        or packed.ndim != 2
+        or steps.device.type != "cpu"
+        or steps.dtype != torch.float32
+        or steps.ndim != 2
+        or steps.shape[0] != packed.shape[0]
+        or steps.shape[1] <= 0
+    ):
+        raise EmitError(
+            f"{where}: f16 steps need CPU uint8 codes [rows, width/2] and F32 steps [rows, groups]"
+        )
+    rows, groups = (int(dim) for dim in steps.shape)
+    width = int(packed.shape[1]) * 2
+    if width % groups:
+        raise EmitError(f"{where}: {groups} groups do not divide the row length {width}")
+    codes = unpack_int4(packed, (rows, width))
+    all_zero = (codes.reshape(rows, groups, width // groups) == 0).all(dim=-1)
+    floored = torch.where(
+        all_zero, torch.maximum(steps, torch.tensor(F16_MIN_NORMAL, dtype=torch.float32)), steps
+    )
+    rounded = floored.to(torch.float16)
+    widened = rounded.to(torch.float32)
+    refused = (widened == 0) | ~torch.isfinite(widened)
+    if bool(refused.any()):
+        row, group = (int(axis) for axis in refused.nonzero()[0])
+        raise EmitError(
+            f"{where}: {int(refused.sum())} steps round to a zero or non-finite f16 — the first is"
+            f" group {group} of row {row} (F32 step {float(steps[row, group])!r})"
+        )
+    table = rounded.reshape(-1)
+    if table.numel() % 2:
+        table = torch.cat((table, torch.zeros(1, dtype=torch.float16)))
+    # MUST: trace back from the bytes about to be written, read the way the kernel reads them —
+    # comparing with `rounded` alone would let a swapped half or byte order slip past.
+    words = table.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    halves = torch.stack((words & 0xFFFF, words >> 16), dim=-1).reshape(-1)[: rows * groups]
+    # The 16-bit patterns as signed values, so the cast to int16 keeps the bits.
+    bits = torch.where(halves >= 0x8000, halves - 0x10000, halves).to(torch.int16)
+    read_back = bits.view(torch.float16).to(torch.float32).reshape(rows, groups)
+    if not torch.equal(dequantize_int4(codes, read_back), dequantize_int4(codes, widened)):
+        raise EmitError(f"{where}: the f16 step table does not decode back to its rounded steps")
+    return table
 
 
 @dataclass(frozen=True)
@@ -591,6 +668,14 @@ def _plan_fixed_weights(
                 f"fixed_weights['{key}']: must be a positive rank-2 f32/meta of the declared shape"
             )
         consumers = [node for node in graph.nodes if name in node.ins]
+        if fixed.dtype == "i4f16":
+            # ADR 0145 decision 3: the f16 steps are read by `expert_linear` only, which no op
+            # here is yet — linear / embedding / conv1d read a scale as F32.
+            ops = " / ".join(sorted({node.op for node in consumers})) or "nothing"
+            raise EmitError(
+                f"fixed_weights['{key}']: int4-sym-g-f16 (f16 steps) is read by expert_linear"
+                f" only — ADR 0145 (consumed by {ops})"
+            )
         if name not in eligible or any(
             node.op not in (LINEAR_OP, EMBEDDING_OP) for node in consumers
         ):
@@ -857,7 +942,16 @@ def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion
 #: `verify.assert_runtime_support` alone) — this layer **only counts bytes**, so it must not be
 #: unable to count a readable graph. It is in bits because packed 4-bit (2 elements per byte —
 #: ADR 0069 decision 2) cannot be expressed in bytes per element.
-_STORAGE_BITS = {"f32": 32, "f16": 16, "bf16": 16, "i8": 8, "i4": 4, "i2": 2, "i32": 32}
+_STORAGE_BITS = {
+    "f32": 32,
+    "f16": 16,
+    "bf16": 16,
+    "i8": 8,
+    "i4": 4,
+    "i4f16": 4,
+    "i2": 2,
+    "i32": 32,
+}
 #: Storage dtypes not counted as compressed (= the plain 4-byte representation). Listing the
 #: compressed side would mean fixing two places for every new storage dtype, so it is written **in
 #: the negative**.
@@ -904,6 +998,12 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
                 if group_size is None:
                     raise EmitError(f"initializer '{name}': i4 storage without group_size")
                 scale_bytes += count // group_size * _SCALE_BYTES
+            elif dtype == "i4f16":
+                # f16 steps, padded to a whole u32 word (the payload the container declares).
+                group_size = initializer.storage.group_size
+                if group_size is None:
+                    raise EmitError(f"initializer '{name}': i4f16 storage without group_size")
+                scale_bytes += codec_scale_bytes(CODEC_FOR_STORAGE["i4f16"], count // group_size)
         else:
             plain_tensors += 1
             plain_bytes += nbytes

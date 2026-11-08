@@ -13,6 +13,10 @@
  * `layout` is the kind of decode path (CPU `decodeI8` / `decodeI4` / `decodeI2`, GPU WGSL), and
  * `ternary` is a subset of the value range of `int2-off`, so it **shares the i2 path as is** (zero
  * lines added to the runtime — decision 13).
+ *
+ * `int4-sym-g-f16` has the bytes of `int4-sym-g` and an f16 step, and its own layout `i4f16` (ADR
+ * 0145 decision 3): the step dtype travels in the codec name, and a consumer that switches on the
+ * layout does not read f16 steps as f32 unless it decides to. Only `expert_linear` reads it.
  */
 
 import { compareCodePoints } from "./json.ts";
@@ -25,11 +29,12 @@ export type CodecName =
   | "i32"
   | "int8-sym"
   | "int4-sym-g"
+  | "int4-sym-g-f16"
   | "int2-off"
   | "ternary";
 
 /** Kind of decode path (derived from the codec — consumers branch on it). */
-export type CodecLayout = "f32" | "f16" | "bf16" | "i32" | "i8" | "i4" | "i2";
+export type CodecLayout = "f32" | "f16" | "bf16" | "i32" | "i8" | "i4" | "i4f16" | "i2";
 
 export type CodecPacking = {
   /** Number of elements one packing block carries. */
@@ -66,10 +71,20 @@ export type CodecEntry = {
    * check passes and the weight is silently decoded along the other axis.
    */
   readonly rowAxes: readonly (0 | 1)[];
+  /**
+   * The dtype of the companion scale, implied by the codec (`encoding.scale.dtype` MUST equal it):
+   * `f32` for every quantized codec but `int4-sym-g-f16`, whose steps are f16 (ADR 0145 decision 3).
+   * undefined when not quantized.
+   */
+  readonly scaleDtype: ScaleDtype | undefined;
 };
 
-/** Accepted scale dtypes (f32 only in the first edition — §6.1). */
-export const SCALE_DTYPES = ["f32"] as const;
+/**
+ * Accepted scale dtypes (§6.1). Each quantized codec takes exactly one of them
+ * ({@link CodecEntry.scaleDtype}); f16 only for `int4-sym-g-f16` (ADR 0069 decision 3's conditions
+ * for f16, bound to one op by ADR 0145 decision 3).
+ */
+export const SCALE_DTYPES = ["f32", "f16"] as const;
 export type ScaleDtype = (typeof SCALE_DTYPES)[number];
 
 /**
@@ -85,6 +100,7 @@ const RAW = (layout: CodecLayout, blockBytes: number): CodecEntry => ({
   grouping: undefined,
   zeroPoint: "forbidden",
   rowAxes: [],
+  scaleDtype: undefined,
 });
 
 /**
@@ -111,6 +127,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
       grouping: "channel",
       zeroPoint: "forbidden",
       rowAxes: [0, 1],
+      scaleDtype: "f32",
     },
   ],
   [
@@ -122,6 +139,21 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
       grouping: "group",
       zeroPoint: "forbidden",
       rowAxes: [0],
+      scaleDtype: "f32",
+    },
+  ],
+  // ADR 0145 decision 3: the bytes, nibble order, grouping and row axis of `int4-sym-g`, one f16
+  // step per group (two per u32 word: step 2i in the low half, 2i+1 in the high half).
+  [
+    "int4-sym-g-f16",
+    {
+      layout: "i4f16",
+      packing: { blockElements: 8, blockBytes: 4, alignBytes: 4 },
+      scale: "required",
+      grouping: "group",
+      zeroPoint: "forbidden",
+      rowAxes: [0],
+      scaleDtype: "f16",
     },
   ],
   [
@@ -133,6 +165,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
       grouping: "channel",
       zeroPoint: "forbidden",
       rowAxes: [0],
+      scaleDtype: "f32",
     },
   ],
   [
@@ -144,6 +177,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
       grouping: "channel",
       zeroPoint: "forbidden",
       rowAxes: [0],
+      scaleDtype: "f32",
     },
   ],
 ]);
@@ -227,19 +261,31 @@ export const payloadBytes = (codec: CodecName, numel: number, where: string): nu
 };
 
 /**
+ * Bytes of one scale step of a quantized codec (its {@link CodecEntry.scaleDtype}: f32 = 4, f16 =
+ * 2). The bytes of a run of whole scale rows are `rows · steps per row ·` this — the length of a
+ * piece of a split scale, which carries no padding of its own unless it is the last.
+ */
+export const scaleStepBytes = (codec: CodecName): number => {
+  const dtype = codecEntry(codec).scaleDtype;
+  if (dtype === undefined) throw new Error(`codec '${codec}' is not quantized, so it has no scale`);
+  return dtype === "f16" ? 2 : 4;
+};
+
+/**
  * Payload byte length of the companion scale (element count → bytes — the scale version of
- * {@link payloadBytes}). The first edition has only one scale dtype, f32 ({@link SCALE_DTYPES}), so
- * an element is 4 bytes.
+ * {@link payloadBytes}): 4 bytes per f32 step, and 2 per f16 step **padded to a whole u32 word**
+ * (an odd step count rounds up — the kernel binds the f16 steps as `array<u32>`, two per word,
+ * and `writeBuffer` takes whole words). Every scale dtype gives a multiple of 4.
  *
  * MUST: values outside safe integers fail loudly. The byte count is used for allocation sizes and
  * the block-length check, so letting a rounded value through breaks that check's claim that "the
  * declaration and the actual data match".
  */
-export const scaleBytes = (count: number, where: string): number => {
+export const scaleBytes = (codec: CodecName, count: number, where: string): number => {
   if (!Number.isSafeInteger(count) || count < 0) {
     throw new Error(`${where}: scale element count ${count} is not a non-negative safe integer`);
   }
-  const bytes = count * 4;
+  const bytes = Math.ceil((count * scaleStepBytes(codec)) / 4) * 4;
   if (!Number.isSafeInteger(bytes)) {
     throw new Error(`${where}: scale byte count ${bytes} is outside the safe integer range`);
   }

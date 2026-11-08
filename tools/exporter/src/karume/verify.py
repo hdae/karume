@@ -46,6 +46,8 @@ from karume.container import (
     payload_bytes,
     per_channel_group_size,
     read_container,
+    scale_bytes,
+    scale_step_bytes,
 )
 from karume.dims import MAX_SAFE_INT, DimError, is_symbol_name, parse_dim, try_parse_dim
 from karume.ir import (
@@ -114,12 +116,19 @@ TOP_LEVEL_KEYS = (
 OPTIONAL_TOP_LEVEL_KEYS = ("states",)
 
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
-STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i2", "i32")
+#: `i4f16` is the layout of `int4-sym-g-f16` (ADR 0145 decision 3): in the vocabulary, so a
+#: container that carries it reads back, and refused by the runtime support check until an op reads
+#: its f16 steps (`ops.M0_STORAGE_DTYPES`).
+STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i4f16", "i2", "i32")
 
 #: Storage dtypes that may carry a scale / group_size descriptor (quantized storage). On the TS
-#: side, these 3 words are the layouts of the codecs with `scale: "required"` in the codec ledger
+#: side, these 4 words are the layouts of the codecs with `scale: "required"` in the codec ledger
 #: (CODEC_LEDGER in `packages/runtime/src/format/container/codecs.ts`).
-QUANTIZED_STORAGE_DTYPES = ("i8", "i4", "i2")
+QUANTIZED_STORAGE_DTYPES = ("i8", "i4", "i4f16", "i2")
+
+#: Storage dtypes of group quantization (a `group_size` that is a power of 2 ≥ 16 is required —
+#: ADR 0069 decision 2): the layouts of the codecs with `grouping: "group"` in the codec ledger.
+GROUP_STORAGE_DTYPES = ("i4", "i4f16")
 
 #: dtype vocabulary of state slots. Only f32 for now (ADR 0066 decision 2).
 STATE_DTYPES = ("f32",)
@@ -135,7 +144,7 @@ MAX_STATE_RANK = 4
 #: Semantic dtype of an initializer → allowed storage dtypes (docs/ir-v2.md "Values and types").
 #: MUST: no crossing — an initializer declared `i32` would be read as an f16 bit pattern, giving
 #: silently wrong values. There is no bool initializer in the vocabulary.
-INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4", "i2"), "i32": ("i32",)}
+INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4", "i4f16", "i2"), "i32": ("i32",)}
 
 
 # ---- JSON layer --------------------------------------------------------------
@@ -358,8 +367,8 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
     # silently gives different values.
     if dtype == "i2" and has_group_size:
         raise IrError(f"{where}: i2 has a per-row scale only (group_size cannot be given)")
-    if dtype == "i4" and not has_group_size and not shared:
-        raise IrError(f"{where}: storage dtype 'i4' requires group_size (ADR 0069 decision 2)")
+    if dtype in GROUP_STORAGE_DTYPES and not has_group_size and not shared:
+        raise IrError(f"{where}: storage dtype '{dtype}' requires group_size (ADR 0069 decision 2)")
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
     group_size = None
     if has_group_size:
@@ -375,7 +384,7 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
         # MUST: the i4 group length is a power of 2 and 16 or more (ADR 0069 decision 2 — the same
         # constraint as ORT). This constraint keeps row and group boundaries always byte-aligned,
         # so the u32 binding holds without tail zero padding.
-        if dtype == "i4" and (raw & (raw - 1) != 0 or raw < MIN_GROUP_SIZE):
+        if dtype in GROUP_STORAGE_DTYPES and (raw & (raw - 1) != 0 or raw < MIN_GROUP_SIZE):
             raise IrError(
                 f"{where}.group_size: {raw} is not a power of 2 that is {MIN_GROUP_SIZE} or more"
                 " (ADR 0069 decision 2)"
@@ -738,7 +747,7 @@ def _check_declarations(
         # A shared initializer cannot declare group_size (_parse_storage) — the lender's
         # resident weight is the source of truth for the group step, and the merge layer checks
         # the lender's container (ADR 0096 stage 2).
-        if storage_dtype == "i4" and not initializers[name].is_shared:
+        if storage_dtype in GROUP_STORAGE_DTYPES and not initializers[name].is_shared:
             _check_group_quantized_shape(name, initializers[name], values[name])
     for node in nodes:
         for out in node.outs:
@@ -1556,20 +1565,30 @@ def _plan_supply(
                 f"{where}: row length {row_length} (= numel / shape[{row_axis}]) is not divisible"
                 f" by groupSize {group_size} (ADR 0069 decision 2)"
             )
-    scale_bytes = row_count * group_count(row_length, group_size) * 4
+    steps = group_count(row_length, group_size)
+    payload_of_scale = scale_bytes(encoding.codec, row_count * steps)
     if encoding.scale_pieces is not None:
         scale = _plan_split_scale(
-            where, pieces is not None, blocks, encoding.scale_pieces, row_count, scale_bytes, locate
+            where,
+            pieces is not None,
+            blocks,
+            encoding.scale_pieces,
+            row_count,
+            steps * scale_step_bytes(encoding.codec),
+            payload_of_scale,
+            locate,
         )
         return InitializerSupply(encoding, tuple(blocks), origin, scale)
     assert encoding.scale_block is not None
     found = locate(encoding.scale_block, f"{where} scale")
-    _assert_padded(found, scale_bytes, f"{where} scale")
+    _assert_padded(found, payload_of_scale, f"{where} scale")
     return InitializerSupply(
         encoding,
         tuple(blocks),
         origin,
-        ScaleSupply(found.id, found.part, found.offset, found.length, (0, row_count), scale_bytes),
+        ScaleSupply(
+            found.id, found.part, found.offset, found.length, (0, row_count), payload_of_scale
+        ),
     )
 
 
@@ -1579,13 +1598,15 @@ def _plan_split_scale(
     body: Sequence[SupplyBlock],
     pieces: Sequence[tuple[str, tuple[int, int]]],
     row_count: int,
+    row_bytes: int,
     payload: int,
     locate: Callable[[str, str], SupplyBlock],
 ) -> ScaleSupply:
     """The plan of a split scale (rule ③ — ADR 0108 addendum 15; mirrors TS `planSplitScale`):
     one scale block per body piece, piece k covering exactly the rows of body piece k, its length
-    `rows · (row length / groupSize) · 4` (middle pieces exactly, the last with padding under 4).
-    The reader has already checked that the list has 2 or more entries continuing from row 0."""
+    `rows · row_bytes` with `row_bytes = (row length / groupSize) · step bytes` (middle pieces
+    exactly, the last with padding under 4). The reader has already checked that the list has 2 or
+    more entries continuing from row 0."""
     by = f"{where} scale"
     # A split scale follows the body's pieces, so a body in one block has no boundaries to split
     # it on (the writer fails loudly instead — `karume.container._cut_scale`).
@@ -1598,8 +1619,9 @@ def _plan_split_scale(
             f"{by}: {len(pieces)} scale pieces for {len(body)} body pieces (one scale piece per"
             " body piece — rule ③)"
         )
-    # A piece list exists only for rowAxis 0 (rule ④), so one scale row is `payload / row_count`.
-    row_bytes = payload // row_count
+    # A piece list exists only for rowAxis 0 (rule ④), so the scale's rows are the body's leading
+    # dimension. One scale row is its steps' bytes, not `payload / row_count`: an f16 payload
+    # carries the word padding of the whole scale, which belongs to no row.
     planned: list[SupplyBlock] = []
     for index, ((block_id, rows), data) in enumerate(zip(pieces, body, strict=True)):
         piece_by = f"{by} piece[{index}]"

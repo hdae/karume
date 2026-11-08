@@ -52,7 +52,10 @@ export type MemoryEncoding = {
   readonly rowAxis?: 0 | 1;
   /** Quantized codecs only; the row length for per-channel. */
   readonly groupSize?: number;
-  /** Required for quantized codecs (f32, laid out as rank 2 `[rows, groups]`). */
+  /**
+   * Required for quantized codecs (laid out as rank 2 `[rows, groups]`, in the codec's scale dtype —
+   * f32, or f16 steps padded to a whole u32 word for `int4-sym-g-f16`).
+   */
   readonly scale?: Uint8Array<ArrayBuffer>;
 };
 
@@ -131,9 +134,6 @@ export type MemoryContainerInput = {
  */
 const WHOLE_PART = 2;
 
-/** dtype of the companion scale (only f32 in the first edition — container-v1 §6.1). */
-const SCALE_DTYPE = "f32" as const;
-
 /**
  * Alignment of the scale's byte position (required by the side that creates the f32 view —
  * `scaleTensor` in `session-build.ts`).
@@ -159,7 +159,12 @@ const resolveEncoding = (
     }
     return { codec: input.codec, packing: entry.packing };
   }
-  if (input.scale === undefined || input.groupSize === undefined || scaleBlock === undefined) {
+  if (
+    input.scale === undefined ||
+    input.groupSize === undefined ||
+    scaleBlock === undefined ||
+    entry.scaleDtype === undefined
+  ) {
     throw new ContainerFormatError(`${where}: codec '${input.codec}' needs scale and groupSize`);
   }
   return {
@@ -167,7 +172,8 @@ const resolveEncoding = (
     packing: entry.packing,
     rowAxis: input.rowAxis ?? 0,
     groupSize: input.groupSize,
-    scale: { block: scaleBlock, dtype: SCALE_DTYPE },
+    // The codec implies the scale dtype (the ledger's `scaleDtype` — container-v1 §6.1).
+    scale: { block: scaleBlock, dtype: entry.scaleDtype },
   };
 };
 

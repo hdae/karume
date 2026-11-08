@@ -592,7 +592,7 @@ A split scale (rule ③ of §5 — the scale of a piece sequence that one block 
 | `groupSize`             | u32    | quantized | at least 1, MUST divide the row length. For a per-channel codec MUST **equal** the row length                                              |
 | `scale.block`           | string | quantized | block id of the scale. `role` MUST be `"scale"`. **Exclusive with `scale.pieces`**; a scale that fits one block MUST be written this way   |
 | `scale.pieces`          | array  | optional  | a split scale (rule ③ of §5): 2 or more `{ block, rows }`, scale piece k with the rows of data piece k; each `role` MUST be `"scale"`      |
-| `scale.dtype`           | string | quantized | one of the ledger's accepted set for `scale.dtype` (the first edition accepts only `"f32"`)                                                |
+| `scale.dtype`           | string | quantized | the dtype the codec implies (the ledger entry's `scaleDtype`: `"f32"`, and `"f16"` for `int4-sym-g-f16` only — another value fails loudly) |
 | `zeroPoint.block`       | string | optional  | may be written only for codecs whose ledger `zeroPoint.allowed` is true (false for all 4 in the first edition ⇒ always omitted)            |
 
 `zeroPoint` has no split form: no ledger codec allows a zero-point, so none is defined until one does
@@ -670,9 +670,9 @@ registered name → {
 The canonical source is `CODEC_LEDGER` in `packages/runtime/src/format/container/codecs.ts`, and the
 Python mirror is `CODEC_LEDGER` in `tools/exporter/src/karume/container.py` (a test checks that the
 two agree — on every field except `zeroPoint`. Python's `CodecEntry` has no `zeroPoint` field, and
-the Python reader rejects `encoding.zeroPoint` whatever the codec). The accepted set of scale dtypes
-(only `f32` in the first edition) is held not by a per-codec field but by the ledger-wide constant
-`SCALE_DTYPES`. The value set, pack order and reconstruction formula (the table of §6.3) are the
+the Python reader rejects `encoding.zeroPoint` whatever the codec). The scale dtype is a per-codec field
+(`scaleDtype` / `scale_dtype` — `f32` for every quantized codec but `int4-sym-g-f16`, whose steps
+are `f16`; the same test checks it), within the accepted set `SCALE_DTYPES`. The value set, pack order and reconstruction formula (the table of §6.3) are the
 codec's spec, not ledger fields — CPU decoding and WGSL implement them.
 
 **The 3 axes are reported separately, and each axis has its own owner**:
@@ -742,6 +742,12 @@ migration), so they will not be changed from now on.
 | **Reconstruction formula (CPU)**              | `fround(q · s)`                                                  | `fround((u − 8) · s)`                                                                                                          | `fround((u − 2) · s)`                                                        | `fround((u − 2) · s)`               |
 | Ops that can stay compressed and resident (③) | linear / embedding / conv1d / conv2d / conv3d / conv_transpose1d | linear / embedding / conv1d (`groups == 1`)                                                                                    | linear / embedding                                                           | same as `int2-off`                  |
 | GPU decoding (WGSL)                           | yes                                                              | yes                                                                                                                            | yes (`linearCompute` is `f32` only)                                          | **shares `int2-off`'s**             |
+
+**`int4-sym-g-f16`** (ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 3) is `int4-sym-g`
+in every row above but two: its layout is `i4f16` (a decode path of its own) and its scale dtype is
+`f16` — one f16 step per group, two per u32 word (step `2i` in the low half, `2i+1` in the high
+half, as `unpack2x16float` reads them), the payload padded to a whole word (an odd step count takes
+one zero step). Only `expert_linear` keeps it compressed; every other consumer refuses it.
 
 Canonical locations:
 

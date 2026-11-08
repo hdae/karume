@@ -288,7 +288,7 @@ BIREFNET_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: a mix that contains i8 — phase 2's i8 series is planned to have a single compressed dtype, and
 #: plugging it into the f16 preset fails the requirement check).
 BIREFNET_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    birefnet_role(BIREFNET_PLAIN_DTYPE): ("f16", "bf16", "i8", "i4", "i2")
+    birefnet_role(BIREFNET_PLAIN_DTYPE): ("f16", "bf16", "i8", "i4", "i4f16", "i2")
 }
 
 #: Declaration of assets. **Empty** (the run needs only the one graph).

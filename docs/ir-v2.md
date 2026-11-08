@@ -194,10 +194,10 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
   ([container-v1](container-v1.md) §5 — `binding[<graph name>][<initializer name>].encoding`),
   and the IR holds only the semantic dtype and the declared shape ("one architecture, one quantization scheme, one graph" —
   ADR [0108](decisions/0108-container-format.md) decision 17). The codec vocabulary is the ledger (container-v1
-  §6.3): `f32` / `f16` / `bf16` / `i32` and the four quantized ones `int8-sym` / `int4-sym-g` / `int2-off` /
-  `ternary`. Everything but `i32` is **an encoding of semantic f32**; only `i32` is **raw int32** (the target that
+  §6.3): `f32` / `f16` / `bf16` / `i32` and the five quantized ones `int8-sym` / `int4-sym-g` / `int4-sym-g-f16` /
+  `int2-off` / `ternary`. Everything but `i32` is **an encoding of semantic f32**; only `i32` is **raw int32** (the target that
   symbol-dependent constants are baked into — ADR [0010](decisions/0010-symbolic-constant-folding.md). The explicit exception to
-  "the storage vocabulary is an encoding of f32"). **The runtime can execute every codec in the ledger** (until 2026-10-17 bf16 was
+  "the storage vocabulary is an encoding of f32"). **The runtime can execute every codec in the ledger** but `int4-sym-g-f16`, which only `expert_linear` reads (ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 3) (until 2026-10-17 bf16 was
   "valid as a declaration, fails loudly on execution", but with ADR [0131](decisions/0131-bf16-weight-execution.md)
   it joined the same path as f16). The ledger holds only the storage format; the canonical source for whether it can be executed
   is the runtime's `RUNTIME_SUPPORT.storage` (`packages/runtime/src/ops/contracts.ts` — the set of decode paths)
@@ -247,6 +247,9 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
   (`q ∈ [−7, 7]`, `u = q + 8`, element `2i` = the low nibble within a byte). The declared shape **stays the logical
   shape**, and the payload is `numel / 2` bytes (a declaration with an odd element count fails loudly because the total bits
   do not land on a byte boundary). The decode kernel binds it as `array<u32>`.
+- **`int4-sym-g-f16`** (ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 3): the bytes of `int4-sym-g` with
+  one f16 step per group (two per u32 word, step `2i` in the low half), the step table padded to a whole word. Read by
+  `expert_linear` only; every other consumer refuses it.
 - **`int2-off`** (ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-1-2026-09-11--int2-storage-and-execution-contract)):
   the logical shape is a rank-2 `[N,K]` of positive integers, with K a multiple of 16. Four elements per byte are packed from the low 2 bits
   as `u = q + 2`, holding the integers `[−2, 1]`. Restoration is the per-element `fround(q·scale)`. linear computes in f32

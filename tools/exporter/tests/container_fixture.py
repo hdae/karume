@@ -1,8 +1,8 @@
 """Synthetic model and generator of the cross-language fixture.
 
 It lives in `packages/runtime/tests/fixtures/container/` (the single form `synthetic.krm`, the
-split form `synthetic-split-NNNNN-of-NNNNN.krm` and the split-scale form
-`synthetic-split-scale.krm`).
+split form `synthetic-split-NNNNN-of-NNNNN.krm`, the split-scale form
+`synthetic-split-scale.krm` and the f16-step form `synthetic-f16-steps.krm`).
 
 The asset shows that the TS reader (`packages/runtime/src/format/container/*.ts`) can open a
 container written **outside this machine**: `packages/runtime/tests/container_fixture_test.ts`
@@ -35,6 +35,10 @@ The split-scale form ({@link SPLIT_SCALE_FIXTURE_PATH}, ADR 0108 addendum 15) ha
 block limit (`w.weight`'s 256 B at a 128 B limit), split into one block per data piece over the
 same rows, beside a piece-split weight whose scale fits one block (`v.weight`).
 
+The f16-step form ({@link F16_STEPS_FIXTURE_PATH}, ADR 0145 decision 3) has one `int4-sym-g-f16`
+weight whose odd step count takes one zero step of padding, its table made by emit's own
+`f16_step_table`.
+
 MUST: payloads are made from a **simple deterministic pattern** ({@link pattern_bytes}), not a
 random generator — the same input gives the same fixture, and the TS test can spell its expected
 values without carrying a copy of the generator.
@@ -45,6 +49,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import torch
+
 from karume.container import (
     AssetInput,
     Encoding,
@@ -52,6 +58,7 @@ from karume.container import (
     container_paths,
     write_model_container,
 )
+from karume.emit import f16_step_table
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrShared, IrStorage, IrValue
 
 #: Repository root (tools/exporter/tests → tools/exporter → tools → repo).
@@ -346,5 +353,76 @@ def write_split_scale_container(
         provenance=Provenance(license="apache-2.0", writer="karume"),
         part_bytes=SPLIT_SCALE_PART_BYTES,
         block_bytes=block_bytes,
+        single=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# f16-step fixture (`int4-sym-g-f16` — ADR 0145 decision 3)
+# ---------------------------------------------------------------------------
+
+#: Location of the f16-step fixture (single form).
+F16_STEPS_FIXTURE_PATH = FIXTURE_PATH.with_name("synthetic-f16-steps.krm")
+
+#: Graph name of the f16-step fixture.
+F16_STEPS_GRAPH_NAME = "synthetic-f16-steps"
+
+#: The steps of `w.weight` (3 rows × 1 group of 16 — an odd count, so the table takes one zero step
+#: of padding). Each is exact in f16, so the TS test spells their bits (0x3800 / 0x3e00 / 0x3000).
+F16_STEPS = (0.5, 1.5, 0.125)
+
+
+def f16_steps_graph() -> IrGraph:
+    """Synthetic graph with one `int4-sym-g-f16` weight `[3, 16]` (group 16)."""
+    return IrGraph(
+        symbols=["T"],
+        inputs=[IrInput(name="x", dtype="f32", shape=["T", 3])],
+        outputs=["h"],
+        initializers={
+            "p_w": IrInitializer(
+                tensor="w.weight",
+                storage=IrStorage(dtype="i4f16", scale="w.weight_scale", group_size=16),
+            ),
+        },
+        values={
+            "p_w": IrValue(dtype="f32", shape=[3, 16]),
+            "h": IrValue(dtype="f32", shape=["T", 16]),
+        },
+        nodes=[IrNode(op="matmul", ins=["x", "p_w"], outs=["h"], attrs={})],
+    )
+
+
+def f16_steps_bindings() -> dict[str, Encoding]:
+    return {
+        "w.weight": Encoding(
+            "int4-sym-g-f16", group_size=16, row_axis=0, scale_key="w.weight_scale"
+        ),
+    }
+
+
+def f16_steps_tensors() -> dict[str, bytes]:
+    """Tensor key → raw bytes: the codes are a pattern, and the step table is emit's own
+    ({@link karume.emit.f16_step_table}) — the fixture shows that the table emit writes opens in
+    the TS reader and decodes there."""
+    codes = pattern_bytes(3 * 16 // 2, 71)
+    table = f16_step_table(
+        torch.frombuffer(bytearray(codes), dtype=torch.uint8).reshape(3, 8),
+        torch.tensor(F16_STEPS, dtype=torch.float32).reshape(3, 1),
+        "f16-step fixture",
+    )
+    return {"w.weight": codes, "w.weight_scale": memoryview(table.numpy()).cast("B").tobytes()}
+
+
+def write_f16_steps_container(path: Path) -> list[Path]:
+    """Write the f16-step synthetic model to `path` (single form)."""
+    return write_model_container(
+        path,
+        f16_steps_graph(),
+        f16_steps_tensors(),
+        f16_steps_bindings(),
+        graph_name=F16_STEPS_GRAPH_NAME,
+        provenance=Provenance(license="apache-2.0", writer="karume"),
+        part_bytes=FIXTURE_PART_BYTES,
+        block_bytes=FIXTURE_BLOCK_BYTES,
         single=True,
     )

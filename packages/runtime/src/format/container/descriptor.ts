@@ -393,6 +393,13 @@ export const parseEncoding = (value: unknown, path: string): Encoding => {
       `${path}.scale.dtype is not in the accepted set (${SCALE_DTYPES.join(" / ")}): ${scaleDtype}`,
     );
   }
+  // The codec implies the step dtype (the ledger's `scaleDtype`) — a mismatch would have the decode
+  // read f16 steps as f32 or the reverse, a silent wrong value with a plausible byte count.
+  if (scaleDtype !== entry.scaleDtype) {
+    fail(
+      `${path}.scale.dtype is not in the accepted set of codec '${codec}' (${String(entry.scaleDtype)} steps): ${scaleDtype}`,
+    );
+  }
   const hasBlock = Object.hasOwn(scaleObject, "block");
   if (hasBlock === Object.hasOwn(scaleObject, "pieces")) {
     fail(`${path}.scale: write exactly one of 'block' (one block) and 'pieces' (split scale)`);

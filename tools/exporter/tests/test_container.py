@@ -25,6 +25,8 @@ from typing import Any
 import pytest
 from conftest import RUNTIME_FIXTURES
 from container_fixture import (
+    F16_STEPS_FIXTURE_PATH,
+    F16_STEPS_GRAPH_NAME,
     FIXTURE_BLOCK_BYTES,
     FIXTURE_PART_BYTES,
     FIXTURE_PATH,
@@ -44,6 +46,7 @@ from container_fixture import (
     synthetic_bindings,
     synthetic_graph,
     synthetic_tensors,
+    write_f16_steps_container,
     write_split_container,
     write_split_scale_container,
     write_synthetic_container,
@@ -959,6 +962,29 @@ class TestTheCrossLanguageFixture:
         assert len(split.encoding.scale_pieces) == 4
         assert whole.pieces is not None and len(whole.pieces) == 2
         assert whole.encoding.scale_block is not None and whole.encoding.scale_pieces is None
+
+    def test_the_committed_f16_steps_fixture_matches_the_generator(self, tmp_path: Path) -> None:
+        rebuilt = write_f16_steps_container(tmp_path / F16_STEPS_FIXTURE_PATH.name)[0].read_bytes()
+        if fixture_write_requested():
+            F16_STEPS_FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            F16_STEPS_FIXTURE_PATH.write_bytes(rebuilt)
+
+        assert F16_STEPS_FIXTURE_PATH.read_bytes() == rebuilt, (
+            "the f16-step fixture drifted from the writer"
+            " (rebuild: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture)"
+        )
+
+    def test_the_f16_steps_fixture_has_a_padded_odd_step_table(self) -> None:
+        """`int4-sym-g-f16` with 3 steps: declared f16, 6 bytes of steps + 2 of padding (ADR 0145
+        decision 3)."""
+        verified = verify_container([F16_STEPS_FIXTURE_PATH], blocks=True)
+        supply = verified.graphs[F16_STEPS_GRAPH_NAME].supplies["w.weight"]
+        binding = json.loads(verified.read.model_descriptor_bytes)["binding"]
+        encoding = binding[F16_STEPS_GRAPH_NAME]["w.weight"]["encoding"]
+
+        assert (encoding["codec"], encoding["scale"]["dtype"]) == ("int4-sym-g-f16", "f16")
+        assert supply.scale is not None and supply.scale.payload_bytes == 8
+        assert verified.read.block(supply.scale.id)[6:8] == b"\x00\x00"
 
 
 class TestTheDescriptorReadIsBounded:
