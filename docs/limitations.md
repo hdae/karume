@@ -353,6 +353,23 @@ The attention follows upstream's masks with the block on sliding layers only, no
 [0144](decisions/0144-gemma4-12b-vision.md) decision 1). Measured on the RTX 3080 Ti under Dawn. In Chrome on the RTX 5070 Ti a chat with images ran and described them
 (the maintainer's check of 2026-11-08); speed and memory there are not measured.
 
+## Gemma 4 26B A4B: every expert resident, a 16 GB GPU with about 0.8 GB to spare
+
+26B A4B ships text only, without a drafter (so `speculative` is refused) and without its vision tower (ADR
+[0145](decisions/0145-gemma4-26b-moe-resident.md) decision 1). All 128 experts of every layer stay in VRAM: the text weights are
+13.4 GiB, and the browser needs about 14.3 GB of CacheStorage quota for one origin.
+
+- **Memory**: in Chrome on the RTX 5070 Ti (16 GB) the model at capacity 4096 used about 14.1 GB of dedicated GPU memory (the
+  maintainer's reading of 2026-11-08), leaving about 0.8 GB. A larger capacity, or another tab using the GPU, can go past it. Dawn
+  on D3D12 pages heaps over PCIe past its budget instead of failing an allocation (from Dawn's code, not observed), so a model that
+  does not fit gets slow instead of stopping, and `capacity: "fit"` and the headroom check may report a fit there; the manifest
+  keeps capacity 4096. On a 12 GB GPU the load fails with `GpuOutOfMemoryError`.
+- **Prefill**: `expert_linear` runs each of a chunk's T × 8 rows on its own expert's weights, with no grouping of rows by expert,
+  and 26B's dense parts have neither the RMS→add fusion nor parallel-GEMV rows (their tables list measured widths only, and 2816 is
+  not among them). Speed is not measured.
+- **Checked on**: the full model only in Chrome on the RTX 5070 Ti; on the RTX 3080 Ti under Dawn, a model cut after 12 layers
+  against the export's goldens (`e2e_gemma4_26b_cut_test.ts`).
+
 ## The f16 attention scores round differently between backends
 
 `attentionScoreStorage: "f16"` stores S through `pack2x16float`, whose rounding WGSL leaves open. Vulkan on the RTX 3080 Ti rounds to

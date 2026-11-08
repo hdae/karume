@@ -1,6 +1,6 @@
 # 0145: Gemma 4 26B A4B with every expert resident
 
-- Status: proposed (2026-11-08 — the maintainer approved the plan; not implemented)
+- Status: accepted (2026-11-08 — implemented; the full model ran in Chrome on the RTX 5070 Ti — addendum below)
 - Date: 2026-11-08
 - Related: ADR [0059](0059-op-vocabulary-entry-doors.md) (vocabulary doors) / [0061](0061-index-oob-semantics.md) (index
   semantics) / [0068](0068-decode-exit-multi-output.md) (static-k `topk`) / [0069](0069-packed-w4-storage.md) (packed i4, f32
@@ -170,3 +170,23 @@ f16's normal range (1.0e-3 to 1.3e-1); attention has steps down to 5.3e-5, below
    and what `capacity: "fit"` reports there.
 3. The reference's RAM peak and time per forward with only the picked experts dequantised (decision 5), against 61 GiB.
 4. The drafter (`…-unquantized-assistant`, 0.42 B, shares the target's KV), vision (an encoder tower of 0.57 B) and the expert cache.
+
+## Addendum (2026-11-08) — implementation and measurements
+
+- **Code**: the op, the kernel and the kernel check (`cb865f45`, `a1922e43`), the codec (`a9f53d67`), the router export
+  (`75c6eaa0`), the recipe `gemma4.export_moe` (`43e91b70`), the TS checks (`b3466d6d`). The TS pipeline admits 26B's
+  product graph without a source change: admission and planning follow the config and the graph, not the model name.
+- **requiredLimits** (corrects decision 1): the assembly derives them from the files, and the largest buffer it finds is the
+  full-attention K = V slot at the position limit (2 heads × 512 × 262,144 positions × 4 bytes = 1 GiB), above the tied
+  embedding (369,098,752 bytes, the largest weight) and one layer's `gate_up` (253.8 MB). The manifest declares 1 GiB for
+  `maxBufferSize` and `maxStorageBufferBindingSize`; decision 1's 253.8 MB is superseded.
+- **Export** (open point 3): the full series reads the 52 GB checkpoint once — trace 15 s, grid import 853 s at a peak RSS of
+  17.0 GiB, goldens 756 s at 20.2 GiB, container write 138 s at 23.6 GiB. The container is 14,347,599,828 bytes (236 `i4`,
+  60 `i4f16`). The greedy goldens' smallest margin is 0.039 (`window-en`), above the floor 0.025.
+- **This machine** (RTX 3080 Ti, 12 GB): the full model fails loudly with `GpuOutOfMemoryError` while uploading the weights
+  (no crash). The 12-layer cut (6.0 GB) runs `e2e_gemma4_26b_cut_test.ts`: routing ids match the goldens in pick order at
+  every row except two near-tie order moves in `window-en`, and the logits differ from the goldens by at most 2.6e-4. The
+  cut reference's last layer equals the full reference's (`torch.equal`).
+- **RTX 5070 Ti in Chrome** (open point 2, in part): the full model runs; the maintainer read 15.2 GB of dedicated GPU memory
+  in use with the model loaded at capacity 4096 and 1.1 GB after releasing it — about 14.1 GB for the model, leaving about
+  0.8 GB of the 16 GB card. What `capacity: "fit"` reports there is still unmeasured, and so is the speed.

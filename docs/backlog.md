@@ -20,9 +20,11 @@ row, the large parts at 4–5 terms). Breaking: `ChatMessage` gains `ChatPartsMe
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
 maintainer's ruling of 2026-11-06).
 
-1. **26B A4B (MoE)** (maintainer 2026-11-08): build it with every expert resident first and check it on the RTX 5070 Ti
-   (16 GB); then see whether a MoE cache that loads the needed experts from RAM can work, and look for a way to pay a miss
-   as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
+1. **26B A4B (MoE)** (maintainer 2026-11-08): every expert resident ✅ 2026-11-08 (ADR
+   [0145](decisions/0145-gemma4-26b-moe-resident.md) and its addendum; in the local mirror, ran in Chrome on the RTX 5070 Ti
+   with about 0.8 GB of 16 GB left; not yet published). Left: the grouped prefill form of `expert_linear`, the dense parts'
+   fusion and parallel-GEMV rows at width 2816, the drafter and vision of 26B. Then see whether a MoE cache that loads the
+   needed experts from RAM can work, and look for a way to pay a miss as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
    paid it with one fence). This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
    ruling changes it.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
