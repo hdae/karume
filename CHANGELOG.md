@@ -15,12 +15,14 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-08
+
 ### Added
 
 - `@karume/models`: image input on Gemma 4 12B of the q4_0 QAT line: `vision: true` on
   `gemma.PipelineOptions`, `Pipeline.embedImage`, and image parts in a user message of `Pipeline.chat`
   and `ChatSession.send`. Preprocessing matches upstream's bytes; E2B and E4B come later (ADR 0144).
-  The distribution with the vision component reaches Hugging Face with the next release.
+  The distribution `hdae/karume-gemma4-qat` on Hugging Face carries the vision component.
 - `@karume/runtime`: `GenerationRun.bidirectionalRows`, one block of rows that see each other in both
   directions on the sliding layers; runs without it keep their kernels (ADR 0144 decision 3).
 
@@ -31,8 +33,8 @@ measurements in `docs/research/`.
   suppresses tokens, whose GPU selection now masks them (ADR 0142 addendum of 2026-11-06).
 - `@karume/runtime`: parallel-GEMV rows for 12B, the int4 output head included, and width 3840 in the
   RMS→add fusion (ADR 0098 and 0099 addenda of 2026-11-06). Recipes: 12B gets `i4-gemvpar` and
-  `i4-fast`, its default staying `i4` (ADR 0104 addendum of 2026-11-06). They reach Hugging Face with
-  the next release.
+  `i4-fast`, its default staying `i4` (ADR 0104 addendum of 2026-11-06); both are in the Hugging Face
+  distribution.
 
 - `@karume/runtime` / `@karume/models`: `fullStateStorage: "f16"` stores the full-layer KV in half the memory
   (12B 16 KiB per position, E2B 6 KiB), with no re-export and no GPU feature (ADR 0143). Opt-in, and it changes the numbers
@@ -2197,7 +2199,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/hdae/karume/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/hdae/karume/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hdae/karume/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/hdae/karume/compare/v0.15.0...v0.15.1
