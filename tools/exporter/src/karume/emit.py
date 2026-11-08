@@ -654,6 +654,16 @@ def _read_only_by_expert_linear(graph: IrGraph, name: str) -> bool:
     return bool(uses) and all(use == (EXPERT_LINEAR_OP, slot) for use in uses)
 
 
+def _expert_linear_weights(graph: IrGraph) -> set[str]:
+    """The values read at `expert_linear`'s weight slot (ADR 0145 decision 2)."""
+    slot = WEIGHT_SLOTS[EXPERT_LINEAR_OP]
+    return {
+        node.ins[slot]
+        for node in graph.nodes
+        if node.op == EXPERT_LINEAR_OP and slot < len(node.ins)
+    }
+
+
 def _plan_fixed_weights(
     graph: IrGraph,
     tensors: Mapping[str, torch.Tensor],
@@ -879,10 +889,22 @@ def _plan_weight_dtype(
         i4_eligible_initializers(graph, scales=weight_scales) if "i4" in requested else set()
     )
     reserved = set(tensors)
+    # `expert_linear` refuses f16 / bf16 storage (ADR 0145 decision 2): planned, the export would
+    # pass and the load fail.
+    experts = _expert_linear_weights(graph) if {"f16", "bf16"} & requested else set()
     for name in sorted(eligible):
         key = graph.initializers[name].tensor
         dtype = weight_dtype_overrides.get(key, weight_dtype)
         if dtype == "f32":
+            continue
+        if dtype in ("f16", "bf16") and name in experts:
+            # The default quietly leaves an expert weight f32 (as an i4-ineligible weight under
+            # an i4 default); an explicit choice cannot be met, so it fails loudly.
+            if key in weight_dtype_overrides:
+                raise EmitError(
+                    f"initializer '{name}' ({key}): explicitly requested '{dtype}', but an"
+                    " expert_linear weight takes f32 / i4 / i4f16 only (ADR 0145)"
+                )
             continue
         tensor = tensors[key]
         if tensor.dtype is not torch.float32:

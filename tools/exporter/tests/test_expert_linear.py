@@ -437,3 +437,55 @@ class TestRuntimeSupport:
 
         with pytest.raises(ContainerError, match=r"unsupported storage dtype 'i4f16' \(1\): w"):
             assert_runtime_support(graph)
+
+
+def half_storage_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
+    """`y = expert_linear(x, index, w)` beside `z = linear(x, v, b)`: one expert weight and one
+    weight an automatic f16 / bf16 storage takes, with real f32 data."""
+    graph, _ = fixed_expert_graph()
+    generator = torch.Generator().manual_seed(20261108)
+    graph = IrGraph(
+        symbols=graph.symbols,
+        inputs=graph.inputs,
+        outputs=[*graph.outputs, "z"],
+        initializers={
+            **graph.initializers,
+            "v": IrInitializer(tensor="dense.v", storage=IrStorage(dtype="f32")),
+            "b": IrInitializer(tensor="dense.b", storage=IrStorage(dtype="f32")),
+        },
+        values={
+            **graph.values,
+            "v": IrValue(dtype="f32", shape=[5, 32]),
+            "b": IrValue(dtype="f32", shape=[5]),
+            "z": IrValue(dtype="f32", shape=[4, 5]),
+        },
+        nodes=[*graph.nodes, IrNode(op="linear", ins=["x", "v", "b"], outs=["z"], attrs={})],
+    )
+    tensors = {
+        "experts.w": torch.randn(*SHAPE, generator=generator),
+        "dense.v": torch.randn(5, 32, generator=generator),
+        "dense.b": torch.randn(5, generator=generator),
+    }
+    return graph, tensors
+
+
+class TestAutomaticHalfStorage:
+    """`expert_linear` refuses f16 / bf16 storage (ADR 0145 decision 2), so emit's automatic
+    planning leaves its weight f32 — planned, the export would pass and the load fail."""
+
+    @pytest.mark.parametrize("dtype", ["f16", "bf16"])
+    def test_the_default_leaves_the_expert_weight_f32(self, dtype: str):
+        graph, tensors = half_storage_graph()
+
+        model = stored_model(graph, tensors, weight_dtype=dtype)
+
+        storages = {name: model.graph.initializers[name].storage.dtype for name in ("w", "v")}
+        assert storages == {"w": "f32", "v": dtype}
+        assert_runtime_support(model.graph)
+
+    @pytest.mark.parametrize("dtype", ["f16", "bf16"])
+    def test_an_explicit_choice_on_the_expert_weight_fails_loudly(self, dtype: str):
+        graph, tensors = half_storage_graph()
+
+        with pytest.raises(EmitError, match="an expert_linear weight takes f32 / i4 / i4f16 only"):
+            stored_model(graph, tensors, weight_dtype_overrides={"experts.w": dtype})

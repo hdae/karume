@@ -40,8 +40,13 @@ there).
 - `_select_to_squeeze`: `select.int(axis of length 1, index 0)` → `squeeze` (general hygiene). A
   static axis of length 2 or more opens into `slice(width 1) + squeeze` (first seen in Gemma4's
   per-layer PLE slice).
-- `_split_to_slices`: `split_with_sizes` + `getitem` → a sequence of `slice`s (ADR 0014. The IR
-  has no multi-output op, so a split opens into one slice per extraction point).
+- `_sum_keepdim_to_unsqueeze`: `sum(x, [d], keepdim=True)` → `unsqueeze(sum(x, [d]), d)` (ADR
+  0145 decision 5 — the IR reduce has no keepdim).
+- `_index_table_to_embedding`: `table[index]` on a constant rank-1 table →
+  `squeeze(embedding(unsqueeze(table, 1), index))` (ADR 0145 decision 5 — the MoE router's
+  `per_expert_scale[top_k_index]`; every other `aten.index.Tensor` form is left alone).
+- `_split_to_slices`: `split_with_sizes` + `getitem` → a sequence of `slice`s (ADR 0014. A split
+  opens into one slice per extraction point — a slice is its own op, not a multi-output node).
 
 MUST: `_fold_rms_norm` runs **before both** `_pow2_to_mul` and `_promote_scalar_operands`
 (ADR 0016's order MUST). Even when `pow(x,2)` collapses into `mul(x,x)` the pattern match itself
@@ -1395,13 +1400,103 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
         stats["select->slice+squeeze"] += 1
 
 
+def _sum_keepdim_to_unsqueeze(graph: Graph, stats: Counter) -> None:
+    """`sum.dim_IntList(x, [d], keepdim=True)` → `unsqueeze(sum(x, [d]), d)` (ADR 0145 decision 5).
+
+    The IR reduce has no `keepdim` field (one axis, the reduced axis removed), and the kept shape
+    is that output with a unit axis put back — a reshape that does not move an element. The
+    unsqueeze takes no sizes, so a symbolic leading axis stays symbolic (`[T, k]` → `[T]` →
+    `[T, 1]`). First met in the MoE router's renormalisation `w / w.sum(-1, keepdim=True)`.
+
+    MUST: fires on the one-axis form without a dtype only. The others (several axes, all axes, a
+    dtype) are left as they are, and `aten_handlers._h_sum` refuses them with their own reason.
+    """
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target is not aten.sum.dim_IntList:
+            continue
+        src = node.args[0]
+        dims = node.args[1] if len(node.args) > 1 else node.kwargs.get("dim")
+        keepdim = node.args[2] if len(node.args) > 2 else node.kwargs.get("keepdim", False)
+        dtype = node.args[3] if len(node.args) > 3 else node.kwargs.get("dtype")
+        if not keepdim or dtype is not None or not isinstance(src, Node):
+            continue
+        if not isinstance(dims, (list, tuple)) or len(dims) != 1 or not isinstance(dims[0], int):
+            continue
+        src_val = _val(src)
+        rank = src_val.dim()
+        if not -rank <= dims[0] < rank:
+            continue
+        dim = dims[0] % rank
+        reduced = _insert(graph, node, aten.sum.dim_IntList, (src, [dim]), src_val)
+        with graph.inserting_before(node):
+            replacement = graph.call_function(aten.unsqueeze.default, (reduced, dim))
+        replacement.meta.update(node.meta)
+        _replace(graph, node, replacement)
+        stats["sum_keepdim->sum+unsqueeze"] += 1
+
+
+#: Index dtypes `aten.index.Tensor` reads as positions (bool / uint8 are masks).
+_POSITION_INDEX_DTYPES = (torch.int64, torch.int32)
+
+
+def _index_table_to_embedding(graph: Graph, stats: Counter, *, tables: frozenset[str]) -> None:
+    """`table[index]` on a constant rank-1 table → `squeeze(embedding(unsqueeze(table, 1), index))`
+    (ADR 0145 decision 5).
+
+    One index tensor on axis 0 of a rank-1 table is a row gather over the table as `[E, 1]`: the
+    embedding gives `[…index, 1]` and the squeeze drops the unit axis, so the result is `index`'s
+    shape. The index is i64 in torch and declared i32 at the boundary (ADR 0009); its range
+    follows embedding's semantics (ADR 0061). First met in the MoE router's
+    `per_expert_scale[top_k_index]`.
+
+    MUST: fires on that form only — the table is a parameter or a buffer (`tables`; a weight that
+    becomes an initializer), rank 1 and f32, with exactly one index tensor of an integer dtype and
+    rank ≥ 1 (embedding's contract). Every other form (a run-time table, several indices or a
+    `None` slot, a table of another rank, a mask index) is left as it is and still goes to the full
+    list of unsupported ops.
+    MUST: a lifted constant is not a `tables` entry. It is a leaf of constant folding, and
+    `aten.index.Tensor` over constants is folded (the causal-mask tables — `convert.FOLDABLE_OPS`);
+    rewriting it would turn a folded constant into run-time nodes.
+    """
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target is not aten.index.Tensor or node.kwargs:
+            continue
+        table, indices = node.args
+        if not isinstance(table, Node) or table.op != "placeholder" or table.name not in tables:
+            continue
+        if not isinstance(indices, (list, tuple)) or len(indices) != 1:
+            continue
+        index = indices[0]
+        if not isinstance(index, Node):
+            continue
+        table_val = _val(table)
+        index_val = index.meta.get("val")
+        if table_val.dim() != 1 or table_val.dtype is not torch.float32:
+            continue
+        if _static_size(table_val.shape[0]) is None:
+            continue
+        if (
+            not isinstance(index_val, torch.Tensor)
+            or index_val.dtype not in _POSITION_INDEX_DTYPES
+            or index_val.dim() < 1
+        ):
+            continue
+        rows = _insert(graph, node, aten.unsqueeze.default, (table, 1), table_val)
+        picked = _insert(graph, node, aten.embedding.default, (rows, index), table_val)
+        with graph.inserting_before(node):
+            replacement = graph.call_function(aten.squeeze.dims, (picked, [index_val.dim()]))
+        replacement.meta.update(node.meta)
+        _replace(graph, node, replacement)
+        stats["index_table->embedding"] += 1
+
+
 def _split_to_slices(graph: Graph, stats: Counter) -> None:
     """`split_with_sizes(x, sizes, dim)` + `getitem` → a sequence of `slice`s (ADR 0014).
 
-    getitem wiring of multi-output aten is deferred until sampling needs it (ADR 0068 addendum 2),
-    so a split opens into one slice per extraction point. Observed: ConvFlow / ResidualCoupling's
-    `torch.split(x, [half]*2, 1)` (recon §2), whose consumers are always `getitem` with a constant
-    index.
+    getitem is wired only for a multi-output op with a handler (`topk` — ADR 0068 decision 3), and
+    split has none, so it opens into one slice per extraction point. Observed: ConvFlow /
+    ResidualCoupling's `torch.split(x, [half]*2, 1)` (recon §2), whose consumers are always
+    `getitem` with a constant index.
 
     MUST: fires only on forms where **the consumers are getitem only**. Passing the tuple itself
     elsewhere makes the rewrite non-equivalent, so it is left alone and goes to the full list of
@@ -1469,7 +1564,9 @@ def _split_to_slices(graph: Graph, stats: Counter) -> None:
         stats["split_with_sizes->slice"] += replaced
 
 
-def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], None], ...]:
+def _passes(
+    placeholders: _Placeholders, tables: frozenset[str]
+) -> tuple[Callable[[Graph, Counter], None], ...]:
     """List the passes to run, in order.
 
     MUST: `_fold_rms_norm` → `_pow2_to_mul` / `_promote_scalar_operands`, and
@@ -1502,6 +1599,9 @@ def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], Non
         _promote_scalar_operands,
         _eq_zero_to_not_bool,
         _select_to_squeeze,
+        # Order-free (their inputs are forms no other pass creates or touches).
+        _sum_keepdim_to_unsqueeze,
+        partial(_index_table_to_embedding, tables=tables),
         # Order-free (split's inputs and outputs are forms no other pass touches). It is last so
         # that it is clear no other pass revisits the slices it creates.
         _split_to_slices,
@@ -1519,7 +1619,11 @@ def normalize_graph(ep: ExportedProgram) -> dict[str, int]:
     graph = gm.graph
     stats: Counter[str] = Counter()
     placeholders = _Placeholders(ep)
-    for run in _passes(placeholders):
+    signature = ep.graph_signature
+    # Parameters and buffers (the weights that become initializers — not lifted constants, see
+    # `_index_table_to_embedding`).
+    tables = frozenset({*signature.inputs_to_parameters, *signature.inputs_to_buffers})
+    for run in _passes(placeholders, tables):
         run(graph, stats)
     graph.eliminate_dead_code()
     graph.lint()

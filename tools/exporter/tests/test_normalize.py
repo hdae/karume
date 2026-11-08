@@ -1477,3 +1477,226 @@ class TestSelectToSqueeze:
 
         with pytest.raises(NotImplementedError, match="select with a symbolic index"):
             normalize_graph(decomposed)
+
+
+class KeptSum(nn.Module):
+    """The MoE router's renormalisation `w / w.sum(-1, keepdim=True)` (ADR 0145 decision 5)."""
+
+    def forward(self, w):
+        return w / w.sum(dim=-1, keepdim=True)
+
+
+class TestSumKeepdimToUnsqueeze:
+    def test_a_one_axis_keepdim_sum_becomes_sum_and_reshape(self, dyn_t):
+        """The reduced value is `[T]` and the kept one `[T, 1]` — the leading axis stays
+        symbolic."""
+        graph, _ = export_and_convert(KeptSum(), (torch.rand(6, 4),), ({0: dyn_t},))
+
+        assert node_ops(graph) == ["sum", "reshape", "div"]
+        reduced = only_node(graph, "sum")
+        assert reduced.attrs == {"dim": 1}
+        assert graph.values[reduced.outs[0]].shape == ["T"]
+        assert graph.values[only_node(graph, "reshape").outs[0]].shape == ["T", 1]
+
+    def test_a_middle_axis_keeps_its_place(self):
+        """The unit axis goes back where the reduced one was (`[2, 3, 4]` over axis 1 → `[2, 1,
+        4]`)."""
+
+        class MiddleSum(nn.Module):
+            def forward(self, x):
+                return x.sum(dim=-2, keepdim=True) * x
+
+        graph, _ = export_and_convert(MiddleSum(), (torch.rand(2, 3, 4),))
+
+        assert only_node(graph, "sum").attrs == {"dim": 1}
+        assert graph.values[only_node(graph, "reshape").outs[0]].shape == [2, 1, 4]
+
+    def test_the_rewrite_computes_the_same_values(self):
+        """The rewritten FX graph run eagerly equals the kept sum (the IR reshape takes its shape
+        from the meta, so a unit axis put back in the wrong place shows only here)."""
+        w = torch.rand(3, 4)
+        decomposed = decompose(KeptSum(), (w,))
+        normalize_graph(decomposed)
+
+        torch.testing.assert_close(decomposed.module()(w), KeptSum()(w))
+
+    def test_the_pass_reports_its_firing_count(self):
+        decomposed = decompose(KeptSum(), (torch.rand(6, 4),))
+
+        assert normalize_graph(decomposed)["sum_keepdim->sum+unsqueeze"] == 1
+
+    def test_without_the_pass_the_handler_rejects_keepdim(self):
+        """Confirms the pass is load-bearing — the reduce contract has no keepdim."""
+        decomposed = decompose(KeptSum(), (torch.rand(6, 4),))
+
+        with pytest.raises(NotImplementedError, match="sum with keepdim=True is not supported"):
+            convert(decomposed)
+
+    def test_a_sum_without_keepdim_is_untouched(self):
+        class PlainSum(nn.Module):
+            def forward(self, x):
+                return x.sum(dim=-1)
+
+        graph, _ = export_and_convert(PlainSum(), (torch.rand(6, 4),))
+
+        assert node_ops(graph) == ["sum"]
+
+    @pytest.mark.parametrize(
+        ("build", "why"),
+        [
+            (lambda x: x.sum(dim=(0, 1), keepdim=True), "multiple axes"),
+            (
+                lambda x: x.sum(dim=-1, keepdim=True, dtype=torch.float32),
+                "sum with keepdim=True is not supported",
+            ),
+        ],
+        ids=["multi-axis", "dtype"],
+    )
+    def test_other_keepdim_forms_still_reach_the_handler_refusal(self, build, why):
+        class Other(nn.Module):
+            def forward(self, x):
+                return build(x)
+
+        with pytest.raises(NotImplementedError, match=why):
+            export_and_convert(Other(), (torch.rand(6, 4),))
+
+
+class PerExpertScale(nn.Module):
+    """The MoE router's `per_expert_scale[top_k_index]` (ADR 0145 decision 5): a rank-1 parameter
+    indexed by a run-time index."""
+
+    def __init__(self):
+        super().__init__()
+        self.scale = nn.Parameter(torch.arange(1.0, 7.0))
+
+    def forward(self, w, index):
+        return w * self.scale[index]
+
+
+class TestIndexTableToEmbedding:
+    def test_a_rank1_parameter_indexed_at_run_time_becomes_an_embedding(self, dyn_t):
+        """`[E]` → reshape `[E, 1]` → embedding `[T, k, 1]` → reshape `[T, k]` (the index's shape,
+        symbolic leading axis kept); the i64 index is declared i32 (ADR 0009)."""
+        graph, _ = export_and_convert(
+            PerExpertScale(),
+            (torch.rand(6, 2), torch.tensor([[0, 5]] * 6)),
+            ({0: dyn_t}, {0: dyn_t}),
+        )
+
+        assert node_ops(graph) == ["reshape", "embedding", "reshape", "mul"]
+        rows, picked, back = graph.nodes[:3]
+        assert rows.ins == ["p_scale"]
+        assert graph.values[rows.outs[0]].shape == [6, 1]
+        assert picked.ins == [rows.outs[0], "index"]
+        assert graph.values[picked.outs[0]].shape == ["T", 2, 1]
+        assert graph.values[back.outs[0]].shape == ["T", 2]
+        assert next(spec for spec in graph.inputs if spec.name == "index").dtype == "i32"
+
+    def test_the_rewrite_computes_the_same_values(self):
+        """The rewritten FX graph run eagerly equals `table[index]` (a swapped table / index or a
+        wrong unit axis would not)."""
+        module = PerExpertScale()
+        w, index = torch.rand(3, 2), torch.tensor([[4, 1], [0, 5], [2, 2]])
+        decomposed = decompose(module, (w, index))
+        normalize_graph(decomposed)
+
+        torch.testing.assert_close(decomposed.module()(w, index), module(w, index))
+
+    def test_the_pass_reports_its_firing_count(self):
+        decomposed = decompose(PerExpertScale(), (torch.rand(3, 2), torch.tensor([[4, 1]] * 3)))
+
+        assert normalize_graph(decomposed)["index_table->embedding"] == 1
+
+    def test_without_the_pass_index_is_outside_the_vocabulary(self):
+        decomposed = decompose(PerExpertScale(), (torch.rand(3, 2), torch.tensor([[4, 1]] * 3)))
+
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert(decomposed)
+
+        assert "aten.index.Tensor" in err.value.ops
+
+    def test_a_buffer_table_is_rewritten_too(self):
+        class BufferTable(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("table", torch.arange(1.0, 7.0))
+
+            def forward(self, index):
+                return self.table[index]
+
+        graph, _ = export_and_convert(BufferTable(), (torch.tensor([3, 1]),))
+
+        assert node_ops(graph) == ["reshape", "embedding", "reshape"]
+
+
+class _RuntimeTable(nn.Module):
+    def forward(self, table, index):
+        return table[index]
+
+
+class _TwoIndices(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.rand(6, 3))
+
+    def forward(self, rows, cols):
+        return self.table[rows, cols]
+
+
+class _NoneSlot(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.rand(3, 6))
+
+    def forward(self, index):
+        return self.table[:, index]
+
+
+class _Rank2Table(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.rand(6, 3))
+
+    def forward(self, index):
+        return self.table[index]
+
+
+class _MaskIndex(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.rand(6))
+
+    def forward(self, mask):
+        return self.table[mask].sum(dim=0, keepdim=True)
+
+
+class _LiftedConstantTable(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = torch.arange(1.0, 7.0)
+
+    def forward(self, index):
+        return self.table[index]
+
+
+class TestIndexTableOtherForms:
+    """Every other `aten.index.Tensor` form is left alone and stays in the full enumeration of
+    unsupported ops (the rewrite is not widened — ADR 0145 decision 5)."""
+
+    @pytest.mark.parametrize(
+        ("module", "args"),
+        [
+            (_RuntimeTable(), (torch.rand(6), torch.tensor([3, 1]))),
+            (_TwoIndices(), (torch.tensor([3, 1]), torch.tensor([0, 2]))),
+            (_NoneSlot(), (torch.tensor([3, 1]),)),
+            (_Rank2Table(), (torch.tensor([3, 1]),)),
+            (_MaskIndex(), (torch.tensor([True, False, True, True, False, True]),)),
+            (_LiftedConstantTable(), (torch.tensor([3, 1]),)),
+        ],
+        ids=["runtime-table", "two-indices", "none-slot", "rank2-table", "mask", "lifted-constant"],
+    )
+    def test_the_form_is_refused_as_an_unsupported_op(self, module, args):
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            export_and_convert(module, args)
+
+        assert "aten.index.Tensor" in err.value.ops

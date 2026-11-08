@@ -80,7 +80,6 @@ from karume.golden_models import (
     SymbolicTable,
     UnaryChain,
     _band_mask,
-    _expert_index,
     _fused_attention_inputs,
     _mask,
     _runtime_masked_attention_inputs,
@@ -474,13 +473,9 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="expert_linear_block",
         build=ExpertLinearBlock,
-        # x [T, 20] / index [T, 2] (i64, normalised to i32 at the boundary; ids distinct within a
-        # token); only the token axis is symbolic.
-        example_inputs=lambda g: (
-            _uniform(g, GOLDEN_T, ExpertLinearBlock.IN, low=-1.5, high=1.5),
-            _expert_index(GOLDEN_T, ExpertLinearBlock.EXPERTS, ExpertLinearBlock.PICKS),
-        ),
-        dynamic_shapes=({0: _DYNAMIC_T}, {0: _DYNAMIC_T}),
+        # x [T, 20], read by the router and the experts; only the token axis is symbolic.
+        example_inputs=lambda g: (_uniform(g, GOLDEN_T, ExpertLinearBlock.IN, low=-1.5, high=1.5),),
+        dynamic_shapes=({0: _DYNAMIC_T},),
     ),
     GoldenSpec(
         name="bilinear_resize",

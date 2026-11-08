@@ -456,3 +456,22 @@ class TestAFailedRegenerationKeepsTheOldFixture:
 
         assert _tree_bytes(root / self.SPEC.name) == before
         assert sorted(path.name for path in root.iterdir()) == [self.SPEC.name]
+
+
+class TestRoutedGolden:
+    """`expert_linear_block` routes with upstream's router (ADR 0145 decision 5), so its expected
+    values hold only if the routing cannot flip between torch and the GPU."""
+
+    SPEC = next(spec for spec in GOLDEN_SPECS if spec.name == "expert_linear_block")
+
+    def test_every_token_keeps_its_picks_away_from_a_tie(self):
+        """Adjacent sorted probabilities, down to the first expert not picked, differ by more than
+        the margin — a near-tie could swap a whole expert (ADR 0145 decision 6)."""
+        generator = goldens._rng()
+        module = self.SPEC.build(generator).eval()
+        (x,) = self.SPEC.example_inputs(generator)
+        with torch.no_grad():
+            ranked = module.router_probabilities(x).sort(dim=-1, descending=True).values
+        gaps = (ranked[:, :-1] - ranked[:, 1:])[:, : module.PICKS]
+
+        assert gaps.min().item() > module.ROUTING_MARGIN

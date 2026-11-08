@@ -90,9 +90,9 @@ ARGMAX_OP = "argmax"
 #: specifies what torch leaves unspecified** (torch does not guarantee the order of equal
 #: elements, and `argmax` and `topk(k=1)` disagree within the same repository — the observation is
 #: in the NOTE of packages/runtime/src/kernels/topk.ts).
-#: NOTE: there is **no aten handler yet** (wiring the getitem of multi-output aten ops is deferred
-#: until sampling needs it — ADR 0068 addendum 2). Not being exportable from torch is expected,
-#: and NON_EMITTABLE_OPS is where it is listed.
+#: NOTE: `aten.topk` lowers through `aten_handlers._h_topk`, and its two `operator.getitem`
+#: consumers are wired to the node's output slots by the engine (`convert.Converter.
+#: _handle_multi_output` — first needed by the MoE router, ADR 0145 decision 5).
 TOPK_OP = "topk"
 #: Ternary elementwise `out = cond ? a : b` (torch's where). All three broadcast right-aligned, and
 #: although the condition is the first slot, **the output is the value side** (mapping bool → f32
@@ -1545,14 +1545,11 @@ OP_CONTRACTS: dict[str, OpContract] = {
 #:
 #: MUST: listed with reasons. The golden coverage check (goldens.generate_all) looks at
 #: EMITTABLE_OPS, so an op put here passes as "an op without goldens" — the empty set is the
-#: default, and adding one makes "not exportable from torch" itself the check (tests/test_convert.py
-#: pins that converting `torch.topk` raises UnsupportedAtenOpsError).
+#: default.
 #:
-#: - `topk` — wiring the getitem of multi-output aten ops is deferred until sampling needs it (ADR
-#:   0068 addendum 2).
 #: - `state_append` — **no corresponding aten op exists** (an effect op of ADR 0067 decision 5,
 #:   emitted by the decode graph script). It cannot come out of the torch.export path in principle.
-NON_EMITTABLE_OPS = frozenset({TOPK_OP, STATE_APPEND_OP})
+NON_EMITTABLE_OPS = frozenset({STATE_APPEND_OP})
 #: The source of truth for the IR op names convert may emit. The check that makes growing the
 #: vocabulary an explicit act.
 EMITTABLE_OPS = frozenset(OP_CONTRACTS) - NON_EMITTABLE_OPS

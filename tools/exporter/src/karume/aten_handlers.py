@@ -752,6 +752,51 @@ def _h_argmax(node: Node) -> Emitted:
     return Emitted("argmax", 1)
 
 
+def _h_topk(node: Node) -> Emitted:
+    """aten.topk → topk (attrs `k` — **the first multi-output handler**, ADR 0068 decision 3).
+
+    torch's schema is `topk(Tensor self, SymInt k, int dim=-1, bool largest=True, bool
+    sorted=True)`. The two outputs (values, indices) leave the node as a tuple and reach their
+    consumers through `operator.getitem`, which the engine wires to the node's output slots
+    (`Converter._handle_multi_output`). The indices are i64 in torch and declared i32 (the
+    boundary normalization of ADR 0009 — {@link DTYPE_NAMES}); they lie in `[0, last dimension)`.
+
+    MUST: every form outside the vocabulary fails loudly:
+
+    - a k that is not a static integer (a SymInt or a tensor-derived k) — the contract is static-k;
+    - not the last dimension — the kernel reduces the contiguous last axis (the same narrowing as
+      argmax);
+    - `largest=False` or `sorted=False` — the contract has neither field (only the descending
+      largest side is in the vocabulary).
+    """
+    src = node.args[0].meta["val"]
+    rank = src.dim()
+    k = _arg_or_kwarg(node, 1, "k", None)
+    _expect(
+        isinstance(k, int) and not isinstance(k, bool),
+        node,
+        f"topk with k={k!r} is not supported (a static integer only — static-k, ADR 0068)",
+    )
+    _expect(rank >= 1, node, "topk of a rank 0 scalar is not supported")
+    axis = _normalized_dims(node, rank, [_arg_or_kwarg(node, 2, "dim", -1)])[0]
+    _expect(
+        axis == rank - 1,
+        node,
+        f"topk on a dimension other than the last (dim={axis} / rank={rank}) is not supported",
+    )
+    _expect(
+        _arg_or_kwarg(node, 3, "largest", True) is True,
+        node,
+        "topk with largest=False is not supported (the largest side only)",
+    )
+    _expect(
+        _arg_or_kwarg(node, 4, "sorted", True) is True,
+        node,
+        "topk with sorted=False is not supported (descending order only)",
+    )
+    return Emitted("topk", 1, {"k": k})
+
+
 # ---- Fused ops (ADR 0012 / ADR 0007's preserved list) ---------------------
 
 
@@ -789,9 +834,9 @@ def _h_linear(node: Node) -> Emitted:
 def _h_layer_norm(node: Node) -> Emitted:
     """aten.layer_norm → layer_norm (attrs `normalized_shape` / `eps`).
 
-    MUST: without preserving it, it becomes native_layer_norm (3 outputs) + getitem, and wiring
-    the getitem of multi-output aten ops is deferred until sampling needs it (ADR 0068 addendum 2),
-    so it cannot be taken (recon §5).
+    MUST: without preserving it, it becomes native_layer_norm (3 outputs) + getitem, and getitem is
+    wired only for a multi-output op with a handler (`topk` — ADR 0068 decision 3), which
+    native_layer_norm has not, so it cannot be taken (recon §5).
     MUST: the normalized axis is the single last dimension only. The affine is accepted in 3
     forms, "both", "neither" and "weight only", and missing slots are filled by synthesizing
     ones/zeros (ADR 0016). Other forms break the row kernel's premise.
@@ -972,6 +1017,10 @@ def _h_softmax(node: Node) -> Emitted:
     not drop SDPA's safe-softmax guard by proof from actual values, carries the
     {@link SAFE_SOFTMAX_META} flag (ADR 0044). The flag travels in the node's meta because the FX
     graph layer has no aten op called "safe_softmax".
+
+    A `dtype` **equal to the input's** is a plain softmax (no conversion happens — the form
+    `softmax(x, dim=-1, dtype=torch.float32)` of an f32 router, ADR 0145 decision 5). MUST: any
+    other dtype fails — it converts the input first, and the IR softmax has no field for that.
     """
     extra = sorted(set(node.kwargs) - {"dtype"})
     _expect(not extra, node, f"softmax with kwargs {extra} is not supported")
@@ -984,7 +1033,12 @@ def _h_softmax(node: Node) -> Emitted:
         f"softmax on a dimension other than the last (dim={dim} / rank={rank}) is not supported",
     )
     dtype = node.args[2] if len(node.args) > 2 else node.kwargs.get("dtype")
-    _expect(dtype is None, node, "softmax with a dtype is not supported")
+    _expect(
+        dtype is None or dtype == src.dtype,
+        node,
+        f"softmax with dtype {dtype} other than its input's {src.dtype} is not supported (a"
+        " dtype equal to the input's is a plain softmax)",
+    )
     op = "safe_softmax" if node.meta.get(SAFE_SOFTMAX_META) else "softmax"
     return Emitted(op, 1, {"dim": dim})
 
@@ -1829,6 +1883,9 @@ ATEN_HANDLERS = {
     # (`torch.Tag.core`, observed 2026-08-17) and not in default_decompositions either, so it stays
     # one node after the curated decomp.
     aten.argmax.default: _h_argmax,
+    # The first multi-output op (ADR 0068 decision 3): its getitem consumers are wired to the
+    # node's output slots by the engine (ADR 0145 decision 5 — the MoE router).
+    aten.topk.default: _h_topk,
     aten._to_copy.default: _h_to_copy,
     aten.bitwise_not.default: _h_bitwise_not,
     # Math ops of phase 3 (sdp's spline / dec's leaky_relu — recon §2)

@@ -989,33 +989,48 @@ class GatedDeltaScanBlock(nn.Module):
 
 
 class ExpertLinearBlock(nn.Module):
-    """torch comparison of expert_linear (extended composite layer — ADR 0145 decision 2): one
-    routed expert FFN, `expert_linear(x, index, gate_up)` → slice gate / up → `gelu_tanh(gate) ·
-    up` → `expert_linear(·, index, down)`.
+    """torch comparison of expert_linear (extended composite layer — ADR 0145 decision 2) behind
+    its router: one routed expert block as Gemma 4 26B A4B writes it (transformers 5.14.1,
+    `Gemma4TextRouter` / `Gemma4TextExperts`).
 
-    The eager expected values come from the body in `karume/custom_ops.py` (upstream's per-expert
-    `F.linear`). The shapes to exercise:
+    The router is upstream's spelling (ADR 0145 decision 5): an RMSNorm without scale written as
+    upstream's `Gemma4RMSNorm._norm` (folded with `router.scale` into one `rms_norm`) →
+    × `hidden^-0.5` → a bias-less Linear → `softmax(dtype=torch.float32)` → `torch.topk` →
+    `w /= w.sum(-1, keepdim=True)` → `w * per_expert_scale[index]`, so the softmax-dtype, topk /
+    getitem, keepdim-sum and index-on-a-table lowerings all run. The experts are
+    `expert_linear(x, index, gate_up)` → slice gate / up → `gelu_tanh(gate) · up` →
+    `expert_linear(·, index, down)`, summed over the picks with the routing weights. The eager
+    expected values of expert_linear come from the body in `karume/custom_ops.py` (upstream's
+    per-expert `F.linear`). The outputs are the block's output, the routing weights and the routing
+    ids (an i32 output compared exactly — routing is compared first, ADR 0145 decision 6).
 
     MUST: **both forms of x** — the gate_up projection reads x shared by the k picks (`[T,in]`),
     the down projection one row per pick (`[T,k,·]`).
     MUST: **the token axis is symbolic** (a prefill chunk).
     MUST: E, k, in, out and out / 2 all differ (6 / 2 / 20 / 16 / 8), so a swapped axis shows in the
-    shapes, and the index is an input with ids that differ within a token and repeat across tokens
-    (the form a `topk` gives). The widths are small because each golden file stays under 16 KiB
-    (`MAX_FILE_BYTES` in tests/test_goldens.py); in = 20 still spans a 4-word prefetch round of the
-    f32 kernel plus a remainder word.
-    NOTE: the index is a graph input because `topk` does not export yet (ADR 0068 addendum); the
-    runtime refuses such a graph at Session construction (the plan-time producer rule of ADR 0145
-    decision 2), so its golden test splices a router `topk` in front of the exported graph.
+    shapes. The widths are small because each golden file stays under 16 KiB (`MAX_FILE_BYTES` in
+    tests/test_goldens.py); in = 20 still spans a 4-word prefetch round of the f32 kernel plus a
+    remainder word.
+    MUST: the picks are **far from a tie** — every token's k-th and (k+1)-th probabilities, and its
+    picks among themselves, differ by far more than a few ulp (`ROUTING_MARGIN`, pinned by
+    tests/test_goldens.py), so a GPU softmax a few ulp off torch's cannot swap an expert.
     """
 
     EXPERTS = 6
     PICKS = 2
     IN = 20
     OUT = 16
+    EPS = 1e-6
+    #: The smallest gap the golden input keeps between adjacent router probabilities of a token,
+    #: down to the first one not picked.
+    ROUTING_MARGIN = 1e-3
 
     def __init__(self, generator: torch.Generator) -> None:
         super().__init__()
+        self.scale = nn.Parameter(_uniform(generator, self.IN, low=0.5, high=1.5))
+        self.proj = nn.Linear(self.IN, self.EXPERTS, bias=False)
+        _fill_param(generator, self.proj.weight, 1.0)
+        self.per_expert_scale = nn.Parameter(_uniform(generator, self.EXPERTS, low=0.5, high=1.5))
         self.gate_up = nn.Parameter(
             _uniform(generator, self.EXPERTS, self.OUT, self.IN, low=-0.3, high=0.3)
         )
@@ -1023,20 +1038,22 @@ class ExpertLinearBlock(nn.Module):
             _uniform(generator, self.EXPERTS, self.IN, self.OUT // 2, low=-0.3, high=0.3)
         )
 
-    def forward(self, x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    def router_probabilities(self, x: torch.Tensor) -> torch.Tensor:
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.EPS
+        normed = x * torch.pow(mean_squared, -0.5)
+        scores = self.proj(normed * self.scale * self.IN**-0.5)
+        return nn.functional.softmax(scores, dim=-1, dtype=torch.float32)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        weights, index = torch.topk(self.router_probabilities(x), k=self.PICKS, dim=-1)
+        weights /= weights.sum(dim=-1, keepdim=True)
+        weights = weights * self.per_expert_scale[index]
         hidden = torch.ops.karume.expert_linear(x, index, self.gate_up)
         half = self.OUT // 2
         gate, up = hidden[..., :half], hidden[..., half:]
         mixed = nn.functional.gelu(gate, approximate="tanh") * up
-        return torch.ops.karume.expert_linear(mixed, index, self.down)
-
-
-def _expert_index(tokens: int, experts: int, picks: int) -> torch.Tensor:
-    """Distinct ids within a token (pick j is `token + j·E/k`), every expert hit and each one
-    repeated across tokens — the form a `topk` over E gives."""
-    stride = experts // picks
-    rows = [[(token + pick * stride) % experts for pick in range(picks)] for token in range(tokens)]
-    return torch.tensor(rows, dtype=torch.int64)
+        picked = torch.ops.karume.expert_linear(mixed, index, self.down)
+        return (picked * weights[..., None]).sum(dim=1), weights, index
 
 
 def _unit_rows(generator: torch.Generator, *shape: int) -> torch.Tensor:

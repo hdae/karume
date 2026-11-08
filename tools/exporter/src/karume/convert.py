@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import operator
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -300,9 +301,9 @@ SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
 #: Only ops that, once decomposed, no longer map 1:1 to a kernel are taken out:
 #:
 #: - `linear` — scatters into addmm + view (16 observed / 2 layers). One fused kernel is right.
-#: - `layer_norm` — becomes native_layer_norm (**3 outputs**) + getitem, and getitem wiring of
-#:   multi-output aten is deferred until sampling needs it (ADR 0068 addendum 2), so it cannot be
-#:   accepted. Preserving it is effectively mandatory.
+#: - `layer_norm` — becomes native_layer_norm (**3 outputs**) + getitem, and getitem is wired only
+#:   for a multi-output op with a handler (`topk` — ADR 0068 decision 3), which native_layer_norm
+#:   has not, so it cannot be accepted. Preserving it is effectively mandatory.
 #: - `softmax` — only becomes `aten._softmax`, nothing gained. Keeps the one safe-softmax kernel.
 #: - `gelu` — scatters into a composition of the erf / tanh approximation (preserved since M0).
 #: - `conv1d` / `conv2d` / `conv3d` / `conv_transpose1d` — become the generic `aten.convolution`
@@ -641,6 +642,27 @@ def _holds_node(value: Any) -> bool:
     return False
 
 
+def _is_multi_output(node: Any) -> bool:
+    """Whether an FX node is a multi-output aten op with a handler (its meta is a tuple of tensors;
+    `topk` is the first — ADR 0068 decision 3)."""
+    return (
+        isinstance(node, Node)
+        and node.op == "call_function"
+        and node.target in ATEN_HANDLERS
+        and isinstance(node.meta.get("val"), (tuple, list))
+    )
+
+
+def _is_slot_read(node: Node) -> bool:
+    """Whether a node is the `operator.getitem` that reads one output slot of a handled
+    multi-output op (torch.export inserts one per tuple element it uses — ADR 0068 addendum 2).
+
+    The getitem of a multi-output op without a handler (`native_layer_norm` and the like) stays
+    outside, so it is still listed as unsupported, as before.
+    """
+    return node.target is operator.getitem and _is_multi_output(node.args[0])
+
+
 class Converter:
     def __init__(self, ep: ExportedProgram, *, symbol_names: Sequence[str] = ("T",)) -> None:
         self.ep = ep
@@ -704,7 +726,10 @@ class Converter:
         # evaluation.
         self._fold_cache: dict[str, dict[str, Any]] = {}
         self._const_by_digest: dict[str, str] = {}
-        self._cse: dict[str, str] = {}
+        self._cse: dict[str, list[str]] = {}
+        # FX name of a multi-output node → its IR output value names in slot order (read by the
+        # getitem nodes — ADR 0068 decision 3).
+        self._slots: dict[str, list[str]] = {}
 
     # ---- Symbols -------------------------------------------------------
 
@@ -1127,23 +1152,36 @@ class Converter:
         attrs: Mapping[str, Any],
     ) -> str:
         """Add a node with CSE and return the output value name."""
+        return self._emit_outputs(op, ins, [(out_name, val)], attrs)[0]
+
+    def _emit_outputs(
+        self,
+        op: str,
+        ins: list[str],
+        outs: Sequence[tuple[str, torch.Tensor]],
+        attrs: Mapping[str, Any],
+    ) -> list[str]:
+        """Add a node with one output per `(name, meta value)` pair (in slot order) with CSE, and
+        return the output value names."""
         if op not in EMITTABLE_OPS:
             raise AssertionError(f"IR op not registered in EMITTABLE_OPS: {op}")
         # MUST: the CSE key includes attrs. The same (op, ins) with different attrs is a different
         # value (`cast(x, to=bool)` vs `cast(x, to=f32)`); dropping attrs makes one silently vanish.
-        # MUST: the output shape is included too. reshape / expand have no attrs — "the declared
+        # MUST: the output shapes are included too. reshape / expand have no attrs — "the declared
         # output shape is the target shape" (ADR 0011) — so with a key without shape, separate
         # `reshape`s of the same input collapse into one and one consumer silently reads a value of
         # a different shape.
-        shape = self._shape(val)
-        key = json.dumps([op, ins, dict(attrs), shape], sort_keys=True)
+        shapes = [self._shape(val) for _, val in outs]
+        key = json.dumps([op, ins, dict(attrs), shapes], sort_keys=True)
         cached = self._cse.get(key)
         if cached is not None:
             return cached
-        self.graph.nodes.append(IrNode(op=op, ins=list(ins), outs=[out_name], attrs=dict(attrs)))
-        self._register_value(out_name, val)
-        self._cse[key] = out_name
-        return out_name
+        names = [name for name, _ in outs]
+        self.graph.nodes.append(IrNode(op=op, ins=list(ins), outs=names, attrs=dict(attrs)))
+        for name, val in outs:
+            self._register_value(name, val)
+        self._cse[key] = names
+        return names
 
     def convert(self) -> tuple[IrGraph, dict[str, torch.Tensor]]:
         foldable = self._classify_foldable()
@@ -1194,7 +1232,7 @@ class Converter:
         for node in self.gm.graph.nodes:
             if node.op != "call_function" or node.name in foldable:
                 continue
-            if node.target in SKIP_OPS or node.target in ATEN_HANDLERS:
+            if node.target in SKIP_OPS or node.target in ATEN_HANDLERS or _is_slot_read(node):
                 continue
             if not isinstance(node.meta.get("val"), torch.Tensor):
                 # Shape machinery that only carries SymInt/int (the arity check fails it if it is
@@ -1327,11 +1365,64 @@ class Converter:
                 check(node)
             self.alias_of[node.name] = node.all_input_nodes[0]
             return
+        if _is_slot_read(node):
+            self.value_of[node.name] = self._slot_value(node)
+            return
+        if _is_multi_output(node):
+            self._handle_multi_output(node, foldable)
+            return
         if not isinstance(node.meta.get("val"), torch.Tensor):
             # Shape machinery that only carries SymInt/int (sym_size / operator.mul etc.). The IR
             # value is already expressed as a shape expression — the arity check fails it if it is
             # consumed at a tensor position.
             return
+        spec, ins = self._lower(node, foldable)
+        self.value_of[node.name] = self._emit(
+            spec.op, ins, node.name, self._meta_val(node), spec.attrs
+        )
+
+    def _handle_multi_output(self, node: Node, foldable: set[str]) -> None:
+        """A multi-output aten op → one IR node with one output per slot (ADR 0068 decision 3).
+
+        Each slot's value is named after the getitem that reads it (FX names are unique), and a
+        slot no getitem reads gets `<node>.<slot>` — FX names are identifiers, so a dotted name
+        cannot collide with another value. The declared dtypes come from the tuple meta (topk's
+        i64 indices are declared i32 — ADR 0009).
+        """
+        vals = node.meta["val"]
+        if not all(isinstance(val, torch.Tensor) for val in vals):
+            raise NotImplementedError(
+                f"{node.target}: a multi-output op with an output that is not a tensor is not"
+                f" supported ({node.name})"
+            )
+        readers: dict[int, str] = {}
+        for user in node.users:
+            if user.target is operator.getitem and user.args[1] not in readers:
+                readers[user.args[1]] = user.name
+        names = [readers.get(slot, f"{node.name}.{slot}") for slot in range(len(vals))]
+        spec, ins = self._lower(node, foldable)
+        self._slots[node.name] = self._emit_outputs(
+            spec.op, ins, list(zip(names, vals, strict=True)), spec.attrs
+        )
+
+    def _slot_value(self, node: Node) -> str:
+        """The IR value a getitem reads (one output slot of a multi-output node emitted before it
+        — the FX graph is in topological order)."""
+        source, slot = node.args
+        _expect(
+            isinstance(slot, int) and not isinstance(slot, bool),
+            node,
+            f"getitem with a slot {slot!r} that is not an integer is not supported",
+        )
+        slots = self._slots.get(source.name)
+        if slots is None:
+            raise AssertionError(f"getitem {node.name} reads {source.name} before its emission")
+        _expect(0 <= slot < len(slots), node, f"slot {slot} is outside {len(slots)} outputs")
+        return slots[slot]
+
+    def _lower(self, node: Node, foldable: set[str]) -> tuple[Emitted, list[str]]:
+        """Run the node's handler and resolve its IR inputs (synthesized constants appended,
+        arity checked)."""
         handler = ATEN_HANDLERS[node.target]  # missing ones failed in _assert_all_ops_supported
         if any(_holds_node(v) for v in node.kwargs.values()):
             raise NotImplementedError(
@@ -1353,9 +1444,7 @@ class Converter:
                 ),
             ]
         self._check_arity(node, spec, ins)
-        self.value_of[node.name] = self._emit(
-            spec.op, ins, node.name, self._meta_val(node), spec.attrs
-        )
+        return spec, ins
 
 
 def convert(
