@@ -7,27 +7,26 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.17.0 release (released 2026-11-06)
+## now — after the 0.18.0 release (released 2026-11-08)
 
-0.17.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.17.0 — Gemma 4 turns without `maxNewTokens` and the
-stop reason `capacity` (ADR 0083 addendum 2026-11-05), function calling and thinking in the chat layer (ADR 0084 addendum
-2026-11-04), `attentionRowBlockMaxBytes` on `gemma.PipelineOptions` (ADR 0124 addendum 2026-11-05); published-smoke green on
-Node and Deno). No weights or manifests changed and the `SOURCES` pins stay. All published repositories took a new
-`README.md` on 2026-11-06 (the title non-endorsement sentence).
+0.18.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.18.0 — image input on Gemma 4 12B of the q4_0 QAT
+line (ADR 0144), `capacity: "fit"`, `decodeAhead` on 12B, `fullStateStorage: "f16"` (ADR 0143); published-smoke green on Node
+and Deno). `hdae/karume-gemma4-qat` took 12B's vision component and its `i4-gemvpar` / `i4-fast` recipes, and
+`gemma.SOURCES["gemma4-qat"]` and the test-asset pin moved (the fragmentation table of the upload: 160 parts, no FAILED
+row, the large parts at 4–5 terms). Breaking: `ChatMessage` gains `ChatPartsMessage`.
 
-## next — Gemma 4, in the maintainer's order (2026-11-06)
+## next — Gemma 4, in the maintainer's order (2026-11-08)
 
 The items go in this order. The candidates of the other families wait until Gemma 4 has been gone through (the
 maintainer's ruling of 2026-11-06).
 
-1. **Vision** (12B first, then E2B / E4B — ADR [0144](decisions/0144-gemma4-12b-vision.md)): V1–V6 for 12B done on main
-   (2026-11-07, unreleased): preprocessing, the embedder container, the product graph's soft inputs, the bidirectional block,
-   chat image parts and the Playground. Left: V7 (upload the 12B distribution with the vision component and the goldens of
-   `gemma4-12b-vision` to the test-asset dataset, cards, re-pin `SOURCES` and the test-asset pin — at the next release), the
-   browser check on the RTX 5070 Ti, and V8 (E2B / E4B, later by the maintainer's ruling of 2026-11-07).
-
-For the next release: upload the `karume-gemma4-qat` manifest with 12B's `i4-gemvpar` and `i4-fast` and re-pin `SOURCES` (the
-local mirror has them).
+1. **26B A4B (MoE)** (maintainer 2026-11-08): build it with every expert resident first and check it on the RTX 5070 Ti
+   (16 GB); then see whether a MoE cache that loads the needed experts from RAM can work, and look for a way to pay a miss
+   as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
+   paid it with one fence). This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
+   ruling changes it.
+2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
+   2026-11-07). 12B's vision shipped with 0.18.0.
 
 ## later
 
