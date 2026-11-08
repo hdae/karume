@@ -41,6 +41,45 @@ export const DEFAULT_SOFT_TOKEN_BUDGET = 280;
 /** Upstream's `1 / 255` as the f32 it multiplies by. */
 const RESCALE = Math.fround(1 / 255);
 
+/** Refuses a budget upstream's processor does not take ({@link SOFT_TOKEN_BUDGETS}). */
+const assertSoftTokenBudget = (budget: number): void => {
+  if (!SOFT_TOKEN_BUDGETS.includes(budget)) {
+    throw new ModelInputError(
+      `Soft token budget ${budget} is not one of ${SOFT_TOKEN_BUDGETS.join(" / ")}`,
+    );
+  }
+};
+
+/**
+ * The most soft tokens one image can become under `budget`: the budget itself. {@link imageTargetSize}
+ * keeps the resized area within `budget` soft tokens, and an image of a fitting aspect fills it (at
+ * 280, 672×960 is 14 × 20 tokens), so no smaller bound holds for every image.
+ */
+export const maxImageSoftTokens = (budget: number): number => {
+  assertSoftTokenBudget(budget);
+  return budget;
+};
+
+/**
+ * Refuses an image whose soft tokens exceed `chunkLength`, before it is embedded: a block is never
+ * split over chunks (ADR 0144 decision 3), so `GenerationSequence.generate` would refuse the turn only
+ * after the embedder ran.
+ */
+export const assertImagesFitChunk = (
+  images: readonly { readonly image: Rgb8Image; readonly softTokens: number }[],
+  chunkLength: number,
+  where: string,
+): void => {
+  for (const { image, softTokens } of images) {
+    if (softTokens > chunkLength) {
+      throw new ModelInputError(
+        `${where}: an image of ${image.width}×${image.height} becomes ${softTokens} soft tokens, ` +
+          `more than chunkLength ${chunkLength} (an image's block is never split over chunks)`,
+      );
+    }
+  }
+};
+
 /**
  * Upstream's `get_aspect_ratio_preserving_size`: the largest multiples of 48 that keep the aspect and
  * stay within the budget, with its rule for a side that rounds to 0.
@@ -50,11 +89,7 @@ export const imageTargetSize = (
   width: number,
   budget: number = DEFAULT_SOFT_TOKEN_BUDGET,
 ): { readonly height: number; readonly width: number } => {
-  if (!SOFT_TOKEN_BUDGETS.includes(budget)) {
-    throw new ModelInputError(
-      `Soft token budget ${budget} is not one of ${SOFT_TOKEN_BUDGETS.join(" / ")}`,
-    );
-  }
+  assertSoftTokenBudget(budget);
   const maxPatches = budget * PATCHES_PER_SOFT_TOKEN;
   const targetArea = maxPatches * PATCH_AREA;
   const factor = Math.sqrt(targetArea / (height * width));

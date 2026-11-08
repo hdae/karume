@@ -8,7 +8,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
 
-import { imageRows, imageTargetSize } from "../src/gemma/vision.ts";
+import {
+  imageRows,
+  imageTargetSize,
+  maxImageSoftTokens,
+  SOFT_TOKEN_BUDGETS,
+} from "../src/gemma/vision.ts";
 import { ModelInputError } from "../src/errors.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
 import { resizeRgb8TorchBicubic } from "../src/image/torch-resample.ts";
@@ -112,5 +117,29 @@ describe("imageRows", () => {
 
   it("refuses a budget upstream does not accept", () => {
     expect(() => imageTargetSize(100, 100, 281)).toThrow(ModelInputError);
+  });
+});
+
+describe("maxImageSoftTokens", () => {
+  it.each(SOFT_TOKEN_BUDGETS)("is reached by an image at budget %i, and never passed", (budget) => {
+    const most = maxImageSoftTokens(budget);
+    // An aspect whose 48-pixel blocks multiply to the budget (70 = 7 × 10, …, 1120 = 28 × 40).
+    const columns = [10, 14, 20, 28, 40][SOFT_TOKEN_BUDGETS.indexOf(budget)];
+    const filling = imageTargetSize((budget / columns) * 48, columns * 48, budget);
+    expect((filling.height / 48) * (filling.width / 48)).toBe(most);
+    for (const [height, width] of [
+      [1, 1],
+      [97, 3001],
+      [4000, 3000],
+      [48, 4800],
+      [1080, 1920],
+    ]) {
+      const size = imageTargetSize(height, width, budget);
+      expect((size.height / 48) * (size.width / 48)).toBeLessThanOrEqual(most);
+    }
+  });
+
+  it("refuses a budget upstream does not accept", () => {
+    expect(() => maxImageSoftTokens(281)).toThrow(ModelInputError);
   });
 });

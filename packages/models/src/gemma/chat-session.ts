@@ -101,12 +101,16 @@
  * `send` takes content parts when the host has an embedder ({@link ChatSessionHost.vision}). A history
  * that can be re-rendered from the start decides three things:
  *
- * - **One copy of the pixels.** `send` copies each image once (the rule "copied at issue"). That frozen
- *   object is the image's identity, and the history copies — `turns`, an overflow policy's input,
- *   {@link ChatSession.fork} — hold references to it ({@link copyMessages}); `structuredClone` would
- *   copy the pixels on every read.
+ * - **One copy of the pixels, never handed out.** `send` copies each image once (the rule "copied at
+ *   issue"). That frozen object is the image's identity, and a branch ({@link ChatSession.fork}) shares
+ *   it. What the session hands out — `turns`, an overflow policy's input — holds pixels copied at that
+ *   read: a typed array cannot be frozen, so a shared one would let a consumer's write reach the rows
+ *   still to be embedded, or set the history apart from the rows and the KV. A read costs one copy of
+ *   the history's pixels; the session itself reads `turns` only to build an overflow policy's input.
  * - **One embedding per image.** The rows are kept next to the history, keyed by that object, so a whole
- *   re-render or a branch runs no embedder. They are released with the last entry that holds the image.
+ *   re-render or a branch runs no embedder. A handed-out copy that a policy returns with its pixels
+ *   unchanged maps back to its image and keeps the rows. They are released with the last entry that
+ *   holds the image.
  * - **Equality looks at the pixels** ({@link sameValue}), because a policy may return deep copies. Two
  *   different images never compare equal; such a copy embeds once more, as the new image it is.
  *
@@ -140,6 +144,7 @@ import {
 import type { SequenceOptions } from "./pipeline.ts";
 import {
   assertChatTemplateOptions,
+  assertImageChatDeclarations,
   type ChatAssistantMessage,
   type ChatContentPart,
   chatImagePrompt,
@@ -163,7 +168,7 @@ import {
   parseChatResponse,
 } from "./text/chat-response.ts";
 import type { Tokenizer } from "./text/tokenizer.ts";
-import type { ImageEmbedding } from "./vision.ts";
+import { assertImagesFitChunk, type ImageEmbedding } from "./vision.ts";
 
 /**
  * The surface the session reads from the pipeline ({@link Pipeline} satisfies it as is).
@@ -504,14 +509,32 @@ const frozenCopy = <T>(value: T): T => {
   return copy;
 };
 
+/** A frozen copy of an image, its pixels included. */
+const snapshotImage = ({ data, width, height }: Rgb8Image): Rgb8Image =>
+  // MUST: `new Uint8Array(data)`, not `data.slice()`: a Node Buffer is a Uint8Array whose `slice` is
+  // a view of the same memory.
+  Object.freeze({ data: new Uint8Array(data), width, height });
+
 /**
- * Copies of history entries that share the images: a content array is copied part by part with the
- * image object in place, anything else goes through `structuredClone`.
+ * Copies of history entries: a content array is copied part by part, each image through `imageOf`
+ * (the one place that decides whether an image is shared or copied), anything else goes through
+ * `structuredClone`.
  */
-const copyMessages = (messages: readonly ChatMessage[]): ChatMessage[] =>
+const copyMessages = (
+  messages: readonly ChatMessage[],
+  imageOf: (image: Rgb8Image) => Rgb8Image,
+): ChatMessage[] =>
   messages.map((message) =>
     message.role === "user" && typeof message.content !== "string"
-      ? { ...message, role: "user", content: message.content.map((part) => ({ ...part })) }
+      ? {
+          ...message,
+          role: "user",
+          content: message.content.map((part) =>
+            part?.type === "image" && part.image?.data instanceof Uint8Array
+              ? { ...part, image: imageOf(part.image) }
+              : { ...part },
+          ),
+        }
       : structuredClone(message),
   );
 
@@ -520,10 +543,7 @@ const snapshotPart = (part: ChatContentPart): ChatContentPart => {
   // Anything else is not a part: the check that follows names it, and it needs no copy to be refused.
   if (typeof part !== "object" || part === null) return part;
   if (part.type !== "image" || !(part.image?.data instanceof Uint8Array)) return { ...part };
-  const { data, width, height } = part.image;
-  // MUST: `new Uint8Array(data)`, not `data.slice()`: a Node Buffer is a Uint8Array whose `slice` is
-  // a view of the same memory.
-  return { ...part, image: Object.freeze({ data: new Uint8Array(data), width, height }) };
+  return { ...part, image: snapshotImage(part.image) };
 };
 
 /** The tool calls of a history entry (none for anything but a tool-calling assistant message). */
@@ -682,6 +702,11 @@ export class ChatSession {
    * its keys inside the history.
    */
   #embeddings = new Map<Rgb8Image, ImageEmbedding>();
+  /**
+   * Each image copy handed out → the history's image it was copied from (so a policy that returns a
+   * copy with its pixels unchanged keeps that image's rows — {@link ChatSession.#adopt}).
+   */
+  readonly #handedOut = new WeakMap<Rgb8Image, Rgb8Image>();
   /** The current sequence (`undefined` = rebuild on the next turn). */
   #sequence: GenerationSequence | undefined;
   /** The number of history entries in that sequence's KV (0 = empty = re-render the whole). */
@@ -725,6 +750,17 @@ export class ChatSession {
       ...(options.enableThinking === undefined ? {} : { enableThinking: options.enableThinking }),
     };
     assertChatTemplateOptions(template, "gemma.ChatSession");
+    // On an image-capable host a spelled image token in the system block is refused here, by the
+    // rule the messages follow — the whole render would refuse it on every turn.
+    if (host.vision !== undefined) {
+      assertImageChatDeclarations(
+        host.tokenizer,
+        host.vision,
+        options.system,
+        template,
+        "gemma.ChatSession",
+      );
+    }
     this.#template = frozenCopy(template);
     // MUST: check the capacity relations **at construction** (the same two formulas as
     // `createGenerationSequence` in `sequence.ts`). This layer uses `#capacity` as the measure of
@@ -758,13 +794,27 @@ export class ChatSession {
    *
    * Returns a deep-frozen **copy** — exposing the internal array as is would let the consumer's
    * `push` / `splice` (or a write into a call's arguments) silently break the mapping to the KV
-   * ("When the KV is carried over" of {@link ChatSession}). Images are the session's own objects, not
-   * copies; their pixels are not read again once embedded.
+   * ("When the KV is carried over" of {@link ChatSession}). Each read copies the images' pixels too
+   * ("Images" of the module doc): a write into a copy reaches neither the history nor its rows.
    */
   get turns(): readonly ChatMessage[] {
-    const copy = copyMessages(this.#turns);
+    const copy = copyMessages(this.#turns, (image) => {
+      const handed = snapshotImage(image);
+      this.#handedOut.set(handed, image);
+      return handed;
+    });
     deepFreeze(copy);
     return copy;
+  }
+
+  /**
+   * The history's image for an image a policy returned: the one a handed-out copy came from while its
+   * pixels still equal it (its rows stay valid), else a copy of its own — a new image to the embedder,
+   * and the policy's object stays the policy's.
+   */
+  #adopt(image: Rgb8Image): Rgb8Image {
+    const source = this.#handedOut.get(image);
+    return source !== undefined && sameValue(source, image) ? source : snapshotImage(image);
   }
 
   /**
@@ -875,7 +925,8 @@ export class ChatSession {
     }
     // `[...]` turns a hole of a sparse array into `undefined`, which the check below refuses.
     const parts: ChatMessage = { role: "user", content: [...message].map(snapshotPart) };
-    chatImageTurn(tokenizer, parts, vision, this.#template);
+    const { images } = chatImageTurn(tokenizer, parts, vision, this.#template);
+    assertImagesFitChunk(images, this.#host.program.chunkLength, "gemma.ChatSession.send");
     return parts;
   }
 
@@ -1120,7 +1171,8 @@ export class ChatSession {
     }
     // Copy along with the KV-to-history mapping (`#committed`). Between turns, "no sequence ⇔ the KV
     // is empty (`#committed === 0`)", so the KV copy is made only when there is a sequence.
-    const turns = copyMessages(this.#turns);
+    // The images are shared: the branch's are as private to it as the original's.
+    const turns = copyMessages(this.#turns, (image) => image);
     const committed = this.#committed;
     const copying = this.#sequence?.fork();
     const branch = new ChatSession(this.#host, {
@@ -1205,6 +1257,9 @@ export class ChatSession {
     images: readonly ChatPromptImage[],
     signal: AbortSignal | undefined,
   ): Promise<GenerationSoftBlock[]> {
+    // `send` checked the images it took; an overflow policy may have returned others. Before any of
+    // them is embedded.
+    assertImagesFitChunk(images, this.#host.program.chunkLength, "gemma.ChatSession.send");
     const blocks: GenerationSoftBlock[] = [];
     for (const { image, start, softTokens } of images) {
       let embedding = this.#embeddings.get(image);
@@ -1345,12 +1400,15 @@ export class ChatSession {
       this.#committed === 0 ? pendingStart(this.#turns) : this.#committed,
     );
     const needed = neededOf(detail);
-    const next = await this.#onOverflow({
+    const returned = await this.#onOverflow({
       turns: this.turns,
       system: this.#system,
       capacity: detail.limit,
       needed,
     });
+    // MUST: the session keeps copies, never the policy's objects (they stay the policy's to write
+    // into, and are not frozen by a later read of `turns`).
+    const next = copyMessages(returned, (image) => this.#adopt(image));
     // MUST: the messages being answered now (the last entries) remain. Letting them through
     // dropped would make `#prepare` re-render "a conversation with no question", and since
     // `chatPrompt` does not constrain the last role either, only an answer would be committed
@@ -1370,7 +1428,7 @@ export class ChatSession {
         detail,
       );
     }
-    this.#turns = copyMessages(next);
+    this.#turns = next;
     this.#pruneEmbeddings();
     // A truncated history is re-rendered from the start, so the context is returned and rebuilt.
     await this.#releaseSequence();

@@ -105,6 +105,21 @@ describe("pipelineConfig.vision", () => {
       "are not distinct",
     );
   });
+
+  it("refuses a budget whose largest image is longer than any chunk the graph takes", () => {
+    refuses(
+      { ...VISION_DECLARED, softTokenBudget: 1120 },
+      `softTokenBudget 1120: one image can become that many soft tokens, more than maxChunkLength ${CHUNK_ROWS}`,
+    );
+    // The counterpart: the largest budget that fits is taken.
+    assertEquals(
+      parsePipelineConfig({
+        ...PIPELINE_CONFIG,
+        vision: { ...VISION_DECLARED, softTokenBudget: 560 },
+      }).vision?.softTokenBudget,
+      560,
+    );
+  });
 });
 
 describe("assertGemma4Vision: declaration, product graph and embedder graph are one model", () => {
@@ -851,6 +866,28 @@ describe("gemma.Pipeline vision", () => {
         rig.modelWeightParts.filter((path) => rig.fetched().includes(path)),
         [],
       );
+    });
+
+    it("a chunkLength shorter than the largest image of the budget, naming both", async () => {
+      const rig = await distribution();
+      await assertRejects(
+        () => rig.open({ vision: true, chunkLength: 256 }),
+        ModelInputError,
+        `${ENTRY}: chunkLength 256 is below the 280 soft tokens one image can become under ` +
+          "pipelineConfig.vision.softTokenBudget 280",
+      );
+      assertEquals(
+        rig.modelWeightParts.filter((path) => rig.fetched().includes(path)),
+        [],
+      );
+    });
+
+    it("a chunkLength of the budget itself is taken, and a shorter one without vision", async () => {
+      const rig = await distribution();
+      await using exact = await rig.open({ vision: true, chunkLength: 280 });
+      assertEquals(exact.program.chunkLength, 280);
+      await using plain = await rig.open({ chunkLength: 256 });
+      assertEquals(plain.program.chunkLength, 256);
     });
 
     it("a declaration without pipelineConfig.vision", async () => {

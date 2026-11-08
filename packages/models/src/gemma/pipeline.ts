@@ -151,6 +151,7 @@ import {
   admitGemma4Ple,
   assertChunkLength,
   assertGemma4Vision,
+  assertGemma4VisionChunkLength,
   assertGemma4ChunkBuckets,
   GEMMA4_PER_LAYER_INPUTS,
   GEMMA4_SOFT_EMBEDS,
@@ -1550,6 +1551,14 @@ export class GemmaPipeline {
         const visionAdmission = vision
           ? assertGemma4Vision(model, open(VISION), config, admitted.vocabSize, entry)
           : undefined;
+        if (visionAdmission !== undefined) {
+          assertGemma4VisionChunkLength(
+            options.chunkLength ?? config.chunkLength,
+            config,
+            visionAdmission.config,
+            entry,
+          );
+        }
         // MUST: **carry, not discard,** the model name settled from the graph (the PLE check does not
         // re-derive it from the layer count).
         const admission: GemmaFamilyAdmission =

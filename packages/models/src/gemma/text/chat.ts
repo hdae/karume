@@ -1323,7 +1323,6 @@ const assertNoImageSpelling = (
   where: string,
 ): void => {
   if (message.role === "assistant" || message.role === "tool") return;
-  const reserved = [vision.imageTokenId, vision.beginImageTokenId, vision.endImageTokenId];
   // MUST: the texts the render writes, not the parts one by one: adjacent text parts are joined, so a
   // marker split over two of them would be whole in the prompt.
   const texts: string[] = [];
@@ -1341,16 +1340,67 @@ const assertNoImageSpelling = (
     }
     texts.push(run);
   }
+  assertNoImageIds(tokenizer, texts, vision, `${where}: the text of a '${message.role}' message`);
+};
+
+/**
+ * The rule of {@link assertNoImageSpelling} on the function declarations: the system block writes them
+ * from the caller's text (descriptions, parameter names and descriptions), and upstream's processor
+ * counts every `<|image|>` of the prompt.
+ */
+const assertNoImageSpellingInTools = (
+  tokenizer: Tokenizer,
+  options: ChatTemplateOptions,
+  vision: PipelineVisionConfig,
+  where: string,
+): void => {
+  assertOptions(options, where).tools.forEach((tool, index) => {
+    const at = `${where}: options.tools[${index}]`;
+    // As the render writes it: between its spellings, so the encoding is the prompt's.
+    const declaration = `${START_OF_TOOL}${formatFunctionDeclaration(tool, at)}${END_OF_TOOL}`;
+    assertNoImageIds(tokenizer, [declaration], vision, `${at}: the declaration`);
+  });
+};
+
+/** Refuses texts any of which encodes to one of the image ids (`what` names the text). */
+const assertNoImageIds = (
+  tokenizer: Tokenizer,
+  texts: readonly string[],
+  vision: PipelineVisionConfig,
+  what: string,
+): void => {
+  const reserved = [vision.imageTokenId, vision.beginImageTokenId, vision.endImageTokenId];
   for (const text of texts) {
     const found = tokenizer.encode(text).find((id) => reserved.includes(id));
     if (found !== undefined) {
       throw new ModelInputError(
-        `${where}: the text of a '${message.role}' message encodes to the image token ${found} ` +
+        `${what} encodes to the image token ${found} ` +
           `(${JSON.stringify(tokenizer.decode([found], { skipSpecialTokens: false }))}) — an image goes ` +
           `in an image part; upstream's processor refuses such a text too`,
       );
     }
   }
+};
+
+/**
+ * Checks what an owner fixes before its first image-capable render — the system text and the
+ * declarations — by the rules {@link chatImagePrompt} applies (`ChatSession`'s constructor fails
+ * synchronously, rather than every turn's render).
+ *
+ * NOTE: internal (not on the public surface); exported for `../chat-session.ts`.
+ */
+export const assertImageChatDeclarations = (
+  tokenizer: Tokenizer,
+  vision: PipelineVisionConfig,
+  system: string | undefined,
+  options: ChatTemplateOptions,
+  where: string,
+): void => {
+  // Anything but a string is the render's to refuse, with the message it gives any history.
+  if (typeof system === "string") {
+    assertNoImageSpelling(tokenizer, { role: "system", content: system }, vision, where);
+  }
+  assertNoImageSpellingInTools(tokenizer, options, vision, where);
 };
 
 /** The dialect an image can be rendered in (E2B / E4B have no image path yet — ADR 0144 Context). */
@@ -1381,6 +1431,7 @@ export const chatImagePrompt = (
   assertImageDialect(tokenizer, where);
   const segments = renderChatSegments(messages, tokenizer.chatDialect, options, where, true);
   for (const message of messages) assertNoImageSpelling(tokenizer, message, vision, where);
+  assertNoImageSpellingInTools(tokenizer, options, vision, where);
   return encodeSegments(tokenizer, segments, vision);
 };
 

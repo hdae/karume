@@ -19,6 +19,7 @@ import {
   chatImageTurn,
   type ChatMessage,
   chatPrompt,
+  type ChatTool,
   chatTurn,
   gemma4StopTokens,
 } from "../src/gemma/text/chat.ts";
@@ -106,6 +107,32 @@ const imageOf = (width: number, height: number, fill = 0): Rgb8Image => ({
   width,
   height,
 });
+
+/** A function declaration whose description is `description`. */
+const plainTool = (description: string): ChatTool => ({
+  type: "function",
+  function: { name: "look", description },
+});
+
+/** Declarations that spell an image marker where the system block writes the caller's text. */
+const SPELLED_TOOLS: readonly (readonly [string, ChatTool])[] = [
+  ["the soft token in the description", plainTool("Shows <|image|> here.")],
+  ["the opening marker in the description", plainTool("Shows <|image> here.")],
+  [
+    "the closing marker in a parameter's description",
+    {
+      type: "function",
+      function: {
+        name: "look",
+        description: "Shows a picture.",
+        parameters: {
+          type: "object",
+          properties: { what: { type: "string", description: "after <image|>" } },
+        },
+      },
+    },
+  ],
+];
 
 const messagesOf = (messages: readonly FixtureMessage[]): ChatMessage[] =>
   messages.map(
@@ -322,6 +349,27 @@ describe("what is refused", () => {
       chatPrompt(tokenizer, messages),
     );
   });
+
+  describe("a spelled marker in a function declaration (the system block renders it)", () => {
+    const messages: ChatMessage[] = [{ role: "user", content: "Hi." }];
+    for (const [label, tool] of SPELLED_TOOLS) {
+      it(label, () => {
+        assertThrows(
+          () => chatImagePrompt(tokenizer, messages, VISION, { tools: [tool] }),
+          ModelInputError,
+          "options.tools[0]: the declaration encodes to the image token",
+        );
+      });
+    }
+
+    it("a declaration without one renders as chatPrompt does", () => {
+      const options = { tools: [plainTool("Shows a picture.")] };
+      assertEquals(
+        chatImagePrompt(tokenizer, messages, VISION, options).prompt,
+        chatPrompt(tokenizer, messages, options),
+      );
+    });
+  });
 });
 
 // ---- ChatSession ----------------------------------------------------------------------------
@@ -329,9 +377,9 @@ describe("what is refused", () => {
 /** One turn of the fake sequences' script. */
 type Answer = { readonly text: string; readonly closes: boolean };
 
-const program = (capacity: number): GenerationProgram =>
+const program = (capacity: number, chunkLength = 768): GenerationProgram =>
   Object.freeze({
-    chunkLength: 768,
+    chunkLength,
     maxPosition: 262144,
     capacity,
     vocabSize: 262144,
@@ -344,6 +392,7 @@ const hostOf = (
   answers: readonly Answer[],
   options: {
     readonly capacity?: number;
+    readonly chunkLength?: number;
     readonly embedError?: unknown;
     readonly noVision?: boolean;
   } = {},
@@ -402,7 +451,7 @@ const hostOf = (
   };
   const host: ChatSessionHost = {
     tokenizer,
-    program: program(options.capacity ?? 4096),
+    program: program(options.capacity ?? 4096, options.chunkLength),
     defaultSampler: undefined,
     sequence: (sequenceOptions) =>
       Promise.resolve(
@@ -576,6 +625,18 @@ describe("ChatSession with images", () => {
     assertEquals(Reflect.set(imageIn(session.turns[0]), "width", 1), false);
   });
 
+  it("a write into the handed-out history reaches neither the embedder nor the history", async () => {
+    const rig = hostOf([{ text: "A.", closes: true }]);
+    await using session = new ChatSession(rig.host, { maxNewTokens: 8 });
+    const stream = session.send(ask(7));
+    // Before the stream drains: embedding happens then.
+    imageIn(session.turns.at(-1)).data.fill(0);
+    await stream.text();
+    assertEquals(rig.embedded[0].firstByte, 7);
+    imageIn(session.turns[0]).data.fill(0);
+    assertEquals(imageIn(session.turns[0]).data[0], 7);
+  });
+
   it("two messages get one embedding each", async () => {
     const rig = hostOf([
       { text: "A", closes: false },
@@ -701,6 +762,72 @@ describe("message equality never takes two images for one", () => {
     assertEquals(rig.requests[1].softBlocks?.length, 2);
     await session.dispose();
   });
+
+  it("an older message returned as given keeps its rows", async () => {
+    const { rig, session, stream } = await overflowing(
+      ({ turns }) => [turns[0], turns.at(-1) as ChatMessage],
+      "x".repeat(100),
+      "a".repeat(130),
+    );
+    await stream.text();
+    assertEquals(
+      rig.embedded.map(({ firstByte }) => firstByte),
+      [3, 4],
+    );
+    await session.dispose();
+  });
+
+  describe("a policy that writes into the pixels it was given writes into its own copy", () => {
+    it("an older image it edits is a new image: its rows come from the edited pixels", async () => {
+      const { rig, session, stream } = await overflowing(
+        ({ turns }) => {
+          imageIn(turns[0]).data.fill(99);
+          return [turns[0], turns.at(-1) as ChatMessage];
+        },
+        "x".repeat(100),
+        "a".repeat(130),
+      );
+      await stream.text();
+      assertEquals(
+        rig.embedded.map(({ firstByte }) => firstByte),
+        [3, 99, 4],
+      );
+      assertEquals(imageIn(session.turns[0]).data[0], 99);
+      await session.dispose();
+    });
+
+    it("the utterance it edits is a dropped utterance, not other pixels for the same one", async () => {
+      const { rig, session, stream } = await overflowing(({ turns }) => {
+        const asked = turns.at(-1) as ChatMessage;
+        imageIn(asked).data.fill(99);
+        return [asked];
+      });
+      await assertRejects(() => stream.text(), Error, "dropped the current utterance");
+      assertEquals(
+        rig.embedded.map(({ firstByte }) => firstByte),
+        [3],
+      );
+      await session.dispose();
+    });
+
+    it("an image of its own is copied, never frozen or shared", async () => {
+      const own = imageOf(64, 64, 5);
+      const { session, stream } = await overflowing(
+        ({ turns }) => [
+          { role: "user", content: [{ type: "image", image: own }] },
+          turns.at(-1) as ChatMessage,
+        ],
+        "x".repeat(100),
+        "a".repeat(130),
+      );
+      await stream.text();
+      assertEquals(imageIn(session.turns[0]).data[0], 5);
+      assertEquals(Object.isFrozen(own), false);
+      own.data.fill(1);
+      assertEquals(imageIn(session.turns[0]).data[0], 5);
+      await session.dispose();
+    });
+  });
 });
 
 describe("what send refuses, before the history moves", () => {
@@ -744,6 +871,64 @@ describe("what send refuses, before the history moves", () => {
     });
   }
 
+  describe("an image longer than one chunk", () => {
+    /** 4800×48: a wide strip, far fewer soft tokens than a square at the same budget. */
+    const strip = (fill: number): ChatContentPart => ({
+      type: "image",
+      image: imageOf(4800, 48, fill),
+    });
+    const CHUNK = 200;
+
+    it("is refused by send, naming both numbers, before anything is embedded", async () => {
+      const rig = hostOf([], { chunkLength: CHUNK });
+      await using session = new ChatSession(rig.host, { maxNewTokens: 8 });
+      const square = imageSoftTokens(imageOf(64, 64), VISION.softTokenBudget);
+      assert(square > CHUNK, `${square} soft tokens fit the chunk`);
+      assertThrows(
+        () => session.send(ask(1)),
+        ModelInputError,
+        `becomes ${square} soft tokens, more than chunkLength ${CHUNK}`,
+      );
+      assertEquals(session.turns, []);
+      assertEquals(rig.embedded, []);
+    });
+
+    it("an image that fits the chunk is taken (the check is not too wide)", async () => {
+      const rig = hostOf([{ text: "A.", closes: true }], { chunkLength: CHUNK });
+      await using session = new ChatSession(rig.host, { maxNewTokens: 8 });
+      const part = strip(1);
+      assert(part.type === "image");
+      assert(imageSoftTokens(part.image, VISION.softTokenBudget) <= CHUNK);
+      await session.send([part]).text();
+      assertEquals(rig.embedded.length, 1);
+    });
+
+    it("one an overflow policy brings in is refused before it is embedded", async () => {
+      const rig = hostOf(
+        [
+          { text: "A.", closes: true },
+          { text: "B.", closes: true },
+        ],
+        { capacity: 768, chunkLength: CHUNK },
+      );
+      await using session = new ChatSession(rig.host, {
+        maxNewTokens: 8,
+        capacity: 768,
+        onOverflow: ({ turns }) => [
+          { role: "user", content: [pixels(9)] },
+          turns.at(-1) as ChatMessage,
+        ],
+      });
+      await session.send([strip(1), { type: "text", text: "a".repeat(400) }]).text();
+      const stream = session.send("b".repeat(300));
+      await assertRejects(() => stream.text(), ModelInputError, `more than chunkLength ${CHUNK}`);
+      assertEquals(
+        rig.embedded.map(({ firstByte }) => firstByte),
+        [1],
+      );
+    });
+  });
+
   it("a failing embedder closes the turn as never having happened", async () => {
     const failure = new Error("embedder lost");
     const rig = hostOf([], { embedError: failure });
@@ -765,5 +950,49 @@ describe("what send refuses, before the history moves", () => {
     // The same settlement as a turn without images: done resolves, it does not reject.
     assertEquals((await stream.done).reason, "aborted");
     assertEquals(rig.embedded, []);
+  });
+});
+
+describe("what the constructor refuses on a host with images, before any turn", () => {
+  it("a spelled marker in the system text", () => {
+    const rig = hostOf([]);
+    assertThrows(
+      () => new ChatSession(rig.host, { maxNewTokens: 8, system: "Describe <|image|> well." }),
+      ModelInputError,
+      "gemma.ChatSession: the text of a 'system' message encodes to the image token",
+    );
+  });
+
+  for (const [label, tool] of SPELLED_TOOLS) {
+    it(`${label} of a declared tool`, () => {
+      const rig = hostOf([]);
+      assertThrows(
+        () => new ChatSession(rig.host, { maxNewTokens: 8, tools: [tool] }),
+        ModelInputError,
+        "gemma.ChatSession: options.tools[0]: the declaration encodes to the image token",
+      );
+    });
+  }
+
+  it("a system text and declarations without one are taken (the check is not too wide)", async () => {
+    const rig = hostOf([{ text: "A.", closes: true }]);
+    await using session = new ChatSession(rig.host, {
+      maxNewTokens: 8,
+      system: "Describe images well.",
+      tools: [plainTool("Shows a picture.")],
+    });
+    await session.send(ask(1)).text();
+    assertEquals(rig.requests.length, 1);
+  });
+
+  it("a host without an embedder takes them as it always did", async () => {
+    const rig = hostOf([{ text: "A.", closes: true }], { noVision: true });
+    await using session = new ChatSession(rig.host, {
+      maxNewTokens: 8,
+      system: "Describe <|image|> well.",
+      tools: SPELLED_TOOLS.map(([, tool]) => tool),
+    });
+    await session.send("Hi.").text();
+    assertEquals(rig.requests.length, 1);
   });
 });

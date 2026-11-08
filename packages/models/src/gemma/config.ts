@@ -28,7 +28,7 @@ import {
   type RopeSpec,
 } from "./rope.ts";
 import { CHAT_DIALECTS, type ChatDialect, isChatDialect } from "./text/chat-dialect.ts";
-import { SOFT_TOKEN_BUDGETS } from "./vision.ts";
+import { maxImageSoftTokens, SOFT_TOKEN_BUDGETS } from "./vision.ts";
 
 /** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const GEMMA4_PIPELINE_NAME = "gemma4";
@@ -504,6 +504,18 @@ export const parsePipelineConfig = (raw: unknown): PipelineConfig => {
   }
   if (!Object.hasOwn(raw, "rope")) throw new Error(`${where}.rope: missing`);
   const rope = parseRope(raw["rope"], `${where}.rope`);
+  const vision = Object.hasOwn(raw, "vision")
+    ? parseVision(raw["vision"], `${where}.vision`)
+    : undefined;
+  // An image's block is never split over chunks (ADR 0144 decision 3), so a budget whose largest
+  // image needs more rows than any chunk the graph takes declares images that could never run.
+  if (vision !== undefined && maxImageSoftTokens(vision.softTokenBudget) > maxChunkLength) {
+    throw new Error(
+      `${where}.vision.softTokenBudget ${vision.softTokenBudget}: one image can become that many ` +
+        `soft tokens, more than maxChunkLength ${maxChunkLength} (an image's block is never split ` +
+        `over chunks)`,
+    );
+  }
   return {
     chunkLength,
     maxChunkLength,
@@ -519,8 +531,6 @@ export const parsePipelineConfig = (raw: unknown): PipelineConfig => {
     ...(Object.hasOwn(raw, "suppressTokens")
       ? { suppressTokens: parseSuppressTokens(raw["suppressTokens"], `${where}.suppressTokens`) }
       : {}),
-    ...(Object.hasOwn(raw, "vision")
-      ? { vision: parseVision(raw["vision"], `${where}.vision`) }
-      : {}),
+    ...(vision === undefined ? {} : { vision }),
   };
 };

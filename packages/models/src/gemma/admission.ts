@@ -33,6 +33,7 @@ import { GEMMA4_ROPE_LAYER_TYPES, GEMMA4_ROPE_PARTS, gemma4RopeInputName } from 
 import { admitGemma4Drafter, type Gemma4DrafterAdmission } from "./speculative.ts";
 import {
   IMAGE_ROW_ELEMENTS,
+  maxImageSoftTokens,
   VISION_PIXELS,
   VISION_POSITION_X,
   VISION_POSITION_Y,
@@ -395,6 +396,30 @@ export const assertGemma4Vision = (
     );
   }
   return { config: declared, output, symbol };
+};
+
+/**
+ * Checks a `vision: true` load's chunk length (the caller's `chunkLength`, or the declaration's)
+ * against the largest image the declared budget can produce, before any weight part is fetched.
+ *
+ * MUST: refused at load, not per image. A block is never split over chunks (ADR 0144 decision 3), so
+ * a shorter chunk would take some images and fail on others — only after the embedder ran on them.
+ */
+export const assertGemma4VisionChunkLength = (
+  chunkLength: number,
+  config: PipelineConfig,
+  vision: PipelineVisionConfig,
+  entry: string,
+): void => {
+  const checked = assertChunkLength(chunkLength, config, entry);
+  const most = maxImageSoftTokens(vision.softTokenBudget);
+  if (checked < most) {
+    throw new ModelInputError(
+      `${entry}: chunkLength ${checked} is below the ${most} soft tokens one image can become under ` +
+        `pipelineConfig.vision.softTokenBudget ${vision.softTokenBudget} (an image's block is never ` +
+        `split over chunks — a chunkLength of at least ${most} is needed with vision: true)`,
+    );
+  }
 };
 
 /**
