@@ -318,3 +318,13 @@ The scale shape comes from `groupScaleShape` in `packages/runtime/src/format/con
 - **The zero-point field's real name:** not `storage.zero_point` but `encoding.zeroPoint` (a block
   reference — container-v1 §6.1), enabled by changing the ledger's `zeroPoint: "forbidden"` to
   `"allowed"`. The reading "offset 8 = default when the zero point is omitted" stays reserved.
+
+## Addendum 12 (2026-11-08) — f16 steps, bound to one op
+
+Decision 3's f16 scale lands as a **separate codec**, `int4-sym-g-f16` (layout `i4f16`), not as a second scale dtype of
+`int4-sym-g`: the bytes, pack order and grouping of `int4-sym-g`, one f16 step per group, two per u32 word (step `2i` in the
+low half). The codec implies the scale dtype, so a consumer that switches on the layout cannot read f16 steps as f32. Only
+`expert_linear` reads it ([ADR 0145](0145-gemma4-26b-moe-resident.md) decision 3); every other consumer refuses it, and the
+existing models keep f32 steps and their bytes. Decision 3's admission conditions hold as written: the step is rounded to f16
+once at emit, a rounded step that is zero or not finite is refused, an all-zero group is floored at the smallest f16 normal,
+and the round trip decodes with the rounded steps.
