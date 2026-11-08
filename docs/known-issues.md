@@ -616,3 +616,30 @@ the same plain arm and a byte-plane arm ran with the split in later runs
 ([research 2026-11-03](research/2026-11-03-qat-integer-gemv-m2.md) §8, §12).
 
 - Impact: the playground bench's split mode only (a run can fail before its per-key attribution is complete).
+
+## The bidirectional block of a generation run: four edge cases outside the shipped path (filed 2026-11-08; recorded only)
+
+A review of `GenerationRun.bidirectionalRows` (ADR [0144](decisions/0144-gemma4-12b-vision.md) decision 3) found four
+cases where the block's behavior differs from its contract. Gemma 4 12B's image chat cannot reach any of them: it runs
+the block on its own immediate chunk of a context the Session made, on sliding slots, far below 2³² rows.
+
+- **A context from outside the type.** `assertBidirectionalRows` (`packages/runtime/src/runtime/executor.ts:428`) reads
+  `run.context[RUNTIME_INTERNAL]` before the context check that runs later in issue. A run with a block on an object that
+  is not a `GenerationContext` rejects with a `TypeError`, not the `ExecutionError` the same run without a block gets.
+  No state is touched.
+- **The CPU reference on a full slot.** `referenceStateAttention`
+  (`packages/runtime/src/reference/state-attention.ts:194`) applies the block whatever the window, so with window 0 (a
+  full slot) it ORs the block in. The runtime keeps full layers causal and the kernel builder refuses a block without a
+  window. The reference describes a behavior the GPU path refuses; no test passes a block to a full slot.
+- **The u32 bound of the block words.** `#writeLengths` (`packages/runtime/src/runtime/generation-context.ts:1531-1533`)
+  writes `pastLength + start` and `pastLength + end` into the lengths uniform without a bound check. When
+  `pastLength + end` is 2³², the upper word wraps to 0 and the block becomes empty, so the run is silently causal.
+- **A second slot backing for block runs.** The prepared key gains `|bidir`
+  (`packages/runtime/src/runtime/executor.ts:1699`), and the slot backings are keyed by it, so an image chunk and a text
+  chunk of the same 768-row signature hold two backings. Under a backing budget sized for one, alternating chunks could
+  evict and rebuild one per chunk. Performance and memory only; not measured.
+
+- Impact: callers of the runtime's `GenerationRun.bidirectionalRows` outside the shipped 12B pipeline, and the CPU
+  reference's tests; the shipped image chat is unaffected.
+- Fix candidates: the context check before the block rule; the reference refusing a block on window 0 as the kernel
+  builder does; a u32 bound in the block rule; measure the backing split before changing the key.
