@@ -33,6 +33,8 @@ write the handler key (`torch.ops.karume.gru_scan.default`).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F  # noqa: N812  -- the spelling of the upstream copy below
 
@@ -268,6 +270,38 @@ def _gated_delta_scan_fake(
 EXPERT_LINEAR_UPSTREAM = "transformers 5.14.1, models/gemma4/modeling_gemma4.py Gemma4TextExperts"
 
 
+def expert_linear_body(
+    x: torch.Tensor,
+    index: torch.Tensor,
+    weight_of: Callable[[int], torch.Tensor],
+    experts: int,
+    out_features: int,
+) -> torch.Tensor:
+    """The per-pick math of {@link expert_linear}, with the weight of expert `e` read through
+    `weight_of(e)` (an `[out, in]` F32 tensor) — `[T, k, out]` for x `[T, in]` / `[T, k, in]` and
+    index `[T, k]`.
+
+    MUST: this is the one body of the op's eager form and of any caller that holds the experts in
+    another form (a recipe's CPU reference over packed bytes dequantises one expert per call), so
+    the trace's op and such a reference share one per-pick summation (ADR 0145 decision 5).
+    `weight_of` is called once per expert the index hits, in ascending id order, and never for an
+    expert it does not hit. MUST: an id outside `[0, experts)` raises (torch would wrap a negative
+    one) — the CPU reference's rule (ADR 0061).
+    """
+    if index.numel() > 0 and (int(index.min()) < 0 or int(index.max()) >= experts):
+        raise ValueError(
+            f"expert_linear: index ids span [{int(index.min())}, {int(index.max())}],"
+            f" outside the {experts} experts"
+        )
+    tokens, picks = index.shape
+    out = x.new_zeros((tokens, picks, out_features))
+    for expert in torch.unique(index).tolist():
+        token, pick = torch.where(index == expert)
+        rows = x[token] if x.dim() == 2 else x[token, pick]
+        out[token, pick] = F.linear(rows, weight_of(expert))
+    return out
+
+
 @torch.library.custom_op("karume::expert_linear", mutates_args=())
 def expert_linear(x: torch.Tensor, index: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """The routed expert linear (ADR 0145 decision 2): x[T,in] (shared by the k picks) or
@@ -275,26 +309,15 @@ def expert_linear(x: torch.Tensor, index: torch.Tensor, weight: torch.Tensor) ->
     `y[t, j] = weight[index[t, j]] · x[t (, j)]`.
 
     MUST: the body is upstream's eager experts math (`Gemma4TextExperts.forward`): for each expert
-    the index hits, the rows routed to it go through `F.linear` with that expert's weight. Only
+    the index hits, the rows routed to it go through `F.linear` with that expert's weight
+    ({@link expert_linear_body} — the body a reference over another weight form shares). Only
     the picked experts are read (`weight[expert]`), so a weight that dequantises on read
     dequantises only those. The op stops at one projection: the activation, the gate × up product,
     the routing weight and the sum over k are the caller's ops (ADR 0145 decision 2).
     MUST: an id outside `[0, E)` raises (torch would wrap a negative one) — the CPU reference's
     rule (ADR 0061); in a graph the index is a topk over E (the runtime's plan-time rule).
     """
-    experts = weight.shape[0]
-    if index.numel() > 0 and (int(index.min()) < 0 or int(index.max()) >= experts):
-        raise ValueError(
-            f"expert_linear: index ids span [{int(index.min())}, {int(index.max())}],"
-            f" outside the {experts} experts"
-        )
-    tokens, picks = index.shape
-    out = x.new_zeros((tokens, picks, weight.shape[1]))
-    for expert in torch.unique(index).tolist():
-        token, pick = torch.where(index == expert)
-        rows = x[token] if x.dim() == 2 else x[token, pick]
-        out[token, pick] = F.linear(rows, weight[expert])
-    return out
+    return expert_linear_body(x, index, weight.__getitem__, weight.shape[0], weight.shape[1])
 
 
 @expert_linear.register_fake

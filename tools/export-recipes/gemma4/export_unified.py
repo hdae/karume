@@ -161,7 +161,7 @@ from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import provenance, sources
-from gemma4.card import GEMMA4_LICENSE, GEMMA4_PLE_MODELS, GEMMA4_UPSTREAM
+from gemma4.card import GEMMA4_LICENSE, GEMMA4_MOE_MODELS, GEMMA4_PLE_MODELS, GEMMA4_UPSTREAM
 from gemma4.distribution import (
     GEMMA4_PRODUCT_SUFFIX,
     GEMMA4_ROLE,
@@ -185,19 +185,31 @@ from qwen3_5.export import MEMORY_FLOOR_GIB, MemoryWatch
 #: The text model type this script exports (`text_config.model_type` of 12B).
 UNIFIED_TEXT_MODEL_TYPE = "gemma4_unified_text"
 
-#: The models this script writes — the ones without per-layer embeddings (12B).
+#: The text model type of the mixture-of-experts model (26B A4B — `gemma4.export_moe`), whose text
+#: decoder is upstream's `Gemma4ForCausalLM` with the expert block on ({@link meta_model}).
+MOE_TEXT_MODEL_TYPE = "gemma4_text"
+
+#: The models this script writes — the ones without per-layer embeddings whose class is
+#: `gemma4_unified` (12B). 26B has no per-layer embeddings either, but its class is another one and
+#: its script is `gemma4.export_moe`.
 MODELS: tuple[str, ...] = tuple(
-    model for model in GEMMA4_UPSTREAM if model not in GEMMA4_PLE_MODELS
+    model
+    for model in GEMMA4_UPSTREAM
+    if model not in GEMMA4_PLE_MODELS and model not in GEMMA4_MOE_MODELS
 )
 
 #: Checkpoint key prefixes outside the text decoder, which this script never reads (12B's
 #: encoder-free vision and audio embedders — 52.4 M parameters; `gemma4.export_vision` reads the
-#: vision ones, nothing reads the audio one).
+#: vision ones, nothing reads the audio one). Another checkpoint passes its own
+#: ({@link Checkpoint}).
 IGNORED_PREFIXES: tuple[str, ...] = (
     "model.vision_embedder.",
     "model.embed_vision.",
     "model.embed_audio.",
 )
+
+#: The index of a sharded checkpoint (HF's spelling): `weight_map` names the file of every key.
+CHECKPOINT_INDEX = "model.safetensors.index.json"
 
 #: The text decoder's key prefix in the wrapper (`UnifiedProductWrapper.model.model`) and in the
 #: checkpoint.
@@ -377,20 +389,27 @@ def load_config(model_dir: Path, layers: int | None = None) -> Any:
         )
     if gemma4_ple_dim(config, where) != 0:
         raise UnifiedExportError(f"{where}: declares per-layer embeddings — not this script's form")
-    if layers is not None:
-        if not 1 <= layers <= int(config.num_hidden_layers):
-            raise UnifiedExportError(f"--layers {layers} outside 1..{config.num_hidden_layers}")
-        layer_types = list(config.layer_types[:layers])
-        if layer_types[-1] != one_shot.FULL_ATTENTION:
-            raise UnifiedExportError(
-                f"--layers {layers} ends on a {layer_types[-1]} layer (upstream's last layer is"
-                " always full attention)"
-            )
-        config.num_hidden_layers = layers
-        config.layer_types = layer_types
+    truncate_layers(config, layers)
     one_shot.register_attention()
     config._attn_implementation = one_shot.ATTENTION_NAME
     return config
+
+
+def truncate_layers(config: Any, layers: int | None) -> None:
+    """Keep the first `layers` layers of `config` (`None` keeps them all) — {@link load_config}'s
+    MUST: the prefix ends on a full-attention layer."""
+    if layers is None:
+        return
+    if not 1 <= layers <= int(config.num_hidden_layers):
+        raise UnifiedExportError(f"--layers {layers} outside 1..{config.num_hidden_layers}")
+    layer_types = list(config.layer_types[:layers])
+    if layer_types[-1] != one_shot.FULL_ATTENTION:
+        raise UnifiedExportError(
+            f"--layers {layers} ends on a {layer_types[-1]} layer (upstream's last layer is"
+            " always full attention)"
+        )
+    config.num_hidden_layers = layers
+    config.layer_types = layer_types
 
 
 def no_soft_inputs(input_ids: torch.Tensor, hidden_size: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -548,13 +567,37 @@ class UnifiedProductWrapper(nn.Module):
 
 
 def meta_model(config: Any) -> nn.Module:
-    """Upstream's `Gemma4UnifiedForCausalLM` without weights (parameters on meta; the derived
-    non-persistent buffers — RoPE frequencies, the embedding scale — computed by upstream's own
-    initializer: `gemma4.export.materialize_non_persistent_buffers`)."""
-    from transformers import Gemma4UnifiedForCausalLM
+    """Upstream's text model without weights (parameters on meta; the derived non-persistent
+    buffers — RoPE frequencies, the embedding scale — computed by upstream's own initializer:
+    `gemma4.export.materialize_non_persistent_buffers`): `Gemma4UnifiedForCausalLM` for 12B,
+    `Gemma4ForCausalLM` for 26B's mixture of experts ({@link MOE_TEXT_MODEL_TYPE}).
 
+    MUST: a model with the expert block runs its experts through `karume::expert_linear`
+    (`gemma4.experts`) — the config names the implementation before the model is built (upstream
+    resolves it in `PreTrainedModel.__init__`, defaulting to `grouped_mm` when it is unset), and the
+    built model is checked to have kept it, so neither the trace nor a reference runs another
+    path.
+    """
+    from transformers import Gemma4ForCausalLM, Gemma4UnifiedForCausalLM
+
+    from gemma4 import experts
+
+    classes = {
+        UNIFIED_TEXT_MODEL_TYPE: Gemma4UnifiedForCausalLM,
+        MOE_TEXT_MODEL_TYPE: Gemma4ForCausalLM,
+    }
+    model_class = classes.get(config.model_type)
+    if model_class is None:
+        raise UnifiedExportError(
+            f"text model type {config.model_type!r} is not one of {sorted(classes)}"
+        )
+    moe = bool(getattr(config, "enable_moe_block", False))
+    if moe:
+        experts.assert_karume_experts(config)
     with torch.device("meta"):
-        model = Gemma4UnifiedForCausalLM(config).eval()
+        model = model_class(config).eval()
+    if moe:
+        experts.assert_karume_experts(model)
     one_shot.materialize_non_persistent_buffers(model)
     return model
 
@@ -631,38 +674,78 @@ def checkpoint_key(state_key: str) -> str:
     return CHECKPOINT_TEXT_PREFIX + state_key.removeprefix(WRAPPER_TEXT_PREFIX)
 
 
-class Checkpoint:
-    """The single-file checkpoint (`model.safetensors`), read one tensor or one block of rows at a
-    time.
+def _shard_keys(directory: Path) -> tuple[dict[str, Path], tuple[str, ...]]:
+    """Key → the file holding it, and the weight files read (in the fingerprint's order): the
+    single `model.safetensors`, or {@link CHECKPOINT_INDEX} and the shards it names. MUST: every
+    shard holds exactly the keys the index maps to it — an index and shards of different
+    snapshots fail loudly instead of reading a key from wherever it happens to be."""
+    single = directory / one_shot.CHECKPOINT_FILE
+    index = directory / CHECKPOINT_INDEX
+    if index.is_file():
+        weight_map = json.loads(index.read_text(encoding="utf-8")).get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise UnifiedExportError(f"{index}: no weight_map")
+        located: dict[str, Path] = {}
+        for name in sorted(set(weight_map.values())):
+            path = directory / name
+            if not path.is_file():
+                raise UnifiedExportError(f"{path} is missing (named by {index.name})")
+            with safe_open(str(path), framework="pt") as handle:
+                held = set(handle.keys())
+            mapped = {key for key, file in weight_map.items() if file == name}
+            if held != mapped:
+                raise UnifiedExportError(
+                    f"{path}: holds {len(held)} keys, {index.name} maps {len(mapped)} to it"
+                    f" (only in the file: {sorted(held - mapped)[:4]}; only in the index:"
+                    f" {sorted(mapped - held)[:4]})"
+                )
+            located.update(dict.fromkeys(held, path))
+        return located, (index.name, *sorted(set(weight_map.values())))
+    if single.is_file():
+        with safe_open(str(single), framework="pt") as handle:
+            return dict.fromkeys(handle.keys(), single), (single.name,)
+    raise UnifiedExportError(f"{directory} holds neither {single.name} nor {index.name}")
 
-    MUST: a key outside the text decoder that is not under {@link IGNORED_PREFIXES} fails loudly —
-    reading only what the graph asks for would silently accept a checkpoint of another structure.
+
+class Checkpoint:
+    """The checkpoint — the single file `model.safetensors`, or the shards of
+    {@link CHECKPOINT_INDEX} — read one tensor or one block of rows at a time.
+
+    MUST: a key outside the text decoder that is not under `ignored` ({@link IGNORED_PREFIXES} for
+    12B) fails loudly — reading only what the graph asks for would silently accept a checkpoint of
+    another structure.
     """
 
-    def __init__(self, directory: Path) -> None:
-        self.path = directory / one_shot.CHECKPOINT_FILE
-        if not self.path.is_file():
-            raise UnifiedExportError(f"{self.path} is missing")
-        with safe_open(str(self.path), framework="pt") as handle:
-            keys = list(handle.keys())
+    def __init__(self, directory: Path, ignored: tuple[str, ...] = IGNORED_PREFIXES) -> None:
+        self.path = directory
+        located, files = _shard_keys(directory)
+        #: The weight files read (`model.safetensors`, or the index and its shards) — what the
+        #: provenance record fingerprints with `config.json`.
+        self.files = files
         stray = sorted(
             key
-            for key in keys
-            if not key.startswith(CHECKPOINT_TEXT_PREFIX) and not key.startswith(IGNORED_PREFIXES)
+            for key in located
+            if not key.startswith(CHECKPOINT_TEXT_PREFIX) and not key.startswith(ignored)
         )
         if stray:
             raise UnifiedExportError(
                 f"{self.path}: {len(stray)} keys outside the text decoder and the ignored"
                 f" prefixes: {stray[:4]}"
             )
-        self._keys = frozenset(key for key in keys if key.startswith(CHECKPOINT_TEXT_PREFIX))
+        self._files = {
+            key: path for key, path in located.items() if key.startswith(CHECKPOINT_TEXT_PREFIX)
+        }
+        self._keys = frozenset(self._files)
 
     def names(self) -> frozenset[str]:
         return self._keys
 
-    def _view(self, handle: Any, key: str) -> Any:
+    def _file(self, key: str) -> str:
         if key not in self._keys:
             raise UnifiedExportError(f"'{key}' is not in {self.path}")
+        return str(self._files[key])
+
+    def _view(self, handle: Any, key: str) -> Any:
         view = handle.get_slice(key)
         if view.get_dtype() not in ACCEPTED_DTYPES:
             raise UnifiedExportError(
@@ -671,18 +754,19 @@ class Checkpoint:
         return view
 
     def shape(self, key: str) -> list[int]:
-        with safe_open(str(self.path), framework="pt") as handle:
+        with safe_open(self._file(key), framework="pt") as handle:
             return list(self._view(handle, key).get_shape())
 
     def read(self, key: str, dtype: torch.dtype | None = torch.float32) -> torch.Tensor:
         """One whole tensor — widened to F32, or as stored (`dtype=None`); always a copy."""
-        with safe_open(str(self.path), framework="pt") as handle:
+        with safe_open(self._file(key), framework="pt") as handle:
             value = self._view(handle, key)[:]
         return value.to(value.dtype if dtype is None else dtype, copy=True)
 
     def read_rows(self, key: str, start: int, stop: int) -> torch.Tensor:
-        """Rows `[start, stop)` of the leading axis as F32."""
-        with safe_open(str(self.path), framework="pt") as handle:
+        """Rows `[start, stop)` of the leading axis as F32 (experts `[start, stop)` of a rank-3
+        expert weight)."""
+        with safe_open(self._file(key), framework="pt") as handle:
             return self._view(handle, key)[start:stop].to(torch.float32, copy=True)
 
 
@@ -730,6 +814,47 @@ def _matrix_shape(checkpoint: Checkpoint, key: str) -> tuple[int, int]:
     if len(shape) != 2:
         raise UnifiedExportError(f"'{key}' has rank {len(shape)} (row quantization is rank 2 only)")
     return int(shape[0]), int(shape[1])
+
+
+@dataclass(frozen=True)
+class GridView:
+    """How a weight's grid is imported: as `[units · rows_per_unit, cols]` rows, read `units` of
+    the leading axis at a time. A rank-2 weight is `rows` units of one row; a rank-3 expert weight
+    `[E, out, in]` is `E` units of `out` rows — the `[E·out, in]` view, the same bytes (ADR 0145
+    decision 3)."""
+
+    units: int
+    rows_per_unit: int
+    cols: int
+
+    @property
+    def rows(self) -> int:
+        return self.units * self.rows_per_unit
+
+
+def grid_view(
+    checkpoint: Checkpoint, key: str, group_size: int, *, experts: bool = False
+) -> GridView:
+    """{@link GridView} of `key`: rank 2, or rank 3 when `experts` (a stacked expert weight).
+
+    MUST: the rank is the caller's claim — every weight but an expert weight keeps the rank-2
+    refusal, so a rank-3 tensor never imports by accident.
+    """
+    if experts:
+        shape = checkpoint.shape(key)
+        if len(shape) != 3:
+            raise UnifiedExportError(
+                f"'{key}' has rank {len(shape)} (an expert weight is [E, out, in])"
+            )
+        units, rows_per_unit, cols = (int(dim) for dim in shape)
+    else:
+        units, cols = _matrix_shape(checkpoint, key)
+        rows_per_unit = 1
+    if cols % group_size or cols % 2:
+        raise UnifiedExportError(
+            f"'{key}': row length {cols} does not split into groups of {group_size}"
+        )
+    return GridView(units=units, rows_per_unit=rows_per_unit, cols=cols)
 
 
 def grid_import(
@@ -780,33 +905,38 @@ def grid_import(
 
 
 def _int4_shape(checkpoint: Checkpoint, key: str, group_size: int) -> tuple[int, int]:
-    rows, cols = _matrix_shape(checkpoint, key)
-    if cols % group_size or cols % 2:
-        raise UnifiedExportError(
-            f"'{key}': row length {cols} does not split into groups of {group_size}"
-        )
-    return rows, cols
+    view = grid_view(checkpoint, key, group_size)
+    return view.rows, view.cols
 
 
 def _grid_blocks(
-    checkpoint: Checkpoint, key: str, group_size: int
+    checkpoint: Checkpoint, key: str, group_size: int, *, experts: bool = False
 ) -> Iterator[tuple[int, int, torch.Tensor, torch.Tensor]]:
     """`(start, stop, codes, steps)` of each block of rows ({@link grid_import} on the F32-widened
     checkpoint rows) — the one source of the container's bytes ({@link quantize_int4_rows}) and
     the reference's values ({@link int4_codes} / {@link imported_embedding}). A group never
-    crosses a row, so the blocks give the whole tensor's codes and steps."""
-    rows, cols = _int4_shape(checkpoint, key, group_size)
-    step = _block_rows(cols)
-    for start in range(0, rows, step):
-        stop = min(start + step, rows)
-        weight = checkpoint.read_rows(key, start, stop)
+    crosses a row, so the blocks give the whole tensor's codes and steps.
+
+    With `experts` the weight is `[E, out, in]` ({@link grid_view}): a block is whole experts and
+    its rows are rows of the `[E·out, in]` view (`start` / `stop` count those rows).
+    """
+    view = grid_view(checkpoint, key, group_size, experts=experts)
+    step = _block_rows(view.rows_per_unit * view.cols)
+    for first in range(0, view.units, step):
+        last = min(first + step, view.units)
+        start, stop = first * view.rows_per_unit, last * view.rows_per_unit
+        weight = checkpoint.read_rows(key, first, last).reshape(stop - start, view.cols)
         codes, steps = grid_import(weight, group_size, f"'{key}'", start)
         del weight
         yield start, stop, codes, steps
 
 
 def quantize_int4_rows(
-    checkpoint: Checkpoint, key: str, group_size: int = DEFAULT_GROUP_SIZE
+    checkpoint: Checkpoint,
+    key: str,
+    group_size: int = DEFAULT_GROUP_SIZE,
+    *,
+    experts: bool = False,
 ) -> FixedQuantizedWeight:
     """Packed i4 with group steps along each row, from the imported grid of blocks of rows
     ({@link _grid_blocks}).
@@ -816,18 +946,22 @@ def quantize_int4_rows(
     ③ — on the packed bytes). Two consecutive elements of a row share a byte
     (`karume.emit.pack_int4` — the row length is even), so the packed rows of the blocks are the
     whole tensor's bytes.
+
+    With `experts` the weight is a stacked expert weight `[E, out, in]`, imported as `[E·out, in]`
+    and stored as `int4-sym-g-f16` (`i4f16` — ADR 0145 decision 3): the same codes, the F32 steps
+    handed to the writer, which rounds them to f16 once (`karume.emit.f16_step_table`).
     """
-    rows, cols = _int4_shape(checkpoint, key, group_size)
-    packed = torch.empty((rows, cols // 2), dtype=torch.uint8)
-    scale = torch.empty((rows, cols // group_size), dtype=torch.float32)
-    for start, stop, codes, steps in _grid_blocks(checkpoint, key, group_size):
+    view = grid_view(checkpoint, key, group_size, experts=experts)
+    packed = torch.empty((view.rows, view.cols // 2), dtype=torch.uint8)
+    scale = torch.empty((view.rows, view.cols // group_size), dtype=torch.float32)
+    for start, stop, codes, steps in _grid_blocks(checkpoint, key, group_size, experts=experts):
         block = pack_int4(codes)
         restored = dequantize_int4(unpack_int4(block, codes.shape), steps)
         if not torch.equal(restored, dequantize_int4(codes, steps)):
             raise UnifiedExportError(f"'{key}' rows {start}..{stop}: packed i4 does not round-trip")
-        packed[start:stop] = block.reshape(stop - start, cols // 2)
+        packed[start:stop] = block.reshape(stop - start, view.cols // 2)
         scale[start:stop] = steps
-    return FixedQuantizedWeight(dtype="i4", packed=packed, scale=scale)
+    return FixedQuantizedWeight(dtype="i4f16" if experts else "i4", packed=packed, scale=scale)
 
 
 # ---------------------------------------------------------------------------
@@ -854,14 +988,59 @@ class TraceKeys:
     derived: frozenset[str]
     #: The linear weights stored as i4.
     int4: frozenset[str]
+    #: The stacked expert weights (`[E, out, in]`) stored as i4f16 (26B — empty for 12B).
+    experts: frozenset[str] = frozenset()
+    #: Every parameter of rank ≥ 2 (both names of the tied pair) — what
+    #: {@link assert_fixed_matrices} holds to the imported set.
+    matrices: frozenset[str] = frozenset()
+
+
+def expert_targets(wrapper: nn.Module) -> frozenset[str]:
+    """The stacked expert weights of `wrapper` (upstream's `Gemma4TextExperts` — `gate_up_proj` /
+    `down_proj`, rank 3), stored as i4f16 (ADR 0145 decision 3)."""
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
+
+    return frozenset(
+        f"{fqn}.{name}"
+        for fqn, module in wrapper.named_modules()
+        if isinstance(module, Gemma4TextExperts)
+        for name, _ in module.named_parameters(recurse=False)
+    )
 
 
 def trace_keys(wrapper: nn.Module) -> TraceKeys:
     persistent = frozenset(wrapper.state_dict())
     buffers = {name for name, _ in wrapper.named_buffers()}
     return TraceKeys(
-        persistent=persistent, derived=frozenset(buffers - persistent), int4=int4_targets(wrapper)
+        persistent=persistent,
+        derived=frozenset(buffers - persistent),
+        int4=int4_targets(wrapper),
+        experts=expert_targets(wrapper),
+        matrices=frozenset(
+            name
+            for name, parameter in wrapper.named_parameters(remove_duplicate=False)
+            if parameter.dim() >= 2
+        ),
     )
+
+
+def assert_fixed_matrices(keys: TraceKeys) -> None:
+    """Every parameter of rank ≥ 2 is imported from the grid — an i4 linear, the tied embedding
+    pair or an i4f16 expert weight — and nothing else is.
+
+    MUST: checked on the parameters, before any weight is read (ADR 0145 decision 3: a 3-D
+    expert can never be written as F32, which would also be about 91 GB for 26B). The trace's own
+    rank-2 constants (the folded masks) are not parameters, so they are not counted.
+    """
+    imported = keys.int4 | keys.experts | {EMBED_KEY, TIED_HEAD_KEY}
+    loose = sorted(keys.matrices - imported)
+    if loose:
+        raise UnifiedExportError(
+            f"{len(loose)} parameters of rank ≥ 2 are not imported from the grid: {loose[:4]}"
+        )
+    absent = sorted(imported - keys.matrices)
+    if absent:
+        raise UnifiedExportError(f"imported keys that are not rank ≥ 2 parameters: {absent[:4]}")
 
 
 def prepare_material(
@@ -870,30 +1049,33 @@ def prepare_material(
     keys: TraceKeys,
     checkpoint: Checkpoint,
 ) -> ContainerMaterial:
-    """Import the grid of the linears and the embedding from the checkpoint, widen the rest.
+    """Import the grid of the linears, the embedding and the expert weights from the checkpoint,
+    widen the rest.
 
     MUST: every tensor the graph declares is one of four kinds — a quantized weight, a
     checkpoint tensor, a trace constant or a config-derived buffer; anything else fails loudly
-    (an uninitialized trace parameter must never reach the writer).
+    (an uninitialized trace parameter must never reach the writer). MUST: every parameter of rank
+    ≥ 2 is a quantized weight ({@link assert_fixed_matrices}), checked before the first read.
     """
+    assert_fixed_matrices(keys)
     declared = sorted({init.tensor for init in graph.initializers.values()})
     embedding = [key for key in declared if key in (EMBED_KEY, TIED_HEAD_KEY)]
     if len(embedding) != 1:
         raise UnifiedExportError(f"the graph declares the tied embedding as {embedding}")
-    missing = sorted(keys.int4 - set(declared))
+    missing = sorted((keys.int4 | keys.experts) - set(declared))
     if missing:
         raise UnifiedExportError(f"quantization targets the graph does not declare: {missing[:4]}")
     material: dict[str, torch.Tensor] = {}
     fixed: dict[str, FixedQuantizedWeight] = {}
     for key in declared:
         shape = list(tensors[key].shape)
-        if key in keys.int4 or key in embedding:
+        if key in keys.int4 or key in embedding or key in keys.experts:
             source = checkpoint_key(key)
             # Checked before the long read: a mismatch fails without quantizing the tensor.
             stored = checkpoint.shape(source)
             if stored != shape:
                 raise UnifiedExportError(f"'{key}': checkpoint shape {stored}, graph {shape}")
-            fixed[key] = quantize_int4_rows(checkpoint, source)
+            fixed[key] = quantize_int4_rows(checkpoint, source, experts=key in keys.experts)
             material[key] = torch.empty(shape, device="meta")
         elif key in keys.persistent:
             value = checkpoint.read(checkpoint_key(key))
@@ -1412,15 +1594,16 @@ def _greedy_summary(
     margins: Mapping[str, list[float]],
     first: Mapping[str, int],
     steps: int,
+    expectations: Mapping[str, str] = FIRST_TOKEN_EXPECTATIONS,
 ) -> dict[str, Any]:
     """The goldens' record for the summary, and the first-token sanity on the cases of
-    {@link FIRST_TOKEN_EXPECTATIONS} (`first` — MUST: before the seat is published —
-    `gemma4.export._sanity` fails loudly)."""
-    missing = sorted(set(FIRST_TOKEN_EXPECTATIONS) - set(first))
+    `expectations` ({@link FIRST_TOKEN_EXPECTATIONS} — 12B's; another model passes its own) with
+    `first` — MUST: before the seat is published — `gemma4.export._sanity` fails loudly."""
+    missing = sorted(set(expectations) - set(first))
     if missing:
         raise UnifiedExportError(f"no first token for the expected cases {missing}")
     tokenizer = one_shot.load_tokenizer(tokenizer_dir)
-    expected = one_shot.expected_token_ids(tokenizer, FIRST_TOKEN_EXPECTATIONS)
+    expected = one_shot.expected_token_ids(tokenizer, expectations)
     labels = {
         token: tokenizer.id_to_token(token)
         for token in set(first.values()) | set(expected.values())

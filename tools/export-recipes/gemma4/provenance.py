@@ -95,28 +95,37 @@ def file_digest(path: Path) -> dict[str, Any]:
     return {"bytes": size, "sha256": digest.hexdigest()}
 
 
+def files_by_role(weights_files: Sequence[str] = WEIGHTS_FILES) -> dict[str, tuple[str, ...]]:
+    """{@link FILES_BY_ROLE} for a checkpoint whose weights are `weights_files` (a sharded one
+    names its index and every shard — 26B, `gemma4.export_moe`)."""
+    return {**FILES_BY_ROLE, "weights": tuple(weights_files)}
+
+
 def checkpoint_fingerprint(
     model_dir: Path,
     label: str | None = None,
     *,
     tokenizer_dir: Path | None = None,
     pins: ModelPins | None = None,
+    weights_files: Sequence[str] = WEIGHTS_FILES,
 ) -> dict[str, Any]:
-    """Fingerprint of the source checkpoint (each file of {@link FINGERPRINT_FILES}).
+    """Fingerprint of the source checkpoint (each file of {@link FINGERPRINT_FILES}, the weights'
+    files being `weights_files`).
 
     `dir` names the checkpoint: `label` when given — the repository ids of hub snapshots, whose
     directory names are only the commit SHAs — else the directory name (a hand-placed checkpoint
     under `inputs/`, named after its repository).
 
-    {@link WEIGHTS_FILES} are read from `model_dir` and {@link TOKENIZER_FILES} from
-    `tokenizer_dir` (`None`: `model_dir` — one checkpoint holds both). `pins` — the sources of a
-    pinned model — adds `sources`: role → `{repo, revision, files}`, naming which source each
-    fingerprinted file was read from.
+    `weights_files` ({@link WEIGHTS_FILES} by default) are read from `model_dir` and
+    {@link TOKENIZER_FILES} from `tokenizer_dir` (`None`: `model_dir` — one checkpoint holds both).
+    `pins` — the sources of a pinned model — adds `sources`: role → `{repo, revision, files}`,
+    naming which source each fingerprinted file was read from.
     """
     tokenizer_root = model_dir if tokenizer_dir is None else tokenizer_dir
+    by_role = files_by_role(weights_files)
     files: dict[str, Any] = {}
-    for name in FINGERPRINT_FILES:
-        directory = model_dir if name in WEIGHTS_FILES else tokenizer_root
+    for name in (*by_role["weights"], *by_role["tokenizer"]):
+        directory = model_dir if name in by_role["weights"] else tokenizer_root
         path = directory / name
         if not path.is_file():
             raise AssertionError(
@@ -129,27 +138,34 @@ def checkpoint_fingerprint(
     }
     if pins is not None:
         fingerprint["sources"] = {
-            role: {"repo": pin.repo, "revision": pin.revision, "files": list(FILES_BY_ROLE[role])}
+            role: {"repo": pin.repo, "revision": pin.revision, "files": list(by_role[role])}
             for role, pin in pins.by_role().items()
         }
     return fingerprint
 
 
-def assert_pinned_fingerprint(fingerprint: Mapping[str, Any], pins: ModelPins) -> None:
+def assert_pinned_fingerprint(
+    fingerprint: Mapping[str, Any],
+    pins: ModelPins,
+    *,
+    weights_files: Sequence[str] = WEIGHTS_FILES,
+) -> None:
     """The fingerprint {@link checkpoint_fingerprint} took (every byte hashed) names the pinned
     files exactly (`gemma4.sources.HUB_PINS`), each source's against its own pin.
 
     The cheap pre-check (`gemma4.sources.assert_model_pins`) trusts the cache's blob names; this
     one runs on the bytes the export actually read, right before the record that names them is
     written. MUST: each pin covers exactly the files the fingerprint reads from its source
-    ({@link FILES_BY_ROLE}) — a file the record names but no pin does would go unchecked, and a
-    file pinned in the other source's role would be checked against bytes of another snapshot.
+    ({@link files_by_role} of `weights_files`) — a file the record names but no pin does would go
+    unchecked, and a file pinned in the other source's role would be checked against bytes of
+    another snapshot.
     """
+    by_role = files_by_role(weights_files)
     for role, pin in pins.by_role().items():
-        if sorted(pin.sha256) != sorted(FILES_BY_ROLE[role]):
+        if sorted(pin.sha256) != sorted(by_role[role]):
             raise AssertionError(
                 f"the {role} pin ({pin.label}) names {sorted(pin.sha256)}, the fingerprint reads"
-                f" {sorted(FILES_BY_ROLE[role])} from that source"
+                f" {sorted(by_role[role])} from that source"
             )
     files = fingerprint["files"]
     wrong = {
@@ -215,18 +231,23 @@ def build_record(
     checkpoint_label: str | None = None,
     tokenizer_dir: Path | None = None,
     pins: ModelPins | None = None,
+    weights_files: Sequence[str] = WEIGHTS_FILES,
 ) -> dict[str, Any]:
     """Contents of `reference.json` (binds the result of {@link assert_reference_goldens} to the
     fingerprint).
 
-    `checkpoint_label` is the fingerprint's `dir`; `tokenizer_dir` and `pins` are passed on as they
-    are ({@link checkpoint_fingerprint}).
+    `checkpoint_label` is the fingerprint's `dir`; `tokenizer_dir`, `pins` and `weights_files` are
+    passed on as they are ({@link checkpoint_fingerprint}).
     """
     return {
         "schema": SCHEMA,
         "series": series_dir.name,
         "checkpoint": checkpoint_fingerprint(
-            model_dir, checkpoint_label, tokenizer_dir=tokenizer_dir, pins=pins
+            model_dir,
+            checkpoint_label,
+            tokenizer_dir=tokenizer_dir,
+            pins=pins,
+            weights_files=weights_files,
         ),
         "reference": dict(reference),
     }

@@ -38,8 +38,8 @@ generation defaults from `google/gemma-4-12B-it` ({@link Gemma4Sources}).
 
 ## The q4_0 QAT line (`karume-gemma4-qat` — {@link QAT_Q4_0_PIPELINE})
 
-A second distribution of the same `gemma4/1` contract: E2B / E4B / 12B from Google's q4_0 QAT
-checkpoints, every text weight on its own 4-bit grid (int4 g32), each model with its QAT MTP
+A second distribution of the same `gemma4/1` contract: E2B / E4B / 12B / 26B from Google's q4_0 QAT
+checkpoints, every text weight on its own 4-bit grid (int4 g32), each model but 26B with its QAT MTP
 drafter. It runs {@link gemma4_plan} with another {@link Gemma4Line} — the graph, drafter,
 tokenizer and configuration checks are the regular line's; what differs is read from the line:
 
@@ -54,7 +54,11 @@ tokenizer and configuration checks are the regular line's; what differs is read 
 - the quants: `i4` (the default — the reference summation order) and the parallel and fused seats
   `i4-gemvpar` / `i4-fast` over the same storage ({@link gemma4_qat_q4_0_quants});
 - the pins: every product container names its QAT weights' revision and every drafter container
-  its QAT drafter's (`gemma4.sources.QAT_TARGET_PINS` / `QAT_DRAFTER_PINS`);
+  its QAT drafter's (`gemma4.sources.QAT_LINE_PINS` / `QAT_DRAFTER_PINS`);
+- 26B A4B: the `model` role alone (no drafter until one is pinned, so `speculative` is refused at
+  weights resolution; no vision), the reference seat only, 12B's graph contract and dialect, its
+  expert weights the one `i4f16` storage of the line (ADR 0145), and its pins in
+  `gemma4.sources.QAT_LINE_PINS` (it is no drafter's target);
 - 12B's image input: a third graph, `vision` — the encoder-free embedder
   (`gemma4/export_vision.py`, series `gemma4-12b-vision`), one bf16 dtype, so every quant of 12B
   maps it — and `pipelineConfig.vision` ({@link gemma4_vision_config}). As with the drafter, it is a
@@ -132,6 +136,7 @@ from .card import (
     GEMMA4_DRAFTER_UPSTREAM,
     GEMMA4_LICENSE,
     GEMMA4_MODEL_ROLE,
+    GEMMA4_MOE_MODELS,
     GEMMA4_PLE_MODELS,
     GEMMA4_QAT_DRAFTER_UPSTREAM,
     GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM,
@@ -151,14 +156,13 @@ from .rope import (
 )
 from .sources import (
     QAT_DRAFTER_PINS,
+    QAT_LINE_PINS,
     QAT_PINS,
-    QAT_TARGET_PINS,
     HubPin,
     ModelPins,
     assert_model_pins,
     checkpoint_dir,
-    qat_target_checkpoint_dir,
-    qat_target_tokenizer_dir,
+    qat_line_dirs,
     tokenizer_dir,
 )
 
@@ -240,8 +244,14 @@ GEMMA4_TOKENIZER_ROLE = "tokenizer"
 #: Every model reads its own series: E4B shared E2B's until Google's glitch-token fixes of
 #: 2026-11-03 gave E2B's and E4B's `tokenizer.json` different merges (E2B drops 267, E4B 253), and
 #: 12B's (fixed on 2026-10-30) drops 239 — the same vocabulary, but another model's asset would
-#: give other ids for some inputs.
-GEMMA4_TOKENIZER_SERIES: Mapping[str, str] = {"e2b": "e2b", "e4b": "e4b", "12b": "12b"}
+#: give other ids for some inputs. 26B's (`google/gemma-4-26B-A4B-it` at its pin) is still the file
+#: from before the fixes (SHA-256 `cc8d3a0c…`), so it is no other model's bytes either.
+GEMMA4_TOKENIZER_SERIES: Mapping[str, str] = {
+    "e2b": "e2b",
+    "e4b": "e4b",
+    "12b": "12b",
+    "26b": "26b",
+}
 
 #: The names and order of the graph inputs (canonical in `gemma4/export_product.py` — the wrapper's
 #: forward argument names). The runtime binds by name, so if a single spelling changes the inputs
@@ -353,8 +363,8 @@ GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: dropped to i4" through (the output head's i8 meets the requirement). An asset that only loses
 #: 10–30 % of its acceptance rate keeps a correct shape and manifest, so this is the only detector.
 GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    GEMMA4_ROLE: ("f16", "i8", "i4", "i2"),
-    GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i4"),
+    GEMMA4_ROLE: ("f16", "i8", "i4", "i4f16", "i2"),
+    GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i4", "i4f16"),
 }
 
 
@@ -581,7 +591,7 @@ class Gemma4Sources:
     weights come from Google's QAT checkpoints, whose `tokenizer.json` is the one every Gemma 4
     repository shipped before Google's glitch-token fixes (the QAT repositories have not received
     them), so the tokenizer and the generation defaults are read from the regular `-it` repository
-    (`gemma4.sources.QAT_TARGET_PINS`).
+    (`gemma4.sources.QAT_LINE_PINS`).
     """
 
     product: Path
@@ -2059,7 +2069,9 @@ GEMMA4_QAT_Q4_0_OUTPUT_PATHS: Mapping[str, str] = {
 #: graph and manifest (it borrows a table of the same name), so only the storage tells it apart;
 #: an int8 embedding is caught the same way on the `model` role, and the regular line's product by
 #: its bf16. The one exception is the `vision` role: 12B's embedder is not on the q4_0 grid, so it
-#: holds the checkpoint's bf16 values, and no rounded storage. MUST: for that role only.
+#: holds the checkpoint's bf16 values, and no rounded storage. MUST: for that role only. The
+#: `model` role may also hold `i4f16` (26B's expert weights — ADR 0145 decision 3); no other role
+#: reads f16 steps.
 GEMMA4_QAT_Q4_0_STORAGE = Gemma4StorageTables(
     required={
         GEMMA4_ROLE: GEMMA4_QAT_Q4_0_DTYPE,
@@ -2068,8 +2080,8 @@ GEMMA4_QAT_Q4_0_STORAGE = Gemma4StorageTables(
     },
     forbidden={
         GEMMA4_ROLE: ("f16", "bf16", "i8", "i2"),
-        GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i8", "i2"),
-        GEMMA4_VISION_ROLE: ("f16", "i8", "i4", "i2"),
+        GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i8", "i4f16", "i2"),
+        GEMMA4_VISION_ROLE: ("f16", "i8", "i4", "i4f16", "i2"),
     },
 )
 
@@ -2079,7 +2091,9 @@ GEMMA4_QAT_Q4_0_VISION_MODELS: frozenset[str] = frozenset({"12b"})
 
 
 def gemma4_qat_q4_0_has_drafter(model: str) -> bool:
-    """Every model of the line ships its QAT drafter (`gemma4.card.GEMMA4_QAT_DRAFTER_UPSTREAM`)."""
+    """Whether the model ships its QAT drafter (`gemma4.card.GEMMA4_QAT_DRAFTER_UPSTREAM`): every
+    model of the line but 26B, whose drafter is later work (ADR 0145 decision 1) — without the
+    role a load that asks for `speculative` fails at weights resolution."""
     return model in GEMMA4_QAT_DRAFTER_UPSTREAM
 
 
@@ -2123,6 +2137,16 @@ GEMMA4_QAT_Q4_0_QUANTS: Mapping[str, Any] = {
 #: The sentence the reference seat of a model with a vision embedder adds: its description says
 #: "every linear weight", and the embedder's are not int4 ({@link GEMMA4_QAT_Q4_0_STORAGE}).
 GEMMA4_QAT_Q4_0_VISION_NOTE = " Vision stays bf16."
+
+#: The reference seat's label and description for a model with routed experts and no drafter
+#: (26B — `gemma4.card.GEMMA4_MOE_MODELS`): the line's own say "drafter included", and its expert
+#: weights keep the grid's codes with f16 steps (`int4-sym-g-f16` — ADR 0145 decision 3).
+GEMMA4_QAT_Q4_0_MOE_QUANT: Mapping[str, str] = {
+    "label": "QAT int4 grid",
+    "description": "The q4_0 QAT checkpoint's own 4-bit grid (packed int4, group 32) for every"
+    " linear weight and the embedding table, experts with f16 steps; GEMV and attention use the"
+    " reference summation order.",
+}
 
 
 #: The line's parallel and fused seats over its one int4 storage (ADR 0098 / 0104): `i4-gemvpar`
@@ -2184,6 +2208,8 @@ def gemma4_qat_q4_0_quants(model: str) -> dict[str, Any]:
     and, for a model with a measured speed note ({@link GEMMA4_QAT_Q4_0_SPEED_NOTE}), the parallel
     and fused seats ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}) with that note."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QAT_Q4_0_QUANTS.items()}
+    if model in GEMMA4_MOE_MODELS:
+        quants[GEMMA4_QAT_Q4_0_DTYPE].update(GEMMA4_QAT_Q4_0_MOE_QUANT)
     if gemma4_qat_q4_0_has_vision(model):
         quants[GEMMA4_QAT_Q4_0_DTYPE]["description"] += GEMMA4_QAT_Q4_0_VISION_NOTE
     note = GEMMA4_QAT_Q4_0_SPEED_NOTE.get(model)
@@ -2215,7 +2241,7 @@ GEMMA4_QAT_Q4_0_LINE = Gemma4Line(
     weights=gemma4_qat_q4_0_weights,
     quants=gemma4_qat_q4_0_quants,
     default_quant=GEMMA4_QAT_Q4_0_DEFAULT_QUANT,
-    pins=QAT_TARGET_PINS,
+    pins=QAT_LINE_PINS,
     drafter_pins=QAT_DRAFTER_PINS,
 )
 
@@ -2234,10 +2260,10 @@ def gemma4_qat_q4_0_repo_name(_model: str) -> str:
 
 
 def gemma4_qat_q4_0_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
-    """The inputs of model `model` of the line: its product and QAT drafter series, its vision
-    series when it ships one, the regular tokenizer series ({@link GEMMA4_TOKENIZER_SERIES} — the
-    line reads the regular `-it` tokenizers), and the hub snapshots of its QAT target pins
-    (`gemma4.sources.QAT_TARGET_PINS`).
+    """The inputs of model `model` of the line: its product series, its QAT drafter series and its
+    vision series when it ships them, the regular tokenizer series
+    ({@link GEMMA4_TOKENIZER_SERIES} — the line reads the regular `-it` tokenizers), and the hub
+    snapshots of its pins (`gemma4.sources.QAT_LINE_PINS`).
 
     A model outside the line fails loudly.
     """
@@ -2246,13 +2272,18 @@ def gemma4_qat_q4_0_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL)
             f"the q4_0 QAT line has no model '{model}'"
             f" (known: {' / '.join(sorted(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM))})"
         )
+    weights, tokenizer = qat_line_dirs(model)
     return Gemma4Sources(
         product=series_dir / gemma4_series_name(model, gemma4_qat_q4_0_product_suffix(model)),
-        drafter=series_dir / gemma4_series_name(model, GEMMA4_QAT_DRAFTER_SUFFIX),
+        drafter=(
+            series_dir / gemma4_series_name(model, GEMMA4_QAT_DRAFTER_SUFFIX)
+            if gemma4_qat_q4_0_has_drafter(model)
+            else None
+        ),
         tokenizer=series_dir
         / gemma4_series_name(GEMMA4_TOKENIZER_SERIES[model], GEMMA4_TOKENIZER_SUFFIX),
-        model=qat_target_checkpoint_dir(model),
-        upstream_tokenizer=qat_target_tokenizer_dir(model),
+        model=weights,
+        upstream_tokenizer=tokenizer,
         vision=(
             series_dir / gemma4_series_name(model, GEMMA4_VISION_SUFFIX)
             if gemma4_qat_q4_0_has_vision(model)
@@ -2271,7 +2302,7 @@ def gemma4_qat_q4_0_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     ({@link gemma4_dist_plan}'s rule), then the plan is built."""
     sources = gemma4_qat_q4_0_sources(series_dir, model)
     try:
-        assert_model_pins(sources.model, sources.upstream_tokenizer, QAT_TARGET_PINS[model])
+        assert_model_pins(sources.model, sources.upstream_tokenizer, QAT_LINE_PINS[model])
     except ValueError as error:
         raise DistError(str(error)) from error
     return gemma4_qat_q4_0_plan(sources, model)
@@ -2279,13 +2310,17 @@ def gemma4_qat_q4_0_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 
 def _qat_q4_0_notice_sources() -> str:
     """The NOTICE's list of redistributed upstreams: per model its QAT checkpoint, its QAT drafter
-    and its base model (the tokenizer's source)."""
-    return "\n".join(
-        f"- `{GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM[model]}`, its drafter"
-        f" `{GEMMA4_QAT_DRAFTER_UPSTREAM[model]}` and the tokenizer of its base model"
-        f" `{GEMMA4_UPSTREAM[model]}`"
-        for model in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM
-    )
+    when it ships one (26B ships none — {@link gemma4_qat_q4_0_has_drafter}) and its base model
+    (the tokenizer's source)."""
+    lines: list[str] = []
+    for model in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM:
+        drafter = GEMMA4_QAT_DRAFTER_UPSTREAM.get(model)
+        lines.append(
+            f"- `{GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM[model]}`"
+            + ("" if drafter is None else f", its drafter `{drafter}`")
+            + f" and the tokenizer of its base model `{GEMMA4_UPSTREAM[model]}`"
+        )
+    return "\n".join(lines)
 
 
 #: The line's modification notice (Apache 2.0 §4(b)). MUST: the text matches the distribution's
@@ -2310,6 +2345,9 @@ The following changes were made:
 - For the 12B checkpoint, the **text decoder and the encoder-free vision embedder** were extracted,
   each as its own graph; its audio embedder was never read. The vision embedder's position table
   was split into its two columns, and an image's rows reach the text decoder's graph as two inputs.
+- For the 26B A4B checkpoint, the **text decoder only** was extracted; its vision tower was never
+  read. Its routed experts were re-expressed as one projection per routed expert, combined with the
+  routing weights in the router's order of picks.
 - The graphs were re-expressed in the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors) in a states form suited to chunked prefill and
   decode.
@@ -2317,9 +2355,11 @@ The following changes were made:
   of each model, the per-layer embedding tables of the E2B and E4B checkpoints and the drafters'
   weights are stored as packed int4 (group 32: the codes of the grid and one step per group,
   refitted from the stored values) instead of being rounded again. The values are therefore not
-  bit-identical to the source checkpoints. The parameters off the grid (the norms, among others)
-  are stored in float32. The 12B vision embedder is not on that grid and keeps the checkpoint's BF16
-  values (the parameters stored in float32 hold the same values widened).
+  bit-identical to the source checkpoints. The expert weights of the 26B A4B checkpoint keep the
+  same codes with each step stored as float16 instead of float32 (the refitted step rounded once).
+  The parameters off the grid (the norms, among others) are stored in float32. The 12B vision
+  embedder is not on that grid and keeps the checkpoint's BF16 values (the parameters stored in
+  float32 hold the same values widened).
 - The exit was narrowed to the selected rows' logits and final hidden states. For the E2B and E4B
   checkpoints, the **per-layer embedding tables were moved out of the graph** into container
   assets that the host gathers (the 12B checkpoint has none).

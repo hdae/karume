@@ -39,6 +39,11 @@ form of `qwen3_5.export`) and {@link gemma4.export_vision} (its encoder-free vis
 goldens with an image). Where every model's checkpoint is read from — and 12B's hub-snapshot pin —
 is {@link gemma4.sources} (torch-free, like `rope`).
 
+26B A4B (`--model 26b`) is E2B / E4B's class with a block of routed experts in every layer and has
+its own script too, {@link gemma4.export_moe} (12B's product contract and meta-trace form, the
+experts through `karume::expert_linear` — {@link gemma4.experts} — and a cut model for this
+machine's GPU — ADR 0145).
+
 E2B / E4B's q4_0 QAT line (Google's `-qat-q4_0-unquantized` checkpoints, every 2-D text weight on a
 4-bit grid) has its own entry, {@link gemma4.export_product_qat}: the product series' graph with the
 grid imported as i4, a schema-4 PLE asset and its own goldens. Its MTP drafter has one too,

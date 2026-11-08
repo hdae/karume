@@ -1,4 +1,4 @@
-# Third-party notices — Gemma 4 (E2B / E4B / 12B)
+# Third-party notices — Gemma 4 (E2B / E4B / 12B / 26B A4B)
 
 Skeleton for the pre-release provenance review (ADR 0065 stage 6). It records what this recipe
 directory is known to derive from. **It is not a license determination.**
@@ -37,6 +37,15 @@ questions it has to answer.
   `tokenizer.json` every Gemma 4 repository had before Google's glitch-token fixes (its other
   tokenizer files are byte-identical to 12B-it's), so the tokenizer comes from the base model. The
   image goldens also read its `processor_config.json`, and the distribution its image token budget.
+- **26B A4B weights** — `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized` on Hugging Face
+  (<https://huggingface.co/google/gemma-4-26B-A4B-it-qat-q4_0-unquantized>), Google's
+  quantization-aware-trained checkpoint of `google/gemma-4-26B-A4B-it` (two shards and their index),
+  read from the HF cache at the commit `sources.py` pins. Only the text decoder keys are read and
+  its 4-bit grid is stored as is, the routed experts' steps as f16 (`export_moe.py`); the vision
+  tower and its embedder are never read.
+- **26B A4B tokenizer, chat template and generation defaults** — `google/gemma-4-26B-A4B-it` on
+  Hugging Face (<https://huggingface.co/google/gemma-4-26B-A4B-it>), read from the HF cache at the
+  commit `sources.py` pins, as 12B's come from 12B-it. Its weights are not read.
 - **MTP drafter weights** — `google/gemma-4-E2B-it-assistant` on Hugging Face
   (<https://huggingface.co/google/gemma-4-E2B-it-assistant>), loaded from the HF cache by
   `export_drafter.py` and re-distributed as `e2b/drafter/` of `karume-gemma4`.
@@ -112,6 +121,28 @@ published.
 | Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Weights license          | **Apache 2.0** — the snapshot's own `README.md` frontmatter says `license: apache-2.0` (`license_link` as for E2B) and names `google/gemma-4-12B-it` as `base_model`, read at this revision on 2026-11-03; re-read on the HF API on 2026-11-04 (`license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `gated` false, `model.safetensors` LFS oid `26f2cee4…` = the pin). Unverified by a human review.                                                                                                               |
 | Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's card and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`) name this repository as the source of the 12B weights — open for the human review.                                                                                                                                                                                                                                                                                                                                |
+
+### google/gemma-4-26B-A4B-it
+
+| Item | Value |
+| --- | --- |
+| Upstream repository | <https://huggingface.co/google/gemma-4-26B-A4B-it> |
+| Revision used | `4d7ae4984b7db7de8f8457170b3f1a419ee76d52` — the hub-cache snapshot `sources.py` pins as 26B's tokenizer source (`HUB_PINS["26b"].tokenizer`, fetched 2026-11-08), with the SHA-256 of `tokenizer.json` at that revision; the chat template, `tokenizer_config.json` and `generation_config.json` are read from the same snapshot |
+| Form of copy | Loaded, not copied. Only the tokenizer, the chat template and the generation defaults are read: `tokenizer.json` is compiled into the Karume tokenizer asset (`26b/tokenizer/` in `models/karume-gemma4-qat`), the chat template (12B's byte for byte) is rendered as the `gemma4-unified` dialect, and the sampler enters the manifest. At this revision `tokenizer.json` is still the pre-fix file (SHA-256 `cc8d3a0c…`, as the QAT repository's). The weights are not read (they come from the QAT checkpoint below). |
+| Code license | n/a (tokenizer and configuration only) |
+| Weights license | **Apache 2.0** — HF API at this revision, 2026-11-08: `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-26B-A4B`, `gated` false. Unverified by a human review. |
+| Attribution requirements | Apache 2.0 §4, handled as for `google/gemma-4-12B-it`: the q4_0 QAT line's `NOTICE.md` names this checkpoint and its changes; the card names it as the base model and the tokenizer source. |
+
+### google/gemma-4-26B-A4B-it-qat-q4_0-unquantized (26B A4B weights)
+
+| Item | Value |
+| --- | --- |
+| Upstream repository | <https://huggingface.co/google/gemma-4-26B-A4B-it-qat-q4_0-unquantized> |
+| Revision used | `f1e06dc520982d9b9edd76859fdb7ab209449949` — the hub-cache snapshot `sources.py` pins as 26B's weights source (`HUB_PINS["26b"].weights`, in the cache on 2026-11-08), with the SHA-256 of both shards, `model.safetensors.index.json` and `config.json` at that revision |
+| Form of copy | Loaded, not copied. Only the text decoder (`model.language_model.*`) is read; the vision tower and its embedder (`model.vision_tower.*`, `model.embed_vision.*`) are never loaded. Re-distributed in converted storage form (`26b/model/` in `models/karume-gemma4-qat`): the linears', the embedding's and the routed experts' own 4-bit grid (codes and one step per group of 32) is stored as is, the experts' steps as f16 (`export_moe.py` — ADR 0145). Its `tokenizer.json` is not read. |
+| Code license | n/a (weights only) |
+| Weights license | **Apache 2.0** — HF API at this revision, 2026-11-08: `cardData.license` `apache-2.0`, `license_link` `https://ai.google.dev/gemma/docs/gemma_4_license`, `base_model` `google/gemma-4-26B-A4B-it`, `gated` false. Unverified by a human review. |
+| Attribution requirements | Apache 2.0 §4: the q4_0 QAT line's card and `NOTICE.md` (`gemma4.distribution.GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN`) name this repository as the source of the 26B weights — open for the human review. |
 
 ### google/gemma-4-E2B-it-qat-q4_0-unquantized (E2B q4_0 QAT weights)
 

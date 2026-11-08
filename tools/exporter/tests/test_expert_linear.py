@@ -23,7 +23,7 @@ from conftest import node_ops, only_node
 from torch import nn
 
 from karume.container import Provenance, container_parts, read_container, write_model_container
-from karume.custom_ops import EXPERT_LINEAR_UPSTREAM, expert_linear
+from karume.custom_ops import EXPERT_LINEAR_UPSTREAM, expert_linear, expert_linear_body
 from karume.emit import EmitError, FixedQuantizedWeight, pack_int4, stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.ops import OpContractError
@@ -125,6 +125,49 @@ class TestEagerBody:
 
         with pytest.raises(ValueError, match="outside the 6 experts"):
             expert_linear(x, index, weight)
+
+
+class TestSharedBody:
+    """`expert_linear_body` — the one per-pick summation of the op and of a reference that holds
+    its experts in another form (ADR 0145 decision 5)."""
+
+    def test_the_op_is_the_body_over_the_stacked_weight_bit_for_bit(self):
+        x, index, weight = _inputs()
+
+        got = expert_linear_body(x, index, weight.__getitem__, EXPERTS, OUT)
+
+        assert torch.equal(got, expert_linear(x, index, weight))
+
+    def test_a_getter_that_decodes_on_read_gives_the_op_over_the_decoded_weight(self):
+        """A reference over another storage (a scale per expert, applied on read) sums exactly as
+        the op over the decoded stacked weight."""
+        x, index, weight = _inputs()
+        scale = torch.linspace(0.5, 1.5, EXPERTS)
+
+        got = expert_linear_body(x, index, lambda e: weight[e] * scale[e], EXPERTS, OUT)
+
+        assert torch.equal(got, expert_linear(x, index, weight * scale[:, None, None]))
+
+    def test_only_the_picked_experts_are_read_once_each_in_id_order(self):
+        x, index, weight = _inputs()
+        read: list[int] = []
+
+        def weight_of(expert: int) -> torch.Tensor:
+            read.append(expert)
+            return weight[expert]
+
+        expert_linear_body(x, index, weight_of, EXPERTS, OUT)
+
+        assert read == sorted(set(index.flatten().tolist()))
+
+    def test_an_id_out_of_range_raises_before_any_read(self):
+        x, index, weight = _inputs()
+        index[0, 0] = EXPERTS
+        read: list[int] = []
+
+        with pytest.raises(ValueError, match="outside the 6 experts"):
+            expert_linear_body(x, index, lambda e: read.append(e) or weight[e], EXPERTS, OUT)
+        assert read == []
 
 
 class TestExport:

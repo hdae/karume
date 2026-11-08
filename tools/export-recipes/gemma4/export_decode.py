@@ -231,8 +231,9 @@ SLIDING_SLACK_ROWS = 8
 #: {@link MARGIN_FLOOR} (steps 1-10 stay >= 0.31; measured 2026-10-30). Dropping the case instead
 #: would leave only " Paris" expectations, which the constant-output check forbids (ruling 47).
 #: 12B starts at E2B's 16 (unmeasured until its first export; `gemma4.export_unified` takes the
-#: same table and the same `--steps` knob, and its margin gate names every offending step).
-GREEDY_STEPS: Mapping[str, int] = {"e2b": 16, "e4b": 10, "12b": 16}
+#: same table and the same `--steps` knob, and its margin gate names every offending step). 26B
+#: (`gemma4.export_moe`) starts at 16 the same way, unmeasured until its first export.
+GREEDY_STEPS: Mapping[str, int] = {"e2b": 16, "e4b": 10, "12b": 16, "26b": 16}
 
 #: The lower bound of the top1 − top2 logit difference at each step. It guarantees that GPU
 #: execution's deviation does not split the greedy sequence, and it is **not tautological** (a

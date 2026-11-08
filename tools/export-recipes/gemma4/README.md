@@ -1,4 +1,4 @@
-# Gemma 4 E2B / E4B / 12B export recipe
+# Gemma 4 E2B / E4B / 12B / 26B A4B export recipe
 
 **Outside the wheel** — this recipe is repo-only (ADR
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)). It produces four series and,
@@ -39,6 +39,15 @@ received the fix). Both snapshots' README front matter
 says `license: apache-2.0`. Its drafter is a QAT checkpoint too,
 `google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` (Google's model card: "the assistant model
 must also be a QAT checkpoint with the same precision").
+
+`google/gemma-4-26B-A4B-it` is a fourth model with its own script, `export_moe.py` (see "What
+`export_moe.py` emits" below — ADR [0145](../../../docs/decisions/0145-gemma4-26b-moe-resident.md)):
+E2B / E4B's class (`gemma4`) with a block of 128 routed experts in every layer, and 12B's
+attention and product contract. It is read as 12B is, from two pinned snapshots: the weights from
+`google/gemma-4-26B-A4B-it-qat-q4_0-unquantized` (two shards and their index), the tokenizer, the
+chat template (12B's byte for byte, so the `gemma4-unified` dialect) and the generation defaults
+from `google/gemma-4-26B-A4B-it`, whose `tokenizer.json` is still the file from before the
+glitch-token fixes. It ships only in the q4_0 QAT line, without a drafter (later work).
 
 The E2B checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
@@ -363,6 +372,42 @@ prefill spans two 768-row chunks; the export fails if no golden runs past the wi
     outputs/series/gemma4-12b-product/model.krm                  the container (no PLE assets)
     outputs/series/gemma4-12b-product/greedy.<case>.safetensors  greedy goldens (4 cases)
     outputs/series/gemma4-12b-product/reference.json             provenance (own goldens)
+
+## What `export_moe.py` emits
+
+26B A4B's product graph: 12B's inputs, outputs and attention (the soft inputs included, unused
+until 26B's vision lands), 30 layers of which 5 are full (K = V, 2 KV heads of width 512) and 25
+sliding (8 KV heads in 1032 rows), 60 slots. Every layer runs the dense MLP and the expert block:
+the router is upstream's module (its `per_expert_scale[index]` becomes an `embedding` over the scale
+as `[128, 1]`), and the experts are two `expert_linear` nodes indexed by the router's `topk`, with
+`gelu_tanh(gate) · up` between and the routing weights summed over the 8 picks. The experts run
+through a `karume` implementation of transformers' `ExpertsInterface` (`experts.py`), named in the
+config before the model is built and checked after.
+
+Every parameter of rank ≥ 2 is imported from the checkpoint's own q4_0 grid, as 12B's: the 235
+linears (the router's projection included) and the tied embedding as int4 with f32 steps, the 60
+stacked expert weights `[128, out, in]` as `int4-sym-g-f16` (the codes of the `[E·out, in]` view,
+each step rounded to f16 once by the writer). The trace runs without weight data (the full trace:
+15 s at a 0.9 GiB peak — measured 2026-11-08), and the grid is imported once: the same bytes go to
+the writer and to the torch reference, which dequantises each linear at use and one expert per
+pick, so the goldens are what the container decodes to.
+
+The goldens are 12B's cases (greedy by full re-forward, unmeasured on 26B until its first export;
+26B suppresses no ids), plus the **cut points**: each full layer's output (layers 5, 11, 17 and 23)
+at every row of every case. `--layers N` (12 by default) writes the model cut after N layers for
+this machine's 12 GB GPU: the cut container and its goldens from the same reference on the cut
+config (teacher-forced logits and hidden of the last 4 rows, each layer's output at those rows,
+and each router's top 9 expert ids and probabilities at every row), checked bit for bit against
+the product series' cut points; `--routing-outputs` adds a diagnostic container whose outputs
+also carry each router's `topk` index.
+
+    outputs/series/gemma4-26b-product/model.krm                       the container
+    outputs/series/gemma4-26b-product/greedy.<case>.safetensors       greedy goldens
+    outputs/series/gemma4-26b-product/cut-points.<case>.safetensors   the full layers' outputs
+    outputs/series/gemma4-26b-product/reference.json                  provenance
+    outputs/series/gemma4-26b-cut<N>/model.krm                        the cut container
+    outputs/series/gemma4-26b-cut<N>/cut.<case>.safetensors           the cut goldens
+    outputs/series/gemma4-26b-cut<N>/routing/model.krm                with --routing-outputs
 
 ## What `export_vision.py` emits
 

@@ -65,6 +65,10 @@ WRITER_CALLS = frozenset(
         # model). The VAE script (`moss/export_vae.py`) has a `write_graphs` of its own, called the
         # same way.
         "write_graphs",
+        # Gemma 4 26B's cut points and cut goldens (`gemma4/export_moe.py`), written inside the
+        # staged seat of its two entries.
+        "write_cut_points",
+        "write_cut_goldens",
     }
 )
 
@@ -82,6 +86,8 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("gemma4/export_product.py", "export_series"),
     ("gemma4/export_product_qat.py", "export_series"),
     ("gemma4/export_unified.py", "export_series"),
+    ("gemma4/export_moe.py", "export_series"),
+    ("gemma4/export_moe.py", "export_cut"),
     ("gemma4/export_vision.py", "export_series"),
     ("gemma4_qat/export.py", "export_qat"),
     ("gemma4/export_drafter.py", "export_series"),

@@ -151,6 +151,67 @@ class TestTwelveBPins:
             sources.assert_snapshot_pin(weights_dir, sources.HUB_PINS["12b"].tokenizer)
 
 
+class TestTwentySixBPins:
+    """26B A4B (ADR 0145 decision 5): the QAT weights in two shards and their index, the front end
+    from `google/gemma-4-26B-A4B-it` — as 12B pins 12B-it."""
+
+    def test_the_weights_and_the_tokenizer_are_two_pinned_sources(self) -> None:
+        pins = sources.HUB_PINS["26b"]
+
+        assert pins.weights.repo == "google/gemma-4-26B-A4B-it-qat-q4_0-unquantized"
+        assert pins.weights.revision == "f1e06dc520982d9b9edd76859fdb7ab209449949"
+        assert sorted(pins.weights.sha256) == [
+            "config.json",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+            "model.safetensors.index.json",
+        ]
+        assert pins.tokenizer.repo == "google/gemma-4-26B-A4B-it"
+        assert pins.tokenizer.revision == "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"
+        assert sorted(pins.tokenizer.sha256) == ["tokenizer.json"]
+
+    def test_its_tokenizer_is_still_the_pre_fix_file(self) -> None:
+        """The base model's `tokenizer.json` at its pin is the QAT repository's (no fix yet) — so
+        26B has a tokenizer series of its own (no other model's bytes)."""
+        assert sources.HUB_PINS["26b"].tokenizer.sha256["tokenizer.json"] == (
+            PRE_FIX_TOKENIZER_SHA256
+        )
+
+    def test_it_is_a_model_of_the_qat_line_and_no_drafter_s_target(self) -> None:
+        assert sources.QAT_LINE_PINS["26b"] is sources.HUB_PINS["26b"]
+        assert "26b" not in sources.QAT_TARGET_PINS
+        assert "26b" not in sources.QAT_DRAFTER_PINS
+        with pytest.raises(ValueError, match="no q4_0 QAT drafter"):
+            sources.qat_drafter_pin("26b")
+
+    def test_the_line_directories_are_the_two_pinned_snapshots(self, tmp_path, monkeypatch) -> None:
+        constants = pytest.importorskip("huggingface_hub.constants")
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+
+        assert sources.qat_line_dirs("26b") == (
+            sources.checkpoint_dir("26b"),
+            sources.tokenizer_dir("26b"),
+        )
+        assert sources.qat_line_dirs("12b") == (
+            sources.qat_target_checkpoint_dir("12b"),
+            sources.qat_target_tokenizer_dir("12b"),
+        )
+        with pytest.raises(ValueError, match="no q4_0 QAT line model"):
+            sources.qat_line_dirs("27b")
+
+    def test_the_cached_snapshots_match_the_pins(self) -> None:
+        """The real hub cache (needs both snapshots)."""
+        pytest.importorskip("huggingface_hub")
+        pins = sources.HUB_PINS["26b"]
+        weights_dir, tokenizer_dir = sources.checkpoint_dir("26b"), sources.tokenizer_dir("26b")
+        if not all((path / "config.json").is_file() for path in (weights_dir, tokenizer_dir)):
+            pytest.skip(
+                f"26B's snapshots are not in the hub cache ({weights_dir}, {tokenizer_dir})"
+            )
+
+        sources.assert_model_pins(weights_dir, tokenizer_dir, pins)
+
+
 class TestSnapshotPin:
     def test_the_pinned_snapshot_passes(self, tmp_path) -> None:
         snapshot, pin = _snapshot(tmp_path)

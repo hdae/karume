@@ -45,7 +45,7 @@ from gemma4.distribution import (
     gemma4_qat_q4_0_plan,
     gemma4_qat_q4_0_sources,
 )
-from gemma4.sources import QAT_DRAFTER_PINS, QAT_TARGET_PINS, HubPin
+from gemma4.sources import QAT_DRAFTER_PINS, QAT_LINE_PINS, QAT_TARGET_PINS, HubPin
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
 from karume.dist import DistError, assemble_family
@@ -112,9 +112,10 @@ def _product(
     revision: str | None = None,
     **overrides: Any,
 ) -> list[bytes]:
-    """A product container of the line: an int4 embedding, a schema-4 PLE (none for 12B), and
-    the provenance of the model's QAT weights pin; `overrides` go to the fixture as they are."""
-    ple = model != "12b"
+    """A product container of the line: an int4 embedding, a schema-4 PLE (none for 12B and 26B),
+    and the provenance of the model's QAT weights pin; `overrides` go to the fixture as they
+    are."""
+    ple = model not in ("12b", "26b")
     return fixture.product_container(
         **{
             "storage": "i4",
@@ -128,7 +129,7 @@ def _product(
                 else None
             ),
             "embedding_storage": embedding_storage,
-            "provenance": _provenance(revision or QAT_TARGET_PINS[model].weights.revision),
+            "provenance": _provenance(revision or QAT_LINE_PINS[model].weights.revision),
             **overrides,
         }
     )
@@ -174,9 +175,11 @@ def _build(
     values."""
     base = model.upper() if model != "12b" else "12B"
     twelve_b = model == "12b"
+    twenty_six_b = model == "26b"
     sources = Gemma4Sources(
         product=root / "series" / f"gemma4-{model}-qat-product",
-        drafter=root / "series" / f"gemma4-{model}-qat-drafter",
+        # 26B ships no drafter (ADR 0145 decision 1).
+        drafter=None if twenty_six_b else root / "series" / f"gemma4-{model}-qat-drafter",
         tokenizer=root / "series" / f"gemma4-{model}-tokenizer",
         model=root / "inputs" / f"gemma-4-{base}-it-qat-q4_0-unquantized",
         upstream_tokenizer=root / "inputs" / f"gemma-4-{base}-it",
@@ -188,7 +191,7 @@ def _build(
         sources.model,
         container=product if product is not None else _product(model),
         drafter=sources.drafter,
-        drafter_bytes=drafter if drafter is not None else _drafter(model),
+        drafter_bytes=drafter if drafter is not None or twenty_six_b else _drafter(model),
         tokenizer={
             **fixture.tokenizer_asset(),
             "source": {"sha256": hashlib.sha256(recorded).hexdigest()},
@@ -197,7 +200,7 @@ def _build(
         text_config={
             **fixture.TEXT_CONFIG,
             "hidden_size_per_layer_input": (
-                ple_dim if ple_dim is not None else 0 if twelve_b else QAT_DIM
+                ple_dim if ple_dim is not None else 0 if twelve_b or twenty_six_b else QAT_DIM
             ),
             "max_position_embeddings": max_position,
         },
@@ -1050,3 +1053,71 @@ class TestQatLegalText:
             assert f"`{weights}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN, model
             assert f"`{GEMMA4_QAT_DRAFTER_UPSTREAM[model]}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
             assert f"`{GEMMA4_UPSTREAM[model]}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
+
+    def test_the_notice_states_26b_s_extraction_and_its_f16_expert_steps(self) -> None:
+        notice = " ".join(GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN.split())
+
+        assert "For the 26B A4B checkpoint, the **text decoder only** was extracted" in notice
+        assert "its vision tower was never read" in notice
+        assert "expert weights of the 26B A4B checkpoint keep the same codes" in notice
+        assert "stored as float16 instead of float32" in notice
+
+
+class TestQat26B:
+    """26B's plan (its one line — ADR 0145): 12B's graph form and dialect, its pins, no drafter
+    (so `speculative` is refused at weights resolution), no vision, the reference seat alone."""
+
+    def test_it_ships_the_model_role_alone_with_12b_s_dialect(self, tmp_path: Path) -> None:
+        out_dir, manifest = _assemble(tmp_path, ("26b",))
+        entry = manifest["models"]["26b"]
+
+        assert sorted(entry["weights"]) == [GEMMA4_ROLE]
+        assert list(entry["quants"]) == ["i4"]
+        assert entry["quants"]["i4"]["weights"] == {GEMMA4_ROLE: "i4"}
+        assert entry["quants"]["i4"]["label"] == "QAT int4 grid"
+        assert "drafter" not in entry["quants"]["i4"]["description"]
+        assert "f16 steps" in entry["quants"]["i4"]["description"]
+        assert entry["pipelineConfig"]["chatDialect"] == "gemma4-unified"
+        assert "suppressTokens" not in entry["pipelineConfig"]
+        assert "vision" not in entry["pipelineConfig"]
+        assert not [path for path in _files(out_dir) if path.startswith("26b/drafter")]
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+        assert "speculative" not in card.split("## Base weights")[0].lower()
+        assert "the routed experts of `26b` keep the same codes with f16 steps" in " ".join(
+            card.split()
+        )
+
+    def test_a_drafter_series_given_for_26b_is_refused(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path, "26b")
+        given = replace(sources, drafter=tmp_path / "series" / "gemma4-26b-qat-drafter")
+
+        with pytest.raises(DistError, match="ships no drafter"):
+            gemma4_qat_q4_0_plan(given, "26b")
+
+    def test_the_sources_are_its_product_series_and_its_pinned_snapshots(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """12B's series naming (`gemma4-26b-product`), its own tokenizer series, no drafter; the
+        weights' config from the QAT checkpoint, the tokenizer from 26B-it."""
+        constants = pytest.importorskip("huggingface_hub.constants")
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+        pins = QAT_LINE_PINS["26b"]
+
+        sources = gemma4_qat_q4_0_sources(tmp_path / "series", "26b")
+
+        assert sources.product.name == "gemma4-26b-product"
+        assert sources.tokenizer.name == "gemma4-26b-tokenizer"
+        assert sources.drafter is None and sources.vision is None
+        assert sources.model.name == pins.weights.revision
+        assert (
+            sources.model.parent.parent.name
+            == "models--google--gemma-4-26B-A4B-it-qat-q4_0-unquantized"
+        )
+        assert sources.upstream_tokenizer.name == pins.tokenizer.revision
+        assert sources.upstream_tokenizer.parent.parent.name == "models--google--gemma-4-26B-A4B-it"
+
+    def test_the_other_models_keep_their_reference_seat_text(self) -> None:
+        for model in ("e2b", "e4b", "12b"):
+            seat = gemma4_distribution.gemma4_qat_q4_0_quants(model)["i4"]
+            assert seat["label"] == "QAT int4 grid, drafter included", model
+            assert "f16 steps" not in seat["description"], model

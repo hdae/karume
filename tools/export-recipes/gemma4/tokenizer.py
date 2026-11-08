@@ -1,13 +1,15 @@
 """Compiles a Gemma 4 model's tokenizer asset and takes its parity fixture (ADR 0084 decision 1).
 
-Every model has a series of its own: `--model` picks E2B (the default), E4B or 12B. Until Google's
-glitch-token fixes the three `tokenizer.json` files were the same bytes; each fix drops another set
-of BPE merges (E2B 267 and the vocabulary entry 249788 renamed to `<glitch_pruned_249788>`, E4B
-253, 12B 239 — same vocabulary otherwise), so some inputs tokenize differently on each model.
+Every model has a series of its own: `--model` picks E2B (the default), E4B, 12B or 26B. Until
+Google's glitch-token fixes the `tokenizer.json` files were the same bytes; each fix drops another
+set of BPE merges (E2B 267 and the vocabulary entry 249788 renamed to `<glitch_pruned_249788>`,
+E4B 253, 12B 239 — same vocabulary otherwise), so some inputs tokenize differently on each model.
+26B's is still the file from before the fixes.
 
     uv run python -m gemma4.tokenizer
     uv run python -m gemma4.tokenizer --model e4b
     uv run python -m gemma4.tokenizer --model 12b
+    uv run python -m gemma4.tokenizer --model 26b
 
 Two outputs (**always both in one run** — {@link _shared.gemma_tokenizer.emit}):
 
@@ -15,9 +17,9 @@ Two outputs (**always both in one run** — {@link _shared.gemma_tokenizer.emit}
   ② the parity fixture
      `packages/models/tests/fixtures/gemma-text/gemma4-parity.json` (**tracked in git**)
 
-E4B's and 12B's series and fixtures carry the model's name (`gemma4-<model>-tokenizer` +
-`gemma4-<model>-parity.json`); E2B's fixture keeps its name `gemma4-parity.json`. 12B's
-`tokenizer.json` is read from the pinned hub snapshot (`gemma4.sources`), E2B's and E4B's from the
+E4B's, 12B's and 26B's series and fixtures carry the model's name (`gemma4-<model>-tokenizer` +
+`gemma4-<model>-parity.json`); E2B's fixture keeps its name `gemma4-parity.json`. 12B's and 26B's
+`tokenizer.json` are read from the pinned hub snapshots (`gemma4.sources`), E2B's and E4B's from the
 hand-placed checkpoints. {@link EXTRA_CASES} adds per model encode cases where its tokenizer and
 another model's split a text differently: E4B's run into merges E4B has and E2B's fix dropped,
 12B's into merges E2B and E4B have and 12B's fix dropped, and E2B's into the vocabulary entry its
@@ -45,7 +47,7 @@ from _shared.paths import REPO_ROOT, SERIES_ROOT
 from gemma4 import sources
 
 #: The models with a tokenizer series of their own (`gemma4.distribution.GEMMA4_TOKENIZER_SERIES`).
-MODELS: tuple[str, ...] = ("e2b", "e4b", "12b")
+MODELS: tuple[str, ...] = ("e2b", "e4b", "12b", "26b")
 
 #: The hand-placed upstream asset (`inputs/<family>/<name>/` — assets-layout).
 TOKENIZER_JSON = sources.tokenizer_dir("e2b") / "tokenizer.json"
@@ -93,7 +95,9 @@ CASES: tuple[EncodeCase, ...] = (
 #: Model → encode cases of its own on top of {@link CASES}. 12B's run into merges E2B and E4B have
 #: and 12B dropped: E2B joins these pieces, 12B keeps them apart. E4B's run into merges E4B has and
 #: E2B dropped: E4B joins them, E2B keeps them apart (the pytest checks that both tokenizers really
-#: split each text differently). E2B's case is the vocabulary entry its fix renamed.
+#: split each text differently). E2B's case is the vocabulary entry its fix renamed. 26B's
+#: `tokenizer.json` is the file from before the fixes (`gemma4.sources.HUB_PINS`): its cases are
+#: 12B's texts, which it joins and 12B keeps apart.
 EXTRA_CASES: Mapping[str, tuple[EncodeCase, ...]] = {
     "e2b": (
         EncodeCase(
@@ -135,6 +139,23 @@ EXTRA_CASES: Mapping[str, tuple[EncodeCase, ...]] = {
         EncodeCase(
             "dropped-merge-twice",
             "both merges that build the piece are dropped (`HDR` + `Offsets`, `HDROff` + `sets`)",
+            "HDROffsets",
+        ),
+    ),
+    "26b": (
+        EncodeCase(
+            "12b-dropped-merge",
+            "a merge 12B's fix dropped and 26B's tokenizer keeps (`Malay` + `Marks`)",
+            "MalayMarks",
+        ),
+        EncodeCase(
+            "12b-dropped-merge-metaspace",
+            "a merge 12B dropped, after a metaspace (`▁jinfo` + `Home`)",
+            " jinfoHome",
+        ),
+        EncodeCase(
+            "12b-dropped-merge-twice",
+            "both merges 12B dropped (`HDR` + `Offsets`, `HDROff` + `sets`)",
             "HDROffsets",
         ),
     ),

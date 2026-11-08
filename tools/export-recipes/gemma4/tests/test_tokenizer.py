@@ -75,7 +75,7 @@ class TestOutputPaths:
 
 
 class TestPerModelSeries:
-    @pytest.mark.parametrize("model", ["e4b", "12b"])
+    @pytest.mark.parametrize("model", ["e4b", "12b", "26b"])
     def test_the_model_has_its_own_series_and_fixture(self, model: str) -> None:
         """The paths come from the same word as the distribution's own series for the model."""
         assert tokenizer.asset_path(model).parent.name == gemma4_series_name(
@@ -100,8 +100,8 @@ class TestPerModelSeries:
 
     @pytest.mark.parametrize(
         ("model", "joined_by"),
-        [("12b", "e2b"), ("12b", "e4b"), ("e4b", "e2b")],
-        ids=["12b-vs-e2b", "12b-vs-e4b", "e4b-vs-e2b"],
+        [("12b", "e2b"), ("12b", "e4b"), ("e4b", "e2b"), ("26b", "12b")],
+        ids=["12b-vs-e2b", "12b-vs-e4b", "e4b-vs-e2b", "26b-vs-12b"],
     )
     def test_the_cases_run_into_the_merges_the_two_tokenizers_disagree_on(
         self, model: str, joined_by: str
@@ -110,7 +110,8 @@ class TestPerModelSeries:
         `model`'s own `tokenizer.json` with the merge list of `joined_by`'s compiled asset (the
         vocabulary, added tokens and pipeline of the files are the same), so the cases measure the
         difference they are there for. A 12B case is a merge 12B dropped (12B splits more); an E4B
-        case is a merge E2B dropped (E4B splits less)."""
+        case is a merge E2B dropped (E4B splits less); a 26B case a merge 12B dropped (26B, before
+        the fixes, splits less)."""
         tokenizers = pytest.importorskip("tokenizers")
         pytest.importorskip("huggingface_hub")
         upstream = sources.tokenizer_dir(model) / "tokenizer.json"

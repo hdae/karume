@@ -108,7 +108,7 @@ from karume.artifacts import staged_publication
 from karume.container import BLOCK_MAX_BYTES, AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph
-from karume.ops import ARGMAX_OP, EMBEDDING_OP
+from karume.ops import ARGMAX_OP, EMBEDDING_OP, RESHAPE_OP
 from karume.pipeline import export_module
 from karume.ple import (
     PLE_FLOAT_INDEX_SCHEMA,
@@ -756,7 +756,8 @@ def assert_ir_form_product(
       happened once).
     - The `embedding` nodes are exactly 2: **the main embedding + the row selection**. Counting
       catches, by number, a form where only part of the PLE remains (one of the 35 left unpruned).
-      RoPE became a host-supplied input, so no `embedding` looks up a table any more.
+      RoPE became a host-supplied input, so no `embedding` looks up a table any more. A model with
+      the expert block adds exactly one router lookup per layer ({@link router_scale_lookups}).
     - The exit is **not argmax**. Even one `argmax` left removes the room for sampling (ADR 0083
       decision 6 — the GPU side goes up to the selected rows' logits).
     - There are **two outputs, in the order logits → hidden**. The runtime reads by slot number,
@@ -834,14 +835,15 @@ def assert_ir_form_product(
                 f" × {len(residents)}: {residents[:4]}"
                 " (not fully moved out to the host gather)"
             )
-    # One main embedding (the same data as the tied lm_head) + one row selection of the last row.
-    # Even one PLE left adds to this, and the RoPE table lookup returning adds to it too (both are
-    # signs of a regression).
-    expected_embeddings = 2
+    # One main embedding (the same data as the tied lm_head) + one row selection of the last row
+    # (+ one router lookup per layer of a mixture of experts). Even one PLE left adds to this, and
+    # the RoPE table lookup returning adds to it too (both are signs of a regression).
+    routed = router_scale_lookups(graph, config, embeddings)
+    expected_embeddings = 2 + len(routed)
     if len(embeddings) != expected_embeddings:
         raise AssertionError(
             f"`{EMBEDDING_OP}` × {len(embeddings)} — not 1 main embedding + 1 row selection"
-            f" = {expected_embeddings}"
+            f" + {len(routed)} router lookups = {expected_embeddings}"
         )
 
     if len(graph.outputs) != 2:
@@ -890,9 +892,52 @@ def assert_ir_form_product(
     return {
         **form,
         "embedding_nodes": len(embeddings),
+        **({"router_lookups": len(routed)} if routed else {}),
         "logits": logits_shape,
         "hidden": hidden_shape,
     }
+
+
+#: The tensor-name suffix of the MoE router's per-expert scale (upstream's
+#: `Gemma4TextRouter.per_expert_scale`, rank 1 `[E]`).
+ROUTER_SCALE_SUFFIX = ".router.per_expert_scale"
+
+
+def router_scale_lookups(graph: IrGraph, config: Any, embeddings: Sequence[Any]) -> list[str]:
+    """The `embedding` nodes that are a mixture-of-experts router's `per_expert_scale[index]`,
+    by the per-expert-scale tensor each reads (ADR 0145 decision 5: the exporter writes that index
+    as an `embedding` over the table reshaped to `[E, 1]`).
+
+    MUST: a model with the expert block (`enable_moe_block`) has exactly one per layer, each over
+    its own layer's `[num_experts, 1]` table reshaped from the parameter — not a constant folded
+    from it (a shape-only trace would ship its uninitialised bytes); a model without one has none.
+    Any other `embedding` stays counted as one that should not be there.
+    """
+    producers = {out: node for node in graph.nodes for out in node.outs}
+    found: list[tuple[str, list[Any]]] = []
+    for node in embeddings:
+        source = producers.get(node.ins[0])
+        if source is None or source.op != RESHAPE_OP or source.ins[0] not in graph.initializers:
+            continue
+        tensor = graph.initializers[source.ins[0]].tensor
+        if tensor.endswith(ROUTER_SCALE_SUFFIX):
+            found.append((tensor, list(declared_shape(graph, node.ins[0]))))
+    tables = [tensor for tensor, _ in found]
+    if not getattr(config, "enable_moe_block", False):
+        if tables:
+            raise AssertionError(f"router lookups {tables[:4]} in a model without the expert block")
+        return []
+    layers = int(config.num_hidden_layers)
+    if len(tables) != layers or len(set(tables)) != layers:
+        raise AssertionError(
+            f"{len(tables)} router lookups over {len(set(tables))} tables — not one per layer"
+            f" ({layers})"
+        )
+    experts = int(config.num_experts)
+    wrong = {tensor: shape for tensor, shape in found if shape != [experts, 1]}
+    if wrong:
+        raise AssertionError(f"router lookups read tables not of shape [{experts}, 1]: {wrong}")
+    return tables
 
 
 # ---- Series ----------------------------------------------------------------

@@ -17,6 +17,10 @@ cache at pinned commits ({@link HUB_PINS}), from **two** repositories:
   own until its commit of 2026-10-30, `9788bdb6…` since, 239 merges fewer): the QAT repositories
   have not received the fix.
 
+26B A4B is read the same way ({@link HUB_PINS}): the weights (two shards and their index) and their
+config from `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized`, the tokenizer, the chat template and
+the generation defaults from `google/gemma-4-26B-A4B-it` (ADR 0145 decision 5).
+
 E2B / E4B also have a **q4_0 QAT line** ({@link QAT_PINS} — `gemma4.export_product_qat`): the
 weights and their config are Google's quantization-aware-trained checkpoints
 `google/gemma-4-E{2,4}B-it-qat-q4_0-unquantized`, the tokenizer, the chat template and the
@@ -151,8 +155,45 @@ _TWELVE_B_TOKENIZER = HubPin(
         )
     },
 )
+#: 26B A4B, both in the hub cache on 2026-11-08 (neither is gated):
+#:
+#: - weights: `main` of `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized` — two shards and their
+#:   index (`model-00001-of-00002.safetensors` 49,907,246,508 B and `model-00002-of-00002…`
+#:   1,704,763,408 B by their LFS blob names; the SHA-256 of `model.safetensors.index.json`'s and
+#:   `config.json`'s bytes). Its text config is `google/gemma-4-26B-A4B-it`'s field for field (the
+#:   `gemma4_text` class with the expert block on — ADR 0145).
+#: - tokenizer: `main` of `google/gemma-4-26B-A4B-it` (ADR 0145 decision 5, as 12B pins 12B-it). At
+#:   this commit its `tokenizer.json` is still the file from before Google's glitch-token fixes
+#:   (`cc8d3a0c…`, the QAT repository's too), its `chat_template.jinja` is 12B's byte for byte
+#:   (`ae53464b…`), and its `generation_config.json` declares no `suppress_tokens` (stop ids
+#:   `[1, 106, 50]`); the QAT repository's `tokenizer_config.json` and `generation_config.json` are
+#:   other bytes.
+#:
+#: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
+_TWENTY_SIX_B_WEIGHTS = HubPin(
+    repo=GEMMA4_WEIGHTS_UPSTREAM["26b"],
+    revision="f1e06dc520982d9b9edd76859fdb7ab209449949",
+    sha256={
+        "model.safetensors.index.json": (
+            "907826a6e46ff454272bd6db1fee629d5531a2303be22986d825a0871d7dc7a7"
+        ),
+        "model-00001-of-00002.safetensors": (
+            "d57e8bde0feda8b0ebf51a81d04b5d988f82fead7f9242d9231625929421453e"
+        ),
+        "model-00002-of-00002.safetensors": (
+            "e5e6e258f562a77be81b0f5136eb2ca71e0d973cf30c4291e4d2c7b1fd712f99"
+        ),
+        "config.json": "ece3392c07744553f4e8bb2b5905bc68b0a7d7ab2927133bb621875b8e4a3289",
+    },
+)
+_TWENTY_SIX_B_TOKENIZER = HubPin(
+    repo=GEMMA4_UPSTREAM["26b"],
+    revision="4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+    sha256={"tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"},
+)
 HUB_PINS: Mapping[str, ModelPins] = {
     "12b": ModelPins(weights=_TWELVE_B_WEIGHTS, tokenizer=_TWELVE_B_TOKENIZER),
+    "26b": ModelPins(weights=_TWENTY_SIX_B_WEIGHTS, tokenizer=_TWENTY_SIX_B_TOKENIZER),
 }
 
 #: Model → the regular `-it` repository's tokenizer at the commit the hand-placed checkpoint was
@@ -280,6 +321,11 @@ QAT_DRAFTER_PINS: Mapping[str, HubPin] = {
 #: same precision — so every QAT drafter has an entry here, and nothing else does.
 QAT_TARGET_PINS: Mapping[str, ModelPins] = {**QAT_PINS, "12b": HUB_PINS["12b"]}
 
+#: Model → the pinned sources of its model in the q4_0 QAT line (`gemma4.distribution`): every QAT
+#: target ({@link QAT_TARGET_PINS}) and 26B's one line ({@link HUB_PINS}), which ships no drafter
+#: until one is pinned (ADR 0145 decision 1) — so it is no drafter's target.
+QAT_LINE_PINS: Mapping[str, ModelPins] = {**QAT_TARGET_PINS, "26b": HUB_PINS["26b"]}
+
 
 def _hand_placed_dir(model: str) -> Path:
     """`inputs/gemma4/<checkpoint>/` (the checkpoint name is the tail of the upstream repository —
@@ -406,6 +452,22 @@ def qat_target_tokenizer_dir(model: str) -> Path:
     defaults from: {@link qat_tokenizer_dir} for E2B / E4B, 12B's tokenizer pin."""
     pin = qat_target_pins(model).tokenizer
     return hub_snapshot_dir(pin.repo, pin.revision)
+
+
+def qat_line_dirs(model: str) -> tuple[Path, Path]:
+    """The hub cache's snapshots of model `model` in the q4_0 QAT line ({@link QAT_LINE_PINS}):
+    `(weights and their config, tokenizer and generation defaults)` — paths only, like
+    {@link checkpoint_dir}; a model outside the line fails loudly."""
+    pins = QAT_LINE_PINS.get(model)
+    if pins is None:
+        raise ValueError(
+            f"gemma4 has no q4_0 QAT line model '{model}'"
+            f" (known: {' / '.join(sorted(QAT_LINE_PINS))})"
+        )
+    return (
+        hub_snapshot_dir(pins.weights.repo, pins.weights.revision),
+        hub_snapshot_dir(pins.tokenizer.repo, pins.tokenizer.revision),
+    )
 
 
 def _digest(path: Path) -> str:

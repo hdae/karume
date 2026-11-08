@@ -112,11 +112,14 @@ GENERATION_PROMPT_SUFFIX: Mapping[str, str] = {
     GEMMA4_UNIFIED_CHAT_DIALECT: "<|channel>thought\n<channel|>",
 }
 
-#: Model → its chat dialect. Key set = `gemma4.card.GEMMA4_UPSTREAM` (tests).
+#: Model → its chat dialect. Key set = `gemma4.card.GEMMA4_UPSTREAM` (tests). 26B's
+#: `chat_template.jinja` (at its tokenizer pin, `gemma4.sources.HUB_PINS`) is 12B's byte for byte
+#: (SHA-256 `ae53464b…` — ADR 0145 decision 5), though its class is E2B / E4B's.
 CHAT_DIALECTS: Mapping[str, str] = {
     "e2b": GEMMA4_CHAT_DIALECT,
     "e4b": GEMMA4_CHAT_DIALECT,
     "12b": GEMMA4_UNIFIED_CHAT_DIALECT,
+    "26b": GEMMA4_UNIFIED_CHAT_DIALECT,
 }
 
 #: The four files bundled into the provenance record (it records that the chat format and the EOS

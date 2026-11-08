@@ -64,6 +64,7 @@ GEMMA4_UPSTREAM: Mapping[str, str] = {
     "e2b": "google/gemma-4-E2B-it",
     "e4b": "google/gemma-4-E4B-it",
     "12b": "google/gemma-4-12B-it",
+    "26b": "google/gemma-4-26B-A4B-it",
 }
 
 #: Model → the checkpoint its weights are read from, for a model whose weights do not come from its
@@ -72,7 +73,10 @@ GEMMA4_UPSTREAM: Mapping[str, str] = {
 #: compilation", whose README front matter names `google/gemma-4-12B-it` as `base_model` and says
 #: `license: apache-2.0`. {@link GEMMA4_UPSTREAM} stays the base model, and the source of the
 #: tokenizer, the chat template and the generation defaults (`gemma4.sources.HUB_PINS`).
-GEMMA4_WEIGHTS_UPSTREAM: Mapping[str, str] = {"12b": "google/gemma-4-12B-it-qat-q4_0-unquantized"}
+GEMMA4_WEIGHTS_UPSTREAM: Mapping[str, str] = {
+    "12b": "google/gemma-4-12B-it-qat-q4_0-unquantized",
+    "26b": "google/gemma-4-26B-A4B-it-qat-q4_0-unquantized",
+}
 
 #: Model → Google's q4_0 quantization-aware-trained checkpoint of its `-it` model (README front
 #: matter at the pinned revisions: `license: apache-2.0`, `base_model` the regular `-it` model).
@@ -92,6 +96,7 @@ GEMMA4_QAT_WEIGHTS_UPSTREAM: Mapping[str, str] = {
 GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM: Mapping[str, str] = {
     **GEMMA4_QAT_WEIGHTS_UPSTREAM,
     "12b": GEMMA4_WEIGHTS_UPSTREAM["12b"],
+    "26b": GEMMA4_WEIGHTS_UPSTREAM["26b"],
 }
 
 #: Model → Google's q4_0 quantization-aware-trained MTP drafter (the "assistant") of its QAT
@@ -112,6 +117,12 @@ GEMMA4_QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
 #: checks it against the upstream config of every model it assembles, so the two cannot drift.
 GEMMA4_PLE_MODELS: frozenset[str] = frozenset({"e2b", "e4b"})
 
+#: Models whose text decoder routes every layer through a block of experts (26B A4B — upstream's
+#: `enable_moe_block`; ADR 0145). A checkpoint fact like {@link GEMMA4_PLE_MODELS}: the expert
+#: weights are the one weight of the q4_0 QAT line stored with f16 steps, which the card and the
+#: notice state, and 26B has its own export script (`gemma4.export_moe`).
+GEMMA4_MOE_MODELS: frozenset[str] = frozenset({"26b"})
+
 #: The storage of the upstream checkpoints' weights (BF16). A manifest `weights` dtype label other
 #: than this one is a weight re-encoded in another storage form ({@link _gemma4_relation}); the
 #: regular line's main model stores exactly this one ({@link _gemma4_storage_lines}).
@@ -126,6 +137,7 @@ GEMMA4_FRONT_ENDS: Mapping[str, str] = {
     "e2b": "vision and audio towers",
     "e4b": "vision and audio towers",
     "12b": "encoder-free vision and audio embedders",
+    "26b": "a vision tower",
 }
 
 #: The role name of the MTP drafter's weights (the key in the manifest's `weights`). The card reads
@@ -667,6 +679,13 @@ def _qat_q4_0_overview_bullets(manifest: Mapping[str, Any]) -> list[str]:
         f" {listed[0].upper()}{listed[1:]} are stored as the q4_0 codes",
         "  with one step per group of 32 values (packed int4) — not rounded again.",
     ]
+    moe = [name for name in names if name in GEMMA4_MOE_MODELS]
+    if moe:
+        lines += [
+            f"- **Routed experts ({_spell_models(moe)})**: each layer sends every token through 8",
+            "  of its 128 experts, all resident on the GPU. The expert weights keep the same",
+            "  codes, each step stored as f16.",
+        ]
     drafters = [name for name, _ in _qat_q4_0_drafters(manifest)]
     if drafters:
         lines += [
@@ -700,7 +719,8 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             " the chat template and the generation defaults; both are licensed **Apache 2.0**"
             f" {license_links}."
         )
-    for name, drafter in _qat_q4_0_drafters(manifest):
+    drafters = _qat_q4_0_drafters(manifest)
+    for name, drafter in drafters:
         lines.append(
             f"- **`{name}` drafter**: [{drafter}](https://huggingface.co/{drafter}), the QAT"
             " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms."
@@ -713,6 +733,12 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         f" the per-layer embeddings of {_spell_models(carriers)} were moved out of the graph into"
         " container assets that the host gathers, on the same grid;"
         if carriers
+        else ""
+    )
+    moe = [name for name in manifest["models"] if name in GEMMA4_MOE_MODELS]
+    experts = (
+        f" the routed experts of {_spell_models(moe)} keep the same codes with f16 steps;"
+        if moe
         else ""
     )
     vision = _gemma4_vision_models(manifest)
@@ -731,9 +757,11 @@ def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  decoder was extracted and re-expressed in the Karume container format; the linear",
         "  weights and the embedding table keep the checkpoint's own 4-bit grid, stored as packed",
         "  int4 (group 32: its codes and one step per group, refitted from the stored values)",
-        f"  rather than rounded again;{ple} the exit was narrowed to the selected rows' logits and",
-        "  hidden states; rotary cos/sin arrive as host-generated inputs; the drafters' weights",
-        "  keep their own grid the same way.",
+        f"  rather than rounded again;{ple}{experts} the exit was narrowed to the selected rows'"
+        " logits and",
+        "  hidden states; rotary cos/sin arrive as host-generated inputs"
+        + ("; the drafters' weights" if drafters else "."),
+        *(["  keep their own grid the same way."] if drafters else []),
         *embedder,
         "  No retraining and no fine-tuning.",
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
