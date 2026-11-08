@@ -171,11 +171,14 @@ class TestRowReduce:
         ("build", "why"),
         [
             (lambda x: x.sum(dim=(0, 1)), r"are not supported for sum \(one axis at a time\)"),
-            (lambda x: x.sum(dim=-1, keepdim=True), "sum with keepdim=True is not supported"),
+            (
+                lambda x: x.sum(dim=(0, 1), keepdim=True),
+                r"are not supported for sum \(one axis at a time\)",
+            ),
             (lambda x: x.amax(dim=(0, 1)), r"are not supported for amax \(one axis at a time\)"),
             (lambda x: x.amin(dim=-1, keepdim=True), "amin with keepdim=True is not supported"),
         ],
-        ids=["sum-multi-axis", "sum-keepdim", "amax-multi-axis", "amin-keepdim"],
+        ids=["sum-multi-axis", "sum-multi-axis-keepdim", "amax-multi-axis", "amin-keepdim"],
     )
     def test_other_reductions_are_rejected(self, convert_module, build, why):
         class Reduce(nn.Module):
@@ -261,6 +264,52 @@ class TestArgmax:
             NotImplementedError, match="argmax over all dimensions is not supported"
         ):
             ATEN_HANDLERS[target](_reduce_node(target, kwargs={"keepdim": True}))
+
+
+class TestTopk:
+    """topk takes only the form of its contract: **static k, last dimension, largest, sorted**
+    (ADR 0068 decision 3). The two outputs are wired to the getitem readers by the engine
+    (test_convert.py `TestMultiOutputWiring`); this pins the handler's narrowing."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda x: torch.topk(x, 2),
+            lambda x: torch.topk(x, k=2, dim=-1),
+            lambda x: torch.topk(x, 2, dim=1, largest=True, sorted=True),
+        ],
+        ids=["defaults", "negative-dim", "explicit-flags"],
+    )
+    def test_the_contract_form_becomes_one_node_with_k(self, convert_module, dyn_t, build):
+        class Topk(nn.Module):
+            def forward(self, x):
+                return build(x)
+
+        graph, _ = convert_module(Topk(), (torch.randn(6, 5),), ({0: dyn_t},))
+
+        assert node_ops(graph) == ["topk"]
+        assert only_node(graph, "topk").attrs == {"k": 2}
+        assert [graph.values[name].shape for name in graph.outputs] == [["T", 2], ["T", 2]]
+
+    @pytest.mark.parametrize(
+        ("build", "why"),
+        [
+            (lambda x: torch.topk(x, 2, largest=False), "topk with largest=False"),
+            (lambda x: torch.topk(x, 2, sorted=False), "topk with sorted=False"),
+            (lambda x: torch.topk(x, 2, dim=0), r"other than the last \(dim=0 / rank=2\)"),
+            (lambda x: torch.topk(x, x.shape[0]), "a static integer only"),
+        ],
+        ids=["smallest", "unsorted", "non-last-axis", "symbolic-k"],
+    )
+    def test_other_forms_are_rejected(self, convert_module, build, why):
+        class Topk(nn.Module):
+            def forward(self, x):
+                return build(x)
+
+        # T ≤ 9 so that the symbolic k = T fits the last dimension (torch guards it).
+        rows = Dim("T", min=2, max=9)
+        with pytest.raises(NotImplementedError, match=why):
+            convert_module(Topk(), (torch.randn(4, 9),), ({0: rows},))
 
 
 def _reduce_node(target, args=(), kwargs=None, shape=(3, 5)):
@@ -876,6 +925,30 @@ class TestFusedOps:
 
         with pytest.raises(NotImplementedError, match="other than the last"):
             convert_module(ByColumn(), (torch.randn(5, 4),))
+
+    def test_softmax_with_its_input_dtype_is_a_plain_softmax(self, convert_module, dyn_t):
+        """`softmax(x, dim=-1, dtype=torch.float32)` on an f32 input (the MoE router's spelling —
+        ADR 0145 decision 5) is the plain softmax: no conversion happens."""
+
+        class Router(nn.Module):
+            def forward(self, x):
+                return nn.functional.softmax(x, dim=-1, dtype=torch.float32)
+
+        graph, _ = convert_module(Router(), (torch.randn(5, 4),), ({0: dyn_t},))
+
+        assert node_ops(graph) == ["softmax"]
+        assert only_node(graph, "softmax").attrs == {"dim": 1}
+        assert graph.values[graph.outputs[0]].dtype == "f32"
+
+    def test_softmax_with_another_dtype_is_rejected(self, convert_module):
+        """A dtype other than the input's converts first — the IR softmax has no field for it."""
+
+        class Narrowing(nn.Module):
+            def forward(self, x):
+                return nn.functional.softmax(x, dim=-1, dtype=torch.float16).float()
+
+        with pytest.raises(NotImplementedError, match=r"softmax with dtype torch\.float16 other"):
+            convert_module(Narrowing(), (torch.randn(5, 4),))
 
     def test_a_runtime_bool_mask_emits_safe_softmax(self, convert_module):
         """ADR 0044's chain: bool input → `where(mask,0,-inf)` → add → **safe_softmax**.

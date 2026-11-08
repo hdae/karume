@@ -130,33 +130,92 @@ class TestUnsupportedOps:
 
         assert "aten.floor.default" in err.value.ops
 
-    def test_topk_is_declared_non_emittable_and_really_cannot_be_exported(self, convert_module):
-        """`topk` is in the contract table but **cannot be emitted from torch** (ADR 0068 addendum).
+    def test_the_getitem_of_a_multi_output_op_without_a_handler_is_still_listed(
+        self, convert_module
+    ):
+        """Only the getitem of a **handled** multi-output op is wired (ADR 0068 decision 3); the
+        getitem of one without a handler (`aten.sort` here) stays in the enumeration — what stops
+        is the getitem, as torch.export inserts one per tuple element used (ADR 0068 addendum 2)."""
 
-        Tuple meta of multi-output aten ops + wiring `operator.getitem` slots is a new mechanism,
-        deferred until sampling really needs it (ruled). An entry in `NON_EMITTABLE_OPS` alone
-        cannot prevent "a handler was added but it stays outside the golden-coverage check", so
-        **the failure itself** is the check (this turns red on the day the handler and the getitem
-        wiring go in; then it is removed from `NON_EMITTABLE_OPS` and goldens are added).
+        class Sort(nn.Module):
+            def forward(self, x):
+                values, _ = torch.sort(x, dim=-1)
+                return values
 
-        Observed (2026-08-17): what stops is not `aten.topk.default` but **`operator.getitem`**.
-        torch.export inserts getitem nodes even when the tuple is returned as is, so adding only an
-        aten handler does not open the way (supporting the ADR addendum's point that the wiring
-        is a new mechanism).
-        """
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(Sort(), (torch.randn(3, 5),))
+
+        assert [key for key in err.value.ops if "getitem" in key], err.value.ops
+
+
+class TestMultiOutputWiring:
+    """A multi-output aten op becomes **one IR node with one output per slot**, and each
+    `operator.getitem` reads its slot (ADR 0068 decision 3 — `topk` is the first, for the MoE router
+    of ADR 0145 decision 5)."""
+
+    def test_topk_is_emittable(self):
+        assert TOPK_OP in EMITTABLE_OPS
+        assert TOPK_OP not in NON_EMITTABLE_OPS
+
+    def test_both_slots_are_outputs_of_one_node_named_after_their_readers(self, convert_module):
+        """The values slot is f32 and the indices slot, i64 in torch, is declared i32 (ADR 0009)."""
 
         class Topk(nn.Module):
             def forward(self, x):
                 values, indices = torch.topk(x, 2, dim=-1)
-                return values, indices.float()
+                return values, indices
 
-        assert TOPK_OP in NON_EMITTABLE_OPS
-        assert TOPK_OP not in EMITTABLE_OPS
-        with pytest.raises(UnsupportedAtenOpsError) as err:
-            convert_module(Topk(), (torch.randn(3, 5),))
+        graph, _ = convert_module(Topk(), (torch.randn(3, 5),))
 
-        assert [key for key in err.value.ops if "getitem" in key], err.value.ops
-        assert "getitem" in str(err.value)
+        node = only_node(graph, "topk")
+        assert node.outs == graph.outputs
+        assert [graph.values[name].dtype for name in node.outs] == ["f32", "i32"]
+        assert all(name.startswith("getitem") for name in node.outs)
+
+    def test_each_reader_gets_its_own_slot(self, convert_module):
+        """The f32 slot reaches an add and the i32 slot a cast, so a swapped wiring shows in the
+        graph."""
+
+        class Topk(nn.Module):
+            def forward(self, x):
+                values, indices = torch.topk(x, 2, dim=-1)
+                return values + values, indices.float()
+
+        graph, _ = convert_module(Topk(), (torch.randn(3, 5),))
+
+        values, indices = only_node(graph, "topk").outs
+        assert only_node(graph, "add").ins == [values, values]
+        assert only_node(graph, "cast").ins == [indices]
+
+    def test_a_slot_no_getitem_reads_gets_a_dotted_name(self, convert_module):
+        """An unread slot is still an output of the node (the contract declares two); its name
+        cannot collide with an FX name, which is an identifier."""
+
+        class Indices(nn.Module):
+            def forward(self, x):
+                return torch.topk(x, 2, dim=-1)[1]
+
+        graph, _ = convert_module(Indices(), (torch.randn(3, 5),))
+
+        node = only_node(graph, "topk")
+        assert node.outs[0] == "topk.0"
+        assert graph.outputs == [node.outs[1]]
+        assert graph.values["topk.0"].dtype == "f32"
+
+    def test_identical_multi_output_nodes_collapse_by_cse(self, convert_module):
+        """Two identical topk share one node, and both readers of each slot read its output."""
+
+        class Twice(nn.Module):
+            def forward(self, x):
+                first = torch.topk(x, 2, dim=-1)
+                second = torch.topk(x, 2, dim=-1)
+                return first[0] * second[0], first[1] + second[1]
+
+        graph, _ = convert_module(Twice(), (torch.randn(3, 5),))
+
+        values, indices = only_node(graph, "topk").outs
+        assert only_node(graph, "mul").ins == [values, values]
+        assert only_node(graph, "add").ins == [indices, indices]
 
 
 class _AtanActivation(nn.Module):
@@ -238,13 +297,17 @@ class TestUnsupportedOpDiagnostics:
         assert "_StackedAtanBlocks ×1 (<root>)" in message
 
     def test_target_outside_aten_is_not_classified_as_core_aten(self, convert_module):
-        class Topk(nn.Module):
+        """NOTE: the example was replaced, `topk` → `sort` (topk's getitem is wired since ADR 0145
+        decision 5, so it no longer reaches the enumeration). The check itself (a getitem is
+        classified outside aten) is unchanged."""
+
+        class Sort(nn.Module):
             def forward(self, x):
-                values, indices = torch.topk(x, 2, dim=-1)
+                values, indices = torch.sort(x, dim=-1)
                 return values, indices.float()
 
         with pytest.raises(UnsupportedAtenOpsError) as err:
-            convert_module(Topk(), (torch.randn(3, 5),))
+            convert_module(Sort(), (torch.randn(3, 5),))
 
         getitem_reports = [
             report for target, report in err.value.reports.items() if "getitem" in target
