@@ -13,6 +13,7 @@ from karume.ops import (
     CONV3D_OP,
     CONV_TRANSPOSE1D_OP,
     EMBEDDING_OP,
+    EXPERT_LINEAR_OP,
     LINEAR_OP,
     WEIGHT_CHANNEL_AXES,
 )
@@ -295,7 +296,9 @@ class TestInt8ChannelAxes:
             nn.Embedding: EMBEDDING_OP,
         }
         assert set(expected) == set(QUANT_CHANNEL_AXES)
-        assert set(expected.values()) == set(WEIGHT_CHANNEL_AXES)
+        # expert_linear has a weight slot but no module type and no i8: it refuses i8 storage, and
+        # its rank-3 weight is written only through fixed weights (ADR 0145 decision 2).
+        assert set(expected.values()) == set(WEIGHT_CHANNEL_AXES) - {EXPERT_LINEAR_OP}
         for module_type, op in expected.items():
             assert QUANT_CHANNEL_AXES[module_type] == WEIGHT_CHANNEL_AXES[op], op
 
