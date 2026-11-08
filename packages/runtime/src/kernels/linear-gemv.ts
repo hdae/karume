@@ -692,7 +692,11 @@ const rowsMacsI2 = (slot: string, rows: number): string =>
       `    acc${row} = linear_i2_word(pw${slot}, xr${row} + xq${slot}, wscale_v, acc${row});`,
   ).join("\n");
 
-const unitMacs = (
+/**
+ * The multiply-adds of one word, by storage. Also the body of `expert_linear`'s kernel
+ * (src/kernels/expert-linear.ts), so the two decode the same text.
+ */
+export const unitMacs = (
   storage: WeightStorage,
   slot: string,
   packed = false,
