@@ -7,13 +7,12 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.18.0 release (released 2026-11-08)
+## now — after the 0.19.0 release (released 2026-11-08)
 
-0.18.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.18.0 — image input on Gemma 4 12B of the q4_0 QAT
-line (ADR 0144), `capacity: "fit"`, `decodeAhead` on 12B, `fullStateStorage: "f16"` (ADR 0143); published-smoke green on Node
-and Deno). `hdae/karume-gemma4-qat` took 12B's vision component and its `i4-gemvpar` / `i4-fast` recipes, and
-`gemma.SOURCES["gemma4-qat"]` and the test-asset pin moved (the fragmentation table of the upload: 160 parts, no FAILED
-row, the large parts at 4–5 terms). Breaking: `ChatMessage` gains `ChatPartsMessage`.
+0.19.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.19.0 — Gemma 4 26B A4B of the q4_0 QAT line with
+every expert resident, the op `expert_linear` and the codec `int4-sym-g-f16` (ADR 0145); published-smoke green on Node and
+Deno). `hdae/karume-gemma4-qat` took `26b/` (64 parts; no FAILED row, the large parts at 49.5 MiB per term or more), and
+`gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
@@ -22,10 +21,13 @@ maintainer's ruling of 2026-11-06).
 
 1. **26B A4B (MoE)** (maintainer 2026-11-08): every expert resident ✅ 2026-11-08 (ADR
    [0145](decisions/0145-gemma4-26b-moe-resident.md) and its addendum; in the local mirror, ran in Chrome on the RTX 5070 Ti
-   with about 0.8 GB of 16 GB left; not yet published). Left: the grouped prefill form of `expert_linear`, the dense parts'
+   with about 0.8 GB of 16 GB left; released in 0.19.0). Left: the grouped prefill form of `expert_linear`, the dense parts'
    fusion and parallel-GEMV rows at width 2816, the drafter and vision of 26B. Then see whether a MoE cache that loads the
    needed experts from RAM can work, and look for a way to pay a miss as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
-   paid it with one fence). This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
+   paid it with one fence). Pre-research done 2026-11-08: the maintainer prefers an exact cache (bit-identical to
+   full residency) and wants the approximate modes (skip a miss, bias routing to the cache) measured too; CPU measurements of
+   decode routing on all 30 layers, the re-run count of the exact cache and the approximate modes' KL come first, then a
+   Chrome check of the fence and the per-expert upload. This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
    ruling changes it.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
