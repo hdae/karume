@@ -409,13 +409,19 @@ class TestQatParallelSeats:
         again = gemma4_distribution.gemma4_qat_q4_0_quants("e4b")
         assert again["i4-fast"]["session"] == PARALLEL_SESSIONS["i4-fast"]
 
-    def test_every_model_of_the_line_has_a_default_quant_pins_and_a_drafter(self) -> None:
+    def test_every_model_of_the_line_has_a_default_quant_pins_and_all_but_26b_a_drafter(
+        self,
+    ) -> None:
+        """26B ships no drafter until one is pinned (ADR 0145 decision 1): it is a model of the
+        line with pins, and no drafter's target."""
         line = set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM)
-        assert line == {"e2b", "e4b", "12b"}
+        assert line == {"e2b", "e4b", "12b", "26b"}
         assert set(GEMMA4_QAT_Q4_0_DEFAULT_QUANT) == line
-        assert set(GEMMA4_QAT_DRAFTER_UPSTREAM) == line
-        assert set(QAT_TARGET_PINS) == line
-        assert set(QAT_DRAFTER_PINS) == line
+        assert set(QAT_LINE_PINS) == line
+        drafters = line - {"26b"}
+        assert set(GEMMA4_QAT_DRAFTER_UPSTREAM) == drafters
+        assert set(QAT_TARGET_PINS) == drafters
+        assert set(QAT_DRAFTER_PINS) == drafters
 
 
 class TestQat12B:
@@ -1049,10 +1055,18 @@ class TestQatLegalText:
         assert "keeps the checkpoint's BF16 values" in notice
 
     def test_the_notice_names_every_upstream_of_the_line(self) -> None:
+        """Every model's QAT checkpoint and base model, and the drafter of every model that ships
+        one — a model without one (26B) names none."""
         for model, weights in GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM.items():
             assert f"`{weights}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN, model
-            assert f"`{GEMMA4_QAT_DRAFTER_UPSTREAM[model]}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
             assert f"`{GEMMA4_UPSTREAM[model]}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
+            drafter = GEMMA4_QAT_DRAFTER_UPSTREAM.get(model)
+            if drafter is None:
+                assert f"`{weights}-assistant`" not in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN, model
+                assert f"- `{weights}` and the tokenizer" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN
+            else:
+                assert f"`{drafter}`" in GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN, model
+        assert set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM) - set(GEMMA4_QAT_DRAFTER_UPSTREAM) == {"26b"}
 
     def test_the_notice_states_26b_s_extraction_and_its_f16_expert_steps(self) -> None:
         notice = " ".join(GEMMA4_QAT_Q4_0_NOTICE_MARKDOWN.split())
