@@ -438,7 +438,7 @@ class Split(nn.Module):
 
 
 class TestSplitToSlices:
-    """split_with_sizes + getitem → a sequence of slices (the IR has no multi-output op — ADR
+    """split_with_sizes + getitem → a sequence of slices (split stays single-output slices — ADR
     0014)."""
 
     def test_each_getitem_becomes_its_own_slice(self):

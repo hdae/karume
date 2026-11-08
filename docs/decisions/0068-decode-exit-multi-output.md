@@ -264,3 +264,10 @@ argmax exit, not the target exit (addendum 7).
   and do not duplicate the GPU rank conversion. Checked: subnormals, NaN, ±0, Infinity, ties, split
   boundaries, large vocabularies and general k. Fault injection on tie direction, finite sentinels
   and NaN priority is kept.
+
+## Addendum 11 (2026-11-08) — the topk aten handler lands with the MoE router
+
+The deferral of addenda 2 and 3 ends: the MoE router of [ADR 0145](0145-gemma4-26b-moe-resident.md) needs `topk` inside the
+graph. The exporter maps `aten.topk` to the IR op in decision 3's form only (static k, last dim, `largest=True`,
+`sorted=True`; other flags are refused) and wires `operator.getitem` to the two outputs of one node; the indices cross the
+boundary as i32 (ADR 0009). A multi-output op without a handler (`sort`) still lists its `getitem` as unsupported.

@@ -425,8 +425,8 @@ norm and before `lm_head`) and the four rotary rows for position `P`, the positi
 being handed in (see _Goldens_ below for the whole calling convention), and returns **k = 3**
 drafted token ids. The three steps are unrolled in Python because the only state carried between
 them is `(token, hidden)` — the drafter has no cache of its own. The clustered sparse output head of
-the upstream checkpoint is replaced by a dense projection over the full vocabulary, because `topk`
-has no `aten` handler in this exporter; `use_ordered_embeddings` is turned off **before** the
+the upstream checkpoint is replaced by a dense projection over the full vocabulary, because the
+scatter back over the vocabulary has no IR op; `use_ordered_embeddings` is turned off **before** the
 checkpoint is read, since `masked_embedding` is built in `__init__`.
 
 Storage is **int8 throughout** — every `nn.Linear` including the tied output head, all

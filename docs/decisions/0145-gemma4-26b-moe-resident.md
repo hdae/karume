@@ -113,13 +113,17 @@ f16's normal range (1.0e-3 to 1.3e-1); attention has steps down to 5.3e-5, below
      0135 decision 5 swaps a function, not a class). It calls `karume::expert_linear`, whose eager body is upstream's per-expert
      math for each pick, dequantising only the picked experts, and whose fake keeps T symbolic. The handler narrows x (f32, rank
      2 or 3), index (i64 → i32, rank 2) and weight (rank 3).
-   - **Router:** upstream's module, through three handler extensions: `softmax` with a `dtype` equal to its input's dtype is a
-     plain `softmax` (another dtype is refused); `sum(keepdim=True)` is `sum` + `reshape`; `aten.index.Tensor` with one runtime
-     index on axis 0 of a constant rank-1 table is `embedding` over the table as `[E, 1]`, reshaped (other forms stay refused).
+   - **Router:** upstream's module. `softmax` with a `dtype` equal to its input's dtype is a plain `softmax` (another dtype is
+     refused, in the handler); two normalize passes, which add no vocabulary, rewrite `sum(keepdim=True)` as `sum` + `reshape`
+     and `aten.index.Tensor` with one runtime index on axis 0 of a rank-1 parameter or buffer as `embedding` over the table as
+     `[E, 1]`, reshaped (other forms stay refused).
      `topk` gets its aten handler and `getitem` wiring, leaves `NON_EMITTABLE_OPS`, and maps its i64 indices to i32 (ADR 0009).
-   - **The text path:** a 26B wrapper (text only, no PLE, no soft inputs) on 12B's meta trace and row-block import, generalised
-     to the `gemma4` class, to sharded checkpoints, to rank-3 weights, and to the vision keys this decision ignores. The K = V
-     wiring check of 12B runs on its graph.
+   - **The text path:** 12B's product wrapper and graph interface, soft inputs included (`soft_embeds` / `soft_mask`, unused
+     until 26B's vision lands, so that work reuses this container instead of re-exporting it), on 12B's meta trace and
+     row-block import, generalised to the `gemma4` class, to sharded checkpoints, to rank-3 weights, and to the vision keys this
+     decision ignores. The container and the reference share one grid import. The K = V wiring check of 12B runs on its graph.
+     The front end (tokenizer, chat template, generation settings) is pinned from `google/gemma-4-26B-A4B-it`, as 12B pins
+     12B-it; the chat template is 12B's byte for byte, so the dialect is `gemma4-unified`.
 
 6. **Checks.**
    - This machine's GPU (12 GB) cannot hold the model, so its tests run a model cut after a few layers, against layer goldens from

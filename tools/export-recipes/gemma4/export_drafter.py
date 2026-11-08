@@ -36,7 +36,7 @@ This is unrolled **k = 3 steps** in a Python loop (the only state between steps 
 outputs (the IR's `cat` is f32 only and cannot concatenate i32).
 
 MUST: load with `use_ordered_embeddings=False`. The distributed checkpoint's sparse centroid softmax
-(topk → 4096 candidates → scatter) is not in the IR vocabulary (`topk` is in `NON_EMITTABLE_OPS`),
+(topk → 4096 candidates → scatter) is not in the IR vocabulary (the scatter has no IR op),
 so it is lowered to **lm_head + argmax over the full vocabulary**. `masked_embedding` is created by
 `__init__` from the config, so instead of dropping it after loading, **the config is switched off
 before loading** (`Gemma4AssistantForCausalLM.__init__`).
