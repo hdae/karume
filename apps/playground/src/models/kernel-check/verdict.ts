@@ -31,6 +31,7 @@ export const KERNEL_CHECK_IDS = [
   "state-kv16",
   "score-f16-store",
   "state-bidirectional",
+  "expert-linear",
 ] as const;
 export type KernelCheckId = (typeof KERNEL_CHECK_IDS)[number];
 

@@ -4,6 +4,7 @@
  */
 
 import {
+  checkExpertLinear,
   checkGemvSubgroup,
   checkIntegerGemv,
   type CheckOptions,
@@ -22,6 +23,7 @@ import {
   SCORE_F16_CASES,
   STATE_BIDIRECTIONAL_CASES,
   STATE_KV16_CASES,
+  EXPERT_LINEAR_CASES,
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
 
@@ -124,6 +126,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: [await checkStateBidirectional(gpu, options)],
       expectedCases: STATE_BIDIRECTIONAL_CASES,
+    }),
+  },
+  {
+    id: "expert-linear",
+    title: "Expert linear (Gemma 4 26B A4B)",
+    summary:
+      "expert_linear with f16 steps at the 26B shapes (gate_up n 1408 k 2816 with x shared, down n 2816 k 704 per pick; E 8, T 3, 8 picks with repeated ids): every pick against linear's i4 GEMV on that expert with the steps widened, u32 identity (ADR 0145).",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkExpertLinear(gpu, options)],
+      expectedCases: EXPERT_LINEAR_CASES,
     }),
   },
 ];

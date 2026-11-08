@@ -988,6 +988,57 @@ class GatedDeltaScanBlock(nn.Module):
         return torch.ops.karume.gated_delta_scan(q, k, v, g, beta)
 
 
+class ExpertLinearBlock(nn.Module):
+    """torch comparison of expert_linear (extended composite layer — ADR 0145 decision 2): one
+    routed expert FFN, `expert_linear(x, index, gate_up)` → slice gate / up → `gelu_tanh(gate) ·
+    up` → `expert_linear(·, index, down)`.
+
+    The eager expected values come from the body in `karume/custom_ops.py` (upstream's per-expert
+    `F.linear`). The shapes to exercise:
+
+    MUST: **both forms of x** — the gate_up projection reads x shared by the k picks (`[T,in]`),
+    the down projection one row per pick (`[T,k,·]`).
+    MUST: **the token axis is symbolic** (a prefill chunk).
+    MUST: E, k, in, out and out / 2 all differ (6 / 2 / 20 / 16 / 8), so a swapped axis shows in the
+    shapes, and the index is an input with ids that differ within a token and repeat across tokens
+    (the form a `topk` gives). The widths are small because each golden file stays under 16 KiB
+    (`MAX_FILE_BYTES` in tests/test_goldens.py); in = 20 still spans a 4-word prefetch round of the
+    f32 kernel plus a remainder word.
+    NOTE: the index is a graph input because `topk` does not export yet (ADR 0068 addendum); the
+    runtime refuses such a graph at Session construction (the plan-time producer rule of ADR 0145
+    decision 2), so its golden test splices a router `topk` in front of the exported graph.
+    """
+
+    EXPERTS = 6
+    PICKS = 2
+    IN = 20
+    OUT = 16
+
+    def __init__(self, generator: torch.Generator) -> None:
+        super().__init__()
+        self.gate_up = nn.Parameter(
+            _uniform(generator, self.EXPERTS, self.OUT, self.IN, low=-0.3, high=0.3)
+        )
+        self.down = nn.Parameter(
+            _uniform(generator, self.EXPERTS, self.IN, self.OUT // 2, low=-0.3, high=0.3)
+        )
+
+    def forward(self, x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+        hidden = torch.ops.karume.expert_linear(x, index, self.gate_up)
+        half = self.OUT // 2
+        gate, up = hidden[..., :half], hidden[..., half:]
+        mixed = nn.functional.gelu(gate, approximate="tanh") * up
+        return torch.ops.karume.expert_linear(mixed, index, self.down)
+
+
+def _expert_index(tokens: int, experts: int, picks: int) -> torch.Tensor:
+    """Distinct ids within a token (pick j is `token + j·E/k`), every expert hit and each one
+    repeated across tokens — the form a `topk` over E gives."""
+    stride = experts // picks
+    rows = [[(token + pick * stride) % experts for pick in range(picks)] for token in range(tokens)]
+    return torch.tensor(rows, dtype=torch.int64)
+
+
 def _unit_rows(generator: torch.Generator, *shape: int) -> torch.Tensor:
     """Rows l2-normalised over the last axis (the q / k contract of gated_delta_scan)."""
     rows = _uniform(generator, *shape, low=-1.0, high=1.0)

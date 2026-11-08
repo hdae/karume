@@ -401,6 +401,14 @@
       "attrs": []
     },
     {
+      "op": "expert_linear",
+      "arity": 3,
+      "dtypes": { "kind": "perSlot", "slots": [["f32"], ["i32"], ["f32"]] },
+      "attrs": [],
+      "weight_slot": 2,
+      "channel_axis": 0
+    },
+    {
       "op": "static_quantize",
       "arity": 1,
       "dtypes": {
@@ -3567,6 +3575,159 @@
       ],
       "throws": true,
       "why": "anything but rank 4/4/4/3/3 is rejected (a folded head axis is not in the vocabulary)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 64],
+        [3, 2],
+        [6, 48, 64]
+      ],
+      "outs": [[3, 2, 48]],
+      "why": "x[T,in] shared by the k picks / index[T,k] / weight[E,out,in] -> [T,k,out] (T, k, E, out and in all distinct, so a swapped axis shows up in the shape)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 2, 48],
+        [3, 2],
+        [6, 64, 48]
+      ],
+      "outs": [[3, 2, 64]],
+      "why": "the per-pick form x[T,k,in] (one row per pick — the down projection of the expert FFN)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        ["T", 2816],
+        ["T", 8],
+        [128, 1408, 2816]
+      ],
+      "bindings": { "T": 5 },
+      "outs": [["T", 8, 1408]],
+      "why": "26B's gate_up with a symbolic token axis (T passes through)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        ["T", 8, 704],
+        ["T", 8],
+        [128, 2816, 704]
+      ],
+      "bindings": { "T": 5 },
+      "outs": [["T", 8, 2816]],
+      "why": "26B's down projection, per pick, with a symbolic token axis"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [0, 64],
+        [0, 2],
+        [6, 48, 64]
+      ],
+      "outs": [[0, 2, 48]],
+      "why": "T = 0 passes (no row — as for linear's leading dimensions)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [[64], [3, 2], [6, 48, 64]],
+      "throws": true,
+      "why": "x is rank 2 or 3 only (a rank-1 x has no token axis)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [1, 3, 2, 64],
+        [3, 2],
+        [6, 48, 64]
+      ],
+      "throws": true,
+      "why": "x of rank 4 is not in the vocabulary"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [[3, 64], [6], [6, 48, 64]],
+      "throws": true,
+      "why": "index is rank 2 [T,k] only"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 64],
+        [3, 2],
+        [48, 64]
+      ],
+      "throws": true,
+      "why": "weight is rank 3 [E,out,in] only (a rank-2 weight is linear's)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 3, 48],
+        [3, 2],
+        [6, 64, 48]
+      ],
+      "throws": true,
+      "why": "the per-pick x has a pick count that differs from index's k"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [4, 64],
+        [3, 2],
+        [6, 48, 64]
+      ],
+      "throws": true,
+      "why": "T of x differs from index's"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 32],
+        [3, 2],
+        [6, 48, 64]
+      ],
+      "throws": true,
+      "why": "the input width of x differs from the weight's in"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 64],
+        [3, 2],
+        [0, 48, 64]
+      ],
+      "throws": true,
+      "why": "E = 0 (an empty expert table has nothing to pick)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 64],
+        [3, 0],
+        [6, 48, 64]
+      ],
+      "throws": true,
+      "why": "k = 0 picks nothing"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 64],
+        [3, 2],
+        [6, 0, 64]
+      ],
+      "throws": true,
+      "why": "out = 0 (an expert without output rows)"
+    },
+    {
+      "op": "expert_linear",
+      "ins": [
+        [3, 64],
+        [3, 2]
+      ],
+      "throws": true,
+      "why": "arity fixed at 3 (no optional slot)"
     },
     {
       "op": "static_quantize",

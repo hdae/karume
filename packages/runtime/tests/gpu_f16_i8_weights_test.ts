@@ -385,7 +385,8 @@ for (const storage of STORAGES) {
 }
 
 test("eligibility looks at the weight-slot position of each WEIGHT_SLOTS op (bias / index are not made eligible)", () => {
-  // op -> (order of ins, position of the weight). Only embedding has slot 0 (the others 1).
+  // op -> (order of ins, position of the weight). Only embedding has slot 0 and expert_linear slot 2
+  // (the others 1).
   const cases: readonly (readonly [string, readonly string[], readonly string[]])[] = [
     ["linear", ["x", "w", "b"], ["w"]],
     ["conv1d", ["x", "w", "b"], ["w"]],
@@ -393,6 +394,8 @@ test("eligibility looks at the weight-slot position of each WEIGHT_SLOTS op (bia
     ["conv3d", ["x", "w", "b"], ["w"]],
     ["conv_transpose1d", ["x", "w", "b"], ["w"]],
     ["embedding", ["w", "x"], ["w"]],
+    // expert_linear (ADR 0145) has its weight at slot 2; the index slot (1) is not eligible
+    ["expert_linear", ["x", "b", "w"], ["w"]],
     // Ops without a weight slot make no slot eligible
     ["layer_norm", ["x", "w", "b"], []],
     ["rms_norm", ["x", "w"], []],

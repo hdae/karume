@@ -2487,12 +2487,20 @@ export class Session {
       this.#state.packedStaticQuantize ||
       this.#state.linearCompute === "a8"
         ? new Map(
-            [...this.#state.residentWeights].map(([name, weight]): [string, FusionWeightLayout] => [
-              name,
-              weight.storage === "i4"
-                ? { storage: weight.storage, groupSize: weight.groupSize }
-                : { storage: weight.storage },
-            ]),
+            // An i4f16 weight (expert_linear only — ADR 0145) feeds no fused linear, so it is absent.
+            [...this.#state.residentWeights].flatMap(
+              ([name, weight]): [string, FusionWeightLayout][] =>
+                weight.storage === "i4f16"
+                  ? []
+                  : [
+                      [
+                        name,
+                        weight.storage === "i4"
+                          ? { storage: weight.storage, groupSize: weight.groupSize }
+                          : { storage: weight.storage },
+                      ],
+                    ],
+            ),
           )
         : undefined;
     const fusion = planFusions(plan.nodes, {

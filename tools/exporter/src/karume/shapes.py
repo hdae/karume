@@ -402,6 +402,8 @@ def _compute(
         return _sole(_gru_scan(contract, ins, where))
     if kind == "gated_delta_scan":
         return _sole(_gated_delta_scan(contract, ins, where))
+    if kind == "expert_linear":
+        return _sole(_expert_linear(contract, ins, where))
     raise OpContractError(f"{where}: op kind '{kind}' has no shape rule")
 
 
@@ -1606,6 +1608,51 @@ def _gated_delta_scan(contract: OpContract, ins: list[list[Extent]], where: str)
             f" — ADR 0135 decision 1): {show}"
         )
     return [batch, time, value_heads, value_dim]
+
+
+def _expert_linear(contract: OpContract, ins: list[list[Extent]], where: str) -> list[Extent]:
+    """The output shape of expert_linear (extended composite layer — ADR 0145 decision 2).
+
+    `x[T,in]` (shared by the picks) or `x[T,k,in]` (one row per pick) / `index[T,k]` /
+    `weight[E,out,in]` -> `[T,k,out]`. **T passes through as a symbol** (the token axis of a
+    prefill chunk).
+
+    MUST: T and k come from index, out and in from the weight; x is **only matched** against them
+    (structurally — the same rule as the TS side `expertLinearShape`).
+    MUST: a constant E, out, in or k below 1 is rejected (T = 0 passes, as for linear's leading
+    dimensions). A symbolic one depends on the binding, so the TS side checks it before execution.
+    The index's range is not a shape fact (the runtime's plan-time producer rule — ADR 0145
+    decision 2).
+    """
+    x, index, weight = ins
+    show = f"x [{_show(x)}] / index [{_show(index)}] / weight [{_show(weight)}]"
+    if len(x) not in (2, 3) or len(index) != 2 or len(weight) != 3:
+        raise OpContractError(
+            f"{where}: {contract.name} expects x[T,in] or x[T,k,in] / index[T,k] /"
+            f" weight[E,out,in] (rank 2 or 3 / 2 / 3): {show}"
+        )
+    tokens, picks = index
+    experts, out_features, in_features = weight
+    if any(
+        extent.is_const and extent.offset < 1
+        for extent in (experts, out_features, in_features, picks)
+    ):
+        raise OpContractError(
+            f"{where}: {contract.name} needs E, out, in and k of at least 1: {show}"
+        )
+    if x[0] != tokens:
+        raise OpContractError(f"{where}: {contract.name} T of x differs from index's: {show}")
+    if len(x) == 3 and x[1] != picks:
+        raise OpContractError(
+            f"{where}: {contract.name} per-pick x has {x[1].to_dim()} rows per token, index has"
+            f" k = {picks.to_dim()}: {show}"
+        )
+    if x[-1] != in_features:
+        raise OpContractError(
+            f"{where}: {contract.name} input feature count of x differs from the weight's in:"
+            f" {show}"
+        )
+    return [tokens, picks, out_features]
 
 
 def _upsample_bilinear2d(

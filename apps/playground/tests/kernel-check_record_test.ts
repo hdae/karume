@@ -79,6 +79,7 @@ describe("kernelCheckRecord", () => {
       ["state-kv16", "not-run"],
       ["score-f16-store", "not-run"],
       ["state-bidirectional", "not-run"],
+      ["expert-linear", "not-run"],
     ]);
     expect(record.checks[1]).toEqual({ id: "rms-subgroup32", verdict: "not-run" });
     expect(record.checks[0]).toEqual({

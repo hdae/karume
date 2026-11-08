@@ -19,6 +19,7 @@
  */
 
 import {
+  type CodecLayout,
   codecLayout,
   type CodecName,
   groupScaleShape,
@@ -33,20 +34,25 @@ import { numel } from "../ops.ts";
 import {
   eligibleCompressedInitializers,
   ExecutionError,
+  expertLinearWeights,
   i2EligibleInitializers,
   i4EligibleInitializers,
+  i4f16EligibleInitializers,
   weightChannelAxes,
 } from "./plan.ts";
 
 /**
- * The refusal of `int4-sym-g-f16` (layout `i4f16`) by every consumer this planner knows (ADR 0145
- * decision 3). The layout maps to no residency class and no `WeightStorage`: its step words are
- * f16 pairs, and every kernel that takes a `WeightStorage` (and the CPU expansion of the `expanded`
- * class, `scaleTensor` in session-build.ts) reads a scale as f32 — a silent wrong value with a
- * plausible byte count.
+ * The refusal of `int4-sym-g-f16` (layout `i4f16`) for a weight that any consumer other than
+ * `expert_linear`'s weight slot reads (ADR 0145 decision 3). Its step words are f16 pairs, and every
+ * kernel that takes a `WeightStorage` (and the CPU expansion of the `expanded` class,
+ * `scaleTensor` in session-build.ts) reads a scale as f32 — a silent wrong value with a plausible
+ * byte count. The layout has its own residency class, `i4f16`, which only `expert_linear` binds.
  */
 const f16StepsRefusal = (where: string): string =>
   `${where}: int4-sym-g-f16 (f16 steps) is read by expert_linear only — ADR 0145`;
+
+/** The storage layouts `expert_linear` reads at its weight slot (ADR 0145 decisions 2 and 3). */
+const EXPERT_LINEAR_LAYOUTS: ReadonlySet<CodecLayout> = new Set(["f32", "i4", "i4f16"]);
 
 /**
  * One weight resident on the GPU in compressed form (the index paired with the Session's weight
@@ -74,15 +80,20 @@ export type ResidentWeight =
        */
       readonly layout?: "conv3d-tap-major";
     }
-  | { readonly storage: "i4"; readonly scale: GPUBuffer; readonly groupSize: number };
+  | { readonly storage: "i4"; readonly scale: GPUBuffer; readonly groupSize: number }
+  // i4 with f16 steps (ADR 0145 decision 3): the scale buffer holds two f16 steps per u32 word, so
+  // it is a separate member — only `expert_linear` binds it, and a consumer narrowing on "i4" never
+  // reads it as f32 steps.
+  | { readonly storage: "i4f16"; readonly scale: GPUBuffer; readonly groupSize: number };
 
 /**
  * The residency class of one initializer (the value of {@link planWeightResidency}).
  *
- * There are eight classes:
+ * There are nine classes:
  * - `raw` — uncompressed storage (f32 / i32) resident on the GPU as raw bytes (construction phase of session-build.ts)
  * - `f16` / `bf16` / `i8` / `i2` / `i4` — resident in compressed form, dequantized inside the kernel (ADR 0018 / 0131 / 0019 / 0097 / 0069)
- * - `expanded` — ineligible, decoded to f32 on the CPU at load (correctness is kept, VRAM saving is zero)
+ * - `i4f16` — `int4-sym-g-f16`, resident for `expert_linear` alone, dequantized inside its kernel (ADR 0145 decision 3)
+ * - `expanded` — ineligible, decoded to f32 on the CPU at load (correctness is kept, VRAM saving is zero; never an `expert_linear` weight)
  * - `shared` — a borrowed weight (ADR 0096 decision 2 and its stage 2 addendum — binds the lending Session's GPU buffer)
  *
  * `payloadBytes` is **the length of the stored bytes themselves** (neither alignment padding nor the
@@ -101,6 +112,13 @@ export type WeightResidency =
     }
   | {
       readonly seat: "i4";
+      readonly payloadBytes: number;
+      readonly scaleBytes: number;
+      readonly groupSize: number;
+    }
+  | {
+      /** `int4-sym-g-f16` (ADR 0145 decision 3): `scaleBytes` counts the f16 steps padded to a whole word. */
+      readonly seat: "i4f16";
       readonly payloadBytes: number;
       readonly scaleBytes: number;
       readonly groupSize: number;
@@ -138,6 +156,11 @@ export type WeightResidency =
  * only the intersection with {@link i4EligibleInitializers} (ADR 0069 decision 5), and the branch per
  * storage dtype.
  *
+ * MUST: an `expert_linear` weight ({@link expertLinearWeights}) is f32, i4 or i4f16 and, when
+ * compressed, resident — never `expanded` (ADR 0145 decision 2: the 26B experts would be ~91 GB of
+ * host f32). Another storage, or a compressed weight that cannot stay resident, fails here, and an
+ * i4f16 weight that any other consumer reads fails with the f16-steps refusal.
+ *
  * MUST: return **every** entry of `graph.initializers` (in declaration order). Allowing gaps makes
  * them indistinguishable from the consumers' default reading "not in the table = read as f32".
  */
@@ -149,6 +172,9 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
   // decode path).
   const i4Eligible = i4EligibleInitializers(graph);
   const i2Eligible = i2EligibleInitializers(graph);
+  // f16 steps are read by expert_linear's weight slot alone (ADR 0145 decision 3).
+  const i4f16Eligible = i4f16EligibleInitializers(graph);
+  const expertWeights = expertLinearWeights(graph);
   // The per-channel scale axis has the **declaration** (`storage.rowAxis` — container-v1 §6.1) as
   // its source of truth. The axis decided by the consuming op (ADR 0019) stays as a cross-check — a
   // mismatch with the declaration would make the GPU-resident path apply the scale to another axis,
@@ -177,9 +203,18 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     }
     const { codec, groupSize, rowAxis } = initializer.storage;
     const layout = codecLayout(codec);
+    const expert = expertWeights.has(name);
+    if (expert && !EXPERT_LINEAR_LAYOUTS.has(layout)) {
+      throw new ExecutionError(
+        `${where}: expert_linear reads f32 / int4-sym-g / int4-sym-g-f16 weights only, not '${codec}'` +
+          " (ADR 0145 decision 2)",
+      );
+    }
     // MUST: before any residency class — not even `expanded` (the CPU expansion reads the scale as
     // f32), and the i4 class below would bind the f16 step words to an f32 scale binding.
-    if (layout === "i4f16") throw new ExecutionError(f16StepsRefusal(where));
+    if (layout === "i4f16" && !i4f16Eligible.has(name)) {
+      throw new ExecutionError(f16StepsRefusal(where));
+    }
     let bytes: number;
     try {
       bytes = payloadBytes(codec, count, where);
@@ -198,6 +233,15 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
           ? eligible.has(name) && i2Eligible.has(name)
           : eligible.has(name);
     if (!resident) {
+      // MUST: an expert weight never takes the host f32 expansion (i4f16 is only ever read by
+      // expert_linear, so the same holds for it).
+      if (expert || layout === "i4f16") {
+        throw new ExecutionError(
+          `${where}: an expert_linear weight is never expanded to f32 on the host (ADR 0145 decision 2),` +
+            ` and this ${codec} weight cannot stay resident (it is also consumed outside a weight slot,` +
+            " by an op without an i4 decode path, or is a graph output)",
+        );
+      }
       plan.set(name, { seat: "expanded", payloadBytes: bytes, expandedBytes: count * 4 });
       continue;
     }
@@ -226,7 +270,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes: scale, rowAxis: axis });
       continue;
     }
-    if (layout !== "i4") {
+    if (layout !== "i4" && layout !== "i4f16") {
       // Unreachable by type: every layout is handled above. A layout added to the ledger turns
       // this red at compile time instead of being planned as i4.
       const unhandled: never = layout;
@@ -239,7 +283,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
         `${where}: group quantization (${codec}) supports rowAxis 0 only (declared ${axis})`,
       );
     }
-    plan.set(name, { seat: "i4", payloadBytes: bytes, scaleBytes: scale, groupSize });
+    plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes: scale, groupSize });
   }
   return plan;
 };
@@ -483,7 +527,7 @@ export const planWeightBuffers = (
       "payload",
       seat.seat === "expanded" ? seat.expandedBytes : seat.payloadBytes,
     );
-    if (seat.seat === "i8" || seat.seat === "i4" || seat.seat === "i2") {
+    if (seat.seat === "i8" || seat.seat === "i4" || seat.seat === "i4f16" || seat.seat === "i2") {
       add(name, seat.seat, "scale", seat.scaleBytes);
     }
   }

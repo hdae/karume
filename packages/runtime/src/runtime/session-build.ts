@@ -961,15 +961,18 @@ export const buildSessionState = async (
             hostExpandedBytes += payload.byteLength;
           }
         }
-        if (layout === "i4") {
+        if (layout === "i4" || layout === "i4f16") {
           // Eligibility is narrower than for f16 / i8: "only weight slots consumed by linear /
           // embedding / conv1d(groups==1)" (ADR 0069 decision 5 and its addendum — decode paths exist
           // only in the tile reads of the GEMM skeleton (B side for linear, A side for conv1d
           // igemm) and in the embedding kernel). Weight slots without a decode path (conv2d /
           // conv_transpose1d / conv1d with groups > 1) and shared i4 go to the CPU-decode fallback
           // (correctness is kept, VRAM saving is zero — the same design as the ineligible i8 case).
-          // The planner has already decided.
-          if (seat.seat === "i4") {
+          // The planner has already decided. i4f16 (`int4-sym-g-f16`, ADR 0145 decision 3) has the
+          // same bytes and its f16 step table as the scale (uploaded as is, two steps per word); the
+          // planner makes it resident for expert_linear or refuses it, so it never reaches the
+          // expansion below.
+          if (seat.seat === "i4" || seat.seat === "i4f16") {
             // The payload needs no padding and is always 4-byte aligned — byte length = numel / 2,
             // and numel is a multiple of group_size (a power of 2 ≥ 16), so the byte length is a
             // multiple of 8 (ADR 0069 decision 2). A piece's length per row is a multiple of 8 for the
@@ -988,12 +991,17 @@ export const buildSessionState = async (
               // The group length is decided only in the one place that copies it from the declaration
               // (the planner) — a form that can pass it through another path becomes the silently
               // wrong value "an asset with group 64 runs on a group-32 pipeline".
-              residentWeights.set(name, {
-                storage: "i4",
-                scale: scaleBuffer,
-                groupSize: seat.groupSize,
-              });
+              residentWeights.set(
+                name,
+                seat.seat === "i4"
+                  ? { storage: "i4", scale: scaleBuffer, groupSize: seat.groupSize }
+                  : { storage: "i4f16", scale: scaleBuffer, groupSize: seat.groupSize },
+              );
             }
+          } else if (layout === "i4f16") {
+            throw new ExecutionError(
+              `initializer '${name}': int4-sym-g-f16 planned as '${seat.seat}' (broken bookkeeping — ADR 0145)`,
+            );
           } else {
             // The range (power of 2 ≥ 16, divisibility) is guaranteed by the merge layer. Presence is
             // optional only in the type, so restate the check rather than skip silently (the same

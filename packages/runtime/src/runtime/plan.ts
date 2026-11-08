@@ -20,6 +20,7 @@ import {
   conv1dAttrs,
   conv3dAttrs,
   EMBEDDING_OP,
+  EXPERT_LINEAR_OP,
   flipDim,
   IO_DTYPES,
   LINEAR_OP,
@@ -159,6 +160,10 @@ export const validateGraphContracts = (graph: IrGraph): void => {
     if (contract.kind === "cat") assertCatAxis(graph, node, where);
     if (contract.kind === "conv3d") assertConv3dSubset(node, where);
     if (contract.kind === "gatedDeltaScan") assertGatedDeltaScanSubset(graph, node, where);
+    if (contract.kind === "expertLinear") {
+      assertExpertLinearIndex(graph, node, where);
+      assertExpertLinearSubset(graph, node, where);
+    }
   });
   assertStateOwnership(graph);
   assertStateOrder(graph);
@@ -218,6 +223,82 @@ const assertGatedDeltaScanSubset = (graph: IrGraph, node: IrNode, where: string)
           " the CPU reference holds the semantics)",
       );
     }
+  }
+};
+
+/**
+ * The producer rule of an `expert_linear` index (ADR 0145 decision 2 — the host-boundary rule of ADR
+ * 0061's addendum of 2026-09-25, met at plan time instead of by a host check): the index MUST be
+ * **output 1 (indices) of a `topk` whose reduced (last) dimension equals the weight's E**, both read
+ * as literal numbers from the declarations.
+ *
+ * `topk` returns indices in `[0, dim)` (ADR 0068), so the ids are in range by construction: no
+ * routing id reaches the host (one fence per run) and no GPU NaN serves as a check. MUST: any other
+ * producer — a graph input (user data), an initializer, another op, topk's values output, a topk
+ * over another extent — fails here. Letting one through would leave an out-of-range id to surface
+ * only as NaN rows (ADR 0061), which the addendum forbids as a check for dynamic indices.
+ */
+const assertExpertLinearIndex = (graph: IrGraph, node: IrNode, where: string): void => {
+  const index = node.ins[1];
+  const experts = declarationOf(graph, node.ins[2]).shape[0];
+  const rule =
+    `an ${node.op} index MUST be output 1 of a topk over the weight's E` +
+    ` (${JSON.stringify(experts)}) — ADR 0145 decision 2`;
+  const producer = graph.nodes.find((candidate) => candidate.outs.includes(index));
+  if (producer === undefined) {
+    const kind = graph.inputs.some((spec) => spec.name === index)
+      ? "a graph input"
+      : Object.hasOwn(graph.initializers, index)
+        ? "an initializer"
+        : "no node";
+    throw new ExecutionError(`${where}: index '${index}' comes from ${kind}; ${rule}`);
+  }
+  if (producer.op !== "topk" || producer.outs.indexOf(index) !== 1) {
+    throw new ExecutionError(
+      `${where}: index '${index}' is output ${producer.outs.indexOf(index)} of ${producer.op}; ${rule}`,
+    );
+  }
+  const scores = declarationOf(graph, producer.ins[0]).shape;
+  const reduced = scores[scores.length - 1];
+  if (typeof experts !== "number" || reduced !== experts) {
+    throw new ExecutionError(
+      `${where}: index '${index}' comes from a topk over ${JSON.stringify(reduced)} values; ${rule}`,
+    );
+  }
+};
+
+/**
+ * The **implemented GPU subset** of `expert_linear` (ADR 0064 axis A — the kernel of ADR 0145
+ * decision 4): the input width `in` is a multiple of the kernel's weight word (4 elements for f32,
+ * 32 for i4) and, for the group codecs, of the group length, read from the weight's declared shape
+ * and storage.
+ *
+ * The semantics (shape rule and CPU reference) hold for any `in`; the kernel walks whole words and
+ * indexes its steps as `row · (in / G)`. MUST: fail at Session construction (the same reason as
+ * {@link assertConv3dSubset}); `expertLinearParams` checks it again. A weight that is not an
+ * initializer (f32 by declaration) or a borrowed one (its codec is the lender's, unknown here) is
+ * checked for the f32 word here and for the rest by the params.
+ */
+const assertExpertLinearSubset = (graph: IrGraph, node: IrNode, where: string): void => {
+  const name = node.ins[2];
+  const inFeatures = declarationOf(graph, name).shape[2];
+  const storage = Object.hasOwn(graph.initializers, name)
+    ? graph.initializers[name].storage
+    : undefined;
+  const layout = storage === undefined ? "f32" : codecLayout(storage.codec);
+  const word = layout === "i4" || layout === "i4f16" ? 32 : 4;
+  const group = layout === "i4" || layout === "i4f16" ? storage?.groupSize : undefined;
+  if (
+    typeof inFeatures !== "number" ||
+    inFeatures % word !== 0 ||
+    (group !== undefined && inFeatures % group !== 0)
+  ) {
+    throw new ExecutionError(
+      `${where}: ${node.op} input width ${JSON.stringify(inFeatures)} of weight '${name}' (${layout}` +
+        `${group === undefined ? "" : `, group ${group}`}) cannot run on the GPU (the implemented subset` +
+        ` is a multiple of ${word}${group === undefined ? "" : ` and of the group`} — ADR 0145 decision 4;` +
+        " the CPU reference holds the semantics)",
+    );
   }
 };
 
@@ -622,11 +703,19 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
  * the set on one side only would turn the two constants that claim to mirror each other into
  * different things, and a future addendum would update only one side).
  *
+ * `expert_linear` decodes i4 in its own kernel (src/kernels/expert-linear.ts — ADR 0145 decision
+ * 4); its `[E, out, in]` rows are the bytes of `[E·out, in]`, the scale `[E, out·in/G]`.
+ *
  * MUST: do not include conv2d / conv3d / conv_transpose1d (they have no decode path at all — the
  * codegen side also rejects them: the conv2d / conv3d checks in src/kernels/gemm.ts and the direct
  * kernel check in src/kernels/conv1d.ts).
  */
-const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([LINEAR_OP, EMBEDDING_OP, CONV1D_OP]);
+const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([
+  LINEAR_OP,
+  EMBEDDING_OP,
+  CONV1D_OP,
+  EXPERT_LINEAR_OP,
+]);
 
 /**
  * Whether this node's weight slot has an i4 decode path (the predicate of ADR 0069 decision 5 and
@@ -683,6 +772,45 @@ export const i4EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
   }
   for (const name of other) executable.delete(name);
   return executable;
+};
+
+/**
+ * Initializers consumed at the weight slot of an `expert_linear` node (at least once — ADR 0145
+ * decision 2). These never take the host f32 expansion: the residency planner refuses a storage the
+ * op does not read and a compressed weight that cannot stay resident.
+ */
+export const expertLinearWeights = (graph: IrGraph): ReadonlySet<string> => {
+  const slot = WEIGHT_SLOTS.get(EXPERT_LINEAR_OP);
+  const names = new Set<string>();
+  for (const node of graph.nodes) {
+    if (node.op !== EXPERT_LINEAR_OP || slot === undefined) continue;
+    const name = node.ins[slot];
+    if (name !== undefined && Object.hasOwn(graph.initializers, name)) names.add(name);
+  }
+  return names;
+};
+
+/**
+ * Initializers **every consumption** of which is the weight slot of an `expert_linear` node (at
+ * least one) — the ones whose `int4-sym-g-f16` steps may be read at all (ADR 0145 decision 3: only
+ * that op reads f16 steps; any other consumer, in a weight slot or not, would read them as f32). The
+ * mirror of the exporter's `_plan_fixed_weights` admission.
+ *
+ * NOTE: a graph output is not a consumption here; it keeps the weight from residency
+ * ({@link eligibleCompressedInitializers}), which for an `expert_linear` weight is an error.
+ */
+export const i4f16EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
+  const slot = WEIGHT_SLOTS.get(EXPERT_LINEAR_OP);
+  const readers = new Set<string>();
+  const other = new Set<string>();
+  for (const node of graph.nodes) {
+    node.ins.forEach((name, index) => {
+      if (!Object.hasOwn(graph.initializers, name)) return;
+      (node.op === EXPERT_LINEAR_OP && index === slot ? readers : other).add(name);
+    });
+  }
+  for (const name of other) readers.delete(name);
+  return readers;
 };
 
 /**

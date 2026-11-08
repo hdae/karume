@@ -635,7 +635,7 @@ const node = (
 // tautologies). This only pins the op set with **an expected literal**; keeping it in sync with
 // the list in docs/ir-v2.md is manual work when adding an op (one contract set — ops.ts / ops.py /
 // shapes.py / fixtures / CPU reference / golden / ir-v2.md).
-test("the contract table holds exactly the 64 ops of the expected literal", () => {
+test("the contract table holds exactly the 65 ops of the expected literal", () => {
   // The op names themselves are pinned by the ops section of fixtures/op-contracts.json; the
   // family lists below are not in the table.
   assertEquals(UNARY_OPS.length, 19);
@@ -643,7 +643,7 @@ test("the contract table holds exactly the 64 ops of the expected literal", () =
   // argmax is **not** in the reduce family (attrs, output dtype and rank handling all differ — ADR
   // 0068 decision 2)
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 64);
+  assertEquals(OP_CONTRACTS.size, 65);
 });
 
 test("the runtime support table and the capability query are derived from the contract table", () => {
@@ -653,6 +653,11 @@ test("the runtime support table and the capability query are derived from the co
   // have execution paths (eligible weights stay resident compressed; ineligible ones are expanded
   // on the CPU). bf16 (ADR 0131) runs on the same path as f16.
   assertEquals([...RUNTIME_SUPPORT.storage], ["f32", "f16", "bf16", "i8", "i4", "i2", "i32"]);
+  // i4f16 (`int4-sym-g-f16`) only through the weight slot of expert_linear (ADR 0145 decision 3).
+  assertEquals(
+    [...(RUNTIME_SUPPORT.opBoundStorage ?? [])].map(([layout, readers]) => [layout, [...readers]]),
+    [["i4f16", [["expert_linear", 2]]]],
+  );
   // The transfer-layer axis (applies to unused graph inputs too) — i32 / bool can be transferred as
   // well (ADR 0009)
   assertEquals([...RUNTIME_SUPPORT.io].sort(), ["bool", "f32", "i32"]);

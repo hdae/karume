@@ -33,6 +33,7 @@ import karume.custom_ops  # noqa: F401  -- registering torch.ops.karume is the s
 from karume.extents import extent_key
 from karume.normalize import SAFE_SOFTMAX_META
 from karume.ops import (
+    EXPERT_LINEAR_OP,
     GATED_DELTA_SCAN_OP,
     GRU_SCAN_OP,
     GRU_SCAN_REVERSE_OP,
@@ -1610,6 +1611,52 @@ def _h_gated_delta_scan(node: Node) -> Emitted:
     return Emitted(GATED_DELTA_SCAN_OP, 5, {})
 
 
+def _h_expert_linear(node: Node) -> Emitted:
+    """karume.expert_linear → the IR op of the same name (empty attrs — ADR 0145 decision 5).
+
+    The schema is `(Tensor x, Tensor index, Tensor weight) -> Tensor`, and the 3 positional tensors
+    become the 3 IR inputs as is. It is a custom op in the `karume::` namespace, so it stays one
+    node after `run_decompositions` with **the token axis T symbolic** (its body sits behind
+    `register_fake`).
+
+    MUST: narrowed to x f32 of rank 2 (`[T,in]`, shared by the picks) or 3 (`[T,k,in]`, one row
+    per pick), index of rank 2 (torch's int64 is declared i32 at the boundary — ADR 0009; an int32
+    index is accepted too) and weight f32 of rank 3 (`[E,out,in]`). The shape relations (T, k,
+    in) are the shape rule's job (`shapes._expert_linear`), and the index's range is the runtime's
+    plan-time producer rule (a `topk` over E — ADR 0145 decision 2).
+    """
+    _expect(
+        not node.kwargs,
+        node,
+        f"expert_linear with kwargs {sorted(node.kwargs)} is not supported",
+    )
+    _expect(
+        len(node.args) == 3,
+        node,
+        f"expert_linear with {len(node.args)} arguments is not supported (the schema has 3)",
+    )
+    x, index, weight = (arg.meta["val"] for arg in node.args)
+    _expect(
+        x.dim() in (2, 3) and x.dtype == torch.float32,
+        node,
+        f"expert_linear x of rank {x.dim()} / {x.dtype} is not supported"
+        " (f32 [T,in] or [T,k,in] only)",
+    )
+    _expect(
+        index.dim() == 2 and index.dtype in (torch.int64, torch.int32),
+        node,
+        f"expert_linear index of rank {index.dim()} / {index.dtype} is not supported"
+        " (an integer [T,k] only)",
+    )
+    _expect(
+        weight.dim() == 3 and weight.dtype == torch.float32,
+        node,
+        f"expert_linear weight of rank {weight.dim()} / {weight.dtype} is not supported"
+        " (f32 [E,out,in] only)",
+    )
+    return Emitted(EXPERT_LINEAR_OP, 3, {})
+
+
 def _h_upsample_bilinear2d(node: Node) -> Emitted:
     """aten.upsample_bilinear2d.vec → upsample_bilinear2d (attrs `output_size` only).
 
@@ -1847,6 +1894,9 @@ ATEN_HANDLERS = {
     # The gated delta rule scan (extended composite layer — ADR 0135, the value form). Our own
     # custom op; it stays one node after the curated decomp = **the length axis T stays symbolic**.
     torch.ops.karume.gated_delta_scan.default: _h_gated_delta_scan,
+    # The routed expert linear (extended composite layer — ADR 0145). Our own custom op; it stays
+    # one node after the curated decomp = **the token axis T stays symbolic**.
+    torch.ops.karume.expert_linear.default: _h_expert_linear,
     # perf-a (ADR 0023) — only targets that preserve SDPA come to this handler
     # (`curated_decompositions(preserved=…)` chooses per target).
     aten.scaled_dot_product_attention.default: _h_attention,

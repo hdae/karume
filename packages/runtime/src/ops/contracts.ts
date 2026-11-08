@@ -53,6 +53,7 @@ import {
   DEFORM_CONV2D_OP,
   EMBEDDING_OP,
   EXPAND_OP,
+  EXPERT_LINEAR_OP,
   FLIP_OP,
   GATED_DELTA_SCAN_OP,
   GATHER_OP,
@@ -80,6 +81,7 @@ import {
   UNARY_OPS,
   type UnaryOpName,
   UPSAMPLE_BILINEAR2D_OP,
+  WEIGHT_SLOTS,
   WHERE_OP,
 } from "./names.ts";
 
@@ -394,6 +396,12 @@ export type OpContract =
       readonly kind: "gatedDeltaScan";
       readonly name: typeof GATED_DELTA_SCAN_OP;
       readonly arity: 5;
+    })
+  // The routed expert linear (ADR 0145 decision 2). Fixed at 3 inputs: x / index / weight.
+  | (ContractBase & {
+      readonly kind: "expertLinear";
+      readonly name: typeof EXPERT_LINEAR_OP;
+      readonly arity: 3;
     });
 
 /** f32-only ops (no i32 / bool form appeared in measured graphs — not unlocked for symmetry). */
@@ -859,6 +867,18 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 5,
     },
   ],
+  // The routed expert linear (extended composite layer, ADR 0145 decision 2). A per-slot contract
+  // of value f32 / index i32 / weight f32 (the output has slot 0's type), empty attrs. Slot 2 is a
+  // weight slot (WEIGHT_SLOTS) whose storage is narrower than linear's: f32 / i4 / i4f16 only.
+  [
+    EXPERT_LINEAR_OP,
+    {
+      ...slotContract(EXPERT_LINEAR_OP, { kind: "perSlot", slots: [F32, I32, F32] }),
+      kind: "expertLinear",
+      name: EXPERT_LINEAR_OP,
+      arity: 3,
+    },
+  ],
 ]);
 
 /** The attrs keys the contract declares as **required** (fields every node must have). */
@@ -905,6 +925,13 @@ export const slotDtypesOf = (found: OpContract): readonly (readonly IrDtype[])[]
  */
 export const IO_DTYPES: readonly IrDtype[] = SEMANTIC_DTYPES;
 
+/** The weight slot of `expert_linear` (read from {@link WEIGHT_SLOTS}, the one source of truth). */
+const expertLinearWeightSlot = (): number => {
+  const slot = WEIGHT_SLOTS.get(EXPERT_LINEAR_OP);
+  if (slot === undefined) throw new Error(`${EXPERT_LINEAR_OP} has no weight slot in WEIGHT_SLOTS`);
+  return slot;
+};
+
 /**
  * The support table passed to `assertRuntimeSupport`. MUST be derived from the contract table only
  * — a hand-written set drifts from the table and produces "supported per the declaration, fails at
@@ -934,12 +961,14 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
   // (eligible weight slots stay compressed and GPU-resident; ineligible ones are decoded to f32 on
   // the CPU at load time), so **they can be executed whatever initializer they are attached to**.
   // Only i4 eligibility is narrower (the weight slots of linear / embedding / conv1d with groups ==
-  // 1 — ADR 0069 decision 5 and its addenda, `i4EligibleInitializers` in runtime/plan.ts; ineligible
-  // ones fall back to CPU decode). i2 eligibility is the weight slots of linear / embedding. bf16
-  // (ADR 0131) uses the same path as f16 (eligible: the same 6 slots as f16, `WEIGHT_SLOTS`;
-  // ineligible ones are decoded on the CPU). `i4f16` (`int4-sym-g-f16`) is absent: no op here reads
-  // its f16 steps (ADR 0145 decision 3 binds it to `expert_linear`).
+  // 1 or expert_linear — ADR 0069 decision 5 and its addenda, `i4EligibleInitializers` in
+  // runtime/plan.ts; ineligible ones fall back to CPU decode, never an expert_linear weight). i2
+  // eligibility is the weight slots of linear / embedding. bf16 (ADR 0131) uses the same path as f16
+  // (eligible: the slots of `WEIGHT_SLOTS`; ineligible ones are decoded on the CPU). `i4f16`
+  // (`int4-sym-g-f16`) is absent here: only `expert_linear` reads its f16 steps (ADR 0145 decision
+  // 3), so it is executable through `opBoundStorage` alone.
   storage: new Set(["f32", "f16", "bf16", "i8", "i4", "i2", "i32"]),
+  opBoundStorage: new Map([["i4f16", new Map([[EXPERT_LINEAR_OP, expertLinearWeightSlot()]])]]),
   io: new Set(IO_DTYPES),
 };
 

@@ -17,6 +17,8 @@
  * Copying the same expression lets an error cancel out on both sides.
  */
 
+import { groupScaleShape } from "../format/container/codecs.ts";
+import { decodeI4, decodeI4F16Steps } from "../format/i4.ts";
 import type { IrDtype } from "../format/ir.ts";
 import {
   ARGMAX_OP,
@@ -975,6 +977,90 @@ export const referenceLinear = (x: RefTensor, weight: RefTensor, bias: RefTensor
     }
   }
   return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * expert_linear `y[t, j, n] = Σ_k x[t (, j), k] · weight[index[t, j], n, k]` (ADR 0145 decision 2),
+ * accumulated in f64 and rounded once, as {@link referenceLinear} (no bias).
+ *
+ * MUST: an id outside `[0, E)` throws (ADR 0061 — the GPU writes quiet NaN to that row instead). The
+ * planner admits only a `topk` over E as the index's producer, so an id out of range is a broken
+ * invariant, and the reference is the diagnostic that names it.
+ * MUST: the weight index is `(e · out + n) · in + k` and the x row `t` (shared) or `t · k + j`
+ * (per pick), written as nested loops — not the kernel's flat `row` decomposition (the MUST at the
+ * top of this file).
+ */
+export const referenceExpertLinear = (
+  x: RefTensor,
+  index: RefTensor,
+  weight: RefTensor,
+): RefTensor => {
+  const contract = resolveOpContract("expert_linear");
+  for (const [slot, input] of [x, index, weight].entries()) {
+    assertSlotDtype(contract, slot, input.dtype, "reference");
+  }
+  const shape = computeOutputShape(contract, [x.shape, index.shape, weight.shape], "reference")[0];
+  const [tokens, picks, outFeatures] = shape;
+  const [experts, , inFeatures] = weight.shape;
+  const shared = x.shape.length === 2;
+  const out = new Float32Array(numel(shape));
+  for (let t = 0; t < tokens; t += 1) {
+    for (let j = 0; j < picks; j += 1) {
+      const pick = index.data[t * picks + j];
+      if (pick < 0 || pick >= experts) {
+        throw new ReferenceOpError(
+          `expert_linear index[${t}, ${j}] = ${pick} is out of range of the ${experts} experts`,
+        );
+      }
+      const xBase = (shared ? t : t * picks + j) * inFeatures;
+      for (let n = 0; n < outFeatures; n += 1) {
+        const wBase = (pick * outFeatures + n) * inFeatures;
+        let acc = 0;
+        for (let k = 0; k < inFeatures; k += 1) acc += x.data[xBase + k] * weight.data[wBase + k];
+        out[(t * picks + j) * outFeatures + n] = Math.fround(acc);
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * The stored forms of an `expert_linear` weight `[E, out, in]` (ADR 0145 decisions 2 and 3): f32
+ * values, or the packed i4 bytes (the bytes of `[E·out, in]`) with f32 steps (`int4-sym-g`) or the
+ * f16 step table (`int4-sym-g-f16` — two steps per u32 word, padded to a whole word). The steps are
+ * `[E, out·in/G]` row major (`groupScaleShape` with row axis 0).
+ */
+export type ExpertLinearStoredWeight =
+  | { readonly storage: "f32"; readonly values: Float32Array<ArrayBuffer> }
+  | {
+      readonly storage: "i4";
+      readonly bytes: Uint8Array<ArrayBuffer>;
+      readonly steps: Float32Array<ArrayBuffer>;
+      readonly groupSize: number;
+    }
+  | {
+      readonly storage: "i4f16";
+      readonly bytes: Uint8Array<ArrayBuffer>;
+      readonly steps: Uint8Array<ArrayBuffer>;
+      readonly groupSize: number;
+    };
+
+/**
+ * Decodes a stored `expert_linear` weight to the f32 values {@link referenceExpertLinear} takes,
+ * through the production decoders ({@link decodeI4} / {@link decodeI4F16Steps} — the one place i4
+ * is interpreted on the host; the f16 step is widened exactly, ADR 0069 decision 3).
+ */
+export const decodeExpertLinearWeight = (
+  shape: readonly number[],
+  stored: ExpertLinearStoredWeight,
+): RefTensor => {
+  if (stored.storage === "f32") return refTensor(shape, stored.values);
+  const scaleShape = groupScaleShape(shape, 0, stored.groupSize);
+  const values =
+    stored.storage === "i4"
+      ? decodeI4(stored.bytes, shape, stored.steps, scaleShape, stored.groupSize)
+      : decodeI4F16Steps(stored.bytes, shape, stored.steps, scaleShape, stored.groupSize);
+  return refTensor(shape, values);
 };
 
 /**
@@ -2088,6 +2174,8 @@ export const applyReferenceOpOutputs = (
       return sole(referenceGruScan(contract.name, inputs[0], inputs[1], inputs[2], inputs[3]));
     case "gatedDeltaScan":
       return sole(referenceGatedDeltaScan(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]));
+    case "expertLinear":
+      return sole(referenceExpertLinear(inputs[0], inputs[1], inputs[2]));
   }
 };
 

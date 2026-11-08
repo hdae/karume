@@ -41,7 +41,8 @@ golden that covers the op need it. Making it conditional would split environment
 
 `src/karume/custom_ops.py` registers this project's own `karume::` operators (`gru_scan` /
 `gru_scan_reverse` — ADR [0056](../../docs/decisions/0056-gru-scan.md); `gated_delta_scan` — ADR
-[0135](../../docs/decisions/0135-gated-delta-rule-scan.md)) with
+[0135](../../docs/decisions/0135-gated-delta-rule-scan.md); `expert_linear` — ADR
+[0145](../../docs/decisions/0145-gemma4-26b-moe-resident.md)) with
 `torch.library.custom_op`, so **importing it has a process-wide side effect**. `aten_handlers.py`
 imports it at the top for the same reason it imports `torchvision`: the handler key
 (`torch.ops.karume.gru_scan.default`) cannot be written otherwise. Hiding the body behind
@@ -260,6 +261,7 @@ Current models and coverage:
 | `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias)                      |
 | `gru_scan_block`           | `T`          | gru_scan / gru_scan_reverse (both directions over a symbolic time axis; the forward branch starts from a folded zero `h0`, the reverse one from a graph input), linear |
 | `gated_delta_scan_block`   | `T`          | gated_delta_scan (symbolic length axis, dk = dv = 128, head broadcast r = 2 — v built from q / k with cat on the head axis), neg, mul |
+| `expert_linear_block`      | `T`          | expert_linear ×2 (one routed expert FFN: x shared by the picks, then one row per pick; E 6, k 2; the index is a graph input until `topk` exports, so the runtime's golden test splices a router in front), slice, gelu_tanh, mul |
 | `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                                             |
 | `group_norm_block`         | `T`          | group_norm ×2 (2 samples × 3 groups over a symbolic axis with a per-channel affine; a rank-3 one-group input without affine — ones/zeros synthesized — spanning two partial chunks) |
 | `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (5 of the 6 `WEIGHT_SLOTS` ops; conv3d's i8 is in the runtime GPU parity test), tanh            |
@@ -488,7 +490,7 @@ writes, re-reads and verifies, and only then swaps the result into place.
 | `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                                                                 |
 | `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                                                          |
 | `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                                                           |
-| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse` / `gated_delta_scan`) registered with `torch.library`                                                 |
+| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse` / `gated_delta_scan` / `expert_linear`) registered with `torch.library`                               |
 | `quant_calib`   | calibration-driven rounding on the storage grid `quantize` defines (GPTQ ships; AWQ is measurement only)                                                        |
 | `quant_methods` | **measurement-only** rounding methods with no storage path (FP4 / NF4 / MXFP4 / k-means codebooks)                                                              |
 | `states`        | the post-export surgery that rewrites an attention graph into the states form (ADR 0067)                                                                        |
@@ -539,20 +541,23 @@ conformance table is the correct one.
   quantization. To preserve existing quantized values, pass `fixed_weights={key:
   FixedQuantizedWeight(dtype, packed, scale)}` to `stored_model` or `publish_model`. The
   corresponding `tensors[key]` must be a shape-only f32 meta tensor. This accepts rank-2
-  linear/embedding weights in fixed I2/I4/I8, retains their bytes when a tensor is bound as
-  row-range pieces, and rejects simultaneous automatic quantization options or real f32 values. The
+  linear/embedding weights in fixed I2/I4/I8 and rank-3 `expert_linear` weights in fixed I4 / I4F16
+  (`int4-sym-g-f16`, whose f16 step table emit rounds once — ADR 0145), retains their bytes when a
+  tensor is bound as row-range pieces, and rejects simultaneous automatic quantization options or
+  real f32 values. The
   model recipe remains responsible for validating the upstream quantization and activation rounding
   (ADR 0097).
-- The IR vocabulary has **64** ops, of which the exporter can emit **62**: `topk` and `state_append`
+- The IR vocabulary has **65** ops, of which the exporter can emit **63**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
-  decision 5). The list below is those 62 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
+  decision 5). The list below is those 63 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
   ADR 0023 added `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake
   activation, `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for
   the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
   `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056 — `conv3d` for the causal 3D
-  VAE of video models — ADR 0118 — `gated_delta_scan` for Gated DeltaNet layers — ADR 0135 — and
-  `group_norm` for the untiled FLUX.2 decoder — ADR 0138):
+  VAE of video models — ADR 0118 — `gated_delta_scan` for Gated DeltaNet layers — ADR 0135 —
+  `group_norm` for the untiled FLUX.2 decoder — ADR 0138 — and `expert_linear` for the routed
+  experts of mixture-of-experts models — ADR 0145):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -628,6 +633,15 @@ conformance table is the correct one.
     `karume::gated_delta_scan`, whose eager body is a copy of upstream's `torch_chunk_gated_delta_rule`
     (transformers 5.14.1). The runtime GPU implements head dims 128 only and rejects others when
     the Session is built
+  - routed expert linear (extended composite layer, ADR 0145): **`expert_linear`** —
+    `x[T,in]` (shared by the k picks) or `x[T,k,in]` (one row per pick) / `index[T,k]` /
+    `weight[E,out,in]` → `y[T,k,out]`, `y[t, j] = weight[index[t, j]] · x[t (, j)]`, with **no
+    attrs** and no bias. The token axis may stay symbolic. The activation, the gate × up product,
+    the routing weight and the sum over k stay existing ops around it. It is captured from
+    `karume::expert_linear`, whose eager body is upstream's per-expert `F.linear` (transformers
+    5.14.1 `Gemma4TextExperts`). Its weight slot takes f32, or a rank-3 fixed i4 / i4f16 weight
+    (`FixedQuantizedWeight` with `packed [E·out, in/2]` and `scale [E·out, in/G]`); the runtime
+    accepts the index only from a `topk` over E, checked when the model is prepared
 - **32 emittable ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `static_quantize.scale` /
   `conv2d.{stride,padding,dilation,groups}` / `conv3d.{stride,padding,dilation,groups}` /

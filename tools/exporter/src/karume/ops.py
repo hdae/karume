@@ -288,6 +288,21 @@ GRU_SCAN_OPS = (GRU_SCAN_OP, GRU_SCAN_REVERSE_OP)
 #: subset — ADR 0064 axis A), so the exporter does not narrow them.
 GATED_DELTA_SCAN_OP = "gated_delta_scan"
 
+#: The **routed expert linear** of a mixture-of-experts layer (extended composite layer — ADR 0145
+#: decision 2; Karume's own name): `y[t, j] = weight[index[t, j]] · x[t (, j)]` with x[T,in] (shared
+#: by the k picks) or x[T,k,in] (one row per pick) / index i32[T,k] / weight[E,out,in] ->
+#: y[T,k,out]. **Fixed arity 3, per-slot f32 / i32 / f32, empty attrs, no bias**; the op names no
+#: activation and no combination (the expert FFN is two of these with slice / gelu_tanh / mul
+#: between them).
+#:
+#: MUST: slot 2 is a weight slot whose storage is f32 / i4 / i4f16 only
+#: (`emit._plan_fixed_weights` admits rank-3 fixed weights for it; the runtime refuses any other
+#: storage and never expands one on the host). The index's range is the runtime's plan-time rule
+#: (the producer is a `topk` over E — runtime/plan.ts), not a shape fact. Captured from
+#: `karume::expert_linear` (karume/custom_ops.py); forms outside this fail loudly in
+#: `aten_handlers._h_expert_linear`.
+EXPERT_LINEAR_OP = "expert_linear"
+
 #: Weight slots **eligible** for low-precision storage (op name → input slot number — ADR 0018).
 #: The mirror of `WEIGHT_SLOTS` on the TS side (`packages/runtime/src/ops/names.ts`, re-exported
 #: by `packages/runtime/src/ops.ts`); a drift is caught by the conformance table
@@ -304,6 +319,7 @@ WEIGHT_SLOTS: Mapping[str, int] = MappingProxyType(
         CONV3D_OP: 1,
         CONV_TRANSPOSE1D_OP: 1,
         EMBEDDING_OP: 0,
+        EXPERT_LINEAR_OP: 2,
     }
 )
 
@@ -314,7 +330,10 @@ WEIGHT_SLOTS: Mapping[str, int] = MappingProxyType(
 #:
 #: The output-channel axis. linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d
 #: `[Cout,Cin/g,Kh,Kw]` / conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]` use 0, and **only
-#: conv_transpose1d uses 1, with its transposed `[Cin,Cout,K]` layout**.
+#: conv_transpose1d uses 1, with its transposed `[Cin,Cout,K]` layout**. `expert_linear` has 0 =
+#: the leading axis its group codecs' rows hang from (the i4 rows of `[E,out,in]` are the bytes of
+#: `[E·out,in]`, the scale `[E,out·in/G]`); it has no i8 row axis, because it refuses i8 (ADR 0145
+#: decision 2).
 #:
 #: MUST: the key set matches WEIGHT_SLOTS (keeps a new weight slot from being silently quantized
 #: as axis 0). test_quantize.py pins that the axes also match `quantize.QUANT_CHANNEL_AXES` (the
@@ -327,6 +346,7 @@ WEIGHT_CHANNEL_AXES: Mapping[str, int] = MappingProxyType(
         CONV3D_OP: 0,
         CONV_TRANSPOSE1D_OP: 1,
         EMBEDDING_OP: 0,
+        EXPERT_LINEAR_OP: 0,
     }
 )
 
@@ -359,9 +379,20 @@ IO_DTYPES = SEMANTIC_DTYPES
 #: load, so either path executes (the mirror of RuntimeSupport.storage on the TS side). i4 and i2
 #: have narrow eligibility — i4 only in the weight slots of linear / embedding / conv1d
 #: (`groups == 1`) (`emit.I4_WEIGHT_OPS`), i2 only in the weight slots of linear / embedding, as a
-#: fixed packed form (ADR 0097). `i4f16` (`int4-sym-g-f16`) is absent: no op here reads its f16
-#: steps (ADR 0145 decision 3 binds it to `expert_linear`).
+#: fixed packed form (ADR 0097). `i4f16` (`int4-sym-g-f16`) is absent here: only `expert_linear`
+#: reads its f16 steps (ADR 0145 decision 3), so it is executable through
+#: {@link OP_BOUND_STORAGE_DTYPES} alone.
 M0_STORAGE_DTYPES = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
+#: Storage dtypes executable **only by named consumers**: storage dtype → (op name → its weight
+#: slot). An initializer in such a storage is supported when it has a consumer and every
+#: consumption is one of these (op, slot) pairs (the mirror of `RuntimeSupport.opBoundStorage` on
+#: the TS side, `packages/runtime/src/ops/contracts.ts`).
+#:
+#: MUST: a storage listed here is not in {@link M0_STORAGE_DTYPES} (there it would be executable
+#: for any consumer, which would read its f16 step words as F32).
+OP_BOUND_STORAGE_DTYPES: Mapping[str, Mapping[str, int]] = MappingProxyType(
+    {"i4f16": MappingProxyType({EXPERT_LINEAR_OP: WEIGHT_SLOTS[EXPERT_LINEAR_OP]})}
+)
 
 OpKind = Literal[
     "unary",
@@ -402,6 +433,7 @@ OpKind = Literal[
     "group_norm",
     "gru_scan",
     "gated_delta_scan",
+    "expert_linear",
 ]
 
 #: attr key → value check function (ADR 0012). Every declared key is required, and an undeclared
@@ -1498,6 +1530,14 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # The gated delta rule scan (extended composite layer — ADR 0135, the value form). All 5 slots
     # f32 of the same type, empty attrs; no weight slot.
     GATED_DELTA_SCAN_OP: _contract(GATED_DELTA_SCAN_OP, "gated_delta_scan", 5),
+    # The routed expert linear (extended composite layer — ADR 0145 decision 2). Per-slot f32 value
+    # / i32 index / f32 weight, empty attrs; slot 2 is a weight slot (WEIGHT_SLOTS).
+    EXPERT_LINEAR_OP: _slot_contract(
+        EXPERT_LINEAR_OP,
+        "expert_linear",
+        3,
+        PerSlotDtypes(slots=(F32_DTYPES, I32_DTYPES, F32_DTYPES)),
+    ),
 }
 
 #: Ops in the contract table that convert **cannot emit** (no aten handler = not exportable from

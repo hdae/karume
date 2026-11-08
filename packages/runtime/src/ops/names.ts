@@ -468,13 +468,37 @@ export type GruScanOpName = (typeof GRU_SCAN_OPS)[number];
 export const GATED_DELTA_SCAN_OP = "gated_delta_scan";
 
 /**
+ * The **routed expert linear** of a mixture-of-experts layer (extended composite layer — ADR 0145
+ * decision 2; Karume's own name). `y[t, j] = weight[index[t, j]] · x[t (, j)]`, read with the
+ * expert id held on the GPU:
+ *
+ * - `x f32[T, in]` (shared by the k picks of a token) or `f32[T, k, in]` (one row per pick) /
+ *   `index i32[T, k]` / `weight f32[E, out, in]` → `y f32[T, k, out]`. T may be symbolic.
+ * - **Arity fixed at 3, empty attrs, no bias.** The op names no activation and no combination: the
+ *   expert FFN is two of these with existing ops between them (`slice`, `gelu_tanh`, `mul`), and the
+ *   weighted sum over k is `mul` + `sum` along k in pick order.
+ *
+ * MUST: the index is in range **by construction** — an `expert_linear` index is output 1 of a
+ * `topk` whose reduced dimension equals the weight's E, checked when the Session is built
+ * (`validateGraphContracts` in runtime/plan.ts; the host-boundary rule of ADR 0061's addendum).
+ * Should the invariant break, the GPU writes quiet NaN to the row and the CPU reference throws (ADR
+ * 0061).
+ * MUST: the weight slot (2) accepts the storages f32, `int4-sym-g` and `int4-sym-g-f16` only (ADR
+ * 0145 decisions 2 and 3); every other storage is refused loudly, and a compressed weight that cannot
+ * stay resident is an error — never the host f32 expansion (the experts of 26B would be ~91 GB).
+ */
+export const EXPERT_LINEAR_OP = "expert_linear";
+
+/**
  * Weight slots for which low-precision storage is **eligible** (op name → input slot index — ADR
  * 0018).
  *
- * Only the 6 slots whose size dominates in measurements are listed (conv3d added by ADR 0118
+ * Only the 7 slots whose size dominates in measurements are listed (conv3d added by ADR 0118
  * decision 1 — the flattened weight is exactly the A tile of the implicit GEMM, so the decode path
- * is shared with conv1d / conv2d). If an initializer has even one consumer not listed here (bias /
- * norm-type weights / other ops), it is ineligible and decoded to f32 on the CPU at load time.
+ * is shared with conv1d / conv2d; `expert_linear`'s `[E, out, in]` by ADR 0145 decision 2). If an
+ * initializer has even one consumer not listed here (bias / norm-type weights / other ops), it is
+ * ineligible and decoded to f32 on the CPU at load time — except an `expert_linear` weight, for
+ * which that is an error (`planWeightResidency` in runtime/weight-residency.ts).
  *
  * MUST: bias is not included. In the prototype, the f32 constant of a bias dragged its weight down
  * with it and made the eligible f16 bytes 0 MB (the target ADR 0006 named for a root-cause fix) —
@@ -488,6 +512,7 @@ export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
   [CONV3D_OP, 1],
   [CONV_TRANSPOSE1D_OP, 1],
   [EMBEDDING_OP, 0],
+  [EXPERT_LINEAR_OP, 2],
 ]);
 
 /**
@@ -497,6 +522,9 @@ export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
  * It is the output-channel axis: 0 for linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d
  * `[Cout,Cin/g,Kh,Kw]` / conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]`, and **1 for
  * conv_transpose1d only, whose layout `[Cin,Cout,K]` is transposed**.
+ * `expert_linear` has 0 = the leading axis its group codecs' rows hang from (`rowAxis` 0 — the i4
+ * rows of `[E, out, in]` are the bytes of `[E·out, in]`, the scale `[E, out·in/G]`). It has no i8
+ * row axis: the op refuses i8 storage before this axis is read (ADR 0145 decision 2).
  *
  * MUST: keep the key set equal to {@link WEIGHT_SLOTS} (pinned by tests/ops_conformance_test.ts).
  * If only one of them grows, the i8 of a new weight slot silently runs as "a scale on axis 0".
@@ -508,4 +536,5 @@ export const WEIGHT_CHANNEL_AXES: ReadonlyMap<string, number> = new Map([
   [CONV3D_OP, 0],
   [CONV_TRANSPOSE1D_OP, 1],
   [EMBEDDING_OP, 0],
+  [EXPERT_LINEAR_OP, 0],
 ]);

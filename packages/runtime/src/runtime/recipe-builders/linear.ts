@@ -1,6 +1,6 @@
 /**
  * Per-op-family derivation — the matrix-product family (matmul, bmm, linear with its GEMV / i8a8
- * variants, embedding).
+ * variants, embedding, expert_linear).
  *
  * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
  * state, params writes, the weights' storage form and scale bindings) are reached only through
@@ -15,6 +15,13 @@ import {
   embeddingParams,
   embeddingWgsl,
 } from "../../kernels/embedding.ts";
+import {
+  EXPERT_LINEAR_SCALE_BINDING,
+  expertLinearDispatch,
+  expertLinearKey,
+  expertLinearParams,
+  expertLinearWgsl,
+} from "../../kernels/expert-linear.ts";
 import { ExecutionError, type NodePlan } from "../plan.ts";
 import { type GemmCompute, gemmUsesVec4 } from "../../kernels/gemm.ts";
 import {
@@ -837,5 +844,63 @@ export const buildEmbedding = async (
       ...face.weightScaleBindings(step, EMBEDDING_SCALE_BINDING),
     ],
     workgroups: [groups, 1, 1],
+  });
+};
+
+/**
+ * expert_linear (ADR 0145 decisions 2 and 4): one dispatch of the GEMV-form kernel, one thread per
+ * output column of one pick row, the expert id read from `index` on the GPU. The T · k rows
+ * grid-stride along y, so they may exceed `maxComputeWorkgroupsPerDimension`; T is the run's
+ * resolved length (the recipe is derived per binding, as for every op with a symbolic leading dim).
+ *
+ * MUST: bind as the WGSL declares (src/kernels/expert-linear.ts): 0 dims (`expertLinearParams`),
+ * 1 x, 2 index, 3 w, 4 out, and the step table at {@link EXPERT_LINEAR_SCALE_BINDING} for i4 /
+ * i4f16 only. MUST: tokens and picks come from index, n / k / E from the weight (the shape rule has
+ * matched x against them); the form of x (shared or per pick) is its rank.
+ */
+export const buildExpertLinear = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+): Promise<void> => {
+  const [x, index, weight] = step.inputShapes;
+  const [tokens, picks] = index;
+  const [experts, n, k] = weight;
+  const storage = face.expertLinearStorage(step);
+  // The group length is baked into the WGSL (paired with the key's g part, as linear's i4).
+  const groupSize = storage === "f32" ? undefined : face.weightGroupSize(step);
+  const key = expertLinearKey(storage, groupSize);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    expertLinearWgsl(storage, groupSize),
+  );
+  const params = face.writeParams(
+    expertLinearParams(
+      storage,
+      { tokens, picks, n, k, experts, sharedX: x.length === 2 },
+      groupSize,
+    ),
+    PARAMS_UNIFORM_USAGE,
+  );
+  builder.dispatch({
+    key,
+    pipeline,
+    layout,
+    roles,
+    params,
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: binds[1] },
+      { binding: 3, source: binds[2] },
+      { binding: 4, source: outs[0] },
+      ...face.weightScaleBindings(step, EXPERT_LINEAR_SCALE_BINDING),
+    ],
+    workgroups: expertLinearDispatch(
+      tokens * picks,
+      n,
+      face.state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    ),
   });
 };

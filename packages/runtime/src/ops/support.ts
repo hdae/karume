@@ -70,6 +70,17 @@ export type RuntimeSupport = {
    */
   readonly storage: ReadonlySet<CodecLayout>;
   /**
+   * Storage layouts executable **only by named consumers**: layout → (op name → its weight slot).
+   * An initializer in such a layout is supported when it has at least one consumer and every
+   * consumption is one of these (op, slot) pairs — `i4f16` (`int4-sym-g-f16`), whose f16 steps
+   * only `expert_linear` reads (ADR 0145 decision 3).
+   *
+   * MUST: a layout listed here is not also in {@link storage}. There it would be executable for
+   * every initializer, and any other consumer would read its f16 step words as f32 (a silent wrong
+   * value with a plausible byte count). Absent = no such layout.
+   */
+  readonly opBoundStorage?: ReadonlyMap<CodecLayout, ReadonlyMap<string, number>>;
+  /**
    * The semantic dtypes that can be transferred as graph inputs.
    *
    * MUST: this axis is needed separately from the op-based matching. The executor transfers every
@@ -87,6 +98,26 @@ export type RuntimeSupport = {
 const declaredDtype = (graph: IrGraph, name: string): IrDtype => {
   const input = graph.inputs.find((spec) => spec.name === name);
   return input !== undefined ? input.dtype : graph.values[name].dtype;
+};
+
+/**
+ * Whether `name` has at least one consumer and every consumption is a listed (op, slot) pair (the
+ * test of {@link RuntimeSupport.opBoundStorage}).
+ */
+const onlyReadBy = (
+  graph: IrGraph,
+  name: string,
+  readers: ReadonlyMap<string, number>,
+): boolean => {
+  let uses = 0;
+  for (const node of graph.nodes) {
+    for (const [slot, input] of node.ins.entries()) {
+      if (input !== name) continue;
+      if (readers.get(node.op) !== slot) return false;
+      uses += 1;
+    }
+  }
+  return uses > 0;
 };
 
 /**
@@ -157,6 +188,8 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
     if (initializer.shared !== undefined) continue;
     const layout = codecLayout(initializer.storage.codec);
     if (support.storage.has(layout)) continue;
+    const readers = support.opBoundStorage?.get(layout);
+    if (readers !== undefined && onlyReadBy(graph, name, readers)) continue;
     const users = missingStorage.get(layout) ?? [];
     users.push(name);
     missingStorage.set(layout, users);

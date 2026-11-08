@@ -48,6 +48,12 @@ export type ExpertLinearStorage = "f32" | "i4" | "i4f16";
 /** Output columns per workgroup. */
 export const EXPERT_LINEAR_COLS = 32;
 
+/**
+ * The binding of the i4 step table (i4 / i4f16 only; bindings 0–4 are dims / x / index / w / out).
+ * The WGSL declares it from this constant, so the recipe builder and the kernel cannot drift.
+ */
+export const EXPERT_LINEAR_SCALE_BINDING = 5;
+
 /** Weight words issued ahead of their multiply-adds (memory parallelism, as `linear`'s GEMV). */
 export const EXPERT_LINEAR_UNROLL = 4;
 
@@ -76,10 +82,10 @@ export const expertLinearKey = (storage: ExpertLinearStorage, groupSize?: number
 
 const scaleBinding = (storage: ExpertLinearStorage): string =>
   storage === "i4"
-    ? "\n@group(0) @binding(5) var<storage, read> wscale: array<f32>;"
+    ? `\n@group(0) @binding(${EXPERT_LINEAR_SCALE_BINDING}) var<storage, read> wscale: array<f32>;`
     : storage === "i4f16"
       ? `
-@group(0) @binding(5) var<storage, read> wscale: array<u32>;
+@group(0) @binding(${EXPERT_LINEAR_SCALE_BINDING}) var<storage, read> wscale: array<u32>;
 
 // step s of an f16 scale: half s % 2 of word s / 2, widened to f32 (exact)
 fn step_at(s: u32) -> f32 {

@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import { checkExpertLinear, EXPERT_LINEAR_CASES } from "@karume/kernel-checks";
 import { f16BitsToF32 } from "../src/format/f16.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import {
@@ -12,6 +13,7 @@ import {
 } from "../src/kernels/expert-linear.ts";
 import { linearGemvParams, linearGemvWgsl } from "../src/kernels/linear-gemv.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 
 const GROUP = 32;
 const NAN_FILL = 0x7fc00000;
@@ -227,3 +229,36 @@ describe.skipIf(!GPU_AVAILABLE)("expert_linear kernel (real GPU)", () => {
     }
   });
 });
+
+describe.skipIf(!GPU_AVAILABLE)(
+  "the expert-linear kernel check at the 26B shapes (real GPU)",
+  () => {
+    it("matches linear's GEMV on every pick, word for word (the /kernel-check case)", async () => {
+      const gpu = await acquireGpu();
+      try {
+        const part = await checkExpertLinear(gpu);
+        assertEquals(part.cases.length, EXPERT_LINEAR_CASES["expert-linear"]);
+        assertCheckPart(part);
+      } finally {
+        gpu.destroy();
+      }
+    });
+
+    it("the comparison can fail: reading every token's first pick mismatches", async () => {
+      const gpu = await acquireGpu();
+      try {
+        const part = await checkExpertLinear(gpu, {
+          mutate: (wgsl) =>
+            wgsl.replace("let pick = index[row];", "let pick = index[row - row % dims.picks];"),
+        });
+        const failing = part.cases.filter((testCase) =>
+          testCase.criteria.some(({ failures }) => failures > 0),
+        );
+        // Every pick but a token's first reads another expert (or its own when the id repeats).
+        assert(failing.length > 0, "no pick mismatched");
+      } finally {
+        gpu.destroy();
+      }
+    });
+  },
+);

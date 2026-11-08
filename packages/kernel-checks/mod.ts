@@ -16,6 +16,7 @@ export {
   type WordFailure,
 } from "./src/result.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
+export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
   checkStateBidirectional,
   STATE_BIDIRECTIONAL_CASES,

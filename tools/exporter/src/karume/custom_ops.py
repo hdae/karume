@@ -20,6 +20,11 @@ recurrence: both upstream functions loop in Python (over tokens, or over 64-toke
 T-dependent padding), so `torch.export` specialises the length axis. Its eager body is a copy of
 upstream's prefill function (the docstring of {@link gated_delta_scan}).
 
+`karume::expert_linear` (ADR 0145 decision 5) is the routed expert projection of a
+mixture-of-experts layer: upstream's experts loop over the experts hit in Python, and gathering
+the picked weights as a tensor would materialise `[T, k, out, in]`. Its eager body is upstream's
+per-expert math (the docstring of {@link expert_linear}).
+
 NOTE: `torch.library.custom_op` is a process-wide global registration, so this import **has a side
 effect** (the "zero side effects in every module" of `packages/*` is a TS-side tree-shaking
 invariant and does not apply to the Python exporter). `aten_handlers.py` imports this module to
@@ -257,6 +262,51 @@ def _gated_delta_scan_fake(
     symbolic)."""
     del q, k, g, beta
     return v.new_empty(v.shape)
+
+
+#: The upstream version the expert_linear body below follows (ADR 0145 decision 5).
+EXPERT_LINEAR_UPSTREAM = "transformers 5.14.1, models/gemma4/modeling_gemma4.py Gemma4TextExperts"
+
+
+@torch.library.custom_op("karume::expert_linear", mutates_args=())
+def expert_linear(x: torch.Tensor, index: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """The routed expert linear (ADR 0145 decision 2): x[T,in] (shared by the k picks) or
+    x[T,k,in] (one row per pick) / index[T,k] / weight[E,out,in] -> y[T,k,out], with
+    `y[t, j] = weight[index[t, j]] · x[t (, j)]`.
+
+    MUST: the body is upstream's eager experts math (`Gemma4TextExperts.forward`): for each expert
+    the index hits, the rows routed to it go through `F.linear` with that expert's weight. Only
+    the picked experts are read (`weight[expert]`), so a weight that dequantises on read
+    dequantises only those. The op stops at one projection: the activation, the gate × up product,
+    the routing weight and the sum over k are the caller's ops (ADR 0145 decision 2).
+    MUST: an id outside `[0, E)` raises (torch would wrap a negative one) — the CPU reference's
+    rule (ADR 0061); in a graph the index is a topk over E (the runtime's plan-time rule).
+    """
+    experts = weight.shape[0]
+    if index.numel() > 0 and (int(index.min()) < 0 or int(index.max()) >= experts):
+        raise ValueError(
+            f"expert_linear: index ids span [{int(index.min())}, {int(index.max())}],"
+            f" outside the {experts} experts"
+        )
+    tokens, picks = index.shape
+    out = x.new_zeros((tokens, picks, weight.shape[1]))
+    for expert in torch.unique(index).tolist():
+        token, pick = torch.where(index == expert)
+        rows = x[token] if x.dim() == 2 else x[token, pick]
+        out[token, pick] = F.linear(rows, weight[expert])
+    return out
+
+
+@expert_linear.register_fake
+def _expert_linear_fake(x: torch.Tensor, index: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Meta implementation: `[T, k, out]` with T and k from index (T stays symbolic).
+
+    The ranks are not checked here: a malformed call still traces, and the handler refuses it by
+    rank (`aten_handlers._h_expert_linear`) with the op named in the message.
+    """
+    del x
+    out = weight.shape[-2] if weight.dim() >= 2 else 0
+    return weight.new_empty((*index.shape, out))
 
 
 @torch.library.custom_op("karume::static_quantize", mutates_args=())

@@ -354,6 +354,54 @@ const gatedDeltaScanShape = (
 };
 
 /**
+ * The output shape of `expert_linear` (ADR 0145 decision 2): `x[T,in]` (shared by the picks) or
+ * `x[T,k,in]` (one row per pick) / `index[T,k]` / `weight[E,out,in]` → `[T,k,out]`.
+ *
+ * MUST: T and k are taken from index, `out` and `in` from the weight, and x is **only matched**
+ * against them (x's T, x's k in the per-pick form, x's last axis against `in`). Taking the same fact
+ * from two places would let a swapped axis through.
+ * MUST: E, out, in and k are at least 1 (an empty expert table or an empty row has nothing to pick
+ * or to sum; k = 0 picks nothing). T = 0 passes (no row — as for linear's leading dimensions).
+ * NOTE: whether the index is in `[0, E)` is not a shape fact: the planner admits only a `topk` over
+ * E as its producer (runtime/plan.ts).
+ */
+const expertLinearShape = (
+  found: OpContract,
+  inputShapes: readonly (readonly number[])[],
+  where: string,
+): number[] => {
+  const [x, index, weight] = inputShapes;
+  const show = `x [${x.join(",")}] / index [${index.join(",")}] / weight [${weight.join(",")}]`;
+  if ((x.length !== 2 && x.length !== 3) || index.length !== 2 || weight.length !== 3) {
+    throw new OpContractError(
+      `${where}: ${found.name} expects x[T,in] or x[T,k,in] / index[T,k] / weight[E,out,in]` +
+        ` (rank 2 or 3 / 2 / 3): ${show}`,
+    );
+  }
+  const [tokens, picks] = index;
+  const [experts, out, inFeatures] = weight;
+  if (experts < 1 || out < 1 || inFeatures < 1 || picks < 1) {
+    throw new OpContractError(
+      `${where}: ${found.name} needs E, out, in and k of at least 1 (E ${experts} / out ${out} / in ${inFeatures} / k ${picks}): ${show}`,
+    );
+  }
+  if (x[0] !== tokens) {
+    throw new OpContractError(`${where}: ${found.name} T of x differs from index's: ${show}`);
+  }
+  if (x.length === 3 && x[1] !== picks) {
+    throw new OpContractError(
+      `${where}: ${found.name} per-pick x has ${x[1]} rows per token, index has k = ${picks}: ${show}`,
+    );
+  }
+  if (x[x.length - 1] !== inFeatures) {
+    throw new OpContractError(
+      `${where}: ${found.name} input feature count of x differs from the weight's in: ${show}`,
+    );
+  }
+  return [tokens, picks, out];
+};
+
+/**
  * Computes the **list of shapes in output slot order** from the input shapes after binding (ADR
  * 0068 decision 1). The list length equals the output count the contract declares (the list length
  * of the output dtype mapping) — only `topk` returns 2 (values + indices — ADR 0068 decision 3),
@@ -1430,6 +1478,8 @@ export const computeOutputShape = (
     }
     case "gatedDeltaScan":
       return sole(gatedDeltaScanShape(found, inputShapes, where));
+    case "expertLinear":
+      return sole(expertLinearShape(found, inputShapes, where));
     case "permute": {
       const source = inputShapes[0];
       // The output rank equals the input's (it only reorders), so checking the input side is enough.

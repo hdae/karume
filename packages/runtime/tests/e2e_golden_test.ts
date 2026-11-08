@@ -11,11 +11,17 @@
 
 import { readDirSync, readFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   acquireGpu,
   capabilities,
+  ExecutionError,
+  type IrDeclaration,
+  type MemoryTensor,
   type OpenedContainer,
+  openMemoryContainer,
+  parseIrDeclarationValue,
+  type PreparedModel,
   prepareContainer,
   type Tensor,
 } from "../mod.ts";
@@ -168,6 +174,104 @@ const MODEL_FILE = "model.krm";
 const openGolden = async (model: string): Promise<OpenedContainer> =>
   await openSeriesContainer(new URL(`${model}/${MODEL_FILE}`, GOLDEN_ROOT));
 
+/**
+ * Goldens whose exported graph **no Session accepts, by design**, with the input that makes it so
+ * and the refusal it MUST meet (a list with reasons, MUST).
+ *
+ * `expert_linear_block`: an `expert_linear` index MUST be output 1 of a `topk` over the
+ * weight's E, checked when the model is prepared (ADR 0145 decision 2), and `topk` does not export
+ * yet (ADR 0068 addendum), so the golden takes the index as a graph input. The comparison runs the
+ * exported graph and weights with a router spliced in front ({@link spliceRouter}): the index input
+ * becomes output 1 of `topk(scores)` over a scores input that ranks the golden's ids first, in
+ * their order.
+ * MUST: the refusal is asserted on the exported graph. The day the router exports (ADR 0145 decision
+ * 5) and the golden is re-exported with it, the refusal stops and this entry goes red — remove it.
+ */
+const ROUTED_GOLDENS: Readonly<
+  Record<string, { readonly index: string; readonly refusal: string }>
+> = {
+  expert_linear_block: {
+    index: "index",
+    refusal: "an expert_linear index MUST be output 1 of a topk over the weight's E",
+  },
+};
+
+/**
+ * The exported graph of a routed golden with its index input replaced by output 1 of a
+ * `topk(scores, k)` node (see {@link ROUTED_GOLDENS}), on the golden's own f32 weights, and the
+ * scores that make the topk return `index` row by row (pick j of a token scores k − j at its id,
+ * every other id 0 — the ids of a token are distinct, as a topk's are).
+ */
+const spliceRouter = async (
+  opened: OpenedContainer,
+  model: string,
+  indexName: string,
+  index: Tensor,
+): Promise<{ readonly prepared: PreparedModel; readonly scores: Tensor }> => {
+  const bound = opened.graphs[model];
+  const declaration: IrDeclaration = bound.declaration;
+  const spec = declaration.inputs.find((input) => input.name === indexName);
+  const reader = declaration.nodes.find(
+    (node) => node.op === "expert_linear" && node.ins[1] === indexName,
+  );
+  if (spec === undefined || reader === undefined || index.dtype !== "i32") {
+    throw new Error(`${model}: no i32 input '${indexName}' read as an expert_linear index`);
+  }
+  const experts = declaration.values[reader.ins[2]].shape[0];
+  const picks = spec.shape[1];
+  if (typeof experts !== "number" || typeof picks !== "number") {
+    throw new Error(`${model}: E and k of the routed index must be numbers`);
+  }
+  const scoresName = `${indexName}_scores`;
+  const valuesName = `${indexName}_values`;
+  const spliced = parseIrDeclarationValue({
+    format: declaration.format,
+    version: declaration.version,
+    requires: { ops: [...new Set([...declaration.requires.ops, "topk"])].sort() },
+    symbols: declaration.symbols,
+    inputs: declaration.inputs.map((input) =>
+      input.name === indexName
+        ? { name: scoresName, dtype: "f32", shape: [input.shape[0], experts] }
+        : input,
+    ),
+    outputs: declaration.outputs,
+    initializers: Object.fromEntries(
+      Object.entries(declaration.initializers).map(([name, { shared }]) => [
+        name,
+        shared ? { shared: true } : {},
+      ]),
+    ),
+    values: {
+      ...declaration.values,
+      [indexName]: { dtype: "i32", shape: spec.shape },
+      [valuesName]: { dtype: "f32", shape: spec.shape },
+    },
+    nodes: [
+      { op: "topk", ins: [scoresName], outs: [valuesName, indexName], attrs: { k: picks } },
+      ...declaration.nodes.map(({ op, ins, outs, attrs }) => ({ op, ins, outs, attrs })),
+    ],
+  });
+  const tensors: Record<string, MemoryTensor> = {};
+  for (const [name, supply] of bound.supplies) {
+    if (supply.encoding.codec !== "f32" || supply.blocks.length !== 1) {
+      throw new Error(`${model}: initializer '${name}' is not one whole f32 block`);
+    }
+    const [block] = supply.blocks;
+    const bytes = (await opened.readBlock(block.id)).slice(0, block.payloadBytes);
+    tensors[name] = { bytes, encoding: { codec: "f32" } };
+  }
+  const prepared = prepareContainer(
+    openMemoryContainer({ graphs: { [model]: spliced }, tensors: { [model]: tensors } }),
+    model,
+  );
+  const [tokens] = index.shape;
+  const data = new Float32Array(tokens * experts);
+  for (let t = 0; t < tokens; t += 1) {
+    for (let j = 0; j < picks; j += 1) data[t * experts + index.data[t * picks + j]] = picks - j;
+  }
+  return { prepared, scores: { dtype: "f32", shape: [tokens, experts], data } };
+};
+
 test("there is at least one golden fixture, and every one is registered as a test", () => {
   // An empty enumeration would only be "0 tests and green", so the lower bound is pinned here
   // (ADR 0005).
@@ -201,7 +305,11 @@ const OPS_WITHOUT_GOLDEN: readonly string[] = ["state_append", "topk"];
 test("the requires.ops of all goldens cover the set of executable ops", async () => {
   const covered = new Set<string>();
   for (const model of MODELS) {
-    const graph = prepareContainer(await openGolden(model), model).graph;
+    const opened = await openGolden(model);
+    // A routed golden is refused by prepare by design (ROUTED_GOLDENS); its ops are declared.
+    const graph = Object.hasOwn(ROUTED_GOLDENS, model)
+      ? opened.graphs[model].declaration
+      : prepareContainer(opened, model).graph;
     for (const op of graph.requires.ops) covered.add(op);
   }
   const uncovered = capabilities().ops.filter((op) => !covered.has(op));
@@ -285,15 +393,21 @@ for (const model of MODELS) {
             openGolden(model),
             readBuffer(model, "io.safetensors"),
           ]);
-          const parsed = prepareContainer(opened, model);
+          const routed = Object.hasOwn(ROUTED_GOLDENS, model) ? ROUTED_GOLDENS[model] : undefined;
+          if (routed !== undefined) {
+            // MUST: the exported graph itself is refused (see ROUTED_GOLDENS).
+            assertThrows(() => prepareContainer(opened, model), ExecutionError, routed.refusal);
+          }
+          const plain = routed === undefined ? prepareContainer(opened, model) : undefined;
+          const exported = plain?.graph ?? opened.graphs[model].declaration;
           const io = parseSafetensors(ioBytes);
 
           // Every tensor in io corresponds exactly to the graph's inputs and outputs (nothing
           // extra, nothing missing). The naming convention's source of truth is "golden layout" in
           // tools/exporter/README.md.
           const expectedKeys = [
-            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+            ...exported.inputs.map((spec) => `input.${spec.name}`),
+            ...exported.outputs.map((_, index) => `output.${index}`),
           ].sort();
           assertEquals(
             [...io.tensors.keys()].sort(),
@@ -304,10 +418,22 @@ for (const model of MODELS) {
           // The symbolic dimension T is bound from the actual length of the golden input shape (no
           // explicit bindings are passed).
           const inputs: Record<string, Tensor> = {};
-          for (const spec of parsed.graph.inputs) {
+          for (const spec of exported.inputs) {
             const view = io.tensors.get(`input.${spec.name}`);
             assert(view !== undefined, `input.${spec.name} is not in io.safetensors`);
             inputs[spec.name] = ioTensor(io, view, spec.dtype);
+          }
+          // A routed golden runs with its router spliced in (ROUTED_GOLDENS), every other one as
+          // exported.
+          const spliced =
+            routed === undefined
+              ? undefined
+              : await spliceRouter(opened, model, routed.index, inputs[routed.index]);
+          const parsed = plain ?? spliced?.prepared;
+          assert(parsed !== undefined, `${model}: neither prepared nor spliced`);
+          if (routed !== undefined && spliced !== undefined) {
+            delete inputs[routed.index];
+            inputs[`${routed.index}_scores`] = spliced.scores;
           }
 
           const gpu = await acquireGpu();

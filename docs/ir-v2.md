@@ -58,6 +58,11 @@ Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and 
   [0135](decisions/0135-gated-delta-rule-scan.md), accepted — the recurrence of a Gated DeltaNet layer, requested by the
   MOSS-Image text encoder; upstream's Python loops specialise the length axis in export). **Arity fixed at 5, empty attrs**;
   the value form only (zero initial state, no state output). No effect on existing IR.
+- Model expansion (2026-11-08): added `expert_linear` as the **extended composite layer** (ADR
+  [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 2, proposed — the routed expert projection of a
+  mixture-of-experts layer, requested by Gemma 4 26B A4B; written with existing ops, the picked weights would be
+  materialised as `[T, k, out, in]`). **Arity fixed at 3, empty attrs**; the index must come from a `topk` over E.
+  No effect on existing IR.
 - autoregressive (2026-08-17): added `argmax` as the **Core ATen layer** (ADR
   [0068](decisions/0068-decode-exit-multi-output.md) decision 2 — the exit of greedy decoding.
   Measured as core by `torch.Tag.core`, so only a ledger NOTE is required (ADR 0059), but decision 2 sits in
@@ -225,7 +230,8 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
     The eligible ops per codec are decided not by the ledger but by the runtime's eligibility check (canonical: `eligibleCompressedInitializers` /
     `i4EligibleInitializers` / `i2EligibleInitializers` in `packages/runtime/src/runtime/plan.ts` and
     `planWeightResidency` in `runtime/weight-residency.ts` — container-v1 §6.2, ADR 0108 addendum item 12).
-    `int4-sym-g` is linear / embedding / conv1d (`groups == 1`); `int2-off` / `ternary` are linear / embedding.
+    `int4-sym-g` is linear / embedding / conv1d (`groups == 1`) / `expert_linear`; `int4-sym-g-f16` is `expert_linear`
+    alone; `int2-off` / `ternary` are linear / embedding.
   - **Ineligible** (bias / norm weights / other ops / consumption mixing the weight slot with other slots /
     zero consumers / an initializer listed in `graph.outputs`): **expanded to f32 on the CPU at load time**.
     Correctness holds, but the VRAM saving is zero; only the delivery size shrinks. Bias not being eligible is
@@ -759,6 +765,17 @@ The contract of nodes that read and write state slots (ADR
     **have no field** (a carried state is the states form, not in the vocabulary yet). The semantics hold for any head
     dims; **the GPU's implemented subset is `dk = dv = 128`**, and other head dims fail loudly when the Session is built.
     `g > 0` is not rejected but its result is unspecified on the GPU (docs/limitations.md)
+  - `expert_linear` (per slot f32 / i32 / f32, **empty attrs**, **arity fixed at 3** — ADR
+    [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 2) — the routed expert linear `x[T,in]` (shared by the
+    k picks) or `x[T,k,in]` (one row per pick) / `index[T,k]` / `weight[E,out,in]` → `y[T,k,out]`,
+    `y[t, j] = weight[index[t, j]] · x[t (, j)]`. **The token axis T may be symbolic.** T and k are taken from index,
+    out and in from the weight, and x is only matched against them; E, out, in and k are at least 1. There is no bias and
+    no field for an activation or a combination (the expert FFN and the weighted sum over k are existing ops around two of
+    these). **The index MUST be output 1 of a `topk` whose reduced dimension equals E** (checked when the model is
+    prepared — ADR 0061's addendum met at plan time); an id outside `[0, E)` is a broken invariant (quiet NaN on the
+    GPU, a throw in the CPU reference). Slot 2 is a weight slot: f32, `int4-sym-g` or `int4-sym-g-f16` only, never
+    expanded on the host; its i4 rows are the leading dimension flattened (the bytes of `[E·out, in]`, the scale
+    `[E, out·in/G]`). The GPU's implemented subset is `in` a multiple of 4 (f32) or of 32 and the group (i4)
 
 The output dtype is decided by the mapping "**input dtype of slot 0 → output dtype**" (identity by default). The mapping is
 **a column per output slot**, and the column's length is the op's output count (ADR 0068 decision 1). The only non-identity cases are the four comparisons

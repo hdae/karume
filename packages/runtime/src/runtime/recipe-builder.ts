@@ -34,6 +34,7 @@
  */
 
 import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
+import type { ExpertLinearStorage } from "../kernels/expert-linear.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
@@ -90,7 +91,13 @@ import {
   buildStridedCopy,
   buildUpsampleBilinear2d,
 } from "./recipe-builders/layout.ts";
-import { buildBmm, buildEmbedding, buildLinear, buildMatmul } from "./recipe-builders/linear.ts";
+import {
+  buildBmm,
+  buildEmbedding,
+  buildExpertLinear,
+  buildLinear,
+  buildMatmul,
+} from "./recipe-builders/linear.ts";
 import {
   buildGroupNorm,
   buildLayerNorm,
@@ -271,6 +278,8 @@ export type RecipeBuildFace = {
   >;
   readonly writeParams: (params: Uint32Array<ArrayBuffer>, usage: number) => GPUBuffer;
   readonly weightStorage: (step: NodePlan) => WeightStorage;
+  /** The storage of an `expert_linear` weight (f32 / i4 / i4f16 — ADR 0145 decisions 2 and 3). */
+  readonly expertLinearStorage: (step: NodePlan) => ExpertLinearStorage;
   /** The upload-time layout flag of the node's weight (`"conv3d-tap-major"` — ADR 0133 decision 4), else undefined. */
   readonly weightLayout: (step: NodePlan) => "conv3d-tap-major" | undefined;
   readonly weightScaleBindings: (step: NodePlan, binding: number) => readonly BindingRecipe[];
@@ -307,6 +316,7 @@ export class RecipeBuilder {
       state,
       writeParams: (params, usage) => this.#writeParams(params, usage),
       weightStorage: (step) => this.#weightStorage(step),
+      expertLinearStorage: (step) => this.#expertLinearStorage(step),
       weightLayout: (step) => this.#weightLayout(step),
       weightScaleBindings: (step, binding) => this.#weightScaleBindings(step, binding),
       weightGroupSize: (step) => this.#weightGroupSize(step),
@@ -779,6 +789,9 @@ export class RecipeBuilder {
       case "gatedDeltaScan":
         await buildGatedDeltaScan(this.#face, step, binds, outs, builder);
         break;
+      case "expertLinear":
+        await buildExpertLinear(this.#face, step, binds, outs, builder);
+        break;
       case "reshape":
         // Aliasing was done in #buildStep (this op issues not a single dispatch).
         break;
@@ -824,9 +837,33 @@ export class RecipeBuilder {
     return step.node.ins[slot];
   }
 
-  /** The storage form of this node's weight slot (kernel-variant selection — ADR 0018). */
+  /**
+   * The storage form of this node's weight slot (kernel-variant selection — ADR 0018).
+   *
+   * MUST: an i4f16 weight fails here — its scale words are f16 pairs, which every kernel taking a
+   * {@link WeightStorage} reads as f32 steps (the planner admits i4f16 only for `expert_linear`,
+   * which reads its storage through {@link RecipeBuilder.#expertLinearStorage}).
+   */
   #weightStorage(step: NodePlan): WeightStorage {
-    return this.#residentWeight(step)?.storage ?? "f32";
+    const storage = this.#residentWeight(step)?.storage ?? "f32";
+    if (storage === "i4f16") {
+      throw new ExecutionError(
+        `${step.node.op}: weight '${this.#weightSlotName(step)}' has f16 steps (int4-sym-g-f16), read by expert_linear only — ADR 0145`,
+      );
+    }
+    return storage;
+  }
+
+  /**
+   * The storage of an `expert_linear` weight: f32 (raw, or not an initializer), i4 or i4f16. MUST:
+   * any other resident storage fails (the planner refuses it first — ADR 0145 decision 2).
+   */
+  #expertLinearStorage(step: NodePlan): ExpertLinearStorage {
+    const storage = this.#residentWeight(step)?.storage ?? "f32";
+    if (storage === "f32" || storage === "i4" || storage === "i4f16") return storage;
+    throw new ExecutionError(
+      `${step.node.op}: weight '${this.#weightSlotName(step)}' is resident as ${storage}; expert_linear reads f32 / i4 / i4f16 only (ADR 0145 decision 2)`,
+    );
   }
 
   /**
@@ -857,7 +894,7 @@ export class RecipeBuilder {
    */
   #weightGroupSize(step: NodePlan): number {
     const resident = this.#residentWeight(step);
-    if (resident?.storage !== "i4") {
+    if (resident?.storage !== "i4" && resident?.storage !== "i4f16") {
       throw new ExecutionError(
         `initializer '${this.#weightSlotName(step)}': i4-resident but has no group_size`,
       );

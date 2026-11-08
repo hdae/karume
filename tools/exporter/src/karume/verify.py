@@ -68,6 +68,7 @@ from karume.ops import (
     ATTENTION_OP,
     IO_DTYPES,
     M0_STORAGE_DTYPES,
+    OP_BOUND_STORAGE_DTYPES,
     OP_CONTRACTS,
     STATE_APPEND_OP,
     STRIDED_RANK_OPS,
@@ -117,8 +118,8 @@ OPTIONAL_TOP_LEVEL_KEYS = ("states",)
 
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
 #: `i4f16` is the layout of `int4-sym-g-f16` (ADR 0145 decision 3): in the vocabulary, so a
-#: container that carries it reads back, and refused by the runtime support check until an op reads
-#: its f16 steps (`ops.M0_STORAGE_DTYPES`).
+#: container that carries it reads back, and accepted by the runtime support check only where
+#: `expert_linear`'s weight slot is its sole reader (`ops.OP_BOUND_STORAGE_DTYPES`).
 STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i4f16", "i2", "i32")
 
 #: Storage dtypes that may carry a scale / group_size descriptor (quantized storage). On the TS
@@ -942,6 +943,20 @@ def _assert_state_order(graph: IrGraph) -> None:
             )
 
 
+def _only_read_by(graph: IrGraph, name: str, readers: Mapping[str, int]) -> bool:
+    """Whether `name` has a consumer and every consumption is a listed (op, slot) pair (the test
+    of `ops.OP_BOUND_STORAGE_DTYPES` — the mirror of `onlyReadBy` in the TS side's support.ts)."""
+    uses = 0
+    for node in graph.nodes:
+        for slot, value in enumerate(node.ins):
+            if value != name:
+                continue
+            if readers.get(node.op) != slot:
+                return False
+            uses += 1
+    return uses > 0
+
+
 def assert_runtime_support(graph: IrGraph) -> None:
     """Cross-check whether the M0 runtime can execute the graph (the same as assertRuntimeSupport
     in packages/runtime/src/ops/support.ts).
@@ -1028,6 +1043,11 @@ def assert_runtime_support(graph: IrGraph) -> None:
     group_quantized: list[str] = []
     for name, initializer in graph.initializers.items():
         dtype = initializer.storage.dtype
+        readers = OP_BOUND_STORAGE_DTYPES.get(dtype)
+        if readers is not None and _only_read_by(graph, name, readers):
+            # `i4f16` read by expert_linear's weight slot alone (ADR 0145 decision 3) — a group
+            # codec, so its group_size is in place.
+            continue
         if dtype not in M0_STORAGE_DTYPES:
             missing_storage.setdefault(dtype, []).append(name)
             continue

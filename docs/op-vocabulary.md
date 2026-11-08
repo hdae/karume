@@ -516,6 +516,37 @@ exactly the reference's positions, and the accurate exp's body is measured direc
 (ADR 0135 decision 6), with a long-memory case at T = 512 in the default lane that the built-in exp
 fails.
 
+NOTE: 2026-11-08 added `expert_linear` to the **extended composite layer** (outside aten — Karume's own
+`karume::expert_linear`). ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 2 is the source of
+truth (proposed). Grounds = the routed experts of Gemma 4 26B A4B (every one of its 30 layers) and of other
+mixture-of-experts language models. `y[t, j] = weight[index[t, j]] · x[t (, j)]` can be written exactly with
+existing ops (a gather of the picked experts' weights, then a batched product — composite, not atomic).
+**Entry condition ② applies** (materialising the intermediate): the gathered weight is `[T, k, out, in]`,
+about 127 MB of temporary per layer for one decode token and orders of magnitude more for a prefill chunk,
+against `[T, k, out]` for the op (the expert weights stay where they are and one thread reads the picked
+row). **Entry condition ③ applies** (recurrence): every layer of 26B, and the routed experts of other MoE
+models. The op names no activation and no combination: the expert FFN is two of them with `slice` /
+`gelu_tanh` / `mul` between them, and the weighted sum over k is `mul` + `sum` in pick order (the
+alternative "the whole expert block as one op" was rejected in the ADR — it serves one family).
+**Contract**: arity 3 — `x f32[T,in]` (shared by the k picks) or `f32[T,k,in]` (one row per pick) /
+`index i32[T,k]` / `weight f32[E,out,in]` → `f32[T,k,out]`, empty attrs, no bias; T may be symbolic.
+Slot 2 is a weight slot (`WEIGHT_SLOTS`) whose storage is f32 / `int4-sym-g` / `int4-sym-g-f16` only;
+any other storage is refused, and a compressed expert weight that cannot stay resident is an error — never
+the host f32 expansion (the 26B experts would be ~91 GB of f32).
+**The index is in range by construction** (ADR 0061's addendum of 2026-09-25, met at plan time): it MUST be
+output 1 of a `topk` whose reduced dimension equals the weight's E, checked when the model is prepared
+(`validateGraphContracts`); any other producer is refused. Out of range otherwise follows ADR 0061 (quiet
+NaN on the GPU, a throw in the CPU reference).
+**Semantic scope and implemented subset** (0064 axis A): the shape rule and the CPU reference hold for any
+`in`; the GPU kernel (the GEMV form of `linear`, ADR 0145 decision 4) needs `in` a multiple of its word
+(4 for f32, 32 for i4) and of the group, checked when the model is prepared. A grouped prefill form is a
+performance item (ADR 0145 open point 1).
+**Axis B** (0064): it breaks none of single output, static shapes, full-write (every output column of every
+pick row is written), 4-byte storage and full-range write of resident tensors.
+**Numerically hazardous class**: none (a product and a sum; no transcendental). Its numeric contract is the
+kernel's own (a sequential f32 sum over `in` per output); the `/kernel-check` case `expert-linear` checks
+it against `linear`'s GEMV on each picked expert at the 26B shapes, word for word.
+
 ## Check for numerically hazardous classes (mandatory when adding an op — made a rule on 2026-08-31)
 
 The CPU reference of the f64 oracle evaluates the whole expression in f64 and rounds only once at the

@@ -20,10 +20,11 @@ stored compressed:
    `packages/runtime/src/runtime/plan.ts`.
    Biases, norm weights, mixed consumption and zero consumption are all ineligible — ADR 0006).
    **i4 is narrower still: only weight slots of {@link I4_WEIGHT_OPS} (`linear` / `embedding` /
-   `conv1d`)** (ADR 0069 decision 5 and the embedding / conv1d addenda — these 3 are the only ops
-   with an i4 decode path, and conv1d further needs `groups == 1` and a stored row length that
-   divides). Even when generally eligible, conv2d / conv_transpose1d weights stay f32 — the same
-   fallback as i8's ineligible ones, the counterpart of the runtime's eligible ∩ i4Eligible.
+   `conv1d` / `expert_linear`)** (ADR 0069 decision 5 and the embedding / conv1d addenda, ADR 0145
+   decision 2 — these are the only ops with an i4 decode path, and conv1d further needs
+   `groups == 1` and a stored row length that divides). Even when generally eligible, conv2d /
+   conv_transpose1d weights stay f32 — the same fallback as i8's ineligible ones, the counterpart
+   of the runtime's eligible ∩ i4Eligible.
 2. **The inverse conversion is bit-identical** (= fake-quant applied). For f16 the round trip
    `f32 → f16 → f32`, for i8 `q8.to(f32) · scale`, for i4 `dequant(unpack(pack(q4)))` (`scale` is
    **exactly** the value fake-quant used).
@@ -90,6 +91,7 @@ from karume.ir import MIN_GROUP_SIZE, IrGraph, IrInitializer, IrNode, IrStorage
 from karume.ops import (
     CONV1D_OP,
     EMBEDDING_OP,
+    EXPERT_LINEAR_OP,
     LINEAR_OP,
     WEIGHT_SLOTS,
     conv1d_attrs,
@@ -108,7 +110,8 @@ from karume.quantize import (
 WEIGHT_DTYPES = ("f32", "f16", "bf16", "i8", "i4")
 
 #: Ops **with an i4 execution path** (= the consumers of i4-eligible weight slots — linear of ADR
-#: 0069 decision 5 and its embedding / conv1d addenda). The mirror of `I4_WEIGHT_OPS` in the
+#: 0069 decision 5 and its embedding / conv1d addenda, and `expert_linear` of ADR 0145 decision 2,
+#: whose `[E,out,in]` rows are the bytes of `[E·out,in]`). The mirror of `I4_WEIGHT_OPS` in the
 #: runtime's `packages/runtime/src/runtime/plan.ts`; when the two diverge the result is either
 #: "export green, load falls back to CPU decode (the VRAM saving silently disappears)" or the
 #: reverse, "export alone fails by requesting a storage it cannot declare".
@@ -121,7 +124,7 @@ WEIGHT_DTYPES = ("f32", "f16", "bf16", "i8", "i4")
 #: MUST: for conv_transpose1d, **the row axis of the weight `[Cin,Cout,K]` is not the first**, so
 #: the packed bytes disagree with the row order (`quantize.storage_rows`) — adding a decode path
 #: alone cannot make it eligible (the maintainer's ruling of 2026-08-20: no permuted pack).
-I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP, CONV1D_OP})
+I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP, CONV1D_OP, EXPERT_LINEAR_OP})
 
 #: Offset of a packed nibble (stored value `u = q + 8`, range [1,15], 0 unused = 15 levels).
 #: Should storage ever become asymmetric, this constant is merely reread as "the default = 8 when
@@ -409,8 +412,12 @@ class FixedQuantizedWeight:
     f32/meta Tensor.
 
     `i4f16` is `int4-sym-g-f16` (ADR 0145 decision 3): the codes of `i4` and its F32 steps, stored
-    as f16 steps ({@link f16_step_table}). Only `expert_linear` reads it, so no consumer admits it
-    yet — linear / embedding / conv1d MUST NOT.
+    as f16 steps ({@link f16_step_table}). Only `expert_linear` reads it — linear / embedding /
+    conv1d MUST NOT.
+
+    For an `expert_linear` weight `[E, out, in]` (rank 3) `packed` is `[E·out, in/2]` and `scale`
+    `[E·out, in/G]` — the same bytes as the container's `[E, out, in]` and `[E, out·in/G]` (ADR
+    0145 decision 3: a rank-3 weight imports as `[E·out, in]`).
     """
 
     dtype: Literal["i2", "i4", "i4f16", "i8"]
@@ -634,13 +641,33 @@ def _plan_i4(
     )
 
 
+def _read_only_by_expert_linear(graph: IrGraph, name: str) -> bool:
+    """Whether `name` has a consumer and every consumption is `expert_linear`'s weight slot (the
+    mirror of `i4f16EligibleInitializers` in the runtime's plan.ts)."""
+    slot = WEIGHT_SLOTS[EXPERT_LINEAR_OP]
+    uses = [
+        (node.op, index)
+        for node in graph.nodes
+        for index, value in enumerate(node.ins)
+        if value == name
+    ]
+    return bool(uses) and all(use == (EXPERT_LINEAR_OP, slot) for use in uses)
+
+
 def _plan_fixed_weights(
     graph: IrGraph,
     tensors: Mapping[str, torch.Tensor],
     fixed_weights: Mapping[str, FixedQuantizedWeight],
 ) -> _StoragePlan:
     """Treat the fixed bytes as the only value; no re-quantization and no f32 materialisation
-    (ADR 0097)."""
+    (ADR 0097).
+
+    Two forms: a rank-2 `linear` / `embedding` weight (i2 / i4 / i8), and a **rank-3
+    `expert_linear` weight** `[E, out, in]` (i4 / i4f16 — ADR 0145 decisions 2 and 3) that no other
+    op reads. Its rows are the leading dimension flattened (`packed [E·out, in/2]`, `scale
+    [E·out, in/G]`, the bytes of `[E·out, in]`), and i4f16 stores the f16 step table of
+    {@link f16_step_table}. i4f16 for any other consumer keeps the ADR 0145 refusal.
+    """
     bakeable = bakeable_initializers(graph)
     names = {graph.initializers[name].tensor: name for name in bakeable}
     if len(names) != len(bakeable):
@@ -655,35 +682,56 @@ def _plan_fixed_weights(
         name = names[key]
         tensor = tensors[key]
         shape = list(tensor.shape)
+        consumers = [node for node in graph.nodes if name in node.ins]
+        expert = _read_only_by_expert_linear(graph, name)
+        rank = 3 if expert else 2
         if (
             not tensor.is_meta
             or tensor.dtype != torch.float32
-            or len(shape) != 2
+            or len(shape) != rank
             or any(dim <= 0 for dim in shape)
             or graph.values[name].dtype != "f32"
             or graph.values[name].shape != shape
             or graph.initializers[name].storage.dtype != "f32"
         ):
             raise EmitError(
-                f"fixed_weights['{key}']: must be a positive rank-2 f32/meta of the declared shape"
+                f"fixed_weights['{key}']: must be a positive rank-{rank} f32/meta of the declared"
+                " shape" + (" (an expert_linear weight is [E, out, in])" if expert else "")
             )
-        consumers = [node for node in graph.nodes if name in node.ins]
-        if fixed.dtype == "i4f16":
-            # ADR 0145 decision 3: the f16 steps are read by `expert_linear` only, which no op
-            # here is yet — linear / embedding / conv1d read a scale as F32.
+        if fixed.dtype == "i4f16" and not expert:
+            # ADR 0145 decision 3: the f16 steps are read by `expert_linear` only — linear /
+            # embedding / conv1d read a scale as F32.
             ops = " / ".join(sorted({node.op for node in consumers})) or "nothing"
             raise EmitError(
                 f"fixed_weights['{key}']: int4-sym-g-f16 (f16 steps) is read by expert_linear"
                 f" only — ADR 0145 (consumed by {ops})"
             )
-        if name not in eligible or any(
+        if expert:
+            # The runtime reads f32 / i4 / i4f16 at this slot and never expands a weight there
+            # (ADR 0145 decision 2), so a graph output (ineligible) is refused here too.
+            if name not in eligible:
+                raise EmitError(
+                    f"fixed_weights['{key}']: an expert_linear weight that is also a graph output"
+                    " cannot stay resident"
+                )
+            if fixed.dtype not in ("i4", "i4f16"):
+                raise EmitError(
+                    f"fixed_weights['{key}']: an expert_linear weight takes i4 / i4f16 only"
+                    f" (ADR 0145 decision 2), not {fixed.dtype}"
+                )
+        elif name not in eligible or any(
             node.op not in (LINEAR_OP, EMBEDDING_OP) for node in consumers
         ):
-            raise EmitError(f"fixed_weights['{key}']: only for linear/embedding weights")
-        if fixed.dtype not in ("i2", "i4", "i8"):
+            raise EmitError(
+                f"fixed_weights['{key}']: only for linear/embedding weights (rank 2) or"
+                " expert_linear weights (rank 3)"
+            )
+        elif fixed.dtype not in ("i2", "i4", "i8"):
             raise EmitError(f"fixed_weights['{key}']: dtype must be i2/i4/i8")
-        rows, width = shape
-        factor = {"i2": 4, "i4": 2, "i8": 1}[fixed.dtype]
+        # The rows of the packed bytes: the leading dimension, flattened with `out` for an
+        # expert weight (ADR 0145 decision 3 — the bytes of [E·out, in]).
+        rows, width = (shape[0] * shape[1], shape[2]) if expert else shape
+        factor = {"i2": 4, "i4": 2, "i4f16": 2, "i8": 1}[fixed.dtype]
         packed_dtype = torch.int8 if fixed.dtype == "i8" else torch.uint8
         packed = fixed.packed
         if (
@@ -706,7 +754,7 @@ def _plan_fixed_weights(
         ):
             raise EmitError(f"fixed_weights['{key}']: scale must be CPU F32 [rows,groups]")
         group_size = None
-        if fixed.dtype == "i4":
+        if fixed.dtype in ("i4", "i4f16"):
             groups = scale.shape[1]
             group_size = width // groups
             if width % groups or group_size < 16 or group_size & (group_size - 1):
@@ -724,7 +772,15 @@ def _plan_fixed_weights(
             raise EmitError(f"fixed_weights['{key}']: scale key collides: {scale_key}")
         scale = scale.detach().contiguous()
         reserved.add(scale_key)
-        plan.scales[scale_key] = scale
+        # i4f16 stores the f16 step table, rounded once here (ADR 0145 decision 3); a rank-3 i4
+        # scale is stored in its declared group shape [E, out·in/G] (the same bytes).
+        plan.scales[scale_key] = (
+            f16_step_table(packed, scale, f"fixed_weights['{key}']")
+            if fixed.dtype == "i4f16"
+            else scale.reshape(shape[0], -1)
+            if expert
+            else scale
+        )
         plan.declarations[name] = IrInitializer(
             tensor=key, storage=IrStorage(dtype=fixed.dtype, scale=scale_key, group_size=group_size)
         )
@@ -1100,9 +1156,10 @@ def stored_model(
 
     `fixed_weights` is the entry point that stores fixed packed values without re-quantizing them
     (ADR 0097). The matching `tensors` are f32/meta carrying only the logical shape, and the set of
-    meta keys must match it exactly. Only for rank-2 linear / embedding weights; a mix of I2 / I4
-    / I8 is kept. Specifying a real f32 value as well, or mixing with the automatic quantization's
-    dtype / scale / override options, is rejected.
+    meta keys must match it exactly. Only for rank-2 linear / embedding weights and rank-3
+    expert_linear weights (i4 / i4f16 — ADR 0145); a mix of I2 / I4 / I4F16 / I8 is kept.
+    Specifying a real f32 value as well, or mixing with the automatic quantization's dtype / scale /
+    override options, is rejected.
 
     `weight_dtype_overrides` (tensor key → storage dtype) is an explicit per-tensor choice that
     **takes precedence** over the default `weight_dtype` (mixed storage — the meaning and where

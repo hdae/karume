@@ -247,6 +247,7 @@ describe("overallVerdict", () => {
         "state-kv16": passed,
         "score-f16-store": passed,
         "state-bidirectional": passed,
+        "expert-linear": passed,
       }),
     ).toBe("pass");
     expect(overallVerdict({})).toBe("none");
@@ -262,6 +263,7 @@ describe("overallVerdict", () => {
       "state-kv16",
       "score-f16-store",
       "state-bidirectional",
+      "expert-linear",
     ]);
   });
 
@@ -276,6 +278,7 @@ describe("overallVerdict", () => {
         "state-kv16": passed,
         "score-f16-store": passed,
         "state-bidirectional": passed,
+        "expert-linear": passed,
       }),
     ).toBe("incomplete");
   });
@@ -303,6 +306,7 @@ describe("withoutOutcomes", () => {
     "state-kv16": passed,
     "score-f16-store": passed,
     "state-bidirectional": passed,
+    "expert-linear": passed,
   };
 
   it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
@@ -323,6 +327,7 @@ describe("withoutOutcomes", () => {
       "state-kv16": passed,
       "score-f16-store": passed,
       "state-bidirectional": passed,
+      "expert-linear": passed,
     });
   });
 });
