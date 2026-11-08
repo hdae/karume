@@ -39,11 +39,20 @@ measurements in `docs/research/`.
 - `@karume/runtime` / `@karume/models`: `fullStateStorage: "f16"` stores the full-layer KV in half the memory
   (12B 16 KiB per position, E2B 6 KiB), with no re-export and no GPU feature (ADR 0143). Opt-in, and it changes the numbers
   slightly. It needs an explicit `speculative` on a pipeline with a drafter. In Chrome on the RTX 5070 Ti its kernel check passes.
+  In the runtime it is `SessionOptions.fullStateStorage` (and the same option of `estimateGraphMemory`, type `StateStorage`);
+  a full slot's depth must be even, and a borrowing context must match its lender.
 
 ### Fixed
 
 - `@karume/runtime`: `fitsHeadroom` left its trial allocation on the device under Dawn, so the
   allocation it had approved could fail (ADR 0070 addendum of 2026-11-06).
+
+### Breaking
+
+- `@karume/models/gemma` and `@karume/models/gemma4-qat-mobile`: `ChatMessage` gains `ChatPartsMessage`,
+  a user message whose `content` is an array of text and image parts, so `content` on a `ChatMessage`
+  (on `ChatSession.turns`, and on `ChatOverflow.turns`, the input of an `onOverflow` policy) is no
+  longer always a `string`. Code that reads it narrows with `typeof message.content === "string"`.
 
 ## [0.17.0] - 2026-11-06
 
