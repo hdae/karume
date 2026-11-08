@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-08
+
 ### Added
 
 - `@karume/models`: Gemma 4 26B A4B (model `26b`) in the q4_0 QAT line, text only, with every one of its
@@ -2222,7 +2224,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/hdae/karume/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/hdae/karume/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/hdae/karume/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hdae/karume/compare/v0.15.1...v0.16.0
