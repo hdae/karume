@@ -557,8 +557,9 @@ describe("MOSS-Image text-encoder stage (encodeMossPrompts)", () => {
     );
 
     expect(lifetimes(events)).toEqual([]);
-    // The release of an earlier stage is awaited before the probe.
-    expect(events).toEqual(["release wait", `probe ${need} refused`]);
+    // The release of an earlier stage is awaited before the probe, and the probe's own release
+    // after it (Dawn returns a destroyed buffer's memory only when a later submit completes).
+    expect(events).toEqual(["release wait", `probe ${need} refused`, "release wait"]);
   });
 
   it("sizes its need at the longer prompt, whichever branch it is: estimate + largest part + margin", () => {
