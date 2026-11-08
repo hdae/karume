@@ -33,8 +33,10 @@ point at on the day of the run. This module never downloads; `hf download <repo>
 fetches a snapshot.
 
 A pin also carries the SHA-256 of the files the provenance record fingerprints from that source
-(`gemma4.provenance.FINGERPRINT_FILES` is the union of the two pins' files).
-{@link assert_model_pins} checks both sources cheaply before a long run (the cache names an LFS
+(`gemma4.provenance.FINGERPRINT_FILES` is the union of the two pins' files), and of any other file
+a script reads from it that the record does not fingerprint ({@link HubPin.also_checked} — 12B's
+`processor_config.json`). {@link assert_model_pins} checks both sources cheaply before a long run
+(the cache names an LFS
 blob by its SHA-256, so only the small files are hashed), and the export checks the record's full
 digests against them once more (`gemma4.provenance.assert_pinned_fingerprint`).
 
@@ -46,7 +48,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from _shared.paths import INPUTS_ROOT, REPO_ROOT
@@ -81,6 +83,12 @@ class HubPin:
     #: File → SHA-256 at {@link revision}, for the files the provenance record fingerprints from
     #: this source (for an LFS file, the oid the HF API reports and the cache names the blob by).
     sha256: Mapping[str, str]
+    #: File → SHA-256 at {@link revision}, for the files read from this source that the provenance
+    #: record does not fingerprint (a script that reads one records its own digest of it). They are
+    #: checked with {@link sha256} before a long run ({@link assert_snapshot_pin}), and are kept
+    #: apart so the fingerprint's check (`gemma4.provenance.assert_pinned_fingerprint`) still
+    #: covers exactly the fingerprinted files.
+    also_checked: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -119,7 +127,10 @@ class ModelPins:
 #:   embeddings); the audio and vision sub-configs drop a few fields.
 #: - tokenizer: `main` of `google/gemma-4-12B-it` (the commit 12B was first pinned at) — the LFS
 #:   blob name of `tokenizer.json` (module docstring: the QAT repository's is the file from before
-#:   Google's glitch-token fixes).
+#:   Google's glitch-token fixes), and the SHA-256 of `processor_config.json`'s bytes (1,382 B;
+#:   `max_soft_tokens` 280 — the image goldens of `gemma4.export_vision` are taken at its budget
+#:   and the distribution declares it, so the file is pinned though no fingerprint names it). The
+#:   cached file's git blob id was `b889adcd…`, the one the snapshot links it by.
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 _TWELVE_B_WEIGHTS = HubPin(
@@ -134,6 +145,11 @@ _TWELVE_B_TOKENIZER = HubPin(
     repo=GEMMA4_UPSTREAM["12b"],
     revision="43c9d014b231474fa7212dbb48a762566c2b255d",
     sha256={"tokenizer.json": "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb"},
+    also_checked={
+        "processor_config.json": (
+            "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9"
+        )
+    },
 )
 HUB_PINS: Mapping[str, ModelPins] = {
     "12b": ModelPins(weights=_TWELVE_B_WEIGHTS, tokenizer=_TWELVE_B_TOKENIZER),
@@ -406,12 +422,13 @@ def _digest(path: Path) -> str:
 
 
 def assert_snapshot_pin(directory: Path, pin: HubPin) -> None:
-    """Every file `pin` names is in `directory` with the pinned SHA-256 (cheap in a hub snapshot).
+    """Every file `pin` names ({@link HubPin.sha256} and {@link HubPin.also_checked}) is in
+    `directory` with the pinned SHA-256 (cheap in a hub snapshot).
 
     MUST: run before anything long reads the checkpoint — a partial download or another revision
     placed at the same path otherwise surfaces hours later, or not at all.
     """
-    for name, expected in sorted(pin.sha256.items()):
+    for name, expected in sorted({**pin.sha256, **pin.also_checked}.items()):
         path = directory / name
         if not path.is_file():
             raise SourcePinError(

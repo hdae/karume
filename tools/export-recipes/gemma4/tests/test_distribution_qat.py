@@ -45,7 +45,7 @@ from gemma4.distribution import (
     gemma4_qat_q4_0_plan,
     gemma4_qat_q4_0_sources,
 )
-from gemma4.sources import QAT_DRAFTER_PINS, QAT_TARGET_PINS
+from gemma4.sources import QAT_DRAFTER_PINS, QAT_TARGET_PINS, HubPin
 from gemma4.tests import product_fixture as fixture
 from karume.container import Provenance
 from karume.dist import DistError, assemble_family
@@ -86,6 +86,9 @@ SPELLINGS: Mapping[str, str] = {
 }
 #: The stand-in vocabulary with the three spellings at the declared ids.
 VISION_VOCAB = ("t0", "t1", "t2", "<|image>", "<|image|>", "<image|>")
+
+#: The stand-in vision series' one greedy golden (named by its record).
+VISION_GREEDY_GOLDEN = "greedy.corpus-image.safetensors"
 
 
 @pytest.fixture(autouse=True)
@@ -217,8 +220,7 @@ def _build(
         assert sources.vision is not None
         write_component(sources.vision / "model.krm", vision if vision is not None else _vision())
         (sources.vision / "vision.corpus-image.safetensors").write_bytes(b"not distributed")
-        (sources.vision / "greedy.corpus-image.safetensors").write_bytes(b"not distributed")
-        (sources.vision / "reference.json").write_text("{}\n", encoding="utf-8")
+        (sources.vision / VISION_GREEDY_GOLDEN).write_bytes(b"not distributed")
         declared = json.loads((sources.model / "config.json").read_text(encoding="utf-8"))
         declared.update(
             {
@@ -244,7 +246,32 @@ def _build(
             ),
             encoding="utf-8",
         )
+        _write_vision_record(sources)
     return sources
+
+
+def _write_vision_record(sources: Gemma4Sources, **reference: Any) -> None:
+    """The vision series' `reference.json` as `gemma4/export_vision.py` writes it, in the parts
+    the distribution reads: the greedy goldens, and the budget and the digest of the processor
+    configuration the goldens were taken at (this tokenizer source's, unless `reference` replaces
+    them)."""
+    assert sources.vision is not None
+    processor = sources.upstream_tokenizer / "processor_config.json"
+    record = {
+        "schema": 1,
+        "series": sources.vision.name,
+        "reference": {
+            "series": sources.vision.name,
+            "goldens": {VISION_GREEDY_GOLDEN: {"bytes": 15, "sha256": "0" * 64}},
+            "softTokenBudget": BUDGET,
+            "processorConfig": {
+                "bytes": processor.stat().st_size,
+                "sha256": hashlib.sha256(processor.read_bytes()).hexdigest(),
+            },
+            **reference,
+        },
+    }
+    (sources.vision / "reference.json").write_text(json.dumps(record), encoding="utf-8")
 
 
 def _assemble(root: Path, models: tuple[str, ...] = ("e2b",)) -> tuple[Path, dict[str, Any]]:
@@ -626,6 +653,44 @@ class TestQatPins:
         with pytest.raises(DistError, match="missing"):
             gemma4_distribution.gemma4_qat_q4_0_dist_plan(tmp_path / "series", "e2b")
 
+    def test_the_dist_plan_refuses_a_processor_configuration_other_than_12b_s_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pinned `tokenizer.json` beside another `processor_config.json` (the budget the
+        distribution declares is read from it) stops the plan at the pins."""
+        constants = pytest.importorskip("huggingface_hub.constants")
+        hub = tmp_path / "hub"
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(hub))
+        pins = QAT_TARGET_PINS["12b"]
+        _pinned_snapshot(hub, pins.weights)
+        tokenizer = _pinned_snapshot(hub, pins.tokenizer)
+        series = tmp_path / "series"
+
+        # The pinned snapshots pass the pins; the plan then stops at the missing series.
+        with pytest.raises(DistError) as passed:
+            gemma4_distribution.gemma4_qat_q4_0_dist_plan(series, "12b")
+        assert "processor_config.json" not in str(passed.value)
+
+        (tokenizer / "processor_config.json").unlink()
+        (tokenizer / "processor_config.json").write_text(
+            '{"image_processor": {"max_soft_tokens": 560}}', encoding="utf-8"
+        )
+        with pytest.raises(DistError, match=r"processor_config\.json: SHA-256"):
+            gemma4_distribution.gemma4_qat_q4_0_dist_plan(series, "12b")
+
+
+def _pinned_snapshot(hub: Path, pin: HubPin) -> Path:
+    """A hub-cache snapshot of `pin`: every file it names links to a blob named by its pinned
+    SHA-256 (what the cheap pin check reads — `gemma4.sources.assert_snapshot_pin`)."""
+    directory = hub / f"models--{pin.repo.replace('/', '--')}" / "snapshots" / pin.revision
+    blobs = hub / f"models--{pin.repo.replace('/', '--')}" / "blobs"
+    blobs.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True)
+    for name, digest in {**pin.sha256, **pin.also_checked}.items():
+        (blobs / digest).write_bytes(b"stand-in")
+        (directory / name).symlink_to(Path("..") / ".." / "blobs" / digest)
+    return directory
+
 
 class TestQatNaming:
     @pytest.mark.parametrize(
@@ -766,6 +831,84 @@ class TestQatVision:
 
         assert product.SOFT_EMBEDS == gemma4_distribution.GEMMA4_SOFT_EMBEDS
         assert product.SOFT_MASK == gemma4_distribution.GEMMA4_SOFT_MASK
+
+
+class TestQatVisionSeries:
+    """The vision series the role is placed from is a full one — its record and the greedy goldens
+    it names — and its goldens were taken at the budget and processor configuration declared."""
+
+    def test_it_refuses_a_series_without_its_record(self, tmp_path: Path) -> None:
+        """What `gemma4/export_vision.py --embedder-only` writes: the container and the embedder
+        goldens, no record and no greedy golden."""
+        sources = _build(tmp_path, "12b")
+        assert sources.vision is not None
+        (sources.vision / "reference.json").unlink()
+        (sources.vision / VISION_GREEDY_GOLDEN).unlink()
+
+        with pytest.raises(DistError, match=r"reference\.json is missing"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_a_series_without_the_greedy_goldens_its_record_names(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _build(tmp_path, "12b")
+        assert sources.vision is not None
+        (sources.vision / VISION_GREEDY_GOLDEN).unlink()
+
+        with pytest.raises(DistError, match=rf"greedy goldens \['{VISION_GREEDY_GOLDEN}'\]"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_a_record_that_names_no_greedy_golden(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path, "12b")
+        _write_vision_record(sources, goldens={})
+
+        with pytest.raises(DistError, match="names no greedy goldens"):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_goldens_taken_at_another_budget(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path, "12b")
+        _write_vision_record(sources, softTokenBudget=560)
+
+        with pytest.raises(
+            DistError, match=rf"softTokenBudget 560, the distribution declares {BUDGET}"
+        ):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_a_processor_configuration_edited_after_the_goldens(
+        self, tmp_path: Path
+    ) -> None:
+        """A hand-edited cache file would change the declared budget alone."""
+        sources = _build(tmp_path, "12b")
+        path = sources.upstream_tokenizer / "processor_config.json"
+        edited = json.loads(path.read_text(encoding="utf-8"))
+        edited["image_processor"]["max_soft_tokens"] = 560
+        path.write_text(json.dumps(edited), encoding="utf-8")
+
+        with pytest.raises(
+            DistError, match=rf"softTokenBudget {BUDGET}, the distribution declares 560"
+        ):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_it_refuses_goldens_taken_with_another_processor_configuration(
+        self, tmp_path: Path
+    ) -> None:
+        """The same budget, other bytes (another resize rule, say): the digest tells them apart."""
+        sources = _build(tmp_path, "12b")
+        _write_vision_record(sources, processorConfig={"bytes": 1, "sha256": "f" * 64})
+        declared = hashlib.sha256(
+            (sources.upstream_tokenizer / "processor_config.json").read_bytes()
+        ).hexdigest()
+
+        with pytest.raises(
+            DistError, match=rf"SHA-256 '{'f' * 64}', the distribution reads {declared}"
+        ):
+            gemma4_qat_q4_0_plan(sources, "12b")
+
+    def test_the_record_s_file_name_mirrors_the_writer(self) -> None:
+        pytest.importorskip("torch")
+        from gemma4 import provenance
+
+        assert provenance.REFERENCE_FILE == gemma4_distribution.GEMMA4_REFERENCE_FILE
 
 
 class TestQatCard:

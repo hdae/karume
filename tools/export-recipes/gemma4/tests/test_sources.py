@@ -190,6 +190,57 @@ class TestSnapshotPin:
             sources.assert_snapshot_pin(snapshot, pin)
 
 
+class TestFilesCheckedButNotFingerprinted:
+    """`HubPin.also_checked`: files a script reads from a pinned source without the provenance
+    record fingerprinting them (12B's `processor_config.json`) are held to the pin as well."""
+
+    def _pin(self, tmp_path: Path) -> tuple[Path, sources.HubPin]:
+        snapshot, pin = _snapshot(tmp_path, lfs=("tokenizer.json",), plain=())
+        (snapshot / "processor_config.json").write_bytes(b'{"max_soft_tokens": 280}')
+        digest = hashlib.sha256(b'{"max_soft_tokens": 280}').hexdigest()
+        return snapshot, sources.HubPin(
+            repo=pin.repo,
+            revision=pin.revision,
+            sha256=pin.sha256,
+            also_checked={"processor_config.json": digest},
+        )
+
+    def test_the_pinned_bytes_pass(self, tmp_path) -> None:
+        snapshot, pin = self._pin(tmp_path)
+
+        sources.assert_snapshot_pin(snapshot, pin)
+
+    def test_other_bytes_fail_loudly_naming_the_file(self, tmp_path) -> None:
+        snapshot, pin = self._pin(tmp_path)
+        (snapshot / "processor_config.json").write_bytes(b'{"max_soft_tokens": 560}')
+
+        with pytest.raises(sources.SourcePinError, match=r"processor_config\.json: SHA-256"):
+            sources.assert_snapshot_pin(snapshot, pin)
+
+    def test_a_missing_file_fails_loudly(self, tmp_path) -> None:
+        snapshot, pin = self._pin(tmp_path)
+        (snapshot / "processor_config.json").unlink()
+
+        with pytest.raises(sources.SourcePinError, match=r"processor_config\.json is missing"):
+            sources.assert_snapshot_pin(snapshot, pin)
+
+    def test_12b_s_tokenizer_pin_holds_its_processor_configuration(self, tmp_path) -> None:
+        """The pinned `tokenizer.json` beside another `processor_config.json` (a different budget,
+        or a cache file edited by hand) fails the tokenizer pin, so every script that checks it —
+        the vision export and the distribution included — stops before anything long runs."""
+        pin = sources.HUB_PINS["12b"].tokenizer
+        blobs, snapshot = tmp_path / "blobs", tmp_path / "snapshots" / pin.revision
+        blobs.mkdir()
+        snapshot.mkdir(parents=True)
+        for name, digest in pin.sha256.items():
+            (blobs / digest).write_bytes(b"stand-in")
+            (snapshot / name).symlink_to(Path("..") / ".." / "blobs" / digest)
+        (snapshot / "processor_config.json").write_bytes(b'{"max_soft_tokens": 560}')
+
+        with pytest.raises(sources.SourcePinError, match=r"processor_config\.json: SHA-256"):
+            sources.assert_snapshot_pin(snapshot, pin)
+
+
 class TestModelPins:
     def test_both_pinned_snapshots_pass(self, tmp_path) -> None:
         weights_dir, tokenizer_dir, pins = _two_sources(tmp_path)

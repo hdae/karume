@@ -6,10 +6,16 @@
     uv run --with 'transformers==5.14.1' python -m gemma4.export_vision --model 12b \\
         --embedder-only --out ../../outputs/diag/<dir>     # no 12B reference, no greedy goldens
 
+`--embedder-only` refuses the canonical series directory as `--out`: the distribution places the
+vision role from it, and a series without greedy goldens and `reference.json` is not one.
+
 The weights and their config are the pinned snapshot of Google's QAT checkpoint, the tokenizer, the
 chat template and the processor configuration the pinned snapshot of `google/gemma-4-12B-it`
-(`gemma4.sources`; `hf download` needs `processor_config.json` too — this is the one script that
-reads it). Both are checked against their pins before anything long runs. Every run prints
+(`gemma4.sources`; `hf download` needs `processor_config.json` too — the tokenizer pin names it).
+Both are checked against their pins before anything long runs, `processor_config.json` included
+(`gemma4.sources.HubPin.also_checked`), and the record names the budget and the digest of the
+processor configuration the goldens were taken at (the distribution compares them with what it
+declares). Every run prints
 per-stage wall time and peak RSS as JSON and runs under a `MemAvailable` floor
 ({@link qwen3_5.export.MemoryWatch}).
 
@@ -94,7 +100,6 @@ import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -996,10 +1001,17 @@ def export_series(
     }
 
 
+def canonical_series_dir(model: str) -> Path:
+    """The series the distribution reads the vision role from
+    (`outputs/series/gemma4-<model>-vision/` — `gemma4.distribution.gemma4_qat_q4_0_sources`), and
+    the default `--out`."""
+    return one_shot.series_dir(model, suffix=GEMMA4_VISION_SUFFIX)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = one_shot.series_parser(
         __doc__.split("\n\n")[0],
-        partial(one_shot.series_dir, suffix=GEMMA4_VISION_SUFFIX),
+        canonical_series_dir,
         with_sym_max=False,
         models=unified.MODELS,
     )
@@ -1026,6 +1038,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.embedder_only and args.out is None:
         parser.error(
             "--embedder-only needs --out (a series without greedy goldens is not a series)"
+        )
+    # MUST: compared resolved — `../series/...` or a link to the canonical directory would
+    # otherwise publish over the full series the distribution reads.
+    canonical = canonical_series_dir(args.model)
+    if args.embedder_only and args.out.resolve() == canonical.resolve():
+        parser.error(
+            f"--embedder-only cannot write the canonical series {canonical} (the distribution"
+            " places the vision role from it, and a series without greedy goldens and"
+            " reference.json is not a series) — pass another --out"
         )
     model = args.model
     options = one_shot.resolve_series_args(args)

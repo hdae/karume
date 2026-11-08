@@ -59,7 +59,10 @@ tokenizer and configuration checks are the regular line's; what differs is read 
   (`gemma4/export_vision.py`, series `gemma4-12b-vision`), one bf16 dtype, so every quant of 12B
   maps it — and `pipelineConfig.vision` ({@link gemma4_vision_config}). As with the drafter, it is a
   weights role precisely so that a reader's selection can leave it out: nothing is fetched unless a
-  load asks for image input. E2B / E4B have neither (their tower is not distributed).
+  load asks for image input. E2B / E4B have neither (their tower is not distributed). The series
+  must be a full one, its goldens taken at the declared budget
+  ({@link assert_gemma4_vision_series}), and `processor_config.json` is pinned with the tokenizer
+  (`gemma4.sources.HubPin.also_checked`).
 
 `pipelineConfig` splits into two kinds (the same split as Irodori): **the numbers the model
 decides** (`maxPosition` = upstream `text_config.max_position_embeddings`, `rope` = the parameters
@@ -295,6 +298,11 @@ GEMMA4_VISION_STORAGE = "bf16"
 #: Upstream's processor configuration, read from the tokenizer source (the budget of
 #: `pipelineConfig.vision`, the row width of the embedder graph).
 GEMMA4_PROCESSOR_CONFIG_FILE = "processor_config.json"
+
+#: The vision series' provenance record (the mirror of `gemma4.provenance.REFERENCE_FILE`, held
+#: equal by the tests — that module imports torch): it names the series' greedy goldens and the
+#: budget and processor configuration they were taken at ({@link assert_gemma4_vision_series}).
+GEMMA4_REFERENCE_FILE = "reference.json"
 
 #: The drafter graph's inputs (canonical in `gemma4/export_drafter.py` — the wrapper's forward
 #: argument names). `token` = the token decided just before, `hidden` = the target's hidden after
@@ -1202,6 +1210,55 @@ def assert_gemma4_vision_graph(
         raise DistError(f"{path}: the vision graph holds state slots")
 
 
+def assert_gemma4_vision_series(series: Path, tokenizer_dir: Path) -> None:
+    """The vision series is a full one, taken at the budget this distribution declares.
+
+    MUST: the series holds its record ({@link GEMMA4_REFERENCE_FILE}) and every greedy golden the
+    record names — `gemma4/export_vision.py --embedder-only` writes the container and the embedder
+    goldens alone, and a vision role placed from such a series ships with neither its image goldens
+    nor its provenance record.
+    MUST: the record's `softTokenBudget` is the budget `pipelineConfig.vision` declares and its
+    `processorConfig` digest the `processor_config.json` it is read from: goldens taken at another
+    budget hold the host to rows it never builds, and a cached file edited by hand changes the
+    declaration alone.
+    """
+    record_path = series / GEMMA4_REFERENCE_FILE
+    if not record_path.is_file():
+        raise DistError(
+            f"{series}: {GEMMA4_REFERENCE_FILE} is missing — not a full vision series (an"
+            " --embedder-only run writes none); write it with python -m gemma4.export_vision"
+        )
+    record = _read_json(record_path, "the vision series' record")
+    reference = record.get("reference") if isinstance(record, dict) else None
+    if not isinstance(reference, dict):
+        raise DistError(f"{record_path}: no reference section")
+    goldens = reference.get("goldens")
+    if not isinstance(goldens, dict) or not goldens:
+        raise DistError(f"{record_path}: names no greedy goldens ({goldens!r})")
+    missing = sorted(name for name in goldens if not (series / name).is_file())
+    if missing:
+        raise DistError(
+            f"{series}: the greedy goldens {missing} that {GEMMA4_REFERENCE_FILE} names are"
+            " missing — not a full vision series"
+        )
+    config_path = tokenizer_dir / GEMMA4_PROCESSOR_CONFIG_FILE
+    budget = gemma4_soft_token_budget(tokenizer_dir)
+    recorded_budget = reference.get("softTokenBudget")
+    if recorded_budget != budget:
+        raise DistError(
+            f"{record_path}: the goldens were taken at softTokenBudget {recorded_budget!r}, the"
+            f" distribution declares {budget} (max_soft_tokens of {config_path})"
+        )
+    digest = sha256_file(config_path)
+    processor = reference.get("processorConfig")
+    recorded_digest = processor.get("sha256") if isinstance(processor, dict) else None
+    if recorded_digest != digest:
+        raise DistError(
+            f"{record_path}: the goldens were taken with {GEMMA4_PROCESSOR_CONFIG_FILE} SHA-256"
+            f" {recorded_digest!r}, the distribution reads {digest} ({config_path})"
+        )
+
+
 def assert_gemma4_drafter_graph(
     graph: Mapping[str, Any],
     path: Path,
@@ -1804,6 +1861,8 @@ def gemma4_plan(
         assert_gemma4_vision_graph(
             ir_graph(vision_container), vision_container, hidden_size, sources.upstream_tokenizer
         )
+    if sources.vision is not None:
+        assert_gemma4_vision_series(sources.vision, sources.upstream_tokenizer)
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     # MUST: every model's asset is held to the upstream `tokenizer.json` this plan reads for it,
     # in every line. A borrowed series whose upstream is other bytes, a model's own series compiled

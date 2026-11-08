@@ -950,6 +950,34 @@ class TestExportSeries:
             )
         assert not (tmp_path / "series").exists()
 
+    def test_a_processor_configuration_other_than_the_pinned_stops_the_run(
+        self, tiny_images, checkpoint_dir, tmp_path
+    ) -> None:
+        """The goldens are taken at the processor configuration's budget: one the pin does not
+        name stops the run before anything is written, with the pinned `tokenizer.json` beside
+        it."""
+        two = _two_sources(checkpoint_dir, tmp_path)
+        pinned = two.pins.tokenizer
+        wrong = sources.ModelPins(
+            weights=two.pins.weights,
+            tokenizer=sources.HubPin(
+                repo=pinned.repo,
+                revision=pinned.revision,
+                sha256=pinned.sha256,
+                also_checked={"processor_config.json": "f" * 64},
+            ),
+        )
+
+        with pytest.raises(sources.SourcePinError, match=r"processor_config\.json"):
+            vision.export_series(
+                two.weights,
+                tmp_path / "series" / "gemma4-12b-vision",
+                tokenizer_dir=two.tokenizer,
+                pins=wrong,
+                steps=1,
+            )
+        assert not (tmp_path / "series").exists()
+
     def test_a_failed_gate_publishes_nothing(
         self, tiny_images, checkpoint_dir, tmp_path, monkeypatch
     ) -> None:
@@ -1004,3 +1032,63 @@ class TestPlan:
     ) -> None:
         with pytest.raises(DistError, match=r"processor_config\.json"):
             vision.load_processor(tmp_path)
+
+
+class TestTheCommandLine:
+    """`--embedder-only` writes a series without greedy goldens and `reference.json`, so it must
+    not land where the distribution reads the full one."""
+
+    @pytest.fixture
+    def runs(self, monkeypatch) -> list[dict[str, Any]]:
+        pytest.importorskip("huggingface_hub")
+        calls: list[dict[str, Any]] = []
+
+        def export_series(model_dir, out_dir, **options):
+            calls.append({"out": out_dir, **options})
+            return {}
+
+        monkeypatch.setattr(vision, "export_series", export_series)
+        return calls
+
+    def test_the_canonical_series_is_the_one_the_distribution_reads(self, tmp_path) -> None:
+        from gemma4.distribution import gemma4_qat_q4_0_sources
+
+        pytest.importorskip("huggingface_hub")
+        canonical = vision.canonical_series_dir("12b")
+
+        assert gemma4_qat_q4_0_sources(canonical.parent, "12b").vision == canonical
+
+    def test_embedder_only_refuses_the_canonical_series(self, runs, capsys) -> None:
+        canonical = vision.canonical_series_dir("12b")
+        # Another spelling of the same directory.
+        spelled = canonical.parent / ".." / canonical.parent.name / canonical.name
+
+        with pytest.raises(SystemExit):
+            vision.main(["--model", "12b", "--embedder-only", "--out", str(spelled)])
+
+        assert "canonical series" in capsys.readouterr().err
+        assert runs == []
+
+    def test_embedder_only_refuses_a_link_to_the_canonical_series(
+        self, runs, capsys, tmp_path
+    ) -> None:
+        link = tmp_path / "link"
+        link.symlink_to(vision.canonical_series_dir("12b"), target_is_directory=True)
+
+        with pytest.raises(SystemExit):
+            vision.main(["--model", "12b", "--embedder-only", "--out", str(link)])
+
+        assert "canonical series" in capsys.readouterr().err
+        assert runs == []
+
+    def test_embedder_only_writes_another_directory(self, runs, tmp_path) -> None:
+        vision.main(["--model", "12b", "--embedder-only", "--out", str(tmp_path / "diag")])
+
+        assert [(run["out"], run["embedder_only"]) for run in runs] == [(tmp_path / "diag", True)]
+
+    def test_the_full_run_writes_the_canonical_series(self, runs) -> None:
+        vision.main(["--model", "12b"])
+
+        assert [(run["out"], run["embedder_only"]) for run in runs] == [
+            (vision.canonical_series_dir("12b"), False)
+        ]
