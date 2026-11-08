@@ -596,7 +596,7 @@ describe("ChatSession with images", () => {
     assertEquals((rig.requests[1].softBlocks?.[0].start ?? 0) + secondBase, whole.images[1].start);
   });
 
-  it("a fork reuses the rows and shares the pixels", async () => {
+  it("a fork reuses the rows, and hands out pixels of its own", async () => {
     const rig = hostOf([
       { text: "A", closes: false },
       { text: "B.", closes: true },
@@ -604,13 +604,14 @@ describe("ChatSession with images", () => {
     await using session = new ChatSession(rig.host, { maxNewTokens: 8 });
     await session.send(ask(7)).text();
     await using branch = await session.fork();
-    assert(imageIn(branch.turns[0]) === imageIn(session.turns[0]), "the fork copied the pixels");
+    imageIn(session.turns[0]).data.fill(0);
+    assertEquals(imageIn(branch.turns[0]).data[0], 7);
     await branch.send("Go on.").text();
     assertEquals(rig.embedded.length, 1);
     assertBlocksFitPrompt(rig.requests[1]);
   });
 
-  it("copies the pixels at issue, once, and hands out the one frozen copy", async () => {
+  it("copies the pixels at issue, once, and hands out a frozen copy per read", async () => {
     const rig = hostOf([{ text: "A.", closes: true }]);
     await using session = new ChatSession(rig.host, { maxNewTokens: 8 });
     const part = pixels(7);
@@ -620,9 +621,11 @@ describe("ChatSession with images", () => {
     await stream.text();
     assertEquals(rig.embedded[0].firstByte, 7);
     assert(rig.embedded[0].image !== part.image, "the session embedded the caller's object");
-    assert(imageIn(session.turns[0]) === rig.embedded[0].image, "turns copied the pixels");
-    assert(imageIn(session.turns[0]) === imageIn(session.turns[0]), "two reads, two copies");
-    assertEquals(Reflect.set(imageIn(session.turns[0]), "width", 1), false);
+    const handed = imageIn(session.turns[0]);
+    assert(handed.data.buffer !== rig.embedded[0].image.data.buffer, "turns shared the pixels");
+    assert(imageIn(session.turns[0]).data.buffer !== handed.data.buffer, "two reads, one copy");
+    assertEquals(handed.data, rig.embedded[0].image.data);
+    assertEquals(Reflect.set(handed, "width", 1), false);
   });
 
   it("a write into the handed-out history reaches neither the embedder nor the history", async () => {
