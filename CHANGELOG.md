@@ -15,6 +15,20 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/models`: Gemma 4 26B A4B (model `26b`) in the q4_0 QAT line, text only, with every one of its
+  128 experts per layer resident in VRAM: about 14.3 GB of weights, so a 16 GB GPU (it ran in Chrome on
+  an RTX 5070 Ti with about 0.8 GB to spare). It ships without a drafter, so `speculative` is refused,
+  and without its vision tower. The distribution `hdae/karume-gemma4-qat` on Hugging Face carries it
+  (ADR 0145).
+- `@karume/runtime`: the op `expert_linear`, one routed expert projection whose expert ids come from a
+  `topk` and are read on the GPU (no host readback), and the codec `int4-sym-g-f16`, packed int4 with
+  one f16 step per group, read by `expert_linear` alone (ADR 0145).
+- Exporter: `topk`, `softmax` with an explicit dtype, `sum` with `keepdim`, a rank-1 table indexed by a
+  runtime index, and the custom op `karume::expert_linear`, so a mixture-of-experts router and its
+  experts export (ADR 0145, ADR 0068 addendum 11).
+
 ## [0.18.0] - 2026-11-08
 
 ### Added
