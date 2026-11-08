@@ -38,9 +38,12 @@ import { readFileIfPresent } from "./helpers/read-if-present.ts";
 import { mirrorHasModel, mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 import {
   GEMMA4_12B_IN_MIRROR,
+  GEMMA4_26B_IN_MIRROR,
   GEMMA4_QAT_MIRROR,
   GEMMA4_12B_TOKENIZER_SERIES,
+  GEMMA4_26B_TOKENIZER_SERIES,
   readGemma4_12bTokenizer,
+  readGemma4_26bTokenizer,
 } from "./helpers/gemma-mirror.ts";
 import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "./helpers/series-checks.ts";
 
@@ -159,6 +162,19 @@ const GEMMA4_12B_ASSET: RealAsset = {
     ", so the gemma4 12B full-vocabulary tokenizer cases SKIP. Assemble: cd tools/export-recipes" +
     " && uv run python dist.py --pipeline gemma4-qat",
   suffix: GEMMA4_12B_IN_MIRROR ? "" : SERIES_CHECKS_OPT_IN,
+};
+
+const GEMMA4_26B_ASSET: RealAsset = {
+  // The same rule as 12B's: the mirror's model 26b asset, else the series under KARUME_SERIES=1.
+  read: readGemma4_26bTokenizer,
+  absent:
+    `[karume] the distribution mirror ${GEMMA4_QAT_MIRROR.pathname} has no model 26b` +
+    (SERIES_CHECKS
+      ? ` and outputs/series/${GEMMA4_26B_TOKENIZER_SERIES}/tokenizer.json is absent`
+      : "") +
+    ", so the gemma4 26B full-vocabulary tokenizer cases SKIP. Compile: cd tools/export-recipes" +
+    " && uv run --no-sync python -m gemma4.tokenizer --model 26b",
+  suffix: GEMMA4_26B_IN_MIRROR ? "" : SERIES_CHECKS_OPT_IN,
 };
 
 const EMBEDDINGGEMMA_SERIES = "embeddinggemma-300m-tokenizer";
@@ -384,6 +400,7 @@ for (const { family, fixtureName, real } of [
   { family: "gemma4", fixtureName: "gemma4", real: GEMMA4_ASSET },
   { family: "gemma4 E4B", fixtureName: "gemma4-e4b", real: GEMMA4_E4B_ASSET },
   { family: "gemma4 12B", fixtureName: "gemma4-12b", real: GEMMA4_12B_ASSET },
+  { family: "gemma4 26B", fixtureName: "gemma4-26b", real: GEMMA4_26B_ASSET },
   { family: "EmbeddingGemma", fixtureName: "embeddinggemma", real: EMBEDDINGGEMMA_ASSET },
 ]) {
   const fixture = await readFixture(fixtureName);
@@ -537,3 +554,21 @@ for (const { model, prefix } of [
     },
   );
 }
+
+// 26B's tokenizer.json is the file from before Google's glitch-token fixes, so it has its own series
+// too: the 26B fixture's `12b-dropped-merge*` cases hit merges 12B's fix dropped and 26B keeps. On
+// 12B's full asset they must tokenize differently (E2B's fix kept those merges, so E2B's asset could
+// not tell the two apart).
+const twelveFull = await GEMMA4_12B_ASSET.read();
+test.skipIf(twelveFull === undefined)(
+  `gemma4 26B fixture: the 12b-dropped-merge cases tokenize differently with the 12B asset${GEMMA4_12B_ASSET.suffix}`,
+  async () => {
+    const fixture = await readFixture("gemma4-26b");
+    const twelve = new Tokenizer(parseGemmaTokenizerAsset(twelveFull as Uint8Array<ArrayBuffer>));
+    const dropped = fixture.encode.filter((row) => row.name.startsWith("12b-dropped-merge"));
+    assert(dropped.length > 0, "the 26b fixture has no 12b-dropped-merge case");
+    for (const testCase of dropped) {
+      assertNotEquals(twelve.encode(testCase.text), testCase.ids, testCase.name);
+    }
+  },
+);

@@ -121,19 +121,38 @@ export const GEMMA4_12B_TOKENIZER_SERIES = "gemma4-12b-tokenizer";
 export const GEMMA4_12B_IN_MIRROR: boolean = mirrorHasModel(GEMMA4_QAT_MIRROR, "12b");
 
 /**
- * gemma-4-12B-it's compiled tokenizer (its own asset — its glitch-token fix drops other BPE merges than
- * E2B's and E4B's):
- * the mirror's model `12b` asset when the mirror carries it, else the series as an
- * implementation-time check under KARUME_SERIES=1 (ADR 0139 decision 6), else `undefined`.
+ * A q4_0 QAT model's compiled tokenizer: the mirror's model asset when the mirror carries the
+ * model, else its tokenizer series as an implementation-time check under KARUME_SERIES=1 (ADR 0139
+ * decision 6), else `undefined`.
  */
-export const readGemma4_12bTokenizer = async (): Promise<Uint8Array<ArrayBuffer> | undefined> => {
-  if (GEMMA4_12B_IN_MIRROR)
-    return await readMirrorAsset(GEMMA4_QAT_MIRROR, "tokenizer", { model: "12b" });
+const readQatTokenizer = async (
+  model: string,
+  inMirror: boolean,
+  series: string,
+): Promise<Uint8Array<ArrayBuffer> | undefined> => {
+  if (inMirror) return await readMirrorAsset(GEMMA4_QAT_MIRROR, "tokenizer", { model });
   if (!SERIES_CHECKS) return undefined;
   return await readFileIfPresent(
-    new URL(
-      `../../../../outputs/series/${GEMMA4_12B_TOKENIZER_SERIES}/tokenizer.json`,
-      import.meta.url,
-    ),
+    new URL(`../../../../outputs/series/${series}/tokenizer.json`, import.meta.url),
   );
 };
+
+/**
+ * gemma-4-12B-it's compiled tokenizer (its own asset — its glitch-token fix drops other BPE merges than
+ * E2B's and E4B's), read as {@link readQatTokenizer} says.
+ */
+export const readGemma4_12bTokenizer = (): Promise<Uint8Array<ArrayBuffer> | undefined> =>
+  readQatTokenizer("12b", GEMMA4_12B_IN_MIRROR, GEMMA4_12B_TOKENIZER_SERIES);
+
+/** gemma-4-26B-A4B-it's tokenizer series (`gemma4.tokenizer --model 26b`). */
+export const GEMMA4_26B_TOKENIZER_SERIES = "gemma4-26b-tokenizer";
+
+/** Whether {@link readGemma4_26bTokenizer} reads the mirror (false = the opt-in series, or nothing). */
+export const GEMMA4_26B_IN_MIRROR: boolean = mirrorHasModel(GEMMA4_QAT_MIRROR, "26b");
+
+/**
+ * gemma-4-26B-A4B-it's compiled tokenizer (its own asset — the file from before Google's
+ * glitch-token fixes, so it keeps merges 12B's fix dropped), read as {@link readQatTokenizer} says.
+ */
+export const readGemma4_26bTokenizer = (): Promise<Uint8Array<ArrayBuffer> | undefined> =>
+  readQatTokenizer("26b", GEMMA4_26B_IN_MIRROR, GEMMA4_26B_TOKENIZER_SERIES);
