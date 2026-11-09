@@ -35,7 +35,7 @@ export type TransferBenchOptions = {
 };
 
 /** One expert's worth of bytes per slot, filled once with xorshift32 (the contents do not matter). */
-const makeSources = (count: number): Uint8Array<ArrayBuffer>[] => {
+export const makeSources = (count: number): Uint8Array<ArrayBuffer>[] => {
   let state = 0x9e3779b9;
   return Array.from({ length: count }, () => {
     const words = new Uint32Array(EXPERT_BYTES / 4);
@@ -54,7 +54,11 @@ const makeSources = (count: number): Uint8Array<ArrayBuffer>[] => {
  * preference to `body`'s own rejection (that is usually its consequence); the scopes are popped
  * either way.
  */
-const scoped = async <T>(device: GPUDevice, where: string, body: () => Promise<T>): Promise<T> => {
+export const scoped = async <T>(
+  device: GPUDevice,
+  where: string,
+  body: () => Promise<T>,
+): Promise<T> => {
   device.pushErrorScope("validation");
   device.pushErrorScope("out-of-memory");
   const outcome = await body().then(

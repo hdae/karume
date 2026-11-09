@@ -3,7 +3,9 @@
  * upload of a batch of Gemma 4 26B A4B experts by a staging ring or by `writeBuffer`, on this
  * browser's GPU — the costs an exact expert cache pays per miss round. Optionally it also reads
  * experts back from 26B in the hub's cache (mount `gemma4-qat`, cached source only), the host store
- * an expert cache would read a miss from.
+ * an expert cache would read a miss from. The Host tier section measures a RAM tier for that store:
+ * how many bytes this tab can hold as `ArrayBuffer`s or as filled upload buffers, and what a hit from
+ * each costs.
  */
 
 import type { AcquireGpuOptions } from "@karume/runtime";
@@ -14,7 +16,9 @@ import { RecordActions } from "@/components/record-actions";
 import { RunStatusCard } from "@/components/run-status-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -31,6 +35,16 @@ import { type HfCoordinates, hfRepoRef } from "@/lib/distributions";
 import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
 
 import { type CacheReadResult, openCached26b, runCacheRead } from "./cache-read";
+import { type HostTierFormResult, type HostTierResult, runHostTier } from "./host-tier";
+import {
+  GIB,
+  HIT_BATCHES,
+  HOST_TIER_FORMS,
+  type HostTierForm,
+  MAX_TARGET_GIB,
+  parseTargetGib,
+  POOL_EXPERTS,
+} from "./host-tier-plan";
 import { runTransferBench, type TransferCaseResult } from "./run";
 import {
   EXPERT_BYTES,
@@ -66,6 +80,8 @@ type TransferRecord = RecordEnvironment & {
     readonly model: "26b";
     readonly results: readonly CacheReadResult[];
   };
+  /** Present when the host tier ran (then alone: `cases` and the batches above are empty). */
+  readonly hostTier?: HostTierResult;
 };
 
 type Form = {
@@ -74,6 +90,10 @@ type Form = {
   readonly batches: string;
   /** Experts per cached read sample; empty skips the cached reads. */
   readonly cacheBatches: string;
+  /** The host tier forms to run. */
+  readonly hostForms: ReadonlySet<HostTierForm>;
+  /** The host tier's target size, GiB. */
+  readonly hostTargetGib: string;
 };
 
 const INITIAL_FORM: Form = {
@@ -81,6 +101,14 @@ const INITIAL_FORM: Form = {
   warmup: "5",
   batches: "1, 4, 8, 16",
   cacheBatches: "1, 8",
+  hostForms: new Set(HOST_TIER_FORMS),
+  hostTargetGib: "13",
+};
+
+const HOST_FORM_LABEL: Readonly<Record<HostTierForm, string>> = {
+  "upload-buffer":
+    "B — upload buffers (MAP_WRITE | COPY_SRC, filled at creation, never mapped again)",
+  array: "A — ArrayBuffers in the page (1 GiB chunks)",
 };
 
 /** The mount whose cached 26B the reads draw from. */
@@ -137,6 +165,24 @@ export const ExpertTransferPage = () => {
               ? `Cached reads need the mount ${CACHE_MOUNT} on the HF-compatible route`
               : undefined;
   const canRun = gpu !== undefined && !task.running && formError === undefined;
+  const hostTargetGib = parseTargetGib(form.hostTargetGib);
+  const hostError =
+    samples === undefined
+      ? "Samples must be a positive integer"
+      : warmup === undefined
+        ? "Warm-up must be a non-negative integer"
+        : hostTargetGib === undefined
+          ? `Target must be an integer from 1 to ${MAX_TARGET_GIB} GiB`
+          : form.hostForms.size === 0
+            ? "Select at least one form"
+            : undefined;
+  const canRunHost = gpu !== undefined && !task.running && hostError === undefined;
+  const toggleHostForm = (hostForm: HostTierForm, checked: boolean) => {
+    const next = new Set(form.hostForms);
+    if (checked) next.add(hostForm);
+    else next.delete(hostForm);
+    setForm({ ...form, hostForms: next });
+  };
 
   const start = () => {
     if (gpu === undefined || samples === undefined || warmup === undefined) return;
@@ -180,6 +226,31 @@ export const ExpertTransferPage = () => {
         },
         cases: results,
         ...(cacheReads === undefined ? {} : { cacheReads }),
+      };
+    });
+  };
+
+  const startHostTier = () => {
+    if (gpu === undefined || samples === undefined || warmup === undefined) return;
+    if (hostTargetGib === undefined) return;
+    const forms = HOST_TIER_FORMS.filter((hostForm) => form.hostForms.has(hostForm));
+    void task.start(async ({ signal, report }) => {
+      const hostTier = await runHostTier(gpu.device, {
+        forms,
+        targetBytes: hostTargetGib * GIB,
+        samples,
+        warmup,
+        signal,
+        onProgress: ({ stage, done, total, unit, note }) =>
+          report({ stage, count: { done, total, unit }, ...(note === undefined ? {} : { note }) }),
+      });
+      return {
+        format: RECORD_FORMAT,
+        page: "expert-transfer",
+        ...recordEnvironment(gpu),
+        settings: { samples, warmup, batches: [], cacheReadBatches: [], expertBytes: EXPERT_BYTES },
+        cases: [],
+        hostTier,
       };
     });
   };
@@ -254,6 +325,71 @@ export const ExpertTransferPage = () => {
         <RunStatusCard gpu={gpuState} onReacquire={reacquire} task={task} />
       </div>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Host tier</CardTitle>
+          <CardDescription>
+            Allocates a RAM tier up to the target in each selected form (B first, then A), stopping
+            at the first failure and keeping what it holds; then, with the tier held, times the
+            empty fence and hits of {HIT_BATCHES.join(", ")} distinct experts drawn at random
+            positions of the tier into a pool of {POOL_EXPERTS} experts in VRAM — A by staging ring
+            and by writeBuffer, B by copyBufferToBuffer. Samples and warm-up are the ones above. B
+            is freed by destroy() at the end of its form; A is released by dropping its references,
+            so its memory goes back only when the garbage collector runs.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-3">
+          <div className="flex flex-col gap-2 sm:col-span-2">
+            {HOST_TIER_FORMS.map((hostForm) => (
+              <Label key={hostForm} className="flex items-center gap-2 font-normal">
+                <Checkbox
+                  id={`host-form-${hostForm}`}
+                  checked={form.hostForms.has(hostForm)}
+                  onCheckedChange={(checked) => toggleHostForm(hostForm, checked)}
+                  disabled={task.running}
+                />
+                {HOST_FORM_LABEL[hostForm]}
+              </Label>
+            ))}
+          </div>
+          <Field
+            id="host-target"
+            label="Target (GiB)"
+            hint={`1 to ${MAX_TARGET_GIB}; 26B is 12.85 GB.`}
+          >
+            <Input
+              id="host-target"
+              inputMode="numeric"
+              value={form.hostTargetGib}
+              onChange={(event) => setForm({ ...form, hostTargetGib: event.target.value })}
+              disabled={task.running}
+            />
+          </Field>
+          <div className="flex flex-col gap-2 text-xs text-muted-foreground sm:col-span-3">
+            <p>
+              Watch the Windows Task Manager while it runs. Form A lives in this tab: its memory is
+              the tab's row in Chrome's own task manager (Shift+Esc), or the chrome.exe processes on
+              the Details tab. Form B lives in shared memory of the GPU process: watch "Shared GPU
+              memory" on Performance &gt; GPU, and the GPU process's row (Shift+Esc).
+            </p>
+            <p>
+              Form B may also hold a copy in this tab (Chrome's mapped-at-creation shared memory):
+              whether the tab's memory grows with B too is what the measurement is meant to find
+              out. If the tab crashes (Aw, Snap! / out of memory), the last progress line — the
+              chunk and the GB held — is the result.
+            </p>
+          </div>
+          <div className="flex gap-3 sm:col-span-3">
+            <Button id="host-run" onClick={startHostTier} disabled={!canRunHost}>
+              Run host tier
+            </Button>
+          </div>
+          {hostError === undefined ? null : (
+            <p className="text-sm text-destructive sm:col-span-3">{hostError}</p>
+          )}
+        </CardContent>
+      </Card>
+
       {record === undefined ? null : (
         <Card>
           <CardHeader>
@@ -267,10 +403,11 @@ export const ExpertTransferPage = () => {
               record={record}
               filename={`expert-transfer_${fileStamp(new Date(record.recordedAt))}.json`}
             />
-            <ResultTable results={record.cases} />
+            {record.cases.length === 0 ? null : <ResultTable results={record.cases} />}
             {record.cacheReads === undefined ? null : (
               <CacheReadTable results={record.cacheReads.results} />
             )}
+            {record.hostTier === undefined ? null : <HostTierTables result={record.hostTier} />}
           </CardContent>
         </Card>
       )}
@@ -385,3 +522,102 @@ const CacheReadTable = ({ results }: { results: readonly CacheReadResult[] }) =>
     </TableBody>
   </Table>
 );
+
+const formatGb = (bytes: number): string => (bytes / 1e9).toFixed(2);
+
+const HostTierTables = ({ result }: { result: HostTierResult }) => (
+  <div className="flex flex-col gap-4">
+    {result.deviceLost === undefined ? null : (
+      <p id="host-device-lost" className="text-sm text-destructive">
+        The device was lost ({result.deviceLost.reason}) during {result.deviceLost.during}:{" "}
+        {result.deviceLost.message}
+      </p>
+    )}
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Host tier form</TableHead>
+          <TableHead className="text-right">GB held / target</TableHead>
+          <TableHead className="text-right">Chunks</TableHead>
+          <TableHead className="text-right">Fill GB/s</TableHead>
+          <TableHead className="text-right">Experts</TableHead>
+          <TableHead className="text-right">Fence median ms</TableHead>
+          <TableHead className="text-right">Slope ms / expert</TableHead>
+          <TableHead>Stopped by</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {result.forms.map((form) => (
+          <TableRow key={form.form}>
+            <TableCell>{form.form}</TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatGb(form.heldBytes)} / {formatGb(form.targetBytes)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {form.chunks.length} × {(form.chunkBytes / GIB).toFixed(2)} GiB
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {form.fillGBps === undefined ? "" : form.fillGBps.toFixed(2)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">{form.experts}</TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatMs(form.fence?.ms.median)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {form.slopes
+                .map(({ method, msPerExpert }) => `${method} ${formatMs(msPerExpert)}`)
+                .join(", ")}
+            </TableCell>
+            <TableCell className="text-xs">{stoppedBy(form)}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Host tier hit</TableHead>
+          <TableHead className="text-right">Bytes</TableHead>
+          <TableHead className="text-right">min ms</TableHead>
+          <TableHead className="text-right">median ms</TableHead>
+          <TableHead className="text-right">p95 ms</TableHead>
+          <TableHead className="text-right">ms / expert (− fence)</TableHead>
+          <TableHead className="text-right">remap median ms</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {result.forms.flatMap((form) =>
+          form.hits.map((hit) => (
+            <TableRow key={hit.id}>
+              <TableCell>
+                {form.form}: {hit.experts} expert{hit.experts === 1 ? "" : "s"} by {hit.method}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {hit.bytes.toLocaleString("en-US")}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">{formatMs(hit.ms.min)}</TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {formatMs(hit.ms.median)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">{formatMs(hit.ms.p95)}</TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {formatMs(hit.perExpertMs)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {formatMs(hit.remapMs?.median)}
+              </TableCell>
+            </TableRow>
+          )),
+        )}
+      </TableBody>
+    </Table>
+  </div>
+);
+
+const stoppedBy = (form: HostTierFormResult): string =>
+  [
+    form.reached ? undefined : (form.failure ?? "not reached"),
+    form.hitsSkipped === undefined ? undefined : `hits: ${form.hitsSkipped}`,
+  ]
+    .filter((part) => part !== undefined)
+    .join("; ");
