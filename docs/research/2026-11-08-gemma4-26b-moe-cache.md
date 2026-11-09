@@ -1,8 +1,8 @@
 > This document is a point-in-time snapshot (2026-11-08 to 2026-11-09) of the pre-research into an expert cache for Gemma 4
 > 26B A4B: how many experts per layer a fixed-size cache would hold, how often decode would miss, what an exact cache (output
 > bit-identical to full residency) costs in re-runs, and how far two approximate modes move the output. Every number comes from
-> a CPU reference of all 30 layers on the maintainer's machine; nothing here ran on a GPU or in a browser. It is not a design
-> source of truth. The harness and the raw records are local and untracked (`outputs/diag/moe-cache-2026-11-08/`).
+> a CPU reference of all 30 layers on the maintainer's machine, except the fence and upload costs of §6.1, which were measured in
+> Chrome on an RTX 5070 Ti. It is not a design source of truth. The harness and the raw records are local and untracked (`outputs/diag/moe-cache-2026-11-08/`).
 
 # Gemma 4 26B A4B: an expert cache
 
@@ -178,7 +178,10 @@ assumed costs as §4.2 apply, with each draft forward and each verify forward at
   limits a cycle is the verify: the exact rows route differently from the drafts in the later layers, and the first row whose
   exact picks miss ends the commit.
 - At K = 64 self-speculation saves 13% of the assumed time against the resume with uniform K, about as much as the per-layer K
-  (35.3 against 35.6 ms); the two were not combined. Depth past 4 adds nothing.
+  (35.3 against 35.6 ms). Depth past 4 adds nothing.
+- Combining the two adds little: self-speculation over the per-layer K of §4.2 gives 34.5 ms at K = 64 and depth 4 (2.74
+  tokens per cycle, 1.82 forwards and 12.1 loads per token). The per-layer K raises the tokens per cycle of the two prose cases
+  (3.16 → 3.28, 3.32 → 3.61) but not of Python (2.00 → 1.95), where 130 of 131 cycles end on a verify miss.
 - The round trips fall to 0.74 fences per token at depth 4 (1.41 retries per token for M2r), which matters more if the Chrome
   fence is far above the 2 ms assumed here.
 - The assumed time flatters the verify: its depth + 1 rows read the union of their picks, 16–24 experts per layer at depth 4
@@ -213,10 +216,9 @@ Pooled over the six cases (1,282 decode rows):
   reach 0.34–0.40. At K = 64 every case is between 0.006 and 0.034.
 - KL here includes the drift of the approximate model's own KV over up to 256 tokens; it is not a per-token figure.
 
-## 6. Transfer and fence costs (not measured here)
+## 6. Transfer and fence costs
 
-These come from earlier measurements and source reading, collected during the pre-research. They are inputs for a Chrome
-measurement, not results of this one.
+These come from earlier measurements and source reading, collected during the pre-research; §6.1 measures them in Chrome.
 
 - The fence floor of the 2026-09-01 PoC ([research 2026-08-31](2026-08-31-freetoken-moe-over-arraybuffer.md)), about 11 ms,
   came from Deno: deno_webgpu sleeps 10 ms after each blocking poll in `mapAsync` and `onSubmittedWorkDone` even when the GPU is
@@ -226,6 +228,34 @@ measurement, not results of this one.
   5.3–6.1 GB/s on Chrome D3D12; `writeBuffer` at 2.0–2.2 and 4.2–5.2 GB/s. These are rates for 8–32 MiB blocks; one expert
   (3.19 MiB) is below the 4 MiB threshold at which Chromium's wire switches to shared memory, so its rate is unknown.
 
+### 6.1 Measured in Chrome on the RTX 5070 Ti
+
+The Playground's expert transfer bench (`/expert-transfer`) ran twice in Chrome 156 on Windows (D3D12, RTX 5070 Ti,
+cross-origin isolated), 50 samples per case after 5 of warm-up. Times are host wall time from the first call to the resolved
+promise; the two runs agree within 0.2 ms on every median below and on every other case except `writeBuffer` at 4 experts (6.6 and 5.8 ms).
+
+| case | median ms | p95 ms |
+|---|---:|---:|
+| fence, empty submit | 0.95–1.00 | 1.9–2.0 |
+| fence after a 4-byte copy | 2.50–2.59 | 3.2–3.7 |
+| readback of one token's router picks (960 B, `mapAsync`) | 2.40–2.42 | 3.3–3.5 |
+| 1 expert by the staging ring | 2.83–2.92 | 3.4 |
+| 16 experts by the staging ring | 9.21–9.40 | 9.9–10.3 |
+| 1 expert by `writeBuffer` | 1.46–1.48 | 4.0–4.2 |
+| 16 experts by `writeBuffer` | 19.84–20.04 | 20.7–21.3 |
+
+- A fence that waits for GPU work costs about 2.5 ms, near the 2 ms assumed; the empty submit resolves sooner, presumably
+  without waiting for the GPU.
+- The ring costs about one fence plus 0.43 ms per expert (the step from 8 to 16 experts, 7.8 GB/s); remapping its slots takes
+  0.2 ms and is off the critical path. `writeBuffer` stays at 2.0–2.7 GB/s, so from 4 experts on it takes about twice the ring's
+  time.
+- With 2.5 ms per fence and 0.43 ms per expert in place of the assumed 2 ms and 0.48 ms, the K = 64 times of §4 change by less
+  than 1 ms: about 40.8 ms for the resume with uniform K, 35.7 ms with the per-layer K, 35.0 ms for self-speculation and 34.3 ms
+  for both. The forwards still set the cost.
+- The resume's times count no readback on a token without a miss; an implementation needs one per token to learn whether
+  it missed (about 2.4 ms here) unless it rides on the readback of the sampled token. Self-speculation's two fences per cycle
+  already include it.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
@@ -234,7 +264,7 @@ measurement, not results of this one.
   2.1 forwards at K = 64, because the early layers miss most.
 - Below K = 48 neither form looks attractive: the exact cache needs about 3 forwards per token (about 2.5 with the resume) and
   the approximate modes pass 0.08 nats.
-- A per-layer K and self-speculation each bring the exact cache at K = 64 to about 35 ms per token under the assumed costs,
-  against 15 ms with every expert resident.
-- Open: combining the per-layer K with self-speculation; the verify's extra expert traffic; and the Chrome fence and the
-  3.19 MiB upload on the RTX 5070 Ti, which set the real weights of the assumed costs.
+- A per-layer K and self-speculation each bring the exact cache at K = 64 to about 35 ms per token, and together to about
+  34 ms, against 15 ms with every expert resident; Chrome's measured fence and upload costs leave these within 1 ms.
+- Open: the verify's extra expert traffic, the real per-forward time of the 26B decode in place of the assumed 15 ms, and
+  whether a GPU implementation reaches the CPU reference's draft acceptance.
