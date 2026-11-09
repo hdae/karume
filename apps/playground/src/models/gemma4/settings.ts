@@ -135,6 +135,41 @@ export const hasVision = (manifest: Manifest, { mount, model }: ModelKey): boole
   manifest.models[model]?.weights["vision"] !== undefined;
 
 /**
+ * Whether the model is a mixture of experts, i.e. whether the page offers the exact expert cache
+ * (`expertCache` of `Pipeline.fromPretrained` — ADR 0146). Decided by the model key: neither the
+ * manifest nor `pipelineConfig` declares the routing (only the graph inside the container has
+ * `expert_linear`, and reading it means opening the container), and the one such model the mounts
+ * hold is Gemma 4 26B A4B of the q4_0 QAT line. The pipeline still refuses a graph without
+ * `expert_linear`, so a wrong entry here fails at Load rather than running something else.
+ */
+export const hasExpertCache = ({ mount, model }: ModelKey): boolean =>
+  mount === "gemma4-qat" && model === "26b";
+
+/**
+ * The slot range the page accepts: 2 × 26B's top-k 8 (a prefill chunk has at least 2 rows, and all
+ * of one chunk's picks must fit) to its 128 experts per layer — the bounds the pipeline checks.
+ */
+export const EXPERT_CACHE_SLOTS = { min: 16, max: 128 } as const;
+
+/**
+ * The "Expert cache slots" field → the slots (`undefined` = empty: no cache, every expert resident),
+ * or the problem. Anything else must be an integer in {@link EXPERT_CACHE_SLOTS}.
+ */
+export const parseExpertCacheSlots = (text: string): Parsed<number | undefined> => {
+  if (text.trim() === "") return { ok: true, value: undefined };
+  const slots = integerOf(text);
+  if (slots === undefined || slots < EXPERT_CACHE_SLOTS.min || slots > EXPERT_CACHE_SLOTS.max) {
+    return {
+      ok: false,
+      errors: [
+        `Expert cache slots must be an integer from ${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}, or empty for none (every expert resident).`,
+      ],
+    };
+  }
+  return { ok: true, value: slots };
+};
+
+/**
  * The `speculative` a chat passes for what was loaded. MUST: `"always"` with a drafter on f16 full
  * slots, because a turn that leaves it out selects the self-tuning gate, which the pipeline refuses
  * there (ADR 0143 decision 8). Everywhere else the session keeps its default.

@@ -34,6 +34,11 @@ export type LoadRequest = {
   /** Build the image embedder (`vision` of `fromPretrained`; the regular entry point only). */
   readonly vision?: boolean;
   /**
+   * Keep only `slots` experts of each routed layer on the GPU (`expertCache` of `fromPretrained` —
+   * a mixture-of-experts model only); absent = every expert resident.
+   */
+  readonly expertCache?: { readonly slots: number };
+  /**
    * Pass `onRunDiagnostics`. It changes the decode path: the pipeline builds its on-GPU greedy
    * selection only without it, so with it a temperature-0 turn reads the whole logits row back.
    */
@@ -91,6 +96,8 @@ export const buildGemmaPipeline = async (input: {
     ...(request.fullStateStorage === undefined
       ? {}
       : { fullStateStorage: request.fullStateStorage }),
+    // Both entry points take it; the pipeline itself refuses a graph without experts.
+    ...(request.expertCache === undefined ? {} : { expertCache: request.expertCache }),
     signal,
     ...(onRunDiagnostics === undefined ? {} : { onRunDiagnostics }),
     ...(onProgress === undefined ? {} : { onProgress }),

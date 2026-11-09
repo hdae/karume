@@ -120,6 +120,33 @@ describe("buildGemmaRecord", () => {
     ).toBe("f16");
   });
 
+  it("names the expert cache and its latest report only when the pipeline was built with it", () => {
+    const without = buildGemmaRecord({ ...input, mount: "gemma4-qat", model: "26b" });
+    expect(without).not.toHaveProperty("expertCache");
+    expect(without).not.toHaveProperty("expertCacheReport");
+    const expertCacheReport = {
+      runs: 12,
+      missedRuns: 4,
+      loads: 4,
+      loadedExperts: 96,
+      evictedExperts: 32,
+      bytesRead: 96 * 3_345_408,
+      loadMs: 210,
+      slots: 64,
+      committedRuns: 8,
+      retries: 4,
+    };
+    const record = buildGemmaRecord({
+      ...input,
+      mount: "gemma4-qat",
+      model: "26b",
+      expertCache: { slots: 64 },
+      expertCacheReport,
+    });
+    expect(record.expertCache).toEqual({ slots: 64 });
+    expect(record.expertCacheReport).toEqual(expertCacheReport);
+  });
+
   it("starts with the format and the environment and names the entry point by mount", () => {
     const record = buildGemmaRecord({ ...input, mount: "gemma4" });
     expect(record.format).toBe(RECORD_FORMAT);

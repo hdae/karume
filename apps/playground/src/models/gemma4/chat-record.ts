@@ -9,6 +9,7 @@
 import type {
   ChatJsonObject,
   ChatStop,
+  ExpertCacheReport,
   GenerationDecodeAhead,
   GenerationSpeculation,
   SamplerSpec,
@@ -165,6 +166,13 @@ export type GemmaRecord = RecordEnvironment & {
   readonly fullStateStorage?: "f16";
   /** Present only when the image embedder was built (`vision` of `fromPretrained`). */
   readonly vision?: true;
+  /** Present only when the pipeline was built with the exact expert cache (`expertCache`). */
+  readonly expertCache?: { readonly slots: number };
+  /**
+   * Present only with {@link expertCache}: `Pipeline.expertCacheReport()` after the latest turn
+   * (cumulative over the pipeline's lifetime, so a "Load again" starts it over).
+   */
+  readonly expertCacheReport?: ExpertCacheReport;
   readonly loadSeconds: number;
   /**
    * Whether the pipeline was loaded with `onRunDiagnostics`. With it the pipeline skips its on-GPU
@@ -189,6 +197,8 @@ export const buildGemmaRecord = (input: {
   readonly speculative: boolean;
   readonly fullStateStorage?: "f16";
   readonly vision?: true;
+  readonly expertCache?: { readonly slots: number };
+  readonly expertCacheReport?: ExpertCacheReport;
   readonly loadSeconds: number;
   readonly chat: ChatSettings;
   readonly turns: readonly TurnRecord[];
@@ -210,6 +220,8 @@ export const buildGemmaRecord = (input: {
   speculative: input.speculative,
   ...(input.fullStateStorage === undefined ? {} : { fullStateStorage: input.fullStateStorage }),
   ...(input.vision === undefined ? {} : { vision: input.vision }),
+  ...(input.expertCache === undefined ? {} : { expertCache: input.expertCache }),
+  ...(input.expertCacheReport === undefined ? {} : { expertCacheReport: input.expertCacheReport }),
   loadSeconds: input.loadSeconds,
   diagnosticsCollected: input.diagnostics !== undefined,
   chat: input.chat,

@@ -67,6 +67,7 @@ import {
   type TurnRecord,
 } from "./chat-record";
 import { ChatTranscript, ImageThumbnail } from "./chat-transcript";
+import { expertCacheText } from "./expert-cache";
 import { decodeImageFile } from "./image-input";
 import { createLiveReplyStore, frameScheduler } from "./live-reply";
 import { type GenerateObservation, type ObservedHost, observeHost } from "./observed-host";
@@ -82,12 +83,14 @@ import {
   type ChatForm,
   type ChatSettings,
   effectiveModelKey,
+  EXPERT_CACHE_SLOTS,
   GEMMA_MOUNTS,
   type GemmaManifests,
   type GemmaMount,
   gemmaModelChoices,
   chatSpeculative,
   hasDrafter,
+  hasExpertCache,
   hasVision,
   INITIAL_CHAT_FORM,
   MOUNT_LABELS,
@@ -97,6 +100,7 @@ import {
   OVERFLOW_CHOICES,
   overflowPolicy,
   parseChatForm,
+  parseExpertCacheSlots,
   parseModelKey,
   parseTurnForm,
   sameChatSettings,
@@ -227,7 +231,11 @@ const pipelineText = (state: GemmaPipelineState): string => {
       const { request } = state;
       return `${MOUNT_LABELS[request.mount]} ${request.model} · ${request.quant} · ${request.source.kind}${
         request.speculative ? " · MTP drafter" : ""
-      }${request.fullStateStorage === "f16" ? " · f16 KV" : ""}${request.diagnostics ? " · diagnostics" : ""} · loaded in ${state.loadSeconds.toFixed(1)} s`;
+      }${request.fullStateStorage === "f16" ? " · f16 KV" : ""}${
+        request.expertCache === undefined
+          ? ""
+          : ` · expert cache ${request.expertCache.slots} slots`
+      }${request.diagnostics ? " · diagnostics" : ""} · loaded in ${state.loadSeconds.toFixed(1)} s`;
     }
   }
 };
@@ -299,6 +307,15 @@ export const Gemma4Page = () => {
     hasDrafter(selectedManifest, modelKey);
   const speculative = speculativeChosen && speculativeAvailable;
   const [f16KvChosen, setF16KvChosen] = useState(false);
+  // The field is kept as typed; it applies (and is checked) only for a mixture-of-experts model.
+  const [expertSlotsText, setExpertSlotsText] = useState("");
+  const expertCacheAvailable = modelKey !== undefined && hasExpertCache(modelKey);
+  const expertSlotsParsed = useMemo(
+    () => parseExpertCacheSlots(expertSlotsText),
+    [expertSlotsText],
+  );
+  const expertCacheSlots =
+    expertCacheAvailable && expertSlotsParsed.ok ? expertSlotsParsed.value : undefined;
   const [diagnosticsChosen, setDiagnosticsChosen] = useState(false);
 
   // GPU and pipeline.
@@ -476,6 +493,7 @@ export const Gemma4Page = () => {
     modelKey !== undefined &&
     quant !== undefined &&
     chatParsed?.ok === true &&
+    (!expertCacheAvailable || expertSlotsParsed.ok) &&
     !running;
   const load = (): void => {
     if (!canLoad || chatParsed?.ok !== true) return;
@@ -487,6 +505,7 @@ export const Gemma4Page = () => {
       source: sourceChoice.source,
       speculative,
       ...(f16KvChosen ? { fullStateStorage: "f16" as const } : {}),
+      ...(expertCacheSlots === undefined ? {} : { expertCache: { slots: expertCacheSlots } }),
       ...(selectedManifest !== undefined && hasVision(selectedManifest, modelKey)
         ? { vision: true }
         : {}),
@@ -871,6 +890,13 @@ export const Gemma4Page = () => {
     // turnRecords: a finished turn changes the KV or the history.
   }, [readyChat, running, turnRecords]);
 
+  // The pipeline's own counters (cumulative), read again once a turn has settled.
+  const expertReport = useMemo(
+    () => readyChat?.pipeline.pipeline.expertCacheReport(),
+    // turnRecords: every settled step ran (and may have loaded experts).
+    [readyChat, turnRecords],
+  );
+
   const record = useMemo((): GemmaRecord | undefined => {
     if (readyChat === undefined || readyGpu === undefined || turnRecords.length === 0) {
       return undefined;
@@ -899,12 +925,14 @@ export const Gemma4Page = () => {
         ? {}
         : { fullStateStorage: request.fullStateStorage }),
       ...(request.vision === true ? { vision: true as const } : {}),
+      ...(request.expertCache === undefined ? {} : { expertCache: request.expertCache }),
+      ...(expertReport === undefined ? {} : { expertCacheReport: expertReport }),
       loadSeconds: Number(loadSeconds.toFixed(3)),
       chat: readyChat.settings,
       turns: turnRecords,
       diagnostics: request.diagnostics ? diagnostics : undefined,
     });
-  }, [readyChat, readyGpu, turnRecords, diagnostics, manifestStates, statuses]);
+  }, [readyChat, readyGpu, turnRecords, diagnostics, expertReport, manifestStates, statuses]);
 
   const chatSettingsChanged =
     readyChat !== undefined &&
@@ -918,6 +946,7 @@ export const Gemma4Page = () => {
       sourceChoice.source !== pipeline.request.source ||
       speculative !== pipeline.request.speculative ||
       f16KvChosen !== (pipeline.request.fullStateStorage === "f16") ||
+      expertCacheSlots !== pipeline.request.expertCache?.slots ||
       diagnosticsChosen !== pipeline.request.diagnostics);
   const modelChoices = useMemo(() => gemmaModelChoices(manifests), [manifests]);
 
@@ -1029,6 +1058,27 @@ export const Gemma4Page = () => {
                 earlier runs are read rounded to f16. With the MTP drafter the session speculates
                 always, without the self-tuning gate. Applies on the next Load.
               </p>
+              <Field
+                id="gemma4-expert-cache"
+                label="Expert cache slots"
+                hint={
+                  expertCacheAvailable
+                    ? `Keeps this many of each layer's ${EXPERT_CACHE_SLOTS.max} experts on the GPU and reads a missing one from the distribution when the routing picks it; a run that missed is run again, so the tokens are those of full residency. ${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}; empty = every expert resident. Prefill chunks shrink to at most ⌊slots / 8⌋ rows, so long prompts are slow, and each token is sampled on the CPU. A refusal by the pipeline shows under Status. Applies on the next Load.`
+                    : "Only for a mixture-of-experts model (Gemma 4 QAT 26B)."
+                }
+              >
+                <Input
+                  id="gemma4-expert-cache"
+                  inputMode="numeric"
+                  value={expertSlotsText}
+                  placeholder="off"
+                  onChange={(event) => setExpertSlotsText(event.target.value)}
+                  disabled={running || !expertCacheAvailable}
+                />
+                {expertCacheAvailable && !expertSlotsParsed.ok ? (
+                  <p className="text-xs text-destructive">{expertSlotsParsed.errors.join(" ")}</p>
+                ) : null}
+              </Field>
               <div className="flex items-center gap-2">
                 <Switch
                   id="gemma4-diagnostics"
@@ -1415,6 +1465,9 @@ export const Gemma4Page = () => {
               ["Pipeline", pipelineText(pipeline)],
               ["Chat", readyChat === undefined ? "—" : settingsText(readyChat.settings)],
               ["Context", contextUsage === undefined ? "—" : contextUsageText(contextUsage)],
+              ...(expertReport === undefined
+                ? []
+                : [["Expert cache", expertCacheText(expertReport)] as const]),
             ]}
           >
             {pipeline.kind === "error" ? (
