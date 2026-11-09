@@ -275,6 +275,41 @@ through the hub's range reader (a `slice` of the cached Blob), then the same ran
   3.9 loads per token of K = 96 to the Blob: about 52 ms per token for the resume if a tier hit costs what the ring does. A
   tier holding every expert returns to the times of §4.
 
+### 6.2 The first chat and a host tier in Chrome (2026-11-09)
+
+The full model ran a chat with the exact cache (scheme A of ADR [0146](../decisions/0146-exact-expert-cache.md)) in Chrome
+on the RTX 5070 Ti at 32 slots, every miss read from the cached Blob. One English prompt of 30 tokens, 239 tokens sampled at
+temperature 1 (top-k 64, top-p 0.95), stopped by the end token:
+
+| counter | value |
+|---|---:|
+| prefill | 8 chunks of 4 rows, 13.3 s |
+| decode | 238 tokens, 62.9 s (264 ms per token) |
+| committed runs / re-runs | 246 / 551 (3.24 forwards per committed run) |
+| experts loaded | 15,662 (52.4 GB), 59.0 s (3.77 ms per expert) |
+| everything else | 17.1 s over 797 runs (about 21 ms per run, about 70 ms per committed run) |
+
+- The Blob reads take 77% of the time. At 64 slots the maintainer saw it only a little faster (no record kept).
+- Even with free loads a committed run would cost about 70 ms at 32 slots; the rest is the re-runs.
+
+A host tier was then measured with the same page (`/expert-transfer`, record
+`expert-transfer_2026-11-09T19-38-13.json`): 13 GiB held in each of two forms, then hits of 1–32 distinct experts at random
+positions of the tier copied into a 32-expert VRAM pool, 25 samples after 5 of warm-up, wall time to `onSubmittedWorkDone`:
+
+| form | allocate and fill 13 GiB | ms per expert at 32 experts (median − fence) / 32 | slope over 1–32 experts |
+|---|---:|---:|---:|
+| A: `ArrayBuffer`s, staging ring | 1.4 s | 0.52 | 0.47 |
+| A: `ArrayBuffer`s, `writeBuffer` | (same) | 1.12 | 1.12 |
+| B: `MAP_WRITE \| COPY_SRC` buffers filled at creation, `copyBufferToBuffer` | 8.4 s | 0.064 | 0.040 |
+
+- Both forms held all 13 GiB (26B's experts are 12.85 GB) without an allocation failure.
+- B's copy runs from system memory at about 50 GB/s; it is the fastest hit by a factor of eight.
+- B's memory was not returned by `destroy()` until the page collected garbage, and the system's memory graph rose by about
+  twice B's size while it was held: Chrome appears to keep a renderer-side copy of a mappable buffer (an inference from
+  Task Manager, not a per-process measurement). A's arrays were returned at once.
+- At 32 slots the chat's 15,662 loads would cost about 8 s through A's ring and about 1 s through B, against 59 s from the
+  Blob: about 25 s and 18 s for the whole chat.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token

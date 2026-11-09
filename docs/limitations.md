@@ -1168,7 +1168,7 @@ an exact cache of 64 experts per layer re-runs a decode token 2.41 times on aver
 re-runs the whole token.
 The revisit entry with its revival conditions is in [backlog](backlog.md) parked.
 
-**The exact expert cache** (`expertCache: { slots }` — ADR [0146](decisions/0146-exact-expert-cache.md), opt-in) is the
+**The exact expert cache** (`expertCache: { slots, hostBytes? }` — ADR [0146](decisions/0146-exact-expert-cache.md), opt-in) is the
 one exception, for experts only: the Session holds `slots` experts per layer and a miss is loaded from the distribution and
 paid with a re-run, so the output is bit-identical to full residency. Its constraints:
 
@@ -1177,6 +1177,8 @@ paid with a re-run, so the output is bit-identical to full residency. Its constr
 - It is refused with `decodeAhead ≥ 2`, a drafter's `speculative`, `pleResidency: "gpu"` and `vision`; decode samples on
   the host.
 - The build still reads and verifies every block, experts included, so the load takes as long as full residency.
+- The host tier (`hostBytes`) is RAM that the memory estimate does not count: every expert of 26B is about 12.85 GB. On a
+  source that does not verify its reads the build still digests every expert, even when the tier holds them all.
 - A cached distribution must stay in its cache while the pipeline lives. Over a source without seekable range reads (the
   hub over Hugging Face on Node or Deno) a miss may read up to a whole part; this is not refused yet (ADR 0146 open
   point 5).

@@ -17,11 +17,13 @@ measurements in `docs/research/`.
 
 ### Added
 
-- `@karume/runtime`: `SessionOptions.expertCache: { slots }`, an exact expert cache for `expert_linear`: each routed layer
-  keeps `slots` experts on the GPU and loads a missing one from the container on request. `Session.expertCache` runs a
+- `@karume/runtime`: `SessionOptions.expertCache: { slots, hostBytes? }`, an exact expert cache for `expert_linear`: each
+  routed layer keeps `slots` experts on the GPU and loads a missing one on request, through a staging ring of upload buffers.
+  `hostBytes` adds a host tier: up to that many bytes of experts held in RAM, filled while the Session reads its weights, so
+  a miss it holds is not read from the container again. `Session.expertCache` runs a
   deferred generation run and returns its routing and misses, and its `load`, `touch` and `stats` calls manage the
   experts. Under the option `Session.run`, `enqueue` and `enqueueRead` are refused (ADR 0146).
-- `@karume/models`: `expertCache: { slots }` on `gemma.PipelineOptions` for Gemma 4 26B A4B. A run that missed an expert
+- `@karume/models`: `expertCache: { slots, hostBytes? }` on `gemma.PipelineOptions` for Gemma 4 26B A4B. A run that missed an expert
   is run again, so the tokens and logits are bit-identical to every expert resident, at 16 to 128 slots instead of 128.
   `Pipeline.expertCacheReport()` and the type `gemma.ExpertCacheReport` give its counters. It is refused with
   `decodeAhead ≥ 2`, `speculative`, `pleResidency: "gpu"` and `vision`. Prefill chunks shrink to at most

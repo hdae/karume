@@ -124,6 +124,8 @@
 | cut model △ | カットモデル | 26B を先頭の N 層だけで書き出したモデル。GPU に載らない機で移植を確かめる | 切ったモデル・短縮モデル | ADR 0145 |
 | near-tie (routing) △ | ニアタイ | router の確率の差が床より小さく、どちらの順・どちらの expert でも正しい行。別枠で報告する | 僅差・同点 | ADR 0145 |
 | exact expert cache △ | expert キャッシュ | 各層の expert のうち slots 個だけを GPU に置き、ミスした run はやり直して、全常駐とビット同一の出力にする仕組み | 近似キャッシュ（別物） | ADR 0146 |
+| host tier △ | RAM 層 | expert キャッシュで配布物の手前に置く RAM（`hostBytes` の予算内で expert を保持し、ミスをここから上げる） | ホスト席・RAM 席 | ADR 0146 追記 2026-11-10 |
+| staging ring △ | ステージングリング | expert をプールへ上げるための MAP_WRITE の upload buffer の環（sliding KV の ring とは別物） | 中継リング | ADR 0146 決定 5 |
 | slot table △ | スロット表 | expert id → プールのスロット番号の表（−1 = 未常駐） | 席表 | ADR 0146 |
 | fake-quant golden △ | fake-quant の golden | torch に活性量子化を掛けて採った期待値 | 鏡像 golden | glossary.md |
 | census | census | 変種のパイプラインキーが実際に走った本数の検査（黙って落ちるのを防ぐ） | — | ADR 0058 決定 4 |

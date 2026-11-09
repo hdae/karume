@@ -118,10 +118,8 @@ The code facts this rests on (read 2026-11-09):
 
 ## Open points
 
-1. A RAM tier. A cached Blob read measured about 2.9 ms per expert in Chrome on the RTX 5070 Ti (research §6.1, 2026-11-09),
-   about 36 ms per token at K = 64; the host store is therefore one narrow interface, so a tier in RAM can be put in front of
-   the Blob once the counters of a real chat are in (the maintainer's ruling of 2026-11-09: build scheme A on the Blob
-   first).
+1. A RAM tier — settled by the addendum of 2026-11-10 (a cached Blob read measured about 2.9 ms per expert in Chrome on
+   the RTX 5070 Ti, research §6.1, and the first chat spent 77% of its time on those reads, §6.2).
 2. A per-layer K (the research's fit saves about 12% at K = 64).
 3. Prefill speed with small chunks, and whether a grouped prefill form (ADR 0145 open point 1) changes it.
 4. The real per-forward time of 26B decode in Chrome, which sets the absolute cost of every re-run.
@@ -160,3 +158,34 @@ page). Where the build differs from the decisions above, or settles what they le
   tokens per golden prompt equal to the pipeline without the cache, with misses, loads and re-runs counted. Committing a
   missed run instead of re-running it fails every one of those checks. The Chrome chat on the RTX 5070 Ti is the
   maintainer's.
+
+## Addendum 2026-11-10: a host tier in RAM
+
+The first chat in Chrome (research [§6.2](../research/2026-11-08-gemma4-26b-moe-cache.md)) spent 77% of its time reading
+misses from the cached Blob (3.77 ms per expert), which settles open point 1. The maintainer's ruling: the host store is
+tiered — the distribution (CacheStorage) → RAM → the VRAM pool — so that larger models and devices with less RAM fit later;
+holding every expert in RAM is fine for now.
+
+- **The RAM tier holds plain `ArrayBuffer`s** (one per expert of a layer) under a byte budget `hostBytes`, filled at build
+  from the verified block bytes the build already reads, LRU over every held expert; a load takes what the tier holds and
+  reads the rest from the container (with the digest check on unverified sources) into the tier. Without `hostBytes`
+  there is no tier and every miss reads the container, as in scheme A.
+- **Uploads go through the staging ring of decision 5** after all: with reads from RAM the upload is the cost, and the ring
+  measured 0.52 ms per expert against 1.12 ms for `writeBuffer`.
+- **Not taken now: upload buffers as the tier** (`MAP_WRITE | COPY_SRC` buffers filled at creation, copied on the GPU).
+  Their hit is eight times cheaper (0.064 ms), but Chrome appeared to hold about twice their size in RAM until garbage
+  collection, and refilling one within a budget needs a `mapAsync` round trip. The tier sits behind one internal
+  interface, so this form can be added as a whole-model fast path if the measured gap matters.
+
+As built (`expert-host-tier.ts`, `expert-staging-ring.ts`):
+
+- An entry is one expert's ranges of every pooled weight of its layer, contiguous (codes then steps per weight), so a held
+  expert is one copy into a ring slot. The ring has up to 32 slots and at most 128 MiB (32 experts of 26B, about 107 MB); a
+  load larger than the ring runs in rounds, and each round makes its experts resident on its own (its tables follow its
+  copies), so a read that fails in a later round leaves the earlier ones valid. A slot is written again only after its
+  `mapAsync` resolved, which WebGPU settles after the copies submitted before it.
+- `ExpertLoad` and `ExpertCacheStats` split the experts by source (host tier, container) and the time into reads and
+  uploads, and report what the tier holds; `bytesRead` stays the bytes read from the container. Dispose clears the tier.
+- On the 26B cut model (12 layers, RTX 3080 Ti) a tier of every expert and a quarter tier keep the golden rows and the
+  greedy tokens byte-identical, with the same misses, loads and re-runs as without a tier. The pipeline at 64 slots spent
+  9.8 s in loads without the tier and 1.8 s with every expert held.
