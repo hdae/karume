@@ -38,8 +38,10 @@ maintainer's ruling of 2026-11-06).
    2026-11-09 (runtime, Gemma pipeline, Playground; the cut model at 16 and 64 slots is bit-identical on the RTX 3080 Ti).
    The maintainer's chat with the full model in Chrome on the RTX 5070 Ti ✅ 2026-11-09 (32 slots: 264 ms per decode token,
    77% of the time in Blob reads — research §6.2). The host tier in RAM ✅ 2026-11-10 (`hostBytes`, plain `ArrayBuffer`s
-   and the staging ring — ADR 0146 addendum 2026-11-10; the cut model is bit-identical with it). Next: the maintainer's
-   chat with the tier in Chrome on the RTX 5070 Ti, then self-speculation and a K per layer.
+   and the staging ring — ADR 0146 addendum 2026-11-10; the cut model is bit-identical with it). The maintainer's
+   chat with the tier in Chrome on the RTX 5070 Ti ✅ 2026-11-09 (every expert in RAM: 9.7 tokens per second at 32 slots,
+   18.1 at 64, 52.3 resident; the same tokens — research §6.3). Next: self-speculation and a K per layer (the re-runs are
+   what is left).
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
 

@@ -1,7 +1,7 @@
-> This document is a point-in-time snapshot (2026-11-08 to 2026-11-09) of the pre-research into an expert cache for Gemma 4
+> This document is a point-in-time snapshot (2026-11-08 to 2026-11-10) of the pre-research into an expert cache for Gemma 4
 > 26B A4B: how many experts per layer a fixed-size cache would hold, how often decode would miss, what an exact cache (output
 > bit-identical to full residency) costs in re-runs, and how far two approximate modes move the output. Every number comes from
-> a CPU reference of all 30 layers on the maintainer's machine, except the fence and upload costs of §6.1, which were measured in
+> a CPU reference of all 30 layers on the maintainer's machine, except §6.1 to §6.3 (transfer costs and chats), which were measured in
 > Chrome on an RTX 5070 Ti. It is not a design source of truth. The harness and the raw records are local and untracked (`outputs/diag/moe-cache-2026-11-08/`).
 
 # Gemma 4 26B A4B: an expert cache
@@ -310,6 +310,36 @@ positions of the tier copied into a 32-expert VRAM pool, 25 samples after 5 of w
 - At 32 slots the chat's 15,662 loads would cost about 8 s through A's ring and about 1 s through B, against 59 s from the
   Blob: about 25 s and 18 s for the whole chat.
 
+### 6.3 The chat with the host tier in Chrome (2026-11-09)
+
+The same chat as §6.2 (one English prompt of 30 tokens, 239 tokens sampled at temperature 1, top-k 64, top-p 0.95, seed 0)
+ran in Chrome on the RTX 5070 Ti with the host tier of ADR 0146's addendum of 2026-11-10, at several slot counts and two tier
+budgets, and once with every expert resident. Records `gemma4_2026-11-09T21-47-57.json` to `…T22-03-55.json`:
+
+| slots | host tier | build | prefill | decode tokens per s | forwards per committed run | experts loaded (from RAM / container) | load time | upload per expert | other time per forward |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16 | every expert | 16.6 s | 5.0 s (15 chunks) | 6.1 | 3.87 | 34,021 (34,021 / 0) | 23.3 s | 0.68 ms | 20.8 ms |
+| 32 | every expert | 16.0 s | 3.4 s (8 chunks) | 9.7 | 3.24 | 15,662 (15,662 / 0) | 11.1 s | 0.71 ms | 21.2 ms |
+| 64 | every expert | 16.5 s | 3.0 s (4 chunks) | 18.1 | 2.32 | 4,583 (4,583 / 0) | 3.6 s | 0.79 ms | 22.3 ms |
+| 96 | every expert | 16.7 s | 2.5 s (4 chunks) | 25.6 | 1.84 | 3,104 (3,104 / 0) | 2.5 s | 0.81 ms | 20.8 ms |
+| 64 | 8 GiB | 9.6 s | 8.7 s (4 chunks) | 12.4 | 2.32 | 4,583 (2,650 / 1,933) | 15.8 s | 0.67 ms | 21.6 ms |
+| 128 (no cache) | — | 7.5 s | 0.4 s (1 chunk) | 52.3 | 1 | — | — | — | 19.1 ms per token |
+
+"Other time per forward" is the turn's time less the load time, over committed runs plus re-runs.
+
+- Every record sampled the same 239 tokens, the run with every expert resident and §6.2's run without a tier included: the
+  output is bit-identical in Chrome too.
+- A tier of every expert held 3,840 experts (30 layers × 128, 12.85 GB) and read nothing from the Blob; at 32 slots decode
+  went from 3.8 to 9.7 tokens per second (§6.2 estimated about 25 s for the chat; it took 28.0 s). The build is about 7 s
+  longer, the time to copy the experts into RAM.
+- With an 8 GiB tier, 2,567 experts were held (just under the budget) and 1,933 misses were read from the Blob at about
+  6.55 ms each, against 3.77 ms in §6.2. A likely cause (not measured): a load now reads its misses one ring round of up to 32
+  at a time, where scheme A read every miss of a load at once.
+- Uploads cost 0.67–0.81 ms per expert, above the 0.52 ms of the bench in §6.2; a decode load moves about 14 experts at 64
+  slots, so a round's fixed cost is shared by fewer.
+- With the transfer out of the way, the time follows the forwards: about 21 ms each at every slot count, close to the 19 ms of
+  a resident decode token. Fewer re-runs (self-speculation, a per-layer K) are what is left to gain.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
@@ -321,6 +351,7 @@ positions of the tier copied into a 32-expert VRAM pool, 25 samples after 5 of w
 - A per-layer K and self-speculation each bring the exact cache at K = 64 to about 35 ms per token, and together to about
   34 ms, against 15 ms with every expert resident; Chrome's measured fence and upload costs leave these within 1 ms.
 - Reading the misses from the cached Blob in Chrome (about 2.9 ms per expert) roughly doubles those times; a host tier in
-  RAM is what brings them back.
+  RAM is what brings them back. In the chat of §6.3 a tier of every expert made 64 slots decode at 18.1 tokens per second
+  (52.3 with every expert resident), about 21 ms per forward.
 - Open: the verify's extra expert traffic, the real per-forward time of the 26B decode in place of the assumed 15 ms, and
   whether a GPU implementation reaches the CPU reference's draft acceptance.
