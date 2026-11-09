@@ -31,8 +31,9 @@ maintainer's ruling of 2026-11-06).
    2026-11-09 (RTX 5070 Ti: about 2.5 ms per fence, about 0.43 ms per expert by a staging ring).
    Resuming a retry at the first missed layer stays exact but saves only about a fifth of the retry layers (the early layers
    miss most); a K that differs per layer and self-speculation over the cache each cut the time at K = 64 by about 12–13%,
-   together about 15%, still about 2.3 times full residency. This stays inside "MoE assumes every expert is resident" of
-   [limitations](limitations.md) until a ruling changes it.
+   together about 15%, still about 2.3 times full residency. Ruling 2026-11-09: build it even if slow (a model whose experts
+   do not fit in VRAM becomes possible in principle) — ADR [0146](decisions/0146-exact-expert-cache.md) (proposed): stage 0 the
+   cached-read measurement, then the whole-token re-run, then self-speculation over the cache.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
 
