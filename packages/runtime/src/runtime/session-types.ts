@@ -698,9 +698,22 @@ export type SessionOptions = {
    * block, fails loudly). On a source that has not verified its bytes, construction keeps the SHA-256
    * of every expert range it read, and a load checks the range against it.
    *
+   * `hostBytes` adds a **host tier** in RAM in front of the container: a budget in bytes of expert
+   * bytes held as plain `ArrayBuffer`s (one per expert of a layer). Construction fills it, in its read
+   * order, from the verified block bytes it reads anyway, holding each expert that still fits; a load
+   * takes what the tier holds from RAM and reads the rest from the container (digest-checked as
+   * above), keeping them in the tier and evicting the least recently used experts over the budget.
+   * A budget at or above every routed expert's bytes holds every expert, and no load reads the
+   * container again. Absent = no tier: every miss reads the container. It changes where the bytes
+   * come from, not which: the output stays bit-identical to full residency. The tier is host memory,
+   * not counted by the estimate, and released by `dispose`.
+   *
+   * MUST: `hostBytes` is a positive safe integer that holds at least one expert (anything else fails
+   * loudly at construction).
+   *
    * DECIDED: docs/decisions/0146-exact-expert-cache.md
    */
-  readonly expertCache?: { readonly slots: number };
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
   /**
    * Test only ({@link I8A8_DOT}). The default is decided from the enumeration of
    * wgslLanguageFeatures.
@@ -968,14 +981,28 @@ export type ExpertRun = {
 
 /** The result of {@link ExpertCache.load}. */
 export type ExpertLoad = {
-  /** Experts read from the container and written to a slot. */
+  /** Experts written to a slot (from the host tier or the container). */
   readonly loaded: number;
   /** Resident experts whose slot was taken (a free slot taken evicts nothing). */
   readonly evicted: number;
+  /** Of `loaded`, the experts taken from the host tier (`SessionOptions.expertCache.hostBytes`). */
+  readonly fromHost: number;
+  /** Of `loaded`, the experts read from the container (every one without a host tier). */
+  readonly fromContainer: number;
   /** Bytes read from the container. */
   readonly bytes: number;
+  /** Bytes uploaded to the pools (every loaded expert's, wherever it came from). */
+  readonly uploadedBytes: number;
   /** Wall time of the load (0 for a load with nothing missing). */
   readonly ms: number;
+  /** Of `ms`, the wait for the container's reads (with their digest checks on an unverified source). */
+  readonly readMs: number;
+  /**
+   * Of `ms`, the staging ring: the wait for its slots, writing them, and issuing the copies and the
+   * table writes with their error scopes. The copies of the last round complete on the GPU after the
+   * load returns (ahead of the next run, in queue order), so that part lands in the next run's fence.
+   */
+  readonly uploadMs: number;
 };
 
 /** The cumulative counters of {@link ExpertCache} (over the Session's lifetime). */
@@ -988,9 +1015,24 @@ export type ExpertCacheStats = {
   readonly loads: number;
   readonly loadedExperts: number;
   readonly evictedExperts: number;
+  /** Of `loadedExperts`, the experts taken from the host tier. */
+  readonly hostExperts: number;
+  /** Of `loadedExperts`, the experts read from the container. */
+  readonly containerExperts: number;
+  /** Bytes read from the container. */
   readonly bytesRead: number;
+  /** Bytes uploaded to the pools. */
+  readonly bytesUploaded: number;
   /** Wall time of the counted loads. */
   readonly loadMs: number;
+  /** Of `loadMs`, the wait for the container's reads ({@link ExpertLoad.readMs}). */
+  readonly readMs: number;
+  /** Of `loadMs`, the staging ring ({@link ExpertLoad.uploadMs}). */
+  readonly uploadMs: number;
+  /** Experts the host tier holds now (0 without a tier). */
+  readonly hostHeldExperts: number;
+  /** Bytes the host tier holds now (at most `hostBytes`; 0 without a tier). */
+  readonly hostHeldBytes: number;
 };
 
 /**
@@ -1024,9 +1066,14 @@ export type ExpertCache = {
    * experts not needed by this routing, and become the most recent. A routing with nothing missing
    * loads nothing and counts nothing.
    *
-   * MUST: a load that fails after its GPU writes were issued leaves the cache unusable (every later
-   * call fails loudly — the tables can no longer be trusted); a failed read before them changes
-   * nothing.
+   * The missing experts are taken from the host tier where it holds them, read from the container
+   * otherwise, and uploaded through a staging ring in rounds of at most its slots; each round makes
+   * its experts resident (pool bytes and tables) on its own.
+   *
+   * MUST: a load that fails after a round's GPU writes were issued, or whose ring cannot be mapped
+   * again, leaves the cache unusable (every later call fails loudly — the tables can no longer be
+   * trusted); a failed read before a round's GPU writes leaves the rounds before it resident and
+   * changes nothing else.
    */
   load(routing: ExpertRouting): Promise<ExpertLoad>;
   /**

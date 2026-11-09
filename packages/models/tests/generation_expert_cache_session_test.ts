@@ -120,7 +120,17 @@ const scriptedCache = (
       log.push(`load [${[...routing.ids].join(",")}]`);
       if (options.failLoad === true) return Promise.reject(new Error("read failed"));
       loads += 1;
-      return Promise.resolve({ loaded: 1, evicted: 0, bytes: 10, ms: 1 });
+      return Promise.resolve({
+        loaded: 1,
+        evicted: 0,
+        fromHost: 0,
+        fromContainer: 1,
+        bytes: 10,
+        uploadedBytes: 10,
+        ms: 1,
+        readMs: 1,
+        uploadMs: 0,
+      });
     },
     touch: (routing, rows) => {
       log.push(`touch ${rows} [${[...routing.ids].join(",")}]`);
@@ -131,8 +141,15 @@ const scriptedCache = (
       loads,
       loadedExperts: loads,
       evictedExperts: 0,
+      hostExperts: 0,
+      containerExperts: loads,
       bytesRead: 10 * loads,
+      bytesUploaded: 10 * loads,
       loadMs: loads,
+      readMs: loads,
+      uploadMs: 0,
+      hostHeldExperts: 3,
+      hostHeldBytes: 30,
     }),
   };
   const target: ExpertCacheTarget<LoggedContext> = {
@@ -187,8 +204,15 @@ describe("the expert cache's re-run face", () => {
         loads: 2,
         loadedExperts: 2,
         evictedExperts: 0,
+        hostExperts: 0,
+        containerExperts: 2,
         bytesRead: 20,
+        bytesUploaded: 20,
         loadMs: 2,
+        readMs: 2,
+        uploadMs: 0,
+        hostHeldExperts: 3,
+        hostHeldBytes: 30,
         slots: 4,
         committedRuns: 3,
         retries: 2,
@@ -370,7 +394,18 @@ describe("the face under the generation loop", () => {
           missing,
         };
       },
-      load: () => Promise.resolve({ loaded: 1, evicted: 0, bytes: 0, ms: 0 }),
+      load: () =>
+        Promise.resolve({
+          loaded: 1,
+          evicted: 0,
+          fromHost: 1,
+          fromContainer: 0,
+          bytes: 0,
+          uploadedBytes: 0,
+          ms: 0,
+          readMs: 0,
+          uploadMs: 0,
+        }),
       touch: () => {},
       stats: () => ({
         runs: 0,
@@ -378,8 +413,15 @@ describe("the face under the generation loop", () => {
         loads: 0,
         loadedExperts: 0,
         evictedExperts: 0,
+        hostExperts: 0,
+        containerExperts: 0,
         bytesRead: 0,
+        bytesUploaded: 0,
         loadMs: 0,
+        readMs: 0,
+        uploadMs: 0,
+        hostHeldExperts: 0,
+        hostHeldBytes: 0,
       }),
     };
     const face = createExpertCacheSession({

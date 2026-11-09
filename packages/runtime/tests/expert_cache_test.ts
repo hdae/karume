@@ -23,6 +23,7 @@ import { type BlockSource, openContainer, partsSource } from "../src/format/cont
 import { parseIrDeclarationValue } from "../src/format/ir.ts";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
 import { GpuValidationError } from "../src/gpu/error-scope.ts";
+import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
 import {
   createSessionFromContainer,
   type ExpertRouting,
@@ -89,6 +90,17 @@ describe("the expertCache option's own checks (no graph)", () => {
     assertEquals(sessionOptionsViolation({ expertCache: { slots: 64 } }), undefined);
   });
 
+  it("accepts a positive integer of host bytes, and its absence", () => {
+    assertEquals(
+      sessionOptionsViolation({ expertCache: { slots: 64, hostBytes: 14 * 2 ** 30 } }),
+      undefined,
+    );
+    assertEquals(
+      sessionOptionsViolation({ expertCache: { slots: 64, hostBytes: undefined } }),
+      undefined,
+    );
+  });
+
   for (const [label, value] of [
     ["0 slots", { slots: 0 }],
     ["negative slots", { slots: -1 }],
@@ -97,6 +109,12 @@ describe("the expertCache option's own checks (no graph)", () => {
     ["string slots", { slots: "8" }],
     ["null", null],
     ["a bare number", 8],
+    ["0 host bytes", { slots: 8, hostBytes: 0 }],
+    ["negative host bytes", { slots: 8, hostBytes: -4096 }],
+    ["fractional host bytes", { slots: 8, hostBytes: 4096.5 }],
+    ["NaN host bytes", { slots: 8, hostBytes: Number.NaN }],
+    ["string host bytes", { slots: 8, hostBytes: "4096" }],
+    ["null host bytes", { slots: 8, hostBytes: null }],
   ] as const) {
     it(`refuses ${label} with a message naming the option`, () => {
       const violation = sessionOptionsViolation({ expertCache: anyOf(value) });
@@ -134,6 +152,42 @@ describe("the expert cache's plan of a graph", () => {
     });
     // The routers keep their residency.
     assertEquals(plan.residency.get("router_w0"), { seat: "raw", payloadBytes: 16 * 64 * 4 });
+  });
+
+  it("lays one expert's entry out as each weight's codes then steps, and sizes the ring by it", () => {
+    const plan = planOf(expertGraph(SHAPE), "i4f16", 8);
+    const [gateUp, down] = plan.layers[0].weights;
+    assertEquals(
+      [gateUp.entryCodesAt, gateUp.entryStepsAt, down.entryCodesAt, down.entryStepsAt],
+      [0, 2048, 2304, 3328],
+    );
+    assertEquals(
+      plan.layers.map((layer) => layer.entryBytes),
+      [3456, 3456],
+    );
+    // 2 layers · 8 slots = 16 experts at most in one load, under the 32 of the ring.
+    assertEquals(plan.ring, { slots: 16, slotBytes: 3456 });
+    // f32 has no steps: down's codes follow gate_up's.
+    const [f32GateUp, f32Down] = planOf(expertGraph(SHAPE), "f32", 4).layers[0].weights;
+    assertEquals([f32GateUp.entryCodesAt, f32Down.entryCodesAt], [0, 64 * 64 * 4]);
+    // gate_up [64, 64] and down [64, 32] f32 values.
+    assertEquals(
+      planOf(expertGraph(SHAPE), "f32", 4).layers[0].entryBytes,
+      64 * 64 * 4 + 64 * 32 * 4,
+    );
+    assertEquals(plan.hostBytes, undefined);
+  });
+
+  it("keeps a host budget that holds an expert, and refuses one that holds none", () => {
+    const declaration = expertGraph(SHAPE);
+    const graph = mergeGraph(declaration, storageOf(declaration, "i4f16"));
+    const residency = planWeightResidency(graph);
+    assertEquals(planExpertGraph(graph, residency, { slots: 8, hostBytes: 3456 }).hostBytes, 3456);
+    assertThrows(
+      () => planExpertGraph(graph, residency, { slots: 8, hostBytes: 3455 }),
+      ExecutionError,
+      "hostBytes 3455 holds no expert (one expert of a routed layer is 3456 bytes)",
+    );
   });
 
   it("sizes f32 and i4 (f32 steps) pools from their own storage", () => {
@@ -214,6 +268,29 @@ describe("the estimate under the expert cache", () => {
     // x and out are [2, 64] f32; the cache also reads both [2, 4] i32 indices back.
     assertEquals(plain.scenarios[0].ioBytes, 1024);
     assertEquals(cached.scenarios[0].ioBytes, 1024 + 2 * 32);
+  });
+
+  it("counts neither the staging ring nor the host tier, and names both as unaccounted", () => {
+    const declaration = expertGraph(SHAPE);
+    const graph = mergeGraph(declaration, storageOf(declaration, "i4f16"));
+    const residency = planWeightResidency(graph);
+    const plain = estimateGraphMemory(graph, residency, { bindings: { T: 2 } });
+    const cached = estimateGraphMemory(graph, residency, {
+      bindings: { T: 2 },
+      expertCache: { slots: 8 },
+    });
+    const held = estimateGraphMemory(graph, residency, {
+      bindings: { T: 2 },
+      expertCache: { slots: 8, hostBytes: 2 * 16 * 3456 },
+    });
+    assertEquals(held.resident, cached.resident);
+    assertEquals(held.peakAccountedBytes, cached.peakAccountedBytes);
+    assertEquals(cached.unaccounted.slice(0, plain.unaccounted.length), plain.unaccounted);
+    const extra = (report: typeof cached) => report.unaccounted.slice(plain.unaccounted.length);
+    assertEquals(extra(cached).length, 1);
+    assertStringIncludes(extra(cached)[0], "staging ring");
+    assertEquals(extra(held).length, 2);
+    assertStringIncludes(extra(held)[1], "host tier");
   });
 
   it("refuses a value construction refuses, with the same message", () => {
@@ -408,18 +485,50 @@ const LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 65535,
 };
 
-type Write = { readonly buffer: number; readonly offset: number; readonly bytes: Uint8Array };
+/**
+ * Bytes that landed in a buffer: by `writeBuffer` (the tables) or by a submitted
+ * `copyBufferToBuffer` (an expert's range, out of a staging-ring slot).
+ */
+type Write = {
+  readonly buffer: number;
+  readonly offset: number;
+  readonly bytes: Uint8Array;
+  readonly via: "writeBuffer" | "copy";
+};
+
+/** One recorded `copyBufferToBuffer` of a fake command encoder. */
+type FakeCopy = {
+  readonly source: GPUBuffer;
+  readonly sourceOffset: number;
+  readonly target: GPUBuffer;
+  readonly targetOffset: number;
+  readonly size: number;
+};
+
+/** `MAP_WRITE | COPY_SRC` — the staging ring's buffers. */
+const UPLOAD_USAGE = BUFFER_USAGE.MAP_WRITE | BUFFER_USAGE.COPY_SRC;
 
 /**
- * A fake device that records every buffer it creates (by number, in creation order) and every
- * `writeBuffer` (a copy of the bytes — the call copies them too). `failNextPop` makes the next pop
- * pair report a validation failure. DOM types are not reproduced, so it is passed with a cast (the
- * same test-only boundary as tests/helpers/fake-gpu.ts).
+ * A fake device that records every buffer it creates (by number, in creation order, with its usage
+ * and whether it was mapped at creation) and the bytes that land in a buffer (`writes`: a copy of
+ * the bytes at `writeBuffer`, which copies them too, and at a submit for each recorded
+ * `copyBufferToBuffer` — the source's contents then). A buffer keeps its bytes, hands its mapped
+ * range out only while mapped, and a submit that uses a mapped buffer or one with a pending map
+ * throws (WebGPU's validation). `submits` counts the copies of every submit. `failNextPop` makes the
+ * next pop pair report a validation failure. DOM types are not reproduced, so it is passed with a
+ * cast (the same test-only boundary as tests/helpers/fake-gpu.ts).
  */
 const recordingGpu = () => {
   const sizes: number[] = [];
+  const usages: number[] = [];
+  const mappedAtCreation: boolean[] = [];
   const writes: Write[] = [];
+  const submits: number[] = [];
   const ids = new WeakMap<object, number>();
+  const memory = new WeakMap<
+    object,
+    { readonly bytes: Uint8Array<ArrayBuffer>; mapped: boolean; pending: boolean }
+  >();
   const faults = { failNextPop: false };
   const device = {
     lost: new Promise<GPUDeviceLostInfo>(() => {}),
@@ -433,42 +542,111 @@ const recordingGpu = () => {
       return Promise.resolve({ message: "injected validation failure" } as GPUError);
     },
     createBuffer: (descriptor: GPUBufferDescriptor): GPUBuffer => {
-      const buffer = { size: descriptor.size, destroy: (): void => undefined };
+      const state = {
+        bytes: new Uint8Array(descriptor.size),
+        mapped: descriptor.mappedAtCreation === true,
+        pending: false,
+      };
+      const buffer = {
+        size: descriptor.size,
+        destroy: (): void => undefined,
+        getMappedRange: (): ArrayBuffer => {
+          if (!state.mapped) throw new Error("fake: getMappedRange of an unmapped buffer");
+          return state.bytes.buffer;
+        },
+        unmap: (): void => {
+          state.mapped = false;
+        },
+        mapAsync: (): Promise<void> => {
+          if (state.mapped || state.pending) {
+            return Promise.reject(new Error("fake: mapAsync of a mapped buffer"));
+          }
+          state.pending = true;
+          return Promise.resolve().then(() => {
+            state.pending = false;
+            state.mapped = true;
+          });
+        },
+      };
       ids.set(buffer, sizes.length);
+      memory.set(buffer, state);
       sizes.push(descriptor.size);
+      usages.push(descriptor.usage);
+      mappedAtCreation.push(descriptor.mappedAtCreation === true);
       return buffer as unknown as GPUBuffer;
+    },
+    createCommandEncoder: () => {
+      const copies: FakeCopy[] = [];
+      return {
+        copyBufferToBuffer: (
+          source: GPUBuffer,
+          sourceOffset: number,
+          target: GPUBuffer,
+          targetOffset: number,
+          size: number,
+        ): void => {
+          copies.push({ source, sourceOffset, target, targetOffset, size });
+        },
+        finish: () => ({ copies }),
+      };
     },
     queue: {
       writeBuffer: (buffer: GPUBuffer, offset: number, data: ArrayBufferView): void => {
         const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice();
-        writes.push({ buffer: ids.get(buffer) ?? -1, offset, bytes });
+        writes.push({ buffer: ids.get(buffer) ?? -1, offset, bytes, via: "writeBuffer" });
       },
-      submit: (): void => undefined,
+      submit: (commands: readonly { readonly copies?: readonly FakeCopy[] }[]): void => {
+        let count = 0;
+        for (const command of commands) {
+          for (const copy of command.copies ?? []) {
+            const source = memory.get(copy.source);
+            if (source === undefined || source.mapped || source.pending) {
+              throw new Error("fake: a submit used a mapped buffer (WebGPU validation)");
+            }
+            writes.push({
+              buffer: ids.get(copy.target) ?? -1,
+              offset: copy.targetOffset,
+              bytes: source.bytes.slice(copy.sourceOffset, copy.sourceOffset + copy.size),
+              via: "copy",
+            });
+            count += 1;
+          }
+        }
+        submits.push(count);
+      },
       onSubmittedWorkDone: (): Promise<void> => Promise.resolve(),
     },
   } as unknown as GPUDevice;
   return {
     gpu: new GpuContext(device, readAdapterInfo({}), LIMITS, new Set()),
     sizes,
+    usages,
+    mappedAtCreation,
     writes,
+    submits,
     faults,
   };
 };
 
 /**
  * A part source whose reads can be corrupted after construction (the bytes of a local file changing
- * under the Session). Unverified, so construction keeps a digest of every expert range.
+ * under the Session). Unverified, so construction keeps a digest of every expert range. `reads`
+ * counts every read; with `corruptFrom` set, the reads from that count on are corrupted too.
  */
 const tamperableSource = (parts: readonly Uint8Array<ArrayBuffer>[]) => {
   const inner = partsSource(parts);
-  const state = { corrupt: false };
+  const state = { corrupt: false, reads: 0, corruptFrom: undefined as number | undefined };
   const source: BlockSource = {
     partCount: inner.partCount,
     verified: false,
     partLength: (index) => inner.partLength(index),
     read: async (part, offset, length) => {
+      const index = state.reads;
+      state.reads += 1;
       const bytes = await inner.read(part, offset, length);
-      if (!state.corrupt) return bytes;
+      if (!state.corrupt && (state.corruptFrom === undefined || index < state.corruptFrom)) {
+        return bytes;
+      }
       const flipped = bytes.slice();
       flipped[0] ^= 0xff;
       return flipped;
@@ -481,12 +659,14 @@ const buildCached = async (
   slots: number,
   storage: ExpertStorage = "f32",
   options: SessionOptions = {},
+  extra: { readonly hostBytes?: number; readonly shape?: ExpertGraphShape } = {},
 ) => {
+  const shape = extra.shape ?? SHAPE;
   const recording = recordingGpu();
-  const tensors = expertTensors(SHAPE, storage);
+  const tensors = expertTensors(shape, storage);
   const written = await writeModelContainer(
     {
-      graphs: { [GRAPH_NAME]: parseIrDeclarationValue(expertGraph(SHAPE)) },
+      graphs: { [GRAPH_NAME]: parseIrDeclarationValue(expertGraph(shape)) },
       consts: [],
       weights: tensors,
       assets: [],
@@ -498,7 +678,7 @@ const buildCached = async (
   const opened = await openContainer({ kind: "source", source: tamper.source });
   const session = await createSessionFromContainer(recording.gpu, opened, GRAPH_NAME, {
     ...options,
-    expertCache: { slots },
+    expertCache: extra.hostBytes === undefined ? { slots } : { slots, hostBytes: extra.hostBytes },
   });
   return { ...recording, session, tensors, tamper };
 };
@@ -580,14 +760,20 @@ describe("a Session built with expertCache (fake device)", () => {
   });
 
   it("allocates pools of K experts and −1 tables, and uploads no expert at construction", async () => {
-    const { session, sizes, writes } = await buildCached(4, "i4f16");
+    const { session, sizes, usages, mappedAtCreation, writes } = await buildCached(4, "i4f16");
     try {
       // Per layer: the router 16 · 64 · 4 = 4096 and its bias 64, a 64-byte table, gate_up 4 · 2048
       // codes + 4 · 256 steps, down 4 · 1024 + 4 · 128 — nothing of [16, …] (32768 bytes of codes).
       assertEquals(
-        [...sizes].sort((a, b) => a - b),
+        sizes.filter((_, id) => usages[id] !== UPLOAD_USAGE).sort((a, b) => a - b),
         [64, 64, 64, 64, 512, 512, 1024, 1024, 4096, 4096, 4096, 4096, 8192, 8192],
       );
+      // The staging ring: one slot per expert a load can need (2 layers · 4 slots), each one
+      // expert's entry (2048 + 256 + 1024 + 128 bytes), mapped at creation for the first load.
+      const ring = sizes.flatMap((size, id) =>
+        usages[id] === UPLOAD_USAGE ? [[size, mappedAtCreation[id]]] : [],
+      );
+      assertEquals(ring, new Array(8).fill([3456, true]));
       // The tables come first, every entry −1; then only the routers are uploaded.
       for (const table of writes.slice(0, 2)) {
         assertEquals([...new Int32Array(table.bytes.buffer)], new Array(16).fill(-1));
@@ -623,6 +809,8 @@ describe("a Session built with expertCache (fake device)", () => {
       // Layer 0 needs 3, 5, 9 (free slots 0, 1, 2), layer 1 needs 7, 1, 2, 0 (slots 0 to 3).
       assertEquals([first.loaded, first.evicted], [7, 0]);
       assertEquals(first.bytes, 7 * (2048 + 256 + 1024 + 128));
+      // Without a host tier every expert is read from the container, and what is read is uploaded.
+      assertEquals([first.fromHost, first.fromContainer, first.uploadedBytes], [0, 7, first.bytes]);
       // Layer 0's writes, expert by expert in pick order: gate_up codes and steps, down codes and
       // steps, each the stored bytes of that expert at its slot.
       const gateUp = storedOf(tensors, "gate_up0");
@@ -650,8 +838,13 @@ describe("a Session built with expertCache (fake device)", () => {
           [8192, 1024, 4096, 512],
         );
       }
-      // 7 experts × 4 ranges, then the tables: layer 0 then layer 1.
+      // 7 experts × 4 ranges, copied out of the staging ring in one submit, then the tables by
+      // writeBuffer: layer 0 then layer 1.
       assertEquals(writes.length, 7 * 4 + 2);
+      assertEquals(
+        writes.map((write) => write.via),
+        [...new Array(7 * 4).fill("copy"), "writeBuffer", "writeBuffer"],
+      );
       const tables = writes.slice(-2).map((write) => [...new Int32Array(write.bytes.buffer)]);
       const expected0 = new Array(16).fill(-1);
       [expected0[3], expected0[5], expected0[9]] = [0, 1, 2];
@@ -671,8 +864,13 @@ describe("a Session built with expertCache (fake device)", () => {
         {
           loaded: 0,
           evicted: 0,
+          fromHost: 0,
+          fromContainer: 0,
           bytes: 0,
+          uploadedBytes: 0,
           ms: 0,
+          readMs: 0,
+          uploadMs: 0,
         },
       );
       assertEquals(writes.length, 0);
@@ -701,6 +899,16 @@ describe("a Session built with expertCache (fake device)", () => {
         [2, 9, 1, first.bytes + 2 * (2048 + 256 + 1024 + 128)],
       );
       assertEquals([stats.runs, stats.missedRuns], [0, 0]);
+      assertEquals(
+        [
+          stats.hostExperts,
+          stats.containerExperts,
+          stats.bytesUploaded,
+          stats.hostHeldExperts,
+          stats.hostHeldBytes,
+        ],
+        [0, 9, stats.bytesRead, 0, 0],
+      );
     } finally {
       await session.dispose();
     }
@@ -779,6 +987,283 @@ describe("a Session built with expertCache (fake device)", () => {
       await assertRejects(() => cache.load(routing), ExecutionError, "the cache is unusable");
       await assertRejects(() => cache.run({ x: anyOf({}) }), ExecutionError, "unusable");
       assertThrows(() => cache.touch(routing, 0), ExecutionError, "unusable");
+    } finally {
+      await session.dispose();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The host tier and the staging ring through a load (fake device): where an expert's bytes come
+// from, what lands in its pool slot, and the rounds of a load larger than the ring.
+// ---------------------------------------------------------------------------
+
+/** Bytes of one i4f16 expert of {@link SHAPE}: gate_up 2048 codes + 256 steps, down 1024 + 128. */
+const ENTRY = 2048 + 256 + 1024 + 128;
+
+/** The bytes that landed by copy (out of a ring slot), in order: `[offset, bytes]`. */
+const copiesOf = (writes: readonly Write[]) =>
+  writes.filter((write) => write.via === "copy").map((write) => [write.offset, write.bytes]);
+
+/**
+ * What a load of `moves` (`[layer, expert, slot]`, in move order) lands: each expert's gate_up codes
+ * and steps, then down's codes and steps — the stored bytes of that expert, at its slot.
+ */
+const expectedCopies = (
+  tensors: ReturnType<typeof expertTensors>,
+  moves: readonly (readonly [number, number, number])[],
+) =>
+  moves.flatMap(([layer, expert, slot]) => {
+    const gateUp = storedOf(tensors, `gate_up${layer}`);
+    const down = storedOf(tensors, `down${layer}`);
+    const slice = (bytes: Uint8Array<ArrayBuffer> | undefined, size: number): Uint8Array => {
+      if (bytes === undefined) throw new Error(`no stored steps of layer ${layer}`);
+      return bytes.slice(expert * size, (expert + 1) * size);
+    };
+    return [
+      [slot * 2048, slice(gateUp.codes, 2048)],
+      [slot * 256, slice(gateUp.steps, 256)],
+      [slot * 1024, slice(down.codes, 1024)],
+      [slot * 128, slice(down.steps, 128)],
+    ];
+  });
+
+/** Three layers of 16 experts: with 16 slots a load can need 48 experts, more than the ring's 32. */
+const SHAPE3: ExpertGraphShape = { ...SHAPE, layers: 3 };
+
+/** Four rows whose picks are experts 0 to 15 in every one of the three layers. */
+const WIDE: ExpertRouting = {
+  layers: 3,
+  rows: 4,
+  picks: 4,
+  ids: Int32Array.from({ length: 3 * 16 }, (_, at) => at % 16),
+};
+
+const IDENTITY16 = Array.from({ length: 16 }, (_, expert) => expert);
+
+describe("the host tier and the staging ring through a load (fake device)", () => {
+  it("holds every expert at construction under a budget for all, and loads without a container read", async () => {
+    const all = 2 * 16 * ENTRY;
+    const { session, writes, tensors, tamper } = await buildCached(
+      4,
+      "i4f16",
+      {},
+      {
+        hostBytes: all,
+      },
+    );
+    const cache = cacheOf(session);
+    try {
+      assertEquals([cache.stats().hostHeldExperts, cache.stats().hostHeldBytes], [32, all]);
+      // Any container read would now fail its digest check (and it is counted).
+      tamper.state.corrupt = true;
+      tamper.state.reads = 0;
+      writes.length = 0;
+      const load = await cache.load(
+        routingOf([
+          [3, 5, 3, 9],
+          [7, 1, 2, 0],
+        ]),
+      );
+      assertEquals(
+        [load.loaded, load.fromHost, load.fromContainer, load.bytes, load.uploadedBytes],
+        [7, 7, 0, 0, 7 * ENTRY],
+      );
+      assertEquals(tamper.state.reads, 0);
+      // The RAM entries carry exactly the stored bytes of each expert to its slot.
+      assertEquals(
+        copiesOf(writes),
+        expectedCopies(tensors, [
+          [0, 3, 0],
+          [0, 5, 1],
+          [0, 9, 2],
+          [1, 7, 0],
+          [1, 1, 1],
+          [1, 2, 2],
+          [1, 0, 3],
+        ]),
+      );
+      const stats = cache.stats();
+      assertEquals(
+        [
+          stats.hostExperts,
+          stats.containerExperts,
+          stats.bytesRead,
+          stats.bytesUploaded,
+          stats.hostHeldExperts,
+        ],
+        [7, 0, 0, 7 * ENTRY, 32],
+      );
+    } finally {
+      await session.dispose();
+    }
+    // The dispose released the tier's RAM.
+    assertEquals([cache.stats().hostHeldExperts, cache.stats().hostHeldBytes], [0, 0]);
+  });
+
+  it("holds the first experts read under a small budget, takes them from RAM, and reads and keeps the rest", async () => {
+    const budget = 6 * ENTRY;
+    const { session, writes, tensors, tamper } = await buildCached(
+      4,
+      "i4f16",
+      {},
+      {
+        hostBytes: budget,
+      },
+    );
+    const cache = cacheOf(session);
+    try {
+      assertEquals([cache.stats().hostHeldExperts, cache.stats().hostHeldBytes], [6, budget]);
+      tamper.state.reads = 0;
+      writes.length = 0;
+      // Layer 0's experts 0 and 1 are among the first read (layer 0's gate_up, in expert order);
+      // 6 and 7 of layer 0 and 0 to 3 of layer 1 are not.
+      const load = await cache.load(
+        routingOf([
+          [0, 1, 6, 7],
+          [0, 1, 2, 3],
+        ]),
+      );
+      assertEquals(
+        [load.loaded, load.fromHost, load.fromContainer, load.bytes, load.uploadedBytes],
+        [8, 2, 6, 6 * ENTRY, 8 * ENTRY],
+      );
+      // Four ranges per expert read; none for the two taken from RAM.
+      assertEquals(tamper.state.reads, 6 * 4);
+      assertEquals(
+        copiesOf(writes),
+        expectedCopies(tensors, [
+          [0, 0, 0],
+          [0, 1, 1],
+          [0, 6, 2],
+          [0, 7, 3],
+          [1, 0, 0],
+          [1, 1, 1],
+          [1, 2, 2],
+          [1, 3, 3],
+        ]),
+      );
+      // The read experts were kept, evicting the least recent: the tier stays at its budget.
+      assertEquals([cache.stats().hostHeldExperts, cache.stats().hostHeldBytes], [6, budget]);
+      // A miss of the tier is read from the container and still checked against the construction
+      // digest: a changed source fails it before any GPU write, and the cache stays usable.
+      tamper.state.corrupt = true;
+      const error = await assertRejects(
+        () =>
+          cache.load(
+            routingOf([
+              [0, 1, 6, 7],
+              [4, 1, 2, 3],
+            ]),
+          ),
+        ContainerFormatError,
+      );
+      assertStringIncludes(error.message, "differ from the bytes verified at construction");
+      tamper.state.corrupt = false;
+      assertEquals(
+        (
+          await cache.load(
+            routingOf([
+              [0, 1, 6, 7],
+              [4, 1, 2, 3],
+            ]),
+          )
+        ).fromContainer,
+        1,
+      );
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("runs a load larger than the ring in rounds, each submitted with its tables after it", async () => {
+    const { session, writes, submits, tensors } = await buildCached(
+      16,
+      "i4f16",
+      {},
+      {
+        shape: SHAPE3,
+      },
+    );
+    const cache = cacheOf(session);
+    try {
+      writes.length = 0;
+      submits.length = 0;
+      const load = await cache.load(WIDE);
+      assertEquals([load.loaded, load.evicted, load.fromContainer], [48, 0, 48]);
+      // 32 experts (layers 0 and 1), then 16 (layer 2): four copies each.
+      assertEquals(submits, [32 * 4, 16 * 4]);
+      // Each round's tables come right after its copies (by writeBuffer, after the submit).
+      assertEquals(
+        writes.map((write) => write.via),
+        [
+          ...new Array(32 * 4).fill("copy"),
+          "writeBuffer",
+          "writeBuffer",
+          ...new Array(16 * 4).fill("copy"),
+          "writeBuffer",
+        ],
+      );
+      assertEquals(
+        writes
+          .filter((write) => write.via === "writeBuffer")
+          .map((write) => [...new Int32Array(write.bytes.buffer)]),
+        [IDENTITY16, IDENTITY16, IDENTITY16],
+      );
+      assertEquals(
+        copiesOf(writes),
+        expectedCopies(
+          tensors,
+          [0, 1, 2].flatMap((layer) =>
+            IDENTITY16.map((expert): [number, number, number] => [layer, expert, expert]),
+          ),
+        ),
+      );
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("keeps the rounds before a failed read resident, changes nothing after it, and stays usable", async () => {
+    const { session, writes, submits, tamper } = await buildCached(
+      16,
+      "i4f16",
+      {},
+      {
+        shape: SHAPE3,
+      },
+    );
+    const cache = cacheOf(session);
+    try {
+      writes.length = 0;
+      submits.length = 0;
+      tamper.state.reads = 0;
+      // The first round reads 32 experts · 4 ranges; every read after them is corrupted.
+      tamper.state.corruptFrom = 32 * 4;
+      await assertRejects(() => cache.load(WIDE), ContainerFormatError, "differ from the bytes");
+      assertEquals(submits, [32 * 4]);
+      assertEquals(
+        writes
+          .filter((write) => write.via === "writeBuffer")
+          .map((write) => [...new Int32Array(write.bytes.buffer)]),
+        [IDENTITY16, IDENTITY16],
+      );
+      const after = cache.stats();
+      assertEquals(
+        [after.loads, after.loadedExperts, after.containerExperts, after.bytesRead],
+        [1, 32, 32, 32 * ENTRY],
+      );
+      // Layers 0 and 1 are resident (touching them passes); layer 2 is not.
+      const resident: ExpertRouting = { ...WIDE, rows: 4 };
+      assertThrows(() => cache.touch(resident, 4), ExecutionError, "of layer 2 is not resident");
+      // The same routing loads the rest, layer 2's 16, in one round.
+      tamper.state.corruptFrom = undefined;
+      writes.length = 0;
+      submits.length = 0;
+      const rest = await cache.load(WIDE);
+      assertEquals([rest.loaded, rest.evicted], [16, 0]);
+      assertEquals(submits, [16 * 4]);
+      cache.touch(WIDE, 4);
     } finally {
       await session.dispose();
     }

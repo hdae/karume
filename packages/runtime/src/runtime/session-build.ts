@@ -46,7 +46,10 @@ import {
   type ExpertPool,
   type ExpertPoolLayer,
   type ExpertPoolWeight,
+  holdExpertItem,
 } from "./expert-cache.ts";
+import { ExpertHostTier } from "./expert-host-tier.ts";
+import { ExpertStagingRing } from "./expert-staging-ring.ts";
 import {
   type ExpertGraphPlan,
   type ExpertSource,
@@ -578,7 +581,9 @@ export type SessionState = {
  * await). A value from outside the type is passed on as is, for the entry check to name.
  */
 const copyExpertCache = (cache: SessionOptions["expertCache"]): SessionOptions["expertCache"] =>
-  typeof cache === "object" && cache !== null ? { slots: cache.slots } : cache;
+  typeof cache === "object" && cache !== null
+    ? { slots: cache.slots, hostBytes: cache.hostBytes }
+    : cache;
 
 /**
  * The copy of {@link SessionOptions} taken at the entry of construction (the MUST at the head of
@@ -839,8 +844,10 @@ export const buildSessionState = async (
     expertStore?.reader.verified === false ? new Map<string, Uint8Array<ArrayBuffer>>() : undefined;
   /**
    * Allocates the expert cache's pools (`slots` experts of codes and steps per expert weight, in the
-   * weight ledger in place of `[E, …]`) and its slot tables, every entry −1 (nothing resident). Called
-   * inside the synchronous section of one errorScope pair.
+   * weight ledger in place of `[E, …]`), its slot tables, every entry −1 (nothing resident), and the
+   * staging ring (its upload buffers are owned by the weights arena, so they go with the weights),
+   * with an empty host tier when `hostBytes` is set (filled by the supply walk below). Called inside
+   * the synchronous section of one errorScope pair.
    */
   const allocateExpertPool = (plan: ExpertGraphPlan, store: ExpertStorePlan): ExpertPool => {
     const { slots, experts } = plan;
@@ -862,9 +869,16 @@ export const buildSessionState = async (
           // MUST: the pools count as the GPU-resident compressed bytes (the bytes actually held).
           residentCompressedBytes += slots * (weight.codesBytes + weight.stepsBytes);
         }
-        return { ...weight, codes, steps, ranges: store.ranges[at][order] };
+        return { ...weight, layer: at, codes, steps, ranges: store.ranges[at][order] };
       });
-      return { index: layer.index, table, weights: pooled };
+      return { index: layer.index, table, weights: pooled, entryBytes: layer.entryBytes };
+    });
+    const { ring } = plan;
+    const buffers = Array.from({ length: ring.slots }, () => {
+      const start = performance.now();
+      const buffer = weights.allocHostUpload(ring.slotBytes);
+      bufferCreateMs += performance.now() - start;
+      return buffer;
     });
     return {
       slots,
@@ -875,6 +889,15 @@ export const buildSessionState = async (
       declaredOutputs: plan.declaredOutputs,
       reader: store.reader,
       digests: expertDigests,
+      host:
+        plan.hostBytes === undefined
+          ? undefined
+          : new ExpertHostTier(
+              plan.hostBytes,
+              experts,
+              layers.map((layer) => layer.entryBytes),
+            ),
+      ring: new ExpertStagingRing(buffers, ring.slotBytes),
     };
   };
   let expertPool: ExpertPool | undefined;
@@ -1208,20 +1231,22 @@ export const buildSessionState = async (
           // The reference to the item ends with this iteration (releasing the CPU-side bytes does
           // not wait for the fence — the NOTE on the fence below).
           supplyBoundary = performance.now();
-          // The digests of a pooled weight's experts, outside the scope section (they await). Their
-          // time is verification on the supply side, so it falls into the next item's wait.
+          // The digests of a pooled weight's experts, outside the scope section (they await), and
+          // the copies the host tier keeps of them. Their time is verification and supply-side work,
+          // so it falls into the next item's wait.
           const pooled = pooledWeights.get(item.name);
-          if (expertDigests !== undefined && pooled !== undefined) {
+          if (pooled !== undefined) {
             const piece = item.piece;
-            await digestExpertItem(
-              expertDigests,
-              pooled,
+            const rows =
               piece === undefined
                 ? { first: 0, count: pooled.ranges.codes.length }
-                : { first: piece.rowOffset, count: piece.rows },
-              item.payload,
-              piece === undefined || piece.first ? item.scale?.bytes : undefined,
-            );
+                : { first: piece.rowOffset, count: piece.rows };
+            const steps = piece === undefined || piece.first ? item.scale?.bytes : undefined;
+            if (expertDigests !== undefined) {
+              await digestExpertItem(expertDigests, pooled, rows, item.payload, steps);
+            }
+            const host = expertPool?.host;
+            if (host !== undefined) holdExpertItem(host, pooled, rows, item.payload, steps);
           }
         }
       } catch (cause) {
@@ -1271,6 +1296,8 @@ export const buildSessionState = async (
       uploadFenceMs += performance.now() - fenceStart;
       supplyBoundary = performance.now();
     }
+    // Every expert the host tier took was filled whole by the walk (a gap fails here).
+    expertPool?.host?.seal();
     // The check right before settling (the MUST at the entry). It sits inside the try so that a
     // failure lets the catch below destroy the owned weights and return the added borrows.
     assertDeviceUsable(gpu, "Session construction");

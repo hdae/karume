@@ -135,10 +135,11 @@ const executionKnobsViolation = (
 };
 
 /**
- * The graph-independent check of {@link SessionOptions.expertCache} (its form and the range of
- * `slots`): Session construction (through {@link sessionOptionsViolation}) and the estimate read it
- * through this one function. The checks against the graph (`slots` between the routed `topk` k and
- * E) are the planner's (`planExpertGraph` in expert-plan.ts).
+ * The graph-independent check of {@link SessionOptions.expertCache} (its form and the ranges of
+ * `slots` and `hostBytes`): Session construction (through {@link sessionOptionsViolation}) and the
+ * estimate read it through this one function. The checks against the graph (`slots` between the
+ * routed `topk` k and E, `hostBytes` at least one expert) are the planner's (`planExpertGraph` in
+ * expert-plan.ts).
  *
  * MUST: a value from outside the type (`null`, a number) is a violation, not a TypeError — read
  * through `typeof` before any property access.
@@ -146,13 +147,19 @@ const executionKnobsViolation = (
 export const expertCacheViolation = (cache: SessionOptions["expertCache"]): string | undefined => {
   if (cache === undefined) return undefined;
   if (typeof cache !== "object" || cache === null) {
-    return `options.expertCache must be an object { slots } (got ${
+    return `options.expertCache must be an object { slots, hostBytes? } (got ${
       cache === null ? "null" : typeof cache
     })`;
   }
   const slots = cache.slots;
   if (!Number.isSafeInteger(slots) || slots < 1) {
     return `options.expertCache.slots ${describeInputValue(slots)} must be a positive safe integer`;
+  }
+  const hostBytes = cache.hostBytes;
+  if (hostBytes !== undefined && (!Number.isSafeInteger(hostBytes) || hostBytes < 1)) {
+    return `options.expertCache.hostBytes ${describeInputValue(
+      hostBytes,
+    )} must be a positive safe integer (bytes of experts held in RAM)`;
   }
   return undefined;
 };

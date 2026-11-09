@@ -1,7 +1,9 @@
 /**
  * The plans of the exact expert cache (ADR 0146) that touch no GPU: which `topk` routes which
- * `expert_linear` weights (the layers), the pool sizes the residency plan counts, where every expert
- * lies in the container, the victims of a load, and the distinct picks of a routing.
+ * `expert_linear` weights (the layers), the pool sizes the residency plan counts, the layout of one
+ * expert's entry (the host tier's and the staging ring's form), the ring's size and a load's rounds,
+ * where every expert lies in the container, the victims of a load, and the distinct picks of a
+ * routing.
  *
  * Session construction (session-build.ts), the estimate (estimate.ts) and the Session's cache
  * (expert-cache.ts) read the same plan from here, so the pool the estimate counts and the pool the
@@ -18,8 +20,8 @@ import { expertCacheViolation } from "./session-options-check.ts";
 import type { ExpertRouting } from "./session-types.ts";
 import type { WeightResidency } from "./weight-residency.ts";
 
-/** One `expert_linear` weight of a routed layer, with the bytes of one of its experts. */
-export type ExpertWeightPlan = {
+/** The bytes of one expert weight's expert, before its place in the layer's entry is known. */
+type ExpertWeightBytes = {
   readonly name: string;
   /** Bytes of one expert's codes (its f32 values for f32) = one slot of the codes pool. */
   readonly codesBytes: number;
@@ -31,12 +33,79 @@ export type ExpertWeightPlan = {
   | { readonly storage: "i4" | "i4f16"; readonly groupSize: number }
 );
 
+/**
+ * One `expert_linear` weight of a routed layer, with the bytes of one of its experts and where they
+ * sit in the layer's **entry** — one expert's ranges of every weight of the layer, contiguous, in
+ * weight order, codes then steps. The entry is the form the host tier holds an expert in and the
+ * form a staging-ring slot carries to the pools (one copy per range out of it).
+ */
+export type ExpertWeightPlan = ExpertWeightBytes & {
+  /** Where the weight's codes start in the layer's entry. */
+  readonly entryCodesAt: number;
+  /** Where its steps start (`entryCodesAt + codesBytes`; nothing is there for f32). */
+  readonly entryStepsAt: number;
+};
+
 /** One routed layer: a `topk` whose index output the layer's `expert_linear` nodes read. */
 export type ExpertLayerPlan = {
   /** The `topk`'s index value (output 1) — the key of the layer's slot table. */
   readonly index: string;
   /** The layer's expert weights, in graph order of the first `expert_linear` reading each. */
   readonly weights: readonly ExpertWeightPlan[];
+  /** Bytes of one expert's entry (the sum of every weight's codes and steps). */
+  readonly entryBytes: number;
+};
+
+/**
+ * The staging ring a load uploads through (ADR 0146 decision 5): `slots` buffers of `slotBytes`
+ * (`MAP_WRITE | COPY_SRC`), one expert's entry per slot.
+ */
+export type ExpertRingPlan = {
+  readonly slots: number;
+  readonly slotBytes: number;
+};
+
+/**
+ * The most slots of the staging ring. The host-tier measurement of 2026-11-09 in Chrome on the RTX
+ * 5070 Ti (docs/research/2026-11-08-gemma4-26b-moe-cache.md §6.2, 3,345,408-byte experts) gave, per
+ * expert after the fence, 2.11 ms for a round of 1, 0.66 for 8, 0.52 for 16 and 0.52 for 32: a
+ * round's fixed cost is amortized by 16, and 32 (about 107 MB) takes a decode token's misses (about
+ * 10 at K = 64) in one round and a prefill chunk's in a few. Larger rounds were not measured.
+ */
+export const EXPERT_RING_SLOTS = 32;
+
+/**
+ * The most bytes of the staging ring: 32 slots of the 26B's experts fit (107 MB); a model with larger
+ * experts gets fewer slots rather than more host-visible upload memory (the measured rate is per byte,
+ * so the amortization of the round's fixed cost holds at the same bytes).
+ */
+export const EXPERT_RING_BYTES = 128 * 2 ** 20;
+
+/**
+ * The slot count of the staging ring: {@link EXPERT_RING_SLOTS}, fewer when that many slots would
+ * exceed {@link EXPERT_RING_BYTES}, and never more than one load can need (`maxLoad` = layers × K
+ * experts) — at least one.
+ */
+export const stagingRingSlots = (slotBytes: number, maxLoad: number): number =>
+  Math.max(1, Math.min(EXPERT_RING_SLOTS, Math.floor(EXPERT_RING_BYTES / slotBytes), maxLoad));
+
+/** One round of a load: the moves `[first, first + count)`, staged in slots `[0, count)`. */
+export type ExpertRingRound = { readonly first: number; readonly count: number };
+
+/**
+ * The rounds of a load of `count` experts through a ring of `slots` slots: full rounds in move order,
+ * the remainder last (no round for an empty load).
+ */
+export const ringRounds = (count: number, slots: number): ExpertRingRound[] => {
+  if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(slots) || slots < 1) {
+    throw new ExecutionError(
+      `expert load: ${count} experts through ${slots} ring slots (broken bookkeeping)`,
+    );
+  }
+  return Array.from({ length: Math.ceil(count / slots) }, (_, round) => ({
+    first: round * slots,
+    count: Math.min(slots, count - round * slots),
+  }));
 };
 
 /** The graph-side plan of an expert cache (shared by Session construction and the estimate). */
@@ -44,8 +113,15 @@ export type ExpertGraphPlan = {
   readonly slots: number;
   readonly experts: number;
   readonly picks: number;
+  /**
+   * The host tier's budget in bytes (`SessionOptions.expertCache.hostBytes`), undefined without one
+   * (every miss reads the container).
+   */
+  readonly hostBytes: number | undefined;
   /** In graph order of the layers' `topk` nodes — the order of the routing's layer axis. */
   readonly layers: readonly ExpertLayerPlan[];
+  /** The staging ring of the loads. */
+  readonly ring: ExpertRingPlan;
   /**
    * The graph with every layer's index appended to its outputs (ADR 0146 decision 3: the routing is
    * read back in the run's own command list and fence, kept alive by the same liveness rule as any
@@ -64,15 +140,16 @@ export type ExpertGraphPlan = {
  * One expert weight's plan and its residency as a pool of `slots` experts (`[slots, out, in]` codes
  * and `[slots, out · in / G]` steps).
  *
- * MUST: one expert's codes and steps are whole u32 words — a load writes a slot with one
- * `writeBuffer`, which takes whole words only.
+ * MUST: one expert's codes and steps are whole u32 words — a load copies each range out of a
+ * staging-ring slot with `copyBufferToBuffer`, whose offsets and size are whole words only (and the
+ * entry's offsets are sums of these lengths).
  */
 const pooledWeight = (
   name: string,
   seat: WeightResidency | undefined,
   shape: readonly number[],
   slots: number,
-): { readonly plan: ExpertWeightPlan; readonly pool: WeightResidency } => {
+): { readonly plan: ExpertWeightBytes; readonly pool: WeightResidency } => {
   const where = `options.expertCache: expert weight '${name}'`;
   const [experts, rows, columns] = shape;
   const words = (codesBytes: number, stepsBytes: number): void => {
@@ -126,7 +203,9 @@ const pooledWeight = (
  * - an expert weight is an initializer the Session owns (not borrowed, not a graph output), read
  *   only at `expert_linear`'s weight slot and under one routing — a pool holds slots, not experts,
  *   so any other reader, or a second slot table, would read another expert's bytes;
- * - one expert's codes and steps are whole u32 words (a load writes a slot with `writeBuffer`).
+ * - one expert's codes and steps are whole u32 words (a load copies whole words out of a ring slot);
+ * - a host tier's budget (`hostBytes`) holds at least one expert's entry (a smaller budget would hold
+ *   nothing — most likely a unit mistake).
  *
  * The planner's producer rule of the index (ADR 0145 decision 2) is unchanged: the declarations stay
  * `[E, out, in]` and only the allocated buffers are pools.
@@ -134,12 +213,12 @@ const pooledWeight = (
 export const planExpertGraph = (
   graph: IrGraph,
   residency: ReadonlyMap<string, WeightResidency>,
-  cache: { readonly slots: number },
+  cache: { readonly slots: number; readonly hostBytes?: number },
 ): ExpertGraphPlan => {
   const violation = expertCacheViolation(cache);
   if (violation !== undefined) throw new ExecutionError(violation);
   const where = "options.expertCache";
-  const { slots } = cache;
+  const { slots, hostBytes } = cache;
   const weightSlot = WEIGHT_SLOTS.get(EXPERT_LINEAR_OP);
   if (weightSlot === undefined) {
     throw new ExecutionError(`${EXPERT_LINEAR_OP} has no weight slot (broken op table)`);
@@ -205,6 +284,8 @@ export const planExpertGraph = (
       );
     }
     picks = k;
+    // The entry's layout: each weight's codes then steps, in the layer's weight order.
+    let entryBytes = 0;
     const weights = names.map((name): ExpertWeightPlan => {
       const shape = graph.values[name].shape.map(Number);
       const count = shape[0];
@@ -216,9 +297,15 @@ export const planExpertGraph = (
       experts = count;
       const { plan, pool } = pooledWeight(name, residency.get(name), shape, slots);
       pooled.set(name, pool);
-      return plan;
+      const placed = {
+        ...plan,
+        entryCodesAt: entryBytes,
+        entryStepsAt: entryBytes + plan.codesBytes,
+      };
+      entryBytes += plan.codesBytes + plan.stepsBytes;
+      return placed;
     });
-    layers.push({ index, weights });
+    layers.push({ index, weights, entryBytes });
   }
   // The index of every expert_linear is a topk output (the producer rule of plan.ts); a direct build
   // that skipped the contract checks lands here instead of planning a table nobody writes.
@@ -232,6 +319,14 @@ export const planExpertGraph = (
       `${where}.slots ${slots} must be from the topk k ${picks} to the experts E ${experts}`,
     );
   }
+  const entries = layers.map((layer) => layer.entryBytes);
+  const smallest = Math.min(...entries);
+  if (hostBytes !== undefined && hostBytes < smallest) {
+    throw new ExecutionError(
+      `${where}.hostBytes ${hostBytes} holds no expert (one expert of a routed layer is ${smallest} bytes)`,
+    );
+  }
+  const slotBytes = Math.max(...entries);
   const declaredOutputs = graph.outputs;
   const indices = layers
     .map((layer) => layer.index)
@@ -240,7 +335,9 @@ export const planExpertGraph = (
     slots,
     experts,
     picks,
+    hostBytes,
     layers,
+    ring: { slots: stagingRingSlots(slotBytes, layers.length * slots), slotBytes },
     graph: { ...graph, outputs: [...declaredOutputs, ...indices] },
     declaredOutputs,
     residency: pooled,
@@ -416,6 +513,34 @@ export const planExpertLoad = (
   }
   return { load, evict };
 };
+
+/** One expert of a load with its layer, its slot and the resident expert whose slot it takes. */
+export type ExpertMove = {
+  readonly layer: number;
+  readonly expert: number;
+  readonly slot: number;
+  /** The expert that leaves `slot` (undefined when the slot was free). */
+  readonly victim: number | undefined;
+};
+
+/**
+ * The moves of a load, layer by layer in the order of each layer's {@link ExpertLoadPlan.load}: each
+ * load paired with the eviction of the slot it takes, so that a round of the staging ring can make
+ * its experts resident on their own (the victims of later rounds stay resident until their round).
+ */
+export const expertLoadMoves = (plans: readonly ExpertLoadPlan[]): ExpertMove[] =>
+  plans.flatMap((plan, layer) => {
+    const victims = new Map(plan.evict.map(({ expert, slot }) => [slot, expert]));
+    if (victims.size !== plan.evict.length) {
+      throw new ExecutionError("expert load: two evictions of one slot (broken bookkeeping)");
+    }
+    return plan.load.map(({ expert, slot }) => ({
+      layer,
+      expert,
+      slot,
+      victim: victims.get(slot),
+    }));
+  });
 
 /** The distinct experts of layer `layer` in the first `rows` rows, in row then pick order. */
 export const routedExperts = (routing: ExpertRouting, layer: number, rows: number): number[] => {

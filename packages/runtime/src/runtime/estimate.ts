@@ -477,8 +477,13 @@ export type EstimateOptions = {
    * tables (one i32 per expert and routed layer) count with the uncompressed weights, and every
    * routed `topk` index counts as an output (the routing readback). A graph or a value the
    * construction refuses fails loudly with the same message.
+   *
+   * Not counted, and named in {@link AdmissionReport.unaccounted} instead: the staging ring (its
+   * `MAP_WRITE | COPY_SRC` upload buffers are host-visible upload memory, the class of the
+   * `writeBuffer` staging it replaces, which is not counted either) and the host tier of `hostBytes`
+   * (RAM, not GPU memory).
    */
-  readonly expertCache?: { readonly slots: number };
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
 };
 
 /**
@@ -494,6 +499,20 @@ const UNACCOUNTED: readonly string[] = Object.freeze([
   "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
   "The implementation staging of queue.writeBuffer (not released until the submit completes)",
   "The retirement window (slot backings retired by a budget overrun / the plan LRU eviction are not destroyed before the next plan's allocation and live until the cleanup after flush, so that run holds the retired backings and the new ones at the same time)",
+]);
+
+/**
+ * {@link UNACCOUNTED} under the expert cache (ADR 0146): its staging ring, and its host tier when
+ * `hostBytes` is set. Without the option the list is {@link UNACCOUNTED} itself (not a byte of the
+ * report changes).
+ */
+const EXPERT_UNACCOUNTED: readonly string[] = Object.freeze([
+  ...UNACCOUNTED,
+  "The expert cache's staging ring (MAP_WRITE | COPY_SRC upload buffers of up to 32 experts — host-visible upload memory like the writeBuffer staging it replaces)",
+]);
+const EXPERT_HOST_UNACCOUNTED: readonly string[] = Object.freeze([
+  ...EXPERT_UNACCOUNTED,
+  "The expert cache's host tier (expertCache.hostBytes of experts in RAM — host memory, not GPU memory)",
 ]);
 
 /**
@@ -1863,6 +1882,11 @@ export const estimateGraphMemory = (
     // The kept set never exceeds `max(budget, largest single backing)` (`#evictBackingsFor` in the
     // executor).
     peakAccountedBytes: weightBytes + state.bytes + Math.max(budgetBytes, peakScenarioBytes),
-    unaccounted: UNACCOUNTED,
+    unaccounted:
+      experts === undefined
+        ? UNACCOUNTED
+        : experts.hostBytes === undefined
+          ? EXPERT_UNACCOUNTED
+          : EXPERT_HOST_UNACCOUNTED,
   };
 };

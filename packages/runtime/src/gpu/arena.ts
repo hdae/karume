@@ -180,6 +180,27 @@ export class RunArena {
   }
 
   /**
+   * Allocates an upload buffer (`MAP_WRITE | COPY_SRC`, created `mappedAtCreation`) the host writes
+   * through its mapped range and the GPU copies out of — the expert cache's staging ring (ADR 0146
+   * decision 5). The caller unmaps it before a submit uses it and maps it again after.
+   * MUST: buffers on this path are outside the regions too — MAP_WRITE cannot be combined with
+   * STORAGE. The arena owns them for the same reason as {@link allocHostRead}: destruction rides on
+   * flush-before-destroy, and a `mapAsync` still pending then is aborted with the buffer.
+   */
+  allocHostUpload(bytes: number): GPUBuffer {
+    this.#assertUsable();
+    const buffer = this.#device.createBuffer({
+      size: toSizeClass(bytes),
+      usage: BUFFER_USAGE.MAP_WRITE | BUFFER_USAGE.COPY_SRC,
+      mappedAtCreation: true,
+    });
+    this.#owned.push(buffer);
+    this.#allocCount += 1;
+    this.#allocatedBytes += buffer.size;
+    return buffer;
+  }
+
+  /**
    * Stores the 3 diagnostic fields copied from the plan (doc of {@link ArenaStats} — once, after
    * the run's intermediates went through the regions).
    */

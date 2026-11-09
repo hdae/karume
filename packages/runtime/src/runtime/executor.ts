@@ -1640,6 +1640,8 @@ export class Session {
       try {
         await this.#state.weights.destroy();
       } finally {
+        // The expert cache's host tier (RAM) goes with the weights (its ring is in their arena).
+        this.#expertCache?.release();
         this.#retireAllBackings();
         this.#destroyRetired();
         // MUST: the borrow count of borrowed weights is returned **always** (regardless of whether

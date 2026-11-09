@@ -13,6 +13,9 @@
 // Both containers of a source are covered: the in-memory container (whole bytes, verified) and a
 // `krm` cut into 2048-byte blocks (gate_up one expert a piece with its scale split along them, down
 // two a piece; unverified, so every range is checked against its construction digest).
+//
+// Every load goes through the staging ring; the last describe adds the host tier (`hostBytes`) and
+// loads larger than the ring (rounds).
 
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -29,6 +32,7 @@ import {
   type Session,
   type Tensor,
 } from "../src/runtime/executor.ts";
+import { EXPERT_RING_SLOTS } from "../src/runtime/expert-plan.ts";
 import { writeModelContainer } from "./helpers/container-write.ts";
 import {
   EXPERT_OPS,
@@ -198,14 +202,23 @@ describe.skipIf(!GPU_AVAILABLE)("the exact expert cache through a Session (real 
         assertEquals((await cache.load(exact.routing)).loaded, 0);
         loaded.runs += 1;
         assertEquals(loaded.bytes, loaded.experts * EXPERT_BYTES);
-        assertEquals(cache.stats(), {
+        const stats = cache.stats();
+        // Without a host tier every expert is read from the container and uploaded as read.
+        assertEquals(stats, {
           runs: loaded.runs,
           missedRuns: loaded.missed,
           loads: loaded.loads,
           loadedExperts: loaded.experts,
           evictedExperts: loaded.evicted,
+          hostExperts: 0,
+          containerExperts: loaded.experts,
           bytesRead: loaded.bytes,
-          loadMs: cache.stats().loadMs,
+          bytesUploaded: loaded.bytes,
+          loadMs: stats.loadMs,
+          readMs: stats.readMs,
+          uploadMs: stats.uploadMs,
+          hostHeldExperts: 0,
+          hostHeldBytes: 0,
         });
         // The cache's run chose the same kernels as full residency (marking the indices as outputs
         // changed no fusion): only expert_linear's key gains the pooled form.
@@ -293,5 +306,90 @@ describe.skipIf(!GPU_AVAILABLE)("the exact expert cache through a Session (real 
         }
       });
     });
+  }
+});
+
+// The host tier (`hostBytes`) and loads larger than the staging ring: three routed layers of 64
+// experts (top-8) with 32 slots, four rows. The first run of an input misses in layer 0 (about 26
+// distinct experts) and routes layers 1 and 2 from rows the misses zeroed (8 each), so its load
+// needs more than the ring's 32 slots and runs in rounds. With a budget for
+// every expert, construction holds them all and no load reads the container; with one of 20
+// experts, construction holds the first 20 read, loads take what RAM holds and read (and keep) the
+// rest. Either way every exact run is bit-identical to full residency.
+const TIERED: ExpertGraphShape = { experts: 64, picks: 8, width: 64, ffn: 32, layers: 3 };
+const TIERED_SLOTS = 32;
+const TIERED_ROWS = 4;
+const EVERY_EXPERT = 3 * 64 * EXPERT_BYTES;
+
+describe.skipIf(!GPU_AVAILABLE)("the host tier and the staging ring's rounds (real GPU)", () => {
+  const tensors = expertTensors(TIERED, "i4f16");
+  for (const kind of KINDS) {
+    for (const [budget, hostBytes] of [
+      ["a budget for every expert", EVERY_EXPERT],
+      ["a budget of 20 experts", 20 * EXPERT_BYTES],
+    ] as const) {
+      it(`runs bit-identical to full residency from RAM and the container, in rounds (${kind}, ${budget})`, async () => {
+        const container = await containerOf(kind, expertGraph(TIERED), tensors);
+        const gpu: GpuContext = await acquireGpu();
+        try {
+          const resident = await createSessionFromContainer(gpu, container, GRAPH_NAME);
+          const cached = await createSessionFromContainer(gpu, container, GRAPH_NAME, {
+            expertCache: { slots: TIERED_SLOTS, hostBytes },
+          });
+          try {
+            const cache = cached.expertCache;
+            assert(cache !== undefined, "no expert cache");
+            const every = hostBytes === EVERY_EXPERT;
+            const filled = cache.stats();
+            // Construction filled the tier: every expert, or the first 20 read (layer 0's gate_up).
+            assertEquals(
+              [filled.hostHeldExperts, filled.hostHeldBytes],
+              every ? [192, EVERY_EXPERT] : [20, 20 * EXPERT_BYTES],
+            );
+            let largest = 0;
+            for (const seed of [13, 29, 47]) {
+              const inputs: RunInputs = {
+                x: {
+                  dtype: "f32",
+                  shape: [TIERED_ROWS, 64],
+                  data: waveValues(TIERED_ROWS * 64, seed, 1.5),
+                },
+              };
+              const expected = await resident.run(inputs);
+              const converged = await converge(cache, () => cache.run(inputs));
+              const last = converged.runs.at(-1);
+              // MUST (precondition): the input misses, so the exact run follows loads.
+              assert(converged.runs[0].missing > 0, `seed ${seed}: the first run missed nothing`);
+              assert(last !== undefined && last.missing === 0);
+              assertEquals(bits(last.outputs["out"]), bits(expected["out"]), `seed ${seed}`);
+              cache.touch(last.routing, TIERED_ROWS);
+              for (const load of converged.loads) largest = Math.max(largest, load.loaded);
+            }
+            // MUST (precondition): a load ran in more than one round of the ring.
+            assert(largest > EXPERT_RING_SLOTS, `the largest load had only ${largest} experts`);
+            const stats = cache.stats();
+            assertEquals(stats.hostExperts + stats.containerExperts, stats.loadedExperts);
+            assertEquals(stats.bytesUploaded, stats.loadedExperts * EXPERT_BYTES);
+            assertEquals(stats.bytesRead, stats.containerExperts * EXPERT_BYTES);
+            if (every) {
+              assertEquals([stats.containerExperts, stats.hostHeldExperts], [0, 192]);
+              assert(stats.hostExperts > 0);
+            } else {
+              // MUST (precondition): both sources served loads.
+              assert(
+                stats.hostExperts > 0 && stats.containerExperts > 0,
+                `${stats.hostExperts} experts from RAM, ${stats.containerExperts} from the container`,
+              );
+              assertEquals(stats.hostHeldBytes, 20 * EXPERT_BYTES);
+            }
+          } finally {
+            await cached.dispose();
+            await resident.dispose();
+          }
+        } finally {
+          gpu.destroy();
+        }
+      });
+    }
   }
 });
