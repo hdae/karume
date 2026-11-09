@@ -26,8 +26,9 @@ maintainer's ruling of 2026-11-06).
    needed experts from RAM can work, and look for a way to pay a miss as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
    paid it with one fence). Pre-research done 2026-11-08: the maintainer prefers an exact cache (bit-identical to
    full residency) and wants the approximate modes (skip a miss, bias routing to the cache) measured too; CPU measurements of
-   decode routing on all 30 layers, the re-run count of the exact cache and the approximate modes' KL come first, then a
-   Chrome check of the fence and the per-expert upload. This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
+   decode routing on all 30 layers, the re-run count of the exact cache and the approximate modes' KL ✅ 2026-11-09
+   ([research](research/2026-11-08-gemma4-26b-moe-cache.md)); next a Chrome check of the fence and the per-expert upload.
+   A resume from the first missed layer, instead of re-running the whole token, is an unmeasured candidate. This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
    ruling changes it.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
@@ -357,8 +358,10 @@ maintainer's ruling of 2026-11-06).
 - Pinning down the cause of the Metal numeric difference (known-issues); lifting the diagnostics / measurement constraints of the resident path.
 - **MoE page-fault**: PoC done in a spike outside the repository (2026-09-01) — the mechanism works (the readback of a miss
   can ride on the round trip that decode already pays, with zero extra synchronization; output bit-identical to direct binding), but **practical
-  viability is uncertain** (the miss cost is dominated not by transfer but by one re-execution fence, and making experts smaller does not
-  make it cheaper. The fence floor in browsers (Dawn) and the real hit rate are unmeasured; one layer only). The start condition is
+  viability is uncertain** (the PoC's miss cost was dominated by one re-execution fence of about 11 ms, which came from Deno's 10 ms
+  sleep; Chrome's floor is expected near 1.5–3 ms but is unmeasured. On all 30 layers of 26B A4B the CPU measurement of
+  [research 2026-11-08](research/2026-11-08-gemma4-26b-moe-cache.md) found the cost is set by re-runs: 2.41 forwards per decode token
+  at 64 experts per layer with whole-token re-runs). The start condition is
   subordinate to parked "value-dependent execution selection in the IR". The first unit stops at transcribing the spike's measurements into
   [research](research/) as a point-in-time snapshot.
 - The MoE seam (fixed-k routing can be expressed with static shapes — do not bake the absence of experts into the dense API).
