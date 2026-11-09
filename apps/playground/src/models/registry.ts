@@ -142,10 +142,10 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/expert-transfer",
     title: "Expert transfer bench",
     summary:
-      "Host round trip of a fence and of a router-pick readback, and the upload of Gemma 4 26B A4B experts by a staging ring or writeBuffer: the per-miss costs of an exact expert cache. Needs no distribution.",
+      "Host round trip of a fence and of a router-pick readback, and the upload of Gemma 4 26B A4B experts by a staging ring or writeBuffer: the per-miss costs of an exact expert cache. Optionally reads experts back from 26B in the hub's cache.",
     group: "Benchmarks",
     icon: ArrowUpFromLineIcon,
-    mounts: [],
+    mounts: ["gemma4-qat"],
   },
   {
     path: "/geometry-sweep",

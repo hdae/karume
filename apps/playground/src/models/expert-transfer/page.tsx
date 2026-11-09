@@ -1,11 +1,13 @@
 /**
  * The expert transfer bench: the host round trip of a fence and of a router-pick readback, and the
  * upload of a batch of Gemma 4 26B A4B experts by a staging ring or by `writeBuffer`, on this
- * browser's GPU — the costs an exact expert cache pays per miss round. Needs no distribution.
+ * browser's GPU — the costs an exact expert cache pays per miss round. Optionally it also reads
+ * experts back from 26B in the hub's cache (mount `gemma4-qat`, cached source only), the host store
+ * an expert cache would read a miss from.
  */
 
 import type { AcquireGpuOptions } from "@karume/runtime";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Field } from "@/components/field";
 import { RecordActions } from "@/components/record-actions";
@@ -21,11 +23,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
 import { useRunTask } from "@/hooks/use-run-task";
 import { fileStamp } from "@/lib/download";
+import { type HfCoordinates, hfRepoRef } from "@/lib/distributions";
 import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
 
+import { type CacheReadResult, openCached26b, runCacheRead } from "./cache-read";
 import { runTransferBench, type TransferCaseResult } from "./run";
 import {
   EXPERT_BYTES,
@@ -51,14 +56,35 @@ type TransferRecord = RecordEnvironment & {
     readonly samples: number;
     readonly warmup: number;
     readonly batches: readonly number[];
+    readonly cacheReadBatches: readonly number[];
     readonly expertBytes: number;
   };
   readonly cases: readonly TransferCaseResult[];
+  /** Present when cached reads ran: the distribution they read and their results. */
+  readonly cacheReads?: {
+    readonly distribution: HfCoordinates;
+    readonly model: "26b";
+    readonly results: readonly CacheReadResult[];
+  };
 };
 
-type Form = { readonly samples: string; readonly warmup: string; readonly batches: string };
+type Form = {
+  readonly samples: string;
+  readonly warmup: string;
+  readonly batches: string;
+  /** Experts per cached read sample; empty skips the cached reads. */
+  readonly cacheBatches: string;
+};
 
-const INITIAL_FORM: Form = { samples: "50", warmup: "5", batches: "1, 4, 8, 16" };
+const INITIAL_FORM: Form = {
+  samples: "50",
+  warmup: "5",
+  batches: "1, 4, 8, 16",
+  cacheBatches: "1, 8",
+};
+
+/** The mount whose cached 26B the reads draw from. */
+const CACHE_MOUNT = "gemma4-qat";
 
 const count = (text: string, min: number): number | undefined => {
   const value = Number(text);
@@ -86,10 +112,18 @@ export const ExpertTransferPage = () => {
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
   const task = useRunTask<TransferRecord>(gpuHandle);
   const [form, setForm] = useState<Form>(INITIAL_FORM);
+  const index = useDistributionIndex();
+  const hf = index.kind === "ready" ? index.index[CACHE_MOUNT]?.hf : undefined;
+  const hfRef = useMemo(
+    () => (hf === undefined ? undefined : hfRepoRef(hf, document.baseURI)),
+    [hf],
+  );
 
   const samples = count(form.samples, 1);
   const warmup = count(form.warmup, 0);
   const batches = parseBatches(form.batches, MAX_BATCH);
+  const cacheBatches =
+    form.cacheBatches.trim() === "" ? [] : parseBatches(form.cacheBatches, MAX_BATCH);
   const formError =
     samples === undefined
       ? "Samples must be a positive integer"
@@ -97,12 +131,16 @@ export const ExpertTransferPage = () => {
         ? "Warm-up must be a non-negative integer"
         : batches === undefined
           ? `Batches must be distinct integers from 1 to ${MAX_BATCH}, separated by commas`
-          : undefined;
+          : cacheBatches === undefined
+            ? `Cached reads must be empty or distinct integers from 1 to ${MAX_BATCH}`
+            : cacheBatches.length > 0 && hf === undefined
+              ? `Cached reads need the mount ${CACHE_MOUNT} on the HF-compatible route`
+              : undefined;
   const canRun = gpu !== undefined && !task.running && formError === undefined;
 
   const start = () => {
     if (gpu === undefined || samples === undefined || warmup === undefined) return;
-    if (batches === undefined) return;
+    if (batches === undefined || cacheBatches === undefined) return;
     const cases = transferCases(batches);
     void task.start(async ({ signal, report }) => {
       const results = await runTransferBench(gpu.device, {
@@ -113,12 +151,35 @@ export const ExpertTransferPage = () => {
         onProgress: ({ caseId, done, total }) =>
           report({ stage: caseId, count: { done, total, unit: "samples" } }),
       });
+      const cacheReads =
+        cacheBatches.length === 0 || hf === undefined || hfRef === undefined
+          ? undefined
+          : {
+              distribution: hf,
+              model: "26b" as const,
+              results: await runCacheRead({
+                ...(await openCached26b(hfRef, signal)),
+                batches: cacheBatches,
+                samples,
+                warmup,
+                signal,
+                onProgress: ({ caseId, done, total }) =>
+                  report({ stage: caseId, count: { done, total, unit: "samples" } }),
+              }),
+            };
       return {
         format: RECORD_FORMAT,
         page: "expert-transfer",
         ...recordEnvironment(gpu),
-        settings: { samples, warmup, batches, expertBytes: EXPERT_BYTES },
+        settings: {
+          samples,
+          warmup,
+          batches,
+          cacheReadBatches: cacheBatches,
+          expertBytes: EXPERT_BYTES,
+        },
         cases: results,
+        ...(cacheReads === undefined ? {} : { cacheReads }),
       };
     });
   };
@@ -166,6 +227,20 @@ export const ExpertTransferPage = () => {
                 disabled={task.running}
               />
             </Field>
+            <div className="sm:col-span-3">
+              <Field
+                id="transfer-cache-batches"
+                label="Experts per cached read"
+                hint={`Reads that many experts (4 ranges each, at random positions) from 26B in the hub's cache (${CACHE_MOUNT}); empty skips. Nothing is downloaded: the run fails if 26B is not fully cached.`}
+              >
+                <Input
+                  id="transfer-cache-batches"
+                  value={form.cacheBatches}
+                  onChange={(event) => setForm({ ...form, cacheBatches: event.target.value })}
+                  disabled={task.running}
+                />
+              </Field>
+            </div>
             <div className="flex gap-3 sm:col-span-3">
               <Button id="transfer-run" onClick={start} disabled={!canRun}>
                 Run
@@ -193,6 +268,9 @@ export const ExpertTransferPage = () => {
               filename={`expert-transfer_${fileStamp(new Date(record.recordedAt))}.json`}
             />
             <ResultTable results={record.cases} />
+            {record.cacheReads === undefined ? null : (
+              <CacheReadTable results={record.cacheReads.results} />
+            )}
           </CardContent>
         </Card>
       )}
@@ -244,6 +322,62 @@ const ResultTable = ({ results }: { results: readonly TransferCaseResult[] }) =>
             </TableCell>
             <TableCell className="text-right font-mono text-xs">
               {formatMs(result.remapMs?.median)}
+            </TableCell>
+          </TableRow>
+        );
+      })}
+    </TableBody>
+  </Table>
+);
+
+const CacheReadTable = ({ results }: { results: readonly CacheReadResult[] }) => (
+  <Table>
+    <TableHeader>
+      <TableRow>
+        <TableHead>Cached read (26B)</TableHead>
+        <TableHead className="text-right">Bytes</TableHead>
+        <TableHead className="text-right">first min ms</TableHead>
+        <TableHead className="text-right">first median ms</TableHead>
+        <TableHead className="text-right">first p95 ms</TableHead>
+        <TableHead className="text-right">first GB/s</TableHead>
+        <TableHead className="text-right">ms / expert</TableHead>
+        <TableHead className="text-right">again median ms</TableHead>
+        <TableHead className="text-right">again GB/s</TableHead>
+      </TableRow>
+    </TableHeader>
+    <TableBody>
+      {results.map((result) => {
+        const first = gigabytesPerSecond(result.bytes, result.ms.median);
+        const again = gigabytesPerSecond(result.bytes, result.warmMs.median);
+        return (
+          <TableRow key={result.id}>
+            <TableCell>
+              {result.experts} expert{result.experts === 1 ? "" : "s"} ({result.experts * 4} ranges
+              at once)
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {result.bytes.toLocaleString("en-US")}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatMs(result.ms.min)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatMs(result.ms.median)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatMs(result.ms.p95)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {first === undefined ? "" : first.toFixed(2)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatMs(result.ms.median / result.experts)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {formatMs(result.warmMs.median)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              {again === undefined ? "" : again.toFixed(2)}
             </TableCell>
           </TableRow>
         );
