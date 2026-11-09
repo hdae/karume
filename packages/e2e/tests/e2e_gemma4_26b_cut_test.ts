@@ -37,6 +37,17 @@
 //    each golden prompt is ④'s argmax at the prompt's last row (the same graph, options and chunk
 //    rows on the same device — so the pipeline's wiring of the MoE graph is held to the
 //    teacher-forced run); one decode step follows, which runs `expert_linear` at one token
+// ⑦ the exact expert cache (real GPU — ADR 0146 decision 7), at 16 and 64 slots per layer, whose
+//    chunks hold ⌊slots / 8⌋ rows (2 and 8 — every pick of a chunk fits in the slots, and a chunk
+//    is a deferred run within the sliding slack): (7a) the product container with
+//    `SessionOptions.expertCache`, teacher-forced like ④ through the re-run face (a run that missed
+//    is dropped with `commit(0)`, its experts loaded and the same chunk run again; only a run with
+//    no miss is committed), gives at the golden rows the very bytes of the logits and the hidden
+//    state that a resident Session gives at the same chunk rows on this device (word for word, no
+//    tolerance — a chunk of other rows is another shape, so ④'s rows are not the reference); and
+//    (7b) `Pipeline.fromAssets` with `expertCache` generates each golden prompt's first greedy
+//    tokens equal to the pipeline's without it at the chunk rows the cache settles. Both require the
+//    counters to show misses, loads and re-runs (a run with no miss would prove nothing)
 //
 // A cut model's hidden state is not the final layer's, and a short cut's logits saturate at the
 // softcap (±30): on cut 6, 7 to 757 entries of each golden row are exactly 30.0, so every margin
@@ -81,6 +92,8 @@
 // 6 GiB (the routing container is another copy, built after the product's Session is gone), the
 // sliding slots 16 MiB per layer (k and v) and the full slots 32 MiB per full layer at capacity
 // 4096 — within a 12 GB GPU. ⑥ holds the container's parts in host RAM (`fromAssets` takes bytes).
+// ⑦ keeps the same rule: the resident Session (or pipeline) is disposed before the cached one is
+// built, whose experts take 16 / 128 or 64 / 128 of the resident ones.
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
@@ -96,11 +109,17 @@ import {
   type PreparedModel,
   type RunOutputs,
   type SafetensorsFile,
-  type Session,
   type Tensor,
 } from "@karume/runtime";
-import { Pipeline, parsePipelineConfig, type PipelineConfig } from "../../models/gemma.ts";
+import {
+  type ExpertCacheReport,
+  Pipeline,
+  parsePipelineConfig,
+  type PipelineConfig,
+} from "../../models/gemma.ts";
 import { admitGemma4, admitGemma4Ple } from "../../models/src/gemma/admission.ts";
+import { createExpertCacheSession } from "../../models/src/generation/expert-cache-session.ts";
+import type { GenerationSession } from "../../models/src/generation/sequence.ts";
 import { gemma4PleAssetSource } from "../../models/src/gemma/ple-index.ts";
 import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { planPrefillChunks, type PrefillChunk } from "../../models/src/generation/greedy.ts";
@@ -648,27 +667,29 @@ type ChunkRun = {
 };
 
 /**
- * Feeds `prompt` through `session` in prefill chunks of the distribution's chunk rows and hands each
- * chunk's outputs to `onChunk`, selecting through `last_row` the golden `rows` that fall in the
- * chunk (a chunk without one selects its last row, which nothing reads).
+ * Feeds `prompt` through `session` in prefill chunks of `chunkLength` rows (default: the
+ * distribution's) and hands each chunk's outputs to `onChunk`, selecting through `last_row` the
+ * golden `rows` that fall in the chunk (a chunk without one selects its last row, which nothing
+ * reads). `session` is a Session or a face over one (⑦'s re-run face of the expert cache).
  *
  * The soft inputs are bound as text-only runs bind them (zeros, false — the graph takes them on
  * every run until 26B's vision lands).
  */
 const teacherForce = async (
-  session: Session,
+  session: GenerationSession,
   prompt: Int32Array<ArrayBuffer>,
   rows: readonly number[],
   onChunk: (run: ChunkRun) => void,
+  chunkLength: number = CHUNK_LENGTH,
 ): Promise<void> => {
   const context: GenerationContext = await session.createGenerationContext({
     bindings: { [CAPACITY_SYMBOL]: CAPACITY },
-    chunkLength: CHUNK_LENGTH,
+    chunkLength,
   });
   try {
-    for (const chunk of planPrefillChunks(prompt.length, CHUNK_LENGTH)) {
-      const ids = new Int32Array(CHUNK_LENGTH);
-      const positions = new Int32Array(CHUNK_LENGTH);
+    for (const chunk of planPrefillChunks(prompt.length, chunkLength)) {
+      const ids = new Int32Array(chunkLength);
+      const positions = new Int32Array(chunkLength);
       for (let row = 0; row < chunk.queryLength; row += 1) {
         ids[row] = prompt[chunk.position + row];
         positions[row] = chunk.position + row;
@@ -679,16 +700,16 @@ const teacherForce = async (
       const lastRow = selected.length > 0 ? selected : [chunk.queryLength - 1];
       const outputs = await session.run(
         {
-          [INPUT_IDS]: { dtype: "i32", shape: [1, CHUNK_LENGTH], data: ids },
+          [INPUT_IDS]: { dtype: "i32", shape: [1, chunkLength], data: ids },
           [SOFT_EMBEDS]: {
             dtype: "f32",
-            shape: [1, CHUNK_LENGTH, HIDDEN],
-            data: new Float32Array(CHUNK_LENGTH * HIDDEN),
+            shape: [1, chunkLength, HIDDEN],
+            data: new Float32Array(chunkLength * HIDDEN),
           },
           [SOFT_MASK]: {
             dtype: "bool",
-            shape: [1, CHUNK_LENGTH, 1],
-            data: new Uint32Array(CHUNK_LENGTH),
+            shape: [1, chunkLength, 1],
+            data: new Uint32Array(chunkLength),
           },
           ...ropeInputs(ROPE, positions),
           [LAST_ROW]: { dtype: "i32", shape: [lastRow.length], data: Int32Array.from(lastRow) },
@@ -1176,6 +1197,220 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         await settleReleases(gpu);
       }
       console.log(`[e2e] gemma4 26b cut pipeline:\n  ${lines.join("\n  ")}`);
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// ⑦ The exact expert cache (ADR 0146)
+// ---------------------------------------------------------------------------
+
+/** The slot counts ⑦ runs: small, so that runs miss and re-run (ADR 0146 decision 7). */
+const CACHE_SLOTS = [16, 64] as const;
+/**
+ * The rows of one prefill chunk under the cache at `slots`: a chunk's picks fit in the slots at once,
+ * and a chunk is a deferred run within the sliding slack (ADR 0146 decision 4) — 2 rows at 16 slots,
+ * 8 at 64.
+ */
+const cacheChunkRows = (slots: number): number =>
+  Math.min(SLIDING_SLACK_ROWS, Math.floor(slots / TOP_K));
+/** Tokens ⑦b generates per golden prompt. */
+const CACHE_NEW_TOKENS = 8;
+
+/** The number of 32-bit words in which two arrays differ (0 = the same bytes). */
+const differingWords = (actual: Float32Array<ArrayBuffer>, expected: Float32Array<ArrayBuffer>) => {
+  assertEquals(actual.length, expected.length, "row lengths");
+  const a = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
+  const e = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
+  let differing = 0;
+  for (let at = 0; at < a.length; at += 1) if (a[at] !== e[at]) differing += 1;
+  return differing;
+};
+
+/** One line of the cache's counters (the runtime's merged with the re-run face's). */
+const reportLine = (report: ExpertCacheReport): string =>
+  `runs ${report.runs}, missedRuns ${report.missedRuns}, loads ${report.loads}, loadedExperts ` +
+  `${report.loadedExperts}, evictedExperts ${report.evictedExperts}, bytesRead ${report.bytesRead}, ` +
+  `loadMs ${report.loadMs.toFixed(1)}, committedRuns ${report.committedRuns}, retries ${report.retries}`;
+
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  `Gemma 4 26B cut, ⑦ the exact expert cache (real GPU)${SERIES_CHECKS_OPT_IN}`,
+  () => {
+    let gpu: GpuContext | undefined;
+    const goldens = new Map<string, CutGolden>();
+
+    beforeAll(async () => {
+      const layers = cutLayers();
+      for (const name of CASES) goldens.set(name, await readGolden(name, layers));
+      gpu = await acquireGpu();
+    });
+    afterAll(() => {
+      gpu?.destroy();
+    });
+
+    /** The logits and hidden rows of one golden prompt fed through `session` in `chunkLength` rows. */
+    const goldenRows = async (
+      session: GenerationSession,
+      golden: CutGolden,
+      chunkLength: number,
+      outputs: readonly string[],
+      where: string,
+    ): Promise<{ readonly rows: ProductRows; readonly chunks: number }> => {
+      const [logitsName, hiddenName] = outputs;
+      const logits = new Float32Array(golden.rows.length * VOCAB);
+      const hidden = new Float32Array(golden.rows.length * HIDDEN);
+      let chunks = 0;
+      await teacherForce(
+        session,
+        golden.prompt,
+        golden.rows,
+        (run) => {
+          chunks += 1;
+          if (run.selected.length === 0) return;
+          placeRows(run.outputs[logitsName], VOCAB, run, golden.rows, logits, `${where} logits`);
+          placeRows(run.outputs[hiddenName], HIDDEN, run, golden.rows, hidden, `${where} hidden`);
+        },
+        chunkLength,
+      );
+      return { rows: { logits, hidden }, chunks };
+    };
+
+    it("⑦a Session: under the cache at 16 and 64 slots the golden rows are the bytes of a resident Session at the same chunk rows, with misses and loads", async () => {
+      assert(gpu !== undefined, "no GPU");
+      const model = prepareContainer(await openSeriesContainer(MODEL), MODEL_GRAPH);
+      const outputs = model.graph.outputs;
+      const key = (chunkLength: number, name: string): string => `${chunkLength}/${name}`;
+      // The resident references first, all from one Session (one large container on the GPU at a
+      // time); the cache's chunk rows change the numbers (other shapes), so each has its own.
+      const resident = new Map<string, ProductRows>();
+      const session = await model.createContainerSession(gpu);
+      try {
+        for (const chunkLength of new Set(CACHE_SLOTS.map(cacheChunkRows))) {
+          for (const [name, golden] of goldens) {
+            const { rows } = await goldenRows(session, golden, chunkLength, outputs, name);
+            resident.set(key(chunkLength, name), rows);
+          }
+        }
+      } finally {
+        await session.dispose();
+        await settleReleases(gpu);
+      }
+
+      const lines: string[] = [];
+      const failures: string[] = [];
+      for (const slots of CACHE_SLOTS) {
+        const chunkLength = cacheChunkRows(slots);
+        const cached = await model.createContainerSession(gpu, { expertCache: { slots } });
+        try {
+          const face = createExpertCacheSession(cached);
+          let chunks = 0;
+          for (const [name, golden] of goldens) {
+            const run = await goldenRows(face, golden, chunkLength, outputs, name);
+            chunks += run.chunks;
+            const reference = resident.get(key(chunkLength, name));
+            assert(reference !== undefined, `${name}: no resident reference`);
+            for (const output of OUTPUTS) {
+              const differing = differingWords(run.rows[output], reference[output]);
+              if (differing > 0) {
+                failures.push(
+                  `slots ${slots} ${name} ${output}: ${differing} of ${reference[output].length} words differ from the resident Session's`,
+                );
+              }
+            }
+          }
+          const report = face.report();
+          lines.push(
+            `slots ${slots} (chunks of ${chunkLength} rows, ${chunks} chunks): ${reportLine(report)}`,
+          );
+          // A run with no miss would prove nothing.
+          if (report.missedRuns === 0 || report.loads === 0) {
+            failures.push(`slots ${slots}: no missed run or no load — the case decides nothing`);
+          }
+          if (report.committedRuns !== chunks || report.retries !== report.missedRuns) {
+            failures.push(
+              `slots ${slots}: ${report.committedRuns} committed runs for ${chunks} chunks, ${report.retries} retries for ${report.missedRuns} missed runs`,
+            );
+          }
+        } finally {
+          await cached.dispose();
+          await settleReleases(gpu);
+        }
+      }
+      console.log(`[e2e] gemma4 26b cut expert cache (Session):\n  ${lines.join("\n  ")}`);
+      assertEquals(failures, [], "the expert cache against the resident Session");
+    });
+
+    it("⑦b gemma.Pipeline: with the cache at 16 and 64 slots the greedy tokens are those without it at the same chunk rows, with re-runs", async () => {
+      assert(gpu !== undefined, "no GPU");
+      const assets = {
+        config: PIPELINE_CONFIG,
+        model: await Promise.all(resolveParts(MODEL).map((part) => readFile(part))),
+        tokenizer: await readFile(TOKENIZER),
+      };
+      /** Each golden prompt's greedy tokens (a stop token included) and stop reason. */
+      const generate = async (pipeline: Pipeline): Promise<Map<string, string>> => {
+        const generated = new Map<string, string>();
+        for (const [name, golden] of goldens) {
+          const sequence = await pipeline.sequence();
+          try {
+            const ids: number[] = [];
+            const stream = sequence.generate({
+              prompt: [...golden.prompt],
+              maxNewTokens: CACHE_NEW_TOKENS,
+              sampler: { temperature: 0 },
+            });
+            for await (const event of stream) {
+              if (event.kind === "token") ids.push(event.id);
+            }
+            const stop = await stream.done;
+            if (stop.reason === "eos") ids.push(stop.token);
+            generated.set(name, `[${ids.join(", ")}] (stop '${stop.reason}')`);
+          } finally {
+            await sequence.dispose();
+          }
+        }
+        return generated;
+      };
+
+      const lines: string[] = [];
+      const failures: string[] = [];
+      for (const slots of CACHE_SLOTS) {
+        const chunkLength = cacheChunkRows(slots);
+        // Without the cache at the chunk rows the cache settles (the same shapes, so the same
+        // numbers); one large container on the GPU at a time.
+        const resident = await Pipeline.fromAssets(assets, { gpu, chunkLength });
+        let expected: Map<string, string>;
+        try {
+          expected = await generate(resident);
+        } finally {
+          await resident.dispose();
+          await settleReleases(gpu);
+        }
+        const cached = await Pipeline.fromAssets(assets, { gpu, expertCache: { slots } });
+        try {
+          assertEquals(cached.program.chunkLength, chunkLength, `slots ${slots}: the chunk rows`);
+          const actual = await generate(cached);
+          const report = cached.expertCacheReport();
+          assert(report !== undefined, "a pipeline with the cache has no report");
+          lines.push(`slots ${slots} (chunks of ${chunkLength} rows): ${reportLine(report)}`);
+          for (const [name, tokens] of expected) {
+            lines.push(`  ${name}: ${tokens}`);
+            if (actual.get(name) !== tokens) {
+              failures.push(
+                `slots ${slots} ${name}: ${actual.get(name)} with the cache, ${tokens} without`,
+              );
+            }
+          }
+          if (report.retries === 0) {
+            failures.push(`slots ${slots}: no re-run — the case decides nothing`);
+          }
+        } finally {
+          await cached.dispose();
+          await settleReleases(gpu);
+        }
+      }
+      console.log(`[e2e] gemma4 26b cut expert cache (Pipeline):\n  ${lines.join("\n  ")}`);
+      assertEquals(failures, [], "the expert cache against the pipeline without it");
     });
   },
 );

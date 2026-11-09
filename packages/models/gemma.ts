@@ -68,6 +68,12 @@ export type { SpeculationGateOptions } from "./src/generation/speculation-gate.t
  */
 export type { PleResidency } from "./src/gemma/ple-gpu.ts";
 /**
+ * The counters of the exact expert cache ({@link PipelineOptions.expertCache} — what
+ * `Pipeline.expertCacheReport()` returns: the runtime's runs, misses and loads with the slots, the
+ * committed runs and the re-runs — ADR 0146).
+ */
+export type { ExpertCacheReport } from "./src/generation/expert-cache-session.ts";
+/**
  * The middle layer that carries a multi-turn conversation (between `chat` and `sequence` — ADR 0083
  * addendum 2026-09-02).
  *

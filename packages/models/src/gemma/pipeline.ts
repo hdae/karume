@@ -47,6 +47,7 @@ import {
   resolveGemmaSessionOptions,
 } from "./session-options.ts";
 import { fitCapacityCandidates, pickFitCapacity } from "./fit-capacity.ts";
+import { assertGemma4ExpertCacheOptions, resolveGemma4ExpertCache } from "./expert-cache.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatPle, ropeInputs as qatRopeInputs } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -123,6 +124,11 @@ import {
   type GenerationStream,
   physicalChunkRows,
 } from "../generation/sequence.ts";
+import {
+  createExpertCacheSession,
+  type ExpertCacheReport,
+  type ExpertCacheSession,
+} from "../generation/expert-cache-session.ts";
 import type { DraftFace } from "../generation/speculation.ts";
 import {
   createSpeculationGate,
@@ -299,6 +305,30 @@ export type PipelineOptions = {
    * (gemma-4-12B-it) needs nothing more.
    */
   readonly decodeAhead?: number;
+  /**
+   * **The exact expert cache** of a mixture-of-experts model (Gemma 4 26B A4B — default absent =
+   * every expert resident, as before).
+   *
+   * With it, each layer keeps only `slots` of its experts on the GPU, and the missing ones are read
+   * from the distribution when a run's routing picks them. The output is bit-identical to full
+   * residency: a run that missed an expert is never committed or sampled from — its rows are dropped,
+   * the experts loaded, and the same run issued again, so the cost of a miss is a re-run, not an
+   * approximation ({@link Pipeline.expertCacheReport} counts both). A cached distribution must stay
+   * in its cache while the pipeline lives (the reads come from it).
+   *
+   * Prefill chunks are at most `min(slidingSlack, ⌊slots / k⌋, the distribution's chunkLength)` rows
+   * (k = the routing's top-k — 8 rows at slots 64 on 26B), which is the default
+   * {@link PipelineOptions.chunkLength}; a larger one fails loudly. Long prompts get slow.
+   *
+   * MUST: `slots` is an integer from 2 × k (a chunk has at least 2 rows) to the experts of a layer,
+   * on a model whose graph has `expert_linear`. Refused (fails loudly, before any weight part is
+   * fetched) with `decodeAhead ≥ 2`, {@link PipelineOptions.speculative}, `pleResidency: "gpu"` and
+   * {@link PipelineOptions.vision} — each runs the target in a batch or an immediate run, which a run
+   * under the cache cannot be. Decode runs on the host sampler (no GPU argmax).
+   *
+   * DECIDED: docs/decisions/0146-exact-expert-cache.md
+   */
+  readonly expertCache?: { readonly slots: number };
   /**
    * The row count of a fixed-length prefill chunk (default: the distribution's declaration
    * {@link PipelineConfig.chunkLength}).
@@ -778,6 +808,11 @@ export type Gemma4State = {
    */
   readonly entry: string;
   readonly greedyOutput?: GemmaGreedyOutput;
+  /**
+   * The re-run face of the target Session (only with {@link PipelineOptions.expertCache}) — the
+   * session every conversation runs through; there is no {@link Gemma4State.greedyOutput} then.
+   */
+  readonly expertCache?: ExpertCacheSession<GenerationContext>;
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly session: Session;
@@ -1497,6 +1532,7 @@ export class GemmaPipeline {
     resolveGemma4PleResidency(where, options);
     assertGemma4DecodeAheadOptions(where, options);
     assertGemma4FullStateStorage(where, options);
+    assertGemma4ExpertCacheOptions(where, options);
     // Both families share this load body, so each names its own table in the omitted-ref hint.
     const source = toManifestSource(
       ref,
@@ -1572,6 +1608,8 @@ export class GemmaPipeline {
         // PLE-free model refuses the PLE placement options here — before any weight part.
         const hasPle = admitGemma4Ple(model, entry);
         if (!hasPle) assertGemma4PleFreeOptions(where, options);
+        // The cache's graph checks (expert_linear, the slots, the chunk rows) — before any weight part.
+        resolveGemma4ExpertCache(where, model.graph, options, config.chunkLength);
         // MUST: a shared GPU's missing features fail at this step (unlike a device acquired here,
         // they cannot be requested, and this is the only check that knows before downloading the
         // weights — the later check is the same one in `session/gpu-features.ts`).
@@ -1654,6 +1692,7 @@ export class GemmaPipeline {
     resolveGemma4PleResidency(where, options);
     assertGemma4DecodeAheadOptions(where, options);
     assertGemma4FullStateStorage(where, options);
+    assertGemma4ExpertCacheOptions(where, options);
     // MUST: the explicit quant execution knobs are checked **here** too. This surface has no manifest
     // and cannot go through `resolveGemmaSessionOptions`; without this the same mistaken option would
     // travel down to Session construction and turn into the runtime's `ExecutionError` = the
@@ -1738,11 +1777,18 @@ export class GemmaPipeline {
     const decodeAhead = resolveGemma4DecodeAhead(entry, options, {
       ple: plePlan.residency !== "none",
     });
+    const expertCache = resolveGemma4ExpertCache(
+      entry,
+      open(MODEL).graph,
+      options,
+      admitted.config.chunkLength,
+    );
     const { wiring, tokenizer, ple } = buildGemma4Program(
       admitted,
       open,
       assets.tokenizer,
-      options,
+      // Under the cache the chunk rows are the settled ones (a chunk's picks fit in the slots).
+      expertCache === undefined ? options : { ...options, chunkLength: expertCache.chunkLength },
       admission,
       plePlan,
     );
@@ -1845,16 +1891,27 @@ export class GemmaPipeline {
         decodeAhead >= 2 && pleGpu === undefined
           ? await gpu.createResident(4, "greedy-ahead-ids")
           : undefined;
-      session = await model.createSession(gpu, sessionOptions);
+      // The cache goes to the target alone (the drafter and the embedder are refused with it).
+      session = await model.createSession(
+        gpu,
+        expertCache === undefined
+          ? sessionOptions
+          : { ...sessionOptions, expertCache: { slots: expertCache.slots } },
+      );
+      const cacheSession =
+        expertCache === undefined ? undefined : createExpertCacheSession(session);
       // Under GPU residency, runs that do not use greedy (prefill, decode with diagnostics) also go
       // through the wrapper — it is the only place to plug in `per_layer_inputs`. Whether greedy
       // itself is used is decided by the generation surface from the presence of `onRun`, so it is
       // independent of whether the wrapper exists.
       // A distribution with a suppressed set masks it inside the GPU selection (`Sampler.greedy`).
+      // MUST: none under the expert cache — the GPU selection enqueues the target into a batch, which
+      // a Session with the cache refuses (its runs go through the re-run face and the host sampler).
       const greedyOutput =
-        pleGpu !== undefined ||
-        decodeAhead >= 2 ||
-        (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined)
+        cacheSession === undefined &&
+        (pleGpu !== undefined ||
+          decodeAhead >= 2 ||
+          (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined))
           ? createGemmaGreedyOutput(
               gpu,
               session,
@@ -1896,6 +1953,7 @@ export class GemmaPipeline {
         gpu,
         ownsGpu,
         session,
+        ...(cacheSession === undefined ? {} : { expertCache: cacheSession }),
         ...(sessionOptions.stateAttentionReduce === undefined
           ? {}
           : { stateAttentionReduce: sessionOptions.stateAttentionReduce }),
@@ -2117,7 +2175,7 @@ export class GemmaPipeline {
           softBlocks.push({ start, rows: (await embedRows(state, rows)).rows });
         }
         sequence = await createGenerationSequence({
-          session: state.greedyOutput?.session ?? state.session,
+          session: state.expertCache ?? state.greedyOutput?.session ?? state.session,
           ...(state.greedyOutput === undefined
             ? {}
             : { greedy: state.greedyOutput.greedy, greedyMasksSuppressed: true }),
@@ -2241,7 +2299,7 @@ export class GemmaPipeline {
       (async (): Promise<GenerationSequence> => {
         const capacity = options.capacity === "fit" ? await this.fitCapacity() : options.capacity;
         const inner = await createGenerationSequence({
-          session: state.greedyOutput?.session ?? state.session,
+          session: state.expertCache ?? state.greedyOutput?.session ?? state.session,
           ...(state.greedyOutput === undefined
             ? {}
             : { greedy: state.greedyOutput.greedy, greedyMasksSuppressed: true }),
@@ -2384,7 +2442,7 @@ export class GemmaPipeline {
    * constant that depends on neither `k` nor `capacity`.
    */
   estimateSessionMemory(options: EstimateOptions = {}): AdmissionReport {
-    const { wiring, graph, gpu, drafter, vision, entry } = this.#state;
+    const { wiring, graph, gpu, drafter, vision, entry, session } = this.#state;
     const capacity = options.capacity ?? wiring.capacity;
     const chunkLength = assertChunkLength(
       options.chunkLength ?? wiring.chunkLength,
@@ -2448,6 +2506,10 @@ export class GemmaPipeline {
       ...(this.#state.fullStateStorage === undefined
         ? {}
         : { fullStateStorage: this.#state.fullStateStorage }),
+      // The expert pools and slot tables the Session holds (its own slots, so the two cannot diverge).
+      ...(session.expertCache === undefined
+        ? {}
+        : { expertCache: { slots: session.expertCache.slots } }),
       ...budget,
     });
     // The auxiliary Session of small-output decode, and the share of the GPU-resident PLE option (ADR
@@ -2564,6 +2626,15 @@ export class GemmaPipeline {
       );
     }
     return picked;
+  }
+
+  /**
+   * The counters of the expert cache over this pipeline's lifetime (`undefined` without
+   * {@link PipelineOptions.expertCache}): the runtime's runs, missed runs, loads and the bytes and
+   * time they took, with the slots, the runs committed and the re-runs a miss cost (ADR 0146).
+   */
+  expertCacheReport(): ExpertCacheReport | undefined {
+    return this.#state.expertCache?.report();
   }
 
   /**

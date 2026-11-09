@@ -387,6 +387,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ExpertCacheReport",
+        "kind": "typeAlias"
+      },
+      {
         "name": "FromPretrainedOptions",
         "kind": "typeAlias"
       },
