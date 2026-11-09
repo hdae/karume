@@ -256,6 +256,25 @@ promise; the two runs agree within 0.2 ms on every median below and on every oth
   it missed (about 2.4 ms here) unless it rides on the readback of the sampled token. Self-speculation's two fences per cycle
   already include it.
 
+A third run (2026-11-09) added reads of experts from the cached 26B distribution in CacheStorage: each sample reads one
+expert's four ranges (or eight experts' 32 ranges) at random 4-byte-aligned positions of the model's parts, all at once
+through the hub's range reader (a `slice` of the cached Blob), then the same ranges again. 50 samples after 5 of warm-up:
+
+| case | first read, median ms | p95 ms | second read, median ms |
+|---|---:|---:|---:|
+| 1 expert (4 ranges, 3.19 MiB) | 3.91 | 6.89 | 2.75 |
+| 8 experts (32 ranges, 25.5 MiB) | 23.36 | 38.89 | 21.64 |
+
+- A cached read costs about 2.9 ms per expert (1.15 GB/s), six times the 0.48 ms assumed for the whole load in §4. Reading
+  eight at once scales linearly, so concurrent reads do not raise the rate.
+- The second read of the same bytes is barely faster (2.7 ms per expert at 8), so the limit is the browser's Blob read
+  path rather than the disk (an inference: the OS cache should serve the second read).
+- With the read added to the ring's 0.43 ms, the 12.7 loads per token at K = 64 add about 36 ms: about 77 ms per token for
+  the resume with uniform K and 72 ms for self-speculation (same assumed 15 ms forwards).
+- LRU has the inclusion property, so a host tier of 32 more experts per layer (about 3.2 GB) in front of the Blob leaves the
+  3.9 loads per token of K = 96 to the Blob: about 52 ms per token for the resume if a tier hit costs what the ring does. A
+  tier holding every expert returns to the times of §4.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
@@ -266,5 +285,7 @@ promise; the two runs agree within 0.2 ms on every median below and on every oth
   the approximate modes pass 0.08 nats.
 - A per-layer K and self-speculation each bring the exact cache at K = 64 to about 35 ms per token, and together to about
   34 ms, against 15 ms with every expert resident; Chrome's measured fence and upload costs leave these within 1 ms.
+- Reading the misses from the cached Blob in Chrome (about 2.9 ms per expert) roughly doubles those times; a host tier in
+  RAM is what brings them back.
 - Open: the verify's extra expert traffic, the real per-forward time of the 26B decode in place of the assumed 15 ms, and
   whether a GPU implementation reaches the CPU reference's draft acceptance.

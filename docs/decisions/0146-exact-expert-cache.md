@@ -118,7 +118,10 @@ The code facts this rests on (read 2026-11-09):
 
 ## Open points
 
-1. The time of a cached Blob read of one expert in Chrome (the stage 0 measurement), and whether a RAM tier is needed.
+1. A RAM tier. A cached Blob read measured about 2.9 ms per expert in Chrome on the RTX 5070 Ti (research §6.1, 2026-11-09),
+   about 36 ms per token at K = 64; the host store is therefore one narrow interface, so a tier in RAM can be put in front of
+   the Blob once the counters of a real chat are in (the maintainer's ruling of 2026-11-09: build scheme A on the Blob
+   first).
 2. A per-layer K (the research's fit saves about 12% at K = 64).
 3. Prefill speed with small chunks, and whether a grouped prefill form (ADR 0145 open point 1) changes it.
 4. The real per-forward time of 26B decode in Chrome, which sets the absolute cost of every re-run.
