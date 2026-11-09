@@ -76,14 +76,16 @@ export type KeyPredicate = (key: string) => boolean;
  * `Extract<…, string>`. Both select a variant whose contract is an integer match / Uint32 match
  * with the reference, and do not change numerics. `attentionRowBlockMaxBytes` is a resource policy
  * that changes only the number of row blocks (the output matches the no-budget run in Uint32 —
- * ADR 0124 decisions 3 / 4).
+ * ADR 0124 decisions 3 / 4). `expertCache` is exact: a run with no miss matches full residency bit
+ * for bit (ADR 0146 decision 1).
  */
 type NonNumericField =
   | "submitPolicy"
   | "sharedWeights"
   | "planBackingBudgetBytes"
   | "linearGemvRowsThreadTarget"
-  | "attentionRowBlockMaxBytes";
+  | "attentionRowBlockMaxBytes"
+  | "expertCache";
 
 /**
  * Options of `SessionOptions` that change numerics (the string keys minus {@link NonNumericField}).

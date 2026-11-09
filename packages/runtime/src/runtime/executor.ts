@@ -110,6 +110,8 @@ import {
   type ValueBinding,
 } from "./recipe.ts";
 import type { TransientPlan } from "./transient-plan.ts";
+import { SessionExpertCache } from "./expert-cache.ts";
+import type { ExpertSource } from "./expert-plan.ts";
 import { type AddedParams, RecipeBuilder } from "./recipe-builder.ts";
 import { planWeightResidency, SharedWeight, type WeightResidency } from "./weight-residency.ts";
 import {
@@ -125,6 +127,7 @@ import type {
   EnqueueOptions,
   EnqueueRead,
   BidirectionalRows,
+  ExpertCache,
   GenerationContextSpec,
   GenerationRun,
   ParamsCacheStats,
@@ -141,6 +144,11 @@ export type {
   EnqueueOptions,
   EnqueueRead,
   BidirectionalRows,
+  ExpertCache,
+  ExpertCacheStats,
+  ExpertLoad,
+  ExpertRouting,
+  ExpertRun,
   GenerationContextSpec,
   GenerationRun,
   I8a8Dot,
@@ -509,6 +517,26 @@ const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): 
 };
 
 /**
+ * What a run's issuer adds inside the serialized body ({@link Session.#issueRun}): `admit` before any
+ * GPU work, `settle` from the outputs to the result.
+ */
+type RunHooks<T> = {
+  readonly admit: () => void;
+  readonly settle: (outputs: RunOutputs) => T;
+};
+
+/** The hooks of a plain `Session.run` (nothing added). */
+const PLAIN_RUN: RunHooks<RunOutputs> = {
+  admit: () => undefined,
+  settle: (outputs) => outputs,
+};
+
+/** The refusal of the plain surfaces under `SessionOptions.expertCache` (ADR 0146). */
+const expertCacheRefusal = (surface: string): string =>
+  `Session.${surface} is refused under SessionOptions.expertCache: a pick whose expert is not resident` +
+  " contributes 0, so run through session.expertCache.run, which returns the routing and the miss count (ADR 0146)";
+
+/**
  * A generation run as the body executes it: the copy taken at issue plus, for a chained run, the
  * reservation the context made for it (`GenerationContextInternals.acquireChainedRun`). The
  * reservation is handed back on every internal call of the run (`pastLength` / `writeLengths` /
@@ -862,10 +890,22 @@ export class Session {
    */
   #lentWeights = 0;
   #disposal: Promise<void> | undefined;
+  /** The expert cache (ADR 0146 — `SessionOptions.expertCache`), undefined without the option. */
+  readonly #expertCache: SessionExpertCache | undefined;
 
   private constructor(state: SessionState) {
     this.#state = state;
     this.#recipeBuilder = new RecipeBuilder(state);
+    this.#expertCache =
+      state.expertPool === undefined
+        ? undefined
+        : new SessionExpertCache(state.expertPool, {
+            gpu: state.gpu,
+            run: (inputs, bindings, generation, hooks) =>
+              this.#issueRun(inputs, bindings, generation, hooks),
+            serialize: (body) => this.#serialize(body),
+            disposed: () => this.#disposal !== undefined,
+          });
   }
 
   /**
@@ -898,8 +938,18 @@ export class Session {
     residency: ReadonlyMap<string, WeightResidency>,
     batches: AsyncIterable<WeightBatch>,
     options: SessionOptions,
+    experts?: ExpertSource,
   ): Promise<Session> {
-    return new Session(await buildSessionState(gpu, graph, residency, batches, options));
+    return new Session(await buildSessionState(gpu, graph, residency, batches, options, experts));
+  }
+
+  /**
+   * The expert cache of a Session built with `SessionOptions.expertCache` (ADR 0146), undefined
+   * without the option. Under it, {@link Session.run} / {@link Session.enqueue} /
+   * {@link Session.enqueueRead} are refused: every run goes through the cache's `run`.
+   */
+  get expertCache(): ExpertCache | undefined {
+    return this.#expertCache;
   }
 
   /**
@@ -949,6 +999,26 @@ export class Session {
     bindings: SymbolBindings = {},
     generation?: GenerationRun,
   ): Promise<RunOutputs> {
+    // MUST: refused under the expert cache — a pick whose expert is not resident contributes 0, and
+    // a plain run gives the caller no way to know it before committing the row (ADR 0146).
+    if (this.#expertCache !== undefined) {
+      return Promise.reject(new ExecutionError(expertCacheRefusal("run")));
+    }
+    return this.#issueRun(inputs, bindings, generation, PLAIN_RUN);
+  }
+
+  /**
+   * The body of {@link Session.run}, shared with the expert cache's `run` (the same acceptance, lock,
+   * validation and readback). `hooks.admit` runs at the head of the serialized body, before any GPU
+   * work, and `hooks.settle` turns the outputs into the result inside the same body — nothing else on
+   * the Session's chain comes between the run and either of them.
+   */
+  #issueRun<T>(
+    inputs: RunInputs,
+    bindings: SymbolBindings,
+    generation: GenerationRun | undefined,
+    hooks: RunHooks<T>,
+  ): Promise<T> {
     // The disposed check happens at call time (checked inside the chain, runs issued before dispose
     // would fail along with it).
     if (this.#disposal !== undefined) {
@@ -1042,7 +1112,8 @@ export class Session {
     this.#pendingRuns += 1;
     return this.#serialize(async () => {
       try {
-        return await this.#runOnce(captured, capturedBindings, issued);
+        hooks.admit();
+        return hooks.settle(await this.#runOnce(captured, capturedBindings, issued));
       } finally {
         // MUST: always return them on success and failure alike (a missed return rejects every
         // later rewind forever / leaves that resident tensor undisposable). At this point every GPU
@@ -1151,6 +1222,10 @@ export class Session {
   #assertEnqueueAdmissible(batch: EnqueueOptions["batch"]): void {
     if (this.#disposal !== undefined) {
       throw new ExecutionError("Cannot run on a disposed Session");
+    }
+    // MUST: refused under the expert cache (the reason of `run`; an enqueue reads no routing back).
+    if (this.#expertCache !== undefined) {
+      throw new ExecutionError(expertCacheRefusal("enqueue"));
     }
     // MUST: device liveness is checked too (the same reason as the acceptance of
     // {@link Session.run} — an enqueue with 0 outputs settles its returned Promise as a success
@@ -3466,6 +3541,12 @@ export class PreparedModel {
       this.#residency,
       containerBatches(source.opened, source.graphName),
       options,
+      // The expert cache reads its misses from the same container (ADR 0146 decision 5); only a
+      // Session with the option looks at it.
+      {
+        supplies: source.opened.graphs[source.graphName].supplies,
+        ranges: source.opened.ranges,
+      },
     );
   }
 }

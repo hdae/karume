@@ -123,6 +123,26 @@
         "kind": "class"
       },
       {
+        "name": "ExpertCache",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ExpertCacheStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ExpertLoad",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ExpertRouting",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ExpertRun",
+        "kind": "typeAlias"
+      },
+      {
         "name": "FusionCounts",
         "kind": "typeAlias"
       },

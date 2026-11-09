@@ -145,6 +145,57 @@ export type BoundGraph = {
 export type BoundContainer = {
   readonly graphs: Readonly<Record<string, BoundGraph>>;
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
+  /**
+   * Range reads inside a declared block — the host store of the expert cache (ADR 0146 decision 5).
+   * Absent = the supply cannot read a range (a Session with `expertCache` fails loudly on it).
+   */
+  readonly ranges?: BlockRangeReader;
+};
+
+/**
+ * Reads `[offset, offset + length)` of one **declared** block (a block id of the index — not the
+ * joined id of a split scale) without reading the whole block, unless `cost` says otherwise.
+ *
+ * MUST: callers do not modify the returned bytes (the same rule as {@link BoundContainer.readBlock}).
+ */
+export type BlockRangeReader = {
+  /**
+   * Whether the bytes are already verified (`BlockSource.verified` of an opened container; the
+   * in-memory container passes the caller's own bytes). When false, a range read checks nothing:
+   * its reader compares the bytes with a digest it took from a verified read of the whole block.
+   */
+  readonly verified: boolean;
+  /**
+   * The cost class of a range read of block `id`: `"seek"` = the range only, `"scan"` = the whole
+   * block or more is read again, `undefined` = the source does not say (a `BlockSource` passed in by
+   * the caller carries no cost class).
+   */
+  cost(id: string): "seek" | "scan" | undefined;
+  read(id: string, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
+};
+
+/**
+ * The bounds check of a {@link BlockRangeReader} read (one rule for every supply): a non-negative
+ * safe-integer range inside the block's declared length.
+ */
+export const assertRangeInBlock = (
+  id: string,
+  blockLength: number,
+  offset: number,
+  length: number,
+): void => {
+  // NaN makes every comparison false and would slip past the bounds, and subarray truncates fractions.
+  if (
+    !Number.isSafeInteger(offset) ||
+    !Number.isSafeInteger(length) ||
+    offset < 0 ||
+    length < 0 ||
+    offset + length > blockLength
+  ) {
+    fail(
+      `block '${id}': range (offset ${offset}, length ${length}) is not inside its ${blockLength} bytes`,
+    );
+  }
 };
 
 // NOTE: a function declaration, because TS treats a call returning `never` as ending control flow

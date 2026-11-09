@@ -2,8 +2,8 @@
  * In-memory container — the supply surface that hands bytes already at hand (synthesized weights,
  * data read out of another buffer) to Session construction **without writing a container**.
  *
- * The surface is the same two members as the `OpenedContainer` of {@link "./open.ts"} for an opened
- * `krm` (`graphs` and `readBlock` = `BoundContainer`), and the binding rules **still have one
+ * The surface is the same members as the `OpenedContainer` of {@link "./open.ts"} for an opened
+ * `krm` (`graphs`, `readBlock` and `ranges` = `BoundContainer`), and the binding rules **still have one
  * owner**, the merge layer ({@link bindDeclarations}). What this module does is check the
  * "declaration → supply" correspondence and **synthesize** the block index the merge layer needs;
  * rules ①–④, codec × semantic dtype, payload lengths and piece coverage are all checked by the merge
@@ -22,6 +22,7 @@
  */
 
 import {
+  assertRangeInBlock,
   bindDeclarations,
   type BoundContainer,
   type Locator,
@@ -198,6 +199,8 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
       readonly part: number;
       readonly record: SupplyRecord;
       readonly read: () => Promise<Uint8Array<ArrayBuffer>>;
+      /** A piece re-reads its whole bytes through the caller's reader on every read. */
+      readonly piece: boolean;
     }
   >();
   const register = (
@@ -205,6 +208,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     part: number,
     length: number,
     read: () => Promise<Uint8Array<ArrayBuffer>>,
+    piece = false,
   ): void => {
     // The equivalent of rule ①: a collision of synthesized ids fails loudly (overwriting with the
     // last one wins would dequantize one initializer's data with another's scale, a silent wrong
@@ -215,7 +219,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         `Synthesized block '${id}' is bound twice (1 block ≤ 1 binding — an initializer name / graph name contains the id separator '#' / '/')`,
       );
     }
-    located.set(id, { part, record: { id, offset: 0, length }, read });
+    located.set(id, { part, record: { id, offset: 0, length }, read, piece });
   };
 
   for (const graphName of Object.keys(input.tensors)) {
@@ -301,8 +305,12 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         scalePart = firstPart;
         const pieces = tensor.pieces.map((piece, index) => {
           const block = `${id}#piece${index + 1}`;
-          register(block, firstPart + index, (piece.rows[1] - piece.rows[0]) * rowBytes, () =>
-            piece.read(),
+          register(
+            block,
+            firstPart + index,
+            (piece.rows[1] - piece.rows[0]) * rowBytes,
+            () => piece.read(),
+            true,
           );
           return { block, rows: piece.rows };
         });
@@ -322,6 +330,26 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     return found;
   };
 
+  const readBlock = async (id: string): Promise<Uint8Array<ArrayBuffer>> => {
+    const found = located.get(id);
+    if (found === undefined) throw new ContainerFormatError(`Undeclared block '${id}'`);
+    // Whole data and scales return **the passed buffer as is** (no copy — the MUST of
+    // `BoundContainer`). A piece calls `read()` again on every call (nothing kept = one buffer's
+    // worth of RAM).
+    const bytes = await found.read();
+    // MUST: fetched length = the declared length of the synthesized index (the same check as
+    // `readBlock` in `open.ts`). A piece's length is derived from the declaration, so even if
+    // `read()` returns longer bytes the merge layer's check is trivially true, and the
+    // `subarray(0, payloadBytes)` of `containerBatches` silently truncates — a caller's mix-up of
+    // row range and reader would land on the GPU as a silent wrong value.
+    if (bytes.byteLength !== found.record.length) {
+      throw new ContainerFormatError(
+        `block '${id}': fetched length ${bytes.byteLength} differs from the declared ${found.record.length}`,
+      );
+    }
+    return bytes;
+  };
+
   return {
     graphs: bindDeclarations({
       graphs: input.graphs,
@@ -331,24 +359,18 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
       binding,
       locate,
     }),
-    readBlock: async (id) => {
-      const found = located.get(id);
-      if (found === undefined) throw new ContainerFormatError(`Undeclared block '${id}'`);
-      // Whole data and scales return **the passed buffer as is** (no copy — the MUST of
-      // `BoundContainer`). A piece calls `read()` again on every call (nothing kept = one buffer's
-      // worth of RAM).
-      const bytes = await found.read();
-      // MUST: fetched length = the declared length of the synthesized index (the same check as
-      // `readBlock` in `open.ts`). A piece's length is derived from the declaration, so even if
-      // `read()` returns longer bytes the merge layer's check is trivially true, and the
-      // `subarray(0, payloadBytes)` of `containerBatches` silently truncates — a caller's mix-up of
-      // row range and reader would land on the GPU as a silent wrong value.
-      if (bytes.byteLength !== found.record.length) {
-        throw new ContainerFormatError(
-          `block '${id}': fetched length ${bytes.byteLength} differs from the declared ${found.record.length}`,
-        );
-      }
-      return bytes;
+    readBlock,
+    // A range is a slice of the block's bytes: whole data are the caller's buffer (seek), while a
+    // piece reads its whole bytes again through the caller's reader for every range (scan). The
+    // bytes are the caller's own, which no block digest checks either (module doc).
+    ranges: {
+      verified: true,
+      cost: (id) => (located.get(id)?.piece === true ? "scan" : "seek"),
+      read: async (id, offset, length) => {
+        const bytes = await readBlock(id);
+        assertRangeInBlock(id, bytes.byteLength, offset, length);
+        return bytes.subarray(offset, offset + length);
+      },
     },
   };
 };

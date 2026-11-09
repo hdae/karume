@@ -678,6 +678,30 @@ export type SessionOptions = {
    */
   readonly sharedWeights?: Readonly<Record<string, SharedWeight>>;
   /**
+   * **An exact expert cache** for the `expert_linear` weights (ADR 0146 — default absent = every
+   * expert resident, as before, with not a byte of WGSL, params, upload or estimate changed).
+   *
+   * With it, each `expert_linear` weight is allocated as a pool of `slots` experts instead of all E
+   * of them, no expert is uploaded at build, and each routed `topk` (the index both projections of a
+   * layer read) gets a table `expert id → slot` that the runtime writes. A pick whose expert is not
+   * resident contributes 0, so the Session refuses `run` / `enqueue` / `enqueueRead` and the runs go
+   * through `Session.expertCache` ({@link ExpertCache}): its `run` returns the routing of the real rows and the number
+   * of picks that missed, its `load` reads the missing experts from the container and writes them to
+   * their slots, and the caller runs the same inputs again (a run with no miss is bit-identical to
+   * full residency).
+   *
+   * MUST: `slots` is an integer from the largest `topk` k of the routed layers to their E, and the
+   * graph has `expert_linear` (anything else fails loudly at construction). Every routed layer has
+   * the same k and E, and an expert weight is an initializer read only by that layer's
+   * `expert_linear` nodes. The container MUST read byte ranges of its blocks without re-reading a
+   * whole block or part (a container that cannot read ranges, or whose range reads re-read a whole
+   * block, fails loudly). On a source that has not verified its bytes, construction keeps the SHA-256
+   * of every expert range it read, and a load checks the range against it.
+   *
+   * DECIDED: docs/decisions/0146-exact-expert-cache.md
+   */
+  readonly expertCache?: { readonly slots: number };
+  /**
    * Test only ({@link I8A8_DOT}). The default is decided from the enumeration of
    * wgslLanguageFeatures.
    */
@@ -912,6 +936,106 @@ export type StateBackingStats = {
    * values stay correct (no exception, no warning).
    */
   readonly rebindCount: number;
+};
+
+/**
+ * The routing of the real rows of one run under {@link SessionOptions.expertCache} (ADR 0146
+ * decision 3): every routed layer's `topk` ids, `[layers, rows, picks]` row major, in graph order of
+ * the layers' `topk` nodes and in pick order.
+ *
+ * `rows` counts real rows only: `queryLength` of a generation run, every row of the index otherwise
+ * (the padded rows of a prefill bucket are left out).
+ */
+export type ExpertRouting = {
+  readonly layers: number;
+  readonly rows: number;
+  readonly picks: number;
+  readonly ids: Int32Array<ArrayBuffer>;
+};
+
+/** The result of {@link ExpertCache.run}. */
+export type ExpertRun = {
+  /** The graph's declared outputs, exactly as `Session.run` would return them. */
+  readonly outputs: RunOutputs;
+  readonly routing: ExpertRouting;
+  /**
+   * The distinct (layer, expert) picks of the real rows whose expert was not resident when the run
+   * executed. 0 = the run is bit-identical to full residency; otherwise those picks contributed 0
+   * and the run MUST NOT be committed (load the routing, then run the same inputs again).
+   */
+  readonly missing: number;
+};
+
+/** The result of {@link ExpertCache.load}. */
+export type ExpertLoad = {
+  /** Experts read from the container and written to a slot. */
+  readonly loaded: number;
+  /** Resident experts whose slot was taken (a free slot taken evicts nothing). */
+  readonly evicted: number;
+  /** Bytes read from the container. */
+  readonly bytes: number;
+  /** Wall time of the load (0 for a load with nothing missing). */
+  readonly ms: number;
+};
+
+/** The cumulative counters of {@link ExpertCache} (over the Session's lifetime). */
+export type ExpertCacheStats = {
+  /** `run` calls that completed. */
+  readonly runs: number;
+  /** Completed runs with `missing > 0`. */
+  readonly missedRuns: number;
+  /** `load` calls that loaded at least one expert. */
+  readonly loads: number;
+  readonly loadedExperts: number;
+  readonly evictedExperts: number;
+  readonly bytesRead: number;
+  /** Wall time of the counted loads. */
+  readonly loadMs: number;
+};
+
+/**
+ * The expert cache of a Session built with {@link SessionOptions.expertCache} (ADR 0146). The
+ * caller's protocol: `run` deferred → if `missing > 0`, `context.commit(0)`, `load(routing)` and run
+ * the same inputs again → when `missing` is 0, `context.commit(rows)` and `touch(routing, rows)`.
+ *
+ * The slot tables are the runtime's alone; `load` and `run` are serialized with the Session's other
+ * runs, so the host mirror the miss count is read from always equals the tables on the GPU.
+ */
+export type ExpertCache = {
+  /** Slots per layer (K). */
+  readonly slots: number;
+  /** Experts per layer (E). */
+  readonly experts: number;
+  /** Routed layers (one per routed `topk`). */
+  readonly layers: number;
+  /** Picks per row (the `topk` k). */
+  readonly picks: number;
+  /**
+   * `Session.run` with the routing and the miss count (same lock, validation and readback; the
+   * routing is read in the run's own command list and fence).
+   *
+   * MUST: a generation run is `commit: "deferred"` and not `chain` (fails loudly otherwise) — a run
+   * with a miss is not exact, so the caller must be able to `commit(0)` and run it again.
+   */
+  run(inputs: RunInputs, bindings?: SymbolBindings, generation?: GenerationRun): Promise<ExpertRun>;
+  /**
+   * Makes every expert of the routing resident: per layer, the distinct ids are needed (more than
+   * `slots` fails loudly), the missing ones take free slots first and then the least recently used
+   * experts not needed by this routing, and become the most recent. A routing with nothing missing
+   * loads nothing and counts nothing.
+   *
+   * MUST: a load that fails after its GPU writes were issued leaves the cache unusable (every later
+   * call fails loudly — the tables can no longer be trusted); a failed read before them changes
+   * nothing.
+   */
+  load(routing: ExpertRouting): Promise<ExpertLoad>;
+  /**
+   * Marks the picks of the first `rows` rows as most recently used, in row then pick order (call it
+   * after `context.commit(rows)` — the recency follows committed rows only, ADR 0146 decision 6).
+   * MUST: every touched expert is resident (a routing whose run missed fails loudly).
+   */
+  touch(routing: ExpertRouting, rows: number): void;
+  stats(): ExpertCacheStats;
 };
 
 export type SessionDiagnostics = {

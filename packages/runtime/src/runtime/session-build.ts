@@ -41,6 +41,19 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
 import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
 import { type AttentionDeviceFacts, attentionDeviceFacts } from "./attention-route.ts";
+import {
+  digestExpertItem,
+  type ExpertPool,
+  type ExpertPoolLayer,
+  type ExpertPoolWeight,
+} from "./expert-cache.ts";
+import {
+  type ExpertGraphPlan,
+  type ExpertSource,
+  type ExpertStorePlan,
+  planExpertGraph,
+  planExpertStore,
+} from "./expert-plan.ts";
 import type { FusionCounts } from "./fusion.ts";
 import { sessionGeometryProfile } from "./geometry-selection.ts";
 import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
@@ -549,7 +562,23 @@ export type SessionState = {
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
   readonly outputNames: ReadonlySet<string>;
+  /**
+   * The expert cache's pools and slot tables (ADR 0146 — `SessionOptions.expertCache`), undefined
+   * without the option. With it, {@link graph} also outputs every routed `topk` index (the routing
+   * readback) and the expert weights' buffers in {@link weightBuffers} are the pools.
+   * NOTE: the pool keeps the container's range reader for the Session's lifetime — the one
+   * exception to {@link graph}'s rule of holding no supply side, and the price of reading a miss
+   * from the distribution itself (ADR 0146 decision 5 and its consequences).
+   */
+  readonly expertPool: ExpertPool | undefined;
 };
+
+/**
+ * The copy of `expertCache` (its contents, as for `submitPolicy`: the pools are sized after an
+ * await). A value from outside the type is passed on as is, for the entry check to name.
+ */
+const copyExpertCache = (cache: SessionOptions["expertCache"]): SessionOptions["expertCache"] =>
+  typeof cache === "object" && cache !== null ? { slots: cache.slots } : cache;
 
 /**
  * The copy of {@link SessionOptions} taken at the entry of construction (the MUST at the head of
@@ -586,6 +615,7 @@ const snapshotSessionOptions = (
   planBackingBudgetBytes: requested.planBackingBudgetBytes,
   attentionRowBlockMaxBytes: requested.attentionRowBlockMaxBytes,
   sharedWeights: requested.sharedWeights,
+  expertCache: copyExpertCache(requested.expertCache),
   [I8A8_DOT]: requested[I8A8_DOT],
   [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
 });
@@ -596,6 +626,9 @@ const snapshotSessionOptions = (
  *
  * It returns only the {@link SessionState} passed to `new Session(state)` — `Session` has a private
  * constructor, so the object is not created here.
+ *
+ * @param experts the container side of `SessionOptions.expertCache` (the supplies and the range
+ *   reader the pools load from); read only with the option
  */
 export const buildSessionState = async (
   gpu: GpuContext,
@@ -603,6 +636,7 @@ export const buildSessionState = async (
   residency: ReadonlyMap<string, WeightResidency>,
   batches: AsyncIterable<WeightBatch>,
   requested: SessionOptions,
+  experts?: ExpertSource,
 ): Promise<SessionState> => {
   // MUST: options are copied once at the entry, and every later check, capability check and state
   // creation reads from the copy. Construction spans awaits (the canary, the weight supply), so
@@ -621,6 +655,13 @@ export const buildSessionState = async (
   // condition here would split the accepted sets of the two entries.
   const violation = sessionOptionsViolation(options);
   if (violation !== undefined) throw new ExecutionError(violation);
+  // The expert cache's plan is GPU-independent too (the graph and the container's descriptor), so a
+  // graph or a container it cannot serve fails before any capability check and any byte uploaded.
+  const expertPlan =
+    options.expertCache === undefined
+      ? undefined
+      : planExpertGraph(graph, residency, options.expertCache);
+  const expertStore = expertPlan === undefined ? undefined : planExpertStore(expertPlan, experts);
   const {
     rmsNormReduce,
     linearCompute,
@@ -687,7 +728,8 @@ export const buildSessionState = async (
   // NOTE: only absolute limits are looked at, never free VRAM (the rule of ADR 0070 decision 5 — the
   // check stays a pure comparison, and the final check of whether the total fits stays with the
   // errorScope).
-  assertWeightsWithinLimits(residency, gpu.limits);
+  // Under the expert cache the expert weights are allocated as their pools, so the pools are checked.
+  assertWeightsWithinLimits(expertPlan?.residency ?? residency, gpu.limits);
 
   // Matching of shared initializers (borrowed weights — ADR 0096 decision 2 and its stage 2
   // addendum). **Before a single byte is uploaded**, check the residency class, declared shape,
@@ -789,6 +831,55 @@ export const buildSessionState = async (
     writeBufferIssueMs += performance.now() - start;
     uploadedBytes += data.byteLength;
   };
+  /**
+   * The SHA-256 of every expert range (ADR 0146 decision 5), taken from the verified block bytes when
+   * the container's range reads verify nothing — the bytes a later load reads are checked against it.
+   */
+  const expertDigests =
+    expertStore?.reader.verified === false ? new Map<string, Uint8Array<ArrayBuffer>>() : undefined;
+  /**
+   * Allocates the expert cache's pools (`slots` experts of codes and steps per expert weight, in the
+   * weight ledger in place of `[E, …]`) and its slot tables, every entry −1 (nothing resident). Called
+   * inside the synchronous section of one errorScope pair.
+   */
+  const allocateExpertPool = (plan: ExpertGraphPlan, store: ExpertStorePlan): ExpertPool => {
+    const { slots, experts } = plan;
+    const layers = plan.layers.map((layer, at): ExpertPoolLayer => {
+      const table = timedAlloc(plan.tableBytes);
+      timedWrite(table, new Uint8Array(new Int32Array(experts).fill(-1).buffer), 0);
+      const pooled = layer.weights.map((weight, order): ExpertPoolWeight => {
+        const codes = timedAlloc(Math.max(4, slots * weight.codesBytes));
+        weightBuffers.set(weight.name, codes);
+        let steps: GPUBuffer | undefined;
+        if (weight.storage !== "f32") {
+          steps = timedAlloc(Math.max(4, slots * weight.stepsBytes));
+          residentWeights.set(
+            weight.name,
+            weight.storage === "i4"
+              ? { storage: "i4", scale: steps, groupSize: weight.groupSize }
+              : { storage: "i4f16", scale: steps, groupSize: weight.groupSize },
+          );
+          // MUST: the pools count as the GPU-resident compressed bytes (the bytes actually held).
+          residentCompressedBytes += slots * (weight.codesBytes + weight.stepsBytes);
+        }
+        return { ...weight, codes, steps, ranges: store.ranges[at][order] };
+      });
+      return { index: layer.index, table, weights: pooled };
+    });
+    return {
+      slots,
+      experts,
+      picks: plan.picks,
+      layers,
+      tables: new Map(layers.map((layer) => [layer.index, layer.table])),
+      declaredOutputs: plan.declaredOutputs,
+      reader: store.reader,
+      digests: expertDigests,
+    };
+  };
+  let expertPool: ExpertPool | undefined;
+  /** Pooled weight name → its pool (the items of these are read but not uploaded). */
+  const pooledWeights = new Map<string, ExpertPoolWeight>();
   /** Shared initializers whose borrow has been added (on construction failure they are returned one by one from here). */
   const borrowed: SharedWeight[] = [];
   try {
@@ -804,6 +895,22 @@ export const buildSessionState = async (
       // length) as well. A name not entered here is read as f32 (the default of the weight ledger),
       // so the residency-class match acts as the check.
       if (internals.resident !== undefined) residentWeights.set(name, internals.resident);
+    }
+    // The pools and tables come before the supply (they depend on no block). The section allocates,
+    // so it has its own scope pair, settled before the first part (no await inside it).
+    if (expertPlan !== undefined && expertStore !== undefined) {
+      pushFailureScopes(gpu.device);
+      try {
+        expertPool = allocateExpertPool(expertPlan, expertStore);
+      } catch (cause) {
+        await discardFailureScopes(gpu.device);
+        throw cause;
+      }
+      const failure = await popFailureScopes(gpu.device, "expert pool allocation");
+      if (failure !== undefined) throw failure;
+      for (const layer of expertPool.layers) {
+        for (const weight of layer.weights) pooledWeights.set(weight.name, weight);
+      }
     }
     // The iteration wait (= the cost of the supply side) is hidden by for await, so it is measured as
     // the difference from **the time the previous one finished processing** (the time until the next
@@ -859,6 +966,18 @@ export const buildSessionState = async (
           throw new ExecutionError(
             `initializer '${name}': ${expectedBytes} bytes from the declaration, but the actual tensor has ${raw.byteLength} bytes`,
           );
+        }
+        // A pooled expert weight uploads nothing at build (ADR 0146 decision 2): its blocks are read
+        // (and checked) as every block is, and a load writes each expert to its slot.
+        if (pooledWeights.has(name)) {
+          if (
+            seat.seat !== "raw" &&
+            (piece === undefined || piece.first) &&
+            item.scale === undefined
+          ) {
+            throw new ExecutionError(`initializer '${name}': storage ${layout} but no scale`);
+          }
+          return;
         }
         // The destination byte position (always 0 when whole). The raw-byte classes put the stored
         // bytes on the GPU and the expanded class the bytes after f32 decoding, so the total length
@@ -1089,6 +1208,21 @@ export const buildSessionState = async (
           // The reference to the item ends with this iteration (releasing the CPU-side bytes does
           // not wait for the fence — the NOTE on the fence below).
           supplyBoundary = performance.now();
+          // The digests of a pooled weight's experts, outside the scope section (they await). Their
+          // time is verification on the supply side, so it falls into the next item's wait.
+          const pooled = pooledWeights.get(item.name);
+          if (expertDigests !== undefined && pooled !== undefined) {
+            const piece = item.piece;
+            await digestExpertItem(
+              expertDigests,
+              pooled,
+              piece === undefined
+                ? { first: 0, count: pooled.ranges.codes.length }
+                : { first: piece.rowOffset, count: piece.rows },
+              item.payload,
+              piece === undefined || piece.first ? item.scale?.bytes : undefined,
+            );
+          }
         }
       } catch (cause) {
         const earlier = await firstScopeFailure(scopeOutcomes);
@@ -1156,7 +1290,8 @@ export const buildSessionState = async (
 
   return {
     gpu,
-    graph,
+    // Under the expert cache, the graph that also outputs every routed index (the routing readback).
+    graph: expertPlan?.graph ?? graph,
     // MUST: the pipeline cache borrows the single one owned by GpuContext (device lifetime —
     // `GpuContextInternals.pipelines`). Allocating a new one here would make every Session on the
     // same device pay again for compiling the same WGSL and resolving getBindGroupLayout.
@@ -1220,6 +1355,8 @@ export const buildSessionState = async (
     rmsNormReduce,
     useCounts: countUses(graph),
     dtypes: declaredDtypes(graph),
-    outputNames: new Set(graph.outputs),
+    // The routing readback's outputs are outputs of the plan too (pinned like any output).
+    outputNames: new Set((expertPlan?.graph ?? graph).outputs),
+    expertPool,
   };
 };

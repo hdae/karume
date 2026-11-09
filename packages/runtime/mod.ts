@@ -272,12 +272,21 @@ export type { WeightResidency } from "./src/runtime/weight-residency.ts";
  * `SharedWeight` (an opaque reference to a lent weight — ADR 0096 decision 2 and its stage 2
  * addendum) is type-only for the same reason: the only entry point is `Session.exportWeight`;
  * constructing it directly could bypass the residency-class match and the borrow counting.
+ *
+ * `ExpertCache` (the exact expert cache of a Session built with `SessionOptions.expertCache` — ADR
+ * 0146) is type-only too: the only entry point is `Session.expertCache`; its run, load and routing
+ * types come with it.
  */
 export type {
   ComputePrecision,
   EnqueueOptions,
   EnqueueRead,
   BidirectionalRows,
+  ExpertCache,
+  ExpertCacheStats,
+  ExpertLoad,
+  ExpertRouting,
+  ExpertRun,
   FusionCounts,
   GenerationContext,
   GenerationContextSpec,

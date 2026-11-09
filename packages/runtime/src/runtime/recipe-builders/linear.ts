@@ -17,6 +17,7 @@ import {
 } from "../../kernels/embedding.ts";
 import {
   EXPERT_LINEAR_SCALE_BINDING,
+  EXPERT_LINEAR_TABLE_BINDING,
   expertLinearDispatch,
   expertLinearKey,
   expertLinearParams,
@@ -857,6 +858,11 @@ export const buildEmbedding = async (
  * 1 x, 2 index, 3 w, 4 out, and the step table at {@link EXPERT_LINEAR_SCALE_BINDING} for i4 /
  * i4f16 only. MUST: tokens and picks come from index, n / k / E from the weight (the shape rule has
  * matched x against them); the form of x (shared or per pick) is its rank.
+ *
+ * Under the expert cache (ADR 0146 decision 2) the weight is a pool of K slots: the pooled kernel
+ * runs with K in its params and the index's slot table at {@link EXPERT_LINEAR_TABLE_BINDING}. E stays
+ * the declaration's (the table's length). Without the cache the key, WGSL, params and bindings are
+ * the resident form's, unchanged.
  */
 export const buildExpertLinear = async (
   face: RecipeBuildFace,
@@ -871,15 +877,25 @@ export const buildExpertLinear = async (
   const storage = face.expertLinearStorage(step);
   // The group length is baked into the WGSL (paired with the key's g part, as linear's i4).
   const groupSize = storage === "f32" ? undefined : face.weightGroupSize(step);
-  const key = expertLinearKey(storage, groupSize);
+  const pool = face.expertTable(step);
+  const pooled = pool !== undefined;
+  const key = expertLinearKey(storage, groupSize, pooled);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    expertLinearWgsl(storage, groupSize),
+    expertLinearWgsl(storage, groupSize, pooled),
   );
   const params = face.writeParams(
     expertLinearParams(
       storage,
-      { tokens, picks, n, k, experts, sharedX: x.length === 2 },
+      {
+        tokens,
+        picks,
+        n,
+        k,
+        experts,
+        sharedX: x.length === 2,
+        ...(pool === undefined ? {} : { slots: pool.slots }),
+      },
       groupSize,
     ),
     PARAMS_UNIFORM_USAGE,
@@ -896,6 +912,14 @@ export const buildExpertLinear = async (
       { binding: 3, source: binds[2] },
       { binding: 4, source: outs[0] },
       ...face.weightScaleBindings(step, EXPERT_LINEAR_SCALE_BINDING),
+      ...(pool === undefined
+        ? []
+        : [
+            {
+              binding: EXPERT_LINEAR_TABLE_BINDING,
+              source: { kind: "resident", buffer: pool.table } as const,
+            },
+          ]),
     ],
     workgroups: expertLinearDispatch(
       tokens * picks,

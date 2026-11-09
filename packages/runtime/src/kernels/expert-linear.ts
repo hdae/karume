@@ -35,6 +35,16 @@
  * The planner admits only an index produced by a `topk` over `E` (ADR 0145 decision 2), so an id is
  * in `[0, E)` by construction. Should the invariant break, the row is written as quiet NaN instead
  * of reading another expert, as `gather` does; the CPU reference throws.
+ *
+ * ## The pooled form (ADR 0146 decision 2)
+ *
+ * Under an expert cache the weight holds K slots (`[K, n, k]`) and a table `i32[E]` (binding
+ * {@link EXPERT_LINEAR_TABLE_BINDING}) maps an expert id to its slot, −1 when the expert is not
+ * resident. A resident pick addresses its slot exactly where the resident kernel addresses the
+ * expert (`e` replaced by the slot, the rest of the text shared), so a row whose picks are all
+ * resident is bit-identical to the resident kernel's. A non-resident pick writes 0 (every output
+ * is still written — ADR 0014): the host reads the routing and runs the row again after loading.
+ * The runtime alone writes the table, so a slot of K or more breaks an invariant and writes NaN.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -53,6 +63,9 @@ export const EXPERT_LINEAR_COLS = 32;
  * The WGSL declares it from this constant, so the recipe builder and the kernel cannot drift.
  */
 export const EXPERT_LINEAR_SCALE_BINDING = 5;
+
+/** The binding of the slot table of the pooled form (module doc). */
+export const EXPERT_LINEAR_TABLE_BINDING = 6;
 
 /** Weight words issued ahead of their multiply-adds (memory parallelism, as `linear`'s GEMV). */
 export const EXPERT_LINEAR_UNROLL = 4;
@@ -75,10 +88,14 @@ const storageKeyPart = (storage: ExpertLinearStorage): string =>
   storage === "f32" ? "" : storage === "i4" ? ":wi4" : ":wi4h";
 
 /** The pipeline key (codegen determinism: same key → byte-identical WGSL). */
-export const expertLinearKey = (storage: ExpertLinearStorage, groupSize?: number): string =>
+export const expertLinearKey = (
+  storage: ExpertLinearStorage,
+  groupSize?: number,
+  pooled = false,
+): string =>
   `expert_linear:v1:f32:i32:c${EXPERT_LINEAR_COLS}u${EXPERT_LINEAR_UNROLL}${storageKeyPart(
     storage,
-  )}${i4GroupKeyPart(groupSize)}`;
+  )}${i4GroupKeyPart(groupSize)}${pooled ? ":pool" : ""}`;
 
 const scaleBinding = (storage: ExpertLinearStorage): string =>
   storage === "i4"
@@ -126,8 +143,40 @@ const wordMacs = (storage: ExpertLinearStorage, slot: string): string =>
     .map((line) => `  ${line}`)
     .join("\n");
 
-/** The WGSL of `expert_linear` (module doc). `groupSize` is required for i4 and refused for f32. */
-export const expertLinearWgsl = (storage: ExpertLinearStorage, groupSize?: number): string => {
+/** The head of a pick row up to its weight row `wrow`: the resident form addresses the expert. */
+const RESIDENT_HEAD = `    let pick = index[row];
+    // an id outside [0, E) breaks the planner's invariant: NaN instead of another expert's row
+    if (pick < 0 || u32(pick) >= dims.experts) {
+      out[row * dims.n + col] = bitcast<f32>(dims.oob);
+    } else {
+      let wrow = u32(pick) * dims.n + col;`;
+
+/** The pooled form's head: the slot of the pick's expert, 0 for an expert not resident. */
+const POOLED_HEAD = `    let pick = index[row];
+    let known = pick >= 0 && u32(pick) < dims.experts;
+    // the pick's slot in the pool, -1 when its expert is not resident (read only for an id in range)
+    var slot = -1;
+    if (known) {
+      slot = table[u32(pick)];
+    }
+    // an id outside [0, E) or a slot outside [0, K) breaks an invariant: NaN instead of another row
+    if (!known || slot >= i32(dims.slots)) {
+      out[row * dims.n + col] = bitcast<f32>(dims.oob);
+    } else if (slot < 0) {
+      // not resident: contributes 0, and the host runs the row again once the expert is loaded
+      out[row * dims.n + col] = 0.0;
+    } else {
+      let wrow = u32(slot) * dims.n + col;`;
+
+/**
+ * The WGSL of `expert_linear` (module doc). `groupSize` is required for i4 and refused for f32.
+ * `pooled` selects the expert cache's form (module doc), which binds the slot table.
+ */
+export const expertLinearWgsl = (
+  storage: ExpertLinearStorage,
+  groupSize?: number,
+  pooled = false,
+): string => {
   const shift = groupShift(storage, groupSize);
   const unit = expertLinearUnit(storage);
   const slots = Array.from({ length: EXPERT_LINEAR_UNROLL }, (_, slot) => `${slot}`);
@@ -152,14 +201,18 @@ struct Dims {
   shared_x: u32,
   experts: u32,
   oob: u32,
-  pad: u32,
+  ${pooled ? "slots" : "pad"}: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> index: array<i32>;
 // Row starts are 16 B aligned because k % ${unit} == 0 (guaranteed by expertLinearParams)
 @group(0) @binding(3) var<storage, read> w: array<vec4<${storage === "f32" ? "f32" : "u32"}>>;
-@group(0) @binding(4) var<storage, read_write> out: array<f32>;${scaleBinding(storage)}
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;${scaleBinding(storage)}${
+    pooled
+      ? `\n@group(0) @binding(${EXPERT_LINEAR_TABLE_BINDING}) var<storage, read> table: array<i32>;`
+      : ""
+  }
 
 @compute @workgroup_size(${EXPERT_LINEAR_COLS})
 fn main(
@@ -175,12 +228,7 @@ fn main(
   let quads = dims.k / 4u;
   var row = gid.y;
   while (row < dims.rows) {
-    let pick = index[row];
-    // an id outside [0, E) breaks the planner's invariant: NaN instead of another expert's row
-    if (pick < 0 || u32(pick) >= dims.experts) {
-      out[row * dims.n + col] = bitcast<f32>(dims.oob);
-    } else {
-      let wrow = u32(pick) * dims.n + col;
+${pooled ? POOLED_HEAD : RESIDENT_HEAD}
       let row_base = wrow * units;${scaleBase}
       let x_base = select(row, row / dims.picks, dims.shared_x == 1u) * quads;
       var acc = 0.0;
@@ -217,6 +265,8 @@ export type ExpertLinearShape = {
   readonly experts: number;
   /** `x` is `[T, k]`, shared by a token's picks (otherwise `[T, picks, k]`). */
   readonly sharedX: boolean;
+  /** The pool's slots K of the pooled form (the weight is `[K, n, k]`); absent = resident. */
+  readonly slots?: number;
 };
 
 /**
@@ -231,8 +281,15 @@ export const expertLinearParams = (
   shape: ExpertLinearShape,
   groupSize?: number,
 ): Uint32Array<ArrayBuffer> => {
-  const { tokens, picks, n, k, experts, sharedX } = shape;
-  assertU32Params("expert_linear params", { tokens, picks, n, k, experts });
+  const { tokens, picks, n, k, experts, sharedX, slots } = shape;
+  assertU32Params("expert_linear params", { tokens, picks, n, k, experts, slots: slots ?? 0 });
+  if (slots !== undefined && (slots < 1 || slots > experts)) {
+    throw new CodegenError(
+      `expert_linear params: ${slots} pool slots for ${experts} experts (1 to E)`,
+    );
+  }
+  // The weight holds the pool's slots under an expert cache, every expert otherwise.
+  const held = slots ?? experts;
   const shift = groupShift(storage, groupSize);
   const unit = expertLinearUnit(storage);
   if (picks < 1 || experts < 1 || n < 1 || k < 1) {
@@ -252,8 +309,8 @@ export const expertLinearParams = (
   const largest = [
     rows * n, // out
     (sharedX ? tokens : rows) * (k / 4), // x quads
-    experts * n * (k / unit), // weight words
-    shift === undefined ? 0 : experts * n * (k >> shift), // steps
+    held * n * (k / unit), // weight words
+    shift === undefined ? 0 : held * n * (k >> shift), // steps
   ];
   if (largest.some((count) => count >= limit)) {
     throw new CodegenError(
@@ -268,6 +325,7 @@ export const expertLinearParams = (
   params[4] = sharedX ? 1 : 0;
   params[5] = experts;
   params[6] = EXPERT_LINEAR_OOB_BITS;
+  params[7] = slots ?? 0;
   return params;
 };
 

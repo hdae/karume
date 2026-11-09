@@ -19,7 +19,13 @@
  * byte-identical in the single and split forms — §8).
  */
 
-import { bindGraphs, type BoundGraph, type SupplyBlock } from "./bind.ts";
+import {
+  assertRangeInBlock,
+  bindGraphs,
+  type BlockRangeReader,
+  type BoundGraph,
+  type SupplyBlock,
+} from "./bind.ts";
 import {
   asSha256Hex,
   type ConstBlockRecord,
@@ -136,6 +142,13 @@ export type OpenedContainer = {
    * and verified like a block (one at a time, so the read holds the whole scale + one piece).
    */
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
+  /**
+   * Range reads inside one declared block, straight from the source (ADR 0146 decision 5): no block
+   * digest, so on an unverified source `verified` is false and the caller checks the bytes itself.
+   * The cost class is `"seek"` for the bytes / parts input (slices of buffers in hand) and unknown
+   * for a `BlockSource` passed in (its type carries no cost class).
+   */
+  readonly ranges: BlockRangeReader;
   /**
    * Opens the reader for one asset (a `krg` and undeclared names fail loudly). Opening fetches no
    * byte.
@@ -397,6 +410,24 @@ export const openContainer = async (
     return joined;
   };
 
+  // The bytes and parts inputs read slices of buffers already in hand; a caller's source says nothing.
+  const rangeCost = input.kind === "source" ? undefined : "seek";
+  const ranges: BlockRangeReader = {
+    verified: source.verified,
+    cost: () => rangeCost,
+    read: async (id, offset, length) => {
+      const found = locate(id);
+      assertRangeInBlock(id, found.record.length, offset, length);
+      const bytes = await source.read(found.part, found.record.offset + offset, length);
+      if (bytes.byteLength !== length) {
+        throw new ContainerFormatError(
+          `block '${id}': fetched range length ${bytes.byteLength} differs from the requested ${length}`,
+        );
+      }
+      return bytes;
+    },
+  };
+
   const asset: OpenedContainer["asset"] = (name) => {
     const binding =
       model !== undefined && Object.hasOwn(model.assets, name) ? model.assets[name] : undefined;
@@ -464,5 +495,5 @@ export const openContainer = async (
     return assembleGraphContainer(graphBytes.slice(), region.slice());
   };
 
-  return { header, graph, model, graphs, source, locate, readBlock, asset, extractGraph };
+  return { header, graph, model, graphs, source, locate, readBlock, ranges, asset, extractGraph };
 };

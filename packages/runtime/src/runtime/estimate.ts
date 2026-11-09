@@ -138,6 +138,7 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { stateSliding } from "../kernels/state-attention.ts";
 import { slotStateStorage, type StateStorage } from "../kernels/state-storage.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
+import { planExpertGraph } from "./expert-plan.ts";
 
 /**
  * The **reserved-name** scenarios. An estimate without `generation` has the single `"run"`; with it,
@@ -470,6 +471,14 @@ export type EstimateOptions = {
    * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
    */
   readonly linearCompute?: "f32" | "a8" | "f16";
+  /**
+   * The expert cache (the same value as `SessionOptions.expertCache` — ADR 0146). With it the expert
+   * weights count as their pools of `slots` experts (the same planner as construction), the slot
+   * tables (one i32 per expert and routed layer) count with the uncompressed weights, and every
+   * routed `topk` index counts as an output (the routing readback). A graph or a value the
+   * construction refuses fails loudly with the same message.
+   */
+  readonly expertCache?: { readonly slots: number };
 };
 
 /**
@@ -1697,7 +1706,22 @@ export const estimateGraphMemory = (
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
   const fullStateStorage = options.fullStateStorage ?? "f32";
   const state = stateEstimate(graph, options.generation, options, fullStateStorage);
-  const weights = weightEstimate(residency);
+  // Under the expert cache: the pools in place of the expert weights, and the graph that also reads
+  // every routed index back (the same plan as construction — expert-plan.ts).
+  const experts =
+    options.expertCache === undefined
+      ? undefined
+      : planExpertGraph(graph, residency, options.expertCache);
+  const planned = experts?.graph ?? graph;
+  const counted = weightEstimate(experts?.residency ?? residency);
+  const weights =
+    experts === undefined
+      ? counted
+      : {
+          ...counted,
+          uncompressed:
+            counted.uncompressed + experts.layers.length * toSizeClass(experts.tableBytes),
+        };
 
   const chunkLength = options.generation?.chunkLength;
   if (chunkLength === undefined && chunkDims.length > 0) {
@@ -1793,12 +1817,14 @@ export const estimateGraphMemory = (
     for (const spec of graph.inputs) {
       ioBytes += toSizeClass(numel(shapeOf(plan.shapes, spec.name)) * 4);
     }
-    for (const name of graph.outputs) ioBytes += toSizeClass(numel(shapeOf(plan.shapes, name)) * 4);
+    for (const name of planned.outputs) {
+      ioBytes += toSizeClass(numel(shapeOf(plan.shapes, name)) * 4);
+    }
     return {
       name,
       ioBytes,
       workspaceBytes: transientSlotBytes(
-        graph,
+        planned,
         plan.nodes,
         state.shapes,
         options.maxStorageBufferBindingSize,

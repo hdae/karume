@@ -135,6 +135,29 @@ const executionKnobsViolation = (
 };
 
 /**
+ * The graph-independent check of {@link SessionOptions.expertCache} (its form and the range of
+ * `slots`): Session construction (through {@link sessionOptionsViolation}) and the estimate read it
+ * through this one function. The checks against the graph (`slots` between the routed `topk` k and
+ * E) are the planner's (`planExpertGraph` in expert-plan.ts).
+ *
+ * MUST: a value from outside the type (`null`, a number) is a violation, not a TypeError — read
+ * through `typeof` before any property access.
+ */
+export const expertCacheViolation = (cache: SessionOptions["expertCache"]): string | undefined => {
+  if (cache === undefined) return undefined;
+  if (typeof cache !== "object" || cache === null) {
+    return `options.expertCache must be an object { slots } (got ${
+      cache === null ? "null" : typeof cache
+    })`;
+  }
+  const slots = cache.slots;
+  if (!Number.isSafeInteger(slots) || slots < 1) {
+    return `options.expertCache.slots ${describeInputValue(slots)} must be a positive safe integer`;
+  }
+  return undefined;
+};
+
+/**
  * The values with runtime defaults filled into omitted execution knobs ({@link sessionOptionsViolation}
  * and `buildSessionState` in session-build.ts read them through this one function — spelling the
  * defaults in two places could split the value that was checked from the value used to build).
@@ -203,6 +226,8 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   if (options.linearGemvPlanes !== undefined && typeof options.linearGemvPlanes !== "boolean") {
     return "options.linearGemvPlanes must be a boolean";
   }
+  const expertCache = expertCacheViolation(options.expertCache);
+  if (expertCache !== undefined) return expertCache;
   const {
     rmsNormReduce,
     linearCompute,

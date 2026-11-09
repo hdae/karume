@@ -217,6 +217,14 @@ export type RecipeBuilderContext = {
   readonly geometryProfile: GeometryProfile;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
+  /**
+   * The expert cache's slots and its tables by routed index (ADR 0146 — `SessionOptions.expertCache`;
+   * undefined without it). An `expert_linear` then runs the pooled kernel and binds its index's
+   * table.
+   */
+  readonly expertPool:
+    | { readonly slots: number; readonly tables: ReadonlyMap<string, GPUBuffer> }
+    | undefined;
 };
 
 /**
@@ -280,6 +288,13 @@ export type RecipeBuildFace = {
   readonly weightStorage: (step: NodePlan) => WeightStorage;
   /** The storage of an `expert_linear` weight (f32 / i4 / i4f16 — ADR 0145 decisions 2 and 3). */
   readonly expertLinearStorage: (step: NodePlan) => ExpertLinearStorage;
+  /**
+   * The pool slots and slot table of an `expert_linear` node under the expert cache (ADR 0146
+   * decision 2), undefined without it.
+   */
+  readonly expertTable: (
+    step: NodePlan,
+  ) => { readonly slots: number; readonly table: GPUBuffer } | undefined;
   /** The upload-time layout flag of the node's weight (`"conv3d-tap-major"` — ADR 0133 decision 4), else undefined. */
   readonly weightLayout: (step: NodePlan) => "conv3d-tap-major" | undefined;
   readonly weightScaleBindings: (step: NodePlan, binding: number) => readonly BindingRecipe[];
@@ -317,6 +332,7 @@ export class RecipeBuilder {
       writeParams: (params, usage) => this.#writeParams(params, usage),
       weightStorage: (step) => this.#weightStorage(step),
       expertLinearStorage: (step) => this.#expertLinearStorage(step),
+      expertTable: (step) => this.#expertTable(step),
       weightLayout: (step) => this.#weightLayout(step),
       weightScaleBindings: (step, binding) => this.#weightScaleBindings(step, binding),
       weightGroupSize: (step) => this.#weightGroupSize(step),
@@ -864,6 +880,23 @@ export class RecipeBuilder {
     throw new ExecutionError(
       `${step.node.op}: weight '${this.#weightSlotName(step)}' is resident as ${storage}; expert_linear reads f32 / i4 / i4f16 only (ADR 0145 decision 2)`,
     );
+  }
+
+  /**
+   * The slot table an `expert_linear` node binds under the expert cache: the table of its index (the
+   * routed `topk` both projections of a layer read). MUST: under the cache every `expert_linear` has
+   * one — its weight is a pool, and the resident kernel would read slots as experts.
+   */
+  #expertTable(step: NodePlan): { readonly slots: number; readonly table: GPUBuffer } | undefined {
+    const pool = this.#state.expertPool;
+    if (pool === undefined) return undefined;
+    const table = pool.tables.get(step.node.ins[1]);
+    if (table === undefined) {
+      throw new ExecutionError(
+        `${step.node.op}: index '${step.node.ins[1]}' has no slot table under the expert cache (broken bookkeeping)`,
+      );
+    }
+    return { slots: pool.slots, table };
   }
 
   /**
