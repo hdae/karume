@@ -67,7 +67,7 @@ import {
   type TurnRecord,
 } from "./chat-record";
 import { ChatTranscript, ImageThumbnail } from "./chat-transcript";
-import { expertCacheText } from "./expert-cache";
+import { expertCacheText, expertHostTierText } from "./expert-cache";
 import { decodeImageFile } from "./image-input";
 import { createLiveReplyStore, frameScheduler } from "./live-reply";
 import { type GenerateObservation, type ObservedHost, observeHost } from "./observed-host";
@@ -84,6 +84,7 @@ import {
   type ChatSettings,
   effectiveModelKey,
   EXPERT_CACHE_SLOTS,
+  EXPERT_HOST_TIER_ALL,
   GEMMA_MOUNTS,
   type GemmaManifests,
   type GemmaMount,
@@ -101,6 +102,7 @@ import {
   overflowPolicy,
   parseChatForm,
   parseExpertCacheSlots,
+  parseExpertHostTier,
   parseModelKey,
   parseTurnForm,
   sameChatSettings,
@@ -234,7 +236,11 @@ const pipelineText = (state: GemmaPipelineState): string => {
       }${request.fullStateStorage === "f16" ? " · f16 KV" : ""}${
         request.expertCache === undefined
           ? ""
-          : ` · expert cache ${request.expertCache.slots} slots`
+          : ` · expert cache ${request.expertCache.slots} slots${
+              request.expertCache.hostBytes === undefined
+                ? ""
+                : ` · ${expertHostTierText(request.expertCache.hostBytes)}`
+            }`
       }${request.diagnostics ? " · diagnostics" : ""} · loaded in ${state.loadSeconds.toFixed(1)} s`;
     }
   }
@@ -316,6 +322,12 @@ export const Gemma4Page = () => {
   );
   const expertCacheSlots =
     expertCacheAvailable && expertSlotsParsed.ok ? expertSlotsParsed.value : undefined;
+  // Likewise kept as typed; it applies (and is checked) only with the cache's slots.
+  const [hostTierInput, setHostTierInput] = useState("");
+  const expertHostTierParsed = useMemo(() => parseExpertHostTier(hostTierInput), [hostTierInput]);
+  const expertHostTierApplies = expertCacheSlots !== undefined;
+  const expertHostBytes =
+    expertHostTierApplies && expertHostTierParsed.ok ? expertHostTierParsed.value : undefined;
   const [diagnosticsChosen, setDiagnosticsChosen] = useState(false);
 
   // GPU and pipeline.
@@ -494,6 +506,7 @@ export const Gemma4Page = () => {
     quant !== undefined &&
     chatParsed?.ok === true &&
     (!expertCacheAvailable || expertSlotsParsed.ok) &&
+    (!expertHostTierApplies || expertHostTierParsed.ok) &&
     !running;
   const load = (): void => {
     if (!canLoad || chatParsed?.ok !== true) return;
@@ -505,7 +518,14 @@ export const Gemma4Page = () => {
       source: sourceChoice.source,
       speculative,
       ...(f16KvChosen ? { fullStateStorage: "f16" as const } : {}),
-      ...(expertCacheSlots === undefined ? {} : { expertCache: { slots: expertCacheSlots } }),
+      ...(expertCacheSlots === undefined
+        ? {}
+        : {
+            expertCache: {
+              slots: expertCacheSlots,
+              ...(expertHostBytes === undefined ? {} : { hostBytes: expertHostBytes }),
+            },
+          }),
       ...(selectedManifest !== undefined && hasVision(selectedManifest, modelKey)
         ? { vision: true }
         : {}),
@@ -947,6 +967,7 @@ export const Gemma4Page = () => {
       speculative !== pipeline.request.speculative ||
       f16KvChosen !== (pipeline.request.fullStateStorage === "f16") ||
       expertCacheSlots !== pipeline.request.expertCache?.slots ||
+      expertHostBytes !== pipeline.request.expertCache?.hostBytes ||
       diagnosticsChosen !== pipeline.request.diagnostics);
   const modelChoices = useMemo(() => gemmaModelChoices(manifests), [manifests]);
 
@@ -1077,6 +1098,28 @@ export const Gemma4Page = () => {
                 />
                 {expertCacheAvailable && !expertSlotsParsed.ok ? (
                   <p className="text-xs text-destructive">{expertSlotsParsed.errors.join(" ")}</p>
+                ) : null}
+              </Field>
+              <Field
+                id="gemma4-expert-host-tier"
+                label="Host tier (GiB)"
+                hint={
+                  expertHostTierApplies
+                    ? `Holds this many GiB of experts in RAM in front of the distribution: they are filled while the weights load, and a miss the RAM holds is uploaded from there instead of read from the distribution again (the least recently used make room for the ones read later). "${EXPERT_HOST_TIER_ALL}" = every expert (about 12 GiB on 26B), so no miss reads the distribution after the load; empty = every miss reads the distribution. The tokens are the same either way. Applies on the next Load.`
+                    : "Only with the expert cache (set its slots first)."
+                }
+              >
+                <Input
+                  id="gemma4-expert-host-tier"
+                  value={hostTierInput}
+                  placeholder="off"
+                  onChange={(event) => setHostTierInput(event.target.value)}
+                  disabled={running || !expertHostTierApplies}
+                />
+                {expertHostTierApplies && !expertHostTierParsed.ok ? (
+                  <p className="text-xs text-destructive">
+                    {expertHostTierParsed.errors.join(" ")}
+                  </p>
                 ) : null}
               </Field>
               <div className="flex items-center gap-2">

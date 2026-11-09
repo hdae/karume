@@ -47,7 +47,12 @@
 //    tolerance — a chunk of other rows is another shape, so ④'s rows are not the reference); and
 //    (7b) `Pipeline.fromAssets` with `expertCache` generates each golden prompt's first greedy
 //    tokens equal to the pipeline's without it at the chunk rows the cache settles. Both require the
-//    counters to show misses, loads and re-runs (a run with no miss would prove nothing)
+//    counters to show misses, loads and re-runs (a run with no miss would prove nothing). Both run
+//    the host tier too (`expertCache.hostBytes` — experts held in RAM in front of the container,
+//    which changes where a load's bytes come from, not which): 7a at 16 slots with every expert held
+//    (no load reads the container) and at 64 slots with a quarter of them (RAM hits, container reads
+//    and RAM evictions all happen), 7b at 64 slots with every expert held — each against the same
+//    resident reference, with the same misses and loads as the run at the same slots without a tier
 //
 // A cut model's hidden state is not the final layer's, and a short cut's logits saturate at the
 // softcap (±30): on cut 6, 7 to 757 entries of each golden row are exactly 30.0, so every margin
@@ -1205,8 +1210,6 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 // ⑦ The exact expert cache (ADR 0146)
 // ---------------------------------------------------------------------------
 
-/** The slot counts ⑦ runs: small, so that runs miss and re-run (ADR 0146 decision 7). */
-const CACHE_SLOTS = [16, 64] as const;
 /**
  * The rows of one prefill chunk under the cache at `slots`: a chunk's picks fit in the slots at once,
  * and a chunk is a deferred run within the sliding slack (ADR 0146 decision 4) — 2 rows at 16 slots,
@@ -1216,6 +1219,31 @@ const cacheChunkRows = (slots: number): number =>
   Math.min(SLIDING_SLACK_ROWS, Math.floor(slots / TOP_K));
 /** Tokens ⑦b generates per golden prompt. */
 const CACHE_NEW_TOKENS = 8;
+/**
+ * A run of ⑦: the slots, and the host tier's budget (absent = no tier; `all` = every expert, as
+ * `Number.MAX_SAFE_INTEGER`; `quarter` = a quarter of every expert's bytes, read off the `all` run's
+ * tier right after its construction, so the `all` run comes first).
+ */
+type CacheRun = { readonly slots: number; readonly host?: "all" | "quarter" };
+/**
+ * ⑦a's runs, at slot counts small enough that runs miss and re-run (ADR 0146 decision 7). The host-tier runs repeat a run without a tier at the same slots, so their misses and
+ * loads must be the same (the tier changes where a load's bytes come from, not which experts).
+ */
+const SESSION_CACHE_RUNS: readonly CacheRun[] = [
+  { slots: 16 },
+  { slots: 64 },
+  { slots: 16, host: "all" },
+  { slots: 64, host: "quarter" },
+];
+/** ⑦b's runs (likewise). */
+const PIPELINE_CACHE_RUNS: readonly CacheRun[] = [
+  { slots: 16 },
+  { slots: 64 },
+  { slots: 64, host: "all" },
+];
+/** A run's name in the log and the failures. */
+const cacheRunName = ({ slots, host }: CacheRun): string =>
+  `slots ${slots}${host === undefined ? "" : ` host ${host}`}`;
 
 /** The number of 32-bit words in which two arrays differ (0 = the same bytes). */
 const differingWords = (actual: Float32Array<ArrayBuffer>, expected: Float32Array<ArrayBuffer>) => {
@@ -1231,7 +1259,74 @@ const differingWords = (actual: Float32Array<ArrayBuffer>, expected: Float32Arra
 const reportLine = (report: ExpertCacheReport): string =>
   `runs ${report.runs}, missedRuns ${report.missedRuns}, loads ${report.loads}, loadedExperts ` +
   `${report.loadedExperts}, evictedExperts ${report.evictedExperts}, bytesRead ${report.bytesRead}, ` +
-  `loadMs ${report.loadMs.toFixed(1)}, committedRuns ${report.committedRuns}, retries ${report.retries}`;
+  `loadMs ${report.loadMs.toFixed(1)}, committedRuns ${report.committedRuns}, retries ${report.retries}` +
+  `, hostExperts ${report.hostExperts}, containerExperts ${report.containerExperts}, bytesUploaded ` +
+  `${report.bytesUploaded}, readMs ${report.readMs.toFixed(1)}, uploadMs ${report.uploadMs.toFixed(1)}` +
+  `, hostHeldExperts ${report.hostHeldExperts}, hostHeldBytes ${report.hostHeldBytes}`;
+
+/** The counters a host tier must leave as they are: which experts missed, loaded and were evicted. */
+const residencyCounters = (report: ExpertCacheReport) => ({
+  runs: report.runs,
+  missedRuns: report.missedRuns,
+  loads: report.loads,
+  loadedExperts: report.loadedExperts,
+  evictedExperts: report.evictedExperts,
+  committedRuns: report.committedRuns,
+  retries: report.retries,
+});
+
+/**
+ * The host tier's counters against its budget (`entryBytes` = one expert's bytes, every layer's
+ * the same on 26B): every loaded expert came from RAM or the container and was uploaded whole, the
+ * container's bytes are its experts', and the tier holds at most its budget. With every expert held
+ * no load reads the container; with a part of them, RAM hits and container reads both happen, and the
+ * tier evicted (each container read is put into it, so it held more than it holds now).
+ */
+const hostTierFailures = (
+  where: string,
+  run: CacheRun,
+  report: ExpertCacheReport,
+  entryBytes: number,
+  hostBytes: number,
+  heldAtBuild: number,
+): string[] => {
+  const failures: string[] = [];
+  const fail = (what: string): void => {
+    failures.push(`${where}: ${what}`);
+  };
+  if (report.hostExperts + report.containerExperts !== report.loadedExperts) {
+    fail(
+      `${report.hostExperts} from RAM + ${report.containerExperts} from the container ≠ ${report.loadedExperts} loaded`,
+    );
+  }
+  if (report.bytesUploaded !== report.loadedExperts * entryBytes) {
+    fail(`${report.bytesUploaded} bytes uploaded for ${report.loadedExperts} experts`);
+  }
+  if (report.bytesRead !== report.containerExperts * entryBytes) {
+    fail(`${report.bytesRead} bytes read for ${report.containerExperts} container experts`);
+  }
+  if (report.hostHeldBytes > hostBytes) {
+    fail(`the tier holds ${report.hostHeldBytes} bytes, above its budget ${hostBytes}`);
+  }
+  if (report.hostExperts === 0) fail("no expert came from RAM — the case decides nothing");
+  if (run.host === "all") {
+    if (report.containerExperts !== 0 || report.bytesRead !== 0) {
+      fail(
+        `${report.containerExperts} experts (${report.bytesRead} bytes) read from the container with every expert held`,
+      );
+    }
+  } else {
+    if (report.containerExperts === 0) {
+      fail("no expert read from the container — the budget held every miss");
+    }
+    if (heldAtBuild + report.containerExperts <= report.hostHeldExperts) {
+      fail(
+        `no RAM eviction (${heldAtBuild} held at build + ${report.containerExperts} put, ${report.hostHeldExperts} held now)`,
+      );
+    }
+  }
+  return failures;
+};
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   `Gemma 4 26B cut, ⑦ the exact expert cache (real GPU)${SERIES_CHECKS_OPT_IN}`,
@@ -1275,7 +1370,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       return { rows: { logits, hidden }, chunks };
     };
 
-    it("⑦a Session: under the cache at 16 and 64 slots the golden rows are the bytes of a resident Session at the same chunk rows, with misses and loads", async () => {
+    it("⑦a Session: under the cache at 16 and 64 slots, with and without a host tier, the golden rows are the bytes of a resident Session at the same chunk rows, with misses and loads", async () => {
       assert(gpu !== undefined, "no GPU");
       const model = prepareContainer(await openSeriesContainer(MODEL), MODEL_GRAPH);
       const outputs = model.graph.outputs;
@@ -1285,7 +1380,9 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       const resident = new Map<string, ProductRows>();
       const session = await model.createContainerSession(gpu);
       try {
-        for (const chunkLength of new Set(CACHE_SLOTS.map(cacheChunkRows))) {
+        for (const chunkLength of new Set(
+          SESSION_CACHE_RUNS.map(({ slots }) => cacheChunkRows(slots)),
+        )) {
           for (const [name, golden] of goldens) {
             const { rows } = await goldenRows(session, golden, chunkLength, outputs, name);
             resident.set(key(chunkLength, name), rows);
@@ -1298,10 +1395,38 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
       const lines: string[] = [];
       const failures: string[] = [];
-      for (const slots of CACHE_SLOTS) {
+      /** Per slots, the residency counters of the run without a tier (the host-tier runs repeat them). */
+      const untiered = new Map<number, ReturnType<typeof residencyCounters>>();
+      /** One expert's bytes and every expert's, read off the `all` run's tier after construction. */
+      let everyExpert: { readonly entryBytes: number; readonly totalBytes: number } | undefined;
+      for (const cacheRun of SESSION_CACHE_RUNS) {
+        const { slots, host } = cacheRun;
+        const where = cacheRunName(cacheRun);
         const chunkLength = cacheChunkRows(slots);
-        const cached = await model.createContainerSession(gpu, { expertCache: { slots } });
+        let hostBytes: number | undefined;
+        if (host === "all") hostBytes = Number.MAX_SAFE_INTEGER;
+        if (host === "quarter") {
+          assert(everyExpert !== undefined, `${where}: the 'all' run must come first`);
+          hostBytes = Math.floor(everyExpert.totalBytes / 4);
+        }
+        const started = performance.now();
+        const cached = await model.createContainerSession(gpu, {
+          expertCache: { slots, ...(hostBytes === undefined ? {} : { hostBytes }) },
+        });
         try {
+          const built = cached.expertCache?.stats();
+          assert(built !== undefined, `${where}: no expert cache`);
+          const heldAtBuild = built.hostHeldExperts;
+          if (host === "all") {
+            // Every routed expert of every layer, filled from the bytes the build read.
+            const experts = cutLayers() * EXPERTS;
+            assertEquals(heldAtBuild, experts, `${where}: experts held after construction`);
+            assertEquals(built.hostHeldBytes % experts, 0, `${where}: one expert's bytes`);
+            everyExpert = {
+              entryBytes: built.hostHeldBytes / experts,
+              totalBytes: built.hostHeldBytes,
+            };
+          }
           const face = createExpertCacheSession(cached);
           let chunks = 0;
           for (const [name, golden] of goldens) {
@@ -1313,23 +1438,49 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
               const differing = differingWords(run.rows[output], reference[output]);
               if (differing > 0) {
                 failures.push(
-                  `slots ${slots} ${name} ${output}: ${differing} of ${reference[output].length} words differ from the resident Session's`,
+                  `${where} ${name} ${output}: ${differing} of ${reference[output].length} words differ from the resident Session's`,
                 );
               }
             }
           }
           const report = face.report();
           lines.push(
-            `slots ${slots} (chunks of ${chunkLength} rows, ${chunks} chunks): ${reportLine(report)}`,
+            `${where} (chunks of ${chunkLength} rows, ${chunks} chunks, ${((performance.now() - started) / 1000).toFixed(1)} s${
+              hostBytes === undefined
+                ? ""
+                : `, hostBytes ${hostBytes}, ${heldAtBuild} held at build`
+            }): ${reportLine(report)}`,
           );
           // A run with no miss would prove nothing.
           if (report.missedRuns === 0 || report.loads === 0) {
-            failures.push(`slots ${slots}: no missed run or no load — the case decides nothing`);
+            failures.push(`${where}: no missed run or no load — the case decides nothing`);
           }
           if (report.committedRuns !== chunks || report.retries !== report.missedRuns) {
             failures.push(
-              `slots ${slots}: ${report.committedRuns} committed runs for ${chunks} chunks, ${report.retries} retries for ${report.missedRuns} missed runs`,
+              `${where}: ${report.committedRuns} committed runs for ${chunks} chunks, ${report.retries} retries for ${report.missedRuns} missed runs`,
             );
+          }
+          if (hostBytes === undefined) {
+            untiered.set(slots, residencyCounters(report));
+          } else {
+            assert(everyExpert !== undefined, `${where}: no expert size`);
+            failures.push(
+              ...hostTierFailures(
+                where,
+                cacheRun,
+                report,
+                everyExpert.entryBytes,
+                hostBytes,
+                heldAtBuild,
+              ),
+            );
+            const expected = untiered.get(slots);
+            assert(expected !== undefined, `${where}: no run without a tier at ${slots} slots`);
+            if (JSON.stringify(residencyCounters(report)) !== JSON.stringify(expected)) {
+              failures.push(
+                `${where}: residency ${JSON.stringify(residencyCounters(report))}, without a tier ${JSON.stringify(expected)}`,
+              );
+            }
           }
         } finally {
           await cached.dispose();
@@ -1340,7 +1491,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       assertEquals(failures, [], "the expert cache against the resident Session");
     });
 
-    it("⑦b gemma.Pipeline: with the cache at 16 and 64 slots the greedy tokens are those without it at the same chunk rows, with re-runs", async () => {
+    it("⑦b gemma.Pipeline: with the cache at 16 and 64 slots, and with every expert in the host tier at 64, the greedy tokens are those without it at the same chunk rows, with re-runs", async () => {
       assert(gpu !== undefined, "no GPU");
       const assets = {
         config: PIPELINE_CONFIG,
@@ -1374,35 +1525,74 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
       const lines: string[] = [];
       const failures: string[] = [];
-      for (const slots of CACHE_SLOTS) {
+      /** Per chunk rows, the tokens without the cache (each computed once). */
+      const withoutCache = new Map<number, Map<string, string>>();
+      const untiered = new Map<number, ReturnType<typeof residencyCounters>>();
+      for (const cacheRun of PIPELINE_CACHE_RUNS) {
+        const { slots, host } = cacheRun;
+        const where = cacheRunName(cacheRun);
         const chunkLength = cacheChunkRows(slots);
-        // Without the cache at the chunk rows the cache settles (the same shapes, so the same
-        // numbers); one large container on the GPU at a time.
-        const resident = await Pipeline.fromAssets(assets, { gpu, chunkLength });
-        let expected: Map<string, string>;
-        try {
-          expected = await generate(resident);
-        } finally {
-          await resident.dispose();
-          await settleReleases(gpu);
+        let expected = withoutCache.get(chunkLength);
+        if (expected === undefined) {
+          // Without the cache at the chunk rows the cache settles (the same shapes, so the same
+          // numbers); one large container on the GPU at a time.
+          const resident = await Pipeline.fromAssets(assets, { gpu, chunkLength });
+          try {
+            expected = await generate(resident);
+          } finally {
+            await resident.dispose();
+            await settleReleases(gpu);
+          }
+          withoutCache.set(chunkLength, expected);
         }
-        const cached = await Pipeline.fromAssets(assets, { gpu, expertCache: { slots } });
+        const started = performance.now();
+        const cached = await Pipeline.fromAssets(assets, {
+          gpu,
+          expertCache: {
+            slots,
+            ...(host === "all" ? { hostBytes: Number.MAX_SAFE_INTEGER } : {}),
+          },
+        });
         try {
-          assertEquals(cached.program.chunkLength, chunkLength, `slots ${slots}: the chunk rows`);
+          assertEquals(cached.program.chunkLength, chunkLength, `${where}: the chunk rows`);
           const actual = await generate(cached);
           const report = cached.expertCacheReport();
           assert(report !== undefined, "a pipeline with the cache has no report");
-          lines.push(`slots ${slots} (chunks of ${chunkLength} rows): ${reportLine(report)}`);
+          lines.push(
+            `${where} (chunks of ${chunkLength} rows, ${((performance.now() - started) / 1000).toFixed(1)} s): ${reportLine(report)}`,
+          );
           for (const [name, tokens] of expected) {
             lines.push(`  ${name}: ${tokens}`);
             if (actual.get(name) !== tokens) {
               failures.push(
-                `slots ${slots} ${name}: ${actual.get(name)} with the cache, ${tokens} without`,
+                `${where} ${name}: ${actual.get(name)} with the cache, ${tokens} without`,
               );
             }
           }
           if (report.retries === 0) {
-            failures.push(`slots ${slots}: no re-run — the case decides nothing`);
+            failures.push(`${where}: no re-run — the case decides nothing`);
+          }
+          if (host === undefined) {
+            untiered.set(slots, residencyCounters(report));
+          } else {
+            // Every expert held: each load came from RAM, none from the distribution.
+            if (
+              report.hostExperts === 0 ||
+              report.hostExperts !== report.loadedExperts ||
+              report.containerExperts !== 0 ||
+              report.bytesRead !== 0
+            ) {
+              failures.push(
+                `${where}: ${report.hostExperts} of ${report.loadedExperts} loads from RAM, ${report.containerExperts} (${report.bytesRead} bytes) from the distribution`,
+              );
+            }
+            const residency = JSON.stringify(residencyCounters(report));
+            const expectedResidency = JSON.stringify(untiered.get(slots));
+            if (residency !== expectedResidency) {
+              failures.push(
+                `${where}: residency ${residency}, without a tier ${expectedResidency}`,
+              );
+            }
           }
         } finally {
           await cached.dispose();

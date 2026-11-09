@@ -35,9 +35,11 @@ export type LoadRequest = {
   readonly vision?: boolean;
   /**
    * Keep only `slots` experts of each routed layer on the GPU (`expertCache` of `fromPretrained` —
-   * a mixture-of-experts model only); absent = every expert resident.
+   * a mixture-of-experts model only); absent = every expert resident. `hostBytes` holds that many
+   * bytes of experts in RAM in front of the distribution (`Number.MAX_SAFE_INTEGER` = every expert);
+   * absent = every miss reads the distribution.
    */
-  readonly expertCache?: { readonly slots: number };
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
   /**
    * Pass `onRunDiagnostics`. It changes the decode path: the pipeline builds its on-GPU greedy
    * selection only without it, so with it a temperature-0 turn reads the whole logits row back.

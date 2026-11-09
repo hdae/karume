@@ -320,15 +320,26 @@ export type PipelineOptions = {
    * (k = the routing's top-k — 8 rows at slots 64 on 26B), which is the default
    * {@link PipelineOptions.chunkLength}; a larger one fails loudly. Long prompts get slow.
    *
+   * `hostBytes` adds a **host tier**: a budget in bytes of expert bytes held in RAM in front of the
+   * distribution (the runtime's `SessionOptions.expertCache.hostBytes`). The Session fills it while
+   * it reads the weights, and a miss the tier holds is uploaded from RAM instead of being read from
+   * the distribution again; the least recently used experts over the budget make room for the ones
+   * read later. `Number.MAX_SAFE_INTEGER` (any budget at or above every expert's bytes — about
+   * 12.85 GB on 26B) holds every expert, so no miss reads the distribution after the load. Absent =
+   * no tier: every miss reads the distribution. It changes where the bytes come from, not the
+   * output. The tier is host memory: the estimate does not count it, and `dispose` releases it.
+   *
    * MUST: `slots` is an integer from 2 × k (a chunk has at least 2 rows) to the experts of a layer,
-   * on a model whose graph has `expert_linear`. Refused (fails loudly, before any weight part is
-   * fetched) with `decodeAhead ≥ 2`, {@link PipelineOptions.speculative}, `pleResidency: "gpu"` and
+   * on a model whose graph has `expert_linear`; `hostBytes`, when present, is a positive safe integer
+   * (both fail loudly before any weight part is fetched; a `hostBytes` below one expert fails at the
+   * Session's construction). Refused (fails loudly, before any weight part is fetched) with
+   * `decodeAhead ≥ 2`, {@link PipelineOptions.speculative}, `pleResidency: "gpu"` and
    * {@link PipelineOptions.vision} — each runs the target in a batch or an immediate run, which a run
    * under the cache cannot be. Decode runs on the host sampler (no GPU argmax).
    *
    * DECIDED: docs/decisions/0146-exact-expert-cache.md
    */
-  readonly expertCache?: { readonly slots: number };
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
   /**
    * The row count of a fixed-length prefill chunk (default: the distribution's declaration
    * {@link PipelineConfig.chunkLength}).
@@ -823,6 +834,11 @@ export type Gemma4State = {
   readonly stateAttentionReduce?: StateAttentionReduce;
   /** Likewise for the storage of the full slots; {@link speculativeSetup} reads it too. */
   readonly fullStateStorage?: SessionOptions["fullStateStorage"];
+  /**
+   * Likewise for the expert cache (its slots and host tier — present exactly when
+   * {@link Gemma4State.expertCache} is).
+   */
+  readonly expertCacheOptions?: SessionOptions["expertCache"];
   /**
    * The product graph's declaration (input of `estimateSessionMemory` — the estimator of ADR 0070
    * decision 5 is a pure function of `graph + residency plan`).
@@ -1892,11 +1908,18 @@ export class GemmaPipeline {
           ? await gpu.createResident(4, "greedy-ahead-ids")
           : undefined;
       // The cache goes to the target alone (the drafter and the embedder are refused with it).
+      const expertCacheOptions: SessionOptions["expertCache"] =
+        expertCache === undefined
+          ? undefined
+          : {
+              slots: expertCache.slots,
+              ...(expertCache.hostBytes === undefined ? {} : { hostBytes: expertCache.hostBytes }),
+            };
       session = await model.createSession(
         gpu,
-        expertCache === undefined
+        expertCacheOptions === undefined
           ? sessionOptions
-          : { ...sessionOptions, expertCache: { slots: expertCache.slots } },
+          : { ...sessionOptions, expertCache: expertCacheOptions },
       );
       const cacheSession =
         expertCache === undefined ? undefined : createExpertCacheSession(session);
@@ -1954,6 +1977,7 @@ export class GemmaPipeline {
         ownsGpu,
         session,
         ...(cacheSession === undefined ? {} : { expertCache: cacheSession }),
+        ...(expertCacheOptions === undefined ? {} : { expertCacheOptions }),
         ...(sessionOptions.stateAttentionReduce === undefined
           ? {}
           : { stateAttentionReduce: sessionOptions.stateAttentionReduce }),
@@ -2442,7 +2466,7 @@ export class GemmaPipeline {
    * constant that depends on neither `k` nor `capacity`.
    */
   estimateSessionMemory(options: EstimateOptions = {}): AdmissionReport {
-    const { wiring, graph, gpu, drafter, vision, entry, session } = this.#state;
+    const { wiring, graph, gpu, drafter, vision, entry, expertCacheOptions } = this.#state;
     const capacity = options.capacity ?? wiring.capacity;
     const chunkLength = assertChunkLength(
       options.chunkLength ?? wiring.chunkLength,
@@ -2506,10 +2530,9 @@ export class GemmaPipeline {
       ...(this.#state.fullStateStorage === undefined
         ? {}
         : { fullStateStorage: this.#state.fullStateStorage }),
-      // The expert pools and slot tables the Session holds (its own slots, so the two cannot diverge).
-      ...(session.expertCache === undefined
-        ? {}
-        : { expertCache: { slots: session.expertCache.slots } }),
+      // The expert pools and slot tables the Session holds: the very option it was built with (its
+      // host tier is named among the uncounted).
+      ...(expertCacheOptions === undefined ? {} : { expertCache: expertCacheOptions }),
       ...budget,
     });
     // The auxiliary Session of small-output decode, and the share of the GPU-resident PLE option (ADR

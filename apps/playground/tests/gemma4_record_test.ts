@@ -130,8 +130,15 @@ describe("buildGemmaRecord", () => {
       loads: 4,
       loadedExperts: 96,
       evictedExperts: 32,
-      bytesRead: 96 * 3_345_408,
+      hostExperts: 90,
+      containerExperts: 6,
+      bytesRead: 6 * 3_345_408,
+      bytesUploaded: 96 * 3_345_408,
       loadMs: 210,
+      readMs: 25,
+      uploadMs: 50,
+      hostHeldExperts: 3840,
+      hostHeldBytes: 3840 * 3_345_408,
       slots: 64,
       committedRuns: 8,
       retries: 4,
@@ -145,6 +152,17 @@ describe("buildGemmaRecord", () => {
     });
     expect(record.expertCache).toEqual({ slots: 64 });
     expect(record.expertCacheReport).toEqual(expertCacheReport);
+  });
+
+  it("keeps the host tier's budget inside the expert cache, through JSON", () => {
+    const record = buildGemmaRecord({
+      ...input,
+      mount: "gemma4-qat",
+      model: "26b",
+      expertCache: { slots: 32, hostBytes: Number.MAX_SAFE_INTEGER },
+    });
+    const saved: unknown = JSON.parse(JSON.stringify(record));
+    expect(saved).toMatchObject({ expertCache: { slots: 32, hostBytes: Number.MAX_SAFE_INTEGER } });
   });
 
   it("starts with the format and the environment and names the entry point by mount", () => {

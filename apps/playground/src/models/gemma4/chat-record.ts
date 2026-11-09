@@ -166,8 +166,11 @@ export type GemmaRecord = RecordEnvironment & {
   readonly fullStateStorage?: "f16";
   /** Present only when the image embedder was built (`vision` of `fromPretrained`). */
   readonly vision?: true;
-  /** Present only when the pipeline was built with the exact expert cache (`expertCache`). */
-  readonly expertCache?: { readonly slots: number };
+  /**
+   * Present only when the pipeline was built with the exact expert cache (`expertCache`), with its
+   * host tier's budget when it had one (`hostBytes`; `Number.MAX_SAFE_INTEGER` = every expert).
+   */
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
   /**
    * Present only with {@link expertCache}: `Pipeline.expertCacheReport()` after the latest turn
    * (cumulative over the pipeline's lifetime, so a "Load again" starts it over).
@@ -197,7 +200,7 @@ export const buildGemmaRecord = (input: {
   readonly speculative: boolean;
   readonly fullStateStorage?: "f16";
   readonly vision?: true;
-  readonly expertCache?: { readonly slots: number };
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
   readonly expertCacheReport?: ExpertCacheReport;
   readonly loadSeconds: number;
   readonly chat: ChatSettings;

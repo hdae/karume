@@ -169,6 +169,39 @@ export const parseExpertCacheSlots = (text: string): Parsed<number | undefined> 
   return { ok: true, value: slots };
 };
 
+const GIB = 2 ** 30;
+
+/**
+ * The "Host tier (GiB)" field's word for every expert: the budget `Number.MAX_SAFE_INTEGER`, which
+ * the runtime reads as "at or above every expert's bytes" (`expertCache.hostBytes`).
+ */
+export const EXPERT_HOST_TIER_ALL = "all";
+
+/**
+ * The "Host tier (GiB)" field → `expertCache.hostBytes` (`undefined` = empty: no host tier, every
+ * miss reads the distribution), or the problem. {@link EXPERT_HOST_TIER_ALL} (any case) is every
+ * expert; anything else must be a positive decimal number of GiB, taken down to whole bytes. A
+ * budget below one expert passes here and is refused by the pipeline at Load (an expert's bytes are
+ * the distribution's, which the page has not read).
+ */
+export const parseExpertHostTier = (text: string): Parsed<number | undefined> => {
+  const trimmed = text.trim();
+  if (trimmed === "") return { ok: true, value: undefined };
+  if (trimmed.toLowerCase() === EXPERT_HOST_TIER_ALL) {
+    return { ok: true, value: Number.MAX_SAFE_INTEGER };
+  }
+  const bytes = /^\d+(\.\d+)?$/.test(trimmed) ? Math.floor(Number(trimmed) * GIB) : undefined;
+  if (bytes === undefined || !Number.isSafeInteger(bytes) || bytes < 1) {
+    return {
+      ok: false,
+      errors: [
+        `Host tier must be a positive number of GiB, "${EXPERT_HOST_TIER_ALL}" for every expert, or empty for none (every miss reads the distribution).`,
+      ],
+    };
+  }
+  return { ok: true, value: bytes };
+};
+
 /**
  * The `speculative` a chat passes for what was loaded. MUST: `"always"` with a drafter on f16 full
  * slots, because a turn that leaves it out selects the self-tuning gate, which the pipeline refuses

@@ -16,7 +16,7 @@ import { ModelInputError } from "../errors.ts";
 
 /** The options the checks read (`PipelineOptions` satisfies it). */
 type ExpertCacheOptions = {
-  readonly expertCache?: { readonly slots: number };
+  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
   readonly decodeAhead?: number;
   readonly speculative?: unknown;
   readonly pleResidency?: string;
@@ -42,12 +42,21 @@ type RoutedGraph = {
 /** What the cache needs to know of the routed layers (the runtime's contract: one k, one E). */
 type Routing = { readonly picks: number; readonly experts: number };
 
-/** The settled option: the slots and the prefill chunk rows the pipeline runs with. */
-export type Gemma4ExpertCache = { readonly slots: number; readonly chunkLength: number };
+/**
+ * The settled option: the slots, the host tier's budget (absent = no tier) and the prefill chunk
+ * rows the pipeline runs with.
+ */
+export type Gemma4ExpertCache = {
+  readonly slots: number;
+  readonly hostBytes?: number;
+  readonly chunkLength: number;
+};
 
 /**
  * The checks the options alone decide (run **before reading a single byte of the assets**), returning
- * the slots (`undefined` without the option).
+ * the slots (`undefined` without the option). `hostBytes` is checked for its form here (a positive
+ * safe integer); that it holds at least one expert is the runtime's check at Session construction
+ * (an expert's bytes are the container's, not the graph's).
  *
  * MUST: refuse every option that would run the target through a batch or an immediate run, both of
  * which a run under the cache cannot be — the run-ahead (`decodeAhead ≥ 2`) and the GPU-resident PLE
@@ -65,6 +74,18 @@ export const assertGemma4ExpertCacheOptions = (
   if (typeof slots !== "number" || !Number.isSafeInteger(slots) || slots < 1) {
     throw new ModelInputError(
       `${where}: expertCache must be { slots: <a positive integer> } (slots ${String(slots)})`,
+    );
+  }
+  const hostBytes: unknown =
+    typeof cache === "object" && cache !== null && "hostBytes" in cache
+      ? cache.hostBytes
+      : undefined;
+  if (
+    hostBytes !== undefined &&
+    (typeof hostBytes !== "number" || !Number.isSafeInteger(hostBytes) || hostBytes < 1)
+  ) {
+    throw new ModelInputError(
+      `${where}: expertCache.hostBytes must be a positive integer of bytes held in RAM (Number.MAX_SAFE_INTEGER holds every expert), or absent for no host tier (hostBytes ${typeof hostBytes === "number" ? String(hostBytes) : JSON.stringify(hostBytes)})`,
     );
   }
   const refuse = (other: string, why: string): never => {
@@ -192,5 +213,6 @@ export const resolveGemma4ExpertCache = (
         ` (the smallest of the sliding slack ${slack ?? "(none)"}, ⌊${slots} / ${routing.picks}⌋ = ${perSlots} and the distribution's chunkLength ${distributionChunkLength})`,
     );
   }
-  return { slots, chunkLength };
+  const hostBytes = options.expertCache?.hostBytes;
+  return { slots, ...(hostBytes === undefined ? {} : { hostBytes }), chunkLength };
 };
