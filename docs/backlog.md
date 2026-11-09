@@ -28,7 +28,8 @@ maintainer's ruling of 2026-11-06).
    full residency) and wants the approximate modes (skip a miss, bias routing to the cache) measured too; CPU measurements of
    decode routing on all 30 layers, the re-run count of the exact cache and the approximate modes' KL ✅ 2026-11-09
    ([research](research/2026-11-08-gemma4-26b-moe-cache.md)); next a Chrome check of the fence and the per-expert upload.
-   A resume from the first missed layer, instead of re-running the whole token, is an unmeasured candidate. This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
+   Resuming a retry at the first missed layer stays exact but saves only about a fifth of the retry layers (the early layers
+   miss most); a K that differs per layer is unmeasured. This stays inside "MoE assumes every expert is resident" of [limitations](limitations.md) until a
    ruling changes it.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.

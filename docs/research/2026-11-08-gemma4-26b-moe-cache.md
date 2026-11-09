@@ -19,6 +19,8 @@
 - An exact cache that re-runs the whole token after any miss was simulated in the loop on all 30 layers. Every accepted token
   routed exactly as full residency and its logits were bit-identical (SHA-256 equal on all 2,304 tokens). The cost is the
   number of forwards: a mean of 2.77 per token at K = 48, 2.41 at K = 64 and 1.90 at K = 96, with a worst case of 8 (§4).
+- Resuming a retry at the first missed layer, instead of re-running the whole token, stays exact but saves only 17–29% of the
+  retry layers (2.12 forwards per token at K = 64), because the first miss is usually in layer 0 or 1 (§4.1).
 - Two approximate modes that never wait for a load were measured against the exact model. At K = 64 both keep a mean KL of
   about 0.02 nats and top-1 agreement of 0.97; at K = 48 it is about 0.08 nats and 0.93–0.94; at K = 32 about 0.22 nats and
   0.90. Biasing the router toward resident experts cuts the dropped router weight sharply but does not lower KL (§5).
@@ -97,8 +99,27 @@ Python), 256 tokens each, LRU:
   7 GB/s measured on Chromium Linux (an inference from bulk rates, see §6), but the token runs 2.41 times. Even at K = 96 the
   mean is 1.90 forwards, because two tokens in three still miss somewhere.
 - Python is the worst case (3.0 attempts at K = 64, 27 loads per token); Japanese prose the best (2.1, 4.5 loads).
-- Not measured: resuming from the first missed layer instead of re-running the whole token. The layers before the first miss
-  are already correct, so a resume would pay only the remaining fraction of a forward per retry.
+
+### 4.1 Resuming at the first missed layer (M2r)
+
+The layers before an attempt's first miss saw no miss, and the loads after the attempt touch only the layers that missed, so
+re-running those layers reproduces them. A retry can therefore resume at the previous attempt's first missed layer, from the
+saved hidden state and the committed KV of the earlier layers. The M2 loop was run again recording, per attempt, the first
+missed layer and the SHA-256 of every decoder layer's input. On every retry the inputs up to the resume layer were SHA-256
+equal to the previous attempt's and no miss fell before it, and the attempt sequence equalled M2's on every token, so the
+resume is exact. Forwards below count decoder layers run divided by 30; the lm_head and the cost differences between layers
+are not weighted. Same three cases, 256 tokens each:
+
+| K | retries per token | whole-token forwards | resumed forwards, mean | p95 | max | retry layers saved | resume layer, median |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 2.31 | 3.31 | 2.88 | 3.90 | 5.30 | 19% | 1 |
+| 48 | 1.77 | 2.77 | 2.46 | 3.45 | 5.03 | 17% | 1 |
+| 64 | 1.41 | 2.41 | 2.12 | 2.97 | 4.30 | 20% | 1 |
+| 96 | 0.90 | 1.90 | 1.64 | 2.43 | 3.70 | 29% | 5.5 |
+
+- The saving is small because the early layers miss most: at K = 64 the decode hit rate of layer 0 is 0.92 and of layer 1
+  0.84, against 0.93–0.98 for the later layers, so the first miss of a token is usually in layer 0 or 1.
+- The number of retries, and so of host round trips, is unchanged by the resume.
 
 ## 5. Approximate modes that never wait (M3)
 
@@ -146,8 +167,9 @@ measurement, not results of this one.
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
   re-runs; the approximate forms cost no extra forward and stay at about 0.02 nats of KL and 97% top-1 agreement.
-- The exact form's cost is set by the re-run granularity, not by the transfer: the first lever to measure is a resume from the
-  first missed layer.
-- Below K = 48 neither form looks attractive: the exact cache needs about 3 forwards per token and the approximate modes pass
-  0.08 nats.
-- Open: the resume variant on the CPU reference, then the Chrome fence and the 3.19 MiB upload on the RTX 5070 Ti.
+- The exact form's cost is set by the re-runs, not by the transfer. A resume from the first missed layer cuts it only to about
+  2.1 forwards at K = 64, because the early layers miss most.
+- Below K = 48 neither form looks attractive: the exact cache needs about 3 forwards per token (about 2.5 with the resume) and
+  the approximate modes pass 0.08 nats.
+- Open: a K that differs per layer (more slots for the early layers, which miss most), and the Chrome fence and the 3.19 MiB
+  upload on the RTX 5070 Ti.
