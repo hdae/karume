@@ -14,6 +14,7 @@ import { Route as AnimaRouteImport } from "./routes/anima";
 import { Route as AttentionBenchRouteImport } from "./routes/attention-bench";
 import { Route as BirefnetRouteImport } from "./routes/birefnet";
 import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
+import { Route as ExpertTransferRouteImport } from "./routes/expert-transfer";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
 import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
 import { Route as GeometrySweepRouteImport } from "./routes/geometry-sweep";
@@ -47,6 +48,11 @@ const BirefnetRoute = BirefnetRouteImport.update({
 const DepthAnythingRoute = DepthAnythingRouteImport.update({
   id: "/depth-anything",
   path: "/depth-anything",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const ExpertTransferRoute = ExpertTransferRouteImport.update({
+  id: "/expert-transfer",
+  path: "/expert-transfer",
   getParentRoute: () => rootRouteImport,
 } as any);
 const Gemma4Route = Gemma4RouteImport.update({
@@ -101,6 +107,7 @@ export interface FileRoutesByFullPath {
   "/attention-bench": typeof AttentionBenchRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
+  "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
@@ -117,6 +124,7 @@ export interface FileRoutesByTo {
   "/attention-bench": typeof AttentionBenchRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
+  "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
@@ -134,6 +142,7 @@ export interface FileRoutesById {
   "/attention-bench": typeof AttentionBenchRoute;
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
+  "/expert-transfer": typeof ExpertTransferRoute;
   "/gemma4": typeof Gemma4Route;
   "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
@@ -152,6 +161,7 @@ export interface FileRouteTypes {
     | "/attention-bench"
     | "/birefnet"
     | "/depth-anything"
+    | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
     | "/geometry-sweep"
@@ -168,6 +178,7 @@ export interface FileRouteTypes {
     | "/attention-bench"
     | "/birefnet"
     | "/depth-anything"
+    | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
     | "/geometry-sweep"
@@ -184,6 +195,7 @@ export interface FileRouteTypes {
     | "/attention-bench"
     | "/birefnet"
     | "/depth-anything"
+    | "/expert-transfer"
     | "/gemma4"
     | "/gemma4-bench"
     | "/geometry-sweep"
@@ -201,6 +213,7 @@ export interface RootRouteChildren {
   AttentionBenchRoute: typeof AttentionBenchRoute;
   BirefnetRoute: typeof BirefnetRoute;
   DepthAnythingRoute: typeof DepthAnythingRoute;
+  ExpertTransferRoute: typeof ExpertTransferRoute;
   Gemma4Route: typeof Gemma4Route;
   Gemma4BenchRoute: typeof Gemma4BenchRoute;
   GeometrySweepRoute: typeof GeometrySweepRoute;
@@ -247,6 +260,13 @@ declare module "@tanstack/react-router" {
       path: "/depth-anything";
       fullPath: "/depth-anything";
       preLoaderRoute: typeof DepthAnythingRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/expert-transfer": {
+      id: "/expert-transfer";
+      path: "/expert-transfer";
+      fullPath: "/expert-transfer";
+      preLoaderRoute: typeof ExpertTransferRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/gemma4": {
@@ -321,6 +341,7 @@ const rootRouteChildren: RootRouteChildren = {
   AttentionBenchRoute: AttentionBenchRoute,
   BirefnetRoute: BirefnetRoute,
   DepthAnythingRoute: DepthAnythingRoute,
+  ExpertTransferRoute: ExpertTransferRoute,
   Gemma4Route: Gemma4Route,
   Gemma4BenchRoute: Gemma4BenchRoute,
   GeometrySweepRoute: GeometrySweepRoute,

@@ -18,6 +18,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
+| Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | built; not yet checked in a browser |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
 | Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer GEMV, the f16 full state slots and the f16 attention scores, word for word on the browser's backend | `/kernel-check` | done |
 

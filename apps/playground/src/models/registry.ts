@@ -6,6 +6,7 @@
 
 import type { FileRoutesByPath } from "@tanstack/react-router";
 import {
+  ArrowUpFromLineIcon,
   AudioLinesIcon,
   BoxesIcon,
   GaugeIcon,
@@ -136,6 +137,15 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Benchmarks",
     icon: GaugeIcon,
     mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
+  },
+  {
+    path: "/expert-transfer",
+    title: "Expert transfer bench",
+    summary:
+      "Host round trip of a fence and of a router-pick readback, and the upload of Gemma 4 26B A4B experts by a staging ring or writeBuffer: the per-miss costs of an exact expert cache. Needs no distribution.",
+    group: "Benchmarks",
+    icon: ArrowUpFromLineIcon,
+    mounts: [],
   },
   {
     path: "/geometry-sweep",
