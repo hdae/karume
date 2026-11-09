@@ -125,3 +125,38 @@ The code facts this rests on (read 2026-11-09):
 2. A per-layer K (the research's fit saves about 12% at K = 64).
 3. Prefill speed with small chunks, and whether a grouped prefill form (ADR 0145 open point 1) changes it.
 4. The real per-forward time of 26B decode in Chrome, which sets the absolute cost of every re-run.
+5. The hub opens a container as a plain block source, which states no range cost, so the refusal of a `"scan"` source
+   (decision 1) does not fire through `fromPretrained`: on Node or Deno over Hugging Face a miss may read up to a whole part.
+   Refusing it at load needs the hub to report the cost.
+
+## Addendum 2026-11-09: scheme A as built
+
+Scheme A is implemented (runtime `SessionOptions.expertCache`, Gemma `PipelineOptions.expertCache`, the Playground chat
+page). Where the build differs from the decisions above, or settles what they left open:
+
+- **Upload by `writeBuffer`, not the staging ring** (decision 5). A cached Blob read (about 2.9 ms per expert) is about seven
+  times the ring's upload (0.43 ms), so the ring's advantage over `writeBuffer` is a small share of a miss; the simpler
+  path was taken and the ring stays available if a RAM tier makes reads cheap.
+- **The cache is a Session face of its own.** With the option, `Session.run`, `enqueue` and `enqueueRead` are refused; runs
+  go through `Session.expertCache.run`, which must be a deferred generation run and cannot be chained. `load` and `touch`
+  are separate calls, so the re-run protocol is the caller's: `@karume/models` owns it in one generic face
+  (`generation/expert-cache-session.ts`), serialized per Session so that two conversations cannot evict each other's
+  experts between a load and its re-run. A run converges in at most one attempt per routed layer plus one (the first
+  missed layer moves strictly forward, since every earlier layer ran on resident experts); a further attempt fails loudly.
+- **The routing is appended to the graph's outputs** (decision 3): every `topk` feeding an `expert_linear` becomes an extra
+  output of the session graph, read back on the run's own fence. The kernel still records nothing.
+- **The slot table rides on binding 6 of the pooled form of `expert_linear`.** A slot of −1 writes 0; an expert id or slot
+  out of range writes the NaN of ADR 0061 (it cannot happen while the runtime alone writes the table).
+- **Range reads come from the bound container** (`BoundContainer.ranges`: `verified`, `cost(block)`, `read(block, offset,
+  length)`). On a source that does not verify its reads, the build takes the SHA-256 of every expert range from the
+  verified block bytes and each load checks its bytes against it, so a miss never uploads bytes the build did not verify.
+- **The build still reads every block once**, experts included (to verify them and take the digests), but uploads no
+  expert row: the load time stays that of full residency, the VRAM is that of the pools.
+- **Gemma refuses more than decision 1 lists**: `pleResidency: "gpu"` (its decode is enqueued in a batch) and `vision` (an
+  image's bidirectional rows need an immediate run), both before any weight part is fetched; `slots` must be from 2 × k
+  to E. Under the option decode samples on the host (no GPU argmax).
+- **Checks** (decision 7): on the RTX 3080 Ti the 12-layer cut model at 16 and 64 slots (prefill chunks of 2 and 8 rows)
+  gives teacher-forced logits and hidden rows word-identical to a resident Session at the same chunk rows, and 8 greedy
+  tokens per golden prompt equal to the pipeline without the cache, with misses, loads and re-runs counted. Committing a
+  missed run instead of re-running it fails every one of those checks. The Chrome chat on the RTX 5070 Ti is the
+  maintainer's.

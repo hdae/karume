@@ -33,7 +33,11 @@ maintainer's ruling of 2026-11-06).
    miss most); a K that differs per layer and self-speculation over the cache each cut the time at K = 64 by about 12–13%,
    together about 15%, still about 2.3 times full residency. Ruling 2026-11-09: build it even if slow (a model whose experts
    do not fit in VRAM becomes possible in principle) — ADR [0146](decisions/0146-exact-expert-cache.md) (proposed): stage 0 the
-   cached-read measurement, then the whole-token re-run, then self-speculation over the cache.
+   cached-read measurement, then the whole-token re-run, then self-speculation over the cache. The cached read ✅ 2026-11-09
+   (about 2.9 ms per expert in Chrome, so a RAM tier comes after a real chat's counters). The whole-token re-run ✅
+   2026-11-09 (runtime, Gemma pipeline, Playground; the cut model at 16 and 64 slots is bit-identical on the RTX 3080 Ti).
+   Next: the maintainer's chat with the full model in Chrome on the RTX 5070 Ti at 64 slots. After that come the RAM tier,
+   self-speculation, and a K per layer.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
 

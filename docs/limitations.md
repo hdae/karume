@@ -1141,7 +1141,7 @@ Which of the two an externally implemented `DistributionSource` becomes is decid
 the measurements are ADR [0108](decisions/0108-container-format.md) addendum 5 and the
 [research record](research/2026-09-24-part-length-ram-peak.md).
 
-## MoE assumes every expert is resident in VRAM (no per-expert dynamic loading / eviction)
+## MoE assumes every expert is resident in VRAM unless the exact expert cache is chosen
 
 By-design (ruling of 2026-08-31). The VRAM budget of an MoE model is built from **the total
 parameters, not the active ones** — dynamic residency that "loads only the experts in use" is not
@@ -1167,6 +1167,19 @@ not settled ([backlog](backlog.md) later, "MoE page-fault"). A CPU measurement o
 an exact cache of 64 experts per layer re-runs a decode token 2.41 times on average when every miss
 re-runs the whole token.
 The revisit entry with its revival conditions is in [backlog](backlog.md) parked.
+
+**The exact expert cache** (`expertCache: { slots }` — ADR [0146](decisions/0146-exact-expert-cache.md), opt-in) is the
+one exception, for experts only: the Session holds `slots` experts per layer and a miss is loaded from the distribution and
+paid with a re-run, so the output is bit-identical to full residency. Its constraints:
+
+- A token that misses runs again (about 2.4 forwards per decode token at 64 of 128 slots on 26B by the CPU study), and a
+  prefill chunk has at most `min(8, ⌊slots / k⌋)` rows, so long prompts are slow.
+- It is refused with `decodeAhead ≥ 2`, a drafter's `speculative`, `pleResidency: "gpu"` and `vision`; decode samples on
+  the host.
+- The build still reads and verifies every block, experts included, so the load takes as long as full residency.
+- A cached distribution must stay in its cache while the pipeline lives. Over a source without seekable range reads (the
+  hub over Hugging Face on Node or Deno) a miss may read up to a whole part; this is not refused yet (ADR 0146 open
+  point 5).
 
 ## Auxiliary-asset safetensors require coverage of the data section and element alignment (may be rejected even when the official `safe_open` reads them)
 
