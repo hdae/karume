@@ -1153,16 +1153,19 @@ correspondence check of `openMemoryContainer`, reject both shortfall and surplus
 opening a hole would break the single accepted set) ② weight residency is assembled once at Session
 construction and has no place for eviction / reload ③ the IR has no value-dependent execution choice
 (dynamic transfer / skipping of experts) (an intentional hold in op-vocabulary; `topk` is static-k too).
-The fixed-k selection itself can be computed with existing ops (expand → gather → permute / reshape →
-bmm), multiplying and accumulating only k of them while keeping shapes static, but there is no kernel
-that reads compressed-resident experts directly, and going through gather needs f32 expansion and
-copies.
+The fixed-k compute itself no longer needs anything value-dependent: since 0.19.0 `expert_linear`
+(ADR [0145](decisions/0145-gemma4-26b-moe-resident.md) decision 2) runs each row on its selected
+experts' compressed weights with static shapes, so what remains of ③ is that no op skips or transfers
+an expert by value.
 Furthermore, as an external factor, the "device-initiated host memory transfer" that prior expert-cache
 methods (FreeToken and others) assume does not exist in WebGPU, so their sync-free mechanism cannot be
 ported directly.
 Host-controlled miss handling (the host reads the router's result and writes the missing experts) was
 shown to work as a mechanism in a PoC outside the repository, but its performance and practicality are
-not settled ([backlog](backlog.md) later, "MoE page-fault").
+not settled ([backlog](backlog.md) later, "MoE page-fault"). A CPU measurement on 26B A4B
+([research/2026-11-08-gemma4-26b-moe-cache.md](research/2026-11-08-gemma4-26b-moe-cache.md)) found that
+an exact cache of 64 experts per layer re-runs a decode token 2.41 times on average when every miss
+re-runs the whole token.
 The revisit entry with its revival conditions is in [backlog](backlog.md) parked.
 
 ## Auxiliary-asset safetensors require coverage of the data section and element alignment (may be rejected even when the official `safe_open` reads them)
