@@ -21,6 +21,10 @@
   number of forwards: a mean of 2.77 per token at K = 48, 2.41 at K = 64 and 1.90 at K = 96, with a worst case of 8 (§4).
 - Resuming a retry at the first missed layer, instead of re-running the whole token, stays exact but saves only 17–29% of the
   retry layers (2.12 forwards per token at K = 64), because the first miss is usually in layer 0 or 1 (§4.1).
+- Giving the early layers more slots at the same mean K moves the first miss later: 1.81 forwards per token at K = 64, about
+  12% less assumed time (§4.2). Drafting ahead on the cache and verifying exactly (self-speculation) saves about as much, 13%,
+  with half the round trips (§4.3). Both stay exact; the best measured point is still about 2.4 times the time of full
+  residency under the assumed costs.
 - Two approximate modes that never wait for a load were measured against the exact model. At K = 64 both keep a mean KL of
   about 0.02 nats and top-1 agreement of 0.97; at K = 48 it is about 0.08 nats and 0.93–0.94; at K = 32 about 0.22 nats and
   0.90. Biasing the router toward resident experts cuts the dropped router weight sharply but does not lower KL (§5).
@@ -121,6 +125,65 @@ are not weighted. Same three cases, 256 tokens each:
   0.84, against 0.93–0.98 for the later layers, so the first miss of a token is usually in layer 0 or 1.
 - The number of retries, and so of host round trips, is unchanged by the resume.
 
+### 4.2 A K that differs per layer
+
+Per-layer LRU misses do not interact (a layer's cache sees only its own picks, and the exact routing is fixed by M1), so each
+(layer, K) was replayed once over the M1 traces and an allocation was scored by stacking the layers. The score is an assumed
+time per token: 15 ms per forward, 2 ms per fence and 0.48 ms per expert loaded (3.19 MiB at 7 GB/s), with full residency at
+15 ms. Counting re-run layers alone is a degenerate objective: it starves the late layers to the minimum, which then miss on
+every token. A local search in steps of 4 slots, keeping the mean equal to K, was fitted on arithmetic, two-turn and summary and
+then run in the loop (M2r, same three cases as above). At K = 64 the fit gives layers 0–4 between 84 and 108 slots and the later
+layers 40–72.
+
+| mean K | allocation | resumed forwards | retries per token | loads per token | first missed layer, mean | assumed ms per token |
+|---:|---|---:|---:|---:|---:|---:|
+| 48 | uniform | 2.46 | 1.77 | 25.0 | 5.2 | 52.4 |
+| 48 | per layer | 2.22 | 1.75 | 24.9 | 9.0 | 48.7 |
+| 64 | uniform | 2.12 | 1.41 | 12.7 | 6.1 | 40.7 |
+| 64 | per layer | 1.81 | 1.32 | 12.2 | 11.6 | 35.6 |
+| 96 | uniform | 1.64 | 0.90 | 3.9 | 8.7 | 28.2 |
+| 96 | per layer | 1.58 | 0.88 | 3.6 | 10.2 | 27.2 |
+
+- The gain comes from moving the first miss later, not from fewer retries: at K = 64 the retries fall by 6% and the resumed
+  forwards by 15%. The replay predicted the same relative gain (−12% of the assumed time at K = 64); its absolute times are
+  lower because it counts one retry per missed token.
+- Every token's logits stayed SHA-256 equal to full residency.
+
+### 4.3 Self-speculation over the cache (M5)
+
+Instead of waiting on a miss, the model drafts ahead with the cache as it is and pays for the misses in one verify. One cycle
+from the committed exact state:
+
+1. Draft `depth` tokens greedily with single-row forwards; a non-resident pick contributes 0 and nothing waits.
+2. Fence 1: load every expert the drafts missed.
+3. Verify the committed token and the drafts in one forward of depth + 1 rows. Attention is causal, so a row is exact when no
+   row up to it misses; the cycle commits the exact predictions of the rows before the first row with a miss (among the rows
+   whose inputs are exact, up to the first rejected draft).
+4. Fence 2: load that row's misses.
+
+The verify's routing is taken from M1 (the inputs of the rows that count are M1's tokens; a multi-row verify is assumed to
+route as the single-row decode). Every committed row was replayed with full residency and was SHA-256 equal to M1. The same
+assumed costs as §4.2 apply, with each draft forward and each verify forward at 15 ms. Uniform K, same three cases:
+
+| K | depth | tokens per cycle | drafts accepted per cycle | forwards per token | fences per token | loads per token | assumed ms per token | M2r uniform, ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 48 | 4 | 2.24 | 3.78 | 2.23 | 0.89 | 24.6 | 46.9 | 52.4 |
+| 64 | 2 | 1.60 | 1.98 | 1.87 | 1.25 | 12.3 | 36.4 | 40.7 |
+| 64 | 4 | 2.69 | 3.89 | 1.85 | 0.74 | 12.7 | 35.3 | 40.7 |
+| 64 | 6 | 3.66 | 5.80 | 1.90 | 0.55 | 12.7 | 35.6 | 40.7 |
+| 96 | 4 | 3.46 | 3.88 | 1.44 | 0.58 | 3.9 | 24.6 | 28.2 |
+
+- The drafts are almost always right: with misses contributing 0, a cycle at K = 64 and depth 4 accepts 3.89 of its 4 drafts
+  (accepted per cycle is the mean over the three cases of the leading drafts equal to the exact tokens). What
+  limits a cycle is the verify: the exact rows route differently from the drafts in the later layers, and the first row whose
+  exact picks miss ends the commit.
+- At K = 64 self-speculation saves 13% of the assumed time against the resume with uniform K, about as much as the per-layer K
+  (35.3 against 35.6 ms); the two were not combined. Depth past 4 adds nothing.
+- The round trips fall to 0.74 fences per token at depth 4 (1.41 retries per token for M2r), which matters more if the Chrome
+  fence is far above the 2 ms assumed here.
+- The assumed time flatters the verify: its depth + 1 rows read the union of their picks, 16–24 experts per layer at depth 4
+  against 8 for one row, and that extra expert traffic is not weighted.
+
 ## 5. Approximate modes that never wait (M3)
 
 The residency for each decode row is the LRU state after the previous token, so no token waits for a load; after the token the
@@ -171,5 +234,7 @@ measurement, not results of this one.
   2.1 forwards at K = 64, because the early layers miss most.
 - Below K = 48 neither form looks attractive: the exact cache needs about 3 forwards per token (about 2.5 with the resume) and
   the approximate modes pass 0.08 nats.
-- Open: a K that differs per layer (more slots for the early layers, which miss most), and the Chrome fence and the 3.19 MiB
-  upload on the RTX 5070 Ti.
+- A per-layer K and self-speculation each bring the exact cache at K = 64 to about 35 ms per token under the assumed costs,
+  against 15 ms with every expert resident.
+- Open: combining the per-layer K with self-speculation; the verify's extra expert traffic; and the Chrome fence and the
+  3.19 MiB upload on the RTX 5070 Ti, which set the real weights of the assumed costs.
