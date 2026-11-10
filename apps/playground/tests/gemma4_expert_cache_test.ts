@@ -8,17 +8,22 @@ import {
   expertHostTierText,
 } from "../src/models/gemma4/expert-cache.ts";
 import {
+  EXPERT_CACHE_FITTED,
   EXPERT_CACHE_SLOTS,
   EXPERT_HOST_TIER_ALL,
   EXPERT_SPECULATION_DEPTH,
+  FITTED_EXPERT_SLOTS,
   hasExpertCache,
   parseExpertCacheSlots,
   parseExpertHostTier,
   parseExpertSpeculationDepth,
+  sameExpertSlots,
 } from "../src/models/gemma4/settings.ts";
 
 const MIB = 2 ** 20;
 const GIB = 2 ** 30;
+/** 64 slots in every one of 26B's 30 routed layers (`ExpertCacheReport.slots`). */
+const SLOTS_64: readonly number[] = new Array<number>(30).fill(64);
 
 const report = (patch: Partial<ExpertCacheReport> = {}): ExpertCacheReport => ({
   runs: 30,
@@ -35,7 +40,7 @@ const report = (patch: Partial<ExpertCacheReport> = {}): ExpertCacheReport => ({
   uploadMs: 250,
   hostHeldExperts: 1536,
   hostHeldBytes: 12 * GIB,
-  slots: 64,
+  slots: SLOTS_64,
   committedRuns: 20,
   retries: 10,
   ...patch,
@@ -75,15 +80,77 @@ describe("parseExpertCacheSlots", () => {
     expect(parseExpertCacheSlots("0").ok).toBe(false);
   });
 
-  it("refuses what is not a plain integer, naming the range", () => {
-    for (const text of ["64.5", "-32", "1e2", "sixty", "32 slots"]) {
+  it("refuses what is not a plain integer, naming the forms", () => {
+    for (const text of ["64.5", "-32", "1e2", "sixty", "32 slots", "fitted64"]) {
       const parsed = parseExpertCacheSlots(text);
       expect(parsed.ok).toBe(false);
       if (parsed.ok) continue;
       expect(parsed.errors).toEqual([
-        "Expert cache slots must be an integer from 16 to 128, or empty for none (every expert resident).",
+        'Expert cache slots must be an integer from 16 to 128, a comma-separated list of such integers (one per routed layer, layer 0 first), "fitted" for the fitted allocation of 26B, or empty for none (every expert resident).',
       ]);
     }
+  });
+
+  it("reads a comma-separated list as one count per layer, in order, spaces allowed", () => {
+    expect(parseExpertCacheSlots("96, 40,108 ,64")).toEqual({ ok: true, value: [96, 40, 108, 64] });
+    expect(parseExpertCacheSlots("16,128")).toEqual({ ok: true, value: [16, 128] });
+  });
+
+  it("refuses a list naming every layer whose count is wrong, an empty entry included", () => {
+    const parsed = parseExpertCacheSlots("64, 15, 64,, 129, x");
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.errors).toEqual([
+      'Expert cache slots must be an integer from 16 to 128, a comma-separated list of such integers (one per routed layer, layer 0 first), "fitted" for the fitted allocation of 26B, or empty for none (every expert resident).',
+      'Layer 1 ("15") is not.',
+      'Layer 3 ("") is not.',
+      'Layer 4 ("129") is not.',
+      'Layer 5 ("x") is not.',
+    ]);
+    expect(parseExpertCacheSlots("64,").ok).toBe(false);
+  });
+
+  it("reads the preset word, in any case, as the fitted allocation", () => {
+    for (const text of [EXPERT_CACHE_FITTED, " Fitted ", "FITTED"]) {
+      expect(parseExpertCacheSlots(text)).toEqual({ ok: true, value: FITTED_EXPERT_SLOTS });
+    }
+  });
+});
+
+describe("FITTED_EXPERT_SLOTS", () => {
+  it("has one count per routed layer of 26B, at the 64 slots' total VRAM", () => {
+    expect(FITTED_EXPERT_SLOTS).toHaveLength(30);
+    expect(FITTED_EXPERT_SLOTS.reduce((sum, count) => sum + count, 0)).toBe(30 * 64);
+  });
+
+  it("keeps every layer in the range the page accepts", () => {
+    for (const count of FITTED_EXPERT_SLOTS) {
+      expect(parseExpertCacheSlots(String(count))).toEqual({ ok: true, value: count });
+    }
+  });
+
+  it("leaves the fewest layer room for a verify at the largest depth (depth + 1 ≤ ⌊slots / 8⌋)", () => {
+    expect(EXPERT_SPECULATION_DEPTH.max + 1).toBeLessThanOrEqual(
+      Math.floor(Math.min(...FITTED_EXPERT_SLOTS) / 8),
+    );
+  });
+});
+
+describe("sameExpertSlots", () => {
+  it("compares lists by value", () => {
+    expect(sameExpertSlots([96, 40], [96, 40])).toBe(true);
+    expect(sameExpertSlots([...FITTED_EXPERT_SLOTS], FITTED_EXPERT_SLOTS)).toBe(true);
+    expect(sameExpertSlots([96, 40], [40, 96])).toBe(false);
+    expect(sameExpertSlots([64, 64], [64, 64, 64])).toBe(false);
+  });
+
+  it("compares counts and no cache by value, and never a count with a list", () => {
+    expect(sameExpertSlots(64, 64)).toBe(true);
+    expect(sameExpertSlots(64, 32)).toBe(false);
+    expect(sameExpertSlots(undefined, undefined)).toBe(true);
+    expect(sameExpertSlots(undefined, 64)).toBe(false);
+    expect(sameExpertSlots([64], undefined)).toBe(false);
+    expect(sameExpertSlots(64, [64])).toBe(false);
   });
 });
 
@@ -163,6 +230,22 @@ describe("expertCacheRequestText", () => {
       expertCacheRequestText({ slots: 64, hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 }),
     ).toBe("expert cache 64 slots · host tier all · depth 4");
   });
+
+  it("names a list by its mean and range, and a list of one count as that count", () => {
+    expect(expertCacheRequestText({ slots: [96, 40, 108, 64], depth: 4 })).toBe(
+      "expert cache 77 slots per layer on average (40–108) · depth 4",
+    );
+    expect(expertCacheRequestText({ slots: [16, 17] })).toBe(
+      "expert cache 16.5 slots per layer on average (16–17)",
+    );
+    expect(expertCacheRequestText({ slots: [32, 32, 32] })).toBe("expert cache 32 slots");
+  });
+
+  it("names the fitted allocation as fitted", () => {
+    expect(
+      expertCacheRequestText({ slots: FITTED_EXPERT_SLOTS, hostBytes: Number.MAX_SAFE_INTEGER }),
+    ).toBe("expert cache fitted, 64 slots per layer on average (40–108) · host tier all");
+  });
 });
 
 describe("expertHostTierText", () => {
@@ -175,7 +258,7 @@ describe("expertHostTierText", () => {
 describe("expertCacheFigures", () => {
   it("divides the retries by the committed runs and the load time by the loaded experts", () => {
     expect(expertCacheFigures(report())).toEqual({
-      slots: 64,
+      slots: SLOTS_64,
       committedRuns: 20,
       retriesPerCommittedRun: 0.5,
       loadedExperts: 400,
@@ -247,6 +330,15 @@ describe("expertCacheText", () => {
   it("shows every figure of the status row", () => {
     expect(expertCacheText(report())).toBe(
       "64 slots · 20 committed runs · 0.50 retries / committed run · 400 loaded (300 from the host tier, 100 from the distribution) · 150 evicted · 1280.0 MiB read · load 900 ms (2.25 ms / expert; read 600 ms, upload 250 ms) · host tier holds 1536 experts (12.00 GiB)",
+    );
+  });
+
+  it("names the mean and range of the slots when the layers have counts of their own", () => {
+    expect(expertCacheText(report({ slots: [96, 40, 108, 64] }))).toMatch(
+      /^77 slots per layer on average \(40–108\) · 20 committed runs · /,
+    );
+    expect(expertCacheText(report({ slots: [...FITTED_EXPERT_SLOTS] }))).toMatch(
+      /^fitted, 64 slots per layer on average \(40–108\) · 20 committed runs · /,
     );
   });
 

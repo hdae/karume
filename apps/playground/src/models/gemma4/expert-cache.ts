@@ -6,12 +6,15 @@
 
 import type { ExpertCacheReport } from "@karume/models/gemma";
 
+import { type ExpertCacheSlots, FITTED_EXPERT_SLOTS, sameExpertSlots } from "./settings";
+
 const MIB = 2 ** 20;
 const GIB = 2 ** 30;
 
 /** The figures derived from a report; a ratio over zero is `undefined` (nothing to divide). */
 export type ExpertCacheFigures = {
-  readonly slots: number;
+  /** Per routed layer, in layer order (`ExpertCacheReport.slots`). */
+  readonly slots: readonly number[];
   readonly committedRuns: number;
   /** Re-runs a miss cost, per committed run. */
   readonly retriesPerCommittedRun?: number;
@@ -81,6 +84,20 @@ export const expertCacheFigures = (report: ExpertCacheReport): ExpertCacheFigure
     : { speculation: speculationFigures(report.speculation) }),
 });
 
+/**
+ * The slots as the status names them: the count when every layer has it, else the mean and the
+ * range, after "fitted" when they are {@link FITTED_EXPERT_SLOTS}.
+ */
+export const expertSlotsText = (slots: ExpertCacheSlots): string => {
+  if (typeof slots === "number") return `${slots} slots`;
+  const fewest = Math.min(...slots);
+  const most = Math.max(...slots);
+  if (fewest === most) return `${fewest} slots`;
+  const mean = slots.reduce((sum, count) => sum + count, 0) / slots.length;
+  const perLayer = `${Number.isInteger(mean) ? mean : mean.toFixed(1)} slots per layer on average (${fewest}–${most})`;
+  return sameExpertSlots(slots, FITTED_EXPERT_SLOTS) ? `fitted, ${perLayer}` : perLayer;
+};
+
 /** One line for the status card. */
 export const expertCacheText = (report: ExpertCacheReport): string => {
   const figures = expertCacheFigures(report);
@@ -89,7 +106,7 @@ export const expertCacheText = (report: ExpertCacheReport): string => {
   const { speculation } = figures;
   const accepted = speculation?.acceptedDraftsPerCycle;
   return [
-    `${figures.slots} slots`,
+    expertSlotsText(figures.slots),
     `${figures.committedRuns} committed runs`,
     `${retries === undefined ? "—" : retries.toFixed(2)} retries / committed run`,
     ...(speculation === undefined
@@ -116,12 +133,12 @@ export const expertHostTierText = (hostBytes: number): string =>
 
 /** The expert cache of a load request (`expertCache`), as the status's Pipeline line names it. */
 export const expertCacheRequestText = (expertCache: {
-  readonly slots: number;
+  readonly slots: ExpertCacheSlots;
   readonly hostBytes?: number;
   readonly depth?: number;
 }): string =>
   [
-    `expert cache ${expertCache.slots} slots`,
+    `expert cache ${expertSlotsText(expertCache.slots)}`,
     ...(expertCache.hostBytes === undefined ? [] : [expertHostTierText(expertCache.hostBytes)]),
     ...(expertCache.depth === undefined ? [] : [`depth ${expertCache.depth}`]),
   ].join(" · ");

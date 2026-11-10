@@ -19,7 +19,7 @@ import { type RefObject, useEffect, useState } from "react";
 import type { TrackGpuWork } from "@/hooks/use-gpu";
 import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
-import { entryPointOf, type GemmaMount, isQatModel } from "./settings";
+import { entryPointOf, type ExpertCacheSlots, type GemmaMount, isQatModel } from "./settings";
 
 /** What **Load** asks for (a new object per press, so pressing again rebuilds). */
 export type LoadRequest = {
@@ -35,13 +35,14 @@ export type LoadRequest = {
   readonly vision?: boolean;
   /**
    * Keep only `slots` experts of each routed layer on the GPU (`expertCache` of `fromPretrained` —
-   * a mixture-of-experts model only); absent = every expert resident. `hostBytes` holds that many
+   * a mixture-of-experts model only), one count for every layer or one per layer; absent = every
+   * expert resident. `hostBytes` holds that many
    * bytes of experts in RAM in front of the distribution (`Number.MAX_SAFE_INTEGER` = every expert);
    * absent = every miss reads the distribution. `depth` decodes by self-speculation over the cache
    * (ADR 0146 decision 8); absent = one run per decode token.
    */
   readonly expertCache?: {
-    readonly slots: number;
+    readonly slots: ExpertCacheSlots;
     readonly hostBytes?: number;
     readonly depth?: number;
   };

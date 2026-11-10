@@ -139,7 +139,7 @@ describe("buildGemmaRecord", () => {
       uploadMs: 50,
       hostHeldExperts: 3840,
       hostHeldBytes: 3840 * 3_345_408,
-      slots: 64,
+      slots: new Array<number>(30).fill(64),
       committedRuns: 8,
       retries: 4,
     };
@@ -165,6 +165,28 @@ describe("buildGemmaRecord", () => {
     expect(saved).toMatchObject({ expertCache: { slots: 32, hostBytes: Number.MAX_SAFE_INTEGER } });
   });
 
+  it("keeps per-layer slots as the list passed, through JSON, so a list and a count stay apart", () => {
+    const perLayer = [96, 108, 84, 40];
+    const listed = buildGemmaRecord({
+      ...input,
+      mount: "gemma4-qat",
+      model: "26b",
+      expertCache: { slots: perLayer, hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 },
+    });
+    const counted = buildGemmaRecord({
+      ...input,
+      mount: "gemma4-qat",
+      model: "26b",
+      expertCache: { slots: 64, hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 },
+    });
+    const savedList: unknown = JSON.parse(JSON.stringify(listed));
+    const savedCount: unknown = JSON.parse(JSON.stringify(counted));
+    expect(savedList).toMatchObject({
+      expertCache: { slots: [96, 108, 84, 40], hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 },
+    });
+    expect(savedCount).toMatchObject({ expertCache: { slots: 64 } });
+  });
+
   it("keeps the self-speculation depth and the cycles' counters through JSON", () => {
     const expertCacheReport = {
       runs: 50,
@@ -181,7 +203,7 @@ describe("buildGemmaRecord", () => {
       uploadMs: 120,
       hostHeldExperts: 3840,
       hostHeldBytes: 3840 * 3_345_408,
-      slots: 64,
+      slots: new Array<number>(30).fill(64),
       committedRuns: 3,
       retries: 1,
       speculation: {

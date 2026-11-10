@@ -83,6 +83,7 @@ import {
   type ChatForm,
   type ChatSettings,
   effectiveModelKey,
+  EXPERT_CACHE_FITTED,
   EXPERT_CACHE_SLOTS,
   EXPERT_HOST_TIER_ALL,
   EXPERT_SPECULATION_DEPTH,
@@ -108,6 +109,7 @@ import {
   parseModelKey,
   parseTurnForm,
   sameChatSettings,
+  sameExpertSlots,
   streamsStructure,
   type TurnForm,
   turnFormOf,
@@ -970,7 +972,7 @@ export const Gemma4Page = () => {
       sourceChoice.source !== pipeline.request.source ||
       speculative !== pipeline.request.speculative ||
       f16KvChosen !== (pipeline.request.fullStateStorage === "f16") ||
-      expertCacheSlots !== pipeline.request.expertCache?.slots ||
+      !sameExpertSlots(expertCacheSlots, pipeline.request.expertCache?.slots) ||
       expertHostBytes !== pipeline.request.expertCache?.hostBytes ||
       expertDepth !== pipeline.request.expertCache?.depth ||
       diagnosticsChosen !== pipeline.request.diagnostics);
@@ -1089,13 +1091,12 @@ export const Gemma4Page = () => {
                 label="Expert cache slots"
                 hint={
                   expertCacheAvailable
-                    ? `Keeps this many of each layer's ${EXPERT_CACHE_SLOTS.max} experts on the GPU and reads a missing one from the distribution when the routing picks it; a run that missed is run again, so the tokens are those of full residency. ${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}; empty = every expert resident. Prefill chunks shrink to at most ⌊slots / 8⌋ rows, so long prompts are slow, and each token is sampled on the CPU. A refusal by the pipeline shows under Status. Applies on the next Load.`
+                    ? `Keeps this many of each layer's ${EXPERT_CACHE_SLOTS.max} experts on the GPU and reads a missing one from the distribution when the routing picks it; a run that missed is run again, so the tokens are those of full residency. One count for every layer (${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}); a comma-separated list of such counts, one per routed layer, layer 0 first (a wrong length is refused by the pipeline); or "${EXPERT_CACHE_FITTED}" for the per-layer allocation fitted to 26B's routing at an average of 64 (more slots in the early layers, the same total VRAM as 64). Empty = every expert resident. Prefill chunks shrink to at most ⌊slots / 8⌋ rows of the fewest layer, so long prompts are slow, and each token is sampled on the CPU. A refusal by the pipeline shows under Status. Applies on the next Load.`
                     : "Only for a mixture-of-experts model (Gemma 4 QAT 26B)."
                 }
               >
                 <Input
                   id="gemma4-expert-cache"
-                  inputMode="numeric"
                   value={expertSlotsText}
                   placeholder="off"
                   onChange={(event) => setExpertSlotsText(event.target.value)}
@@ -1132,7 +1133,7 @@ export const Gemma4Page = () => {
                 label="Self-speculation depth"
                 hint={
                   expertDepthApplies
-                    ? `Drafts up to this many tokens on the cache as it is (a missing expert contributes 0 and nothing waits), loads the experts the drafts picked and verifies them in one run, so one cycle can confirm several tokens. The tokens are the same either way. ${EXPERT_SPECULATION_DEPTH.min} to ${EXPERT_SPECULATION_DEPTH.max}; empty = one run per decode token, re-run after a miss. A depth too large for the slots is refused by the pipeline (shown under Status). Applies on the next Load.`
+                    ? `Drafts up to this many tokens on the cache as it is (a missing expert contributes 0 and nothing waits), loads the experts the drafts picked and verifies them in one run, so one cycle can confirm several tokens. The tokens are the same either way. ${EXPERT_SPECULATION_DEPTH.min} to ${EXPERT_SPECULATION_DEPTH.max}; empty = one run per decode token, re-run after a miss. A depth too large for the slots (depth + 1 above ⌊slots / 8⌋ of the fewest layer) is refused by the pipeline (shown under Status). Applies on the next Load.`
                     : "Only with the expert cache (set its slots first)."
                 }
               >

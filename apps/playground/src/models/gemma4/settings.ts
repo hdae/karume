@@ -146,28 +146,76 @@ export const hasExpertCache = ({ mount, model }: ModelKey): boolean =>
   mount === "gemma4-qat" && model === "26b";
 
 /**
- * The slot range the page accepts: 2 × 26B's top-k 8 (a prefill chunk has at least 2 rows, and all
- * of one chunk's picks must fit) to its 128 experts per layer — the bounds the pipeline checks.
+ * The slot range the page accepts (for each layer of a list too): 2 × 26B's top-k 8 (a prefill chunk
+ * has at least 2 rows, and all of one chunk's picks must fit) to its 128 experts per layer — the
+ * bounds the pipeline checks.
  */
 export const EXPERT_CACHE_SLOTS = { min: 16, max: 128 } as const;
 
 /**
- * The "Expert cache slots" field → the slots (`undefined` = empty: no cache, every expert resident),
- * or the problem. Anything else must be an integer in {@link EXPERT_CACHE_SLOTS}.
+ * The slots of `expertCache`: one count for every routed layer, or one count per routed layer in
+ * layer order (the pipeline checks the length against the model).
  */
-export const parseExpertCacheSlots = (text: string): Parsed<number | undefined> => {
-  if (text.trim() === "") return { ok: true, value: undefined };
+export type ExpertCacheSlots = number | readonly number[];
+
+/** The "Expert cache slots" field's word for {@link FITTED_EXPERT_SLOTS}. */
+export const EXPERT_CACHE_FITTED = "fitted";
+
+/**
+ * 26B's per-layer slots fitted at a mean of 64, layer 0 first: the allocation of
+ * docs/research/2026-11-08-gemma4-26b-moe-cache.md §4.2, fitted on CPU traces by a local search that
+ * keeps the mean at 64 — the same total VRAM as 64 slots in every layer, moved to the early layers
+ * so a run's first miss comes later.
+ */
+export const FITTED_EXPERT_SLOTS: readonly number[] = Object.freeze([
+  96, 108, 84, 88, 84, 68, 72, 72, 68, 60, 52, 56, 64, 64, 60, 68, 52, 56, 64, 56, 48, 40, 44, 48,
+  52, 48, 56, 60, 64, 68,
+]);
+
+const slotCountOf = (text: string): number | undefined => {
   const slots = integerOf(text);
-  if (slots === undefined || slots < EXPERT_CACHE_SLOTS.min || slots > EXPERT_CACHE_SLOTS.max) {
-    return {
-      ok: false,
-      errors: [
-        `Expert cache slots must be an integer from ${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}, or empty for none (every expert resident).`,
-      ],
-    };
-  }
-  return { ok: true, value: slots };
+  return slots === undefined || slots < EXPERT_CACHE_SLOTS.min || slots > EXPERT_CACHE_SLOTS.max
+    ? undefined
+    : slots;
 };
+
+/**
+ * The "Expert cache slots" field → the slots (`undefined` = empty: no cache, every expert resident),
+ * or the problem. {@link EXPERT_CACHE_FITTED} (any case) is {@link FITTED_EXPERT_SLOTS}; text with a
+ * comma is a list, one count per routed layer; anything else is one count for every layer. Every
+ * count must be an integer in {@link EXPERT_CACHE_SLOTS}. A list of the wrong length passes here and
+ * is refused by the pipeline at Load (the layer count is the model's, which the page has not read).
+ */
+export const parseExpertCacheSlots = (text: string): Parsed<ExpertCacheSlots | undefined> => {
+  const trimmed = text.trim();
+  if (trimmed === "") return { ok: true, value: undefined };
+  if (trimmed.toLowerCase() === EXPERT_CACHE_FITTED) {
+    return { ok: true, value: FITTED_EXPERT_SLOTS };
+  }
+  const forms = `Expert cache slots must be an integer from ${EXPERT_CACHE_SLOTS.min} to ${EXPERT_CACHE_SLOTS.max}, a comma-separated list of such integers (one per routed layer, layer 0 first), "${EXPERT_CACHE_FITTED}" for the fitted allocation of 26B, or empty for none (every expert resident).`;
+  if (!trimmed.includes(",")) {
+    const slots = slotCountOf(trimmed);
+    return slots === undefined ? { ok: false, errors: [forms] } : { ok: true, value: slots };
+  }
+  const entries = trimmed.split(",").map((entry) => entry.trim());
+  const counts: number[] = [];
+  const wrong: string[] = [];
+  entries.forEach((entry, layer) => {
+    const count = slotCountOf(entry);
+    if (count === undefined) wrong.push(`Layer ${layer} ("${entry}") is not.`);
+    else counts.push(count);
+  });
+  return wrong.length > 0 ? { ok: false, errors: [forms, ...wrong] } : { ok: true, value: counts };
+};
+
+/** Whether two slot settings are the same, a list compared by value (a count is not a list). */
+export const sameExpertSlots = (
+  left: ExpertCacheSlots | undefined,
+  right: ExpertCacheSlots | undefined,
+): boolean =>
+  typeof left === "object" && typeof right === "object"
+    ? left.length === right.length && left.every((count, layer) => right[layer] === count)
+    : left === right;
 
 const GIB = 2 ** 30;
 
@@ -204,7 +252,8 @@ export const parseExpertHostTier = (text: string): Parsed<number | undefined> =>
 
 /**
  * The range the "Self-speculation depth" field accepts (`expertCache.depth` — ADR 0146 decision 8).
- * The bound that depends on the slots (`depth + 1 ≤ ⌊slots / 8⌋` on 26B) is the pipeline's to check:
+ * The bound that depends on the slots (`depth + 1 ≤ ⌊slots / 8⌋` on 26B, with the fewest layer's
+ * slots for a list) is the pipeline's to check:
  * a depth it refuses fails at Load with its own message.
  */
 export const EXPERT_SPECULATION_DEPTH = { min: 1, max: 4 } as const;

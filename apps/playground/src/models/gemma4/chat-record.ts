@@ -18,7 +18,13 @@ import type {
 import type { RecordEnvironment } from "@/lib/environment";
 import type { ComponentRecord, SourceRecord } from "@/lib/record";
 
-import { type ChatSettings, entryPointOf, type GemmaEntryPoint, type GemmaMount } from "./settings";
+import {
+  type ChatSettings,
+  entryPointOf,
+  type ExpertCacheSlots,
+  type GemmaEntryPoint,
+  type GemmaMount,
+} from "./settings";
 import type { TurnTiming } from "./turns";
 
 /**
@@ -167,12 +173,13 @@ export type GemmaRecord = RecordEnvironment & {
   /** Present only when the image embedder was built (`vision` of `fromPretrained`). */
   readonly vision?: true;
   /**
-   * Present only when the pipeline was built with the exact expert cache (`expertCache`), with its
+   * Present only when the pipeline was built with the exact expert cache (`expertCache`), its slots
+   * in the form passed (one count, or one per routed layer — the `fitted` preset as its list), with its
    * host tier's budget when it had one (`hostBytes`; `Number.MAX_SAFE_INTEGER` = every expert) and
    * its self-speculation depth when decode ran in cycles (`depth`; absent = one run per decode token).
    */
   readonly expertCache?: {
-    readonly slots: number;
+    readonly slots: ExpertCacheSlots;
     readonly hostBytes?: number;
     readonly depth?: number;
   };
@@ -207,7 +214,7 @@ export const buildGemmaRecord = (input: {
   readonly fullStateStorage?: "f16";
   readonly vision?: true;
   readonly expertCache?: {
-    readonly slots: number;
+    readonly slots: ExpertCacheSlots;
     readonly hostBytes?: number;
     readonly depth?: number;
   };
