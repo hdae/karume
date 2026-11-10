@@ -54,7 +54,7 @@ import type {
   Tensor,
 } from "./session-types.ts";
 
-/** One pooled weight on the GPU: `slots` experts of codes and, for i4 / i4f16, of steps. */
+/** One pooled weight on the GPU: its layer's slots of codes and, for i4 / i4f16, of steps. */
 export type ExpertPoolWeight = ExpertWeightPlan & {
   /** The routed layer the weight belongs to (the routing's layer axis). */
   readonly layer: number;
@@ -66,6 +66,11 @@ export type ExpertPoolWeight = ExpertWeightPlan & {
 /** One routed layer on the GPU: its slot table (i32 per expert, −1 = not resident) and weights. */
 export type ExpertPoolLayer = {
   readonly index: string;
+  /**
+   * The layer's pool slots: its weights' pools hold this many experts, and every slot its table
+   * names is below it.
+   */
+  readonly slots: number;
   readonly table: GPUBuffer;
   readonly weights: readonly ExpertPoolWeight[];
   /** Bytes of one expert's entry (expert-plan.ts). */
@@ -77,12 +82,15 @@ export type ExpertPoolLayer = {
  * releases it with the weights).
  */
 export type ExpertPool = {
-  readonly slots: number;
   readonly experts: number;
   readonly picks: number;
+  /** In the routing's layer order. */
   readonly layers: readonly ExpertPoolLayer[];
-  /** Index value → slot table (what an `expert_linear` recipe binds). */
-  readonly tables: ReadonlyMap<string, GPUBuffer>;
+  /**
+   * Index value → its layer (what an `expert_linear` recipe binds: the layer's slot table, with the
+   * layer's slots in the kernel's params).
+   */
+  readonly byIndex: ReadonlyMap<string, ExpertPoolLayer>;
   /** The graph's declared outputs (the Session's graph also reads every index back). */
   readonly declaredOutputs: readonly string[];
   readonly reader: BlockRangeReader;
@@ -238,7 +246,7 @@ const emptyTally = (): LoadTally => ({
 
 /** The {@link ExpertCache} of one Session (ADR 0146 decisions 2 to 6). */
 export class SessionExpertCache implements ExpertCache {
-  readonly slots: number;
+  readonly slots: readonly number[];
   readonly experts: number;
   readonly layers: number;
   readonly picks: number;
@@ -271,7 +279,9 @@ export class SessionExpertCache implements ExpertCache {
     this.#pool = pool;
     this.#host = host;
     this.#store = pool.host;
-    this.slots = pool.slots;
+    // Frozen: a caller's write cannot reach it (and the loads read each layer's count from the
+    // pool, not from here).
+    this.slots = Object.freeze(pool.layers.map((layer) => layer.slots));
     this.experts = pool.experts;
     this.layers = pool.layers.length;
     this.picks = pool.picks;
@@ -469,7 +479,7 @@ export class SessionExpertCache implements ExpertCache {
     const moves = expertLoadMoves(
       this.#tables.map((table, layer) =>
         planExpertLoad(
-          this.slots,
+          this.#pool.layers[layer].slots,
           table,
           this.#recency[layer].keys(),
           routedExperts(routing, layer, routing.rows),

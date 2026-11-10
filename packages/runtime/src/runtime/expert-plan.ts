@@ -50,6 +50,8 @@ export type ExpertWeightPlan = ExpertWeightBytes & {
 export type ExpertLayerPlan = {
   /** The `topk`'s index value (output 1) — the key of the layer's slot table. */
   readonly index: string;
+  /** The layer's pool slots (K of this layer): its pools hold this many experts. */
+  readonly slots: number;
   /** The layer's expert weights, in graph order of the first `expert_linear` reading each. */
   readonly weights: readonly ExpertWeightPlan[];
   /** Bytes of one expert's entry (the sum of every weight's codes and steps). */
@@ -83,8 +85,8 @@ export const EXPERT_RING_BYTES = 128 * 2 ** 20;
 
 /**
  * The slot count of the staging ring: {@link EXPERT_RING_SLOTS}, fewer when that many slots would
- * exceed {@link EXPERT_RING_BYTES}, and never more than one load can need (`maxLoad` = layers × K
- * experts) — at least one.
+ * exceed {@link EXPERT_RING_BYTES}, and never more than one load can need (`maxLoad` = the sum of
+ * every layer's K experts) — at least one.
  */
 export const stagingRingSlots = (slotBytes: number, maxLoad: number): number =>
   Math.max(1, Math.min(EXPERT_RING_SLOTS, Math.floor(EXPERT_RING_BYTES / slotBytes), maxLoad));
@@ -110,7 +112,6 @@ export const ringRounds = (count: number, slots: number): ExpertRingRound[] => {
 
 /** The graph-side plan of an expert cache (shared by Session construction and the estimate). */
 export type ExpertGraphPlan = {
-  readonly slots: number;
   readonly experts: number;
   readonly picks: number;
   /**
@@ -118,7 +119,10 @@ export type ExpertGraphPlan = {
    * (every miss reads the container).
    */
   readonly hostBytes: number | undefined;
-  /** In graph order of the layers' `topk` nodes — the order of the routing's layer axis. */
+  /**
+   * In graph order of the layers' `topk` nodes — the order of the routing's layer axis and of an
+   * array of `slots` (each layer carries its own count).
+   */
   readonly layers: readonly ExpertLayerPlan[];
   /** The staging ring of the loads. */
   readonly ring: ExpertRingPlan;
@@ -130,7 +134,7 @@ export type ExpertGraphPlan = {
   readonly graph: IrGraph;
   /** The graph's declared outputs (what a run returns to its caller). */
   readonly declaredOutputs: readonly string[];
-  /** The residency plan with every expert weight sized as its pool of `slots` experts. */
+  /** The residency plan with every expert weight sized as its pool of its layer's slots. */
   readonly residency: ReadonlyMap<string, WeightResidency>;
   /** Bytes of one slot table (one i32 per expert). */
   readonly tableBytes: number;
@@ -197,7 +201,9 @@ const pooledWeight = (
  * not hold exactly:
  *
  * - `slots` is a positive integer from the routed `topk` k to E (a row's picks always fit, and a
- *   pool never holds more than E experts);
+ *   pool never holds more than E experts) — every layer's, or, as an array, one per routed layer in
+ *   the graph order of their `topk` nodes (exactly as many entries as routed layers, each in that
+ *   range; a failure names the entry);
  * - the graph has `expert_linear`, every layer has the same k and E (the routing is one
  *   `[layers, rows, picks]` array);
  * - an expert weight is an initializer the Session owns (not borrowed, not a graph output), read
@@ -213,7 +219,7 @@ const pooledWeight = (
 export const planExpertGraph = (
   graph: IrGraph,
   residency: ReadonlyMap<string, WeightResidency>,
-  cache: { readonly slots: number; readonly hostBytes?: number },
+  cache: { readonly slots: number | readonly number[]; readonly hostBytes?: number },
 ): ExpertGraphPlan => {
   const violation = expertCacheViolation(cache);
   if (violation !== undefined) throw new ExecutionError(violation);
@@ -268,6 +274,13 @@ export const planExpertGraph = (
       throw new ExecutionError(`${where}: expert weight '${name}' is a graph output`);
     }
   }
+  // One count per routed layer, in layer order (a number is every layer's).
+  const counts = typeof slots === "number" ? new Array<number>(routed.size).fill(slots) : slots;
+  if (counts.length !== routed.size) {
+    throw new ExecutionError(
+      `${where}.slots has ${counts.length} entries for ${routed.size} routed layers (one per routed layer, in the graph order of their topk nodes)`,
+    );
+  }
 
   const layers: ExpertLayerPlan[] = [];
   const pooled = new Map(residency);
@@ -284,6 +297,7 @@ export const planExpertGraph = (
       );
     }
     picks = k;
+    const layerSlots = counts[layers.length];
     // The entry's layout: each weight's codes then steps, in the layer's weight order.
     let entryBytes = 0;
     const weights = names.map((name): ExpertWeightPlan => {
@@ -295,7 +309,7 @@ export const planExpertGraph = (
         );
       }
       experts = count;
-      const { plan, pool } = pooledWeight(name, residency.get(name), shape, slots);
+      const { plan, pool } = pooledWeight(name, residency.get(name), shape, layerSlots);
       pooled.set(name, pool);
       const placed = {
         ...plan,
@@ -305,7 +319,7 @@ export const planExpertGraph = (
       entryBytes += plan.codesBytes + plan.stepsBytes;
       return placed;
     });
-    layers.push({ index, weights, entryBytes });
+    layers.push({ index, slots: layerSlots, weights, entryBytes });
   }
   // The index of every expert_linear is a topk output (the producer rule of plan.ts); a direct build
   // that skipped the contract checks lands here instead of planning a table nobody writes.
@@ -314,10 +328,12 @@ export const planExpertGraph = (
       `${where}: an expert_linear index is not the index output of a topk (ADR 0145 decision 2)`,
     );
   }
-  if (slots < picks || slots > experts) {
-    throw new ExecutionError(
-      `${where}.slots ${slots} must be from the topk k ${picks} to the experts E ${experts}`,
-    );
+  for (const [at, layer] of layers.entries()) {
+    if (layer.slots < picks || layer.slots > experts) {
+      throw new ExecutionError(
+        `${where}.slots${typeof slots === "number" ? "" : `[${at}]`} ${layer.slots} must be from the topk k ${picks} to the experts E ${experts}`,
+      );
+    }
   }
   const entries = layers.map((layer) => layer.entryBytes);
   const smallest = Math.min(...entries);
@@ -331,13 +347,13 @@ export const planExpertGraph = (
   const indices = layers
     .map((layer) => layer.index)
     .filter((name) => !declaredOutputs.includes(name));
+  const pooledExperts = layers.reduce((total, layer) => total + layer.slots, 0);
   return {
-    slots,
     experts,
     picks,
     hostBytes,
     layers,
-    ring: { slots: stagingRingSlots(slotBytes, layers.length * slots), slotBytes },
+    ring: { slots: stagingRingSlots(slotBytes, pooledExperts), slotBytes },
     graph: { ...graph, outputs: [...declaredOutputs, ...indices] },
     declaredOutputs,
     residency: pooled,

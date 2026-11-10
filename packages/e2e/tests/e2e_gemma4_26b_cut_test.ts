@@ -57,7 +57,14 @@
 //    0146 decision 8), every expert in the host tier, at 64 slots depth 4 and 16 slots depth 1 —
 //    generates each golden prompt's tokens at temperature 0 and at temperature 1 (top-k 64, top-p
 //    0.95, a fixed seed) equal to the pipeline's without the cache at the chunk rows the cache settles,
-//    with drafts confirmed and verifies that missed (cut at their first missing row or run again)
+//    with drafts confirmed and verifies that missed (cut at their first missing row or run again);
+//    and (7d) one slot count per routed layer (`expertCache.slots` as an array — ADR 0146 open point
+//    2), every expert in the host tier, for the research's fitted allocation (its first 12 layers,
+//    the smallest 52) and a stress mix of small and large layers (the smallest 16): the chunks hold
+//    the smallest layer's ⌊slots / 8⌋ rows (6 and 2), the Session's golden rows are a resident
+//    Session's bytes at those chunk rows, the pipeline's greedy tokens are those without the cache,
+//    and on the stress mix self-speculation at depth 1 (the most its smallest layer allows) gives
+//    them at temperature 0 and 1
 //
 // A cut model's hidden state is not the final layer's, and a short cut's logits saturate at the
 // softcap (±30): on cut 6, 7 to 757 entries of each golden row are exactly 30.0, so every margin
@@ -1263,6 +1270,22 @@ const SPECULATION_SAMPLERS: readonly (readonly [string, SamplerSpec])[] = [
 ];
 /** Tokens ⑦c generates per golden prompt and sampler (several cycles each). */
 const SPECULATION_NEW_TOKENS = 32;
+/**
+ * ⑦d's allocations: one slot count per routed layer of the cut's 12 (ADR 0146 open point 2). The
+ * first is the research's fitted allocation at a mean of 64 for the full model, its first 12 layers;
+ * the second mixes small and large layers.
+ */
+const LAYER_SLOT_RUNS: readonly { readonly name: string; readonly slots: readonly number[] }[] = [
+  { name: "fitted", slots: [96, 108, 84, 88, 84, 68, 72, 72, 68, 60, 52, 56] },
+  { name: "stress", slots: [16, 128, 32, 96, 16, 64, 128, 16, 48, 32, 112, 16] },
+];
+/**
+ * The chunk rows under per-layer slots: the smallest layer's (every layer holds one chunk's picks at
+ * once) — 6 for the fitted allocation (52), 2 for the stress mix (16).
+ */
+const layerChunkRows = (slots: readonly number[]): number => cacheChunkRows(Math.min(...slots));
+/** ⑦d's self-speculation: the stress mix at the most drafts its smallest layer allows (⌊16 / 8⌋ − 1). */
+const LAYER_SPECULATION = { name: "stress", depth: 1 } as const;
 /** A run's name in the log and the failures. */
 const cacheRunName = ({ slots, host }: CacheRun): string =>
   `slots ${slots}${host === undefined ? "" : ` host ${host}`}`;
@@ -1759,6 +1782,281 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         `[e2e] gemma4 26b cut self-speculation over the expert cache:\n  ${lines.join("\n  ")}`,
       );
       assertEquals(failures, [], "self-speculation over the cache against the pipeline without it");
+    });
+
+    it("⑦d Session: with one slot count per layer (the fitted allocation and a stress mix), the golden rows are the bytes of a resident Session at the smallest layer's chunk rows, each layer's pools sized by its own count", async () => {
+      assert(gpu !== undefined, "no GPU");
+      const model = prepareContainer(await openSeriesContainer(MODEL), MODEL_GRAPH);
+      const outputs = model.graph.outputs;
+      const key = (chunkLength: number, name: string): string => `${chunkLength}/${name}`;
+      // The resident references first (one large container on the GPU at a time), at each
+      // allocation's chunk rows, with the resident weights' compressed bytes.
+      const resident = new Map<string, ProductRows>();
+      const session = await model.createContainerSession(gpu);
+      let residentCompressed: number;
+      try {
+        residentCompressed = session.diagnostics().storage.residentCompressedBytes;
+        for (const chunkLength of new Set(
+          LAYER_SLOT_RUNS.map(({ slots }) => layerChunkRows(slots)),
+        )) {
+          for (const [name, golden] of goldens) {
+            const { rows } = await goldenRows(session, golden, chunkLength, outputs, name);
+            resident.set(key(chunkLength, name), rows);
+          }
+        }
+      } finally {
+        await session.dispose();
+        await settleReleases(gpu);
+      }
+
+      const lines: string[] = [];
+      const failures: string[] = [];
+      for (const { name: allocation, slots } of LAYER_SLOT_RUNS) {
+        assertEquals(slots.length, cutLayers(), `${allocation}: one count per layer of the cut`);
+        const chunkLength = layerChunkRows(slots);
+        const started = performance.now();
+        const cached = await model.createContainerSession(gpu, {
+          expertCache: { slots, hostBytes: Number.MAX_SAFE_INTEGER },
+        });
+        try {
+          const cache = cached.expertCache;
+          assert(cache !== undefined, `${allocation}: no expert cache`);
+          assertEquals(cache.slots, slots, `${allocation}: the face's slots`);
+          // Each layer's pools hold its own count: the resident Session's compressed bytes less
+          // the experts no layer pools (one expert's bytes read off the tier, which holds all).
+          const built = cache.stats();
+          const experts = cutLayers() * EXPERTS;
+          assertEquals(built.hostHeldExperts, experts, `${allocation}: experts held`);
+          const entryBytes = built.hostHeldBytes / experts;
+          const pooled = slots.reduce((total, count) => total + count, 0);
+          assertEquals(
+            cached.diagnostics().storage.residentCompressedBytes,
+            residentCompressed - (experts - pooled) * entryBytes,
+            `${allocation}: the pools' bytes`,
+          );
+          const face = createExpertCacheSession(cached);
+          let chunks = 0;
+          for (const [name, golden] of goldens) {
+            const run = await goldenRows(face, golden, chunkLength, outputs, name);
+            chunks += run.chunks;
+            const reference = resident.get(key(chunkLength, name));
+            assert(reference !== undefined, `${name}: no resident reference`);
+            for (const output of OUTPUTS) {
+              const differing = differingWords(run.rows[output], reference[output]);
+              if (differing > 0) {
+                failures.push(
+                  `${allocation} ${name} ${output}: ${differing} of ${reference[output].length} words differ from the resident Session's`,
+                );
+              }
+            }
+          }
+          const report = face.report();
+          lines.push(
+            `${allocation} [${slots.join(", ")}] (chunks of ${chunkLength} rows, ${chunks} chunks, ${((performance.now() - started) / 1000).toFixed(1)} s): ${reportLine(report)}`,
+          );
+          // A run with no miss would prove nothing.
+          if (report.missedRuns === 0 || report.loads === 0) {
+            failures.push(`${allocation}: no missed run or no load — the case decides nothing`);
+          }
+          if (report.committedRuns !== chunks || report.retries !== report.missedRuns) {
+            failures.push(
+              `${allocation}: ${report.committedRuns} committed runs for ${chunks} chunks, ${report.retries} retries for ${report.missedRuns} missed runs`,
+            );
+          }
+          if (report.containerExperts !== 0 || report.hostExperts !== report.loadedExperts) {
+            failures.push(
+              `${allocation}: ${report.hostExperts} of ${report.loadedExperts} loads from RAM, ${report.containerExperts} from the container with every expert held`,
+            );
+          }
+        } finally {
+          await cached.dispose();
+          await settleReleases(gpu);
+        }
+      }
+      console.log(`[e2e] gemma4 26b cut per-layer slots (Session):\n  ${lines.join("\n  ")}`);
+      assertEquals(failures, [], "per-layer slots against the resident Session");
+    });
+
+    it("⑦d gemma.Pipeline: with one slot count per layer, the greedy tokens are those without the cache at the smallest layer's chunk rows, and self-speculation at depth 1 on the stress mix gives them at temperature 0 and 1", async () => {
+      assert(gpu !== undefined, "no GPU");
+      const assets = {
+        config: PIPELINE_CONFIG,
+        model: await Promise.all(resolveParts(MODEL).map((part) => readFile(part))),
+        tokenizer: await readFile(TOKENIZER),
+      };
+      const greedy: SamplerSpec = { temperature: 0 };
+      /** Each golden prompt's tokens (a stop token included) and stop reason, and the decode tokens. */
+      const generate = async (
+        pipeline: Pipeline,
+        sampler: SamplerSpec,
+        maxNewTokens: number,
+      ): Promise<{ readonly tokens: Map<string, string>; readonly decoded: number }> => {
+        const tokens = new Map<string, string>();
+        let decoded = 0;
+        for (const [name, golden] of goldens) {
+          const sequence = await pipeline.sequence();
+          try {
+            const ids: number[] = [];
+            const stream = sequence.generate({ prompt: [...golden.prompt], maxNewTokens, sampler });
+            for await (const event of stream) {
+              if (event.kind === "token") ids.push(event.id);
+            }
+            const stop = await stream.done;
+            if (stop.reason === "eos") ids.push(stop.token);
+            // The first token comes from the prefill; the rest are decode's.
+            decoded += stop.tokens - 1;
+            tokens.set(name, `[${ids.join(", ")}] (stop '${stop.reason}')`);
+          } finally {
+            await sequence.dispose();
+          }
+        }
+        return { tokens, decoded };
+      };
+      const speculation = LAYER_SLOT_RUNS.find((run) => run.name === LAYER_SPECULATION.name);
+      assert(speculation !== undefined, "no allocation for the self-speculation");
+      const speculationRows = layerChunkRows(speculation.slots);
+
+      const lines: string[] = [];
+      const failures: string[] = [];
+      /** `${chunk rows}/${sampler}` → the tokens without the cache (one large container at a time). */
+      const withoutCache = new Map<string, Map<string, string>>();
+      for (const chunkLength of new Set(
+        LAYER_SLOT_RUNS.map(({ slots }) => layerChunkRows(slots)),
+      )) {
+        const resident = await Pipeline.fromAssets(assets, { gpu, chunkLength });
+        try {
+          withoutCache.set(
+            `${chunkLength}/greedy`,
+            (await generate(resident, greedy, CACHE_NEW_TOKENS)).tokens,
+          );
+          if (chunkLength === speculationRows) {
+            for (const [label, sampler] of SPECULATION_SAMPLERS) {
+              withoutCache.set(
+                `${chunkLength}/${label}`,
+                (await generate(resident, sampler, SPECULATION_NEW_TOKENS)).tokens,
+              );
+            }
+          }
+        } finally {
+          await resident.dispose();
+          await settleReleases(gpu);
+        }
+      }
+      const compare = (
+        where: string,
+        expected: Map<string, string> | undefined,
+        actual: Map<string, string>,
+      ): void => {
+        assert(expected !== undefined, `${where}: no reference`);
+        for (const [name, tokens] of expected) {
+          lines.push(`  ${name}: ${tokens}`);
+          if (actual.get(name) !== tokens) {
+            failures.push(
+              `${where} ${name}: ${actual.get(name)} with the cache, ${tokens} without`,
+            );
+          }
+        }
+      };
+      /** Every expert held: each load came from RAM, none from the distribution. */
+      const fromRam = (where: string, report: ExpertCacheReport): void => {
+        if (
+          report.hostExperts !== report.loadedExperts ||
+          report.containerExperts !== 0 ||
+          report.bytesRead !== 0
+        ) {
+          failures.push(
+            `${where}: ${report.hostExperts} of ${report.loadedExperts} loads from RAM, ${report.containerExperts} (${report.bytesRead} bytes) from the distribution`,
+          );
+        }
+      };
+
+      // Scheme A, greedy, for both allocations.
+      for (const { name: allocation, slots } of LAYER_SLOT_RUNS) {
+        const chunkLength = layerChunkRows(slots);
+        const started = performance.now();
+        const cached = await Pipeline.fromAssets(assets, {
+          gpu,
+          expertCache: { slots, hostBytes: Number.MAX_SAFE_INTEGER },
+        });
+        try {
+          assertEquals(cached.program.chunkLength, chunkLength, `${allocation}: the chunk rows`);
+          const actual = await generate(cached, greedy, CACHE_NEW_TOKENS);
+          const report = cached.expertCacheReport();
+          assert(report !== undefined, "a pipeline with the cache has no report");
+          assertEquals(report.slots, slots, `${allocation}: the report's slots`);
+          lines.push(
+            `${allocation} [${slots.join(", ")}] greedy (chunks of ${chunkLength} rows, ${((performance.now() - started) / 1000).toFixed(1)} s): ${reportLine(report)}`,
+          );
+          compare(allocation, withoutCache.get(`${chunkLength}/greedy`), actual.tokens);
+          if (report.retries === 0) {
+            failures.push(`${allocation}: no re-run — the case decides nothing`);
+          }
+          fromRam(allocation, report);
+        } finally {
+          await cached.dispose();
+          await settleReleases(gpu);
+        }
+      }
+
+      // Self-speculation on the stress mix (as ⑦c).
+      const run = `${speculation.name} depth ${LAYER_SPECULATION.depth}`;
+      const cached = await Pipeline.fromAssets(assets, {
+        gpu,
+        expertCache: {
+          slots: speculation.slots,
+          depth: LAYER_SPECULATION.depth,
+          hostBytes: Number.MAX_SAFE_INTEGER,
+        },
+      });
+      try {
+        assertEquals(cached.program.chunkLength, speculationRows, `${run}: the chunk rows`);
+        for (const [label, sampler] of SPECULATION_SAMPLERS) {
+          const where = `${run} ${label}`;
+          const before = cached.expertCacheReport()?.speculation;
+          const started = performance.now();
+          const actual = await generate(cached, sampler, SPECULATION_NEW_TOKENS);
+          const seconds = (performance.now() - started) / 1000;
+          const now = cached.expertCacheReport()?.speculation;
+          assert(before !== undefined && now !== undefined, `${where}: no cycles reported`);
+          const delta = {
+            cycles: now.cycles - before.cycles,
+            draftRuns: now.draftRuns - before.draftRuns,
+            acceptedDrafts: now.acceptedDrafts - before.acceptedDrafts,
+            verifyRetries: now.verifyRetries - before.verifyRetries,
+            partialCommits: now.partialCommits - before.partialCommits,
+          };
+          lines.push(
+            `${where} (chunks of ${speculationRows} rows, ${seconds.toFixed(1)} s, ${actual.decoded} decode tokens): ` +
+              `cycles ${delta.cycles}, draftRuns ${delta.draftRuns}, acceptedDrafts ${delta.acceptedDrafts}, ` +
+              `partialCommits ${delta.partialCommits}, verifyRetries ${delta.verifyRetries}`,
+          );
+          compare(where, withoutCache.get(`${speculationRows}/${label}`), actual.tokens);
+          // A case whose drafts were never confirmed, or whose verifies never missed, decides
+          // nothing about the cycle.
+          if (delta.acceptedDrafts === 0) failures.push(`${where}: no draft confirmed`);
+          if (delta.partialCommits + delta.verifyRetries === 0) {
+            failures.push(`${where}: no verify missed — the case decides nothing`);
+          }
+          if (delta.cycles === 0 || delta.cycles > actual.decoded) {
+            failures.push(`${where}: ${delta.cycles} cycles for ${actual.decoded} decode tokens`);
+          }
+        }
+        const report = cached.expertCacheReport();
+        assert(report?.speculation !== undefined);
+        lines.push(`${run} (whole pipeline): ${reportLine(report)}`);
+        fromRam(run, report);
+        // The counters account for every run: scheme A's prefill, then the cycles' runs.
+        const { draftRuns, cycles, verifyRetries } = report.speculation;
+        const counted = report.committedRuns + report.retries + draftRuns + cycles + verifyRetries;
+        if (report.runs !== counted) {
+          failures.push(`${run}: ${report.runs} runs, ${counted} counted by the face`);
+        }
+      } finally {
+        await cached.dispose();
+        await settleReleases(gpu);
+      }
+      console.log(`[e2e] gemma4 26b cut per-layer slots (Pipeline):\n  ${lines.join("\n  ")}`);
+      assertEquals(failures, [], "per-layer slots against the pipeline without the cache");
     });
   },
 );

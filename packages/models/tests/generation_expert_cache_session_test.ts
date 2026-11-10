@@ -94,9 +94,11 @@ const scriptedCache = (
   let missedRuns = 0;
   let loads = 0;
   const issued: unknown[] = [];
+  const layers = options.layers ?? 3;
   const cache: ExpertCacheRuns<LoggedContext> = {
-    slots: 4,
-    layers: options.layers ?? 3,
+    // One count per layer, each its own (4, 6, 8, …): the report carries them as they are.
+    slots: Array.from({ length: layers }, (_, layer) => 4 + 2 * layer),
+    layers,
     run: (_inputs, _bindings, generation) => {
       attempts += 1;
       const missing = misses.shift() ?? 0;
@@ -214,7 +216,7 @@ describe("the expert cache's re-run face", () => {
         uploadMs: 0,
         hostHeldExperts: 3,
         hostHeldBytes: 30,
-        slots: 4,
+        slots: [4, 6, 8],
         committedRuns: 3,
         retries: 2,
       });
@@ -378,7 +380,7 @@ describe("the face under the generation loop", () => {
     // One entry per attempt: the prefill misses twice, decode steps 1 and 3 once.
     const misses = [2, 1, 0, 1, 0, 0, 1, 0];
     const cache: ExpertCacheRuns<FakeContext> = {
-      slots: 16,
+      slots: [16, 16, 16, 16],
       layers: 4,
       run: async (inputs, bindings, generation) => {
         assert(generation !== undefined, "the generation loop always passes a generation");

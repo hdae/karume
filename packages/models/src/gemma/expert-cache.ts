@@ -17,7 +17,7 @@ import { ModelInputError } from "../errors.ts";
 /** The options the checks read (`PipelineOptions` satisfies it). */
 type ExpertCacheOptions = {
   readonly expertCache?: {
-    readonly slots: number;
+    readonly slots: number | readonly number[];
     readonly hostBytes?: number;
     readonly depth?: number;
   };
@@ -43,25 +43,35 @@ type RoutedGraph = {
   readonly states: Readonly<Record<string, { readonly shape: Dims }>>;
 };
 
-/** What the cache needs to know of the routed layers (the runtime's contract: one k, one E). */
-type Routing = { readonly picks: number; readonly experts: number };
+/**
+ * What the cache needs to know of the routed layers (the runtime's contract: one k, one E) and how
+ * many there are (an array of slots has one entry per routed layer).
+ */
+type Routing = { readonly picks: number; readonly experts: number; readonly layers: number };
 
 /**
- * The settled option: the slots, the host tier's budget (absent = no tier), self-speculation's depth
- * (absent = scheme A alone) and the prefill chunk rows the pipeline runs with.
+ * The settled option: the slots (one count, or one per routed layer in layer order — as given), the
+ * host tier's budget (absent = no tier), self-speculation's depth (absent = scheme A alone) and the
+ * prefill chunk rows the pipeline runs with.
  */
 export type Gemma4ExpertCache = {
-  readonly slots: number;
+  readonly slots: number | readonly number[];
   readonly hostBytes?: number;
   readonly depth?: number;
   readonly chunkLength: number;
 };
 
+/** A positive safe integer (a count of slots). */
+const isCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+
 /**
  * The checks the options alone decide (run **before reading a single byte of the assets**), returning
- * the slots (`undefined` without the option). `hostBytes` is checked for its form here (a positive
- * safe integer); that it holds at least one expert is the runtime's check at Session construction
- * (an expert's bytes are the container's, not the graph's).
+ * the slots (`undefined` without the option): the number, or a frozen copy of the per-layer array
+ * (its length against the routed layers is {@link resolveGemma4ExpertCache}'s, which needs the
+ * graph). `hostBytes` is checked for its form here (a positive safe integer); that it holds at least
+ * one expert is the runtime's check at Session construction (an expert's bytes are the container's,
+ * not the graph's).
  *
  * MUST: refuse every option that would run the target through a batch or an immediate run, both of
  * which a run under the cache cannot be — the run-ahead (`decodeAhead ≥ 2`) and the GPU-resident PLE
@@ -71,14 +81,31 @@ export type Gemma4ExpertCache = {
 export const assertGemma4ExpertCacheOptions = (
   where: string,
   options: ExpertCacheOptions,
-): number | undefined => {
+): number | readonly number[] | undefined => {
   const cache: unknown = options.expertCache;
   if (cache === undefined) return undefined;
-  const slots: unknown =
+  const given: unknown =
     typeof cache === "object" && cache !== null && "slots" in cache ? cache.slots : undefined;
-  if (typeof slots !== "number" || !Number.isSafeInteger(slots) || slots < 1) {
+  let slots: number | readonly number[];
+  if (Array.isArray(given)) {
+    // Copied entry by entry as checked (by index, so a hole is read as undefined), so the settled
+    // value is the one checked.
+    const counts: number[] = [];
+    for (let layer = 0; layer < given.length; layer += 1) {
+      const count: unknown = given[layer];
+      if (!isCount(count)) {
+        throw new ModelInputError(
+          `${where}: expertCache.slots[${layer}] must be a positive integer, one per routed layer in layer order (slots[${layer}] ${typeof count === "number" ? String(count) : (JSON.stringify(count) ?? String(count))})`,
+        );
+      }
+      counts.push(count);
+    }
+    slots = Object.freeze(counts);
+  } else if (isCount(given)) {
+    slots = given;
+  } else {
     throw new ModelInputError(
-      `${where}: expertCache must be { slots: <a positive integer> } (slots ${String(slots)})`,
+      `${where}: expertCache must be { slots: <a positive integer> } or { slots: [<a positive integer per routed layer>] } (slots ${String(given)})`,
     );
   }
   const hostBytes: unknown =
@@ -126,7 +153,11 @@ export const assertGemma4ExpertCacheOptions = (
   return slots;
 };
 
-/** The routed layers' top-k and expert count (`undefined` = the graph has no `expert_linear`). */
+/**
+ * The routed layers' top-k, expert count and number — one routed layer per distinct index the
+ * `expert_linear` nodes read, as the runtime counts them (`undefined` = the graph has no
+ * `expert_linear`).
+ */
 const routingOf = (where: string, graph: RoutedGraph): Routing | undefined => {
   const routers = new Map(
     graph.nodes.flatMap((node) =>
@@ -135,8 +166,10 @@ const routingOf = (where: string, graph: RoutedGraph): Routing | undefined => {
   );
   const picks = new Set<unknown>();
   const experts = new Set<unknown>();
+  const indices = new Set<string>();
   for (const node of graph.nodes) {
     if (node.op !== "expert_linear") continue;
+    indices.add(node.ins[1]);
     picks.add(routers.get(node.ins[1])?.attrs["k"]);
     const weight = node.ins[2];
     experts.add(Object.hasOwn(graph.values, weight) ? graph.values[weight].shape[0] : undefined);
@@ -159,7 +192,7 @@ const routingOf = (where: string, graph: RoutedGraph): Routing | undefined => {
         ` (k ${[...picks].join(" / ")}, E ${[...experts].join(" / ")}) — the cache needs both uniform`,
     );
   }
-  return { picks: k, experts: e };
+  return { picks: k, experts: e, layers: indices.size };
 };
 
 /**
@@ -193,7 +226,11 @@ const slidingSlackOf = (where: string, graph: RoutedGraph): number | undefined =
  * chunkLength)` rows: a chunk is a deferred run (at most the slack), and all of one chunk's picks
  * must fit in the slots at once so its re-run converges (ADR 0146 decision 4). That bound is the
  * default chunk length, and a larger `chunkLength` fails loudly. The fewest slots are 2 · k (a
- * prefill chunk has at least 2 rows).
+ * prefill chunk has at least 2 rows), and at most E.
+ *
+ * With one count per routed layer, the array has exactly one entry per routed layer, each entry is
+ * held to those bounds (a failure names it), and `slots` above is the **smallest** layer's — every
+ * layer must hold one chunk's (and one verify's) picks at once; the messages name that layer.
  */
 export const resolveGemma4ExpertCache = (
   where: string,
@@ -210,37 +247,62 @@ export const resolveGemma4ExpertCache = (
     );
   }
   const minimum = 2 * routing.picks;
-  if (slots < minimum) {
+  // One count per routed layer, in layer order (a number is every layer's).
+  const perLayer = typeof slots === "number" ? undefined : slots;
+  if (perLayer !== undefined && perLayer.length !== routing.layers) {
     throw new ModelInputError(
-      `${where}: expertCache.slots ${slots} is below the minimum ${minimum}` +
-        ` (2 × the routing's top-k ${routing.picks}: a prefill chunk has at least 2 rows, and all of one chunk's picks must fit in the slots)`,
+      `${where}: expertCache.slots has ${perLayer.length} entries, but the model has ${routing.layers} routed layers (one entry per routed layer, in layer order)`,
     );
   }
-  if (slots > routing.experts) {
-    throw new ModelInputError(
-      `${where}: expertCache.slots ${slots} exceeds the ${routing.experts} experts of a layer`,
-    );
+  const counts = typeof slots === "number" ? [slots] : slots;
+  for (const [layer, count] of counts.entries()) {
+    const named = perLayer === undefined ? "expertCache.slots" : `expertCache.slots[${layer}]`;
+    if (count < minimum) {
+      throw new ModelInputError(
+        `${where}: ${named} ${count} is below the minimum ${minimum}` +
+          ` (2 × the routing's top-k ${routing.picks}: a prefill chunk has at least 2 rows, and all of one chunk's picks must fit in the slots)`,
+      );
+    }
+    if (count > routing.experts) {
+      throw new ModelInputError(
+        `${where}: ${named} ${count} exceeds the ${routing.experts} experts of a layer`,
+      );
+    }
   }
+  // MUST: the rows of a chunk and of a verify are bounded by the smallest layer — every layer holds
+  // one run's distinct picks at once, so the layer with the fewest slots decides (the first of them
+  // is named).
+  const fewest = Math.min(...counts);
+  const smallest = counts.indexOf(fewest);
   const slack = slidingSlackOf(where, graph);
-  const perSlots = Math.floor(slots / routing.picks);
+  const perSlots = Math.floor(fewest / routing.picks);
   const bound = Math.min(slack ?? perSlots, perSlots, distributionChunkLength);
+  // How the messages name the slots: the number as given, or the array by its smallest layer.
+  const under =
+    perLayer === undefined
+      ? `expertCache { slots: ${slots} }`
+      : `expertCache's per-layer slots (the smallest layer, slots[${smallest}], has ${fewest})`;
+  const ratio =
+    perLayer === undefined
+      ? `⌊${fewest} / ${routing.picks}⌋ = ${perSlots}`
+      : `⌊${fewest} / ${routing.picks}⌋ = ${perSlots} of the smallest layer, slots[${smallest}],`;
   const chunkLength = options.chunkLength ?? bound;
   if (chunkLength > bound) {
     throw new ModelInputError(
-      `${where}: chunkLength ${chunkLength} exceeds ${bound}, the most rows one prefill chunk can have under expertCache { slots: ${slots} }` +
-        ` (the smallest of the sliding slack ${slack ?? "(none)"}, ⌊${slots} / ${routing.picks}⌋ = ${perSlots} and the distribution's chunkLength ${distributionChunkLength})`,
+      `${where}: chunkLength ${chunkLength} exceeds ${bound}, the most rows one prefill chunk can have under ${under}` +
+        ` (the smallest of the sliding slack ${slack ?? "(none)"}, ${ratio} and the distribution's chunkLength ${distributionChunkLength})`,
     );
   }
   const hostBytes = options.expertCache?.hostBytes;
   const depth = options.expertCache?.depth;
   if (depth !== undefined) {
     // The verify of `depth + 1` rows is one deferred run (the slack and the chunk rows bound it),
-    // and its picks are loaded at once, pinned (`depth + 1` rows of k picks fit the slots).
+    // and its picks are loaded at once, pinned (`depth + 1` rows of k picks fit every layer's slots).
     const depthBound = Math.min(perSlots, slack ?? perSlots, chunkLength) - 1;
     if (depth > depthBound) {
       throw new ModelInputError(
-        `${where}: expertCache.depth ${depth} exceeds ${depthBound}, the most drafts a verify of depth + 1 rows allows under expertCache { slots: ${slots} }` +
-          ` (depth + 1 ≤ ⌊${slots} / ${routing.picks}⌋ = ${perSlots} so that its picks fit the slots, ≤ the sliding slack ${slack ?? "(none)"} and ≤ chunkLength ${chunkLength})`,
+        `${where}: expertCache.depth ${depth} exceeds ${depthBound}, the most drafts a verify of depth + 1 rows allows under ${under}` +
+          ` (depth + 1 ≤ ${ratio} so that its picks fit the slots, ≤ the sliding slack ${slack ?? "(none)"} and ≤ chunkLength ${chunkLength})`,
       );
     }
   }

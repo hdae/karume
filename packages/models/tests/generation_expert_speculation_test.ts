@@ -103,7 +103,7 @@ const scriptedCache = (scenario: Scenario) => {
   const attempts = new Map<number, number>();
   let draftRuns = 0;
   const cache: ExpertCacheRuns<FakeContext> = {
-    slots: 64,
+    slots: [64, 64],
     layers: 2,
     run: async (inputs, bindings, generation) => {
       assert(generation !== undefined, "every run under the cache is a generation run");

@@ -580,10 +580,16 @@ export type SessionState = {
  * The copy of `expertCache` (its contents, as for `submitPolicy`: the pools are sized after an
  * await). A value from outside the type is passed on as is, for the entry check to name.
  */
-const copyExpertCache = (cache: SessionOptions["expertCache"]): SessionOptions["expertCache"] =>
-  typeof cache === "object" && cache !== null
-    ? { slots: cache.slots, hostBytes: cache.hostBytes }
-    : cache;
+const copyExpertCache = (cache: SessionOptions["expertCache"]): SessionOptions["expertCache"] => {
+  if (typeof cache !== "object" || cache === null) return cache;
+  const slots = cache.slots;
+  return {
+    // Per-layer slots are copied too (a hole becomes undefined, which the entry check names); a
+    // value from outside the type is passed on as is.
+    slots: typeof slots !== "number" && Array.isArray(slots) ? Array.from<number>(slots) : slots,
+    hostBytes: cache.hostBytes,
+  };
+};
 
 /**
  * The copy of {@link SessionOptions} taken at the entry of construction (the MUST at the head of
@@ -843,15 +849,16 @@ export const buildSessionState = async (
   const expertDigests =
     expertStore?.reader.verified === false ? new Map<string, Uint8Array<ArrayBuffer>>() : undefined;
   /**
-   * Allocates the expert cache's pools (`slots` experts of codes and steps per expert weight, in the
-   * weight ledger in place of `[E, …]`), its slot tables, every entry −1 (nothing resident), and the
-   * staging ring (its upload buffers are owned by the weights arena, so they go with the weights),
-   * with an empty host tier when `hostBytes` is set (filled by the supply walk below). Called inside
-   * the synchronous section of one errorScope pair.
+   * Allocates the expert cache's pools (its layer's slots of codes and steps per expert weight, in
+   * the weight ledger in place of `[E, …]`), its slot tables, every entry −1 (nothing resident), and
+   * the staging ring (its upload buffers are owned by the weights arena, so they go with the
+   * weights), with an empty host tier when `hostBytes` is set (filled by the supply walk below).
+   * Called inside the synchronous section of one errorScope pair.
    */
   const allocateExpertPool = (plan: ExpertGraphPlan, store: ExpertStorePlan): ExpertPool => {
-    const { slots, experts } = plan;
+    const { experts } = plan;
     const layers = plan.layers.map((layer, at): ExpertPoolLayer => {
+      const { slots } = layer;
       const table = timedAlloc(plan.tableBytes);
       timedWrite(table, new Uint8Array(new Int32Array(experts).fill(-1).buffer), 0);
       const pooled = layer.weights.map((weight, order): ExpertPoolWeight => {
@@ -871,7 +878,7 @@ export const buildSessionState = async (
         }
         return { ...weight, layer: at, codes, steps, ranges: store.ranges[at][order] };
       });
-      return { index: layer.index, table, weights: pooled, entryBytes: layer.entryBytes };
+      return { index: layer.index, slots, table, weights: pooled, entryBytes: layer.entryBytes };
     });
     const { ring } = plan;
     const buffers = Array.from({ length: ring.slots }, () => {
@@ -881,11 +888,10 @@ export const buildSessionState = async (
       return buffer;
     });
     return {
-      slots,
       experts,
       picks: plan.picks,
       layers,
-      tables: new Map(layers.map((layer) => [layer.index, layer.table])),
+      byIndex: new Map(layers.map((layer) => [layer.index, layer])),
       declaredOutputs: plan.declaredOutputs,
       reader: store.reader,
       digests: expertDigests,

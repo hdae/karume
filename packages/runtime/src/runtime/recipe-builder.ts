@@ -218,12 +218,17 @@ export type RecipeBuilderContext = {
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
   /**
-   * The expert cache's slots and its tables by routed index (ADR 0146 — `SessionOptions.expertCache`;
-   * undefined without it). An `expert_linear` then runs the pooled kernel and binds its index's
-   * table.
+   * The expert cache's layers by routed index — each layer's slots and table (ADR 0146 —
+   * `SessionOptions.expertCache`; undefined without it). An `expert_linear` then runs the pooled
+   * kernel with its index's layer's slots and binds that layer's table.
    */
   readonly expertPool:
-    | { readonly slots: number; readonly tables: ReadonlyMap<string, GPUBuffer> }
+    | {
+        readonly byIndex: ReadonlyMap<
+          string,
+          { readonly slots: number; readonly table: GPUBuffer }
+        >;
+      }
     | undefined;
 };
 
@@ -883,20 +888,22 @@ export class RecipeBuilder {
   }
 
   /**
-   * The slot table an `expert_linear` node binds under the expert cache: the table of its index (the
-   * routed `topk` both projections of a layer read). MUST: under the cache every `expert_linear` has
-   * one — its weight is a pool, and the resident kernel would read slots as experts.
+   * The slot table an `expert_linear` node binds under the expert cache, with the slots of its pool:
+   * those of its index's layer (the routed `topk` both projections of a layer read). MUST: under the
+   * cache every `expert_linear` has one — its weight is a pool, and the resident kernel would read
+   * slots as experts. MUST: the slots are the layer's own (its pool holds that many experts; the
+   * kernel writes NaN for a slot at or above them).
    */
   #expertTable(step: NodePlan): { readonly slots: number; readonly table: GPUBuffer } | undefined {
     const pool = this.#state.expertPool;
     if (pool === undefined) return undefined;
-    const table = pool.tables.get(step.node.ins[1]);
-    if (table === undefined) {
+    const layer = pool.byIndex.get(step.node.ins[1]);
+    if (layer === undefined) {
       throw new ExecutionError(
         `${step.node.op}: index '${step.node.ins[1]}' has no slot table under the expert cache (broken bookkeeping)`,
       );
     }
-    return { slots: pool.slots, table };
+    return { slots: layer.slots, table: layer.table };
   }
 
   /**

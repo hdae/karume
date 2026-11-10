@@ -3,7 +3,8 @@
 // `expertCache: { slots: 8 }`. The cache runs a row, loads what it missed and runs it again until no
 // pick misses; that run's output MUST be bit-identical to full residency (the bytes, not a
 // tolerance). A second input that needs other experts evicts and converges the same way, and the
-// counters count every run and load.
+// counters count every run and load. With one slot count per layer (`slots: [8, 12]`), each layer's
+// pools, slots and evictions are its own, and the exact runs are the same bytes.
 //
 // A missed run is never exact: its first run's output differs from full residency (the fault
 // injection — committing a missed row would fail the comparison). The same protocol drives a
@@ -120,12 +121,13 @@ const EXPERT_BYTES = 2048 + 256 + 1024 + 128;
 const withSessions = async (
   container: BoundContainer,
   body: (resident: Session, cached: Session, cache: ExpertCache) => Promise<void>,
+  slots: number | readonly number[] = SLOTS,
 ): Promise<void> => {
   const gpu: GpuContext = await acquireGpu();
   try {
     const resident = await createSessionFromContainer(gpu, container, GRAPH_NAME);
     const cached = await createSessionFromContainer(gpu, container, GRAPH_NAME, {
-      expertCache: { slots: SLOTS },
+      expertCache: { slots },
     });
     try {
       const cache = cached.expertCache;
@@ -146,7 +148,10 @@ describe.skipIf(!GPU_AVAILABLE)("the exact expert cache through a Session (real 
     it(`runs bit-identical to full residency once nothing misses, through evictions (${kind})`, async () => {
       const container = await containerOf(kind, expertGraph(SHAPE), tensors);
       await withSessions(container, async (resident, cached, cache) => {
-        assertEquals([cache.slots, cache.experts, cache.layers, cache.picks], [SLOTS, 16, 2, 4]);
+        assertEquals(
+          [cache.slots, cache.experts, cache.layers, cache.picks],
+          [[SLOTS, SLOTS], 16, 2, 4],
+        );
         // The pools hold half the experts (per layer 16 · 3,456 bytes resident, 8 · 3,456 pooled).
         assertEquals(resident.diagnostics().storage.residentCompressedBytes, 2 * 16 * EXPERT_BYTES);
         assertEquals(
@@ -246,6 +251,55 @@ describe.skipIf(!GPU_AVAILABLE)("the exact expert cache through a Session (real 
           "the cache did not run the pooled kernel",
         );
       });
+    });
+  }
+
+  // One slot count per layer: 8 in layer 0, 12 in layer 1. Layer 1 holds more experts than layer
+  // 0's count (its slots 8 to 11 are used — a pool or a kernel sized by layer 0's count would fail
+  // the copies or write NaN there), layer 0 evicts within its own 8, and every exact run is the
+  // resident bytes.
+  const LAYER_SLOTS = [8, 12];
+  for (const kind of KINDS) {
+    it(`gives each layer its own slot count, bit-identical to full residency (${kind})`, async () => {
+      const container = await containerOf(kind, expertGraph(SHAPE), tensors);
+      await withSessions(
+        container,
+        async (resident, cached, cache) => {
+          assertEquals(cache.slots, LAYER_SLOTS);
+          assertEquals(
+            cached.diagnostics().storage.residentCompressedBytes,
+            (8 + 12) * EXPERT_BYTES,
+          );
+          /** Per layer, every expert an exact run used (each was loaded into the layer's pool). */
+          const used = LAYER_SLOTS.map(() => new Set<number>());
+          let evicted = 0;
+          for (const seed of [13, 29, 47, 61]) {
+            const inputs: RunInputs = {
+              x: { dtype: "f32", shape: [ROWS, 64], data: waveValues(ROWS * 64, seed, 1.5) },
+            };
+            const expected = await resident.run(inputs);
+            const converged = await converge(cache, () => cache.run(inputs));
+            const last = converged.runs.at(-1);
+            assert(last !== undefined && last.missing === 0);
+            assertEquals(bits(last.outputs["out"]), bits(expected["out"]), `seed ${seed}`);
+            cache.touch(last.routing, ROWS);
+            for (const load of converged.loads) evicted += load.evicted;
+            const span = ROWS * SHAPE.picks;
+            used.forEach((experts, layer) => {
+              for (const id of last.routing.ids.subarray(layer * span, (layer + 1) * span)) {
+                experts.add(id);
+              }
+            });
+          }
+          // MUST (precondition): layer 0 used more experts than its 8 slots (it evicted), and layer
+          // 1 more than layer 0's count (its free slots fill in ascending order, so it used slots
+          // at 8 and above).
+          assert(used[0].size > 8, `layer 0 used only ${used[0].size} experts`);
+          assert(used[1].size > 8, `layer 1 used only ${used[1].size} experts`);
+          assert(evicted > 0, "no expert was evicted");
+        },
+        LAYER_SLOTS,
+      );
     });
   }
 

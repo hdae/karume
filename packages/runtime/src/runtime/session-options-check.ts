@@ -137,9 +137,9 @@ const executionKnobsViolation = (
 /**
  * The graph-independent check of {@link SessionOptions.expertCache} (its form and the ranges of
  * `slots` and `hostBytes`): Session construction (through {@link sessionOptionsViolation}) and the
- * estimate read it through this one function. The checks against the graph (`slots` between the
- * routed `topk` k and E, `hostBytes` at least one expert) are the planner's (`planExpertGraph` in
- * expert-plan.ts).
+ * estimate read it through this one function. The checks against the graph (each layer's `slots`
+ * between the routed `topk` k and E, an array's length the routed layer count, `hostBytes` at least
+ * one expert) are the planner's (`planExpertGraph` in expert-plan.ts).
  *
  * MUST: a value from outside the type (`null`, a number) is a violation, not a TypeError — read
  * through `typeof` before any property access.
@@ -151,9 +151,19 @@ export const expertCacheViolation = (cache: SessionOptions["expertCache"]): stri
       cache === null ? "null" : typeof cache
     })`;
   }
-  const slots = cache.slots;
-  if (!Number.isSafeInteger(slots) || slots < 1) {
-    return `options.expertCache.slots ${describeInputValue(slots)} must be a positive safe integer`;
+  const slots: unknown = cache.slots;
+  if (Array.isArray(slots)) {
+    // Indexed reads (not iteration), so a hole is read as undefined and named like any bad entry.
+    for (let layer = 0; layer < slots.length; layer += 1) {
+      const count: unknown = slots[layer];
+      if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
+        return `options.expertCache.slots[${layer}] ${describeInputValue(
+          count,
+        )} must be a positive safe integer (one entry per routed layer)`;
+      }
+    }
+  } else if (typeof slots !== "number" || !Number.isSafeInteger(slots) || slots < 1) {
+    return `options.expertCache.slots ${describeInputValue(slots)} must be a positive safe integer (or an array of one per routed layer)`;
   }
   const hostBytes = cache.hostBytes;
   if (hostBytes !== undefined && (!Number.isSafeInteger(hostBytes) || hostBytes < 1)) {

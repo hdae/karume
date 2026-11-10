@@ -348,6 +348,114 @@ describe("expertCache: the prefill chunk rows", () => {
   });
 });
 
+describe("expertCache: one slot count per routed layer", () => {
+  /** The research's fitted allocation at a mean of 64, its first 12 layers (smallest: 52 at 10). */
+  const FITTED = [96, 108, 84, 88, 84, 68, 72, 72, 68, 60, 52, 56] as const;
+  /** Small and large layers mixed (smallest: 16, first at 0). */
+  const STRESS = [16, 128, 32, 96, 16, 64, 128, 16, 48, 32, 112, 16] as const;
+  const twelve = moeGraph({ layers: 12 });
+
+  it("accepts an array of positive integers and returns a frozen copy of it", () => {
+    const given = [64, 32, 96];
+    const slots = assertGemma4ExpertCacheOptions("T", { expertCache: { slots: given } });
+    assertEquals(slots, [64, 32, 96]);
+    assert(slots !== given && Object.isFrozen(slots), "the settled slots are the caller's array");
+  });
+
+  it("refuses an entry that is not a positive integer as an input error, naming it", () => {
+    const cases: readonly (readonly [readonly unknown[], string])[] = [
+      [[64, 0], "slots[1] 0"],
+      [[-1, 64], "slots[0] -1"],
+      [[64, 64, 16.5], "slots[2] 16.5"],
+      [[64, "16"], 'slots[1] "16"'],
+      [[64, null], "slots[1] null"],
+      // oxlint-disable-next-line no-sparse-arrays -- the hole is the input under test (read as undefined)
+      [[64, , 64], "slots[1] undefined"],
+    ];
+    for (const [slots, shown] of cases) {
+      const error = assertThrows(
+        () =>
+          assertGemma4ExpertCacheOptions("T", {
+            expertCache: { slots } as unknown as { readonly slots: readonly number[] },
+          }),
+        ModelInputError,
+        `expertCache.${shown.split(" ")[0]} must be a positive integer, one per routed layer`,
+      );
+      assert(error.message.includes(`(${shown})`), error.message);
+    }
+  });
+
+  it("settles the chunk rows from the smallest layer, and carries the array as given", () => {
+    // ⌊52 / 8⌋ = 6 below the slack (8); ⌊16 / 8⌋ = 2.
+    assertEquals(resolve({ expertCache: { slots: FITTED } }, twelve), {
+      slots: FITTED,
+      chunkLength: 6,
+    });
+    assertEquals(resolve({ expertCache: { slots: STRESS } }, twelve), {
+      slots: STRESS,
+      chunkLength: 2,
+    });
+    // Every layer at 128 is the slack's bound, as the number 128 is.
+    assertEquals(
+      resolve({ expertCache: { slots: new Array<number>(12).fill(128) } }, twelve)?.chunkLength,
+      resolve({ expertCache: { slots: 128 } }, twelve)?.chunkLength,
+    );
+  });
+
+  it("refuses a chunkLength above the smallest layer's bound, naming that layer", () => {
+    const error = assertThrows(
+      () => resolve({ expertCache: { slots: FITTED }, chunkLength: 7 }, twelve),
+      ModelInputError,
+      "chunkLength 7 exceeds 6",
+    );
+    assert(error.message.includes("the smallest layer, slots[10], has 52"), error.message);
+    assert(error.message.includes("⌊52 / 8⌋ = 6 of the smallest layer, slots[10]"), error.message);
+  });
+
+  it("bounds the depth by the smallest layer, naming it", () => {
+    assertEquals(resolve({ expertCache: { slots: STRESS, depth: 1 } }, twelve)?.depth, 1);
+    assertEquals(resolve({ expertCache: { slots: FITTED, depth: 5 } }, twelve)?.depth, 5);
+    for (const [slots, depth, bound, named] of [
+      [STRESS, 2, 1, "slots[0], has 16"],
+      [FITTED, 6, 5, "slots[10], has 52"],
+    ] as const) {
+      const error = assertThrows(
+        () => resolve({ expertCache: { slots, depth } }, twelve),
+        ModelInputError,
+        `expertCache.depth ${depth} exceeds ${bound}`,
+      );
+      assert(error.message.includes(`the smallest layer, ${named}`), error.message);
+    }
+  });
+
+  it("refuses an array that is not one entry per routed layer, naming both counts", () => {
+    for (const slots of [FITTED.slice(0, 11), [...FITTED, 64], []]) {
+      assertThrows(
+        () => resolve({ expertCache: { slots } }, twelve),
+        ModelInputError,
+        `expertCache.slots has ${slots.length} entries, but the model has 12 routed layers`,
+      );
+    }
+  });
+
+  it("refuses an entry below 2 × k or above the experts of a layer, naming it", () => {
+    const below: number[] = [...FITTED];
+    below[4] = 2 * TOP_K - 1;
+    assertThrows(
+      () => resolve({ expertCache: { slots: below } }, twelve),
+      ModelInputError,
+      `expertCache.slots[4] ${2 * TOP_K - 1} is below the minimum ${2 * TOP_K}`,
+    );
+    const above: number[] = [...FITTED];
+    above[11] = EXPERTS + 1;
+    assertThrows(
+      () => resolve({ expertCache: { slots: above } }, twelve),
+      ModelInputError,
+      `expertCache.slots[11] ${EXPERTS + 1} exceeds the ${EXPERTS} experts of a layer`,
+    );
+  });
+});
+
 // ---- fromAssets / fromPretrained: where the refusals sit ---------------------------------------
 //
 // The option checks come before a byte of the assets is read (fromAssets with no parts and a
@@ -391,6 +499,23 @@ describe("expertCache: the refusals come before the weights", () => {
       );
       assertEquals(requests, 0, "a request went out before the check");
     }
+  });
+
+  it("fromPretrained refuses a bad entry of per-layer slots with no request sent", async () => {
+    let requests = 0;
+    await assertRejects(
+      () =>
+        Pipeline.fromPretrained("karume/gemma4-26b", {
+          expertCache: { slots: [64, 0, 64] },
+          fetch: () => {
+            requests += 1;
+            return Promise.reject(new Error("the check should have failed first"));
+          },
+        }),
+      ModelInputError,
+      "expertCache.slots[1] must be a positive integer",
+    );
+    assertEquals(requests, 0, "a request went out before the check");
   });
 
   const MODEL = "model";

@@ -473,7 +473,8 @@ export type EstimateOptions = {
   readonly linearCompute?: "f32" | "a8" | "f16";
   /**
    * The expert cache (the same value as `SessionOptions.expertCache` — ADR 0146). With it the expert
-   * weights count as their pools of `slots` experts (the same planner as construction), the slot
+   * weights count as their pools of their layer's `slots` experts (one count, or one per routed
+   * layer — the same planner as construction), the slot
    * tables (one i32 per expert and routed layer) count with the uncompressed weights, and every
    * routed `topk` index counts as an output (the routing readback). A graph or a value the
    * construction refuses fails loudly with the same message.
@@ -483,7 +484,10 @@ export type EstimateOptions = {
    * `writeBuffer` staging it replaces, which is not counted either) and the host tier of `hostBytes`
    * (RAM, not GPU memory).
    */
-  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
+  readonly expertCache?: {
+    readonly slots: number | readonly number[];
+    readonly hostBytes?: number;
+  };
 };
 
 /**

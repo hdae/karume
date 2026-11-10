@@ -310,7 +310,9 @@ export type PipelineOptions = {
    * every expert resident, as before).
    *
    * With it, each layer keeps only `slots` of its experts on the GPU, and the missing ones are read
-   * from the distribution when a run's routing picks them. The output is bit-identical to full
+   * from the distribution when a run's routing picks them. `slots` is one count for every routed
+   * layer, or an array of one count per routed layer in layer order (each layer then keeps its own
+   * count; for every count below, read the smallest layer's). The output is bit-identical to full
    * residency: a run that missed an expert is never committed or sampled from — its rows are dropped,
    * the experts loaded, and the same run issued again, so the cost of a miss is a re-run, not an
    * approximation ({@link Pipeline.expertCacheReport} counts both). A cached distribution must stay
@@ -338,21 +340,24 @@ export type PipelineOptions = {
    * tokens a cycle confirms. Absent = one run per decode token, re-run after a miss. Prefill is the
    * same either way.
    *
-   * MUST: `slots` is an integer from 2 × k (a chunk has at least 2 rows) to the experts of a layer,
-   * on a model whose graph has `expert_linear`; `hostBytes`, when present, is a positive safe integer
-   * (both fail loudly before any weight part is fetched; a `hostBytes` below one expert fails at the
-   * Session's construction). `depth`, when present, is a positive integer with `depth + 1` at most
-   * `⌊slots / k⌋` (a verify's picks fit the slots), the sliding slack and the chunk rows (one verify
-   * is one deferred run) — 7 at slots 64 on 26B; a larger one fails loudly with the bound, before any
-   * weight part is fetched. Refused (fails loudly, before any weight part is fetched) with
-   * `decodeAhead ≥ 2`, {@link PipelineOptions.speculative}, `pleResidency: "gpu"` and
-   * {@link PipelineOptions.vision} — each runs the target in a batch or an immediate run, which a run
-   * under the cache cannot be. Decode runs on the host sampler (no GPU argmax).
+   * MUST: `slots` (each entry of an array) is an integer from 2 × k (a chunk has at least 2 rows) to
+   * the experts of a layer, an array has exactly one entry per routed layer, on a model whose graph
+   * has `expert_linear`; `hostBytes`, when present, is a positive safe integer (both fail loudly
+   * before any weight part is fetched, naming the entry; a `hostBytes` below one expert fails at the
+   * Session's construction). The prefill chunk rows above and the depth bound below take the
+   * smallest layer's slots (every layer holds one run's picks at once). `depth`, when present, is a
+   * positive integer with `depth + 1` at most `⌊slots / k⌋` (a verify's picks fit the slots), the
+   * sliding slack and the chunk rows (one verify is one deferred run) — 7 at slots 64 on 26B; a
+   * larger one fails loudly with the bound, before any weight part is fetched. Refused (fails
+   * loudly, before any weight part is fetched) with `decodeAhead ≥ 2`,
+   * {@link PipelineOptions.speculative}, `pleResidency: "gpu"` and {@link PipelineOptions.vision} —
+   * each runs the target in a batch or an immediate run, which a run under the cache cannot be.
+   * Decode runs on the host sampler (no GPU argmax).
    *
    * DECIDED: docs/decisions/0146-exact-expert-cache.md
    */
   readonly expertCache?: {
-    readonly slots: number;
+    readonly slots: number | readonly number[];
     readonly hostBytes?: number;
     readonly depth?: number;
   };

@@ -683,15 +683,19 @@ export type SessionOptions = {
    *
    * With it, each `expert_linear` weight is allocated as a pool of `slots` experts instead of all E
    * of them, no expert is uploaded at build, and each routed `topk` (the index both projections of a
-   * layer read) gets a table `expert id → slot` that the runtime writes. A pick whose expert is not
+   * layer read) gets a table `expert id → slot` that the runtime writes. `slots` is one count for
+   * every routed layer, or an array of one count per routed layer in layer order (the graph order of
+   * the layers' `topk` nodes — the routing's layer axis): each layer's pools, slot table entries and
+   * evictions then stay within its own count. A pick whose expert is not
    * resident contributes 0, so the Session refuses `run` / `enqueue` / `enqueueRead` and the runs go
    * through `Session.expertCache` ({@link ExpertCache}): its `run` returns the routing of the real rows and the number
    * of picks that missed, its `load` reads the missing experts from the container and writes them to
    * their slots, and the caller runs the same inputs again (a run with no miss is bit-identical to
    * full residency).
    *
-   * MUST: `slots` is an integer from the largest `topk` k of the routed layers to their E, and the
-   * graph has `expert_linear` (anything else fails loudly at construction). Every routed layer has
+   * MUST: `slots` (each entry of an array) is an integer from the largest `topk` k of the routed
+   * layers to their E, an array has exactly one entry per routed layer, and the graph has
+   * `expert_linear` (anything else fails loudly at construction, naming the entry). Every routed layer has
    * the same k and E, and an expert weight is an initializer read only by that layer's
    * `expert_linear` nodes. The container MUST read byte ranges of its blocks without re-reading a
    * whole block or part (a container that cannot read ranges, or whose range reads re-read a whole
@@ -713,7 +717,10 @@ export type SessionOptions = {
    *
    * DECIDED: docs/decisions/0146-exact-expert-cache.md
    */
-  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
+  readonly expertCache?: {
+    readonly slots: number | readonly number[];
+    readonly hostBytes?: number;
+  };
   /**
    * Test only ({@link I8A8_DOT}). The default is decided from the enumeration of
    * wgslLanguageFeatures.
@@ -1055,8 +1062,11 @@ export type ExpertCacheStats = {
  * runs, so the host mirror the miss count is read from always equals the tables on the GPU.
  */
 export type ExpertCache = {
-  /** Slots per layer (K). */
-  readonly slots: number;
+  /**
+   * Slots per routed layer (K), one entry per layer in the routing's layer order — every entry the
+   * same when `SessionOptions.expertCache.slots` was one number. Frozen.
+   */
+  readonly slots: readonly number[];
   /** Experts per layer (E). */
   readonly experts: number;
   /** Routed layers (one per routed `topk`). */
@@ -1076,7 +1086,7 @@ export type ExpertCache = {
   run(inputs: RunInputs, bindings?: SymbolBindings, generation?: GenerationRun): Promise<ExpertRun>;
   /**
    * Makes every expert of the routing resident: per layer, the distinct ids are needed (more than
-   * `slots` fails loudly), the missing ones take free slots first and then the least recently used
+   * the layer's `slots` fails loudly), the missing ones take free slots first and then the least recently used
    * experts not needed by this routing, and become the most recent. A routing with nothing missing
    * loads nothing and counts nothing.
    *

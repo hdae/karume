@@ -19,7 +19,8 @@
  *    `firstMissingRow` (m) are exact: attention is causal, and no row up to them missed. While m is 0,
  *    `commit(0)`, load the verify's routing and run it again — row 0 alone is a scheme-A run, so its
  *    first missed layer moves strictly forward and it converges in at most `layers + 1` attempts (the
- *    load pins every row's picks, which fit the slots: `(depth + 1) · k ≤ slots` is the caller's).
+ *    load pins every row's picks, which fit the slots: `(depth + 1) · k ≤` every layer's slots is
+ *    the caller's).
  * 4. **Accept** on the exact rows only: `acceptDrafts` over the drafts before row m − 1 draws t_j =
  *    {@link Sampler.next} of row j with the confirmed history — the only draws of the cycle, in the
  *    order, on the logits and with the history plain decode has — and stops at a rejection or a stop

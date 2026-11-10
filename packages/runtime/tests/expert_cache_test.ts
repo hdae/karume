@@ -66,7 +66,7 @@ const SHAPE: ExpertGraphShape = { experts: 16, picks: 4, width: 64, ffn: 32, lay
 const planOf = (
   declaration: DeclarationJson,
   storage: ExpertStorage,
-  slots: number,
+  slots: number | readonly number[],
 ): ExpertGraphPlan => {
   const graph = mergeGraph(declaration, storageOf(declaration, storage));
   return planExpertGraph(graph, planWeightResidency(graph), { slots });
@@ -123,6 +123,43 @@ describe("the expertCache option's own checks (no graph)", () => {
       assertStringIncludes(violation, "options.expertCache");
     });
   }
+
+  it("accepts an array of positive integers, one per routed layer (its length is the planner's)", () => {
+    assertEquals(sessionOptionsViolation({ expertCache: { slots: [4, 12] } }), undefined);
+    assertEquals(
+      sessionOptionsViolation({ expertCache: { slots: [96, 52, 16], hostBytes: 4096 } }),
+      undefined,
+    );
+  });
+
+  for (const [label, slots, named] of [
+    ["a 0 entry", [4, 0], "slots[1] 0"],
+    ["a negative entry", [-4, 8], "slots[0] -4"],
+    ["a fractional entry", [4, 8, 1.5], "slots[2] 1.5"],
+    ["a NaN entry", [Number.NaN], "slots[0] NaN"],
+    ["a string entry", [4, "8"], 'slots[1] "8"'],
+    ["a null entry", [4, null], "slots[1] object"],
+    // oxlint-disable-next-line no-sparse-arrays -- the hole is the input under test (read as undefined)
+    ["a hole", [4, , 8], "slots[1] undefined"],
+  ] as const) {
+    it(`refuses an array with ${label}, naming the entry`, () => {
+      const violation = sessionOptionsViolation({ expertCache: anyOf({ slots }) });
+      assert(violation !== undefined, `${label} was accepted`);
+      assertStringIncludes(
+        violation,
+        `options.expertCache.${named} must be a positive safe integer`,
+      );
+    });
+  }
+
+  it("refuses an object that is not an array as the slots", () => {
+    const violation = sessionOptionsViolation({ expertCache: anyOf({ slots: { length: 2 } }) });
+    assert(violation !== undefined, "an array-like object was accepted");
+    assertStringIncludes(
+      violation,
+      "options.expertCache.slots object must be a positive safe integer",
+    );
+  });
 });
 
 describe("the expert cache's plan of a graph", () => {
@@ -134,7 +171,10 @@ describe("the expert cache's plan of a graph", () => {
     );
     assertEquals(plan.declaredOutputs, ["out"]);
     assertEquals(plan.graph.outputs, ["out", "index0", "index1"]);
-    assertEquals([plan.slots, plan.experts, plan.picks, plan.tableBytes], [8, 16, 4, 64]);
+    assertEquals(
+      [plan.layers.map((layer) => layer.slots), plan.experts, plan.picks, plan.tableBytes],
+      [[8, 8], 16, 4, 64],
+    );
     const [gateUp, down] = plan.layers[0].weights;
     // f16 steps: 128 · 2 bytes for gate_up, 64 · 2 for down.
     assertEquals([gateUp.name, gateUp.codesBytes, gateUp.stepsBytes], ["gate_up0", 2048, 256]);
@@ -205,13 +245,76 @@ describe("the expert cache's plan of a graph", () => {
   });
 
   it("accepts K from the topk k to E, and refuses K outside it", () => {
-    assertEquals(planOf(expertGraph(SHAPE), "f32", 4).slots, 4);
-    assertEquals(planOf(expertGraph(SHAPE), "f32", 16).slots, 16);
+    const slotsOf = (plan: ExpertGraphPlan) => plan.layers.map((layer) => layer.slots);
+    assertEquals(slotsOf(planOf(expertGraph(SHAPE), "f32", 4)), [4, 4]);
+    assertEquals(slotsOf(planOf(expertGraph(SHAPE), "f32", 16)), [16, 16]);
     for (const slots of [3, 17]) {
       assertThrows(
         () => planOf(expertGraph(SHAPE), "f32", slots),
         ExecutionError,
         "must be from the topk k 4 to the experts E 16",
+      );
+    }
+  });
+
+  it("sizes each layer's pools by its own slots, and the ring by their sum", () => {
+    const plan = planOf(expertGraph(SHAPE), "i4f16", [4, 10]);
+    assertEquals(
+      plan.layers.map((layer) => [layer.index, layer.slots]),
+      [
+        ["index0", 4],
+        ["index1", 10],
+      ],
+    );
+    // Layer 0: 4 · 2048 codes and 4 · 256 f16 steps for gate_up, 4 · 1024 and 4 · 128 for down;
+    // layer 1 the same per expert, for 10.
+    for (const [name, payloadBytes, scaleBytes] of [
+      ["gate_up0", 4 * 2048, 4 * 256],
+      ["down0", 4 * 1024, 4 * 128],
+      ["gate_up1", 10 * 2048, 10 * 256],
+      ["down1", 10 * 1024, 10 * 128],
+    ] as const) {
+      assertEquals(
+        plan.residency.get(name),
+        { seat: "i4f16", payloadBytes, scaleBytes, groupSize: EXPERT_GROUP },
+        name,
+      );
+    }
+    // A load needs at most 4 + 10 experts (not 2 · 4, nor 2 · 10).
+    assertEquals(plan.ring, { slots: 14, slotBytes: 3456 });
+    // The tables stay one i32 per expert, whatever a layer's slots.
+    assertEquals([plan.experts, plan.picks, plan.tableBytes], [16, 4, 64]);
+  });
+
+  it("plans a number as an array of that number in every layer", () => {
+    for (const storage of ["f32", "i4", "i4f16"] as const) {
+      assertEquals(
+        planOf(expertGraph(SHAPE), storage, [8, 8]),
+        planOf(expertGraph(SHAPE), storage, 8),
+        storage,
+      );
+    }
+  });
+
+  it("refuses an array that is not one entry per routed layer, naming the counts", () => {
+    for (const slots of [[8], [8, 8, 8], []]) {
+      assertThrows(
+        () => planOf(expertGraph(SHAPE), "f32", slots),
+        ExecutionError,
+        `options.expertCache.slots has ${slots.length} entries for 2 routed layers`,
+      );
+    }
+  });
+
+  it("refuses an entry outside the topk k to E, naming it", () => {
+    for (const [slots, named] of [
+      [[8, 3], "slots[1] 3"],
+      [[17, 8], "slots[0] 17"],
+    ] as const) {
+      assertThrows(
+        () => planOf(expertGraph(SHAPE), "f32", slots),
+        ExecutionError,
+        `options.expertCache.${named} must be from the topk k 4 to the experts E 16`,
       );
     }
   });
@@ -269,6 +372,29 @@ describe("the estimate under the expert cache", () => {
     // x and out are [2, 64] f32; the cache also reads both [2, 4] i32 indices back.
     assertEquals(plain.scenarios[0].ioBytes, 1024);
     assertEquals(cached.scenarios[0].ioBytes, 1024 + 2 * 32);
+  });
+
+  it("counts each layer's pools by its own slots", () => {
+    const declaration = expertGraph(SHAPE);
+    const graph = mergeGraph(declaration, storageOf(declaration, "i4f16"));
+    const residency = planWeightResidency(graph);
+    const cached = estimateGraphMemory(graph, residency, {
+      bindings: { T: 2 },
+      expertCache: { slots: [4, 10] },
+    });
+    // One expert of a layer is 2048 + 256 + 1024 + 128 = 3,456 bytes: 4 of layer 0, 10 of layer 1.
+    assertEquals(cached.resident.weights.compressedBytes, (4 + 10) * 3456);
+    // The tables do not depend on the slots: two of 64 bytes.
+    assertEquals(cached.resident.weights.uncompressedBytes, 2 * 4160 + 2 * 64);
+    assertThrows(
+      () =>
+        estimateGraphMemory(graph, residency, {
+          bindings: { T: 2 },
+          expertCache: { slots: [4] },
+        }),
+      ExecutionError,
+      "options.expertCache.slots has 1 entries for 2 routed layers",
+    );
   });
 
   it("counts neither the staging ring nor the host tier, and names both as unaccounted", () => {
@@ -725,7 +851,7 @@ const tamperableSource = (parts: readonly Uint8Array<ArrayBuffer>[]) => {
 };
 
 const buildCached = async (
-  slots: number,
+  slots: number | readonly number[],
   storage: ExpertStorage = "f32",
   options: SessionOptions = {},
   extra: { readonly hostBytes?: number; readonly shape?: ExpertGraphShape } = {},
@@ -1059,6 +1185,96 @@ describe("a Session built with expertCache (fake device)", () => {
       await assertRejects(() => cache.load(routing), ExecutionError, "the cache is unusable");
       await assertRejects(() => cache.run({ x: anyOf({}) }), ExecutionError, "unusable");
       assertThrows(() => cache.touch(routing, 0), ExecutionError, "unusable");
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("sizes each layer's pools by its own slots, and loads and evicts each layer within them", async () => {
+    const { session, sizes, usages, mappedAtCreation, writes } = await buildCached(
+      [4, 10],
+      "i4f16",
+    );
+    const cache = cacheOf(session);
+    try {
+      assertEquals(cache.slots, [4, 10]);
+      assert(Object.isFrozen(cache.slots), "the face's slots can be written");
+      // Per layer: the router 4096 and its bias 64, a 64-byte table, then the pools — layer 0's of 4
+      // experts (gate_up 8192 + 1024, down 4096 + 512), layer 1's of 10 (20480 + 2560, 10240 + 1280).
+      assertEquals(
+        sizes.filter((_, id) => usages[id] !== UPLOAD_USAGE).sort((a, b) => a - b),
+        [64, 64, 64, 64, 512, 1024, 1280, 2560, 4096, 4096, 4096, 8192, 10240, 20480],
+      );
+      // The staging ring: one slot per expert a load can need (4 + 10), one entry each.
+      assertEquals(
+        sizes.flatMap((size, id) =>
+          usages[id] === UPLOAD_USAGE ? [[size, mappedAtCreation[id]]] : [],
+        ),
+        new Array(14).fill([3456, true]),
+      );
+      assertEquals(session.diagnostics().storage.residentCompressedBytes, (4 + 10) * 3456);
+      // The tables are written first at construction, layer 0 then layer 1.
+      const tableIds = writes.slice(0, 2).map((write) => write.buffer);
+      /** A layer's table as last written: expert → slot. */
+      const tableOf = (layer: number): number[] => {
+        const last = writes.findLast((write) => write.buffer === tableIds[layer]);
+        assert(last !== undefined, `no write of layer ${layer}'s table`);
+        return [...new Int32Array(last.bytes.slice().buffer)];
+      };
+      /** A table with `slots[i]` for expert `experts[i]`, −1 elsewhere. */
+      const table = (experts: readonly number[], slots: readonly number[]): number[] => {
+        const expected = new Array<number>(16).fill(-1);
+        experts.forEach((expert, at) => {
+          expected[expert] = slots[at];
+        });
+        return expected;
+      };
+      const routing = (rows: number, ids: readonly number[]): ExpertRouting => ({
+        layers: 2,
+        rows,
+        picks: 4,
+        ids: Int32Array.from(ids),
+      });
+      writes.length = 0;
+      // Two rows: layer 0 needs 4 distinct experts, layer 1 needs 8 — more than layer 0's count,
+      // within its own.
+      const first = await cache.load(routing(2, [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7]));
+      assertEquals([first.loaded, first.evicted], [12, 0]);
+      assertEquals(tableOf(0), table([0, 1, 2, 3], [0, 1, 2, 3]));
+      assertEquals(tableOf(1), table([0, 1, 2, 3, 4, 5, 6, 7], [0, 1, 2, 3, 4, 5, 6, 7]));
+      // Layer 0 is full: 4 to 7 evict 0 to 3 (least recent first); layer 1 takes its free slots 8
+      // and 9 and keeps 0 and 1.
+      const second = await cache.load(routing(1, [4, 5, 6, 7, 8, 9, 0, 1]));
+      assertEquals([second.loaded, second.evicted], [6, 4]);
+      assertEquals(tableOf(0), table([4, 5, 6, 7], [0, 1, 2, 3]));
+      assertEquals(
+        tableOf(1),
+        table([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+      );
+      // Layer 1 is full at 10: 10 to 13 evict its least recent 0 to 3; layer 0 loads nothing.
+      const third = await cache.load(routing(1, [4, 5, 6, 7, 10, 11, 12, 13]));
+      assertEquals([third.loaded, third.evicted], [4, 4]);
+      assertEquals(
+        tableOf(1),
+        table([10, 11, 12, 13, 4, 5, 6, 7, 8, 9], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+      );
+      // Every copy lands inside its pool (layer 1's slot 9 is past the 4 slots of layer 0's pools).
+      for (const write of writes.filter((candidate) => candidate.via === "copy")) {
+        assert(
+          write.offset + write.bytes.byteLength <= sizes[write.buffer],
+          `a copy of ${write.bytes.byteLength} bytes at ${write.offset} into a ${sizes[write.buffer]}-byte buffer`,
+        );
+      }
+      assert(
+        writes.some((write) => write.via === "copy" && write.offset === 9 * 2048),
+        "no copy into layer 1's slot 9",
+      );
+      // Layer 0 still refuses more distinct experts than its own 4 slots.
+      await assertRejects(
+        () => cache.load(routing(2, [0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 4, 5, 6, 7])),
+        ExecutionError,
+        "more than its 4 slots",
+      );
     } finally {
       await session.dispose();
     }

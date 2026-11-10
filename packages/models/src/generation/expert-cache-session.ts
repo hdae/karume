@@ -62,8 +62,11 @@ import type {
  * {@link ExpertCacheReport.speculation}).
  */
 export type ExpertCacheReport = ExpertCacheStats & {
-  /** Slots per routed layer (K). */
-  readonly slots: number;
+  /**
+   * Slots per routed layer (K), one entry per layer in layer order — the runtime's
+   * `ExpertCache.slots`.
+   */
+  readonly slots: readonly number[];
   /**
    * Scheme A's runs (`run` — the prefill chunks, and every decode step without a depth) whose rows
    * were committed (each of them missed no expert).
@@ -107,7 +110,7 @@ type IssuedRun<C> = {
  * can stand in (the context is a type parameter for the reason of {@link GenerationSession}).
  */
 export type ExpertCacheRuns<C extends GenerationContextFace> = {
-  readonly slots: number;
+  readonly slots: readonly number[];
   readonly layers: number;
   run(
     inputs: RunInputs,
