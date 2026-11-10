@@ -367,6 +367,57 @@ report is cumulative, so its row is the difference between the two.
   measured): the drafts route on hidden states that missed experts, so the verify's rows pick experts the drafts' load did
   not bring in.
 
+### 6.5 Per-layer slots in Chrome (2026-11-10)
+
+The maintainer compared 64 slots in every layer with the fitted allocation of §4.2 (`fitted` in the Playground: a mean of
+64, from 40 to 108 per layer), each without and with depth 4, in Chrome on the RTX 5070 Ti with every expert in the host
+tier, on the same three turns in the same order (temperature 1, top-k 64, top-p 0.95, seed 0). Records
+`gemma4_2026-11-10T06-57-09.json` to `…T07-00-47.json`.
+
+| slots, depth | decode tokens per s (360 tokens) | tokens per cycle | runs per decode token | cycles ended at the first missed row |
+|---|---:|---:|---:|---:|
+| 64, none | 17.5 | — | — | — |
+| 64, 4 | 20.5 | 3.03 | 1.64 | 107 of 119 |
+| fitted, none | 19.0 | — | — | — |
+| fitted, 4 | 22.6 | 3.21 | 1.54 | 94 of 112 |
+
+- The four runs sampled the same tokens in every turn.
+- The fitted allocation gained about 9% without a depth and about 10% with depth 4, at the same expert VRAM. The CPU
+  estimate of §4.2 predicted about 12% for scheme A, and only about 2% on top of self-speculation; with self-speculation
+  the gain is larger than predicted because fewer cycles end at their first missed row (the early layers, which miss
+  most, hold more experts).
+
+### 6.6 The cost of one run under self-speculation (2026-11-10)
+
+The full 26B ran on the RTX 3080 Ti (Node and Dawn) at 64 slots with every expert in the host tier, with scheme A and
+self-speculation at depth 4 alternated on one Session (three prompts of 96 tokens, temperature 0 and 1; the same tokens
+in every arm). The GPU ran at 88–91 °C with thermal slowdown in every arm, so the comparison is the ratio within a run.
+Scripts and logs: `outputs/diag/expert-run-cost-2026-11-10/`.
+
+| part of a cycle (temperature 0) | ms per decode token | share |
+|---|---:|---:|
+| drafts (3.8 runs of one row per cycle, median 23.5 ms each) | 32.5 | 59% |
+| verify (8 physical rows, median 45 ms) | 16.8 | 30% |
+| loads (the drafts' merged load and the load after a cut) | 3.2 | 6% |
+| verify retries | 1.75 | 3% |
+| sampler (`peek` and acceptance over the 262k vocabulary) | 1.05 | 2% |
+| input preparation, `touch`, `commit` | 0.1 | 0% |
+| total | 55.4 (18.1 tokens per s) | |
+
+Scheme A on the same Session took 64.4 ms per decode token (15.5 tokens per s), so the ratio 0.86 matches Chrome's 0.84
+(§6.4).
+
+- **The verify's shape is the main cost.** Depth 4 verifies 5 rows, but the default buckets under the cache are `[4]`
+  below the chunk rows 8, so it ran 8 physical rows: about 1.9 times a one-row run. Most of the gap is the pooled
+  `expert_linear` (3.0 → 14.2 ms of GPU time), which reads each row's picks, pad rows included; reading back 5 rows of
+  logits instead of 1 costs only 1–5 ms.
+- **A draft is a whole forward**, as long as a scheme-A decode run; about 0.9 drafts per cycle are not accepted.
+- **The host side is small**: the sampler takes 0.4–0.6 ms per draw, and input preparation and the bookkeeping under
+  0.1 ms per token. The loads are 6% here and likely more in Chrome (its fence and upload costs, not measured).
+- **Running the verify at 5 physical rows** (a bucket `[4, 5]`) took 48.2 ms per decode token (20.8 tokens per s, ratio
+  0.76 against scheme A) with the same tokens and the same cycle statistics as at 8 rows. Depth 3 (4 rows) at 8-row
+  buckets came to a ratio of 0.81, depth 2 to 0.82–0.85.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
@@ -383,5 +434,7 @@ report is cumulative, so its row is the difference between the two.
 - Self-speculation at depth 4 (§6.4) confirmed about three tokens per cycle on the full model and brought the runs per
   decode token from about 2.3 to 1.6, but decode only from 17.4 to 20.8 tokens per second: the cost per run is now what
   is left.
+- The fitted per-layer allocation (§6.5) adds about 10% on top in Chrome (22.6 tokens per second at depth 4). Of the cost
+  per run (§6.6), the drafts' whole forwards and the verify's padding to 8 rows are most of it; the host side is not.
 - Open: the verify's extra expert traffic, the real per-forward time of the 26B decode in place of the assumed 15 ms, and
   whether a GPU implementation reaches the CPU reference's draft acceptance.
