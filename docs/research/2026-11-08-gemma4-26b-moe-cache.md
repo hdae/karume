@@ -418,6 +418,32 @@ Scheme A on the same Session took 64.4 ms per decode token (15.5 tokens per s), 
   0.76 against scheme A) with the same tokens and the same cycle statistics as at 8 rows. Depth 3 (4 rows) at 8-row
   buckets came to a ratio of 0.81, depth 2 to 0.82–0.85.
 
+### 6.7 Where a run's time goes in Chrome (2026-11-10)
+
+In Chrome on the RTX 5070 Ti the verify at 5 rows instead of 8 changed decode only from 22.6 to 22.8 tokens per second
+(fitted, depth 4, every expert in the host tier; the same tokens). A temporary probe (not committed) then timed every
+run's submits and readback maps on the same three turns, for fitted at depth 4, fitted without a depth and every expert
+resident (records `gemma4_2026-11-10T07-46-23.json`, `…T07-47-16.json`, `…T07-48-58.json`; the analysis script is
+`outputs/diag/expert-run-cost-2026-11-10/probe-analyze.mjs`). Medians:
+
+| run | host encode (start → last of 12–13 submits) | first submit → readback mapped | whole run |
+| --- | ---: | ---: | ---: |
+| decode, every expert resident | 0.4 ms (0.8 ms between steps) | 18.5 ms (from the last submit) | 20.5 ms per token |
+| draft (one row) | 0.7 ms | 18.1 ms | 19.8 ms |
+| verify (5 rows) | 1.1 ms | about 30 ms | 33.4 ms |
+| scheme A decode (one row) | 0.7 ms | about 18 ms | 20.1 ms |
+
+- **The runs are bound by the GPU, not by the host.** Encoding and submitting a run takes under 1 ms, and a readback
+  resolves when the GPU work ends; a draft costs what a resident decode step costs. Chaining the drafts on the GPU to
+  save fences would gain little here.
+- Per decode token at depth 4: the drafts 25.1 ms, the verify 10.9 ms, the loads 5.7 ms and the host steps (`peek`,
+  acceptance) about 1 ms, 42.8 ms in all (23.4 tokens per second while decoding).
+- A 5-row verify costs about 1.65 one-row runs; with the expert work proportional to rows × picks, the pooled
+  `expert_linear` is the likely part (not measured per kernel in Chrome).
+- One forward of 26B takes about 18 ms of GPU time on the RTX 5070 Ti, resident or cached. That is far above what its
+  active weights take to read (about 4 billion parameters at 4 bits, a few ms at the card's bandwidth — an estimate, not
+  measured), so the forward itself is the largest cost of every mode.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
