@@ -145,3 +145,19 @@ GEMV rows and a width outside the fusion, is gone (ADR 0098 and 0099 addenda of 
   "except when speculative".
 - **Not on Hugging Face yet.** The published `hdae/karume-gemma4-qat` still has `i4` alone for 12B; the local mirror has
   three. The manifest goes up and `SOURCES` is re-pinned at the next release.
+
+## Addendum (2026-11-10) — 26B gets `i4-gemvpar` and `i4-fast`; its default stays `i4`
+
+`karume-gemma4-qat` 26B A4B now declares the same three presets as the other models of the line. The reason it had one, no
+GEMV rows and a width outside the fusion, is gone (ADR 0098 and 0099 addenda of 2026-11-10).
+
+- **Default**: `i4`, unchanged, for the same reason as 12B (ADR 0128 decision 1).
+- **What changes**: the dense linears, the attention and the RMS→add pairs. The routed experts (`expert_linear`) keep
+  their sequential order in every preset, so the descriptions' "parallel GEMV" names the dense part only.
+- **Speed** on the RTX 3080 Ti under Node + Dawn ([research 2026-11-10](../research/2026-11-10-gemma4-26b-fast.md)): one
+  decode forward 24.6–25.7 → 17.5–17.9 ms. The card cannot hold 26B resident, so the measurement ran under the exact
+  expert cache (ADR 0146); 26B has no drafter, so there is no speculative arm.
+- **With the expert cache** the presets apply as they are: a run of the same row count takes the same kernels with
+  every expert resident and with the cache, which is the cache's reference of exactness (ADR 0146 decision 7).
+- **Not in the mirror or on Hugging Face yet.** The recipe declares the presets; the local mirror's manifest and the
+  published `hdae/karume-gemma4-qat` still have `i4` alone for 26B.

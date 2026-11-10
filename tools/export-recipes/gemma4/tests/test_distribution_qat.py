@@ -365,7 +365,7 @@ PARALLEL_SESSIONS: Mapping[str, Mapping[str, Any]] = {
 class TestQatParallelSeats:
     """Every model carries the parallel and fused seats over the line's int4 storage."""
 
-    @pytest.mark.parametrize("model", ["e2b", "e4b", "12b"])
+    @pytest.mark.parametrize("model", ["e2b", "e4b", "12b", "26b"])
     def test_the_seats_declare_the_parallel_and_fused_session_flags(self, model: str) -> None:
         quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
 
@@ -387,13 +387,13 @@ class TestQatParallelSeats:
         assert list(manifest["models"]["12b"]["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
 
     def test_the_descriptions_name_the_output_head_only_where_it_stays_sequential(self) -> None:
-        for model, excluded in (("e2b", True), ("e4b", True), ("12b", False)):
+        for model, excluded in (("e2b", True), ("e4b", True), ("12b", False), ("26b", False)):
             quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
             for name in PARALLEL_SESSIONS:
                 assert ("output head" in quants[name]["description"]) is excluded, (model, name)
 
     def test_every_model_of_the_line_carries_a_measured_speed_note(self) -> None:
-        assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) == {"e2b", "e4b", "12b"}
+        assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) == {"e2b", "e4b", "12b", "26b"}
         assert set(gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE) <= set(
             GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM
         )
@@ -1079,15 +1079,18 @@ class TestQatLegalText:
 
 class TestQat26B:
     """26B's plan (its one line — ADR 0145): 12B's graph form and dialect, its pins, no drafter
-    (so `speculative` is refused at weights resolution), no vision, the reference seat alone."""
+    (so `speculative` is refused at weights resolution), no vision, the reference seat and the
+    parallel and fused seats."""
 
     def test_it_ships_the_model_role_alone_with_12b_s_dialect(self, tmp_path: Path) -> None:
         out_dir, manifest = _assemble(tmp_path, ("26b",))
         entry = manifest["models"]["26b"]
 
         assert sorted(entry["weights"]) == [GEMMA4_ROLE]
-        assert list(entry["quants"]) == ["i4"]
-        assert entry["quants"]["i4"]["weights"] == {GEMMA4_ROLE: "i4"}
+        assert list(entry["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert entry["defaultQuant"] == "i4"
+        for name, quant in entry["quants"].items():
+            assert quant["weights"] == {GEMMA4_ROLE: "i4"}, name
         assert entry["quants"]["i4"]["label"] == "QAT int4 grid"
         assert "drafter" not in entry["quants"]["i4"]["description"]
         assert "f16 steps" in entry["quants"]["i4"]["description"]
@@ -1129,6 +1132,26 @@ class TestQat26B:
         )
         assert sources.upstream_tokenizer.name == pins.tokenizer.revision
         assert sources.upstream_tokenizer.parent.parent.name == "models--google--gemma-4-26B-A4B-it"
+
+    def test_the_parallel_seats_state_no_drafter_and_carry_26b_s_speed_note(
+        self, tmp_path: Path
+    ) -> None:
+        """The seats' text is the line's own, true for a model without a drafter: the head is on
+        the parallel GEMV (no exclusion note) and the speed sentence is 26B's measured one."""
+        _, manifest = _assemble(tmp_path, ("26b",))
+        quants = manifest["models"]["26b"]["quants"]
+
+        note = gemma4_distribution.GEMMA4_QAT_Q4_0_SPEED_NOTE["26b"]
+        assert note == " Faster than i4 on the tested 26B device."
+        assert gemma4_distribution.GEMMA4_QAT_Q4_0_HEAD_NOTE["26b"] == ""
+        for name, session in PARALLEL_SESSIONS.items():
+            assert quants[name]["session"] == dict(session), name
+            assert quants[name]["description"].startswith("Same weights as i4;"), name
+            assert quants[name]["description"].endswith(note), name
+            assert "output head" not in quants[name]["description"], name
+            assert "drafter" not in quants[name]["label"], name
+            assert "drafter" not in quants[name]["description"], name
+            assert "speculative" not in quants[name]["description"], name
 
     def test_the_other_models_keep_their_reference_seat_text(self) -> None:
         for model in ("e2b", "e4b", "12b"):

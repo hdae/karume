@@ -56,7 +56,8 @@ tokenizer and configuration checks are the regular line's; what differs is read 
 - the pins: every product container names its QAT weights' revision and every drafter container
   its QAT drafter's (`gemma4.sources.QAT_LINE_PINS` / `QAT_DRAFTER_PINS`);
 - 26B A4B: the `model` role alone (no drafter until one is pinned, so `speculative` is refused at
-  weights resolution; no vision), the reference seat only, 12B's graph contract and dialect, its
+  weights resolution; no vision), the reference seat and the parallel and fused seats (its routed
+  experts keep the sequential order in every seat), 12B's graph contract and dialect, its
   expert weights the one `i4f16` storage of the line (ADR 0145), and its pins in
   `gemma4.sources.QAT_LINE_PINS` (it is no drafter's target);
 - 12B's image input: a third graph, `vision` — the encoder-free embedder
@@ -2158,7 +2159,10 @@ GEMMA4_QAT_Q4_0_MOE_QUANT: Mapping[str, str] = {
 #: unmeasured copies of them — ADR 0098 addendum 2026-09-26), the RMS→add fusion takes 106 / 127
 #: pairs, and the drafter has two eligible linears (of 68, as the regular int8 drafter). Every
 #: linear of the 12B product, the output head included, is on the table with rows measured on 12B,
-#: and the fusion takes its width (ADR 0098 addendum 2026-11-06).
+#: and the fusion takes its width (ADR 0098 addendum 2026-11-06). The same holds for every dense
+#: linear of the 26B product, its int4 output head (`[262144, 2816]`) included, and the fusion takes
+#: width 2816; its routed experts (`expert_linear`) keep the sequential order in every seat — only
+#: the dense linears, the attention and the RMS→add pairs change.
 GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
     "i4-gemvpar": {
         "weights": {},
@@ -2187,19 +2191,27 @@ GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
 #: were faster than `i4` on every prompt and arm measured (two runs) — without the drafter E2B by
 #: 2.0–2.5× and E4B by 2.1–2.9×, with it both by 1.2–1.5×. 12B (2026-11-06,
 #: `outputs/diag/gemma4-12b-fast-2026-11-06/`, the same protocol): without the drafter both seats by
-#: 1.9–2.1×; with it both are slower than `i4` with it, so its sentence says so.
+#: 1.9–2.1×; with it both are slower than `i4` with it, so its sentence says so. 26B (2026-11-10,
+#: `outputs/diag/forward-cost-2026-11-10/`; 12 GB cannot hold it resident, so decode ran under the
+#: exact expert cache — 64 slots per layer, every expert in the host tier, re-run after a miss —
+#: one process per arm, greedy, three prompts of 96 tokens with the same tokens in every arm, two
+#: rounds): one decode forward without a miss (median wall) took 24.6 / 25.7 ms with `i4`,
+#: 17.7 / 17.9 ms with `i4-gemvpar` and 17.6 / 17.5 ms with `i4-fast`. It has no drafter, so there
+#: is no speculative arm.
 GEMMA4_QAT_Q4_0_SPEED_NOTE: Mapping[str, str] = {
     "e2b": " Faster than i4 on the tested E2B device.",
     "e4b": " Faster than i4 on the tested E4B device.",
     "12b": " Faster than i4 on the tested 12B device, except when speculative.",
+    "26b": " Faster than i4 on the tested 26B device.",
 }
 
-#: How the seats' descriptions spell the output head: the int4 head's parallel GEMV row exists only
-#: for 12B ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}).
+#: How the seats' descriptions spell the output head: the int4 head's parallel GEMV row exists for
+#: 12B and 26B only ({@link GEMMA4_QAT_Q4_0_PARALLEL_QUANTS}).
 GEMMA4_QAT_Q4_0_HEAD_NOTE: Mapping[str, str] = {
     "e2b": " (not the int4 output head)",
     "e4b": " (not the int4 output head)",
     "12b": "",
+    "26b": "",
 }
 
 
