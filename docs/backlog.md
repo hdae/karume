@@ -23,8 +23,8 @@ maintainer's ruling of 2026-11-06).
    [0145](decisions/0145-gemma4-26b-moe-resident.md) and its addendum; in the local mirror, ran in Chrome on the RTX 5070 Ti
    with about 0.8 GB of 16 GB left; released in 0.19.0). Left: the grouped prefill form of `expert_linear` (perf-ledger K-104), the drafter and vision of 26B. The dense parts'
    fusion and parallel-GEMV rows at width 2816 ✅ 2026-11-10 (`i4-gemvpar` / `i4-fast` for 26B, a decode forward ×0.70 on the
-   RTX 3080 Ti — [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md); the mirror and the Hugging Face repository
-   still carry `i4` alone). Then see whether a MoE cache that loads the
+   RTX 3080 Ti, and 30.1 against 22.8 tokens per second under the expert cache in Chrome on the RTX 5070 Ti —
+   [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md); the Hugging Face repository still carries `i4` alone). Then see whether a MoE cache that loads the
    needed experts from RAM can work, and look for a way to pay a miss as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
    paid it with one fence). Pre-research done 2026-11-08: the maintainer prefers an exact cache (bit-identical to
    full residency) and wants the approximate modes (skip a miss, bias routing to the cache) measured too; CPU measurements of

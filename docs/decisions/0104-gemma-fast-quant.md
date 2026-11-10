@@ -159,5 +159,7 @@ GEMV rows and a width outside the fusion, is gone (ADR 0098 and 0099 addenda of 
   expert cache (ADR 0146); 26B has no drafter, so there is no speculative arm.
 - **With the expert cache** the presets apply as they are: a run of the same row count takes the same kernels with
   every expert resident and with the cache, which is the cache's reference of exactness (ADR 0146 decision 7).
-- **Not in the mirror or on Hugging Face yet.** The recipe declares the presets; the local mirror's manifest and the
-  published `hdae/karume-gemma4-qat` still have `i4` alone for 26B.
+- **In Chrome on the RTX 5070 Ti** (research §6): 80.9 tokens per second with every expert resident and the f16 KV, and
+  30.1 against 22.8 under the expert cache with self-speculation, with the same tokens as `i4`.
+- **Not on Hugging Face yet.** The published `hdae/karume-gemma4-qat` still has `i4` alone for 26B; the local mirror has
+  three.
