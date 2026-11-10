@@ -11,8 +11,8 @@
     "test": "vp test"
   },
   "dependencies": {
-    "@karume/hub": "jsr:^0.19.0",
-    "@karume/models": "jsr:^0.19.0",
+    "@karume/hub": "jsr:^0.20.0",
+    "@karume/models": "jsr:^0.20.0",
     "webgpu": "catalog:"
   },
   "devDependencies": {
