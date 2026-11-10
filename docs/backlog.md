@@ -7,12 +7,12 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.19.0 release (released 2026-11-08)
+## now — after the 0.20.0 release (released 2026-11-10)
 
-0.19.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.19.0 — Gemma 4 26B A4B of the q4_0 QAT line with
-every expert resident, the op `expert_linear` and the codec `int4-sym-g-f16` (ADR 0145); published-smoke green on Node and
-Deno). `hdae/karume-gemma4-qat` took `26b/` (64 parts; no FAILED row, the large parts at 49.5 MiB per term or more), and
-`gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking.
+0.20.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.20.0 — the exact expert cache of ADR 0146 with
+its host tier, self-speculation and per-layer slots; the parallel-GEMV rows and the RMS→add width for 26B, with the 26B
+presets `i4-gemvpar` / `i4-fast`). `hdae/karume-gemma4-qat` was re-uploaded with them (no FAILED row, the large parts at
+51.2 MiB per term or more), and `gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
@@ -24,7 +24,7 @@ maintainer's ruling of 2026-11-06).
    with about 0.8 GB of 16 GB left; released in 0.19.0). Left: the grouped prefill form of `expert_linear` (perf-ledger K-104), the drafter and vision of 26B. The dense parts'
    fusion and parallel-GEMV rows at width 2816 ✅ 2026-11-10 (`i4-gemvpar` / `i4-fast` for 26B, a decode forward ×0.70 on the
    RTX 3080 Ti, and 30.1 against 22.8 tokens per second under the expert cache in Chrome on the RTX 5070 Ti —
-   [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md); the Hugging Face repository still carries `i4` alone). Then see whether a MoE cache that loads the
+   [research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md)). Then see whether a MoE cache that loads the
    needed experts from RAM can work, and look for a way to pay a miss as a transfer rather than a re-run (the PoC of [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)
    paid it with one fence). Pre-research done 2026-11-08: the maintainer prefers an exact cache (bit-identical to
    full residency) and wants the approximate modes (skip a miss, bias routing to the cache) measured too; CPU measurements of

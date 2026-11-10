@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-10
+
 ### Added
 
 - `@karume/runtime`: `SessionOptions.expertCache: { slots, hostBytes? }`, an exact expert cache for `expert_linear`: each
@@ -37,7 +39,7 @@ measurements in `docs/research/`.
 - `@karume/runtime`: parallel-GEMV rows for the dense linears of Gemma 4 26B A4B, the int4 output head included, and width
   2816 in the RMS→add fusion, so `linearGemvReduce: "parallel"` and `fuseRmsNormAdd` now take effect on 26B (ADR 0098 and
   0099 addenda of 2026-11-10). Recipes: 26B gets `i4-gemvpar` and `i4-fast`, its default staying `i4` (ADR 0104 addendum of
-  2026-11-10); the Hugging Face distribution does not carry them yet.
+  2026-11-10). The distribution `hdae/karume-gemma4-qat` on Hugging Face carries them.
 
 ## [0.19.0] - 2026-11-08
 
@@ -2248,7 +2250,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/hdae/karume/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/hdae/karume/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/hdae/karume/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/hdae/karume/compare/v0.16.0...v0.17.0

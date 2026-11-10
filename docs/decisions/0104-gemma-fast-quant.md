@@ -161,5 +161,5 @@ GEMV rows and a width outside the fusion, is gone (ADR 0098 and 0099 addenda of 
   every expert resident and with the cache, which is the cache's reference of exactness (ADR 0146 decision 7).
 - **In Chrome on the RTX 5070 Ti** (research §6): 80.9 tokens per second with every expert resident and the f16 KV, and
   30.1 against 22.8 under the expert cache with self-speculation, with the same tokens as `i4`.
-- **Not on Hugging Face yet.** The published `hdae/karume-gemma4-qat` still has `i4` alone for 26B; the local mirror has
-  three.
+- **On Hugging Face as of 0.20.0.** The published `hdae/karume-gemma4-qat` carries the three presets for 26B
+  (`gemma.SOURCES["gemma4-qat"]`).
