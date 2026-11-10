@@ -44,8 +44,12 @@ maintainer's ruling of 2026-11-06).
    "scheme B as built"; the cut model gives the tokens without the cache at temperature 0 and 1). The maintainer's
    Chrome chat at 64 slots depth 4 ✅ 2026-11-10 (the same tokens as resident; 17.4 → 20.8 tokens per second, 1.6 runs
    per decode token — research §6.4). A K per layer ✅ 2026-11-10 (`slots` as an array, the Playground preset `fitted` —
-   ADR 0146 addendum "per-layer slots"; the cut model gives the tokens without the cache). Next: the maintainer's Chrome
-   A/B of 64 against `fitted`, and the cost per run (being measured).
+   ADR 0146 addendum "per-layer slots"; the cut model gives the tokens without the cache). The maintainer's Chrome A/B ✅
+   2026-11-10 (the same tokens; `fitted` at depth 4 decodes 22.6 tokens per second against 20.5 at 64 — research §6.5).
+   The cost per run ✅ 2026-11-10 (the drafts' whole forwards and the verify padded to 8 rows — research §6.6); the
+   verify in a bucket of `depth + 1` rows ✅ 2026-11-10. Next, by the measured share: `expert_linear` reading each
+   distinct expert once and skipping pad rows, a depth sweep in Chrome, drafts chained on the GPU, and the load after a
+   cut for its last row alone.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
 

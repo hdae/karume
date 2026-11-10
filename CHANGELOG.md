@@ -29,7 +29,8 @@ measurements in `docs/research/`.
   `decodeAhead ≥ 2`, `speculative`, `pleResidency: "gpu"` and `vision`. Prefill chunks shrink to at most
   `⌊slots / 8⌋` rows. `depth` decodes by self-speculation over the cache: each cycle drafts up to `depth` tokens on the
   cache as it is, loads what they picked and verifies them in one run, keeping only exact rows, so the tokens stay those
-  of every expert resident at any temperature; `ExpertCacheReport.speculation` gives the cycle counters (ADR 0146).
+  of every expert resident at any temperature; `ExpertCacheReport.speculation` gives the cycle counters, and the default
+  `chunkBuckets` gain `depth + 1` so the verify runs no pad rows (ADR 0146).
 - `expertCache.slots` (runtime and Gemma) also takes an array of one count per routed layer, in layer order: each layer
   keeps its own number of experts, and Gemma's chunk rows and depth bound follow the smallest layer.
   `ExpertCache.slots` and `ExpertCacheReport.slots` are one entry per layer (ADR 0146).

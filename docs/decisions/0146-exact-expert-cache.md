@@ -223,7 +223,10 @@ cycles (`packages/models/src/generation/expert-speculation.ts`); prefill is sche
   chunkLength) − 1`: the verify's `depth + 1` rows of picks are loaded at once and must fit the slots, and the verify and the
   draft chain are deferred runs bounded by the slack and the chunk rows. That is 7 at 64 slots and 1 at 16 slots on 26B.
   `depth` cannot be combined with `speculative` or `decodeAhead`. The verify runs in the fixed shape of `depth + 1` rows
-  (padded), as the drafter's verify does.
+  (padded), as the drafter's verify does. Since 2026-11-10 Gemma adds `depth + 1` to its default prefill buckets, so that
+  shape has no pad rows: rounded up to the buckets `[4]` it ran 8 physical rows at depth 4, and the pooled `expert_linear`
+  reads every row's picks, pad rows included (research §6.6: 5 rows took the 26B decode from 18.1 to 20.8 tokens per
+  second on the RTX 3080 Ti).
 - **Checks.** On the 26B cut model (12 layers, RTX 3080 Ti, every expert in the host tier), at 64 slots depth 4 and 16 slots
   depth 1, the four golden prompts generate 32 tokens each equal to the pipeline without the cache, at temperature 0 and at
   temperature 1 (top-k 64, top-p 0.95, a fixed seed), with drafts confirmed and verifies cut or run again. Accepting rows
