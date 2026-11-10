@@ -34,6 +34,7 @@ import {
 } from "../src/runtime/executor.ts";
 import {
   type ExpertGraphPlan,
+  firstMissingRow,
   planExpertGraph,
   planExpertLoad,
   planExpertStore,
@@ -466,6 +467,74 @@ describe("the slot choice of one layer's load", () => {
   });
 });
 
+describe("the first missing row of a run's routing (ExpertRun.firstMissingRow)", () => {
+  /** Two layers of 8 experts: 0, 1, 2, 3 resident in layer 0; 4, 5, 6, 7 in layer 1. */
+  const tables = (): Int32Array<ArrayBuffer>[] => [
+    Int32Array.from([0, 1, 2, 3, -1, -1, -1, -1]),
+    Int32Array.from([-1, -1, -1, -1, 0, 1, 2, 3]),
+  ];
+  /** A routing of two picks per row: `ids[layer][row]` are that row's picks. */
+  const routing = (ids: readonly (readonly (readonly number[])[])[]): ExpertRouting => ({
+    layers: ids.length,
+    rows: ids[0].length,
+    picks: 2,
+    ids: Int32Array.from(ids.flat(2)),
+  });
+
+  it("is the row count when every pick is resident", () => {
+    const every = routing([
+      [
+        [0, 1],
+        [2, 3],
+        [3, 0],
+      ],
+      [
+        [4, 5],
+        [6, 7],
+        [7, 4],
+      ],
+    ]);
+    assertEquals(firstMissingRow(every, tables()), 3);
+    assertEquals(
+      firstMissingRow({ layers: 2, rows: 0, picks: 2, ids: new Int32Array(0) }, tables()),
+      0,
+    );
+  });
+
+  it("is the first row that misses in any layer, not the last one", () => {
+    // Row 0 hits everywhere; row 1 misses in layer 1 alone (its second pick); row 2 misses in both.
+    const missed = routing([
+      [
+        [0, 1],
+        [2, 3],
+        [5, 0],
+      ],
+      [
+        [4, 5],
+        [6, 1],
+        [2, 4],
+      ],
+    ]);
+    assertEquals(firstMissingRow(missed, tables()), 1);
+  });
+
+  it("takes a later layer's earlier row over an earlier layer's later row", () => {
+    const missed = routing([
+      [
+        [0, 1],
+        [2, 3],
+        [3, 7],
+      ],
+      [
+        [0, 5],
+        [6, 7],
+        [7, 4],
+      ],
+    ]);
+    assertEquals(firstMissingRow(missed, tables()), 0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // A Session over a fake device: construction issues no dispatch, a load only writeBuffers and pops
 // its scopes, so the whole surface but the run itself is exercised without a GPU.
@@ -715,7 +784,7 @@ describe("a Session built with expertCache (fake device)", () => {
     }
   });
 
-  it("refuses a generation run that is not deferred, and a chained one", async () => {
+  it("refuses a generation run that is not deferred, chained or not", async () => {
     const { session } = await buildCached(4);
     const cache = cacheOf(session);
     // The rule is checked before the context is touched, so a stand-in context is enough.
@@ -724,10 +793,13 @@ describe("a Session built with expertCache (fake device)", () => {
     try {
       await assertRejects(() => run({}), ExecutionError, "needs commit 'deferred'");
       await assertRejects(() => run({ commit: "immediate" }), ExecutionError, "commit 'deferred'");
+      // A chained run is admitted only deferred (self-speculation's drafts — ADR 0146 decision 8);
+      // the chained deferred run itself is run in gpu_expert_cache_test.ts.
+      await assertRejects(() => run({ chain: true }), ExecutionError, "needs commit 'deferred'");
       await assertRejects(
-        () => run({ commit: "deferred", chain: true }),
+        () => run({ commit: "immediate", chain: true }),
         ExecutionError,
-        "cannot be chained",
+        "needs commit 'deferred'",
       );
     } finally {
       await session.dispose();

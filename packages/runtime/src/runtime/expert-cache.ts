@@ -33,6 +33,7 @@ import {
   type ExpertByteRange,
   type ExpertMove,
   expertLoadMoves,
+  firstMissingRow,
   type ExpertWeightPlan,
   type ExpertWeightRanges,
   planExpertLoad,
@@ -298,15 +299,12 @@ export class SessionExpertCache implements ExpertCache {
               chain: generation.chain,
               bidirectionalRows: generation.bidirectionalRows,
             };
-      // MUST: a run with a miss is not exact, so its rows must stay uncommitted until a re-run.
+      // MUST: a run with a miss is not exact, so its rows must stay uncommitted until a re-run. A
+      // chained run is deferred too (the Session's checks hold it to `GenerationRun.chain`'s rules),
+      // so `commit(0)` drops a whole chain of runs that missed (self-speculation's drafts).
       if (issued !== undefined && issued.commit !== "deferred") {
         throw new ExecutionError(
           "expertCache.run: a generation run needs commit 'deferred' (a run that missed is run again after commit(0))",
-        );
-      }
-      if (issued?.chain === true) {
-        throw new ExecutionError(
-          "expertCache.run: a generation run cannot be chained (a chained run's rows cannot be run again alone)",
         );
       }
     } catch (cause) {
@@ -439,6 +437,7 @@ export class SessionExpertCache implements ExpertCache {
         if (table[expert] < 0) missing += 1;
       }
     });
+    const firstMissing = firstMissingRow(routing, this.#tables);
     this.#stats.runs += 1;
     if (missing > 0) this.#stats.missedRuns += 1;
     // Only the declared outputs reach the caller (the index readback is the cache's).
@@ -450,7 +449,7 @@ export class SessionExpertCache implements ExpertCache {
       }
       declared[name] = tensor;
     }
-    return { outputs: declared, routing, missing };
+    return { outputs: declared, routing, missing, firstMissingRow: firstMissing };
   }
 
   /**

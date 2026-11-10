@@ -550,6 +550,33 @@ export const routedExperts = (routing: ExpertRouting, layer: number, rows: numbe
 };
 
 /**
+ * The first row of a checked routing with a pick whose expert is not resident in any layer
+ * (`tables[layer][expert] < 0`), or `routing.rows` when every pick is resident — `ExpertRun.firstMissingRow`.
+ *
+ * Attention is causal, so in a run whose rows are consecutive positions a row before this one read
+ * only resident experts and rows that did: those rows are exact, and this row is the first that may
+ * not be.
+ */
+export const firstMissingRow = (
+  routing: ExpertRouting,
+  tables: readonly Int32Array<ArrayBuffer>[],
+): number => {
+  const { rows, picks, ids } = routing;
+  let first = rows;
+  tables.forEach((table, layer) => {
+    const base = layer * rows * picks;
+    // Only the rows before the earliest miss found so far can lower it.
+    for (let at = base; at < base + first * picks; at += 1) {
+      if (table[ids[at]] < 0) {
+        first = Math.floor((at - base) / picks);
+        break;
+      }
+    }
+  });
+  return first;
+};
+
+/**
  * Checks a routing handed back by the caller against the cache's shape: its sizes, an `Int32Array`
  * of exactly `layers × rows × picks` ids, every id an expert in `[0, experts)`.
  *

@@ -9,6 +9,9 @@
 // injection — committing a missed row would fail the comparison). The same protocol drives a
 // states-form graph (attention over a full KV slot, then the expert layers): a deferred run that
 // misses is discarded with commit(0), the experts load, the same position runs again and commits.
+// On the same graph, self-speculation's pieces: drafts as chained deferred runs dropped by one
+// commit(0), and a multi-row verify whose rows before its first missing row are committed alone —
+// those rows are the resident Session's bytes, the first missing row is not.
 //
 // Both containers of a source are covered: the in-memory container (whole bytes, verified) and a
 // `krm` cut into 2048-byte blocks (gate_up one expert a piece with its scale split along them, down
@@ -305,6 +308,150 @@ describe.skipIf(!GPU_AVAILABLE)("the exact expert cache through a Session (real 
           await plain.dispose();
         }
       });
+    });
+  }
+
+  // Self-speculation's pieces (ADR 0146 decision 8) on the states-form graph with 32 experts per
+  // layer and 12 slots, so that a run of three rows' picks fits and a row of other inputs still
+  // misses: two drafts as chained deferred runs on the cache as it is, dropped by one commit(0);
+  // row 0 alone until it misses nothing; a three-row verify at the same position whose row 0 hits
+  // and whose later rows miss; then only the rows before its first missing row are committed, and the
+  // rest of the rows run again after a load. Every committed row is the resident Session's, run
+  // through the same shapes (the verify's three rows, then the rest) on a context of its own.
+  const VERIFY_SLOTS = 12;
+  const VERIFY_ROWS = 3;
+  const VERIFY_SHAPE: ExpertGraphShape = { ...SHAPE, experts: 32 };
+  const verifyLayers = expertLayers(VERIFY_SHAPE, "ox", "out", "M");
+  const verifyGraph: DeclarationJson = {
+    ...stateful,
+    initializers: { ...states.initializers, ...verifyLayers.initializers },
+    values: { ...states.values, ox: { dtype: "f32", shape: ["M", 64] }, ...verifyLayers.values },
+    nodes: [
+      ...states.nodes,
+      { op: "reshape", ins: ["o"], outs: ["ox"], attrs: {} },
+      ...verifyLayers.nodes,
+    ],
+  };
+  const verifyTensors = expertTensors(VERIFY_SHAPE, "i4f16");
+  /** The inputs of `rows` consecutive rows from row `first` (each row's q, k and v of its own). */
+  const rowsOf = (first: number, rows: number): RunInputs => {
+    const values = (seed: number) => {
+      const data = new Float32Array(rows * 64);
+      for (let row = 0; row < rows; row += 1) {
+        data.set(waveValues(64, 53 * (first + row) + seed, 0.8), row * 64);
+      }
+      return { dtype: "f32" as const, shape: [1, 1, rows, 64], data };
+    };
+    const [q, k, v] = [values(1), values(2), values(3)];
+    return { q, k, v, append_k: k, append_v: v };
+  };
+  /** Row `row` of an `[M, 64]` output, as u32 words. */
+  const rowBits = (tensor: Tensor | undefined, row: number): number[] =>
+    bits(tensor).slice(row * 64, (row + 1) * 64);
+  for (const kind of KINDS) {
+    it(`commits the rows before a verify's first missing row after chained drafts, and they are the resident rows (${kind})`, async () => {
+      const container = await containerOf(kind, verifyGraph, verifyTensors);
+      const gpu: GpuContext = await acquireGpu();
+      try {
+        const resident = await createSessionFromContainer(gpu, container, GRAPH_NAME);
+        const cached = await createSessionFromContainer(gpu, container, GRAPH_NAME, {
+          expertCache: { slots: VERIFY_SLOTS },
+        });
+        const spec = { bindings: { C: 8 }, chunkLength: VERIFY_ROWS, chunkBuckets: [2] };
+        const plain = await resident.createGenerationContext(spec);
+        const context = await cached.createGenerationContext(spec);
+        try {
+          const cache = cached.expertCache;
+          assert(cache !== undefined, "no expert cache");
+          // Two drafts, each one row: the second is placed after the first, both stay pending.
+          const drafts: ExpertRun[] = [];
+          for (const row of [0, 1]) {
+            drafts.push(
+              await cache.run(
+                rowsOf(row, 1),
+                {},
+                {
+                  context,
+                  queryLength: 1,
+                  commit: "deferred",
+                  chain: true,
+                },
+              ),
+            );
+            assertEquals(context.pendingCommit, { pastLength: 0, queryLength: row + 1 });
+          }
+          for (const draft of drafts) {
+            assertEquals(draft.routing.rows, 1);
+            assertEquals(draft.firstMissingRow, draft.missing === 0 ? 1 : 0);
+          }
+          // MUST (precondition): the first draft ran on an empty cache, so it missed.
+          assert(drafts[0].missing > 0, "the first draft missed nothing");
+          context.commit(0);
+          assertEquals([context.pastLength, context.pendingCommit], [0, undefined]);
+
+          // Row 0 alone until it misses nothing (dropped each time): its experts, and only its, are
+          // resident — 4 of 32 per layer, so rows of other inputs miss.
+          const alone = { context, queryLength: 1, commit: "deferred" } as const;
+          await converge(
+            cache,
+            () => cache.run(rowsOf(0, 1), {}, alone),
+            () => context.commit(0),
+          );
+          context.commit(0);
+
+          // The verify: three rows at position 0. Row 0 hits, so it is exact; rows 1 and 2 miss.
+          const verifyInputs = rowsOf(0, VERIFY_ROWS);
+          const verify = { context, queryLength: VERIFY_ROWS, commit: "deferred" } as const;
+          const run = await cache.run(verifyInputs, {}, verify);
+          const exact = run.firstMissingRow;
+          // MUST (precondition): row 0 hit and a later row missed, so a part of the verify is dropped.
+          assert(exact >= 1 && exact < VERIFY_ROWS, `the verify's first missing row is ${exact}`);
+          const expected = await resident.run(verifyInputs, {}, { ...verify, context: plain });
+          for (let row = 0; row < exact; row += 1) {
+            assertEquals(
+              rowBits(run.outputs["out"], row),
+              rowBits(expected["out"], row),
+              `row ${row}`,
+            );
+          }
+          // Fault injection: the first missing row is not the resident one (committing it, or
+          // reporting a later row as the first one, would commit a row that is not exact).
+          assertNotEquals(rowBits(run.outputs["out"], exact), rowBits(expected["out"], exact));
+          context.commit(exact);
+          cache.touch(run.routing, exact);
+          plain.commit(exact);
+          await cache.load(run.routing);
+
+          // The rest of the rows from the first missing one, until they miss nothing.
+          const rest = VERIFY_ROWS - exact;
+          const restInputs = rowsOf(exact, rest);
+          const generation = { context, queryLength: rest, commit: "deferred" } as const;
+          const converged = await converge(
+            cache,
+            () => cache.run(restInputs, {}, generation),
+            () => context.commit(0),
+          );
+          const last = converged.runs.at(-1);
+          assert(last !== undefined && last.missing === 0);
+          assertEquals(last.firstMissingRow, rest);
+          context.commit(rest);
+          cache.touch(last.routing, rest);
+          const reference = await resident.run(
+            restInputs,
+            {},
+            { context: plain, queryLength: rest },
+          );
+          assertEquals(bits(last.outputs["out"]), bits(reference["out"]), "the rest of the rows");
+          assertEquals([context.pastLength, plain.pastLength], [VERIFY_ROWS, VERIFY_ROWS]);
+        } finally {
+          await context.dispose();
+          await plain.dispose();
+          await cached.dispose();
+          await resident.dispose();
+        }
+      } finally {
+        gpu.destroy();
+      }
     });
   }
 });

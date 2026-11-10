@@ -977,6 +977,15 @@ export type ExpertRun = {
    * and the run MUST NOT be committed (load the routing, then run the same inputs again).
    */
   readonly missing: number;
+  /**
+   * The first real row with a pick whose expert was not resident, in any routed layer (`routing.rows`
+   * when `missing` is 0). The rows of a generation run are consecutive positions and attention is
+   * causal, so every row before this one read only resident experts and rows that did: those rows
+   * are bit-identical to full residency, and `context.commit(firstMissingRow)` may keep them while the
+   * rest is dropped (self-speculation's verify — ADR 0146 decision 8). A stateless run's rows are
+   * independent of each other, so there the value only locates the first missed row.
+   */
+  readonly firstMissingRow: number;
 };
 
 /** The result of {@link ExpertCache.load}. */
@@ -1039,6 +1048,8 @@ export type ExpertCacheStats = {
  * The expert cache of a Session built with {@link SessionOptions.expertCache} (ADR 0146). The
  * caller's protocol: `run` deferred → if `missing > 0`, `context.commit(0)`, `load(routing)` and run
  * the same inputs again → when `missing` is 0, `context.commit(rows)` and `touch(routing, rows)`.
+ * A caller that keeps only exact rows may also commit the rows before {@link ExpertRun.firstMissingRow}
+ * and touch those rows alone (self-speculation's verify — ADR 0146 decision 8).
  *
  * The slot tables are the runtime's alone; `load` and `run` are serialized with the Session's other
  * runs, so the host mirror the miss count is read from always equals the tables on the GPU.
@@ -1056,8 +1067,11 @@ export type ExpertCache = {
    * `Session.run` with the routing and the miss count (same lock, validation and readback; the
    * routing is read in the run's own command list and fence).
    *
-   * MUST: a generation run is `commit: "deferred"` and not `chain` (fails loudly otherwise) — a run
-   * with a miss is not exact, so the caller must be able to `commit(0)` and run it again.
+   * MUST: a generation run is `commit: "deferred"` (fails loudly otherwise) — a run with a miss is
+   * not exact, so the caller must be able to `commit(0)` and run it again. It may be chained
+   * ({@link GenerationRun.chain}, under that field's rules — on `Session.run`'s face, one unsettled run
+   * at a time): self-speculation drafts several rows on the cache as it is, one chained run after
+   * another, and `commit(0)` drops the whole chain at once.
    */
   run(inputs: RunInputs, bindings?: SymbolBindings, generation?: GenerationRun): Promise<ExpertRun>;
   /**

@@ -114,6 +114,7 @@ const scriptedCache = (
         outputs: { logits: { dtype: "f32", shape: [1], data: Float32Array.of(attempts) } },
         routing,
         missing,
+        firstMissingRow: missing === 0 ? routing.rows : 0,
       });
     },
     load: (routing) => {
@@ -392,6 +393,7 @@ describe("the face under the generation loop", () => {
             ids: new Int32Array(generation.queryLength),
           },
           missing,
+          firstMissingRow: missing === 0 ? generation.queryLength : 0,
         };
       },
       load: () =>
