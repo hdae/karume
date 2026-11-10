@@ -34,6 +34,10 @@ measurements in `docs/research/`.
 - `expertCache.slots` (runtime and Gemma) also takes an array of one count per routed layer, in layer order: each layer
   keeps its own number of experts, and Gemma's chunk rows and depth bound follow the smallest layer.
   `ExpertCache.slots` and `ExpertCacheReport.slots` are one entry per layer (ADR 0146).
+- `@karume/runtime`: parallel-GEMV rows for the dense linears of Gemma 4 26B A4B, the int4 output head included, and width
+  2816 in the RMS→add fusion, so `linearGemvReduce: "parallel"` and `fuseRmsNormAdd` now take effect on 26B (ADR 0098 and
+  0099 addenda of 2026-11-10). Recipes: 26B gets `i4-gemvpar` and `i4-fast`, its default staying `i4` (ADR 0104 addendum of
+  2026-11-10); the Hugging Face distribution does not carry them yet.
 
 ## [0.19.0] - 2026-11-08
 

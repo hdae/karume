@@ -123,7 +123,9 @@ The code facts this rests on (read 2026-11-09):
 2. A per-layer K (the research's fit saves about 12% at K = 64) — built by the addendum "per-layer slots" of 2026-11-10;
    the gain in Chrome is not measured yet.
 3. Prefill speed with small chunks, and whether a grouped prefill form (ADR 0145 open point 1) changes it.
-4. The real per-forward time of 26B decode in Chrome, which sets the absolute cost of every re-run.
+4. The real per-forward time of 26B decode in Chrome, which sets the absolute cost of every re-run — about 18.5 ms with
+   `i4` on the RTX 5070 Ti (research §6.7). The parallel presets cut a forward to ×0.70 on the RTX 3080 Ti
+   ([research 2026-11-10](../research/2026-11-10-gemma4-26b-fast.md)); not measured in Chrome yet.
 5. The hub opens a container as a plain block source, which states no range cost, so the refusal of a `"scan"` source
    (decision 1) does not fire through `fromPretrained`: on Node or Deno over Hugging Face a miss may read up to a whole part.
    Refusing it at load needs the hub to report the cost.
