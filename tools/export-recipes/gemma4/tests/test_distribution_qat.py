@@ -1100,6 +1100,9 @@ class TestQat26B:
         assert not [path for path in _files(out_dir) if path.startswith("26b/drafter")]
         card = (out_dir / "README.md").read_text(encoding="utf-8")
         assert "speculative" not in card.split("## Base weights")[0].lower()
+        prose = " ".join(card.split())
+        assert "By default all of them are resident on the GPU." in prose
+        assert "Passing `expertCache: { slots: 64 }` when loading keeps 64 experts" in prose
         assert "the routed experts of `26b` keep the same codes with f16 steps" in " ".join(
             card.split()
         )

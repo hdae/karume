@@ -707,8 +707,8 @@ cd tools/export-recipes
 uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/, E2B alone (~8.7 GiB)
 # both models (~22.6 GiB: each model's bf16 container, E2B's drafter, the tokenizers)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
-# the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters) → models/karume-gemma4-qat/
-uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b --out ../../models/karume-gemma4-qat
+# the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters, and 26B A4B) → models/karume-gemma4-qat/
+uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b --model 26b --out ../../models/karume-gemma4-qat
 ```
 
 The regular line (`karume-gemma4`) ships E2B and E4B; it refuses `--model 12b`. 12B ships in the
@@ -728,6 +728,13 @@ the one bf16 exception of the line's storage gate (its weights are not on the 4-
 `beginImageTokenId` / `endImageTokenId` (`config.json`, held to the tokenizer asset through the
 spellings of `tokenizer_config.json`) and `hiddenSize`. E2B and E4B have neither, and their entries
 are unchanged by 12B's presence.
+
+26B A4B ships in the same line with the `model` role alone: its entry reads `gemma4-26b-product` and
+its own `gemma4-26b-tokenizer`, declares the line's three quants (the routed experts keep their
+sequential order in each) and 12B's dialect, and has no drafter and no vision embedder, so a load
+that asks for `speculative` is refused at weights resolution. Its expert weights are the line's
+one `i4f16` storage (the grid's codes with f16 steps — ADR
+[0145](../../../docs/decisions/0145-gemma4-26b-moe-resident.md)).
 
 `--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
 so an E4B-only build should name its own `--out`.

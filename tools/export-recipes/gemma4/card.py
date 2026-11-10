@@ -683,8 +683,12 @@ def _qat_q4_0_overview_bullets(manifest: Mapping[str, Any]) -> list[str]:
     if moe:
         lines += [
             f"- **Routed experts ({_spell_models(moe)})**: each layer sends every token through 8",
-            "  of its 128 experts, all resident on the GPU. The expert weights keep the same",
-            "  codes, each step stored as f16.",
+            "  of its 128 experts. By default all of them are resident on the GPU. Passing",
+            "  `expertCache: { slots: 64 }` when loading keeps 64 experts of each layer there and",
+            "  loads another when a token picks it. A run that needed an expert that was not",
+            "  loaded is repeated after loading it, so no token is computed without its experts;",
+            "  this trades decode speed for GPU memory. The expert weights keep the same codes,",
+            "  each step stored as f16.",
         ]
     drafters = [name for name, _ in _qat_q4_0_drafters(manifest)]
     if drafters:
