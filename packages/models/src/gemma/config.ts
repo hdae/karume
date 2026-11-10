@@ -65,7 +65,7 @@ export const SOURCES = {
   },
   "gemma4-qat": {
     repo: "hdae/karume-gemma4-qat",
-    revision: "411381062ddda065f6fb01c8da2cd0aa36d97ef0",
+    revision: "1c6349e9a8b618c15adcffb559b7683c7e27e939",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
