@@ -12,7 +12,8 @@
 0.20.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.20.0 — the exact expert cache of ADR 0146 with
 its host tier, self-speculation and per-layer slots; the parallel-GEMV rows and the RMS→add width for 26B, with the 26B
 presets `i4-gemvpar` / `i4-fast`). `hdae/karume-gemma4-qat` was re-uploaded with them (no FAILED row, the large parts at
-51.2 MiB per term or more), and `gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking.
+51.2 MiB per term or more), and `gemma.SOURCES["gemma4-qat"]` moved. Nothing is breaking. Published-smoke is green on
+Node and Deno.
 
 ## next — Gemma 4, in the maintainer's order (2026-11-08)
 
