@@ -340,6 +340,33 @@ budgets, and once with every expert resident. Records `gemma4_2026-11-09T21-47-5
 - With the transfer out of the way, the time follows the forwards: about 21 ms each at every slot count, close to the 19 ms of
   a resident decode token. Fewer re-runs (self-speculation, a per-layer K) are what is left to gain.
 
+### 6.4 Self-speculation in Chrome (2026-11-10)
+
+The maintainer ran self-speculation (ADR 0146 addendum "scheme B as built") in Chrome on the RTX 5070 Ti at 64 slots with
+every expert in the host tier and depth 4, on a three-turn chat (temperature 1, top-k 64, top-p 0.95, seed 0) and then a
+long counting turn stopped by hand. Records `gemma4_2026-11-10T00-56-25.json` and `…T00-58-19.json`; the second record's
+report is cumulative, so its row is the difference between the two.
+
+| run | decode tokens | decode tokens per s | tokens per cycle | accepted drafts per cycle | runs per decode token | cycles ended at the first missed row | verify retries |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| three turns, depth 4 | 357 | 20.8 | 3.10 | 3.02 | 1.61 | 102 of 115 | 5 |
+| the same three turns in another order, no depth (`…T22-20-04.json`) | 360 | 17.4 | — | — | — | — | — |
+| the same three turns, every expert resident (`gemma4_2026-11-08T14-29-54.json`) | 357 | 49.4 | — | — | — | — | — |
+| counting turn, depth 4 | 917 | 17.1 | 2.96 | 2.83 | 1.79 | 270 of 310 | 91 |
+
+"Runs per decode token" is draft runs plus verifies plus verify retries over the decode tokens.
+
+- The three turns sampled the same tokens as the resident run of 2026-11-08 with the same prompts in the same order, at
+  temperature 1: the output stays bit-identical in Chrome with self-speculation.
+- On the full model a cycle confirmed about three drafts of four at temperature 1, far more than on the cut model (1.43
+  tokens per cycle in the cut e2e): the cut model's logits are no guide to the acceptance.
+- Runs per decode token went from about 2.3 (scheme A at 64 slots, §6.3) to 1.6–1.8, but decode only from 17.4 to 20.8
+  tokens per second. A likely reading (not measured): each draft is a whole forward of its own, and the verify runs 8
+  physical rows with up to five rows' experts loaded first, so a run costs more than a scheme-A decode run.
+- Most cycles ended at the verify's first missed row (102 of 115) with every row before it accepted. A likely cause (not
+  measured): the drafts route on hidden states that missed experts, so the verify's rows pick experts the drafts' load did
+  not bring in.
+
 ## 7. What the numbers say
 
 - A cache at K = 64 halves the expert VRAM. The exact form of it costs about 2.4 forwards per decode token with whole-token
@@ -353,5 +380,8 @@ budgets, and once with every expert resident. Records `gemma4_2026-11-09T21-47-5
 - Reading the misses from the cached Blob in Chrome (about 2.9 ms per expert) roughly doubles those times; a host tier in
   RAM is what brings them back. In the chat of §6.3 a tier of every expert made 64 slots decode at 18.1 tokens per second
   (52.3 with every expert resident), about 21 ms per forward.
+- Self-speculation at depth 4 (§6.4) confirmed about three tokens per cycle on the full model and brought the runs per
+  decode token from about 2.3 to 1.6, but decode only from 17.4 to 20.8 tokens per second: the cost per run is now what
+  is left.
 - Open: the verify's extra expert traffic, the real per-forward time of the 26B decode in place of the assumed 15 ms, and
   whether a GPU implementation reaches the CPU reference's draft acceptance.
