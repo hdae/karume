@@ -23,11 +23,13 @@ measurements in `docs/research/`.
   a miss it holds is not read from the container again. `Session.expertCache` runs a
   deferred generation run and returns its routing and misses, and its `load`, `touch` and `stats` calls manage the
   experts. Under the option `Session.run`, `enqueue` and `enqueueRead` are refused (ADR 0146).
-- `@karume/models`: `expertCache: { slots, hostBytes? }` on `gemma.PipelineOptions` for Gemma 4 26B A4B. A run that missed an expert
+- `@karume/models`: `expertCache: { slots, hostBytes?, depth? }` on `gemma.PipelineOptions` for Gemma 4 26B A4B. A run that missed an expert
   is run again, so the tokens and logits are bit-identical to every expert resident, at 16 to 128 slots instead of 128.
   `Pipeline.expertCacheReport()` and the type `gemma.ExpertCacheReport` give its counters. It is refused with
   `decodeAhead ≥ 2`, `speculative`, `pleResidency: "gpu"` and `vision`. Prefill chunks shrink to at most
-  `⌊slots / 8⌋` rows (ADR 0146).
+  `⌊slots / 8⌋` rows. `depth` decodes by self-speculation over the cache: each cycle drafts up to `depth` tokens on the
+  cache as it is, loads what they picked and verifies them in one run, keeping only exact rows, so the tokens stay those
+  of every expert resident at any temperature; `ExpertCacheReport.speculation` gives the cycle counters (ADR 0146).
 
 ## [0.19.0] - 2026-11-08
 

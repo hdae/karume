@@ -40,8 +40,9 @@ maintainer's ruling of 2026-11-06).
    77% of the time in Blob reads — research §6.2). The host tier in RAM ✅ 2026-11-10 (`hostBytes`, plain `ArrayBuffer`s
    and the staging ring — ADR 0146 addendum 2026-11-10; the cut model is bit-identical with it). The maintainer's
    chat with the tier in Chrome on the RTX 5070 Ti ✅ 2026-11-09 (every expert in RAM: 9.7 tokens per second at 32 slots,
-   18.1 at 64, 52.3 resident; the same tokens — research §6.3). Next: self-speculation and a K per layer (the re-runs are
-   what is left).
+   18.1 at 64, 52.3 resident; the same tokens — research §6.3). Self-speculation over the cache ✅ 2026-11-10 (`expertCache.depth` — ADR 0146 addendum
+   "scheme B as built"; the cut model gives the tokens without the cache at temperature 0 and 1). Next: the maintainer's
+   Chrome chat with a depth on the RTX 5070 Ti, then a K per layer.
 2. **Vision on E2B / E4B** (V8 of ADR [0144](decisions/0144-gemma4-12b-vision.md); later by the maintainer's ruling of
    2026-11-07). 12B's vision shipped with 0.18.0.
 

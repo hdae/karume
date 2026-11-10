@@ -189,3 +189,55 @@ As built (`expert-host-tier.ts`, `expert-staging-ring.ts`):
 - On the 26B cut model (12 layers, RTX 3080 Ti) a tier of every expert and a quarter tier keep the golden rows and the
   greedy tokens byte-identical, with the same misses, loads and re-runs as without a tier. The pipeline at 64 slots spent
   9.8 s in loads without the tier and 1.8 s with every expert held.
+
+## Addendum 2026-11-10: scheme B as built
+
+Decision 8 is implemented as `expertCache.depth` (Gemma `PipelineOptions`, the Playground chat page). Decode then runs in
+cycles (`packages/models/src/generation/expert-speculation.ts`); prefill is scheme A's.
+
+- **One cycle.** From the frontier b at position P, with `k' = min(depth, remaining − 1)`:
+  1. draft one row at a time on the cache as it is, each a deferred run chained on the ones before it (a miss contributes
+     0, nothing is loaded); a stop draft ends the drafting;
+  2. `commit(0)` drops the drafts, and one load of every draft row's routing makes their picks resident;
+  3. verify `[b, d₁..d_k']` in one deferred run; while its first row misses, `commit(0)`, load its routing and run it
+     again (row 0 alone is a scheme-A run, so this converges in at most one attempt per routed layer plus one);
+  4. draw only from the rows before the verify's first missed row, `ExpertRun.firstMissingRow`, until a rejection or a
+     stop token. When every one of those rows accepted, the cycle ends at the first missed row: its input is a confirmed
+     draft, it becomes the next frontier, and the verify's routing is loaded again for the next cycle.
+- **`firstMissingRow` is the runtime's.** It is the first real row with a non-resident pick in any routed layer. Attention
+  is causal, so every row before it read only resident experts and rows that did; those rows are bit-identical to full
+  residency. The cache now accepts `chain: true` for the drafts (a generation run must still be deferred).
+- **Drafts peek the uniform value the exact row will draw.** `Sampler.peek(logits, history, ahead)` returns the token
+  `next` would pick after `ahead` more draws, without consuming the RNG (splitmix64 moves its state by a constant per
+  step, so the state `ahead` steps on is a sum). `ahead` counts the drafts of the cycle that would have drawn. The RNG
+  advances only in `next`, once per confirmed token, from an exact row with the confirmed history, so the output is plain
+  decode's at every temperature; the drafts decide only how many tokens a cycle confirms.
+- **The verify returns pending; the decode loop commits.** The loop delivers the confirmed tokens one by one and commits
+  the rows of the tokens it delivered, so a consumer's `break` leaves the conversation at the tokens received plus one
+  frontier, as on the drafter's path. `touch` covers every confirmed row inside the cycle (another conversation's load
+  could otherwise evict them first), so the recency may count a row that is not delivered; it only orders evictions.
+- **Each cycle is one operation of the face's serialization chain**, so no other conversation's run or load comes between
+  its drafts, loads, verify and touch.
+- **Bounds.** Gemma refuses (before any weight part is fetched) a depth above `min(⌊slots / k⌋, sliding slack,
+  chunkLength) − 1`: the verify's `depth + 1` rows of picks are loaded at once and must fit the slots, and the verify and the
+  draft chain are deferred runs bounded by the slack and the chunk rows. That is 7 at 64 slots and 1 at 16 slots on 26B.
+  `depth` cannot be combined with `speculative` or `decodeAhead`. The verify runs in the fixed shape of `depth + 1` rows
+  (padded), as the drafter's verify does.
+- **Checks.** On the 26B cut model (12 layers, RTX 3080 Ti, every expert in the host tier), at 64 slots depth 4 and 16 slots
+  depth 1, the four golden prompts generate 32 tokens each equal to the pipeline without the cache, at temperature 0 and at
+  temperature 1 (top-k 64, top-p 0.95, a fixed seed), with drafts confirmed and verifies cut or run again. Accepting rows
+  from the first missed row on, or letting `peek` consume the RNG, fails those checks (the latter at temperature 1 only,
+  as expected).
+- **Measured on the cut model** (decode runs per decode token = draft runs + verifies + verify retries, over 124 tokens):
+
+  | slots, depth | temperature | tokens per cycle | decode runs per token (verify / draft) |
+  | ------------ | ----------- | ---------------- | -------------------------------------- |
+  | 64, 4        | 0           | 2.53             | 1.88 (0.46 / 1.42)                     |
+  | 64, 4        | 1           | 1.43             | 3.40 (0.82 / 2.57)                     |
+  | 16, 1        | 0           | 1.06             | 2.55 (1.64 / 0.91)                     |
+  | 16, 1        | 1           | 1.04             | 3.54 (2.61 / 0.93)                     |
+
+  A cut model's logits are not the full model's, so these say nothing yet about the speed in Chrome. At temperature 1
+  fewer drafts are confirmed: a draft's logits differ from the exact row's, and in a flat distribution the same uniform
+  value then often lands on another token (an explanation, not measured). At 16 slots depth 1 nearly every cycle ends at
+  its first missed row.
