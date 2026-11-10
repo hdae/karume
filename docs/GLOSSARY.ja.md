@@ -21,19 +21,19 @@
 | numerics profile ◆ | 数値プロファイル | 見送り（2026-10-18・ADR 0126 は deferred — 0.15.0 には無い）。`SessionOptions` の実行形の束。`practical` / `reference` の 2 値 | 層（実用層・参照層）・既定経路 | ADR 0126（deferred・0058 / 0110 の改定は発効せず） |
 | practical profile ◆ | 実用プロファイル | 見送り（同上）。実装されれば既定で、形と adapter の能力で E / C / R の変種を選ぶ。近似（Q）は含まない。今の既定の実用側は manifest の実用プリセット（`session` の束） | 実用層・実用経路 | 同上 |
 | reference profile ◆ | 参照プロファイル | 見送り（同上）。opt-in の knob の値として予定していた「省略値の束（自動選択なし）」。今はその状態が runtime の既定そのもの = 参照経路（次の行） | 参照層・既定経路 | 同上 |
-| reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0058 決定 2・ADR 0110 §1 |
+| reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0147 決定 1・6 |
 | original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
 | q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み）、各モデルに QAT の MTP drafter が付く。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
 | mobile QAT line △ | モバイル QAT 系 | Gemma 4 の配布 `karume-gemma4-qat-mobile`（旧 `karume-gemma4-qat`）。公式モバイル版の固定 INT2 / INT4 / INT8 と SRQ を保つ E2B / E4B。契約は `gemma4-qat/1` | 「QAT 版」だけで呼ぶ（2 系統あるので取り違える） | ADR 0097 追記 10 |
 | quantized weights ◆ | 量子化された重み | i8 / i4 / i2 の格納型。`quant` の明示指定で選ぶ | 実用席の重み | 同上 |
 | storage dtype | 格納型 | 容器に書いた重みの形（f32 / f16 / i8 / i4 / i2） | — | glossary.md |
 | activation quantization | 活性量子化（a8） | 活性を int8 に量子化して計算する実行形。品質に効くのでプリセットの中身（明示） | — | ADR 0025 / 0030 |
-| oracle | オラクル | 正しさの物差しになる自前の参照実装（TS 鏡像・f64 参照） | — | ADR 0005 / 0110 |
+| oracle | オラクル | 正しさの物差しになる自前の参照実装（TS 鏡像・f64 参照） | — | ADR 0005 / 0147 |
 | tolerance band △ | 許容帯 | オラクルとの差の上限（`atol + rtol·\|ref\|`） | 帯 | op-tolerance.ts |
-| contract class (E / C / R / Q) | 契約クラス | 変種の主張の強さ（鏡像 / 合成 / 加算順 / 近似） | — | ADR 0110 決定 2 |
-| variant | 変種 | あるノブの値 1 つに対応するカーネル経路 | 入居者 | ADR 0058 |
-| option / knob △ | オプション（ノブ） | `SessionOptions` の個別の設定 | 席（実行の席） | ADR 0058 決定 1 |
-| fallback △ | フォールバック | 形や limit が適格でないとき参照の変種へ落ちること。診断のパイプラインキーに必ず出る | 縮退・沈黙縮退 | ADR 0058 決定 3 |
+| contract class (E / C / R / Q) | 契約クラス | 変種の主張の強さ（鏡像 / 合成 / 加算順 / 近似） | — | ADR 0147 決定 2 |
+| variant | 変種 | あるノブの値 1 つに対応するカーネル経路 | 入居者 | ADR 0147 決定 6 |
+| option / knob △ | オプション（ノブ） | `SessionOptions` の個別の設定 | 席（実行の席） | ADR 0147 決定 6 |
+| fallback △ | フォールバック | 形や limit が適格でないとき参照の変種へ落ちること。診断のパイプラインキーに必ず出る | 縮退・沈黙縮退 | ADR 0147 決定 8 |
 | auto-selection | 自動選択 | 見送り（2026-10-18・ADR 0126 は deferred）。実用プロファイルが形 / adapter で変種を選ぶこと。選択は確認可能で、ノブで上書きできる ◆ | auto | ADR 0126（deferred） |
 | packed | packed | 1 語 / 1 byte に複数の整数要素を詰めた格納（`i4` は 1 byte 2 要素・`i2` は 4 要素） | — | ADR 0069 決定 2 |
 | group_size | group_size | `i4` の scale 1 個が担当する K 方向の連続要素数（exporter 側の名前・容器では `groupSize`） | グループ量子化（「group 量子化」で統一する） | ADR 0069 決定 2 |
@@ -55,6 +55,16 @@
 | GPTQ | GPTQ | 校正データで丸めを補正する方式（出荷は格子が RTN と同じ版） | — | perf-ledger Q-6 |
 | fixed quantization (importing QAT) | 固定量子化 | 上流 checkpoint の整数と scale を再量子化せずに書く経路 | — | ADR 0097 追記 3 |
 | grid import (QAT) △ | 格子の取り込み | QAT のチェックポイントが持つ 4-bit の格子（32 要素ごとの整数 [-8, 7] と 1 つの step）を丸め直さずに取り込むこと。q4_0 QAT 系（`karume-gemma4-qat`）の E2B / E4B / 12B の重み、E2B / E4B の PLE（索引 schema 4）、QAT の drafter で使う | 丸め直し | glossary.md・ADR 0128 追記 2026-11-03 |
+| level (reference / practical / opt-in) △ | 参照レベル / 実用レベル / opt-in レベル | 経路の目的と受け入れの道筋（契約クラスとは別の軸） | 層・参照層・実用層 | ADR 0147 決定 1 |
+| approximate reference / declared approximation △ | 宣言した近似（近似を含む参照） | 唯一の経路にある近似。オラクル・上流との距離・理由を記録する | — | ADR 0147 決定 10 |
+| default-on fusion △ | 既定オンの融合 | 融合前とビット同一で、オプションなしで走る融合 | — | ADR 0147 決定 5・9 |
+| Session canary △ | Session 構築時のカナリア | 融合と融合前を同じ入力で走らせ u32 で比べる。不一致なら警告して外す | — | ADR 0147 決定 9 |
+| canary | カナリア | 実行時に小さな入力で正しさを確かめる仕組み | — | ADR 0147 決定 6・9 |
+| known-answer canary △ | 既知解カナリア | 事前に計算した答えと比べるカナリア | — | ADR 0147 決定 6・9 |
+| applicability check △ | 適用可否の判定 | オプションがグラフに効く場所を持つか、構造的に不可能かを admission で判定する | 受理表 | ADR 0147 決定 7 |
+| applicability query △ | 適用可否の問い合わせ | 同じ判定を公開 API で返す（manifest と part 0 だけで） | — | ADR 0147 決定 7 |
+| device-capability switch △ | 機能不足による切り替え | adapter に機能が無いとき定めた経路へ移る（警告とパイプラインキー） | 縮退・沈黙縮退 | ADR 0147 決定 8 |
+| dominated configuration △ | 劣位の構成 | 同じ速さで明らかに品質が悪い、または同じ品質で遅い構成 | — | ADR 0147 決定 3 |
 
 ## 配布と資産
 
@@ -70,7 +80,7 @@
 | export recipe | レシピ | モデル別の export 手順（`tools/export-recipes/`） | — | ADR 0065 |
 | rebuild (a distribution) △ | 作り直す | 配布形を exporter から生成し直すこと | 焼き直す・焼く | release-runbook |
 | dtype label | dtype ラベル | manifest の `quants[].weights` に書く綴り（格納型と同じ語彙） | — | ADR 0074 決定 2 |
-| practical preset | 実用プリセット | `session` が空でないプリセット（実用の経路を束ねる）。自機 A/B で参照側のプリセットと比べる側 | 実用層・実用席 | ADR 0110 決定 1 |
+| practical preset | 実用プリセット | `session` が空でないプリセット（実用の経路を束ねる）。自機 A/B で参照側のプリセットと比べる側。決定 1 の実用レベルとは別の語（実用プリセットが持つ R / Q のオプションは opt-in レベル） | 実用層・実用席 | ADR 0147 決定 1・11 |
 | `krm` | krm | 重み block を持つコンテナ（model） | — | ADR 0108 決定 1 |
 | `krg` | krg | 重み block を持たないコンテナ（graph）。`krm` からバイトコピーで抜ける | — | ADR 0108 決定 1 / 4 |
 | descriptor (graph descriptor / model descriptor) | descriptor | コンテナ先頭に置く 2 文書の JSON（グラフ記述 / モデル記述） | ヘッダ（先頭 24 B 固定長の「ヘッダ」と混ぜない） | ADR 0108 決定 2 |
@@ -130,12 +140,12 @@
 | peek (sampler) △ | peek | 乱数を消費せずに、`next` が先で引くトークンを覗く sampler の呼び出し | 先読み抽選 | ADR 0146 追記「scheme B as built」 |
 | slot table △ | スロット表 | expert id → プールのスロット番号の表（−1 = 未常駐） | 席表 | ADR 0146 |
 | fake-quant golden △ | fake-quant の golden | torch に活性量子化を掛けて採った期待値 | 鏡像 golden | glossary.md |
-| census | census | 変種のパイプラインキーが実際に走った本数の検査（黙って落ちるのを防ぐ） | — | ADR 0058 決定 4 |
-| self A/B △ | 自機 A/B | 同じ機で参照経路（省略値）と実用プリセットの出力を比べる検査 | 自機 A/B 門 | ADR 0110 決定 5 |
-| difference floor △ | 差の下限 | 自機 A/B で「1 bit 以上違う」こと（束が丸ごと効いていない状態の検出） | 床 | ADR 0110 決定 5 |
-| collapse ceiling | 崩壊上限 | 自機 A/B の相対 RMS の上限 | — | ADR 0110 決定 5 |
-| fault injection | 故障注入 | チェックが空振りでないことの証明（わざと壊して赤にする） | — | ADR 0110 決定 3 |
-| determinism | 決定性 | 同じ機・同じ入力・同じプリセットで出力バイトが同一 | ビット同一（主張としての） | ADR 0110 決定 6 |
+| census | census | 変種のパイプラインキーが実際に走った本数の検査（黙って落ちるのを防ぐ） | — | ADR 0147 決定 2 |
+| self A/B △ | 自機 A/B | 同じ機で参照経路（省略値）と実用プリセットの出力を比べる検査 | 自機 A/B 門 | ADR 0147 決定 2 |
+| difference floor △ | 差の下限 | 自機 A/B で「1 bit 以上違う」こと（束が丸ごと効いていない状態の検出） | 床 | ADR 0147 決定 2 |
+| collapse ceiling | 崩壊上限 | 自機 A/B の相対 RMS の上限 | — | ADR 0147 決定 2 |
+| fault injection | 故障注入 | チェックが空振りでないことの証明（わざと壊して赤にする） | — | ADR 0147 決定 2 |
+| determinism | 決定性 | 同じ機・同じ入力・同じプリセットで出力バイトが同一 | ビット同一（主張としての） | ADR 0147 決定 11 |
 | upstream parity | 上流との一致 | 数値または意図の水準で上流と合っていること。上流のバグは写さない | 100% 一致 | ADR 0005 追記 2026-10-11 |
 | port △ | 移植 | 上流の処理を Karume に書き写すこと | 写す | — |
 | acceptance | 検収 | ステップの完了条件を満たしたことの確認 | — | — |
@@ -145,12 +155,12 @@
 | held row (explicit SKIP per environment key) | held 行 | その機でプロセスごと落ちるファミリーを、環境キーの行で明示 SKIP する表 | — | ADR 0106 追記決定 8 |
 | results directory (`outputs/verify/`) | 結果のディレクトリ | 走行ごとの `results.json` と成果物の置き場（追跡外・消して安全） | 結果の席 | ADR 0106 決定 5 |
 | measurements | 実測 | 許容差判定が出した差の記録（`results.json` の `cases[].measurements`） | 計測値・メトリクス | ADR 0106 追記決定 2 |
-| four-point kernel check | 4 点型 | R / Q の変種のカーネルのチェック（f64 との差・参照経路との A/B・構造的保証・故障注入の記録） | — | ADR 0110 決定 3 |
-| full-eligibility check | 完全適格の検査 | 融合 attention の全 dispatch が宣言した変種を通ったかを比で見る検査 | — | ADR 0058 追記 2026-10-10 |
-| reference-path rows / practical-preset rows | 参照経路の行 / 実用プリセットの行 | sha の参照値の行の 2 クラス（`session` が空なら参照経路の行） | 参照行・実用行 | ADR 0110 決定 7 |
-| acceptance table (`FamilySessionPolicy`) | 受理表 | ファミリーごとに manifest の宣言と明示指定のどのキーを受けるかの網羅表 | — | ADR 0058 追記 2026-09-26 |
+| four-point kernel check | 4 点型 | R / Q の変種のカーネルのチェック（f64 との差・参照経路との A/B・構造的保証・故障注入の記録） | — | ADR 0147 決定 2 |
+| full-eligibility check | 完全適格の検査 | 融合 attention の全 dispatch が宣言した変種を通ったかを比で見る検査 | — | ADR 0147 決定 2 |
+| reference-path rows / practical-preset rows | 参照経路の行 / 実用プリセットの行 | sha の参照値の行の 2 クラス（`session` が空なら参照経路の行） | 参照行・実用行 | ADR 0147 決定 11 |
+| acceptance table (`FamilySessionPolicy`) | 受理表 | ファミリーごとに manifest の宣言と明示指定のどのキーを受けるかの網羅表。ADR 0147 決定 7 で適用可否の判定に置き換える（コードを変えるまでは表が残る） | — | ADR 0147 決定 7 |
 | reference partner | 参照側のプリセット | 実用プリセットと同じ重みで `session` が空のプリセット（自機 A/B の相手） | 参照席 | `packages/e2e/tests/helpers/ab-gate.ts` の `referencePartnerOf` |
-| relative RMS error (relRms) | 相対 RMS 誤差 | 出力ごとの ‖x − 参照‖₂ / ‖参照‖₂ | — | ADR 0110 決定 5 |
+| relative RMS error (relRms) | 相対 RMS 誤差 | 出力ごとの ‖x − 参照‖₂ / ‖参照‖₂ | — | ADR 0147 決定 2 |
 | different sample | 別標本 | 正しい実装どうしでも深い層の出力が同じ分布の別の標本になること、またその標本 | — | ADR 0025 決定 6 |
 | perturbation ensemble | 摂動アンサンブル | 埋め込みの出口に微小な乱数を入れて回した別標本の束 | — | ADR 0026 追記 2026-10-07 |
 | census table (per bundle) | census 表 | 束ごとに変種の期待本数（ちょうど）を持つ表 | — | `packages/models/tests/helpers/census-table.ts` |
@@ -162,6 +172,16 @@
 | upstream-error band △ | 上流誤差の許容帯 | f64 のオラクルに対し、同じ入力での上流自身の f32 誤差の倍数で決める許容帯（gated_delta_scan では上流 2 関数の大きい方の 2 倍） | — | ADR 0135 決定 6 |
 | IR CPU reference execution △ | IR の CPU 参照実行 | 容器のグラフを、runtime の op ごとの TS 参照実装（`applyReferenceOp`）で CPU 上に 1 op ずつ回すこと（重みは容器自身の i8 などを復号して使う）。Qwen3.5 のテキストエンコーダの GPU チェックのオラクル（torch の golden ではないので既定のレーンで回す） | — | ADR 0137 決定 6 |
 | band case / acceptance case △ | 帯のケース / 受け入れのケース | 実測から帯を決めるときの 2 つの入力の組。帯のケースの最悪値の定数倍が帯になり（ADR 0118 決定 8 では × 5）、受け入れのケース（別の seed・条件・境目）がその内に入ることを確かめる。帯のケースは自分の帯では赤にならないので、検査を赤にできるのは受け入れのケースと故障注入だけ | — | ADR 0118 決定 8・追記 2026-10-02 |
+| export fidelity check (A) △ | エクスポートの一致チェック | 公開 krm と fake-quant の eager の比較 | — | ADR 0147 決定 4 |
+| patch fidelity check (P) △ | パッチの一致チェック | パッチあり / なしの上流 eager の比較 | — | ADR 0147 決定 4 |
+| host-glue check (F) △ | ホスト側処理の一致チェック | スケジューラ・トークナイザ・前後処理を上流と bit 一致で比べる | — | ADR 0147 決定 4 |
+| runtime fidelity check (B) △ | runtime の一致チェック | GPU と IR の CPU 参照実行の比較（参照経路・小さな入力） | — | ADR 0147 決定 4 |
+| op-level check (C) △ | op 単位のチェック | 各 op の kernel を TS オラクルと許容帯（√K 則）で比べ、中核の op には故障注入を足す。決定 4 の「チェック C」は契約クラス C とは別物 | クラス C | ADR 0147 決定 4 |
+| plan-transformation identity (D) △ | 計画変換のビット同一性 | 融合・row block・geometry が融合前の計画とビット同一 | — | ADR 0147 決定 4 |
+| loop and state equivalence (G) △ | ループと状態の等価性 | チャンク prefill・decode・drafter を 1 パス実行と比べる | — | ADR 0147 決定 4 |
+| cross-implementation audit △ | 他実装との突き合わせ | 取り込み時に他実装とモデルコードを比べて記録する | — | ADR 0147 決定 4 |
+| deviation record △ | 上流との相違の記録 | 上流のバグを写さなかった箇所と、それぞれのチェック | — | ADR 0147 決定 4 |
+| per-GPU evidence record △ | GPU ごとの証拠の記録 | /kernel-check の結果を vendor / architecture / backend / browser ごとに残す | — | ADR 0147 決定 9 |
 
 ## op の語彙
 

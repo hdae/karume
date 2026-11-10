@@ -119,6 +119,9 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
   `docs/GLOSSARY.ja.md` — the Japanese terms of the conversation
 - `docs/quantization.md` — index of quantization methods (storage dtypes / execution knobs / quant presets / exporter-side
   methods and their status. Numbers and semantics are not duplicated; it points to the source of truth)
+- `docs/kernel-rules.md` — rules index for adding a kernel, a fusion rule, an IR op or a path that changes numbers
+  (decision flow, contract classes, checklists, per-device evidence; the source of truth is the cited ADRs — numerics:
+  ADR 0147)
 - `docs/assets-layout.md` — conventions for the three local asset roots (models / outputs / inputs — all outside git)
 - `docs/release-runbook.md` — the standing procedure for releases and HF publishing (writing the pins, countermeasures against fragmentation, publish order)
 - `docs/research/` — investigation and measurement records (**point-in-time snapshots** — one opening line states their nature)
