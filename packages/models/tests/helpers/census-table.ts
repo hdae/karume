@@ -351,6 +351,18 @@ const GEMMA4_12B_RMS_ADD = { variant: 96 } as const;
 const GEMMA4_12B_STATE_PARALLEL = { variant: 96, reference: 0 } as const;
 
 /**
+ * 26B A4B (product graph, 30 layers — the mixture of experts), read from a real run of the mirror at
+ * decode as 12B's: all 236 dense linears take the parallel GEMV (the 60 routed `expert_linear`
+ * dispatches have no parallel form and are not GEMVs), RMS→add folds 90 times and states-form
+ * attention runs ①' / ③' once each on the 30 layers. The run was under the exact expert cache
+ * (ADR 0146), which changes where the routed experts live and none of these kernels. NOTE: no test
+ * compares these rows with a run — the 12 GB development GPU cannot hold 26B resident.
+ */
+const GEMMA4_26B_GEMV = { variant: 236, reference: 0 } as const;
+const GEMMA4_26B_RMS_ADD = { variant: 90 } as const;
+const GEMMA4_26B_STATE_PARALLEL = { variant: 60, reference: 0 } as const;
+
+/**
  * gemma4-qat E4B (product graph, 42 layers): of the 344 linears, 342 take the parallel GEMV — the
  * per-shape breakdown is pinned by the QAT E4B describe of runtime's
  * `gpu_linear_gemv_parallel_test.ts`. The other 2 fall to the sequential path for the same reason
@@ -399,6 +411,7 @@ const GEMMA4_E4B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const
 const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
 const TWELVE_B = ["12b"] as const;
+const TWENTY_SIX_B = ["26b"] as const;
 
 /**
  * The irodori v4 DiT: 245 linears (of the 317 before the split, k ∈ {32, 192, 512, 768, 1280, 3680}
@@ -617,6 +630,37 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       target: {
         prefill: { fuseRmsNormAdd: GEMMA4_12B_RMS_ADD },
         decode: { linearGemvReduce: GEMMA4_12B_GEMV, fuseRmsNormAdd: GEMMA4_12B_RMS_ADD },
+      },
+    },
+  },
+  // --- gemma4 26B (the q4_0 mirror; it ships no drafter) ---------------------
+  {
+    // The distribution mirror's `i4-gemvpar`.
+    family: "gemma4",
+    models: TWENTY_SIX_B,
+    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    census: {
+      target: {
+        decode: {
+          linearGemvReduce: GEMMA4_26B_GEMV,
+          stateAttentionReduce: GEMMA4_26B_STATE_PARALLEL,
+        },
+      },
+    },
+  },
+  {
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
+    family: "gemma4",
+    models: TWENTY_SIX_B,
+    session: {
+      linearGemvReduce: "parallel",
+      fuseRmsNormAdd: true,
+      stateAttentionReduce: "parallel-fused",
+    },
+    census: {
+      target: {
+        prefill: { fuseRmsNormAdd: GEMMA4_26B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_26B_GEMV, fuseRmsNormAdd: GEMMA4_26B_RMS_ADD },
       },
     },
   },

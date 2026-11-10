@@ -70,6 +70,17 @@ const HOLDS: ReferenceHolds = {
       " (VK_ERROR_OUT_OF_DEVICE_MEMORY, observed 2026-11-08); its numbers are checked here on the" +
       " 12-layer cut (e2e_gemma4_26b_cut_test.ts — ADR 0145 decision 6)",
   },
+  "26b/i4-gemvpar": {
+    "node-nvidia-geforce-rtx-3080-ti":
+      "the same weights as 26b/i4, which this 12 GB GPU cannot hold resident; the parallel GEMV rows" +
+      " are checked here on the 12-layer cut (e2e_gemma4_26b_cut_test.ts ⑦e), and the preset's" +
+      " unfused states-form attention has no 26B run on this machine",
+  },
+  "26b/i4-fast": {
+    "node-nvidia-geforce-rtx-3080-ti":
+      "the same weights as 26b/i4, which this 12 GB GPU cannot hold resident; the forms the preset" +
+      " declares are checked here on the 12-layer cut (e2e_gemma4_26b_cut_test.ts ⑦e)",
+  },
 };
 /** Whether seat `id` is held for this machine's environment key. */
 const heldHere = (id: string): boolean => {
