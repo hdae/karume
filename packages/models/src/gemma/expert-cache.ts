@@ -16,7 +16,11 @@ import { ModelInputError } from "../errors.ts";
 
 /** The options the checks read (`PipelineOptions` satisfies it). */
 type ExpertCacheOptions = {
-  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
+  readonly expertCache?: {
+    readonly slots: number;
+    readonly hostBytes?: number;
+    readonly depth?: number;
+  };
   readonly decodeAhead?: number;
   readonly speculative?: unknown;
   readonly pleResidency?: string;
@@ -43,12 +47,13 @@ type RoutedGraph = {
 type Routing = { readonly picks: number; readonly experts: number };
 
 /**
- * The settled option: the slots, the host tier's budget (absent = no tier) and the prefill chunk
- * rows the pipeline runs with.
+ * The settled option: the slots, the host tier's budget (absent = no tier), self-speculation's depth
+ * (absent = scheme A alone) and the prefill chunk rows the pipeline runs with.
  */
 export type Gemma4ExpertCache = {
   readonly slots: number;
   readonly hostBytes?: number;
+  readonly depth?: number;
   readonly chunkLength: number;
 };
 
@@ -88,6 +93,16 @@ export const assertGemma4ExpertCacheOptions = (
       `${where}: expertCache.hostBytes must be a positive integer of bytes held in RAM (Number.MAX_SAFE_INTEGER holds every expert), or absent for no host tier (hostBytes ${typeof hostBytes === "number" ? String(hostBytes) : JSON.stringify(hostBytes)})`,
     );
   }
+  const depth: unknown =
+    typeof cache === "object" && cache !== null && "depth" in cache ? cache.depth : undefined;
+  if (
+    depth !== undefined &&
+    (typeof depth !== "number" || !Number.isSafeInteger(depth) || depth < 1)
+  ) {
+    throw new ModelInputError(
+      `${where}: expertCache.depth must be a positive integer of drafts per self-speculation cycle, or absent for none (depth ${typeof depth === "number" ? String(depth) : JSON.stringify(depth)})`,
+    );
+  }
   const refuse = (other: string, why: string): never => {
     throw new ModelInputError(
       `${where}: expertCache cannot be combined with ${other} (${why}; a run under the cache runs alone, deferred, until it misses no expert — ADR 0146)`,
@@ -97,7 +112,10 @@ export const assertGemma4ExpertCacheOptions = (
     refuse(`decodeAhead ${options.decodeAhead}`, "the run-ahead chains its steps in one GPU batch");
   }
   if (options.speculative !== undefined) {
-    refuse("speculative", "a drafter's verify over the cache is later work");
+    refuse(
+      "speculative",
+      "a drafter's verify does not run over the cache — its own self-speculation is expertCache.depth",
+    );
   }
   if (options.pleResidency === "gpu") {
     refuse('pleResidency: "gpu"', "the on-GPU gather enqueues the target's decode in its batch");
@@ -214,5 +232,22 @@ export const resolveGemma4ExpertCache = (
     );
   }
   const hostBytes = options.expertCache?.hostBytes;
-  return { slots, ...(hostBytes === undefined ? {} : { hostBytes }), chunkLength };
+  const depth = options.expertCache?.depth;
+  if (depth !== undefined) {
+    // The verify of `depth + 1` rows is one deferred run (the slack and the chunk rows bound it),
+    // and its picks are loaded at once, pinned (`depth + 1` rows of k picks fit the slots).
+    const depthBound = Math.min(perSlots, slack ?? perSlots, chunkLength) - 1;
+    if (depth > depthBound) {
+      throw new ModelInputError(
+        `${where}: expertCache.depth ${depth} exceeds ${depthBound}, the most drafts a verify of depth + 1 rows allows under expertCache { slots: ${slots} }` +
+          ` (depth + 1 ≤ ⌊${slots} / ${routing.picks}⌋ = ${perSlots} so that its picks fit the slots, ≤ the sliding slack ${slack ?? "(none)"} and ≤ chunkLength ${chunkLength})`,
+      );
+    }
+  }
+  return {
+    slots,
+    ...(hostBytes === undefined ? {} : { hostBytes }),
+    ...(depth === undefined ? {} : { depth }),
+    chunkLength,
+  };
 };

@@ -1,6 +1,7 @@
 /**
  * The generation face of a Session built with `SessionOptions.expertCache` — the whole-token re-run
- * of ADR 0146 (scheme A, decision 4).
+ * of ADR 0146 (scheme A, decision 4), and with a `depth` the cycles of self-speculation over the cache
+ * that decode then runs as (scheme B, decision 8 — `expert-speculation.ts`), on the same chain.
  *
  * Under the cache a pick whose expert is not resident contributes 0, so a run that missed is not
  * the model's output. The face runs every run through `session.expertCache.run` deferred, and a run
@@ -28,7 +29,8 @@
  * between its load and its re-run, another conversation's load could evict the experts this run
  * needs: `touch` would then fail ("not resident"), or the two could evict each other's experts
  * attempt after attempt. One protocol at a time on the face (run → commit(0) → load → run again →
- * commit → touch) closes both; the Session's own lock serializes only single calls.
+ * commit → touch, or a whole self-speculation cycle) closes both; the Session's own lock serializes
+ * only single calls.
  *
  * MUST: every module is side-effect free (CLAUDE.md).
  * DECIDED: docs/decisions/0146-exact-expert-cache.md
@@ -45,23 +47,59 @@ import type {
   SymbolBindings,
 } from "@karume/runtime";
 import { createOperationChain } from "../concurrency/serial.ts";
-import type { GenerationContextFace, GenerationSession } from "./sequence.ts";
+import { createExpertCycleTally, runExpertCycle } from "./expert-speculation.ts";
+import type {
+  GenerationContextFace,
+  GenerationSelfSpeculation,
+  GenerationSession,
+} from "./sequence.ts";
 
-/** The face's counters merged with the runtime's (what `Pipeline.expertCacheReport()` returns). */
+/**
+ * The face's counters merged with the runtime's (what `Pipeline.expertCacheReport()` returns).
+ *
+ * The runs of the two schemes are counted apart: on a face whose runs all succeeded, the runtime's
+ * `runs` = `committedRuns + retries` (scheme A) `+ draftRuns + cycles + verifyRetries` (scheme B,
+ * {@link ExpertCacheReport.speculation}).
+ */
 export type ExpertCacheReport = ExpertCacheStats & {
   /** Slots per routed layer (K). */
   readonly slots: number;
-  /** Generation runs whose rows were committed (each of them missed no expert). */
+  /**
+   * Scheme A's runs (`run` — the prefill chunks, and every decode step without a depth) whose rows
+   * were committed (each of them missed no expert).
+   */
   readonly committedRuns: number;
-  /** Runs issued again after a miss (every attempt beyond a run's first). */
+  /** Scheme A's runs issued again after a miss (every attempt of a run beyond its first). */
   readonly retries: number;
+  /**
+   * The self-speculation cycles' counters — present exactly on a face built with a `depth` (absent
+   * and 0 cycles are different: absence is a face that decodes by scheme A).
+   */
+  readonly speculation?: ExpertSpeculationReport;
 };
 
-/** One run as the face issues it: always deferred, never chained. */
+/** {@link ExpertCacheReport.speculation}. */
+export type ExpertSpeculationReport = {
+  /** The most drafts of a cycle (the face's `depth`). */
+  readonly depth: number;
+  /** Cycles whose verify reached an exact row (each confirmed at least one token). */
+  readonly cycles: number;
+  /** The cycles' draft runs (one row each, on the cache as it was). */
+  readonly draftRuns: number;
+  /** Drafts confirmed (the leading confirmed tokens of a cycle that equal its drafts). */
+  readonly acceptedDrafts: number;
+  /** Verify runs issued again because their first row missed. */
+  readonly verifyRetries: number;
+  /** Cycles that ended at the verify's first missing row (every row before it accepted). */
+  readonly partialCommits: number;
+};
+
+/** One run as the face issues it: always deferred, chained only for a cycle's drafts. */
 type IssuedRun<C> = {
   readonly context: C;
   readonly queryLength: number;
   readonly commit: "deferred";
+  readonly chain?: true;
 };
 
 /**
@@ -106,7 +144,24 @@ export type ExpertCacheSession<C extends GenerationContextFace> = {
     bindings: SymbolBindings | undefined,
     generation?: GenerationArgument<C>,
   ): Promise<RunOutputs>;
+  /**
+   * Self-speculation over the cache (scheme B — ADR 0146 decision 8), present when the face was
+   * built with a `depth`: the decode loop's `selfSpeculation`. Each cycle is one operation of the
+   * face's chain (`expert-speculation.ts`), so no other conversation's run or load comes between its
+   * drafts, loads, verify and touch.
+   */
+  readonly speculation: GenerationSelfSpeculation<C> | undefined;
   report(): ExpertCacheReport;
+};
+
+/** The options of {@link createExpertCacheSession}. */
+export type ExpertCacheSessionOptions = {
+  /**
+   * Self-speculation's most drafts per cycle (absent = scheme A alone). MUST: a positive integer;
+   * that a verify of `depth + 1` rows fits the slots and the context is the caller's to check (the
+   * runtime's load and run fail loudly otherwise).
+   */
+  readonly depth?: number;
 };
 
 const WHERE = "expert cache";
@@ -119,6 +174,7 @@ const WHERE = "expert cache";
  */
 export const createExpertCacheSession = <C extends GenerationContextFace>(
   target: ExpertCacheTarget<C>,
+  options: ExpertCacheSessionOptions = {},
 ): ExpertCacheSession<C> => {
   const cache = target.expertCache;
   if (cache === undefined) {
@@ -126,10 +182,15 @@ export const createExpertCacheSession = <C extends GenerationContextFace>(
       `${WHERE}: the Session was built without SessionOptions.expertCache (there is no cache to run through)`,
     );
   }
+  const depth = options.depth;
+  if (depth !== undefined && (!Number.isSafeInteger(depth) || depth < 1)) {
+    throw new Error(`${WHERE}: depth ${depth} is not a positive integer`);
+  }
   const maxAttempts = cache.layers + 1;
   const chain = createOperationChain();
   let committedRuns = 0;
   let retries = 0;
+  const cycles = createExpertCycleTally();
 
   /** The protocol of one run (module doc), on the face's chain. */
   const runClean = async (
@@ -197,6 +258,16 @@ export const createExpertCacheSession = <C extends GenerationContextFace>(
       }
       return chain(() => runClean(inputs, bindings, issued));
     },
-    report: () => ({ ...cache.stats(), slots: cache.slots, committedRuns, retries }),
+    speculation:
+      depth === undefined
+        ? undefined
+        : { depth, cycle: (request) => chain(() => runExpertCycle(cache, request, cycles)) },
+    report: () => ({
+      ...cache.stats(),
+      slots: cache.slots,
+      committedRuns,
+      retries,
+      ...(depth === undefined ? {} : { speculation: { depth, ...cycles } }),
+    }),
   };
 };

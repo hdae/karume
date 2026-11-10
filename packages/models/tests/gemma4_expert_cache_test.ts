@@ -160,6 +160,32 @@ describe("expertCache: the options alone", () => {
     }
   });
 
+  it("refuses a depth that is not a positive safe integer as an input error, naming the field", () => {
+    const cases: readonly (readonly [unknown, string])[] = [
+      [0, "0"],
+      [-1, "-1"],
+      [1.5, "1.5"],
+      [Number.NaN, "NaN"],
+      ["4", '"4"'],
+      [null, "null"],
+    ];
+    for (const [depth, shown] of cases) {
+      const error = assertThrows(
+        () =>
+          assertGemma4ExpertCacheOptions("T", {
+            expertCache: { slots: 64, depth } as unknown as {
+              readonly slots: number;
+              readonly depth?: number;
+            },
+          }),
+        ModelInputError,
+        "expertCache.depth must be a positive integer",
+      );
+      assert(error.message.includes(`(depth ${shown})`), error.message);
+    }
+    assertEquals(assertGemma4ExpertCacheOptions("T", { expertCache: { slots: 64, depth: 4 } }), 64);
+  });
+
   it("refuses every combination that runs the target in a batch or an immediate run, naming it", () => {
     const cases: readonly (readonly [PipelineOptions, string])[] = [
       [{ decodeAhead: 2 }, "decodeAhead 2"],
@@ -273,6 +299,43 @@ describe("expertCache: the prefill chunk rows", () => {
     );
   });
 
+  it("carries self-speculation's depth into the settled option up to its bound, and leaves it out without one", () => {
+    // depth + 1 ≤ min(⌊slots / k⌋, slack, chunk rows): 7 at 64 slots, 1 at 16, 3 with 4 chunk rows.
+    for (const [options, depth] of [
+      [{ expertCache: { slots: 64, depth: 7 } }, 7],
+      [{ expertCache: { slots: 64, depth: 4 } }, 4],
+      [{ expertCache: { slots: 16, depth: 1 } }, 1],
+      [{ expertCache: { slots: 64, depth: 3 }, chunkLength: 4 }, 3],
+    ] as const) {
+      assertEquals(resolve(options)?.depth, depth, JSON.stringify(options));
+    }
+    assertEquals(resolve({ expertCache: { slots: 128, depth: 4 } }, moeGraph({ sliding: false })), {
+      slots: 128,
+      depth: 4,
+      chunkLength: EXPERTS / TOP_K,
+    });
+    assert(!Object.hasOwn(resolve({ expertCache: { slots: 64 } }) ?? {}, "depth"));
+  });
+
+  it("refuses a depth whose verify does not fit the slots, the slack or the chunk rows, naming the bound", () => {
+    const cases: readonly (readonly [PipelineOptions, number])[] = [
+      // ⌊16 / 8⌋ = 2 rows of picks: one draft.
+      [{ expertCache: { slots: 16, depth: 2 } }, 1],
+      // The slack (8) bounds one deferred run of depth + 1 rows.
+      [{ expertCache: { slots: 128, depth: 8 } }, 7],
+      [{ expertCache: { slots: 64, depth: 4 }, chunkLength: 4 }, 3],
+    ];
+    for (const [options, bound] of cases) {
+      const depth = options.expertCache?.depth;
+      const error = assertThrows(
+        () => resolve(options),
+        ModelInputError,
+        `expertCache.depth ${depth} exceeds ${bound}`,
+      );
+      assert(error.message.includes("depth + 1"), error.message);
+    }
+  });
+
   it("fails loudly on routed layers that do not share one k", () => {
     const graph = moeGraph();
     const mixed = {
@@ -310,6 +373,7 @@ describe("expertCache: the refusals come before the weights", () => {
   it("fromPretrained refuses an invalid option and a combination with no request sent", async () => {
     for (const options of [
       { expertCache: { slots: 0 } },
+      { expertCache: { slots: 64, depth: 0 } },
       { expertCache: { slots: 64 }, pleResidency: "gpu" },
     ] as const) {
       let requests = 0;

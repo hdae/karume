@@ -22,6 +22,7 @@ import {
   type SamplerSpec,
   snapshotSpec,
 } from "../src/generation/sampler.ts";
+import { Randu } from "../src/generation/random.ts";
 
 const f32 = (values: readonly number[]): Float32Array<ArrayBuffer> => {
   const data = new Float32Array(values.length);
@@ -1016,5 +1017,85 @@ describe("sampler: suppressed tokens are never selected", () => {
         ),
       ModelInputError,
     );
+  });
+});
+
+describe("sampler: peek — the draft of self-speculation over the expert cache (ADR 0146 decision 8)", () => {
+  /** Specs that leave several candidates (each draw consumes a uniform value). */
+  const DRAWING: readonly SamplerSpec[] = [
+    { temperature: 1 },
+    { temperature: 0.7, topK: 3 },
+    { temperature: 1, topP: 0.8 },
+    { temperature: 1.3, topK: 64, topP: 0.95 },
+  ];
+  /** Other logits, so that draws in between see another distribution. */
+  const OTHER = f32([0.2, 1.4, -0.3, 0.9]);
+
+  it("Randu.peek(a) is the uniform value after a more draws, the walk's own, and does not advance", () => {
+    const peeked = new Randu(17);
+    const walked = new Randu(17);
+    const values = [walked.uniform(), walked.uniform(), walked.uniform(), walked.uniform()];
+    assertEquals(
+      [0, 1, 2, 3].map((ahead) => peeked.peek(ahead)),
+      values,
+    );
+    // Nothing advanced: the next draw is still the first value, and the peeks move with it.
+    assertEquals(peeked.uniform(), values[0]);
+    assertEquals(peeked.peek(0), values[1]);
+    for (const ahead of [-1, 1.5, Number.NaN]) assertThrows(() => peeked.peek(ahead), RangeError);
+  });
+
+  it("peek(…, 0) on the same logits is the token next picks, with one draw", () => {
+    for (const spec of DRAWING) {
+      for (let seed = 0; seed < 24; seed += 1) {
+        const sampler = createSampler({ ...spec, seed });
+        const peeked = sampler.peek(BASE_LOGITS, [], 0);
+        assertEquals(
+          { ...peeked, next: sampler.next(BASE_LOGITS, []) },
+          { token: peeked.token, draws: 1, next: peeked.token },
+          `${JSON.stringify(spec)} seed ${seed}`,
+        );
+      }
+    }
+  });
+
+  it("peek(…, a) is the token next picks after a draws", () => {
+    for (const spec of DRAWING) {
+      for (let seed = 0; seed < 24; seed += 1) {
+        const peeking = createSampler({ ...spec, seed });
+        const drawing = createSampler({ ...spec, seed });
+        const peeked = peeking.peek(BASE_LOGITS, [], 2);
+        drawing.next(OTHER, []);
+        drawing.next(OTHER, []);
+        assertEquals(
+          peeked.token,
+          drawing.next(BASE_LOGITS, []),
+          `${JSON.stringify(spec)} seed ${seed}`,
+        );
+      }
+    }
+  });
+
+  it("never changes what a later next picks", () => {
+    for (const spec of DRAWING) {
+      const peeking = createSampler({ ...spec, seed: 5 });
+      const plain = createSampler({ ...spec, seed: 5 });
+      const peekingDraws: number[] = [];
+      const plainDraws: number[] = [];
+      for (let step = 0; step < 32; step += 1) {
+        for (let ahead = 0; ahead < step % 4; ahead += 1) peeking.peek(OTHER, [], ahead);
+        peekingDraws.push(peeking.next(step % 2 === 0 ? BASE_LOGITS : OTHER, []));
+        plainDraws.push(plain.next(step % 2 === 0 ? BASE_LOGITS : OTHER, []));
+      }
+      assertEquals(peekingDraws, plainDraws, JSON.stringify(spec));
+    }
+  });
+
+  it("draws nothing where next consumes nothing (one candidate), and picks next's token", () => {
+    for (const spec of [{ temperature: 0 }, { temperature: 1, topK: 1 }] satisfies SamplerSpec[]) {
+      const sampler = createSampler({ ...spec, seed: 3 });
+      assertEquals(sampler.peek(BASE_LOGITS, [], 4), { token: 0, draws: 0 }, JSON.stringify(spec));
+      assertEquals(sampler.next(BASE_LOGITS, []), 0);
+    }
   });
 });

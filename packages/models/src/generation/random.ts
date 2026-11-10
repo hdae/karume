@@ -36,6 +36,9 @@ const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bi
   return { state: next, value: (z ^ (z >> 31n)) & MASK_64 };
 };
 
+/** A 64-bit output as a [0, 1) uniform value (its top 53 bits). */
+const toUniform = (value: bigint): number => Number(value >> 11n) / Number(DENOMINATOR);
+
 /** Generator of a deterministic [0,1) uniform sequence (the same `seed` gives the same one). */
 export class Randu {
   #state: bigint;
@@ -52,6 +55,20 @@ export class Randu {
   uniform(): number {
     const { state, value } = nextUint64(this.#state);
     this.#state = state;
-    return Number(value >> 11n) / Number(DENOMINATOR);
+    return toUniform(value);
+  }
+
+  /**
+   * The uniform value `uniform()` would return after `ahead` more calls (`peek(0)` is the next one),
+   * without advancing. A splitmix64 state moves by the golden gamma per step, so the state `ahead`
+   * steps on is a sum, not a walk.
+   *
+   * MUST: `ahead` is a non-negative safe integer (anything else is a caller's broken bookkeeping).
+   */
+  peek(ahead: number): number {
+    if (!Number.isSafeInteger(ahead) || ahead < 0) {
+      throw new RangeError(`Randu.peek: ahead ${ahead} is not a non-negative integer`);
+    }
+    return toUniform(nextUint64((this.#state + BigInt(ahead) * GOLDEN_GAMMA) & MASK_64).value);
   }
 }

@@ -329,17 +329,33 @@ export type PipelineOptions = {
    * no tier: every miss reads the distribution. It changes where the bytes come from, not the
    * output. The tier is host memory: the estimate does not count it, and `dispose` releases it.
    *
+   * `depth` turns decode into **self-speculation over the cache** (ADR 0146 decision 8): each cycle
+   * drafts up to `depth` tokens one row at a time on the cache as it is (a missing expert contributes
+   * 0 and nothing waits), loads what the drafts picked, verifies the frontier and the drafts in one
+   * run of `depth + 1` rows, and keeps only the rows before the first one that picked a missing
+   * expert. Every token is drawn from such an exact row with the sampler's own random sequence, so
+   * the output stays that of full residency at every temperature; the drafts only decide how many
+   * tokens a cycle confirms. Absent = one run per decode token, re-run after a miss. Prefill is the
+   * same either way.
+   *
    * MUST: `slots` is an integer from 2 × k (a chunk has at least 2 rows) to the experts of a layer,
    * on a model whose graph has `expert_linear`; `hostBytes`, when present, is a positive safe integer
    * (both fail loudly before any weight part is fetched; a `hostBytes` below one expert fails at the
-   * Session's construction). Refused (fails loudly, before any weight part is fetched) with
+   * Session's construction). `depth`, when present, is a positive integer with `depth + 1` at most
+   * `⌊slots / k⌋` (a verify's picks fit the slots), the sliding slack and the chunk rows (one verify
+   * is one deferred run) — 7 at slots 64 on 26B; a larger one fails loudly with the bound, before any
+   * weight part is fetched. Refused (fails loudly, before any weight part is fetched) with
    * `decodeAhead ≥ 2`, {@link PipelineOptions.speculative}, `pleResidency: "gpu"` and
    * {@link PipelineOptions.vision} — each runs the target in a batch or an immediate run, which a run
    * under the cache cannot be. Decode runs on the host sampler (no GPU argmax).
    *
    * DECIDED: docs/decisions/0146-exact-expert-cache.md
    */
-  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
+  readonly expertCache?: {
+    readonly slots: number;
+    readonly hostBytes?: number;
+    readonly depth?: number;
+  };
   /**
    * The row count of a fixed-length prefill chunk (default: the distribution's declaration
    * {@link PipelineConfig.chunkLength}).
@@ -1922,7 +1938,12 @@ export class GemmaPipeline {
           : { ...sessionOptions, expertCache: expertCacheOptions },
       );
       const cacheSession =
-        expertCache === undefined ? undefined : createExpertCacheSession(session);
+        expertCache === undefined
+          ? undefined
+          : createExpertCacheSession(
+              session,
+              expertCache.depth === undefined ? {} : { depth: expertCache.depth },
+            );
       // Under GPU residency, runs that do not use greedy (prefill, decode with diagnostics) also go
       // through the wrapper — it is the only place to plug in `per_layer_inputs`. Whether greedy
       // itself is used is decided by the generation surface from the presence of `onRun`, so it is
@@ -2206,6 +2227,9 @@ export class GemmaPipeline {
           ...(state.greedyOutput?.ahead === undefined
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
+          ...(state.expertCache?.speculation === undefined
+            ? {}
+            : { selfSpeculation: state.expertCache.speculation }),
           program: state.wiring,
           ...(capacity === undefined ? {} : { capacity }),
           ...(speculative === undefined ? {} : { speculative }),
@@ -2330,6 +2354,9 @@ export class GemmaPipeline {
           ...(state.greedyOutput?.ahead === undefined
             ? {}
             : { greedyAhead: state.greedyOutput.ahead }),
+          ...(state.expertCache?.speculation === undefined
+            ? {}
+            : { selfSpeculation: state.expertCache.speculation }),
           program: state.wiring,
           ...(capacity === undefined ? {} : { capacity }),
           ...(speculative === undefined ? {} : { speculative }),
@@ -2464,6 +2491,9 @@ export class GemmaPipeline {
    * One drafter run (inputs / outputs and intermediates) is put on the `unaccounted` side — a draft
    * run never runs at the same time as a verify run, and the requirement of that shape is a small
    * constant that depends on neither `k` nor `capacity`.
+   *
+   * With {@link PipelineOptions.expertCache} `depth`, item 1 alone is added, with `depth + 1` rows
+   * (its drafts run in the decode shape on the target itself).
    */
   estimateSessionMemory(options: EstimateOptions = {}): AdmissionReport {
     const { wiring, graph, gpu, drafter, vision, entry, expertCacheOptions } = this.#state;
@@ -2515,6 +2545,11 @@ export class GemmaPipeline {
       ...(drafter === undefined
         ? {}
         : { verifyQueryLength: (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1 }),
+      // Self-speculation over the expert cache verifies `depth + 1` rows the same way (a drafter is
+      // refused with the cache, so at most one of the two is present).
+      ...(this.#state.expertCache?.speculation === undefined
+        ? {}
+        : { verifyQueryLength: this.#state.expertCache.speculation.depth + 1 }),
     });
     const baseTarget = estimateGraphMemory(graph, planWeightResidency(graph), {
       // In a run the row-count symbol R is bound by the element count of `last_row` (from the input

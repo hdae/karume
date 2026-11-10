@@ -150,7 +150,7 @@ export type DraftAcceptance = {
 export const acceptDrafts = (
   row: (index: number) => Float32Array<ArrayBuffer>,
   drafts: readonly number[],
-  sampler: Sampler,
+  sampler: Pick<Sampler, "next">,
   history: readonly number[],
   isStop: (token: number) => boolean,
 ): DraftAcceptance => {

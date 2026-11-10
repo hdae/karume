@@ -140,6 +140,22 @@ export type Sampler = {
    * specification does not use the penalty.
    */
   next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number;
+  /**
+   * The token {@link Sampler.next} would pick from these logits if `ahead` draws came before it,
+   * without consuming the RNG — the draft of self-speculation over the expert cache (ADR 0146
+   * decision 8). `draws` is whether that `next` would consume a uniform value: 0 when the
+   * distribution has one candidate (temperature 0, top-k 1), 1 otherwise. A draft that peeks the
+   * very value the exact row will draw with picks, from nearly the same logits, nearly always the
+   * token the exact row picks.
+   *
+   * MUST: never changes what any later `next` returns (the RNG is consumed only by `next`, once
+   * per confirmed token, so the sequence stays that of plain decode).
+   */
+  peek(
+    logits: Float32Array<ArrayBuffer>,
+    history: readonly number[],
+    ahead: number,
+  ): { readonly token: number; readonly draws: 0 | 1 };
 };
 
 const assertFiniteAtLeast = (value: number, minimum: number, where: string): void => {
@@ -703,6 +719,25 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
 };
 
 /**
+ * The inverse-CDF draw shared by {@link Sampler.next} and {@link Sampler.peek} (one mapping from a
+ * uniform value to a token, so a peek of the value `next` will use picks what `next` picks).
+ */
+const drawFrom = (
+  tokens: Int32Array<ArrayBuffer>,
+  probabilities: Float64Array<ArrayBuffer>,
+  draw: number,
+): number => {
+  let cumulative = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    cumulative += probabilities[index];
+    if (draw < cumulative) return tokens[index];
+  }
+  // Rounding can leave the cumulative sum slightly below 1 (`draw` is in [0,1), so only then does
+  // control reach here).
+  return tokens[tokens.length - 1];
+};
+
+/**
  * Builds a sampler (it holds RNG state, so one generation **reuses the same object**).
  *
  * Omitting the specification gives greedy (temperature 0) — this expresses that this layer owns no
@@ -746,15 +781,13 @@ export const createSampler = (
       // One candidate (temperature 0 / topK 1 / vocabulary 1) makes the draw trivial, so the RNG
       // is not advanced.
       if (tokens.length === 1) return tokens[0];
-      const draw = random.uniform();
-      let cumulative = 0;
-      for (let index = 0; index < tokens.length; index += 1) {
-        cumulative += probabilities[index];
-        if (draw < cumulative) return tokens[index];
-      }
-      // Rounding can leave the cumulative sum slightly below 1 (`draw` is in [0,1), so only then
-      // does control reach here).
-      return tokens[tokens.length - 1];
+      return drawFrom(tokens, probabilities, random.uniform());
+    },
+    peek(logits: Float32Array<ArrayBuffer>, history: readonly number[], ahead: number) {
+      const { tokens, probabilities } = samplerDistribution(logits, frozen, history, suppressed);
+      // The same rule as `next`: one candidate consumes no uniform value.
+      if (tokens.length === 1) return { token: tokens[0], draws: 0 };
+      return { token: drawFrom(tokens, probabilities, random.peek(ahead)), draws: 1 };
     },
   };
 };

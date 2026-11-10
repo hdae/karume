@@ -52,7 +52,12 @@
 //    which changes where a load's bytes come from, not which): 7a at 16 slots with every expert held
 //    (no load reads the container) and at 64 slots with a quarter of them (RAM hits, container reads
 //    and RAM evictions all happen), 7b at 64 slots with every expert held — each against the same
-//    resident reference, with the same misses and loads as the run at the same slots without a tier
+//    resident reference, with the same misses and loads as the run at the same slots without a tier;
+//    and (7c) `Pipeline.fromAssets` with `expertCache.depth` — self-speculation over the cache (ADR
+//    0146 decision 8), every expert in the host tier, at 64 slots depth 4 and 16 slots depth 1 —
+//    generates each golden prompt's tokens at temperature 0 and at temperature 1 (top-k 64, top-p
+//    0.95, a fixed seed) equal to the pipeline's without the cache at the chunk rows the cache settles,
+//    with drafts confirmed and verifies that missed (cut at their first missing row or run again)
 //
 // A cut model's hidden state is not the final layer's, and a short cut's logits saturate at the
 // softcap (±30): on cut 6, 7 to 757 entries of each golden row are exactly 30.0, so every margin
@@ -121,6 +126,7 @@ import {
   Pipeline,
   parsePipelineConfig,
   type PipelineConfig,
+  type SamplerSpec,
 } from "../../models/gemma.ts";
 import { admitGemma4, admitGemma4Ple } from "../../models/src/gemma/admission.ts";
 import { createExpertCacheSession } from "../../models/src/generation/expert-cache-session.ts";
@@ -1241,6 +1247,22 @@ const PIPELINE_CACHE_RUNS: readonly CacheRun[] = [
   { slots: 64 },
   { slots: 64, host: "all" },
 ];
+/**
+ * ⑦c's runs: self-speculation of `depth` drafts per cycle over the cache with every expert in the
+ * host tier — at 64 slots the depth the research measured (4), at 16 the most a verify's picks
+ * allow (⌊16 / 8⌋ − 1 = 1).
+ */
+const SPECULATION_RUNS: readonly { readonly slots: number; readonly depth: number }[] = [
+  { slots: 64, depth: 4 },
+  { slots: 16, depth: 1 },
+];
+/** ⑦c's samplers: greedy, and the Playground's defaults (26B-it's) with a fixed seed. */
+const SPECULATION_SAMPLERS: readonly (readonly [string, SamplerSpec])[] = [
+  ["temperature 0", { temperature: 0 }],
+  ["temperature 1", { temperature: 1, topK: 64, topP: 0.95, seed: 7 }],
+];
+/** Tokens ⑦c generates per golden prompt and sampler (several cycles each). */
+const SPECULATION_NEW_TOKENS = 32;
 /** A run's name in the log and the failures. */
 const cacheRunName = ({ slots, host }: CacheRun): string =>
   `slots ${slots}${host === undefined ? "" : ` host ${host}`}`;
@@ -1601,6 +1623,142 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       }
       console.log(`[e2e] gemma4 26b cut expert cache (Pipeline):\n  ${lines.join("\n  ")}`);
       assertEquals(failures, [], "the expert cache against the pipeline without it");
+    });
+
+    it("⑦c gemma.Pipeline: self-speculation over the cache at 64 slots depth 4 and 16 slots depth 1 gives the tokens without the cache at temperature 0 and 1, with accepted drafts and cut verifies", async () => {
+      assert(gpu !== undefined, "no GPU");
+      const assets = {
+        config: PIPELINE_CONFIG,
+        model: await Promise.all(resolveParts(MODEL).map((part) => readFile(part))),
+        tokenizer: await readFile(TOKENIZER),
+      };
+      /** Each golden prompt's tokens (a stop token included) and stop reason, and the decode tokens. */
+      const generate = async (
+        pipeline: Pipeline,
+        sampler: SamplerSpec,
+      ): Promise<{ readonly tokens: Map<string, string>; readonly decoded: number }> => {
+        const tokens = new Map<string, string>();
+        let decoded = 0;
+        for (const [name, golden] of goldens) {
+          const sequence = await pipeline.sequence();
+          try {
+            const ids: number[] = [];
+            const stream = sequence.generate({
+              prompt: [...golden.prompt],
+              maxNewTokens: SPECULATION_NEW_TOKENS,
+              sampler,
+            });
+            for await (const event of stream) {
+              if (event.kind === "token") ids.push(event.id);
+            }
+            const stop = await stream.done;
+            if (stop.reason === "eos") ids.push(stop.token);
+            // The first token comes from the prefill; the rest are decode's.
+            decoded += stop.tokens - 1;
+            tokens.set(name, `[${ids.join(", ")}] (stop '${stop.reason}')`);
+          } finally {
+            await sequence.dispose();
+          }
+        }
+        return { tokens, decoded };
+      };
+
+      const lines: string[] = [];
+      const failures: string[] = [];
+      /** Per chunk rows and sampler, the tokens without the cache (each computed once). */
+      const withoutCache = new Map<string, Map<string, string>>();
+      for (const { slots, depth } of SPECULATION_RUNS) {
+        const run = `slots ${slots} depth ${depth}`;
+        const chunkLength = cacheChunkRows(slots);
+        if (!SPECULATION_SAMPLERS.every(([label]) => withoutCache.has(`${chunkLength}/${label}`))) {
+          // Without the cache at the chunk rows the cache settles; one large container at a time.
+          const resident = await Pipeline.fromAssets(assets, { gpu, chunkLength });
+          try {
+            for (const [label, sampler] of SPECULATION_SAMPLERS) {
+              withoutCache.set(
+                `${chunkLength}/${label}`,
+                (await generate(resident, sampler)).tokens,
+              );
+            }
+          } finally {
+            await resident.dispose();
+            await settleReleases(gpu);
+          }
+        }
+        const cached = await Pipeline.fromAssets(assets, {
+          gpu,
+          expertCache: { slots, depth, hostBytes: Number.MAX_SAFE_INTEGER },
+        });
+        try {
+          assertEquals(cached.program.chunkLength, chunkLength, `${run}: the chunk rows`);
+          for (const [label, sampler] of SPECULATION_SAMPLERS) {
+            const where = `${run} ${label}`;
+            const expected = withoutCache.get(`${chunkLength}/${label}`);
+            assert(expected !== undefined, `${where}: no reference`);
+            const before = cached.expertCacheReport();
+            const started = performance.now();
+            const actual = await generate(cached, sampler);
+            const seconds = (performance.now() - started) / 1000;
+            const after = cached.expertCacheReport();
+            const [was, now] = [before?.speculation, after?.speculation];
+            assert(
+              after !== undefined && was !== undefined && now !== undefined,
+              `${where}: no cycles reported`,
+            );
+            const delta = {
+              cycles: now.cycles - was.cycles,
+              draftRuns: now.draftRuns - was.draftRuns,
+              acceptedDrafts: now.acceptedDrafts - was.acceptedDrafts,
+              verifyRetries: now.verifyRetries - was.verifyRetries,
+              partialCommits: now.partialCommits - was.partialCommits,
+            };
+            const decodeRuns = delta.draftRuns + delta.cycles + delta.verifyRetries;
+            lines.push(
+              `${where} (chunks of ${chunkLength} rows, ${seconds.toFixed(1)} s, ${actual.decoded} decode tokens): ` +
+                `cycles ${delta.cycles}, draftRuns ${delta.draftRuns}, acceptedDrafts ${delta.acceptedDrafts}, ` +
+                `partialCommits ${delta.partialCommits}, verifyRetries ${delta.verifyRetries}, ` +
+                `decode runs per decode token ${(decodeRuns / actual.decoded).toFixed(2)} ` +
+                `(verify ${((delta.cycles + delta.verifyRetries) / actual.decoded).toFixed(2)}, draft ${(delta.draftRuns / actual.decoded).toFixed(2)}), ` +
+                `tokens per cycle ${(actual.decoded / delta.cycles).toFixed(2)}`,
+            );
+            for (const [name, tokens] of expected) {
+              lines.push(`  ${name}: ${tokens}`);
+              if (actual.tokens.get(name) !== tokens) {
+                failures.push(
+                  `${where} ${name}: ${actual.tokens.get(name)} with the cache, ${tokens} without`,
+                );
+              }
+            }
+            // A case whose drafts were never confirmed, or whose verifies never missed, decides
+            // nothing about the cycle.
+            if (delta.acceptedDrafts === 0) failures.push(`${where}: no draft confirmed`);
+            if (delta.partialCommits + delta.verifyRetries === 0) {
+              failures.push(`${where}: no verify missed — the case decides nothing`);
+            }
+            // Every decode token came from a cycle (one cycle confirms at least one).
+            if (delta.cycles === 0 || delta.cycles > actual.decoded) {
+              failures.push(`${where}: ${delta.cycles} cycles for ${actual.decoded} decode tokens`);
+            }
+          }
+          const report = cached.expertCacheReport();
+          assert(report?.speculation !== undefined);
+          lines.push(`${run} (whole pipeline): ${reportLine(report)}`);
+          // The counters account for every run: scheme A's prefill, then the cycles' runs.
+          const { draftRuns, cycles, verifyRetries } = report.speculation;
+          const counted =
+            report.committedRuns + report.retries + draftRuns + cycles + verifyRetries;
+          if (report.runs !== counted) {
+            failures.push(`${run}: ${report.runs} runs, ${counted} counted by the face`);
+          }
+        } finally {
+          await cached.dispose();
+          await settleReleases(gpu);
+        }
+      }
+      console.log(
+        `[e2e] gemma4 26b cut self-speculation over the expert cache:\n  ${lines.join("\n  ")}`,
+      );
+      assertEquals(failures, [], "self-speculation over the cache against the pipeline without it");
     });
   },
 );

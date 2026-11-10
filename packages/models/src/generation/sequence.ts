@@ -129,6 +129,17 @@
  * abort boundary is the batch; a token of a batch already run is checked synchronously before it is
  * handed out. A failed batch commits nothing (the frontier stays `pendingToken`, as for a failed
  * per-step run).
+ *
+ * ## Self-speculation over the expert cache (`options.selfSpeculation` — ADR 0146 decision 8)
+ *
+ * Decode runs as cycles of the capability: one call drafts up to `k' = min(depth, remaining − 1)`
+ * tokens on the cache as it is, verifies `[b, d₁..d_k']` and draws, from the verify's exact rows
+ * only, the tokens plain decode would draw (the same logits, history and order, once per confirmed
+ * token — at any temperature). It returns with the verify pending, and the delivery is the
+ * speculative path's: `pendingToken` / `generated` / `history` before each yield, the stop check, and
+ * `settleCommit()` up to the frontier of the delivered tokens — so a consumer's `break` leaves the
+ * conversation at "the tokens received + one frontier" here too. Prefill is unchanged (the cache's
+ * re-run face runs each chunk until it misses nothing).
  */
 
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -146,7 +157,7 @@ import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { assertPrefillBlocks, planPrefillChunksWithBlocks } from "./greedy.ts";
-import { createSampler, isStopToken, type SamplerSpec } from "./sampler.ts";
+import { createSampler, isStopToken, type Sampler, type SamplerSpec } from "./sampler.ts";
 import type { GenerationSoftInputs, GenerationWiring } from "./program.ts";
 import {
   acceptDrafts,
@@ -842,6 +853,64 @@ export type GenerationGreedyAhead<C extends GenerationContextFace> = {
   run(request: GenerationGreedyAheadRequest<C>): Promise<readonly GreedyRunResult[]>;
 };
 
+/**
+ * The rows of one run of a self-speculation cycle, built by the generation loop
+ * ({@link GenerationSelfSpeculationRequest.prepare} — the loop owns the shapes and the inputs).
+ */
+export type GenerationPreparedRows = {
+  /** Every input of the run: the token ids, the row selection, the derived and the soft inputs. */
+  readonly inputs: RunInputs;
+  /**
+   * The logits of the run's selected rows (`row(j)` = input row `j`; a view valid until the next
+   * run).
+   */
+  logits(outputs: RunOutputs, where: string): (row: number) => Float32Array<ArrayBuffer>;
+};
+
+/** One cycle's input ({@link GenerationSelfSpeculation.cycle}). */
+export type GenerationSelfSpeculationRequest<C extends GenerationContextFace> = {
+  readonly context: C;
+  /** The frontier b: confirmed, not in the KV, at position `context.pastLength`. */
+  readonly token: number;
+  /** `k' = min(depth, remaining − 1)`: the most drafts the cycle takes (fewer after a stop draft). */
+  readonly drafts: number;
+  /** This turn's confirmed sequence, the frontier included (the history of every draw). */
+  readonly history: readonly number[];
+  /** The turn's sampler: `peek` for the drafts, `next` for the exact rows alone. */
+  readonly sampler: Pick<Sampler, "next" | "peek">;
+  readonly isStop: (token: number) => boolean;
+  /** The inputs of the rows `ids`, row `j` at position `position + j`. */
+  prepare(ids: readonly number[], position: number): Promise<GenerationPreparedRows>;
+};
+
+/** What one cycle confirmed ({@link GenerationSelfSpeculation.cycle}). */
+export type GenerationSelfSpeculationCycle = {
+  /**
+   * The confirmed tokens in order: `confirmed[i]` is the draw from the verify's exact row `i`, so
+   * delivering it consumes that row. The last one is the new frontier, or a stop token.
+   */
+  readonly confirmed: readonly number[];
+  /** Drafts the cycle ran (`k'`, fewer when a draft was a stop token). */
+  readonly drafted: number;
+  /** The leading confirmed tokens that equal the drafts (drafts confirmed). */
+  readonly accepted: number;
+};
+
+/**
+ * Self-speculation over the exact expert cache (internal capability —
+ * {@link GenerationSequenceOptions.selfSpeculation}; ADR 0146 decision 8).
+ *
+ * MUST: a cycle returns with its verify pending on the context, at least `confirmed.length` rows
+ * from the `pastLength` it started at, every one of those rows exact; the loop commits the rows of
+ * the tokens it delivered. A cycle that throws leaves nothing pending but rows the loop drops with
+ * `commit(0)`.
+ */
+export type GenerationSelfSpeculation<C extends GenerationContextFace> = {
+  /** The most drafts of one cycle (`≥ 1`; the verify runs `depth + 1` rows). */
+  readonly depth: number;
+  cycle(request: GenerationSelfSpeculationRequest<C>): Promise<GenerationSelfSpeculationCycle>;
+};
+
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   /**
    * Internal capability that returns the maximum of the logits. Used only for decode at
@@ -869,6 +938,16 @@ export type GenerationSequenceOptions<C extends GenerationContextFace> = {
    * absent or declared `positionsOnly` (a step is derived before its token exists).
    */
   readonly greedyAhead?: GenerationGreedyAhead<C>;
+  /**
+   * Self-speculation over the exact expert cache (internal capability — the module doc section):
+   * decode runs as its cycles at any temperature, and the tokens are plain decode's.
+   *
+   * MUST (checked at sequence creation, failing loudly): `depth` is an integer ≥ 1 with
+   * `depth + 1` within the context's sliding slack and `chunkLength` (the verify is one deferred run
+   * of `depth + 1` rows); no `speculative` and no `greedyAhead` (each holds the context's one pending
+   * commit with runs of its own).
+   */
+  readonly selfSpeculation?: GenerationSelfSpeculation<C>;
   readonly session: GenerationSession<C>;
   /** The verified static wiring (the return value of `createGenerationProgram`). */
   readonly program: GenerationWiring;
@@ -1173,6 +1252,48 @@ const assertGreedyAheadSetup = (
 };
 
 /**
+ * The setup check of self-speculation ({@link GenerationSequenceOptions.selfSpeculation}) — at
+ * sequence creation, once the context (and with it the sliding slack) exists.
+ *
+ * - `depth + 1 ≤ slidingSlack` and `≤ chunkLength`: the drafts are a chain of `depth` deferred rows
+ *   and the verify one deferred run of `depth + 1`, both bounded by the runtime with these two values.
+ *   Failing here names the knob; the runtime would refuse the first cycle with the generic bound.
+ * - No drafter and no run-ahead: each takes the decode with runs of its own, and all three would
+ *   hold the context's one pending commit.
+ */
+const assertSelfSpeculationSetup = (
+  depth: number,
+  others: { readonly speculative: boolean; readonly greedyAhead: boolean },
+  slidingSlack: number | undefined,
+  program: GenerationWiring,
+): void => {
+  if (!Number.isSafeInteger(depth) || depth < 1) {
+    throw new Error(`selfSpeculation.depth ${depth} is not a positive integer`);
+  }
+  if (others.speculative) {
+    throw new Error(
+      "selfSpeculation and speculative cannot be combined (both draft and verify on the context's one pending commit)",
+    );
+  }
+  if (others.greedyAhead) {
+    throw new Error(
+      "selfSpeculation and greedyAhead cannot be combined (both hold the context's one pending commit with runs of their own)",
+    );
+  }
+  if (slidingSlack !== undefined && depth + 1 > slidingSlack) {
+    throw new Error(
+      `selfSpeculation.depth ${depth} needs a verify of ${depth + 1} rows, more than the sliding ring's slack ${slidingSlack}` +
+        " (rejected rows must not overwrite live past KV)",
+    );
+  }
+  if (depth + 1 > program.chunkLength) {
+    throw new Error(
+      `selfSpeculation.depth ${depth} needs a verify of ${depth + 1} rows, more than chunkLength ${program.chunkLength}`,
+    );
+  }
+};
+
+/**
  * Copies and checks {@link GenerationRequest.softBlocks} (at issue, synchronously): the row-count
  * rule here, the placement in `assertPrefillBlocks` (`greedy.ts`). Each error is the request's
  * (ADR 0107 decision 2).
@@ -1313,14 +1434,27 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
    */
   const now = options.speculative?.now ?? ((): number => performance.now());
   const ahead = options.greedyAhead;
-  if (ahead !== undefined) {
+  /** Self-speculation over the expert cache, with its depth read once (checked below). */
+  const self = options.selfSpeculation;
+  const selfDepth = self?.depth ?? 0;
+  if (ahead !== undefined || self !== undefined) {
     try {
-      assertGreedyAheadSetup(
-        ahead.depth,
-        options.speculative !== undefined,
-        context.slidingSlack,
-        program,
-      );
+      if (ahead !== undefined) {
+        assertGreedyAheadSetup(
+          ahead.depth,
+          options.speculative !== undefined,
+          context.slidingSlack,
+          program,
+        );
+      }
+      if (self !== undefined) {
+        assertSelfSpeculationSetup(
+          selfDepth,
+          { speculative: options.speculative !== undefined, greedyAhead: ahead !== undefined },
+          context.slidingSlack,
+          program,
+        );
+      }
     } catch (error) {
       // The context of a failed assembly is unreachable from the caller — close it first (the same
       // rule as the speculative block below; it runs first, so no drafter is open yet).
@@ -1329,7 +1463,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       } catch (cleanup) {
         throw new AggregateError(
           [error, cleanup],
-          "greedyAhead was refused, and closing the context failed too",
+          "greedyAhead or selfSpeculation was refused, and closing the context failed too",
         );
       }
       throw error;
@@ -1539,7 +1673,10 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       options.greedyMasksSuppressed === true,
     );
     const greedy =
-      face === undefined && options.onRun === undefined && sampler.greedy !== undefined
+      face === undefined &&
+      self === undefined &&
+      options.onRun === undefined &&
+      sampler.greedy !== undefined
         ? options.greedy
         : undefined;
     /**
@@ -1942,6 +2079,106 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             }
             settleCommit();
             hidden = nextHidden;
+          }
+          stop = limitStop(generated);
+          return;
+        }
+
+        if (self !== undefined) {
+          // ---- Self-speculation over the expert cache (the module doc section, ADR 0146 decision 8)
+          const isStop = (id: number): boolean =>
+            isStopToken(id, program.stopTokens) || isStopToken(id, requestStopTokens);
+          /**
+           * One run of a cycle: a single row in the decode shape (M=1, R=1); a verify in the fixed
+           * shape of `depth + 1` rows, R padded to `depth + 1` (as the drafter's verify — a `k'` that
+           * shrinks at the end of the budget or at a stop draft adds no PreparedPlan shape).
+           */
+          const prepare = async (
+            ids: readonly number[],
+            position: number,
+          ): Promise<GenerationPreparedRows> => {
+            const drafted = ids.length - 1;
+            const rows = physicalChunkRows(drafted === 0 ? 1 : selfDepth + 1, program);
+            const tokenIds = new Int32Array(rows);
+            const positions = new Int32Array(rows);
+            // MUST: pad rows stay 0 (the value contract of ADR 0066 addendum 6).
+            ids.forEach((id, row) => {
+              tokenIds[row] = id;
+              positions[row] = position + row;
+            });
+            const extra = await deriveInputs(tokenIds, positions, signal);
+            // The stage boundary is right before each run (as in every other path).
+            signal?.throwIfAborted();
+            const rowIndices = verifyRowIndices(drafted, selfDepth);
+            return {
+              inputs: {
+                [program.inputIds]: i32Row(rows, tokenIds),
+                [program.lastRow]: lastRowInput(rowIndices),
+                ...extra,
+              },
+              logits: (outputs, where) =>
+                readLogits(outputs, program, where, rowIndices.length).row,
+            };
+          };
+          let cycle = 0;
+          while (generated < tokenLimit) {
+            await settleAbort(signal);
+            const drafts = planDraftLength(selfDepth, tokenLimit - generated);
+            cycle += 1;
+            const startedAt = now();
+            const result = await self.cycle({
+              context,
+              token,
+              drafts,
+              history,
+              sampler,
+              isStop,
+              prepare,
+            });
+            // ---- Synchronous from here to the first yield (the verify is pending; an exception is
+            // folded by finally's settleCommit as commit(0)).
+            frontierRows = 0;
+            const confirmed = result.confirmed;
+            const pending = context.pendingCommit;
+            // A face that confirms nothing, more than the verify's rows, or rows it left uncommitted
+            // nowhere is broken — delivering would put tokens in the conversation without their rows.
+            if (
+              confirmed.length < 1 ||
+              confirmed.length > drafts + 1 ||
+              pending === undefined ||
+              pending.queryLength < confirmed.length
+            ) {
+              throw new Error(
+                `selfSpeculation: cycle ${cycle} confirmed ${confirmed.length} tokens of at most ${drafts + 1}` +
+                  ` with ${pending?.queryLength ?? 0} rows pending (broken bookkeeping)`,
+              );
+            }
+            onRun?.({
+              kind: "verify",
+              cycle,
+              rows: result.drafted + 1,
+              accepted: result.accepted,
+              delivered: confirmed.length,
+              wallMs: now() - startedAt,
+            });
+            for (let index = 0; index < confirmed.length; index += 1) {
+              const id = confirmed[index];
+              // MUST: update the frontier before the yield (the speculative path's rule — a `break`
+              // commits up to here in finally).
+              token = id;
+              generated += 1;
+              history.push(id);
+              pendingToken = id;
+              frontierRows = index + 1;
+              const stopped = stopFor(id, generated);
+              if (stopped !== undefined) {
+                stop = stopped;
+                settleCommit();
+                return;
+              }
+              yield { kind: "token", id, position: context.pastLength + 1 + index };
+            }
+            settleCommit();
           }
           stop = limitStop(generated);
           return;

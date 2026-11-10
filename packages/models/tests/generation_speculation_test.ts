@@ -2133,7 +2133,10 @@ const rowsOf = (tokens: readonly number[]) => {
  * A sampler that records the draw history (actually the real temperature-0 one — the decision is
  * argmax).
  */
-const recordingSampler = (): { readonly sampler: Sampler; readonly histories: number[][] } => {
+const recordingSampler = (): {
+  readonly sampler: Pick<Sampler, "next">;
+  readonly histories: number[][];
+} => {
   const inner = createSampler();
   const histories: number[][] = [];
   return {
