@@ -22,6 +22,9 @@ describe("linearGemvStagedEligible (K-90)", () => {
       [3840, 4096],
       [3840, 8192],
       [3840, 15360],
+      [2816, 4096],
+      [2816, 8192],
+      [2816, 2112],
     ]) {
       for (const m of [1, 4, 8])
         assertEquals(linearGemvStagedEligible("i4", m, n, k, 32), 32, `${n}×${k} M${m}`);

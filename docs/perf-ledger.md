@@ -563,3 +563,15 @@ the speed picture. That sentence predates the implementation: on 12B it does cha
 | ------ | --- | --------- | ------------------------------ |
 | 🧪 | K-101 | An int4 `[262144, H]` output-head row for E2B / E4B | Filed 2026-11-06. 12B's head row took 1.6 ms/token off 23.9 (lanes 16; research §2). E2B and E4B keep the head in the reference order. Measure as whole-model decode; a row that does not beat that order by more than the noise of its arms is not added. |
 | 🧪 | K-102 | Why `i4-fast` loses to `i4` on 12B with the drafter | Filed 2026-11-06. 38.2 against 32.6 and 25.9 against 19.1 ms/token (research §3), while plain decode gains 1.9–2.1× and E2B / E4B gain with the drafter as well. Not investigated. One chat each in Chrome on the RTX 5070 Ti (2026-11-07) went the other way, 44.5 against 30.6 tokens per second ([research](research/2026-11-07-gemma4-f16-kv.md) §6), so this may be specific to the machine or backend. Closes with an explanation, or with a measured path that makes speculative `i4-fast` no slower than speculative `i4`. |
+
+## 2026-11-10 Gemma 4 26B decode
+
+[Research 2026-11-10](research/2026-11-10-gemma4-26b-fast.md) added 26B's rows and measured them on the RTX 3080 Ti: a
+decode forward went from 24.6–25.7 to 17.5–17.9 ms. What is left of the forward is 6.3 ms of small kernels, 5.6 ms of
+dense linears, 2.9 ms of routed experts and 0.9 ms of attention.
+
+| Status | ID | Candidate | Preconditions / kill criterion |
+| ------ | --- | --------- | ------------------------------ |
+| 🧪 | K-103 | A parallel form of `expert_linear` for the parallel presets | Filed 2026-11-10. 60 dispatches at 48 µs against 17–30 µs for the dense rows of similar size on the parallel GEMV (research §5): 2.9 ms per forward. It is a second numeric contract for the op, and the pooled and resident kernels must share it (ADR 0146 decision 2). Measure as whole-model decode; killed if it does not take 1 ms off the forward. |
+| 🧪 | K-104 | A grouped form of `expert_linear` for runs of several rows (ADR 0145 open point 1) | Filed 2026-11-10. One thread reads an expert's weight row once for every row of the run that picked it, as the row block of the dense GEMV does; bit identity with the one-row form is then an exact-match test, and the one-row kernel does not change. Estimate for decode under the cache: about 2% (the verify of self-speculation alone; five rows share about half of their picks). The cache's prefill is slow because of re-runs and loads, which this does not change. Worth it only for resident prefill of long prompts; measure that first. |
+| 🧪 | K-105 | The small kernels of the 26B forward | Filed 2026-11-10. 938 dispatches, 6.3 ms of 15.7 (40%) once the dense linears are parallel; each takes 6–8 µs whatever its size. The lever is fewer dispatches (in-layer fusion), which needs the ruling the 2026-11-09 re-audit lists. |

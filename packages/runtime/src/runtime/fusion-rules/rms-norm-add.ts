@@ -46,7 +46,7 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
     if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
     if (
       shape.some((dim) => dim < 1) ||
-      ![256, 1536, 2560, 3840].includes(shape[shape.length - 1])
+      ![256, 1536, 2560, 2816, 3840].includes(shape[shape.length - 1])
     ) {
       return undefined;
     }

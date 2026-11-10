@@ -82,3 +82,10 @@ The rule's widths are now 256 / 1536 / 2560 / 3840. 3840 is among the widths the
 [0017](0017-rms-norm-conv2d-clamp-min.md) addendum 2), and it is covered by the same u32 check against the unfused pair
 (`packages/runtime/tests/gpu_rms_norm_add_fusion_test.ts`). It is part of 12B's `i4-fast`
 ([research 2026-11-06](../research/2026-11-06-gemma4-12b-fast.md)); its own gain was not separated from the other rows.
+
+## Addendum (2026-11-10) — width 2816 for 26B
+
+The rule's widths are now 256 / 1536 / 2560 / 2816 / 3840. 2816 (11 × 256) is among the widths the generator accepts,
+and it is covered by the same u32 check against the unfused pair. On 26B it fuses 90 pairs per decode forward, about
+0.5 ms of GPU time on the RTX 3080 Ti ([research 2026-11-10](../research/2026-11-10-gemma4-26b-fast.md) §5). It is part
+of 26B's `i4-fast`.

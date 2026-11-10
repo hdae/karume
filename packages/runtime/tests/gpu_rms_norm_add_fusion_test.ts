@@ -24,7 +24,7 @@ const parity = (a: Uint32Array<ArrayBuffer>, b: Uint32Array<ArrayBuffer>, label:
 };
 
 describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
-  for (const dim of [256, 1536, 2560, 3840]) {
+  for (const dim of [256, 1536, 2560, 2816, 3840]) {
     for (const normFirst of [false, true]) {
       it(`dim=${dim} / normFirst=${normFirst}: matches the reference across row counts and cancellation`, async () => {
         const gpu = await acquireGpu();

@@ -110,3 +110,27 @@ so `parallel` and what builds on it (ADR 0103, 0105) fell back on every E4B line
   this device. E2B and E4B still have no such row (perf-ledger K-101).
 - Generated tokens were identical in every arm of the sweep at this prompt. The rows change rounding, so that is an
   observation about these prompts, not a guarantee; the quant's description says so (ADR 0104).
+
+## Addendum (2026-11-10) — the 26B rows, measured per kernel as whole-model decode
+
+26B A4B (the mixture of experts, ADR [0145](0145-gemma4-26b-moe-resident.md)) had no row either, so `parallel` fell back
+on each of its 236 dense linears, about half of a decode forward. Its rows are in `PARALLEL_SHAPES`, int4 group 32
+throughout:
+
+| Role | Shape (n × k) | Lanes |
+| ---- | ------------- | ----- |
+| expanding: full q, sliding q, sliding k / v, gate / up | 8192 / 4096 / 2048 / 2112 × 2816 | 4 |
+| full k, router | 1024 / 128 × 2816 | 32 |
+| reducing: o, down | 2816 × 4096 / 8192 / 2112 | 32, staged activations |
+| output head | 262144 × 2816 | 4 |
+
+- **Measured** on the RTX 3080 Ti as the per-kernel GPU time of whole-model decode
+  ([research 2026-11-10](../research/2026-11-10-gemma4-26b-fast.md) §4). On the expanding rows 4, 16 and 32 tie and 2
+  and 8 lose, so they take 12B's 4. The reducing rows tie between staged 32 and staged 16 and lose unstaged. The head
+  takes 4, which beat 8 and 16 by a quarter of its time; 32 does not build, as on 12B.
+- The dense linears go from 12.4 to 5.6 ms per decode forward, and the forward from 24.6–25.7 to 17.5–17.9 ms.
+- **The routed experts are not on this table.** `expert_linear` keeps its sequential order under every option (its own
+  numeric contract, ADR 0145 decision 4), so the exact expert cache's reference does not move
+  (ADR [0146](0146-exact-expert-cache.md)).
+- Generated tokens were identical in every arm on the three prompts measured; as for 12B, that is an observation, not a
+  guarantee.

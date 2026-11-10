@@ -1111,6 +1111,50 @@ const PARALLEL_SHAPES: readonly ParallelShape[] = [
   },
   // lm_head (tied embedding)
   { storage: "i4", n: 262144, k: 3840, group: 32, lanes: 16, packedActivations: false },
+  // ---- 26B A4B q4_0 QAT (added 2026-11-10) — the dense linears of the mixture of experts (the
+  // routed experts run on `expert_linear`, which has no parallel form). Lanes measured per kernel
+  // as whole-model decode on the RTX 3080 Ti (ADR 0098 addendum 2026-11-10): on the rows that
+  // widen 4, 16 and 32 tie and 2 and 8 lose, so they take 12B's 4; the router and the full k take
+  // 32; the rows that narrow take staged 32 (staged 16 ties, unstaged 32 and plain 4 lose); and
+  // the output head takes 4, which beats 8 and 16 here (32 does not build).
+  // q (full), q (sliding), k / v (sliding), gate / up
+  { storage: "i4", n: 8192, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 4096, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 2048, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 2112, k: 2816, group: 32, lanes: 4, packedActivations: false },
+  // k (full), router
+  { storage: "i4", n: 1024, k: 2816, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 128, k: 2816, group: 32, lanes: 32, packedActivations: false },
+  // o (sliding), o (full), down
+  {
+    storage: "i4",
+    n: 2816,
+    k: 4096,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  {
+    storage: "i4",
+    n: 2816,
+    k: 8192,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  {
+    storage: "i4",
+    n: 2816,
+    k: 2112,
+    group: 32,
+    lanes: 32,
+    packedActivations: false,
+    stagedActivations: true,
+  },
+  // lm_head (tied embedding)
+  { storage: "i4", n: 262144, k: 2816, group: 32, lanes: 4, packedActivations: false },
 ];
 
 /** Row lookup in the measured table (including the M range, in one place). */

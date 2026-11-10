@@ -60,6 +60,7 @@ describe.skipIf(!GPU_AVAILABLE)("staged-activation parallel GEMV (K-90, real GPU
           shapes.push(
             { k: 12288, group: 32 },
             { k: 15360, group: 32 },
+            { k: 2112, group: 32 },
             { k: 4096, group: 512 },
             { k: 2048, group: 2048 },
           );

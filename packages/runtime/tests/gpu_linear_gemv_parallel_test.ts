@@ -253,6 +253,12 @@ describe.skipIf(!GPU_AVAILABLE)("where the parallel GEMV accumulation applies (r
         { storage: "i4", bits: 4, n: 512, k: 3840, group: 32 },
         { storage: "i4", bits: 4, n: 3840, k: 15360, group: 32 },
         { storage: "i4", bits: 4, n: 262144, k: 3840, group: 32 },
+        // Representatives of the 26B rows (2026-11-10) — l4 / l32 / l32 staged / the l4 head at
+        // the real n.
+        { storage: "i4", bits: 4, n: 8192, k: 2816, group: 32 },
+        { storage: "i4", bits: 4, n: 128, k: 2816, group: 32 },
+        { storage: "i4", bits: 4, n: 2816, k: 2112, group: 32 },
+        { storage: "i4", bits: 4, n: 262144, k: 2816, group: 32 },
       ] as const) {
         const { storage, n, k, bits, group } = shape;
         const w = Uint8Array.from(
