@@ -47,7 +47,11 @@ import {
   resolveGemmaSessionOptions,
 } from "./session-options.ts";
 import { fitCapacityCandidates, pickFitCapacity } from "./fit-capacity.ts";
-import { assertGemma4ExpertCacheOptions, resolveGemma4ExpertCache } from "./expert-cache.ts";
+import {
+  assertGemma4ExpertCacheOptions,
+  resolveGemma4ExpertCache,
+  withVerifyBucket,
+} from "./expert-cache.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatPle, ropeInputs as qatRopeInputs } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -382,7 +386,9 @@ export type PipelineOptions = {
   readonly chunkLength?: number;
   /**
    * Physical chunk row counts used as prefill shapes **in addition to** `chunkLength` (default: the
-   * entries of {@link CHUNK_BUCKETS} below `chunkLength`; `[]` disables them).
+   * entries of {@link CHUNK_BUCKETS} below `chunkLength`, plus `depth + 1` under
+   * {@link PipelineOptions.expertCache} with a `depth`, so its verify runs no pad rows; `[]`
+   * disables them).
    *
    * Padding a short prompt to `chunkLength` (768 by distribution default) rows makes the pad rows
    * contribute nothing to the output or the KV, yet the row-local ops (linear / pointwise / norm)
@@ -1824,8 +1830,17 @@ export class GemmaPipeline {
       admitted,
       open,
       assets.tokenizer,
-      // Under the cache the chunk rows are the settled ones (a chunk's picks fit in the slots).
-      expertCache === undefined ? options : { ...options, chunkLength: expertCache.chunkLength },
+      // Under the cache the chunk rows are the settled ones (a chunk's picks fit in the slots), and
+      // the default buckets hold self-speculation's verify exactly.
+      expertCache === undefined
+        ? options
+        : {
+            ...options,
+            chunkLength: expertCache.chunkLength,
+            chunkBuckets:
+              options.chunkBuckets ??
+              withVerifyBucket(defaultChunkBuckets(expertCache.chunkLength), expertCache),
+          },
       admission,
       plePlan,
     );

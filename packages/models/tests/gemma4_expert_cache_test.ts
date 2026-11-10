@@ -10,6 +10,7 @@ import { ModelInputError } from "../src/errors.ts";
 import {
   assertGemma4ExpertCacheOptions,
   resolveGemma4ExpertCache,
+  withVerifyBucket,
 } from "../src/gemma/expert-cache.ts";
 import type { PipelineOptions } from "../src/gemma/pipeline.ts";
 import { Pipeline } from "../gemma.ts";
@@ -453,6 +454,39 @@ describe("expertCache: one slot count per routed layer", () => {
       ModelInputError,
       `expertCache.slots[11] ${EXPERTS + 1} exceeds the ${EXPERTS} experts of a layer`,
     );
+  });
+});
+
+describe("expertCache: the verify bucket of self-speculation", () => {
+  const BUCKETS = [4];
+  /** The settled cache of a 26B-shaped graph (the option is present, so it settles). */
+  const settled = (options: PipelineOptions) => {
+    const cache = resolve(options);
+    if (cache === undefined) throw new Error("the option settled nothing");
+    return cache;
+  };
+
+  it("adds depth + 1 to the default buckets, in order, so the verify runs no pad rows", () => {
+    // 64 slots: chunks of 8 rows, default ladder [4] — a verify of 5 rows would otherwise run as 8.
+    assertEquals(
+      withVerifyBucket(BUCKETS, settled({ expertCache: { slots: 64, depth: 4 } })),
+      [4, 5],
+    );
+    assertEquals(
+      withVerifyBucket(BUCKETS, settled({ expertCache: { slots: 64, depth: 1 } })),
+      [2, 4],
+    );
+    assertEquals(
+      withVerifyBucket(BUCKETS, settled({ expertCache: { slots: 64, depth: 5 } })),
+      [4, 6],
+    );
+  });
+
+  it("adds nothing without a depth, for rows already a bucket, or for rows at the chunk rows", () => {
+    assertEquals(withVerifyBucket(BUCKETS, settled({ expertCache: { slots: 64 } })), [4]);
+    assertEquals(withVerifyBucket(BUCKETS, settled({ expertCache: { slots: 64, depth: 3 } })), [4]);
+    // depth 7 verifies 8 rows, the chunk rows themselves (a bucket is below them).
+    assertEquals(withVerifyBucket(BUCKETS, settled({ expertCache: { slots: 64, depth: 7 } })), [4]);
   });
 });
 

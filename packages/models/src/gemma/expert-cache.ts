@@ -313,3 +313,24 @@ export const resolveGemma4ExpertCache = (
     chunkLength,
   };
 };
+
+/**
+ * The default prefill buckets under the settled cache, with self-speculation's verify of
+ * `depth + 1` rows added as a bucket of its own. A run's physical rows are rounded up to a bucket,
+ * and the default ladder below the cache's few chunk rows is `[4]`, so a verify of 5 rows would run
+ * as 8; a pooled `expert_linear` reads every row's picks, pad rows included, which made such a
+ * verify cost about 1.9 decode runs instead of about 1.5 (Gemma 4 26B at 64 slots, depth 4). Rows
+ * already a bucket, or at the chunk rows themselves, add nothing.
+ *
+ * MUST: only for the default ladder — buckets the caller gave are used as given (the verify then
+ * rounds up to the first of them that holds it).
+ */
+export const withVerifyBucket = (
+  buckets: readonly number[],
+  cache: Gemma4ExpertCache,
+): readonly number[] => {
+  if (cache.depth === undefined) return buckets;
+  const rows = cache.depth + 1;
+  if (rows >= cache.chunkLength || buckets.includes(rows)) return buckets;
+  return [...buckets, rows].sort((left, right) => left - right);
+};
