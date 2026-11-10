@@ -1,7 +1,9 @@
 # 0111: Composition of SessionOptions — one rule for every family: explicit > preset declaration > runtime default
 
 - Status: accepted (2026-09-26 — phase 1 "contract and groundwork", A3; approved by the
-  maintainer); decision 7 re-graded 2026-10-18 to SHOULD
+  maintainer); decision 7 re-graded 2026-10-18 to SHOULD;
+  decision 2 superseded and decision 6 amended by [0147](0147-numerics-and-kernel-adoption.md) decisions 7 and 8
+  (2026-11-10): acceptance is derived from the graph; a missing `shader-f16` warns and switches to f32
 - Date: 2026-09-26
 - Related: [0058](0058-numerics-opt-in-contract.md) (addendum 2026-09-26) / [0104](0104-gemma-fast-quant.md)
   (gemma's rule, generalised here) / [0107](0107-model-input-error.md) / [0110](0110-practical-tier-numerics-contract.md)
@@ -44,7 +46,11 @@ the rule must be one, and families may differ only in which keys they accept.
 6. **GPU feature requirements derive from the effective setting**: an explicit `"f16"` over a preset
    without shader-f16 would acquire a device without the feature and fail at construction after the
    upload. `sessionGpuFeatures` adds what the effective setting needs and fails by name at admission.
-   (Extended to every family by the addendum.)
+   (Extended to every family by the addendum.) (Amended 2026-11-10 by ADR
+   [0147](0147-numerics-and-kernel-adoption.md) decision 8: the derivation stays; on a shared GPU without `shader-f16`
+   admission warns and the Session runs f32; a self-acquired device requests only the available features and warns at
+   acquisition. A manifest's own `gpuFeatures` is a request: a device without the feature warns and switches toward the
+   reference, and on a shared GPU acquired without it the warning gives the re-acquire text.)
 7. **The runtime SHOULD NOT carry a bulk axis** (`numerics: "practical"` and the like): the bundle
    differs per family and storage dtype, and only the manifest preset expresses it (ADR 0058 addendum
    2026-09-26). (Re-graded 2026-10-18 to SHOULD: ADR 0126 designed such an axis and was deferred with
@@ -79,7 +85,9 @@ per family, a table that starts accepting f16 compute would pass type check with
 - **The only behaviour change**: a manifest declaring f16 compute in `session` without
   `gpuFeatures.shaderF16` (then only sbv2 could). It failed at Session construction; now it fails by
   name at admission on a shared GPU and requests the feature on a self-acquired device. No mirror
-  distribution has this shape (the mirror test checks "derived requirement = declaration").
+  distribution has this shape (the mirror test checks "derived requirement = declaration"). (Amended
+  2026-11-10 by ADR 0147 decision 8: on a shared GPU it warns and runs f32 instead of failing, and a
+  self-acquired device requests the feature only when the adapter has it.)
 - **gemma** never read `quant.gpuFeatures` (a silent degradation). `fromPretrained` now derives at
   admission and checks a shared GPU there; construction calls `acquireGpu({ ...required, subgroups })`
   and the post-acquire check. `fromAssets` has no manifest and requests only what the effective

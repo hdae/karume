@@ -5,7 +5,9 @@
   becomes the default preset); partly superseded: decision 6 (default stays `f16`) by the ruling of
   2026-10-04 (4), generalized by [0128](0128-default-preset-original-weights.md) decision 1 on 2026-10-17;
   decision 3's r check is opt-in since 2026-10-17 ([0129](0129-test-layout-and-lanes.md) addendum
-  (2)). Decision 1's "no intermediate presets" re-graded 2026-10-18 to SHOULD.
+  (2)). Decision 1's "no intermediate presets" re-graded 2026-10-18 to SHOULD;
+  decision 7's acceptance table replaced by the derived check of [0147](0147-numerics-and-kernel-adoption.md) decision
+  7 (2026-11-10)
 - Date: 2026-10-03
 - Related: research [2026-10-03-wan-w8a8-recon](../research/2026-10-03-wan-w8a8-recon.md)
   ("investigation §n" below — source of the facts and numbers) / ADR
@@ -201,17 +203,18 @@ without dp4a get a warning, ADR 0128 decision 5.)**
 ### 7. The public API is only the existing `quant` option
 
 - Presets are selected with `WanPipeline`'s existing `quant` option.
-- The acceptance table `WAN_SESSION_POLICY` (`packages/models/src/wan/family.ts:231`) sets
-  `linearCompute`, `attentionCompute` and `attentionScoreStorage` to `true` so the manifest's
-  `session` may declare them.
+- The manifest's `session` may declare the keys that have a place in the DiT graph, decided by the
+  derived applicability check of ADR [0147](0147-numerics-and-kernel-adoption.md) decision 7 (amended
+  2026-11-10; it replaces the acceptance table `WAN_SESSION_POLICY` in `packages/models/src/wan/family.ts`,
+  which stays until that change lands).
 - No explicit user options (`linearCompute` and the like) are added to the public surface; the third
-  argument of `resolveSessionOptions` stays empty (`family.ts:419-424`). They can be added on demand
-  since the acceptance table is shared.
+  argument of `resolveSessionOptions` stays empty (`packages/models/src/wan/family.ts`). They can be
+  added on demand (ADR 0147 decision 7 keeps this style).
 
 Why: manifest overrides suffice for tests; no public surface without a use (ADR 0008).
 
-Protects: a minimal public surface; a declaration outside the acceptance table still fails loudly
-before the weights are fetched.
+Protects: a minimal public surface; a declaration that has no place in the graph still fails loudly
+before the weights are fetched (ADR 0147 decision 7).
 
 ### 8. Steps and acceptance
 

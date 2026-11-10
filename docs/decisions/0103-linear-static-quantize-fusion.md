@@ -5,7 +5,9 @@
   `i4-fast` presets declare `fuseLinearStaticQuantize: true` — "defaults unchanged" and the M2
   condition) and [0111](0111-session-options-composition.md) (2026-09-26: composition of explicit
   options, quant declarations and runtime defaults); on 2026-10-18 the Chrome page selection was
-  withdrawn
+  withdrawn;
+  the option of "Option and eligibility" is removed by [0147](0147-numerics-and-kernel-adoption.md) decision 5
+  (2026-11-10): the fusion applies automatically on the parallel / f32 path
 - Date: 2026-09-15
 - Related: [0097](0097-gemma4-qat-integration.md), [0098](0098-linear-gemv-parallel.md),
   [0096](0096-speculative-decoding.md), [0040](0040-fusion-pass.md)
@@ -21,10 +23,11 @@ transposition and a changed submit limit are not adopted together; only this fus
 
 ## Option and eligibility
 
-Add `SessionOptions.fuseLinearStaticQuantize?: boolean`, default false. True is accepted only with
-`linearGemvReduce: "parallel"` and `linearCompute: "f32"`; another combination or a non-boolean is
-rejected at Session construction, and the parallel setting is not added implicitly. The shared
-regular / QAT Gemma pipeline options pass the setting to the target and drafter Sessions.
+The fusion has no option: it applies whenever `linearGemvReduce: "parallel"` and `linearCompute: "f32"`
+hold and the shapes below match, and the parallel setting is not added implicitly (amended 2026-11-10
+by ADR [0147](0147-numerics-and-kernel-adoption.md) decision 5, which removes the option
+`SessionOptions.fuseLinearStaticQuantize?: boolean` this section added, and its combination rejection
+with it; the unfused plan is reached through the test-only switch of that decision).
 
 Fused are adjacent `linear → static_quantize` pairs with all inputs and outputs f32, equal output
 shapes, a private linear output with one consumer and three distinct input bindings; limited to
@@ -36,7 +39,7 @@ intermediates stay unfused. `lastRunFusions.linearStaticQuantize` and a separate
 The defaults of models, quants and CLI, the manifest, IR, weights and published source pins do not
 change. (Superseded by ADR 0104 on 2026-09-15: the option is in the manifest `session` vocabulary
 (`packages/hub/src/manifest.ts`) and the QAT `i4-fast` presets declare it.) False returns to the
-unfused path. Regular Gemma has no matching SRQ in its graph, so nothing is fused there.
+unfused path. (Since 2026-11-10 the option and its manifest field are removed — ADR 0147 decision 5.) Regular Gemma has no matching SRQ in its graph, so nothing is fused there.
 
 ## Arithmetic and code generation
 

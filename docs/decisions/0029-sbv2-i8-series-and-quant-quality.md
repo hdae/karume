@@ -3,7 +3,9 @@
 - Status: accepted (2026-08-04; listening check accepted by the maintainer: "at least it does not
   collapse; only w8-real-gpu sounds a little different, but I do not perceive it as worse");
   the series directory of decision 1 superseded by [0074](0074-quant-seat-naming.md) and
-  [docs/assets-layout.md](../assets-layout.md); decision 4 re-graded to MAY on 2026-10-18
+  [docs/assets-layout.md](../assets-layout.md); decision 4 re-graded to MAY on 2026-10-18;
+  decision 4's listening condition split by [0147](0147-numerics-and-kernel-adoption.md) decision 3 on 2026-11-10
+  (option admission machine-only; the preset decision stays with the maintainer)
 - Date: 2026-08-04
 - Related: [0019](0019-i8-weight-execution.md) (the w8 method — execution path unchanged) /
   [0027](0027-sbv2-f16-series.md) (the series pattern; its decision 1 "no i8" is overridden here —
@@ -46,7 +48,9 @@ in practice.
    use, so read it as an **optimistic upper bound**.
 4. **Execution paths for w8a8 / w8a16 on conv1d (dp4a / f16 tiles) are not implemented.** w8a8 is
    closed on quality (below). w8a16 MAY be implemented if a speed measurement shows a gain;
-   adoption of either path still goes through the maintainer's listening check, with the
+   admitting either path as a runtime option needs machine checks only (ADR
+   [0147](0147-numerics-and-kernel-adoption.md) decision 3 (1)); making it a preset is the maintainer's decision under ADR
+   0147 decision 3 (2), whose human review is a listening check for audio (amended 2026-11-10), with the
    measurements below as the material (re-graded 2026-10-18 to MAY: w8a16 equals w8 in quality, so speed decides alone, and the
    negative speed finding rests on one 1:1 device — tied to ADR 0028 decision 4; perf ledger K-68).
    Today the SBV2 `i8-a8` preset sets only `linearCompute: "a8"`

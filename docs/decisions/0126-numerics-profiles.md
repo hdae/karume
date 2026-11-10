@@ -2,7 +2,10 @@
 
 - Status: deferred (2026-10-18 — not implemented in 0.15.0 by the maintainer's ruling at phase 2 step 2-8:
   the runtime default stays the reference path and the practical bundles reach users through the default
-  presets of [0128](0128-default-preset-original-weights.md); reason and re-entry conditions in the addendum)
+  presets of [0128](0128-default-preset-original-weights.md); reason and re-entry conditions in the addendum).
+  Deferred unchanged; the clauses of 0058 and 0110 it planned to amend are superseded by
+  [0147](0147-numerics-and-kernel-adoption.md) (2026-11-10) — its amendment targets are now 0147 decisions 1, 3, 6 and
+  11 (0111 decision 7 is unchanged).
 - Date: 2026-10-16
 - Related:
   - [0058](0058-numerics-opt-in-contract.md) — the numerics opt-in contract; this ADR amends its decision 2

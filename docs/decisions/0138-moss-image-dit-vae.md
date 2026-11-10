@@ -10,6 +10,9 @@
   53 a (Addendum of 2026-10-31); the distribution step followed on 2026-11-01 (a local mirror and
   the subpath `@karume/models/moss`; published on Hugging Face as `hdae/karume-moss-image` with
   0.15.1 — Addendum of 2026-11-01 and its publication addendum).
+  The knob ownership of decision 13 and of the 2026-11-01 addendum's B2 is replaced by
+  [0147](0147-numerics-and-kernel-adoption.md) decision 7 (2026-11-10): a preset's knob values derive from the
+  manifest, and a test compares the pinned distribution's `session` with the knob values the checks were run on.
 - Date: 2026-10-27
 - Scope: the family `packages/models/src/moss/` on `main`, with the subpath `@karume/models/moss`
   and the distribution recipe `tools/export-recipes/moss/distribution.py` since 2026-11-01 (the
@@ -475,6 +478,11 @@ forwards would never run the declared route at square sizes.
 
 ### 13. Presets and the default
 
+(Amended 2026-11-10 by ADR [0147](0147-numerics-and-kernel-adoption.md) decision 7: a preset's knob values
+derive from the manifest, as in the other families, so `preset.ts` stops gating; the routing of the knobs to
+the pair's Sessions stays, and a test compares the `session` each preset declares in the pinned distribution
+with the knob values its checks were run on.)
+
 `packages/models/src/moss/preset.ts`; the names follow ADR 0074's grammar (the VAE's f32 is the base
 storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8 VAE):
 
@@ -858,7 +866,13 @@ publication (a later maintainer decision — no repository, no revision pin, no 
   census, the sha rows whose IDs start with the preset's name — decision 11) were run on these
   knobs; a manifest could otherwise run unchecked numerics under a checked name. A new preset is
   added to the table with its checks first. Rejected: knobs taken from the manifest alone (Wan's
-  form) — two owners of a name's knobs.
+  form) — two owners of a name's knobs. (Replaced 2026-11-10 by ADR
+  [0147](0147-numerics-and-kernel-adoption.md) decision 7: the knobs come from the manifest. The reason
+  above is held for a published distribution by its pinned revision (ADR 0073), by the rule that a
+  published preset's `session` changes only through a new pinned revision with the self A/B check
+  redone when the numbers move (ADR 0147 decision 11), and by a test that compares the pinned
+  distribution's `session` with the knob values the checks were run on; a manifest the caller supplies
+  runs the knobs it declares, as in the other families.)
 
 ### B3. `pipelineConfig` — upstream's defaults
 

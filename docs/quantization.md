@@ -56,26 +56,28 @@ the opt-in contract for options that change numbers is ADR [0058](decisions/0058
 | `gpuFeatures.shaderF16`      | yes (outside `session`; `Quant.gpuFeatures`)             | optional                                                                                                                                                                            | ADR [0038](decisions/0038-manifest-v1.md)                                                                                                                                                                                    |
 | `requiredLimits`             | yes (`Quant.requiredLimits`)                             | optional (rejected at admission, before the weights are fetched)                                                                                                                    | ADR [0038](decisions/0038-manifest-v1.md); [0089](decisions/0089-memory-limits-preflight.md)                                                                                                                                 |
 
-### Table 2-b — Contract classes of the options that change numbers (ADR [0110](decisions/0110-practical-tier-numerics-contract.md) decisions 2 and 9)
+### Table 2-b — Contract classes of the options that change numbers (ADR [0147](decisions/0147-numerics-and-kernel-adoption.md) decision 2)
 
-E = atol=0 against the TS mirror / C = atol=0 against host rounding + the existing f32 kernel / R = only the summation order differs (the f64 band stays the op band of the reference path) / Q = a band wider than the reference (approximation; none admitted).
+E = atol=0 against the TS mirror, or u32 equality with the unfused plan for a plan transformation / C = atol=0 against host rounding + the existing f32 kernel / R = only the summation order differs (the f64 band stays the op band of the reference path) / Q = a band wider than the reference op band, from an error model (member: `attentionScoreStorage: "none"`). Four points = ① the band against f64 ② the A/B band against the reference path ③ exact checks of structural guarantees ④ a recorded fault injection — MUST for every new R / Q option; the existing ones keep their admission under the grace clause, with the missing points filed in the backlog. This table is the living copy of ADR 0147 decision 2's classification (as of 2026-11-09) and is kept current with every new option.
 
-| Option (value)                                                         | Class | Notes                                                    |
-| ---------------------------------------------------------------------- | ----- | -------------------------------------------------------- |
-| `linearCompute: "a8"`                                                  | E     | dp4a vs emulation is also atol=0                         |
-| `convCompute: "a8"`                                                    | E     | one fma per tap in ascending tap order; dp4a vs emulation atol=0 |
-| `attentionCompute: "a8"`                                               | E     | statistical check only for the qP generation of ③ PV     |
-| `linearCompute` / `attentionCompute: "f16"`                            | C     | atol=0 against the f32 variant with inputs rounded to f16 |
-| `attentionScoreStorage: "f16"`                                         | C     | atol=0 against the f32 variant with S rounded on the host |
-| `fullStateStorage: "f16"`                                              | C     | atol=0 against the f32 kernel with the slot rounded on the host (ADR 0143) |
-| `attentionScoreStorage: "none"`                                        | Q     | the P̃-lattice error model; all four points (ADR 0132)      |
-| `stateAttentionReduce: "parallel"` / `"parallel-fused"`                | R     | all four points present                                  |
-| `linearGemvReduce: "parallel"`                                         | R     | no fault-injection record yet (grace clause)             |
-| `rmsNormReduce` / `linearGemvReduce` subgroup32                        | R     | no A/B band and no fault injection yet (grace clause)    |
-| `fuseRmsNormAdd` / `fuseLinearStaticQuantize` / `packedStaticQuantize` | E     | u32 equality with the unfused path                       |
-| `integerGemv: true`                                                    | E     | atol=0 against the TS mirror (exact integer sums per group) |
-| `linearGemvPlanes: true`                                               | R     | the addition order and the channel scale applied once after the sum (exact products — ADR 0141 decision 3); all four points present |
-| `fuseGeluMulStaticQuantize`                                            | E     | u32 equality with the unfused path                       |
+| Option (value) | Class | Four points | Notes | Source |
+| --- | --- | --- | --- | --- |
+| `linearCompute: "a8"` | E | — | dp4a vs emulation is also atol=0 | ADR [0025](decisions/0025-w8a8-linear-execution.md) |
+| `convCompute: "a8"` | E | — | one fma per tap in ascending tap order; dp4a vs emulation atol=0 | ADR [0133](decisions/0133-conv3d-w8a8.md) |
+| `attentionCompute: "a8"` | E | — | statistical check only for the qP generation of ③ PV | ADR [0030](decisions/0030-attention-a8-execution.md) |
+| `linearCompute` / `attentionCompute: "f16"` | C | — | atol=0 against the f32 variant with inputs rounded to f16 | ADR [0028](decisions/0028-f16-compute-variants.md) |
+| `attentionScoreStorage: "f16"` | C | — | atol=0 against the f32 variant with S rounded on the host | ADR [0031](decisions/0031-attention-score-f16-storage.md) |
+| `fullStateStorage: "f16"` | C | — | atol=0 against the f32 kernel with the slot rounded on the host | ADR [0143](decisions/0143-f16-full-state-storage.md) |
+| `attentionScoreStorage: "none"` | Q | ① ② ③ ④ | the P̃-lattice error model | ADR [0132](decisions/0132-online-int8-attention.md) |
+| `stateAttentionReduce: "parallel"` | R | ① ② ③ ④ | — | `gpu_state_attention_parallel_test.ts`; ADR [0102](decisions/0102-state-attention-stats-pv-fusion.md) |
+| `stateAttentionReduce: "parallel-fused"` | R, by u32 equality with `"parallel"` | inherits `"parallel"`; its own checks are the f64 band, NaN / Inf by class and zero padding (no ② ④ of its own) | — | `gpu_state_attention_parallel_test.ts`; ADR 0102 |
+| `linearGemvReduce: "parallel"` | R | ① ② ③ (no ④, no worst-case record — grace clause) | — | `gpu_linear_gemv_parallel_test.ts`; ADR [0098](decisions/0098-linear-gemv-parallel.md) |
+| `linearGemvReduce: "parallel-subgroup32"` | R | ① ③ + u32 equality with `"parallel"` on the same device (no ② ④ — grace clause) | — | `packages/kernel-checks/src/gemv-subgroup.ts`; ADR [0101](decisions/0101-linear-gemv-subgroup.md) |
+| `rmsNormReduce: "subgroup32"` | R | ① ③ (no ② ④ — grace clause); its only u32 equality is the RMS→add fusion on against off, both under subgroup32 — none against the workgroup form | — | `packages/kernel-checks/src/rms-subgroup.ts`; ADR [0100](decisions/0100-rms-subgroup-reduction.md) |
+| `linearGemvPlanes: true` | R | ① ② ③ ④ | the addition order and the channel scale applied once after the sum (exact products — ADR 0141 decision 3) | ADR [0141](decisions/0141-byte-plane-gemv.md) |
+| `integerGemv: true` | E (TS mirror) | — | atol=0 against the TS mirror (exact integer sums per group); its fault injection is a record in the ADR | ADR [0140](decisions/0140-integer-gemv.md) |
+| `packedStaticQuantize: true` | E on finite values | — | NaN saturates to ±127 / −128 where the f32 path passes it through, and −0.0 becomes +0.0, which does not move the output (ADR 0105 decision 3); stays opt-in (ADR 0147 decision 5) | ADR [0105](decisions/0105-packed-static-quantize-activations.md) |
+| `fuseRmsNormAdd` / `fuseLinearStaticQuantize` / `fuseGeluMulStaticQuantize` | E | — | default-on fusion (no option — ADR 0147 decision 5), u32 equality with the unfused plan, checked per device by the Session canary (decision 9). Removing the three keys and adding the canary are filed in the backlog; until then they are opt-in booleans | ADR [0040](decisions/0040-fusion-pass.md), [0099](decisions/0099-rms-norm-add-fusion.md), [0103](decisions/0103-linear-static-quantize-fusion.md) |
 
 ## Table 3 — Quant presets (the names in a distribution)
 

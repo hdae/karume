@@ -1,11 +1,11 @@
 # 0058: General contract for numerics opt-ins (one named option each; the default is the reference path)
 
-- Status: accepted (2026-08-14); partly superseded by [0110](0110-practical-tier-numerics-contract.md)
-  (decision 4 ② and ③, 2026-09-26) and by the addendum of 2026-09-13 with 0110 decision 8
-  (decisions 5 and 6, marked 2026-10-18); [0128](0128-default-preset-original-weights.md)
-  (accepted 2026-10-29) takes over decision 6 and the same-weights bullet of the 2026-09-13
-  addendum; decision 8 withdrawn 2026-10-18. Decision 2 stands: [0126](0126-numerics-profiles.md),
-  which would amend it, is deferred (2026-10-18)
+- Status: superseded by [0147](0147-numerics-and-kernel-adoption.md) (2026-11-10) as a whole — every still-valid decision and
+  addendum is restated there, so this file is no longer needed to apply the rules; the body is kept as the record of how
+  they came about. Earlier partial supersessions (by 0110, 0128, and the withdrawal of decision 8) are folded into 0147.
+  [0126](0126-numerics-profiles.md) (deferred) planned to amend decisions 2 and 6 and the 2026-09-26 addendum; those
+  targets are now 0147 decisions 6 and 11. Pointers to this ADR's clauses in other ADRs resolve through 0147's "Where the
+  old clauses went".
 - Date: 2026-08-14
 - Related: [0028](0028-f16-compute-variants.md) (decision 1, "no auto", generalised here) /
   [0074](0074-quant-seat-naming.md) (preset naming) / [0050](0050-irodori-quant-series.md) (first

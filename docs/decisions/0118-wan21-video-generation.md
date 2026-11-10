@@ -16,6 +16,8 @@
   not published on Hugging Face (addendum 2026-10-15). Superseded 2026-10-26: ruling b of the step 2 / 4
   addendum (the cache zeroing is a host write of zeros for now) and the matching note of decision 2's
   hand-over, by the addendum of 2026-10-26 (the caches are zeroed on the GPU).
+  The always-tiled decode of ruling 1 is a declared approximation under [0147](0147-numerics-and-kernel-adoption.md)
+  decision 10 (2026-11-10).
 - Date: 2026-10-02
 - Related: research [2026-10-02-video-gen-recon](../research/2026-10-02-video-gen-recon.md) (below
   "recon §n") / [the pre-study of 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md)

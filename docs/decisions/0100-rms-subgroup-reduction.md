@@ -4,7 +4,9 @@
   [0127](0127-node-dawn-toolchain.md) / [0129](0129-test-layout-and-lanes.md) (2026-10-16: Node +
   Dawn supports subgroups — decision 5's Deno / Chrome scope and the Deno SKIP) and by
   [0128](0128-default-preset-original-weights.md) decision 2 C1 (2026-10-17: now the reason it stays
-  out of default presets); on 2026-10-18 decision 6 (the comparison page) was withdrawn
+  out of default presets); on 2026-10-18 decision 6 (the comparison page) was withdrawn;
+  decision 2's rejection of missing device features replaced by [0147](0147-numerics-and-kernel-adoption.md) decision
+  8 (2026-11-10): a warned switch to `workgroup`
 - Date: 2026-09-13
 - Related: [0017](0017-rms-norm-conv2d-clamp-min.md), [0058](0058-numerics-opt-in-contract.md),
   [0099](0099-rms-norm-add-fusion.md)
@@ -25,8 +27,10 @@ approved opt-in policy (ADR 0058). Numbers: [research](../research/2026-09-13-rm
    (32 lanes × 8 subgroups): the feature list is not proof that it works, and failures to create,
    run or read back, and device loss, raise. Acquiring it does not switch the inference summation.
 2. Add `SessionOptions.rmsNormReduce?: "workgroup" | "subgroup32"` and the type `RmsNormReduce`,
-   default `workgroup`. Invalid values and missing device features are rejected before the weights
-   are uploaded. `subgroup32` applies to f32 RMS wider than 128 and to RMS → add pairs already
+   default `workgroup`. Invalid values are rejected before the weights are uploaded; without the
+   subgroup features the Session warns once per device and runs `"workgroup"` (the reference value),
+   shown in the pipeline key (amended 2026-11-10 by ADR [0147](0147-numerics-and-kernel-adoption.md)
+   decision 8, replacing the rejection of missing device features). `subgroup32` applies to f32 RMS wider than 128 and to RMS → add pairs already
    eligible under `fuseRmsNormAdd: true`; widths up to 128 keep the existing kernel. The fusion
    conditions (shape, use count, public values, argument order) do not change.
 3. The new kernel: 256 threads, `@subgroup_size(32)`, the same input scan per thread. The 8

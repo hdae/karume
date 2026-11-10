@@ -1,6 +1,8 @@
 # 0132: Online int8 attention — `attentionScoreStorage: "none"` (S never materialised)
 
-- Status: accepted (2026-10-23 — the Wan2.2 A/B check and the timing of decision 6 are below)
+- Status: accepted (2026-10-23 — the Wan2.2 A/B check and the timing of decision 6 are below);
+  decision 5's fallback to the three dispatches warns since [0147](0147-numerics-and-kernel-adoption.md) decision 8
+  (2026-11-10)
 - Date: 2026-10-23
 - Related: ADR [0023](0023-fused-attention.md) (fused attention: the three dispatches ①QK / ②
   stats / ③PV and their bit identity with the decomposed path — unchanged, the default path) /
@@ -88,7 +90,9 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    (at D = 128 `:sg32` declares 29,440 B and `:wg` 33,536 B — 32 KiB devices without subgroups
    fall back to the three dispatches,
    also keyed). Because the choice cannot change a bit, it is capability-driven without breaking
-   ADR 0058 decision 2.
+   ADR 0058 decision 2. (Amended 2026-11-10 by ADR [0147](0147-numerics-and-kernel-adoption.md)
+   decisions 8 and 9: the fallback to the three dispatches also warns once per device; the
+   `:sg32` / `:wg` choice stays capability-driven, gains a run-time canary and does not warn.)
    **ADR 0100 decision 1 is amended**: `AcquireGpuOptions.subgroups` accepts `"available"` —
    request the features when the adapter advertises them, silently run without otherwise; `true`
    keeps its rejecting meaning. The 32-lane known-answer check of ADR 0100 runs whenever the

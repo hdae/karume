@@ -2,7 +2,10 @@
 
 - Status: accepted (2026-10-29, the maintainer's ruling 34 a — amended by the addendum of
   2026-10-29; proposed 2026-10-16, rewritten 2026-10-17 after the maintainer's rulings of the same
-  day)
+  day);
+  decision 1's human-review gate, the Related line's 0110 decision 8 clause and the gate sentences of the addenda of
+  2026-11-03 and 2026-11-04 are replaced by [0147](0147-numerics-and-kernel-adoption.md) decision 3 (2026-11-10); the
+  addenda keep the gate then in force as history
 - Date: 2026-10-16 (rewritten 2026-10-17)
 - Related: ADR [0074](0074-quant-seat-naming.md) (preset naming — the name never says "default";
   `defaultQuant` points at it) / [0075](0075-quant-presentation.md) (`label` / `description`;
@@ -10,8 +13,8 @@
   [0058](0058-numerics-opt-in-contract.md) (its 2026-09-13 addendum lets a distribution put a
   speed-bundled preset into `defaultQuant` beside a reference preset with the same weights — the
   form decision 1 keeps) / [0110](0110-practical-tier-numerics-contract.md) (decision 7 classifies
-  sha rows by the preset's `session`; decision 8 ties the human quality review to entering
-  `defaultQuant` — kept as part of decision 1's procedure) / [0111](0111-session-options-composition.md)
+  sha rows by the preset's `session`) / [0147](0147-numerics-and-kernel-adoption.md) decision 3 (2) (who decides presets
+  and their quality — since 2026-11-10, in place of 0110 decision 8) / [0111](0111-session-options-composition.md)
   (explicit option > preset declaration > runtime default; unchanged) /
   [0113](0113-birefnet-weight-series.md) (2026-10-11 addendum: the BiRefNet default is the preset
   whose storage equals the upstream checkpoint's; an instance of decision 1 and the origin of
@@ -118,12 +121,14 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
 
 1. **The default is chosen per model by a recorded procedure, and the current defaults stand.** For
    every model the maintainer picks `defaultQuant` among the shipped presets from measurements on
-   the reference devices — speed, resident memory, download size and output quality; the human
-   quality review of ADR 0110 decision 8 remains the gate for entering `defaultQuant` — and records
+   the reference devices — speed, resident memory, download size and output quality; the default is
+   one of the presets, and a preset's quality decision is ADR [0147](0147-numerics-and-kernel-adoption.md) decision 3 (2):
+   every preset is reviewed by a human before publication, and the default preset's review is never
+   skipped (amended 2026-11-10) — and records
    the candidates, the measurements and the reason in the decision record (the family's ADR, or the
    table in Context for families without one). (amended 2026-10-29, see the addendum)
    The default is normally the practical preset: the
-   lightest preset whose quality loss the review accepted. The rulings for sbv2 (2026-08-20),
+   lightest preset whose quality the maintainer accepted under ADR 0147 decision 3 (2). The rulings for sbv2 (2026-08-20),
    Wan2.1 (ADR 0120 ruling 4, 2026-10-04), Wan2.2 (ADR 0121 decision 2, 2026-10-06; amended
    2026-10-29, see the addendum),
    gemma4 (ADR
@@ -359,7 +364,7 @@ there unchanged.)
    not apply (no activation quantization), and C3 exempts a model with one preset. `i4-gemvpar` and
    `i4-fast` follow once the GEMV rows of the 12B shapes are measured (ADR 0098: only measured
    shapes are eligible). The human quality review of ADR 0110 decision 8 is still the gate before
-   publication. (It passed on 2026-11-04 — ADR [0110](0110-practical-tier-numerics-contract.md)
+   publication (the gate then in force; since 2026-11-10 ADR 0147 decision 3 (2)). (It passed on 2026-11-04 — ADR [0110](0110-practical-tier-numerics-contract.md)
    addendum of that date.)
 2. **The weights are Google's quantization-aware-trained checkpoint**
    (`google/gemma-4-12B-it-qat-q4_0-unquantized`, a QAT fine-tune of `google/gemma-4-12B-it`), and
@@ -424,7 +429,8 @@ addendum of 2026-11-04.)
    presets. Decision 1 asks for the candidates, the measurements and the reason to be recorded. The
    candidates are the four presets above, and the measurements are in item 4. The ruling records the
    choice; this addendum adds no reason on the maintainer's behalf. ADR 0110 decision 8's human quality
-   review is the gate for a practical preset entering `defaultQuant`; `bf16` rounds nothing, and its
+   review is the gate for a practical preset entering `defaultQuant` (the gate then in force; since 2026-11-10 ADR 0147
+   decision 3 (2)); `bf16` rounds nothing, and its
    goldens are the upstream checkpoints' own continuations computed in f32 (ADR 0085 addendum
    2026-11-04, acceptance). No human quality review of it is recorded. The gate's C1 to C3 apply to it
    as to every preset: it declares no `gpuFeatures` (C1), no activation quantization (C2 does not

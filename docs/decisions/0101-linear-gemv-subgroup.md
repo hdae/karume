@@ -7,7 +7,9 @@
   opt-in, replacing decision 5's Deno / Chrome scope) and by [0127](0127-node-dawn-toolchain.md) /
   [0129](0129-test-layout-and-lanes.md) (2026-10-16: the real-GPU lane runs on Node + Dawn — the Deno
   SKIP in the verification list); on 2026-10-18 decision 6, the page selection
-  after the M2 check and the browser entry point of the 2026-09-25 addendum were withdrawn
+  after the M2 check and the browser entry point of the 2026-09-25 addendum were withdrawn;
+  decision 2's "no automatic fallback" replaced by [0147](0147-numerics-and-kernel-adoption.md) decision 8
+  (2026-11-10): a warned switch to `parallel`
 - Date: 2026-09-13
 - Related: [0098](0098-linear-gemv-parallel.md), [0100](0100-rms-subgroup-reduction.md)
 
@@ -30,8 +32,11 @@ synchronization without weight copies or more shared memory. Numbers: the
    (`linearGemvParallelLanes`, `packages/runtime/src/kernels/linear-gemv.ts`), now 47 rows, 22 of
    them unmeasured E4B rows added on 2026-09-26.)
 2. The mode requires `acquireGpu({ subgroups: true })`, reusing ADR 0100's feature and known-answer
-   checks; the Session also rejects missing device / WGSL features before the weights are uploaded.
-   No automatic fallback. Acquiring the capability alone does not switch the computation.
+   checks. Without the device / WGSL features the Session warns once per device and runs `"parallel"`,
+   shown in the pipeline key; the kernel check already compares the two as u32 on the same device
+   (`packages/kernel-checks/src/gemv-subgroup.ts`) (amended 2026-11-10 by ADR
+   [0147](0147-numerics-and-kernel-adoption.md) decision 8, replacing the rejection before upload and "no
+   automatic fallback"). Acquiring the capability alone does not switch the computation.
 3. 128 threads, a fixed 32 lanes. The output column comes from the subgroup ID and the invocation ID
    inside the subgroup; no correspondence with the local ID is assumed. The packed-word scan,
    dequantization and multiply-accumulate of each lane are those of `parallel`. `subgroupShuffleXor`

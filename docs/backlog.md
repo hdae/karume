@@ -58,6 +58,78 @@ maintainer's ruling of 2026-11-06).
 
 ## later
 
+- **ADR 0147 follow-ups — numerics and kernel adoption (filed 2026-11-10; ADR [0147](decisions/0147-numerics-and-kernel-adoption.md)
+  accepted, nothing below is built; the order among them and against the other items is the maintainer's)**. Each code item is its
+  own commit with its behaviour tests and states its blast radius:
+  - **Code** (the decisions name what each changes):
+    1. The three fusion keys leave `SessionOptions`, the type checks and the combination rule; the fusions run by default
+       (decision 5). The test-only switch that disables the fusion rules lands in the same change (the Session baseline of
+       `gpu_linear_static_quantize_session_test.ts` and the grid-stride reference of the RMS→add kernel check obtain the
+       unfused plan by omitting the option today). The reference sha rows stay; the fusion-count tests, `EXPECTED_FUSIONS`
+       and the census rows that pin fused counts change. Breaking (surface snapshot, CHANGELOG); a cross-cutting change, so
+       the full `vp test`.
+    2. The same keys leave the manifest vocabulary (`SESSION_KEYS`, `SessionSpec`, `parseSession`) and the recipes' quant
+       tables (`gemma4_qat`, the q4_0 QAT quants of `gemma4`); the mirrors are regenerated and `verify_dist` is green; the
+       re-upload, the source pins and the published smoke wait for the maintainer's explicit go-ahead (decision 5).
+    3. The Session canary for every default-on fusion: fused against unfused on a canary input as u32, a mismatch warns and
+       drops the rule on that device, memoised per device, with a fault-injection test (decision 9). The input size is
+       decided and the start-up cost measured at implementation, and the cost is reported to the maintainer.
+    4. The derived applicability check at admission replaces the twelve `FamilySessionPolicy` tables: one pure runtime
+       function shared with the recipe builders' predicates; the structurally impossible combinations of decision 7 move
+       from the first run to admission (tested with a fetch spy); the linear rejections become one shared violation function
+       used by admission, `buildLinear` and the estimate; `WRITERS` exhaustiveness, the error type by origin and the routing
+       to component Sessions stay (decision 7). MOSS-Image's knob table stops gating, and in the same commit a test compares
+       the `session` each preset declares in the distribution mirror with the knob values its checks were run on.
+    5. The public applicability query API (user story, export diff, surface snapshot, CHANGELOG) and one line on how to query
+       in the model card; the fixed override type covering every numerics option of `SessionOptions` replaces
+       `SessionOverrides`, and gemma's explicit `rmsNormReduce` / `fullStateStorage` fold into it (decision 7).
+    6. Device fallbacks become warned switches: f16 without `shader-f16` → `"f32"` (the throw is removed); `parallel-subgroup32`
+       → `"parallel"` and `rmsNormReduce: "subgroup32"` → `"workgroup"` without subgroups; a warning on online attention's
+       three-dispatch fallback; a shared GPU warns at admission, a self-acquired device requests only the available features;
+       a manifest's `gpuFeatures` is a request; the attention dp4a canary with both arms outside the band warns and runs that
+       attention in f32, and its `emu-exact` verdict warns once (decision 8). Today `sessionGpuFeatures` covers only
+       `shader-f16`, so a subgroup32 option on a shared GPU without subgroups throws at construction after the fetch; this item
+       removes that.
+    7. Run-time canaries for linear and conv3d a8's dp4a choice and for online attention's `sg32` / `wg` choice on devices
+       where the path is requested (decisions 6 and 9).
+    8. `/kernel-check` covers the fusions (fused against unfused, u32) and the default kernels; the tune sweep record and
+       the `/kernel-check` record gain a backend field (how it is filled is an implementation-time item); where the per-GPU
+       evidence records live is decided with it (decision 9).
+    9. Wiring: gemma forwards `linearCompute` once the derived check admits it; Wan's text stage passes umT5's options
+       (wiring only — no umT5 `i8-a8` preset, perf-ledger K-80 / K-81) (decision 7).
+    10. `packedStaticQuantize` passes NaN through (so it becomes E) (decisions 2 and 5).
+    11. `packedStaticQuantize`, `integerGemv` and `linearGemvPlanes` assessed against decision 6's test (certainly on / off);
+        each that fails becomes a string union at the next breaking change of this area or at 1.0, whichever comes first.
+    12. GPU checks: no grid-stride kernel's numbers depend on the workgroup count (a `LIMIT_CAPS` Uint32 test); bit identity
+        under an injected geometry profile (decision 8, device-driven choices).
+  - **Checks**:
+    1. Fault injection on the core ops (matmul, conv, …) for check C (decision 4).
+    2. Gemma's E2E self A/B check, held under the grace clause until it exists (decision 2).
+    3. The grace clause's missing points: parallel GEMV's ④ and worst-case record; the subgroup32 reductions' ② and ④
+       (decision 2).
+    4. The checks of decision 4 (A, P, F, B, G, E): before a `KARUME_UPSTREAM_PARITY` file is retired it is mapped to its
+       replacement (a file without one keeps its opt-in lane); patch fidelity for the recipes without a `--verify` mode
+       (deberta, embeddinggemma, gemma4, gemma4_qat, irodori, minicpm5, moss, qwen3_5 on 2026-11-09); deviation records per
+       family, starting from BiRefNet's post-processing (ADR 0125) and Gemma 4's vision masks (ADR 0144 decision 1).
+  - **Records**: Wan2.2's untiled VAE distance (torch tiled against untiled on the same latents — an ADR 0121 addendum and
+    ADR 0147 decision 10); the inventory of published presets with no recorded verification (the self A/B check, the
+    census-table row, the quality record — human, machine or none; for example the regular Gemma 4 `bf16` default has no
+    recorded human review, ADR 0128 addendum 2026-11-04, while decision 3 (2) never skips the default preset's); the full
+    inventory of device-driven choices of 2026-11-09 into `docs/research/` (decision 8); the first per-GPU evidence records on
+    the two everyday environments (decision 9).
+  - **For a later ruling**: whether Anima's sha rows, recorded on its practical preset, move to its reference preset (decision
+    11; re-recording needs the GPU); the wording of ADR 0126's re-entry condition 2 and of perf-ledger K-80 / K-81, which name
+    the acceptance tables decision 7 removes (changed only with the maintainer's agreement); whether the old rule "a band's
+    derivation table sits in the docstring of the test constant" (ADR 0058 decision 4 ②, not restated by ADR 0147) should be
+    restated.
+  - **Stale statements found on 2026-11-09 (report only, not yet fixed)**: the `DECIDED` comment above `PARALLEL_SHAPES`
+    ("only measured shapes are eligible") against its 22 rows marked unmeasured (ADR 0098 decision 4 was re-graded to SHOULD);
+    ADR 0111 decision 2's list of tables; the table comments of gemma (`session-options.ts`) and anima (`pipeline.ts`); the
+    rmsNormAdd widths in the `SessionOptions` doc (3840 is missing); the header of `a8-emulation-warning.ts` (`convCompute`
+    is missing); `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
+    cite; ADR 0132 decision 5's v1 workgroup-storage figures (the v2 figures are in its later addendum); the table of
+    `packages/kernel-checks/README.md` (expert-linear and state-bidirectional are missing); the unreachable w4a8 `k % group`
+    check; the online kernel's `:emu` against `:dp4aEmu` in the other i8a8 pipeline keys.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
   [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple

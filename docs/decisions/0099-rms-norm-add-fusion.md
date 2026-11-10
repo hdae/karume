@@ -4,7 +4,10 @@
   [0104](0104-gemma-fast-quant.md) (2026-09-15: the Gemma `i4-fast` presets, E2B's default, declare
   `fuseRmsNormAdd: true` — decision 4's "defaults unchanged") and by
   [0128](0128-default-preset-original-weights.md) decision 1 (2026-10-17: the M2 condition on
-  promotion); on 2026-10-18 decision 1's width limit was re-graded to SHOULD and decision 5 withdrawn
+  promotion); on 2026-10-18 decision 1's width limit was re-graded to SHOULD and decision 5 withdrawn;
+  the `fuseRmsNormAdd` option of decision 1 and its pipeline / manifest acceptance in decision 4 are superseded by
+  [0147](0147-numerics-and-kernel-adoption.md) decision 5 (2026-11-10): the fusion is default-on; decision 1's
+  accepted set and width SHOULD, decision 3's caveat and decision 4's `submitPolicy` forwarding stand
 - Date: 2026-09-13
 - Related: [0017](0017-rms-norm-conv2d-clamp-min.md), [0058](0058-numerics-opt-in-contract.md),
   [0068](0068-decode-exit-multi-output.md), [0098](0098-linear-gemv-parallel.md)
@@ -22,8 +25,9 @@ E2B; with a submit limit of 768 it did (2026-09-13). Dispatch counts and rejecte
 
 ## Decision
 
-1. Add `SessionOptions.fuseRmsNormAdd?: boolean`, default false; a wrong type is rejected at
-   Session construction. Only adjacent f32 RMS → add pairs with the same shape, whose intermediate
+1. The fusion runs by default, with no option (amended 2026-11-10 by ADR
+   [0147](0147-numerics-and-kernel-adoption.md) decision 5, which removes the option
+   `SessionOptions.fuseRmsNormAdd?: boolean` this decision added). Only adjacent f32 RMS → add pairs with the same shape, whose intermediate
    has one consumer and is not a graph output, are accepted. The last dimension SHOULD be limited to
    the widths the unit check covers — today 256 / 1536 / 2560
    (`packages/runtime/src/runtime/fusion-rules/rms-norm-add.ts`) — and a width is added together
@@ -37,12 +41,14 @@ E2B; with a submit limit of 768 it did (2026-09-13). Dispatch counts and rejecte
    that the integer operation runs.
 3. This is not a specified guarantee of bit identity on every GPU: WGSL allows
    [reassociation and fusion](https://www.w3.org/TR/WGSL/#reassociation-and-fusion) and leeway for
-   special values ([bitcast](https://www.w3.org/TR/WGSL/#bitcast-builtin)). The default reference
-   path, the original key and WGSL, and the goldens stay. A mismatch with the reference does not
+   special values ([bitcast](https://www.w3.org/TR/WGSL/#bitcast-builtin)). The reference path's
+   values and goldens stay; the fused kernel is on the default path, checked per device by ADR 0147
+   decision 9 (amended 2026-11-10). A mismatch with the reference does not
    weaken the tolerance; cause, quality and speed are examined as a separate execution setting.
-4. `Gemma4Pipeline` and `Gemma4QatPipeline` accept `fuseRmsNormAdd` and the existing runtime option
-   `submitPolicy` and pass them to the target and the drafter. Fusion does not change the submit
-   limit implicitly; the two settings are independent. The defaults of the runtime, models, CLI and
+4. `Gemma4Pipeline` and `Gemma4QatPipeline` accept the existing runtime option `submitPolicy` and pass
+   it to the target and the drafter (their acceptance of `fuseRmsNormAdd`, and its manifest vocabulary,
+   removed 2026-11-10 by ADR 0147 decision 5). Fusion does not change the submit limit implicitly; the
+   two are independent. The defaults of the runtime, models, CLI and
    quant definitions, the hub storage format, the exporter and the published revisions do not
    change. (Superseded by ADR 0104 on 2026-09-15: `fuseRmsNormAdd` is in the manifest `session`
    vocabulary (`packages/hub/src/manifest.ts`) and the `i4-fast` presets declare it.)

@@ -9,6 +9,8 @@
   declarations live on in the q4_0 QAT line `karume-gemma4-qat` (E2B / E4B) and the mobile QAT line
   `karume-gemma4-qat-mobile`). Automated acceptance: [integration acceptance](../research/2026-09-15-gemma-fast-quant.md);
   broad quality, long texts and E4B were not accepted at the time.
+  The fusion fields of `i4-fast` and of the stored vocabulary are removed by
+  [0147](0147-numerics-and-kernel-adoption.md) decision 5 (2026-11-10).
 - Related: [0038](0038-manifest-v1.md), [0058](0058-numerics-opt-in-contract.md),
   [0098](0098-linear-gemv-parallel.md), [0099](0099-rms-norm-add-fusion.md),
   [0103](0103-linear-static-quantize-fusion.md); M2 evidence: [RMS fusion](../research/2026-09-13-rms-subgroup-reduction.md)
@@ -25,6 +27,10 @@ weights; no requantization or weight copy is needed.
 | Regular | `linearGemvReduce: parallel`, `fuseRmsNormAdd: true` (+ `stateAttentionReduce` since the addendum of 2026-09-26)                                                                                                                         |
 | QAT     | the above + `fuseLinearStaticQuantize: true` + `packedStaticQuantize: true` ([0105 addendum 2](0105-packed-static-quantize-activations.md#addendum-2-2026-09-20--promotion-to-the-manifest-vocabulary-the-i4-fast-declaration-and-the-rejection-of-stage-1b), 2026-09-20) |
 
+(Amended 2026-11-10 by ADR [0147](0147-numerics-and-kernel-adoption.md) decision 5: the fusion fields
+`fuseRmsNormAdd` and `fuseLinearStaticQuantize` leave the vocabulary, the re-uploaded `i4-fast` presets
+no longer declare them, and the fusions run by default wherever they match.)
+
 E4B, outside the accepted scope, keeps only `i4`. (Superseded by ADR 0128 decision 1 on 2026-10-17: a
 regular E4B distribution gets its default from the per-model procedure when one ships — no regular E4B
 mirror exists, and `tools/export-recipes/gemma4/distribution.py` marks its `i4` as provisional; QAT E4B
@@ -38,7 +44,9 @@ changes when a distribution is rebuilt from the recipe; existing distributions a
 The hub's `SessionSpec` gains two optional booleans, `fuseRmsNormAdd` and `fuseLinearStaticQuantize`
 (`packedStaticQuantize` was added the same way by 0105 addendum 2). Only true / false are accepted;
 null, numbers and strings are rejected. false is not folded into an omission; the common mapping in
-`@karume/models` forwards it explicitly.
+`@karume/models` forwards it explicitly. (Amended 2026-11-10 by ADR 0147 decision 5: `fuseRmsNormAdd`
+and `fuseLinearStaticQuantize` leave `SessionSpec`, so a reader with that decision rejects a manifest
+that declares them; `packedStaticQuantize` stays.)
 
 The manifest stays `karume/4`: a new reader reads an old manifest with the same meaning, an old reader
 rejects the new fields as unknown keys, and a new distribution is not treated as readable by the
@@ -59,7 +67,9 @@ SRQ fusion with an effective `linearGemvReduce` other than `parallel` is rejecte
 `sequential` or `parallel-subgroup32`, and also when nothing declares it (`i4` with only the fusion set
 to true). To compare such a setting, also pass `fuseLinearStaticQuantize: false` and
 `packedStaticQuantize: false`, or select `i4` / `i4-gemvpar` (packed has the same rejection —
-`packages/runtime/src/runtime/session-options-check.ts`). A correctly typed false always wins over the
+`packages/runtime/src/runtime/session-options-check.ts`). (Amended 2026-11-10 by ADR 0147 decision 5:
+the SRQ fusion has no option and applies only on the parallel / f32 path, so this advice no longer
+applies to it; it still applies to `packedStaticQuantize`.) A correctly typed false always wins over the
 quant's true. `fromAssets` has no quant selection and uses only explicit options, as before.
 
 ## Host-side policy stays separate

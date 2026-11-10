@@ -6,6 +6,8 @@
   (P-3: decision 2 replaced) and, for decision 5, by its addendum of 2026-09-05 (ruling 9a) and
   [0129](0129-test-layout-and-lanes.md) addendum 2026-10-17 (2) (upstream parity is opt-in).
   Decisions 3 and 4 and the detection limits are in force.
+  The tiled decode is a declared approximation of the reference level ([0147](0147-numerics-and-kernel-adoption.md)
+  decision 10, 2026-11-10); oracle, distance and reason are recorded there.
 - Date: 2026-08-04
 - Related: recon: [2026-08-03-dynres-vae-tiling.md](../research/2026-08-03-dynres-vae-tiling.md)
   (§1.2 structural invariance of the graph, §4 tiling design, §4.2 the announced deliberate

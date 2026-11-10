@@ -4,7 +4,8 @@
   preset on 2026-08-24, the 0.5.0 renaming on 2026-08-25); partly superseded by
   [0074](0074-quant-seat-naming.md) and [0128](0128-default-preset-original-weights.md) (preset
   names and the default, decisions 2 / 7 / 10), [0110](0110-practical-tier-numerics-contract.md)
-  (decision 9 on 2026-10-17, the scope of decision 13) and [0129](0129-test-layout-and-lanes.md)
+  (decision 9 on 2026-10-17); decision 13's scope restored by [0147](0147-numerics-and-kernel-adoption.md) (2026-11-10);
+  and [0129](0129-test-layout-and-lanes.md)
   (decision 4, 2026-10-17); decision 5 re-graded 2026-10-18
 - Date: 2026-08-12
 - Related: [0006](0006-quantization.md) (fake-quant method) / [0018](0018-f16-weight-execution.md) /
@@ -120,8 +121,8 @@ Q-2, can be added later).
 13. **Simulation does not transfer to the shipped rig** (research §2): the measurement rig's A/B
     proves effects inside that rig only; the shipped rig re-solves GPTQ rounding and re-draws the
     utterance. Delicate properties (prosody) are therefore judged on the shipped bytes, not on the
-    simulation. (Superseded in scope by ADR 0110 decision 8: a human quality verdict is required
-    only when a preset becomes `defaultQuant`; opt-in safety is the machine checks' job.) Whether
+    simulation. (Scope restored by ADR [0147](0147-numerics-and-kernel-adoption.md) decision 3 (2) on 2026-11-10: it
+    applies to the quality judgement of every preset.) Whether
     adaLN i8 helps on the shipped rig was left unverified (on/off A/B waits for demand — backlog).
 14. **Listening verdict (2026-08-24): R3 fixes the muffling; shippable as opt-in.** Published on HF
     (commit `67e9584c`, fragmentation 29.4 MiB per range).

@@ -1,8 +1,10 @@
 # 0110: Numerics contract of the practical presets — reference path and practical presets, contract classes E / C / R / Q, in-device determinism, classes of sha256 reference values
 
-- Status: accepted (2026-09-26 — the maintainer's ruling: split the numerics into a slow, exact
-  reference path and fast practical presets; in-device determinism is MUST for the practical presets
-  too; the plan of phase 1 "contract and groundwork" approved)
+- Status: superseded by [0147](0147-numerics-and-kernel-adoption.md) (2026-11-10) as a whole — the two paths become levels
+  (0147 decision 1), the contract classes, checks and bands are restated with class Q's member (decision 2), decision 8
+  covers every preset (decision 3), determinism and the sha row classes are decision 11. The body is kept as the record.
+  [0126](0126-numerics-profiles.md) (deferred) planned to amend decisions 1, 7 and 8; those targets are now 0147 decisions
+  1, 3, 6 and 11. Pointers to this ADR's clauses in other ADRs resolve through 0147's "Where the old clauses went".
 - Date: 2026-09-26
 - Related: [0058](0058-numerics-opt-in-contract.md) (numerics opt-in contract, restated here for the
   two paths) / [0106](0106-device-keyed-references.md) (per-environment sha256 reference values) /

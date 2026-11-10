@@ -17,18 +17,14 @@
 ## Policy (the role of the bit-identity check — standing)
 
 > **The role of the bit-identity check (the maintainer's policy 2026-08-13): it is an indicator that the implementation is
-> correct, not a goal in itself.** Optimisations that change numbers are allowed as an **opt-in option** — default =
-> the reference path (the sha256 checks are frozen there and kept as the indicator); the opt-in side gets an A/B band check against the
-> reference path + census; a quality ruling is made only when promoting it to the default (making w8a8 the default is the precedent). **Division of
-> quality control (supplement of the same day): the correctness and non-destructiveness of the implementation are verified mechanically with bit identity,
-> and the parts where bit identity is not guaranteed are quality-controlled by human review (listening, viewing)** — even when the numbers are much worse,
-> the generated result often has not collapsed, so human evaluation takes precedence over numeric indicators (the precedent is "listening
-> beats LSD 5.64" when w8a8 became the default). This policy replaces the old "designing a substitute quality check is the precondition". The
-> first step of the 2026-08-12 ruling (no preconditions) is done.
-
-2026-09-26: the acceptance contract of the reference path / practical presets is [ADR 0110](decisions/0110-practical-tier-numerics-contract.md)
-(contract classes E / C / R / Q, the four-point kernel check, in-device determinism MUST for the practical presets too, sha reference-path rows / practical-preset rows).
-Approximate kernels (Q) come in under this contract.
+> correct, not a goal in itself.** The rules for admitting a numerics-changing path are
+> [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md) (2026-11-10, superseding ADR 0058 and ADR 0110): a kernel or
+> numerics path becomes a runtime option on machine checks only (its contract class E / C / R / Q, the four-point check
+> for R / Q, the census, the reference path's sha256 rows unchanged); bit-identical fusions run by default and are checked
+> per device by the Session canary; making a configuration a preset is the maintainer's decision after a human
+> quality review — never skipped for the default preset, and for another preset skipped only on the maintainer's prior
+> approval, with a machine evaluation in its place; the maintainer picks the default preset among the presets. A dominated configuration
+> (same speed and clearly worse, or slower and the same) is not made a preset.
 
 Performance waves ① to ③ of the 2026-08-13 ruling are **done** (wave ① K-4a = ADR 0053 / wave ② the H group = ADR 0054 /
 wave ③ K-5 = ADR 0058 and 0060, closed on 2026-08-14 — the history is in each ADR and in research).

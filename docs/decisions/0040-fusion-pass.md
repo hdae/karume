@@ -1,7 +1,10 @@
 # 0040: Runtime fusion is a separate pure-function pass (exact matching plus permanent counters)
 
 - Status: accepted (2026-08-08 — the four PNG sha256 checks did not move, and SBV2 WAV sha256 is
-  identical with fusion on and off)
+  identical with fusion on and off);
+  the per-backend evidence of the default-on fusions is [0147](0147-numerics-and-kernel-adoption.md) decision 9
+  (2026-11-10), and the `fuseGeluMulStaticQuantize` flag of the 2026-10-31 addendum is removed by 0147 decision 5
+  (2026-11-10); references to ADR 0058 in this file (decision 2) resolve through 0147's "Where the old clauses went"
 - Date: 2026-08-08
 - Related: ADR [0007](0007-op-vocabulary.md) (op vocabulary allowlist — this ADR adds no public op) /
   [0012](0012-attrs-and-fused-ops.md) (contract for fused ops placed in the IR — this ADR is the
@@ -234,7 +237,10 @@ in the default lanes (`packages/runtime/tests/gpu_rope_fusion_test.ts` and the o
 SHOULD be run when such a reference machine is available (re-graded 2026-10-18 to SHOULD: the
 repository has no M2 check — the reference rows cover only the RTX 3080 Ti and Intel BMG environments —
 and upstream golden comparison is opt-in, `KARUME_UPSTREAM_PARITY=1`, per ADR
-[0129](0129-test-layout-and-lanes.md), addendum 2026-10-17 (2)).
+[0129](0129-test-layout-and-lanes.md), addendum 2026-10-17 (2)). (Amended 2026-11-10 by ADR
+[0147](0147-numerics-and-kernel-adoption.md) decision 9: the twin-graph tests stay the check of record on the
+development machine; the per-device evidence for every default-on fusion is the Session canary on every device and the
+`/kernel-check` run per backend before every release, MUST on Dawn / Vulkan RTX 3080 Ti and Chrome / D3D12 RTX 5070 Ti.)
 Rationale and Chrome measurements: [research](../research/2026-09-12-chrome-gemma-optimization.md).
 
 ## Addendum (2026-09-21) — splitting the fusion pass into files (entry stays `fusion.ts`)
@@ -665,7 +671,9 @@ Gemma 4 QAT runs one `gelu_tanh → mul → static_quantize` chain per layer on 
 path (the gate's gelu times the PLE slice, quantized into `per_layer_projection`): 35 per token on E2B,
 42 on E4B. The rule folds the chain into one dispatch (`packages/runtime/src/kernels/gelu-mul-static-quantize.ts`,
 `packages/runtime/src/runtime/fusion-rules/gelu-mul-static-quantize.ts`), opted in by the session flag
-`fuseGeluMulStaticQuantize`, which the QAT distribution declares in its `i4-fast` presets.
+`fuseGeluMulStaticQuantize`, which the QAT distribution declares in its `i4-fast` presets. (Amended
+2026-11-10 by ADR [0147](0147-numerics-and-kernel-adoption.md) decision 5: the flag is removed and the rule
+applies wherever its chain matches, with no prerequisite option.)
 
 - **Bit identity**: the kernel computes gelu, the product and the SRQ with the plain chain's own WGSL text
   (`prologueUnaryWgsl`, the elementwise `mul`, the K-97 `quantize`), keeps the mul's operand order as
@@ -687,4 +695,5 @@ path (the gate's gelu times the PLE slice, quantized into `per_layer_projection`
   mechanism (`packages/runtime/tests/runtime_fusion_test.ts`).
 - **Speed** (Node + Dawn, RTX 3080 Ti, greedy, 4 interleaved rounds): QAT E2B GPU 5.96 → 5.84 ms per token
   (1,106 → 1,036 dispatches), QAT E4B 10.02 → 9.85 (1,365 → 1,281); text identical. Not measured on
-  D3D12 / Metal. A manifest that declares the flag needs a reader newer than 0.15.0.
+  D3D12 / Metal. A manifest that declares the flag needs a reader newer than 0.15.0; a reader with ADR 0147
+  decision 5 rejects it (amended 2026-11-10).

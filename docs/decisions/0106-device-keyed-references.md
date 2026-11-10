@@ -7,6 +7,8 @@
   that deletes practical rows was kept with the `deno-*` rows exempt, and its rejected alternative was
   re-graded to MAY. [0129](0129-test-layout-and-lanes.md) decision 3 keeps the rows, the three modes and
   the reference guard as MUST.
+  The classes of reference values (0110 decision 7) are [0147](0147-numerics-and-kernel-adoption.md) decision 11 since
+  2026-11-10.
 - Date: 2026-09-20
 - Scope: `packages/runtime/tests/helpers/{environment,reference,results}.ts` (environment key; reading and
   writing the fixtures and the reference guard; results directory); unit tests `environment_key_test.ts` /

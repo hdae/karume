@@ -4,7 +4,8 @@
   check and storage key; recommended options for decisions 2 / 3 / 4 / 6); implemented (2026-10-03);
   partly superseded by [0127](0127-node-dawn-toolchain.md) decision 5 (2026-10-16: decision 1's
   thin shells `tools/geometry-sweep` and `tools/gpu-lab` are not ported, so the regeneration decision
-  4 requires has no tool in the repository). Triage 2026-10-18: decisions 3 and 4 kept at their grade.
+  4 requires has no tool in the repository). Triage 2026-10-18: decisions 3 and 4 kept at their grade;
+  decision 8's record gains a backend field by [0147](0147-numerics-and-kernel-adoption.md) decision 9 (2026-11-10)
 - Date: 2026-10-01
 - Related: [0115](0115-geometry-profiles.md) (geometry profiles — decisions 1 / 4 / 8, addendum
   decisions 6 / 7 / 8, addenda 7 / 9) / [0116](0116-geometry-profile-row-buckets.md) (seven row
@@ -289,6 +290,10 @@ readonly provenance?: {
 | `caseSet`           | The case-set version (decision 4)                                    | Which case set was measured                                                              |
 | `defaultKernels`    | Kernel fingerprint of the default table (`DEFAULT_GEOMETRY_PROFILE`) | Which runtime's kernels the ratios rest on                                               |
 
+- A backend field is added to the record by ADR [0147](0147-numerics-and-kernel-adoption.md) decision 9
+  (amended 2026-11-10; WebGPU exposes no backend). How it is filled — inference from the user agent, which
+  is speculation-grade, entry by the person running the sweep, or both — is an implementation-time item of
+  that decision.
 - The format stays /2 and the fields are optional. The reader `parseSweepReport`
   (`src/tune/derive.ts:376`) checks only the fields it reads and ignores unknown ones (as when
   `candidateSet` was added).
