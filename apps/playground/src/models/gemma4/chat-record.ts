@@ -168,12 +168,18 @@ export type GemmaRecord = RecordEnvironment & {
   readonly vision?: true;
   /**
    * Present only when the pipeline was built with the exact expert cache (`expertCache`), with its
-   * host tier's budget when it had one (`hostBytes`; `Number.MAX_SAFE_INTEGER` = every expert).
+   * host tier's budget when it had one (`hostBytes`; `Number.MAX_SAFE_INTEGER` = every expert) and
+   * its self-speculation depth when decode ran in cycles (`depth`; absent = one run per decode token).
    */
-  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
+  readonly expertCache?: {
+    readonly slots: number;
+    readonly hostBytes?: number;
+    readonly depth?: number;
+  };
   /**
    * Present only with {@link expertCache}: `Pipeline.expertCacheReport()` after the latest turn
-   * (cumulative over the pipeline's lifetime, so a "Load again" starts it over).
+   * (cumulative over the pipeline's lifetime, so a "Load again" starts it over), with the
+   * self-speculation cycles' counters (`speculation`) exactly when {@link expertCache} has a `depth`.
    */
   readonly expertCacheReport?: ExpertCacheReport;
   readonly loadSeconds: number;
@@ -200,7 +206,11 @@ export const buildGemmaRecord = (input: {
   readonly speculative: boolean;
   readonly fullStateStorage?: "f16";
   readonly vision?: true;
-  readonly expertCache?: { readonly slots: number; readonly hostBytes?: number };
+  readonly expertCache?: {
+    readonly slots: number;
+    readonly hostBytes?: number;
+    readonly depth?: number;
+  };
   readonly expertCacheReport?: ExpertCacheReport;
   readonly loadSeconds: number;
   readonly chat: ChatSettings;

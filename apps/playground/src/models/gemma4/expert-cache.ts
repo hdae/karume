@@ -33,7 +33,31 @@ export type ExpertCacheFigures = {
   /** What the host tier holds now (0 without one). */
   readonly hostHeldExperts: number;
   readonly hostHeldGiB: number;
+  /** Present exactly when the pipeline was built with a self-speculation depth. */
+  readonly speculation?: ExpertSpeculationFigures;
 };
+
+/** The self-speculation cycles' figures (`ExpertCacheReport.speculation`). */
+export type ExpertSpeculationFigures = {
+  readonly cycles: number;
+  /** Drafts confirmed per cycle (at most the depth). */
+  readonly acceptedDraftsPerCycle?: number;
+  /** Cycles that ended at the verify's first missing row. */
+  readonly partialCommits: number;
+  /** Verify runs issued again because their first row missed. */
+  readonly verifyRetries: number;
+};
+
+const speculationFigures = (
+  speculation: NonNullable<ExpertCacheReport["speculation"]>,
+): ExpertSpeculationFigures => ({
+  cycles: speculation.cycles,
+  ...(speculation.cycles === 0
+    ? {}
+    : { acceptedDraftsPerCycle: speculation.acceptedDrafts / speculation.cycles }),
+  partialCommits: speculation.partialCommits,
+  verifyRetries: speculation.verifyRetries,
+});
 
 export const expertCacheFigures = (report: ExpertCacheReport): ExpertCacheFigures => ({
   slots: report.slots,
@@ -52,6 +76,9 @@ export const expertCacheFigures = (report: ExpertCacheReport): ExpertCacheFigure
   uploadMs: report.uploadMs,
   hostHeldExperts: report.hostHeldExperts,
   hostHeldGiB: report.hostHeldBytes / GIB,
+  ...(report.speculation === undefined
+    ? {}
+    : { speculation: speculationFigures(report.speculation) }),
 });
 
 /** One line for the status card. */
@@ -59,10 +86,20 @@ export const expertCacheText = (report: ExpertCacheReport): string => {
   const figures = expertCacheFigures(report);
   const retries = figures.retriesPerCommittedRun;
   const perExpert = figures.loadMsPerExpert;
+  const { speculation } = figures;
+  const accepted = speculation?.acceptedDraftsPerCycle;
   return [
     `${figures.slots} slots`,
     `${figures.committedRuns} committed runs`,
     `${retries === undefined ? "—" : retries.toFixed(2)} retries / committed run`,
+    ...(speculation === undefined
+      ? []
+      : [
+          `${speculation.cycles} cycles`,
+          `${accepted === undefined ? "—" : accepted.toFixed(2)} accepted drafts / cycle`,
+          `${speculation.partialCommits} partial commits`,
+          `${speculation.verifyRetries} verify retries`,
+        ]),
     `${figures.loadedExperts} loaded (${figures.hostExperts} from the host tier, ${figures.containerExperts} from the distribution)`,
     `${figures.evictedExperts} evicted`,
     `${figures.readMiB.toFixed(1)} MiB read`,
@@ -76,3 +113,15 @@ export const expertHostTierText = (hostBytes: number): string =>
   hostBytes === Number.MAX_SAFE_INTEGER
     ? "host tier all"
     : `host tier ${(hostBytes / GIB).toFixed(2)} GiB`;
+
+/** The expert cache of a load request (`expertCache`), as the status's Pipeline line names it. */
+export const expertCacheRequestText = (expertCache: {
+  readonly slots: number;
+  readonly hostBytes?: number;
+  readonly depth?: number;
+}): string =>
+  [
+    `expert cache ${expertCache.slots} slots`,
+    ...(expertCache.hostBytes === undefined ? [] : [expertHostTierText(expertCache.hostBytes)]),
+    ...(expertCache.depth === undefined ? [] : [`depth ${expertCache.depth}`]),
+  ].join(" · ");

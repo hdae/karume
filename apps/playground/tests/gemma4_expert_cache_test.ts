@@ -3,15 +3,18 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   expertCacheFigures,
+  expertCacheRequestText,
   expertCacheText,
   expertHostTierText,
 } from "../src/models/gemma4/expert-cache.ts";
 import {
   EXPERT_CACHE_SLOTS,
   EXPERT_HOST_TIER_ALL,
+  EXPERT_SPECULATION_DEPTH,
   hasExpertCache,
   parseExpertCacheSlots,
   parseExpertHostTier,
+  parseExpertSpeculationDepth,
 } from "../src/models/gemma4/settings.ts";
 
 const MIB = 2 ** 20;
@@ -119,6 +122,49 @@ describe("parseExpertHostTier", () => {
   });
 });
 
+describe("parseExpertSpeculationDepth", () => {
+  it("reads an empty field as no self-speculation", () => {
+    expect(parseExpertSpeculationDepth("")).toEqual({ ok: true, value: undefined });
+    expect(parseExpertSpeculationDepth("  ")).toEqual({ ok: true, value: undefined });
+  });
+
+  it("accepts the bounds and the integers between them", () => {
+    expect(parseExpertSpeculationDepth(String(EXPERT_SPECULATION_DEPTH.min))).toEqual({
+      ok: true,
+      value: 1,
+    });
+    expect(parseExpertSpeculationDepth(" 3 ")).toEqual({ ok: true, value: 3 });
+    expect(parseExpertSpeculationDepth(String(EXPERT_SPECULATION_DEPTH.max))).toEqual({
+      ok: true,
+      value: 4,
+    });
+  });
+
+  it("refuses a depth just outside the bounds and what is not a plain integer, naming the range", () => {
+    for (const text of ["0", "5", "-1", "2.5", "1e0", "four", "4 drafts"]) {
+      const parsed = parseExpertSpeculationDepth(text);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) continue;
+      expect(parsed.errors).toEqual([
+        "Self-speculation depth must be an integer from 1 to 4, or empty for none (one run per decode token).",
+      ]);
+    }
+  });
+});
+
+describe("expertCacheRequestText", () => {
+  it("names the slots, then the host tier and the depth only when they were asked for", () => {
+    expect(expertCacheRequestText({ slots: 64 })).toBe("expert cache 64 slots");
+    expect(expertCacheRequestText({ slots: 64, hostBytes: Number.MAX_SAFE_INTEGER })).toBe(
+      "expert cache 64 slots · host tier all",
+    );
+    expect(expertCacheRequestText({ slots: 64, depth: 4 })).toBe("expert cache 64 slots · depth 4");
+    expect(
+      expertCacheRequestText({ slots: 64, hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 }),
+    ).toBe("expert cache 64 slots · host tier all · depth 4");
+  });
+});
+
 describe("expertHostTierText", () => {
   it("names every expert as all and a budget in GiB", () => {
     expect(expertHostTierText(Number.MAX_SAFE_INTEGER)).toBe("host tier all");
@@ -146,6 +192,47 @@ describe("expertCacheFigures", () => {
     });
   });
 
+  it("has no self-speculation figures for a pipeline built without a depth", () => {
+    expect(expertCacheFigures(report())).not.toHaveProperty("speculation");
+  });
+
+  it("divides the accepted drafts by the cycles when the pipeline was built with a depth", () => {
+    const figures = expertCacheFigures(
+      report({
+        speculation: {
+          depth: 4,
+          cycles: 40,
+          draftRuns: 150,
+          acceptedDrafts: 120,
+          verifyRetries: 3,
+          partialCommits: 7,
+        },
+      }),
+    );
+    expect(figures.speculation).toEqual({
+      cycles: 40,
+      acceptedDraftsPerCycle: 3,
+      partialCommits: 7,
+      verifyRetries: 3,
+    });
+  });
+
+  it("leaves out the accepted drafts per cycle before the first cycle", () => {
+    const figures = expertCacheFigures(
+      report({
+        speculation: {
+          depth: 4,
+          cycles: 0,
+          draftRuns: 0,
+          acceptedDrafts: 0,
+          verifyRetries: 0,
+          partialCommits: 0,
+        },
+      }),
+    );
+    expect(figures.speculation).toEqual({ cycles: 0, partialCommits: 0, verifyRetries: 0 });
+  });
+
   it("leaves out a ratio with nothing to divide by (before the first turn, a run that missed nothing)", () => {
     const figures = expertCacheFigures(
       report({ committedRuns: 0, retries: 0, loadedExperts: 0, bytesRead: 0, loadMs: 0 }),
@@ -160,6 +247,44 @@ describe("expertCacheText", () => {
   it("shows every figure of the status row", () => {
     expect(expertCacheText(report())).toBe(
       "64 slots · 20 committed runs · 0.50 retries / committed run · 400 loaded (300 from the host tier, 100 from the distribution) · 150 evicted · 1280.0 MiB read · load 900 ms (2.25 ms / expert; read 600 ms, upload 250 ms) · host tier holds 1536 experts (12.00 GiB)",
+    );
+  });
+
+  it("adds the self-speculation cycles after the committed runs when the pipeline was built with a depth", () => {
+    expect(
+      expertCacheText(
+        report({
+          speculation: {
+            depth: 4,
+            cycles: 40,
+            draftRuns: 150,
+            acceptedDrafts: 125,
+            verifyRetries: 3,
+            partialCommits: 7,
+          },
+        }),
+      ),
+    ).toBe(
+      "64 slots · 20 committed runs · 0.50 retries / committed run · 40 cycles · 3.13 accepted drafts / cycle · 7 partial commits · 3 verify retries · 400 loaded (300 from the host tier, 100 from the distribution) · 150 evicted · 1280.0 MiB read · load 900 ms (2.25 ms / expert; read 600 ms, upload 250 ms) · host tier holds 1536 experts (12.00 GiB)",
+    );
+  });
+
+  it("shows a dash for the accepted drafts per cycle before the first cycle", () => {
+    expect(
+      expertCacheText(
+        report({
+          speculation: {
+            depth: 2,
+            cycles: 0,
+            draftRuns: 0,
+            acceptedDrafts: 0,
+            verifyRetries: 0,
+            partialCommits: 0,
+          },
+        }),
+      ),
+    ).toContain(
+      " · 0 cycles · — accepted drafts / cycle · 0 partial commits · 0 verify retries · ",
     );
   });
 

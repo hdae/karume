@@ -165,6 +165,48 @@ describe("buildGemmaRecord", () => {
     expect(saved).toMatchObject({ expertCache: { slots: 32, hostBytes: Number.MAX_SAFE_INTEGER } });
   });
 
+  it("keeps the self-speculation depth and the cycles' counters through JSON", () => {
+    const expertCacheReport = {
+      runs: 50,
+      missedRuns: 6,
+      loads: 12,
+      loadedExperts: 140,
+      evictedExperts: 76,
+      hostExperts: 140,
+      containerExperts: 0,
+      bytesRead: 0,
+      bytesUploaded: 140 * 3_345_408,
+      loadMs: 300,
+      readMs: 0,
+      uploadMs: 120,
+      hostHeldExperts: 3840,
+      hostHeldBytes: 3840 * 3_345_408,
+      slots: 64,
+      committedRuns: 3,
+      retries: 1,
+      speculation: {
+        depth: 4,
+        cycles: 10,
+        draftRuns: 34,
+        acceptedDrafts: 31,
+        verifyRetries: 2,
+        partialCommits: 3,
+      },
+    };
+    const record = buildGemmaRecord({
+      ...input,
+      mount: "gemma4-qat",
+      model: "26b",
+      expertCache: { slots: 64, hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 },
+      expertCacheReport,
+    });
+    const saved: unknown = JSON.parse(JSON.stringify(record));
+    expect(saved).toMatchObject({
+      expertCache: { slots: 64, hostBytes: Number.MAX_SAFE_INTEGER, depth: 4 },
+      expertCacheReport,
+    });
+  });
+
   it("starts with the format and the environment and names the entry point by mount", () => {
     const record = buildGemmaRecord({ ...input, mount: "gemma4" });
     expect(record.format).toBe(RECORD_FORMAT);

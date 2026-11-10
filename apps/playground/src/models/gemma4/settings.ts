@@ -203,6 +203,36 @@ export const parseExpertHostTier = (text: string): Parsed<number | undefined> =>
 };
 
 /**
+ * The range the "Self-speculation depth" field accepts (`expertCache.depth` — ADR 0146 decision 8).
+ * The bound that depends on the slots (`depth + 1 ≤ ⌊slots / 8⌋` on 26B) is the pipeline's to check:
+ * a depth it refuses fails at Load with its own message.
+ */
+export const EXPERT_SPECULATION_DEPTH = { min: 1, max: 4 } as const;
+
+/**
+ * The "Self-speculation depth" field → `expertCache.depth` (`undefined` = empty: no
+ * self-speculation, every decode token is one run re-run after a miss), or the problem. Anything
+ * else must be an integer in {@link EXPERT_SPECULATION_DEPTH}.
+ */
+export const parseExpertSpeculationDepth = (text: string): Parsed<number | undefined> => {
+  if (text.trim() === "") return { ok: true, value: undefined };
+  const depth = integerOf(text);
+  if (
+    depth === undefined ||
+    depth < EXPERT_SPECULATION_DEPTH.min ||
+    depth > EXPERT_SPECULATION_DEPTH.max
+  ) {
+    return {
+      ok: false,
+      errors: [
+        `Self-speculation depth must be an integer from ${EXPERT_SPECULATION_DEPTH.min} to ${EXPERT_SPECULATION_DEPTH.max}, or empty for none (one run per decode token).`,
+      ],
+    };
+  }
+  return { ok: true, value: depth };
+};
+
+/**
  * The `speculative` a chat passes for what was loaded. MUST: `"always"` with a drafter on f16 full
  * slots, because a turn that leaves it out selects the self-tuning gate, which the pipeline refuses
  * there (ADR 0143 decision 8). Everywhere else the session keeps its default.

@@ -67,7 +67,7 @@ import {
   type TurnRecord,
 } from "./chat-record";
 import { ChatTranscript, ImageThumbnail } from "./chat-transcript";
-import { expertCacheText, expertHostTierText } from "./expert-cache";
+import { expertCacheRequestText, expertCacheText } from "./expert-cache";
 import { decodeImageFile } from "./image-input";
 import { createLiveReplyStore, frameScheduler } from "./live-reply";
 import { type GenerateObservation, type ObservedHost, observeHost } from "./observed-host";
@@ -85,6 +85,7 @@ import {
   effectiveModelKey,
   EXPERT_CACHE_SLOTS,
   EXPERT_HOST_TIER_ALL,
+  EXPERT_SPECULATION_DEPTH,
   GEMMA_MOUNTS,
   type GemmaManifests,
   type GemmaMount,
@@ -103,6 +104,7 @@ import {
   parseChatForm,
   parseExpertCacheSlots,
   parseExpertHostTier,
+  parseExpertSpeculationDepth,
   parseModelKey,
   parseTurnForm,
   sameChatSettings,
@@ -234,13 +236,7 @@ const pipelineText = (state: GemmaPipelineState): string => {
       return `${MOUNT_LABELS[request.mount]} ${request.model} · ${request.quant} · ${request.source.kind}${
         request.speculative ? " · MTP drafter" : ""
       }${request.fullStateStorage === "f16" ? " · f16 KV" : ""}${
-        request.expertCache === undefined
-          ? ""
-          : ` · expert cache ${request.expertCache.slots} slots${
-              request.expertCache.hostBytes === undefined
-                ? ""
-                : ` · ${expertHostTierText(request.expertCache.hostBytes)}`
-            }`
+        request.expertCache === undefined ? "" : ` · ${expertCacheRequestText(request.expertCache)}`
       }${request.diagnostics ? " · diagnostics" : ""} · loaded in ${state.loadSeconds.toFixed(1)} s`;
     }
   }
@@ -328,6 +324,12 @@ export const Gemma4Page = () => {
   const expertHostTierApplies = expertCacheSlots !== undefined;
   const expertHostBytes =
     expertHostTierApplies && expertHostTierParsed.ok ? expertHostTierParsed.value : undefined;
+  // Likewise kept as typed; it applies (and is checked) only with the cache's slots.
+  const [depthInput, setDepthInput] = useState("");
+  const expertDepthParsed = useMemo(() => parseExpertSpeculationDepth(depthInput), [depthInput]);
+  const expertDepthApplies = expertCacheSlots !== undefined;
+  const expertDepth =
+    expertDepthApplies && expertDepthParsed.ok ? expertDepthParsed.value : undefined;
   const [diagnosticsChosen, setDiagnosticsChosen] = useState(false);
 
   // GPU and pipeline.
@@ -507,6 +509,7 @@ export const Gemma4Page = () => {
     chatParsed?.ok === true &&
     (!expertCacheAvailable || expertSlotsParsed.ok) &&
     (!expertHostTierApplies || expertHostTierParsed.ok) &&
+    (!expertDepthApplies || expertDepthParsed.ok) &&
     !running;
   const load = (): void => {
     if (!canLoad || chatParsed?.ok !== true) return;
@@ -524,6 +527,7 @@ export const Gemma4Page = () => {
             expertCache: {
               slots: expertCacheSlots,
               ...(expertHostBytes === undefined ? {} : { hostBytes: expertHostBytes }),
+              ...(expertDepth === undefined ? {} : { depth: expertDepth }),
             },
           }),
       ...(selectedManifest !== undefined && hasVision(selectedManifest, modelKey)
@@ -968,6 +972,7 @@ export const Gemma4Page = () => {
       f16KvChosen !== (pipeline.request.fullStateStorage === "f16") ||
       expertCacheSlots !== pipeline.request.expertCache?.slots ||
       expertHostBytes !== pipeline.request.expertCache?.hostBytes ||
+      expertDepth !== pipeline.request.expertCache?.depth ||
       diagnosticsChosen !== pipeline.request.diagnostics);
   const modelChoices = useMemo(() => gemmaModelChoices(manifests), [manifests]);
 
@@ -1120,6 +1125,27 @@ export const Gemma4Page = () => {
                   <p className="text-xs text-destructive">
                     {expertHostTierParsed.errors.join(" ")}
                   </p>
+                ) : null}
+              </Field>
+              <Field
+                id="gemma4-expert-depth"
+                label="Self-speculation depth"
+                hint={
+                  expertDepthApplies
+                    ? `Drafts up to this many tokens on the cache as it is (a missing expert contributes 0 and nothing waits), loads the experts the drafts picked and verifies them in one run, so one cycle can confirm several tokens. The tokens are the same either way. ${EXPERT_SPECULATION_DEPTH.min} to ${EXPERT_SPECULATION_DEPTH.max}; empty = one run per decode token, re-run after a miss. A depth too large for the slots is refused by the pipeline (shown under Status). Applies on the next Load.`
+                    : "Only with the expert cache (set its slots first)."
+                }
+              >
+                <Input
+                  id="gemma4-expert-depth"
+                  inputMode="numeric"
+                  value={depthInput}
+                  placeholder="off"
+                  onChange={(event) => setDepthInput(event.target.value)}
+                  disabled={running || !expertDepthApplies}
+                />
+                {expertDepthApplies && !expertDepthParsed.ok ? (
+                  <p className="text-xs text-destructive">{expertDepthParsed.errors.join(" ")}</p>
                 ) : null}
               </Field>
               <div className="flex items-center gap-2">
