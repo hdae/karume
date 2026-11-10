@@ -64,7 +64,16 @@
 //    the smallest layer's ⌊slots / 8⌋ rows (6 and 2), the Session's golden rows are a resident
 //    Session's bytes at those chunk rows, the pipeline's greedy tokens are those without the cache,
 //    and on the stress mix self-speculation at depth 1 (the most its smallest layer allows) gives
-//    them at temperature 0 and 1
+//    them at temperature 0 and 1; and (7e) the parallel forms 26B's `i4-fast` preset declares
+//    (`linearGemvReduce: "parallel"`, `fuseRmsNormAdd`, `stateAttentionReduce: "parallel-fused"` —
+//    passed explicitly, the cut has no manifest) on both sides: 7c's 64 slots depth 4, every expert
+//    in the host tier, generates each golden prompt's tokens at temperature 0 and 1 equal to the
+//    pipeline's without the cache with the same options at the same chunk rows, with misses, loads,
+//    drafts confirmed and verifies that missed, and every verify run's census shows the forms ran:
+//    every dense linear on the parallel GEMV (none on the sequential one), the RMS→add fusion, the
+//    attention on its parallel or parallel-fused keys, and `expert_linear` on its pooled key (the routed
+//    experts keep their sequential order under every option). Nothing is compared with the
+//    reference-order tokens: the parallel forms change the rounding
 //
 // A cut model's hidden state is not the final layer's, and a short cut's logits saturate at the
 // softcap (±30): on cut 6, 7 to 757 entries of each golden row are exactly 30.0, so every margin
@@ -151,7 +160,15 @@ import {
   resolveParts,
 } from "../../runtime/tests/helpers/container-files.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
-import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { expertLinearKey } from "../../runtime/src/kernels/expert-linear.ts";
+import { linearKey } from "../../runtime/src/kernels/linear.ts";
+import { linearGemvKey } from "../../runtime/src/kernels/linear-gemv.ts";
+import {
+  type CensusRow,
+  countDispatches,
+  requireCensus,
+  SEAT_SIGNATURES,
+} from "../../runtime/tests/helpers/pipeline-census.ts";
 import {
   f32ArtifactBytes,
   openReferences,
@@ -1286,6 +1303,78 @@ const LAYER_SLOT_RUNS: readonly { readonly name: string; readonly slots: readonl
 const layerChunkRows = (slots: readonly number[]): number => cacheChunkRows(Math.min(...slots));
 /** ⑦d's self-speculation: the stress mix at the most drafts its smallest layer allows (⌊16 / 8⌋ − 1). */
 const LAYER_SPECULATION = { name: "stress", depth: 1 } as const;
+/**
+ * ⑦e's Session options: the parallel forms 26B's `i4-fast` preset declares. The cut has no manifest,
+ * so both pipelines take them explicitly.
+ */
+const PARALLEL_FORMS = {
+  linearGemvReduce: "parallel",
+  fuseRmsNormAdd: true,
+  stateAttentionReduce: "parallel-fused",
+} as const;
+/** ⑦e's self-speculation: 7c's run at 64 slots (every expert in the host tier). */
+const PARALLEL_SPECULATION = { slots: 64, depth: 4 } as const;
+/** The family of a pipeline key (before the first `:`). */
+const keyFamily = (key: string): string => key.split(":")[0];
+/** The sequential GEMV's family and the row-block GEMM's (spelled from the key functions). */
+const SEQUENTIAL_GEMV_FAMILY = keyFamily(linearGemvKey("i4", 32));
+const GEMM_FAMILY = keyFamily(linearKey("f32", true));
+/** The pooled `expert_linear` key of the cache (i4 codes, f16 steps, group 32 — ADR 0145). */
+const POOLED_EXPERT_KEY = expertLinearKey("i4f16", 32, true);
+/** The states-form attention's kernels (①QK, ②row statistics, ③PV and the fused ②+③). */
+const STATE_ATTENTION_PREFIX = "attention_state";
+
+/**
+ * Whether one run's census shows the parallel forms of ⑦e: every dense linear (`linears` of the
+ * graph, one dispatch each) on the parallel GEMV and none on the sequential GEMV or the GEMM, an
+ * RMS→add pair fused, every attention node's ①QK on a parallel key and its ②+③ on the fused key or
+ * on the row statistics plus a parallel ③PV (no sequential states-form kernel), and every
+ * `expert_linear` (`experts` of the graph) on the pooled
+ * key — the routed experts keep their sequential order under every option.
+ */
+const parallelFormFailures = (
+  where: string,
+  rows: readonly CensusRow[],
+  graph: { readonly linears: number; readonly attentions: number; readonly experts: number },
+): string[] => {
+  const failures: string[] = [];
+  const keys = rows.map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
+  const fail = (what: string): void => {
+    failures.push(`${where}: ${what} — ${keys}`);
+  };
+  const count = (match: (key: string) => boolean): number => countDispatches(rows, match);
+  const parallel = count(SEAT_SIGNATURES.linearGemvReduce.parallel);
+  if (parallel !== graph.linears) {
+    fail(`${parallel} parallel GEMV dispatches for ${graph.linears} dense linears`);
+  }
+  const sequential = count((key) => keyFamily(key) === SEQUENTIAL_GEMV_FAMILY);
+  const gemm = count((key) => keyFamily(key) === GEMM_FAMILY);
+  if (sequential + gemm !== 0) fail(`${sequential} sequential GEMV and ${gemm} GEMM dispatches`);
+  if (count(SEAT_SIGNATURES.fuseRmsNormAdd.true) === 0) fail("no RMS→add pair fused");
+  // A node runs ①QK on a parallel key and ②+③ either fused (one dispatch) or as the row statistics
+  // plus a parallel ③PV (the fused form takes only some shapes and keeps the same order —
+  // `SessionOptions.stateAttentionReduce`): two dispatches on the parallel-or-fused keys per node,
+  // and one row-statistics dispatch per node that is not fused. A sequential ①QK or ③PV would add
+  // to the total without being among them.
+  const fused = count(SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]);
+  const stateParallel = count(SEAT_SIGNATURES.stateAttentionReduce.parallel);
+  const attention = count((key) => key.startsWith(STATE_ATTENTION_PREFIX));
+  if (
+    stateParallel + fused !== 2 * graph.attentions ||
+    attention !== stateParallel + fused + (graph.attentions - fused)
+  ) {
+    fail(
+      `${stateParallel} parallel ①QK / ③PV and ${fused} fused ②+③ of ${attention} states-form attention dispatches for ${graph.attentions} attention nodes`,
+    );
+  }
+  const experts = count((key) => keyFamily(key) === keyFamily(POOLED_EXPERT_KEY));
+  const pooled = count((key) => key === POOLED_EXPERT_KEY);
+  if (pooled !== graph.experts || experts !== pooled) {
+    fail(`${pooled} pooled of ${experts} expert_linear dispatches for ${graph.experts} nodes`);
+  }
+  return failures;
+};
+
 /** A run's name in the log and the failures. */
 const cacheRunName = ({ slots, host }: CacheRun): string =>
   `slots ${slots}${host === undefined ? "" : ` host ${host}`}`;
@@ -2057,6 +2146,184 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       }
       console.log(`[e2e] gemma4 26b cut per-layer slots (Pipeline):\n  ${lines.join("\n  ")}`);
       assertEquals(failures, [], "per-layer slots against the pipeline without the cache");
+    });
+
+    it("⑦e gemma.Pipeline: with the parallel forms of i4-fast on both sides, self-speculation over the cache at 64 slots depth 4 gives the tokens without the cache at temperature 0 and 1, and every verify run took the parallel forms", async () => {
+      assert(gpu !== undefined, "no GPU");
+      const caseStarted = performance.now();
+      const assets = {
+        config: PIPELINE_CONFIG,
+        model: await Promise.all(resolveParts(MODEL).map((part) => readFile(part))),
+        tokenizer: await readFile(TOKENIZER),
+      };
+      // The graph's node counts the census is held to (one dispatch per node).
+      const nodes = prepareContainer(await openSeriesContainer(MODEL), MODEL_GRAPH).graph.nodes;
+      const opCount = (op: string): number => nodes.filter((node) => node.op === op).length;
+      const graph = {
+        linears: opCount("linear"),
+        attentions: opCount("attention"),
+        experts: opCount("expert_linear"),
+      };
+      /** Each golden prompt's tokens (a stop token included) and stop reason, and the decode tokens. */
+      const generate = async (
+        pipeline: Pipeline,
+        sampler: SamplerSpec,
+      ): Promise<{ readonly tokens: Map<string, string>; readonly decoded: number }> => {
+        const tokens = new Map<string, string>();
+        let decoded = 0;
+        for (const [name, golden] of goldens) {
+          const sequence = await pipeline.sequence();
+          try {
+            const ids: number[] = [];
+            const stream = sequence.generate({
+              prompt: [...golden.prompt],
+              maxNewTokens: SPECULATION_NEW_TOKENS,
+              sampler,
+            });
+            for await (const event of stream) {
+              if (event.kind === "token") ids.push(event.id);
+            }
+            const stop = await stream.done;
+            if (stop.reason === "eos") ids.push(stop.token);
+            // The first token comes from the prefill; the rest are decode's.
+            decoded += stop.tokens - 1;
+            tokens.set(name, `[${ids.join(", ")}] (stop '${stop.reason}')`);
+          } finally {
+            await sequence.dispose();
+          }
+        }
+        return { tokens, decoded };
+      };
+
+      const { slots, depth } = PARALLEL_SPECULATION;
+      const run = `slots ${slots} depth ${depth} parallel forms`;
+      const chunkLength = cacheChunkRows(slots);
+      // Without the cache, with the same options at the chunk rows the cache settles; one large
+      // container at a time.
+      const withoutCache = new Map<string, Map<string, string>>();
+      const resident = await Pipeline.fromAssets(assets, { gpu, chunkLength, ...PARALLEL_FORMS });
+      try {
+        for (const [label, sampler] of SPECULATION_SAMPLERS) {
+          withoutCache.set(label, (await generate(resident, sampler)).tokens);
+        }
+      } finally {
+        await resident.dispose();
+        await settleReleases(gpu);
+      }
+
+      const lines: string[] = [];
+      const failures: string[] = [];
+      /** Each verify run's census (the run the cycle committed, after any re-run). */
+      const verifies: (readonly CensusRow[] | undefined)[] = [];
+      const cached = await Pipeline.fromAssets(assets, {
+        gpu,
+        ...PARALLEL_FORMS,
+        expertCache: { slots, depth, hostBytes: Number.MAX_SAFE_INTEGER },
+        onRunDiagnostics: (diagnostics, phase) => {
+          if (phase.kind !== "verify") return;
+          const rows = diagnostics.lastRunPipelines;
+          verifies.push(rows === undefined ? undefined : [...rows]);
+        },
+      });
+      try {
+        assertEquals(cached.program.chunkLength, chunkLength, `${run}: the chunk rows`);
+        for (const [label, sampler] of SPECULATION_SAMPLERS) {
+          const where = `${run} ${label}`;
+          const expected = withoutCache.get(label);
+          assert(expected !== undefined, `${where}: no reference`);
+          const before = cached.expertCacheReport()?.speculation;
+          const started = performance.now();
+          const actual = await generate(cached, sampler);
+          const seconds = (performance.now() - started) / 1000;
+          const now = cached.expertCacheReport()?.speculation;
+          assert(before !== undefined && now !== undefined, `${where}: no cycles reported`);
+          const delta = {
+            cycles: now.cycles - before.cycles,
+            draftRuns: now.draftRuns - before.draftRuns,
+            acceptedDrafts: now.acceptedDrafts - before.acceptedDrafts,
+            verifyRetries: now.verifyRetries - before.verifyRetries,
+            partialCommits: now.partialCommits - before.partialCommits,
+          };
+          lines.push(
+            `${where} (chunks of ${chunkLength} rows, ${seconds.toFixed(1)} s, ${actual.decoded} decode tokens): ` +
+              `cycles ${delta.cycles}, draftRuns ${delta.draftRuns}, acceptedDrafts ${delta.acceptedDrafts}, ` +
+              `partialCommits ${delta.partialCommits}, verifyRetries ${delta.verifyRetries}`,
+          );
+          for (const [name, tokens] of expected) {
+            lines.push(`  ${name}: ${tokens}`);
+            if (actual.tokens.get(name) !== tokens) {
+              failures.push(
+                `${where} ${name}: ${actual.tokens.get(name)} with the cache, ${tokens} without`,
+              );
+            }
+          }
+          // A case whose drafts were never confirmed, or whose verifies never missed, decides
+          // nothing about the cycle.
+          if (delta.acceptedDrafts === 0) failures.push(`${where}: no draft confirmed`);
+          if (delta.partialCommits + delta.verifyRetries === 0) {
+            failures.push(`${where}: no verify missed — the case decides nothing`);
+          }
+          if (delta.cycles === 0 || delta.cycles > actual.decoded) {
+            failures.push(`${where}: ${delta.cycles} cycles for ${actual.decoded} decode tokens`);
+          }
+        }
+        const report = cached.expertCacheReport();
+        assert(report?.speculation !== undefined);
+        lines.push(`${run} (whole pipeline): ${reportLine(report)}`);
+        // A run with no miss would prove nothing; every expert held, so each load came from RAM.
+        if (report.missedRuns === 0 || report.loads === 0) {
+          failures.push(`${run}: no missed run or no load — the case decides nothing`);
+        }
+        if (
+          report.hostExperts !== report.loadedExperts ||
+          report.containerExperts !== 0 ||
+          report.bytesRead !== 0
+        ) {
+          failures.push(
+            `${run}: ${report.hostExperts} of ${report.loadedExperts} loads from RAM, ${report.containerExperts} (${report.bytesRead} bytes) from the distribution`,
+          );
+        }
+        // The counters account for every run: scheme A's prefill, then the cycles' runs.
+        const { draftRuns, cycles, verifyRetries } = report.speculation;
+        const counted = report.committedRuns + report.retries + draftRuns + cycles + verifyRetries;
+        if (report.runs !== counted) {
+          failures.push(`${run}: ${report.runs} runs, ${counted} counted by the face`);
+        }
+        // The forms ran: every verify run's census (one per cycle).
+        if (verifies.length !== cycles) {
+          failures.push(`${run}: ${verifies.length} verify observations for ${cycles} cycles`);
+        }
+        verifies.forEach((rows, index) => {
+          failures.push(
+            ...parallelFormFailures(
+              `${run} verify ${index + 1}`,
+              requireCensus(rows, `${run} verify ${index + 1}`),
+              graph,
+            ),
+          );
+        });
+        const first = verifies[0];
+        if (first !== undefined) {
+          lines.push(
+            `${run} verify 1 census (graph: ${graph.linears} linear, ${graph.attentions} attention, ${graph.experts} expert_linear): ` +
+              first.map((row) => `${row.key}×${row.dispatchCount}`).join(" / "),
+          );
+        }
+      } finally {
+        await cached.dispose();
+        await settleReleases(gpu);
+      }
+      lines.push(
+        `${run}: the case took ${((performance.now() - caseStarted) / 1000).toFixed(1)} s`,
+      );
+      console.log(
+        `[e2e] gemma4 26b cut self-speculation over the expert cache, parallel forms:\n  ${lines.join("\n  ")}`,
+      );
+      assertEquals(
+        failures,
+        [],
+        "self-speculation over the cache with the parallel forms against the pipeline without it",
+      );
     });
   },
 );
