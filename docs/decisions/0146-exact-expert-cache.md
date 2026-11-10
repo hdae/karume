@@ -120,7 +120,8 @@ The code facts this rests on (read 2026-11-09):
 
 1. A RAM tier — settled by the addendum of 2026-11-10 (a cached Blob read measured about 2.9 ms per expert in Chrome on
    the RTX 5070 Ti, research §6.1, and the first chat spent 77% of its time on those reads, §6.2).
-2. A per-layer K (the research's fit saves about 12% at K = 64).
+2. A per-layer K (the research's fit saves about 12% at K = 64) — built by the addendum "per-layer slots" of 2026-11-10;
+   the gain in Chrome is not measured yet.
 3. Prefill speed with small chunks, and whether a grouped prefill form (ADR 0145 open point 1) changes it.
 4. The real per-forward time of 26B decode in Chrome, which sets the absolute cost of every re-run.
 5. The hub opens a container as a plain block source, which states no range cost, so the refusal of a `"scan"` source
@@ -241,3 +242,28 @@ cycles (`packages/models/src/generation/expert-speculation.ts`); prefill is sche
   fewer drafts are confirmed: a draft's logits differ from the exact row's, and in a flat distribution the same uniform
   value then often lands on another token (an explanation, not measured). At 16 slots depth 1 nearly every cycle ends at
   its first missed row.
+
+## Addendum 2026-11-10: per-layer slots
+
+Open point 2 is built: `expertCache.slots` is one count for every routed layer, or an array of one count per routed layer
+in the graph order of their `topk` nodes (the routing's layer axis), in the runtime's `SessionOptions` and Gemma's
+`PipelineOptions`.
+
+- **Each layer keeps its own count.** Its pools hold that many experts, its slot table names slots below it, its LRU and
+  free slots are counted against it, and the pooled `expert_linear` kernel takes it in its params. The staging ring is
+  bounded by the sum of the counts (one load needs at most every layer's slots). `ExpertCache.slots` and
+  `ExpertCacheReport.slots` are one entry per layer, the same entries when one number was given.
+- **Checks.** The runtime refuses an array whose length is not the routed layer count, and an entry outside k to E,
+  naming the entry. Gemma refuses an entry outside 2k to E before any weight part is fetched (the length after the graph
+  is read). The prefill chunk rows and the depth bound of decision 8 take the **smallest** layer's count: every layer
+  must hold one run's distinct picks at once, so the layer with the fewest slots decides, and the messages name it.
+- **The Playground holds the fitted allocation** of the research (§4.2: a local search over the CPU traces at a mean of 64,
+  more slots in the early layers, the same VRAM as 64 in every layer) as the preset `fitted`; the field also takes a
+  comma-separated list.
+- **Checks on the 26B cut model** (12 layers, RTX 3080 Ti, every expert in the host tier): the fitted allocation's first
+  12 entries (smallest 52, so chunks of 6 rows) and a stress allocation from 16 to 128 (chunks of 2 rows) give
+  teacher-forced rows word-identical to a resident Session at the same chunk rows, pools of exactly each layer's bytes,
+  and greedy tokens equal to the pipeline without the cache; the stress allocation at depth 1 gives the same tokens at
+  temperature 0 and 1. Sizing every pool by the first layer's count fails the runtime's unit and GPU tests, passing the
+  first layer's count to the kernel fails the GPU test (two layers of 8 and 12 slots), and taking the chunk rows from the
+  largest layer fails Gemma's unit tests and the cut-model check.

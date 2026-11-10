@@ -30,6 +30,9 @@ measurements in `docs/research/`.
   `⌊slots / 8⌋` rows. `depth` decodes by self-speculation over the cache: each cycle drafts up to `depth` tokens on the
   cache as it is, loads what they picked and verifies them in one run, keeping only exact rows, so the tokens stay those
   of every expert resident at any temperature; `ExpertCacheReport.speculation` gives the cycle counters (ADR 0146).
+- `expertCache.slots` (runtime and Gemma) also takes an array of one count per routed layer, in layer order: each layer
+  keeps its own number of experts, and Gemma's chunk rows and depth bound follow the smallest layer.
+  `ExpertCache.slots` and `ExpertCacheReport.slots` are one entry per layer (ADR 0146).
 
 ## [0.19.0] - 2026-11-08
 
