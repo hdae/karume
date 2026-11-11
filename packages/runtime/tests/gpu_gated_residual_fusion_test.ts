@@ -9,11 +9,13 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { GATED_RESIDUAL_KEY } from "../src/kernels/gated-residual.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /**
@@ -61,20 +63,6 @@ const gatedResidualGraph = (rows: number, dim: number, interpose: boolean): Decl
 
 const words = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
-
-const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
-
-/** Non-NaN words match exactly; NaN only by classification (payloads are backend-defined). */
-const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
-  assertEquals(actual.length, expected.length, `${label}: length`);
-  for (let i = 0; i < actual.length; i++) {
-    if (isNanWord(expected[i])) {
-      assertEquals(isNanWord(actual[i]), true, `${label}: NaN classification index=${i}`);
-    } else {
-      assertEquals(actual[i], expected[i], `${label}: word index=${i}`);
-    }
-  }
-};
 
 /**
  * Inputs whose product and residual are of similar magnitude with both signs (so a contracted
@@ -137,32 +125,18 @@ test.skipIf(!GPU_AVAILABLE)(
         try {
           for (const [maskLabel, mask] of MASKS) {
             const label = `rows=${rows} dim=${dim} ${maskLabel}`;
-            const values = inputs(rows, dim, mask);
-            // The submit statistics accumulate over a session's runs, so compare the increments.
-            const fusedBefore = fused.diagnostics().submit.dispatchCount;
-            const primitiveBefore = primitive.diagnostics().submit.dispatchCount;
-            const fusedOut = (await fused.run(values)).out;
-            const primitiveOut = (await primitive.run(values)).out;
-            assertFloatParity(words(fusedOut), words(primitiveOut), `${label}: fused vs primitive`);
-            assertEquals(
-              fused.diagnostics().submit.dispatchCount - fusedBefore,
-              1,
-              `${label}: one pass`,
-            );
-            assertEquals(
-              primitive.diagnostics().submit.dispatchCount - primitiveBefore,
-              3,
-              `${label}: where + mul + add`,
-            );
-            assertEquals(
-              fused.diagnostics().lastRunFusions?.gatedResidual,
-              1,
-              `${label}: fused counter`,
-            );
-            assertEquals(
-              primitive.diagnostics().lastRunFusions?.gatedResidual,
-              0,
-              `${label}: reference counter`,
+            assertCheckCase(
+              await checkFusionTwin(gpu, {
+                label: `${label}: fused vs primitive`,
+                fused,
+                plain: primitive,
+                feeds: inputs(rows, dim, mask),
+                counter: "gatedResidual",
+                hits: 1,
+                nan: "class",
+                // One pass against where + mul + add.
+                dispatches: { fused: 1, plain: 3 },
+              }),
             );
             assertEquals(
               requireCensus(fused.diagnostics().lastRunPipelines, label).map((row) => row.key),
@@ -200,13 +174,17 @@ test.skipIf(!GPU_AVAILABLE)(
         GRAPH_NAME,
       );
       try {
-        const values = inputs(rows, dim, (row) => row % 2);
-        assertFloatParity(
-          words((await fused.run(values)).out),
-          words((await primitive.run(values)).out),
-          "grid-stride",
+        assertCheckCase(
+          await checkFusionTwin(gpu, {
+            label: "grid-stride",
+            fused,
+            plain: primitive,
+            feeds: inputs(rows, dim, (row) => row % 2),
+            counter: "gatedResidual",
+            hits: 1,
+            nan: "class",
+          }),
         );
-        assertEquals(fused.diagnostics().lastRunFusions?.gatedResidual, 1);
       } finally {
         await fused.dispose();
         await primitive.dispose();
