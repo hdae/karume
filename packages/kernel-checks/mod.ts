@@ -32,6 +32,18 @@ export {
   siluGraph,
   siluInput,
 } from "./src/fusion-twins/silu.ts";
+export {
+  ADALN_GATES,
+  ADALN_TOKEN_MASKS,
+  ADALN_TOKEN_SHAPES,
+  ADALN_TWIN_CASES,
+  adalnGraph,
+  type AdalnGraphOptions,
+  adalnInputs,
+  adalnTokenGraph,
+  adalnTokenInputs,
+  checkAdalnTwins,
+} from "./src/fusion-twins/adaln.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
