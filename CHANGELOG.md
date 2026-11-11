@@ -29,6 +29,17 @@ measurements in `docs/research/`.
   `FusionMatchContext`, `FusionLimits`), the predicates `allF32` / `sameShape`, the WGSL parts that keep the unfused rounding
   (`prologueUnaryWgsl`, `fusedBinaryWgsl`, `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` with `IS_NAN_BITS_WGSL`, and the
   rounding barrier `stagedLoopWgsl` / `stagedF32`), `CodegenError` and the types a rule names (ADR 0148).
+- `@karume/runtime/tune`: `runSessionAb`, a wall-clock A/B of whole runs for accepting or dropping a fusion rule on
+  measured end-to-end time and u32 identity of the outputs. Two or more arms (`sessionArm` builds one from a prepared
+  model, the GpuContext, Session options and feeds; a pipeline passes its own `open` / `run` / `close` value) run an
+  untimed warm-up round, then forward and reverse in every round (A B B A); the clock spans each run alone. The record
+  (`karume-session-ab/1`, plain JSON) keeps the environment the caller states, every raw time, the fusion and dispatch
+  counts each arm reported and each arm's worst visit against the first arm's outputs. `sessionAbStatistics` and
+  `judgeSessionAb` are pure functions of a record: the median of the paired round differences, the gain, the noise
+  floor and one verdict per arm (`"adopt"`, `"reject"`, `"inconclusive"`), identity required by default (ADR 0117
+  addendum of 2026-11-11).
+- `@karume/runtime/tune`: `wordIdentity` (with `NanPolicy`, `WordIdentity`, `WordMismatch`), the u32 identity
+  comparison of two word arrays with NaN read by class or by payload.
 
 ### Breaking
 

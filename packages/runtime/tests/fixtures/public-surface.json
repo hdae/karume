@@ -671,8 +671,84 @@
         "kind": "typeAlias"
       },
       {
+        "name": "JudgeSessionAbOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "NanPolicy",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbAdapter",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbArm",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbArmRecord",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbComparison",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbEnvironment",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbIdentity",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbJudgement",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbMismatch",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbOutput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbRecord",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbRun",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbVerdict",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionAbVisitIdentity",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionArmOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "WAN22_ATTENTION_SHAPES",
         "kind": "variable"
+      },
+      {
+        "name": "WordIdentity",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WordMismatch",
+        "kind": "typeAlias"
       },
       {
         "name": "deriveGeometryProfile",
@@ -691,6 +767,10 @@
         "kind": "function"
       },
       {
+        "name": "judgeSessionAb",
+        "kind": "function"
+      },
+      {
         "name": "parseGeometryProfileJson",
         "kind": "function"
       },
@@ -703,11 +783,27 @@
         "kind": "function"
       },
       {
+        "name": "runSessionAb",
+        "kind": "function"
+      },
+      {
+        "name": "sessionAbStatistics",
+        "kind": "function"
+      },
+      {
+        "name": "sessionArm",
+        "kind": "function"
+      },
+      {
         "name": "sweepCandidateKernelsId",
         "kind": "function"
       },
       {
         "name": "sweepCaseSetId",
+        "kind": "function"
+      },
+      {
+        "name": "wordIdentity",
         "kind": "function"
       }
     ]

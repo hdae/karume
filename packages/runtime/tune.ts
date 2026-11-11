@@ -61,6 +61,25 @@
  * caller's device, and returns a JSON-serializable record. It chooses nothing and changes no
  * profile. The same rule applies: do not run it while inference runs on the same GPU.
  *
+ * {@link runSessionAb} is the wall-clock A/B of whole runs, the measurement a fusion rule (built-in
+ * or external) is accepted or dropped on: two or more arms — Session configurations built with
+ * {@link sessionArm}, or a caller's own pipeline — run the same work in alternating order (one
+ * untimed warm-up round, then arms forward and reverse in every round: A B B A), the wall clock
+ * spans each run alone (its readback included, opening and closing outside), and every run's outputs
+ * are compared as u32 words with the first arm's (the base) through {@link wordIdentity}. It exists
+ * because per-dispatch GPU time overstates what removing a small dispatch saves in an untimed run.
+ * It shares nothing with the geometry sweep: no case list, no fingerprint, a record of its own
+ * (`karume-session-ab/1`). {@link sessionAbStatistics} and {@link judgeSessionAb} are pure
+ * functions of a record (a stored record can be judged again): per arm the median of the paired
+ * round differences, the gain over the base's median, the noise floor (how far each arm moved
+ * against itself within a round) and one verdict — `"adopt"`, `"reject"` or `"inconclusive"` —
+ * with identity required by default (a class E rule). A verdict speaks for the record's device,
+ * backend and work only; `"inconclusive"` does not mean the difference is zero. Never run it while
+ * other work uses the same GPU: the times would measure the contention.
+ *
+ * {@link wordIdentity} is the public u32 identity comparison (NaN by class or by payload), the one
+ * comparison loop behind the A/B and the fused-vs-unfused checks.
+ *
  * @module
  */
 
@@ -149,3 +168,37 @@ export type {
   AttentionBenchStage,
   AttentionBenchVariants,
 } from "./src/tune/attention-bench.ts";
+
+/**
+ * The wall-clock A/B of whole runs (`karume-session-ab/1`): the runner, the arm built from a
+ * prepared model, the record and its parts.
+ */
+export { runSessionAb } from "./src/tune/session-ab.ts";
+export type {
+  SessionAbAdapter,
+  SessionAbArm,
+  SessionAbArmRecord,
+  SessionAbEnvironment,
+  SessionAbIdentity,
+  SessionAbMismatch,
+  SessionAbOptions,
+  SessionAbOutput,
+  SessionAbRecord,
+  SessionAbRun,
+  SessionAbVisitIdentity,
+} from "./src/tune/session-ab.ts";
+export { sessionArm } from "./src/tune/session-arm.ts";
+export type { SessionArmOptions } from "./src/tune/session-arm.ts";
+
+/** The statistics and the verdict of a session A/B record, pure functions of the record. */
+export { judgeSessionAb, sessionAbStatistics } from "./src/tune/session-ab-judge.ts";
+export type {
+  JudgeSessionAbOptions,
+  SessionAbComparison,
+  SessionAbJudgement,
+  SessionAbVerdict,
+} from "./src/tune/session-ab-judge.ts";
+
+/** The u32 identity comparison of two word arrays, NaN by a declared policy. */
+export { wordIdentity } from "./src/tune/word-identity.ts";
+export type { NanPolicy, WordIdentity, WordMismatch } from "./src/tune/word-identity.ts";
