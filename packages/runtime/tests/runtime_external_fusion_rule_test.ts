@@ -12,6 +12,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   defineExternalRule,
   defineRule,
+  type ExternalRuleDefinition,
   type ExternalRuleName,
   type FusedBuild,
   type FusionMatch,
@@ -176,7 +177,7 @@ describe("defineExternalRule", () => {
       assertThrows(
         () =>
           defineExternalRule(
-            outsideTheType<FusionRuleDefinition<NegNegMatch, ExternalRuleName>>({
+            outsideTheType<ExternalRuleDefinition<NegNegMatch>>({
               ...negNeg("test/neg_neg"),
               ...fault,
             }),
@@ -233,6 +234,28 @@ describe("defineExternalRule", () => {
 });
 
 describe("an external rule building a step", () => {
+  it("gives its matcher only the graph's use counts and outputs, one frozen context per scan", () => {
+    const seen: unknown[] = [];
+    const definition = negNeg("test/neg_neg");
+    plan([
+      defineExternalRule({
+        ...definition,
+        heads: ["abs", "neg"],
+        match: (nodes, index, context) => {
+          seen.push(context);
+          return definition.match(nodes, index);
+        },
+      }),
+    ]);
+    // Tried at the abs (index 0) and the first neg (index 1, where it folds both negs).
+    assertEquals(seen.length, 2);
+    const [context] = seen;
+    assert(typeof context === "object" && context !== null);
+    assertEquals(Object.keys(context).sort(), ["outputNames", "useCounts"]);
+    assert(Object.isFrozen(context), "the context is frozen");
+    assert(seen[1] === context, "both tries of one scan read the same context");
+  });
+
   it("folds its chain when every check holds", () => {
     const folded = plan([defineExternalRule(negNeg("test/neg_neg"))]);
     assertEquals(

@@ -25,7 +25,7 @@ measurements in `docs/research/`.
   the rules (ADR 0148).
 - `@karume/runtime/kernel`, an experimental entry for writing those rules (it may change in a minor version while
   the package is 0.x): `defineRule` (a name `<namespace>/<rule>`, a declared contract class, dispatch keys under
-  `ext:<namespace>:`), the predicates `allF32` / `sameShape`, the WGSL parts that keep the unfused rounding
+  `ext:<namespace>:`, a matcher that reads the nodes and the graph's use counts and outputs — `FusionMatchContext`), the predicates `allF32` / `sameShape`, the WGSL parts that keep the unfused rounding
   (`prologueUnaryWgsl`, `fusedBinaryWgsl`, `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` with `IS_NAN_BITS_WGSL`, and the
   rounding barrier `stagedLoopWgsl` / `stagedF32`), `gridStrideWorkgroups`, `CodegenError` and the types a rule names
   (ADR 0148).

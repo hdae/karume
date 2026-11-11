@@ -38,6 +38,7 @@ import {
   type FusionMatch,
   type FusionPlan,
   type FusionRule,
+  fusionMatchContext,
   LINEAR_PROLOGUE_OPS,
   planFusions,
   planRowBlocks,
@@ -1046,6 +1047,7 @@ test("adaLN's in-window passthroughs do not take away other rules' match positio
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
     packedValues: new Map<string, number>(),
+    matchContext: { useCounts: countUses(ir), outputNames: new Set(ir.outputs) },
   };
   // Checks that nothing but adaln matches at **every start position** of the window (layer_norm +
   // reshape×3 + add + mul + add). `reshape` is also upsample2x's first op, so only here can it be
@@ -3487,7 +3489,11 @@ test("rmsNormAdd and rmsNormRope share the head rms_norm but never accept the sa
   ] as const) {
     graph.requires.ops = [...new Set(graph.nodes.map((step) => step.op))].sort();
     const { nodes, context } = planRmsNormRope(graph, { fuseRmsNormAdd: true });
-    const scan = { ...context, packedValues: new Map<string, number>() };
+    const scan = {
+      ...context,
+      packedValues: new Map<string, number>(),
+      matchContext: fusionMatchContext(context),
+    };
     for (let index = 0; index < nodes.length; index += 1) {
       const accepting = FUSION_RULES.filter(
         (rule) => rule.apply(nodes, index, scan) !== undefined,

@@ -158,6 +158,7 @@ import {
   type FusionRule,
   type FusionRuleName,
   type FusionScanContext,
+  fusionMatchContext,
   internalsArePrivate,
   isExternalRule,
   ruleOrigin,
@@ -185,6 +186,7 @@ export type {
   AttentionTokenMajor,
   ContractClass,
   ExecStep,
+  ExternalRuleDefinition,
   ExternalRuleName,
   FusedBuild,
   FusedDispatch,
@@ -197,6 +199,7 @@ export type {
   FusionHit,
   FusionLimits,
   FusionMatch,
+  FusionMatchContext,
   FusionPlan,
   FusionRule,
   FusionRuleDefinition,
@@ -211,6 +214,7 @@ export {
   allF32,
   defineExternalRule,
   defineRule,
+  fusionMatchContext,
   nodeStepSpan,
   ruleOrigin,
   sameShape,
@@ -732,7 +736,11 @@ const scanFusions = <Name extends string>(
 ): FusionPlan<Name> => {
   const steps: ExecStep[] = [];
   const aliases = planAliases(nodes);
-  const scanContext: FusionScanContext = { ...context, packedValues: packed };
+  const scanContext: FusionScanContext = {
+    ...context,
+    packedValues: packed,
+    matchContext: fusionMatchContext(context),
+  };
   const counts = zeroFusionCounts(context.rules);
   counts.packedStaticQuantize = packed.size;
   // The same record keyed by the run-time name a hit carries ({@link FusedStep.rule}).

@@ -391,8 +391,28 @@ export type FusionContext<Name extends string = string> = {
 };
 
 /**
+ * What the matcher of a rule written outside the runtime reads (`match` of
+ * {@link ExternalRuleDefinition} — the third argument of a matcher written against
+ * `@karume/runtime/kernel`): the graph facts a rule is written with, and nothing a plan decides.
+ *
+ * MUST: no Session knob, no rule list and no packed-activation decision enters it. A matcher that
+ * read the knobs would make the public type change with every new planning knob, one that read the
+ * rule list could call the built-in rules, and one that read the packed values could take a
+ * different window in the second scan than in the first (`planFusions` in {@link "./fusion.ts"}),
+ * where the pairing decided on the first scan would then hand packed words to the wrong reader.
+ * The scan builds it once ({@link FusionScanContext.matchContext}).
+ */
+export type FusionMatchContext = {
+  /** Value name → consumer count in the graph (each use counted, so a node reading a value twice counts 2). */
+  readonly useCounts: ReadonlyMap<string, number>;
+  /** The graph outputs (read back after a run, so a fold may not leave them unmaterialised). */
+  readonly outputNames: ReadonlySet<string>;
+};
+
+/**
  * The context a rule sees = the caller's {@link FusionContext} + the packed activation pairs
- * **decided inside the scan** (value name → the producer SRQ's scale).
+ * **decided inside the scan** (value name → the producer SRQ's scale) + the narrowed context the
+ * external rules' matchers read.
  *
  * MUST: the caller does not declare `packedValues` (`planFusions` in {@link "./fusion.ts"} derives
  * it from the result of the first
@@ -400,7 +420,16 @@ export type FusionContext<Name extends string = string> = {
  */
 export type FusionScanContext = FusionContext & {
   readonly packedValues: ReadonlyMap<string, number>;
+  /**
+   * What an external rule's matcher receives ({@link FusionMatchContext}, {@link fusionMatchContext}),
+   * built once per scan. The built-in rules read the whole context and ignore it.
+   */
+  readonly matchContext: FusionMatchContext;
 };
+
+/** The {@link FusionMatchContext} of a plan's context: its graph facts, frozen. */
+export const fusionMatchContext = (context: FusionContext): FusionMatchContext =>
+  Object.freeze({ useCounts: context.useCounts, outputNames: context.outputNames });
 
 export const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
   a.length === b.length && a.every((dim, index) => dim === b[index]);
@@ -673,8 +702,11 @@ const assertTempLifetimes = (
  */
 export type FusedBuild = Omit<FusedStep, "kind" | "rule" | "ins" | "nodeCount">;
 
-/** What {@link defineRule} and {@link defineExternalRule} collect for one rule. */
-export type FusionRuleDefinition<Matched extends FusionMatch, Name extends string = string> = {
+/**
+ * What a define entry collects for one rule; `MatchContext` is what its matcher reads
+ * ({@link FusionRuleDefinition} inside the runtime, {@link ExternalRuleDefinition} outside it).
+ */
+type RuleDefinition<Matched extends FusionMatch, Name extends string, MatchContext> = {
   readonly name: Name;
   readonly heads: readonly string[];
   /**
@@ -693,11 +725,27 @@ export type FusionRuleDefinition<Matched extends FusionMatch, Name extends strin
   readonly match: (
     nodes: readonly NodePlan[],
     index: number,
-    context: FusionScanContext,
+    context: MatchContext,
   ) => Matched | undefined;
   /** Lowers a grabbed window to its dispatches. */
   readonly build: (matched: Matched) => FusedBuild;
 };
+
+/** What {@link defineRule} collects for a built-in rule: its matcher reads the whole scan context. */
+export type FusionRuleDefinition<
+  Matched extends FusionMatch,
+  Name extends string = string,
+> = RuleDefinition<Matched, Name, FusionScanContext>;
+
+/**
+ * What {@link defineExternalRule} collects for a rule written outside the runtime (the
+ * `FusionRuleDefinition` of `@karume/runtime/kernel`): its matcher reads the narrowed
+ * {@link FusionMatchContext}.
+ */
+export type ExternalRuleDefinition<
+  Matched extends FusionMatch,
+  Name extends ExternalRuleName = ExternalRuleName,
+> = RuleDefinition<Matched, Name, FusionMatchContext>;
 
 /**
  * The brand of a rule built by {@link defineRule} or {@link defineExternalRule}: a property keyed by
@@ -759,7 +807,7 @@ const CONTRACT_CLASSES: Readonly<Record<ContractClass, true>> = {
  * is not a function would fail as an unnamed `TypeError` at the first run instead of here).
  */
 const assertDeclarations = (
-  rule: Omit<FusionRuleDefinition<FusionMatch>, "match" | "build"> & {
+  rule: Omit<RuleDefinition<FusionMatch, string, never>, "match" | "build"> & {
     readonly match: unknown;
     readonly build: unknown;
   },
@@ -871,17 +919,18 @@ const assertExternalBuild = (
 };
 
 /**
- * One try of a rule at `index` ({@link FusionRule.apply} of {@link brandedRule}'s rules), on the
- * frozen copy of its definition ({@link snapshotDefinition}).
+ * The rest of one try of a rule at `index` ({@link FusionRule.apply} of {@link brandedRule}'s
+ * rules), once its matcher grabbed `matched`, on the frozen copy of its definition
+ * ({@link snapshotDefinition}).
  */
 const applyRule = <Matched extends FusionMatch, Name extends string>(
-  rule: FusionRuleDefinition<Matched, Name>,
+  rule: RuleDefinition<Matched, Name, never>,
   namespace: string | undefined,
   nodes: readonly NodePlan[],
   index: number,
   context: FusionScanContext,
+  matched: Matched | undefined,
 ): FusionHit | undefined => {
-  const matched = rule.match(nodes, index, context);
   if (matched === undefined) return undefined;
   if (namespace !== undefined) assertExternalWindow(rule.name, nodes, index, matched);
   // After fusion no buffer for an internal value exists, so a consumer outside the chain or a
@@ -938,9 +987,9 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
  * the later name — crediting its hits to another counter — and the later `internals`, `match` and
  * `build`, past the checks run here.
  */
-const snapshotDefinition = <Matched extends FusionMatch, Name extends string>(
-  rule: FusionRuleDefinition<Matched, Name>,
-): FusionRuleDefinition<Matched, Name> => {
+const snapshotDefinition = <Matched extends FusionMatch, Name extends string, MatchContext>(
+  rule: RuleDefinition<Matched, Name, MatchContext>,
+): RuleDefinition<Matched, Name, MatchContext> => {
   const { name, heads, contract, internals, match, build } = rule;
   assertDeclarations({ name, heads, contract, internals, match, build });
   return Object.freeze({
@@ -954,19 +1003,25 @@ const snapshotDefinition = <Matched extends FusionMatch, Name extends string>(
 };
 
 /**
- * The rule a definition describes, branded with `origin`. For an external rule `namespace` is its
- * name's namespace, and the window and build checks of an external rule apply.
+ * The rule a frozen definition describes, branded built-in or, with `namespace` (its name's
+ * namespace), external — the window and build checks of an external rule then apply. `match` runs
+ * the definition's matcher on the context it reads.
  */
 const brandedRule = <Matched extends FusionMatch, Name extends string>(
-  rule: FusionRuleDefinition<Matched, Name>,
+  definition: RuleDefinition<Matched, Name, never>,
   namespace: string | undefined,
+  match: (
+    nodes: readonly NodePlan[],
+    index: number,
+    context: FusionScanContext,
+  ) => Matched | undefined,
 ): FusionRule<Name> => {
-  const definition = snapshotDefinition(rule);
   const defined: FusionRule<Name> = {
     name: definition.name,
     heads: definition.heads,
     contract: definition.contract,
-    apply: (nodes, index, context) => applyRule(definition, namespace, nodes, index, context),
+    apply: (nodes, index, context) =>
+      applyRule(definition, namespace, nodes, index, context, match(nodes, index, context)),
   };
   const origin: RuleOrigin = namespace === undefined ? "built-in" : "external";
   Object.defineProperty(defined, RULE_BRAND, { value: origin });
@@ -995,28 +1050,35 @@ const brandedRule = <Matched extends FusionMatch, Name extends string>(
  */
 export const defineRule = <Matched extends FusionMatch, Name extends string = string>(
   rule: FusionRuleDefinition<Matched, Name>,
-): FusionRule<Name> => brandedRule(rule, undefined);
+): FusionRule<Name> => {
+  const definition = snapshotDefinition(rule);
+  return brandedRule(definition, undefined, definition.match);
+};
 
 /**
  * {@link defineRule} for a rule written outside the runtime — the `defineRule` of
  * `@karume/runtime/kernel`. The name is `<namespace>/<rule>` ({@link ExternalRuleName}), checked
  * here; the rule is branded external, so a Session takes it through `SessionOptions.fusionRules`;
- * and besides every check of {@link defineRule}, its window must start where it was tried, its build
- * must bind only the chain's own inputs and write the chain's last value, and every dispatch key
- * must start with `ext:<namespace>:` (checked each time the rule builds a step).
+ * its matcher reads the narrowed {@link FusionMatchContext}; and besides every check of
+ * {@link defineRule}, its window must start where it was tried, its build must bind only the chain's
+ * own inputs and write the chain's last value, and every dispatch key must start with
+ * `ext:<namespace>:` (checked each time the rule builds a step).
  */
 export const defineExternalRule = <
   Matched extends FusionMatch,
   Name extends ExternalRuleName = ExternalRuleName,
 >(
-  rule: FusionRuleDefinition<Matched, Name>,
+  rule: ExternalRuleDefinition<Matched, Name>,
 ): FusionRule<Name> => {
-  const namespace = externalNamespace(rule.name);
+  const definition = snapshotDefinition(rule);
+  const namespace = externalNamespace(definition.name);
   if (namespace === undefined) {
     throw new ExecutionError(
-      `fusion rule '${String(rule.name)}': an external rule's name is '<namespace>/<rule>', two lowercase` +
+      `fusion rule '${String(definition.name)}': an external rule's name is '<namespace>/<rule>', two lowercase` +
         " identifiers ([a-z][a-z0-9_]*) joined by one slash",
     );
   }
-  return brandedRule(rule, namespace);
+  return brandedRule(definition, namespace, (nodes, index, context) =>
+    definition.match(nodes, index, context.matchContext),
+  );
 };

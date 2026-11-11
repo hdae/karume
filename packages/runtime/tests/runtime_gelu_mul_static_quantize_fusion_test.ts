@@ -16,7 +16,12 @@ import {
 } from "../src/kernels/gelu-mul-static-quantize.ts";
 import { STATIC_QUANTIZE_FN_WGSL, staticQuantizeParams } from "../src/kernels/static-quantize.ts";
 import { GELU_MUL_STATIC_QUANTIZE_RULE } from "../src/runtime/fusion-rules/gelu-mul-static-quantize.ts";
-import { FUSION_RULES, type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
+import {
+  FUSION_RULES,
+  type FusionPlan,
+  fusionMatchContext,
+  planFusions,
+} from "../src/runtime/fusion.ts";
 import { countUses, type NodePlan, planGraph } from "../src/runtime/plan.ts";
 import { sessionOptionsViolation } from "../src/runtime/session-options-check.ts";
 import {
@@ -170,7 +175,11 @@ describe("geluMulStaticQuantize: forms that stay on the plain chain", () => {
 
   it("does not fold an SRQ whose output is handed over as packed int8 (ADR 0105)", () => {
     const { nodes, context } = planned({ other: "input" });
-    const scan = { ...context, fuseGeluMulStaticQuantize: true };
+    const scan = {
+      ...context,
+      fuseGeluMulStaticQuantize: true,
+      matchContext: fusionMatchContext(context),
+    };
     assert(
       GELU_MUL_STATIC_QUANTIZE_RULE.apply(nodes, 0, { ...scan, packedValues: new Map() }) !==
         undefined,

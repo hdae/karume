@@ -493,19 +493,15 @@
         "kind": "typeAlias"
       },
       {
-        "name": "FusionContext",
-        "kind": "typeAlias"
-      },
-      {
         "name": "FusionHit",
         "kind": "typeAlias"
       },
       {
-        "name": "FusionLimits",
+        "name": "FusionMatch",
         "kind": "typeAlias"
       },
       {
-        "name": "FusionMatch",
+        "name": "FusionMatchContext",
         "kind": "typeAlias"
       },
       {
@@ -514,14 +510,6 @@
       },
       {
         "name": "FusionRuleDefinition",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "FusionScanContext",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "FusionWeightLayout",
         "kind": "typeAlias"
       },
       {
