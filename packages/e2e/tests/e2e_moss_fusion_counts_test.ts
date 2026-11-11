@@ -142,8 +142,10 @@ const UNCUT_WINDOW = 32;
  * applicability table of 2026-11-10 counted the same 84 each). They are named by the op sequence
  * of their chain (passthroughs excluded), and one maximal window may hold more than one site:
  *
- * - RoPE: `slice, slice, mul, neg, cat, mul, add` — q and k per block. Both sit in one maximal
- *   window that runs from the q projection through the attention to the gated residual.
+ * - RoPE: `slice, slice, mul, neg, cat, mul, add` — q and k per block. On the reference preset both
+ *   sit in one maximal window that runs from the q projection through the attention to the gated
+ *   residual; on the practical preset the attention's step absorbs permutes and ends the plain run,
+ *   so each stands alone (`slice, slice, mul, neg, cat, mul, add, permute`, 84 windows).
  * - adaLN: `rms_norm, mul, add` — the norm, the broadcast `1 + scale` product and the shift, before
  *   the attention and before the FFN of each block.
  * - Gated residual: `linear, mul, add` — the output projection (attention or FFN), its broadcast gate
