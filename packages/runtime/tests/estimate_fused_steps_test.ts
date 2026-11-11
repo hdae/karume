@@ -8,23 +8,29 @@
 // opens a new region instead when it would grow by the whole slot — transient-plan.ts). Graph
 // inputs and weights have no slot. Nothing here goes through fused-step-layout.ts: the literals are
 // the independent side of the estimate == execution check (gpu_estimate_test.ts compares the same
-// graphs with a real Session's slot table). No GPU.
+// graphs with a real Session's slot table). The last section checks that a fused step execution
+// refuses gets the same refusal from the estimate (execution on a fake GPU). No GPU.
 
 import { describe, it } from "vite-plus/test";
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { defineRule, type FusionMatch, type NodePlan } from "../kernel.ts";
 import { UNREAD_ATTENTION_DEVICE } from "../src/runtime/attention-route.ts";
 import { estimateFusionFacts } from "../src/runtime/estimate.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import { planFusions } from "../src/runtime/fusion.ts";
-import { countUses, planGraph } from "../src/runtime/plan.ts";
+import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { sessionFusionContext } from "../src/runtime/session-fusion-context.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
 import { openGraph } from "./helpers/estimate-graphs.ts";
+import { fakeRecipeGpuContext } from "./helpers/fake-gpu.ts";
 import {
   a8LinearAfterDeadRegion,
   a8LinearCase,
   FUSED_WINDOW_CASES,
   type FusedWindowCase,
+  geluMulGraph,
 } from "./helpers/fused-window-graphs.ts";
+import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 
 /** Desktop-class limits (no binding limit decides anything at these sizes). */
 const LIMITS = {
@@ -166,4 +172,112 @@ describe("the estimate counts a fused step in its post-fusion form", () => {
       assertEquals(report.scenarios[0].workspaceBytes, EXPECTED[fused.name]);
     });
   }
+});
+
+describe("the estimate refuses a fused step execution refuses", () => {
+  type GeluMulMatch = FusionMatch & { readonly gate: string; readonly other: string };
+
+  /** A kernel's bind group: the params, then one storage binding per operand. */
+  const kernel = (bindings: readonly ("read" | "read_write")[]): string =>
+    [
+      "@group(0) @binding(0) var<uniform> params: vec4<u32>;",
+      ...bindings.map(
+        (access, slot) =>
+          `@group(0) @binding(${slot + 1}) var<storage, ${access}> b${slot}: array<f32>;`,
+      ),
+      "@compute @workgroup_size(64) fn main() {}",
+    ].join("\n");
+
+  /**
+   * `mul(gelu(gate), other)` of {@link geluMulGraph} in two dispatches with the gelu value in
+   * temporary 0: ① binds gate and the temporary, ② the temporary, other and the output. The
+   * temporary is allocated before ① and released after dispatch `releaseAfter` — 1 is the schedule
+   * of the staged rule (helpers/fused-window-graphs.ts), 0 releases it before ② binds it.
+   */
+  const twoDispatchRule = (releaseAfter: number) =>
+    defineRule<GeluMulMatch, "test/two_dispatch">({
+      name: "test/two_dispatch",
+      heads: ["gelu"],
+      contract: "E",
+      internals: "private",
+      match: (nodes: readonly NodePlan[], index: number): GeluMulMatch | undefined => {
+        const [gelu, mul] = [nodes[index], nodes[index + 1]];
+        if (gelu?.node.op !== "gelu" || mul?.node.op !== "mul") return undefined;
+        if (mul.node.ins[0] !== gelu.outputs[0].name) return undefined;
+        return {
+          window: [gelu, mul],
+          chain: [gelu, mul],
+          gate: gelu.node.ins[0],
+          other: mul.node.ins[1],
+        };
+      },
+      build: (matched) => {
+        const product = matched.chain[1].outputs[0];
+        const workgroups = { kind: "gridStride", items: 256, size: 64 } as const;
+        return {
+          binds: [matched.gate, matched.other],
+          outputName: product.name,
+          outputShape: product.shape,
+          temps: [{ byteLength: 256 * 4, allocBefore: 0, releaseAfter }],
+          dispatches: [
+            {
+              key: "ext:test:two_dispatch:gelu",
+              wgsl: () => kernel(["read", "read_write"]),
+              params: new Uint32Array(4),
+              operands: [
+                { kind: "bind", index: 0 },
+                { kind: "temp", id: 0 },
+              ],
+              workgroups,
+            },
+            {
+              key: "ext:test:two_dispatch:mul",
+              wgsl: () => kernel(["read", "read", "read_write"]),
+              params: new Uint32Array(4),
+              operands: [{ kind: "temp", id: 0 }, { kind: "bind", index: 1 }, { kind: "output" }],
+              workgroups,
+            },
+          ],
+        };
+      },
+    });
+
+  /** The run of a Session given `rule` on a fake GPU (it stops at the transient plan at the latest). */
+  const execute = async (rule: ReturnType<typeof twoDispatchRule>): Promise<unknown> => {
+    const session = await createSessionFromContainer(
+      fakeRecipeGpuContext(),
+      await openModelBytes(geluMulGraph(), []),
+      GRAPH_NAME,
+      { fusionRules: [rule] },
+    );
+    const row = [1, 4, 64];
+    return await session.run({ gate: fill(row, (i) => i), other: fill(row, (i) => -i) });
+  };
+
+  it("a temporary bound by a dispatch after its release: execution's declaration check refuses it, and the estimate with the same message", async () => {
+    const rule = twoDispatchRule(0);
+    const message =
+      "step 'y': dispatch 1 'ext:test:two_dispatch:mul' binding 1 references temporary 0 outside its" +
+      " live range [0, 0]";
+    // The refusal execution gives (the recipe's declaration check, not wrapped by the rule's name).
+    await assertRejects(() => execute(rule), ExecutionError, message);
+    assertThrows(
+      () => openGraph(geluMulGraph()).estimate({ ...LIMITS, fusionRules: [rule] }),
+      ExecutionError,
+      message,
+    );
+  });
+
+  it("a temporary bound within its live range: the run passes the declaration check, and the estimate returns a number", async () => {
+    const rule = twoDispatchRule(1);
+    // The control: the fake GPU's run gets past every recipe and stops at the transient plan.
+    await assertRejects(() => execute(rule), Error, "invalid transient plan limit");
+    // y 1,024 B + the temporary 1,024 B (① writes it, ② reads it and writes y: two regions) — the
+    // staged rule's case above.
+    assertEquals(
+      openGraph(geluMulGraph()).estimate({ ...LIMITS, fusionRules: [rule] }).scenarios[0]
+        .workspaceBytes,
+      4 * 64 * 4 + 4 * 64 * 4,
+    );
+  });
 });

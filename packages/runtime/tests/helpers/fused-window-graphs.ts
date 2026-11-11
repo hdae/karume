@@ -468,7 +468,7 @@ const rowBlockAttention = (): FusedWindowCase => {
 // ---------------------------------------------------------------------------- external rules
 
 /** `mul(gelu(gate), other)` on `[1, 4, 64]` — the window both external rules take. */
-const geluMulGraph = (): DeclarationJson => {
+export const geluMulGraph = (): DeclarationJson => {
   const row = [1, 4, 64];
   return declaration({
     inputs: [

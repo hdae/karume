@@ -127,7 +127,7 @@ import {
   argmaxSplitPartialBytes,
   topkOneSplitGroups,
 } from "../kernels/argmax.ts";
-import { assertChunkRowsAllowed } from "./recipe.ts";
+import { assertChunkRowsAllowed, assertTempBoundInLiveRange } from "./recipe.ts";
 import {
   planStateAttention,
   type StateAttentionBlock,
@@ -1005,8 +1005,10 @@ const stateAttentionTemps = (
  * An external rule's dispatches are checked as execution checks them (`assertExternalWrites` per
  * dispatch, `assertExternalOutputWritten` after the last), and a failure while they are resolved is
  * rethrown naming the rule (`ruleFailure`), so the estimate returns no number for a step execution
- * refuses. A binding with no WGSL storage declaration fails with execution's message
- * (`buildTransientProgram` in recipe.ts), outside the rule's wrapping as there.
+ * refuses. A dispatch of any rule that binds a temporary outside its live range fails with the
+ * recipe declaration check's test and message ({@link assertTempBoundInLiveRange}, which
+ * `validateStepRecipe` runs), and a binding with no WGSL storage declaration with execution's message
+ * (`buildTransientProgram` in recipe.ts) — both outside the rule's wrapping, as there.
  */
 const fusedStepProgram = (
   step: FusedStep,
@@ -1070,6 +1072,23 @@ const fusedStepProgram = (
     if (!external) throw error;
     throw ruleFailure(step.rule, "resolving its step's dispatches", error);
   }
+  const outputs = transientOutputs(step, bookkeeping);
+  // A temporary bound after its release still resolves in the layout; execution refuses it in the
+  // recipe's declaration check, after the step's dispatches are resolved and outside the rule's
+  // wrapping (`validateStepRecipe`) — the same test and message.
+  for (const [index, { operands }] of resolved.layout.dispatches.entries()) {
+    for (const [slot, operand] of operands.entries()) {
+      if (operand.kind !== "temp") continue;
+      assertTempBoundInLiveRange(
+        outputs.map((spec) => spec.name),
+        index,
+        step.dispatches[index].key,
+        slot + 1,
+        operand.temp,
+        resolved.layout.temps[operand.temp],
+      );
+    }
+  }
   const dispatches = resolved.dispatches.map(({ roles: dispatchRole, refs }, index) => {
     const reads: TransientRef[] = [];
     const writes: TransientRef[] = [];
@@ -1089,7 +1108,7 @@ const fusedStepProgram = (
     return { reads, writes };
   });
   return {
-    outputs: transientOutputs(step, bookkeeping),
+    outputs,
     temps: resolved.layout.temps,
     dispatches,
     releases: stepReleases(step),

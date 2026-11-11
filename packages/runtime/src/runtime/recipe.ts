@@ -248,7 +248,8 @@ export class StepRecipeBuilder {
  * the same strength).
  */
 export const validateStepRecipe = (recipe: StepRecipe): void => {
-  const where = `step '${recipe.outputs.map((output) => output.name).join(", ")}'`;
+  const outputNames = recipe.outputs.map((output) => output.name);
+  const where = stepWhere(outputNames);
   const dispatchCount = recipe.dispatches.length;
   recipe.temps.forEach((temp, id) => {
     if (
@@ -284,15 +285,47 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
             ` but ${recipe.temps.length} are declared`,
         );
       }
-      const temp = recipe.temps[source.id];
-      if (index < temp.allocBefore || index > temp.releaseAfter) {
-        throw new ExecutionError(
-          `${where}: dispatch ${index} '${dispatch.key}' binding ${entry.binding} references temporary ` +
-            `${source.id} outside its live range [${temp.allocBefore}, ${temp.releaseAfter}]`,
-        );
-      }
+      assertTempBoundInLiveRange(
+        outputNames,
+        index,
+        dispatch.key,
+        entry.binding,
+        source.id,
+        recipe.temps[source.id],
+      );
     }
   });
+};
+
+/** What the declaration check names a step by: its output names. */
+const stepWhere = (outputNames: readonly string[]): string => `step '${outputNames.join(", ")}'`;
+
+/**
+ * Refuses a dispatch that binds a step temporary outside the temporary's
+ * `[allocBefore, releaseAfter]` (the last MUST of {@link validateStepRecipe}).
+ *
+ * MUST: the one implementation of this test and its message. {@link validateStepRecipe} runs it on
+ * every recipe, and the memory estimate (`fusedStepProgram` in estimate.ts) on every fused step, so
+ * a step execution refuses here gets no number there. A pure function (no GPU object).
+ *
+ * @param outputNames The step's output names, in ascending output slot (what the message names it by).
+ * @param index The dispatch's index in the step's dispatch list.
+ * @param id The temporary's id in the recipe (its index in allocation order).
+ */
+export const assertTempBoundInLiveRange = (
+  outputNames: readonly string[],
+  index: number,
+  key: string,
+  binding: number,
+  id: number,
+  temp: Pick<TempRecipe, "allocBefore" | "releaseAfter">,
+): void => {
+  if (index < temp.allocBefore || index > temp.releaseAfter) {
+    throw new ExecutionError(
+      `${stepWhere(outputNames)}: dispatch ${index} '${key}' binding ${binding} references temporary ` +
+        `${id} outside its live range [${temp.allocBefore}, ${temp.releaseAfter}]`,
+    );
+  }
 };
 
 /**

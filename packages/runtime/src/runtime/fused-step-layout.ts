@@ -143,7 +143,8 @@ const dispatchOperands = (step: FusedStep, dispatch: FusedDispatch): readonly Fu
  * Before dispatch `i` the temporaries whose `allocBefore` is `i` are allocated in ascending declared
  * id; after it the ones whose `releaseAfter` is `i` are released in descending declared id. A
  * temporary operand resolves to a temporary allocated at or before its dispatch; one bound after its
- * release still resolves here, and the recipe's declaration check (`validateStepRecipe`) refuses it.
+ * release still resolves here, and the recipe's declaration check (`validateStepRecipe`) and the
+ * memory estimate refuse it with one shared test (`assertTempBoundInLiveRange` in recipe.ts).
  * MUST: an operand that points at nothing is returned as `unresolved`, not thrown. The derivation
  * phase throws it only where it resolves that binding, after the dispatches before it have fetched
  * their pipelines and written their params — the order its failures have always come in.
