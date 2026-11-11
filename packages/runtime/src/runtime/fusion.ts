@@ -208,10 +208,12 @@ export type {
 } from "./fusion-rule.ts";
 export {
   absorbedPermutes,
+  allF32,
   defineExternalRule,
   defineRule,
   nodeStepSpan,
   ruleOrigin,
+  sameShape,
 } from "./fusion-rule.ts";
 /**
  * Row-block splitting and the derivation of its limit (defined in

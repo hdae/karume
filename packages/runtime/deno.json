@@ -4,7 +4,8 @@
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
-    "./tune": "./tune.ts"
+    "./tune": "./tune.ts",
+    "./kernel": "./kernel.ts"
   },
   "publish": {
     "exclude": ["tests/"]

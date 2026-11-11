@@ -6,12 +6,14 @@
   "files": [
     "mod.ts",
     "tune.ts",
+    "kernel.ts",
     "src"
   ],
   "type": "module",
   "exports": {
     ".": "./mod.ts",
-    "./tune": "./tune.ts"
+    "./tune": "./tune.ts",
+    "./kernel": "./kernel.ts"
   },
   "scripts": {
     "test": "vp test"

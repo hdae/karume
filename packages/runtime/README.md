@@ -110,6 +110,23 @@ from sweeps timed with GPU timestamps (a row whose speed-up could be off by more
 timestamp rounding is left out), and the runtime does not check an injected
 profile against the adapter.
 
+## Fusion rules outside the runtime (`@karume/runtime/kernel`, experimental)
+
+The `./kernel` entry is for writing a fusion rule in another package or an application. A rule
+replaces a run of the graph's built-in ops with its own kernel dispatches; it adds no IR op, so the
+same container runs without it, unfused. `defineRule({ name, heads, contract, internals, match,
+build })` builds one — the name is `<namespace>/<rule>` and every dispatch key starts with
+`ext:<namespace>:` — and a Session takes it through `SessionOptions.fusionRules`, fixed at
+construction and tried before the built-in rules. The runtime allocates the buffers, builds the
+bind groups and caches the pipelines; the rule supplies the match, the WGSL, the params and the
+workgroup counts. The entry also exports the predicates `allF32` / `sameShape`, the WGSL text the
+plain kernels compile (`prologueUnaryWgsl`, `fusedBinaryWgsl`, the stable sigmoid and tanh) and the
+rounding barrier `stagedLoopWgsl` / `stagedF32`, so a fused kernel can keep the unfused rounding. The
+runtime does not check a rule's numbers: a rule declares its contract class, and a class E rule
+(u32-identical to the unfused plan) carries its own fused-against-unfused check on each backend it
+ships on. The memory estimate does not see these rules. While the package is 0.x this entry may
+change in a minor version (ADR 0148).
+
 ## Requirements
 
 - A WebGPU device. Deno 2 (tested on 2.9.6) exposes WebGPU without a flag; in the browser, any

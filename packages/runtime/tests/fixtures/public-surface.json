@@ -451,6 +451,140 @@
         "kind": "function"
       }
     ],
+    "./kernel": [
+      {
+        "name": "CodegenError",
+        "kind": "class"
+      },
+      {
+        "name": "ContractClass",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ExternalRuleName",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedBinaryOp",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedBuild",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedDispatch",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedOperand",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedStep",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedTemp",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusedWorkgroups",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionContext",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionHit",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionLimits",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionMatch",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionRule",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionRuleDefinition",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionScanContext",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FusionWeightLayout",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IS_NAN_BITS_WGSL",
+        "kind": "variable"
+      },
+      {
+        "name": "NodePlan",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PrologueUnaryOp",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SIGMOID_STABLE_WGSL",
+        "kind": "variable"
+      },
+      {
+        "name": "StagedLoop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StagedValue",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "TANH_STABLE_WGSL",
+        "kind": "variable"
+      },
+      {
+        "name": "allF32",
+        "kind": "function"
+      },
+      {
+        "name": "defineRule",
+        "kind": "function"
+      },
+      {
+        "name": "fusedBinaryWgsl",
+        "kind": "function"
+      },
+      {
+        "name": "gridStrideWorkgroups",
+        "kind": "function"
+      },
+      {
+        "name": "prologueUnaryWgsl",
+        "kind": "function"
+      },
+      {
+        "name": "sameShape",
+        "kind": "function"
+      },
+      {
+        "name": "stagedF32",
+        "kind": "function"
+      },
+      {
+        "name": "stagedLoopWgsl",
+        "kind": "function"
+      }
+    ],
     "./tune": [
       {
         "name": "ATTENTION_BENCH_FORMAT",
