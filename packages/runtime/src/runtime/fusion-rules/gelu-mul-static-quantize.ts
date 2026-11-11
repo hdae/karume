@@ -63,7 +63,10 @@ type GeluMulStaticQuantizeMatch = FusionMatch & {
  *
  * Total uses of external inputs: the gate in gelu_tanh, the other operand in mul = 2.
  */
-export const GELU_MUL_STATIC_QUANTIZE_RULE = defineRule<GeluMulStaticQuantizeMatch>({
+export const GELU_MUL_STATIC_QUANTIZE_RULE = defineRule<
+  GeluMulStaticQuantizeMatch,
+  "geluMulStaticQuantize"
+>({
   name: "geluMulStaticQuantize",
   heads: ["gelu_tanh"],
   match: (nodes, index, context) => {

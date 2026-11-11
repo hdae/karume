@@ -90,7 +90,7 @@ const nextReader = (nodes: readonly NodePlan[], from: number, name: string): num
  *
  * Total uses of external inputs: x / weight / cos / sin once each.
  */
-export const RMS_NORM_ROPE_RULE = defineRule<RmsNormRopeMatch>({
+export const RMS_NORM_ROPE_RULE = defineRule<RmsNormRopeMatch, "rmsNormRope">({
   name: "rmsNormRope",
   heads: [RMS_NORM_OP],
   match: (nodes, index, context) => {

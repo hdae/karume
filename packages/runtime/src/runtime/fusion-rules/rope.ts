@@ -192,7 +192,7 @@ export const matchRopePairForm = (
  *
  * Total uses of external inputs: x 3 times (slice×2 and the direct mul), cos / sin once each.
  */
-export const ROPE_RULE = defineRule<RopeMatch>({
+export const ROPE_RULE = defineRule<RopeMatch, "rope">({
   name: "rope",
   heads: ["mul", "slice"],
   match: (nodes, index, context) => {

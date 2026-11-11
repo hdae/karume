@@ -33,7 +33,7 @@ type RmsNormAddMatch = FusionMatch & {
  * Shared, output and broadcast cases go back to the existing path. Limited to the measured last
  * dimensions (ADR 0099).
  */
-export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
+export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch, "rmsNormAdd">({
   name: "rmsNormAdd",
   heads: ["rms_norm"],
   match: (nodes, index, context) => {

@@ -47,7 +47,7 @@ type GatedResidualMatch = FusionMatch & {
  *
  * Total uses of external inputs: mask / gate_c / gate_g / y / residual once each = 5.
  */
-export const GATED_RESIDUAL_RULE = defineRule<GatedResidualMatch>({
+export const GATED_RESIDUAL_RULE = defineRule<GatedResidualMatch, "gatedResidual">({
   name: "gatedResidual",
   heads: [WHERE_OP],
   match: (nodes, index, context) => {

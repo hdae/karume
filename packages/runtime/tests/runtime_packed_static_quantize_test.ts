@@ -12,7 +12,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../src/format/ir.ts";
 import { mergedGraph } from "../src/format/container/bind.ts";
-import { type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
+import { FUSION_RULES, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
 import {
   linearGemvPackedEligible,
@@ -221,6 +221,7 @@ const plan = (o: Options = {}, context: Partial<Parameters<typeof planFusions>[1
     s.storage === "i4" ? { storage: "i4", groupSize: s.group as number } : { storage: s.storage };
   const plain = PLAIN_SHAPES.find((s) => s.storage === shape.storage && s.k === shape.k);
   return planFusions(planGraph(ir, {}).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {
@@ -349,6 +350,7 @@ describe("pairing of packed int8 activations (ADR 0105)", () => {
     graph.outputs = ["z"];
     const ir: IrGraph = mergeGraph(graph, storageMap({ shape: DEFAULT_SHAPE }));
     const fused = planFusions(planGraph(ir, {}).nodes, {
+      rules: FUSION_RULES,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: {
@@ -483,6 +485,7 @@ const fuseLinearStaticQuantize = (
       ? { storage: "i4", groupSize: o.group ?? 512 }
       : { storage: o.storage ?? "i8" };
   return planFusions(planGraph(graph, {}).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     limits: {

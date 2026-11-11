@@ -114,7 +114,7 @@ Applies to `FUSION_RULES` entries (`FusedStep` rules). Consumer annotations foll
 
 - [ ] The unfused form already runs correctly and only speed is at stake (`docs/op-vocabulary.md:224-226`); a result expressible in IR ops belongs to `normalize.py` by default, case by case where both work (ADR 0040 d4).
 - [ ] One file `packages/runtime/src/runtime/fusion-rules/<rule>.ts` built with `defineRule`; never import `fusion.ts` from it (ADR 0040 addendum 2026-09-21).
-- [ ] Register by hand: `FUSION_RULES` (MUST: one hand-written array, order = application order; `fusion.ts:198-210`), `FusionRuleName` (`fusion-rule.ts:22-32`), the counter initialiser (`fusion.ts:556-571`), and the pinned rule and head lists (`packages/runtime/tests/runtime_fusion_test.ts:91-130`).
+- [ ] Register by hand: `FUSION_RULES` (MUST: one hand-written array, order = application order; `fusion.ts:207-236`), `FusionRuleName` (`fusion-rule.ts:24-34`; the list checks it in both directions at compile time, so pass the name as `defineRule`'s second type argument too), and the pinned rule and head lists (`packages/runtime/tests/runtime_fusion_test.ts:97-136`). The counters are built from the list a plan is given.
 - [ ] Heads disjoint from other rules, or a declared exception with a test that at most one mechanism accepts per index (ADR 0040 d1).
 - [ ] Exact match only: op sequence, wiring, attrs, resolved shapes, dtypes; bind constants as buffers, never bake them; add counterexample tests (ADR 0040 d2, addendum 2026-08-10 item 2).
 - [ ] Internals have one consumer and are not graph outputs (`internalsArePrivate`); `internalsStayInChain` only when the matcher pins every slot (MUST) (ADR 0040 d2; `fusion-rule.ts:438-453`).

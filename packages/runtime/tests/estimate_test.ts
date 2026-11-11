@@ -28,7 +28,7 @@ import {
   type EstimateOptions,
 } from "../src/runtime/estimate.ts";
 import type { PreparedModel } from "../src/runtime/executor.ts";
-import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
+import { type ExecStep, FUSION_RULES, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { planRecipes, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
 import { CORE_TRANSIENT_LIMITS } from "../src/runtime/transient-plan.ts";
@@ -1330,6 +1330,7 @@ test("in a form where no fusion applies, the estimator's intermediate total equa
   const model = openGraph(aliasMixGraph());
   const plan = planGraph(model.graph, {});
   const fusion = planFusions(plan.nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(model.graph),
     outputNames: new Set(model.graph.outputs),
     limits: TEST_LIMITS,

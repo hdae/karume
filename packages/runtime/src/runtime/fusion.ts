@@ -94,7 +94,8 @@
  * MUST: keep {@link FUSION_RULES} as **one hand-written list** (do not replace it with automatic
  * registration at rule import time). The rule that every module is side-effect free bans running
  * code at import time, and tests/runtime_fusion_test.ts reads **this array** to check the
- * disjointness of the leading ops mechanically.
+ * disjointness of the leading ops mechanically. The list a plan uses is **passed in**
+ * (`FusionContext.rules`): a Session passes this array, and the scan reads no module-level list.
  *
  * ## In-window passthrough
  *
@@ -143,13 +144,14 @@ import { UPSAMPLE_2X_RULE } from "./fusion-rules/upsample2x.ts";
 import {
   absorbedPermutes,
   allF32,
+  type AnnotationCounterName,
   type AttentionTokenMajor,
   type ExecStep,
   type FusionContext,
-  type FusionCounterName,
   type FusionHit,
   type FusionPlan,
   type FusionRule,
+  type FusionRuleName,
   type FusionScanContext,
   internalsArePrivate,
   type LinearPrologue,
@@ -177,14 +179,17 @@ export type {
   ExecStep,
   FusedOperand,
   FusedStep,
+  FusionContext,
   FusionCounts,
   FusionLimits,
+  FusionMatch,
   FusionPlan,
+  FusionRule,
   FusionWeightLayout,
   LinearPrologue,
   PackedActivations,
 } from "./fusion-rule.ts";
-export { absorbedPermutes, nodeStepSpan } from "./fusion-rule.ts";
+export { absorbedPermutes, defineRule, nodeStepSpan } from "./fusion-rule.ts";
 /**
  * Row-block splitting and the derivation of its limit (defined in
  * {@link "./fusion-rules/row-block-attention.ts"}).
@@ -195,8 +200,11 @@ export {
   rowBlockLimit,
 } from "./fusion-rules/row-block-attention.ts";
 
-/** MUST: the order of this array is the application order (the "Application order" section). */
-export const FUSION_RULES: readonly FusionRule[] = [
+/**
+ * The hand-written list of the built-in rules ({@link FUSION_RULES} is its typed view). Its tuple
+ * type carries each rule's name, which the compile-time check below reads.
+ */
+const BUILT_IN_RULES = [
   LINEAR_STATIC_QUANTIZE_RULE,
   GELU_MUL_STATIC_QUANTIZE_RULE,
   RMS_NORM_ADD_RULE,
@@ -207,7 +215,25 @@ export const FUSION_RULES: readonly FusionRule[] = [
   ADALN_RULE,
   GATED_RESIDUAL_RULE,
   ROW_BLOCK_ATTENTION_RULE,
-];
+] as const;
+
+/**
+ * Compile-time check that {@link FusionRuleName} and the built-in list agree in both directions: the
+ * constraint rejects a rule whose name is not in the union, and a name of the union with no rule in
+ * the list turns the type into one that names it, which the list does not satisfy.
+ */
+type ListsEveryBuiltInName<Rules extends readonly FusionRule<FusionRuleName>[]> = [
+  Exclude<FusionRuleName, Rules[number]["name"]>,
+] extends [never]
+  ? Rules
+  : { readonly builtInNameWithoutRule: Exclude<FusionRuleName, Rules[number]["name"]> };
+
+/**
+ * MUST: the order of this array is the application order (the "Application order" section). It is
+ * the list a Session passes to the pass ({@link FusionContext.rules}).
+ */
+export const FUSION_RULES: readonly FusionRule<FusionRuleName>[] =
+  BUILT_IN_RULES satisfies ListsEveryBuiltInName<typeof BUILT_IN_RULES>;
 
 /**
  * An axis of length 1 always has coordinate 0, so moving it does not affect the flat element order.
@@ -544,30 +570,74 @@ const attentionPermutesAt = (
   };
 };
 
+/** The annotation counters at zero (a record literal, so the type rejects a missing name). */
+const ANNOTATION_ZEROS: Readonly<Record<AnnotationCounterName, number>> = {
+  identityExpand: 0,
+  packedStaticQuantize: 0,
+  linearPrologue: 0,
+  attentionPermute: 0,
+};
+
+/**
+ * Whether `counts` — built from the names of `rules` and the annotation counters — has as many keys
+ * as there are names, i.e. one counter per name.
+ */
+const oneCounterPerName = <Name extends string>(
+  counts: Record<string, number>,
+  rules: readonly FusionRule<Name>[],
+): counts is Record<Name | AnnotationCounterName, number> =>
+  Object.keys(counts).length === rules.length + Object.keys(ANNOTATION_ZEROS).length;
+
+/**
+ * The counter record of a plan at zero: one counter per rule name of `rules` and the annotation
+ * counters.
+ *
+ * MUST: every name has its own counter. Two rules of one name, or a rule named like an annotation
+ * counter, would add their hits together silently, so they fail loudly here.
+ */
+const zeroFusionCounts = <Name extends string>(
+  rules: readonly FusionRule<Name>[],
+): Record<Name | AnnotationCounterName, number> => {
+  const counts: Record<string, number> = {
+    ...Object.fromEntries(rules.map((rule) => [rule.name, 0])),
+    ...ANNOTATION_ZEROS,
+  };
+  if (!oneCounterPerName(counts, rules)) {
+    const names = rules.map((rule) => rule.name);
+    const shared = names.filter(
+      (name, at) => names.indexOf(name) !== at || Object.hasOwn(ANNOTATION_ZEROS, name),
+    );
+    throw new ExecutionError(
+      `fusion rules: the name(s) '${shared.join("', '")}' do not have a counter of their own` +
+        " (each rule needs a name of its own, distinct from the annotation counters)",
+    );
+  }
+  return counts;
+};
+
 /** Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain. */
-const scanFusions = (
+const scanFusions = <Name extends string>(
   nodes: readonly NodePlan[],
-  context: FusionContext,
+  context: FusionContext<Name>,
   packed: ReadonlyMap<string, number>,
-): FusionPlan => {
+): FusionPlan<Name> => {
   const steps: ExecStep[] = [];
   const aliases = planAliases(nodes);
   const scanContext: FusionScanContext = { ...context, packedValues: packed };
-  const counts: Record<FusionCounterName, number> = {
-    linearStaticQuantize: 0,
-    geluMulStaticQuantize: 0,
-    rmsNormAdd: 0,
-    silu: 0,
-    upsample2x: 0,
-    rope: 0,
-    rmsNormRope: 0,
-    adaln: 0,
-    gatedResidual: 0,
-    rowBlockAttention: 0,
-    identityExpand: 0,
-    packedStaticQuantize: packed.size,
-    linearPrologue: 0,
-    attentionPermute: 0,
+  const counts = zeroFusionCounts(context.rules);
+  counts.packedStaticQuantize = packed.size;
+  // The same record keyed by the run-time name a hit carries ({@link FusedStep.rule}).
+  const ruleCounts: Record<string, number> = counts;
+  const countHit = (rule: string): void => {
+    // MUST: a hit counts under a counter of the plan's list. A name without one would count NaN
+    // silently (a rule built outside `defineRule` can return a step under any name).
+    if (!Object.hasOwn(ruleCounts, rule)) {
+      throw new ExecutionError(
+        `fusion rule '${rule}': the step's rule name has no counter (the plan's rules are` +
+          ` ${context.rules.map((entry) => `'${entry.name}'`).join(", ")})`,
+      );
+    }
+    ruleCounts[rule] += 1;
   };
   const pushNode = (plan: NodePlan): void => {
     const alias = aliases.has(plan);
@@ -580,7 +650,7 @@ const scanFusions = (
   // alias decision reads only its own input, which precedes it in either order.
   const scanned = [...nodes];
   for (let index = 0; index < scanned.length;) {
-    const hit = FUSION_RULES.reduce<FusionHit | undefined>(
+    const hit = context.rules.reduce<FusionHit | undefined>(
       (found, rule) => found ?? rule.apply(scanned, index, scanContext),
       undefined,
     );
@@ -588,7 +658,7 @@ const scanFusions = (
       // MUST: passthroughs first (the fused step may take a passthrough's output as input).
       for (const plan of hit.passthrough) pushNode(plan);
       steps.push(hit.step);
-      counts[hit.step.rule] += 1;
+      countHit(hit.step.rule);
       const resume = index + hit.advance - hit.deferred.length;
       hit.deferred.forEach((plan, offset) => {
         scanned[resume + offset] = plan;
@@ -754,7 +824,10 @@ const packedStaticQuantizeValues = (
  * the dispatch built by a grabbed linear→SRQ fusion change), so both scans have **the same rule
  * grab the same window** — the pairing's input never moves in the second scan.
  */
-export const planFusions = (nodes: readonly NodePlan[], context: FusionContext): FusionPlan => {
+export const planFusions = <Name extends string>(
+  nodes: readonly NodePlan[],
+  context: FusionContext<Name>,
+): FusionPlan<Name> => {
   const first = scanFusions(nodes, context, NO_PACKED);
   const packed = packedStaticQuantizeValues(nodes, first.steps, context);
   return packed.size === 0 ? first : scanFusions(nodes, context, packed);

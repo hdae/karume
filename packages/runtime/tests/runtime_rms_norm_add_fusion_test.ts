@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { mergedGraph } from "../src/format/container/bind.ts";
-import { planFusions } from "../src/runtime/fusion.ts";
+import { FUSION_RULES, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
 import { rmsNormSubgroupKey } from "../src/kernels/rms-norm-subgroup.ts";
 import { rmsNormAddKey } from "../src/kernels/rms-norm.ts";
@@ -14,6 +14,7 @@ const fuse = (options: RmsNormAddGraphOptions = {}, enabled?: boolean, subgroup 
     GRAPH_NAME,
   );
   return planFusions(planGraph(graph, {}).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     limits: {

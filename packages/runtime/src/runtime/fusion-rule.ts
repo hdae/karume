@@ -16,10 +16,12 @@ import type { LinearGemvReduce } from "./session-types.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
- * Fusion rule identifiers (one-to-one with the declaration order of `FUSION_RULES` in
- * {@link "./fusion.ts"}).
+ * The names of the built-in rules — the type of the built-in list `FUSION_RULES` in
+ * {@link "./fusion.ts"}, which checks at compile time that the two agree in both directions (every
+ * name has its rule in the list, every rule of the list has a name of this union). A rule's own name
+ * is a string ({@link FusionRule.name}): the list a plan uses is an input ({@link FusionContext.rules}).
  */
-type FusionRuleName =
+export type FusionRuleName =
   | "linearStaticQuantize"
   | "geluMulStaticQuantize"
   | "rmsNormAdd"
@@ -39,8 +41,14 @@ type FusionRuleName =
  * absorbs ({@link AttentionTokenMajor} — one per absorbed permute, so up to four per attention).
  * Reshape aliasing is unconditional and is not counted (it cannot drop out = nothing to observe).
  */
-export type FusionCounterName =
-  | FusionRuleName
+export type FusionCounterName = FusionRuleName | AnnotationCounterName;
+
+/**
+ * The counters that do not belong to a rule: each counts an annotation of a plain node step
+ * (`aliasesInput` of an expand, {@link PackedActivations}, {@link LinearPrologue},
+ * {@link AttentionTokenMajor}). Every plan counts them, whatever its rule list.
+ */
+export type AnnotationCounterName =
   | "identityExpand"
   | "packedStaticQuantize"
   | "linearPrologue"
@@ -133,7 +141,8 @@ export type FusedTemp = {
  */
 export type FusedStep = {
   readonly kind: "fused";
-  readonly rule: FusionRuleName;
+  /** The name of the rule that built the step ({@link FusionRule.name}). */
+  readonly rule: string;
   /**
    * The total-use list (duplicates included) of the **external** inputs the original nodes
    * consumed. Internal values are never materialised, so they are not included. MUST: it never
@@ -260,9 +269,14 @@ export const nodeStepSpan = (step: NodeStep): number =>
 
 export type ExecStep = NodeStep | FusedStep;
 
-export type FusionPlan = {
+/**
+ * The result of the fusion pass. `counts` holds one counter per rule name of the plan's rule list
+ * (`Name` — {@link FusionContext.rules}) and the {@link AnnotationCounterName}s; with the built-in
+ * list (the default) it is {@link FusionCounts}.
+ */
+export type FusionPlan<Name extends string = FusionRuleName> = {
   readonly steps: readonly ExecStep[];
-  readonly counts: FusionCounts;
+  readonly counts: Readonly<Record<Name | AnnotationCounterName, number>>;
 };
 
 /**
@@ -288,7 +302,13 @@ export type FusionWeightLayout =
   | { readonly storage: "i4"; readonly groupSize: number };
 
 /** Whole-graph facts the decision needs (passed from the executor's Session state). */
-export type FusionContext = {
+export type FusionContext<Name extends string = string> = {
+  /**
+   * The rules the scan tries at each index, in this order (the application order). A Session passes
+   * the built-in list (`FUSION_RULES` in {@link "./fusion.ts"}); the plan counts one counter per
+   * name of this list ({@link FusionPlan.counts}).
+   */
+  readonly rules: readonly FusionRule<Name>[];
   /** Value name → consumer count in the graph (countUses in plan.ts). */
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
@@ -546,8 +566,9 @@ export type FusionHit = {
 };
 
 /** The body of a rule (match grabs, build lowers to a step declaratively). */
-export type FusionRule = {
-  readonly name: FusionRuleName;
+export type FusionRule<Name extends string = string> = {
+  /** The rule's counter name ({@link FusionPlan.counts}) and {@link FusedStep.rule}. */
+  readonly name: Name;
   /**
    * The leading ops this rule can grab (declared so that the pairwise disjointness of the
    * application order is checked mechanically).
@@ -595,7 +616,7 @@ export type FusionMatch = {
  * it is rejected at the one entry point for declarations.
  */
 const assertTempLifetimes = (
-  name: FusionRuleName,
+  name: string,
   temps: readonly FusedTemp[],
   dispatchCount: number,
 ): void => {
@@ -626,9 +647,11 @@ const assertTempLifetimes = (
  * ({@link windowIsSingleOutput}).
  * MUST: a window containing a node that touches state is rejected at the same place
  * ({@link windowTouchesState}).
+ * A built-in rule passes its name as `Name` too (`defineRule<Match, "silu">`), so the built-in list
+ * can check its names at compile time; any other rule leaves it a string.
  */
-export const defineRule = <Matched extends FusionMatch>(rule: {
-  readonly name: FusionRuleName;
+export const defineRule = <Matched extends FusionMatch, Name extends string = string>(rule: {
+  readonly name: Name;
   readonly heads: readonly string[];
   readonly match: (
     nodes: readonly NodePlan[],
@@ -636,7 +659,7 @@ export const defineRule = <Matched extends FusionMatch>(rule: {
     context: FusionScanContext,
   ) => Matched | undefined;
   readonly build: (matched: Matched) => Omit<FusedStep, "kind" | "rule" | "ins" | "nodeCount">;
-}): FusionRule => ({
+}): FusionRule<Name> => ({
   name: rule.name,
   heads: rule.heads,
   apply: (nodes, index, context) => {

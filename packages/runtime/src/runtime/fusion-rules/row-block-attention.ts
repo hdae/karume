@@ -217,7 +217,7 @@ type RowBlockAttentionMatch = FusionMatch & {
  *
  * Total uses of external inputs: q / kᵀ / mask / v once each = 4.
  */
-export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
+export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch, "rowBlockAttention">({
   name: "rowBlockAttention",
   heads: ["bmm"],
   match: (nodes, index, context) => {

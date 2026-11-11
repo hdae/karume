@@ -29,7 +29,12 @@ import {
   planesGemvWorkgroups,
 } from "../src/kernels/linear-gemv-planes.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
-import { type FusionPlan, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
+import {
+  FUSION_RULES,
+  type FusionPlan,
+  type FusionWeightLayout,
+  planFusions,
+} from "../src/runtime/fusion.ts";
 import { linearPlanesGemvVariant } from "../src/runtime/linear-route.ts";
 import { countUses, ExecutionError, type NodePlan, planGraph } from "../src/runtime/plan.ts";
 import { type BindingSource, StepRecipeBuilder } from "../src/runtime/recipe.ts";
@@ -285,6 +290,7 @@ const planOf = (options: GraphOptions, context: Partial<Context> = {}): FusionPl
   const ir = mergeGraph(planesGraph(options));
   const layout: FusionWeightLayout = { storage: "i2" };
   return planFusions(planGraph(ir, {}).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {

@@ -239,7 +239,7 @@ const tokenDispatches = (matched: AdalnMatch): Pick<FusedStep, "temps" | "dispat
  *
  * Total uses of external inputs: x / ln weight / ln bias / scale / one / shift once each = 6.
  */
-export const ADALN_RULE = defineRule<AdalnMatch>({
+export const ADALN_RULE = defineRule<AdalnMatch, "adaln">({
   name: "adaln",
   heads: [LAYER_NORM_OP],
   match: (nodes, index, context) => {

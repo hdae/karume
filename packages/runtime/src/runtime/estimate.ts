@@ -61,6 +61,7 @@ import {
   type AttentionTokenMajor,
   type ExecStep,
   type FusedStep,
+  FUSION_RULES,
   type FusionWeightLayout,
   nodeStepSpan,
   planAliases,
@@ -939,6 +940,7 @@ const postFusionSteps = (
   device: AttentionDeviceFacts,
 ): ReadonlyMap<number, ExecStep> => {
   const { steps } = planFusions(nodes, {
+    rules: FUSION_RULES,
     useCounts: uses,
     outputNames,
     limits: {

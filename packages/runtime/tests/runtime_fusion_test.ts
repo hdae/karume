@@ -31,9 +31,13 @@ import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
 import { type AttentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
 import {
   type AttentionTokenMajor,
+  defineRule,
   type ExecStep,
   FUSION_RULES,
+  type FusionContext,
+  type FusionMatch,
   type FusionPlan,
+  type FusionRule,
   LINEAR_PROLOGUE_OPS,
   planFusions,
   planRowBlocks,
@@ -73,6 +77,7 @@ const fuse = (
   const ir = parse(graph);
   const plan = planGraph(ir, bindSymbols(ir, inputShapes));
   return planFusions(plan.nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -128,6 +133,156 @@ test("the rule table's first ops are disjoint, so the application order does not
     "slice",
     "where",
   ]);
+});
+
+// ---------------------------------------------------------------- The rule list is an input
+
+type NegNegMatch = FusionMatch & {
+  readonly input: string;
+  readonly outputName: string;
+  readonly outputShape: readonly number[];
+};
+
+/**
+ * A test-local rule: `neg(neg(x))` folded into one dispatch (head `neg`, which no built-in rule
+ * has). The plans are never executed, so the dispatch only has to be well formed.
+ */
+const NEG_NEG_RULE = defineRule<NegNegMatch>({
+  name: "testNegNeg",
+  heads: ["neg"],
+  match: (nodes, index) => {
+    const first = nodes[index];
+    const second = nodes[index + 1];
+    if (first?.node.op !== "neg" || second?.node.op !== "neg") return undefined;
+    if (second.node.ins[0] !== first.outputs[0].name) return undefined;
+    const chain = [first, second];
+    return {
+      window: chain,
+      chain,
+      input: first.node.ins[0],
+      outputName: second.outputs[0].name,
+      outputShape: second.outputs[0].shape,
+    };
+  },
+  build: (matched) => ({
+    binds: [matched.input],
+    outputName: matched.outputName,
+    outputShape: matched.outputShape,
+    temps: [],
+    dispatches: [
+      {
+        key: "test:neg-neg",
+        wgsl: () => "",
+        params: new Uint32Array(4),
+        workgroups: {
+          kind: "gridStride",
+          items: matched.outputShape.reduce((count, dim) => count * dim, 1),
+          size: 64,
+        },
+      },
+    ],
+  }),
+});
+
+/** `y = silu(x)` (a built-in rule's form) beside `n2 = neg(neg(z))` (the test-local rule's form). */
+const ruleListGraph = (): DeclarationJson => {
+  const shape = [4, 8];
+  const nodes: DeclarationJson["nodes"] = [
+    { op: "sigmoid", ins: ["x"], outs: ["s"], attrs: {} },
+    { op: "mul", ins: ["x", "s"], outs: ["y"], attrs: {} },
+    { op: "neg", ins: ["z"], outs: ["n1"], attrs: {} },
+    { op: "neg", ins: ["n1"], outs: ["n2"], attrs: {} },
+  ];
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs: [
+      { name: "x", dtype: "f32", shape: [...shape] },
+      { name: "z", dtype: "f32", shape: [...shape] },
+    ],
+    outputs: ["y", "n2"],
+    initializers: {},
+    values: Object.fromEntries(
+      ["s", "y", "n1", "n2"].map((name) => [name, { dtype: "f32", shape: [...shape] }]),
+    ),
+    nodes,
+  };
+};
+
+/** Plans `graph` with the rule list `rules` (and the other facts as {@link fuse} passes them). */
+const fuseWithRules = <Name extends string>(
+  graph: DeclarationJson,
+  rules: readonly FusionRule<Name>[],
+  extra: Omit<Partial<FusionContext>, "rules"> = {},
+): FusionPlan<Name> => {
+  const ir = parse(graph);
+  return planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+    ...extra,
+    rules,
+  });
+};
+
+test("the rule list is an input: an extra rule built with defineRule folds and counts under its own name, and the built-in counters stay as they were", () => {
+  const graph = ruleListGraph();
+  const builtIn = fuseWithRules(graph, FUSION_RULES);
+  assertEquals(outline(builtIn.steps), ["fused:silu", "neg", "neg"]);
+  const extended = fuseWithRules(graph, [...FUSION_RULES, NEG_NEG_RULE]);
+  assertEquals(outline(extended.steps), ["fused:silu", "fused:testNegNeg"]);
+  assertEquals(extended.counts, { ...builtIn.counts, testNegNeg: 1 });
+});
+
+test("with an empty rule list nothing folds through a rule, while the linear prologue and the attention permutes still apply", () => {
+  const annotationsOnly = {
+    identityExpand: 0,
+    packedStaticQuantize: 0,
+    linearPrologue: 0,
+    attentionPermute: 0,
+  };
+  const ruleForms = fuseWithRules(ruleListGraph(), []);
+  assertEquals(outline(ruleForms.steps), ["sigmoid", "mul", "neg", "neg"]);
+  assertEquals(ruleForms.counts, annotationsOnly);
+  const prologue = fuseWithRules(prologuePairGraph(), [], A8_I8);
+  assertEquals(outline(prologue.steps), ["linear"]);
+  assertEquals(prologue.counts, { ...annotationsOnly, linearPrologue: 1 });
+  const permutes = fuseWithRules(attentionPermuteGraph(), [], A8_SEAT);
+  assertEquals(outline(permutes.steps), ["attention", "permute"]);
+  assertEquals(permutes.counts, { ...annotationsOnly, attentionPermute: 3 });
+});
+
+test("a rule list whose names do not give one counter each fails loudly (a name twice, a rule named like an annotation counter)", () => {
+  const graph = ruleListGraph();
+  for (const [label, rules, shared] of [
+    ["the same rule twice", [NEG_NEG_RULE, NEG_NEG_RULE], "testNegNeg"],
+    [
+      "a rule named like a counter",
+      [{ ...NEG_NEG_RULE, name: "linearPrologue" }],
+      "linearPrologue",
+    ],
+  ] as const) {
+    assertThrows(() => fuseWithRules(graph, rules), ExecutionError, `'${shared}'`, label);
+  }
+});
+
+test("a hit whose step carries a rule name without a counter fails loudly instead of counting NaN", () => {
+  // A rule built outside defineRule can return a step under any name.
+  const renaming: FusionRule = {
+    name: "testRenaming",
+    heads: ["neg"],
+    apply: (nodes, index, context) => {
+      const hit = NEG_NEG_RULE.apply(nodes, index, context);
+      return hit === undefined ? undefined : { ...hit, step: { ...hit.step, rule: "elsewhere" } };
+    },
+  };
+  assertThrows(
+    () => fuseWithRules(ruleListGraph(), [renaming]),
+    ExecutionError,
+    "fusion rule 'elsewhere'",
+  );
 });
 
 // ---------------------------------------------------------------- SiLU
@@ -245,6 +400,7 @@ test("no rule matches a window containing a node that touches state (an invarian
   const ir = parse(siluGraph());
   const plan = planGraph(ir, bindSymbols(ir, siluInputs()));
   const context = {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -806,6 +962,7 @@ test("adaLN's in-window passthroughs do not take away other rules' match positio
   const ir = parse(graph);
   const plan = planGraph(ir, bindSymbols(ir, adalnInputs(graph)));
   const context = {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -1250,6 +1407,7 @@ test("row blocks are split evenly into the fewest blocks that fit the limit, and
   // 1 row = 2·64·4 = 512B. Limiting to 30 rows' worth gives ceil(100/30) = 4 blocks (25 rows × 4).
   const ir = parse(attentionGraph(shape));
   const plan = planFusions(planGraph(ir, bindSymbols(ir, attentionInputs(shape))).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: { maxStorageBufferBindingSize: 512 * 30, maxComputeWorkgroupsPerDimension: 65535 },
@@ -1280,6 +1438,7 @@ test("the attentionRowBlockMaxBytes budget splits decomposed attention by the sm
   const nodes = planGraph(ir, bindSymbols(ir, attentionInputs(shape))).nodes;
   const planWith = (budget: number | undefined) =>
     planFusions(nodes, {
+      rules: FUSION_RULES,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       // The binding limit is 128 MiB (1 block without a budget). Only the budget moves the block
@@ -2050,6 +2209,7 @@ const fusePrologue = (
   const graph = prologuePairGraph(options);
   const ir = parse(graph);
   return planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2141,6 +2301,7 @@ test("the linear prologue keeps the total-use accounting exact: the producer's i
   const ir = parse(graph);
   const uses = countUses(ir);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, { x: row })).nodes, {
+    rules: FUSION_RULES,
     useCounts: uses,
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2230,6 +2391,7 @@ test("the linear prologue rejects a producer that is not f32 in and out", () => 
     ["output i32", { ...producer, outputs: [{ ...producer.outputs[0], dtype: "i32" }] }],
   ] as const) {
     const plan = planFusions([replaced, linear], {
+      rules: FUSION_RULES,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: TEST_LIMITS,
@@ -2287,6 +2449,7 @@ test("geluMulStaticQuantize and the linear prologue never accept the same gelu_t
   };
   const ir = parse(graph);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, { x: row, gate: row, ple: row })).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2484,6 +2647,7 @@ const fuseAttentionPermutes = (
   const graph = attentionPermuteGraph(options);
   const ir = parse(graph);
   return planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2605,6 +2769,7 @@ test("the absorbed permutes keep the total-use accounting exact: each permute's 
   const ir = parse(graph);
   const uses = countUses(ir);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    rules: FUSION_RULES,
     useCounts: uses,
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2721,6 +2886,7 @@ test("nothing around a states-form attention or a non-f32 permute is absorbed", 
   const ir = parse(graph);
   const nodes = planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes;
   const context = {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2948,6 +3114,7 @@ test("on the online route an absorbable [0, 2, 1, 3] permute right after the att
   graph.outputs.push("xt");
   const ir = parse(graph);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -2974,6 +3141,7 @@ test("the absorbed output permute keeps the total-use accounting exact: O is nev
   const ir = parse(graph);
   const uses = countUses(ir);
   const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    rules: FUSION_RULES,
     useCounts: uses,
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
@@ -3043,6 +3211,7 @@ const planRmsNormRope = (graph: DeclarationJson, context: RmsNormRopeContext = {
   return {
     nodes,
     context: {
+      rules: FUSION_RULES,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: TEST_LIMITS,

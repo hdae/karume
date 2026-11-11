@@ -36,7 +36,7 @@ type Upsample2xMatch = FusionMatch & {
  * MUST: only f32 rank-4 NCHW, x2 on each spatial axis. Do not widen to a general broadcast /
  * resize.
  */
-export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
+export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch, "upsample2x">({
   name: "upsample2x",
   heads: ["reshape"],
   match: (nodes, index, context) => {

@@ -38,7 +38,7 @@ type SiluMatch = FusionMatch & {
  *
  * Total uses of external inputs: x once each in sigmoid and mul = 2.
  */
-export const SILU_RULE = defineRule<SiluMatch>({
+export const SILU_RULE = defineRule<SiluMatch, "silu">({
   name: "silu",
   heads: ["sigmoid"],
   match: (nodes, index, context) => {

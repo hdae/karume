@@ -20,6 +20,7 @@ import type { IrGraph } from "../../../runtime/src/format/ir.ts";
 import type { ScoreStorage } from "../../../runtime/src/kernels/score-storage.ts";
 import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
+  FUSION_RULES,
   type FusionCounts,
   type FusionWeightLayout,
   planFusions,
@@ -118,6 +119,7 @@ export const fusionCounts = (
   fuseGeluMulStaticQuantize = false,
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(graph),
     fuseRmsNormAdd,
     fuseLinearStaticQuantize,

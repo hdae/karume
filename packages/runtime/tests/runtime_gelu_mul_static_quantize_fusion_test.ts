@@ -16,7 +16,7 @@ import {
 } from "../src/kernels/gelu-mul-static-quantize.ts";
 import { STATIC_QUANTIZE_FN_WGSL, staticQuantizeParams } from "../src/kernels/static-quantize.ts";
 import { GELU_MUL_STATIC_QUANTIZE_RULE } from "../src/runtime/fusion-rules/gelu-mul-static-quantize.ts";
-import { type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
+import { FUSION_RULES, type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, type NodePlan, planGraph } from "../src/runtime/plan.ts";
 import { sessionOptionsViolation } from "../src/runtime/session-options-check.ts";
 import {
@@ -33,6 +33,7 @@ const planned = (options: GeluMulStaticQuantizeGraphOptions = {}) => {
     GRAPH_NAME,
   );
   const context: FusionContext = {
+    rules: FUSION_RULES,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     limits: {

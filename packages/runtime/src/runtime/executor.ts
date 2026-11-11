@@ -57,6 +57,7 @@ import { assertRuntimeSupport } from "../ops/support.ts";
 import { type AdmissionReport, estimateGraphMemory, type EstimateOptions } from "./estimate.ts";
 import {
   type ExecStep,
+  FUSION_RULES,
   type FusionCounts,
   type FusionWeightLayout,
   planFusions,
@@ -2581,6 +2582,7 @@ export class Session {
           )
         : undefined;
     const fusion = planFusions(plan.nodes, {
+      rules: FUSION_RULES,
       useCounts: this.#state.useCounts,
       fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
       fuseLinearStaticQuantize: this.#state.fuseLinearStaticQuantize,

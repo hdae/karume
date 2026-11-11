@@ -92,7 +92,10 @@ const dispatchOf = (
 };
 
 // DECIDED: docs/decisions/0103-linear-static-quantize-fusion.md
-export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>({
+export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
+  LinearStaticQuantizeMatch,
+  "linearStaticQuantize"
+>({
   name: "linearStaticQuantize",
   heads: ["linear"],
   match: (nodes, index, context) => {

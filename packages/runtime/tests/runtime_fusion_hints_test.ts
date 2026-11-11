@@ -18,6 +18,7 @@ import type { IrGraph } from "../src/format/ir.ts";
 import {
   enumerateUnfusedWindows,
   type ExecStep,
+  FUSION_RULES,
   planAliases,
   planFusions,
   type UnfusedWindow,
@@ -45,6 +46,7 @@ const plan = (graph: DeclarationJson, inputShapes: Readonly<Record<string, reado
   return {
     nodes,
     context: {
+      rules: FUSION_RULES,
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),
       limits: TEST_LIMITS,

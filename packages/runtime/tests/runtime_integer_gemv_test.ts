@@ -29,6 +29,7 @@ import { referenceIntegerGemv } from "../src/reference/linear-gemv-integer.ts";
 import { referenceStaticQuantize } from "../src/reference/ops.ts";
 import {
   type ExecStep,
+  FUSION_RULES,
   type FusionPlan,
   type FusionWeightLayout,
   planFusions,
@@ -802,6 +803,7 @@ type Context = Parameters<typeof planFusions>[1];
 const planOf = (options: GraphOptions, context: Partial<Context> = {}): FusionPlan => {
   const ir = mergeGraph(integerGraph(options), storageOf(options));
   return planFusions(planGraph(ir, {}).nodes, {
+    rules: FUSION_RULES,
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: {
