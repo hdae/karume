@@ -4,7 +4,13 @@
 // Sessions (the same rig as `gemma4_estimate_test.ts`).
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import type { RunInputs, RunOutputs, Session, SessionOptions } from "@karume/runtime";
+import {
+  estimateGraphMemory,
+  type RunInputs,
+  type RunOutputs,
+  type Session,
+  type SessionOptions,
+} from "@karume/runtime";
 import { afterEach, beforeEach, describe, it, vi } from "vite-plus/test";
 import { ManifestReferenceError } from "@karume/hub";
 import { GpuContext, readAdapterInfo } from "../../runtime/src/gpu/device.ts";
@@ -35,6 +41,13 @@ import {
 } from "./helpers/container-loading-fixture.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { GELU_MUL_RULE } from "@karume/candidate-rules";
+
+// The pipeline calls the runtime's estimator through the package entry; the spy records the options
+// of every call and runs the real estimator (the numbers stay the runtime's own).
+vi.mock("@karume/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@karume/runtime")>();
+  return { ...actual, estimateGraphMemory: vi.fn(actual.estimateGraphMemory) };
+});
 
 const ENTRY = gemmaEntryName("gemma4");
 const HIDDEN = 16;
@@ -862,6 +875,38 @@ describe("gemma.Pipeline vision", () => {
       const [target, vision] = runs.built;
       assertEquals(target.options.fusionRules, fusionRules);
       assertEquals(Object.hasOwn(vision.options, "fusionRules"), false);
+    });
+
+    // The estimate's half: each graph is estimated with the fusion options its Session got.
+    it("estimateSessionMemory gives the rules and the row-block limit to the target's estimate and not the embedder's", async () => {
+      const rig = await distribution();
+      const fusionRules = [GELU_MUL_RULE];
+      await using pipeline = await rig.open({
+        vision: true,
+        fusionRules,
+        attentionRowBlockMaxBytes: 64 * MIB,
+      });
+      const spy = vi.mocked(estimateGraphMemory);
+      const before = spy.mock.calls.length;
+      pipeline.estimateSessionMemory();
+      const [target, embedder, ...rest] = spy.mock.calls.slice(before).map(([, , options]) => {
+        assert(options !== undefined);
+        return options;
+      });
+      assertEquals(rest, [], "one estimate per graph: the target's, then the embedder's");
+      assertEquals(target.fusionRules, fusionRules);
+      assertEquals(target.attentionRowBlockMaxBytes, 64 * MIB);
+      const [targetSession, visionSession] = runs.built;
+      for (const key of ["fusionRules", "attentionRowBlockMaxBytes"] as const) {
+        assertEquals(Object.hasOwn(visionSession.options, key), false, `${key} on the Session`);
+        assertEquals(Object.hasOwn(embedder, key), false, `${key} on the estimate`);
+        assertEquals(target[key], targetSession.options[key]);
+      }
+      // Both graphs are estimated with the device's limits (the rig's fake device).
+      for (const options of [target, embedder]) {
+        assertEquals(options.maxStorageBufferBindingSize, 2048 * MIB);
+        assertEquals(options.maxComputeWorkgroupsPerDimension, 65535);
+      }
     });
   });
 

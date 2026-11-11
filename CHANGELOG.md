@@ -53,8 +53,8 @@ measurements in `docs/research/`.
   them), **experimental**: fusion rules built with `defineRule`, passed unchanged as `SessionOptions.fusionRules` to the
   target Session and the drafter Session; the image embedder, the on-GPU PLE gather and the on-GPU greedy selection do
   not get them. It exists to measure a candidate rule on a real decode with the session A/B and may change or go away
-  in a minor version. The rule's author owns the evidence for its numbers, and the memory estimate does not see it
-  (ADR 0148).
+  in a minor version. The rule's author owns the evidence for its numbers (ADR 0148). `estimateSessionMemory` plans
+  the target and the drafter with the same rules.
 
 ### Changed
 
@@ -74,6 +74,18 @@ measurements in `docs/research/`.
   that read it (the MOSS-Image VAE and text-encoder stages and Anima's VAE stage drop by up to about 2 GiB at
   the largest accepted size). A step execution refuses fails the estimate with the same refusal. `AdmissionReport.unaccounted`
   names what is still not counted.
+- `@karume/models`: `gemma.Pipeline.estimateSessionMemory` (and the mobile QAT pipeline's) estimates the target and
+  the drafter with the fusion options their Sessions are built with — the preset's or caller's fusion and GEMV knobs
+  (`fuseRmsNormAdd`, `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `packedStaticQuantize`, `integerGemv`,
+  `linearGemvPlanes`, `linearGemvReduce`, `rmsNormReduce`), `attentionRowBlockMaxBytes` and `fusionRules` — and
+  with the device's `maxComputeWorkgroupsPerDimension`; until now, of these, it passed only
+  `attentionRowBlockMaxBytes`, not the fusion and GEMV knobs or `fusionRules`, so those windows were planned at the
+  runtime defaults. Only the target's
+  numbers can move: from the drafter's estimate the report takes its resident weights and state, not its run, so the
+  drafter's options decide only whether that estimate refuses. On the shipped presets `peakAccountedBytes`, and with
+  it `fitCapacity`, do not move; on `i4-fast` of E2B and E4B only the small decode and verify `workspaceBytes` move,
+  by at most 92 KiB. The image embedder's estimate no longer
+  takes `attentionRowBlockMaxBytes`, which its Session does not get either.
 
 ### Breaking
 

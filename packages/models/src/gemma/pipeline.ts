@@ -587,8 +587,12 @@ export type PipelineOptions = {
    * It exists to measure a candidate rule on a real decode (the session A/B of
    * `@karume/runtime/tune`); it may change or go away in a minor version. Passing a rule is the
    * opt-in, and the rule's author owns the evidence for its numbers (ADR 0148): the runtime does not
-   * check them. The memory estimate ({@link Pipeline.estimateSessionMemory}) does not see the rules.
-   * A value the runtime refuses fails when the Session is built, after the weights are read.
+   * check them. The memory estimate ({@link Pipeline.estimateSessionMemory}) plans the target and
+   * the drafter with the same rules and counts the target's steps as its Session allocates them;
+   * from the drafter's estimate it reports only the resident weights and the state (its run is
+   * listed as unaccounted), so there the rules decide only whether that estimate refuses (the
+   * embedder's estimate, like its Session, without them). A value the runtime refuses fails when
+   * the Session is built, after the weights are read.
    *
    * DECIDED: docs/decisions/0148-external-fusion-rules.md
    */
@@ -966,14 +970,16 @@ export type Gemma4State = {
    */
   readonly planBackingBudgetBytes?: number;
   /**
-   * The row-block limit passed to the Session ({@link PipelineOptions.attentionRowBlockMaxBytes};
-   * only the binding limit when unspecified).
+   * The fusion-relevant options the target and drafter Sessions were built with
+   * ({@link gemmaFusionOptions} — the knobs, the row-block limit of
+   * {@link PipelineOptions.attentionRowBlockMaxBytes} and {@link PipelineOptions.fusionRules}).
    *
    * MUST: the field exists so that {@link Pipeline.estimateSessionMemory} passes **the same
-   * value** to the estimate — if the two diverged, the reported peak would count a different block
-   * split from the one the Session runs.
+   * value** to the estimates of those two graphs — if the two diverged on the target, the reported
+   * peak would count a different fusion plan or block split from the one its Session runs; on the
+   * drafter, whose run is not counted, a divergence would change only which estimates refuse.
    */
-  readonly attentionRowBlockMaxBytes?: SessionOptions["attentionRowBlockMaxBytes"];
+  readonly fusionOptions: GemmaFusionOptions;
   /** The per-run observation callback ({@link PipelineOptions.onRunDiagnostics}). */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
 };
@@ -1380,6 +1386,60 @@ export const gemma4EstimateGenerations = (
     borrower: { chunkLength: 1, bindings },
   };
 };
+
+/**
+ * The options of the language-model Sessions (the target and the drafter) that the runtime's fusion
+ * pass reads: the resolved fusion and GEMV knobs, the row-block budget and the experimental rules.
+ */
+type GemmaFusionOptions = Pick<
+  SessionOptions,
+  | "fuseRmsNormAdd"
+  | "fuseLinearStaticQuantize"
+  | "fuseGeluMulStaticQuantize"
+  | "packedStaticQuantize"
+  | "integerGemv"
+  | "linearGemvPlanes"
+  | "linearGemvReduce"
+  | "rmsNormReduce"
+  | "attentionRowBlockMaxBytes"
+  | "fusionRules"
+>;
+
+/**
+ * The fusion-relevant options of the target and drafter Sessions, from the resolved pipeline options
+ * (explicit > quant declaration; an unspecified one is not passed at all, so the runtime default
+ * applies on both sides).
+ *
+ * MUST: the one derivation of these options. `#build` spreads it into the options both Sessions are
+ * built with and keeps it in the state, and {@link Pipeline.estimateSessionMemory} passes the kept
+ * value to the estimates of the same two graphs — an option the fusion pass reads goes here, so the
+ * target's estimate plans the fusion its Session runs (an option given to one side only counts the
+ * windows it folds in their unfused form). The drafter's estimate contributes only its resident
+ * weights and state (its run is listed as unaccounted), so there these options move no reported
+ * number and decide only whether that estimate refuses. The image embedder's Session gets none of
+ * them, and its estimate none either.
+ */
+const gemmaFusionOptions = (options: PipelineOptions): GemmaFusionOptions => ({
+  ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
+  ...(options.fuseLinearStaticQuantize === undefined
+    ? {}
+    : { fuseLinearStaticQuantize: options.fuseLinearStaticQuantize }),
+  ...(options.fuseGeluMulStaticQuantize === undefined
+    ? {}
+    : { fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize }),
+  ...(options.packedStaticQuantize === undefined
+    ? {}
+    : { packedStaticQuantize: options.packedStaticQuantize }),
+  ...(options.integerGemv === undefined ? {} : { integerGemv: options.integerGemv }),
+  ...(options.linearGemvPlanes === undefined ? {} : { linearGemvPlanes: options.linearGemvPlanes }),
+  ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
+  ...(options.linearGemvReduce === undefined ? {} : { linearGemvReduce: options.linearGemvReduce }),
+  ...(options.attentionRowBlockMaxBytes === undefined
+    ? {}
+    : { attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes }),
+  // Experimental (a measurement opt-in): the target and the drafter get the same rules.
+  ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
+});
 
 /** The soft inputs a product graph declares ({@link GenerationProgramSpec.softInputs}). */
 const softInputsOf = (
@@ -1880,23 +1940,11 @@ export class GemmaPipeline {
     // The quant execution knobs (including the ③PV reduction form) pass only the composed values
     // (explicit > quant declaration); unspecified ones are not passed at all (copying defaults here
     // would make this family alone run with stale values when the runtime's default moves — the same
-    // for the budget). The drafter Session gets the same knobs.
+    // for the budget). The drafter Session gets the same knobs. The ones the fusion pass reads come
+    // from the one derivation the estimate shares (`gemmaFusionOptions`).
+    const fusionOptions = gemmaFusionOptions(options);
     const sessionOptions = {
-      ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
-      ...(options.fuseLinearStaticQuantize === undefined
-        ? {}
-        : { fuseLinearStaticQuantize: options.fuseLinearStaticQuantize }),
-      ...(options.fuseGeluMulStaticQuantize === undefined
-        ? {}
-        : { fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize }),
-      ...(options.packedStaticQuantize === undefined
-        ? {}
-        : { packedStaticQuantize: options.packedStaticQuantize }),
-      ...(options.integerGemv === undefined ? {} : { integerGemv: options.integerGemv }),
-      ...(options.linearGemvPlanes === undefined
-        ? {}
-        : { linearGemvPlanes: options.linearGemvPlanes }),
-      ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
+      ...fusionOptions,
       ...(options.fullStateStorage === undefined
         ? {}
         : { fullStateStorage: options.fullStateStorage }),
@@ -1904,20 +1952,12 @@ export class GemmaPipeline {
       ...(options.stateAttentionReduce === undefined
         ? {}
         : { stateAttentionReduce: options.stateAttentionReduce }),
-      ...(options.linearGemvReduce === undefined
-        ? {}
-        : { linearGemvReduce: options.linearGemvReduce }),
       ...(options.planBackingBudgetBytes === undefined
         ? {}
         : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
-      ...(options.attentionRowBlockMaxBytes === undefined
-        ? {}
-        : { attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes }),
       ...(options.linearGemvRowsThreadTarget === undefined
         ? {}
         : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
-      // Experimental (a measurement opt-in): the target and the drafter get the same rules.
-      ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
     };
     // MUST: cannot be combined with GPU timing diagnostics (`beginBatch` cannot open on a device
     // with measurement enabled — the mechanism of enqueuing the gather in the same batch as the target
@@ -2074,9 +2114,7 @@ export class GemmaPipeline {
         ...(options.planBackingBudgetBytes === undefined
           ? {}
           : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
-        ...(options.attentionRowBlockMaxBytes === undefined
-          ? {}
-          : { attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes }),
+        fusionOptions,
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -2560,25 +2598,35 @@ export class GemmaPipeline {
         `${entry}: capacity ${capacity} exceeds maxPosition ${wiring.maxPosition}`,
       );
     }
-    // MUST: pass the same budgets as were passed to the Session (if only one side fell back to the
-    // default, the reported peak would name a different budget from the actual held set, or count a
-    // different row-block split). Unspecified is not passed at all and left to the runtime default.
-    const budget = {
-      ...(this.#state.planBackingBudgetBytes === undefined
+    // MUST: pass the same budget as was passed to the Sessions (if only one side fell back to the
+    // default, the reported peak would name a different budget from the actual held set).
+    // Unspecified is not passed at all and left to the runtime default.
+    const budget =
+      this.#state.planBackingBudgetBytes === undefined
         ? {}
-        : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes }),
-      ...(this.#state.attentionRowBlockMaxBytes === undefined
-        ? {}
-        : { attentionRowBlockMaxBytes: this.#state.attentionRowBlockMaxBytes }),
+        : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes };
+    // The device limits of the pipeline's device, for every graph.
+    // MUST: pass `maxStorageBufferBindingSize` (the in-node transients of states-form attention have a
+    // row-block count decided by this limit alone, so omitting it makes the estimator fail loudly — it
+    // is not filled with a default). Both limits on a single state slot are checked (the same check
+    // as the real construction in `GenerationContext.create` — passing only one would let through the
+    // estimate a capacity that "shows a number at startup and fails on the first turn").
+    // `maxComputeWorkgroupsPerDimension` is the limit the fusion pass gets in execution (a rule of
+    // `fusionRules` needs it in the estimate).
+    const limits = {
+      maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+      maxBufferSize: gpu.limits.maxBufferSize,
+      maxComputeWorkgroupsPerDimension: gpu.limits.maxComputeWorkgroupsPerDimension,
     };
-    // MUST: pass it (the in-node transients of states-form attention have a row-block count decided by
-    // this limit alone, so omitting it makes the estimator fail loudly — it is not filled with a
-    // default).
-    const maxStorageBufferBindingSize = gpu.limits.maxStorageBufferBindingSize;
-    // Both limits on a single state slot are checked (the same check as the real construction in
-    // `GenerationContext.create` — passing only one would let through the estimate a capacity that
-    // "shows a number at startup and fails on the first turn").
-    const maxBufferSize = gpu.limits.maxBufferSize;
+    // MUST: the target and the drafter are planned with the fusion options their Sessions were built
+    // with (`gemmaFusionOptions` — the knobs, the row-block limit and the rules), so the target's
+    // fused windows are counted as its Session allocates them. Only the drafter's resident weights
+    // and state enter the report (its run is listed as unaccounted), so there the options move no
+    // reported number; they decide only whether that estimate refuses. For the same reason it moves
+    // no reported number that the drafter's estimate still lacks what its Session also gets
+    // (`stateAttentionReduce`, `fullStateStorage`, and the borrowed weight's storage through
+    // `sharedWeights`).
+    const { fusionOptions } = this.#state;
     const generations = gemma4EstimateGenerations(wiring, {
       capacity,
       chunkLength,
@@ -2597,8 +2645,8 @@ export class GemmaPipeline {
       // explicitly.
       bindings: { [wiring.rowSymbol]: 1 },
       generation: generations.target,
-      maxStorageBufferBindingSize,
-      maxBufferSize,
+      ...limits,
+      ...fusionOptions,
       ...(this.#state.stateAttentionReduce === undefined
         ? {}
         : { stateAttentionReduce: this.#state.stateAttentionReduce }),
@@ -2630,19 +2678,19 @@ export class GemmaPipeline {
         ? undefined
         : estimateGraphMemory(drafter.graph, planWeightResidency(drafter.graph), {
             generation: generations.borrower,
-            maxStorageBufferBindingSize,
-            maxBufferSize,
+            ...limits,
+            ...fusionOptions,
             ...budget,
           });
     // The embedder goes through the same estimator, at the most rows one image can have (its row
-    // symbol is bound by the inputs, which an estimate does not have).
+    // symbol is bound by the inputs, which an estimate does not have). Its Session gets none of the
+    // fusion options (only the host policies), so neither does its estimate.
     const embedder =
       vision === undefined
         ? undefined
         : estimateGraphMemory(vision.graph, planWeightResidency(vision.graph), {
             bindings: { [vision.symbol]: vision.config.softTokenBudget },
-            maxStorageBufferBindingSize,
-            maxBufferSize,
+            ...limits,
             ...budget,
           });
     const companions = [borrower, embedder].filter((report) => report !== undefined);

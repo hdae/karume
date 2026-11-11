@@ -6,9 +6,15 @@
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { afterEach, beforeEach, describe, it, vi } from "vite-plus/test";
-import type { Session, SessionOptions } from "@karume/runtime";
+import {
+  estimateGraphMemory,
+  type EstimateOptions as GraphEstimateOptions,
+  type Session,
+  type SessionOptions,
+} from "@karume/runtime";
 import { GpuContext, readAdapterInfo } from "../../runtime/src/gpu/device.ts";
 import { PreparedModel } from "../../runtime/src/runtime/executor.ts";
+import type { SessionFusionOptions } from "../../runtime/src/runtime/session-fusion-context.ts";
 import { fakeDevice } from "../../runtime/tests/helpers/fake-gpu.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import {
@@ -28,6 +34,13 @@ import {
 } from "./helpers/container-loading-fixture.ts";
 import { fakeSession, programOf } from "./helpers/generation-fake.ts";
 import { GELU_MUL_RULE } from "@karume/candidate-rules";
+
+// The pipeline calls the runtime's estimator through the package entry; the spy records the options
+// of every call and runs the real estimator, so every number below is still the runtime's own.
+vi.mock("@karume/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@karume/runtime")>();
+  return { ...actual, estimateGraphMemory: vi.fn(actual.estimateGraphMemory) };
+});
 
 /** A pipeline with chunk length 16 and bucket ladder [4, 8] (capacity symbol `C`, row symbol `R`). */
 const wiring = () =>
@@ -354,7 +367,14 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
   /** One row of the fixture's tables has to fit a block. */
   const BLOCKS = { partBytes: 1024 * 1024, blockBytes: 64 * 1024 };
 
-  const load = async (options: PipelineOptions): Promise<Pipeline> => {
+  /**
+   * @param session The quant's `session` declaration in the manifest (default none — the knobs then
+   *   come from `options` alone).
+   */
+  const load = async (
+    options: PipelineOptions,
+    session: Readonly<Record<string, unknown>> = {},
+  ): Promise<Pipeline> => {
     const model = await serveContainer("model/model.f32", targetComponent(), BLOCKS);
     const drafter = await serveContainer("drafter/model.f32", drafterComponent(), BLOCKS);
     const tokenizer = tokenizerBytes();
@@ -364,7 +384,7 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
           pipeline: "gemma4/1",
           weights: { model: { f32: model.entry }, drafter: { f32: drafter.entry } },
           assets: { tokenizer: await fileRef("tokenizer.json", tokenizer) },
-          quants: { f32: { weights: { model: "f32", drafter: "f32" }, session: {} } },
+          quants: { f32: { weights: { model: "f32", drafter: "f32" }, session } },
           defaultQuant: "f32",
           pipelineConfig: {
             chunkLength: CHUNK_ROWS,
@@ -525,6 +545,118 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
       (await load({ attentionRowBlockMaxBytes: limit })).estimateSessionMemory();
       const speculative = await load({ speculative: {}, attentionRowBlockMaxBytes: limit });
       assertThrows(() => speculative.estimateSessionMemory(), Error, "attentionRowBlockMaxBytes");
+    });
+  });
+
+  // The estimate plans each graph's fusion as that graph's Session does: the options the fusion pass
+  // reads must reach the target's and the drafter's estimates exactly as their Sessions got them.
+  describe("the fusion options of the estimates", () => {
+    /**
+     * Every Session option the runtime's fusion pass reads (`SessionFusionOptions`, its test-only
+     * symbols aside). Written out; the type below fails to compile when the runtime adds one.
+     */
+    const FUSION_KEYS = [
+      "fuseRmsNormAdd",
+      "fuseLinearStaticQuantize",
+      "fuseGeluMulStaticQuantize",
+      "packedStaticQuantize",
+      "integerGemv",
+      "linearGemvPlanes",
+      "linearGemvReduce",
+      "linearCompute",
+      "attentionCompute",
+      "attentionScoreStorage",
+      "rmsNormReduce",
+      "attentionRowBlockMaxBytes",
+      "fusionRules",
+    ] as const satisfies readonly (keyof SessionFusionOptions)[];
+    const everyKeyListed: [
+      Exclude<Extract<keyof SessionFusionOptions, string>, (typeof FUSION_KEYS)[number]>,
+    ] extends [never]
+      ? true
+      : never = true;
+    assert(everyKeyListed);
+
+    /**
+     * The `session` of the mobile QAT manifest's `i4-fast` (its every knob), plus the two integer
+     * GEMV knobs that preset leaves to an explicit option, so each one Gemma accepts is declared.
+     */
+    const I4_FAST = {
+      linearGemvReduce: "parallel",
+      fuseRmsNormAdd: true,
+      fuseLinearStaticQuantize: true,
+      fuseGeluMulStaticQuantize: true,
+      packedStaticQuantize: true,
+      integerGemv: true,
+      linearGemvPlanes: true,
+      stateAttentionReduce: "parallel-fused",
+    } as const;
+
+    /** The options of each estimator call `run` makes, in call order. */
+    const estimateCalls = (run: () => void): GraphEstimateOptions[] => {
+      const spy = vi.mocked(estimateGraphMemory);
+      const before = spy.mock.calls.length;
+      run();
+      return spy.mock.calls.slice(before).map(([, , options]) => options ?? {});
+    };
+
+    /** The fields of `FUSION_KEYS` an options object carries (absent ones stay absent). */
+    const fusionPart = (options: GraphEstimateOptions | SessionOptions) =>
+      Object.fromEntries(
+        FUSION_KEYS.filter((key) => Object.hasOwn(options, key)).map((key) => [key, options[key]]),
+      );
+
+    it("an i4-fast declaration with fusionRules and a row-block limit: the target's and the drafter's estimates get their Sessions' fusion options", async () => {
+      const fusionRules = [GELU_MUL_RULE];
+      const pipeline = await load(
+        { speculative: {}, fusionRules, attentionRowBlockMaxBytes: 16 * MIB },
+        I4_FAST,
+      );
+      const calls = estimateCalls(() => pipeline.estimateSessionMemory());
+      assertEquals(sessionOptions.length, 2, "the target Session and the drafter Session");
+      assertEquals(calls.length, 2, "the target's estimate and the drafter's");
+      // Not vacuous: the Sessions got every declared knob, the limit and the rules.
+      assertEquals(fusionPart(sessionOptions[0]), {
+        linearGemvReduce: "parallel",
+        fuseRmsNormAdd: true,
+        fuseLinearStaticQuantize: true,
+        fuseGeluMulStaticQuantize: true,
+        packedStaticQuantize: true,
+        integerGemv: true,
+        linearGemvPlanes: true,
+        attentionRowBlockMaxBytes: 16 * MIB,
+        fusionRules,
+      });
+      for (const [index, options] of calls.entries()) {
+        assertEquals(fusionPart(options), fusionPart(sessionOptions[index]), `call ${index}`);
+        // The caller's array itself, as the Sessions got it.
+        assertStrictEquals(options.fusionRules, fusionRules);
+        // The device limits a non-empty rule list needs, from the pipeline's device.
+        assertEquals(options.maxStorageBufferBindingSize, BINDING_LIMIT);
+        assertEquals(options.maxBufferSize, BINDING_LIMIT);
+        assertEquals(options.maxComputeWorkgroupsPerDimension, 65535);
+      }
+    });
+
+    it("explicit knobs instead of a declaration reach both estimates the same way", async () => {
+      const pipeline = await load({
+        speculative: {},
+        linearGemvReduce: "parallel",
+        fuseRmsNormAdd: true,
+      });
+      const calls = estimateCalls(() => pipeline.estimateSessionMemory());
+      assertEquals(calls.length, 2);
+      for (const [index, options] of calls.entries()) {
+        assertEquals(fusionPart(options), { linearGemvReduce: "parallel", fuseRmsNormAdd: true });
+        assertEquals(fusionPart(options), fusionPart(sessionOptions[index]));
+      }
+    });
+
+    it("with nothing declared or given, neither estimate gets a fusion option", async () => {
+      const pipeline = await load({ speculative: {} });
+      const calls = estimateCalls(() => pipeline.estimateSessionMemory());
+      assertEquals(calls.length, 2);
+      for (const options of calls) assertEquals(fusionPart(options), {});
     });
   });
 });
