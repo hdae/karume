@@ -1,8 +1,8 @@
 /**
  * The session A/B page's saved record: the runtime's `karume-session-ab/1` record as it is, inside
- * the page's envelope with the request it ran, the distribution it read, what a reader needs to
- * run it again (the package versions, the rule's dispatch keys, the expert cache as resolved) and
- * the judgements. Pure, so `vp test` covers it; a stored envelope's `record` can be judged again
+ * the page's envelope with the request it ran, the distribution it read, the counts of the probe
+ * before the A/B (the runner's record carries none), what a reader needs to run it again (the
+ * package versions, the rule's dispatch keys, the expert cache as resolved) and the judgements. Pure, so `vp test` covers it; a stored envelope's `record` can be judged again
  * with `judgeSessionAb`.
  */
 
@@ -16,10 +16,10 @@ import modelsPackage from "../../../../../packages/models/package.json" with { t
 import runtimePackage from "../../../../../packages/runtime/package.json" with { type: "json" };
 
 import type { SessionAbRequest } from "./request";
-import { type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run";
+import { type ArmCounts, type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run";
 
 /** The version of the envelope; bump it when a field changes meaning or goes away. */
-export const SESSION_AB_PAGE_FORMAT = "karume-playground-session-ab/1";
+export const SESSION_AB_PAGE_FORMAT = "karume-playground-session-ab/2";
 
 /** The versions of the workspace packages a build of the page runs. */
 export type SessionAbVersions = { readonly runtime: string; readonly models: string };
@@ -43,11 +43,11 @@ export type SessionAbRuleRecord = {
   readonly package: "@karume/candidate-rules";
 } & (
   | {
-      /** The keys under the rule's prefix in the rule arm's first counted run (counts read). */
+      /** The keys under the rule's prefix in the counted run of the rule arm's probe. */
       readonly dispatchKeys: readonly string[];
     }
   | {
-      /** The prefix every dispatch key of the rule carries (no counts read, so no keys seen). */
+      /** The prefix every dispatch key of the rule carries (no probe, so no keys seen). */
       readonly keyPrefix: string;
     }
 );
@@ -57,6 +57,18 @@ export type SessionAbArmExpertCache = ResolvedExpertCache & { readonly arm: stri
 
 /** What one arm learned, by name (the arm builder's `facts`). */
 export type SessionAbArmFacts = { readonly name: string; readonly facts: ArmFacts };
+
+/** What one arm's count probe read, by name (`probeCounts`). */
+export type SessionAbArmProbe = { readonly name: string; readonly counts: ArmCounts };
+
+/** One arm's counts as its probe read them. */
+export type SessionAbArmCounts = {
+  readonly arm: string;
+  /** The fusion counts of the probe's counted run. */
+  readonly fusions: Readonly<Record<string, number>>;
+  /** The planned dispatches of the probe's counted run. */
+  readonly dispatches: number;
+};
 
 export type SessionAbPageRecord = RecordEnvironment & {
   readonly format: typeof SESSION_AB_PAGE_FORMAT;
@@ -74,6 +86,13 @@ export type SessionAbPageRecord = RecordEnvironment & {
    * without the cache.
    */
   readonly expertCache?: readonly SessionAbArmExpertCache[];
+  /**
+   * The fusion counts and planned dispatches of each arm's counted run (its first decode run, or
+   * its first verify run with a self-speculation depth), as the count probe before the A/B read
+   * them, in the arms' order. Absent when the counts were not probed. The runtime's `record`
+   * carries no counts: the arms it timed were built without the diagnostics callback.
+   */
+  readonly counts?: readonly SessionAbArmCounts[];
   /** The runtime's record (`karume-session-ab/1`), unchanged. */
   readonly record: SessionAbRecord;
   /** `judgeSessionAb(record, { minGain: request.minGain })`, one per compared arm. */
@@ -84,9 +103,9 @@ const namesOf = (arms: readonly { readonly name: string }[]): string =>
   arms.map(({ name }) => name).join(", ");
 
 /**
- * The envelope of one finished A/B. Refuses a record or arm facts whose arms are not the request's
- * (they would describe different runs), and an arm without its resolved expert cache when the
- * request has one.
+ * The envelope of one finished A/B. Refuses a record, arm facts or probes whose arms are not the
+ * request's (they would describe different runs), probes the request did not ask for or probes
+ * missing when it did, and an arm without its resolved expert cache when the request has one.
  */
 export const buildSessionAbPageRecord = (input: {
   readonly environment: RecordEnvironment;
@@ -96,10 +115,12 @@ export const buildSessionAbPageRecord = (input: {
   readonly source: SourceRecord;
   readonly ruleName: string;
   readonly arms: readonly SessionAbArmFacts[];
+  /** The count probes in the arms' order; present exactly when the request probes the counts. */
+  readonly probes?: readonly SessionAbArmProbe[];
   readonly record: SessionAbRecord;
   readonly judgements: readonly SessionAbJudgement[];
 }): SessionAbPageRecord => {
-  const { request, record, ruleName, arms } = input;
+  const { request, record, ruleName, arms, probes } = input;
   const requested = namesOf(request.arms);
   const recorded = namesOf(record.arms);
   if (requested !== recorded || record.rounds !== request.rounds) {
@@ -110,9 +131,19 @@ export const buildSessionAbPageRecord = (input: {
   if (namesOf(arms) !== requested) {
     throw new Error(`The arm facts (${namesOf(arms)}) are not the request's arms (${requested})`);
   }
+  if (request.probeCounts !== (probes !== undefined)) {
+    throw new Error(
+      request.probeCounts
+        ? "The request probes the counts, and no probe was given"
+        : "The request does not probe the counts, and probes were given",
+    );
+  }
+  if (probes !== undefined && namesOf(probes) !== requested) {
+    throw new Error(`The probes (${namesOf(probes)}) are not the request's arms (${requested})`);
+  }
   const ruleArm = request.arms.findIndex(({ fusionRules }) => fusionRules.includes(ruleName));
   if (ruleArm < 0) throw new Error(`No arm of the request passes the rule ${ruleName}`);
-  const ruleKeys = arms[ruleArm].facts.ruleKeys;
+  const ruleKeys = probes?.[ruleArm].counts.ruleKeys;
   const expertCache =
     request.expertCache === undefined
       ? undefined
@@ -139,6 +170,15 @@ export const buildSessionAbPageRecord = (input: {
         : { dispatchKeys: ruleKeys }),
     },
     ...(expertCache === undefined ? {} : { expertCache }),
+    ...(probes === undefined
+      ? {}
+      : {
+          counts: probes.map(({ name, counts }): SessionAbArmCounts => ({
+            arm: name,
+            fusions: counts.fusions,
+            dispatches: counts.dispatches,
+          })),
+        }),
     record,
     judgements: input.judgements,
   };

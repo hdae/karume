@@ -17,7 +17,7 @@ const errorsOf = (form: SessionAbForm): readonly string[] => {
 
 describe("the session A/B request", () => {
   describe("the defaults", () => {
-    it("are 4 rounds, 96 tokens, a minimum gain of 1%, open per visit and counts read", () => {
+    it("are 4 rounds, 96 tokens, a minimum gain of 1%, open per visit and the counts probed", () => {
       expect(parseSessionAbForm(chosen)).toEqual({
         ok: true,
         value: {
@@ -25,7 +25,7 @@ describe("the session A/B request", () => {
           tokens: 96,
           minGain: 0.01,
           openPerVisit: true,
-          readCounts: true,
+          probeCounts: true,
           backend: "d3d12",
         },
       });
@@ -77,7 +77,7 @@ describe("the session A/B request", () => {
   });
 
   it("names the two arms and the fixed work of every run", () => {
-    const parsed = parseSessionAbForm({ ...chosen, openPerVisit: false, readCounts: false });
+    const parsed = parseSessionAbForm({ ...chosen, openPerVisit: false, probeCounts: false });
     if (!parsed.ok) throw new Error(parsed.errors.join(" "));
     const request = sessionAbRequest(
       {
@@ -98,7 +98,7 @@ describe("the session A/B request", () => {
       tokens: 96,
       minGain: 0.01,
       openPerVisit: false,
-      readCounts: false,
+      probeCounts: false,
       backend: "d3d12",
       prompt: SESSION_AB_PROMPT,
       sampler: { temperature: 0, seed: 0 },

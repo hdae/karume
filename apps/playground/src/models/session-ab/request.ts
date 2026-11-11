@@ -31,7 +31,7 @@ export const SESSION_AB_CAPACITY = 1024;
 
 /**
  * What the form accepts. Rounds: the runner's minimum. Tokens: at least 2 (the first token comes
- * from the prefill, so a run of one token has no decode run and no counts to report), at most what
+ * from the prefill, so a run of one token has no decode run for the probe to count), at most what
  * {@link SESSION_AB_CAPACITY} holds next to the prompt.
  */
 export const SESSION_AB_LIMITS = { minRounds: 3, minTokens: 2, maxTokens: 512 } as const;
@@ -43,8 +43,11 @@ export type SessionAbForm = {
   readonly minGain: string;
   /** Open and close each arm's pipeline around every visit (two large pipelines do not fit together). */
   readonly openPerVisit: boolean;
-  /** Read the fusion and dispatch counts through `onRunDiagnostics`. */
-  readonly readCounts: boolean;
+  /**
+   * Probe each arm's fusion and dispatch counts before the A/B (one extra load and run per arm,
+   * built with `onRunDiagnostics`; the arms themselves never are).
+   */
+  readonly probeCounts: boolean;
   /** Empty until the user picks one: the record must not name a backend nobody chose. */
   readonly backend: string;
 };
@@ -54,7 +57,7 @@ export const INITIAL_SESSION_AB_FORM: SessionAbForm = {
   tokens: "96",
   minGain: "0.01",
   openPerVisit: true,
-  readCounts: true,
+  probeCounts: true,
   backend: "",
 };
 
@@ -64,7 +67,7 @@ export type SessionAbSettings = {
   readonly tokens: number;
   readonly minGain: number;
   readonly openPerVisit: boolean;
-  readonly readCounts: boolean;
+  readonly probeCounts: boolean;
   readonly backend: SessionAbBackend;
 };
 
@@ -123,7 +126,7 @@ export const parseSessionAbForm = (form: SessionAbForm): Parsed<SessionAbSetting
       tokens,
       minGain,
       openPerVisit: form.openPerVisit,
-      readCounts: form.readCounts,
+      probeCounts: form.probeCounts,
       backend,
     },
   };

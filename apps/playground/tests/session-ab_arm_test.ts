@@ -12,12 +12,14 @@ import { runSessionAb } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  type ArmCounts,
   type ArmPipeline,
   type ArmRequest,
   type ArmSequence,
   type CountsDiagnostics,
   type DiagnosticsCallback,
   pipelineArm,
+  probeCounts,
 } from "../src/models/session-ab/run.ts";
 
 const ENVIRONMENT = {
@@ -201,7 +203,6 @@ const REQUEST: ArmRequest = {
   tokens: 4,
   sampler: { temperature: 0, seed: 0 },
   capacity: 1024,
-  readCounts: true,
 };
 
 /** The page's two arms: `base` without rules, `rule` with the candidate rule. */
@@ -210,42 +211,66 @@ const ARMS: readonly {
   readonly fusionRules?: SessionOptions["fusionRules"];
 }[] = [{ name: "base" }, { name: "rule", fusionRules: [GELU_MUL_RULE] }];
 
+/** What an arm and its probe are built from, for each of the page's two arms. */
+const specsOf = (where: Rig, request: ArmRequest, fake: FakeOptions) =>
+  ARMS.map(({ name, fusionRules }) => ({
+    name,
+    ...(fusionRules === undefined ? {} : { fusionRules }),
+    request,
+    build: fakeBuild(where, name, fake),
+    prompt: () => {
+      where.record(`${name}:prompt`);
+      return [1, 2, 3];
+    },
+    signal: new AbortController().signal,
+  }));
+
 const armsOf = (where: Rig, request: ArmRequest, fake: FakeOptions) =>
-  ARMS.map(({ name, fusionRules }) =>
-    pipelineArm({
-      name,
-      ...(fusionRules === undefined ? {} : { fusionRules }),
-      request,
-      build: fakeBuild(where, name, fake),
-      prompt: () => {
-        where.record(`${name}:prompt`);
-        return [1, 2, 3];
-      },
-      signal: new AbortController().signal,
-      onStep: ({ step }) => where.record(`${name}:step:${step}`),
-    }),
+  specsOf(where, request, fake).map((spec) =>
+    pipelineArm({ ...spec, onStep: ({ step }) => where.record(`${spec.name}:step:${step}`) }),
   );
+
+/** The probes of both arms, one after the other, as the page runs them. */
+const probesOf = async (where: Rig, request: ArmRequest, fake: FakeOptions) => {
+  const counts: ArmCounts[] = [];
+  for (const spec of specsOf(where, request, fake)) {
+    counts.push(
+      await probeCounts({
+        ...spec,
+        onStep: ({ step }) => where.record(`${spec.name}:probe:${step}`),
+      }),
+    );
+  }
+  return counts;
+};
 
 const run = (where: Rig, arms: ReturnType<typeof armsOf>, openPerVisit: boolean) =>
   runSessionAb({ arms, rounds: 3, openPerVisit, environment: ENVIRONMENT, clock: where.clock });
 
 describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
   describe("the options each arm builds with", () => {
-    it("passes the rules to the rule arm alone, and the callback only when counts are read", async () => {
-      for (const readCounts of [true, false]) {
+    it("passes the rules to the rule arm alone, and never the diagnostics callback", async () => {
+      for (const openPerVisit of [false, true]) {
         const where = newRig();
-        const arms = armsOf(where, { ...REQUEST, readCounts }, { phases: decodePhases(4) });
-        await run(where, arms, false);
+        await run(where, armsOf(where, REQUEST, { phases: decodePhases(4) }), openPerVisit);
+        expect(where.builds).toHaveLength(openPerVisit ? 2 * 2 * 4 : 2);
+        for (const [index, options] of where.builds.entries()) {
+          expect(Object.hasOwn(options, "onRunDiagnostics"), `build ${index}`).toBe(false);
+        }
         const [base, rule] = where.builds;
-        expect(where.builds).toHaveLength(2);
         expect(Object.hasOwn(base, "fusionRules")).toBe(false);
         expect(rule.fusionRules).toEqual([GELU_MUL_RULE]);
-        for (const options of where.builds) {
-          expect(Object.hasOwn(options, "onRunDiagnostics"), `readCounts ${readCounts}`).toBe(
-            readCounts,
-          );
-        }
       }
+    });
+
+    it("the probe passes the arm's rules and the diagnostics callback", async () => {
+      const where = newRig();
+      await probesOf(where, REQUEST, { phases: decodePhases(4) });
+      const [base, rule] = where.builds;
+      expect(where.builds).toHaveLength(2);
+      expect(Object.hasOwn(base, "fusionRules")).toBe(false);
+      expect(rule.fusionRules).toEqual([GELU_MUL_RULE]);
+      for (const options of where.builds) expect(typeof options.onRunDiagnostics).toBe("function");
     });
   });
 
@@ -284,43 +309,71 @@ describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
   });
 
   describe("the counts", () => {
-    it("are the first decode run's, and the rule's dispatch keys come from it", async () => {
+    it("are not reported by the arms: the runner's record has none", async () => {
       const where = newRig();
       const arms = armsOf(where, REQUEST, { phases: decodePhases(4) });
-      const record = await run(where, arms, true);
-      const [base, rule] = record.arms;
-      // decode step 1 = 1000 + 1, plus the rule's 60.
-      expect([base.dispatches, rule.dispatches]).toEqual([1001, 1061]);
-      expect(rule.fusions).toEqual({ [GELU_MUL_RULE_NAME]: 60 });
-      expect(arms.map((arm) => arm.facts().ruleKeys)).toEqual([[], [RULE_KEY]]);
-    });
-
-    it("under self-speculation are the first verify run's (no decode run happens)", async () => {
-      const where = newRig();
-      const request: ArmRequest = { ...REQUEST, expertCache: { slots: 64, depth: 2 } };
-      const record = await run(
-        where,
-        armsOf(where, request, { phases: verifyPhases(2), report: cacheReport([64, 64], 2) }),
-        true,
-      );
-      expect(record.arms.map(({ dispatches }) => dispatches)).toEqual([2001, 2061]);
-    });
-
-    it("refuse a run without the counted run: a verify-only decode without a depth set", async () => {
-      const where = newRig();
-      await expect(
-        run(where, armsOf(where, REQUEST, { phases: verifyPhases(2) }), true),
-      ).rejects.toThrow("Arm base: the run had no decode run to count");
-    });
-
-    it("are not read when the request reads none: the record has no counts and no keys", async () => {
-      const where = newRig();
-      const arms = armsOf(where, { ...REQUEST, readCounts: false }, { phases: decodePhases(4) });
       const record = await run(where, arms, false);
       for (const arm of record.arms) {
         expect(Object.hasOwn(arm, "fusions") || Object.hasOwn(arm, "dispatches")).toBe(false);
       }
       expect(arms.map((arm) => arm.facts())).toEqual([{}, {}]);
+    });
+
+    it("of a probe are its first decode run's, and the rule's dispatch keys come from it", async () => {
+      const where = newRig();
+      const [base, rule] = await probesOf(where, REQUEST, { phases: decodePhases(4) });
+      // decode step 1 = 1000 + 1, plus the rule's 60.
+      expect(base).toEqual({ fusions: {}, dispatches: 1001, ruleKeys: [] });
+      expect(rule).toEqual({
+        fusions: { [GELU_MUL_RULE_NAME]: 60 },
+        dispatches: 1061,
+        ruleKeys: [RULE_KEY],
+      });
+    });
+
+    it("of a probe under self-speculation are its first verify run's (no decode run happens)", async () => {
+      const where = newRig();
+      const request: ArmRequest = { ...REQUEST, expertCache: { slots: 64, depth: 2 } };
+      const probes = await probesOf(where, request, {
+        phases: verifyPhases(2),
+        report: cacheReport([64, 64], 2),
+      });
+      expect(probes.map(({ dispatches }) => dispatches)).toEqual([2001, 2061]);
+    });
+
+    it("a probe refuses a generation without the counted run: verify-only without a depth set", async () => {
+      const where = newRig();
+      await expect(probesOf(where, REQUEST, { phases: verifyPhases(2) })).rejects.toThrow(
+        "Arm base: the probe's generation had no decode run to count",
+      );
+      expect(where.log.slice(-2)).toEqual(["base:probe:close", "base:dispose"]);
+    });
+  });
+
+  describe("a probe", () => {
+    it("builds once, runs one generation in one sequence and disposes the pipeline, in order", async () => {
+      const where = newRig();
+      await probesOf(where, REQUEST, { phases: decodePhases(4) });
+      expect(where.log.filter((entry) => entry.startsWith("base:"))).toEqual([
+        "base:probe:open",
+        "base:build",
+        "base:sequence",
+        "base:probe:run",
+        "base:prompt",
+        "base:generate",
+        "base:probe:close",
+        "base:dispose",
+      ]);
+      // The rule arm's probe starts after the base's pipeline is disposed.
+      expect(where.log.indexOf("rule:build")).toBeGreaterThan(where.log.indexOf("base:dispose"));
+    });
+
+    it("disposes the pipeline when the generation throws, and the error propagates", async () => {
+      const where = newRig();
+      await expect(
+        probesOf(where, REQUEST, { phases: decodePhases(4), generateThrows: true }),
+      ).rejects.toThrow("the generation failed");
+      expect(where.log.slice(-2)).toEqual(["base:probe:close", "base:dispose"]);
     });
   });
 

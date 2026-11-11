@@ -74,9 +74,11 @@ describe("what the session A/B page shows of a judgement", () => {
 });
 
 describe("what the session A/B page shows of an arm", () => {
-  it("an identical arm with counts: its runs, the rule's hits (0 when its counter is absent) and dispatches", () => {
+  it("an identical arm with its probe's counts: its runs, the rule's hits (0 when its counter is absent) and dispatches", () => {
     const [base, rule] = abRecord({ base: steady(100), rule: steady(90) }).arms;
-    expect(armRow(base, RULE)).toEqual({
+    const baseCounts = { arm: "base", fusions: { rmsNormAdd: 30 }, dispatches: 1294 };
+    const ruleCounts = { arm: "rule", fusions: { rmsNormAdd: 30, [RULE]: 60 }, dispatches: 1234 };
+    expect(armRow(base, baseCounts, RULE)).toEqual({
       name: "base",
       identity: "identical (20 runs)",
       identical: true,
@@ -84,7 +86,8 @@ describe("what the session A/B page shows of an arm", () => {
       dispatches: "1294",
       rounds: ["100.0 ms / 100.1 ms", "100.1 ms / 100.0 ms", "100.0 ms / 100.1 ms"],
     });
-    expect([armRow(rule, RULE).hits, armRow(rule, RULE).dispatches]).toEqual(["60", "1234"]);
+    const ruleRow = armRow(rule, ruleCounts, RULE);
+    expect([ruleRow.hits, ruleRow.dispatches]).toEqual(["60", "1234"]);
   });
 
   it("a differing arm: how many words of which run, and the first", () => {
@@ -93,15 +96,16 @@ describe("what the session A/B page shows of an arm", () => {
       rule: steady(90),
       ruleIdentity: DIFFERING,
     }).arms;
-    expect(armRow(rule, RULE)).toMatchObject({
+    expect(armRow(rule, undefined, RULE)).toMatchObject({
       identical: false,
       identity:
         "3 of 96 words differ (round 2, visit 2, run 2; first at tokens[41] (word): expected 100, got 200)",
     });
   });
 
-  it("an arm without counts shows dashes, not zeros", () => {
-    const [base] = abRecord({ base: steady(100), rule: steady(90), noCounts: true }).arms;
-    expect([armRow(base, RULE).hits, armRow(base, RULE).dispatches]).toEqual(["—", "—"]);
+  it("an arm without probed counts shows dashes, not zeros", () => {
+    const [base] = abRecord({ base: steady(100), rule: steady(90) }).arms;
+    const row = armRow(base, undefined, RULE);
+    expect([row.hits, row.dispatches]).toEqual(["—", "—"]);
   });
 });

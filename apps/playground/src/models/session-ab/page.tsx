@@ -4,9 +4,11 @@
  * and preset — `base` with no rule, `rule` with `candidate/gelu_mul` of `@karume/candidate-rules`
  * through the gemma pipeline's experimental `fusionRules` — and every timed run is one greedy
  * generation from a fixed prompt whose token ids the runner compares, so identity is token
- * identity. The page shows where the runner is, then per arm the identity, the rule's hits, the
- * dispatches and the per-round times, and the judgement with its numbers and its reason; the record
- * is saved as JSON.
+ * identity. The arms are built without the diagnostics callback (every run is the production
+ * path); the rule's hits and the dispatches come from a count probe of each arm before the A/B.
+ * The page shows the probe's progress and where the runner is, then per arm the identity, the
+ * probe's hits and dispatches and the per-round times, and the judgement with its numbers and its
+ * reason; the record is saved as JSON.
  */
 
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
@@ -65,7 +67,12 @@ import {
 } from "@/models/gemma4/settings";
 import { buildGemmaPipeline, type GemmaPipeline } from "@/models/gemma4/use-gemma-pipeline";
 
-import { buildSessionAbPageRecord, PACKAGE_VERSIONS, type SessionAbPageRecord } from "./record";
+import {
+  buildSessionAbPageRecord,
+  PACKAGE_VERSIONS,
+  type SessionAbArmProbe,
+  type SessionAbPageRecord,
+} from "./record";
 import {
   INITIAL_SESSION_AB_FORM,
   parseSessionAbForm,
@@ -78,7 +85,15 @@ import {
   type SessionAbRequest,
   sessionAbRequest,
 } from "./request";
-import { type ArmStep, pipelineArm, type RunPosition, runPositions } from "./run";
+import {
+  type ArmSpec,
+  type ArmStep,
+  pipelineArm,
+  probeCounts,
+  type ProbeStep,
+  type RunPosition,
+  runPositions,
+} from "./run";
 import { armRow, judgementView } from "./view";
 
 /** Module constant (useGpu needs stable options): subgroups when the adapter has them. */
@@ -114,6 +129,19 @@ const progressOf = (
       return { stage: `ran · ${positionText(positions[ended - 1], step.arm)}`, count };
     case "close":
       return { stage: `closing the pipeline of ${step.arm}`, count };
+  }
+};
+
+/** The status line of one probe step, and how many probes have ended. */
+const probeProgressOf = (step: ProbeStep, ended: number, total: number): RunProgress => {
+  const count = { done: ended, total, unit: "probes" };
+  switch (step.step) {
+    case "open":
+      return { stage: `probing the counts · building the pipeline of ${step.arm}`, count };
+    case "run":
+      return { stage: `probing the counts · one untimed generation of ${step.arm}`, count };
+    case "close":
+      return { stage: `probing the counts · closing the pipeline of ${step.arm}`, count };
   }
 };
 
@@ -254,39 +282,53 @@ export const SessionAbPage = () => {
         holdTicker(step.step !== "close" && ended < positions.length && positions[ended].timed);
         flushSync(() => report(progressOf(step, positions, ended)));
       };
-      const armOf = (name: string, fusionRules: SessionOptions["fusionRules"]) =>
-        pipelineArm<GemmaPipeline>({
-          name,
-          ...(fusionRules === undefined ? {} : { fusionRules }),
-          request,
-          prompt: (pipeline) =>
-            chatPrompt(pipeline.tokenizer, [{ role: "user", content: request.prompt }]),
-          build: (options) =>
-            buildGemmaPipeline({
-              gpu: readyGpu,
-              request: {
-                mount: model.mount,
-                model: model.model,
-                quant: model.quant,
-                source: DIRECT_SOURCE,
-                speculative: false,
-                ...(model.fullStateStorage === undefined
-                  ? {}
-                  : { fullStateStorage: model.fullStateStorage }),
-                ...(model.expertCache === undefined ? {} : { expertCache: model.expertCache }),
-              },
-              signal,
-              ...(options.fusionRules === undefined
+      const specOf = (
+        name: string,
+        fusionRules: SessionOptions["fusionRules"],
+      ): ArmSpec<GemmaPipeline> => ({
+        name,
+        ...(fusionRules === undefined ? {} : { fusionRules }),
+        request,
+        prompt: (pipeline) =>
+          chatPrompt(pipeline.tokenizer, [{ role: "user", content: request.prompt }]),
+        build: (options) =>
+          buildGemmaPipeline({
+            gpu: readyGpu,
+            request: {
+              mount: model.mount,
+              model: model.model,
+              quant: model.quant,
+              source: DIRECT_SOURCE,
+              speculative: false,
+              ...(model.fullStateStorage === undefined
                 ? {}
-                : { sessionOptions: { fusionRules: options.fusionRules } }),
-              ...(options.onRunDiagnostics === undefined
-                ? {}
-                : { onRunDiagnostics: options.onRunDiagnostics }),
-            }),
-          signal,
-          onStep,
-        });
-      const arms = [armOf("base", undefined), armOf("rule", [GELU_MUL_RULE])];
+                : { fullStateStorage: model.fullStateStorage }),
+              ...(model.expertCache === undefined ? {} : { expertCache: model.expertCache }),
+            },
+            signal,
+            ...(options.fusionRules === undefined
+              ? {}
+              : { sessionOptions: { fusionRules: options.fusionRules } }),
+            ...(options.onRunDiagnostics === undefined
+              ? {}
+              : { onRunDiagnostics: options.onRunDiagnostics }),
+          }),
+        signal,
+      });
+      const specs = [specOf("base", undefined), specOf("rule", [GELU_MUL_RULE])];
+      // The count probes come first, one arm at a time, all untimed; the arms are never built with
+      // the diagnostics callback.
+      const probes: SessionAbArmProbe[] = [];
+      if (settings.probeCounts) {
+        for (const spec of specs) {
+          const counts = await probeCounts({
+            ...spec,
+            onStep: (step) => report(probeProgressOf(step, probes.length, specs.length)),
+          });
+          probes.push({ name: spec.name, counts });
+        }
+      }
+      const arms = specs.map((spec) => pipelineArm({ ...spec, onStep }));
       const record = await runSessionAb({
         arms,
         rounds: settings.rounds,
@@ -310,6 +352,7 @@ export const SessionAbPage = () => {
           source: sourceRecord(DIRECT_SOURCE),
           ruleName: GELU_MUL_RULE_NAME,
           arms: arms.map((arm) => ({ name: arm.name, facts: arm.facts() })),
+          ...(settings.probeCounts ? { probes } : {}),
           record,
           judgements,
         }),
@@ -502,20 +545,23 @@ export const SessionAbPage = () => {
               </p>
               <div className="flex items-center gap-2">
                 <Switch
-                  id="session-ab-read-counts"
-                  checked={form.readCounts}
-                  onCheckedChange={(checked) => setForm({ ...form, readCounts: checked })}
+                  id="session-ab-probe-counts"
+                  checked={form.probeCounts}
+                  onCheckedChange={(checked) => setForm({ ...form, probeCounts: checked })}
                   disabled={running}
                 />
-                <Label htmlFor="session-ab-read-counts">Read fusion and dispatch counts</Label>
+                <Label htmlFor="session-ab-probe-counts">
+                  Probe the counts first (one extra load and run per arm)
+                </Label>
               </div>
               <p className="-mt-2 text-xs text-muted-foreground">
-                Passes onRunDiagnostics and records the fusion counts and the planned dispatches of
-                each run&apos;s first decode run, or with a self-speculation depth its first verify
-                run (depth + 1 rows). The callback runs inside every run, timed ones included.
-                Without the expert cache it changes the decode path of both arms alike: greedy
-                tokens are then picked on the CPU from the whole logits row instead of on the GPU.
-                Under the expert cache decode is on the CPU sampler either way.
+                Before the A/B, each arm&apos;s pipeline is built once with onRunDiagnostics, runs
+                one untimed generation of the same prompt and token count, and is disposed; the page
+                keeps the fusion counts and the planned dispatches of its first decode run (its
+                first verify run, depth + 1 rows, with a self-speculation depth). The arms of the
+                A/B are always built without the callback, whose presence alone changes the decode
+                path, so every run, timed or not, is the production path. The probe&apos;s tokens
+                are compared with nothing.
               </p>
               <Field
                 id="session-ab-backend"
@@ -575,13 +621,15 @@ const requestText = (request: SessionAbRequest): string =>
         ]),
     `${request.rounds} rounds × ${request.tokens} tokens`,
     request.openPerVisit ? "open per visit" : "kept open",
-    request.readCounts ? "counts" : "no counts",
+    request.probeCounts ? "counts probed" : "no counts",
     request.backend,
   ].join(" · ");
 
 /** Memoized: the status ticker re-renders the page every 250 ms while an untimed step is going. */
 const SessionAbResultView = memo(({ record }: { record: SessionAbPageRecord }) => {
-  const rows = record.record.arms.map((arm) => armRow(arm, record.rule.name));
+  const rows = record.record.arms.map((arm, index) =>
+    armRow(arm, record.counts?.[index], record.rule.name),
+  );
   const rounds = record.record.rounds;
   return (
     <>
@@ -590,10 +638,11 @@ const SessionAbResultView = memo(({ record }: { record: SessionAbPageRecord }) =
           <CardTitle>Arms</CardTitle>
           <CardDescription>
             Identity is against the base&apos;s first run, over every run (the warm-up and the
-            untimed runs included). Hits are the counter of <code>{record.rule.name}</code> in the
-            arm&apos;s first decode run (its first verify run with a self-speculation depth);
-            dispatches are that run&apos;s planned dispatches. Times are the timed runs of each
-            round, visit 1 / visit 2.
+            untimed runs included). Hits are the counter of <code>{record.rule.name}</code> and
+            dispatches the planned dispatches in the first decode run (the first verify run with a
+            self-speculation depth) of the arm&apos;s count probe before the A/B, not of the timed
+            runs: the runner&apos;s record carries no counts, and without the probe they show —.
+            Times are the timed runs of each round, visit 1 / visit 2.
           </CardDescription>
         </CardHeader>
         <CardContent className="overflow-x-auto">

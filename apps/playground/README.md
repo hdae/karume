@@ -1398,16 +1398,22 @@ greedy generation (temperature 0, seed 0) of the chosen token count from one fix
 fresh sequence of capacity 1024; it returns the generated token ids, which the runner compares with
 the base's first run, so identity is token identity. The sequence of every later run is created by
 the report of the run before it, which also disposes that run's sequence, outside the timed span.
-With **Read fusion and dispatch counts** on (the default), the pipeline is built with
-`onRunDiagnostics` and each run reports the fusion counts and the planned dispatches
-(`lastRunPipelines`) of one run of its generation: the first decode run, or, with a
+The arms are always built **without** `onRunDiagnostics`: the callback is a build-time option of
+the gemma pipeline, and its presence alone moves every generation of that pipeline onto another
+decode path (no on-GPU greedy output without the expert cache, no run-ahead, a diagnostics read per
+run). So every run of the A/B, timed or not, is the production path, and the arms report no counts
+to the runner: the runtime's record carries none.
+
+**The count probe.** With **Probe the counts first (one extra load and run per arm)** on (the
+default), the page probes each arm in turn before the A/B: it builds the arm's pipeline once with
+`onRunDiagnostics`, runs one untimed generation of the same prompt and token count, takes the
+fusion counts, the planned dispatches (`lastRunPipelines`) and the rule's dispatch keys of one run
+of that generation, and disposes the pipeline. The counted run is the first decode run, or, with a
 self-speculation depth set, the first verify run (a self-speculating decode has no decode run: each
 cycle is one verify of its drafts plus one row, `depth + 1` rows, fewer near the token limit), so
-with a depth the counts are those of that multi-row verify plan. The callback runs inside every
-run, timed ones included: the pipeline takes it at build time and offers no per-generation switch,
-so it cannot be limited to the untimed runs. Without the expert cache it also moves greedy decoding
-from the GPU to the CPU for both arms alike; under the cache decode is on the CPU either way. Off,
-the record has no counts.
+with a depth the counts are those of that multi-row verify plan. The probe's tokens are compared
+with nothing; it exists for the counts only. The status card shows the probe's progress (which
+arm, building, generating or closing). Off, the page and its record have no counts.
 
 | Field | Default | Accepted |
 | --- | --- | --- |
@@ -1415,6 +1421,7 @@ the record has no counts.
 | Tokens per run | 96 | 2 to 512 (the first token comes from the prefill, so one token has no decode run) |
 | Minimum gain | 0.01 (1% of the base's time) | a number ≥ 0 |
 | Open and close per visit | on | on: every visit builds its pipeline, runs it once untimed and once timed, and disposes it (two pipelines of a large model do not fit together); off: both pipelines stay loaded |
+| Probe the counts first (one extra load and run per arm) | on | on: the count probe above runs before the A/B; off: no counts |
 | Backend | none (must be chosen) | `d3d12` / `metal` / `vulkan` / `other` — WebGPU does not expose it, so the record states what is chosen |
 
 The runner visits the arms forward and in reverse in every round (base, rule, rule, base); the
@@ -1423,34 +1430,36 @@ ended. A visit's close awaits the pipeline's dispose, which resolves once the de
 memory back, so the next visit's build does not land on top of the disposed pipeline.
 
 When it ends the page shows, per arm, the identity (identical over N runs, or how many words of
-which run differ and where first), the rule's hits, the dispatches and every timed round's two
-visits; then the judgement of the rule arm: **Adopt**, **Reject** or **Inconclusive**, its reason in
+which run differ and where first), the rule's hits and the dispatches from the arm's count probe
+(not from the timed runs; a dash without the probe) and every timed round's two visits; then the judgement of the rule arm: **Adopt**, **Reject** or **Inconclusive**, its reason in
 words and its numbers (median paired difference, base median, gain, noise floor, the interval of
 the median difference with its coverage, the paired differences per round). Identity is required: tokens that differ reject
 the rule whatever the times. A verdict speaks for that device, backend and work only, and
 inconclusive does not mean the difference is zero.
 
-### The record (`format: "karume-playground-session-ab/1"`)
+### The record (`format: "karume-playground-session-ab/2"`)
 
 **Download record (JSON)** saves `session-ab_<UTC timestamp>.json` once the A/B has ended:
 `recordEnvironment`, `versions` (the `@karume/runtime` and `@karume/models` versions the page was
 built with), the `request` (model, preset, load options, rounds, tokens, minimum gain, open per
-visit, counts, backend, the prompt, the sampler, the capacity and the two arms with the rules they
-passed), `pipeline` (the entry point), `distribution` (directory and manifest sha256), `source`,
-`rule` (name, package and `dispatchKeys`, the rule's dispatch keys in the rule arm's counted run;
-`keyPrefix`, the prefix every key of the rule carries, instead when no counts were read),
-`expertCache` (with the cache: per arm the slots per routed layer, the host tier's bytes and the
-depth, as the pipeline resolved them), the runtime's `record` (`karume-session-ab/1`) unchanged and
-the `judgements`. A stored `record` can be judged again with `judgeSessionAb`, with another minimum
+visit, `probeCounts`, backend, the prompt, the sampler, the capacity and the two arms with the
+rules they passed), `pipeline` (the entry point), `distribution` (directory and manifest sha256),
+`source`, `rule` (name, package and `dispatchKeys`, the rule's dispatch keys in the counted run of
+the rule arm's probe; `keyPrefix`, the prefix every key of the rule carries, instead when the counts
+were not probed), `expertCache` (with the cache: per arm the slots per routed layer, the host tier's
+bytes and the depth, as the pipeline resolved them), `counts` (with the probe: per arm the fusion
+counts and the planned dispatches of the probe's counted run), the runtime's `record`
+(`karume-session-ab/1`) unchanged, which carries no counts (its arms were built without the
+callback), and the `judgements`. A stored `record` can be judged again with `judgeSessionAb`, with another minimum
 gain too. A failed or cancelled A/B leaves no record (the runner returns one only at the end).
 **Copy record** copies the same JSON.
 
 Caveats:
 
 - Never run it while other work uses the same GPU: the times would measure the contention.
-- Nothing the page does runs inside a timed span but the generation (with counts read, the
-  diagnostics callback is part of it): the status is rendered at once on every step an arm reports
-  outside the spans, and the status card's ticker (the elapsed seconds) is held while a timed run is
+- Nothing the page does runs inside a timed span but the generation, on the production path (the
+  diagnostics callback is only ever given to the probe's pipelines): the status is rendered at once
+  on every step an arm reports outside the spans, and the status card's ticker (the elapsed seconds) is held while a timed run is
   in flight, so it stands still then.
 - Building a pipeline per visit is not timed, but it heats the GPU between visits like any load;
   the A B B A order spreads that over both arms.

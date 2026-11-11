@@ -1,6 +1,6 @@
 /**
- * What the session A/B page shows of a record: one row per arm (identity, the rule's hits, the
- * dispatches, the per-round times) and, per compared arm, the judgement with its numbers and its
+ * What the session A/B page shows of a record: one row per arm (identity and the per-round times
+ * from the runner's record, the rule's hits and the dispatches from the arm's count probe) and, per compared arm, the judgement with its numbers and its
  * reason in words. Pure, so `vp test` covers it.
  */
 
@@ -10,15 +10,17 @@ import type {
   SessionAbVerdict,
 } from "@karume/runtime/tune";
 
+import type { SessionAbArmCounts } from "./record";
+
 /** One arm's row. */
 export type ArmRow = {
   readonly name: string;
   /** "identical (N runs)" or how many words of which run differ, and where first. */
   readonly identity: string;
   readonly identical: boolean;
-  /** The rule's hits per run; "—" when the arm reported no counts. */
+  /** The rule's hits in the probe's counted run; "—" when the counts were not probed. */
   readonly hits: string;
-  /** The dispatches per run; "—" when the arm reported none. */
+  /** The probe's counted run's planned dispatches; "—" when the counts were not probed. */
   readonly dispatches: string;
   /** Per timed round, "visit 1 / visit 2" in ms. */
   readonly rounds: readonly string[];
@@ -37,13 +39,20 @@ const identityText = (arm: SessionAbArmRecord): string => {
   return `${worst.failures} of ${worst.words} words differ (${where}${first})`;
 };
 
-/** The row of one arm; `rule` names the counter the hits are read from. */
-export const armRow = (arm: SessionAbArmRecord, rule: string): ArmRow => ({
+/**
+ * The row of one arm: its record from the runner and its probe's counts (absent when the counts
+ * were not probed); `rule` names the counter the hits are read from.
+ */
+export const armRow = (
+  arm: SessionAbArmRecord,
+  counts: SessionAbArmCounts | undefined,
+  rule: string,
+): ArmRow => ({
   name: arm.name,
   identity: identityText(arm),
   identical: arm.identity.worst.failures === 0,
-  hits: arm.fusions === undefined ? "—" : String(arm.fusions[rule] ?? 0),
-  dispatches: arm.dispatches === undefined ? "—" : String(arm.dispatches),
+  hits: counts === undefined ? "—" : String(counts.fusions[rule] ?? 0),
+  dispatches: counts === undefined ? "—" : String(counts.dispatches),
   rounds: arm.timesMs.map(([first, second]) => `${ms(first)} / ${ms(second)}`),
 });
 

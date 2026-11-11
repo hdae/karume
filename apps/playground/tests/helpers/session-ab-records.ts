@@ -1,6 +1,7 @@
 /**
  * Hand-written `karume-session-ab/1` records for the session A/B page's tests: two arms, `base` and
- * `rule`, with the times, counts and identity each case needs. Plain data, as a stored record is.
+ * `rule`, with the times and identity each case needs, and no counts (the page's arms report none
+ * to the runner: the counts come from the probe). Plain data, as a stored record is.
  */
 
 import type { SessionAbArmRecord, SessionAbRecord } from "@karume/runtime/tune";
@@ -31,8 +32,6 @@ export const abRecord = (input: {
   readonly base: Times;
   readonly rule: Times;
   readonly ruleIdentity?: SessionAbArmRecord["identity"];
-  /** Leave the counts out of both arms (a run without `readCounts`). */
-  readonly noCounts?: boolean;
 }): SessionAbRecord => ({
   format: "karume-session-ab/1",
   environment: {
@@ -46,15 +45,11 @@ export const abRecord = (input: {
   arms: [
     {
       name: "base",
-      ...(input.noCounts === true ? {} : { fusions: { rmsNormAdd: 30 }, dispatches: 1294 }),
       timesMs: input.base,
       identity: identical(20),
     },
     {
       name: "rule",
-      ...(input.noCounts === true
-        ? {}
-        : { fusions: { rmsNormAdd: 30, [RULE]: 60 }, dispatches: 1234 }),
       timesMs: input.rule,
       identity: input.ruleIdentity ?? identical(20),
     },

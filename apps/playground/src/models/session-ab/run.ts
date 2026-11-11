@@ -4,9 +4,10 @@
  * An arm (`SessionAbArm` of `@karume/runtime/tune`) here is one Gemma 4 pipeline configuration:
  * open builds the pipeline with the arm's options (the candidate rule for the `rule` arm), a run is
  * one generation of the request's tokens from the fixed prompt with the fixed sampler — its output
- * is the generated token ids, so the A/B's identity is token identity — the report gives the counts
- * of the run's counted run ({@link countedPhaseOf}, when the request reads them), and close
- * disposes the pipeline.
+ * is the generated token ids, so the A/B's identity is token identity — and close disposes the
+ * pipeline. The arms are built without the diagnostics callback, so every run is the production
+ * path; the fusion and dispatch counts come from a count probe of each arm before the A/B
+ * ({@link probeCounts}: one build with the callback, one generation, one dispose).
  *
  * NOTE: the arm builder ({@link pipelineArm} and what it uses, between the twin markers) has a twin
  * in packages/e2e/tests/e2e_gemma4_session_ab_test.ts (the opt-in Node A/B). No module both may
@@ -21,7 +22,7 @@
 
 import type { ExpertCacheReport, Pipeline, RunPhase } from "@karume/models/gemma";
 import type { SessionDiagnostics, SessionOptions } from "@karume/runtime";
-import type { SessionAbArm, SessionAbReport, SessionAbRun } from "@karume/runtime/tune";
+import type { SessionAbArm, SessionAbRun } from "@karume/runtime/tune";
 
 import type { SessionAbRequest } from "./request";
 
@@ -64,10 +65,7 @@ export const runPositions = (
 };
 
 /** The request fields an arm reads. */
-export type ArmRequest = Pick<
-  SessionAbRequest,
-  "tokens" | "sampler" | "capacity" | "readCounts" | "expertCache"
->;
+export type ArmRequest = Pick<SessionAbRequest, "tokens" | "sampler" | "capacity" | "expertCache">;
 
 // ---- The arm builder: twin begin (the same text in e2e_gemma4_session_ab_test.ts, `export` aside) ----
 
@@ -76,6 +74,12 @@ export type ArmRequest = Pick<
  * returned (from the report, outside the timed span), `close` before a pipeline is disposed.
  */
 export type ArmStep = { readonly arm: string; readonly step: "open" | "ran" | "close" };
+
+/**
+ * What one count probe did, as a caller shows it: `open` before its pipeline is built, `run` before
+ * its one generation, `close` before its pipeline is disposed.
+ */
+export type ProbeStep = { readonly arm: string; readonly step: "open" | "run" | "close" };
 
 /** What an arm uses of a sequence. */
 export type ArmSequence = Pick<Awaited<ReturnType<Pipeline["sequence"]>>, "generate" | "dispose">;
@@ -87,17 +91,17 @@ export type ArmPipeline = {
   readonly dispose: () => Promise<void>;
 };
 
-/** What an arm reads of a run's diagnostics (`SessionDiagnostics` has both). */
+/** What a probe reads of a run's diagnostics (`SessionDiagnostics` has both). */
 export type CountsDiagnostics = {
   readonly lastRunFusions: Readonly<Record<string, number | undefined>> | undefined;
   readonly lastRunPipelines: SessionDiagnostics["lastRunPipelines"];
 };
 
-/** The diagnostics callback a pipeline is built with. */
+/** The diagnostics callback a probe's pipeline is built with. */
 export type DiagnosticsCallback = (diagnostics: CountsDiagnostics, phase: RunPhase) => void;
 
 /**
- * The run whose counts an arm reads: the generation's first decode run, or under self-speculation
+ * The run whose counts a probe reads: the generation's first decode run, or under self-speculation
  * (an expert cache with a depth) its first verify run. A self-speculating decode runs no decode
  * phase: every cycle is one verify run of its drafts plus one row (`depth + 1` rows, fewer near the
  * token limit), and its drafts are not observed. So with a depth the counts are those of a
@@ -130,11 +134,6 @@ export type ResolvedExpertCache = {
 export type ArmFacts = {
   /** The expert cache as the pipeline resolved it on the arm's first open (absent without one). */
   readonly expertCache?: ResolvedExpertCache;
-  /**
-   * The dispatch keys of the arm's rules in its first counted run (absent when the request reads no
-   * counts; empty for an arm without rules).
-   */
-  readonly ruleKeys?: readonly string[];
 };
 
 const resolvedExpertCache = (
@@ -149,20 +148,25 @@ const resolvedExpertCache = (
         ...(report.speculation === undefined ? {} : { depth: report.speculation.depth }),
       };
 
-/** One counted run: the runner's counts and the rules' dispatch keys. */
-type Counted = { readonly report: SessionAbReport; readonly ruleKeys: readonly string[] };
+/** One arm's counts, as its probe read them from the counted run ({@link countedPhaseOf}). */
+export type ArmCounts = {
+  /** The counted run's fusion counts (`lastRunFusions`). */
+  readonly fusions: Readonly<Record<string, number>>;
+  /** The counted run's planned dispatches (`lastRunPipelines`). */
+  readonly dispatches: number;
+  /** The dispatch keys of the arm's rules in the counted run (empty for an arm without rules). */
+  readonly ruleKeys: readonly string[];
+};
 
-const countedOf = (diagnostics: CountsDiagnostics, prefixes: readonly string[]): Counted => {
+const countsOf = (diagnostics: CountsDiagnostics, prefixes: readonly string[]): ArmCounts => {
   const fusions: Record<string, number> = {};
   for (const [name, count] of Object.entries(diagnostics.lastRunFusions ?? {})) {
     if (count !== undefined) fusions[name] = count;
   }
   const pipelines = diagnostics.lastRunPipelines ?? [];
   return {
-    report: {
-      fusions,
-      dispatches: pipelines.reduce((sum, { dispatchCount }) => sum + dispatchCount, 0),
-    },
+    fusions,
+    dispatches: pipelines.reduce((sum, { dispatchCount }) => sum + dispatchCount, 0),
     ruleKeys: pipelines
       .map(({ key }) => key)
       .filter((key) => prefixes.some((prefix) => key.startsWith(prefix))),
@@ -170,26 +174,12 @@ const countedOf = (diagnostics: CountsDiagnostics, prefixes: readonly string[]):
 };
 
 /**
- * One arm on a Gemma 4 pipeline. `build` loads the pipeline with the arm's rules and, when the
- * request reads counts, the diagnostics callback; `prompt` gives the prompt's token ids for a built
- * pipeline. The signal is checked before every open and passed to every generation. Close disposes
- * the pipeline, whose dispose resolves once the device has its memory back (ADR 0095, addendum of
- * 2026-11-11), so the next visit's build does not land on top of it.
- *
- * The timed span (`run`) holds the generation alone: the prompt is encoded when the pipeline is
- * built, and the sequence a run generates in is created before it — by open for the first run, by
- * the report of the run before for the others — and disposed by the next report (or by the
- * pipeline's dispose). The report is always there, so the runner calls it after every run, outside
- * the timed span: it says the run ended (`onStep`), disposes the run's sequence, creates the next
- * one and gives the counts, or none when the request does not read them (the record then has no
- * counts).
- *
- * With counts read, the diagnostics callback is part of every run's generation, timed runs
- * included: the pipeline calls it once per run (and without the expert cache it turns the
- * on-GPU greedy selection and the run-ahead off). The pipeline offers no per-generation switch for
- * it, so it cannot be limited to the untimed runs.
+ * What an arm and its count probe are built from. `build` loads the pipeline with the options it
+ * is given (the arm's rules, and for the probe alone the diagnostics callback); `prompt` gives the
+ * prompt's token ids for a built pipeline. The signal is checked before every build and passed to
+ * every generation.
  */
-export const pipelineArm = <P extends ArmPipeline>(input: {
+export type ArmSpec<P extends ArmPipeline> = {
   readonly name: string;
   readonly fusionRules?: SessionOptions["fusionRules"];
   readonly request: ArmRequest;
@@ -199,25 +189,35 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
   }) => Promise<P>;
   readonly prompt: (pipeline: P) => readonly number[];
   readonly signal: AbortSignal;
-  readonly onStep: (step: ArmStep) => void;
-}): SessionAbArm & { readonly facts: () => ArmFacts } => {
+};
+
+/**
+ * One arm on a Gemma 4 pipeline, built with the arm's rules and never with the diagnostics
+ * callback. The callback is a build-time option of the gemma pipeline, and its presence alone moves
+ * every generation of that pipeline onto another decode path (no on-GPU greedy output without the
+ * expert cache, no run-ahead, a diagnostics read per run), so an arm built with it would not time
+ * the production path. Every run of an arm, timed or not, is the production path; the arm reports
+ * no counts to the runner, and the counts come from {@link probeCounts} before the A/B.
+ *
+ * The timed span (`run`) holds the generation alone: the prompt is encoded when the pipeline is
+ * built, and the sequence a run generates in is created before it — by open for the first run, by
+ * the report of the run before for the others — and disposed by the next report (or by the
+ * pipeline's dispose). The report is always there, so the runner calls it after every run, outside
+ * the timed span: it says the run ended (`onStep`), disposes the run's sequence and creates the next
+ * one. Close disposes the pipeline, whose dispose resolves once the device has its memory back (ADR
+ * 0095, addendum of 2026-11-11), so the next visit's build does not land on top of it.
+ */
+export const pipelineArm = <P extends ArmPipeline>(
+  input: ArmSpec<P> & { readonly onStep: (step: ArmStep) => void },
+): SessionAbArm & { readonly facts: () => ArmFacts } => {
   const { name, fusionRules, request, signal, onStep } = input;
-  const counted = countedPhaseOf(request);
-  const prefixes = (fusionRules ?? []).map((rule) => ruleKeyPrefix(rule.name));
   let pipeline: P | undefined;
   let prompt: readonly number[] = [];
   /** The sequence the next run generates in. */
   let next: ArmSequence | undefined;
   /** The sequence the last run generated in, until its report disposes it. */
   let used: ArmSequence | undefined;
-  /** The counted run of the run in flight or just returned. */
-  let current: Counted | undefined;
-  let firstCounted: Counted | undefined;
   let expertCache: ResolvedExpertCache | undefined;
-  const onRunDiagnostics: DiagnosticsCallback = (diagnostics, phase) => {
-    if (current !== undefined || phase.kind !== counted) return;
-    current = countedOf(diagnostics, prefixes);
-  };
   const opened = (): P => {
     if (pipeline === undefined) throw new Error(`Arm ${name}: used before open`);
     return pipeline;
@@ -230,7 +230,6 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
     if (sequence === undefined) throw new Error(`Arm ${name}: no sequence prepared for the run`);
     next = undefined;
     used = sequence;
-    current = undefined;
     const ids: number[] = [];
     const stream = sequence.generate({
       prompt,
@@ -247,10 +246,7 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
     open: async () => {
       signal.throwIfAborted();
       onStep({ arm: name, step: "open" });
-      pipeline = await input.build({
-        ...(fusionRules === undefined ? {} : { fusionRules }),
-        ...(request.readCounts ? { onRunDiagnostics } : {}),
-      });
+      pipeline = await input.build(fusionRules === undefined ? {} : { fusionRules });
       // The same options resolve the same way on every open, so the first open's is the arm's.
       expertCache ??= resolvedExpertCache(
         pipeline.expertCacheReport(),
@@ -266,12 +262,7 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
       used = undefined;
       await finished?.dispose();
       await prepare();
-      if (!request.readCounts) return {};
-      if (current === undefined) {
-        throw new Error(`Arm ${name}: the run had no ${counted} run to count`);
-      }
-      firstCounted ??= current;
-      return current.report;
+      return {};
     },
     close: async () => {
       onStep({ arm: name, step: "close" });
@@ -282,11 +273,54 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
       // The pipeline's dispose closes the sequences it handed out.
       await closing?.dispose();
     },
-    facts: () => ({
-      ...(expertCache === undefined ? {} : { expertCache }),
-      ...(firstCounted === undefined ? {} : { ruleKeys: firstCounted.ruleKeys }),
-    }),
+    facts: () => (expertCache === undefined ? {} : { expertCache }),
   };
+};
+
+/**
+ * The count probe of one arm, run before the A/B: it builds the arm's pipeline once with the
+ * diagnostics callback, runs one generation of the request's prompt and tokens, takes the counts of
+ * its counted run ({@link countedPhaseOf}) and disposes the pipeline, also when the generation
+ * throws. Its tokens are compared with nothing: the probe exists for the counts only, and nothing of
+ * it is timed. Refuses a generation without the counted run.
+ */
+export const probeCounts = async <P extends ArmPipeline>(
+  input: ArmSpec<P> & { readonly onStep: (step: ProbeStep) => void },
+): Promise<ArmCounts> => {
+  const { name, fusionRules, request, signal, onStep } = input;
+  const counted = countedPhaseOf(request);
+  const prefixes = (fusionRules ?? []).map((rule) => ruleKeyPrefix(rule.name));
+  /** The counted run's counts, once the generation reached it. */
+  const seen: { counts?: ArmCounts } = {};
+  signal.throwIfAborted();
+  onStep({ arm: name, step: "open" });
+  const pipeline = await input.build({
+    ...(fusionRules === undefined ? {} : { fusionRules }),
+    onRunDiagnostics: (diagnostics, phase) => {
+      if (seen.counts !== undefined || phase.kind !== counted) return;
+      seen.counts = countsOf(diagnostics, prefixes);
+    },
+  });
+  try {
+    const sequence = await pipeline.sequence({ capacity: request.capacity });
+    onStep({ arm: name, step: "run" });
+    const stream = sequence.generate({
+      prompt: input.prompt(pipeline),
+      maxNewTokens: request.tokens,
+      sampler: request.sampler,
+      signal,
+    });
+    for await (const _event of stream) continue;
+    await stream.done;
+  } finally {
+    onStep({ arm: name, step: "close" });
+    // The pipeline's dispose closes the sequence it handed out.
+    await pipeline.dispose();
+  }
+  if (seen.counts === undefined) {
+    throw new Error(`Arm ${name}: the probe's generation had no ${counted} run to count`);
+  }
+  return seen.counts;
 };
 
 // ---- The arm builder: twin end ----

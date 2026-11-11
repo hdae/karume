@@ -249,7 +249,9 @@ corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
 - **The evidence item "not produced" above** is now an opt-in check: `packages/e2e/tests/e2e_gemma4_session_ab_test.ts`
   (`KARUME_SESSION_AB=<dir>`) runs the session A/B of [0117](0117-app-geometry-tuning.md) (addendum of 2026-11-11) on
   Gemma 4 26B A4B under the expert cache, one pipeline per visit, and asserts token identity over every run of both
-  arms and the rule's hits in the decode plan; the record goes to the directory, not to the docs. The playground's
+  arms and the rule's hits in the decode plan; the record goes to the directory, not to the docs. The arms are built
+  without the diagnostics callback (its presence alone changes the gemma decode path), so the hits come from a count
+  probe of each arm before the A/B (one build with the callback, one generation, one dispose). The playground's
   `/session-ab` page runs the same A/B in a browser.
 - **Observed while building it**: on a device the caller keeps, a disposed pipeline's buffers are freed by Dawn only
   once a submit made after the destroy has completed (Dawn on Vulkan), so a second 26B build right after a dispose ran
