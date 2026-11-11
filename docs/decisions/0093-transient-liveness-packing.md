@@ -245,3 +245,58 @@ Consequences:
   whole output before reading it (ADR [0014](0014-layout-ops-full-write.md)). The sha256 rows are the check.
 - Tests that fixed first-fit's layout by hand were re-derived for the new rule; the invariants checks
   (no overlap in time and space, the usage-scope split, alignment, total ≥ live peak) are unchanged.
+
+## Addendum (2026-11-11) — decision 4 revised: the estimate walks the step list of the fusion plan
+
+The addendum of 2026-10-10 counted only row-block attention windows in fused form ("other fusion rules are still
+counted in pre-fusion form"). That line is replaced: the estimate now counts **every step of the fusion plan as
+execution allocates it**.
+
+- `transientSlotBytes` plans fusion under the same context as Session construction (`sessionFusionContext` on the
+  facts `estimateFusionFacts` derives: the rule list with the rules of `fusionRules`, the fusion knobs, the weights'
+  storage from the residency plan) and maps the returned `steps` in their order — deferred nodes and in-window
+  passthroughs where the list puts them.
+- A fused step of any rule, built-in or external, takes its bookkeeping from the device-free module execution replays
+  (`fused-step-layout.ts`): the output spec, the temporaries in allocation order, what each binding points at and the
+  release list. What a binding reads or writes comes from the dispatch's WGSL storage declarations, as in execution.
+  MUST: one implementation for both sides; a hand copy in the estimate drifts the first time a rule uses a form the
+  copy lacks.
+- A node step keeps the estimate's own program where the node runs several dispatches (states-form attention, the
+  fused attention op, `group_norm`, the two-phase argmax / topk) and gains the i8a8 linear: its two temporaries (`xq`,
+  `xs`) come from the bytes function `buildLinearI8a8` calls (`linearI8a8TempBytes`), under the route predicate
+  execution uses (`linearTakesI8a8`).
+- An external rule's steps are checked as execution checks them (what a dispatch writes, that the output is written,
+  a temporary bound inside its lifetime), so the estimate returns no number for a step those checks refuse. The checks
+  recipe derivation makes on a dispatch itself (workgroup counts, params) are not run. With `fusionRules` the estimate requires
+  `maxStorageBufferBindingSize` and `maxComputeWorkgroupsPerDimension` (a rule's matcher may read them); the
+  2026-10-10 note "`maxComputeWorkgroupsPerDimension` is not checked" holds only without rules.
+- Still not counted, and listed in `unaccounted`: fusion under a knob the caller did not pass, the i8a8 linear of a
+  borrowed weight (its storage is the lender's), the conv3d i8a8 temporaries, params buffers, `writeBuffer` staging and
+  the retirement window.
+
+Why: the estimate and execution each kept a table of "what a fused window allocates". The estimate's table covered
+three forms, so every other window was counted with intermediates no Session allocates, and the i8a8 linear's
+temporaries were missing. Sharing the bookkeeping removes the second table (ADR
+[0070](0070-shard-loading-admission.md) decision 5: the same rule as execution).
+
+Because shared bookkeeping makes "estimate equals execution" partly true by construction, the checks are independent
+of it: hand-derived byte literals per rule on the CPU (`estimate_fused_steps_test.ts`), and on the GPU
+`planBacking.residentBytes === workspaceBytes` for every rule's window, two external rules and the i8a8 linear
+(`gpu_estimate_test.ts`). Fault injection confirmed four mutations turn them red: a dropped fused temporary, a dropped
+i8a8 temporary, and — only on graphs with a released region ahead of the step, added for it — a dropped read of a
+fused dispatch and of the i8a8 GEMM.
+
+Evidence (2026-11-11, RTX 3080 Ti, Node + Dawn): on the Wan2.2 TI2V-5B DiT at `f16+dit8-a8-attn8-online` the estimate
+equals the run's backing — 768,867,264 B at S = 7,920 and 2,632,460,864 B at S = 27,280 (it was 16,178,112 B and
+55,904,832 B under, the i8a8 linear temporaries); `e2e_wan_ti2v_dit_estimate_test.ts` pins both.
+
+Effect on `workspaceBytes`: graphs whose windows were counted unfused go down (the MOSS-Image VAE stage's need by
+2,192,900,480 B at 1664², Anima's VAE stage by 100,663,296 B, the Wan2.2 DiT's dense f32 route by 317,395,968 B at
+S = 27,280); graphs with i8a8 linears go up by their temporaries where no free region holds them (the Wan2.2 online
+route above; the SBV2 text encoder at `i8-a8` by 1,572,864 B). Anima's text encoder workspace rises by up to
+4,194,304 B at 512 tokens; its stage need does not move, because the workspace stays under the keep budget. No
+MOSS-Image stage need rises at any size.
+
+The headroom margins of the family pipelines are unchanged (maintainer's ruling 2026-11-11). The estimate is the
+theoretical demand and a guard for a caller that did not check the model's VRAM requirement; it is not compared with
+free VRAM (ADR 0070 decision 5) and what `unaccounted` lists stays outside it.

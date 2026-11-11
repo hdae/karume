@@ -618,14 +618,14 @@ at region 0 offset 0, `xq` and `xs` alone in regions 1 and 2, and one shared slo
   than `xq`, `reuseCount` asserted to be exactly 2); the same construction fits here.
 - Impact: tests only (the runtime is unchanged).
 
-## The memory estimate does not count conv3d w8a8's in-node temporaries, nor list them as unaccounted (filed 2026-10-27; estimate callers on conv8 Sessions)
+## The memory estimate does not count conv3d w8a8's in-node temporaries (filed 2026-10-27; listed as unaccounted since 2026-11-11; estimate callers on conv8 Sessions)
 
 With `convCompute: "a8"` an eligible conv3d node allocates two temporaries between its two dispatches
-(`buildConv3dI8a8`, `packages/runtime/src/runtime/recipe-builders/conv.ts:569-570`): `xq` = P·Cin bytes (the per-pixel
+(`buildConv3dI8a8`, `packages/runtime/src/runtime/recipe-builders/conv.ts:622-623`): `xq` = P·Cin bytes (the per-pixel
 int8 words) and `xs` = 4·P bytes (the per-pixel scales), P = T·H·W of the conv input, alive from the quantiser to the
-GEMM. `EstimateOptions` has no `convCompute` (`packages/runtime/src/runtime/estimate.ts:302`), the estimate counts
-neither, and its `UNACCOUNTED` list (`estimate.ts:456-462`) names linear i8a8's quantized intermediates but not
-conv3d's — against that list's own MUST (list every item known to be not included). ADR
+GEMM. `EstimateOptions` has no `convCompute` (`packages/runtime/src/runtime/estimate.ts:354`) and the estimate counts
+neither. Its `UNACCOUNTED` list (`estimate.ts:596-602`) names them since 2026-11-11, when linear i8a8's pair became
+counted (ADR [0093](decisions/0093-transient-liveness-packing.md) addendum 2026-11-11). ADR
 [0133](decisions/0133-conv3d-w8a8.md)'s addendum of 2026-10-26 (channel-major quantiser) notes the gap as pre-existing.
 
 - Sizes on the Wan2.2 TI2V-5B decoder (every conv3d runs the w8a8 key — `e2e_wan_ti2v_vae_a8_test.ts`; conv input
@@ -635,10 +635,11 @@ conv3d's — against that list's own MUST (list every item known to be not inclu
   P 196,608) and 192 MiB + 1.5 MiB (next, Cin 512, P 393,216). Arithmetic from the shapes, not measured.
 - The pair lives inside one node, so the live peak misses at most the largest pair; how the region total moves depends
   on the placement. No family calls the estimate on the Wan decoder today (`packages/models/src`); a caller of
-  `PreparedModel.estimate` / `estimateGraphMemory` on a conv8 preset gets the under-count without a note.
+  `PreparedModel.estimate` / `estimateGraphMemory` on a conv8 preset gets the under-count, named in `unaccounted`.
 - Impact: callers of `PreparedModel.estimate` / `estimateGraphMemory` on Sessions with `convCompute: "a8"`; no shipped family pipeline today (execution is unaffected).
 - Fix candidates: `EstimateOptions.convCompute`, counting the pair under the same eligibility as execution
-  (`conv3dI8a8Eligible`, `packages/runtime/src/kernels/conv3d-i8a8.ts:114`), or at least an `UNACCOUNTED` item.
+  (`conv3dI8a8Eligible`, `packages/runtime/src/kernels/conv3d-i8a8.ts:114`) from a bytes function shared with
+  `buildConv3dI8a8`, as linear i8a8 does.
 
 ## `/gemma4-bench` split mode fails intermittently (filed 2026-11-03; playground bench split mode only)
 

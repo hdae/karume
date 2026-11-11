@@ -724,3 +724,19 @@ The rule list a plan uses is the Session's: the rules of `SessionOptions.fusionR
   (`<namespace>/<rule>`); a Session given a rule counts it, 0 when it did not fire. The test-only `DISABLED_FUSION_RULES`
   takes an external rule's name on a Session given that rule, which gives the plain side of a fused-against-unfused check.
 - The memory estimate plans without the external rules (ADR 0148 decision 8).
+
+## Addendum (2026-11-11) — the estimate walks the plan's step list
+
+The memory estimate no longer maps windows back onto the node list (`postFusionSteps`, removed): it builds its
+allocation program from the `steps` of the same `planFusions` call, in order, and counts each fused step from the
+bookkeeping execution replays (ADR [0093](0093-transient-liveness-packing.md) addendum 2026-11-11). Two statements of
+earlier addenda are replaced by it, and the other descriptions of the estimate in the addenda of 2026-10-24 to
+2026-10-26 (what `postFusionSteps` maps, "the estimate does not replay it" for `rmsNormRope` and its over-count of the
+normalised row) describe the mechanism it replaced:
+
+- The addenda of 2026-10-25 and 2026-10-26 describe `postFusionSteps` placing steps "by the running node count". The
+  estimate reads the step list directly, so the MUST that a deferring rule "defers only nodes that cannot head a step the
+  estimate keeps in post-fusion form" is withdrawn. `passthroughIsIndependent` and `deferralIsIndependent` stay.
+- The addendum of 2026-11-11 (rules defined outside the runtime) ends with "the memory estimate plans without the
+  external rules". An estimate given `fusionRules` plans with them (ADR [0148](0148-external-fusion-rules.md) addendum
+  2026-11-11).

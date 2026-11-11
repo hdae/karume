@@ -785,17 +785,28 @@ there is a real need.
 
 ## The `workspaceBytes` of estimates (`PreparedModel.estimate` / `estimateGraphMemory`) is approximate (`unaccounted` lists what is not counted)
 
-`scenarios[].workspaceBytes` is a live-interval simulation over the node sequence **before** fusion,
-and the shapes that the real build folds / splits are not counted. The exception is **row-block
-attention** (the 9-node window of decomposed attention — ADR
-[0060](decisions/0060-row-block-attention.md)): windows caught by the same fusion plan as the
-execution phase are counted in their post-fusion shape (the temporaries and output of one row block),
-and the binding-limit check also applies only to that buffer (ADR [0093](decisions/0093-transient-liveness-packing.md)
-addendum 2026-10-10). The `unaccounted` field lists what is not counted, verbatim — ① intermediates
-that fusions other than row-block attention fold away, and the in-node temporaries their fusion rules
-declare ② the quantization intermediates of linear i8a8 ③ params buffers
-④ the implementation staging of `queue.writeBuffer` ⑤ the window of retirement (slot backings
-retired by budget overrun / LRU eviction of plans stay alive until the cleanup after flush).
+`scenarios[].workspaceBytes` is the placement of the allocation program of **the step list of the
+fusion plan** — the plan a Session built with the same options runs. Every fused step, built-in or
+from `fusionRules`, is counted as execution allocates it (its declared temporaries and single output;
+for row-block attention the temporaries and output of one row block, to which the binding-limit check
+applies), and so are the two quantization temporaries of linear i8a8 (ADR
+[0093](decisions/0093-transient-liveness-packing.md) addendum 2026-11-11). It describes the Session only
+for the options it is given: a fusion or compute option the Session gets and the estimate does not is
+planned at the runtime default, and the windows it folds are counted unfused. The `unaccounted` field
+lists what is not counted, verbatim — ① fusion the options passed do not describe ② the quantization
+intermediates of a linear i8a8 whose weight is borrowed (`sharedWeights`) and the in-node temporaries
+of conv3d i8a8 ③ params buffers ④ the implementation staging of `queue.writeBuffer` ⑤ the window of
+retirement (slot backings retired by budget overrun / LRU eviction of plans stay alive until the
+cleanup after flush).
+The estimate is the theoretical demand of what it counts and a guard for a caller that did not check
+the model's VRAM requirement. It is not a statement that a device with that much free VRAM runs the
+model: ④ and ⑤ are outside it, and the checks that compare it with a device add a fixed margin (the
+MOSS-Image and Anima stage checks, gemma's `fitCapacity`; unchanged on 2026-11-11, when the numbers of
+several stages went down — ADR 0093 addendum).
+The estimate does not repeat every refusal of execution: a linear that execution rejects for its
+weight storage (i2 residency under `linearCompute` `"a8"` / `"f16"`, integer residency under `"f16"`,
+`k` over the i8a8 reduction guard) is counted and gets a number, and an external rule's dispatch is
+not checked for its workgroup counts or params. Such a Session fails at its first run.
 **The in-node temporaries of attention are counted** — the score S and the row statistics of the
 states form (the row statistics only for plans that `stateAttentionReduce` requires; 0 bytes for
 plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization
@@ -814,7 +825,7 @@ let the estimate alone claim a block count that no device produces).
 There is one more difference not listed in `unaccounted`: **padding at region boundaries** — the
 estimate's placement drifts from the real build's packer by a few hundred bytes.
 Where the estimate's allocation program differs from the execution's (one dispatch per plain node,
-fusion temporaries left out), the placement can also keep a different one of its two orders, because
+the temporaries of ② left out), the placement can also keep a different one of its two orders, because
 the second order compares lifetimes counted in allocation events (ADR 0093 addendum 2026-10-26); the
 drift can then exceed a few hundred bytes (not measured on the shipped models).
 `EstimateOptions.maxBufferSize` affects both the limit check of a single state slot and the limit of

@@ -231,8 +231,10 @@ block 22. A runtime gate in one graph would compute block 22, add a graph input 
   the sum of its three graphs' estimates (h, w and S = h·w), the three Sessions being open together
   as in the Wan VAE encoder, plus the three hand-over residents. The added residents make the needs
   upper bounds.
-- The estimate leaves the i8a8 linears' quantised intermediates out; the margin has to cover them,
-  which stage 5 measured (Results).
+- The estimate left the i8a8 linears' quantised intermediates out; the margin had to cover them,
+  which stage 5 measured (Results). Since 2026-11-11 the estimate counts them (ADR
+  [0093](0093-transient-liveness-packing.md) addendum); the DiT needs did not move, the temporaries fit in regions
+  the plan already held.
 - The largest area that fits a 12 GiB device is not a constant of the code: it is an observation
   recorded in `docs/limitations.md` (decision 9 for why).
 

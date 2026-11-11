@@ -181,6 +181,9 @@ refuses).
 
 ### 8. The memory estimate is not changed
 
+Replaced by the addendum of 2026-11-11 "the estimate plans with the rules" below; the text is kept as the state this
+record was accepted in.
+
 `estimate` plans the graph as if no rule were given, so a rule's step temporaries are not counted, and neither are the
 values a built-in fold would have removed when an external rule takes its nodes first (the estimate counts row-block
 attention, a linear's folded producer and an absorbed permute in their post-fusion form, so displacing one can make the
@@ -257,6 +260,27 @@ corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
   once a submit made after the destroy has completed (Dawn on Vulkan), so a second 26B build right after a dispose ran
   out of memory before its first submit. A disposal now ends with that release wait in the runtime
   ([0095](0095-plan-backing-budget.md), addendum of 2026-11-11), so the A/B arms only await the dispose.
+
+## Addendum (2026-11-11) — the estimate plans with the rules (decision 8 replaced)
+
+The later work decision 8 names is done (ADR [0093](0093-transient-liveness-packing.md) addendum 2026-11-11).
+
+- `EstimateOptions` takes the fusion options of `SessionOptions`, `fusionRules` among them, and plans fusion as a
+  Session built with the same options does. A fused step of an external rule is counted like a built-in one: its
+  declared temporaries, its single output, the roles of its bindings from its WGSL.
+- With `fusionRules` the estimate requires `maxStorageBufferBindingSize` and `maxComputeWorkgroupsPerDimension`, the
+  limits a matcher may read; without them it fails loudly instead of planning under limits no device has.
+- The estimate runs the checks on what an external dispatch writes and on the output being written (decision 5), so it
+  returns no number for a step execution refuses. It does not run the checks recipe derivation makes on the dispatch itself
+  (the workgroup counts, the params); such a step fails at the first run's plan derivation. Two WGSL texts under
+  one pipeline key are refused by the estimate as by the pipeline cache.
+- `gemma.Pipeline.estimateSessionMemory` passes the target and drafter estimates the fusion options their Sessions were
+  built with, from one derivation. Only the target's scenarios enter its report (the drafter contributes its weights
+  and state), so the rules move the reported workspace through the target, and decide whether the drafter's estimate
+  refuses. The sentence "the memory estimate does not see it" of the addendum above and of the Consequences of ADR 0040's
+  addendum no longer holds.
+- A caller that gives a Session rules and the estimate none gets the count of the plan without them; `unaccounted`
+  says so.
 
 ## Alternatives considered
 
