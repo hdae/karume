@@ -14,13 +14,7 @@ import {
   RMS_NORM_ROPE_WGSL,
   rmsNormRopeParams,
 } from "../../kernels/rms-norm-rope.ts";
-import {
-  allF32,
-  defineRule,
-  type FusionMatch,
-  internalsStayInChain,
-  sameShape,
-} from "../fusion-rule.ts";
+import { allF32, defineRule, type FusionMatch, sameShape } from "../fusion-rule.ts";
 import type { NodePlan } from "../plan.ts";
 import { matchRopePairForm } from "./rope.ts";
 
@@ -73,9 +67,10 @@ const nextReader = (nodes: readonly NodePlan[], from: number, name: string): num
  *   the decision `buildRmsNorm` makes), the kernel the fused one shares its reduction with and is
  *   bit-identical to: a row of at most 128 (the 128-wide form) or `rmsNormReduce: "subgroup32"`
  *   (another summation order) leaves the nodes, and the RoPE then folds alone (rule `rope`).
- * - Every use of the internal values is inside the chain ({@link internalsStayInChain}): `n` once
- *   (the first reshape), `v` twice (the pair reshape and the RoPE's direct `mul`), `pairs` twice (the
- *   two slices), the RoPE's own values once each. The matcher pins every slot they occupy, and the
+ * - Every use of the internal values is inside the chain (the declared `internals: "stayInChain"`,
+ *   which `defineRule` applies): `n` once (the first reshape), `v` twice (the pair reshape and the
+ *   RoPE's direct `mul`), `pairs` twice (the two slices), the RoPE's own values once each (the shared
+ *   pair-form matcher checks that one use itself). The matcher pins every slot they occupy, and the
  *   bind surface holds external values only (x, weight, cos, sin — no duplicates).
  * - The nodes between the chain's are only {@link INTERLEAVED_OPS}, and they are **deferred**
  *   ({@link FusionMatch.others}): in the Wan IR the q and k chains interleave (`rms_norm` q,
@@ -93,6 +88,7 @@ const nextReader = (nodes: readonly NodePlan[], from: number, name: string): num
 export const RMS_NORM_ROPE_RULE = defineRule<RmsNormRopeMatch, "rmsNormRope">({
   name: "rmsNormRope",
   heads: [RMS_NORM_OP],
+  internals: "stayInChain",
   match: (nodes, index, context) => {
     const norm = nodes[index];
     if (norm?.node.op !== RMS_NORM_OP) return undefined;
@@ -120,7 +116,7 @@ export const RMS_NORM_ROPE_RULE = defineRule<RmsNormRopeMatch, "rmsNormRope">({
 
     // MUST: the actual node order (the release bookkeeping derives the total-use list from it).
     const chain = [norm, view, pairs, ...rope.chain];
-    if (!allF32([norm, view, pairs]) || !internalsStayInChain(chain, context)) return undefined;
+    if (!allF32([norm, view, pairs])) return undefined;
     const binds = [norm.node.ins[0], norm.node.ins[1], cos, sin];
     if (new Set(binds).size !== binds.length) return undefined;
 

@@ -220,6 +220,7 @@ type RowBlockAttentionMatch = FusionMatch & {
 export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch, "rowBlockAttention">({
   name: "rowBlockAttention",
   heads: ["bmm"],
+  internals: "private",
   match: (nodes, index, context) => {
     const qk = nodes[index];
     if (qk?.node.op !== "bmm") return undefined;
@@ -288,6 +289,9 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch, "rowB
     if (softmaxDim(softmax.node.attrs ?? {}, "row-block attention safe_softmax") !== 3) {
       return undefined;
     }
+    // MUST: checked here as well as by the declaration `defineRule` applies after the match: a
+    // window whose internal values are not private stays plain, and must not reach the split below,
+    // which fails loudly where the plain path may still run (a budget smaller than one query row).
     if (!internalsArePrivate(chain, context)) return undefined;
 
     const binds = [qk.node.ins[0], qk.node.ins[1], addMask.node.ins[1], expandV.node.ins[0]];

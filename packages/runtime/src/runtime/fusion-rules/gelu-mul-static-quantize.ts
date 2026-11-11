@@ -13,13 +13,7 @@ import {
   geluMulStaticQuantizeParams,
   geluMulStaticQuantizeWgsl,
 } from "../../kernels/gelu-mul-static-quantize.ts";
-import {
-  allF32,
-  defineRule,
-  type FusionMatch,
-  internalsArePrivate,
-  sameShape,
-} from "../fusion-rule.ts";
+import { allF32, defineRule, type FusionMatch, sameShape } from "../fusion-rule.ts";
 
 /**
  * The measured form (perf-ledger K-48 step 1b): Gemma 4 QAT's per-layer-input gate,
@@ -48,7 +42,7 @@ type GeluMulStaticQuantizeMatch = FusionMatch & {
  *
  * 1. The session option (`fuseGeluMulStaticQuantize`) is set.
  * 2. The gelu value's and the product's single consumers are the next node, and neither is a graph
- *    output ({@link internalsArePrivate}).
+ *    output (the declared `internals: "private"`, which `defineRule` applies).
  * 3. Every slot is f32, and the gate, the gelu value, the mul's other operand, the product and the
  *    SRQ output have one shape: `[…, 256]` with 1 to 8 rows (no broadcast). The kernel reads the
  *    other operand as `other[i]`, the element order the plain mul reads a same-shape operand in.
@@ -69,6 +63,7 @@ export const GELU_MUL_STATIC_QUANTIZE_RULE = defineRule<
 >({
   name: "geluMulStaticQuantize",
   heads: ["gelu_tanh"],
+  internals: "private",
   match: (nodes, index, context) => {
     if (context.fuseGeluMulStaticQuantize !== true) return undefined;
     const gelu = nodes[index],
@@ -81,7 +76,7 @@ export const GELU_MUL_STATIC_QUANTIZE_RULE = defineRule<
     )
       return undefined;
     const chain = [gelu, mul, srq];
-    if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
+    if (!allF32(chain)) return undefined;
     if (gelu.node.ins.length !== 1 || mul.node.ins.length !== 2 || srq.node.ins.length !== 1) {
       return undefined;
     }

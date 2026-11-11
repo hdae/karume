@@ -12,14 +12,7 @@ import {
   GATED_RESIDUAL_WORKGROUP_SIZE,
   gatedResidualParams,
 } from "../../kernels/gated-residual.ts";
-import {
-  allF32,
-  defineRule,
-  type FusionMatch,
-  internalsArePrivate,
-  isF32Where,
-  sameShape,
-} from "../fusion-rule.ts";
+import { allF32, defineRule, type FusionMatch, isF32Where, sameShape } from "../fusion-rule.ts";
 
 type GatedResidualMatch = FusionMatch & {
   /** mask, gate_c, gate_g, y, residual (= the kernel's bindings 1–5). */
@@ -50,7 +43,8 @@ type GatedResidualMatch = FusionMatch & {
 export const GATED_RESIDUAL_RULE = defineRule<GatedResidualMatch, "gatedResidual">({
   name: "gatedResidual",
   heads: [WHERE_OP],
-  match: (nodes, index, context) => {
+  internals: "private",
+  match: (nodes, index) => {
     const select = nodes[index];
     if (select?.node.op !== WHERE_OP) return undefined;
     const multiply = nodes[index + 1];
@@ -80,7 +74,6 @@ export const GATED_RESIDUAL_RULE = defineRule<GatedResidualMatch, "gatedResidual
       !sameShape(add.inputShapes[0], rowShape)
     )
       return undefined;
-    if (!internalsArePrivate(chain, context)) return undefined;
 
     // The bind surface maps one-to-one onto the kernel's bindings 1–5, so no duplicates (a value
     // in two slots is not a measured form).

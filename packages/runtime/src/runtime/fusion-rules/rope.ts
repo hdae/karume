@@ -144,6 +144,10 @@ export const matchRopePairForm = (
   )
     return undefined;
 
+  // MUST: checked here as well as by the declaration `defineRule` applies. rmsNormRope reuses this
+  // matcher and declares `internals: "stayInChain"` over its longer chain, which counts reads only:
+  // the table slots `direct.ins[1]` / `cross.ins[1]` are not pinned, so at H = 1 a table slot reading
+  // `rot` would pass it and bind a value fusion never materialises. One use per value keeps it out.
   if (!internalsArePrivate(chain, context)) return undefined;
   // The bind surface maps one-to-one onto the kernel's bindings 1–4, so no duplicates (one value
   // in two slots is not a measured form, and it breaks the "no duplicates" of FusedStep.binds).
@@ -195,6 +199,7 @@ export const matchRopePairForm = (
 export const ROPE_RULE = defineRule<RopeMatch, "rope">({
   name: "rope",
   heads: ["mul", "slice"],
+  internals: "private",
   match: (nodes, index, context) => {
     // Called for every node, so check the leading op before building an array (a short-lived
     // slice per node would eat back on the CPU what the dispatch reduction saves).
@@ -294,8 +299,6 @@ export const ROPE_RULE = defineRule<RopeMatch, "rope">({
       !sameShape(add.outputs[0].shape, fullShape)
     )
       return undefined;
-
-    if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
       window: nodes.slice(index, windowEnd),

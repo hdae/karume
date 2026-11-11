@@ -445,7 +445,8 @@ export const isF32Where = (step: NodePlan): boolean =>
  * one consumer and is not a graph output".
  *
  * MUST: after fusion no buffer for an internal value exists, so a single external consumer or
- * readback would lose the value. This is the eligibility condition shared by every rule.
+ * readback would lose the value. This is the eligibility condition shared by every rule: a rule
+ * declares it (`internals: "private"`) and {@link defineRule} applies it to the matched chain.
  * MUST: look at **every output** of a node (do not rely on whether {@link windowIsSingleOutput}
  * rejects multi-output nodes first — keep the conclusion independent of the check order).
  */
@@ -464,8 +465,9 @@ export const internalsArePrivate = (chain: readonly NodePlan[], context: FusionC
  * is at least one, and none is a graph output. The fold loses no value for the same reason (no
  * consumer outside the chain, no readback).
  *
- * MUST: only a matcher that pins **every** slot an internal value may occupy uses this, and its
- * bind surface holds no internal value. Counted reads alone do not know which slot reads the value:
+ * MUST: only a rule whose matcher pins **every** slot an internal value may occupy declares this
+ * (`internals: "stayInChain"`, applied by {@link defineRule}), and its bind surface holds no internal
+ * value. Counted reads alone do not know which slot reads the value:
  * under this predicate `add(n, n)` after `rms_norm → n` would pass, and the rmsNormAdd matcher would
  * bind `n` — a value fusion never materialises — as its residual. That is why it does not replace
  * {@link internalsArePrivate} for every rule (those matchers rely on "one use" to keep an internal
@@ -508,17 +510,19 @@ const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
  * it, the result is a "no buffer for value 'x'" error or, if the name is reused, a silent wrong
  * value).
  *
- * NOTE: for the two current rules with in-window passthroughs (adaln / rope), the only chain values
+ * NOTE: for the two built-in rules with in-window passthroughs (adaln / rope), the only chain values
  * a passthrough can read are **internal values** (the last output is defined after the passthrough,
- * so it cannot be read), and {@link internalsArePrivate} (exactly one consumer) rejects those first
- * — **a counterexample cannot be built on its own** (confirmed once by fault injection against
- * tests/runtime_fusion_test.ts; no standing test exercises this predicate alone). This check takes effect independently only for a future rule with
- * a window where "the **last** node of the chain comes before the passthrough"; internalsArePrivate
- * does not look at the last output, so it is no substitute. It sits in `defineRule` as an invariant
- * of the window mechanism.
+ * so it cannot be read), and the privacy both declare (`internals: "private"` —
+ * {@link internalsArePrivate}, exactly one consumer), which `defineRule` applies before this check,
+ * rejects those first — **a counterexample cannot be built from those rules** (confirmed once by
+ * fault injection against tests/runtime_fusion_test.ts; no standing test exercises this predicate
+ * alone). This check takes effect independently only for a rule with a window where "the **last**
+ * node of the chain comes before the passthrough"; internalsArePrivate does not look at the last
+ * output, so it is no substitute. It sits in `defineRule` as an invariant of the window mechanism.
  * The same check holds for the **deferred** nodes ({@link FusionMatch.others}): they run after the
  * fused step, but an internal value is never materialised, so they may read none either (the
- * rmsNormRope rule's {@link internalsStayInChain} rejects such a read first, for the same reason).
+ * {@link internalsStayInChain} privacy rmsNormRope declares rejects such a read first, for the same
+ * reason).
  */
 export const passthroughIsIndependent = (
   chain: readonly NodePlan[],
@@ -647,12 +651,24 @@ const assertTempLifetimes = (
  * ({@link windowIsSingleOutput}).
  * MUST: a window containing a node that touches state is rejected at the same place
  * ({@link windowTouchesState}).
+ * MUST: the privacy of the folded chain's internal values is applied here, to `matched.chain`, by
+ * the rule's declaration (`internals`), so no rule can forget it ({@link internalsArePrivate} /
+ * {@link internalsStayInChain}). A matcher may check it earlier as well, where code after the check
+ * must not see a chain that is not private (a fail-loudly step, or a matcher shared with a rule that
+ * declares the other privacy).
  * A built-in rule passes its name as `Name` too (`defineRule<Match, "silu">`), so the built-in list
  * can check its names at compile time; any other rule leaves it a string.
  */
 export const defineRule = <Matched extends FusionMatch, Name extends string = string>(rule: {
   readonly name: Name;
   readonly heads: readonly string[];
+  /**
+   * Who may read the chain's internal values: `"private"` = each has exactly one consumer and is
+   * not a graph output ({@link internalsArePrivate}); `"stayInChain"` = every use is inside the
+   * chain, possibly more than one ({@link internalsStayInChain} — only for a matcher that pins every
+   * slot an internal value may occupy).
+   */
+  readonly internals: "private" | "stayInChain";
   readonly match: (
     nodes: readonly NodePlan[],
     index: number,
@@ -665,6 +681,13 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
   apply: (nodes, index, context) => {
     const matched = rule.match(nodes, index, context);
     if (matched === undefined) return undefined;
+    // After fusion no buffer for an internal value exists, so a consumer outside the chain or a
+    // readback would lose it.
+    const internalsKept =
+      rule.internals === "private"
+        ? internalsArePrivate(matched.chain, context)
+        : internalsStayInChain(matched.chain, context);
+    if (!internalsKept) return undefined;
     // Multi-output nodes (ADR 0068 decision 1) are not fusion candidates. The matcher's op-name
     // spelling only narrows the accepted set and does not guarantee "one output", so there is one
     // place that checks every node of the window against its contract.

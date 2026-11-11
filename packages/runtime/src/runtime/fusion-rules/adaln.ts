@@ -23,8 +23,6 @@ import {
   defineRule,
   type FusedStep,
   type FusionMatch,
-  type FusionScanContext,
-  internalsArePrivate,
   isF32Where,
   sameShape,
 } from "../fusion-rule.ts";
@@ -71,11 +69,7 @@ const modulationShape = (rowShape: readonly number[], dim: number): readonly num
  * Total uses of external inputs: x / weight / bias / scale_c / scale_g / one / shift_c / shift_g
  * once each and mask twice = 10.
  */
-const matchTokenForm = (
-  nodes: readonly NodePlan[],
-  index: number,
-  context: FusionScanContext,
-): AdalnMatch | undefined => {
+const matchTokenForm = (nodes: readonly NodePlan[], index: number): AdalnMatch | undefined => {
   const norm = nodes[index];
   const selectScale = nodes[index + 1];
   const modulate = nodes[index + 2];
@@ -136,7 +130,6 @@ const matchTokenForm = (
     !sameShape(offset.outputs[0].shape, rowShape)
   )
     return undefined;
-  if (!internalsArePrivate(chain, context)) return undefined;
 
   // MUST: no duplicates — the operand lists of the two dispatches index into this surface, and a
   // value in two slots is not a measured form.
@@ -242,10 +235,11 @@ const tokenDispatches = (matched: AdalnMatch): Pick<FusedStep, "temps" | "dispat
 export const ADALN_RULE = defineRule<AdalnMatch, "adaln">({
   name: "adaln",
   heads: [LAYER_NORM_OP],
-  match: (nodes, index, context) => {
+  internals: "private",
+  match: (nodes, index) => {
     const norm = nodes[index];
     if (norm?.node.op !== LAYER_NORM_OP) return undefined;
-    if (nodes[index + 1]?.node.op === WHERE_OP) return matchTokenForm(nodes, index, context);
+    if (nodes[index + 1]?.node.op === WHERE_OP) return matchTokenForm(nodes, index);
     // The in-window passthrough is only "the consecutive reshapes right after". Two forms are
     // measured: 2 (shift / scale) and 3 with the gate added (the gate is consumed outside the
     // chain).
@@ -294,7 +288,6 @@ export const ADALN_RULE = defineRule<AdalnMatch, "adaln">({
       !sameShape(offset.outputs[0].shape, rowShape)
     )
       return undefined;
-    if (!internalsArePrivate(chain, context)) return undefined;
 
     // The bind surface maps one-to-one onto the kernel's bindings 1–6, so **no duplicates** (a
     // value name in two slots is not measured, and it would break the "no duplicates" of

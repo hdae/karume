@@ -31,7 +31,6 @@ import {
   defineRule,
   type FusedDispatch,
   type FusionMatch,
-  internalsArePrivate,
   sameShape,
 } from "../fusion-rule.ts";
 import { linearIntegerGemvVariant, linearPlanesGemvVariant } from "../linear-route.ts";
@@ -98,6 +97,7 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
 >({
   name: "linearStaticQuantize",
   heads: ["linear"],
+  internals: "private",
   match: (nodes, index, context) => {
     if (
       context.fuseLinearStaticQuantize !== true ||
@@ -109,7 +109,7 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
       srq = nodes[index + 1];
     if (linear?.node.op !== "linear" || srq?.node.op !== "static_quantize") return undefined;
     const chain = [linear, srq];
-    if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
+    if (!allF32(chain)) return undefined;
     if (
       linear.node.ins.length !== 3 ||
       new Set(linear.node.ins).size !== 3 ||

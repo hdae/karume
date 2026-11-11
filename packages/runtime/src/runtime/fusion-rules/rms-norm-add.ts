@@ -12,13 +12,7 @@ import {
   rmsNormParams,
 } from "../../kernels/rms-norm.ts";
 import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../../kernels/rms-norm-subgroup.ts";
-import {
-  allF32,
-  defineRule,
-  type FusionMatch,
-  internalsArePrivate,
-  sameShape,
-} from "../fusion-rule.ts";
+import { allF32, defineRule, type FusionMatch, sameShape } from "../fusion-rule.ts";
 
 type RmsNormAddMatch = FusionMatch & {
   readonly binds: readonly string[];
@@ -36,6 +30,7 @@ type RmsNormAddMatch = FusionMatch & {
 export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch, "rmsNormAdd">({
   name: "rmsNormAdd",
   heads: ["rms_norm"],
+  internals: "private",
   match: (nodes, index, context) => {
     if (context.fuseRmsNormAdd !== true) return undefined;
     const norm = nodes[index],
@@ -43,7 +38,7 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch, "rmsNormAdd">({
     if (norm?.node.op !== "rms_norm" || add?.node.op !== "add") return undefined;
     const chain = [norm, add],
       shape = norm.outputs[0].shape;
-    if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
+    if (!allF32(chain)) return undefined;
     if (
       shape.some((dim) => dim < 1) ||
       ![256, 1536, 2560, 2816, 3840].includes(shape[shape.length - 1])

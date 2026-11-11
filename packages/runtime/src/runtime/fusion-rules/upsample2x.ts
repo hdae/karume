@@ -11,13 +11,7 @@ import {
   UPSAMPLE_2X_WGSL,
   UPSAMPLE_2X_WORKGROUP_SIZE,
 } from "../../kernels/upsample2x.ts";
-import {
-  allF32,
-  defineRule,
-  type FusionMatch,
-  internalsArePrivate,
-  sameShape,
-} from "../fusion-rule.ts";
+import { allF32, defineRule, type FusionMatch, sameShape } from "../fusion-rule.ts";
 
 type Upsample2xMatch = FusionMatch & {
   readonly inputName: string;
@@ -39,7 +33,8 @@ type Upsample2xMatch = FusionMatch & {
 export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch, "upsample2x">({
   name: "upsample2x",
   heads: ["reshape"],
-  match: (nodes, index, context) => {
+  internals: "private",
+  match: (nodes, index) => {
     const first = nodes[index];
     if (first?.node.op !== "reshape") return undefined;
     const horizontal = nodes[index + 1];
@@ -97,7 +92,6 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch, "upsample2x">({
       !sameShape(output.outputs[0].shape, [batch, channels, outHeight, outWidth])
     )
       return undefined;
-    if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
       window: chain,

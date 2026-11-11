@@ -12,13 +12,7 @@ import {
   siluParams,
   siluWgsl,
 } from "../../kernels/silu.ts";
-import {
-  allF32,
-  defineRule,
-  type FusionMatch,
-  internalsArePrivate,
-  sameShape,
-} from "../fusion-rule.ts";
+import { allF32, defineRule, type FusionMatch, sameShape } from "../fusion-rule.ts";
 
 type SiluMatch = FusionMatch & {
   readonly xName: string;
@@ -41,7 +35,8 @@ type SiluMatch = FusionMatch & {
 export const SILU_RULE = defineRule<SiluMatch, "silu">({
   name: "silu",
   heads: ["sigmoid"],
-  match: (nodes, index, context) => {
+  internals: "private",
+  match: (nodes, index) => {
     const sigmoid = nodes[index];
     if (sigmoid?.node.op !== "sigmoid") return undefined;
     const mul = nodes[index + 1];
@@ -68,7 +63,6 @@ export const SILU_RULE = defineRule<SiluMatch, "silu">({
       !sameShape(mul.outputs[0].shape, shape)
     )
       return undefined;
-    if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
       window: chain,

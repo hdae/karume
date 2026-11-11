@@ -145,11 +145,13 @@ type NegNegMatch = FusionMatch & {
 
 /**
  * A test-local rule: `neg(neg(x))` folded into one dispatch (head `neg`, which no built-in rule
- * has). The plans are never executed, so the dispatch only has to be well formed.
+ * has). The plans are never executed, so the dispatch only has to be well formed. Its matcher does
+ * not check the privacy of `n1` itself: only its declaration does.
  */
 const NEG_NEG_RULE = defineRule<NegNegMatch>({
   name: "testNegNeg",
   heads: ["neg"],
+  internals: "private",
   match: (nodes, index) => {
     const first = nodes[index];
     const second = nodes[index + 1];
@@ -184,8 +186,15 @@ const NEG_NEG_RULE = defineRule<NegNegMatch>({
   }),
 });
 
+type RuleListOptions = {
+  /** `n1` (the test-local rule's internal value) has a consumer outside the chain. */
+  readonly internalConsumer?: boolean;
+  /** `n1` is a graph output. */
+  readonly internalOutput?: boolean;
+};
+
 /** `y = silu(x)` (a built-in rule's form) beside `n2 = neg(neg(z))` (the test-local rule's form). */
-const ruleListGraph = (): DeclarationJson => {
+const ruleListGraph = (options: RuleListOptions = {}): DeclarationJson => {
   const shape = [4, 8];
   const nodes: DeclarationJson["nodes"] = [
     { op: "sigmoid", ins: ["x"], outs: ["s"], attrs: {} },
@@ -193,6 +202,12 @@ const ruleListGraph = (): DeclarationJson => {
     { op: "neg", ins: ["z"], outs: ["n1"], attrs: {} },
     { op: "neg", ins: ["n1"], outs: ["n2"], attrs: {} },
   ];
+  const outputs = ["y", "n2"];
+  if (options.internalConsumer) {
+    nodes.push({ op: "abs", ins: ["n1"], outs: ["n3"], attrs: {} });
+    outputs.push("n3");
+  }
+  if (options.internalOutput) outputs.push("n1");
   return {
     format: "karume-ir",
     version: 2,
@@ -202,10 +217,10 @@ const ruleListGraph = (): DeclarationJson => {
       { name: "x", dtype: "f32", shape: [...shape] },
       { name: "z", dtype: "f32", shape: [...shape] },
     ],
-    outputs: ["y", "n2"],
+    outputs,
     initializers: {},
     values: Object.fromEntries(
-      ["s", "y", "n1", "n2"].map((name) => [name, { dtype: "f32", shape: [...shape] }]),
+      nodes.flatMap((node) => node.outs).map((name) => [name, { dtype: "f32", shape: [...shape] }]),
     ),
     nodes,
   };
@@ -252,6 +267,24 @@ test("with an empty rule list nothing folds through a rule, while the linear pro
   const permutes = fuseWithRules(attentionPermuteGraph(), [], A8_SEAT);
   assertEquals(outline(permutes.steps), ["attention", "permute"]);
   assertEquals(permutes.counts, { ...annotationsOnly, attentionPermute: 3 });
+});
+
+test("defineRule applies the declared privacy: a rule declared private folds only when its internal value has no consumer outside the chain and is not a graph output", () => {
+  const rules = [NEG_NEG_RULE];
+  const control = fuseWithRules(ruleListGraph(), rules);
+  assertEquals(outline(control.steps), ["sigmoid", "mul", "fused:testNegNeg"], "control");
+  for (const [label, options] of [
+    ["a consumer outside the chain", { internalConsumer: true }],
+    ["a graph output", { internalOutput: true }],
+  ] as const) {
+    const plan = fuseWithRules(ruleListGraph(options), rules);
+    assertEquals(plan.counts.testNegNeg, 0, label);
+    assertEquals(
+      plan.steps.every((step) => step.kind === "node"),
+      true,
+      `${label}: ${outline(plan.steps).join(",")}`,
+    );
+  }
 });
 
 test("a rule list whose names do not give one counter each fails loudly (a name twice, a rule named like an annotation counter)", () => {
