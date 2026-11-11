@@ -99,7 +99,9 @@ maintainer's ruling of 2026-11-06).
        evidence records live is decided with it (decision 9). (Updated 2026-11-11: the fusions landed — the page's
        "Fusion rules: fused vs unfused" runs the built-in fusion twins from `packages/kernel-checks/src/fusion-twins/`, the
        cases the runtime's twin-graph tests run; so far run on Dawn only. The default kernels, the backend field and where
-       the records live remain.)
+       the records live remain. Updated 2026-11-11: the page also runs "rms_norm: prefetch form vs runtime-trip form"
+       (`checkRmsNormPrefetch`, the cases of `gpu_rms_norm_prefetch_test.ts`), and the rmsNormRope twin runs at five more
+       row widths, to tell a backend difference of the prefetch form from one of long rows.)
     9. Wiring: gemma forwards `linearCompute` once the derived check admits it; Wan's text stage passes umT5's options
        (wiring only — no umT5 `i8-a8` preset, perf-ledger K-80 / K-81) (decision 7).
     10. `packedStaticQuantize` passes NaN through (so it becomes E) (decisions 2 and 5).

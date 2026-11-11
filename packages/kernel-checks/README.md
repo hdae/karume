@@ -4,7 +4,7 @@ Private workspace package (not published): the kernel identity checks that must 
 backend a kernel rewrite relies on, in one implementation shared by
 
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
-  `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts`,
+  `gpu_rms_norm_subgroup_test.ts`, `gpu_rms_norm_prefetch_test.ts`, `gpu_state_attention_fold_test.ts`,
   `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
   `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` and the
   twin-graph tests of the fusion rules (`gpu_gated_residual_fusion_test.ts`, `gpu_silu_fusion_test.ts`,
@@ -22,6 +22,7 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | --- | --- | --- |
 | Parallel GEMV `linearGemvReduce: "parallel-subgroup32"` vs parallel, u32 identity (ADR 0101) | `checkGemvSubgroup` | `subgroups` + `subgroup-size-control` + WGSL `subgroup_id` (`subgroup32Available`) |
 | RMS `rmsNormReduce: "subgroup32"`: CPU-reference tolerance, row identity across M, fused vs unfused identity, grid-stride (ADR 0100) | `checkRmsSubgroup` | the same |
+| The prefetch form of the 256-wide rms_norm and of both RMS → add orders (perf-ledger K-99) vs the runtime-trip form (`RMS_NORM_WGSL` and the add forms' v1 WGSL), u32 identity with NaN by payload, every width the prefetch form takes on adversarial rows, one workgroup per row and three | `checkRmsNormPrefetch` | nothing optional |
 | States attention rewrites (perf-ledger K-55 / K-91): folded ①' vs ①', unrolled ③' and fused stats + PV vs their v1 WGSL, u32 identity, plus order-only mutants that must mismatch | `checkStateQkFold`, `checkStatePvUnroll`, `checkStateStatsPvUnroll`, `checkStateAttentionMutants`, and `checkStateAttentionMutantMatrix` (each mutant on every case of its shape — the page runs it, the node test does not; all five: `checkStateAttentionRewrites`) | nothing optional |
 | Integer GEMV `integerGemv`: every output word equals the CPU reference, rows past M unwritten (mirror class E — ADR 0140) | `checkIntegerGemv` (and `benchIntegerGemv`, a single-kernel timing, not a check) | nothing optional |
 | Byte-plane GEMV `linearGemvPlanes`: the f64 band, the A/B band against the sequential GEMV, two dispatches identical, nothing written past the outputs, NaN propagation (class R — ADR 0141; the fault injection runs in the node test only, through `PlanesGemvCheckOptions.mutate`) | `checkPlanesGemv` (and `benchPlanesGemv`, a single-kernel timing, not a check) | nothing optional |
@@ -36,7 +37,7 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 under `src/fusion-twins/` build both Sessions the way each twin-graph test made them (an interposed
 zero-dispatch reshape, an opt-in on one side only, a forced split of the fused side) and run their
 cases through it; each exports its builders for the node test's own cases, its check and its part's
-case count, and `checkFusionTwins` runs them all for the page (`FUSION_TWIN_CASES`, 372 cases). What
+case count, and `checkFusionTwins` runs them all for the page (`FUSION_TWIN_CASES`, 377 cases). What
 is no twin on the given device stays in the node tests: census, counterexamples, grid-stride runs on
 a device with capped limits, comparisons with host expectations, raw-dispatch barrier tests and the
 online attention routes in the wg form (a device acquired without subgroups).
@@ -49,7 +50,7 @@ internal error scopes and also fails on an uncaptured WebGPU error or a lost dev
 (`scopedGpuWork`), since an invalid shader or a failed backend compile does not throw and would
 otherwise read back the buffers' initial contents for both runs of a case; a mutation anchor that
 no longer matches throws as well. Each check exports the number of cases each of its parts returns
-(`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
+(`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `RMS_NORM_PREFETCH_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
 `GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`,
 `FUSION_TWIN_CASES` and each twin module's `…_TWIN_CASES`) and the
 mutant count
