@@ -4905,6 +4905,20 @@ describe("the vec4 skeleton of the i8a8 GEMM (perf-ledger K-85)", () => {
     );
   });
 
+  it("the key refuses a vec4 fill without the skeleton or with i4 weights, as the WGSL does (no :fill16 key without its kernel)", () => {
+    for (const build of [
+      () => linearI8a8Key(true, true, WORD_L1C, "i8", undefined, true),
+      () => linearI8a8Key(false, false, WORD_L1C, "i8", undefined, true),
+      () => linearI8a8Key(true, true, SKELETON_L1C, "i4", 32, true),
+    ]) {
+      assertThrows(
+        build,
+        CodegenError,
+        "the vec4 fill needs a geometry with the vec4 skeleton and i8 weights",
+      );
+    }
+  });
+
   it("the attention ①QK / ③PV and conv3d take only the unrolled loop from a skeleton geometry", () => {
     for (const [name, skeleton, plain] of [
       [

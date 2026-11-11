@@ -244,6 +244,11 @@ export const linearI8a8Key = (
   if (weight !== "i8" && weight !== "i4") {
     throw new CodegenError(`linear i8a8: weight storage must be i8 / i4 (${weight})`);
   }
+  if (vecFill && (geometry.skeleton !== "vec4" || weight !== "i8")) {
+    throw new CodegenError(
+      "linear i8a8: the vec4 fill needs a geometry with the vec4 skeleton and i8 weights",
+    );
+  }
   i4GroupShift("linear i8a8", weight, groupSize);
   // The generation that keeps w4a8's group scale in range on edge columns too. The i8 output stays
   // as before.
