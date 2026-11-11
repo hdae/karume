@@ -207,6 +207,7 @@ const CORE_E2E_TESTS = [
   "packages/e2e/tests/e2e_ab_gate_test.ts",
   "packages/e2e/tests/e2e_assets_gate_test.ts",
   "packages/e2e/tests/e2e_session_options_mirror_test.ts",
+  "packages/e2e/tests/fusion_candidates_test.ts",
 ];
 
 /**
