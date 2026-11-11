@@ -147,13 +147,11 @@ test.skipIf(!WAN22_AVAILABLE)(
           fusionCounts(
             ir,
             shapes(ir),
-            undefined,
-            false,
-            false,
-            false,
-            "a8",
-            "a8",
-            options.attentionScoreStorage,
+            {
+              linearCompute: "a8",
+              attentionCompute: "a8",
+              attentionScoreStorage: options.attentionScoreStorage,
+            },
             DEVICE.attentionDevice,
           ).attentionPermute;
         assertEquals(

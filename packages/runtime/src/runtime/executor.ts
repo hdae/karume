@@ -55,13 +55,7 @@ export type { StateStorage } from "../kernels/state-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import { type AdmissionReport, estimateGraphMemory, type EstimateOptions } from "./estimate.ts";
-import {
-  type ExecStep,
-  FUSION_RULES,
-  type FusionCounts,
-  type FusionWeightLayout,
-  planFusions,
-} from "./fusion.ts";
+import { type ExecStep, FUSION_RULES, type FusionCounts, planFusions } from "./fusion.ts";
 import {
   type ChainedRun,
   GenerationContext,
@@ -124,6 +118,7 @@ import {
   type SessionState,
   type WeightBatch,
 } from "./session-build.ts";
+import { sessionFusionContext } from "./session-fusion-context.ts";
 import type {
   EnqueueOptions,
   EnqueueRead,
@@ -2556,58 +2551,19 @@ export class Session {
     const { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension } =
       this.#state.gpu.limits;
     // The instances are not passed to the fusion pure function; only at plan derivation are they
-    // projected to storage descriptions.
-    // The pairing of packed activations (ADR 0105) also looks at the storage format of the
-    // consuming linear, so the projection is made when either option is on. The linear prologue
-    // (perf-ledger F-4) decides the linear's i8a8 route from the same storage, so a8 needs it too.
-    const weightLayouts =
-      this.#state.fuseLinearStaticQuantize ||
-      this.#state.packedStaticQuantize ||
-      this.#state.linearCompute === "a8"
-        ? new Map(
-            // An i4f16 weight (expert_linear only — ADR 0145) feeds no fused linear, so it is absent.
-            [...this.#state.residentWeights].flatMap(
-              ([name, weight]): [string, FusionWeightLayout][] =>
-                weight.storage === "i4f16"
-                  ? []
-                  : [
-                      [
-                        name,
-                        weight.storage === "i4"
-                          ? { storage: weight.storage, groupSize: weight.groupSize }
-                          : { storage: weight.storage },
-                      ],
-                    ],
-            ),
-          )
-        : undefined;
-    const fusion = planFusions(plan.nodes, {
-      rules: FUSION_RULES,
-      useCounts: this.#state.useCounts,
-      fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
-      fuseLinearStaticQuantize: this.#state.fuseLinearStaticQuantize,
-      fuseGeluMulStaticQuantize: this.#state.fuseGeluMulStaticQuantize,
-      packedStaticQuantize: this.#state.packedStaticQuantize,
-      integerGemv: this.#state.integerGemv,
-      linearGemvPlanes: this.#state.linearGemvPlanes,
-      linearGemvReduce: this.#state.linearGemvReduce,
-      linearCompute: this.#state.linearCompute,
-      attentionCompute: this.#state.attentionCompute,
-      // The output permute is absorbed only on the online route, decided by the same attentionRoute
-      // buildAttention calls on these seats and device facts (perf-ledger F-3 A4).
-      attentionScoreStorage: this.#state.attentionScoreStorage,
-      attentionDevice: this.#state.attentionDevice,
-      ...(weightLayouts === undefined ? {} : { weightLayouts }),
-      rmsNormReduce: this.#state.rmsNormReduce,
-      outputNames: this.#state.outputNames,
-      limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
-      ...(this.#state.rowBlockSplit === undefined
-        ? {}
-        : { rowBlockSplit: this.#state.rowBlockSplit }),
-      ...(this.#state.attentionRowBlockMaxBytes === undefined
-        ? {}
-        : { attentionRowBlockMaxBytes: this.#state.attentionRowBlockMaxBytes }),
-    });
+    // projected to storage descriptions (sessionFusionContext).
+    const fusion = planFusions(
+      plan.nodes,
+      sessionFusionContext({
+        rules: FUSION_RULES,
+        knobs: this.#state,
+        useCounts: this.#state.useCounts,
+        outputNames: this.#state.outputNames,
+        limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
+        attentionDevice: this.#state.attentionDevice,
+        residentWeights: this.#state.residentWeights,
+      }),
+    );
     return { shapes: plan.shapes, fusions: fusion.counts, steps: fusion.steps };
   }
 

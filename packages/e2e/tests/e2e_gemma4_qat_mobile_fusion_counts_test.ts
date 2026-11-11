@@ -15,7 +15,30 @@ import {
   containerPart0,
   readContainerGraph,
 } from "../../runtime/tests/helpers/container-graph.ts";
-import { decodeFusionCounts, exists, NONE } from "./helpers/fusion-counts.ts";
+import {
+  decodeFusionCounts,
+  exists,
+  type FusionCountOptions,
+  NONE,
+} from "./helpers/fusion-counts.ts";
+
+/**
+ * The stacked opt-ins of the decode cases below, as a Session takes them: the linear→SRQ fusion
+ * and packed activations run only on the parallel GEMV, so a Session rejects either without
+ * `linearGemvReduce: "parallel"`.
+ */
+const LINEAR_SRQ: FusionCountOptions = {
+  fuseRmsNormAdd: true,
+  fuseLinearStaticQuantize: true,
+  linearGemvReduce: "parallel",
+};
+
+const packedSrq = (fuseLinearStaticQuantize: boolean): FusionCountOptions => ({
+  fuseRmsNormAdd: true,
+  fuseLinearStaticQuantize,
+  packedStaticQuantize: true,
+  linearGemvReduce: "parallel",
+});
 
 // The distribution also takes its first part (part 0) from the manifest. Both the old series and
 // QAT keep the emission order.
@@ -43,12 +66,12 @@ test.skipIf(!available)(
     for (const rows of [1, 4, 8, 32, 40, 64]) {
       assertEquals(decodeFusionCounts(graph, rows), { ...NONE, rope: 50 }, `${family} M=${rows}`);
       assertEquals(
-        decodeFusionCounts(graph, rows, true),
+        decodeFusionCounts(graph, rows, { fuseRmsNormAdd: true }),
         { ...NONE, rope: 50, rmsNormAdd: 106 },
         `${family} fused M=${rows}`,
       );
       assertEquals(
-        decodeFusionCounts(graph, rows, true, true),
+        decodeFusionCounts(graph, rows, LINEAR_SRQ),
         {
           ...NONE,
           rope: 50,
@@ -68,7 +91,7 @@ test.skipIf(!available)(
       // 0. Whether the fusion is on does not move this count.
       for (const fuseSrq of [false, true]) {
         assertEquals(
-          decodeFusionCounts(graph, rows, true, fuseSrq, true),
+          decodeFusionCounts(graph, rows, packedSrq(fuseSrq)),
           {
             ...NONE,
             rope: 50,
@@ -84,7 +107,7 @@ test.skipIf(!available)(
       // form); a prefill plan keeps the plain chain. No other counter moves: the folded SRQs feed
       // per_layer_projection (i8 1536×256), which never takes packed activations.
       assertEquals(
-        decodeFusionCounts(graph, rows, true, true, true, true),
+        decodeFusionCounts(graph, rows, { ...packedSrq(true), fuseGeluMulStaticQuantize: true }),
         {
           ...NONE,
           rope: 50,

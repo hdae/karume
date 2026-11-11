@@ -17,15 +17,23 @@
 
 import { isNotFound, stat } from "@karume/test-support/fs";
 import type { IrGraph } from "../../../runtime/src/format/ir.ts";
-import type { ScoreStorage } from "../../../runtime/src/kernels/score-storage.ts";
 import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
   FUSION_RULES,
   type FusionCounts,
-  type FusionWeightLayout,
   planFusions,
 } from "../../../runtime/src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../../../runtime/src/runtime/plan.ts";
+import {
+  type ResidentWeightStorage,
+  type SessionFusionKnobs,
+  sessionFusionContext,
+} from "../../../runtime/src/runtime/session-fusion-context.ts";
+import {
+  executionKnobDefaults,
+  sessionOptionsViolation,
+} from "../../../runtime/src/runtime/session-options-check.ts";
+import type { SessionOptions } from "../../../runtime/src/runtime/session-types.ts";
 import { planWeightResidency } from "../../../runtime/src/runtime/weight-residency.ts";
 import { resolveParts } from "../../../runtime/tests/helpers/container-files.ts";
 import {
@@ -98,57 +106,109 @@ export const readDistributionGraph = (
   return readContainerGraph(new URL(head.path, mirror), component);
 };
 
+/**
+ * The Session options a check plans under: the subset of `SessionOptions` the fusion pass reads
+ * (the row-block budget aside — it moves no hit count). An omitted field is the Session's default.
+ * The opt-in rules and annotations fire only under their options: the linear prologue (perf-ledger
+ * F-4) under `linearCompute: "a8"`, the attention's absorbed permutes (perf-ledger F-3 / F-8) on
+ * the a8 attention seat, the output permute only on the online route (`attentionScoreStorage:
+ * "none"` with the device facts).
+ */
+export type FusionCountOptions = Pick<
+  SessionOptions,
+  | "fuseRmsNormAdd"
+  | "fuseLinearStaticQuantize"
+  | "fuseGeluMulStaticQuantize"
+  | "packedStaticQuantize"
+  | "integerGemv"
+  | "linearGemvPlanes"
+  | "linearGemvReduce"
+  | "linearCompute"
+  | "attentionCompute"
+  | "attentionScoreStorage"
+  | "rmsNormReduce"
+>;
+
+/**
+ * The knobs a Session constructed with `options` fixes — the same entry check and the same defaults
+ * as Session construction, so a combination no Session accepts fails here instead of planning a
+ * Session that cannot exist.
+ */
+const sessionKnobs = (options: FusionCountOptions): SessionFusionKnobs => {
+  const violation = sessionOptionsViolation(options);
+  if (violation !== undefined) throw new Error(`fusion-count options: ${violation}`);
+  const defaults = executionKnobDefaults(options);
+  return {
+    fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
+    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
+    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
+    packedStaticQuantize: options.packedStaticQuantize ?? false,
+    integerGemv: options.integerGemv ?? false,
+    linearGemvPlanes: options.linearGemvPlanes ?? false,
+    linearGemvReduce: defaults.linearGemvReduce,
+    linearCompute: defaults.linearCompute,
+    attentionCompute: defaults.attentionCompute,
+    attentionScoreStorage: defaults.attentionScoreStorage,
+    rmsNormReduce: defaults.rmsNormReduce,
+    rowBlockSplit: undefined,
+    attentionRowBlockMaxBytes: undefined,
+  };
+};
+
+/**
+ * The storage each initializer is resident in, from the residency plan — the group size comes with
+ * the preset (the planner derives it from the merged declaration, so it is not derived twice). Raw
+ * and expanded weights are f32, and a borrowed weight's storage is the lender's (unknown here): all
+ * absent.
+ */
+const residentWeights = (graph: IrGraph): ReadonlyMap<string, ResidentWeightStorage> =>
+  new Map(
+    [...planWeightResidency(graph)].flatMap(([name, weight]): [string, ResidentWeightStorage][] => {
+      switch (weight.seat) {
+        case "i4":
+        case "i4f16":
+          return [[name, { storage: weight.seat, groupSize: weight.groupSize }]];
+        case "f16":
+        case "bf16":
+        case "i8":
+        case "i2":
+          return [[name, { storage: weight.seat }]];
+        default:
+          return [];
+      }
+    }),
+  );
+
+/**
+ * The fusion hit counts of a graph planned as a Session with `options` would plan it (the context
+ * from the executor's own `sessionFusionContext`). `attentionDevice` is the device facts of the
+ * online attention route, needed only on the online seat.
+ */
 export const fusionCounts = (
   graph: IrGraph,
   inputShapes: Readonly<Record<string, readonly number[]>>,
-  stateShapes?: ReadonlyMap<string, readonly number[]>,
-  fuseRmsNormAdd = false,
-  fuseLinearStaticQuantize = false,
-  packedStaticQuantize = false,
-  // The a8 Session's linear prologue (perf-ledger F-4) fires only under "a8": with the default the
-  // gate cannot see it at all.
-  linearCompute: "f32" | "a8" = "f32",
-  // Likewise the attention's absorbed permutes (perf-ledger F-3 / F-8) fire only on the a8
-  // attention seat.
-  attentionCompute: "f32" | "a8" = "f32",
-  // The output permute is absorbed only where the route is the online kernel (perf-ledger F-3 A4),
-  // which reads the storage form of S and the device facts.
-  attentionScoreStorage: ScoreStorage = "f32",
+  options: FusionCountOptions = {},
   attentionDevice?: AttentionDeviceFacts,
-  // The gelu_tanh → mul → SRQ fold of the QAT per-layer-input gate (perf-ledger K-48).
-  fuseGeluMulStaticQuantize = false,
+  stateShapes?: ReadonlyMap<string, readonly number[]>,
 ): FusionCounts =>
-  planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
-    rules: FUSION_RULES,
-    useCounts: countUses(graph),
-    fuseRmsNormAdd,
-    fuseLinearStaticQuantize,
-    fuseGeluMulStaticQuantize,
-    packedStaticQuantize,
-    linearGemvReduce: "parallel",
-    linearCompute,
-    attentionCompute,
-    attentionScoreStorage,
-    ...(attentionDevice === undefined ? {} : { attentionDevice }),
-    weightLayouts: new Map(
-      [...planWeightResidency(graph)].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
-        // The group size comes with the preset (the residency planner derives it from the merged
-        // declaration — the same value is not derived twice).
-        if (weight.seat === "i4") return [[name, { storage: "i4", groupSize: weight.groupSize }]];
-        return weight.seat === "i2" || weight.seat === "i8" || weight.seat === "f16"
-          ? [[name, { storage: weight.seat }]]
-          : [];
-      }),
-    ),
-    outputNames: new Set(graph.outputs),
-    // Decide against the WebGPU core default (128MiB). The row-block count does not affect the hit
-    // counts, but **not taking the limit from the machine's measured value** keeps this check fixed
-    // and independent of the machine.
-    limits: {
-      maxStorageBufferBindingSize: 128 * 1024 * 1024,
-      maxComputeWorkgroupsPerDimension: 65535,
-    },
-  }).counts;
+  planFusions(
+    planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes,
+    sessionFusionContext({
+      rules: FUSION_RULES,
+      knobs: sessionKnobs(options),
+      useCounts: countUses(graph),
+      outputNames: new Set(graph.outputs),
+      // Decide against the WebGPU core default (128MiB). The row-block count does not affect the
+      // hit counts, but **not taking the limit from the machine's measured value** keeps this check
+      // fixed and independent of the machine.
+      limits: {
+        maxStorageBufferBindingSize: 128 * 1024 * 1024,
+        maxComputeWorkgroupsPerDimension: 65535,
+      },
+      ...(attentionDevice === undefined ? {} : { attentionDevice }),
+      residentWeights: residentWeights(graph),
+    }),
+  ).counts;
 
 /**
  * Fusion hit counts of a decode graph with states (planned for a given physical chunk row count M).
@@ -160,10 +220,7 @@ export const fusionCounts = (
 export const decodeFusionCounts = (
   graph: IrGraph,
   rows: number,
-  fuseRmsNormAdd = false,
-  fuseLinearStaticQuantize = false,
-  packedStaticQuantize = false,
-  fuseGeluMulStaticQuantize = false,
+  options: FusionCountOptions = {},
 ): FusionCounts => {
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
@@ -177,19 +234,7 @@ export const decodeFusionCounts = (
       slot.shape.map((dim) => (typeof dim === "number" ? dim : 640)),
     ]),
   );
-  return fusionCounts(
-    graph,
-    inputShapes,
-    stateShapes,
-    fuseRmsNormAdd,
-    fuseLinearStaticQuantize,
-    packedStaticQuantize,
-    "f32",
-    "f32",
-    "f32",
-    undefined,
-    fuseGeluMulStaticQuantize,
-  );
+  return fusionCounts(graph, inputShapes, options, undefined, stateShapes);
 };
 
 export const NONE: FusionCounts = {

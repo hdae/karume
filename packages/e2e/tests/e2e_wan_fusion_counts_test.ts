@@ -115,10 +115,13 @@ test.skipIf(!WAN_AVAILABLE)(
       const counts = { ...NONE, silu: 2, rmsNormRope: 60 };
       const f32 = (graph: IrGraph) => fusionCounts(graph, wanShapes(graph, sequence));
       const a8 = (graph: IrGraph) =>
-        fusionCounts(graph, wanShapes(graph, sequence), undefined, false, false, false, "a8");
+        fusionCounts(graph, wanShapes(graph, sequence), { linearCompute: "a8" });
       // The f16+dit8-a8-attn8-s16 preset: linearCompute and attentionCompute "a8".
       const attn8 = (graph: IrGraph) =>
-        fusionCounts(graph, wanShapes(graph, sequence), undefined, false, false, false, "a8", "a8");
+        fusionCounts(graph, wanShapes(graph, sequence), {
+          linearCompute: "a8",
+          attentionCompute: "a8",
+        });
       assertEquals(f32(transformer), counts, `transformer S=${sequence}`);
       assertEquals(a8(transformer), counts, `transformer S=${sequence} f16 seat a8`);
       assertEquals(f32(transformerI8), counts, `transformer S=${sequence} i8 seat`);
@@ -142,13 +145,7 @@ test.skipIf(!WAN_AVAILABLE)(
         fusionCounts(
           graph,
           wanShapes(graph, sequence),
-          undefined,
-          false,
-          false,
-          false,
-          "a8",
-          "a8",
-          "none",
+          { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
           ONLINE_DEVICE,
         );
       assertEquals(

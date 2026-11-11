@@ -113,7 +113,7 @@ const ditA8 = (quant: "i8" | "f16"): FusionCounts => ({
 });
 
 const a8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
-  fusionCounts(graph, shapes, undefined, false, false, false, "a8");
+  fusionCounts(graph, shapes, { linearCompute: "a8" });
 
 /**
  * The DiT's counts on the a8 attention seat (the `f16+dit8-a8-attn8*` presets — linearCompute and
@@ -126,7 +126,7 @@ const a8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly numbe
 const ditAttn8 = (quant: "i8" | "f16"): FusionCounts => ({ ...ditA8(quant), attentionPermute: 56 });
 
 const attn8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
-  fusionCounts(graph, shapes, undefined, false, false, false, "a8", "a8");
+  fusionCounts(graph, shapes, { linearCompute: "a8", attentionCompute: "a8" });
 
 /**
  * Device facts that hold the online kernel at the DiT's D 128 (subgroups and 48 KiB of workgroup
@@ -147,7 +147,12 @@ const ditOnline = (quant: "i8" | "f16"): FusionCounts => ({
 });
 
 const onlineCounts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
-  fusionCounts(graph, shapes, undefined, false, false, false, "a8", "a8", "none", ONLINE_DEVICE);
+  fusionCounts(
+    graph,
+    shapes,
+    { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
+    ONLINE_DEVICE,
+  );
 
 test.skipIf(!ASSETS_AVAILABLE)(
   "the real DiT grabs adaln 85 / rope 56 / silu 2 per run (the same on w8a8 and f16; under a8, linearPrologue 28 on the i8 seat only; attentionPermute 56 on the a8 attention seat that stores S, 112 on the online seat)",

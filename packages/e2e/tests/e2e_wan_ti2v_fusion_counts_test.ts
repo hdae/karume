@@ -106,7 +106,7 @@ test.skipIf(!WAN22_AVAILABLE)(
       const counts = { ...NONE, silu: 4, rmsNormRope: 60, adaln: 61, gatedResidual: 60 };
       assertEquals(fusionCounts(transformer, shapes), counts, `transformer S=${sequence}`);
       assertEquals(
-        fusionCounts(transformer, shapes, undefined, false, false, false, "a8"),
+        fusionCounts(transformer, shapes, { linearCompute: "a8" }),
         { ...counts, linearPrologue: 31 },
         `transformer S=${sequence} a8`,
       );
@@ -121,13 +121,7 @@ test.skipIf(!WAN22_AVAILABLE)(
           fusionCounts(
             transformer,
             shapes,
-            undefined,
-            false,
-            false,
-            false,
-            "a8",
-            "a8",
-            storage,
+            { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: storage },
             ONLINE_DEVICE,
           ),
           { ...counts, linearPrologue: 31, attentionPermute: absorbed },

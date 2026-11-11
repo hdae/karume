@@ -1124,7 +1124,8 @@ type LinearKnobs = {
 
 /**
  * The resident storage per initializer that the fusion decision reads — from the residency plan,
- * the same projection the executor makes from its resident weights (`#planSteps` in executor.ts).
+ * the same projection the executor makes from its resident weights (`sessionFusionContext` in
+ * session-fusion-context.ts).
  * Uncompressed (`raw`) and expanded weights are f32 and absent, as in execution. A borrowed weight's
  * storage (`shared`) is the lender's, decided at construction and unknown here, so it is absent too
  * (its linear is counted unfolded — on the large side).
