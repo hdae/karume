@@ -43,15 +43,16 @@ import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
-import type { SessionPipelines } from "../gpu/pipeline-cache.ts";
+import type { SessionPipelines, StorageRoles } from "../gpu/pipeline-cache.ts";
 import { CAST_OP, numel, stateReadonly, WEIGHT_SLOTS, WHERE_OP } from "../ops.ts";
-import type {
-  AttentionTokenMajor,
-  ExecStep,
-  FusedOperand,
-  FusedStep,
-  LinearPrologue,
-  PackedActivations,
+import {
+  type AttentionTokenMajor,
+  type ExecStep,
+  type FusedOperand,
+  type FusedStep,
+  isExternalRuleName,
+  type LinearPrologue,
+  type PackedActivations,
 } from "./fusion.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
@@ -313,6 +314,40 @@ export type RecipeBuildFace = {
 export type AddedParams = { readonly key: string; readonly buffer: GPUBuffer };
 
 /**
+ * Checks that an external rule's dispatch writes only its step's output and temporaries: a binding
+ * its WGSL declares `read_write` (the roles parsed from the WGSL when its pipeline was fetched) binds
+ * the output or a temporary of the step.
+ *
+ * MUST: the runtime owns every other buffer such a kernel could bind. An input is read again by later
+ * nodes; a resident weight or scale is shared by every Session that leases it; a params buffer is
+ * shared by content with every dispatch that has the same params. A kernel that wrote any of them
+ * would corrupt values outside its step silently, so the refusal names the rule and the binding.
+ */
+const assertExternalWrites = (
+  step: FusedStep,
+  index: number,
+  operands: readonly FusedOperand[],
+  roles: StorageRoles,
+): void => {
+  const refuse = (binding: number, what: string): never => {
+    throw new ExecutionError(
+      `fusion rule '${step.rule}': dispatch ${index} ('${step.dispatches[index].key}') declares binding ${binding}` +
+        ` read_write, but it binds ${what} (an external step writes only its output and its temporaries)`,
+    );
+  };
+  if (roles.writes.has(0)) refuse(0, "the params");
+  for (const [slot, operand] of operands.entries()) {
+    if (!roles.writes.has(slot + 1) || operand.kind === "output" || operand.kind === "temp")
+      continue;
+    const name = step.binds[operand.index];
+    refuse(
+      slot + 1,
+      operand.kind === "bind" ? `the input '${name}'` : `the resident scale of '${name}'`,
+    );
+  }
+};
+
+/**
  * The body of the derivation phase. A Session holds exactly one and calls
  * {@link RecipeBuilder.buildRecipes} from the miss path of run / enqueue.
  */
@@ -553,6 +588,7 @@ export class RecipeBuilder {
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
   ): Promise<void> {
+    const external = isExternalRuleName(step.rule);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const temps: TempSource[] = [];
     const resolve = (operand: FusedOperand): BindingSource => {
@@ -601,6 +637,7 @@ export class RecipeBuilder {
         ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
         { kind: "output" } as const,
       ];
+      if (external) assertExternalWrites(step, index, operands, roles);
       const { workgroups } = dispatch;
       builder.dispatch({
         key: dispatch.key,

@@ -21,7 +21,9 @@
  *   return value is a rule a Session takes. It applies the checks every rule meets (single-output
  *   nodes, no node that touches state, the declared privacy, a window that starts where it was
  *   tried) and checks each step it builds (only the chain's own inputs bound, the chain's last value
- *   written, every dispatch key starting with `ext:<namespace>:`).
+ *   bound as the output by at least one dispatch, every dispatch key starting with
+ *   `ext:<namespace>:`) and, when the step's recipe is built, each dispatch's WGSL (no binding
+ *   declared `read_write` but the output and the step's temporaries).
  * - {@link allF32} and {@link sameShape} are the predicates the built-in rules use in their
  *   matchers. Every fused kernel is f32, so a rule's step is taken only when its folded chain is all
  *   f32 ({@link allF32}, checked by the runtime: a window with another dtype is left unfused).

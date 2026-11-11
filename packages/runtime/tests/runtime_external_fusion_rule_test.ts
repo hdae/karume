@@ -8,13 +8,15 @@
  */
 
 import { describe, it } from "vite-plus/test";
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import {
   defineExternalRule,
   defineRule,
   type ExternalRuleDefinition,
   type ExternalRuleName,
   type FusedBuild,
+  type FusedOperand,
   type FusionMatch,
   type FusionRule,
   type FusionRuleDefinition,
@@ -28,7 +30,8 @@ import {
   type NodePlan,
   planGraph,
 } from "../src/runtime/plan.ts";
-import type { DeclarationJson } from "./helpers/model-fixture.ts";
+import { fakeRecipeGpuContext } from "./helpers/fake-gpu.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 
 const SHAPE = [4, 8];
@@ -73,6 +76,12 @@ type Fault = {
   readonly key?: string;
   /** The step declares no dispatch. */
   readonly noDispatch?: boolean;
+  /** The dispatch's operand list (omitted: the bind, then the output). */
+  readonly operands?: readonly FusedOperand[];
+  /** The dispatch's WGSL (omitted: none — a plan that is never built needs none). */
+  readonly wgsl?: string;
+  /** The dispatch binds its params as storage. */
+  readonly paramsStorage?: boolean;
 };
 
 /** `neg(neg(z))` folded into one dispatch: the definition, with `fault` applied. */
@@ -111,8 +120,12 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
           : [
               {
                 key: fault.key ?? "ext:test:neg_neg",
-                wgsl: () => "",
+                wgsl: () => fault.wgsl ?? "",
                 params: new Uint32Array(4),
+                ...(fault.paramsStorage === undefined
+                  ? {}
+                  : { paramsStorage: fault.paramsStorage }),
+                ...(fault.operands === undefined ? {} : { operands: fault.operands }),
                 workgroups: { kind: "gridStride", items: 32, size: 64 },
               },
             ],
@@ -353,6 +366,17 @@ describe("an external rule building a step", () => {
     );
   });
 
+  it("fails loudly on a step whose dispatches never bind its output (its buffer would never be written)", () => {
+    assertThrows(
+      () =>
+        plan([
+          defineExternalRule(negNeg("test/neg_neg", { operands: [{ kind: "bind", index: 0 }] })),
+        ]),
+      ExecutionError,
+      "no dispatch binds the step's output 'n2'",
+    );
+  });
+
   it("fails loudly on a step that declares no dispatch (its output would never be written)", () => {
     assertThrows(
       () => plan([defineExternalRule(negNeg("test/neg_neg", { noDispatch: true }))]),
@@ -464,6 +488,55 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
         ExecutionError,
         `fusion rule '${name}': its step folds the '${op}' node that ${verb} 'xq', a value handed over as packed int8`,
         op,
+      );
+    }
+  });
+});
+
+describe("an external step's recipe (a fake GPU: the run stops at the transient plan, after every recipe)", () => {
+  /** The bind group of the neg-neg step: params, the chain's input, the output. */
+  const wgslOf = (params: string, input: "read" | "read_write"): string =>
+    `@group(0) @binding(0) ${params} params: vec4<u32>;
+@group(0) @binding(1) var<storage, ${input}> src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(64) fn main() {}`;
+
+  const run = async (fault: Fault): Promise<unknown> => {
+    const session = await createSessionFromContainer(
+      fakeRecipeGpuContext(),
+      await openModelBytes(NEG_NEG_GRAPH, []),
+      GRAPH_NAME,
+      { fusionRules: [defineExternalRule(negNeg("test/neg_neg", fault))] },
+    );
+    return await session.run({ x: fill(SHAPE, (i) => i), z: fill(SHAPE, (i) => -i) });
+  };
+
+  it("builds the recipe of a step that writes only its output (the control: the run reaches the transient plan)", async () => {
+    await assertRejects(
+      () => run({ wgsl: wgslOf("var<uniform>", "read") }),
+      Error,
+      "invalid transient plan limit",
+    );
+  });
+
+  it("fails loudly, naming the rule and the binding, on a kernel that declares an input or the params read_write", async () => {
+    for (const [label, fault, message] of [
+      [
+        "an input",
+        { wgsl: wgslOf("var<uniform>", "read_write") },
+        "declares binding 1 read_write, but it binds the input 'z'",
+      ],
+      [
+        "the params",
+        { wgsl: wgslOf("var<storage, read_write>", "read"), paramsStorage: true },
+        "declares binding 0 read_write, but it binds the params",
+      ],
+    ] as const) {
+      await assertRejects(
+        () => run(fault),
+        ExecutionError,
+        `fusion rule 'test/neg_neg': dispatch 0 ('ext:test:neg_neg') ${message}`,
+        label,
       );
     }
   });

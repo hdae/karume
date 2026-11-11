@@ -112,3 +112,32 @@ export const losableGpuContext = (
     lose: (info: GPUDeviceLostInfo = DEFAULT_LOSS): void => resolve(info),
   };
 };
+
+/**
+ * A fake GPU on which a Session derives its recipes: it compiles any WGSL to a pipeline that does
+ * nothing and hands out buffers that hold nothing. Its limits are {@link fakeGpuContext}'s zeros, so
+ * a run stops at the transient plan (`invalid transient plan limit`), after every step was planned
+ * and every recipe built — enough to observe a refusal raised while either happens, without a GPU.
+ * The device parts go through a cast, as in {@link fakeDevice}.
+ */
+export const fakeRecipeGpuContext = (): GpuContext => {
+  const device = fakeDevice({
+    createBuffer: (descriptor) =>
+      ({
+        size: descriptor.size,
+        usage: descriptor.usage,
+        label: descriptor.label ?? "",
+        destroy: (): void => undefined,
+      }) as unknown as GPUBuffer,
+    writeBuffer: (): void => undefined,
+  });
+  return fakeGpuContext(
+    Object.assign(device, {
+      limits: { minStorageBufferOffsetAlignment: 256 },
+      createShaderModule: () => ({
+        getCompilationInfo: () => Promise.resolve({ messages: [] }),
+      }),
+      createComputePipelineAsync: () => Promise.resolve({ getBindGroupLayout: () => ({}) }),
+    }),
+  );
+};

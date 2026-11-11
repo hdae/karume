@@ -216,6 +216,7 @@ export {
   defineExternalRule,
   defineRule,
   fusionMatchContext,
+  isExternalRuleName,
   nodeStepSpan,
   ruleOrigin,
   sameShape,

@@ -885,11 +885,15 @@ const assertExternalWindow = (
  * MUST: every bind is an external input of the chain, once. The release bookkeeping rests on the
  * chain's inputs alone (`ins`), so a bind outside them could be released, and its buffer reused,
  * before the step reads it — a silent wrong value. MUST: the output is the chain's last value with
- * its shape (consumers read that name, and the buffer is sized from the shape), and there is at
- * least one dispatch to write it. MUST: every dispatch key starts with `ext:<namespace>:`. The
- * pipeline cache is one per device and shared by every Session; the prefix keeps an external rule's
- * keys out of the built-in kernels' and another namespace's (two different WGSL bodies under one key
- * still fail as `PipelineKeyConflictError`, the last line of defence).
+ * its shape (consumers read that name, and the buffer is sized from the shape), and at least one
+ * dispatch binds it (its `operands` omitted — the output is then the last binding — or holding
+ * `{ kind: "output" }`). Which bindings a dispatch writes is known only from its WGSL, so the
+ * recipe builder checks, when it fetches the pipeline, that an external dispatch writes nothing but
+ * the output and the step's temporaries (`assertExternalWrites` in recipe-builder.ts). MUST: every
+ * dispatch key starts with `ext:<namespace>:`. The pipeline cache is one per device and shared by
+ * every Session; the prefix keeps an external rule's keys out of the built-in kernels' and another
+ * namespace's (two different WGSL bodies under one key still fail as `PipelineKeyConflictError`, the
+ * last line of defence).
  */
 const assertExternalBuild = (
   name: string,
@@ -916,6 +920,17 @@ const assertExternalBuild = (
   }
   if (built.dispatches.length === 0) {
     throw new ExecutionError(`fusion rule '${name}': the step declares no dispatch`);
+  }
+  const writesOutput = built.dispatches.some(
+    (dispatch) =>
+      dispatch.operands === undefined ||
+      dispatch.operands.some((operand) => operand.kind === "output"),
+  );
+  if (!writesOutput) {
+    throw new ExecutionError(
+      `fusion rule '${name}': no dispatch binds the step's output '${built.outputName}' (its buffer would never be` +
+        " written, and its consumers would read stale data)",
+    );
   }
   const prefix = `ext:${namespace}:`;
   const strayKeys = built.dispatches
@@ -1079,10 +1094,10 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
  * here; the rule is branded external, so a Session takes it through `SessionOptions.fusionRules`;
  * it is tried only at a node whose op is one of its `heads`, its matcher reads the narrowed
  * {@link FusionMatchContext}, and a window whose chain is not all f32 is not taken; and besides every
- * check of
- * {@link defineRule}, its window must start where it was tried, its build must bind only the chain's
- * own inputs and write the chain's last value, and every dispatch key must start with
- * `ext:<namespace>:` (checked each time the rule builds a step).
+ * check of {@link defineRule}, its window must start where it was tried and keep the chain in node
+ * order, its build must bind only the chain's own inputs and write the chain's last value, and every
+ * dispatch key must start with `ext:<namespace>:` (checked each time the rule builds a step); its
+ * kernels may write only the output and the step's temporaries (checked when the recipe is built).
  */
 export const defineExternalRule = <
   Matched extends FusionMatch,
