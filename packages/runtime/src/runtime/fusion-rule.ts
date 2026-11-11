@@ -10,7 +10,7 @@
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
-import { numel, outputCountOf, WHERE_OP } from "../ops.ts";
+import { numel, OP_CONTRACTS, outputCountOf, WHERE_OP } from "../ops.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
 import { describeInputValue, ExecutionError, type NodePlan } from "./plan.ts";
@@ -1224,6 +1224,16 @@ export const defineExternalRule = <
     throw new ExecutionError(
       `fusion rule '${String(definition.name)}': an external rule's name is '<namespace>/<rule>', two lowercase` +
         " identifiers ([a-z][a-z0-9_]*) joined by one slash",
+    );
+  }
+  // MUST: every head is an op of the runtime's vocabulary (the op contract table). A rule folds
+  // built-in ops only (ADR 0148 decision 1), so a head outside it — a typo, or an op of another
+  // runtime version — would leave the rule silently never tried.
+  const unknownHeads = definition.heads.filter((head) => !OP_CONTRACTS.has(head));
+  if (unknownHeads.length > 0) {
+    throw new ExecutionError(
+      `fusion rule '${definition.name}': head(s) '${unknownHeads.join("', '")}' are not ops of the runtime's op` +
+        " vocabulary (an external rule folds built-in ops only)",
     );
   }
   // MUST: an external rule is tried only at a node whose op it declares in `heads`, so the heads

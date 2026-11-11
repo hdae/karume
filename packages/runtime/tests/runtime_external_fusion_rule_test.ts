@@ -265,6 +265,23 @@ describe("defineExternalRule", () => {
     }
   });
 
+  it("refuses a head that is not an op of the runtime's op vocabulary, naming the rule and the head", () => {
+    for (const heads of [["nope"], ["neg", "Neg"], ["neg", "gelu_tanh", "negate"]]) {
+      assertThrows(
+        () => defineExternalRule({ ...negNeg("test/neg_neg"), heads }),
+        ExecutionError,
+        `fusion rule 'test/neg_neg': head(s) '${heads.filter((head) => head !== "neg" && head !== "gelu_tanh").join("', '")}' are not ops of the runtime's op vocabulary`,
+        heads.join(","),
+      );
+    }
+    assertEquals(
+      defineExternalRule({ ...negNeg("test/neg_neg"), heads: ["neg", "gelu_tanh", "linear"] })
+        .heads,
+      ["neg", "gelu_tanh", "linear"],
+      "the control: ops of the vocabulary",
+    );
+  });
+
   it("refuses, through either define entry, a definition that is not an object", () => {
     for (const given of [null, undefined, "test/neg_neg"]) {
       assertThrows(
