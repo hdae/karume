@@ -24,6 +24,14 @@ export {
   gatedResidualGraph,
   gatedResidualInputs,
 } from "./src/fusion-twins/gated-residual.ts";
+export {
+  checkSiluTwins,
+  SILU_ORDERS,
+  SILU_SHAPE,
+  SILU_TWIN_CASES,
+  siluGraph,
+  siluInput,
+} from "./src/fusion-twins/silu.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
