@@ -31,13 +31,15 @@ measurements in `docs/research/`.
   rounding barrier `stagedLoopWgsl` / `stagedF32`), `CodegenError` and the types a rule names (ADR 0148).
 - `@karume/runtime/tune`: `runSessionAb`, a wall-clock A/B of whole runs for accepting or dropping a fusion rule on
   measured end-to-end time and u32 identity of the outputs. Two or more arms (`sessionArm` builds one from a prepared
-  model, the GpuContext, Session options and feeds; a pipeline passes its own `open` / `run` / `close` value) run an
-  untimed warm-up round, then forward and reverse in every round (A B B A); the clock spans each run alone. The record
+  model, the GpuContext, Session options and feeds; a pipeline passes its own `open` / `run` / `close` value, with an
+  optional `report` of its counts) run an untimed warm-up round, then forward and reverse in every round (A B B A); the
+  clock spans each run alone, and the counts are read after it stopped. Every run must report the counts of its arm's
+  first run, and every run's outputs are compared with a copy of the first arm's first outputs. The record
   (`karume-session-ab/1`, plain JSON) keeps the environment the caller states, every raw time, the fusion and dispatch
-  counts each arm reported and each arm's worst visit against the first arm's outputs. `sessionAbStatistics` and
+  counts each arm reported and each arm's worst run against the first arm's outputs. `sessionAbStatistics` and
   `judgeSessionAb` are pure functions of a record: the median of the paired round differences, the gain, the noise
-  floor and one verdict per arm (`"adopt"`, `"reject"`, `"inconclusive"`), identity required by default (ADR 0117
-  addendum of 2026-11-11).
+  floor (the larger of the visit spread within rounds and the delta spread across rounds) and one verdict per arm
+  (`"adopt"`, `"reject"`, `"inconclusive"`), identity required by default (ADR 0117 addendum of 2026-11-11).
 - `@karume/runtime/tune`: `wordIdentity` (with `NanPolicy`, `WordIdentity`, `WordMismatch`), the u32 identity
   comparison of two word arrays with NaN read by class or by payload.
 

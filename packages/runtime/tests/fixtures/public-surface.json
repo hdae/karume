@@ -723,6 +723,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "SessionAbReport",
+        "kind": "typeAlias"
+      },
+      {
         "name": "SessionAbRun",
         "kind": "typeAlias"
       },

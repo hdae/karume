@@ -49,7 +49,6 @@ describe.skipIf(!GPU_AVAILABLE)("runSessionAb with sessionArm (real GPU)", () =>
       const gpu = await acquireGpu();
       try {
         const prepared = prepareContainer(await openModelBytes(GRAPH, []), GRAPH_NAME);
-        const info = gpu.adapterInfo;
         const record = await runSessionAb({
           arms: [
             sessionArm({ name: "base", prepared, gpu, feeds: FEEDS }),
@@ -64,25 +63,30 @@ describe.skipIf(!GPU_AVAILABLE)("runSessionAb with sessionArm (real GPU)", () =>
           rounds: 3,
           openPerVisit,
           environment: {
-            adapter: {
-              vendor: info.vendor,
-              architecture: info.architecture,
-              device: info.device,
-              description: info.description,
-            },
+            // The GPUAdapterInfo as it is: the record copies its four fields by name.
+            adapter: gpu.adapterInfo,
             userAgent: navigator.userAgent,
             backend: "unknown",
             date: new Date().toISOString(),
           },
         });
+        const info = gpu.adapterInfo;
+        assertEquals(record.environment.adapter, {
+          vendor: info.vendor,
+          architecture: info.architecture,
+          device: info.device,
+          description: info.description,
+        });
         const [base, fused] = record.arms;
         for (const arm of record.arms) {
           assertEquals(
-            arm.identity.identical,
-            true,
+            arm.identity.worst.failures,
+            0,
             `${arm.name}: ${JSON.stringify(arm.identity)}`,
           );
-          assertEquals(arm.identity.visits, 8, arm.name);
+          // Two visits per round over the warm-up and 3 timed rounds; two runs per visit with
+          // openPerVisit (the untimed first run of the fresh Session, then the timed one).
+          assertEquals(arm.identity.runs, openPerVisit ? 16 : 8, arm.name);
           assertEquals(arm.identity.worst.words, 3 * 257, arm.name);
           assertEquals(arm.timesMs.length, 3, arm.name);
           assert(

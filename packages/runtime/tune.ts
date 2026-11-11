@@ -65,17 +65,21 @@
  * or external) is accepted or dropped on: two or more arms — Session configurations built with
  * {@link sessionArm}, or a caller's own pipeline — run the same work in alternating order (one
  * untimed warm-up round, then arms forward and reverse in every round: A B B A), the wall clock
- * spans each run alone (its readback included, opening and closing outside), and every run's outputs
- * are compared as u32 words with the first arm's (the base) through {@link wordIdentity}. It exists
- * because per-dispatch GPU time overstates what removing a small dispatch saves in an untimed run.
- * It shares nothing with the geometry sweep: no case list, no fingerprint, a record of its own
- * (`karume-session-ab/1`). {@link sessionAbStatistics} and {@link judgeSessionAb} are pure
- * functions of a record (a stored record can be judged again): per arm the median of the paired
- * round differences, the gain over the base's median, the noise floor (how far each arm moved
- * against itself within a round) and one verdict — `"adopt"`, `"reject"` or `"inconclusive"` —
- * with identity required by default (a class E rule). A verdict speaks for the record's device,
- * backend and work only; `"inconclusive"` does not mean the difference is zero. Never run it while
- * other work uses the same GPU: the times would measure the contention.
+ * spans each run alone (its readback included; opening, closing, the arm's counts and the identity
+ * comparison outside; with `openPerVisit` an untimed run of the fresh Session precedes the timed
+ * one), every run must report the counts (fusion hits, dispatches) of its arm's first run, and every
+ * run's outputs are compared as u32 words with a copy of the first arm's (the base's) first outputs
+ * through {@link wordIdentity}. It exists because per-dispatch GPU time overstates what removing a
+ * small dispatch saves in an untimed run. It shares nothing with the geometry sweep: no case list,
+ * no fingerprint, a record of its own (`karume-session-ab/1`). {@link sessionAbStatistics} and
+ * {@link judgeSessionAb} are pure functions of a record (a stored record can be judged again): per
+ * arm the median of the paired round differences, the gain over the base's median, the noise floor
+ * (the larger of how far each arm moved against itself within a round and how far the paired
+ * differences scatter across rounds; conservative on purpose, it does not shrink with more rounds)
+ * and one verdict — `"adopt"`, `"reject"` or `"inconclusive"` — with identity required by default
+ * (a class E rule). A verdict speaks for the record's device, backend and work only;
+ * `"inconclusive"` does not mean the difference is zero. Never run it while other work uses the same
+ * GPU: the times would measure the contention.
  *
  * {@link wordIdentity} is the public u32 identity comparison (NaN by class or by payload), the one
  * comparison loop behind the A/B and the fused-vs-unfused checks.
@@ -184,6 +188,7 @@ export type {
   SessionAbOptions,
   SessionAbOutput,
   SessionAbRecord,
+  SessionAbReport,
   SessionAbRun,
   SessionAbVisitIdentity,
 } from "./src/tune/session-ab.ts";

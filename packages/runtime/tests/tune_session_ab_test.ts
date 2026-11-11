@@ -1,7 +1,8 @@
 // The wall-clock A/B of whole runs (`runSessionAb`, `sessionAbStatistics` and `judgeSessionAb` of
 // `@karume/runtime/tune`) on synthetic arms and a fake clock. No GPU. The arms are scripted: each
 // run advances the fake clock by the next duration of the arm's script and returns the outputs the
-// script gives for that visit, and every open, run and close is logged.
+// script gives for that run, and every open, run, report and close is logged. Opening, closing and
+// reporting advance the fake clock too, so any of them inside a timed span changes a time.
 
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -11,6 +12,7 @@ import {
   type SessionAbArm,
   type SessionAbEnvironment,
   type SessionAbRecord,
+  type SessionAbReport,
   type SessionAbRun,
   sessionAbStatistics,
 } from "../tune.ts";
@@ -22,20 +24,33 @@ const ENVIRONMENT: SessionAbEnvironment = {
   date: "2026-01-01T00:00:00.000Z",
 };
 
-/** What an open or a close costs on the fake clock: enough to show up in any time it leaks into. */
+/**
+ * What an open, a close or a report costs on the fake clock: enough to show up in any time it leaks
+ * into.
+ */
 const OPEN_CLOSE_MS = 1000;
+
+/** The duration of the untimed first run of a visit with openPerVisit (see {@link withUntimed}). */
+const UNTIMED_MS = 7;
 
 type FakeClock = { now: number };
 
 type Script = {
-  /** The duration of each run in visit order: the two warm-up visits first, then two per round. */
+  /**
+   * The duration of each run in run order: the two warm-up visits first, then two per round (with
+   * openPerVisit, two runs per visit: {@link withUntimed}).
+   */
   readonly durations: readonly number[];
-  /** The outputs of the n-th visit (0-based, warm-up included). Default: {@link baseOutputs}. */
-  readonly outputs?: (visit: number) => SessionAbRun["outputs"];
-  /** The visit (0-based) whose run throws. */
+  /** The outputs of the n-th run (0-based, warm-up included). Default: {@link baseOutputs}. */
+  readonly outputs?: (run: number) => SessionAbRun["outputs"];
+  /** The counts reported after the n-th run (0-based). Default: {@link defaultReport}. */
+  readonly report?: (run: number) => SessionAbReport;
+  /** The run (0-based) that throws. */
   readonly throwAt?: number;
   /** Whether `open` throws. */
   readonly openThrows?: boolean;
+  /** Whether `close` throws. */
+  readonly closeThrows?: boolean;
 };
 
 const baseOutputs = (): SessionAbRun["outputs"] => ({
@@ -43,14 +58,22 @@ const baseOutputs = (): SessionAbRun["outputs"] => ({
   ids: Int32Array.of(7, 8),
 });
 
-/** An arm that follows `script` on `clock` and logs `open <name>`, `run <name>`, `close <name>`. */
+const defaultReport = (name: string): SessionAbReport => ({
+  fusions: { "test/rule": name === "base" ? 0 : 2 },
+  dispatches: name === "base" ? 6 : 4,
+});
+
+/**
+ * An arm that follows `script` on `clock` and logs `open <name>`, `run <name>`, `report <name>` and
+ * `close <name>`.
+ */
 const scriptedArm = (
   name: string,
   script: Script,
   clock: FakeClock,
   log: string[],
 ): SessionAbArm => {
-  let visit = 0;
+  let runs = 0;
   return {
     name,
     open: () => {
@@ -61,19 +84,21 @@ const scriptedArm = (
     },
     run: () => {
       log.push(`run ${name}`);
-      const current = visit;
-      visit += 1;
+      const current = runs;
+      runs += 1;
       if (current === script.throwAt) return Promise.reject(new Error(`run ${name} failed`));
       clock.now += script.durations[current] ?? 1;
-      return Promise.resolve({
-        outputs: (script.outputs ?? baseOutputs)(current),
-        fusions: { "test/rule": name === "base" ? 0 : 2 },
-        dispatches: name === "base" ? 6 : 4,
-      });
+      return Promise.resolve({ outputs: (script.outputs ?? baseOutputs)(current) });
+    },
+    report: () => {
+      log.push(`report ${name}`);
+      clock.now += OPEN_CLOSE_MS;
+      return Promise.resolve(script.report?.(runs - 1) ?? defaultReport(name));
     },
     close: () => {
       log.push(`close ${name}`);
       clock.now += OPEN_CLOSE_MS;
+      if (script.closeThrows === true) return Promise.reject(new Error(`close ${name} failed`));
       return Promise.resolve();
     },
   };
@@ -85,6 +110,10 @@ const durations = (rounds: readonly (readonly [number, number])[]): number[] => 
   50,
   ...rounds.flat(),
 ];
+
+/** Durations in run order with openPerVisit: an untimed run before every visit's duration. */
+const withUntimed = (visits: readonly number[]): number[] =>
+  visits.flatMap((duration) => [UNTIMED_MS, duration]);
 
 type Arms = Readonly<Record<string, Script>>;
 
@@ -113,6 +142,9 @@ const BASE_TIMES = [
   [103, 101],
 ] as const;
 
+/** One run of an arm as the log shows it: the run, then its report. */
+const runOf = (name: string): string[] => [`run ${name}`, `report ${name}`];
+
 describe("runSessionAb", () => {
   describe("visit order", () => {
     it("runs an untimed warm-up round, then every round forward and reverse (A B B A), between one open and one close per arm", async () => {
@@ -120,7 +152,7 @@ describe("runSessionAb", () => {
         { base: { durations: durations(BASE_TIMES) }, fused: { durations: durations(BASE_TIMES) } },
         3,
       );
-      const round = ["run base", "run fused", "run fused", "run base"];
+      const round = [...runOf("base"), ...runOf("fused"), ...runOf("fused"), ...runOf("base")];
       assertEquals(log, [
         "open base",
         "open fused",
@@ -136,7 +168,14 @@ describe("runSessionAb", () => {
     it("visits three arms as A B C C B A", async () => {
       const script = { durations: durations(BASE_TIMES) };
       const { log } = await run({ a: script, b: script, c: script }, 3);
-      const round = ["run a", "run b", "run c", "run c", "run b", "run a"];
+      const round = [
+        ...runOf("a"),
+        ...runOf("b"),
+        ...runOf("c"),
+        ...runOf("c"),
+        ...runOf("b"),
+        ...runOf("a"),
+      ];
       assertEquals(log, [
         "open a",
         "open b",
@@ -151,13 +190,21 @@ describe("runSessionAb", () => {
       ]);
     });
 
-    it("opens and closes around every visit with openPerVisit", async () => {
+    it("opens and closes around every visit with openPerVisit, with an untimed run before the timed one", async () => {
       const { log } = await run(
-        { base: { durations: durations(BASE_TIMES) }, fused: { durations: durations(BASE_TIMES) } },
+        {
+          base: { durations: withUntimed(durations(BASE_TIMES)) },
+          fused: { durations: withUntimed(durations(BASE_TIMES)) },
+        },
         3,
         true,
       );
-      const visit = (name: string): string[] => [`open ${name}`, `run ${name}`, `close ${name}`];
+      const visit = (name: string): string[] => [
+        `open ${name}`,
+        ...runOf(name),
+        ...runOf(name),
+        `close ${name}`,
+      ];
       const round = [...visit("base"), ...visit("fused"), ...visit("fused"), ...visit("base")];
       assertEquals(log, [...round, ...round, ...round, ...round]);
     });
@@ -170,11 +217,12 @@ describe("runSessionAb", () => {
       [98, 96],
     ] as const;
     for (const openPerVisit of [false, true]) {
-      it(`records each run's own duration and nothing of open or close (openPerVisit ${openPerVisit})`, async () => {
+      it(`records each timed run's own duration and nothing of open, close, report or an untimed run (openPerVisit ${openPerVisit})`, async () => {
+        const order = openPerVisit ? withUntimed : (visits: number[]) => visits;
         const { record } = await run(
           {
-            base: { durations: durations(BASE_TIMES) },
-            fused: { durations: durations(fusedTimes) },
+            base: { durations: order(durations(BASE_TIMES)) },
+            fused: { durations: order(durations(fusedTimes)) },
           },
           3,
           openPerVisit,
@@ -186,6 +234,41 @@ describe("runSessionAb", () => {
         );
       });
     }
+
+    it("keeps reading the outputs (the copy and the identity comparison) out of the timed span", async () => {
+      const clock: FakeClock = { now: 0 };
+      // Every read of `y` costs time on the fake clock, as work on the outputs would.
+      const costlyOutputs = (): SessionAbRun["outputs"] => ({
+        get y() {
+          clock.now += OPEN_CLOSE_MS;
+          return Float32Array.of(1, 2);
+        },
+      });
+      const record = await runSessionAb({
+        arms: [
+          scriptedArm(
+            "base",
+            { durations: durations(BASE_TIMES), outputs: costlyOutputs },
+            clock,
+            [],
+          ),
+          scriptedArm(
+            "fused",
+            { durations: durations(fusedTimes), outputs: costlyOutputs },
+            clock,
+            [],
+          ),
+        ],
+        rounds: 3,
+        environment: ENVIRONMENT,
+        clock: () => clock.now,
+      });
+      assertEquals(
+        record.arms.map((arm) => arm.timesMs),
+        [BASE_TIMES, fusedTimes],
+      );
+      assertEquals(record.arms[1].identity.worst.failures, 0);
+    });
   });
 
   describe("the record", () => {
@@ -205,14 +288,109 @@ describe("runSessionAb", () => {
           { name: "fused", fusions: { "test/rule": 2 }, dispatches: 4 },
         ],
       );
-      // Two outputs of 4 + 2 words; 8 visits per arm (the warm-up round's included).
+      // Two outputs of 4 + 2 words; 8 runs per arm (the warm-up round's included).
       for (const arm of record.arms) {
         assertEquals(arm.identity, {
-          identical: true,
-          visits: 8,
-          worst: { round: 0, visit: 1, words: 6, failures: 0 },
+          runs: 8,
+          worst: { round: 0, visit: 1, run: 1, words: 6, failures: 0 },
         });
       }
+    });
+
+    it("copies the adapter's four fields by name, also from accessors on a prototype (a browser's GPUAdapterInfo)", async () => {
+      class AdapterInfo {
+        get vendor(): string {
+          return "vendor-a";
+        }
+        get architecture(): string {
+          return "arch-b";
+        }
+        get device(): string {
+          return "device-c";
+        }
+        get description(): string {
+          return "description-d";
+        }
+      }
+      const clock: FakeClock = { now: 0 };
+      const script = { durations: durations(BASE_TIMES) };
+      const record = await runSessionAb({
+        arms: [scriptedArm("base", script, clock, []), scriptedArm("fused", script, clock, [])],
+        rounds: 3,
+        environment: { ...ENVIRONMENT, adapter: new AdapterInfo() },
+        clock: () => clock.now,
+      });
+      assertEquals(JSON.parse(JSON.stringify(record.environment.adapter)), {
+        vendor: "vendor-a",
+        architecture: "arch-b",
+        device: "device-c",
+        description: "description-d",
+      });
+    });
+  });
+
+  describe("counts", () => {
+    it("refuses an arm whose run reports other counts than its first run, and closes every arm", async () => {
+      const log: string[] = [];
+      const clock: FakeClock = { now: 0 };
+      const arms = [
+        scriptedArm("base", { durations: durations(BASE_TIMES) }, clock, log),
+        scriptedArm(
+          "fused",
+          {
+            durations: durations(BASE_TIMES),
+            // Run 4 = round 2, visit 1.
+            report: (run) =>
+              run === 4 ? { ...defaultReport("fused"), dispatches: 5 } : defaultReport("fused"),
+          },
+          clock,
+          log,
+        ),
+      ];
+      await assertRejects(
+        () => runSessionAb({ arms, rounds: 3, environment: ENVIRONMENT, clock: () => clock.now }),
+        RangeError,
+        'arm "fused" reported {"fusions":{"test/rule":2},"dispatches":5} in round 2, visit 1, run 1',
+      );
+      assertEquals(log.slice(-2), ["close fused", "close base"]);
+    });
+
+    it("refuses a fusion count that changes between runs", async () => {
+      const report = (run: number): SessionAbReport => ({
+        fusions: run === 0 ? { "test/rule": 2 } : { "test/rule": 2, "test/other": 1 },
+        dispatches: 4,
+      });
+      await assertRejects(
+        () =>
+          run(
+            {
+              base: { durations: durations(BASE_TIMES) },
+              fused: { durations: durations(BASE_TIMES), report },
+            },
+            3,
+          ),
+        RangeError,
+        'arm "fused" reported',
+      );
+    });
+
+    it("compares the untimed run's counts too with openPerVisit", async () => {
+      // Run 2 = the warm-up's visit 2, its untimed run.
+      const report = (run: number): SessionAbReport =>
+        run === 2 ? { ...defaultReport("fused"), dispatches: 9 } : defaultReport("fused");
+      await assertRejects(
+        () =>
+          run(
+            {
+              base: { durations: withUntimed(durations(BASE_TIMES)) },
+              fused: { durations: withUntimed(durations(BASE_TIMES)), report },
+            },
+            3,
+            true,
+          ),
+        RangeError,
+        "in round 0, visit 2, run 1",
+      );
     });
   });
 
@@ -236,9 +414,15 @@ describe("runSessionAb", () => {
     it("closes the arm whose run throws with openPerVisit", async () => {
       const clock: FakeClock = { now: 0 };
       const log: string[] = [];
+      // Run 1 = the timed run of the base's first visit.
       const arms = [
-        scriptedArm("base", { durations: durations(BASE_TIMES), throwAt: 1 }, clock, log),
-        scriptedArm("fused", { durations: durations(BASE_TIMES) }, clock, log),
+        scriptedArm(
+          "base",
+          { durations: withUntimed(durations(BASE_TIMES)), throwAt: 1 },
+          clock,
+          log,
+        ),
+        scriptedArm("fused", { durations: withUntimed(durations(BASE_TIMES)) }, clock, log),
       ];
       await assertRejects(
         () =>
@@ -252,7 +436,7 @@ describe("runSessionAb", () => {
         Error,
         "run base failed",
       );
-      assertEquals(log.slice(-3), ["open base", "run base", "close base"]);
+      assertEquals(log, ["open base", "run base", "report base", "run base", "close base"]);
     });
 
     it("closes the arms already opened when an open throws", async () => {
@@ -268,6 +452,41 @@ describe("runSessionAb", () => {
         "open fused failed",
       );
       assertEquals(log, ["open base", "open fused", "close base"]);
+    });
+
+    it("attempts every close when closes throw after a complete A/B, and the first close error propagates", async () => {
+      const clock: FakeClock = { now: 0 };
+      const log: string[] = [];
+      const arms = [
+        scriptedArm("base", { durations: durations(BASE_TIMES), closeThrows: true }, clock, log),
+        scriptedArm("fused", { durations: durations(BASE_TIMES), closeThrows: true }, clock, log),
+      ];
+      await assertRejects(
+        () => runSessionAb({ arms, rounds: 3, environment: ENVIRONMENT, clock: () => clock.now }),
+        Error,
+        "close fused failed",
+      );
+      assertEquals(log.slice(-2), ["close fused", "close base"]);
+    });
+
+    it("lets the run's error win over close errors, and still attempts every close", async () => {
+      const clock: FakeClock = { now: 0 };
+      const log: string[] = [];
+      const arms = [
+        scriptedArm("base", { durations: durations(BASE_TIMES), closeThrows: true }, clock, log),
+        scriptedArm(
+          "fused",
+          { durations: durations(BASE_TIMES), throwAt: 4, closeThrows: true },
+          clock,
+          log,
+        ),
+      ];
+      await assertRejects(
+        () => runSessionAb({ arms, rounds: 3, environment: ENVIRONMENT, clock: () => clock.now }),
+        Error,
+        "run fused failed",
+      );
+      assertEquals(log.slice(-3), ["run fused", "close fused", "close base"]);
     });
   });
 
@@ -302,23 +521,113 @@ describe("runSessionAb", () => {
       // Visit 5 = round 2, visit 2.
       const record = await identityOf(differing, 5);
       assertEquals(record.arms[1].identity, {
-        identical: false,
-        visits: 8,
+        runs: 8,
         worst: {
           round: 2,
           visit: 2,
+          run: 1,
           words: 6,
           failures: 1,
           first: { output: "y", cause: "word", index: 2, expected: 0x40400000, actual: 0x40600000 },
         },
       });
-      assertEquals(record.arms[0].identity.identical, true);
+      assertEquals(record.arms[0].identity.worst.failures, 0);
     });
 
     it("passes a NaN against a NaN of another payload in an f32 output", async () => {
       const base = { y: floatsOf(QUIET_NAN, 0x3f800000) };
       const record = await identityOf({ y: floatsOf(PAYLOAD_NAN, 0x3f800000) }, 3, base);
-      assertEquals(record.arms[1].identity.identical, true);
+      assertEquals(record.arms[1].identity.worst.failures, 0);
+    });
+
+    it("fails an output of another array type whole, even with the same bits", async () => {
+      const base = { y: Float32Array.of(1, 2) };
+      const sameBits = new Int32Array(Float32Array.of(1, 2).buffer);
+      const record = await identityOf({ y: sameBits }, 3, base);
+      assertEquals(record.arms[1].identity.worst, {
+        round: 1,
+        visit: 2,
+        run: 1,
+        words: 2,
+        failures: 2,
+        first: { output: "y", cause: "type", index: 0, expected: 0x3f800000, actual: 0x3f800000 },
+      });
+    });
+
+    it("compares with a copy of the base's first outputs, so a base that rewrites one array shows as not deterministic", async () => {
+      const shared = Float32Array.of(0, 5);
+      const record = (
+        await run(
+          {
+            base: {
+              durations: durations(BASE_TIMES),
+              outputs: (index) => {
+                shared[0] = index;
+                return { y: shared };
+              },
+            },
+            fused: {
+              durations: durations(BASE_TIMES),
+              outputs: () => ({ y: Float32Array.of(0, 5) }),
+            },
+          },
+          3,
+        )
+      ).record;
+      assertEquals(record.arms[0].identity.worst, {
+        round: 0,
+        visit: 2,
+        run: 1,
+        words: 2,
+        failures: 1,
+        first: { output: "y", cause: "word", index: 0, expected: 0, actual: 0x3f800000 },
+      });
+      assertEquals(record.arms[1].identity.worst.failures, 0);
+    });
+
+    it("compares the untimed run of a visit too with openPerVisit", async () => {
+      const differing = { ...baseOutputs(), ids: Int32Array.of(7, 9) };
+      // Run 2 = the warm-up's visit 2, its untimed run.
+      const record = (
+        await run(
+          {
+            base: { durations: withUntimed(durations(BASE_TIMES)) },
+            fused: {
+              durations: withUntimed(durations(BASE_TIMES)),
+              outputs: (index) => (index === 2 ? differing : baseOutputs()),
+            },
+          },
+          3,
+          true,
+        )
+      ).record;
+      assertEquals(record.arms[1].identity.runs, 16);
+      assertEquals(
+        [record.arms[1].identity.worst.round, record.arms[1].identity.worst.visit],
+        [0, 2],
+      );
+      assertEquals(record.arms[1].identity.worst.run, 1);
+    });
+
+    it("refuses a base whose first run returns no output, or outputs with no word", async () => {
+      const empties: SessionAbRun["outputs"][] = [
+        {},
+        { y: new Float32Array(0), ids: new Int32Array(0) },
+      ];
+      for (const empty of empties) {
+        await assertRejects(
+          () =>
+            run(
+              {
+                base: { durations: durations(BASE_TIMES), outputs: () => empty },
+                fused: { durations: durations(BASE_TIMES), outputs: () => empty },
+              },
+              3,
+            ),
+          RangeError,
+          'the base arm "base" returned no output word on its first run',
+        );
+      }
     });
 
     it("compares an integer output word for word (no NaN class for integers)", async () => {
@@ -332,6 +641,7 @@ describe("runSessionAb", () => {
       assertEquals(record.arms[1].identity.worst, {
         round: 1,
         visit: 1,
+        run: 1,
         words: 6,
         failures: 2,
         first: { output: "ids", cause: "missing", index: 0, expected: 7, actual: 0 },
@@ -403,7 +713,7 @@ describe("runSessionAb", () => {
           3,
         )
       ).record;
-      assertEquals(record.arms[0].identity.identical, false);
+      assertEquals(record.arms[0].identity.worst.failures, 1);
       const [judged] = judgeSessionAb(record, { minGain: 0 });
       assertEquals(judged.verdict, "reject");
       assertStringIncludes(judged.reason, 'the base arm "base" differs from its own first outputs');
@@ -441,6 +751,22 @@ describe("runSessionAb", () => {
         );
       }
     });
+
+    it("refuses a timed span the clock reads as not finite or negative, in the judge's words", async () => {
+      for (const bad of [-1, Number.NaN]) {
+        const fused = durations([
+          [bad, 100],
+          [100, 100],
+          [100, 100],
+        ]);
+        await assertRejects(
+          () => run({ base: { durations: durations(BASE_TIMES) }, fused: { durations: fused } }, 3),
+          RangeError,
+          'arm "fused" does not hold two finite non-negative times for each of the 3 rounds' +
+            ` (round 1, visit 1: ${bad} ms)`,
+        );
+      }
+    });
   });
 });
 
@@ -458,7 +784,7 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
 
   it("adopts an arm faster than the noise floor by at least minGain", async () => {
     // fused round means 96, 96, 97 → deltas −5, −5, −5 (median −5); its spreads 2, 0, 2 (median 2);
-    // floor max(2, 2) = 2; |−5| > 2; gain 5 / 101 ≈ 4.95% ≥ 1%.
+    // visit spread max(2, 2) = 2; delta spread 0; floor 2; |−5| > 2; gain 5 / 101 ≈ 4.95% ≥ 1%.
     const record = await recordOf([
       [95, 97],
       [96, 96],
@@ -472,6 +798,8 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
       medianDeltaMs: -5,
       baseMedianMs: 101,
       gain: 5 / 101,
+      visitSpreadMs: 2,
+      deltaSpreadMs: 0,
       noiseFloorMs: 2,
       verdict: "adopt",
       identical: true,
@@ -538,7 +866,7 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
   it("takes the mean of the two middle values as the median of an even count", async () => {
     // Four rounds. base round means 100, 100, 100, 100 (median 100), spreads 0.
     // fused round means 99, 97, 95, 93 → deltas −1, −3, −5, −7 (median (−3 − 5) / 2 = −4);
-    // spreads 2, 2, 2, 6 (median 2).
+    // spreads 2, 2, 2, 6 (median 2); |delta − (−4)| 3, 1, 1, 3 (median 2).
     const record = await recordOf(
       [
         [98, 100],
@@ -561,8 +889,90 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
       medianDeltaMs: -4,
       baseMedianMs: 100,
       gain: 0.04,
+      visitSpreadMs: 2,
+      deltaSpreadMs: 2,
       noiseFloorMs: 2,
     });
+  });
+
+  it("takes the base's visit spread when it is the larger one", async () => {
+    // base round means 103, 104, 103 (median 103), spreads 6, 6, 6; fused round means 100, 101, 100
+    // → deltas −3, −3, −3, its spreads 0; visit spread max(6, 0) = 6; |−3| ≤ 6.
+    const record = await recordOf(
+      [
+        [100, 100],
+        [101, 101],
+        [100, 100],
+      ],
+      [
+        [100, 106],
+        [101, 107],
+        [100, 106],
+      ],
+    );
+    const [judged] = judgeSessionAb(record, { minGain: 0.01 });
+    assertEquals(
+      [judged.verdict, judged.medianDeltaMs, judged.visitSpreadMs, judged.noiseFloorMs],
+      ["inconclusive", -3, 6, 6],
+    );
+  });
+
+  it("widens the floor by the scatter of the paired differences across rounds", async () => {
+    // Five rounds; base 100 in every visit. fused visits agree within each round (visit spread 0)
+    // but its speed moves from round to round: deltas −3, −2, −1, 2, 3 (median −1, gain 1%);
+    // |delta − (−1)| 2, 1, 0, 3, 4 (median 2); floor 2; |−1| ≤ 2.
+    const record = await recordOf(
+      [
+        [97, 97],
+        [98, 98],
+        [99, 99],
+        [102, 102],
+        [103, 103],
+      ],
+      [
+        [100, 100],
+        [100, 100],
+        [100, 100],
+        [100, 100],
+        [100, 100],
+      ],
+    );
+    const [judged] = judgeSessionAb(record, { minGain: 0.005 });
+    assertEquals(
+      {
+        verdict: judged.verdict,
+        median: judged.medianDeltaMs,
+        visit: judged.visitSpreadMs,
+        delta: judged.deltaSpreadMs,
+        floor: judged.noiseFloorMs,
+      },
+      { verdict: "inconclusive", median: -1, visit: 0, delta: 2, floor: 2 },
+    );
+  });
+
+  it("calls a median difference equal to the noise floor inconclusive", async () => {
+    // fused round means 99, 99, 100 → deltas −2, −2, −2; floor max(2, 2) = 2; |−2| = 2.
+    const record = await recordOf([
+      [98, 100],
+      [99, 99],
+      [101, 99],
+    ]);
+    const [judged] = judgeSessionAb(record, { minGain: 0.01 });
+    assertEquals(
+      [judged.verdict, judged.medianDeltaMs, judged.noiseFloorMs],
+      ["inconclusive", -2, 2],
+    );
+  });
+
+  it("adopts a gain equal to minGain", async () => {
+    // The adopt case's numbers: gain exactly 5 / 101.
+    const record = await recordOf([
+      [95, 97],
+      [96, 96],
+      [98, 96],
+    ]);
+    const [judged] = judgeSessionAb(record, { minGain: 5 / 101 });
+    assertEquals([judged.verdict, judged.gain], ["adopt", 5 / 101]);
   });
 
   it("judges every non-base arm against the base, in order", async () => {
@@ -629,6 +1039,101 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
         arms: [record.arms[0], { ...record.arms[1], timesMs: record.arms[1].timesMs.slice(1) }],
       };
       assertThrows(() => sessionAbStatistics(short), RangeError, 'arm "fused"');
+    });
+
+    it("refuses times that are not finite and non-negative in a stored record", async () => {
+      const record = await recordOf(BASE_TIMES);
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+        const edited: SessionAbRecord = {
+          ...record,
+          arms: [
+            record.arms[0],
+            { ...record.arms[1], timesMs: [[bad, 100], ...record.arms[1].timesMs.slice(1)] },
+          ],
+        };
+        assertThrows(
+          () => judgeSessionAb(edited, { minGain: 0 }),
+          RangeError,
+          'arm "fused" does not hold two finite non-negative times for each of the 3 rounds',
+        );
+      }
+    });
+
+    it("refuses a base whose median round time is not positive", async () => {
+      const record = await recordOf(BASE_TIMES, [
+        [0, 0],
+        [0, 0],
+        [0, 0],
+      ]);
+      assertThrows(
+        () => sessionAbStatistics(record),
+        RangeError,
+        'the base arm "base" has a median round time of 0 ms',
+      );
+    });
+
+    it("refuses an identity block that does not hold what the judge reads, by name", async () => {
+      const record = await recordOf(BASE_TIMES);
+      const { worst } = record.arms[1].identity;
+      const malformed: unknown[] = [
+        undefined,
+        { runs: 8 },
+        { runs: 0, worst },
+        { runs: 8, worst: { ...worst, failures: -1 } },
+        { runs: 8, worst: { ...worst, visit: 3 } },
+        { runs: 8, worst: { ...worst, round: 4 } },
+        // Failures without the first mismatch, and a first mismatch of an unknown cause.
+        { runs: 8, worst: { ...worst, failures: 3 } },
+        {
+          runs: 8,
+          worst: {
+            ...worst,
+            failures: 1,
+            first: { output: "y", cause: "other", index: 0, expected: 0, actual: 1 },
+          },
+        },
+      ];
+      for (const identity of malformed) {
+        const edited: SessionAbRecord = JSON.parse(
+          JSON.stringify({ ...record, arms: [record.arms[0], { ...record.arms[1], identity }] }),
+        );
+        assertThrows(
+          () => judgeSessionAb(edited, { minGain: 0 }),
+          RangeError,
+          'arm "fused" does not hold a valid identity block',
+        );
+      }
+    });
+
+    it("reads identity from the worst run of a stored record", async () => {
+      const record = await recordOf([
+        [95, 97],
+        [96, 96],
+        [98, 96],
+      ]);
+      const failing: SessionAbRecord = {
+        ...record,
+        arms: [
+          record.arms[0],
+          {
+            ...record.arms[1],
+            identity: {
+              runs: 8,
+              worst: {
+                round: 3,
+                visit: 1,
+                run: 1,
+                words: 6,
+                failures: 2,
+                first: { output: "ids", cause: "word", index: 1, expected: 8, actual: 9 },
+              },
+            },
+          },
+        ],
+      };
+      const [judged] = judgeSessionAb(failing, { minGain: 0.01 });
+      assertEquals([judged.verdict, judged.identical], ["reject", false]);
+      assertStringIncludes(judged.reason, "2 of 6 words fail in round 3, visit 1, run 1");
     });
   });
 });
