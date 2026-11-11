@@ -28,7 +28,7 @@ import {
   containerPart0,
 } from "../../runtime/tests/helpers/container-graph.ts";
 import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/session-types.ts";
-import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
 import {
   exists,
   fusionCounts,
@@ -194,13 +194,6 @@ test.skipIf(!ASSETS_AVAILABLE)(
 );
 
 /**
- * A window limit no window of the unfused DiT reaches (its widest maximal window is 43 nodes —
- * 2026-11-11). At the default limit of 12 the block chains are cut into overlapping windows marked
- * "hit the limit", and a site inside an overlap is counted more than once.
- */
-const UNCUT_WINDOW = 64;
-
-/**
  * **The control of the fusion candidate search**: the DiT planned with every rule off
  * (`DISABLED_FUSION_RULES: "all"`) must show each site the rules grab today as a candidate — the
  * check that the enumerator neither loses a window nor counts one chain twice. Each rule's sites
@@ -215,8 +208,11 @@ const UNCUT_WINDOW = 64;
  *   holds the reshape of the block's gate vector, a passthrough here too) and at the head's norm
  *   (no gate), three at the other 56.
  *
- * At the default window limit of 12 the same count gives rope 140 and the two-reshape adaLN 141:
- * the overlapping cut windows count one site several times.
+ * The search is the stable one: it widens the window limit until the rows stop changing (the
+ * widest maximal window of the unfused DiT is 43 nodes — 2026-11-11). At the default window limit
+ * of 12 the block chains are cut into overlapping windows marked "hit the limit", and the same count
+ * gives rope 140 and the two-reshape adaLN 141: the overlapping cut windows count one site several
+ * times.
  */
 test.skipIf(!ASSETS_AVAILABLE)(
   "with fusion off, the real DiT's silu 2 / rope 56 / adaln 85 all come out as fusion candidates",
@@ -228,7 +224,8 @@ test.skipIf(!ASSETS_AVAILABLE)(
         [DISABLED_FUSION_RULES]: "all",
       });
       assertEquals(plan.counts, NONE, `${label}: precondition — no rule grabs anything`);
-      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      const { rows, stable } = stableFusionCandidates(plan.steps, context);
+      assertEquals(stable, true, `${label}: precondition — the stable search stabilised`);
       assertEquals(
         rows.filter((row) => row.hitLimit).map((row) => row.form),
         [],

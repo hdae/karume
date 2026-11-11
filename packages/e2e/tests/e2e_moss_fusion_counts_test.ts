@@ -26,7 +26,7 @@ import {
   mossPreset,
 } from "../../models/src/moss/preset.ts";
 import { MOSS_GET_MIRROR, MOSS_MIRROR } from "../../models/tests/helpers/moss-dit.ts";
-import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
 import {
   exists,
   fusionCounts,
@@ -128,16 +128,6 @@ test.skipIf(!MOSS_AVAILABLE)(
 );
 
 /**
- * A window limit no window of the DiT reaches (the widest maximal window is 28 nodes on the
- * reference preset, 25 on the practical one — 2026-11-11). At the
- * default limit of 12 the long chains of the blocks are cut into overlapping windows marked "hit
- * the limit", and a site inside the overlap is counted twice (the gated residual of the FFN came
- * out 86 times); the table's own instruction for a marked row is to search again with a larger
- * limit, which this check does once and for all.
- */
-const UNCUT_WINDOW = 32;
-
-/**
  * The three known misses as fusion candidates, each at its **84 sites** (42 blocks × 2 — the
  * applicability table of 2026-11-10 counted the same 84 each). They are named by the op sequence
  * of their chain (passthroughs excluded), and one maximal window may hold more than one site:
@@ -150,6 +140,14 @@ const UNCUT_WINDOW = 32;
  *   the attention and before the FFN of each block.
  * - Gated residual: `linear, mul, add` — the output projection (attention or FFN), its broadcast gate
  *   and the residual add.
+ *
+ * The search is the stable one: it widens the window limit until the rows stop changing. At the
+ * default limit of 12 the long chains of the blocks are cut into overlapping windows marked "hit the
+ * limit", and a site inside the overlap is counted twice (the gated residual of the FFN came out 86
+ * times). The widest maximal window is 69 nodes on the reference preset (the search stops at 192)
+ * and 25 on the practical one (it stops at 96 — 2026-11-11). A fixed limit of 32 leaves no window at
+ * the limit on either preset: the 69-node window only appears once the
+ * limit spans it, which the limit mark cannot tell.
  *
  * If a count moves, first check whether the exporter's emission order changed or a rule started to
  * grab a site (its hit count above moves with it).
@@ -166,7 +164,8 @@ test.skipIf(!MOSS_AVAILABLE)(
         mossPreset(name).dit,
         ONLINE_DEVICE,
       );
-      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      const { rows, stable } = stableFusionCandidates(plan.steps, context);
+      assertEquals(stable, true, `${label}: precondition — the stable search stabilised`);
       assertEquals(
         rows.filter((row) => row.hitLimit).map((row) => row.form),
         [],

@@ -16,7 +16,7 @@ import {
   containerPart0,
   readContainerGraph,
 } from "../../runtime/tests/helpers/container-graph.ts";
-import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
 import { exists, fusionCounts, NONE, planDistributionFusions } from "./helpers/fusion-counts.ts";
 
 const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
@@ -178,18 +178,16 @@ test.skipIf(!IRODORI_AVAILABLE)(
 );
 
 /**
- * A window limit no window of the DiT reaches (the widest maximal window is 13 nodes —
- * 2026-11-11; at the default limit of 12 some windows are marked "hit the limit").
- */
-const UNCUT_WINDOW = 32;
-
-/**
  * The DiT's adaLN (adaln 0 above — it normalises with `rms_norm`) as a fusion candidate, named by
  * the op sequence of its chain: `rms_norm, add, mul, add` — the norm, `1 + scale`, the product and
  * the shift. **24** = the 12 blocks × 2 (before the attention and before the MLP), the same 24 as
  * the record of the removed 0.14 tool (`docs/research/2026-09-03-op-census-fusion-hints.md` §2.2).
  * 23 of them end a longer maximal window (`linear, linear, add, …` before the norm); one stands
  * alone.
+ *
+ * The search is the stable one: it widens the window limit until the rows stop changing (the widest
+ * maximal window is 13 nodes — 2026-11-11; at the default limit of 12 some windows are marked "hit
+ * the limit").
  */
 test.skipIf(!IRODORI_AVAILABLE)(
   "the Irodori DiT's adaLN form comes out as a fusion candidate 24 times (rms_norm, add, mul, add)",
@@ -198,7 +196,8 @@ test.skipIf(!IRODORI_AVAILABLE)(
     for (const sequence of [125, 750]) {
       const label = `S=${sequence}`;
       const { plan, context } = planDistributionFusions(graph, irodoriDitShapes(sequence));
-      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      const { rows, stable } = stableFusionCandidates(plan.steps, context);
+      assertEquals(stable, true, `${label}: precondition — the stable search stabilised`);
       assertEquals(
         rows.filter((row) => row.hitLimit).map((row) => row.form),
         [],

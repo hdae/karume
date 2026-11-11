@@ -11,7 +11,7 @@ import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
-import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
 import {
   exists,
   fusionCounts,
@@ -178,14 +178,6 @@ test.skipIf(!WAN_AVAILABLE)(
 );
 
 /**
- * A window limit no window of the DiT reaches (the widest maximal window is 18 nodes —
- * 2026-11-11). At the default limit of 12 the block chains are cut into overlapping windows marked
- * "hit the limit" and sites inside an overlap are counted twice (the adaLN form came out 62 times,
- * the gated residual 64).
- */
-const UNCUT_WINDOW = 32;
-
-/**
  * The DiT's two known misses (adaln 0 and gatedResidual 0 above) as fusion candidates, named by the
  * op sequence of their chain (passthroughs excluded):
  *
@@ -200,6 +192,11 @@ const UNCUT_WINDOW = 32;
  * A candidate is not a rule to write: a mul→add gated residual rule was measured on anima and
  * Irodori (−0.2 to −0.6% of the GPU total, nothing in the wall) and rejected (perf-ledger K-7).
  * The check records that the candidate search finds these sites.
+ *
+ * The search is the stable one: it widens the window limit until the rows stop changing. At the
+ * default limit of 12 the block chains are cut into overlapping windows marked "hit the limit" and
+ * sites inside an overlap are counted twice (the adaLN form came out 62 times, the gated residual
+ * 64); the widest maximal window is 18 nodes (2026-11-11).
  */
 test.skipIf(!WAN_AVAILABLE)(
   "the Wan2.1 DiT's known misses come out as fusion candidates: the adaLN form 61 times, the gated residual 60",
@@ -211,7 +208,8 @@ test.skipIf(!WAN_AVAILABLE)(
         transformer,
         wanShapes(transformer, sequence),
       );
-      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      const { rows, stable } = stableFusionCandidates(plan.steps, context);
+      assertEquals(stable, true, `${label}: precondition — the stable search stabilised`);
       assertEquals(
         rows.filter((row) => row.hitLimit).map((row) => row.form),
         [],
