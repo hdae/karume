@@ -15,6 +15,7 @@
 
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { stridedKey } from "../src/codegen/strided.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { attentionOnlineKeyWords } from "../src/kernels/attention-online-i8a8.ts";
@@ -23,10 +24,12 @@ import { TRANSPOSE_TILED_KEY } from "../src/kernels/transpose-tiled.ts";
 import { attentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
 import {
   createSessionFromContainer,
+  type Session,
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase, assertWordIdentity } from "./helpers/kernel-check-assert.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
 import { type CensusRow, countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 
@@ -91,13 +94,48 @@ const permutedAttentionGraph = (shape: Shape, interpose: boolean): DeclarationJs
   };
 };
 
-const words = (tensor: Tensor): Uint32Array =>
+const words = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
 type Observed = {
-  readonly output: Uint32Array;
+  readonly output: Uint32Array<ArrayBuffer>;
   readonly census: readonly CensusRow[];
-  readonly absorbed: number | undefined;
+};
+
+const openGraph = async (
+  gpu: GpuContext,
+  shape: Shape,
+  interpose: boolean,
+  options: SessionOptions,
+): Promise<Session> =>
+  await createSessionFromContainer(
+    gpu,
+    await openGraphModel(permutedAttentionGraph(shape, interpose)),
+    GRAPH_NAME,
+    options,
+  );
+
+const feedsOf = (shape: Shape): Readonly<Record<string, Tensor>> => {
+  const { b, h, s, n, d } = shape;
+  return {
+    qt: fill([b, s, h, d], (i) => Math.sin(i * 0.37) * 1.7 + ((i % 13) - 6) / 9),
+    kt: fill([b, n, h, d], (i) => Math.cos(i * 0.23) * 1.3 + ((i % 7) - 3) / 7),
+    vt: fill([b, n, h, d], (i) => Math.sin(i * 0.11 + 1) * 2.1 + ((i % 5) - 2) / 3),
+  };
+};
+
+/** Runs `session` once on the shape's inputs: its output words and its census. */
+const observe = async (session: Session, shape: Shape, interpose: boolean): Promise<Observed> => {
+  const outputs = await session.run(feedsOf(shape));
+  const ot = outputs["ot"];
+  assert(ot !== undefined, "the attention output is missing");
+  return {
+    output: words(ot),
+    census: requireCensus(
+      session.diagnostics().lastRunPipelines,
+      interpose ? "reference" : "absorbed",
+    ),
+  };
 };
 
 const runGraph = async (
@@ -106,27 +144,9 @@ const runGraph = async (
   interpose: boolean,
   options: SessionOptions,
 ): Promise<Observed> => {
-  const { b, h, s, n, d } = shape;
-  const session = await createSessionFromContainer(
-    gpu,
-    await openGraphModel(permutedAttentionGraph(shape, interpose)),
-    GRAPH_NAME,
-    options,
-  );
+  const session = await openGraph(gpu, shape, interpose, options);
   try {
-    const outputs = await session.run({
-      qt: fill([b, s, h, d], (i) => Math.sin(i * 0.37) * 1.7 + ((i % 13) - 6) / 9),
-      kt: fill([b, n, h, d], (i) => Math.cos(i * 0.23) * 1.3 + ((i % 7) - 3) / 7),
-      vt: fill([b, n, h, d], (i) => Math.sin(i * 0.11 + 1) * 2.1 + ((i % 5) - 2) / 3),
-    });
-    const ot = outputs["ot"];
-    assert(ot !== undefined, "the attention output is missing");
-    const diagnostics = session.diagnostics();
-    return {
-      output: words(ot),
-      census: requireCensus(diagnostics.lastRunPipelines, interpose ? "reference" : "absorbed"),
-      absorbed: diagnostics.lastRunFusions?.attentionPermute,
-    };
+    return await observe(session, shape, interpose);
   } finally {
     await session.dispose();
   }
@@ -154,13 +174,6 @@ const dispatchesOf = (census: readonly CensusRow[]): Dispatches => ({
   ),
   total: countDispatches(census, () => true),
 });
-
-const assertSameWords = (actual: Uint32Array, expected: Uint32Array, where: string): void => {
-  assertEquals(actual.length, expected.length, `${where}: length`);
-  let differing = 0;
-  for (let i = 0; i < actual.length; i += 1) if (actual[i] !== expected[i]) differing += 1;
-  assertEquals(differing, 0, `${where}: differing words`);
-};
 
 type Route = {
   readonly name: string;
@@ -343,20 +356,31 @@ describe.skipIf(!GPU_AVAILABLE)(
               `${route.name}: route`,
             );
           }
-          const absorbed = await runGraph(gpu, route.shape, false, route.options);
-          const reference = await runGraph(gpu, route.shape, true, route.options);
-          assertEquals(
-            absorbed.absorbed,
-            route.absorbedPermutes,
-            `${route.name}: absorbed counter`,
-          );
-          assertEquals(reference.absorbed, 0, `${route.name}: reference counter`);
+          const absorbedSession = await openGraph(gpu, route.shape, false, route.options);
+          const referenceSession = await openGraph(gpu, route.shape, true, route.options);
+          let absorbed: Observed;
+          let reference: Observed;
+          try {
+            assertCheckCase(
+              await checkFusionTwin(gpu, {
+                label: `${route.name}: absorbed vs reference`,
+                fused: absorbedSession,
+                plain: referenceSession,
+                feeds: feedsOf(route.shape),
+                counter: "attentionPermute",
+                hits: route.absorbedPermutes,
+                nan: "payload",
+              }),
+            );
+            // The output words and the census, from a run of each side of its own (the harness
+            // returns a case).
+            absorbed = await observe(absorbedSession, route.shape, false);
+            reference = await observe(referenceSession, route.shape, true);
+          } finally {
+            await absorbedSession.dispose();
+            await referenceSession.dispose();
+          }
           assert(new Set(reference.output).size > 1, `${route.name}: the output is constant`);
-          assertSameWords(
-            absorbed.output,
-            reference.output,
-            `${route.name}: absorbed vs reference`,
-          );
           const keys = (census: readonly CensusRow[]): string =>
             census.map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
           assertEquals(
@@ -380,9 +404,10 @@ describe.skipIf(!GPU_AVAILABLE)(
               keys(threeDispatch.census),
               `${route.name}: the a8 × "f32" census`,
             );
-            assertSameWords(
+            assertWordIdentity(
               absorbed.output,
               threeDispatch.output,
+              "payload",
               `${route.name}: absorbed vs a8 × "f32"`,
             );
           } else if (route.options.attentionScoreStorage === "none") {
