@@ -93,6 +93,16 @@ export {
   checkAttentionPermuteTwins,
   permutedAttentionGraph,
 } from "./src/fusion-twins/attention-permute.ts";
+export {
+  checkRowBlockAttentionTwins,
+  ROW_BLOCK_ATTENTION_TWIN_CASES,
+  ROW_BLOCK_SHAPES,
+  ROW_BLOCK_SPLITS,
+  rowBlockAttentionGraph,
+  rowBlockAttentionInputs,
+  rowBlockBudget,
+  type RowBlockShape,
+} from "./src/fusion-twins/row-block-attention.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
