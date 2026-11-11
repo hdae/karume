@@ -7,7 +7,8 @@
  *
  * The caller builds both Sessions, in whichever way gives the plain plan of the same values: a twin
  * graph with a zero-dispatch reshape interposed (the exact matcher stops matching), an opt-in present
- * on one side only, a forced split, or the test-only `DISABLED_FUSION_RULES` key on the plain side.
+ * on one side only, a forced split, or the test-only `DISABLED_FUSION_RULES` key on the plain side
+ * (which takes an external rule's name on a Session that was given the rule).
  *
  * MUST: the plain side's counter is a criterion of its own. Two sides that both fuse would compare a
  * kernel with itself and pass with nothing checked.
@@ -43,7 +44,8 @@ export type FusionTwin = {
   readonly feeds: RunInputs;
   /**
    * The counter of `diagnostics().lastRunFusions` that shows the fusion — any key of the record, a
-   * rule's or an annotation counter.
+   * rule's or an annotation counter. An external rule (`SessionOptions.fusionRules`) counts under its
+   * `<namespace>/<rule>` name; give both sides the rule and disable it on the plain side by that name.
    */
   readonly counter: keyof FusionCounts;
   /** The count the fused side's counter MUST show over its run. */
