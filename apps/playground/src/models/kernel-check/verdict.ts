@@ -26,6 +26,7 @@ import type { RecordEnvironment } from "@/lib/environment";
 export const KERNEL_CHECK_IDS = [
   "gemv-subgroup32",
   "rms-subgroup32",
+  "rms-norm-prefetch",
   "state-attention-rewrites",
   "gemv-integer",
   "gemv-planes",

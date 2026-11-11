@@ -10,6 +10,7 @@ import {
   checkIntegerGemv,
   type CheckOptions,
   checkPlanesGemv,
+  checkRmsNormPrefetch,
   checkRmsSubgroup,
   checkStateAttentionRewrites,
   checkScoreF16Store,
@@ -18,6 +19,7 @@ import {
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
+  RMS_NORM_PREFETCH_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
@@ -61,6 +63,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: await checkRmsSubgroup(gpu, options),
       expectedCases: RMS_SUBGROUP_CASES,
+    }),
+  },
+  {
+    id: "rms-norm-prefetch",
+    title: "rms_norm: prefetch form vs runtime-trip form",
+    summary:
+      "The prefetch form of the 256-wide rms_norm and of both RMS → add orders against their runtime-trip v1 WGSL, u32 identity with NaN by payload (every multiple of 256 up to 4096 at rows 1 / 4 / 8 / 33, 768 rows at three widths, one workgroup per row and three; adversarial rows) (perf-ledger K-99).",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: await checkRmsNormPrefetch(gpu, options),
+      expectedCases: RMS_NORM_PREFETCH_CASES,
     }),
   },
   {

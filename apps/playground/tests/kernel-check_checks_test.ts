@@ -2,6 +2,7 @@ import {
   FUSION_TWIN_CASES,
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
+  RMS_NORM_PREFETCH_CASES,
   STATE_KV16_CASES,
 } from "@karume/kernel-checks";
 import { describe, expect, it } from "vite-plus/test";
@@ -12,6 +13,20 @@ import { KERNEL_CHECK_IDS } from "../src/models/kernel-check/verdict.ts";
 describe("the kernel-check page's checks", () => {
   it("has one check per id, in the order the verdicts and the record list them", () => {
     expect(KERNEL_CHECKS.map(({ id }) => id)).toEqual([...KERNEL_CHECK_IDS]);
+  });
+
+  it("runs the rms_norm prefetch check on any device, one part per compared kernel", () => {
+    const check = KERNEL_CHECKS.find(({ id }) => id === "rms-norm-prefetch");
+    expect(check?.title).toBe("rms_norm: prefetch form vs runtime-trip form");
+    expect(check?.needsSubgroups).toBe(false);
+    expect(KERNEL_CHECK_IDS.indexOf("rms-norm-prefetch")).toBe(
+      KERNEL_CHECK_IDS.indexOf("rms-subgroup32") + 1,
+    );
+    expect(Object.keys(RMS_NORM_PREFETCH_CASES)).toEqual([
+      "rms-prefetch-plain",
+      "rms-prefetch-add-norm-residual",
+      "rms-prefetch-add-residual-norm",
+    ]);
   });
 
   it("runs the integer GEMV check on any device, against the case count the check exports", () => {

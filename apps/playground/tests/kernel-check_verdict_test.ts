@@ -241,6 +241,7 @@ describe("overallVerdict", () => {
       overallVerdict({
         "gemv-subgroup32": passed,
         "rms-subgroup32": passed,
+        "rms-norm-prefetch": passed,
         "state-attention-rewrites": passed,
         "gemv-integer": passed,
         "gemv-planes": passed,
@@ -259,6 +260,7 @@ describe("overallVerdict", () => {
     expect(notRunChecks({ "state-attention-rewrites": passed })).toEqual([
       "gemv-subgroup32",
       "rms-subgroup32",
+      "rms-norm-prefetch",
       "gemv-integer",
       "gemv-planes",
       "state-kv16",
@@ -274,6 +276,7 @@ describe("overallVerdict", () => {
       overallVerdict({
         "gemv-subgroup32": { kind: "not-available", reason: "no subgroups" },
         "rms-subgroup32": passed,
+        "rms-norm-prefetch": passed,
         "state-attention-rewrites": passed,
         "gemv-integer": passed,
         "gemv-planes": passed,
@@ -342,6 +345,7 @@ describe("a part the device cannot run (notRun)", () => {
       overallVerdict({
         "gemv-subgroup32": passed,
         "rms-subgroup32": passed,
+        "rms-norm-prefetch": passed,
         "state-attention-rewrites": passed,
         "gemv-integer": passed,
         "gemv-planes": passed,
@@ -359,6 +363,7 @@ describe("withoutOutcomes", () => {
   const everyCheckPassed = {
     "gemv-subgroup32": passed,
     "rms-subgroup32": passed,
+    "rms-norm-prefetch": passed,
     "state-attention-rewrites": passed,
     "gemv-integer": passed,
     "gemv-planes": passed,
@@ -381,6 +386,7 @@ describe("withoutOutcomes", () => {
       withoutOutcomes({ ...everyCheckPassed, "gemv-subgroup32": failed }, ["rms-subgroup32"]),
     ).toEqual({
       "gemv-subgroup32": failed,
+      "rms-norm-prefetch": passed,
       "state-attention-rewrites": passed,
       "gemv-integer": passed,
       "gemv-planes": passed,

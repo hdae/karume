@@ -73,6 +73,7 @@ describe("kernelCheckRecord", () => {
     expect(record.checks.map(({ id, verdict }) => [id, verdict])).toEqual([
       ["gemv-subgroup32", "not-available"],
       ["rms-subgroup32", "not-run"],
+      ["rms-norm-prefetch", "not-run"],
       ["state-attention-rewrites", "fail"],
       ["gemv-integer", "not-run"],
       ["gemv-planes", "not-run"],
@@ -92,7 +93,7 @@ describe("kernelCheckRecord", () => {
   });
 
   it("keeps every case with its criteria, the part summary, the mutants and the fold classes", () => {
-    const check = record.checks[2];
+    const check = record.checks.find(({ id }) => id === "state-attention-rewrites");
     if (check?.verdict !== "fail") throw new Error("expected the failing check");
     const [part] = check.parts;
     expect(part?.results).toEqual(PART.cases);
@@ -107,7 +108,7 @@ describe("kernelCheckRecord", () => {
   });
 
   it("names the counts that differ from what the check exports (here the missing mutant matrix)", () => {
-    const check = record.checks[2];
+    const check = record.checks.find(({ id }) => id === "state-attention-rewrites");
     if (check?.verdict !== "fail") throw new Error("expected the failing check");
     expect(check.countMismatches).toEqual(["mutant matrix rows: 0, expected 1"]);
   });
