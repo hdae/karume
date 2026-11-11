@@ -19,11 +19,13 @@ import { isNotFound, stat } from "@karume/test-support/fs";
 import type { IrGraph } from "../../../runtime/src/format/ir.ts";
 import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
-  FUSION_RULES,
+  type ExternalRuleName,
   type FusionContext,
   type FusionCounts,
   type FusionPlan,
+  type FusionRuleName,
   planFusions,
+  sessionFusionRules,
 } from "../../../runtime/src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../../../runtime/src/runtime/plan.ts";
 import {
@@ -120,10 +122,12 @@ export const readDistributionGraph = (
  * the a8 attention seat, the output permute only on the online route (`attentionScoreStorage:
  * "none"` with the device facts). The test-only {@link DISABLED_FUSION_RULES} plans with rules
  * left out (`"all"` = fusion off — the annotation folds stay, as on a Session), so a control can
- * plan the same graph unfused through the same path.
+ * plan the same graph unfused through the same path. `fusionRules` plans with rules written outside
+ * the runtime, first and in their order, as a Session given them would (ADR 0148).
  */
 export type FusionCountOptions = Pick<
   SessionOptions,
+  | "fusionRules"
   | "fuseRmsNormAdd"
   | "fuseLinearStaticQuantize"
   | "fuseGeluMulStaticQuantize"
@@ -198,7 +202,7 @@ const residentWeights = (graph: IrGraph): ReadonlyMap<string, ResidentWeightStor
 
 /** A plan of a distribution graph and the context it was planned under. */
 export type DistributionFusionPlan = {
-  readonly plan: FusionPlan;
+  readonly plan: FusionPlan<FusionRuleName | ExternalRuleName>;
   readonly context: FusionContext;
 };
 
@@ -220,7 +224,8 @@ export const planDistributionFusions = (
   stateShapes?: ReadonlyMap<string, readonly number[]>,
 ): DistributionFusionPlan => {
   const context = sessionFusionContext({
-    rules: FUSION_RULES,
+    // The Session's own composition and checks of `fusionRules` (the built-in rules alone without it).
+    rules: sessionFusionRules(options.fusionRules),
     knobs: sessionKnobs(options),
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
@@ -262,7 +267,14 @@ export const decodeFusionCounts = (
   graph: IrGraph,
   rows: number,
   options: FusionCountOptions = {},
-): FusionCounts => {
+): FusionCounts => decodeFusionPlan(graph, rows, options).plan.counts;
+
+/** The plan behind {@link decodeFusionCounts} (the same shapes), for a check that reads its steps. */
+export const decodeFusionPlan = (
+  graph: IrGraph,
+  rows: number,
+  options: FusionCountOptions = {},
+): DistributionFusionPlan => {
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
       spec.name,
@@ -275,7 +287,7 @@ export const decodeFusionCounts = (
       slot.shape.map((dim) => (typeof dim === "number" ? dim : 640)),
     ]),
   );
-  return fusionCounts(graph, inputShapes, options, undefined, stateShapes);
+  return planDistributionFusions(graph, inputShapes, options, undefined, stateShapes);
 };
 
 /** Every built-in counter at 0 (the checks spread their expected hits over it). */
