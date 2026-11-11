@@ -20,7 +20,9 @@ import type { IrGraph } from "../../../runtime/src/format/ir.ts";
 import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
   FUSION_RULES,
+  type FusionContext,
   type FusionCounts,
+  type FusionPlan,
   planFusions,
 } from "../../../runtime/src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../../../runtime/src/runtime/plan.ts";
@@ -181,11 +183,52 @@ const residentWeights = (graph: IrGraph): ReadonlyMap<string, ResidentWeightStor
     }),
   );
 
+/** A plan of a distribution graph and the context it was planned under. */
+export type DistributionFusionPlan = {
+  readonly plan: FusionPlan;
+  readonly context: FusionContext;
+};
+
 /**
- * The fusion hit counts of a graph planned as a Session with `options` would plan it (the context
- * from the executor's own `sessionFusionContext`). `attentionDevice` is the device facts of the
- * online attention route, needed only on the online seat.
+ * The plan of a graph as a Session with `options` would plan it (the context from the executor's
+ * own `sessionFusionContext`). `attentionDevice` is the device facts of the online attention route,
+ * needed only on the online seat.
+ *
+ * MUST: every reader of a distribution plan (the hit counts below, the fusion candidate search in
+ * `./fusion-candidates.ts`) plans through here. Two planning paths would let one of them plan under
+ * a stale context (limits, weight storage, seats), and its table would describe a plan no Session
+ * makes.
  */
+export const planDistributionFusions = (
+  graph: IrGraph,
+  inputShapes: Readonly<Record<string, readonly number[]>>,
+  options: FusionCountOptions = {},
+  attentionDevice?: AttentionDeviceFacts,
+  stateShapes?: ReadonlyMap<string, readonly number[]>,
+): DistributionFusionPlan => {
+  const context = sessionFusionContext({
+    rules: FUSION_RULES,
+    knobs: sessionKnobs(options),
+    useCounts: countUses(graph),
+    outputNames: new Set(graph.outputs),
+    // Decide against the WebGPU core default (128MiB). The row-block count does not affect the
+    // hit counts, but **not taking the limit from the machine's measured value** keeps this check
+    // fixed and independent of the machine.
+    limits: {
+      maxStorageBufferBindingSize: 128 * 1024 * 1024,
+      maxComputeWorkgroupsPerDimension: 65535,
+    },
+    ...(attentionDevice === undefined ? {} : { attentionDevice }),
+    residentWeights: residentWeights(graph),
+  });
+  const plan = planFusions(
+    planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes,
+    context,
+  );
+  return { plan, context };
+};
+
+/** The fusion hit counts of {@link planDistributionFusions}. */
 export const fusionCounts = (
   graph: IrGraph,
   inputShapes: Readonly<Record<string, readonly number[]>>,
@@ -193,24 +236,7 @@ export const fusionCounts = (
   attentionDevice?: AttentionDeviceFacts,
   stateShapes?: ReadonlyMap<string, readonly number[]>,
 ): FusionCounts =>
-  planFusions(
-    planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes,
-    sessionFusionContext({
-      rules: FUSION_RULES,
-      knobs: sessionKnobs(options),
-      useCounts: countUses(graph),
-      outputNames: new Set(graph.outputs),
-      // Decide against the WebGPU core default (128MiB). The row-block count does not affect the
-      // hit counts, but **not taking the limit from the machine's measured value** keeps this check
-      // fixed and independent of the machine.
-      limits: {
-        maxStorageBufferBindingSize: 128 * 1024 * 1024,
-        maxComputeWorkgroupsPerDimension: 65535,
-      },
-      ...(attentionDevice === undefined ? {} : { attentionDevice }),
-      residentWeights: residentWeights(graph),
-    }),
-  ).counts;
+  planDistributionFusions(graph, inputShapes, options, attentionDevice, stateShapes).plan.counts;
 
 /**
  * Fusion hit counts of a decode graph with states (planned for a given physical chunk row count M).
