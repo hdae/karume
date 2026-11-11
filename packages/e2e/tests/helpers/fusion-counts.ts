@@ -238,6 +238,12 @@ export const planDistributionFusions = (
     },
     ...(attentionDevice === undefined ? {} : { attentionDevice }),
     residentWeights: residentWeights(graph),
+    // The borrowed weights (the expert pool is not planned here: no option of this helper sets it).
+    sharedOrPooledWeights: new Set(
+      [...planWeightResidency(graph)].flatMap(([name, weight]) =>
+        weight.seat === "shared" ? [name] : [],
+      ),
+    ),
   });
   const plan = planFusions(
     planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes,

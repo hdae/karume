@@ -392,6 +392,14 @@ export type FusionContext<Name extends string = string> = {
    */
   readonly attentionDevice?: AttentionDeviceFacts;
   readonly weightLayouts?: ReadonlyMap<string, FusionWeightLayout>;
+  /**
+   * The weights whose bound buffer is not the tensor's own f32 words: resident in compressed form
+   * (f16 / bf16 / i8 / i4 / i2), borrowed from another Session, or held in the expert cache's pool
+   * (`sessionFusionContext` in {@link "./session-fusion-context.ts"} derives it). Only external
+   * rules read it: their step is not taken when it binds one, because an external kernel reads every
+   * bind as f32 words. Omitted = no such weight.
+   */
+  readonly weightsNotF32?: ReadonlySet<string>;
   readonly rmsNormReduce?: "workgroup" | "subgroup32";
 };
 
@@ -899,13 +907,16 @@ const assertExternalWindow = (
  * MUST: every bind is an external input of the chain, once. The release bookkeeping rests on the
  * chain's inputs alone (`ins`), so a bind outside them could be released, and its buffer reused,
  * before the step reads it — a silent wrong value. MUST: the output is the chain's last value with
- * its shape (consumers read that name, and the buffer is sized from the shape) with at least one
- * element (each dispatch's counts are checked to be positive where the recipe builder resolves
- * them, `assertExternalWorkgroups` in recipe-builder.ts), and at least one
- * dispatch binds it (its `operands` omitted — the output is then the last binding — or holding
- * `{ kind: "output" }`). Which bindings a dispatch writes is known only from its WGSL, so the
- * recipe builder checks, when it fetches the pipeline, that an external dispatch writes nothing but
- * the output and the step's temporaries (`assertExternalWrites` in recipe-builder.ts). MUST: every
+ * its shape (consumers read that name, and the buffer is sized from the shape — a chain whose
+ * output has no element is not taken, `applyRule`, since each dispatch's counts are checked to be
+ * positive where the recipe builder resolves them, `assertExternalWorkgroups` in recipe-builder.ts),
+ * and at least one dispatch binds it (its `operands` omitted — the output is then the last binding —
+ * or holding `{ kind: "output" }`). Which bindings a dispatch writes is known only from its WGSL, so
+ * the recipe builder checks, when it fetches the pipeline, that an external dispatch writes nothing
+ * but the output and the step's temporaries (`assertExternalWrites` in recipe-builder.ts). MUST: no
+ * operand is a `weightScale`. An external kernel reads every buffer as f32 words, and a resident
+ * scale belongs to a weight stored in another form (a weight an external step binds is resident as
+ * f32, or the step is not taken — `applyRule`). MUST: every
  * dispatch key starts with `ext:<namespace>:`. The pipeline cache is one per device and shared by
  * every Session; the prefix keeps an external rule's keys out of the built-in kernels' and another
  * namespace's (two different WGSL bodies under one key still fail as `PipelineKeyConflictError`, the
@@ -934,12 +945,6 @@ const assertExternalBuild = (
         ` folded chain's last value '${last.name}' [${last.shape.join(",")}]`,
     );
   }
-  if (numel(built.outputShape) === 0) {
-    throw new ExecutionError(
-      `fusion rule '${name}': the output '${built.outputName}' [${built.outputShape.join(",")}] has no element` +
-        " (an external step's dispatches would run no workgroup, so its value must hold one)",
-    );
-  }
   if (built.dispatches.length === 0) {
     throw new ExecutionError(`fusion rule '${name}': the step declares no dispatch`);
   }
@@ -952,6 +957,15 @@ const assertExternalBuild = (
     throw new ExecutionError(
       `fusion rule '${name}': no dispatch binds the step's output '${built.outputName}' (its buffer would never be` +
         " written, and its consumers would read stale data)",
+    );
+  }
+  const scaled = built.dispatches.findIndex(
+    (dispatch) => dispatch.operands?.some((operand) => operand.kind === "weightScale") === true,
+  );
+  if (scaled >= 0) {
+    throw new ExecutionError(
+      `fusion rule '${name}': dispatch ${scaled} ('${String(built.dispatches[scaled].key)}') binds a weightScale` +
+        " operand (an external step binds f32 values only: its inputs, its output and its temporaries)",
     );
   }
   const prefix = `ext:${namespace}:`;
@@ -987,6 +1001,11 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
     // to refuse would read them as f32 silently. Such a window is not taken (the unfused plan is
     // always correct), as the built-in matchers decline it.
     if (!allF32(matched.chain)) return undefined;
+    // A chain whose output has no element is not taken either: the binding sized it, not the rule,
+    // and the unfused plan runs it (the recipe builder refuses an external dispatch of zero groups).
+    if (matched.chain[matched.chain.length - 1].outputs.some((out) => numel(out.shape) === 0)) {
+      return undefined;
+    }
   }
   // After fusion no buffer for an internal value exists, so a consumer outside the chain or a
   // readback would lose it.
@@ -1019,7 +1038,17 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
   // A standalone call, `this` undefined ({@link snapshotDefinition}).
   const built = Reflect.apply(rule.build, undefined, [matched]);
   assertTempLifetimes(rule.name, built.temps, built.dispatches.length);
-  if (namespace !== undefined) assertExternalBuild(rule.name, namespace, matched.chain, built);
+  if (namespace !== undefined) {
+    assertExternalBuild(rule.name, namespace, matched.chain, built);
+    // A bind that is a weight not resident as f32 (stored compressed, borrowed, or held in the
+    // expert pool) is not taken: an external kernel reads every bind as f32 words, and the IR dtype
+    // of such a weight is f32 all the same, so `allF32` passes it. The storage is the Session's
+    // decision, not the rule's, so the window stays unfused (the unfused plan reads it correctly).
+    const weightsNotF32 = context.weightsNotF32;
+    if (weightsNotF32 !== undefined && built.binds.some((bind) => weightsNotF32.has(bind))) {
+      return undefined;
+    }
+  }
   return {
     passthrough: deferring ? [] : others,
     deferred: deferring ? others : [],

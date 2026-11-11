@@ -2563,6 +2563,14 @@ export class Session {
         limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
         attentionDevice: this.#state.attentionDevice,
         residentWeights: this.#state.residentWeights,
+        sharedOrPooledWeights: new Set([
+          ...[...this.#state.residency].flatMap(([name, residency]) =>
+            residency.seat === "shared" ? [name] : [],
+          ),
+          ...(this.#state.expertPool?.layers.flatMap((layer) =>
+            layer.weights.map((weight) => weight.name),
+          ) ?? []),
+        ]),
       }),
     );
     return { shapes: plan.shapes, fusions: fusion.counts, steps: fusion.steps };

@@ -62,6 +62,13 @@ export type SessionFusionFacts<Name extends string> = {
    */
   readonly attentionDevice?: AttentionDeviceFacts;
   readonly residentWeights: ReadonlyMap<string, ResidentWeightStorage>;
+  /**
+   * The weights whose buffer is not this Session's own copy of the tensor: borrowed from another
+   * Session (`SessionOptions.sharedWeights`, ADR 0096) or held in the expert cache's pool (ADR 0146 —
+   * its buffer holds slots, not the tensor). With {@link residentWeights} they are the weights an
+   * external rule's step may not bind (`FusionContext.weightsNotF32`).
+   */
+  readonly sharedOrPooledWeights: ReadonlySet<string>;
 };
 
 /**
@@ -121,6 +128,8 @@ export const sessionFusionContext = <Name extends string>(
     attentionScoreStorage: knobs.attentionScoreStorage,
     ...(facts.attentionDevice === undefined ? {} : { attentionDevice: facts.attentionDevice }),
     ...(weightLayouts === undefined ? {} : { weightLayouts }),
+    // Every stored form but f32 (i4f16 included), whatever the knobs: only external rules read it.
+    weightsNotF32: new Set([...facts.residentWeights.keys(), ...facts.sharedOrPooledWeights]),
     rmsNormReduce: knobs.rmsNormReduce,
     outputNames: facts.outputNames,
     limits: facts.limits,

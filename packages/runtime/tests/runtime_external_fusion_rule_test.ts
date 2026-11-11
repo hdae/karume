@@ -23,7 +23,7 @@ import {
   type FusionRuleDefinition,
   ruleOrigin,
 } from "../src/runtime/fusion-rule.ts";
-import { type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
+import { type FusionContext, type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
 import {
   bindSymbols,
   countUses,
@@ -160,11 +160,15 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
   },
 });
 
-/** `rewrite` changes the planned nodes (a dtype the graph's declaration cannot carry). */
+/**
+ * `rewrite` changes the planned nodes (a dtype the graph's declaration cannot carry); `facts` are
+ * the Session facts the context carries besides the graph's.
+ */
 const plan = (
   rules: readonly FusionRule[],
   rewrite: (node: NodePlan) => NodePlan = (node) => node,
   declaration: DeclarationJson = NEG_NEG_GRAPH,
+  facts: Pick<FusionContext, "weightsNotF32"> = {},
 ): FusionPlan<string> => {
   const graph = mergeGraph(declaration);
   const nodes = planGraph(graph, bindSymbols(graph, { x: SHAPE, z: SHAPE })).nodes.map(rewrite);
@@ -176,6 +180,7 @@ const plan = (
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxComputeWorkgroupsPerDimension: 65535,
     },
+    ...facts,
   });
 };
 
@@ -466,16 +471,44 @@ describe("an external rule building a step", () => {
     );
   });
 
-  it("fails loudly on a step whose output has no element", () => {
+  it("does not fold a chain whose output has no element (the binding sized it, not the rule)", () => {
+    const folded = plan([defineExternalRule(negNeg("test/neg_neg"))], (node) =>
+      node.outputs[0].name === "n2"
+        ? { ...node, outputs: node.outputs.map((out) => ({ ...out, shape: [0, 8] })) }
+        : node,
+    );
+    assertEquals(
+      folded.steps.map((step) => (step.kind === "fused" ? step.rule : step.plan.node.op)),
+      ["abs", "neg", "neg"],
+    );
+    assertEquals(folded.counts["test/neg_neg"], 0);
+  });
+
+  it("does not fold a chain whose step binds a weight not resident as f32 (stored in another form, borrowed or pooled)", () => {
+    // The Session lists those weights by name (`sessionFusionContext`); the name is all the pass reads.
+    const rule = defineExternalRule(negNeg("test/neg_neg"));
+    const kept = plan([rule], undefined, NEG_NEG_GRAPH, { weightsNotF32: new Set(["z"]) });
+    assertEquals(
+      kept.steps.map((step) => (step.kind === "fused" ? step.rule : step.plan.node.op)),
+      ["abs", "neg", "neg"],
+    );
+    assertEquals(kept.counts["test/neg_neg"], 0);
+    const folded = plan([rule], undefined, NEG_NEG_GRAPH, { weightsNotF32: new Set(["x"]) });
+    assertEquals(folded.counts["test/neg_neg"], 1, "the control: a weight the step does not bind");
+  });
+
+  it("fails loudly on a step that binds a weightScale operand (an external kernel reads f32 values only)", () => {
     assertThrows(
       () =>
-        plan([defineExternalRule(negNeg("test/neg_neg"))], (node) =>
-          node.outputs[0].name === "n2"
-            ? { ...node, outputs: node.outputs.map((out) => ({ ...out, shape: [0, 8] })) }
-            : node,
-        ),
+        plan([
+          defineExternalRule(
+            negNeg("test/neg_neg", {
+              operands: [{ kind: "weightScale", index: 0 }, { kind: "output" }],
+            }),
+          ),
+        ]),
       ExecutionError,
-      "the output 'n2' [0,8] has no element",
+      "fusion rule 'test/neg_neg': dispatch 0 ('ext:test:neg_neg') binds a weightScale operand",
     );
   });
 

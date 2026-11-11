@@ -51,6 +51,7 @@ const contextOf = (knobs: Partial<SessionFusionKnobs>) =>
       maxComputeWorkgroupsPerDimension: 65535,
     },
     residentWeights: RESIDENT,
+    sharedOrPooledWeights: new Set(["w_borrowed", "w_pooled"]),
   });
 
 describe("sessionFusionContext", () => {
@@ -69,6 +70,15 @@ describe("sessionFusionContext", () => {
           ["w_bf16", { storage: "bf16" }],
         ]),
         label,
+      );
+    }
+  });
+
+  it("lists every weight not resident as f32 for the external rules, whatever the knobs: each stored form but f32, borrowed and pooled", () => {
+    for (const knobs of [{}, { fuseLinearStaticQuantize: true }] as const) {
+      assertEquals(
+        contextOf(knobs).weightsNotF32,
+        new Set(["w_i8", "w_i4", "w_bf16", "w_expert", "w_borrowed", "w_pooled"]),
       );
     }
   });

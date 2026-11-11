@@ -340,11 +340,8 @@ const assertExternalWrites = (
   for (const [slot, operand] of operands.entries()) {
     if (!roles.writes.has(slot + 1) || operand.kind === "output" || operand.kind === "temp")
       continue;
-    const name = step.binds[operand.index];
-    refuse(
-      slot + 1,
-      operand.kind === "bind" ? `the input '${name}'` : `the resident scale of '${name}'`,
-    );
+    // An external step binds no weightScale (refused when the step is planned), so it is an input.
+    refuse(slot + 1, `the input '${step.binds[operand.index]}'`);
   }
 };
 
