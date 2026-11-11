@@ -4,11 +4,13 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // A length that leaves a partial 256-thread workgroup.
@@ -98,23 +100,6 @@ const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): Declaration
 const words = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
-
-/**
- * Non-NaN values must be bit-identical; NaN only has to match in class, allowing backend
- * differences.
- */
-const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
-  assertEquals(actual.length, expected.length, label + ": length");
-  for (let i = 0; i < actual.length; i++) {
-    if (isNanWord(expected[i])) {
-      assertEquals(isNanWord(actual[i]), true, `${label}: NaN classification index=${i}`);
-    } else {
-      assertEquals(actual[i], expected[i], `${label}: word index=${i}`);
-    }
-  }
-};
-
 const testInput = (): Tensor => {
   const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
   // Mix finite values, signed zeros, subnormals, the smallest normal, the overflow boundary, ±Inf
@@ -145,22 +130,20 @@ test.skipIf(!GPU_AVAILABLE)(
           GRAPH_NAME,
         );
         try {
-          const fusedOut = (await fused.run({ x })).y;
-          const primitiveOut = (await primitive.run({ x })).y;
-          assertFloatParity(words(fusedOut), words(primitiveOut), `${order}: fused vs primitive`);
-          assertEquals(fused.diagnostics().submit.dispatchCount, 1, `${order}: fused 1 dispatch`);
-          assertEquals(
-            primitive.diagnostics().submit.dispatchCount,
-            2,
-            `${order}: sigmoid + mul primitive`,
-          );
           // If fusion silently stopped applying, the values would stay correct and only the
           // dispatch count would grow. Pin it directly with the counter.
-          assertEquals(fused.diagnostics().lastRunFusions?.silu, 1, `${order}: fusion counter`);
-          assertEquals(
-            primitive.diagnostics().lastRunFusions?.silu,
-            0,
-            `${order}: the counter of the counterexample is 0`,
+          assertCheckCase(
+            await checkFusionTwin(gpu, {
+              label: `${order}: fused vs primitive`,
+              fused,
+              plain: primitive,
+              feeds: { x },
+              counter: "silu",
+              hits: 1,
+              nan: "class",
+              // One dispatch against sigmoid + mul.
+              dispatches: { fused: 1, plain: 2 },
+            }),
           );
           assertEquals(
             requireCensus(fused.diagnostics().lastRunPipelines, order).map((row) => row.key),
@@ -194,12 +177,20 @@ test.skipIf(!GPU_AVAILABLE)(
       GRAPH_NAME,
     );
     try {
-      const fusedOut = await fused.run({ x });
-      const primitiveOut = await primitive.run({ x });
-      assertFloatParity(words(fusedOut.y), words(primitiveOut.y), "SiLU output");
-      assertFloatParity(words(fusedOut.x_copy), words(primitiveOut.x_copy), "late x consumer");
-      assertEquals(fused.diagnostics().submit.dispatchCount, 2, "SiLU + late consumer");
-      assertEquals(primitive.diagnostics().submit.dispatchCount, 3, "primitive + late consumer");
+      // Both outputs: the SiLU output and the late x consumer.
+      assertCheckCase(
+        await checkFusionTwin(gpu, {
+          label: "SiLU and the late x consumer",
+          fused,
+          plain: primitive,
+          feeds: { x },
+          counter: "silu",
+          hits: 1,
+          nan: "class",
+          // SiLU + late consumer against the primitives + late consumer.
+          dispatches: { fused: 2, plain: 3 },
+        }),
+      );
     } finally {
       await fused.dispose();
       await primitive.dispose();
