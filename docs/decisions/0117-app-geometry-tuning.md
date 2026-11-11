@@ -642,7 +642,7 @@ fusion rules from outside the runtime — [0148](0148-external-fusion-rules.md) 
 This addendum records its two rulings on `./tune`.
 
 - **What changed**: `./tune` gains `runSessionAb(options)`, `sessionArm(options)`, `sessionAbStatistics(record)`,
-  `judgeSessionAb(record, options)` and their types (the arm, its run, the environment, the record
+  `judgeSessionAb(record, options)` and their types (the arm, its run, its report, the environment, the record
   `karume-session-ab/1` and its parts, the comparison, the verdict and the judge's options), and `wordIdentity`
   with `NanPolicy`, `WordIdentity` and `WordMismatch`.
 - **Ruling 1: the comparison of fusions is its own function and its own record, and a fusion is accepted or dropped
@@ -654,23 +654,38 @@ This addendum records its two rulings on `./tune`.
   list, no fingerprint, no record format: a fusion case added to the sweep's case table would move the case-set id
   and every geometry profile's fingerprint (decision 4), so every table on every GPU would need a new sweep.
   - **The protocol**: an untimed warm-up round, then in every round the arms in order and in reverse order (A B B A),
-    so each arm is visited twice per round and a drift linear within the round cancels in each arm's round mean. The
-    wall clock (injectable, `performance.now` by default) spans the arm's run alone, its readback included; opening
-    and closing an arm are never timed, also when the arms are opened and closed around every visit (for models whose
-    two Sessions do not fit in memory together). Every visit's outputs are compared with the base arm's first outputs.
+    so each arm is visited twice per round and a drift linear within the round cancels in each arm's round mean, for
+    any number of arms. A cost of switching from one arm to another is balanced only for two arms: with three or more,
+    a middle arm follows another arm twice per round and the outer arms once. The wall clock (injectable,
+    `performance.now` by default) spans the arm's run alone, its readback included; opening and closing an arm are
+    never timed, also when the arms are opened and closed around every visit (for models whose two Sessions do not fit
+    in memory together). There a visit is open, one untimed run, the timed run, close: the first run of a fresh
+    Session derives its plan, which is not what the A/B measures. An arm's counts (fusion hits, dispatches) are read by
+    its optional `report` after the clock stopped (`sessionArm` reads the Session's diagnostics there, so nothing but
+    the Session's run is timed), and every run must report its arm's first run's counts: a plan that changes between
+    runs makes the A/B meaningless, so the runner refuses it. Every run's outputs, the untimed runs' included, are
+    compared with a copy of the base arm's first outputs, taken when they are captured; an output of another array
+    type fails whole, and a base whose first run returns no word is refused (an identity over nothing proves nothing).
+    A timed span the clock reads as not finite or negative is refused in the runner, in the judge's words.
   - **The statistics**: per round, the mean of each arm's two visits; the median of the paired differences; the gain
-    over the base's median round time; and the noise floor, the larger of the two arms' medians of |visit 1 − visit
-    2|. **The verdict** is `"inconclusive"` inside the noise floor, otherwise `"adopt"` at a gain of at least the
+    over the base's median round time; and the noise floor, the larger of the visit spread (the larger of the two
+    arms' medians over rounds of |visit 1 − visit 2|) and the delta spread (the median over rounds of |delta_r −
+    median delta|, which catches an arm whose speed moves from round to round while its two visits of a round agree).
+    The floor is conservative on purpose and does not shrink with the number of rounds: more rounds make the medians
+    steadier, they do not let a gain smaller than the jitter of one visit through. **The verdict** is
+    `"inconclusive"` inside the noise floor, otherwise `"adopt"` at a gain of at least the
     caller's `minGain`, otherwise `"reject"`; identity with the base is required by default (a class E rule — ADR
     0147 decision 2), and an arm that differs is `"reject"` whatever its times. The threshold is the caller's. A
     verdict holds for the record's device, backend and work only; `"inconclusive"` does not say the difference is zero.
   - **The record** carries what ADR 0147 decision 9 asks of per-GPU evidence: the adapter's four fields, the user
     agent, the backend's name as the caller states it (WebGPU does not expose it, so the runner does not infer it),
-    and a date the caller passes (the runner reads no clock for dates); per arm its fusion counts, dispatch count,
-    every raw time and its worst visit's identity.
+    and a date the caller passes (the runner reads no clock for dates; the adapter is copied field by field, so a
+    browser's `GPUAdapterInfo`, whose fields are accessors, can be passed as it is); per arm its fusion counts,
+    dispatch count, every raw time and its worst run's identity. The record holds no identity flag: the judge reads
+    identity from the worst run's failures, and refuses a malformed identity block by name.
   - **Arms**: `sessionArm` builds an arm from a prepared model, the GpuContext, Session options and feeds through the
-    public API; a caller with a pipeline (an LLM decode) passes its own `open` / `run` / `close` value, and the runner
-    never looks inside it.
+    public API; a caller with a pipeline (an LLM decode) passes its own `open` / `run` / `close` value, with an
+    optional `report`, and the runner never looks inside it.
   - The rule of decision 9 applies: never run it while other work uses the same GPU (the times would measure the
     contention; the runtime cannot see other work).
 - **Ruling 2: the part of the fused-vs-unfused check that the public API can express lives in `./tune`.** That part
@@ -683,10 +698,15 @@ This addendum records its two rulings on `./tune`.
   on its users' backends; the hand-made script of 2026-11-10 imported runtime internals to do it. The entries are
   high-level and of the rank decision 2 asks for: the runner, the arm builder and two pure functions of a record.
 - **Checks**: `packages/runtime/tests/tune_session_ab_test.ts` (synthetic arms and a fake clock: the three verdicts
-  with hand-checkable numbers, the visit order for two and three arms, open and close outside the timed spans in both
-  opening modes, closing on a failing run, the identity failures, the refusals, a record judged again after a JSON
-  round trip) and `packages/runtime/tests/gpu_session_ab_test.ts` (two `sessionArm`s on the GPU, without and with an
-  external test rule: identical outputs, the rule's hit and one dispatch fewer in the record; no verdict on real
-  times). Fault injections (each turned the first test red): the reverse half of the visit order dropped, the open
-  timed inside the span, the identity comparison skipped for the non-base arm, the noise floor forced to 0.
+  with hand-checkable numbers, each component of the noise floor deciding a verdict, the boundaries |median delta| =
+  floor and gain = `minGain`, the visit order for two and three arms, open, close, the report, the untimed run and the
+  reading of the outputs outside the timed spans in both opening modes, counts that change between runs refused,
+  closing on a failing run and on failing closes, the identity failures (another array type, a base that rewrites one
+  array, the untimed run), the refusals of the runner and of the judge, a record judged again after a JSON round
+  trip) and `packages/runtime/tests/gpu_session_ab_test.ts` (two `sessionArm`s on the GPU, without and with an
+  external test rule, the adapter passed as the `GPUAdapterInfo` itself: identical outputs, the rule's hit and one
+  dispatch fewer in the record; no verdict on real times). Fault injections (each turned the first test red): the
+  reverse half of the visit order dropped, the open timed inside the span, the identity comparison skipped for the
+  non-base arm, the noise floor forced to 0, the delta spread left out of the floor, the counts read inside the span,
+  the comparison of every run's counts removed, the untimed run of `openPerVisit` removed.
 - **Not in this addendum**: the playground's page that runs the A/B on real models, and running it on real weights.

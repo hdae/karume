@@ -1,5 +1,6 @@
 /**
- * In-app tuning of the GEMM tile geometry (`@karume/runtime/tune`).
+ * In-app tuning and measurement (`@karume/runtime/tune`): the GEMM tile geometry, the session A/B
+ * of whole runs, and the public u32 identity comparison.
  *
  * An application measures the tile geometries on the user's own device, derives a geometry profile
  * from the measurements, stores it, and passes it to the next `acquireGpu({ geometryProfile })`.
