@@ -705,3 +705,22 @@ applies wherever its chain matches, with no prerequisite option.)
   (1,106 → 1,036 dispatches), QAT E4B 10.02 → 9.85 (1,365 → 1,281); text identical. Not measured on
   D3D12 / Metal. A manifest that declares the flag needs a reader newer than 0.15.0; a reader with ADR 0147
   decision 5 rejects it (amended 2026-11-10).
+
+## Addendum (2026-11-11) — rules defined outside the runtime (ADR 0148)
+
+The rule list a plan uses is the Session's: the rules of `SessionOptions.fusionRules`, defined outside the runtime with the
+`defineRule` of `@karume/runtime/kernel`, in the order given, then `FUSION_RULES` (`sessionFusionRules` in
+`packages/runtime/src/runtime/fusion.ts` — ADR [0148](0148-external-fusion-rules.md) decisions 3 and 5).
+
+- **Decision 1** holds as before for the built-in list: `FUSION_RULES` stays one hand-written array, and its heads stay
+  disjoint but for the declared exceptions. An external rule is tried first at each index, so where it and a built-in
+  rule could take the same index, it takes it; the disjointness test covers the built-in list only.
+- **Every rule declares a contract class** (`contract`, ADR 0147 decision 2); the built-in rules declare E. `defineRule`
+  freezes and brands the rule it returns, and a Session takes only rules branded external.
+- **Decision 2's window checks** apply to external rules unchanged, and an external rule's step is held to what the
+  built-in rules keep by construction: its window starts where it was tried, it binds only its chain's own inputs, it
+  writes the chain's last value, and its dispatch keys start with `ext:<namespace>:`.
+- **Decision 3's counters**: `FusionCounts` keeps every built-in counter and gains an optional key per external rule
+  (`<namespace>/<rule>`); a Session given a rule counts it, 0 when it did not fire. The test-only `DISABLED_FUSION_RULES`
+  takes an external rule's name on a Session given that rule, which gives the plain side of a fused-against-unfused check.
+- The memory estimate plans without the external rules (ADR 0148 decision 8).

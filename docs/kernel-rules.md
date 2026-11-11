@@ -1,9 +1,9 @@
 # Kernel, fusion and numerics rules: cheat sheet
 
-This is a summary index of rules whose source of truth is the cited ADRs and docs; when this sheet and a source disagree, the source wins (point-in-time: 2026-11-10, after ADR [0147](decisions/0147-numerics-and-kernel-adoption.md) was accepted; line numbers in code cites are those of 2026-11-09 and drift).
+This is a summary index of rules whose source of truth is the cited ADRs and docs; when this sheet and a source disagree, the source wins (point-in-time: 2026-11-10, after ADR [0147](decisions/0147-numerics-and-kernel-adoption.md) was accepted, with checklist (d) and the rows on rules from outside the runtime added on 2026-11-11 for ADR [0148](decisions/0148-external-fusion-rules.md); line numbers in code cites are those of 2026-11-09 and drift).
 The numerics rules are ADR 0147, which supersedes ADR 0058 and ADR 0110. Several of its rules wait for code changes filed in the [backlog](backlog.md); where the code still behaves the old way, this sheet says "pending".
 
-Audience: anyone adding a kernel, a fusion rule, an IR op or a path that changes numbers.
+Audience: anyone adding a kernel, a fusion rule, an IR op or a path that changes numbers, inside the runtime or, as a fusion rule, outside it.
 RFC 2119 words (MUST / SHOULD / MAY) appear only where the source uses them; "by precedent" marks practice that no source requires.
 Paths are repository-relative; `ADR nnnn dN` means decision N of `docs/decisions/nnnn-*.md`.
 
@@ -21,6 +21,7 @@ Paths are repository-relative; `ADR nnnn dN` means decision N of `docs/decisions
 | Contract set | Landed together: `OP_CONTRACTS` (TS), Python `ops.py` / `shapes.py`, `fixtures/op-contracts.json`, CPU reference, golden `COVERAGE` | ADR 0059 d7; ADR 0007 |
 | Fusion rule / annotation | A plan-time matcher in `packages/runtime/src/runtime/fusion-rules/` that replaces nodes with a private kernel (a `FusedStep`); an annotation instead lets a consumer kernel absorb its producer (linear prologue, attention permutes) | ADR 0040 d1, addenda 2026-10-25, 2026-10-26 |
 | Rounding barrier | A kernel technique that keeps each rounding point of the unfused chain, so the compiler cannot contract across it | ADR 0040 d2; ADR 0099 d2 |
+| External fusion rule | A fusion rule defined outside the runtime with `defineRule` of `@karume/runtime/kernel` (name `<namespace>/<rule>`, keys `ext:<namespace>:`) and passed to a Session as `SessionOptions.fusionRules`; tried before the built-in rules. The one form of custom kernel the runtime takes | ADR 0148 d1-d5 |
 | Twin-graph test | GPU check comparing a fused Session with a plain Session of the same values (the sides differ by an interposed zero-dispatch reshape, an opt-in on one side only, a forced split, or the test-only `DISABLED_FUSION_RULES` key): u32 identity with NaN by class or by payload as each case declares, the counter on both sides | ADR 0040 addendum 2026-09-12; `packages/kernel-checks/src/fusion-twins/` |
 | Four-point check | (1) band vs f64, (2) A/B band vs the reference path, (3) exact structural checks, (4) a recorded fault injection that turns (1) or (2) red | ADR 0147 d2 |
 | E2E self A/B (five items) | Census, difference floor, collapse ceiling, observation point, fault injection per check (section 4c) | ADR 0147 d2 |
@@ -113,7 +114,8 @@ Side rules that cut across the layers:
 Applies to `FUSION_RULES` entries (`FusedStep` rules). Consumer annotations follow the last item instead.
 
 - [ ] The unfused form already runs correctly and only speed is at stake (`docs/op-vocabulary.md:224-226`); a result expressible in IR ops belongs to `normalize.py` by default, case by case where both work (ADR 0040 d4).
-- [ ] One file `packages/runtime/src/runtime/fusion-rules/<rule>.ts` built with `defineRule`; never import `fusion.ts` from it (ADR 0040 addendum 2026-09-21).
+- [ ] One file `packages/runtime/src/runtime/fusion-rules/<rule>.ts` built with `defineRule`; never import `fusion.ts` from it (ADR 0040 addendum 2026-09-21). A model-specific rule is written outside the runtime instead, against `@karume/runtime/kernel`: follow (d) (ADR 0148 d4).
+- [ ] Declare the rule's contract class (`contract`, required): `"E"` for a rule u32-identical to the unfused plan, which every built-in rule is (ADR 0147 d2; ADR 0148 d5).
 - [ ] Register by hand: `FUSION_RULES` (MUST: one hand-written array, order = application order; `fusion.ts:207-236`), `FusionRuleName` (`fusion-rule.ts:24-34`; the list checks it in both directions at compile time, so pass the name as `defineRule`'s second type argument too), and the pinned rule and head lists (`packages/runtime/tests/runtime_fusion_test.ts:97-136`). The counters are built from the list a plan is given.
 - [ ] Heads disjoint from other rules, or a declared exception with a test that at most one mechanism accepts per index (ADR 0040 d1).
 - [ ] Exact match only: op sequence, wiring, attrs, resolved shapes, dtypes; bind constants as buffers, never bake them; add counterexample tests (ADR 0040 d2, addendum 2026-08-10 item 2).
@@ -176,6 +178,19 @@ Applies to `FUSION_RULES` entries (`FusedStep` rules). Consumer annotations foll
 - [ ] A published preset's `session` changes only through a new pinned distribution revision; a change that moves the numbers under the same name goes into the CHANGELOG and redoes the E2E self A/B check (ADR 0147 d11).
 - [ ] Add rows to `docs/quantization.md` Tables 2 and 2-b (CLAUDE.md "Where docs go").
 
+### (d) Writing a fusion rule outside the runtime
+
+Applies to a rule a package or an application passes to a Session (ADR 0148). It replaces built-in ops with its own dispatches and adds no IR op.
+
+- [ ] Import only from `@karume/runtime/kernel` (experimental: it may change in a minor version while the package is 0.x); build the rule with its `defineRule`. A hand-written object, a copy of a rule or a built-in rule is refused at Session construction (ADR 0148 d5).
+- [ ] Name it `<namespace>/<rule>` (lowercase identifiers, one slash) and start every dispatch key with `ext:<namespace>:`; same key → byte-identical WGSL, and every generation parameter baked into the WGSL is in the key (CLAUDE.md codegen determinism; ADR 0148 d5).
+- [ ] Declare `contract`: `"E"` claims u32 identity with the unfused plan; another class follows ADR 0147 (the class checks of d2, a named opt-in). Passing the rule is the opt-in; the runtime does not check its numbers (ADR 0148 d6).
+- [ ] Match exactly (ADR 0040 d2), from the index the rule is tried at: the window starts there and covers the folded chain, the build binds only the chain's own external inputs, and writes the chain's last value with its shape. `defineRule` checks these each time it builds a step and applies the declared `internals`; it does not check dtypes, so a matcher of an f32 kernel checks `allF32` itself (ADR 0148 d5, d7).
+- [ ] Keep the unfused rounding: take the plain kernels' own text (`prologueUnaryWgsl`, `fusedBinaryWgsl`, `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` with `IS_NAN_BITS_WGSL`, in the node's operand order), and stage through `stagedLoopWgsl` / `stagedF32` every value the unfused sequence stored that a later arithmetic node reads — at least every product that feeds an add or a subtract. That the barrier holds is measured per backend, not a WGSL guarantee (`packages/runtime/src/kernels/rounding-barrier.ts`; ADR 0040 d2).
+- [ ] Check it per backend before shipping: run the graph through a Session given the rule and one built from the same options without it, and compare every output as u32 words (NaN by class where the kernel computes); assert the rule's counter in `lastRunFusions` on both sides. Run it on every backend the rule ships on: the built-in `/kernel-check` cases do not cover an external rule. In this repository the runtime GPU tests do it with `checkFusionTwin` and the test-only `DISABLED_FUSION_RULES` naming the rule (`packages/runtime/tests/gpu_external_fusion_rule_test.ts`) (ADR 0147 d9; ADR 0148 d6).
+- [ ] Pin the hit count on the real graph the rule targets, through the planning path a Session takes (`planDistributionFusions` with `fusionRules` in `packages/e2e/tests/helpers/fusion-counts.ts`; example `e2e_gemma4_26b_external_rule_test.ts`) (ADR 0040 d3).
+- [ ] Expect the memory estimate not to count the rule (it plans as if no rule were given); size the step's temporaries with that in mind (ADR 0148 d8).
+
 ## 5. Verification and per-device evidence
 
 General rule behind the canaries: an automatic selection that claims bit identity is allowed only when the identity is machine-checked on that device; enumeration or a spec claim is not enough (ADR 0147 d6). It covers the default-on fusions (the Session canary) and the bit-identical choices made from device facts (linear and conv3d a8's dp4a choice, online attention's `sg32` / `wg`), which get a run-time canary on devices where the path is requested (ADR 0147 d9 — pending).
@@ -230,6 +245,7 @@ A release requires (ADR 0005; ADR 0129 d7; `docs/release-runbook.md:114-165`):
 | Write matchers into the executor's scan loop, or hand-write retain/release per fusion | One decision point; one shared bookkeeping path | ADR 0040 d1; `packages/runtime/src/runtime/fusion.ts:27-34` |
 | Fuse multi-output or state-touching nodes | Values defined once; state order | ADR 0068 d1; ADR 0067 d5b; `fusion-rule.ts:373-400` |
 | Let rules self-register, run code at import, or read WebGPU globals at module scope | Tree-shaking, zero side effects, import safety on Node | ADR 0040 addendum 2026-09-21; CLAUDE.md |
+| Hand-write a `FusionRule` object, or take an IR op from outside the runtime | The window checks of `defineRule`; a container that runs on the runtime alone | ADR 0148 d1, d5 |
 | Use float atomics, arrival-order merges, a reduction order outside the key, or scatter with CAS | In-device determinism of summation order | ADR 0147 d11; ADR 0007 |
 | Put private kernels or ops into the exporter's IR | The frozen op allowlist | ADR 0040 d4; ADR 0007 |
 | Put kernel limits into the IR spec, or execution concerns into the container descriptor | IR and container stay execution-neutral | ADR 0007; ADR 0108 d2 |
@@ -245,10 +261,10 @@ A release requires (ADR 0005; ADR 0129 d7; `docs/release-runbook.md:114-165`):
 
 ## 7. Not yet decided (proposals from the 2026-11-09 discussion — NOT current rules)
 
-Nothing below binds a contributor today. ADR 0147 settled two of the original proposals: a per-adapter-class evidence table that decides enablement was rejected (its alternative 1), and the Session-time fused-vs-unfused u32 check was adopted as the Session canary (its decision 9). The extension point for model-specific kernels stays out of its scope (a separate ADR later).
-Background (2026-11-08 auto-fusion investigation, follow-up of 2026-11-09): models have no way to supply kernels today; the closest are `karume::` custom ops, whose kernels are built into the runtime.
+Nothing below binds a contributor today. ADR 0147 settled two of the original proposals: a per-adapter-class evidence table that decides enablement was rejected (its alternative 1), and the Session-time fused-vs-unfused u32 check was adopted as the Session canary (its decision 9). ADR [0148](decisions/0148-external-fusion-rules.md) (2026-11-11) settled the extension point for model-specific kernels: a fusion rule defined with `@karume/runtime/kernel` and passed as `SessionOptions.fusionRules` (not to `prepareContainer`), tried before the built-in rules, with a declared contract class of any kind; no IR op from outside; the estimate does not see it yet. The first two rows below are kept as the record of the proposals it replaced.
+Background (2026-11-08 auto-fusion investigation, follow-up of 2026-11-09): models had no way to supply kernels then; the closest were `karume::` custom ops, whose kernels are built into the runtime.
 The leading idea is a plan-time extension point that leaves the IR and container unchanged, because `FusedStep` is data and the executor does not care which rule built it.
-Open questions: ordering against built-in rules, whether to limit extensions to class E, and a general estimate for every `FusedStep`.
+Open questions of 2026-11-09: ordering against built-in rules, whether to limit extensions to class E, and a general estimate for every `FusedStep` — ADR 0148 answered the first two (external first; any class, declared) and left the estimate for later.
 
 | Proposal | Builds on (current rule) | Would have to amend or meet |
 | --- | --- | --- |
@@ -282,6 +298,7 @@ Open questions: ordering against built-in rules, whether to limit extensions to 
 | ADR 0128 | Default preset procedure; gate constraints C1-C3; a8 warning |
 | ADR 0132 | Online int8 attention (class Q); subgroup form selection |
 | ADR 0147 | Numerics and kernel adoption: levels, contract classes, four-point check, bands, E2E self A/B, who decides, evidence checks, default-on fusions, API rules, applicability, device switches, per-GPU evidence, declared approximations, determinism and row classes |
+| ADR 0148 | Fusion rules from outside the runtime: the kernel entry, `SessionOptions.fusionRules`, external-first order, the brand, names and keys, what `defineRule` checks, the estimate left out |
 | `docs/op-vocabulary.md` | Layer table, procedure, hazardous numerics rule, op NOTEs |
 | `docs/quantization.md` | Current option list and contract classes (Tables 2, 2-b), presets (Table 3) |
 | `docs/perf-ledger.md` / `docs/release-runbook.md` | Performance candidates and kill criteria / release checklist |

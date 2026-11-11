@@ -135,6 +135,16 @@ maintainer's ruling of 2026-11-06).
     rmsNormAdd widths in the `SessionOptions` doc (3840 is missing); `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
     cite; ADR 0132 decision 5's v1 workgroup-storage figures (the v2 figures are in its later addendum); the unreachable w4a8 `k % group`
     check; the online kernel's `:emu` against `:dp4aEmu` in the other i8a8 pipeline keys.
+- **Fusion-rule mechanisms — the rule list, rules from outside the runtime, comparisons in tune (design approved
+  2026-11-11: `.claude/reviews/2026-11-11_extension-mechanisms/DESIGN.md`, not tracked by git)**. The rule list as an input
+  with its test-only switch and the shared twin check, the fusion candidate search, and fusion rules from outside the
+  runtime (ADR [0148](decisions/0148-external-fusion-rules.md): `@karume/runtime/kernel`, `SessionOptions.fusionRules`) are
+  built. Left, in the design's order: `runSessionAb` / `judgeSessionAb` and their record in `@karume/runtime/tune`, with
+  the part of the twin check the public API can express, then the Playground's `/session-ab` page (P3); the estimate
+  planning every fused step, external rules included (P4); generated elementwise fusions, tried on the MOSS-Image DiT
+  (S5). Open: whether `defineRule` refuses a chain that is not f32 (ADR 0148 open question 1); token identity of the test
+  rule `test/gelu_mul` on the real 26B weights (not produced — ADR 0148 Evidence); the Session canary (ADR 0147
+  follow-ups, code item 3) covers external rules when it is built.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
   [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple
