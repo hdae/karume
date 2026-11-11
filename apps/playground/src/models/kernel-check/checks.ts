@@ -88,7 +88,7 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     id: "gemv-planes",
     title: "Byte-plane GEMV",
     summary:
-      "The byte-plane GEMV (linearGemvPlanes) within the GEMM band of an FP64 reference and within twice that band of the sequential GEMV (15 variants, K = 16 / 80 / 1536, 37 and 1029 columns, M = 1 / 8, plus a saturated fixture); two runs identical, nothing written past the outputs, a NaN reaches its whole row (ADR 0110 class R).",
+      "The byte-plane GEMV (linearGemvPlanes) within the GEMM band of an FP64 reference and within twice that band of the sequential GEMV (15 variants, K = 16 / 80 / 1536, 37 and 1029 columns, M = 1 / 8, plus a saturated fixture); two runs identical, nothing written past the outputs, a NaN reaches its whole row (ADR 0147 decision 2, class R).",
     needsSubgroups: false,
     run: async (gpu, options) => ({
       parts: [await checkPlanesGemv(gpu, options)],
