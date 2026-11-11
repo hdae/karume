@@ -661,6 +661,255 @@ const assertTempLifetimes = (
 };
 
 /**
+ * What a rule's `build` declares: the bind surface, the output and the dispatches with their
+ * temporaries. The rest of a {@link FusedStep} (`ins`, `nodeCount`, the rule's name) is derived from
+ * the grabbed window ({@link defineRule}).
+ */
+export type FusedBuild = Omit<FusedStep, "kind" | "rule" | "ins" | "nodeCount">;
+
+/** What {@link defineRule} and {@link defineExternalRule} collect for one rule. */
+export type FusionRuleDefinition<Matched extends FusionMatch, Name extends string = string> = {
+  readonly name: Name;
+  readonly heads: readonly string[];
+  /**
+   * The contract class of the rule's numbers ({@link ContractClass}, ADR 0147 decision 2). A rule
+   * u32-identical to the unfused plan declares `"E"`.
+   */
+  readonly contract: ContractClass;
+  /**
+   * Who may read the chain's internal values: `"private"` = each has exactly one consumer and is
+   * not a graph output ({@link internalsArePrivate}); `"stayInChain"` = every use is inside the
+   * chain, possibly more than one ({@link internalsStayInChain} — only for a matcher that pins every
+   * slot an internal value may occupy).
+   */
+  readonly internals: "private" | "stayInChain";
+  /** Grabs the window that starts at `nodes[index]`, or returns `undefined`. */
+  readonly match: (
+    nodes: readonly NodePlan[],
+    index: number,
+    context: FusionScanContext,
+  ) => Matched | undefined;
+  /** Lowers a grabbed window to its dispatches. */
+  readonly build: (matched: Matched) => FusedBuild;
+};
+
+/**
+ * The brand of a rule built by {@link defineRule} or {@link defineExternalRule}: a property keyed by
+ * this module-private symbol, non-enumerable and read-only, on a frozen rule. A Session takes only
+ * branded external rules (`sessionFusionRules` in {@link "./fusion.ts"}), so a hand-written object —
+ * or a copy of a rule with its `apply` replaced — cannot reach the scan around the checks this file
+ * applies. The brand is a value on the rule, not an entry in a module-level table (no global mutable
+ * state). It guards against accidents, not against a caller who reads the symbol off a rule on
+ * purpose.
+ */
+const RULE_BRAND: unique symbol = Symbol("karume.fusionRule");
+
+/** Where a branded rule was defined: inside the runtime, or outside it ({@link defineExternalRule}). */
+export type RuleOrigin = "built-in" | "external";
+
+/** The brand of `value` ({@link RULE_BRAND}), or `undefined` for anything not built by a define entry. */
+export const ruleOrigin = (value: unknown): RuleOrigin | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  const brand: unknown = Object.getOwnPropertyDescriptor(value, RULE_BRAND)?.value;
+  return brand === "built-in" || brand === "external" ? brand : undefined;
+};
+
+/**
+ * The name of a rule defined outside the runtime: `<namespace>/<rule>`, each segment a lowercase
+ * identifier (`[a-z][a-z0-9_]*`). The built-in names have no slash, so the two never meet.
+ */
+export type ExternalRuleName = `${string}/${string}`;
+
+const EXTERNAL_RULE_NAME = /^([a-z][a-z0-9_]*)\/[a-z][a-z0-9_]*$/;
+
+/** The namespace of an external rule's name, or `undefined` when the name is not of that form. */
+export const externalNamespace = (name: unknown): string | undefined =>
+  typeof name === "string" ? EXTERNAL_RULE_NAME.exec(name)?.[1] : undefined;
+
+/** Whether `name` is an external rule's name ({@link ExternalRuleName}, the full pattern). */
+export const isExternalRuleName = (name: unknown): name is ExternalRuleName =>
+  externalNamespace(name) !== undefined;
+
+const CONTRACT_CLASSES: Readonly<Record<ContractClass, true>> = {
+  E: true,
+  C: true,
+  R: true,
+  Q: true,
+};
+
+/**
+ * The checks of a definition's declarations (a JavaScript caller can pass any value; a declaration
+ * read wrongly would decide the privacy of every chain the rule folds).
+ */
+const assertDeclarations = (
+  rule: Pick<FusionRuleDefinition<FusionMatch>, "name" | "contract" | "internals">,
+): void => {
+  const contract: unknown = rule.contract;
+  if (typeof contract !== "string" || !Object.hasOwn(CONTRACT_CLASSES, contract)) {
+    throw new ExecutionError(
+      `fusion rule '${String(rule.name)}': contract must be "E", "C", "R" or "Q" (ADR 0147 decision 2), got ${String(contract)}`,
+    );
+  }
+  const internals: unknown = rule.internals;
+  if (internals !== "private" && internals !== "stayInChain") {
+    throw new ExecutionError(
+      `fusion rule '${String(rule.name)}': internals must be "private" or "stayInChain", got ${String(internals)}`,
+    );
+  }
+};
+
+/**
+ * The window checks of an external rule, after its matcher grabbed `matched` at `index` (a built-in
+ * rule is written to the same invariants and pinned by its own tests).
+ *
+ * MUST: the window is the run of nodes that starts at `nodes[index]` and holds at least the chain's
+ * nodes. The scan places the fused step at `index` and moves on by the window's length, so a window
+ * that starts elsewhere or skips a node would drop that node or run another twice — silent wrong
+ * values with no exception — and an empty one would never move on.
+ */
+const assertExternalWindow = (
+  name: string,
+  nodes: readonly NodePlan[],
+  index: number,
+  matched: FusionMatch,
+): void => {
+  const contiguous = matched.window.every((step, offset) => step === nodes[index + offset]);
+  if (matched.window.length === 0 || matched.chain.length === 0 || !contiguous) {
+    throw new ExecutionError(
+      `fusion rule '${name}': the window of ${matched.window.length} nodes (chain ${matched.chain.length}) is not` +
+        ` the run of nodes that starts at node ${index} (an external rule's window starts where it was tried,` +
+        " holds every node it covers, and folds at least one)",
+    );
+  }
+};
+
+/**
+ * The build checks of an external rule: its declared surface agrees with the chain it folds.
+ *
+ * MUST: every bind is an external input of the chain, once. The release bookkeeping rests on the
+ * chain's inputs alone (`ins`), so a bind outside them could be released, and its buffer reused,
+ * before the step reads it — a silent wrong value. MUST: the output is the chain's last value with
+ * its shape (consumers read that name, and the buffer is sized from the shape), and there is at
+ * least one dispatch to write it. MUST: every dispatch key starts with `ext:<namespace>:`. The
+ * pipeline cache is one per device and shared by every Session; the prefix keeps an external rule's
+ * keys out of the built-in kernels' and another namespace's (two different WGSL bodies under one key
+ * still fail as `PipelineKeyConflictError`, the last line of defence).
+ */
+const assertExternalBuild = (
+  name: string,
+  namespace: string,
+  chain: readonly NodePlan[],
+  built: FusedBuild,
+): void => {
+  const inputs = new Set(externalIns(chain));
+  const strayBinds = built.binds.filter(
+    (bind, at) => !inputs.has(bind) || built.binds.indexOf(bind) !== at,
+  );
+  if (strayBinds.length > 0) {
+    throw new ExecutionError(
+      `fusion rule '${name}': bind(s) '${strayBinds.join("', '")}' are not distinct external inputs of the folded chain` +
+        ` (its inputs are ${[...inputs].map((input) => `'${input}'`).join(", ")})`,
+    );
+  }
+  const last = chain[chain.length - 1].outputs[0];
+  if (built.outputName !== last.name || !sameShape(built.outputShape, last.shape)) {
+    throw new ExecutionError(
+      `fusion rule '${name}': the declared output '${built.outputName}' [${built.outputShape.join(",")}] is not the` +
+        ` folded chain's last value '${last.name}' [${last.shape.join(",")}]`,
+    );
+  }
+  if (built.dispatches.length === 0) {
+    throw new ExecutionError(`fusion rule '${name}': the step declares no dispatch`);
+  }
+  const prefix = `ext:${namespace}:`;
+  const strayKeys = built.dispatches
+    .map((dispatch) => dispatch.key)
+    .filter((key) => typeof key !== "string" || !key.startsWith(prefix));
+  if (strayKeys.length > 0) {
+    throw new ExecutionError(
+      `fusion rule '${name}': dispatch key(s) '${strayKeys.map(String).join("', '")}' do not start with '${prefix}'` +
+        " (an external rule's pipeline keys live in its own namespace)",
+    );
+  }
+};
+
+/** One try of a rule at `index` ({@link FusionRule.apply} of {@link brandedRule}'s rules). */
+const applyRule = <Matched extends FusionMatch, Name extends string>(
+  rule: FusionRuleDefinition<Matched, Name>,
+  namespace: string | undefined,
+  nodes: readonly NodePlan[],
+  index: number,
+  context: FusionScanContext,
+): FusionHit | undefined => {
+  const matched = rule.match(nodes, index, context);
+  if (matched === undefined) return undefined;
+  if (namespace !== undefined) assertExternalWindow(rule.name, nodes, index, matched);
+  // After fusion no buffer for an internal value exists, so a consumer outside the chain or a
+  // readback would lose it.
+  const internalsKept =
+    rule.internals === "private"
+      ? internalsArePrivate(matched.chain, context)
+      : internalsStayInChain(matched.chain, context);
+  if (!internalsKept) return undefined;
+  // Multi-output nodes (ADR 0068 decision 1) are not fusion candidates. The matcher's op-name
+  // spelling only narrows the accepted set and does not guarantee "one output", so there is one
+  // place that checks every node of the window against its contract.
+  if (!windowIsSingleOutput(matched.window)) return undefined;
+  // Nodes that touch state (ADR 0067 decision 5b) are not fusion candidates — the ban on
+  // reordering is an invariant of the window mechanism and cannot be expressed by the matcher's
+  // op-name spelling.
+  if (windowTouchesState(matched.window)) return undefined;
+  const folded = new Set(matched.chain);
+  const others = matched.window.filter((step) => !folded.has(step));
+  // MUST: the chain is a subsequence of the window. Otherwise it folded a node outside the window
+  // (= the scan width is short, so it runs twice) or missed one inside it (= never runs); both
+  // are silent wrong values with no exception.
+  if (others.length + matched.chain.length !== matched.window.length) {
+    throw new ExecutionError(
+      `fusion rule '${rule.name}': the folded chain of ${matched.chain.length} nodes is not a subsequence of the window of ${matched.window.length} nodes`,
+    );
+  }
+  if (!passthroughIsIndependent(matched.chain, others)) return undefined;
+  const deferring = matched.others === "deferred";
+  if (deferring && !deferralIsIndependent(matched.chain, others)) return undefined;
+  const built = rule.build(matched);
+  assertTempLifetimes(rule.name, built.temps, built.dispatches.length);
+  if (namespace !== undefined) assertExternalBuild(rule.name, namespace, matched.chain, built);
+  return {
+    passthrough: deferring ? [] : others,
+    deferred: deferring ? others : [],
+    advance: matched.window.length,
+    step: {
+      kind: "fused",
+      rule: rule.name,
+      ins: externalIns(matched.chain),
+      nodeCount: matched.chain.length,
+      ...built,
+    },
+  };
+};
+
+/**
+ * The rule a definition describes, branded with `origin`. For an external rule `namespace` is its
+ * name's namespace, and the window and build checks of an external rule apply.
+ */
+const brandedRule = <Matched extends FusionMatch, Name extends string>(
+  rule: FusionRuleDefinition<Matched, Name>,
+  namespace: string | undefined,
+): FusionRule<Name> => {
+  assertDeclarations(rule);
+  const defined: FusionRule<Name> = {
+    name: rule.name,
+    heads: Object.freeze([...rule.heads]),
+    contract: rule.contract,
+    apply: (nodes, index, context) => applyRule(rule, namespace, nodes, index, context),
+  };
+  const origin: RuleOrigin = namespace === undefined ? "built-in" : "external";
+  Object.defineProperty(defined, RULE_BRAND, { value: origin });
+  return Object.freeze(defined);
+};
+
+/**
  * Enforces by type the separation of match (grab) and build (declare binds / kernel key / params).
  *
  * MUST: the basis of the release bookkeeping (the total-use list `ins`), the folded count
@@ -676,78 +925,34 @@ const assertTempLifetimes = (
  * {@link internalsStayInChain}). A matcher may check it earlier as well, where code after the check
  * must not see a chain that is not private (a fail-loudly step, or a matcher shared with a rule that
  * declares the other privacy).
- * A built-in rule passes its name as `Name` too (`defineRule<Match, "silu">`), so the built-in list
- * can check its names at compile time; any other rule leaves it a string.
+ * The rule comes back frozen and branded ({@link RULE_BRAND}) as a built-in rule. A built-in rule
+ * passes its name as `Name` too (`defineRule<Match, "silu">`), so the built-in list can check its
+ * names at compile time; any other rule leaves it a string.
  */
-export const defineRule = <Matched extends FusionMatch, Name extends string = string>(rule: {
-  readonly name: Name;
-  readonly heads: readonly string[];
-  /**
-   * The contract class of the rule's numbers ({@link ContractClass}, ADR 0147 decision 2). A rule
-   * u32-identical to the unfused plan declares `"E"`.
-   */
-  readonly contract: ContractClass;
-  /**
-   * Who may read the chain's internal values: `"private"` = each has exactly one consumer and is
-   * not a graph output ({@link internalsArePrivate}); `"stayInChain"` = every use is inside the
-   * chain, possibly more than one ({@link internalsStayInChain} — only for a matcher that pins every
-   * slot an internal value may occupy).
-   */
-  readonly internals: "private" | "stayInChain";
-  readonly match: (
-    nodes: readonly NodePlan[],
-    index: number,
-    context: FusionScanContext,
-  ) => Matched | undefined;
-  readonly build: (matched: Matched) => Omit<FusedStep, "kind" | "rule" | "ins" | "nodeCount">;
-}): FusionRule<Name> => ({
-  name: rule.name,
-  heads: rule.heads,
-  contract: rule.contract,
-  apply: (nodes, index, context) => {
-    const matched = rule.match(nodes, index, context);
-    if (matched === undefined) return undefined;
-    // After fusion no buffer for an internal value exists, so a consumer outside the chain or a
-    // readback would lose it.
-    const internalsKept =
-      rule.internals === "private"
-        ? internalsArePrivate(matched.chain, context)
-        : internalsStayInChain(matched.chain, context);
-    if (!internalsKept) return undefined;
-    // Multi-output nodes (ADR 0068 decision 1) are not fusion candidates. The matcher's op-name
-    // spelling only narrows the accepted set and does not guarantee "one output", so there is one
-    // place that checks every node of the window against its contract.
-    if (!windowIsSingleOutput(matched.window)) return undefined;
-    // Nodes that touch state (ADR 0067 decision 5b) are not fusion candidates — the ban on
-    // reordering is an invariant of the window mechanism and cannot be expressed by the matcher's
-    // op-name spelling.
-    if (windowTouchesState(matched.window)) return undefined;
-    const folded = new Set(matched.chain);
-    const others = matched.window.filter((step) => !folded.has(step));
-    // MUST: the chain is a subsequence of the window. Otherwise it folded a node outside the window
-    // (= the scan width is short, so it runs twice) or missed one inside it (= never runs); both
-    // are silent wrong values with no exception.
-    if (others.length + matched.chain.length !== matched.window.length) {
-      throw new ExecutionError(
-        `fusion rule '${rule.name}': the folded chain of ${matched.chain.length} nodes is not a subsequence of the window of ${matched.window.length} nodes`,
-      );
-    }
-    if (!passthroughIsIndependent(matched.chain, others)) return undefined;
-    const deferring = matched.others === "deferred";
-    if (deferring && !deferralIsIndependent(matched.chain, others)) return undefined;
-    const built = rule.build(matched);
-    assertTempLifetimes(rule.name, built.temps, built.dispatches.length);
-    return {
-      passthrough: deferring ? [] : others,
-      deferred: deferring ? others : [],
-      advance: matched.window.length,
-      step: {
-        kind: "fused",
-        rule: rule.name,
-        ins: externalIns(matched.chain),
-        nodeCount: matched.chain.length,
-        ...built,
-      },
-    };
-  },
-});
+export const defineRule = <Matched extends FusionMatch, Name extends string = string>(
+  rule: FusionRuleDefinition<Matched, Name>,
+): FusionRule<Name> => brandedRule(rule, undefined);
+
+/**
+ * {@link defineRule} for a rule written outside the runtime — the `defineRule` of
+ * `@karume/runtime/kernel`. The name is `<namespace>/<rule>` ({@link ExternalRuleName}), checked
+ * here; the rule is branded external, so a Session takes it through `SessionOptions.fusionRules`;
+ * and besides every check of {@link defineRule}, its window must start where it was tried, its build
+ * must bind only the chain's own inputs and write the chain's last value, and every dispatch key
+ * must start with `ext:<namespace>:` (checked each time the rule builds a step).
+ */
+export const defineExternalRule = <
+  Matched extends FusionMatch,
+  Name extends ExternalRuleName = ExternalRuleName,
+>(
+  rule: FusionRuleDefinition<Matched, Name>,
+): FusionRule<Name> => {
+  const namespace = externalNamespace(rule.name);
+  if (namespace === undefined) {
+    throw new ExecutionError(
+      `fusion rule '${String(rule.name)}': an external rule's name is '<namespace>/<rule>', two lowercase` +
+        " identifiers ([a-z][a-z0-9_]*) joined by one slash",
+    );
+  }
+  return brandedRule(rule, namespace);
+};
