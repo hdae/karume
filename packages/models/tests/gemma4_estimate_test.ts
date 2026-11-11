@@ -4,7 +4,7 @@
 // On the real gemma4 E2B assets the bucket shapes do not dominate the peak, so the check on `peakAccountedBytes`
 // (`e2e_gemma4_drafter_test.ts` ②) does not break even if the bucket wiring is removed. The wiring is pinned here directly.
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { afterEach, beforeEach, describe, it, vi } from "vite-plus/test";
 import type { Session, SessionOptions } from "@karume/runtime";
 import { GpuContext, readAdapterInfo } from "../../runtime/src/gpu/device.ts";
@@ -27,6 +27,7 @@ import {
   SHA,
 } from "./helpers/container-loading-fixture.ts";
 import { fakeSession, programOf } from "./helpers/generation-fake.ts";
+import { GELU_MUL_RULE } from "./helpers/gelu-mul-rule.ts";
 
 /** A pipeline with chunk length 16 and bucket ladder [4, 8] (capacity symbol `C`, row symbol `R`). */
 const wiring = () =>
@@ -408,6 +409,27 @@ describe("gemma.Pipeline attentionRowBlockMaxBytes", () => {
       for (const options of sessionOptions) {
         assertEquals(Object.hasOwn(options, "attentionRowBlockMaxBytes"), false);
       }
+    });
+  });
+
+  // The experimental measurement opt-in on the same fixture: passed through, not interpreted.
+  describe("fusionRules (experimental)", () => {
+    it("the target Session and the drafter Session both get the caller's array itself", async () => {
+      const fusionRules = [GELU_MUL_RULE];
+      await load({ speculative: {}, fusionRules });
+      assertEquals(sessionOptions.length, 2);
+      for (const options of sessionOptions) assertStrictEquals(options.fusionRules, fusionRules);
+    });
+
+    it("unset, the field does not exist and every other option is what the pipeline with rules passed", async () => {
+      await load({ speculative: {}, fusionRules: [GELU_MUL_RULE] });
+      const withRules = sessionOptions.map((options) =>
+        Object.fromEntries(Object.entries(options).filter(([key]) => key !== "fusionRules")),
+      );
+      await load({ speculative: {} });
+      const without = sessionOptions.slice(withRules.length);
+      for (const options of without) assertEquals(Object.hasOwn(options, "fusionRules"), false);
+      assertEquals(without, withRules);
     });
   });
 

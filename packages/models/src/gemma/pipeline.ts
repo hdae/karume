@@ -576,6 +576,24 @@ export type PipelineOptions = {
    */
   readonly linearGemvRowsThreadTarget?: number;
   /**
+   * **Experimental**: fusion rules written outside the runtime (`defineRule` of
+   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
+   * the language model graphs: the target Session (which runs prefill and decode) and, with
+   * {@link PipelineOptions.speculative}, the drafter Session. The image embedder
+   * ({@link PipelineOptions.vision}), the on-GPU PLE gather (`pleResidency: "gpu"`) and the on-GPU
+   * greedy selection do not get them. Absent = no rule: the Sessions are built as without the
+   * option.
+   *
+   * It exists to measure a candidate rule on a real decode (the session A/B of
+   * `@karume/runtime/tune`); it may change or go away in a minor version. Passing a rule is the
+   * opt-in, and the rule's author owns the evidence for its numbers (ADR 0148): the runtime does not
+   * check them. The memory estimate ({@link Pipeline.estimateSessionMemory}) does not see the rules.
+   * A value the runtime refuses fails when the Session is built, after the weights are read.
+   *
+   * DECIDED: docs/decisions/0148-external-fusion-rules.md
+   */
+  readonly fusionRules?: SessionOptions["fusionRules"];
+  /**
    * **Builds an MTP drafter alongside** for speculative decoding (ADR 0096 — not built when omitted).
    *
    * When given, the distribution's `drafter` weights are fetched as well, and one drafter Session is
@@ -1898,6 +1916,8 @@ export class GemmaPipeline {
       ...(options.linearGemvRowsThreadTarget === undefined
         ? {}
         : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
+      // Experimental (a measurement opt-in): the target and the drafter get the same rules.
+      ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
     };
     // MUST: cannot be combined with GPU timing diagnostics (`beginBatch` cannot open on a device
     // with measurement enabled — the mechanism of enqueuing the gather in the same batch as the target

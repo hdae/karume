@@ -42,6 +42,12 @@ measurements in `docs/research/`.
   (`"adopt"`, `"reject"`, `"inconclusive"`), identity required by default (ADR 0117 addendum of 2026-11-11).
 - `@karume/runtime/tune`: `wordIdentity` (with `NanPolicy`, `WordIdentity`, `WordMismatch`), the u32 identity
   comparison of two word arrays with NaN read by class or by payload.
+- `@karume/models`: `fusionRules` on `gemma.PipelineOptions` (and the mobile QAT pipeline's options, which share
+  them), **experimental**: fusion rules built with `defineRule`, passed unchanged as `SessionOptions.fusionRules` to the
+  target Session and the drafter Session; the image embedder, the on-GPU PLE gather and the on-GPU greedy selection do
+  not get them. It exists to measure a candidate rule on a real decode with the session A/B and may change or go away
+  in a minor version. The rule's author owns the evidence for its numbers, and the memory estimate does not see it
+  (ADR 0148).
 
 ### Breaking
 
