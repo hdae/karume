@@ -143,6 +143,38 @@ epilogue do not have it yet. Making the TS reference FMA-tolerant has not been s
 [research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)
 (M2 re-verification).
 
+## In Chrome on Metal, kernel rewrites that are word-identical on Vulkan and D3D12 differ by a few ULP (measured 2026-11-11, recorded and accepted)
+
+The playground's `/kernel-check` page (Run all) on **Apple M2 and Apple M5 (the M5's adapter reports no name), Chrome 157, Metal** FAILs the
+checks below; on Chrome / D3D12 (RTX 5070 Ti) and on Node + Dawn / Vulkan (RTX 3080 Ti) the same cases are
+word-identical (D3D12 keeps its one known FAIL, the K-95 classes of the states-attention check). Each check compares
+two WGSL texts of the same arithmetic as u32 words; every one that FAILs has a sum over many terms in it, and the
+differences are 1–2 ULP of finite values. The order-only mutants of the states-attention check are all detected
+on Metal too, so the harness is not blind there.
+
+| Check (part) | Compared | Failing cases on Metal |
+| --- | --- | --- |
+| `rms-norm-prefetch` (3 parts) | the prefetch form of `rms_norm` and of both RMS → add orders (perf-ledger K-99) vs the runtime-trip text | 96 of 118 in each part (about 10% of the words of the plain kernel at 33 rows, about 3.5% of the add forms); the 22 that pass hold only rows that are all zero or have a non-finite element |
+| `fusion-twins` (`fusion-rms-norm-rope`) | the fused rmsNormRope vs `rms_norm` → pair RoPE | 4 of 8: exactly the row widths where the plain side's `rms_norm` is the prefetch form (256, 512, 1536, 3072); the widths on the runtime-trip text (384, 1664, 3200) are identical, so the fused kernel writes the runtime-trip form's words |
+| `state-attention-rewrites` (`state-qk-fold`) | folded ①′ vs ①′ | 252 of 252, the F = 8 classes the product folds included |
+| `state-attention-rewrites` (`state-pv-unroll`, `state-stats-pv-unroll`) | the unrolled forms (perf-ledger K-91) vs their v1 WGSL | 532 of 546 and 476 of 490 |
+| `state-kv16` (`state-kv16-readers`) | f16 full-slot readers vs their f32 forms over a rounded slot | 31 of 246, the read-only reader's O words only |
+
+Identical on Metal: the other twelve fusion twin parts (gated residual, SiLU, adaLN, RoPE, upsample, linear
+prologue, attention permutes, row blocks, RMS → add, gelu → mul → SRQ, linear → SRQ), the subgroup GEMV and RMS
+reductions, the integer and byte-plane GEMVs, the f16 score store, the bidirectional block and the expert linear.
+
+- **Impact**: what does not hold on Metal is the statement "this rewrite changed no word", not the output. The
+  product runs one form of each kernel on every device, so no two paths of one device disagree. Gemma 4 26B
+  (`i4-fast`, f16 KV) generated the same token ids on the M5 as on the RTX 5070 Ti over three turns (temperature 1,
+  seed 0). Affected in the last bits on Metal: `rms_norm` at row widths that are multiples of 256 up to 4096 (most
+  models), the decode attention of the Gemma 4 and MiniCPM5 lines, and Wan's q / k prologues.
+- **Mechanism (unconfirmed)**: Dawn compiles Metal shaders with relaxed floating-point math where the OS allows it,
+  so the rounding of a sum or a product chain depends on the surrounding code. The same class as the sections above.
+- **Ruling (2026-11-11, provisional)**: recorded and accepted — bit identity across forms was never guaranteed on
+  Metal. A release reads the Metal page against this table (release runbook). What to do about Metal beyond that is
+  undecided.
+
 ## On Metal the out-of-memory errorScope stays silent — the fail-loudly check does not fire (an independent bug)
 
 On real **M2 (24GB / maxBufferSize 14.3GB)** hardware, the test in `gpu_generation_context_test.ts`

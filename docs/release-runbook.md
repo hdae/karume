@@ -151,6 +151,9 @@ after changing to the repository root, so the pin applies to it too.
       perf-ledger id and does not block — until K-95 lands, the states-attention check FAILs on D3D12 in the e4b-full classes only (shown as
       "kept for K-95"; the product does not fold them), so its verdict "outside the K-95 classes" must read PASS; a new FAIL blocks — it is a
       regression on that backend.
+      On Chrome / Metal the page FAILs by known differences (the table of the "In Chrome on Metal, kernel rewrites …" section of
+      [known-issues](known-issues.md)): a Metal record whose FAILs are the parts of that table does not block; a FAIL outside it does
+      (provisional ruling of 2026-11-11).
       Before 0.15 the procedure was Chrome's `/check.html` (GEMV) and the RMS round-trip comparison (`tools/llm-speed/browser/README.md` of 0.14.0 — ADR 0127)
 - [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
       `uv run --no-sync ruff format --check` green
