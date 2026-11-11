@@ -6,7 +6,8 @@ backend a kernel rewrite relies on, in one implementation shared by
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
   `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts`,
   `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
-  `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts` — Dawn on the development machine), and
+  `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` — Dawn on the
+  development machine), and
 - the playground's `/kernel-check` page (`apps/playground` — the browser's own backend: D3D12 in
   Chrome on Windows, Metal on macOS).
 
@@ -23,6 +24,13 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | f16 attention scores `attentionScoreStorage`: the store vs host rounding (ADR 0031) | `checkScoreF16Store` | nothing optional |
 | Bidirectional block of the sliding ①ₜ (`GenerationRun.bidirectionalRows`): every S word vs the same kernel keeping every score plus a host mirror of the predicate, u32 identity (ADR 0144) | `checkStateBidirectional` (and `stateBidirectionalMutants`, node test only) | nothing optional |
 | `expert_linear` with f16 steps at the 26B shapes: every pick's output words vs `linear`'s sequential i4 GEMV on that expert with the steps widened to f32, u32 identity (ADR 0145) | `checkExpertLinear` | nothing optional |
+| A fusion against the unfused plan of the same graph (a rule of `FUSION_RULES` or an annotation fold): two open Sessions run the same feeds, every compared output u32-identical with NaN by class or by payload, the fusion counter at the expected hits on the fused side and at 0 on the plain side, optionally each side's dispatches (class E — ADR 0147 decision 2) | `checkFusionTwin` | nothing optional |
+
+The page does not run `checkFusionTwin` yet: the caller builds both Sessions, and the graphs and the
+ways of making the plain side (an interposed zero-dispatch reshape, an opt-in on one side only, a
+forced split, the test-only `DISABLED_FUSION_RULES` key) live in the runtime's twin-graph tests
+(`gpu_*_fusion_test.ts`, `gpu_fusion_twin_test.ts`). It returns one case per call, so it exports no
+case count.
 
 A check does not assert. It returns structured results — per case, per criterion, the number of
 failing words and the first (identity) or worst (tolerance band) failing word as u32 — and the
