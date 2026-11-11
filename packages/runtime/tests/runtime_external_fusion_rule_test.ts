@@ -67,6 +67,8 @@ type Fault = {
   readonly wrongOutput?: boolean;
   /** The dispatch key. */
   readonly key?: string;
+  /** The step declares no dispatch. */
+  readonly noDispatch?: boolean;
 };
 
 /** `neg(neg(z))` folded into one dispatch: the definition, with `fault` applied. */
@@ -94,14 +96,17 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
       outputName: fault.wrongOutput === true ? "n1" : last.outputs[0].name,
       outputShape: last.outputs[0].shape,
       temps: [],
-      dispatches: [
-        {
-          key: fault.key ?? "ext:test:neg_neg",
-          wgsl: () => "",
-          params: new Uint32Array(4),
-          workgroups: { kind: "gridStride", items: 32, size: 64 },
-        },
-      ],
+      dispatches:
+        fault.noDispatch === true
+          ? []
+          : [
+              {
+                key: fault.key ?? "ext:test:neg_neg",
+                wgsl: () => "",
+                params: new Uint32Array(4),
+                workgroups: { kind: "gridStride", items: 32, size: 64 },
+              },
+            ],
     };
   },
 });
@@ -212,6 +217,14 @@ describe("an external rule building a step", () => {
         label,
       );
     }
+  });
+
+  it("fails loudly on a step that declares no dispatch (its output would never be written)", () => {
+    assertThrows(
+      () => plan([defineExternalRule(negNeg("test/neg_neg", { noDispatch: true }))]),
+      ExecutionError,
+      "the step declares no dispatch",
+    );
   });
 
   it("is checked as an external rule only: the same faults through defineRule are the built-in rules' own responsibility", () => {
