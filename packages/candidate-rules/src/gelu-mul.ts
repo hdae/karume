@@ -2,8 +2,9 @@
  * A candidate fusion rule written the way a package outside the runtime writes one, against
  * `@karume/runtime/kernel` alone (packages/models/tests/external_fusion_rule_test.ts pins that
  * import list): the chain `gelu_tanh(gate) → mul(·, other)` in one dispatch. A candidate, not an
- * adopted rule: no pipeline passes it by default; a measurement passes it through the gemma
- * pipeline's experimental `fusionRules`.
+ * adopted rule: no pipeline passes it by default; the session A/B (the opt-in e2e test
+ * e2e_gemma4_session_ab_test.ts and the playground's `/session-ab` page) passes it through the gemma
+ * pipeline's experimental `fusionRules` to measure it.
  *
  * It is the rewrite of the 2026-11-10 investigation prototype (perf-ledger K-105, research
  * 2026-11-10 §8.1), which reached the rule list through a module load hook and runtime internals.
