@@ -61,6 +61,16 @@ const NEG_NEG_GRAPH: DeclarationJson = {
   ],
 };
 
+/** The same chain with `y = abs(x)` between its two negs. */
+const INTERLEAVED_GRAPH: DeclarationJson = {
+  ...NEG_NEG_GRAPH,
+  nodes: [
+    { op: "neg", ins: ["z"], outs: ["n1"], attrs: {} },
+    { op: "abs", ins: ["x"], outs: ["y"], attrs: {} },
+    { op: "neg", ins: ["n1"], outs: ["n2"], attrs: {} },
+  ],
+};
+
 type NegNegMatch = FusionMatch & { readonly input: string };
 
 /** How a test rule's matcher and build go wrong (each a break of one invariant). */
@@ -69,6 +79,12 @@ type Fault = {
   readonly shiftedWindow?: boolean;
   /** The chain lists the two negs in reverse order. */
   readonly reversedChain?: boolean;
+  /** The second neg is looked for one node further, and the window skips the node between. */
+  readonly gappedWindow?: boolean;
+  /** The step binds the chain's input twice. */
+  readonly duplicateBind?: boolean;
+  /** The step declares its output under the right name with the shape transposed. */
+  readonly transposedOutput?: boolean;
   /** The step binds the graph input `x`, which the chain does not read. */
   readonly strayBind?: boolean;
   /** The step declares the internal value `n1` as its output. */
@@ -95,7 +111,7 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
   internals: "private" as const,
   match: (nodes: readonly NodePlan[], index: number): NegNegMatch | undefined => {
     const first = nodes[index];
-    const second = nodes[index + 1];
+    const second = nodes[index + (fault.gappedWindow === true ? 2 : 1)];
     if (first?.node.op !== "neg" || second?.node.op !== "neg") return undefined;
     if (second.node.ins[0] !== first.outputs[0].name) return undefined;
     const chain = [first, second];
@@ -113,9 +129,17 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
   build: (matched: NegNegMatch): FusedBuild => {
     const last = matched.chain[matched.chain.length - 1];
     return {
-      binds: fault.strayBind === true ? [matched.input, "x"] : [matched.input],
+      binds:
+        fault.strayBind === true
+          ? [matched.input, "x"]
+          : fault.duplicateBind === true
+            ? [matched.input, matched.input]
+            : [matched.input],
       outputName: fault.wrongOutput === true ? "n1" : last.outputs[0].name,
-      outputShape: last.outputs[0].shape,
+      outputShape:
+        fault.transposedOutput === true
+          ? last.outputs[0].shape.toReversed()
+          : last.outputs[0].shape,
       temps: [],
       dispatches:
         fault.noDispatch === true
@@ -140,8 +164,9 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
 const plan = (
   rules: readonly FusionRule[],
   rewrite: (node: NodePlan) => NodePlan = (node) => node,
+  declaration: DeclarationJson = NEG_NEG_GRAPH,
 ): FusionPlan<string> => {
-  const graph = mergeGraph(NEG_NEG_GRAPH);
+  const graph = mergeGraph(declaration);
   const nodes = planGraph(graph, bindSymbols(graph, { x: SHAPE, z: SHAPE })).nodes.map(rewrite);
   return planFusions(nodes, {
     rules,
@@ -359,6 +384,32 @@ describe("an external rule building a step", () => {
       ["abs", "neg", "neg"],
     );
     assertEquals(folded.counts["test/neg_neg"], 0);
+  });
+
+  it("fails loudly on a window that skips a node, a bind given twice, and an output of the right name with another shape", () => {
+    assertThrows(
+      () =>
+        plan(
+          [defineExternalRule(negNeg("test/neg_neg", { gappedWindow: true }))],
+          undefined,
+          INTERLEAVED_GRAPH,
+        ),
+      ExecutionError,
+      "is not the run of nodes that starts at node 0",
+      "gapped window",
+    );
+    assertThrows(
+      () => plan([defineExternalRule(negNeg("test/neg_neg", { duplicateBind: true }))]),
+      ExecutionError,
+      "bind(s) 'z' are not distinct external inputs",
+      "duplicate bind",
+    );
+    assertThrows(
+      () => plan([defineExternalRule(negNeg("test/neg_neg", { transposedOutput: true }))]),
+      ExecutionError,
+      "the declared output 'n2' [8,4] is not the folded chain's last value 'n2' [4,8]",
+      "transposed output",
+    );
   });
 
   it("fails loudly on a chain that does not follow the window's node order", () => {
