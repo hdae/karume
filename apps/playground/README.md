@@ -1419,8 +1419,8 @@ visit's build of 26B ran out of memory before its first submit (observed on Dawn
 When it ends the page shows, per arm, the identity (identical over N runs, or how many words of
 which run differ and where first), the rule's hits, the dispatches and every timed round's two
 visits; then the judgement of the rule arm: **Adopt**, **Reject** or **Inconclusive**, its reason in
-words and its numbers (median paired difference, base median, gain, noise floor with the visit and
-delta spreads, the paired differences per round). Identity is required: tokens that differ reject
+words and its numbers (median paired difference, base median, gain, noise floor, the interval of
+the median difference with its coverage, the paired differences per round). Identity is required: tokens that differ reject
 the rule whatever the times. A verdict speaks for that device, backend and work only, and
 inconclusive does not mean the difference is zero.
 

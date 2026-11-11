@@ -668,12 +668,15 @@ This addendum records its two rulings on `./tune`.
     type fails whole, and a base whose first run returns no word is refused (an identity over nothing proves nothing).
     A timed span the clock reads as not finite or negative is refused in the runner, in the judge's words.
   - **The statistics**: per round, the mean of each arm's two visits; the median of the paired differences; the gain
-    over the base's median round time; and the noise floor, the larger of the visit spread (the larger of the two
-    arms' medians over rounds of |visit 1 − visit 2|) and the delta spread (the median over rounds of |delta_r −
-    median delta|, which catches an arm whose speed moves from round to round while its two visits of a round agree).
-    The floor is conservative on purpose and does not shrink with the number of rounds: more rounds make the medians
-    steadier, they do not let a gain smaller than the jitter of one visit through. **The verdict** is
-    `"inconclusive"` inside the noise floor, otherwise `"adopt"` at a gain of at least the
+    over the base's median round time; the noise floor (the larger of the two arms' medians over rounds of
+    |visit 1 − visit 2|), conservative on purpose — it does not shrink with the number of rounds: more rounds make
+    the medians steadier, they do not let a gain smaller than the jitter of one visit through; and the
+    order-statistic interval of the median of the paired differences (the k-th smallest and k-th largest, with the
+    largest k that keeps 90% coverage; the smallest and the largest with 3 or 4 rounds, at 75% and 87.5%), which
+    catches an arm whose speed moves from round to round while its two visits of a round agree. A spread of the
+    differences around their own median was tried first and dropped: it is 0 whenever half the rounds tie, so a
+    3-of-5 split still adopted and the verdict changed with the parity of the round count. **The verdict** is
+    `"inconclusive"` inside the noise floor or when the interval holds 0, otherwise `"adopt"` at a gain of at least the
     caller's `minGain`, otherwise `"reject"`; identity with the base is required by default (a class E rule — ADR
     0147 decision 2), and an arm that differs is `"reject"` whatever its times. The threshold is the caller's. A
     verdict holds for the record's device, backend and work only; `"inconclusive"` does not say the difference is zero.
@@ -698,7 +701,8 @@ This addendum records its two rulings on `./tune`.
   on its users' backends; the hand-made script of 2026-11-10 imported runtime internals to do it. The entries are
   high-level and of the rank decision 2 asks for: the runner, the arm builder and two pure functions of a record.
 - **Checks**: `packages/runtime/tests/tune_session_ab_test.ts` (synthetic arms and a fake clock: the three verdicts
-  with hand-checkable numbers, each component of the noise floor deciding a verdict, the boundaries |median delta| =
+  with hand-checkable numbers, the noise floor and the interval of the median each deciding a verdict (rounds that
+  tie, one and two outlier rounds of eight, the same verdict from 3 to 8 rounds), the boundaries |median delta| =
   floor and gain = `minGain`, the visit order for two and three arms, open, close, the report, the untimed run and the
   reading of the outputs outside the timed spans in both opening modes, counts that change between runs refused,
   closing on a failing run and on failing closes, the identity failures (another array type, a base that rewrites one
@@ -707,7 +711,8 @@ This addendum records its two rulings on `./tune`.
   external test rule, the adapter passed as the `GPUAdapterInfo` itself: identical outputs, the rule's hit and one
   dispatch fewer in the record; no verdict on real times). Fault injections (each turned the first test red): the
   reverse half of the visit order dropped, the open timed inside the span, the identity comparison skipped for the
-  non-base arm, the noise floor forced to 0, the delta spread left out of the floor, the counts read inside the span,
+  non-base arm, the noise floor forced to 0, the interval test removed, the interval fixed at the smallest and largest
+  difference, the counts read inside the span,
   the comparison of every run's counts removed, the untimed run of `openPerVisit` removed.
 - **Not in this addendum**: the playground's page that runs the A/B on real models, and running it on real weights.
   Both were built later the same day ([0148](0148-external-fusion-rules.md) addendum of 2026-11-11): the `/session-ab`

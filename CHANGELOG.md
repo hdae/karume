@@ -38,7 +38,7 @@ measurements in `docs/research/`.
   (`karume-session-ab/1`, plain JSON) keeps the environment the caller states, every raw time, the fusion and dispatch
   counts each arm reported and each arm's worst run against the first arm's outputs. `sessionAbStatistics` and
   `judgeSessionAb` are pure functions of a record: the median of the paired round differences, the gain, the noise
-  floor (the larger of the visit spread within rounds and the delta spread across rounds) and one verdict per arm
+  floor (how far an arm moves against itself within a round), the interval of the median difference and one verdict per arm
   (`"adopt"`, `"reject"`, `"inconclusive"`), identity required by default (ADR 0117 addendum of 2026-11-11).
 - `@karume/runtime/tune`: `wordIdentity` (with `NanPolicy`, `WordIdentity`, `WordMismatch`), the u32 identity
   comparison of two word arrays with NaN read by class or by payload.

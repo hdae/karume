@@ -784,7 +784,8 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
 
   it("adopts an arm faster than the noise floor by at least minGain", async () => {
     // fused round means 96, 96, 97 → deltas −5, −5, −5 (median −5); its spreads 2, 0, 2 (median 2);
-    // visit spread max(2, 2) = 2; delta spread 0; floor 2; |−5| > 2; gain 5 / 101 ≈ 4.95% ≥ 1%.
+    // floor max(2, 2) = 2; |−5| > 2; three rounds: the interval is [min, max] = [−5, −5] at
+    // 1 − 2 / 8 = 75% coverage, and it does not hold 0; gain 5 / 101 ≈ 4.95% ≥ 1%.
     const record = await recordOf([
       [95, 97],
       [96, 96],
@@ -798,9 +799,10 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
       medianDeltaMs: -5,
       baseMedianMs: 101,
       gain: 5 / 101,
-      visitSpreadMs: 2,
-      deltaSpreadMs: 0,
       noiseFloorMs: 2,
+      deltaLowMs: -5,
+      deltaHighMs: -5,
+      intervalCoverage: 0.75,
       verdict: "adopt",
       identical: true,
       reason: judged.reason,
@@ -866,7 +868,7 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
   it("takes the mean of the two middle values as the median of an even count", async () => {
     // Four rounds. base round means 100, 100, 100, 100 (median 100), spreads 0.
     // fused round means 99, 97, 95, 93 → deltas −1, −3, −5, −7 (median (−3 − 5) / 2 = −4);
-    // spreads 2, 2, 2, 6 (median 2); |delta − (−4)| 3, 1, 1, 3 (median 2).
+    // spreads 2, 2, 2, 6 (median 2); four rounds: the interval is [−7, −1] at 1 − 2 / 16 = 87.5%.
     const record = await recordOf(
       [
         [98, 100],
@@ -889,15 +891,16 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
       medianDeltaMs: -4,
       baseMedianMs: 100,
       gain: 0.04,
-      visitSpreadMs: 2,
-      deltaSpreadMs: 2,
       noiseFloorMs: 2,
+      deltaLowMs: -7,
+      deltaHighMs: -1,
+      intervalCoverage: 0.875,
     });
   });
 
   it("takes the base's visit spread when it is the larger one", async () => {
     // base round means 103, 104, 103 (median 103), spreads 6, 6, 6; fused round means 100, 101, 100
-    // → deltas −3, −3, −3, its spreads 0; visit spread max(6, 0) = 6; |−3| ≤ 6.
+    // → deltas −3, −3, −3, its spreads 0; floor max(6, 0) = 6; |−3| ≤ 6.
     const record = await recordOf(
       [
         [100, 100],
@@ -912,41 +915,101 @@ describe("judgeSessionAb and sessionAbStatistics", () => {
     );
     const [judged] = judgeSessionAb(record, { minGain: 0.01 });
     assertEquals(
-      [judged.verdict, judged.medianDeltaMs, judged.visitSpreadMs, judged.noiseFloorMs],
-      ["inconclusive", -3, 6, 6],
+      [judged.verdict, judged.medianDeltaMs, judged.noiseFloorMs],
+      ["inconclusive", -3, 6],
     );
   });
 
-  it("widens the floor by the scatter of the paired differences across rounds", async () => {
-    // Five rounds; base 100 in every visit. fused visits agree within each round (visit spread 0)
-    // but its speed moves from round to round: deltas −3, −2, −1, 2, 3 (median −1, gain 1%);
-    // |delta − (−1)| 2, 1, 0, 3, 4 (median 2); floor 2; |−1| ≤ 2.
-    const record = await recordOf(
-      [
-        [97, 97],
-        [98, 98],
-        [99, 99],
-        [102, 102],
-        [103, 103],
-      ],
-      [
-        [100, 100],
-        [100, 100],
-        [100, 100],
-        [100, 100],
-        [100, 100],
-      ],
-    );
+  /** `rounds` rounds of a base at 100 ms in every visit (noise floor 0 when the arm's visits agree). */
+  const flatBase = (rounds: number): readonly (readonly [number, number])[] =>
+    Array.from({ length: rounds }, () => [100, 100] as const);
+  /** An arm whose two visits of a round agree, at `100 + delta` ms per round. */
+  const agreeing = (deltas: readonly number[]): readonly (readonly [number, number])[] =>
+    deltas.map((delta) => [100 + delta, 100 + delta] as const);
+
+  it("calls it inconclusive when the rounds do not agree on which arm is faster, whatever the noise floor", async () => {
+    // Five rounds, every arm's two visits agree (floor 0). deltas −3, −2, −1, 2, 3: median −1
+    // (gain 1%), but the interval [min, max] = [−3, 3] (1 − 2 / 32 = 93.75%) holds 0.
+    const record = await recordOf(agreeing([-3, -2, -1, 2, 3]), flatBase(5));
     const [judged] = judgeSessionAb(record, { minGain: 0.005 });
     assertEquals(
       {
         verdict: judged.verdict,
         median: judged.medianDeltaMs,
-        visit: judged.visitSpreadMs,
-        delta: judged.deltaSpreadMs,
         floor: judged.noiseFloorMs,
+        interval: [judged.deltaLowMs, judged.deltaHighMs, judged.intervalCoverage],
       },
-      { verdict: "inconclusive", median: -1, visit: 0, delta: 2, floor: 2 },
+      { verdict: "inconclusive", median: -1, floor: 0, interval: [-3, 3, 0.9375] },
+    );
+    assertStringIncludes(judged.reason, "the rounds do not agree on which arm is faster");
+  });
+
+  it("is not fooled by rounds that tie: three rounds at −1 and two at +4 are inconclusive", async () => {
+    // deltas −1, −1, −1, 4, 4: median −1, and the scatter around the median is 0 for most rounds
+    // (the reading a spread around the median would give), yet two rounds of five say the arm is
+    // slower: the interval [−1, 4] holds 0.
+    const record = await recordOf(agreeing([-1, -1, -1, 4, 4]), flatBase(5));
+    const [judged] = judgeSessionAb(record, { minGain: 0.005 });
+    assertEquals(
+      [judged.verdict, judged.medianDeltaMs, judged.deltaLowMs, judged.deltaHighMs],
+      ["inconclusive", -1, -1, 4],
+    );
+  });
+
+  it("drops one outlier round of eight from the interval, and not two", async () => {
+    // Eight rounds: P(B ≤ 1) = 9 / 256, so the second smallest and second largest keep
+    // 1 − 18 / 256 = 92.97% coverage. Seven rounds at −2 and one at +50: interval [−2, −2], adopt
+    // (gain 2%). With two rounds at +50 the interval is [−2, 50] and holds 0.
+    const one = await recordOf(agreeing([-2, -2, 50, -2, -2, -2, -2, -2]), flatBase(8));
+    const [adopted] = judgeSessionAb(one, { minGain: 0.01 });
+    assertEquals(
+      [adopted.verdict, adopted.deltaLowMs, adopted.deltaHighMs, adopted.intervalCoverage],
+      ["adopt", -2, -2, 1 - 18 / 256],
+    );
+    const two = await recordOf(agreeing([-2, -2, 50, -2, -2, 50, -2, -2]), flatBase(8));
+    const [undecided] = judgeSessionAb(two, { minGain: 0.01 });
+    assertEquals(
+      [undecided.verdict, undecided.medianDeltaMs, undecided.deltaLowMs, undecided.deltaHighMs],
+      ["inconclusive", -2, -2, 50],
+    );
+  });
+
+  it("gives the same verdict as rounds are added to an arm that is faster in every round", async () => {
+    // The verdict must not depend on the parity of the round count: −2 in every round is adopt at
+    // 3, 4, 5, 6, 7 and 8 rounds alike.
+    for (const rounds of [3, 4, 5, 6, 7, 8]) {
+      const record = await recordOf(
+        agreeing(Array.from({ length: rounds }, () => -2)),
+        flatBase(rounds),
+      );
+      assertEquals(
+        judgeSessionAb(record, { minGain: 0.01 })[0].verdict,
+        "adopt",
+        `${rounds} rounds`,
+      );
+    }
+  });
+
+  it("refuses, by name, a stored record whose arms are not arms, and more rounds than the statistics take", async () => {
+    const record = await recordOf(agreeing([-2, -2, -2]), flatBase(3));
+    for (const arms of [undefined, "base", [{ name: "base" }, { name: "fused" }], [5, 6]]) {
+      assertThrows(
+        () => sessionAbStatistics({ ...record, arms } as unknown as SessionAbRecord),
+        RangeError,
+        "the record's arms must be an array of arms",
+        JSON.stringify(arms),
+      );
+    }
+    const times = Array.from({ length: 1001 }, () => [100, 100] as const);
+    assertThrows(
+      () =>
+        sessionAbStatistics({
+          ...record,
+          rounds: 1001,
+          arms: record.arms.map((arm) => ({ ...arm, timesMs: times })),
+        }),
+      RangeError,
+      "at most 1000 rounds",
     );
   });
 

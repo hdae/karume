@@ -75,9 +75,9 @@
  * no fingerprint, a record of its own (`karume-session-ab/1`). {@link sessionAbStatistics} and
  * {@link judgeSessionAb} are pure functions of a record (a stored record can be judged again): per
  * arm the median of the paired round differences, the gain over the base's median, the noise floor
- * (the larger of how far each arm moved against itself within a round and how far the paired
- * differences scatter across rounds; conservative on purpose, it does not shrink with more rounds)
- * and one verdict — `"adopt"`, `"reject"` or `"inconclusive"` — with identity required by default
+ * (how far each arm moved against itself within a round; conservative on purpose, it does not shrink
+ * with more rounds), the interval the median difference can lie in (read from the differences
+ * themselves; when it holds 0 the rounds do not agree on which arm is faster) and one verdict — `"adopt"`, `"reject"` or `"inconclusive"` — with identity required by default
  * (a class E rule). A verdict speaks for the record's device, backend and work only;
  * `"inconclusive"` does not mean the difference is zero. Never run it while other work uses the same
  * GPU: the times would measure the contention.

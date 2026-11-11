@@ -6,27 +6,34 @@
  * the round (forward and reverse pass, so a drift linear within the round cancels), and
  * `delta_r = arm_r − base_r`. Over the rounds: `medianDeltaMs` = the median of `delta_r`,
  * `baseMedianMs` = the median of `base_r`, and `gain = −medianDeltaMs / baseMedianMs` (positive =
- * the arm is faster). The noise floor reads two scatters and takes the larger:
+ * the arm is faster). A median of an even count is the mean of the two middle values. Two readings
+ * say whether that median is more than noise, and both must hold:
  *
- * - `visitSpreadMs`, how far one arm moves against itself within a round: for each arm, the median
- *   over rounds of |visit 1 − visit 2|, the larger of the base's and the compared arm's;
- * - `deltaSpreadMs`, how far the paired differences scatter across rounds: the median over rounds of
- *   |delta_r − medianDeltaMs| (an arm whose speed moves from round to round while its two visits of
- *   a round agree has a visit spread near 0, and this is what catches it);
- * - `noiseFloorMs = max(visitSpreadMs, deltaSpreadMs)`.
+ * - `noiseFloorMs`, how far one arm moves against itself within a round: for each arm, the median
+ *   over rounds of |visit 1 − visit 2|, the larger of the base's and the compared arm's. It is
+ *   conservative on purpose and does not shrink with the number of rounds: more rounds make the
+ *   medians steadier, they do not let a gain smaller than the jitter of one visit through.
+ * - `[deltaLowMs, deltaHighMs]`, where the median of the paired differences can be, read from the
+ *   differences themselves: the order-statistic interval of the median (the k-th smallest and the
+ *   k-th largest `delta_r`, with the largest k that keeps the interval's coverage at 90% or more —
+ *   distribution-free, since each difference falls on either side of the true median with equal
+ *   chance). With 3 or 4 rounds no k reaches 90%, and the interval is the smallest and the largest
+ *   difference (coverage 75% and 87.5%, reported as `intervalCoverage`); from 5 rounds it is at least
+ *   90%, and from 8 rounds a single outlier round no longer widens it. An interval that holds 0
+ *   means the rounds do not agree on which arm is faster — an arm whose speed moves from round to
+ *   round while its two visits of a round agree has a noise floor near 0, and this is what catches
+ *   it. (The spread of the differences around their own median is not used: it is 0 whenever half
+ *   the rounds tie, whatever the rest do.)
  *
- * A median of an even count is the mean of the two middle values. The floor is conservative on
- * purpose and does not shrink with the number of rounds: more rounds make the medians steadier, they
- * do not let a gain smaller than the jitter of one visit through.
- *
- * The verdict, per non-base arm: `"inconclusive"` when |medianDeltaMs| ≤ noiseFloorMs; otherwise
- * `"adopt"` when gain ≥ minGain; otherwise `"reject"`. Identity comes first and is required by
+ * The verdict, per non-base arm: `"inconclusive"` when |medianDeltaMs| ≤ noiseFloorMs or the interval
+ * holds 0; otherwise `"adopt"` when gain ≥ minGain; otherwise `"reject"`. Identity comes first and is required by
  * default (a class E rule, ADR 0147 decision 2): an arm whose outputs differed from the base's in any
  * run, or a base whose own runs differed, is `"reject"` whatever its times. Identity is read from
  * each arm's worst run (`identity.worst.failures` 0 means identical).
  *
  * What the verdict means: on this record's device, backend and work, the arm's end-to-end time
- * differed from the base's by more than the arms moved against themselves, by at least `minGain`.
+ * differed from the base's by more than the arms moved against themselves, in a direction the rounds
+ * agree on, by at least `minGain`.
  * What it does not mean: anything about another device, backend or input size, or that a
  * difference inside the noise floor is zero.
  */
@@ -53,11 +60,13 @@ export type SessionAbComparison = {
   /** `−medianDeltaMs / baseMedianMs`; positive when the arm is faster. */
   readonly gain: number;
   /** The larger of the two arms' medians over rounds of |visit 1 − visit 2|. */
-  readonly visitSpreadMs: number;
-  /** The median over rounds of |delta_r − medianDeltaMs|. */
-  readonly deltaSpreadMs: number;
-  /** `max(visitSpreadMs, deltaSpreadMs)`. */
   readonly noiseFloorMs: number;
+  /** The lower end of the order-statistic interval of the median of `deltasMs`. */
+  readonly deltaLowMs: number;
+  /** The upper end of that interval. */
+  readonly deltaHighMs: number;
+  /** The interval's coverage: at least 0.9 from 5 rounds, 0.75 with 3 and 0.875 with 4. */
+  readonly intervalCoverage: number;
 };
 
 /** The three verdicts of {@link judgeSessionAb}. */
@@ -89,6 +98,37 @@ const median = (values: readonly number[]): number => {
   const sorted = values.toSorted((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+/** The coverage the interval of the median keeps when the rounds allow it. */
+const INTERVAL_COVERAGE = 0.9;
+
+/** The most rounds the statistics take: `2 ** -rounds` must not underflow in {@link medianInterval}. */
+const MAX_ROUNDS = 1000;
+
+/**
+ * The order-statistic interval of the median of `values`: `[x_(k), x_(n+1−k)]` of the sorted values
+ * misses the true median with probability `2 · P(B ≤ k − 1)`, B ~ Binomial(n, 1/2), whatever the
+ * distribution. k is the largest that keeps the coverage at {@link INTERVAL_COVERAGE} or more, and 1
+ * when not even the full range does (n ≤ 4).
+ */
+const medianInterval = (
+  values: readonly number[],
+): { readonly low: number; readonly high: number; readonly coverage: number } => {
+  const sorted = values.toSorted((a, b) => a - b);
+  const count = sorted.length;
+  // P(B = 0), then P(B = rank) from P(B = rank − 1) by the ratio (count − rank + 1) / rank
+  let term = 2 ** -count;
+  let below = term;
+  let rank = 1;
+  // 2 · rank < count keeps the next interval's ends in order
+  while (2 * rank < count) {
+    term = (term * (count - rank + 1)) / rank;
+    if (2 * (below + term) > 1 - INTERVAL_COVERAGE) break;
+    below += term;
+    rank += 1;
+  }
+  return { low: sorted[rank - 1], high: sorted[count - rank], coverage: 1 - 2 * below };
 };
 
 /** A field of a value read from a stored record; `undefined` when the value is not an object. */
@@ -138,16 +178,35 @@ const assertRecord = (record: SessionAbRecord): void => {
       `session A/B: the record's format is ${JSON.stringify(record.format)}, not "${SESSION_AB_FORMAT}"`,
     );
   }
+  // A stored record is data: its shape is checked before anything is read off it
+  const arms: unknown = record.arms;
+  const shaped =
+    Array.isArray(arms) &&
+    arms.every(
+      (arm) => typeof fieldOf(arm, "name") === "string" && Array.isArray(fieldOf(arm, "timesMs")),
+    );
+  if (!shaped) {
+    throw new RangeError(
+      "session A/B: the record's arms must be an array of arms, each with a name and its timesMs",
+    );
+  }
   assertSessionAbShape(
     record.arms.map((arm) => arm.name),
     record.rounds,
   );
+  if (record.rounds > MAX_ROUNDS) {
+    throw new RangeError(
+      `session A/B: the statistics take at most ${MAX_ROUNDS} rounds (got ${record.rounds})`,
+    );
+  }
   for (const arm of record.arms) {
     const valid =
       arm.timesMs.length === record.rounds &&
       arm.timesMs.every(
-        (visits) =>
-          visits.length === 2 && visits.every((time) => Number.isFinite(time) && time >= 0),
+        (visits: unknown) =>
+          Array.isArray(visits) &&
+          visits.length === 2 &&
+          visits.every((time) => typeof time === "number" && Number.isFinite(time) && time >= 0),
       );
     if (!valid) throw new RangeError(invalidTimesMessage(arm.name, record.rounds));
     if (!validIdentity(arm.identity, record.rounds)) {
@@ -171,8 +230,9 @@ const selfSpread = (times: readonly (readonly [number, number])[]): number =>
 
 /**
  * The statistics of every non-base arm against the base (the first arm), in the record's order.
- * Refuses (`RangeError`) a record of another format, fewer than two arms, a name used twice, rounds
- * that are not an integer of at least 3, times that are not two finite non-negative numbers per
+ * Refuses (`RangeError`) a record of another format, arms that are not an array of named arms with
+ * their times, fewer than two arms, a name used twice, rounds that are not an integer from 3 to
+ * 1000, times that are not two finite non-negative numbers per
  * round, an identity block that does not hold what the judge reads, and a base whose median round
  * time is not positive.
  */
@@ -190,8 +250,7 @@ export const sessionAbStatistics = (record: SessionAbRecord): SessionAbCompariso
   return others.map((arm) => {
     const deltasMs = roundMeans(arm.timesMs).map((mean, round) => mean - baseMeans[round]);
     const medianDeltaMs = median(deltasMs);
-    const visitSpreadMs = Math.max(baseSpread, selfSpread(arm.timesMs));
-    const deltaSpreadMs = median(deltasMs.map((delta) => Math.abs(delta - medianDeltaMs)));
+    const interval = medianInterval(deltasMs);
     return {
       arm: arm.name,
       base: base.name,
@@ -199,9 +258,10 @@ export const sessionAbStatistics = (record: SessionAbRecord): SessionAbCompariso
       medianDeltaMs,
       baseMedianMs,
       gain: -medianDeltaMs / baseMedianMs,
-      visitSpreadMs,
-      deltaSpreadMs,
-      noiseFloorMs: Math.max(visitSpreadMs, deltaSpreadMs),
+      noiseFloorMs: Math.max(baseSpread, selfSpread(arm.timesMs)),
+      deltaLowMs: interval.low,
+      deltaHighMs: interval.high,
+      intervalCoverage: interval.coverage,
     };
   });
 };
@@ -250,17 +310,25 @@ export const judgeSessionAb = (
           ` round ${worst.round}, visit ${worst.visit}, run ${worst.run}${where}`,
       };
     }
-    const { medianDeltaMs, noiseFloorMs, gain } = comparison;
+    const { medianDeltaMs, noiseFloorMs, gain, deltaLowMs, deltaHighMs } = comparison;
     const numbers =
-      `median delta ${ms(medianDeltaMs)}, noise floor ${ms(noiseFloorMs)}` +
-      ` (visit spread ${ms(comparison.visitSpreadMs)}, delta spread` +
-      ` ${ms(comparison.deltaSpreadMs)}), gain ${percent(gain)} of ${ms(comparison.baseMedianMs)}`;
+      `median delta ${ms(medianDeltaMs)}, noise floor ${ms(noiseFloorMs)}, interval of the median` +
+      ` [${ms(deltaLowMs)}, ${ms(deltaHighMs)}] at ${percent(comparison.intervalCoverage)} coverage,` +
+      ` gain ${percent(gain)} of ${ms(comparison.baseMedianMs)}`;
     if (Math.abs(medianDeltaMs) <= noiseFloorMs) {
       return {
         ...comparison,
         verdict: "inconclusive",
         identical,
         reason: `the difference is inside the noise floor (${numbers})`,
+      };
+    }
+    if (deltaLowMs <= 0 && deltaHighMs >= 0) {
+      return {
+        ...comparison,
+        verdict: "inconclusive",
+        identical,
+        reason: `the rounds do not agree on which arm is faster: the interval holds 0 (${numbers})`,
       };
     }
     if (gain >= minGain) {
