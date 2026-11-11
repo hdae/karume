@@ -859,7 +859,10 @@ const assertDeclarations = (
  * values with no exception — and an empty one would never move on. MUST: the chain follows the
  * window's node order. The step's inputs and output are derived from the chain in its order (the
  * last node's value is the output, earlier values are internal), so a reversed chain would list
- * its own output among its inputs and never define the value its consumers read.
+ * its own output among its inputs and never define the value its consumers read. MUST: the chain
+ * starts at the window's first node (no leading passthrough). The rule is tried only where that node's
+ * op is one of its `heads`, and the heads say which built-in rules it can pre-empt; a chain that
+ * started later would fold ops its heads never name.
  */
 const assertExternalWindow = (
   name: string,
@@ -880,6 +883,12 @@ const assertExternalWindow = (
     throw new ExecutionError(
       `fusion rule '${name}': the folded chain does not follow the window's node order (its nodes sit at` +
         ` window positions ${positions.join(", ")})`,
+    );
+  }
+  if (positions[0] !== 0) {
+    throw new ExecutionError(
+      `fusion rule '${name}': the folded chain starts at window position ${positions[0]}, not at the node it was` +
+        " tried at (an external chain starts at its window's first node, the node whose op is one of its heads)",
     );
   }
 };

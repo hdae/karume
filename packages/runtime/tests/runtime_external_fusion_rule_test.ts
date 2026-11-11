@@ -420,6 +420,24 @@ describe("an external rule building a step", () => {
     );
   });
 
+  it("fails loudly on a chain that does not start at its window's first node (a leading passthrough would fold ops its heads never name)", () => {
+    const definition = negNeg("test/neg_neg");
+    // Tried at the abs (its only head), it folds the two negs after it and keeps the abs in front.
+    const leading = defineExternalRule({
+      ...definition,
+      heads: ["abs"],
+      match: (nodes, index) => {
+        const negs = definition.match(nodes, index + 1);
+        return negs === undefined ? undefined : { ...negs, window: [nodes[index], ...negs.window] };
+      },
+    });
+    assertThrows(
+      () => plan([leading]),
+      ExecutionError,
+      "fusion rule 'test/neg_neg': the folded chain starts at window position 1, not at the node it was tried at",
+    );
+  });
+
   it("fails loudly on a step whose dispatches never bind its output (its buffer would never be written)", () => {
     assertThrows(
       () =>
