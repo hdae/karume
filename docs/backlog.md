@@ -218,7 +218,9 @@ maintainer's ruling of 2026-11-06).
     `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`, `vowel-detector` and `wan`
     (Wan2.1). `fusion-hints`' search itself is back (2026-11-11) as the fusion candidate search of `packages/e2e`
     (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
-    `e2e_fusion_candidates_report_test.ts`); only its page is still to come.
+    `e2e_fusion_candidates_report_test.ts`); its window limit widens by itself (from 12, doubled until the table stops
+    changing, ceiling 384 — every local mirror stabilises by then), so no table needs a second search by hand. Only its
+    page is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
     `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
   - Small doc edits: `packages/e2e/README.md` names `outputs/series/` but not `outputs/test-assets/` (ADR
