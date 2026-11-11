@@ -573,3 +573,53 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   2026-10-30 with the maintainer's ruling 42 = c, which re-derived the whole `nvidia-blackwell` table from two full
   sweeps of the current kernels: `i8a8.conv3d` takes `tile64x64r8x4w16x8k16`, the i8a8 ③PV and conv2d rows32 change,
   and GEMMs of 129–512 rows and the i8a8 ①QK return to the default; the records are in the table's provenance.)
+
+### Addendum decision 12: the i8a8 geometries take an optional field `skeleton` (perf-ledger K-85; 2026-11-11)
+
+- **What.** `I8a8Geometry` gains an optional field `skeleton?: "vec4"` (the skeleton form of the
+  integer GEMM). Absent, a geometry builds the keys and WGSL it built before, byte for byte (the
+  codegen snapshots are unchanged). Present, the shared inner-product loop is emitted unrolled (one
+  block per pack, every pack offset a constant) in every i8a8 consumer, and the i8a8 linear with i8
+  weights where `k % 16 == 0` fills its shared tiles one `vec4<u32>` of global memory per item
+  (four whole-word stores with static components into the scalar `u32` tiles — the shared-tile
+  MUST of gemm.ts holds). The key names the form: `s` after the K tile (`k32sv4`), `:fill16` for
+  the vec4 fill. w4a8 and `k % 16 != 0` keep the word fill with the unrolled loop; ①QK / ③PV and
+  conv3d take only the unrolled loop in this slice. The guard (`assertI8a8Geometry`) refuses a
+  skeleton K tile that is not whole vec4s (`tileK % 16`) and any value but `"vec4"`.
+- **Why a field of the geometry** (not a profile-wide flag or a Session option): the form changes
+  no integer (exact i32 reduction — the "kernel variant or geometry" row of
+  [kernel-rules](../kernel-rules.md) §3), so it is a speed choice like the tile shape, carried in
+  the key and decided per field by the sweep of decision 4. The recorded gains split by field and
+  by GPU (the spike: linear ×1.32–1.39 per Wan2.2 33f forward on the RTX 3080 Ti at K32, ×0.41 at
+  K32 and about ×1.07 at K64 on the RTX 5070 Ti; ③PV ×1.50–1.58 on both), so one flag could not
+  serve both tables.
+- **Not breaking.** The field is optional: the default profile and the three embedded tables carry
+  none (their keys, WGSL and `provenance.kernels` are unchanged), `acquireGpu({ geometryProfile })`
+  and `parseGeometryProfileJson` accept it and reject any other value naming the field, and the
+  sweep and the fingerprint build the same fill form the recipe builder takes
+  (`linearI8a8UsesVecFill`).
+- **The evaluation set `k85`.** The sweep gains a candidate set that measures the field on cases of
+  its own instead of the case set of decision 6: the Wan2.2 TI2V-5B DiT linears at 33 frames
+  (S = 7,920, from the distribution's transformer graph, with their node counts per forward — 303
+  of its 310 linears) and an Irodori M = 185 guard, against the registered tables' `i8a8.linear`
+  and a grid of 204 geometries (regM 8 / 12 / 16, regN 4 / 8, the existing workgroup shapes, K
+  tile 16 / 32 / 64, with and without the field, within 16,384 B). Its record carries the case-set
+  version and the default's fingerprint of its own cases, and the generator derives no table from
+  it; `SWEEP_CASES`, the other sets and every saved table's matching keys are unchanged. Every sweep
+  record now names the embedded table a Session on that adapter selects (`geometryProfile`), the
+  "this adapter's table" a `k85` summary compares against (the Playground's K-85 preset).
+- **What stays for a table entry.** `i8a8.linear` is one geometry for every M (decision 6), and the
+  recorded small-M losers (Irodori M = 185 / M = 1, ×0.90–0.93) read the same field, so an entry
+  waits for the row-count buckets of `i8a8.linear` (the second slice of K-85; ADR
+  [0116](0116-geometry-profile-row-buckets.md)). A K64 geometry in `i8a8.linear` would be refused
+  at generation for w4a8 at group 32 (`groupSize % tileK`); no default preset runs w4a8 on the a8
+  path, but that resolution belongs to the same slice. The vec4 fills of ①QK / ③PV and conv3d, and
+  the table derivation on both GPUs (a Chrome sweep on the RTX 5070 Ti, a Node sweep on the RTX
+  3080 Ti, then the sha256 re-checks of decision 8), are not done.
+- **Measured on the development GPU (2026-11-11, an evaluation, not adoption evidence).** The k85 set
+  on the RTX 3080 Ti (Node + Dawn / Vulkan, dp4a, one device per case with 60 s idle between):
+  every one of the 1,242 rows was identical to the default; the census-weighted sum over one 33f
+  forward's linears is 1,874.6 ms with the `nvidia-ampere` geometry, 1,532.7 ms with the per-case
+  best skeleton and 1,578.0 ms with one skeleton geometry for every case. Every case but the guard
+  drifted by ×1.14–1.21 during its run, outside the 0.9–1.1 range of addendum decision 8, so the
+  derivation would not take these ratios; the numbers and their caveats are in perf-ledger K-85.
