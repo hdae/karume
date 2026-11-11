@@ -28,7 +28,9 @@ export const assertCheckCase = (checkCase: CheckCase, prefix = ""): void => {
   }
 };
 
+/** Asserts the part ran (no `notRun`), every case and every requirement. */
 export const assertCheckPart = (part: CheckPart): void => {
+  assert(part.notRun === undefined, `${part.id}: not run — ${part.notRun}`);
   for (const checkCase of part.cases) assertCheckCase(checkCase, `${part.id} `);
   for (const requirement of part.requirements) {
     assert(requirement.met, `${part.id}: ${requirement.name} — ${requirement.detail}`);

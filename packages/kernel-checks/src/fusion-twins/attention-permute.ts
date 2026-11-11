@@ -10,7 +10,7 @@
  * Two parts: the routes any device takes (the three-dispatch s16 route, an online seat whose shape
  * falls back, the two a8 shapes whose stage falls back to f32, and the f32 seat, which absorbs
  * nothing), and the online routes in their sg32 form, which need a device whose online kernel takes
- * that form ({@link attentionPermuteSg32Shortfall}). The online routes in the wg form need a device
+ * that form (on another device the part is not run). The online routes in the wg form need a device
  * without subgroups, so they run in the runtime's node test only.
  */
 
@@ -27,7 +27,7 @@ import {
   openGraphModel,
 } from "../../../runtime/tests/helpers/model-fixture.ts";
 import { checkFusionTwin } from "../fusion-twin.ts";
-import { type CheckOptions, type CheckPart, type ExpectedCases } from "../result.ts";
+import { type CheckOptions, type CheckPart, type ExpectedCases, notRunPart } from "../result.ts";
 import { twinCases, withTwinSessions } from "./session.ts";
 
 export type AttentionPermuteShape = {
@@ -275,6 +275,8 @@ export const attentionPermuteOnlineForm = (
 
 const BASE_PART = "fusion-attention-permute";
 const SG32_PART = "fusion-attention-permute-sg32";
+const SG32_TITLE =
+  "attentionPermute: the online attention (sg32) absorbing q / k / v and O vs permutes as nodes";
 
 /** The routes any device takes, and the online routes in the sg32 form. */
 const BASE_ROUTES = ATTENTION_PERMUTE_ROUTES.filter(({ reduce }) => reduce === undefined);
@@ -359,19 +361,19 @@ export const checkAttentionPermuteTwins = async (
 });
 
 /**
- * The online routes in the sg32 form, as {@link checkAttentionPermuteTwins}. Throws on a device
- * whose online attention takes another form ({@link attentionPermuteSg32Shortfall}).
+ * The online routes in the sg32 form, as {@link checkAttentionPermuteTwins}. On a device whose
+ * online attention takes another form the part is not run ({@link attentionPermuteSg32Shortfall} in
+ * `notRun`).
  */
 export const checkAttentionPermuteSg32Twins = async (
   gpu: GpuContext,
   options: CheckOptions = {},
 ): Promise<CheckPart> => {
   const shortfall = attentionPermuteSg32Shortfall(gpu);
-  if (shortfall !== undefined) throw new Error(`${SG32_PART}: ${shortfall}`);
+  if (shortfall !== undefined) return notRunPart(SG32_PART, SG32_TITLE, shortfall);
   return {
     id: SG32_PART,
-    title:
-      "attentionPermute: the online attention (sg32) absorbing q / k / v and O vs permutes as nodes",
+    title: SG32_TITLE,
     cases: await runRoutes(gpu, SG32_PART, SG32_ROUTES, options),
     requirements: [],
   };

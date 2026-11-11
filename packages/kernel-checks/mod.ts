@@ -16,6 +16,7 @@ export {
   type WordFailure,
 } from "./src/result.ts";
 export { checkFusionTwin, type FusionTwin } from "./src/fusion-twin.ts";
+export { checkFusionTwins, FUSION_TWIN_CASES } from "./src/fusion-twins/all.ts";
 export {
   checkGatedResidualTwins,
   GATED_RESIDUAL_MASKS,

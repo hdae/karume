@@ -54,7 +54,22 @@ export type CheckPart = {
   readonly title: string;
   readonly cases: readonly CheckCase[];
   readonly requirements: readonly Requirement[];
+  /**
+   * Present when the device lacks what the part needs (a WGSL language feature, a form of a kernel
+   * it never takes): the reason. Such a part has no cases and MUST NOT read as a pass — it was not
+   * run here.
+   */
+  readonly notRun?: string;
 };
+
+/** The part a device cannot run: no cases, and the reason. */
+export const notRunPart = (id: string, title: string, reason: string): CheckPart => ({
+  id,
+  title,
+  cases: [],
+  requirements: [],
+  notRun: reason,
+});
 
 /**
  * The number of cases each part of a check MUST return, by part id. A part with another count did

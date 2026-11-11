@@ -9,7 +9,7 @@
  * the physical kernels stay the production pair, only the exact match stops matching.
  *
  * The dp4a cases force `dot4I8Packed` (WGSL `packed_4x8_integer_dot_product`), so the part needs that
- * language feature ({@link linearPrologueShortfall}).
+ * language feature; a device without it returns the part as not run.
  */
 
 import type { PrologueUnaryOp } from "../../../runtime/src/codegen/elementwise.ts";
@@ -27,7 +27,7 @@ import {
   openModelBytes,
 } from "../../../runtime/tests/helpers/model-fixture.ts";
 import { checkFusionTwin } from "../fusion-twin.ts";
-import { type CheckOptions, type CheckPart, type ExpectedCases } from "../result.ts";
+import { type CheckOptions, type CheckPart, type ExpectedCases, notRunPart } from "../result.ts";
 import { twinCases, withTwinSessions } from "./session.ts";
 
 /**
@@ -141,7 +141,7 @@ export const linearPrologueLabel = (
 ): string => `${op} rows=${rows} K=${k} N=${n} ${dot}`;
 
 /** What the device lacks for the part (the dp4a cases force `dot4I8Packed`), or undefined. */
-export const linearPrologueShortfall = (
+const linearPrologueShortfall = (
   gpu: Pick<GpuContext, "wgslLanguageFeatures">,
 ): string | undefined =>
   dp4aAvailable(gpu.wgslLanguageFeatures)
@@ -149,6 +149,7 @@ export const linearPrologueShortfall = (
     : `the dp4a cases need the WGSL language feature ${DP4A_WGSL_FEATURE}, which this device lacks`;
 
 const PART = "fusion-linear-prologue";
+const TITLE = "linearPrologue: gelu folded into the a8 linear vs the pair (dp4a and emulated dot)";
 
 /** The cases of {@link checkLinearPrologueTwins}: 5 shapes × 2 ops × 2 dot forms. */
 export const LINEAR_PROLOGUE_TWIN_CASES = { [PART]: 20 } as const satisfies ExpectedCases;
@@ -156,14 +157,15 @@ export const LINEAR_PROLOGUE_TWIN_CASES = { [PART]: 20 } as const satisfies Expe
 /**
  * Every shape, op and dot form on the a8 seat: the fused Session against the interposed one
  * (checkFusionTwin, NaN by class), linearPrologue at 1 and 0, the prologue quantize + the GEMM
- * against the op + quantize_rows + the GEMM. Throws on a device without dp4a.
+ * against the op + quantize_rows + the GEMM. On a device without dp4a the part is not run (its
+ * reason in `notRun`).
  */
 export const checkLinearPrologueTwins = async (
   gpu: GpuContext,
   options: CheckOptions = {},
 ): Promise<CheckPart> => {
   const shortfall = linearPrologueShortfall(gpu);
-  if (shortfall !== undefined) throw new Error(`${PART}: ${shortfall}`);
+  if (shortfall !== undefined) return notRunPart(PART, TITLE, shortfall);
   const sink = twinCases(PART, LINEAR_PROLOGUE_TWIN_CASES[PART], options);
   for (const shape of LINEAR_PROLOGUE_SHAPES) {
     const [rows, k, n] = shape;
@@ -204,7 +206,7 @@ export const checkLinearPrologueTwins = async (
   }
   return {
     id: PART,
-    title: "linearPrologue: gelu folded into the a8 linear vs the pair (dp4a and emulated dot)",
+    title: TITLE,
     cases: sink.cases,
     requirements: [],
   };
