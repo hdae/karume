@@ -2,7 +2,13 @@ import { judgeSessionAb } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { RecordEnvironment } from "../src/lib/environment.ts";
-import { buildSessionAbPageRecord } from "../src/models/session-ab/record.ts";
+import { readFileSync } from "node:fs";
+
+import {
+  buildSessionAbPageRecord,
+  PACKAGE_VERSIONS,
+  type SessionAbArmFacts,
+} from "../src/models/session-ab/record.ts";
 import {
   INITIAL_SESSION_AB_FORM,
   parseSessionAbForm,
@@ -41,15 +47,35 @@ const request = sessionAbRequest(
   RULE,
 );
 
-const build = (record = abRecord({ base: steady(100), rule: steady(90) })) =>
+const VERSIONS = { runtime: "9.8.7", models: "6.5.4" };
+
+/** What the two arms learned: the cache as resolved (two layers here) and the rule's keys. */
+const FACTS: readonly SessionAbArmFacts[] = [
+  { name: "base", facts: { expertCache: { slots: [64, 64] }, ruleKeys: [] } },
+  {
+    name: "rule",
+    facts: {
+      expertCache: { slots: [64, 64] },
+      ruleKeys: ["ext:candidate:gelu_mul:v1:gelu-other:f32:wg128"],
+    },
+  },
+];
+
+const build = (
+  record = abRecord({ base: steady(100), rule: steady(90) }),
+  arms: readonly SessionAbArmFacts[] = FACTS,
+  ofRequest = request,
+) =>
   buildSessionAbPageRecord({
     environment: ENVIRONMENT,
-    request,
+    versions: VERSIONS,
+    request: ofRequest,
     distribution: { directory: "models/karume-gemma4-qat", manifestSha256: "ab".repeat(32) },
     source: { kind: "direct" },
     ruleName: RULE,
+    arms,
     record,
-    judgements: judgeSessionAb(record, { minGain: request.minGain }),
+    judgements: judgeSessionAb(record, { minGain: ofRequest.minGain }),
   });
 
 describe("the session A/B page's record", () => {
@@ -90,5 +116,61 @@ describe("the session A/B page's record", () => {
     const renamed = abRecord({ base: steady(100), rule: steady(90) });
     const swapped = { ...renamed, arms: renamed.arms.toReversed() };
     expect(() => build(swapped)).toThrow(/is not the request's/);
+  });
+
+  describe("what a reader needs to run it again", () => {
+    it("keeps the versions it is given; the page's are the two packages' own", () => {
+      expect(build().versions).toEqual(VERSIONS);
+      const versionOf = (name: string): unknown =>
+        JSON.parse(
+          readFileSync(new URL(`../../../packages/${name}/package.json`, import.meta.url), "utf8"),
+        ).version;
+      expect(PACKAGE_VERSIONS).toEqual({
+        runtime: versionOf("runtime"),
+        models: versionOf("models"),
+      });
+    });
+
+    it("names the rule's dispatch keys as the rule arm reported them", () => {
+      expect(build().rule).toEqual({
+        name: RULE,
+        package: "@karume/candidate-rules",
+        dispatchKeys: ["ext:candidate:gelu_mul:v1:gelu-other:f32:wg128"],
+      });
+    });
+
+    it("names the rule's key prefix when no counts were read (no keys seen)", () => {
+      const unread = FACTS.map(({ name, facts }) => ({
+        name,
+        facts: facts.expertCache === undefined ? {} : { expertCache: facts.expertCache },
+      }));
+      expect(
+        build(abRecord({ base: steady(100), rule: steady(90), noCounts: true }), unread).rule,
+      ).toEqual({
+        name: RULE,
+        package: "@karume/candidate-rules",
+        keyPrefix: "ext:candidate:",
+      });
+    });
+
+    it("keeps the expert cache as each arm resolved it, and none without the cache", () => {
+      expect(build().expertCache).toEqual([
+        { arm: "base", slots: [64, 64] },
+        { arm: "rule", slots: [64, 64] },
+      ]);
+      const plain = sessionAbRequest(
+        { mount: "gemma4-qat", model: "12b", quant: "i4" },
+        settings,
+        RULE,
+      );
+      const noCache = FACTS.map(({ name }) => ({ name, facts: { ruleKeys: [] } }));
+      expect(Object.hasOwn(build(undefined, noCache, plain), "expertCache")).toBe(false);
+    });
+
+    it("refuses arm facts of other arms, or an arm without its resolved cache", () => {
+      expect(() => build(undefined, FACTS.toReversed())).toThrow(/are not the request's arms/);
+      const missing = [FACTS[0], { name: "rule", facts: { ruleKeys: [] } }];
+      expect(() => build(undefined, missing)).toThrow(/rule reported no resolved expert cache/);
+    });
   });
 });

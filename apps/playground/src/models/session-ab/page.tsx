@@ -65,7 +65,7 @@ import {
 } from "@/models/gemma4/settings";
 import { buildGemmaPipeline, type GemmaPipeline } from "@/models/gemma4/use-gemma-pipeline";
 
-import { buildSessionAbPageRecord, type SessionAbPageRecord } from "./record";
+import { buildSessionAbPageRecord, PACKAGE_VERSIONS, type SessionAbPageRecord } from "./record";
 import {
   INITIAL_SESSION_AB_FORM,
   parseSessionAbForm,
@@ -305,10 +305,12 @@ export const SessionAbPage = () => {
         kind: "done",
         record: buildSessionAbPageRecord({
           environment,
+          versions: PACKAGE_VERSIONS,
           request,
           distribution: facts,
           source: sourceRecord(DIRECT_SOURCE),
           ruleName: GELU_MUL_RULE_NAME,
+          arms: arms.map((arm) => ({ name: arm.name, facts: arm.facts() })),
           record,
           judgements,
         }),

@@ -1435,10 +1435,14 @@ inconclusive does not mean the difference is zero.
 ### The record (`format: "karume-playground-session-ab/1"`)
 
 **Download record (JSON)** saves `session-ab_<UTC timestamp>.json` once the A/B has ended:
-`recordEnvironment`, the `request` (model, preset, load options, rounds, tokens, minimum gain, open
-per visit, counts, backend, the prompt, the sampler, the capacity and the two arms with the rules
-they passed), `pipeline` (the entry point), `distribution` (directory and manifest sha256),
-`source`, `rule` (name and package), the runtime's `record` (`karume-session-ab/1`) unchanged and
+`recordEnvironment`, `versions` (the `@karume/runtime` and `@karume/models` versions the page was
+built with), the `request` (model, preset, load options, rounds, tokens, minimum gain, open per
+visit, counts, backend, the prompt, the sampler, the capacity and the two arms with the rules they
+passed), `pipeline` (the entry point), `distribution` (directory and manifest sha256), `source`,
+`rule` (name, package and `dispatchKeys`, the rule's dispatch keys in the rule arm's counted run;
+`keyPrefix`, the prefix every key of the rule carries, instead when no counts were read),
+`expertCache` (with the cache: per arm the slots per routed layer, the host tier's bytes and the
+depth, as the pipeline resolved them), the runtime's `record` (`karume-session-ab/1`) unchanged and
 the `judgements`. A stored `record` can be judged again with `judgeSessionAb`, with another minimum
 gain too. A failed or cancelled A/B leaves no record (the runner returns one only at the end).
 **Copy record** copies the same JSON.
