@@ -12,10 +12,28 @@
 // The reference is the same graph with a zero-dispatch reshape between each input permute and the
 // attention, and between the attention and the output permute: the values and the physical kernels
 // stay the graph's, only the exact match stops matching.
+//
+// The route table, the graphs and the twin cases of the routes any device takes and of the online
+// sg32 routes live in @karume/kernel-checks (checkAttentionPermuteTwins,
+// checkAttentionPermuteSg32Twins), which the playground's /kernel-check page runs on the browser's
+// backend too. The online wg routes need a device acquired without subgroups and keep their twin
+// here; the census, the non-constant output and the a8 × "f32" comparison of every route stay here.
 
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
-import { checkFusionTwin } from "@karume/kernel-checks";
+import {
+  ATTENTION_PERMUTE_ROUTES,
+  ATTENTION_PERMUTE_TWIN_CASES,
+  type AttentionPermuteDispatches,
+  attentionPermuteFeeds,
+  attentionPermuteOnlineForm,
+  type AttentionPermuteShape,
+  attentionPermuteSg32Shortfall,
+  checkAttentionPermuteSg32Twins,
+  checkAttentionPermuteTwins,
+  checkFusionTwin,
+  permutedAttentionGraph,
+} from "@karume/kernel-checks";
 import { stridedKey } from "../src/codegen/strided.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { attentionOnlineKeyWords } from "../src/kernels/attention-online-i8a8.ts";
@@ -29,70 +47,13 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { assertCheckCase, assertWordIdentity } from "./helpers/kernel-check-assert.ts";
-import { type DeclarationJson, fill, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
+import {
+  assertCheckCase,
+  assertCheckPart,
+  assertWordIdentity,
+} from "./helpers/kernel-check-assert.ts";
+import { GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
 import { type CensusRow, countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
-
-type Shape = {
-  readonly b: number;
-  readonly h: number;
-  readonly s: number;
-  readonly n: number;
-  readonly d: number;
-};
-
-/**
- * Token-major q / k / v → permute to head-major → attention → permute O back (the Wan DiT form).
- * `interpose` puts a zero-dispatch reshape after each input permute and after the attention.
- */
-const permutedAttentionGraph = (shape: Shape, interpose: boolean): DeclarationJson => {
-  const { b, h, s, n, d } = shape;
-  const dtype = "f32";
-  const token = { q: [b, s, h, d], k: [b, n, h, d], v: [b, n, h, d] } as const;
-  const head = { q: [b, h, s, d], k: [b, h, n, d], v: [b, h, n, d] } as const;
-  const values: DeclarationJson["values"] = {
-    o: { dtype, shape: [b, h, s, d] },
-    ot: { dtype, shape: [b, s, h, d] },
-  };
-  const nodes: DeclarationJson["nodes"] = [];
-  for (const operand of ["q", "k", "v"] as const) {
-    values[operand] = { dtype, shape: [...head[operand]] };
-    nodes.push({
-      op: "permute",
-      ins: [`${operand}t`],
-      outs: [operand],
-      attrs: { dims: [0, 2, 1, 3] },
-    });
-  }
-  const read = (name: string, shape: readonly number[]): string => {
-    if (!interpose) return name;
-    values[`${name}_r`] = { dtype, shape: [...shape] };
-    nodes.push({ op: "reshape", ins: [name], outs: [`${name}_r`], attrs: {} });
-    return `${name}_r`;
-  };
-  const ins = (["q", "k", "v"] as const).map((operand) => read(operand, head[operand]));
-  const scale = Math.fround(1 / Math.sqrt(d));
-  const attended = interpose ? "o_a" : "o";
-  if (interpose) values[attended] = { dtype, shape: [b, h, s, d] };
-  nodes.push({ op: "attention", ins, outs: [attended], attrs: { scale } });
-  if (interpose) nodes.push({ op: "reshape", ins: [attended], outs: ["o"], attrs: {} });
-  nodes.push({ op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } });
-  return {
-    format: "karume-ir",
-    version: 2,
-    requires: { ops: [...new Set(nodes.map((node) => node.op))].sort() },
-    symbols: [],
-    inputs: (["q", "k", "v"] as const).map((operand) => ({
-      name: `${operand}t`,
-      dtype,
-      shape: [...token[operand]],
-    })),
-    outputs: ["ot"],
-    initializers: {},
-    values,
-    nodes,
-  };
-};
 
 const words = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
@@ -104,7 +65,7 @@ type Observed = {
 
 const openGraph = async (
   gpu: GpuContext,
-  shape: Shape,
+  shape: AttentionPermuteShape,
   interpose: boolean,
   options: SessionOptions,
 ): Promise<Session> =>
@@ -115,18 +76,13 @@ const openGraph = async (
     options,
   );
 
-const feedsOf = (shape: Shape): Readonly<Record<string, Tensor>> => {
-  const { b, h, s, n, d } = shape;
-  return {
-    qt: fill([b, s, h, d], (i) => Math.sin(i * 0.37) * 1.7 + ((i % 13) - 6) / 9),
-    kt: fill([b, n, h, d], (i) => Math.cos(i * 0.23) * 1.3 + ((i % 7) - 3) / 7),
-    vt: fill([b, n, h, d], (i) => Math.sin(i * 0.11 + 1) * 2.1 + ((i % 5) - 2) / 3),
-  };
-};
-
 /** Runs `session` once on the shape's inputs: its output words and its census. */
-const observe = async (session: Session, shape: Shape, interpose: boolean): Promise<Observed> => {
-  const outputs = await session.run(feedsOf(shape));
+const observe = async (
+  session: Session,
+  shape: AttentionPermuteShape,
+  interpose: boolean,
+): Promise<Observed> => {
+  const outputs = await session.run(attentionPermuteFeeds(shape));
   const ot = outputs["ot"];
   assert(ot !== undefined, "the attention output is missing");
   return {
@@ -140,7 +96,7 @@ const observe = async (session: Session, shape: Shape, interpose: boolean): Prom
 
 const runGraph = async (
   gpu: GpuContext,
-  shape: Shape,
+  shape: AttentionPermuteShape,
   interpose: boolean,
   options: SessionOptions,
 ): Promise<Observed> => {
@@ -152,16 +108,7 @@ const runGraph = async (
   }
 };
 
-/** The dispatches of the kernels the absorption moves, and the total. */
-type Dispatches = {
-  readonly strided: number;
-  readonly transpose: number;
-  readonly quantizeBshd: number;
-  readonly quantizeRows: number;
-  readonly total: number;
-};
-
-const dispatchesOf = (census: readonly CensusRow[]): Dispatches => ({
+const dispatchesOf = (census: readonly CensusRow[]): AttentionPermuteDispatches => ({
   strided: countDispatches(census, stridedKey({ dtype: "f32" })),
   transpose: countDispatches(census, TRANSPOSE_TILED_KEY),
   quantizeBshd: countDispatches(
@@ -175,169 +122,46 @@ const dispatchesOf = (census: readonly CensusRow[]): Dispatches => ({
   total: countDispatches(census, () => true),
 });
 
-type Route = {
-  readonly name: string;
-  readonly options: SessionOptions;
-  readonly shape: Shape;
-  /**
-   * The subgroup request of the device (default "available"); `false` leaves the online kernel only
-   * its wg form.
-   */
-  readonly subgroups?: false;
-  /** The online kernel's reduction form the route must take (online routes only). */
-  readonly reduce?: "sg32" | "wg";
-  /**
-   * An online seat whose shape the online kernel does not admit: the route must fall back to the
-   * three a8 dispatches with S in f32, and the run must be the a8 × "f32" Session's.
-   */
-  readonly fallsBack?: true;
-  /** The attentionPermute count of the graph without the reshapes. */
-  readonly absorbedPermutes: number;
-  /** The census of the absorbed graph. */
-  readonly absorbed: Dispatches;
-  /** The census of the reference (the permutes as nodes). */
-  readonly reference: Dispatches;
-};
-
-const WAN_LIKE: Shape = { b: 2, h: 3, s: 150, n: 200, d: 128 };
-/** N % 4 = 3: the online kernel reads a padded Vᵀ (`…:kpad`), the quantisation is `quantize_rows:…:pad`. */
-const PADDED_KEYS: Shape = { ...WAN_LIKE, n: 203 };
-
-const ROUTES: readonly Route[] = [
-  {
-    // a8 + "none": q / k read token-major by the quantisation, Vᵀ by the tiled transpose, O stored
-    // token-major by the online kernel; no strided copy is left. The reference: the three input
-    // permutes, the strided Vᵀ, the output permute.
-    name: "online (sg32, D 128)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: WAN_LIKE,
-    reduce: "sg32",
-    absorbedPermutes: 4,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
-  },
-  {
-    // The same at D 64.
-    name: "online (sg32, D 64)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: { b: 2, h: 3, s: 150, n: 200, d: 64 },
-    reduce: "sg32",
-    absorbedPermutes: 4,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
-  },
-  {
-    // A device without subgroups: the online kernel's wg form stores O token-major the same way.
-    name: "online (wg, D 128)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: WAN_LIKE,
-    subgroups: false,
-    reduce: "wg",
-    absorbedPermutes: 4,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
-  },
-  {
-    // The padded key axis (N % 4 != 0) on the same route: the same dispatches, the padded
-    // Vᵀ quantisation counted among quantizeRows, O stored token-major by the `…:obshd:kpad` kernel.
-    name: "online (sg32, D 128, N 203)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: PADDED_KEYS,
-    reduce: "sg32",
-    absorbedPermutes: 4,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
-  },
-  {
-    // The same at D 64.
-    name: "online (sg32, D 64, N 203)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: { ...PADDED_KEYS, d: 64 },
-    reduce: "sg32",
-    absorbedPermutes: 4,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
-  },
-  {
-    // The padded key axis on the wg form.
-    name: "online (wg, D 128, N 203)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: PADDED_KEYS,
-    subgroups: false,
-    reduce: "wg",
-    absorbedPermutes: 4,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
-  },
-  {
-    // a8 + S in f16 (the three dispatches): the same quantisation, ③PV writes O head-major for the
-    // output permute node.
-    name: "three-dispatch s16",
-    options: { attentionCompute: "a8", attentionScoreStorage: "f16" },
-    shape: WAN_LIKE,
-    absorbedPermutes: 3,
-    absorbed: { strided: 1, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 8 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 11 },
-  },
-  {
-    // a8 + "none" at D = 96 (not 64 / 128): the online kernel does not admit the shape, so the route
-    // is the three a8 dispatches with S in f32 — the same dispatches as s16, O stored head-major and
-    // its permute a node.
-    name: "online seat falling back (D 96)",
-    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
-    shape: { b: 2, h: 3, s: 150, n: 200, d: 96 },
-    fallsBack: true,
-    absorbedPermutes: 3,
-    absorbed: { strided: 1, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 8 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 11 },
-  },
-  {
-    // a8 with D = 14 (D % 4 != 0): ①QK falls back to f32 and reads head-major copies of q / k,
-    // ③PV stays i8a8 and transposes the token-major V.
-    name: "a8 with ①QK on f32 (D = 14)",
-    options: { attentionCompute: "a8" },
-    shape: { b: 2, h: 3, s: 37, n: 44, d: 14 },
-    absorbedPermutes: 3,
-    absorbed: { strided: 3, transpose: 1, quantizeBshd: 0, quantizeRows: 1, total: 8 },
-    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 1, total: 9 },
-  },
-  {
-    // a8 with N = 43 (N % 4 != 0): ③PV falls back to f32 and reads a head-major copy of V, ①QK
-    // stays i8a8 and quantises the token-major q / k.
-    name: "a8 with ③PV on f32 (N = 43)",
-    options: { attentionCompute: "a8" },
-    shape: { b: 2, h: 3, s: 37, n: 43, d: 16 },
-    absorbedPermutes: 3,
-    absorbed: { strided: 2, transpose: 0, quantizeBshd: 2, quantizeRows: 0, total: 7 },
-    reference: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 2, total: 9 },
-  },
-  {
-    // The f32 seat absorbs nothing: both graphs run the four permutes as nodes.
-    name: "f32 seat",
-    options: {},
-    shape: WAN_LIKE,
-    absorbedPermutes: 0,
-    absorbed: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 0, total: 7 },
-    reference: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 0, total: 7 },
-  },
-];
-
 describe.skipIf(!GPU_AVAILABLE)(
   "a fused attention that absorbs the permutes of its q / k / v (perf-ledger F-3 / F-8)",
   () => {
-    for (const route of ROUTES) {
-      it(`${route.name}: bit-identical to the permutes as nodes, attentionPermute ${route.absorbedPermutes}, and the route's own dispatches`, async (context) => {
+    it("the routes any device takes: bit-identical to the permutes as nodes, attentionPermute at the route's count", async () => {
+      const gpu = await acquireGpu({ subgroups: "available" });
+      try {
+        const part = await checkAttentionPermuteTwins(gpu);
+        assertEquals([part.id, part.cases.length], Object.entries(ATTENTION_PERMUTE_TWIN_CASES)[0]);
+        assertCheckPart(part);
+      } finally {
+        gpu.destroy();
+      }
+    });
+
+    it("the online routes in the sg32 form: bit-identical to the permutes as nodes, attentionPermute 4", async (context) => {
+      const gpu = await acquireGpu({ subgroups: "available" });
+      try {
+        if (attentionPermuteSg32Shortfall(gpu) !== undefined) {
+          // The device does not take the sg32 form (the wg routes and the other routes cover it).
+          context.skip();
+          return;
+        }
+        const part = await checkAttentionPermuteSg32Twins(gpu);
+        assertEquals([part.id, part.cases.length], Object.entries(ATTENTION_PERMUTE_TWIN_CASES)[1]);
+        assertCheckPart(part);
+      } finally {
+        gpu.destroy();
+      }
+    });
+
+    for (const route of ATTENTION_PERMUTE_ROUTES) {
+      // The wg routes need a device acquired without subgroups, so their twin stays here.
+      const twinHere = route.reduce === "wg";
+      it(`${route.name}: ${twinHere ? `bit-identical to the permutes as nodes, attentionPermute ${route.absorbedPermutes}, and ` : ""}the route's own dispatches`, async (context) => {
         const gpu = await acquireGpu(route.subgroups === false ? {} : { subgroups: "available" });
         try {
           const { d, n } = route.shape;
           if (
             route.reduce !== undefined &&
-            attentionRoute(
-              { attentionCompute: "a8", attentionScoreStorage: "none" },
-              d,
-              n,
-              attentionDeviceFacts(gpu),
-            ).online !== route.reduce
+            attentionPermuteOnlineForm(gpu, route.shape) !== route.reduce
           ) {
             // The device does not take this online form (the other online cases and s16 cover it).
             context.skip();
@@ -361,17 +185,19 @@ describe.skipIf(!GPU_AVAILABLE)(
           let absorbed: Observed;
           let reference: Observed;
           try {
-            assertCheckCase(
-              await checkFusionTwin(gpu, {
-                label: `${route.name}: absorbed vs reference`,
-                fused: absorbedSession,
-                plain: referenceSession,
-                feeds: feedsOf(route.shape),
-                counter: "attentionPermute",
-                hits: route.absorbedPermutes,
-                nan: "payload",
-              }),
-            );
+            if (twinHere) {
+              assertCheckCase(
+                await checkFusionTwin(gpu, {
+                  label: `${route.name}: absorbed vs reference`,
+                  fused: absorbedSession,
+                  plain: referenceSession,
+                  feeds: attentionPermuteFeeds(route.shape),
+                  counter: "attentionPermute",
+                  hits: route.absorbedPermutes,
+                  nan: "payload",
+                }),
+              );
+            }
             // The output words and the census, from a run of each side of its own (the harness
             // returns a case).
             absorbed = await observe(absorbedSession, route.shape, false);
@@ -442,7 +268,7 @@ describe.skipIf(!GPU_AVAILABLE)(
             );
           }
           console.log(
-            `[attention permutes] ${route.name}: ${route.reference.total} → ${route.absorbed.total} dispatches, ${absorbed.output.length} words identical`,
+            `[attention permutes] ${route.name}: ${route.reference.total} → ${route.absorbed.total} dispatches, ${absorbed.output.length} words`,
           );
         } finally {
           gpu.destroy();

@@ -81,6 +81,18 @@ export {
   linearPrologueLabel,
   linearPrologueWeights,
 } from "./src/fusion-twins/linear-prologue.ts";
+export {
+  ATTENTION_PERMUTE_ROUTES,
+  ATTENTION_PERMUTE_TWIN_CASES,
+  type AttentionPermuteDispatches,
+  attentionPermuteFeeds,
+  attentionPermuteOnlineForm,
+  type AttentionPermuteShape,
+  attentionPermuteSg32Shortfall,
+  checkAttentionPermuteSg32Twins,
+  checkAttentionPermuteTwins,
+  permutedAttentionGraph,
+} from "./src/fusion-twins/attention-permute.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
