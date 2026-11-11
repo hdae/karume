@@ -161,6 +161,7 @@ import {
   fusionMatchContext,
   internalsArePrivate,
   isExternalRule,
+  isExternalRuleName,
   ruleOrigin,
   type LinearPrologue,
   nodeStepSpan,
@@ -723,6 +724,40 @@ const triedRules = <Name extends string>(
 };
 
 /**
+ * Checks, on the scan that gives the final plan, that an external rule's step leaves every packed
+ * activation pair (ADR 0105) as the first scan decided it: no node it folds produces or consumes a
+ * packed value. `window` is the hit's window (an external window starts at the index it was tried
+ * at, so it is the run the scan covers).
+ *
+ * MUST: the pairing is decided on the first scan and holds only if the second scan folds the same
+ * nodes. An external matcher reads no packed value ({@link FusionMatchContext}), but nothing makes
+ * its answer the same on both scans (a matcher that keeps state can differ). Folding a packed
+ * producer leaves its reader taking f32 words as packed int8 codes; folding a consumer, or binding
+ * the value, makes the external kernel read packed words as f32. Both are silent wrong values, so
+ * the final plan fails loudly here, naming the rule.
+ */
+const assertPackedPairsUntouched = (
+  window: readonly NodePlan[],
+  hit: FusionHit,
+  packed: ReadonlyMap<string, number>,
+): void => {
+  const kept = new Set([...hit.passthrough, ...hit.deferred]);
+  for (const plan of window) {
+    if (kept.has(plan)) continue;
+    const touched = [...plan.outputs.map((out) => out.name), ...plan.node.ins].find((name) =>
+      packed.has(name),
+    );
+    if (touched !== undefined) {
+      throw new ExecutionError(
+        `fusion rule '${hit.step.rule}': its step folds the '${plan.node.op}' node that ` +
+          `${plan.node.ins.includes(touched) ? "reads" : "writes"} '${touched}', a value handed over as packed int8` +
+          " activations (ADR 0105) on the first scan; an external step may neither take nor produce one",
+      );
+    }
+  }
+};
+
+/**
  * Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain.
  *
  * `rules` are the rules tried at each index ({@link triedRules}); the counter record has one counter
@@ -772,6 +807,9 @@ const scanFusions = <Name extends string>(
       undefined,
     );
     if (hit !== undefined) {
+      if (packed.size > 0 && isExternalRuleName(hit.step.rule)) {
+        assertPackedPairsUntouched(scanned.slice(index, index + hit.advance), hit, packed);
+      }
       // MUST: passthroughs first (the fused step may take a passthrough's output as input).
       for (const plan of hit.passthrough) pushNode(plan);
       steps.push(hit.step);
@@ -939,7 +977,9 @@ const packedStaticQuantizeValues = (
  * obtains the input of the pairing (which SRQs stay plain nodes); the second is the result.
  * MUST: whether packed is on enters no rule's `match` condition (only the key, WGSL and params of
  * the dispatch built by a grabbed linear→SRQ fusion change), so both scans have **the same rule
- * grab the same window** — the pairing's input never moves in the second scan.
+ * grab the same window** — the pairing's input never moves in the second scan. The built-in rules
+ * keep this by construction; an external rule's matcher sees no packed value, and its step on the
+ * second scan is checked to leave every pair alone ({@link assertPackedPairsUntouched}).
  */
 export const planFusions = <Name extends string>(
   nodes: readonly NodePlan[],

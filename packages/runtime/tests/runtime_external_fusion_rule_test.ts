@@ -307,3 +307,104 @@ describe("an external rule building a step", () => {
     assertEquals(folded.counts.testNegNeg, 1);
   });
 });
+
+describe("an external rule and the packed int8 activations (ADR 0105)", () => {
+  const ROWS = 1;
+  const K = 12288;
+  const N = 1536;
+  /** `y = linear(static_quantize(src), w, b)` on an i2 weight: a pair the parallel GEMV takes packed. */
+  const PACKED_GRAPH: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["linear", "static_quantize"] },
+    symbols: [],
+    inputs: [{ name: "src", dtype: "f32", shape: [ROWS, K] }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype: "f32", shape: [N, K] },
+      b: { dtype: "f32", shape: [N] },
+      xq: { dtype: "f32", shape: [ROWS, K] },
+      y: { dtype: "f32", shape: [ROWS, N] },
+    },
+    nodes: [
+      { op: "static_quantize", ins: ["src"], outs: ["xq"], attrs: { scale: Math.fround(0.00071) } },
+      { op: "linear", ins: ["xq", "w", "b"], outs: ["y"], attrs: {} },
+    ],
+  };
+
+  const planPacked = (rules: readonly FusionRule[]): FusionPlan<string> => {
+    const graph = mergeGraph(PACKED_GRAPH, { w: { codec: "int2-off" } });
+    return planFusions(planGraph(graph, {}).nodes, {
+      rules,
+      useCounts: countUses(graph),
+      outputNames: new Set(graph.outputs),
+      limits: {
+        maxStorageBufferBindingSize: 128 * 1024 * 1024,
+        maxComputeWorkgroupsPerDimension: 65535,
+      },
+      packedStaticQuantize: true,
+      linearGemvReduce: "parallel",
+      linearCompute: "f32",
+      weightLayouts: new Map([["w", { storage: "i2" }]]),
+    });
+  };
+
+  /**
+   * A rule folding the one `op` node, from its second try at such a node on: it declines on the
+   * first scan, where the pairing is decided, and folds on the second.
+   */
+  const lateRule = (op: string, name: ExternalRuleName) => {
+    let tries = 0;
+    return defineExternalRule<FusionMatch, ExternalRuleName>({
+      name,
+      heads: [op],
+      contract: "E",
+      internals: "private",
+      match: (nodes, index) => {
+        const node = nodes[index];
+        if (node?.node.op !== op) return undefined;
+        tries += 1;
+        return tries >= 2 ? { window: [node], chain: [node] } : undefined;
+      },
+      build: (matched) => ({
+        binds: [...new Set(matched.chain[0].node.ins)],
+        outputName: matched.chain[0].outputs[0].name,
+        outputShape: matched.chain[0].outputs[0].shape,
+        temps: [],
+        dispatches: [
+          {
+            key: `ext:${name.split("/")[0]}:late`,
+            wgsl: () => "",
+            params: new Uint32Array(4),
+            workgroups: { kind: "gridStride", items: 32, size: 64 },
+          },
+        ],
+      }),
+    });
+  };
+
+  it("pairs the static_quantize with the linear without an external rule (the control)", () => {
+    const planned = planPacked([]);
+    assertEquals(
+      planned.steps.map((step) =>
+        step.kind === "node" ? `${step.plan.node.op}:${step.packedActivations?.role}` : step.rule,
+      ),
+      ["static_quantize:write", "linear:read"],
+    );
+  });
+
+  it("fails loudly, naming the rule, when its step folds the packed producer or the packed consumer on the final scan", () => {
+    for (const [op, name, verb] of [
+      ["static_quantize", "test/late_producer", "writes"],
+      ["linear", "test/late_consumer", "reads"],
+    ] as const) {
+      assertThrows(
+        () => planPacked([lateRule(op, name)]),
+        ExecutionError,
+        `fusion rule '${name}': its step folds the '${op}' node that ${verb} 'xq', a value handed over as packed int8`,
+        op,
+      );
+    }
+  });
+});
