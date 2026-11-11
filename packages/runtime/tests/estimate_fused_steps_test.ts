@@ -20,6 +20,7 @@ import { sessionFusionContext } from "../src/runtime/session-fusion-context.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
 import { openGraph } from "./helpers/estimate-graphs.ts";
 import {
+  a8LinearAfterDeadRegion,
   a8LinearCase,
   FUSED_WINDOW_CASES,
   type FusedWindowCase,
@@ -76,6 +77,13 @@ const EXPECTED: Readonly<Record<string, number>> = {
   // The unfused pair has the same total by construction (the temporary takes the gelu output's
   // place); the GPU equality and the fault injection are what pin the temporary's mapping.
   "external test/gelu_mul_staged": 4 * 64 * 4 + 4 * 64 * 4,
+  // dead = neg(z) 8,192 B, released once probe = slice(dead) (4 B, a graph output) has read it;
+  // then y 1,024 B and the staged value 1,024 B. Placed by size: dead opens region 0; y joins it at
+  // offset 0 (dead is released before y exists); the staged value is written by ① and read by ②,
+  // which writes y, so it may not join y's region and opens region 1 — were that read lost, it would
+  // sit in region 0 at offset 1,024 for free; probe conflicts with dead (slice reads dead, writes
+  // probe), and in region 1 it would grow it by its whole 4 B, so it opens region 2.
+  "external test/gelu_mul_staged after a dead region": 8192 + 1024 + 4,
 };
 
 /** The plan's counter of the case's rule (the same planning as a Session given the options). */
@@ -128,6 +136,20 @@ describe("the estimate counts the i8a8 linear's two node temporaries", () => {
       }
     });
   }
+  it("a8 linear after a dead region: the GEMM's read of xq keeps xq out of y's region", () => {
+    // dead = neg(z) 8,192 B, released once probe = slice(dead) (4 B, a graph output) has read it;
+    // then y 256 B, xq 256 B, xs 16 B. Placed by size: dead opens region 0; y joins it at offset 0
+    // (dead is released before y exists); xq is read by ②, which writes y, so it may not join y's
+    // region and opens region 1 — were that read lost, it would sit in region 0 at offset 256 for
+    // free; xs conflicts with y too and in region 1 (xq alive) would grow it by its whole 16 B, so it
+    // opens region 2; probe conflicts with dead and opens region 3 (4 B) for the same reason.
+    const linear = a8LinearAfterDeadRegion();
+    const model = openGraph(linear.graph, linear.tensors);
+    assertEquals(
+      model.estimate({ ...LIMITS, ...linear.options }).scenarios[0].workspaceBytes,
+      8192 + 256 + 16 + 4,
+    );
+  });
 });
 
 describe("the estimate counts a fused step in its post-fusion form", () => {

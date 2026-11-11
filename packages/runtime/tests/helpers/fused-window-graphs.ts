@@ -612,6 +612,41 @@ const externalStagedGeluMul = (): FusedWindowCase => {
   };
 };
 
+/**
+ * `graph` behind a region its window can reuse: `dead = neg(z)` (`[1, 2048]`, 8,192 B) and the
+ * one-element `probe = slice(dead)` (a graph output) run first, so `dead` is released before the
+ * window's step allocates anything. Its 8,192 B region then has room for the window's output and a
+ * temporary together, and only the read / write separation of the window's dispatches (a value read
+ * and a value written by one dispatch go to different regions) keeps the temporary out of it — the
+ * graphs where a dispatch's read set moves the total.
+ */
+const withDeadRegion = (graph: DeclarationJson): DeclarationJson => ({
+  ...graph,
+  requires: { ops: [...new Set(["neg", "slice", ...graph.requires.ops])] },
+  inputs: [{ name: "z", ...f32([1, 2048]) }, ...graph.inputs],
+  outputs: ["probe", ...graph.outputs],
+  values: { dead: f32([1, 2048]), probe: f32([1, 1]), ...graph.values },
+  nodes: [
+    { op: "neg", ins: ["z"], outs: ["dead"], attrs: {} },
+    { op: "slice", ins: ["dead"], outs: ["probe"], attrs: { dim: 1, start: 0, end: 1 } },
+    ...graph.nodes,
+  ],
+});
+
+/** The staged external rule's window after a dead region ({@link withDeadRegion}). */
+const externalStagedGeluMulAfterDeadRegion = (): FusedWindowCase => {
+  const graph = withDeadRegion(geluMulGraph());
+  return {
+    name: "external test/gelu_mul_staged after a dead region",
+    counter: "test/gelu_mul_staged",
+    windows: 1,
+    graph,
+    tensors: [],
+    inputs: inputsOf(graph),
+    options: { fusionRules: [EXTERNAL_STAGED_GELU_MUL_RULE] },
+  };
+};
+
 /** Every rule's case, in the order of the built-in list, then the external rules. */
 export const FUSED_WINDOW_CASES: readonly (() => FusedWindowCase)[] = [
   linearStaticQuantize,
@@ -628,6 +663,7 @@ export const FUSED_WINDOW_CASES: readonly (() => FusedWindowCase)[] = [
   rowBlockAttention,
   externalGeluMul,
   externalStagedGeluMul,
+  externalStagedGeluMulAfterDeadRegion,
 ];
 
 /**
@@ -669,5 +705,17 @@ export const a8LinearCase = (prologue: boolean): FusedWindowCase => {
     ],
     inputs: inputsOf(graph),
     options: { linearCompute: "a8" },
+  };
+};
+
+/** The a8 linear (no prologue) after a dead region ({@link withDeadRegion}). */
+export const a8LinearAfterDeadRegion = (): FusedWindowCase => {
+  const linear = a8LinearCase(false);
+  const graph = withDeadRegion(linear.graph);
+  return {
+    ...linear,
+    name: "a8 linear after a dead region",
+    graph,
+    inputs: inputsOf(graph),
   };
 };

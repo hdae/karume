@@ -36,7 +36,11 @@ import {
   fill,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
-import { a8LinearCase, FUSED_WINDOW_CASES } from "./helpers/fused-window-graphs.ts";
+import {
+  a8LinearAfterDeadRegion,
+  a8LinearCase,
+  FUSED_WINDOW_CASES,
+} from "./helpers/fused-window-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 
@@ -795,6 +799,7 @@ test.skipIf(!GPU_AVAILABLE)(
         ...FUSED_WINDOW_CASES,
         () => a8LinearCase(false),
         () => a8LinearCase(true),
+        a8LinearAfterDeadRegion,
       ]) {
         const fused = make();
         const model = openGraph(fused.graph, fused.tensors);
