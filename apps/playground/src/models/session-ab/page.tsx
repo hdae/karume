@@ -10,9 +10,11 @@
  */
 
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
+import { chatPrompt } from "@karume/models/gemma";
 import type { SessionOptions } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb } from "@karume/runtime/tune";
 import { memo, useMemo, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { type Choice, ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert } from "@/components/error-alert";
@@ -61,7 +63,7 @@ import {
   parseExpertSpeculationDepth,
   parseModelKey,
 } from "@/models/gemma4/settings";
-import { buildGemmaPipeline } from "@/models/gemma4/use-gemma-pipeline";
+import { buildGemmaPipeline, type GemmaPipeline } from "@/models/gemma4/use-gemma-pipeline";
 
 import { buildSessionAbPageRecord, type SessionAbPageRecord } from "./record";
 import {
@@ -241,18 +243,24 @@ export const SessionAbPage = () => {
     const environment = recordEnvironment(readyGpu);
     const facts = distribution;
     setResult({ kind: "running", request });
-    void task.start(async ({ signal, report }) => {
+    void task.start(async ({ signal, report, holdTicker }) => {
       const positions = runPositions(request.arms.length, settings.rounds, settings.openPerVisit);
       let ended = 0;
+      // Steps come from an arm's open, report and close, all outside the timed spans. The status is
+      // rendered at once (flushSync), so no render is left to land in the run that follows, and the
+      // ticker is held from the step before a timed run to the step after it.
       const onStep = (step: ArmStep): void => {
         if (step.step === "ran") ended += 1;
-        report(progressOf(step, positions, ended));
+        holdTicker(step.step !== "close" && ended < positions.length && positions[ended].timed);
+        flushSync(() => report(progressOf(step, positions, ended)));
       };
       const armOf = (name: string, fusionRules: SessionOptions["fusionRules"]) =>
-        pipelineArm({
+        pipelineArm<GemmaPipeline>({
           name,
           ...(fusionRules === undefined ? {} : { fusionRules }),
           request,
+          prompt: (pipeline) =>
+            chatPrompt(pipeline.tokenizer, [{ role: "user", content: request.prompt }]),
           build: (options) =>
             buildGemmaPipeline({
               gpu: readyGpu,
@@ -279,8 +287,9 @@ export const SessionAbPage = () => {
           signal,
           onStep,
         });
+      const arms = [armOf("base", undefined), armOf("rule", [GELU_MUL_RULE])];
       const record = await runSessionAb({
-        arms: [armOf("base", undefined), armOf("rule", [GELU_MUL_RULE])],
+        arms,
         rounds: settings.rounds,
         openPerVisit: settings.openPerVisit,
         environment: {
@@ -501,10 +510,11 @@ export const SessionAbPage = () => {
               </div>
               <p className="-mt-2 text-xs text-muted-foreground">
                 Passes onRunDiagnostics and records the fusion counts and the planned dispatches of
-                each run&apos;s first one-row run. Without the expert cache it changes the decode
-                path of both arms alike: greedy tokens are then picked on the CPU from the whole
-                logits row instead of on the GPU. Under the expert cache decode is on the CPU
-                sampler either way.
+                each run&apos;s first decode run, or with a self-speculation depth its first verify
+                run (depth + 1 rows). The callback runs inside every run, timed ones included.
+                Without the expert cache it changes the decode path of both arms alike: greedy
+                tokens are then picked on the CPU from the whole logits row instead of on the GPU.
+                Under the expert cache decode is on the CPU sampler either way.
               </p>
               <Field
                 id="session-ab-backend"
@@ -568,7 +578,7 @@ const requestText = (request: SessionAbRequest): string =>
     request.backend,
   ].join(" · ");
 
-/** Memoized: the status ticker re-renders the page every 250 ms while a run is going. */
+/** Memoized: the status ticker re-renders the page every 250 ms while an untimed step is going. */
 const SessionAbResultView = memo(({ record }: { record: SessionAbPageRecord }) => {
   const rows = record.record.arms.map((arm) => armRow(arm, record.rule.name));
   const rounds = record.record.rounds;
@@ -580,8 +590,9 @@ const SessionAbResultView = memo(({ record }: { record: SessionAbPageRecord }) =
           <CardDescription>
             Identity is against the base&apos;s first run, over every run (the warm-up and the
             untimed runs included). Hits are the counter of <code>{record.rule.name}</code> in the
-            arm&apos;s one-row run; dispatches are that run&apos;s planned dispatches. Times are the
-            timed runs of each round, visit 1 / visit 2.
+            arm&apos;s first decode run (its first verify run with a self-speculation depth);
+            dispatches are that run&apos;s planned dispatches. Times are the timed runs of each
+            round, visit 1 / visit 2.
           </CardDescription>
         </CardHeader>
         <CardContent className="overflow-x-auto">

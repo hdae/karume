@@ -1392,15 +1392,22 @@ runs 26B on a 16 GB GPU). Both arms load it with `buildGemmaPipeline` over the d
 
 **The arms.** `base` passes no rule; `rule` passes the candidate rule `candidate/gelu_mul` of
 `@karume/candidate-rules` through the gemma pipeline's experimental `fusionRules` (the target
-Session gets it). An arm's open builds the pipeline, close disposes it. A **timed run** is one
+Session gets it). An arm's open builds the pipeline, encodes the prompt and creates the first run's
+sequence; close disposes the pipeline (with the sequences it handed out). A **timed run** is one
 greedy generation (temperature 0, seed 0) of the chosen token count from one fixed prompt, in a
 fresh sequence of capacity 1024; it returns the generated token ids, which the runner compares with
-the base's first run, so identity is token identity. With **Read fusion and dispatch counts** on
-(the default), the pipeline is built with `onRunDiagnostics` and each run reports the fusion counts
-and the planned dispatches (`lastRunPipelines`) of its first one-row run (a decode run, or a draft
-under self-speculation). Without the expert cache that callback moves greedy decoding from the GPU to
-the CPU for both arms alike; under the cache decode is on the CPU either way. Off, the record has no
-counts.
+the base's first run, so identity is token identity. The sequence of every later run is created by
+the report of the run before it, which also disposes that run's sequence, outside the timed span.
+With **Read fusion and dispatch counts** on (the default), the pipeline is built with
+`onRunDiagnostics` and each run reports the fusion counts and the planned dispatches
+(`lastRunPipelines`) of one run of its generation: the first decode run, or, with a
+self-speculation depth set, the first verify run (a self-speculating decode has no decode run: each
+cycle is one verify of its drafts plus one row, `depth + 1` rows, fewer near the token limit), so
+with a depth the counts are those of that multi-row verify plan. The callback runs inside every
+run, timed ones included: the pipeline takes it at build time and offers no per-generation switch,
+so it cannot be limited to the untimed runs. Without the expert cache it also moves greedy decoding
+from the GPU to the CPU for both arms alike; under the cache decode is on the CPU either way. Off,
+the record has no counts.
 
 | Field | Default | Accepted |
 | --- | --- | --- |
@@ -1412,9 +1419,10 @@ counts.
 
 The runner visits the arms forward and in reverse in every round (base, rule, rule, base); the
 status card shows the run in progress (round, visit, arm, timed or not) and how many runs have
-ended. After a closed pipeline the page submits one empty command buffer and waits for it: Dawn
-frees a destroyed buffer's memory only after a later submit completes, and without it the next
-visit's build of 26B ran out of memory before its first submit (observed on Dawn / Vulkan).
+ended. After a closed pipeline the page submits one empty command buffer and waits for it, also
+when the dispose failed: Dawn frees a destroyed buffer's memory only after a later submit
+completes, and without it the next visit's build of 26B ran out of memory before its first submit
+(observed on Dawn / Vulkan).
 
 When it ends the page shows, per arm, the identity (identical over N runs, or how many words of
 which run differ and where first), the rule's hits, the dispatches and every timed round's two
@@ -1438,8 +1446,10 @@ gain too. A failed or cancelled A/B leaves no record (the runner returns one onl
 Caveats:
 
 - Never run it while other work uses the same GPU: the times would measure the contention.
-- The status card's ticker re-renders the page every 250 ms while runs go; nothing the page does
-  runs inside a timed span but the generation.
+- Nothing the page does runs inside a timed span but the generation (with counts read, the
+  diagnostics callback is part of it): the status is rendered at once on every step an arm reports
+  outside the spans, and the status card's ticker (the elapsed seconds) is held while a timed run is
+  in flight, so it stands still then.
 - Building a pipeline per visit is not timed, but it heats the GPU between visits like any load;
   the A B B A order spreads that over both arms.
 
