@@ -3,7 +3,8 @@
 // external define entry built (a hand-written object, a copy and a built-in rule are refused), no
 // name is given twice, and the list the Session plans with puts the given rules before the built-in
 // ones, in their order. The test-only DISABLED_FUSION_RULES takes an external rule's name on a
-// Session that was given the rule. What the rules do on a real GPU is covered by
+// Session that was given the rule. A run on a fake GPU that derives recipes shows that the Session
+// plans with that list (its given rule is tried). What the rules do on a real GPU is covered by
 // tests/gpu_external_fusion_rule_test.ts.
 
 import { describe, it } from "vite-plus/test";
@@ -29,9 +30,9 @@ import {
   planGraph,
 } from "../src/runtime/plan.ts";
 import { buildSessionState } from "../src/runtime/session-build.ts";
-import { fakeDevice, fakeGpuContext } from "./helpers/fake-gpu.ts";
+import { fakeDevice, fakeGpuContext, fakeRecipeGpuContext } from "./helpers/fake-gpu.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
-import { type DeclarationJson, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 
 const SHAPE = [8];
 
@@ -201,5 +202,41 @@ describe("the Session's rule list in the fusion pass", () => {
     // The control: without the rule the built-in silu rule takes the same nodes.
     const builtIn = plan(sessionFusionRules(undefined));
     assertEquals([builtIn.counts["test/sigmoid_mul"], builtIn.counts.silu], [undefined, 1]);
+  });
+});
+
+describe("a Session's run plans with the Session's own rule list (a fake GPU: no device needed)", () => {
+  /** A Session on the fake recipe GPU, run once on the silu graph. */
+  const runOnce = async (options: SessionOptions): Promise<unknown> => {
+    const session = await createSessionFromContainer(
+      fakeRecipeGpuContext(),
+      await openModelBytes(SILU_GRAPH, []),
+      GRAPH_NAME,
+      options,
+    );
+    return await session.run({ x: fill(SHAPE, (i) => i - 4) });
+  };
+
+  it("tries the rule it was given: a matcher that throws stops the run", async () => {
+    const definition = {
+      name: "test/tried",
+      heads: ["sigmoid"],
+      contract: "E",
+      internals: "private",
+      match: () => {
+        throw new Error("the Session tried test/tried");
+      },
+      build: () => {
+        throw new Error("never built");
+      },
+    } as const;
+    await assertRejects(
+      () => runOnce({ fusionRules: [defineExternalRule(definition)] }),
+      Error,
+      "the Session tried test/tried",
+    );
+    // The control: without the rule the same run gets past planning and every recipe, and stops
+    // where the fake GPU's zero limits stop it.
+    await assertRejects(() => runOnce({}), Error, "invalid transient plan limit");
   });
 });
