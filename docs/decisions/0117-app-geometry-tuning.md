@@ -634,3 +634,59 @@ Steps 1–7 all green (see Acceptance); the remaining items stay under Open poin
   addendum of 2026-10-26 to [0133](0133-conv3d-w8a8.md) (conv3d geometry) the table also holds the
   conv3d w8a8 cases of Wan2.2 TI2V-5B's VAE decoder, which decide `i8a8.conv3d`. The `./tune`
   module doc says so.
+
+## Addendum (2026-11-11) — a wall-clock session A/B and the public identity comparison (amends decision 2)
+
+The maintainer approved the design of the three extension mechanisms on 2026-11-11 (fusion rules as a Session input,
+fusion rules from outside the runtime — [0148](0148-external-fusion-rules.md) — and a way to compare them in `./tune`).
+This addendum records its two rulings on `./tune`.
+
+- **What changed**: `./tune` gains `runSessionAb(options)`, `sessionArm(options)`, `sessionAbStatistics(record)`,
+  `judgeSessionAb(record, options)` and their types (the arm, its run, the environment, the record
+  `karume-session-ab/1` and its parts, the comparison, the verdict and the judge's options), and `wordIdentity`
+  with `NanPolicy`, `WordIdentity` and `WordMismatch`.
+- **Ruling 1: the comparison of fusions is its own function and its own record, and a fusion is accepted or dropped
+  on the wall clock.** A fusion's effect is measured as the end-to-end time of untimed runs of two Session
+  configurations (or two pipelines), not as per-dispatch GPU time, which is reported only as a breakdown. Why: on
+  2026-11-10 the per-dispatch times of the `gelu_tanh` → `mul` prototype on Gemma 4 26B A4B promised a gain that the
+  untimed forward did not show ([research 2026-11-10](../research/2026-11-10-gemma4-26b-fast.md) §8.1; perf-ledger
+  K-105); the whole-forward A/B was the reading that held. The A/B shares nothing with the geometry sweep — no case
+  list, no fingerprint, no record format: a fusion case added to the sweep's case table would move the case-set id
+  and every geometry profile's fingerprint (decision 4), so every table on every GPU would need a new sweep.
+  - **The protocol**: an untimed warm-up round, then in every round the arms in order and in reverse order (A B B A),
+    so each arm is visited twice per round and a drift linear within the round cancels in each arm's round mean. The
+    wall clock (injectable, `performance.now` by default) spans the arm's run alone, its readback included; opening
+    and closing an arm are never timed, also when the arms are opened and closed around every visit (for models whose
+    two Sessions do not fit in memory together). Every visit's outputs are compared with the base arm's first outputs.
+  - **The statistics**: per round, the mean of each arm's two visits; the median of the paired differences; the gain
+    over the base's median round time; and the noise floor, the larger of the two arms' medians of |visit 1 − visit
+    2|. **The verdict** is `"inconclusive"` inside the noise floor, otherwise `"adopt"` at a gain of at least the
+    caller's `minGain`, otherwise `"reject"`; identity with the base is required by default (a class E rule — ADR
+    0147 decision 2), and an arm that differs is `"reject"` whatever its times. The threshold is the caller's. A
+    verdict holds for the record's device, backend and work only; `"inconclusive"` does not say the difference is zero.
+  - **The record** carries what ADR 0147 decision 9 asks of per-GPU evidence: the adapter's four fields, the user
+    agent, the backend's name as the caller states it (WebGPU does not expose it, so the runner does not infer it),
+    and a date the caller passes (the runner reads no clock for dates); per arm its fusion counts, dispatch count,
+    every raw time and its worst visit's identity.
+  - **Arms**: `sessionArm` builds an arm from a prepared model, the GpuContext, Session options and feeds through the
+    public API; a caller with a pipeline (an LLM decode) passes its own `open` / `run` / `close` value, and the runner
+    never looks inside it.
+  - The rule of decision 9 applies: never run it while other work uses the same GPU (the times would measure the
+    contention; the runtime cannot see other work).
+- **Ruling 2: the part of the fused-vs-unfused check that the public API can express lives in `./tune`.** That part
+  is the u32 identity comparison with a NaN policy, `wordIdentity`, which the A/B and `checkFusionTwin` of
+  `packages/kernel-checks` both use (one implementation). Why: the models package's tests may not import
+  `packages/kernel-checks` (the test import rules of [0129](0129-test-layout-and-lanes.md), addendum of 2026-10-29), and a rule written outside the runtime
+  needs the same comparison. This changes the earlier design proposal (its question 4), which had kept the whole twin harness in
+  `packages/kernel-checks`. The built-in checks that drive runtime internals stay there; nothing else moves.
+- **Why public**: an application or a package that passes its own fusion rule (ADR 0148) has to measure and check it
+  on its users' backends; the hand-made script of 2026-11-10 imported runtime internals to do it. The entries are
+  high-level and of the rank decision 2 asks for: the runner, the arm builder and two pure functions of a record.
+- **Checks**: `packages/runtime/tests/tune_session_ab_test.ts` (synthetic arms and a fake clock: the three verdicts
+  with hand-checkable numbers, the visit order for two and three arms, open and close outside the timed spans in both
+  opening modes, closing on a failing run, the identity failures, the refusals, a record judged again after a JSON
+  round trip) and `packages/runtime/tests/gpu_session_ab_test.ts` (two `sessionArm`s on the GPU, without and with an
+  external test rule: identical outputs, the rule's hit and one dispatch fewer in the record; no verdict on real
+  times). Fault injections (each turned the first test red): the reverse half of the visit order dropped, the open
+  timed inside the span, the identity comparison skipped for the non-base arm, the noise floor forced to 0.
+- **Not in this addendum**: the playground's page that runs the A/B on real models, and running it on real weights.
