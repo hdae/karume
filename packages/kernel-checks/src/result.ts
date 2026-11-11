@@ -10,6 +10,7 @@
  */
 
 import { assertDeviceUsable, type GpuContext } from "../../runtime/src/gpu/device.ts";
+import { type NanPolicy, wordIdentity } from "../../runtime/src/tune/word-identity.ts";
 
 /** One failing word: its index in the compared range and both values as u32 words. */
 export type WordFailure = {
@@ -86,33 +87,43 @@ export const subgroup32Available = (
   gpu.features.has("subgroup-size-control") &&
   gpu.wgslLanguageFeatures.has("subgroup_id");
 
+/**
+ * The identity criterion of two word arrays under a NaN policy (the comparison is
+ * {@link wordIdentity}, shared with the runtime). A first failure past the shorter array notes the
+ * two lengths.
+ */
+const compareWordsUnder = (
+  name: string,
+  actual: Uint32Array<ArrayBuffer>,
+  expected: Uint32Array<ArrayBuffer>,
+  nan: NanPolicy,
+): Criterion => {
+  const { words, failures, first } = wordIdentity(actual, expected, nan);
+  if (first === undefined) return { name, words, failures };
+  const lengthOnly = first.index >= Math.min(actual.length, expected.length);
+  const failure: WordFailure = lengthOnly
+    ? { ...first, at: "first", note: `length ${actual.length} vs ${expected.length}` }
+    : { ...first, at: "first" };
+  return { name, words, failures, failure };
+};
+
 /** Compares two word arrays one by one; a length difference counts each missing word. */
 export const compareWords = (
   name: string,
   actual: Uint32Array<ArrayBuffer>,
   expected: Uint32Array<ArrayBuffer>,
-): Criterion => {
-  const common = Math.min(actual.length, expected.length);
-  let failures = Math.abs(actual.length - expected.length);
-  let failure: WordFailure | undefined;
-  for (let i = 0; i < common; i += 1) {
-    if (actual[i] === expected[i]) continue;
-    failures += 1;
-    failure ??= { index: i, expected: expected[i], actual: actual[i], at: "first" };
-  }
-  if (failures > 0 && failure === undefined) {
-    failure = {
-      index: common,
-      expected: expected[common] ?? 0,
-      actual: actual[common] ?? 0,
-      at: "first",
-      note: `length ${actual.length} vs ${expected.length}`,
-    };
-  }
-  return failure === undefined
-    ? { name, words: expected.length, failures }
-    : { name, words: expected.length, failures, failure };
-};
+): Criterion => compareWordsUnder(name, actual, expected, "payload");
+
+/**
+ * {@link compareWords} with NaN compared by class: where `expected` holds a NaN, `actual` must hold a
+ * NaN of any payload and sign; every other word must be equal (an actual NaN against a non-NaN
+ * expected word fails). For words a kernel computes, whose NaN payloads are backend-defined.
+ */
+export const compareWordsNanClass = (
+  name: string,
+  actual: Uint32Array<ArrayBuffer>,
+  expected: Uint32Array<ArrayBuffer>,
+): Criterion => compareWordsUnder(name, actual, expected, "class");
 
 /** Every word of `actual` must be `expected` (a poison value a kernel must leave in place). */
 export const compareFill = (

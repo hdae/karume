@@ -9,7 +9,7 @@ import {
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
 } from "../mod.ts";
-import { scopedGpuWork } from "../src/result.ts";
+import { compareWords, compareWordsNanClass, scopedGpuWork } from "../src/result.ts";
 
 /**
  * A real GpuContext around a fake device that counts the error scopes pushed and popped and keeps
@@ -92,6 +92,45 @@ describe("scopedGpuWork", () => {
         "no error scope on the stack",
       );
       assertEquals(left().listeners, []);
+    });
+  });
+});
+
+describe("the word identity criteria", () => {
+  const words = (...values: number[]): Uint32Array<ArrayBuffer> => Uint32Array.from(values);
+
+  it("compareWords compares payloads: a NaN of another payload fails", () => {
+    assertEquals(compareWords("out", words(1, 0x7fc00000), words(1, 0x7fc01234)), {
+      name: "out",
+      words: 2,
+      failures: 1,
+      failure: { index: 1, expected: 0x7fc01234, actual: 0x7fc00000, at: "first" },
+    });
+  });
+
+  it("compareWords notes the two lengths when only the lengths differ", () => {
+    assertEquals(compareWords("out", words(1), words(1, 2)), {
+      name: "out",
+      words: 2,
+      failures: 1,
+      failure: { index: 1, expected: 2, actual: 0, at: "first", note: "length 1 vs 2" },
+    });
+  });
+
+  it("compareWordsNanClass accepts any NaN where a NaN is expected and fails a NaN where none is", () => {
+    assertEquals(
+      compareWordsNanClass("out", words(0xff800001, 0x3f800000), words(0x7fc01234, 0x3f800000)),
+      {
+        name: "out",
+        words: 2,
+        failures: 0,
+      },
+    );
+    assertEquals(compareWordsNanClass("out", words(0x7fc00000), words(0x3f800000)), {
+      name: "out",
+      words: 1,
+      failures: 1,
+      failure: { index: 0, expected: 0x3f800000, actual: 0x7fc00000, at: "first" },
     });
   });
 });
