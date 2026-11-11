@@ -46,17 +46,24 @@ import { GpuDeviceLostError } from "../gpu/context.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import { GpuOutOfMemoryError } from "../gpu/error-scope.ts";
 import type { SessionPipelines, StorageRoles } from "../gpu/pipeline-cache.ts";
-import { CAST_OP, numel, stateReadonly, WEIGHT_SLOTS, WHERE_OP } from "../ops.ts";
+import { CAST_OP, stateReadonly, WEIGHT_SLOTS, WHERE_OP } from "../ops.ts";
 import {
   type AttentionTokenMajor,
   type ExecStep,
-  type FusedOperand,
   type FusedStep,
   isExternalRuleName,
   type LinearPrologue,
   type PackedActivations,
   ruleFailure,
 } from "./fusion.ts";
+import {
+  assertExternalOutputWritten,
+  assertExternalWrites,
+  type FusedSlot,
+  fusedStepLayout,
+  stepOutputs,
+  stepReleases,
+} from "./fused-step-layout.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
   type BindingRecipe,
@@ -317,37 +324,6 @@ export type RecipeBuildFace = {
 export type AddedParams = { readonly key: string; readonly buffer: GPUBuffer };
 
 /**
- * Checks that an external rule's dispatch writes only its step's output and temporaries: a binding
- * its WGSL declares `read_write` (the roles parsed from the WGSL when its pipeline was fetched) binds
- * the output or a temporary of the step.
- *
- * MUST: the runtime owns every other buffer such a kernel could bind. An input is read again by later
- * nodes; a resident weight or scale is shared by every Session that leases it; a params buffer is
- * shared by content with every dispatch that has the same params. A kernel that wrote any of them
- * would corrupt values outside its step silently, so the refusal names the rule and the binding.
- */
-const assertExternalWrites = (
-  step: FusedStep,
-  index: number,
-  operands: readonly FusedOperand[],
-  roles: StorageRoles,
-): void => {
-  const refuse = (binding: number, what: string): never => {
-    throw new ExecutionError(
-      `fusion rule '${step.rule}': dispatch ${index} ('${step.dispatches[index].key}') declares binding ${binding}` +
-        ` read_write, but it binds ${what} (an external step writes only its output and its temporaries)`,
-    );
-  };
-  if (roles.writes.has(0)) refuse(0, "the params");
-  for (const [slot, operand] of operands.entries()) {
-    if (!roles.writes.has(slot + 1) || operand.kind === "output" || operand.kind === "temp")
-      continue;
-    // An external step binds no weightScale (refused when the step is planned), so it is an input.
-    refuse(slot + 1, `the input '${step.binds[operand.index]}'`);
-  }
-};
-
-/**
  * Checks the workgroup size an external rule declares for a `gridStride` dispatch: a positive
  * integer. The count is resolved from it (`gridStrideWorkgroups`), including the check that the
  * loop's u32 arithmetic cannot wrap, so a size of 0 or a fraction would resolve a count that check
@@ -534,36 +510,15 @@ export class RecipeBuilder {
     defined: Set<string>,
     states: StateBuildContext,
   ): Promise<StepRecipe> {
-    // A plain node's output list has the same order and length as `node.outs` ({@link NodePlan.outputs} in plan.ts).
-    const outSlots: readonly { readonly name: string; readonly shape: readonly number[] }[] =
-      step.kind === "node"
-        ? step.plan.outputs
-        : [{ name: step.outputName, shape: step.outputShape }];
     // The operand order of the bind surface (no duplicates) and the release list of the bookkeeping
     // are different things. For a plain node both equal node.ins; only a fused step declares the two
-    // separately.
+    // separately (`stepReleases`).
     const bindNames = step.kind === "node" ? step.plan.node.ins : step.binds;
-    const consumedNames = step.kind === "node" ? step.plan.node.ins : step.ins;
     const binds = bindNames.map((name) => this.#bindingSource(name, defined));
-    // An alias that keeps the element order **makes the input buffer the output's object as is**
-    // (alias — ADR 0011). It issues neither a dispatch nor an allocation. planGraph has already
-    // checked that the element counts match, so the real buffer behind the alias always covers the
-    // size of the declared shape.
-    // MUST: the alias origin is the head of the bind surface (it can never be a temp).
-    // MUST: the ops that can alias (reshape / expand / permute) have a **single output**, so the
-    // output list of an alias is always exactly one. This form cannot express aliasing a
-    // multi-output op (adding it would require declaring "which input" per slot for the alias).
-    const aliasesInput = step.kind === "node" && step.aliasesInput;
-    const outputs: readonly StepOutput[] = outSlots.map(({ name, shape }): StepOutput => {
-      const bookkeeping = {
-        name,
-        uses: this.#state.useCounts.get(name) ?? 0,
-        pinned: this.#state.outputNames.has(name),
-      };
-      return aliasesInput
-        ? { ...bookkeeping, kind: "alias", source: binds[0] }
-        : { ...bookkeeping, kind: "alloc", byteLength: numel(shape) * 4 };
-    });
+    // The output specs and the bookkeeping come from the one device-free derivation the estimate
+    // shares (fused-step-layout.ts). MUST: the alias origin is the head of the bind surface (it can
+    // never be a temp — ADR 0011).
+    const outputs: readonly StepOutput[] = stepOutputs(step, this.#state, binds[0]);
     // Outputs are bound as "that value name". The execution phase puts them in env before the
     // dispatches, so binds within the same step can be resolved through this list too.
     const outs: readonly BindingSource[] = outputs.map((output) => ({
@@ -595,7 +550,7 @@ export class RecipeBuilder {
       outputs,
       temps: builder.temps,
       dispatches: builder.dispatches,
-      releases: consumedNames,
+      releases: stepReleases(step),
       // MUST: the discrimination is by contract (only `state_append` writes — ADR 0067 decision 5).
       // Fused steps never contain nodes that touch state (the window guard of fusion.ts), so they are
       // always false.
@@ -632,46 +587,43 @@ export class RecipeBuilder {
   ): Promise<void> {
     const external = isExternalRuleName(step.rule);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    // Indexed by the layout's allocation order (= the temporary's id in the recipe).
     const temps: TempSource[] = [];
-    const resolve = (operand: FusedOperand): BindingSource => {
-      if (operand.kind === "output") return outs[0];
-      if (operand.kind === "bind") {
-        const source = binds[operand.index];
-        if (source === undefined) {
-          throw new ExecutionError(
-            `fusion rule '${step.rule}': bind index ${operand.index} is outside the ${binds.length} declared binds`,
-          );
-        }
-        return source;
+    const resolve = (slot: FusedSlot): BindingSource => {
+      if (slot.kind === "output") return outs[0];
+      if (slot.kind === "bind") return binds[slot.index];
+      // A bind index outside the binds, or a temporary bound before its allocation (which breaks
+      // the lifetime declaration), fails here, where the binding is resolved.
+      if (slot.kind === "unresolved") {
+        throw new ExecutionError(`fusion rule '${step.rule}': ${slot.reason}`);
       }
-      if (operand.kind === "weightScale") {
-        const name = step.binds[operand.index];
-        const resident = this.#state.residentWeights.get(name);
+      if (slot.kind === "weightScale") {
+        const resident =
+          slot.name === undefined ? undefined : this.#state.residentWeights.get(slot.name);
         if (resident === undefined || resident.storage === "f16" || resident.storage === "bf16") {
           throw new ExecutionError(
-            `fusion rule '${step.rule}': bind ${operand.index} has no resident scale`,
+            `fusion rule '${step.rule}': bind ${slot.index} has no resident scale`,
           );
         }
         // Borrow the existing weight scale. The owner and the sharedWeights lease stay with the Session.
         return { kind: "resident", buffer: resident.scale };
       }
-      const temp = temps[operand.id];
-      // Binding an unallocated temporary breaks the lifetime declaration (it is read from a dispatch
-      // before its allocation).
-      if (temp === undefined) {
-        throw new ExecutionError(`fusion rule '${step.rule}': unallocated temporary ${operand.id}`);
-      }
-      return temp;
+      return temps[slot.temp];
     };
     // An external step's dispatches are the rule's own values: whatever fails while they are
     // resolved (a malformed field, a count the resolver refuses, a WGSL thunk that throws) is
     // rethrown naming the rule (`ruleFailure`) — a pipeline key conflict and an invalid kernel
     // included, the original kept as the cause. A built-in step's failure passes through unchanged.
     try {
-      let writesOutput = false;
+      // The schedule of the temporaries and what each binding points at come from the one
+      // device-free derivation the estimate shares (fused-step-layout.ts); only what needs the
+      // device is resolved here.
+      const stepLayout = fusedStepLayout(step);
+      const dispatchRoles: StorageRoles[] = [];
       for (const [index, dispatch] of step.dispatches.entries()) {
-        for (const [id, temp] of step.temps.entries()) {
-          if (temp.allocBefore === index) temps[id] = builder.allocTemp(temp.byteLength);
+        const placed = stepLayout.dispatches[index];
+        for (const temp of placed.allocate) {
+          temps[temp] = builder.allocTemp(stepLayout.temps[temp].byteLength);
         }
         const { pipeline, layout, roles } = await this.#state.cache.get(
           dispatch.key,
@@ -681,15 +633,10 @@ export class RecipeBuilder {
           dispatch.params,
           dispatch.paramsStorage === true ? PARAMS_STORAGE_USAGE : PARAMS_UNIFORM_USAGE,
         );
-        const operands = dispatch.operands ?? [
-          ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
-          { kind: "output" } as const,
-        ];
+        const operands = placed.operands;
         if (external) {
           assertExternalWrites(step, index, operands, roles);
-          writesOutput ||= operands.some(
-            (operand, slot) => operand.kind === "output" && roles.writes.has(slot + 1),
-          );
+          dispatchRoles.push(roles);
         }
         const { workgroups } = dispatch;
         if (external && workgroups.kind === "gridStride") {
@@ -712,22 +659,11 @@ export class RecipeBuilder {
           })),
           workgroups: counts,
         });
-        // MUST: releases at the same boundary go in reverse allocation order (the same order as the plan replay).
-        for (let id = step.temps.length - 1; id >= 0; id -= 1) {
-          if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
-        }
+        for (const temp of placed.release) builder.releaseTemp(temps[temp]);
       }
-      // MUST: an external step writes its output. A step whose every dispatch binds the output
-      // `read` leaves the buffer as the pool handed it over, and its consumers read stale data
-      // silently. The plan checks only that some dispatch binds it; what a binding writes is known
-      // here, from the WGSL roles (a built-in rule writes its output by construction).
-      if (external && !writesOutput) {
-        throw new ExecutionError(
-          `fusion rule '${step.rule}': no dispatch declares the binding of the step's output` +
-            ` '${step.outputName}' read_write (its buffer would never be written, and its consumers would read` +
-            " stale data)",
-        );
-      }
+      // MUST: an external step writes its output (what a binding writes is known only here, from
+      // the WGSL roles — a built-in rule writes its output by construction).
+      if (external) assertExternalOutputWritten(step, stepLayout, dispatchRoles);
     } catch (error) {
       // Out of memory and a lost device are conditions of the device, not of the rule, and callers
       // recover from them by class, so they pass through as they are.

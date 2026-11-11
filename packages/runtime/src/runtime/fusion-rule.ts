@@ -940,7 +940,7 @@ const assertExternalWindow = (
  * and at least one dispatch binds it (its `operands` omitted — the output is then the last binding —
  * or holding `{ kind: "output" }`). Which bindings a dispatch writes is known only from its WGSL, so
  * the recipe builder checks, when it fetches the pipeline, that an external dispatch writes nothing
- * but the output and the step's temporaries (`assertExternalWrites` in recipe-builder.ts). MUST: no
+ * but the output and the step's temporaries (`assertExternalWrites` in fused-step-layout.ts). MUST: no
  * operand is a `weightScale`. An external kernel reads every buffer as f32 words, and a resident
  * scale belongs to a weight stored in another form (a weight an external step binds is resident as
  * f32, or the step is not taken — `applyRule`). MUST: every
