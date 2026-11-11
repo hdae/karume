@@ -358,7 +358,7 @@ a graph without it (= every existing model) the accepted set does not change at 
   **and passing one fails loudly** (the binding point is the single place `createGenerationContext` —
   no double bookkeeping against the capacity the context holds).
 - `dtype` is **`f32` only**. `f16` is **only reserved** (ADR 0066 addendum item 5 — lowering the precision of state
-  storage changes the numeric contract, so it needs an opt-in in the style of ADR [0058](decisions/0058-numerics-opt-in-contract.md)),
+  storage changes the numeric contract, so it needs a named numerics option under ADR [0147](decisions/0147-numerics-and-kernel-adoption.md) decision 6),
   and when declared it fails loudly as "**unsupported**" (a different diagnostic from "outside the vocabulary").
   Anything else (`i32` / `bool` / unknown names) is outside the vocabulary.
 - **A slot is not a value**: it has no declaration in `inputs` / `values` and is not referenced from `ins` / `outs` either

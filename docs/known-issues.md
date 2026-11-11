@@ -58,8 +58,9 @@ below**), 4 attention i8a8 tests
   negligible at 1 ULP (as the track record of the Mac generating correct images shows). Browser execution goes through
   Dawn / Tint, not naga, so the same symptom is not guaranteed (unverified).
 - Variant selection is handled by **decision rule v2** of the run-time canary (ADR
-  [0058](decisions/0058-numerics-opt-in-contract.md) addendum) — "both arms bit-identical, inside the band (rtol 1e-5)
-  against the reference" picks dp4a and continues with one warning (a8 runs). Only outside the band is `GpuFeatureError`.
+  [0147](decisions/0147-numerics-and-kernel-adoption.md) decision 6) — "both arms bit-identical, inside the band (rtol 1e-5)
+  against the reference" picks dp4a and continues with one warning (a8 runs). Only outside the band is `GpuFeatureError` (ADR 0147 decision 8
+  turns that into a warning and f32 for that attention; the code change is filed in the backlog).
 - **The fixed input of canary ① QK was moved onto the f16 grid** (2026-08-30, RC1-1): by restricting the multiplier to
   powers of 2 and keeping the significant digits of `acc` within the f16 mantissa, all 8,192 elements of the known answer
   are exact f16 values, and **no rounding occurs even once** in the epilogue. Hence ① QK is expected to match the known

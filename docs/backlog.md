@@ -133,7 +133,7 @@ maintainer's ruling of 2026-11-06).
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
   [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple
-  M2 (the RTX under Dawn, D3D12), the decision to declare them in a preset (ADR 0110 §8), K-48 step 1, K-98, and QAT
+  M2 (the RTX under Dawn, D3D12), the decision to declare them in a preset (ADR 0147 decision 3 (2)), K-48 step 1, K-98, and QAT
   E4B's parallel-GEMV rows, which are unmeasured copies (K-59). The filed comparison with regular E2B's int4 presets
   ended when they were removed on 2026-11-04 (ADR 0128), so the baseline has to be chosen again.
 - **Regular E4B's MTP drafter (maintainer 2026-11-01)**: `karume-gemma4`'s E4B ships no drafter:
@@ -283,7 +283,7 @@ maintainer's ruling of 2026-11-06).
 
 - **Revisit the structure of the manifest (`karume.json`) — make optimization flags and presets easier to handle (filed by the maintainer 2026-10-06)**: today the bundle of execution knobs
   is held in the single `session` of a quant preset, and the preset name doubles as the bundle's name (ADR [0074](decisions/0074-quant-seat-naming.md) /
-  [0110](decisions/0110-practical-tier-numerics-contract.md) / [0111](decisions/0111-session-options-composition.md)).
+  [0147](decisions/0147-numerics-and-kernel-adoption.md) / [0111](decisions/0111-session-options-composition.md)).
   We want a form in which optimization flags and presets (bundles) are easier to handle. What belongs where (storage dtype, execution knobs, bundles, per-component declarations and so on)
   is to be sorted out later. The material is the open points of the inventory of how fast paths are expressed (2026-10-06, `.claude/reviews/2026-10-06_fast-path-inventory/`, not tracked by git)
   — there is no per-component session (the fast paths of the VAE / text encoder cannot be declared), the keys of new kernel variants, and whether changing a bundle
@@ -337,7 +337,7 @@ maintainer's ruling of 2026-11-06).
 - **Ruling on the contracts that block large in-layer fusion (filed 2026-09-19)**: part of the dispatch gap to WebML is
   blocked jointly by `windowTouchesState` MUST (ADR 0067) and the single-output MUST of fused steps
   (`windowIsSingleOutput`, ADR 0068 addendum 1). The third blocker, the atomic last-arriver merge, is now a MUST NOT of
-  ADR 0110 decision 6. The individual candidates (attention→SRQ, residual add→SRQ, attention in 1 dispatch, Q/K/V with 3
+  ADR 0147 decision 11. The individual candidates (attention→SRQ, residual add→SRQ, attention in 1 dispatch, Q/K/V with 3
   outputs) were all closed by refutation, so a design ruling on whether to relax the contracts comes first
   ([research](research/2026-09-19-qat-speed-recon.md) §9.1). Do not file in-layer fusion candidates before the ruling.
 - **Remaining items of the video-generation foundation (investigation 2026-09-10; ADRs [0118](decisions/0118-wan21-video-generation.md) /

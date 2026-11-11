@@ -476,7 +476,7 @@ population variance, f32 only, not in `WEIGHT_SLOTS`. **Kernel**: five
 dispatches over two node temporaries — per 1,024-element chunk partial sums, a fixed-tree total per
 group, in **two passes** (mean, then squared deviations — the layer_norm discipline), then the
 grid-stride affine; the tree depends on the shape only (determinism, geometry invariance). Its
-four-point check (ADR 0110 decision 3) and the large-group check at 16.8M elements per group are
+four-point check (ADR 0147 decision 2) and the large-group check at 16.8M elements per group are
 `packages/runtime/tests/gpu_group_norm_test.ts`. The `group_norm` row of the counter-examples
 ("delegate to layer_norm — partly") stays true: the A/B check of the kernel uses exactly that
 decomposition on small static shapes.

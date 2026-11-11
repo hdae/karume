@@ -384,8 +384,8 @@ Other backends are not known: `score-f16-store` on `/kernel-check` names the rou
 declared only in the stages that meet the shape conditions. The conditions are: the i8a8 of ①QK needs
 `D % 4 == 0`, the i8a8 of ③PV needs `N % 4 == 0`, and f16 storage of S needs
 `D % 4 == 0 && N % 4 == 0`. A stage that does not meet them falls back to the f32 path — with no
-exception and no warning (the fallback that [ADR 0058](decisions/0058-numerics-opt-in-contract.md)
-decision 3 permits). A stage that fell back is not on the declared path: ③PV does not use the integer
+exception and no warning (the shape fallback that [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md)
+decision 8 permits). A stage that fell back is not on the declared path: ③PV does not use the integer
 dot product, and S in VRAM has f32 width. The canonical source of the decision is one pure function
 (`attentionRoute` in `packages/runtime/src/runtime/attention-route.ts`).
 
@@ -1064,7 +1064,7 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   fixed value — research 2026-09-09). The wall clock wobbles per run, but the 2 paths that can be chosen
   (M=1 for a step that fell back, M=4 for a speculative cycle) are bit-identical by the checks of the
   item above, so **on a device where the checks are green, the wall-clock choice does not change the
-  output** (general rule 3 of the ADR 0058 addendum of 2026-08-29, ADR 0096 addendum 2026-09-26).
+  output** (the host-side adaptive policy rule of ADR 0147 decision 11, ADR 0096 addendum 2026-09-26).
   Speculation ② of the e2e also checks, with the default preset, that the gated sequence matches
   always. The handling of devices where the check is red is as in the item above.
   The number of steps that fell back is `GenerationStop.speculation.plainSteps` and the number of
@@ -1349,8 +1349,8 @@ input bit for bit**. The source coordinate is made by multiplying the output ind
 This is by-design, and **torch itself produces the same value** (it evaluates
 `area_pixel_compute_scale` in float and multiplies `scale · dst_index` in float). The numeric contract
 of the kernel is "match torch's `UpSample.h`", so clamping the end points to make them exact would
-instead split the bits from torch (not allowed on the default path in light of ADR 0058's opt-in
-contract). Measured extent of occurrence (2026-08-16): of the 128,961 pairs `2 ≤ I ≤ 64` ×
+instead split the bits from torch (not allowed on the default path: the output does not change
+silently, ADR 0147 decision 6). Measured extent of occurrence (2026-08-16): of the 128,961 pairs `2 ≤ I ≤ 64` ×
 `2 ≤ O ≤ 2048`, 11.6% are inexact. However, `O = 2I` / `O = 2I−1` (I ≤ 4096) have 0 cases, and the
 47 real-shape sites of the distributed models are all on the exact side for both H and W.
 
@@ -2053,8 +2053,8 @@ The fourth input of `attention`, the mask (ADR 0023 addendum 2026-08-11), is del
 The GQA / MQA shape (`H % Hkv == 0`, ADR
 [0067](decisions/0067-autoregressive-attention-vocabulary.md) decision 1) is on the f32 / f16 paths only.
 The a8 path has 5 head bases (`attention-i8a8.ts`), and the quantization and allocation of K / V also assume `B·H`, so
-the GQA shape **fails loudly without fallback** (silently dropping to f32 would quietly change performance — ADR 0058
-decision 3). **The rejection is provisional and support is planned later** (ADR 0067 decision 3 — the supplementary surface is settled: kv-head mapping
+the GQA shape **fails loudly without fallback** (silently dropping to f32 would quietly change performance; an unimplemented combination fails loudly — ADR 0147
+decision 8). **The rejection is provisional and support is planned later** (ADR 0067 decision 3 — the supplementary surface is settled: kv-head mapping
 for the K/scale and V/scale bases only + Hkv in the recipe builder. Verification reuses the repeat_kv
 parity assets of the f32 path).
 
@@ -2063,8 +2063,8 @@ parity assets of the f32 path).
 The scratch of `topk` (ADR [0068](decisions/0068-decode-exit-multi-output.md) decision 3) stays within
 workgroup storage, so the upper limit of k is set by `8·32·(k+1) ≤ maxComputeWorkgroupStorageSize`
 (`topkMaxK` in `src/kernels/topk.ts`). With WebGPU's default of 16384B, **k ≤ 63**;
-on this development machine (49152B), 191. Exceeding it fails loudly with the limit value (no fallback — ADR 0058
-decision 3). The practical range of top-k sampling (k ≤ 50 class) fits even on a machine with the defaults. A design to raise the limit
+on this development machine (49152B), 191. Exceeding it fails loudly with the limit value (no fallback — a limit that no option relaxes throws; it is outside the switches of ADR 0147
+decision 8). The practical range of top-k sampling (k ≤ 50 class) fits even on a machine with the defaults. A design to raise the limit
 (multi-stage merge and the like) is to be filed in the perf-ledger when there is real demand.
 
 ## WAVs with the streaming convention (riffSize placeholder) are not accepted
@@ -2405,7 +2405,7 @@ Deliberate constraints of attention with the `states` field / `state_append` (AD
 [0067](decisions/0067-autoregressive-attention-vocabulary.md) decisions 4 / 5):
 
 - **`attentionCompute: 'a8' / 'f16'` × the states form fails loudly** (the kernels of the other families are f32 only —
-  rejected without fallback, ADR 0058 decision 3. An opt-in option is to be raised in the ADR 0058 manner when there is real demand).
+  rejected without fallback as an unimplemented combination, ADR 0147 decision 8. An opt-in option is to be raised under ADR 0147 when there is real demand).
   **`attentionScoreStorage: 'f16'` × the states form likewise** (S is stored in f32 only).
 - **`rewind` of a GenerationContext that contains even one sliding slot is always rejected** (ADR
   [0066](decisions/0066-generation-context-state-slots.md) addendum 2 — after eviction the ring's physical layout and
@@ -2704,7 +2704,7 @@ The shapes of the gemma4 drafters (`[256,3072]` / `[262144,256]` and so on — i
 QAT E2B's `i4-fast` declares it by default (regular Gemma 4 has no `static_quantize`, so it does not declare it). 4 by-design constraints:
 
 - **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of `PARALLEL_SHAPES` whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 40 rows (including the 23 g32 rows) are outside the targets.
-- **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted as within the reach of the numeric opt-in ([ADR 0058](decisions/0058-numerics-opt-in-contract.md)).
+- **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted for the opt-in: [ADR 0147](decisions/0147-numerics-and-kernel-adoption.md) decision 2 classes `packedStaticQuantize` as E on finite values and states this NaN saturation.
 - **The allocation does not become 1/4**. The output tensor's storage is allocated at the declared shape, and only 1/4 of it is actually written. This is a choice to keep the arena buckets unchanged, not a VRAM saving.
 - **Only the combination of `linearGemvReduce: "parallel"` and `linearCompute: "f32"` is accepted**. Other combinations and non-boolean values are rejected at Session construction, without silently dropping to the f32 path.
 

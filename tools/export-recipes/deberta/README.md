@@ -127,7 +127,7 @@ linear runs as an i8a8 GEMM plus `quantize_rows`). The output.0/1 tolerance is a
 the collapse ceiling (a per-output relative RMS error ceiling, from 0.020 on output.2 to 0.33 on
 output.24, plus no non-finite values) was derived on 2026-10-07 as twice the worst measured error of
 each output across the legitimate samples, rounded up to two significant figures (ADR 0026, addendum
-of 2026-10-07; ADR 0110 decision 5-3). Every run records each output's error in `results.json`.
+of 2026-10-07; the collapse ceiling of ADR 0147 decision 2). Every run records each output's error in `results.json`.
 
 Do **not** regenerate the `io-i8a8.<case>` mirror goldens on a different machine's CPU. The strict
 output.0/1 tolerance depends on which way the CPU that took the goldens rounds the layer-0
