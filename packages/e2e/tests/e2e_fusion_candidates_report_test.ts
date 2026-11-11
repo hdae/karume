@@ -6,8 +6,10 @@
  *
  *     KARUME_FUSION_CANDIDATES=outputs/diag/<date>_fusion-candidates vp test packages/e2e/tests/e2e_fusion_candidates_report_test.ts
  *
- * The tables are searched at the default window limit (12). A row marked "limit" may have been cut
- * by it; `KARUME_FUSION_CANDIDATES_WINDOW=<n>` searches again with a larger one.
+ * Every table comes from the stable search (`stableFusionCandidates`): the window limit starts at the
+ * default (12) and doubles until the rows stop changing, up to the ceiling. The index shows the
+ * limit each table stopped at and whether its search stabilised; a table that did not says so at
+ * its head, and its rows keep their limit marks.
  *
  * MUST: it writes only under `<dir>` (a directory under `outputs/`, outside git —
  * docs/assets-layout.md). It asserts nothing about the models: the hit-count and candidate checks live in the
@@ -30,11 +32,11 @@ import {
 } from "../../runtime/tests/helpers/container-graph.ts";
 import {
   type CandidateScenario,
-  candidateRows,
   candidatesJsonl,
   candidatesMarkdown,
-  candidateWindows,
   DEFAULT_MAX_WINDOW,
+  MAX_WINDOW_CEILING,
+  stableFusionCandidates,
 } from "./helpers/fusion-candidates.ts";
 import { exists, planDistributionFusions, readDistributionGraph } from "./helpers/fusion-counts.ts";
 
@@ -45,17 +47,6 @@ if (OUTPUT === undefined) {
       " under outputs/, e.g. outputs/diag/<date>_fusion-candidates) to write the tables of every local mirror",
   );
 }
-
-/** The window limit of the report (`KARUME_FUSION_CANDIDATES_WINDOW`, default 12). */
-const windowLimit = (): number => {
-  const text = process.env.KARUME_FUSION_CANDIDATES_WINDOW;
-  if (text === undefined) return DEFAULT_MAX_WINDOW;
-  const limit = Number(text);
-  if (!Number.isSafeInteger(limit) || limit < 2) {
-    throw new Error(`KARUME_FUSION_CANDIDATES_WINDOW=${text} must be an integer of at least 2`);
-  }
-  return limit;
-};
 
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
@@ -172,14 +163,15 @@ test.skipIf(OUTPUT === undefined)(
     const out = OUTPUT;
     if (out === undefined)
       throw new Error("unreachable: the case SKIPs without KARUME_FUSION_CANDIDATES");
-    const maxWindow = windowLimit();
     const index = [
       "# Fusion candidates — index",
       "",
-      `Window limit ${maxWindow}; Session defaults; the default model and the first storage of each manifest.`,
+      `The window limit of each table is where its search stopped (from ${DEFAULT_MAX_WINDOW}, doubled` +
+        ` until the rows stop changing, ceiling ${MAX_WINDOW_CEILING}); Session defaults; the default` +
+        " model and the first storage of each manifest.",
       "",
-      "| Mirror | Model | Component | Storage | Binding | Rows | Rows at the limit | Table |",
-      "| --- | --- | --- | --- | --- | ---: | ---: | --- |",
+      "| Mirror | Model | Component | Storage | Binding | Window limit | Stabilised | Rows | Rows at the limit | Table |",
+      "| --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | --- |",
     ];
     for (const mirror of await localMirrors()) {
       const root = new URL(`${mirror}/`, MODELS_ROOT);
@@ -195,7 +187,7 @@ test.skipIf(OUTPUT === undefined)(
         const head = containerPart0(manifest, model, component, storage);
         if (head.repo !== undefined) {
           index.push(
-            `| ${mirror} | ${model} | ${component} | ${storage} | — | — | — | cross-repository reference to ${head.repo} |`,
+            `| ${mirror} | ${model} | ${component} | ${storage} | — | — | — | — | — | cross-repository reference to ${head.repo} |`,
           );
           continue;
         }
@@ -217,12 +209,13 @@ test.skipIf(OUTPUT === undefined)(
           undefined,
           shapes.states,
         );
-        const rows = candidateRows(candidateWindows(plan.steps, context, maxWindow));
+        const { rows, maxWindow, stable } = stableFusionCandidates(plan.steps, context);
         const scenario: CandidateScenario = {
           graph: `${where} (${storage})`,
           shapes: shapes.inputs,
           options: {},
           maxWindow,
+          stable,
         };
         await mkdir(`${out}/${mirror}`, { recursive: true });
         await writeTextFile(`${out}/${mirror}/${component}.md`, candidatesMarkdown(rows, scenario));
@@ -231,7 +224,8 @@ test.skipIf(OUTPUT === undefined)(
           .map(([name, value]) => `${name}=${value}`)
           .join(" ");
         index.push(
-          `| ${mirror} | ${model} | ${component} | ${storage} | ${bound === "" ? "static" : bound} | ${rows.length}` +
+          `| ${mirror} | ${model} | ${component} | ${storage} | ${bound === "" ? "static" : bound}` +
+            ` | ${maxWindow} | ${stable ? "yes" : "**no**"} | ${rows.length}` +
             ` | ${rows.filter((row) => row.hitLimit).length} | [${component}.md](${mirror}/${component}.md) |`,
         );
       }

@@ -19,8 +19,10 @@ import {
   candidatesJsonl,
   candidatesMarkdown,
   candidateWindows,
+  DEFAULT_MAX_WINDOW,
   fusionCandidates,
   opSequenceCount,
+  stableFusionCandidates,
 } from "./helpers/fusion-candidates.ts";
 
 type Node = DeclarationJson["nodes"][number];
@@ -112,6 +114,65 @@ describe("maximal windows", () => {
       ["neg,neg,neg", true],
       ["neg,neg,neg", true],
     ]);
+  });
+});
+
+/** `neg` `length` times in a row from `x`; the last value is the graph output. */
+const negChain = (length: number): DeclarationJson => {
+  const names = ["x", ...Array.from({ length }, (_, at) => `v${at}`)];
+  return graphOf(
+    [2, 3],
+    names.slice(1).map((name, at) => neg(names[at], name)),
+    [names[length]],
+  );
+};
+
+describe("the stable search", () => {
+  it("a chain longer than the starting limit comes out as one row once the search has widened", () => {
+    const { steps, context } = planOf(negChain(20));
+    expect(
+      fusionCandidates(steps, context).map((row) => [row.ops.length, row.count, row.hitLimit]),
+      "precondition: the default limit cuts it into nine marked windows",
+    ).toEqual([[DEFAULT_MAX_WINDOW, 9, true]]);
+    const search = stableFusionCandidates(steps, context);
+    // 12 cuts it, 24 holds it whole, 48 gives the same rows: the search stops at 48.
+    expect([search.maxWindow, search.stable]).toEqual([48, true]);
+    expect(search.rows.map((row) => [row.ops.length, row.count, row.hitLimit])).toEqual([
+      [20, 1, false],
+    ]);
+  });
+
+  it("rows that differ only in the limit mark are the same: a chain as wide as the starting limit stops at the next one", () => {
+    const { steps, context } = planOf(negChain(DEFAULT_MAX_WINDOW));
+    expect(
+      fusionCandidates(steps, context).map((row) => row.hitLimit),
+      "precondition: the default limit marks it",
+    ).toEqual([true]);
+    const search = stableFusionCandidates(steps, context);
+    expect([search.maxWindow, search.stable]).toEqual([2 * DEFAULT_MAX_WINDOW, true]);
+    expect(search.rows.map((row) => [row.ops.length, row.count, row.hitLimit])).toEqual([
+      [DEFAULT_MAX_WINDOW, 1, false],
+    ]);
+  });
+
+  it("a chain longer than the ceiling reports that the search did not stabilise, its rows marked", () => {
+    // A ceiling of 48 stands in for the real one (a chain past 384 takes seconds to search).
+    const ceiling = 4 * DEFAULT_MAX_WINDOW;
+    const { steps, context } = planOf(negChain(ceiling + 1));
+    const search = stableFusionCandidates(steps, context, ceiling);
+    expect([search.maxWindow, search.stable]).toEqual([ceiling, false]);
+    expect(search.rows.map((row) => [row.ops.length, row.count, row.hitLimit])).toEqual([
+      [ceiling, 2, true],
+    ]);
+  });
+
+  it("a ceiling that is not an integer of at least the starting limit fails loudly", () => {
+    const { steps, context } = planOf(fiveChain());
+    for (const ceiling of [DEFAULT_MAX_WINDOW - 1, 24.5, Number.NaN]) {
+      expect(() => stableFusionCandidates(steps, context, ceiling), `${ceiling}`).toThrow(
+        /ceiling/,
+      );
+    }
   });
 });
 
@@ -239,6 +300,7 @@ describe("ranking and output", () => {
       shapes: { x: [2, 3] },
       options: {},
       maxWindow: 12,
+      stable: true,
     };
     const run = () => {
       const { steps, context } = planOf(ranked());
@@ -261,5 +323,21 @@ describe("ranking and output", () => {
         .split("\n")
         .map((line) => JSON.parse(line).rank),
     ).toEqual([1, 2, 3]);
+  });
+
+  it("the table's head says in words whether the search stabilised", () => {
+    const { steps, context } = planOf(ranked());
+    const search = stableFusionCandidates(steps, context);
+    const scenario = {
+      graph: "synthetic",
+      shapes: { x: [2, 3] },
+      options: {},
+      maxWindow: search.maxWindow,
+    };
+    const stable = candidatesMarkdown(search.rows, { ...scenario, stable: true });
+    const unstable = candidatesMarkdown(search.rows, { ...scenario, stable: false });
+    expect(stable).toContain("- Window limit: 24 (the search stabilised");
+    expect(stable).not.toContain("did not stabilise");
+    expect(unstable).toContain("- Window limit: 24 — **the search did not stabilise**");
   });
 });

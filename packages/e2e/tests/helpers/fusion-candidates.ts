@@ -32,6 +32,30 @@
  * A window is **maximal** when no other window contains both its node range and its chain; one
  * chain is then one row instance instead of all its n-gram prefixes. A window as wide as the
  * window limit may have been cut by the limit, so it carries the "hit the limit" mark.
+ *
+ * **The stable search** (`stableFusionCandidates`) takes the limit out of the reader's hands. A
+ * fixed limit cuts a long chain into overlapping windows: the same chain becomes several rows
+ * shifted by one node and its bytes are counted more than once (at 12, the MOSS-Image DiT had 16 of
+ * 33 rows at the limit, a matte model 79 of 97). The mark alone is not enough either: a window that
+ * ends one node short of the limit can still have its chain cut. So the search starts at the
+ * default limit and doubles it until the ranked rows are the same as at the limit before
+ * (everything compared but the mark, which follows the limit and not the chain), up to a ceiling.
+ * A search that reaches the ceiling with the rows still changing says so (`stable: false`); its
+ * rows keep their marks.
+ *
+ * The ceiling, 384, is the smallest doubling of the default limit at which every local mirror
+ * stabilises (2026-11-11, Session defaults, the report's bindings): of 47 graphs, 17 stop at 24,
+ * 20 at 48, 6 at 96, 2 at 192 (the MOSS-Image DiT pair, widest window 69 nodes) and 2 at 384 (the
+ * two matte models: 32 rows at 96, 31 at 192 and 384, widest window 128 nodes). At 192 those two
+ * would not stabilise. The cost grows about fourfold per doubling (a matte model takes 3.8 s at
+ * 192 and 13 s at 384); the report over every mirror runs in 47 s at this ceiling, and its
+ * searches would take about 21 s at 192.
+ *
+ * NOTE: "the same rows at two limits in a row" is a stopping rule, not a proof. A window whose first
+ * node's value is read hundreds of nodes later appears only once the limit spans the whole
+ * distance: the sbv2 voice graph gives the same rows at 48, 96 and 192 (the search stops at 96),
+ * yet at 384 and 768 it has windows of 381 to 394 nodes (a `slice` read by a node at the end of a
+ * flow layer, some 18 to 23 chain ops among hundreds of in-window passthroughs).
  */
 
 import {
@@ -246,6 +270,61 @@ export const fusionCandidates = (
   maxWindow: number = DEFAULT_MAX_WINDOW,
 ): readonly CandidateRow[] => candidateRows(candidateWindows(steps, context, maxWindow));
 
+/** The ceiling of the stable search's window limit (the module doc gives the measurement). */
+export const MAX_WINDOW_CEILING = 384;
+
+/** The result of {@link stableFusionCandidates}. */
+export type StableCandidates = {
+  /** The ranked rows at {@link StableCandidates.maxWindow}. */
+  readonly rows: readonly CandidateRow[];
+  /** The window limit the search stopped at. */
+  readonly maxWindow: number;
+  /**
+   * The rows at `maxWindow` are the same as at the limit before it (limit marks aside). False: the
+   * search reached the ceiling with the rows still changing, so a row marked limit may still be cut.
+   */
+  readonly stable: boolean;
+};
+
+/** A row without its limit mark (the mark follows the limit, not the chain). */
+const rowWithoutMark = ({ hitLimit: _mark, ...row }: CandidateRow): string => JSON.stringify(row);
+
+/** Whether two ranked row lists are the same, limit marks aside. */
+const sameRowsBesidesMark = (a: readonly CandidateRow[], b: readonly CandidateRow[]): boolean =>
+  a.length === b.length && a.every((row, rank) => rowWithoutMark(row) === rowWithoutMark(b[rank]));
+
+/**
+ * **The stable search**: the ranked rows of a plan, the window limit widened until the table stops
+ * changing — from {@link DEFAULT_MAX_WINDOW}, doubled, until the rows are the same as at the limit
+ * before (limit marks aside), up to {@link MAX_WINDOW_CEILING}. Reaching the ceiling with the rows
+ * still changing is not an error: the result says `stable: false`, and the rows keep their marks.
+ *
+ * `ceiling` is there for the unit tests (a chain past the real ceiling costs seconds to search);
+ * every real search takes the default.
+ */
+export const stableFusionCandidates = (
+  steps: readonly ExecStep[],
+  context: FusionContext,
+  ceiling: number = MAX_WINDOW_CEILING,
+): StableCandidates => {
+  if (!Number.isSafeInteger(ceiling) || ceiling < DEFAULT_MAX_WINDOW) {
+    throw new Error(
+      `fusion candidates: the ceiling ${ceiling} must be an integer of at least ${DEFAULT_MAX_WINDOW}`,
+    );
+  }
+  let maxWindow = DEFAULT_MAX_WINDOW;
+  let rows = fusionCandidates(steps, context, maxWindow);
+  while (maxWindow < ceiling) {
+    const wider = Math.min(maxWindow * 2, ceiling);
+    const widerRows = fusionCandidates(steps, context, wider);
+    const stable = sameRowsBesidesMark(rows, widerRows);
+    maxWindow = wider;
+    rows = widerRows;
+    if (stable) return { rows, maxWindow, stable };
+  }
+  return { rows, maxWindow, stable: false };
+};
+
 /**
  * How many times the op sequence `ops` occurs in the chains of `rows`: the non-overlapping
  * occurrences in each row's chain ops (passthroughs excluded), times the row's count. A check names
@@ -274,7 +353,10 @@ export type CandidateScenario = {
   readonly shapes: Readonly<Record<string, readonly number[]>>;
   /** The Session options planned under (`{}` = the Session defaults). */
   readonly options: Readonly<Record<string, unknown>>;
+  /** The window limit the stable search stopped at. */
   readonly maxWindow: number;
+  /** Whether the stable search stabilised there ({@link StableCandidates.stable}). */
+  readonly stable: boolean;
 };
 
 const MIB = 1024 * 1024;
@@ -295,8 +377,18 @@ const TABLE_STATEMENTS = [
   "- A row is a candidate that passed only the eligibility conditions every rule shares, not a" +
     " rule's spelling or rounding points. Dispatches are approximate (an aliasing node 0, `cat` one" +
     " per input, every other node 1). Forms list the window's ops; `[op]` is an in-window passthrough.",
-  "- A row marked **limit** has a window as wide as the window limit: re-run with a larger limit.",
+  `- The window limit widens by itself: from ${DEFAULT_MAX_WINDOW}, doubled until the rows are the` +
+    ` same as at the limit before (limit marks aside), up to ${MAX_WINDOW_CEILING}. A row marked` +
+    " **limit** has a window as wide as the limit the search stopped at, so the limit may have cut" +
+    " it; a search that stabilised leaves no such row.",
 ];
+
+/** The window limit line of a table's head, saying in words whether the search stabilised. */
+const windowLimitLine = ({ maxWindow, stable }: CandidateScenario): string =>
+  stable
+    ? `- Window limit: ${maxWindow} (the search stabilised: the rows are the same as at the limit before)`
+    : `- Window limit: ${maxWindow} — **the search did not stabilise**: the rows still changed up to` +
+      ` the ceiling, so a row marked limit may still be cut`;
 
 /** The Markdown table of `rows` (deterministic: the same rows give the same bytes). */
 export const candidatesMarkdown = (
@@ -311,7 +403,7 @@ export const candidatesMarkdown = (
     "",
     `- Shape binding: ${shapes}`,
     `- Session options: \`${JSON.stringify(scenario.options)}\``,
-    `- Window limit: ${scenario.maxWindow}`,
+    windowLimitLine(scenario),
     "",
     ...TABLE_STATEMENTS,
     "",
