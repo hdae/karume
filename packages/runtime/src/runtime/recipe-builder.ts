@@ -53,6 +53,7 @@ import {
   isExternalRuleName,
   type LinearPrologue,
   type PackedActivations,
+  ruleFailure,
 } from "./fusion.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
@@ -663,48 +664,56 @@ export class RecipeBuilder {
       }
       return temp;
     };
-    for (const [index, dispatch] of step.dispatches.entries()) {
-      for (const [id, temp] of step.temps.entries()) {
-        if (temp.allocBefore === index) temps[id] = builder.allocTemp(temp.byteLength);
+    // An external step's dispatches are the rule's own values: whatever fails while they are
+    // resolved (a malformed field, a count the resolver refuses, a WGSL thunk that throws) is
+    // rethrown naming the rule (`ruleFailure`). A built-in step's failure passes through unchanged.
+    try {
+      for (const [index, dispatch] of step.dispatches.entries()) {
+        for (const [id, temp] of step.temps.entries()) {
+          if (temp.allocBefore === index) temps[id] = builder.allocTemp(temp.byteLength);
+        }
+        const { pipeline, layout, roles } = await this.#state.cache.get(
+          dispatch.key,
+          dispatch.wgsl(),
+        );
+        const params = this.#writeParams(
+          dispatch.params,
+          dispatch.paramsStorage === true ? PARAMS_STORAGE_USAGE : PARAMS_UNIFORM_USAGE,
+        );
+        const operands = dispatch.operands ?? [
+          ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
+          { kind: "output" } as const,
+        ];
+        if (external) assertExternalWrites(step, index, operands, roles);
+        const { workgroups } = dispatch;
+        if (external && workgroups.kind === "gridStride") {
+          assertExternalGridStride(step, index, workgroups.size);
+        }
+        const counts: readonly [number, number, number] =
+          workgroups.kind === "tiled"
+            ? workgroups.counts
+            : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1];
+        if (external) assertExternalWorkgroups(step, index, counts, limit);
+        builder.dispatch({
+          key: dispatch.key,
+          pipeline,
+          layout,
+          roles,
+          params,
+          bindings: operands.map((operand, slot) => ({
+            binding: slot + 1,
+            source: resolve(operand),
+          })),
+          workgroups: counts,
+        });
+        // MUST: releases at the same boundary go in reverse allocation order (the same order as the plan replay).
+        for (let id = step.temps.length - 1; id >= 0; id -= 1) {
+          if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
+        }
       }
-      const { pipeline, layout, roles } = await this.#state.cache.get(
-        dispatch.key,
-        dispatch.wgsl(),
-      );
-      const params = this.#writeParams(
-        dispatch.params,
-        dispatch.paramsStorage === true ? PARAMS_STORAGE_USAGE : PARAMS_UNIFORM_USAGE,
-      );
-      const operands = dispatch.operands ?? [
-        ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
-        { kind: "output" } as const,
-      ];
-      if (external) assertExternalWrites(step, index, operands, roles);
-      const { workgroups } = dispatch;
-      if (external && workgroups.kind === "gridStride") {
-        assertExternalGridStride(step, index, workgroups.size);
-      }
-      const counts: readonly [number, number, number] =
-        workgroups.kind === "tiled"
-          ? workgroups.counts
-          : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1];
-      if (external) assertExternalWorkgroups(step, index, counts, limit);
-      builder.dispatch({
-        key: dispatch.key,
-        pipeline,
-        layout,
-        roles,
-        params,
-        bindings: operands.map((operand, slot) => ({
-          binding: slot + 1,
-          source: resolve(operand),
-        })),
-        workgroups: counts,
-      });
-      // MUST: releases at the same boundary go in reverse allocation order (the same order as the plan replay).
-      for (let id = step.temps.length - 1; id >= 0; id -= 1) {
-        if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
-      }
+    } catch (error) {
+      if (!external) throw error;
+      throw ruleFailure(step.rule, "resolving its step's dispatches", error);
     }
   }
 

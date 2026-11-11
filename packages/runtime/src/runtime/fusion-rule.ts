@@ -1045,6 +1045,12 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
 const snapshotDefinition = <Matched extends FusionMatch, Name extends string, MatchContext>(
   rule: RuleDefinition<Matched, Name, MatchContext>,
 ): RuleDefinition<Matched, Name, MatchContext> => {
+  const given: unknown = rule;
+  if (typeof given !== "object" || given === null) {
+    throw new ExecutionError(
+      `fusion rule definition: expected an object, got ${given === null ? "null" : describeInputValue(given)}`,
+    );
+  }
   const { name, heads, contract, internals, match, build } = rule;
   assertDeclarations({ name, heads, contract, internals, match, build });
   return Object.freeze({
@@ -1058,9 +1064,30 @@ const snapshotDefinition = <Matched extends FusionMatch, Name extends string, Ma
 };
 
 /**
+ * `error`, thrown while the runtime planned or built a step of the external rule `name`, as an
+ * `ExecutionError` that names the rule: unchanged when it already is one, otherwise a new one that
+ * says what threw and keeps `error` as its `cause`.
+ *
+ * MUST: every call site of an external rule's code, and of the runtime reading what that code
+ * returned, rethrows through here (`brandedRule` below, `#buildFused` in recipe-builder.ts). A
+ * JavaScript match or build can return a value of any shape, and a result read as the wrong shape
+ * fails as a `TypeError` that names neither the rule nor the Session option it came from. One
+ * wrapper per call site keeps every such failure named without a schema of every field.
+ */
+export const ruleFailure = (name: string, during: string, error: unknown): ExecutionError => {
+  if (error instanceof ExecutionError && error.message.startsWith(`fusion rule '${name}'`)) {
+    return error;
+  }
+  const thrown =
+    error instanceof Error ? `${error.name}: ${error.message}` : describeInputValue(error);
+  return new ExecutionError(`fusion rule '${name}': ${during} threw ${thrown}`, { cause: error });
+};
+
+/**
  * The rule a frozen definition describes, branded built-in or, with `namespace` (its name's
- * namespace), external — the window and build checks of an external rule then apply. `match` runs
- * the definition's matcher on the context it reads.
+ * namespace), external — the window and build checks of an external rule then apply, and any
+ * failure of its try is rethrown naming it ({@link ruleFailure}). `match` runs the definition's
+ * matcher on the context it reads.
  */
 const brandedRule = <Matched extends FusionMatch, Name extends string>(
   definition: RuleDefinition<Matched, Name, never>,
@@ -1071,12 +1098,30 @@ const brandedRule = <Matched extends FusionMatch, Name extends string>(
     context: FusionScanContext,
   ) => Matched | undefined,
 ): FusionRule<Name> => {
+  const tryAt = (
+    nodes: readonly NodePlan[],
+    index: number,
+    context: FusionScanContext,
+  ): FusionHit | undefined =>
+    applyRule(definition, namespace, nodes, index, context, match(nodes, index, context));
   const defined: FusionRule<Name> = {
     name: definition.name,
     heads: definition.heads,
     contract: definition.contract,
-    apply: (nodes, index, context) =>
-      applyRule(definition, namespace, nodes, index, context, match(nodes, index, context)),
+    apply:
+      namespace === undefined
+        ? tryAt
+        : (nodes, index, context) => {
+            try {
+              return tryAt(nodes, index, context);
+            } catch (error) {
+              throw ruleFailure(
+                definition.name,
+                "its match or build, or the runtime reading what they returned,",
+                error,
+              );
+            }
+          },
   };
   const origin: RuleOrigin = namespace === undefined ? "built-in" : "external";
   Object.defineProperty(defined, RULE_BRAND, { value: origin });

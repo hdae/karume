@@ -254,6 +254,23 @@ describe("defineExternalRule", () => {
     }
   });
 
+  it("refuses, through either define entry, a definition that is not an object", () => {
+    for (const given of [null, undefined, "test/neg_neg"]) {
+      assertThrows(
+        () => defineExternalRule(outsideTheType<ExternalRuleDefinition<NegNegMatch>>(given)),
+        ExecutionError,
+        "fusion rule definition: expected an object",
+        String(given),
+      );
+      assertThrows(
+        () => defineRule(outsideTheType<FusionRuleDefinition<NegNegMatch>>(given)),
+        ExecutionError,
+        "fusion rule definition: expected an object",
+        String(given),
+      );
+    }
+  });
+
   it("brands its rule external and frozen, where defineRule brands it built-in; an object written by hand or copied has no brand", () => {
     const external = defineExternalRule(negNeg("test/neg_neg"));
     const builtIn = defineRule(negNeg("testNegNeg"));
@@ -470,6 +487,75 @@ describe("an external rule building a step", () => {
     );
   });
 
+  it("names the rule, keeping what was thrown as the cause, when its match or build throws or returns a value of the wrong shape", () => {
+    const definition = negNeg("test/neg_neg");
+    const thrown = new RangeError("a bug in the matcher");
+    for (const [label, fault] of [
+      [
+        "a match that throws",
+        {
+          match: () => {
+            throw thrown;
+          },
+        },
+      ],
+      [
+        "a match that throws a string",
+        {
+          match: () => {
+            throw "no";
+          },
+        },
+      ],
+      ["a match result that is not a match", { match: () => 5 }],
+      [
+        "a window that is not an array",
+        {
+          match: (nodes: readonly NodePlan[], index: number) => {
+            const matched = definition.match(nodes, index);
+            return matched === undefined ? undefined : { ...matched, window: "window" };
+          },
+        },
+      ],
+      ["no build result", { build: () => undefined }],
+      [
+        "binds that are not an array",
+        { build: (matched: NegNegMatch) => ({ ...definition.build(matched), binds: "z" }) },
+      ],
+      [
+        "no temporaries",
+        { build: (matched: NegNegMatch) => ({ ...definition.build(matched), temps: undefined }) },
+      ],
+    ] as const) {
+      const error = assertThrows(
+        () =>
+          plan([
+            defineExternalRule(
+              outsideTheType<ExternalRuleDefinition<NegNegMatch>>({ ...definition, ...fault }),
+            ),
+          ]),
+        ExecutionError,
+        "fusion rule 'test/neg_neg': its match or build, or the runtime reading what they returned, threw",
+        label,
+      );
+      assert(error.cause !== undefined && !(error.cause instanceof ExecutionError), label);
+    }
+    const error = assertThrows(
+      () =>
+        plan([
+          defineExternalRule({
+            ...definition,
+            match: () => {
+              throw thrown;
+            },
+          }),
+        ]),
+      ExecutionError,
+      "threw RangeError: a bug in the matcher",
+    );
+    assert(error.cause === thrown, "the original is the cause");
+  });
+
   it("is checked as an external rule only: the same faults through defineRule are the built-in rules' own responsibility", () => {
     // The built-in entry keeps the checks it had; a key without the prefix folds as before.
     const folded = plan([defineRule(negNeg("testNegNeg", { key: "test:neg_neg" }))]);
@@ -645,6 +731,30 @@ describe("an external step's recipe (a fake GPU: the run stops at the transient 
         `fusion rule 'test/neg_neg': dispatch 0 ('ext:test:neg_neg') ${message}`,
         label,
       );
+    }
+  });
+
+  it("names the rule, keeping what was thrown as the cause, when resolving a dispatch fails outside its own checks", async () => {
+    const wgsl = wgslOf("var<uniform>", "read");
+    for (const [label, workgroups, message] of [
+      [
+        "an element count the grid-stride resolver refuses",
+        { kind: "gridStride", items: 2 ** 32, size: 64 },
+        "threw DispatchLimitError",
+      ],
+      [
+        "tiled counts missing",
+        outsideTheType<FusedWorkgroups>({ kind: "tiled" }),
+        "threw TypeError",
+      ],
+    ] as const) {
+      const error = await assertRejects(
+        () => run({ wgsl, workgroups }),
+        ExecutionError,
+        `fusion rule 'test/neg_neg': resolving its step's dispatches ${message}`,
+        label,
+      );
+      assert(error.cause instanceof Error && !(error.cause instanceof ExecutionError), label);
     }
   });
 

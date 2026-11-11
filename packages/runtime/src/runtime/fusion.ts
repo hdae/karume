@@ -218,6 +218,7 @@ export {
   fusionMatchContext,
   isExternalRuleName,
   nodeStepSpan,
+  ruleFailure,
   ruleOrigin,
   sameShape,
 } from "./fusion-rule.ts";
