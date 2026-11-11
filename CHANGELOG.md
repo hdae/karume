@@ -27,8 +27,7 @@ measurements in `docs/research/`.
   the package is 0.x): `defineRule` (a name `<namespace>/<rule>`, a declared contract class, dispatch keys under
   `ext:<namespace>:`, a matcher that reads the nodes and the graph's use counts and outputs — `FusionMatchContext`), the predicates `allF32` / `sameShape`, the WGSL parts that keep the unfused rounding
   (`prologueUnaryWgsl`, `fusedBinaryWgsl`, `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` with `IS_NAN_BITS_WGSL`, and the
-  rounding barrier `stagedLoopWgsl` / `stagedF32`), `gridStrideWorkgroups`, `CodegenError` and the types a rule names
-  (ADR 0148).
+  rounding barrier `stagedLoopWgsl` / `stagedF32`), `CodegenError` and the types a rule names (ADR 0148).
 
 ### Breaking
 

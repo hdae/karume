@@ -553,10 +553,6 @@
         "kind": "function"
       },
       {
-        "name": "gridStrideWorkgroups",
-        "kind": "function"
-      },
-      {
         "name": "prologueUnaryWgsl",
         "kind": "function"
       },

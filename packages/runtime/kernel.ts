@@ -35,8 +35,9 @@
  *   unfused sequence stored — at least every product that feeds an add — at its own rounding point,
  *   so the compiler cannot contract across it. That this holds is measured per backend, not
  *   guaranteed by WGSL.
- * - {@link gridStrideWorkgroups} is the workgroup count the runtime dispatches for a `gridStride`
- *   dispatch; {@link CodegenError} is what the WGSL parts throw.
+ * - {@link CodegenError} is what the WGSL parts throw. A dispatch declares its workgroups
+ *   (`{ kind: "gridStride", items, size }` or `{ kind: "tiled", counts }`) and the runtime resolves
+ *   and checks the counts, so a rule computes no workgroup count itself.
  *
  * What the runtime does and the rule does not: it allocates and releases every buffer, builds the
  * bind groups, caches the pipelines, runs every dispatch under its error scopes and requests the
@@ -90,7 +91,5 @@ export {
 /** The rounding barrier of a fused elementwise kernel. */
 export { stagedF32, stagedLoopWgsl } from "./src/kernels/rounding-barrier.ts";
 export type { StagedLoop, StagedValue } from "./src/kernels/rounding-barrier.ts";
-/** The workgroup count of a grid-stride dispatch. */
-export { gridStrideWorkgroups } from "./src/codegen/dispatch.ts";
 /** The error of the WGSL generation layer. */
 export { CodegenError } from "./src/codegen/errors.ts";

@@ -59,7 +59,8 @@ The package gains a third entry (`packages/runtime/kernel.ts`; `exports` and `fi
 - the WGSL parts that keep the unfused rounding: `prologueUnaryWgsl` and `fusedBinaryWgsl` (the plain elementwise kernels'
   own text), `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` and `IS_NAN_BITS_WGSL` (which `tanh_stable` calls), and the
   rounding barrier `stagedLoopWgsl` / `stagedF32`;
-- `gridStrideWorkgroups` and `CodegenError`.
+- `CodegenError`. A dispatch declares its workgroups and the runtime resolves and checks the counts, so the entry exports
+  no workgroup-count helper.
 
 **While the package is 0.x the entry is experimental: anything it exports may change in a minor version.** Its header, the
 runtime README and the CHANGELOG say so. It has no side effects and reads no WebGPU global at import

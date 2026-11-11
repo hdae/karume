@@ -50,7 +50,6 @@ const VALUES = [
   "allF32",
   "defineRule",
   "fusedBinaryWgsl",
-  "gridStrideWorkgroups",
   "prologueUnaryWgsl",
   "sameShape",
   "stagedF32",

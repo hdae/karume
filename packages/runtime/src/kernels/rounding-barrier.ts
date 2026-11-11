@@ -27,9 +27,10 @@
  * MUST: `index`, the staged values and `finish` use only `i` (the element index) and `lid` (the
  * local invocation index) of the names this entry point binds; `wid`, `nwg`, `stride` and `base`
  * belong to the loop. They must not write a `var<workgroup>` of their own or call a barrier.
- * MUST: dispatch with the grid-stride workgroup count for `count` elements at this workgroup size
- * (`gridStrideWorkgroups` in src/codegen/dispatch.ts): every element is written however few
- * workgroups run, and the loop arithmetic stays inside u32.
+ * MUST: declare the fused step's dispatch as grid-stride workgroups for `count` elements at this
+ * workgroup size (`workgroups: { kind: "gridStride", items, size }` of the dispatch; the runtime
+ * resolves the count): every element is written however few workgroups run, and the loop arithmetic
+ * stays inside u32.
  */
 
 import { CodegenError } from "../codegen/errors.ts";

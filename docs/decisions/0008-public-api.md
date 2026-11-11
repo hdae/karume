@@ -94,7 +94,7 @@ gains no values; the snapshot gate picks up `./tune` automatically.
 `@karume/runtime/kernel` (ADR [0148](0148-external-fusion-rules.md)) serves the user story "a package or an
 application writes a fusion rule for its model and passes it to a Session". It exports only what a rule is written
 with: the external `defineRule`, the types a rule names, the predicates `allF32` / `sameShape`, the WGSL parts that
-keep the unfused rounding, `gridStrideWorkgroups` and `CodegenError`. The codegen vocabulary of the built-in kernels
+keep the unfused rounding and `CodegenError`. The codegen vocabulary of the built-in kernels
 stays internal (the 2026-09-03 rule). While the package is 0.x the entry is experimental and may change in a minor
 version. `mod.ts` gains no value: `SessionOptions.fusionRules` names `FusionRule`, which a Session user imports from the
 kernel entry. The snapshot gate picks up `./kernel` automatically.
