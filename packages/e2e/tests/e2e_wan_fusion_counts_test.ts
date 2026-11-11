@@ -11,7 +11,14 @@ import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
-import { exists, fusionCounts, NONE, readDistributionGraph } from "./helpers/fusion-counts.ts";
+import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import {
+  exists,
+  fusionCounts,
+  NONE,
+  planDistributionFusions,
+  readDistributionGraph,
+} from "./helpers/fusion-counts.ts";
 
 /**
  * The Wan2.1 T2V 1.3B distribution (`models/karume-wan2.1/` — ADR 0118 step 7; not published on
@@ -165,6 +172,58 @@ test.skipIf(!WAN_AVAILABLE)(
         fusionCounts(graph, wanShapes(graph, 0)),
         { ...NONE, silu: 29, upsample2x: 3 },
         name,
+      );
+    }
+  },
+);
+
+/**
+ * A window limit no window of the DiT reaches (the widest maximal window is 18 nodes —
+ * 2026-11-11). At the default limit of 12 the block chains are cut into overlapping windows marked
+ * "hit the limit" and sites inside an overlap are counted twice (the adaLN form came out 62 times,
+ * the gated residual 64).
+ */
+const UNCUT_WINDOW = 32;
+
+/**
+ * The DiT's two known misses (adaln 0 and gatedResidual 0 above) as fusion candidates, named by the
+ * op sequence of their chain (passthroughs excluded):
+ *
+ * - adaLN: `layer_norm, add, mul, add` — the norm, `1 + scale` (the modulation vector is sliced
+ *   before the norm, so ADALN_RULE's broadcast form with its reshapes after the norm does not
+ *   match), the product and the shift: **61** = the self-attention and FFN norms of the 30 blocks
+ *   and the head's norm (the same 61 the Wan2.2 DiT grabs as adaln).
+ * - Gated residual: `linear, mul, add` — the output projection of the self-attention or the FFN,
+ *   its broadcast gate and the residual add (no per-token `where`): **60** = 30 blocks × 2. The
+ *   cross-attention's projection is added without a gate.
+ *
+ * A candidate is not a rule to write: a mul→add gated residual rule was measured on anima and
+ * Irodori (−0.2 to −0.6% of the GPU total, nothing in the wall) and rejected (perf-ledger K-7).
+ * The check records that the candidate search finds these sites.
+ */
+test.skipIf(!WAN_AVAILABLE)(
+  "the Wan2.1 DiT's known misses come out as fusion candidates: the adaLN form 61 times, the gated residual 60",
+  async () => {
+    const transformer = await readWanGraph("transformer");
+    for (const sequence of [192, 14040]) {
+      const label = `transformer S=${sequence}`;
+      const { plan, context } = planDistributionFusions(
+        transformer,
+        wanShapes(transformer, sequence),
+      );
+      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      assertEquals(
+        rows.filter((row) => row.hitLimit).map((row) => row.form),
+        [],
+        `${label}: precondition — no window at the limit`,
+      );
+      assertEquals(
+        {
+          adaln: opSequenceCount(rows, ["layer_norm", "add", "mul", "add"]),
+          gatedResidual: opSequenceCount(rows, ["linear", "mul", "add"]),
+        },
+        { adaln: 61, gatedResidual: 60 },
+        label,
       );
     }
   },

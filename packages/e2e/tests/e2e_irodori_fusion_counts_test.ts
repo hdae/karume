@@ -16,7 +16,8 @@ import {
   containerPart0,
   readContainerGraph,
 } from "../../runtime/tests/helpers/container-graph.ts";
-import { exists, fusionCounts, NONE } from "./helpers/fusion-counts.ts";
+import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import { exists, fusionCounts, NONE, planDistributionFusions } from "./helpers/fusion-counts.ts";
 
 const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
 
@@ -172,6 +173,38 @@ test.skipIf(!IRODORI_AVAILABLE)(
       ["codec_encoder", { wav: [1, 750, 1920] }],
     ] as const) {
       assertEquals(fusionCounts(await readIrodoriGraph(name), shapes), NONE, name);
+    }
+  },
+);
+
+/**
+ * A window limit no window of the DiT reaches (the widest maximal window is 13 nodes —
+ * 2026-11-11; at the default limit of 12 some windows are marked "hit the limit").
+ */
+const UNCUT_WINDOW = 32;
+
+/**
+ * The DiT's adaLN (adaln 0 above — it normalises with `rms_norm`) as a fusion candidate, named by
+ * the op sequence of its chain: `rms_norm, add, mul, add` — the norm, `1 + scale`, the product and
+ * the shift. **24** = the 12 blocks × 2 (before the attention and before the MLP), the same 24 as
+ * the record of the removed 0.14 tool (`docs/research/2026-09-03-op-census-fusion-hints.md` §2.2).
+ * 23 of them end a longer maximal window (`linear, linear, add, …` before the norm); one stands
+ * alone.
+ */
+test.skipIf(!IRODORI_AVAILABLE)(
+  "the Irodori DiT's adaLN form comes out as a fusion candidate 24 times (rms_norm, add, mul, add)",
+  async () => {
+    const graph = await readIrodoriGraph("dit");
+    for (const sequence of [125, 750]) {
+      const label = `S=${sequence}`;
+      const { plan, context } = planDistributionFusions(graph, irodoriDitShapes(sequence));
+      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      assertEquals(
+        rows.filter((row) => row.hitLimit).map((row) => row.form),
+        [],
+        `${label}: precondition — no window at the limit`,
+      );
+      assertEquals(opSequenceCount(rows, ["rms_norm", "add", "mul", "add"]), 24, label);
     }
   },
 );
