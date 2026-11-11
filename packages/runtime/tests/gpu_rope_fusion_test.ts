@@ -3,11 +3,13 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY, ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // With H=1, S=3, n=384, which also exercises a partial trailing 256-thread workgroup.
@@ -100,32 +102,6 @@ const ropeGraph = (
   };
 };
 
-const bits = (tensor: Tensor): Uint32Array =>
-  new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
-
-const assertFloatParity = (actual: Uint32Array, expected: Uint32Array): void => {
-  assertEquals(actual.length, expected.length);
-  const word = new Uint32Array(1);
-  const value = new Float32Array(word.buffer);
-  for (let i = 0; i < actual.length; i++) {
-    if (actual[i] === expected[i]) continue;
-    word[0] = actual[i];
-    const actualValue = value[0];
-    word[0] = expected[i];
-    const expectedValue = value[0];
-    assertEquals(
-      Number.isNaN(actualValue) && Number.isNaN(expectedValue),
-      true,
-      "non-NaN values must be bit-identical index=" +
-        i +
-        " actual=0x" +
-        actual[i].toString(16) +
-        " expected=0x" +
-        expected[i].toString(16),
-    );
-  }
-};
-
 /** The full input set, with ±0 / subnormals / ±Inf / NaN payloads written at the start of x. */
 const ropeInputs = (heads: number, sequence: number): Readonly<Record<string, Tensor>> => {
   const x = fill([1, heads, sequence, 128], (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
@@ -166,20 +142,18 @@ test.skipIf(!GPU_AVAILABLE)(
           GRAPH_NAME,
         );
         try {
-          const fusedOut = (await fused.run(inputs)).y;
-          const splitOut = (await split.run(inputs)).y;
-          assertFloatParity(bits(fusedOut), bits(splitOut));
-          assertEquals(fused.diagnostics().submit.dispatchCount, 1, `${order}: RoPE 1 pass`);
-          assertEquals(
-            split.diagnostics().submit.dispatchCount,
-            8,
-            `${order}: slice×2 + neg + cat×2 + mul×2 + add`,
-          );
-          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: fusion counter`);
-          assertEquals(
-            split.diagnostics().lastRunFusions?.rope,
-            0,
-            `${order}: the counter of the counterexample is 0`,
+          assertCheckCase(
+            await checkFusionTwin(gpu, {
+              label: order,
+              fused,
+              plain: split,
+              feeds: inputs,
+              counter: "rope",
+              hits: 1,
+              nan: "class",
+              // RoPE in 1 pass against slice×2 + neg + cat×2 + mul×2 + add.
+              dispatches: { fused: 1, plain: 8 },
+            }),
           );
         } finally {
           await fused.dispose();
@@ -248,12 +222,20 @@ test.skipIf(!GPU_AVAILABLE)(
           GRAPH_NAME,
         );
         try {
-          const fusedOut = (await fused.run(inputs)).y;
-          const splitOut = (await split.run(inputs)).y;
-          assertEquals(fusedOut.shape, [1, 3, 5, 128], `${order}: output shape`);
-          assertFloatParity(bits(fusedOut), bits(splitOut));
-          assertEquals(fused.diagnostics().submit.dispatchCount, 1, `${order}: RoPE 1 pass`);
-          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: fusion counter`);
+          assertCheckCase(
+            await checkFusionTwin(gpu, {
+              label: order,
+              fused,
+              plain: split,
+              feeds: inputs,
+              counter: "rope",
+              hits: 1,
+              nan: "class",
+              // RoPE in 1 pass.
+              dispatches: { fused: 1 },
+            }),
+          );
+          assertEquals((await fused.run(inputs)).y.shape, [1, 3, 5, 128], `${order}: output shape`);
         } finally {
           await fused.dispose();
           await split.dispose();
@@ -400,13 +382,19 @@ test.skipIf(!GPU_AVAILABLE)(
             GRAPH_NAME,
           );
           try {
-            const actual = (await fused.run(inputs)).y;
-            const expected = (await split.run(inputs)).y;
-            assertEquals(actual.shape, [1, sequence, heads, dim]);
-            assertFloatParity(bits(actual), bits(expected));
-            assertEquals(fused.diagnostics().lastRunFusions?.rope, 1);
-            assertEquals(split.diagnostics().lastRunFusions?.rope, 0);
-            assertEquals(fused.diagnostics().submit.dispatchCount, 1);
+            assertCheckCase(
+              await checkFusionTwin(gpu, {
+                label: `H=${heads} S=${sequence} D=${dim} ${order}`,
+                fused,
+                plain: split,
+                feeds: inputs,
+                counter: "rope",
+                hits: 1,
+                nan: "class",
+                dispatches: { fused: 1 },
+              }),
+            );
+            assertEquals((await fused.run(inputs)).y.shape, [1, sequence, heads, dim]);
           } finally {
             await fused.dispose();
             await split.dispose();
@@ -444,8 +432,17 @@ test.skipIf(!GPU_AVAILABLE)(
         GRAPH_NAME,
       );
       try {
-        assertFloatParity(bits((await fused.run(inputs)).y), bits((await split.run(inputs)).y));
-        assertEquals(fused.diagnostics().lastRunFusions?.rope, 1);
+        assertCheckCase(
+          await checkFusionTwin(gpu, {
+            label: "BSHD grid-stride",
+            fused,
+            plain: split,
+            feeds: inputs,
+            counter: "rope",
+            hits: 1,
+            nan: "class",
+          }),
+        );
       } finally {
         await fused.dispose();
         await split.dispose();
@@ -611,18 +608,20 @@ test.skipIf(!GPU_AVAILABLE)(
           GRAPH_NAME,
         );
         try {
-          const actual = (await fused.run(inputs)).y;
-          const expected = (await split.run(inputs)).y;
-          assertEquals(actual.shape, [1, sequence, heads, headDim], label);
-          assertFloatParity(bits(actual), bits(expected));
-          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${label}: fused counter`);
-          assertEquals(split.diagnostics().lastRunFusions?.rope, 0, `${label}: reference counter`);
-          assertEquals(fused.diagnostics().submit.dispatchCount, 1, `${label}: one pass`);
-          assertEquals(
-            split.diagnostics().submit.dispatchCount,
-            8,
-            `${label}: slice + neg + slice + cat×2 + mul×2 + add`,
+          assertCheckCase(
+            await checkFusionTwin(gpu, {
+              label,
+              fused,
+              plain: split,
+              feeds: inputs,
+              counter: "rope",
+              hits: 1,
+              nan: "class",
+              // One pass against slice + neg + slice + cat×2 + mul×2 + add.
+              dispatches: { fused: 1, plain: 8 },
+            }),
           );
+          assertEquals((await fused.run(inputs)).y.shape, [1, sequence, heads, headDim], label);
           assertEquals(
             requireCensus(fused.diagnostics().lastRunPipelines, label).map((row) => row.key),
             [ROPE_PAIR_BSHD_KEY],
@@ -660,8 +659,17 @@ test.skipIf(!GPU_AVAILABLE)(
         GRAPH_NAME,
       );
       try {
-        assertFloatParity(bits((await fused.run(inputs)).y), bits((await split.run(inputs)).y));
-        assertEquals(fused.diagnostics().lastRunFusions?.rope, 1);
+        assertCheckCase(
+          await checkFusionTwin(gpu, {
+            label: "pair grid-stride",
+            fused,
+            plain: split,
+            feeds: inputs,
+            counter: "rope",
+            hits: 1,
+            nan: "class",
+          }),
+        );
       } finally {
         await fused.dispose();
         await split.dispose();
