@@ -12,6 +12,7 @@ import {
   SWEEP_CASES,
   SWEEP_OPS,
   sweepCaseEntries,
+  sweepCasesFor,
 } from "../src/tune/cases.ts";
 
 /**
@@ -267,5 +268,58 @@ describe("sweepCaseEntries (the public case list, geometrySweepCases of ./tune)"
       assertEquals(sweepCaseEntries()[0]?.id, SWEEP_CASES[0]?.id);
       assert(SWEEP_CASES[0]?.id !== "renamed");
     });
+  });
+});
+
+describe("the case table of the evaluation set k85 (perf-ledger K-85)", () => {
+  const k85 = sweepCasesFor("k85");
+
+  it("is the Wan2.2 TI2V-5B DiT linears at 33 frames (S = 7,920) and a small-M guard, all i8a8 linear, outside the sweep's case set", () => {
+    assertEquals(
+      k85.map((sweepCase) =>
+        sweepCase.op === "i8a8-linear"
+          ? [sweepCase.m, sweepCase.n, sweepCase.k, sweepCase.censusCount]
+          : [],
+      ),
+      [
+        [7920, 3072, 3072, 180],
+        [7920, 14336, 3072, 30],
+        [7920, 3072, 14336, 30],
+        [512, 3072, 3072, 61],
+        [1, 18432, 3072, 2],
+        [185, 1280, 1280, 0],
+      ],
+    );
+    const ids = new Set(SWEEP_CASES.map(({ id }) => id));
+    for (const sweepCase of k85) {
+      assert(!ids.has(sweepCase.id), `${sweepCase.id} is also a case of the sweep's table`);
+      assert(sweepCase.id.startsWith("k85-i8a8-linear-"), sweepCase.id);
+    }
+    assertEquals(new Set(k85.map(({ id }) => id)).size, k85.length);
+    // 303 of the graph's 310 linears are weighted (the 7 left out are 1–2 nodes each)
+    assertEquals(
+      k85.reduce((total, sweepCase) => total + sweepCase.censusCount, 0),
+      303,
+    );
+  });
+
+  it("holds shapes the vec4 fill and the i8a8 path take (k % 16 == 0, n % 4 == 0, k within the i32 guard)", () => {
+    for (const sweepCase of k85) {
+      assert(sweepCase.op === "i8a8-linear", sweepCase.id);
+      assertEquals(sweepCase.k % 16, 0, sweepCase.id);
+      assertEquals(sweepCase.n % 4, 0, sweepCase.id);
+      assert(sweepCase.k <= LINEAR_I8A8_MAX_K, sweepCase.id);
+      assert(caseFlops(sweepCase) > 0, sweepCase.id);
+    }
+  });
+
+  it("every other set sweeps the sweep's table, and the public list gives the k85 cases with their census count", () => {
+    for (const set of ["quick", "quick+", "full"] as const)
+      assertEquals(sweepCasesFor(set), SWEEP_CASES);
+    assertEquals(
+      sweepCaseEntries("k85"),
+      k85.map(({ id, op, censusCount }) => ({ id, op, censusCount })),
+    );
+    assertEquals(sweepCaseEntries("full"), sweepCaseEntries());
   });
 });

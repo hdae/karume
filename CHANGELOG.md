@@ -66,6 +66,14 @@ measurements in `docs/research/`.
   geometry without the field keeps its keys and WGSL byte for byte, and no embedded table carries it.
   `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept it and
   reject any other value naming the field.
+- `@karume/runtime/tune`: the candidate set `"k85"` of `runGeometrySweep`, an evaluation of that skeleton on the
+  i8a8 linear: the registered tables' `i8a8.linear` geometries and a grid of 204 geometries (regM 8 / 12 / 16, regN 4
+  / 8, the existing workgroup shapes, K tile 16 / 32 / 64, each with and without the skeleton, within 16,384 B of
+  workgroup storage) on cases of its own — the Wan2.2 TI2V-5B DiT linears at 33 frames and a small-M guard — that
+  `geometrySweepCases("k85")` lists with their node counts in one Wan2.2 DiT forward. Its record carries the case-set
+  version of those cases, and `deriveGeometryProfile` derives no table from it; the other sets, their cases and
+  every fingerprint are unchanged. Every sweep record now names the embedded table a Session on that adapter selects
+  (`geometryProfile`).
 
 ### Changed
 

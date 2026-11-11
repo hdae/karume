@@ -31,11 +31,19 @@ import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import {
   conv2dProfileGeometry,
+  DEFAULT_GEOMETRY_PROFILE,
   gemmRowsGeometry,
   type GeometryProfile,
 } from "../kernels/geometry-profile.ts";
-import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, type SweepCase } from "./cases.ts";
 import {
+  ALL_SWEEP_CASES,
+  PROFILE_GEMM_ROWS_BOUNDS,
+  SWEEP_CASES,
+  type SweepCase,
+  sweepCasesFor,
+} from "./cases.ts";
+import {
+  type CandidateSet,
   conv2dCandidate,
   gemmCandidate,
   type GeometryCandidate,
@@ -412,7 +420,7 @@ export const candidateKernelsId = (
  * detect it either).
  */
 export const sweepCandidateKernelsId = (rows: readonly MeasuredRow[], dp4a: boolean): string =>
-  candidateKernelsId(rows, dp4a, SWEEP_CASES, casePlan);
+  candidateKernelsId(rows, dp4a, ALL_SWEEP_CASES, casePlan);
 
 /**
  * The names of fields any case type has (the union of keyof over each member of the case-type
@@ -498,3 +506,19 @@ export const caseSetId = (cases: readonly SweepCase[], bounds: readonly number[]
  * descriptions do not change it.
  */
 export const sweepCaseSetId = (): string => caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS);
+
+/**
+ * The case-set version a sweep of `set` records (`caseSet`): {@link sweepCaseSetId} for the
+ * table-deriving sets, and the same hash over its own case table for an evaluation set
+ * (`sweepCasesFor` in cases.ts), so that its record never claims the sweep's case set.
+ */
+export const candidateSetCaseSetId = (set: CandidateSet): string =>
+  caseSetId(sweepCasesFor(set), PROFILE_GEMM_ROWS_BOUNDS);
+
+/**
+ * The fingerprint of the ratio baseline a sweep of `set` records (`defaultKernels`): the default
+ * table over the case table of `set` ({@link geometryProfileKernelsId} of the default table for the
+ * table-deriving sets).
+ */
+export const candidateSetDefaultKernelsId = (set: CandidateSet): string =>
+  profileKernelsId(DEFAULT_GEOMETRY_PROFILE, sweepCasesFor(set), casePlan);

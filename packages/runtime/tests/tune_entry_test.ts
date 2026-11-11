@@ -292,3 +292,23 @@ describe("runGeometrySweep: real GPU — recording an abort (aborted)", () => {
     },
   );
 });
+
+describe("runGeometrySweep: the evaluation set k85 sweeps its own case table (options validation, before touching the GPU)", () => {
+  it("refuses a case of the sweep's table under k85, and an op its table does not have", async () => {
+    await assertRejects(
+      () => runGeometrySweep({ candidateSet: "k85", cases: ["i8a8-linear-m1024-n2048-k2048"] }),
+      Error,
+      "Case i8a8-linear-m1024-n2048-k2048 is not in the shape table of candidate set k85",
+    );
+    await assertRejects(
+      () => runGeometrySweep({ candidateSet: "k85", ops: ["linear"] }),
+      Error,
+      "No case matches",
+    );
+    await assertRejects(
+      () => runGeometrySweep({ cases: ["k85-i8a8-linear-m7920-n3072-k3072"] }),
+      Error,
+      "is not in the shape table of candidate set quick+",
+    );
+  });
+});

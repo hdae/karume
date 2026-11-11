@@ -192,6 +192,14 @@ export type Report = {
    */
   readonly userAgent: string | { readonly deno: string };
   readonly adapter: ReportAdapter;
+  /**
+   * The id of the embedded geometry profile a Session on this adapter selects automatically
+   * (`selectGeometryProfile` — `SessionDiagnostics.geometryProfile` of a Session without an injected
+   * table; `"default"` when no embedded table matches). What a reader compares the candidates with
+   * as "this adapter's table"; the generator does not read it. JSON from before 2026-11-11 lacks
+   * it.
+   */
+  readonly geometryProfile?: string;
   readonly checkout?: string;
   readonly checkoutDirty?: boolean;
   /** The sha256 of the page's bundle (absent from the CLI, which does not bundle). */

@@ -25,9 +25,14 @@
  * 1280×704 (the containers `vae_decoder_first` / `vae_decoder_next` at tile 16 and
  * `vae_decoder_first_32` / `vae_decoder_next_32` at tile 32 — ADR 0134), read from the graphs'
  * static shapes. They too are copied and not read at run time ({@link CONV3D_I8A8_CASES}).
+ *
+ * The evaluation set `k85` (perf-ledger K-85) has a table of its own ({@link K85_CASES}), outside
+ * {@link SWEEP_CASES}: the case-set version and the kernel fingerprints of the table-deriving sets
+ * do not see it ({@link sweepCasesFor}).
  */
 
 import type { Conv3dDims } from "../kernels/conv3d.ts";
+import { type CandidateSet, DEFAULT_CANDIDATE_SET } from "./geometries.ts";
 
 /**
  * The op families of the sweep (the vocabulary of the CLI's `--op` and the page's checkboxes — both
@@ -511,16 +516,103 @@ export const SWEEP_CASES: readonly SweepCase[] = [
   ...CONV3D_I8A8_CASES,
 ];
 
-/** A sweep case as an application sees it: the id `GeometrySweepOptions.cases` takes, and its op. */
-export type SweepCaseEntry = { readonly id: string; readonly op: SweepOp };
+/**
+ * The id of a K-85 case (`k85-` before the linear spelling, so that it never meets an id of
+ * {@link SWEEP_CASES} — the measured-candidate fingerprint looks rows up in both tables).
+ */
+const k85Id = (m: number, n: number, k: number): string =>
+  `k85-${linearId("i8a8-linear", m, n, k)}`;
+
+/** The source of the K-85 cases of the Wan2.2 DiT (the forward the census counts are taken from). */
+const WAN22_DIT = "Wan2.2 TI2V-5B transformer (33 frames at 1280×704, S = 7,920)";
 
 /**
- * Every case of {@link SWEEP_CASES} as its id and op, in the table's order. A new array of new
- * objects on every call: the table itself stays internal (its descriptive fields are no public
+ * The cases of the evaluation set `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear),
+ * all `i8a8-linear` with i8 weights. The source is the `transformer` graph of the Wan2.2 TI2V-5B
+ * distribution (`models/karume-wan2.2/ti2v-5b/transformer`, its `linear` nodes by input and weight
+ * shape) with `S = 7,920` (33 frames at 1280×704), and the `dit` graph of Irodori v4-small for the
+ * small-M guard. Copied, not read at run time.
+ *
+ * `censusCount` is the node count **in one Wan2.2 33f DiT forward** (the weight of the set's forward
+ * sum): self-attention q / k / v / o and cross-attention q / o 180 (30 blocks × 6), the FFN up and
+ * down 30 each, the cross-attention k / v at the 512 text tokens 60 plus the text embedder's second
+ * layer 1, and the time projection at M = 1 2 (one per timestep input). Those are 303 of the
+ * graph's 310 linears; the 7 left out are the patch embedding, the output projection and the text
+ * embedder's first layer (1 node each) and the timestep embedder's two layers at M = 1 (2 each). The
+ * Irodori case is a guard for the families whose a8 linears run at small M (its default preset
+ * `i8-a8` reads the same `i8a8.linear` field): count 0, it is not in the Wan2.2 forward (60 nodes
+ * per Irodori DiT step at M = S = 185, the M of the research's regression measurement —
+ * docs/research/2026-10-25-speed-recon-3080ti.md §5).
+ */
+export const K85_CASES: readonly LinearCase[] = [
+  { m: 7920, n: 3072, k: 3072, count: 180, what: "self q / k / v / o and cross q / o" },
+  { m: 7920, n: 14336, k: 3072, count: 30, what: "FFN up" },
+  { m: 7920, n: 3072, k: 14336, count: 30, what: "FFN down" },
+  { m: 512, n: 3072, k: 3072, count: 61, what: "cross k / v and the text embedder's second layer" },
+  { m: 1, n: 18432, k: 3072, count: 2, what: "time projection" },
+].map(({ m, n, k, count, what }): LinearCase => ({
+  id: k85Id(m, n, k),
+  op: "i8a8-linear",
+  m,
+  n,
+  k,
+  censusCount: count,
+  source: `${WAN22_DIT} [1,${m},${k}] × [${n},${k}] (${what})`,
+}));
+
+/** The small-M guard of {@link K85_CASES} (Irodori v4-small, not in the Wan2.2 forward). */
+const K85_GUARD_CASES: readonly LinearCase[] = [
+  {
+    id: k85Id(185, 1280, 1280),
+    op: "i8a8-linear",
+    m: 185,
+    n: 1280,
+    k: 1280,
+    censusCount: 0,
+    source:
+      "Irodori v4-small dit [1,185,1280] × [1280,1280] (60 nodes per DiT step; not in the Wan2.2 forward)",
+  },
+];
+
+/** Every case of the evaluation set `k85` (the Wan2.2 DiT forward, then the guard). */
+const K85_TABLE: readonly SweepCase[] = [...K85_CASES, ...K85_GUARD_CASES];
+
+/**
+ * The case table a candidate set sweeps: the evaluation set `k85` its own table, every other set
+ * {@link SWEEP_CASES}. The sweep, its record's case-set version and default fingerprint, and the
+ * page's case list take it from here.
+ */
+export const sweepCasesFor = (set: CandidateSet): readonly SweepCase[] =>
+  set === "k85" ? K85_TABLE : SWEEP_CASES;
+
+/**
+ * Every case any set sweeps (the lookup of the measured-candidate fingerprint — a row names its case
+ * by id; the ids of the two tables never meet).
+ */
+export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K85_TABLE];
+
+/**
+ * A sweep case as an application sees it: the id `GeometrySweepOptions.cases` takes, and its op.
+ * `censusCount` is set on the cases of the evaluation set `k85` only: the node count in one Wan2.2
+ * TI2V-5B 33f DiT forward (0 for a guard shape of another model) — the weight of that set's forward
+ * sum.
+ */
+export type SweepCaseEntry = {
+  readonly id: string;
+  readonly op: SweepOp;
+  readonly censusCount?: number;
+};
+
+/**
+ * Every case of the case table of `set` ({@link sweepCasesFor} — default: {@link SWEEP_CASES}) as
+ * its id and op, in the table's order (the `k85` cases with their `censusCount`). A new array of new
+ * objects on every call: the table itself stays internal (its other descriptive fields are no public
  * surface), and nothing a caller does to the result reaches the case set or the fingerprints.
  */
-export const sweepCaseEntries = (): SweepCaseEntry[] =>
-  SWEEP_CASES.map(({ id, op }) => ({ id, op }));
+export const sweepCaseEntries = (set: CandidateSet = DEFAULT_CANDIDATE_SET): SweepCaseEntry[] =>
+  set === "k85"
+    ? K85_TABLE.map(({ id, op, censusCount }) => ({ id, op, censusCount }))
+    : SWEEP_CASES.map(({ id, op }) => ({ id, op }));
 
 /**
  * The operation count of one dispatch (multiply-add = 2). For i8a8, the number of integer

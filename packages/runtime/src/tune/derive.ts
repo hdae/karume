@@ -99,6 +99,7 @@ import {
   CANDIDATE_SETS,
   type CandidateSet,
   conv2dCandidate,
+  EVALUATION_SETS,
   gemmCandidate,
   i8a8Candidate,
   isCandidateSet,
@@ -438,6 +439,16 @@ export const parseSweepReport = (
   if (!isRecord(parsed)) throw new Error(`${where}: the JSON is not an object`);
   if (parsed.format !== REPORT_FORMAT) {
     throw new Error(`${where}: format is not ${REPORT_FORMAT} (${String(parsed.format)})`);
+  }
+  // MUST: no table is derived from an evaluation set (perf-ledger K-85): its cases are outside the
+  // sweep's case set, so its verdicts would decide a field on shapes the table does not stand for
+  const settings = parsed.settings;
+  const recordedSet = isRecord(settings) ? settings.candidateSet : undefined;
+  if (EVALUATION_SETS.some((set) => set === recordedSet)) {
+    throw new Error(
+      `${where}: settings.candidateSet ${String(recordedSet)} is an evaluation set (perf-ledger K-85): ` +
+        "it measures cases outside the sweep's case set, and no table is derived from it",
+    );
   }
   const adapter = parsed.adapter;
   if (!isRecord(adapter)) throw new Error(`${where}: adapter is missing`);

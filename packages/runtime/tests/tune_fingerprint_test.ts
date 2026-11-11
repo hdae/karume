@@ -30,9 +30,16 @@ import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
-import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
+import {
+  PROFILE_GEMM_ROWS_BOUNDS,
+  SWEEP_CASES,
+  type SweepCase,
+  sweepCasesFor,
+} from "../src/tune/cases.ts";
 import {
   candidateKernelsId,
+  candidateSetCaseSetId,
+  candidateSetDefaultKernelsId,
   canonicalJson,
   type CasePlanner,
   caseSetId,
@@ -47,6 +54,7 @@ import {
 import {
   type GeometryCandidate,
   i8a8Candidate,
+  k85I8a8Candidates,
   quickConv2dCandidates,
   quickGemmCandidates,
   quickI8a8Candidates,
@@ -685,6 +693,51 @@ describe("the vec4 skeleton of an i8a8 geometry in the fingerprint and the sweep
     assertNotEquals(
       sweepCandidateKernelsId([row(skeleton)], true),
       sweepCandidateKernelsId([row(word)], true),
+    );
+  });
+});
+
+describe("the record keys of the evaluation set k85 (perf-ledger K-85)", () => {
+  it("the table-deriving sets record the same case-set version and default fingerprint as before", () => {
+    for (const set of ["quick", "quick+", "full"] as const) {
+      assertEquals(candidateSetCaseSetId(set), sweepCaseSetId());
+      assertEquals(
+        candidateSetDefaultKernelsId(set),
+        geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      );
+    }
+  });
+
+  it("k85 records the version and the default fingerprint of its own case table, never the sweep's", () => {
+    assertMatch(candidateSetCaseSetId("k85"), /^[0-9a-f]{16}$/);
+    assertNotEquals(candidateSetCaseSetId("k85"), sweepCaseSetId());
+    assertEquals(
+      candidateSetCaseSetId("k85"),
+      caseSetId(sweepCasesFor("k85"), PROFILE_GEMM_ROWS_BOUNDS),
+    );
+    assertNotEquals(
+      candidateSetDefaultKernelsId("k85"),
+      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+    );
+  });
+
+  it("the measured-candidate fingerprint reads rows of k85 cases, and a row of the sweep's table gives the value it gave before", () => {
+    const [k85Case] = sweepCasesFor("k85");
+    assert(k85Case !== undefined);
+    const skeleton = k85I8a8Candidates().find(({ geometry }) => geometry.skeleton === "vec4");
+    assert(skeleton !== undefined);
+    assertMatch(
+      sweepCandidateKernelsId([{ caseId: k85Case.id, geometryParams: skeleton.geometry }], true),
+      /^[0-9a-f]{16}$/,
+    );
+    const [first] = SWEEP_CASES;
+    assert(first !== undefined);
+    const rows: MeasuredRow[] = [
+      { caseId: first.id, geometryParams: casePlan(first, 65535, true).defaultCandidate.geometry },
+    ];
+    assertEquals(
+      sweepCandidateKernelsId(rows, true),
+      candidateKernelsId(rows, true, SWEEP_CASES, casePlan),
     );
   });
 });

@@ -13,9 +13,11 @@
  * 16,384 B of shared memory), and the f32 skeleton's shared `64·(tileM + tileN)` B is exactly
  * 16,384 B at 128 + 128.
  *
- * There are three candidate sets ({@link CandidateSet}): `quick` (the default + 4–5 shapes),
- * `quick+` (quick ∪ the geometries adopted by the registered profiles — the default) and `full`
- * (the whole grid).
+ * There are three candidate sets a table is derived from ({@link CandidateSet}): `quick` (the
+ * default + 4–5 shapes), `quick+` (quick ∪ the geometries adopted by the registered profiles — the
+ * default) and `full` (the whole grid). A fourth, `k85`, is an evaluation set
+ * ({@link EVALUATION_SETS}): the vec4 skeleton of the i8a8 linear (perf-ledger K-85) on cases of its
+ * own, outside the sweep's case set, so it changes neither the other sets nor any fingerprint.
  */
 import {
   assertGemmGeometry,
@@ -31,6 +33,7 @@ import {
   defaultI8a8Geometry,
   type I8a8Geometry,
   i8a8GeometryKeyPart,
+  i8a8WorkgroupStorageBytes,
 } from "../kernels/i8a8-geometry.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
@@ -262,13 +265,64 @@ export const quickPlusI8a8Candidates = (
   ]);
 
 /**
+ * The workgroup storage every WebGPU device provides (the default of
+ * `maxComputeWorkgroupStorageSize`, 16,384 B). The k85 grid keeps to it as an embedded table must:
+ * the automatic selection path does not run the limit check (geometry-profile.ts).
+ */
+const DEFAULT_WORKGROUP_STORAGE = 16384;
+
+/**
+ * The i8a8 set of `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear): the
+ * `i8a8.linear` geometry of every registered profile (`profiles` — the table an adapter runs today,
+ * measured in the same record) and the grid regM ∈ {8, 12, 16} × regN ∈ {4, 8} × wgX ∈ {8, 16} ×
+ * wgY ∈ {4, 8, 16} × tileK ∈ {16, 32, 64}, each without and then with the skeleton, filtered by the
+ * runtime's check and {@link DEFAULT_WORKGROUP_STORAGE}. The sweep puts the default geometry at the
+ * front of every case.
+ *
+ * NOTE: the set runs on i8 weights only (its cases are cases.ts's `K85_CASES`). A K64 geometry is
+ * refused for w4a8 at group 32 (`assertI8a8GroupGeometry`), which this set does not measure.
+ */
+export const k85I8a8Candidates = (
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): I8a8Candidate[] => {
+  const grid: I8a8Candidate[] = [];
+  for (const regM of [8, 12, 16]) {
+    for (const regN of [4, 8]) {
+      for (const wgX of [8, 16]) {
+        for (const wgY of [4, 8, 16]) {
+          for (const tileK of [16, 32, 64]) {
+            const word: I8a8Geometry = { regM, regN, wgX, wgY, tileK };
+            for (const geometry of [word, { ...word, skeleton: "vec4" as const }]) {
+              if (
+                i8a8WorkgroupStorageBytes(geometry) <= DEFAULT_WORKGROUP_STORAGE &&
+                passes(() => assertI8a8Geometry(geometry, "geometry-sweep"))
+              ) {
+                grid.push(i8a8Candidate(geometry));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return unique([...profiles.map((profile) => i8a8Candidate(profile.i8a8.linear)), ...grid]);
+};
+
+/**
  * The vocabulary of candidate sets (the CLI's `--set` and the page's select — both removed in
  * 0.15 — and the JSON's `settings.candidateSet`).
  */
-export const CANDIDATE_SETS = ["quick+", "quick", "full"] as const;
+export const CANDIDATE_SETS = ["quick+", "quick", "full", "k85"] as const;
 
-/** A candidate set (`quick` / `quick+` / `full` — {@link CANDIDATE_SETS}). */
+/** A candidate set (`quick` / `quick+` / `full` / `k85` — {@link CANDIDATE_SETS}). */
 export type CandidateSet = (typeof CANDIDATE_SETS)[number];
+
+/**
+ * The evaluation sets: a kernel change measured on cases of its own (cases.ts's `sweepCasesFor`),
+ * outside the case set a table is derived from. Their records carry the case-set version and the
+ * default's fingerprint of their own cases, and the generator derives no table from them (derive.ts).
+ */
+export const EVALUATION_SETS: readonly CandidateSet[] = ["k85"];
 
 /**
  * The default when no set is given (`quick+` — measures up to the registered tables' geometries
@@ -279,26 +333,49 @@ export const DEFAULT_CANDIDATE_SET: CandidateSet = "quick+";
 export const isCandidateSet = (value: string): value is CandidateSet =>
   (CANDIDATE_SETS as readonly string[]).includes(value);
 
+/** An evaluation set has no candidates for a family its cases do not have. */
+const noCandidates = (set: CandidateSet, family: string): never => {
+  throw new Error(`Candidate set ${set} has no ${family} candidates (it measures the i8a8 linear)`);
+};
+
 /** The set for the f32 skeleton (linear / matmul / bmm / fused attention). */
-export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] =>
-  set === "quick"
-    ? quickGemmCandidates()
-    : set === "quick+"
-      ? quickPlusGemmCandidates()
-      : gemmCandidates();
+export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
+  switch (set) {
+    case "quick":
+      return quickGemmCandidates();
+    case "quick+":
+      return quickPlusGemmCandidates();
+    case "full":
+      return gemmCandidates();
+    case "k85":
+      return noCandidates(set, "f32 skeleton");
+  }
+};
 
 /** The set for conv2d's implicit GEMM. */
-export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] =>
-  set === "quick"
-    ? quickConv2dCandidates()
-    : set === "quick+"
-      ? quickPlusConv2dCandidates()
-      : conv2dCandidates();
+export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
+  switch (set) {
+    case "quick":
+      return quickConv2dCandidates();
+    case "quick+":
+      return quickPlusConv2dCandidates();
+    case "full":
+      return conv2dCandidates();
+    case "k85":
+      return noCandidates(set, "conv2d");
+  }
+};
 
 /** The set for the i8a8 family. */
-export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] =>
-  set === "quick"
-    ? quickI8a8Candidates()
-    : set === "quick+"
-      ? quickPlusI8a8Candidates()
-      : i8a8Candidates();
+export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] => {
+  switch (set) {
+    case "quick":
+      return quickI8a8Candidates();
+    case "quick+":
+      return quickPlusI8a8Candidates();
+    case "full":
+      return i8a8Candidates();
+    case "k85":
+      return k85I8a8Candidates();
+  }
+};

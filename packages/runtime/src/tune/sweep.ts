@@ -14,8 +14,8 @@
  * when the user calls this explicitly.
  */
 import { acquireGpu } from "../gpu/device.ts";
-import { DEFAULT_GEOMETRY_PROFILE } from "../kernels/geometry-profile.ts";
-import { SWEEP_CASES, SWEEP_OPS, type SweepCase, type SweepOp } from "./cases.ts";
+import { selectGeometryProfile } from "../kernels/geometry-profile.ts";
+import { SWEEP_OPS, type SweepCase, sweepCasesFor, type SweepOp } from "./cases.ts";
 import {
   CANDIDATE_SETS,
   type CandidateSet,
@@ -23,9 +23,9 @@ import {
   isCandidateSet,
 } from "./geometries.ts";
 import {
-  geometryProfileKernelsId,
+  candidateSetCaseSetId,
+  candidateSetDefaultKernelsId,
   sweepCandidateKernelsId,
-  sweepCaseSetId,
 } from "./fingerprint.ts";
 import { createSweepContext, destroySweepContext, runSweep, SWEEP_MAX_REPS } from "./harness.ts";
 import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
@@ -79,13 +79,16 @@ export type GeometrySweepOptions = {
   readonly gpu?: GPU;
   /** Passed to `requestAdapter` (`powerPreference` etc. — same as `acquireGpu({ adapter })`). */
   readonly adapter?: GPURequestAdapterOptions;
-  /** The candidate set (default `quick+`). */
+  /**
+   * The candidate set (default `quick+`). The evaluation set `k85` sweeps its own case table
+   * (`geometrySweepCases("k85")`), and no table is derived from its record.
+   */
   readonly candidateSet?: CandidateSet;
   /** The op families to sweep (default: all families). */
   readonly ops?: readonly SweepOp[];
   /**
    * Narrows by case id (default: every case of `ops` — the CLI's `--case`; the CLI was removed in
-   * 0.15).
+   * 0.15). The ids are those of the candidate set's case table.
    */
   readonly cases?: readonly string[];
   /**
@@ -122,8 +125,9 @@ const isSweepOp = (value: string): value is SweepOp =>
 
 /**
  * Checks the options and chooses the cases (before touching the GPU — a misspelled set, op or case
- * is never run as the default). The cases are those matching both op and id (every case of the op
- * when no id is given), in the order of the shape table.
+ * is never run as the default). The cases are those of the candidate set's case table
+ * (`sweepCasesFor`) matching both op and id (every case of the op when no id is given), in the
+ * order of that table.
  */
 const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   const candidateSet = options.candidateSet ?? DEFAULT_CANDIDATE_SET;
@@ -135,14 +139,19 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   if (unknownOp !== undefined) {
     throw new Error(`op ${unknownOp} is none of ${SWEEP_OPS.join(" / ")}`);
   }
+  const table = sweepCasesFor(candidateSet);
   const caseIds = options.cases ?? [];
-  const unknownCase = caseIds.find((id) => !SWEEP_CASES.some((sweepCase) => sweepCase.id === id));
-  if (unknownCase !== undefined) throw new Error(`Case ${unknownCase} is not in the shape table`);
+  const unknownCase = caseIds.find((id) => !table.some((sweepCase) => sweepCase.id === id));
+  if (unknownCase !== undefined) {
+    throw new Error(
+      `Case ${unknownCase} is not in the shape table of candidate set ${candidateSet}`,
+    );
+  }
   const rounds = options.rounds ?? ROUNDS;
   if (!Number.isInteger(rounds) || rounds < 1) {
     throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
-  const cases = SWEEP_CASES.filter(
+  const cases = table.filter(
     (sweepCase) =>
       ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id)),
   );
@@ -249,9 +258,13 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
       // into the record (the generator matches them against the current runtime — ADR 0117 decision
       // 8). All are pure functions that read no GPU, with a negligible cost next to the sweep (the
       // default fingerprint takes about 13 ms; the candidate fingerprint stays under 1 second even
-      // for every row of full)
-      caseSet: sweepCaseSetId(),
-      defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      // for every row of full). The case-set version and the baseline are those of the set's own
+      // case table (the same values as before for the table-deriving sets)
+      caseSet: candidateSetCaseSetId(plan.candidateSet),
+      defaultKernels: candidateSetDefaultKernelsId(plan.candidateSet),
+      // The embedded table a Session on this adapter selects (no table is injected here) — what a
+      // record is read against as "this adapter's table"
+      geometryProfile: selectGeometryProfile(info).id,
       candidateKernels: sweepCandidateKernelsId(rows, context.dp4a),
       userAgent: navigator.userAgent,
       adapter,
