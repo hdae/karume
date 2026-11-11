@@ -351,11 +351,12 @@ export type AdmissionReport = {
  * The fields that mirror {@link SessionOptions} take their types from it, so one options object can
  * be given to both (a field the estimate does not read, such as `sharedWeights`, is ignored here).
  * Every option the fusion pass reads is among them (`SessionFusionOptions` in
- * session-fusion-context.ts — a knob added there reaches this type), except the test-only
- * `ROW_BLOCK_SPLIT`: the estimate claims only the default row-block split. The other fields are
- * the estimate's own (the device limits and facts, the bindings and the generation scenarios).
+ * session-fusion-context.ts — a knob added there fails to compile until this type takes it with the
+ * Session's type: {@link MirrorsSessionFusionOptions}), except the test-only `ROW_BLOCK_SPLIT`: the
+ * estimate claims only the default row-block split. The other fields are the estimate's own (the
+ * device limits and facts, the bindings and the generation scenarios).
  */
-export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT> & {
+export type EstimateOptions = {
   /**
    * The same states attention setting as the Session. When omitted, the temporaries of the
    * reference path are estimated.
@@ -429,10 +430,12 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
    * The granted value of `maxComputeWorkgroupsPerDimension` (`GPUDevice.limits` /
    * `readAdapterLimits`).
    *
-   * Passed to the fusion pass as the device limit of that name, as execution passes it. No built-in
-   * rule's decision reads it, but an external rule's matcher may (`FusionMatchContext.limits`) and
-   * decline a window under it. When omitted, the pass gets a value no dispatch count reaches
-   * (`Number.MAX_SAFE_INTEGER`), as before the field existed.
+   * Passed to the fusion pass as the device limit of that name, as execution passes it. Two built-in
+   * rules read it: linearStaticQuantize's matcher and rowBlockAttention's build compute their tiled
+   * workgroup counts under it and throw `DispatchLimitError` above it; an external rule's matcher
+   * may read it too (`FusionMatchContext.limits`) and decline a window under it. When omitted, the
+   * pass plans under a limit no dispatch count reaches (`Number.MAX_SAFE_INTEGER`), so a window
+   * execution refuses for its dispatch count gets a number.
    * MUST: **required** together with `maxStorageBufferBindingSize` when {@link fusionRules} is
    * non-empty (the estimate fails loudly without them — a guessed limit would return numbers for a
    * plan the device does not make). The range (a positive safe integer) is checked at the entry
@@ -578,8 +581,10 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
    * A window a rule takes is counted in its post-fusion form: the step's output and the temporaries
    * it declares, with the reads and writes of its kernels' WGSL storage declarations. A step
    * execution refuses (a dispatch that writes a binding other than the output or a temporary, an
-   * output no dispatch writes, a malformed operand) makes the estimate fail with the same refusal,
-   * naming the rule.
+   * output no dispatch writes, a malformed operand, a temporary bound outside its live range, two
+   * different WGSL texts under one pipeline key) makes the estimate fail with the same refusal. The
+   * estimate does not run the checks recipe derivation makes on a dispatch itself (its workgroup
+   * counts, its params): such a step gets a number and fails at the first run's plan derivation.
    */
   readonly fusionRules?: SessionOptions["fusionRules"];
   /**
@@ -590,6 +595,31 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
   readonly [DISABLED_FUSION_RULES]?: SessionOptions[typeof DISABLED_FUSION_RULES];
 };
 
+/** The options the fusion pass reads that an estimate takes (every one but `ROW_BLOCK_SPLIT`). */
+type EstimateFusionKey = Exclude<keyof SessionFusionOptions, typeof ROW_BLOCK_SPLIT>;
+
+/** Whether two types are the same type (not merely assignable either way). */
+type SameType<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+
+/** The keys of {@link EstimateFusionKey} that {@link EstimateOptions} lacks or types differently. */
+type UnmirroredFusionKey = {
+  [Key in EstimateFusionKey]-?: Key extends keyof EstimateOptions
+    ? SameType<EstimateOptions[Key], SessionFusionOptions[Key]> extends true
+      ? never
+      : Key
+    : Key;
+}[EstimateFusionKey];
+
+/**
+ * Compile-time check that {@link EstimateOptions} declares every option the fusion pass reads with
+ * the Session's type: a key that drifts turns this into a type that names it, which no estimate
+ * options satisfy (`estimateFusionFacts` checks its argument against it).
+ */
+type MirrorsSessionFusionOptions = [UnmirroredFusionKey] extends [never]
+  ? EstimateOptions
+  : { readonly fusionOptionNotMirrored: UnmirroredFusionKey };
+
 /**
  * What is not accounted for (a constant).
  *
@@ -599,7 +629,7 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "Fusion the options passed do not describe: the estimate plans fusion as a Session built with the same options does (the fusion knobs, the fusionRules given, the weights' storage from the residency plan) and counts every fused step it plans, built-in or external, after fusion with the temporaries its rule declares, and the producers and permutes a node step absorbs as absent; a knob omitted is planned at the runtime default, so a window a Session folds under a knob the estimate was not given is counted in its unfused form",
-  "Quantized intermediates of linear i8a8 whose weight is borrowed (SessionOptions.sharedWeights — its storage is the lender's and unknown to the estimate, so the linear is counted as a plain one; with any other weight they are counted when linearCompute 'a8' is passed), and the in-node temporaries of conv3d i8a8 (convCompute 'a8' — the estimate takes no convCompute). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op with the head-major copies it makes for absorbed permutes (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others) — and so are those of group_norm and of the two-phase argmax / topk",
+  "Quantized intermediates of linear i8a8 whose weight is borrowed (SessionOptions.sharedWeights — its storage is the lender's and unknown to the estimate, so the linear is counted as a plain one; with any other weight they are counted when linearCompute 'a8' is passed; every other fusion decision of the estimate reads a borrowed weight as f32 too, so a linear → static_quantize fold or a packed int8 pairing execution makes on the lender's storage is counted unfused), and the in-node temporaries of conv3d i8a8 (convCompute 'a8' — the estimate takes no convCompute). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op with the head-major copies it makes for absorbed permutes (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others) — and so are those of group_norm and of the two-phase argmax / topk",
   "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
   "The implementation staging of queue.writeBuffer (not released until the submit completes)",
   "The retirement window (slot backings retired by a budget overrun / the plan LRU eviction are not destroyed before the next plan's allocation and live until the cleanup after flush, so that run holds the retired backings and the new ones at the same time)",
@@ -1242,7 +1272,10 @@ export const estimateFusionFacts = (
   }
   return {
     rules,
-    knobs: { ...sessionFusionKnobs(options, rules), rowBlockSplit: undefined },
+    knobs: {
+      ...sessionFusionKnobs(options satisfies MirrorsSessionFusionOptions, rules),
+      rowBlockSplit: undefined,
+    },
     attentionDevice,
     residentWeights: plannedResidentWeights(residency),
     sharedOrPooledWeights: sharedOrPooledWeights(residency, pooled),
@@ -1475,6 +1508,10 @@ type NodeStep = Extract<ExecStep, { readonly kind: "node" }>;
  * `buildLinear` tries before it (packed activations, the integer GEMV) need linearCompute `"f32"`,
  * which this predicate refuses, so under `"a8"` it alone decides. An `i4f16` weight is
  * `expert_linear`'s alone (the planner admits it nowhere else), so it is read as not integer here.
+ * `buildLinear`'s refusals for the weight storage are not repeated here (i2 residency under `"a8"`
+ * or `"f16"`, i8 and i4 residency under `"f16"` — w8a16 / w4a16 — and, on the i8a8 path, a
+ * per-channel weight's `k` above `LINEAR_I8A8_MAX_K`): the estimate counts such a linear and returns
+ * a number, and the Session fails at its first run.
  * NOTE: a borrowed weight (`seat: "shared"`) is absent from the plan — its storage is the lender's —
  * so its linear is counted as a plain one ({@link AdmissionReport.unaccounted}).
  */

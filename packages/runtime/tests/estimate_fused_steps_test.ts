@@ -6,8 +6,8 @@
 // two rules that matter at this size (a value read and a value written by one dispatch go to
 // different regions; two slots alive at once share a region only at an offset aligned to 256, which
 // opens a new region instead when it would grow by the whole slot — transient-plan.ts). Graph
-// inputs and weights have no slot. Nothing here goes through fused-step-layout.ts: the literals are
-// the independent side of the estimate == execution check (gpu_estimate_test.ts compares the same
+// inputs and weights have no slot. The expected literals do not go through fused-step-layout.ts (the
+// estimate under test does): they are the independent side of the estimate == execution check (gpu_estimate_test.ts compares the same
 // graphs with a real Session's slot table). The last section checks that a fused step execution
 // refuses gets the same refusal from the estimate (execution on a fake GPU). No GPU.
 

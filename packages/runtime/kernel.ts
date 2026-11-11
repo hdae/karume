@@ -58,7 +58,9 @@
  * bind groups, caches the pipelines, runs every dispatch under its error scopes and requests the
  * limits. What stays with the rule's author: evidence for its numbers. A class E rule carries a
  * fused-against-unfused u32 check on each backend it ships on (docs/kernel-rules.md); a rule of
- * another class follows ADR 0147. The memory estimate does not see these rules.
+ * another class follows ADR 0147. The memory estimate counts a rule's steps when it is given the
+ * same `fusionRules` (with the two device limits `maxStorageBufferBindingSize` and
+ * `maxComputeWorkgroupsPerDimension`).
  *
  * This entry has no side effects and reads no WebGPU global at import, so it can be imported where
  * WebGPU does not exist (on Node without an implementation, for example).

@@ -787,9 +787,11 @@ export type SessionOptions = {
    * NOTE: the memory estimate plans with these rules (`EstimateOptions.fusionRules`, which then
    * needs the device limits) and counts the windows they take in their post-fusion form: the step's
    * output and the temporaries the rule declares, with the reads and writes of its kernels' WGSL
-   * storage declarations. A step the recipe build refuses for the binding checks above makes the
-   * estimate fail with the same refusal (the workgroup-count checks need the device and are not run
-   * by the estimate).
+   * storage declarations. A step the recipe build refuses for the binding checks above, for a
+   * dispatch that binds a step temporary outside its live range, or for two different WGSL texts
+   * under one pipeline key makes the estimate fail with the same refusal. The estimate does not run
+   * the checks recipe derivation makes on a dispatch itself (its workgroup counts, its params): such
+   * a step fails at the first run's plan derivation.
    */
   readonly fusionRules?: readonly FusionRule[];
   /**

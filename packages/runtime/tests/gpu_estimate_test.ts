@@ -786,7 +786,7 @@ test.skipIf(!GPU_AVAILABLE)(
  * options the window needs, the estimate the same options and the device's limits.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "every rule's fused window and the a8 linear have the workspace of their slot table: the ten built-in rules, two external ones and the a8 linear with and without a folded producer (real GPU)",
+  "every rule's fused window and the a8 linear have the workspace of their slot table: the ten built-in rules, two external ones (the staged one also after a dead region) and the a8 linear with and without a folded producer and after a dead region (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {

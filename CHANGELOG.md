@@ -72,7 +72,8 @@ measurements in `docs/research/`.
   windows moves — mostly down, as the intermediates those windows fold away leave the count, and up where the
   post-fusion lifetimes place differently or a rule's temporaries outweigh what it folds — and so do the stage needs
   that read it (the MOSS-Image VAE and text-encoder stages and Anima's VAE stage drop by up to about 2 GiB at
-  the largest accepted size). A step execution refuses fails the estimate with the same refusal. `AdmissionReport.unaccounted`
+  the largest accepted size). A step execution refuses fails the estimate with the same refusal, except for the checks
+  recipe derivation makes on a dispatch itself (its workgroup counts, its params), which fail at the first run. `AdmissionReport.unaccounted`
   names what is still not counted.
 - `@karume/models`: `gemma.Pipeline.estimateSessionMemory` (and the mobile QAT pipeline's) estimates the target and
   the drafter with the fusion options their Sessions are built with — the preset's or caller's fusion and GEMV knobs

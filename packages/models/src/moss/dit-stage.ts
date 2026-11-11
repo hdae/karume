@@ -50,9 +50,10 @@
  * Before each probe the stage waits for the release of what the previous stage destroyed (the
  * Anima form — `../session/settle-released-memory.ts`).
  *
- * With the practical preset the estimate leaves out the i8a8 linears' quantised intermediates
- * (`runtime/estimate.ts`); the margin covers them: measured on an RTX 3080 Ti (2026-10-28, the
- * WebGPU buffers the process held), the pair held 6.43 / 8.03 / 9.04 GB at 1024² / 1456² /
+ * With the practical preset the estimate counts the i8a8 linears' quantised intermediates
+ * (`runtime/estimate.ts`); the DiT needs did not move when they became counted (they fit in regions
+ * the plan already held). The evidence for the margin is the measurement made while they were still
+ * left out: on an RTX 3080 Ti (2026-10-28, the WebGPU buffers the process held), the pair held 6.43 / 8.03 / 9.04 GB at 1024² / 1456² /
  * 1696×1648 against needs of 7.33 / 9.04 / 10.11 GB (the reference preset: 9.17 / 10.26 GB against
  * 10.07 / 11.27 GB). The check is a fact of the moment, not a reservation (another process may take
  * the memory after it).
