@@ -14,7 +14,7 @@
  * order), and the gelu value — the one value the unfused chain stores before the mul reads it — is
  * staged through workgroup memory by the rounding barrier (`stagedLoopWgsl`), so the compiler
  * cannot fold it into the product. That the barrier holds is measured per backend, not guaranteed
- * by WGSL: the fused-against-unfused check is tests/gpu_external_fusion_rule_test.ts in the runtime.
+ * by WGSL: the fused-against-unfused check is packages/e2e/tests/e2e_external_fusion_rule_test.ts.
  */
 
 import {

@@ -10,8 +10,8 @@
  * (perf-ledger K-105). Every other counter stays the plan's without the rule, and the rule disabled
  * by name gives that plan back. Token identity on the real weights is not checked here (this
  * machine's GPU cannot hold 26B, and the 26B decode tests run through the gemma pipeline, which
- * passes no rules); the rule's values are checked against the unfused plan in the runtime's
- * `gpu_external_fusion_rule_test.ts`.
+ * passes no rules); the rule's values are checked against the unfused plan on the GPU in
+ * `e2e_external_fusion_rule_test.ts`.
  *
  * MUST: the asset is the distribution mirror `models/karume-gemma4-qat/` with its `26b` model
  * (untracked local asset); without it the case SKIPs explicitly (ADR 0005).

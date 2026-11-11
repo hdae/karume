@@ -3,8 +3,8 @@
 // load hook (that would need `node:module`) — and its code has no type assertion, `any` or
 // TypeScript directive to get around the entry's types; and a Session takes it through the same
 // construction check that refuses anything defineRule did not build. No GPU needed; what the rule
-// computes is checked in the runtime (tests/gpu_external_fusion_rule_test.ts) and on Gemma 4 26B's
-// graph in the e2e package (e2e_gemma4_26b_external_rule_test.ts).
+// computes is checked against its unfused plan on the GPU (e2e_external_fusion_rule_test.ts) and
+// planned on Gemma 4 26B's graph (e2e_gemma4_26b_external_rule_test.ts), both in the e2e package.
 
 import { importSpecifiersOf } from "@karume/test-support/module-graph";
 import { readTextFile } from "@karume/test-support/fs";

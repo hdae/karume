@@ -199,13 +199,17 @@ const E2E_DIR = "packages/e2e/tests/";
 
 /**
  * The end-to-end tests that belong in core: gates over pure functions and manifests that need
- * neither a GPU nor real weights. Every other file of `packages/e2e/tests` runs real weights and
+ * neither a GPU nor real weights, and one GPU check on small synthetic graphs that needs no model
+ * asset (the models package's external fusion rule against its unfused plan, which lives in the
+ * e2e package because the runtime's tests import nothing from the models package; it SKIPs
+ * explicitly without an adapter). Every other file of `packages/e2e/tests` runs real weights and
  * belongs to a family lane, so a dropped family row or a new e2e file whose name misses its
  * family's token turns the gate red instead of moving real-weight runs into core.
  */
 const CORE_E2E_TESTS = [
   "packages/e2e/tests/e2e_ab_gate_test.ts",
   "packages/e2e/tests/e2e_assets_gate_test.ts",
+  "packages/e2e/tests/e2e_external_fusion_rule_test.ts",
   "packages/e2e/tests/e2e_fusion_candidates_report_test.ts",
   "packages/e2e/tests/e2e_session_options_mirror_test.ts",
   "packages/e2e/tests/fusion_candidates_test.ts",
@@ -218,11 +222,11 @@ const CORE_E2E_TESTS = [
  */
 const HOST_ONLY_FAMILY_LANES = ["models:umt5"];
 
-test("lane gate: core holds no end-to-end test but the GPU-free gates", () => {
+test("lane gate: core holds no end-to-end test but the gates that need no model asset", () => {
   assertEquals(
     sorted(core).filter((file) => file.startsWith(E2E_DIR)),
     CORE_E2E_TESTS,
-    "core collects an end-to-end test that is not a GPU-free gate (a family row was dropped from " +
+    "core collects an end-to-end test that is not one of the gates without model assets (a family row was dropped from " +
       "FAMILY_LANES, or the file name misses its family's token): restore the lane or rename the file",
   );
 });

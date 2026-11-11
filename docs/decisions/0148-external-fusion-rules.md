@@ -154,7 +154,11 @@ rules. `SessionOptions.fusionRules` says so.
   M = 32: 60 hits per plan, 30 over the dense MLP's up projection and 30 adjacent in the routed experts, the prototype's
   count; every other counter as without the rule (`packages/e2e/tests/e2e_gemma4_26b_external_rule_test.ts`).
 - On the GPU (Vulkan / RTX 3080 Ti): u32-identical to the same Session options with the rule disabled by name, in the
-  three windows it takes, with the counter at 1 fused and 0 plain (`packages/runtime/tests/gpu_external_fusion_rule_test.ts`).
+  three windows it takes, with the counter at 1 fused and 0 plain (`packages/e2e/tests/e2e_external_fusion_rule_test.ts`,
+  which compares the words with `wordIdentity`; it sits in the e2e package because the runtime's tests import nothing from
+  the models package). Multiplying the rule's product by 1.0001 turns it red at 478 of 771 words. The runtime keeps a twin
+  of its own through `checkFusionTwin`, a `gelu` → `mul` rule defined in its test tree
+  (`packages/runtime/tests/gpu_external_fusion_rule_test.ts`).
 - Not produced: token identity of the rule on the real 26B weights. This machine's GPU (12 GB) cannot hold 26B, the 26B
   decode cases run through the gemma pipeline, which passes no rule (decision 4), and the only runtime-level 26B Session,
   the 12-layer cut's teacher-forced run (`KARUME_SERIES=1`), would need a second upload of the cut for one comparison.
