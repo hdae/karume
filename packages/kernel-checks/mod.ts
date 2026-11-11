@@ -71,6 +71,16 @@ export {
   RMS_NORM_ROPE_TWIN_CASES,
   rmsNormRopeInputs,
 } from "./src/fusion-twins/rms-norm-rope.ts";
+export {
+  checkLinearPrologueTwins,
+  LINEAR_PROLOGUE_FORMS,
+  LINEAR_PROLOGUE_SHAPES,
+  LINEAR_PROLOGUE_TWIN_CASES,
+  linearPrologueActivations,
+  linearPrologueGraph,
+  linearPrologueLabel,
+  linearPrologueWeights,
+} from "./src/fusion-twins/linear-prologue.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
