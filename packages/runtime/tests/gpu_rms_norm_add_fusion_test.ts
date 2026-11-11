@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
 import {
   createSessionFromContainer,
@@ -10,18 +11,11 @@ import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import { rmsNormAddWgsl, rmsNormParams } from "../src/kernels/rms-norm.ts";
 import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase, assertWordIdentity } from "./helpers/kernel-check-assert.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 
 const words = (t: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(t.data.buffer, t.data.byteOffset, t.data.length);
-const parity = (a: Uint32Array<ArrayBuffer>, b: Uint32Array<ArrayBuffer>, label: string): void => {
-  assertEquals(a.length, b.length, label);
-  for (let i = 0; i < a.length; i++) {
-    if ((b[i] & 0x7fffffff) > 0x7f800000) {
-      assertEquals((a[i] & 0x7fffffff) > 0x7f800000, true, `${label} NaN @${i}`);
-    } else assertEquals(a[i], b[i], `${label} word @${i}`);
-  }
-};
 
 describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
   for (const dim of [256, 1536, 2560, 2816, 3840]) {
@@ -63,17 +57,32 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
                   const n = (await reference.run({ x, w, r })).n;
                   for (let i = 0; i < n.data.length; i++) r.data[i] = -n.data[i];
                 }
-                const expected = await reference.run({ x, w, r });
-                const before = fused.diagnostics().submit.dispatchCount;
-                const actual = await fused.run({ x, w, r });
-                parity(words(actual.y), words(expected.y), `${rows}/${pattern}/y`);
-                parity(words(actual.copy), words(expected.copy), `${rows}/${pattern}/late x`);
-                assertEquals(fused.diagnostics().lastRunFusions?.rmsNormAdd, 1);
-                assertEquals(fused.diagnostics().submit.dispatchCount - before, 2);
+                // y and the late x consumer (`copy`); the reference also outputs the norm.
+                assertCheckCase(
+                  await checkFusionTwin(gpu, {
+                    label: `${rows}/${pattern}`,
+                    fused,
+                    plain: reference,
+                    feeds: { x, w, r },
+                    counter: "rmsNormAdd",
+                    hits: 1,
+                    nan: "class",
+                    outputs: ["y", "copy"],
+                    dispatches: { fused: 2 },
+                  }),
+                );
                 if (pattern === "finite") {
-                  const row = words(actual.y).slice(0, dim);
+                  // The fused output, from a run of its own (the harness returns a case).
+                  const row = words((await fused.run({ x, w, r })).y).slice(0, dim);
                   if (firstRow === undefined) firstRow = row;
-                  else parity(row, firstRow, "M=1 matches the first row of the multi-row run");
+                  else {
+                    assertWordIdentity(
+                      row,
+                      firstRow,
+                      "class",
+                      "M=1 matches the first row of the multi-row run",
+                    );
+                  }
                 }
               }
             } finally {
@@ -146,9 +155,10 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
           await stage.mapAsync(MAP_MODE.READ);
           const actual = new Uint32Array(stage.getMappedRange().slice(0));
           stage.unmap();
-          parity(
+          assertWordIdentity(
             actual,
             expected.map((v) => (v ^ mask) >>> 0),
+            "class",
             `mask=${mask}`,
           );
         }
