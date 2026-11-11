@@ -27,6 +27,7 @@ const DEFAULT_KNOBS: SessionFusionKnobs = {
   attentionScoreStorage: "f32",
   rmsNormReduce: "workgroup",
   rowBlockSplit: undefined,
+  disabledFusionRules: undefined,
   attentionRowBlockMaxBytes: undefined,
 };
 
@@ -75,12 +76,20 @@ describe("sessionFusionContext", () => {
   it("carries the optional facts only when the Session has them", () => {
     const plain = contextOf({});
     assertEquals(
-      ["rowBlockSplit", "attentionRowBlockMaxBytes", "attentionDevice"].filter((key) =>
-        Object.hasOwn(plain, key),
+      ["rowBlockSplit", "attentionRowBlockMaxBytes", "attentionDevice", "disabledRules"].filter(
+        (key) => Object.hasOwn(plain, key),
       ),
       [],
     );
     const forced = contextOf({ rowBlockSplit: 3, attentionRowBlockMaxBytes: 4096 });
     assertEquals([forced.rowBlockSplit, forced.attentionRowBlockMaxBytes], [3, 4096]);
+  });
+
+  it("carries the Session's disabled fusion rules to the pass", () => {
+    assertEquals(contextOf({ disabledFusionRules: "all" }).disabledRules, "all");
+    assertEquals(
+      contextOf({ disabledFusionRules: new Set(["silu"]) }).disabledRules,
+      new Set(["silu"]),
+    );
   });
 });

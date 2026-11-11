@@ -57,9 +57,15 @@ import {
   planExpertGraph,
   planExpertStore,
 } from "./expert-plan.ts";
-import type { FusionCounts } from "./fusion.ts";
+import { assertDisabledRulesNamed, FUSION_RULES, type FusionCounts } from "./fusion.ts";
 import { sessionGeometryProfile } from "./geometry-selection.ts";
-import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
+import {
+  conv3dTapMajorInitializers,
+  countUses,
+  declaredDtypes,
+  describeInputValue,
+  ExecutionError,
+} from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
 import type { TransientLimits } from "./transient-plan.ts";
 import {
@@ -71,6 +77,7 @@ import {
 } from "./weight-residency.ts";
 import {
   type ComputePrecision,
+  DISABLED_FUSION_RULES,
   I8A8_DOT,
   type I8a8Dot,
   type LinearGemvReduce,
@@ -535,6 +542,11 @@ export type SessionState = {
   /** Forcing the number of row blocks (test only — {@link ROW_BLOCK_SPLIT}). */
   readonly rowBlockSplit: number | undefined;
   /**
+   * The fusion rules the Session's plans leave out (test only — {@link DISABLED_FUSION_RULES}),
+   * checked at construction against the Session's rule list. `undefined` = every rule on.
+   */
+  readonly disabledFusionRules: "all" | ReadonlySet<string> | undefined;
+  /**
    * The budget per row-block temporary ({@link SessionOptions.attentionRowBlockMaxBytes} — ADR 0124).
    * `undefined` = no budget (the binding limit stays).
    * MUST: not changed after construction (the key of a prepared plan is only the resolved bindings,
@@ -592,6 +604,15 @@ const copyExpertCache = (cache: SessionOptions["expertCache"]): SessionOptions["
 };
 
 /**
+ * The copy of `DISABLED_FUSION_RULES` (its names, as for `expertCache`). A value from outside the
+ * type is passed on as is, for the entry check to name.
+ */
+const copyDisabledFusionRules = (
+  disabled: SessionOptions[typeof DISABLED_FUSION_RULES],
+): SessionOptions[typeof DISABLED_FUSION_RULES] =>
+  Array.isArray(disabled) ? Array.from<string>(disabled) : disabled;
+
+/**
  * The copy of {@link SessionOptions} taken at the entry of construction (the MUST at the head of
  * {@link buildSessionState}).
  *
@@ -629,7 +650,31 @@ const snapshotSessionOptions = (
   expertCache: copyExpertCache(requested.expertCache),
   [I8A8_DOT]: requested[I8A8_DOT],
   [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
+  [DISABLED_FUSION_RULES]: copyDisabledFusionRules(requested[DISABLED_FUSION_RULES]),
 });
+
+/**
+ * The fusion rules a Session leaves out (test only — {@link DISABLED_FUSION_RULES}) as the set its
+ * fusion context carries, checked against the rule list the Session plans with (`FUSION_RULES`, the
+ * list `Session.#planSteps` passes) by the pass's own check, so a bad name fails at construction
+ * instead of at the first run.
+ */
+const sessionDisabledFusionRules = (
+  disabled: SessionOptions[typeof DISABLED_FUSION_RULES],
+): "all" | ReadonlySet<string> | undefined => {
+  if (disabled === undefined || disabled === "all") return disabled;
+  const names: unknown = disabled;
+  if (!Array.isArray(names) || !names.every((name) => typeof name === "string")) {
+    throw new ExecutionError(
+      `options[DISABLED_FUSION_RULES] must be "all" or an array of rule names (got ${describeInputValue(
+        names,
+      )})`,
+    );
+  }
+  const set = new Set<string>(names);
+  assertDisabledRulesNamed(FUSION_RULES, set);
+  return set;
+};
 
 /**
  * The body of `Session.build` in {@link "./executor.ts"} (the construction transaction itself). The
@@ -666,6 +711,7 @@ export const buildSessionState = async (
   // condition here would split the accepted sets of the two entries.
   const violation = sessionOptionsViolation(options);
   if (violation !== undefined) throw new ExecutionError(violation);
+  const disabledFusionRules = sessionDisabledFusionRules(options[DISABLED_FUSION_RULES]);
   // The expert cache's plan is GPU-independent too (the graph and the container's descriptor), so a
   // graph or a container it cannot serve fails before any capability check and any byte uploaded.
   const expertPlan =
@@ -1377,6 +1423,7 @@ export const buildSessionState = async (
     // variants on M2, has been withdrawn — the doc of SessionState.attentionI8a8Dot).
     attentionI8a8Dot,
     rowBlockSplit: options[ROW_BLOCK_SPLIT],
+    disabledFusionRules,
     attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes,
     geometryProfile,
     fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,

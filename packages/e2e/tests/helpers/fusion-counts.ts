@@ -152,6 +152,7 @@ const sessionKnobs = (options: FusionCountOptions): SessionFusionKnobs => {
     attentionScoreStorage: defaults.attentionScoreStorage,
     rmsNormReduce: defaults.rmsNormReduce,
     rowBlockSplit: undefined,
+    disabledFusionRules: undefined,
     attentionRowBlockMaxBytes: undefined,
   };
 };

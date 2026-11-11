@@ -29,6 +29,7 @@ export type SessionFusionKnobs = Pick<
   | "attentionScoreStorage"
   | "rmsNormReduce"
   | "rowBlockSplit"
+  | "disabledFusionRules"
   | "attentionRowBlockMaxBytes"
 >;
 
@@ -99,6 +100,9 @@ export const sessionFusionContext = <Name extends string>(
       : undefined;
   return {
     rules: facts.rules,
+    ...(knobs.disabledFusionRules === undefined
+      ? {}
+      : { disabledRules: knobs.disabledFusionRules }),
     useCounts: facts.useCounts,
     fuseRmsNormAdd: knobs.fuseRmsNormAdd,
     fuseLinearStaticQuantize: knobs.fuseLinearStaticQuantize,

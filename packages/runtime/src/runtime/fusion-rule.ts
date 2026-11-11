@@ -309,6 +309,15 @@ export type FusionContext<Name extends string = string> = {
    * name of this list ({@link FusionPlan.counts}).
    */
   readonly rules: readonly FusionRule<Name>[];
+  /**
+   * The rules of {@link rules} the scan does not try (**test only** — the executor's
+   * `DISABLED_FUSION_RULES`): `"all"`, or the names of the disabled rules. Omitted = every rule is
+   * tried. A disabled rule keeps its counter, at 0; the annotation folds
+   * ({@link AnnotationCounterName}) are not rules and are unaffected.
+   * MUST: every name is a name of {@link rules} (`assertDisabledRulesNamed` in
+   * {@link "./fusion.ts"} — a misspelt name fails loudly instead of leaving its rule on).
+   */
+  readonly disabledRules?: "all" | ReadonlySet<string>;
   /** Value name → consumer count in the graph (countUses in plan.ts). */
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;

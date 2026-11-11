@@ -293,6 +293,30 @@ export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
 export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
 
 /**
+ * **A private, test-only surface** (not exported from mod.ts — the same convention as
+ * {@link I8A8_DOT}).
+ *
+ * Leaves fusion rules out of the Session's fusion pass: `"all"` disables every rule of the Session's
+ * rule list (`FUSION_RULES` in src/runtime/fusion.ts), an array disables the rules with those names,
+ * and an empty array disables nothing. It gives the unfused plan of the same graph on the same
+ * device — the control side of a fused-vs-unfused identity check (`checkFusionTwin` in
+ * packages/kernel-checks) and of an A/B timing. No public option does that (ADR 0147 decision 5);
+ * it is a per-Session knob rather than an environment variable so that one process can run both.
+ *
+ * It covers the rules of the list only. The folds the annotation counters count (`identityExpand`,
+ * `packedStaticQuantize`, `linearPrologue` and `attentionPermute` of {@link FusionCounts}) are not
+ * rules and are unaffected. A disabled rule keeps its counter in
+ * {@link SessionDiagnostics.lastRunFusions}, at 0.
+ *
+ * MUST: a name that is not a name of the rule list fails loudly at construction, with the check
+ * the fusion pass applies (`assertDisabledRulesNamed` in src/runtime/fusion.ts) — a misspelt name
+ * would otherwise leave that rule on and the "unfused" side fused.
+ * NOTE: the memory estimate does not read it (`EstimateOptions` has no field for it, as for
+ * {@link ROW_BLOCK_SPLIT}), so an estimate describes the plan with every rule on.
+ */
+export const DISABLED_FUSION_RULES: unique symbol = Symbol("karume.disabledFusionRules");
+
+/**
  * The compute precision knob per op family (ADR 0028 / attention i8a8: design §9.2). **A separate
  * axis from f16 weight storage (ADR 0018)**: `"f16"` selects the variant that drops the shared
  * tiles to f16 for the dot product (accumulating in f32), and `"a8"` selects the variant that
@@ -731,6 +755,11 @@ export type SessionOptions = {
    * device's limit.
    */
   readonly [ROW_BLOCK_SPLIT]?: number;
+  /**
+   * Test only ({@link DISABLED_FUSION_RULES}). The default is every rule of the Session's rule list
+   * on.
+   */
+  readonly [DISABLED_FUSION_RULES]?: "all" | readonly string[];
 };
 
 /**

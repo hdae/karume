@@ -319,6 +319,42 @@ test("a hit whose step carries a rule name without a counter fails loudly instea
   );
 });
 
+// ---------------------------------------------------------------- Disabled rules (test only)
+
+test("disabling 'all' rules leaves no fused step and a complete counter record of zeros, while the annotation folds still apply", () => {
+  const plan = fuseWithRules(ruleListGraph(), FUSION_RULES, { disabledRules: "all" });
+  assertEquals(outline(plan.steps), ["sigmoid", "mul", "neg", "neg"]);
+  assertEquals(plan.counts, builtInCounts());
+  const prologue = fuseWithRules(prologuePairGraph(), FUSION_RULES, {
+    ...A8_I8,
+    disabledRules: "all",
+  });
+  assertEquals(outline(prologue.steps), ["linear"]);
+  assertEquals(prologue.counts, builtInCounts({ linearPrologue: 1 }));
+});
+
+test("a disabled rule name leaves only that rule out: another rule of the same graph still folds, and an empty set disables nothing", () => {
+  const graph = ruleListGraph();
+  const rules = [...FUSION_RULES, NEG_NEG_RULE];
+  const withoutSilu = fuseWithRules(graph, rules, { disabledRules: new Set(["silu"]) });
+  assertEquals(outline(withoutSilu.steps), ["sigmoid", "mul", "fused:testNegNeg"]);
+  assertEquals(withoutSilu.counts, { ...builtInCounts(), testNegNeg: 1 });
+  const withoutNegNeg = fuseWithRules(graph, rules, { disabledRules: new Set(["testNegNeg"]) });
+  assertEquals(outline(withoutNegNeg.steps), ["fused:silu", "neg", "neg"]);
+  assertEquals(withoutNegNeg.counts, { ...builtInCounts({ silu: 1 }), testNegNeg: 0 });
+  const none = fuseWithRules(graph, rules, { disabledRules: new Set() });
+  assertEquals(outline(none.steps), ["fused:silu", "fused:testNegNeg"]);
+});
+
+test("a disabled name that is not a name of the rule list fails loudly instead of leaving its rule on", () => {
+  assertThrows(
+    () =>
+      fuseWithRules(ruleListGraph(), FUSION_RULES, { disabledRules: new Set(["silu", "Silu"]) }),
+    ExecutionError,
+    "'Silu'",
+  );
+});
+
 // ---------------------------------------------------------------- SiLU
 
 type SiluOptions = {

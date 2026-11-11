@@ -615,10 +615,53 @@ export const zeroFusionCounts = <Name extends string>(
   return counts;
 };
 
-/** Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain. */
+/**
+ * Checks that every disabled rule name ({@link FusionContext.disabledRules}) is a name of `rules`.
+ * The pass calls it on its context, and Session construction on the Session's rule list (the
+ * executor's `DISABLED_FUSION_RULES`), so a bad name fails before the first run.
+ *
+ * MUST: an unknown name fails loudly (ExecutionError). A misspelt name would leave its rule on, and
+ * the side meant to be unfused would fuse — a fused-vs-unfused comparison would then compare a
+ * kernel with itself and pass.
+ */
+export const assertDisabledRulesNamed = (
+  rules: readonly FusionRule[],
+  disabled: "all" | ReadonlySet<string> | undefined,
+): void => {
+  if (disabled === undefined || disabled === "all") return;
+  const names = new Set(rules.map((rule) => rule.name));
+  const unknown = [...disabled].filter((name) => !names.has(name));
+  if (unknown.length === 0) return;
+  throw new ExecutionError(
+    `fusion rules: the disabled name(s) '${unknown.join("', '")}' are not names of the rule list` +
+      ` (the rules are ${rules.map((rule) => `'${rule.name}'`).join(", ")})`,
+  );
+};
+
+/**
+ * The rules the scan tries: the context's list without the disabled ones
+ * ({@link FusionContext.disabledRules}), in list order.
+ */
+const triedRules = <Name extends string>(
+  context: FusionContext<Name>,
+): readonly FusionRule<Name>[] => {
+  const disabled = context.disabledRules;
+  assertDisabledRulesNamed(context.rules, disabled);
+  if (disabled === undefined) return context.rules;
+  if (disabled === "all") return [];
+  return context.rules.filter((rule) => !disabled.has(rule.name));
+};
+
+/**
+ * Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain.
+ *
+ * `rules` are the rules tried at each index ({@link triedRules}); the counter record has one counter
+ * per rule of `context.rules` all the same, so a disabled rule reads 0.
+ */
 const scanFusions = <Name extends string>(
   nodes: readonly NodePlan[],
   context: FusionContext<Name>,
+  rules: readonly FusionRule<Name>[],
   packed: ReadonlyMap<string, number>,
 ): FusionPlan<Name> => {
   const steps: ExecStep[] = [];
@@ -650,7 +693,7 @@ const scanFusions = <Name extends string>(
   // alias decision reads only its own input, which precedes it in either order.
   const scanned = [...nodes];
   for (let index = 0; index < scanned.length;) {
-    const hit = context.rules.reduce<FusionHit | undefined>(
+    const hit = rules.reduce<FusionHit | undefined>(
       (found, rule) => found ?? rule.apply(scanned, index, scanContext),
       undefined,
     );
@@ -828,9 +871,10 @@ export const planFusions = <Name extends string>(
   nodes: readonly NodePlan[],
   context: FusionContext<Name>,
 ): FusionPlan<Name> => {
-  const first = scanFusions(nodes, context, NO_PACKED);
+  const rules = triedRules(context);
+  const first = scanFusions(nodes, context, rules, NO_PACKED);
   const packed = packedStaticQuantizeValues(nodes, first.steps, context);
-  return packed.size === 0 ? first : scanFusions(nodes, context, packed);
+  return packed.size === 0 ? first : scanFusions(nodes, context, rules, packed);
 };
 
 /**
