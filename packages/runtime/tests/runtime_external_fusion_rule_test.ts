@@ -256,6 +256,27 @@ describe("an external rule building a step", () => {
     assert(seen[1] === context, "both tries of one scan read the same context");
   });
 
+  it("is tried only at a node whose op is one of its heads", () => {
+    const tried: string[] = [];
+    const definition = negNeg("test/neg_neg");
+    const folded = plan([
+      defineExternalRule({
+        ...definition,
+        heads: ["abs"],
+        match: (nodes, index) => {
+          tried.push(nodes[index].node.op);
+          return definition.match(nodes, index);
+        },
+      }),
+    ]);
+    assertEquals(tried, ["abs"]);
+    assertEquals(
+      folded.steps.map((step) => (step.kind === "fused" ? step.rule : step.plan.node.op)),
+      ["abs", "neg", "neg"],
+    );
+    assertEquals(folded.counts["test/neg_neg"], 0);
+  });
+
   it("folds its chain when every check holds", () => {
     const folded = plan([defineExternalRule(negNeg("test/neg_neg"))]);
     assertEquals(

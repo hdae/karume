@@ -628,7 +628,8 @@ export type FusionRule<Name extends string = string> = {
   readonly name: Name;
   /**
    * The leading ops this rule can grab (declared so that the pairwise disjointness of the
-   * application order is checked mechanically).
+   * application order is checked mechanically among the built-in rules). An external rule is tried
+   * only at a node whose op is one of them.
    */
   readonly heads: readonly string[];
   /** The contract class the rule declares ({@link ContractClass}). */
@@ -1059,7 +1060,8 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
  * {@link defineRule} for a rule written outside the runtime — the `defineRule` of
  * `@karume/runtime/kernel`. The name is `<namespace>/<rule>` ({@link ExternalRuleName}), checked
  * here; the rule is branded external, so a Session takes it through `SessionOptions.fusionRules`;
- * its matcher reads the narrowed {@link FusionMatchContext}; and besides every check of
+ * it is tried only at a node whose op is one of its `heads`, and its matcher reads the narrowed
+ * {@link FusionMatchContext}; and besides every check of
  * {@link defineRule}, its window must start where it was tried, its build must bind only the chain's
  * own inputs and write the chain's last value, and every dispatch key must start with
  * `ext:<namespace>:` (checked each time the rule builds a step).
@@ -1078,7 +1080,13 @@ export const defineExternalRule = <
         " identifiers ([a-z][a-z0-9_]*) joined by one slash",
     );
   }
-  return brandedRule(definition, namespace, (nodes, index, context) =>
-    definition.match(nodes, index, context.matchContext),
-  );
+  // MUST: an external rule is tried only at a node whose op it declares in `heads`, so the heads
+  // say which built-in rules it can pre-empt (it is tried before them — ADR 0148 decision 3).
+  const heads = new Set(definition.heads);
+  return brandedRule(definition, namespace, (nodes, index, context) => {
+    const op = nodes[index]?.node.op;
+    return op !== undefined && heads.has(op)
+      ? definition.match(nodes, index, context.matchContext)
+      : undefined;
+  });
 };

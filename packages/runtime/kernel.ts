@@ -12,15 +12,16 @@
  * given, counted under their names in `lastRunFusions`); passing a rule is the opt-in.
  *
  * - {@link defineRule} builds a rule from a definition: its name `<namespace>/<rule>`, the leading
- *   ops it can take (`heads`), its contract class (`contract`, ADR 0147 decision 2 — `"E"` for a
- *   rule u32-identical to the unfused plan), who may read the chain's internal values (`internals`),
- *   a matcher that grabs a window of nodes (it reads the nodes and a {@link FusionMatchContext} —
- *   the graph's use counts and outputs, nothing a plan decides), and a build that lowers it to
- *   dispatches: the binds, the output, the step's temporaries and, per dispatch, a key, the WGSL,
- *   the params and the workgroup count. Only its return value is a rule a Session takes. It applies the checks every rule meets
- *   (single-output nodes, no node that touches state, the declared privacy, a window that starts
- *   where it was tried) and checks each step it builds (only the chain's own inputs bound, the
- *   chain's last value written, every dispatch key starting with `ext:<namespace>:`).
+ *   ops it can take (`heads` — it is tried only at a node of one of them), its contract class
+ *   (`contract`, ADR 0147 decision 2 — `"E"` for a rule u32-identical to the unfused plan), who may
+ *   read the chain's internal values (`internals`), a matcher that grabs a window of nodes (it reads
+ *   the nodes and a {@link FusionMatchContext} — the graph's use counts and outputs, nothing a plan
+ *   decides), and a build that lowers it to dispatches: the binds, the output, the step's
+ *   temporaries and, per dispatch, a key, the WGSL, the params and the workgroup count. Only its
+ *   return value is a rule a Session takes. It applies the checks every rule meets (single-output
+ *   nodes, no node that touches state, the declared privacy, a window that starts where it was
+ *   tried) and checks each step it builds (only the chain's own inputs bound, the chain's last value
+ *   written, every dispatch key starting with `ext:<namespace>:`).
  * - {@link allF32} and {@link sameShape} are the predicates the built-in rules use in their
  *   matchers. `defineRule` does not check dtypes: a matcher that writes an f32 kernel checks
  *   {@link allF32} itself.
