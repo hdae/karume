@@ -34,6 +34,9 @@
  * verify). Under the expert cache the callback does not change the decode path (it runs on the
  * host sampler either way), but it runs inside every run, timed ones included.
  *
+ * The record's backend is inferred from the platform (linux → vulkan, darwin → metal, win32 →
+ * d3d12: Dawn's backend there), and the envelope says so; WebGPU does not expose it.
+ *
  * MUST: never run it while other work uses the GPU (the times would measure the contention); run it
  * under `flock /tmp/karume-gpu.lock`. Without the variable, without the mirror's `26b` model or
  * without an adapter, the case SKIPs with the reason (ADR 0005).
@@ -98,6 +101,20 @@ const REQUEST = {
 
 /** The 30 layers' dense and routed-expert chains, one hit each, in the decode plan. */
 const RULE_HITS = 60;
+
+/** Dawn's backend on each platform Node runs it on (the record says the backend is inferred). */
+const DAWN_BACKENDS: Readonly<Record<string, string>> = {
+  linux: "vulkan",
+  darwin: "metal",
+  win32: "d3d12",
+};
+
+const inferredBackend = (platform: string): string => {
+  if (!Object.hasOwn(DAWN_BACKENDS, platform)) {
+    throw new Error(`No Dawn backend is known for the platform '${platform}'`);
+  }
+  return DAWN_BACKENDS[platform];
+};
 
 /** The request fields an arm reads. */
 type ArmRequest = {
@@ -377,6 +394,7 @@ describe.skipIf(skipReason !== undefined)("the session A/B on Gemma 4 26B A4B (o
           signal: new AbortController().signal,
           onStep: () => undefined,
         });
+      const backend = inferredBackend(process.platform);
       const record = await runSessionAb({
         arms: [armOf("base", undefined), armOf("rule", [GELU_MUL_RULE])],
         rounds: REQUEST.rounds,
@@ -384,7 +402,7 @@ describe.skipIf(skipReason !== undefined)("the session A/B on Gemma 4 26B A4B (o
         environment: {
           adapter: gpu.adapterInfo,
           userAgent: navigator.userAgent,
-          backend: "vulkan",
+          backend,
           date: new Date().toISOString(),
         },
       });
@@ -398,6 +416,7 @@ describe.skipIf(skipReason !== undefined)("the session A/B on Gemma 4 26B A4B (o
           {
             format: "karume-e2e-session-ab/1",
             request: REQUEST,
+            backendSource: `inferred from process.platform '${process.platform}' (Dawn's backend there)`,
             record,
             judgements,
           },
