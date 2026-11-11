@@ -3,13 +3,27 @@
  * the {@link FusionContext} its plans are fused under (`Session.#planSteps` in executor.ts).
  *
  * MUST: every caller that plans "what a Session would" builds its context here (the executor, and
- * the fusion-count checks on the distribution graphs in packages/e2e). Two hand-built copies drift
- * apart without an exception — a gate added to one and not the other only moves a hit count.
+ * the fusion-count checks on the distribution graphs in packages/e2e), and
+ * derives its knobs ({@link sessionFusionKnobs}) and weight facts ({@link plannedResidentWeights},
+ * {@link sharedOrPooledWeights}) through the functions below. Two hand-built copies drift apart
+ * without an exception — a gate added to one and not the other only moves a hit count.
+ *
+ * Pure and device-free: no import here touches the GPU (the estimate imports this module).
  */
 
 import type { AttentionDeviceFacts } from "./attention-route.ts";
-import type { FusionContext, FusionLimits, FusionRule, FusionWeightLayout } from "./fusion.ts";
+import {
+  assertDisabledRulesNamed,
+  type FusionContext,
+  type FusionLimits,
+  type FusionRule,
+  type FusionWeightLayout,
+} from "./fusion.ts";
+import { describeInputValue, ExecutionError } from "./plan.ts";
 import type { SessionState } from "./session-build.ts";
+import { executionKnobDefaults } from "./session-options-check.ts";
+import { DISABLED_FUSION_RULES, ROW_BLOCK_SPLIT, type SessionOptions } from "./session-types.ts";
+import type { WeightResidency } from "./weight-residency.ts";
 
 /**
  * The Session-fixed knobs the fusion pass reads: the fields of the Session state with the same
@@ -34,6 +48,87 @@ export type SessionFusionKnobs = Pick<
 >;
 
 /**
+ * The {@link SessionOptions} fields a Session's fusion context derives from: the knobs of
+ * {@link SessionFusionKnobs} under their option names, the rule list (`fusionRules`) and the two
+ * test-only symbols. A field the fusion pass reads is added here, so every caller that takes these
+ * options (the memory estimate's `EstimateOptions` among them) sees it in its type.
+ */
+export type SessionFusionOptions = Pick<
+  SessionOptions,
+  | "fuseRmsNormAdd"
+  | "fuseLinearStaticQuantize"
+  | "fuseGeluMulStaticQuantize"
+  | "packedStaticQuantize"
+  | "integerGemv"
+  | "linearGemvPlanes"
+  | "linearGemvReduce"
+  | "linearCompute"
+  | "attentionCompute"
+  | "attentionScoreStorage"
+  | "rmsNormReduce"
+  | "attentionRowBlockMaxBytes"
+  | "fusionRules"
+  | typeof ROW_BLOCK_SPLIT
+  | typeof DISABLED_FUSION_RULES
+>;
+
+/**
+ * The fusion rules a Session leaves out (test only — `DISABLED_FUSION_RULES`) as the set its fusion
+ * context carries, checked against the rule list the Session plans with (`rules` — the list
+ * `Session.#planSteps` passes, external rules included) by the pass's own check, so a bad name fails
+ * at construction instead of at the first run.
+ */
+export const sessionDisabledFusionRules = (
+  disabled: SessionOptions[typeof DISABLED_FUSION_RULES],
+  rules: readonly FusionRule[],
+): "all" | ReadonlySet<string> | undefined => {
+  if (disabled === undefined || disabled === "all") return disabled;
+  const names: unknown = disabled;
+  if (!Array.isArray(names) || !names.every((name) => typeof name === "string")) {
+    throw new ExecutionError(
+      `options[DISABLED_FUSION_RULES] must be "all" or an array of rule names (got ${describeInputValue(
+        names,
+      )})`,
+    );
+  }
+  const set = new Set<string>(names);
+  assertDisabledRulesNamed(rules, set);
+  return set;
+};
+
+/**
+ * The knobs a Session constructed with `options` fixes for its fusion pass, with the defaults
+ * construction fills in (`executionKnobDefaults` — the one spelling of the defaults). `rules` is the
+ * Session's rule list (`sessionFusionRules` in fusion.ts), against which the disabled names are
+ * checked ({@link sessionDisabledFusionRules} — it throws `ExecutionError` on a bad value).
+ *
+ * MUST: the caller has run `sessionOptionsViolation` on `options` first (the knobs are read as
+ * checked values; this adds no check of its own besides the disabled names).
+ */
+export const sessionFusionKnobs = (
+  options: SessionFusionOptions,
+  rules: readonly FusionRule[],
+): SessionFusionKnobs => {
+  const defaults = executionKnobDefaults(options);
+  return {
+    fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
+    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
+    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
+    packedStaticQuantize: options.packedStaticQuantize ?? false,
+    integerGemv: options.integerGemv ?? false,
+    linearGemvPlanes: options.linearGemvPlanes ?? false,
+    linearGemvReduce: defaults.linearGemvReduce,
+    linearCompute: defaults.linearCompute,
+    attentionCompute: defaults.attentionCompute,
+    attentionScoreStorage: defaults.attentionScoreStorage,
+    rmsNormReduce: defaults.rmsNormReduce,
+    rowBlockSplit: options[ROW_BLOCK_SPLIT],
+    disabledFusionRules: sessionDisabledFusionRules(options[DISABLED_FUSION_RULES], rules),
+    attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes,
+  };
+};
+
+/**
  * The storage of a resident weight without its GPU objects (the part of `ResidentWeight` in
  * weight-residency.ts the fusion decision reads). A weight that is not resident in compressed form
  * is absent and read as f32.
@@ -42,6 +137,54 @@ export type ResidentWeightStorage =
   | { readonly storage: "f16" | "bf16" | "i8" | "i2" }
   | { readonly storage: "i4"; readonly groupSize: number }
   | { readonly storage: "i4f16"; readonly groupSize: number };
+
+/**
+ * The storage each initializer is resident in, from the residency plan alone (no device): the
+ * classification Session construction applies when it uploads (the compressed seats keep their
+ * storage, the group size comes with the plan — the planner copies it from the declaration, so it
+ * is not derived twice). Uncompressed (`raw`) and expanded weights are f32 and absent.
+ *
+ * NOTE: a borrowed weight (`seat: "shared"`) is absent too: its storage is the lender's, which a
+ * Session learns only from the lender's resident record at construction and a caller without the
+ * lender cannot know. Such a caller reads it as f32 (a linear it feeds is counted unfolded — on the
+ * large side); {@link sharedOrPooledWeights} still lists it, so no external rule binds it.
+ * Session construction does not call this: its resident records carry GPU objects (the scale
+ * buffers) made at upload, and a borrowed weight takes the lender's record.
+ */
+export const plannedResidentWeights = (
+  residency: ReadonlyMap<string, WeightResidency>,
+): ReadonlyMap<string, ResidentWeightStorage> =>
+  new Map(
+    [...residency].flatMap(([name, weight]): [string, ResidentWeightStorage][] => {
+      switch (weight.seat) {
+        case "i4":
+        case "i4f16":
+          return [[name, { storage: weight.seat, groupSize: weight.groupSize }]];
+        case "f16":
+        case "bf16":
+        case "i8":
+        case "i2":
+          return [[name, { storage: weight.seat }]];
+        default:
+          return [];
+      }
+    }),
+  );
+
+/**
+ * The weights whose buffer is not the Session's own copy of the tensor
+ * ({@link SessionFusionFacts.sharedOrPooledWeights}): the borrowed ones of the residency plan, and
+ * the expert weights held in the expert cache's pools (`pooled` — the layers of the expert plan or
+ * of the pool built from it, ADR 0146; omitted without the cache).
+ */
+export const sharedOrPooledWeights = (
+  residency: ReadonlyMap<string, WeightResidency>,
+  pooled: readonly { readonly weights: readonly { readonly name: string }[] }[] | undefined,
+): ReadonlySet<string> =>
+  new Set([
+    ...[...residency].flatMap(([name, weight]) => (weight.seat === "shared" ? [name] : [])),
+    ...(pooled?.flatMap((layer) => layer.weights.map((weight) => weight.name)) ?? []),
+  ]);
 
 /** What {@link sessionFusionContext} maps to a {@link FusionContext}. */
 export type SessionFusionFacts<Name extends string> = {

@@ -29,14 +29,13 @@ import {
 } from "../../../runtime/src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../../../runtime/src/runtime/plan.ts";
 import {
-  type ResidentWeightStorage,
+  plannedResidentWeights,
   type SessionFusionKnobs,
   sessionFusionContext,
+  sessionFusionKnobs,
+  sharedOrPooledWeights,
 } from "../../../runtime/src/runtime/session-fusion-context.ts";
-import {
-  executionKnobDefaults,
-  sessionOptionsViolation,
-} from "../../../runtime/src/runtime/session-options-check.ts";
+import { sessionOptionsViolation } from "../../../runtime/src/runtime/session-options-check.ts";
 import {
   DISABLED_FUSION_RULES,
   type SessionOptions,
@@ -142,63 +141,20 @@ export type FusionCountOptions = Pick<
   | typeof DISABLED_FUSION_RULES
 >;
 
-/** The rules left out, as the set a Session's fusion context carries. */
-const disabledFusionRules = (
-  disabled: FusionCountOptions[typeof DISABLED_FUSION_RULES],
-): "all" | ReadonlySet<string> | undefined =>
-  disabled === undefined || disabled === "all" ? disabled : new Set(disabled);
-
 /**
- * The knobs a Session constructed with `options` fixes — the same entry check and the same defaults
- * as Session construction, so a combination no Session accepts fails here instead of planning a
- * Session that cannot exist.
+ * The knobs a Session constructed with `options` fixes — the same entry check and the same mapping
+ * with its defaults as Session construction (`sessionFusionKnobs`), so a combination no Session
+ * accepts fails here instead of planning a Session that cannot exist. `rules` is the rule list the
+ * disabled names are checked against.
  */
-const sessionKnobs = (options: FusionCountOptions): SessionFusionKnobs => {
+const sessionKnobs = (
+  options: FusionCountOptions,
+  rules: Parameters<typeof sessionFusionKnobs>[1],
+): SessionFusionKnobs => {
   const violation = sessionOptionsViolation(options);
   if (violation !== undefined) throw new Error(`fusion-count options: ${violation}`);
-  const defaults = executionKnobDefaults(options);
-  return {
-    fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
-    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
-    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
-    packedStaticQuantize: options.packedStaticQuantize ?? false,
-    integerGemv: options.integerGemv ?? false,
-    linearGemvPlanes: options.linearGemvPlanes ?? false,
-    linearGemvReduce: defaults.linearGemvReduce,
-    linearCompute: defaults.linearCompute,
-    attentionCompute: defaults.attentionCompute,
-    attentionScoreStorage: defaults.attentionScoreStorage,
-    rmsNormReduce: defaults.rmsNormReduce,
-    rowBlockSplit: undefined,
-    // The names are checked against the rule list by the pass itself (`assertDisabledRulesNamed`).
-    disabledFusionRules: disabledFusionRules(options[DISABLED_FUSION_RULES]),
-    attentionRowBlockMaxBytes: undefined,
-  };
+  return sessionFusionKnobs(options, rules);
 };
-
-/**
- * The storage each initializer is resident in, from the residency plan — the group size comes with
- * the preset (the planner derives it from the merged declaration, so it is not derived twice). Raw
- * and expanded weights are f32, and a borrowed weight's storage is the lender's (unknown here): all
- * absent.
- */
-const residentWeights = (graph: IrGraph): ReadonlyMap<string, ResidentWeightStorage> =>
-  new Map(
-    [...planWeightResidency(graph)].flatMap(([name, weight]): [string, ResidentWeightStorage][] => {
-      switch (weight.seat) {
-        case "i4":
-        case "i4f16":
-          return [[name, { storage: weight.seat, groupSize: weight.groupSize }]];
-        case "f16":
-        case "bf16":
-        case "i8":
-        case "i2":
-          return [[name, { storage: weight.seat }]];
-        default:
-          return [];
-      }
-    }),
-  );
 
 /** A plan of a distribution graph and the context it was planned under. */
 export type DistributionFusionPlan = {
@@ -223,10 +179,12 @@ export const planDistributionFusions = (
   attentionDevice?: AttentionDeviceFacts,
   stateShapes?: ReadonlyMap<string, readonly number[]>,
 ): DistributionFusionPlan => {
+  // The Session's own composition and checks of `fusionRules` (the built-in rules alone without it).
+  const rules = sessionFusionRules(options.fusionRules);
+  const residency = planWeightResidency(graph);
   const context = sessionFusionContext({
-    // The Session's own composition and checks of `fusionRules` (the built-in rules alone without it).
-    rules: sessionFusionRules(options.fusionRules),
-    knobs: sessionKnobs(options),
+    rules,
+    knobs: sessionKnobs(options, rules),
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
     // Decide against the WebGPU core default (128MiB). The row-block count does not affect the
@@ -237,13 +195,10 @@ export const planDistributionFusions = (
       maxComputeWorkgroupsPerDimension: 65535,
     },
     ...(attentionDevice === undefined ? {} : { attentionDevice }),
-    residentWeights: residentWeights(graph),
+    // The storage the residency plan gives each weight (a borrowed one's is the lender's: absent).
+    residentWeights: plannedResidentWeights(residency),
     // The borrowed weights (the expert pool is not planned here: no option of this helper sets it).
-    sharedOrPooledWeights: new Set(
-      [...planWeightResidency(graph)].flatMap(([name, weight]) =>
-        weight.seat === "shared" ? [name] : [],
-      ),
-    ),
+    sharedOrPooledWeights: sharedOrPooledWeights(residency, undefined),
   });
   const plan = planFusions(
     planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes,

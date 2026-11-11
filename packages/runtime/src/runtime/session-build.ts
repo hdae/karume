@@ -58,7 +58,6 @@ import {
   planExpertStore,
 } from "./expert-plan.ts";
 import {
-  assertDisabledRulesNamed,
   type ExternalRuleName,
   type FusionCounts,
   type FusionRule,
@@ -66,13 +65,8 @@ import {
   sessionFusionRules,
 } from "./fusion.ts";
 import { sessionGeometryProfile } from "./geometry-selection.ts";
-import {
-  conv3dTapMajorInitializers,
-  countUses,
-  declaredDtypes,
-  describeInputValue,
-  ExecutionError,
-} from "./plan.ts";
+import { sessionFusionKnobs } from "./session-fusion-context.ts";
+import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
 import type { TransientLimits } from "./transient-plan.ts";
 import {
@@ -676,30 +670,6 @@ const snapshotSessionOptions = (
 });
 
 /**
- * The fusion rules a Session leaves out (test only — {@link DISABLED_FUSION_RULES}) as the set its
- * fusion context carries, checked against the rule list the Session plans with (`rules` — the list
- * `Session.#planSteps` passes, external rules included) by the pass's own check, so a bad name fails
- * at construction instead of at the first run.
- */
-const sessionDisabledFusionRules = (
-  disabled: SessionOptions[typeof DISABLED_FUSION_RULES],
-  rules: readonly FusionRule[],
-): "all" | ReadonlySet<string> | undefined => {
-  if (disabled === undefined || disabled === "all") return disabled;
-  const names: unknown = disabled;
-  if (!Array.isArray(names) || !names.every((name) => typeof name === "string")) {
-    throw new ExecutionError(
-      `options[DISABLED_FUSION_RULES] must be "all" or an array of rule names (got ${describeInputValue(
-        names,
-      )})`,
-    );
-  }
-  const set = new Set<string>(names);
-  assertDisabledRulesNamed(rules, set);
-  return set;
-};
-
-/**
  * The body of `Session.build` in {@link "./executor.ts"} (the construction transaction itself). The
  * contract and the MUSTs are owned by the doc of `Session.build` on the facade side.
  *
@@ -737,10 +707,9 @@ export const buildSessionState = async (
   // The rule list is fixed here, before any capability check and any byte uploaded: a value that
   // is not a defined external rule fails now, not at the first run.
   const fusionRules = sessionFusionRules(options.fusionRules);
-  const disabledFusionRules = sessionDisabledFusionRules(
-    options[DISABLED_FUSION_RULES],
-    fusionRules,
-  );
+  // The knobs the fusion pass reads, through the one mapping every planner of "what a Session
+  // would" shares (the disabled rule names are checked against the rule list here).
+  const fusionKnobs = sessionFusionKnobs(options, fusionRules);
   // The expert cache's plan is GPU-independent too (the graph and the container's descriptor), so a
   // graph or a container it cannot serve fails before any capability check and any byte uploaded.
   const expertPlan =
@@ -748,17 +717,10 @@ export const buildSessionState = async (
       ? undefined
       : planExpertGraph(graph, residency, options.expertCache);
   const expertStore = expertPlan === undefined ? undefined : planExpertStore(expertPlan, experts);
-  const {
-    rmsNormReduce,
-    linearCompute,
-    convCompute,
-    attentionCompute,
-    attentionScoreStorage,
-    stateAttentionReduce,
-    fullStateStorage,
-    linearGemvReduce,
-    planBackingBudgetBytes,
-  } = executionKnobDefaults(options);
+  // The checks below read the fusion knobs as the state carries them (one derivation of each).
+  const { rmsNormReduce, linearCompute, attentionCompute, linearGemvReduce } = fusionKnobs;
+  const { convCompute, stateAttentionReduce, fullStateStorage, planBackingBudgetBytes } =
+    executionKnobDefaults(options);
   const linearGemvRowsThreadTarget = options.linearGemvRowsThreadTarget;
   // From here on, only checks that look at GPU capabilities (features / WGSL language features).
   if (
@@ -1433,14 +1395,10 @@ export const buildSessionState = async (
       uploadedBytes,
       uploadFenceMs,
     },
-    linearCompute,
     convCompute,
-    attentionCompute,
-    attentionScoreStorage,
     attentionDevice: attentionDeviceFacts(gpu),
     stateAttentionReduce,
     fullStateStorage,
-    linearGemvReduce,
     linearGemvRowsThreadTarget,
     planBackingBudgetBytes,
     // Whether linear has the extension **affects only speed** (both variants return the same
@@ -1451,18 +1409,11 @@ export const buildSessionState = async (
     // above — the comparison with the known answer) (the original rationale, a mismatch between
     // variants on M2, has been withdrawn — the doc of SessionState.attentionI8a8Dot).
     attentionI8a8Dot,
-    rowBlockSplit: options[ROW_BLOCK_SPLIT],
-    disabledFusionRules,
+    // The fusion knobs (the linear / attention seats, the reductions, the fusion opt-ins and the
+    // test-only row-block split and disabled rules) — the values the checks above read.
+    ...fusionKnobs,
     fusionRules,
-    attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes,
     geometryProfile,
-    fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
-    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
-    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
-    packedStaticQuantize: options.packedStaticQuantize ?? false,
-    integerGemv: options.integerGemv ?? false,
-    linearGemvPlanes: options.linearGemvPlanes ?? false,
-    rmsNormReduce,
     useCounts: countUses(graph),
     dtypes: declaredDtypes(graph),
     // The routing readback's outputs are outputs of the plan too (pinned like any output).

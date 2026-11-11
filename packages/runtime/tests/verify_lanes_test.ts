@@ -213,6 +213,7 @@ const CORE_E2E_TESTS = [
   "packages/e2e/tests/e2e_fusion_candidates_report_test.ts",
   "packages/e2e/tests/e2e_session_options_mirror_test.ts",
   "packages/e2e/tests/fusion_candidates_test.ts",
+  "packages/e2e/tests/fusion_counts_context_test.ts",
 ];
 
 /**

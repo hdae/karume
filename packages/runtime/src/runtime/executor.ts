@@ -119,7 +119,7 @@ import {
   type SessionState,
   type WeightBatch,
 } from "./session-build.ts";
-import { sessionFusionContext } from "./session-fusion-context.ts";
+import { sessionFusionContext, sharedOrPooledWeights } from "./session-fusion-context.ts";
 import type {
   EnqueueOptions,
   EnqueueRead,
@@ -2570,14 +2570,10 @@ export class Session {
         limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
         attentionDevice: this.#state.attentionDevice,
         residentWeights: this.#state.residentWeights,
-        sharedOrPooledWeights: new Set([
-          ...[...this.#state.residency].flatMap(([name, residency]) =>
-            residency.seat === "shared" ? [name] : [],
-          ),
-          ...(this.#state.expertPool?.layers.flatMap((layer) =>
-            layer.weights.map((weight) => weight.name),
-          ) ?? []),
-        ]),
+        sharedOrPooledWeights: sharedOrPooledWeights(
+          this.#state.residency,
+          this.#state.expertPool?.layers,
+        ),
       }),
     );
     return { shapes: plan.shapes, fusions: fusion.counts, steps: fusion.steps };
