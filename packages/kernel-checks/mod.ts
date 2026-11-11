@@ -142,6 +142,7 @@ export {
   type StateBidirectionalMutant,
 } from "./src/state-bidirectional.ts";
 export { checkRmsSubgroup, RMS_SUBGROUP_CASES } from "./src/rms-subgroup.ts";
+export { checkRmsNormPrefetch, RMS_NORM_PREFETCH_CASES } from "./src/rms-norm-prefetch.ts";
 export {
   benchIntegerGemv,
   checkIntegerGemv,

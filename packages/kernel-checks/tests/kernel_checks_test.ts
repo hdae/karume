@@ -6,6 +6,7 @@ import {
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
+  RMS_NORM_PREFETCH_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,
@@ -142,6 +143,11 @@ describe("the expected case counts each check exports", () => {
   it("are the counts of the grids the checks were measured at", () => {
     assertEquals(GEMV_SUBGROUP_CASES, { "gemv-subgroup32": 180 });
     assertEquals(RMS_SUBGROUP_CASES, { "rms-rows": 48, "rms-fusion": 12, "rms-grid-stride": 1 });
+    assertEquals(RMS_NORM_PREFETCH_CASES, {
+      "rms-prefetch-plain": 118,
+      "rms-prefetch-add-norm-residual": 118,
+      "rms-prefetch-add-residual-norm": 118,
+    });
     assertEquals(STATE_ATTENTION_CASES, {
       "state-qk-fold": 252,
       "state-pv-unroll": 546,
