@@ -35,7 +35,10 @@ import {
   executionKnobDefaults,
   sessionOptionsViolation,
 } from "../../../runtime/src/runtime/session-options-check.ts";
-import type { SessionOptions } from "../../../runtime/src/runtime/session-types.ts";
+import {
+  DISABLED_FUSION_RULES,
+  type SessionOptions,
+} from "../../../runtime/src/runtime/session-types.ts";
 import { planWeightResidency } from "../../../runtime/src/runtime/weight-residency.ts";
 import { resolveParts } from "../../../runtime/tests/helpers/container-files.ts";
 import { builtInCounts } from "../../../runtime/tests/helpers/fusion-count-record.ts";
@@ -115,7 +118,9 @@ export const readDistributionGraph = (
  * The opt-in rules and annotations fire only under their options: the linear prologue (perf-ledger
  * F-4) under `linearCompute: "a8"`, the attention's absorbed permutes (perf-ledger F-3 / F-8) on
  * the a8 attention seat, the output permute only on the online route (`attentionScoreStorage:
- * "none"` with the device facts).
+ * "none"` with the device facts). The test-only {@link DISABLED_FUSION_RULES} plans with rules
+ * left out (`"all"` = fusion off — the annotation folds stay, as on a Session), so a control can
+ * plan the same graph unfused through the same path.
  */
 export type FusionCountOptions = Pick<
   SessionOptions,
@@ -130,7 +135,14 @@ export type FusionCountOptions = Pick<
   | "attentionCompute"
   | "attentionScoreStorage"
   | "rmsNormReduce"
+  | typeof DISABLED_FUSION_RULES
 >;
+
+/** The rules left out, as the set a Session's fusion context carries. */
+const disabledFusionRules = (
+  disabled: FusionCountOptions[typeof DISABLED_FUSION_RULES],
+): "all" | ReadonlySet<string> | undefined =>
+  disabled === undefined || disabled === "all" ? disabled : new Set(disabled);
 
 /**
  * The knobs a Session constructed with `options` fixes — the same entry check and the same defaults
@@ -154,7 +166,8 @@ const sessionKnobs = (options: FusionCountOptions): SessionFusionKnobs => {
     attentionScoreStorage: defaults.attentionScoreStorage,
     rmsNormReduce: defaults.rmsNormReduce,
     rowBlockSplit: undefined,
-    disabledFusionRules: undefined,
+    // The names are checked against the rule list by the pass itself (`assertDisabledRulesNamed`).
+    disabledFusionRules: disabledFusionRules(options[DISABLED_FUSION_RULES]),
     attentionRowBlockMaxBytes: undefined,
   };
 };

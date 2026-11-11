@@ -27,7 +27,15 @@ import {
   type ContainerManifest,
   containerPart0,
 } from "../../runtime/tests/helpers/container-graph.ts";
-import { exists, fusionCounts, NONE, readDistributionGraph } from "./helpers/fusion-counts.ts";
+import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/session-types.ts";
+import { fusionCandidates, opSequenceCount } from "./helpers/fusion-candidates.ts";
+import {
+  exists,
+  fusionCounts,
+  NONE,
+  planDistributionFusions,
+  readDistributionGraph,
+} from "./helpers/fusion-counts.ts";
 
 const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 
@@ -181,6 +189,67 @@ test.skipIf(!ASSETS_AVAILABLE)(
           `${quant} a8 attention, online: S=${sequence}`,
         );
       }
+    }
+  },
+);
+
+/**
+ * A window limit no window of the unfused DiT reaches (its widest maximal window is 43 nodes —
+ * 2026-11-11). At the default limit of 12 the block chains are cut into overlapping windows marked
+ * "hit the limit", and a site inside an overlap is counted more than once.
+ */
+const UNCUT_WINDOW = 64;
+
+/**
+ * **The control of the fusion candidate search**: the DiT planned with every rule off
+ * (`DISABLED_FUSION_RULES: "all"`) must show each site the rules grab today as a candidate — the
+ * check that the enumerator neither loses a window nor counts one chain twice. Each rule's sites
+ * are named by the op sequence of their chain in the unfused plan (passthroughs excluded):
+ *
+ * - silu 2: `sigmoid, mul`.
+ * - rope 56: the half-split form, `slice, slice, neg, cat, mul, mul, add` — q and k of the 28
+ *   self-attention blocks. Both sit in one maximal window that runs on through the attention.
+ * - adaln 85: `layer_norm`, the reshapes of the modulation vectors, then `add, mul, add`. The rule
+ *   places those reshapes as in-window passthroughs; unfused they are private values that flow into
+ *   the chain, so they are chain nodes here: two at the 28 self-attention norms (the window also
+ *   holds the reshape of the block's gate vector, a passthrough here too) and at the head's norm
+ *   (no gate), three at the other 56.
+ *
+ * At the default window limit of 12 the same count gives rope 140 and the two-reshape adaLN 141:
+ * the overlapping cut windows count one site several times.
+ */
+test.skipIf(!ASSETS_AVAILABLE)(
+  "with fusion off, the real DiT's silu 2 / rope 56 / adaln 85 all come out as fusion candidates",
+  async () => {
+    const graph = await readAnimaGraph("transformer", "f16");
+    for (const sequence of [4096, 1024]) {
+      const label = `S=${sequence}`;
+      const { plan, context } = planDistributionFusions(graph, ditShapes(sequence), {
+        [DISABLED_FUSION_RULES]: "all",
+      });
+      assertEquals(plan.counts, NONE, `${label}: precondition — no rule grabs anything`);
+      const rows = fusionCandidates(plan.steps, context, UNCUT_WINDOW);
+      assertEquals(
+        rows.filter((row) => row.hitLimit).map((row) => row.form),
+        [],
+        `${label}: precondition — no window at the limit`,
+      );
+      const adaln = (reshapes: number) => [
+        "layer_norm",
+        ...Array.from({ length: reshapes }, () => "reshape"),
+        "add",
+        "mul",
+        "add",
+      ];
+      assertEquals(
+        {
+          silu: opSequenceCount(rows, ["sigmoid", "mul"]),
+          rope: opSequenceCount(rows, ["slice", "slice", "neg", "cat", "mul", "mul", "add"]),
+          adaln: opSequenceCount(rows, adaln(2)) + opSequenceCount(rows, adaln(3)),
+        },
+        { silu: 2, rope: 56, adaln: 85 },
+        label,
+      );
     }
   },
 );
