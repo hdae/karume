@@ -20,7 +20,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
-| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block and the expert linear, word for word on the browser's backend | `/kernel-check` | done |
+| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block, the expert linear and the built-in fusions against their unfused plans, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1308,9 +1308,10 @@ tests, not a copy.
 | f16 attention scores (S) | `gpu_score_f16_store_test.ts` | The store of `attentionScoreStorage: "f16"` writes what host rounding writes (2 cases). It goes through `pack2x16float`, whose rounding WGSL leaves open: PASS means every word matches one rounding, to nearest or toward zero, and the `rounding` requirement names which. FAIL means anything else, a mix of the two included. | nothing optional |
 | Bidirectional block (Gemma 4 12B images) | `gpu_state_bidirectional_test.ts` | The sliding ①ₜ with `GenerationRun.bidirectionalRows` (ADR 0144) writes every S word of the same kernel run with every score kept plus a host mirror of the predicate (33 cases: 12B's sliding shape and a small window, P = 0 / 17 / 1000 / 5000, four row layouts, plus one image chunk). The node test also runs predicate mutants that must mismatch; the page does not run them. | nothing optional |
 | Expert linear (Gemma 4 26B A4B) | `gpu_expert_linear_test.ts` | `expert_linear` with f16 steps (ADR 0145) writes, for every pick, the words of `linear`'s sequential i4 GEMV on that expert with the steps widened to f32 (48 cases: gate_up and down × 3 tokens × 8 picks with repeated ids); every output starts as a NaN pattern, so an unwritten word mismatches too. | nothing optional |
+| Fusion rules: fused vs unfused | the twin-graph tests of the fusion rules (`gpu_gated_residual_fusion_test.ts`, `gpu_silu_fusion_test.ts`, `gpu_adaln_fusion_test.ts`, `gpu_rope_fusion_test.ts`, `gpu_upsample2x_fusion_test.ts`, `gpu_rms_norm_rope_fusion_test.ts`, `gpu_linear_prologue_fusion_test.ts`, `gpu_attention_permute_fusion_test.ts`, `gpu_row_block_attention_test.ts`, `gpu_rms_norm_add_fusion_test.ts`, `gpu_gelu_mul_static_quantize_fusion_test.ts`, `gpu_linear_static_quantize_session_test.ts`) | Each built-in fusion's output equals the same values run node by node — a plain Session with an interposed zero-dispatch reshape, without the opt-in, or without the forced row blocks — word for word, with NaN by class or by payload as each case declares, and the fusion counter shows the expected hits on the fused side and 0 on the plain side, plus the dispatches where the test pins them (ADR 0147 decision 9, layer 1; 372 cases in 13 parts, one per rule: gated residual 9, SiLU 3, adaLN 11, RoPE 23, upsample x2 1, rmsNormRope 3, linear prologue 20, attention permutes 5 + 4 online sg32, row-block attention 15, RMS→add 200, gelu→mul→SRQ 54, linear→SRQ 24). The node tests also keep what is no twin on the given device (census, counterexamples, capped-limit grid-stride runs, the online wg routes); the page does not run those. | the linear prologue part: WGSL `packed_4x8_integer_dot_product`; the online sg32 part: a device whose online attention takes the sg32 form (subgroups and a linear lane mapping). Elsewhere that part reads as not run |
 
 The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
-next to a check runs that check; **Run all** runs the nine in order; Cancel stops before the next
+next to a check runs that check; **Run all** runs the ten in order; Cancel stops before the next
 case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
 earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
 linear lane mapping.
@@ -1319,7 +1320,7 @@ Each check gets a verdict:
 
 - **PASS** — every part ran the number of cases its check exports (`GEMV_SUBGROUP_CASES`,
   `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`, `GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`,
-  `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`; the counts in the table above) and the
+  `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`, `FUSION_TWIN_CASES`; the counts in the table above) and the
   states-attention check its `STATE_ATTENTION_MUTANTS` mutants and matrix rows, every criterion of
   every case has 0 failing words, every requirement is met, every mutant mismatched on its case and
   every mutant matrix row passed;
@@ -1330,11 +1331,14 @@ Each check gets a verdict:
 - **not available** — the device lacks a feature the check needs (the subgroup checks without
   `subgroups` / `subgroup-size-control` / WGSL `subgroup_id`). This is not a pass: the page's
   overall verdict is then **INCOMPLETE** at best;
+- **INCOMPLETE** — the check ran and nothing failed, but the device lacked what one of its parts
+  needs (the fusion check's linear prologue or online sg32 part); the part table shows that part as
+  "not run here" with the reason. Not a pass either: the overall verdict is **INCOMPLETE** at best;
 - **ERROR** — the harness itself failed: a WebGPU error caught by the validation, out-of-memory or
   internal error scope every case runs under, an uncaptured WebGPU error, a lost device, or a
   mutation anchor that no longer matches the generated WGSL; the error is shown in full.
 
-The overall verdict covers all nine checks: a check that was not run counts like one that is not
+The overall verdict covers all ten checks: a check that was not run counts like one that is not
 available, so running one check alone gives **INCOMPLETE** at best (the result card lists the
 checks not run). The release check is a **Run all**.
 
@@ -1358,9 +1362,11 @@ anything the product runs, so on D3D12 it is the one that must read PASS.
 cancelled or aborted (it holds every check run on the page so far with the current device; a
 reacquired device starts a new record): the environment fields (as on the other pages — adapter,
 device features, WGSL language features, limits), `adapterFeatures`, the overall `verdict` and
-every check with its `verdict` — `not-run` for one that was not run — and `seconds`, and either
+every check with its `verdict` — `not-run` for one that was not run, `incomplete` for one with a part
+not run here — and `seconds`, and either
 the reason it was not available, the error, or `countMismatches` (the counts that differ from the
-check's; empty when none do), the parts (summary, requirements and `results`:
+check's; empty when none do), the parts (summary — with `notRun`, the reason, for a part not run
+here — requirements and `results`:
 every case with each criterion's word count, failing words and first or worst failing word), the
 mutants, the mutant matrix, the fold classes and, for the states-attention check, `productVerdict`
 (the verdict outside the K-95 classes). While a run is in progress there is no record to download.

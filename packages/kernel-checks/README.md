@@ -7,7 +7,12 @@ backend a kernel rewrite relies on, in one implementation shared by
   `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts`,
   `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
   `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` and the
-  twin-graph tests of the fusion rules — Dawn on the development machine), and
+  twin-graph tests of the fusion rules (`gpu_gated_residual_fusion_test.ts`, `gpu_silu_fusion_test.ts`,
+  `gpu_adaln_fusion_test.ts`, `gpu_rope_fusion_test.ts`, `gpu_upsample2x_fusion_test.ts`,
+  `gpu_rms_norm_rope_fusion_test.ts`, `gpu_linear_prologue_fusion_test.ts`,
+  `gpu_attention_permute_fusion_test.ts`, `gpu_row_block_attention_test.ts`,
+  `gpu_rms_norm_add_fusion_test.ts`, `gpu_gelu_mul_static_quantize_fusion_test.ts`,
+  `gpu_linear_static_quantize_session_test.ts`) — Dawn on the development machine), and
 - the playground's `/kernel-check` page (`apps/playground` — the browser's own backend: D3D12 in
   Chrome on Windows, Metal on macOS).
 
@@ -25,12 +30,16 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | Bidirectional block of the sliding ①ₜ (`GenerationRun.bidirectionalRows`): every S word vs the same kernel keeping every score plus a host mirror of the predicate, u32 identity (ADR 0144) | `checkStateBidirectional` (and `stateBidirectionalMutants`, node test only) | nothing optional |
 | `expert_linear` with f16 steps at the 26B shapes: every pick's output words vs `linear`'s sequential i4 GEMV on that expert with the steps widened to f32, u32 identity (ADR 0145) | `checkExpertLinear` | nothing optional |
 | A fusion against the unfused plan of the same graph (a rule of `FUSION_RULES` or an annotation fold): two open Sessions run the same feeds, every compared output u32-identical with NaN by class or by payload, the fusion counter at the expected hits on the fused side and at 0 on the plain side, optionally each side's dispatches (class E — ADR 0147 decision 2) | `checkFusionTwin` | nothing optional |
+| The built-in fusions against their unfused plans (ADR 0147 decision 9, layer 1): the twin cases of the twelve twin-graph tests, one module per test under `src/fusion-twins/` with its graphs, inputs and loop, one part per rule (the attention permute rule in two: the routes any device takes, the online routes in the sg32 form) | `checkFusionTwins` (all thirteen parts in a fixed order); each module's `check…Twins` | the linear prologue part: WGSL `packed_4x8_integer_dot_product` (its dp4a cases); the sg32 part: a device whose online attention takes the sg32 form. Elsewhere the part is returned not run |
 
-The page does not run `checkFusionTwin` yet: the caller builds both Sessions, and the graphs and the
-ways of making the plain side (an interposed zero-dispatch reshape, an opt-in on one side only, a
-forced split, the test-only `DISABLED_FUSION_RULES` key) live in the runtime's twin-graph tests
-(`gpu_*_fusion_test.ts`, `gpu_fusion_twin_test.ts`). It returns one case per call, so it exports no
-case count.
+`checkFusionTwin` compares one twin and returns one case, so it exports no case count. The modules
+under `src/fusion-twins/` build both Sessions the way each twin-graph test made them (an interposed
+zero-dispatch reshape, an opt-in on one side only, a forced split of the fused side) and run their
+cases through it; each exports its builders for the node test's own cases, its check and its part's
+case count, and `checkFusionTwins` runs them all for the page (`FUSION_TWIN_CASES`, 372 cases). What
+is no twin on the given device stays in the node tests: census, counterexamples, grid-stride runs on
+a device with capped limits, comparisons with host expectations, raw-dispatch barrier tests and the
+online attention routes in the wg form (a device acquired without subgroups).
 
 A check does not assert. It returns structured results — per case, per criterion, the number of
 failing words and the first (identity) or worst (tolerance band) failing word as u32 — and the
@@ -41,10 +50,13 @@ internal error scopes and also fails on an uncaptured WebGPU error or a lost dev
 otherwise read back the buffers' initial contents for both runs of a case; a mutation anchor that
 no longer matches throws as well. Each check exports the number of cases each of its parts returns
 (`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
-`GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`) and the
+`GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`,
+`FUSION_TWIN_CASES` and each twin module's `…_TWIN_CASES`) and the
 mutant count
 (`STATE_ATTENTION_MUTANTS`); the tests and the page hold a run to them, so a part that ran no
-cases cannot pass.
+cases cannot pass. A part the device lacks something for comes back with `notRun` (the reason) and
+no cases: the tests' `assertCheckPart` fails on it, and the page reads it as not run (the check is
+INCOMPLETE, never a pass).
 
 The checks drive runtime internals (kernel WGSL generators, the dispatch harness and fixtures under
 `packages/runtime/tests/helpers` and `tests/fixtures/wgsl-baseline`) through relative imports, as

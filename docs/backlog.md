@@ -96,7 +96,10 @@ maintainer's ruling of 2026-11-06).
        where the path is requested (decisions 6 and 9).
     8. `/kernel-check` covers the fusions (fused against unfused, u32) and the default kernels; the tune sweep record and
        the `/kernel-check` record gain a backend field (how it is filled is an implementation-time item); where the per-GPU
-       evidence records live is decided with it (decision 9).
+       evidence records live is decided with it (decision 9). (Updated 2026-11-11: the fusions landed — the page's
+       "Fusion rules: fused vs unfused" runs the built-in fusion twins from `packages/kernel-checks/src/fusion-twins/`, the
+       cases the runtime's twin-graph tests run; so far run on Dawn only. The default kernels, the backend field and where
+       the records live remain.)
     9. Wiring: gemma forwards `linearCompute` once the derived check admits it; Wan's text stage passes umT5's options
        (wiring only — no umT5 `i8-a8` preset, perf-ledger K-80 / K-81) (decision 7).
     10. `packedStaticQuantize` passes NaN through (so it becomes E) (decisions 2 and 5).

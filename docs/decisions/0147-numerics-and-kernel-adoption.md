@@ -596,7 +596,11 @@ residency, and throws on limits that no option relaxes, are left out; recording 
    as the release runbook's `/kernel-check` step states); a new FAIL blocks. Other GPUs (Apple M2, Intel, AMD, ARM Mali …) are run when at hand; a backend not run is recorded as not run
    and does not block the release. WebGPU exposes no backend field, and inferring it from the user agent is
    speculation-grade; how the backend field is filled (inference from the user agent, entry by the person running the page,
-   or both) is an implementation-time item below.
+   or both) is an implementation-time item below. (Updated 2026-11-11: the page runs the built-in fusion twins — its entry
+   "Fusion rules: fused vs unfused" runs `checkFusionTwins` of `packages/kernel-checks`, the twin cases the runtime's
+   twin-graph tests run, from one implementation (372 cases in 13 parts, one per rule); a part the device cannot run reads
+   as not run. So far these cases have run on Dawn / Vulkan only. The default kernels, the backend field and the evidence
+   records are still to come.)
 2. **At run time.** Every default-on E path is checked on every device by a canary at Session construction — the fusion
    rules that run without an option (seven of the ten in `FUSION_RULES` today) and the three of decision 5:
    the fused and the unfused form on the same input, compared as u32. On a mismatch the runtime warns and drops that fusion.
