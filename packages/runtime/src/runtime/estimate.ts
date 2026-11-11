@@ -46,7 +46,7 @@
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
-import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
+import { parseStorageRoles, type StorageRoles } from "../gpu/pipeline-cache.ts";
 import {
   groupNormAttrs,
   numel,
@@ -66,12 +66,21 @@ import {
   type ExternalRuleName,
   type FusedStep,
   type FusionRuleName,
-  nodeStepSpan,
-  planAliases,
+  isExternalRuleName,
   planFusions,
   rowBlockLimit,
+  ruleFailure,
   sessionFusionRules,
 } from "./fusion.ts";
+import {
+  assertExternalOutputWritten,
+  assertExternalWrites,
+  type FusedStepLayout,
+  fusedStepLayout,
+  type OutputBookkeeping,
+  stepOutputs,
+  stepReleases,
+} from "./fused-step-layout.ts";
 import {
   allowedChunkRows,
   assertChunkBuckets,
@@ -208,27 +217,30 @@ export type AdmissionScenario = {
   /** Graph input buffers + output readback staging (exact). */
   readonly ioBytes: number;
   /**
-   * The bytes needed by the transient slot table = the demand side of the prepared backing
-   * (**approximate**).
+   * The bytes needed by the transient slot table = the demand side of the prepared backing.
    *
-   * Walks the pre-fusion node list (row-block attention in its post-fusion form) in declaration
-   * order, builds slot live ranges with the same allocation rules as the execution phase (use
-   * counts from `countUses`; graph outputs are pinned and never released; outputs that can be
-   * aliased are not allocated and use the input's backing under another name), and sums the regions
-   * assigned by the same placement function as the execution phase (placement by live ranges and
-   * offsets — ADR 0093). **The in-node temporaries of states-form attention (scores S and row
-   * statistics) are included** — they always appear regardless of whether fusion applies, and in
-   * capacity-bound graphs they dominate the intermediates (formula: {@link stateAttentionTemps}).
-   * **Row-block attention (ADR 0060) windows are included in their post-fusion form** — a window
-   * claimed by the same fusion plan as execution is counted as one row block's temporaries plus the
-   * output, not as the full width of the scores, mask-added scores and softmax output (ADR 0093
-   * addendum of 2026-10-10). **So is the linear prologue** (perf-ledger F-4 — with
-   * {@link EstimateOptions.linearCompute} `"a8"`, a producer folded into an i8a8 linear's step ①
-   * has no output, as in execution), **and so are the permutes a fused attention absorbs**
-   * (perf-ledger F-3 A4 / F-8 — with {@link EstimateOptions.attentionCompute} `"a8"`, counted as
-   * absent, with the head-major copies the attention makes in their place on the stages that need
-   * them). Other in-node temporaries and intermediates folded
-   * away by other fusions are not accounted for ({@link AdmissionReport.unaccounted}).
+   * Walks **the step list of the same fusion plan as execution** (`planFusions` under the
+   * Session's own fusion context — the knobs, rules and weight facts of {@link EstimateOptions}), in
+   * the order execution turns it into recipes, builds slot live ranges with the same allocation
+   * rules as the execution phase (use counts from `countUses`; graph outputs are pinned and never
+   * released; outputs that alias are not allocated and use the input's backing under another name),
+   * and sums the regions assigned by the same placement function as the execution phase (placement
+   * by live ranges and offsets — ADR 0093). **Every fused step is counted in its post-fusion form**,
+   * for built-in and external rules alike (ADR 0148): its single output and the temporaries its rule
+   * declares, with the same schedule and the same per-binding reads and writes as execution
+   * (fused-step-layout.ts and the kernels' WGSL storage declarations), so an intermediate a fusion
+   * folds away is not counted — row-block attention (ADR 0060) as one row block's temporaries plus
+   * the output, not the full width of the scores (ADR 0093 addendum of 2026-10-10). **So are the node
+   * steps that absorb their neighbours**: a producer folded into an i8a8 linear's step ①
+   * (perf-ledger F-4) and the permutes a fused attention absorbs (perf-ledger F-3 A4 / F-8) have no
+   * output, as in execution. **The in-node temporaries of states-form attention (scores S and row
+   * statistics) are included** — in capacity-bound graphs they dominate the intermediates (formula:
+   * {@link stateAttentionTemps}) — and so are those of the fused attention op, the i8a8 linear
+   * (with {@link EstimateOptions.linearCompute} `"a8"`), group_norm and the two-phase argmax / topk.
+   * The node temporaries still not counted are named in {@link AdmissionReport.unaccounted}.
+   * NOTE: a plain node is planned as one dispatch that reads its inputs and writes its outputs (the
+   * placement keeps a value read and a value written by one dispatch in separate regions), so a
+   * node whose kernels bind narrower sets can be placed differently from execution.
    */
   readonly workspaceBytes: number;
 };
@@ -532,9 +544,9 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
    *
    * The estimate plans fusion with them, as execution does, through the same mapping and the same
    * checks as Session construction (`sessionOptionsViolation`, so a combination no Session accepts
-   * fails loudly here too). The windows these fusions take are still counted in their pre-fusion
-   * form ({@link AdmissionReport.unaccounted}); what they change in the counted bytes is which
-   * windows are left to row-block attention, the linear prologue and the absorbed permutes.
+   * fails loudly here too), and counts the windows these fusions take in their post-fusion form
+   * ({@link AdmissionScenario.workspaceBytes}). A knob omitted is planned at the runtime default, as
+   * for the Session.
    */
   readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
   /** See {@link fuseRmsNormAdd}. */
@@ -559,9 +571,11 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
    *
    * MUST: when the list is non-empty, {@link maxStorageBufferBindingSize} and
    * {@link maxComputeWorkgroupsPerDimension} are both required (a rule's matcher may read them).
-   * NOTE: the windows a rule takes are counted in their pre-fusion form, and the temporaries its
-   * steps declare are not counted ({@link AdmissionReport.unaccounted}); a window a rule takes from
-   * row-block attention, the linear prologue or an absorbed permute is counted unfolded too.
+   * A window a rule takes is counted in its post-fusion form: the step's output and the temporaries
+   * it declares, with the reads and writes of its kernels' WGSL storage declarations. A step
+   * execution refuses (a dispatch that writes a binding other than the output or a temporary, an
+   * output no dispatch writes, a malformed operand) makes the estimate fail with the same refusal,
+   * naming the rule.
    */
   readonly fusionRules?: SessionOptions["fusionRules"];
   /**
@@ -580,8 +594,8 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
  * field).
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "Intermediates that fusions other than row-block attention, the linear prologue and the attention's absorbed permutes fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted, a producer folded into an i8a8 linear is counted as absent when linearCompute is passed, and a permute absorbed by a fused attention is counted as absent with the head-major copies that attention makes in its place when attentionCompute 'a8' is passed)",
-  "Quantized intermediates of linear i8a8 whose weight is borrowed (SessionOptions.sharedWeights — its storage is the lender's and unknown to the estimate, so the linear is counted as a plain one; with any other weight they are counted when linearCompute 'a8' is passed). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others)",
+  "Fusion the options passed do not describe: the estimate plans fusion as a Session built with the same options does (the fusion knobs, the fusionRules given, the weights' storage from the residency plan) and counts every fused step it plans, built-in or external, after fusion with the temporaries its rule declares, and the producers and permutes a node step absorbs as absent; a knob omitted is planned at the runtime default, so a window a Session folds under a knob the estimate was not given is counted in its unfused form",
+  "Quantized intermediates of linear i8a8 whose weight is borrowed (SessionOptions.sharedWeights — its storage is the lender's and unknown to the estimate, so the linear is counted as a plain one; with any other weight they are counted when linearCompute 'a8' is passed), and the in-node temporaries of conv3d i8a8 (convCompute 'a8' — the estimate takes no convCompute). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op with the head-major copies it makes for absorbed permutes (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others) — and so are those of group_norm and of the two-phase argmax / topk",
   "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
   "The implementation staging of queue.writeBuffer (not released until the submit completes)",
   "The retirement window (slot backings retired by a budget overrun / the plan LRU eviction are not destroyed before the next plan's allocation and live until the cleanup after flush, so that run holds the retired backings and the new ones at the same time)",
@@ -978,184 +992,128 @@ const stateAttentionTemps = (
 };
 
 /**
- * Looks up, among the fusion plan's steps (the same {@link planFusions} as the execution phase),
- * those the estimate counts **in post-fusion form**, as "index of the window's first node → step"
- * (ADR 0093 addendum of 2026-10-10).
+ * The allocation program of one fused step of any rule, built-in or external — the bookkeeping of
+ * `#buildStep` / `#buildFused` in recipe-builder, taken from the same device-free derivation
+ * (fused-step-layout.ts): the output spec from {@link stepOutputs}, the temporaries in allocation
+ * order and what every binding points at from {@link fusedStepLayout}, the release list from
+ * {@link stepReleases}. What a binding reads or writes comes from **the dispatch's WGSL storage
+ * declarations**, as in execution ({@link parseStorageRoles}, memoised per pipeline key in `roles`
+ * for one estimate call — the pipeline cache's key is execution's identity of a kernel too).
  *
- * Row-block attention, the linear prologue and the attention's absorbed permutes. Counted in the
- * pre-fusion list, the binding limit would hit the full width of the scores, mask-added scores and
- * softmax output that fusion never materialises, and only the estimate of shapes that do run would
- * throw (the demand shape of ADR 0060). A linear with a folded producer (perf-ledger F-4) is a plain
- * node step that stands for the producer at the key and the linear right after it; counted in the
- * pre-fusion list, the producer's output (454 MB at the Wan2.2 33-frame FFN) would stay in a peak
- * execution never has. An attention that absorbed its permutes (perf-ledger F-3 A4 / F-8) is a plain
- * node step that stands for the absorbed input permutes at the key, the attention right after them
- * and, with `o`, the output permute after it ({@link nodeStepSpan} nodes); the permutes' copies
- * never exist as node outputs, and the copies the attention makes itself are its own temporaries
- * ({@link fusedAttentionProgram}).
- * Other rules are still counted in the pre-fusion list (the `unaccounted` side).
- * MUST: plan under the Session's own context (`sessionFusionContext` on {@link EstimateFusionFacts})
- * — the prologue is decided from the linear seat and the weights' storage, the input permutes from
- * the attention seat, the output permute from `attentionRoute` on the seats and the device facts
- * (only the online kernel absorbs it), and every other rule's window, which can take a node one of
- * these would have, from the rest of the context.
- *
- * MUST: pass the same binding limit as the limit check of the allocation program (the row-block
- * count is decided only by this value and the budget — dividing by another value would make the
- * estimate alone count temporaries with a block count different from execution). The budget is the
- * knobs' `attentionRowBlockMaxBytes`, as in execution (ADR 0124 decision 7).
+ * A bind that is a weight (an initializer — resident for the Session's lifetime) and a
+ * `weightScale` operand have no slot, as in execution's transient program (a resident source).
+ * An external rule's dispatches are checked as execution checks them (`assertExternalWrites` per
+ * dispatch, `assertExternalOutputWritten` after the last), and a failure while they are resolved is
+ * rethrown naming the rule (`ruleFailure`), so the estimate returns no number for a step execution
+ * refuses. A binding with no WGSL storage declaration fails with execution's message
+ * (`buildTransientProgram` in recipe.ts), outside the rule's wrapping as there.
  */
-const postFusionSteps = (
-  nodes: readonly NodePlan[],
-  uses: ReadonlyMap<string, number>,
-  outputNames: ReadonlySet<string>,
-  bindingLimit: number,
-  fusion: EstimateFusionFacts,
-): ReadonlyMap<number, ExecStep> => {
-  const { maxComputeWorkgroupsPerDimension, ...facts } = fusion;
-  const { steps } = planFusions(
-    nodes,
-    sessionFusionContext({
-      ...facts,
-      useCounts: uses,
-      outputNames,
-      limits: { maxStorageBufferBindingSize: bindingLimit, maxComputeWorkgroupsPerDimension },
-    }),
-  );
-  const found = new Map<number, ExecStep>();
-  // The scan lays out "passthrough nodes → fused step" per window and advances by the window width,
-  // so the running node count of the step list always points at the start of the next window.
-  // Row-block attention windows have no passthrough (window = chain), so this running count is
-  // their start in the pre-fusion list as is. A node step that absorbed its neighbours (a folded
-  // producer, absorbed permutes) stands for `nodeStepSpan` contiguous nodes. A window that defers
-  // nodes (rmsNormRope — "Deferred nodes" in fusion.ts) lays out its fused step first and its
-  // deferred nodes after it, so inside that region the count is the position in the scanned list,
-  // and it is the pre-fusion position again once they are laid out. No step kept here starts in
-  // such a region: the deferred nodes are `rms_norm` / `reshape`, which head none of them (the
-  // MUST on `FusionMatch.others`).
-  let index = 0;
-  for (const step of steps) {
-    if (step.kind === "node") {
-      const span = nodeStepSpan(step);
-      if (span === 1) {
-        index += 1;
-        continue;
-      }
-      // MUST: the step's output is the last of its nodes in the unfused list (the linear after its
-      // producer, the attention after its input permutes or its output permute) — the same
-      // bookkeeping-break check as row-block attention's below.
-      if (nodes[index + span - 1]?.outputs[0]?.name !== step.plan.outputs[0].name) {
-        throw new ExecutionError(
-          `Estimate: the node step '${step.plan.outputs[0].name}' that absorbed ${span - 1} node(s) does not match the unfused node list at index ${index}`,
-        );
-      }
-      found.set(index, step);
-      index += span;
-      continue;
-    }
-    if (step.rule === "rowBlockAttention") {
-      // MUST: if the end of the chain does not match the fused step's output, bookkeeping is broken
-      // (silently replacing another node would make the estimate count a list different from
-      // execution).
-      if (nodes[index + step.nodeCount - 1]?.outputs[0]?.name !== step.outputName) {
-        throw new ExecutionError(
-          `Estimate: the window of row-block attention '${step.outputName}' does not match the unfused node list at index ${index}`,
-        );
-      }
-      found.set(index, step);
-    }
-    index += step.nodeCount;
-  }
-  return found;
-};
-
-/**
- * The allocation program of one fused row-block attention step (a copy of the bookkeeping side of
- * `#buildStep` / `#buildFused` in recipe-builder).
- *
- * The output is a single-output backing (`numel × 4`), the temporaries keep the lifetimes the rule
- * declared, and releases are the external inputs with repeats ({@link FusedStep.ins}). Dispatch reads
- * and writes come from **the WGSL storage declarations**, as in the execution phase
- * ({@link parseStorageRoles} — no hand-written table).
- *
- * MUST: row-block attention only. It copies only the forms this rule uses (every dispatch declares
- * its operands; no resident scale is bound), not the forms of other rules (the default order when
- * operands are omitted, `weightScale`). Passing another rule would make the estimate silently count
- * an allocation program different from execution, so it fails loudly on both the rule name and the
- * form. To extend it to other rules, add the forms to copy here first, then widen the callers'
- * targets.
- */
-const fusedTransientStep = (
+const fusedStepProgram = (
   step: FusedStep,
-  uses: ReadonlyMap<string, number>,
-  outputNames: ReadonlySet<string>,
+  graph: IrGraph,
+  bookkeeping: OutputBookkeeping,
+  roles: Map<string, StorageRoles>,
 ): TransientStepSpec => {
-  const where = `Estimate: fusion rule '${step.rule}' (output '${step.outputName}')`;
-  if (step.rule !== "rowBlockAttention") {
-    throw new ExecutionError(`${where} cannot be counted after fusion (row-block attention only)`);
-  }
-  const output: TransientRef = { kind: "value", name: step.outputName };
-  const bindRef = (index: number): TransientRef => {
-    const name = step.binds[index];
-    // MUST: an out-of-range index fails loudly (matching the same check in the execution phase's
-    // recipe-builder — silently creating a reference without a name would make the estimate alone
-    // return a number for a shape on which the execution phase fails).
-    if (name === undefined) {
-      throw new ExecutionError(
-        `${where}: bind index ${index} is outside the ${step.binds.length} declared binds`,
-      );
-    }
-    return { kind: "value", name };
+  const external = isExternalRuleName(step.rule);
+  const rolesOf = (dispatch: FusedStep["dispatches"][number]): StorageRoles => {
+    const known = roles.get(dispatch.key);
+    if (known !== undefined) return known;
+    const parsed = parseStorageRoles(dispatch.wgsl());
+    roles.set(dispatch.key, parsed);
+    return parsed;
   };
-  const dispatches = step.dispatches.map((dispatch): TransientDispatchSpec => {
-    if (dispatch.operands === undefined) {
-      throw new ExecutionError(
-        `${where}: dispatch '${dispatch.key}' does not declare its operands`,
-      );
-    }
-    const roles = parseStorageRoles(dispatch.wgsl());
+  const output: TransientRef = { kind: "value", name: step.outputName };
+  let resolved: {
+    readonly layout: FusedStepLayout;
+    readonly dispatches: readonly {
+      readonly roles: StorageRoles;
+      readonly refs: readonly (TransientRef | undefined)[];
+    }[];
+  };
+  try {
+    const layout = fusedStepLayout(step);
+    const dispatchRoles: StorageRoles[] = [];
+    const dispatches = step.dispatches.map((dispatch, index) => {
+      const dispatchRole = rolesOf(dispatch);
+      const { operands } = layout.dispatches[index];
+      if (external) {
+        assertExternalWrites(step, index, operands, dispatchRole);
+        dispatchRoles.push(dispatchRole);
+      }
+      const refs = operands.map((operand): TransientRef | undefined => {
+        switch (operand.kind) {
+          case "output":
+            return output;
+          case "temp":
+            return { kind: "temp", id: operand.temp };
+          case "weightScale":
+            return undefined;
+          case "bind":
+            return Object.hasOwn(graph.initializers, operand.name)
+              ? undefined
+              : { kind: "value", name: operand.name };
+          case "unresolved":
+            // A bind index outside the binds, or a temporary bound before its allocation — the
+            // failure execution throws where it resolves the binding.
+            throw new ExecutionError(`fusion rule '${step.rule}': ${operand.reason}`);
+          default: {
+            const unhandled: never = operand;
+            throw new ExecutionError(`Unhandled fused operand: ${JSON.stringify(unhandled)}`);
+          }
+        }
+      });
+      return { roles: dispatchRole, refs };
+    });
+    if (external) assertExternalOutputWritten(step, layout, dispatchRoles);
+    resolved = { layout, dispatches };
+  } catch (error) {
+    if (!external) throw error;
+    throw ruleFailure(step.rule, "resolving its step's dispatches", error);
+  }
+  const dispatches = resolved.dispatches.map(({ roles: dispatchRole, refs }, index) => {
     const reads: TransientRef[] = [];
     const writes: TransientRef[] = [];
-    dispatch.operands.forEach((operand, slot) => {
-      if (operand.kind === "weightScale") {
-        throw new ExecutionError(
-          `${where}: dispatch '${dispatch.key}' has a resident scale bound to it`,
-        );
-      }
-      const ref: TransientRef =
-        operand.kind === "temp"
-          ? { kind: "temp", id: operand.id }
-          : operand.kind === "output"
-            ? output
-            : bindRef(operand.index);
+    refs.forEach((ref, slot) => {
+      if (ref === undefined) return;
       // Binding 0 is params, so the operands start at binding 1.
       const binding = slot + 1;
-      if (roles.writes.has(binding)) writes.push(ref);
-      else if (roles.reads.has(binding)) reads.push(ref);
+      if (dispatchRole.writes.has(binding)) writes.push(ref);
+      else if (dispatchRole.reads.has(binding)) reads.push(ref);
       else {
         throw new ExecutionError(
-          `${where}: dispatch '${dispatch.key}' binding ${binding} has no WGSL` +
-            " storage declaration (its read / read-write role cannot be determined)",
+          `dispatch '${step.dispatches[index].key}' binding ${binding} has no WGSL storage declaration` +
+            " (the read / read-write role cannot be taken from it)",
         );
       }
     });
     return { reads, writes };
   });
   return {
-    outputs: [
-      {
-        name: step.outputName,
-        kind: "alloc",
-        byteLength: numel(step.outputShape) * 4,
-        uses: uses.get(step.outputName) ?? 0,
-        pinned: outputNames.has(step.outputName),
-      },
-    ],
-    temps: step.temps,
+    outputs: transientOutputs(step, bookkeeping),
+    temps: resolved.layout.temps,
     dispatches,
-    releases: step.ins,
+    releases: stepReleases(step),
   };
 };
+
+/**
+ * The output specs of one step as the transient plan takes them ({@link stepOutputs} — the same
+ * call execution makes; an alias points at the value name of the step's first input, which the
+ * plan resolves to no slot when it is a graph input or a weight, as execution's resident source).
+ */
+const transientOutputs = (step: ExecStep, bookkeeping: OutputBookkeeping): TransientOutputSpec[] =>
+  stepOutputs<string | undefined>(
+    step,
+    bookkeeping,
+    step.kind === "node" ? step.plan.node.ins[0] : undefined,
+  ).map((output) => ({
+    name: output.name,
+    kind: output.kind,
+    byteLength: output.kind === "alloc" ? output.byteLength : 0,
+    source: output.kind === "alias" ? output.source : undefined,
+    uses: output.uses,
+    pinned: output.pinned,
+  }));
 
 /**
  * The execution options the intermediate accounting reads (the same values as the Session — after
@@ -1167,20 +1125,24 @@ type TransientKnobs = {
   /** The budget per row-block temporary (`undefined` = no budget — ADR 0124). */
   readonly attentionRowBlockMaxBytes: number | undefined;
   /**
-   * The compute form of fused attention and the storage form of S (defaults already filled in). They
-   * also decide the absorbed permutes ({@link postFusionSteps}: the compute form the input ones, the
-   * route on both and {@link attentionDevice} the output one).
-   */
-  readonly seats: AttentionSeats;
-  /**
    * The device facts of the online kernel's route: `EstimateOptions.attentionDevice`, or
    * {@link UNREAD_ATTENTION_DEVICE} on a seat whose route never reads them (the entry of
    * {@link estimateGraphMemory} rejects `"none"` without the facts).
    */
   readonly attentionDevice: AttentionDeviceFacts;
-  /** What the fusion pass plans under ({@link postFusionSteps}). */
+  /**
+   * What the fusion pass plans under ({@link transientSlotBytes}). Its knobs are also the seats the
+   * in-node accounting reads (the attention's compute form and S storage, the linear's compute form —
+   * the values Session construction fills in, read from this one place).
+   */
   readonly fusion: EstimateFusionFacts;
 };
+
+/** The attention seats of the fusion facts' knobs (the defaults Session construction fills in). */
+const attentionSeats = (knobs: TransientKnobs): AttentionSeats => ({
+  attentionCompute: knobs.fusion.knobs.attentionCompute,
+  attentionScoreStorage: knobs.fusion.knobs.attentionScoreStorage,
+});
 
 /**
  * The facts the estimate plans fusion under: the Session's ({@link SessionFusionFacts}) without the
@@ -1287,17 +1249,21 @@ const fusedAttentionBlocks = (
  * in two cases only: ① the window's whole score S (the first bmm's output) fits in one block under
  * the core default ② the budget is at most the core default (the limit is then the budget itself on
  * every device).
+ * The S bytes come from the step's own binds: its bind surface is `[q, kᵀ, mask, v]` with
+ * `q [H, M, D]` and `kᵀ [H, D, N]` (the rule's match), so S `[H, M, N]` is `H·M·N·4` bytes.
  */
 const assertRowBlockWindowCount = (
   step: FusedStep,
-  scores: NodePlan,
+  shapes: ReadonlyMap<string, readonly number[]>,
   limit: number | undefined,
   budget: number | undefined,
 ): void => {
   if (limit !== undefined) return;
   const core = CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
   if (budget !== undefined && budget <= core) return;
-  const scoreBytes = numel(scores.outputs[0].shape) * 4;
+  const [heads, queries] = shapeOf(shapes, step.binds[0]);
+  const keys = shapeOf(shapes, step.binds[1])[2];
+  const scoreBytes = heads * queries * keys * 4;
   if (scoreBytes <= core) return;
   throw new ExecutionError(
     `Estimate: row-block attention '${step.outputName}': the score S (${scoreBytes}B) does not fit in one block under the WebGPU core default binding limit (${core}B), so` +
@@ -1349,7 +1315,7 @@ const fusedAttentionProgram = (
   const [q, k, v] = attentionHeadMajorShapes(node.inputShapes, tokenMajor);
   const shape = { batch: q[0] * q[1], rows: q[2], cols: k[2], depth: q[3] };
   const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
-  const { seats } = knobs;
+  const seats = attentionSeats(knobs);
   const route = attentionRoute(seats, shape.depth, shape.cols, knobs.attentionDevice);
   const [qRef, kRef, vRef, maskRef] = reads;
   const violation = fusedAttentionViolation(
@@ -1450,6 +1416,9 @@ const fusedAttentionProgram = (
   return { temps, dispatches };
 };
 
+/** A plain node step of the fusion plan. */
+type NodeStep = Extract<ExecStep, { readonly kind: "node" }>;
+
 /**
  * Whether a linear takes execution's i8a8 path (`buildLinear` in recipe-builders/linear.ts): the one
  * route predicate `linearTakesI8a8` on the Session's linear seat (the fusion facts' knobs) and the
@@ -1470,24 +1439,174 @@ const linearTakesI8a8Route = (node: NodePlan, knobs: TransientKnobs): boolean =>
 };
 
 /**
- * Counts the GPU bytes of intermediate buffers (node outputs and fusion-rule temporaries) with **the
- * same planning function** as execution (ADR 0093 decision 4 — sharing {@link planTransients};
+ * The allocation program of one node step (a plain node of the step list, re-pointed where it
+ * absorbed its neighbours): its outputs from {@link stepOutputs} (an aliasing step allocates nothing
+ * and issues no dispatch — `step.aliasesInput`, the decision execution reads), its in-node
+ * temporaries and dispatches, and its release list from {@link stepReleases}.
+ */
+const nodeStepProgram = (
+  step: NodeStep,
+  bookkeeping: OutputBookkeeping,
+  stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
+  limit: number | undefined,
+  knobs: TransientKnobs,
+): TransientStepSpec => {
+  const { stateAttentionReduce, fullStateStorage, attentionRowBlockMaxBytes } = knobs;
+  const { plan: node, tokenMajor, aliasesInput: isAlias } = step;
+  // MUST: absorbed permutes reach only a fused attention (the same check as execution's
+  // recipe-builder — counting another node with them would return a number for a plan execution
+  // rejects).
+  if (tokenMajor !== undefined && (node.contract.kind !== "attention" || isStateAttention(node))) {
+    throw new ExecutionError(
+      `Estimate: ${node.node.op} carries absorbed permutes (perf-ledger F-3 / F-8), which only a fused attention executes`,
+    );
+  }
+  const reads: TransientRef[] = node.node.ins.map((name) => ({ kind: "value", name }));
+  const outputRefs: TransientRef[] = node.outputs.map((out) => ({
+    kind: "value",
+    name: out.name,
+  }));
+  const temps: TransientTempSpec[] = [];
+  const dispatches: TransientDispatchSpec[] = [];
+  if (isStateAttention(node)) {
+    // Copy the execution phase's 2 / 3 dispatches and temporary lifetimes per row block.
+    // MUST: scores and stats (when not fused) are both allocated right before QK, in that order,
+    // and both are released right after PV — the order of `buildStateAttention` /
+    // `buildReadonlyStateAttention`. Allocating stats after QK gives the same plan only while no
+    // release falls between QK and the statistics; the copy keeps execution's program instead.
+    // The readonly variant (the borrower's cross-attention — ADR 0096; ins is q only) reads K/V
+    // from external slots and has no k / v inputs for this step. Read references cover **only the
+    // inputs that exist** (referencing a missing name would make the transient plan fail on an
+    // undefined reference).
+    const [q, k, v] = reads;
+    // Execution rejects numeric variants × states form before taking temporaries (same test, same
+    // message as execution).
+    const [qShape, kShape] = node.inputShapes;
+    const readonly = stateReadonly(node.node.attrs, `nodes (${node.node.op})`);
+    const variantViolation = stateAttentionVariantViolation(
+      readonly
+        ? `attention (readonly) [${qShape.join(",")}]`
+        : `attention (states) [${qShape.join(",")}] × [${kShape.join(",")}]`,
+      readonly ? "readonly" : "states",
+      attentionSeats(knobs),
+    );
+    if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
+    const blocks = stateAttentionTemps(
+      node,
+      stateShapes,
+      limit,
+      attentionRowBlockMaxBytes,
+      stateAttentionReduce,
+      fullStateStorage,
+    );
+    for (const temp of blocks) {
+      const base = dispatches.length;
+      const fused = temp.statsBytes === 0;
+      const last = base + (fused ? 1 : 2);
+      const scores: TransientRef = { kind: "temp", id: temps.length };
+      temps.push({ byteLength: temp.scoreBytes, allocBefore: base, releaseAfter: last });
+      dispatches.push({ reads: k === undefined ? [q] : [q, k], writes: [scores] });
+      if (fused) {
+        dispatches.push({ reads: v === undefined ? [scores] : [scores, v], writes: outputRefs });
+      } else {
+        const stats: TransientRef = { kind: "temp", id: temps.length };
+        temps.push({ byteLength: temp.statsBytes, allocBefore: base, releaseAfter: last });
+        dispatches.push({ reads: [scores], writes: [stats] });
+        dispatches.push({
+          reads: v === undefined ? [scores, stats] : [scores, stats, v],
+          writes: outputRefs,
+        });
+      }
+    }
+  } else if (node.contract.kind === "attention") {
+    // In-node temporaries of a fused attention op (no states field): S, row statistics, i8a8
+    // quantisation temporaries.
+    const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs, tokenMajor);
+    temps.push(...program.temps);
+    dispatches.push(...program.dispatches);
+  } else if (node.contract.kind === "groupNorm") {
+    // The two in-node temporaries of group_norm (partial sums, per-row mean / rstd) over its
+    // five dispatches, with the lifetimes `buildGroupNorm` declares (the same layout function
+    // — kernels/group-norm.ts).
+    const { groups } = groupNormAttrs(node.node.attrs, `nodes (${node.node.op})`);
+    const bytes = groupNormTempBytes(groupNormLayout(node.outputs[0].shape, groups));
+    const partials: TransientRef = { kind: "temp", id: temps.length };
+    const stats: TransientRef = { kind: "temp", id: temps.length + 1 };
+    temps.push({ byteLength: bytes.partials, allocBefore: 0, releaseAfter: 3 });
+    temps.push({ byteLength: bytes.stats, allocBefore: 0, releaseAfter: 4 });
+    const [x] = reads;
+    for (let pass = 0; pass < 2; pass += 1) {
+      dispatches.push({ reads: [x, stats], writes: [partials] });
+      dispatches.push({ reads: [partials], writes: [stats] });
+    }
+    dispatches.push({ reads: [x, stats, ...reads.slice(1)], writes: outputRefs });
+  } else if (linearTakesI8a8Route(node, knobs)) {
+    // The i8a8 linear's two node temporaries over its two dispatches, with the lifetimes
+    // `buildLinearI8a8` declares (the same bytes function — kernels/linear-i8a8.ts): ① quantize reads
+    // the input (a folded producer's input with a prologue — the re-pointed plan) and writes `xq`
+    // and `xs`; ② the GEMM reads `xq`, the weight, the bias and `xs` and writes the output; both are
+    // released after ②.
+    const [x, weight] = node.inputShapes;
+    const bytes = linearI8a8TempBytes(numel(x.slice(0, -1)), weight[1]);
+    const xq: TransientRef = { kind: "temp", id: temps.length };
+    const xs: TransientRef = { kind: "temp", id: temps.length + 1 };
+    temps.push({ byteLength: bytes.xq, allocBefore: 0, releaseAfter: 1 });
+    temps.push({ byteLength: bytes.xs, allocBefore: 0, releaseAfter: 1 });
+    dispatches.push({ reads: [reads[0]], writes: [xq, xs] });
+    dispatches.push({ reads: [xq, ...reads.slice(1), xs], writes: outputRefs });
+  } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
+    // Reduce from the partial maxima to the smallest index. topk's merge also reads the value
+    // bits of the original input.
+    const partial: TransientRef = { kind: "temp", id: temps.length };
+    temps.push({
+      byteLength: selectionSplitTempBytes(node),
+      allocBefore: 0,
+      releaseAfter: 1,
+    });
+    dispatches.push({ reads, writes: [partial] });
+    dispatches.push({
+      reads: node.node.op === "topk" ? [partial, ...reads] : [partial],
+      writes: outputRefs,
+    });
+  } else if (!isAlias) {
+    dispatches.push({ reads, writes: outputRefs });
+  }
+  // Aliases consume their input too (counted in `uses`), so every node releases its inputs with
+  // repeats.
+  return {
+    outputs: transientOutputs(step, bookkeeping),
+    temps,
+    dispatches,
+    releases: stepReleases(step),
+  };
+};
+
+/**
+ * Counts the GPU bytes of intermediate buffers (node outputs and node / fused-step temporaries) with
+ * **the same planning function** as execution (ADR 0093 decision 4 — sharing {@link planTransients};
  * meets ADR 0070 decision 5's "the same rule as execution" by sharing the function). Returns the sum
  * of regions (`totalBytes`).
  *
- * MUST: build the allocation program from the pre-fusion node list and replace only the windows of
- * row-block attention with the same fused steps as the execution phase (ADR 0093 addendum of
- * 2026-10-10), each linear-prologue pair with its linear's re-pointed plain node (perf-ledger F-4)
- * and each attention with its absorbed permutes with the attention's re-pointed plain node
- * (perf-ledger F-3 A4 / F-8) — all from {@link postFusionSteps}. Intermediates folded by other fusions and fusion-rule
- * temporaries are on the `unaccounted` side. Plain nodes' dispatches are approximated as one per
- * node (reads = `ins`, writes = `outs`), giving the usage-scope rule for separate regions the same
- * counterparts in the same direction as the execution phase. States-form attention and fused
- * attention ops (no states field — {@link fusedAttentionProgram}) copy the execution phase's three
- * dispatches (①qk writes scores → ②stats reads scores and writes row statistics → ③pv reads both
- * and writes the output) per row block — because the overlap between temporaries and the way regions
- * split affect the sum (fused attention also copies the i8a8 quantisation temporaries and dispatches
- * — ADR 0124 decision 7).
+ * MUST: build the allocation program from **the step list of the same fusion plan as execution**
+ * ({@link planFusions} under `sessionFusionContext` on {@link EstimateFusionFacts}), in its order —
+ * the order execution turns into recipes, deferred nodes (rmsNormRope — "Deferred nodes" in
+ * fusion.ts) and in-window passthroughs where the list puts them. A fused step of any rule is
+ * {@link fusedStepProgram} (the bookkeeping execution derives from fused-step-layout.ts); a node
+ * step is {@link nodeStepProgram} on its plan — the re-pointed plan of a linear with a folded
+ * producer (perf-ledger F-4) or of an attention with absorbed permutes (perf-ledger F-3 A4 / F-8),
+ * whose absorbed nodes have no step — with whether it aliases taken from the step
+ * ({@link stepOutputs}, as execution) and its release list from {@link stepReleases}.
+ * Plain nodes' dispatches are approximated as one per node (reads = `ins`, writes = `outs`), giving
+ * the usage-scope rule for separate regions the same counterparts in the same direction as the
+ * execution phase. States-form attention and fused attention ops (no states field —
+ * {@link fusedAttentionProgram}) copy the execution phase's three dispatches (①qk writes scores →
+ * ②stats reads scores and writes row statistics → ③pv reads both and writes the output) per row
+ * block — because the overlap between temporaries and the way regions split affect the sum (fused
+ * attention also copies the i8a8 quantisation temporaries and dispatches — ADR 0124 decision 7).
+ * MUST: plan with the same binding limit as the limit check of the allocation program (the
+ * row-block count is decided only by this value and the budget — dividing by another value would
+ * make the estimate alone count temporaries with a block count different from execution). The budget
+ * is the knobs' `attentionRowBlockMaxBytes`, as in execution (ADR 0124 decision 7).
  * MUST: the planning function **lists every overrun** (actual slot size > binding limit) and fails
  * (ADR 0093 decision 5). The same check runs at the estimate's entry, so a shape where "this device
  * cannot bind the intermediates" returns no number and fails loudly. The check applies to the
@@ -1501,176 +1620,43 @@ const linearTakesI8a8Route = (node: NodePlan, knobs: TransientKnobs): boolean =>
  * phase (which plans with the granted values) (ADR 0093 decision 4).
  * MUST: the bookkeeping unit is **the slot, not the value name** (an alias extends its root's live
  * range).
+ *
+ * @param shapes The resolved value shapes of the plan (`planGraph`).
+ * @param roles The storage roles parsed so far in this estimate call, by pipeline key.
  */
 const transientSlotBytes = (
   graph: IrGraph,
   nodes: readonly NodePlan[],
+  shapes: ReadonlyMap<string, readonly number[]>,
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
   maxBufferSize: number | undefined,
   knobs: TransientKnobs,
+  roles: Map<string, StorageRoles>,
 ): number => {
-  const { stateAttentionReduce, fullStateStorage, attentionRowBlockMaxBytes } = knobs;
-  const uses = countUses(graph);
-  const outputNames = new Set(graph.outputs);
-  const aliases = planAliases(nodes);
-  const bindingLimit = limit ?? CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
-  const nodeStep = (node: NodePlan, tokenMajor?: AttentionTokenMajor): TransientStepSpec => {
-    // MUST: absorbed permutes reach only a fused attention (the same check as execution's
-    // recipe-builder — counting another node with them would return a number for a plan execution
-    // rejects).
-    if (
-      tokenMajor !== undefined &&
-      (node.contract.kind !== "attention" || isStateAttention(node))
-    ) {
-      throw new ExecutionError(
-        `Estimate: ${node.node.op} carries absorbed permutes (perf-ledger F-3 / F-8), which only a fused attention executes`,
-      );
-    }
-    const isAlias = aliases.has(node);
-    const outputs: TransientOutputSpec[] = node.outputs.map((out) => ({
-      name: out.name,
-      kind: isAlias ? "alias" : "alloc",
-      byteLength: isAlias ? 0 : numel(out.shape) * 4,
-      source: isAlias ? node.node.ins[0] : undefined,
-      uses: uses.get(out.name) ?? 0,
-      pinned: outputNames.has(out.name),
-    }));
-    const reads: TransientRef[] = node.node.ins.map((name) => ({ kind: "value", name }));
-    const outputRefs: TransientRef[] = node.outputs.map((out) => ({
-      kind: "value",
-      name: out.name,
-    }));
-    const temps: TransientTempSpec[] = [];
-    const dispatches: TransientDispatchSpec[] = [];
-    if (isStateAttention(node)) {
-      // Copy the execution phase's 2 / 3 dispatches and temporary lifetimes per row block.
-      // MUST: scores and stats (when not fused) are both allocated right before QK, in that order,
-      // and both are released right after PV — the order of `buildStateAttention` /
-      // `buildReadonlyStateAttention`. Allocating stats after QK gives the same plan only while no
-      // release falls between QK and the statistics; the copy keeps execution's program instead.
-      // The readonly variant (the borrower's cross-attention — ADR 0096; ins is q only) reads K/V
-      // from external slots and has no k / v inputs for this step. Read references cover **only the
-      // inputs that exist** (referencing a missing name would make the transient plan fail on an
-      // undefined reference).
-      const [q, k, v] = reads;
-      // Execution rejects numeric variants × states form before taking temporaries (same test, same
-      // message as execution).
-      const [qShape, kShape] = node.inputShapes;
-      const readonly = stateReadonly(node.node.attrs, `nodes (${node.node.op})`);
-      const variantViolation = stateAttentionVariantViolation(
-        readonly
-          ? `attention (readonly) [${qShape.join(",")}]`
-          : `attention (states) [${qShape.join(",")}] × [${kShape.join(",")}]`,
-        readonly ? "readonly" : "states",
-        knobs.seats,
-      );
-      if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
-      const blocks = stateAttentionTemps(
-        node,
-        stateShapes,
-        limit,
-        attentionRowBlockMaxBytes,
-        stateAttentionReduce,
-        fullStateStorage,
-      );
-      for (const temp of blocks) {
-        const base = dispatches.length;
-        const fused = temp.statsBytes === 0;
-        const last = base + (fused ? 1 : 2);
-        const scores: TransientRef = { kind: "temp", id: temps.length };
-        temps.push({ byteLength: temp.scoreBytes, allocBefore: base, releaseAfter: last });
-        dispatches.push({ reads: k === undefined ? [q] : [q, k], writes: [scores] });
-        if (fused) {
-          dispatches.push({ reads: v === undefined ? [scores] : [scores, v], writes: outputRefs });
-        } else {
-          const stats: TransientRef = { kind: "temp", id: temps.length };
-          temps.push({ byteLength: temp.statsBytes, allocBefore: base, releaseAfter: last });
-          dispatches.push({ reads: [scores], writes: [stats] });
-          dispatches.push({
-            reads: v === undefined ? [scores, stats] : [scores, stats, v],
-            writes: outputRefs,
-          });
-        }
-      }
-    } else if (node.contract.kind === "attention") {
-      // In-node temporaries of a fused attention op (no states field): S, row statistics, i8a8
-      // quantisation temporaries.
-      const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs, tokenMajor);
-      temps.push(...program.temps);
-      dispatches.push(...program.dispatches);
-    } else if (node.contract.kind === "groupNorm") {
-      // The two in-node temporaries of group_norm (partial sums, per-row mean / rstd) over its
-      // five dispatches, with the lifetimes `buildGroupNorm` declares (the same layout function
-      // — kernels/group-norm.ts).
-      const { groups } = groupNormAttrs(node.node.attrs, `nodes (${node.node.op})`);
-      const bytes = groupNormTempBytes(groupNormLayout(node.outputs[0].shape, groups));
-      const partials: TransientRef = { kind: "temp", id: temps.length };
-      const stats: TransientRef = { kind: "temp", id: temps.length + 1 };
-      temps.push({ byteLength: bytes.partials, allocBefore: 0, releaseAfter: 3 });
-      temps.push({ byteLength: bytes.stats, allocBefore: 0, releaseAfter: 4 });
-      const [x] = reads;
-      for (let pass = 0; pass < 2; pass += 1) {
-        dispatches.push({ reads: [x, stats], writes: [partials] });
-        dispatches.push({ reads: [partials], writes: [stats] });
-      }
-      dispatches.push({ reads: [x, stats, ...reads.slice(1)], writes: outputRefs });
-    } else if (linearTakesI8a8Route(node, knobs)) {
-      // The i8a8 linear's two node temporaries over its two dispatches, with the lifetimes
-      // `buildLinearI8a8` declares (the same bytes function — kernels/linear-i8a8.ts): ① quantize
-      // reads the input (a folded producer's input with a prologue — the re-pointed plan) and
-      // writes `xq` and `xs`; ② the GEMM reads `xq`, the weight, the bias and `xs` and writes the
-      // output; both are released after ②.
-      const [x, weight] = node.inputShapes;
-      const bytes = linearI8a8TempBytes(numel(x.slice(0, -1)), weight[1]);
-      const xq: TransientRef = { kind: "temp", id: temps.length };
-      const xs: TransientRef = { kind: "temp", id: temps.length + 1 };
-      temps.push({ byteLength: bytes.xq, allocBefore: 0, releaseAfter: 1 });
-      temps.push({ byteLength: bytes.xs, allocBefore: 0, releaseAfter: 1 });
-      dispatches.push({ reads: [reads[0]], writes: [xq, xs] });
-      dispatches.push({ reads: [xq, ...reads.slice(1), xs], writes: outputRefs });
-    } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
-      // Reduce from the partial maxima to the smallest index. topk's merge also reads the value
-      // bits of the original input.
-      const partial: TransientRef = { kind: "temp", id: temps.length };
-      temps.push({
-        byteLength: selectionSplitTempBytes(node),
-        allocBefore: 0,
-        releaseAfter: 1,
-      });
-      dispatches.push({ reads, writes: [partial] });
-      dispatches.push({
-        reads: node.node.op === "topk" ? [partial, ...reads] : [partial],
-        writes: outputRefs,
-      });
-    } else if (!isAlias) {
-      dispatches.push({ reads, writes: outputRefs });
-    }
-    // Aliases consume their input too (counted in `uses`), so every node releases its inputs with
-    // repeats.
-    return { outputs, temps, dispatches, releases: node.node.ins };
+  const bookkeeping: OutputBookkeeping = {
+    useCounts: countUses(graph),
+    outputNames: new Set(graph.outputs),
   };
-  const fused = postFusionSteps(nodes, uses, outputNames, bindingLimit, knobs.fusion);
-  const program: TransientStepSpec[] = [];
-  for (let index = 0; index < nodes.length;) {
-    const step = fused.get(index);
-    if (step === undefined) {
-      program.push(nodeStep(nodes[index]));
-      index += 1;
-      continue;
-    }
+  const bindingLimit = limit ?? CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
+  const { maxComputeWorkgroupsPerDimension, ...facts } = knobs.fusion;
+  const { steps } = planFusions(
+    nodes,
+    sessionFusionContext({
+      ...facts,
+      ...bookkeeping,
+      limits: { maxStorageBufferBindingSize: bindingLimit, maxComputeWorkgroupsPerDimension },
+    }),
+  );
+  const program = steps.map((step): TransientStepSpec => {
     if (step.kind === "node") {
-      // The node step that absorbed its neighbours (the linear with its folded producer, the
-      // attention with its permutes): its own program on the re-pointed plan (it reads the absorbed
-      // nodes' inputs), and no step for the absorbed nodes, whose outputs never exist.
-      program.push(nodeStep(step.plan, step.tokenMajor));
-      index += nodeStepSpan(step);
-      continue;
+      return nodeStepProgram(step, bookkeeping, stateShapes, limit, knobs);
     }
-    assertRowBlockWindowCount(step, nodes[index], limit, attentionRowBlockMaxBytes);
-    program.push(fusedTransientStep(step, uses, outputNames));
-    index += step.nodeCount;
-  }
+    if (step.rule === "rowBlockAttention") {
+      assertRowBlockWindowCount(step, shapes, limit, knobs.attentionRowBlockMaxBytes);
+    }
+    return fusedStepProgram(step, graph, bookkeeping, roles);
+  });
   return planTransients(program, {
     maxBufferSize: maxBufferSize ?? Math.max(CORE_TRANSIENT_LIMITS.maxBufferSize, bindingLimit),
     maxStorageBufferBindingSize: bindingLimit,
@@ -1819,19 +1805,16 @@ export const estimateGraphMemory = (
     rmsNormReduce: options.rmsNormReduce,
   });
   if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
-  const seats: AttentionSeats = {
-    attentionCompute: options.attentionCompute ?? "f32",
-    attentionScoreStorage: options.attentionScoreStorage ?? "f32",
-  };
   // The device facts are checked here regardless of the graph's shape (the rule of
   // {@link assertLimitOption}), before the fusion pass reads them.
   // MUST: "none" without them fails loudly with this message whatever the graph — the route (and
   // with it whether S exists and whether the output permute is absorbed) depends on the device, and
   // assuming one would let the estimate claim temporaries the device does not produce (the same
   // reason as the binding-limit requirement of {@link stateAttentionTemps}). Any other seat never
-  // reads the facts, so the stand-in passes.
+  // reads the facts, so the stand-in passes. (The seats themselves are the fusion facts' knobs below
+  // — `"none"` is never a default, so the option decides it.)
   const passedDevice = options.attentionDevice;
-  if (passedDevice === undefined && seats.attentionScoreStorage === "none") {
+  if (passedDevice === undefined && options.attentionScoreStorage === "none") {
     throw new ExecutionError(
       "attentionScoreStorage 'none' needs options.attentionDevice" +
         " (the online kernel's route is decided by the device's subgroups and workgroup-storage limit — ADR 0132)",
@@ -1948,6 +1931,9 @@ export const estimateGraphMemory = (
     generation === undefined
       ? undefined
       : allowedChunkRows(generation.chunkLength, generation.chunkBuckets ?? []);
+  // The storage roles of the fused steps' kernels, parsed once per pipeline key for every scenario
+  // of this call (local to the call — the module holds no state).
+  const roles = new Map<string, StorageRoles>();
   const estimateScenario = ([name, scenarioBindings]: [
     name: string,
     bindings: SymbolBindings,
@@ -1978,6 +1964,7 @@ export const estimateGraphMemory = (
       workspaceBytes: transientSlotBytes(
         planned,
         plan.nodes,
+        plan.shapes,
         state.shapes,
         options.maxStorageBufferBindingSize,
         options.maxBufferSize,
@@ -1985,10 +1972,10 @@ export const estimateGraphMemory = (
           stateAttentionReduce,
           fullStateStorage,
           attentionRowBlockMaxBytes,
-          seats,
           attentionDevice,
           fusion,
         },
+        roles,
       ),
     };
   };

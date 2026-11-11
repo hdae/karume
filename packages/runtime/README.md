@@ -125,8 +125,8 @@ rounding barrier `stagedLoopWgsl` / `stagedF32`, so a fused kernel can keep the 
 runtime does not check a rule's numbers: a rule declares its contract class, and a class E rule
 (u32-identical to the unfused plan) carries its own fused-against-unfused check on each backend it
 ships on. The memory estimate plans with these rules when given them (`EstimateOptions.fusionRules`)
-but does not count their steps yet. While the package is 0.x this entry may
-change in a minor version (ADR 0148).
+and counts their steps after fusion, with the temporaries they declare. While the package is 0.x this
+entry may change in a minor version (ADR 0148).
 
 ## Requirements
 

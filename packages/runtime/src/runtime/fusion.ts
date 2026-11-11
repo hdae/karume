@@ -126,8 +126,8 @@
  * deferred nodes are independent both ways ({@link passthroughIsIndependent} and
  * `deferralIsIndependent` in {@link "./fusion-rule.ts"}). The step list is then a valid order of the
  * nodes that differs from the declaration order inside the deferred region only; a consumer that
- * walks it against the declaration order (the estimate's `postFusionSteps`, the node index of
- * {@link enumerateUnfusedWindows}) counts positions in the scanned list.
+ * walks it against the declaration order (the node index of {@link enumerateUnfusedWindows}) counts
+ * positions in the scanned list.
  */
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";

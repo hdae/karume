@@ -22,15 +22,14 @@ measurements in `docs/research/`.
   and the container are unchanged. The rules are fixed at construction and tried before the built-in rules, in the
   order given; a hit counts under the rule's `<namespace>/<rule>` name in `lastRunFusions`. Construction refuses
   anything that `defineRule` did not build, a built-in rule and a name given twice. The memory estimate plans with
-  the rules when given them (`EstimateOptions.fusionRules`) but does not count their steps yet (ADR 0148).
+  the rules when given them (`EstimateOptions.fusionRules`) and counts their steps after fusion (ADR 0148).
 - `@karume/runtime`: `EstimateOptions` takes the remaining Session options the fusion pass reads, with their types
   taken from `SessionOptions`, so one options object can be given to a Session and to its estimate:
   `fuseRmsNormAdd`, `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `packedStaticQuantize`, `integerGemv`,
   `linearGemvPlanes`, `linearGemvReduce`, `rmsNormReduce` and `fusionRules`, plus the device limit
   `maxComputeWorkgroupsPerDimension`. The estimate plans fusion with them through the same mapping and checks as
-  Session construction; the windows these fusions take are still counted unfolded. A non-empty `fusionRules` needs
-  both `maxStorageBufferBindingSize` and `maxComputeWorkgroupsPerDimension`. An estimate given none of the new fields
-  returns the same numbers as before.
+  Session construction, and counts the windows these fusions take after fusion. A non-empty `fusionRules` needs
+  both `maxStorageBufferBindingSize` and `maxComputeWorkgroupsPerDimension`.
 - `@karume/runtime/kernel`, an experimental entry for writing those rules (it may change in a minor version while
   the package is 0.x): `defineRule` (a name `<namespace>/<rule>`, a declared contract class, dispatch keys under
   `ext:<namespace>:`, a matcher that reads the nodes, the graph's use counts and outputs and the device's limits —
@@ -62,8 +61,19 @@ measurements in `docs/research/`.
 - `@karume/runtime`: with `linearCompute: "a8"` the memory estimate counts an i8a8 linear's two node temporaries
   (its activations quantized to int8 and their per-token scales), which the Session allocates for the quantize and
   GEMM dispatches of every such linear; they were listed as unaccounted. `workspaceBytes` of graphs with i8- or
-  i4-resident linears on that seat moves up by what they add to the slot table (the Wan2.2 TI2V DiT on its online
-  preset by 15.4 MiB at 7,920 tokens; a linear whose weight is borrowed is still counted as a plain one).
+  i4-resident linears on that seat moves with them, mostly up (the Wan2.2 TI2V DiT on its online preset by 15.4 MiB
+  at 7,920 tokens; where they fit between the existing slots the total stays, and a different placement can even
+  lower it). A linear whose weight is borrowed is still counted as a plain one.
+- `@karume/runtime`: the memory estimate's `workspaceBytes` (and with it `peakAccountedBytes`) walks the step list
+  of the same fusion plan as execution: every fused step, of a built-in or an external rule, is counted as
+  execution allocates it — its output and the temporaries its rule declares, with its kernels' reads and writes —
+  and the intermediates it folds away are no longer counted. Until now only row-block attention, the linear
+  prologue and the attention's absorbed permutes were counted after fusion. The estimate of a graph with other fused
+  windows moves — mostly down, as the intermediates those windows fold away leave the count, and up where the
+  post-fusion lifetimes place differently or a rule's temporaries outweigh what it folds — and so do the stage needs
+  that read it (the MOSS-Image VAE and text-encoder stages and Anima's VAE stage drop by up to about 2 GiB at
+  the largest accepted size). A step execution refuses fails the estimate with the same refusal. `AdmissionReport.unaccounted`
+  names what is still not counted.
 
 ### Breaking
 

@@ -1,8 +1,8 @@
 /**
  * **Static liveness packing** of intermediate buffers (node outputs and node temporaries) (ADR 0093).
  *
- * Replays the allocation program ({@link TransientProgram} — built from a recipe list or from the
- * pre-fusion node list) in the same event order as the execution phase, takes the live interval and
+ * Replays the allocation program ({@link TransientProgram} — built from a recipe list or, by the
+ * estimate, from the fusion plan's step list) in the same event order as the execution phase, takes the live interval and
  * the real size of each logical tensor, and places them at offsets in region buffers so that tensors
  * whose time intervals do not overlap can share the same bytes. It returns the number and size of the
  * regions, `(region, offset, byteLength)` per slot, and the slot assignment per step.

@@ -684,10 +684,8 @@ export type FusionMatch = {
    * DiT's q and k prologues), whose head would otherwise be emitted as a plain passthrough and never
    * fold. Legal only when the chain and those nodes are independent both ways
    * ({@link passthroughIsIndependent} and {@link deferralIsIndependent}, checked by `defineRule`).
-   * MUST: defer only nodes that cannot head a step the estimate keeps in post-fusion form (a
-   * row-block attention's `bmm`, a linear-prologue producer, a permute an attention absorbs).
-   * `postFusionSteps` in estimate.ts places those steps by the running node count, which inside a
-   * deferred region is the position in the scanned list, not in the declaration order.
+   * The memory estimate walks the step list in its order (`transientSlotBytes` in estimate.ts), so
+   * the deferred nodes are counted where the list puts them.
    */
   readonly others?: "deferred";
 };

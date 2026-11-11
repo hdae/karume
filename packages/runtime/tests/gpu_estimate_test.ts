@@ -1,15 +1,17 @@
 // Real-GPU comparison of the memory-requirement estimator (ADR 0070 decision 5) (the GPU-independent
 // checks are in estimate_test.ts).
 //
-// Exact equality can be claimed only for the 2 categories the diagnostics measure (compressed
-// residency, expansion) and the state capacity, the slot table of a states-form attention to which no
-// fusion applies at all, the slot table of a row-block attention window alone, and the slot table of a
-// single fused attention op node. The row-block attention window can be compared because the estimate
-// counts it in its fused form (ADR 0093 addendum 2026-10-10). The fused attention op's in-node
-// temporaries (S, the row statistics, the i8a8 quantization temporaries) are counted by the estimate
-// with the same pure function as execution (ADR 0124 decision 7). Other intermediate peaks are
-// **approximations** and are not compared (other fusions remove intermediates — the difference the
-// estimator's unaccounted field admits). Without an adapter the tests SKIP explicitly.
+// Exact equality is claimed for the 2 categories the diagnostics measure (compressed residency,
+// expansion) and the state capacity, and for the slot tables of small graphs whose every step the
+// estimate replays as execution allocates it: a states-form attention, a single fused attention op
+// node (its in-node temporaries — S, the row statistics, the i8a8 quantization temporaries — come
+// from the same pure functions as execution, ADR 0124 decision 7), an attention with absorbed
+// permutes, and one window of each fusion rule, built-in or external (the estimate walks the same
+// fusion plan's step list and maps each fused step from the same device-free bookkeeping,
+// fused-step-layout.ts). A plain node is planned as one dispatch reading its inputs and writing its
+// outputs, so a graph whose kernels bind narrower sets can be placed differently; and the node
+// temporaries the estimator's unaccounted field names are not counted. Without an adapter the tests
+// SKIP explicitly.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -34,7 +36,7 @@ import {
   fill,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
-import { a8LinearCase } from "./helpers/fused-window-graphs.ts";
+import { a8LinearCase, FUSED_WINDOW_CASES } from "./helpers/fused-window-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 
@@ -680,10 +682,7 @@ test.skipIf(!GPU_AVAILABLE)(
       } finally {
         await stateSession.dispose();
       }
-      // workspaceBytes is not compared — fusions other than row-block attention remove intermediates and
-      // those fusions' temporaries are not counted, so in principle it differs from the measurements
-      // (planBacking.residentBytes / lastRun.peakTransientBytes) (exactly the difference the estimator's
-      // unaccounted field admits).
+      // workspaceBytes is compared on the graphs below, each built for one accounting path.
     } finally {
       gpu.destroy();
     }
@@ -776,13 +775,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * The estimate's count of the a8 linear's two node temporaries (the quantized activations and their
- * per-token scales — `linearI8a8TempBytes`) against the slot table a Session builds for the same
- * graph, with and without a folded producer (helpers/fused-window-graphs.ts;
- * estimate_fused_steps_test.ts pins the same graphs to hand-derived numbers).
+ * The estimate's post-fusion accounting of every rule against the slot table a Session builds for
+ * the same graph (helpers/fused-window-graphs.ts — one window per rule, both external test rules,
+ * and the a8 linear's two node temporaries with and without a folded producer;
+ * estimate_fused_steps_test.ts pins the same graphs to hand-derived numbers). The Session gets the
+ * options the window needs, the estimate the same options and the device's limits.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "the a8 linear's quantize → GEMM pair has the workspace of its slot table, with and without a folded producer (real GPU)",
+  "every rule's fused window and the a8 linear have the workspace of their slot table: the ten built-in rules, two external ones and the a8 linear with and without a folded producer (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -791,7 +791,11 @@ test.skipIf(!GPU_AVAILABLE)(
         maxBufferSize: gpu.limits.maxBufferSize,
         maxComputeWorkgroupsPerDimension: gpu.limits.maxComputeWorkgroupsPerDimension,
       };
-      for (const make of [() => a8LinearCase(false), () => a8LinearCase(true)]) {
+      for (const make of [
+        ...FUSED_WINDOW_CASES,
+        () => a8LinearCase(false),
+        () => a8LinearCase(true),
+      ]) {
         const fused = make();
         const model = openGraph(fused.graph, fused.tensors);
         const { scenarios } = model.estimate({

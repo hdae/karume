@@ -785,10 +785,11 @@ export type SessionOptions = {
    * (docs/kernel-rules.md).
    *
    * NOTE: the memory estimate plans with these rules (`EstimateOptions.fusionRules`, which then
-   * needs the device limits), but counts the windows they take in their pre-fusion form: the step
-   * temporaries a rule declares are not counted, and a window a rule takes from a built-in fold the
-   * estimate counts in post-fusion form (row-block attention, a linear's folded producer, an absorbed
-   * permute) is counted unfolded. Counting the rules' steps is later work (ADR 0148).
+   * needs the device limits) and counts the windows they take in their post-fusion form: the step's
+   * output and the temporaries the rule declares, with the reads and writes of its kernels' WGSL
+   * storage declarations. A step the recipe build refuses for the binding checks above makes the
+   * estimate fail with the same refusal (the workgroup-count checks need the device and are not run
+   * by the estimate).
    */
   readonly fusionRules?: readonly FusionRule[];
   /**
