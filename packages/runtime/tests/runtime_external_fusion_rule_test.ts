@@ -556,6 +556,38 @@ describe("an external rule building a step", () => {
     assert(error.cause === thrown, "the original is the cause");
   });
 
+  it("calls its match and build as standalone functions: a method that reads `this` fails loudly, naming the rule, instead of changing what it does", () => {
+    const definition = negNeg("test/neg_neg");
+    for (const [label, methods] of [
+      [
+        "match",
+        {
+          fold: true,
+          match(nodes: readonly NodePlan[], index: number) {
+            return this.fold ? definition.match(nodes, index) : undefined;
+          },
+        },
+      ],
+      [
+        "build",
+        {
+          shape: SHAPE,
+          build(matched: NegNegMatch) {
+            return { ...definition.build(matched), outputShape: this.shape };
+          },
+        },
+      ],
+    ] as const) {
+      const error = assertThrows(
+        () => plan([defineExternalRule({ ...definition, ...methods })]),
+        ExecutionError,
+        "fusion rule 'test/neg_neg': its match or build, or the runtime reading what they returned, threw TypeError",
+        label,
+      );
+      assert(error.cause instanceof TypeError, label);
+    }
+  });
+
   it("is checked as an external rule only: the same faults through defineRule are the built-in rules' own responsibility", () => {
     // The built-in entry keeps the checks it had; a key without the prefix folds as before.
     const folded = plan([defineRule(negNeg("testNegNeg", { key: "test:neg_neg" }))]);

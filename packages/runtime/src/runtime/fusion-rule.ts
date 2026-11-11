@@ -1016,7 +1016,8 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
   if (!passthroughIsIndependent(matched.chain, others)) return undefined;
   const deferring = matched.others === "deferred";
   if (deferring && !deferralIsIndependent(matched.chain, others)) return undefined;
-  const built = rule.build(matched);
+  // A standalone call, `this` undefined ({@link snapshotDefinition}).
+  const built = Reflect.apply(rule.build, undefined, [matched]);
   assertTempLifetimes(rule.name, built.temps, built.dispatches.length);
   if (namespace !== undefined) assertExternalBuild(rule.name, namespace, matched.chain, built);
   return {
@@ -1040,7 +1041,10 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
  * MUST: the rule reads only this copy. The caller's object stays theirs to edit (deriving a variant
  * by editing a shared definition is ordinary JavaScript), and a rule that read it live would take
  * the later name — crediting its hits to another counter — and the later `internals`, `match` and
- * `build`, past the checks run here.
+ * `build`, past the checks run here. MUST: `match` and `build` are called as standalone functions,
+ * `this` undefined. Called as methods of this copy, a definition written with method syntax that
+ * reads `this` would see the copy instead of the caller's object and change what it does without an
+ * error; called standalone, it fails loudly at its first try, naming the rule ({@link ruleFailure}).
  */
 const snapshotDefinition = <Matched extends FusionMatch, Name extends string, MatchContext>(
   rule: RuleDefinition<Matched, Name, MatchContext>,
@@ -1186,7 +1190,7 @@ export const defineExternalRule = <
   return brandedRule(definition, namespace, (nodes, index, context) => {
     const op = nodes[index]?.node.op;
     return op !== undefined && heads.has(op)
-      ? definition.match(nodes, index, context.matchContext)
+      ? Reflect.apply(definition.match, undefined, [nodes, index, context.matchContext])
       : undefined;
   });
 };
