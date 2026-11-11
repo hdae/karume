@@ -772,8 +772,10 @@ export type SessionOptions = {
    * (docs/kernel-rules.md).
    *
    * NOTE: the memory estimate does not see these rules: `estimate` counts the graph as if no rule
-   * were given (the step temporaries a rule declares are not counted). Planning them in the estimate
-   * is later work (ADR 0148).
+   * were given. The step temporaries a rule declares are not counted, and neither are the values a
+   * built-in fold would have removed when a rule takes its nodes first (row-block attention, a
+   * linear's folded producer, an absorbed permute — the estimate counts them in post-fusion form).
+   * Planning them in the estimate is later work (ADR 0148).
    */
   readonly fusionRules?: readonly FusionRule[];
   /**

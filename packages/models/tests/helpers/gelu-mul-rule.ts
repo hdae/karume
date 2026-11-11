@@ -5,9 +5,10 @@
  *
  * It is the rewrite of the 2026-11-10 investigation prototype (perf-ledger K-105, research
  * 2026-11-10 §8.1), which reached the rule list through a module load hook and runtime internals.
- * The accepted windows are the prototype's: the two nodes adjacent (Gemma 4 26B's routed experts),
- * or one independent `linear` between them (26B's dense MLP: gate linear → gelu_tanh → up linear →
- * mul), which the scan places before the fused step as an in-window passthrough.
+ * The accepted windows are the prototype's, minus empty shapes (a shape with no element is not taken
+ * — the prototype had no such clause): the two nodes adjacent (Gemma 4 26B's routed experts), or one
+ * independent `linear` between them (26B's dense MLP: gate linear → gelu_tanh → up linear → mul),
+ * which the scan places before the fused step as an in-window passthrough.
  *
  * Bit identity with the unfused plan (class E): the gelu value and the product use the plain
  * elementwise kernels' own text (`prologueUnaryWgsl`, `fusedBinaryWgsl`, in the mul's operand

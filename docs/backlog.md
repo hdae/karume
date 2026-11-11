@@ -142,9 +142,8 @@ maintainer's ruling of 2026-11-06).
   built. Left, in the design's order: `runSessionAb` / `judgeSessionAb` and their record in `@karume/runtime/tune`, with
   the part of the twin check the public API can express, then the Playground's `/session-ab` page (P3); the estimate
   planning every fused step, external rules included (P4); generated elementwise fusions, tried on the MOSS-Image DiT
-  (S5). Open: token identity of the test
-  rule `test/gelu_mul` on the real 26B weights (not produced — ADR 0148 Evidence); the Session canary (ADR 0147
-  follow-ups, code item 3) covers external rules when it is built.
+  (S5). Open: token identity of the test rule `test/gelu_mul` on the real 26B weights (not produced — ADR 0148
+  Evidence); the Session canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
   [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple

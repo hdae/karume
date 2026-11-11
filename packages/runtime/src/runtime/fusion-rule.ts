@@ -315,8 +315,9 @@ export type FusionWeightLayout =
 export type FusionContext<Name extends string = string> = {
   /**
    * The rules the scan tries at each index, in this order (the application order). A Session passes
-   * the built-in list (`FUSION_RULES` in {@link "./fusion.ts"}); the plan counts one counter per
-   * name of this list ({@link FusionPlan.counts}).
+   * its own list (`sessionFusionRules` in {@link "./fusion.ts"}: the external rules of
+   * `SessionOptions.fusionRules` in the order given, then the built-in `FUSION_RULES`); the plan
+   * counts one counter per name of this list ({@link FusionPlan.counts}).
    */
   readonly rules: readonly FusionRule<Name>[];
   /**

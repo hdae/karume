@@ -42,7 +42,7 @@
   [0141](0141-byte-plane-gemv.md), [0143](0143-f16-full-state-storage.md) / [0069](0069-packed-w4-storage.md) addendum 9
   (listening for group-size rulings). Out of scope: the op vocabulary
   ([0059](0059-op-vocabulary-entry-doors.md) / [0064](0064-entry-door-generality-axes.md)) and the extension point for
-  model-specific kernels (a separate ADR later).
+  model-specific kernels (a separate ADR later — [0148](0148-external-fusion-rules.md), fusion rules from outside the runtime).
 
 ## Context
 
