@@ -2,6 +2,10 @@
  * The geometry sweep page's settings: the form (op families, cases, candidate set, rounds, idle
  * seconds between cases), its plan (the case list `runGeometrySweep` is called with, one case per
  * call) and the presets. Pure, so the case selection is tested without a GPU.
+ *
+ * The case list depends on the candidate set: the evaluation set `k85` sweeps a table of its own
+ * (`geometrySweepCases("k85")`). Every function that takes `cases` takes the list of the form's set
+ * (of the preset's set for {@link presetForm}).
  */
 
 import type {
@@ -10,11 +14,15 @@ import type {
   GeometrySweepOp,
 } from "@karume/runtime/tune";
 
-/** The candidate sets in growing size (the runtime's default is `quick+`). */
+/**
+ * The candidate sets in growing size (the runtime's default is `quick+`), then the evaluation set
+ * `k85`.
+ */
 export const CANDIDATE_SETS = [
   "quick",
   "quick+",
   "full",
+  "k85",
 ] as const satisfies readonly GeometrySweepCandidateSet[];
 
 export type SweepForm = {
@@ -61,6 +69,15 @@ export const SWEEP_PRESETS: readonly SweepPreset[] = [
     rounds: 5,
     idleSeconds: 90,
   },
+  {
+    id: "k85-linear",
+    label: "K-85 (i8a8 linear skeleton)",
+    hint: "The k85 set — this adapter's table geometry, the default and 204 grid geometries with and without the vec4 skeleton — on the Wan2.2 TI2V-5B DiT linears at 33 frames and a small-M guard, 5 rounds, 90 s idle: per case the best skeleton against the table geometry, and the sum over one Wan2.2 33f DiT forward. No table is derived from it.",
+    ops: ["i8a8-linear"],
+    candidateSet: "k85",
+    rounds: 5,
+    idleSeconds: 90,
+  },
 ];
 
 /** The op families of the table, in its order (each once). */
@@ -88,6 +105,27 @@ export const presetForm = (
   rounds: String(preset.rounds),
   idleSeconds: String(preset.idleSeconds),
 });
+
+/**
+ * The form after the candidate set changes to `set`. When the new set sweeps another case table
+ * (`casesOf` — `geometrySweepCases`), every case and op of that table is ticked (the old ticks name
+ * cases the new table does not have); otherwise only the set changes.
+ */
+export const changeCandidateSet = (
+  form: SweepForm,
+  set: GeometrySweepCandidateSet,
+  casesOf: (set: GeometrySweepCandidateSet) => readonly GeometrySweepCase[],
+): SweepForm => {
+  const ids = (cases: readonly GeometrySweepCase[]): string => cases.map(({ id }) => id).join("\n");
+  const cases = casesOf(set);
+  if (ids(casesOf(form.candidateSet)) === ids(cases)) return { ...form, candidateSet: set };
+  return {
+    ...form,
+    candidateSet: set,
+    ops: new Set(sweepOps(cases)),
+    cases: new Set(cases.map(({ id }) => id)),
+  };
+};
 
 /** The text as an integer ≥ `min`, else undefined. */
 const integerAtLeast = (text: string, min: number): number | undefined => {

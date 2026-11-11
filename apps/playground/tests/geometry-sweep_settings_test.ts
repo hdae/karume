@@ -1,7 +1,12 @@
-import { type GeometrySweepCase, geometrySweepCases } from "@karume/runtime/tune";
+import {
+  type GeometrySweepCandidateSet,
+  type GeometrySweepCase,
+  geometrySweepCases,
+} from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  changeCandidateSet,
   initialForm,
   matchingPreset,
   planSweep,
@@ -112,5 +117,54 @@ describe("matchingPreset", () => {
 
   it("names none for a form that cannot run", () => {
     expect(matchingPreset({ ...initialForm(CASES), rounds: "x" }, CASES)).toBeUndefined();
+  });
+});
+
+const K85 = SWEEP_PRESETS.find(({ id }) => id === "k85-linear");
+
+describe("the K-85 preset", () => {
+  it("plans every case of the k85 table with the k85 set, 5 rounds, 90 s idle", () => {
+    if (K85 === undefined) throw new Error("no K-85 preset");
+    const k85Cases = geometrySweepCases("k85");
+    const plan = plannedCases(presetForm(K85, k85Cases), k85Cases);
+    expect(plan).toEqual({
+      caseIds: k85Cases.map(({ id }) => id),
+      ops: ["i8a8-linear"],
+      candidateSet: "k85",
+      rounds: 5,
+      idleSeconds: 90,
+    });
+    expect(plan.caseIds.length).toBe(6);
+    expect(matchingPreset(presetForm(K85, k85Cases), k85Cases)?.id).toBe("k85-linear");
+  });
+
+  it("is not named for the same ops and set over the sweep's own table", () => {
+    if (K85 === undefined) throw new Error("no K-85 preset");
+    const runtimeCases = geometrySweepCases();
+    const form = { ...presetForm(K85, runtimeCases), candidateSet: "full" as const };
+    expect(matchingPreset(form, runtimeCases)?.id).toBeUndefined();
+  });
+});
+
+describe("changeCandidateSet", () => {
+  const casesOf = (set: GeometrySweepCandidateSet): readonly GeometrySweepCase[] =>
+    set === "k85" ? [{ id: "k85-a", op: "i8a8-linear", censusCount: 1 }] : CASES;
+
+  it("keeps the ticks when the new set sweeps the same table", () => {
+    const form = { ...initialForm(CASES), cases: new Set(["linear-a"]) };
+    const changed = changeCandidateSet(form, "full", casesOf);
+    expect(changed.candidateSet).toBe("full");
+    expect([...changed.cases]).toEqual(["linear-a"]);
+    expect(changed.ops).toBe(form.ops);
+  });
+
+  it("ticks every case and op of the new table when the set sweeps another one, and back", () => {
+    const toK85 = changeCandidateSet(initialForm(CASES), "k85", casesOf);
+    expect(toK85.candidateSet).toBe("k85");
+    expect([...toK85.cases]).toEqual(["k85-a"]);
+    expect([...toK85.ops]).toEqual(["i8a8-linear"]);
+    const back = changeCandidateSet(toK85, "quick+", casesOf);
+    expect([...back.cases]).toEqual(CASES.map(({ id }) => id));
+    expect(plannedCases(back).caseIds.length).toBe(CASES.length);
   });
 });
