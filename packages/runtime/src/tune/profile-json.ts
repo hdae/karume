@@ -104,14 +104,21 @@ const readGemmGeometry = (value: unknown, path: string): GemmGeometry => {
   };
 };
 
+/** The optional skeleton form of an i8a8 geometry (perf-ledger K-85 — `"vec4"` is the only value). */
+const readSkeleton = (value: unknown, path: string): NonNullable<I8a8Geometry["skeleton"]> =>
+  value === "vec4" ? value : fail(path, `is not "vec4" (${show(value)})`);
+
 const readI8a8Geometry = (value: unknown, path: string): I8a8Geometry => {
-  const fields = readRecord(value, path, [...GEMM_FIELDS, "tileK"]);
+  const fields = readRecord(value, path, [...GEMM_FIELDS, "tileK"], ["skeleton"]);
   return {
     regM: readInteger(fields.regM, child(path, "regM")),
     regN: readInteger(fields.regN, child(path, "regN")),
     wgX: readInteger(fields.wgX, child(path, "wgX")),
     wgY: readInteger(fields.wgY, child(path, "wgY")),
     tileK: readInteger(fields.tileK, child(path, "tileK")),
+    ...(fields.skeleton === undefined
+      ? {}
+      : { skeleton: readSkeleton(fields.skeleton, child(path, "skeleton")) }),
   };
 };
 

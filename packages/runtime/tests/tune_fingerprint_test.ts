@@ -46,10 +46,13 @@ import {
 } from "../src/tune/fingerprint.ts";
 import {
   type GeometryCandidate,
+  i8a8Candidate,
   quickConv2dCandidates,
   quickGemmCandidates,
   quickI8a8Candidates,
 } from "../src/tune/geometries.ts";
+import type { I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
+import { linearI8a8Key, linearI8a8UsesVec4, linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
 import { candidatesFor, type CasePlan, casePlan } from "../src/tune/harness.ts";
 
 type Launch = ReturnType<CasePlan["launch"]>;
@@ -634,6 +637,54 @@ describe("canonicalJson", () => {
     assertEquals(
       canonicalJson({ b: [1, Number.POSITIVE_INFINITY, "x"], a: { d: undefined, c: null } }),
       '{"a":{"c":null},"b":[1,1e999,"x"]}',
+    );
+  });
+});
+
+describe("the vec4 skeleton of an i8a8 geometry in the fingerprint and the sweep's dispatch (perf-ledger K-85)", () => {
+  const word: I8a8Geometry = { ...DEFAULT_GEOMETRY_PROFILE.i8a8.linear, tileK: 32 };
+  const skeleton: I8a8Geometry = { ...word, skeleton: "vec4" };
+
+  it("a table whose i8a8.linear carries the skeleton fingerprints differently from the same geometry without it", () => {
+    const withWord = {
+      ...DEFAULT_GEOMETRY_PROFILE,
+      i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, linear: word },
+    };
+    const withSkeleton = { ...withWord, i8a8: { ...withWord.i8a8, linear: skeleton } };
+    assertNotEquals(geometryProfileKernelsId(withSkeleton), geometryProfileKernelsId(withWord));
+    assertNotEquals(
+      geometryProfileKernelsId(withWord),
+      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+    );
+  });
+
+  it("the sweep builds an i8a8 linear skeleton candidate with the fill form a Session takes (:fill16 at k % 16 == 0), and the same geometry without it as before", () => {
+    const sweepCase = SWEEP_CASES.find((entry) => entry.op === "i8a8-linear");
+    assert(sweepCase !== undefined && sweepCase.op === "i8a8-linear" && sweepCase.k % 16 === 0);
+    const v4 = linearI8a8UsesVec4(sweepCase.n);
+    for (const dp4a of [false, true]) {
+      const plan = casePlan(sweepCase, 65535, dp4a);
+      const vec = plan.launch(i8a8Candidate(skeleton));
+      assertEquals(vec.key, linearI8a8Key(v4, dp4a, skeleton, "i8", undefined, true));
+      assertEquals(vec.wgsl, linearI8a8Wgsl(v4, dp4a, skeleton, "i8", undefined, true));
+      assertStringIncludes(vec.key, "k32s");
+      assertEquals(vec.key.endsWith(":fill16"), true);
+      const plain = plan.launch(i8a8Candidate(word));
+      assertEquals(plain.key, linearI8a8Key(v4, dp4a, word));
+      assertEquals(plain.wgsl, linearI8a8Wgsl(v4, dp4a, word));
+    }
+  });
+
+  it("a measured row with the skeleton fingerprints differently from the same row without it", () => {
+    const sweepCase = SWEEP_CASES.find((entry) => entry.op === "i8a8-linear");
+    assert(sweepCase !== undefined);
+    const row = (geometryParams: I8a8Geometry): MeasuredRow => ({
+      caseId: sweepCase.id,
+      geometryParams,
+    });
+    assertNotEquals(
+      sweepCandidateKernelsId([row(skeleton)], true),
+      sweepCandidateKernelsId([row(word)], true),
     );
   });
 });

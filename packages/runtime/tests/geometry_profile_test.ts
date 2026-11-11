@@ -1979,3 +1979,53 @@ describe("the limit check of injected tables (the device's workgroup limits — 
     assertEquals(requests, 0);
   });
 });
+
+describe("the optional vec4 skeleton of the i8a8 fields (perf-ledger K-85)", () => {
+  const skeleton: I8a8Geometry = {
+    regM: 16,
+    regN: 4,
+    wgX: 16,
+    wgY: 8,
+    tileK: 32,
+    skeleton: "vec4",
+  };
+
+  it("a table with the skeleton in an i8a8 field passes the check and the limit check under WebGPU's default limits", () => {
+    const profile: unknown = {
+      ...OPT_IN,
+      i8a8: { ...OPT_IN.i8a8, linear: skeleton, conv3d: { ...skeleton, tileK: 64 } },
+    };
+    assertGeometryProfile(profile);
+    assertEquals(profile.i8a8.linear.skeleton, "vec4");
+    assertGeometryProfileWithinLimits(profile, WEBGPU_DEFAULT_LIMITS);
+  });
+
+  it("an unknown skeleton value and a skeleton geometry the vec4 fill cannot cover are rejected naming the field (CodegenError)", () => {
+    const cases: readonly (readonly [string, unknown, string])[] = [
+      [
+        "an unknown value",
+        { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, attentionPv: { ...skeleton, skeleton: "vec8" } } },
+        'i8a8.attentionPv: geometry skeleton must be "vec4" or absent ("vec8")',
+      ],
+      [
+        "a non-string value",
+        { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, linear: { ...skeleton, skeleton: 4 } } },
+        'i8a8.linear: geometry skeleton must be "vec4" or absent (4)',
+      ],
+      [
+        "tileK 24",
+        {
+          ...OPT_IN,
+          i8a8: {
+            ...OPT_IN.i8a8,
+            linear: { regM: 4, regN: 4, wgX: 8, wgY: 12, tileK: 24, skeleton: "vec4" },
+          },
+        },
+        "i8a8.linear: the vec4 skeleton needs tileK to be a multiple of 16 (24)",
+      ],
+    ];
+    for (const [name, value, message] of cases) {
+      assertThrows(() => assertGeometryProfile(value), CodegenError, message, name);
+    }
+  });
+});

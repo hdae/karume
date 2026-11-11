@@ -87,6 +87,7 @@ import {
   linearI8a8Key,
   linearI8a8Params,
   linearI8a8UsesVec4,
+  linearI8a8UsesVecFill,
   linearI8a8Wgsl,
 } from "../kernels/linear-i8a8.ts";
 import {
@@ -433,9 +434,12 @@ const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): Ca
     defaultCandidate: i8a8Candidate(defaultI8a8Geometry("linear")),
     launch: (candidate) => {
       const geometry = i8a8Of(candidate, sweepCase.id);
+      // The fill form of the vec4 skeleton, decided as linear.ts decides it (a geometry without the
+      // skeleton: the word fill, so its key and WGSL do not move)
+      const vecFill = linearI8a8UsesVecFill(geometry, "i8", k);
       return {
-        key: linearI8a8Key(v4, dp4a, geometry, "i8"),
-        wgsl: linearI8a8Wgsl(v4, dp4a, geometry, "i8"),
+        key: linearI8a8Key(v4, dp4a, geometry, "i8", undefined, vecFill),
+        wgsl: linearI8a8Wgsl(v4, dp4a, geometry, "i8", undefined, vecFill),
         params: linearI8a8Params(m, n, k),
         bindings: ["xq", "w", "bias", "out", "wscale", "xscale"],
         writes: ["out"],

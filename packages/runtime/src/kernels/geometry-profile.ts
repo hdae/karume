@@ -277,9 +277,31 @@ const gemmGeometryOf = (value: unknown, where: string, path: string): GemmGeomet
   };
 };
 
+/**
+ * Guard on the optional skeleton form of an i8a8 geometry (perf-ledger K-85): `"vec4"` is the only
+ * value (the same wording as {@link assertI8a8Geometry}, which checks it again at generation).
+ */
+const skeletonOf = (
+  value: unknown,
+  where: string,
+  path: string,
+): NonNullable<I8a8Geometry["skeleton"]> => {
+  if (value === "vec4") return value;
+  throw new CodegenError(
+    `${where}: ${path}: geometry skeleton must be "vec4" or absent (${JSON.stringify(value)})`,
+  );
+};
+
 const i8a8GeometryOf = (value: unknown, where: string, path: string): I8a8Geometry => {
-  const { tileK } = recordOf(value, where, path);
-  return { ...gemmGeometryOf(value, where, path), tileK: numberOf(tileK, where, path, "tileK") };
+  const { tileK, skeleton } = recordOf(value, where, path);
+  const geometry = {
+    ...gemmGeometryOf(value, where, path),
+    tileK: numberOf(tileK, where, path, "tileK"),
+  };
+  // Absent stays absent (a table without the field keeps its keys and WGSL byte for byte)
+  return skeleton === undefined
+    ? geometry
+    : { ...geometry, skeleton: skeletonOf(skeleton, where, path) };
 };
 
 /**

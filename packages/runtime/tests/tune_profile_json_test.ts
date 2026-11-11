@@ -299,3 +299,55 @@ describe("parseGeometryProfileJson: finally runs the runtime's injection check (
     });
   }
 });
+
+describe("parseGeometryProfileJson: the optional vec4 skeleton of an i8a8 geometry (perf-ledger K-85)", () => {
+  const skeleton = { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 64, skeleton: "vec4" as const };
+
+  it("a table with the skeleton in i8a8.linear comes back with it, and a table without it comes back without the field", () => {
+    const profile: GeometryProfile = { ...BASE, i8a8: { ...BASE.i8a8, linear: skeleton } };
+    const parsed = parseGeometryProfileJson(geometryProfileJson(profile));
+    assertEquals(parsed, profile);
+    assertEquals(parsed.i8a8.linear.skeleton, "vec4");
+    assertEquals(
+      "skeleton" in parseGeometryProfileJson(geometryProfileJson(BASE)).i8a8.linear,
+      false,
+    );
+  });
+
+  it("rejects a skeleton value other than vec4 naming the field, and still rejects an unknown field next to it", () => {
+    rejects(
+      json({ ...BASE, i8a8: { ...BASE.i8a8, linear: { ...skeleton, skeleton: "vec8" } } }),
+      'i8a8.linear.skeleton is not "vec4" ("vec8")',
+    );
+    rejects(
+      json({ ...BASE, i8a8: { ...BASE.i8a8, conv3d: { ...skeleton, skeleton: true } } }),
+      'i8a8.conv3d.skeleton is not "vec4" (true)',
+    );
+    rejects(
+      json({ ...BASE, i8a8: { ...BASE.i8a8, linear: { ...skeleton, unroll: true } } }),
+      "i8a8.linear has unknown fields unroll",
+    );
+    // An f32 skeleton geometry has no such field
+    rejects(
+      json({
+        ...BASE,
+        attention: { ...BASE.attention, qk: { ...BASE.attention.qk, skeleton: "vec4" } },
+      }),
+      "attention.qk has unknown fields skeleton",
+    );
+  });
+
+  it("a skeleton geometry the vec4 fill cannot cover is rejected by the injection check (tileK 24)", () => {
+    const error = rejects(
+      json({
+        ...BASE,
+        i8a8: {
+          ...BASE.i8a8,
+          linear: { regM: 4, regN: 4, wgX: 8, wgY: 12, tileK: 24, skeleton: "vec4" },
+        },
+      }),
+      "i8a8.linear: the vec4 skeleton needs tileK to be a multiple of 16 (24)",
+    );
+    assertInstanceOf(error.cause, CodegenError);
+  });
+});

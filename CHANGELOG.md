@@ -59,6 +59,13 @@ measurements in `docs/research/`.
   not get them. It exists to measure a candidate rule on a real decode with the session A/B and may change or go away
   in a minor version. The rule's author owns the evidence for its numbers (ADR 0148). `estimateSessionMemory` plans
   the target and the drafter with the same rules.
+- `@karume/runtime`: `I8a8Geometry.skeleton`, an optional field of the i8a8 geometries of a geometry profile
+  (`"vec4"`, perf-ledger K-85): the pack loop of the integer GEMM emitted unrolled and, in the i8a8 linear with i8
+  weights where `k % 16 == 0`, the shared tiles filled one `vec4<u32>` of global memory per item. The integers
+  are the same as without it; only speed differs, and the pipeline key names the form (`k32s…`, `:fill16`). A
+  geometry without the field keeps its keys and WGSL byte for byte, and no embedded table carries it.
+  `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept it and
+  reject any other value naming the field.
 
 ### Changed
 
