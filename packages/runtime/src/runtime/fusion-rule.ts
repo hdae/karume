@@ -851,7 +851,10 @@ const assertDeclarations = (
  * MUST: the window is the run of nodes that starts at `nodes[index]` and holds at least the chain's
  * nodes. The scan places the fused step at `index` and moves on by the window's length, so a window
  * that starts elsewhere or skips a node would drop that node or run another twice — silent wrong
- * values with no exception — and an empty one would never move on.
+ * values with no exception — and an empty one would never move on. MUST: the chain follows the
+ * window's node order. The step's inputs and output are derived from the chain in its order (the
+ * last node's value is the output, earlier values are internal), so a reversed chain would list
+ * its own output among its inputs and never define the value its consumers read.
  */
 const assertExternalWindow = (
   name: string,
@@ -865,6 +868,13 @@ const assertExternalWindow = (
       `fusion rule '${name}': the window of ${matched.window.length} nodes (chain ${matched.chain.length}) is not` +
         ` the run of nodes that starts at node ${index} (an external rule's window starts where it was tried,` +
         " holds every node it covers, and folds at least one)",
+    );
+  }
+  const positions = matched.chain.map((step) => matched.window.indexOf(step));
+  if (!positions.every((at, offset) => at > (offset === 0 ? -1 : positions[offset - 1]))) {
+    throw new ExecutionError(
+      `fusion rule '${name}': the folded chain does not follow the window's node order (its nodes sit at` +
+        ` window positions ${positions.join(", ")})`,
     );
   }
 };

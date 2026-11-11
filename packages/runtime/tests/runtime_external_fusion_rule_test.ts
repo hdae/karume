@@ -63,6 +63,8 @@ type NegNegMatch = FusionMatch & { readonly input: string };
 type Fault = {
   /** The window starts one node after the index the rule was tried at. */
   readonly shiftedWindow?: boolean;
+  /** The chain lists the two negs in reverse order. */
+  readonly reversedChain?: boolean;
   /** The step binds the graph input `x`, which the chain does not read. */
   readonly strayBind?: boolean;
   /** The step declares the internal value `n1` as its output. */
@@ -87,7 +89,12 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
     const chain = [first, second];
     return {
       window: fault.shiftedWindow === true ? [second] : chain,
-      chain: fault.shiftedWindow === true ? [second] : chain,
+      chain:
+        fault.shiftedWindow === true
+          ? [second]
+          : fault.reversedChain === true
+            ? [second, first]
+            : chain,
       input: first.node.ins[0],
     };
   },
@@ -312,6 +319,14 @@ describe("an external rule building a step", () => {
         label,
       );
     }
+  });
+
+  it("fails loudly on a chain that does not follow the window's node order", () => {
+    assertThrows(
+      () => plan([defineExternalRule(negNeg("test/neg_neg", { reversedChain: true }))]),
+      ExecutionError,
+      "the folded chain does not follow the window's node order (its nodes sit at window positions 1, 0)",
+    );
   });
 
   it("fails loudly on a step that declares no dispatch (its output would never be written)", () => {
