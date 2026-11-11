@@ -13,7 +13,7 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { outputCountOf, WHERE_OP } from "../ops.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
-import { ExecutionError, type NodePlan } from "./plan.ts";
+import { describeInputValue, ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
  * The names of the built-in rules — the type of the built-in list `FUSION_RULES` in
@@ -755,11 +755,32 @@ const CONTRACT_CLASSES: Readonly<Record<ContractClass, true>> = {
 
 /**
  * The checks of a definition's declarations (a JavaScript caller can pass any value; a declaration
- * read wrongly would decide the privacy of every chain the rule folds).
+ * read wrongly would decide the privacy of every chain the rule folds, and a `match` or `build` that
+ * is not a function would fail as an unnamed `TypeError` at the first run instead of here).
  */
 const assertDeclarations = (
-  rule: Pick<FusionRuleDefinition<FusionMatch>, "name" | "contract" | "internals">,
+  rule: Omit<FusionRuleDefinition<FusionMatch>, "match" | "build"> & {
+    readonly match: unknown;
+    readonly build: unknown;
+  },
 ): void => {
+  const heads: unknown = rule.heads;
+  if (
+    !Array.isArray(heads) ||
+    heads.length === 0 ||
+    !heads.every((head) => typeof head === "string" && head.length > 0)
+  ) {
+    throw new ExecutionError(
+      `fusion rule '${String(rule.name)}': heads must be a non-empty array of op names, got ${Array.isArray(heads) ? `[${heads.map(describeInputValue).join(", ")}]` : describeInputValue(heads)}`,
+    );
+  }
+  for (const field of ["match", "build"] as const) {
+    if (typeof rule[field] !== "function") {
+      throw new ExecutionError(
+        `fusion rule '${String(rule.name)}': ${field} must be a function, got ${describeInputValue(rule[field])}`,
+      );
+    }
+  }
   const contract: unknown = rule.contract;
   if (typeof contract !== "string" || !Object.hasOwn(CONTRACT_CLASSES, contract)) {
     throw new ExecutionError(
@@ -921,7 +942,7 @@ const snapshotDefinition = <Matched extends FusionMatch, Name extends string>(
   rule: FusionRuleDefinition<Matched, Name>,
 ): FusionRuleDefinition<Matched, Name> => {
   const { name, heads, contract, internals, match, build } = rule;
-  assertDeclarations({ name, contract, internals });
+  assertDeclarations({ name, heads, contract, internals, match, build });
   return Object.freeze({
     name,
     heads: Object.freeze([...heads]),

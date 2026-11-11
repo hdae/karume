@@ -16,6 +16,7 @@ import {
   type FusedBuild,
   type FusionMatch,
   type FusionRule,
+  type FusionRuleDefinition,
   ruleOrigin,
 } from "../src/runtime/fusion-rule.ts";
 import { type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
@@ -161,6 +162,42 @@ describe("defineExternalRule", () => {
       ExecutionError,
       "internals",
     );
+  });
+
+  it("refuses, through either define entry, heads that are not a non-empty array of op names and a match or build that is not a function", () => {
+    for (const [label, fault, message] of [
+      ["heads not an array", { heads: 5 }, "heads must be a non-empty array"],
+      ["empty heads", { heads: [] }, "heads must be a non-empty array"],
+      ["a head not a string", { heads: ["neg", 7] }, 'got ["neg", 7]'],
+      ["an empty head", { heads: [""] }, "heads must be a non-empty array"],
+      ["no match", { match: undefined }, "match must be a function"],
+      ["build not a function", { build: {} }, "build must be a function"],
+    ] as const) {
+      assertThrows(
+        () =>
+          defineExternalRule(
+            outsideTheType<FusionRuleDefinition<NegNegMatch, ExternalRuleName>>({
+              ...negNeg("test/neg_neg"),
+              ...fault,
+            }),
+          ),
+        ExecutionError,
+        message,
+        label,
+      );
+      assertThrows(
+        () =>
+          defineRule(
+            outsideTheType<FusionRuleDefinition<NegNegMatch>>({
+              ...negNeg("testNegNeg"),
+              ...fault,
+            }),
+          ),
+        ExecutionError,
+        message,
+        label,
+      );
+    }
   });
 
   it("brands its rule external and frozen, where defineRule brands it built-in; an object written by hand or copied has no brand", () => {

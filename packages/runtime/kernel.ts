@@ -48,9 +48,10 @@
 
 /**
  * Builds a fusion rule written outside the runtime; the value `SessionOptions.fusionRules` takes.
- * Throws `ExecutionError` (of `@karume/runtime`) on a name that is not `<namespace>/<rule>`, on a
- * contract class or a privacy outside the declared values, and, each time the rule builds a step,
- * on a step that breaks the checks above.
+ * Throws `ExecutionError` (of `@karume/runtime`) on a name that is not `<namespace>/<rule>`, on
+ * heads that are not a non-empty array of op names, on a contract class or a privacy outside the
+ * declared values, on a `match` or `build` that is not a function, and, each time the rule builds a
+ * step, on a step that breaks the checks above.
  */
 export { defineExternalRule as defineRule } from "./src/runtime/fusion.ts";
 /** The parts of a rule's definition, of the step it builds, and of the context its matcher reads. */
