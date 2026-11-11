@@ -10,7 +10,7 @@
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
-import { outputCountOf, WHERE_OP } from "../ops.ts";
+import { numel, outputCountOf, WHERE_OP } from "../ops.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
 import { describeInputValue, ExecutionError, type NodePlan } from "./plan.ts";
@@ -87,6 +87,10 @@ export type FusedOperand =
  * - `tiled` = the GEMM family with **one workgroup = one output tile**. It cannot be clamped onto a
  *   grid-stride loop, so exceeding the limit fails loudly on the declaring side
  *   (`tiledWorkgroups`).
+ *
+ * An external rule's counts are checked where the runtime resolves them: three positive integers
+ * within the device limit, from a positive integer workgroup size (`assertExternalWorkgroups` in
+ * recipe-builder.ts).
  */
 export type FusedWorkgroups =
   | { readonly kind: "gridStride"; readonly items: number; readonly size: number }
@@ -885,7 +889,9 @@ const assertExternalWindow = (
  * MUST: every bind is an external input of the chain, once. The release bookkeeping rests on the
  * chain's inputs alone (`ins`), so a bind outside them could be released, and its buffer reused,
  * before the step reads it — a silent wrong value. MUST: the output is the chain's last value with
- * its shape (consumers read that name, and the buffer is sized from the shape), and at least one
+ * its shape (consumers read that name, and the buffer is sized from the shape) with at least one
+ * element (each dispatch's counts are checked to be positive where the recipe builder resolves
+ * them, `assertExternalWorkgroups` in recipe-builder.ts), and at least one
  * dispatch binds it (its `operands` omitted — the output is then the last binding — or holding
  * `{ kind: "output" }`). Which bindings a dispatch writes is known only from its WGSL, so the
  * recipe builder checks, when it fetches the pipeline, that an external dispatch writes nothing but
@@ -916,6 +922,12 @@ const assertExternalBuild = (
     throw new ExecutionError(
       `fusion rule '${name}': the declared output '${built.outputName}' [${built.outputShape.join(",")}] is not the` +
         ` folded chain's last value '${last.name}' [${last.shape.join(",")}]`,
+    );
+  }
+  if (numel(built.outputShape) === 0) {
+    throw new ExecutionError(
+      `fusion rule '${name}': the output '${built.outputName}' [${built.outputShape.join(",")}] has no element` +
+        " (an external step's dispatches would run no workgroup, so its value must hold one)",
     );
   }
   if (built.dispatches.length === 0) {

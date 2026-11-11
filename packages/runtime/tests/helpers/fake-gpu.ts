@@ -115,10 +115,11 @@ export const losableGpuContext = (
 
 /**
  * A fake GPU on which a Session derives its recipes: it compiles any WGSL to a pipeline that does
- * nothing and hands out buffers that hold nothing. Its limits are {@link fakeGpuContext}'s zeros, so
- * a run stops at the transient plan (`invalid transient plan limit`), after every step was planned
- * and every recipe built — enough to observe a refusal raised while either happens, without a GPU.
- * The device parts go through a cast, as in {@link fakeDevice}.
+ * nothing and hands out buffers that hold nothing. Its limits are {@link fakeGpuContext}'s zeros but
+ * the WebGPU default workgroup count per dimension (65535, which a recipe's dispatch counts are
+ * checked against), so a run stops at the transient plan (`invalid transient plan limit`), after
+ * every step was planned and every recipe built — enough to observe a refusal raised while either
+ * happens, without a GPU. The device parts go through a cast, as in {@link fakeDevice}.
  */
 export const fakeRecipeGpuContext = (): GpuContext => {
   const device = fakeDevice({
@@ -131,7 +132,7 @@ export const fakeRecipeGpuContext = (): GpuContext => {
       }) as unknown as GPUBuffer,
     writeBuffer: (): void => undefined,
   });
-  return fakeGpuContext(
+  return new GpuContext(
     Object.assign(device, {
       limits: { minStorageBufferOffsetAlignment: 256 },
       createShaderModule: () => ({
@@ -139,5 +140,8 @@ export const fakeRecipeGpuContext = (): GpuContext => {
       }),
       createComputePipelineAsync: () => Promise.resolve({ getBindGroupLayout: () => ({}) }),
     }),
+    readAdapterInfo({}),
+    { ...ZERO_LIMITS, maxComputeWorkgroupsPerDimension: 65535 },
+    new Set(),
   );
 };

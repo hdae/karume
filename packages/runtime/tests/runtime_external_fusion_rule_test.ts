@@ -17,6 +17,7 @@ import {
   type ExternalRuleName,
   type FusedBuild,
   type FusedOperand,
+  type FusedWorkgroups,
   type FusionMatch,
   type FusionRule,
   type FusionRuleDefinition,
@@ -82,6 +83,8 @@ type Fault = {
   readonly wgsl?: string;
   /** The dispatch binds its params as storage. */
   readonly paramsStorage?: boolean;
+  /** The dispatch's workgroups (omitted: 32 items over workgroups of 64). */
+  readonly workgroups?: FusedWorkgroups;
 };
 
 /** `neg(neg(z))` folded into one dispatch: the definition, with `fault` applied. */
@@ -126,7 +129,7 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
                   ? {}
                   : { paramsStorage: fault.paramsStorage }),
                 ...(fault.operands === undefined ? {} : { operands: fault.operands }),
-                workgroups: { kind: "gridStride", items: 32, size: 64 },
+                workgroups: fault.workgroups ?? { kind: "gridStride", items: 32, size: 64 },
               },
             ],
     };
@@ -377,6 +380,19 @@ describe("an external rule building a step", () => {
     );
   });
 
+  it("fails loudly on a step whose output has no element", () => {
+    assertThrows(
+      () =>
+        plan([defineExternalRule(negNeg("test/neg_neg"))], (node) =>
+          node.outputs[0].name === "n2"
+            ? { ...node, outputs: node.outputs.map((out) => ({ ...out, shape: [0, 8] })) }
+            : node,
+        ),
+      ExecutionError,
+      "the output 'n2' [0,8] has no element",
+    );
+  });
+
   it("fails loudly on a step that declares no dispatch (its output would never be written)", () => {
     assertThrows(
       () => plan([defineExternalRule(negNeg("test/neg_neg", { noDispatch: true }))]),
@@ -517,6 +533,50 @@ describe("an external step's recipe (a fake GPU: the run stops at the transient 
       Error,
       "invalid transient plan limit",
     );
+  });
+
+  it("fails loudly, naming the rule, on workgroup counts that are not positive integers within the device limit", async () => {
+    const wgsl = wgslOf("var<uniform>", "read");
+    await assertRejects(
+      () => run({ wgsl, workgroups: { kind: "tiled", counts: [1, 1, 1] } }),
+      Error,
+      "invalid transient plan limit",
+      "the control: one workgroup",
+    );
+    for (const [label, workgroups, message] of [
+      [
+        "no tile",
+        { kind: "tiled", counts: [0, 1, 1] },
+        "resolves to the workgroup counts [0, 1, 1]",
+      ],
+      [
+        "over the limit",
+        { kind: "tiled", counts: [65536, 1, 1] },
+        "resolves to the workgroup counts [65536, 1, 1]",
+      ],
+      [
+        "a fraction",
+        { kind: "tiled", counts: [1.5, 1, 1] },
+        "resolves to the workgroup counts [1.5, 1, 1]",
+      ],
+      [
+        "no item",
+        { kind: "gridStride", items: 0, size: 64 },
+        "resolves to the workgroup counts [0, 1, 1]",
+      ],
+      [
+        "no workgroup size",
+        { kind: "gridStride", items: 32, size: 0 },
+        "declares the grid-stride workgroup size 0",
+      ],
+    ] as const) {
+      await assertRejects(
+        () => run({ wgsl, workgroups }),
+        ExecutionError,
+        `fusion rule 'test/neg_neg': dispatch 0 ('ext:test:neg_neg') ${message}`,
+        label,
+      );
+    }
   });
 
   it("fails loudly, naming the rule and the binding, on a kernel that declares an input or the params read_write", async () => {

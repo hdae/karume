@@ -348,6 +348,48 @@ const assertExternalWrites = (
 };
 
 /**
+ * Checks the workgroup size an external rule declares for a `gridStride` dispatch: a positive
+ * integer. The count is resolved from it (`gridStrideWorkgroups`), including the check that the
+ * loop's u32 arithmetic cannot wrap, so a size of 0 or a fraction would resolve a count that check
+ * does not cover.
+ */
+const assertExternalGridStride = (step: FusedStep, index: number, size: number): void => {
+  if (Number.isSafeInteger(size) && size > 0) return;
+  throw new ExecutionError(
+    `fusion rule '${step.rule}': dispatch ${index} ('${step.dispatches[index].key}') declares the grid-stride` +
+      ` workgroup size ${size}, which must be a positive integer`,
+  );
+};
+
+/**
+ * Checks an external rule's dispatch counts where they are resolved: three positive integers within
+ * the device limit.
+ *
+ * MUST: a count of 0 dispatches nothing, and the output keeps whatever a reused buffer held — a
+ * silent wrong value; a count above the limit fails only as a WebGPU validation error later, naming
+ * neither the rule nor the dispatch. The built-in rules resolve their counts through
+ * `tiledWorkgroups` / `gridStrideWorkgroups` themselves; an external `tiled` dispatch declares
+ * its counts as values.
+ */
+const assertExternalWorkgroups = (
+  step: FusedStep,
+  index: number,
+  counts: readonly number[],
+  limit: number,
+): void => {
+  if (
+    counts.length === 3 &&
+    counts.every((count) => Number.isSafeInteger(count) && count >= 1 && count <= limit)
+  ) {
+    return;
+  }
+  throw new ExecutionError(
+    `fusion rule '${step.rule}': dispatch ${index} ('${step.dispatches[index].key}') resolves to the workgroup` +
+      ` counts [${counts.join(", ")}], which must be three positive integers within the device limit ${limit}`,
+  );
+};
+
+/**
  * The body of the derivation phase. A Session holds exactly one and calls
  * {@link RecipeBuilder.buildRecipes} from the miss path of run / enqueue.
  */
@@ -639,6 +681,14 @@ export class RecipeBuilder {
       ];
       if (external) assertExternalWrites(step, index, operands, roles);
       const { workgroups } = dispatch;
+      if (external && workgroups.kind === "gridStride") {
+        assertExternalGridStride(step, index, workgroups.size);
+      }
+      const counts: readonly [number, number, number] =
+        workgroups.kind === "tiled"
+          ? workgroups.counts
+          : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1];
+      if (external) assertExternalWorkgroups(step, index, counts, limit);
       builder.dispatch({
         key: dispatch.key,
         pipeline,
@@ -649,10 +699,7 @@ export class RecipeBuilder {
           binding: slot + 1,
           source: resolve(operand),
         })),
-        workgroups:
-          workgroups.kind === "tiled"
-            ? workgroups.counts
-            : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1],
+        workgroups: counts,
       });
       // MUST: releases at the same boundary go in reverse allocation order (the same order as the plan replay).
       for (let id = step.temps.length - 1; id >= 0; id -= 1) {
