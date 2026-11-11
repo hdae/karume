@@ -731,10 +731,14 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
 
 describe("an external step's recipe (a fake GPU: the run stops at the transient plan, after every recipe)", () => {
   /** The bind group of the neg-neg step: params, the chain's input, the output. */
-  const wgslOf = (params: string, input: "read" | "read_write"): string =>
+  const wgslOf = (
+    params: string,
+    input: "read" | "read_write",
+    output: "read" | "read_write" = "read_write",
+  ): string =>
     `@group(0) @binding(0) ${params} params: vec4<u32>;
 @group(0) @binding(1) var<storage, ${input}> src: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(2) var<storage, ${output}> out: array<f32>;
 @compute @workgroup_size(64) fn main() {}`;
 
   const run = async (fault: Fault): Promise<unknown> => {
@@ -821,6 +825,14 @@ describe("an external step's recipe (a fake GPU: the run stops at the transient 
       );
       assert(error.cause instanceof Error && !(error.cause instanceof ExecutionError), label);
     }
+  });
+
+  it("fails loudly, naming the rule, on a step whose dispatches bind the output but never declare it read_write", async () => {
+    await assertRejects(
+      () => run({ wgsl: wgslOf("var<uniform>", "read", "read") }),
+      ExecutionError,
+      "fusion rule 'test/neg_neg': no dispatch declares the binding of the step's output 'n2' read_write",
+    );
   });
 
   it("fails loudly, naming the rule and the binding, on a kernel that declares an input or the params read_write", async () => {

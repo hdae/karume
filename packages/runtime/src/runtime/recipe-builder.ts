@@ -665,6 +665,7 @@ export class RecipeBuilder {
     // resolved (a malformed field, a count the resolver refuses, a WGSL thunk that throws) is
     // rethrown naming the rule (`ruleFailure`). A built-in step's failure passes through unchanged.
     try {
+      let writesOutput = false;
       for (const [index, dispatch] of step.dispatches.entries()) {
         for (const [id, temp] of step.temps.entries()) {
           if (temp.allocBefore === index) temps[id] = builder.allocTemp(temp.byteLength);
@@ -681,7 +682,12 @@ export class RecipeBuilder {
           ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
           { kind: "output" } as const,
         ];
-        if (external) assertExternalWrites(step, index, operands, roles);
+        if (external) {
+          assertExternalWrites(step, index, operands, roles);
+          writesOutput ||= operands.some(
+            (operand, slot) => operand.kind === "output" && roles.writes.has(slot + 1),
+          );
+        }
         const { workgroups } = dispatch;
         if (external && workgroups.kind === "gridStride") {
           assertExternalGridStride(step, index, workgroups.size);
@@ -707,6 +713,17 @@ export class RecipeBuilder {
         for (let id = step.temps.length - 1; id >= 0; id -= 1) {
           if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
         }
+      }
+      // MUST: an external step writes its output. A step whose every dispatch binds the output
+      // `read` leaves the buffer as the pool handed it over, and its consumers read stale data
+      // silently. The plan checks only that some dispatch binds it; what a binding writes is known
+      // here, from the WGSL roles (a built-in rule writes its output by construction).
+      if (external && !writesOutput) {
+        throw new ExecutionError(
+          `fusion rule '${step.rule}': no dispatch declares the binding of the step's output` +
+            ` '${step.outputName}' read_write (its buffer would never be written, and its consumers would read` +
+            " stale data)",
+        );
       }
     } catch (error) {
       if (!external) throw error;
