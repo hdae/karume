@@ -192,7 +192,10 @@ one or more `karume-geometry-sweep/2` records and combines them into one profile
   headers of `geometry-profiles/apple-metal-3.ts:12` and `nvidia-blackwell.ts:12` still name
   `deno run -A tools/geometry-sweep/main.ts profile`, which no longer exists in the tree; so do the
   comments at `packages/runtime/src/tune/derive.ts:5` and
-  `packages/runtime/tests/tune_profile_test.ts:6`.
+  `packages/runtime/tests/tune_profile_test.ts:6`. (Updated 2026-11-11: `apple-metal-3.ts` keeps that command as the
+  record of how it was generated and marks the tool removed; `nvidia-ampere.ts` and `nvidia-blackwell.ts` name the
+  untracked Node scripts that derived them; `derive.ts` and `tune_profile_test.ts` name the removed tools as removed.
+  No tracked command regenerates a table, so the SHOULD stays unmet.)
 
 ### 5. The default profile is byte-identical to the previous table
 
@@ -416,14 +419,14 @@ Confirmed in the diagnostics of all four anima stages; timings in research K-70 
 (Superseded by ADR 0127 decision 5 on 2026-10-16: the Deno-era tools, `tools/gpu-lab` included, were
 removed from the development tree in `bb35fe2a`; they remain on `main` at 0.14.0.) What remains: the
 candidate set `quick+` (quick ∪ the adopted geometries of the registered profiles) is the default
-of the sweep in `./tune` (`DEFAULT_CANDIDATE_SET`, `packages/runtime/src/tune/geometries.ts:242`),
+of the sweep in `./tune` (`DEFAULT_CANDIDATE_SET` in `packages/runtime/src/tune/geometries.ts`),
 because the fixed quick set lacked the M2 and RTX winners and trying other machines' winners costs
 about as much as quick. Tables for registration are built from `full`.
 
 ### Addendum 8: full re-runs on M2 and RTX 5070 Ti (2026-09-29 evening)
 
 `nvidia-blackwell` lost its single-case `gemmRows` rules (they lost badly at other M of the same
-bucket) and keeps only the three i8a8 fields; on the M2, thermal drift (re-measured ratio 1.160 on
+bucket) and keeps only the three i8a8 fields (until its re-derivation of 2026-10-30 — addendum decision 11); on the M2, thermal drift (re-measured ratio 1.160 on
 matmul M 4096) would have sent > 512 back to the default. Settled by addendum decision 8 and ADR
 0116; details in commit `b860e44b`.
 
@@ -566,4 +569,7 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   `apple-metal-3` carry the new `caseSet` although their records contain no conv3d case; their
   `i8a8.conv3d` is the default by absence. Scoping the `caseSet` per op family (ADR
   [0117](0117-app-geometry-tuning.md) decisions 4 / 8) is filed in the [backlog](../backlog.md) (later).
-  A conv3d-only sweep on the RTX 5070 Ti is prepared (perf-ledger V-15).
+  A conv3d-only sweep on the RTX 5070 Ti is prepared (perf-ledger V-15). (Updated 2026-11-11: V-15 closed on
+  2026-10-30 with the maintainer's ruling 42 = c, which re-derived the whole `nvidia-blackwell` table from two full
+  sweeps of the current kernels: `i8a8.conv3d` takes `tile64x64r8x4w16x8k16`, the i8a8 ③PV and conv2d rows32 change,
+  and GEMMs of 129–512 rows and the i8a8 ①QK return to the default; the records are in the table's provenance.)

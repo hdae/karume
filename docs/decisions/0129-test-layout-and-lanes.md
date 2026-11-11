@@ -128,7 +128,7 @@ The following MUST stay in the suite through the migration and after it:
   turned into a tolerance: a tolerance would erase what the gate proves (the numbers did not move on
   this machine).
 - **The all-skip gates** of ADR 0005 — `gpu_gate_test.ts` (no adapter, no `shader-f16`, no
-  `timestamp-query`), `assets_gate_test.ts` (no real-weight assets) and `distribution_gate_test.ts`
+  `timestamp-query`), `assets_gate_test.ts` (no real-weight assets; now `packages/e2e/tests/e2e_assets_gate_test.ts`) and `distribution_gate_test.ts`
   (no distribution mirrors) — with their explicit opt-outs (`KARUME_ALLOW_NO_GPU`,
   `KARUME_ALLOW_NO_SHADER_F16`, `KARUME_ALLOW_NO_TIMESTAMP_QUERY`, `KARUME_ALLOW_NO_ASSETS`,
   `KARUME_ALLOW_NO_DISTRIBUTION`). A run that sets an opt-out is not release evidence. *(Amended
@@ -406,7 +406,9 @@ is listed under "Follow-ups" and is not done by this addendum.
   the lane population (`{packages,tools}/*/tests/**/*_test.ts`) and need the playground's own Vite
   configuration (its `@` alias and plugins). They run with `pnpm --filter @karume/playground test`,
   are not part of the lanes, and are not collected by `vp test`. "`vp test` is the full suite" holds
-  for the lanes only. Today neither CI nor the release runbook runs this suite (follow-up).
+  for the lanes only. Today neither CI nor the release runbook runs this suite (follow-up). (Updated
+  2026-11-11: both run it — the step "Test (playground)" of the `check` job in `.github/workflows/ci.yml` and an
+  item of `docs/release-runbook.md` §1.)
 
 **Decision 3 — what stays mandatory.**
 
@@ -462,7 +464,8 @@ is listed under "Follow-ups" and is not done by this addendum.
    `src/` and `tests/helpers` by relative path. The direction is one-way: no runtime, hub or models
    test imports `packages/e2e` (addendum 2026-10-17), and only the runtime GPU tests (with their
    helpers) and the playground import `@karume/kernel-checks`. Both rules hold today; no gate
-   enforces them (follow-up).
+   enforces them (follow-up). (Updated 2026-11-11: `packages/runtime/tests/verify_test_imports_test.ts`
+   enforces both.)
 5. Sanitizers — **closed for now**: the loss of Deno's resource / op sanitizers is accepted
    (`@karume/test-support/process-events` covers escaped errors, not resource leaks). It belongs in
    `docs/limitations.md` (follow-up); a GPU resource-leak check is filed only if a leak shows up.
@@ -474,9 +477,10 @@ is listed under "Follow-ups" and is not done by this addendum.
 **Follow-ups** (not blockers for 0.15.0):
 
 - A gate for the two import rules of open point 4 (no published-package test imports
-  `packages/e2e`; only the runtime GPU tests and the playground import `@karume/kernel-checks`).
+  `packages/e2e`; only the runtime GPU tests and the playground import `@karume/kernel-checks`). Done
+  (`verify_test_imports_test.ts`; updated 2026-11-11).
 - Move the kept optional asset cases of decision 1 into `packages/e2e`.
-- Run the playground suite in CI and add it to the release runbook's checks.
+- Run the playground suite in CI and add it to the release runbook's checks. Done (updated 2026-11-11).
 - Record the sanitizer loss in `docs/limitations.md`.
 - Correct `packages/e2e/README.md`, which says every test there needs local assets and a GPU (the
   three core gates need neither, and the `*_host*_test.ts` files need no GPU).

@@ -101,7 +101,9 @@ adapter `device` and `description`, and Apple M2 and M5 share `apple` / `metal-3
 - timestamp-query is requested when the adapter lists it; otherwise the sweep measures by wall clock,
   and the generator rejects that record (decision 3).
 - The cases come from Anima's op census (`src/tune/cases.ts` header), so applications of other
-  families also get their fields decided by Anima's shapes; the `./tune` doc states this.
+  families also get their fields decided by Anima's shapes; the `./tune` doc states this. (Amended by the
+  addendum of 2026-10-28: the table also holds the Wan2.2 VAE decoder's conv3d w8a8 cases, which decide
+  `i8a8.conv3d`.)
 
 ### 3. Measurement check: an upper bound on rounding error per observation (amends ADR 0115 decision 4's input check)
 
@@ -207,7 +209,9 @@ readonly provenance?: {
   built-in tables, which call themselves "generated — do not edit by hand"
   (`src/kernels/geometry-profiles/apple-metal-3.ts:2`); a GEMM kernel change turns this test red with
   only a hand edit to fix it. The regeneration path has to be restored before work on the GEMM
-  kernels.)
+  kernels.) (Updated 2026-11-11: the records now come from the playground's `/geometry-sweep` page and
+  `deriveGeometryProfile` derives the table, but the step that writes the TS module is still an untracked script
+  under `outputs/diag/`, so the tracked regeneration path is still missing.)
 
 #### Case-set version
 
@@ -327,7 +331,7 @@ geometry goes together with re-running the sha256 checks. MUST NOT: geometry tha
 | Who                            | Guarantees                                                                                                                                                                                                        |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | runtime                        | The injected table does not change during the device's lifetime; nothing is measured on the acquire / Session path; structural check at injection (`assertGeometryProfile`)                                     |
-| `./tune` (sweep and generator) | An adopted geometry matched the default's output in every case of its class and was ×1.05 or faster (ADR 0115 decision 4); the evidence covers only the sweep's case set (Anima's shapes) × that device × the adopted geometries |
+| `./tune` (sweep and generator) | An adopted geometry matched the default's output in every case of its class and was ×1.05 or faster (ADR 0115 decision 4); the evidence covers only the sweep's case set (Anima's shapes, and the Wan2.2 VAE's conv3d cases since the addendum of 2026-10-28) × that device × the adopted geometries |
 | user application               | Decides with `geometryProfileMismatch` whether to keep a table; does not sweep alongside inference; records which table ran (output reproducibility)                                                             |
 
 - The end-to-end sha256 checks (PNG / WAV reference values — ADR 0106) cover the built-in tables,

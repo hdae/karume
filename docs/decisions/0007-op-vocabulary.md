@@ -24,7 +24,8 @@
   embedding, masked_fill (9 ops). ADR [0015](0015-conv-family-extension.md) added `leaky_relu` (its
   decomposed form inflates intermediate buffers 1.5–2×), ADR [0017](0017-rms-norm-conv2d-clamp-min.md)
   added `rms_norm` and ADR [0118](0118-wan21-video-generation.md) decision 1 added `conv3d`. The
-  canonical list is `karume.convert.PRESERVED_OP_PREFIXES` (12 ops); attention is preserved only
+  canonical list is `karume.convert.PRESERVED_OP_PREFIXES` (12 ops; 13 since ADR
+  [0138](0138-moss-image-dit-vae.md) decision 7 added `group_norm`, updated 2026-11-11); attention is preserved only
   per target through `PRESERVED_OP_PREFIXES_WITH_ATTENTION` (`tools/exporter/src/karume/convert.py`).
 - **A judgement that an op "can be decomposed" MUST pass the torch comparison check.** Adversarial
   checks in the prototype proved many decompositions wrong (missing log1p, pow with a negative base,

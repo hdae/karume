@@ -1,7 +1,7 @@
 # 0012: attrs vocabulary and the fused-op contract (preserved list of 9 ops)
 
-- Status: accepted (2026-08-02); the attrs contract is current. The preserved list is now 12 (0015
-  `leaky_relu`, 0017 `rms_norm`, 0118 `conv3d`; ADR 0023's fused attention is only in
+- Status: accepted (2026-08-02); the attrs contract is current. The preserved list is now 13 (0015
+  `leaky_relu`, 0017 `rms_norm`, 0118 `conv3d`, 0138 `group_norm`; ADR 0023's fused attention is only in
   `PRESERVED_OP_PREFIXES_WITH_ATTENTION`, `tools/exporter/src/karume/convert.py`).
 - Date: 2026-08-02
 - Related: [0007](0007-op-vocabulary.md) / [op-vocabulary.md](../op-vocabulary.md) (current list) /

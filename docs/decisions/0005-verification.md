@@ -29,7 +29,9 @@ Node + Dawn*).
    of 2026-10-29 closed that open point and leaves the home to this ADR, which MAY name the
    playground — `apps/playground`, its `/kernel-check` page and model pages; until it does, the
    home is an open point here. The release runbook §1 already runs the `/kernel-check` page in
-   Chrome for releases that change the subgroup variants or the state-attention rewrites)*.
+   Chrome for releases that change the subgroup variants or the state-attention rewrites; updated 2026-11-11:
+   since ADR [0147](0147-numerics-and-kernel-adoption.md) decision 9 it runs the page before every release, MUST on
+   Dawn / Vulkan on the RTX 3080 Ti and Chrome / D3D12 on the RTX 5070 Ti, and the lane's home stays open here)*.
    Dawn / wgpu differences (rounding, features) are caught here.
 
 ### Rules (inherited from the prototype)

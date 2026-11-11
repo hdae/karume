@@ -51,7 +51,8 @@ When the option is on, a `static_quantize` node is passed packed only if all of 
    epilogue). One GEMM, sequential GEMV, subgroup variant or other op among them keeps it f32.
 4. No fusion step other than the linear→SRQ fusion consumes the value. Only that fusion has a spelling
    that reads packed words, so the moment another rule takes `linear` into its window, its fused kernel
-   would read packed words as f32. None of the current 7 rules has `linear` in its window, so this
+   would read packed words as f32. None of the current 7 rules has `linear` in its window (updated 2026-11-11: of the ten rules today, still
+   none but linearStaticQuantize), so this
    never fires today; without the check on the accepting side, **only the newly added rule** would
    break silently.
 

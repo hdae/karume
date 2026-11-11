@@ -52,7 +52,9 @@ sequence (`ExecStep[]` — plain nodes or fused steps) is closed in one pure fun
 the GPU, `planFusions`. The execution side receives the step sequence and holds no matching logic.
 
 - **Rules form a declaration table**, `FUSION_RULES` (seven rules as of 2026-10-18:
-  linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln / rowBlockAttention). Each rule
+  linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln / rowBlockAttention; updated
+  2026-11-11: ten rules, with geluMulStaticQuantize, rmsNormRope and gatedResidual added by the addenda below — the
+  list is `FUSION_RULES` itself). Each rule
   separates `match` (capture) from `build` (declare binds, kernel key and params), and `defineRule`
   enforces the separation through types.
 - **MUST: the basis of release bookkeeping (the multiset of external inputs, `ins`) and the scan width
@@ -111,7 +113,9 @@ only observation point, so per-rule application counts are permanent:
 `SessionDiagnostics.lastRunFusions`, with the same lifetime as `lastRun` / `lastRunTiming` (the most
 recent run, replaced as a whole on every run).
 
-The counters are the fusion rules plus `identityExpand` (and `packedStaticQuantize`, added later).
+The counters are the fusion rules plus `identityExpand` (and `packedStaticQuantize`, `linearPrologue` and
+`attentionPermute`, added later — ADR 0105 and the addendum of 2026-10-25; updated 2026-11-11, the list is
+`FusionCounterName` in `packages/runtime/src/runtime/fusion-rule.ts`).
 **`reshape` aliasing is not counted**: it always applies, so there is nothing to observe; identity
 expand depends on a shape condition and can fail, so it is counted.
 
@@ -196,7 +200,9 @@ shift / scale / gate) sit between `layer_norm` and `add(scale, const[1])`. They 
    multiplication, so there is no reduction to reorder). The output loop is the block loop of silu: an
    `o = lid` while loop is workgroup-nonuniform and cannot hold a barrier.
 4. **`adaln` is added to `FusionCounterName`**, and `FusedDispatch.workgroupSize` is documented as the
-   grid-stride divisor, not `@workgroup_size` (row-per-workgroup kernels pass 1).
+   grid-stride divisor, not `@workgroup_size` (row-per-workgroup kernels pass 1). (Updated 2026-11-11: the field
+   is now `FusedDispatch.workgroups`; its grid-stride form `{ kind: "gridStride", items, size }` carries the
+   divisor as `size`, and its tiled form gives the counts.)
 5. **The execution side is unchanged**; the rule fits the common "params, inputs…, output" bind surface.
 
 On the RTX 3080 Ti / Vulkan the twin-graph check (`packages/runtime/tests/gpu_adaln_fusion_test.ts`,
@@ -406,7 +412,8 @@ copies is a node output. The permute after the attention stays a node.
   backing: the Wan2.2 DiT's region total — what the slot backing allocates — is 888.0 MiB with the
   permute as a node and 1,042.7 MiB with it absorbed at S 7,920 (3,043.3 / 3,576.1 MiB at S 27,280),
   the live peak unchanged at 634.2 / 2,169.2 MiB. The output permute stays a node until the transient
-  placement no longer turns its removal into a larger backing.
+  placement no longer turns its removal into a larger backing. (Revised by the addendum of 2026-10-26: on the
+  online route the attention absorbs its output permute.)
 - **The exact match** (decision 2 — `attentionPermutesAt` in `packages/runtime/src/runtime/fusion.ts`),
   on an a8 seat, on the window from the scan index: a run of `p ≥ 1` nodes directly followed by a
   fused `attention` (no states field — the states form is another kernel family), f32, one output,
@@ -421,7 +428,8 @@ copies is a node output. The permute after the attention stays a node.
 - **Fail loudly**: a node other than a fused attention that carries the annotation throws
   `ExecutionError` in the recipe builder and in the estimate (it would read the re-pointed inputs in
   the wrong layout).
-- **The counter**: `attentionPermute`, once per absorbed permute (up to three per attention), in the
+- **The counter**: `attentionPermute`, once per absorbed permute (up to three per attention; up to four since the addendum of
+  2026-10-26, which absorbs the output permute on the online route), in the
   public `FusionCounts` (`lastRunFusions`). Counted 2026-10-25 from the distribution graphs on the a8
   attention seat (`packages/e2e/tests/e2e_*_fusion_counts_test.ts`): the Wan2.2 and Wan2.1 DiTs 180
   each (q, k and v of 60 attentions); anima's DiT 56 (v of 56 attentions — its q / k reach the

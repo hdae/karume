@@ -343,7 +343,7 @@ CPU decoding and executability have separate owners.**)**
   ①②③, with ③ only for linear / embedding), so **"accept a new codec as a declaration first" was an
   existing path**. The example of the time, bf16 as ① only, no longer holds **(superseded by ADR
   0131 on 2026-10-17: bf16 executes like f16; `RUNTIME_SUPPORT.storage` lists it —
-  `packages/runtime/src/ops/contracts.ts:855`)**.
+  `packages/runtime/src/ops/contracts.ts`)**.
 - **An unknown codec is rejected before any weight is fetched** (the same shape as the old rejection
   of storage dtypes outside the vocabulary).
 - The ledger's purpose was to stop a predicate growing per codec (`eligibleCompressedInitializers` /
@@ -458,7 +458,7 @@ Low-bit codecs **presuppose packed int8 activations (ADR 0105)**, and what they 
   `self_attn`), and a JSON object would drop the order contract.
 - Upstream weights are bf16, so a **bf16 decoder is required**. (At the time the runtime did not
   execute bf16 — **superseded by ADR 0131 on 2026-10-17**: `RUNTIME_SUPPORT.storage` lists `bf16`,
-  `packages/runtime/src/ops/contracts.ts:855`, decoded by `decodeBf16` in
+  `packages/runtime/src/ops/contracts.ts`, decoded by `decodeBf16` in
   `packages/runtime/src/format/bf16.ts`.) Rounding **bf16 → exact f32 → `Math.f16round`** matches the
   distributed f16 weights **567/567 bytes**. The 113 tensors stored as f32 **already hold f16-rounded
   values** (`round_weights_to_f16` in `tools/export-recipes/anima/export.py` runs over the whole
@@ -987,7 +987,7 @@ Owners of each axis:
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Storage format (axis ①)              | `CODEC_LEDGER` in `packages/runtime/src/format/container/codecs.ts` (Python mirror: `CODEC_LEDGER` in `tools/exporter/src/karume/container.py`)          | Registered name, `layout` (kind of expansion path), `packing`, `scale`, `grouping`, `zeroPoint`, `rowAxes`. Declaration rules in `descriptor.ts` (unknown-codec rejection, field presence), `memory.ts` (field presence), `bind.ts` (ranges, divisibility, scale length, `rowAxes`) |
 | CPU decoding                         | `decodeF16` (`packages/runtime/src/format/f16.ts`), `decodeBf16` (`bf16.ts`, since ADR 0131), `decodeI8` (`i8.ts`), `decodeI4` (`i4.ts`), `decodeI2` (`i2.ts`) | One per expansion path. Called from `packages/runtime/src/runtime/session-build.ts` (weights that axis ③ rules ineligible are expanded to f32)                                                                                        |
-| Executable (axis ②)                  | `RUNTIME_SUPPORT.storage` in `packages/runtime/src/ops/contracts.ts` and `assertRuntimeSupport` in `packages/runtime/src/ops/support.ts`                | The set of executable expansion paths. The original row said "`bf16` is in the ledger but not here (declaration accepted, execution rejected as a missing capability before weights are fetched)" — **superseded by ADR 0131 on 2026-10-17**: `bf16` is in the set (`contracts.ts:855`) |
+| Executable (axis ②)                  | `RUNTIME_SUPPORT.storage` in `packages/runtime/src/ops/contracts.ts` and `assertRuntimeSupport` in `packages/runtime/src/ops/support.ts`                | The set of executable expansion paths. The original row said "`bf16` is in the ledger but not here (declaration accepted, execution rejected as a missing capability before weights are fetched)" — **superseded by ADR 0131 on 2026-10-17**: `bf16` is in the set |
 | Compressed-resident ops (axis ③)     | the three predicates in `packages/runtime/src/runtime/plan.ts` and `planWeightResidency` in `packages/runtime/src/runtime/weight-residency.ts`           | Eligible ops per expansion path; ineligible weights go to CPU decoding                                                                                                                                                                |
 | GPU decoding (WGSL)                  | `packages/runtime/src/kernels/weight-storage.ts` (generators shared by the five fused kernels) and dedicated kernels (`linear-gemv.ts`, `linear-i8a8.ts`, …) | Per storage form: reading and scale multiplication                                                                                                                                                                                    |
 

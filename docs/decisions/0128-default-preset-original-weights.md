@@ -312,7 +312,9 @@ work is listed under follow-ups and is not part of this addendum.
    `convCompute: "a8"`. The only conv8 preset, Wan2.2 `i8-a8-attn8-online-conv8`, also sets
    `linearCompute: "a8"`, and its sibling `i8` has the same weights and an empty `session`, so
    every mirror of 2026-10-29 already passes the three-knob rule. Extending the gate is a
-   follow-up (open point 5).
+   follow-up (open point 5). (Updated 2026-11-11: done — `A8_KNOBS` and `defaultPresetViolations` in
+   `packages/runtime/tests/distribution_gate_test.ts` count the three knobs, with fault-injection cases for a
+   preset whose only a8 knob is `convCompute` and for a would-be sibling that keeps it.)
 6. **Decision 5 names the three knobs.** The warning fires for any of the three
    (`packages/runtime/src/runtime/a8-emulation-warning.ts:37-48`), and its text already names
    `convCompute` among the knobs to set to `"f32"` (`:53-54`). The knob route out is `"f32"` for
@@ -324,7 +326,7 @@ work is listed under follow-ups and is not part of this addendum.
    knob route also needs `convCompute: "f32"`, as the warning text already says.
 9. **Consequences, "For the repository".** The CHANGELOG entry of the warning (`[Unreleased]`,
    Added) names only `linearCompute` / `attentionCompute`; it should name `convCompute` too
-   (follow-up).
+   (follow-up). (Updated 2026-11-11: the entry names it.)
 
 ### Open points after acceptance
 
@@ -333,7 +335,8 @@ work is listed under follow-ups and is not part of this addendum.
 2. Revisiting decision 5 — kept open; there is no field evidence before the release.
 3. The "which presets fit this device" report — kept open, unscheduled; unrelated to the release.
 4. Already records its resolution (2026-10-18, step 2-8); closed, its text stays as written.
-5. **New: the gate's C2 counts `convCompute`** (amendment 5). Open until the test change lands.
+5. **New: the gate's C2 counts `convCompute`** (amendment 5). Open until the test change lands. (Updated
+   2026-11-11: closed, the test change landed.)
 
 The review's other two new points are closed by this addendum: the provisional gemma4 e4b default
 by the note of amendment 2, and where a family records its choice by amendment 4.
@@ -343,8 +346,8 @@ by the note of amendment 2, and where a family records its choice by amendment 4
 - Extend C2 in `packages/runtime/tests/distribution_gate_test.ts` to the three knobs, with
   fault-injection cases for a preset whose only a8 knob is `convCompute` and for a would-be sibling
   that sets `convCompute: "a8"`. No GPU is needed; it waits until the pending geometry derivation
-  lifts the freeze on `packages/runtime`. No mirror changes.
-- Name `convCompute` in the CHANGELOG entry of the dp4a warning.
+  lifts the freeze on `packages/runtime`. No mirror changes. (Done; updated 2026-11-11.)
+- Name `convCompute` in the CHANGELOG entry of the dp4a warning. (Done; updated 2026-11-11.)
 - Sync the documents that still call this ADR proposed: ADR 0058 (the status line, the marker
   on decision 6, and the same-weights bullet of its 2026-09-13 addendum, "effective when 0128 is
   accepted"), ADR 0091,

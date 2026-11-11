@@ -54,7 +54,8 @@ existing ops do not change) and closes both holes.
    by demand (recurrence, entry conditions).
 5. **Non-core ops kept from decomposition sit in the extended composite layer.** Of the 12 ops whose
    decomposition is forbidden, strictly 3 carry `Tag.core` (embedding / gelu / leaky_relu; torch,
-   measured 2026-08-14). The 9 non-core ones (conv1d / conv2d / conv_transpose1d / layer_norm /
+   measured 2026-08-14; updated 2026-11-11: 14 ops today — ADR 0118 added `conv3d` to the extended composite layer
+   and ADR 0138 decision 7 added `group_norm`, a Core ATen layer op). The 9 non-core ones (conv1d / conv2d / conv_transpose1d / layer_norm /
    linear / masked_fill / rms_norm / softmax / attention (SDPA, per target)) are composites whose
    decomposition the exporter chose to stop; they belong to the extended composite layer (grounds in
    existing ADRs and the ledger; no retroactive procedure). Consequence: **a non-core op (by the
@@ -68,7 +69,7 @@ existing ops do not change) and closes both holes.
    part in the vocabulary doors. Withdrawn 2026-10-18: the inventory table of 2026-08-14 (for
    example "the fusion layer is exactly four rules"); the current inventory lives in the source and
    the ledger (ADR 0064 decision 3) — `FUSION_RULES` in `packages/runtime/src/runtime/fusion.ts`
-   holds seven rules today.
+   holds seven rules today (updated 2026-11-11: ten).
 7. **Inherited unchanged**: the "better not to do" list (no additions for symmetry; filling the 160
    is not a goal) overrides every door; the fusion layer MUST have observation points (ADR 0040);
    the no-decomposition list is an axis independent of layers (ADR 0043 addendum, decision 3); the

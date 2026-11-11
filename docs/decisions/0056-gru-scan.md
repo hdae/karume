@@ -245,7 +245,9 @@ The inventory for a future `lstm_scan`:
 - **Open conflict**: LSTM's `(y, h_n, c_n)` has three outputs. A model that needs only `y` can copy this
   ADR's form; a model consuming `h_n` / `c_n` needs a multi-output contract. Node-level multiple outputs
   are allowed by ADR 0068 decision 1; the remaining wall is the exporter's `operator.getitem` wiring
-  (ADR 0068 addendum 2, item 3). Whether Kokoro-82M's LSTMs consume `h_n` / `c_n` is **unverified** —
+  (ADR 0068 addendum 2, item 3). (Updated 2026-11-11: since ADR 0068 addendum 11 the exporter wires
+  `operator.getitem` to the outputs of a handled multi-output node, first for `topk`; an LSTM handler is still to
+  be written.) Whether Kokoro-82M's LSTMs consume `h_n` / `c_n` is **unverified** —
   check it before starting LSTM (the one branch that could rework the contract).
 - Gate count as an attr shared with GRU is not possible (the attr-variant problem of `gelu` /
   `gelu_tanh`; a separate op, for the reason of decision 2).

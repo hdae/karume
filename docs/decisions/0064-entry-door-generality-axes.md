@@ -33,7 +33,8 @@
    — the packages are published; the re-ruling stays open in `docs/backlog.md` (release section).
 2. **Axis B — an addition that breaks an execution-model invariant MUST have an ADR, even when it
    belongs to Core ATen.** The invariants: single output (superseded by ADR 0068 decision 1 on
-   2026-08-17: node-level multi-output is allowed through the six surfaces of 0068) / static shapes (no
+   2026-08-17: node-level multi-output is allowed through the six surfaces of 0068 — eight in the code, ADR 0068
+   addendum 1) / static shapes (no
    data-dependent output shape) / full-write / 4-byte storage with three semantic dtypes / full-range
    write of resident tensors. The ADR states the impact (planner / executor / recipe / IR …) up front
    as a required section. This is an exception to step 3 of the procedure (core → ledger NOTE only).
