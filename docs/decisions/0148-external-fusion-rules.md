@@ -125,8 +125,12 @@ pair) stays as it is and covers the built-in list only. Which rule hit is in `la
 
 A rule cannot fold a node with several outputs or a node that touches state, cannot hand packed int8 words to another step,
 and cannot add an op: those windows are not taken, and the restriction is not changed here. Every fused kernel of the
-runtime is f32; `defineRule` itself does not check dtypes, and a matcher checks `allF32` on its chain as the built-in rules
-do (open question 1).
+runtime is f32, and **an external rule folds only chains that are all f32**: the runtime checks `allF32` on the chain an
+external matcher grabbed and does not take the window otherwise (the unfused plan is always correct). The check is not left
+to the matcher, because a matcher that forgot it would fold an i32 or bool chain into an f32 kernel silently. The built-in
+rules keep the dtype checks in their matchers (some read a bool condition — `isF32Where`). This settles the question the
+first version of this record left open (the design of 2026-11-11 listed non-f32 outputs among what `defineRule`
+refuses).
 
 ### 8. The memory estimate is not changed
 
@@ -171,9 +175,3 @@ rules. `SessionOptions.fusionRules` says so.
 - The evidence for an external rule's numbers is its author's: the runtime does not run its checks and `/kernel-check` does
   not cover it.
 - What a fused step may bind is now checked for external rules, not only by construction.
-
-## Open questions
-
-1. Whether `defineRule` should refuse a chain that is not f32 (the design of 2026-11-11 listed non-f32 outputs among what
-   it refuses; the code leaves the dtype to each matcher, as for the built-in rules, and this record keeps the code's
-   behaviour).

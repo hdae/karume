@@ -943,7 +943,14 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
   matched: Matched | undefined,
 ): FusionHit | undefined => {
   if (matched === undefined) return undefined;
-  if (namespace !== undefined) assertExternalWindow(rule.name, nodes, index, matched);
+  if (namespace !== undefined) {
+    assertExternalWindow(rule.name, nodes, index, matched);
+    // An external rule folds only f32 chains, checked here and not left to its matcher: every
+    // fused kernel reads and writes f32 words, so a chain with another dtype that a matcher forgot
+    // to refuse would read them as f32 silently. Such a window is not taken (the unfused plan is
+    // always correct), as the built-in matchers decline it.
+    if (!allF32(matched.chain)) return undefined;
+  }
   // After fusion no buffer for an internal value exists, so a consumer outside the chain or a
   // readback would lose it.
   const internalsKept =
@@ -1070,8 +1077,9 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
  * {@link defineRule} for a rule written outside the runtime — the `defineRule` of
  * `@karume/runtime/kernel`. The name is `<namespace>/<rule>` ({@link ExternalRuleName}), checked
  * here; the rule is branded external, so a Session takes it through `SessionOptions.fusionRules`;
- * it is tried only at a node whose op is one of its `heads`, and its matcher reads the narrowed
- * {@link FusionMatchContext}; and besides every check of
+ * it is tried only at a node whose op is one of its `heads`, its matcher reads the narrowed
+ * {@link FusionMatchContext}, and a window whose chain is not all f32 is not taken; and besides every
+ * check of
  * {@link defineRule}, its window must start where it was tried, its build must bind only the chain's
  * own inputs and write the chain's last value, and every dispatch key must start with
  * `ext:<namespace>:` (checked each time the rule builds a step).

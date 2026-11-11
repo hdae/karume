@@ -120,9 +120,14 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
   },
 });
 
-const plan = (rules: readonly FusionRule[]): FusionPlan<string> => {
+/** `rewrite` changes the planned nodes (a dtype the graph's declaration cannot carry). */
+const plan = (
+  rules: readonly FusionRule[],
+  rewrite: (node: NodePlan) => NodePlan = (node) => node,
+): FusionPlan<string> => {
   const graph = mergeGraph(NEG_NEG_GRAPH);
-  return planFusions(planGraph(graph, bindSymbols(graph, { x: SHAPE, z: SHAPE })).nodes, {
+  const nodes = planGraph(graph, bindSymbols(graph, { x: SHAPE, z: SHAPE })).nodes.map(rewrite);
+  return planFusions(nodes, {
     rules,
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
@@ -319,6 +324,25 @@ describe("an external rule building a step", () => {
         label,
       );
     }
+  });
+
+  it("does not fold a chain with a node that is not f32 (the runtime checks it, not the matcher)", () => {
+    const rule = defineExternalRule(negNeg("test/neg_neg"));
+    // The second neg reads and writes i32 words; the matcher does not look at dtypes.
+    const folded = plan([rule], (node) =>
+      node.outputs[0].name === "n2"
+        ? {
+            ...node,
+            inputDtypes: ["i32"],
+            outputs: node.outputs.map((out) => ({ ...out, dtype: "i32" })),
+          }
+        : node,
+    );
+    assertEquals(
+      folded.steps.map((step) => (step.kind === "fused" ? step.rule : step.plan.node.op)),
+      ["abs", "neg", "neg"],
+    );
+    assertEquals(folded.counts["test/neg_neg"], 0);
   });
 
   it("fails loudly on a chain that does not follow the window's node order", () => {

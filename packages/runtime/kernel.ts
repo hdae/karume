@@ -23,8 +23,8 @@
  *   tried) and checks each step it builds (only the chain's own inputs bound, the chain's last value
  *   written, every dispatch key starting with `ext:<namespace>:`).
  * - {@link allF32} and {@link sameShape} are the predicates the built-in rules use in their
- *   matchers. `defineRule` does not check dtypes: a matcher that writes an f32 kernel checks
- *   {@link allF32} itself.
+ *   matchers. Every fused kernel is f32, so a rule's step is taken only when its folded chain is all
+ *   f32 ({@link allF32}, checked by the runtime: a window with another dtype is left unfused).
  * - The WGSL parts keep the unfused rounding. {@link prologueUnaryWgsl} and {@link fusedBinaryWgsl}
  *   are the text the plain elementwise kernels compile; {@link SIGMOID_STABLE_WGSL} and
  *   {@link TANH_STABLE_WGSL} are the overflow-safe functions those kernels call
