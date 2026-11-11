@@ -27,7 +27,7 @@ import {
   SHA,
 } from "./helpers/container-loading-fixture.ts";
 import { fakeSession, programOf } from "./helpers/generation-fake.ts";
-import { GELU_MUL_RULE } from "./helpers/gelu-mul-rule.ts";
+import { GELU_MUL_RULE } from "@karume/candidate-rules";
 
 /** A pipeline with chunk length 16 and bucket ladder [4, 8] (capacity symbol `C`, row symbol `R`). */
 const wiring = () =>

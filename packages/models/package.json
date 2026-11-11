@@ -32,6 +32,7 @@
     "@karume/runtime": "workspace:*"
   },
   "devDependencies": {
+    "@karume/candidate-rules": "workspace:*",
     "@karume/test-support": "workspace:*"
   }
 }

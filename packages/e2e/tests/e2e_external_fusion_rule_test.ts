@@ -1,6 +1,6 @@
-// The models package's external fusion rule on the GPU (ADR 0148): the test-support rule
-// `test/gelu_mul` (packages/models/tests/helpers/gelu-mul-rule.ts — `gelu_tanh` then `mul` in one
-// dispatch, written against `@karume/runtime/kernel` alone) passed through
+// A fusion rule written outside the runtime, on the GPU (ADR 0148): the candidate rule
+// `candidate/gelu_mul` (`@karume/candidate-rules`, packages/candidate-rules/src/gelu-mul.ts —
+// `gelu_tanh` then `mul` in one dispatch, written against `@karume/runtime/kernel` alone) passed through
 // `SessionOptions.fusionRules`, against the same Session options with the rule disabled by the
 // test-only `DISABLED_FUSION_RULES` (the plain side). Every output is compared as u32 words
 // (`wordIdentity`, NaN by class), and the rule's counter in `lastRunFusions` reads 1 on the fused
@@ -8,7 +8,7 @@
 // graphs, no model assets: the two windows the rule takes (the nodes adjacent in both mul orders,
 // and one independent linear between them), a partial last workgroup, and inputs past the tanh
 // saturation with ±0, a subnormal, ±Inf and a NaN payload. It lives here, not in the runtime,
-// because the runtime's tests import nothing from the models package (the runtime keeps a twin of
+// because the runtime's tests import nothing outside the runtime (the runtime keeps a twin of
 // its own: packages/runtime/tests/gpu_external_fusion_rule_test.ts). No adapter = explicit SKIP.
 
 import { describe, it } from "vite-plus/test";
@@ -31,7 +31,7 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "../../runtime/tests/helpers/model-fixture.ts";
-import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "../../models/tests/helpers/gelu-mul-rule.ts";
+import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 /** Rows × width: 771 elements leave a partial last workgroup of the rule's 128 threads. */
@@ -162,9 +162,9 @@ const wordsOf = (tensor: Tensor | undefined): Uint32Array<ArrayBuffer> => {
 };
 
 describe.skipIf(!GPU_AVAILABLE)(
-  "the models package's external fusion rule against its unfused plan (real GPU)",
+  "the candidate external fusion rule against its unfused plan (real GPU)",
   () => {
-    it("test/gelu_mul is u32-identical to the plain gelu_tanh and mul in each window it takes, and counts once", async () => {
+    it("candidate/gelu_mul is u32-identical to the plain gelu_tanh and mul in each window it takes, and counts once", async () => {
       const gpu = await acquireGpu();
       try {
         for (const form of ["gelu-other", "other-gelu", "over-linear"] as const) {

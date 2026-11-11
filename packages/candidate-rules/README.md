@@ -1,0 +1,25 @@
+# @karume/candidate-rules
+
+Private workspace package (not published): fusion rules that are **candidates**, not adopted rules.
+
+A candidate is a fusion rule written outside the runtime with `defineRule` of `@karume/runtime/kernel`
+(ADR 0148) while it is being measured and checked: its effect on a real run (the wall-clock session A/B of
+`@karume/runtime/tune`) and the evidence its contract class asks for (for a class E rule, the
+fused-against-unfused u32 check on each backend — docs/kernel-rules.md). No pipeline passes a candidate by
+default; a measurement passes it explicitly (the gemma pipeline's experimental `fusionRules`).
+
+- **Nothing here is part of a release.** The package is private, no published package depends on it, and
+  no default, preset or manifest names a rule from it.
+- **A rule moves into `packages/models` when it is adopted**, together with its evidence (the A/B records
+  and the identity checks it was adopted on). A rule that is dropped is removed from here, and the
+  measurement that dropped it stays in `docs/research/`.
+- **Every file imports from `@karume/runtime/kernel` and nothing else of the runtime** — the entry a
+  package outside the runtime writes a rule against. No runtime-internal module, no load hook, no type
+  assertion around the entry's types; `packages/models/tests/external_fusion_rule_test.ts` pins this for
+  the rules below.
+
+| Rule | Export | What it folds | Contract | Checked by |
+| --- | --- | --- | --- | --- |
+| `candidate/gelu_mul` | `GELU_MUL_RULE`, `GELU_MUL_RULE_NAME` (`src/gelu-mul.ts`) | `gelu_tanh(gate)` then the `mul` that reads it, adjacent or with one independent `linear` between them (Gemma 4 26B A4B's routed experts and dense MLP), in one dispatch | E | `packages/e2e/tests/e2e_external_fusion_rule_test.ts` (fused vs unfused on the GPU), `e2e_gemma4_26b_external_rule_test.ts` (planned on 26B's graph) |
+
+Who imports it: the models test that pins the import list and the e2e tests above.

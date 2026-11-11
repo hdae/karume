@@ -1,11 +1,11 @@
 /**
  * A fusion rule written outside the runtime on a real graph (no GPU — `planFusions` on part 0
- * only): the test-support rule `test/gelu_mul` (`packages/models/tests/helpers/gelu-mul-rule.ts`,
- * written against `@karume/runtime/kernel` alone) planned on Gemma 4 26B A4B's decode graph through
- * the path a Session takes (`planDistributionFusions` with `fusionRules`, so the Session's own list
- * composition and checks). It takes each layer's two `gelu_tanh → mul` chains — the dense MLP's,
- * with the up projection's `linear` between them (gate linear → gelu_tanh → up linear → mul), and
- * the routed experts', adjacent (gelu_tanh of one half of the gate/up `expert_linear` → mul with the
+ * only): the candidate rule `candidate/gelu_mul` (`@karume/candidate-rules`,
+ * packages/candidate-rules/src/gelu-mul.ts, written against `@karume/runtime/kernel` alone) planned
+ * on Gemma 4 26B A4B's decode graph through the path a Session takes (`planDistributionFusions`
+ * with `fusionRules`, so the Session's own list composition and checks). It takes each layer's two
+ * `gelu_tanh → mul` chains — the dense MLP's, with the up projection's `linear` between them (gate
+ * linear → gelu_tanh → up linear → mul), and the routed experts', adjacent (gelu_tanh of one half of the gate/up `expert_linear` → mul with the
  * other half): 30 + 30 = 60 per plan, the count the 2026-11-10 prototype reached through a load hook
  * (perf-ledger K-105). Every other counter stays the plan's without the rule, and the rule disabled
  * by name gives that plan back. Token identity on the real weights is not checked here (this
@@ -23,7 +23,7 @@ import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/session-types.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
-import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "../../models/tests/helpers/gelu-mul-rule.ts";
+import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import {
   GEMMA4_26B_IN_MIRROR,
   GEMMA4_QAT_MIRROR,

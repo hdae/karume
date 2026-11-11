@@ -10,6 +10,7 @@
   },
   "devDependencies": {
     "@hdae/yomi": "catalog:",
+    "@karume/candidate-rules": "workspace:*",
     "@karume/hub": "workspace:*",
     "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*",

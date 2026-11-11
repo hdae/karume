@@ -1,7 +1,9 @@
 /**
- * A fusion rule written the way a package outside the runtime writes one, against
- * `@karume/runtime/kernel` alone (tests/external_fusion_rule_test.ts pins that import list): the chain
- * `gelu_tanh(gate) → mul(·, other)` in one dispatch. Test support only — no pipeline passes it.
+ * A candidate fusion rule written the way a package outside the runtime writes one, against
+ * `@karume/runtime/kernel` alone (packages/models/tests/external_fusion_rule_test.ts pins that
+ * import list): the chain `gelu_tanh(gate) → mul(·, other)` in one dispatch. A candidate, not an
+ * adopted rule: no pipeline passes it by default; a measurement passes it through the gemma
+ * pipeline's experimental `fusionRules`.
  *
  * It is the rewrite of the 2026-11-10 investigation prototype (perf-ledger K-105, research
  * 2026-11-10 §8.1), which reached the rule list through a module load hook and runtime internals.
@@ -31,7 +33,7 @@ import {
 } from "@karume/runtime/kernel";
 
 /** The rule's name, and its counter in `lastRunFusions`. */
-export const GELU_MUL_RULE_NAME = "test/gelu_mul";
+export const GELU_MUL_RULE_NAME = "candidate/gelu_mul";
 
 const WORKGROUP_SIZE = 128;
 
@@ -45,8 +47,8 @@ type GeluMulMatch = FusionMatch & {
   readonly count: number;
 };
 
-/** MUST: the order stays in the key (it changes the WGSL); the key is under `ext:test:`. */
-const key = (order: Order): string => `ext:test:gelu_mul:v1:${order}:f32:wg${WORKGROUP_SIZE}`;
+/** MUST: the order stays in the key (it changes the WGSL); the key is under `ext:candidate:`. */
+const key = (order: Order): string => `ext:candidate:gelu_mul:v1:${order}:f32:wg${WORKGROUP_SIZE}`;
 
 const wgsl = (order: Order): string => {
   const gelu = prologueUnaryWgsl("gelu_tanh", "gate[i]");
@@ -55,7 +57,7 @@ const wgsl = (order: Order): string => {
     order === "gelu-other"
       ? fusedBinaryWgsl("mul", act, "other[i]")
       : fusedBinaryWgsl("mul", "other[i]", act);
-  return `// karume external rule test/gelu_mul: gelu_tanh -> mul (${order}, f32)
+  return `// karume candidate rule candidate/gelu_mul: gelu_tanh -> mul (${order}, f32)
 struct Params { n: u32, reserved0: u32, reserved1: u32, reserved2: u32 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> gate: array<f32>;
