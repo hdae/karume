@@ -49,6 +49,7 @@ import {
   type NodePlan,
   planGraph,
 } from "../src/runtime/plan.ts";
+import { builtInCounts } from "./helpers/fusion-count-record.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 import {
@@ -1272,22 +1273,7 @@ test("counters accumulate per rule on a graph with fusions in a row", () => {
 
   const plan = fuse(graph, ropeInputs({ heads: 2 }));
   assertEquals(outline(plan.steps), ["fused:rope", "fused:silu"]);
-  assertEquals(plan.counts, {
-    silu: 1,
-    upsample2x: 0,
-    rope: 1,
-    rmsNormRope: 0,
-    adaln: 0,
-    gatedResidual: 0,
-    rmsNormAdd: 0,
-    linearStaticQuantize: 0,
-    geluMulStaticQuantize: 0,
-    rowBlockAttention: 0,
-    identityExpand: 0,
-    packedStaticQuantize: 0,
-    linearPrologue: 0,
-    attentionPermute: 0,
-  });
+  assertEquals(plan.counts, builtInCounts({ silu: 1, rope: 1 }));
 });
 
 // --------------------------------------------- Row-block attention (rowBlockAttention)
@@ -2250,23 +2236,6 @@ const fusePrologue = (
   });
 };
 
-const NO_FUSIONS = {
-  silu: 0,
-  upsample2x: 0,
-  rope: 0,
-  rmsNormRope: 0,
-  adaln: 0,
-  gatedResidual: 0,
-  rmsNormAdd: 0,
-  linearStaticQuantize: 0,
-  geluMulStaticQuantize: 0,
-  rowBlockAttention: 0,
-  identityExpand: 0,
-  packedStaticQuantize: 0,
-  linearPrologue: 0,
-  attentionPermute: 0,
-} as const;
-
 /** A node step's `prologue` (undefined for fused steps and plain nodes). */
 const prologueOf = (step: ExecStep) => (step.kind === "node" ? step.prologue : undefined);
 
@@ -2297,7 +2266,7 @@ test("the linear prologue folds gelu_tanh and the erf gelu into the a8 linear th
       label,
     );
     assertEquals(step.aliasesInput, false, label);
-    assertEquals(plan.counts, { ...NO_FUSIONS, linearPrologue: 1 }, label);
+    assertEquals(plan.counts, builtInCounts({ linearPrologue: 1 }), label);
   }
 });
 
@@ -2490,7 +2459,7 @@ test("geluMulStaticQuantize and the linear prologue never accept the same gelu_t
     fuseGeluMulStaticQuantize: true,
   });
   assertEquals(outline(plan.steps), ["linear", "fused:geluMulStaticQuantize"]);
-  assertEquals(plan.counts, { ...NO_FUSIONS, linearPrologue: 1, geluMulStaticQuantize: 1 });
+  assertEquals(plan.counts, builtInCounts({ linearPrologue: 1, geluMulStaticQuantize: 1 }));
 });
 
 // ------------------------------- the permutes a fused attention absorbs (perf-ledger F-3 / F-8)
@@ -2716,7 +2685,7 @@ test("on an a8 attention seat a fused attention absorbs the [0, 2, 1, 3] permute
   ]);
   assertEquals(step.plan.outputs, [{ name: "o", shape: [b, 2, s, d], dtype: "f32" }]);
   assertEquals(step.aliasesInput, false);
-  assertEquals(plan.counts, { ...NO_FUSIONS, attentionPermute: 3 });
+  assertEquals(plan.counts, builtInCounts({ attentionPermute: 3 }));
 });
 
 test("only the a8 attention seat absorbs: on an f32, an f16 or an unset seat every permute stays a node", () => {
@@ -2736,7 +2705,7 @@ test("only the a8 attention seat absorbs: on an f32, an f16 or an unset seat eve
       plan.steps.map(() => undefined),
       `${label}: no annotation`,
     );
-    assertEquals(plan.counts, NO_FUSIONS, `${label}: counters`);
+    assertEquals(plan.counts, builtInCounts(), `${label}: counters`);
   }
 });
 
@@ -3018,7 +2987,7 @@ test("on the online route (a8 × 'none', D 64 / 128, any N, a device with the sg
       [{ name: "ot", shape: [b, s, 2, d], dtype: "f32" }],
       `${label}: token-major output`,
     );
-    assertEquals(plan.counts, { ...NO_FUSIONS, attentionPermute: 4 }, `${label}: counters`);
+    assertEquals(plan.counts, builtInCounts({ attentionPermute: 4 }), `${label}: counters`);
   }
 });
 
@@ -3334,7 +3303,7 @@ test("rmsNormRope folds the Wan DiT's interleaved q and k prologues into one ste
       });
       assertEquals(dispatch.operands, undefined, label);
     }
-    assertEquals(plan.counts, { ...NO_FUSIONS, rmsNormRope: 2 }, label);
+    assertEquals(plan.counts, builtInCounts({ rmsNormRope: 2 }), label);
     assertStepOrder(plan, graph, label);
   }
   // One chain alone folds the same way (no deferred node).

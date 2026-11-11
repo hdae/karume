@@ -36,6 +36,7 @@ import {
 import type { SessionOptions } from "../../../runtime/src/runtime/session-types.ts";
 import { planWeightResidency } from "../../../runtime/src/runtime/weight-residency.ts";
 import { resolveParts } from "../../../runtime/tests/helpers/container-files.ts";
+import { builtInCounts } from "../../../runtime/tests/helpers/fusion-count-record.ts";
 import {
   type ContainerManifest,
   containerPart0,
@@ -237,19 +238,5 @@ export const decodeFusionCounts = (
   return fusionCounts(graph, inputShapes, options, undefined, stateShapes);
 };
 
-export const NONE: FusionCounts = {
-  silu: 0,
-  upsample2x: 0,
-  rope: 0,
-  rmsNormRope: 0,
-  adaln: 0,
-  gatedResidual: 0,
-  rmsNormAdd: 0,
-  linearStaticQuantize: 0,
-  geluMulStaticQuantize: 0,
-  rowBlockAttention: 0,
-  identityExpand: 0,
-  packedStaticQuantize: 0,
-  linearPrologue: 0,
-  attentionPermute: 0,
-};
+/** Every built-in counter at 0 (the checks spread their expected hits over it). */
+export const NONE: FusionCounts = builtInCounts();

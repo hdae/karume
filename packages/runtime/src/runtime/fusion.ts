@@ -590,12 +590,12 @@ const oneCounterPerName = <Name extends string>(
 
 /**
  * The counter record of a plan at zero: one counter per rule name of `rules` and the annotation
- * counters.
+ * counters (the scan starts from it; tests build their expected records from it).
  *
  * MUST: every name has its own counter. Two rules of one name, or a rule named like an annotation
  * counter, would add their hits together silently, so they fail loudly here.
  */
-const zeroFusionCounts = <Name extends string>(
+export const zeroFusionCounts = <Name extends string>(
   rules: readonly FusionRule<Name>[],
 ): Record<Name | AnnotationCounterName, number> => {
   const counts: Record<string, number> = {
