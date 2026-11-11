@@ -18,6 +18,13 @@
  * record (`karume-session-ab/1`, inside an envelope with the request and the container's part-0
  * digest) is written under the directory the variable names.
  *
+ * NOTE: the feeds (between the twin markers) are the same text as the playground's
+ * apps/playground/src/models/session-ab/moss.ts, `export` aside: the playground's MOSS-Image DiT
+ * target of `/session-ab` runs the same forward on the same feeds in a browser. No module both may
+ * import fits the gates (the e2e tests cannot import the playground, `@karume/candidate-rules`
+ * holds rules only), so the two copies are kept textually parallel: a change to one MUST be made to
+ * the other (apps/playground/tests/session-ab_moss_test.ts compares them).
+ *
  * The record's backend is inferred from the platform (linux → vulkan, darwin → metal, win32 →
  * d3d12: Dawn's backend there), and the envelope says so; WebGPU does not expose it.
  *
@@ -61,22 +68,6 @@ if (skipReason !== undefined) {
   console.warn(`[karume] the session A/B on the MOSS-Image DiT SKIPs: ${skipReason}`);
 }
 
-/** The DiT component the A/B runs (its graph has the same name). */
-const COMPONENT = "dit";
-
-/** The request the A/B runs (written into the record's envelope). */
-const REQUEST = {
-  model: "sft",
-  component: COMPONENT,
-  quant: MOSS_PRACTICAL_PRESET,
-  imageTokens: 4096,
-  textTokens: 63,
-  seed: 0x5eed,
-  rounds: 4,
-  openPerVisit: true,
-  minGain: 0.01,
-} as const;
-
 /**
  * The rule's runs in one forward (42 FFN gates, 84 RoPE tails, 84 gated-residual tails, 82 adaLN
  * tails — e2e_moss_fusion_counts_test.ts) and the nodes they fold beyond one dispatch each.
@@ -97,6 +88,15 @@ const inferredBackend = (platform: string): string => {
   }
   return DAWN_BACKENDS[platform];
 };
+
+// ---- The MOSS DiT feeds: twin begin (the same text in e2e_moss_session_ab_test.ts and the playground's session-ab/moss.ts, `export` aside) ----
+
+/**
+ * The work of one forward: the sequence of a 1024 × 1024 request — 4,096 image tokens (64 × 64
+ * latent cells) and the 63 text tokens of the fridge-note prompt, S = 4,159 — and the seed of the
+ * feeds.
+ */
+const MOSS_DIT_WORK = { imageTokens: 4096, textTokens: 63, seed: 0x5eed } as const;
 
 /** A graph input as the DiT declares it (`S` its one symbol). */
 type DitInput = {
@@ -159,6 +159,22 @@ const mossDitFeeds = (
   }
   return feeds;
 };
+
+// ---- The MOSS DiT feeds: twin end ----
+
+/** The DiT component the A/B runs (its graph has the same name). */
+const COMPONENT = "dit";
+
+/** The request the A/B runs (written into the record's envelope). */
+const REQUEST = {
+  model: "sft",
+  component: COMPONENT,
+  quant: MOSS_PRACTICAL_PRESET,
+  ...MOSS_DIT_WORK,
+  rounds: 4,
+  openPerVisit: true,
+  minGain: 0.01,
+} as const;
 
 describe.skipIf(skipReason !== undefined)("the session A/B on the MOSS-Image DiT (opt-in)", () => {
   it("the candidate rule keeps every output word and takes its 292 runs per forward", async () => {

@@ -15,6 +15,7 @@ import { entryPointOf, type GemmaEntryPoint } from "@/models/gemma4/settings";
 import modelsPackage from "../../../../../packages/models/package.json" with { type: "json" };
 import runtimePackage from "../../../../../packages/runtime/package.json" with { type: "json" };
 
+import type { SessionAbMossRequest } from "./moss";
 import type { SessionAbRequest } from "./request";
 import { type ArmCounts, type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run";
 
@@ -179,6 +180,99 @@ export const buildSessionAbPageRecord = (input: {
             dispatches: counts.dispatches,
           })),
         }),
+    record,
+    judgements: input.judgements,
+  };
+};
+
+/**
+ * The version of the MOSS-Image DiT target's envelope, a record of its own (the Gemma target's
+ * `karume-playground-session-ab/2` is unchanged); bump it when a field changes meaning or goes away.
+ */
+export const SESSION_AB_MOSS_PAGE_FORMAT = "karume-playground-session-ab-moss/1";
+
+/** The container both arms built their Sessions from. */
+export type SessionAbMossContainer = {
+  readonly component: string;
+  /** sha256 of its part 0 (the two documents, which name every block's sha256). */
+  readonly part0Sha256: string;
+};
+
+export type SessionAbMossPageRecord = RecordEnvironment & {
+  readonly format: typeof SESSION_AB_MOSS_PAGE_FORMAT;
+  readonly page: "session-ab";
+  readonly target: "moss-dit-forward";
+  /** The `@karume/runtime` and `@karume/models` versions the page was built with. */
+  readonly versions: SessionAbVersions;
+  readonly request: SessionAbMossRequest;
+  readonly distribution: SessionAbDistribution;
+  readonly source: SourceRecord;
+  readonly container: SessionAbMossContainer;
+  /** The rule the `rule` arm passed; its dispatch keys all start with the prefix. */
+  readonly rule: {
+    readonly name: string;
+    readonly package: "@karume/candidate-rules";
+    readonly keyPrefix: string;
+  };
+  /**
+   * The runtime's record (`karume-session-ab/1`), unchanged. Its arms carry the counts: every run of
+   * a `sessionArm` reports its fusion counts and dispatches, and the runner refused a run whose
+   * counts were not its arm's first run's.
+   */
+  readonly record: SessionAbRecord;
+  /** `judgeSessionAb(record, { minGain: request.minGain })`, one per compared arm. */
+  readonly judgements: readonly SessionAbJudgement[];
+};
+
+/**
+ * The envelope of one finished A/B on the MOSS-Image DiT target. Refuses a record whose arms or
+ * round count are not the request's (it would describe different runs), a request without an arm
+ * that passes the rule, and a record whose arms carry no counts (every arm of this target reports
+ * them).
+ */
+export const buildSessionAbMossPageRecord = (input: {
+  readonly environment: RecordEnvironment;
+  readonly versions: SessionAbVersions;
+  readonly request: SessionAbMossRequest;
+  readonly distribution: SessionAbDistribution;
+  readonly source: SourceRecord;
+  readonly container: SessionAbMossContainer;
+  readonly ruleName: string;
+  readonly record: SessionAbRecord;
+  readonly judgements: readonly SessionAbJudgement[];
+}): SessionAbMossPageRecord => {
+  const { request, record, ruleName } = input;
+  const requested = namesOf(request.arms);
+  const recorded = namesOf(record.arms);
+  if (requested !== recorded || record.rounds !== request.rounds) {
+    throw new Error(
+      `The A/B record (${recorded}; ${record.rounds} rounds) is not the request's (${requested}; ${request.rounds} rounds)`,
+    );
+  }
+  if (!request.arms.some(({ fusionRules }) => fusionRules.includes(ruleName))) {
+    throw new Error(`No arm of the request passes the rule ${ruleName}`);
+  }
+  const uncounted = record.arms.filter(
+    (arm) => arm.fusions === undefined || arm.dispatches === undefined,
+  );
+  if (uncounted.length > 0) {
+    throw new Error(`The A/B record's arm(s) ${namesOf(uncounted)} reported no counts`);
+  }
+  return {
+    format: SESSION_AB_MOSS_PAGE_FORMAT,
+    page: "session-ab",
+    target: "moss-dit-forward",
+    ...input.environment,
+    versions: input.versions,
+    request,
+    distribution: input.distribution,
+    source: input.source,
+    container: input.container,
+    rule: {
+      name: ruleName,
+      package: "@karume/candidate-rules",
+      keyPrefix: ruleKeyPrefix(ruleName),
+    },
     record,
     judgements: input.judgements,
   };

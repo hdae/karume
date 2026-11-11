@@ -101,3 +101,12 @@ export const judgementView = (judgement: SessionAbJudgement): JudgementView => (
   ],
   reason: judgement.reason,
 });
+
+/**
+ * An arm's counts as the runner's record keeps them (a target whose arms report their counts to
+ * the runner, the MOSS-Image DiT's `sessionArm`s); `undefined` when the arm reported none.
+ */
+export const recordedCounts = (arm: SessionAbArmRecord): SessionAbArmCounts | undefined =>
+  arm.fusions === undefined || arm.dispatches === undefined
+    ? undefined
+    : { arm: arm.name, fusions: arm.fusions, dispatches: arm.dispatches };
