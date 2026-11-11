@@ -27,12 +27,14 @@
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import {
   createSessionFromContainer,
   ROW_BLOCK_SPLIT,
+  type Session,
   type Tensor,
 } from "../src/runtime/executor.ts";
 import {
@@ -43,6 +45,7 @@ import {
   openGraphModel,
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 
 /** The WebGPU core default storage binding limit. The portability check reproduces it. */
@@ -149,6 +152,41 @@ type RunResult = {
   readonly windowedQkDispatches: number;
 };
 
+const open = async (
+  gpu: GpuContext,
+  graph: DeclarationJson,
+  split?: number,
+  budget?: number,
+): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME, {
+    ...(split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split }),
+    ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
+  });
+
+/**
+ * What the Session's last run allocated. MUST: read after its first run — a later run on the slot
+ * backing allocates no intermediate buffer from the arena, so its peak reads 0.
+ */
+const allocated = (session: Session): Omit<RunResult, "output"> => {
+  const diagnostics = session.diagnostics();
+  return {
+    peakTransientBytes: diagnostics.lastRun?.peakTransientBytes ?? 0,
+    windowedQkDispatches: countDispatches(
+      requireCensus(diagnostics.lastRunPipelines, "decomposed attention"),
+      (key) => key.includes(":rwa"),
+    ),
+  };
+};
+
+/** Runs `session` once and reads what that run allocated. */
+const observe = async (
+  session: Session,
+  inputs: Readonly<Record<string, FilledTensor>>,
+): Promise<RunResult> => {
+  const output = (await session.run(inputs))["y"];
+  return { output, ...allocated(session) };
+};
+
 const run = async (
   gpu: GpuContext,
   graph: DeclarationJson,
@@ -156,21 +194,9 @@ const run = async (
   split?: number,
   budget?: number,
 ): Promise<RunResult> => {
-  const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME, {
-    ...(split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split }),
-    ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
-  });
+  const session = await open(gpu, graph, split, budget);
   try {
-    const output = (await session.run(inputs))["y"];
-    const diagnostics = session.diagnostics();
-    return {
-      output,
-      peakTransientBytes: diagnostics.lastRun?.peakTransientBytes ?? 0,
-      windowedQkDispatches: countDispatches(
-        requireCensus(diagnostics.lastRunPipelines, "decomposed attention"),
-        (key) => key.includes(":rwa"),
-      ),
-    };
+    return await observe(session, inputs);
   } finally {
     await session.dispose();
   }
@@ -182,23 +208,39 @@ const run = async (
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-const assertSameBits = (actual: Tensor, expected: Tensor, label: string): void => {
-  assertEquals(actual.shape, expected.shape, label);
-  const a = bits(actual);
-  const b = bits(expected);
-  const mismatches: number[] = [];
-  for (let i = 0; i < a.length && mismatches.length < 4; i += 1) {
-    if (a[i] !== b[i]) mismatches.push(i);
-  }
-  assertEquals(
-    mismatches,
-    [],
-    `${label}: the bit patterns differ (first mismatches: ${mismatches
-      .map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`)
-      .join(" / ")})`,
+/**
+ * The fused side's row-block run against the plain 9-node sequence: the bit patterns, the
+ * rowBlockAttention counter on both sides (checkFusionTwin, NaN by payload), the output shape and a
+ * check against tautology (if the output is constant, "equal" verifies nothing), on a run of the
+ * fused side of its own (the harness returns a case). Returns that output with what the harness's
+ * run — the fused Session's first — allocated.
+ */
+const assertSameBits = async (
+  gpu: GpuContext,
+  fused: Session,
+  reference: { readonly session: Session; readonly output: Tensor },
+  inputs: Readonly<Record<string, FilledTensor>>,
+  label: string,
+): Promise<RunResult> => {
+  assertCheckCase(
+    await checkFusionTwin(gpu, {
+      label,
+      fused,
+      plain: reference.session,
+      feeds: inputs,
+      counter: "rowBlockAttention",
+      hits: 1,
+      nan: "payload",
+    }),
   );
-  // A check against tautology: if the output is constant, "equal" verifies nothing.
-  assert(new Set(a).size > 1, `${label}: the output is constant (bit equality is a tautology)`);
+  const firstRun = allocated(fused);
+  const output = (await fused.run(inputs))["y"];
+  assertEquals(output.shape, reference.output.shape, label);
+  assert(
+    new Set(bits(output)).size > 1,
+    `${label}: the output is constant (bit equality is a tautology)`,
+  );
+  return { output, ...firstRun };
 };
 
 const SHAPES: readonly Shape[] = [
@@ -224,20 +266,32 @@ test.skipIf(!GPU_AVAILABLE)(
         const inputs = attentionInputs(shape);
         // The reference = a spelling the matcher cannot catch (the plain 9-node sequence that
         // never fuses).
-        const reference = await run(gpu, attentionGraph(shape, true), inputs);
-        let previousPeak = Number.POSITIVE_INFINITY;
-        for (const split of SPLITS) {
-          const fused = await run(gpu, attentionGraph(shape), inputs, split);
-          const label = `${shape.name} / ${split} blocks`;
-          assertSameBits(fused.output, reference.output, label);
-          // More blocks lower the intermediate peak (the observation point that **the materialized
-          // width shrinks** even with identical values — if this is not monotonic, a temporary's
-          // lifetime declaration or the pool reuse is broken).
-          assert(
-            fused.peakTransientBytes < previousPeak,
-            `${label}: the intermediate peak ${fused.peakTransientBytes}B did not shrink from ${previousPeak}B`,
-          );
-          previousPeak = fused.peakTransientBytes;
+        const referenceSession = await open(gpu, attentionGraph(shape, true));
+        try {
+          const reference = {
+            session: referenceSession,
+            output: (await observe(referenceSession, inputs)).output,
+          };
+          let previousPeak = Number.POSITIVE_INFINITY;
+          for (const split of SPLITS) {
+            const fusedSession = await open(gpu, attentionGraph(shape), split);
+            try {
+              const label = `${shape.name} / ${split} blocks`;
+              const fused = await assertSameBits(gpu, fusedSession, reference, inputs, label);
+              // More blocks lower the intermediate peak (the observation point that **the
+              // materialized width shrinks** even with identical values — if this is not
+              // monotonic, a temporary's lifetime declaration or the pool reuse is broken).
+              assert(
+                fused.peakTransientBytes < previousPeak,
+                `${label}: the intermediate peak ${fused.peakTransientBytes}B did not shrink from ${previousPeak}B`,
+              );
+              previousPeak = fused.peakTransientBytes;
+            } finally {
+              await fusedSession.dispose();
+            }
+          }
+        } finally {
+          await referenceSession.dispose();
         }
       }
     } finally {
@@ -266,11 +320,26 @@ test.skipIf(!GPU_AVAILABLE)(
         const inputs = attentionInputs(shape);
         const budget = shape.heads * shape.keys * 4 * Math.ceil(shape.queries / 3);
         const label = `${shape.name} / budget ${budget}B`;
-        const reference = await run(gpu, attentionGraph(shape, true), inputs);
-        const single = await run(gpu, attentionGraph(shape), inputs);
-        assertEquals(single.windowedQkDispatches, 0, `${label}: the unbudgeted run is not 1 block`);
-        const budgeted = await run(gpu, attentionGraph(shape), inputs, undefined, budget);
-        assertSameBits(budgeted.output, reference.output, label);
+        const referenceSession = await open(gpu, attentionGraph(shape, true));
+        const budgetedSession = await open(gpu, attentionGraph(shape), undefined, budget);
+        let budgeted: RunResult;
+        let single: RunResult;
+        try {
+          const reference = {
+            session: referenceSession,
+            output: (await observe(referenceSession, inputs)).output,
+          };
+          single = await run(gpu, attentionGraph(shape), inputs);
+          assertEquals(
+            single.windowedQkDispatches,
+            0,
+            `${label}: the unbudgeted run is not 1 block`,
+          );
+          budgeted = await assertSameBits(gpu, budgetedSession, reference, inputs, label);
+        } finally {
+          await referenceSession.dispose();
+          await budgetedSession.dispose();
+        }
         assertEquals(budgeted.windowedQkDispatches, 3, `${label}: the budgeted block count`);
         assert(
           budgeted.peakTransientBytes < single.peakTransientBytes,
