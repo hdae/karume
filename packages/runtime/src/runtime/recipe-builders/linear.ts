@@ -30,6 +30,7 @@ import {
   LINEAR_I8A8_MAX_K,
   linearI8a8Key,
   linearI8a8Params,
+  linearI8a8TempBytes,
   linearI8a8UsesVec4,
   linearI8a8Wgsl,
 } from "../../kernels/linear-i8a8.ts";
@@ -729,9 +730,10 @@ const buildLinearI8a8 = async (
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
   // The quantized activations `xq` (four i8 packed per word) and the per-token scale `xs`.
-  // Temporary regions closed inside the node.
-  const xq = builder.allocTemp(Math.max(4, m * (k / 4) * 4));
-  const xs = builder.allocTemp(Math.max(4, m * 4));
+  // Temporary regions closed inside the node (the bytes from the function the estimate shares).
+  const bytes = linearI8a8TempBytes(m, k);
+  const xq = builder.allocTemp(bytes.xq);
+  const xs = builder.allocTemp(bytes.xs);
 
   // ① Per-token quantization of the activations (grid-stride over rows). With a prologue the same
   // quantization of `op(x)`, `x` being the folded producer's input (`binds[0]`); the bindings and

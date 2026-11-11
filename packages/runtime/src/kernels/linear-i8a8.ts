@@ -155,6 +155,23 @@ export const LINEAR_I8A8_MAX_K = 131072;
  */
 export const LINEAR_W4A8_MAX_GROUP = 2113664;
 
+/**
+ * Bytes of the i8a8 linear's two in-node temporaries (a pure function): the quantized activations
+ * `xq` (four i8 packed per word, `k / 4` words per row) and the per-token scale `xs` (one f32 per
+ * row), for `m` rows of reduction length `k` (`k % 4 == 0` on this path — `linearTakesI8a8`).
+ *
+ * MUST: execution (`buildLinearI8a8` in recipe-builders/linear.ts) and the estimate (estimate.ts)
+ * take them from this one function (rewriting the formula on one side would let the estimate keep
+ * claiming a different number against an implementation where only one side was fixed).
+ */
+export const linearI8a8TempBytes = (
+  m: number,
+  k: number,
+): { readonly xq: number; readonly xs: number } => ({
+  xq: Math.max(4, m * (k / 4) * 4),
+  xs: Math.max(4, m * 4),
+});
+
 /** Name of the WGSL language extension used for the integer dot product (not a device feature). */
 export const DP4A_WGSL_FEATURE = "packed_4x8_integer_dot_product";
 
