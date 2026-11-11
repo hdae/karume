@@ -6,6 +6,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import type { CheckCase, CheckPart, Criterion } from "@karume/kernel-checks";
+import { type NanPolicy, wordIdentity } from "../../src/tune/word-identity.ts";
 
 const hex = (word: number): string => `0x${word.toString(16).padStart(8, "0")}`;
 
@@ -32,4 +33,23 @@ export const assertCheckPart = (part: CheckPart): void => {
   for (const requirement of part.requirements) {
     assert(requirement.met, `${part.id}: ${requirement.name} — ${requirement.detail}`);
   }
+};
+
+/**
+ * Asserts that `actual` equals `expected` word for word under the NaN policy `nan` — the comparison
+ * the checks make (`wordIdentity` in src/tune/word-identity.ts), for a comparison no check makes
+ * (against a host-built expectation, or between two runs of the same side).
+ */
+export const assertWordIdentity = (
+  actual: Uint32Array<ArrayBuffer>,
+  expected: Uint32Array<ArrayBuffer>,
+  nan: NanPolicy,
+  label: string,
+): void => {
+  const { words, failures, first } = wordIdentity(actual, expected, nan);
+  const at =
+    first === undefined
+      ? ""
+      : ` — first at word ${first.index}: expected ${hex(first.expected)}, actual ${hex(first.actual)}`;
+  assertEquals(failures, 0, `${label}: ${failures} of ${words} words (NaN by ${nan})${at}`);
 };

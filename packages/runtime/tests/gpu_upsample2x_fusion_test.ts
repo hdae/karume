@@ -4,11 +4,13 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase, assertWordIdentity } from "./helpers/kernel-check-assert.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // B>1 / C>1, odd H/W, and 2*3*5*7=210 is not a multiple of the workgroup width 256.
@@ -61,35 +63,10 @@ const upsampleGraph = (interpose: boolean, scaleWidth = 2): DeclarationJson => {
   };
 };
 
-const words = (tensor: Tensor): Uint32Array =>
+const words = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
-
-/** The u32 copy kernel itself preserves every bit, NaN payloads included. */
-const assertExactWords = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
-  assertEquals(actual.length, expected.length, label + ": length");
-  for (let i = 0; i < actual.length; i++) {
-    assertEquals(actual[i], expected[i], `${label}: word index=${i}`);
-  }
-};
-
-/**
- * Against the existing f32 primitives, only NaNs (which a backend may canonicalize) are compared by
- * classification.
- */
-const assertSemanticWords = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
-  assertEquals(actual.length, expected.length, label + ": length");
-  for (let i = 0; i < actual.length; i++) {
-    if (isNanWord(expected[i])) {
-      assertEquals(isNanWord(actual[i]), true, `${label}: NaN classification index=${i}`);
-    } else {
-      assertEquals(actual[i], expected[i], `${label}: word index=${i}`);
-    }
-  }
-};
-
-const expectedUpsampleWords = (input: Uint32Array): Uint32Array => {
+const expectedUpsampleWords = (input: Uint32Array): Uint32Array<ArrayBuffer> => {
   const out = new Uint32Array(OUT.reduce((total, dim) => total * dim, 1));
   for (let b = 0; b < SHAPE[0]; b++) {
     for (let c = 0; c < SHAPE[1]; c++) {
@@ -134,16 +111,23 @@ test.skipIf(!GPU_AVAILABLE)(
       const fusedOut = (await fused.run({ x })).y;
       const primitiveOut = (await primitive.run({ x })).y;
       const expected = expectedUpsampleWords(words(x));
-      assertExactWords(words(fusedOut), expected, "fused full write");
-      assertSemanticWords(words(primitiveOut), expected, "primitive full write");
-      assertSemanticWords(words(fusedOut), words(primitiveOut), "fused vs primitive");
-      assertEquals(fused.diagnostics().submit.dispatchCount, 1, "fused copy 1 pass");
-      assertEquals(primitive.diagnostics().submit.dispatchCount, 2, "expand x2 primitive");
-      assertEquals(fused.diagnostics().lastRunFusions?.upsample2x, 1, "fusion counter");
-      assertEquals(
-        primitive.diagnostics().lastRunFusions?.upsample2x,
-        0,
-        "the counter of the counterexample is 0",
+      // The u32 copy kernel itself preserves every bit, NaN payloads included.
+      assertWordIdentity(words(fusedOut), expected, "payload", "fused full write");
+      // Against the existing f32 primitives, only NaNs (which a backend may canonicalize) are
+      // compared by classification.
+      assertWordIdentity(words(primitiveOut), expected, "class", "primitive full write");
+      assertCheckCase(
+        await checkFusionTwin(gpu, {
+          label: "fused vs primitive",
+          fused,
+          plain: primitive,
+          feeds: { x },
+          counter: "upsample2x",
+          hits: 1,
+          nan: "class",
+          // The fused copy in 1 pass against expand x2.
+          dispatches: { fused: 1, plain: 2 },
+        }),
       );
       assertEquals(
         requireCensus(fused.diagnostics().lastRunPipelines, "upsample2x").map((row) => row.key),
