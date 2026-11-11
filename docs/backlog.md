@@ -63,11 +63,13 @@ maintainer's ruling of 2026-11-06).
   own commit with its behaviour tests and states its blast radius:
   - **Code** (the decisions name what each changes):
     1. The three fusion keys leave `SessionOptions`, the type checks and the combination rule; the fusions run by default
-       (decision 5). The test-only switch that disables the fusion rules lands in the same change (the Session baseline of
-       `gpu_linear_static_quantize_session_test.ts` and the grid-stride reference of the RMS→add kernel check obtain the
-       unfused plan by omitting the option today). The reference sha rows stay; the fusion-count tests, `EXPECTED_FUSIONS`
-       and the census rows that pin fused counts change. Breaking (surface snapshot, CHANGELOG); a cross-cutting change, so
-       the full `vp test`.
+       (decision 5). The test-only switch that disables the fusion rules has landed (`DISABLED_FUSION_RULES`, with
+       `checkFusionTwin` in `packages/kernel-checks` as the comparison — 2026-11-11); the tests that obtain the unfused
+       plan by omitting the option (the Session baseline of `gpu_linear_static_quantize_session_test.ts`, the references
+       of `gpu_rms_norm_add_fusion_test.ts` and `gpu_gelu_mul_static_quantize_fusion_test.ts`, and the grid-stride
+       reference of the RMS→add kernel check) move to it in this change. The reference sha rows stay; the fusion-count
+       tests, `EXPECTED_FUSIONS` and the census rows that pin fused counts change. Breaking (surface snapshot, CHANGELOG); a
+       cross-cutting change, so the full `vp test`.
     2. The same keys leave the manifest vocabulary (`SESSION_KEYS`, `SessionSpec`, `parseSession`) and the recipes' quant
        tables (`gemma4_qat`, the q4_0 QAT quants of `gemma4`); the mirrors are regenerated and `verify_dist` is green; the
        re-upload, the source pins and the published smoke wait for the maintainer's explicit go-ahead (decision 5).

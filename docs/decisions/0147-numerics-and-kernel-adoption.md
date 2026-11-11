@@ -393,7 +393,11 @@ on 2026-11-09). Most of the checks below do not exist yet in this form; building
   (`packages/runtime/src/runtime/session-types.ts`) disables the fusion rules. The Session canary of decision 9, the
   fused-vs-unfused checks (check D of decision 4, the twin-graph tests) and bisecting a fusion against the reference path
   all obtain the unfused plan through that one entry. It lands together with the key removal, because existing tests
-  obtain the unfused plan by omitting the option.
+  obtain the unfused plan by omitting the option. (Updated 2026-11-11: the switch landed ahead of the key removal —
+  `DISABLED_FUSION_RULES` in `packages/runtime/src/runtime/session-types.ts` takes `"all"` or rule names, a name outside
+  the rule list fails at Session construction, and the annotation folds are not rules and stay on. The fused-vs-unfused
+  comparison is `checkFusionTwin` in `packages/kernel-checks`; the twin-graph tests keep the plain sides they had, and
+  the tests that omit an option move to the switch with the key removal.)
 - **The three keys are removed from the vocabulary**: `SessionOptions` and the manifest `SessionSpec` (`SESSION_KEYS` and
   `SessionSpec`, `packages/hub/src/manifest.ts`). The published manifests that declare them are re-uploaded. This is a
   breaking change: the hub rejects an unknown `session` key (`assertAllowedKeys`, called from `parseSession` in

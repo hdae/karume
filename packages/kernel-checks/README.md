@@ -6,8 +6,8 @@ backend a kernel rewrite relies on, in one implementation shared by
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
   `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts`,
   `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
-  `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` — Dawn on the
-  development machine), and
+  `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` and the
+  twin-graph tests of the fusion rules — Dawn on the development machine), and
 - the playground's `/kernel-check` page (`apps/playground` — the browser's own backend: D3D12 in
   Chrome on Windows, Metal on macOS).
 
