@@ -34,6 +34,7 @@ import {
   SHA,
 } from "./helpers/container-loading-fixture.ts";
 import { stubModel } from "./helpers/stub-model.ts";
+import { GELU_MUL_RULE } from "@karume/candidate-rules";
 
 const ENTRY = gemmaEntryName("gemma4");
 const HIDDEN = 16;
@@ -846,6 +847,21 @@ describe("gemma.Pipeline vision", () => {
       await pipeline.dispose();
       assertEquals(runs.disposed, ["vision", "model"]);
       await assertRejects(() => pipeline.embedImage(IMAGE), Error, "after dispose");
+    });
+
+    // The exclusion half of the experimental `fusionRules` (its forwarding half is in
+    // gemma4_estimate_test.ts): the rules are for the Sessions that run the target's graph.
+    it("fusionRules reach the target Session and not the embedder Session", async () => {
+      const rig = await distribution();
+      const fusionRules = [GELU_MUL_RULE];
+      await using _pipeline = await rig.open({ vision: true, fusionRules });
+      assertEquals(
+        runs.built.map(({ graph }) => graph),
+        ["model", "vision"],
+      );
+      const [target, vision] = runs.built;
+      assertEquals(target.options.fusionRules, fusionRules);
+      assertEquals(Object.hasOwn(vision.options, "fusionRules"), false);
     });
   });
 
