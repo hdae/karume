@@ -77,7 +77,8 @@ const MIB = 2 ** 20;
  * here, before any read). The one build path of the chat page and the decode bench, so both load a
  * model the same way. Without `onRunDiagnostics` the pipeline keeps its on-GPU greedy selection.
  * `sessionOptions` are passed to `fromPretrained` as explicit Session options (the pipeline resolves
- * them as explicit > the preset's declaration > the runtime default); the chat page passes none.
+ * them as explicit > the preset's declaration > the runtime default; the session A/B page passes the
+ * experimental `fusionRules`, which goes to the Sessions unchanged); the chat page passes none.
  * `pipelineOptions` are passed to `fromPretrained` as they are (the decode bench's PLE placement and
  * run-ahead depth); the chat page passes none.
  */
@@ -89,7 +90,7 @@ export const buildGemmaPipeline = async (input: {
   readonly onProgress?: FromPretrainedOptions["onProgress"];
   readonly sessionOptions?: Pick<
     FromPretrainedOptions,
-    "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes"
+    "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes" | "fusionRules"
   >;
   readonly pipelineOptions?: Pick<FromPretrainedOptions, "pleResidency" | "decodeAhead">;
 }): Promise<GemmaPipeline> => {

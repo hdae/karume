@@ -302,6 +302,9 @@ importers:
       '@hdae/yomi':
         specifier: 'catalog:'
         version: '@jsr/hdae__yomi@0.4.2'
+      '@karume/candidate-rules':
+        specifier: workspace:*
+        version: link:../../packages/candidate-rules
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub

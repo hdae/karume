@@ -22,4 +22,5 @@ default; a measurement passes it explicitly (the gemma pipeline's experimental `
 | --- | --- | --- | --- | --- |
 | `candidate/gelu_mul` | `GELU_MUL_RULE`, `GELU_MUL_RULE_NAME` (`src/gelu-mul.ts`) | `gelu_tanh(gate)` then the `mul` that reads it, adjacent or with one independent `linear` between them (Gemma 4 26B A4B's routed experts and dense MLP), in one dispatch | E | `packages/e2e/tests/e2e_external_fusion_rule_test.ts` (fused vs unfused on the GPU), `e2e_gemma4_26b_external_rule_test.ts` (planned on 26B's graph) |
 
-Who imports it: the models test that pins the import list and the e2e tests above.
+Who imports it: the models test that pins the import list, the e2e tests above and the playground's
+`/session-ab` page (`apps/playground`).

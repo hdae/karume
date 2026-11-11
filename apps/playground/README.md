@@ -20,6 +20,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
+| Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode with and without the candidate fusion rule (`runSessionAb`, `judgeSessionAb`): token identity, hits, dispatches, per-round times and the verdict | `/session-ab` | built; not yet checked in a browser |
 | Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the rms_norm prefetch form, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block, the expert linear and the built-in fusions against their unfused plans, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
@@ -40,7 +41,10 @@ One exception to the public surfaces: the kernel-check page imports `@karume/ker
 private workspace package (never published) that drives runtime internals — kernel WGSL generators
 and the runtime tests' dispatch harness — so that the page runs the same check implementation as
 the runtime's node GPU tests ([the kernel-check page](#the-kernel-check-page)). No other page may
-import it, and nothing here imports runtime internals directly.
+import it, and nothing here imports runtime internals directly. The session A/B page imports
+`@karume/candidate-rules`, another private workspace package: candidate fusion rules written against
+`@karume/runtime/kernel` alone, which the page passes to the gemma pipeline to measure them
+([the session A/B page](#the-session-ab-page)).
 
 ## Run
 
@@ -1372,6 +1376,72 @@ every case with each criterion's word count, failing words and first or worst fa
 mutants, the mutant matrix, the fold classes and, for the states-attention check, `productVerdict`
 (the verdict outside the K-95 classes). While a run is in progress there is no record to download.
 **Copy record** copies the same JSON.
+
+## The session A/B page
+
+The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) on a real
+Gemma 4 decode, with and without a candidate fusion rule: how a fusion is accepted or dropped on a
+backend the node lanes do not reach (D3D12 in Chrome on Windows, Metal on macOS). Speed fusions are
+adopted on the measured end-to-end time of untimed runs, not on per-dispatch GPU time
+([ADR 0117](../../docs/decisions/0117-app-geometry-tuning.md), addendum of 2026-11-11).
+
+**The pipeline.** The model and the preset are chosen as on the chat page (any model of the three
+mounts), with the load options the chat page offers that the A/B needs: f16 KV and, for Gemma 4 26B
+A4B, the expert cache (slots, host tier, self-speculation depth — 64 slots with the host tier `all`
+runs 26B on a 16 GB GPU). Both arms load it with `buildGemmaPipeline` over the direct route.
+
+**The arms.** `base` passes no rule; `rule` passes the candidate rule `candidate/gelu_mul` of
+`@karume/candidate-rules` through the gemma pipeline's experimental `fusionRules` (the target
+Session gets it). An arm's open builds the pipeline, close disposes it. A **timed run** is one
+greedy generation (temperature 0, seed 0) of the chosen token count from one fixed prompt, in a
+fresh sequence of capacity 1024; it returns the generated token ids, which the runner compares with
+the base's first run, so identity is token identity. With **Read fusion and dispatch counts** on
+(the default), the pipeline is built with `onRunDiagnostics` and each run reports the fusion counts
+and the planned dispatches (`lastRunPipelines`) of its first one-row run (a decode run, or a draft
+under self-speculation). Without the expert cache that callback moves greedy decoding from the GPU to
+the CPU for both arms alike; under the cache decode is on the CPU either way. Off, the record has no
+counts.
+
+| Field | Default | Accepted |
+| --- | --- | --- |
+| Rounds | 4 | an integer ≥ 3 (one untimed warm-up round comes first) |
+| Tokens per run | 96 | 2 to 512 (the first token comes from the prefill, so one token has no decode run) |
+| Minimum gain | 0.01 (1% of the base's time) | a number ≥ 0 |
+| Open and close per visit | on | on: every visit builds its pipeline, runs it once untimed and once timed, and disposes it (two pipelines of a large model do not fit together); off: both pipelines stay loaded |
+| Backend | none (must be chosen) | `d3d12` / `metal` / `vulkan` / `other` — WebGPU does not expose it, so the record states what is chosen |
+
+The runner visits the arms forward and in reverse in every round (base, rule, rule, base); the
+status card shows the run in progress (round, visit, arm, timed or not) and how many runs have
+ended. After a closed pipeline the page submits one empty command buffer and waits for it: Dawn
+frees a destroyed buffer's memory only after a later submit completes, and without it the next
+visit's build of 26B ran out of memory before its first submit (observed on Dawn / Vulkan).
+
+When it ends the page shows, per arm, the identity (identical over N runs, or how many words of
+which run differ and where first), the rule's hits, the dispatches and every timed round's two
+visits; then the judgement of the rule arm: **Adopt**, **Reject** or **Inconclusive**, its reason in
+words and its numbers (median paired difference, base median, gain, noise floor with the visit and
+delta spreads, the paired differences per round). Identity is required: tokens that differ reject
+the rule whatever the times. A verdict speaks for that device, backend and work only, and
+inconclusive does not mean the difference is zero.
+
+### The record (`format: "karume-playground-session-ab/1"`)
+
+**Download record (JSON)** saves `session-ab_<UTC timestamp>.json` once the A/B has ended:
+`recordEnvironment`, the `request` (model, preset, load options, rounds, tokens, minimum gain, open
+per visit, counts, backend, the prompt, the sampler, the capacity and the two arms with the rules
+they passed), `pipeline` (the entry point), `distribution` (directory and manifest sha256),
+`source`, `rule` (name and package), the runtime's `record` (`karume-session-ab/1`) unchanged and
+the `judgements`. A stored `record` can be judged again with `judgeSessionAb`, with another minimum
+gain too. A failed or cancelled A/B leaves no record (the runner returns one only at the end).
+**Copy record** copies the same JSON.
+
+Caveats:
+
+- Never run it while other work uses the same GPU: the times would measure the contention.
+- The status card's ticker re-renders the page every 250 ms while runs go; nothing the page does
+  runs inside a timed span but the generation.
+- Building a pipeline per visit is not timed, but it heats the GPU between visits like any load;
+  the A B B A order spreads that over both arms.
 
 ## Develop
 

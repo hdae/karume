@@ -17,6 +17,7 @@ import {
   MicVocalIcon,
   MountainIcon,
   ScissorsIcon,
+  ScaleIcon,
   ShieldCheckIcon,
   SparklesIcon,
   TimerIcon,
@@ -155,6 +156,15 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Benchmarks",
     icon: Grid3x3Icon,
     mounts: [],
+  },
+  {
+    path: "/session-ab",
+    title: "Session A/B",
+    summary:
+      "Wall-clock A/B of a Gemma 4 decode with and without the candidate fusion rule (runSessionAb): token identity, the rule's hits, dispatches, per-round times and the verdict of judgeSessionAb.",
+    group: "Benchmarks",
+    icon: ScaleIcon,
+    mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
   },
   {
     path: "/kernel-check",
