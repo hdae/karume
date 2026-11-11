@@ -5,7 +5,8 @@
  * sweep records by the `profile` command of tools/geometry-sweep (removed in 0.15) (perf-ledger
  * K-71). The runtime only selects this table by the adapter's `match` (exact match on vendor /
  * architecture / description).
- * Nothing is measured at run time (no autotuning — ADR 0022 decision 3). To change a value, take the
+ * Nothing is measured at run time (no autotuning — the MUST NOT of the ADR 0022 addendum of
+ * 2026-08-10 (later), reaffirmed by ADR 0115 decision 8 and ADR 0117 decision 9). To change a value, take the
  * sweep again and regenerate the table.
  *
  * Regeneration: the generator (tools/geometry-sweep) was removed in 0.15 and is to be rebuilt as a

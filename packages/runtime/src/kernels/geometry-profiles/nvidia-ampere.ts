@@ -6,8 +6,9 @@
  * decision 2 — the CLI and the GPU lab that used to write these files were removed in 0.15; the short Node
  * scripts that ran the sweep and wrote this file are kept, untracked, in
  * `outputs/diag/wave-b-2026-10-26/v5/`). The runtime only selects this table by the adapter's
- * `match` (exact match on vendor / architecture). Nothing is measured at run time (no autotuning — ADR 0022
- * decision 3). To change a value, take the sweep again and regenerate the table.
+ * `match` (exact match on vendor / architecture). Nothing is measured at run time (no autotuning — the
+ * MUST NOT of the ADR 0022 addendum of 2026-08-10 (later), reaffirmed by ADR 0115 decision 8 and ADR 0117 decision 9).
+ * To change a value, take the sweep again and regenerate the table.
  *
  * Sweeps (adapter nvidia / ampere / nvidia-geforce-rtx-3080-ti / NVIDIA: 615.78.08 615.78.8.0; Node + Dawn, Vulkan;
  * one process per case, the GPU cooled before each case):

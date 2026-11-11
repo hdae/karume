@@ -491,8 +491,8 @@ const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
  * NOTE: for the two current rules with in-window passthroughs (adaln / rope), the only chain values
  * a passthrough can read are **internal values** (the last output is defined after the passthrough,
  * so it cannot be read), and {@link internalsArePrivate} (exactly one consumer) rejects those first
- * — **a counterexample cannot be built on its own** (confirmed by fault injection in
- * tests/runtime_fusion_test.ts). This check takes effect independently only for a future rule with
+ * — **a counterexample cannot be built on its own** (confirmed once by fault injection against
+ * tests/runtime_fusion_test.ts; no standing test exercises this predicate alone). This check takes effect independently only for a future rule with
  * a window where "the **last** node of the chain comes before the passthrough"; internalsArePrivate
  * does not look at the last output, so it is no substitute. It sits in `defineRule` as an invariant
  * of the window mechanism.

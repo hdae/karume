@@ -4,8 +4,9 @@
 //
 // What this pins: (1) rule extraction (the ratio-to-default gate, the output-match gate, winning on
 // every case of the class, comparison by geometric mean, the default for a class with no case in
-// the sweep) and (2) not mixing adapters. The TS rendering of the output and the CLI
-// (`main.ts profile --check`) are pinned by tools/geometry-sweep/profile_test.ts.
+// the sweep) and (2) not mixing adapters. Nothing in the repository renders the TS module of a
+// table or pins that rendering: the CLI (`main.ts profile --check`) and its test
+// tools/geometry-sweep/profile_test.ts were removed in 0.15 (ADR 0127 decision 5).
 //
 // Also pinned here: (3) the injected table built by buildGeometryProfile (its fields, match,
 // provenance, the kernels fingerprint it cannot derive, description and opt-in tables), and (4) the

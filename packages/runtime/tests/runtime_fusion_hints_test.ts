@@ -6,10 +6,10 @@
  * are dropped", with a control for each eligibility condition (single output / no state access /
  * f32 / the chain's internal values do not escape).
  *
- * The cross-check against real assets (reproducing known hit counts, detecting double counting)
- * and the aggregation live in the tool's tools/fusion-hints/enumerate_test.ts — discovering,
- * binding and aggregating assets are the tool's concern, and runtime tests do not import tools
- * (ADR 0008 addendum 2026-09-03).
+ * No test cross-checks the enumeration against real assets (reproducing known hit counts,
+ * detecting double counting) or aggregates it: that check lived in tools/fusion-hints, which was
+ * removed in 0.15 with its test. A replacement belongs with the assets, not here — runtime tests
+ * do not import tools or real assets (ADR 0008 addendum 2026-09-03).
  */
 
 import { test } from "vite-plus/test";

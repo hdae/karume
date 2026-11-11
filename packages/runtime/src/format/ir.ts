@@ -253,8 +253,8 @@ const asUniqueStrings = (value: unknown, where: string): string[] => {
 };
 
 /**
- * Unreleased, so no forward-compatibility channel — unknown keys fail loudly instead of being
- * ignored silently.
+ * No forward-compatibility channel (docs/ir-v2.md: one is introduced only by revising the spec) —
+ * unknown keys fail loudly instead of being ignored silently.
  */
 const checkKeys = (
   obj: Record<string, unknown>,

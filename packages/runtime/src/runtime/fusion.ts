@@ -45,7 +45,7 @@
  * ## The fold target is not always one dispatch
  *
  * linearStaticQuantize / geluMulStaticQuantize / rmsNormAdd / silu / upsample2x / rope / rmsNormRope /
- * adaln / gatedResidual are "N nodes → one dispatch of a private kernel"
+ * adaln (its broadcast form) / gatedResidual are "N nodes → one dispatch of a private kernel"
  * ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV and the fixed requantization into one
  * dispatch), but
  * {@link ROW_BLOCK_ATTENTION_RULE} folds **the materialised width of an intermediate, not the

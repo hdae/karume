@@ -57,7 +57,8 @@ const parse = mergeGraph;
 
 /**
  * Device capabilities used for the decision (WebGPU core defaults — 128MiB / 65535). Only the row
- * block split count reads them (the existing 4 rules do not depend on device capabilities).
+ * block split count and the workgroup-count checks of linearStaticQuantize read them (no other rule
+ * depends on device capabilities).
  */
 const TEST_LIMITS = {
   maxStorageBufferBindingSize: 128 * 1024 * 1024,

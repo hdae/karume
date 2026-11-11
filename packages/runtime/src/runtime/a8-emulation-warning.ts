@@ -1,5 +1,5 @@
 /**
- * The warning for running int8 activations (`linearCompute` / `attentionCompute: "a8"`) on a device
+ * The warning for running int8 activations (`linearCompute` / `convCompute` / `attentionCompute: "a8"`) on a device
  * without dp4a (DECIDED: ADR 0128 decision 5 — a device without dp4a gets a warning, not a fallback
  * and not an automatic sibling preset).
  *

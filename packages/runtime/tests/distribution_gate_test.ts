@@ -1,11 +1,12 @@
 // The **distribution-mirror** version of the ADR 0005 guard "all cases SKIP is an explicit FAIL"
-// (the real-weight series version is tests/e2e_assets_gate_test.ts, the GPU version is
-// tests/gpu_gate_test.ts).
+// (the real-weight series version is packages/e2e/tests/e2e_assets_gate_test.ts, the GPU version
+// is tests/gpu_gate_test.ts).
 //
 // The checks rooted at the distribution mirrors (`models/karume-<family>/`) — the real-asset e2e of
-// anima / sbv2 / irodori / gemma4 / QAT / wan (packages/models/tests/e2e_*_test.ts and
-// helpers/irodori-assets.ts) and the distribution sections of the fusion hit counts (anima /
-// anima-extra / irodori / gemma4 / gemma4-qat-mobile / wan — tests/e2e_*_fusion_counts_test.ts) —
+// anima / sbv2 / irodori / gemma4 / QAT / wan (packages/e2e/tests/e2e_*_test.ts and
+// packages/e2e/tests/helpers/irodori-assets.ts) and the distribution sections of the fusion hit
+// counts (anima / anima-extra / irodori / gemma4 / gemma4-qat-mobile / wan —
+// packages/e2e/tests/e2e_*_fusion_counts_test.ts) —
 // all `ignore` themselves on the absence of `karume.json` and go green leaving only a
 // `console.warn`. On a machine with only `outputs/series/` (a new work machine, a worktree taken
 // to another host), e2e_assets_gate_test.ts stays green while the real-asset checks vanish

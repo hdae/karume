@@ -7,8 +7,9 @@
  * the geometry-sweep page of apps/playground
  * (full candidate set); the short Node scripts that derived the table and wrote this file are kept, untracked,
  * in `outputs/diag/blackwell-rederive-2026-10-29/`. The runtime only selects this table by the adapter's
- * `match` (exact match on vendor / architecture). Nothing is measured at run time (no autotuning — ADR 0022
- * decision 3). To change a value, take the sweep again and regenerate the table.
+ * `match` (exact match on vendor / architecture). Nothing is measured at run time (no autotuning — the
+ * MUST NOT of the ADR 0022 addendum of 2026-08-10 (later), reaffirmed by ADR 0115 decision 8 and ADR 0117 decision 9).
+ * To change a value, take the sweep again and regenerate the table.
  *
  * Sweeps (adapter nvidia / blackwell / 0x2c05 / NVIDIA GeForce RTX 5070 Ti; Chrome 156, Windows;
  * WebGPU backend not recorded; timestamps unquantised in all 2 records):
