@@ -16,12 +16,8 @@
  * change to one MUST be made to the other (apps/playground/tests/session-ab_arm_test.ts compares
  * them). Its doc says what is inside a timed span and what is counted.
  *
- * NOTE: closing an arm ends with one empty submit and its fence (`releaseFence`), in a `finally`
- * after the pipeline's dispose. Dawn frees the memory of destroyed buffers only once a submit made
- * after the destroy has completed, so on a device the caller keeps, a disposed 26B pipeline (about
- * 7.2 GiB) stays allocated until the next submit, and the next visit's build fails with
- * VK_ERROR_OUT_OF_DEVICE_MEMORY before its first submit (observed 2026-11-11, Dawn on Vulkan). The
- * fence runs outside the timed span.
+ * Both arms are built on the one device the test keeps, one after the other: an arm's close
+ * awaits the pipeline's dispose, which resolves once the device has the memory back.
  *
  * It asserts token identity (every run of both arms equals the base's first) and the rule's hit
  * count in the decode plan (60: the 30 dense and the 30 routed-expert chains — the count of
@@ -232,9 +228,9 @@ const countedOf = (diagnostics: CountsDiagnostics, prefixes: readonly string[]):
 /**
  * One arm on a Gemma 4 pipeline. `build` loads the pipeline with the arm's rules and, when the
  * request reads counts, the diagnostics callback; `prompt` gives the prompt's token ids for a built
- * pipeline; `afterClose` runs after the pipeline's dispose, also when the dispose throws (the page
- * and the e2e test let the device free the pipeline's memory there). The signal is checked before
- * every open and passed to every generation.
+ * pipeline. The signal is checked before every open and passed to every generation. Close disposes
+ * the pipeline, whose dispose resolves once the device has its memory back (ADR 0095, addendum of
+ * 2026-11-11), so the next visit's build does not land on top of it.
  *
  * The timed span (`run`) holds the generation alone: the prompt is encoded when the pipeline is
  * built, and the sequence a run generates in is created before it — by open for the first run, by
@@ -258,7 +254,6 @@ const pipelineArm = <P extends ArmPipeline>(input: {
     readonly onRunDiagnostics?: DiagnosticsCallback;
   }) => Promise<P>;
   readonly prompt: (pipeline: P) => readonly number[];
-  readonly afterClose: () => Promise<void>;
   readonly signal: AbortSignal;
   readonly onStep: (step: ArmStep) => void;
 }): SessionAbArm & { readonly facts: () => ArmFacts } => {
@@ -340,30 +335,14 @@ const pipelineArm = <P extends ArmPipeline>(input: {
       pipeline = undefined;
       next = undefined;
       used = undefined;
-      try {
-        // The pipeline's dispose closes the sequences it handed out.
-        await closing?.dispose();
-      } finally {
-        await input.afterClose();
-      }
+      // The pipeline's dispose closes the sequences it handed out.
+      await closing?.dispose();
     },
     facts: () => ({
       ...(expertCache === undefined ? {} : { expertCache }),
       ...(firstCounted === undefined ? {} : { ruleKeys: firstCounted.ruleKeys }),
     }),
   };
-};
-
-/**
- * One empty submit and its fence, run after an arm's pipeline is disposed. Dawn frees the memory of
- * destroyed buffers only once a submit made after the destroy has completed, so on a device the
- * caller keeps a disposed pipeline stays allocated until the next submit, and the next visit's build
- * of a large model fails out of memory before its first submit (observed 2026-11-11 with Gemma 4
- * 26B under Dawn on Vulkan). Outside the timed span; the pipeline itself is not changed.
- */
-const releaseFence = async (device: GPUDevice): Promise<void> => {
-  device.queue.submit([device.createCommandEncoder().finish()]);
-  await device.queue.onSubmittedWorkDone();
 };
 
 // ---- The arm builder: twin end ----
@@ -390,7 +369,6 @@ describe.skipIf(skipReason !== undefined)("the session A/B on Gemma 4 26B A4B (o
                 : { onRunDiagnostics: options.onRunDiagnostics }),
             }),
           prompt: (pipeline) => chatPrompt(pipeline.tokenizer, prompt),
-          afterClose: () => releaseFence(gpu.device),
           signal: new AbortController().signal,
           onStep: () => undefined,
         });

@@ -221,10 +221,6 @@ const armsOf = (where: Rig, request: ArmRequest, fake: FakeOptions) =>
         where.record(`${name}:prompt`);
         return [1, 2, 3];
       },
-      afterClose: () => {
-        where.record(`${name}:fence`);
-        return Promise.resolve();
-      },
       signal: new AbortController().signal,
       onStep: ({ step }) => where.record(`${name}:step:${step}`),
     }),
@@ -255,14 +251,14 @@ describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
 
   describe("the timed span", () => {
     for (const openPerVisit of [false, true]) {
-      it(`holds the generation alone: the sequence, the prompt, the dispose and the fence are outside it (openPerVisit: ${openPerVisit})`, async () => {
+      it(`holds the generation alone: the sequence, the prompt and the dispose are outside it (openPerVisit: ${openPerVisit})`, async () => {
         const where = newRig();
         await run(where, armsOf(where, REQUEST, { phases: decodePhases(4) }), openPerVisit);
         // Two clocked runs per arm per round (the warm-up round's too), one generation each.
         expect(where.timed).toHaveLength(2 * 2 * 4);
         expect(new Set(where.timed)).toEqual(new Set(["base:generate", "rule:generate"]));
         // The control: what is kept out of the span did happen.
-        for (const entry of ["sequence", "prompt", "sequence.dispose", "dispose", "fence"]) {
+        for (const entry of ["sequence", "prompt", "sequence.dispose", "dispose"]) {
           expect(where.log, entry).toContain(`rule:${entry}`);
         }
       });
@@ -350,20 +346,20 @@ describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
   });
 
   describe("close", () => {
-    it("disposes the pipeline and runs the fence when a run throws", async () => {
+    it("disposes the pipeline when a run throws", async () => {
       const where = newRig();
       await expect(
         run(where, armsOf(where, REQUEST, { phases: decodePhases(4), generateThrows: true }), true),
       ).rejects.toThrow("the generation failed");
-      expect(where.log.slice(-3)).toEqual(["base:step:close", "base:dispose", "base:fence"]);
+      expect(where.log.slice(-2)).toEqual(["base:step:close", "base:dispose"]);
     });
 
-    it("runs the fence when the dispose throws, and the dispose's error propagates", async () => {
+    it("lets the dispose's error propagate", async () => {
       const where = newRig();
       const [base] = armsOf(where, REQUEST, { phases: decodePhases(4), disposeThrows: true });
       await base.open();
       await expect(base.close()).rejects.toThrow("the dispose failed");
-      expect(where.log.slice(-3)).toEqual(["base:step:close", "base:dispose", "base:fence"]);
+      expect(where.log.slice(-2)).toEqual(["base:step:close", "base:dispose"]);
     });
   });
 

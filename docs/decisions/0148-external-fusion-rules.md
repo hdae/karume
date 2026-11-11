@@ -253,8 +253,8 @@ corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
   `/session-ab` page runs the same A/B in a browser.
 - **Observed while building it**: on a device the caller keeps, a disposed pipeline's buffers are freed by Dawn only
   once a submit made after the destroy has completed (Dawn on Vulkan), so a second 26B build right after a dispose ran
-  out of memory before its first submit. The A/B arms (test and page) end their close with one empty submit and its
-  fence, outside the timed span; the runtime's dispose is unchanged (backlog).
+  out of memory before its first submit. A disposal now ends with that release wait in the runtime
+  ([0095](0095-plan-backing-budget.md), addendum of 2026-11-11), so the A/B arms only await the dispose.
 
 ## Alternatives considered
 

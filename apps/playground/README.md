@@ -1419,10 +1419,8 @@ the record has no counts.
 
 The runner visits the arms forward and in reverse in every round (base, rule, rule, base); the
 status card shows the run in progress (round, visit, arm, timed or not) and how many runs have
-ended. After a closed pipeline the page submits one empty command buffer and waits for it, also
-when the dispose failed: Dawn frees a destroyed buffer's memory only after a later submit
-completes, and without it the next visit's build of 26B ran out of memory before its first submit
-(observed on Dawn / Vulkan).
+ended. A visit's close awaits the pipeline's dispose, which resolves once the device has the
+memory back, so the next visit's build does not land on top of the disposed pipeline.
 
 When it ends the page shows, per arm, the identity (identical over N runs, or how many words of
 which run differ and where first), the rule's hits, the dispatches and every timed round's two

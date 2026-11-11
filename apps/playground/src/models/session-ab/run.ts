@@ -172,9 +172,9 @@ const countedOf = (diagnostics: CountsDiagnostics, prefixes: readonly string[]):
 /**
  * One arm on a Gemma 4 pipeline. `build` loads the pipeline with the arm's rules and, when the
  * request reads counts, the diagnostics callback; `prompt` gives the prompt's token ids for a built
- * pipeline; `afterClose` runs after the pipeline's dispose, also when the dispose throws (the page
- * and the e2e test let the device free the pipeline's memory there). The signal is checked before
- * every open and passed to every generation.
+ * pipeline. The signal is checked before every open and passed to every generation. Close disposes
+ * the pipeline, whose dispose resolves once the device has its memory back (ADR 0095, addendum of
+ * 2026-11-11), so the next visit's build does not land on top of it.
  *
  * The timed span (`run`) holds the generation alone: the prompt is encoded when the pipeline is
  * built, and the sequence a run generates in is created before it — by open for the first run, by
@@ -198,7 +198,6 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
     readonly onRunDiagnostics?: DiagnosticsCallback;
   }) => Promise<P>;
   readonly prompt: (pipeline: P) => readonly number[];
-  readonly afterClose: () => Promise<void>;
   readonly signal: AbortSignal;
   readonly onStep: (step: ArmStep) => void;
 }): SessionAbArm & { readonly facts: () => ArmFacts } => {
@@ -280,30 +279,14 @@ export const pipelineArm = <P extends ArmPipeline>(input: {
       pipeline = undefined;
       next = undefined;
       used = undefined;
-      try {
-        // The pipeline's dispose closes the sequences it handed out.
-        await closing?.dispose();
-      } finally {
-        await input.afterClose();
-      }
+      // The pipeline's dispose closes the sequences it handed out.
+      await closing?.dispose();
     },
     facts: () => ({
       ...(expertCache === undefined ? {} : { expertCache }),
       ...(firstCounted === undefined ? {} : { ruleKeys: firstCounted.ruleKeys }),
     }),
   };
-};
-
-/**
- * One empty submit and its fence, run after an arm's pipeline is disposed. Dawn frees the memory of
- * destroyed buffers only once a submit made after the destroy has completed, so on a device the
- * caller keeps a disposed pipeline stays allocated until the next submit, and the next visit's build
- * of a large model fails out of memory before its first submit (observed 2026-11-11 with Gemma 4
- * 26B under Dawn on Vulkan). Outside the timed span; the pipeline itself is not changed.
- */
-export const releaseFence = async (device: GPUDevice): Promise<void> => {
-  device.queue.submit([device.createCommandEncoder().finish()]);
-  await device.queue.onSubmittedWorkDone();
 };
 
 // ---- The arm builder: twin end ----

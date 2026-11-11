@@ -145,8 +145,7 @@ maintainer's ruling of 2026-11-06).
   the Playground's `/session-ab` page and an opt-in Node run on 26B (`KARUME_SESSION_AB=<dir>`,
   `e2e_gemma4_session_ab_test.ts`). Left: the page's first runs in Chrome (D3D12) and on Metal; the option on other
   families; a public way to switch a built-in rule off for a measurement (today only the test-only
-  `DISABLED_FUSION_RULES`); a pipeline dispose on a shared device that gives its memory back without a later submit
-  (the A/B arms end with an empty submit and its fence — ADR 0148 addendum of 2026-11-11); the estimate planning every
+  `DISABLED_FUSION_RULES`); the estimate planning every
   fused step, external rules included (P4); generated elementwise fusions, tried on the MOSS-Image DiT (S5). The Session
   canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV

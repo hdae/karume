@@ -78,7 +78,7 @@ import {
   type SessionAbRequest,
   sessionAbRequest,
 } from "./request";
-import { type ArmStep, pipelineArm, releaseFence, type RunPosition, runPositions } from "./run";
+import { type ArmStep, pipelineArm, type RunPosition, runPositions } from "./run";
 import { armRow, judgementView } from "./view";
 
 /** Module constant (useGpu needs stable options): subgroups when the adapter has them. */
@@ -283,7 +283,6 @@ export const SessionAbPage = () => {
                 ? {}
                 : { onRunDiagnostics: options.onRunDiagnostics }),
             }),
-          afterClose: () => releaseFence(readyGpu.device),
           signal,
           onStep,
         });
