@@ -792,14 +792,12 @@ export const isExternalRuleName = (name: unknown): name is ExternalRuleName =>
   externalNamespace(name) !== undefined;
 
 /**
- * Whether `value` is a rule {@link defineExternalRule} built: branded external, with an external
- * rule's name (the name is read from the frozen rule itself, not through the type).
+ * Whether `value` is a rule {@link defineExternalRule} built: branded external (the entry brands a
+ * rule external only after checking its name, and the rule is frozen, so its name is an external
+ * rule's name).
  */
 export const isExternalRule = (value: unknown): value is FusionRule<ExternalRuleName> =>
-  ruleOrigin(value) === "external" &&
-  typeof value === "object" &&
-  value !== null &&
-  isExternalRuleName(Object.getOwnPropertyDescriptor(value, "name")?.value);
+  ruleOrigin(value) === "external";
 
 const CONTRACT_CLASSES: Readonly<Record<ContractClass, true>> = {
   E: true,

@@ -678,9 +678,10 @@ export const assertDisabledRulesNamed = (
  * MUST: every entry is a rule {@link defineExternalRule} of this copy of the runtime built (its brand).
  * A built-in rule is refused as such; a hand-written object, a copy of a rule and a rule defined by
  * another copy of the runtime all lack the brand, and the refusal names both causes (the brand cannot
- * tell them apart). Every name of the list has a counter of its own: the external names are distinct, and no name meets a built-in rule's or an annotation
- * counter's ({@link zeroFusionCounts}, the check the pass applies). Anything else fails loudly
- * (`ExecutionError`), before the Session uploads a byte.
+ * tell them apart). Every name of the list has a counter of its own: the external names are checked
+ * distinct here, and none can meet a built-in rule's or an annotation counter's, because an external
+ * name has a slash and those have none (the pass's {@link zeroFusionCounts} still refuses a clash on
+ * every plan). Anything else fails loudly (`ExecutionError`), before the Session uploads a byte.
  */
 export const sessionFusionRules = (
   fusionRules: unknown,
@@ -709,12 +710,7 @@ export const sessionFusionRules = (
     }
     external.push(rule);
   }
-  const rules: readonly FusionRule<FusionRuleName | ExternalRuleName>[] = [
-    ...external,
-    ...FUSION_RULES,
-  ];
-  zeroFusionCounts(rules);
-  return rules;
+  return [...external, ...FUSION_RULES];
 };
 
 /**
