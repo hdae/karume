@@ -227,6 +227,8 @@
 | three-dispatch route (fused attention) △ | 3 dispatch の経路 | スコアを格納する融合 attention の形。①QK がスコア S を書き、② が行の統計（softmax）を取り、③PV が P × V を計算する — attention 1 つに kernel 3 本。online の kernel は同じ attention を 1 dispatch で回し、online が動かないところでは Session がこの経路に落ちる | — | ADR 0132・ADR 0138 Context |
 | P̃ / Vᵀ (int8 attention operands) △ | P̃ / Vᵀ | P̃ = softmax の重みを 1/127 の格子で int8 にしたもの。Vᵀ = V の転置（キーの方向 N が行の中に並ぶ）。どちらも N の方向に 4 キーずつ u32 の 1 語に詰めるので、③PV の i8a8 は N % 4 == 0 が要り、online の kernel はキー軸を詰める（キーの有効長） | — | ADR 0132・ADR 0138 Context |
 | rmsNormRope（rms_norm → pair RoPE fusion）△ | rms_norm と RoPE の融合 | Wan DiT の self-attention の q / k の前処理（トークン行の `rms_norm` → reshape 2 本 → ペア形の RoPE）を、正規化した行を格納しない f32 カーネル 1 本へ畳む融合（素の経路が 256 幅の workgroup の `rms_norm` を使うときだけ。`rmsNormRope` で数える） | — | ADR 0040 追記 2026-10-25 |
+| external fusion rule △ | 外から渡す融合ルール | runtime の外（models やアプリ）で `defineRule` を使って書き、`SessionOptions.fusionRules` で Session に渡す融合ルール。名前は `<名前空間>/<ルール名>` | カスタムカーネル（op を足す意味では使わない） | ADR 0148 |
+| staged loop（rounding barrier）△ | 丸めバリアつきのループ | 融合前に格納されていた値のビット列を workgroup メモリに書き、barrier の後で読み直すループ。積と和が fma にまとまるのを防ぐ | — | `stagedLoopWgsl`・kernel-rules |
 | deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
 | split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
