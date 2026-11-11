@@ -1,10 +1,12 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { linearStaticQuantizeModel } from "./helpers/linear-static-quantize-graph.ts";
 import { GRAPH_NAME } from "./helpers/model-fixture.ts";
 
@@ -36,20 +38,26 @@ describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetime
               fuseLinearStaticQuantize: true,
             });
             try {
-              const x = input(m),
-                expected = await baseline.run(x);
+              const x = input(m);
               // The second run uses the derived plan. The same scale reference is kept, and x lives until the later neg.
               for (let repeat = 0; repeat < 2; repeat++) {
-                const actual = await fused.run(x);
-                assertEquals(words(actual.y.data), words(expected.y.data));
-                assertEquals(words(actual.copy.data), words(expected.copy.data));
-                assertEquals(
-                  fused.diagnostics().lastRunFusions?.linearStaticQuantize,
-                  m <= 8 ? 1 : 0,
+                // y and the late x consumer (copy); M9 stays unfused, so its counter is 0.
+                assertCheckCase(
+                  await checkFusionTwin(gpu, {
+                    label: `${storage} M${m} run ${repeat + 1}`,
+                    fused,
+                    plain: baseline,
+                    feeds: x,
+                    counter: "linearStaticQuantize",
+                    hits: m <= 8 ? 1 : 0,
+                    nan: "payload",
+                  }),
                 );
                 if (m <= 8) {
-                  first ??= words(actual.y.data).slice(0, n);
-                  assertEquals(words(actual.y.data).slice(0, n), first);
+                  // The fused output, from a run of its own (the harness returns a case).
+                  const row = words((await fused.run(x)).y.data).slice(0, n);
+                  first ??= row;
+                  assertEquals(row, first);
                 }
               }
             } finally {
