@@ -46,7 +46,11 @@
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
-import { parseStorageRoles, type StorageRoles } from "../gpu/pipeline-cache.ts";
+import {
+  parseStorageRoles,
+  pipelineKeyConflict,
+  type StorageRoles,
+} from "../gpu/pipeline-cache.ts";
 import {
   groupNormAttrs,
   numel,
@@ -992,6 +996,15 @@ const stateAttentionTemps = (
 };
 
 /**
+ * The storage roles of one pipeline key in an estimate call, with the WGSL they were parsed from
+ * when the key is an external rule's (`undefined` for a built-in key — {@link fusedStepProgram}).
+ */
+type KernelRoles = {
+  readonly roles: StorageRoles;
+  readonly wgsl: string | undefined;
+};
+
+/**
  * The allocation program of one fused step of any rule, built-in or external — the bookkeeping of
  * `#buildStep` / `#buildFused` in recipe-builder, taken from the same device-free derivation
  * (fused-step-layout.ts): the output spec from {@link stepOutputs}, the temporaries in allocation
@@ -999,6 +1012,11 @@ const stateAttentionTemps = (
  * {@link stepReleases}. What a binding reads or writes comes from **the dispatch's WGSL storage
  * declarations**, as in execution ({@link parseStorageRoles}, memoised per pipeline key in `roles`
  * for one estimate call — the pipeline cache's key is execution's identity of a kernel too).
+ * A built-in key is memoised by the key alone: its key → WGSL identity is pinned by the codegen
+ * snapshots, and generating its WGSL again per step would cost time on large graphs. An external
+ * rule's key keeps its WGSL with the entry, and a second, different text under it fails as the
+ * pipeline cache fails it ({@link pipelineKeyConflict}, rethrown naming the rule as below) — in one
+ * step, across steps or across the scenarios of the call.
  *
  * A bind that is a weight (an initializer — resident for the Session's lifetime) and a
  * `weightScale` operand have no slot, as in execution's transient program (a resident source).
@@ -1014,14 +1032,26 @@ const fusedStepProgram = (
   step: FusedStep,
   graph: IrGraph,
   bookkeeping: OutputBookkeeping,
-  roles: Map<string, StorageRoles>,
+  roles: Map<string, KernelRoles>,
 ): TransientStepSpec => {
   const external = isExternalRuleName(step.rule);
   const rolesOf = (dispatch: FusedStep["dispatches"][number]): StorageRoles => {
     const known = roles.get(dispatch.key);
-    if (known !== undefined) return known;
-    const parsed = parseStorageRoles(dispatch.wgsl());
-    roles.set(dispatch.key, parsed);
+    if (!external) {
+      if (known !== undefined) return known.roles;
+      const parsed = parseStorageRoles(dispatch.wgsl());
+      roles.set(dispatch.key, { roles: parsed, wgsl: undefined });
+      return parsed;
+    }
+    // As the pipeline cache's `get`: the text is generated for every dispatch, and a key already
+    // held with another text is refused before anything else of the dispatch is read.
+    const wgsl = dispatch.wgsl();
+    if (known !== undefined) {
+      if (known.wgsl !== wgsl) throw pipelineKeyConflict(dispatch.key);
+      return known.roles;
+    }
+    const parsed = parseStorageRoles(wgsl);
+    roles.set(dispatch.key, { roles: parsed, wgsl });
     return parsed;
   };
   const output: TransientRef = { kind: "value", name: step.outputName };
@@ -1651,7 +1681,7 @@ const transientSlotBytes = (
   limit: number | undefined,
   maxBufferSize: number | undefined,
   knobs: TransientKnobs,
-  roles: Map<string, StorageRoles>,
+  roles: Map<string, KernelRoles>,
 ): number => {
   const bookkeeping: OutputBookkeeping = {
     useCounts: countUses(graph),
@@ -1952,7 +1982,7 @@ export const estimateGraphMemory = (
       : allowedChunkRows(generation.chunkLength, generation.chunkBuckets ?? []);
   // The storage roles of the fused steps' kernels, parsed once per pipeline key for every scenario
   // of this call (local to the call — the module holds no state).
-  const roles = new Map<string, StorageRoles>();
+  const roles = new Map<string, KernelRoles>();
   const estimateScenario = ([name, scenarioBindings]: [
     name: string,
     bindings: SymbolBindings,

@@ -22,6 +22,18 @@ export class PipelineKeyConflictError extends Error {
 }
 
 /**
+ * The refusal of a second, different WGSL text under `key`.
+ *
+ * MUST: the one construction of it. The pipeline cache throws it, and the memory estimate
+ * (`fusedStepProgram` in src/runtime/estimate.ts) throws it for an external rule's dispatch, so a
+ * step execution refuses this way gets no number there.
+ */
+export const pipelineKeyConflict = (key: string): PipelineKeyConflictError =>
+  new PipelineKeyConflictError(
+    `Pipeline key "${key}" was given a different WGSL (codegen determinism is broken)`,
+  );
+
+/**
  * The WGSL storage binding declarations contradict each other (the same binding number appears as
  * both read and read_write).
  */
@@ -131,11 +143,7 @@ export class PipelineCache {
   async get(key: string, wgsl: string): Promise<CachedPipeline> {
     const cached = this.#entries.get(key);
     if (cached !== undefined) {
-      if (cached.wgsl !== wgsl) {
-        throw new PipelineKeyConflictError(
-          `Pipeline key "${key}" was given a different WGSL (codegen determinism is broken)`,
-        );
-      }
+      if (cached.wgsl !== wgsl) throw pipelineKeyConflict(key);
       return await cached.resolved;
     }
     // MUST: do not keep a failed entry (keeping it would hand the same rejected Promise to everyone

@@ -12,8 +12,9 @@
 // refuses gets the same refusal from the estimate (execution on a fake GPU). No GPU.
 
 import { describe, it } from "vite-plus/test";
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { defineRule, type FusionMatch, type NodePlan } from "../kernel.ts";
+import { PipelineKeyConflictError } from "../src/gpu/pipeline-cache.ts";
 import { UNREAD_ATTENTION_DEVICE } from "../src/runtime/attention-route.ts";
 import { estimateFusionFacts } from "../src/runtime/estimate.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
@@ -30,7 +31,7 @@ import {
   type FusedWindowCase,
   geluMulGraph,
 } from "./helpers/fused-window-graphs.ts";
-import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 
 /** Desktop-class limits (no binding limit decides anything at these sizes). */
 const LIMITS = {
@@ -175,26 +176,39 @@ describe("the estimate counts a fused step in its post-fusion form", () => {
 });
 
 describe("the estimate refuses a fused step execution refuses", () => {
-  type GeluMulMatch = FusionMatch & { readonly gate: string; readonly other: string };
+  type GeluMulMatch = FusionMatch & {
+    readonly gate: string;
+    readonly other: string;
+    readonly count: number;
+  };
+
+  /** How {@link twoDispatchRule} departs from the staged rule's schedule and keys. */
+  type Variant = {
+    /** The dispatch after which temporary 0 is released (default 1, after ②). */
+    readonly releaseAfter?: number;
+    /** ②'s pipeline key (default its own, `ext:test:two_dispatch:mul`). */
+    readonly mulKey?: string;
+    /** Both kernels' text ends with a comment naming the element count (default not). */
+    readonly countInText?: boolean;
+  };
 
   /** A kernel's bind group: the params, then one storage binding per operand. */
-  const kernel = (bindings: readonly ("read" | "read_write")[]): string =>
+  const kernel = (bindings: readonly ("read" | "read_write")[], tail = ""): string =>
     [
       "@group(0) @binding(0) var<uniform> params: vec4<u32>;",
       ...bindings.map(
         (access, slot) =>
           `@group(0) @binding(${slot + 1}) var<storage, ${access}> b${slot}: array<f32>;`,
       ),
-      "@compute @workgroup_size(64) fn main() {}",
+      `@compute @workgroup_size(64) fn main() {}${tail}`,
     ].join("\n");
 
   /**
    * `mul(gelu(gate), other)` of {@link geluMulGraph} in two dispatches with the gelu value in
-   * temporary 0: ① binds gate and the temporary, ② the temporary, other and the output. The
-   * temporary is allocated before ① and released after dispatch `releaseAfter` — 1 is the schedule
-   * of the staged rule (helpers/fused-window-graphs.ts), 0 releases it before ② binds it.
+   * temporary 0: ① binds gate and the temporary, ② the temporary, other and the output — the
+   * schedule of the staged rule (helpers/fused-window-graphs.ts), with `variant` applied.
    */
-  const twoDispatchRule = (releaseAfter: number) =>
+  const twoDispatchRule = ({ releaseAfter = 1, mulKey, countInText = false }: Variant = {}) =>
     defineRule<GeluMulMatch, "test/two_dispatch">({
       name: "test/two_dispatch",
       heads: ["gelu"],
@@ -209,20 +223,22 @@ describe("the estimate refuses a fused step execution refuses", () => {
           chain: [gelu, mul],
           gate: gelu.node.ins[0],
           other: mul.node.ins[1],
+          count: gelu.inputShapes[0].reduce((product, dim) => product * dim, 1),
         };
       },
       build: (matched) => {
         const product = matched.chain[1].outputs[0];
-        const workgroups = { kind: "gridStride", items: 256, size: 64 } as const;
+        const workgroups = { kind: "gridStride", items: matched.count, size: 64 } as const;
+        const tail = countInText ? ` // n = ${matched.count}` : "";
         return {
           binds: [matched.gate, matched.other],
           outputName: product.name,
           outputShape: product.shape,
-          temps: [{ byteLength: 256 * 4, allocBefore: 0, releaseAfter }],
+          temps: [{ byteLength: matched.count * 4, allocBefore: 0, releaseAfter }],
           dispatches: [
             {
               key: "ext:test:two_dispatch:gelu",
-              wgsl: () => kernel(["read", "read_write"]),
+              wgsl: () => kernel(["read", "read_write"], tail),
               params: new Uint32Array(4),
               operands: [
                 { kind: "bind", index: 0 },
@@ -231,8 +247,8 @@ describe("the estimate refuses a fused step execution refuses", () => {
               workgroups,
             },
             {
-              key: "ext:test:two_dispatch:mul",
-              wgsl: () => kernel(["read", "read", "read_write"]),
+              key: mulKey ?? "ext:test:two_dispatch:mul",
+              wgsl: () => kernel(["read", "read", "read_write"], tail),
               params: new Uint32Array(4),
               operands: [{ kind: "temp", id: 0 }, { kind: "bind", index: 1 }, { kind: "output" }],
               workgroups,
@@ -255,7 +271,7 @@ describe("the estimate refuses a fused step execution refuses", () => {
   };
 
   it("a temporary bound by a dispatch after its release: execution's declaration check refuses it, and the estimate with the same message", async () => {
-    const rule = twoDispatchRule(0);
+    const rule = twoDispatchRule({ releaseAfter: 0 });
     const message =
       "step 'y': dispatch 1 'ext:test:two_dispatch:mul' binding 1 references temporary 0 outside its" +
       " live range [0, 0]";
@@ -269,7 +285,7 @@ describe("the estimate refuses a fused step execution refuses", () => {
   });
 
   it("a temporary bound within its live range: the run passes the declaration check, and the estimate returns a number", async () => {
-    const rule = twoDispatchRule(1);
+    const rule = twoDispatchRule();
     // The control: the fake GPU's run gets past every recipe and stops at the transient plan.
     await assertRejects(() => execute(rule), Error, "invalid transient plan limit");
     // y 1,024 B + the temporary 1,024 B (① writes it, ② reads it and writes y: two regions) — the
@@ -279,5 +295,66 @@ describe("the estimate refuses a fused step execution refuses", () => {
         .workspaceBytes,
       4 * 64 * 4 + 4 * 64 * 4,
     );
+  });
+
+  /** The refusal of a second WGSL text under `key`, as execution reports it for the rule. */
+  const keyConflict = (key: string): string =>
+    "fusion rule 'test/two_dispatch': resolving its step's dispatches threw PipelineKeyConflictError:" +
+    ` Pipeline key "${key}" was given a different WGSL (codegen determinism is broken)`;
+
+  it("two dispatches of one step under one key with different WGSL: the pipeline cache refuses it, and the estimate with the same error", async () => {
+    const rule = twoDispatchRule({ mulKey: "ext:test:two_dispatch:gelu" });
+    const message = keyConflict("ext:test:two_dispatch:gelu");
+    const executed = await assertRejects(() => execute(rule), ExecutionError, message);
+    assert(executed.cause instanceof PipelineKeyConflictError, "execution keeps the cache's error");
+    const estimated = assertThrows(
+      () => openGraph(geluMulGraph()).estimate({ ...LIMITS, fusionRules: [rule] }),
+      ExecutionError,
+      message,
+    );
+    assert(estimated.cause instanceof PipelineKeyConflictError, "the estimate keeps it too");
+  });
+
+  it("one key whose WGSL differs between two scenarios of one estimate call: refused as the second shape's run would be", () => {
+    // gelu·mul on [1, 1, M, 64] beside a state_append of gate, so generation binds the chunk rows M:
+    // prefill M = chunkLength, decode M = 1.
+    const row = [1, 1, "M", 64];
+    const graph: DeclarationJson = {
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["state_append", "gelu", "mul"] },
+      symbols: ["M", "C"],
+      inputs: [
+        { name: "gate", dtype: "f32", shape: row },
+        { name: "other", dtype: "f32", shape: row },
+      ],
+      outputs: ["y"],
+      initializers: {},
+      values: { g: { dtype: "f32", shape: row }, y: { dtype: "f32", shape: row } },
+      states: { k: { dtype: "f32", shape: [1, 1, "C", 64] } },
+      nodes: [
+        { op: "state_append", ins: ["gate"], outs: [], attrs: {}, states: { slot: "k" } },
+        { op: "gelu", ins: ["gate"], outs: ["g"], attrs: {} },
+        { op: "mul", ins: ["g", "other"], outs: ["y"], attrs: {} },
+      ],
+    };
+    const estimate = (rule: ReturnType<typeof twoDispatchRule>, chunkLength: number) =>
+      openGraph(graph).estimate({
+        ...LIMITS,
+        fusionRules: [rule],
+        generation: { chunkLength, bindings: { C: 8 } },
+      });
+    const counted = twoDispatchRule({ countInText: true });
+    // The controls: with one chunk row both scenarios have the same text, and a text that names no
+    // shape gets a number for both scenarios of four rows.
+    assertEquals(estimate(counted, 1).scenarios.length, 2);
+    assertEquals(estimate(twoDispatchRule(), 4).scenarios.length, 2);
+    // Prefill registers the 256-element text, decode brings the 64-element one under the same key.
+    const estimated = assertThrows(
+      () => estimate(counted, 4),
+      ExecutionError,
+      keyConflict("ext:test:two_dispatch:gelu"),
+    );
+    assert(estimated.cause instanceof PipelineKeyConflictError);
   });
 });
