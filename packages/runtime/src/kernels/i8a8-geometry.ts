@@ -63,6 +63,15 @@ export type I8a8Geometry = {
   readonly wgY: number;
   /** K tile width (in elements — the pack count is `tileK / 4`). */
   readonly tileK: number;
+  /**
+   * The skeleton form (perf-ledger K-85). Absent = the original form: a pack loop that runs at run
+   * time, and a fill that loads one u32 (4 i8) of global memory per item. `"vec4"` = the pack loop
+   * emitted unrolled (every pack offset a constant) and, in a consumer that implements it and on a
+   * shape that allows it, a fill that loads one `vec4<u32>` (16 i8) of global memory per item
+   * ({@link i8a8VecQuads}). Both forms return the same integers; the choice is speed only.
+   * MUST: it is in the key ({@link i8a8GeometryKeyPart}) — it changes the WGSL.
+   */
+  readonly skeleton?: "vec4";
 };
 
 /** Rows of the output tile. The dispatch's y is `ceil(m / tileM)`. */
@@ -152,6 +161,26 @@ export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void 
       )} are not divisible by the fill stride ${stride}`,
     );
   }
+  const skeleton: unknown = geometry.skeleton;
+  if (skeleton === undefined) return;
+  if (skeleton !== "vec4") {
+    throw new CodegenError(
+      `${where}: geometry skeleton must be "vec4" or absent (${JSON.stringify(skeleton)})`,
+    );
+  }
+  // The vec4 fill takes 4 packs per item: a K tile is whole vec4s, and the threads divide over them.
+  if (kPacks % I8A8_PACK !== 0) {
+    throw new CodegenError(
+      `${where}: the vec4 skeleton needs tileK to be a multiple of ${I8A8_PACK * I8A8_PACK} (${tileK})`,
+    );
+  }
+  if (threads % (kPacks / I8A8_PACK) !== 0) {
+    throw new CodegenError(
+      `${where}: thread count ${threads} is not divisible by the K quad count ${
+        kPacks / I8A8_PACK
+      } (the vec4 fill assignment cannot be built)`,
+    );
+  }
 };
 
 /**
@@ -183,11 +212,14 @@ export const assertI8a8GroupGeometry = (
  * (`gemmKeyPart` of the f32 skeleton, {@link "./gemm.ts"}) and adds what is needed now that **the
  * tile edges alone no longer determine the geometry** (`M128N64` can be built as `r8×8 wg8×16` or as
  * `r16×8 wg8×8`, so a key of tile edges alone would collide with a different kernel). The position
- * and spelling of the v4 flag stay at the end as before.
+ * and spelling of the v4 flag stay at the end as before. The vec4 skeleton adds `s` after the K
+ * tile (`k32sv4`); a geometry without it keeps its key byte for byte.
  */
 export const i8a8GeometryKeyPart = (geometry: I8a8Geometry, v4: boolean): string =>
   `tile${i8a8TileM(geometry)}x${i8a8TileN(geometry)}r${geometry.regM}x${geometry.regN}` +
-  `w${geometry.wgX}x${geometry.wgY}k${geometry.tileK}${v4 ? "v4" : ""}`;
+  `w${geometry.wgX}x${geometry.wgY}k${geometry.tileK}${geometry.skeleton === undefined ? "" : "s"}${
+    v4 ? "v4" : ""
+  }`;
 
 /**
  * Default for linear / ①QK (the only variant all 3 shapes picked as their best in measurement) and
@@ -237,6 +269,9 @@ export const i8a8AccumulatorInit = (geometry: I8a8Geometry): string => {
  * them get the pack stride wrong). The addition order per output is "K tiles ascending, 4 words of a
  * pack together"; whatever the geometry, it is exact i32 addition, so the result is
  * order-independent.
+ *
+ * With the vec4 skeleton the loop over the packs is emitted unrolled: one block per pack, every
+ * pack offset a constant. The body and the addition order per output are the loop's.
  */
 export const i8a8InnerProductLoop = (geometry: I8a8Geometry): string => {
   const { regM, regN } = geometry;
@@ -257,6 +292,17 @@ export const i8a8InnerProductLoop = (geometry: I8a8Geometry): string => {
     }).join("\n");
     return `      let a${row} = sa[arow_at${at(row)}];\n${updates}`;
   }).join("\n");
+  if (geometry.skeleton === "vec4") {
+    return Array.from(
+      { length: kPacks },
+      (_, pack) => `    {
+      let bcol = ${pack * i8a8TileN(geometry)}u + lid.x * ${regN}u;
+${bLoads}
+      let arow_at = ${pack * i8a8TileM(geometry)}u + lid.y * ${regM}u;
+${rows}
+    }`,
+    ).join("\n");
+  }
   return `    // ${regN + regM} shared loads (${regN} words of B + ${regM} words of A) give ${
     regM * regN
   } integer inner products = ${regM * regN * I8A8_PACK} MACs.
@@ -274,4 +320,90 @@ ${rows}
 export const i8a8GeometryNote = (geometry: I8a8Geometry): string =>
   `tile ${i8a8TileM(geometry)}x${i8a8TileN(
     geometry,
-  )} / ${geometry.regM}x${geometry.regN} per thread / wg ${geometry.wgX}x${geometry.wgY} / K ${geometry.tileK}`;
+  )} / ${geometry.regM}x${geometry.regN} per thread / wg ${geometry.wgX}x${geometry.wgY} / K ${geometry.tileK}${
+    geometry.skeleton === undefined ? "" : " / vec4 skeleton"
+  }`;
+
+// ---------------------------------------------------------------------------------------------
+// The vec4 fill of the vec4 skeleton (perf-ledger K-85), shared by every consumer that has one.
+//
+// One fill item = one row (or column) x 4 consecutive packs = 16 i8 = one `vec4<u32>` of global
+// memory. A K tile has Q = kPacks / 4 items per row. A thread takes the items tid, tid + T, …
+// (T = threads): T % Q == 0 ({@link assertI8a8Geometry}), so its pack quad is tid % Q in every slot
+// and its row advances by T / Q per slot.
+//
+// MUST: the shared tiles stay `array<u32>` and each loaded vec4 is stored as four whole-word
+// stores with static components (`.x .y .z .w`). No workgroup vec4 is written through a dynamic
+// component (the MUST of gemm.ts on shared tile stores).
+// ---------------------------------------------------------------------------------------------
+
+/** Pack quads per row per K tile (vec4 fill). */
+export const i8a8VecQuads = (geometry: I8a8Geometry): number => i8a8KPacks(geometry) / I8A8_PACK;
+
+/** The row step between two slots of one thread (vec4 fill). */
+export const i8a8VecStride = (geometry: I8a8Geometry): number =>
+  i8a8Threads(geometry) / i8a8VecQuads(geometry);
+
+/** Slots one thread fills for a tile edge of `edge` rows (vec4 fill); the last may be partial. */
+export const i8a8VecSlots = (geometry: I8a8Geometry, edge: number): number =>
+  Math.ceil(edge / i8a8VecStride(geometry));
+
+/** The row offset of each slot (slot · stride). */
+export const i8a8VecSlotOffsets = (geometry: I8a8Geometry, edge: number): number[] =>
+  Array.from({ length: i8a8VecSlots(geometry, edge) }, (_, slot) => slot * i8a8VecStride(geometry));
+
+/** Whether slot `slot` of an edge of `edge` rows reaches past the tile (it needs a row guard). */
+const i8a8VecSlotPartial = (geometry: I8a8Geometry, edge: number, slot: number): boolean =>
+  (slot + 1) * i8a8VecStride(geometry) > edge;
+
+const VEC_LANES = ["x", "y", "z", "w"] as const;
+
+/** The thread's assignment, invariant over the K tiles: its quad, its first row, its tile offset. */
+export const i8a8VecAssign = (
+  geometry: I8a8Geometry,
+  edge: number,
+  names: { readonly quad: string; readonly row: string; readonly at: string },
+): string => {
+  const quads = i8a8VecQuads(geometry);
+  return `  let ${names.quad} = tid % ${quads}u;
+  let ${names.row} = tid / ${quads}u;
+  let ${names.at} = ${names.quad} * ${I8A8_PACK * edge}u + ${names.row};`;
+};
+
+/**
+ * One slot of the fill: `value` (a `vec4<u32>` already loaded, or zero) stored as four words of
+ * the `[pack][row]` tile. A partial slot stores only inside the tile.
+ */
+export const i8a8VecStoreSlot = (
+  geometry: I8a8Geometry,
+  edge: number,
+  slot: number,
+  names: {
+    readonly tile: string;
+    readonly at: string;
+    readonly row: string;
+    readonly value: string;
+  },
+  indent: string,
+): string => {
+  const offset = slot * i8a8VecStride(geometry);
+  const plus = (extra: number): string => (extra === 0 ? "" : ` + ${extra}u`);
+  const stores = VEC_LANES.map(
+    (lane, pack) =>
+      `${indent}${names.tile}[${names.at}${plus(offset + pack * edge)}] = ${names.value}.${lane};`,
+  ).join("\n");
+  return i8a8VecSlotPartial(geometry, edge, slot)
+    ? `${indent}if (${names.row} + ${offset}u < ${edge}u) {\n${stores.replace(/^/gm, "  ")}\n${indent}}`
+    : stores;
+};
+
+/** The in-tile row condition a partial slot's load needs (` && …`), or "". */
+export const i8a8VecLoadGuard = (
+  geometry: I8a8Geometry,
+  edge: number,
+  slot: number,
+  row: string,
+): string =>
+  i8a8VecSlotPartial(geometry, edge, slot)
+    ? ` && ${row} + ${slot * i8a8VecStride(geometry)}u < ${edge}u`
+    : "";

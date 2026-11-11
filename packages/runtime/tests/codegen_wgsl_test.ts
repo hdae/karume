@@ -254,6 +254,7 @@ import {
   linearI8a8Key,
   linearI8a8Params,
   linearI8a8UsesVec4,
+  linearI8a8UsesVecFill,
   linearI8a8Wgsl,
 } from "../src/kernels/linear-i8a8.ts";
 import {
@@ -315,9 +316,14 @@ import {
 } from "../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Wgsl } from "../src/kernels/attention-online-i8a8.ts";
 import { TRANSPOSE_TILED_WGSL } from "../src/kernels/transpose-tiled.ts";
-import { CONV3D_I8A8_QUANTIZE_GEOMETRY, conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
+import {
+  CONV3D_I8A8_QUANTIZE_GEOMETRY,
+  conv3dI8a8Key,
+  conv3dI8a8Wgsl,
+} from "../src/kernels/conv3d-i8a8.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import {
+  assertI8a8Geometry,
   defaultI8a8Geometry,
   type I8a8Geometry,
   i8a8GeometryKeyPart,
@@ -334,6 +340,25 @@ const fixture = (name: string): Promise<string> => readTextFile(fixtureUrl(name)
 // that change only the comments inside the WGSL templates (ADR 0130 step 2-9d): the diff of the
 // fixtures then has to be comment lines only, which the commit's review checks.
 const WRITE_SNAPSHOTS = process.env.KARUME_WGSL_SNAPSHOT === "write";
+
+/**
+ * The vec4 skeleton of the i8a8 GEMM (perf-ledger K-85) at the geometry the spike measured on the
+ * RTX 3080 Ti (tile 128×64, r16×4, wg16×8, K32): the slots of the vec4 fill cover the tile exactly.
+ */
+const SKELETON_L1C: I8a8Geometry = {
+  regM: 16,
+  regN: 4,
+  wgX: 16,
+  wgY: 8,
+  tileK: 32,
+  skeleton: "vec4",
+};
+
+/**
+ * A vec4-skeleton geometry whose A-side fill has a partial slot (tile 96 rows, 64 rows per slot —
+ * the second slot reaches past the tile and is guarded).
+ */
+const SKELETON_PARTIAL: I8a8Geometry = { ...SKELETON_L1C, regM: 12 };
 
 // The 5 fused kernels have weight-storage variants (ADR 0018). The existing invariants apply to the
 // **w=f32 variant**, so the old names are bound to that variant (the f16 variants are covered by
@@ -860,6 +885,21 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["linear_w4a8_g32_v4.wgsl", linearI8a8Wgsl(true, true, undefined, "i4", 32)],
     ["linear_w4a8_g32_emu.wgsl", linearI8a8Wgsl(false, false, undefined, "i4", 32)],
     ["linear_w4a8_g32_emu_v4.wgsl", linearI8a8Wgsl(true, false, undefined, "i4", 32)],
+    // The vec4 skeleton (perf-ledger K-85 — an optional geometry field): the vec4 fill with the
+    // unrolled pack loop (i8, k % 16 == 0), the same with a partial fill slot (emulated dot, scalar
+    // store), the word fill with the unrolled loop (i8 at k % 16 != 0), and w4a8 with the unrolled
+    // loop. The condition is **placing them as a pair with the linear_i8a8* / linear_w4a8* above**:
+    // a geometry without the field must not move by one byte.
+    [
+      "linear_i8a8_skel_fill16_v4.wgsl",
+      linearI8a8Wgsl(true, true, SKELETON_L1C, "i8", undefined, true),
+    ],
+    [
+      "linear_i8a8_skel_fill16_partial_emu.wgsl",
+      linearI8a8Wgsl(false, false, SKELETON_PARTIAL, "i8", undefined, true),
+    ],
+    ["linear_i8a8_skel_word_v4.wgsl", linearI8a8Wgsl(true, true, SKELETON_L1C, "i8")],
+    ["linear_w4a8_g32_skel_v4.wgsl", linearI8a8Wgsl(true, true, SKELETON_L1C, "i4", 32)],
     // The i8a8 variants of fused attention ①QK / ③PV (iterations 1 / 2 of the design's §7). The
     // condition is **placing them as a pair with the f32 / :c16 variants above**: the worst
     // accident is adding the variants moving the default path's bytes.
@@ -1194,6 +1234,21 @@ test("the same generator input always yields identical WGSL (every op × dtype �
           linearI8a8Wgsl(v4, dp4a, undefined, "i4", groupSize),
           linearI8a8Wgsl(v4, dp4a, undefined, "i4", groupSize),
           `linear w4a8:v4=${v4}:dp4a=${dp4a}:g=${groupSize}`,
+        );
+      }
+      // The vec4 skeleton (perf-ledger K-85): both fill forms, the partial-slot geometry and w4a8
+      for (const geometry of [SKELETON_L1C, SKELETON_PARTIAL]) {
+        for (const vecFill of [false, true]) {
+          assertEquals(
+            linearI8a8Wgsl(v4, dp4a, geometry, "i8", undefined, vecFill),
+            linearI8a8Wgsl(v4, dp4a, geometry, "i8", undefined, vecFill),
+            `linear i8a8 skeleton ${i8a8GeometryKeyPart(geometry, v4)}:dp4a=${dp4a}:fill16=${vecFill}`,
+          );
+        }
+        assertEquals(
+          linearI8a8Wgsl(v4, dp4a, geometry, "i4", 32),
+          linearI8a8Wgsl(v4, dp4a, geometry, "i4", 32),
+          `linear w4a8 skeleton ${i8a8GeometryKeyPart(geometry, v4)}:dp4a=${dp4a}`,
         );
       }
       assertEquals(
@@ -4697,6 +4752,178 @@ test("the i8a8 geometry is reflected in the key and the output, and combinations
     assertThrows(() => attentionQkI8a8Wgsl(true, true, "f32", geometry), CodegenError, message);
     assertThrows(() => attentionPvI8a8Wgsl(true, true, "f32", geometry), CodegenError, message);
   }
+});
+
+/**
+ * The vec4 skeleton of the i8a8 GEMM (perf-ledger K-85): an optional geometry field. Absent, keys
+ * and WGSL do not move (the snapshots above); present, it changes the key (`s` after the K tile),
+ * unrolls the pack loop, and — in linear with i8 weights and `k % 16 == 0` — fills the shared
+ * tiles one `vec4<u32>` of global memory per item (`:fill16`). The integers are the same in every
+ * form (checking that on hardware is tests/gpu_i8a8_skeleton_test.ts's job).
+ */
+describe("the vec4 skeleton of the i8a8 GEMM (perf-ledger K-85)", () => {
+  const { skeleton: _skeleton, ...WORD_L1C } = SKELETON_L1C;
+
+  it("the skeleton puts `s` after the K tile of the key, and a geometry without it keeps its key", () => {
+    assertEquals(
+      linearI8a8Key(true, true, SKELETON_L1C, "i8", undefined, true),
+      "linear:v4:i8a8:tile128x64r16x4w16x8k32sv4:dp4a:fill16",
+    );
+    assertEquals(
+      linearI8a8Key(true, true, SKELETON_L1C, "i8"),
+      "linear:v4:i8a8:tile128x64r16x4w16x8k32sv4:dp4a",
+    );
+    assertEquals(
+      linearI8a8Key(false, false, SKELETON_PARTIAL, "i8", undefined, true),
+      "linear:v4:i8a8:tile96x64r12x4w16x8k32s:dp4aEmu:fill16",
+    );
+    assertEquals(
+      linearI8a8Key(true, true, SKELETON_L1C, "i4", 32),
+      "linear:v5:i8a8:tile128x64r16x4w16x8k32sv4:dp4a:wi4g32",
+    );
+    // Without the field: the key of the same tile has no `s` and no `:fill16`
+    assertEquals(
+      linearI8a8Key(true, true, WORD_L1C),
+      "linear:v4:i8a8:tile128x64r16x4w16x8k32v4:dp4a",
+    );
+    assertEquals(linearI8a8Key(true, true), "linear:v4:i8a8:tile128x64r8x8w8x16k16v4:dp4a");
+    // The attention ①QK / ③PV and conv3d keys carry it through the shared key part
+    assertEquals(
+      attentionQkI8a8Key(true, true, "f32", SKELETON_L1C).includes("tile128x64r16x4w16x8k32sv4"),
+      true,
+    );
+    assertEquals(
+      attentionPvI8a8Key(true, true, "f32", SKELETON_L1C).includes("tile128x64r16x4w16x8k32sv4"),
+      true,
+    );
+    assertEquals(
+      conv3dI8a8Key(true, true, SKELETON_L1C).includes("tile128x64r16x4w16x8k32sv4"),
+      true,
+    );
+    assertNotEquals(conv3dI8a8Key(true, true, SKELETON_L1C), conv3dI8a8Key(true, true, WORD_L1C));
+  });
+
+  it("the vec4 fill is taken only with the skeleton, i8 weights and k % 16 == 0", () => {
+    assertEquals(linearI8a8UsesVecFill(SKELETON_L1C, "i8", 3072), true);
+    assertEquals(linearI8a8UsesVecFill(SKELETON_L1C, "i8", 16), true);
+    assertEquals(linearI8a8UsesVecFill(SKELETON_L1C, "i8", 200), false, "k % 16 == 8");
+    assertEquals(linearI8a8UsesVecFill(SKELETON_L1C, "i4", 3072), false, "w4a8");
+    assertEquals(linearI8a8UsesVecFill(WORD_L1C, "i8", 3072), false, "no skeleton");
+  });
+
+  it("the pack loop is unrolled with constant pack offsets, and the vec4 fill reads vec4<u32> and stores whole words with static components", () => {
+    const fill16 = linearI8a8Wgsl(true, true, SKELETON_L1C, "i8", undefined, true);
+    const word = linearI8a8Wgsl(true, true, SKELETON_L1C, "i8");
+    const plain = linearI8a8Wgsl(true, true, WORD_L1C);
+    for (const [name, wgsl] of [
+      ["fill16", fill16],
+      ["word", word],
+      ["w4a8", linearI8a8Wgsl(true, true, SKELETON_L1C, "i4", 32)],
+    ] as const) {
+      assertEquals(
+        wgsl.includes("for (var p = 0u;"),
+        false,
+        `${name}: the pack loop is not unrolled`,
+      );
+      // 8 packs per K32 tile: one block each, the last at pack offset 7 · tileN / 7 · tileM
+      assertEquals(wgsl.includes("let bcol = 448u + lid.x * 4u;"), true, `${name}: pack 7 of B`);
+      assertEquals(
+        wgsl.includes("let arow_at = 896u + lid.y * 16u;"),
+        true,
+        `${name}: pack 7 of A`,
+      );
+      assertEquals(wgsl.includes("let bcol = 512u"), false, `${name}: a pack past the tile`);
+    }
+    assertEquals(plain.includes("for (var p = 0u; p < 8u; p = p + 1u) {"), true);
+    // The shared tiles stay u32 in every form (the storage formula does not change)
+    for (const wgsl of [fill16, word, plain]) {
+      assertEquals(wgsl.includes("var<workgroup> sa: array<u32, 1024>;"), true);
+      assertEquals(wgsl.includes("var<workgroup> sb: array<u32, 512>;"), true);
+    }
+    // The vec4 fill: the bindings are vec4<u32>, one load per slot, four static-component stores
+    assertEquals(fill16.includes("var<storage, read> xq: array<vec4<u32>>;"), true);
+    assertEquals(fill16.includes("var<storage, read> w: array<vec4<u32>>;"), true);
+    assertEquals(word.includes("var<storage, read> xq: array<u32>;"), true);
+    assertEquals(fill16.includes("av0 = xq[arow_base0 + aquad];"), true);
+    for (const lane of ["x", "y", "z", "w"]) {
+      assertEquals(fill16.includes(`= av1.${lane};`), true, `A slot 1 lane ${lane}`);
+      assertEquals(fill16.includes(`= wv0.${lane};`), true, `B slot 0 lane ${lane}`);
+    }
+    assertEquals(fill16.includes("av2"), false, "tile 128 rows over 64 rows per slot = 2 slots");
+    assertEquals(/s[ab]\[[^\]]*\]\[/.test(fill16), false, "a dynamic component store");
+    // The exact cover has no partial-slot guard; the 96-row tile guards its second slot
+    assertEquals(fill16.includes("< 128u) {"), false);
+    const partial = linearI8a8Wgsl(false, false, SKELETON_PARTIAL, "i8", undefined, true);
+    assertEquals(partial.includes("if (ar + 64u < 96u) {"), true, "the store guard");
+    assertEquals(partial.includes("&& ar + 64u < 96u) {"), true, "the load guard");
+  });
+
+  it("a skeleton geometry that the vec4 fill cannot cover, an unknown skeleton value, and a vec4 fill without the skeleton or with i4 weights throw CodegenError", () => {
+    // tileK 24 passes the word-fill checks (96 threads / 6 packs = stride 16) but is not whole vec4s
+    const tileK24: I8a8Geometry = { regM: 4, regN: 4, wgX: 8, wgY: 12, tileK: 24 };
+    assertI8a8Geometry(tileK24, "control");
+    assertThrows(
+      () => linearI8a8Wgsl(true, true, { ...tileK24, skeleton: "vec4" }),
+      CodegenError,
+      "the vec4 skeleton needs tileK to be a multiple of 16 (24)",
+    );
+    // A thread count that does not divide: the pack check already refuses it (a count that divides
+    // the packs divides their quads too)
+    assertThrows(
+      () =>
+        linearI8a8Wgsl(true, true, {
+          regM: 8,
+          regN: 8,
+          wgX: 3,
+          wgY: 3,
+          tileK: 32,
+          skeleton: "vec4",
+        }),
+      CodegenError,
+      "is not divisible by the K pack count",
+    );
+    // A value outside the type (a table built by a JS caller or read from stored data)
+    const unknownValue: I8a8Geometry = { ...WORD_L1C };
+    Reflect.set(unknownValue, "skeleton", "vec8");
+    for (const generate of [
+      () => linearI8a8Wgsl(true, true, unknownValue),
+      () => attentionQkI8a8Wgsl(true, true, "f32", unknownValue),
+      () => attentionPvI8a8Wgsl(true, true, "f32", unknownValue),
+      () => conv3dI8a8Wgsl(true, true, unknownValue),
+    ]) {
+      assertThrows(generate, CodegenError, 'geometry skeleton must be "vec4" or absent ("vec8")');
+    }
+    assertThrows(
+      () => linearI8a8Wgsl(true, true, WORD_L1C, "i8", undefined, true),
+      CodegenError,
+      "the vec4 fill needs a geometry with the vec4 skeleton and i8 weights",
+    );
+    assertThrows(
+      () => linearI8a8Wgsl(true, true, SKELETON_L1C, "i4", 32, true),
+      CodegenError,
+      "the vec4 fill needs a geometry with the vec4 skeleton and i8 weights",
+    );
+  });
+
+  it("the attention ①QK / ③PV and conv3d take only the unrolled loop from a skeleton geometry", () => {
+    for (const [name, skeleton, plain] of [
+      [
+        "attention_qk",
+        attentionQkI8a8Wgsl(true, true, "f32", SKELETON_L1C),
+        attentionQkI8a8Wgsl(true, true, "f32", WORD_L1C),
+      ],
+      [
+        "attention_pv",
+        attentionPvI8a8Wgsl(true, true, "f32", SKELETON_L1C),
+        attentionPvI8a8Wgsl(true, true, "f32", WORD_L1C),
+      ],
+      ["conv3d", conv3dI8a8Wgsl(true, true, SKELETON_L1C), conv3dI8a8Wgsl(true, true, WORD_L1C)],
+    ] as const) {
+      assertEquals(skeleton.includes("for (var p = 0u;"), false, `${name}: not unrolled`);
+      assertEquals(plain.includes("for (var p = 0u;"), true, `${name}: control`);
+      assertEquals(skeleton.includes("vec4<u32>"), false, `${name}: no vec4 fill in this slice`);
+    }
+  });
 });
 
 /**

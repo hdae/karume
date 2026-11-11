@@ -32,6 +32,7 @@ import {
   linearI8a8Params,
   linearI8a8TempBytes,
   linearI8a8UsesVec4,
+  linearI8a8UsesVecFill,
   linearI8a8Wgsl,
 } from "../../kernels/linear-i8a8.ts";
 import {
@@ -767,10 +768,12 @@ const buildLinearI8a8 = async (
   // MUST: look up both key and wgsl with **the actual resident form** (`weightStorage`). Fixing it
   // to i8 would hand out i4's group scales as per-channel scales, a silent wrong value (the numeric
   // contracts differ — ADR 0076).
-  const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize);
+  // The fill form of the vec4 skeleton (a geometry without the skeleton: always the word fill).
+  const vecFill = linearI8a8UsesVecFill(geometry, weightStorage, k);
+  const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize, vecFill);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    linearI8a8Wgsl(v4, dp4a, geometry, weightStorage, groupSize),
+    linearI8a8Wgsl(v4, dp4a, geometry, weightStorage, groupSize, vecFill),
   );
   builder.dispatch({
     key,

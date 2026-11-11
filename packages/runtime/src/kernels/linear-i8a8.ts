@@ -121,6 +121,12 @@ import {
   i8a8Threads,
   i8a8TileM,
   i8a8TileN,
+  i8a8VecAssign,
+  i8a8VecLoadGuard,
+  i8a8VecQuads,
+  i8a8VecSlotOffsets,
+  i8a8VecSlots,
+  i8a8VecStoreSlot,
 } from "./i8a8-geometry.ts";
 
 export { LINEAR_SCALE_BINDING } from "./gemm.ts";
@@ -195,6 +201,22 @@ export const dp4aAvailable = (wgslLanguageFeatures: ReadonlySet<string>): boolea
 export const linearI8a8UsesVec4 = (n: number): boolean => n % I8A8_PACK === 0;
 
 /**
+ * Whether the kernel fills its shared tiles one `vec4<u32>` of global memory per item (the vec4
+ * skeleton of the geometry, perf-ledger K-85): the geometry carries the skeleton, the weights are
+ * i8, and a row of `k` elements is whole vec4s (`k % 16 == 0`). Otherwise a geometry with the
+ * skeleton keeps the word fill and only its pack loop is unrolled.
+ *
+ * MUST: the key and the WGSL take this one answer ({@link linearI8a8Key}, {@link linearI8a8Wgsl}) —
+ * the bindings of `xq` and `w` are typed `array<vec4<u32>>` under it, so a pipeline of one form
+ * must never be bound for the other.
+ */
+export const linearI8a8UsesVecFill = (
+  geometry: I8a8Geometry,
+  weight: WeightStorage,
+  k: number,
+): boolean => geometry.skeleton === "vec4" && weight === "i8" && k % (I8A8_PACK * I8A8_PACK) === 0;
+
+/**
  * Pipeline key. The geometry became a parameter, so **the tile edges alone do not determine the
  * output** ({@link i8a8GeometryKeyPart}) — the generation is bumped to `v4` and the whole geometry
  * discriminator goes in.
@@ -204,6 +226,8 @@ export const linearI8a8UsesVec4 = (n: number): boolean => n % I8A8_PACK === 0;
  * implicit shader cache is not rebuilt). Forgetting the group length gives the silent wrong value
  * **a group-32 pipeline running on group-64 assets** (g is baked into the WGSL as a shift — ADR
  * 0069).
+ * MUST: `vecFill` ({@link linearI8a8UsesVecFill}) appends `:fill16`; without it the key is
+ * unchanged.
  */
 export const linearI8a8Key = (
   v4: boolean,
@@ -211,6 +235,7 @@ export const linearI8a8Key = (
   geometry: I8a8Geometry = defaultI8a8Geometry("linear"),
   weight: WeightStorage = "i8",
   groupSize?: number,
+  vecFill = false,
 ): string => {
   // MUST: run the same two checks as {@link linearI8a8Wgsl} with the same wording (side effects
   // only — the return value for valid input does not change by a single byte). Storage other than
@@ -225,7 +250,9 @@ export const linearI8a8Key = (
   return (
     `linear:v${weight === "i4" ? 5 : 4}:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${
       dp4a ? "dp4a" : "dp4aEmu"
-    }` + (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`)
+    }` +
+    (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`) +
+    (vecFill ? ":fill16" : "")
   );
 };
 
@@ -312,9 +339,10 @@ ${slots}`;
  * Shared tile fill on the A (activation) side (out of range is zero-filled — `idot(0, x) == 0`, so
  * it is exact even with a K remainder).
  *
- * MUST: both the i8 and the w4a8 variant use this one function. `t` is **the running K tile
- * number**, so in w4a8's two-level loop (group outside × tile inside) the expression is identical
- * as long as `t` is rebuilt from both levels.
+ * MUST: both the i8 and the w4a8 variant use this one function for the word fill. `t` is **the
+ * running K tile number**, so in w4a8's two-level loop (group outside × tile inside) the expression
+ * is identical as long as `t` is rebuilt from both levels. (The vec4 fill, {@link fillTilesVec}, is
+ * the i8 variant's alone.)
  */
 const fillTilesA = (geometry: I8a8Geometry): string => {
   const kPacks = i8a8KPacks(geometry);
@@ -354,6 +382,68 @@ ${b}`;
 /** Shared tile fill (zero-filled out of range — `idot(0, x) == 0`, exact even with a K remainder). */
 const fillTiles = (geometry: I8a8Geometry): string =>
   `${fillTilesA(geometry)}\n${fillTilesB(geometry)}`;
+
+/**
+ * The vec4 fill's assignment of the x tile and of the W tile ({@link linearI8a8UsesVecFill}): a
+ * thread's quad and rows, invariant over the K tile loop. `k16` is a row's length in vec4s.
+ */
+const prologueVec = (geometry: I8a8Geometry): string => {
+  const tileM = i8a8TileM(geometry);
+  const tileN = i8a8TileN(geometry);
+  const quads = i8a8VecQuads(geometry);
+  const aSlots = i8a8VecSlotOffsets(geometry, tileM)
+    .map(
+      (offset, slot) => `  let arow${slot} = wid.y * ${tileM}u + ar${at(offset)};
+  let arow_base${slot} = arow${slot} * k16;`,
+    )
+    .join("\n");
+  const bSlots = i8a8VecSlotOffsets(geometry, tileN)
+    .map(
+      (offset, slot) => `  let wcol${slot} = wid.x * ${tileN}u + wc${at(offset)};
+  let wrow_base${slot} = wcol${slot} * k16;`,
+    )
+    .join("\n");
+  return `  // k % 16 == 0 on this form, so a row is whole vec4s (16 i8 each)
+  let k16 = dims.k / ${I8A8_PACK * I8A8_PACK}u;
+  // x tile assignment (vec4 fill: ${tileM} rows × ${quads} quads, ${i8a8VecSlots(geometry, tileM)} slots)
+${i8a8VecAssign(geometry, tileM, { quad: "aq", row: "ar", at: "sa_at" })}
+${aSlots}
+  // W tile assignment (vec4 fill: ${tileN} output channels × ${quads} quads, ${i8a8VecSlots(geometry, tileN)} slots)
+${i8a8VecAssign(geometry, tileN, { quad: "wq4", row: "wc", at: "sb_at" })}
+${bSlots}`;
+};
+
+/**
+ * Shared tile fill of the vec4 form: one `vec4<u32>` of `xq` / `w` per item, stored as four
+ * words. Out of range is zero-filled, as in the word fill (`idot(0, x) == 0`).
+ */
+const fillTilesVec = (geometry: I8a8Geometry): string => {
+  const tileM = i8a8TileM(geometry);
+  const tileN = i8a8TileN(geometry);
+  const quads = i8a8VecQuads(geometry);
+  const a = i8a8VecSlotOffsets(geometry, tileM)
+    .map(
+      (_, slot) => `    var av${slot} = vec4<u32>(0u);
+    if (arow${slot} < dims.m && aquad < k16${i8a8VecLoadGuard(geometry, tileM, slot, "ar")}) {
+      av${slot} = xq[arow_base${slot} + aquad];
+    }
+${i8a8VecStoreSlot(geometry, tileM, slot, { tile: "sa", at: "sa_at", row: "ar", value: `av${slot}` }, "    ")}`,
+    )
+    .join("\n");
+  const b = i8a8VecSlotOffsets(geometry, tileN)
+    .map(
+      (_, slot) => `    var wv${slot} = vec4<u32>(0u);
+    if (wcol${slot} < dims.n && wquad < k16${i8a8VecLoadGuard(geometry, tileN, slot, "wc")}) {
+      wv${slot} = w[wrow_base${slot} + wquad];
+    }
+${i8a8VecStoreSlot(geometry, tileN, slot, { tile: "sb", at: "sb_at", row: "wc", value: `wv${slot}` }, "    ")}`,
+    )
+    .join("\n");
+  return `    let aquad = t * ${quads}u + aq;
+${a}
+    let wquad = t * ${quads}u + wq4;
+${b}`;
+};
 
 /**
  * Shared tile fill on the B (i4 weight) side. 1 pack = 4 elements is half a word (8 elements), so
@@ -612,10 +702,16 @@ export const linearI8a8Wgsl = (
   geometry: I8a8Geometry = defaultI8a8Geometry("linear"),
   weight: WeightStorage = "i8",
   groupSize?: number,
+  vecFill = false,
 ): string => {
   assertI8a8Geometry(geometry, "linear i8a8");
   if (weight !== "i8" && weight !== "i4") {
     throw new CodegenError(`linear i8a8: weight storage must be i8 / i4 (${weight})`);
+  }
+  if (vecFill && (geometry.skeleton !== "vec4" || weight !== "i8")) {
+    throw new CodegenError(
+      "linear i8a8: the vec4 fill needs a geometry with the vec4 skeleton and i8 weights",
+    );
   }
   // MUST: i4 and the group length come as a pair (a missing or extra one is a wiring bug —
   // weight-storage.ts)
@@ -633,8 +729,8 @@ struct Dims {
   k: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-@group(0) @binding(1) var<storage, read> xq: array<u32>;
-@group(0) @binding(2) var<storage, read> w: array<u32>;
+@group(0) @binding(1) var<storage, read> xq: array<${vecFill ? "vec4<u32>" : "u32"}>;
+@group(0) @binding(2) var<storage, read> w: array<${vecFill ? "vec4<u32>" : "u32"}>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${v4 ? "vec4<f32>" : "f32"}>;
 @group(0) @binding(${LINEAR_SCALE_BINDING}) var<storage, read> wscale: array<f32>;
@@ -657,8 +753,12 @@ fn main(
   // Eligibility requires k % 4 == 0, so a row always starts on a word boundary (the i8 payload
   // packs 4 per flat index)
   let k4 = dims.k / ${I8A8_PACK}u;
-${prologueA(geometry)}
-${prologueB(geometry, shift === undefined ? "k4" : "dims.k")}
+${
+  vecFill
+    ? prologueVec(geometry)
+    : `${prologueA(geometry)}
+${prologueB(geometry, shift === undefined ? "k4" : "dims.k")}`
+}
 ${
   shift === undefined || groupSize === undefined
     ? `  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
@@ -666,7 +766,7 @@ ${
   let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;
 ${i8a8AccumulatorInit(geometry)}
   for (var t = 0u; t < tiles; t = t + 1u) {
-${fillTiles(geometry)}
+${vecFill ? fillTilesVec(geometry) : fillTiles(geometry)}
     workgroupBarrier();
 ${i8a8InnerProductLoop(geometry)}
     workgroupBarrier();

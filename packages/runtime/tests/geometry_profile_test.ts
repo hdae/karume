@@ -1800,6 +1800,34 @@ describe("the derivation of shared memory (a pure function) matches the total of
     // 20)
     assertEquals(i8a8WorkgroupStorageBytes(I8A8_TINY), 32);
   });
+
+  it("i8a8 with the vec4 skeleton (perf-ledger K-85 — both fill forms of linear, w4a8, ①QK / ③PV, conv3d): the shared tiles are declared as without it", () => {
+    const skeletons: readonly I8a8Geometry[] = [
+      { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 32, skeleton: "vec4" },
+      { regM: 12, regN: 4, wgX: 16, wgY: 8, tileK: 64, skeleton: "vec4" },
+      { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 64, skeleton: "vec4" },
+      { regM: 12, regN: 4, wgX: 16, wgY: 8, tileK: 32, skeleton: "vec4" },
+      { ...I8A8_STORAGE_32K, skeleton: "vec4" },
+    ];
+    for (const geometry of skeletons) {
+      const { skeleton: _skeleton, ...word } = geometry;
+      assertEquals(i8a8WorkgroupStorageBytes(geometry), i8a8WorkgroupStorageBytes(word));
+      for (const [name, wgsl] of [
+        ["linear fill16", linearI8a8Wgsl(true, true, geometry, "i8", undefined, true)],
+        ["linear word", linearI8a8Wgsl(false, false, geometry)],
+        ["linear w4a8", linearI8a8Wgsl(true, true, geometry, "i4", 128)],
+        ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", geometry)],
+        ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", geometry)],
+        ["conv3d", conv3dI8a8Wgsl(true, true, geometry)],
+      ] as const) {
+        assertEquals(
+          i8a8WorkgroupStorageBytes(geometry),
+          declaredWorkgroupBytes(wgsl),
+          `${name} ${label(geometry)}`,
+        );
+      }
+    }
+  });
 });
 
 describe("the limit check of injected tables (the device's workgroup limits — against the adapter's limits, before the device is created)", () => {

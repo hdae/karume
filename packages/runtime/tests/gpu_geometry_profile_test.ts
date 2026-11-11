@@ -706,3 +706,38 @@ describe.skipIf(!GPU_AVAILABLE)(
     });
   },
 );
+
+describe.skipIf(!GPU_AVAILABLE)(
+  "a vec4-skeleton geometry injected in i8a8.linear (perf-ledger K-85, real GPU)",
+  () => {
+    it("the Session runs the a8 linear with the skeleton's :fill16 key and returns the words of the default profile", async () => {
+      const { match: _match, ...rest } = DEFAULT_GEOMETRY_PROFILE;
+      const skeleton: GeometryProfile = {
+        ...rest,
+        id: "k85-skeleton",
+        i8a8: {
+          ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+          linear: { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 32, skeleton: "vec4" },
+        },
+      };
+      const plain = await acquireGpu();
+      const injected = await acquireGpu({ geometryProfile: skeleton });
+      try {
+        // k = 64 (whole vec4s) and n = 96 (the v4 store): the vec4 fill of the skeleton runs
+        const testCase: ProfileCase = {
+          ...linearI8a8Case(),
+          expected: () => [
+            {
+              prefix: "linear:v4:i8a8:",
+              parts: ["tile128x64r16x4w16x8k32sv4:dp4aEmu:fill16"],
+            },
+          ],
+        };
+        await assertRunsWithProfile(contextAs(plain, "", "", ""), injected, skeleton, testCase);
+      } finally {
+        injected.destroy();
+        plain.destroy();
+      }
+    });
+  },
+);

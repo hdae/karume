@@ -203,3 +203,68 @@ test("the online int8 attention generator declares no shadowed name (both depths
     }
   }
 });
+
+/**
+ * The vec4-skeleton grid (perf-ledger K-85): regM ∈ {4,8,12,16}, regN ∈ {4,8}, wgX ∈ {8,16}, wgY ∈
+ * {4,8,16}, tileK ∈ {16,32,64}, every one with `skeleton: "vec4"`, filtered through the check.
+ */
+const skeletonGeometries = (): I8a8Geometry[] => {
+  const found: I8a8Geometry[] = [];
+  for (const regM of [4, 8, 12, 16]) {
+    for (const regN of [4, 8]) {
+      for (const wgX of [8, 16]) {
+        for (const wgY of [4, 8, 16]) {
+          for (const tileK of [16, 32, 64]) {
+            const geometry: I8a8Geometry = { regM, regN, wgX, wgY, tileK, skeleton: "vec4" };
+            try {
+              assertI8a8Geometry(geometry, "candidate");
+              found.push(geometry);
+            } catch {
+              // A geometry the check rejects is not a candidate
+            }
+          }
+        }
+      }
+    }
+  }
+  return found;
+};
+
+test("the 3 i8a8 kernels never redeclare an outer-scope name for any vec4-skeleton geometry × fill form × variant", () => {
+  const geometries = skeletonGeometries();
+  assert(geometries.length >= 100, `only ${geometries.length} skeleton candidates`);
+  // The grid must contain a vec4 fill whose last A-side slot reaches past the tile (the guarded form)
+  assert(
+    geometries.some((g) => (g.regM * g.wgY) % ((g.wgX * g.wgY) / (g.tileK / 16)) !== 0),
+    "no skeleton geometry with a partial vec4 fill slot",
+  );
+  const failures: string[] = [];
+  for (const geometry of geometries) {
+    const tag = i8a8GeometryKeyPart(geometry, false);
+    for (const dp4a of [true, false]) {
+      for (const v4 of [true, false]) {
+        const variants: [string, () => string][] = [
+          [
+            `linear fill16 v4=${v4} dp4a=${dp4a}`,
+            () => linearI8a8Wgsl(v4, dp4a, geometry, "i8", undefined, true),
+          ],
+          [`linear word v4=${v4} dp4a=${dp4a}`, () => linearI8a8Wgsl(v4, dp4a, geometry)],
+          [`qk v4=${v4} dp4a=${dp4a}`, () => attentionQkI8a8Wgsl(v4, dp4a, "f32", geometry)],
+          [`pv v4=${v4} dp4a=${dp4a}`, () => attentionPvI8a8Wgsl(v4, dp4a, "f32", geometry)],
+          [`conv3d v4=${v4} dp4a=${dp4a}`, () => conv3dI8a8Wgsl(v4, dp4a, geometry)],
+        ];
+        if (64 % geometry.tileK === 0) {
+          variants.push([
+            `w4a8 g64 v4=${v4} dp4a=${dp4a}`,
+            () => linearI8a8Wgsl(v4, dp4a, geometry, "i4", 64),
+          ]);
+        }
+        for (const [label, generate] of variants) {
+          const shadowed = shadowedDeclarations(generate());
+          if (shadowed.length > 0) failures.push(`${tag} ${label}: ${shadowed.join(", ")}`);
+        }
+      }
+    }
+  }
+  assertEquals(failures, []);
+});
