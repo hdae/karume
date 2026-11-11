@@ -162,7 +162,7 @@ describe("the expected case counts each check exports", () => {
       "fusion-adaln": 11,
       "fusion-rope": 23,
       "fusion-upsample2x": 1,
-      "fusion-rms-norm-rope": 3,
+      "fusion-rms-norm-rope": 8,
       "fusion-linear-prologue": 20,
       "fusion-attention-permute": 5,
       "fusion-attention-permute-sg32": 4,

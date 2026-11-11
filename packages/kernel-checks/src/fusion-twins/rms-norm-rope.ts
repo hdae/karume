@@ -52,18 +52,28 @@ export const RMS_NORM_ROPE_OUTPUTS = ["q_y", "k_y", "v_out"] as const;
 
 /**
  * (heads, headDim, sequence): Wan2.2 (24 × 128), Wan2.1 (12 × 128), and a row of 384 (its second
- * chunk half full).
+ * chunk half full). The first two rows (3072, 1536) put the prefetch form (perf-ledger K-99) of
+ * rms_norm on the plain side, the third the runtime-trip text. Then: rows of 1664 and 3200 (long and
+ * not a multiple of 256, so the plain side runs the runtime-trip text; 3200 about as long as
+ * Wan2.2's), 384 again with more than one finite row (at S = 1 q's only row holds the special
+ * values; runtime-trip text), and rows of 256 and 512 (the prefetch form at one and two trips).
+ * The fused kernel's WGSL is the same at every row width.
  */
 export const RMS_NORM_ROPE_SHAPES: readonly (readonly [number, number, number])[] = [
   [24, 128, 7],
   [12, 128, 5],
   [3, 128, 1],
+  [13, 128, 5],
+  [25, 128, 3],
+  [3, 128, 5],
+  [2, 128, 5],
+  [4, 128, 5],
 ];
 
 const PART = "fusion-rms-norm-rope";
 
 /** The cases of {@link checkRmsNormRopeTwins}: one per shape. */
-export const RMS_NORM_ROPE_TWIN_CASES = { [PART]: 3 } as const satisfies ExpectedCases;
+export const RMS_NORM_ROPE_TWIN_CASES = { [PART]: 8 } as const satisfies ExpectedCases;
 
 /**
  * Every shape: the fused Session against the interposed one (checkFusionTwin, NaN by payload) on
