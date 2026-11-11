@@ -119,6 +119,12 @@ export type GenerationContextHost = {
    */
   flush(): Promise<void>;
   /**
+   * The release fence of a disposal: one empty submit and its completion after the destroys, so the
+   * backend has freed the slots before the caller allocates again (implemented by
+   * `SubmitScheduler.releaseDestroyed`, which says why a destroy alone does not free them).
+   */
+  releaseDestroyed(): Promise<void>;
+  /**
    * Queues onto the same chain as the Session's run / enqueue / dispose (implemented by
    * `Session.#serialize`).
    */
@@ -1478,6 +1484,11 @@ export class GenerationContext {
         this.#pending = undefined;
         this.#host.forget(this);
       }
+      // MUST: a context that destroyed its own slots ends with the release fence (a new context of
+      // the same Session would otherwise be allocated on top of them — the host's
+      // `releaseDestroyed`). A borrower destroyed only its length uniform, and the lender's
+      // disposal fences. Reached only when the flush above succeeded.
+      if (this.#borrow === undefined) await this.#host.releaseDestroyed();
     });
     return this.#disposal;
   }

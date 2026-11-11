@@ -362,6 +362,7 @@ const stateHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
   graph,
   fullStateStorage: "f32",
   flush: () => Promise.resolve(),
+  releaseDestroyed: () => Promise.resolve(),
   serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
   forget: () => {},
   adopt: (allocate) => allocate(),

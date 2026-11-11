@@ -1457,6 +1457,7 @@ export class Session {
       graph: this.#state.graph,
       fullStateStorage: this.#state.fullStateStorage,
       flush: () => this.#state.scheduler.flush(),
+      releaseDestroyed: () => this.#state.scheduler.releaseDestroyed(),
       serialize: <T>(body: () => Promise<T>): Promise<T> => this.#serialize(body),
       forget: (context: GenerationContext): void => {
         this.#contexts.delete(context);
@@ -1645,6 +1646,12 @@ export class Session {
         // disposal succeeded — a missed return leaves the lending Session undisposable forever).
         for (const weight of this.#state.sharedWeights) weight[RUNTIME_INTERNAL].release();
       }
+      // MUST: the disposal ends with the release fence, after every destroy above — on Dawn's
+      // Vulkan backend the destroyed buffers stay allocated until a submit made after the destroy
+      // has completed (`SubmitScheduler.releaseDestroyed`), and a caller that builds the next model
+      // on this device right after `await dispose()` would allocate it on top of this one. Reached
+      // only when the flush above succeeded: after a loss the memory is gone with the device.
+      await this.#state.scheduler.releaseDestroyed();
     });
     return this.#disposal;
   }

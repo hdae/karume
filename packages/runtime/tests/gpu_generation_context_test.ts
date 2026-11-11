@@ -60,6 +60,7 @@ import {
   openModelBytes,
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { traceQueue } from "./helpers/queue-trace.ts";
 
 /** WebGPU core's default storage binding limit (the capacity-gate check reproduces it). */
 const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
@@ -267,10 +268,34 @@ const injectedHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost =>
   graph,
   fullStateStorage: "f32",
   flush: () => Promise.resolve(),
+  releaseDestroyed: () => Promise.resolve(),
   serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
   forget: () => {},
   adopt: (allocate) => allocate(),
 });
+
+test.skipIf(!GPU_AVAILABLE)(
+  "a context's dispose ends with one submit made after its last slot destroy, and waits for it (the release fence)",
+  async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      const context = await session.createGenerationContext({ chunkLength: 4 });
+      const trace = traceQueue(gpu);
+      try {
+        await context.dispose();
+      } finally {
+        trace.restore();
+      }
+      const lastDestroy = trace.log.lastIndexOf("destroy");
+      assert(lastDestroy >= 0, `the disposal destroyed a slot (${trace.log.join(" ")})`);
+      assertEquals(trace.log.slice(lastDestroy + 1), ["submit", "done"], trace.log.join(" "));
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+);
 
 test.skipIf(!GPU_AVAILABLE)(
   "createGenerationContext allocates physically per slot and returns it on dispose (with diagnostics, real GPU)",

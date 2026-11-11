@@ -226,3 +226,27 @@ top of 4.7 GiB of weights.
   `gpu_run_fence_test.ts` / `gpu_submit_backpressure_test.ts` count the one wait of the building run.
   On the RTX 3080 Ti: the default preset's 2-step 1280×704×121 completes (peak 9,300 MiB), the 121-frame
   A/B passes (relRMS s16 4.915e-2, online 4.675e-2, band 9.9e-2) and the 121-frame pipeline case passes.
+
+## Addendum (2026-11-11) — a disposal ends with the release wait
+
+- The same fact as the 2026-10-24 addendum, met from the other side: a Session (or a pipeline of Sessions)
+  disposed on a device its caller keeps holds its memory until a later submit completes. A caller that
+  awaits `dispose()` and builds the next model at once allocates it on top of the first. Probe (a language
+  model of about 8 GiB with its generation context, disposed, on Node + Dawn / Vulkan): 8,331 MiB still held
+  after the dispose; 938 MiB after it once the disposal ends with the wait. The session A/B of two pipelines
+  on one device (ADR 0117 addendum of 2026-11-11) ran out of memory building its second arm exactly here.
+- Decision: `Session.dispose` and the disposal of a generation context that owns its slots end with one
+  empty submit and its completion (`SubmitScheduler.releaseDestroyed`, raced with device loss), after every
+  destroy of that disposal. When `dispose()` resolves, the device has returned the memory. Not reached when
+  the disposal's flush failed (after a loss the memory is gone with the device); a borrowing context
+  destroys only its length uniform and does not wait.
+- Not taken: a wait at the start of Session construction instead (it would cover buffers destroyed by
+  anyone, but a caller that measures memory or allocates by itself after a dispose would still see the old
+  model held; the two are not exclusive, and the building side already waits where it allocates large
+  regions before its first submit — the 2026-10-24 addendum and the upload fence of ADR 0108 decision 9).
+  The models-side `settleReleasedMemory` between stages stays as it is; after a Session disposal it now
+  waits for memory that is already back.
+- Checks: `gpu_dispose_release_test.ts` and a case of `gpu_generation_context_test.ts` (on a real device,
+  the calls after the disposal's last buffer destroy are exactly one submit and its completion — red with
+  either wait removed). The amount of memory is not observable through WebGPU, so it is not asserted; the
+  probe above was run by hand.

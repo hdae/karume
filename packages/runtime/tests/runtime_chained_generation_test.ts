@@ -112,6 +112,7 @@ const rig = async (options: { window?: number; chunkLength: number }): Promise<R
     graph,
     fullStateStorage: "f32",
     flush: () => Promise.resolve(),
+    releaseDestroyed: () => Promise.resolve(),
     serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
     forget: () => undefined,
     adopt: (allocate) => allocate(),

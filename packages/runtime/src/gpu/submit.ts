@@ -777,9 +777,10 @@ export class SubmitScheduler {
    * silently leaving wrong values behind. On a failure path, {@link SubmitScheduler.discard} avoids
    * draining the remains.
    *
-   * MUST: within this scheduler, `onSubmittedWorkDone` is called as a fence **only here** (the
-   * attribution of measurements in the module doc — the in-flight bound's completion markers do not
-   * close the window. The fence that settles a batch is set by `BatchScope`, and that window is
+   * MUST: within this scheduler, `onSubmittedWorkDone` is called as a fence of a run **only here**
+   * (the attribution of measurements in the module doc — the in-flight bound's completion markers
+   * do not close the window; {@link SubmitScheduler.releaseDestroyed} is the fence of a disposal
+   * and touches no measurement. The fence that settles a batch is set by `BatchScope`, and that window is
    * closed by {@link SubmitScheduler.closeMeasurementWindowAfterFence}).
    * The observation point of the adaptive control piggybacks on the same wait — the window is
    * closed right after the wait, and timestamp collection (`mapAsync`) is placed outside the window
@@ -798,6 +799,34 @@ export class SubmitScheduler {
     );
     this.#closeMeasurementWindow();
     await this.#collectTimings();
+  }
+
+  /**
+   * The last step of a disposal, after its buffers were destroyed: one empty submit and its
+   * completion, so that the backend has freed their memory before the caller allocates again.
+   *
+   * `GPUBuffer.destroy()` ends only ownership: Dawn returns a destroyed buffer's memory when a
+   * submit made **after** the destroy has completed — neither a completion wait alone nor elapsed
+   * time does (ADR 0095, addenda of 2026-10-24 and 2026-11-11). After the last submit of a disposal
+   * nothing frees its buffers until some later work is submitted, so a caller that disposes one
+   * model and builds the next on the same device would allocate the second while the first is
+   * still held, and run out of memory with both in place. The same shape as the release wait
+   * before a slot backing is built (executor.ts) and the fence after a weight upload
+   * (session-build.ts); those stay — they cover buffers no disposal destroyed (a run's arena, the
+   * upload staging). Backends other than Dawn / Vulkan were not measured; the fence costs them one
+   * empty submit.
+   *
+   * MUST: only a disposal path calls it, after its destroys (it is a fence: the module doc's rule
+   * against a fence per submit stands for runs). It goes to the queue directly — the scheduler's
+   * in-flight bound and measurement window are a run's. MUST: the wait is raced against a loss, as
+   * in {@link SubmitScheduler.flush} (after a loss the memory is gone with the device).
+   */
+  async releaseDestroyed(): Promise<void> {
+    this.#device.queue.submit([]);
+    await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
+      this.#device.queue.onSubmittedWorkDone(),
+      "the release of destroyed buffers",
+    );
   }
 
   /**
