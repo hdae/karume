@@ -23,7 +23,7 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/session-types.ts";
-import { wordIdentity } from "../../runtime/src/tune/word-identity.ts";
+import { wordIdentity } from "@karume/runtime/tune";
 import type { TensorInput } from "../../runtime/tests/helpers/container-write.ts";
 import {
   type DeclarationJson,
