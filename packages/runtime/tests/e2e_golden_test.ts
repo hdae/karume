@@ -98,21 +98,10 @@ const GOLDEN_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * MUST: add a row here only **per op, within the WGSL spec's accuracy guarantee, and when there is
  * no real harm**, and write the basis (the relevant spec section and the measured value) for each
  * row. Do not loosen everything at once.
- *
- * - `activations/sin` on `deno-intel-graphics-bmg-g21`: the WGSL spec's `sin(x)` allows **an
- *   absolute error of up to 2⁻¹¹** for |x| ≤ π (§ Accuracy of Concrete Floating Point
- *   Expressions). The golden inputs are [−1.28, 1.89], inside this interval. Intel Arc B570 (Mesa
- *   ANV) gives 2.68e-5 at x = 1.5908 (measured 2026-09-20 — within the spec, four orders of
- *   magnitude below the O(1) of an implementation bug). NVIDIA (RTX 3080 Ti) rounds almost
- *   correctly, so it passes at 1e-6 and has no row.
  */
 const OUTPUT_TOLERANCE: Readonly<
   Record<string, Readonly<Record<string, { readonly spec: Tolerance }>>>
-> = {
-  "activations/sin": {
-    "deno-intel-graphics-bmg-g21": { spec: { atol: 2 ** -11, rtol: 0 } },
-  },
-};
+> = {};
 
 /**
  * The spec band for the machine of this run (`undefined` when there is none = no second stage).

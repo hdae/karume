@@ -15,9 +15,8 @@
 // the H/W padding are baked as resolution-dependent constants, so another resolution is another
 // graph. The resolutions are **1024²** and **2048²** (General-HR of the upstream handler); both are
 // in {@link SERIES}, and the tolerance is measured per series (2048² is all green on the RTX 3080
-// Ti). However, on the Intel Arc B570 machine the tests that use the GPU are held for 2048²
-// ({@link HELD_SERIES} — the last dispatch of the decoder exceeds the driver's job limit and takes
-// the whole process down).
+// Ti). A machine that cannot run a series without taking the process down holds its GPU tests
+// ({@link HELD_SERIES}).
 //
 // **The storage dtype is an axis of the series too** (ADR 0113): one series per preset of the
 // distribution, and a `--dtype f16` series is a separate `<model>-<resolution>-f16` series.
@@ -327,7 +326,7 @@ const LUCIDA_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1.5e-3, rtol: 0 };
  * boundaries with the f16 value layout (a guess — the quantisation error itself is in the golden
  * and does not show up here).
  *
- * TODO: 2048² **cannot be measured on the B570** (`HELD_SERIES` — deform_conv2d's job limit). The
+ * TODO: 2048² **could not be measured on the B570** (deform_conv2d's job limit). The
  * same value as the f32 series' {@link LUCIDA_2048_SYNTHETIC_TOLERANCE} is a placeholder, to be
  * replaced by one derived from a plain comparison with `atol=rtol=0` on a machine that can run it.
  */
@@ -456,15 +455,6 @@ const SERIES: readonly Series[] = [
 ];
 
 /**
- * Why the 2048² series are held on the Intel Arc B570 (shared by the rows of {@link HELD_SERIES}).
- */
-const B570_JOB_TIMEOUT =
-  "the one deform_conv2d dispatch at the end of the decoder (output [1,256,1024,1024]; expected ≈ 6.6 s from 1.66 s at 1024²)" +
-  " exceeds the 5 s compute job limit of the Linux xe driver and loses the device, and Deno panics the whole process instead of" +
-  ' raising an exception (stopping the verification that follows too — the "BiRefNet family" section of docs/limitations.md).' +
-  " Remove this row once deform_conv2d is split or sped up";
-
-/**
  * The series whose **GPU tests are held** per environment key. The outer key is a series name of
  * {@link SERIES}, the inner one an **environment key** (`<runtime>-<adapter name slug>` — ADR 0106
  * decision 2, the same approach as the reference rows).
@@ -485,19 +475,9 @@ const B570_JOB_TIMEOUT =
  * the following verification down with it), and write the grounds and "remove this row once it is
  * resolved" in the reason. This is not the place to hold a series whose numbers do not match (that
  * one is fixed while red).
- *
- * - The 3 series at 2048² (`birefnet-hr-2048-f16` / `lucida-2048` / `lucida-2048-f16`) on
- *   `deno-intel-graphics-bmg-g21` (Intel Arc B570, Linux xe driver): the "BiRefNet family" section
- *   of docs/limitations.md (measured 2026-09-20, ruled 2026-09-26). The f16 series are held too
- *   because the failing dispatch is deform_conv2d, whose weights stay in f32 storage even in the
- *   f16 series (not eligible), so the same dispatch runs whatever the storage dtype.
  */
 const HELD_SERIES: Readonly<Record<string, Readonly<Record<string, { readonly reason: string }>>>> =
-  {
-    "lucida-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
-    "birefnet-hr-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
-    "lucida-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
-  };
+  {};
 
 /** The reason to hold on the machine of this run (`undefined` = not held). */
 const heldReason = (series: Series): string | undefined => {
