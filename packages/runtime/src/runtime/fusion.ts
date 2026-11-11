@@ -675,9 +675,10 @@ export const assertDisabledRulesNamed = (
  * built-in rule at each index (ADR 0148). Session construction calls it once, so the list is fixed
  * for the Session's lifetime (the prepared-plan key is the bindings alone).
  *
- * MUST: every entry is a rule {@link defineExternalRule} built (its brand — a hand-written object,
- * a copy of a rule and a built-in rule are refused), and every name of the list has a counter of its
- * own: the external names are distinct, and no name meets a built-in rule's or an annotation
+ * MUST: every entry is a rule {@link defineExternalRule} of this copy of the runtime built (its brand).
+ * A built-in rule is refused as such; a hand-written object, a copy of a rule and a rule defined by
+ * another copy of the runtime all lack the brand, and the refusal names both causes (the brand cannot
+ * tell them apart). Every name of the list has a counter of its own: the external names are distinct, and no name meets a built-in rule's or an annotation
  * counter's ({@link zeroFusionCounts}, the check the pass applies). Anything else fails loudly
  * (`ExecutionError`), before the Session uploads a byte.
  */
@@ -694,7 +695,13 @@ export const sessionFusionRules = (
   for (const [at, rule] of fusionRules.entries()) {
     if (!isExternalRule(rule)) {
       throw new ExecutionError(
-        `options.fusionRules[${at}] ${ruleOrigin(rule) === "built-in" ? "is a built-in rule (the built-in rules are always on)" : "is not a rule built by defineRule of @karume/runtime/kernel (a hand-written object or a copy of a rule is refused)"}`,
+        `options.fusionRules[${at}] ${
+          ruleOrigin(rule) === "built-in"
+            ? "is a built-in rule (the built-in rules are always on)"
+            : "is not a rule built by defineRule of @karume/runtime/kernel: either an object defineRule did not make" +
+              " (a hand-written object or a copy of a rule), or a rule defined by another copy of @karume/runtime in" +
+              " the dependency tree (a rule is bound to the runtime copy that defined it — install one copy)"
+        }`,
       );
     }
     if (external.some((given) => given.name === rule.name)) {

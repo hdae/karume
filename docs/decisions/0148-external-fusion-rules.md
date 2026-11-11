@@ -93,8 +93,13 @@ pair) stays as it is and covers the built-in list only. Which rule hit is in `la
   non-enumerable property keyed by a module-private symbol, recording whether it was defined inside the runtime or outside
   it. A Session refuses an entry of `fusionRules` without the external brand: a hand-written object, a copy of a rule (the
   brand does not travel with a spread) or a built-in rule. The brand is a value on the rule, not an entry in a module-level
-  table, so the runtime keeps no global state. It guards against accidents, not against a caller who reads the symbol off a
-  rule on purpose.
+  table, so the runtime keeps no global state. Because the symbol is private to the module, **a rule is bound to the copy of
+  `@karume/runtime` that defined it**: a dependency tree with two copies (an application's pin beside the range
+  `@karume/models` asks for, or a bundler that keeps symlinked copies apart) gets the rules of one refused by Sessions of the
+  other. The refusal names both causes — an object `defineRule` did not make, or a rule from another copy of the runtime —
+  and the remedy is one copy. The brand guards against accidents, not against a caller who reads the symbol off a rule on
+  purpose and forges it: such a rule skips every check of an external rule, a documented limitation (no module-level
+  registry replaces the brand, because the package keeps no global mutable state).
 - **The external entry** (`defineRule` of the kernel entry; `defineExternalRule` inside) takes a name `<namespace>/<rule>`
   — two lowercase identifiers `[a-z][a-z0-9_]*` and one slash; built-in names have none, so the two never meet. The
   runtime's own entry keeps accepting the built-in names and is not on the kernel entry.

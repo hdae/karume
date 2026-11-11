@@ -758,8 +758,10 @@ export type ExternalRuleDefinition<
  * branded external rules (`sessionFusionRules` in {@link "./fusion.ts"}), so a hand-written object —
  * or a copy of a rule with its `apply` replaced — cannot reach the scan around the checks this file
  * applies. The brand is a value on the rule, not an entry in a module-level table (no global mutable
- * state). It guards against accidents, not against a caller who reads the symbol off a rule on
- * purpose.
+ * state). The symbol is private to this module, so a rule is bound to the copy of the runtime that
+ * defined it: a Session of another copy in the same dependency tree refuses it, and the refusal says
+ * so. It guards against accidents, not against a caller who reads the symbol off a rule on purpose
+ * and forges it.
  */
 const RULE_BRAND: unique symbol = Symbol("karume.fusionRule");
 

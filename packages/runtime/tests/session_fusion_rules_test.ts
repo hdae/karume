@@ -126,6 +126,15 @@ describe("Session construction with fusionRules", () => {
     }
   });
 
+  it("names both causes of a missing brand: an object defineRule did not make, or a rule of another copy of the runtime", async () => {
+    await assertRejects(
+      () => construct({ fusionRules: [{ ...RULE }] }),
+      ExecutionError,
+      "either an object defineRule did not make (a hand-written object or a copy of a rule), or a rule defined by" +
+        " another copy of @karume/runtime in the dependency tree",
+    );
+  });
+
   it("refuses a value that is not an array, and a rule name given twice", async () => {
     await assertRejects(
       () => construct({ fusionRules: outsideTheType(RULE) }),

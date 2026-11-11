@@ -759,8 +759,10 @@ export type SessionOptions = {
    * (0 when it did not fire).
    *
    * MUST: every entry is a rule `defineRule` of `@karume/runtime/kernel` built — a hand-written
-   * object, a copy of a rule or a built-in rule is refused — and no name is given twice; anything else
-   * fails loudly at construction (`ExecutionError`), before a byte is uploaded. Each time a rule builds
+   * object, a copy of a rule or a built-in rule is refused, and so is a rule defined by another copy
+   * of `@karume/runtime` in the dependency tree (a rule is bound to the copy that defined it) — and
+   * no name is given twice; anything else fails loudly at construction (`ExecutionError`), before a
+   * byte is uploaded. Each time a rule builds
    * a step it is checked again: its window, its binds, its output and its dispatch keys (which start
    * with `ext:<namespace>:`) — a failure throws `ExecutionError` in the run that plans it.
    *
