@@ -4,7 +4,8 @@
  * each one's `workspaceBytes` to a literal derived by hand; gpu_estimate_test.ts compares it with the
  * slot table of a real Session). The ten built-in rules (adaLN in both of its forms, rmsNormRope also
  * in the Wan form whose window defers k's nodes), two external rules (the single-dispatch
- * `test/gelu_mul` and `test/gelu_mul_staged`, which stages the gelu value in a step temporary), and
+ * `test/gelu_mul` and `test/gelu_mul_staged`, which stages the gelu value in a step temporary; the
+ * staged one also after a dead region, and the single-dispatch one also binding an intermediate), and
  * the i8a8 linear with and without a folded producer.
  *
  * The expected numbers stay in the tests (moving hand-derived constants here would make the checks
@@ -647,6 +648,34 @@ const externalStagedGeluMulAfterDeadRegion = (): FusedWindowCase => {
   };
 };
 
+/**
+ * The single-dispatch external rule's window binding an intermediate: `gate = neg(x)` runs after a
+ * dead region ({@link withDeadRegion}), so the window's step binds a value an earlier step produced
+ * (a slot), not a graph input. The region `dead` leaves has room for `gate` and the window's output
+ * together; only the step's read of `gate` (its dispatch reads `gate` and writes the output) keeps
+ * the output out of it — the graph where a fused step's read of a bind moves the total.
+ */
+const externalGeluMulOfIntermediate = (): FusedWindowCase => {
+  const base = geluMulGraph();
+  const row = [1, 4, 64];
+  const graph = withDeadRegion({
+    ...base,
+    requires: { ops: [...new Set(["neg", ...base.requires.ops])] },
+    inputs: [{ name: "x", ...f32(row) }, ...base.inputs.filter((spec) => spec.name !== "gate")],
+    values: { gate: f32(row), ...base.values },
+    nodes: [{ op: "neg", ins: ["x"], outs: ["gate"], attrs: {} }, ...base.nodes],
+  });
+  return {
+    name: "external test/gelu_mul binding an intermediate after a dead region",
+    counter: "test/gelu_mul",
+    windows: 1,
+    graph,
+    tensors: [],
+    inputs: inputsOf(graph),
+    options: { fusionRules: [EXTERNAL_GELU_MUL_RULE] },
+  };
+};
+
 /** Every rule's case, in the order of the built-in list, then the external rules. */
 export const FUSED_WINDOW_CASES: readonly (() => FusedWindowCase)[] = [
   linearStaticQuantize,
@@ -664,6 +693,7 @@ export const FUSED_WINDOW_CASES: readonly (() => FusedWindowCase)[] = [
   externalGeluMul,
   externalStagedGeluMul,
   externalStagedGeluMulAfterDeadRegion,
+  externalGeluMulOfIntermediate,
 ];
 
 /**

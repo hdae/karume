@@ -91,6 +91,13 @@ const EXPECTED: Readonly<Record<string, number>> = {
   // sit in region 0 at offset 1,024 for free; probe conflicts with dead (slice reads dead, writes
   // probe), and in region 1 it would grow it by its whole 4 B, so it opens region 2.
   "external test/gelu_mul_staged after a dead region": 8192 + 1024 + 4,
+  // dead 8,192 B and probe 4 B as above; then gate = neg(x) 1,024 B (an intermediate, released when
+  // the window's step has read it) and y 1,024 B. Placed by size: dead opens region 0; gate joins it
+  // at offset 0 (dead is released before gate exists); the step's dispatch reads gate and writes y,
+  // so y may not join gate's region and opens region 1 — were that read lost, y would sit in region
+  // 0 at offset 1,024 for free (8,192 + 4 in all); probe conflicts with dead, and in region 1 it
+  // would grow it by its whole 4 B (y is alive from its offset 0), so it opens region 2.
+  "external test/gelu_mul binding an intermediate after a dead region": 8192 + 1024 + 4,
 };
 
 /** The plan's counter of the case's rule (the same planning as a Session given the options). */
