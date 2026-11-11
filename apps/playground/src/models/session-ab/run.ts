@@ -8,6 +8,12 @@
  * of the run's counted run ({@link countedPhaseOf}, when the request reads them), and close
  * disposes the pipeline.
  *
+ * NOTE: the arm builder ({@link pipelineArm} and what it uses, between the twin markers) has a twin
+ * in packages/e2e/tests/e2e_gemma4_session_ab_test.ts (the opt-in Node A/B). No module both may
+ * import fits the gates and this change's scope (the e2e tests cannot import the playground,
+ * `@karume/candidate-rules` holds rules only), so the two copies are kept textually parallel: a
+ * change to one MUST be made to the other (tests/session-ab_arm_test.ts compares them).
+ *
  * {@link runPositions} is the runner's visiting order as a list, so the page can say where a run is
  * (`runSessionAb` reports no progress of its own); `vp test` drives the real runner with fake arms
  * against it.
@@ -62,6 +68,8 @@ export type ArmRequest = Pick<
   SessionAbRequest,
   "tokens" | "sampler" | "capacity" | "readCounts" | "expertCache"
 >;
+
+// ---- The arm builder: twin begin (the same text in e2e_gemma4_session_ab_test.ts, `export` aside) ----
 
 /**
  * What one arm did, as a caller shows it: `open` before a pipeline is built, `ran` after a run
@@ -297,3 +305,5 @@ export const releaseFence = async (device: GPUDevice): Promise<void> => {
   device.queue.submit([device.createCommandEncoder().finish()]);
   await device.queue.onSubmittedWorkDone();
 };
+
+// ---- The arm builder: twin end ----

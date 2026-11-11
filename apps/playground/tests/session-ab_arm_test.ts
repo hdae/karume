@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import type {
   ExpertCacheReport,
@@ -362,6 +364,25 @@ describe("the session A/B page's arm on a Gemma 4 pipeline", () => {
       await base.open();
       await expect(base.close()).rejects.toThrow("the dispose failed");
       expect(where.log.slice(-3)).toEqual(["base:step:close", "base:dispose", "base:fence"]);
+    });
+  });
+
+  describe("its twin in the opt-in Node A/B", () => {
+    /** The text between the twin markers, `export` aside. */
+    const twinOf = (path: string): string => {
+      const text = readFileSync(new URL(path, import.meta.url), "utf8");
+      const begin = text.indexOf("// ---- The arm builder: twin begin");
+      const endMarker = "// ---- The arm builder: twin end ----";
+      const end = text.indexOf(endMarker);
+      expect(begin, path).toBeGreaterThanOrEqual(0);
+      expect(end, path).toBeGreaterThan(begin);
+      return text.slice(begin, end + endMarker.length).replace(/^export /gm, "");
+    };
+
+    it("is the same text as the page's (a change to one is made to the other)", () => {
+      const page = twinOf("../src/models/session-ab/run.ts");
+      expect(page).toContain("const pipelineArm = <P extends ArmPipeline>");
+      expect(twinOf("../../../packages/e2e/tests/e2e_gemma4_session_ab_test.ts")).toBe(page);
     });
   });
 });
