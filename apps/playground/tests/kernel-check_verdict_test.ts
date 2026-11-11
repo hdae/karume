@@ -248,6 +248,7 @@ describe("overallVerdict", () => {
         "score-f16-store": passed,
         "state-bidirectional": passed,
         "expert-linear": passed,
+        "fusion-twins": passed,
       }),
     ).toBe("pass");
     expect(overallVerdict({})).toBe("none");
@@ -264,6 +265,7 @@ describe("overallVerdict", () => {
       "score-f16-store",
       "state-bidirectional",
       "expert-linear",
+      "fusion-twins",
     ]);
   });
 
@@ -279,6 +281,7 @@ describe("overallVerdict", () => {
         "score-f16-store": passed,
         "state-bidirectional": passed,
         "expert-linear": passed,
+        "fusion-twins": passed,
       }),
     ).toBe("incomplete");
   });
@@ -296,6 +299,62 @@ describe("overallVerdict", () => {
   });
 });
 
+describe("a part the device cannot run (notRun)", () => {
+  const notRun: CheckPart = {
+    id: "fusion-sg32",
+    title: "online sg32",
+    cases: [],
+    requirements: [],
+    notRun: "the online attention takes the wg form on this device",
+  };
+  const report = {
+    parts: [cleanPart("fusion-a", ["x"]), notRun],
+    expectedCases: { "fusion-a": 1, "fusion-sg32": 4 },
+  };
+
+  it("is no count mismatch, and the summary keeps its reason", () => {
+    expect(countMismatches(report)).toEqual([]);
+    expect(summarizePart(notRun).notRun).toBe(
+      "the online attention takes the wg form on this device",
+    );
+    expect(summarizePart(cleanPart("fusion-a", ["x"]))).not.toHaveProperty("notRun");
+  });
+
+  it("makes a check whose other parts pass incomplete, never a pass", () => {
+    expect(verdictOf({ kind: "done", seconds: 1, report })).toBe("incomplete");
+  });
+
+  it("still fails the check on a failure in a part that ran", () => {
+    expect(
+      verdictOf({
+        kind: "done",
+        seconds: 1,
+        report: {
+          parts: [failingPart, notRun],
+          expectedCases: { "state-qk-fold": 3, "fusion-sg32": 4 },
+        },
+      }),
+    ).toBe("fail");
+  });
+
+  it("keeps the page from PASS when every other check passed", () => {
+    expect(
+      overallVerdict({
+        "gemv-subgroup32": passed,
+        "rms-subgroup32": passed,
+        "state-attention-rewrites": passed,
+        "gemv-integer": passed,
+        "gemv-planes": passed,
+        "state-kv16": passed,
+        "score-f16-store": passed,
+        "state-bidirectional": passed,
+        "expert-linear": passed,
+        "fusion-twins": { kind: "done", seconds: 1, report },
+      }),
+    ).toBe("incomplete");
+  });
+});
+
 describe("withoutOutcomes", () => {
   const everyCheckPassed = {
     "gemv-subgroup32": passed,
@@ -307,6 +366,7 @@ describe("withoutOutcomes", () => {
     "score-f16-store": passed,
     "state-bidirectional": passed,
     "expert-linear": passed,
+    "fusion-twins": passed,
   };
 
   it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
@@ -328,6 +388,7 @@ describe("withoutOutcomes", () => {
       "score-f16-store": passed,
       "state-bidirectional": passed,
       "expert-linear": passed,
+      "fusion-twins": passed,
     });
   });
 });

@@ -80,6 +80,7 @@ describe("kernelCheckRecord", () => {
       ["score-f16-store", "not-run"],
       ["state-bidirectional", "not-run"],
       ["expert-linear", "not-run"],
+      ["fusion-twins", "not-run"],
     ]);
     expect(record.checks[1]).toEqual({ id: "rms-subgroup32", verdict: "not-run" });
     expect(record.checks[0]).toEqual({
@@ -113,5 +114,38 @@ describe("kernelCheckRecord", () => {
 
   it("survives JSON (the saved file is the record as is)", () => {
     expect(JSON.parse(JSON.stringify(record))).toEqual(record);
+  });
+});
+
+describe("kernelCheckRecord of a check with a part the device could not run", () => {
+  const record = kernelCheckRecord(ENVIRONMENT, [], {
+    "fusion-twins": {
+      kind: "done",
+      seconds: 3,
+      report: {
+        parts: [
+          { ...PART, id: "fusion-a", cases: [PART.cases[0]] },
+          {
+            id: "fusion-sg32",
+            title: "online sg32",
+            cases: [],
+            requirements: [],
+            notRun: "the online attention takes the wg form on this device",
+          },
+        ],
+        expectedCases: { "fusion-a": 1, "fusion-sg32": 4 },
+      },
+    },
+  });
+
+  it("records the check as incomplete with the part's reason, and the page as incomplete", () => {
+    const check = record.checks.find(({ id }) => id === "fusion-twins");
+    if (check?.verdict !== "incomplete") throw new Error("expected the incomplete check");
+    expect(check.countMismatches).toEqual([]);
+    expect(check.parts.map(({ id, cases, notRun }) => [id, cases, notRun])).toEqual([
+      ["fusion-a", 1, undefined],
+      ["fusion-sg32", 0, "the online attention takes the wg form on this device"],
+    ]);
+    expect(record.verdict).toBe("incomplete");
   });
 });

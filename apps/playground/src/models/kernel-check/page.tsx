@@ -384,7 +384,9 @@ const PartTable = ({ parts }: { parts: readonly PartSummary[] }) => (
           <TableCell className="text-right font-mono text-xs">{part.failingCases}</TableCell>
           <TableCell className="text-right font-mono text-xs">{part.mismatchingWords}</TableCell>
           <TableCell className="text-xs whitespace-normal">
-            {part.unmetRequirements.length === 0 ? (
+            {part.notRun !== undefined ? (
+              <span className="text-muted-foreground">not run here — {part.notRun}</span>
+            ) : part.unmetRequirements.length === 0 ? (
               "all met"
             ) : (
               <ul className="text-destructive">

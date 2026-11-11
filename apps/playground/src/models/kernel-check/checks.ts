@@ -5,6 +5,7 @@
 
 import {
   checkExpertLinear,
+  checkFusionTwins,
   checkGemvSubgroup,
   checkIntegerGemv,
   type CheckOptions,
@@ -24,6 +25,7 @@ import {
   STATE_BIDIRECTIONAL_CASES,
   STATE_KV16_CASES,
   EXPERT_LINEAR_CASES,
+  FUSION_TWIN_CASES,
 } from "@karume/kernel-checks";
 import type { GpuContext } from "@karume/runtime";
 
@@ -137,6 +139,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: [await checkExpertLinear(gpu, options)],
       expectedCases: EXPERT_LINEAR_CASES,
+    }),
+  },
+  {
+    id: "fusion-twins",
+    title: "Fusion rules: fused vs unfused",
+    summary:
+      "Each built-in fusion's output against the same values run node by node (the unfused plan of the same graph), u32 identity with NaN by class or by payload as each case declares, plus the fusion counters of both sides — the expected hits fused, 0 unfused (ADR 0147 decision 9). The linear prologue part needs WGSL packed_4x8_integer_dot_product and the sg32 online-attention part a device whose online attention takes the sg32 form; elsewhere they read as not run.",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: await checkFusionTwins(gpu, options),
+      expectedCases: FUSION_TWIN_CASES,
     }),
   },
 ];

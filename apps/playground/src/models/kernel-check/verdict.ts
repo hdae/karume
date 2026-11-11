@@ -6,7 +6,8 @@
  * and every criterion of every case has 0 failing words, every requirement is met and every mutant
  * mismatched (on its one case and on every case its code path runs on). A check the device cannot
  * run (a missing feature) is "not available" — never a pass — and keeps the whole page from
- * reading PASS, as does a check that was not run.
+ * reading PASS, as does a check that was not run. A check with a part the device cannot run
+ * (`CheckPart.notRun`) and nothing failing is "incomplete", which keeps the page from PASS too.
  */
 
 import type {
@@ -32,6 +33,7 @@ export const KERNEL_CHECK_IDS = [
   "score-f16-store",
   "state-bidirectional",
   "expert-linear",
+  "fusion-twins",
 ] as const;
 export type KernelCheckId = (typeof KERNEL_CHECK_IDS)[number];
 
@@ -54,7 +56,8 @@ export type CheckOutcome =
 
 export type CheckOutcomes = Readonly<Partial<Record<KernelCheckId, CheckOutcome>>>;
 
-export type Verdict = "pass" | "fail" | "not-available" | "error";
+/** `incomplete`: the check ran and nothing failed, but a part of it could not run on this device. */
+export type Verdict = "pass" | "fail" | "incomplete" | "not-available" | "error";
 
 /** The whole page: `incomplete` = nothing failed, but a check could not run here or was not run. */
 export type OverallVerdict = "pass" | "fail" | "incomplete" | "none";
@@ -75,6 +78,8 @@ export type PartSummary = {
   readonly mismatchingWords: number;
   readonly unmetRequirements: readonly Requirement[];
   readonly firstFailure?: FirstFailure;
+  /** Why the device could not run the part (it has no cases). */
+  readonly notRun?: string;
 };
 
 const caseFails = (testCase: CheckCase): boolean =>
@@ -102,6 +107,7 @@ export const summarizePart = (part: CheckPart): PartSummary => {
     failingCases: part.cases.filter(caseFails).length,
     mismatchingWords,
     unmetRequirements: part.requirements.filter(({ met }) => !met),
+    ...(part.notRun === undefined ? {} : { notRun: part.notRun }),
   };
   return firstFailure === undefined ? summary : { ...summary, firstFailure };
 };
@@ -129,13 +135,16 @@ const listCountMismatch = (
 /**
  * Where the report's parts, cases and mutants differ in number from what the check exports: a
  * part that ran fewer cases (none at all, say) compared fewer words, so its clean result proves less.
+ * A part the device could not run (`notRun`) is returned but has no cases; the verdict reads it as
+ * not run instead.
  */
 export const countMismatches = (report: CheckReport): readonly string[] => {
   const { parts, expectedCases, expectedMutants } = report;
   const returned = new Set(parts.map(({ id }) => id));
   return [
-    ...parts.flatMap(({ id, cases }) => {
+    ...parts.flatMap(({ id, cases, notRun }) => {
       if (!Object.hasOwn(expectedCases, id)) return [`${id}: not a part of this check`];
+      if (notRun !== undefined && cases.length === 0) return [];
       const expected = expectedCases[id];
       return cases.length === expected
         ? []
@@ -163,7 +172,8 @@ const reportPasses = (report: CheckReport): boolean =>
 
 export const verdictOf = (outcome: CheckOutcome): Verdict => {
   if (outcome.kind !== "done") return outcome.kind;
-  return reportPasses(outcome.report) ? "pass" : "fail";
+  if (!reportPasses(outcome.report)) return "fail";
+  return outcome.report.parts.some(({ notRun }) => notRun !== undefined) ? "incomplete" : "pass";
 };
 
 /** The groups of the fold classes kept only for K-95 (checked, but the product does not fold them). */
@@ -201,7 +211,11 @@ export const overallVerdict = (outcomes: CheckOutcomes): OverallVerdict => {
   });
   if (verdicts.every((verdict) => verdict === "not-run")) return "none";
   if (verdicts.some((verdict) => verdict === "fail" || verdict === "error")) return "fail";
-  if (verdicts.some((verdict) => verdict === "not-available" || verdict === "not-run")) {
+  if (
+    verdicts.some(
+      (verdict) => verdict === "incomplete" || verdict === "not-available" || verdict === "not-run",
+    )
+  ) {
     return "incomplete";
   }
   return "pass";
@@ -298,7 +312,8 @@ export type CheckRecord =
     }
   | {
       readonly id: KernelCheckId;
-      readonly verdict: "pass" | "fail";
+      /** {@link verdictOf}: `incomplete` when a part was not run here (its `notRun` says why). */
+      readonly verdict: "pass" | "fail" | "incomplete";
       /** {@link productVerdictOf}: present for the check with fold classes. */
       readonly productVerdict?: "pass" | "fail";
       readonly seconds: number;
@@ -333,7 +348,8 @@ const checkRecord = (id: KernelCheckId, outcome: CheckOutcome | undefined): Chec
     return { id, verdict: "error", seconds: outcome.seconds, error: outcome.message };
   }
   const { report } = outcome;
-  const verdict = verdictOf(outcome) === "pass" ? "pass" : "fail";
+  const ran = verdictOf(outcome);
+  const verdict = ran === "pass" || ran === "incomplete" ? ran : "fail";
   const productVerdict = productVerdictOf(outcome);
   return {
     id,
