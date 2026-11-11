@@ -42,8 +42,10 @@
  * - {@link allF32} and {@link sameShape} are the predicates the built-in rules use in their
  *   matchers. Every fused kernel is f32, so a rule's step is taken only when its folded chain is all
  *   f32 (checked by the runtime, as above).
- * - The WGSL parts keep the unfused rounding. {@link prologueUnaryWgsl} and {@link fusedBinaryWgsl}
- *   are the text the plain elementwise kernels compile; {@link SIGMOID_STABLE_WGSL} and
+ * - The WGSL parts keep the unfused rounding. {@link elementwiseValueWgsl} is the value text the
+ *   plain elementwise kernels compile, for every unary and binary op that maps f32 to f32
+ *   ({@link prologueUnaryWgsl} and {@link fusedBinaryWgsl} are its forms for the ops the built-in
+ *   fusions apply); {@link SIGMOID_STABLE_WGSL} and
  *   {@link TANH_STABLE_WGSL} are the overflow-safe functions those kernels call
  *   ({@link IS_NAN_BITS_WGSL} with the tanh, which calls it). {@link stagedLoopWgsl} and
  *   {@link stagedF32} are the rounding barrier: a grid-stride entry point that keeps each value the
@@ -99,8 +101,16 @@ export type { NodePlan } from "./src/runtime/plan.ts";
 /** The predicates of the built-in matchers. */
 export { allF32, sameShape } from "./src/runtime/fusion.ts";
 /** The plain elementwise kernels' own value text (a fused kernel that copies it is bit-identical only by accident). */
-export { fusedBinaryWgsl, prologueUnaryWgsl } from "./src/codegen/elementwise.ts";
-export type { FusedBinaryOp, PrologueUnaryOp } from "./src/codegen/elementwise.ts";
+export {
+  elementwiseValueWgsl,
+  fusedBinaryWgsl,
+  prologueUnaryWgsl,
+} from "./src/codegen/elementwise.ts";
+export type {
+  ElementwiseValueOp,
+  FusedBinaryOp,
+  PrologueUnaryOp,
+} from "./src/codegen/elementwise.ts";
 /** The overflow-safe sigmoid and tanh of the plain kernels, and the NaN test the tanh calls. */
 export {
   IS_NAN_BITS_WGSL,

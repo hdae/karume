@@ -36,6 +36,10 @@ measurements in `docs/research/`.
   `FusionMatchContext`, `FusionLimits`), the predicates `allF32` / `sameShape`, the WGSL parts that keep the unfused rounding
   (`prologueUnaryWgsl`, `fusedBinaryWgsl`, `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` with `IS_NAN_BITS_WGSL`, and the
   rounding barrier `stagedLoopWgsl` / `stagedF32`), `CodegenError` and the types a rule names (ADR 0148).
+- `@karume/runtime/kernel`: `elementwiseValueWgsl` (with its op type `ElementwiseValueOp`), the value text the plain
+  elementwise kernels compile for every unary and binary op that maps f32 to f32 (`neg` to `gelu_tanh`, `clamp`,
+  `clamp_min` and `leaky_relu` with their scalar attrs, `add`, `sub`, `mul`, `div`) and the helper functions it calls,
+  so a rule over any of them keeps the unfused rounding without copying text. The plain kernels' WGSL is unchanged.
 - `@karume/runtime/tune`: `runSessionAb`, a wall-clock A/B of whole runs for accepting or dropping a fusion rule on
   measured end-to-end time and u32 identity of the outputs. Two or more arms (`sessionArm` builds one from a prepared
   model, the GpuContext, Session options and feeds; a pipeline passes its own `open` / `run` / `close` value, with an

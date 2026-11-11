@@ -120,9 +120,10 @@ build })` builds one — the name is `<namespace>/<rule>` and every dispatch key
 construction and tried before the built-in rules. The runtime allocates the buffers, builds the
 bind groups and caches the pipelines; the rule supplies the match, the WGSL, the params and the
 workgroup counts. The entry also exports the predicates `allF32` / `sameShape`, the WGSL text the
-plain kernels compile (`prologueUnaryWgsl`, `fusedBinaryWgsl`, the stable sigmoid and tanh) and the
-rounding barrier `stagedLoopWgsl` / `stagedF32`, so a fused kernel can keep the unfused rounding. The
-runtime does not check a rule's numbers: a rule declares its contract class, and a class E rule
+plain kernels compile (`elementwiseValueWgsl` for every unary and binary op that maps f32 to f32,
+`prologueUnaryWgsl`, `fusedBinaryWgsl`, the stable sigmoid and tanh) and the rounding barrier
+`stagedLoopWgsl` / `stagedF32`, so a fused kernel can keep the unfused rounding. The runtime does
+not check a rule's numbers: a rule declares its contract class, and a class E rule
 (u32-identical to the unfused plan) carries its own fused-against-unfused check on each backend it
 ships on. The memory estimate plans with these rules when given them (`EstimateOptions.fusionRules`)
 and counts their steps after fusion, with the temporaries they declare. While the package is 0.x this

@@ -282,6 +282,25 @@ The later work decision 8 names is done (ADR [0093](0093-transient-liveness-pack
 - A caller that gives a Session rules and the estimate none gets the count of the plan without them; `unaccounted`
   says so.
 
+## Addendum (2026-11-11) — the value text of every f32 elementwise op (decision 2 extended)
+
+- **What changed**: the kernel entry also exports `elementwiseValueWgsl(op, operands, scalars?)` and its op type
+  `ElementwiseValueOp`: the value expression the plain elementwise kernel of `op` compiles, on the operands and scalar
+  attrs given, with the helper functions it calls. It serves every unary and binary op that maps f32 to f32 — `neg`,
+  `abs`, `exp`, `log`, `log1p`, `sqrt`, `sin`, `tanh`, `sigmoid`, `relu`, `gelu`, `gelu_tanh`, `clamp`, `clamp_min`,
+  `leaky_relu` (the last three with their scalar attrs), `add`, `sub`, `mul`, `div` — and throws `CodegenError` for
+  another op or the wrong number of operands or scalars. The list of decision 2's WGSL parts gains it;
+  `prologueUnaryWgsl` and `fusedBinaryWgsl` stay as its forms for the ops the built-in fusions apply.
+- **Why**: decision 2 exported value text only for `gelu` / `gelu_tanh` and `mul`, so a rule over any other
+  elementwise op could be bit-identical only by copying text that drifts when the runtime changes that kernel. The
+  first such rule is the candidate `candidate/ew_chain` (`packages/candidate-rules`), which folds a run of f32
+  elementwise nodes of any of these ops.
+- **What it does not change**: the plain kernels' WGSL (it is the same text they compile, and the elementwise WGSL
+  snapshots are unchanged), the ops a built-in fusion applies, and decision 6 — the runtime still does not check a
+  rule's numbers. `packages/runtime/tests/codegen_elementwise_value_test.ts` reads the expected value and helpers of
+  each op from the plain kernel's WGSL and checks that the op list is the contract table's f32 → f32 unary and binary
+  ops.
+
 ## Alternatives considered
 
 1. **An IR op from outside** (a caller-supplied op contract and kernel) — rejected for this phase: decision 1.

@@ -49,6 +49,7 @@ const VALUES = [
   "TANH_STABLE_WGSL",
   "allF32",
   "defineRule",
+  "elementwiseValueWgsl",
   "fusedBinaryWgsl",
   "prologueUnaryWgsl",
   "sameShape",

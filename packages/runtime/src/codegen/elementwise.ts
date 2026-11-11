@@ -423,6 +423,69 @@ export const fusedBinaryWgsl = (op: FusedBinaryOp, slot0: string, slot1: string)
   BINARY_WGSL[op](slot0, slot1);
 
 /**
+ * The unary and binary elementwise ops that map f32 operands to an f32 value: the ops whose value
+ * text a kernel outside this module may take through {@link elementwiseValueWgsl}.
+ */
+const VALUE_OPS = [
+  "neg",
+  "abs",
+  "exp",
+  "log",
+  "log1p",
+  "sqrt",
+  "sin",
+  "tanh",
+  "sigmoid",
+  "relu",
+  "gelu",
+  "gelu_tanh",
+  "clamp",
+  "clamp_min",
+  "leaky_relu",
+  "add",
+  "sub",
+  "mul",
+  "div",
+] as const satisfies readonly (UnaryOpName | BinaryOpName)[];
+
+/** An op of {@link elementwiseValueWgsl}. */
+export type ElementwiseValueOp = (typeof VALUE_OPS)[number];
+
+/**
+ * The value expression the plain elementwise kernel of `op` compiles, on the given f32 operands
+ * (slot 0 first) and scalar attrs (in the order of `SCALAR_PARAM_ATTRS`: `clamp` takes min then
+ * max, `clamp_min` its min, `leaky_relu` its slope; every other op takes none), with the helper
+ * functions it calls (closed over their dependencies, in {@link HELPERS} order).
+ *
+ * MUST: a kernel that applies one of these ops outside this module takes its text from here, never
+ * a copy (the rule of {@link prologueUnaryWgsl}): the value is bit-identical to the plain kernel's
+ * only while both compile the same string.
+ * MUST: every operand and scalar is a primary expression — a name, an indexed read, a call or a
+ * parenthesised expression. The text is spliced as the plain kernel splices its `v0` / `v1` / `s0`
+ * names, with no parentheses added, so an operand such as `a + b` would change the expression.
+ */
+export const elementwiseValueWgsl = (
+  op: ElementwiseValueOp,
+  operands: readonly string[],
+  scalars: readonly string[] = [],
+): { readonly value: string; readonly helpers: readonly string[] } => {
+  if (!VALUE_OPS.some((name) => name === op)) {
+    throw new CodegenError(`elementwise value: op '${op}' has no f32 value expression`);
+  }
+  const arity = isUnary(op) ? 1 : 2;
+  if (operands.length !== arity || scalars.length !== scalarParamCount(op)) {
+    throw new CodegenError(
+      `elementwise value: op '${op}' takes ${arity} operands and ${scalarParamCount(op)} scalars` +
+        ` (${operands.length} and ${scalars.length} given)`,
+    );
+  }
+  const value = isUnary(op)
+    ? UNARY_WGSL[op](operands[0], (index) => scalars[index])
+    : BINARY_WGSL[op](operands[0], operands[1]);
+  return { value, helpers: usedHelpers(value) };
+};
+
+/**
  * MUST: every generation parameter baked into the WGSL goes into the key. The workgroup size is
  * baked into `@workgroup_size` and the grid-stride stride expression, so changing the constant
  * without it in the key reuses a pipeline compiled with the old size under the same key, out of

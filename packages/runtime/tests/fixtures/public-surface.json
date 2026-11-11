@@ -461,6 +461,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ElementwiseValueOp",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ExternalRuleName",
         "kind": "typeAlias"
       },
@@ -550,6 +554,10 @@
       },
       {
         "name": "defineRule",
+        "kind": "function"
+      },
+      {
+        "name": "elementwiseValueWgsl",
         "kind": "function"
       },
       {
