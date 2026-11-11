@@ -51,15 +51,17 @@ The package gains a third entry (`packages/runtime/kernel.ts`; `exports` and `fi
 
 - `defineRule` — the external define entry (decision 5);
 - the types a rule author names: `FusionRule`, `FusionRuleDefinition` (the external definition), `FusionMatch`,
-  `FusionMatchContext`, `FusedBuild`, `FusedStep`, `FusedDispatch`, `FusedOperand`, `FusedTemp`, `FusedWorkgroups`,
-  `FusionHit`, `ContractClass`, `ExternalRuleName`, `NodePlan`, and those of the WGSL parts (`PrologueUnaryOp`,
-  `FusedBinaryOp`, `StagedLoop`, `StagedValue`). The IR-layer types `NodePlan` refers to are not exported; they are
-  reachable as its indexed types, and so is the runtime's own scan context in `FusionRule.apply`;
-- **a matcher's context is `FusionMatchContext`**: the graph's use counts and outputs (what the declared privacy reads),
-  frozen and built once per scan. It holds no Session knob, no rule list and no packed-activation decision: a knob in it
-  would make every new planning knob a change of this public type, the rule list would hand a matcher the built-in rules
-  (and their WGSL), and the packed values would let a matcher take a different window in the second planning scan than in
-  the first (decision 6). The two maps are read-only by type; the runtime does not copy them, and the type is the guard;
+  `FusionMatchContext`, `FusionLimits`, `FusedBuild`, `FusedStep`, `FusedDispatch`, `FusedOperand`, `FusedTemp`,
+  `FusedWorkgroups`, `FusionHit`, `ContractClass`, `ExternalRuleName`, `NodePlan`, and those of the WGSL parts
+  (`PrologueUnaryOp`, `FusedBinaryOp`, `StagedLoop`, `StagedValue`). The IR-layer types `NodePlan` refers to are not
+  exported; they are reachable as its indexed types, and so is the runtime's own scan context in `FusionRule.apply`;
+- **a matcher's context is `FusionMatchContext`**: the graph's use counts and outputs (what the declared privacy reads)
+  and the device limits the pass carries (`FusionLimits`, so a matcher can decline a window whose dispatch would exceed
+  one), frozen and built once per scan. It holds no Session knob, no rule list and no packed-activation decision: a knob
+  in it would make every new planning knob a change of this public type, the rule list would hand a matcher the built-in
+  rules (and their WGSL), and the packed values would let a matcher take a different window in the second planning scan
+  than in the first (decision 6). The two maps are read-only by type; the runtime does not copy them, and the type is the
+  guard — as it is for the node list a matcher reads (decision 9);
 - the predicates `allF32` and `sameShape`;
 - the WGSL parts that keep the unfused rounding: `prologueUnaryWgsl` and `fusedBinaryWgsl` (the plain elementwise kernels'
   own text), `SIGMOID_STABLE_WGSL`, `TANH_STABLE_WGSL` and `IS_NAN_BITS_WGSL` (which `tanh_stable` calls), and the
@@ -81,9 +83,10 @@ CHANGELOG.
 
 A Session plans with its given rules first, in the order given, then `FUSION_RULES` (`sessionFusionRules` in
 `packages/runtime/src/runtime/fusion.ts`). Where an external rule and a built-in rule could both take a node, the external
-rule — the caller's choice — takes it. **An external rule is tried only at a node whose op is one of its `heads`**, so its
-declaration says which built-in rules it can pre-empt. The test that the built-in rules' heads are disjoint (but for the
-one declared pair) stays as it is and covers the built-in list only. Which rule hit is in `lastRunFusions`.
+rule — the caller's choice — takes it. **An external rule is tried only at a node whose op is one of its `heads`, and its
+folded chain starts at that node**, so its declaration says which built-in rules it can pre-empt. The test that the
+built-in rules' heads are disjoint (but for the one declared pair) stays as it is and covers the built-in list only.
+Which rule hit is in `lastRunFusions`.
 
 ### 4. The model-specific built-in rules stay in the runtime
 
@@ -94,12 +97,15 @@ one declared pair) stays as it is and covers the built-in list only. Which rule 
 
 - **Every rule declares** `name`, `heads` (a non-empty array of op names), `contract` (`"E" | "C" | "R" | "Q"`, ADR 0147
   decision 2), `internals` (`"private"` or `"stayInChain"`, which the entry applies to the folded chain), `match` and
-  `build` (functions). Both define entries check these when they run, so a malformed JavaScript definition fails there
-  as an `ExecutionError` naming the rule, not as a `TypeError` at the first run. Every built-in rule declares `"E"`, the
+  `build` (functions). Both define entries check these when they run (and refuse a definition that is not an object), so
+  a malformed JavaScript definition fails there as an `ExecutionError` naming the rule, not as a `TypeError` at the first
+  run. The external entry also refuses a head that is not an op of the runtime's vocabulary (the op contract table): such
+  a rule would never be tried. Every built-in rule declares `"E"`, the
   class the classification table of ADR 0147 decision 2 gives the fusion rules.
 - **The definition is read once.** The entry copies each field when it runs and the rule reads only that frozen copy, so
   editing the caller's object afterwards (deriving a variant from a shared definition) changes nothing the rule does —
-  not its name, its counter, its privacy, its matcher or its build.
+  not its name, its counter, its privacy, its matcher or its build. `match` and `build` are called as standalone functions,
+  `this` undefined, so a method that reads `this` fails loudly at its first try instead of reading the frozen copy.
 - **Only the return value of a define entry is a rule a Session takes.** The entry freezes the rule and brands it with a
   non-enumerable property keyed by a module-private symbol, recording whether it was defined inside the runtime or outside
   it. A Session refuses an entry of `fusionRules` without the external brand: a hand-written object, a copy of a rule (the
@@ -117,23 +123,33 @@ one declared pair) stays as it is and covers the built-in list only. Which rule 
 - **Each time an external rule builds a step** it meets the invariants the built-in rules keep by construction, and an
   `ExecutionError` names the rule otherwise:
   - its window is the run of nodes that starts where it was tried and holds at least one folded node (a window elsewhere
-    would drop or repeat a node silently), and its chain follows the window's node order (the step's inputs and output are
-    derived from the chain in that order);
+    would drop or repeat a node silently), its chain starts at the window's first node (no leading passthrough, so the op
+    checked against `heads` is the chain's first op), and its chain follows the window's node order (the step's inputs and
+    output are derived from the chain in that order);
   - it binds only distinct external inputs of its folded chain (the release bookkeeping rests on those inputs alone, so a
     bind outside them could be released and its buffer reused before the step reads it);
-  - its output is the chain's last value with its shape and at least one element, it declares at least one dispatch, and
-    at least one dispatch binds the output (`operands` omitted, or holding the output), so the output buffer is written;
+  - its output is the chain's last value with its shape, it declares at least one dispatch, and at least one dispatch binds
+    the output (`operands` omitted, or holding the output);
+  - no operand is a `weightScale` (an external kernel reads f32 values only, and a resident scale belongs to a weight
+    stored in another form);
   - every dispatch key starts with `ext:<namespace>:` (the pipeline cache is one per device and shared by every Session).
     The keys are checked here, when a step is planned — in the first run that plans the binding — not at Session
     construction as the design of 2026-11-11 had it: a key exists only once a matcher has grabbed a window and the build
     has run, which needs the bindings.
-- **A window whose chain is not all f32 is not taken** for an external rule (decision 7).
+- **A window is declined** for an external rule (decision 9) when its chain is not all f32 (decision 7), its output has
+  no element (the binding sized it, and the recipe refuses a dispatch of zero groups), or its step binds a weight not
+  resident as f32 — stored as f16 / bf16 / i8 / i4 / i2, borrowed from another Session, or held in the expert cache's
+  pool (the weight's IR dtype is f32 whatever its storage, so `allF32` cannot see it).
 - **When the step's recipe is built** (the WGSL is known once its pipeline is fetched), an external dispatch's storage
   roles and workgroup counts are checked, again failing loudly and naming the rule: every binding its WGSL declares
   `read_write` is the step's output or one of its temporaries (an input, a resident weight or scale, or a params buffer
-  bound `read_write` is refused — each is a buffer the runtime shares beyond the step), and its counts, as the runtime
-  resolves them, are three positive integers within the device limit (zero groups would leave the output with a reused
-  buffer's data).
+  bound `read_write` is refused — each is a buffer the runtime shares beyond the step), at least one dispatch declares
+  the output's binding `read_write` (binding is not writing: a kernel that only reads the output leaves the pool's stale
+  data), and its counts, as the runtime resolves them, are three positive integers within the device limit (zero groups
+  would leave the output with a reused buffer's data).
+- **Any other failure** of the rule's code, or of the runtime reading what it returned — a `TypeError` on a result of the
+  wrong shape, a `DispatchLimitError` of the count resolver — is rethrown as an `ExecutionError` that names the rule and
+  keeps the original as `cause` (one wrapper at each call site, not a schema of every field).
 - **Everything else is the built-in rules' checks**: a window with a multi-output node or a node that touches state is not
   taken, the chain is a subsequence of the window, the passthroughs and deferred nodes are independent of the chain, and
   the temporaries' lifetimes close inside the step.
@@ -145,10 +161,10 @@ one declared pair) stays as it is and covers the built-in list only. Which rule 
 | A pipeline key collides with a built-in kernel's or another extension's | The name `<namespace>/<rule>` and the key prefix `ext:<namespace>:` (decision 5). The last line of defence stays `PipelineKeyConflictError` (two WGSL bodies under one key) |
 | Registration at import, global state | None. The rules are a value of the Session options, fixed at construction (the prepared-plan key stays the bindings alone); the brand is on the value |
 | Contention with the built-in rules | External first, in the order given (decision 3); the hit shows in `lastRunFusions` |
-| Packed int8 words read as f32 | No fused step other than `linearStaticQuantize` may consume a packed value (`packedStaticQuantizeValues`, condition 5 — ADR 0105). The pairing is decided on the first planning scan; an external matcher sees no packed value, and on the second scan an external step that folds a node producing or reading a packed value fails loudly, naming the rule — so an external step never receives one, even from a matcher whose answer differs between the scans |
+| Packed int8 words read as f32 | No fused step other than `linearStaticQuantize` may consume a packed value (`packedStaticQuantizeValues`, condition 5 — ADR 0105). The pairing is decided on the first planning scan, and an external matcher sees no packed value. On the second scan an external step that folds a node producing or reading a packed value fails loudly, naming the rule; after it the pairing is recomputed from the final steps, and a plan whose pairing changed between the scans (a matcher that is not a pure function can let a built-in rule take a paired value — the linear→SRQ fusion then writes f32 words a packed reader takes as codes) fails loudly, naming the external rules of the list |
 | A rule that changes the numbers | `contract` is required. Class E claims u32 identity with the unfused plan; another class follows ADR 0147 (a named numerics opt-in with its evidence). Passing a rule is itself the opt-in: the runtime does not check its numbers |
 | The shader compiler differs per device | The two layers of ADR 0147 decision 9. Before shipping, the rule's author runs a fused-against-unfused u32 check on each backend the rule ships on (the built-in rules' `/kernel-check` cases do not cover it). The Session canary, when it is built (ADR 0147 decision 9, backlog), covers external rules too |
-| Buffers, bind groups, limits | The runtime's existing path: a rule supplies a match, WGSL, params and workgroup counts, and never allocates; the executor's generic fused-step path builds and releases everything (ADR 0004). An external kernel writes only its output and its temporaries, and its counts are checked against the limit (decision 5) |
+| Buffers, bind groups, limits | The runtime's existing path: a rule supplies a match, WGSL, params and workgroup counts, and never allocates; the executor's generic fused-step path builds and releases everything (ADR 0004). An external kernel writes its output and nothing but its output and its temporaries, and its counts are checked against the limit (decision 5) |
 
 ### 7. What a rule cannot do
 
@@ -157,7 +173,8 @@ and cannot add an op: those windows are not taken, and the restriction is not ch
 runtime is f32, and **an external rule folds only chains that are all f32**: the runtime checks `allF32` on the chain an
 external matcher grabbed and does not take the window otherwise (the unfused plan is always correct). The check is not left
 to the matcher, because a matcher that forgot it would fold an i32 or bool chain into an f32 kernel silently. The built-in
-rules keep the dtype checks in their matchers (some read a bool condition — `isF32Where`). This settles the question the
+rules keep the dtype checks in their matchers (some read a bool condition — `isF32Where`). For the same reason a step that
+binds a weight not resident as f32 is not taken (decision 5). This settles the question the
 first version of this record left open (the design of 2026-11-11 listed non-f32 outputs among what `defineRule`
 refuses).
 
@@ -169,6 +186,27 @@ attention, a linear's folded producer and an absorbed permute in their post-fusi
 undercount larger than the rule's own temporaries — up to the full score matrix of an attention). Generalising the estimate
 to every fused step, external ones included, is later work (the design's phase P4); no estimate option is added for the
 rules. `SessionOptions.fusionRules` says so.
+
+### 9. Decline or throw, and matchers are pure
+
+The promise: a rule written outside the runtime cannot, by accident, make a Session silently compute wrong values or
+corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
+
+- **Decline** — the window stays unfused, its values stay correct, the rule's counter does not move — when the condition
+  depends on the graph or the binding and the runtime can evaluate it without the rule being wrong: the node at the index
+  is not one of the rule's heads; the chain is not all f32; the output has zero elements; a bind is a weight that is not
+  resident as f32.
+- **Throw an `ExecutionError` naming the rule** when what the rule returned is wrong whatever the data: a malformed match
+  or build result, a window or chain that breaks the window rules, a bind outside the chain's inputs, a wrong output, a key
+  outside its prefix, a kernel that writes what it must not or never writes its output, invalid workgroup counts, an
+  operand an external step may not use (decision 5).
+- **`match` and `build` are pure functions of their arguments (MUST)**, written as standalone functions. The pass scans a
+  plan more than once (the packed pairing) and caches plans, so a matcher whose answer depends on anything else can make
+  the scans disagree. Where that would break the packed pairing the plan fails loudly (decision 6); anywhere else it is
+  the rule's bug, not one the runtime detects. The kernel entry's `defineRule` and `SessionOptions.fusionRules` say so.
+- **The read-only types are the guard** of the node list a matcher reads (the scan's own list and its `NodePlan`s) and of
+  the Session's maps in its context: the runtime does not copy or freeze them at run time. A matcher that writes them is a
+  hostile caller in effect, outside the promise; freezing them is recorded, not done.
 
 ## Evidence (2026-11-11)
 
@@ -210,5 +248,6 @@ rules. `SessionOptions.fusionRules` says so.
 - `FusionCounts` is a breaking change of a public type (CHANGELOG).
 - The evidence for an external rule's numbers is its author's: the runtime does not run its checks and `/kernel-check` does
   not cover it.
-- What a fused step may bind and write, its window, its chain's order and dtypes, and its workgroup counts are now checked
-  for external rules, not only by construction.
+- What a fused step may bind and write, its window, its chain's start, order and dtypes, and its workgroup counts are now
+  checked for external rules, not only by construction; a condition of the graph or the binding declines the window, and a
+  wrong result of the rule fails loudly, naming it (decision 9).

@@ -97,9 +97,9 @@
  * disjointness of the leading ops mechanically. The list a plan uses is **passed in**
  * (`FusionContext.rules`): a Session passes {@link sessionFusionRules} — the external rules it was
  * given (`SessionOptions.fusionRules`, ADR 0148) in their order, then this array — and the scan reads
- * no module-level list. An external rule is tried first at each index, so where it and a built-in
- * rule could both take an index, the external rule takes it; the disjointness above holds among the
- * built-in rules only.
+ * no module-level list. An external rule is tried first at each index whose op is one of its heads,
+ * so where it and a built-in rule could both take such an index, the external rule takes it; the
+ * disjointness above holds among the built-in rules only.
  *
  * ## In-window passthrough
  *

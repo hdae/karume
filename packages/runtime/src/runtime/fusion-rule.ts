@@ -748,13 +748,17 @@ type RuleDefinition<Matched extends FusionMatch, Name extends string, MatchConte
    * slot an internal value may occupy).
    */
   readonly internals: "private" | "stayInChain";
-  /** Grabs the window that starts at `nodes[index]`, or returns `undefined`. */
+  /**
+   * Grabs the window that starts at `nodes[index]`, or returns `undefined`. MUST: a pure function
+   * of its arguments, called standalone (`this` undefined): the pass scans a plan more than once and
+   * caches plans, so an answer that depends on anything else can make two scans disagree.
+   */
   readonly match: (
     nodes: readonly NodePlan[],
     index: number,
     context: MatchContext,
   ) => Matched | undefined;
-  /** Lowers a grabbed window to its dispatches. */
+  /** Lowers a grabbed window to its dispatches. MUST: pure and standalone, as {@link match}. */
   readonly build: (matched: Matched) => FusedBuild;
 };
 
@@ -1203,14 +1207,18 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
 
 /**
  * {@link defineRule} for a rule written outside the runtime — the `defineRule` of
- * `@karume/runtime/kernel`. The name is `<namespace>/<rule>` ({@link ExternalRuleName}), checked
- * here; the rule is branded external, so a Session takes it through `SessionOptions.fusionRules`;
- * it is tried only at a node whose op is one of its `heads`, its matcher reads the narrowed
- * {@link FusionMatchContext}, and a window whose chain is not all f32 is not taken; and besides every
- * check of {@link defineRule}, its window must start where it was tried and keep the chain in node
- * order, its build must bind only the chain's own inputs and write the chain's last value, and every
- * dispatch key must start with `ext:<namespace>:` (checked each time the rule builds a step); its
- * kernels may write only the output and the step's temporaries (checked when the recipe is built).
+ * `@karume/runtime/kernel`. The name is `<namespace>/<rule>` ({@link ExternalRuleName}) and the heads
+ * are ops of the vocabulary, checked here; the rule is branded external, so a Session takes it
+ * through `SessionOptions.fusionRules`; it is tried only at a node whose op is one of its `heads`,
+ * and its matcher reads the narrowed {@link FusionMatchContext}. A window is not taken (declined)
+ * when its chain is not all f32, its output has no element, or the step binds a weight not resident
+ * as f32. Besides every check of {@link defineRule}, each time the rule builds a step its window
+ * must start where it was tried, its chain must start at the window's first node and keep node
+ * order, its build must bind only the chain's own inputs, declare the chain's last value as the
+ * output, bind it in some dispatch, use no `weightScale` operand, and key every dispatch under
+ * `ext:<namespace>:`; when the recipe is built, its kernels must write the output and nothing but
+ * the output and the step's temporaries, with valid workgroup counts. Any other failure of its code
+ * is rethrown naming the rule ({@link ruleFailure}).
  */
 export const defineExternalRule = <
   Matched extends FusionMatch,

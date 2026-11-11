@@ -753,18 +753,31 @@ export type SessionOptions = {
    * a minor version) and folds a run of built-in ops of the graph into its own kernel dispatches. The
    * graph and the container do not change, so the same graph runs without the rule, unfused.
    *
-   * Fixed at construction. At each node the rules are tried in the order given, **before** the
-   * built-in rules: where a rule and a built-in rule could both take a node, the rule takes it. A
-   * rule's hits count under its `<namespace>/<rule>` name in {@link SessionDiagnostics.lastRunFusions}
-   * (0 when it did not fire).
+   * Fixed at construction. A rule is tried only at a node whose op is one of its `heads`, there in
+   * the order given and **before** the built-in rules: where a rule and a built-in rule could both
+   * take such a node, the rule takes it. A rule's hits count under its `<namespace>/<rule>` name in
+   * {@link SessionDiagnostics.lastRunFusions} (0 when it did not fire).
    *
    * MUST: every entry is a rule `defineRule` of `@karume/runtime/kernel` built — a hand-written
    * object, a copy of a rule or a built-in rule is refused, and so is a rule defined by another copy
    * of `@karume/runtime` in the dependency tree (a rule is bound to the copy that defined it) — and
    * no name is given twice; anything else fails loudly at construction (`ExecutionError`), before a
-   * byte is uploaded. Each time a rule builds
-   * a step it is checked again: its window, its binds, its output and its dispatch keys (which start
-   * with `ext:<namespace>:`) — a failure throws `ExecutionError` in the run that plans it.
+   * byte is uploaded. MUST: a rule's `match` and `build` are pure, standalone functions (the pass
+   * scans a plan more than once and caches plans).
+   *
+   * Each time a rule builds a step, in the run that plans it, the window is **declined** (left
+   * unfused, its values correct, the counter not moved) when its chain is not all f32, its output
+   * has no element, or the step binds a weight not resident as f32 (stored in another form, borrowed
+   * through {@link sharedWeights}, or held in the expert cache's pool). The step **fails loudly**
+   * (`ExecutionError` naming the rule) when what the rule returned is wrong whatever the data: a
+   * malformed match or build result; a window that does not start where the rule was tried or skips
+   * a node, or a chain that does not start at the window's first node or leaves its order; a bind
+   * that is not a distinct input of the chain; an output other than the chain's last value with its
+   * shape; no dispatch, or none that binds the output; a `weightScale` operand; a dispatch key outside
+   * `ext:<namespace>:`. When the step's recipe is built, a kernel that declares a binding
+   * `read_write` other than the output and the step's temporaries, that never declares the output's
+   * binding `read_write`, or whose workgroup counts are not three positive integers within the
+   * device limit fails loudly the same way.
    *
    * Passing a rule is the opt-in: the runtime does not check its numbers. A rule declares its
    * contract class (`contract`, ADR 0147 decision 2), and a class E rule, which claims u32 identity
