@@ -4,63 +4,52 @@
 // rms_norm, which breaks the match and leaves the plain path (rms_norm, then the pair RoPE folded
 // alone by the rope rule) on the same backend. The outputs are compared as u32 words, with the
 // counters, the dispatch counts and the census. No adapter = explicit SKIP.
+//
+// The twin cases live in @karume/kernel-checks (checkRmsNormRopeTwins), which the playground's
+// /kernel-check page runs on the browser's backend too; the shapes, the rope counters, the census
+// and the grid-stride run on a capped device stay here.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { checkFusionTwin } from "@karume/kernel-checks";
+import {
+  checkFusionTwin,
+  checkRmsNormRopeTwins,
+  RMS_NORM_ROPE_OUTPUTS,
+  RMS_NORM_ROPE_SHAPES,
+  RMS_NORM_ROPE_TWIN_CASES,
+  rmsNormRopeInputs,
+} from "@karume/kernel-checks";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { rmsNormWorkgroupKey } from "../src/kernels/rms-norm.ts";
 import { RMS_NORM_ROPE_KEY } from "../src/kernels/rms-norm-rope.ts";
 import { ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
-import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
-import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
+import { assertCheckCase, assertCheckPart } from "./helpers/kernel-check-assert.ts";
 import { countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 import { rmsNormRopeGraph } from "./helpers/rms-norm-rope-graph.ts";
-
-/**
- * The graph inputs: q / k / v rows, the two norm weights and the tables, with special values in
- * q's first row (±0, a subnormal, 2e19, ±inf, a NaN payload) and an all-zero second row of k.
- */
-const inputs = (
-  heads: number,
-  headDim: number,
-  sequence: number,
-): Readonly<Record<string, Tensor>> => {
-  const dim = heads * headDim;
-  const row = [1, sequence, dim];
-  const table = [1, sequence, 1, headDim];
-  const q = fill(row, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
-  new Uint32Array(q.data.buffer).set([
-    0x00000000, 0x80000000, 0x00000001, 0x5f0ac723, 0x7f800000, 0xff800000, 0x7fc01234,
-  ]);
-  const k = fill(row, (i) => Math.cos(i * 0.29) * 2.3 - i / 1531);
-  if (sequence > 1) k.data.fill(0, dim, 2 * dim);
-  return {
-    q_x: q,
-    k_x: k,
-    v_x: fill(row, (i) => Math.sin(i * 0.11) - 0.5),
-    q_w: fill([dim], (i) => 0.2 + Math.cos(i * 0.17)),
-    k_w: fill([dim], (i) => 1.1 - Math.sin(i * 0.13)),
-    cos: fill(table, (i) => Math.cos(i * 0.19 + 0.3)),
-    sin: fill(table, (i) => Math.sin(i * 0.23 - 0.2)),
-  };
-};
-
-const OUTPUTS = ["q_y", "k_y", "v_out"] as const;
 
 test.skipIf(!GPU_AVAILABLE)(
   "rmsNormRope folds the interleaved q / k prologues into one dispatch each, bit-identical to rms_norm → pair RoPE, at the Wan shapes and with a partial last chunk (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // Wan2.2 (24 × 128), Wan2.1 (12 × 128), and a row of 384 (its second chunk half full).
-      for (const [heads, headDim, sequence] of [
-        [24, 128, 7],
-        [12, 128, 5],
-        [3, 128, 1],
-      ] as const) {
+      const part = await checkRmsNormRopeTwins(gpu);
+      assertEquals([part.id, part.cases.length], Object.entries(RMS_NORM_ROPE_TWIN_CASES)[0]);
+      assertCheckPart(part);
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "rmsNormRope keeps the output shapes, leaves no pair RoPE of its own on the fused side and runs the plain path's kernels on the reference (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const [heads, headDim, sequence] of RMS_NORM_ROPE_SHAPES) {
         const label = `H=${heads} D=${headDim} S=${sequence}`;
         const fused = await createSessionFromContainer(
           gpu,
@@ -73,26 +62,10 @@ test.skipIf(!GPU_AVAILABLE)(
           GRAPH_NAME,
         );
         try {
-          const given = inputs(heads, headDim, sequence);
-          assertCheckCase(
-            await checkFusionTwin(gpu, {
-              label,
-              fused,
-              plain,
-              feeds: given,
-              counter: "rmsNormRope",
-              hits: 2,
-              nan: "payload",
-              outputs: OUTPUTS,
-              // q and k one dispatch each, plus v's neg; the plain path runs both rms_norms and
-              // both pair RoPEs (the reshapes are zero-dispatch aliases).
-              dispatches: { fused: 3, plain: 5 },
-            }),
-          );
-          // The shapes, from a run of each side of its own (the harness returns a case).
+          const given = rmsNormRopeInputs(heads, headDim, sequence);
           const actual = await fused.run(given);
           const expected = await plain.run(given);
-          for (const name of OUTPUTS) {
+          for (const name of RMS_NORM_ROPE_OUTPUTS) {
             assertEquals(actual[name].shape, expected[name].shape, `${label}: ${name} shape`);
           }
           const fusedRun = fused.diagnostics();
@@ -154,11 +127,11 @@ test.skipIf(!GPU_AVAILABLE)(
             label: "grid-stride",
             fused,
             plain,
-            feeds: inputs(heads, headDim, sequence),
+            feeds: rmsNormRopeInputs(heads, headDim, sequence),
             counter: "rmsNormRope",
             hits: 2,
             nan: "payload",
-            outputs: OUTPUTS,
+            outputs: RMS_NORM_ROPE_OUTPUTS,
           }),
         );
       } finally {

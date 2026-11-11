@@ -64,6 +64,13 @@ export {
   upsample2xGraph,
   upsample2xInput,
 } from "./src/fusion-twins/upsample2x.ts";
+export {
+  checkRmsNormRopeTwins,
+  RMS_NORM_ROPE_OUTPUTS,
+  RMS_NORM_ROPE_SHAPES,
+  RMS_NORM_ROPE_TWIN_CASES,
+  rmsNormRopeInputs,
+} from "./src/fusion-twins/rms-norm-rope.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
