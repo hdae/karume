@@ -14,6 +14,12 @@
  *   never live together). Every timed run is one forward at the 1024 × 1024 sequence (S = 4,159) on
  *   seeded feeds whose output words the runner compares (u32, NaN by class); the hits and the
  *   dispatches are the runner's, which every run of a `sessionArm` reports.
+ * - **Wan2.2 VAE next chunk** and **anima VAE decode**: the `vae_decoder_next` chunk graph of Wan2.2
+ *   or the `vae_decoder` tile graph of anima at the chosen preset, opened the same way, and three
+ *   `sessionArm`s over it — `base` with the options the pipeline gives its VAE, `g8` and `g4` with
+ *   the same plus `candidate/vae_rms_silu_g8` / `_g4` — each visit opening and closing its Session.
+ *   Every timed run is one forward on seeded feeds (the Wan chunk graph's caches included) and reads
+ *   every output back; the runner compares every output's words and keeps the counts.
  *
  * The page shows where the runner is, then per arm the identity, the hits and dispatches and the
  * per-round times, and the judgement with its numbers and its reason; the record is saved as JSON.
@@ -92,7 +98,7 @@ import {
   sessionAbMossRequest,
   steppedArm,
 } from "./moss";
-import { openMossDitModel } from "./moss-model";
+import { openComponentModel } from "./component-model";
 import {
   buildSessionAbMossPageRecord,
   buildSessionAbPageRecord,
@@ -100,6 +106,8 @@ import {
   type SessionAbArmProbe,
   type SessionAbMossPageRecord,
   type SessionAbPageRecord,
+  type SessionAbVaePageRecord,
+  buildSessionAbVaePageRecord,
 } from "./record";
 import {
   INITIAL_SESSION_AB_FORM,
@@ -122,6 +130,20 @@ import {
   type RunPosition,
   runPositions,
 } from "./run";
+import {
+  isVaeTarget,
+  type SessionAbVaeRequest,
+  type SessionAbVaeTarget,
+  sessionAbVaeRequest,
+  VAE_AB_MOUNTS,
+  VAE_AB_TARGETS,
+  vaeAbModel,
+  vaeArmOptions,
+  vaeBackendRefusal,
+  vaeFeeds,
+  vaeRowRule,
+  vaeSessionOptions,
+} from "./vae";
 import { armRow, judgementView, recordedCounts } from "./view";
 
 /**
@@ -136,11 +158,13 @@ const BACKEND_CHOICES: readonly Choice<string>[] = [
 ];
 
 /** The work an A/B runs. */
-type SessionAbTarget = "gemma4-decode" | "moss-dit-forward";
+type SessionAbTarget = "gemma4-decode" | "moss-dit-forward" | SessionAbVaeTarget;
 
 const TARGET_CHOICES: readonly Choice<SessionAbTarget>[] = [
   { value: "gemma4-decode", label: "Gemma 4 decode (candidate/gelu_mul)" },
   { value: "moss-dit-forward", label: "MOSS-Image DiT forward (candidate/ew_chain)" },
+  { value: "wan22-vae-next", label: "Wan2.2 VAE next chunk (candidate/vae_rms_silu_g8 / _g4)" },
+  { value: "anima-vae-decode", label: "anima VAE decode (candidate/vae_rms_silu_g8 / _g4)" },
 ];
 
 const MIB = 2 ** 20;
@@ -187,10 +211,37 @@ const probeProgressOf = (step: ProbeStep, ended: number, total: number): RunProg
   }
 };
 
-/** What one press of Run produced, on either target. */
+/**
+ * The step reporter of a Session target's arms (the MOSS-Image DiT, the VAEs): the status is
+ * rendered at once outside the timed spans, and the ticker is held from the step before a timed run
+ * to the step after it, as on the Gemma target. A Session run takes no signal, so a cancel stops the
+ * A/B at the next visit's open.
+ */
+const sessionStepper = (
+  positions: readonly RunPosition[],
+  signal: AbortSignal,
+  report: (progress: RunProgress) => void,
+  holdTicker: (hold: boolean) => void,
+): ((step: ArmStep) => void) => {
+  let ended = 0;
+  return (step) => {
+    if (step.step === "open") signal.throwIfAborted();
+    if (step.step === "ran") ended += 1;
+    holdTicker(step.step !== "close" && ended < positions.length && positions[ended].timed);
+    flushSync(() => report(progressOf(step, positions, ended, "Session")));
+  };
+};
+
+/** What one press of Run produced, on any target. */
 type SessionAbResult =
-  | { readonly kind: "running"; readonly request: SessionAbRequest | SessionAbMossRequest }
-  | { readonly kind: "done"; readonly record: SessionAbPageRecord | SessionAbMossPageRecord };
+  | {
+      readonly kind: "running";
+      readonly request: SessionAbRequest | SessionAbMossRequest | SessionAbVaeRequest;
+    }
+  | {
+      readonly kind: "done";
+      readonly record: SessionAbPageRecord | SessionAbMossPageRecord | SessionAbVaePageRecord;
+    };
 
 export const SessionAbPage = () => {
   const index = useDistributionIndex();
@@ -443,8 +494,8 @@ export const SessionAbPage = () => {
     mossManifestState.kind === "ready" && mossStatus !== undefined
       ? { directory: mossStatus.directory, manifestSha256: mossManifestState.sha256 }
       : undefined;
-  // The token count is the Gemma target's: this target parses the form without it.
-  const mossParsed = useMemo(
+  // The token count is the Gemma target's: the Session targets parse the form without it.
+  const sessionParsed = useMemo(
     () => parseSessionAbForm({ ...form, tokens: INITIAL_SESSION_AB_FORM.tokens }),
     [form],
   );
@@ -452,22 +503,25 @@ export const SessionAbPage = () => {
     readyGpu !== undefined &&
     mossModel !== undefined &&
     mossDistribution !== undefined &&
-    mossParsed.ok &&
+    sessionParsed.ok &&
     !running;
 
   const runMoss = (): void => {
-    if (!canRunMoss || readyGpu === undefined || mossModel === undefined || !mossParsed.ok) return;
-    const request = sessionAbMossRequest(mossModel, mossParsed.value, EW_CHAIN_RULE_NAME);
+    if (!canRunMoss || readyGpu === undefined || mossModel === undefined || !sessionParsed.ok) {
+      return;
+    }
+    const request = sessionAbMossRequest(mossModel, sessionParsed.value, EW_CHAIN_RULE_NAME);
     const environment = recordEnvironment(readyGpu);
     const facts = mossDistribution;
     const source = mossSource;
     setResult({ kind: "running", request });
     void task.start(async ({ signal, report, holdTicker }) => {
       report({ stage: "fetching and opening the dit component" });
-      const model = await openMossDitModel(
+      const model = await openComponentModel(
         pretrainedRef(source, MOSS_MOUNT),
         request.model,
         request.quant,
+        request.component,
         signal,
         (progress) =>
           report({
@@ -486,16 +540,7 @@ export const SessionAbPage = () => {
         request.seed,
       );
       const positions = runPositions(request.arms.length, request.rounds, request.openPerVisit);
-      let ended = 0;
-      // As on the Gemma target: the status is rendered at once outside the timed spans, and the
-      // ticker is held from the step before a timed run to the step after it. A Session run takes
-      // no signal, so a cancel stops the A/B at the next visit's open.
-      const onStep = (step: ArmStep): void => {
-        if (step.step === "open") signal.throwIfAborted();
-        if (step.step === "ran") ended += 1;
-        holdTicker(step.step !== "close" && ended < positions.length && positions[ended].timed);
-        flushSync(() => report(progressOf(step, positions, ended, "Session")));
-      };
+      const onStep = sessionStepper(positions, signal, report, holdTicker);
       const knobs: SessionOptions = { ...request.session };
       const arms = request.arms.map(({ name, fusionRules }) =>
         steppedArm(
@@ -539,14 +584,132 @@ export const SessionAbPage = () => {
     });
   };
 
+  // The VAE targets: the distribution's default model at the chosen preset, from the target's mount.
+  // Both manifests are read, so switching targets never pairs one target with the other's manifest.
+  const vae = isVaeTarget(target);
+  const vaeTarget: SessionAbVaeTarget = vae ? target : "wan22-vae-next";
+  const vaeMount = VAE_AB_MOUNTS[vaeTarget];
+  const wanVaeStatus = mountStatus(distributionIndex, VAE_AB_MOUNTS["wan22-vae-next"]);
+  const animaVaeStatus = mountStatus(distributionIndex, VAE_AB_MOUNTS["anima-vae-decode"]);
+  const wanVaeManifestState = useManifest(VAE_AB_MOUNTS["wan22-vae-next"], wanVaeStatus);
+  const animaVaeManifestState = useManifest(VAE_AB_MOUNTS["anima-vae-decode"], animaVaeStatus);
+  const wanVae = vaeTarget === "wan22-vae-next";
+  const vaeStatus = wanVae ? wanVaeStatus : animaVaeStatus;
+  const vaeManifestState = wanVae ? wanVaeManifestState : animaVaeManifestState;
+  const vaeManifest = manifestOf(vaeManifestState);
+  const vaePresets = useMemo(
+    () =>
+      vaeManifest === undefined
+        ? undefined
+        : manifestPresets(vaeManifest, vaeManifest.defaultModel),
+    [vaeManifest],
+  );
+  const [chosenVaeQuant, setChosenVaeQuant] = useState<string | undefined>(undefined);
+  const vaeQuant =
+    vaePresets === undefined
+      ? undefined
+      : chosenVaeQuant !== undefined &&
+          vaePresets.presets.some(({ name }) => name === chosenVaeQuant)
+        ? chosenVaeQuant
+        : vaePresets.defaultQuant;
+  const vaeModel =
+    vaeManifest === undefined || vaeQuant === undefined
+      ? undefined
+      : vaeAbModel(vaeManifest, vaeTarget, vaeQuant);
+  const {
+    source: vaeSource,
+    hfRef: vaeHfRef,
+    choose: chooseVaeSource,
+  } = usePipelineSource(vaeStatus);
+  const vaeDistribution =
+    vaeManifestState.kind === "ready" && vaeStatus !== undefined
+      ? { directory: vaeStatus.directory, manifestSha256: vaeManifestState.sha256 }
+      : undefined;
+  const vaeRefusal = sessionParsed.ok ? vaeBackendRefusal(sessionParsed.value.backend) : undefined;
+  const canRunVae =
+    readyGpu !== undefined &&
+    vaeModel !== undefined &&
+    vaeDistribution !== undefined &&
+    sessionParsed.ok &&
+    vaeRefusal === undefined &&
+    !running;
+
+  const runVae = (): void => {
+    if (!canRunVae || readyGpu === undefined || vaeModel === undefined || !sessionParsed.ok) {
+      return;
+    }
+    const request = sessionAbVaeRequest(vaeTarget, vaeModel, sessionParsed.value);
+    const environment = recordEnvironment(readyGpu);
+    const facts = vaeDistribution;
+    const source = vaeSource;
+    setResult({ kind: "running", request });
+    void task.start(async ({ signal, report, holdTicker }) => {
+      report({ stage: `fetching and opening the ${request.component} component` });
+      const model = await openComponentModel(
+        pretrainedRef(source, request.mount),
+        request.model,
+        request.quant,
+        request.component,
+        signal,
+        (progress) =>
+          report({
+            stage: `fetching the ${request.component} component`,
+            count: {
+              done: Math.round(progress.loaded / MIB),
+              total: Math.round(progress.total / MIB),
+              unit: "MiB",
+            },
+          }),
+      );
+      const feeds = vaeFeeds(model.prepared.graph.inputs, request.seed);
+      const positions = runPositions(request.arms.length, request.rounds, request.openPerVisit);
+      const onStep = sessionStepper(positions, signal, report, holdTicker);
+      const arms = vaeArmOptions(request).map(({ name, options }) =>
+        steppedArm(
+          sessionArm({ name, prepared: model.prepared, gpu: readyGpu, options, feeds }),
+          onStep,
+        ),
+      );
+      const record = await runSessionAb({
+        arms,
+        rounds: request.rounds,
+        openPerVisit: request.openPerVisit,
+        environment: {
+          adapter: readyGpu.adapterInfo,
+          userAgent: navigator.userAgent,
+          backend: request.backend,
+          date: new Date().toISOString(),
+        },
+      });
+      const judgements = judgeSessionAb(record, { minGain: request.minGain });
+      if (facts === undefined) throw new Error("The distribution's facts went away");
+      setResult({
+        kind: "done",
+        record: buildSessionAbVaePageRecord({
+          environment,
+          versions: PACKAGE_VERSIONS,
+          request,
+          distribution: facts,
+          source: sourceRecord(source),
+          container: { component: request.component, part0Sha256: model.part0Sha256 },
+          record,
+          judgements,
+        }),
+      });
+    });
+  };
+  const sessionTarget = moss || vae;
+
   const missing = GEMMA_MOUNTS.flatMap((mount) => {
     const state = manifestStates[mount];
     return state.kind === "missing" ? [state.directory] : [];
   });
-  const formErrors = moss
-    ? mossParsed.ok
-      ? []
-      : mossParsed.errors
+  const formErrors = sessionTarget
+    ? sessionParsed.ok
+      ? vae && vaeRefusal !== undefined
+        ? [vaeRefusal]
+        : []
+      : sessionParsed.errors
     : parsed.ok
       ? []
       : parsed.errors;
@@ -555,12 +718,12 @@ export const SessionAbPage = () => {
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
         <h1 className="text-2xl font-semibold">Session A/B</h1>
-        <MountBadges index={index} mounts={moss ? [MOSS_MOUNT] : GEMMA_MOUNTS} />
+        <MountBadges index={index} mounts={moss ? [MOSS_MOUNT] : vae ? [vaeMount] : GEMMA_MOUNTS} />
       </div>
       {index.kind === "error" ? (
         <ErrorAlert title="Distribution index" error={index.error} />
       ) : null}
-      {moss
+      {sessionTarget
         ? null
         : GEMMA_MOUNTS.map((mount) => {
             const state = manifestStates[mount];
@@ -568,7 +731,7 @@ export const SessionAbPage = () => {
               <ErrorAlert key={mount} title={`Manifest (${mount})`} error={state.error} />
             ) : null;
           })}
-      {!moss && missing.length === GEMMA_MOUNTS.length ? (
+      {!sessionTarget && missing.length === GEMMA_MOUNTS.length ? (
         <ErrorAlert
           title="No Gemma 4 distribution"
           error={new Error(`The dev server has none of ${missing.join(" / ")}.`)}
@@ -583,6 +746,15 @@ export const SessionAbPage = () => {
           error={new Error(`The dev server has no ${mossManifestState.directory}.`)}
         />
       ) : null}
+      {vae && vaeManifestState.kind === "error" ? (
+        <ErrorAlert title={`Manifest (${vaeMount})`} error={vaeManifestState.error} />
+      ) : null}
+      {vae && vaeManifestState.kind === "missing" ? (
+        <ErrorAlert
+          title="No distribution for this VAE"
+          error={new Error(`The dev server has no ${vaeManifestState.directory}.`)}
+        />
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <div className="flex flex-col gap-6">
@@ -590,7 +762,7 @@ export const SessionAbPage = () => {
             <CardHeader>
               <CardTitle>Target</CardTitle>
               <CardDescription>
-                The work every timed run does, and the candidate rule the arm <code>rule</code>{" "}
+                The work every timed run does, and the candidate rule each arm but <code>base</code>{" "}
                 adds.
               </CardDescription>
             </CardHeader>
@@ -602,6 +774,7 @@ export const SessionAbPage = () => {
                   choices={TARGET_CHOICES}
                   onChange={(value) => {
                     setTarget(value);
+                    setChosenVaeQuant(undefined);
                     setResult(undefined);
                   }}
                   disabled={running}
@@ -645,6 +818,50 @@ export const SessionAbPage = () => {
                   {mossModel === undefined || Object.keys(mossModel.session).length === 0
                     ? "none (the reference path)"
                     : JSON.stringify(mossModel.session)}
+                </p>
+              </CardContent>
+            </Card>
+          ) : vae ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>VAE</CardTitle>
+                <CardDescription>
+                  Every arm builds its Sessions from the{" "}
+                  <code>{VAE_AB_TARGETS[vaeTarget].component}</code> component of this preset,
+                  fetched and opened once, with the options its pipeline gives the VAE. The arms{" "}
+                  <code>g8</code> and <code>g4</code> add the candidate rule{" "}
+                  <code>candidate/vae_rms_silu_g8</code> / <code>_g4</code> (
+                  <code>@karume/candidate-rules</code>) through{" "}
+                  <code>SessionOptions.fusionRules</code>; <code>base</code> passes none. Not on
+                  Metal: the rules&apos; rounding barrier is measured not to hold there.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                <SourcePicker
+                  id="session-ab-vae-source"
+                  value={vaeSource.kind}
+                  cachedAvailable={vaeHfRef !== undefined}
+                  onChange={chooseVaeSource}
+                  disabled={running}
+                />
+                {vaePresets === undefined || vaeQuant === undefined ? null : (
+                  <PresetSelect
+                    id="session-ab-vae-preset"
+                    value={vaeQuant}
+                    presets={vaePresets.presets}
+                    defaultQuant={vaePresets.defaultQuant}
+                    onChange={setChosenVaeQuant}
+                    disabled={running}
+                  />
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {vaeModel === undefined
+                    ? "Options: —"
+                    : `Storage ${vaeModel.storage} · options ${
+                        Object.keys(vaeSessionOptions(vaeTarget, vaeModel.session)).length === 0
+                          ? "none"
+                          : JSON.stringify(vaeSessionOptions(vaeTarget, vaeModel.session))
+                      }`}
                 </p>
               </CardContent>
             </Card>
@@ -753,11 +970,13 @@ export const SessionAbPage = () => {
             <CardHeader>
               <CardTitle>A/B</CardTitle>
               <CardDescription>
-                {moss
-                  ? `A timed run is one DiT forward at the sequence of a 1024 × 1024 request (${MOSS_DIT_WORK.imageTokens} image tokens + ${MOSS_DIT_WORK.textTokens} text tokens) on fixed feeds drawn from seed ${MOSS_DIT_WORK.seed}; its output words (u32, NaN by class) are what the runner compares.`
-                  : `A timed run is one greedy generation (seed 0) of the chosen token count from one fixed prompt in a sequence of capacity ${SESSION_AB_CAPACITY}; its token ids are what the runner compares.`}{" "}
+                {vae
+                  ? `A timed run is one forward of the ${VAE_AB_TARGETS[vaeTarget].component} graph on fixed feeds drawn from seed ${VAE_AB_TARGETS[vaeTarget].seed}, and every output's words (u32, NaN by class) are what the runner compares — on the Wan2.2 chunk graph its 32 caches too, about 0.9 GiB over the bus per run in every arm. A 1024² anima image decodes the tile forward 9 times.`
+                  : moss
+                    ? `A timed run is one DiT forward at the sequence of a 1024 × 1024 request (${MOSS_DIT_WORK.imageTokens} image tokens + ${MOSS_DIT_WORK.textTokens} text tokens) on fixed feeds drawn from seed ${MOSS_DIT_WORK.seed}; its output words (u32, NaN by class) are what the runner compares.`
+                    : `A timed run is one greedy generation (seed 0) of the chosen token count from one fixed prompt in a sequence of capacity ${SESSION_AB_CAPACITY}; its token ids are what the runner compares.`}{" "}
                 One untimed warm-up round, then every round visits the arms forward and in reverse
-                (base, rule, rule, base).
+                {vae ? " (base, g8, g4, g4, g8, base)." : " (base, rule, rule, base)."}
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
@@ -783,9 +1002,9 @@ export const SessionAbPage = () => {
                   <Input
                     id="session-ab-tokens"
                     inputMode="numeric"
-                    value={moss ? "—" : form.tokens}
+                    value={sessionTarget ? "—" : form.tokens}
                     onChange={(event) => setForm({ ...form, tokens: event.target.value })}
-                    disabled={running || moss}
+                    disabled={running || sessionTarget}
                   />
                 </Field>
                 <Field id="session-ab-min-gain" label="Minimum gain" hint="0.01 = 1%">
@@ -801,21 +1020,24 @@ export const SessionAbPage = () => {
               <div className="flex items-center gap-2">
                 <Switch
                   id="session-ab-open-per-visit"
-                  checked={moss || form.openPerVisit}
+                  checked={sessionTarget || form.openPerVisit}
                   onCheckedChange={(checked) => setForm({ ...form, openPerVisit: checked })}
-                  disabled={running || moss}
+                  disabled={running || sessionTarget}
                 />
                 <Label htmlFor="session-ab-open-per-visit">Open and close per visit</Label>
               </div>
               <p className="-mt-2 text-xs text-muted-foreground">
-                {moss
-                  ? "Always on for the DiT: every visit builds its arm's Session, runs it once untimed and once timed, and disposes it, so two DiT Sessions never live together. Building is never timed."
-                  : "On: every visit builds its arm's pipeline, runs it once untimed and once timed, and disposes it (two pipelines of a large model do not fit together). Off: both pipelines are built once and stay loaded. Building is never timed."}
+                {vae
+                  ? "Always on for the VAEs: every visit builds its arm's Session, runs it once untimed and once timed, and disposes it, so two VAE Sessions never live together. Building is never timed."
+                  : moss
+                    ? "Always on for the DiT: every visit builds its arm's Session, runs it once untimed and once timed, and disposes it, so two DiT Sessions never live together. Building is never timed."
+                    : "On: every visit builds its arm's pipeline, runs it once untimed and once timed, and disposes it (two pipelines of a large model do not fit together). Off: both pipelines are built once and stay loaded. Building is never timed."}
               </p>
-              {moss ? (
+              {sessionTarget ? (
                 <p className="text-xs text-muted-foreground">
-                  Counts: every run of a DiT arm reports its fusion counts and dispatches to the
-                  runner (outside the timed span), so this target needs no count probe.
+                  Counts: every run of a {vae ? "VAE" : "DiT"} arm reports its fusion counts and
+                  dispatches to the runner (outside the timed span), so this target needs no count
+                  probe.
                 </p>
               ) : (
                 <>
@@ -854,7 +1076,7 @@ export const SessionAbPage = () => {
                   disabled={running}
                 />
               </Field>
-              {moss ? null : (
+              {sessionTarget ? null : (
                 <p className="text-xs text-muted-foreground">Prompt: {SESSION_AB_PROMPT}</p>
               )}
               {formErrors.length === 0 ? null : (
@@ -862,8 +1084,8 @@ export const SessionAbPage = () => {
               )}
               <Button
                 id="session-ab-run"
-                onClick={moss ? runMoss : run}
-                disabled={!(moss ? canRunMoss : canRun)}
+                onClick={moss ? runMoss : vae ? runVae : run}
+                disabled={!(moss ? canRunMoss : vae ? canRunVae : canRun)}
               >
                 Run
               </Button>
@@ -892,15 +1114,24 @@ export const SessionAbPage = () => {
   );
 };
 
-const requestText = (request: SessionAbRequest | SessionAbMossRequest): string =>
-  "target" in request
+const requestText = (
+  request: SessionAbRequest | SessionAbMossRequest | SessionAbVaeRequest,
+): string =>
+  "sessionOptions" in request
     ? [
-        `${request.mount}/${request.model} ${request.quant} ${request.component}`,
-        `${request.rounds} rounds × one forward at S = ${request.imageTokens + request.textTokens}`,
+        `${request.mount}/${request.model} ${request.quant} ${request.component} (${request.storage})`,
+        `${request.rounds} rounds × one forward, ${request.arms.map(({ name }) => name).join(" / ")}`,
         "open per visit",
         request.backend,
       ].join(" · ")
-    : gemmaRequestText(request);
+    : "target" in request
+      ? [
+          `${request.mount}/${request.model} ${request.quant} ${request.component}`,
+          `${request.rounds} rounds × one forward at S = ${request.imageTokens + request.textTokens}`,
+          "open per visit",
+          request.backend,
+        ].join(" · ")
+      : gemmaRequestText(request);
 
 const gemmaRequestText = (request: SessionAbRequest): string =>
   [
@@ -921,10 +1152,22 @@ const gemmaRequestText = (request: SessionAbRequest): string =>
 
 /** Memoized: the status ticker re-renders the page every 250 ms while an untimed step is going. */
 const SessionAbResultView = memo(
-  ({ record }: { record: SessionAbPageRecord | SessionAbMossPageRecord }) => {
-    const moss = "target" in record;
+  ({
+    record,
+  }: {
+    record: SessionAbPageRecord | SessionAbMossPageRecord | SessionAbVaePageRecord;
+  }) => {
+    // The Session targets' counts are the runner's; a VAE arm's hits are its own rule's counter.
+    const counted = "target" in record;
+    const vaeRequest = "rules" in record ? record.request : undefined;
+    const ruleText =
+      "rules" in record ? record.rules.map(({ name }) => name).join(" / ") : record.rule.name;
     const rows = record.record.arms.map((arm, index) =>
-      armRow(arm, moss ? recordedCounts(arm) : record.counts?.[index], record.rule.name),
+      armRow(
+        arm,
+        counted ? recordedCounts(arm) : record.counts?.[index],
+        "rules" in record ? vaeRowRule(record.request, arm.name) : record.rule.name,
+      ),
     );
     const rounds = record.record.rounds;
     return (
@@ -934,8 +1177,9 @@ const SessionAbResultView = memo(
             <CardTitle>Arms</CardTitle>
             <CardDescription>
               Identity is against the base&apos;s first run, over every run (the warm-up and the
-              untimed runs included). Hits are the counter of <code>{record.rule.name}</code>
-              {moss
+              untimed runs included). Hits are the counter of <code>{ruleText}</code>
+              {vaeRequest === undefined ? "" : " (each arm's own rule; the base reads the first)"}
+              {counted
                 ? " and dispatches the dispatches of one forward, as every run of the arm reported them to the runner (a run whose counts differ from its arm's first run's is refused)."
                 : " and dispatches the planned dispatches in the first decode run (the first verify run with a self-speculation depth) of the arm's count probe before the A/B, not of the timed runs: the runner's record carries no counts, and without the probe they show —."}{" "}
               Times are the timed runs of each round, visit 1 / visit 2.
@@ -1013,7 +1257,13 @@ const SessionAbResultView = memo(
           <CardContent>
             <RecordActions
               record={record}
-              filename={`${moss ? "session-ab-moss" : "session-ab"}_${fileStamp(new Date(record.recordedAt))}.json`}
+              filename={`${
+                vaeRequest !== undefined
+                  ? `session-ab-vae-${vaeRequest.target}`
+                  : counted
+                    ? "session-ab-moss"
+                    : "session-ab"
+              }_${fileStamp(new Date(record.recordedAt))}.json`}
             />
           </CardContent>
         </Card>

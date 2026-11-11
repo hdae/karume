@@ -18,6 +18,7 @@ import runtimePackage from "../../../../../packages/runtime/package.json" with {
 import type { SessionAbMossRequest } from "./moss";
 import type { SessionAbRequest } from "./request";
 import { type ArmCounts, type ArmFacts, type ResolvedExpertCache, ruleKeyPrefix } from "./run";
+import type { SessionAbVaeRequest, SessionAbVaeTarget } from "./vae";
 
 /** The version of the envelope; bump it when a field changes meaning or goes away. */
 export const SESSION_AB_PAGE_FORMAT = "karume-playground-session-ab/2";
@@ -273,6 +274,93 @@ export const buildSessionAbMossPageRecord = (input: {
       package: "@karume/candidate-rules",
       keyPrefix: ruleKeyPrefix(ruleName),
     },
+    record,
+    judgements: input.judgements,
+  };
+};
+
+/**
+ * The version of the VAE targets' envelope, a record of its own (the Gemma and MOSS-Image targets'
+ * formats are unchanged); bump it when a field changes meaning or goes away.
+ */
+export const SESSION_AB_VAE_PAGE_FORMAT = "karume-playground-session-ab-vae/1";
+
+/** A rule an arm of a VAE target passed; its dispatch keys all start with the prefix. */
+export type SessionAbVaeRule = {
+  readonly name: string;
+  readonly package: "@karume/candidate-rules";
+  readonly keyPrefix: string;
+};
+
+export type SessionAbVaePageRecord = RecordEnvironment & {
+  readonly format: typeof SESSION_AB_VAE_PAGE_FORMAT;
+  readonly page: "session-ab";
+  readonly target: SessionAbVaeTarget;
+  /** The `@karume/runtime` and `@karume/models` versions the page was built with. */
+  readonly versions: SessionAbVersions;
+  readonly request: SessionAbVaeRequest;
+  readonly distribution: SessionAbDistribution;
+  readonly source: SourceRecord;
+  /** The container every arm built its Sessions from. */
+  readonly container: SessionAbMossContainer;
+  /** The rules the arms passed, in the arms' order (each named once). */
+  readonly rules: readonly SessionAbVaeRule[];
+  /**
+   * The runtime's record (`karume-session-ab/1`), unchanged. Its arms carry the counts: every run of
+   * a `sessionArm` reports its fusion counts and dispatches, and the runner refused a run whose
+   * counts were not its arm's first run's.
+   */
+  readonly record: SessionAbRecord;
+  /** `judgeSessionAb(record, { minGain: request.minGain })`, one per compared arm. */
+  readonly judgements: readonly SessionAbJudgement[];
+};
+
+/**
+ * The envelope of one finished A/B on a VAE target. Refuses a record whose arms or round count are
+ * not the request's (it would describe different runs), a request whose arms pass no rule, and a
+ * record whose arms carry no counts (every arm of these targets reports them).
+ */
+export const buildSessionAbVaePageRecord = (input: {
+  readonly environment: RecordEnvironment;
+  readonly versions: SessionAbVersions;
+  readonly request: SessionAbVaeRequest;
+  readonly distribution: SessionAbDistribution;
+  readonly source: SourceRecord;
+  readonly container: SessionAbMossContainer;
+  readonly record: SessionAbRecord;
+  readonly judgements: readonly SessionAbJudgement[];
+}): SessionAbVaePageRecord => {
+  const { request, record } = input;
+  const requested = namesOf(request.arms);
+  const recorded = namesOf(record.arms);
+  if (requested !== recorded || record.rounds !== request.rounds) {
+    throw new Error(
+      `The A/B record (${recorded}; ${record.rounds} rounds) is not the request's (${requested}; ${request.rounds} rounds)`,
+    );
+  }
+  const names = [...new Set(request.arms.flatMap(({ fusionRules }) => fusionRules))];
+  if (names.length === 0) throw new Error("No arm of the request passes a rule");
+  const uncounted = record.arms.filter(
+    (arm) => arm.fusions === undefined || arm.dispatches === undefined,
+  );
+  if (uncounted.length > 0) {
+    throw new Error(`The A/B record's arm(s) ${namesOf(uncounted)} reported no counts`);
+  }
+  return {
+    format: SESSION_AB_VAE_PAGE_FORMAT,
+    page: "session-ab",
+    target: request.target,
+    ...input.environment,
+    versions: input.versions,
+    request,
+    distribution: input.distribution,
+    source: input.source,
+    container: input.container,
+    rules: names.map((name) => ({
+      name,
+      package: "@karume/candidate-rules",
+      keyPrefix: ruleKeyPrefix(name),
+    })),
     record,
     judgements: input.judgements,
   };

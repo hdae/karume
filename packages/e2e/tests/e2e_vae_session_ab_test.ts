@@ -151,10 +151,13 @@ const seededUniform = (seed: number): (() => number) => {
  * tile's — the times and the identity do not depend on them being real). Refuses an input that is
  * not f32 or has a symbolic dimension, so a changed graph does not run on feeds made for another.
  */
-const vaeFeeds = (inputs: readonly VaeInput[], seed: number): Readonly<Record<string, Tensor>> => {
+const vaeFeeds = (
+  graphInputs: readonly VaeInput[],
+  seed: number,
+): Readonly<Record<string, Tensor>> => {
   const next = seededUniform(seed);
   const feeds: Record<string, Tensor> = {};
-  for (const input of inputs) {
+  for (const input of graphInputs) {
     const shape = input.shape.map((dim) => {
       if (typeof dim === "number") return dim;
       throw new Error(`VAE feeds: input '${input.name}' has symbol '${dim}'`);

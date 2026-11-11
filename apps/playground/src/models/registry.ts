@@ -161,10 +161,10 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/session-ab",
     title: "Session A/B",
     summary:
-      "Wall-clock A/B of a Gemma 4 decode or a MOSS-Image DiT forward with and without a candidate fusion rule (runSessionAb): identity of the outputs, the rule's hits, dispatches, per-round times and the verdict of judgeSessionAb.",
+      "Wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a candidate fusion rule (runSessionAb): identity of the outputs, the rule's hits, dispatches, per-round times and the verdict of judgeSessionAb.",
     group: "Benchmarks",
     icon: ScaleIcon,
-    mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile", "moss-image"],
+    mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile", "moss-image", "wan22", "anima"],
   },
   {
     path: "/kernel-check",
