@@ -20,7 +20,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
-| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer GEMV, the f16 full state slots and the f16 attention scores, word for word on the browser's backend | `/kernel-check` | done |
+| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block and the expert linear, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1306,9 +1306,11 @@ tests, not a copy.
 | Byte-plane GEMV | `gpu_linear_gemv_planes_test.ts` | The byte-plane GEMV (`linearGemvPlanes`) meets contract class R (ADR 0147 decision 2; 240 cases: the 15 (lanes, rows) variants at K = 16 / 80 / 1536 and at 37 and 1029 columns — multiples of no workgroup's columns — with random codes, plus a saturated fixture at K = 1536 — every code −2 against activations of one sign — each at M = 1 / 8): every output within the GEMM band of an FP64 reference, and at M = 1 and K = 1536 within twice that band of the sequential GEMV; a second dispatch writes the same words; nothing is written past the M × n outputs; a NaN in one activation reaches every output of its row. The node test also shows the band is not vacuous (two WGSL mutants turn it red); the page does not run them. | nothing optional |
 | f16 full state slots | `gpu_state_kv16_test.ts` | With `fullStateStorage: "f16"` (ADR 0143), the append writes what host rounding writes, word layout included (7 cases, one on every rounding boundary of f16), and every reader of an f16 slot writes the same words as its f32 kernel over the same slot rounded on the host (246 cases, 6 of them with subnormal slots). The node test also shows the check can fail (6 mutants each mismatch, one rounding toward zero); the page does not run them. | nothing optional |
 | f16 attention scores (S) | `gpu_score_f16_store_test.ts` | The store of `attentionScoreStorage: "f16"` writes what host rounding writes (2 cases). It goes through `pack2x16float`, whose rounding WGSL leaves open: PASS means every word matches one rounding, to nearest or toward zero, and the `rounding` requirement names which. FAIL means anything else, a mix of the two included. | nothing optional |
+| Bidirectional block (Gemma 4 12B images) | `gpu_state_bidirectional_test.ts` | The sliding ①ₜ with `GenerationRun.bidirectionalRows` (ADR 0144) writes every S word of the same kernel run with every score kept plus a host mirror of the predicate (33 cases: 12B's sliding shape and a small window, P = 0 / 17 / 1000 / 5000, four row layouts, plus one image chunk). The node test also runs predicate mutants that must mismatch; the page does not run them. | nothing optional |
+| Expert linear (Gemma 4 26B A4B) | `gpu_expert_linear_test.ts` | `expert_linear` with f16 steps (ADR 0145) writes, for every pick, the words of `linear`'s sequential i4 GEMV on that expert with the steps widened to f32 (48 cases: gate_up and down × 3 tokens × 8 picks with repeated ids); every output starts as a NaN pattern, so an unwritten word mismatches too. | nothing optional |
 
 The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
-next to a check runs that check; **Run all** runs the seven in order; Cancel stops before the next
+next to a check runs that check; **Run all** runs the nine in order; Cancel stops before the next
 case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
 earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
 linear lane mapping.
@@ -1316,7 +1318,8 @@ linear lane mapping.
 Each check gets a verdict:
 
 - **PASS** — every part ran the number of cases its check exports (`GEMV_SUBGROUP_CASES`,
-  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`; the counts in the table above) and the
+  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`, `GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`,
+  `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`; the counts in the table above) and the
   states-attention check its `STATE_ATTENTION_MUTANTS` mutants and matrix rows, every criterion of
   every case has 0 failing words, every requirement is met, every mutant mismatched on its case and
   every mutant matrix row passed;
@@ -1331,7 +1334,7 @@ Each check gets a verdict:
   internal error scope every case runs under, an uncaptured WebGPU error, a lost device, or a
   mutation anchor that no longer matches the generated WGSL; the error is shown in full.
 
-The overall verdict covers all four checks: a check that was not run counts like one that is not
+The overall verdict covers all nine checks: a check that was not run counts like one that is not
 available, so running one check alone gives **INCOMPLETE** at best (the result card lists the
 checks not run). The release check is a **Run all**.
 

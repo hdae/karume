@@ -5,8 +5,8 @@ backend a kernel rewrite relies on, in one implementation shared by
 
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
   `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts`,
-  `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts` — Dawn on the development
-  machine), and
+  `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
+  `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts` — Dawn on the development machine), and
 - the playground's `/kernel-check` page (`apps/playground` — the browser's own backend: D3D12 in
   Chrome on Windows, Metal on macOS).
 
@@ -21,6 +21,8 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | Byte-plane GEMV `linearGemvPlanes`: the f64 band, the A/B band against the sequential GEMV, two dispatches identical, nothing written past the outputs, NaN propagation (class R — ADR 0141; the fault injection runs in the node test only, through `PlanesGemvCheckOptions.mutate`) | `checkPlanesGemv` (and `benchPlanesGemv`, a single-kernel timing, not a check) | nothing optional |
 | f16 full state slots `fullStateStorage`: every reader vs its f32 form over a rounded slot, the append vs host rounding on every rounding boundary (class C — ADR 0143) | `checkStateKv16` (and `checkStateKv16Mutants`, node test only) | nothing optional |
 | f16 attention scores `attentionScoreStorage`: the store vs host rounding (ADR 0031) | `checkScoreF16Store` | nothing optional |
+| Bidirectional block of the sliding ①ₜ (`GenerationRun.bidirectionalRows`): every S word vs the same kernel keeping every score plus a host mirror of the predicate, u32 identity (ADR 0144) | `checkStateBidirectional` (and `stateBidirectionalMutants`, node test only) | nothing optional |
+| `expert_linear` with f16 steps at the 26B shapes: every pick's output words vs `linear`'s sequential i4 GEMV on that expert with the steps widened to f32, u32 identity (ADR 0145) | `checkExpertLinear` | nothing optional |
 
 A check does not assert. It returns structured results — per case, per criterion, the number of
 failing words and the first (identity) or worst (tolerance band) failing word as u32 — and the
@@ -31,7 +33,8 @@ internal error scopes and also fails on an uncaptured WebGPU error or a lost dev
 otherwise read back the buffers' initial contents for both runs of a case; a mutation anchor that
 no longer matches throws as well. Each check exports the number of cases each of its parts returns
 (`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
-`GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`) and the mutant count
+`GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`) and the
+mutant count
 (`STATE_ATTENTION_MUTANTS`); the tests and the page hold a run to them, so a part that ran no
 cases cannot pass.
 
