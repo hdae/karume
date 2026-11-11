@@ -214,7 +214,8 @@ corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
 ## Evidence (2026-11-11)
 
 - The 2026-11-10 prototype, rewritten against the kernel entry alone (`packages/models/tests/helpers/gelu-mul-rule.ts`, the
-  rule `test/gelu_mul`, class E; `packages/models/tests/external_fusion_rule_test.ts` pins its only import to
+  rule `test/gelu_mul`, class E — moved on 2026-11-11 to `packages/candidate-rules/src/gelu-mul.ts` as
+  `candidate/gelu_mul`, see the addendum; `packages/models/tests/external_fusion_rule_test.ts` pins its only import to
   `@karume/runtime/kernel` and finds no type assertion in its code). The gelu value is staged by `stagedLoopWgsl` instead
   of the prototype's run-time XOR mask.
 - Planned on Gemma 4 26B A4B's decode graph of the local mirror through the Session's own list composition, at M = 1 and
@@ -229,6 +230,31 @@ corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
 - Not produced: token identity of the rule on the real 26B weights. This machine's GPU (12 GB) cannot hold 26B, the 26B
   decode cases run through the gemma pipeline, which passes no rule (decision 4), and the only runtime-level 26B Session,
   the 12-layer cut's teacher-forced run (`KARUME_SERIES=1`), would need a second upload of the cut for one comparison.
+
+## Addendum (2026-11-11) — a measurement opt-in on the gemma pipeline, and where candidate rules live
+
+- **What changed**: `gemma.PipelineOptions.fusionRules` (experimental; the mobile QAT pipeline shares the options),
+  passed unchanged as `SessionOptions.fusionRules` to the target Session (prefill and decode) and, with `speculative`,
+  the drafter Session; the image embedder, the on-GPU PLE gather and the on-GPU greedy selection do not get it. The
+  maintainer's ruling for this step: add it to gemma only, as an experiment, and decide the details later — so no other
+  family, no manifest vocabulary and no preset name it, and it may change or go away in a minor version. Decision 4's
+  "no pipeline passes a rule yet" still holds for every default: a pipeline passes a rule only when its caller gives
+  one. The rule's author owns its evidence, and the memory estimate does not see it (as for `SessionOptions`).
+- **Candidate rules**: rules that are measured and not adopted live in the private workspace package
+  `packages/candidate-rules` (depends on `@karume/runtime` only; every file imports `@karume/runtime/kernel` and
+  nothing else of the runtime, which `packages/models/tests/external_fusion_rule_test.ts` checks over the whole
+  package). A rule moves into `packages/models` with its evidence when it is adopted; nothing there is part of a
+  release. The prototype rule moved there and was renamed `test/gelu_mul` → `candidate/gelu_mul` (keys under
+  `ext:candidate:`), since a page and a record now show it.
+- **The evidence item "not produced" above** is now an opt-in check: `packages/e2e/tests/e2e_gemma4_session_ab_test.ts`
+  (`KARUME_SESSION_AB=<dir>`) runs the session A/B of [0117](0117-app-geometry-tuning.md) (addendum of 2026-11-11) on
+  Gemma 4 26B A4B under the expert cache, one pipeline per visit, and asserts token identity over every run of both
+  arms and the rule's hits in the decode plan; the record goes to the directory, not to the docs. The playground's
+  `/session-ab` page runs the same A/B in a browser.
+- **Observed while building it**: on a device the caller keeps, a disposed pipeline's buffers are freed by Dawn only
+  once a submit made after the destroy has completed (Dawn on Vulkan), so a second 26B build right after a dispose ran
+  out of memory before its first submit. The A/B arms (test and page) end their close with one empty submit and its
+  fence, outside the timed span; the runtime's dispose is unchanged (backlog).
 
 ## Alternatives considered
 

@@ -139,11 +139,16 @@ maintainer's ruling of 2026-11-06).
   2026-11-11: `.claude/reviews/2026-11-11_extension-mechanisms/DESIGN.md`, not tracked by git)**. The rule list as an input
   with its test-only switch and the shared twin check, the fusion candidate search, and fusion rules from outside the
   runtime (ADR [0148](decisions/0148-external-fusion-rules.md): `@karume/runtime/kernel`, `SessionOptions.fusionRules`) are
-  built. Left, in the design's order: `runSessionAb` / `judgeSessionAb` and their record in `@karume/runtime/tune`, with
-  the part of the twin check the public API can express, then the Playground's `/session-ab` page (P3); the estimate
-  planning every fused step, external rules included (P4); generated elementwise fusions, tried on the MOSS-Image DiT
-  (S5). Open: token identity of the test rule `test/gelu_mul` on the real 26B weights (not produced — ADR 0148
-  Evidence); the Session canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.
+  built. The session A/B is built too (P3): `runSessionAb` / `judgeSessionAb` and their record in `@karume/runtime/tune`
+  with `wordIdentity`, the gemma pipeline's experimental `fusionRules` (gemma only, as an experiment — maintainer
+  2026-11-11; the details are decided later), the private `packages/candidate-rules` (the candidate `candidate/gelu_mul`),
+  the Playground's `/session-ab` page and an opt-in Node run on 26B (`KARUME_SESSION_AB=<dir>`,
+  `e2e_gemma4_session_ab_test.ts`). Left: the page's first runs in Chrome (D3D12) and on Metal; the option on other
+  families; a public way to switch a built-in rule off for a measurement (today only the test-only
+  `DISABLED_FUSION_RULES`); a pipeline dispose on a shared device that gives its memory back without a later submit
+  (the A/B arms end with an empty submit and its fence — ADR 0148 addendum of 2026-11-11); the estimate planning every
+  fused step, external rules included (P4); generated elementwise fusions, tried on the MOSS-Image DiT (S5). The Session
+  canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR
   [0141](decisions/0141-byte-plane-gemv.md)) are opt-in and declared by no preset. Left: their speed away from the Apple

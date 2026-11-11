@@ -710,3 +710,6 @@ This addendum records its two rulings on `./tune`.
   non-base arm, the noise floor forced to 0, the delta spread left out of the floor, the counts read inside the span,
   the comparison of every run's counts removed, the untimed run of `openPerVisit` removed.
 - **Not in this addendum**: the playground's page that runs the A/B on real models, and running it on real weights.
+  Both were built later the same day ([0148](0148-external-fusion-rules.md) addendum of 2026-11-11): the `/session-ab`
+  page, whose arms are two loads of one Gemma 4 pipeline with and without a candidate rule and whose output is the
+  generated token ids, and the opt-in Node run on 26B. Neither changes the runner, the record or the judge.
