@@ -28,11 +28,17 @@ export type RunTaskState<Result> =
 
 /**
  * What a task gets: the signal to pass on (Cancel, leaving the page and re-acquiring the GPU abort
- * it) and the reporter.
+ * it), the reporter and the ticker's hold.
  */
 export type RunTaskContext = {
   readonly signal: AbortSignal;
   readonly report: (progress: RunProgress) => void;
+  /**
+   * Holds the elapsed-time ticker (true) or lets it run again (false): while held it does not
+   * re-render the page, for a task that times work on the main thread (the session A/B). Released
+   * when the run ends.
+   */
+  readonly holdTicker: (held: boolean) => void;
 };
 
 /** What the status card needs of a task. */
@@ -69,11 +75,14 @@ export const useRunTask = <Result>(gpu: Pick<GpuHandle, "track" | "lease">): Run
   const [state, setState] = useState<RunTaskState<Result>>({ kind: "idle" });
   const [now, setNow] = useState(() => performance.now());
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const tickerHeldRef = useRef(false);
   const running = state.kind === "running";
 
   useEffect(() => {
     if (!running) return undefined;
-    const timer = setInterval(() => setNow(performance.now()), 250);
+    const timer = setInterval(() => {
+      if (!tickerHeldRef.current) setNow(performance.now());
+    }, 250);
     return () => clearInterval(timer);
   }, [running]);
   // The end of the lease (leaving the page, re-acquiring the GPU) cancels a run, in the same commit
@@ -98,8 +107,11 @@ export const useRunTask = <Result>(gpu: Pick<GpuHandle, "track" | "lease">): Run
         if (controllerRef.current !== controller) return;
         setState({ kind: "running", startedAt, progress });
       };
+      const holdTicker = (held: boolean): void => {
+        if (controllerRef.current === controller) tickerHeldRef.current = held;
+      };
       try {
-        const result = await track(task({ signal: controller.signal, report }));
+        const result = await track(task({ signal: controller.signal, report, holdTicker }));
         setState({ kind: "done", result, seconds: (performance.now() - startedAt) / 1000 });
       } catch (error) {
         setState(
@@ -109,6 +121,7 @@ export const useRunTask = <Result>(gpu: Pick<GpuHandle, "track" | "lease">): Run
         );
       } finally {
         controllerRef.current = undefined;
+        tickerHeldRef.current = false;
       }
     },
     [track],
