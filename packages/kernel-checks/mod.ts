@@ -44,6 +44,19 @@ export {
   adalnTokenInputs,
   checkAdalnTwins,
 } from "./src/fusion-twins/adaln.ts";
+export {
+  checkRopeTwins,
+  ROPE_BSHD_SHAPES,
+  ROPE_ORDERS,
+  ROPE_PAIR_SHAPES,
+  ROPE_TWIN_CASES,
+  ropeBshdInputs,
+  ropeGraph,
+  ropeInputs,
+  ropePairGraph,
+  ropePairInputs,
+  ropePairLabel,
+} from "./src/fusion-twins/rope.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
