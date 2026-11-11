@@ -9,6 +9,8 @@
 
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { GpuDeviceLostError } from "../src/gpu/context.ts";
+import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import {
   defineExternalRule,
@@ -17,6 +19,7 @@ import {
   type ExternalRuleName,
   type FusedBuild,
   type FusedOperand,
+  type FusedTemp,
   type FusedWorkgroups,
   type FusionMatch,
   type FusionMatchContext,
@@ -103,6 +106,10 @@ type Fault = {
   readonly operands?: readonly FusedOperand[];
   /** The dispatch's WGSL (omitted: none — a plan that is never built needs none). */
   readonly wgsl?: string;
+  /** What the dispatch's WGSL thunk throws instead of returning its text. */
+  readonly wgslThrows?: Error;
+  /** The step's temporaries (omitted: none). */
+  readonly temps?: readonly FusedTemp[];
   /** The dispatch binds its params as storage. */
   readonly paramsStorage?: boolean;
   /** The dispatch's workgroups (omitted: 32 items over workgroups of 64). */
@@ -146,14 +153,17 @@ const negNeg = <Name extends string>(name: Name, fault: Fault = {}) => ({
         fault.transposedOutput === true
           ? last.outputs[0].shape.toReversed()
           : last.outputs[0].shape,
-      temps: [],
+      temps: fault.temps ?? [],
       dispatches:
         fault.noDispatch === true
           ? []
           : [
               {
                 key: fault.key ?? "ext:test:neg_neg",
-                wgsl: () => fault.wgsl ?? "",
+                wgsl: () => {
+                  if (fault.wgslThrows !== undefined) throw fault.wgslThrows;
+                  return fault.wgsl ?? "";
+                },
                 params: new Uint32Array(4),
                 ...(fault.paramsStorage === undefined
                   ? {}
@@ -539,6 +549,45 @@ describe("an external rule building a step", () => {
       ExecutionError,
       "fusion rule 'test/neg_neg': dispatch 0 ('ext:test:neg_neg') binds a weightScale operand",
     );
+  });
+
+  it("fails loudly on an operand of a kind the recipe builder does not resolve, and on a temporary whose lifetime is not an integer", () => {
+    assertThrows(
+      () =>
+        plan([
+          defineExternalRule(
+            negNeg("test/neg_neg", {
+              operands: [
+                outsideTheType<FusedOperand>({ kind: "input", index: 0 }),
+                { kind: "output" },
+              ],
+            }),
+          ),
+        ]),
+      ExecutionError,
+      "fusion rule 'test/neg_neg': dispatch 0 ('ext:test:neg_neg') has an operand of kind 'input'",
+    );
+    assertThrows(
+      () =>
+        plan([
+          defineExternalRule(
+            negNeg("test/neg_neg", {
+              temps: [{ byteLength: 16, allocBefore: Number.NaN, releaseAfter: 0 }],
+            }),
+          ),
+        ]),
+      ExecutionError,
+      "fusion rule 'test/neg_neg': temporary 0 has a declared lifetime [NaN, 0]",
+    );
+    const kept = plan([
+      defineExternalRule(
+        negNeg("test/neg_neg", {
+          temps: [{ byteLength: 16, allocBefore: 0, releaseAfter: 0 }],
+          operands: [{ kind: "bind", index: 0 }, { kind: "output" }],
+        }),
+      ),
+    ]);
+    assertEquals(kept.counts["test/neg_neg"], 1, "the control: valid kinds and a closed lifetime");
   });
 
   it("fails loudly on a step that declares no dispatch (its output would never be written)", () => {
@@ -955,6 +1004,22 @@ describe("an external step's recipe (a fake GPU: the run stops at the transient 
       );
       assert(error.cause instanceof Error && !(error.cause instanceof ExecutionError), label);
     }
+  });
+
+  it("lets an out-of-memory error and a lost device through as they are (callers recover from them by class)", async () => {
+    for (const thrown of [
+      new GpuOutOfMemoryError("no memory left"),
+      new GpuDeviceLostError("the device was lost"),
+    ]) {
+      const error = await assertRejects(() => run({ wgslThrows: thrown }));
+      assert(error === thrown, thrown.name);
+    }
+    await assertRejects(
+      () => run({ wgslThrows: new RangeError("a bug in the thunk") }),
+      ExecutionError,
+      "fusion rule 'test/neg_neg': resolving its step's dispatches threw RangeError",
+      "the control: any other error is named",
+    );
   });
 
   it("fails loudly, naming the rule, on a step whose dispatches bind the output but never declare it read_write", async () => {

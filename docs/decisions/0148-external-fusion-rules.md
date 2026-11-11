@@ -84,7 +84,7 @@ CHANGELOG.
 A Session plans with its given rules first, in the order given, then `FUSION_RULES` (`sessionFusionRules` in
 `packages/runtime/src/runtime/fusion.ts`). Where an external rule and a built-in rule could both take a node, the external
 rule — the caller's choice — takes it. **An external rule is tried only at a node whose op is one of its `heads`, and its
-folded chain starts at that node**, so its declaration says which built-in rules it can pre-empt. The test that the
+folded chain starts at that node**, so its declaration says at which nodes it can pre-empt a built-in rule (its chain may go on to fold nodes a built-in rule would have led: the heads name where it is tried, not everything it takes). The test that the
 built-in rules' heads are disjoint (but for the one declared pair) stays as it is and covers the built-in list only.
 Which rule hit is in `lastRunFusions`.
 
@@ -105,7 +105,8 @@ Which rule hit is in `lastRunFusions`.
 - **The definition is read once.** The entry copies each field when it runs and the rule reads only that frozen copy, so
   editing the caller's object afterwards (deriving a variant from a shared definition) changes nothing the rule does —
   not its name, its counter, its privacy, its matcher or its build. `match` and `build` are called as standalone functions,
-  `this` undefined, so a method that reads `this` fails loudly at its first try instead of reading the frozen copy.
+  `this` undefined, so a method that reads `this` fails loudly at its first try instead of reading the frozen copy (in strict
+  code, which every ES module is).
 - **Only the return value of a define entry is a rule a Session takes.** The entry freezes the rule and brands it with a
   non-enumerable property keyed by a module-private symbol, recording whether it was defined inside the runtime or outside
   it. A Session refuses an entry of `fusionRules` without the external brand: a hand-written object, a copy of a rule (the
@@ -158,7 +159,7 @@ Which rule hit is in `lastRunFusions`.
 
 | Concern | Measure |
 | --- | --- |
-| A pipeline key collides with a built-in kernel's or another extension's | The name `<namespace>/<rule>` and the key prefix `ext:<namespace>:` (decision 5). The last line of defence stays `PipelineKeyConflictError` (two WGSL bodies under one key) |
+| A pipeline key collides with a built-in kernel's or another extension's | The name `<namespace>/<rule>` and the key prefix `ext:<namespace>:` (decision 5). The last line of defence stays the pipeline cache's `PipelineKeyConflictError` (two WGSL bodies under one key), rethrown naming the rule with it as the cause |
 | Registration at import, global state | None. The rules are a value of the Session options, fixed at construction (the prepared-plan key stays the bindings alone); the brand is on the value |
 | Contention with the built-in rules | External first, in the order given (decision 3); the hit shows in `lastRunFusions` |
 | Packed int8 words read as f32 | No fused step other than `linearStaticQuantize` may consume a packed value (`packedStaticQuantizeValues`, condition 5 — ADR 0105). The pairing is decided on the first planning scan, and an external matcher sees no packed value. On the second scan an external step that folds a node producing or reading a packed value fails loudly, naming the rule; after it the pairing is recomputed from the final steps, and a plan whose pairing changed between the scans (a matcher that is not a pure function can let a built-in rule take a paired value — the linear→SRQ fusion then writes f32 words a packed reader takes as codes) fails loudly, naming the external rules of the list |
@@ -199,7 +200,9 @@ corrupt buffers the runtime owns. A deliberately hostile caller is out of scope.
 - **Throw an `ExecutionError` naming the rule** when what the rule returned is wrong whatever the data: a malformed match
   or build result, a window or chain that breaks the window rules, a bind outside the chain's inputs, a wrong output, a key
   outside its prefix, a kernel that writes what it must not or never writes its output, invalid workgroup counts, an
-  operand an external step may not use (decision 5).
+  operand an external step may not use (decision 5). Any other failure of the rule's code or of resolving its step is
+  rethrown the same way with the original as the cause — except an out-of-memory error and a lost device, which are
+  conditions of the device and pass through as they are (callers recover from them by class).
 - **`match` and `build` are pure functions of their arguments (MUST)**, written as standalone functions. The pass scans a
   plan more than once (the packed pairing) and caches plans, so a matcher whose answer depends on anything else can make
   the scans disagree. Where that would break the packed pairing the plan fails loudly (decision 6); anywhere else it is

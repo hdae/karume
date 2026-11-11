@@ -42,7 +42,9 @@ import type { StateStorage } from "../kernels/state-storage.ts";
 import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
+import { GpuDeviceLostError } from "../gpu/context.ts";
 import type { GpuContext } from "../gpu/device.ts";
+import { GpuOutOfMemoryError } from "../gpu/error-scope.ts";
 import type { SessionPipelines, StorageRoles } from "../gpu/pipeline-cache.ts";
 import { CAST_OP, numel, stateReadonly, WEIGHT_SLOTS, WHERE_OP } from "../ops.ts";
 import {
@@ -663,7 +665,8 @@ export class RecipeBuilder {
     };
     // An external step's dispatches are the rule's own values: whatever fails while they are
     // resolved (a malformed field, a count the resolver refuses, a WGSL thunk that throws) is
-    // rethrown naming the rule (`ruleFailure`). A built-in step's failure passes through unchanged.
+    // rethrown naming the rule (`ruleFailure`) — a pipeline key conflict and an invalid kernel
+    // included, the original kept as the cause. A built-in step's failure passes through unchanged.
     try {
       let writesOutput = false;
       for (const [index, dispatch] of step.dispatches.entries()) {
@@ -726,7 +729,15 @@ export class RecipeBuilder {
         );
       }
     } catch (error) {
-      if (!external) throw error;
+      // Out of memory and a lost device are conditions of the device, not of the rule, and callers
+      // recover from them by class, so they pass through as they are.
+      if (
+        !external ||
+        error instanceof GpuOutOfMemoryError ||
+        error instanceof GpuDeviceLostError
+      ) {
+        throw error;
+      }
       throw ruleFailure(step.rule, "resolving its step's dispatches", error);
     }
   }

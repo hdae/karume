@@ -710,6 +710,9 @@ const assertTempLifetimes = (
     if (
       !Number.isSafeInteger(temp.byteLength) ||
       temp.byteLength < 1 ||
+      // A lifetime that is not an integer (NaN among them) passes every comparison below
+      !Number.isSafeInteger(temp.allocBefore) ||
+      !Number.isSafeInteger(temp.releaseAfter) ||
       temp.allocBefore < 0 ||
       temp.releaseAfter < temp.allocBefore ||
       temp.releaseAfter >= dispatchCount
@@ -825,6 +828,13 @@ export const isExternalRuleName = (name: unknown): name is ExternalRuleName =>
 export const isExternalRule = (value: unknown): value is FusionRule<ExternalRuleName> =>
   ruleOrigin(value) === "external";
 
+const OPERAND_KINDS: Readonly<Record<FusedOperand["kind"], true>> = {
+  bind: true,
+  temp: true,
+  weightScale: true,
+  output: true,
+};
+
 const CONTRACT_CLASSES: Readonly<Record<ContractClass, true>> = {
   E: true,
   C: true,
@@ -936,8 +946,9 @@ const assertExternalWindow = (
  * f32, or the step is not taken — `applyRule`). MUST: every
  * dispatch key starts with `ext:<namespace>:`. The pipeline cache is one per device and shared by
  * every Session; the prefix keeps an external rule's keys out of the built-in kernels' and another
- * namespace's (two different WGSL bodies under one key still fail as `PipelineKeyConflictError`, the
- * last line of defence).
+ * namespace's (two different WGSL bodies under one key still fail: the pipeline cache's
+ * `PipelineKeyConflictError`, rethrown naming the rule with it as the cause — the last line of
+ * defence).
  */
 const assertExternalBuild = (
   name: string,
@@ -975,6 +986,19 @@ const assertExternalBuild = (
       `fusion rule '${name}': no dispatch binds the step's output '${built.outputName}' (its buffer would never be` +
         " written, and its consumers would read stale data)",
     );
+  }
+  // MUST: every operand is of a kind the recipe builder resolves. It reads any other kind as a
+  // temporary, so a misspelt kind would fail later as "unallocated temporary undefined".
+  for (const [at, dispatch] of built.dispatches.entries()) {
+    const unknown = (dispatch.operands ?? []).find(
+      (operand) => !Object.hasOwn(OPERAND_KINDS, operand.kind),
+    );
+    if (unknown !== undefined) {
+      throw new ExecutionError(
+        `fusion rule '${name}': dispatch ${at} ('${String(dispatch.key)}') has an operand of kind` +
+          ` '${String(unknown.kind)}' (the kinds are "bind", "temp" and "output")`,
+      );
+    }
   }
   const scaled = built.dispatches.findIndex(
     (dispatch) => dispatch.operands?.some((operand) => operand.kind === "weightScale") === true,
@@ -1090,7 +1114,8 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
  * `build`, past the checks run here. MUST: `match` and `build` are called as standalone functions,
  * `this` undefined. Called as methods of this copy, a definition written with method syntax that
  * reads `this` would see the copy instead of the caller's object and change what it does without an
- * error; called standalone, it fails loudly at its first try, naming the rule ({@link ruleFailure}).
+ * error; called standalone, it fails loudly at its first try, naming the rule ({@link ruleFailure}) —
+ * in strict code, which every ES module is (a sloppy-mode function sees the global object instead).
  */
 const snapshotDefinition = <Matched extends FusionMatch, Name extends string, MatchContext>(
   rule: RuleDefinition<Matched, Name, MatchContext>,
