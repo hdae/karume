@@ -95,7 +95,11 @@
  * registration at rule import time). The rule that every module is side-effect free bans running
  * code at import time, and tests/runtime_fusion_test.ts reads **this array** to check the
  * disjointness of the leading ops mechanically. The list a plan uses is **passed in**
- * (`FusionContext.rules`): a Session passes this array, and the scan reads no module-level list.
+ * (`FusionContext.rules`): a Session passes {@link sessionFusionRules} — the external rules it was
+ * given (`SessionOptions.fusionRules`, ADR 0148) in their order, then this array — and the scan reads
+ * no module-level list. An external rule is tried first at each index, so where it and a built-in
+ * rule could both take an index, the external rule takes it; the disjointness above holds among the
+ * built-in rules only.
  *
  * ## In-window passthrough
  *
@@ -147,6 +151,7 @@ import {
   type AnnotationCounterName,
   type AttentionTokenMajor,
   type ExecStep,
+  type ExternalRuleName,
   type FusionContext,
   type FusionHit,
   type FusionPlan,
@@ -154,6 +159,8 @@ import {
   type FusionRuleName,
   type FusionScanContext,
   internalsArePrivate,
+  isExternalRule,
+  ruleOrigin,
   type LinearPrologue,
   nodeStepSpan,
   type PackedActivations,
@@ -167,7 +174,7 @@ import {
   linearPlanesGemvVariant,
   linearTakesI8a8,
 } from "./linear-route.ts";
-import { ExecutionError, type NodePlan } from "./plan.ts";
+import { describeInputValue, ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
  * The public types of the fusion pass (defined in {@link "./fusion-rule.ts"}). MUST: consumers
@@ -176,20 +183,36 @@ import { ExecutionError, type NodePlan } from "./plan.ts";
  */
 export type {
   AttentionTokenMajor,
+  ContractClass,
   ExecStep,
+  ExternalRuleName,
+  FusedBuild,
+  FusedDispatch,
   FusedOperand,
   FusedStep,
+  FusedTemp,
+  FusedWorkgroups,
   FusionContext,
   FusionCounts,
+  FusionHit,
   FusionLimits,
   FusionMatch,
   FusionPlan,
   FusionRule,
+  FusionRuleDefinition,
+  FusionRuleName,
+  FusionScanContext,
   FusionWeightLayout,
   LinearPrologue,
   PackedActivations,
 } from "./fusion-rule.ts";
-export { absorbedPermutes, defineRule, nodeStepSpan } from "./fusion-rule.ts";
+export {
+  absorbedPermutes,
+  defineExternalRule,
+  defineRule,
+  nodeStepSpan,
+  ruleOrigin,
+} from "./fusion-rule.ts";
 /**
  * Row-block splitting and the derivation of its limit (defined in
  * {@link "./fusion-rules/row-block-attention.ts"}).
@@ -636,6 +659,47 @@ export const assertDisabledRulesNamed = (
     `fusion rules: the disabled name(s) '${unknown.join("', '")}' are not names of the rule list` +
       ` (the rules are ${rules.map((rule) => `'${rule.name}'`).join(", ")})`,
   );
+};
+
+/**
+ * The rule list a Session plans with: the external rules of `SessionOptions.fusionRules` in the
+ * order given, then the built-in {@link FUSION_RULES} — an external rule is tried before every
+ * built-in rule at each index (ADR 0148). Session construction calls it once, so the list is fixed
+ * for the Session's lifetime (the prepared-plan key is the bindings alone).
+ *
+ * MUST: every entry is a rule {@link defineExternalRule} built (its brand — a hand-written object,
+ * a copy of a rule and a built-in rule are refused), and every name of the list has a counter of its
+ * own: the external names are distinct, and no name meets a built-in rule's or an annotation
+ * counter's ({@link zeroFusionCounts}, the check the pass applies). Anything else fails loudly
+ * (`ExecutionError`), before the Session uploads a byte.
+ */
+export const sessionFusionRules = (
+  fusionRules: unknown,
+): readonly FusionRule<FusionRuleName | ExternalRuleName>[] => {
+  if (fusionRules === undefined) return FUSION_RULES;
+  if (!Array.isArray(fusionRules)) {
+    throw new ExecutionError(
+      `options.fusionRules must be an array of rules built by defineRule of @karume/runtime/kernel (got ${describeInputValue(fusionRules)})`,
+    );
+  }
+  const external: FusionRule<ExternalRuleName>[] = [];
+  for (const [at, rule] of fusionRules.entries()) {
+    if (!isExternalRule(rule)) {
+      throw new ExecutionError(
+        `options.fusionRules[${at}] ${ruleOrigin(rule) === "built-in" ? "is a built-in rule (the built-in rules are always on)" : "is not a rule built by defineRule of @karume/runtime/kernel (a hand-written object or a copy of a rule is refused)"}`,
+      );
+    }
+    if (external.some((given) => given.name === rule.name)) {
+      throw new ExecutionError(`options.fusionRules: the rule '${rule.name}' is given twice`);
+    }
+    external.push(rule);
+  }
+  const rules: readonly FusionRule<FusionRuleName | ExternalRuleName>[] = [
+    ...external,
+    ...FUSION_RULES,
+  ];
+  zeroFusionCounts(rules);
+  return rules;
 };
 
 /**

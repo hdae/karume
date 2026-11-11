@@ -77,7 +77,9 @@ export type KeyPredicate = (key: string) => boolean;
  * with the reference, and do not change numerics. `attentionRowBlockMaxBytes` is a resource policy
  * that changes only the number of row blocks (the output matches the no-budget run in Uint32 —
  * ADR 0124 decisions 3 / 4). `expertCache` is exact: a run with no miss matches full residency bit
- * for bit (ADR 0146 decision 1).
+ * for bit (ADR 0146 decision 1). `fusionRules` is not one seat with one reference value and one key
+ * signature: each rule it carries declares its own contract class (ADR 0147 decision 2), and a class
+ * E rule is u32-identical to the plan without it (ADR 0148).
  */
 type NonNumericField =
   | "submitPolicy"
@@ -85,7 +87,8 @@ type NonNumericField =
   | "planBackingBudgetBytes"
   | "linearGemvRowsThreadTarget"
   | "attentionRowBlockMaxBytes"
-  | "expertCache";
+  | "expertCache"
+  | "fusionRules";
 
 /**
  * Options of `SessionOptions` that change numerics (the string keys minus {@link NonNumericField}).

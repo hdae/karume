@@ -55,7 +55,7 @@ export type { StateStorage } from "../kernels/state-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import { type AdmissionReport, estimateGraphMemory, type EstimateOptions } from "./estimate.ts";
-import { type ExecStep, FUSION_RULES, type FusionCounts, planFusions } from "./fusion.ts";
+import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
 import {
   type ChainedRun,
   GenerationContext,
@@ -74,9 +74,10 @@ export type { GenerationContext } from "./generation-context.ts";
  * re-exported so the public surface can name it. Treated like `ScoreStorage`: not a pass-through
  * re-export, it only puts **a component of a type that is already public** on the surface).
  *
- * NOTE: the key set is the set of fusion rules itself, so adding one rule adds a key (as a type
- * this can be a breaking change). It is already exposed structurally through `SessionDiagnostics`,
- * so giving it a name does not change the effective compatibility surface.
+ * NOTE: the key set is the set of fusion rules itself, so adding one built-in rule adds a key (as a
+ * type this can be a breaking change); an external rule (`SessionOptions.fusionRules`) adds an
+ * optional key under its `<namespace>/<rule>` name. It is already exposed structurally through
+ * `SessionDiagnostics`, so giving it a name does not change the effective compatibility surface.
  */
 export type { FusionCounts } from "./fusion.ts";
 import {
@@ -2555,7 +2556,7 @@ export class Session {
     const fusion = planFusions(
       plan.nodes,
       sessionFusionContext({
-        rules: FUSION_RULES,
+        rules: this.#state.fusionRules,
         knobs: this.#state,
         useCounts: this.#state.useCounts,
         outputNames: this.#state.outputNames,

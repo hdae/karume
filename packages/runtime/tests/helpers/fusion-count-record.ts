@@ -8,10 +8,13 @@
  * edit here.
  */
 
-import { FUSION_RULES, type FusionCounts, zeroFusionCounts } from "../../src/runtime/fusion.ts";
+import { FUSION_RULES, type FusionPlan, zeroFusionCounts } from "../../src/runtime/fusion.ts";
+
+/** The counter record of a plan made with the built-in rule list (no external rule's key). */
+type BuiltInCounts = FusionPlan["counts"];
 
 /** The built-in counter record with `hits` and every other counter at 0. */
-export const builtInCounts = (hits: Partial<FusionCounts> = {}): FusionCounts => ({
+export const builtInCounts = (hits: Partial<BuiltInCounts> = {}): BuiltInCounts => ({
   ...zeroFusionCounts(FUSION_RULES),
   ...hits,
 });

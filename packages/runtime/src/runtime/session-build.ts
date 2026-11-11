@@ -57,7 +57,14 @@ import {
   planExpertGraph,
   planExpertStore,
 } from "./expert-plan.ts";
-import { assertDisabledRulesNamed, FUSION_RULES, type FusionCounts } from "./fusion.ts";
+import {
+  assertDisabledRulesNamed,
+  type ExternalRuleName,
+  type FusionCounts,
+  type FusionRule,
+  type FusionRuleName,
+  sessionFusionRules,
+} from "./fusion.ts";
 import { sessionGeometryProfile } from "./geometry-selection.ts";
 import {
   conv3dTapMajorInitializers,
@@ -547,6 +554,13 @@ export type SessionState = {
    */
   readonly disabledFusionRules: "all" | ReadonlySet<string> | undefined;
   /**
+   * The rule list the Session plans with ({@link sessionFusionRules}): the external rules of
+   * {@link SessionOptions.fusionRules} in the order given, then the built-in `FUSION_RULES`.
+   * MUST: not changed after construction (the key of a prepared plan is only the resolved bindings —
+   * a Session-level invariant like {@link rowBlockSplit}).
+   */
+  readonly fusionRules: readonly FusionRule<FusionRuleName | ExternalRuleName>[];
+  /**
    * The budget per row-block temporary ({@link SessionOptions.attentionRowBlockMaxBytes} — ADR 0124).
    * `undefined` = no budget (the binding limit stays).
    * MUST: not changed after construction (the key of a prepared plan is only the resolved bindings,
@@ -604,6 +618,13 @@ const copyExpertCache = (cache: SessionOptions["expertCache"]): SessionOptions["
 };
 
 /**
+ * The copy of `fusionRules` (the array, as for `expertCache`; the rules themselves are frozen). A
+ * value from outside the type is passed on as is, for the entry check to name.
+ */
+const copyFusionRules = (rules: SessionOptions["fusionRules"]): SessionOptions["fusionRules"] =>
+  Array.isArray(rules) ? Array.from<FusionRule>(rules) : rules;
+
+/**
  * The copy of `DISABLED_FUSION_RULES` (its names, as for `expertCache`). A value from outside the
  * type is passed on as is, for the entry check to name.
  */
@@ -648,6 +669,7 @@ const snapshotSessionOptions = (
   attentionRowBlockMaxBytes: requested.attentionRowBlockMaxBytes,
   sharedWeights: requested.sharedWeights,
   expertCache: copyExpertCache(requested.expertCache),
+  fusionRules: copyFusionRules(requested.fusionRules),
   [I8A8_DOT]: requested[I8A8_DOT],
   [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
   [DISABLED_FUSION_RULES]: copyDisabledFusionRules(requested[DISABLED_FUSION_RULES]),
@@ -655,12 +677,13 @@ const snapshotSessionOptions = (
 
 /**
  * The fusion rules a Session leaves out (test only — {@link DISABLED_FUSION_RULES}) as the set its
- * fusion context carries, checked against the rule list the Session plans with (`FUSION_RULES`, the
- * list `Session.#planSteps` passes) by the pass's own check, so a bad name fails at construction
- * instead of at the first run.
+ * fusion context carries, checked against the rule list the Session plans with (`rules` — the list
+ * `Session.#planSteps` passes, external rules included) by the pass's own check, so a bad name fails
+ * at construction instead of at the first run.
  */
 const sessionDisabledFusionRules = (
   disabled: SessionOptions[typeof DISABLED_FUSION_RULES],
+  rules: readonly FusionRule[],
 ): "all" | ReadonlySet<string> | undefined => {
   if (disabled === undefined || disabled === "all") return disabled;
   const names: unknown = disabled;
@@ -672,7 +695,7 @@ const sessionDisabledFusionRules = (
     );
   }
   const set = new Set<string>(names);
-  assertDisabledRulesNamed(FUSION_RULES, set);
+  assertDisabledRulesNamed(rules, set);
   return set;
 };
 
@@ -711,7 +734,13 @@ export const buildSessionState = async (
   // condition here would split the accepted sets of the two entries.
   const violation = sessionOptionsViolation(options);
   if (violation !== undefined) throw new ExecutionError(violation);
-  const disabledFusionRules = sessionDisabledFusionRules(options[DISABLED_FUSION_RULES]);
+  // The rule list is fixed here, before any capability check and any byte uploaded: a value that
+  // is not a defined external rule fails now, not at the first run.
+  const fusionRules = sessionFusionRules(options.fusionRules);
+  const disabledFusionRules = sessionDisabledFusionRules(
+    options[DISABLED_FUSION_RULES],
+    fusionRules,
+  );
   // The expert cache's plan is GPU-independent too (the graph and the container's descriptor), so a
   // graph or a container it cannot serve fails before any capability check and any byte uploaded.
   const expertPlan =
@@ -1424,6 +1453,7 @@ export const buildSessionState = async (
     attentionI8a8Dot,
     rowBlockSplit: options[ROW_BLOCK_SPLIT],
     disabledFusionRules,
+    fusionRules,
     attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes,
     geometryProfile,
     fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,

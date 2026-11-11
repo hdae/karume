@@ -11,7 +11,7 @@ import type { BatchScope, ResidentTensor } from "../gpu/device.ts";
 import type { GpuTimingStats, SubmitPolicy, SubmitStats } from "../gpu/submit.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
-import type { FusionCounts } from "./fusion.ts";
+import type { FusionCounts, FusionRule } from "./fusion.ts";
 import type { GenerationContext } from "./generation-context.ts";
 import type { SymbolBindings } from "./plan.ts";
 import type { SharedWeight } from "./weight-residency.ts";
@@ -297,8 +297,10 @@ export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
  * {@link I8A8_DOT}).
  *
  * Leaves fusion rules out of the Session's fusion pass: `"all"` disables every rule of the Session's
- * rule list (`FUSION_RULES` in src/runtime/fusion.ts), an array disables the rules with those names,
- * and an empty array disables nothing. It gives the unfused plan of the same graph on the same
+ * rule list (`sessionFusionRules` in src/runtime/fusion.ts — the external rules of
+ * {@link SessionOptions.fusionRules}, then the built-in `FUSION_RULES`), an array disables the rules
+ * with those names (an external rule by its `<namespace>/<rule>` name), and an empty array disables
+ * nothing. It gives the unfused plan of the same graph on the same
  * device — the control side of a fused-vs-unfused identity check (`checkFusionTwin` in
  * packages/kernel-checks) and of an A/B timing. No public option does that (ADR 0147 decision 5);
  * it is a per-Session knob rather than an environment variable so that one process can run both.
@@ -745,6 +747,33 @@ export type SessionOptions = {
     readonly slots: number | readonly number[];
     readonly hostBytes?: number;
   };
+  /**
+   * **Fusion rules written outside the runtime** (default: none — ADR 0148). Each rule is a value of
+   * `defineRule` of `@karume/runtime/kernel` (experimental while the package is 0.x: it may change in
+   * a minor version) and folds a run of built-in ops of the graph into its own kernel dispatches. The
+   * graph and the container do not change, so the same graph runs without the rule, unfused.
+   *
+   * Fixed at construction. At each node the rules are tried in the order given, **before** the
+   * built-in rules: where a rule and a built-in rule could both take a node, the rule takes it. A
+   * rule's hits count under its `<namespace>/<rule>` name in {@link SessionDiagnostics.lastRunFusions}
+   * (0 when it did not fire).
+   *
+   * MUST: every entry is a rule `defineRule` of `@karume/runtime/kernel` built — a hand-written
+   * object, a copy of a rule or a built-in rule is refused — and no name is given twice; anything else
+   * fails loudly at construction (`ExecutionError`), before a byte is uploaded. Each time a rule builds
+   * a step it is checked again: its window, its binds, its output and its dispatch keys (which start
+   * with `ext:<namespace>:`) — a failure throws `ExecutionError` in the run that plans it.
+   *
+   * Passing a rule is the opt-in: the runtime does not check its numbers. A rule declares its
+   * contract class (`contract`, ADR 0147 decision 2), and a class E rule, which claims u32 identity
+   * with the unfused plan, carries its own fused-against-unfused check on each backend it runs on
+   * (docs/kernel-rules.md).
+   *
+   * NOTE: the memory estimate does not see these rules: `estimate` counts the graph as if no rule
+   * were given (the step temporaries a rule declares are not counted). Planning them in the estimate
+   * is later work (ADR 0148).
+   */
+  readonly fusionRules?: readonly FusionRule[];
   /**
    * Test only ({@link I8A8_DOT}). The default is decided from the enumeration of
    * wgslLanguageFeatures.

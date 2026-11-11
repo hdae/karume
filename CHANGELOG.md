@@ -15,6 +15,21 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/runtime`: `SessionOptions.fusionRules`, fusion rules written outside the runtime with `defineRule` of
+  `@karume/runtime/kernel`. A rule folds a run of the graph's built-in ops into its own kernel dispatches; the graph
+  and the container are unchanged. The rules are fixed at construction and tried before the built-in rules, in the
+  order given; a hit counts under the rule's `<namespace>/<rule>` name in `lastRunFusions`. Construction refuses
+  anything that `defineRule` did not build, a built-in rule and a name given twice. The memory estimate does not see
+  the rules (ADR 0148).
+
+### Breaking
+
+- `@karume/runtime`: `FusionCounts` gains optional keys for the rules of `SessionOptions.fusionRules`
+  (`<namespace>/<rule>`, `number | undefined`) next to the built-in counters, which stay present. Code that walks
+  every value of the record (`Object.values`, `Object.entries`) now gets `number | undefined`.
+
 ## [0.20.0] - 2026-11-10
 
 ### Added

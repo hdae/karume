@@ -45,7 +45,10 @@ export type ResidentWeightStorage =
 
 /** What {@link sessionFusionContext} maps to a {@link FusionContext}. */
 export type SessionFusionFacts<Name extends string> = {
-  /** The rule list the Session plans with (the built-in `FUSION_RULES` in fusion.ts). */
+  /**
+   * The rule list the Session plans with (`sessionFusionRules` in fusion.ts: the external rules it
+   * was given, then the built-in `FUSION_RULES`).
+   */
   readonly rules: readonly FusionRule<Name>[];
   readonly knobs: SessionFusionKnobs;
   /** Value name → consumer count in the graph (`countUses` in plan.ts). */
