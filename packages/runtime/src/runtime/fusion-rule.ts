@@ -849,7 +849,10 @@ const assertExternalBuild = (
   }
 };
 
-/** One try of a rule at `index` ({@link FusionRule.apply} of {@link brandedRule}'s rules). */
+/**
+ * One try of a rule at `index` ({@link FusionRule.apply} of {@link brandedRule}'s rules), on the
+ * frozen copy of its definition ({@link snapshotDefinition}).
+ */
 const applyRule = <Matched extends FusionMatch, Name extends string>(
   rule: FusionRuleDefinition<Matched, Name>,
   namespace: string | undefined,
@@ -906,6 +909,30 @@ const applyRule = <Matched extends FusionMatch, Name extends string>(
 };
 
 /**
+ * The definition as it was when a define entry ran: each field read once from the caller's object,
+ * checked, and kept in a frozen copy.
+ *
+ * MUST: the rule reads only this copy. The caller's object stays theirs to edit (deriving a variant
+ * by editing a shared definition is ordinary JavaScript), and a rule that read it live would take
+ * the later name — crediting its hits to another counter — and the later `internals`, `match` and
+ * `build`, past the checks run here.
+ */
+const snapshotDefinition = <Matched extends FusionMatch, Name extends string>(
+  rule: FusionRuleDefinition<Matched, Name>,
+): FusionRuleDefinition<Matched, Name> => {
+  const { name, heads, contract, internals, match, build } = rule;
+  assertDeclarations({ name, contract, internals });
+  return Object.freeze({
+    name,
+    heads: Object.freeze([...heads]),
+    contract,
+    internals,
+    match,
+    build,
+  });
+};
+
+/**
  * The rule a definition describes, branded with `origin`. For an external rule `namespace` is its
  * name's namespace, and the window and build checks of an external rule apply.
  */
@@ -913,12 +940,12 @@ const brandedRule = <Matched extends FusionMatch, Name extends string>(
   rule: FusionRuleDefinition<Matched, Name>,
   namespace: string | undefined,
 ): FusionRule<Name> => {
-  assertDeclarations(rule);
+  const definition = snapshotDefinition(rule);
   const defined: FusionRule<Name> = {
-    name: rule.name,
-    heads: Object.freeze([...rule.heads]),
-    contract: rule.contract,
-    apply: (nodes, index, context) => applyRule(rule, namespace, nodes, index, context),
+    name: definition.name,
+    heads: definition.heads,
+    contract: definition.contract,
+    apply: (nodes, index, context) => applyRule(definition, namespace, nodes, index, context),
   };
   const origin: RuleOrigin = namespace === undefined ? "built-in" : "external";
   Object.defineProperty(defined, RULE_BRAND, { value: origin });

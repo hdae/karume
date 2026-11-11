@@ -179,6 +179,20 @@ describe("defineExternalRule", () => {
     assertEquals(ruleOrigin({ ...external }), undefined, "a spread copy");
     assertEquals(ruleOrigin(undefined), undefined);
   });
+
+  it("keeps the definition as it was when it ran: editing the caller's object afterwards changes nothing the rule does", () => {
+    const definition = negNeg<ExternalRuleName>("test/neg_neg");
+    const rule = defineExternalRule(definition);
+    definition.name = "test/later";
+    definition.internals = outsideTheType("anything");
+    definition.match = () => undefined;
+    const folded = plan([rule]);
+    assertEquals(
+      folded.steps.map((step) => (step.kind === "fused" ? step.rule : step.plan.node.op)),
+      ["abs", "test/neg_neg"],
+    );
+    assertEquals(folded.counts["test/neg_neg"], 1);
+  });
 });
 
 describe("an external rule building a step", () => {
