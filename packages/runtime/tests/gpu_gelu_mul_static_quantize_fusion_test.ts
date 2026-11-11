@@ -8,6 +8,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import {
@@ -19,6 +20,7 @@ import {
 import { staticQuantizeParams } from "../src/kernels/static-quantize.ts";
 import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import {
   geluMulStaticQuantizeGraph,
   type GeluMulStaticQuantizeGraphOptions,
@@ -217,6 +219,7 @@ const pleWords = async (
 
 /** Runs the chain flag off and on and compares the SRQ words (and the gate's late consumer) as u32. */
 const assertIdentity = async (
+  gpu: GpuContext,
   chain: Chain,
   scale: number,
   seed: number,
@@ -232,16 +235,21 @@ const assertIdentity = async (
   const hits = [...targeted].filter(([i, target]) => product[i] === target).length;
   assert(hits >= targeted.size * 0.95, `${label}: ${hits}/${targeted.size} on a boundary`);
   if (scale !== 0) assert(targeted.size > 0, `${label}: no boundary targeted`);
-  const expected = await chain.reference.run(inputs);
-  const before = chain.fused.diagnostics().submit.dispatchCount;
-  const actual = await chain.fused.run(inputs);
-  assertEquals(words(actual.y), words(expected.y), `${label}: SRQ words`);
-  assertEquals(words(actual.copy), words(expected.copy), `${label}: the gate after the fold`);
-  assertEquals(chain.fused.diagnostics().lastRunFusions?.geluMulStaticQuantize, 1, label);
-  assertEquals(chain.reference.diagnostics().lastRunFusions?.geluMulStaticQuantize, 0, label);
   // gelu_tanh + mul + static_quantize + neg (+ slice) → fused + neg (+ slice).
   const plain = (chain.options.other ?? "slice") === "slice" ? 3 : 2;
-  assertEquals(chain.fused.diagnostics().submit.dispatchCount - before, plain, label);
+  // The SRQ words (y) and the gate after the fold (copy).
+  assertCheckCase(
+    await checkFusionTwin(gpu, {
+      label,
+      fused: chain.fused,
+      plain: chain.reference,
+      feeds: inputs,
+      counter: "geluMulStaticQuantize",
+      hits: 1,
+      nan: "payload",
+      dispatches: { fused: plain },
+    }),
+  );
 };
 
 describe.skipIf(!GPU_AVAILABLE)("gelu_tanh → mul → SRQ fusion (real GPU)", () => {
@@ -254,6 +262,7 @@ describe.skipIf(!GPU_AVAILABLE)("gelu_tanh → mul → SRQ fusion (real GPU)", (
           try {
             for (const seed of [11, 29]) {
               await assertIdentity(
+                gpu,
                 chain,
                 scale,
                 seed + index + rows * 101,
@@ -282,7 +291,7 @@ describe.skipIf(!GPU_AVAILABLE)("gelu_tanh → mul → SRQ fusion (real GPU)", (
         for (const scale of [Math.fround(0.0371), 0]) {
           const chain = await openChain(gpu, { rows: 8, order, other, scale });
           try {
-            await assertIdentity(chain, scale, 7, `${order} / ${other} / scale ${scale}`);
+            await assertIdentity(gpu, chain, scale, 7, `${order} / ${other} / scale ${scale}`);
           } finally {
             await disposeChain(chain);
           }
