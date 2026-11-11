@@ -406,7 +406,8 @@ export type FusionContext<Name extends string = string> = {
 /**
  * What the matcher of a rule written outside the runtime reads (`match` of
  * {@link ExternalRuleDefinition} — the third argument of a matcher written against
- * `@karume/runtime/kernel`): the graph facts a rule is written with, and nothing a plan decides.
+ * `@karume/runtime/kernel`): the graph facts a rule is written with and the device's limits, and
+ * nothing a plan decides.
  *
  * MUST: no Session knob, no rule list and no packed-activation decision enters it. A matcher that
  * read the knobs would make the public type change with every new planning knob, one that read the
@@ -420,6 +421,11 @@ export type FusionMatchContext = {
   readonly useCounts: ReadonlyMap<string, number>;
   /** The graph outputs (read back after a run, so a fold may not leave them unmaterialised). */
   readonly outputNames: ReadonlySet<string>;
+  /**
+   * The device's granted limits the plan reads ({@link FusionLimits}, frozen), so a matcher can
+   * decline a window whose dispatch would exceed one. A device fact, fixed per Session, not a knob.
+   */
+  readonly limits: FusionLimits;
 };
 
 /**
@@ -440,9 +446,16 @@ export type FusionScanContext = FusionContext & {
   readonly matchContext: FusionMatchContext;
 };
 
-/** The {@link FusionMatchContext} of a plan's context: its graph facts, frozen. */
+/** The {@link FusionMatchContext} of a plan's context: its graph facts and limits, frozen. */
 export const fusionMatchContext = (context: FusionContext): FusionMatchContext =>
-  Object.freeze({ useCounts: context.useCounts, outputNames: context.outputNames });
+  Object.freeze({
+    useCounts: context.useCounts,
+    outputNames: context.outputNames,
+    limits: Object.freeze({
+      maxStorageBufferBindingSize: context.limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupsPerDimension: context.limits.maxComputeWorkgroupsPerDimension,
+    }),
+  });
 
 export const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
   a.length === b.length && a.every((dim, index) => dim === b[index]);

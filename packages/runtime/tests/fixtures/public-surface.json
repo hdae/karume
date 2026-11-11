@@ -497,6 +497,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "FusionLimits",
+        "kind": "typeAlias"
+      },
+      {
         "name": "FusionMatch",
         "kind": "typeAlias"
       },

@@ -1047,7 +1047,11 @@ test("adaLN's in-window passthroughs do not take away other rules' match positio
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
     packedValues: new Map<string, number>(),
-    matchContext: { useCounts: countUses(ir), outputNames: new Set(ir.outputs) },
+    matchContext: {
+      useCounts: countUses(ir),
+      outputNames: new Set(ir.outputs),
+      limits: TEST_LIMITS,
+    },
   };
   // Checks that nothing but adaln matches at **every start position** of the window (layer_norm +
   // reshape×3 + add + mul + add). `reshape` is also upsample2x's first op, so only here can it be

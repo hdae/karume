@@ -19,6 +19,7 @@ import {
   type FusedOperand,
   type FusedWorkgroups,
   type FusionMatch,
+  type FusionMatchContext,
   type FusionRule,
   type FusionRuleDefinition,
   ruleOrigin,
@@ -314,8 +315,8 @@ describe("defineExternalRule", () => {
 });
 
 describe("an external rule building a step", () => {
-  it("gives its matcher only the graph's use counts and outputs, one frozen context per scan", () => {
-    const seen: unknown[] = [];
+  it("gives its matcher only the graph's use counts and outputs and the device limits, one frozen context per scan", () => {
+    const seen: FusionMatchContext[] = [];
     const definition = negNeg("test/neg_neg");
     plan([
       defineExternalRule({
@@ -331,8 +332,14 @@ describe("an external rule building a step", () => {
     assertEquals(seen.length, 2);
     const [context] = seen;
     assert(typeof context === "object" && context !== null);
-    assertEquals(Object.keys(context).sort(), ["outputNames", "useCounts"]);
+    assertEquals(Object.keys(context).sort(), ["limits", "outputNames", "useCounts"]);
     assert(Object.isFrozen(context), "the context is frozen");
+    const { limits } = context;
+    assertEquals(limits, {
+      maxStorageBufferBindingSize: 128 * 1024 * 1024,
+      maxComputeWorkgroupsPerDimension: 65535,
+    });
+    assert(Object.isFrozen(limits), "the limits are frozen");
     assert(seen[1] === context, "both tries of one scan read the same context");
   });
 

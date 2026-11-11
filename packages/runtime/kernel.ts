@@ -15,8 +15,8 @@
  *   ops it can take (`heads` — it is tried only at a node of one of them), its contract class
  *   (`contract`, ADR 0147 decision 2 — `"E"` for a rule u32-identical to the unfused plan), who may
  *   read the chain's internal values (`internals`), a matcher that grabs a window of nodes (it reads
- *   the nodes and a {@link FusionMatchContext} — the graph's use counts and outputs, nothing a plan
- *   decides), and a build that lowers it to dispatches: the binds, the output, the step's
+ *   the nodes and a {@link FusionMatchContext} — the graph's use counts and outputs and the device's
+ *   {@link FusionLimits}, nothing a plan decides), and a build that lowers it to dispatches: the binds, the output, the step's
  *   temporaries and, per dispatch, a key, the WGSL, the params and the workgroup count. Only its
  *   return value is a rule a Session takes. It applies the checks every rule meets (single-output
  *   nodes, no node that touches state, the declared privacy, a window that starts where it was
@@ -71,6 +71,7 @@ export type {
   FusedTemp,
   FusedWorkgroups,
   FusionHit,
+  FusionLimits,
   FusionMatch,
   FusionMatchContext,
   FusionRule,
