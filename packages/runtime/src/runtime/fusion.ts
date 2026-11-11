@@ -985,6 +985,12 @@ const packedStaticQuantizeValues = (
  * grab the same window** — the pairing's input never moves in the second scan. The built-in rules
  * keep this by construction; an external rule's matcher sees no packed value, and its step on the
  * second scan is checked to leave every pair alone ({@link assertPackedPairsUntouched}).
+ * MUST: the pairing is a fixpoint of the final plan, whatever rule caused a difference. An external
+ * matcher can still answer differently on the two scans (a matcher that keeps state), and then a
+ * built-in rule can take a window on the second scan that the first left plain — the linear→SRQ
+ * fusion folding a paired SRQ, which writes f32 words its packed reader takes as int8 codes. So the
+ * pairing is recomputed from the final steps as the first scan's were read, and a difference fails
+ * loudly ({@link assertPackedFixpoint}).
  */
 export const planFusions = <Name extends string>(
   nodes: readonly NodePlan[],
@@ -993,7 +999,40 @@ export const planFusions = <Name extends string>(
   const rules = triedRules(context);
   const first = scanFusions(nodes, context, rules, NO_PACKED);
   const packed = packedStaticQuantizeValues(nodes, first.steps, context);
-  return packed.size === 0 ? first : scanFusions(nodes, context, rules, packed);
+  if (packed.size === 0) return first;
+  const final = scanFusions(nodes, context, rules, packed);
+  assertPackedFixpoint(packed, packedStaticQuantizeValues(nodes, final.steps, context), context);
+  return final;
+};
+
+/**
+ * Checks that the packed values the final scan was planned with ({@link packedStaticQuantizeValues}
+ * of the first scan's steps) are the ones its own steps give: the same values with the same scales.
+ *
+ * The built-in rules grab the same windows on both scans by construction, so only a rule whose
+ * matcher is not a pure function of its arguments can make them differ; the refusal names the
+ * external rules of the list, the only ones that can be.
+ */
+const assertPackedFixpoint = (
+  planned: ReadonlyMap<string, number>,
+  given: ReadonlyMap<string, number>,
+  context: FusionContext,
+): void => {
+  const same =
+    planned.size === given.size &&
+    [...planned].every(([name, scale]) => Object.is(given.get(name), scale));
+  if (same) return;
+  const external = context.rules.filter((rule) => isExternalRuleName(rule.name));
+  const names = (values: ReadonlyMap<string, number>): string =>
+    values.size === 0 ? "none" : [...values.keys()].map((name) => `'${name}'`).join(", ");
+  throw new ExecutionError(
+    "fusion rules: the plan changed between the two planning scans (the packed int8 activations of ADR 0105" +
+      ` were planned as ${names(planned)} from the first scan, and the final plan gives ${names(given)}):` +
+      " a rule's matcher is not a pure function of its arguments — " +
+      (external.length === 0
+        ? "the list has no external rule"
+        : `the external rules in the list are ${external.map((rule) => `'${rule.name}'`).join(", ")}`),
+  );
 };
 
 /**

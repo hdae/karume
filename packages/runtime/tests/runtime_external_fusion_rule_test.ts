@@ -23,7 +23,12 @@ import {
   type FusionRuleDefinition,
   ruleOrigin,
 } from "../src/runtime/fusion-rule.ts";
-import { type FusionContext, type FusionPlan, planFusions } from "../src/runtime/fusion.ts";
+import {
+  type FusionContext,
+  type FusionPlan,
+  planFusions,
+  sessionFusionRules,
+} from "../src/runtime/fusion.ts";
 import {
   bindSymbols,
   countUses,
@@ -726,6 +731,107 @@ describe("an external rule and the packed int8 activations (ADR 0105)", () => {
         op,
       );
     }
+  });
+
+  /**
+   * `h = linear(src, w0, b0)` before the pair: the linear→SRQ rule can fold `h`'s linear with the
+   * static_quantize, which then writes f32 words, not packed codes.
+   */
+  const LEADING_LINEAR_GRAPH: DeclarationJson = {
+    ...PACKED_GRAPH,
+    inputs: [{ name: "src", dtype: "f32", shape: [ROWS, N] }],
+    initializers: { w0: {}, b0: {}, w: {}, b: {} },
+    values: {
+      ...PACKED_GRAPH.values,
+      w0: { dtype: "f32", shape: [K, N] },
+      b0: { dtype: "f32", shape: [K] },
+      h: { dtype: "f32", shape: [ROWS, K] },
+    },
+    nodes: [
+      { op: "linear", ins: ["src", "w0", "b0"], outs: ["h"], attrs: {} },
+      { op: "static_quantize", ins: ["h"], outs: ["xq"], attrs: { scale: Math.fround(0.00071) } },
+      { op: "linear", ins: ["xq", "w", "b"], outs: ["y"], attrs: {} },
+    ],
+  };
+
+  it("fails loudly, naming the external rules, when a matcher's answer differs between the scans and a built-in rule then takes a paired value", () => {
+    const graph = mergeGraph(LEADING_LINEAR_GRAPH, {
+      w0: { codec: "int2-off" },
+      w: { codec: "int2-off" },
+    });
+    const planWith = (rules: readonly FusionRule[]): FusionPlan<string> =>
+      planFusions(planGraph(graph, {}).nodes, {
+        rules,
+        useCounts: countUses(graph),
+        outputNames: new Set(graph.outputs),
+        limits: {
+          maxStorageBufferBindingSize: 128 * 1024 * 1024,
+          maxComputeWorkgroupsPerDimension: 65535,
+        },
+        packedStaticQuantize: true,
+        fuseLinearStaticQuantize: true,
+        linearGemvReduce: "parallel",
+        linearCompute: "f32",
+        weightLayouts: new Map([
+          ["w0", { storage: "i2" }],
+          ["w", { storage: "i2" }],
+        ]),
+      });
+    // The controls: the built-in rules alone fold the leading linear with the static_quantize
+    // (nothing is paired), and a rule that folds the leading linear on both scans leaves the pair.
+    assertEquals(
+      planWith(sessionFusionRules(undefined)).steps.map((step) =>
+        step.kind === "node" ? `${step.plan.node.op}:${step.packedActivations?.role}` : step.rule,
+      ),
+      ["linearStaticQuantize", "linear:undefined"],
+    );
+    const leading = (name: ExternalRuleName, folds: () => boolean) =>
+      defineExternalRule<FusionMatch, ExternalRuleName>({
+        name,
+        heads: ["linear"],
+        contract: "E",
+        internals: "private",
+        match: (nodes, index) => {
+          const node = nodes[index];
+          return node.node.ins[0] === "src" && folds()
+            ? { window: [node], chain: [node] }
+            : undefined;
+        },
+        build: (matched) => ({
+          binds: [...matched.chain[0].node.ins],
+          outputName: "h",
+          outputShape: [ROWS, K],
+          temps: [],
+          dispatches: [
+            {
+              key: `ext:${name.split("/")[0]}:leading`,
+              wgsl: () => "",
+              params: new Uint32Array(4),
+              workgroups: { kind: "gridStride", items: 32, size: 64 },
+            },
+          ],
+        }),
+      });
+    assertEquals(
+      planWith(sessionFusionRules([leading("test/always", () => true)])).steps.map((step) =>
+        step.kind === "node" ? `${step.plan.node.op}:${step.packedActivations?.role}` : step.rule,
+      ),
+      ["test/always", "static_quantize:write", "linear:read"],
+    );
+    // Folds on its first try only: the first scan leaves the static_quantize plain (so `xq` is
+    // paired), and on the second the linear→SRQ rule takes it.
+    let tries = 0;
+    const once = leading("test/once", () => {
+      tries += 1;
+      return tries === 1;
+    });
+    assertThrows(
+      () => planWith(sessionFusionRules([once])),
+      ExecutionError,
+      "fusion rules: the plan changed between the two planning scans (the packed int8 activations of ADR 0105" +
+        " were planned as 'xq' from the first scan, and the final plan gives none): a rule's matcher is not a" +
+        " pure function of its arguments — the external rules in the list are 'test/once'",
+    );
   });
 });
 
