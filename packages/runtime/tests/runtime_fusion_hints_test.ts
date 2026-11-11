@@ -6,10 +6,12 @@
  * are dropped", with a control for each eligibility condition (single output / no state access /
  * f32 / the chain's internal values do not escape).
  *
- * No test cross-checks the enumeration against real assets (reproducing known hit counts,
- * detecting double counting) or aggregates it: that check lived in tools/fusion-hints, which was
- * removed in 0.15 with its test. A replacement belongs with the assets, not here — runtime tests
- * do not import tools or real assets (ADR 0008 addendum 2026-09-03).
+ * The checks against real assets and the aggregation live with the assets in packages/e2e, not
+ * here — runtime tests do not import tools or real assets (ADR 0008 addendum 2026-09-03): the
+ * fusion candidate search (`packages/e2e/tests/helpers/fusion-candidates.ts`, unit-tested in
+ * `fusion_candidates_test.ts`) keeps the maximal windows and ranks them, and the family
+ * fusion-count tests reproduce known hit counts with fusion off (anima) and pin known misses as
+ * candidates (MOSS-Image, Wan2.1, Irodori).
  */
 
 import { test } from "vite-plus/test";

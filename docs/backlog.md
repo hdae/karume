@@ -207,7 +207,9 @@ maintainer's ruling of 2026-11-06).
   - The order in which the rest of the removed 0.14.0 tools and examples (v0.14.0 tag) come back as `apps/playground`
     pages (ADR 0127 decision 5): the tools `anima-residency`, `birefnet-ab`, `flag-bench`, `fusion-hints`, `llm-speed`,
     `mtp-bench`, `opbench`, `ram-peak` and `wan-seams`, and the examples `minicpm5`, `qwen3`, `vowel-detector` and `wan`
-    (Wan2.1).
+    (Wan2.1). `fusion-hints`' search itself is back (2026-11-11) as the fusion candidate search of `packages/e2e`
+    (`tests/helpers/fusion-candidates.ts`, and the opt-in report `KARUME_FUSION_CANDIDATES=<dir>` of
+    `e2e_fusion_candidates_report_test.ts`); only its page is still to come.
   - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
     `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
   - Small doc edits: `packages/e2e/README.md` names `outputs/series/` but not `outputs/test-assets/` (ADR
@@ -338,6 +340,12 @@ maintainer's ruling of 2026-11-06).
   becomes the topic again (re-measure the TTFT attribution of research 2026-09-19 §15.2 first — "the prefill arena path"
   is not in hit runs, as corrected in the addendum of 2026-09-25). The adoption of candidates and the kill criteria are
   in [perf-ledger](perf-ledger.md), the attribution in [research 2026-09-19](research/2026-09-19-qat-speed-recon.md).
+
+- **Fusion hit-count checks for the families without one (filed 2026-11-11, with the fusion candidate search)**: a fusion that
+  stops matching only moves performance, so a family without a hit-count check (`packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`)
+  would not notice. MOSS-Image's DiT stage gained one with the candidate search; still without: sbv2 (DeBERTa included),
+  umT5, BiRefNet, Depth Anything, SigLIP2, vowel-detector, Qwen3.5 (MOSS-Image's text encoder), Gemma 4 26B and the q4_0 QAT
+  line, and Irodori v4.1-small. The opt-in candidate report already binds and plans those with a local mirror.
 
 - **Ruling on the contracts that block large in-layer fusion (filed 2026-09-19)**: part of the dispatch gap to WebML is
   blocked jointly by `windowTouchesState` MUST (ADR 0067) and the single-output MUST of fused steps
