@@ -7,6 +7,7 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { rmsNormWorkgroupKey } from "../src/kernels/rms-norm.ts";
 import { RMS_NORM_ROPE_KEY } from "../src/kernels/rms-norm-rope.ts";
@@ -14,22 +15,9 @@ import { ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 import { rmsNormRopeGraph } from "./helpers/rms-norm-rope-graph.ts";
-
-const words = (tensor: Tensor): Uint32Array =>
-  new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
-
-/** The first differing word, or `undefined`. */
-const firstDifference = (actual: Uint32Array, expected: Uint32Array): string | undefined => {
-  if (actual.length !== expected.length) return `length ${actual.length} vs ${expected.length}`;
-  for (let i = 0; i < actual.length; i += 1) {
-    if (actual[i] !== expected[i]) {
-      return `word ${i}: 0x${actual[i].toString(16)} vs 0x${expected[i].toString(16)}`;
-    }
-  }
-  return undefined;
-};
 
 /**
  * The graph inputs: q / k / v rows, the two norm weights and the tables, with special values in
@@ -86,32 +74,31 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         try {
           const given = inputs(heads, headDim, sequence);
+          assertCheckCase(
+            await checkFusionTwin(gpu, {
+              label,
+              fused,
+              plain,
+              feeds: given,
+              counter: "rmsNormRope",
+              hits: 2,
+              nan: "payload",
+              outputs: OUTPUTS,
+              // q and k one dispatch each, plus v's neg; the plain path runs both rms_norms and
+              // both pair RoPEs (the reshapes are zero-dispatch aliases).
+              dispatches: { fused: 3, plain: 5 },
+            }),
+          );
+          // The shapes, from a run of each side of its own (the harness returns a case).
           const actual = await fused.run(given);
           const expected = await plain.run(given);
           for (const name of OUTPUTS) {
             assertEquals(actual[name].shape, expected[name].shape, `${label}: ${name} shape`);
-            assertEquals(
-              firstDifference(words(actual[name]), words(expected[name])),
-              undefined,
-              `${label}: ${name}`,
-            );
           }
           const fusedRun = fused.diagnostics();
           const plainRun = plain.diagnostics();
-          assertEquals(
-            [fusedRun.lastRunFusions?.rmsNormRope, fusedRun.lastRunFusions?.rope],
-            [2, 0],
-            `${label}: fused counters`,
-          );
-          assertEquals(
-            [plainRun.lastRunFusions?.rmsNormRope, plainRun.lastRunFusions?.rope],
-            [0, 2],
-            `${label}: plain counters`,
-          );
-          // q and k one dispatch each, plus v's neg; the plain path runs both rms_norms and both
-          // pair RoPEs (the reshapes are zero-dispatch aliases).
-          assertEquals(fusedRun.submit.dispatchCount, 3, `${label}: fused dispatches`);
-          assertEquals(plainRun.submit.dispatchCount, 5, `${label}: plain dispatches`);
+          assertEquals(fusedRun.lastRunFusions?.rope, 0, `${label}: fused counters`);
+          assertEquals(plainRun.lastRunFusions?.rope, 2, `${label}: plain counters`);
           const census = requireCensus(fusedRun.lastRunPipelines, label);
           assertEquals(countDispatches(census, RMS_NORM_ROPE_KEY), 2, `${label}: census`);
           assertEquals(
@@ -162,17 +149,18 @@ test.skipIf(!GPU_AVAILABLE)(
         GRAPH_NAME,
       );
       try {
-        const given = inputs(heads, headDim, sequence);
-        const actual = await fused.run(given);
-        const expected = await plain.run(given);
-        for (const name of OUTPUTS) {
-          assertEquals(
-            firstDifference(words(actual[name]), words(expected[name])),
-            undefined,
-            name,
-          );
-        }
-        assertEquals(fused.diagnostics().lastRunFusions?.rmsNormRope, 2);
+        assertCheckCase(
+          await checkFusionTwin(gpu, {
+            label: "grid-stride",
+            fused,
+            plain,
+            feeds: inputs(heads, headDim, sequence),
+            counter: "rmsNormRope",
+            hits: 2,
+            nan: "payload",
+            outputs: OUTPUTS,
+          }),
+        );
       } finally {
         await fused.dispose();
         await plain.dispose();
