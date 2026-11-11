@@ -1,6 +1,17 @@
+// The twin cases of the RMS→add fusion live in @karume/kernel-checks (checkRmsNormAddTwins), which
+// the playground's /kernel-check page runs on the browser's backend too; the row identity across
+// row counts, the forced grid-stride dispatch and the option's rejection stay here.
+
 import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { checkFusionTwin } from "@karume/kernel-checks";
+import {
+  checkRmsNormAddTwins,
+  RMS_NORM_ADD_DIMS,
+  RMS_NORM_ADD_ORDERS,
+  RMS_NORM_ADD_ROWS,
+  RMS_NORM_ADD_TWIN_CASES,
+  rmsNormAddInputs,
+} from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
 import {
   createSessionFromContainer,
@@ -11,83 +22,52 @@ import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import { rmsNormAddWgsl, rmsNormParams } from "../src/kernels/rms-norm.ts";
 import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { assertCheckCase, assertWordIdentity } from "./helpers/kernel-check-assert.ts";
+import { assertCheckPart, assertWordIdentity } from "./helpers/kernel-check-assert.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 
 const words = (t: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(t.data.buffer, t.data.byteOffset, t.data.length);
 
 describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
-  for (const dim of [256, 1536, 2560, 2816, 3840]) {
-    for (const normFirst of [false, true]) {
-      it(`dim=${dim} / normFirst=${normFirst}: matches the reference across row counts and cancellation`, async () => {
+  it("matches the reference across widths, orders, row counts and cancellation", async () => {
+    const gpu = await acquireGpu();
+    try {
+      const part = await checkRmsNormAddTwins(gpu);
+      assertEquals([part.id, part.cases.length], Object.entries(RMS_NORM_ADD_TWIN_CASES)[0]);
+      assertCheckPart(part);
+    } finally {
+      gpu.destroy();
+    }
+  });
+  for (const dim of RMS_NORM_ADD_DIMS) {
+    for (const normFirst of RMS_NORM_ADD_ORDERS) {
+      it(`dim=${dim} / normFirst=${normFirst}: the M=1 row matches the first row of every multi-row run`, async () => {
         const gpu = await acquireGpu();
         try {
           let firstRow: Uint32Array<ArrayBuffer> | undefined;
-          for (const rows of [1, 4, 8, 40, 64]) {
-            const options = { rows, dim, normFirst };
+          for (const rows of RMS_NORM_ADD_ROWS) {
             const fused = await createSessionFromContainer(
               gpu,
-              await openModelBytes(rmsNormAddGraph(options), []),
+              await openModelBytes(rmsNormAddGraph({ rows, dim, normFirst }), []),
               GRAPH_NAME,
               { fuseRmsNormAdd: true },
             );
-            const reference = await createSessionFromContainer(
-              gpu,
-              await openModelBytes(rmsNormAddGraph({ ...options, normOutput: true }), []),
-              GRAPH_NAME,
-            );
             try {
-              for (const pattern of ["finite", "cancel", "special", "zeros"]) {
-                const x = fill([rows, dim], (i) => Math.sin((i % dim) * 0.713 + 0.19) * 4);
-                const w = fill([dim], (i) => 0.2 + Math.cos(i * 0.17));
-                const r = fill([rows, dim], (i) => Math.cos((i % dim) * 0.531) * 3);
-                if (pattern === "special") {
-                  words(x).set([
-                    0, 0x80000000, 1, 0x80000001, 0x00800000, 0x80800000, 0x7f800000, 0xff800000,
-                    0x7fc00123,
-                  ]);
-                }
-                if (pattern === "zeros") {
-                  words(x).set(
-                    Uint32Array.from({ length: rows * dim }, (_, i) => (i % 2 ? 0x80000000 : 0)),
-                  );
-                }
-                if (pattern === "cancel") {
-                  const n = (await reference.run({ x, w, r })).n;
-                  for (let i = 0; i < n.data.length; i++) r.data[i] = -n.data[i];
-                }
-                // y and the late x consumer (`copy`); the reference also outputs the norm.
-                assertCheckCase(
-                  await checkFusionTwin(gpu, {
-                    label: `${rows}/${pattern}`,
-                    fused,
-                    plain: reference,
-                    feeds: { x, w, r },
-                    counter: "rmsNormAdd",
-                    hits: 1,
-                    nan: "class",
-                    outputs: ["y", "copy"],
-                    dispatches: { fused: 2 },
-                  }),
+              const row = words((await fused.run(rmsNormAddInputs(rows, dim, "finite"))).y).slice(
+                0,
+                dim,
+              );
+              if (firstRow === undefined) firstRow = row;
+              else {
+                assertWordIdentity(
+                  row,
+                  firstRow,
+                  "class",
+                  "M=1 matches the first row of the multi-row run",
                 );
-                if (pattern === "finite") {
-                  // The fused output, from a run of its own (the harness returns a case).
-                  const row = words((await fused.run({ x, w, r })).y).slice(0, dim);
-                  if (firstRow === undefined) firstRow = row;
-                  else {
-                    assertWordIdentity(
-                      row,
-                      firstRow,
-                      "class",
-                      "M=1 matches the first row of the multi-row run",
-                    );
-                  }
-                }
               }
             } finally {
               await fused.dispose();
-              await reference.dispose();
             }
           }
         } finally {

@@ -103,6 +103,14 @@ export {
   rowBlockBudget,
   type RowBlockShape,
 } from "./src/fusion-twins/row-block-attention.ts";
+export {
+  checkRmsNormAddTwins,
+  RMS_NORM_ADD_DIMS,
+  RMS_NORM_ADD_ORDERS,
+  RMS_NORM_ADD_ROWS,
+  RMS_NORM_ADD_TWIN_CASES,
+  rmsNormAddInputs,
+} from "./src/fusion-twins/rms-norm-add.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
