@@ -118,11 +118,12 @@ export const buildBenchRecord = (input: {
   readonly arms: readonly RunArm[];
   /** The distribution of every mount an arm reads. */
   readonly distributions: Partial<Readonly<Record<GemmaMount, ArmDistribution>>>;
-  readonly source: SourceRecord;
+  /** The source of every mount an arm reads (one choice for the run; a mount without a cached route is direct). */
+  readonly sources: Partial<Readonly<Record<GemmaMount, SourceRecord>>>;
   readonly visits: readonly VisitRecord[];
   readonly chats: readonly ChatRecord[];
 }): DecodeBenchRecord => {
-  const { environment, settings, arms, distributions, source } = input;
+  const { environment, settings, arms, distributions, sources } = input;
   const environmentKey = chromeEnvironmentKey(environment.userAgent, environment.adapter);
   return {
     format: RECORD_FORMAT,
@@ -148,6 +149,8 @@ export const buildBenchRecord = (input: {
     arms: arms.map((arm, index) => {
       const distribution = distributions[arm.mount];
       if (distribution === undefined) throw new Error(`No distribution facts for '${arm.mount}'`);
+      const source = sources[arm.mount];
+      if (source === undefined) throw new Error(`No source for '${arm.mount}'`);
       return {
         index: index + 1,
         mount: arm.mount,

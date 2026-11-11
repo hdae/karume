@@ -1073,8 +1073,10 @@ A decode A/B of regular Gemma 4 and its q4_0 QAT line (`gemma.Pipeline`, mounts 
 `gemma4-qat-mobile`), kept as a page so each measurement wave reuses it
 (ADR 0127 decision 5). An **arm** is a model of any of the three distributions at one preset, with the GPU tap
 on or off. The page builds each arm's pipeline the way the chat page does (`buildGemmaPipeline`),
-always over the **direct route** (the mounts also have a cached route, which the bench does not
-offer): one route for every arm keeps the source out of the comparison.
+from one source chosen on the page: the **cached route** by default (the hub's cache, so the visits
+after the first read the browser's CacheStorage) or the direct route (`/models/`, fetched anew on
+every visit). An arm whose distribution has no cached route reads it directly; the record keeps each
+arm's source.
 
 **The GPU tap** (`src/models/gemma4-bench/tap.ts`). The page acquires its GPU through a wrapper of
 `navigator.gpu` (`acquireGpu({ subgroups: "available", gpu: tap.gpu })`). The wrapper requests

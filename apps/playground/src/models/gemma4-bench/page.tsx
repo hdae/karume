@@ -23,6 +23,7 @@ import { MountBadges } from "@/components/mount-badges";
 import { PresetSelect } from "@/components/preset-select";
 import { RecordActions } from "@/components/record-actions";
 import { RunStatusCard } from "@/components/run-status-card";
+import { SourcePicker } from "@/components/source-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,11 +43,17 @@ import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { type GpuOptions, useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import { type DistributionStatus, mountStatus, type PipelineSource } from "@/lib/distributions";
+import {
+  type DistributionStatus,
+  hfRepoRef,
+  mountStatus,
+  type PipelineSource,
+  type SourceKind,
+} from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";
-import { sha256Hex, sourceRecord, type Spread } from "@/lib/record";
+import { sha256Hex, type SourceRecord, sourceRecord, type Spread } from "@/lib/record";
 import {
   GEMMA_MOUNTS,
   type GemmaManifests,
@@ -93,12 +100,6 @@ import {
 } from "./summary";
 import { createGpuTap, type DeviceProbe, type GpuTap } from "./tap";
 
-/**
- * Both distributions are read over the direct route (both also have a cached one, which the bench
- * does not offer): one route for every arm keeps the source out of the comparison.
- */
-const DIRECT_SOURCE: PipelineSource = { kind: "direct" };
-
 /** What one press of Run started, and what has landed since (kept when a later step fails). */
 type BenchResult = {
   readonly environment: RecordEnvironment;
@@ -106,6 +107,8 @@ type BenchResult = {
   readonly settings: BenchSettings;
   readonly arms: readonly RunArm[];
   readonly distributions: Partial<Record<GemmaMount, ArmDistribution>>;
+  /** The source each mount was read from in this run. */
+  readonly sources: Readonly<Record<GemmaMount, SourceRecord>>;
   readonly visits: readonly VisitRecord[];
   readonly chats: readonly ChatRecord[];
   readonly complete: boolean;
@@ -165,6 +168,24 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
     }),
     [distributionIndex],
   );
+  // One choice for every arm: the cached route where the arm's mount has one, the direct route
+  // otherwise (a bench builds every arm's pipeline once per visit, and the direct route fetches the
+  // weights anew each time).
+  const [sourceKind, setSourceKind] = useState<SourceKind>("cached");
+  const sources = useMemo((): Readonly<Record<GemmaMount, PipelineSource>> => {
+    const sourceOf = (mount: GemmaMount): PipelineSource => {
+      const hf = statuses[mount]?.hf;
+      return sourceKind === "cached" && hf !== undefined
+        ? { kind: "cached", ref: hfRepoRef(hf, document.baseURI), cacheGeneration: 0 }
+        : { kind: "direct" };
+    };
+    return {
+      gemma4: sourceOf("gemma4"),
+      "gemma4-qat": sourceOf("gemma4-qat"),
+      "gemma4-qat-mobile": sourceOf("gemma4-qat-mobile"),
+    };
+  }, [sourceKind, statuses]);
+  const cachedAvailable = GEMMA_MOUNTS.some((mount) => statuses[mount]?.hf !== undefined);
   const regularManifest = useManifest("gemma4", statuses.gemma4);
   const qatManifest = useManifest("gemma4-qat", statuses["gemma4-qat"]);
   const mobileManifest = useManifest("gemma4-qat-mobile", statuses["gemma4-qat-mobile"]);
@@ -262,6 +283,11 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
       settings,
       arms: runArms,
       distributions,
+      sources: {
+        gemma4: sourceRecord(sources.gemma4),
+        "gemma4-qat": sourceRecord(sources["gemma4-qat"]),
+        "gemma4-qat-mobile": sourceRecord(sources["gemma4-qat-mobile"]),
+      },
       visits: [],
       chats: [],
       complete: false,
@@ -284,7 +310,7 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                   mount: arm.mount,
                   model: arm.model,
                   quant: arm.quant,
-                  source: DIRECT_SOURCE,
+                  source: sources[arm.mount],
                   speculative: false,
                 },
                 signal: buildSignal,
@@ -316,7 +342,7 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
             settings: result.settings,
             arms: result.arms,
             distributions: result.distributions,
-            source: sourceRecord(DIRECT_SOURCE),
+            sources: result.sources,
             visits: result.visits,
             chats: result.chats,
           }),
@@ -393,12 +419,19 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
               <CardDescription>
                 A model of either distribution at one preset. Every visit builds the arm&apos;s
                 pipeline, runs its chats and releases it before the next visit, so two models are
-                never resident at once. Both distributions are read over the direct route (
-                <code>/models/</code>, plain fetch), so the source stays out of the comparison. Arm
-                1 is the one the summary compares the others with.
+                never resident at once. Every arm reads its distribution from the source chosen
+                below (an arm whose distribution has no cached route reads it directly). Arm 1 is
+                the one the summary compares the others with.
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
+              <SourcePicker
+                id="gemma4-bench-source"
+                value={sourceKind === "cached" && cachedAvailable ? "cached" : "direct"}
+                cachedAvailable={cachedAvailable}
+                onChange={setSourceKind}
+                disabled={running}
+              />
               {drafts.map((draft, armIndex) => {
                 const manifest = manifests[draft.key.mount];
                 const presets =

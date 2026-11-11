@@ -156,7 +156,11 @@ describe("the integer GEMV switch", () => {
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ integerGemv: true })],
         distributions: { "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00" } },
-        source: { kind: "direct" },
+        sources: {
+          gemma4: { kind: "direct" },
+          "gemma4-qat": { kind: "direct" },
+          "gemma4-qat-mobile": { kind: "direct" },
+        },
         visits: [],
         chats: [],
       });
