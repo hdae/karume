@@ -1233,9 +1233,11 @@ of IR declaration reader, `parseIrDeclaration` / `parseIrDeclarationValue`
 `parseIrDeclarationValue` before they are passed to the in-memory container (the doc in
 `packages/runtime/mod.ts`).
 
-**The Python side also passes the merged representation to the existing checks, and does not
-implement the rules twice** (`bind_graphs` in `tools/exporter/src/karume/verify.py` is the mirror of
-TS `bindGraphs`).
+**The Python side also passes the merged representation to the existing checks, through its own
+mirror of the merge rules** (`bind_graphs` in `tools/exporter/src/karume/verify.py` mirrors TS
+`bindGraphs`; `container.py` the codec rules): Python is not present at run time, so the exporter
+implements the rules a second time, and cross-language fixtures keep the two in agreement (ADR
+[0108](decisions/0108-container-format.md) decision 17).
 
 ### 13.4 What does not change
 

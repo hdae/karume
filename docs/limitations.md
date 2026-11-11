@@ -1273,7 +1273,7 @@ docstring of `_drop_identity_add` in `karume/normalize.py`).
 
 ## Whether a semantic dtype can execute is decided per op (no blanket enabling)
 
-The contract table (`packages/runtime/src/ops.ts` / `karume/ops.py`) is canonical. i32 / bool can
+The contract table (`packages/runtime/src/ops/contracts.ts` / `karume/ops.py`) is canonical. i32 / bool can
 execute only in the shapes that appeared in measured graphs and in the ops newly created for them
 (e.g. mul / sub are f32+i32, div is f32 only, bitwise_not is bool only). It is the dtype version of the
 frozen vocabulary allowlist (ADR 0007), and an extension requires one set of measurements + the

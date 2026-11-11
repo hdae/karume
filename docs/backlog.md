@@ -125,10 +125,8 @@ maintainer's ruling of 2026-11-06).
   - **Stale statements found on 2026-11-09 (report only, not yet fixed)**: the `DECIDED` comment above `PARALLEL_SHAPES`
     ("only measured shapes are eligible") against its 22 rows marked unmeasured (ADR 0098 decision 4 was re-graded to SHOULD);
     ADR 0111 decision 2's list of tables; the table comments of gemma (`session-options.ts`) and anima (`pipeline.ts`); the
-    rmsNormAdd widths in the `SessionOptions` doc (3840 is missing); the header of `a8-emulation-warning.ts` (`convCompute`
-    is missing); `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
-    cite; ADR 0132 decision 5's v1 workgroup-storage figures (the v2 figures are in its later addendum); the table of
-    `packages/kernel-checks/README.md` (expert-linear and state-bidirectional are missing); the unreachable w4a8 `k % group`
+    rmsNormAdd widths in the `SessionOptions` doc (3840 is missing); `session_options_test.ts` checking "all 10 families" (moot once the tables go); ADR 0033 decision 4's test
+    cite; ADR 0132 decision 5's v1 workgroup-storage figures (the v2 figures are in its later addendum); the unreachable w4a8 `k % group`
     check; the online kernel's `:emu` against `:dp4aEmu` in the other i8a8 pipeline keys.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV
   (K-45, ADR [0140](decisions/0140-integer-gemv.md)) and the byte-plane lm_head (K-52, ADR

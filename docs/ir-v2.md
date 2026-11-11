@@ -192,7 +192,7 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
   Run-time storage is i32 = 32 bit, bool = **u32 0 / 1** (because storage buffers have no 1-bit type
   — ADR [0009](decisions/0009-dtype-i32-bool.md)). Elements are 4 bytes for all three types.
 - **The semantic dtypes an op can execute differ per op** (not one uniform set). The canonical accepted set is the contract table
-  (`packages/runtime/src/ops.ts` / `karume/ops.py`), and the runtime fails loudly listing what is unsupported.
+  (`packages/runtime/src/ops/contracts.ts` / `karume/ops.py`), and the runtime fails loudly listing what is unsupported.
   Graph inputs can be transferred for all three types. torch's default integer i64 is **normalized to i32
   at the exporter boundary** (out-of-range values fail loudly) — there is no i64 in the IR.
 - **Storage (codec) is not written in the IR**. The storage form of an initializer's backing data is held by the container's **binding table**
@@ -208,8 +208,8 @@ Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` es
   is the runtime's `RUNTIME_SUPPORT.storage` (`packages/runtime/src/ops/contracts.ts` — the set of decode paths)
   (container-v1 §6.2, ADR 0108 addendum item 12).
 - **Merge layer** (container-v1 §13.3): the graph and the binding table are **merged before the weights are fetched**, and
-  the storage rules are applied to the merged representation (it lives in one place, the runtime's `format/` — the Python side mirrors the
-  same rules; they are not implemented twice):
+  the storage rules are applied to the merged representation (it lives in the runtime's `format/`; the exporter mirrors the same rules in
+  Python, and cross-language fixtures keep the two in agreement — ADR 0108 decision 17):
   - A quantized codec **requires** `encoding.scale` (no default of 1.0 is filled in — this blocks a forgotten entry from silently
     running as "weights at 1/127 of their pre-quantization value", ADR 0019 / 0069)
   - The `groupSize` of `int4-sym-g` MUST be **a power of 2 and at least 16**, and MUST divide the row length (`numel / shape[rowAxis]`)
@@ -481,7 +481,7 @@ The contract of nodes that read and write state slots (ADR
 
 ## Op set (the implementation's contract table is canonical; this is only a list)
 
-> There are two implementations (TS `packages/runtime/src/ops.ts` and the exporter's `karume/ops.py` +
+> There are two implementations (TS `packages/runtime/src/ops/contracts.ts` and the exporter's `karume/ops.py` +
 > `karume/shapes.py`). The canonical source for both holding the same contract is the conformance case table
 > `packages/runtime/tests/fixtures/op-contracts.json`: the tests on both sides match the full set of op names / arity / slot dtypes /
 > attrs key sets and value ranges / output shape rules (including rank limits) against the same table

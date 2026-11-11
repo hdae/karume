@@ -386,12 +386,11 @@ matches argmax**.
 
 **`sort` is not added** (reordering the whole vocabulary cannot be narrowed to a width of k, so the
 reason for the hold remains as it is).
-**There is no aten handler on the exporter side** — the tuple meta of a multi-output aten op and the
-slot wiring of `operator.getitem` are a new mechanism, deferred until sampling is actually needed
-(ADR 0068 addendum). What the measurement stops at is **`operator.getitem`**, not
-`aten.topk.default`, so adding only a handler does not open the way.
-Today topk nodes appear only from **hand-written IR on the runtime side / a future decode graph
-script**.
+**The exporter has an aten handler** (ADR 0068 addendum 11, 2026-11-08 — with the MoE router of ADR
+[0145](decisions/0145-gemma4-26b-moe-resident.md)): `aten.topk` maps to the IR op in decision 3's form only
+(static k, last dim, `largest=True`, `sorted=True`; other flags are refused), `operator.getitem` is wired to
+the two outputs of one node, and the indices cross the boundary as i32 (ADR 0009). topk nodes come from
+exported graphs (the 26B router) and from hand-written IR on the runtime side.
 
 NOTE: 2026-08-18 added `state_append` to the **extended atomic layer** (outside Core ATen), and added
 the **states form** to `attention` (an optional `states` field — a contract extension under the same
