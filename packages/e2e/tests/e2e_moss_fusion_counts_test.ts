@@ -11,12 +11,14 @@
  * every preset — ADR 0138 decision 3, so it is planned without knobs only). Their counts were
  * frozen from planning the mirror on 2026-11-11 and do not depend on the sequence length (each is
  * checked at two lengths: S = N + T with N = 256 / 4,096 image tokens at 256² / 1024² and T = 64 /
- * 128 text tokens).
+ * 128 text tokens). The last case pins the hits of the candidate rule `candidate/ew_chain`, which
+ * no preset passes (`@karume/candidate-rules`).
  */
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
 import { builtInCounts } from "../../runtime/tests/helpers/fusion-count-record.ts";
@@ -180,6 +182,94 @@ test.skipIf(!MOSS_AVAILABLE)(
         { rope: 84, adaln: 84, gatedResidual: 84 },
         label,
       );
+    }
+  },
+);
+
+/** The sequence lengths of the 1024² fridge-note request: S₊ = 4,096 + 63, S₋ = 4,096 + 10. */
+const REQUEST_LENGTHS = { dit: 4096 + 63, dit_skip22: 4096 + 10 } as const;
+
+/**
+ * The candidate rule `candidate/ew_chain` (`@karume/candidate-rules`, a run of f32 elementwise
+ * nodes in one dispatch) planned on the DiT pair with the practical preset's knobs, per form (its
+ * dispatch key names the inputs' classes and the node list):
+ *
+ * - **the nine-node FFN gate** (`div, tanh, mul, sigmoid, mul, div, tanh, mul, mul` over
+ *   `[1, S, 8192]` with two `[1]` constants), 42 on `dit` — **0 on `dit_skip22`**, whose constants
+ *   are weights borrowed from `dit`, which the runtime declines to bind (ADR 0148 decisions 5 and 7);
+ * - **the RoPE tail** (`mul(·, sin [1, S, 1, D]) → add(x·cos, ·)` over `[1, S, 24, 128]`), 84 / 82;
+ * - **the gated residual's tail** (`mul(·, gate [1, 1, C]) → add(residual, ·)`), 84 / 82;
+ * - **adaLN's tail** (`mul(·, 1 + scale [1, 1, C]) → add(·, shift [1, 1, C])`), 82 / 80 — block 0's
+ *   pair sits around an aliasing `reshape` and an independent `add` (the candidate rows), which a
+ *   run of consecutive nodes does not cross.
+ *
+ * 292 on `dit` and 244 on `dit_skip22`, at the request's length and at 256² alike. The built-in
+ * silu stays at 1 (the rule leaves the exact `sigmoid(x) → mul(x, ·)` pair to it), every other
+ * counter is the plan's without the rule, and the steps fall by the nodes folded (2,310 → 1,724 and
+ * 2,256 → 2,012 at the request's length).
+ */
+test.skipIf(!MOSS_AVAILABLE)(
+  "the candidate rule candidate/ew_chain takes 292 runs of dit and 244 of dit_skip22 on the practical preset, per form, and moves no other counter",
+  async () => {
+    const forms = (gate: number, rope: number, gated: number, adaln: number) => ({
+      ...(gate === 0
+        ? {}
+        : {
+            "f.s.f.s:div.x0.x1-tanh.t0-mul.t1.x1-sigmoid.x0-mul.t2.t3-div.x2.x3-tanh.t5-mul.t6.x3-mul.t4.t7":
+              gate,
+          }),
+      "f.b0101.f:mul.x0.x1-add.x2.t0": rope,
+      "f.b001.f:mul.x0.x1-add.x2.t0": gated,
+      "f.b001.b001:mul.x0.x1-add.t0.x2": adaln,
+    });
+    const knobs = mossPreset(MOSS_PRACTICAL_PRESET).dit;
+    for (const [component, expected, steps] of [
+      ["dit", forms(42, 84, 84, 82), [2310, 1724]],
+      ["dit_skip22", forms(0, 82, 82, 80), [2256, 2012]],
+    ] as const) {
+      const graph = await readMossGraph(component);
+      for (const length of [REQUEST_LENGTHS[component], 256 + 64]) {
+        const label = `${component} S=${length}`;
+        const shapes = boundShapes(graph, length);
+        const plain = planDistributionFusions(graph, shapes, knobs, ONLINE_DEVICE);
+        const fused = planDistributionFusions(
+          graph,
+          shapes,
+          { ...knobs, fusionRules: [EW_CHAIN_RULE] },
+          ONLINE_DEVICE,
+        );
+        const seen: Record<string, number> = {};
+        let folded = 0;
+        for (const step of fused.plan.steps) {
+          if (step.kind !== "fused" || step.rule !== EW_CHAIN_RULE_NAME) continue;
+          const form = step.dispatches[0].key.replace(
+            /^ext:candidate:ew_chain:v1:|:f32:wg128$/g,
+            "",
+          );
+          seen[form] = (seen[form] ?? 0) + 1;
+          folded += step.nodeCount - 1;
+        }
+        assertEquals(seen, expected, `${label}: hits per form`);
+        const hits = Object.values(expected).reduce((sum, count) => sum + count, 0);
+        assertEquals(
+          fused.plan.counts,
+          { ...plain.plan.counts, [EW_CHAIN_RULE_NAME]: hits },
+          `${label}: the counters`,
+        );
+        assertEquals(plain.plan.counts.silu, 1, `${label}: silu`);
+        assertEquals(
+          fused.plan.steps.length,
+          plain.plan.steps.length - folded,
+          `${label}: the steps fall by the nodes folded`,
+        );
+        if (length === REQUEST_LENGTHS[component]) {
+          assertEquals(
+            [plain.plan.steps.length, fused.plan.steps.length],
+            [...steps],
+            `${label}: steps`,
+          );
+        }
+      }
     }
   },
 );
