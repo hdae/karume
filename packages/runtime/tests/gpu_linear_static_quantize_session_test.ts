@@ -1,70 +1,68 @@
+// The twin cases of the linear→SRQ Session fusion live in @karume/kernel-checks
+// (checkLinearStaticQuantizeTwins), which the playground's /kernel-check page runs on the browser's
+// backend too; the row identity across M, the borrowed scale's lifetimes and the construction
+// rejections stay here.
+
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { checkFusionTwin } from "@karume/kernel-checks";
+import {
+  checkLinearStaticQuantizeTwins,
+  LINEAR_STATIC_QUANTIZE_ROWS,
+  LINEAR_STATIC_QUANTIZE_STORAGES,
+  LINEAR_STATIC_QUANTIZE_TWIN_CASES,
+  linearStaticQuantizeInput,
+  linearStaticQuantizeWidth,
+} from "@karume/kernel-checks";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
+import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 import { linearStaticQuantizeModel } from "./helpers/linear-static-quantize-graph.ts";
 import { GRAPH_NAME } from "./helpers/model-fixture.ts";
 
-const input = (m: number, k = 1536) => ({
-  x: {
-    dtype: "f32" as const,
-    shape: [m, k],
-    data: Float32Array.from({ length: m * k }, (_, i) => Math.sin(i * 0.037) * 0.75),
-  },
-});
+const input = linearStaticQuantizeInput;
 const words = (data: ArrayBufferView<ArrayBuffer>) =>
   new Uint32Array(data.buffer, data.byteOffset, data.byteLength / 4);
 
 describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetimes (real GPU)", () => {
-  it("INT2/4/8 at M1/4/8 match the unfused path on row 0, and M9 stays unfused", async () => {
+  it("INT2/4/8 at M1/4/8 match the unfused path, and M9 stays unfused", async () => {
     const gpu = await acquireGpu();
     try {
-      for (const storage of ["i2", "i4", "i8"] as const) {
-        const n = storage === "i2" ? 12288 : 256;
+      const part = await checkLinearStaticQuantizeTwins(gpu);
+      assertEquals(
+        [part.id, part.cases.length],
+        Object.entries(LINEAR_STATIC_QUANTIZE_TWIN_CASES)[0],
+      );
+      assertCheckPart(part);
+    } finally {
+      gpu.destroy();
+    }
+  });
+  it("INT2/4/8 at M1/4/8 return the same row 0, on both runs", async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const storage of LINEAR_STATIC_QUANTIZE_STORAGES) {
+        const n = linearStaticQuantizeWidth(storage);
         let first: Uint32Array<ArrayBuffer> | undefined;
-        for (const m of [1, 4, 8, 9]) {
-          const model = linearStaticQuantizeModel({ storage, n, m });
-          const baseline = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
-            linearGemvReduce: "parallel",
-          });
+        for (const m of LINEAR_STATIC_QUANTIZE_ROWS.filter((rows) => rows <= 8)) {
+          const fused = await createSessionFromContainer(
+            gpu,
+            linearStaticQuantizeModel({ storage, n, m }),
+            GRAPH_NAME,
+            { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
+          );
           try {
-            const fused = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
-              linearGemvReduce: "parallel",
-              fuseLinearStaticQuantize: true,
-            });
-            try {
-              const x = input(m);
-              // The second run uses the derived plan. The same scale reference is kept, and x lives until the later neg.
-              for (let repeat = 0; repeat < 2; repeat++) {
-                // y and the late x consumer (copy); M9 stays unfused, so its counter is 0.
-                assertCheckCase(
-                  await checkFusionTwin(gpu, {
-                    label: `${storage} M${m} run ${repeat + 1}`,
-                    fused,
-                    plain: baseline,
-                    feeds: x,
-                    counter: "linearStaticQuantize",
-                    hits: m <= 8 ? 1 : 0,
-                    nan: "payload",
-                  }),
-                );
-                if (m <= 8) {
-                  // The fused output, from a run of its own (the harness returns a case).
-                  const row = words((await fused.run(x)).y.data).slice(0, n);
-                  first ??= row;
-                  assertEquals(row, first);
-                }
-              }
-            } finally {
-              await fused.dispose();
+            const x = input(m);
+            // The second run uses the derived plan.
+            for (let repeat = 0; repeat < 2; repeat++) {
+              const row = words((await fused.run(x)).y.data).slice(0, n);
+              first ??= row;
+              assertEquals(row, first);
             }
           } finally {
-            await baseline.dispose();
+            await fused.dispose();
           }
         }
       }
@@ -75,8 +73,8 @@ describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetime
   it("a borrowed scale protects the lender's lifetime and stays reusable from the lender after the borrower is destroyed", async () => {
     const gpu = await acquireGpu();
     try {
-      for (const storage of ["i2", "i4", "i8"] as const) {
-        const n = storage === "i2" ? 12288 : 256;
+      for (const storage of LINEAR_STATIC_QUANTIZE_STORAGES) {
+        const n = linearStaticQuantizeWidth(storage);
         const owner = await createSessionFromContainer(
           gpu,
           linearStaticQuantizeModel({ storage, n }),

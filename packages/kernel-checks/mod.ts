@@ -124,6 +124,14 @@ export {
   geluMulPleWords,
   openGeluMulChain,
 } from "./src/fusion-twins/gelu-mul-static-quantize.ts";
+export {
+  checkLinearStaticQuantizeTwins,
+  LINEAR_STATIC_QUANTIZE_ROWS,
+  LINEAR_STATIC_QUANTIZE_STORAGES,
+  LINEAR_STATIC_QUANTIZE_TWIN_CASES,
+  linearStaticQuantizeInput,
+  linearStaticQuantizeWidth,
+} from "./src/fusion-twins/linear-static-quantize.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
