@@ -60,13 +60,14 @@ import { assertRuntimeSupport } from "../ops/support.ts";
 import {
   type AttentionTokenMajor,
   type ExecStep,
+  type ExternalRuleName,
   type FusedStep,
-  FUSION_RULES,
-  type FusionWeightLayout,
+  type FusionRuleName,
   nodeStepSpan,
   planAliases,
   planFusions,
   rowBlockLimit,
+  sessionFusionRules,
 } from "./fusion.ts";
 import {
   allowedChunkRows,
@@ -101,9 +102,11 @@ import {
   type TransientTempSpec,
 } from "./transient-plan.ts";
 import {
-  type ComputePrecision,
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+  DISABLED_FUSION_RULES,
   type GenerationContextSpec,
+  type ROW_BLOCK_SPLIT,
+  type SessionOptions,
   STATE_ATTENTION_REDUCES,
   type StateAttentionReduce,
 } from "./session-types.ts";
@@ -135,7 +138,14 @@ import {
   stateAttentionVariantViolation,
 } from "./recipe-builders/attention.ts";
 import { sessionOptionsViolation } from "./session-options-check.ts";
-import type { ScoreStorage } from "../kernels/score-storage.ts";
+import {
+  plannedResidentWeights,
+  type SessionFusionFacts,
+  sessionFusionContext,
+  type SessionFusionOptions,
+  sessionFusionKnobs,
+  sharedOrPooledWeights,
+} from "./session-fusion-context.ts";
 import { stateSliding } from "../kernels/state-attention.ts";
 import { slotStateStorage, type StateStorage } from "../kernels/state-storage.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
@@ -316,12 +326,22 @@ export type AdmissionReport = {
   readonly unaccounted: readonly string[];
 };
 
-export type EstimateOptions = {
+/**
+ * The options of one estimate.
+ *
+ * The fields that mirror {@link SessionOptions} take their types from it, so one options object can
+ * be given to both (a field the estimate does not read, such as `sharedWeights`, is ignored here).
+ * Every option the fusion pass reads is among them (`SessionFusionOptions` in
+ * session-fusion-context.ts — a knob added there reaches this type), except the test-only
+ * `ROW_BLOCK_SPLIT`: the estimate claims only the default row-block split. The other fields are
+ * the estimate's own (the device limits and facts, the bindings and the generation scenarios).
+ */
+export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT> & {
   /**
    * The same states attention setting as the Session. When omitted, the temporaries of the
    * reference path are estimated.
    */
-  readonly stateAttentionReduce?: StateAttentionReduce;
+  readonly stateAttentionReduce?: SessionOptions["stateAttentionReduce"];
   /**
    * Values of symbolic dimensions (the graph-input side — the same bindings passed to a run).
    * States-only symbols (capacity) and the symbols of the physical chunk rows `M` are both decided
@@ -387,6 +407,20 @@ export type EstimateOptions = {
    */
   readonly maxBufferSize?: number;
   /**
+   * The granted value of `maxComputeWorkgroupsPerDimension` (`GPUDevice.limits` /
+   * `readAdapterLimits`).
+   *
+   * Passed to the fusion pass as the device limit of that name, as execution passes it. No built-in
+   * rule's decision reads it, but an external rule's matcher may (`FusionMatchContext.limits`) and
+   * decline a window under it. When omitted, the pass gets a value no dispatch count reaches
+   * (`Number.MAX_SAFE_INTEGER`), as before the field existed.
+   * MUST: **required** together with `maxStorageBufferBindingSize` when {@link fusionRules} is
+   * non-empty (the estimate fails loudly without them — a guessed limit would return numbers for a
+   * plan the device does not make). The range (a positive safe integer) is checked at the entry
+   * regardless of the graph's shape.
+   */
+  readonly maxComputeWorkgroupsPerDimension?: number;
+  /**
    * The slot-backing keep budget (the same value as `SessionOptions.planBackingBudgetBytes`; default
    * `DEFAULT_PLAN_BACKING_BUDGET_BYTES` = 256 MiB).
    *
@@ -397,7 +431,7 @@ export type EstimateOptions = {
    * (the budget is a quantity on the side of **how many** are kept, not the demand of one shape).
    * Budget 0 = always one, so the peak is the largest scenario, as before.
    */
-  readonly planBackingBudgetBytes?: number;
+  readonly planBackingBudgetBytes?: SessionOptions["planBackingBudgetBytes"];
   /**
    * The budget per row-block temporary (the same value as `SessionOptions.attentionRowBlockMaxBytes`;
    * omitted = no budget — ADR 0124).
@@ -413,7 +447,7 @@ export type EstimateOptions = {
    * message as execution's plan derivation — the way for the estimate to learn of a budget violation
    * in advance (in execution it fails in a run after the weights are uploaded).
    */
-  readonly attentionRowBlockMaxBytes?: number;
+  readonly attentionRowBlockMaxBytes?: SessionOptions["attentionRowBlockMaxBytes"];
   /**
    * The compute form of fused attention (the same value as `SessionOptions.attentionCompute`;
    * omitted = `"f32"`, the runtime default — the same precedent as `stateAttentionReduce`).
@@ -427,7 +461,7 @@ export type EstimateOptions = {
    * MUST: spelling and combinations (c16 × s16 with `attentionScoreStorage`) go through the same
    * check as `sessionOptionsViolation`.
    */
-  readonly attentionCompute?: ComputePrecision;
+  readonly attentionCompute?: SessionOptions["attentionCompute"];
   /**
    * The storage form of fused attention's S (the same value as
    * `SessionOptions.attentionScoreStorage`; omitted = `"f32"`).
@@ -437,7 +471,7 @@ export type EstimateOptions = {
    * nodes the estimate sees the same absorbed output permute as execution (perf-ledger F-3 A4 — the
    * same `planFusions`); it needs {@link attentionDevice}.
    */
-  readonly attentionScoreStorage?: ScoreStorage;
+  readonly attentionScoreStorage?: SessionOptions["attentionScoreStorage"];
   /**
    * The storage of full state slots (the same value as `SessionOptions.fullStateStorage`; omitted =
    * `"f32"`). `"f16"` halves the bytes of the full slots and leaves the sliding slots alone (the same
@@ -445,7 +479,7 @@ export type EstimateOptions = {
    * counts the temporaries of the unfused kernels, as execution runs them.
    * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
    */
-  readonly fullStateStorage?: StateStorage;
+  readonly fullStateStorage?: SessionOptions["fullStateStorage"];
   /**
    * The device facts the online kernel's route reads (ADR 0132 decision 5): whether the device has
    * subgroups (`subgroups` and `subgroup-size-control` enabled and WGSL `subgroup_id` present) and
@@ -471,7 +505,7 @@ export type EstimateOptions = {
    * unfolded (on the large side). The i8a8 linear's quantized intermediates stay unaccounted.
    * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
    */
-  readonly linearCompute?: "f32" | "a8" | "f16";
+  readonly linearCompute?: SessionOptions["linearCompute"];
   /**
    * The expert cache (the same value as `SessionOptions.expertCache` — ADR 0146). With it the expert
    * weights count as their pools of their layer's `slots` experts (one count, or one per routed
@@ -485,10 +519,51 @@ export type EstimateOptions = {
    * `writeBuffer` staging it replaces, which is not counted either) and the host tier of `hostBytes`
    * (RAM, not GPU memory).
    */
-  readonly expertCache?: {
-    readonly slots: number | readonly number[];
-    readonly hostBytes?: number;
-  };
+  readonly expertCache?: SessionOptions["expertCache"];
+  /**
+   * The fusion opt-ins and the reduction forms the fusion pass reads (the same values as the
+   * `SessionOptions` fields of these names; omitted = the runtime default, as for the Session).
+   *
+   * The estimate plans fusion with them, as execution does, through the same mapping and the same
+   * checks as Session construction (`sessionOptionsViolation`, so a combination no Session accepts
+   * fails loudly here too). The windows these fusions take are still counted in their pre-fusion
+   * form ({@link AdmissionReport.unaccounted}); what they change in the counted bytes is which
+   * windows are left to row-block attention, the linear prologue and the absorbed permutes.
+   */
+  readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly fuseGeluMulStaticQuantize?: SessionOptions["fuseGeluMulStaticQuantize"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly integerGemv?: SessionOptions["integerGemv"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly linearGemvPlanes?: SessionOptions["linearGemvPlanes"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
+  /** See {@link fuseRmsNormAdd}. */
+  readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
+  /**
+   * The fusion rules written outside the runtime (the same value as `SessionOptions.fusionRules` —
+   * ADR 0148). The estimate plans with them first and in their order, as a Session given them does,
+   * with the same checks of the list (a value that is not a defined rule, or a rule given twice,
+   * fails loudly).
+   *
+   * MUST: when the list is non-empty, {@link maxStorageBufferBindingSize} and
+   * {@link maxComputeWorkgroupsPerDimension} are both required (a rule's matcher may read them).
+   * NOTE: the windows a rule takes are counted in their pre-fusion form, and the temporaries its
+   * steps declare are not counted ({@link AdmissionReport.unaccounted}); a window a rule takes from
+   * row-block attention, the linear prologue or an absorbed permute is counted unfolded too.
+   */
+  readonly fusionRules?: SessionOptions["fusionRules"];
+  /**
+   * Test only (`DISABLED_FUSION_RULES` — the same value as on `SessionOptions`): the estimate plans
+   * with those rules left out, as the Session given it does, and a name outside the rule list fails
+   * loudly with the same check.
+   */
+  readonly [DISABLED_FUSION_RULES]?: SessionOptions[typeof DISABLED_FUSION_RULES];
 };
 
 /**
@@ -913,47 +988,34 @@ const stateAttentionTemps = (
  * never exist as node outputs, and the copies the attention makes itself are its own temporaries
  * ({@link fusedAttentionProgram}).
  * Other rules are still counted in the pre-fusion list (the `unaccounted` side).
- * MUST: pass the same `linearCompute` and weight storage as execution (`linear`) — the prologue is
- * decided from them, and the estimate would otherwise count the pair unfolded. Likewise the same
- * seats (`seats`) and device facts (`device`) — the input permutes are decided from the attention
- * seat, the output permute from `attentionRoute` on the seats and the device (only the online
- * kernel absorbs it).
+ * MUST: plan under the Session's own context (`sessionFusionContext` on {@link EstimateFusionFacts})
+ * — the prologue is decided from the linear seat and the weights' storage, the input permutes from
+ * the attention seat, the output permute from `attentionRoute` on the seats and the device facts
+ * (only the online kernel absorbs it), and every other rule's window, which can take a node one of
+ * these would have, from the rest of the context.
  *
  * MUST: pass the same binding limit as the limit check of the allocation program (the row-block
  * count is decided only by this value and the budget — dividing by another value would make the
- * estimate alone count temporaries with a block count different from execution). The budget
- * (`budget`) is passed as `attentionRowBlockMaxBytes` of the fusion context, as in execution (ADR
- * 0124 decision 7). A forced row-block count (`rowBlockSplit` — test only) is not passed (the same
- * reason as {@link stateAttentionTemps}).
- * NOTE: `maxComputeWorkgroupsPerDimension` only affects the limit check of dispatch counts and does
- * not move bytes. The estimate checks no dispatch counts even for plain nodes (it has no field for
- * it either), so a value that checks nothing is passed here too.
+ * estimate alone count temporaries with a block count different from execution). The budget is the
+ * knobs' `attentionRowBlockMaxBytes`, as in execution (ADR 0124 decision 7).
  */
 const postFusionSteps = (
   nodes: readonly NodePlan[],
   uses: ReadonlyMap<string, number>,
   outputNames: ReadonlySet<string>,
   bindingLimit: number,
-  budget: number | undefined,
-  linear: LinearKnobs,
-  seats: AttentionSeats,
-  device: AttentionDeviceFacts,
+  fusion: EstimateFusionFacts,
 ): ReadonlyMap<number, ExecStep> => {
-  const { steps } = planFusions(nodes, {
-    rules: FUSION_RULES,
-    useCounts: uses,
-    outputNames,
-    limits: {
-      maxStorageBufferBindingSize: bindingLimit,
-      maxComputeWorkgroupsPerDimension: Number.MAX_SAFE_INTEGER,
-    },
-    ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
-    linearCompute: linear.linearCompute,
-    attentionCompute: seats.attentionCompute,
-    attentionScoreStorage: seats.attentionScoreStorage,
-    attentionDevice: device,
-    weightLayouts: linear.weightLayouts,
-  });
+  const { maxComputeWorkgroupsPerDimension, ...facts } = fusion;
+  const { steps } = planFusions(
+    nodes,
+    sessionFusionContext({
+      ...facts,
+      useCounts: uses,
+      outputNames,
+      limits: { maxStorageBufferBindingSize: bindingLimit, maxComputeWorkgroupsPerDimension },
+    }),
+  );
   const found = new Map<number, ExecStep>();
   // The scan lays out "passthrough nodes → fused step" per window and advances by the window width,
   // so the running node count of the step list always points at the start of the next window.
@@ -1110,44 +1172,67 @@ type TransientKnobs = {
    * {@link estimateGraphMemory} rejects `"none"` without the facts).
    */
   readonly attentionDevice: AttentionDeviceFacts;
-  /** What the linear-prologue decision reads ({@link postFusionSteps}). */
-  readonly linear: LinearKnobs;
-};
-
-/** The facts the linear prologue (perf-ledger F-4) is decided from, as in execution. */
-type LinearKnobs = {
-  /** `EstimateOptions.linearCompute` with the runtime default filled in. */
-  readonly linearCompute: "f32" | "a8" | "f16";
-  /** The weights' resident storage ({@link fusionWeightLayouts}). */
-  readonly weightLayouts: ReadonlyMap<string, FusionWeightLayout>;
+  /** What the fusion pass plans under ({@link postFusionSteps}). */
+  readonly fusion: EstimateFusionFacts;
 };
 
 /**
- * The resident storage per initializer that the fusion decision reads — from the residency plan,
- * the same projection the executor makes from its resident weights (`sessionFusionContext` in
- * session-fusion-context.ts).
- * Uncompressed (`raw`) and expanded weights are f32 and absent, as in execution. A borrowed weight's
- * storage (`shared`) is the lender's, decided at construction and unknown here, so it is absent too
- * (its linear is counted unfolded — on the large side).
+ * The facts the estimate plans fusion under: the Session's ({@link SessionFusionFacts}) without the
+ * graph's use counts and output names and without the binding limit, which the intermediate
+ * accounting derives itself (the same value its placement uses), plus the dispatch-count limit.
  */
-const fusionWeightLayouts = (
+export type EstimateFusionFacts = Omit<
+  SessionFusionFacts<FusionRuleName | ExternalRuleName>,
+  "useCounts" | "outputNames" | "limits"
+> & {
+  /** `EstimateOptions.maxComputeWorkgroupsPerDimension`, or `Number.MAX_SAFE_INTEGER` without it. */
+  readonly maxComputeWorkgroupsPerDimension: number;
+};
+
+/**
+ * The fusion facts of an estimate, derived as Session construction derives its own: the rule list
+ * (`sessionFusionRules`), the knobs (`sessionFusionKnobs` — the disabled rule names checked against
+ * that list), the weights' storage from the residency plan (`plannedResidentWeights`) and the
+ * weights an external step may not bind (`sharedOrPooledWeights`, with the expert plan's pooled
+ * weights — `pooled` — as the executor takes its pool's).
+ *
+ * `options` are checked values (the entry of {@link estimateGraphMemory} ran
+ * `sessionOptionsViolation` on them); `attentionDevice` is the checked device facts or the
+ * stand-in of a seat that never reads them.
+ * MUST: a non-empty `fusionRules` without both device limits fails loudly (`ExecutionError`): an
+ * external rule's matcher may read the limits and decline a window, so a guessed limit would return
+ * numbers for a plan the device does not make.
+ * MUST: the test-only row-block split (`ROW_BLOCK_SPLIT`) is not taken, even when `options` is a
+ * Session's options object that carries it (the reason of {@link stateAttentionTemps}).
+ */
+export const estimateFusionFacts = (
   residency: ReadonlyMap<string, WeightResidency>,
-): ReadonlyMap<string, FusionWeightLayout> =>
-  new Map(
-    [...residency].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
-      switch (weight.seat) {
-        case "i4":
-          return [[name, { storage: "i4", groupSize: weight.groupSize }]];
-        case "f16":
-        case "bf16":
-        case "i8":
-        case "i2":
-          return [[name, { storage: weight.seat }]];
-        default:
-          return [];
-      }
-    }),
-  );
+  pooled: Parameters<typeof sharedOrPooledWeights>[1],
+  options: EstimateOptions,
+  attentionDevice: AttentionDeviceFacts,
+): EstimateFusionFacts => {
+  const rules = sessionFusionRules(options.fusionRules);
+  if (
+    options.fusionRules !== undefined &&
+    options.fusionRules.length > 0 &&
+    (options.maxStorageBufferBindingSize === undefined ||
+      options.maxComputeWorkgroupsPerDimension === undefined)
+  ) {
+    throw new ExecutionError(
+      "options.fusionRules needs options.maxStorageBufferBindingSize and options.maxComputeWorkgroupsPerDimension" +
+        " (an external rule's matcher may read the device limits and decline a window — ADR 0148)",
+    );
+  }
+  return {
+    rules,
+    knobs: { ...sessionFusionKnobs(options, rules), rowBlockSplit: undefined },
+    attentionDevice,
+    residentWeights: plannedResidentWeights(residency),
+    sharedOrPooledWeights: sharedOrPooledWeights(residency, pooled),
+    maxComputeWorkgroupsPerDimension:
+      options.maxComputeWorkgroupsPerDimension ?? Number.MAX_SAFE_INTEGER,
+  };
+};
 
 /**
  * The row blocks of one fused attention op node (the same `planAttentionBlocks` × `rowBlockLimit` as
@@ -1526,16 +1611,7 @@ const transientSlotBytes = (
     // repeats.
     return { outputs, temps, dispatches, releases: node.node.ins };
   };
-  const fused = postFusionSteps(
-    nodes,
-    uses,
-    outputNames,
-    bindingLimit,
-    attentionRowBlockMaxBytes,
-    knobs.linear,
-    knobs.seats,
-    knobs.attentionDevice,
-  );
+  const fused = postFusionSteps(nodes, uses, outputNames, bindingLimit, knobs.fusion);
   const program: TransientStepSpec[] = [];
   for (let index = 0; index < nodes.length;) {
     const step = fused.get(index);
@@ -1657,6 +1733,7 @@ export const estimateGraphMemory = (
   // attention.
   assertLimitOption("maxStorageBufferBindingSize", options.maxStorageBufferBindingSize);
   assertLimitOption("maxBufferSize", options.maxBufferSize);
+  assertLimitOption("maxComputeWorkgroupsPerDimension", options.maxComputeWorkgroupsPerDimension);
   // MUST: check the budget's range **here** too (the same check as `createContainerSession` — ADR
   // 0095 decision 1). Placing it only where it is read (the peak below) would let the estimate alone
   // return numbers for a budget with which no Session can be built.
@@ -1685,21 +1762,27 @@ export const estimateGraphMemory = (
   // The compute form of fused attention and the storage form of S go through the same check as
   // Session construction (spelling, the c16 × s16 pair) (ADR 0124 decision 7 — the estimate alone
   // returns no numbers for options with which no Session can be built).
-  // The execution form of linear goes through the same check (it decides the linear prologue).
+  // The execution form of linear goes through the same check (it decides the linear prologue), and
+  // so do the other knobs the fusion pass reads (types and combinations — before the pass reads
+  // them).
   const seatViolation = sessionOptionsViolation({
     attentionCompute: options.attentionCompute,
     attentionScoreStorage: options.attentionScoreStorage,
     linearCompute: options.linearCompute,
     fullStateStorage: options.fullStateStorage,
+    fuseRmsNormAdd: options.fuseRmsNormAdd,
+    fuseLinearStaticQuantize: options.fuseLinearStaticQuantize,
+    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize,
+    packedStaticQuantize: options.packedStaticQuantize,
+    integerGemv: options.integerGemv,
+    linearGemvPlanes: options.linearGemvPlanes,
+    linearGemvReduce: options.linearGemvReduce,
+    rmsNormReduce: options.rmsNormReduce,
   });
   if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
   const seats: AttentionSeats = {
     attentionCompute: options.attentionCompute ?? "f32",
     attentionScoreStorage: options.attentionScoreStorage ?? "f32",
-  };
-  const linear: LinearKnobs = {
-    linearCompute: options.linearCompute ?? "f32",
-    weightLayouts: fusionWeightLayouts(residency),
   };
   // The device facts are checked here regardless of the graph's shape (the rule of
   // {@link assertLimitOption}), before the fusion pass reads them.
@@ -1739,6 +1822,10 @@ export const estimateGraphMemory = (
       ? undefined
       : planExpertGraph(graph, residency, options.expertCache);
   const planned = experts?.graph ?? graph;
+  // What the fusion pass plans under: the Session's rule list, knobs and weight facts, through the
+  // functions Session construction and the executor use (`residency` is the plan the Session holds,
+  // the pools' weights are the expert plan's).
+  const fusion = estimateFusionFacts(residency, experts?.layers, options, attentionDevice);
   const counted = weightEstimate(experts?.residency ?? residency);
   const weights =
     experts === undefined
@@ -1861,7 +1948,7 @@ export const estimateGraphMemory = (
           attentionRowBlockMaxBytes,
           seats,
           attentionDevice,
-          linear,
+          fusion,
         },
       ),
     };

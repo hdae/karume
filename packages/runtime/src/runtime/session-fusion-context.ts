@@ -2,8 +2,8 @@
  * The fusion context of a Session: the one mapping from the facts a Session fixes at construction to
  * the {@link FusionContext} its plans are fused under (`Session.#planSteps` in executor.ts).
  *
- * MUST: every caller that plans "what a Session would" builds its context here (the executor, and
- * the fusion-count checks on the distribution graphs in packages/e2e), and
+ * MUST: every caller that plans "what a Session would" builds its context here (the executor, the
+ * memory estimate, and the fusion-count checks on the distribution graphs in packages/e2e), and
  * derives its knobs ({@link sessionFusionKnobs}) and weight facts ({@link plannedResidentWeights},
  * {@link sharedOrPooledWeights}) through the functions below. Two hand-built copies drift apart
  * without an exception — a gate added to one and not the other only moves a hit count.

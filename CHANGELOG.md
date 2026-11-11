@@ -21,8 +21,16 @@ measurements in `docs/research/`.
   `@karume/runtime/kernel`. A rule folds a run of the graph's built-in ops into its own kernel dispatches; the graph
   and the container are unchanged. The rules are fixed at construction and tried before the built-in rules, in the
   order given; a hit counts under the rule's `<namespace>/<rule>` name in `lastRunFusions`. Construction refuses
-  anything that `defineRule` did not build, a built-in rule and a name given twice. The memory estimate does not see
-  the rules (ADR 0148).
+  anything that `defineRule` did not build, a built-in rule and a name given twice. The memory estimate plans with
+  the rules when given them (`EstimateOptions.fusionRules`) but does not count their steps yet (ADR 0148).
+- `@karume/runtime`: `EstimateOptions` takes the remaining Session options the fusion pass reads, with their types
+  taken from `SessionOptions`, so one options object can be given to a Session and to its estimate:
+  `fuseRmsNormAdd`, `fuseLinearStaticQuantize`, `fuseGeluMulStaticQuantize`, `packedStaticQuantize`, `integerGemv`,
+  `linearGemvPlanes`, `linearGemvReduce`, `rmsNormReduce` and `fusionRules`, plus the device limit
+  `maxComputeWorkgroupsPerDimension`. The estimate plans fusion with them through the same mapping and checks as
+  Session construction; the windows these fusions take are still counted unfolded. A non-empty `fusionRules` needs
+  both `maxStorageBufferBindingSize` and `maxComputeWorkgroupsPerDimension`. An estimate given none of the new fields
+  returns the same numbers as before.
 - `@karume/runtime/kernel`, an experimental entry for writing those rules (it may change in a minor version while
   the package is 0.x): `defineRule` (a name `<namespace>/<rule>`, a declared contract class, dispatch keys under
   `ext:<namespace>:`, a matcher that reads the nodes, the graph's use counts and outputs and the device's limits —

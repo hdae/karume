@@ -313,8 +313,8 @@ export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
  * MUST: a name that is not a name of the rule list fails loudly at construction, with the check
  * the fusion pass applies (`assertDisabledRulesNamed` in src/runtime/fusion.ts) — a misspelt name
  * would otherwise leave that rule on and the "unfused" side fused.
- * NOTE: the memory estimate does not read it (`EstimateOptions` has no field for it, as for
- * {@link ROW_BLOCK_SPLIT}), so an estimate describes the plan with every rule on.
+ * NOTE: the memory estimate reads it too (`EstimateOptions` takes the same field and plans with the
+ * same rules left out); it does not read {@link ROW_BLOCK_SPLIT}.
  */
 export const DISABLED_FUSION_RULES: unique symbol = Symbol("karume.disabledFusionRules");
 
@@ -784,11 +784,11 @@ export type SessionOptions = {
    * with the unfused plan, carries its own fused-against-unfused check on each backend it runs on
    * (docs/kernel-rules.md).
    *
-   * NOTE: the memory estimate does not see these rules: `estimate` counts the graph as if no rule
-   * were given. The step temporaries a rule declares are not counted, and neither are the values a
-   * built-in fold would have removed when a rule takes its nodes first (row-block attention, a
-   * linear's folded producer, an absorbed permute — the estimate counts them in post-fusion form).
-   * Planning them in the estimate is later work (ADR 0148).
+   * NOTE: the memory estimate plans with these rules (`EstimateOptions.fusionRules`, which then
+   * needs the device limits), but counts the windows they take in their pre-fusion form: the step
+   * temporaries a rule declares are not counted, and a window a rule takes from a built-in fold the
+   * estimate counts in post-fusion form (row-block attention, a linear's folded producer, an absorbed
+   * permute) is counted unfolded. Counting the rules' steps is later work (ADR 0148).
    */
   readonly fusionRules?: readonly FusionRule[];
   /**
