@@ -57,6 +57,14 @@ measurements in `docs/research/`.
   in a minor version. The rule's author owns the evidence for its numbers, and the memory estimate does not see it
   (ADR 0148).
 
+### Changed
+
+- `@karume/runtime`: with `linearCompute: "a8"` the memory estimate counts an i8a8 linear's two node temporaries
+  (its activations quantized to int8 and their per-token scales), which the Session allocates for the quantize and
+  GEMM dispatches of every such linear; they were listed as unaccounted. `workspaceBytes` of graphs with i8- or
+  i4-resident linears on that seat moves up by what they add to the slot table (the Wan2.2 TI2V DiT on its online
+  preset by 15.4 MiB at 7,920 tokens; a linear whose weight is borrowed is still counted as a plain one).
+
 ### Breaking
 
 - `@karume/runtime`: `FusionCounts` gains optional keys for the rules of `SessionOptions.fusionRules`

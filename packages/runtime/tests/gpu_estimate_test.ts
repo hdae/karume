@@ -34,6 +34,7 @@ import {
   fill,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
+import { a8LinearCase } from "./helpers/fused-window-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 
@@ -768,6 +769,53 @@ test.skipIf(!GPU_AVAILABLE)(
         }
       };
       assertEquals(await residentBytes(pair), await residentBytes(alone));
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+/**
+ * The estimate's count of the a8 linear's two node temporaries (the quantized activations and their
+ * per-token scales — `linearI8a8TempBytes`) against the slot table a Session builds for the same
+ * graph, with and without a folded producer (helpers/fused-window-graphs.ts;
+ * estimate_fused_steps_test.ts pins the same graphs to hand-derived numbers).
+ */
+test.skipIf(!GPU_AVAILABLE)(
+  "the a8 linear's quantize → GEMM pair has the workspace of its slot table, with and without a folded producer (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      const limits = {
+        maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+        maxBufferSize: gpu.limits.maxBufferSize,
+        maxComputeWorkgroupsPerDimension: gpu.limits.maxComputeWorkgroupsPerDimension,
+      };
+      for (const make of [() => a8LinearCase(false), () => a8LinearCase(true)]) {
+        const fused = make();
+        const model = openGraph(fused.graph, fused.tensors);
+        const { scenarios } = model.estimate({
+          ...limits,
+          ...(fused.bindings === undefined ? {} : { bindings: fused.bindings }),
+          ...fused.options,
+        });
+        const session = await model.createContainerSession(gpu, fused.options);
+        try {
+          // The slot backing is built on the second run of one signature (the first runs on the arena).
+          for (let step = 0; step < 2; step += 1) await session.run(fused.inputs);
+          const diagnostics = session.diagnostics();
+          const counts: Readonly<Record<string, number | undefined>> =
+            diagnostics.lastRunFusions ?? {};
+          assertEquals(counts[fused.counter], fused.windows, `${fused.name}: windows taken`);
+          assertEquals(
+            diagnostics.planBacking.residentBytes,
+            scenarios[0].workspaceBytes,
+            `${fused.name}: slot table vs estimate`,
+          );
+        } finally {
+          await session.dispose();
+        }
+      }
     } finally {
       gpu.destroy();
     }

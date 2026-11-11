@@ -54,8 +54,11 @@ import {
   stateReadonly,
   stateWindow,
   topkK,
+  WEIGHT_SLOTS,
 } from "../ops.ts";
 import { groupNormLayout, groupNormTempBytes } from "../kernels/group-norm.ts";
+import { linearI8a8TempBytes } from "../kernels/linear-i8a8.ts";
+import { linearTakesI8a8 } from "./linear-route.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import {
   type AttentionTokenMajor,
@@ -500,9 +503,12 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
    *
    * With `"a8"` the estimate sees the same linear-prologue decision as execution (perf-ledger F-4 —
    * the same `planFusions`, on the weights' storage from the residency plan): an elementwise producer
-   * folded into an i8a8 linear's step ① has no output, so its bytes are not counted. A borrowed
-   * weight's storage (`seat: "shared"`) is the lender's and unknown here, so its linear is counted
-   * unfolded (on the large side). The i8a8 linear's quantized intermediates stay unaccounted.
+   * folded into an i8a8 linear's step ① has no output, so its bytes are not counted; and an i8a8
+   * linear counts its two node temporaries (the quantized activations and their per-token scales —
+   * `linearI8a8TempBytes`, the function execution allocates them with) over its quantize and GEMM
+   * dispatches. A borrowed weight's storage (`seat: "shared"`) is the lender's and unknown here, so
+   * its linear is counted as a plain one, without the fold and without the temporaries
+   * ({@link AdmissionReport.unaccounted}).
    * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
    */
   readonly linearCompute?: SessionOptions["linearCompute"];
@@ -575,7 +581,7 @@ export type EstimateOptions = Omit<SessionFusionOptions, typeof ROW_BLOCK_SPLIT>
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "Intermediates that fusions other than row-block attention, the linear prologue and the attention's absorbed permutes fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted, a producer folded into an i8a8 linear is counted as absent when linearCompute is passed, and a permute absorbed by a fused attention is counted as absent with the head-major copies that attention makes in its place when attentionCompute 'a8' is passed)",
-  "Quantized intermediates of linear i8a8 (depend on the numeric variant and the device limits). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others)",
+  "Quantized intermediates of linear i8a8 whose weight is borrowed (SessionOptions.sharedWeights — its storage is the lender's and unknown to the estimate, so the linear is counted as a plain one; with any other weight they are counted when linearCompute 'a8' is passed). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others)",
   "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
   "The implementation staging of queue.writeBuffer (not released until the submit completes)",
   "The retirement window (slot backings retired by a budget overrun / the plan LRU eviction are not destroyed before the next plan's allocation and live until the cleanup after flush, so that run holds the retired backings and the new ones at the same time)",
@@ -1445,6 +1451,25 @@ const fusedAttentionProgram = (
 };
 
 /**
+ * Whether a linear takes execution's i8a8 path (`buildLinear` in recipe-builders/linear.ts): the one
+ * route predicate `linearTakesI8a8` on the Session's linear seat (the fusion facts' knobs) and the
+ * storage of the weight slot from the residency plan (`plannedResidentWeights`). The branches
+ * `buildLinear` tries before it (packed activations, the integer GEMV) need linearCompute `"f32"`,
+ * which this predicate refuses, so under `"a8"` it alone decides. An `i4f16` weight is
+ * `expert_linear`'s alone (the planner admits it nowhere else), so it is read as not integer here.
+ * NOTE: a borrowed weight (`seat: "shared"`) is absent from the plan — its storage is the lender's —
+ * so its linear is counted as a plain one ({@link AdmissionReport.unaccounted}).
+ */
+const linearTakesI8a8Route = (node: NodePlan, knobs: TransientKnobs): boolean => {
+  if (node.contract.kind !== "linear") return false;
+  const slot = WEIGHT_SLOTS.get(node.node.op);
+  const resident =
+    slot === undefined ? undefined : knobs.fusion.residentWeights.get(node.node.ins[slot]);
+  const storage = resident === undefined || resident.storage === "i4f16" ? "f32" : resident.storage;
+  return linearTakesI8a8(knobs.fusion.knobs.linearCompute, storage, node.inputShapes[1][1]);
+};
+
+/**
  * Counts the GPU bytes of intermediate buffers (node outputs and fusion-rule temporaries) with **the
  * same planning function** as execution (ADR 0093 decision 4 — sharing {@link planTransients};
  * meets ADR 0070 decision 5's "the same rule as execution" by sharing the function). Returns the sum
@@ -1590,6 +1615,20 @@ const transientSlotBytes = (
         dispatches.push({ reads: [partials], writes: [stats] });
       }
       dispatches.push({ reads: [x, stats, ...reads.slice(1)], writes: outputRefs });
+    } else if (linearTakesI8a8Route(node, knobs)) {
+      // The i8a8 linear's two node temporaries over its two dispatches, with the lifetimes
+      // `buildLinearI8a8` declares (the same bytes function — kernels/linear-i8a8.ts): ① quantize
+      // reads the input (a folded producer's input with a prologue — the re-pointed plan) and
+      // writes `xq` and `xs`; ② the GEMM reads `xq`, the weight, the bias and `xs` and writes the
+      // output; both are released after ②.
+      const [x, weight] = node.inputShapes;
+      const bytes = linearI8a8TempBytes(numel(x.slice(0, -1)), weight[1]);
+      const xq: TransientRef = { kind: "temp", id: temps.length };
+      const xs: TransientRef = { kind: "temp", id: temps.length + 1 };
+      temps.push({ byteLength: bytes.xq, allocBefore: 0, releaseAfter: 1 });
+      temps.push({ byteLength: bytes.xs, allocBefore: 0, releaseAfter: 1 });
+      dispatches.push({ reads: [reads[0]], writes: [xq, xs] });
+      dispatches.push({ reads: [xq, ...reads.slice(1), xs], writes: outputRefs });
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
       // Reduce from the partial maxima to the smallest index. topk's merge also reads the value
       // bits of the original input.
@@ -1692,8 +1731,8 @@ const transientSlotBytes = (
  *   execution, and a budget smaller than a single row fails loudly with the same message as
  *   execution (the way to learn of a budget violation before the weights are loaded).
  * @param options.linearCompute the execution form of linear (the same value as `SessionOptions`).
- *   With `"a8"` a producer folded into an i8a8 linear (perf-ledger F-4) is not counted, as in
- *   execution.
+ *   With `"a8"` a producer folded into an i8a8 linear (perf-ledger F-4) is not counted, and an
+ *   i8a8 linear's quantized activations and scales are, as in execution.
  */
 export const estimateGraphMemory = (
   graph: IrGraph,
