@@ -1388,7 +1388,11 @@ adopted on the measured end-to-end time of untimed runs, not on per-dispatch GPU
 **The pipeline.** The model and the preset are chosen as on the chat page (any model of the three
 mounts), with the load options the chat page offers that the A/B needs: f16 KV and, for Gemma 4 26B
 A4B, the expert cache (slots, host tier, self-speculation depth — 64 slots with the host tier `all`
-runs 26B on a 16 GB GPU). Both arms load it with `buildGemmaPipeline` over the direct route.
+runs 26B on a 16 GB GPU). Both arms and the count probes load it with `buildGemmaPipeline` from one
+source, chosen as on the chat page: the cached route by default (the hub's cache, so the loads after
+the first read the browser's CacheStorage) or the direct route (`/models/`, fetched anew on every
+load). With the defaults an A/B loads the pipeline 22 times — two probes, and two arms twice per
+round over the warm-up round and four timed rounds — so the route matters; the record keeps it.
 
 **The arms.** `base` passes no rule; `rule` passes the candidate rule `candidate/gelu_mul` of
 `@karume/candidate-rules` through the gemma pipeline's experimental `fusionRules` (the target

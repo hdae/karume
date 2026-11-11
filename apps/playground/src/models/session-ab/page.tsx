@@ -26,6 +26,7 @@ import { MountBadges } from "@/components/mount-badges";
 import { PresetSelect } from "@/components/preset-select";
 import { RecordActions } from "@/components/record-actions";
 import { RunStatusCard } from "@/components/run-status-card";
+import { SourcePicker } from "@/components/source-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,8 +44,9 @@ import {
 import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { type GpuOptions, useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
+import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import { type DistributionStatus, mountStatus, type PipelineSource } from "@/lib/distributions";
+import { type DistributionStatus, mountStatus } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";
@@ -98,9 +100,6 @@ import { armRow, judgementView } from "./view";
 
 /** Module constant (useGpu needs stable options): subgroups when the adapter has them. */
 const GPU_OPTIONS: GpuOptions = { subgroups: "available" };
-
-/** Every arm reads the direct route, so the source stays out of the comparison. */
-const DIRECT_SOURCE: PipelineSource = { kind: "direct" };
 
 const BACKEND_CHOICES: readonly Choice<string>[] = [
   { value: "", label: "Choose the backend…", disabled: true },
@@ -256,6 +255,13 @@ export const SessionAbPage = () => {
                 },
               }),
         };
+  // One source for every arm and probe (the cached route by default: an A/B loads the pipeline once
+  // per visit and probe, and the direct route would fetch the weights anew each time).
+  const {
+    source,
+    hfRef,
+    choose: chooseSource,
+  } = usePipelineSource(modelKey === undefined ? undefined : statuses[modelKey.mount]);
   const canRun =
     readyGpu !== undefined &&
     model !== undefined &&
@@ -298,7 +304,7 @@ export const SessionAbPage = () => {
               mount: model.mount,
               model: model.model,
               quant: model.quant,
-              source: DIRECT_SOURCE,
+              source,
               speculative: false,
               ...(model.fullStateStorage === undefined
                 ? {}
@@ -349,7 +355,7 @@ export const SessionAbPage = () => {
           versions: PACKAGE_VERSIONS,
           request,
           distribution: facts,
-          source: sourceRecord(DIRECT_SOURCE),
+          source: sourceRecord(source),
           ruleName: GELU_MUL_RULE_NAME,
           arms: arms.map((arm) => ({ name: arm.name, facts: arm.facts() })),
           ...(settings.probeCounts ? { probes } : {}),
@@ -393,10 +399,10 @@ export const SessionAbPage = () => {
             <CardHeader>
               <CardTitle>Pipeline</CardTitle>
               <CardDescription>
-                Both arms load this model and preset over the direct route (<code>/models/</code>).
-                The arm <code>rule</code> adds the candidate rule <code>{GELU_MUL_RULE_NAME}</code>{" "}
-                (<code>@karume/candidate-rules</code>) through the gemma pipeline&apos;s
-                experimental <code>fusionRules</code>; <code>base</code> passes none.
+                Both arms load this model and preset from the same source. The arm <code>rule</code>{" "}
+                adds the candidate rule <code>{GELU_MUL_RULE_NAME}</code> (
+                <code>@karume/candidate-rules</code>) through the gemma pipeline&apos;s experimental{" "}
+                <code>fusionRules</code>; <code>base</code> passes none.
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
@@ -412,6 +418,13 @@ export const SessionAbPage = () => {
                   disabled={running || modelChoices.length === 0}
                 />
               </Field>
+              <SourcePicker
+                id="session-ab-source"
+                value={source.kind}
+                cachedAvailable={hfRef !== undefined}
+                onChange={chooseSource}
+                disabled={running}
+              />
               {presets === undefined || quant === undefined ? null : (
                 <PresetSelect
                   id="session-ab-preset"
