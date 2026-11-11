@@ -6,3 +6,4 @@
 
 export { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "./src/gelu-mul.ts";
 export { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "./src/ew-chain.ts";
+export { type VaeRmsSiluGroups, vaeRmsSiluRule, vaeRmsSiluRuleName } from "./src/vae-rms-silu.ts";

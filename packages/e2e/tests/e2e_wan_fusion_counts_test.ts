@@ -1,6 +1,8 @@
 /**
  * Fusion hit counts of the Wan2.1 distribution graphs (no GPU — `planFusions` on part 0 only; the
- * shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`).
+ * shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`). The last
+ * case pins the hits of the candidate rules `candidate/vae_rms_silu_g8` / `_g4`, which no preset
+ * passes (`@karume/candidate-rules`).
  *
  * MUST: the asset is `models/karume-wan2.1/` (untracked local asset); where it is missing the case
  * SKIPs explicitly with a reason (ADR 0005).
@@ -9,6 +11,7 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { vaeRmsSiluRuleName } from "@karume/candidate-rules";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
 import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
@@ -19,6 +22,7 @@ import {
   planDistributionFusions,
   readDistributionGraph,
 } from "./helpers/fusion-counts.ts";
+import { vaeRmsSiluPlans } from "./helpers/vae-rms-silu-plan.ts";
 
 /**
  * The Wan2.1 T2V 1.3B distribution (`models/karume-wan2.1/` — ADR 0118 step 7; not published on
@@ -223,6 +227,43 @@ test.skipIf(!WAN_AVAILABLE)(
         { adaln: 61, gatedResidual: 60 },
         label,
       );
+    }
+  },
+);
+
+/**
+ * The candidate rules `candidate/vae_rms_silu_g8` / `_g4` (`@karume/candidate-rules`, the channel
+ * RMS norm and the SiLU after it in one dispatch), which no preset passes, planned on the two VAE
+ * chunk graphs on 2026-11-11 (the two rules plan alike): **29** norms with the SiLU and **1**
+ * without it (the mid-block attention's norm, `[1, 384, 32, 32]` over axis 1, which a conv2d reads)
+ * per graph. The built-in silu's 29 go to the rule (silu 29 → 0), upsample2x keeps its 3, and the
+ * steps fall by 29 × 8 + 7 = 239 (the ten nodes of a site were nine steps, the silu pair being one):
+ * 401 → 162 on first, 413 → 174 on next.
+ */
+test.skipIf(!WAN_AVAILABLE)(
+  "the candidate rules candidate/vae_rms_silu_g8 / _g4 take 29 + 1 norms of each VAE chunk graph and move only silu",
+  async () => {
+    for (const [name, steps] of [
+      ["vae_decoder_first", [401, 162]],
+      ["vae_decoder_next", [413, 174]],
+    ] as const) {
+      const graph = await readWanGraph(name);
+      for (const groups of [8, 4] as const) {
+        const label = `${name} g${groups}`;
+        const planned = vaeRmsSiluPlans(graph, wanShapes(graph, 0), groups);
+        assertEquals(planned.tails, { silu: 29, none: 1 }, `${label}: hits per tail`);
+        assertEquals(
+          planned.fused.plan.counts,
+          { ...planned.plain.plan.counts, silu: 0, [vaeRmsSiluRuleName(groups)]: 30 },
+          `${label}: the counters`,
+        );
+        assertEquals(planned.plain.plan.counts.silu, 29, `${label}: silu without the rule`);
+        assertEquals(
+          [planned.plain.plan.steps.length, planned.fused.plan.steps.length],
+          [...steps],
+          `${label}: steps`,
+        );
+      }
     }
   },
 );

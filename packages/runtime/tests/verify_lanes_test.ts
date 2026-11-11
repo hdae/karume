@@ -199,7 +199,7 @@ const E2E_DIR = "packages/e2e/tests/";
 
 /**
  * The end-to-end tests that belong in core: gates over pure functions and manifests that need
- * neither a GPU nor real weights, and two GPU checks on small synthetic graphs that need no model
+ * neither a GPU nor real weights, and three GPU checks on small synthetic graphs that need no model
  * asset (the candidate external fusion rules against their unfused plans, which live in the e2e
  * package because the runtime's tests import nothing outside the runtime; they SKIP explicitly
  * without an adapter). Every other file of `packages/e2e/tests` runs real weights and
@@ -213,9 +213,11 @@ const CORE_E2E_TESTS = [
   "packages/e2e/tests/e2e_external_fusion_rule_test.ts",
   "packages/e2e/tests/e2e_fusion_candidates_report_test.ts",
   "packages/e2e/tests/e2e_session_options_mirror_test.ts",
+  "packages/e2e/tests/e2e_vae_rms_silu_rule_test.ts",
   "packages/e2e/tests/ew_chain_rule_plan_test.ts",
   "packages/e2e/tests/fusion_candidates_test.ts",
   "packages/e2e/tests/fusion_counts_context_test.ts",
+  "packages/e2e/tests/vae_rms_silu_rule_plan_test.ts",
 ];
 
 /**

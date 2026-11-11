@@ -5,7 +5,9 @@
  * MUST: the assets are `models/karume-anima/` (official repo, 5 variants, default =
  * anima-turbo-v1.1 — ADR 0087) and `models/karume-anima-extra/` (extra variants whose shared
  * components are cross-repo references into the official repo). Both are untracked local assets;
- * where they are missing the cases SKIP explicitly with a reason (ADR 0005).
+ * where they are missing the cases SKIP explicitly with a reason (ADR 0005). One case pins the hits
+ * of the candidate rules `candidate/vae_rms_silu_g8` / `_g4`, which no preset passes
+ * (`@karume/candidate-rules`).
  *
  * NOTE: what this file pins are the values **per run** (the same lifetime as `lastRunFusions`). The
  * per-predict totals in the measurement column of ADR 0040 are these folded over the pipeline's run
@@ -21,6 +23,7 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { vaeRmsSiluRuleName } from "@karume/candidate-rules";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
 import {
@@ -36,6 +39,7 @@ import {
   planDistributionFusions,
   readDistributionGraph,
 } from "./helpers/fusion-counts.ts";
+import { vaeRmsSiluPlans } from "./helpers/vae-rms-silu-plan.ts";
 
 const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 
@@ -286,6 +290,41 @@ test.skipIf(!ASSETS_AVAILABLE)(
       { ...NONE, silu: 29, upsample2x: 3 },
       "VAE decoder (one tile)",
     );
+  },
+);
+
+/**
+ * The candidate rules `candidate/vae_rms_silu_g8` / `_g4` (`@karume/candidate-rules`, the channel
+ * RMS norm and the SiLU after it in one dispatch), which no preset passes, planned on the VAE
+ * decoder's tile graph on 2026-11-11, at both seats (the f16 one of the default presets and the
+ * bf16 preset's; the two rules plan alike): **29** norms with the SiLU and **1** without it (the
+ * mid-block attention's norm, `[1, 384, 64, 64]` over axis 1, which a conv2d reads). The built-in
+ * silu's 29 go to the rule (silu 29 → 0), upsample2x keeps its 3, and the steps fall by
+ * 29 × 8 + 7 = 239 (the ten nodes of a site were nine steps, the silu pair being one): 334 → 95.
+ * A 1024² decode runs the tile graph 9 times.
+ */
+test.skipIf(!ASSETS_AVAILABLE)(
+  "the candidate rules candidate/vae_rms_silu_g8 / _g4 take 29 + 1 norms of the VAE decoder's tile graph and move only silu",
+  async () => {
+    for (const seat of ["f16", "bf16"]) {
+      const graph = await readAnimaGraph("vae_decoder", seat);
+      for (const groups of [8, 4] as const) {
+        const label = `vae_decoder/${seat} g${groups}`;
+        const planned = vaeRmsSiluPlans(graph, { latents: [1, 16, 64, 64] }, groups);
+        assertEquals(planned.tails, { silu: 29, none: 1 }, `${label}: hits per tail`);
+        assertEquals(
+          planned.fused.plan.counts,
+          { ...planned.plain.plan.counts, silu: 0, [vaeRmsSiluRuleName(groups)]: 30 },
+          `${label}: the counters`,
+        );
+        assertEquals(planned.plain.plan.counts.silu, 29, `${label}: silu without the rule`);
+        assertEquals(
+          [planned.plain.plan.steps.length, planned.fused.plan.steps.length],
+          [334, 95],
+          `${label}: steps`,
+        );
+      }
+    }
   },
 );
 
