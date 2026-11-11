@@ -16,6 +16,14 @@ export {
   type WordFailure,
 } from "./src/result.ts";
 export { checkFusionTwin, type FusionTwin } from "./src/fusion-twin.ts";
+export {
+  checkGatedResidualTwins,
+  GATED_RESIDUAL_MASKS,
+  GATED_RESIDUAL_SHAPES,
+  GATED_RESIDUAL_TWIN_CASES,
+  gatedResidualGraph,
+  gatedResidualInputs,
+} from "./src/fusion-twins/gated-residual.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
