@@ -43,6 +43,8 @@ type GatedResidualMatch = FusionMatch & {
 export const GATED_RESIDUAL_RULE = defineRule<GatedResidualMatch, "gatedResidual">({
   name: "gatedResidual",
   heads: [WHERE_OP],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index) => {
     const select = nodes[index];

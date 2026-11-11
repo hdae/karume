@@ -578,6 +578,15 @@ export type FusionHit = {
   readonly advance: number;
 };
 
+/**
+ * The contract class a rule declares (ADR 0147 decision 2) — the form of the evidence for its
+ * numbers. `"E"`: u32-identical to the unfused plan of the same graph (the class of every built-in
+ * rule — the classification table of ADR 0147 decision 2). `"C"`, `"R"` and `"Q"` are the classes
+ * of a numerics-changing variant (composition, addition order, approximation) and follow the
+ * checks ADR 0147 assigns to them.
+ */
+export type ContractClass = "E" | "C" | "R" | "Q";
+
 /** The body of a rule (match grabs, build lowers to a step declaratively). */
 export type FusionRule<Name extends string = string> = {
   /** The rule's counter name ({@link FusionPlan.counts}) and {@link FusedStep.rule}. */
@@ -587,6 +596,8 @@ export type FusionRule<Name extends string = string> = {
    * application order is checked mechanically).
    */
   readonly heads: readonly string[];
+  /** The contract class the rule declares ({@link ContractClass}). */
+  readonly contract: ContractClass;
   readonly apply: (
     nodes: readonly NodePlan[],
     index: number,
@@ -672,6 +683,11 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
   readonly name: Name;
   readonly heads: readonly string[];
   /**
+   * The contract class of the rule's numbers ({@link ContractClass}, ADR 0147 decision 2). A rule
+   * u32-identical to the unfused plan declares `"E"`.
+   */
+  readonly contract: ContractClass;
+  /**
    * Who may read the chain's internal values: `"private"` = each has exactly one consumer and is
    * not a graph output ({@link internalsArePrivate}); `"stayInChain"` = every use is inside the
    * chain, possibly more than one ({@link internalsStayInChain} — only for a matcher that pins every
@@ -687,6 +703,7 @@ export const defineRule = <Matched extends FusionMatch, Name extends string = st
 }): FusionRule<Name> => ({
   name: rule.name,
   heads: rule.heads,
+  contract: rule.contract,
   apply: (nodes, index, context) => {
     const matched = rule.match(nodes, index, context);
     if (matched === undefined) return undefined;

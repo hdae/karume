@@ -33,6 +33,8 @@ type Upsample2xMatch = FusionMatch & {
 export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch, "upsample2x">({
   name: "upsample2x",
   heads: ["reshape"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index) => {
     const first = nodes[index];

@@ -199,6 +199,8 @@ export const matchRopePairForm = (
 export const ROPE_RULE = defineRule<RopeMatch, "rope">({
   name: "rope",
   heads: ["mul", "slice"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
     // Called for every node, so check the leading op before building an array (a short-lived

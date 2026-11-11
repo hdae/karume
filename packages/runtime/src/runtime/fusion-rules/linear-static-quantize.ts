@@ -97,6 +97,8 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<
 >({
   name: "linearStaticQuantize",
   heads: ["linear"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
     if (

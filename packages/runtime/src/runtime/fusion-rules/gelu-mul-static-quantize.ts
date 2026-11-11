@@ -63,6 +63,8 @@ export const GELU_MUL_STATIC_QUANTIZE_RULE = defineRule<
 >({
   name: "geluMulStaticQuantize",
   heads: ["gelu_tanh"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
     if (context.fuseGeluMulStaticQuantize !== true) return undefined;

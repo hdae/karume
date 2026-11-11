@@ -235,6 +235,8 @@ const tokenDispatches = (matched: AdalnMatch): Pick<FusedStep, "temps" | "dispat
 export const ADALN_RULE = defineRule<AdalnMatch, "adaln">({
   name: "adaln",
   heads: [LAYER_NORM_OP],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index) => {
     const norm = nodes[index];

@@ -220,6 +220,8 @@ type RowBlockAttentionMatch = FusionMatch & {
 export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch, "rowBlockAttention">({
   name: "rowBlockAttention",
   heads: ["bmm"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
     const qk = nodes[index];

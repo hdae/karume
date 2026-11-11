@@ -35,6 +35,8 @@ type SiluMatch = FusionMatch & {
 export const SILU_RULE = defineRule<SiluMatch, "silu">({
   name: "silu",
   heads: ["sigmoid"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index) => {
     const sigmoid = nodes[index];

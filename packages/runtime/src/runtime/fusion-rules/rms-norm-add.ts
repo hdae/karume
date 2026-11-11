@@ -30,6 +30,8 @@ type RmsNormAddMatch = FusionMatch & {
 export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch, "rmsNormAdd">({
   name: "rmsNormAdd",
   heads: ["rms_norm"],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "private",
   match: (nodes, index, context) => {
     if (context.fuseRmsNormAdd !== true) return undefined;

@@ -88,6 +88,8 @@ const nextReader = (nodes: readonly NodePlan[], from: number, name: string): num
 export const RMS_NORM_ROPE_RULE = defineRule<RmsNormRopeMatch, "rmsNormRope">({
   name: "rmsNormRope",
   heads: [RMS_NORM_OP],
+  // ADR 0147 decision 2: every built-in fusion rule is class E (u32 equality with the unfused plan).
+  contract: "E",
   internals: "stayInChain",
   match: (nodes, index, context) => {
     const norm = nodes[index];

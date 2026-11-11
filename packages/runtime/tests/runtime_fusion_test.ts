@@ -136,6 +136,13 @@ test("the rule table's first ops are disjoint, so the application order does not
   ]);
 });
 
+test("every built-in rule declares contract class E, the class ADR 0147 decision 2 gives the fusion rules", () => {
+  assertEquals(
+    FUSION_RULES.filter((rule) => rule.contract !== "E").map((rule) => rule.name),
+    [],
+  );
+});
+
 // ---------------------------------------------------------------- The rule list is an input
 
 type NegNegMatch = FusionMatch & {
@@ -152,6 +159,7 @@ type NegNegMatch = FusionMatch & {
 const NEG_NEG_RULE = defineRule<NegNegMatch>({
   name: "testNegNeg",
   heads: ["neg"],
+  contract: "E",
   internals: "private",
   match: (nodes, index) => {
     const first = nodes[index];
@@ -307,6 +315,7 @@ test("a hit whose step carries a rule name without a counter fails loudly instea
   const renaming: FusionRule = {
     name: "testRenaming",
     heads: ["neg"],
+    contract: "E",
     apply: (nodes, index, context) => {
       const hit = NEG_NEG_RULE.apply(nodes, index, context);
       return hit === undefined ? undefined : { ...hit, step: { ...hit.step, rule: "elsewhere" } };
