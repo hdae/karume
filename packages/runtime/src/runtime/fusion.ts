@@ -888,6 +888,12 @@ export const planFusions = <Name extends string>(
 export type UnfusedWindow = {
   /** The op names of the chain that would be folded (in-window passthroughs excluded). */
   readonly ops: readonly string[];
+  /**
+   * The chain's nodes themselves, in window order (the nodes of {@link UnfusedWindow.ops}; the
+   * in-window passthroughs are the window's other nodes). A consumer reads the shapes of the values
+   * a fold would remove from them, instead of re-deriving the chain outside the fusion-pass layer.
+   */
+  readonly chain: readonly NodePlan[];
   /** Node count of the consecutive window; the difference from `ops.length` = passthrough count. */
   readonly windowSize: number;
   /** The position of the window's first node (index in node order, the step list expanded). */
@@ -996,6 +1002,7 @@ export const enumerateUnfusedWindows = (
         if (!passthroughIsIndependent(chain, passthrough)) continue;
         found.push({
           ops: chain.map((step) => step.node.op),
+          chain,
           windowSize: size,
           nodeIndex: runStart + start,
           outputName: chain[chain.length - 1].outputs[0].name,

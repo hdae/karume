@@ -143,14 +143,12 @@ test("a window whose chain's internal value escapes is not a candidate (another 
 });
 
 /**
- * Splitting out an in-window passthrough (an in-window node not in the chain). The same shape as
- * the `sym_prefix_slice` of RoPE's cos / sin tables — it flows into the chain's `add` but is also
- * read elsewhere (2 consumers), so it does not join the chain, and only the window width becomes
- * 1 larger than the chain.
+ * A chain with an in-window passthrough: `neg → (neg of w) → add → mul`, where the second `neg`'s
+ * output `t` is read by the chain's `add` and by a `mul` outside the window.
  */
-test("an in-window passthrough leaves the chain, and only the window width grows beyond the chain", () => {
+const passthroughGraph = (): DeclarationJson => {
   const shape = [4, 8];
-  const graph: DeclarationJson = {
+  return {
     format: "karume-ir",
     version: 2,
     requires: { ops: ["neg", "add", "mul"] },
@@ -174,7 +172,16 @@ test("an in-window passthrough leaves the chain, and only the window width grows
       { op: "mul", ins: ["t", "w"], outs: ["e"], attrs: {} },
     ],
   };
-  const { nodes, context } = plan(graph, CHAIN_INPUTS);
+};
+
+/**
+ * Splitting out an in-window passthrough (an in-window node not in the chain). The same shape as
+ * the `sym_prefix_slice` of RoPE's cos / sin tables — it flows into the chain's `add` but is also
+ * read elsewhere (2 consumers), so it does not join the chain, and only the window width becomes
+ * 1 larger than the chain.
+ */
+test("an in-window passthrough leaves the chain, and only the window width grows beyond the chain", () => {
+  const { nodes, context } = plan(passthroughGraph(), CHAIN_INPUTS);
   const windows = enumerateUnfusedWindows(unfused(nodes), context, 4);
   // `neg,add` is picked up with window width 3 (with the passthrough neg in between).
   assertEquals(outline(windows).includes("neg,add@0+3=b"), true, outline(windows).join(" / "));
@@ -183,6 +190,35 @@ test("an in-window passthrough leaves the chain, and only the window width grows
   assertEquals(
     windows.filter((window) => window.ops.join(",") === "neg,add").map((w) => w.nodeIndex),
     [0],
+  );
+});
+
+test("a window's chain holds the folded nodes themselves: their ops are the window's ops, and no in-window passthrough is among them", () => {
+  const { nodes, context } = plan(passthroughGraph(), CHAIN_INPUTS);
+  const windows = enumerateUnfusedWindows(unfused(nodes), context, 4);
+  for (const window of windows) {
+    const label = outline([window])[0];
+    assertEquals(
+      window.chain.map((step) => step.node.op),
+      window.ops,
+      label,
+    );
+    // The chain is a subsequence of its window and ends at the node that writes `outputName`.
+    const span = nodes.slice(window.nodeIndex, window.nodeIndex + window.windowSize);
+    assertEquals(
+      window.chain.every((step) => span.includes(step)),
+      true,
+      label,
+    );
+    assertEquals(window.chain[window.chain.length - 1].outputs[0].name, window.outputName, label);
+  }
+  // The window that holds the passthrough: the chain writes `a` and `b`, and the passthrough `neg`
+  // of `w` (it writes `t`) is the window's third node but not a chain node.
+  const withPassthrough = windows.find((window) => outline([window])[0] === "neg,add@0+3=b");
+  assertEquals(
+    withPassthrough?.chain.map((step) => step.outputs[0].name),
+    ["a", "b"],
+    outline(windows).join(" / "),
   );
 });
 
