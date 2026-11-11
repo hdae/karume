@@ -111,6 +111,19 @@ export {
   RMS_NORM_ADD_TWIN_CASES,
   rmsNormAddInputs,
 } from "./src/fusion-twins/rms-norm-add.ts";
+export {
+  checkGeluMulStaticQuantizeTwins,
+  disposeGeluMulChain,
+  GELU_MUL_DIM,
+  GELU_MUL_GROUPS,
+  GELU_MUL_STATIC_QUANTIZE_TWIN_CASES,
+  geluMulCase,
+  geluMulF32Tensor,
+  geluMulGateWords,
+  geluMulInputs,
+  geluMulPleWords,
+  openGeluMulChain,
+} from "./src/fusion-twins/gelu-mul-static-quantize.ts";
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkExpertLinear, EXPERT_LINEAR_CASES } from "./src/expert-linear.ts";
 export {
