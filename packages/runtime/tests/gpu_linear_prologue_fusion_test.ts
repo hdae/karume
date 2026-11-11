@@ -10,6 +10,7 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
+import { checkFusionTwin } from "@karume/kernel-checks";
 import { elementwiseKey, type PrologueUnaryOp } from "../src/codegen/elementwise.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
@@ -27,6 +28,7 @@ import {
 } from "../src/runtime/executor.ts";
 import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertCheckCase } from "./helpers/kernel-check-assert.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import {
   type DeclarationJson,
@@ -104,23 +106,6 @@ const weightTensors = (k: number, n: number) => {
   ] as const;
 };
 
-const words = (tensor: Tensor): Uint32Array =>
-  new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
-
-const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
-
-/** Non-NaN words match exactly; NaN only by classification (payloads are backend-defined). */
-const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
-  assertEquals(actual.length, expected.length, `${label}: length`);
-  for (let i = 0; i < actual.length; i++) {
-    if (isNanWord(expected[i])) {
-      assertEquals(isNanWord(actual[i]), true, `${label}: NaN classification index=${i}`);
-    } else {
-      assertEquals(actual[i], expected[i], `${label}: word index=${i}`);
-    }
-  }
-};
-
 /**
  * Activations of the DiT's pre-gelu magnitude (both signs, up to |x| ≈ 14.7: past the point where
  * both ops saturate to x and to −0), one all-zero row and one row with a NaN (its output row is NaN
@@ -175,27 +160,18 @@ test.skipIf(!GPU_AVAILABLE)(
             options,
           );
           try {
-            // The submit statistics accumulate over a session's runs, so compare the increments.
-            const fusedBefore = fused.diagnostics().submit.dispatchCount;
-            const primitiveBefore = primitive.diagnostics().submit.dispatchCount;
-            const fusedOut = (await fused.run({ x })).y;
-            const primitiveOut = (await primitive.run({ x })).y;
-            assertFloatParity(words(fusedOut), words(primitiveOut), `${label}: fused vs pair`);
-            assertEquals(
-              fused.diagnostics().submit.dispatchCount - fusedBefore,
-              2,
-              `${label}: the prologue quantize + the GEMM`,
-            );
-            assertEquals(
-              primitive.diagnostics().submit.dispatchCount - primitiveBefore,
-              3,
-              `${label}: ${op} + quantize_rows + the GEMM`,
-            );
-            assertEquals(fused.diagnostics().lastRunFusions?.linearPrologue, 1, `${label}: fused`);
-            assertEquals(
-              primitive.diagnostics().lastRunFusions?.linearPrologue,
-              0,
-              `${label}: reference`,
+            assertCheckCase(
+              await checkFusionTwin(gpu, {
+                label: `${label}: fused vs pair`,
+                fused,
+                plain: primitive,
+                feeds: { x },
+                counter: "linearPrologue",
+                hits: 1,
+                nan: "class",
+                // The prologue quantize + the GEMM against the op + quantize_rows + the GEMM.
+                dispatches: { fused: 2, plain: 3 },
+              }),
             );
             const gemm = linearI8a8Key(linearI8a8UsesVec4(n), dot === "dp4a", profile.i8a8.linear);
             assertEquals(
