@@ -41,6 +41,9 @@ Who imports it (every importer; keep this list complete when one is added):
   `vae_rms_silu_rule_plan_test.ts`, `e2e_wan_ti2v_fusion_counts_test.ts`, `e2e_wan_fusion_counts_test.ts`
   `e2e_anima_fusion_counts_test.ts` (through `tests/helpers/vae-rms-silu-plan.ts`) and
   `e2e_vae_session_ab_test.ts` — the e2e tests in the table above.
+- `packages/e2e/tests/e2e_moss_pipeline_rule_test.ts`, `e2e_anima_pipeline_rule_test.ts` and
+  `e2e_wan_ti2v_pipeline_rule_test.ts` — the opt-in end-to-end identity and timing of `candidate/ew_chain` and
+  `candidate/vae_rms_silu_g8` through the MOSS-Image, anima and Wan2.2 pipelines' `fusionRules`.
 - `apps/playground/src/models/session-ab/page.tsx` and `vae.ts` — the playground's `/session-ab` page (its
   Gemma 4 target passes `candidate/gelu_mul`, its MOSS-Image DiT target `candidate/ew_chain`, its two VAE
   targets `candidate/vae_rms_silu_g8` / `_g4`), and `apps/playground/tests/session-ab_arm_test.ts`,
