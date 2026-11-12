@@ -56,6 +56,13 @@ export const ROWS_SLOT_NAMES = [
   "gemmRows > 512",
 ] as const;
 
+/** Field names of the 3 i8a8.linear buckets (expected spelling of the generator — written by hand). */
+export const I8A8_LINEAR_SLOT_NAMES = [
+  "i8a8.linear ≤ 256",
+  "i8a8.linear 257〜512",
+  "i8a8.linear > 512",
+] as const;
+
 export type CaseRef = { readonly caseId: string; readonly op: SweepOp; readonly shape: string };
 
 export const linearCase = (m: number): CaseRef => ({

@@ -8,6 +8,7 @@ import { conv2dIgemmMTile, conv2dUsesVec4 } from "../src/kernels/conv2d.ts";
 import { conv3dI8a8EligibleShape, conv3dI8a8UsesVec4 } from "../src/kernels/conv3d-i8a8.ts";
 import {
   caseFlops,
+  I8A8_LINEAR_ROWS_BOUNDS,
   PROFILE_GEMM_ROWS_BOUNDS,
   SWEEP_CASES,
   SWEEP_OPS,
@@ -70,6 +71,63 @@ describe("the boundaries of the profile's gemmRows segments", () => {
   });
 });
 
+/** The i8a8 linear cases of the sweep's table (M / N / K and the census count, in order). */
+const i8a8LinearCases = SWEEP_CASES.flatMap((sweepCase) =>
+  sweepCase.op === "i8a8-linear" ? [sweepCase] : [],
+);
+
+describe("the boundaries of the profile's i8a8.linear buckets (ADR 0115 addendum decision 14)", () => {
+  it("are 256 / 512 / Infinity, and every bound but the last equals the M of an i8a8 linear case (a bucket's upper end is measured — ADR 0116)", () => {
+    assertEquals(I8A8_LINEAR_ROWS_BOUNDS, [256, 512, Number.POSITIVE_INFINITY]);
+    const rows = new Set(i8a8LinearCases.map(({ m }) => m));
+    for (const maxRows of I8A8_LINEAR_ROWS_BOUNDS.slice(0, -1)) {
+      assert(rows.has(maxRows), `no i8a8 linear case at M = ${maxRows}`);
+    }
+    for (let index = 1; index < I8A8_LINEAR_ROWS_BOUNDS.length; index++) {
+      assert(I8A8_LINEAR_ROWS_BOUNDS[index - 1] < I8A8_LINEAR_ROWS_BOUNDS[index], `${index}`);
+    }
+  });
+
+  it("every bucket has an i8a8 linear case", () => {
+    const bucketOf = (m: number): number =>
+      I8A8_LINEAR_ROWS_BOUNDS.findIndex((maxRows) => m <= maxRows);
+    assertEquals(
+      [...new Set(i8a8LinearCases.map(({ m }) => bucketOf(m)))].sort((a, b) => a - b),
+      I8A8_LINEAR_ROWS_BOUNDS.map((_, index) => index),
+    );
+  });
+});
+
+describe("the i8a8 linear cases (ADR 0115 addendum decision 14)", () => {
+  it("are the six anima DiT shapes, the five Wan2.2 TI2V-5B DiT shapes at 33 frames, the Irodori guard and its M 256 edge, with the ordinary ids and their counts", () => {
+    assertEquals(
+      i8a8LinearCases.map(({ id, m, n, k, censusCount }) => [id, m, n, k, censusCount]),
+      [
+        ["i8a8-linear-m1024-n2048-k2048", 1024, 2048, 2048, 168],
+        ["i8a8-linear-m1024-n8192-k2048", 1024, 8192, 2048, 28],
+        ["i8a8-linear-m1024-n2048-k8192", 1024, 2048, 8192, 28],
+        ["i8a8-linear-m4096-n2048-k2048", 4096, 2048, 2048, 168],
+        ["i8a8-linear-m4096-n8192-k2048", 4096, 8192, 2048, 28],
+        ["i8a8-linear-m4096-n2048-k8192", 4096, 2048, 8192, 28],
+        ["i8a8-linear-m7920-n3072-k3072", 7920, 3072, 3072, 180],
+        ["i8a8-linear-m7920-n14336-k3072", 7920, 14336, 3072, 30],
+        ["i8a8-linear-m7920-n3072-k14336", 7920, 3072, 14336, 30],
+        ["i8a8-linear-m512-n3072-k3072", 512, 3072, 3072, 61],
+        ["i8a8-linear-m1-n18432-k3072", 1, 18432, 3072, 2],
+        ["i8a8-linear-m185-n1280-k1280", 185, 1280, 1280, 0],
+        ["i8a8-linear-m256-n1280-k1280", 256, 1280, 1280, 0],
+      ],
+    );
+    // The Wan2.2 counts weigh 303 of the 310 linears of one 33f DiT forward
+    assertEquals(
+      i8a8LinearCases
+        .filter(({ source }) => source.startsWith("Wan2.2"))
+        .reduce((total, { censusCount }) => total + censusCount, 0),
+      303,
+    );
+  });
+});
+
 describe("shape table", () => {
   it("ids are unique and every op family has at least one case", () => {
     const ids = SWEEP_CASES.map((sweepCase) => sweepCase.id);
@@ -83,8 +141,17 @@ describe("shape table", () => {
   });
 
   it("census-derived cases have a positive integer census count and a positive operation count", () => {
+    // The Irodori guard and its edge are not in the Wan2.2 forward the other i8a8 linear counts
+    // weigh (count 0)
+    const outsideCensus = ["i8a8-linear-m185-n1280-k1280", "i8a8-linear-m256-n1280-k1280"];
+    for (const id of outsideCensus) {
+      const sweepCase = SWEEP_CASES.find((entry) => entry.id === id);
+      assert(sweepCase !== undefined, id);
+      assertEquals(sweepCase.censusCount, 0, id);
+      assert(caseFlops(sweepCase) > 0, id);
+    }
     for (const sweepCase of SWEEP_CASES) {
-      if (sweepCase.op === "matmul") continue;
+      if (sweepCase.op === "matmul" || outsideCensus.includes(sweepCase.id)) continue;
       assert(Number.isInteger(sweepCase.censusCount) && sweepCase.censusCount > 0, sweepCase.id);
       assert(caseFlops(sweepCase) > 0, sweepCase.id);
     }

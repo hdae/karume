@@ -13,9 +13,10 @@
  *   would compete for the GPU. The runtime cannot see other devices, so this is the caller's
  *   responsibility.
  * - The sweep's cases come from the op census of the models the profile serves: Anima (a DiT image
- *   model) for the GEMM, attention and conv2d fields, and the VAE decoder of Wan2.2 TI2V-5B for
- *   `i8a8.conv3d`. The profile's fields are decided by those shapes, also for applications that run
- *   other models.
+ *   model) for the GEMM, attention and conv2d fields, the DiTs of Anima and Wan2.2 TI2V-5B with a
+ *   small-M guard of Irodori for `i8a8.linear` (by row-count buckets of its own), and the VAE
+ *   decoder of Wan2.2 TI2V-5B for `i8a8.conv3d`. The profile's fields are decided by those shapes,
+ *   also for applications that run other models.
  * - {@link deriveGeometryProfile} turns one or more sweep records into a profile. A geometry is
  *   adopted for a field only if, in every case of that field, its output matched the default
  *   geometry's output bit for bit and it was at least ×1.05 faster. The evidence is limited to the

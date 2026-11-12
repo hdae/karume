@@ -26,6 +26,12 @@
  * `vae_decoder_first_32` / `vae_decoder_next_32` at tile 32 — ADR 0134), read from the graphs'
  * static shapes. They too are copied and not read at run time ({@link CONV3D_I8A8_CASES}).
  *
+ * The i8a8 linear has two more sources besides anima's DiT (ADR 0115 addendum decision 14): the
+ * Wan2.2 TI2V-5B DiT at 33 frames ({@link WAN22_DIT_LINEAR}) and a guard of the Irodori v4-small
+ * DiT at small M with an edge case at the upper end of the bucket ≤ 256
+ * ({@link IRODORI_I8A8_LINEAR_CASES}) — the shapes the families running the i8a8 linear by default
+ * reach, at the row counts the field's buckets ({@link I8A8_LINEAR_ROWS_BOUNDS}) split.
+ *
  * The evaluation sets `k85` and `k88` (perf-ledger K-85 / K-88) have tables of their own
  * ({@link K85_CASES}, {@link K88_CASES}), outside {@link SWEEP_CASES}: the case-set version and the
  * kernel fingerprints of the table-deriving sets do not see them ({@link sweepCasesFor}).
@@ -211,6 +217,15 @@ export const PROFILE_GEMM_ROWS_BOUNDS: readonly number[] = [
   Number.POSITIVE_INFINITY,
 ];
 
+/**
+ * The bucket boundaries of the geometry profile's `i8a8.linear` (the `maxRows` column — ADR 0115
+ * addendum decision 14), the `i8a8-linear` family's bounds (they enter that family's case-set
+ * version and no other). The generator writes one rule per bucket for every table. The entries
+ * other than the last MUST each equal the M of an `i8a8-linear` sweep case (tune_cases_test
+ * enforces it — a bucket's upper end is measured, ADR 0116).
+ */
+export const I8A8_LINEAR_ROWS_BOUNDS: readonly number[] = [256, 512, Number.POSITIVE_INFINITY];
+
 /** The census's attention `attrs.scale` (common to the DiT's self / cross — `128^-0.25`). */
 const DIT_ATTENTION_SCALE = 0.2973017692565918;
 
@@ -247,6 +262,68 @@ const ditLinear = (op: LinearCase["op"]): LinearCase[] =>
       }`,
     })),
   );
+
+/** The source of the Wan2.2 DiT's i8a8 linear cases (the forward the census counts are taken from). */
+const WAN22_DIT = "Wan2.2 TI2V-5B transformer (33 frames at 1280×704, S = 7,920)";
+
+/**
+ * The Wan2.2 TI2V-5B DiT's linears (the `transformer` graph of the distribution,
+ * `models/karume-wan2.2/ti2v-5b/transformer`, its `linear` nodes by input and weight shape) at
+ * `S = 7,920` (33 frames at 1280×704), all i8 weights. Copied, not read at run time.
+ *
+ * `count` is the node count **in one Wan2.2 33f DiT forward**: self-attention q / k / v / o and
+ * cross-attention q / o 180 (30 blocks × 6), the FFN up and down 30 each, the cross-attention k / v
+ * at the 512 text tokens 60 plus the text embedder's second layer 1, and the time projection at
+ * M = 1 2 (one per timestep input). Those are 303 of the graph's 310 linears; the 7 left out are the
+ * patch embedding, the output projection and the text embedder's first layer (1 node each) and the
+ * timestep embedder's two layers at M = 1 (2 each).
+ */
+const WAN22_DIT_LINEAR: readonly {
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly count: number;
+  readonly what: string;
+}[] = [
+  { m: 7920, n: 3072, k: 3072, count: 180, what: "self q / k / v / o and cross q / o" },
+  { m: 7920, n: 14336, k: 3072, count: 30, what: "FFN up" },
+  { m: 7920, n: 3072, k: 14336, count: 30, what: "FFN down" },
+  { m: 512, n: 3072, k: 3072, count: 61, what: "cross k / v and the text embedder's second layer" },
+  { m: 1, n: 18432, k: 3072, count: 2, what: "time projection" },
+];
+
+/** The Wan2.2 DiT's i8a8 linear cases ({@link WAN22_DIT_LINEAR}, in its order). */
+const WAN22_I8A8_LINEAR_CASES: readonly LinearCase[] = WAN22_DIT_LINEAR.map(
+  ({ m, n, k, count, what }): LinearCase => ({
+    id: linearId("i8a8-linear", m, n, k),
+    op: "i8a8-linear",
+    m,
+    n,
+    k,
+    censusCount: count,
+    source: `${WAN22_DIT} [1,${m},${k}] × [${n},${k}] (${what})`,
+  }),
+);
+
+/**
+ * The Irodori v4-small DiT's linear `[1,185,1280] × [1280,1280]` (the `dit` graph, 60 nodes per DiT
+ * step at M = S = 185 — the M of the research's regression measurement,
+ * docs/research/2026-10-25-speed-recon-3080ti.md §5): a guard for the families whose a8 linears run
+ * at small M (Irodori's default preset `i8-a8` reads the same `i8a8.linear` field), and the same
+ * shape at M = 256, the upper end of the bucket ≤ 256 ({@link I8A8_LINEAR_ROWS_BOUNDS}). Count 0:
+ * neither is in the Wan2.2 forward the other counts weigh.
+ */
+const IRODORI_I8A8_LINEAR_CASES: readonly LinearCase[] = [185, 256].map((m): LinearCase => ({
+  id: linearId("i8a8-linear", m, 1280, 1280),
+  op: "i8a8-linear",
+  m,
+  n: 1280,
+  k: 1280,
+  censusCount: 0,
+  source: `Irodori v4-small dit [1,${m},1280] × [1280,1280] (${
+    m === 185 ? "60 nodes per DiT step" : "the guard's M 185 replaced with 256"
+  }; not in the Wan2.2 forward)`,
+}));
 
 const LINEAR_CASES: readonly LinearCase[] = [
   ...ditLinear("linear"),
@@ -293,6 +370,8 @@ const LINEAR_CASES: readonly LinearCase[] = [
     source: `text_encoder [1,${m},1024] × [3072,1024] (census M 64 replaced with ${m})`,
   })),
   ...ditLinear("i8a8-linear"),
+  ...WAN22_I8A8_LINEAR_CASES,
+  ...IRODORI_I8A8_LINEAR_CASES,
 ];
 
 /**
@@ -546,42 +625,22 @@ export const SWEEP_CASES: readonly SweepCase[] = [
 const k85Id = (m: number, n: number, k: number): string =>
   `k85-${linearId("i8a8-linear", m, n, k)}`;
 
-/** The source of the K-85 cases of the Wan2.2 DiT (the forward the census counts are taken from). */
-const WAN22_DIT = "Wan2.2 TI2V-5B transformer (33 frames at 1280×704, S = 7,920)";
-
 /**
  * The cases of the evaluation set `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear),
- * all `i8a8-linear` with i8 weights. The source is the `transformer` graph of the Wan2.2 TI2V-5B
- * distribution (`models/karume-wan2.2/ti2v-5b/transformer`, its `linear` nodes by input and weight
- * shape) with `S = 7,920` (33 frames at 1280×704), and the `dit` graph of Irodori v4-small for the
- * small-M guard. Copied, not read at run time.
- *
- * `censusCount` is the node count **in one Wan2.2 33f DiT forward** (the weight of the set's forward
- * sum): self-attention q / k / v / o and cross-attention q / o 180 (30 blocks × 6), the FFN up and
- * down 30 each, the cross-attention k / v at the 512 text tokens 60 plus the text embedder's second
- * layer 1, and the time projection at M = 1 2 (one per timestep input). Those are 303 of the
- * graph's 310 linears; the 7 left out are the patch embedding, the output projection and the text
- * embedder's first layer (1 node each) and the timestep embedder's two layers at M = 1 (2 each). The
- * Irodori case is a guard for the families whose a8 linears run at small M (its default preset
- * `i8-a8` reads the same `i8a8.linear` field): count 0, it is not in the Wan2.2 forward (60 nodes
- * per Irodori DiT step at M = S = 185, the M of the research's regression measurement —
- * docs/research/2026-10-25-speed-recon-3080ti.md §5).
+ * all `i8a8-linear` with i8 weights: the Wan2.2 DiT's linears ({@link WAN22_DIT_LINEAR}, the
+ * weight of the set's forward sum) under the set's own ids, then the Irodori guard.
  */
-export const K85_CASES: readonly LinearCase[] = [
-  { m: 7920, n: 3072, k: 3072, count: 180, what: "self q / k / v / o and cross q / o" },
-  { m: 7920, n: 14336, k: 3072, count: 30, what: "FFN up" },
-  { m: 7920, n: 3072, k: 14336, count: 30, what: "FFN down" },
-  { m: 512, n: 3072, k: 3072, count: 61, what: "cross k / v and the text embedder's second layer" },
-  { m: 1, n: 18432, k: 3072, count: 2, what: "time projection" },
-].map(({ m, n, k, count, what }): LinearCase => ({
-  id: k85Id(m, n, k),
-  op: "i8a8-linear",
-  m,
-  n,
-  k,
-  censusCount: count,
-  source: `${WAN22_DIT} [1,${m},${k}] × [${n},${k}] (${what})`,
-}));
+export const K85_CASES: readonly LinearCase[] = WAN22_DIT_LINEAR.map(
+  ({ m, n, k, count, what }): LinearCase => ({
+    id: k85Id(m, n, k),
+    op: "i8a8-linear",
+    m,
+    n,
+    k,
+    censusCount: count,
+    source: `${WAN22_DIT} [1,${m},${k}] × [${n},${k}] (${what})`,
+  }),
+);
 
 /** The small-M guard of {@link K85_CASES} (Irodori v4-small, not in the Wan2.2 forward). */
 const K85_GUARD_CASES: readonly LinearCase[] = [

@@ -26,7 +26,12 @@ import {
   type GeometryProfileFamily,
 } from "../src/kernels/geometry-profile.ts";
 import { ATTENTION_BENCH_SHAPES } from "../src/tune/attention-shapes.ts";
-import { caseShape, SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
+import {
+  caseShape,
+  I8A8_LINEAR_ROWS_BOUNDS,
+  SWEEP_CASES,
+  type SweepCase,
+} from "../src/tune/cases.ts";
 import { infinityJson } from "../src/tune/derive.ts";
 import { familyEntries } from "../src/tune/families.ts";
 import { familyKernelsId } from "../src/tune/fingerprint.ts";
@@ -122,8 +127,15 @@ describe("deriveGeometryProfile with a base table", () => {
     // Derived from the new record
     assertEquals(families.attention?.sweep, "new-attention.json");
     assertEquals(profile.attention, DEFAULT_GEOMETRY_PROFILE.attention);
-    // No case and no base entry: the default, no entry
-    assertEquals(profile.i8a8, DEFAULT_GEOMETRY_PROFILE.i8a8);
+    // No case and no base entry: the default (i8a8.linear: the default's geometry in every bucket),
+    // no entry
+    const { linear, ...i8a8 } = profile.i8a8;
+    const { linear: defaultLinear, ...defaultI8a8 } = DEFAULT_GEOMETRY_PROFILE.i8a8;
+    assertEquals(i8a8, defaultI8a8);
+    assertEquals(
+      linear,
+      I8A8_LINEAR_ROWS_BOUNDS.map((maxRows) => ({ maxRows, geometry: defaultLinear[0].geometry })),
+    );
     for (const family of ["i8a8-linear", "i8a8-attention", "i8a8-conv3d"] as const) {
       assertEquals(families[family], undefined, family);
     }

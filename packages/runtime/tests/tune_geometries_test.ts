@@ -336,12 +336,14 @@ describe("candidate set k85 (perf-ledger K-85 — the vec4 skeleton of the i8a8 
   const skeletons = k85.filter(({ geometry }) => geometry.skeleton === "vec4");
 
   it("is the registered tables' i8a8.linear and the grid regM 8 / 12 / 16 × regN 4 / 8 × wgX 8 / 16 × wgY 4 / 8 / 16 × tileK 16 / 32 / 64, with and without the skeleton, within the checks and 16,384 B", () => {
-    assertEquals(
-      names(k85.slice(0, BUILTIN_GEOMETRY_PROFILES.length)),
-      BUILTIN_GEOMETRY_PROFILES.flatMap((profile) =>
-        profile.i8a8.linear.map((rule) => i8a8GeometryKeyPart(rule.geometry, false)),
+    const registered = [
+      ...new Set(
+        BUILTIN_GEOMETRY_PROFILES.flatMap((profile) =>
+          profile.i8a8.linear.map((rule) => i8a8GeometryKeyPart(rule.geometry, false)),
+        ),
       ),
-    );
+    ];
+    assertEquals(names(k85.slice(0, registered.length)), registered);
     assertEquals(new Set(names(k85)).size, k85.length);
     assertEquals(k85.length, 207);
     assertEquals(skeletons.length, 103);

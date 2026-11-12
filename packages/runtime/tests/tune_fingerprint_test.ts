@@ -33,6 +33,7 @@ import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/g
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import {
+  I8A8_LINEAR_ROWS_BOUNDS,
   PROFILE_GEMM_ROWS_BOUNDS,
   SWEEP_CASES,
   type SweepCase,
@@ -122,7 +123,10 @@ const another = <T extends GeometryCandidate["geometry"]>(
   return found.geometry;
 };
 
-/** One table per field of the 15, with only that field changed (field name → table). */
+/**
+ * One table per field of the 17 (the seven gemmRows rules and the three i8a8.linear rules count one
+ * each), with only that field changed (field name → table).
+ */
 const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, GeometryProfile> => {
   const gemm = quickGemmCandidates();
   const conv2d = quickConv2dCandidates();
@@ -216,17 +220,18 @@ describe("geometryProfileKernelsIds: the kernel fingerprints per op family", () 
     );
   });
 
-  it("changing any one of the table's 15 fields changes the values, and the 15 values differ from each other", () => {
+  it("changing any one of the table's 17 fields (each gemmRows and i8a8.linear rule counted) changes the values, and the 17 values differ from each other", () => {
     const base = canonicalJson(geometryProfileKernelsIds(APPLE_METAL_3));
+    assertEquals(APPLE_METAL_3.i8a8.linear.length, I8A8_LINEAR_ROWS_BOUNDS.length);
     const variants = singleFieldVariants(APPLE_METAL_3);
-    assertEquals(variants.size, 15);
+    assertEquals(variants.size, 17);
     const values = new Set([base]);
     for (const [field, profile] of variants) {
       const value = canonicalJson(geometryProfileKernelsIds(profile));
       assertNotEquals(value, base, field);
       values.add(value);
     }
-    assertEquals(values.size, 16);
+    assertEquals(values.size, 18);
   });
 
   it("a table with different gemmRows segment boundaries (the default's 3 segments) is also derivable, assigning geometries to cases with the runtime's selection function", () => {
@@ -1028,17 +1033,33 @@ describe("the matching keys are taken per op family (ADR 0117 addendum 2026-11-1
     }
   });
 
-  it("the row-count bucket bounds enter the gemm family's case-set version only", () => {
+  it("the row-count bucket bounds enter only their own family's case-set version (gemmRows' the gemm family's, i8a8.linear's the i8a8-linear family's)", () => {
     const ids = sweepCaseSetIds();
     assertEquals(ids.gemm, caseSetId(casesOf("gemm"), PROFILE_GEMM_ROWS_BOUNDS));
     assertNotEquals(
       ids.gemm,
       caseSetId(casesOf("gemm"), [16, 32, 64, 512, Number.POSITIVE_INFINITY]),
     );
-    for (const family of GEOMETRY_PROFILE_FAMILIES.filter((entry) => entry !== "gemm")) {
-      // Hashed without bounds, so a change of the bounds cannot move it
+    assertNotEquals(ids.gemm, caseSetId(casesOf("gemm"), I8A8_LINEAR_ROWS_BOUNDS));
+    assertEquals(ids["i8a8-linear"], caseSetId(casesOf("i8a8-linear"), I8A8_LINEAR_ROWS_BOUNDS));
+    assertNotEquals(
+      ids["i8a8-linear"],
+      caseSetId(casesOf("i8a8-linear"), [512, Number.POSITIVE_INFINITY]),
+    );
+    assertNotEquals(ids["i8a8-linear"], caseSetId(casesOf("i8a8-linear")));
+    assertNotEquals(
+      ids["i8a8-linear"],
+      caseSetId(casesOf("i8a8-linear"), PROFILE_GEMM_ROWS_BOUNDS),
+    );
+    assertEquals(familyCaseSetId("gemm"), ids.gemm);
+    assertEquals(familyCaseSetId("i8a8-linear"), ids["i8a8-linear"]);
+    for (const family of GEOMETRY_PROFILE_FAMILIES.filter(
+      (entry) => entry !== "gemm" && entry !== "i8a8-linear",
+    )) {
+      // Hashed without bounds, so a change of either bounds cannot move it
       assertEquals(ids[family], caseSetId(casesOf(family)), family);
       assertNotEquals(ids[family], caseSetId(casesOf(family), PROFILE_GEMM_ROWS_BOUNDS), family);
+      assertNotEquals(ids[family], caseSetId(casesOf(family), I8A8_LINEAR_ROWS_BOUNDS), family);
       assertEquals(familyCaseSetId(family), ids[family], family);
     }
   });

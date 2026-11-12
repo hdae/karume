@@ -577,53 +577,55 @@
  *   - igemm64x64:wg8x16: geometric mean ×1.395 (short of the adopted ×1.600)
  *   - igemm64x64:wg8x8: geometric mean ×1.186 (short of the adopted ×1.600)
  *   - igemm8x64:wg8x4: ×0.316 < ×1.050 on conv2d-c96-512x512
- * - i8a8.linear (i8a8 linear, 6 cases): adopted tile64x64r4x8w8x16k16 ×1.116 (×1.104–×1.134)
- *   - tile128x128r8x8w16x16k16: ×0.769 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile128x128r8x8w16x16k32: ×0.813 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile128x32r8x4w8x16k16: geometric mean ×1.110 (short of the adopted ×1.116)
- *   - tile128x32r8x4w8x16k32: geometric mean ×1.091 (short of the adopted ×1.116)
- *   - tile128x64r8x4w16x16k16: geometric mean ×1.086 (short of the adopted ×1.116)
- *   - tile128x64r8x4w16x16k32: ×1.001 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile128x64r8x8w8x16k32: ×1.029 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile16x128r4x8w16x4k16: geometric mean ×1.106 (short of the adopted ×1.116)
- *   - tile16x128r4x8w16x4k32: geometric mean ×1.091 (short of the adopted ×1.116)
- *   - tile16x32r4x4w8x4k16: ×0.988 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile16x32r4x4w8x4k32: ×0.987 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile16x64r4x4w16x4k16: ×0.988 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile16x64r4x4w16x4k32: ×0.988 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile16x64r4x8w8x4k16: geometric mean ×1.105 (short of the adopted ×1.116)
- *   - tile16x64r4x8w8x4k32: geometric mean ×1.089 (short of the adopted ×1.116)
- *   - tile32x128r4x8w16x8k16: geometric mean ×1.110 (short of the adopted ×1.116)
- *   - tile32x128r4x8w16x8k32: geometric mean ×1.088 (short of the adopted ×1.116)
- *   - tile32x128r8x8w16x4k16: ×0.964 < ×1.050 on i8a8-linear-m1024-n2048-k8192
- *   - tile32x128r8x8w16x4k32: ×0.997 < ×1.050 on i8a8-linear-m1024-n2048-k8192
- *   - tile32x32r4x4w8x8k16: ×0.993 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile32x32r4x4w8x8k32: ×0.988 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile32x32r8x4w8x4k16: geometric mean ×1.111 (short of the adopted ×1.116)
- *   - tile32x32r8x4w8x4k32: geometric mean ×1.103 (short of the adopted ×1.116)
- *   - tile32x64r4x4w16x8k16: ×0.984 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile32x64r4x4w16x8k32: ×0.989 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile32x64r4x8w8x8k16: geometric mean ×1.114 (short of the adopted ×1.116)
- *   - tile32x64r4x8w8x8k32: geometric mean ×1.111 (short of the adopted ×1.116)
- *   - tile32x64r8x4w16x4k16: geometric mean ×1.113 (short of the adopted ×1.116)
- *   - tile32x64r8x4w16x4k32: geometric mean ×1.109 (short of the adopted ×1.116)
- *   - tile32x64r8x8w8x4k16: ×0.958 < ×1.050 on i8a8-linear-m1024-n2048-k8192
- *   - tile32x64r8x8w8x4k32: ×0.922 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile64x128r4x8w16x16k16: geometric mean ×1.086 (short of the adopted ×1.116)
- *   - tile64x128r4x8w16x16k32: ×0.997 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile64x128r8x8w16x8k16: ×0.982 < ×1.050 on i8a8-linear-m1024-n2048-k8192
- *   - tile64x128r8x8w16x8k32: ×1.017 < ×1.050 on i8a8-linear-m4096-n2048-k8192
- *   - tile64x32r4x4w8x16k16: ×0.990 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile64x32r4x4w8x16k32: ×0.990 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile64x32r8x4w8x8k16: geometric mean ×1.113 (short of the adopted ×1.116)
- *   - tile64x32r8x4w8x8k32: geometric mean ×1.110 (short of the adopted ×1.116)
- *   - tile64x64r4x4w16x16k16: ×0.958 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile64x64r4x4w16x16k32: ×0.967 < ×1.050 on i8a8-linear-m4096-n8192-k2048
- *   - tile64x64r4x8w8x16k32: geometric mean ×1.110 (short of the adopted ×1.116)
- *   - tile64x64r8x4w16x8k16: geometric mean ×1.113 (short of the adopted ×1.116)
- *   - tile64x64r8x4w16x8k32: geometric mean ×1.107 (short of the adopted ×1.116)
- *   - tile64x64r8x8w8x8k16: ×1.013 < ×1.050 on i8a8-linear-m1024-n2048-k8192
- *   - tile64x64r8x8w8x8k32: ×1.025 < ×1.050 on i8a8-linear-m1024-n2048-k8192
+ * - i8a8.linear ≤ 256 (i8a8 linear row count ≤ 256, 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
+ * - i8a8.linear 257〜512 (i8a8 linear row count 257〜512, 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
+ * - i8a8.linear > 512 (i8a8 linear row count > 512, 6 cases): adopted tile64x64r4x8w8x16k16 ×1.116 (×1.104–×1.134)
+ *   - tile128x128r8x8w16x16k16: i8a8-linear-m4096-n2048-k8192: ×0.769 < ×1.050
+ *   - tile128x128r8x8w16x16k32: i8a8-linear-m4096-n2048-k8192: ×0.813 < ×1.050
+ *   - tile128x32r8x4w8x16k16: geometric mean ×1.110 (below the adopted ×1.116)
+ *   - tile128x32r8x4w8x16k32: geometric mean ×1.091 (below the adopted ×1.116)
+ *   - tile128x64r8x4w16x16k16: geometric mean ×1.086 (below the adopted ×1.116)
+ *   - tile128x64r8x4w16x16k32: i8a8-linear-m4096-n2048-k8192: ×1.001 < ×1.050
+ *   - tile128x64r8x8w8x16k32: i8a8-linear-m4096-n2048-k8192: ×1.029 < ×1.050
+ *   - tile16x128r4x8w16x4k16: geometric mean ×1.106 (below the adopted ×1.116)
+ *   - tile16x128r4x8w16x4k32: geometric mean ×1.091 (below the adopted ×1.116)
+ *   - tile16x32r4x4w8x4k16: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
+ *   - tile16x32r4x4w8x4k32: i8a8-linear-m4096-n8192-k2048: ×0.987 < ×1.050
+ *   - tile16x64r4x4w16x4k16: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
+ *   - tile16x64r4x4w16x4k32: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
+ *   - tile16x64r4x8w8x4k16: geometric mean ×1.105 (below the adopted ×1.116)
+ *   - tile16x64r4x8w8x4k32: geometric mean ×1.089 (below the adopted ×1.116)
+ *   - tile32x128r4x8w16x8k16: geometric mean ×1.110 (below the adopted ×1.116)
+ *   - tile32x128r4x8w16x8k32: geometric mean ×1.088 (below the adopted ×1.116)
+ *   - tile32x128r8x8w16x4k16: i8a8-linear-m1024-n2048-k8192: ×0.964 < ×1.050
+ *   - tile32x128r8x8w16x4k32: i8a8-linear-m1024-n2048-k8192: ×0.997 < ×1.050
+ *   - tile32x32r4x4w8x8k16: i8a8-linear-m4096-n8192-k2048: ×0.993 < ×1.050
+ *   - tile32x32r4x4w8x8k32: i8a8-linear-m4096-n8192-k2048: ×0.988 < ×1.050
+ *   - tile32x32r8x4w8x4k16: geometric mean ×1.111 (below the adopted ×1.116)
+ *   - tile32x32r8x4w8x4k32: geometric mean ×1.103 (below the adopted ×1.116)
+ *   - tile32x64r4x4w16x8k16: i8a8-linear-m4096-n8192-k2048: ×0.984 < ×1.050
+ *   - tile32x64r4x4w16x8k32: i8a8-linear-m4096-n8192-k2048: ×0.989 < ×1.050
+ *   - tile32x64r4x8w8x8k16: geometric mean ×1.114 (below the adopted ×1.116)
+ *   - tile32x64r4x8w8x8k32: geometric mean ×1.111 (below the adopted ×1.116)
+ *   - tile32x64r8x4w16x4k16: geometric mean ×1.113 (below the adopted ×1.116)
+ *   - tile32x64r8x4w16x4k32: geometric mean ×1.109 (below the adopted ×1.116)
+ *   - tile32x64r8x8w8x4k16: i8a8-linear-m1024-n2048-k8192: ×0.958 < ×1.050
+ *   - tile32x64r8x8w8x4k32: i8a8-linear-m4096-n2048-k8192: ×0.922 < ×1.050
+ *   - tile64x128r4x8w16x16k16: geometric mean ×1.086 (below the adopted ×1.116)
+ *   - tile64x128r4x8w16x16k32: i8a8-linear-m4096-n2048-k8192: ×0.997 < ×1.050
+ *   - tile64x128r8x8w16x8k16: i8a8-linear-m1024-n2048-k8192: ×0.982 < ×1.050
+ *   - tile64x128r8x8w16x8k32: i8a8-linear-m4096-n2048-k8192: ×1.017 < ×1.050
+ *   - tile64x32r4x4w8x16k16: i8a8-linear-m4096-n8192-k2048: ×0.990 < ×1.050
+ *   - tile64x32r4x4w8x16k32: i8a8-linear-m4096-n8192-k2048: ×0.990 < ×1.050
+ *   - tile64x32r8x4w8x8k16: geometric mean ×1.113 (below the adopted ×1.116)
+ *   - tile64x32r8x4w8x8k32: geometric mean ×1.110 (below the adopted ×1.116)
+ *   - tile64x64r4x4w16x16k16: i8a8-linear-m4096-n8192-k2048: ×0.958 < ×1.050
+ *   - tile64x64r4x4w16x16k32: i8a8-linear-m4096-n8192-k2048: ×0.967 < ×1.050
+ *   - tile64x64r4x8w8x16k32: geometric mean ×1.110 (below the adopted ×1.116)
+ *   - tile64x64r8x4w16x8k16: geometric mean ×1.113 (below the adopted ×1.116)
+ *   - tile64x64r8x4w16x8k32: geometric mean ×1.107 (below the adopted ×1.116)
+ *   - tile64x64r8x8w8x8k16: i8a8-linear-m1024-n2048-k8192: ×1.013 < ×1.050
+ *   - tile64x64r8x8w8x8k32: i8a8-linear-m1024-n2048-k8192: ×1.025 < ×1.050
  * - i8a8.attentionQk (i8a8 attention ①QK, 4 cases): adopted tile32x64r4x8w8x8k16 ×1.157 (×1.156–×1.158)
  *   - tile128x128r8x8w16x16k16: ×0.757 < ×1.050 on i8a8-attention-qk-cross-m1024-n512
  *   - tile128x128r8x8w16x16k32: ×0.819 < ×1.050 on i8a8-attention-qk-self-m1024-n1024
@@ -731,8 +733,20 @@
  * `kernels` / `caseSet` are the current runtime's keys over the family's cases. `i8a8-conv3d` has no entry
  * (no record has a conv3d case; its field is the default).
  *
- * Converted on 2026-11-12 to the row-count rules of `i8a8.linear` (ADR 0115 addendum decision 14), no
- * value changed: the field holds one rule up to Infinity with the geometry it held.
+ * `i8a8.linear` re-derived on 2026-11-12 when the field became row-count rules and the `i8a8-linear`
+ * family got new cases and the bounds 256 / 512 / ∞ (ADR 0115 addendum decision 14): `deriveGeometryProfile`
+ * (no base) over the records above, read through a script that lifts them in memory to the current record
+ * format (`karume-geometry-sweep/3` with the current runtime's `caseSets` / `defaultKernels` for the
+ * families of their rows; the rows untouched).
+ * That rests on the rows having been measured on the same kernels; these records were written before
+ * `candidateKernels` existed, so the evidence is the table's own fingerprint of the family (its geometry
+ * and the default's on the family's cases), which re-derived equal with the current runtime before
+ * the cases changed — the other measured candidates' kernels have no recorded key.
+ * The records hold i8a8 linear cases at M = 1024 / 4096 only, so the buckets ≤ 256 and 257〜512 keep the
+ * default geometry — a speed change for the small-M i8a8 linears (Irodori's M = 185, for one) until a sweep
+ * of the family is registered; outputs do not change (the geometries are bit-identical by contract). The
+ * bucket > 512 keeps the geometry the field held. Every other field and provenance entry is unchanged;
+ * the `i8a8-linear` entry has the current `kernels` / `caseSet`.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -758,6 +772,8 @@ export const APPLE_METAL_3: GeometryProfile = {
   },
   i8a8: {
     linear: [
+      { maxRows: 256, geometry: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 } },
+      { maxRows: 512, geometry: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 } },
       {
         maxRows: Number.POSITIVE_INFINITY,
         geometry: { regM: 4, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
@@ -828,8 +844,8 @@ export const APPLE_METAL_3: GeometryProfile = {
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
         ],
-        kernels: "27dd52274a7ceadf",
-        caseSet: "71a785d66fcf3512",
+        kernels: "9cc5917c8287af47",
+        caseSet: "3d32dc6f10559af2",
       },
       "i8a8-attention": {
         sweep:

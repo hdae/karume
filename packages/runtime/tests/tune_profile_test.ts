@@ -43,7 +43,11 @@ import {
   gemmGeometryForRows,
 } from "../src/kernels/gemm-geometry.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
-import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES } from "../src/tune/cases.ts";
+import {
+  I8A8_LINEAR_ROWS_BOUNDS,
+  PROFILE_GEMM_ROWS_BOUNDS,
+  SWEEP_CASES,
+} from "../src/tune/cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "../src/tune/geometries.ts";
 import {
   buildGeometryProfile,
@@ -72,6 +76,7 @@ import {
   type CaseRef,
   caseRows,
   FAST,
+  I8A8_LINEAR_SLOT_NAMES,
   linearCase,
   matmulCase,
   OPTIONS,
@@ -446,7 +451,7 @@ describe("deriveProfile: the conv3d w8a8 class (i8a8.conv3d)", () => {
       ],
       OPTIONS,
     );
-    assertEquals(verdictOf(verdicts, "i8a8.linear").outcome.geometry, WIDE);
+    assertEquals(verdictOf(verdicts, "i8a8.linear ≤ 256").outcome.geometry, WIDE);
     const conv3d = verdictOf(verdicts, "i8a8.conv3d");
     assert(conv3d.outcome.kind === "default");
     assertEquals(conv3d.outcome.geometry, defaultI8a8Geometry("conv3d"));
@@ -459,16 +464,23 @@ describe("deriveProfile: the conv3d w8a8 class (i8a8.conv3d)", () => {
     const sources = [source(conv3dRows(ref, [[WIDE, { speedup: 1.2 }]]))];
     const verdicts = deriveProfile(sources, OPTIONS);
     assertEquals(verdictOf(verdicts, "i8a8.conv3d").outcome.geometry, WIDE);
-    assertEquals(
-      verdictOf(verdicts, "i8a8.linear").outcome.geometry,
-      defaultI8a8Geometry("linear"),
-    );
+    for (const slot of I8A8_LINEAR_SLOT_NAMES) {
+      assertEquals(verdictOf(verdicts, slot).outcome.geometry, defaultI8a8Geometry("linear"), slot);
+    }
     const profile = buildGeometryProfile(
       { id: "conv3d-only", vendor: "apple", architecture: "metal-3" },
       sources,
       verdicts,
     );
-    assertEquals(profile.i8a8, { ...DEFAULT_GEOMETRY_PROFILE.i8a8, conv3d: WIDE });
+    assertEquals(profile.i8a8, {
+      ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+      // The default's geometry in every bucket of i8a8.linear (no linear case)
+      linear: I8A8_LINEAR_ROWS_BOUNDS.map((maxRows) => ({
+        maxRows,
+        geometry: defaultI8a8Geometry("linear"),
+      })),
+      conv3d: WIDE,
+    });
   });
 
   it("a conv3d default row that is not the runtime's conv3d default stops the generation", () => {
@@ -513,7 +525,7 @@ describe("deriveProfile: the vec4 skeleton of an i8a8 geometry is a candidate li
     );
     assertEquals(parsedRow?.geometryParams, SKELETON);
     const verdicts = deriveProfile(sources, OPTIONS);
-    const verdict = verdictOf(verdicts, "i8a8.linear");
+    const verdict = verdictOf(verdicts, "i8a8.linear > 512");
     assert(verdict.outcome.kind === "adopted");
     assertEquals(verdict.outcome.geometry, SKELETON);
     assertEquals(verdict.outcome.name, "tile64x64r8x4w16x8k64s");
@@ -527,6 +539,44 @@ describe("deriveProfile: the vec4 skeleton of an i8a8 geometry is a candidate li
       verdicts,
     );
     assertEquals(profile.i8a8.linear.at(-1)?.geometry, SKELETON);
+    assertGeometryProfile(profile);
+  });
+
+  it("the rows of each i8a8.linear bucket decide that bucket alone (M = 256 the first, 512 the second, 7920 the last), and the table writes one rule per bucket", () => {
+    const OTHER: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 };
+    const sources = [
+      source([
+        // ≤ 256: the skeleton wins
+        ...linearRows(1, 1.1, 2.5),
+        ...linearRows(256, 1.2, 1.9),
+        // 257〜512: the word geometry wins, the skeleton is short of ×1.05 there
+        ...linearRows(512, 1.3, 1.04),
+        // > 512: a third geometry wins
+        row(linearRef(7920), linearDefault, true),
+        row(linearRef(7920), i8a8Candidate(WORD), false, { speedup: 0.9, identical: true }),
+        row(linearRef(7920), i8a8Candidate(OTHER), false, { speedup: 1.2, identical: true }),
+      ]),
+    ];
+    const verdicts = deriveProfile(sources, OPTIONS);
+    assertEquals(
+      I8A8_LINEAR_SLOT_NAMES.map((slot) => verdictOf(verdicts, slot).cases),
+      [["i8a8-linear-m1", "i8a8-linear-m256"], ["i8a8-linear-m512"], ["i8a8-linear-m7920"]],
+    );
+    assertEquals(
+      I8A8_LINEAR_SLOT_NAMES.map((slot) => verdictOf(verdicts, slot).outcome.geometry),
+      [SKELETON, WORD, OTHER],
+    );
+    assertEquals(verdictOf(verdicts, "i8a8.linear ≤ 256").scope, "i8a8 linear row count ≤ 256");
+    const profile = buildGeometryProfile(
+      { id: "buckets", vendor: "apple", architecture: "metal-3" },
+      sources,
+      verdicts,
+    );
+    assertEquals(profile.i8a8.linear, [
+      { maxRows: 256, geometry: SKELETON },
+      { maxRows: 512, geometry: WORD },
+      { maxRows: Number.POSITIVE_INFINITY, geometry: OTHER },
+    ]);
     assertGeometryProfile(profile);
   });
 
@@ -1030,7 +1080,7 @@ describe("deriveProfile: description narrows the adapter down to the model", () 
 });
 
 describe("deriveProfile: consistency with the runtime's default profile", () => {
-  it("the default written for a class without cases: a gemmRows bucket gets the geometry of the default bucket covering its range, every other field DEFAULT_GEOMETRY_PROFILE's (15 fields, in this order)", () => {
+  it("the default written for a class without cases: a gemmRows bucket gets the geometry of the default bucket covering its range, an i8a8.linear bucket the default's one rule, every other field DEFAULT_GEOMETRY_PROFILE's (17 fields, in this order)", () => {
     const profile = DEFAULT_GEOMETRY_PROFILE;
     // The default table stays at 3 segments (≤ 64 / 65–512 / > 512 — ADR 0116 decision 3)
     assertEquals(
@@ -1050,8 +1100,10 @@ describe("deriveProfile: consistency with the runtime's default profile", () => 
       "attention.pv": profile.attention.pv,
       "conv2d.rows64": profile.conv2d.rows64,
       "conv2d.rows32": profile.conv2d.rows32,
-      // The default table holds one i8a8.linear rule
-      "i8a8.linear": profile.i8a8.linear[0].geometry,
+      // The default table holds one i8a8.linear rule, up to Infinity
+      "i8a8.linear ≤ 256": profile.i8a8.linear[0].geometry,
+      "i8a8.linear 257〜512": profile.i8a8.linear[0].geometry,
+      "i8a8.linear > 512": profile.i8a8.linear[0].geometry,
       "i8a8.attentionQk": profile.i8a8.attentionQk,
       "i8a8.attentionPv": profile.i8a8.attentionPv,
       "i8a8.conv3d": profile.i8a8.conv3d,
@@ -1245,10 +1297,20 @@ describe("deriveProfile: the sweep's default row must be the current runtime's d
       ],
     },
     {
-      slot: "i8a8.linear",
+      slot: "i8a8.linear ≤ 256",
       rows: [
         row(
           { caseId: "i8a8-linear", op: "i8a8-linear", shape: "M64 N64 K64" },
+          i8a8Candidate(defaultI8a8Geometry("attention_pv")),
+          true,
+        ),
+      ],
+    },
+    {
+      slot: "i8a8.linear > 512",
+      rows: [
+        row(
+          { caseId: "i8a8-linear", op: "i8a8-linear", shape: "M7920 N64 K64" },
           i8a8Candidate(defaultI8a8Geometry("attention_pv")),
           true,
         ),
@@ -1487,7 +1549,6 @@ describe("buildGeometryProfile", () => {
       ["attention.pv", profile.attention.pv],
       ["conv2d.rows64", profile.conv2d.rows64],
       ["conv2d.rows32", profile.conv2d.rows32],
-      ["i8a8.linear", profile.i8a8.linear[0].geometry],
       ["i8a8.attentionQk", profile.i8a8.attentionQk],
       ["i8a8.attentionPv", profile.i8a8.attentionPv],
       ["i8a8.conv3d", profile.i8a8.conv3d],
@@ -1495,6 +1556,15 @@ describe("buildGeometryProfile", () => {
     for (const [slot, geometry] of slots) {
       assertEquals(geometry, verdictOf(verdicts, slot).outcome.geometry, slot);
     }
+    // i8a8.linear: one rule per bucket of I8A8_LINEAR_ROWS_BOUNDS, each its bucket's verdict
+    assertEquals(
+      profile.i8a8.linear.map((rule) => rule.maxRows),
+      [...I8A8_LINEAR_ROWS_BOUNDS],
+    );
+    profile.i8a8.linear.forEach((rule, index) => {
+      const slot = I8A8_LINEAR_SLOT_NAMES[index];
+      assertEquals(rule.geometry, verdictOf(verdicts, slot).outcome.geometry, slot);
+    });
   });
 
   it("a field with no case in the sweep gets the same value as the default table (DEFAULT_GEOMETRY_PROFILE) (a gemmRows segment gets the default segment covering its range)", () => {
@@ -1507,7 +1577,17 @@ describe("buildGeometryProfile", () => {
     }
     assertEquals(profile.attention, DEFAULT_GEOMETRY_PROFILE.attention);
     assertEquals(profile.conv2d, DEFAULT_GEOMETRY_PROFILE.conv2d);
-    assertEquals(profile.i8a8, DEFAULT_GEOMETRY_PROFILE.i8a8);
+    const { linear, ...i8a8 } = profile.i8a8;
+    const { linear: defaultLinear, ...defaultI8a8 } = DEFAULT_GEOMETRY_PROFILE.i8a8;
+    assertEquals(i8a8, defaultI8a8);
+    // Every i8a8.linear bucket gets the default table's one rule (a bucket per bound)
+    assertEquals(
+      linear.map((rule) => rule.maxRows),
+      [...I8A8_LINEAR_ROWS_BOUNDS],
+    );
+    for (const rule of linear) {
+      assertEquals(rule.geometry, defaultLinear[0].geometry, String(rule.maxRows));
+    }
   });
 
   it("match and provenance follow the spec and the order of the sweeps; the adapter keeps its 4 fields as is; the family the records have rows of gets the fingerprint and the case-set version of the current runtime, the others no entry (without architecture, match has vendor only)", () => {

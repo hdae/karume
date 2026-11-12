@@ -71,9 +71,12 @@
  * `PROFILE_GEMM_ROWS_BOUNDS` of the sweep's shape table = ≤ 16 / 17–32 / 33–64 / 65–128 / 129–256 /
  * 257–512 / > 512 — seven buckets refining the default table `GEMM_ROWS_BUCKETS`'s 64 / 512 / ∞,
  * ADR 0116), fused attention's ①QK / ③PV, conv2d's m tile of 64 / 32 rows (the default row's
- * tileM), and i8a8's linear / ①QK / ③PV / conv3d. A class with no case in the sweep gets the runtime's
- * default as is (the reason is left in the generated file's comment). A gemmRows bucket's default
- * is the geometry of the default table's bucket covering its range ({@link profileRowsSegments}).
+ * tileM), the i8a8 linear by buckets of M of its own (`I8A8_LINEAR_ROWS_BOUNDS` = ≤ 256 / 257–512 /
+ * > 512 — ADR 0115 addendum decision 14), and i8a8's ①QK / ③PV / conv3d. A class with no case in
+ * the sweep gets the runtime's default as is (the reason is left in the generated file's comment). A
+ * bucket's default is the geometry of the default table's rule covering its range
+ * ({@link profileRowsSegments}, {@link i8a8LinearSegments} — the default geometry for every
+ * i8a8.linear bucket).
  *
  * ## The second input: attention-bench records (ADR 0117 addendum 2026-11-12)
  *
@@ -120,7 +123,13 @@ import {
 } from "../runtime/recipe-builders/attention.ts";
 import { ATTENTION_BENCH_FORMAT, onlineDispatchRows } from "./attention-bench.ts";
 import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
-import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS, type SweepOp } from "./cases.ts";
+import {
+  I8A8_LINEAR_ROWS_BOUNDS,
+  PROFILE_GEMM_ROWS_BOUNDS,
+  SWEEP_CASES,
+  SWEEP_OPS,
+  type SweepOp,
+} from "./cases.ts";
 import {
   familiesOf,
   familyEntries,
@@ -684,6 +693,13 @@ export const parseSweepReport = (
  */
 export type GemmRowsSlot = `gemmRows ${string}`;
 
+/**
+ * The field name of an `i8a8.linear` bucket, spelled by its row range the way the gemmRows buckets
+ * are (`i8a8.linear ≤ 256`, `i8a8.linear 257〜512`, `i8a8.linear > 512` — ADR 0115 addendum
+ * decision 14).
+ */
+export type I8a8LinearSlot = `i8a8.linear ${string}`;
+
 /** A profile field (= class). The generated file's comments name fields with this spelling too. */
 export type ProfileSlot =
   | GemmRowsSlot
@@ -691,7 +707,7 @@ export type ProfileSlot =
   | "attention.pv"
   | "conv2d.rows64"
   | "conv2d.rows32"
-  | "i8a8.linear"
+  | I8a8LinearSlot
   | "i8a8.attentionQk"
   | "i8a8.attentionPv"
   | "i8a8.conv3d";
@@ -708,19 +724,26 @@ type SlotSpec = {
   readonly fallback: () => { readonly name: string; readonly geometry: Geometry };
 };
 
-/** One gemmRows bucket ({@link profileRowsSegments}). */
-export type RowsSegment = {
-  readonly slot: GemmRowsSlot;
+/**
+ * One row-count bucket of `gemmRows` ({@link profileRowsSegments}) or of `i8a8.linear`
+ * ({@link i8a8LinearSegments}).
+ */
+export type RowsSegment<
+  Slot extends ProfileSlot = GemmRowsSlot,
+  G extends Geometry = GemmGeometry,
+> = {
+  readonly slot: Slot;
   /** The range the field applies to (for comments). */
   readonly scope: string;
   readonly maxRows: number;
   /**
-   * The geometry of the default table's (`GEMM_ROWS_BUCKETS`) bucket covering this bucket's range.
-   * The value written for a bucket with no adoption or no case in the sweep, and also the ratio
-   * baseline compared with the sweep's default row (the sweep builds it from the default table,
-   * `gemmGeometryForRows(m)`).
+   * The geometry of the default table's bucket covering this bucket's range (`GEMM_ROWS_BUCKETS`
+   * for gemmRows, the default profile's one `i8a8.linear` rule for the i8a8 linear). The value
+   * written for a bucket with no adoption or no case in the sweep, and also the ratio baseline
+   * compared with the sweep's default row (the sweep builds it from the default table,
+   * `gemmGeometryForRows(m)` / `i8a8LinearGeometry(DEFAULT_GEOMETRY_PROFILE, m)`).
    */
-  readonly fallback: GemmGeometry;
+  readonly fallback: G;
 };
 
 /**
@@ -753,8 +776,45 @@ export const rowsRange = (bounds: readonly number[], index: number): string => {
  * generated file breaks syntactically, the generator itself can no longer be loaded; in that case,
  * remove its registration from index.ts and then regenerate.
  */
-export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSegment[] => {
-  const where = `gemmRows bucket bounds [${bounds.join(", ")}]`;
+export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSegment[] =>
+  rowsSegments(
+    "gemmRows",
+    bounds,
+    GEMM_ROWS_BUCKETS,
+    (range) => `gemmRows ${range}`,
+    (range) => `linear / matmul / bmm row count ${range}`,
+  );
+
+/**
+ * The buckets of `i8a8.linear` (ADR 0115 addendum decision 14), checked and built by the same rule
+ * as {@link profileRowsSegments}; the generator passes `I8A8_LINEAR_ROWS_BOUNDS`. The default is
+ * the default profile's one rule (`defaultI8a8Geometry("linear")` up to Infinity), so every bucket's
+ * default is that geometry and any bounds ending in Infinity refine it.
+ */
+export const i8a8LinearSegments = (
+  bounds: readonly number[],
+): readonly RowsSegment<I8a8LinearSlot, I8a8Geometry>[] =>
+  rowsSegments(
+    "i8a8.linear",
+    bounds,
+    DEFAULT_GEOMETRY_PROFILE.i8a8.linear,
+    (range) => `i8a8.linear ${range}`,
+    (range) => `i8a8 linear row count ${range}`,
+  );
+
+/**
+ * The body of {@link profileRowsSegments} / {@link i8a8LinearSegments}: the bounds of `field`
+ * checked against its default rules (`defaults`), and one bucket per bound with its slot, scope
+ * and the default rule covering it.
+ */
+const rowsSegments = <Slot extends ProfileSlot, G extends Geometry>(
+  field: string,
+  bounds: readonly number[],
+  defaults: readonly { readonly maxRows: number; readonly geometry: G }[],
+  slotOf: (range: string) => Slot,
+  scopeOf: (range: string) => string,
+): readonly RowsSegment<Slot, G>[] => {
+  const where = `${field} bucket bounds [${bounds.join(", ")}]`;
   if (bounds.at(-1) !== Number.POSITIVE_INFINITY) {
     throw new Error(`${where}: the last bound is not Infinity (no bucket covers a larger M)`);
   }
@@ -772,9 +832,9 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
       );
     }
   });
-  const missing = GEMM_ROWS_BUCKETS.map((rule) => rule.maxRows).filter(
-    (maxRows) => !bounds.includes(maxRows),
-  );
+  const missing = defaults
+    .map((rule) => rule.maxRows)
+    .filter((maxRows) => !bounds.includes(maxRows));
   if (missing.length > 0) {
     throw new Error(
       `${where}: missing the default table's bounds ${missing.join(" / ")} (not a refinement of the default) — ` +
@@ -784,22 +844,16 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
   return bounds.map((maxRows, index) => {
     const range = rowsRange(bounds, index);
     const covering =
-      GEMM_ROWS_BUCKETS.find((rule) => maxRows <= rule.maxRows) ??
-      GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
-    return {
-      slot: `gemmRows ${range}`,
-      scope: `linear / matmul / bmm row count ${range}`,
-      maxRows,
-      fallback: covering.geometry,
-    };
+      defaults.find((rule) => maxRows <= rule.maxRows) ?? defaults[defaults.length - 1];
+    return { slot: slotOf(range), scope: scopeOf(range), maxRows, fallback: covering.geometry };
   });
 };
 
 /**
- * The fields other than gemmRows (in the order of the generated fields and of the verdicts in the
- * comments, after the gemmRows buckets).
+ * The fields between the gemmRows buckets and the i8a8.linear buckets (in the order of the
+ * generated fields and of the verdicts in the comments).
  */
-const FIXED_SLOTS: readonly SlotSpec[] = [
+const F32_FIXED_SLOTS: readonly SlotSpec[] = [
   {
     slot: "attention.qk",
     scope: "fused attention f32 ①QK",
@@ -820,11 +874,10 @@ const FIXED_SLOTS: readonly SlotSpec[] = [
     scope: "conv2d implicit GEMM m tile of 32 rows",
     fallback: () => conv2dCandidate(gemmMTileGeometry(32)),
   },
-  {
-    slot: "i8a8.linear",
-    scope: "i8a8 linear",
-    fallback: () => i8a8Candidate(defaultI8a8Geometry("linear")),
-  },
+];
+
+/** The fields after the i8a8.linear buckets (likewise in order). */
+const I8A8_FIXED_SLOTS: readonly SlotSpec[] = [
   {
     slot: "i8a8.attentionQk",
     scope: "i8a8 attention ①QK",
@@ -844,15 +897,24 @@ const FIXED_SLOTS: readonly SlotSpec[] = [
 
 /**
  * The list of fields (in the order of the generated fields and of the verdicts in the comments —
- * gemmRows buckets → the rest).
+ * gemmRows buckets → fused attention f32 and conv2d → i8a8.linear buckets → the other i8a8 fields).
  */
-const profileSlots = (segments: readonly RowsSegment[]): readonly SlotSpec[] => [
+const profileSlots = (
+  segments: readonly RowsSegment[],
+  i8a8Segments: readonly RowsSegment<I8a8LinearSlot, I8a8Geometry>[],
+): readonly SlotSpec[] => [
   ...segments.map((segment) => ({
     slot: segment.slot,
     scope: segment.scope,
     fallback: () => gemmCandidate(segment.fallback),
   })),
-  ...FIXED_SLOTS,
+  ...F32_FIXED_SLOTS,
+  ...i8a8Segments.map((segment) => ({
+    slot: segment.slot,
+    scope: segment.scope,
+    fallback: () => i8a8Candidate(segment.fallback),
+  })),
+  ...I8A8_FIXED_SLOTS,
 ];
 
 /** The row count of linear / matmul (`M{m} N{n} K{k}` of `caseShape`). */
@@ -874,33 +936,45 @@ const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
 };
 
 /**
- * A row's field. For linear / matmul / bmm, the first bucket where the shape's M satisfies `rows <=
- * maxRows` (the same rule by which the three production paths look up the same gemmRows table by M
- * — src/runtime/recipe-builders/linear.ts, gemmRowsGeometry in geometry-profile.ts); for attention,
- * the shape's stage; for conv2d, **the tileM of the case's default row** (the side chosen by the
- * production m-tile selection `conv2dIgemmMTile` — the geometry the sweep measured as the default
- * is the source of truth).
+ * The bucket of `segments` a row's M falls in (the first with `rows <= maxRows` — the same rule
+ * by which the production paths look up their rules by M). The bucket list ends in Infinity
+ * (checked by {@link rowsSegments}), so some bucket always matches.
+ */
+const segmentOf = <Slot extends ProfileSlot, G extends Geometry>(
+  row: SweepObservation,
+  pattern: RegExp,
+  segments: readonly RowsSegment<Slot, G>[],
+  where: string,
+): Slot => {
+  const matched = pattern.exec(row.shape);
+  if (matched === null) {
+    throw new Error(`${where}: cannot read the shape of ${row.caseId} (${row.shape})`);
+  }
+  const rows = Number(matched[1]);
+  return (segments.find((segment) => rows <= segment.maxRows) ?? segments[segments.length - 1])
+    .slot;
+};
+
+/**
+ * A row's field. For linear / matmul / bmm, the gemmRows bucket of the shape's M (the three
+ * production paths look up the same gemmRows table by M — src/runtime/recipe-builders/linear.ts,
+ * gemmRowsGeometry in geometry-profile.ts); for the i8a8 linear, the i8a8.linear bucket of its M
+ * (`i8a8LinearGeometry`); for attention, the shape's stage; for conv2d, **the tileM of the case's
+ * default row** (the side chosen by the production m-tile selection `conv2dIgemmMTile` — the
+ * geometry the sweep measured as the default is the source of truth).
  */
 const slotOf = (
   row: SweepObservation,
   segments: readonly RowsSegment[],
+  i8a8Segments: readonly RowsSegment<I8a8LinearSlot, I8a8Geometry>[],
   conv2dDefaultTileM: ReadonlyMap<string, number>,
   where: string,
 ): ProfileSlot => {
   switch (row.op) {
     case "linear":
     case "matmul":
-    case "bmm": {
-      const matched = (row.op === "bmm" ? BMM_SHAPE : LINEAR_SHAPE).exec(row.shape);
-      if (matched === null) {
-        throw new Error(`${where}: cannot read the shape of ${row.caseId} (${row.shape})`);
-      }
-      const rows = Number(matched[1]);
-      // The bucket list ends in Infinity (checked by profileRowsSegments), so some bucket always
-      // matches
-      return (segments.find((segment) => rows <= segment.maxRows) ?? segments[segments.length - 1])
-        .slot;
-    }
+    case "bmm":
+      return segmentOf(row, row.op === "bmm" ? BMM_SHAPE : LINEAR_SHAPE, segments, where);
     case "attention":
       return attentionStage(row, where) === "qk" ? "attention.qk" : "attention.pv";
     case "conv2d": {
@@ -910,7 +984,7 @@ const slotOf = (
       throw new Error(`${where}: the default m tile of ${row.caseId} is not 64 / 32 (${tileM})`);
     }
     case "i8a8-linear":
-      return "i8a8.linear";
+      return segmentOf(row, LINEAR_SHAPE, i8a8Segments, where);
     case "i8a8-attention":
       return attentionStage(row, where) === "qk" ? "i8a8.attentionQk" : "i8a8.attentionPv";
     case "i8a8-conv3d":
@@ -1321,6 +1395,7 @@ export const deriveProfile = (
   // Stop here if the bucket boundaries do not refine the default table (the ratio baseline would
   // split within a bucket — profileRowsSegments)
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
+  const i8a8Segments = i8a8LinearSegments(I8A8_LINEAR_ROWS_BOUNDS);
   // The same conditions as the runtime's check (assertGeometryProfile) — stop before generating
   // rather than failing at the injection or registration step. description is the machine model's
   // name, a field only for splitting within a vendor / architecture
@@ -1387,7 +1462,7 @@ export const deriveProfile = (
     const excludedHere: { readonly slot: ProfileSlot; readonly excluded: ExcludedCase }[] = [];
     const excludedCases = new Set<string>();
     for (const row of source.rows) {
-      const slot = slotOf(row, segments, conv2dDefaultTileM, source.path);
+      const slot = slotOf(row, segments, i8a8Segments, conv2dDefaultTileM, source.path);
       const base = defaultBounds.get(row.caseId);
       // parseSweepReport has checked one default row per case
       if (base === undefined) throw new Error(`${source.path}: ${row.caseId} has no default row`);
@@ -1440,7 +1515,7 @@ export const deriveProfile = (
       excludedBySlot.set(slot, [...(excludedBySlot.get(slot) ?? []), excluded]);
     }
   }
-  return profileSlots(segments).map((spec) =>
+  return profileSlots(segments, i8a8Segments).map((spec) =>
     judgeSlot(
       spec,
       bySlot.get(spec.slot) ?? [],
@@ -2262,6 +2337,7 @@ export const buildGeometryProfile = (
   // early at generation). profileRowsSegments checks the trailing Infinity and the refinement of
   // the default
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
+  const i8a8Segments = i8a8LinearSegments(I8A8_LINEAR_ROWS_BOUNDS);
   if (sources.length === 0) throw new Error("No sweep records (provenance cannot be written)");
   const derived: GeometryProfile = {
     id: spec.id,
@@ -2287,7 +2363,10 @@ export const buildGeometryProfile = (
       rows32: gemmSlot(verdicts, "conv2d.rows32"),
     },
     i8a8: {
-      linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: i8a8Slot(verdicts, "i8a8.linear") }],
+      linear: i8a8Segments.map((segment) => ({
+        maxRows: segment.maxRows,
+        geometry: i8a8Slot(verdicts, segment.slot),
+      })),
       attentionQk: i8a8Slot(verdicts, "i8a8.attentionQk"),
       attentionPv: i8a8Slot(verdicts, "i8a8.attentionPv"),
       conv3d: i8a8Slot(verdicts, "i8a8.conv3d"),

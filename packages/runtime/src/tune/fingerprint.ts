@@ -633,7 +633,7 @@ export const caseSetId = (cases: readonly SweepCase[], bounds?: readonly number[
 /**
  * The case-set version per op family over `cases`: for every family that has a case in `cases`
  * (in the fixed family order), {@link caseSetId} over the family's cases and its bounds
- * (`familyBounds` — the row-count bucket bounds for `gemm` only).
+ * (`familyBounds` — the row-count bucket bounds for `gemm` and `i8a8-linear` only).
  */
 export const caseSetIds = (cases: readonly SweepCase[]): GeometryProfileFamilyIds => {
   const ids: { [Family in GeometryProfileFamily]?: string } = {};
@@ -654,7 +654,8 @@ export const familyCaseSetId = (family: GeometryProfileFamily): string =>
  * The case-set versions (`provenance.families[family].caseSet` — ADR 0117 decision 4, per op family
  * since its addendum 2026-11-12): per family, the hash (16 hex digits) of the canonical JSON of the
  * dispatch-deciding fields ({@link CASE_SET_FIELDS}) of the family's sweep cases (`SWEEP_CASES`)
- * and, for `gemm`, the gemmRows bucket boundaries (`PROFILE_GEMM_ROWS_BOUNDS`). Given a candidate
+ * and, for `gemm` and `i8a8-linear`, the bucket boundaries of `gemmRows` (`PROFILE_GEMM_ROWS_BOUNDS`)
+ * and of `i8a8.linear` (`I8A8_LINEAR_ROWS_BOUNDS`). Given a candidate
  * set, the versions a sweep of every case of that set records ({@link candidateSetCaseSetIds} — the
  * same values for the table-deriving sets, the families of its own table for an evaluation set).
  *

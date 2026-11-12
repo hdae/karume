@@ -557,7 +557,9 @@
  *   - igemm64x64:wg8x16: conv2d-c96-512x512: ×0.938 < ×1.050
  *   - igemm64x64:wg8x8: conv2d-c96-512x512: ×0.904 < ×1.050
  *   - igemm8x64:wg8x4: conv2d-c96-512x512: ×0.474 < ×1.050
- * - i8a8.linear (i8a8 linear, 6 cases): adopted tile128x64r8x4w16x16k16 ×1.148 (×1.107–×1.185)
+ * - i8a8.linear ≤ 256 (i8a8 linear row count ≤ 256, 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
+ * - i8a8.linear 257〜512 (i8a8 linear row count 257〜512, 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
+ * - i8a8.linear > 512 (i8a8 linear row count > 512, 6 cases): adopted tile128x64r8x4w16x16k16 ×1.148 (×1.107–×1.185)
  *   - tile128x128r8x8w16x16k16: i8a8-linear-m1024-n8192-k2048: ×0.921 < ×1.050
  *   - tile128x128r8x8w16x16k32: i8a8-linear-m1024-n8192-k2048: ×0.939 < ×1.050
  *   - tile128x32r8x4w8x16k16: i8a8-linear-m1024-n2048-k2048: ×0.691 < ×1.050
@@ -751,8 +753,18 @@
  * value changed: both records have rows of every family, so every family's entry names both, and its
  * `kernels` / `caseSet` are the current runtime's keys over the family's cases.
  *
- * Converted on 2026-11-12 to the row-count rules of `i8a8.linear` (ADR 0115 addendum decision 14), no
- * value changed: the field holds one rule up to Infinity with the geometry it held.
+ * `i8a8.linear` re-derived on 2026-11-12 when the field became row-count rules and the `i8a8-linear`
+ * family got new cases and the bounds 256 / 512 / ∞ (ADR 0115 addendum decision 14): `deriveGeometryProfile`
+ * (no base) over the records above, read through a script that lifts them in memory to the current record
+ * format (`karume-geometry-sweep/3` with the current runtime's `caseSets` / `defaultKernels` for the
+ * families of their rows; the rows untouched).
+ * That rests on the rows having been measured on the same kernels: each record's `candidateKernels`
+ * re-derives equal with the current runtime.
+ * The records hold i8a8 linear cases at M = 1024 / 4096 only, so the buckets ≤ 256 and 257〜512 keep the
+ * default geometry — a speed change for the small-M i8a8 linears (Irodori's M = 185, for one) until a sweep
+ * of the family is registered; outputs do not change (the geometries are bit-identical by contract). The
+ * bucket > 512 keeps the geometry the field held. Every other field and provenance entry is unchanged;
+ * the `i8a8-linear` entry has the current `kernels` / `caseSet`.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -778,6 +790,8 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
   },
   i8a8: {
     linear: [
+      { maxRows: 256, geometry: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 } },
+      { maxRows: 512, geometry: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 } },
       {
         maxRows: Number.POSITIVE_INFINITY,
         geometry: { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 },
@@ -844,8 +858,8 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
         userAgent: [
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
         ],
-        kernels: "367e5aabd38c4e49",
-        caseSet: "71a785d66fcf3512",
+        kernels: "0a459a91e7c502c1",
+        caseSet: "3d32dc6f10559af2",
       },
       "i8a8-attention": {
         sweep:

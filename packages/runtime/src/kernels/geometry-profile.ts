@@ -132,8 +132,8 @@ export type GeometryProfileFamilyProvenance = {
    */
   readonly kernels: string;
   /**
-   * Case-set version of this family (hash of its sweep cases and, for `gemm`, the row-count bucket
-   * bounds — hex).
+   * Case-set version of this family (hash of its sweep cases and, for `gemm` and `i8a8-linear`,
+   * the row-count bucket bounds — hex).
    */
   readonly caseSet: string;
 };
