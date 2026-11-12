@@ -83,6 +83,8 @@ adapter `device` and `description`, and Apple M2 and M5 share `apple` / `metal-3
 
 ### 2. The `./tune` surface: high-level entry points only
 
+(Amended 2026-11-12: `sweepCaseSetId()` is replaced by `sweepCaseSetIds()` and `sweepDefaultKernelsIds()`, one value per op family, and `runGeometrySweep` returns `karume-geometry-sweep/3` — addendum "the matching keys per op family".)
+
 | Entry point                                                       | Role                                                                                                                                                         |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `runGeometrySweep(options)`                                       | Acquires a dedicated device, sweeps, destroys it; returns the record (`karume-geometry-sweep/2`). Options include the adapter request, the candidate set (`quick` / `quick+` / `full`), an op filter, an `AbortSignal` and progress |
@@ -868,8 +870,9 @@ filed 2026-10-27 after the ruling of 2026-10-26).
 - **Public surface**: `./tune` exports `sweepCaseSetIds(set?)` and `sweepDefaultKernelsIds(set?)` (one value per
   family, `GeometryProfileFamilyIds`) in place of `sweepCaseSetId`, whose callers no longer compile; `.` exports
   `GeometryProfileFamily` and `GeometryProfileFamilyProvenance`. The default table's fingerprints are public because
-  a record must now carry them for every family it has rows of, and an application that builds or checks a record
-  has no other way to obtain them.
+  a record must now carry them for every family it has rows of: records written by `runGeometrySweep` carry them, but
+  the function gives the current runtime's values without running a sweep, which a caller that builds or checks a
+  record without a GPU (the playground's record tests) needs now that a record without them is refused.
 - **The embedded tables** are converted in format only. Before the conversion, each table's single `kernels` and
   `caseSet` equalled the runtime's (the equality `tune_fingerprint_test.ts` pinned), so its per-family keys are those
   of the same runtime. A family has an entry exactly when one of the records the table names has a row of it.
