@@ -272,6 +272,8 @@ import {
   quantizeRowsPaddedGeometry,
   quantizeRowsPaddedWgsl,
   quantizeRowsPrologueWgsl,
+  quantizeRowsTiledGeometry,
+  quantizeRowsTiledWgsl,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
@@ -934,6 +936,11 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     // (N = 125, 8 rows × 32 lanes). The plain forms above must not move.
     ["quantize_rows_r1w256_pad.wgsl", quantizeRowsPaddedWgsl(quantizeRowsPaddedGeometry(4106))],
     ["quantize_rows_r8w32_pad.wgsl", quantizeRowsPaddedWgsl(quantizeRowsPaddedGeometry(125))],
+    // The tiled form (a measure-first candidate — perf-ledger K-106: the online attention's Vᵀ
+    // already in the kernel's key order): the Wan2.2 33f self-attention's N = 7,920 (one row per
+    // workgroup) and N = 65 (8 rows × 32 lanes, a partial second tile). The forms above must not move.
+    ["quantize_rows_r1w256_tile.wgsl", quantizeRowsTiledWgsl(quantizeRowsTiledGeometry(7920))],
+    ["quantize_rows_r8w32_tile.wgsl", quantizeRowsTiledWgsl(quantizeRowsTiledGeometry(65))],
     // The channel-major read of conv3d w8a8's activation (perf-ledger V-6) at the production
     // geometry. The plain forms above must not move.
     [
@@ -1040,6 +1047,17 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     [
       "attention_online_i8a8_d64_wg_kpad.wgsl",
       attentionOnlineI8a8Wgsl(true, 64, "wg", "bhsd", "padded"),
+    ],
+    // The tiled key axis (a measure-first candidate — perf-ledger K-106: one vec4 load per Vᵀ owner
+    // slot): the production-like D = 128 sg32 form, and D = 64 in the wg form with the token-major O.
+    // The whole-word and padded forms above must not move.
+    [
+      "attention_online_i8a8_d128_sg32_ktile.wgsl",
+      attentionOnlineI8a8Wgsl(true, 128, "sg32", "bhsd", "tiled"),
+    ],
+    [
+      "attention_online_i8a8_d64_wg_obshd_ktile.wgsl",
+      attentionOnlineI8a8Wgsl(true, 64, "wg", "bshd", "tiled"),
     ],
     // The w8a8 variants of conv3d (ADR 0133 — `convCompute: "a8"`): of the 2 output variants × 2
     // dot-product variants, 3 are frozen (scalar × emulated only differs as the combination, so it
@@ -1353,6 +1371,23 @@ test("the same generator input always yields identical WGSL (every op × dtype �
       quantizeRowsPaddedWgsl(geometry),
       `quantize_rows padded:dim=${dim}`,
     );
+  }
+  for (const dim of [5, 65, 203, 512, 7920, 27280]) {
+    const geometry = quantizeRowsTiledGeometry(dim);
+    assertEquals(
+      quantizeRowsTiledWgsl(geometry),
+      quantizeRowsTiledWgsl(geometry),
+      `quantize_rows tiled:dim=${dim}`,
+    );
+  }
+  for (const reduce of ["sg32", "wg"] as const) {
+    for (const output of ["bhsd", "bshd"] as const) {
+      assertEquals(
+        attentionOnlineI8a8Wgsl(true, 128, reduce, output, "tiled"),
+        attentionOnlineI8a8Wgsl(true, 128, reduce, output, "tiled"),
+        `attention_online tiled:${reduce}:${output}`,
+      );
+    }
   }
   for (const pixels of [4, 8, 16, 32, 64]) {
     assertEquals(

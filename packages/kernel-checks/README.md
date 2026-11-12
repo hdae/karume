@@ -6,6 +6,7 @@ backend a kernel rewrite relies on, in one implementation shared by
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
   `gpu_rms_norm_subgroup_test.ts`, `gpu_rms_norm_prefetch_test.ts`, `gpu_state_attention_fold_test.ts`,
   `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts`, `gpu_state_kv16_test.ts`, `gpu_score_f16_store_test.ts`,
+  `gpu_attention_online_tiled_test.ts`,
   `gpu_state_bidirectional_test.ts`, `gpu_expert_linear_test.ts`, `gpu_fusion_twin_test.ts` and the
   twin-graph tests of the fusion rules (`gpu_gated_residual_fusion_test.ts`, `gpu_silu_fusion_test.ts`,
   `gpu_adaln_fusion_test.ts`, `gpu_rope_fusion_test.ts`, `gpu_upsample2x_fusion_test.ts`,
@@ -30,6 +31,7 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | f16 attention scores `attentionScoreStorage`: the store vs host rounding (ADR 0031) | `checkScoreF16Store` | nothing optional |
 | Bidirectional block of the sliding ①ₜ (`GenerationRun.bidirectionalRows`): every S word vs the same kernel keeping every score plus a host mirror of the predicate, u32 identity (ADR 0144) | `checkStateBidirectional` (and `stateBidirectionalMutants`, node test only) | nothing optional |
 | `expert_linear` with f16 steps at the 26B shapes: every pick's output words vs `linear`'s sequential i4 GEMV on that expert with the steps widened to f32, u32 identity (ADR 0145) | `checkExpertLinear` | nothing optional |
+| The tiled key axis of the online int8 attention (perf-ledger K-106, a measure-first candidate): the tiled `quantize_rows` vs the host permutation of today's producer bytes (words, scale bits, nothing past the rows), and the kernel reading the tiled Vᵀ vs today's kernel, O u32 identity — both output layouts, dp4a and emulated, one part per reduction form (the fault injection runs in the node test only, through `AttentionOnlineTiledCheckOptions.mutate`) | `checkAttentionOnlineTiled` (and `tiledValueWords`, the host permutation) | the kernel parts: WGSL `packed_4x8_integer_dot_product` and the D = 128 workgroup storage of the form; the sg32 part: a device whose online attention takes the sg32 form. Elsewhere the part is returned not run |
 | A fusion against the unfused plan of the same graph (a rule of `FUSION_RULES` or an annotation fold): two open Sessions run the same feeds, every compared output u32-identical with NaN by class or by payload, the fusion counter at the expected hits on the fused side and at 0 on the plain side, optionally each side's dispatches (class E — ADR 0147 decision 2) | `checkFusionTwin` | nothing optional |
 | The built-in fusions against their unfused plans (ADR 0147 decision 9, layer 1): the twin cases of the twelve twin-graph tests, one module per test under `src/fusion-twins/` with its graphs, inputs and loop, one part per rule (the attention permute rule in two: the routes any device takes, the online routes in the sg32 form) | `checkFusionTwins` (all thirteen parts in a fixed order); each module's `check…Twins` | the linear prologue part: WGSL `packed_4x8_integer_dot_product` (its dp4a cases); the sg32 part: a device whose online attention takes the sg32 form. Elsewhere the part is returned not run |
 
@@ -52,6 +54,7 @@ otherwise read back the buffers' initial contents for both runs of a case; a mut
 no longer matches throws as well. Each check exports the number of cases each of its parts returns
 (`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `RMS_NORM_PREFETCH_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
 `GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`, `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`,
+`ATTENTION_ONLINE_TILED_CASES`,
 `FUSION_TWIN_CASES` and each twin module's `…_TWIN_CASES`) and the
 mutant count
 (`STATE_ATTENTION_MUTANTS`); the tests and the page hold a run to them, so a part that ran no

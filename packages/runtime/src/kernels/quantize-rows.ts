@@ -268,8 +268,14 @@ const BSHD_TEXT: Readonly<
 /** The word count and pass ② of the lined-up form for rows of `dim % 4 == 0` (every form but the padded one). */
 const QUADS_TEXT = `  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per flat index)
   let quads = dim / 4u;`;
-const WORD_TEXT = `        let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
+const WORD_TEXT = `        let e = base + q * 4u;
+        let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
         let r = ${latticeWgsl("v")};`;
+/** Where word `q` of row `row` is stored: rows of `quads` words, one after the other. */
+const ROW_STORE_TEXT = {
+  base: "      let qbase = row * quads;",
+  at: "qbase + q",
+} as const;
 
 /**
  * The text of the padded form ({@link quantizeRowsPaddedWgsl}): `ceil(dim / 4)` words per row, and
@@ -280,12 +286,45 @@ const PADDED_TEXT = {
   header: ", rows of any length (the last word zero-padded)",
   quads: `  // Rows of any length: ceil(dim / 4) words per row, the bytes from element dim on are 0
   let quads = (dim + 3u) / 4u;`,
-  word: `        // In the last word the elements from dim on are padding: clamped reads, bytes forced to 0
+  word: `        let e = base + q * 4u;
+        // In the last word the elements from dim on are padding: clamped reads, bytes forced to 0
         let last = base + dim - 1u;
         let inside = vec4<u32>(0u, 1u, 2u, 3u) + q * 4u < vec4<u32>(dim);
         let v = vec4<f32>(x[e], x[min(e + 1u, last)], x[min(e + 2u, last)], x[min(e + 3u, last)]) / s;
         let r = select(vec4<f32>(0.0), ${latticeWgsl("v")}, inside);`,
 } as const;
+
+/**
+ * The text of the tiled form ({@link quantizeRowsTiledWgsl}): the key order of the online attention
+ * (attention-online-i8a8.ts `AttentionOnlineKeyWords` `tiled`). A row is cut into tiles of 64
+ * elements, `16 · ceil(dim / 64)` words per row; word `q` packs the elements
+ * `64·(q/16) + q%16 + 16·i` (i = 0..3) — the four keys one lane of the attention's score phase
+ * takes — and the elements from `dim` on read a clamped in-row element and are forced to 0, as in
+ * the padded form. The words of four consecutive rows are interleaved (`[row/4][word][row%4]`), so
+ * the consumer reads the same word of four rows as one `vec4<u32>`.
+ *
+ * Each byte is the plain form's: the same scale, the same lattice of the same `x / s`; only which
+ * four elements share a word, and where the word is stored, differ.
+ */
+const TILED_TEXT = {
+  header:
+    ", rows cut into 64-element tiles (word q = the elements 64·(q/16) + q%16 + 16·i), four rows interleaved",
+  quads: `  // 16 words per 64-element tile; the bytes from element dim on are 0
+  let quads = ((dim + 63u) / 64u) * 16u;`,
+  word: `        // Word q = the elements 64·(q/16) + q%16 + 16·i; from dim on: clamped reads, bytes forced to 0
+        let last = base + dim - 1u;
+        let e = (q / 16u) * 64u + q % 16u;
+        let keys = vec4<u32>(e, e + 16u, e + 32u, e + 48u);
+        let inside = keys < vec4<u32>(dim);
+        let v = vec4<f32>(x[min(base + keys.x, last)], x[min(base + keys.y, last)], x[min(base + keys.z, last)], x[min(base + keys.w, last)]) / s;
+        let r = select(vec4<f32>(0.0), ${latticeWgsl("v")}, inside);`,
+  // MUST: rows % 4 == 0 (quantizeRowsTiledParams) — a group of four rows shares each vec4
+  base: "      let qbase = (row / 4u) * quads * 4u + row % 4u;",
+  at: "qbase + q * 4u",
+} as const;
+
+/** How the lined-up form packs a row into words: the plain quads, the padded last word, or the tiled key order. */
+type QuantizeRowsWords = "quads" | "padded" | "tiled";
 
 /**
  * WGSL of the lined-up shape. One workgroup (256) is cut into R lane groups of width W, and group
@@ -297,9 +336,11 @@ const PADDED_TEXT = {
 const quantizeRowsGroupedWgsl = (
   { lanesPerRow, rowsPerGroup }: QuantizeRowsGeometry,
   layout: QuantizeRowsLayout = "rows",
-  padded = false,
+  words: QuantizeRowsWords = "quads",
 ): string =>
-  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup${BSHD_TEXT[layout].header}${padded ? PADDED_TEXT.header : ""}
+  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup${BSHD_TEXT[layout].header}${
+    words === "padded" ? PADDED_TEXT.header : words === "tiled" ? TILED_TEXT.header : ""
+  }
 struct Params {
   rows: u32,
   dim: u32,${BSHD_TEXT[layout].params}
@@ -323,7 +364,7 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-${padded ? PADDED_TEXT.quads : QUADS_TEXT}
+${words === "padded" ? PADDED_TEXT.quads : words === "tiled" ? TILED_TEXT.quads : QUADS_TEXT}
   // Lane groups: width ${lanesPerRow} × ${rowsPerGroup} groups. lane = position in a group, slot = group
   let lane = lid % ${lanesPerRow}u;
   let slot = lid / ${lanesPerRow}u;
@@ -366,12 +407,11 @@ ${BSHD_TEXT[layout].base}
 
     // ② Quantize each 4 consecutive elements (quad) and pack them into one word
     if (has_row) {
-      let qbase = row * quads;
+${(words === "tiled" ? TILED_TEXT : ROW_STORE_TEXT).base}
       var q = lane;
       while (q < quads) {
-        let e = base + q * 4u;
-${padded ? PADDED_TEXT.word : WORD_TEXT}
-        xq[qbase + q] = pack4xI8(vec4<i32>(r));
+${words === "padded" ? PADDED_TEXT.word : words === "tiled" ? TILED_TEXT.word : WORD_TEXT}
+        xq[${(words === "tiled" ? TILED_TEXT : ROW_STORE_TEXT).at}] = pack4xI8(vec4<i32>(r));
         q = q + ${lanesPerRow}u;
       }
     }
@@ -590,7 +630,7 @@ export const quantizeRowsPaddedKey = (geometry: QuantizeRowsGeometry): string =>
 
 /** WGSL of the padded form (Params `{rows, dim}` — {@link quantizeRowsPaddedParams}). */
 export const quantizeRowsPaddedWgsl = (geometry: QuantizeRowsGeometry): string =>
-  quantizeRowsGroupedWgsl(geometry, "rows", true);
+  quantizeRowsGroupedWgsl(geometry, "rows", "padded");
 
 /** Uniform Params of the padded form: `rows`, `dim` = the row length (not a multiple of 4). */
 export const quantizeRowsPaddedParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
@@ -598,6 +638,52 @@ export const quantizeRowsPaddedParams = (rows: number, dim: number): Uint32Array
   // MUST: the in-row loops step by at most the workgroup size.
   assertRowLoopBound("quantize_rows padded params", { dim }, QUANTIZE_ROWS_WORKGROUP_SIZE);
   assertPaddedDim("quantize_rows padded params", dim);
+  const params = new Uint32Array(4);
+  params[0] = rows;
+  params[1] = dim;
+  return params;
+};
+
+/** Elements per tile of the tiled form: the online attention's key tile. */
+const QUANTIZE_ROWS_TILE = 64;
+
+/** Words per row of the tiled form: 16 per 64-element tile. */
+export const quantizeRowsTiledRowWords = (dim: number): number =>
+  Math.ceil(dim / QUANTIZE_ROWS_TILE) * (QUANTIZE_ROWS_TILE / 4);
+
+/**
+ * Geometry of the **tiled form** ({@link TILED_TEXT}): rows of any length `dim ≥ 1` in a contiguous
+ * `[rows, dim]` layout, always in the lined-up generator, with the lanes of the row padded to
+ * whole tiles.
+ */
+export const quantizeRowsTiledGeometry = (dim: number): QuantizeRowsGeometry => {
+  if (!Number.isSafeInteger(dim) || dim < 1) {
+    throw new CodegenError(`quantize_rows tiled geometry: dim must be a positive integer (${dim})`);
+  }
+  return quantizeRowsGeometry(quantizeRowsTiledRowWords(dim) * 4);
+};
+
+export const quantizeRowsTiledKey = (geometry: QuantizeRowsGeometry): string =>
+  `${QUANTIZE_ROWS_KEY}:r${geometry.rowsPerGroup}w${geometry.lanesPerRow}:tile${QUANTIZE_ROWS_TILE}`;
+
+/** WGSL of the tiled form (Params `{rows, dim}` — {@link quantizeRowsTiledParams}). */
+export const quantizeRowsTiledWgsl = (geometry: QuantizeRowsGeometry): string =>
+  quantizeRowsGroupedWgsl(geometry, "rows", "tiled");
+
+/**
+ * Uniform Params of the tiled form: `rows`, `dim` = the row length.
+ * MUST: `rows % 4 == 0` — four consecutive rows share each `vec4` of the output; a last group
+ * of fewer rows would leave components the consumer reads unwritten.
+ */
+export const quantizeRowsTiledParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
+  assertU32Params("quantize_rows tiled params", { rows, dim });
+  // MUST: the in-row loops step by at most the workgroup size.
+  assertRowLoopBound("quantize_rows tiled params", { dim }, QUANTIZE_ROWS_WORKGROUP_SIZE);
+  if (!Number.isSafeInteger(dim) || dim < 1 || rows % 4 !== 0) {
+    throw new CodegenError(
+      `quantize_rows tiled params: dim must be a positive integer and rows a multiple of 4 (rows ${rows}, dim ${dim})`,
+    );
+  }
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;

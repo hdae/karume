@@ -153,8 +153,16 @@ export const attentionOnlineI8a8Eligible = (depth: number, cols: number): boolea
  * MUST: `whole` keeps the key and the WGSL of the kernel before the addendum byte for byte, so the
  * outputs of every `N % 4 == 0` shape (every accepted Wan2.1 / Wan2.2 size) are unchanged by
  * construction.
+ *
+ * `tiled` (a candidate, measured before it replaces anything — perf-ledger, the Vᵀ key order):
+ * the producer writes Vᵀ already in the kernel's key order (`quantizeRowsTiledWgsl`): any
+ * `N ≥ 1`, `16 · ceil(N / 64)` words per column, word `16·tile + pk` = the keys
+ * `64·tile + pk + 16·i`, the words of four consecutive columns interleaved. The kernel's owner
+ * fill is then one `vec4` load where the other forms gather 16 bytes; the Vᵀ tile it builds, and
+ * everything after it, is the same. It is chosen by the caller, never by
+ * {@link attentionOnlineKeyWords}.
  */
-export type AttentionOnlineKeyWords = "whole" | "padded";
+export type AttentionOnlineKeyWords = "whole" | "padded" | "tiled";
 
 export const attentionOnlineKeyWords = (cols: number): AttentionOnlineKeyWords =>
   cols % I8A8_PACK === 0 ? "whole" : "padded";
@@ -165,6 +173,10 @@ export const attentionOnlineKeyWords = (cols: number): AttentionOnlineKeyWords =
  * expression serves both.
  */
 export const attentionOnlineValueRowWords = (cols: number): number => Math.ceil(cols / I8A8_PACK);
+
+/** Words per column of the quantised Vᵀ in the `tiled` form: `16 · ceil(N / 64)` (whole key tiles). */
+export const attentionOnlineTiledValueRowWords = (cols: number): number =>
+  Math.ceil(cols / ATTENTION_ONLINE_KEYS) * V_WORDS;
 
 /** Bytes of workgroup storage the kernel declares (what the device compares with its limit). */
 export const attentionOnlineI8a8WorkgroupStorageBytes = (
@@ -195,7 +207,9 @@ export const attentionOnlineI8a8Key = (
 ): string =>
   `attention_online:v2:i8a8:d${depth}:r${ATTENTION_ONLINE_ROWS}k${ATTENTION_ONLINE_KEYS}:${
     dp4a ? "dp4a" : "emu"
-  }:${reduce}${output === "bshd" ? ":obshd" : ""}${keyWords === "padded" ? ":kpad" : ""}`;
+  }:${reduce}${output === "bshd" ? ":obshd" : ""}${
+    keyWords === "padded" ? ":kpad" : keyWords === "tiled" ? ":ktile" : ""
+  }`;
 
 /**
  * The uniform: `m` = query rows of the whole node, `n` = keys, `row_offset` = the first row of this
@@ -218,7 +232,8 @@ export const attentionOnlineI8a8Params = (
   if (!Number.isFinite(scale)) {
     throw new CodegenError(`attention_online i8a8: scale must be finite (${scale})`);
   }
-  if (keyWords !== attentionOnlineKeyWords(n)) {
+  // The tiled form takes any key length; the other two are decided by N % 4
+  if (keyWords !== "tiled" && keyWords !== attentionOnlineKeyWords(n)) {
     throw new CodegenError(
       `attention_online i8a8: N = ${n} takes the '${attentionOnlineKeyWords(n)}' key axis, but the pipeline was compiled for '${keyWords}'`,
     );
@@ -327,6 +342,7 @@ export const attentionOnlineI8a8Wgsl = (
 ): string => {
   const bshd = output === "bshd";
   const padded = keyWords === "padded";
+  const tiled = keyWords === "tiled";
   assertDepth(depth);
   const quads = qkQuads(depth);
   const qkS = qkStride(depth);
@@ -347,7 +363,7 @@ diagnostic(off, subgroup_uniformity);
   return `${header}// karume attention_online (O = softmax((q·scale)(k·scale)ᵀ) · v with S never stored — ADR 0132; q / k per-token i8, v per-column i8, P̃ = round(127·exp(S − m)) against the running max${
     dp4a ? "" : " (emulated)"
   }, D = ${depth}, 64 rows × 64-key tiles, 256 threads, vec4 tiles, ${sg ? "subgroup shuffle" : "workgroup memory"} reductions${
-    padded ? ", Vᵀ rows of ceil(N/4) words" : ""
+    padded ? ", Vᵀ rows of ceil(N/4) words" : tiled ? ", Vᵀ in the kernel's key order" : ""
   })
 struct Dims {
   m: u32,
@@ -358,7 +374,7 @@ struct Dims {
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> qq: array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read> kq: array<vec4<u32>>;
-@group(0) @binding(3) var<storage, read> vq: array<u32>;
+@group(0) @binding(3) var<storage, read> vq: array<${tiled ? "vec4<u32>" : "u32"}>;
 @group(0) @binding(4) var<storage, read_write> o: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> qs: array<f32>;
 @group(0) @binding(6) var<storage, read> ks: array<f32>;
@@ -386,16 +402,20 @@ fn main(
   let tx = t % ${LANES}u;
   let ty = t / ${LANES}u;
 ${
-  padded
-    ? `  // Vᵀ rows hold ceil(N/4) words: the producer zero-pads the last one, and its keys from N on
+  tiled
+    ? `  // Vᵀ columns hold whole key tiles (${V_WORDS} words each), four columns interleaved: the vec4
+  // at (d4, 16·tile + pk) is word pk of the tile for the columns d4·4..+3 — the producer's layout
+  let n4 = ((dims.n + ${ATTENTION_ONLINE_KEYS - 1}u) / ${ATTENTION_ONLINE_KEYS}u) * ${V_WORDS}u;`
+    : padded
+      ? `  // Vᵀ rows hold ceil(N/4) words: the producer zero-pads the last one, and its keys from N on
   // score NEG, so their P̃ is 0 and the padding never weighs in
   let n4 = (dims.n + ${I8A8_PACK - 1}u) / ${I8A8_PACK}u;`
-    : `  let n4 = dims.n / ${I8A8_PACK}u;`
+      : `  let n4 = dims.n / ${I8A8_PACK}u;`
 }
   // this head's offsets: q / k in vec4 words, Vᵀ in words, the k scales in elements
   let q_bh = bh * dims.m * ${quads}u;
   let k_bh = bh * dims.n * ${quads}u;
-  let v_bh = bh * ${depth}u * n4;
+  let v_bh = bh * ${tiled ? depth / VEC : depth}u * n4;
   let ks_bh = bh * dims.n;
 ${rows
   .map(
@@ -424,10 +444,11 @@ ${kSlots
   )
   .join("\n")}
 ${vSlots
-  .map(
-    (
-      s,
-    ) => `    // Vᵀ owner (pk, d4): consecutive lanes take consecutive keys of the same four columns
+  .map((s) =>
+    tiled
+      ? `    // Vᵀ owner (pk, d4): one vec4 of the producer's key order (whole tiles, so no guard)
+    { let w = t + ${s * THREADS}u; let pk = w % ${V_WORDS}u; let d4 = w / ${V_WORDS}u; vr${s} = vq[v_bh + d4 * n4 + tile * ${V_WORDS}u + pk]; }`
+      : `    // Vᵀ owner (pk, d4): consecutive lanes take consecutive keys of the same four columns
     { let w = t + ${s * THREADS}u; let pk = w % ${V_WORDS}u; let d4 = w / ${V_WORDS}u; let kg = key0 + pk; let shift = (kg % ${I8A8_PACK}u) * 8u; let gw = kg / ${I8A8_PACK}u;
 ${range(VEC).map(vtOwnerWord).join("\n")}
       vr${s} = vec4<u32>(vw0, vw1, vw2, vw3); }`,

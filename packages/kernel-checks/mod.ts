@@ -184,3 +184,9 @@ export {
   STATE_KV16_MUTANTS,
   type StateKv16Mutant,
 } from "./src/state-kv16.ts";
+export {
+  ATTENTION_ONLINE_TILED_CASES,
+  type AttentionOnlineTiledCheckOptions,
+  checkAttentionOnlineTiled,
+  tiledValueWords,
+} from "./src/attention-online-tiled.ts";
