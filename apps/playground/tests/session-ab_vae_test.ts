@@ -17,7 +17,6 @@ import {
   VAE_AB_TARGETS,
   vaeAbModel,
   vaeArmOptions,
-  vaeBackendRefusal,
   vaeFeeds,
   type VaeInput,
   vaeRowRule,
@@ -292,13 +291,6 @@ describe("the session A/B page's VAE targets", () => {
     it("reads each arm's hits from its own rule, and the base's from the first rule", () => {
       const request = sessionAbVaeRequest("wan22-vae-next", CONV8, settings());
       expect(["base", "rule"].map((arm) => vaeRowRule(request, arm))).toEqual([RULE, RULE]);
-    });
-
-    it("refuses the metal backend: the rules' rounding barrier does not hold there", () => {
-      expect(vaeBackendRefusal("metal")).toContain("must not run on Metal");
-      for (const backend of ["d3d12", "vulkan", "other"] as const) {
-        expect(vaeBackendRefusal(backend)).toBeUndefined();
-      }
     });
   });
 

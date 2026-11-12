@@ -43,9 +43,10 @@
  * (apps/playground/tests/session-ab_vae_test.ts compares them).
  *
  * The record's backend is inferred from the platform (linux → vulkan, darwin → metal, win32 →
- * d3d12: Dawn's backend there), and the envelope says so; WebGPU does not expose it. The rules MUST
- * NOT be passed on Metal (their XOR rounding barrier is measured not to hold there), so the case
- * refuses that backend.
+ * d3d12: Dawn's backend there), and the envelope says so; WebGPU does not expose it. The case runs on
+ * Metal too, where the rule has not been run: its XOR rounding barrier is measured to hold on Vulkan
+ * and D3D12 on NVIDIA, the same form did not act as a barrier on Metal in other kernels, and the
+ * pipelines pass the rule there all the same (docs/known-issues.md), so a run there measures it.
  *
  * MUST: never run it while other work uses the GPU (the times would measure the contention); run it
  * under `flock /tmp/karume-gpu.lock`. Without the variable, without a target's mirror or without an
@@ -217,7 +218,6 @@ const runTarget = async (
   const prepared = prepareContainer(opened, component);
   const feeds = vaeFeeds(prepared.graph.inputs, seed);
   const backend = inferredBackend(process.platform);
-  if (backend === "metal") throw new Error("the rules' XOR barrier does not hold on Metal");
   const arms = [
     { name: "base", options },
     { name: "rule", options: { ...options, fusionRules: [VAE_RMS_SILU_RULE] } },

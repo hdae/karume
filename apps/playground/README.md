@@ -1609,8 +1609,9 @@ compare). Every output is read back and compared (u32, NaN by class): on the Wan
 that is the four frames and the 32 updated caches, so the timed span moves about 0.9 GiB over the
 bus per run, the same in every arm. The hits column shows the rule's counter (0 in the base); the
 counts come from the runner's record, and the Tokens and Probe fields do not
-apply. The page refuses the `metal` backend for these targets: the rules' XOR rounding barrier is
-measured not to hold on Metal.
+apply. The targets run on every backend, Metal included, where the rule has not been run: the
+pipelines pass it there too, and a difference from the base is recorded, not refused
+([known issues](../../docs/known-issues.md)).
 
 **The record** (`format: "karume-playground-session-ab-vae/1"`):
 `session-ab-vae-<target>_<UTC timestamp>.json` with `recordEnvironment`, `versions`, the

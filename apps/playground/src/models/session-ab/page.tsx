@@ -137,7 +137,6 @@ import {
   VAE_AB_TARGETS,
   vaeAbModel,
   vaeArmOptions,
-  vaeBackendRefusal,
   vaeFeeds,
   vaeRowRule,
   vaeSessionOptions,
@@ -623,13 +622,11 @@ export const SessionAbPage = () => {
     vaeManifestState.kind === "ready" && vaeStatus !== undefined
       ? { directory: vaeStatus.directory, manifestSha256: vaeManifestState.sha256 }
       : undefined;
-  const vaeRefusal = sessionParsed.ok ? vaeBackendRefusal(sessionParsed.value.backend) : undefined;
   const canRunVae =
     readyGpu !== undefined &&
     vaeModel !== undefined &&
     vaeDistribution !== undefined &&
     sessionParsed.ok &&
-    vaeRefusal === undefined &&
     !running;
 
   const runVae = (): void => {
@@ -704,9 +701,7 @@ export const SessionAbPage = () => {
   });
   const formErrors = sessionTarget
     ? sessionParsed.ok
-      ? vae && vaeRefusal !== undefined
-        ? [vaeRefusal]
-        : []
+      ? []
       : sessionParsed.errors
     : parsed.ok
       ? []
@@ -831,8 +826,7 @@ export const SessionAbPage = () => {
                   fusion rule. The arm <code>rule</code> adds the rule{" "}
                   <code>{VAE_RMS_SILU_RULE_NAME}</code> (<code>@karume/models</code>, which the Wan
                   and anima pipelines pass by default) through{" "}
-                  <code>SessionOptions.fusionRules</code>; <code>base</code> passes none. Not on
-                  Metal: the rules&apos; rounding barrier is measured not to hold there.
+                  <code>SessionOptions.fusionRules</code>; <code>base</code> passes none.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">

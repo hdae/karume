@@ -8,8 +8,8 @@
  * `@karume/runtime/tune` over one prepared model — `base` with the options the pipeline gives its
  * VAE besides its fusion rule, `rule` with the same plus that rule `models/vae_rms_silu` (the plan
  * the pipeline runs) — and every output is read back, so the A/B's identity is u32 identity of every
- * output word (NaN by class). The counts
- * (the rules' hits, the dispatches) are the runner's: a `sessionArm` reports them for every run.
+ * output word (NaN by class). The counts (the rule's hits, the dispatches) are the runner's: a
+ * `sessionArm` reports them for every run.
  *
  * NOTE: the feeds (between the twin markers) have a twin in
  * packages/e2e/tests/e2e_vae_session_ab_test.ts (the opt-in Node A/B). No module both may import
@@ -107,10 +107,10 @@ export type VaeSessionOptions = Pick<SessionOptions, "convCompute">;
 
 /**
  * The VAE Session's options as the target's pipeline derives them from the preset's `session`,
- * besides the fusion rule it adds (the `rule` arm adds it here): Wan's VAE takes the conv knob alone (`wanVaeSessionOptions` of
- * packages/models/src/wan/tile-decode.ts — ADR 0133 decision 6) and anima's VAE stage none of it
- * (`withStage` of packages/models/src/anima/pipeline.ts). A copy of that rule: neither function is
- * on the public surface the playground reads.
+ * besides the fusion rule it adds (the `rule` arm adds it here): Wan's VAE takes the conv knob
+ * alone (`wanVaeSessionOptions` of packages/models/src/wan/tile-decode.ts — ADR 0133 decision 6)
+ * and anima's VAE stage none of it (`withStage` of packages/models/src/anima/pipeline.ts). A copy of
+ * that rule: neither function is on the public surface the playground reads.
  */
 export const vaeSessionOptions = (
   target: SessionAbVaeTarget,
@@ -218,13 +218,3 @@ export const vaeRowRule = (request: SessionAbVaeRequest, arm: string): string =>
   if (rule === undefined) throw new Error("The request's arms add no rule");
   return rule;
 };
-
-/**
- * Why a VAE target does not run on `backend`, or `undefined`. MUST NOT run on Metal: the rules'
- * XOR rounding barrier is measured not to hold there (docs/known-issues.md), so their arms would
- * not be the plans they stand for.
- */
-export const vaeBackendRefusal = (backend: SessionAbSettings["backend"]): string | undefined =>
-  backend === "metal"
-    ? "The VAE rules must not run on Metal: their rounding barrier is measured not to hold there."
-    : undefined;
