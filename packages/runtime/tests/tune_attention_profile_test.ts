@@ -9,8 +9,8 @@
 // whenever records are given, its `kernels` (the online attention's kernel fingerprint) exactly when
 // the field is adopted, no family fingerprint moved by the field; ③ the refusals — a record that
 // cannot stand for the current runtime on this adapter throws instead of being skipped; ④ matching —
-// a table carrying the field needs the block with a current `kernels` (ADR 0117 addendum 2026-11-12,
-// per op family).
+// a table carrying the field needs the block with a current `kernels`, and a table without it a block
+// without `kernels` (ADR 0117 addendum 2026-11-12, per op family).
 
 import { assert, assertEquals, assertMatch, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -317,6 +317,16 @@ describe("a table derived with attention-bench records through storage and match
     assertEquals(
       geometryProfileMismatch({ ...plain, provenance: withoutBlock }, BENCH_ADAPTER),
       undefined,
+    );
+  });
+
+  it("mismatches a table without attentionOnline whose block names the online attention's kernels (the key is present exactly when the table carries the field)", () => {
+    const { profile } = derive([bench("run1.json")]);
+    assert(profile.provenance?.attentionBench?.kernels !== undefined);
+    const { attentionOnline: _field, ...plain } = profile;
+    assertStringIncludes(
+      geometryProfileMismatch(plain, BENCH_ADAPTER) ?? "",
+      "provenance.attentionBench names the online attention's kernels but the table chooses no form",
     );
   });
 

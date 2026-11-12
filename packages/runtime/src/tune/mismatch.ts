@@ -73,8 +73,9 @@ const familyMismatch = (
 
 /**
  * The first mismatch of the online attention's evidence (undefined when it matches): a table
- * carrying `attentionOnline` needs `provenance.attentionBench` with `kernels`; `kernels`, when
- * present, and `shapes` are compared with the current runtime's.
+ * carrying `attentionOnline` needs `provenance.attentionBench` with `kernels`, and a table without
+ * it a block without `kernels` (the key is present exactly when the table carries the field);
+ * `kernels`, when present, and `shapes` are compared with the current runtime's.
  */
 const attentionBenchMismatch = (
   profile: GeometryProfile & { readonly provenance: NonNullable<GeometryProfile["provenance"]> },
@@ -88,6 +89,9 @@ const attentionBenchMismatch = (
   }
   if (profile.attentionOnline !== undefined && attentionBench.kernels === undefined) {
     return `${where}: it carries attentionOnline but provenance.attentionBench has no kernels (nothing to match the online attention's kernels against)`;
+  }
+  if (profile.attentionOnline === undefined && attentionBench.kernels !== undefined) {
+    return `${where}: provenance.attentionBench names the online attention's kernels but the table chooses no form (no attentionOnline — the block does not belong to this table's fields)`;
   }
   if (attentionBench.kernels !== undefined) {
     const kernels = derived(attentionBenchKernelsId);
@@ -128,8 +132,9 @@ const attentionBenchMismatch = (
  *    2026-10-19), then its case-set version; without an entry, that the family's fingerprint equals
  *    the default table's (its fields are the default). The message names the family.
  * 5. The online attention's evidence (`provenance.attentionBench` — ADR 0117 addenda 2026-11-12): a
- *    table carrying `attentionOnline` has the block with `kernels`; `kernels`, when present, equals
- *    the current runtime's `attentionBenchKernelsId`, and `shapes` its `attentionBenchShapeSetId`.
+ *    table carrying `attentionOnline` has the block with `kernels`, a table without it has no
+ *    `kernels` in the block; `kernels`, when present, equals the current runtime's
+ *    `attentionBenchKernelsId`, and `shapes` its `attentionBenchShapeSetId`.
  *
  * Not compared: `candidateSet` (whether a quick+ table suffices is the application's call), `match`
  * (injection does not look at `match`), browser and driver versions (no information is available —

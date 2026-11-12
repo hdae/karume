@@ -347,4 +347,15 @@ describe("the attention-bench block carried over from the base", () => {
       "carries attentionOnline but its provenance.attentionBench has no kernels",
     );
   });
+
+  it("refuses a block naming the online attention's kernels on a base without attentionOnline", () => {
+    const { attentionOnline: _field, ...from } = withBench();
+    assert(provenanceOf(from).attentionBench?.kernels !== undefined);
+    const error = assertThrows(
+      () => derive([input("new-attention.json", familyRows("attention"))], { base: from }),
+      Error,
+      "Base table 'base-gpu': its provenance.attentionBench names the online attention's kernels but the table chooses no form",
+    );
+    assertStringIncludes(error.message, "measure the attention bench again");
+  });
 });

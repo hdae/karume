@@ -2031,8 +2031,8 @@ const withBaseFields = (
  *   table edited by hand otherwise) — the family keeps the default.
  * - Without attention-bench records: `base`'s block is carried after its `shapes` (and `kernels`,
  *   when present) are checked against the current runtime (stale: measure the attention bench
- *   again); a `base` carrying `attentionOnline` without the block or without its `kernels` is
- *   refused.
+ *   again); a `base` carrying `attentionOnline` without the block or without its `kernels`, and a
+ *   block with `kernels` on a `base` without `attentionOnline`, are refused.
  */
 const carryOver = (
   base: GeometryProfile,
@@ -2139,6 +2139,11 @@ const carriedAttentionBench = (base: GeneratedProfile): AttentionBenchProvenance
   if (base.attentionOnline !== undefined && block.kernels === undefined) {
     throw new Error(
       `${where} carries attentionOnline but its provenance.attentionBench has no kernels — measure the attention bench again`,
+    );
+  }
+  if (base.attentionOnline === undefined && block.kernels !== undefined) {
+    throw new Error(
+      `${where}: its provenance.attentionBench names the online attention's kernels but the table chooses no form (no attentionOnline — the block does not belong to the table's fields) — measure the attention bench again`,
     );
   }
   const shapes = attentionBenchShapeSetId();
