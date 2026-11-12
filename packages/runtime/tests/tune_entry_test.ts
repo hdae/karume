@@ -25,7 +25,8 @@ import {
 import { timestampUnitFor } from "../src/tune/sweep.ts";
 import { sweepCaseEntries } from "../src/tune/cases.ts";
 import { defaultI8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
-import { i8a8Candidate, i8a8LinearCandidates } from "../src/tune/geometries.ts";
+import { gemmGeometryForRows } from "../src/kernels/gemm-geometry.ts";
+import { gemmCandidate, i8a8Candidate, i8a8LinearCandidates } from "../src/tune/geometries.ts";
 import { familiesOf } from "../src/tune/families.ts";
 import {
   candidateSetCaseSetIds,
@@ -194,6 +195,28 @@ describe("runGeometrySweep: the geometries option (options validation, before to
         }),
       Error,
       `Geometry ${skeleton.name} is not a candidate of case i8a8-attention-qk-self-m1024-n1024`,
+    );
+  });
+
+  it("throws on the default geometry of a chosen case, naming the name and the case (its row is always measured)", async () => {
+    const defaultName = i8a8Candidate(defaultI8a8Geometry("linear")).name;
+    assert(skeleton !== undefined);
+    await assertRejects(
+      () => runGeometrySweep({ ...linear, geometries: [skeleton.name, defaultName] }),
+      Error,
+      `Geometry ${defaultName} is the default geometry of case i8a8-linear-m1024-n2048-k2048`,
+    );
+    // Per case: an f32 linear case refuses its own default (the gemmRows rule for its M)
+    const gemmDefault = gemmCandidate(gemmGeometryForRows(16)).name;
+    await assertRejects(
+      () =>
+        runGeometrySweep({
+          candidateSet: "full",
+          cases: ["linear-m16-n3072-k1024"],
+          geometries: [gemmDefault],
+        }),
+      Error,
+      `Geometry ${gemmDefault} is the default geometry of case linear-m16-n3072-k1024`,
     );
   });
 

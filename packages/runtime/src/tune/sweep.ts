@@ -101,9 +101,10 @@ export type GeometrySweepOptions = {
   /**
    * The candidate geometries to measure, by the name a record's rows carry (`geometry` — e.g.
    * `"tile64x64r8x4w16x8k64s"`), in the order given (default: every candidate of the set — an
-   * empty list is the default too, as for `cases`). The default geometry's row is always measured.
-   * A name that is not a candidate of every selected case, or a name given twice, throws before
-   * the GPU is touched. Recorded in `settings.geometries`. A record taken with it is an ordinary
+   * empty list is the default too, as for `cases`). The default geometry's row is always measured,
+   * so the list does not name it: a name that is the default geometry of a selected case, a name
+   * that is not a candidate of every selected case, or a name given twice, throws before the GPU
+   * is touched. Recorded in `settings.geometries`. A record taken with it is an ordinary
    * derivation input: each row stands for itself, and a candidate it did not measure is "not
    * measured" there, as with narrowed `cases`. Its purpose: a machine that heats within one case
    * measures that case in chunks with a cool-down between calls (ADR 0117 addendum 2026-11-12).

@@ -838,9 +838,10 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
 /**
  * The candidates one case measures: every candidate of `set` ({@link candidatesFor}) when
  * `geometries` is absent, else those geometries by name, in the order given (ADR 0117 addendum
- * 2026-11-12, "the `geometries` option"). A name that is not a candidate of the case throws — the
- * sweep entry point checks every planned case before it touches the GPU. The default geometry is
- * not chosen here: {@link sweepCase} always measures it first.
+ * 2026-11-12, "the `geometries` option"). A name that is not a candidate of the case throws, and
+ * so does the case's default geometry — the sweep entry point checks every planned case before it
+ * touches the GPU. The default geometry is not chosen here: {@link sweepCase} always measures it
+ * first, as the default row.
  */
 export const selectedCandidates = (
   sweepCase: SweepCase,
@@ -849,6 +850,17 @@ export const selectedCandidates = (
 ): GeometryCandidate[] => {
   const candidates = candidatesFor(sweepCase, set);
   if (geometries === undefined) return candidates;
+  // MUST: refuse the default's name. It is measured only as the default row (sweepCase drops it
+  // from the candidates), so `settings.geometries` would list as a measured candidate a geometry
+  // that has no candidate row. The name is read from the case plan the sweep runs, which builds no
+  // GPU object; the workgroup limit and dp4a do not enter any plan's default candidate, so the
+  // check needs no device
+  const defaultName = casePlan(sweepCase, Number.POSITIVE_INFINITY, false).defaultCandidate.name;
+  if (geometries.includes(defaultName)) {
+    throw new Error(
+      `Geometry ${defaultName} is the default geometry of case ${sweepCase.id}: its row is always measured, so do not list it in geometries`,
+    );
+  }
   return geometries.map((name) => {
     const found = candidates.find((candidate) => candidate.name === name);
     if (found === undefined) {
