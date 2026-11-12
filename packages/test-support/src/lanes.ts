@@ -56,9 +56,14 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("embeddinggemma", [`${E2E}/e2e_embeddinggemma*_test.ts`]),
   family("deberta", [`${E2E}/e2e_deberta*_test.ts`]),
   family("wan", both("wan"), both("wan_ti2v")),
-  // The opt-in session A/B of the VAE rules runs a Wan2.2 and an anima target; one lane claims it,
-  // so a run of every lane collects it once.
-  family("wan-ti2v", [...both("wan_ti2v"), `${E2E}/e2e_vae_session_ab_test.ts`]),
+  // The opt-in session A/B of the VAE rules runs a Wan2.2 and an anima target, and the opt-in K-88
+  // sweep shapes of Wan2.2, anima, gemma4, umT5 and siglip2 (the heaviest are the Wan2.2 VAE's);
+  // one lane claims each, so a run of every lane collects it once.
+  family("wan-ti2v", [
+    ...both("wan_ti2v"),
+    `${E2E}/e2e_vae_session_ab_test.ts`,
+    `${E2E}/e2e_k88_gemm_sweep_test.ts`,
+  ]),
   family("umt5", both("umt5"), both("wan")),
   family("qwen3_5", both("qwen3_5")),
   family("moss", both("moss")),
