@@ -145,9 +145,10 @@ maintainer's ruling of 2026-11-06).
   the Playground's `/session-ab` page and an opt-in Node run on 26B (`KARUME_SESSION_AB=<dir>`,
   `e2e_gemma4_session_ab_test.ts`). Left: the page's first runs in Chrome (D3D12) and on Metal; the option on other
   families; a public way to switch a built-in rule off for a measurement (today only the test-only
-  `DISABLED_FUSION_RULES`); generated elementwise fusions on the MOSS-Image DiT (S5, [perf-ledger](perf-ledger.md) F-13 —
-  the candidate `candidate/ew_chain`, its checks and the Node A/B are built and run on the RTX 3080 Ti, 2026-11-11; left:
-  the RTX 5070 Ti / D3D12 run on the page's MOSS-Image target, then the research note). The estimate plans every
+  `DISABLED_FUSION_RULES`). Generated elementwise fusions on the MOSS-Image DiT (S5, [perf-ledger](perf-ledger.md) F-13)
+  are adopted (2026-11-12): `models/ew_chain`, the first rule a pipeline passes by default (ADR 0148 addendum of
+  2026-11-12); left: the research note, a run on Metal, and — not decided — whether the runtime should bind borrowed
+  weights for an external rule, which keeps `dit_skip22`'s 42 gates unfused today. The estimate plans every
   fused step, external rules included, and counts the i8a8 linear's temporaries (P4, 2026-11-11 — ADR
   [0093](decisions/0093-transient-liveness-packing.md) addendum). The Session
   canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.

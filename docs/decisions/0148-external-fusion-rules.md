@@ -93,6 +93,9 @@ Which rule hit is in `lastRunFusions`.
 `adaln`, `gatedResidual`, `rmsNormRope` and `upsample2x` stay where they are. New model-specific rules are written in
 `@karume/models` (or the application) against the kernel entry. No pipeline passes a rule yet.
 
+Amended by the addendum of 2026-11-12 below: MOSS-Image passes `models/ew_chain` by default; the text is kept as the
+state this record was accepted in.
+
 ### 5. What `defineRule` collects and checks
 
 - **Every rule declares** `name`, `heads` (a non-empty array of op names), `contract` (`"E" | "C" | "R" | "Q"`, ADR 0147
@@ -300,6 +303,56 @@ The later work decision 8 names is done (ADR [0093](0093-transient-liveness-pack
   rule's numbers. `packages/runtime/tests/codegen_elementwise_value_test.ts` reads the expected value and helpers of
   each op from the plain kernel's WGSL and checks that the op list is the contract table's f32 → f32 unary and binary
   ops.
+
+## Addendum (2026-11-12) — the first rule a pipeline passes by default (`models/ew_chain` on MOSS-Image)
+
+The maintainer adopted the candidate `candidate/ew_chain` on 2026-11-12, on the measurements of
+[perf-ledger](../perf-ledger.md) F-13. Decision 4's "No pipeline passes a rule yet" ends here for MOSS-Image and holds
+for every other family.
+
+- **What moved**: the rule is `packages/models/src/moss/ew-chain.ts`, named `models/ew_chain`, its dispatch keys under
+  `ext:models:`. The name and the key prefix are the only changes: its key form, its matcher and its WGSL are as
+  measured (the WGSL's comment line names the new rule). It still imports `@karume/runtime/kernel` and nothing else,
+  and its code has no type assertion; `packages/models/tests/external_fusion_rule_test.ts` pins both for the file. It
+  left `packages/candidate-rules`, as that package's README foresaw for an adopted rule. `@karume/models/moss`
+  exports it as `EW_CHAIN_RULE` and `EW_CHAIN_RULE_NAME` (on the barrel `moss.EW_CHAIN_RULE` — ADR 0136), experimental
+  like the kernel entry it is written against, for code that builds its own Sessions of the family's graphs (the
+  playground's `/session-ab` MOSS-Image target, the e2e tests).
+- **What is passed where**: `mossFusionRules` (`packages/models/src/moss/fusion-rules.ts`) is the one rule list of the
+  MOSS-Image image graphs — `models/ew_chain`, then the rules the caller gives through the experimental
+  `moss.PipelineOptions.fusionRules`, in their order. The DiT stage gives it to the Sessions of `dit_text`, `dit` and
+  `dit_skip22`, the VAE stage to the three decoder graphs' Sessions, and both to the headroom estimates of the same
+  graphs, which then need the device's `maxComputeWorkgroupsPerDimension` (the stages' limit types require it). The
+  Qwen3.5 text encoder's Session gets no rule. These are the Sessions the end-to-end measurement gave the rule. A
+  caller that gives `models/ew_chain` again is refused as a rule given twice (decision 3's list composition).
+- **No option turns it off** ([kernel-rules](../kernel-rules.md) 4(a); ADR 0147 decision 5: a rule u32-identical to
+  the unfused plan takes no boolean key). The tests reach the plan without it through the test-only
+  `DISABLED_FUSION_RULES` on the same options.
+- **The evidence** (the numbers of F-13; the measurements named the rule `candidate/ew_chain`):
+  - class E: u32-identical to the unfused plan in every form on Vulkan / RTX 3080 Ti, and a variant that reads the
+    product inline differs (`packages/e2e/tests/e2e_ew_chain_rule_test.ts`, now on the adopted rule);
+  - the hits on the real graphs through the pipeline's rule list, against the same options with the rule disabled by
+    name (`packages/e2e/tests/e2e_moss_fusion_counts_test.ts`): `dit` 292 per forward and `dit_skip22` 244 on both
+    presets, `dit_text` 6, the VAE decoder graphs 1 / 1 / 13 (their residual `add → div`), every other counter as
+    without it;
+  - the session A/B of one `dit` forward at S = 4,159 on seeded feeds, the output identical on every run: Node / Dawn
+    / Vulkan on the RTX 3080 Ti, a median paired difference of −171.7 ms on a base median of 1,792.3 ms (gain 9.6 %,
+    verdict adopt; a second run −181.9 ms of 1,809.4 ms, 10.1 %, adopt); Chrome 157 / D3D12 on the RTX 5070 Ti,
+    −171.1 ms of 1,329.4 ms (12.9 %, adopt);
+  - the whole generation: on the RTX 3080 Ti at 256² × 2 steps, every image of 14 generations u32-identical (the time
+    inconclusive — at that size a generation is mostly the weight upload); on the RTX 5070 Ti in Chrome at 1024² ×
+    50 steps, the same output hash and 131.0 → 121.5 s (−7.3 %);
+  - **Metal: not run.** The rounding barrier is measured behaviour, so the rule's identity on Metal is unknown, and
+    nothing refuses it there.
+- **Limits**: the runtime's decline of borrowed weights for an external rule (decisions 5, 7 and 9) is not changed, so
+  `dit_skip22` folds none of its 42 FFN gates (their constants are `dit`'s weights). No other family passes the rule:
+  the maintainer measured a Gemma 4 preset to regress with it (2026-11-12; the numbers are not recorded in this
+  repository).
+- **What went away with it**: the opt-in pipeline-level A/B `packages/e2e/tests/e2e_moss_pipeline_rule_test.ts` (with
+  the rule on by default the pipeline has no plain arm, and that arm is not worth a public option), and the
+  `/moss-image` page's **Experimental fusion rule** switch with its record field `experimentalFusionRule` (the page's
+  record is `karume-playground-moss-image/2`). The Session-level A/B (`packages/e2e/tests/e2e_moss_session_ab_test.ts`
+  and the playground's `/session-ab`) stays and compares a `dit` forward with and without the rule.
 
 ## Alternatives considered
 
