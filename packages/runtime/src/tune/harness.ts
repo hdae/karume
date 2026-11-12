@@ -1283,19 +1283,10 @@ export type Timing = {
 };
 
 /**
- * Measures one geometry: reset the output to 0 and run once → estimate `reps` → idle runs →
- * `rounds` measurements (protocol rules 1–3).
+ * Estimates the `reps` that make one pass of `ready` about {@link TARGET_PASS_MS} (the module doc's
+ * NOTE — double by wall clock and take the slope of the last two points).
  */
-export const timeLaunch = async (
-  context: SweepContext,
-  ready: ReadyLaunch,
-  output: GPUBuffer,
-  rounds: number,
-): Promise<Timing> => {
-  // The first run starts from an output reset to 0 (unwritten tiles show as a digest mismatch)
-  await runPass(context, ready, 1, false, output);
-  // Estimating reps (the module doc's NOTE — double by wall clock and take the slope of the last
-  // two points)
+const probeReps = async (context: SweepContext, ready: ReadyLaunch): Promise<number> => {
   let reps = 1;
   let previous: { readonly reps: number; readonly wallNs: number } | undefined;
   let probeNs: number;
@@ -1314,7 +1305,22 @@ export const timeLaunch = async (
     previous = { reps, wallNs };
     reps = Math.min(SWEEP_MAX_REPS, reps * 2);
   }
-  reps = calibrateReps(probeNs, TARGET_PASS_MS, SWEEP_MAX_REPS);
+  return calibrateReps(probeNs, TARGET_PASS_MS, SWEEP_MAX_REPS);
+};
+
+/**
+ * Measures one geometry: reset the output to 0 and run once → estimate `reps` → idle runs →
+ * `rounds` measurements (protocol rules 1–3).
+ */
+export const timeLaunch = async (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  output: GPUBuffer,
+  rounds: number,
+): Promise<Timing> => {
+  // The first run starts from an output reset to 0 (unwritten tiles show as a digest mismatch)
+  await runPass(context, ready, 1, false, output);
+  const reps = await probeReps(context, ready);
   await warmUp(context, ready, reps);
   const gpuRounds: number[] = [];
   const wallRounds: number[] = [];
@@ -1338,6 +1344,123 @@ export const timeLaunch = async (
     ...(kept.length === 0 ? {} : { perDispatch: Math.min(...kept) / reps }),
     wallNsPerDispatch: Math.min(...wallRounds) / reps,
   };
+};
+
+/** The order of the four passes of one paired round: A, B, B, A (a drift within the round cancels). */
+export const PAIR_ORDER = ["a", "b", "b", "a"] as const;
+
+/** One paired round: the two passes of each arm, in the record's unit, and their wall clocks. */
+export type PairedRound = {
+  readonly a: readonly [number, number];
+  readonly b: readonly [number, number];
+  readonly wallA: readonly [number, number];
+  readonly wallB: readonly [number, number];
+  /** Passes of the round whose timestamp difference was negative (clamped to 0). */
+  readonly clamped: number;
+};
+
+export type PairedTiming = {
+  /** The same repetitions for both arms (calibrated on A), so the passes keep one duty cycle. */
+  readonly reps: number;
+  readonly rounds: readonly PairedRound[];
+};
+
+/**
+ * Measures two dispatches in the same rounds (an A/B whose thermal drift cancels): reset both
+ * outputs and run each once → estimate `reps` on A → idle runs of A, then B → `rounds` rounds of
+ * {@link PAIR_ORDER}. The two arms share `reps`, so a per-round ratio compares passes of one length
+ * taken under the same clocks.
+ */
+export const timeLaunchPair = async (
+  context: SweepContext,
+  a: ReadyLaunch,
+  b: ReadyLaunch,
+  outputs: { readonly a: GPUBuffer; readonly b: GPUBuffer },
+  rounds: number,
+): Promise<PairedTiming> => {
+  await runPass(context, a, 1, false, outputs.a);
+  await runPass(context, b, 1, false, outputs.b);
+  const reps = await probeReps(context, a);
+  await warmUp(context, a, reps);
+  await warmUp(context, b, reps);
+  const timed = context.unit !== "wall";
+  const measured: PairedRound[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    const samples: { readonly arm: "a" | "b"; readonly sample: PassSample }[] = [];
+    for (const arm of PAIR_ORDER) {
+      samples.push({ arm, sample: await runPass(context, arm === "a" ? a : b, reps, timed) });
+    }
+    const of = (arm: "a" | "b", pick: (sample: PassSample) => number): [number, number] => {
+      const [first, second] = samples.filter((entry) => entry.arm === arm);
+      return [pick(first.sample), pick(second.sample)];
+    };
+    measured.push({
+      a: of("a", (sample) => sample.gpu ?? sample.wallNs),
+      b: of("b", (sample) => sample.gpu ?? sample.wallNs),
+      wallA: of("a", (sample) => sample.wallNs),
+      wallB: of("b", (sample) => sample.wallNs),
+      clamped: samples.filter(({ sample }) => sample.clamped).length,
+    });
+  }
+  return { reps, rounds: measured };
+};
+
+/** Runs one dispatch once (no timestamps); with `clear`, resets that buffer to 0 first. */
+export const runLaunchOnce = async (
+  context: SweepContext,
+  ready: ReadyLaunch,
+  clear?: GPUBuffer,
+): Promise<void> => {
+  await runPass(context, ready, 1, false, clear);
+};
+
+/** Reads `bytes` of `buffer` from `offset` through the context's staging buffer (a copy). */
+const readChunk = async (
+  context: SweepContext,
+  buffer: GPUBuffer,
+  offset: number,
+  bytes: number,
+): Promise<Uint32Array<ArrayBuffer>> => {
+  const { gpu, staging } = context;
+  await submitAndWait(gpu, "buffer readback", (encoder) => {
+    encoder.copyBufferToBuffer(buffer, offset, staging, 0, bytes);
+  });
+  await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+    staging.mapAsync(MAP_MODE.READ, 0, bytes),
+    "buffer readback",
+  );
+  const copy = new Uint32Array(staging.getMappedRange(0, bytes).slice(0));
+  staging.unmap();
+  return copy;
+};
+
+/**
+ * Compares the first `bytes` of two buffers word for word, one staging chunk at a time (the JS
+ * side holds two chunks at most): the number of words, of differing words, and the first difference.
+ */
+export const compareBufferWords = async (
+  context: SweepContext,
+  a: GPUBuffer,
+  b: GPUBuffer,
+  bytes: number,
+): Promise<{
+  readonly words: number;
+  readonly differing: number;
+  readonly first?: { readonly index: number; readonly a: number; readonly b: number };
+}> => {
+  let differing = 0;
+  let first: { readonly index: number; readonly a: number; readonly b: number } | undefined;
+  for (let offset = 0; offset < bytes; offset += context.staging.size) {
+    const length = Math.min(context.staging.size, bytes - offset);
+    const left = await readChunk(context, a, offset, length);
+    const right = await readChunk(context, b, offset, length);
+    for (let at = 0; at < left.length; at += 1) {
+      if (left[at] === right[at]) continue;
+      differing += 1;
+      first ??= { index: offset / 4 + at, a: left[at], b: right[at] };
+    }
+  }
+  return { words: bytes / 4, differing, ...(first === undefined ? {} : { first }) };
 };
 
 /** Prepares and measures one candidate's dispatch (params are released after measuring). */

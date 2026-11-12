@@ -9,6 +9,13 @@
  *   `attention_online` dispatch.
  * - `quantization` (optional) — the four dispatches both routes share (q and k per token, the
  *   permute to Vᵀ and its quantization). They run once per node, outside the route totals.
+ * - `onlineTiled` (opt-in) — a measure-first candidate, not a production route: the online kernel
+ *   reading Vᵀ in its own key order (`AttentionOnlineKeyWords` `tiled`, perf-ledger K-106), timed
+ *   against `online` in the same rounds ({@link timeLaunchPair}: A B B A per round, a per-round
+ *   ratio, so a thermal drift within a round cancels), with its producer (the tiled
+ *   `quantize_rows`) timed beside today's in the quantization line, and an identity block: both
+ *   producers on the same f32 Vᵀ, both kernels on their outputs, O compared word for word. It is
+ *   built from the generator calls a production route would make for the form.
  *
  * It exists because the Wan2.2 pipeline cannot run on a timing-enabled device, while the per-kernel
  * GPU time of the two routes is what tells why a route gains on one machine and not on another
@@ -86,7 +93,9 @@ import {
   attentionOnlineI8a8Params,
   attentionOnlineI8a8Wgsl,
   attentionOnlineI8a8WorkgroupStorageBytes,
+  type AttentionOnlineKeyWords,
   attentionOnlineKeyWords,
+  attentionOnlineTiledValueRowWords,
 } from "../kernels/attention-online-i8a8.ts";
 import {
   ATTENTION_STATS_STRIDE,
@@ -102,6 +111,10 @@ import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsTiledGeometry,
+  quantizeRowsTiledKey,
+  quantizeRowsTiledParams,
+  quantizeRowsTiledWgsl,
   quantizeRowsWgsl,
 } from "../kernels/quantize-rows.ts";
 import {
@@ -121,23 +134,31 @@ import {
 import { sessionGeometryProfile } from "../runtime/geometry-selection.ts";
 import type { I8a8Dot } from "../runtime/session-types.ts";
 import {
+  compareBufferWords,
   createResources,
   createSweepContext,
   destroySweepContext,
   type Launch,
+  type PairedRound,
+  type PairedTiming,
   prepareLaunch,
   type ResourceSpec,
+  runLaunchOnce,
   SWEEP_MAX_REPS,
   type SweepContext,
   timeLaunch,
+  timeLaunchPair,
   type Timing,
 } from "./harness.ts";
 import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 import { timestampUnitFor } from "./sweep.ts";
 
-/** The format of the bench record. */
-export const ATTENTION_BENCH_FORMAT = "karume-attention-bench/1";
+/**
+ * The format of the bench record. `/2`: `settings.onlineTiled`, and per shape the optional
+ * `onlineTiled`, `tiledVsOnline`, `tiledVsOnlineWithProducer` and `quantization.tiledVt`.
+ */
+export const ATTENTION_BENCH_FORMAT = "karume-attention-bench/2";
 
 /**
  * One attention shape (batch 1 — `heads` is the folded `B·H` axis). `queries` is the node's full
@@ -204,6 +225,11 @@ export type AttentionBenchOptions = {
   readonly rounds?: number;
   /** Also time the four shared quantization dispatches (default true). */
   readonly quantization?: boolean;
+  /**
+   * Also time the candidate `onlineTiled` (perf-ledger K-106) against `online` at each shape, its
+   * producer against today's in the quantization line, and check the pair's identity (default false).
+   */
+  readonly onlineTiled?: boolean;
   /** Abort (stops before the next dispatch is measured — the record keeps the finished shapes). */
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: AttentionBenchProgress) => void;
@@ -255,16 +281,78 @@ export type AttentionBenchRoute =
       readonly error?: string;
     };
 
+/** One paired round as recorded: the harness's round and its ratio B ÷ A (absent when a pass was clamped). */
+export type AttentionBenchPairedRound = PairedRound & { readonly ratio?: number };
+
+/** Two dispatches timed in the same rounds ({@link timeLaunchPair}): A = today's, B = the candidate. */
+export type AttentionBenchPair = {
+  readonly stages: readonly [a: string, b: string];
+  readonly keys: readonly [a: string, b: string];
+  readonly workgroups: readonly [
+    a: readonly [number, number, number],
+    b: readonly [number, number, number],
+  ];
+  /** The repetitions of every pass of both arms. */
+  readonly reps?: number;
+  /** Per round, in the order A B B A (record unit; the wall clock alongside). */
+  readonly rounds?: readonly AttentionBenchPairedRound[];
+  /** ms per dispatch of each arm: the min over its passes (GPU time for unit `ns`, else the wall clock). */
+  readonly aMsPerDispatch?: number;
+  readonly bMsPerDispatch?: number;
+  /** The median of the per-round ratios B ÷ A (below 1 = the candidate faster). */
+  readonly ratio?: number;
+  readonly error?: string;
+};
+
+/** Both producers on the same f32 Vᵀ, both kernels on their outputs: O and the Vᵀ scales word for word. */
+export type AttentionBenchIdentity = {
+  readonly identical: boolean;
+  /** O words compared (the whole O of the node; rows past the measured window are 0 on both sides). */
+  readonly words?: number;
+  readonly differingWords?: number;
+  readonly differingScaleWords?: number;
+  /** The first differing O word (index, today's word, the candidate's word). */
+  readonly first?: { readonly index: number; readonly a: number; readonly b: number };
+  readonly error?: string;
+};
+
+/** The candidate `onlineTiled` at one shape (`eligible: false` = the online route does not run). */
+export type AttentionBenchTiled =
+  | { readonly eligible: false; readonly reason: string }
+  | {
+      readonly eligible: true;
+      /** Query rows of the measured dispatch (the online route's). */
+      readonly rows: number;
+      /** `online` (A) and `onlineTiled` (B) in the same rounds. */
+      readonly kernel: AttentionBenchPair;
+      /** The node's route time of each arm from the paired minimums (ms per row × the node's rows). */
+      readonly onlineNodeMs?: number;
+      readonly tiledNodeMs?: number;
+      readonly identity: AttentionBenchIdentity;
+    };
+
 export type AttentionBenchShapeResult = {
   readonly shape: AttentionBenchShape;
   readonly s16: AttentionBenchRoute;
   readonly online: AttentionBenchRoute;
   /** `online.msPer1000Rows / s16.msPer1000Rows` (below 1 = online faster). */
   readonly onlineVsS16?: number;
+  /** The candidate (present when `onlineTiled` was requested). */
+  readonly onlineTiled?: AttentionBenchTiled;
+  /** The kernel alone: `onlineTiled.kernel.ratio` (time tiled ÷ online; below 1 = tiled faster). */
+  readonly tiledVsOnline?: number;
+  /**
+   * Kernel and producer per node: (tiled node ms + tiled producer ms) ÷ (online node ms + today's
+   * producer ms), from the paired minimums (needs the quantization line).
+   */
+  readonly tiledVsOnlineWithProducer?: number;
   /** The four shared quantization dispatches of one node (absent when not requested or no route ran). */
   readonly quantization?: {
     readonly stages: readonly AttentionBenchStage[];
+    /** The four stages above (today's dispatches — the candidate's producer is not in it). */
     readonly msPerNode?: number;
+    /** `quantize_vt` (A) and the tiled producer (B) in the same rounds (with `onlineTiled`). */
+    readonly tiledVt?: AttentionBenchPair;
   };
 };
 
@@ -280,6 +368,7 @@ export type AttentionBenchReport = {
   readonly settings: {
     readonly rounds: number;
     readonly quantization: boolean;
+    readonly onlineTiled: boolean;
     readonly targetPassMs: number;
     readonly maxReps: number;
     readonly warmupNs: number;
@@ -359,6 +448,69 @@ export const finiteRatio = (numerator?: number, denominator?: number): number | 
     ? numerator / denominator
     : undefined;
 
+/** The median (the mean of the middle two for an even count; absent for none). */
+export const medianOf = (values: readonly number[]): number | undefined => {
+  if (values.length === 0) return undefined;
+  const sorted = values.toSorted((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+/** A round's ratio B ÷ A over its two passes per arm (absent when a pass was clamped). */
+export const pairedRoundRatio = (round: PairedRound): number | undefined =>
+  round.clamped > 0 ? undefined : finiteRatio(round.b[0] + round.b[1], round.a[0] + round.a[1]);
+
+/**
+ * The record of a paired timing: each round with its ratio, the median ratio (the representative —
+ * each round's two arms ran under the same clocks), and each arm's min over its passes per dispatch
+ * (GPU time for unit `ns`, otherwise the wall clock; a clamped 0 is never the min).
+ */
+export const summarizePair = (
+  unit: TimingUnit,
+  timing: PairedTiming,
+): Pick<AttentionBenchPair, "reps" | "rounds" | "aMsPerDispatch" | "bMsPerDispatch" | "ratio"> => {
+  const rounds = timing.rounds.map((round): AttentionBenchPairedRound => {
+    const ratio = pairedRoundRatio(round);
+    return ratio === undefined ? round : { ...round, ratio };
+  });
+  const msOf = (passes: readonly number[]): number | undefined => {
+    const kept = passes.filter((value) => value > 0);
+    return kept.length === 0 ? undefined : Math.min(...kept) / timing.reps / 1e6;
+  };
+  const arm = (gpu: "a" | "b", wall: "wallA" | "wallB"): number | undefined =>
+    msOf(timing.rounds.flatMap((round) => (unit === "ns" ? round[gpu] : round[wall])));
+  const aMs = arm("a", "wallA");
+  const bMs = arm("b", "wallB");
+  const ratio = medianOf(
+    rounds.flatMap((round) => (round.ratio === undefined ? [] : [round.ratio])),
+  );
+  return {
+    reps: timing.reps,
+    rounds,
+    ...(aMs === undefined ? {} : { aMsPerDispatch: aMs }),
+    ...(bMs === undefined ? {} : { bMsPerDispatch: bMs }),
+    ...(ratio === undefined ? {} : { ratio }),
+  };
+};
+
+/**
+ * Kernel and producer per node, candidate ÷ today: (B node ms + B producer ms) ÷ (A node ms + A
+ * producer ms), absent unless all four are known.
+ */
+export const withProducerRatio = (
+  kernel: { readonly onlineNodeMs?: number; readonly tiledNodeMs?: number },
+  producer: { readonly aMsPerDispatch?: number; readonly bMsPerDispatch?: number } | undefined,
+): number | undefined =>
+  kernel.onlineNodeMs === undefined ||
+  kernel.tiledNodeMs === undefined ||
+  producer?.aMsPerDispatch === undefined ||
+  producer.bMsPerDispatch === undefined
+    ? undefined
+    : finiteRatio(
+        kernel.tiledNodeMs + producer.bMsPerDispatch,
+        kernel.onlineNodeMs + producer.aMsPerDispatch,
+      );
+
 const isPositiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 1;
 
 /** Checks the options before the GPU is touched (a misspelled shape is never run as something else). */
@@ -435,6 +587,50 @@ const timeStage = async (
       wallMsPerDispatch: timing.wallNsPerDispatch / 1e6,
       ...(ns === undefined ? { error: "every round's timestamp was negative" } : {}),
     };
+  } catch (cause) {
+    if (cause instanceof BenchAborted) throw cause;
+    return { ...base, error: describeCause(cause) };
+  }
+};
+
+/** Measures two dispatches in the same rounds (each stage's write target is reset to 0 first). */
+const timePair = async (
+  bench: Bench,
+  stages: readonly [string, string],
+  a: Launch,
+  b: Launch,
+  resources: ReadonlyMap<string, GPUBuffer>,
+): Promise<AttentionBenchPair> => {
+  throwIfAborted(bench);
+  const base = {
+    stages,
+    keys: [a.key, b.key] as const,
+    workgroups: [a.workgroups, b.workgroups] as const,
+  };
+  try {
+    const outputA = resources.get(a.writes[0]);
+    const outputB = resources.get(b.writes[0]);
+    if (outputA === undefined || outputB === undefined) {
+      throw new Error(`${a.key} / ${b.key}: output ${a.writes[0]} / ${b.writes[0]} is missing`);
+    }
+    const readyA = await prepareLaunch(bench.context, a, resources);
+    try {
+      const readyB = await prepareLaunch(bench.context, b, resources);
+      try {
+        const timing = await timeLaunchPair(
+          bench.context,
+          readyA,
+          readyB,
+          { a: outputA, b: outputB },
+          bench.rounds,
+        );
+        return { ...base, ...summarizePair(bench.context.unit, timing) };
+      } finally {
+        readyB.params.destroy();
+      }
+    } finally {
+      readyA.params.destroy();
+    }
   } catch (cause) {
     if (cause instanceof BenchAborted) throw cause;
     return { ...base, error: describeCause(cause) };
@@ -654,13 +850,108 @@ const onlineIneligibleReason = (
       } B)`
     : `the shape is not eligible (D=${shape.depth}, N=${shape.keys}: needs D % 64 == 0, D ≤ 128, N ≥ 1)`;
 
+/** The resources an online dispatch binds (today's route reads the shared `vq` / `vscale` / `o`). */
+type OnlineBuffers = { readonly vq: string; readonly vs: string; readonly o: string };
+const SHARED_ONLINE: OnlineBuffers = { vq: "vq", vs: "vscale", o: "o" };
+
+/**
+ * One online dispatch of the first window (`rows` rows) in the key-axis form `keyWords`: today's
+ * form for the route, `tiled` for the candidate — the same generator calls either way.
+ */
+const onlineLaunch = (
+  bench: Bench,
+  shape: AttentionBenchShape,
+  reduce: AttentionOnlineReduce,
+  rows: number,
+  keyWords: AttentionOnlineKeyWords,
+  buffers: OnlineBuffers = SHARED_ONLINE,
+): Launch => {
+  const { id, heads, queries, keys, depth, scale } = shape;
+  const where = `${id} online${keyWords === "tiled" ? " tiled" : ""}`;
+  const dp4a = bench.dot === "dp4a";
+  return {
+    // attention.ts:1591-1596
+    key: attentionOnlineI8a8Key(dp4a, depth, reduce, "bhsd", keyWords),
+    wgsl: attentionOnlineI8a8Wgsl(dp4a, depth, reduce, "bhsd", keyWords),
+    // attention.ts:1603-1606 (the first window: row_offset 0, m = the node's M)
+    params: attentionOnlineI8a8Params(queries, keys, 0, scale, keyWords),
+    // attention.ts:1607-1615
+    bindings: positionalBindings(where, [
+      [1, "qq"],
+      [2, "kq"],
+      [3, buffers.vq],
+      [4, buffers.o],
+      [5, "qscale"],
+      [6, "kscale"],
+      [7, buffers.vs],
+    ]),
+    writes: [buffers.o],
+    // attention.ts:1618-1622
+    workgroups: [
+      tiledWorkgroups(rows, ATTENTION_ONLINE_ROWS, bench.limit, where),
+      tiledWorkgroups(heads, 1, bench.limit, where),
+      1,
+    ],
+  };
+};
+
+/**
+ * The candidate's producer: the tiled `quantize_rows` over the `rows` rows `(head, d)` of Vᵀ, row
+ * length N, on the grid-stride grid production gives `quantize_rows` (attention.ts:1879-1910 is
+ * where the route would take it from).
+ */
+const tiledProducerLaunch = (
+  bench: Bench,
+  rows: number,
+  keys: number,
+  names: readonly [vt: string, vq: string, vs: string],
+): Launch => {
+  const geometry = quantizeRowsTiledGeometry(keys);
+  return {
+    key: quantizeRowsTiledKey(geometry),
+    wgsl: quantizeRowsTiledWgsl(geometry),
+    params: quantizeRowsTiledParams(rows, keys),
+    bindings: [...names],
+    writes: [names[1], names[2]],
+    workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, bench.limit), 1, 1],
+  };
+};
+
+/** Today's Vᵀ producer for the online route (the form `attentionOnlineKeyWords` gives N). */
+const valueQuantizeLaunch = (
+  bench: Bench,
+  rows: number,
+  keys: number,
+  names: readonly [vt: string, vq: string, vs: string],
+): Launch => {
+  // At N % 4 != 0 only the online route quantises (s16 is not eligible there), so the form is
+  // the online kernel's
+  const { geometry, key, wgsl, params } = attentionValueQuantization(
+    rows,
+    keys,
+    attentionOnlineKeyWords(keys),
+  );
+  return {
+    key,
+    wgsl,
+    params,
+    bindings: [...names],
+    writes: [names[1], names[2]],
+    workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, bench.limit), 1, 1],
+  };
+};
+
+/** Bytes of the quantised Vᵀ in the tiled form (`16 · ceil(N / 64)` words per column). */
+const tiledValueBytes = (shape: AttentionBenchShape): number =>
+  shape.heads * shape.depth * attentionOnlineTiledValueRowWords(shape.keys) * 4;
+
 /** The online route at one shape (one dispatch of one window). */
 const benchOnline = async (
   bench: Bench,
   shape: AttentionBenchShape,
   shared: ReadonlyMap<string, GPUBuffer>,
 ): Promise<AttentionBenchRoute> => {
-  const { id, heads, queries, keys, depth, scale } = shape;
+  const { id, heads, queries, keys, depth } = shape;
   const where = `${id} online`;
   const route = attentionRoute(
     { attentionCompute: "a8", attentionScoreStorage: "none" },
@@ -681,32 +972,7 @@ const benchOnline = async (
   // attention.ts:1597 — the first window production dispatches
   const windows = planAttentionOnlineWindows(queries, { batch: heads, cols: keys, depth });
   const rows = onlineDispatchRows(shape.rowsPerDispatch ?? windows[0].rows, queries);
-  const dp4a = bench.dot === "dp4a";
-  const keyWords = attentionOnlineKeyWords(keys);
-  const launch: Launch = {
-    // attention.ts:1591-1596
-    key: attentionOnlineI8a8Key(dp4a, depth, reduce, "bhsd", keyWords),
-    wgsl: attentionOnlineI8a8Wgsl(dp4a, depth, reduce, "bhsd", keyWords),
-    // attention.ts:1603-1606 (the first window: row_offset 0, m = the node's M)
-    params: attentionOnlineI8a8Params(queries, keys, 0, scale, keyWords),
-    // attention.ts:1607-1615
-    bindings: positionalBindings(where, [
-      [1, "qq"],
-      [2, "kq"],
-      [3, "vq"],
-      [4, "o"],
-      [5, "qscale"],
-      [6, "kscale"],
-      [7, "vscale"],
-    ]),
-    writes: ["o"],
-    // attention.ts:1618-1622
-    workgroups: [
-      tiledWorkgroups(rows, ATTENTION_ONLINE_ROWS, bench.limit, where),
-      tiledWorkgroups(heads, 1, bench.limit, where),
-      1,
-    ],
-  };
+  const launch = onlineLaunch(bench, shape, reduce, rows, attentionOnlineKeyWords(keys));
   bench.status(`${id}: online ${reduce} (${rows} rows)`);
   const stages = [await timeStage(bench, "online", launch, shared)];
   return {
@@ -721,11 +987,139 @@ const benchOnline = async (
   };
 };
 
+/**
+ * The identity block of the candidate: today's producer and the tiled producer on the same f32 Vᵀ,
+ * then today's kernel and the tiled kernel (the first window) on their outputs. Every O word and
+ * every Vᵀ scale word must be equal; O starts at 0 on both sides, so rows past the window compare 0
+ * with 0. A failure to run is recorded as not identical, with the error.
+ */
+const benchIdentity = async (
+  bench: Bench,
+  shape: AttentionBenchShape,
+  shared: ReadonlyMap<string, GPUBuffer>,
+  reduce: AttentionOnlineReduce,
+  rows: number,
+): Promise<AttentionBenchIdentity> => {
+  const { id, heads, queries, keys, depth } = shape;
+  try {
+    const valueRows = heads * depth;
+    const launches: readonly Launch[] = [
+      valueQuantizeLaunch(bench, valueRows, keys, ["vtIdentity", "vqA", "vsA"]),
+      tiledProducerLaunch(bench, valueRows, keys, ["vtIdentity", "vqB", "vsB"]),
+      onlineLaunch(bench, shape, reduce, rows, attentionOnlineKeyWords(keys), {
+        vq: "vqA",
+        vs: "vsA",
+        o: "oA",
+      }),
+      onlineLaunch(bench, shape, reduce, rows, "tiled", { vq: "vqB", vs: "vsB", o: "oB" }),
+    ];
+    const oBytes = heads * queries * depth * F32;
+    const scaleBytes = valueRows * F32;
+    const specs: ResourceSpec[] = [
+      { name: "vtIdentity", bytes: valueRows * keys * F32, fill: "f32" },
+      {
+        name: "vqA",
+        bytes: attentionI8a8TempBytes({ batch: heads, rows: queries, cols: keys, depth }).pv.vq,
+        fill: "none",
+      },
+      { name: "vsA", bytes: scaleBytes, fill: "none" },
+      { name: "vqB", bytes: tiledValueBytes(shape), fill: "none" },
+      { name: "vsB", bytes: scaleBytes, fill: "none" },
+      { name: "oA", bytes: oBytes, fill: "none" },
+      { name: "oB", bytes: oBytes, fill: "none" },
+    ];
+    bench.status(`${id}: tiled identity (both producers, both kernels)`);
+    return await withResources(bench, specs, async (extra) => {
+      const resources = new Map([...shared, ...extra]);
+      for (const launch of launches) {
+        throwIfAborted(bench);
+        const ready = await prepareLaunch(bench.context, launch, resources);
+        try {
+          await runLaunchOnce(bench.context, ready, resources.get(launch.writes[0]));
+        } finally {
+          ready.params.destroy();
+        }
+      }
+      const buffer = (name: string): GPUBuffer => {
+        const found = resources.get(name);
+        if (found === undefined) throw new Error(`${id}: resource ${name} is missing`);
+        return found;
+      };
+      const scales = await compareBufferWords(
+        bench.context,
+        buffer("vsA"),
+        buffer("vsB"),
+        scaleBytes,
+      );
+      const o = await compareBufferWords(bench.context, buffer("oA"), buffer("oB"), oBytes);
+      return {
+        identical: o.differing === 0 && scales.differing === 0,
+        words: o.words,
+        differingWords: o.differing,
+        differingScaleWords: scales.differing,
+        ...(o.first === undefined ? {} : { first: o.first }),
+      };
+    });
+  } catch (cause) {
+    if (cause instanceof BenchAborted) throw cause;
+    return { identical: false, error: describeCause(cause) };
+  }
+};
+
+/**
+ * The candidate at one shape: `online` (A) and `onlineTiled` (B) on the online route's first window,
+ * in the same rounds, then the identity block. The tiled kernel reads its own Vᵀ buffer (the tiled
+ * size, filled like the shared one — the timing does not depend on the values).
+ */
+const benchOnlineTiled = async (
+  bench: Bench,
+  shape: AttentionBenchShape,
+  shared: ReadonlyMap<string, GPUBuffer>,
+  online: AttentionBenchRoute,
+): Promise<AttentionBenchTiled> => {
+  if (!online.eligible || online.reduce === undefined) {
+    return {
+      eligible: false,
+      reason: `the online route does not run here${online.eligible ? "" : ` (${online.reason})`}`,
+    };
+  }
+  const { id, keys, queries } = shape;
+  const { reduce, rows } = online;
+  let a: Launch;
+  let b: Launch;
+  try {
+    a = onlineLaunch(bench, shape, reduce, rows, attentionOnlineKeyWords(keys));
+    b = onlineLaunch(bench, shape, reduce, rows, "tiled", { ...SHARED_ONLINE, vq: "vqTiled" });
+  } catch (cause) {
+    return { eligible: false, reason: `the candidate cannot be built: ${describeCause(cause)}` };
+  }
+  bench.status(`${id}: online vs online tiled, A B B A (${rows} rows)`);
+  const kernel = await withResources(
+    bench,
+    [{ name: "vqTiled", bytes: tiledValueBytes(shape), fill: "i8" }],
+    (extra) => timePair(bench, ["online", "onlineTiled"], a, b, new Map([...shared, ...extra])),
+  );
+  const nodeMs = (ms: number | undefined): number | undefined =>
+    ms === undefined ? undefined : (ms * queries) / rows;
+  const onlineNodeMs = nodeMs(kernel.aMsPerDispatch);
+  const tiledNodeMs = nodeMs(kernel.bMsPerDispatch);
+  const identity = await benchIdentity(bench, shape, shared, reduce, rows);
+  return {
+    eligible: true,
+    rows,
+    kernel,
+    ...(onlineNodeMs === undefined ? {} : { onlineNodeMs }),
+    ...(tiledNodeMs === undefined ? {} : { tiledNodeMs }),
+    identity,
+  };
+};
+
 /** The four quantization dispatches of one node (attention.ts:1373-1424 and :1493-1559). */
 const benchQuantization = async (
   bench: Bench,
   shape: AttentionBenchShape,
   shared: ReadonlyMap<string, GPUBuffer>,
+  tiledVt: boolean,
 ): Promise<NonNullable<AttentionBenchShapeResult["quantization"]>> => {
   const { id, heads, queries, keys, depth } = shape;
   const { limit } = bench;
@@ -743,23 +1137,11 @@ const benchQuantization = async (
     writes: [names[1], names[2]],
     workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, limit), 1, 1],
   });
-  const valueQuantize = (rows: number, dim: number): Launch => {
-    // At N % 4 != 0 only the online route quantises (s16 is not eligible there), so the form is
-    // the online kernel's
-    const { geometry, key, wgsl, params } = attentionValueQuantization(
-      rows,
-      dim,
-      attentionOnlineKeyWords(dim),
-    );
-    return {
-      key,
-      wgsl,
-      params,
-      bindings: ["vt", "vq", "vscale"],
-      writes: ["vq", "vscale"],
-      workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, limit), 1, 1],
-    };
-  };
+  const valueRows = heads * depth;
+  const quantizeVt = valueQuantizeLaunch(bench, valueRows, keys, ["vt", "vq", "vscale"]);
+  const tiledProducer = tiledVt
+    ? tiledProducerLaunch(bench, valueRows, keys, ["vt", "vqTiled", "vscaleTiled"])
+    : undefined;
   const stridedSpec = { dtype: "f32" } as const;
   const launches: readonly (readonly [string, Launch])[] = [
     // attention.ts:1402-1423 (q per token, then k per token)
@@ -787,22 +1169,41 @@ const benchQuantization = async (
       },
     ],
     // attention.ts:1539-1558 (rows = (head, d), row length N — the padded form at N % 4 != 0)
-    ["quantize_vt", valueQuantize(heads * depth, keys)],
+    ["quantize_vt", quantizeVt],
   ];
   const specs: ResourceSpec[] = [
     { name: "q", bytes: heads * queries * depth * F32, fill: "f32" },
     { name: "k", bytes: heads * keys * depth * F32, fill: "f32" },
     { name: "v", bytes: heads * keys * depth * F32, fill: "f32" },
     { name: "vt", bytes: heads * depth * keys * F32, fill: "none" },
+    // The candidate producer's outputs (only with the candidate)
+    ...(tiledProducer !== undefined
+      ? [
+          { name: "vqTiled", bytes: tiledValueBytes(shape), fill: "none" } as const,
+          { name: "vscaleTiled", bytes: valueRows * F32, fill: "none" } as const,
+        ]
+      : []),
   ];
-  const stages = await withResources(bench, specs, async (inputs) => {
+  const { stages, pair } = await withResources(bench, specs, async (inputs) => {
     const resources = new Map([...shared, ...inputs]);
     const measured: AttentionBenchStage[] = [];
     for (const [stage, launch] of launches) {
       bench.status(`${id}: ${stage}`);
       measured.push(await timeStage(bench, stage, launch, resources));
     }
-    return measured;
+    if (tiledProducer === undefined) return { stages: measured };
+    // permute_v above left Vᵀ in `vt`, so both producers read the same values
+    bench.status(`${id}: quantize_vt vs the tiled producer, A B B A`);
+    return {
+      stages: measured,
+      pair: await timePair(
+        bench,
+        ["quantize_vt", "quantize_vt_tiled"],
+        quantizeVt,
+        tiledProducer,
+        resources,
+      ),
+    };
   });
   const complete = stages.every((stage) => stage.msPerDispatch !== undefined);
   return {
@@ -810,6 +1211,7 @@ const benchQuantization = async (
     ...(complete
       ? { msPerNode: stages.reduce((sum, stage) => sum + (stage.msPerDispatch ?? 0), 0) }
       : {}),
+    ...(pair === undefined ? {} : { tiledVt: pair }),
   };
 };
 
@@ -827,10 +1229,23 @@ const planned = async (route: () => Promise<AttentionBenchRoute>): Promise<Atten
   }
 };
 
+/** The candidate, with a failure to allocate or build reported as not eligible (as {@link planned}). */
+const plannedTiled = async (
+  candidate: () => Promise<AttentionBenchTiled>,
+): Promise<AttentionBenchTiled> => {
+  try {
+    return await candidate();
+  } catch (cause) {
+    if (cause instanceof BenchAborted) throw cause;
+    return { eligible: false, reason: `the candidate fails: ${describeCause(cause)}` };
+  }
+};
+
 const benchShape = async (
   bench: Bench,
   shape: AttentionBenchShape,
   quantization: boolean,
+  tiled: boolean,
 ): Promise<AttentionBenchShapeResult> => {
   bench.status(`${shape.id}: preparing inputs`);
   return await withResources(bench, sharedResources(shape), async (shared) => {
@@ -840,15 +1255,27 @@ const benchShape = async (
       online.eligible ? online.msPer1000Rows : undefined,
       s16.eligible ? s16.msPer1000Rows : undefined,
     );
+    const onlineTiled = tiled
+      ? await plannedTiled(() => benchOnlineTiled(bench, shape, shared, online))
+      : undefined;
     const measureQuantization = quantization && (s16.eligible || online.eligible);
+    const quantized = measureQuantization
+      ? await benchQuantization(bench, shape, shared, onlineTiled?.eligible === true)
+      : undefined;
+    const tiledVsOnline = onlineTiled?.eligible === true ? onlineTiled.kernel.ratio : undefined;
+    const withProducer =
+      onlineTiled?.eligible === true
+        ? withProducerRatio(onlineTiled, quantized?.tiledVt)
+        : undefined;
     return {
       shape,
       s16,
       online,
       ...(ratio === undefined ? {} : { onlineVsS16: ratio }),
-      ...(measureQuantization
-        ? { quantization: await benchQuantization(bench, shape, shared) }
-        : {}),
+      ...(onlineTiled === undefined ? {} : { onlineTiled }),
+      ...(tiledVsOnline === undefined ? {} : { tiledVsOnline }),
+      ...(withProducer === undefined ? {} : { tiledVsOnlineWithProducer: withProducer }),
+      ...(quantized === undefined ? {} : { quantization: quantized }),
     };
   });
 };
@@ -881,7 +1308,7 @@ const chooseDot = async (
 
 /**
  * Times the s16 and online routes of a8 fused attention at each shape on `gpu` and returns the
- * record (`karume-attention-bench/1`, JSON-serializable). Uses GPU timestamps when the device was
+ * record (`karume-attention-bench/2`, JSON-serializable); with `onlineTiled`, also the candidate. Uses GPU timestamps when the device was
  * acquired with `gpuTiming: true`, the wall clock otherwise. A route production would not run on
  * this device or shape is reported as not eligible; a failed dispatch is kept as an `error` of its
  * stage and the bench goes on. Option errors throw before the GPU is touched.
@@ -900,6 +1327,7 @@ export const runAttentionRouteBench = async (
     throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
   const quantization = options.quantization ?? true;
+  const onlineTiled = options.onlineTiled ?? false;
   const startedAt = new Date().toISOString();
   const notify = options.onProgress;
   const profile = sessionGeometryProfile(gpu);
@@ -923,7 +1351,7 @@ export const runAttentionRouteBench = async (
     for (const shape of shapes) {
       let result: AttentionBenchShapeResult;
       try {
-        result = await benchShape(bench, shape, quantization);
+        result = await benchShape(bench, shape, quantization, onlineTiled);
       } catch (cause) {
         if (!(cause instanceof BenchAborted)) throw cause;
         aborted = true;
@@ -971,6 +1399,7 @@ export const runAttentionRouteBench = async (
     settings: {
       rounds,
       quantization,
+      onlineTiled,
       targetPassMs: TARGET_PASS_MS,
       maxReps: SWEEP_MAX_REPS,
       warmupNs: WARMUP_NS,

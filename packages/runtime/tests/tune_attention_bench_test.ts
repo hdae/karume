@@ -1,7 +1,9 @@
 // The attention route bench (`runAttentionRouteBench` of `@karume/runtime/tune`): the pure helpers,
 // the binding-role check with storage params, and one GPU run on small shapes (both routes timed,
 // a finite ratio, an N % 4 != 0 shape timed online with its padded Vᵀ quantisation, and a shape the
-// online kernel cannot run reported as not eligible).
+// online kernel cannot run reported as not eligible), and the opt-in candidate `onlineTiled`
+// (perf-ledger K-106): the paired timing's pure summary, and one GPU run where the candidate is timed
+// in the same rounds as `online`, its producer beside today's, and its identity block holds.
 
 import { describe, test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
@@ -17,10 +19,14 @@ import {
   attentionIntegerOps,
   checkAttentionBenchShape,
   finiteRatio,
+  medianOf,
   onlineDispatchRows,
+  pairedRoundRatio,
   positionalBindings,
+  summarizePair,
+  withProducerRatio,
 } from "../src/tune/attention-bench.ts";
-import { assertBindingRoles } from "../src/tune/harness.ts";
+import { assertBindingRoles, PAIR_ORDER, type PairedRound } from "../src/tune/harness.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
 import { stridedWgsl } from "../src/codegen/strided.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -112,6 +118,77 @@ describe("attention bench helpers", () => {
       () => assertBindingRoles({ key: "strided", bindings: ["v", "vt"], writes: ["vt"] }, roles),
       Error,
       "storage bindings",
+    );
+  });
+});
+
+describe("the paired timing of the candidate (pure)", () => {
+  const round = (a: [number, number], b: [number, number], clamped = 0): PairedRound => ({
+    a,
+    b,
+    wallA: [a[0] + 10, a[1] + 10],
+    wallB: [b[0] + 10, b[1] + 10],
+    clamped,
+  });
+
+  test("a round runs A, B, B, A, so a drift that is linear in time weighs both arms alike", () => {
+    assertEquals([...PAIR_ORDER], ["a", "b", "b", "a"]);
+    // Pass i runs at clock factor 1 + 0.1·i: A at 1.0 and 1.3, B at 1.1 and 1.2 — the same sum
+    const drift = [1, 1.1, 1.2, 1.3];
+    const sums = { a: 0, b: 0 };
+    PAIR_ORDER.forEach((arm, pass) => {
+      sums[arm] += drift[pass];
+    });
+    assertEquals(sums.a.toFixed(12), sums.b.toFixed(12));
+  });
+
+  test("the round ratio is B ÷ A over both passes, and absent when a pass was clamped", () => {
+    assertEquals(pairedRoundRatio(round([100, 100], [90, 100])), 0.95);
+    assertEquals(pairedRoundRatio(round([100, 100], [0, 100], 1)), undefined);
+  });
+
+  test("the median takes the middle value, or the mean of the middle two", () => {
+    assertEquals(medianOf([3, 1, 2]), 2);
+    assertEquals(medianOf([4, 1, 3, 2]), 2.5);
+    assertEquals(medianOf([]), undefined);
+  });
+
+  test("the summary keeps every round with its ratio, the median ratio and each arm's min per dispatch", () => {
+    const summary = summarizePair("ns", {
+      reps: 10,
+      rounds: [
+        round([1e7, 1.1e7], [0.95e7, 1.0e7]),
+        round([1.2e7, 1.2e7], [1.08e7, 1.08e7]),
+        round([0.9e7, 1e7], [0, 0.8e7], 1),
+      ],
+    });
+    assertEquals(summary.reps, 10);
+    assertEquals(
+      summary.rounds?.map(({ ratio }) => ratio?.toFixed(4)),
+      ["0.9286", "0.9000", undefined],
+    );
+    // The median of the two unclamped rounds
+    assertEquals(summary.ratio?.toFixed(4), ((0.9286 + 0.9) / 2).toFixed(4));
+    // min over the arm's passes ÷ reps, in ms; a clamped 0 is never the min
+    assertEquals(summary.aMsPerDispatch, 0.9e7 / 10 / 1e6);
+    assertEquals(summary.bMsPerDispatch, 0.8e7 / 10 / 1e6);
+    // Without GPU timestamps the wall clock gives the per-dispatch times
+    const wall = summarizePair("wall", { reps: 10, rounds: [round([1e7, 1e7], [2e7, 2e7])] });
+    assertEquals(wall.aMsPerDispatch, (1e7 + 10) / 10 / 1e6);
+  });
+
+  test("kernel and producer per node need all four times", () => {
+    assertEquals(
+      withProducerRatio(
+        { onlineNodeMs: 100, tiledNodeMs: 90 },
+        { aMsPerDispatch: 2, bMsPerDispatch: 3 },
+      ),
+      93 / 102,
+    );
+    assertEquals(withProducerRatio({ onlineNodeMs: 100, tiledNodeMs: 90 }, undefined), undefined);
+    assertEquals(
+      withProducerRatio({ onlineNodeMs: 100 }, { aMsPerDispatch: 2, bMsPerDispatch: 3 }),
+      undefined,
     );
   });
 });
@@ -216,6 +293,73 @@ describe.skipIf(!GPU_AVAILABLE)("attention route bench on the GPU", () => {
       );
       // The record is plain JSON (no Infinity / NaN / undefined-only fields lost in meaning)
       assertEquals(JSON.parse(JSON.stringify(report)).format, ATTENTION_BENCH_FORMAT);
+      // The candidate is opt-in: nothing of it without the option
+      assertEquals(report.settings.onlineTiled, false);
+      for (const result of report.shapes) {
+        assertEquals(result.onlineTiled, undefined);
+        assertEquals(result.quantization?.tiledVt, undefined);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  test("the candidate onlineTiled is timed with online in the same rounds, its producer beside today's, and its O is identical", async () => {
+    const adapter = await navigator.gpu.requestAdapter();
+    const timestamps = adapter?.features.has("timestamp-query") === true;
+    const gpu = await acquireGpu({
+      subgroups: "available",
+      ...(timestamps ? { gpuTiming: true } : {}),
+    });
+    try {
+      const report = await runAttentionRouteBench(gpu, {
+        shapes: [
+          shape({ id: "n512", keys: 512 }),
+          shape({ id: "n1022", keys: 1022, queries: 200 }),
+          shape({ id: "d96n1022", keys: 1022, depth: 96 }),
+        ],
+        rounds: 2,
+        onlineTiled: true,
+      });
+      assertEquals(report.settings.onlineTiled, true);
+      const [whole, padded, odd] = report.shapes;
+      for (const result of [whole, padded]) {
+        const { id } = result.shape;
+        const tiled = result.onlineTiled;
+        assert(tiled?.eligible === true, `${id}: the candidate did not run`);
+        assert(result.online.eligible);
+        assertEquals(tiled.rows, result.online.rows);
+        const { kernel } = tiled;
+        assertEquals(kernel.error, undefined, `${id}: ${kernel.error}`);
+        assertEquals(kernel.stages, ["online", "onlineTiled"]);
+        assertMatch(kernel.keys[1], /:ktile$/);
+        assertEquals(kernel.keys[0], result.online.stages[0]?.key);
+        assertEquals(kernel.rounds?.length, 2);
+        assert((kernel.reps ?? 0) >= 1);
+        assert((kernel.aMsPerDispatch ?? 0) > 0 && (kernel.bMsPerDispatch ?? 0) > 0);
+        assert(Number.isFinite(kernel.ratio ?? Number.NaN), `${id}: ratio ${kernel.ratio}`);
+        assertEquals(result.tiledVsOnline, kernel.ratio);
+        // The identity block: both producers, both kernels, every O word and scale word equal
+        assertEquals(tiled.identity, {
+          identical: true,
+          words: result.shape.heads * result.shape.queries * result.shape.depth,
+          differingWords: 0,
+          differingScaleWords: 0,
+        });
+        // The producer pair in the quantization line, after today's four stages
+        const pair = result.quantization?.tiledVt;
+        assert(pair !== undefined, `${id}: no producer pair`);
+        assertEquals(pair.error, undefined, `${id}: ${pair.error}`);
+        assertEquals(pair.stages, ["quantize_vt", "quantize_vt_tiled"]);
+        assertEquals(pair.keys[0], result.quantization?.stages[3]?.key);
+        assertMatch(pair.keys[1], /:tile64$/);
+        assert(Number.isFinite(pair.ratio ?? Number.NaN));
+        assert(Number.isFinite(result.tiledVsOnlineWithProducer ?? Number.NaN));
+      }
+      // Where the online route does not run, neither does the candidate
+      assertEquals(odd.onlineTiled?.eligible, false);
+      assertEquals(odd.tiledVsOnline, undefined);
+      assertEquals(JSON.parse(JSON.stringify(report)).shapes.length, 3);
     } finally {
       gpu.destroy();
     }

@@ -104,6 +104,13 @@ measurements in `docs/research/`.
 - `@karume/runtime/tune`: `sweepCaseSetId` takes an optional candidate set and then returns the case-set version a
   sweep of that set records (the same value as without it for `quick` / `quick+` / `full`, an evaluation set's own
   table's for `k85` / `k88`).
+- `@karume/runtime/tune`: `runAttentionRouteBench` takes `onlineTiled` (default false), a measure-first candidate
+  for the online int8 attention (perf-ledger K-106): the kernel reading Vᵀ in its own key order, timed against
+  `online` in the same rounds (A B B A per round, the median of the per-round ratios), its producer timed beside
+  today's in the quantization line, and an identity block (both producers on the same f32 Vᵀ, both kernels on their
+  outputs, O and the scales compared word for word). The record is `karume-attention-bench/2`: `settings.onlineTiled`,
+  and per shape the optional `onlineTiled`, `tiledVsOnline`, `tiledVsOnlineWithProducer` and `quantization.tiledVt`.
+  No Session route uses the candidate.
 
 ### Changed
 

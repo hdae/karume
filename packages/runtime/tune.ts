@@ -164,8 +164,8 @@ export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
 /**
  * Times the s16 and online routes of a8 fused attention at given shapes (default: Wan2.2 TI2V-5B's
  * self- and cross-attention) on the caller's device and returns the record
- * (`karume-attention-bench/1`). Uses GPU timestamps when the device was acquired with
- * `gpuTiming: true`.
+ * (`karume-attention-bench/2`). Uses GPU timestamps when the device was acquired with
+ * `gpuTiming: true`. `onlineTiled` adds a measure-first candidate (perf-ledger K-106).
  */
 export {
   ATTENTION_BENCH_FORMAT,
