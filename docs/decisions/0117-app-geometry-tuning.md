@@ -718,3 +718,75 @@ This addendum records its two rulings on `./tune`.
   Both were built later the same day ([0148](0148-external-fusion-rules.md) addendum of 2026-11-11): the `/session-ab`
   page, whose arms are two loads of one Gemma 4 pipeline with and without a candidate rule and whose output is the
   generated token ids, and the opt-in Node run on 26B. Neither changes the runner, the record or the judge.
+
+## Addendum (2026-11-12) — attention-bench records as the derivation's second input (amends decisions 2, 3, 4 and 5)
+
+The maintainer approved adopting the online attention's tiled key axis (perf-ledger K-106) for Ampere on 2026-11-12,
+through the derivation and never by a hand edit of a generated table. A geometry profile now has one field that is a
+kernel variant rather than a geometry, `attentionOnline` (`{ keyWords: "tiled" }` or absent — ADR
+[0132](0132-online-int8-attention.md) addendum 2026-11-12), and this addendum records how the derivation decides it.
+
+- **What changed**: `deriveGeometryProfile` takes an optional second input, `DeriveGeometryProfileOptions.attentionBench`
+  — attention-bench records (`karume-attention-bench/2` from `runAttentionRouteBench` with `onlineTiled` and
+  `quantization`) as `AttentionBenchInput` (the record, a path, the SHA-256 of its bytes). They decide `attentionOnline`;
+  without them the table has neither the field nor its provenance, and every derivation is unchanged. `./tune` gains
+  `ATTENTION_BENCH_SHAPES`, the bench's default shapes and the set the records must cover: Wan2.2 TI2V-5B's three
+  attention shapes and MOSS-Image's 1024² attention (`moss-image-1024`, S = 4,159).
+- **The rule** (amends decision 3 for this field): adopted only when every shape of every record is identical (the
+  record's identity block: 0 differing O words and 0 differing scale words — both producers on the same f32 Vᵀ, both
+  kernels on their outputs) and every shape of `ATTENTION_BENCH_SHAPES` gains at least `minSpeedup` (×1.05 by default,
+  the geometry fields' threshold). The gain of one record at one shape is (N's kernel per node + N's producer) ÷ (tiled
+  kernel per node + tiled producer), each term the arm's minimum pass ÷ its repetitions, the kernel's scaled from the
+  measured window to the node's query rows; the records of one shape combine by the geometric mean of their gains.
+  Otherwise the field is absent (the form N gives).
+  - **Why minimums** and not the record's median of the paired rounds' ratios: a stall only adds time. In the RTX
+    3080 Ti record of 2026-11-11 at the cross-attention shape (`outputs/diag/attn-tiled-2026-11-11/run1/`), N's
+    kernel ran at about 6× its time in 5 of its 10 passes, so the median of the per-round ratios is 0.243 (a void
+    ×4.1 gain) while the ratio of minimums is 0.860. The minimum per dispatch is decision 3's statistic for the sweep.
+    A band filter like ADR [0115](0115-geometry-profiles.md) addendum decision 8's would drop clean data here: the
+    passes of a stall-free arm in those records spread up to ×1.15 around its minimum. The minimum assumes one clean
+    pass per arm; a record whose arm had none overstates the gain (the RTX 3080 Ti record of 2026-11-12 at the
+    cross-attention shape, run 1 — ADR 0132 addendum 2026-11-12).
+  - **Why kernel + producer**: it is what a Session pays per node, and the tiled producer is slower than N's (×1.26
+    per dispatch at 121f self-attention), so a kernel-only gain could hide a node that loses.
+  - **Material check**: an observation whose kernel or producer pair failed, or whose rounding-error bound
+    E = q ÷ min(A) + q ÷ min(B) on either pair exceeds `ROUNDING_ERROR_LIMIT` (1%), is dropped (q = Chrome's 100 µs
+    when every pass of the record is a multiple of it, else 0 — the bench record carries no quantization flag); a
+    shape left without an observation keeps the default. An observation that is not identical keeps the default
+    whatever the gains.
+- **Refused records** (fail loudly — measure again with the current runtime): another format, or
+  `settings.onlineTiled` / `settings.quantization` not both true; the wall clock (`timing.unit` must be `ns` or
+  `deno-raw-tick`); another adapter than the sweep records' four fields; one record given twice; a shape outside
+  `ATTENTION_BENCH_SHAPES` or with other dimensions; a kernel pair whose keys are not the current runtime's
+  `attentionOnlineI8a8Key` of N's form and of `tiled` (the record's dp4a variant, the online route's reduction form,
+  `bhsd`), or a producer pair whose keys are not `attentionValueQuantization`'s; a measured window other than the first
+  one production runs; and records that together leave a shape of the set unmeasured. Coverage is checked over all the
+  records given, because the Node bench writes one record per shape. The playground's `/attention-bench` file holds the
+  record under `bench`: the application passes that value (the runtime does not read the page's wrapper).
+- **What is written** (amends decision 4): `attentionOnline` exactly when adopted, and `provenance.attentionBench`
+  (`records`, `sha256` and `date` joined with `", "` in the order given, and `shapes`, the id of the bench's shape set:
+  FNV-1a 64 of the canonical JSON of `ATTENTION_BENCH_SHAPES`) whenever records are given. The verdict lines gain the
+  field's line, with each shape's combined gain and each record's. The kernel fingerprint gains, for a table carrying
+  the field only, the online attention's kernels the field chooses between: per bench shape, for N's form and `tiled`,
+  the Vᵀ producer and the first window's kernel in both dp4a variants × both reduction forms (`bhsd`). A table without
+  the field hashes exactly the lines it hashed before, so the three built-in tables keep their `provenance.kernels`.
+- **Matching** (amends decision 5): when a table has `provenance.attentionBench`, `geometryProfileMismatch` also
+  compares its `shapes` with the current runtime's shape-set id, after the case-set version.
+- **Reading and guarding**: `parseGeometryProfileJson` reads `attentionOnline` (`keyWords` must be `"tiled"`) and
+  `provenance.attentionBench` (four strings), unknown fields refused as everywhere; `assertGeometryProfile` checks both
+  shapes; the frozen copies of `BUILTIN_GEOMETRY_PROFILES` copy both.
+- **The bench**: the record format is unchanged. The `online` row times the route's form on the device and reports it
+  (`keyWords`); the candidate pair's A arm and the quantization line's `quantize_vt` stay N's form, so a record
+  measured on a table that chose `tiled` is still a derivation input. `WAN22_ATTENTION_SHAPES` stays exported; the
+  bench's default is now `ATTENTION_BENCH_SHAPES`.
+- **First use**: `nvidia-ampere`, derived from its two sweep records and eight Node records of 2026-11-12
+  (`outputs/diag/attn-tiled-2026-11-12/`), keeps N's form — `moss-image-1024` gains ×1.046 (×1.044 and ×1.048), under
+  ×1.05; Wan2.2's shapes gain ×1.072 / ×1.119 / ×1.687 — and every other field is identical to the checked-in table, so
+  it is not regenerated. The numbers are in ADR 0132 addendum 2026-11-12.
+- **Checks**: `packages/runtime/tests/tune_attention_profile_test.ts` on synthetic records whose keys the current
+  runtime builds (`tests/helpers/attention-bench-records.ts`): adoption and what is written, the fingerprint covering
+  the field (and a table matching the current runtime), a stall burst in three of five rounds still read at the
+  minimums' gain, records combined by geometric mean (×1.25 with ×0.97 adopts, ×1.10 with ×0.98 does not), one shape
+  under ×1.05, one shape not identical, a failed pair and a quantised record over the rounding bound, per-shape records
+  covering the set together, and every refusal above; `tune_profile_json_test.ts` (both fields read back and refused
+  when malformed); `tune_fingerprint_test.ts` (the built-in tables' fingerprints unchanged).

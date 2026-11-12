@@ -130,10 +130,37 @@ measurements in `docs/research/`.
   today's in the quantization line, and an identity block (both producers on the same f32 Vᵀ, both kernels on their
   outputs, O and the scales compared word for word). The record is `karume-attention-bench/2`: `settings.onlineTiled`,
   and per shape the optional `onlineTiled`, `tiledVsOnline`, `tiledVsOnlineWithProducer` and `quantization.tiledVt`.
-  No Session route uses the candidate.
+  A Session's online route uses the form only where the device's geometry profile chooses it (next entry); no
+  built-in table does.
+- `@karume/runtime`: `GeometryProfile.attentionOnline` (optional, `{ keyWords: "tiled" }`) lets a geometry profile
+  choose the online int8 attention's tiled key axis (perf-ledger K-106): a Session on that device then reads Vᵀ in
+  the kernel's key order at every N (key `…:ktile`, its producer `quantize_rows …:tile64`), bit-identical to the
+  other forms by check. `AttentionDeviceFacts.onlineKeyWords` carries the choice: `attentionDeviceFacts(gpu)` reads
+  it from the profile a Session on `gpu` runs with (the injected table, else the embedded one), and the memory
+  estimate takes it in `EstimateOptions.attentionDevice.onlineKeyWords` to size the quantised Vᵀ (up to 15 words
+  more per Vᵀ row; any value but `"tiled"` is refused). No built-in table carries the field, so nothing changes
+  without one (ADR 0132 addendum of 2026-11-12).
+- `@karume/runtime/tune`: `deriveGeometryProfile` takes attention-bench records as a second input,
+  `DeriveGeometryProfileOptions.attentionBench` (`AttentionBenchInput`: the record of `runAttentionRouteBench`
+  with `onlineTiled` and `quantization`, a path and its SHA-256), and decides `attentionOnline` from them: the
+  tiled key axis only when every shape of every record is identical and every shape of `ATTENTION_BENCH_SHAPES` gains
+  at least `minSpeedup` per node, kernel and producer together, from each arm's minimum pass, records of one shape
+  combined by geometric mean. Records measured with the wall clock, on another adapter than the sweeps, on other
+  kernels or shapes than the current runtime's, or that do not cover the set together are refused. The table gets
+  `provenance.attentionBench` (the records and the shape set's id) whenever records are given, and a table carrying
+  the field fingerprints the online attention's kernels too; `geometryProfileMismatch` compares the shape set's id,
+  and `parseGeometryProfileJson` reads both fields. Without records nothing changes, and the built-in tables'
+  fingerprints do not move (ADR 0117 addendum of 2026-11-12).
+- `@karume/runtime/tune`: `ATTENTION_BENCH_SHAPES`, the attention bench's default shapes and the set the
+  derivation requires: Wan2.2 TI2V-5B's three attention shapes and MOSS-Image's attention at 1024²
+  (`moss-image-1024`: 24 heads, D = 128, S = 4,159).
 
 ### Changed
 
+- `@karume/runtime/tune`: `runAttentionRouteBench` measures `ATTENTION_BENCH_SHAPES` by default (MOSS-Image's
+  1024² attention added to Wan2.2's three shapes). Its `online` row times the online kernel in the key-axis form the
+  route takes on the device and reports it (`keyWords`); with `onlineTiled`, the pair's first arm and the
+  quantization line's `quantize_vt` stay in the form N gives, whatever the device's profile chooses.
 - `@karume/runtime`: with `linearCompute: "a8"` the memory estimate counts an i8a8 linear's two node temporaries
   (its activations quantized to int8 and their per-token scales), which the Session allocates for the quantize and
   GEMM dispatches of every such linear; they were listed as unaccounted. `workspaceBytes` of graphs with i8- or
@@ -166,6 +193,8 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/runtime`: `attentionDeviceFacts` takes a `GpuContext`, since it reads the device's geometry profile;
+  a plain object with the features, WGSL language features, lane mapping and limits no longer type-checks.
 - `@karume/runtime`: `FusionCounts` gains optional keys for the rules of `SessionOptions.fusionRules`
   (`<namespace>/<rule>`, `number | undefined`) next to the built-in counters, which stay present. Code that walks
   every value of the record (`Object.values`, `Object.entries`) now gets `number | undefined`.

@@ -322,3 +322,88 @@ word). That condition is lifted for the online kernel only; ③PV's i8a8 kernel 
   fits there.
 - **Surface**: the public-surface snapshot gains the two names (`KARUME_SURFACE=write`); no
   behaviour of the runtime changes.
+
+## Addendum (2026-11-12) — the Vᵀ key-axis form is the route's, chosen per device by the geometry profile (perf-ledger K-106)
+
+The maintainer approved adopting the tiled key axis (`AttentionOnlineKeyWords` `tiled`, perf-ledger K-106) for Ampere
+on 2026-11-12, through the profile derivation and never by a hand edit of a generated table. The route now carries the
+form and a geometry profile can choose it; the measurement on the RTX 3080 Ti did not pass the derivation's rule at
+MOSS-Image's shape, so **no built-in table carries the field** and nothing runs differently on any machine today.
+
+- **What changed**: `attentionRoute`'s online variant returns `keyWords`, the key-axis form of the quantised Vᵀ: the
+  device facts' `onlineKeyWords` when the device's geometry profile chose one (`GeometryProfile.attentionOnline:
+  { keyWords: "tiled" }` — the one non-geometry field of a profile; ADR [0117](0117-app-geometry-tuning.md) addendum
+  2026-11-12 says how the derivation decides it), otherwise `attentionOnlineKeyWords(N)` (`whole` / `padded`, as
+  before). `AttentionDeviceFacts` gains `onlineKeyWords`. The public `attentionDeviceFacts(gpu)` moved to
+  `packages/runtime/src/runtime/attention-device.ts` and reads the field from the profile `sessionGeometryProfile(gpu)`
+  selects (the injected table, else the embedded one the adapter matches); Session construction passes the profile it
+  selected to the structural core `readAttentionDeviceFacts(gpu, profile)` of `attention-route.ts`, which stays free of
+  GPU imports for the estimate. So the Session, the memory estimate (`EstimateOptions.attentionDevice` accepts the field
+  and refuses any value but `"tiled"`), the attention bench and MOSS-Image's headroom check read one derivation, as the
+  addendum of 2026-10-28 intended.
+- **One decision point** (amends the addendum of 2026-10-27, where the form came from `attentionOnlineKeyWords`): the
+  online node (`buildAttentionOnline`), the Vᵀ producer (`attentionValueQuantization`, which now builds the tiled
+  `quantize_rows` — `…:tile64`, any N; its rows B·H·D are a multiple of 4 because the kernel takes `D % 64 == 0`), the
+  kernel's key, WGSL and uniform, and the size of the quantised Vᵀ (`attentionI8a8TempBytes(shape, keyWords)`:
+  `16 · ceil(N / 64)` words per column in the tiled form) take the form from the route. ③PV's i8a8 passes `whole` as
+  before. MUST: the tiled kernel reads whole key tiles without a bounds guard, so a `vq` sized in N's form is read past
+  its end — fault-injected, the Session test below went red. The fusion pass asks only whether the route is online, so
+  the absorbed permutes do not depend on the form.
+- **Absent field = before the addendum** (MUST): a profile without the field adds nothing to the facts and the route
+  returns N's form, so every key, WGSL, estimate and `provenance.kernels` is unchanged by construction. The default
+  table, `apple-metal-3`, `nvidia-ampere`, `nvidia-blackwell` and every injected table without the field keep the
+  whole / padded forms.
+- **Memory where a profile chooses the form**: per Vᵀ column `16 · ceil(N / 64) − ceil(N / 4)` more words (0 to 15).
+  At 24 heads × D = 128 (one node): Wan2.2 self-attention +49,152 B at 17f (N = 4,400) and 33f (N = 7,920), +147,456 B
+  at 121f (N = 27,280), 0 B for cross-attention (N = 512); MOSS-Image at 1024² 0 B for the positive branch (S = 4,159)
+  and +159,744 B for the negative one (S = 4,106).
+- **The measurement for Ampere** (RTX 3080 Ti, Node + Dawn / Vulkan, the opt-in bench `KARUME_ATTN_TILED_BENCH` of
+  `packages/e2e/tests/e2e_wan_ti2v_attention_tiled_bench_test.ts`, two runs of 5 rounds, one record per shape; records
+  in `outputs/diag/attn-tiled-2026-11-12/run1/` and `run2/`, untracked). The bench's shape set gained MOSS-Image's
+  1024² attention first (`moss-image-1024`: 24 heads, D = 128, S = 4,096 image tokens + the 63 tokens of the
+  fridge-note prompt = 4,159; pinned against the family by `packages/models/tests/moss_attention_bench_shape_test.ts`).
+  Every shape of both runs is identical (0 differing O words, 0 differing scale words). Kernel + producer per node from
+  each arm's minimum pass (the derivation's statistic), run 1 / run 2 → geometric mean, and the two pairs' ratios of
+  minimums (below 1 = the tiled form faster):
+
+  | Shape | Gain run 1 | Gain run 2 | Combined | Kernel tiled ÷ N's, run 1 / 2 | Producer tiled ÷ N's, run 1 / 2 |
+  | --- | --- | --- | --- | --- | --- |
+  | `wan22-self-33f` | ×1.090 | ×1.054 | ×1.072 | 0.916 / 0.948 | 1.037 / 1.037 |
+  | `wan22-self-121f` | ×1.098 | ×1.140 | ×1.119 | 0.910 / 0.876 | 1.264 / 1.263 |
+  | `wan22-cross-121f` | ×2.606 | ×1.092 | ×1.687 | 0.383 / 0.915 | 1.050 / 1.046 |
+  | `moss-image-1024` | ×1.044 | ×1.048 | ×1.046 | 0.956 / 0.952 | 1.091 / 1.070 |
+
+  The derivation of `nvidia-ampere` from its two sweep records and these eight records keeps N's form
+  (`moss-image-1024: ×1.046 < ×1.050`), and every other field comes out identical to the checked-in table; the table is
+  therefore not regenerated (the untracked generator stays in `outputs/diag/attn-tiled-2026-11-12/`). Run 1's
+  cross-attention value is not a clean reading: N's arm ran at about 30 ms per dispatch in its first three passes and
+  about 10.8 ms in every other one, while the tiled arm ran at 4.1–4.3 ms and the record's own online row measured N's
+  kernel at 4.66 ms just before the pair; no pass of that arm was clean, so its minimum overstates the gain. It does not
+  move the verdict, which the MOSS-Image shape decides.
+- **The RTX 5070 Ti** (Chrome 157 / D3D12, `outputs/bench-browser/attention-bench_2026-11-12T05-27-48.json`, untracked)
+  keeps the default under the same rule: its three Wan2.2 shapes gain ×1.012 / ×1.013 / ×1.019 (kernel + producer per
+  node, minimums), under ×1.05. It predates the MOSS-Image shape, so the derivation would refuse it as an input for not
+  covering the bench's set. `nvidia-blackwell` and `apple-metal-3` are not regenerated.
+- **Evidence for a table that chooses the form** (when one does): the forms are bit-identical by measured behaviour,
+  not by construction (the producers compute `x / s` in two shaders; WGSL allows division 2.5 ULP) — checked by
+  `checkAttentionOnlineTiled` of `packages/kernel-checks` (the GPU test `gpu_attention_online_tiled_test.ts` and the
+  `/kernel-check` page, both kept) and, end to end, by the sha rows of the adapter's lanes. A table matches an adapter
+  class (vendor / architecture), so its choice would also reach backends where no identity check ran (for Ampere,
+  Chrome on D3D12 — no such device at hand); the run-time canary of [0147](0147-numerics-and-kernel-adoption.md)
+  decision 9 (pending) is what would cover them. The bench times the `bhsd` output layout; production Wan writes O
+  token-major (`bshd`, only the store address differs).
+- **Tests whose specification changed**: the route literals of `attention_route_test.ts`,
+  `attention_head_major_copies_test.ts` and `packages/models/tests/wan_attention_route_test.ts` gain `keyWords`;
+  `gpu_attention_online_tiled_test.ts` pinned that the production producer refuses `tiled` — it now pins that the
+  producer builds the tiled launch at any N and still refuses whole / padded for an N of the other form; the census
+  checks of `gpu_attention_online_session_test.ts`, `gpu_attention_permute_fusion_test.ts` and
+  `packages/e2e/tests/e2e_moss_ab_test.ts` take the expected form from the route instead of N % 4 (on a table without
+  the field the expected values are the old ones, with the whole form now asserted too);
+  `gpu_attention_online_i8a8_test.ts` passes the form to `attentionI8a8TempBytes`.
+- **Checks**: an injected copy of this device's table with and without the field —
+  `gpu_attention_online_session_test.ts` case (vi) (`…:ktile` with the tiled producer at N = 200, 203, 65, 8 and
+  4,106, Uint32-identical to the table without the field and to the raw kernel in N's form) and
+  `gpu_estimate_test.ts` (estimate = slot table at N = 203, 68 and 8, where the sizes differ); `estimate_test.ts` (the
+  CPU estimate with the tiled form, 19,072 B against 11,904 B at N = 8). Fault injections, each turning a test red:
+  `vq` sized in N's form on the tiled route, the tiled kernel given N's producer, the facts ignoring the profile's
+  field, the estimate ignoring the route's form.
