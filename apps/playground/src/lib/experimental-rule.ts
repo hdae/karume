@@ -1,7 +1,7 @@
 /**
- * The "Experimental fusion rule" control of the image and video pages (`/moss-image`, `/wan22`,
- * `/anima`): one candidate rule of `@karume/candidate-rules`, off by default, that a run passes
- * through its pipeline's experimental `fusionRules` option. The pipeline opens with the rule fixed
+ * The "Experimental fusion rule" control of the video and image pages `/wan22` and `/anima`: one
+ * candidate rule of `@karume/candidate-rules`, off by default, that a run passes through its
+ * pipeline's experimental `fusionRules` option. The pipeline opens with the rule fixed
  * (a Session takes its rules at construction), so the page keys its held pipeline by the rule in
  * use as well. Pure, so `vp test` covers it.
  *
@@ -10,12 +10,7 @@
  * time only, never the output.
  */
 
-import {
-  EW_CHAIN_RULE,
-  EW_CHAIN_RULE_NAME,
-  vaeRmsSiluRule,
-  vaeRmsSiluRuleName,
-} from "@karume/candidate-rules";
+import { vaeRmsSiluRule, vaeRmsSiluRuleName } from "@karume/candidate-rules";
 import type { FusionRule } from "@karume/runtime/kernel";
 
 /** One candidate a page offers. */
@@ -28,14 +23,6 @@ export type ExperimentalRule = {
   readonly metalRefusal?: string;
   /** Builds the rule (called once per pipeline opening). */
   readonly build: () => FusionRule;
-};
-
-/** `/moss-image`: the elementwise chains of the DiT (perf-ledger F-13). */
-export const EW_CHAIN_EXPERIMENT: ExperimentalRule = {
-  name: EW_CHAIN_RULE_NAME,
-  folds:
-    "the runs of f32 elementwise nodes of dit_text, the DiT pair and the VAE in one dispatch each",
-  build: () => EW_CHAIN_RULE,
 };
 
 /** `/wan22` and `/anima`: the VAE's channel RMS norm with its SiLU (perf-ledger V-10). */

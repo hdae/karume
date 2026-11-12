@@ -54,7 +54,7 @@ describe("assembleRecord", () => {
   it("starts with the format, the page and the environment", () => {
     const record = assembleRecord(observation());
     expect(record.format).toBe(RECORD_FORMAT);
-    expect(record.format).toBe("karume-playground-moss-image/1");
+    expect(record.format).toBe("karume-playground-moss-image/2");
     expect(record.page).toBe("moss-image");
     expect(record.adapter).toEqual(environment.adapter);
     expect(record.device).toEqual(environment.device);
@@ -135,18 +135,8 @@ describe("assembleRecord", () => {
     const record = assembleRecord(observation());
     expect(JSON.parse(JSON.stringify(record))).toEqual(record);
   });
-});
 
-describe("assembleRecord: the experimental fusion rule", () => {
-  it("names the rule the run's pipeline was opened with", () => {
-    const record = assembleRecord(observation({ fusionRule: "candidate/ew_chain" }));
-    expect(record.experimentalFusionRule).toBe("candidate/ew_chain");
-  });
-
-  it("is null when no rule ran (left out or undefined)", () => {
-    expect(assembleRecord(observation()).experimentalFusionRule).toBeNull();
-    expect(
-      assembleRecord(observation({ fusionRule: undefined })).experimentalFusionRule,
-    ).toBeNull();
+  it("names no fusion rule (the page has no switch for one)", () => {
+    expect(Object.hasOwn(assembleRecord(observation()), "experimentalFusionRule")).toBe(false);
   });
 });

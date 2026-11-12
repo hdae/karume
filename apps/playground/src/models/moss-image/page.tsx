@@ -2,8 +2,6 @@
  * MOSS-Image text → image: pick a preset and a source, generate one image on the page's GPU from
  * the distribution `karume-moss-image`, and save a record of the run (request, wall times, the sha256
  * of the RGBA output). `generate` reports no stage events, so the status shows the elapsed time only.
- * The experimental fusion rule control (off by default) opens the pipeline with `candidate/ew_chain`
- * (`@/lib/experimental-rule`); the result and the record name the rule that ran.
  */
 
 import { imageToRgba } from "@karume/models/moss";
@@ -11,7 +9,6 @@ import type { AcquireGpuOptions } from "@karume/runtime";
 import { useState } from "react";
 
 import { ErrorAlert, thrownText } from "@/components/error-alert";
-import { ExperimentalRuleSwitch } from "@/components/experimental-rule-switch";
 import { Field } from "@/components/field";
 import { KeyValueTable } from "@/components/key-value-table";
 import { MountBadges } from "@/components/mount-badges";
@@ -33,12 +30,6 @@ import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
-import {
-  EW_CHAIN_EXPERIMENT,
-  experimentalRuleInUse,
-  experimentalRuleLabel,
-  runsOnMetal,
-} from "@/lib/experimental-rule";
 import type { RgbaPixels } from "@/lib/image";
 import { manifestPresets } from "@/lib/presets";
 import { sha256Hex } from "@/lib/record";
@@ -99,11 +90,9 @@ export const MossImagePage = () => {
 
   const { state: gpuState, lease, reacquire, track } = useGpu(GPU_OPTIONS);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
-  const metal = runsOnMetal(navigator.userAgent, gpu?.adapterInfo.architecture ?? "");
-  const fusionRule = experimentalRuleInUse(EW_CHAIN_EXPERIMENT, form.experimentalRule, metal);
 
   const { held, releaseError, open, release } = useMossPipeline(
-    { gpu, source, model, quant, fusionRule },
+    { gpu, source, model, quant },
     track,
   );
 
@@ -134,7 +123,7 @@ export const MossImagePage = () => {
     ) {
       return;
     }
-    const spec = { gpu, source, model, quant, fusionRule };
+    const spec = { gpu, source, model, quant };
     const directory = status?.directory ?? "";
     const quantLabel = presets.presets.find(({ name }) => name === quant)?.label ?? quant;
     const requestForm = form;
@@ -159,7 +148,7 @@ export const MossImagePage = () => {
       signal.throwIfAborted();
       report({
         stage: "Generating",
-        note: `text encoder → text refiner → DiT → VAE (no per-stage progress) · experimental rule: ${experimentalRuleLabel(fusionRule)}`,
+        note: "text encoder → text refiner → DiT → VAE (no per-stage progress)",
         cancellable: false,
         cancelNote: `Cancel is not available while generating: ${GENERATE_NOTE}`,
       });
@@ -182,7 +171,6 @@ export const MossImagePage = () => {
         quant,
         quantLabel,
         defaultQuant: presets.defaultQuant,
-        fusionRule,
         request: parts,
         effective,
         openMilliseconds: opened.openMilliseconds,
@@ -415,16 +403,6 @@ export const MossImagePage = () => {
                 </Button>
               </div>
             </Field>
-            <div className="sm:col-span-2">
-              <ExperimentalRuleSwitch
-                id="moss-image-experimental-rule"
-                rule={EW_CHAIN_EXPERIMENT}
-                checked={form.experimentalRule}
-                metal={metal}
-                onCheckedChange={(checked) => update({ experimentalRule: checked })}
-                disabled={disabled}
-              />
-            </div>
             <div className="flex gap-3 sm:col-span-2">
               <Button id="moss-image-run" onClick={run} disabled={!canRun}>
                 Run
@@ -451,7 +429,7 @@ export const MossImagePage = () => {
               "Pipeline",
               held === undefined
                 ? "not open (opens on Run)"
-                : `${held.model} · ${held.quant} · ${held.source} · rule ${experimentalRuleLabel(held.fusionRule)} (${held.openSeconds.toFixed(1)} s to open)`,
+                : `${held.model} · ${held.quant} · ${held.source} (${held.openSeconds.toFixed(1)} s to open)`,
             ],
           ]}
         >
@@ -483,8 +461,7 @@ export const MossImagePage = () => {
             <CardTitle>Result</CardTitle>
             <CardDescription>
               {result.record.output.width}×{result.record.output.height} ·{" "}
-              {result.record.preset.quant} · {result.record.generateSeconds} s · experimental rule:{" "}
-              {experimentalRuleLabel(result.record.experimentalFusionRule)}
+              {result.record.preset.quant} · {result.record.generateSeconds} s
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -534,7 +511,6 @@ const RecordTable = ({ record }: { record: MossImageRecord }) => (
       ],
       ["Model", `${record.model.name}${record.model.isDefault ? " (default)" : ""}`],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
-      ["Experimental rule", experimentalRuleLabel(record.experimentalFusionRule)],
       [
         "Size",
         `${String(record.effective.width ?? "—")}×${String(record.effective.height ?? "—")}`,

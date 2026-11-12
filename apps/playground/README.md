@@ -44,10 +44,9 @@ the runtime's node GPU tests ([the kernel-check page](#the-kernel-check-page)). 
 import it, and nothing here imports runtime internals directly. The session A/B page imports
 `@karume/candidate-rules`, another private workspace package: candidate fusion rules written against
 `@karume/runtime/kernel` alone, which the page passes to the gemma pipeline or to a MOSS-Image DiT
-Session to measure them ([the session A/B page](#the-session-ab-page)). The `/moss-image`, `/wan22`
-and `/anima` pages import it too, through `src/lib/experimental-rule.ts`: their **Experimental fusion
-rule** control (off by default) passes one candidate through the pipeline's experimental
-`fusionRules`.
+Session to measure them ([the session A/B page](#the-session-ab-page)). The `/wan22` and `/anima`
+pages import it too, through `src/lib/experimental-rule.ts`: their **Experimental fusion rule**
+control (off by default) passes one candidate through the pipeline's experimental `fusionRules`.
 
 ## Run
 
@@ -426,14 +425,7 @@ generates (the page is left, the GPU is acquired again) drops its image when `ge
 The result card shows the image (`imageToRgba` into a canvas; **Download PNG** — lossless, from the
 same RGBA bytes the sha256 covers) and a summary of the record.
 
-**Experimental fusion rule.** Off by default. On, the pipeline opens with the candidate rule
-`candidate/ew_chain` of `@karume/candidate-rules` (`src/lib/experimental-rule.ts`), passed through
-the pipeline's experimental `fusionRules` to `dit_text`, the DiT pair and the VAE decoder (the text
-encoder gets none). A Session takes its rules at construction, so switching it opens the pipeline
-again. The rule is bit-identical to the unfused plan where it was checked: only the times should
-move. The status, the result and the record (`experimentalFusionRule`) name the rule that ran.
-
-### The record (`format: "karume-playground-moss-image/1"`)
+### The record (`format: "karume-playground-moss-image/2"`)
 
 | Field | What |
 | --- | --- |
@@ -442,7 +434,6 @@ move. The status, the result and the record (`experimentalFusionRule`) name the 
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
 | `model` | `name`, `isDefault` (the manifest's `defaultModel`) |
 | `preset` | `quant`, `label`, `isDefault` |
-| `experimentalFusionRule` | the experimental fusion rule the pipeline was opened with (`candidate/...`), or `null` when the control was off |
 | `request` | exactly the fields sent to `generate` (`prompt`, `seed`, plus the fields the form set: `negativePrompt`, `width`, `height`, `steps`, `guidance`, `shift`) |
 | `effective` | the values the run used once the manifest's defaults filled the rest: `width`, `height`, `steps`, `guidance`, `shift`, `negativePrompt` (`null` when not used) |
 | `pipeline` | `reused` (an earlier run's pipeline ran this one) and `openSeconds` (`null` when reused) |

@@ -1,8 +1,8 @@
-import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
+import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  EW_CHAIN_EXPERIMENT,
+  type ExperimentalRule,
   experimentalRuleInUse,
   experimentalRuleLabel,
   experimentalRuleOptions,
@@ -11,7 +11,13 @@ import {
   VAE_RMS_SILU_EXPERIMENT,
 } from "../src/lib/experimental-rule.ts";
 import { initialForm as animaInitialForm } from "../src/models/anima/settings.ts";
-import { initialForm as mossInitialForm } from "../src/models/moss-image/settings.ts";
+
+/** A rule with no Metal refusal (no page offers one now), for the branch where Metal may run it. */
+const NO_REFUSAL: ExperimentalRule = {
+  name: GELU_MUL_RULE_NAME,
+  folds: "a test rule",
+  build: () => GELU_MUL_RULE,
+};
 
 const CHROME_WINDOWS =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
@@ -47,8 +53,8 @@ describe("the experimental rule control", () => {
     expect(experimentalRuleRefusal(VAE_RMS_SILU_EXPERIMENT, false)).toBeUndefined();
   });
 
-  it("the DiT rule has no Metal refusal", () => {
-    expect(experimentalRuleRefusal(EW_CHAIN_EXPERIMENT, true)).toBeUndefined();
+  it("a rule without a Metal refusal is not refused on Metal", () => {
+    expect(experimentalRuleRefusal(NO_REFUSAL, true)).toBeUndefined();
   });
 
   it("names the rule in use only when the control is on and the rule may run here", () => {
@@ -57,37 +63,38 @@ describe("the experimental rule control", () => {
     );
     expect(experimentalRuleInUse(VAE_RMS_SILU_EXPERIMENT, true, true)).toBeUndefined();
     expect(experimentalRuleInUse(VAE_RMS_SILU_EXPERIMENT, false, false)).toBeUndefined();
-    expect(experimentalRuleInUse(EW_CHAIN_EXPERIMENT, true, true)).toBe(EW_CHAIN_RULE_NAME);
+    expect(experimentalRuleInUse(NO_REFUSAL, true, true)).toBe(GELU_MUL_RULE_NAME);
   });
 
   it("without a rule in use the pipeline options carry no fusionRules key at all", () => {
-    const options = experimentalRuleOptions(EW_CHAIN_EXPERIMENT, undefined);
+    const options = experimentalRuleOptions(VAE_RMS_SILU_EXPERIMENT, undefined);
     expect(options).toEqual({});
     expect(Object.hasOwn(options, "fusionRules")).toBe(false);
   });
 
   it("with the rule in use the options carry exactly that rule", () => {
-    expect(experimentalRuleOptions(EW_CHAIN_EXPERIMENT, EW_CHAIN_RULE_NAME).fusionRules).toEqual([
-      EW_CHAIN_RULE,
+    expect(experimentalRuleOptions(NO_REFUSAL, GELU_MUL_RULE_NAME).fusionRules).toEqual([
+      GELU_MUL_RULE,
     ]);
     const vae = experimentalRuleOptions(VAE_RMS_SILU_EXPERIMENT, "candidate/vae_rms_silu_g8");
     expect(vae.fusionRules?.map((rule) => rule.name)).toEqual(["candidate/vae_rms_silu_g8"]);
   });
 
   it("a name the page does not offer fails loudly", () => {
-    expect(() => experimentalRuleOptions(EW_CHAIN_EXPERIMENT, "candidate/vae_rms_silu_g8")).toThrow(
-      /offers candidate\/ew_chain/,
+    expect(() => experimentalRuleOptions(VAE_RMS_SILU_EXPERIMENT, GELU_MUL_RULE_NAME)).toThrow(
+      /offers candidate\/vae_rms_silu_g8/,
     );
   });
 
   it("labels the rule a record names, and none", () => {
-    expect(experimentalRuleLabel(EW_CHAIN_RULE_NAME)).toBe("candidate/ew_chain (experimental)");
+    expect(experimentalRuleLabel("candidate/vae_rms_silu_g8")).toBe(
+      "candidate/vae_rms_silu_g8 (experimental)",
+    );
     expect(experimentalRuleLabel(null)).toBe("none");
     expect(experimentalRuleLabel(undefined)).toBe("none");
   });
 
-  it("is off in the initial forms of /moss-image and /anima", () => {
-    expect(mossInitialForm("a red fox").experimentalRule).toBe(false);
+  it("is off in the initial form of /anima", () => {
     expect(animaInitialForm("a red fox").experimentalRule).toBe(false);
   });
 });

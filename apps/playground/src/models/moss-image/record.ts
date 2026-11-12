@@ -13,8 +13,11 @@ import { seconds, type SourceRecord, sourceRecord } from "@/lib/record";
 
 import { type EffectiveRequest, MOSS_MOUNT, type MossRequestParts } from "./settings";
 
-/** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const RECORD_FORMAT = "karume-playground-moss-image/1";
+/**
+ * The version of the saved record; bump it when a field changes meaning or goes away (`/2`: the
+ * field `experimentalFusionRule` went away with the page's switch).
+ */
+export const RECORD_FORMAT = "karume-playground-moss-image/2";
 
 /** The saved record of one run (JSON; the page shows a summary of it). */
 export type MossImageRecord = RecordEnvironment & {
@@ -29,11 +32,6 @@ export type MossImageRecord = RecordEnvironment & {
   readonly source: SourceRecord;
   readonly model: { readonly name: string; readonly isDefault: boolean };
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
-  /**
-   * The experimental fusion rule the pipeline was opened with (`fusionRules`), or `null` when none
-   * ran: the times of the record are those of that plan.
-   */
-  readonly experimentalFusionRule: string | null;
   /** The fields sent to `generate` (a field left out takes the manifest's default). */
   readonly request: MossRequestParts;
   /** The values the run used once the manifest's defaults filled the rest. */
@@ -69,8 +67,6 @@ export type RunObservation = {
   readonly quant: string;
   readonly quantLabel: string;
   readonly defaultQuant: string;
-  /** The experimental rule the run's pipeline was opened with (absent or `undefined` = none). */
-  readonly fusionRule?: string | undefined;
   readonly request: MossRequestParts;
   readonly effective: EffectiveRequest;
   readonly openMilliseconds: number | undefined;
@@ -90,7 +86,6 @@ export const assembleRecord = (run: RunObservation): MossImageRecord => ({
   source: sourceRecord(run.source),
   model: { name: run.model, isDefault: run.model === run.defaultModel },
   preset: { quant: run.quant, label: run.quantLabel, isDefault: run.quant === run.defaultQuant },
-  experimentalFusionRule: run.fusionRule ?? null,
   request: run.request,
   effective: run.effective,
   pipeline: {
