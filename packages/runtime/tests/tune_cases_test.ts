@@ -212,6 +212,10 @@ describe("shape table", () => {
           assertEquals(sweepCase.k % 4, 0, sweepCase.id);
           assert(sweepCase.k <= LINEAR_I8A8_MAX_K, sweepCase.id);
           assertEquals(sweepCase.n % 4, 0, sweepCase.id);
+          // The vec4 fill's condition (k % 16 == 0 — linearI8a8UsesVecFill): the family's `full`
+          // grid holds skeleton candidates, and on a case with another K a skeleton candidate would
+          // silently measure the word fill under the skeleton's name
+          assertEquals(sweepCase.k % 16, 0, sweepCase.id);
           break;
         case "attention":
           assert(gemmUsesVec4(sweepCase.d, sweepCase.n), sweepCase.id);
