@@ -2313,6 +2313,16 @@ const generatedFamilies = (
     }
     const carried = carry?.families.find((entry) => entry.family === family);
     if (carried !== undefined) {
+      // MUST: the carried entry vouches for the fields actually written. carryOver checked the entry
+      // against `base`'s fields of the family through the family's cases, but withBaseFields copies
+      // them by its own field → family switch, a second encoding beside PROFILE_FIELD_FAMILIES; if
+      // the two disagree, the table would carry an entry for fields it does not hold (an
+      // implementation error, not bad input)
+      if (carried.entry.kernels !== kernels) {
+        throw new Error(
+          `Generated table '${table.id}': the entry of family ${family} carried over from the base has kernel fingerprint ${carried.entry.kernels}, but the fields written for it build ${kernels} (an implementation error: the carried fields and the family map disagree)`,
+        );
+      }
       families[family] = carried.entry;
       continue;
     }
