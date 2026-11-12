@@ -3,16 +3,19 @@
  *
  * A static table of tile geometries for adapter `apple / metal-3 / Apple M2`, written from the
  * sweep records by the `profile` command of tools/geometry-sweep (removed in 0.15) (perf-ledger
- * K-71). The runtime only selects this table by the adapter's `match` (exact match on vendor /
- * architecture / description).
+ * K-71); its `i8a8.linear` part was regenerated on 2026-11-12 with `deriveGeometryProfile` of the
+ * public surface `@karume/runtime/tune` (the last paragraph of this comment). The runtime only
+ * selects this table by the adapter's `match` (exact match on vendor / architecture / description).
  * Nothing is measured at run time (no autotuning — the MUST NOT of the ADR 0022 addendum of
  * 2026-08-10 (later), reaffirmed by ADR 0115 decision 8 and ADR 0117 decision 9). To change a value, take the
  * sweep again and regenerate the table.
  *
- * Regeneration: the generator (tools/geometry-sweep) was removed in 0.15 and is to be rebuilt as a
- * browser application (ADR 0127 decision 5). Until then this file is maintained by hand, and the data
- * must not be edited without a new sweep. The command that generated it (from the repository root;
- * adding `--check` only checked that regeneration is byte-identical):
+ * Regeneration: the generator (tools/geometry-sweep) was removed in 0.15 (ADR 0127 decision 5); a
+ * table is now derived from sweep records with `deriveGeometryProfile` (ADR 0117 decision 2), which
+ * regenerated the `i8a8.linear` part on 2026-11-12. Everything else keeps the text and the data the
+ * removed CLI wrote, and the data must not be edited without a new sweep. The command that first
+ * generated it (from the repository root; adding `--check` only checked that regeneration is
+ * byte-identical):
  *
  *   deno run -A tools/geometry-sweep/main.ts profile \
  *     --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json \
