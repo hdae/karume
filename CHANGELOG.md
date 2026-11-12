@@ -59,6 +59,14 @@ measurements in `docs/research/`.
   not get them. It exists to measure a candidate rule on a real decode with the session A/B and may change or go away
   in a minor version. The rule's author owns the evidence for its numbers (ADR 0148). `estimateSessionMemory` plans
   the target and the drafter with the same rules.
+- `@karume/models`: `fusionRules` on `moss.PipelineOptions`, `wan.PipelineOptions` (both the Wan2.1 `Pipeline` and the
+  Wan2.2 `Ti2vPipeline`) and `anima.PipelineOptions`, **experimental**: fusion rules built with `defineRule`, passed
+  unchanged as `SessionOptions.fusionRules` to the Sessions of the image and video graphs — MOSS-Image's `dit_text`,
+  `dit`, `dit_skip22` and three VAE decoder graphs; Wan's DiT, VAE decoder chunk graphs (the tile-32 lenders and
+  borrowers included) and Wan2.2's VAE encoder; anima's DiT and VAE decoder. The text encoders' Sessions do not get
+  them. It exists to measure a candidate rule on a whole generation and may change or go away in a minor version; no
+  rule is passed by default. The rule's author owns the evidence for its numbers (ADR 0148). MOSS-Image's headroom
+  checks and anima's VAE estimate plan those graphs with the same rules; Wan has no memory estimate.
 - `@karume/runtime`: `I8a8Geometry.skeleton`, an optional field of the i8a8 geometries of a geometry profile
   (`"vec4"`, perf-ledger K-85): the pack loop of the integer GEMM emitted unrolled and, in the i8a8 linear with i8
   weights where `k % 16 == 0`, the shared tiles filled one `vec4<u32>` of global memory per item. The integers

@@ -118,6 +118,11 @@ import {
   sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
+import {
+  fusionRulesEstimateOptions,
+  type PipelineFusionRules,
+  withFusionRules,
+} from "../session/fusion-rules.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
@@ -444,6 +449,23 @@ export type PipelineOptions = {
    * generate). An unknown spelling gives `ModelInputError` before the weights are fetched.
    */
   readonly residency?: Residency;
+  /**
+   * **Experimental**: fusion rules written outside the runtime (`defineRule` of
+   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
+   * the image graphs: the DiT (`transformer`, resident or per stage) and the VAE decoder. The text
+   * stages (`text_encoder`, `text_conditioner`) do not get them. Absent = no rule: the Sessions
+   * are built as without the option.
+   *
+   * It exists to measure a candidate rule on a whole generation (with and without the rule); it may
+   * change or go away in a minor version. Passing a rule is the opt-in, and the rule's author owns
+   * the evidence for its numbers (ADR 0148): the runtime does not check them. The VAE stage's
+   * memory estimate (the pre-emptive eviction before the VAE stage, with a resident DiT) plans the
+   * VAE with the same rules (with the device's `maxComputeWorkgroupsPerDimension`, which a rule's
+   * matcher may read). A value the runtime refuses fails when the first such Session is built.
+   *
+   * DECIDED: docs/decisions/0148-external-fusion-rules.md
+   */
+  readonly fusionRules?: PipelineFusionRules;
 };
 
 /**
@@ -562,12 +584,15 @@ const stageNeed = (
   state: AnimaState,
   model: ModelComponent,
   bindings: Record<string, number>,
+  fusionRules?: PipelineFusionRules,
 ): number =>
   stageMemoryNeed(
     model.estimate({
       maxStorageBufferBindingSize: state.gpu.limits.maxStorageBufferBindingSize,
       maxBufferSize: state.gpu.limits.maxBufferSize,
       bindings,
+      // MUST: the rules the stage's Session gets (the estimate plans the fusion it runs).
+      ...fusionRulesEstimateOptions(fusionRules, state.gpu.limits),
     }),
     model.maxPartBytes,
   );
@@ -598,7 +623,8 @@ const textStagesNeed = (
  * Bytes vae_decoder needs on top of the resident DiT, used by the measurement before the VAE stage
  * (after the DiT stage) (static shape — no bindings).
  */
-const vaeStageNeed = (state: AnimaState): number => stageNeed(state, state.vaeDecoder, {});
+const vaeStageNeed = (state: AnimaState): number =>
+  stageNeed(state, state.vaeDecoder, {}, state.fusionRules);
 
 /**
  * Decides the negative prompt actually passed to the uncond side (the entry of
@@ -832,6 +858,18 @@ const withSession = async <T>(
 };
 
 /**
+ * The Session options of a stage other than the DiT: none of the quant's knobs (the text stages /
+ * VAE run as the quant declares — f32); the VAE alone takes the experimental `fusionRules`
+ * ({@link PipelineOptions.fusionRules}), the text stages never.
+ *
+ * NOTE: `export` is for the host test (not exposed on `mod.ts` / the subpath surface — ADR 0008).
+ */
+export const animaStageSessionOptions = (
+  component: Exclude<RunComponent, "transformer">,
+  fusionRules: PipelineFusionRules,
+): SessionOptions => (component === "vae_decoder" ? withFusionRules({}, fusionRules) : {});
+
+/**
  * Binds the component name for the observation hook
  * ({@link PipelineOptions.onRunDiagnostics}).
  */
@@ -859,6 +897,11 @@ type AnimaState = {
   readonly vaeDecoder: ModelComponent;
   /** Effective residency when a generate does not override it in the request (checked). */
   readonly residency: Residency;
+  /**
+   * Experimental ({@link PipelineOptions.fusionRules}): the DiT's and the VAE's Sessions (and the
+   * VAE's estimate) get them; the text stages' do not. Absent = no rule anywhere.
+   */
+  readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
@@ -976,6 +1019,7 @@ export class Pipeline {
         ? {}
         : { attentionScoreStorage: options.attentionScoreStorage }),
       ...(options.residency === undefined ? {} : { residency: options.residency }),
+      ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
     };
     // The family checks run in the admission hook (before the weight parts are fetched —
     // `src/hub/components.ts`).
@@ -1168,6 +1212,8 @@ export class Pipeline {
         ropeBase,
         vaeDecoder,
         residency,
+        // Experimental (a measurement opt-in): the DiT and VAE Sessions get the rules.
+        ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -1306,7 +1352,8 @@ export class Pipeline {
      * Runs one stage other than the DiT (`stage` events wrap Session construction and release — if
      * the stage fails midway, `end` is not emitted). An OOM while a resident DiT exists evicts it
      * and re-runs the stage once (`TransformerResidency.runStage`). The text stages / VAE do not
-     * take the quant's session (`{}`).
+     * take the quant's session; the VAE alone takes the experimental `fusionRules`
+     * ({@link animaStageSessionOptions}).
      */
     const withStage = async <T>(
       component: Exclude<RunComponent, "transformer">,
@@ -1315,7 +1362,14 @@ export class Pipeline {
     ): Promise<T> => {
       await emit({ kind: "stage", component, at: "start" });
       const result = await this.#residency.runStage(
-        () => withSession(state.gpu, model, {}, observer(state, component), body),
+        () =>
+          withSession(
+            state.gpu,
+            model,
+            animaStageSessionOptions(component, state.fusionRules),
+            observer(state, component),
+            body,
+          ),
         notifyResidency,
       );
       await emit({ kind: "stage", component, at: "end" });
@@ -1381,7 +1435,11 @@ export class Pipeline {
       await emit({ kind: "stage", component: "transformer", at: "start" });
       const { latents, latentShape } = await this.#residency.runTransformer({
         effective: residency,
-        open: () => state.transformer.createSession(state.gpu, state.sessionOptions),
+        open: () =>
+          state.transformer.createSession(
+            state.gpu,
+            withFusionRules(state.sessionOptions, state.fusionRules),
+          ),
         notify: notifyResidency,
         body: async (session) => {
           const model = state.transformer;

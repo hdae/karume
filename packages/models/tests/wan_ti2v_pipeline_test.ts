@@ -32,6 +32,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { describe, it } from "vite-plus/test";
+import { vaeRmsSiluRule } from "@karume/candidate-rules";
 import { type DistributionSource, localDirectory, type Manifest, parseManifest } from "@karume/hub";
 import type { EnqueueOptions, RunInput, RunInputs, SessionOptions, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -774,9 +775,13 @@ const mockTi2v = (
       readonly sessionOptions?: SessionOptions;
       readonly failCreate?: "vae_decoder_first_32" | "vae_decoder_next_32";
     };
+    /** The state's experimental `fusionRules` (absent = the field does not exist). */
+    readonly fusionRules?: SessionOptions["fusionRules"];
   } = {},
 ) => {
   const log: string[] = [];
+  /** Every `createSession` of every stand-in, with the options object it received (in call order). */
+  const created: { readonly component: string; readonly options: unknown }[] = [];
   const ditRuns: Record<string, Tensor>[] = [];
   /** The enqueues of the three encoder Sessions (in issue order). */
   const encoderEnqueues: EncoderEnqueue[] = [];
@@ -797,7 +802,8 @@ const mockTi2v = (
     },
   });
   const vaeSession = (name: string) => ({
-    createSession: () => {
+    createSession: (_gpu: unknown, sessionOptions: unknown) => {
+      created.push({ component: name, options: sessionOptions });
       log.push(`create:${name}`);
       return Promise.resolve({
         enqueue: (inputs: Record<string, Tensor>) => {
@@ -811,6 +817,7 @@ const mockTi2v = (
   });
   const encoderSession = (part: string) => ({
     createSession: (_gpu: unknown, sessionOptions: unknown) => {
+      created.push({ component: part, options: sessionOptions });
       log.push(`create:${part}:${JSON.stringify(sessionOptions)}`);
       options.onEncoderCreate?.(part);
       if (options.failCreate === part) return Promise.reject(CREATE_FAILURE);
@@ -832,6 +839,7 @@ const mockTi2v = (
   /** A 16-latent Session that lends its weights (only with `options.tile32`). */
   const lenderSession = (name: string) => ({
     createSession: (_gpu: unknown, sessionOptions: unknown) => {
+      created.push({ component: name, options: sessionOptions });
       log.push(`create:${name}:${JSON.stringify(sessionOptions)}`);
       return Promise.resolve({
         exportWeight: (initializer: string) => {
@@ -854,6 +862,7 @@ const mockTi2v = (
   /** A 32-latent Session that borrows (only with `options.tile32`). */
   const borrowerSession = (name: "vae_decoder_first_32" | "vae_decoder_next_32") => ({
     createSession: (_gpu: unknown, sessionOptions: Record<string, unknown>) => {
+      created.push({ component: name, options: sessionOptions });
       log.push(`create:${name}:${JSON.stringify(sessionOptions)}`);
       if (options.tile32?.failCreate === name) return Promise.reject(CREATE_FAILURE);
       return Promise.resolve({
@@ -925,7 +934,8 @@ const mockTi2v = (
         encoder: wanParityEncoder(),
         contract: { output: "umt5_out" },
         component: {
-          createSession: () => {
+          createSession: (_gpu: unknown, sessionOptions: unknown) => {
+            created.push({ component: "text_encoder", options: sessionOptions });
             log.push("create:text_encoder");
             return Promise.resolve({
               run: (inputs: Record<string, Tensor>) => {
@@ -1008,7 +1018,8 @@ const mockTi2v = (
     quantName: "f16",
     sessionOptions: options.tile32?.sessionOptions ?? {},
     transformer: {
-      createSession: () => {
+      createSession: (_gpu: unknown, sessionOptions: unknown) => {
+        created.push({ component: "transformer", options: sessionOptions });
         log.push("create:transformer");
         return Promise.resolve({
           run: (inputs: Record<string, Tensor>) => {
@@ -1043,6 +1054,7 @@ const mockTi2v = (
     dit,
     textEmbeds: parseWanTextEmbeds(embedsAsset(3).buffer),
     text,
+    ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
     onRunDiagnostics: (component: string) => {
       diagnosed.push(component);
     },
@@ -1073,6 +1085,7 @@ const mockTi2v = (
   return {
     pipeline,
     log,
+    created,
     ditRuns,
     encoderEnqueues,
     vaeLatents,
@@ -2479,5 +2492,73 @@ describe("Ti2vPipeline.generate with vaeTile 32 (mock Sessions — the 16 pair l
       log.filter((entry) => entry.startsWith("create:")),
       [],
     );
+  });
+});
+
+// The experimental measurement opt-in (`PipelineOptions.fusionRules`): passed through, not interpreted.
+describe("Ti2vPipeline fusionRules (experimental — the state's rules reach the video graphs' Sessions)", () => {
+  /** The components a rule list reaches (the text encoder is not one of them). */
+  const RULED = /^(transformer|vae_decoder|vae_encoder)/;
+
+  /** Every Session's options without the `fusionRules` key (what the run without rules must match). */
+  const withoutRules = (
+    created: readonly { readonly component: string; readonly options: unknown }[],
+  ) =>
+    created.map(({ component, options }) => ({
+      component,
+      options: Object.fromEntries(
+        Object.entries(options as Record<string, unknown>).filter(([key]) => key !== "fusionRules"),
+      ),
+    }));
+
+  it("an I2V request on the GPU text path: the DiT, both decoder Sessions and the three encoder Sessions get the caller's array itself; umT5 gets none", async () => {
+    const fusionRules = [vaeRmsSiluRule(8)];
+    const { created, generate } = mockTi2v({ textEncoder: "gpu", fusionRules });
+    await generate({ image: LANDSCAPE });
+    assertEquals(
+      created.map(({ component }) => component),
+      [
+        "vae_encoder_pre",
+        "vae_encoder_attn",
+        "vae_encoder_post",
+        "text_encoder",
+        "transformer",
+        "vae_decoder_first",
+        "vae_decoder_next",
+      ],
+    );
+    for (const { component, options } of created) {
+      const rules = (options as SessionOptions).fusionRules;
+      if (RULED.test(component)) assertStrictEquals(rules, fusionRules, component);
+      else assertEquals(Object.hasOwn(options as object, "fusionRules"), false, component);
+    }
+  });
+
+  it("vaeTile 32: the two lenders and the two borrowers get the rules beside the conv knob and the shared weights", async () => {
+    const fusionRules = [vaeRmsSiluRule(8)];
+    const { created, generate } = mockTi2v({
+      tile32: { sessionOptions: { convCompute: "a8", linearCompute: "a8" } },
+      fusionRules,
+    });
+    await generate({ vaeTile: 32 });
+    const decoders = created.filter(({ component }) => component.startsWith("vae_decoder"));
+    assertEquals(decoders.length, 4);
+    for (const { component, options } of decoders) {
+      const given = options as SessionOptions;
+      assertStrictEquals(given.fusionRules, fusionRules, component);
+      assertEquals(given.convCompute, "a8", component);
+      assertEquals(Object.hasOwn(given, "sharedWeights"), component.endsWith("_32"), component);
+    }
+  });
+
+  it("without rules, no Session has the field and every other option is what the run with rules passed", async () => {
+    const ruled = mockTi2v({ textEncoder: "gpu", fusionRules: [vaeRmsSiluRule(8)] });
+    await ruled.generate({ image: LANDSCAPE });
+    const plain = mockTi2v({ textEncoder: "gpu" });
+    await plain.generate({ image: LANDSCAPE });
+    for (const { component, options } of plain.created) {
+      assertEquals(Object.hasOwn(options as object, "fusionRules"), false, component);
+    }
+    assertEquals(plain.created, withoutRules(ruled.created));
   });
 });

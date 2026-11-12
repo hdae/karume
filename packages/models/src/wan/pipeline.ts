@@ -126,6 +126,7 @@ import {
   WAN21_FAMILY,
   type WanState,
 } from "./family.ts";
+import type { PipelineFusionRules } from "../session/fusion-rules.ts";
 import type { Prompt } from "./text-embeds.ts";
 
 /** The generation result. `data` is `[3, frames, height, width]` f32 (range `[-1, 1]` — clamped). */
@@ -371,6 +372,25 @@ export type PipelineOptions = {
    * `AbortSignal.timeout`) must not make every later generation fail.
    */
   readonly signal?: AbortSignal;
+  /**
+   * **Experimental**: fusion rules written outside the runtime (`defineRule` of
+   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
+   * the video graphs: the DiT (`transformer`), the VAE decoder chunk graphs (the 16-latent pair, and
+   * with `vaeTile` 32 its lenders and the 32-latent borrowers) and, for Wan2.2's I2V, the three VAE
+   * encoder graphs. umT5's Session does not get them. Absent = no rule: the Sessions are built as
+   * without the option. Both classes (`Pipeline` for Wan2.1, `Ti2vPipeline` for Wan2.2) take it.
+   *
+   * It exists to measure a candidate rule on a whole generation (with and without the rule); it may
+   * change or go away in a minor version. Passing a rule is the opt-in, and the rule's author owns
+   * the evidence for its numbers (ADR 0148): the runtime does not check them. The 32-latent
+   * borrowers borrow every weight, and the runtime does not bind a borrowed weight to an external
+   * rule's step, so a rule folds no window there. This family has no memory estimate, so there is
+   * nothing to plan with the rules. A value the runtime refuses fails when the first such Session is
+   * built.
+   *
+   * DECIDED: docs/decisions/0148-external-fusion-rules.md
+   */
+  readonly fusionRules?: PipelineFusionRules;
 };
 
 /**

@@ -95,6 +95,7 @@ import { fitsHeadroom, type GpuContext } from "@karume/runtime";
 import { ModelInputError } from "../errors.ts";
 import type { Qwen3_5Overflow } from "../qwen3_5/tokenizer.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
+import type { PipelineFusionRules } from "../session/fusion-rules.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import { MOSS_DIT, MOSS_DIT_SKIP22, MOSS_DIT_TEXT, type MossDitContract } from "./dit-contract.ts";
 import {
@@ -416,6 +417,11 @@ export type MossGenerateState = {
   readonly dit: { readonly components: MossDitComponents; readonly contract: MossDitContract };
   readonly vae: { readonly components: MossVaeComponents; readonly contract: MossVaeContract };
   readonly text?: MossTextEncoderState;
+  /**
+   * Experimental (the pipeline's `fusionRules`): the DiT stage's and the VAE stage's Sessions
+   * and their headroom estimates get them; the text encoder's do not. Absent = no rule anywhere.
+   */
+  readonly fusionRules?: PipelineFusionRules;
 };
 
 /** A generated image. */
@@ -436,12 +442,14 @@ const assertFirstHeadroom = async (
   state: MossGenerateState,
   plan: MossGeneratePlan,
 ): Promise<void> => {
-  const { gpu } = state;
+  const { gpu, fusionRules } = state;
+  const rules = fusionRules === undefined ? {} : { fusionRules };
   const dit = mossDitStageNeeds(
     {
       ...state.dit,
       preset: state.preset,
       device: mossDeviceFacts(gpu),
+      ...rules,
     },
     plan.dit,
   );
@@ -459,7 +467,7 @@ const assertFirstHeadroom = async (
       : []),
     [MOSS_DIT_TEXT, dit.text],
     [`${MOSS_DIT} + ${MOSS_DIT_SKIP22}`, dit.pair],
-    ["VAE", mossVaeStageNeeds({ ...state.vae, limits: gpu.limits }, plan.vae)],
+    ["VAE", mossVaeStageNeeds({ ...state.vae, limits: gpu.limits, ...rules }, plan.vae)],
   ];
   const [stage, bytes] = needs.reduce((largest, need) => (need[1] > largest[1] ? need : largest));
   await settleReleasedMemory(gpu);
@@ -522,8 +530,10 @@ export const generateMoss = async (
   state: MossGenerateState,
   request: MossGenerateRequest,
 ): Promise<MossGeneratedImage> => {
-  const { gpu } = state;
+  const { gpu, fusionRules } = state;
   const preset = requireMossPreset(state.preset);
+  // Experimental: the DiT and VAE stages only (the text encoder takes none — `MossGenerateState`).
+  const rules = fusionRules === undefined ? {} : { fusionRules };
   const plan = planMossGenerate(request, {
     dit: state.dit.contract,
     vae: state.vae.contract,
@@ -532,7 +542,7 @@ export const generateMoss = async (
   });
   await assertFirstHeadroom(state, plan);
   const initial = mossInitialLatents(plan, state.dit.contract.latentChannels);
-  const ditState = { gpu, preset, ...state.dit };
+  const ditState = { gpu, preset, ...state.dit, ...rules };
   // The prompt form's text stage runs (and is closed) before dit_text opens (module doc, step 2).
   const ditPlan: MossDitPlan =
     plan.text === "embeddings"
@@ -548,6 +558,6 @@ export const generateMoss = async (
   const latents = await withMossDitPair(ditState, ditPlan, refined, (pair) =>
     mossDenoise(pair.predict, plan, initial),
   );
-  const image = await decodeMossVae({ gpu, ...state.vae }, plan.vae, latents);
+  const image = await decodeMossVae({ gpu, ...state.vae, ...rules }, plan.vae, latents);
   return { image, latents, width: plan.vae.width, height: plan.vae.height };
 };

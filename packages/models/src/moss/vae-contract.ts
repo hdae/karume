@@ -327,6 +327,8 @@ export const readMossLatentBatchNorm = async (
 export type MossVaeDeviceLimits = {
   readonly maxStorageBufferBindingSize: number;
   readonly maxBufferSize: number;
+  /** Read only with `fusionRules` (a rule's matcher may read it — `fusionRulesEstimateOptions`). */
+  readonly maxComputeWorkgroupsPerDimension?: number;
 };
 
 /** The largest accepted area on a device (module doc "The area limit"). */

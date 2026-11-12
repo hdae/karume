@@ -29,6 +29,7 @@ import type {
 
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import type { GenerateEvent, RunComponent } from "./pipeline.ts";
 import type { PlanLayout, WanGenerationKnobs } from "./plan.ts";
@@ -309,6 +310,12 @@ type WanVaeDecodeState = {
   readonly layout: WanVaeChunkLayout;
   /** The 32-latent pair (undefined when the preset has none — a plan never asks for it then). */
   readonly vaeTile32?: WanVaeTile32;
+  /**
+   * Experimental (the pipeline's `fusionRules`): passed unchanged to every Session of the stage
+   * (the 32-latent borrowers too, where the runtime binds no borrowed weight to an external rule's
+   * step); absent = no rule.
+   */
+  readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
@@ -447,7 +454,10 @@ export const decodeWanVaeStage = async (
     // `sessionOptions`, the effective settings the family admission derived from the quant
     // declaration through the acceptance table, is the DiT Session's; the same contract as
     // anima's `withStage` for everything but conv3d).
-    const vaeOptions = wanVaeSessionOptions(state.sessionOptions);
+    const vaeOptions = withFusionRules(
+      wanVaeSessionOptions(state.sessionOptions),
+      state.fusionRules,
+    );
     if (tile32 === undefined) {
       first = await state.vaeFirst.createSession(state.gpu, vaeOptions);
       next = await state.vaeNext.createSession(state.gpu, vaeOptions);

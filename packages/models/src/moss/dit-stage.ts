@@ -84,6 +84,11 @@ import {
 import { HEADROOM_MARGIN_BYTES } from "../session/headroom-margin.ts";
 import type { ModelComponent } from "../hub/components.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import {
+  fusionRulesEstimateOptions,
+  type PipelineFusionRules,
+  withFusionRules,
+} from "../session/fusion-rules.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import {
   MOSS_DIT,
@@ -129,6 +134,11 @@ export type MossDitStageState = {
   readonly components: MossDitComponents;
   readonly contract: MossDitContract;
   readonly preset: MossPreset;
+  /**
+   * Experimental (the pipeline's `fusionRules`): passed unchanged to the three Sessions of the stage
+   * and to their headroom estimates; absent = neither gets a rule.
+   */
+  readonly fusionRules?: PipelineFusionRules;
 };
 
 /** One value per CFG branch (`negative` undefined = guidance 1, no negative branch). */
@@ -193,6 +203,8 @@ const sequenceLengths = (plan: MossDitShape): MossBranches<number> => {
 export type MossDeviceLimits = {
   readonly maxStorageBufferBindingSize: number;
   readonly maxBufferSize: number;
+  /** Read only with `fusionRules` (a rule's matcher may read it — `fusionRulesEstimateOptions`). */
+  readonly maxComputeWorkgroupsPerDimension?: number;
 };
 
 /** The device facts the estimates take (the stage passes `gpu.limits` and `attentionDeviceFacts(gpu)`). */
@@ -207,6 +219,7 @@ const estimatedPeak = (
   component: ModelComponent,
   bindings: Readonly<Record<string, number>>,
   knobs: MossDitKnobs,
+  fusionRules: PipelineFusionRules,
 ): number =>
   component.estimate({
     maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
@@ -214,6 +227,8 @@ const estimatedPeak = (
     bindings,
     ...knobs,
     attentionDevice: device.attention,
+    // MUST: the rules the stage's Sessions get (the estimate plans the fusion they run).
+    ...fusionRulesEstimateOptions(fusionRules, device.limits),
   }).peakAccountedBytes;
 
 /** The device facts of `gpu` the estimates take (one derivation for every stage and the first check). */
@@ -245,15 +260,22 @@ export const mossDitStageNeeds = (
     readonly components: MossDitComponents;
     readonly contract: Pick<MossDitContract, "width">;
     readonly preset: MossPreset;
+    readonly fusionRules?: PipelineFusionRules;
   },
   plan: MossDitShape,
 ): MossDitStageNeeds => {
-  const { device, components, contract } = input;
+  const { device, components, contract, fusionRules } = input;
   const preset = requireMossPreset(input.preset);
   const { texts } = plan;
   const longest = Math.max(texts.positive.tokens, texts.negative?.tokens ?? 0);
   const text =
-    estimatedPeak(device, components.ditText, { [symbolOf(components.ditText)]: longest }, {}) +
+    estimatedPeak(
+      device,
+      components.ditText,
+      { [symbolOf(components.ditText)]: longest },
+      {},
+      fusionRules,
+    ) +
     components.ditText.maxPartBytes +
     HEADROOM_MARGIN_BYTES;
   const lengths = sequenceLengths(plan);
@@ -265,6 +287,7 @@ export const mossDitStageNeeds = (
           components.ditSkip22,
           { [symbolOf(components.ditSkip22)]: lengths.negative },
           preset.dit,
+          fusionRules,
         ) + contextBytes(lengths.negative, contract.width);
   const pair =
     estimatedPeak(
@@ -272,6 +295,7 @@ export const mossDitStageNeeds = (
       components.dit,
       { [symbolOf(components.dit)]: lengths.positive },
       preset.dit,
+      fusionRules,
     ) +
     contextBytes(lengths.positive, contract.width) +
     negative +
@@ -367,7 +391,10 @@ export const runMossTextStage = async (
     plan,
   );
   // f32 compute in every preset (ADR 0138 decision 3): none of the preset's knobs.
-  const session = await components.ditText.createSession(gpu, {});
+  const session = await components.ditText.createSession(
+    gpu,
+    withFusionRules({}, state.fusionRules),
+  );
   let failure: { readonly error: unknown } | undefined;
   try {
     const run = async (text: MossBranchText, label: string): Promise<MossRefinedText> => {
@@ -465,7 +492,10 @@ export const withMossDitPair = async <T>(
   const residents: ResidentTensor[] = [];
   let failure: { readonly error: unknown } | undefined;
   try {
-    lender = await components.dit.createSession(gpu, { ...preset.dit });
+    lender = await components.dit.createSession(
+      gpu,
+      withFusionRules({ ...preset.dit }, state.fusionRules),
+    );
     const open = async (
       session: Session,
       output: string,
@@ -495,10 +525,15 @@ export const withMossDitPair = async <T>(
     const positive = await open(lender, contract.outputs.dit, refined.positive, "positive");
     let negative: BranchRunner | undefined;
     if (refined.negative !== undefined) {
-      borrower = await components.ditSkip22.createSession(gpu, {
-        ...preset.dit,
-        sharedWeights: lentWeights(lender, contract.borrowed),
-      });
+      // The borrowed weights are not bound to an external rule's step (the runtime declines it), so
+      // the rules fold fewer windows here than on `dit`.
+      borrower = await components.ditSkip22.createSession(
+        gpu,
+        withFusionRules(
+          { ...preset.dit, sharedWeights: lentWeights(lender, contract.borrowed) },
+          state.fusionRules,
+        ),
+      );
       negative = await open(borrower, contract.outputs.ditSkip22, refined.negative, "negative");
     }
     const channels = contract.latentChannels;

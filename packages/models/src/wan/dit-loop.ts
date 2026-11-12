@@ -20,6 +20,7 @@ import type { GpuContext, RunInputs, SessionDiagnostics, SessionOptions } from "
 
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import type { GenerateEvent, RunComponent } from "./pipeline.ts";
 import type { WanDitInputForm } from "./descriptor.ts";
@@ -276,6 +277,11 @@ type WanDenoiseState = {
   readonly transformer: ModelComponent;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
+  /**
+   * Experimental (the pipeline's `fusionRules`): passed unchanged to this stage's Sessions; absent
+   * = no rule.
+   */
+  readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
@@ -497,7 +503,10 @@ export const runWanDenoise = async (
   const observe = state.onRunDiagnostics;
 
   await emit({ kind: "stage", component: "transformer", at: "start" });
-  const session = await state.transformer.createSession(state.gpu, state.sessionOptions);
+  const session = await state.transformer.createSession(
+    state.gpu,
+    withFusionRules(state.sessionOptions, state.fusionRules),
+  );
   let failure: { readonly error: unknown } | undefined;
   try {
     const predict = async (

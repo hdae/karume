@@ -6,7 +6,8 @@ A candidate is a fusion rule written outside the runtime with `defineRule` of `@
 (ADR 0148) while it is being measured and checked: its effect on a real run (the wall-clock session A/B of
 `@karume/runtime/tune`) and the evidence its contract class asks for (for a class E rule, the
 fused-against-unfused u32 check on each backend — docs/kernel-rules.md). No pipeline passes a candidate by
-default; a measurement passes it explicitly (the gemma pipeline's experimental `fusionRules`).
+default; a measurement passes it explicitly (the experimental `fusionRules` of the gemma, MOSS-Image, Wan and anima
+pipelines).
 
 - **Nothing here is part of a release.** The package is private, no published package depends on it at
   run time (`@karume/models` lists it as a devDependency for its tests, which JSR does not publish), and
@@ -31,6 +32,9 @@ Who imports it (every importer; keep this list complete when one is added):
 - `packages/models/tests/gemma4_estimate_test.ts` — the gemma pipeline's `fusionRules` reaches the target
   and the drafter Session.
 - `packages/models/tests/gemma4_vision_pipeline_test.ts` — and not the image embedder's Session.
+- `packages/models/tests/moss_fusion_rules_test.ts`, `wan_ti2v_pipeline_test.ts` and `anima_pipeline_test.ts` — the
+  MOSS-Image, Wan and anima pipelines' `fusionRules` reach their DiT and VAE Sessions (and estimates) and not the text
+  encoders'.
 - `packages/e2e/tests/e2e_external_fusion_rule_test.ts`, `e2e_gemma4_26b_external_rule_test.ts`,
   `e2e_gemma4_session_ab_test.ts`, `e2e_ew_chain_rule_test.ts`, `ew_chain_rule_plan_test.ts`,
   `e2e_moss_fusion_counts_test.ts`, `e2e_moss_session_ab_test.ts`, `e2e_vae_rms_silu_rule_test.ts`,

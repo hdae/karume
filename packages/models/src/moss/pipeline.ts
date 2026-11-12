@@ -61,6 +61,7 @@ import {
   hubLoadOptions,
 } from "../hub/load-options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
+import type { PipelineFusionRules } from "../session/fusion-rules.ts";
 import { parseQwen3_5TokenizerAsset, Qwen3_5Tokenizer } from "../qwen3_5/tokenizer.ts";
 import {
   assertGpuFeaturesGranted,
@@ -184,6 +185,25 @@ export type PipelineOptions = {
    * as is. Not carried over to generation.
    */
   readonly signal?: AbortSignal;
+  /**
+   * **Experimental**: fusion rules written outside the runtime (`defineRule` of
+   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
+   * the image graphs: `dit_text`, `dit` and `dit_skip22` (the DiT stage) and the three VAE decoder
+   * graphs. The Qwen3.5 text encoder's Session does not get them. Absent = no rule: the Sessions
+   * are built as without the option.
+   *
+   * It exists to measure a candidate rule on a whole generation (with and without the rule); it may
+   * change or go away in a minor version. Passing a rule is the opt-in, and the rule's author owns
+   * the evidence for its numbers (ADR 0148): the runtime does not check them. The headroom checks
+   * before each stage estimate those graphs with the same rules (with the device's
+   * `maxComputeWorkgroupsPerDimension`, which a rule's matcher may read), so they size the
+   * Sessions that open. `dit_skip22` borrows `dit`'s weights, and the runtime does not bind a
+   * borrowed weight to an external rule's step, so a rule folds fewer windows there. A value the
+   * runtime refuses fails at the first generation, before any stage opens.
+   *
+   * DECIDED: docs/decisions/0148-external-fusion-rules.md
+   */
+  readonly fusionRules?: PipelineFusionRules;
 };
 
 /** The options of {@link Pipeline.fromPretrained} (the fetch-layer knobs pass through to hub). */
@@ -439,6 +459,8 @@ const loadMoss = async (
           contract: admitted.vae,
         },
         text: { component: textEncoder, tokenizer, contract: textContract },
+        // Experimental (a measurement opt-in): the DiT and VAE stages' Sessions get the rules.
+        ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
       },
       config: admitted.config,
       ownsGpu,

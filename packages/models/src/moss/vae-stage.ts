@@ -69,6 +69,11 @@ import {
 import { HEADROOM_MARGIN_BYTES } from "../session/headroom-margin.ts";
 import type { ModelComponent } from "../hub/components.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import {
+  fusionRulesEstimateOptions,
+  type PipelineFusionRules,
+  withFusionRules,
+} from "../session/fusion-rules.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import type { MossCells } from "./dit-rope.ts";
 import { assertMossImageArea, assertMossImageSize } from "./request.ts";
@@ -113,6 +118,11 @@ export type MossVaeStageState = {
   readonly gpu: GpuContext;
   readonly components: MossVaeComponents;
   readonly contract: MossVaeContract;
+  /**
+   * Experimental (the pipeline's `fusionRules`): passed unchanged to the three Sessions and to
+   * their headroom estimates; absent = neither gets a rule.
+   */
+  readonly fusionRules?: PipelineFusionRules;
 };
 
 /** An accepted VAE request ({@link planMossVae}). */
@@ -166,10 +176,11 @@ export const mossVaeStageNeeds = (
     readonly limits: MossVaeDeviceLimits;
     readonly components: MossVaeComponents;
     readonly contract: MossVaeContract;
+    readonly fusionRules?: PipelineFusionRules;
   },
   plan: MossVaePlan,
 ): number => {
-  const { limits, components, contract } = input;
+  const { limits, components, contract, fusionRules } = input;
   const bindings = bindingsOf(contract, plan);
   const estimate = (
     component: ModelComponent,
@@ -181,6 +192,8 @@ export const mossVaeStageNeeds = (
       maxBufferSize: limits.maxBufferSize,
       bindings: values,
       ...options,
+      // MUST: the rules the stage's Sessions get (the estimate plans the fusion they run).
+      ...fusionRulesEstimateOptions(fusionRules, limits),
     }).peakAccountedBytes;
   const residents = residentBytes(contract, plan);
   return (
@@ -234,7 +247,10 @@ export const decodeMossVae = async (
     component: ModelComponent,
     options: { readonly attentionRowBlockMaxBytes?: number } = {},
   ): Promise<Session> => {
-    const session = await component.createSession(gpu, { ...options });
+    const session = await component.createSession(
+      gpu,
+      withFusionRules({ ...options }, state.fusionRules),
+    );
     sessions.push(session);
     return session;
   };

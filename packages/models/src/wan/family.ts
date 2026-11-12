@@ -37,6 +37,7 @@ import {
 } from "@karume/hub";
 
 import { settleAbort } from "../concurrency/abort.ts";
+import type { PipelineFusionRules } from "../session/fusion-rules.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import {
   assertAcquiredGpuCapabilities,
@@ -362,6 +363,11 @@ export type WanState = {
   /** The embedding asset (the accepted set of `"precomputed"`, `prompts` on both paths). */
   readonly textEmbeds: WanTextEmbeds;
   readonly text: WanTextStage;
+  /**
+   * Experimental ({@link PipelineOptions.fusionRules}): the DiT, VAE decoder and VAE encoder
+   * Sessions get them; umT5's does not. Absent = no rule anywhere.
+   */
+  readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
@@ -398,6 +404,7 @@ export const loadWanFromPretrained = async (
       ? {}
       : { onRunDiagnostics: options.onRunDiagnostics }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
   };
   // The family checks run in the admission callback (before the weight parts are fetched —
   // `src/hub/components.ts`).
@@ -682,6 +689,8 @@ const buildWan = async (
       dit,
       textEmbeds,
       text,
+      // Experimental (a measurement opt-in): the DiT and VAE stages' Sessions get the rules.
+      ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),

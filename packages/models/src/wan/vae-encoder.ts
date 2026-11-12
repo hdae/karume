@@ -35,6 +35,7 @@ import type { GpuContext, ResidentTensor, Session, SessionDiagnostics } from "@k
 
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import type { GenerateEvent, RunComponent } from "./pipeline.ts";
@@ -343,6 +344,11 @@ export const wanVaeEncoderContract = (
 type WanVaeEncodeState = {
   readonly gpu: GpuContext;
   readonly vaeEncoder: WanVaeEncoder;
+  /**
+   * Experimental (the pipeline's `fusionRules`): passed unchanged to this stage's Sessions; absent
+   * = no rule.
+   */
+  readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
@@ -458,7 +464,10 @@ export const encodeWanImageStage = async (
   const sessions: Session[] = [];
   const residents: ResidentTensor[] = [];
   const createSession = async (component: ModelComponent): Promise<Session> => {
-    const session = await component.createSession(state.gpu, {});
+    const session = await component.createSession(
+      state.gpu,
+      withFusionRules({}, state.fusionRules),
+    );
     sessions.push(session);
     return session;
   };

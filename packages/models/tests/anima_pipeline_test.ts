@@ -31,7 +31,7 @@
 // NOTE: The mapping from the manifest's `session` to `SessionOptions` is now shared by seven
 // families, so its check lives in `session_options_test.ts`.
 
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import {
   assert,
   assertAlmostEquals,
@@ -43,9 +43,12 @@ import {
   assertThrows,
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
+import type { Session, SessionOptions } from "@karume/runtime";
+import { vaeRmsSiluRule } from "@karume/candidate-rules";
 import { SAMPLER_TYPES } from "../anima.ts";
 import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
+  animaStageSessionOptions,
   type GenerateRequest,
   Pipeline,
   type PipelineOptions,
@@ -58,6 +61,7 @@ import { ModelInputError } from "../src/errors.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
+import { PreparedModel } from "../../runtime/src/runtime/executor.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /**
@@ -735,4 +739,87 @@ test("latentSnapshot: copies the latent at the time it was bound (the copy does 
   assertNotStrictEquals(copy.shape, shape);
   shape[2] = 99;
   assertEquals(copy.shape, [1, 2, 1, 1]);
+});
+
+// --- fusionRules (experimental — a measurement opt-in, passed through, not interpreted) ----------
+
+test("animaStageSessionOptions: the VAE alone gets the caller's array itself; the text stages get none, with or without rules", () => {
+  const fusionRules = [vaeRmsSiluRule(8)];
+  assertStrictEquals(animaStageSessionOptions("vae_decoder", fusionRules).fusionRules, fusionRules);
+  for (const component of ["text_encoder", "text_conditioner"] as const) {
+    assertEquals(animaStageSessionOptions(component, fusionRules), {}, component);
+  }
+  for (const component of ["text_encoder", "text_conditioner", "vae_decoder"] as const) {
+    assertEquals(animaStageSessionOptions(component, undefined), {}, component);
+  }
+});
+
+/**
+ * Runs one generate on the buildable assets with every Session a stand-in (the text stages return
+ * a one-element tensor; the DiT stage then stops at the fixture's DiT graph, which has none of the
+ * DiT's inputs) and returns each Session's options, in construction order.
+ */
+const stageSessionOptions = async (
+  options: PipelineOptions,
+): Promise<{ readonly output: string; readonly options: SessionOptions }[]> => {
+  const created: { readonly output: string; readonly options: SessionOptions }[] = [];
+  const spy = vi
+    .spyOn(PreparedModel.prototype, "createContainerSession")
+    .mockImplementation(function (this: PreparedModel, _gpu, sessionOptions = {}) {
+      const output = this.graph.outputs[0];
+      created.push({ output, options: sessionOptions });
+      // NOTE: the cast — the stages read only `run`, `diagnostics` and `dispose`.
+      return Promise.resolve({
+        run: () =>
+          Promise.resolve({
+            [output]: { dtype: "f32", shape: [1, 1, 1], data: new Float32Array(1) },
+          }),
+        diagnostics: () => ({}),
+        dispose: () => Promise.resolve(),
+      } as unknown as Session);
+    });
+  try {
+    const manifest = parseManifest(manifestText());
+    await using pipeline = await Pipeline.fromAssets(
+      { manifest, assets: await buildableAssets() },
+      { gpu: fakeGpuContext(fakeDevice()), ...options },
+    );
+    const stages: string[] = [];
+    await assertRejects(() =>
+      pipeline.generate({
+        prompt: "aba",
+        onEvent: (event) => {
+          if (event.kind === "stage" && event.at === "start") stages.push(event.component);
+        },
+      }),
+    );
+    // Not vacuous: the three Sessions below are the two text stages' and the DiT's.
+    assertEquals(stages, ["text_encoder", "text_conditioner", "transformer"]);
+    return created;
+  } finally {
+    spy.mockRestore();
+  }
+};
+
+test("fromAssets fusionRules: the DiT Session gets the caller's array itself; the text stages' Sessions do not", async () => {
+  const fusionRules = [vaeRmsSiluRule(8)];
+  const created = await stageSessionOptions({ fusionRules });
+  assertEquals(created.length, 3);
+  const [textEncoder, textConditioner, transformer] = created;
+  assertEquals(Object.hasOwn(textEncoder.options, "fusionRules"), false);
+  assertEquals(Object.hasOwn(textConditioner.options, "fusionRules"), false);
+  assertStrictEquals(transformer.options.fusionRules, fusionRules);
+});
+
+test("fromAssets without fusionRules: no Session has the field, and the rest is what the run with rules passed", async () => {
+  const ruled = await stageSessionOptions({ fusionRules: [vaeRmsSiluRule(8)] });
+  const plain = await stageSessionOptions({});
+  for (const { options } of plain) assertEquals(Object.hasOwn(options, "fusionRules"), false);
+  assertEquals(
+    plain,
+    ruled.map(({ output, options }) => ({
+      output,
+      options: Object.fromEntries(Object.entries(options).filter(([key]) => key !== "fusionRules")),
+    })),
+  );
 });
