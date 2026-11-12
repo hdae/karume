@@ -147,20 +147,23 @@ export const attentionOnlineI8a8Eligible = (depth: number, cols: number): boolea
  *
  * MUST: the kernel ({@link attentionOnlineI8a8Wgsl} and its uniform
  * {@link attentionOnlineI8a8Params}), the Vᵀ producer (recipe-builders/attention.ts
- * `attentionValueQuantization`) and the size of the quantised Vᵀ (`attentionI8a8TempBytes`, through
- * {@link attentionOnlineValueRowWords}) take the form from this one function — a row length two of
- * them disagree on reads the wrong words without an exception.
+ * `attentionValueQuantization`) and the size of the quantised Vᵀ (`attentionI8a8TempBytes`) take the
+ * form from one value, the online route's `keyWords` (runtime/attention-route.ts — the form
+ * {@link attentionOnlineKeyWords} gives N unless the device's geometry profile chose `tiled`; ADR 0132
+ * addendum 2026-11-12) — a row length two of them disagree on reads the wrong words without an
+ * exception.
  * MUST: `whole` keeps the key and the WGSL of the kernel before the addendum byte for byte, so the
  * outputs of every `N % 4 == 0` shape (every accepted Wan2.1 / Wan2.2 size) are unchanged by
  * construction.
  *
- * `tiled` (a candidate, measured before it replaces anything — perf-ledger, the Vᵀ key order):
- * the producer writes Vᵀ already in the kernel's key order (`quantizeRowsTiledWgsl`): any
- * `N ≥ 1`, `16 · ceil(N / 64)` words per column, word `16·tile + pk` = the keys
- * `64·tile + pk + 16·i`, the words of four consecutive columns interleaved. The kernel's owner
- * fill is then one `vec4` load where the other forms gather 16 bytes; the Vᵀ tile it builds, and
- * everything after it, is the same. It is chosen by the caller, never by
- * {@link attentionOnlineKeyWords}.
+ * `tiled` (perf-ledger K-106): the producer writes Vᵀ already in the kernel's key order
+ * (`quantizeRowsTiledWgsl`): any `N ≥ 1`, `16 · ceil(N / 64)` words per column, word
+ * `16·tile + pk` = the keys `64·tile + pk + 16·i`, the words of four consecutive columns
+ * interleaved. The kernel's owner fill is then one `vec4` load where the other forms gather 16
+ * bytes; the Vᵀ tile it builds, and everything after it, is the same. A geometry profile chooses it
+ * (`GeometryProfile.attentionOnline`, read through the route — no built-in table does), and the
+ * attention bench and the identity checks build it directly; {@link attentionOnlineKeyWords} never
+ * returns it.
  */
 export type AttentionOnlineKeyWords = "whole" | "padded" | "tiled";
 
@@ -197,7 +200,7 @@ export const attentionOnlineI8a8WorkgroupStorageBytes = (
  */
 export type AttentionOnlineOutput = "bhsd" | "bshd";
 
-/** The key adds `:kpad` for the {@link AttentionOnlineKeyWords} `padded` form only (`whole` keys are unchanged). */
+/** The key adds `:kpad` for the {@link AttentionOnlineKeyWords} `padded` form and `:ktile` for `tiled` (`whole` keys are unchanged). */
 export const attentionOnlineI8a8Key = (
   dp4a: boolean,
   depth: number,
