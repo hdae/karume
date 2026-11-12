@@ -20,7 +20,6 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from "react"
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
 import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
-import { experimentalRuleOptions, VAE_RMS_SILU_EXPERIMENT } from "@/lib/experimental-rule";
 
 import { residentAfter } from "./record";
 import type { AnimaMount } from "./settings";
@@ -34,11 +33,6 @@ export type PipelineSpec = {
   readonly mount: AnimaMount;
   readonly model: string;
   readonly quant: string;
-  /**
-   * The experimental rule the pipeline opens with (`experimentalRuleInUse`); `undefined` = none.
-   * A Session takes its rules at construction, so a different rule is a different pipeline.
-   */
-  readonly fusionRule: string | undefined;
 };
 
 /** What the status card shows of the held pipeline. */
@@ -46,7 +40,6 @@ export type HeldPipelineInfo = {
   readonly mount: AnimaMount;
   readonly model: string;
   readonly quant: string;
-  readonly fusionRule: string | undefined;
   readonly sourceKind: PipelineSource["kind"];
   readonly openSeconds: number;
   /** A DiT kept by `residency: "transformer"` sits on the device. */
@@ -65,8 +58,7 @@ const sameSpec = (left: PipelineSpec, right: Partial<PipelineSpec>): boolean =>
   left.source === right.source &&
   left.mount === right.mount &&
   left.model === right.model &&
-  left.quant === right.quant &&
-  left.fusionRule === right.fusionRule;
+  left.quant === right.quant;
 
 export type OpenedPipeline = {
   readonly pipeline: Pipeline;
@@ -132,14 +124,14 @@ export const useAnimaPipeline = (
   }, [disposeQueued]);
 
   // Drop the held pipeline once the selection moves away from it.
-  const { gpu, source, mount, model, quant, fusionRule } = selection;
+  const { gpu, source, mount, model, quant } = selection;
   useEffect(() => {
-    selectionRef.current = { gpu, source, mount, model, quant, fusionRule };
+    selectionRef.current = { gpu, source, mount, model, quant };
     const current = heldRef.current;
     if (current !== undefined && !sameSpec(current.spec, selectionRef.current)) {
       void release();
     }
-  }, [gpu, source, mount, model, quant, fusionRule, release]);
+  }, [gpu, source, mount, model, quant, release]);
   // Leaving the page disposes it.
   useEffect(() => {
     mountedRef.current = true;
@@ -182,7 +174,6 @@ export const useAnimaPipeline = (
           gpu: spec.gpu,
           model: spec.model,
           quant: spec.quant,
-          ...experimentalRuleOptions(VAE_RMS_SILU_EXPERIMENT, spec.fusionRule),
           signal,
           onRunDiagnostics: (component, report) => diagnostics.current?.(component, report),
           onProgress,
@@ -207,7 +198,6 @@ export const useAnimaPipeline = (
         mount: spec.mount,
         model: spec.model,
         quant: spec.quant,
-        fusionRule: spec.fusionRule,
         sourceKind: spec.source.kind,
         openSeconds: openMilliseconds / 1000,
         residentDit: false,

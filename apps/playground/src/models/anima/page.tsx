@@ -17,7 +17,6 @@ import { useRef, useState } from "react";
 
 import { type Choice, ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
-import { ExperimentalRuleSwitch } from "@/components/experimental-rule-switch";
 import { Field } from "@/components/field";
 import { KeyValueTable } from "@/components/key-value-table";
 import { MountBadges } from "@/components/mount-badges";
@@ -43,12 +42,6 @@ import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
 import { crossRepoMounts, type DistributionStatus, type RepoHolders } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
-import {
-  experimentalRuleInUse,
-  experimentalRuleLabel,
-  runsOnMetal,
-  VAE_RMS_SILU_EXPERIMENT,
-} from "@/lib/experimental-rule";
 import type { RgbaPixels } from "@/lib/image";
 import { manifestPresets } from "@/lib/presets";
 import {
@@ -185,12 +178,10 @@ export const AnimaPage = () => {
     track,
   } = useGpu(needsShaderF16 ? GPU_WITH_F16 : GPU_PLAIN);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
-  const metal = runsOnMetal(navigator.userAgent, gpu?.adapterInfo.architecture ?? "");
-  const fusionRule = experimentalRuleInUse(VAE_RMS_SILU_EXPERIMENT, form.experimentalRule, metal);
 
   const diagnosticsRef = useRef<DiagnosticsSink | undefined>(undefined);
   const { held, releaseError, open, release } = useAnimaPipeline(
-    { gpu, source, mount: chosen?.mount, model: chosen?.model, quant, fusionRule },
+    { gpu, source, mount: chosen?.mount, model: chosen?.model, quant },
     diagnosticsRef,
     track,
   );
@@ -226,7 +217,7 @@ export const AnimaPage = () => {
     }
     const mountManifest = manifestStates[chosen.mount];
     if (mountManifest.kind !== "ready") return;
-    const spec = { gpu, source, mount: chosen.mount, model: chosen.model, quant, fusionRule };
+    const spec = { gpu, source, mount: chosen.mount, model: chosen.model, quant };
     const directory = chosenStatus?.directory ?? "";
     const quantLabel = presets.presets.find(({ name }) => name === quant)?.label ?? quant;
     const previewOn = livePreview;
@@ -354,7 +345,6 @@ export const AnimaPage = () => {
           defaultModel: mountManifest.manifest.defaultModel,
           quant,
           quantLabel,
-          fusionRule,
           defaultQuant: presets.defaultQuant,
           request: parts,
           effective,
@@ -649,16 +639,6 @@ export const AnimaPage = () => {
               />
               Live preview (approximate, at 1/8 of the image, after every denoise step)
             </Label>
-            <div className="sm:col-span-2">
-              <ExperimentalRuleSwitch
-                id="anima-experimental-rule"
-                rule={VAE_RMS_SILU_EXPERIMENT}
-                checked={form.experimentalRule}
-                metal={metal}
-                onCheckedChange={(checked) => update({ experimentalRule: checked })}
-                disabled={disabled}
-              />
-            </div>
             <div className="flex gap-3 sm:col-span-2">
               <Button id="anima-run" onClick={run} disabled={!canRun}>
                 Run
@@ -702,7 +682,7 @@ export const AnimaPage = () => {
               "Pipeline",
               held === undefined
                 ? "not open (opens on Run)"
-                : `${held.model} · ${held.quant} · ${held.sourceKind} · rule ${experimentalRuleLabel(held.fusionRule)} (${held.openSeconds.toFixed(1)} s to open)${
+                : `${held.model} · ${held.quant} · ${held.sourceKind} (${held.openSeconds.toFixed(1)} s to open)${
                     held.residentDit ? " · DiT resident" : ""
                   }`,
             ],
@@ -752,8 +732,7 @@ export const AnimaPage = () => {
             <CardDescription>
               {result.record.output.width}×{result.record.output.height} ·{" "}
               {result.record.model.name} · {result.record.preset.quant} ·{" "}
-              {result.record.generateSeconds} s · experimental rule:{" "}
-              {experimentalRuleLabel(result.record.experimentalFusionRule)}
+              {result.record.generateSeconds} s
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -844,7 +823,6 @@ const RecordTable = ({ record }: { record: AnimaRecord }) => (
       ],
       ["Model", `${record.model.name}${record.model.isDefault ? " (default)" : ""}`],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
-      ["Experimental rule", experimentalRuleLabel(record.experimentalFusionRule)],
       ["Resolution", record.effective.resolution ?? "—"],
       ["Steps", String(record.effective.steps ?? "—")],
       ["Guidance", String(record.effective.guidanceScale ?? "—")],

@@ -24,8 +24,11 @@ import {
 
 import type { AnimaMount, AnimaRequestParts, EffectiveRequest } from "./settings";
 
-/** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const RECORD_FORMAT = "karume-playground-anima/1";
+/**
+ * The version of the saved record; bump it when a field changes meaning or goes away (`/2`: the
+ * field `experimentalFusionRule` went away with the page's switch).
+ */
+export const RECORD_FORMAT = "karume-playground-anima/2";
 
 /** The stages in the order a generation runs them (the components of `stage` events). */
 export const STAGES: readonly RunComponent[] = [
@@ -79,11 +82,6 @@ export type AnimaRecord = RecordEnvironment & {
   readonly source: SourceRecord;
   readonly model: { readonly name: string; readonly isDefault: boolean };
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
-  /**
-   * The experimental fusion rule the pipeline was opened with (`fusionRules`), or `null` when none
-   * ran: the stage seconds, the timeline and the diagnostics are those of that plan.
-   */
-  readonly experimentalFusionRule: string | null;
   /** The fields sent to `generate` (a field left out takes the manifest's default). */
   readonly request: AnimaRequestParts;
   /** The values the run used once the manifest's defaults filled the rest. */
@@ -140,8 +138,6 @@ export type RunObservation = {
   readonly defaultModel: string;
   readonly quant: string;
   readonly quantLabel: string;
-  /** The experimental rule the run's pipeline was opened with (absent or `undefined` = none). */
-  readonly fusionRule?: string | undefined;
   readonly defaultQuant: string;
   readonly request: AnimaRequestParts;
   readonly effective: EffectiveRequest;
@@ -175,7 +171,6 @@ export const assembleRecord = (run: RunObservation): AnimaRecord => ({
   source: run.source,
   model: { name: run.model, isDefault: run.model === run.defaultModel },
   preset: { quant: run.quant, label: run.quantLabel, isDefault: run.quant === run.defaultQuant },
-  experimentalFusionRule: run.fusionRule ?? null,
   request: run.request,
   effective: run.effective,
   livePreview: run.livePreview,

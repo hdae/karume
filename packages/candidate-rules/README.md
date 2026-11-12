@@ -47,6 +47,3 @@ Who imports it (every importer; keep this list complete when one is added):
 - `apps/playground/src/models/session-ab/page.tsx` and `vae.ts` — the playground's `/session-ab` page (its
   Gemma 4 target passes `candidate/gelu_mul`, its two VAE targets `candidate/vae_rms_silu_g8` / `_g4`), and
   `apps/playground/tests/session-ab_arm_test.ts` and `session-ab_vae_test.ts`, the tests of its arms.
-- `apps/playground/src/lib/experimental-rule.ts` — the **Experimental fusion rule** control of the `/wan22` and
-  `/anima` pages (`candidate/vae_rms_silu_g8`), which passes the rule through the pipeline's experimental
-  `fusionRules`, and `apps/playground/tests/experimental_rule_test.ts`, its test.

@@ -1,7 +1,6 @@
 /**
- * Builds a `Ti2vPipeline` for the chosen (source, preset, text encoder path, experimental fusion
- * rule) on the page's GPU, and rebuilds it when any of them changes (a Session takes its rules at
- * construction, so a different rule is a different pipeline). Construction creates no Session (it opens the containers
+ * Builds a `Ti2vPipeline` for the chosen (source, preset, text encoder path) on the page's GPU,
+ * and rebuilds it when any of them changes. Construction creates no Session (it opens the containers
  * and reads the small assets), so building eagerly costs little and gives the page the prompt list.
  */
 
@@ -12,7 +11,6 @@ import { type RefObject, useEffect, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
 import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
-import { experimentalRuleOptions, VAE_RMS_SILU_EXPERIMENT } from "@/lib/experimental-rule";
 
 import type { TextEncoderPath } from "./settings";
 
@@ -26,8 +24,6 @@ export type PipelineState =
       readonly source: PipelineSource;
       readonly quant: string;
       readonly textEncoder: TextEncoderPath;
-      /** The experimental rule the pipeline was opened with (`undefined` = none). */
-      readonly fusionRule: string | undefined;
       readonly loadSeconds: number;
     }
   | {
@@ -37,7 +33,6 @@ export type PipelineState =
       readonly source: PipelineSource;
       readonly quant: string;
       readonly textEncoder: TextEncoderPath;
-      readonly fusionRule: string | undefined;
     };
 
 export type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiagnostics) => void;
@@ -57,8 +52,6 @@ export const useWanPipeline = (input: {
   readonly source: PipelineSource;
   readonly quant: string | undefined;
   readonly textEncoder: TextEncoderPath;
-  /** The experimental rule to open with (`experimentalRuleInUse` — `undefined` = none). */
-  readonly fusionRule: string | undefined;
   /** `crossRepo` key for the umT5 mount (from the manifest); `gpu` path only. */
   readonly textEncoderRepo: string | undefined;
   /** Whether `/models/umt5/` is there; the `gpu` path fails early without it. */
@@ -68,17 +61,8 @@ export const useWanPipeline = (input: {
   /** The page GPU's `track`: the build and every dispose hold the device until they settle. */
   readonly track: TrackGpuWork;
 }): PipelineState => {
-  const {
-    gpu,
-    source,
-    quant,
-    textEncoder,
-    fusionRule,
-    textEncoderRepo,
-    umt5Directory,
-    diagnostics,
-    track,
-  } = input;
+  const { gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics, track } =
+    input;
   const [state, setState] = useState<PipelineState>({ kind: "idle" });
 
   useEffect(() => {
@@ -91,7 +75,7 @@ export const useWanPipeline = (input: {
     const started = performance.now();
     setState({
       kind: "loading",
-      detail: `opening ${quant} (${textEncoder} text encoder, ${source.kind} source, experimental rule ${fusionRule ?? "none"})`,
+      detail: `opening ${quant} (${textEncoder} text encoder, ${source.kind} source)`,
     });
 
     const build = async (): Promise<Ti2vPipeline> => {
@@ -115,7 +99,6 @@ export const useWanPipeline = (input: {
         quant,
         // MUST: name the path explicitly (the pipeline's default is "gpu").
         textEncoder,
-        ...experimentalRuleOptions(VAE_RMS_SILU_EXPERIMENT, fusionRule),
         signal: controller.signal,
         onRunDiagnostics: (component, report) => diagnostics.current?.(component, report),
         onProgress: (progress) => {
@@ -151,13 +134,12 @@ export const useWanPipeline = (input: {
           source,
           quant,
           textEncoder,
-          fusionRule,
           loadSeconds: (performance.now() - started) / 1000,
         });
       },
       (error: unknown) => {
         if (!controller.signal.aborted) {
-          setState({ kind: "error", error, source, quant, textEncoder, fusionRule });
+          setState({ kind: "error", error, source, quant, textEncoder });
         }
       },
     );
@@ -167,17 +149,7 @@ export const useWanPipeline = (input: {
       // generation first).
       if (built !== undefined) void release(built, track);
     };
-  }, [
-    gpu,
-    source,
-    quant,
-    textEncoder,
-    fusionRule,
-    textEncoderRepo,
-    umt5Directory,
-    diagnostics,
-    track,
-  ]);
+  }, [gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics, track]);
 
   return state;
 };
