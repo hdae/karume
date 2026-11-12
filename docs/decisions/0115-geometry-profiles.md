@@ -623,3 +623,73 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   best skeleton and 1,578.0 ms with one skeleton geometry for every case. Every case but the guard
   drifted by ×1.14–1.21 during its run, outside the 0.9–1.1 range of addendum decision 8, so the
   derivation would not take these ratios; the numbers and their caveats are in perf-ledger K-85.
+
+### Addendum decision 13: the f32 GEMM geometries take optional fields `form` and `decode` (perf-ledger K-88; 2026-11-11)
+
+- **What.** `GemmGeometry` gains two optional fields. `form?: "tb-un" | "tas-tb-un"` is the form of
+  the f32 GEMM skeleton: `"tb-un"` maps a thread's column quads a workgroup row apart
+  (`lid.x + q · wgX`, in the accumulator update and in the store alike) and emits the 16-step K
+  loop unrolled; `"tas-tb-un"` also stores the A tile k-major (`sa[k · tileM + row]`, still a
+  scalar `array<f32>` with static stores — the shared-tile MUST of gemm.ts holds). `decode?:
+  "counter"` is the im2col decode of conv2d's implicit GEMM: each B slot keeps an `(ic, kh, kw)`
+  counter that advances by the K tile's mixed-radix step, the quad's column origin is computed
+  once, and the edge path checks the input row once per quad (`xcol4`, a whole-vec4 constructor).
+  Absent, a geometry builds the keys and WGSL it built before, byte for byte (no snapshot moved).
+  Present, the key names them (`:tb-un`, `:tas-tb-un`, `:dec`). `form` takes effect in the vec4
+  f32-compute kernels of linear / matmul / bmm / conv2d (`gemmFormGeometry`); every other kernel
+  that receives such a geometry generates the original form. `decode` takes effect in conv2d's
+  vec4 kernel; the generator refuses it on every other op.
+- **Why a field of the geometry** (not a default and not a Session option). Both forms run the same
+  multiply-adds in the same order per output element (`t` and `kk` ascending, the literal
+  `acc + a * b`, bias first in conv) and read the same elements, so the output words do not move —
+  the "kernel variant or geometry" row of [kernel-rules](../kernel-rules.md) §3; a speed choice
+  like the tile shape, carried in the key and decided per field. This widens what a geometry
+  decides from "which thread handles which output" (decision 1's invariant, reaffirmed by addendum
+  decision 6) to that plus **a bit-identical code form that keeps the K reduction order and the
+  literal multiply-add** — the same widening addendum decision 12 made for the i8a8 skeleton. The
+  invariant that matters for the numeric contract (the K order, the MAC form) is unchanged. The
+  recorded gains split by GPU and by bucket (×1.42–1.46 on the r8×8 kernels of the RTX 3080 Ti and
+  ×1.05–1.06 on the RTX 5070 Ti, ×0.91 on its r1×4 shape; the conv2d decode ×1.07–1.12 and
+  ×1.19–1.29), so one default for every device would lose somewhere; the profile route chooses it
+  per bucket (`gemmRows` rules, `conv2d.rows64` / `rows32`).
+- **Where a table may carry them.** The guard (`assertGeometryProfile`, also at
+  `acquireGpu({ geometryProfile })`) and `parseGeometryProfileJson` accept `form` in the
+  `gemmRows` rules and in `conv2d`, `decode` in `conv2d` only, and neither in `attention`: the fused
+  attention kernels keep the original form whatever the geometry carries, and every op but conv2d
+  refuses the decode at generation, so a table carrying them there would either not be what it says
+  or fail only when that op is first built. Any other value is refused naming the field.
+- **Not breaking.** Both fields are optional: the default profile and the three embedded tables
+  carry neither (their keys, WGSL and `provenance.kernels` are unchanged). A candidate's name
+  carries the fields as the key spells them, and a geometry without them keeps its name.
+- **The evaluation set `k88`.** The sweep gains a second evaluation set (the pattern of addendum
+  decision 12): a case table of its own read from the distributions' graphs — the gemma4 E2B
+  prefill gate / up, down and q linears at the 768-row chunk (int4 g32, 140 of the chunk's 277
+  linears), the umT5-XXL feed-forward wi (int8), the siglip2 so400m fc1 (f32), a small-M linear and
+  the square 4,096³ linear and matmul, the three heaviest conv2d of a Wan2.2 VAE decoder next and
+  first chunk (int8) and the anima VAE c192 / c384 conv2d (f16), each with its node count in a unit
+  (`censusGroup`). Per case the candidates are the geometry the default profile and every
+  registered table give it, each without the fields, with each form and, for conv2d, with the
+  decode alone and with each form. `deriveGeometryProfile` derives no table from it; the other
+  sets, their cases and every fingerprint are unchanged. The Playground's K-88 preset on
+  `/geometry-sweep` runs it in a browser.
+- **What stays before a table entry.** The intermittent `NVVM compilation failed: 3` seen on the
+  RTX 3080 Ti in long multi-pipeline Node runs is unexplained (seven sightings on record, four of
+  them without any K-88 code, one in a production-only gemma4 decode run, all at or after the end of
+  the results — perf-ledger K-88); the exit-path experiment that would tell a
+  teardown race from a kernel has not run. Until it has, no table carries either field and neither
+  becomes a default. Then: a derivation on both GPUs (a Chrome sweep on the RTX 5070 Ti through the
+  K-88 preset, a cooled Node sweep here) with the candidates in the derivation's own sets, and the
+  sha256 re-checks of decision 8. Not covered: the scalar (non-v4) kernels, the f16 compute variant,
+  the fused and states-form attention, conv1d / conv3d, and Metal / naga (only the k-major store
+  form has passed the M2 probe).
+- **Measured on the development GPU (2026-11-12, an evaluation, not adoption evidence).** The k88 set
+  on the RTX 3080 Ti (Node + Dawn / Vulkan, `nvidia-ampere`, one device per case with 60 s idle
+  between, 5 rounds): every one of the 159 rows was identical to the default, no row failed, and
+  every case's drift was ×0.987–1.053 (inside the 0.9–1.1 range of addendum decision 8; the GPU
+  peaked at 75 °C). The table geometry against the same geometry with its best form, decode, and
+  decode + form, as census-weighted sums: one gemma4 E2B prefill chunk's 140 measured linears
+  234.3 → 181.5 ms with the best form (×1.29); one Wan2.2 VAE next chunk's three heavy conv2d
+  55.1 ms → 49.7 (form, ×1.11), 49.0 (decode, ×1.12), 39.9 (both, ×1.38); a first chunk 16.3 ms →
+  14.4 / 14.8 / 12.0 (×1.13 / ×1.10 / ×1.35); the anima VAE's 11 conv2d 40.8 ms → 34.8 / 36.7 / 29.9
+  (×1.17 / ×1.11 / ×1.36); the siglip2 so400m fc1 ×1.32; the umT5 feed-forward wi (r4×4) ×1.00 and
+  the M = 64 guard (r1×4) ×1.02. The per-case ratios are in perf-ledger K-88.
