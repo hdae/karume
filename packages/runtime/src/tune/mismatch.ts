@@ -53,7 +53,7 @@ const familyMismatch = (
     const defaults = familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family);
     return kernels.id === defaults
       ? undefined
-      : `${where}: no provenance for family ${family} but its geometry is not the default (fingerprint ${kernels.id} / the default table's ${defaults} — a table edited by hand, or one whose provenance lost the family's entry)`;
+      : `${where}: no provenance for family ${family} but its geometry is not the default (fingerprint ${kernels.id} / the default table's ${defaults} — a table edited by hand, one whose provenance lost the family's entry, or the runtime's default geometry of the family changed since the table was written)`;
   }
   if (kernels.id !== entry.kernels) {
     return (

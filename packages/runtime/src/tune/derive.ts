@@ -2126,7 +2126,7 @@ const carryOver = (
       const defaults = familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family);
       if (kernels !== defaults) {
         throw new Error(
-          `${where} has no provenance for family ${family} but its fields are not the default (fingerprint ${kernels} / the default table's ${defaults} — a table edited by hand; sweep this family)`,
+          `${where} has no provenance for family ${family} but its fields are not the default (fingerprint ${kernels} / the default table's ${defaults} — a table edited by hand, or the runtime's default geometry of the family changed since the table was written; sweep this family)`,
         );
       }
       continue;
