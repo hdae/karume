@@ -149,6 +149,8 @@ an upper bound on the error rounding adds to its ratio.
 
 ### 4. Structured `provenance`
 
+(Amended 2026-11-12: provenance and both keys are kept per op family — addendum "the matching keys per op family".)
+
 ```ts
 readonly provenance?: {
   readonly sweep: string; // paths of the sweep records (in input order, joined with ", ")
@@ -222,6 +224,8 @@ readonly provenance?: {
 
 ### 5. The pure matching function `geometryProfileMismatch`
 
+(Amended 2026-11-12: it compares per op family — addendum "the matching keys per op family".)
+
 - Form: `geometryProfileMismatch(profile: GeometryProfile, adapterInfo: GPUAdapterInfo): string |
   undefined` (parameter narrowed to the four fields — addendum 2026-10-02, step 4). It returns the
   first mismatch as a message, or `undefined`, and never throws. As with `sessionOptionsViolation`
@@ -286,6 +290,8 @@ readonly provenance?: {
 
 ### 8. Fields added to the sweep record `karume-geometry-sweep/2`
 
+(Amended 2026-11-12: the record is `karume-geometry-sweep/3`, with `caseSets` and `defaultKernels` per op family, and the generator reads `/3` only — addendum "the matching keys per op family".)
+
 | Field               | Content                                                              | Reason                                                                                   |
 | ------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `startedAt`         | Start time of the sweep (ISO 8601)                                   | `date` is the end time; the duration could not be read                                   |
@@ -343,6 +349,8 @@ geometry goes together with re-running the sha256 checks. MUST NOT: geometry tha
   it ran is the application's responsibility, and the `./tune` doc says so.
 
 ### 10. Table lifetime and when to re-sweep
+
+(Amended 2026-11-12: a runtime change invalidates only the entries of the op families it touches, and a sweep of those families derived with the stored table as `base` restores it — addendum "the matching keys per op family".)
 
 - **Condition for continued use**: `geometryProfileMismatch` returns `undefined` (adapter fields,
   kernel fingerprint and case-set version match).
@@ -790,3 +798,98 @@ kernel variant rather than a geometry, `attentionOnline` (`{ keyWords: "tiled" }
   under ×1.05, one shape not identical, a failed pair and a quantised record over the rounding bound, per-shape records
   covering the set together, and every refusal above; `tune_profile_json_test.ts` (both fields read back and refused
   when malformed); `tune_fingerprint_test.ts` (the built-in tables' fingerprints unchanged).
+
+## Addendum (2026-11-12) — the matching keys per op family (amends decisions 4, 5, 8 and 10)
+
+The maintainer approved this design on 2026-11-12 (the backlog item "Scope the geometry sweep's `caseSet` per op family",
+filed 2026-10-27 after the ruling of 2026-10-26).
+
+- **Why**: the case-set version was one hash over every case of `SWEEP_CASES`, and the kernel fingerprint one hash
+  over the kernels of every case. Adding one op family's cases moved both for every table: every embedded and every
+  saved table mismatched and every sweep record was refused, also for the families whose cases had not changed. And a
+  table whose records had no case of a class still carried the whole case set (`apple-metal-3` and its `i8a8.conv3d` —
+  ADR [0115](0115-geometry-profiles.md) addendum decision 11).
+- **The families**, the unit a class's evidence stands on (`GeometryProfileFamily` in
+  `src/kernels/geometry-profile.ts`, since kernels do not import tune; the maps from sweep op and from profile field to
+  family are one table each in `src/tune/families.ts`, written with `satisfies` so that a new op or field must be
+  classified):
+
+  | Family | Sweep ops | Profile fields |
+  | --- | --- | --- |
+  | `gemm` | `linear`, `matmul`, `bmm` | `gemmRows` (every bucket) |
+  | `attention` | `attention` | `attention.qk`, `attention.pv` |
+  | `conv2d` | `conv2d` | `conv2d.rows64`, `conv2d.rows32` |
+  | `i8a8-linear` | `i8a8-linear` | `i8a8.linear` |
+  | `i8a8-attention` | `i8a8-attention` | `i8a8.attentionQk`, `i8a8.attentionPv` |
+  | `i8a8-conv3d` | `i8a8-conv3d` | `i8a8.conv3d` |
+
+  The row-count bucket bounds (`PROFILE_GEMM_ROWS_BOUNDS`) enter the `gemm` family's case-set version only. The hashed
+  form has a bounds entry per family (absent for the other five), so another family can get bounds without a change
+  of format.
+- **Provenance** (amends decision 4): `adapter` (unchanged) and `families`, one entry per family with `sweep`,
+  `sha256`, `date`, `candidateSet` and `userAgent` restricted to the records that have a row of the family, `kernels`
+  (the fingerprint over the family's cases only) and `caseSet` (the version over the family's cases and bounds). A
+  family that no record has a case of has no entry, and its fields are the default. The single `sweep`, `sha256`,
+  `date`, `candidateSet`, `userAgent`, `kernels` and `caseSet` are gone; `parseGeometryProfileJson` refuses them as
+  unknown fields, and there is no reader for the earlier shape.
+- **The online attention's form is not a family**: `attentionOnline` is decided from attention-bench records, not
+  sweep cases. The online attention's launch lines, which the single fingerprint appended for a table carrying the
+  field (addendum of 2026-11-12 on attention-bench records), are now `provenance.attentionBench.kernels`, their hash
+  alone (`attentionBenchKernelsId`), present exactly when the table carries the field. No family fingerprint contains
+  them, and a table without the field hashes nothing new.
+- **The sweep record is `karume-geometry-sweep/3`** (amends decision 8): `caseSet` becomes `caseSets` and
+  `defaultKernels` becomes a map, both with one value per family of the planned cases, each hashed over the candidate
+  set's own case table restricted to the family (an evaluation set still never claims the sweep's case set).
+  `candidateKernels` is unchanged. The reader accepts `/3` only: for every family the record has a row of,
+  `caseSets[family]` and `defaultKernels[family]` must be present and equal the current runtime's, and a missing key
+  throws. The leniency for records without the keys goes with `/2`. An application that merges per-case records takes
+  the union of their keys, since each record holds the families of its own cases (the playground's page does).
+- **Derivation with a base table**: `deriveGeometryProfile(reports, { …, base })`. A family is covered when some
+  record has a row of one of its cases, and a covered family is derived from the records as before. A family the
+  records do not cover takes `base`'s fields of the family and its provenance entry verbatim, after the entry's
+  `kernels` and `caseSet` are checked against the current runtime (a stale entry throws, naming the family: sweep this
+  family again). Without a `base` entry the family keeps the default and gets no entry; a `base` whose fields of that
+  family are not the default is refused (a table edited by hand). With `base`, `base.provenance` must exist with the
+  records' adapter, and a covered family must have every case of its current case set in the records: carrying over
+  promises that nothing else moves, so a half-swept family must not silently put its unswept fields back to the
+  default. Without attention-bench records, `base`'s attention-bench block and its `attentionOnline` are carried
+  likewise after `shapes` (and `kernels`, when present) are checked (stale: measure the attention bench again); a
+  `base` carrying `attentionOnline` without the block, or without its `kernels`, is refused. `id` and `match` still
+  come from the options, and at least one record is still required. A carried field gets one verdict line naming the
+  base table and the sweeps of its entry. Without `base` the coverage rule is unchanged: each field is judged on the
+  cases of it the records have, and a field with no case keeps the default (a family with some of its cases swept is
+  derived from those cases, and its entry carries the family's whole case-set version).
+- **Matching** (amends decision 5): `provenance` is present → the four adapter fields → per family in the fixed order
+  (`gemm`, `attention`, `conv2d`, `i8a8-linear`, `i8a8-attention`, `i8a8-conv3d`): with an entry, `kernels`, then
+  `caseSet`; without one, the family's fingerprint equals the default table's ("no provenance for family X but its
+  geometry is not the default"). Then the online attention's block: a table with `attentionOnline` needs the block
+  with `kernels`, `kernels` is compared when present and `shapes` whenever the block exists. The first mismatch is
+  returned as a message that names the family; the function still returns `string | undefined`.
+- **Public surface**: `./tune` exports `sweepCaseSetIds(set?)` and `sweepDefaultKernelsIds(set?)` (one value per
+  family, `GeometryProfileFamilyIds`) in place of `sweepCaseSetId`, whose callers no longer compile; `.` exports
+  `GeometryProfileFamily` and `GeometryProfileFamilyProvenance`. The default table's fingerprints are public because
+  a record must now carry them for every family it has rows of, and an application that builds or checks a record
+  has no other way to obtain them.
+- **The embedded tables** are converted in format only. Before the conversion, each table's single `kernels` and
+  `caseSet` equalled the runtime's (the equality `tune_fingerprint_test.ts` pinned), so its per-family keys are those
+  of the same runtime. A family has an entry exactly when one of the records the table names has a row of it.
+  `nvidia-ampere` and `nvidia-blackwell` have an entry for every family (each of their two records has rows of all
+  six); `apple-metal-3` has none for `i8a8-conv3d` (no record has a conv3d case), and its other entries name the
+  records with rows of the family (five for `gemm`, four for `attention` and `conv2d`, three for the two i8a8
+  families). No field value, geometry, kernel, codegen snapshot or sha row moves.
+- **Consequences** (amends decision 10): a table saved before this change no longer parses and a `/2` record is
+  refused, so an application sweeps once more. From then on a runtime change that touches one family's kernels,
+  cases or bounds invalidates only that family's entries, and a sweep of that family derived with the stored table as
+  `base` restores the table.
+- **Checks**: `tune_fingerprint_test.ts` (each family's keys move with that family's fields, kernels, cases and bounds
+  only; the built-in tables' entries are the current runtime's and a family without one is the default);
+  `tune_profile_test.ts` (a record missing a family's key is refused, naming it; a family without rows is not read;
+  `/2` is refused); `tune_profile_base_test.ts` (the carry-over copies fields and entry verbatim; a stale base entry,
+  a base whose family without an entry is not the default, a half-covered family, a base without provenance or of
+  another adapter, and a stale or incomplete attention-bench block are refused; each entry names only the records
+  with rows of its family); `tune_mismatch_test.ts` (the message names the family, the order, a family without an
+  entry, every built-in table against its own adapter); `tune_attention_profile_test.ts` (`attentionBench.kernels`
+  exactly when adopted, no family fingerprint moved by the field, the matching rule); `tune_profile_json_test.ts`
+  and `geometry_profile_test.ts` (the shape).
+- **Not in this addendum**: a `base` input on the playground's `/geometry-sweep` page, and a structured answer to
+  "which families are stale" (the message names the first one).

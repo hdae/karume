@@ -234,8 +234,9 @@
 | split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
-| kernel fingerprint (`provenance.kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ | — | ADR 0117 決定 4 |
-| case-set version (`caseSet`) | ケース集合の版 | 掃引ケースと行数バケットの境界から導くハッシュ | — | ADR 0117 決定 4 / 8 |
+| kernel fingerprint (`provenance.families[family].kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ（op ファミリーごとに 1 つ） | — | ADR 0117 決定 4・追記 2026-11-12 |
+| case-set version (`provenance.families[family].caseSet`) | ケース集合の版 | 掃引ケース（gemm は行数バケットの境界も）から op ファミリーごとに導くハッシュ | — | ADR 0117 決定 4 / 8・追記 2026-11-12 |
+| op family (geometry sweep) △ | op ファミリー（掃引の） | 幾何プロファイルの根拠と照合のキーを分ける単位（gemm / attention / conv2d / i8a8-linear / i8a8-attention / i8a8-conv3d）。モデルの「ファミリー」とは別の語 | — | ADR 0117 追記 2026-11-12 |
 | rounding-error bound (E) | 丸め誤差の上界 | 100 µs 丸めが既定比に与える相対誤差の上界 | — | ADR 0117 決定 3 |
 | rounding-error bound (E of the measurement check) | 丸め誤差の上界 / 計測のチェック | E ≤ 1% の観測だけを比の材料にする計測の検査 | 計測の門 | ADR 0117 決定 3 |
 | matching (`geometryProfileMismatch`) | 照合（表の） | 保存した表を今の adapter と runtime に当ててよいかを見る純関数 | — | ADR 0117 決定 5 |

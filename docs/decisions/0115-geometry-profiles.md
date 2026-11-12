@@ -573,6 +573,9 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   2026-10-30 with the maintainer's ruling 42 = c, which re-derived the whole `nvidia-blackwell` table from two full
   sweeps of the current kernels: `i8a8.conv3d` takes `tile64x64r8x4w16x8k16`, the i8a8 ③PV and conv2d rows32 change,
   and GEMMs of 129–512 rows and the i8a8 ①QK return to the default; the records are in the table's provenance.)
+  (Updated 2026-11-12: the case-set version and the kernel fingerprint are now taken per op family — ADR
+  [0117](0117-app-geometry-tuning.md) addendum 2026-11-12, "the matching keys per op family"; `apple-metal-3` has no
+  `i8a8-conv3d` entry, so its `i8a8.conv3d` is the default by absence in the provenance too.)
 
 ### Addendum decision 12: the i8a8 geometries take an optional field `skeleton` (perf-ledger K-85; 2026-11-11)
 
