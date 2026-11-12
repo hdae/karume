@@ -15,7 +15,8 @@
  *
  * There are three candidate sets a table is derived from ({@link CandidateSet}): `quick` (the
  * default + 4–5 shapes), `quick+` (quick ∪ the geometries adopted by the registered profiles — the
- * default) and `full` (the whole grid). Two more, `k85` and `k88`, are evaluation sets
+ * default) and `full` (the whole grid — for the i8a8 linear a grid of its own with the vec4
+ * skeleton and the K64 tiles, {@link i8a8LinearCandidates}). Two more, `k85` and `k88`, are evaluation sets
  * ({@link EVALUATION_SETS}): the vec4 skeleton of the i8a8 linear (perf-ledger K-85) and the f32
  * skeleton forms with the conv2d counter decode (perf-ledger K-88), each on cases of its own,
  * outside the sweep's case set, so they change neither the other sets nor any fingerprint.
@@ -281,25 +282,25 @@ export const quickPlusI8a8Candidates = (
 
 /**
  * The workgroup storage every WebGPU device provides (the default of
- * `maxComputeWorkgroupStorageSize`, 16,384 B). The k85 grid keeps to it as an embedded table must:
+ * `maxComputeWorkgroupStorageSize`, 16,384 B). The skeleton grid and the i8a8 linear's `full`
+ * keep to it as an embedded table must:
  * the automatic selection path does not run the limit check (geometry-profile.ts).
  */
 const DEFAULT_WORKGROUP_STORAGE = 16384;
 
 /**
- * The i8a8 set of `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear): the
- * geometry of every `i8a8.linear` rule of every registered profile (`profiles` — the table an adapter runs today,
- * measured in the same record) and the grid regM ∈ {8, 12, 16} × regN ∈ {4, 8} × wgX ∈ {8, 16} ×
- * wgY ∈ {4, 8, 16} × tileK ∈ {16, 32, 64}, each without and then with the skeleton, filtered by the
- * runtime's check and {@link DEFAULT_WORKGROUP_STORAGE}. The sweep puts the default geometry at the
- * front of every case.
- *
- * NOTE: the set runs on i8 weights only (its cases are cases.ts's `K85_CASES`). A K64 geometry is
- * refused for w4a8 at group 32 (`assertI8a8GroupGeometry`), which this set does not measure.
+ * Whether a geometry fits the workgroup storage every device provides
+ * ({@link DEFAULT_WORKGROUP_STORAGE}).
  */
-export const k85I8a8Candidates = (
-  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
-): I8a8Candidate[] => {
+const fitsEveryDevice = (geometry: I8a8Geometry): boolean =>
+  i8a8WorkgroupStorageBytes(geometry) <= DEFAULT_WORKGROUP_STORAGE;
+
+/**
+ * The skeleton grid of the i8a8 linear (perf-ledger K-85): regM ∈ {8, 12, 16} × regN ∈ {4, 8} ×
+ * wgX ∈ {8, 16} × wgY ∈ {4, 8, 16} × tileK ∈ {16, 32, 64}, each without and then with the vec4
+ * skeleton, filtered by the runtime's check and {@link DEFAULT_WORKGROUP_STORAGE}.
+ */
+const skeletonGridCandidates = (): I8a8Candidate[] => {
   const grid: I8a8Candidate[] = [];
   for (const regM of [8, 12, 16]) {
     for (const regN of [4, 8]) {
@@ -309,7 +310,7 @@ export const k85I8a8Candidates = (
             const word: I8a8Geometry = { regM, regN, wgX, wgY, tileK };
             for (const geometry of [word, { ...word, skeleton: "vec4" as const }]) {
               if (
-                i8a8WorkgroupStorageBytes(geometry) <= DEFAULT_WORKGROUP_STORAGE &&
+                fitsEveryDevice(geometry) &&
                 passes(() => assertI8a8Geometry(geometry, "geometry-sweep"))
               ) {
                 grid.push(i8a8Candidate(geometry));
@@ -320,13 +321,42 @@ export const k85I8a8Candidates = (
       }
     }
   }
-  return unique([
+  return grid;
+};
+
+/**
+ * The i8a8 linear's candidates in `full` (ADR 0115 addendum decision 14): the i8a8 grid of
+ * {@link i8a8Candidates}, then the skeleton grid (the K64 tiles and the vec4 skeleton included —
+ * {@link skeletonGridCandidates}), deduplicated by name and filtered to
+ * {@link DEFAULT_WORKGROUP_STORAGE} as an embedded table must be. The i8a8 attention and conv3d keep
+ * {@link i8a8Candidates}.
+ *
+ * NOTE: the i8a8 linear's sweep cases are i8 weights. A K64 geometry is refused for w4a8 at group
+ * 32 (`assertI8a8GroupGeometry`); the recipe builder then runs the default geometry instead.
+ */
+export const i8a8LinearCandidates = (): I8a8Candidate[] =>
+  unique([...i8a8Candidates(), ...skeletonGridCandidates()]).filter(({ geometry }) =>
+    fitsEveryDevice(geometry),
+  );
+
+/**
+ * The i8a8 set of `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear): the
+ * geometry of every `i8a8.linear` rule of every registered profile (`profiles` — the table an
+ * adapter runs today, measured in the same record) and the skeleton grid
+ * ({@link skeletonGridCandidates}). The sweep puts the default geometry at the front of every case.
+ *
+ * NOTE: the set runs on i8 weights only (its cases are cases.ts's `K85_CASES`). A K64 geometry is
+ * refused for w4a8 at group 32 (`assertI8a8GroupGeometry`), which this set does not measure.
+ */
+export const k85I8a8Candidates = (
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): I8a8Candidate[] =>
+  unique([
     ...profiles.flatMap((profile) =>
       profile.i8a8.linear.map((rule) => i8a8Candidate(rule.geometry)),
     ),
-    ...grid,
+    ...skeletonGridCandidates(),
   ]);
-};
 
 /** The skeleton forms of the f32 GEMM (perf-ledger K-88), in the order the `k88` set measures them. */
 const K88_FORMS = ["tb-un", "tas-tb-un"] as const;
@@ -467,7 +497,14 @@ export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
   }
 };
 
-/** The set for the i8a8 family. */
+/**
+ * The set for the i8a8 linear: `full` is its own grid ({@link i8a8LinearCandidates}), every other
+ * set the i8a8 family's ({@link i8a8CandidatesIn}).
+ */
+export const i8a8LinearCandidatesIn = (set: CandidateSet): I8a8Candidate[] =>
+  set === "full" ? i8a8LinearCandidates() : i8a8CandidatesIn(set);
+
+/** The set for the i8a8 family (the i8a8 attention and conv3d — the linear's `full` differs). */
 export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] => {
   switch (set) {
     case "quick":

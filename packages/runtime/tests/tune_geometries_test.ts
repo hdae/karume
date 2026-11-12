@@ -37,6 +37,8 @@ import {
   i8a8Candidate,
   i8a8Candidates,
   i8a8CandidatesIn,
+  i8a8LinearCandidates,
+  i8a8LinearCandidatesIn,
   EVALUATION_SETS,
   k85I8a8Candidates,
   k88Conv2dCandidates,
@@ -48,6 +50,8 @@ import {
   quickPlusGemmCandidates,
   quickPlusI8a8Candidates,
 } from "../src/tune/geometries.ts";
+import { SWEEP_CASES } from "../src/tune/cases.ts";
+import { candidatesFor } from "../src/tune/harness.ts";
 
 const names = (items: readonly { readonly name: string }[]): string[] =>
   items.map((item) => item.name);
@@ -128,6 +132,94 @@ describe("i8a8 candidates", () => {
   it("quick is a subset of full", () => {
     const full = new Set(names(i8a8Candidates()));
     for (const name of names(quickI8a8Candidates())) assert(full.has(name), name);
+  });
+});
+
+describe("the i8a8 linear's full grid (ADR 0115 addendum decision 14)", () => {
+  const linear = i8a8LinearCandidates();
+  const listed = names(linear);
+  /** Whether a geometry passes the runtime's check and fits 16,384 B (the grid's filter). */
+  const allowed = (geometry: I8a8Geometry): boolean => {
+    if (i8a8WorkgroupStorageBytes(geometry) > 16384) return false;
+    try {
+      assertI8a8Geometry(geometry, "grid");
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("is the old full i8a8 grid first, then the skeleton grid regM 8 / 12 / 16 × regN 4 / 8 × wgX 8 / 16 × wgY 4 / 8 / 16 × tileK 16 / 32 / 64, without and with the skeleton, deduplicated, within the checks and 16,384 B", () => {
+    assertEquals(listed.slice(0, i8a8Candidates().length), names(i8a8Candidates()));
+    assertEquals(new Set(listed).size, listed.length);
+    assertEquals(linear.length, 230);
+    assertEquals(linear.filter(({ geometry }) => geometry.skeleton === "vec4").length, 103);
+    assertEquals(linear.filter(({ geometry }) => geometry.tileK === 64).length, 62);
+    for (const { name, geometry } of linear) {
+      assert(allowed(geometry), name);
+      assertEquals(name, i8a8GeometryKeyPart(geometry, false));
+    }
+    // Every point of the skeleton grid the checks and the limit allow is in it (nothing else dropped)
+    for (const regM of [8, 12, 16]) {
+      for (const regN of [4, 8]) {
+        for (const wgX of [8, 16]) {
+          for (const wgY of [4, 8, 16]) {
+            for (const tileK of [16, 32, 64]) {
+              for (const skeleton of [undefined, "vec4" as const]) {
+                const geometry: I8a8Geometry = {
+                  regM,
+                  regN,
+                  wgX,
+                  wgY,
+                  tileK,
+                  ...(skeleton === undefined ? {} : { skeleton }),
+                };
+                assertEquals(
+                  listed.includes(i8a8GeometryKeyPart(geometry, false)),
+                  allowed(geometry),
+                  JSON.stringify(geometry),
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+    // The geometries the K-85 evaluation picked on both GPUs are in it
+    for (const name of [
+      "tile64x64r8x4w16x8k64s",
+      "tile32x64r8x4w16x4k64s",
+      "tile128x64r16x4w16x8k64s",
+      "tile128x64r8x8w8x16k64s",
+      "tile32x32r8x4w8x4k64s",
+      "tile96x128r12x8w16x8k64s",
+    ]) {
+      assert(listed.includes(name), name);
+    }
+  });
+
+  it("is what the i8a8 linear sweeps under full; quick / quick+ and the i8a8 attention and conv3d keep the i8a8 family's set", () => {
+    assertEquals(names(i8a8LinearCandidatesIn("full")), listed);
+    for (const set of ["quick", "quick+"] as const) {
+      assertEquals(names(i8a8LinearCandidatesIn(set)), names(i8a8CandidatesIn(set)), set);
+    }
+    assertEquals(names(i8a8CandidatesIn("full")), names(i8a8Candidates()));
+    for (const op of ["i8a8-linear", "i8a8-attention", "i8a8-conv3d"] as const) {
+      const sweepCase = SWEEP_CASES.find((entry) => entry.op === op);
+      assert(sweepCase !== undefined, op);
+      assertEquals(
+        names(candidatesFor(sweepCase, "full")),
+        op === "i8a8-linear" ? listed : names(i8a8Candidates()),
+        op,
+      );
+      assertEquals(names(candidatesFor(sweepCase, "quick+")), names(quickPlusI8a8Candidates()), op);
+    }
+    // The table-deriving sets other than the linear's full hold no skeleton and no K64 tile
+    for (const set of ["quick", "quick+", "full"] as const) {
+      for (const { name, geometry } of i8a8CandidatesIn(set)) {
+        assert(!("skeleton" in geometry) && geometry.tileK <= 32, `${set}: ${name}`);
+      }
+    }
   });
 });
 

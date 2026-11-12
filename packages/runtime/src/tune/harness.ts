@@ -149,6 +149,7 @@ import {
   type GeometryCandidate,
   i8a8Candidate,
   i8a8CandidatesIn,
+  i8a8LinearCandidatesIn,
   k88Conv2dCandidates,
   k88GemmCandidates,
 } from "./geometries.ts";
@@ -821,6 +822,8 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
     case "conv2d":
       return set === "k88" ? k88Conv2dCandidates(sweepCase.channelsOut) : conv2dCandidatesIn(set);
     case "i8a8-linear":
+      // `full` gives the i8a8 linear its own grid (the skeleton and the K64 tiles included)
+      return i8a8LinearCandidatesIn(set);
     case "i8a8-attention":
     case "i8a8-conv3d":
       return i8a8CandidatesIn(set);

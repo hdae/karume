@@ -304,17 +304,26 @@ const isI8a8Op = (op: SweepOp): boolean =>
   op === "i8a8-linear" || op === "i8a8-attention" || op === "i8a8-conv3d";
 
 /**
- * The geometry fields (4 values for the f32 family, 5 including tileK for the i8a8 family — a wrong
- * combination of family and fields fails).
+ * The geometry fields (4 values for the f32 family, 5 including tileK for the i8a8 family, which
+ * may also carry the vec4 skeleton `skeleton: "vec4"` — perf-ledger K-85; a wrong combination of
+ * family and fields fails).
  */
 const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geometry => {
   if (!isRecord(value)) throw new Error(`${where}: geometryParams is not an object`);
   const keys = isI8a8Op(op)
     ? (["regM", "regN", "wgX", "wgY", "tileK"] as const)
     : (["regM", "regN", "wgX", "wgY"] as const);
-  const extra = Object.keys(value).filter((key) => !(keys as readonly string[]).includes(key));
+  const extra = Object.keys(value).filter(
+    (key) => !(keys as readonly string[]).includes(key) && !(isI8a8Op(op) && key === "skeleton"),
+  );
   if (extra.length > 0) {
     throw new Error(`${where}: geometryParams has unexpected fields ${extra.join(", ")}`);
+  }
+  const { skeleton } = value;
+  if (skeleton !== undefined && skeleton !== "vec4") {
+    throw new Error(
+      `${where}: geometryParams.skeleton must be "vec4" or absent (${JSON.stringify(skeleton)})`,
+    );
   }
   const params: Record<string, number> = {};
   for (const key of keys) {
@@ -333,6 +342,8 @@ const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geomet
         wgX: params.wgX,
         wgY: params.wgY,
         tileK: params.tileK,
+        // Absent stays absent (a geometry without it keeps its key and WGSL byte for byte)
+        ...(skeleton === undefined ? {} : { skeleton }),
       } satisfies I8a8Geometry)
     : { regM: params.regM, regN: params.regN, wgX: params.wgX, wgY: params.wgY };
 };
@@ -907,9 +918,15 @@ const slotOf = (
   }
 };
 
+/**
+ * The identity of a geometry (an i8a8 geometry with the vec4 skeleton is another geometry than the
+ * same tile without it — another kernel, a candidate of its own).
+ */
 const geometryKey = (geometry: Geometry): string =>
   "tileK" in geometry
-    ? `${geometry.regM},${geometry.regN},${geometry.wgX},${geometry.wgY},${geometry.tileK}`
+    ? `${geometry.regM},${geometry.regN},${geometry.wgX},${geometry.wgY},${geometry.tileK}${
+        geometry.skeleton === undefined ? "" : `,${geometry.skeleton}`
+      }`
     : `${geometry.regM},${geometry.regN},${geometry.wgX},${geometry.wgY}`;
 
 const geometricMean = (values: readonly number[]): number =>

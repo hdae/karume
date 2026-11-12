@@ -490,6 +490,75 @@ describe("deriveProfile: the conv3d w8a8 class (i8a8.conv3d)", () => {
   });
 });
 
+describe("deriveProfile: the vec4 skeleton of an i8a8 geometry is a candidate like any other (perf-ledger K-85)", () => {
+  const linearDefault = i8a8Candidate(defaultI8a8Geometry("linear"));
+  const linearRef = (m: number): CaseRef => ({
+    caseId: `i8a8-linear-m${m}`,
+    op: "i8a8-linear",
+    shape: `M${m} N64 K64`,
+  });
+  const WORD: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 64 };
+  const SKELETON: I8a8Geometry = { ...WORD, skeleton: "vec4" };
+  /** One i8a8 linear case: the default row, the word geometry and the same tile with the skeleton. */
+  const linearRows = (m: number, word: number, skeleton: number): Record<string, unknown>[] => [
+    row(linearRef(m), linearDefault, true),
+    row(linearRef(m), i8a8Candidate(WORD), false, { speedup: word, identical: true }),
+    row(linearRef(m), i8a8Candidate(SKELETON), false, { speedup: skeleton, identical: true }),
+  ];
+
+  it("a skeleton row is read with its field, judged apart from the same tile without it, and the table carries it", () => {
+    const sources = [source([...linearRows(1024, 1.2, 1.4), ...linearRows(4096, 1.1, 1.3)])];
+    const parsedRow = sources[0].rows.find(
+      (entry) => entry.geometry === i8a8Candidate(SKELETON).name,
+    );
+    assertEquals(parsedRow?.geometryParams, SKELETON);
+    const verdicts = deriveProfile(sources, OPTIONS);
+    const verdict = verdictOf(verdicts, "i8a8.linear");
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, SKELETON);
+    assertEquals(verdict.outcome.name, "tile64x64r8x4w16x8k64s");
+    assertStringIncludes(
+      verdict.rejected.find(({ name }) => name === i8a8Candidate(WORD).name)?.reason ?? "",
+      "geometric mean ×1.149 (below the adopted ×1.349)",
+    );
+    const profile = buildGeometryProfile(
+      { id: "skeleton", vendor: "apple", architecture: "metal-3" },
+      sources,
+      verdicts,
+    );
+    assertEquals(profile.i8a8.linear.at(-1)?.geometry, SKELETON);
+    assertGeometryProfile(profile);
+  });
+
+  it("a skeleton value other than vec4, and a skeleton on an f32 geometry, fail the record naming the row", () => {
+    const bad = (
+      geometryParams: Record<string, unknown>,
+      ref: CaseRef,
+    ): Record<string, unknown> => ({
+      ...row(ref, i8a8Candidate(WORD), false, { speedup: 1.2, identical: true }),
+      geometryParams,
+    });
+    assertThrows(
+      () =>
+        source([
+          row(linearRef(1024), linearDefault, true),
+          bad({ ...WORD, skeleton: "vec8" }, linearRef(1024)),
+        ]),
+      Error,
+      'rows[1]: geometryParams.skeleton must be "vec4" or absent ("vec8")',
+    );
+    assertThrows(
+      () =>
+        source([
+          ...caseRows(linearCase(1024), BIG, []),
+          bad({ ...A, skeleton: "vec4" }, linearCase(1024)),
+        ]),
+      Error,
+      "rows[1]: geometryParams has unexpected fields skeleton",
+    );
+  });
+});
+
 describe("deriveProfile: a case whose default re-measurement ratio is out of range is dropped from that sweep's inputs", () => {
   const ref = linearCase(1024);
   const wide = linearCase(4096);
