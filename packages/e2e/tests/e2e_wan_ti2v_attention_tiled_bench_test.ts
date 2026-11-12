@@ -1,17 +1,19 @@
 /**
- * The tiled key axis candidate of the online attention on this machine (opt-in:
+ * The tiled key axis of the online attention against the form N gives, on this machine (opt-in:
  * `KARUME_ATTN_TILED_BENCH=<dir>`; perf-ledger K-106): `runAttentionRouteBench` of
- * `@karume/runtime/tune` with `onlineTiled` at Wan2.2 TI2V-5B's three attention shapes
- * (`WAN22_ATTENTION_SHAPES`: self-attention at 33 and 121 frames, cross-attention at 121 frames),
- * one call per shape with idle time between them for cooling (`KARUME_ATTN_TILED_IDLE_SECONDS`,
- * default 60). `KARUME_ATTN_TILED_SHAPES=<id>,<id>` narrows the shapes.
+ * `@karume/runtime/tune` with `onlineTiled` at the bench's shape set (`ATTENTION_BENCH_SHAPES`:
+ * Wan2.2 TI2V-5B's self-attention at 33 and 121 frames and cross-attention at 121 frames, and
+ * MOSS-Image's attention at 1024²), one call per shape with idle time between them for cooling
+ * (`KARUME_ATTN_TILED_IDLE_SECONDS`, default 60). `KARUME_ATTN_TILED_SHAPES=<id>,<id>` narrows the
+ * shapes.
  *
  * It needs no model asset: the shapes are sizes, and the bench fills them with seeded values. Each
- * per-shape record is written under the directory the variable names, with a summary of the two
- * ratios per shape — tiled ÷ online for the kernel alone (the median of the per-round ratios, each
- * round timing A B B A on one device, so a thermal drift within the round cancels) and for kernel +
- * producer per node — the kernel gain (online ÷ tiled) and whether it clears the adoption line
- * ×1.05. That line is decided on the RTX 5070 Ti; a value here is this machine's.
+ * per-shape record is written under the directory the variable names — the records are the second
+ * input of the profile derivation (`deriveGeometryProfile`'s `attentionBench`, ADR 0117 addendum
+ * 2026-11-12) — with a summary of the two ratios per shape: tiled ÷ online for the kernel alone (the
+ * median of the per-round ratios, each round timing A B B A on one device, so a thermal drift within
+ * the round cancels) and for kernel + producer per node from the arms' minimums (the statistic the
+ * derivation reads), each with its gain (online ÷ tiled) and whether it clears ×1.05.
  *
  * It asserts what the run is the evidence for: GPU timestamps, the candidate ran at every shape
  * without a failed stage, and its identity block is identical (both producers on the same f32 Vᵀ,
@@ -28,9 +30,9 @@ import { assert, assertEquals } from "@std/assert";
 import { mkdir, writeTextFile } from "@karume/test-support/fs";
 import { acquireGpu } from "@karume/runtime";
 import {
+  ATTENTION_BENCH_SHAPES,
   type AttentionBenchReport,
   runAttentionRouteBench,
-  WAN22_ATTENTION_SHAPES,
 } from "@karume/runtime/tune";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
@@ -54,7 +56,7 @@ if (skipReason !== undefined) {
 }
 
 const ROUNDS = 5;
-/** The adoption line of the candidate: a kernel gain of ×1.05 (ADR 0132 Consequences). */
+/** The adoption line: a gain of ×1.05 (the derivation's default `minSpeedup`). */
 const ADOPTION_GAIN = 1.05;
 
 const sleep = (seconds: number): Promise<void> =>
@@ -66,10 +68,10 @@ const gainOf = (ratio: number | undefined): number | undefined =>
 describe.skipIf(skipReason !== undefined)(
   "the tiled key axis candidate on this machine (opt-in)",
   () => {
-    it("the candidate runs at every Wan2.2 attention shape with an identical O, timed in the same rounds as online", async () => {
+    it("the candidate runs at every shape of the bench's set with an identical O, timed in the same rounds as online", async () => {
       const directory = DIRECTORY ?? "";
       await mkdir(directory, { recursive: true });
-      const shapes = WAN22_ATTENTION_SHAPES.filter(
+      const shapes = ATTENTION_BENCH_SHAPES.filter(
         ({ id }) => SHAPE_FILTER.length === 0 || SHAPE_FILTER.includes(id),
       );
       assert(
@@ -161,7 +163,7 @@ describe.skipIf(skipReason !== undefined)(
         rounds: ROUNDS,
         idleSeconds: IDLE_SECONDS,
         adoptionGain: ADOPTION_GAIN,
-        what: "tiled ÷ online: below 1 = the candidate faster; gain = online ÷ tiled; the adoption line is decided on the RTX 5070 Ti",
+        what: "tiled ÷ online: below 1 = the candidate faster; gain = online ÷ tiled; the profile derivation reads withProducer (kernel + producer per node from the arms' minimums)",
         shapes: perShape,
       };
       await writeTextFile(

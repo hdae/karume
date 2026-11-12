@@ -64,12 +64,42 @@ export const WAN22_ATTENTION_SHAPES: readonly AttentionBenchShape[] = [
   },
 ];
 
+const MOSS_IMAGE_HEADS = 24;
+const MOSS_IMAGE_DEPTH = 128;
+/** Image tokens of a 1024² MOSS-Image request: 64 × 64 latent cells of 16 px. */
+const MOSS_IMAGE_TOKENS_1024 = 64 * 64;
+/** The text tokens of the fridge-note prompt (the request of the family's 1024² sha rows). */
+const MOSS_IMAGE_FRIDGE_NOTE_TOKENS = 63;
+
+/**
+ * MOSS-Image's attention at the default preset's 1024² request (`f32+dit8-a8-attn8-online`, the
+ * online route): the joint self-attention of `dit` over S = 4,096 image tokens + 63 text tokens =
+ * 4,159 (N % 4 = 3 — the padded form where the profile chooses none), 24 heads of D = 128 (the
+ * `dit` graph's 42 attention nodes are all `[1, 24, S, 128]` with the half scale of D = 128 — the
+ * distribution's graph declaration; `assertMossImageSize` / `mossImageTokens` of
+ * packages/models/src/moss give the image tokens, the session A/B of e2e_moss_session_ab_test.ts the
+ * text tokens). `dit_skip22`'s negative branch (S = 4,106 there) is the same kind of shape and is
+ * not measured separately.
+ */
+export const MOSS_IMAGE_ATTENTION_SHAPE: AttentionBenchShape = {
+  id: "moss-image-1024",
+  heads: MOSS_IMAGE_HEADS,
+  queries: MOSS_IMAGE_TOKENS_1024 + MOSS_IMAGE_FRIDGE_NOTE_TOKENS,
+  keys: MOSS_IMAGE_TOKENS_1024 + MOSS_IMAGE_FRIDGE_NOTE_TOKENS,
+  depth: MOSS_IMAGE_DEPTH,
+  scale: halfScale(MOSS_IMAGE_DEPTH),
+};
+
 /**
  * The bench's default shapes and the set an attention-bench record given to the profile derivation
- * must cover (`deriveGeometryProfile`'s `attentionBench` — ADR 0117 addendum 2026-11-12): every shape
- * a field the derivation decides from these records applies to on a default preset.
+ * must cover (`deriveGeometryProfile`'s `attentionBench` — ADR 0117 addendum 2026-11-12): Wan2.2's
+ * three and MOSS-Image's one, the online-route shapes of the default presets the derivation's field
+ * applies to.
  * MUST: a change here changes `attentionBenchShapeSetId`, so a saved table whose `attentionOnline`
  * was decided on another set mismatches (`geometryProfileMismatch`) and records of another set are
  * refused.
  */
-export const ATTENTION_BENCH_SHAPES: readonly AttentionBenchShape[] = [...WAN22_ATTENTION_SHAPES];
+export const ATTENTION_BENCH_SHAPES: readonly AttentionBenchShape[] = [
+  ...WAN22_ATTENTION_SHAPES,
+  MOSS_IMAGE_ATTENTION_SHAPE,
+];
