@@ -33,8 +33,9 @@
  *    shape since the online kernel's key valid length, ADR 0132's addendum of 2026-10-27), exactly
  *    {@link LINEAR_A8} i8a8 linear dispatches, exactly {@link ATTENTION_NODES} × the node's query-row
  *    windows online-kernel dispatches (`planAttentionOnlineWindows` — a pure function of the shape),
- *    and the online kernel in its padded form (`:kpad`) at every dispatch when the branch's
- *    S = N + T is not a multiple of 4, at none otherwise.
+ *    and the online kernel in the route's key-axis form at every dispatch: `:ktile` where the
+ *    device's geometry profile chooses the tiled form (ADR 0132 addendum 2026-11-12), otherwise N's
+ *    own — padded (`:kpad`) when the branch's S = N + T is not a multiple of 4, whole otherwise.
  * 3. **Band** (decisions 5-2 / 5-3): per observation point, at least one bit different from the
  *    reference (MUST), finite, and relRMS under the ceiling = the measured value × 2, rounded up to
  *    two significant digits, derived per case and point ({@link CASES} has the derivation and the
@@ -80,7 +81,12 @@
 
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { parseSafetensors, type GpuContext, type SessionDiagnostics } from "@karume/runtime";
+import {
+  attentionDeviceFacts,
+  parseSafetensors,
+  type GpuContext,
+  type SessionDiagnostics,
+} from "@karume/runtime";
 import type { ModelComponent } from "../../models/src/hub/components.ts";
 import {
   mossDitContract,
@@ -127,6 +133,7 @@ import {
   requireCensus,
   SEAT_SIGNATURES,
 } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
 import { planAttentionOnlineWindows } from "../../runtime/src/runtime/recipe-builders/attention.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import {
@@ -420,14 +427,30 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
       }
     };
 
-    /** The online kernel's dispatches, and those in its padded form (`:kpad`). */
-    const onlineDispatches = (census: readonly CensusRow[]) => ({
-      total: countDispatches(census, SEAT_SIGNATURES.attentionScoreStorage.none),
-      padded: countDispatches(
-        census,
-        (key) => SEAT_SIGNATURES.attentionScoreStorage.none(key) && `${key}:`.includes(":kpad:"),
-      ),
-    });
+    /** The key segment of a key-axis form (the whole form adds none). */
+    const KEY_AXIS_SEGMENTS = { whole: undefined, padded: ":kpad", tiled: ":ktile" } as const;
+
+    /**
+     * The online kernel's dispatches, and those in the key-axis form `keyWords` (its segment, or for
+     * the whole form neither segment).
+     */
+    const onlineDispatches = (
+      census: readonly CensusRow[],
+      keyWords: keyof typeof KEY_AXIS_SEGMENTS,
+    ) => {
+      const segment = KEY_AXIS_SEGMENTS[keyWords];
+      return {
+        total: countDispatches(census, SEAT_SIGNATURES.attentionScoreStorage.none),
+        inForm: countDispatches(
+          census,
+          (key) =>
+            SEAT_SIGNATURES.attentionScoreStorage.none(key) &&
+            (segment === undefined
+              ? !`${key}:`.includes(":kpad:") && !`${key}:`.includes(":ktile:")
+              : `${key}:`.includes(`${segment}:`)),
+        ),
+      };
+    };
 
     /** The census of the practical pair (module doc "The checks" 2), per Session. */
     const assertPracticalCensus = (
@@ -436,9 +459,10 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
       counts: CensusCounts,
       where: string,
     ): void => {
-      assert(contract !== undefined);
+      assert(contract !== undefined && gpu !== undefined);
       const depth = contract.ropeWidth;
       const heads = contract.width / depth;
+      const facts = attentionDeviceFacts(gpu);
       for (const graph of ["dit", "dit_skip22"] as const) {
         const census = observation.census[graph];
         const at = `${where} ${graph}`;
@@ -446,8 +470,15 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
         assertAttentionSeatsComplete(census, knobs, at);
         const a8 = countDispatches(census, SEAT_SIGNATURES.linearCompute.a8);
         assertEquals(a8, counts.linear[graph], `${at}: linearCompute=a8 dispatches`);
-        const online = onlineDispatches(census);
         const sequence = observation.sequence[graph];
+        // The route's key-axis form on this device (the profile's choice, else N's own)
+        const seats = {
+          attentionCompute: knobs.attentionCompute ?? "f32",
+          attentionScoreStorage: knobs.attentionScoreStorage ?? "f32",
+        };
+        const route = attentionRoute(seats, depth, sequence, facts);
+        assert(route.online !== undefined, `${at}: the online route at S = ${sequence}`);
+        const online = onlineDispatches(census, route.keyWords);
         const windows = planAttentionOnlineWindows(sequence, {
           batch: heads,
           cols: sequence,
@@ -458,11 +489,10 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
           counts.attention[graph] * windows,
           `${at}: online-kernel dispatches (${counts.attention[graph]} nodes × ${windows} windows)`,
         );
-        const padded = sequence % 4 !== 0;
         assertEquals(
-          online.padded,
-          padded ? online.total : 0,
-          `${at}: online dispatches in the padded form at S = ${sequence}`,
+          online.inForm,
+          online.total,
+          `${at}: online dispatches in the ${route.keyWords} form at S = ${sequence}`,
         );
       }
     };
@@ -520,11 +550,12 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
                 return [point, result] as const;
               });
               const counts = (["dit", "dit_skip22"] as const).map((graph) => {
-                const online = onlineDispatches(one.census[graph]);
+                const padded = onlineDispatches(one.census[graph], "padded");
+                const tiled = onlineDispatches(one.census[graph], "tiled");
                 return (
                   `${graph} S = ${one.sequence[graph]}: linear a8 ×` +
                   `${countDispatches(one.census[graph], SEAT_SIGNATURES.linearCompute.a8)},` +
-                  ` online ×${online.total} (padded ×${online.padded})`
+                  ` online ×${padded.total} (padded ×${padded.inForm}, tiled ×${tiled.inForm})`
                 );
               });
               console.log(`[moss-ab] ${key} census: ${counts.join(" / ")}`);

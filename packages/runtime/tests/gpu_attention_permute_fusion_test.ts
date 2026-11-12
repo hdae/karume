@@ -4,7 +4,9 @@
 // O after it (the kernel stores O token-major): bit parity with the same graph where the permutes
 // stay nodes, the counter, and the dispatches each route saves, on the online route (sg32 at D 128
 // and 64, wg at D 128 — each with N = 200 and with N = 203, the padded key axis of the ADR 0132
-// addendum of 2026-10-27: tiled transpose → padded Vᵀ quantisation → the `…:obshd:kpad` kernel), the three-dispatch a8 route with S in f16 (s16), an online seat whose shape
+// addendum of 2026-10-27: tiled transpose → padded Vᵀ quantisation → the `…:obshd:kpad` kernel, or
+// the tiled key axis at both N where the device's geometry profile chooses it — the addendum of
+// 2026-11-12, `…:obshd:ktile`), the three-dispatch a8 route with S in f16 (s16), an online seat whose shape
 // (D 96) falls back to the three dispatches with S in f32, and the two a8 shapes whose stage falls
 // back to f32 (①QK at D % 4 != 0, ③PV at N % 4 != 0 — the head-major copy path). The f32 seat
 // absorbs nothing. Off the online route the output permute stays a node.
@@ -36,7 +38,6 @@ import {
 } from "@karume/kernel-checks";
 import { stridedKey } from "../src/codegen/strided.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
-import { attentionOnlineKeyWords } from "../src/kernels/attention-online-i8a8.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { TRANSPOSE_TILED_KEY } from "../src/kernels/transpose-tiled.ts";
 import { attentionDeviceFacts } from "../src/runtime/attention-device.ts";
@@ -250,22 +251,36 @@ describe.skipIf(!GPU_AVAILABLE)(
               );
             assertEquals(tokenMajorStores(absorbed.census), 1, `${route.name}: absorbed O store`);
             assertEquals(tokenMajorStores(reference.census), 0, `${route.name}: reference O store`);
-            // Both runs read Vᵀ in the key-axis form of N (`…:kpad` exactly when N % 4 != 0).
-            const paddedReads = (census: readonly CensusRow[]): number =>
+            // Both runs read Vᵀ in the route's key-axis form on this device: N's own (`…:kpad`
+            // exactly when N % 4 != 0, no segment otherwise), or `…:ktile` where the device's
+            // geometry profile chooses the tiled form
+            const online = attentionRoute(
+              { attentionCompute: "a8", attentionScoreStorage: "none" },
+              d,
+              n,
+              attentionDeviceFacts(gpu),
+            );
+            assert(online.online !== undefined, `${route.name}: an online route`);
+            const segment =
+              online.keyWords === "padded" ? ":kpad" : online.keyWords === "tiled" ? ":ktile" : "";
+            const formReads = (census: readonly CensusRow[]): number =>
               countDispatches(
                 census,
-                (key) => key.startsWith("attention_online:") && key.endsWith(":kpad"),
+                (key) =>
+                  key.startsWith("attention_online:") &&
+                  (segment === ""
+                    ? !key.endsWith(":kpad") && !key.endsWith(":ktile")
+                    : key.endsWith(segment)),
               );
-            const expectedPadded = attentionOnlineKeyWords(n) === "padded" ? 1 : 0;
             assertEquals(
-              paddedReads(absorbed.census),
-              expectedPadded,
-              `${route.name}: absorbed key axis`,
+              formReads(absorbed.census),
+              1,
+              `${route.name}: absorbed key axis (${online.keyWords})`,
             );
             assertEquals(
-              paddedReads(reference.census),
-              expectedPadded,
-              `${route.name}: reference key axis`,
+              formReads(reference.census),
+              1,
+              `${route.name}: reference key axis (${online.keyWords})`,
             );
           }
           console.log(
