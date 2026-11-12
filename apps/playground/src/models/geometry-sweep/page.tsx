@@ -3,7 +3,8 @@
  * `runGeometrySweep` of `@karume/runtime/tune`, one case per call with idle time between cases,
  * merges the per-case records into one sweep record (the file `deriveGeometryProfile` reads), and
  * derives a table from it on the page so the verdicts are seen before the file is sent. A record of
- * the evaluation set `k85` (perf-ledger K-85) gets the K-85 summary instead of a derivation.
+ * the evaluation set `k85` (perf-ledger K-85) gets the K-85 summary instead of a derivation, one of
+ * `k88` (perf-ledger K-88) the K-88 summary.
  *
  * `runGeometrySweep` acquires a dedicated device of its own, so this page has no `useGpu`: the run
  * joins the app's device queue through `runOnGpuQueue` instead.
@@ -53,6 +54,7 @@ import {
   sweepRecordText,
 } from "./record";
 import { K85_SET, type K85Summary, k85Summary } from "./k85";
+import { K88_SET, type K88Summary, k88Summary } from "./k88";
 import { foldSweepEvent, INITIAL_LIVE, runSweepPlan, type SweepLive, type SweepStop } from "./run";
 import {
   CANDIDATE_SETS,
@@ -112,7 +114,8 @@ type SweepResult =
             readonly profileJson: string;
           }
         | { readonly kind: "failed"; readonly error: unknown }
-        | { readonly kind: "k85"; readonly summary: K85Summary };
+        | { readonly kind: "k85"; readonly summary: K85Summary }
+        | { readonly kind: "k88"; readonly summary: K88Summary };
     }
   | { readonly kind: "failed"; readonly error: unknown };
 
@@ -132,10 +135,14 @@ const buildResult = async (
     const sha256 = await sha256Hex(new TextEncoder().encode(text));
     const target = deriveTarget(report.adapter);
     let derivation: Extract<SweepResult, { kind: "ready" }>["derivation"];
-    // No table is derived from the evaluation set (deriveGeometryProfile refuses it): its summary
+    // No table is derived from an evaluation set (deriveGeometryProfile refuses it): its summary
     if (report.settings.candidateSet === K85_SET) {
       const summary = k85Summary(report, geometrySweepCases(K85_SET));
       return { kind: "ready", report, filename, sha256, derivation: { kind: "k85", summary } };
+    }
+    if (report.settings.candidateSet === K88_SET) {
+      const summary = k88Summary(report, geometrySweepCases(K88_SET));
+      return { kind: "ready", report, filename, sha256, derivation: { kind: "k88", summary } };
     }
     try {
       const saved: unknown = JSON.parse(text);
@@ -183,10 +190,11 @@ const stopText = (stop: SweepStop): string => {
 
 export const GeometrySweepPage = () => {
   const queue = useGpuQueue();
-  const [caseSetId] = useState(sweepCaseSetId);
   const [form, setForm] = useState<SweepForm>(() => initialForm(geometrySweepCases()));
-  // The case table of the form's candidate set (the evaluation set k85 has its own)
+  // The case table of the form's candidate set (the evaluation sets k85 / k88 have their own), and
+  // the case-set version a sweep of that set records
   const cases = useMemo(() => geometrySweepCases(form.candidateSet), [form.candidateSet]);
+  const caseSetId = useMemo(() => sweepCaseSetId(form.candidateSet), [form.candidateSet]);
   const ops = sweepOps(cases);
   const [probe, setProbe] = useState<AdapterProbe>({ kind: "probing" });
   const [run, setRun] = useState<RunState>({ kind: "idle" });
@@ -662,7 +670,9 @@ const ResultCard = ({ result }: { result: SweepResult }) => {
           deriveGeometryProfile reads.{" "}
           {derivation.kind === "k85"
             ? "Below, the K-85 summary of this record (an evaluation set: no table is derived)."
-            : "Below, the table derived from this record alone; the repository's derivation adds the adapter's earlier records."}
+            : derivation.kind === "k88"
+              ? "Below, the K-88 summary of this record (an evaluation set: no table is derived)."
+              : "Below, the table derived from this record alone; the repository's derivation adds the adapter's earlier records."}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -697,6 +707,8 @@ const ResultCard = ({ result }: { result: SweepResult }) => {
         />
         {derivation.kind === "k85" ? (
           <K85Card summary={derivation.summary} unit={report.gpuTiming.unit} />
+        ) : derivation.kind === "k88" ? (
+          <K88Card summary={derivation.summary} unit={report.gpuTiming.unit} />
         ) : derivation.kind === "failed" ? (
           <ErrorAlert title="deriveGeometryProfile rejected the record" error={derivation.error} />
         ) : (
@@ -796,6 +808,112 @@ const K85Card = ({ summary, unit }: { summary: K85Summary; unit: GeometrySweepTi
               </TableCell>
               <TableCell className="text-right font-mono text-xs">
                 {ratioText(entry.skeletonVsDefault)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">{entry.mismatches}</TableCell>
+              <TableCell className="text-right font-mono text-xs">{entry.errors}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+};
+
+/**
+ * The K-88 summary: per case the table geometry against the same geometry with the fastest form,
+ * the decode alone and the fastest decode + form (speed ratios), and the sums per unit.
+ */
+const K88Card = ({ summary, unit }: { summary: K88Summary; unit: GeometrySweepTimingUnit }) => {
+  const sumText = (value: number | undefined, table: number | undefined): string =>
+    value === undefined
+      ? ""
+      : `${formatPerDispatch(value, unit)}${
+          table === undefined ? "" : ` (${ratioText(table / value)})`
+        }`;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="text-sm font-medium">
+        K-88: the forms and the decode of this adapter's table geometry ({summary.tableId})
+      </div>
+      <p className="text-sm text-muted-foreground">
+        The k88 set is an evaluation: no table is derived from its record. Each ratio is the table
+        geometry's time ÷ the variant's time of the same geometry (above ×1: the variant is faster),
+        within this record only; a candidate whose output differed from the default never counts.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Unit (census-weighted sum)</TableHead>
+            <TableHead className="text-right">Nodes</TableHead>
+            <TableHead className="text-right">Table</TableHead>
+            <TableHead className="text-right">Best form</TableHead>
+            <TableHead className="text-right">Decode</TableHead>
+            <TableHead className="text-right">Both</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {summary.sums.map((entry) => (
+            <TableRow key={entry.unit}>
+              <TableCell className="text-xs">
+                {entry.unit}
+                {entry.measured < entry.planned
+                  ? ` — ${entry.measured} / ${entry.planned} cases, no sum`
+                  : ""}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">{entry.nodes}</TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {formatPerDispatch(entry.table, unit)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {sumText(entry.bestForm, entry.table)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {sumText(entry.decode, entry.table)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {sumText(entry.bestBoth, entry.table)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Case</TableHead>
+            <TableHead className="text-right">Per unit</TableHead>
+            <TableHead>Table geometry</TableHead>
+            <TableHead className="text-right">Best form ÷ table</TableHead>
+            <TableHead className="text-right">Decode ÷ table</TableHead>
+            <TableHead className="text-right">Both ÷ table</TableHead>
+            <TableHead className="text-right">Identical</TableHead>
+            <TableHead className="text-right">Mismatches</TableHead>
+            <TableHead className="text-right">Errors</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {summary.cases.map((entry) => (
+            <TableRow key={entry.caseId}>
+              <TableCell className="font-mono text-xs">{entry.caseId}</TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {entry.censusCount === 0 ? "guard" : `×${entry.censusCount}`}
+              </TableCell>
+              <TableCell className="font-mono text-xs">
+                {entry.table === undefined
+                  ? ""
+                  : `${entry.table.geometry} ${formatPerDispatch(entry.table.perDispatch, unit)}`}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {ratioText(entry.formVsTable)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {ratioText(entry.decodeVsTable)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {ratioText(entry.bothVsTable)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {entry.identical ? "yes" : "no"}
               </TableCell>
               <TableCell className="text-right font-mono text-xs">{entry.mismatches}</TableCell>
               <TableCell className="text-right font-mono text-xs">{entry.errors}</TableCell>

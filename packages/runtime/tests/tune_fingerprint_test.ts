@@ -891,3 +891,13 @@ describe("the record keys and the dispatches of the evaluation set k88 (perf-led
     assertNotEquals(ids[0], ids[1]);
   });
 });
+
+describe("sweepCaseSetId with a candidate set (the case-set version a sweep of that set records)", () => {
+  it("is the sweep's own for the table-deriving sets and an evaluation set's own table's for k85 / k88", () => {
+    for (const set of ["quick", "quick+", "full", "k85", "k88"] as const) {
+      assertEquals(sweepCaseSetId(set), candidateSetCaseSetId(set), set);
+    }
+    assertEquals(sweepCaseSetId("quick+"), sweepCaseSetId());
+    assertNotEquals(sweepCaseSetId("k88"), sweepCaseSetId());
+  });
+});

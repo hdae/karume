@@ -3,9 +3,9 @@
  * seconds between cases), its plan (the case list `runGeometrySweep` is called with, one case per
  * call) and the presets. Pure, so the case selection is tested without a GPU.
  *
- * The case list depends on the candidate set: the evaluation set `k85` sweeps a table of its own
- * (`geometrySweepCases("k85")`). Every function that takes `cases` takes the list of the form's set
- * (of the preset's set for {@link presetForm}).
+ * The case list depends on the candidate set: the evaluation sets `k85` and `k88` sweep tables of
+ * their own (`geometrySweepCases("k85")`, `geometrySweepCases("k88")`). Every function that takes
+ * `cases` takes the list of the form's set (of the preset's set for {@link presetForm}).
  */
 
 import type {
@@ -15,14 +15,15 @@ import type {
 } from "@karume/runtime/tune";
 
 /**
- * The candidate sets in growing size (the runtime's default is `quick+`), then the evaluation set
- * `k85`.
+ * The candidate sets in growing size (the runtime's default is `quick+`), then the evaluation sets
+ * `k85` and `k88`.
  */
 export const CANDIDATE_SETS = [
   "quick",
   "quick+",
   "full",
   "k85",
+  "k88",
 ] as const satisfies readonly GeometrySweepCandidateSet[];
 
 export type SweepForm = {
@@ -75,6 +76,15 @@ export const SWEEP_PRESETS: readonly SweepPreset[] = [
     hint: "The k85 set — this adapter's table geometry, the default and 204 grid geometries with and without the vec4 skeleton — on the Wan2.2 TI2V-5B DiT linears at 33 frames and a small-M guard, 5 rounds, 90 s idle: per case the best skeleton against the table geometry, and the sum over one Wan2.2 33f DiT forward. No table is derived from it.",
     ops: ["i8a8-linear"],
     candidateSet: "k85",
+    rounds: 5,
+    idleSeconds: 90,
+  },
+  {
+    id: "k88-forms",
+    label: "K-88 (GEMM forms / conv2d decode)",
+    hint: "The k88 set — per case the geometry the default and the registered tables give it, without the fields, with each skeleton form and, for conv2d, with the counter decode alone and with each form — on the gemma4 E2B prefill, umT5, siglip2 and guard linears, the square matmul and the Wan2.2 / anima VAE conv2d, 5 rounds, 90 s idle: per case the best form, the decode and both against the table geometry, and the sums over one gemma4 prefill chunk, one Wan2.2 VAE next chunk and the other units. No table is derived from it.",
+    ops: ["linear", "matmul", "conv2d"],
+    candidateSet: "k88",
     rounds: 5,
     idleSeconds: 90,
   },

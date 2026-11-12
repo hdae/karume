@@ -168,3 +168,40 @@ describe("changeCandidateSet", () => {
     expect(plannedCases(back).caseIds.length).toBe(CASES.length);
   });
 });
+
+const K88 = SWEEP_PRESETS.find(({ id }) => id === "k88-forms");
+
+describe("the K-88 preset", () => {
+  it("plans every case of the k88 table (linear, matmul, conv2d) with the k88 set, 5 rounds, 90 s idle", () => {
+    if (K88 === undefined) throw new Error("no K-88 preset");
+    expect(K88.label).toBe("K-88 (GEMM forms / conv2d decode)");
+    const k88Cases = geometrySweepCases("k88");
+    const plan = plannedCases(presetForm(K88, k88Cases), k88Cases);
+    expect(plan).toEqual({
+      caseIds: k88Cases.map(({ id }) => id),
+      ops: ["linear", "matmul", "conv2d"],
+      candidateSet: "k88",
+      rounds: 5,
+      idleSeconds: 90,
+    });
+    expect(plan.caseIds.length).toBe(19);
+    expect(matchingPreset(presetForm(K88, k88Cases), k88Cases)?.id).toBe("k88-forms");
+  });
+
+  it("is not named for the same ops and set over another table", () => {
+    if (K88 === undefined) throw new Error("no K-88 preset");
+    const runtimeCases = geometrySweepCases();
+    const form = { ...presetForm(K88, runtimeCases), candidateSet: "full" as const };
+    expect(matchingPreset(form, runtimeCases)?.id).toBeUndefined();
+  });
+
+  it("changing between k85, k88 and quick+ switches the case table each way", () => {
+    const toK88 = changeCandidateSet(initialForm(geometrySweepCases()), "k88", geometrySweepCases);
+    expect([...toK88.cases]).toEqual(geometrySweepCases("k88").map(({ id }) => id));
+    const toK85 = changeCandidateSet(toK88, "k85", geometrySweepCases);
+    expect([...toK85.cases]).toEqual(geometrySweepCases("k85").map(({ id }) => id));
+    expect([...toK85.ops]).toEqual(["i8a8-linear"]);
+    const back = changeCandidateSet(toK85, "quick+", geometrySweepCases);
+    expect([...back.cases]).toEqual(geometrySweepCases().map(({ id }) => id));
+  });
+});

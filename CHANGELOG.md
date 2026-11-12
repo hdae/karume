@@ -93,6 +93,9 @@ measurements in `docs/research/`.
   with each form and, for conv2d, with the decode alone and with each form. Its record carries the case-set version
   of those cases, and `deriveGeometryProfile` derives no table from it; the other sets, their cases and every
   fingerprint are unchanged. A candidate's name carries its fields as the key spells them (`…:tb-un`, `…:dec`).
+- `@karume/runtime/tune`: `sweepCaseSetId` takes an optional candidate set and then returns the case-set version a
+  sweep of that set records (the same value as without it for `quick` / `quick+` / `full`, an evaluation set's own
+  table's for `k85` / `k88`).
 
 ### Changed
 

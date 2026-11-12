@@ -1213,7 +1213,9 @@ checks), and merges the per-case records into **one sweep record** (`karume-geom
 format `deriveGeometryProfile` reads, with no playground envelope). Its first job is perf-ledger
 V-15: the conv3d-only sweep on the RTX 5070 Ti, from which the derivation chooses `i8a8.conv3d` of
 the `nvidia-blackwell` table. Its second is perf-ledger K-85: the evaluation set `k85` of the vec4
-skeleton of the i8a8 linear on the Wan2.2 DiT linears ([The K-85 preset](#the-k-85-preset)).
+skeleton of the i8a8 linear on the Wan2.2 DiT linears ([The K-85 preset](#the-k-85-preset)). Its
+third is perf-ledger K-88: the evaluation set `k88` of the f32 GEMM skeleton forms and the conv2d
+counter decode ([The K-88 preset](#the-k-88-preset)).
 
 **Serve the page from the checkout that will derive the table.** The record carries `caseSet`,
 `defaultKernels` and `candidateKernels`, the fingerprints of the case set and of the kernels of the
@@ -1233,18 +1235,18 @@ instead:
 
 | Control | What it does |
 | --- | --- |
-| Preset | **V-15: conv3d, full, 5 rounds, 90 s idle** fills the form with every conv3d w8a8 case, the `full` set, 5 rounds and 90 s idle; **K-85 (i8a8 linear skeleton)** with every case of the `k85` table, the `k85` set, 5 rounds and 90 s idle. While the form equals a preset, a badge next to the title names it. **Every case (reset)** is no preset: it goes back to the initial form (every case, `quick+`, 5 rounds, 90 s). |
-| Op families | Which families are shown and swept (the runtime's `geometrySweepCases(<candidate set>)`, grouped by op — the `k85` set has a case table of its own). |
+| Preset | **V-15: conv3d, full, 5 rounds, 90 s idle** fills the form with every conv3d w8a8 case, the `full` set, 5 rounds and 90 s idle; **K-85 (i8a8 linear skeleton)** with every case of the `k85` table, the `k85` set, 5 rounds and 90 s idle; **K-88 (GEMM forms / conv2d decode)** with every case of the `k88` table, the `k88` set, 5 rounds and 90 s idle. While the form equals a preset, a badge next to the title names it. **Every case (reset)** is no preset: it goes back to the initial form (every case, `quick+`, 5 rounds, 90 s). |
+| Op families | Which families are shown and swept (the runtime's `geometrySweepCases(<candidate set>)`, grouped by op — the `k85` and `k88` sets have case tables of their own). |
 | Cases | Every case of the chosen families, with **all** / **none** per family. A ticked case of a family that is not chosen is not swept. |
-| Candidate set | `quick` (a few geometries — a dry run that checks the page and the device), `quick+` (quick plus the registered tables' geometries; the runtime's default), `full` (every geometry — the set a table is derived from), `k85` (the evaluation of perf-ledger K-85; no table is derived). Changing between `k85` and the others switches the case table and ticks every case of it. |
+| Candidate set | `quick` (a few geometries — a dry run that checks the page and the device), `quick+` (quick plus the registered tables' geometries; the runtime's default), `full` (every geometry — the set a table is derived from), `k85` (the evaluation of perf-ledger K-85; no table is derived), `k88` (the evaluation of perf-ledger K-88; no table is derived). Changing to a set that sweeps another case table switches the table and ticks every case of it. |
 | Rounds | Measurement rounds per geometry (default 5); the min is kept. |
 | Idle between cases (s) | Cooling before every case but the first (default 90; 0 = none). |
 | Run / Cancel | Run sweeps the cases in the table's order. Cancel takes effect at once during the idle wait, before the next case starts, and inside a case once the current geometry is measured (`runGeometrySweep` keeps the rows measured so far, with `aborted: true`). While a case still acquires its device, Cancel waits for the device; that case measured nothing, and its record is dropped. A Cancel after the last case has measured everything leaves the run completed. |
 
 The status card shows the adapter as the browser reports it (read without creating a device), whether
 it lists `timestamp-query` (without it the sweep falls back to the wall clock, and the derivation
-rejects a wall-clock record), cross-origin isolation, the runtime's case set id (`sweepCaseSetId`)
-and, once the first case has started, dp4a and the timing unit. While running it shows the elapsed
+rejects a wall-clock record), cross-origin isolation, the case set id the chosen candidate set's records carry
+(`sweepCaseSetId(<candidate set>)` — an evaluation set's own) and, once the first case has started, dp4a and the timing unit. While running it shows the elapsed
 seconds, the cases done, and the current case with its row count and the sweep's status line (the
 geometry measured now), or the seconds left of the idle wait. A device loss stops the run after
 that case.
@@ -1300,6 +1302,34 @@ over one Wan2.2 33f DiT forward (each case's node count × its time per dispatch
 geometry and the per-case best skeleton, plus the one skeleton geometry with the smallest sum (a
 profile field holds one geometry for every M). The guard case is shown but not summed. The record
 downloads as for any set.
+
+### The K-88 preset
+
+The `k88` set measures the two optional geometry fields of perf-ledger K-88 on a case table of its
+own: `form` (`"tb-un"`: a thread's column quads a workgroup row apart and the K loop unrolled;
+`"tas-tb-un"`: also the A tile k-major) in the vec4 f32-compute kernels of linear / matmul / conv2d,
+and `decode: "counter"` (an incremental im2col decode) in conv2d's vec4 kernel. The cases are copied
+from the distributions' graphs, each with its node count in a unit: the gemma4 E2B prefill gate /
+up, down and q linears at the 768-row chunk (int4 g32 — 140 of the chunk's 277 linears), the
+umT5-XXL feed-forward wi (int8, 512 tokens), the siglip2 so400m fc1 (f32), a small-M linear and the
+square 4,096³ linear and matmul (no model, not summed), the three heaviest conv2d of a Wan2.2 VAE
+decoder next chunk and first chunk (int8, the chunk's frames in the batch) and the anima VAE c192 /
+c384 conv2d (f16). Per case the candidates are the geometry the default profile and every
+registered table give it, each without the fields, with each form and, for conv2d, with the decode
+alone and with each form; every one is checked for bit identity with the default as in the other
+sets. A case takes 5–20 s on an RTX 3080 Ti.
+
+No table is derived from a `k88` record (`deriveGeometryProfile` refuses it). The result card shows
+the **K-88 summary** instead. Per unit (one gemma4 E2B prefill chunk, one Wan2.2 VAE next chunk, one
+first chunk, one umT5 forward, one siglip2 forward, one anima VAE decode), the census-weighted sum
+(each case's node count × its time per dispatch) of this adapter's table geometry and of its best
+form, its decode and its best decode + form, with each sum's ratio to the table's. Per case, this
+adapter's table geometry (the embedded table a Session on this adapter selects — the record's
+`geometryProfile`; its `gemmRows` rule of the case's M or its conv2d field of the case's class) and
+the same geometry's best form ÷ table, decode ÷ table and both ÷ table (each the table's time ÷ the
+variant's: above ×1 the variant is faster), whether every candidate of the case matched the default
+bit for bit, and the mismatching and failed rows. A candidate whose output differed never counts.
+The record downloads as for any set.
 
 **Download record (JSON)** saves `geometry-sweep_<adapter>_<candidate set>_<UTC timestamp>.json`
 (the adapter's description, or its vendor, architecture and device when the description is empty;

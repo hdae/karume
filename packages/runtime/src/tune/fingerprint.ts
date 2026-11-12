@@ -502,14 +502,17 @@ export const caseSetId = (cases: readonly SweepCase[], bounds: readonly number[]
 /**
  * The case-set version (`provenance.caseSet` — ADR 0117 decision 4): the hash (16 hex digits) of
  * the canonical JSON of the dispatch-deciding fields ({@link CASE_SET_FIELDS}) of the sweep cases
- * (`SWEEP_CASES`) and the gemmRows bucket boundaries (`PROFILE_GEMM_ROWS_BOUNDS`).
+ * (`SWEEP_CASES`) and the gemmRows bucket boundaries (`PROFILE_GEMM_ROWS_BOUNDS`). Given a
+ * candidate set, the version a sweep of that set records ({@link candidateSetCaseSetId} — the same
+ * value for the table-deriving sets, its own table's for an evaluation set).
  *
  * No hand-bumped version number (no way to add a case and forget the bump). When cases are added,
  * removed or reordered, or a dispatch-deciding field or a boundary changes, the value changes and
  * saved tables mismatch at matching (re-sweep). Changes only to informational fields such as
  * descriptions do not change it.
  */
-export const sweepCaseSetId = (): string => caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS);
+export const sweepCaseSetId = (set?: CandidateSet): string =>
+  set === undefined ? caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS) : candidateSetCaseSetId(set);
 
 /**
  * The case-set version a sweep of `set` records (`caseSet`): {@link sweepCaseSetId} for the
