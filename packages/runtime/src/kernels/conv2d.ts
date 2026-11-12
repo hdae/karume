@@ -149,9 +149,13 @@ export const conv2dIgemmKey = (
   // → `gemmMTileGeometry`, in that order). Embedding mTile directly would make only the key keep
   // naming the old edges when the geometry is swapped, colliding with a different WGSL.
   const resolved = geometry ?? gemmMTileGeometry(mTile);
+  // MUST: the skeleton form (v4 kernels) appends `:tb-un` / `:tas-tb-un` and the counter decode
+  // `:dec`; a geometry without them keeps its key byte for byte.
   return `conv2d:v3:f32:igemm${gemmTileM(resolved)}x${gemmTileN(resolved)}${
     v4 ? "v4" : ""
-  }:wg${resolved.wgX}x${resolved.wgY}${weightKeyPart(weight)}`;
+  }:wg${resolved.wgX}x${resolved.wgY}${weightKeyPart(weight)}${
+    v4 && resolved.form !== undefined ? `:${resolved.form}` : ""
+  }${resolved.decode === undefined ? "" : ":dec"}`;
 };
 
 export const conv2dIgemmWgsl = (

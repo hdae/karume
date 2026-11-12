@@ -211,9 +211,16 @@ const rowsGeometry = (rows: number | undefined): GemmGeometry =>
  * attention_pv).
  * MUST: the same value as the one passed to generation (the reason is the same as for `rows`). When
  * omitted, the key does not move by a single byte.
+ * MUST: a v4 key carries the geometry's skeleton form (`:tb-un` / `:tas-tb-un`) — every kernel
+ * the form changes is a v4 kernel ({@link gemmFormGeometry}); a geometry without a form keeps its
+ * key byte for byte.
  */
-export const gemmKeyPart = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
-  `${gemmGeometryTileKeyPart(geometry ?? rowsGeometry(rows))}${v4 ? "v4" : ""}`;
+export const gemmKeyPart = (v4: boolean, rows?: number, geometry?: GemmGeometry): string => {
+  const resolved = geometry ?? rowsGeometry(rows);
+  return `${gemmGeometryTileKeyPart(resolved)}${v4 ? "v4" : ""}${
+    v4 && resolved.form !== undefined ? `:${resolved.form}` : ""
+  }`;
+};
 
 /**
  * The **compute** variant of the inner product (ADR 0028). `"f16"` lowers the shared tiles to f16,
@@ -645,6 +652,33 @@ ${
 ${op === "attention_pv" ? "  let rbase = wid.z * dims.m;\n" : ""}`;
 };
 
+/** Whether the A tile is k-major (`sa[k · tileM + row]` — {@link GemmGeometry.form} `"tas-tb-un"`). */
+const kMajorA = (geometry: GemmGeometry): boolean => geometry.form === "tas-tb-un";
+
+/** Whether a thread's column quads are a workgroup row apart, and the K loop unrolled ({@link GemmGeometry.form}). */
+const stridedB = (geometry: GemmGeometry): boolean => geometry.form !== undefined;
+
+/**
+ * The A tile index of a fill slot's first component: the quad `aq` of row `ar`. Row-major it is
+ * `ar · 16 + aq · 4`; k-major, `aq · 4 · tileM + ar`.
+ */
+const saBase0 = (geometry: GemmGeometry): string =>
+  kMajorA(geometry)
+    ? `aq * ${GEMM_QUAD * gemmTileM(geometry)}u + ar`
+    : `ar * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u`;
+
+/** The A tile offset of a slot `rows` rows after slot 0. */
+const saSlotOffset = (geometry: GemmGeometry, rows: number): number =>
+  kMajorA(geometry) ? rows : rows * GEMM_TILE_K;
+
+/**
+ * The A tile offset of component `component` (1..3) of a fill slot: the next k of the same row —
+ * the next word row-major, a tile of rows further k-major. MUST: a static component store either
+ * way (no vec4 of workgroup memory is written through a dynamic component).
+ */
+const saComponentOffset = (geometry: GemmGeometry, component: number): number =>
+  kMajorA(geometry) ? component * gemmTileM(geometry) : component;
+
 /**
  * Assignment and row-start offsets of the A tile (`[m,k]` row-major). All of them are invariant in
  * the K tile loop.
@@ -660,10 +694,10 @@ const prologueA = (geometry: GemmGeometry, op: GemmSpec["op"], v4: boolean): str
       slot === 0
         ? `  let arow0 = wid.y * ${gemmTileM(geometry)}u + ar;
   let arow_base0 = ${batchBase(op, "abase")}arow0 * ${kUnit};
-  let sa_base0 = ar * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;`
+  let sa_base0 = ${saBase0(geometry)};`
         : `  let arow${slot} = arow0 + ${slot * stride}u;
   let arow_base${slot} = arow_base0 + ${slot * stride}u * ${kUnit};
-  let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`,
+  let sa_base${slot} = sa_base0 + ${saSlotOffset(geometry, slot * stride)}u;`,
     )
     .join("\n");
   return `  // A tile assignment (${gemmTileM(geometry)} rows × ${GEMM_K_QUADS} quads over ${gemmThreads(
@@ -754,9 +788,9 @@ const fillA = (
       return `    var av${slot} = vec4<f32>(0.0);
 ${load}
     sa[sa_base${slot}] = ${tileScalar(compute, `av${slot}.x`)};
-    sa[sa_base${slot} + 1u] = ${tileScalar(compute, `av${slot}.y`)};
-    sa[sa_base${slot} + 2u] = ${tileScalar(compute, `av${slot}.z`)};
-    sa[sa_base${slot} + 3u] = ${tileScalar(compute, `av${slot}.w`)};`;
+    sa[sa_base${slot} + ${saComponentOffset(geometry, 1)}u] = ${tileScalar(compute, `av${slot}.y`)};
+    sa[sa_base${slot} + ${saComponentOffset(geometry, 2)}u] = ${tileScalar(compute, `av${slot}.z`)};
+    sa[sa_base${slot} + ${saComponentOffset(geometry, 3)}u] = ${tileScalar(compute, `av${slot}.w`)};`;
     })
     .join("\n");
   return `    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
@@ -1139,9 +1173,9 @@ const store = (
       .map((quad) =>
         quad === 0
           ? `  let ocq0 = wid.x * ${gemmColumnQuads(geometry)}u + lid.x${
-              quads === 1 ? "" : ` * ${quads}u`
+              quads === 1 || stridedB(geometry) ? "" : ` * ${quads}u`
             };`
-          : `  let ocq${quad} = ocq0 + ${quad}u;`,
+          : `  let ocq${quad} = ocq0 + ${stridedB(geometry) ? quad * geometry.wgX : quad}u;`,
       )
       .join("\n");
     const blocks = slots(quads)
@@ -1221,8 +1255,12 @@ ${rowStores}`;
 const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string => {
   const { regM } = geometry;
   const quads = gemmQuadsPerThread(geometry);
+  // MUST: the same thread → column quad mapping as {@link store} (a thread's accumulator quad q
+  // is the column quad it stores)
   const column = (quad: number): string =>
-    `sb[kk * ${gemmColumnQuads(geometry)}u + lid.x${quads === 1 ? "" : ` * ${quads}u${at(quad)}`}]`;
+    `sb[kk * ${gemmColumnQuads(geometry)}u + lid.x${
+      quads === 1 ? "" : stridedB(geometry) ? at(quad * geometry.wgX) : ` * ${quads}u${at(quad)}`
+    }]`;
   const loads = slots(quads)
     .map(
       (quad) =>
@@ -1232,7 +1270,9 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
   const row = (index: number): string =>
     compute === "f16"
       ? `f32(sa[(lid.y * ${regM}u + ${index}u) * ${GEMM_TILE_K}u + kk])`
-      : `sa[(lid.y * ${regM}u + ${index}u) * ${GEMM_TILE_K}u + kk]`;
+      : kMajorA(geometry)
+        ? `sa[kk * ${gemmTileM(geometry)}u + lid.y * ${regM}u + ${index}u]`
+        : `sa[(lid.y * ${regM}u + ${index}u) * ${GEMM_TILE_K}u + kk]`;
   const macs = slots(regM)
     .map((index) =>
       slots(quads)
@@ -1336,9 +1376,20 @@ ${fillTiles}
     // "the f32 variant with inputs rounded to f16".`
         : ""
     }
-    for (var kk = 0u; kk < ${GEMM_TILE_K}u; kk = kk + 1u) {
+${
+  stridedB(geometry)
+    ? slots(GEMM_TILE_K)
+        .map(
+          (kk) => `    {
+      let kk = ${kk}u;
 ${accumulatorUpdate(geometry, compute)}
-    }
+    }`,
+        )
+        .join("\n")
+    : `    for (var kk = 0u; kk < ${GEMM_TILE_K}u; kk = kk + 1u) {
+${accumulatorUpdate(geometry, compute)}
+    }`
+}
     workgroupBarrier();
   }
 ${storeTile}
@@ -2092,6 +2143,44 @@ fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
 `;
 
 /**
+ * The edge path of the counter decode ({@link GemmGeometry.decode}): the four elements of one
+ * column quad of `Xcol`, given the quad's input row `iy` and first input column `ix0`.
+ *
+ * Under the v4 condition (`Wout % 4 == 0`, `stride_w == 1` — `conv2dUsesVec4`) the four columns
+ * share the output row, so `iy` is one value and column j reads `ix0 + j`: the same elements as
+ * four calls of `xcol`, with one row check and no division.
+ * MUST: out of range returns 0 and x is read only inside the checks (the MUSTs of
+ * {@link CONV2D_XCOL_WGSL}). The quad is built by a whole-vec4 constructor from scalar lets — no
+ * component of a vec4 is written.
+ */
+const CONV2D_XCOL4_WGSL = `
+// One element of the input row whose first element is x[rb] (0 out of range)
+fn xcol_row(rb: u32, ix: i32) -> f32 {
+  if (ix < 0 || u32(ix) >= dims.width_in) {
+    return 0.0;
+  }
+  return x[rb + u32(ix)];
+}
+// The quad shares the output row (the v4 condition): one row check, then one check per column.
+// xc = b·Cin + ic (the batch is the dispatch's z axis, so the caller adds it)
+fn xcol4(xc: u32, iy: i32, ix0: i32) -> vec4<f32> {
+  if (iy < 0 || u32(iy) >= dims.height_in) {
+    return vec4<f32>(0.0);
+  }
+  let rb = (xc * dims.height_in + u32(iy)) * dims.width_in;
+  let e0 = xcol_row(rb, ix0);
+  let e1 = xcol_row(rb, ix0 + 1);
+  let e2 = xcol_row(rb, ix0 + 2);
+  let e3 = xcol_row(rb, ix0 + 3);
+  return vec4<f32>(e0, e1, e2, e3);
+}
+`;
+
+/** Whether the conv2d kernel of this geometry takes the counter decode (v4 kernels only). */
+const conv2dCounterDecode = (geometry: GemmGeometry, v4: boolean): boolean =>
+  v4 && geometry.decode === "counter";
+
+/**
  * Assignment of the conv1d / conv2d A tile (weights `[Cout, K]` — flattened, exactly a row-major
  * `[m,k]`).
  *
@@ -2119,7 +2208,7 @@ const prologueAConv = (geometry: GemmGeometry, weight: WeightStorage): string =>
             scaleVar(0),
           )}
   let arow_base0 = arow0 * dims.k;
-  let sa_base0 = ar * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;`
+  let sa_base0 = ${saBase0(geometry)};`
         : `  let arow${slot} = arow0 + ${slot * stride}u;${weightScaleWgsl(
             weight,
             `min(arow${slot}, dims.m - 1u)`,
@@ -2127,7 +2216,7 @@ const prologueAConv = (geometry: GemmGeometry, weight: WeightStorage): string =>
             scaleVar(slot),
           )}
   let arow_base${slot} = arow_base0 + ${slot * stride}u * dims.k;
-  let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`,
+  let sa_base${slot} = sa_base0 + ${saSlotOffset(geometry, slot * stride)}u;`,
     )
     .join("\n");
   return `  // A tile assignment (${gemmTileM(geometry)} rows × ${GEMM_K_QUADS} quads over ${gemmThreads(
@@ -2189,9 +2278,9 @@ ${
     }`
 }
     sa[sa_base${slot}] = av${slot}.x;
-    sa[sa_base${slot} + 1u] = av${slot}.y;
-    sa[sa_base${slot} + 2u] = av${slot}.z;
-    sa[sa_base${slot} + 3u] = av${slot}.w;`,
+    sa[sa_base${slot} + ${saComponentOffset(geometry, 1)}u] = av${slot}.y;
+    sa[sa_base${slot} + ${saComponentOffset(geometry, 2)}u] = av${slot}.z;
+    sa[sa_base${slot} + ${saComponentOffset(geometry, 3)}u] = av${slot}.w;`,
     )
     .join("\n");
   return `    // Fill out-of-range entries with 0. They do not contribute to the inner product, so a K
@@ -2229,7 +2318,28 @@ const prologueBConv2d = (geometry: GemmGeometry, v4: boolean): string => {
       : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
   }${rows}
   // Invariant in the K tile loop (the step for splitting flat k into (ic, kh, kw))
-  let khw = dims.kernel_h * dims.kernel_w;`;
+  let khw = dims.kernel_h * dims.kernel_w;${
+    conv2dCounterDecode(geometry, v4)
+      ? `
+  // The quad's column origin, invariant in the K tile loop
+  let n0q = bc4 * ${GEMM_QUAD}u;
+  let oy_q = i32((n0q / dims.width_out) * dims.stride_h);
+  let ox_q = i32((n0q % dims.width_out) * dims.stride_w);
+  // One K tile advances flat k by ${GEMM_TILE_K}: the step as mixed-radix digits (ic, kh, kw)
+  let step_ic = ${GEMM_TILE_K}u / khw;
+  let step_r = ${GEMM_TILE_K}u % khw;
+  let step_kh = step_r / dims.kernel_w;
+  let step_kw = step_r % dims.kernel_w;
+  // Each slot's (ic, kh, kw) at K tile 0 — the divisions the original form does every tile
+${slots(gemmQuadSlots(geometry))
+  .map(
+    (slot) => `  var c_ic${slot} = bk${slot} / khw;
+  var c_kh${slot} = (bk${slot} % khw) / dims.kernel_w;
+  var c_kw${slot} = (bk${slot} % khw) % dims.kernel_w;`,
+  )
+  .join("\n")}`
+      : ""
+  }`;
 };
 
 /**
@@ -2237,12 +2347,34 @@ const prologueBConv2d = (geometry: GemmGeometry, v4: boolean): string => {
  *
  * MUST: that ascending flat k matches the direct kernel's triple ascending `(ic, kh, kw)` is the
  * foundation of K tile 16 ascending → bit identity (ADR 0024).
+ *
+ * With the counter decode ({@link GemmGeometry.decode}) the triple is the slot's counter: the same
+ * `(ic, kh, kw)` as the divisions give ({@link conv2dCounterAdvance}).
  */
-const conv2dKDecode = (slot: number): string =>
-  `      let ic = brow${slot} / khw;
+const conv2dKDecode = (slot: number, counter = false): string =>
+  counter
+    ? `      let ic = c_ic${slot};
+      let ky = i32(c_kh${slot} * dims.dilation_h) - i32(dims.padding_h);
+      let kx = i32(c_kw${slot} * dims.dilation_w) - i32(dims.padding_w);`
+    : `      let ic = brow${slot} / khw;
       let kr = brow${slot} % khw;
       let ky = i32((kr / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);
       let kx = i32((kr % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);`;
+
+/**
+ * The counter's step to the next K tile: a mixed-radix add of `(step_ic, step_kh, step_kw)`.
+ *
+ * Each digit is below its radix before the add and so is its step, so the sum (with a carry of at
+ * most 1 from the digit below) is below twice the radix: one conditional subtraction per digit is
+ * the whole carry. MUST: it runs on every K tile, outside the fill's guard — a tile whose fill is
+ * skipped still advances k.
+ */
+const conv2dCounterAdvance = (slot: number): string =>
+  `    c_kw${slot} = c_kw${slot} + step_kw;
+    if (c_kw${slot} >= dims.kernel_w) { c_kw${slot} = c_kw${slot} - dims.kernel_w; c_kh${slot} = c_kh${slot} + 1u; }
+    c_kh${slot} = c_kh${slot} + step_kh;
+    if (c_kh${slot} >= dims.kernel_h) { c_kh${slot} = c_kh${slot} - dims.kernel_h; c_ic${slot} = c_ic${slot} + 1u; }
+    c_ic${slot} = c_ic${slot} + step_ic;`;
 
 /**
  * Fill of the conv2d B tile (the only entirely new part of this design).
@@ -2265,8 +2397,24 @@ const fillBConv2d = (geometry: GemmGeometry, v4: boolean): string =>
         `    let brow${slot} = t * ${GEMM_TILE_K}u + bk${slot};
     var bv4_${slot} = vec4<f32>(0.0);
 ${
-  v4
+  conv2dCounterDecode(geometry, v4)
     ? `    if (brow${slot} < dims.k && bc4 < n4) {
+${conv2dKDecode(slot, true)}
+      let xc = xbase + ic;
+      // The 4 columns of the quad are contiguous ox in the same output row (the v4 condition), so x
+      // can be read contiguously too
+      let iy = oy_q + ky;
+      let ix0 = ox_q + kx;
+      if (iy >= 0 && u32(iy) < dims.height_in && ix0 >= 0 && u32(ix0) + 3u < dims.width_in) {
+        let base = (xc * dims.height_in + u32(iy)) * dims.width_in + u32(ix0);
+        bv4_${slot} = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
+      } else {
+        // Only image edges and the padding area come here (0 out of range — the MUST of xcol)
+        bv4_${slot} = xcol4(xc, iy, ix0);
+      }
+    }`
+    : v4
+      ? `    if (brow${slot} < dims.k && bc4 < n4) {
 ${conv2dKDecode(slot)}
       let xc = xbase + ic;
       // The 4 columns of the quad are contiguous ox in the same output row (the v4 condition), so x
@@ -2287,7 +2435,7 @@ ${conv2dKDecode(slot)}
         );
       }
     }`
-    : `    if (brow${slot} < dims.k) {
+      : `    if (brow${slot} < dims.k) {
 ${conv2dKDecode(slot)}
       let xc = xbase + ic;
       if (bcol < dims.n) {
@@ -2304,7 +2452,9 @@ ${conv2dKDecode(slot)}
       }
     }`
 }
-    sb[bk${slot} * ${gemmColumnQuads(geometry)}u + bcq] = bv4_${slot};`,
+    sb[bk${slot} * ${gemmColumnQuads(geometry)}u + bcq] = bv4_${slot};${
+      conv2dCounterDecode(geometry, v4) ? `\n${conv2dCounterAdvance(slot)}` : ""
+    }`,
     )
     .join("\n");
 
@@ -2329,7 +2479,9 @@ const conv2dIgemmWgsl = (geometry: GemmGeometry, weight: WeightStorage, v4: bool
 @group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${v4 ? "vec4<f32>" : "f32"}>;`,
-    `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${CONV2D_XCOL_WGSL}`,
+    `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${
+      conv2dCounterDecode(geometry, v4) ? CONV2D_XCOL4_WGSL : CONV2D_XCOL_WGSL
+    }`,
     `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv(geometry, weight)}
 ${prologueBConv2d(geometry, v4)}`,
     `${fillAConv(geometry, "w", weight, v4)}
@@ -2746,6 +2898,27 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
   }
 };
 
+/** The ops whose kernels have the skeleton forms ({@link GemmGeometry.form}). */
+const FORM_OPS: ReadonlySet<GemmSpec["op"]> = new Set(["linear", "matmul", "bmm", "conv2d"]);
+
+/**
+ * The geometry the fragments generate from: `geometry` as is where its skeleton form takes
+ * effect, and without the form elsewhere — the form is built and measured for the kernels of
+ * {@link FORM_OPS} with vec4 I/O and f32 compute (the scalar kernels and the f16 compute variant
+ * have another store mapping and another B tile type), so every other kernel keeps the original
+ * form whatever the geometry carries.
+ *
+ * MUST: the fragments read `form` only from the geometry this function returns (they all take
+ * the one geometry of {@link gemmWgsl}), so no kernel mixes two forms.
+ */
+const gemmFormGeometry = (geometry: GemmGeometry, spec: GemmSpec): GemmGeometry => {
+  if (geometry.form === undefined) return geometry;
+  const f32Compute = !("compute" in spec) || spec.compute === undefined || spec.compute === "f32";
+  if (FORM_OPS.has(spec.op) && "v4" in spec && spec.v4 && f32Compute) return geometry;
+  const { form: _dropped, ...original } = geometry;
+  return original;
+};
+
 /**
  * One WGSL shader from one generation input. The same input always yields byte-identical text.
  *
@@ -2761,8 +2934,12 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
  * execution) is unchanged (DECIDED: ADR 0115).
  */
 export const gemmWgsl = (spec: GemmSpec): string => {
-  const geometry = resolveGeometry(spec);
-  assertGemmGeometry(geometry, spec.op);
+  const resolved = resolveGeometry(spec);
+  assertGemmGeometry(resolved, spec.op);
+  const geometry = gemmFormGeometry(resolved, spec);
+  if (geometry.decode !== undefined && spec.op !== "conv2d") {
+    throw new CodegenError(`${spec.op}: the geometry's decode field is conv2d's alone`);
+  }
   switch (spec.op) {
     case "linear":
       return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute, spec.weightGroupShift);

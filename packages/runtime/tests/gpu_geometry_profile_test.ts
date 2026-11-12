@@ -741,3 +741,51 @@ describe.skipIf(!GPU_AVAILABLE)(
     });
   },
 );
+
+describe.skipIf(!GPU_AVAILABLE)(
+  "the skeleton forms and the conv2d counter decode injected in gemmRows and conv2d (perf-ledger K-88, real GPU)",
+  () => {
+    it("the Session runs a linear and both conv2d classes under the keys of the injected fields and returns the words of the default profile", async () => {
+      const { match: _match, ...rest } = DEFAULT_GEOMETRY_PROFILE;
+      const forms: GeometryProfile = {
+        ...rest,
+        id: "k88-forms",
+        gemmRows: DEFAULT_GEOMETRY_PROFILE.gemmRows.map((rule) => ({
+          ...rule,
+          geometry: { ...rule.geometry, form: "tas-tb-un" },
+        })),
+        conv2d: {
+          rows64: { ...DEFAULT_GEOMETRY_PROFILE.conv2d.rows64, form: "tb-un", decode: "counter" },
+          rows32: { ...DEFAULT_GEOMETRY_PROFILE.conv2d.rows32, decode: "counter" },
+        },
+      };
+      const plain = await acquireGpu();
+      const injected = await acquireGpu({ geometryProfile: forms });
+      try {
+        // linear M = 1024, k = 64, n = 96 (the v4 kernel, the r8×8 bucket — both quads of a
+        // thread remapped); conv2d 3×3 over 20×20 with 8 input channels (the v4 kernel) in the
+        // 64-row and the 32-row class
+        const cases: readonly ProfileCase[] = [
+          {
+            ...linearCase(1024),
+            expected: () => [{ prefix: "linear:v2:f32:reg128x128r8x8w16v4:tas-tb-un", parts: [] }],
+          },
+          {
+            ...conv2dCase(128, "rows64"),
+            expected: () => [{ prefix: "conv2d:v3:f32:igemm64x128v4:wg16x8:tb-un:dec", parts: [] }],
+          },
+          {
+            ...conv2dCase(96, "rows32"),
+            expected: () => [{ prefix: "conv2d:v3:f32:igemm32x128v4:wg16x4:dec", parts: [] }],
+          },
+        ];
+        for (const testCase of cases) {
+          await assertRunsWithProfile(contextAs(plain, "", "", ""), injected, forms, testCase);
+        }
+      } finally {
+        injected.destroy();
+        plain.destroy();
+      }
+    });
+  },
+);

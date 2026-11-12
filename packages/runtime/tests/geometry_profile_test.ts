@@ -1781,6 +1781,38 @@ describe("the derivation of shared memory (a pure function) matches the total of
     }
   });
 
+  it("the f32 skeleton forms and the conv2d counter decode (perf-ledger K-88 — linear, matmul, bmm, conv2d v4): the shared tiles are declared as without them", () => {
+    for (const base of SAMPLE_GEMM) {
+      for (const form of ["tb-un", "tas-tb-un"] as const) {
+        const geometry: GemmGeometry = { ...base, form };
+        assertEquals(
+          gemmWorkgroupStorageBytes(geometry, "f32"),
+          gemmWorkgroupStorageBytes(base, "f32"),
+        );
+        const cases: readonly (readonly [string, string])[] = [
+          ["linear f32", linearWgsl("f32", true, "f32", 128, undefined, geometry)],
+          ["linear i4", linearWgsl("i4", true, "f32", 128, 32, geometry)],
+          ["matmul", matmulWgsl(true, 128, geometry)],
+          ["bmm", bmmWgsl(true, 128, undefined, geometry)],
+          ["conv2d", conv2dIgemmWgsl("f32", true, 64, geometry)],
+          ["conv2d decode", conv2dIgemmWgsl("i8", true, 64, { ...geometry, decode: "counter" })],
+        ];
+        for (const [name, wgsl] of cases) {
+          assertEquals(
+            gemmWorkgroupStorageBytes(geometry, "f32"),
+            declaredWorkgroupBytes(wgsl),
+            `${name} ${label(geometry)}`,
+          );
+        }
+      }
+      assertEquals(
+        gemmWorkgroupStorageBytes(base, "f32"),
+        declaredWorkgroupBytes(conv2dIgemmWgsl("f16", true, 64, { ...base, decode: "counter" })),
+        `conv2d decode alone ${label(base)}`,
+      );
+    }
+  });
+
   it("i8a8 (linear, fused attention ①QK / ③PV and conv3d — including the per-variable 16-byte round-up)", () => {
     for (const geometry of SAMPLE_I8A8) {
       for (const [name, wgsl] of [

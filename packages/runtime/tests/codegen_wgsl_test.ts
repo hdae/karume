@@ -85,11 +85,12 @@ import {
 import {
   ATTENTION_QK_MASK_BINDING,
   GEMM_MTILE_SMALL,
+  gemmMTileGeometry,
   gemmUsesVec4,
   statePvTiledWgsl,
   stateQkTiledWgsl,
 } from "../src/kernels/gemm.ts";
-import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
+import { defaultGemmGeometry, GEMM_TILE, type GemmGeometry } from "../src/kernels/gemm-geometry.ts";
 import {
   CONV1D_SCALE_BINDING,
   conv1dIgemmKey,
@@ -359,6 +360,13 @@ const SKELETON_L1C: I8a8Geometry = {
  * the second slot reaches past the tile and is guarded).
  */
 const SKELETON_PARTIAL: I8a8Geometry = { ...SKELETON_L1C, regM: 12 };
+
+/** The f32 skeleton forms (perf-ledger K-88) at the default geometry (r8×8, wg16×16). */
+const K88_TBUN: GemmGeometry = { ...defaultGemmGeometry(), form: "tb-un" };
+const K88_TASTBUN: GemmGeometry = { ...defaultGemmGeometry(), form: "tas-tb-un" };
+
+/** conv2d's 64-row class geometry (r8×8, wg16×8 — the default profile's `conv2d.rows64`). */
+const K88_CONV: GemmGeometry = gemmMTileGeometry(GEMM_TILE);
 
 // The 5 fused kernels have weight-storage variants (ADR 0018). The existing invariants apply to the
 // **w=f32 variant**, so the old names are bound to that variant (the f16 variants are covered by
@@ -781,6 +789,69 @@ test("generated WGSL matches the snapshots byte for byte (pins codegen determini
     ["conv2d_igemm_m32_wbf16_v4.wgsl", conv2dIgemmWgsl("bf16", true, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wi8.wgsl", conv2dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wi8_v4.wgsl", conv2dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
+    // The skeleton forms of the f32 GEMM and the counter decode of conv2d's implicit GEMM
+    // (perf-ledger K-88 — optional geometry fields, v4 kernels only): each form on linear (f32
+    // weights at the default geometry and at the one-quad-per-thread {4,4,8,16}, i4 g32 weights),
+    // matmul, bmm and conv2d; the decode alone and with each form on conv2d (f32 weights, the
+    // 64-row and the 32-row class), and both on the i8 conv2d the spike measured. The condition is
+    // **placing them as a pair with linear_v4 / matmul_v4 / bmm_v4 / conv2d_igemm*_v4**: a geometry
+    // without the fields must not move by one byte.
+    ["linear_tbun_v4.wgsl", linearWgsl("f32", true, "f32", undefined, undefined, K88_TBUN)],
+    ["linear_tastbun_v4.wgsl", linearWgsl("f32", true, "f32", undefined, undefined, K88_TASTBUN)],
+    [
+      "linear_m64n32_tastbun_v4.wgsl",
+      linearWgsl("f32", true, "f32", undefined, undefined, {
+        regM: 4,
+        regN: 4,
+        wgX: 8,
+        wgY: 16,
+        form: "tas-tb-un",
+      }),
+    ],
+    ["linear_wi4_g32_tastbun_v4.wgsl", linearWgsl("i4", true, "f32", undefined, 32, K88_TASTBUN)],
+    ["matmul_tbun_v4.wgsl", matmulWgsl(true, undefined, K88_TBUN)],
+    ["matmul_tastbun_v4.wgsl", matmulWgsl(true, undefined, K88_TASTBUN)],
+    ["bmm_tbun_v4.wgsl", bmmWgsl(true, undefined, undefined, K88_TBUN)],
+    ["bmm_tastbun_v4.wgsl", bmmWgsl(true, undefined, undefined, K88_TASTBUN)],
+    [
+      "conv2d_igemm_tbun_v4.wgsl",
+      conv2dIgemmWgsl("f32", true, GEMM_TILE, { ...K88_CONV, form: "tb-un" }),
+    ],
+    [
+      "conv2d_igemm_tastbun_v4.wgsl",
+      conv2dIgemmWgsl("f32", true, GEMM_TILE, { ...K88_CONV, form: "tas-tb-un" }),
+    ],
+    [
+      "conv2d_igemm_dec_v4.wgsl",
+      conv2dIgemmWgsl("f32", true, GEMM_TILE, { ...K88_CONV, decode: "counter" }),
+    ],
+    [
+      "conv2d_igemm_dec_tbun_v4.wgsl",
+      conv2dIgemmWgsl("f32", true, GEMM_TILE, { ...K88_CONV, form: "tb-un", decode: "counter" }),
+    ],
+    [
+      "conv2d_igemm_dec_tastbun_v4.wgsl",
+      conv2dIgemmWgsl("f32", true, GEMM_TILE, {
+        ...K88_CONV,
+        form: "tas-tb-un",
+        decode: "counter",
+      }),
+    ],
+    [
+      "conv2d_igemm_m32_dec_v4.wgsl",
+      conv2dIgemmWgsl("f32", true, GEMM_MTILE_SMALL, {
+        ...gemmMTileGeometry(GEMM_MTILE_SMALL),
+        decode: "counter",
+      }),
+    ],
+    [
+      "conv2d_igemm_wi8_dec_tastbun_v4.wgsl",
+      conv2dIgemmWgsl("i8", true, GEMM_TILE, {
+        ...K88_CONV,
+        form: "tas-tb-un",
+        decode: "counter",
+      }),
+    ],
     // conv1d's implicit GEMM (the 1D version of ADR 0024) has 12 variants at the same granularity.
     // The condition is **listing them as a pair with both conv1d*.wgsl above (the direct kernel)
     // and conv2d_igemm*.wgsl**: the worst accident is generalizing the fragments to 1D moving the
@@ -4936,6 +5007,302 @@ describe("the vec4 skeleton of the i8a8 GEMM (perf-ledger K-85)", () => {
       assertEquals(skeleton.includes("for (var p = 0u;"), false, `${name}: not unrolled`);
       assertEquals(plain.includes("for (var p = 0u;"), true, `${name}: control`);
       assertEquals(skeleton.includes("vec4<u32>"), false, `${name}: no vec4 fill in this slice`);
+    }
+  });
+});
+
+/**
+ * The skeleton forms of the f32 GEMM (`GemmGeometry.form`) and the counter decode of conv2d's
+ * implicit GEMM (`GemmGeometry.decode`) — perf-ledger K-88, optional geometry fields. Absent, keys
+ * and WGSL do not move (the snapshots above); present, they change the key and only the parts of
+ * the kernel they name. Every form runs the same multiply-adds in the same order per output
+ * element (checking that on hardware is tests/gpu_gemm_forms_test.ts's job).
+ */
+describe("the skeleton forms of the f32 GEMM and the counter decode of conv2d (perf-ledger K-88)", () => {
+  const FORMS = ["tb-un", "tas-tb-un"] as const;
+  /** A geometry with the field set to a value outside the type (stored data, a JS caller). */
+  const withRaw = (geometry: GemmGeometry, field: string, value: unknown): GemmGeometry => {
+    const raw: GemmGeometry = { ...geometry };
+    Reflect.set(raw, field, value);
+    return raw;
+  };
+
+  it("a geometry without the fields keeps its key, and each form and the decode add their key part", () => {
+    assertEquals(
+      linearKey("f32", true, "f32", undefined, undefined, defaultGemmGeometry()),
+      linearKey("f32", true),
+    );
+    assertEquals(linearKey("f32", true), "linear:v2:f32:reg128x128r8x8w16v4");
+    assertEquals(
+      linearKey("f32", true, "f32", undefined, undefined, K88_TBUN),
+      "linear:v2:f32:reg128x128r8x8w16v4:tb-un",
+    );
+    assertEquals(
+      linearKey("i4", true, "f32", undefined, 32, K88_TASTBUN),
+      "linear:v2:f32:reg128x128r8x8w16v4:tas-tb-un:wi4g32",
+    );
+    assertEquals(
+      linearKey("i8", true, "f32", 768, undefined, K88_TASTBUN),
+      "linear:v3:f32:reg128x128r8x8w16v4:tas-tb-un:wi8",
+    );
+    assertEquals(matmulKey(true, undefined, K88_TBUN), "matmul:v2:f32:reg128x128r8x8w16v4:tb-un");
+    assertEquals(
+      bmmKey(true, undefined, undefined, K88_TASTBUN),
+      "bmm:v2:f32:reg128x128r8x8w16v4:tas-tb-un",
+    );
+    assertEquals(conv2dIgemmKey("f32", true, GEMM_TILE, K88_CONV), conv2dIgemmKey("f32", true));
+    assertEquals(
+      conv2dIgemmKey("i8", true, GEMM_TILE, K88_CONV),
+      "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8",
+    );
+    const conv2dVariants = [undefined, ...FORMS].flatMap((form) =>
+      [undefined, "counter" as const].map((decode): GemmGeometry => ({
+        ...K88_CONV,
+        ...(form === undefined ? {} : { form }),
+        ...(decode === undefined ? {} : { decode }),
+      })),
+    );
+    assertEquals(
+      conv2dVariants.map((geometry) => conv2dIgemmKey("i8", true, GEMM_TILE, geometry)),
+      [
+        "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8",
+        "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8:dec",
+        "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8:tb-un",
+        "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8:tb-un:dec",
+        "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8:tas-tb-un",
+        "conv2d:v3:f32:igemm64x128v4:wg16x8:wi8:tas-tb-un:dec",
+      ],
+    );
+    // Six keys, six different kernels (same key ⇔ same WGSL across the variants)
+    assertEquals(
+      new Set(conv2dVariants.map((geometry) => conv2dIgemmWgsl("i8", true, GEMM_TILE, geometry)))
+        .size,
+      6,
+    );
+    assertEquals(
+      conv2dIgemmKey("f16", true, GEMM_MTILE_SMALL, {
+        ...gemmMTileGeometry(GEMM_MTILE_SMALL),
+        decode: "counter",
+      }),
+      "conv2d:v3:f32:igemm32x128v4:wg16x4:wf16:dec",
+    );
+  });
+
+  it("the forms change only the skeleton: column quads a workgroup row apart in the update and the store, 16 unrolled K steps, a k-major A tile with static scalar stores", () => {
+    const plain = linearWgsl("f32", true, "f32", undefined, undefined, defaultGemmGeometry());
+    const tbun = linearWgsl("f32", true, "f32", undefined, undefined, K88_TBUN);
+    const tas = linearWgsl("f32", true, "f32", undefined, undefined, K88_TASTBUN);
+    assertEquals(plain.includes("for (var kk = 0u; kk < 16u; kk = kk + 1u) {"), true);
+    assertEquals(plain.includes("let bv1 = sb[kk * 32u + lid.x * 2u + 1u];"), true);
+    assertEquals(plain.includes("let ocq1 = ocq0 + 1u;"), true);
+    for (const [name, wgsl] of [
+      ["tb-un", tbun],
+      ["tas-tb-un", tas],
+    ] as const) {
+      assertEquals(wgsl.includes("for (var kk"), false, `${name}: the K loop is unrolled`);
+      for (let kk = 0; kk < 16; kk += 1) {
+        assertEquals(wgsl.includes(`      let kk = ${kk}u;\n`), true, `${name}: block ${kk}`);
+      }
+      assertEquals(wgsl.includes("let kk = 16u;"), false, `${name}: a step past the K tile`);
+      // TB: quad q of a thread is lid.x + q · wgX in the update and in the store alike
+      assertEquals(wgsl.includes("let bv1 = sb[kk * 32u + lid.x + 16u];"), true, name);
+      assertEquals(wgsl.includes("let ocq0 = wid.x * 32u + lid.x;"), true, name);
+      assertEquals(wgsl.includes("let ocq1 = ocq0 + 16u;"), true, name);
+      // Every MAC keeps the literal `acc + a * b` (8 rows × 2 quads × 16 steps)
+      assertEquals(
+        [...wgsl.matchAll(/^ {6}acc(\d)_(\d) = acc\1_\2 \+ sa\[[^\]]+\] \* bv\2;$/gm)].length,
+        8 * 2 * 16,
+        `${name}: the multiply-adds`,
+      );
+      // The tiles keep their scalar A / vec4 B types and sizes, and no component is written
+      // through a dynamic index (the shared-tile MUST of gemm.ts)
+      assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 2048>;"), true, name);
+      assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 512>;"), true, name);
+      assertEquals(/s[ab]\[[^\]]*\]\[/.test(wgsl), false, `${name}: a dynamic component store`);
+    }
+    // TAs: the A tile is k-major (row ar of quad aq at aq · 4 · 128 + ar; component c a tile of
+    // rows further); tb-un keeps it row-major
+    assertEquals(tbun.includes("let sa_base0 = ar * 16u + aq * 4u;"), true);
+    assertEquals(tbun.includes("sa[sa_base0 + 1u] = av0.x;"), false);
+    assertEquals(tbun.includes("sa[sa_base0 + 1u] = av0.y;"), true);
+    assertEquals(tas.includes("let sa_base0 = aq * 512u + ar;"), true);
+    assertEquals(tas.includes("let sa_base1 = sa_base0 + 64u;"), true);
+    for (const [component, lane] of [
+      [128, "y"],
+      [256, "z"],
+      [384, "w"],
+    ] as const) {
+      assertEquals(tas.includes(`sa[sa_base0 + ${component}u] = av0.${lane};`), true, lane);
+    }
+    assertEquals(tas.includes("sa[kk * 128u + lid.y * 8u + 7u] * bv1;"), true);
+    assertEquals(tbun.includes("sa[(lid.y * 8u + 7u) * 16u + kk] * bv1;"), true);
+    // One quad per thread (regN 4): TB has nothing to remap, the K loop is still unrolled
+    const narrow: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
+    const narrowTb = linearWgsl("f32", true, "f32", undefined, undefined, {
+      ...narrow,
+      form: "tb-un",
+    });
+    assertEquals(narrowTb.includes("let ocq0 = wid.x * 8u + lid.x;"), true);
+    assertEquals(narrowTb.includes("ocq1"), false);
+    assertEquals(narrowTb.includes("for (var kk"), false);
+  });
+
+  it("the counter decode: conv2d v4 only, the quad's column origin once, a per-slot counter advanced after every store, and the edge path through xcol4 with no division", () => {
+    const plain = conv2dIgemmWgsl("f32", true, GEMM_TILE, K88_CONV);
+    const counter = conv2dIgemmWgsl("f32", true, GEMM_TILE, { ...K88_CONV, decode: "counter" });
+    assertEquals(plain.includes("let ic = brow0 / khw;"), true);
+    assertEquals(plain.includes("fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {"), true);
+    assertEquals(counter.includes("fn xcol("), false, "the per-element decode is gone");
+    assertEquals(counter.includes("/ khw;\n      let kr"), false);
+    assertEquals(counter.includes("let n0q = bc4 * 4u;"), true);
+    assertEquals(counter.includes("let step_ic = 16u / khw;"), true);
+    // 4 B slots at wg16×8: each has its counter, read in place of the divisions and advanced
+    // right after its store, outside the fill's guard
+    for (let slot = 0; slot < 4; slot += 1) {
+      assertEquals(counter.includes(`  var c_ic${slot} = bk${slot} / khw;\n`), true, `${slot}`);
+      assertEquals(counter.includes(`      let ic = c_ic${slot};\n`), true, `${slot}`);
+      assertEquals(
+        counter.includes(
+          `    sb[bk${slot} * 32u + bcq] = bv4_${slot};\n    c_kw${slot} = c_kw${slot} + step_kw;\n`,
+        ),
+        true,
+        `slot ${slot}: the advance follows the store`,
+      );
+      assertEquals(counter.includes(`      bv4_${slot} = xcol4(xc, iy, ix0);\n`), true);
+    }
+    assertEquals(counter.includes("var c_ic4"), false);
+    // The edge helpers divide nothing (the point of the form) and read x only inside the checks
+    const helpers = counter.slice(
+      counter.indexOf("fn xcol_row("),
+      counter.indexOf("// Shared A tile"),
+    );
+    const code = helpers
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("//"))
+      .join("\n");
+    assertEquals(/[/%]/.test(code), false, "a division in the edge path");
+    assertEquals(code.includes("return vec4<f32>(e0, e1, e2, e3);"), true);
+    assertEquals(/s[ab]\[[^\]]*\]\[|bv4_\d\.[xyzw] =/.test(counter), false);
+    // The scalar kernel keeps the per-element decode whatever the geometry carries
+    const scalar = conv2dIgemmWgsl("f32", false, GEMM_TILE, { ...K88_CONV, decode: "counter" });
+    assertEquals(scalar, conv2dIgemmWgsl("f32", false, GEMM_TILE, K88_CONV));
+  });
+
+  it("refuses the decode on another op and an unknown form or decode value (CodegenError)", () => {
+    const decode: GemmGeometry = { ...defaultGemmGeometry(), decode: "counter" };
+    for (const [op, generate] of [
+      ["linear", () => linearWgsl("f32", true, "f32", undefined, undefined, decode)],
+      ["linear", () => linearWgsl("i8", false, "f32", undefined, undefined, decode)],
+      ["matmul", () => matmulWgsl(true, undefined, decode)],
+      ["bmm", () => bmmWgsl(false, undefined, undefined, decode)],
+      ["attention_qk", () => attentionQkWgsl(true, "f32", "f32", false, false, false, decode)],
+      ["attention_pv", () => attentionPvWgsl(true, "f32", "f32", false, false, decode)],
+    ] as const) {
+      assertThrows(generate, CodegenError, `${op}: the geometry's decode field is conv2d's alone`);
+    }
+    for (const generate of [
+      () => linearWgsl("f32", true, "f32", undefined, undefined, withRaw(K88_TBUN, "form", "tb")),
+      () => matmulWgsl(true, undefined, withRaw(K88_TBUN, "form", "TB-UN")),
+      () => conv2dIgemmWgsl("f32", true, GEMM_TILE, withRaw(K88_CONV, "form", 1)),
+    ]) {
+      assertThrows(generate, CodegenError, 'geometry form must be "tb-un", "tas-tb-un" or absent');
+    }
+    for (const value of ["table", true]) {
+      assertThrows(
+        () => conv2dIgemmWgsl("f32", true, GEMM_TILE, withRaw(K88_CONV, "decode", value)),
+        CodegenError,
+        `geometry decode must be "counter" or absent (${JSON.stringify(value)})`,
+      );
+    }
+  });
+
+  it("a form is dropped where it has no effect: the scalar kernels generate the original WGSL under the original key", () => {
+    const geometries: readonly GemmGeometry[] = [
+      defaultGemmGeometry(),
+      { regM: 4, regN: 4, wgX: 8, wgY: 16 },
+      { regM: 1, regN: 4, wgX: 4, wgY: 16 },
+    ];
+    for (const base of geometries) {
+      for (const form of FORMS) {
+        const geometry = { ...base, form };
+        const where = `${JSON.stringify(base)} ${form}`;
+        for (const weight of WEIGHT_STORAGES) {
+          assertEquals(
+            linearWgsl(weight, false, "f32", undefined, undefined, geometry),
+            linearWgsl(weight, false, "f32", undefined, undefined, base),
+            `linear ${weight} ${where}`,
+          );
+          assertEquals(
+            linearKey(weight, false, "f32", undefined, undefined, geometry),
+            linearKey(weight, false, "f32", undefined, undefined, base),
+            `linear ${weight} ${where}`,
+          );
+        }
+        assertEquals(
+          linearWgsl("i4", false, "f32", undefined, 32, geometry),
+          linearWgsl("i4", false, "f32", undefined, 32, base),
+        );
+        assertEquals(
+          linearKey("i4", false, "f32", undefined, 32, geometry),
+          linearKey("i4", false, "f32", undefined, 32, base),
+        );
+        assertEquals(matmulWgsl(false, undefined, geometry), matmulWgsl(false, undefined, base));
+        assertEquals(matmulKey(false, undefined, geometry), matmulKey(false, undefined, base));
+        assertEquals(
+          bmmWgsl(false, undefined, undefined, geometry),
+          bmmWgsl(false, undefined, undefined, base),
+        );
+        assertEquals(
+          bmmKey(false, undefined, undefined, geometry),
+          bmmKey(false, undefined, undefined, base),
+        );
+        for (const weight of WEIGHT_STORAGES) {
+          assertEquals(
+            conv2dIgemmWgsl(weight, false, GEMM_TILE, geometry),
+            conv2dIgemmWgsl(weight, false, GEMM_TILE, base),
+            `conv2d ${weight} ${where}`,
+          );
+          assertEquals(
+            conv2dIgemmKey(weight, false, GEMM_TILE, geometry),
+            conv2dIgemmKey(weight, false, GEMM_TILE, base),
+            `conv2d ${weight} ${where}`,
+          );
+        }
+      }
+    }
+  });
+
+  it("the same generator input always yields identical WGSL (each form and the decode, every weight storage)", () => {
+    for (const form of FORMS) {
+      const geometry: GemmGeometry = { ...defaultGemmGeometry(), form };
+      for (const weight of WEIGHT_STORAGES) {
+        assertEquals(
+          linearWgsl(weight, true, "f32", undefined, undefined, geometry),
+          linearWgsl(weight, true, "f32", undefined, undefined, geometry),
+          `linear ${weight} ${form}`,
+        );
+        for (const decode of [undefined, "counter" as const]) {
+          const conv: GemmGeometry = {
+            ...K88_CONV,
+            form,
+            ...(decode === undefined ? {} : { decode }),
+          };
+          assertEquals(
+            conv2dIgemmWgsl(weight, true, GEMM_TILE, conv),
+            conv2dIgemmWgsl(weight, true, GEMM_TILE, conv),
+            `conv2d ${weight} ${form} ${decode ?? ""}`,
+          );
+        }
+      }
+      assertEquals(
+        linearWgsl("i4", true, "f32", undefined, 32, geometry),
+        linearWgsl("i4", true, "f32", undefined, 32, geometry),
+      );
+      assertEquals(matmulWgsl(true, undefined, geometry), matmulWgsl(true, undefined, geometry));
+      assertEquals(
+        bmmWgsl(true, undefined, undefined, geometry),
+        bmmWgsl(true, undefined, undefined, geometry),
+      );
     }
   });
 });

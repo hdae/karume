@@ -95,6 +95,31 @@ export type GemmGeometry = {
   readonly wgX: number;
   /** y edge of the workgroup (row direction). */
   readonly wgY: number;
+  /**
+   * The im2col decode of conv2d's implicit GEMM (perf-ledger K-88). Absent = the original form:
+   * every K tile splits its flat k into `(ic, kh, kw)` and its column into `(oy, ox)` by
+   * division. `"counter"` = each B slot keeps an `(ic, kh, kw)` counter that advances by the K
+   * tile, the column origin is computed once, and the edge path checks the input row once per quad
+   * instead of once per element — in the v4 kernel only (the scalar kernel keeps the original
+   * form). Both forms read the same elements of x in the same order; the choice is speed only.
+   * MUST: conv2d only (`gemmWgsl` refuses it on another op), and in the key (`conv2dIgemmKey`
+   * in ./conv2d.ts) — it changes the WGSL.
+   */
+  readonly decode?: "counter";
+  /**
+   * The form of the f32 GEMM skeleton (perf-ledger K-88). Absent = the original form: a thread's
+   * column quads are adjacent (`lid.x · Q + q`), the A tile is row-major (`sa[row · 16 + k]`) and
+   * the 16 steps of a K tile run as a loop. `"tb-un"` = a thread's column quads are a workgroup
+   * row apart (`lid.x + q · wgX`, so the threads of a row read adjacent quads) and the K loop is
+   * emitted unrolled. `"tas-tb-un"` = that, and the A tile is k-major (`sa[k · tileM + row]`,
+   * still a scalar array with static component stores). Every form runs the same multiply-adds
+   * in the same order per output element; the choice is speed only.
+   * It takes effect only in the kernels of linear / matmul / bmm / conv2d with vec4 I/O and f32
+   * compute (`gemmFormGeometry` in ./gemm.ts); elsewhere a geometry that carries it generates the
+   * original form.
+   * MUST: in the key (`gemmKeyPart`, `conv2dIgemmKey`) — it changes the WGSL.
+   */
+  readonly form?: "tb-un" | "tas-tb-un";
 };
 
 /** Rows of the output tile. The dispatch's y is `ceil(m / tileM)`. */
@@ -188,6 +213,18 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
   if (GEMM_TILE_K % quadStride !== 0) {
     throw new CodegenError(
       `${where}: K tile ${GEMM_TILE_K} is not divisible by the quad fill stride ${quadStride}`,
+    );
+  }
+  const form: unknown = geometry.form;
+  if (form !== undefined && form !== "tb-un" && form !== "tas-tb-un") {
+    throw new CodegenError(
+      `${where}: geometry form must be "tb-un", "tas-tb-un" or absent (${JSON.stringify(form)})`,
+    );
+  }
+  const decode: unknown = geometry.decode;
+  if (decode !== undefined && decode !== "counter") {
+    throw new CodegenError(
+      `${where}: geometry decode must be "counter" or absent (${JSON.stringify(decode)})`,
     );
   }
 };
