@@ -143,12 +143,14 @@ maintainer's ruling of 2026-11-06).
   with `wordIdentity`, the gemma pipeline's experimental `fusionRules` (gemma only, as an experiment — maintainer
   2026-11-11; the details are decided later), the private `packages/candidate-rules` (the candidate `candidate/gelu_mul`),
   the Playground's `/session-ab` page and an opt-in Node run on 26B (`KARUME_SESSION_AB=<dir>`,
-  `e2e_gemma4_session_ab_test.ts`). Left: the page's first runs in Chrome (D3D12) and on Metal; the option on other
-  families; a public way to switch a built-in rule off for a measurement (today only the test-only
-  `DISABLED_FUSION_RULES`). Generated elementwise fusions on the MOSS-Image DiT (S5, [perf-ledger](perf-ledger.md) F-13)
-  are adopted (2026-11-12): `models/ew_chain`, the first rule a pipeline passes by default (ADR 0148 addendum of
-  2026-11-12); left: the research note, a run on Metal, and — not decided — whether the runtime should bind borrowed
-  weights for an external rule, which keeps `dit_skip22`'s 42 gates unfused today. The VAE's channel RMS norm + SiLU
+  `e2e_gemma4_session_ab_test.ts`). The page ran in Chrome / D3D12 on the RTX 5070 Ti on every target (the Gemma 4
+  target on 2026-11-11, the MOSS-Image and VAE targets on 2026-11-12 — [perf-ledger](perf-ledger.md) K-105, F-13, V-10),
+  and the experimental `fusionRules` option reached the MOSS-Image, Wan and anima pipelines. Left: a run on Metal; a
+  public way to switch a built-in rule off for a measurement (today only the test-only `DISABLED_FUSION_RULES`).
+  Generated elementwise fusions on the MOSS-Image DiT (S5, [perf-ledger](perf-ledger.md) F-13) are adopted
+  (2026-11-12): `models/ew_chain`, the first rule a pipeline passes by default (ADR 0148 addendum of 2026-11-12);
+  left: the research note, a run on Metal, and — not decided — whether the runtime should bind borrowed weights for an
+  external rule, which keeps `dit_skip22`'s 42 gates unfused today. The VAE's channel RMS norm + SiLU
   ([perf-ledger](perf-ledger.md) V-10) is adopted too (2026-11-12): `models/vae_rms_silu`, which the Wan and anima
   pipelines pass by default to their VAE decoder Sessions (ADR 0148 addendum of 2026-11-12 on it); left: a run on Metal
   (it runs there unmeasured, by the maintainer's ruling — [known issues](known-issues.md)), Wan2.2's VAE encoder (its
