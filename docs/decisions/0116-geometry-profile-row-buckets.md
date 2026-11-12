@@ -227,4 +227,6 @@ order of `gemmRows` (one guard checks both), every bound but the last a measured
 the sweep for it), the generator writing the fixed set for every table (decision 2), a bucket without a case keeping
 the default (here the default profile's one rule, so any bounds refine it — decision 3), verdict lines named by range
 (decision 6) and one real-GPU case per rule (decision 7). The bounds enter the `i8a8-linear` family's case-set
-version only.
+version only. The bound rule differs from decision 1's for `gemmRows`, whose bounds other than the last equal the set
+of the cases' M values up to 512: for `i8a8.linear` every bound but the last is the M of some case and every bucket
+holds a case, while cases at other M values (1, 185, 1,024, …) lie inside a bucket (`tune_cases_test.ts`).
