@@ -16,10 +16,13 @@
 
 import { attentionPvI8a8Eligible, attentionQkI8a8Eligible } from "../kernels/attention-i8a8.ts";
 import {
+  type AttentionOnlineKeyWords,
   type AttentionOnlineReduce,
   attentionOnlineI8a8Eligible,
   attentionOnlineI8a8WorkgroupStorageBytes,
+  attentionOnlineKeyWords,
 } from "../kernels/attention-online-i8a8.ts";
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import {
   attentionScoreUsesF16,
   type MaterialisedScoreStorage,
@@ -49,6 +52,15 @@ export type AttentionRoute =
       readonly score: "none";
       /** The reduction form of the online kernel (bit-identical either way — ADR 0132 decision 5). */
       readonly online: AttentionOnlineReduce;
+      /**
+       * The key-axis form of the quantised Vᵀ (bit-identical in every form — ADR 0132 addendum
+       * 2026-11-12): the device facts' {@link AttentionDeviceFacts.onlineKeyWords} where the profile
+       * chose one, otherwise the form `attentionOnlineKeyWords` gives N.
+       * MUST: the Vᵀ producer, the kernel's key and WGSL, its uniform and the size of the quantised
+       * Vᵀ (`attentionI8a8TempBytes`) all take it from here — a row length two of them disagree on
+       * reads the wrong words without an exception.
+       */
+      readonly keyWords: AttentionOnlineKeyWords;
     };
 
 /**
@@ -60,29 +72,47 @@ export type AttentionDeviceFacts = {
   readonly subgroups: boolean;
   /** The device's granted `maxComputeWorkgroupStorageSize`. */
   readonly maxComputeWorkgroupStorageSize: number;
+  /**
+   * The key-axis form the device's geometry profile chose for the online kernel's Vᵀ
+   * (`GeometryProfile.attentionOnline` — ADR 0132 addendum 2026-11-12); absent = the form N gives.
+   * NOTE: facts built by hand rather than read with `attentionDeviceFacts(gpu)` lack it, so on a
+   * device whose profile chooses `tiled` an estimate given them sizes the quantised Vᵀ in N's form
+   * — up to 15 words per Vᵀ row short.
+   */
+  readonly onlineKeyWords?: "tiled";
 };
 
 /**
- * Reads {@link AttentionDeviceFacts} from a device context (a structural parameter so that this
- * module stays free of GPU imports — the estimate imports it).
+ * Reads {@link AttentionDeviceFacts} from a device context and the geometry profile its Session runs
+ * with (structural parameters so that this module stays free of GPU imports — the estimate imports
+ * it; the public `attentionDeviceFacts(gpu)` of attention-device.ts passes the profile
+ * `sessionGeometryProfile` selects).
  * MUST: the subgroup fact is the three conditions the `sg32` form compiles under (the features the
  * device **enabled**, not those the adapter merely advertises — the same reading as the
  * `rmsNormReduce: "subgroup32"` check of session-build.ts) **and** the measured linear lane
  * mapping (`GpuContext.subgroupLanesLinear` — the form addresses its tiles by
  * `local_invocation_index`, ADR 0132 decision 5).
+ * MUST: the key-axis form is the profile's own field; a profile without it adds nothing, so the
+ * facts (and every route, key and estimate) are those of before the field.
  */
-export const attentionDeviceFacts = (gpu: {
-  readonly features: ReadonlySet<string>;
-  readonly wgslLanguageFeatures: ReadonlySet<string>;
-  readonly subgroupLanesLinear: boolean;
-  readonly limits: { readonly maxComputeWorkgroupStorageSize: number };
-}): AttentionDeviceFacts => ({
+export const readAttentionDeviceFacts = (
+  gpu: {
+    readonly features: ReadonlySet<string>;
+    readonly wgslLanguageFeatures: ReadonlySet<string>;
+    readonly subgroupLanesLinear: boolean;
+    readonly limits: { readonly maxComputeWorkgroupStorageSize: number };
+  },
+  profile: Pick<GeometryProfile, "attentionOnline">,
+): AttentionDeviceFacts => ({
   subgroups:
     gpu.features.has("subgroups") &&
     gpu.features.has("subgroup-size-control") &&
     gpu.wgslLanguageFeatures.has("subgroup_id") &&
     gpu.subgroupLanesLinear,
   maxComputeWorkgroupStorageSize: gpu.limits.maxComputeWorkgroupStorageSize,
+  ...(profile.attentionOnline === undefined
+    ? {}
+    : { onlineKeyWords: profile.attentionOnline.keyWords }),
 });
 
 /** The options that decide the route (the Session's resolved values — filling omitted values is session-build.ts's job). */
@@ -121,7 +151,8 @@ const onlineReduce = (
  *   holds one of its reduction forms — `sg32` when the device has subgroups and its tiles fit,
  *   otherwise `wg` when the workgroup-storage limit holds its scratch too. Otherwise the route falls
  *   back to the three dispatches of a8 with S in f32 (never `"none"` — the three kernels cannot
- *   store it).
+ *   store it). The online route also carries its Vᵀ key-axis form (`keyWords`): the profile's
+ *   choice in the device facts, else N's own.
  *
  * MUST: the rejections of mask × a8 and GQA × a8 look at the **requested mode**
  * (`attentionCompute === "a8"`), not at this return value (the MUST of buildAttention — looking at
@@ -138,7 +169,10 @@ export const attentionRoute = (
     seats.attentionScoreStorage === "none" && i8a8 && attentionOnlineI8a8Eligible(depth, cols)
       ? onlineReduce(depth, device)
       : undefined;
-  if (online !== undefined) return { qk: "i8a8", pv: "i8a8", score: "none", online };
+  if (online !== undefined) {
+    const keyWords = device.onlineKeyWords ?? attentionOnlineKeyWords(cols);
+    return { qk: "i8a8", pv: "i8a8", score: "none", online, keyWords };
+  }
   return {
     qk: i8a8 && attentionQkI8a8Eligible(depth) ? "i8a8" : "dense",
     pv: i8a8 && attentionPvI8a8Eligible(cols) ? "i8a8" : "dense",

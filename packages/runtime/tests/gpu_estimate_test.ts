@@ -17,10 +17,13 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { attentionOnlineI8a8Eligible } from "../src/kernels/attention-online-i8a8.ts";
+import type { GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import type { PreparedModel, SessionOptions } from "../src/runtime/executor.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
-import { attentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../src/runtime/attention-device.ts";
+import { attentionRoute } from "../src/runtime/attention-route.ts";
+import { sessionGeometryProfile } from "../src/runtime/geometry-selection.ts";
 import {
   bothScenarios,
   decomposedAttentionGraph,
@@ -314,6 +317,8 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
   readonly expectedOnlineWindows?: number;
   /** Acquire with subgroups "available" (the online kernel's sg32 form on devices that have them). */
   readonly subgroups?: "available";
+  /** A geometry profile to inject (the tiled key axis of the online route — {@link tiledKeyAxisTable}). */
+  readonly geometryProfile?: GeometryProfile;
   /** The graph shape (default {@link FUSED}). */
   readonly shape?: {
     readonly b: number;
@@ -335,9 +340,10 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
       attrs: { scale: 1 / Math.sqrt(d) },
     }),
   );
-  const gpu = await acquireGpu(
-    variant.subgroups === undefined ? {} : { subgroups: variant.subgroups },
-  );
+  const gpu = await acquireGpu({
+    ...(variant.subgroups === undefined ? {} : { subgroups: variant.subgroups }),
+    ...(variant.geometryProfile === undefined ? {} : { geometryProfile: variant.geometryProfile }),
+  });
   try {
     const { scenarios } = model.estimate({
       maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
@@ -378,6 +384,15 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
             .filter(({ key }) => key.startsWith(family))
             .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
         assertEquals(count("attention_online"), variant.expectedOnlineWindows, "online windows");
+        if (variant.geometryProfile?.attentionOnline !== undefined) {
+          // The injected table's key-axis form reached the kernel (`…:ktile`)
+          assert(
+            pipelines.some(
+              ({ key }) => key.startsWith("attention_online") && key.endsWith(":ktile"),
+            ),
+            `the tiled key axis: ${pipelines.map(({ key }) => key).join(" / ")}`,
+          );
+        }
         assertEquals(
           count("attention_qk") + count("attention_stats") + count("attention_pv"),
           0,
@@ -442,6 +457,35 @@ test.skipIf(!GPU_AVAILABLE)(
       expectedOnlineWindows: 2,
       subgroups: "available",
       shape: { b: 1, h: 1, m: 65568, n: 65536, d: 128 },
+    }),
+);
+
+/**
+ * This device's geometry profile with the tiled key axis of the online attention chosen
+ * (`attentionOnline` — ADR 0132 addendum 2026-11-12), for injection: every other field is the table
+ * a Session on the device selects.
+ */
+const tiledKeyAxisTable = async (): Promise<GeometryProfile> => {
+  const probe = await acquireGpu({ subgroups: "available" });
+  try {
+    const { attentionOnline: _chosen, ...table } = sessionGeometryProfile(probe);
+    return { ...table, id: `${table.id}+tiled-key-axis`, attentionOnline: { keyWords: "tiled" } };
+  } finally {
+    probe.destroy();
+  }
+};
+
+test.skipIf(!GPU_AVAILABLE)(
+  "the workspace of a fused attention op matches the slot table on the online route with a profile choosing the tiled key axis (N = 203: Vᵀ in whole key tiles, real GPU)",
+  async () =>
+    // ceil(203 / 64) = 4 tiles: 64 words per Vᵀ column against ceil(203 / 4) = 51 in N's own form
+    assertFusedAttentionMatchesEstimate({
+      options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+      expectedBlocks: 1,
+      expectedOnlineWindows: 1,
+      subgroups: "available",
+      shape: { b: 1, h: 4, m: 64, n: 203, d: 128 },
+      geometryProfile: await tiledKeyAxisTable(),
     }),
 );
 
@@ -587,6 +631,71 @@ test.skipIf(!GPU_AVAILABLE)(
             diagnostics.planBacking.residentBytes,
             scenarios[0].workspaceBytes,
             `${variant.name}: slot table vs estimate`,
+          );
+        } finally {
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "an attention that absorbed its permutes has the workspace of its slot table on the online route with a profile choosing the tiled key axis (N = 68 / 8, real GPU)",
+  async () => {
+    const gpu = await acquireGpu({
+      subgroups: "available",
+      geometryProfile: await tiledKeyAxisTable(),
+    });
+    try {
+      const facts = attentionDeviceFacts(gpu);
+      assertEquals(facts.onlineKeyWords, "tiled", "the injected table's form in the device facts");
+      const options: SessionOptions = { attentionCompute: "a8", attentionScoreStorage: "none" };
+      // N = 68: 32 words per Vᵀ column against 17; N = 8: 16 against 2 (the online shapes above)
+      for (const shape of [
+        { b: 2, h: 3, s: 70, n: 68, d: 64 },
+        { b: 1, h: 2, s: 512, n: 8, d: 64 },
+      ]) {
+        const name = `N ${shape.n}`;
+        const route = attentionRoute(
+          { attentionCompute: "a8", attentionScoreStorage: "none" },
+          shape.d,
+          shape.n,
+          facts,
+        );
+        if (route.online === undefined) {
+          console.warn(`[karume] SKIP ${name}: the device holds neither form of the online kernel`);
+          continue;
+        }
+        assertEquals(route.keyWords, "tiled", `${name}: route`);
+        const model = permutedAttentionModel(shape);
+        const { scenarios } = model.estimate({
+          maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+          maxBufferSize: gpu.limits.maxBufferSize,
+          attentionDevice: facts,
+          ...options,
+        });
+        const session = await model.createContainerSession(gpu, options);
+        try {
+          const { b, h, s, n, d } = shape;
+          const inputs = {
+            qt: fill([b, s, h, d], (i) => Math.sin(i * 0.3)),
+            kt: fill([b, n, h, d], (i) => Math.cos(i * 0.2)),
+            vt: fill([b, n, h, d], (i) => ((i % 9) - 4) / 4),
+          };
+          for (let step = 0; step < 2; step += 1) await session.run(inputs);
+          const diagnostics = session.diagnostics();
+          const keys = (diagnostics.lastRunPipelines ?? []).map(({ key }) => key);
+          assert(
+            keys.some((key) => key.startsWith("attention_online") && key.endsWith(":obshd:ktile")),
+            `${name}: the tiled key axis with the absorbed output — ${keys.join(" / ")}`,
+          );
+          assertEquals(
+            diagnostics.planBacking.residentBytes,
+            scenarios[0].workspaceBytes,
+            `${name}: slot table vs estimate`,
           );
         } finally {
           await session.dispose();

@@ -28,6 +28,7 @@ import {
   attentionOnlineI8a8Wgsl,
   type AttentionOnlineKeyWords,
   attentionOnlineKeyWords,
+  attentionOnlineTiledValueRowWords,
   attentionOnlineValueRowWords,
 } from "../../kernels/attention-online-i8a8.ts";
 import {
@@ -84,6 +85,10 @@ import {
   quantizeRowsPaddedParams,
   quantizeRowsPaddedWgsl,
   quantizeRowsParams,
+  quantizeRowsTiledGeometry,
+  quantizeRowsTiledKey,
+  quantizeRowsTiledParams,
+  quantizeRowsTiledWgsl,
   quantizeRowsWgsl,
   type QuantizeRowsGeometry,
 } from "../../kernels/quantize-rows.ts";
@@ -338,35 +343,57 @@ export const attentionScoreElementBytes = (
  * let the estimate keep claiming a different number against an implementation where only one side
  * was fixed). i8a8 cannot be combined with GQA ({@link fusedAttentionViolation}), so the k / v side
  * is also counted with the q side's `B·H`.
+ * `keyWords` is the key-axis form of the quantised Vᵀ: the online route's (`route.keyWords`), or
+ * `whole` for ③PV's i8a8 (which reads only that form). MUST: taken from the route — the tiled
+ * kernel reads whole key tiles without a bounds guard, so a `vq` sized in N's form would be read
+ * past its end.
  */
 export const attentionI8a8TempBytes = (
   shape: AttentionShape,
+  keyWords: AttentionOnlineKeyWords,
 ): {
-  readonly qk: {
-    readonly qq: number;
-    readonly qs: number;
-    readonly kq: number;
-    readonly ks: number;
-  };
+  readonly qk: AttentionQkTempBytes;
   readonly pv: { readonly vt: number; readonly vq: number; readonly vs: number };
 } => {
-  const { batch, rows, cols, depth } = shape;
+  const { batch, cols, depth } = shape;
+  // Words per Vᵀ column of the form: whole key tiles in the tiled form, ceil(N / 4) otherwise
+  const valueWords =
+    keyWords === "tiled"
+      ? attentionOnlineTiledValueRowWords(cols)
+      : attentionOnlineValueRowWords(cols);
   return {
-    // The quantized q / k (four i8 packed per word) and the per-token scales.
-    qk: {
-      qq: Math.max(4, batch * rows * depth),
-      qs: Math.max(4, batch * rows * 4),
-      kq: Math.max(4, batch * cols * depth),
-      ks: Math.max(4, batch * cols * 4),
-    },
+    qk: attentionQkTempBytes(shape),
     // Vᵀ (f32 — the strided permute of a head-major V, or the tiled transpose of a token-major one)
-    // and its quantization result: the row length of the key-axis form (N % 4 != 0 reaches here only
-    // on the online route, whose Vᵀ is padded — {@link attentionValueQuantization}).
+    // and its quantization result in the key-axis form (N % 4 != 0 reaches here only on the online
+    // route — {@link attentionValueQuantization}).
     pv: {
       vt: Math.max(4, batch * depth * cols * 4),
-      vq: Math.max(4, batch * depth * attentionOnlineValueRowWords(cols) * I8A8_PACK),
+      vq: Math.max(4, batch * depth * valueWords * I8A8_PACK),
       vs: Math.max(4, batch * depth * 4),
     },
+  };
+};
+
+/** The ①QK side of {@link attentionI8a8TempBytes} (q / k do not depend on the Vᵀ form). */
+type AttentionQkTempBytes = {
+  readonly qq: number;
+  readonly qs: number;
+  readonly kq: number;
+  readonly ks: number;
+};
+
+/**
+ * The quantized q / k (four i8 packed per word) and the per-token scales — the `qk` part of
+ * {@link attentionI8a8TempBytes}, which the q / k quantisation reads directly (it runs on every a8
+ * route, whatever the Vᵀ form).
+ */
+const attentionQkTempBytes = (shape: AttentionShape): AttentionQkTempBytes => {
+  const { batch, rows, cols, depth } = shape;
+  return {
+    qq: Math.max(4, batch * rows * depth),
+    qs: Math.max(4, batch * rows * 4),
+    kq: Math.max(4, batch * cols * depth),
+    ks: Math.max(4, batch * cols * 4),
   };
 };
 
@@ -754,7 +781,13 @@ export const buildAttention = async (
       binds,
       outs[0],
       { batch, rows, cols, depth },
-      { scale, reduce: route.online, where, output: tokenMajor?.o === true ? "bshd" : "bhsd" },
+      {
+        scale,
+        reduce: route.online,
+        keyWords: route.keyWords,
+        where,
+        output: tokenMajor?.o === true ? "bshd" : "bhsd",
+      },
       layout,
     );
     return;
@@ -1658,7 +1691,7 @@ const quantizeAttentionQk = async (
   // closed inside the node; the q side's scale is **per row** and the k side's **per output
   // column** (two readings of the same per-token quantization).
   // The sizes come from the formula shared with the estimate ({@link attentionI8a8TempBytes}).
-  const bytes = attentionI8a8TempBytes(shape).qk;
+  const bytes = attentionQkTempBytes(shape);
   const qq = builder.allocTemp(bytes.qq);
   const qs = builder.allocTemp(bytes.qs);
   const kq = builder.allocTemp(bytes.kq);
@@ -1799,8 +1832,9 @@ const quantizeAttentionPv = async (
 
   // Vᵀ (f32, the materialised permute or transpose) and its quantization result. All are temporary
   // regions closed inside the node.
-  // The sizes come from the formula shared with the estimate ({@link attentionI8a8TempBytes}).
-  const bytes = attentionI8a8TempBytes(shape).pv;
+  // The sizes come from the formula shared with the estimate ({@link attentionI8a8TempBytes}), in
+  // the key-axis form the consumer reads.
+  const bytes = attentionI8a8TempBytes(shape, keyWords).pv;
   const vt = builder.allocTemp(bytes.vt);
   const vq = builder.allocTemp(bytes.vq);
   const vs = builder.allocTemp(bytes.vs);
@@ -1870,12 +1904,16 @@ const quantizeAttentionPv = async (
  * as before ADR 0132's addendum of 2026-10-27); `N % 4 != 0` takes the padded form, whose rows are
  * `ceil(N / 4)` words with zero bytes past key N − 1 — the Vᵀ the online kernel's `padded` key
  * axis reads. Only the online route reaches `N % 4 != 0` (③PV's i8a8 needs `N % 4 == 0`).
- * `keyWords` is the form the consumer reads; an N of another form throws here, at the producer
- * (③PV passes `whole`, so an N it cannot read fails loudly at its producer — where
- * `quantizeRowsGeometry` threw before the addendum).
+ * `tiled` (any N — the online route where the profile chose it, ADR 0132 addendum 2026-11-12) takes
+ * the tiled form, `16 · ceil(N / 64)` words per row in the kernel's key order, four rows
+ * interleaved (`rows` = B·H·D is a multiple of 4, since the online kernel takes `D % 64 == 0`).
+ * `keyWords` is the form the consumer reads; a `whole` / `padded` request for an N of the other
+ * form throws here, at the producer (③PV passes `whole`, so an N it cannot read fails loudly at its
+ * producer — where `quantizeRowsGeometry` threw before the addendum of 2026-10-27).
  *
- * MUST: the form follows `attentionOnlineKeyWords`, the function the kernel's form follows too
- * (the producer and the reader agree on the row length by construction).
+ * MUST: the form is the consumer's — the online route's `keyWords` (attention-route.ts), the value
+ * the kernel's form follows too, so the producer and the reader agree on the row length by
+ * construction.
  * MUST: execution and the route bench (src/tune/attention-bench.ts) take the launch from here.
  */
 export const attentionValueQuantization = (
@@ -1888,6 +1926,15 @@ export const attentionValueQuantization = (
   readonly wgsl: string;
   readonly params: Uint32Array<ArrayBuffer>;
 } => {
+  if (keyWords === "tiled") {
+    const geometry = quantizeRowsTiledGeometry(cols);
+    return {
+      geometry,
+      key: quantizeRowsTiledKey(geometry),
+      wgsl: quantizeRowsTiledWgsl(geometry),
+      params: quantizeRowsTiledParams(rows, cols),
+    };
+  }
   if (keyWords !== attentionOnlineKeyWords(cols)) {
     throw new ExecutionError(
       `attention Vᵀ quantisation: N = ${cols} takes the '${attentionOnlineKeyWords(cols)}' key axis, but its reader takes '${keyWords}' (③PV's i8a8 reads only 'whole')`,
@@ -1975,6 +2022,8 @@ const buildAttentionOnline = async (
   run: {
     readonly scale: number;
     readonly reduce: AttentionOnlineReduce;
+    /** The route's Vᵀ key-axis form (`route.keyWords` — attention-route.ts). */
+    readonly keyWords: AttentionOnlineKeyWords;
     readonly where: string;
     readonly output: AttentionOnlineOutput;
   },
@@ -1984,9 +2033,9 @@ const buildAttentionOnline = async (
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `${run.where} online`;
   const qk = await quantizeAttentionQk(face, builder, binds, shape, layout);
-  // The key axis form (N % 4 != 0: a padded Vᵀ) — one value for the Vᵀ producer, the kernel and its
-  // uniform
-  const keyWords = attentionOnlineKeyWords(cols);
+  // The key-axis form the route chose (the profile's, else N's own) — one value for the Vᵀ
+  // producer, the size of the quantised Vᵀ, the kernel and its uniform
+  const { keyWords } = run;
   const pv = await quantizeAttentionPv(face, builder, binds, shape, layout, keyWords);
   // The integer dot-product variant follows the same decision as the a8 kernels (the per-device
   // canary — SessionState.attentionI8a8Dot); both variants are bit-identical.

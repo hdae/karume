@@ -352,6 +352,30 @@ describe("parseGeometryProfileJson: the optional vec4 skeleton of an i8a8 geomet
   });
 });
 
+describe("parseGeometryProfileJson: the optional key-axis form of the online attention (perf-ledger K-106)", () => {
+  const tiled: GeometryProfile = { ...BASE, attentionOnline: { keyWords: "tiled" } };
+
+  it("a table with attentionOnline comes back with it, and a table without it comes back without the field", () => {
+    const parsed = parseGeometryProfileJson(geometryProfileJson(tiled));
+    assertEquals(parsed, tiled);
+    assertEquals(parsed.attentionOnline, { keyWords: "tiled" });
+    assertEquals("attentionOnline" in parseGeometryProfileJson(geometryProfileJson(BASE)), false);
+  });
+
+  it("rejects a form other than tiled naming the field, a missing form and an unknown field next to it", () => {
+    rejects(
+      json({ ...BASE, attentionOnline: { keyWords: "padded" } }),
+      'attentionOnline.keyWords is not "tiled" ("padded")',
+    );
+    rejects(json({ ...BASE, attentionOnline: {} }), "attentionOnline is missing fields keyWords");
+    rejects(
+      json({ ...BASE, attentionOnline: { keyWords: "tiled", tile: 64 } }),
+      "attentionOnline has unknown fields tile",
+    );
+    rejects(json({ ...BASE, attentionOnline: "tiled" }), "attentionOnline is not an object");
+  });
+});
+
 describe("parseGeometryProfileJson: the optional skeleton form and counter decode of the f32 fields (perf-ledger K-88)", () => {
   const withFields: GeometryProfile = {
     ...BASE,

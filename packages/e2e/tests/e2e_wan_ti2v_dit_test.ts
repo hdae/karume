@@ -173,7 +173,8 @@ import {
   assertAttentionSeatsComplete,
   assertSeatsApplied,
 } from "../../runtime/tests/helpers/pipeline-census.ts";
-import { attentionDeviceFacts, attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../../runtime/src/runtime/attention-device.ts";
+import { attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
 import {
   assertAdapterMatchesEnvironment,
   ENVIRONMENT,

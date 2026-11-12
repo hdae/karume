@@ -52,7 +52,7 @@ import {
   TRANSPOSE_TILED_WGSL,
   transposeTiledParams,
 } from "../src/kernels/transpose-tiled.ts";
-import { attentionDeviceFacts } from "../src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../src/runtime/attention-device.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;

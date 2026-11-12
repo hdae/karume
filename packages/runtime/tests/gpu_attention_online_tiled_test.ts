@@ -1,10 +1,11 @@
-// The tiled key axis of the online int8 attention (perf-ledger K-106 — a measure-first candidate,
-// not on the production route): `AttentionOnlineKeyWords` `tiled` (src/kernels/attention-online-i8a8.ts)
-// and its producer, the tiled `quantize_rows` (src/kernels/quantize-rows.ts).
+// The tiled key axis of the online int8 attention (perf-ledger K-106 — the online route's form where
+// the geometry profile chooses it, ADR 0132 addendum 2026-11-12): `AttentionOnlineKeyWords` `tiled`
+// (src/kernels/attention-online-i8a8.ts) and its producer, the tiled `quantize_rows`
+// (src/kernels/quantize-rows.ts).
 //
 // - CPU: the keys (the existing ones unmoved), the row words and Vᵀ bytes by hand, the producer's
 //   refusals, the host permutation that is the oracle of the GPU parts, and the production producer
-//   refusing the form (it stays out of production until it is adopted).
+//   building the form at any N.
 // - GPU: the identity check of @karume/kernel-checks (one implementation with the playground's
 //   /kernel-check page): the tiled producer against the host permutation of today's producer's bytes,
 //   and the kernel reading the tiled Vᵀ against today's kernel, Uint32 identity of O on the shapes of
@@ -111,7 +112,7 @@ describe("the tiled key axis (CPU)", () => {
     );
   });
 
-  test("the kernel takes any key length in the tiled form; the key-axis choice never picks it", () => {
+  test("the kernel takes any key length in the tiled form; N's own form is never tiled (only a profile chooses it)", () => {
     for (const n of KEY_LENGTHS) {
       assertEquals(attentionOnlineI8a8Params(64, n, 0, 0.5, "tiled")[1], n);
       assertNotEquals(attentionOnlineKeyWords(n), "tiled");
@@ -133,9 +134,20 @@ describe("the tiled key axis (CPU)", () => {
     assertThrows(() => quantizeRowsTiledGeometry(2.5), Error, "positive integer");
   });
 
-  test("the production producer refuses the tiled form (it is not on the production route)", () => {
-    assertThrows(() => attentionValueQuantization(256, 512, "tiled"), Error, "'tiled'");
-    assertThrows(() => attentionValueQuantization(256, 203, "tiled"), Error, "'tiled'");
+  test("the production producer builds the tiled form at any key length, and N's forms only for their own N", () => {
+    for (const n of KEY_LENGTHS) {
+      const launch = attentionValueQuantization(256, n, "tiled");
+      const geometry = quantizeRowsTiledGeometry(n);
+      assertEquals(launch.geometry, geometry, `N=${n}`);
+      assertEquals(launch.key, quantizeRowsTiledKey(geometry), `N=${n}`);
+      assertEquals(launch.wgsl, quantizeRowsTiledWgsl(geometry), `N=${n}`);
+      assertEquals(Array.from(launch.params), Array.from(quantizeRowsTiledParams(256, n)));
+    }
+    // Four rows share each vec4 of the tiled Vᵀ, so a row count that is not a multiple of 4 fails
+    assertThrows(() => attentionValueQuantization(254, 512, "tiled"), Error, "multiple of 4");
+    // The other forms still refuse an N of the other form
+    assertThrows(() => attentionValueQuantization(256, 203, "whole"), Error, "'padded'");
+    assertThrows(() => attentionValueQuantization(256, 512, "padded"), Error, "'whole'");
   });
 
   test("the generated WGSL is deterministic and distinct from the other forms", () => {

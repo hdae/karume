@@ -15,10 +15,8 @@
  */
 
 import type { GpuContext } from "../../../runtime/src/gpu/device.ts";
-import {
-  attentionDeviceFacts,
-  attentionRoute,
-} from "../../../runtime/src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../../../runtime/src/runtime/attention-device.ts";
+import { attentionRoute } from "../../../runtime/src/runtime/attention-route.ts";
 import type { SessionOptions } from "../../../runtime/src/runtime/executor.ts";
 import {
   type DeclarationJson,

@@ -29,6 +29,8 @@
  * in 0.15); now `deriveGeometryProfile` of `@karume/runtime/tune`). States-shaped attention (①ₜ /
  * ③ₜ), the row blocks of decomposed attention and the implicit GEMM of conv1d keep the default
  * selection (outside the sweep — a path that was not measured is not moved by a table).
+ * One field is a kernel variant rather than a geometry: the key-axis form of the online attention's
+ * quantised Vᵀ (`attentionOnline`), read through the attention route only.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -108,6 +110,18 @@ export type GeometryProfile = {
      */
     readonly conv3d: I8a8Geometry;
   };
+  /**
+   * The key-axis form of the online int8 attention's quantised Vᵀ (perf-ledger K-106 — ADR 0132
+   * addendum 2026-11-12), a kernel-variant choice rather than a geometry. Absent (every table but one
+   * measured to gain from it) = the form `attentionOnlineKeyWords` gives N (`whole` at `N % 4 == 0`,
+   * `padded` otherwise), so every key, WGSL and estimate of a table without the field is unchanged.
+   * `{ keyWords: "tiled" }` = the producer writes Vᵀ in the kernel's key order at every N. Both forms
+   * are bit-identical by measured behaviour (`checkAttentionOnlineTiled` of packages/kernel-checks).
+   *
+   * MUST: read only through the attention route (`attentionDeviceFacts` → `attentionRoute`), the one
+   * decision point the producer, the kernel, its uniform and the size of the quantised Vᵀ share.
+   */
+  readonly attentionOnline?: { readonly keyWords: "tiled" };
   /**
    * Provenance and matching material held only by profiles generated from a sweep (DECIDED: ADR 0117
    * decision 4). Only the generator (`deriveGeometryProfile` of `@karume/runtime/tune`) writes it,
@@ -385,6 +399,19 @@ const assertProvenanceShape = (value: unknown, where: string): void => {
 };
 
 /**
+ * Guard on the optional {@link GeometryProfile.attentionOnline}: an object whose `keyWords` is
+ * `"tiled"` (the one form a table can choose — the others are N's own).
+ */
+const assertAttentionOnlineShape = (value: unknown, where: string): void => {
+  const { keyWords } = recordOf(value, where, "attentionOnline");
+  if (keyWords !== "tiled") {
+    throw new CodegenError(
+      `${where}: attentionOnline.keyWords must be "tiled" (${JSON.stringify(keyWords)} — omit the field for the form N gives)`,
+    );
+  }
+};
+
+/**
  * Guard on one profile (shape of match, the rules, divisibility conditions of the geometry in every
  * field).
  *
@@ -475,6 +502,8 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
   ] as const) {
     assertI8a8Geometry(i8a8GeometryOf(geometry, where, name), `${where}: ${name}`);
   }
+  if (fields.attentionOnline !== undefined)
+    assertAttentionOnlineShape(fields.attentionOnline, where);
   if (fields.provenance !== undefined) assertProvenanceShape(fields.provenance, where);
 };
 

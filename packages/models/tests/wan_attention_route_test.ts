@@ -148,12 +148,12 @@ const ONLINE_DEVICES: readonly {
   {
     name: "subgroups, 32 KiB of workgroup storage",
     device: { subgroups: true, maxComputeWorkgroupStorageSize: 32768 },
-    route: { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+    route: { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32", keyWords: "whole" },
   },
   {
     name: "no subgroups, 48 KiB of workgroup storage",
     device: { subgroups: false, maxComputeWorkgroupStorageSize: 49152 },
-    route: { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
+    route: { qk: "i8a8", pv: "i8a8", score: "none", online: "wg", keyWords: "whole" },
   },
   {
     name: "no subgroups, 32 KiB of workgroup storage (falls back)",

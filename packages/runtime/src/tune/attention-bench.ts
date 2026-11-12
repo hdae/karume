@@ -6,16 +6,20 @@
  *   `attentionScoreStorage: "f16"`): ①QK i8a8, ② row statistics, ③PV i8a8, each timed on its own
  *   and summed.
  * - `online` — the online int8 kernel (`attentionScoreStorage: "none"`, ADR 0132): one
- *   `attention_online` dispatch.
- * - `quantization` (optional) — the four dispatches both routes share (q and k per token, the
- *   permute to Vᵀ and its quantization). They run once per node, outside the route totals.
- * - `onlineTiled` (opt-in) — a measure-first candidate, not a production route: the online kernel
- *   reading Vᵀ in its own key order (`AttentionOnlineKeyWords` `tiled`, perf-ledger K-106), timed
- *   against `online` in the same rounds ({@link timeLaunchPair}: A B B A per round, a per-round
- *   ratio, so a thermal drift within a round cancels), with its producer (the tiled
- *   `quantize_rows`) timed beside today's in the quantization line, and an identity block: both
- *   producers on the same f32 Vᵀ, both kernels on their outputs, O compared word for word. It is
- *   built from the generator calls a production route would make for the form.
+ *   `attention_online` dispatch, in the Vᵀ key-axis form the route takes on this device (`keyWords`
+ *   — the profile's choice, else N's own; ADR 0132 addendum 2026-11-12).
+ * - `quantization` (optional) — the four quantisation dispatches (q and k per token, the permute to
+ *   Vᵀ and its quantization in the form N gives — the s16 route's, and the online route's where the
+ *   profile does not choose `tiled`). They run once per node, outside the route totals.
+ * - `onlineTiled` (opt-in) — the tiled key axis (`AttentionOnlineKeyWords` `tiled`, perf-ledger
+ *   K-106) against the form N gives, whatever the profile chooses: the online kernel reading Vᵀ in
+ *   its own key order (B) timed against the kernel reading N's form (A) in the same rounds
+ *   ({@link timeLaunchPair}: A B B A per round, a per-round ratio, so a thermal drift within a round
+ *   cancels), with its producer (the tiled `quantize_rows`) timed beside N's in the quantization
+ *   line, and an identity block: both producers on the same f32 Vᵀ, both kernels on their outputs, O
+ *   compared word for word. Both arms are the production route's generator calls for their form,
+ *   and A stays N's form on a table that chooses `tiled`, so a record is the input the profile
+ *   derivation reads (`deriveGeometryProfile`) on any table.
  *
  * It exists because the Wan2.2 pipeline cannot run on a timing-enabled device, while the per-kernel
  * GPU time of the two routes is what tells why a route gains on one machine and not on another
@@ -95,7 +99,6 @@ import {
   attentionOnlineI8a8WorkgroupStorageBytes,
   type AttentionOnlineKeyWords,
   attentionOnlineKeyWords,
-  attentionOnlineTiledValueRowWords,
 } from "../kernels/attention-online-i8a8.ts";
 import {
   ATTENTION_STATS_STRIDE,
@@ -111,17 +114,10 @@ import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
-  quantizeRowsTiledGeometry,
-  quantizeRowsTiledKey,
-  quantizeRowsTiledParams,
-  quantizeRowsTiledWgsl,
   quantizeRowsWgsl,
 } from "../kernels/quantize-rows.ts";
-import {
-  type AttentionDeviceFacts,
-  attentionDeviceFacts,
-  attentionRoute,
-} from "../runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../runtime/attention-device.ts";
+import { type AttentionDeviceFacts, attentionRoute } from "../runtime/attention-route.ts";
 import { rowBlockLimit } from "../runtime/fusion.ts";
 import {
   attentionI8a8TempBytes,
@@ -275,6 +271,8 @@ export type AttentionBenchRoute =
       readonly estimatedNodeMs?: number;
       /** The online route's reduction form and the workgroup storage it declares. */
       readonly reduce?: AttentionOnlineReduce;
+      /** The online route's Vᵀ key-axis form (the route's `keyWords` on this device). */
+      readonly keyWords?: AttentionOnlineKeyWords;
       readonly workgroupStorageBytes?: number;
       /** The s16 route: whether the row-window variant ran (several production blocks). */
       readonly rowWindow?: boolean;
@@ -673,22 +671,32 @@ const routeTotals = (
   };
 };
 
-/** The shared i8a8 inputs and the output O (both routes read the same buffers). */
-const sharedResources = (shape: AttentionBenchShape): ResourceSpec[] => {
+/** Bytes of the quantised Vᵀ of a shape's node in a key-axis form (the production function). */
+const valueBytes = (shape: AttentionBenchShape, keyWords: AttentionOnlineKeyWords): number =>
+  attentionI8a8TempBytes(
+    { batch: shape.heads, rows: shape.queries, cols: shape.keys, depth: shape.depth },
+    keyWords,
+  ).pv.vq;
+
+/**
+ * The shared i8a8 inputs and the output O (both routes read the same buffers). The quantised Vᵀ is
+ * sized in `keyWords`, the online route's form on this device (the largest a shared reader takes:
+ * the tiled form's `16 · ceil(N / 64)` words per column are never fewer than N's `ceil(N / 4)`).
+ */
+const sharedResources = (
+  shape: AttentionBenchShape,
+  keyWords: AttentionOnlineKeyWords,
+): ResourceSpec[] => {
   const { heads, queries, keys, depth } = shape;
   return [
     // Quantized q / k (four i8 per word) and their per-token scales (attention.ts:1386-1390 via
-    // attentionI8a8TempBytes), the quantized Vᵀ[heads, D, ceil(N/4) words] and its per-column
+    // attentionI8a8TempBytes), the quantized Vᵀ[heads, D, words of the form] and its per-column
     // scales (attention.ts:1505-1508, the same function), and O[heads, M, D] in f32
     { name: "qq", bytes: heads * queries * depth, fill: "i8" },
     { name: "qscale", bytes: heads * queries * F32, fill: "scale" },
     { name: "kq", bytes: heads * keys * depth, fill: "i8" },
     { name: "kscale", bytes: heads * keys * F32, fill: "scale" },
-    {
-      name: "vq",
-      bytes: attentionI8a8TempBytes({ batch: heads, rows: queries, cols: keys, depth }).pv.vq,
-      fill: "i8",
-    },
+    { name: "vq", bytes: valueBytes(shape, keyWords), fill: "i8" },
     { name: "vscale", bytes: heads * depth * F32, fill: "scale" },
     { name: "o", bytes: heads * queries * depth * F32, fill: "none" },
   ];
@@ -855,8 +863,9 @@ type OnlineBuffers = { readonly vq: string; readonly vs: string; readonly o: str
 const SHARED_ONLINE: OnlineBuffers = { vq: "vq", vs: "vscale", o: "o" };
 
 /**
- * One online dispatch of the first window (`rows` rows) in the key-axis form `keyWords`: today's
- * form for the route, `tiled` for the candidate — the same generator calls either way.
+ * One online dispatch of the first window (`rows` rows) in the key-axis form `keyWords`: the
+ * route's form for the online row, N's form and `tiled` for the two arms of the candidate pair —
+ * the same generator calls either way.
  */
 const onlineLaunch = (
   bench: Bench,
@@ -896,41 +905,19 @@ const onlineLaunch = (
 };
 
 /**
- * The candidate's producer: the tiled `quantize_rows` over the `rows` rows `(head, d)` of Vᵀ, row
- * length N, on the grid-stride grid production gives `quantize_rows` (attention.ts:1879-1910 is
- * where the route would take it from).
+ * The Vᵀ producer in the key-axis form `keyWords` over the `rows` rows `(head, d)` of Vᵀ, row
+ * length N (attention.ts `attentionValueQuantization` — the production launch, on the grid-stride
+ * grid production gives it): N's form for the quantization line and the candidate pair's A, `tiled`
+ * for its B. At N % 4 != 0 only the online route quantises (s16 is not eligible there).
  */
-const tiledProducerLaunch = (
-  bench: Bench,
-  rows: number,
-  keys: number,
-  names: readonly [vt: string, vq: string, vs: string],
-): Launch => {
-  const geometry = quantizeRowsTiledGeometry(keys);
-  return {
-    key: quantizeRowsTiledKey(geometry),
-    wgsl: quantizeRowsTiledWgsl(geometry),
-    params: quantizeRowsTiledParams(rows, keys),
-    bindings: [...names],
-    writes: [names[1], names[2]],
-    workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, bench.limit), 1, 1],
-  };
-};
-
-/** Today's Vᵀ producer for the online route (the form `attentionOnlineKeyWords` gives N). */
 const valueQuantizeLaunch = (
   bench: Bench,
   rows: number,
   keys: number,
+  keyWords: AttentionOnlineKeyWords,
   names: readonly [vt: string, vq: string, vs: string],
 ): Launch => {
-  // At N % 4 != 0 only the online route quantises (s16 is not eligible there), so the form is
-  // the online kernel's
-  const { geometry, key, wgsl, params } = attentionValueQuantization(
-    rows,
-    keys,
-    attentionOnlineKeyWords(keys),
-  );
+  const { geometry, key, wgsl, params } = attentionValueQuantization(rows, keys, keyWords);
   return {
     key,
     wgsl,
@@ -940,10 +927,6 @@ const valueQuantizeLaunch = (
     workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, bench.limit), 1, 1],
   };
 };
-
-/** Bytes of the quantised Vᵀ in the tiled form (`16 · ceil(N / 64)` words per column). */
-const tiledValueBytes = (shape: AttentionBenchShape): number =>
-  shape.heads * shape.depth * attentionOnlineTiledValueRowWords(shape.keys) * 4;
 
 /** The online route at one shape (one dispatch of one window). */
 const benchOnline = async (
@@ -972,8 +955,8 @@ const benchOnline = async (
   // attention.ts:1597 — the first window production dispatches
   const windows = planAttentionOnlineWindows(queries, { batch: heads, cols: keys, depth });
   const rows = onlineDispatchRows(shape.rowsPerDispatch ?? windows[0].rows, queries);
-  const launch = onlineLaunch(bench, shape, reduce, rows, attentionOnlineKeyWords(keys));
-  bench.status(`${id}: online ${reduce} (${rows} rows)`);
+  const launch = onlineLaunch(bench, shape, reduce, rows, route.keyWords);
+  bench.status(`${id}: online ${reduce} ${route.keyWords} (${rows} rows)`);
   const stages = [await timeStage(bench, "online", launch, shared)];
   return {
     eligible: true,
@@ -981,6 +964,7 @@ const benchOnline = async (
     productionDispatches: windows.length,
     productionRows: windows[0].rows,
     reduce,
+    keyWords: route.keyWords,
     workgroupStorageBytes: attentionOnlineI8a8WorkgroupStorageBytes(depth, reduce),
     stages,
     ...routeTotals(shape, rows, stages),
@@ -988,10 +972,10 @@ const benchOnline = async (
 };
 
 /**
- * The identity block of the candidate: today's producer and the tiled producer on the same f32 Vᵀ,
- * then today's kernel and the tiled kernel (the first window) on their outputs. Every O word and
- * every Vᵀ scale word must be equal; O starts at 0 on both sides, so rows past the window compare 0
- * with 0. A failure to run is recorded as not identical, with the error.
+ * The identity block of the candidate: N's producer and the tiled producer on the same f32 Vᵀ, then
+ * N's kernel and the tiled kernel (the first window) on their outputs. Every O word and every Vᵀ
+ * scale word must be equal; O starts at 0 on both sides, so rows past the window compare 0 with 0. A
+ * failure to run is recorded as not identical, with the error.
  */
 const benchIdentity = async (
   bench: Bench,
@@ -1001,12 +985,13 @@ const benchIdentity = async (
   rows: number,
 ): Promise<AttentionBenchIdentity> => {
   const { id, heads, queries, keys, depth } = shape;
+  const own = attentionOnlineKeyWords(keys);
   try {
     const valueRows = heads * depth;
     const launches: readonly Launch[] = [
-      valueQuantizeLaunch(bench, valueRows, keys, ["vtIdentity", "vqA", "vsA"]),
-      tiledProducerLaunch(bench, valueRows, keys, ["vtIdentity", "vqB", "vsB"]),
-      onlineLaunch(bench, shape, reduce, rows, attentionOnlineKeyWords(keys), {
+      valueQuantizeLaunch(bench, valueRows, keys, own, ["vtIdentity", "vqA", "vsA"]),
+      valueQuantizeLaunch(bench, valueRows, keys, "tiled", ["vtIdentity", "vqB", "vsB"]),
+      onlineLaunch(bench, shape, reduce, rows, own, {
         vq: "vqA",
         vs: "vsA",
         o: "oA",
@@ -1017,13 +1002,9 @@ const benchIdentity = async (
     const scaleBytes = valueRows * F32;
     const specs: ResourceSpec[] = [
       { name: "vtIdentity", bytes: valueRows * keys * F32, fill: "f32" },
-      {
-        name: "vqA",
-        bytes: attentionI8a8TempBytes({ batch: heads, rows: queries, cols: keys, depth }).pv.vq,
-        fill: "none",
-      },
+      { name: "vqA", bytes: valueBytes(shape, own), fill: "none" },
       { name: "vsA", bytes: scaleBytes, fill: "none" },
-      { name: "vqB", bytes: tiledValueBytes(shape), fill: "none" },
+      { name: "vqB", bytes: valueBytes(shape, "tiled"), fill: "none" },
       { name: "vsB", bytes: scaleBytes, fill: "none" },
       { name: "oA", bytes: oBytes, fill: "none" },
       { name: "oB", bytes: oBytes, fill: "none" },
@@ -1067,9 +1048,9 @@ const benchIdentity = async (
 };
 
 /**
- * The candidate at one shape: `online` (A) and `onlineTiled` (B) on the online route's first window,
- * in the same rounds, then the identity block. The tiled kernel reads its own Vᵀ buffer (the tiled
- * size, filled like the shared one — the timing does not depend on the values).
+ * The candidate at one shape: `online` in N's form (A) and `onlineTiled` (B) on the online route's
+ * first window, in the same rounds, then the identity block. The tiled kernel reads its own Vᵀ
+ * buffer (the tiled size, filled like the shared one — the timing does not depend on the values).
  */
 const benchOnlineTiled = async (
   bench: Bench,
@@ -1096,7 +1077,7 @@ const benchOnlineTiled = async (
   bench.status(`${id}: online vs online tiled, A B B A (${rows} rows)`);
   const kernel = await withResources(
     bench,
-    [{ name: "vqTiled", bytes: tiledValueBytes(shape), fill: "i8" }],
+    [{ name: "vqTiled", bytes: valueBytes(shape, "tiled"), fill: "i8" }],
     (extra) => timePair(bench, ["online", "onlineTiled"], a, b, new Map([...shared, ...extra])),
   );
   const nodeMs = (ms: number | undefined): number | undefined =>
@@ -1138,9 +1119,14 @@ const benchQuantization = async (
     workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, limit), 1, 1],
   });
   const valueRows = heads * depth;
-  const quantizeVt = valueQuantizeLaunch(bench, valueRows, keys, ["vt", "vq", "vscale"]);
+  // N's form (the pair's A — a fixed baseline whatever form the profile chooses)
+  const quantizeVt = valueQuantizeLaunch(bench, valueRows, keys, attentionOnlineKeyWords(keys), [
+    "vt",
+    "vq",
+    "vscale",
+  ]);
   const tiledProducer = tiledVt
-    ? tiledProducerLaunch(bench, valueRows, keys, ["vt", "vqTiled", "vscaleTiled"])
+    ? valueQuantizeLaunch(bench, valueRows, keys, "tiled", ["vt", "vqTiled", "vscaleTiled"])
     : undefined;
   const stridedSpec = { dtype: "f32" } as const;
   const launches: readonly (readonly [string, Launch])[] = [
@@ -1179,7 +1165,7 @@ const benchQuantization = async (
     // The candidate producer's outputs (only with the candidate)
     ...(tiledProducer !== undefined
       ? [
-          { name: "vqTiled", bytes: tiledValueBytes(shape), fill: "none" } as const,
+          { name: "vqTiled", bytes: valueBytes(shape, "tiled"), fill: "none" } as const,
           { name: "vscaleTiled", bytes: valueRows * F32, fill: "none" } as const,
         ]
       : []),
@@ -1248,7 +1234,16 @@ const benchShape = async (
   tiled: boolean,
 ): Promise<AttentionBenchShapeResult> => {
   bench.status(`${shape.id}: preparing inputs`);
-  return await withResources(bench, sharedResources(shape), async (shared) => {
+  // The online route's Vᵀ form on this device (N's own where the route does not run online)
+  const onlineRoute = attentionRoute(
+    { attentionCompute: "a8", attentionScoreStorage: "none" },
+    shape.depth,
+    shape.keys,
+    bench.device,
+  );
+  const sharedForm =
+    onlineRoute.online === undefined ? attentionOnlineKeyWords(shape.keys) : onlineRoute.keyWords;
+  return await withResources(bench, sharedResources(shape, sharedForm), async (shared) => {
     const s16 = await planned(() => benchS16(bench, shape, shared));
     const online = await planned(() => benchOnline(bench, shape, shared));
     const ratio = finiteRatio(

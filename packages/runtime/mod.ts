@@ -227,11 +227,12 @@ export type {
 } from "./src/runtime/estimate.ts";
 /**
  * The device facts the online attention kernel's route reads (ADR 0132 decision 5), from a
- * `GpuContext` — the same function Session construction uses. An estimate of a graph with
+ * `GpuContext` — the same function Session construction uses, including the key-axis form the
+ * device's geometry profile chooses (ADR 0132 addendum 2026-11-12). An estimate of a graph with
  * `attentionScoreStorage: "none"` requires them (`EstimateOptions.attentionDevice`); deriving them
  * any other way could estimate a route the Session does not take.
  */
-export { attentionDeviceFacts } from "./src/runtime/attention-route.ts";
+export { attentionDeviceFacts } from "./src/runtime/attention-device.ts";
 export type { AttentionDeviceFacts } from "./src/runtime/attention-route.ts";
 /**
  * The weight residency plan — a pure function determined by the graph alone, and the second

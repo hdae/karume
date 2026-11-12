@@ -541,8 +541,16 @@ test("the key-axis form ties the Vᵀ row length, its producer and the uniform t
   // Words per Vᵀ row (by hand): 512 / 4 = 128, ceil(65 / 4) = 17, ceil(4,106 / 4) = 1,027
   assertEquals([512, 65, 4106].map(attentionOnlineValueRowWords), [128, 17, 1027]);
   // vq = B·D·words·4 bytes: 2 · 128 · 51 · 4 at N = 203 (51 = ceil(203 / 4)), B·D·N at N = 512
-  assertEquals(attentionI8a8TempBytes({ batch: 2, rows: 10, cols: 203, depth: 128 }).pv.vq, 52224);
-  assertEquals(attentionI8a8TempBytes({ batch: 2, rows: 10, cols: 512, depth: 128 }).pv.vq, 131072);
+  const n203 = { batch: 2, rows: 10, cols: 203, depth: 128 };
+  const n512 = { batch: 2, rows: 10, cols: 512, depth: 128 };
+  assertEquals(attentionI8a8TempBytes(n203, "padded").pv.vq, 52224);
+  assertEquals(attentionI8a8TempBytes(n512, "whole").pv.vq, 131072);
+  // The tiled form holds whole key tiles: 2 · 128 · (16 · ceil(203 / 64) = 64) · 4 at N = 203, the
+  // same bytes as the whole form at N = 512 (eight whole tiles)
+  assertEquals(attentionI8a8TempBytes(n203, "tiled").pv.vq, 65536);
+  assertEquals(attentionI8a8TempBytes(n512, "tiled").pv.vq, 131072);
+  // The q / k side does not depend on the form
+  assertEquals(attentionI8a8TempBytes(n203, "tiled").qk, attentionI8a8TempBytes(n203, "padded").qk);
   // The producer: the plain quantize_rows at N % 4 == 0 (its key unchanged), the padded one else
   assertEquals(
     attentionValueQuantization(256, 512, "whole").key,

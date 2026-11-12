@@ -511,10 +511,14 @@ export type EstimateOptions = {
    * estimate fails loudly at its entry instead of guessing a route (a device without subgroups and
    * with a 32 KiB limit runs the three dispatches with S, the others the online kernel without it).
    * Not read otherwise.
+   * `onlineKeyWords` is the key-axis form the device's geometry profile chose for the online
+   * kernel's Vᵀ (ADR 0132 addendum 2026-11-12 — it sizes the quantised Vᵀ); pass the facts of
+   * `attentionDeviceFacts(gpu)`, which carry it where the profile has it.
    */
   readonly attentionDevice?: {
     readonly subgroups: boolean;
     readonly maxComputeWorkgroupStorageSize: number;
+    readonly onlineKeyWords?: "tiled";
   };
   /**
    * The execution form of linear (the same value as `SessionOptions.linearCompute`; omitted =
@@ -1412,7 +1416,12 @@ const fusedAttentionProgram = (
     temps.push({ byteLength, allocBefore: dispatches.length, releaseAfter });
     return { kind: "temp", id: temps.length - 1 };
   };
-  const quantized = attentionI8a8TempBytes(shape);
+  // The Vᵀ key-axis form is the online route's (the profile's choice through the device facts); ③PV's
+  // i8a8 reads only the whole form
+  const quantized = attentionI8a8TempBytes(
+    shape,
+    route.online === undefined ? "whole" : route.keyWords,
+  );
   // The i8a8 quantisation of ①QK (q and k) and of ③PV (v's permute and Vᵀ), alive until `last`.
   const quantizeQk = (last: number) => {
     const refs = {
@@ -1916,6 +1925,13 @@ export const estimateGraphMemory = (
       "attentionDevice.maxComputeWorkgroupStorageSize",
       passedDevice.maxComputeWorkgroupStorageSize,
     );
+    // A misspelled form would size the quantised Vᵀ in N's form while the Session runs another
+    const { onlineKeyWords } = passedDevice;
+    if (onlineKeyWords !== undefined && onlineKeyWords !== "tiled") {
+      throw new ExecutionError(
+        `options.attentionDevice.onlineKeyWords must be "tiled" or absent (${JSON.stringify(onlineKeyWords)})`,
+      );
+    }
   }
   const attentionDevice = passedDevice ?? UNREAD_ATTENTION_DEVICE;
   const chunkDims = chunkRowDims(graph);

@@ -13,7 +13,15 @@
 //         `planAttentionOnlineWindows`, bit-identical to a single raw dispatch;
 //   (v)   N % 4 != 0 (the padded key axis — ADR 0132 addendum 2026-10-27) runs the online kernel,
 //         bit-identical to the raw kernel on a host-packed Vᵀ of ceil(N/4) words per row: the
-//         Session's padded Vᵀ quantisation lays the rows out as the kernel reads them.
+//         Session's padded Vᵀ quantisation lays the rows out as the kernel reads them;
+//   (vi)  a geometry profile that chooses the tiled key axis (an injected copy of this device's table
+//         with `attentionOnline` — ADR 0132 addendum 2026-11-12) runs `…:ktile` with the tiled
+//         producer at every N, Uint32-identical to the same table without the field and to the raw
+//         kernel in N's own form.
+//
+// The census's key-axis form is the route's (`attentionRoute` on `attentionDeviceFacts(gpu)`), so on a
+// device whose embedded table chooses `tiled` cases (i)–(v) check that form against the raw kernel
+// in N's own form.
 //
 // The inputs are built so that their per-token quantisation is exact (every element is an integer
 // multiple of its row's step and every row holds ±127 steps): the host quantisation of the raw run
@@ -27,19 +35,26 @@ import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
 import {
   ATTENTION_ONLINE_ROWS,
+  type AttentionOnlineKeyWords,
   type AttentionOnlineReduce,
   attentionOnlineI8a8Key,
   attentionOnlineI8a8Params,
   attentionOnlineI8a8Wgsl,
   attentionOnlineKeyWords,
 } from "../src/kernels/attention-online-i8a8.ts";
+import type { GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { stridedKey } from "../src/codegen/strided.ts";
 import { transposeValues } from "../src/reference/attention-online.ts";
 import { quantizeRowsReference } from "../src/reference/i8a8.ts";
-import { attentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../src/runtime/attention-device.ts";
+import { attentionRoute } from "../src/runtime/attention-route.ts";
 import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
-import { planAttentionOnlineWindows } from "../src/runtime/recipe-builders/attention.ts";
+import { sessionGeometryProfile } from "../src/runtime/geometry-selection.ts";
+import {
+  attentionValueQuantization,
+  planAttentionOnlineWindows,
+} from "../src/runtime/recipe-builders/attention.ts";
 import { GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type CensusRow, countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
@@ -310,21 +325,38 @@ const THREE_PASS_FAMILIES: ReadonlySet<string> = new Set([
   "attention_pv",
 ]);
 
+/** The online route's two forms on a device (the reduction and the Vᵀ key axis). */
+type OnlineForm = {
+  readonly reduce: AttentionOnlineReduce;
+  readonly keyWords: AttentionOnlineKeyWords;
+};
+
+/** The key segment of a key-axis form (`whole` adds none). */
+const keyAxisSegment = (keyWords: AttentionOnlineKeyWords): string =>
+  keyWords === "padded" ? ":kpad" : keyWords === "tiled" ? ":ktile" : "";
+
 /**
  * The census of an online node: only the online family among the attention kernels, one key in the
- * expected reduction form, one dispatch per window, and the four quantisation dispatches of a8.
+ * expected reduction and key-axis form, one dispatch per window, the four quantisation dispatches of
+ * a8, and the Vᵀ quantisation in the producer of that key-axis form.
  */
 const assertOnlineCensus = (
   census: readonly CensusRow[],
   shape: Shape,
-  reduce: AttentionOnlineReduce,
+  form: OnlineForm,
   where: string,
 ): void => {
   const keys = census.map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
   const online = census.filter((row) => familyOf(row.key) === ONLINE_FAMILY);
   assertEquals(online.length, 1, `${where}: one online key — ${keys}`);
-  const suffix = `:${reduce}${attentionOnlineKeyWords(shape.n) === "padded" ? ":kpad" : ""}`;
+  const suffix = `:${form.reduce}${keyAxisSegment(form.keyWords)}`;
   assert(online[0].key.endsWith(suffix), `${where}: the ${suffix} form — ${keys}`);
+  const producer = attentionValueQuantization(shape.b * shape.h * shape.d, shape.n, form.keyWords);
+  assertEquals(
+    countDispatches(census, producer.key),
+    1,
+    `${where}: the Vᵀ quantisation of the ${form.keyWords} form (${producer.key}) — ${keys}`,
+  );
   assertEquals(
     online[0].dispatchCount,
     planAttentionOnlineWindows(shape.m, { batch: shape.b * shape.h, cols: shape.n, depth: shape.d })
@@ -360,17 +392,22 @@ const subgroupsSupported = async (): Promise<boolean> => {
 };
 
 /**
- * The reduction form the Session must take on this device (the same function as buildAttention);
- * `undefined` on a device that holds neither form (no subgroups and less workgroup storage than the
- * workgroup-memory form needs — the route falls back to the three dispatches).
+ * The reduction and key-axis forms the Session must take on this device (the same function as
+ * buildAttention, on the facts Session construction reads); `undefined` on a device that holds
+ * neither reduction form (no subgroups and less workgroup storage than the workgroup-memory form
+ * needs — the route falls back to the three dispatches).
  */
-const expectedReduce = (gpu: GpuContext, shape: Shape): AttentionOnlineReduce | undefined =>
-  attentionRoute(
+const expectedForm = (gpu: GpuContext, shape: Shape): OnlineForm | undefined => {
+  const route = attentionRoute(
     { attentionCompute: "a8", attentionScoreStorage: "none" },
     shape.d,
     shape.n,
     attentionDeviceFacts(gpu),
-  ).online;
+  );
+  return route.online === undefined
+    ? undefined
+    : { reduce: route.online, keyWords: route.keyWords };
+};
 
 describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 0132)", () => {
   const ELIGIBLE: Shape = { b: 1, h: 2, m: 150, n: 200, d: 128 };
@@ -381,13 +418,13 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
     for (const subgroups of [false, "available"] as const) {
       const gpu = await acquireGpu({ subgroups });
       try {
-        const reduce = expectedReduce(gpu, ELIGIBLE);
+        const form = expectedForm(gpu, ELIGIBLE);
         if (subgroups === "available" && advertised) {
-          assertEquals(reduce, "sg32", "subgroups 'available' on an adapter that has them");
+          assertEquals(form?.reduce, "sg32", "subgroups 'available' on an adapter that has them");
         }
-        const where = `subgroups=${subgroups} (${reduce ?? "fallback"})`;
+        const where = `subgroups=${subgroups} (${form?.reduce ?? "fallback"})`;
         const online = await runSession(gpu, ELIGIBLE, inputs, ONLINE);
-        if (reduce === undefined) {
+        if (form === undefined) {
           // Neither form fits this device: the route falls back (its values are case (iii)'s).
           assertEquals(
             countDispatches(online.census, (key) => familyOf(key) === ONLINE_FAMILY),
@@ -397,7 +434,7 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
           console.log(`[attention_online session] ${where}: the device holds neither form`);
           continue;
         }
-        assertOnlineCensus(online.census, ELIGIBLE, reduce, where);
+        assertOnlineCensus(online.census, ELIGIBLE, form, where);
         console.log(
           `[attention_online session] ${where}: ${online.census.map((row) => row.key).join(" / ")}`,
         );
@@ -456,13 +493,13 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
     const inputs = makeInputs(shape);
     const gpu = await acquireGpu({ subgroups: "available" });
     try {
-      const reduce = expectedReduce(gpu, shape);
-      if (reduce === undefined) {
+      const form = expectedForm(gpu, shape);
+      if (form === undefined) {
         context.skip();
         return;
       }
       const online = await runSession(gpu, shape, inputs, ONLINE);
-      assertOnlineCensus(online.census, shape, reduce, "two windows");
+      assertOnlineCensus(online.census, shape, form, "two windows");
       const raw = await runRawKernel(gpu, shape, inputs, "wg");
       assertBitIdentical(online.output, raw, "two windows: Session vs one raw dispatch");
     } finally {
@@ -479,14 +516,14 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
         { b: 1, h: 2, m: 64, n: 4106, d: 128 },
       ] satisfies Shape[]) {
         const where = `N=${shape.n} D=${shape.d}`;
-        const reduce = expectedReduce(gpu, shape);
-        if (reduce === undefined) {
+        const form = expectedForm(gpu, shape);
+        if (form === undefined) {
           context.skip();
           return;
         }
         const inputs = makeInputs(shape);
         const online = await runSession(gpu, shape, inputs, ONLINE);
-        assertOnlineCensus(online.census, shape, reduce, where);
+        assertOnlineCensus(online.census, shape, form, where);
         assert(new Set(online.output).size > 1, `${where}: the output is constant`);
         const raw = await runRawKernel(gpu, shape, inputs, "wg");
         assertBitIdentical(online.output, raw, `${where}: Session vs raw kernel`);
@@ -494,5 +531,71 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
     } finally {
       gpu.destroy();
     }
+  });
+
+  it("(vi) a profile choosing the tiled key axis runs ':ktile' with the tiled producer, Uint32-identical to the same table without it", async (context) => {
+    // This device's table, injected twice: once without the field and once choosing the tiled form
+    const probe = await acquireGpu({ subgroups: "available" });
+    let selected: GeometryProfile;
+    try {
+      selected = sessionGeometryProfile(probe);
+    } finally {
+      probe.destroy();
+    }
+    const { attentionOnline: _chosen, ...table } = selected;
+    const arms = {
+      own: { ...table, id: `${selected.id}+own-key-axis` },
+      tiled: {
+        ...table,
+        id: `${selected.id}+tiled-key-axis`,
+        attentionOnline: { keyWords: "tiled" },
+      },
+    } as const satisfies Record<string, GeometryProfile>;
+    // N = 200 (whole), 203 (padded), 65 (one key past a tile), 8 (one partial tile), 4,106 (MOSS's
+    // negative branch at 1024² — many tiles, the last one partial)
+    const shapes: readonly Shape[] = [
+      { b: 1, h: 2, m: 150, n: 200, d: 128 },
+      { b: 1, h: 2, m: 150, n: 203, d: 128 },
+      { b: 2, h: 1, m: 70, n: 65, d: 64 },
+      { b: 1, h: 2, m: 70, n: 8, d: 64 },
+      { b: 1, h: 2, m: 64, n: 4106, d: 128 },
+    ];
+    const outputs: Record<keyof typeof arms, Float32Array<ArrayBuffer>[]> = { own: [], tiled: [] };
+    for (const arm of ["own", "tiled"] as const) {
+      const gpu = await acquireGpu({ subgroups: "available", geometryProfile: arms[arm] });
+      try {
+        for (const shape of shapes) {
+          const where = `${arm} N=${shape.n} D=${shape.d}`;
+          const form = expectedForm(gpu, shape);
+          if (form === undefined) {
+            context.skip();
+            return;
+          }
+          assertEquals(
+            form.keyWords,
+            arm === "tiled" ? "tiled" : attentionOnlineKeyWords(shape.n),
+            `${where}: the route's key-axis form`,
+          );
+          const inputs = makeInputs(shape);
+          const online = await runSession(gpu, shape, inputs, ONLINE);
+          assertOnlineCensus(online.census, shape, form, where);
+          assert(new Set(online.output).size > 1, `${where}: the output is constant`);
+          outputs[arm].push(online.output);
+          if (arm === "tiled") {
+            const raw = await runRawKernel(gpu, shape, inputs, "wg");
+            assertBitIdentical(online.output, raw, `${where}: Session vs raw kernel in N's form`);
+          }
+        }
+      } finally {
+        gpu.destroy();
+      }
+    }
+    shapes.forEach((shape, index) =>
+      assertBitIdentical(
+        outputs.tiled[index],
+        outputs.own[index],
+        `N=${shape.n} D=${shape.d}: tiled vs N's own form`,
+      ),
+    );
   });
 });

@@ -199,6 +199,17 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
   });
 };
 
+/** `attentionOnline` (`{ keyWords: "tiled" }` — the only form a table chooses). */
+const readAttentionOnline = (
+  value: unknown,
+  path: string,
+): NonNullable<GeometryProfile["attentionOnline"]> => {
+  const fields = readRecord(value, path, ["keyWords"]);
+  return fields.keyWords === "tiled"
+    ? { keyWords: "tiled" }
+    : fail(child(path, "keyWords"), `is not "tiled" (${show(fields.keyWords)})`);
+};
+
 const readProvenance = (value: unknown, path: string): Provenance => {
   // userAgent is an optional reference field (not used for matching — ADR 0117 addendum
   // 2026-10-02). Unknown fields are still rejected
@@ -260,7 +271,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     parsed,
     ROOT,
     ["id", "gemmRows", "attention", "conv2d", "i8a8"],
-    ["match", "provenance"],
+    ["match", "attentionOnline", "provenance"],
   );
   const attention = readRecord(fields.attention, "attention", ["qk", "pv"]);
   const conv2d = readRecord(fields.conv2d, "conv2d", ["rows64", "rows32"]);
@@ -283,6 +294,9 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
       attentionPv: readI8a8Geometry(i8a8.attentionPv, "i8a8.attentionPv"),
       conv3d: readI8a8Geometry(i8a8.conv3d, "i8a8.conv3d"),
     },
+    ...(fields.attentionOnline === undefined
+      ? {}
+      : { attentionOnline: readAttentionOnline(fields.attentionOnline, "attentionOnline") }),
     ...(fields.provenance === undefined
       ? {}
       : { provenance: readProvenance(fields.provenance, "provenance") }),

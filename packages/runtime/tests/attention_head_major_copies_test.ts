@@ -26,7 +26,13 @@ const INPUTS = [
   [2, 6, 3, 8],
 ] as const;
 
-const ONLINE: AttentionRoute = { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" };
+const ONLINE: AttentionRoute = {
+  qk: "i8a8",
+  pv: "i8a8",
+  score: "none",
+  online: "wg",
+  keyWords: "padded",
+};
 const A8: AttentionRoute = { qk: "i8a8", pv: "i8a8", score: "f16" };
 const DENSE: AttentionRoute = { qk: "dense", pv: "dense", score: "f32" };
 const QK_DENSE: AttentionRoute = { qk: "dense", pv: "i8a8", score: "f32" };

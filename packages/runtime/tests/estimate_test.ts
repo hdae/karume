@@ -1608,6 +1608,32 @@ describe("the online attention kernel counts the a8 quantisation temporaries and
     );
   });
 
+  it("a profile that chooses the tiled key axis sizes the quantised Vᵀ in whole key tiles (ADR 0132 addendum 2026-11-12)", () => {
+    // N = 8 is one partial key tile: 16 words per Vᵀ column instead of ceil(8 / 4) = 2, so vq is
+    // 2×64×16×4 = 8,192 B in place of 1,024 B; the other seven temporaries and y are unchanged and
+    // still all live at once: 11,904 − 1,024 + 8,192 = 19,072 B.
+    assertEquals(
+      runScenario(
+        onlineModel().estimate({
+          ...NONE,
+          attentionDevice: { ...SUBGROUPS, onlineKeyWords: "tiled" },
+        }),
+      ).workspaceBytes,
+      4096 + 4096 + 1024 + 1024 + 8192 + 512 + 64 + 64,
+    );
+  });
+
+  it("rejects a key-axis form other than 'tiled' in the device facts (a misspelling would size Vᵀ in N's form)", () => {
+    const facts = { ...SUBGROUPS };
+    // A JS caller outside the types
+    Reflect.set(facts, "onlineKeyWords", "padded");
+    assertThrows(
+      () => onlineModel().estimate({ ...NONE, attentionDevice: facts }),
+      ExecutionError,
+      'options.attentionDevice.onlineKeyWords must be "tiled" or absent ("padded")',
+    );
+  });
+
   it("a device that admits neither form counts the three a8 dispatches with S in f32", () => {
     // 16 KiB without subgroups: the route falls back, so the estimate equals the plain a8 one.
     assertEquals(

@@ -40,7 +40,7 @@ import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { StateStorage } from "../kernels/state-storage.ts";
 import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
-import { type AttentionDeviceFacts, attentionDeviceFacts } from "./attention-route.ts";
+import { type AttentionDeviceFacts, readAttentionDeviceFacts } from "./attention-route.ts";
 import {
   digestExpertItem,
   type ExpertPool,
@@ -1396,7 +1396,9 @@ export const buildSessionState = async (
       uploadFenceMs,
     },
     convCompute,
-    attentionDevice: attentionDeviceFacts(gpu),
+    // The profile selected above (its key-axis form for the online attention — the same reading as
+    // the public attentionDeviceFacts(gpu), which selects the same table)
+    attentionDevice: readAttentionDeviceFacts(gpu, geometryProfile),
     stateAttentionReduce,
     fullStateStorage,
     linearGemvRowsThreadTarget,

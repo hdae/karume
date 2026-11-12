@@ -9,9 +9,9 @@ import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
   type AttentionDeviceFacts,
-  attentionDeviceFacts,
   attentionRoute,
   type AttentionSeats,
+  readAttentionDeviceFacts,
 } from "../src/runtime/attention-route.ts";
 
 const A8_S16: AttentionSeats = { attentionCompute: "a8", attentionScoreStorage: "f16" };
@@ -121,12 +121,12 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     for (const depth of [64, 128]) {
       assertEquals(
         attentionRoute(A8_NONE, depth, 27280, SUBGROUPS_48K),
-        { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+        { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32", keyWords: "whole" },
         `D=${depth}`,
       );
       assertEquals(
         attentionRoute(A8_NONE, depth, 512, PORTABLE_48K),
-        { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
+        { qk: "i8a8", pv: "i8a8", score: "none", online: "wg", keyWords: "whole" },
         `D=${depth}`,
       );
     }
@@ -148,7 +148,7 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
         subgroups: false,
         maxComputeWorkgroupStorageSize: 35328,
       }),
-      { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
+      { qk: "i8a8", pv: "i8a8", score: "none", online: "wg", keyWords: "whole" },
     );
     // With subgroups the scratch is not needed: 32 KiB holds the subgroup form, 31,231 B does not.
     assertEquals(
@@ -157,11 +157,11 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     );
     assertEquals(
       attentionRoute(A8_NONE, 128, 512, { subgroups: true, maxComputeWorkgroupStorageSize: 31232 }),
-      { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+      { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32", keyWords: "whole" },
     );
     assertEquals(
       attentionRoute(A8_NONE, 128, 512, { subgroups: true, maxComputeWorkgroupStorageSize: 32768 }),
-      { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+      { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32", keyWords: "whole" },
     );
     // Subgroups but a limit below the subgroup form's tiles: no form fits.
     assertEquals(attentionRoute(A8_NONE, 128, 512, { ...CORE_16K, subgroups: true }), FALLBACK);
@@ -180,12 +180,12 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     for (const cols of [65, 203, 1089, 4106]) {
       assertEquals(
         attentionRoute(A8_NONE, 128, cols, SUBGROUPS_48K),
-        { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+        { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32", keyWords: "padded" },
         `N=${cols}`,
       );
       assertEquals(
         attentionRoute(A8_NONE, 64, cols, PORTABLE_48K),
-        { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
+        { qk: "i8a8", pv: "i8a8", score: "none", online: "wg", keyWords: "padded" },
         `N=${cols}`,
       );
       // Only the online kernel learned the key valid length: a8 + s16 (Anima's preset) still runs
@@ -202,6 +202,48 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
       pv: "dense",
       score: "f32",
     });
+  });
+
+  it("takes the profile's key-axis form from the device facts at every N, and N's own form without it (ADR 0132 addendum 2026-11-12)", () => {
+    const tiled = (device: AttentionDeviceFacts): AttentionDeviceFacts => ({
+      ...device,
+      onlineKeyWords: "tiled",
+    });
+    for (const cols of [8, 64, 65, 203, 512, 4159, 27280]) {
+      const own = cols % 4 === 0 ? "whole" : "padded";
+      for (const [device, online] of [
+        [SUBGROUPS_48K, "sg32"],
+        [PORTABLE_48K, "wg"],
+      ] as const) {
+        assertEquals(
+          attentionRoute(A8_NONE, 128, cols, device),
+          { qk: "i8a8", pv: "i8a8", score: "none", online, keyWords: own },
+          `N=${cols} ${online}`,
+        );
+        assertEquals(
+          attentionRoute(A8_NONE, 128, cols, tiled(device)),
+          { qk: "i8a8", pv: "i8a8", score: "none", online, keyWords: "tiled" },
+          `N=${cols} ${online} tiled`,
+        );
+      }
+    }
+  });
+
+  it("leaves every route off the online kernel unchanged when the facts carry a key-axis form (the form is the online route's alone)", () => {
+    const tiled: AttentionDeviceFacts = { ...SUBGROUPS_48K, onlineKeyWords: "tiled" };
+    // An ineligible depth, a device without either form, and the three-dispatch seats
+    assertEquals(attentionRoute(A8_NONE, 96, 512, tiled), FALLBACK);
+    assertEquals(
+      attentionRoute(A8_NONE, 128, 512, { ...CORE_16K, onlineKeyWords: "tiled" }),
+      FALLBACK,
+    );
+    for (const cols of [512, 203]) {
+      assertEquals(
+        attentionRoute(A8_S16, 128, cols, tiled),
+        attentionRoute(A8_S16, 128, cols, SUBGROUPS_48K),
+        `a8 + s16 N=${cols}`,
+      );
+    }
   });
 
   it("never returns 'none' without attentionCompute 'a8' (the option check rejects it earlier)", () => {
@@ -223,15 +265,22 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     const limits = { maxComputeWorkgroupStorageSize: 49152 };
     const all = new Set(["subgroups", "subgroup-size-control"]);
     const language = new Set(["subgroup_id"]);
-    assertEquals(
-      attentionDeviceFacts({
-        features: all,
-        wgslLanguageFeatures: language,
-        subgroupLanesLinear: true,
-        limits,
-      }),
-      { subgroups: true, maxComputeWorkgroupStorageSize: 49152 },
-    );
+    const gpu = {
+      features: all,
+      wgslLanguageFeatures: language,
+      subgroupLanesLinear: true,
+      limits,
+    };
+    assertEquals(readAttentionDeviceFacts(gpu, {}), {
+      subgroups: true,
+      maxComputeWorkgroupStorageSize: 49152,
+    });
+    // The profile's key-axis form joins the facts; a profile without it adds nothing
+    assertEquals(readAttentionDeviceFacts(gpu, { attentionOnline: { keyWords: "tiled" } }), {
+      subgroups: true,
+      maxComputeWorkgroupStorageSize: 49152,
+      onlineKeyWords: "tiled",
+    });
     for (const [features, wgsl, linear] of [
       [new Set(["subgroups"]), language, true],
       [new Set(["subgroup-size-control"]), language, true],
@@ -241,12 +290,10 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
       [all, language, false],
     ] as const) {
       assertEquals(
-        attentionDeviceFacts({
-          features,
-          wgslLanguageFeatures: wgsl,
-          subgroupLanesLinear: linear,
-          limits,
-        }).subgroups,
+        readAttentionDeviceFacts(
+          { features, wgslLanguageFeatures: wgsl, subgroupLanesLinear: linear, limits },
+          {},
+        ).subgroups,
         false,
       );
     }

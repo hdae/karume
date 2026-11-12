@@ -42,7 +42,8 @@ import {
 } from "../../runtime/src/kernels/quantize-rows.ts";
 import { quantizeRowsReference } from "../../runtime/src/reference/i8a8.ts";
 import { transposeValues } from "../../runtime/src/reference/attention-online.ts";
-import { attentionDeviceFacts, attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../../runtime/src/runtime/attention-device.ts";
+import { attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
 import { attentionValueQuantization } from "../../runtime/src/runtime/recipe-builders/attention.ts";
 import {
   type CheckCase,

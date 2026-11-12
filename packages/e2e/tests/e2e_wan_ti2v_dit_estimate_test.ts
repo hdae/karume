@@ -26,7 +26,7 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { prepareContainer, type Tensor } from "@karume/runtime";
-import { attentionDeviceFacts } from "../../runtime/src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../../runtime/src/runtime/attention-device.ts";
 import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "../../models/tests/helpers/census-table.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";

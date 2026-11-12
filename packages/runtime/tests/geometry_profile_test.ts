@@ -580,6 +580,52 @@ describe("i8a8.conv3d: the conv3d w8a8 geometry is a required profile field", ()
   });
 });
 
+describe("attentionOnline: the optional key-axis form of the online attention (perf-ledger K-106)", () => {
+  it("a table with { keyWords: 'tiled' } passes the check and selection returns it; the default carries none", () => {
+    const tiled = profileOf(
+      "tiled-key-axis",
+      { vendor: "test" },
+      { attentionOnline: { keyWords: "tiled" } },
+    );
+    assertGeometryProfile(tiled);
+    const selected = selectGeometryProfile({ vendor: "test", architecture: "" }, [tiled]);
+    assertEquals(selected.attentionOnline, { keyWords: "tiled" });
+    assertEquals("attentionOnline" in DEFAULT_GEOMETRY_PROFILE, false);
+    // An injection-only table takes it too
+    assertGeometryProfile({
+      ...OPT_IN,
+      id: "tiled-opt-in",
+      attentionOnline: { keyWords: "tiled" },
+    });
+  });
+
+  it("a form other than tiled, or a field that is not an object, is rejected naming the field (selection and injection)", async () => {
+    for (const [value, message] of [
+      [{ keyWords: "padded" }, 'attentionOnline.keyWords must be "tiled" ("padded"'],
+      [{ keyWords: "whole" }, 'attentionOnline.keyWords must be "tiled" ("whole"'],
+      [{}, "attentionOnline.keyWords must be"],
+      ["tiled", "attentionOnline is not an object"],
+    ] as const) {
+      const broken: GeometryProfile = { ...OPT_IN, id: "broken-key-axis" };
+      // A JS caller or stored data outside the types
+      Reflect.set(broken, "attentionOnline", value);
+      assertThrows(() => assertGeometryProfile(broken), CodegenError, message);
+      const requests = await withCountingGpu(async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: broken }),
+          GpuFeatureError,
+          message,
+        );
+      });
+      assertEquals(
+        requests,
+        0,
+        `a broken attentionOnline (${JSON.stringify(value)}) reached requestDevice`,
+      );
+    }
+  });
+});
+
 // The derivation phase (src/runtime/recipe-builders/) now reads the geometry from the profile and
 // passes it **explicitly**. The unit version of "not a single byte moves on a default machine" is
 // "keys and WGSL with the default profile's values passed explicitly are byte-identical to the call

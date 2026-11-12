@@ -39,7 +39,8 @@ import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { attentionOnlineKeyWords } from "../src/kernels/attention-online-i8a8.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { TRANSPOSE_TILED_KEY } from "../src/kernels/transpose-tiled.ts";
-import { attentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
+import { attentionDeviceFacts } from "../src/runtime/attention-device.ts";
+import { attentionRoute } from "../src/runtime/attention-route.ts";
 import {
   createSessionFromContainer,
   type Session,
