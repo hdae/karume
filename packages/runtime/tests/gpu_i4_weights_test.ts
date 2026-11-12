@@ -29,10 +29,9 @@ import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { i4EligibleInitializers } from "../src/runtime/plan.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
-import { linearI8a8Geometry } from "../src/runtime/recipe-builders/linear.ts";
 import { quantizeRowsTieMargin, referenceLinearW4a8 } from "../src/reference/i8a8.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
-import { deviceGeometryProfile } from "./helpers/geometry.ts";
+import { deviceGeometryProfile, expectedW4a8LinearGeometry } from "./helpers/geometry.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import {
   type DeclarationJson,
@@ -1160,7 +1159,7 @@ test.skipIf(!GPU_AVAILABLE)(
             linearI8a8Key(
               linearI8a8UsesVec4(n),
               true,
-              linearI8a8Geometry(profile, m, "i4", groupSize),
+              expectedW4a8LinearGeometry(profile, m, groupSize),
               "i4",
               groupSize,
             ),

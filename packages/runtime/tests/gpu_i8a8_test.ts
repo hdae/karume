@@ -82,12 +82,15 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { BoundContainer } from "../src/format/container/bind.ts";
-import { gemmRowsGeometry, i8a8LinearGeometry } from "../src/kernels/geometry-profile.ts";
-import { linearI8a8Geometry } from "../src/runtime/recipe-builders/linear.ts";
+import { gemmRowsGeometry } from "../src/kernels/geometry-profile.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
-import { deviceGeometryProfile } from "./helpers/geometry.ts";
+import {
+  deviceGeometryProfile,
+  expectedI8a8LinearGeometry,
+  expectedW4a8LinearGeometry,
+} from "./helpers/geometry.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import {
@@ -754,7 +757,7 @@ test.skipIf(!GPU_AVAILABLE)(
             linearI8a8Key(
               linearI8a8UsesVec4(testCase.n),
               true,
-              i8a8LinearGeometry(profile, testCase.m),
+              expectedI8a8LinearGeometry(profile, testCase.m),
             ),
             quantizeRowsKey(quantizeRowsGeometry(testCase.k)),
           ].sort(),
@@ -836,7 +839,7 @@ test.skipIf(!GPU_AVAILABLE)(
               linearI8a8Key(
                 linearI8a8UsesVec4(testCase.n),
                 dot === "dp4a",
-                i8a8LinearGeometry(profile, testCase.m),
+                expectedI8a8LinearGeometry(profile, testCase.m),
               ),
             ),
             true,
@@ -904,7 +907,7 @@ test.skipIf(!GPU_AVAILABLE)(
             linearI8a8Key(
               linearI8a8UsesVec4(smallCase.n),
               false,
-              i8a8LinearGeometry(profile, smallCase.m),
+              expectedI8a8LinearGeometry(profile, smallCase.m),
             ),
           ),
           true,
@@ -1234,7 +1237,7 @@ test.skipIf(!GPU_AVAILABLE)(
         const key = linearI8a8Key(
           linearI8a8UsesVec4(testCase.n),
           true,
-          linearI8a8Geometry(profile, testCase.m, "i4", testCase.groupSize),
+          expectedW4a8LinearGeometry(profile, testCase.m, testCase.groupSize),
           "i4",
           testCase.groupSize,
         );
@@ -1324,7 +1327,7 @@ test.skipIf(!GPU_AVAILABLE)(
               linearI8a8Key(
                 linearI8a8UsesVec4(testCase.n),
                 dot === "dp4a",
-                linearI8a8Geometry(profile, testCase.m, "i4", testCase.groupSize),
+                expectedW4a8LinearGeometry(profile, testCase.m, testCase.groupSize),
                 "i4",
                 testCase.groupSize,
               ),

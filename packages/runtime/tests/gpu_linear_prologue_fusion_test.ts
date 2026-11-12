@@ -26,14 +26,13 @@ import {
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
-import { i8a8LinearGeometry } from "../src/kernels/geometry-profile.ts";
 import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsPrologueKey,
 } from "../src/kernels/quantize-rows.ts";
 import { createSessionFromContainer, I8A8_DOT } from "../src/runtime/executor.ts";
-import { deviceGeometryProfile } from "./helpers/geometry.ts";
+import { deviceGeometryProfile, expectedI8a8LinearGeometry } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
@@ -84,7 +83,7 @@ test.skipIf(!GPU_AVAILABLE)(
             const gemm = linearI8a8Key(
               linearI8a8UsesVec4(n),
               dot === "dp4a",
-              i8a8LinearGeometry(profile, rows),
+              expectedI8a8LinearGeometry(profile, rows),
             );
             assertEquals(
               requireCensus(fused.diagnostics().lastRunPipelines, label)
