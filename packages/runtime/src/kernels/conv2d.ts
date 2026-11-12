@@ -1,10 +1,15 @@
 /**
  * The two kernels of conv2d (`x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout]`, f32).
  *
- * | Path                | Key                                                 | Condition   |
- * | ------------------- | --------------------------------------------------- | ----------- |
- * | implicit GEMM       | `conv2d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}` | groups == 1 |
- * | direct convolution  | `conv2d:v1:f32:direct:wg256{:w…}`                   | groups > 1  |
+ * | Path                | Key                                                                    | Condition   |
+ * | ------------------- | ---------------------------------------------------------------------- | ----------- |
+ * | implicit GEMM       | `conv2d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}{:form}{:dec}`   | groups == 1 |
+ * | direct convolution  | `conv2d:v1:f32:direct:wg256{:w…}`                                      | groups > 1  |
+ *
+ * `{:form}` (`:tb-un` / `:tas-tb-un`, the geometry's skeleton form) and `{:dec}` (`:dec`, the
+ * geometry's counter decode) are optional parts: they appear only in the v4 kernel and only when
+ * the geometry carries them, so a geometry without them, and the scalar kernel, keep the key
+ * without them ({@link conv2dIgemmKey}).
  *
  * The tile edges and workgroup shape in the implicit GEMM key are **derived from the geometry**
  * ({@link conv2dIgemmKey} — the edges `gemmMTileGeometry` returns for the m-tile 64 / 32 variants.
