@@ -576,8 +576,8 @@ dense linears, 2.9 ms of routed experts and 0.9 ms of attention.
 
 A fusion rule written outside the runtime (ADR [0148](decisions/0148-external-fusion-rules.md)) that folds whatever run of
 f32 elementwise nodes it finds, tried first on MOSS-Image's DiT, whose runs are bandwidth-bound passes over whole
-activations. Adopted on 2026-11-12 as `models/ew_chain`, which the MOSS-Image pipeline passes by default (F-13). No
-research note yet (backlog).
+activations. Adopted on 2026-11-12 as `models/ew_chain`, which the MOSS-Image pipeline passes by default (F-13). The
+measurements are in [research 2026-11-12](research/2026-11-12-fusion-rules-and-kernel-forms.md) §3.
 
 | Status | ID | Candidate | Preconditions / kill criterion |
 | ------ | --- | --------- | ------------------------------ |
