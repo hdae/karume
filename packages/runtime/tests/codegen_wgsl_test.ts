@@ -5307,6 +5307,58 @@ describe("the skeleton forms of the f32 GEMM and the counter decode of conv2d (p
     }
   });
 
+  it("a key names a form or the decode only where the kernel takes it: the f16-compute linear, the fused attention and the scalar conv2d keep the key of their unchanged WGSL", () => {
+    const base = defaultGemmGeometry();
+    for (const form of FORMS) {
+      const geometry: GemmGeometry = { ...base, form };
+      assertEquals(
+        linearWgsl("f32", true, "f16", undefined, undefined, geometry),
+        linearWgsl("f32", true, "f16", undefined, undefined, base),
+        form,
+      );
+      assertEquals(
+        linearKey("f32", true, "f16", undefined, undefined, geometry),
+        linearKey("f32", true, "f16", undefined, undefined, base),
+        form,
+      );
+      for (const compute of ["f32", "f16"] as const) {
+        assertEquals(
+          attentionQkWgsl(true, compute, "f32", false, false, false, geometry),
+          attentionQkWgsl(true, compute, "f32", false, false, false, base),
+          `qk ${compute} ${form}`,
+        );
+        assertEquals(
+          attentionQkKey(true, compute, "f32", false, false, false, geometry),
+          attentionQkKey(true, compute, "f32", false, false, false, base),
+          `qk ${compute} ${form}`,
+        );
+        assertEquals(
+          attentionPvWgsl(true, compute, "f32", false, false, geometry),
+          attentionPvWgsl(true, compute, "f32", false, false, base),
+          `pv ${compute} ${form}`,
+        );
+        assertEquals(
+          attentionPvKey(true, compute, "f32", false, false, geometry),
+          attentionPvKey(true, compute, "f32", false, false, base),
+          `pv ${compute} ${form}`,
+        );
+      }
+    }
+    const decode: GemmGeometry = { ...K88_CONV, decode: "counter" };
+    for (const weight of WEIGHT_STORAGES) {
+      assertEquals(
+        conv2dIgemmWgsl(weight, false, GEMM_TILE, decode),
+        conv2dIgemmWgsl(weight, false, GEMM_TILE, K88_CONV),
+        `conv2d ${weight}`,
+      );
+      assertEquals(
+        conv2dIgemmKey(weight, false, GEMM_TILE, decode),
+        conv2dIgemmKey(weight, false, GEMM_TILE, K88_CONV),
+        `conv2d ${weight}`,
+      );
+    }
+  });
+
   it("the same generator input always yields identical WGSL (each form and the decode, every weight storage)", () => {
     for (const form of FORMS) {
       const geometry: GemmGeometry = { ...defaultGemmGeometry(), form };

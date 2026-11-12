@@ -17,11 +17,11 @@
  */
 
 import { assertU32Params } from "../codegen/params.ts";
-import { gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import { gemmKeyPart, gemmParams, gemmTakesForm, gemmWgsl } from "./gemm.ts";
 import type { GemmGeometry } from "./gemm-geometry.ts";
 
 export const matmulKey = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
-  `matmul:v2:f32:${gemmKeyPart(v4, rows, geometry)}`;
+  `matmul:v2:f32:${gemmKeyPart(v4, rows, geometry, gemmTakesForm("matmul", v4))}`;
 
 export const matmulWgsl = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
   gemmWgsl({ op: "matmul", v4, rows, geometry });

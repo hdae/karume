@@ -63,6 +63,7 @@ import {
   type GemmCompute,
   gemmComputeKeyPart,
   gemmKeyPart,
+  gemmTakesForm,
   gemmParams,
   type GemmRowWindowSpan,
   gemmWgsl,
@@ -137,7 +138,7 @@ export const attentionQkKey = (
   rowWindow = false,
   geometry?: GemmGeometry,
 ): string =>
-  `attention_qk:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${scoreKeyPart(
+  `attention_qk:v1:f32:${gemmKeyPart(v4, undefined, geometry, gemmTakesForm("attention_qk", v4, compute))}${gemmComputeKeyPart(compute)}${scoreKeyPart(
     score,
   )}${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
 
@@ -150,7 +151,7 @@ export const attentionPvKey = (
   rowWindow = false,
   geometry?: GemmGeometry,
 ): string =>
-  `attention_pv:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${scoreKeyPart(
+  `attention_pv:v1:f32:${gemmKeyPart(v4, undefined, geometry, gemmTakesForm("attention_pv", v4, compute))}${gemmComputeKeyPart(compute)}${scoreKeyPart(
     score,
   )}${gqaKeyPart(gqa)}${rowWindowKeyPart("c", rowWindow)}`;
 

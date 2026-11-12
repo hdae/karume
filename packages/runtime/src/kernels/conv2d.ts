@@ -54,7 +54,13 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 import { assertConvAxisExtent, assertConvFlatExtents } from "./conv-bounds.ts";
-import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
+import {
+  conv2dCounterDecode,
+  GEMM_MTILE_SMALL,
+  gemmMTileGeometry,
+  gemmTakesForm,
+  gemmWgsl,
+} from "./gemm.ts";
 import { GEMM_TILE, type GemmGeometry, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
   WEIGHT_SCALE_VAR,
@@ -149,13 +155,14 @@ export const conv2dIgemmKey = (
   // → `gemmMTileGeometry`, in that order). Embedding mTile directly would make only the key keep
   // naming the old edges when the geometry is swapped, colliding with a different WGSL.
   const resolved = geometry ?? gemmMTileGeometry(mTile);
-  // MUST: the skeleton form (v4 kernels) appends `:tb-un` / `:tas-tb-un` and the counter decode
-  // `:dec`; a geometry without them keeps its key byte for byte.
+  // MUST: the skeleton form appends `:tb-un` / `:tas-tb-un` and the counter decode `:dec`, each
+  // only where the kernel takes it (the v4 kernel; the scalar kernel keeps the original text
+  // whatever the geometry carries); a geometry without them keeps its key byte for byte.
   return `conv2d:v3:f32:igemm${gemmTileM(resolved)}x${gemmTileN(resolved)}${
     v4 ? "v4" : ""
   }:wg${resolved.wgX}x${resolved.wgY}${weightKeyPart(weight)}${
-    v4 && resolved.form !== undefined ? `:${resolved.form}` : ""
-  }${resolved.decode === undefined ? "" : ":dec"}`;
+    gemmTakesForm("conv2d", v4) && resolved.form !== undefined ? `:${resolved.form}` : ""
+  }${conv2dCounterDecode(resolved, v4) ? ":dec" : ""}`;
 };
 
 export const conv2dIgemmWgsl = (

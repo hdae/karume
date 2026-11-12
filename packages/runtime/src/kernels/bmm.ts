@@ -18,6 +18,7 @@ import {
   assertGemmRowWindow,
   gemmKeyPart,
   gemmParams,
+  gemmTakesForm,
   type GemmRowWindow,
   gemmWgsl,
 } from "./gemm.ts";
@@ -44,7 +45,7 @@ export const bmmKey = (
   window?: GemmRowWindow,
   geometry?: GemmGeometry,
 ): string =>
-  `bmm:v2:f32:${gemmKeyPart(v4, rows, geometry)}${window === undefined ? "" : `:rw${window}`}`;
+  `bmm:v2:f32:${gemmKeyPart(v4, rows, geometry, gemmTakesForm("bmm", v4))}${window === undefined ? "" : `:rw${window}`}`;
 
 export const bmmWgsl = (
   v4: boolean,

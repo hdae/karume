@@ -211,14 +211,21 @@ const rowsGeometry = (rows: number | undefined): GemmGeometry =>
  * attention_pv).
  * MUST: the same value as the one passed to generation (the reason is the same as for `rows`). When
  * omitted, the key does not move by a single byte.
- * MUST: a v4 key carries the geometry's skeleton form (`:tb-un` / `:tas-tb-un`) — every kernel
- * the form changes is a v4 kernel ({@link gemmFormGeometry}); a geometry without a form keeps its
- * key byte for byte.
+ * MUST: the key carries the geometry's skeleton form (`:tb-un` / `:tas-tb-un`) exactly where the
+ * kernel takes it — `takesForm` is {@link gemmTakesForm} of the same op, v4 bit and compute as
+ * generation ({@link gemmFormGeometry} drops the form by the same predicate). A key that named a
+ * form its WGSL does not have would compile the same text twice under two names. A geometry
+ * without a form keeps its key byte for byte.
  */
-export const gemmKeyPart = (v4: boolean, rows?: number, geometry?: GemmGeometry): string => {
+export const gemmKeyPart = (
+  v4: boolean,
+  rows: number | undefined,
+  geometry: GemmGeometry | undefined,
+  takesForm: boolean,
+): string => {
   const resolved = geometry ?? rowsGeometry(rows);
   return `${gemmGeometryTileKeyPart(resolved)}${v4 ? "v4" : ""}${
-    v4 && resolved.form !== undefined ? `:${resolved.form}` : ""
+    takesForm && resolved.form !== undefined ? `:${resolved.form}` : ""
   }`;
 };
 
@@ -2176,10 +2183,6 @@ fn xcol4(xc: u32, iy: i32, ix0: i32) -> vec4<f32> {
 }
 `;
 
-/** Whether the conv2d kernel of this geometry takes the counter decode (v4 kernels only). */
-const conv2dCounterDecode = (geometry: GemmGeometry, v4: boolean): boolean =>
-  v4 && geometry.decode === "counter";
-
 /**
  * Assignment of the conv1d / conv2d A tile (weights `[Cout, K]` — flattened, exactly a row-major
  * `[m,k]`).
@@ -2902,6 +2905,24 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
 const FORM_OPS: ReadonlySet<GemmSpec["op"]> = new Set(["linear", "matmul", "bmm", "conv2d"]);
 
 /**
+ * Whether a kernel takes the geometry's skeleton form: an op of {@link FORM_OPS} with vec4 I/O
+ * and f32 compute. MUST: generation ({@link gemmFormGeometry}) and the keys ({@link gemmKeyPart},
+ * `conv2dIgemmKey`) decide by this one predicate.
+ */
+export const gemmTakesForm = (
+  op: GemmSpec["op"],
+  v4: boolean,
+  compute: GemmCompute = "f32",
+): boolean => FORM_OPS.has(op) && v4 && compute === "f32";
+
+/**
+ * Whether the conv2d kernel of this geometry takes the counter decode (v4 kernels only). MUST:
+ * `conv2dIgemmKey` appends `:dec` by this predicate — the scalar kernel keeps the original decode.
+ */
+export const conv2dCounterDecode = (geometry: GemmGeometry, v4: boolean): boolean =>
+  v4 && geometry.decode === "counter";
+
+/**
  * The geometry the fragments generate from: `geometry` as is where its skeleton form takes
  * effect, and without the form elsewhere — the form is built and measured for the kernels of
  * {@link FORM_OPS} with vec4 I/O and f32 compute (the scalar kernels and the f16 compute variant
@@ -2913,8 +2934,9 @@ const FORM_OPS: ReadonlySet<GemmSpec["op"]> = new Set(["linear", "matmul", "bmm"
  */
 const gemmFormGeometry = (geometry: GemmGeometry, spec: GemmSpec): GemmGeometry => {
   if (geometry.form === undefined) return geometry;
-  const f32Compute = !("compute" in spec) || spec.compute === undefined || spec.compute === "f32";
-  if (FORM_OPS.has(spec.op) && "v4" in spec && spec.v4 && f32Compute) return geometry;
+  const v4 = "v4" in spec && spec.v4;
+  const compute = "compute" in spec ? spec.compute : undefined;
+  if (gemmTakesForm(spec.op, v4, compute)) return geometry;
   const { form: _dropped, ...original } = geometry;
   return original;
 };

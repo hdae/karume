@@ -19,7 +19,14 @@
  */
 
 import { assertU32Params } from "../codegen/params.ts";
-import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import {
+  type GemmCompute,
+  gemmComputeKeyPart,
+  gemmKeyPart,
+  gemmParams,
+  gemmTakesForm,
+  gemmWgsl,
+} from "./gemm.ts";
 import type { GemmGeometry } from "./gemm-geometry.ts";
 import {
   i4GroupKeyPart,
@@ -52,7 +59,7 @@ export const linearKey = (
 ): string => {
   i4GroupShift("linear", weight, groupSize);
   // The generation that guarded the i8 scale read. Keys of unchanged storage formats are kept.
-  return `linear:v${weight === "i8" ? 3 : 2}:f32:${gemmKeyPart(v4, rows, geometry)}${weightKeyPart(
+  return `linear:v${weight === "i8" ? 3 : 2}:f32:${gemmKeyPart(v4, rows, geometry, gemmTakesForm("linear", v4, compute))}${weightKeyPart(
     weight,
   )}${i4GroupKeyPart(groupSize)}${gemmComputeKeyPart(compute)}`;
 };
