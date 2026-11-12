@@ -175,6 +175,25 @@ reductions, the integer and byte-plane GEMVs, the f16 score store, the bidirecti
   Metal. A release reads the Metal page against this table (release runbook). What to do about Metal beyond that is
   undecided.
 
+## On Metal, the VAE fusion rule `models/vae_rms_silu` may differ from the unfused plan (not measured; recorded by the ruling of 2026-11-12)
+
+The Wan (2.1 and 2.2) and anima pipelines pass the fusion rule `models/vae_rms_silu` by default to their VAE decoder
+Sessions on every backend (ADR [0148](decisions/0148-external-fusion-rules.md) addendum of 2026-11-12 on it). Its bit
+identity with the unfused plan rests on a rounding barrier: each value the unfused plan stores passes an XOR with a mask
+that is 0 at run time, which keeps the compiler from contracting a multiply-add across it. That form is measured to hold
+on Vulkan and D3D12 on NVIDIA (the rule's u32 check, `packages/e2e/tests/e2e_vae_rms_silu_rule_test.ts`, and the
+Chrome / D3D12 runs of [perf-ledger](perf-ledger.md) V-10). On Metal the same XOR form was measured not to act as a
+barrier in other kernels (the attention i8a8 section above: the bitcast round trip with an XOR of 0 was ineffective
+on the M2 — ADR [0105](decisions/0105-packed-static-quantize-activations.md) addendum 4).
+
+- **Not measured**: the rule has not been run on Metal. Where its barrier does not hold, the VAE decoder's output can
+  differ from the unfused plan by the rounding of a contracted multiply-add, so Wan's frames and anima's images on Metal
+  may not be the unfused plan's words.
+- **Ruling (2026-11-12)**: the rule runs on Metal too, and a difference there is recorded rather than gated, as for the
+  Chrome-on-Metal kernel rewrites just above; no option turns it off. A measurement would be the playground's `/session-ab`
+  VAE targets in Chrome on a Mac, or the opt-in Node A/B `packages/e2e/tests/e2e_vae_session_ab_test.ts` there: both
+  compare every output word of a forward with and without the rule.
+
 ## On Metal the out-of-memory errorScope stays silent — the fail-loudly check does not fire (an independent bug)
 
 On real **M2 (24GB / maxBufferSize 14.3GB)** hardware, the test in `gpu_generation_context_test.ts`

@@ -148,8 +148,12 @@ maintainer's ruling of 2026-11-06).
   `DISABLED_FUSION_RULES`). Generated elementwise fusions on the MOSS-Image DiT (S5, [perf-ledger](perf-ledger.md) F-13)
   are adopted (2026-11-12): `models/ew_chain`, the first rule a pipeline passes by default (ADR 0148 addendum of
   2026-11-12); left: the research note, a run on Metal, and — not decided — whether the runtime should bind borrowed
-  weights for an external rule, which keeps `dit_skip22`'s 42 gates unfused today. The estimate plans every
-  fused step, external rules included, and counts the i8a8 linear's temporaries (P4, 2026-11-11 — ADR
+  weights for an external rule, which keeps `dit_skip22`'s 42 gates unfused today. The VAE's channel RMS norm + SiLU
+  ([perf-ledger](perf-ledger.md) V-10) is adopted too (2026-11-12): `models/vae_rms_silu`, which the Wan and anima
+  pipelines pass by default to their VAE decoder Sessions (ADR 0148 addendum of 2026-11-12 on it); left: a run on Metal
+  (it runs there unmeasured, by the maintainer's ruling — [known issues](known-issues.md)), Wan2.2's VAE encoder (its
+  sites are planned, not measured), and the same borrowed-weight question, which keeps the tile-32 pair unfused.
+  The estimate plans every fused step, external rules included, and counts the i8a8 linear's temporaries (P4, 2026-11-11 — ADR
   [0093](decisions/0093-transient-liveness-packing.md) addendum). The Session
   canary (ADR 0147 follow-ups, code item 3) covers external rules when it is built.
 - **Gemma 4 mobile QAT decode speed (maintainer 2026-10-30)**: 0.15.1 took K-97, K-48 step 1b and K-99; the integer GEMV

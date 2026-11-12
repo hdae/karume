@@ -354,6 +354,73 @@ for every other family.
   record is `karume-playground-moss-image/2`). The Session-level A/B (`packages/e2e/tests/e2e_moss_session_ab_test.ts`
   and the playground's `/session-ab`) stays and compares a `dit` forward with and without the rule.
 
+## Addendum (2026-11-12) — `models/vae_rms_silu` on the Wan and anima VAE decoders, and Metal
+
+The maintainer adopted the candidate `candidate/vae_rms_silu_g8` on 2026-11-12, on the measurements of
+[perf-ledger](../perf-ledger.md) V-10. Decision 4's "No pipeline passes a rule yet" now ends for Wan (2.1 and 2.2) and
+anima as well, for their VAE decoders.
+
+- **What moved**: the rule is `packages/models/src/vae/vae-rms-silu.ts`, named `models/vae_rms_silu`, its dispatch keys
+  under `ext:models:` with the rest of the key as measured (`vae_rms_silu:v1:g8:<tail>:f32:wg256:xor`). One geometry:
+  the candidate came in two (`_g8` and `_g4`, 32 and 64 pixels per workgroup), which measured within the noise floor
+  of each other on both targets in Chrome / D3D12 on the RTX 5070 Ti, and the g4 form went away everywhere (the rule,
+  the playground's A/B arms, the tests). The matcher and the WGSL are as measured (the WGSL's comment line names the new
+  rule); it imports `@karume/runtime/kernel` and nothing else, and `packages/models/tests/external_fusion_rule_test.ts`
+  pins that and the absence of type assertions for the file. Wan and anima share this norm but no VAE code, so the rule
+  and its list sit in a directory of their own, and `@karume/models/wan` and `@karume/models/anima` both export it as
+  `VAE_RMS_SILU_RULE` and `VAE_RMS_SILU_RULE_NAME` (one object; on the barrel `wan.VAE_RMS_SILU_RULE` and
+  `anima.VAE_RMS_SILU_RULE` — ADR 0136), experimental, for code that builds its own Sessions of those graphs (the
+  playground's `/session-ab` VAE targets, the e2e tests). It left `packages/candidate-rules`, which now holds
+  `candidate/gelu_mul` alone.
+- **What is passed where**: `vaeDecoderFusionRules` (`packages/models/src/vae/fusion-rules.ts`) is the one rule list of
+  the VAE decoder graphs — `models/vae_rms_silu`, then the rules the caller gives through the experimental
+  `fusionRules` of `wan.PipelineOptions` or `anima.PipelineOptions`, in their order. Wan's VAE stage (both classes)
+  gives it to every decoder chunk Session — the 16-latent pair and, with `vaeTile` 32, its lenders and the 32-latent
+  borrowers — and anima's to its VAE decoder Session and to that graph's estimate (Wan has no memory estimate). The
+  DiTs, the text encoders and Wan2.2's VAE encoder keep the caller's rules alone. The encoder holds the same chain (18
+  sites in `vae_encoder_pre`, 3 in `vae_encoder_post`, none in `vae_encoder_attn`, as planned), but no measurement ran
+  the rule there. A caller that gives `models/vae_rms_silu` again is refused by the decoder's Sessions as a rule given
+  twice.
+- **No option turns it off**, as for `models/ew_chain` (the addendum above); the tests reach the plan without it
+  through the test-only `DISABLED_FUSION_RULES` on the same options.
+- **The evidence** (the numbers of V-10; the measurements named the rule `candidate/vae_rms_silu_g8`):
+  - class E: u32-identical to the unfused plan on Vulkan / RTX 3080 Ti on both layouts, C 96 to 1024, partial and
+    multi-workgroup tiles and adversarial values, and its own step without the barriers or with mask 1 differs
+    (`packages/e2e/tests/e2e_vae_rms_silu_rule_test.ts`, now on the adopted rule);
+  - the hits on the real graphs through the decoder's rule list, against the same options with the rule disabled by
+    name: 29 + 1 per 16-latent decoder chunk graph of Wan2.1 and Wan2.2 and per anima VAE tile (silu 29 → 0; steps
+    447 → 208 on Wan2.2 next, 413 → 174 on Wan2.1 next, 334 → 95 on anima), none on the tile-32 pair
+    (`e2e_wan_fusion_counts_test.ts`, `e2e_wan_ti2v_fusion_counts_test.ts`, `e2e_anima_fusion_counts_test.ts`);
+  - the session A/B of one forward on seeded feeds, every output identical on every run: Node / Dawn / Vulkan on the
+    RTX 3080 Ti, the Wan2.2 next chunk −19.7 ms of 583.8 ms (3.4 %, noise floor 10.8 ms, verdict adopt) and the anima
+    tile −21.1 ms of 149.1 ms (14.2 %, noise floor 5.6 ms, adopt) in the second of two runs, the first inconclusive on
+    both; Chrome 157 / D3D12 on the RTX 5070 Ti, −13.2 ms of 473.9 ms (2.8 %, noise floor 6.7 ms, adopt) and −15.4 ms
+    of 128.2 ms (12.0 %, noise floor 0.7 ms, adopt);
+  - whole generations: on the RTX 3080 Ti, every image of 14 anima generations and every decoded video of 14 Wan2.2
+    decodes u32-identical to the base's first (the times inconclusive — the anima generation −113.7 ms, 2.2 %, under a
+    noise floor of 266.2 ms; the Wan2.2 decodes spread from 88 to 174 s on a GPU at 91–93 °C); on the RTX 5070 Ti in
+    Chrome, the same output hash on both, a steady VAE tile 1.348 → 1.274 s on Wan2.2 (median of 27, −5.5 %) and
+    0.116 → 0.102 s on anima (median of 8, −12 %).
+- **Metal** — the maintainer's ruling of 2026-11-12: the rule runs on every backend, Metal included, and a difference
+  there is recorded rather than gated, as backend differences are recorded and tolerated with no switch added (the
+  [known issues](../known-issues.md) ruling of 2026-11-11 on the Metal kernel rewrites). The rule's rounding barrier,
+  an XOR with a mask that is 0 at run time, is measured to hold on Vulkan and D3D12 on NVIDIA. On Metal the same form
+  was measured not to act as a barrier in other kernels, and this rule has not been run there; where the barrier does
+  not hold, its output can differ from the unfused plan by the rounding of a contracted multiply-add. Known issues
+  records it in its Metal section as not measured, and the playground no longer refuses the rule on Metal (the
+  `/session-ab` VAE targets and the opt-in Node A/B now run there).
+- **Limits**: the runtime's decline of borrowed weights for an external rule (decisions 5, 7 and 9) is not changed, so
+  the tile-32 pair folds none of its 30 sites (every weight there is the 16-latent pair's); Wan2.2's VAE encoder is not
+  given the rule; Metal is not run.
+- **What went away with it**: the g4 form; the opt-in pipeline-level A/B tests
+  `packages/e2e/tests/e2e_anima_pipeline_rule_test.ts` and `e2e_wan_ti2v_pipeline_rule_test.ts` with their helper
+  `helpers/pipeline-rule-ab.ts` (with the rule on by default the pipelines have no plain arm, and that arm is not worth
+  a public option); the `/wan22` and `/anima` pages' **Experimental fusion rule** switch with its record field
+  `experimentalFusionRule` (the records are `karume-playground-wan22/3` and `karume-playground-anima/2`), and with it the
+  playground's shared switch, which no page uses any more. The Session-level A/B
+  (`packages/e2e/tests/e2e_vae_session_ab_test.ts` and the playground's `/session-ab`) stays and compares a VAE forward
+  with and without the rule.
+
 ## Alternatives considered
 
 1. **An IR op from outside** (a caller-supplied op contract and kernel) — rejected for this phase: decision 1.
