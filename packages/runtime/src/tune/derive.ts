@@ -2020,7 +2020,8 @@ const withBaseFields = (
  * The checks of `base` against the records and the current runtime, and what it carries over
  * ({@link CarryOver} — ADR 0117 addendum 2026-11-12). Every refusal throws (fail loudly):
  *
- * - `base` has `provenance`, and its adapter equals the records' four fields.
+ * - `base` has `provenance`, its adapter equals the records' four fields, and its
+ *   `provenance.families` is an object (not a table saved in the earlier shape).
  * - Every family the records cover has every case of the current case set in the records: carrying
  *   over promises that nothing else moves, so a half-swept family must not silently put its unswept
  *   fields back to the default.
@@ -2052,6 +2053,14 @@ const carryOver = (
         `${where}: adapter ${field} ${JSON.stringify(provenance.adapter[field])} differs from the sweep records' ${JSON.stringify(adapter[field])} (a table is carried over only onto records of the same adapter)`,
       );
     }
+  }
+  // The type says `families` is an object, but a table saved by an earlier runtime (the single
+  // top-level keys) and read back with JSON.parse and a cast has none (the same check as matching's)
+  const savedFamilies: unknown = provenance.families;
+  if (typeof savedFamilies !== "object" || savedFamilies === null) {
+    throw new Error(
+      `${where}: its provenance has no per-family entries (provenance.families is ${JSON.stringify(savedFamilies)} — a table saved by an earlier runtime; sweep again)`,
+    );
   }
   const rows = sources.flatMap((source) => source.rows);
   const covered = familiesOf(rows);

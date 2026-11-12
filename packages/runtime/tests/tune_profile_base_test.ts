@@ -26,6 +26,7 @@ import {
   type GeometryProfileFamily,
 } from "../src/kernels/geometry-profile.ts";
 import { caseShape, SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
+import { infinityJson } from "../src/tune/derive.ts";
 import { familyEntries } from "../src/tune/families.ts";
 import { familyKernelsId } from "../src/tune/fingerprint.ts";
 import { type GeometryCandidate, quickConv2dCandidates } from "../src/tune/geometries.ts";
@@ -227,6 +228,21 @@ describe("deriveGeometryProfile with a base table", () => {
       () => derive(records, { base: other }),
       Error,
       "Base table 'base-gpu': adapter description",
+    );
+  });
+
+  it("refuses a base saved in the earlier shape (provenance without per-family entries)", () => {
+    const { families: _families, ...earlier } = provenanceOf(base());
+    const text = infinityJson({
+      ...base(),
+      provenance: { ...earlier, sweep: "base.json", kernels: "0123456789abcdef" },
+    });
+    // What an application holds after JSON.parse and a cast of a table saved by an earlier runtime
+    const saved: GeometryProfile = JSON.parse(text);
+    assertThrows(
+      () => derive([input("new-attention.json", familyRows("attention"))], { base: saved }),
+      Error,
+      "Base table 'base-gpu': its provenance has no per-family entries",
     );
   });
 });

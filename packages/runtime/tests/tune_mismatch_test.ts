@@ -1,15 +1,17 @@
 // The check of geometryProfileMismatch, the matching of a saved table (src/tune/mismatch.ts — ADR
 // 0117 decision 5, per op family since its addendum 2026-11-12). The public functions come from the
-// public surface (../tune.ts), the unexported fingerprint (familyKernelsId) from src. No GPU is used
-// (the fingerprint is derived from codegen alone).
+// public surface (../tune.ts), the unexported fingerprint (familyKernelsId) and the JSON writer of
+// a saved table (infinityJson) from src. No GPU is used (the fingerprint is derived from codegen
+// alone).
 //
 // What this pins: ① undefined when everything matches ② a missing provenance and a mismatch of each
 // of the adapter's 4 fields (the empty string is a value too), a family's fingerprint and its
 // case-set version are each returned with wording that names that field and the family ③ the
 // matching order (only the first mismatch is returned; families in the fixed order) ④ a family
 // without an entry matches only when its fields are the default ⑤ it does not throw (a table whose
-// geometry cannot build the kernels of the sweep shapes is also returned as a message) ⑥ every
-// built-in table matches its own adapter.
+// geometry cannot build the kernels of the sweep shapes, and a table saved in the earlier shape
+// without per-family entries, are also returned as a message) ⑥ every built-in table matches its own
+// adapter.
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -23,6 +25,7 @@ import {
   type GeometryProfileFamilyProvenance,
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
+import { infinityJson } from "../src/tune/derive.ts";
 import { familyKernelsId } from "../src/tune/fingerprint.ts";
 
 type Provenance = NonNullable<GeometryProfile["provenance"]>;
@@ -257,6 +260,22 @@ describe("geometryProfileMismatch", () => {
     assertStringIncludes(message, "family conv2d");
     assertStringIncludes(message, "cannot build the kernels");
     assertStringIncludes(message, "conv2d-c96-512x512");
+  });
+
+  it("does not throw on a table saved in the earlier shape (provenance without per-family entries): returns that it has none", () => {
+    const { families: _families, ...earlier } = stored().provenance;
+    const text = infinityJson({
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id: "stored",
+      provenance: { ...earlier, sweep: "sweep.json", kernels: "0123456789abcdef" },
+    });
+    // What an application holds after JSON.parse and a cast of a table saved by an earlier runtime
+    const saved: GeometryProfile = JSON.parse(text);
+    const message = mismatchOf(saved, ADAPTER);
+    assertStringIncludes(message, "Table 'stored': its provenance has no per-family entries");
+    assertStringIncludes(message, "saved by an earlier runtime; sweep again");
+    // The adapter is still compared first
+    assertStringIncludes(mismatchOf(saved, { ...ADAPTER, device: "0x1234" }), "adapter device");
   });
 });
 

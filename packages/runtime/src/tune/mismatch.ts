@@ -120,12 +120,14 @@ const attentionBenchMismatch = (
  *    against).
  * 2. The four adapter fields (`vendor` / `architecture` / `device` / `description` — empty strings
  *    are compared as values too).
- * 3. Per op family, in the fixed family order (`GEOMETRY_PROFILE_FAMILIES`): with an entry in
+ * 3. `provenance.families` is an object (a table saved in the earlier shape, without per-family
+ *    entries, is returned as a mismatch — not thrown).
+ * 4. Per op family, in the fixed family order (`GEOMETRY_PROFILE_FAMILIES`): with an entry in
  *    `provenance.families`, the family's kernel fingerprint (re-derived from the table by the
  *    current runtime — the WGSL counted without comments and whitespace, ADR 0117 addendum
  *    2026-10-19), then its case-set version; without an entry, that the family's fingerprint equals
  *    the default table's (its fields are the default). The message names the family.
- * 4. The online attention's evidence (`provenance.attentionBench` — ADR 0117 addenda 2026-11-12): a
+ * 5. The online attention's evidence (`provenance.attentionBench` — ADR 0117 addenda 2026-11-12): a
  *    table carrying `attentionOnline` has the block with `kernels`; `kernels`, when present, equals
  *    the current runtime's `attentionBenchKernelsId`, and `shapes` its `attentionBenchShapeSetId`.
  *
@@ -157,6 +159,13 @@ export const geometryProfileMismatch = (
         provenance.adapter[field],
       )} / this adapter ${JSON.stringify(adapterInfo[field])} — a table made on another machine or another adapter)`;
     }
+  }
+  // The type says `families` is an object, but a table saved by an earlier runtime (the single
+  // top-level keys) and read back with JSON.parse and a cast has none; reading its entries would
+  // throw a TypeError, and this function promises a message instead
+  const families: unknown = provenance.families;
+  if (typeof families !== "object" || families === null) {
+    return `Table '${profile.id}': its provenance has no per-family entries (provenance.families is ${JSON.stringify(families)} — a table saved by an earlier runtime; sweep again)`;
   }
   const stored = { ...profile, provenance };
   for (const family of GEOMETRY_PROFILE_FAMILIES) {
