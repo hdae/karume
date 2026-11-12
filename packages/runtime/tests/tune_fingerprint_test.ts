@@ -52,6 +52,8 @@ import {
   wgslTokenText,
 } from "../src/tune/fingerprint.ts";
 import {
+  conv2dCandidate,
+  gemmCandidate,
   type GeometryCandidate,
   i8a8Candidate,
   k85I8a8Candidates,
@@ -59,6 +61,7 @@ import {
   quickGemmCandidates,
   quickI8a8Candidates,
 } from "../src/tune/geometries.ts";
+import type { GemmGeometry } from "../src/kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import { linearI8a8Key, linearI8a8UsesVec4, linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
 import { candidatesFor, type CasePlan, casePlan } from "../src/tune/harness.ts";
@@ -739,5 +742,76 @@ describe("the record keys of the evaluation set k85 (perf-ledger K-85)", () => {
       sweepCandidateKernelsId(rows, true),
       candidateKernelsId(rows, true, SWEEP_CASES, casePlan),
     );
+  });
+});
+
+describe("the skeleton form and the counter decode of an f32 geometry in the fingerprint and the sweep's dispatch (perf-ledger K-88)", () => {
+  const withRows = (form: GemmGeometry["form"]): GeometryProfile => ({
+    ...DEFAULT_GEOMETRY_PROFILE,
+    gemmRows: DEFAULT_GEOMETRY_PROFILE.gemmRows.map((rule) => ({
+      ...rule,
+      geometry: form === undefined ? rule.geometry : { ...rule.geometry, form },
+    })),
+  });
+  const withConv = (fields: Pick<GemmGeometry, "form" | "decode">): GeometryProfile => ({
+    ...DEFAULT_GEOMETRY_PROFILE,
+    conv2d: {
+      rows64: { ...DEFAULT_GEOMETRY_PROFILE.conv2d.rows64, ...fields },
+      rows32: { ...DEFAULT_GEOMETRY_PROFILE.conv2d.rows32, ...fields },
+    },
+  });
+
+  it("a table carrying a form or the decode fingerprints differently from the same table without it, and every variant differently from the others", () => {
+    const ids = [
+      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      geometryProfileKernelsId(withRows("tb-un")),
+      geometryProfileKernelsId(withRows("tas-tb-un")),
+      geometryProfileKernelsId(withConv({ decode: "counter" })),
+      geometryProfileKernelsId(withConv({ form: "tb-un" })),
+      geometryProfileKernelsId(withConv({ form: "tb-un", decode: "counter" })),
+    ];
+    assertEquals(new Set(ids).size, ids.length);
+    // A table without the fields keeps its fingerprint (the same object shape gives the same id)
+    assertEquals(geometryProfileKernelsId(withRows(undefined)), ids[0]);
+  });
+
+  it("the sweep builds a form / decode candidate with the kernel a Session takes, and the same geometry without the fields as before", () => {
+    const linearCase = SWEEP_CASES.find((entry) => entry.op === "linear" && entry.m === 4096);
+    const conv2dCase = SWEEP_CASES.find((entry) => entry.op === "conv2d");
+    assert(linearCase?.op === "linear" && conv2dCase?.op === "conv2d");
+    const base = DEFAULT_GEOMETRY_PROFILE.gemmRows.at(-1)?.geometry;
+    assert(base !== undefined);
+    const linearPlan = casePlan(linearCase, 65535, false);
+    const plain = linearPlan.launch(gemmCandidate(base));
+    const form = linearPlan.launch(gemmCandidate({ ...base, form: "tas-tb-un" }));
+    assertEquals(plain.key.includes(":tas-tb-un"), false);
+    assertStringIncludes(form.key, "v4:tas-tb-un");
+    assertNotEquals(form.wgsl, plain.wgsl);
+    assertEquals(form.workgroups, plain.workgroups);
+    const conv2dPlan = casePlan(conv2dCase, 65535, false);
+    const convBase = conv2dPlan.defaultCandidate.geometry;
+    assert(!("tileK" in convBase));
+    const convPlain = conv2dPlan.launch(conv2dCandidate(convBase));
+    const convBoth = conv2dPlan.launch(
+      conv2dCandidate({ ...convBase, form: "tb-un", decode: "counter" }),
+    );
+    assertEquals(convBoth.key, `${convPlain.key}:tb-un:dec`);
+    assertNotEquals(convBoth.wgsl, convPlain.wgsl);
+  });
+
+  it("a measured row with a form or the decode fingerprints differently from the same row without it", () => {
+    const conv2dCase = SWEEP_CASES.find((entry) => entry.op === "conv2d");
+    assert(conv2dCase !== undefined);
+    const geometry = DEFAULT_GEOMETRY_PROFILE.conv2d.rows64;
+    const row = (geometryParams: GemmGeometry): MeasuredRow => ({
+      caseId: conv2dCase.id,
+      geometryParams,
+    });
+    const ids = [
+      sweepCandidateKernelsId([row(geometry)], false),
+      sweepCandidateKernelsId([row({ ...geometry, decode: "counter" })], false),
+      sweepCandidateKernelsId([row({ ...geometry, form: "tas-tb-un" })], false),
+    ];
+    assertEquals(new Set(ids).size, ids.length);
   });
 });

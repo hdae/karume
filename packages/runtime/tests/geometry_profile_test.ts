@@ -2061,3 +2061,105 @@ describe("the optional vec4 skeleton of the i8a8 fields (perf-ledger K-85)", () 
     }
   });
 });
+
+describe("the optional skeleton form and counter decode of the f32 fields (perf-ledger K-88)", () => {
+  const FORMS: GeometryProfile = {
+    ...OPT_IN,
+    id: "k88-fields",
+    gemmRows: OPT_IN.gemmRows.map((rule, index) => ({
+      ...rule,
+      geometry: { ...rule.geometry, form: index % 2 === 0 ? "tb-un" : "tas-tb-un" },
+    })),
+    conv2d: {
+      rows64: { ...OPT_IN.conv2d.rows64, form: "tas-tb-un", decode: "counter" },
+      rows32: { ...OPT_IN.conv2d.rows32, decode: "counter" },
+    },
+  };
+
+  it("a table with the form in its row-count buckets and the form and the decode in conv2d passes the check and the limit check under WebGPU's default limits, and the selection reads them", () => {
+    const profile: unknown = FORMS;
+    assertGeometryProfile(profile);
+    assertGeometryProfileWithinLimits(profile, WEBGPU_DEFAULT_LIMITS);
+    assertEquals(gemmRowsGeometry(profile, 4096).form, FORMS.gemmRows.at(-1)?.geometry.form);
+    assertEquals(conv2dProfileGeometry(profile, 64), FORMS.conv2d.rows64);
+    assertEquals(conv2dProfileGeometry(profile, 32).decode, "counter");
+  });
+
+  it("acquireGpu injects such a table as a copy that keeps the fields (no device is needed)", async () => {
+    await withFakeAdapter(FAKE_INFO, async () => {
+      const gpu = await acquireGpu({ geometryProfile: FORMS });
+      try {
+        const injected = gpu[RUNTIME_INTERNAL].geometryProfile;
+        assertEquals(injected, FORMS);
+        assert(injected !== FORMS, "the injected table was not copied");
+        assertEquals(injected?.conv2d.rows64.decode, "counter");
+      } finally {
+        gpu.destroy();
+      }
+    });
+  });
+
+  it("an unknown value, the decode outside conv2d and either field in the fused attention are rejected naming the field (CodegenError, and GpuFeatureError at injection)", async () => {
+    const raw = (geometry: GemmGeometry, field: string, value: unknown): GemmGeometry => {
+      const copy: GemmGeometry = { ...geometry };
+      Reflect.set(copy, field, value);
+      return copy;
+    };
+    const rows = (geometry: GemmGeometry): GeometryProfile["gemmRows"] =>
+      OPT_IN.gemmRows.map((rule, index) => (index === 0 ? { ...rule, geometry } : rule));
+    const first = OPT_IN.gemmRows[0].geometry;
+    const cases: readonly (readonly [string, unknown, string])[] = [
+      [
+        "an unknown form",
+        { ...OPT_IN, gemmRows: rows(raw(first, "form", "tb")) },
+        'gemmRows[0].geometry: geometry form must be "tb-un", "tas-tb-un" or absent ("tb")',
+      ],
+      [
+        "a non-string form",
+        { ...OPT_IN, conv2d: { ...OPT_IN.conv2d, rows32: raw(OPT_IN.conv2d.rows32, "form", 1) } },
+        'conv2d.rows32: geometry form must be "tb-un", "tas-tb-un" or absent (1)',
+      ],
+      [
+        "an unknown decode",
+        {
+          ...OPT_IN,
+          conv2d: { ...OPT_IN.conv2d, rows64: raw(OPT_IN.conv2d.rows64, "decode", "table") },
+        },
+        'conv2d.rows64: geometry decode must be "counter" or absent ("table")',
+      ],
+      [
+        "the decode in a row-count bucket",
+        { ...OPT_IN, gemmRows: rows({ ...first, decode: "counter" }) },
+        'gemmRows[0].geometry: the counter decode is conv2d\'s alone (decode "counter")',
+      ],
+      [
+        "the form in the fused attention",
+        {
+          ...OPT_IN,
+          attention: { ...OPT_IN.attention, pv: { ...OPT_IN.attention.pv, form: "tb-un" } },
+        },
+        'attention.pv: the skeleton form is taken only by linear / matmul / bmm and conv2d (form "tb-un"',
+      ],
+      [
+        "the decode in the fused attention",
+        {
+          ...OPT_IN,
+          attention: { ...OPT_IN.attention, qk: { ...OPT_IN.attention.qk, decode: "counter" } },
+        },
+        'attention.qk: the counter decode is conv2d\'s alone (decode "counter")',
+      ],
+    ];
+    for (const [name, value, message] of cases) {
+      assertThrows(() => assertGeometryProfile(value), CodegenError, message, name);
+      const requests = await withFakeAdapter(FAKE_INFO, async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: untypedCallback(value) }),
+          GpuFeatureError,
+          `geometryProfile (callback return value): Geometry profile 'opt-in': ${message}`,
+          name,
+        );
+      });
+      assertEquals(requests, 0, `${name}: a rejected table reached requestDevice`);
+    }
+  });
+});

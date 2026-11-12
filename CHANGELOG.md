@@ -74,6 +74,16 @@ measurements in `docs/research/`.
   version of those cases, and `deriveGeometryProfile` derives no table from it; the other sets, their cases and
   every fingerprint are unchanged. Every sweep record now names the embedded table a Session on that adapter selects
   (`geometryProfile`).
+- `@karume/runtime`: `GemmGeometry.form` and `GemmGeometry.decode`, optional fields of the f32 GEMM geometries of a
+  geometry profile (perf-ledger K-88). `form` (`"tb-un"` / `"tas-tb-un"`, in the row-count buckets and in `conv2d`)
+  is the form of the GEMM skeleton in the vec4 f32-compute kernels of linear / matmul / bmm / conv2d: a thread's
+  column quads a workgroup row apart and the K loop emitted unrolled, and with `"tas-tb-un"` also the A tile stored
+  k-major. `decode` (`"counter"`, in `conv2d` only) is the im2col decode of conv2d's vec4 implicit GEMM: a per-slot
+  counter instead of a division per K tile, and an edge path that checks the input row once per quad. The output
+  words are the same as without them; only speed differs, and the pipeline key names them (`:tb-un`, `:tas-tb-un`,
+  `:dec`). A geometry without them keeps its keys and WGSL byte for byte, and no embedded table carries them.
+  `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept them there and
+  reject any other value, the decode outside `conv2d` and either field in `attention`, naming the field.
 
 ### Changed
 

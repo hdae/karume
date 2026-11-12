@@ -351,3 +351,83 @@ describe("parseGeometryProfileJson: the optional vec4 skeleton of an i8a8 geomet
     assertInstanceOf(error.cause, CodegenError);
   });
 });
+
+describe("parseGeometryProfileJson: the optional skeleton form and counter decode of the f32 fields (perf-ledger K-88)", () => {
+  const withFields: GeometryProfile = {
+    ...BASE,
+    gemmRows: BASE.gemmRows.map((rule, index) => ({
+      ...rule,
+      geometry: { ...rule.geometry, form: index % 2 === 0 ? "tas-tb-un" : "tb-un" },
+    })),
+    conv2d: {
+      rows64: { ...BASE.conv2d.rows64, form: "tb-un", decode: "counter" },
+      rows32: { ...BASE.conv2d.rows32, decode: "counter" },
+    },
+  };
+
+  it("a table with the form in its row-count buckets and the form and the decode in conv2d comes back with them, and a table without them comes back without the fields", () => {
+    const parsed = parseGeometryProfileJson(geometryProfileJson(withFields));
+    assertEquals(parsed, withFields);
+    assertEquals(parsed.conv2d.rows64.decode, "counter");
+    assertEquals(parsed.gemmRows[0].geometry.form, "tas-tb-un");
+    const plain = parseGeometryProfileJson(geometryProfileJson(BASE));
+    assertEquals(plain, BASE);
+    for (const geometry of [
+      ...plain.gemmRows.map((rule) => rule.geometry),
+      plain.conv2d.rows64,
+      plain.conv2d.rows32,
+      plain.attention.qk,
+    ]) {
+      assertEquals("form" in geometry || "decode" in geometry, false);
+    }
+  });
+
+  it("rejects an unknown value naming the field, the fields where the slot takes none, and an unknown field next to them", () => {
+    const rows = (geometry: Record<string, unknown>): unknown[] =>
+      BASE.gemmRows.map((rule, index) => (index === 0 ? { ...rule, geometry } : rule));
+    rejects(
+      json({ ...BASE, gemmRows: rows({ ...BASE.gemmRows[0].geometry, form: "tbun" }) }),
+      'gemmRows[0].geometry.form is not "tb-un" or "tas-tb-un" ("tbun")',
+    );
+    rejects(
+      json({
+        ...BASE,
+        conv2d: { ...BASE.conv2d, rows64: { ...BASE.conv2d.rows64, decode: "division" } },
+      }),
+      'conv2d.rows64.decode is not "counter" ("division")',
+    );
+    rejects(
+      json({
+        ...BASE,
+        conv2d: { ...BASE.conv2d, rows32: { ...BASE.conv2d.rows32, form: null } },
+      }),
+      'conv2d.rows32.form is not "tb-un" or "tas-tb-un" (null)',
+    );
+    // The decode is conv2d's alone, and the fused attention takes neither field
+    rejects(
+      json({ ...BASE, gemmRows: rows({ ...BASE.gemmRows[0].geometry, decode: "counter" }) }),
+      "gemmRows[0].geometry has unknown fields decode",
+    );
+    rejects(
+      json({
+        ...BASE,
+        attention: { ...BASE.attention, qk: { ...BASE.attention.qk, form: "tb-un" } },
+      }),
+      "attention.qk has unknown fields form",
+    );
+    rejects(
+      json({
+        ...BASE,
+        attention: { ...BASE.attention, pv: { ...BASE.attention.pv, decode: "counter" } },
+      }),
+      "attention.pv has unknown fields decode",
+    );
+    rejects(
+      json({
+        ...BASE,
+        conv2d: { ...BASE.conv2d, rows64: { ...BASE.conv2d.rows64, form: "tb-un", unroll: 16 } },
+      }),
+      "conv2d.rows64 has unknown fields unroll",
+    );
+  });
+});

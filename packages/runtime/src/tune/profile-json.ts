@@ -94,13 +94,36 @@ const readInteger = (value: unknown, path: string): number =>
 
 const GEMM_FIELDS = ["regM", "regN", "wgX", "wgY"] as const;
 
-const readGemmGeometry = (value: unknown, path: string): GemmGeometry => {
-  const fields = readRecord(value, path, GEMM_FIELDS);
+/** The optional skeleton form of an f32 GEMM geometry (perf-ledger K-88). */
+const readForm = (value: unknown, path: string): NonNullable<GemmGeometry["form"]> =>
+  value === "tb-un" || value === "tas-tb-un"
+    ? value
+    : fail(path, `is not "tb-un" or "tas-tb-un" (${show(value)})`);
+
+/** The optional im2col decode of a conv2d geometry (perf-ledger K-88 — `"counter"` only). */
+const readDecode = (value: unknown, path: string): NonNullable<GemmGeometry["decode"]> =>
+  value === "counter" ? value : fail(path, `is not "counter" (${show(value)})`);
+
+/**
+ * An f32 GEMM geometry. `optional` names the K-88 fields the slot may carry (the row-count buckets
+ * the skeleton form, conv2d the form and the decode, the fused attention none — anywhere else they
+ * are unknown fields).
+ */
+const readGemmGeometry = (
+  value: unknown,
+  path: string,
+  optional: readonly ("form" | "decode")[] = [],
+): GemmGeometry => {
+  const fields = readRecord(value, path, GEMM_FIELDS, optional);
   return {
     regM: readInteger(fields.regM, child(path, "regM")),
     regN: readInteger(fields.regN, child(path, "regN")),
     wgX: readInteger(fields.wgX, child(path, "wgX")),
     wgY: readInteger(fields.wgY, child(path, "wgY")),
+    ...(fields.form === undefined ? {} : { form: readForm(fields.form, child(path, "form")) }),
+    ...(fields.decode === undefined
+      ? {}
+      : { decode: readDecode(fields.decode, child(path, "decode")) }),
   };
 };
 
@@ -169,7 +192,10 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
         `is not Infinity (${maxRows} — the last rule is 1e999, which covers every row count)`,
       );
     }
-    return { maxRows, geometry: readGemmGeometry(fields.geometry, child(where, "geometry")) };
+    return {
+      maxRows,
+      geometry: readGemmGeometry(fields.geometry, child(where, "geometry"), ["form"]),
+    };
   });
 };
 
@@ -248,8 +274,8 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
       pv: readGemmGeometry(attention.pv, "attention.pv"),
     },
     conv2d: {
-      rows64: readGemmGeometry(conv2d.rows64, "conv2d.rows64"),
-      rows32: readGemmGeometry(conv2d.rows32, "conv2d.rows32"),
+      rows64: readGemmGeometry(conv2d.rows64, "conv2d.rows64", ["form", "decode"]),
+      rows32: readGemmGeometry(conv2d.rows32, "conv2d.rows32", ["form", "decode"]),
     },
     i8a8: {
       linear: readI8a8Geometry(i8a8.linear, "i8a8.linear"),

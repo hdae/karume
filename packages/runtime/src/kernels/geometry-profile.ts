@@ -267,14 +267,71 @@ const numberOf = (value: unknown, where: string, path: string, name: string): nu
   );
 };
 
+/**
+ * Guard on the optional skeleton form of an f32 GEMM geometry (perf-ledger K-88 — the same
+ * wording as {@link assertGemmGeometry}, which checks it again at generation).
+ */
+const formOf = (value: unknown, where: string, path: string): NonNullable<GemmGeometry["form"]> => {
+  if (value === "tb-un" || value === "tas-tb-un") return value;
+  throw new CodegenError(
+    `${where}: ${path}: geometry form must be "tb-un", "tas-tb-un" or absent (${JSON.stringify(value)})`,
+  );
+};
+
+/** Guard on the optional im2col decode of a conv2d geometry (perf-ledger K-88). */
+const decodeOf = (
+  value: unknown,
+  where: string,
+  path: string,
+): NonNullable<GemmGeometry["decode"]> => {
+  if (value === "counter") return value;
+  throw new CodegenError(
+    `${where}: ${path}: geometry decode must be "counter" or absent (${JSON.stringify(value)})`,
+  );
+};
+
 const gemmGeometryOf = (value: unknown, where: string, path: string): GemmGeometry => {
-  const { regM, regN, wgX, wgY } = recordOf(value, where, path);
+  const { regM, regN, wgX, wgY, form, decode } = recordOf(value, where, path);
+  // Absent stays absent (a table without the fields keeps its keys and WGSL byte for byte)
   return {
     regM: numberOf(regM, where, path, "regM"),
     regN: numberOf(regN, where, path, "regN"),
     wgX: numberOf(wgX, where, path, "wgX"),
     wgY: numberOf(wgY, where, path, "wgY"),
+    ...(form === undefined ? {} : { form: formOf(form, where, path) }),
+    ...(decode === undefined ? {} : { decode: decodeOf(decode, where, path) }),
   };
+};
+
+/**
+ * Which optional fields of an f32 GEMM geometry a profile field may carry (perf-ledger K-88): the
+ * skeleton form where a kernel takes it (the row-count buckets of linear / matmul / bmm, conv2d),
+ * the counter decode in conv2d only.
+ *
+ * MUST: refuse them elsewhere. The fused attention kernels keep the original form whatever the
+ * geometry carries, and every op but conv2d refuses the decode at generation — a table carrying
+ * them there would either be silently not what it says or fail only when that op is first built.
+ */
+const assertGemmFieldsIn = (
+  geometry: GemmGeometry,
+  where: string,
+  path: string,
+  allowed: { readonly form: boolean; readonly decode: boolean },
+): void => {
+  if (geometry.form !== undefined && !allowed.form) {
+    throw new CodegenError(
+      `${where}: ${path}: the skeleton form is taken only by linear / matmul / bmm and conv2d (form ${JSON.stringify(
+        geometry.form,
+      )} — the fused attention kernels keep the original form)`,
+    );
+  }
+  if (geometry.decode !== undefined && !allowed.decode) {
+    throw new CodegenError(
+      `${where}: ${path}: the counter decode is conv2d's alone (decode ${JSON.stringify(
+        geometry.decode,
+      )})`,
+    );
+  }
 };
 
 /**
@@ -390,22 +447,24 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
       if (typeof rule.maxRows !== "number") {
         throw new CodegenError(`${where}: maxRows of gemmRows[${index}] is not a number`);
       }
-      return {
-        maxRows: rule.maxRows,
-        geometry: gemmGeometryOf(rule.geometry, where, `gemmRows[${index}].geometry`),
-      };
+      const path = `gemmRows[${index}].geometry`;
+      const geometry = gemmGeometryOf(rule.geometry, where, path);
+      assertGemmFieldsIn(geometry, where, path, { form: true, decode: false });
+      return { maxRows: rule.maxRows, geometry };
     }),
     where,
   );
   const attention = recordOf(fields.attention, where, "attention");
   const conv2d = recordOf(fields.conv2d, where, "conv2d");
-  for (const [name, geometry] of [
-    ["attention.qk", attention.qk],
-    ["attention.pv", attention.pv],
-    ["conv2d.rows64", conv2d.rows64],
-    ["conv2d.rows32", conv2d.rows32],
+  for (const [name, value, allowed] of [
+    ["attention.qk", attention.qk, false],
+    ["attention.pv", attention.pv, false],
+    ["conv2d.rows64", conv2d.rows64, true],
+    ["conv2d.rows32", conv2d.rows32, true],
   ] as const) {
-    assertGemmGeometry(gemmGeometryOf(geometry, where, name), `${where}: ${name}`);
+    const geometry = gemmGeometryOf(value, where, name);
+    assertGemmFieldsIn(geometry, where, name, { form: allowed, decode: allowed });
+    assertGemmGeometry(geometry, `${where}: ${name}`);
   }
   const i8a8 = recordOf(fields.i8a8, where, "i8a8");
   for (const [name, geometry] of [
