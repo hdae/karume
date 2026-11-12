@@ -903,8 +903,10 @@ filed 2026-10-27 after the ruling of 2026-10-26).
 - **What.** `runGeometrySweep({ geometries })`: the candidate geometries to measure, by the name a record's rows carry
   (`geometry`, e.g. `tile64x64r8x4w16x8k64s`), in the order given. The default geometry's row is measured as always,
   first. Omitted (or an empty list, as for `cases`), every candidate of the set is measured, as before. A name that
-  is not a candidate of every chosen case, or a name given twice, throws before the GPU is touched; the check and the
-  sweep take the candidates through one function (`selectedCandidates` in `src/tune/harness.ts`).
+  is the default geometry of a chosen case throws (its row is always measured, only as the default row, so listing it
+  would put in `settings.geometries` a geometry with no candidate row), as does a name that is not a candidate of
+  every chosen case or a name given twice — all before the GPU is touched; the check and the sweep take the
+  candidates through one function (`selectedCandidates` in `src/tune/harness.ts`).
 - **Why.** A machine that heats within one case measures that case in chunks with a cool-down between calls. The
   i8a8 linear's `full` grid holds 230 geometries per case (ADR [0115](0115-geometry-profiles.md) addendum decision
   14), and in the K-85 evaluation on the RTX 3080 Ti every case but the guard drifted ×1.14–1.21 over its run
