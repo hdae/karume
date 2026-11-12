@@ -346,8 +346,8 @@ for every other family.
     nothing refuses it there.
 - **Limits**: the runtime's decline of borrowed weights for an external rule (decisions 5, 7 and 9) is not changed, so
   `dit_skip22` folds none of its 42 FFN gates (their constants are `dit`'s weights). No other family passes the rule:
-  the maintainer measured a Gemma 4 preset to regress with it (2026-11-12; the numbers are not recorded in this
-  repository).
+  it is tried before the built-in rules and takes windows a built-in rule would have led (decision 3), and its effect
+  on a graph other than MOSS-Image's has not been measured.
 - **What went away with it**: the opt-in pipeline-level A/B `packages/e2e/tests/e2e_moss_pipeline_rule_test.ts` (with
   the rule on by default the pipeline has no plain arm, and that arm is not worth a public option), and the
   `/moss-image` page's **Experimental fusion rule** switch with its record field `experimentalFusionRule` (the page's
