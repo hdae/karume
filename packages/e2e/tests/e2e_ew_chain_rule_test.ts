@@ -11,13 +11,14 @@
 // The graphs are small and synthetic (no model asset): the four forms the MOSS-Image DiT has
 // (asserted by their dispatch keys — the nine-node gate with two `[1]` constants over a rank-3
 // activation, and the three `mul → add` tails at their real ranks and broadcast patterns), the
-// same tails with the broadcast operand in the other slot or of rank 1, an internal value read
-// twice, a chain of every op of the rule, an element count that is not a multiple of the rule's
-// 128 threads and one below 128. The first elements of every input hold ±0, subnormals, ±Inf, NaN
-// payloads, the largest finite values and values that saturate tanh and sigmoid; a block after
-// them holds exact rounding ties for the products (1 + 2⁻¹² squared lies halfway between two f32,
-// and the add of −1 then keeps or loses that half ulp), where a product contracted into the add
-// would differ.
+// form its VAE decoder graphs have (a residual `add` and a divide by a one-element constant, its
+// key asserted too), the same tails with the broadcast operand in the other slot or of rank 1, an
+// internal value read twice, a chain of every op of the rule, an element count that is not a
+// multiple of the rule's 128 threads and one below 128. The first elements of every input hold ±0,
+// subnormals, ±Inf, NaN payloads, the largest finite values and values that saturate tanh and
+// sigmoid; a block after them holds exact rounding ties for the products (1 + 2⁻¹² squared lies
+// halfway between two f32, and the add of −1 then keeps or loses that half ulp), where a product
+// contracted into the add would differ.
 //
 // Fault injection: a test rule built here from the same pieces (`elementwiseValueWgsl`,
 // `stagedLoopWgsl`), identical to the rule's `mul → add` kernel except that the add reads the
@@ -120,7 +121,7 @@ type Case = {
   readonly shape: readonly number[];
   /** The scale of the generated values. */
   readonly scale: number;
-  /** The rule's dispatch key, for the forms the MOSS-Image DiT has. */
+  /** The rule's dispatch key, for the forms the MOSS-Image graphs have. */
   readonly key?: string;
 };
 
@@ -177,6 +178,19 @@ const CASES: readonly Case[] = [
     key: keyOf(
       "f.s.f.s:div.x0.x1-tanh.t0-mul.t1.x1-sigmoid.x0-mul.t2.t3-div.x2.x3-tanh.t5-mul.t6.x3-mul.t4.t7",
     ),
+  },
+  {
+    // The VAE decoder's residual connection: `add(x, h)`, then a divide by the block's output
+    // scale, a one-element constant (a weight, as in the exported graphs).
+    name: "residual add, divided by a constant",
+    inputs: [input("x", FULL), input("h", FULL), { name: "s", shape: [1], constant: Math.SQRT2 }],
+    nodes: [
+      ["add", ["x", "h"], "t"],
+      ["div", ["t", "s"], "y"],
+    ],
+    shape: FULL,
+    scale: 5.3,
+    key: keyOf("f.f.s:add.x0.x1-div.t0.x2"),
   },
   mulAdd("RoPE tail", ROPE, [ROPE, ROPE_TABLE, ROPE], 1, keyOf("f.b0101.f:mul.x0.x1-add.x2.t0")),
   mulAdd("gated residual", FULL, [FULL, CHANNEL, FULL], 1, keyOf("f.b001.f:mul.x0.x1-add.x2.t0")),
