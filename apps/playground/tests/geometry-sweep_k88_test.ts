@@ -199,16 +199,12 @@ describe("k88Summary", () => {
 describe("the case-set ids the page shows (the chosen set's, per op family)", () => {
   it("differ per evaluation set and are the sweep's own for the table-deriving sets", () => {
     const sweep = sweepCaseSetIds();
-    const k85 = sweepCaseSetIds("k85");
     const k88 = sweepCaseSetIds("k88");
     expect(sweepCaseSetIds("full")).toEqual(sweep);
-    expect(Object.keys(k85)).toEqual(["i8a8-linear"]);
-    expect(k85["i8a8-linear"]).not.toBe(sweep["i8a8-linear"]);
     expect(Object.keys(k88).length).toBeGreaterThan(0);
     const sweepIds = new Map(Object.entries(sweep));
     for (const [family, id] of Object.entries(k88)) {
       expect(id, family).not.toBe(sweepIds.get(family));
     }
-    expect(k88).not.toEqual(k85);
   });
 });

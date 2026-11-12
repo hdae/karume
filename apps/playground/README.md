@@ -1241,9 +1241,9 @@ one case takes minutes, and heat moves the default geometry's re-measurement, wh
 checks), and merges the per-case records into **one sweep record** (`karume-geometry-sweep/3`, the
 format `deriveGeometryProfile` reads, with no playground envelope). Its first job is perf-ledger
 V-15: the conv3d-only sweep on the RTX 5070 Ti, from which the derivation chooses `i8a8.conv3d` of
-the `nvidia-blackwell` table. Its second is perf-ledger K-85: the evaluation set `k85` of the vec4
-skeleton of the i8a8 linear on the Wan2.2 DiT linears ([The K-85 preset](#the-k-85-preset)). Its
-third is perf-ledger K-88: the evaluation set `k88` of the f32 GEMM skeleton forms and the conv2d
+the `nvidia-blackwell` table. Its second is perf-ledger K-85: a `full` sweep of the `i8a8-linear`
+family alone, the vec4 skeleton and the K64 tiles included ([The i8a8 linear run](#the-i8a8-linear-run)).
+Its third is perf-ledger K-88: the evaluation set `k88` of the f32 GEMM skeleton forms and the conv2d
 counter decode ([The K-88 preset](#the-k-88-preset)).
 
 **Serve the page from the checkout that will derive the table.** The record carries `caseSets` and
@@ -1264,10 +1264,10 @@ instead:
 
 | Control | What it does |
 | --- | --- |
-| Preset | **V-15: conv3d, full, 5 rounds, 90 s idle** fills the form with every conv3d w8a8 case, the `full` set, 5 rounds and 90 s idle; **K-85 (i8a8 linear skeleton)** with every case of the `k85` table, the `k85` set, 5 rounds and 90 s idle; **K-88 (GEMM forms / conv2d decode)** with every case of the `k88` table, the `k88` set, 5 rounds and 90 s idle. While the form equals a preset, a badge next to the title names it. **Every case (reset)** is no preset: it goes back to the initial form (every case, `quick+`, 5 rounds, 90 s). |
-| Op families | Which families are shown and swept (the runtime's `geometrySweepCases(<candidate set>)`, grouped by op — the `k85` and `k88` sets have case tables of their own). |
+| Preset | **V-15: conv3d, full, 5 rounds, 90 s idle** fills the form with every conv3d w8a8 case, the `full` set, 5 rounds and 90 s idle; **K-88 (GEMM forms / conv2d decode)** with every case of the `k88` table, the `k88` set, 5 rounds and 90 s idle. While the form equals a preset, a badge next to the title names it. **Every case (reset)** is no preset: it goes back to the initial form (every case, `quick+`, 5 rounds, 90 s). |
+| Op families | Which families are shown and swept (the runtime's `geometrySweepCases(<candidate set>)`, grouped by op — the `k88` set has a case table of its own). With one family left ticked, the run sweeps that family alone. |
 | Cases | Every case of the chosen families, with **all** / **none** per family. A ticked case of a family that is not chosen is not swept. |
-| Candidate set | `quick` (a few geometries — a dry run that checks the page and the device), `quick+` (quick plus the registered tables' geometries; the runtime's default), `full` (every geometry — the set a table is derived from), `k85` (the evaluation of perf-ledger K-85; no table is derived), `k88` (the evaluation of perf-ledger K-88; no table is derived). Changing to a set that sweeps another case table switches the table and ticks every case of it. |
+| Candidate set | `quick` (a few geometries — a dry run that checks the page and the device), `quick+` (quick plus the registered tables' geometries; the runtime's default), `full` (every geometry — the set a table is derived from; for `i8a8-linear` a grid of its own with the vec4 skeleton and K tile 64), `k88` (the evaluation of perf-ledger K-88; no table is derived). Changing to a set that sweeps another case table switches the table and ticks every case of it. |
 | Rounds | Measurement rounds per geometry (default 5); the min is kept. |
 | Idle between cases (s) | Cooling before every case but the first (default 90; 0 = none). |
 | Run / Cancel | Run sweeps the cases in the table's order. Cancel takes effect at once during the idle wait, before the next case starts, and inside a case once the current geometry is measured (`runGeometrySweep` keeps the rows measured so far, with `aborted: true`). While a case still acquires its device, Cancel waits for the device; that case measured nothing, and its record is dropped. A Cancel after the last case has measured everything leaves the run completed. |
@@ -1314,26 +1314,27 @@ has cases for (for V-15, `i8a8.conv3d`) say what a derivation with the adapter's
 choose — that derivation carries the other families over from the table. A record the derivation
 rejects shows the reason instead.
 
-### The K-85 preset
+### The i8a8 linear run
 
-The `k85` set measures the vec4 skeleton of the i8a8 linear (perf-ledger K-85 — the optional
-geometry field `skeleton: "vec4"`: the pack loop unrolled and, at `k % 16 == 0`, the shared tiles
-filled one `vec4<u32>` per item) on a case table of its own: the Wan2.2 TI2V-5B DiT linears at 33
-frames (S = 7,920 — q / k / v / o ×180, FFN up ×30, FFN down ×30, cross k / v ×61, the M = 1 time
-projection ×2) and an Irodori M = 185 guard outside the forward. The candidates are the registered
-tables' `i8a8.linear` geometries, the default, and 204 grid geometries (regM 8 / 12 / 16, regN 4 / 8,
-the existing workgroup shapes, K tile 16 / 32 / 64, each with and without the skeleton, within
-16,384 B of workgroup storage); every one is checked for bit identity with the default as in the
-other sets. One case takes about 4 minutes at M = 1 on an RTX 3080 Ti, more at M = 7,920.
+Perf-ledger K-85 asks for one record of the `i8a8-linear` family alone with the `full` set (ADR 0115
+addendum decision 14). There is no preset for it: choose `full` under **Candidate set** and untick
+every **Op families** checkbox but `i8a8-linear`. The run then sweeps that family's 13 cases of the
+sweep's own table, one call per case, and merges them into one record:
 
-No table is derived from a `k85` record (`deriveGeometryProfile` refuses it). The result card shows
-the **K-85 summary** instead: per case, this adapter's table geometry (the embedded table a Session
-on this adapter selects — the record's `geometryProfile`), the fastest skeleton candidate whose
-output matched the default, skeleton ÷ table and the skeleton's ratio to the default; and the sum
-over one Wan2.2 33f DiT forward (each case's node count × its time per dispatch) for the table
-geometry and the per-case best skeleton, plus the one skeleton geometry with the smallest sum (a
-profile field holds one geometry for every M). The guard case is shown but not summed. The record
-downloads as for any set.
+- the six anima DiT shapes (M 1,024 / 4,096);
+- the five Wan2.2 TI2V-5B DiT shapes at 33 frames (M 7,920 / 512 / 1);
+- the Irodori v4-small guard at M 185, and the same shape at M 256 (the upper end of the bucket
+  ≤ 256).
+
+Under `full` the family has a grid of its own: the 48 geometries the other i8a8 families use, then the
+vec4 skeleton grid (regM 8 / 12 / 16, regN 4 / 8, the existing workgroup shapes, K tile 16 / 32 / 64,
+each without and with the skeleton), within 16,384 B of workgroup storage — 230 geometries, 103 of
+them with the skeleton and 62 with K tile 64. Every one is checked for bit identity with the default
+as in the other sets.
+
+The result card derives the table from this record alone, so only the three `i8a8.linear` buckets
+(≤ 256 / 257〜512 / > 512) say what a derivation with the adapter's table as `base` will choose; the
+other families come out at the default.
 
 ### The K-88 preset
 

@@ -67,7 +67,7 @@ import {
   gemmCandidate,
   type GeometryCandidate,
   i8a8Candidate,
-  k85I8a8Candidates,
+  i8a8LinearCandidates,
   quickConv2dCandidates,
   quickGemmCandidates,
   quickI8a8Candidates,
@@ -753,7 +753,7 @@ describe("the vec4 skeleton of an i8a8 geometry in the fingerprint and the sweep
   });
 });
 
-describe("the record keys of the evaluation set k85 (perf-ledger K-85)", () => {
+describe("the record keys of the table-deriving sets", () => {
   it("the table-deriving sets record the same case-set versions and default fingerprints as the sweep's table", () => {
     for (const set of ["quick", "quick+", "full"] as const) {
       assertEquals(candidateSetCaseSetIds(set), sweepCaseSetIds());
@@ -764,27 +764,16 @@ describe("the record keys of the evaluation set k85 (perf-ledger K-85)", () => {
     }
   });
 
-  it("k85 records the version and the default fingerprint of its own case table, never the sweep's", () => {
-    const k85 = candidateSetCaseSetIds("k85");
-    // Its table holds i8a8-linear cases only
-    assertEquals(Object.keys(k85), ["i8a8-linear"]);
-    assertMatch(k85["i8a8-linear"] ?? "", /^[0-9a-f]{16}$/);
-    assertNotEquals(k85["i8a8-linear"], sweepCaseSetIds()["i8a8-linear"]);
-    assertEquals(k85, caseSetIds(sweepCasesFor("k85")));
-    assertNotEquals(
-      candidateSetDefaultKernelsIds("k85")["i8a8-linear"],
-      geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE)["i8a8-linear"],
-    );
-  });
-
-  it("the measured-candidate fingerprint reads rows of k85 cases, and a row of the sweep's table gives the value it gave before", () => {
-    const [k85Case] = sweepCasesFor("k85");
-    assert(k85Case !== undefined);
-    const skeleton = k85I8a8Candidates().find(({ geometry }) => geometry.skeleton === "vec4");
+  it("the measured-candidate fingerprint reads a skeleton row of a Wan2.2 i8a8 linear case of the sweep's table, and a row of the sweep's table gives the value candidateKernelsId gives over it", () => {
+    const wan = SWEEP_CASES.find(({ id }) => id === "i8a8-linear-m7920-n3072-k3072");
+    assert(wan !== undefined);
+    const skeleton = i8a8LinearCandidates().find(({ geometry }) => geometry.skeleton === "vec4");
     assert(skeleton !== undefined);
-    assertMatch(
-      sweepCandidateKernelsId([{ caseId: k85Case.id, geometryParams: skeleton.geometry }], true),
-      /^[0-9a-f]{16}$/,
+    const skeletonRows: MeasuredRow[] = [{ caseId: wan.id, geometryParams: skeleton.geometry }];
+    assertMatch(sweepCandidateKernelsId(skeletonRows, true), /^[0-9a-f]{16}$/);
+    assertEquals(
+      sweepCandidateKernelsId(skeletonRows, true),
+      candidateKernelsId(skeletonRows, true, SWEEP_CASES, casePlan),
     );
     const [first] = SWEEP_CASES;
     assert(first !== undefined);
@@ -874,7 +863,6 @@ describe("the record keys and the dispatches of the evaluation set k88 (perf-led
     const k88 = candidateSetCaseSetIds("k88");
     assertEquals(k88, caseSetIds(sweepCasesFor("k88")));
     const sweep = sweepCaseSetIds();
-    const k85 = candidateSetCaseSetIds("k85");
     const defaults = geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE);
     const k88Defaults = candidateSetDefaultKernelsIds("k88");
     assertEquals(Object.keys(k88Defaults), Object.keys(k88));
@@ -882,7 +870,7 @@ describe("the record keys and the dispatches of the evaluation set k88 (perf-led
       const id = k88[family];
       if (id === undefined) continue;
       assertMatch(id, /^[0-9a-f]{16}$/);
-      for (const other of [sweep[family], k85[family]]) assertNotEquals(id, other, family);
+      assertNotEquals(id, sweep[family], family);
       assertMatch(k88Defaults[family] ?? "", /^[0-9a-f]{16}$/);
       assertNotEquals(k88Defaults[family], defaults[family], family);
     }
@@ -945,8 +933,8 @@ describe("the record keys and the dispatches of the evaluation set k88 (perf-led
 });
 
 describe("sweepCaseSetIds with a candidate set (the case-set versions a sweep of that set records)", () => {
-  it("is the sweep's own for the table-deriving sets and an evaluation set's own table's for k85 / k88", () => {
-    for (const set of ["quick", "quick+", "full", "k85", "k88"] as const) {
+  it("is the sweep's own for the table-deriving sets and the evaluation set's own table's for k88", () => {
+    for (const set of ["quick", "quick+", "full", "k88"] as const) {
       assertEquals(sweepCaseSetIds(set), candidateSetCaseSetIds(set), set);
     }
     assertEquals(sweepCaseSetIds("quick+"), sweepCaseSetIds());

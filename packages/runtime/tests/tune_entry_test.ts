@@ -301,23 +301,21 @@ describe("runGeometrySweep: real GPU — recording an abort (aborted)", () => {
   );
 });
 
-describe("runGeometrySweep: the evaluation set k85 sweeps its own case table (options validation, before touching the GPU)", () => {
-  it("refuses a case of the sweep's table under k85, and an op its table does not have", async () => {
+describe("runGeometrySweep: the retired evaluation set k85 (options validation, before touching the GPU)", () => {
+  const untyped = (json: string): GeometrySweepOptions => JSON.parse(json);
+
+  it("refuses k85 as a candidate set and its old case ids — its shapes are cases of the sweep's table under the ordinary ids", async () => {
     await assertRejects(
-      () => runGeometrySweep({ candidateSet: "k85", cases: ["i8a8-linear-m1024-n2048-k2048"] }),
+      () => runGeometrySweep(untyped('{ "candidateSet": "k85" }')),
       Error,
-      "Case i8a8-linear-m1024-n2048-k2048 is not in the shape table of candidate set k85",
-    );
-    await assertRejects(
-      () => runGeometrySweep({ candidateSet: "k85", ops: ["linear"] }),
-      Error,
-      "No case matches",
+      "Candidate set k85 is none of quick+ / quick / full / k88",
     );
     await assertRejects(
       () => runGeometrySweep({ cases: ["k85-i8a8-linear-m7920-n3072-k3072"] }),
       Error,
       "is not in the shape table of candidate set quick+",
     );
+    assert(sweepCaseEntries().some(({ id }) => id === "i8a8-linear-m7920-n3072-k3072"));
   });
 });
 

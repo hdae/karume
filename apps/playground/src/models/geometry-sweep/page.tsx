@@ -3,8 +3,7 @@
  * `runGeometrySweep` of `@karume/runtime/tune`, one case per call with idle time between cases,
  * merges the per-case records into one sweep record (the file `deriveGeometryProfile` reads), and
  * derives a table from it on the page so the verdicts are seen before the file is sent. A record of
- * the evaluation set `k85` (perf-ledger K-85) gets the K-85 summary instead of a derivation, one of
- * `k88` (perf-ledger K-88) the K-88 summary.
+ * the evaluation set `k88` (perf-ledger K-88) gets the K-88 summary instead of a derivation.
  *
  * `runGeometrySweep` acquires a dedicated device of its own, so this page has no `useGpu`: the run
  * joins the app's device queue through `runOnGpuQueue` instead.
@@ -53,7 +52,6 @@ import {
   sweepFileName,
   sweepRecordText,
 } from "./record";
-import { K85_SET, type K85Summary, k85Summary } from "./k85";
 import { K88_SET, type K88Summary, k88Summary } from "./k88";
 import { foldSweepEvent, INITIAL_LIVE, runSweepPlan, type SweepLive, type SweepStop } from "./run";
 import {
@@ -73,7 +71,6 @@ const CANDIDATE_SET_HINTS: Readonly<Record<GeometrySweepCandidateSet, string>> =
   quick: "a few geometries per family — a dry run that checks the page and the device",
   "quick+": "quick plus the geometries of the registered tables (the runtime's default)",
   full: "every geometry of the family — the set a table is derived from",
-  k85: "the vec4 skeleton of the i8a8 linear on its own cases (perf-ledger K-85) — an evaluation, no table is derived",
   k88: "the f32 GEMM skeleton forms and the conv2d counter decode on their own cases (perf-ledger K-88) — an evaluation, no table is derived",
 };
 
@@ -114,7 +111,6 @@ type SweepResult =
             readonly profileJson: string;
           }
         | { readonly kind: "failed"; readonly error: unknown }
-        | { readonly kind: "k85"; readonly summary: K85Summary }
         | { readonly kind: "k88"; readonly summary: K88Summary };
     }
   | { readonly kind: "failed"; readonly error: unknown };
@@ -136,10 +132,6 @@ const buildResult = async (
     const target = deriveTarget(report.adapter);
     let derivation: Extract<SweepResult, { kind: "ready" }>["derivation"];
     // No table is derived from an evaluation set (deriveGeometryProfile refuses it): its summary
-    if (report.settings.candidateSet === K85_SET) {
-      const summary = k85Summary(report, geometrySweepCases(K85_SET));
-      return { kind: "ready", report, filename, sha256, derivation: { kind: "k85", summary } };
-    }
     if (report.settings.candidateSet === K88_SET) {
       const summary = k88Summary(report, geometrySweepCases(K88_SET));
       return { kind: "ready", report, filename, sha256, derivation: { kind: "k88", summary } };
@@ -191,7 +183,7 @@ const stopText = (stop: SweepStop): string => {
 export const GeometrySweepPage = () => {
   const queue = useGpuQueue();
   const [form, setForm] = useState<SweepForm>(() => initialForm(geometrySweepCases()));
-  // The case table of the form's candidate set (the evaluation sets k85 / k88 have their own), and
+  // The case table of the form's candidate set (the evaluation set k88 has its own), and
   // the case-set version per op family a sweep of that set records
   const cases = useMemo(() => geometrySweepCases(form.candidateSet), [form.candidateSet]);
   const caseSetIds = useMemo(
@@ -674,11 +666,9 @@ const ResultCard = ({ result }: { result: SweepResult }) => {
         <CardDescription>
           One sweep record ({report.format}) over every case that ran, in the format
           deriveGeometryProfile reads.{" "}
-          {derivation.kind === "k85"
-            ? "Below, the K-85 summary of this record (an evaluation set: no table is derived)."
-            : derivation.kind === "k88"
-              ? "Below, the K-88 summary of this record (an evaluation set: no table is derived)."
-              : "Below, the table derived from this record alone; the repository's derivation adds the adapter's earlier records."}
+          {derivation.kind === "k88"
+            ? "Below, the K-88 summary of this record (an evaluation set: no table is derived)."
+            : "Below, the table derived from this record alone; the repository's derivation adds the adapter's earlier records."}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -711,9 +701,7 @@ const ResultCard = ({ result }: { result: SweepResult }) => {
             ["Started · ended", `${report.startedAt} · ${report.date}`],
           ]}
         />
-        {derivation.kind === "k85" ? (
-          <K85Card summary={derivation.summary} unit={report.gpuTiming.unit} />
-        ) : derivation.kind === "k88" ? (
+        {derivation.kind === "k88" ? (
           <K88Card summary={derivation.summary} unit={report.gpuTiming.unit} />
         ) : derivation.kind === "failed" ? (
           <ErrorAlert title="deriveGeometryProfile rejected the record" error={derivation.error} />
@@ -737,93 +725,6 @@ const ResultCard = ({ result }: { result: SweepResult }) => {
 /** A ratio as `×1.234`, or empty. */
 const ratioText = (value: number | undefined): string =>
   value === undefined ? "" : `×${value.toFixed(3)}`;
-
-/**
- * The K-85 summary: per case the table geometry against the fastest skeleton candidate whose output
- * matched the default, and the sum over one Wan2.2 TI2V-5B 33f DiT forward.
- */
-const K85Card = ({ summary, unit }: { summary: K85Summary; unit: GeometrySweepTimingUnit }) => {
-  const { forward } = summary;
-  const gain =
-    forward.table === undefined || forward.perCaseBestSkeleton === undefined
-      ? undefined
-      : forward.table / forward.perCaseBestSkeleton;
-  const single = forward.singleBestSkeleton;
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="text-sm font-medium">
-        K-85: best skeleton candidate ÷ this adapter's table ({summary.tableId})
-      </div>
-      <p className="text-sm text-muted-foreground">
-        The k85 set is an evaluation: no table is derived from its record. Ratios are within this
-        record only; a candidate whose output differed from the default never counts.
-      </p>
-      <KeyValueTable
-        rows={[
-          [
-            `One Wan2.2 33f DiT forward (${forward.nodes} nodes, ${forward.measured} / ${forward.planned} cases)`,
-            forward.table === undefined
-              ? "incomplete: a forward case lacks the table geometry or a skeleton candidate"
-              : `table ${formatPerDispatch(forward.table, unit)} → per-case best skeleton ${formatPerDispatch(
-                  forward.perCaseBestSkeleton,
-                  unit,
-                )} (${ratioText(gain)})`,
-          ],
-          [
-            "One skeleton geometry for every case (a profile field holds one)",
-            single === undefined || forward.table === undefined
-              ? ""
-              : `${single.geometry}: ${formatPerDispatch(single.perDispatch, unit)} (${ratioText(
-                  forward.table / single.perDispatch,
-                )})`,
-          ],
-        ]}
-      />
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Case</TableHead>
-            <TableHead className="text-right">Per forward</TableHead>
-            <TableHead>Table geometry</TableHead>
-            <TableHead>Best skeleton</TableHead>
-            <TableHead className="text-right">Skeleton ÷ table</TableHead>
-            <TableHead className="text-right">vs default</TableHead>
-            <TableHead className="text-right">Mismatches</TableHead>
-            <TableHead className="text-right">Errors</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {summary.cases.map((entry) => (
-            <TableRow key={entry.caseId}>
-              <TableCell className="font-mono text-xs">{entry.caseId}</TableCell>
-              <TableCell className="text-right font-mono text-xs">
-                {entry.censusCount === 0 ? "guard" : `×${entry.censusCount}`}
-              </TableCell>
-              <TableCell className="font-mono text-xs">
-                {entry.table === undefined
-                  ? ""
-                  : `${entry.table.geometry} ${formatPerDispatch(entry.table.perDispatch, unit)}`}
-              </TableCell>
-              <TableCell className="font-mono text-xs">
-                {entry.bestSkeleton === undefined
-                  ? ""
-                  : `${entry.bestSkeleton.geometry} ${formatPerDispatch(entry.bestSkeleton.perDispatch, unit)}`}
-              </TableCell>
-              <TableCell className="text-right font-mono text-xs">
-                {ratioText(entry.skeletonVsTable)}
-              </TableCell>
-              <TableCell className="text-right font-mono text-xs">
-                {ratioText(entry.skeletonVsDefault)}
-              </TableCell>
-              <TableCell className="text-right font-mono text-xs">{entry.mismatches}</TableCell>
-              <TableCell className="text-right font-mono text-xs">{entry.errors}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-};
 
 /**
  * The K-88 summary: per case the table geometry against the same geometry with the fastest form,

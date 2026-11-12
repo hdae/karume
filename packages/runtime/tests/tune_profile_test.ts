@@ -1967,13 +1967,13 @@ describe("deriveGeometryProfile passes the table it returns through the injectio
   });
 });
 
-describe("the evaluation set k85 (perf-ledger K-85): no table is derived from its record", () => {
-  it("rejects a record whose settings.candidateSet is k85 before reading its rows, naming the reason", () => {
+describe("the retired evaluation set k85: no table is derived from its record", () => {
+  it("rejects a record whose settings.candidateSet is k85 (no candidate set any more), naming the reason", () => {
     const k85 = record({ settings: { candidateSet: "k85", quick: false } });
     assertThrows(
       () => derive(k85),
       Error,
-      "settings.candidateSet k85 is an evaluation set (perf-ledger K-85)",
+      'settings.candidateSet is none of quick+ / quick / full / k88 ("k85")',
     );
     // Control: the same record under a table-deriving set derives
     assertEquals(

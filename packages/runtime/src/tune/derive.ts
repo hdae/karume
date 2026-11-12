@@ -567,7 +567,7 @@ export const parseSweepReport = (
   if (parsed.format !== REPORT_FORMAT) {
     throw new Error(`${where}: format is not ${REPORT_FORMAT} (${String(parsed.format)})`);
   }
-  // MUST: no table is derived from an evaluation set (perf-ledger K-85 / K-88): its cases are
+  // MUST: no table is derived from an evaluation set (perf-ledger K-88): its cases are
   // outside the sweep's case set, so its verdicts would decide a field on shapes the table does not
   // stand for
   const settings = parsed.settings;

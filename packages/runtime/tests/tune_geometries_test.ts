@@ -40,7 +40,6 @@ import {
   i8a8LinearCandidates,
   i8a8LinearCandidatesIn,
   EVALUATION_SETS,
-  k85I8a8Candidates,
   k88Conv2dCandidates,
   k88GemmCandidates,
   quickConv2dCandidates,
@@ -331,84 +330,10 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
   });
 });
 
-describe("candidate set k85 (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear)", () => {
-  const k85 = k85I8a8Candidates();
-  const skeletons = k85.filter(({ geometry }) => geometry.skeleton === "vec4");
-
-  it("is the registered tables' i8a8.linear and the grid regM 8 / 12 / 16 × regN 4 / 8 × wgX 8 / 16 × wgY 4 / 8 / 16 × tileK 16 / 32 / 64, with and without the skeleton, within the checks and 16,384 B", () => {
-    const registered = [
-      ...new Set(
-        BUILTIN_GEOMETRY_PROFILES.flatMap((profile) =>
-          profile.i8a8.linear.map((rule) => i8a8GeometryKeyPart(rule.geometry, false)),
-        ),
-      ),
-    ];
-    assertEquals(names(k85.slice(0, registered.length)), registered);
-    assertEquals(new Set(names(k85)).size, k85.length);
-    assertEquals(k85.length, 207);
-    assertEquals(skeletons.length, 103);
-    for (const { name, geometry } of k85) {
-      assertI8a8Geometry(geometry, name);
-      assert(i8a8WorkgroupStorageBytes(geometry) <= 16384, name);
-    }
-    // Every grid point the checks and the limit allow is in the set (the filter drops nothing else)
-    for (const regM of [8, 12, 16]) {
-      for (const regN of [4, 8]) {
-        for (const wgX of [8, 16]) {
-          for (const wgY of [4, 8, 16]) {
-            for (const tileK of [16, 32, 64]) {
-              for (const skeleton of [undefined, "vec4" as const]) {
-                const geometry: I8a8Geometry = {
-                  regM,
-                  regN,
-                  wgX,
-                  wgY,
-                  tileK,
-                  ...(skeleton === undefined ? {} : { skeleton }),
-                };
-                let valid = i8a8WorkgroupStorageBytes(geometry) <= 16384;
-                try {
-                  assertI8a8Geometry(geometry, "grid");
-                } catch {
-                  valid = false;
-                }
-                assertEquals(
-                  names(k85).includes(i8a8GeometryKeyPart(geometry, false)),
-                  valid,
-                  JSON.stringify(geometry),
-                );
-              }
-            }
-          }
-        }
-      }
-    }
-    // The geometries the spike measured on both GPUs are in it, with the skeleton
-    for (const name of [
-      "tile128x64r16x4w16x8k32s",
-      "tile128x64r16x4w16x8k64s",
-      "tile128x64r8x8w8x16k64s",
-      "tile96x64r12x4w16x8k64s",
-    ]) {
-      assert(names(skeletons).includes(name), name);
-    }
-  });
-
-  it("leaves quick / quick+ / full as they were: none holds a skeleton, regM 12 / 16 or tileK 64", () => {
-    for (const set of ["quick", "quick+", "full"] as const) {
-      for (const { name, geometry } of i8a8CandidatesIn(set)) {
-        assert(!("skeleton" in geometry), `${set}: ${name}`);
-        assert(geometry.regM <= 8 && geometry.tileK <= 32, `${set}: ${name}`);
-      }
-    }
-    assertEquals(names(i8a8CandidatesIn("k85")), names(k85));
-    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k85", "k88"]);
-    assertEquals(EVALUATION_SETS, ["k85", "k88"]);
-  });
-
-  it("has no candidates of the f32 skeleton or conv2d (its cases are i8a8 linears only)", () => {
-    assertThrows(() => gemmCandidatesIn("k85"), Error, "has no f32 skeleton candidates");
-    assertThrows(() => conv2dCandidatesIn("k85"), Error, "has no conv2d candidates");
+describe("the candidate sets", () => {
+  it("are quick+, quick, full and the evaluation set k88 (the evaluation set k85 is retired — its cases are the sweep's own and its grid is the i8a8 linear's full)", () => {
+    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k88"]);
+    assertEquals(EVALUATION_SETS, ["k88"]);
   });
 });
 

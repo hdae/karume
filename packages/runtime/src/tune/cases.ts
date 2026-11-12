@@ -32,9 +32,9 @@
  * ({@link IRODORI_I8A8_LINEAR_CASES}) — the shapes the families running the i8a8 linear by default
  * reach, at the row counts the field's buckets ({@link I8A8_LINEAR_ROWS_BOUNDS}) split.
  *
- * The evaluation sets `k85` and `k88` (perf-ledger K-85 / K-88) have tables of their own
- * ({@link K85_CASES}, {@link K88_CASES}), outside {@link SWEEP_CASES}: the case-set version and the
- * kernel fingerprints of the table-deriving sets do not see them ({@link sweepCasesFor}).
+ * The evaluation set `k88` (perf-ledger K-88) has a table of its own ({@link K88_CASES}), outside
+ * {@link SWEEP_CASES}: the case-set version and the kernel fingerprints of the table-deriving sets
+ * do not see it ({@link sweepCasesFor}).
  */
 
 import type { Conv3dDims } from "../kernels/conv3d.ts";
@@ -619,47 +619,6 @@ export const SWEEP_CASES: readonly SweepCase[] = [
 ];
 
 /**
- * The id of a K-85 case (`k85-` before the linear spelling, so that it never meets an id of
- * {@link SWEEP_CASES} — the measured-candidate fingerprint looks rows up in both tables).
- */
-const k85Id = (m: number, n: number, k: number): string =>
-  `k85-${linearId("i8a8-linear", m, n, k)}`;
-
-/**
- * The cases of the evaluation set `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear),
- * all `i8a8-linear` with i8 weights: the Wan2.2 DiT's linears ({@link WAN22_DIT_LINEAR}, the
- * weight of the set's forward sum) under the set's own ids, then the Irodori guard.
- */
-export const K85_CASES: readonly LinearCase[] = WAN22_DIT_LINEAR.map(
-  ({ m, n, k, count, what }): LinearCase => ({
-    id: k85Id(m, n, k),
-    op: "i8a8-linear",
-    m,
-    n,
-    k,
-    censusCount: count,
-    source: `${WAN22_DIT} [1,${m},${k}] × [${n},${k}] (${what})`,
-  }),
-);
-
-/** The small-M guard of {@link K85_CASES} (Irodori v4-small, not in the Wan2.2 forward). */
-const K85_GUARD_CASES: readonly LinearCase[] = [
-  {
-    id: k85Id(185, 1280, 1280),
-    op: "i8a8-linear",
-    m: 185,
-    n: 1280,
-    k: 1280,
-    censusCount: 0,
-    source:
-      "Irodori v4-small dit [1,185,1280] × [1280,1280] (60 nodes per DiT step; not in the Wan2.2 forward)",
-  },
-];
-
-/** Every case of the evaluation set `k85` (the Wan2.2 DiT forward, then the guard). */
-const K85_TABLE: readonly SweepCase[] = [...K85_CASES, ...K85_GUARD_CASES];
-
-/**
  * What the `censusCount` of a `k88` case counts (its `censusGroup` — the unit of the set's
  * sums). Each count is the node count of the shape in that unit's graph.
  */
@@ -859,25 +818,23 @@ export const K88_CASES: readonly SweepCase[] = [
 ];
 
 /**
- * The case table a candidate set sweeps: the evaluation sets `k85` and `k88` their own tables,
- * every other set {@link SWEEP_CASES}. The sweep, its record's case-set version and default
- * fingerprint, and the page's case list take it from here.
+ * The case table a candidate set sweeps: the evaluation set `k88` its own table, every other set
+ * {@link SWEEP_CASES}. The sweep, its record's case-set version and default fingerprint, and the
+ * page's case list take it from here.
  */
 export const sweepCasesFor = (set: CandidateSet): readonly SweepCase[] =>
-  set === "k85" ? K85_TABLE : set === "k88" ? K88_CASES : SWEEP_CASES;
+  set === "k88" ? K88_CASES : SWEEP_CASES;
 
 /**
  * Every case any set sweeps (the lookup of the measured-candidate fingerprint — a row names its case
- * by id; the ids of the three tables never meet).
+ * by id; the ids of the two tables never meet).
  */
-export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K85_TABLE, ...K88_CASES];
+export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K88_CASES];
 
 /**
  * A sweep case as an application sees it: the id `GeometrySweepOptions.cases` takes, and its op.
- * `censusCount` is set on the cases of the evaluation sets only: for `k85` the node count in one
- * Wan2.2 TI2V-5B 33f DiT forward (0 for a guard shape of another model) — the weight of that set's
- * forward sum; for `k88` the node count in the unit `censusGroup` names (0 and no group for a
- * shape of no model) — the weight of that unit's sum.
+ * `censusCount` is set on the cases of the evaluation set `k88` only: the node count in the unit
+ * `censusGroup` names (0 and no group for a shape of no model) — the weight of that unit's sum.
  */
 export type SweepCaseEntry = {
   readonly id: string;
@@ -888,24 +845,22 @@ export type SweepCaseEntry = {
 
 /**
  * Every case of the case table of `set` ({@link sweepCasesFor} — default: {@link SWEEP_CASES}) as
- * its id and op, in the table's order (the `k85` cases with their `censusCount`, the `k88` cases
- * with their `censusCount` and `censusGroup`). A new array of new objects on every call: the table
+ * its id and op, in the table's order (the `k88` cases with their `censusCount` and
+ * `censusGroup`). A new array of new objects on every call: the table
  * itself stays internal (its other descriptive fields are no public surface), and nothing a caller
  * does to the result reaches the case set or the fingerprints.
  */
 export const sweepCaseEntries = (set: CandidateSet = DEFAULT_CANDIDATE_SET): SweepCaseEntry[] =>
-  set === "k85"
-    ? K85_TABLE.map(({ id, op, censusCount }) => ({ id, op, censusCount }))
-    : set === "k88"
-      ? K88_CASES.map((sweepCase) => ({
-          id: sweepCase.id,
-          op: sweepCase.op,
-          censusCount: sweepCase.censusCount,
-          ...("censusGroup" in sweepCase && sweepCase.censusGroup !== undefined
-            ? { censusGroup: sweepCase.censusGroup }
-            : {}),
-        }))
-      : SWEEP_CASES.map(({ id, op }) => ({ id, op }));
+  set === "k88"
+    ? K88_CASES.map((sweepCase) => ({
+        id: sweepCase.id,
+        op: sweepCase.op,
+        censusCount: sweepCase.censusCount,
+        ...("censusGroup" in sweepCase && sweepCase.censusGroup !== undefined
+          ? { censusGroup: sweepCase.censusGroup }
+          : {}),
+      }))
+    : SWEEP_CASES.map(({ id, op }) => ({ id, op }));
 
 /**
  * The operation count of one dispatch (multiply-add = 2). For i8a8, the number of integer
