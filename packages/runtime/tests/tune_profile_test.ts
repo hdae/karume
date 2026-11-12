@@ -1597,6 +1597,20 @@ describe("the record's matching keys caseSets / defaultKernels (ADR 0117 decisio
       );
     });
 
+    it(`refuses a key of ${key} that is not an op family, and a non-string value of a family without rows, naming the record, the map and the key`, () => {
+      assertThrows(
+        () => derive(record({ ...current, [key]: { ...current[key], gemmm: "0123456789abcdef" } })),
+        Error,
+        `sweep-0.json: ${key}.gemmm is not an op family`,
+      );
+      // The record has rows of gemm only: conv2d's value is not compared, but it is still checked
+      assertThrows(
+        () => derive(record({ ...current, [key]: { ...current[key], conv2d: 1 } })),
+        Error,
+        `sweep-0.json: ${key}.conv2d is not a string (1)`,
+      );
+    });
+
     it(`refuses a record without ${key} of a family it has rows of, naming the family, and does not read the entries of families without rows`, () => {
       const { gemm: _gemm, ...others } = current[key];
       const error = assertThrows(

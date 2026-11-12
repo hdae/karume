@@ -121,7 +121,12 @@ import {
 import { ATTENTION_BENCH_FORMAT, onlineDispatchRows } from "./attention-bench.ts";
 import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS, type SweepOp } from "./cases.ts";
-import { familiesOf, familyEntries, profileSlotFamily } from "./families.ts";
+import {
+  familiesOf,
+  familyEntries,
+  type GeometryProfileFamilyIds,
+  profileSlotFamily,
+} from "./families.ts";
 import {
   attentionBenchKernelsId,
   attentionBenchShapeSetId,
@@ -451,8 +456,9 @@ const assertRecordedCandidateKernels = (
  * Compares a per-family matching key of the record (`caseSets` / `defaultKernels` — ADR 0117
  * decision 8, per op family since its addendum 2026-11-12) with the current runtime's value, for
  * every family the record has a row of. A missing key throws: the record cannot be matched for that
- * family (only a `/3` writer writes the keys, and it writes one per family it planned). Families
- * without rows are not read. The current value is derived only for the families checked.
+ * family (only a `/3` writer writes the keys, and it writes one per family it planned). Every own
+ * key of the map is checked ({@link recordedFamilyIds}), but only the families with rows are
+ * compared with the current runtime. The current value is derived only for the families compared.
  */
 const assertRecordedFamilyKeys = (
   record: Record<string, unknown>,
@@ -462,22 +468,20 @@ const assertRecordedFamilyKeys = (
   meaning: string,
   where: string,
 ): void => {
-  if (families.length === 0) return;
   const recorded = record[key];
-  if (!isRecord(recorded)) {
+  const ids = isRecord(recorded) ? recordedFamilyIds(recorded, key, where) : undefined;
+  if (families.length === 0) return;
+  if (ids === undefined) {
     throw new Error(
       `${where}: ${key} is not an object (${JSON.stringify(recorded)} — the record has rows of ${families.join(", ")} and cannot be matched against the current runtime; sweep again with the current runtime)`,
     );
   }
   for (const family of families) {
-    const value = recorded[family];
+    const value = ids[family];
     if (value === undefined) {
       throw new Error(
         `${where}: ${key}.${family} is missing (the record has rows of family ${family} but no ${meaning} for it, so it cannot be matched against the current runtime — sweep this family again with the current runtime)`,
       );
-    }
-    if (typeof value !== "string") {
-      throw new Error(`${where}: ${key}.${family} is not a string (${JSON.stringify(value)})`);
     }
     const now = current(family);
     if (value !== now) {
@@ -487,6 +491,33 @@ const assertRecordedFamilyKeys = (
       );
     }
   }
+};
+
+/**
+ * The record's per-family map `key` (`caseSets` / `defaultKernels`) with every own key checked: an
+ * op family name with a string value. Fails loudly, naming the record, the map and the key — also
+ * for families without rows, whose values are not compared ({@link assertRecordedFamilyKeys}), so a
+ * misspelt family or a broken value is not carried along unseen.
+ */
+const recordedFamilyIds = (
+  map: Record<string, unknown>,
+  key: "caseSets" | "defaultKernels",
+  where: string,
+): GeometryProfileFamilyIds => {
+  const ids: { [Family in GeometryProfileFamily]?: string } = {};
+  for (const [name, value] of Object.entries(map)) {
+    const family = GEOMETRY_PROFILE_FAMILIES.find((entry) => entry === name);
+    if (family === undefined) {
+      throw new Error(
+        `${where}: ${key}.${name} is not an op family (the families are ${GEOMETRY_PROFILE_FAMILIES.join(", ")})`,
+      );
+    }
+    if (typeof value !== "string") {
+      throw new Error(`${where}: ${key}.${family} is not a string (${JSON.stringify(value)})`);
+    }
+    ids[family] = value;
+  }
+  return ids;
 };
 
 /** The record's `dp4a` (the measured i8a8 variant — read when deriving `candidateKernels`). */
