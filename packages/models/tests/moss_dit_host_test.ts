@@ -59,6 +59,7 @@ import {
   mossTextStageInputs,
   planMossDit,
 } from "../src/moss/dit-stage.ts";
+import { mossFusionRules } from "../src/moss/fusion-rules.ts";
 import { MOSS_PRACTICAL_PRESET, MOSS_REFERENCE_PRESET, mossPreset } from "../src/moss/preset.ts";
 import {
   assertMossImageSize,
@@ -850,7 +851,13 @@ describe.skipIf(!MIRROR_PRESENT)(
   `MOSS-Image headroom of the DiT stages${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     /** The 3080 Ti's limits (any device's would do — the estimate is a pure function of them). */
-    const limits = { maxStorageBufferBindingSize: 2_147_483_644, maxBufferSize: 2_147_483_648 };
+    const limits = {
+      maxStorageBufferBindingSize: 2_147_483_644,
+      maxBufferSize: 2_147_483_648,
+      maxComputeWorkgroupsPerDimension: 65_535,
+    };
+    /** The rule list the stage's Sessions and estimates plan with (the family's rule alone). */
+    const ruled = { fusionRules: mossFusionRules(undefined) };
     /** A device with the online kernel's subgroup form (the 3080 Ti's facts). */
     const device = {
       limits,
@@ -897,7 +904,11 @@ describe.skipIf(!MIRROR_PRESENT)(
         positive: embeddings(63),
         negative: undefined,
       });
-      const borrower = series.components.ditSkip22.estimate({ ...limits, bindings: { S: 4106 } });
+      const borrower = series.components.ditSkip22.estimate({
+        ...limits,
+        ...ruled,
+        bindings: { S: 4106 },
+      });
 
       const pair = mossDitStageNeeds(state, plan).pair;
       const alone = mossDitStageNeeds(state, single).pair;
@@ -909,7 +920,7 @@ describe.skipIf(!MIRROR_PRESENT)(
       expect(pair - alone).toBe(borrower.peakAccountedBytes + 4106 * 3072 * 4);
       // The largest part is the lender's: the borrower has no weight part (all its weights are
       // borrowed), so `Math.max` over the two parts is not exercised by this series.
-      const lender = series.components.dit.estimate({ ...limits, bindings: { S: 4159 } });
+      const lender = series.components.dit.estimate({ ...limits, ...ruled, bindings: { S: 4159 } });
       expect(alone).toBe(
         lender.peakAccountedBytes +
           4159 * 3072 * 4 +
@@ -934,7 +945,7 @@ describe.skipIf(!MIRROR_PRESENT)(
         positive: embeddings(63),
         negative: embeddings(10),
       });
-      const knobs = { ...limits, ...practical.dit, attentionDevice: device.attention };
+      const knobs = { ...limits, ...practical.dit, attentionDevice: device.attention, ...ruled };
       const lender = series.components.dit.estimate({ ...knobs, bindings: { S: 4159 } });
       const borrower = series.components.ditSkip22.estimate({ ...knobs, bindings: { S: 4106 } });
       const components = series.components;
@@ -984,7 +995,7 @@ describe.skipIf(!MIRROR_PRESENT)(
       );
       const state = { device, components: series.components, contract, preset: reference };
       const estimate = (tokens: number) =>
-        series.components.ditText.estimate({ ...limits, bindings: { T: tokens } });
+        series.components.ditText.estimate({ ...limits, ...ruled, bindings: { T: tokens } });
       // Precondition: the two lengths have different estimates (below some T the plan backing
       // budget is the whole scenario term, so short texts all estimate the same).
       expect(estimate(7).peakAccountedBytes).toBeLessThan(estimate(4096).peakAccountedBytes);

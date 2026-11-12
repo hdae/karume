@@ -829,6 +829,14 @@
     ],
     "./moss": [
       {
+        "name": "EW_CHAIN_RULE",
+        "kind": "variable"
+      },
+      {
+        "name": "EW_CHAIN_RULE_NAME",
+        "kind": "variable"
+      },
+      {
         "name": "FromPretrainedOptions",
         "kind": "typeAlias"
       },

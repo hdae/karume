@@ -64,9 +64,18 @@ measurements in `docs/research/`.
   unchanged as `SessionOptions.fusionRules` to the Sessions of the image and video graphs — MOSS-Image's `dit_text`,
   `dit`, `dit_skip22` and three VAE decoder graphs; Wan's DiT, VAE decoder chunk graphs (the tile-32 lenders and
   borrowers included) and Wan2.2's VAE encoder; anima's DiT and VAE decoder. The text encoders' Sessions do not get
-  them. It exists to measure a candidate rule on a whole generation and may change or go away in a minor version; no
-  rule is passed by default. The rule's author owns the evidence for its numbers (ADR 0148). MOSS-Image's headroom
-  checks and anima's VAE estimate plan those graphs with the same rules; Wan has no memory estimate.
+  them. It exists to measure a candidate rule on a whole generation and may change or go away in a minor version;
+  Wan and anima pass no rule by default, and MOSS-Image passes its own rule ahead of the given ones (next entry). The
+  rule's author owns the evidence for its numbers (ADR 0148). MOSS-Image's headroom checks and anima's VAE estimate
+  plan those graphs with the same rules; Wan has no memory estimate.
+- `@karume/models`: the MOSS-Image pipeline passes the fusion rule `models/ew_chain` by default to the Sessions of
+  `dit_text`, `dit`, `dit_skip22` and the three VAE decoder graphs (not the text encoder's), ahead of any rule given
+  through `fusionRules`, and its headroom checks plan with it. The rule folds a run of consecutive f32 elementwise
+  nodes into one dispatch and is u32-identical to the unfused plan (its fused-against-unfused check on Vulkan / RTX
+  3080 Ti; identical DiT outputs and images on D3D12 / RTX 5070 Ti in Chrome; not run on Metal), so images do not
+  change; a 1024², 50-step generation took 7.3 % less time on the RTX 5070 Ti. No option turns it off. `moss.EW_CHAIN_RULE` and `EW_CHAIN_RULE_NAME` export it,
+  **experimental**, for code that builds its own Sessions of the family's graphs; giving it in `fusionRules` as well is
+  refused as a rule given twice (ADR 0148 addendum of 2026-11-12).
 - `@karume/runtime`: `I8a8Geometry.skeleton`, an optional field of the i8a8 geometries of a geometry profile
   (`"vec4"`, perf-ledger K-85): the pack loop of the integer GEMM emitted unrolled and, in the i8a8 linear with i8
   weights where `k % 16 == 0`, the shared tiles filled one `vec4<u32>` of global memory per item. The integers

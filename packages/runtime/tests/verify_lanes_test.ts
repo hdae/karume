@@ -200,8 +200,9 @@ const E2E_DIR = "packages/e2e/tests/";
 /**
  * The end-to-end tests that belong in core: gates over pure functions and manifests that need
  * neither a GPU nor real weights, and three GPU checks on small synthetic graphs that need no model
- * asset (the candidate external fusion rules against their unfused plans, which live in the e2e
- * package because the runtime's tests import nothing outside the runtime; they SKIP explicitly
+ * asset (the external fusion rules — the candidates and the models package's adopted rule — against
+ * their unfused plans, which live in the e2e package because the runtime's tests import nothing
+ * outside the runtime; they SKIP explicitly
  * without an adapter). Every other file of `packages/e2e/tests` runs real weights and
  * belongs to a family lane, so a dropped family row or a new e2e file whose name misses its
  * family's token turns the gate red instead of moving real-weight runs into core.

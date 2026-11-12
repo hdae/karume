@@ -1,7 +1,8 @@
 /**
- * Fusion hit counts and fusion candidates of the MOSS-Image DiT stage graphs (no GPU —
- * `planFusions` on part 0 only; the shared planning side lives in `./helpers/fusion-counts.ts`, the
- * candidate search in `./helpers/fusion-candidates.ts`).
+ * Fusion hit counts and fusion candidates of the MOSS-Image DiT stage graphs, and the hits of the
+ * family's fusion rule on every image graph (no GPU — `planFusions` on part 0 only; the shared
+ * planning side lives in `./helpers/fusion-counts.ts`, the candidate search in
+ * `./helpers/fusion-candidates.ts`).
  *
  * MUST: the asset is the distribution mirror `models/karume-moss-image/` (untracked local asset);
  * where it is missing the cases SKIP explicitly with the command that gets it (ADR 0005).
@@ -11,17 +12,20 @@
  * every preset — ADR 0138 decision 3, so it is planned without knobs only). Their counts were
  * frozen from planning the mirror on 2026-11-11 and do not depend on the sequence length (each is
  * checked at two lengths: S = N + T with N = 256 / 4,096 image tokens at 256² / 1024² and T = 64 /
- * 128 text tokens). The last case pins the hits of the candidate rule `candidate/ew_chain`, which
- * no preset passes (`@karume/candidate-rules`).
+ * 128 text tokens). The first case pins the built-in rules' hits (the plan without the family's
+ * rule); the last cases pin the hits of `models/ew_chain` (`@karume/models/moss`), which the pipeline
+ * passes by default to `dit_text`, the DiT pair and the three VAE decoder graphs.
  */
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
+import { DISABLED_FUSION_RULES } from "../../runtime/src/runtime/session-types.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
 import { builtInCounts } from "../../runtime/tests/helpers/fusion-count-record.ts";
+import { mossFusionRules } from "../../models/src/moss/fusion-rules.ts";
 import {
   MOSS_PRACTICAL_PRESET,
   MOSS_REFERENCE_PRESET,
@@ -31,6 +35,7 @@ import { MOSS_GET_MIRROR, MOSS_MIRROR } from "../../models/tests/helpers/moss-di
 import { opSequenceCount, stableFusionCandidates } from "./helpers/fusion-candidates.ts";
 import {
   exists,
+  type FusionCountOptions,
   fusionCounts,
   NONE,
   planDistributionFusions,
@@ -51,8 +56,11 @@ if (!MOSS_AVAILABLE) {
  */
 const NO_MIRRORS: ReadonlyMap<string, URL> = new Map();
 
-/** A DiT-stage graph of the default model (every DiT-stage component has the i8 seat only). */
-const readMossGraph = async (component: string): Promise<IrGraph> => {
+/**
+ * A graph of the default model at its one seat: `i8` for the DiT-stage components, `f32` for the VAE
+ * decoder graphs.
+ */
+const readMossGraph = async (component: string, seat = "i8"): Promise<IrGraph> => {
   const manifest: ContainerManifest = JSON.parse(
     await readTextFile(new URL("karume.json", MOSS_MIRROR)),
   );
@@ -61,7 +69,7 @@ const readMossGraph = async (component: string): Promise<IrGraph> => {
     manifest,
     manifest.defaultModel,
     component,
-    "i8",
+    seat,
     NO_MIRRORS,
   );
 };
@@ -189,10 +197,83 @@ test.skipIf(!MOSS_AVAILABLE)(
 /** The sequence lengths of the 1024² fridge-note request: S₊ = 4,096 + 63, S₋ = 4,096 + 10. */
 const REQUEST_LENGTHS = { dit: 4096 + 63, dit_skip22: 4096 + 10 } as const;
 
+/** The input shapes with each symbol bound by name (the VAE decoder graphs have two: `h`, `w`). */
+const shapesOf = (
+  graph: IrGraph,
+  binding: Readonly<Record<string, number>>,
+): Readonly<Record<string, readonly number[]>> =>
+  Object.fromEntries(
+    graph.inputs.map((spec) => [
+      spec.name,
+      spec.shape.map((dim) => {
+        if (typeof dim === "number") return dim;
+        if (!Object.hasOwn(binding, dim)) throw new Error(`no binding for the symbol '${dim}'`);
+        return binding[dim];
+      }),
+    ]),
+  );
+
+/** The rule's forms (its dispatch key without the rule's prefix and suffix). */
+const GATE_FORM =
+  "f.s.f.s:div.x0.x1-tanh.t0-mul.t1.x1-sigmoid.x0-mul.t2.t3-div.x2.x3-tanh.t5-mul.t6.x3-mul.t4.t7";
+const ROPE_FORM = "f.b0101.f:mul.x0.x1-add.x2.t0";
+const GATED_FORM = "f.b001.f:mul.x0.x1-add.x2.t0";
+const ADALN_FORM = "f.b001.b001:mul.x0.x1-add.t0.x2";
+const RESIDUAL_FORM = "f.f.s:add.x0.x1-div.t0.x2";
+
 /**
- * The candidate rule `candidate/ew_chain` (`@karume/candidate-rules`, a run of f32 elementwise
- * nodes in one dispatch) planned on the DiT pair with the practical preset's knobs, per form (its
- * dispatch key names the inputs' classes and the node list):
+ * Plans `graph` with the knobs and the pipeline's default rule list (`mossFusionRules` — the list
+ * the MOSS-Image stages give every image graph's Session and estimate), and with the same options and
+ * `models/ew_chain` disabled by name (the test-only `DISABLED_FUSION_RULES`, the plain side), and
+ * asserts the rule's hits per form, that no other counter moves, and that the steps fall by the
+ * nodes folded. Returns the plain and fused step counts and the plain side's silu hits.
+ */
+const assertDefaultRuleHits = (
+  graph: IrGraph,
+  shapes: Readonly<Record<string, readonly number[]>>,
+  knobs: FusionCountOptions,
+  expected: Readonly<Record<string, number>>,
+  label: string,
+): { readonly steps: readonly [number, number]; readonly silu: number } => {
+  const options = { ...knobs, fusionRules: mossFusionRules(undefined) };
+  const fused = planDistributionFusions(graph, shapes, options, ONLINE_DEVICE);
+  const plain = planDistributionFusions(
+    graph,
+    shapes,
+    { ...options, [DISABLED_FUSION_RULES]: [EW_CHAIN_RULE_NAME] },
+    ONLINE_DEVICE,
+  );
+  const seen: Record<string, number> = {};
+  let folded = 0;
+  for (const step of fused.plan.steps) {
+    if (step.kind !== "fused" || step.rule !== EW_CHAIN_RULE_NAME) continue;
+    const form = step.dispatches[0].key.replace(/^ext:models:ew_chain:v1:|:f32:wg128$/g, "");
+    seen[form] = (seen[form] ?? 0) + 1;
+    folded += step.nodeCount - 1;
+  }
+  assertEquals(seen, expected, `${label}: hits per form`);
+  const hits = Object.values(expected).reduce((sum, count) => sum + count, 0);
+  assertEquals(plain.plan.counts[EW_CHAIN_RULE_NAME], 0, `${label}: the plain side`);
+  assertEquals(
+    fused.plan.counts,
+    { ...plain.plan.counts, [EW_CHAIN_RULE_NAME]: hits },
+    `${label}: the counters`,
+  );
+  assertEquals(
+    fused.plan.steps.length,
+    plain.plan.steps.length - folded,
+    `${label}: the steps fall by the nodes folded`,
+  );
+  return {
+    steps: [plain.plan.steps.length, fused.plan.steps.length],
+    silu: plain.plan.counts.silu,
+  };
+};
+
+/**
+ * The pipeline's default rule `models/ew_chain` (a run of f32 elementwise nodes in one dispatch)
+ * planned on the DiT pair with each preset's knobs, per form (its dispatch key names the inputs'
+ * classes and the node list):
  *
  * - **the nine-node FFN gate** (`div, tanh, mul, sigmoid, mul, div, tanh, mul, mul` over
  *   `[1, S, 8192]` with two `[1]` constants), 42 on `dit` — **0 on `dit_skip22`**, whose constants
@@ -203,72 +284,107 @@ const REQUEST_LENGTHS = { dit: 4096 + 63, dit_skip22: 4096 + 10 } as const;
  *   pair sits around an aliasing `reshape` and an independent `add` (the candidate rows), which a
  *   run of consecutive nodes does not cross.
  *
- * 292 on `dit` and 244 on `dit_skip22`, at the request's length and at 256² alike. The built-in
- * silu stays at 1 (the rule leaves the exact `sigmoid(x) → mul(x, ·)` pair to it), every other
- * counter is the plan's without the rule, and the steps fall by the nodes folded (2,310 → 1,724 and
- * 2,256 → 2,012 at the request's length).
+ * 292 on `dit` and 244 on `dit_skip22`, on both presets, at the request's length and at 256² alike.
+ * The built-in silu stays at 1 (the rule leaves the exact `sigmoid(x) → mul(x, ·)` pair to it),
+ * every other counter is the plan's without the rule, and the steps fall by the nodes folded (at
+ * the request's length 2,310 → 1,724 and 2,256 → 2,012 on the practical preset, 2,394 → 1,808 and
+ * 2,338 → 2,094 on the reference preset).
  */
 test.skipIf(!MOSS_AVAILABLE)(
-  "the candidate rule candidate/ew_chain takes 292 runs of dit and 244 of dit_skip22 on the practical preset, per form, and moves no other counter",
+  "the pipeline's default rule models/ew_chain takes 292 runs of dit and 244 of dit_skip22 on both presets, per form, and moves no other counter",
   async () => {
     const forms = (gate: number, rope: number, gated: number, adaln: number) => ({
-      ...(gate === 0
-        ? {}
-        : {
-            "f.s.f.s:div.x0.x1-tanh.t0-mul.t1.x1-sigmoid.x0-mul.t2.t3-div.x2.x3-tanh.t5-mul.t6.x3-mul.t4.t7":
-              gate,
-          }),
-      "f.b0101.f:mul.x0.x1-add.x2.t0": rope,
-      "f.b001.f:mul.x0.x1-add.x2.t0": gated,
-      "f.b001.b001:mul.x0.x1-add.t0.x2": adaln,
+      ...(gate === 0 ? {} : { [GATE_FORM]: gate }),
+      [ROPE_FORM]: rope,
+      [GATED_FORM]: gated,
+      [ADALN_FORM]: adaln,
     });
-    const knobs = mossPreset(MOSS_PRACTICAL_PRESET).dit;
-    for (const [component, expected, steps] of [
-      ["dit", forms(42, 84, 84, 82), [2310, 1724]],
-      ["dit_skip22", forms(0, 82, 82, 80), [2256, 2012]],
+    const STEPS = {
+      [MOSS_PRACTICAL_PRESET]: { dit: [2310, 1724], dit_skip22: [2256, 2012] },
+      [MOSS_REFERENCE_PRESET]: { dit: [2394, 1808], dit_skip22: [2338, 2094] },
+    } as const;
+    for (const [component, expected] of [
+      ["dit", forms(42, 84, 84, 82)],
+      ["dit_skip22", forms(0, 82, 82, 80)],
     ] as const) {
       const graph = await readMossGraph(component);
-      for (const length of [REQUEST_LENGTHS[component], 256 + 64]) {
-        const label = `${component} S=${length}`;
-        const shapes = boundShapes(graph, length);
-        const plain = planDistributionFusions(graph, shapes, knobs, ONLINE_DEVICE);
-        const fused = planDistributionFusions(
-          graph,
-          shapes,
-          { ...knobs, fusionRules: [EW_CHAIN_RULE] },
-          ONLINE_DEVICE,
-        );
-        const seen: Record<string, number> = {};
-        let folded = 0;
-        for (const step of fused.plan.steps) {
-          if (step.kind !== "fused" || step.rule !== EW_CHAIN_RULE_NAME) continue;
-          const form = step.dispatches[0].key.replace(
-            /^ext:candidate:ew_chain:v1:|:f32:wg128$/g,
-            "",
+      for (const name of PRESETS) {
+        for (const length of [REQUEST_LENGTHS[component], 256 + 64]) {
+          const label = `${component} ${name} S=${length}`;
+          const { steps, silu } = assertDefaultRuleHits(
+            graph,
+            boundShapes(graph, length),
+            mossPreset(name).dit,
+            expected,
+            label,
           );
-          seen[form] = (seen[form] ?? 0) + 1;
-          folded += step.nodeCount - 1;
+          assertEquals(silu, 1, `${label}: silu`);
+          if (length === REQUEST_LENGTHS[component]) {
+            assertEquals(steps, STEPS[name][component], `${label}: steps`);
+          }
         }
-        assertEquals(seen, expected, `${label}: hits per form`);
-        const hits = Object.values(expected).reduce((sum, count) => sum + count, 0);
+      }
+    }
+  },
+);
+
+/**
+ * The same default rule on the other image graphs the pipeline gives it to, per form:
+ *
+ * - **`dit_text`** (the text refiner, planned without knobs — f32 compute in every preset): 6 — the
+ *   RoPE tails of q and k in each of its two blocks and the two FFN gates (the DiT's forms);
+ * - **the VAE decoder graphs**: every residual connection `add(x, h) → div(·, scale)` with the
+ *   block's output scale as a one-element constant — 1 in `vae_decoder_pre`, 1 in
+ *   `vae_decoder_attn` (the attention's), 13 in `vae_decoder_post`.
+ *
+ * The counts do not depend on the bound sizes (each graph is planned at two); every other counter
+ * is the plan's without the rule, and the steps fall by the nodes folded (103 → 83, 10 → 9,
+ * 18 → 17 and 115 → 102).
+ */
+test.skipIf(!MOSS_AVAILABLE)(
+  "the pipeline's default rule models/ew_chain takes 6 runs of dit_text and 1 / 1 / 13 of the VAE decoder graphs, per form, and moves no other counter",
+  async () => {
+    /** A graph, its seat, two bindings of its symbols, the hits per form and the plain / fused steps. */
+    type Row = readonly [
+      component: string,
+      seat: string,
+      bindings: readonly Readonly<Record<string, number>>[],
+      expected: Readonly<Record<string, number>>,
+      steps: readonly [number, number],
+    ];
+    const rows: readonly Row[] = [
+      ["dit_text", "i8", [{ T: 64 }, { T: 128 }], { [ROPE_FORM]: 4, [GATE_FORM]: 2 }, [103, 83]],
+      [
+        "vae_decoder_pre",
+        "f32",
+        [
+          { h: 32, w: 32 },
+          { h: 128, w: 128 },
+        ],
+        { [RESIDUAL_FORM]: 1 },
+        [10, 9],
+      ],
+      ["vae_decoder_attn", "f32", [{ S: 1024 }, { S: 16384 }], { [RESIDUAL_FORM]: 1 }, [18, 17]],
+      [
+        "vae_decoder_post",
+        "f32",
+        [
+          { h: 32, w: 32 },
+          { h: 128, w: 128 },
+        ],
+        { [RESIDUAL_FORM]: 13 },
+        [115, 102],
+      ],
+    ];
+    for (const [component, seat, bindings, expected, steps] of rows) {
+      const graph = await readMossGraph(component, seat);
+      for (const binding of bindings) {
+        const label = `${component} ${JSON.stringify(binding)}`;
         assertEquals(
-          fused.plan.counts,
-          { ...plain.plan.counts, [EW_CHAIN_RULE_NAME]: hits },
-          `${label}: the counters`,
+          assertDefaultRuleHits(graph, shapesOf(graph, binding), {}, expected, label).steps,
+          steps,
+          `${label}: steps`,
         );
-        assertEquals(plain.plan.counts.silu, 1, `${label}: silu`);
-        assertEquals(
-          fused.plan.steps.length,
-          plain.plan.steps.length - folded,
-          `${label}: the steps fall by the nodes folded`,
-        );
-        if (length === REQUEST_LENGTHS[component]) {
-          assertEquals(
-            [plain.plan.steps.length, fused.plan.steps.length],
-            [...steps],
-            `${label}: steps`,
-          );
-        }
       }
     }
   },

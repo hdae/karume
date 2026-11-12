@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { parseManifest } from "@karume/hub";
 import { runSessionAb, type SessionAbArm, type SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
@@ -322,8 +322,8 @@ describe("the session A/B page's MOSS-Image DiT target", () => {
       expect(page.container).toEqual({ component: "dit", part0Sha256: hex("c") });
       expect(page.rule).toEqual({
         name: EW_CHAIN_RULE_NAME,
-        package: "@karume/candidate-rules",
-        keyPrefix: "ext:candidate:",
+        package: "@karume/models",
+        keyPrefix: "ext:models:",
       });
       expect(page.record).toBe(record);
       expect(JSON.parse(JSON.stringify(page))).toEqual(page);

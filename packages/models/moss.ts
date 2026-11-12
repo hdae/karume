@@ -6,7 +6,8 @@
  * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained}) /
  * choose a source ({@link SOURCES}) / generate (`generate` — a prompt string; every knob left out
  * takes the manifest's default) / turn the image into pixels ({@link imageToRgba}) / release
- * (`dispose`).
+ * (`dispose`) / build Sessions of the family's graphs with the family's fusion rule
+ * ({@link EW_CHAIN_RULE}, experimental).
  *
  * The distribution `karume-moss-image` is published on Hugging Face (`"moss-image"` of
  * {@link SOURCES}); a local distribution can be passed as a source handle instead (`nodeDirectory`
@@ -44,6 +45,18 @@ export { SOURCES } from "./src/moss/config.ts";
  * (`clamp(x/2 + 0.5, 0, 1)` → `round(·255)`), so consumers do not rewrite it.
  */
 export { imageToRgba } from "./src/moss/image.ts";
+
+/**
+ * **Experimental**: the fusion rule `models/ew_chain` ({@link EW_CHAIN_RULE_NAME} — a run of
+ * consecutive f32 elementwise nodes in one dispatch, u32-identical to the unfused plan), which
+ * {@link Pipeline} passes by default to the Sessions of its image graphs (not the text encoder's).
+ * Exported for code that builds its own Sessions from the family's components — to pass it as
+ * `SessionOptions.fusionRules`, or to compare a Session with and without it; its name is its
+ * counter in `lastRunFusions`. Built with `defineRule` of `@karume/runtime/kernel` (ADR 0148), so
+ * it may change in a minor version while the packages are 0.x. Not for
+ * `PipelineOptions.fusionRules`: the pipeline already passes it, and a rule given twice is refused.
+ */
+export { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "./src/moss/ew-chain.ts";
 
 /**
  * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it

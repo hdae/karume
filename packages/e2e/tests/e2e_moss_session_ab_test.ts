@@ -2,10 +2,10 @@
  * The session A/B of `@karume/runtime/tune` on one MOSS-Image DiT forward (opt-in:
  * `KARUME_SESSION_AB=<dir>`): the `dit` component (the positive branch) from the distribution
  * mirror with the practical preset's knobs (`f32+dit8-a8-attn8-online`), two arms built with
- * `sessionArm` — `base` (the preset's knobs) and `rule` (the same plus the candidate rule
- * `candidate/ew_chain` of `@karume/candidate-rules`). A run is one forward at the sequence of a
- * 1024² request (S = 4,096 image tokens + 63 text tokens = 4,159) on fixed seeded feeds, and its
- * output is the DiT's output rows, so the A/B's identity is u32 identity of the output (NaN by
+ * `sessionArm` — `base` (the preset's knobs) and `rule` (the same plus the rule `models/ew_chain`
+ * of `@karume/models/moss`, which the MOSS-Image pipeline passes by default). A run is one forward at
+ * the sequence of a 1024² request (S = 4,096 image tokens + 63 text tokens = 4,159) on fixed seeded
+ * feeds, and its output is the DiT's output rows, so the A/B's identity is u32 identity of the output (NaN by
  * class) of every run of both arms against the base's first. Two DiT Sessions never live together:
  * every visit opens and closes its Session (`openPerVisit`), and a close awaits the dispose, which
  * resolves once the device has the memory back.
@@ -38,7 +38,7 @@ import { assertEquals } from "@std/assert";
 import { mkdir, writeTextFile } from "@karume/test-support/fs";
 import { prepareContainer, type Tensor } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb, sessionArm } from "@karume/runtime/tune";
-import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import {
   MOSS_PRACTICAL_PRESET,
   mossAcquireGpuOptions,
@@ -177,7 +177,7 @@ const REQUEST = {
 } as const;
 
 describe.skipIf(skipReason !== undefined)("the session A/B on the MOSS-Image DiT (opt-in)", () => {
-  it("the candidate rule keeps every output word and takes its 292 runs per forward", async () => {
+  it("the rule keeps every output word and takes its 292 runs per forward", async () => {
     const preset = mossPreset(REQUEST.quant);
     const gpu = await acquireTestGpu(mossAcquireGpuOptions(preset));
     try {

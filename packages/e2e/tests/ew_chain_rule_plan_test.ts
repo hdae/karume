@@ -1,6 +1,6 @@
 /**
- * The candidate rule `candidate/ew_chain` (`@karume/candidate-rules`,
- * packages/candidate-rules/src/ew-chain.ts) as the fusion pass plans it, on small synthetic graphs
+ * The rule `models/ew_chain` (`@karume/models/moss`, packages/models/src/moss/ew-chain.ts, which the
+ * MOSS-Image pipeline passes by default) as the fusion pass plans it, on small synthetic graphs
  * (no GPU, no model asset — the core lane): planned through the path a Session takes
  * (`planDistributionFusions` with `fusionRules`, `./helpers/fusion-counts.ts`), so what is checked
  * is the plan a Session given the rule would run. It pins the windows the rule declines (a chain
@@ -19,7 +19,7 @@ import { assertEquals, assertNotEquals } from "@std/assert";
 import type { ExecStep } from "../../runtime/src/runtime/fusion-rule.ts";
 import { mergeGraph } from "../../runtime/tests/helpers/merged-graph.ts";
 import type { DeclarationJson } from "../../runtime/tests/helpers/model-fixture.ts";
-import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { type DistributionFusionPlan, planDistributionFusions } from "./helpers/fusion-counts.ts";
 
 /** A rank-3 activation, and its per-channel broadcast operand. */
@@ -114,7 +114,7 @@ const GATED: GraphSpec = {
   nodes: [node("mul", ["x", "gate"], "t"), node("add", ["residual", "t"], "y")],
 };
 
-describe("candidate/ew_chain: the windows it declines", () => {
+describe("models/ew_chain: the windows it declines", () => {
   it("a chain that is not f32", () => {
     assertDeclined(
       {
@@ -203,7 +203,7 @@ describe("candidate/ew_chain: the windows it declines", () => {
   });
 });
 
-describe("candidate/ew_chain: the run it takes", () => {
+describe("models/ew_chain: the run it takes", () => {
   it("is the longest one: a run whose tail breaks the shape falls back to its longest prefix that passes", () => {
     const planned = planOf({
       inputs: { scale: CHANNEL, shift: CHANNEL, bias: CHANNEL, x: FULL },
@@ -251,12 +251,12 @@ describe("candidate/ew_chain: the run it takes", () => {
     assertEquals([step.nodeCount, step.binds], [3, ["x", "z"]]);
     assertEquals(
       step.dispatches[0].key,
-      "ext:candidate:ew_chain:v1:f.f:add.x0.x1-mul.t0.t0-sub.t1.x0:f32:wg128",
+      "ext:models:ew_chain:v1:f.f:add.x0.x1-mul.t0.t0-sub.t1.x0:f32:wg128",
     );
   });
 });
 
-describe("candidate/ew_chain: keys, WGSL and params", () => {
+describe("models/ew_chain: keys, WGSL and params", () => {
   it("gives one form one key and byte-identical WGSL whatever the shapes, and another form another key", () => {
     const shaped = (rows: number, width: number): GraphSpec => ({
       inputs: { x: [1, rows, width], gate: [1, 1, width], residual: [1, rows, width] },
@@ -268,7 +268,7 @@ describe("candidate/ew_chain: keys, WGSL and params", () => {
     const [small, large] = [shaped(3, 8), shaped(4159, 3072)].map(
       (spec) => onlyStep(planOf(spec), "shapes").dispatches[0],
     );
-    assertEquals(small.key, "ext:candidate:ew_chain:v1:f.b001.f:mul.x0.x1-add.x2.t0:f32:wg128");
+    assertEquals(small.key, "ext:models:ew_chain:v1:f.b001.f:mul.x0.x1-add.x2.t0:f32:wg128");
     assertEquals(large.key, small.key);
     assertEquals(large.wgsl(), small.wgsl());
     assertNotEquals(large.params, small.params);
@@ -280,7 +280,7 @@ describe("candidate/ew_chain: keys, WGSL and params", () => {
       }),
       "swapped",
     ).dispatches[0];
-    assertEquals(swapped.key, "ext:candidate:ew_chain:v1:f.b001.f:mul.x0.x1-add.t0.x2:f32:wg128");
+    assertEquals(swapped.key, "ext:models:ew_chain:v1:f.b001.f:mul.x0.x1-add.t0.x2:f32:wg128");
     assertNotEquals(swapped.wgsl(), small.wgsl());
   });
 
@@ -319,7 +319,7 @@ describe("candidate/ew_chain: keys, WGSL and params", () => {
       "rank 4",
     );
     const [dispatch] = step.dispatches;
-    assertEquals(dispatch.key, "ext:candidate:ew_chain:v1:f.b0101.f:mul.x0.x1-add.x2.t0:f32:wg128");
+    assertEquals(dispatch.key, "ext:models:ew_chain:v1:f.b0101.f:mul.x0.x1-add.x2.t0:f32:wg128");
     // Fields n, o1, d1, o3, d3, s1_1, s1_3, reserved0: element i reads
     // sin[((i / (H·D)) % S) · D + ((i / 1) % D) · 1].
     assertEquals([...dispatch.params], [S * H * D, H * D, S, 1, D, D, 1, 0]);

@@ -6,7 +6,8 @@
  * template and the tokenizer on the host, then the Qwen3.5 text encoder, `dit_text`, the DiT pair
  * (`dit` and `dit_skip22`, which borrows `dit`'s weights) and the three VAE decoder graphs on the
  * GPU, each stage's Sessions closed before the next stage opens, with a headroom check before each.
- * This module adds what a distribution brings:
+ * The image graphs' Sessions plan with the family's fusion rule `models/ew_chain`
+ * (`./fusion-rules.ts`). This module adds what a distribution brings:
  *
  * - **The preset** is the manifest's: `quant` when given, else the model's `defaultQuant`
  *   (`f32+dit8-a8-attn8-online` in `karume-moss-image` — ADR 0128 decision 1); its knobs are the
@@ -187,15 +188,18 @@ export type PipelineOptions = {
   readonly signal?: AbortSignal;
   /**
    * **Experimental**: fusion rules written outside the runtime (`defineRule` of
-   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
-   * the image graphs: `dit_text`, `dit` and `dit_skip22` (the DiT stage) and the three VAE decoder
-   * graphs. The Qwen3.5 text encoder's Session does not get them. Absent = no rule: the Sessions
-   * are built as without the option.
+   * `@karume/runtime/kernel`), passed as `SessionOptions.fusionRules` to the Sessions of the image
+   * graphs: `dit_text`, `dit` and `dit_skip22` (the DiT stage) and the three VAE decoder graphs.
+   * The Qwen3.5 text encoder's Session does not get them. Those Sessions always plan with the
+   * family's own rule `models/ew_chain` (`EW_CHAIN_RULE` — u32-identical to the unfused plan,
+   * on by default with no option to turn it off); the rules given here follow it, in their order.
+   * Giving `models/ew_chain` here again is refused as a rule given twice. Absent = the family's rule
+   * alone.
    *
    * It exists to measure a candidate rule on a whole generation (with and without the rule); it may
    * change or go away in a minor version. Passing a rule is the opt-in, and the rule's author owns
    * the evidence for its numbers (ADR 0148): the runtime does not check them. The headroom checks
-   * before each stage estimate those graphs with the same rules (with the device's
+   * before each stage estimate those graphs with the same rule list (with the device's
    * `maxComputeWorkgroupsPerDimension`, which a rule's matcher may read), so they size the
    * Sessions that open. `dit_skip22` borrows `dit`'s weights, and the runtime does not bind a
    * borrowed weight to an external rule's step, so a rule folds fewer windows there. A value the
@@ -459,7 +463,8 @@ const loadMoss = async (
           contract: admitted.vae,
         },
         text: { component: textEncoder, tokenizer, contract: textContract },
-        // Experimental (a measurement opt-in): the DiT and VAE stages' Sessions get the rules.
+        // Experimental (a measurement opt-in): the DiT and VAE stages' Sessions get the caller's
+        // rules after the family's own (`./fusion-rules.ts`).
         ...(options.fusionRules === undefined ? {} : { fusionRules: options.fusionRules }),
       },
       config: admitted.config,

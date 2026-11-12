@@ -1,7 +1,7 @@
-// The candidate rule `candidate/ew_chain` (`@karume/candidate-rules`,
-// packages/candidate-rules/src/ew-chain.ts — a run of consecutive f32 elementwise nodes in one
-// dispatch, written against `@karume/runtime/kernel` alone) on the GPU, against its unfused plan:
-// the class E evidence of docs/kernel-rules.md (d). Each graph runs on a Session given the rule
+// The rule `models/ew_chain` (`@karume/models/moss`, packages/models/src/moss/ew-chain.ts — a run of
+// consecutive f32 elementwise nodes in one dispatch, written against `@karume/runtime/kernel` alone,
+// which the MOSS-Image pipeline passes by default) on the GPU, against its unfused plan: the class E
+// evidence of docs/kernel-rules.md (d). Each graph runs on a Session given the rule
 // through `SessionOptions.fusionRules` and on one built from the same options with the rule
 // disabled by the test-only `DISABLED_FUSION_RULES` (the plain side, the same graph without the
 // rule). Every output is compared as u32 words (`wordIdentity`, NaN by class); the rule's counter
@@ -56,7 +56,7 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "../../runtime/tests/helpers/model-fixture.ts";
-import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 /** Rows × width: 771 elements leave a partial last workgroup of the rule's 128 threads. */
@@ -149,7 +149,7 @@ const mulAdd = (
   ...(key === undefined ? {} : { key }),
 });
 
-const keyOf = (form: string): string => `ext:candidate:ew_chain:v1:${form}:f32:wg128`;
+const keyOf = (form: string): string => `ext:models:ew_chain:v1:${form}:f32:wg128`;
 
 const CASES: readonly Case[] = [
   {
@@ -400,7 +400,7 @@ const FAULT_CASES: readonly Case[] = [
 ];
 
 describe.skipIf(!GPU_AVAILABLE)(
-  "the candidate rule candidate/ew_chain against its unfused plan (real GPU)",
+  "the rule models/ew_chain against its unfused plan (real GPU)",
   () => {
     it("is u32-identical to the plain nodes in every form, runs each graph as its one dispatch and counts once", async () => {
       const gpu = await acquireGpu();
@@ -416,7 +416,7 @@ describe.skipIf(!GPU_AVAILABLE)(
           );
           assertEquals(fused.pipelines.length, 1, `${where}: the fused side's pipelines`);
           const [{ key, dispatchCount }] = fused.pipelines;
-          assert(key.startsWith(`ext:candidate:ew_chain:`), `${where}: ${key}`);
+          assert(key.startsWith(`ext:models:ew_chain:`), `${where}: ${key}`);
           assertEquals(dispatchCount, 1, `${where}: the fused side's dispatches`);
           if (testCase.key !== undefined) assertEquals(key, testCase.key, `${where}: the form`);
           assertEquals(

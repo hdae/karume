@@ -1,14 +1,17 @@
-// The experimental `fusionRules` of the MOSS-Image pipeline (`moss.PipelineOptions.fusionRules` →
-// `MossGenerateState.fusionRules`): the rules reach the Sessions of the DiT stage (`dit_text`, `dit`,
-// `dit_skip22`) and of the VAE stage (the three decoder graphs) unchanged, and the headroom estimates
-// of the same six graphs with the device's `maxComputeWorkgroupsPerDimension`; without them every
-// options object is what it was. Stand-in components record what each `createSession` and each
+// The fusion rules of the MOSS-Image image graphs: the family's rule `models/ew_chain`, which the
+// pipeline passes by default, then the experimental `fusionRules` the caller gives
+// (`moss.PipelineOptions.fusionRules` → `MossGenerateState.fusionRules`), in their order. That one
+// list reaches the Sessions of the DiT stage (`dit_text`, `dit`, `dit_skip22`) and of the VAE stage
+// (the three decoder graphs), and the headroom estimates of the same six graphs with the device's
+// `maxComputeWorkgroupsPerDimension`; without caller rules it is the family's rule alone, and every
+// other option is what it was. Stand-in components record what each `createSession` and each
 // `estimate` received; no GPU (a real `GpuContext` over a fake device whose trial allocations fit).
 
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import type { EstimateOptions, Session, SessionOptions } from "@karume/runtime";
-import { EW_CHAIN_RULE } from "@karume/candidate-rules";
+import { GELU_MUL_RULE } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE } from "../moss.ts";
 import type { GraphOwner, ModelComponent } from "../src/hub/components.ts";
 import type { MossDitContract } from "../src/moss/dit-contract.ts";
 import type { MossRopeBase } from "../src/moss/dit-rope.ts";
@@ -217,7 +220,7 @@ const openStages = async (recorded: Recorded, fusionRules?: SessionOptions["fusi
   );
 };
 
-/** The options without the `fusionRules` key and the limit only a rule needs. */
+/** The options without the `fusionRules` key and the dispatch limit a rule list needs. */
 const stripped = (options: SessionOptions | EstimateOptions) =>
   Object.fromEntries(
     Object.entries(options).filter(
@@ -225,7 +228,21 @@ const stripped = (options: SessionOptions | EstimateOptions) =>
     ),
   );
 
-describe("MOSS-Image fusionRules (experimental)", () => {
+/** `actual` holds exactly the rules of `expected`, the same objects in the same order. */
+const assertRuleList = (
+  actual: SessionOptions["fusionRules"],
+  expected: NonNullable<SessionOptions["fusionRules"]>,
+  where: string,
+): void => {
+  assertEquals(
+    actual?.map((rule) => rule.name),
+    expected.map((rule) => rule.name),
+    `${where}: the rule names`,
+  );
+  expected.forEach((rule, at) => assertStrictEquals(actual?.[at], rule, `${where}: rule ${at}`));
+};
+
+describe("MOSS-Image fusion rules (models/ew_chain by default, then the experimental fusionRules)", () => {
   const STAGE_SESSIONS = [
     "dit_text",
     "dit",
@@ -235,16 +252,15 @@ describe("MOSS-Image fusionRules (experimental)", () => {
     "vae_decoder_post",
   ];
 
-  it("the DiT stage's three Sessions and the VAE stage's three get the caller's array itself, beside the preset's knobs", async () => {
+  it("the DiT stage's three Sessions and the VAE stage's three plan with models/ew_chain, then the caller's rules, beside the preset's knobs", async () => {
     const recorded = recorder();
-    const fusionRules = [EW_CHAIN_RULE];
-    await openStages(recorded, fusionRules);
+    await openStages(recorded, [GELU_MUL_RULE]);
     assertEquals(
       recorded.sessions.map(({ component: name }) => name),
       STAGE_SESSIONS,
     );
     for (const { component: name, options } of recorded.sessions) {
-      assertStrictEquals(options.fusionRules, fusionRules, name);
+      assertRuleList(options.fusionRules, [EW_CHAIN_RULE, GELU_MUL_RULE], name);
     }
     const [, dit, skip] = recorded.sessions;
     // The knobs and the borrowed weights are still there.
@@ -252,13 +268,12 @@ describe("MOSS-Image fusionRules (experimental)", () => {
     assert(Object.hasOwn(skip.options, "sharedWeights"), "dit_skip22 lost its shared weights");
   });
 
-  it("every headroom estimate of those graphs plans with the same rules and the device's dispatch limit", async () => {
+  it("every headroom estimate of those graphs plans with the same list and the device's dispatch limit", async () => {
     const recorded = recorder();
-    const fusionRules = [EW_CHAIN_RULE];
-    await openStages(recorded, fusionRules);
+    await openStages(recorded, [GELU_MUL_RULE]);
     assert(recorded.estimates.length > 0);
     for (const { component: name, options } of recorded.estimates) {
-      assertStrictEquals(options.fusionRules, fusionRules, name);
+      assertRuleList(options.fusionRules, [EW_CHAIN_RULE, GELU_MUL_RULE], name);
       assertEquals(options.maxComputeWorkgroupsPerDimension, 65_535, name);
     }
     assertEquals(
@@ -267,14 +282,17 @@ describe("MOSS-Image fusionRules (experimental)", () => {
     );
   });
 
-  it("without rules, no Session or estimate has the field or the limit, and the rest is what the run with rules passed", async () => {
+  it("without caller rules, every Session and estimate plans with models/ew_chain alone and the dispatch limit, and the rest is what the run with rules passed", async () => {
     const ruled = recorder();
-    await openStages(ruled, [EW_CHAIN_RULE]);
+    await openStages(ruled, [GELU_MUL_RULE]);
     const plain = recorder();
     await openStages(plain);
-    for (const { component: name, options } of [...plain.sessions, ...plain.estimates]) {
-      assertEquals(Object.hasOwn(options, "fusionRules"), false, name);
-      assertEquals(Object.hasOwn(options, "maxComputeWorkgroupsPerDimension"), false, name);
+    for (const { component: name, options } of plain.sessions) {
+      assertRuleList(options.fusionRules, [EW_CHAIN_RULE], name);
+    }
+    for (const { component: name, options } of plain.estimates) {
+      assertRuleList(options.fusionRules, [EW_CHAIN_RULE], name);
+      assertEquals(options.maxComputeWorkgroupsPerDimension, 65_535, name);
     }
     const shape = (entries: Recorded["sessions"] | Recorded["estimates"]) =>
       entries.map(({ component: name, options }) => ({ name, options: stripped(options) }));
@@ -282,9 +300,8 @@ describe("MOSS-Image fusionRules (experimental)", () => {
     assertEquals(shape(plain.estimates), shape(ruled.estimates));
   });
 
-  it("generateMoss hands the state's rules to the first headroom check's estimates and to the DiT stage, not to the text encoder", async () => {
+  it("generateMoss hands the state's rules, after models/ew_chain, to the first headroom check's estimates and to the DiT stage, not to the text encoder", async () => {
     const recorded = recorder();
-    const fusionRules = [EW_CHAIN_RULE];
     const dit = ditState(recorded);
     const vae = vaeState(recorded);
     const state: MossGenerateState = {
@@ -292,7 +309,7 @@ describe("MOSS-Image fusionRules (experimental)", () => {
       preset: dit.preset,
       dit: { components: dit.components, contract: dit.contract },
       vae: { components: vae.components, contract: vae.contract },
-      fusionRules,
+      fusionRules: [GELU_MUL_RULE],
     };
     await assertRejects(
       () =>
@@ -314,13 +331,17 @@ describe("MOSS-Image fusionRules (experimental)", () => {
       recorded.sessions.map(({ component: name }) => name),
       ["dit_text"],
     );
-    assertStrictEquals(recorded.sessions[0].options.fusionRules, fusionRules);
+    assertRuleList(
+      recorded.sessions[0].options.fusionRules,
+      [EW_CHAIN_RULE, GELU_MUL_RULE],
+      "dit_text",
+    );
     assertEquals(
       [...new Set(recorded.estimates.map(({ component: name }) => name))].sort(),
       [...STAGE_SESSIONS].sort(),
     );
     for (const { component: name, options } of recorded.estimates) {
-      assertStrictEquals(options.fusionRules, fusionRules, name);
+      assertRuleList(options.fusionRules, [EW_CHAIN_RULE, GELU_MUL_RULE], name);
     }
   });
 });

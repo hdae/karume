@@ -21,7 +21,8 @@
  * The preset (`./preset.ts` — explicit, no default) sets the knobs of the pair's two Sessions; the
  * `dit_text` Session takes none (f32 compute in every preset — ADR 0138 decision 3). The same knobs
  * go to the pair's headroom estimates below (with the device's attention facts, which decide the
- * online kernel's route), so the check sizes the Sessions it admits.
+ * online kernel's route), so the check sizes the Sessions it admits. The three Sessions and their
+ * estimates plan with the family's fusion rules (`./fusion-rules.ts` — `models/ew_chain` first).
  *
  * ## Headroom (ADR 0138 decision 5 — the Anima form)
  *
@@ -100,6 +101,7 @@ import {
 } from "./dit-contract.ts";
 import { type MossCells, mossRopeTables, mossTextRopeTables } from "./dit-rope.ts";
 import { mossTimestepsProj } from "./dit-timestep.ts";
+import { mossFusionRules } from "./fusion-rules.ts";
 import { type MossDitKnobs, type MossPreset, requireMossPreset } from "./preset.ts";
 import {
   mossHeadRows,
@@ -135,8 +137,9 @@ export type MossDitStageState = {
   readonly contract: MossDitContract;
   readonly preset: MossPreset;
   /**
-   * Experimental (the pipeline's `fusionRules`): passed unchanged to the three Sessions of the stage
-   * and to their headroom estimates; absent = neither gets a rule.
+   * Experimental (the pipeline's `fusionRules`): the caller's rules. The three Sessions of the stage
+   * and their headroom estimates plan with the family's rule list (`./fusion-rules.ts` —
+   * `models/ew_chain`, then these in order); absent = the family's rule alone.
    */
   readonly fusionRules?: PipelineFusionRules;
 };
@@ -203,8 +206,12 @@ const sequenceLengths = (plan: MossDitShape): MossBranches<number> => {
 export type MossDeviceLimits = {
   readonly maxStorageBufferBindingSize: number;
   readonly maxBufferSize: number;
-  /** Read only with `fusionRules` (a rule's matcher may read it — `fusionRulesEstimateOptions`). */
-  readonly maxComputeWorkgroupsPerDimension?: number;
+  /**
+   * The estimates of a rule list need it (a rule's matcher may read it —
+   * `fusionRulesEstimateOptions`), and every graph of the stage plans with the family's rule list
+   * (`./fusion-rules.ts`).
+   */
+  readonly maxComputeWorkgroupsPerDimension: number;
 };
 
 /** The device facts the estimates take (the stage passes `gpu.limits` and `attentionDeviceFacts(gpu)`). */
@@ -228,7 +235,7 @@ const estimatedPeak = (
     ...knobs,
     attentionDevice: device.attention,
     // MUST: the rules the stage's Sessions get (the estimate plans the fusion they run).
-    ...fusionRulesEstimateOptions(fusionRules, device.limits),
+    ...fusionRulesEstimateOptions(mossFusionRules(fusionRules), device.limits),
   }).peakAccountedBytes;
 
 /** The device facts of `gpu` the estimates take (one derivation for every stage and the first check). */
@@ -393,7 +400,7 @@ export const runMossTextStage = async (
   // f32 compute in every preset (ADR 0138 decision 3): none of the preset's knobs.
   const session = await components.ditText.createSession(
     gpu,
-    withFusionRules({}, state.fusionRules),
+    withFusionRules({}, mossFusionRules(state.fusionRules)),
   );
   let failure: { readonly error: unknown } | undefined;
   try {
@@ -487,6 +494,7 @@ export const withMossDitPair = async <T>(
     `${MOSS_DIT} + ${MOSS_DIT_SKIP22}`,
     plan,
   );
+  const fusionRules = mossFusionRules(state.fusionRules);
   let lender: Session | undefined;
   let borrower: Session | undefined;
   const residents: ResidentTensor[] = [];
@@ -494,7 +502,7 @@ export const withMossDitPair = async <T>(
   try {
     lender = await components.dit.createSession(
       gpu,
-      withFusionRules({ ...preset.dit }, state.fusionRules),
+      withFusionRules({ ...preset.dit }, fusionRules),
     );
     const open = async (
       session: Session,
@@ -531,7 +539,7 @@ export const withMossDitPair = async <T>(
         gpu,
         withFusionRules(
           { ...preset.dit, sharedWeights: lentWeights(lender, contract.borrowed) },
-          state.fusionRules,
+          fusionRules,
         ),
       );
       negative = await open(borrower, contract.outputs.ditSkip22, refined.negative, "negative");

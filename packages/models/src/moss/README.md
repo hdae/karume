@@ -81,9 +81,12 @@ has them, for the online kernel's subgroup form — never required).
 | `config.ts`        | —     | the manifest contract: the pipeline name `moss-image/1`, the `pipelineConfig` schema (upstream's defaults), the tokenizer asset's name |
 | `pipeline.ts`      | —     | the public `Pipeline` (`fromPretrained`, `generate`, `dispose`): the manifest's preset and defaults, the admission before the weights are fetched |
 | `image.ts`         | —     | `imageToRgba` (the image → 8-bit RGBA) |
+| `ew-chain.ts`      | —     | the fusion rule `models/ew_chain` (a run of f32 elementwise nodes in one dispatch, class E), written against `@karume/runtime/kernel` alone |
+| `fusion-rules.ts`  | —     | `mossFusionRules`: the rule list of the image graphs' Sessions and estimates (`models/ew_chain`, then the caller's experimental `fusionRules`) |
 
-(The stages are those of ADR 0138 decision 14; `text-stage.ts` is its addendum of 2026-10-31, the
-last three files its addendum of 2026-11-01.)
+(The stages are those of ADR 0138 decision 14; `text-stage.ts` is its addendum of 2026-10-31,
+`config.ts`, `pipeline.ts` and `image.ts` its addendum of 2026-11-01; the last two files are ADR
+0148's addendum of 2026-11-12.)
 
 ## Accepted requests
 

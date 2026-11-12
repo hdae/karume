@@ -7,6 +7,11 @@
 // that refuses anything defineRule did not build. No GPU needed; what the rule
 // computes is checked against its unfused plan on the GPU (e2e_external_fusion_rule_test.ts) and
 // planned on Gemma 4 26B's graph (e2e_gemma4_26b_external_rule_test.ts), both in the e2e package.
+//
+// The adopted rule `models/ew_chain` (packages/models/src/moss/ew-chain.ts, which the MOSS-Image
+// pipeline passes by default) is held to the same entry: its only import is
+// `@karume/runtime/kernel`, its code has no type assertion, `any` or directive, and a Session takes
+// it. Its fused-against-unfused check is e2e_ew_chain_rule_test.ts.
 
 import { importSpecifiersOf } from "@karume/test-support/module-graph";
 import { readDir, readTextFile } from "@karume/test-support/fs";
@@ -20,10 +25,14 @@ import {
   openModelBytes,
 } from "../../runtime/tests/helpers/model-fixture.ts";
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
+import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "../moss.ts";
 
 /** The candidate package (every file of it is held to the entry a package outside the runtime has). */
 const PACKAGE = new URL("../../candidate-rules/", import.meta.url);
 const RULE_FILE = new URL("src/gelu-mul.ts", PACKAGE);
+
+/** The adopted rule's file in this package. */
+const ADOPTED_RULE_FILE = new URL("../src/moss/ew-chain.ts", import.meta.url);
 
 /** `y = mul(gelu_tanh(gate), other)`, the rule's adjacent window. */
 const GELU_MUL_GRAPH: DeclarationJson = {
@@ -117,5 +126,29 @@ describe("the external gelu -> mul rule", () => {
       ExecutionError,
       "options.fusionRules[0] is not a rule built by defineRule",
     );
+  });
+});
+
+describe("the adopted rule models/ew_chain", () => {
+  it("imports @karume/runtime/kernel and nothing else", async () => {
+    const source = await readTextFile(ADOPTED_RULE_FILE);
+    assertEquals(importSpecifiersOf(ADOPTED_RULE_FILE.href, source), ["@karume/runtime/kernel"]);
+  });
+
+  it("has no type assertion, no any and no TypeScript directive in its code", async () => {
+    const code = codeOf(await readTextFile(ADOPTED_RULE_FILE));
+    // The control: the stripped code still holds the rule.
+    assertEquals(code.includes("defineRule<EwChainMatch"), true, "the code was stripped away");
+    assertEquals(code.match(/\bas\s+(?!const\b)\w+/g), null, "a type assertion");
+    assertEquals(code.match(/\b(?:any|never)\b/g), null, "any or never");
+    assertEquals(code.match(/@ts-/g), null, "a TypeScript directive");
+  });
+
+  it("is a defined external rule of class E under its models namespace, which a Session takes", async () => {
+    assertEquals(
+      [EW_CHAIN_RULE.name, EW_CHAIN_RULE.contract, EW_CHAIN_RULE_NAME.startsWith("models/")],
+      [EW_CHAIN_RULE_NAME, "E", true],
+    );
+    await (await construct([EW_CHAIN_RULE])).dispose();
   });
 });

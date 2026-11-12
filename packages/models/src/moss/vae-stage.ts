@@ -10,7 +10,9 @@
  * a resident tensor, `vae_decoder_attn` reads the same bytes as `[1, C, S]` (S = h·w) and writes a
  * second resident, which `vae_decoder_post` reads as `[1, C, h, w]` — nothing is copied between the
  * graphs and there is one read-back, of the image (the Wan2.2 VAE encoder form —
- * `../wan/vae-encoder.ts`). The image is clamped to [-1, 1] as upstream does after `decode`.
+ * `../wan/vae-encoder.ts`). The image is clamped to [-1, 1] as upstream does after `decode`. The
+ * three Sessions and their estimates plan with the family's fusion rules (`./fusion-rules.ts` —
+ * `models/ew_chain` first).
  *
  * ## Lifetime (ADR 0138 decision 5)
  *
@@ -76,6 +78,7 @@ import {
 } from "../session/fusion-rules.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import type { MossCells } from "./dit-rope.ts";
+import { mossFusionRules } from "./fusion-rules.ts";
 import { assertMossImageArea, assertMossImageSize } from "./request.ts";
 import {
   MOSS_VAE_DECODER_ATTN,
@@ -119,8 +122,9 @@ export type MossVaeStageState = {
   readonly components: MossVaeComponents;
   readonly contract: MossVaeContract;
   /**
-   * Experimental (the pipeline's `fusionRules`): passed unchanged to the three Sessions and to
-   * their headroom estimates; absent = neither gets a rule.
+   * Experimental (the pipeline's `fusionRules`): the caller's rules. The three Sessions and their
+   * headroom estimates plan with the family's rule list (`./fusion-rules.ts` — `models/ew_chain`,
+   * then these in order); absent = the family's rule alone.
    */
   readonly fusionRules?: PipelineFusionRules;
 };
@@ -173,7 +177,8 @@ const residentBytes = (contract: MossVaeContract, plan: MossVaePlan) => {
  */
 export const mossVaeStageNeeds = (
   input: {
-    readonly limits: MossVaeDeviceLimits;
+    /** Every field: the estimates plan with the family's rule list, which needs the dispatch limit. */
+    readonly limits: Required<MossVaeDeviceLimits>;
     readonly components: MossVaeComponents;
     readonly contract: MossVaeContract;
     readonly fusionRules?: PipelineFusionRules;
@@ -193,7 +198,7 @@ export const mossVaeStageNeeds = (
       bindings: values,
       ...options,
       // MUST: the rules the stage's Sessions get (the estimate plans the fusion they run).
-      ...fusionRulesEstimateOptions(fusionRules, limits),
+      ...fusionRulesEstimateOptions(mossFusionRules(fusionRules), limits),
     }).peakAccountedBytes;
   const residents = residentBytes(contract, plan);
   return (
@@ -243,13 +248,14 @@ export const decodeMossVae = async (
   const residents = residentBytes(contract, plan);
   const sessions: Session[] = [];
   const held: ResidentTensor[] = [];
+  const fusionRules = mossFusionRules(state.fusionRules);
   const open = async (
     component: ModelComponent,
     options: { readonly attentionRowBlockMaxBytes?: number } = {},
   ): Promise<Session> => {
     const session = await component.createSession(
       gpu,
-      withFusionRules({ ...options }, state.fusionRules),
+      withFusionRules({ ...options }, fusionRules),
     );
     sessions.push(session);
     return session;

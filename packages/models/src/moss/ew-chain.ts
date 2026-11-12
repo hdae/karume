@@ -1,9 +1,10 @@
 /**
- * A generated candidate fusion rule: a run of consecutive f32 elementwise nodes folded into one
- * dispatch, whatever the ops and their wiring (`candidate/ew_chain`). Written the way a package
- * outside the runtime writes a rule, against `@karume/runtime/kernel` alone
- * (packages/models/tests/external_fusion_rule_test.ts pins that import list). A candidate, not an
- * adopted rule: no pipeline passes it by default.
+ * A generated fusion rule: a run of consecutive f32 elementwise nodes folded into one dispatch,
+ * whatever the ops and their wiring (`models/ew_chain`). Written the way a package outside the
+ * runtime writes a rule, against `@karume/runtime/kernel` alone
+ * (packages/models/tests/external_fusion_rule_test.ts pins that import list). Adopted on
+ * 2026-11-12 (perf-ledger F-13): the MOSS-Image pipeline passes it by default to the Sessions of its
+ * image graphs (`./fusion-rules.ts`); no other family passes it.
  *
  * What it takes: the longest run of nodes that starts at the head, whose ops are scalar-free f32
  * unary / binary elementwise ops ({@link ARITY}), in which every node writes the shape of the last
@@ -41,7 +42,7 @@ import {
 } from "@karume/runtime/kernel";
 
 /** The rule's name, and its counter in `lastRunFusions`. */
-export const EW_CHAIN_RULE_NAME = "candidate/ew_chain";
+export const EW_CHAIN_RULE_NAME = "models/ew_chain";
 
 const WORKGROUP_SIZE = 128;
 
@@ -135,14 +136,14 @@ const operandKey = (operand: Operand): string =>
 
 /**
  * MUST: every part of the form is in the key (each changes the WGSL); the key is under
- * `ext:candidate:`. The rank is in it through the `broadcast` classes, the only place it is baked.
+ * `ext:models:`. The rank is in it through the `broadcast` classes, the only place it is baked.
  */
 const formKey = (form: Form): string => {
   const inputs = form.inputs.map(classKey).join(".");
   const nodes = form.nodes
     .map((node) => [node.op, ...node.operands.map(operandKey)].join("."))
     .join("-");
-  return `ext:candidate:ew_chain:v1:${inputs}:${nodes}:f32:wg${WORKGROUP_SIZE}`;
+  return `ext:models:ew_chain:v1:${inputs}:${nodes}:f32:wg${WORKGROUP_SIZE}`;
 };
 
 /** The axes some `broadcast` input indexes, ascending: the ones the params carry. */
@@ -236,7 +237,7 @@ const wgsl = (form: Form): string => {
   const bindings = form.inputs.map(
     (_, k) => `@group(0) @binding(${k + 1}) var<storage, read> x${k}: array<f32>;`,
   );
-  return `// karume candidate rule candidate/ew_chain (${formKey(form)})
+  return `// karume rule models/ew_chain (${formKey(form)})
 struct Params { ${paramFields(form)
     .map((field) => `${field}: u32`)
     .join(", ")} }
@@ -377,9 +378,14 @@ const match = (
   return undefined;
 };
 
-export const EW_CHAIN_RULE = defineRule<EwChainMatch, typeof EW_CHAIN_RULE_NAME>({
+/**
+ * The rule (class E). Both module-scope calls are marked pure for the barrel's tree-shaking: a call
+ * a bundler cannot prove pure (`Object.keys` included) would keep the module's import of
+ * `@karume/runtime/kernel` in every bundle of `@karume/models`.
+ */
+export const EW_CHAIN_RULE = /* @__PURE__ */ defineRule<EwChainMatch, typeof EW_CHAIN_RULE_NAME>({
   name: EW_CHAIN_RULE_NAME,
-  heads: Object.keys(ARITY),
+  heads: /* @__PURE__ */ Object.keys(ARITY),
   contract: "E",
   internals: "stayInChain",
   match,

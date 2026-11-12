@@ -418,8 +418,10 @@ export type MossGenerateState = {
   readonly vae: { readonly components: MossVaeComponents; readonly contract: MossVaeContract };
   readonly text?: MossTextEncoderState;
   /**
-   * Experimental (the pipeline's `fusionRules`): the DiT stage's and the VAE stage's Sessions
-   * and their headroom estimates get them; the text encoder's do not. Absent = no rule anywhere.
+   * Experimental (the pipeline's `fusionRules`): the caller's rules. The DiT stage's and the VAE
+   * stage's Sessions and their headroom estimates plan with the family's rule list
+   * (`./fusion-rules.ts` — `models/ew_chain`, then these in order); the text encoder's get none.
+   * Absent = the family's rule alone.
    */
   readonly fusionRules?: PipelineFusionRules;
 };
@@ -532,7 +534,8 @@ export const generateMoss = async (
 ): Promise<MossGeneratedImage> => {
   const { gpu, fusionRules } = state;
   const preset = requireMossPreset(state.preset);
-  // Experimental: the DiT and VAE stages only (the text encoder takes none — `MossGenerateState`).
+  // The caller's rules go to the DiT and VAE stages only, which add the family's own ahead of them
+  // (the text encoder takes none — `MossGenerateState`).
   const rules = fusionRules === undefined ? {} : { fusionRules };
   const plan = planMossGenerate(request, {
     dit: state.dit.contract,

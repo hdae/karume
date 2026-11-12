@@ -3,9 +3,9 @@
  * sequence of a 1024 × 1024 request and the seeded feeds), the request and the arms' step reports.
  * A run is one forward of the `dit` component (the positive branch) on the fixed feeds, the arms are
  * `sessionArm`s of `@karume/runtime/tune` over the one prepared model — `base` with the preset's
- * knobs, `rule` with the same plus the candidate rule — and the output is the DiT's output rows, so
- * the A/B's identity is u32 identity of the output words (NaN by class). The counts (the rule's hits,
- * the dispatches) are the runner's: a `sessionArm` reports every run's fusion counts and dispatches
+ * knobs, `rule` with the same plus the rule `models/ew_chain` — and the output is the DiT's output
+ * rows, so the A/B's identity is u32 identity of the output words (NaN by class). The counts (the
+ * rule's hits, the dispatches) are the runner's: a `sessionArm` reports every run's fusion counts and dispatches
  * outside the timed span, so this target needs no count probe.
  *
  * NOTE: the feeds (between the twin markers) have a twin in

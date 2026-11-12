@@ -22,6 +22,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { HEADROOM_MARGIN_BYTES } from "../src/session/headroom-margin.ts";
+import { mossFusionRules } from "../src/moss/fusion-rules.ts";
 import { assertMossImageArea } from "../src/moss/request.ts";
 import {
   MOSS_LATENT_BATCH_NORM,
@@ -76,8 +77,15 @@ const MISSING_GOLDENS = MOSS_VAE_CASES.filter((testCase) => !vaeGoldenPresent(te
   .map((testCase) => vaeGoldenUrl(testCase).pathname)
   .join(", ");
 
-/** A device whose binding limit is exactly 2 GiB (the RTX 3080 Ti class — ADR 0124). */
-const LIMITS_2GIB = { maxStorageBufferBindingSize: 2 ** 31, maxBufferSize: 2 ** 32 };
+/**
+ * A device whose binding limit is exactly 2 GiB (the RTX 3080 Ti class — ADR 0124), with the dispatch
+ * limit the stage's estimates need (they plan with the family's rule list).
+ */
+const LIMITS_2GIB = {
+  maxStorageBufferBindingSize: 2 ** 31,
+  maxBufferSize: 2 ** 32,
+  maxComputeWorkgroupsPerDimension: 65_535,
+};
 /** The WebGPU core default binding (128 MiB). */
 const LIMITS_CORE = { maxStorageBufferBindingSize: 2 ** 27, maxBufferSize: 2 ** 28 };
 
@@ -272,6 +280,8 @@ describe.skipIf(!MIRROR_PRESENT)(
           ...LIMITS_2GIB,
           bindings: values,
           ...(attentionRowBlockMaxBytes === undefined ? {} : { attentionRowBlockMaxBytes }),
+          // The stage's Sessions and estimates plan with the family's rule list.
+          fusionRules: mossFusionRules(undefined),
         }).peakAccountedBytes;
       const post = estimate(components.post, bindings);
       const attention = estimate(

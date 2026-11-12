@@ -1,6 +1,6 @@
 /**
  * The shared part of the opt-in end-to-end runs of a candidate fusion rule through a real pipeline
- * (`KARUME_PIPELINE_RULE_AB=<dir>` — e2e_moss_pipeline_rule_test.ts, e2e_anima_pipeline_rule_test.ts,
+ * (`KARUME_PIPELINE_RULE_AB=<dir>` — e2e_anima_pipeline_rule_test.ts,
  * e2e_wan_ti2v_pipeline_rule_test.ts): two pipelines over the same distribution mirror, `base`
  * (without `fusionRules`) and `rule` (the same plus the rule), generate the same request in the
  * order of `runSessionAb` of `@karume/runtime/tune` (an untimed warm-up round, then A B B A per

@@ -20,7 +20,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
-| Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a candidate fusion rule (`runSessionAb`, `judgeSessionAb`): identity, hits, dispatches, per-round times and the verdict | `/session-ab` | built; not yet checked in a browser (the MOSS-Image and VAE targets neither) |
+| Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a fusion rule (`runSessionAb`, `judgeSessionAb`): identity, hits, dispatches, per-round times and the verdict | `/session-ab` | built; not yet checked in a browser (the MOSS-Image and VAE targets neither) |
 | Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the rms_norm prefetch form, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block, the expert linear, the built-in fusions against their unfused plans and the tiled key axis candidate of the online attention, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
@@ -43,8 +43,9 @@ and the runtime tests' dispatch harness — so that the page runs the same check
 the runtime's node GPU tests ([the kernel-check page](#the-kernel-check-page)). No other page may
 import it, and nothing here imports runtime internals directly. The session A/B page imports
 `@karume/candidate-rules`, another private workspace package: candidate fusion rules written against
-`@karume/runtime/kernel` alone, which the page passes to the gemma pipeline or to a MOSS-Image DiT
-Session to measure them ([the session A/B page](#the-session-ab-page)). The `/wan22` and `/anima`
+`@karume/runtime/kernel` alone, which the page passes to the gemma pipeline or to a VAE Session to
+measure them ([the session A/B page](#the-session-ab-page)); its MOSS-Image DiT target passes the
+adopted rule `models/ew_chain` of `@karume/models/moss` instead. The `/wan22` and `/anima`
 pages import it too, through `src/lib/experimental-rule.ts`: their **Experimental fusion rule**
 control (off by default) passes one candidate through the pipeline's experimental `fusionRules`.
 
@@ -424,6 +425,11 @@ generates (the page is left, the GPU is acquired again) drops its image when `ge
 
 The result card shows the image (`imageToRgba` into a canvas; **Download PNG** — lossless, from the
 same RGBA bytes the sha256 covers) and a summary of the record.
+
+**Fusion rule.** The pipeline passes its own rule `models/ew_chain` (`@karume/models/moss`,
+u32-identical to the unfused plan) by default to `dit_text`, the DiT pair and the VAE decoder, so
+the page has no switch for it. The session A/B page's MOSS-Image target compares a DiT forward with
+and without it.
 
 ### The record (`format: "karume-playground-moss-image/2"`)
 
@@ -1474,7 +1480,7 @@ mutants, the mutant matrix, the fold classes and, for the states-attention check
 The wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, judged by `judgeSessionAb`) on a real
 Gemma 4 decode, one MOSS-Image DiT forward or one Wan2.2 / anima VAE forward (the **Target** select;
 the sections below up to the MOSS-Image one describe the Gemma 4 target), with and without a
-candidate fusion rule: how a fusion is accepted or dropped on a
+fusion rule: how a fusion is accepted or dropped on a
 backend the node lanes do not reach (D3D12 in Chrome on Windows, Metal on macOS). Speed fusions are
 adopted on the measured end-to-end time of untimed runs, not on per-dispatch GPU time
 ([ADR 0117](../../docs/decisions/0117-app-geometry-tuning.md), addendum of 2026-11-11).
@@ -1573,7 +1579,8 @@ model with the knobs the preset declares (`session` of the manifest; the practic
 `linearCompute: "a8"`, `attentionCompute: "a8"`, `attentionScoreStorage: "none"`).
 
 **The arms.** `sessionArm`s of `@karume/runtime/tune`: `base` with the preset's knobs, `rule` with
-the same plus `candidate/ew_chain` through `SessionOptions.fusionRules`. **Open and close per visit
+the same plus `models/ew_chain` of `@karume/models/moss` (the rule the MOSS-Image pipeline passes by
+default) through `SessionOptions.fusionRules`. **Open and close per visit
 is always on** for this target (two DiT Sessions never live together; the switch is locked). A
 **timed run** is one forward at the sequence of a 1024 × 1024 request — 4,096 image tokens and 63
 text tokens, S = 4,159 — on fixed feeds: every f32 input uniform in [−1, 1) from a seeded generator
@@ -1589,7 +1596,7 @@ Gemma 4 target's): `session-ab-moss_<UTC timestamp>.json` with `recordEnvironmen
 the `request` (`target: "moss-dit-forward"`, the mount, model, preset and its knobs, the component,
 the rounds, minimum gain, backend, the token counts and seed of the feeds, and the two arms with
 the rules they passed), `distribution`, `source`, `container` (the component and the sha256 of its
-part 0), `rule` (name, package, `keyPrefix`), the runtime's `record` unchanged — its arms carry
+part 0), `rule` (name, package — `@karume/models` — and `keyPrefix`), the runtime's `record` unchanged — its arms carry
 the counts — and the `judgements`.
 
 ### The VAE targets

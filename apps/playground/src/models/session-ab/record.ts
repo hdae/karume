@@ -209,10 +209,13 @@ export type SessionAbMossPageRecord = RecordEnvironment & {
   readonly distribution: SessionAbDistribution;
   readonly source: SourceRecord;
   readonly container: SessionAbMossContainer;
-  /** The rule the `rule` arm passed; its dispatch keys all start with the prefix. */
+  /**
+   * The rule the `rule` arm passed (the MOSS-Image pipeline's own, from `@karume/models`); its
+   * dispatch keys all start with the prefix.
+   */
   readonly rule: {
     readonly name: string;
-    readonly package: "@karume/candidate-rules";
+    readonly package: "@karume/models";
     readonly keyPrefix: string;
   };
   /**
@@ -271,7 +274,7 @@ export const buildSessionAbMossPageRecord = (input: {
     container: input.container,
     rule: {
       name: ruleName,
-      package: "@karume/candidate-rules",
+      package: "@karume/models",
       keyPrefix: ruleKeyPrefix(ruleName),
     },
     record,

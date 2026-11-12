@@ -1,6 +1,6 @@
 /**
  * The session A/B: the wall-clock A/B of `@karume/runtime/tune` (`runSessionAb`, `judgeSessionAb`)
- * with and without a candidate fusion rule, on one of two targets.
+ * with and without a fusion rule, on one of two targets.
  *
  * - **Gemma 4 decode**: two arms load the same model and preset — `base` with no rule, `rule` with
  *   `candidate/gelu_mul` of `@karume/candidate-rules` through the gemma pipeline's experimental
@@ -10,8 +10,8 @@
  *   count probe of each arm before the A/B.
  * - **MOSS-Image DiT forward**: the `dit` component of the chosen preset, fetched and opened once
  *   through the hub, and two `sessionArm`s over it — `base` with the preset's knobs, `rule` with the
- *   same plus `candidate/ew_chain` — each visit opening and closing its Session (two DiT Sessions
- *   never live together). Every timed run is one forward at the 1024 × 1024 sequence (S = 4,159) on
+ *   same plus `models/ew_chain` of `@karume/models/moss` (the rule the MOSS-Image pipeline passes by
+ *   default) — each visit opening and closing its Session (two DiT Sessions never live together). Every timed run is one forward at the 1024 × 1024 sequence (S = 4,159) on
  *   seeded feeds whose output words the runner compares (u32, NaN by class); the hits and the
  *   dispatches are the runner's, which every run of a `sessionArm` reports.
  * - **Wan2.2 VAE next chunk** and **anima VAE decode**: the `vae_decoder_next` chunk graph of Wan2.2
@@ -25,13 +25,9 @@
  * per-round times, and the judgement with its numbers and its reason; the record is saved as JSON.
  */
 
-import {
-  EW_CHAIN_RULE,
-  EW_CHAIN_RULE_NAME,
-  GELU_MUL_RULE,
-  GELU_MUL_RULE_NAME,
-} from "@karume/candidate-rules";
+import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import { chatPrompt } from "@karume/models/gemma";
+import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
 import type { SessionOptions } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb, sessionArm } from "@karume/runtime/tune";
 import { memo, useMemo, useState } from "react";
@@ -162,7 +158,7 @@ type SessionAbTarget = "gemma4-decode" | "moss-dit-forward" | SessionAbVaeTarget
 
 const TARGET_CHOICES: readonly Choice<SessionAbTarget>[] = [
   { value: "gemma4-decode", label: "Gemma 4 decode (candidate/gelu_mul)" },
-  { value: "moss-dit-forward", label: "MOSS-Image DiT forward (candidate/ew_chain)" },
+  { value: "moss-dit-forward", label: "MOSS-Image DiT forward (models/ew_chain)" },
   { value: "wan22-vae-next", label: "Wan2.2 VAE next chunk (candidate/vae_rms_silu_g8 / _g4)" },
   { value: "anima-vae-decode", label: "anima VAE decode (candidate/vae_rms_silu_g8 / _g4)" },
 ];
@@ -762,7 +758,7 @@ export const SessionAbPage = () => {
             <CardHeader>
               <CardTitle>Target</CardTitle>
               <CardDescription>
-                The work every timed run does, and the candidate rule each arm but <code>base</code>{" "}
+                The work every timed run does, and the fusion rule each arm but <code>base</code>{" "}
                 adds.
               </CardDescription>
             </CardHeader>
@@ -790,8 +786,9 @@ export const SessionAbPage = () => {
                 <CardDescription>
                   Both arms build their Sessions from the <code>dit</code> component (the positive
                   branch) of this preset, fetched and opened once, with the knobs the preset
-                  declares. The arm <code>rule</code> adds the candidate rule{" "}
-                  <code>{EW_CHAIN_RULE_NAME}</code> (<code>@karume/candidate-rules</code>) through{" "}
+                  declares. The arm <code>rule</code> adds the rule{" "}
+                  <code>{EW_CHAIN_RULE_NAME}</code> (<code>@karume/models/moss</code>, which the
+                  MOSS-Image pipeline passes by default) through{" "}
                   <code>SessionOptions.fusionRules</code>; <code>base</code> passes none.
                 </CardDescription>
               </CardHeader>
