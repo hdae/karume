@@ -26,9 +26,9 @@
  * `vae_decoder_first_32` / `vae_decoder_next_32` at tile 32 — ADR 0134), read from the graphs'
  * static shapes. They too are copied and not read at run time ({@link CONV3D_I8A8_CASES}).
  *
- * The evaluation set `k85` (perf-ledger K-85) has a table of its own ({@link K85_CASES}), outside
- * {@link SWEEP_CASES}: the case-set version and the kernel fingerprints of the table-deriving sets
- * do not see it ({@link sweepCasesFor}).
+ * The evaluation sets `k85` and `k88` (perf-ledger K-85 / K-88) have tables of their own
+ * ({@link K85_CASES}, {@link K88_CASES}), outside {@link SWEEP_CASES}: the case-set version and the
+ * kernel fingerprints of the table-deriving sets do not see them ({@link sweepCasesFor}).
  */
 
 import type { Conv3dDims } from "../kernels/conv3d.ts";
@@ -70,10 +70,26 @@ export type LinearCase = {
   readonly m: number;
   readonly n: number;
   readonly k: number;
+  /**
+   * The weight storage of a `linear` case (absent = `f16`, the storage of the census). The
+   * `k88` cases carry the storage of the model they are copied from; `i4` needs
+   * `groupSize`. An `i8a8-linear` case is always i8 and has no such field.
+   */
+  readonly weight?: CaseWeight;
+  /** The i4 group length (with `weight: "i4"` only). */
+  readonly groupSize?: number;
   readonly censusCount: number;
+  /** What `censusCount` counts (the `k88` cases — {@link K88_CENSUS}). */
+  readonly censusGroup?: string;
   /** Which census row (the component and its input shape in the census). */
   readonly source: string;
 };
+
+/**
+ * The weight storages of the f32-compute cases: `f16` is the census's, the others those of the
+ * models the `k88` cases are copied from (i4 at a group length — {@link LinearCase.groupSize}).
+ */
+export type CaseWeight = "f32" | "f16" | "i8" | "i4";
 
 /**
  * matmul (`a[M,K] · b[K,N]`, f32 × f32). The same GEMM skeleton as linear; the only differences are
@@ -134,17 +150,24 @@ export type AttentionCase = {
 };
 
 /**
- * conv2d's implicit GEMM (groups = 1, 3×3, stride 1, padding 1, dilation 1, B = 1, f16-stored
- * weights). `M = Cout`, `N = H·W`, `K = Cin·9`.
+ * conv2d's implicit GEMM (groups = 1, 3×3, stride 1, padding 1, dilation 1, f16-stored weights and
+ * B = 1 unless the case says otherwise). `M = Cout`, `N = H·W`, `K = Cin·9`; the batch is the
+ * dispatch's z axis.
  */
 export type Conv2dCase = {
   readonly id: string;
   readonly op: "conv2d";
+  /** The batch (absent = 1 — the `k88` Wan2.2 VAE cases fold the chunk's frames into it). */
+  readonly batch?: number;
   readonly channelsIn: number;
   readonly channelsOut: number;
   readonly height: number;
   readonly width: number;
+  /** The weight storage (absent = `f16`, the census's). */
+  readonly weight?: CaseWeight;
   readonly censusCount: number;
+  /** What `censusCount` counts (the `k88` cases — {@link K88_CENSUS}). */
+  readonly censusGroup?: string;
   readonly source: string;
 };
 
@@ -578,41 +601,252 @@ const K85_GUARD_CASES: readonly LinearCase[] = [
 const K85_TABLE: readonly SweepCase[] = [...K85_CASES, ...K85_GUARD_CASES];
 
 /**
- * The case table a candidate set sweeps: the evaluation set `k85` its own table, every other set
- * {@link SWEEP_CASES}. The sweep, its record's case-set version and default fingerprint, and the
- * page's case list take it from here.
+ * What the `censusCount` of a `k88` case counts (its `censusGroup` — the unit of the set's
+ * sums). Each count is the node count of the shape in that unit's graph.
+ */
+export const K88_CENSUS = {
+  gemma4Prefill: "one gemma4 E2B prefill chunk (M = 768)",
+  umt5: "one umT5-XXL encoder forward (512 tokens)",
+  siglip2: "one siglip2 so400m vision forward (729 tokens)",
+  wanNext: "one Wan2.2 TI2V-5B VAE decoder next chunk (tile 16)",
+  wanFirst: "one Wan2.2 TI2V-5B VAE decoder first chunk (tile 16)",
+  anima: "one anima VAE decode (the graph's 64×64 latent)",
+} as const;
+
+/** A `k88` linear (f32 compute, the model's weight storage). */
+const k88Linear = (shape: {
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly weight: CaseWeight;
+  readonly groupSize?: number;
+  readonly count: number;
+  readonly group?: string;
+  readonly source: string;
+}): LinearCase => {
+  const { m, n, k, weight, groupSize, count, group, source } = shape;
+  return {
+    id: `k88-${linearId("linear", m, n, k)}-w${weight}${groupSize === undefined ? "" : `g${groupSize}`}`,
+    op: "linear",
+    m,
+    n,
+    k,
+    weight,
+    ...(groupSize === undefined ? {} : { groupSize }),
+    censusCount: count,
+    ...(group === undefined ? {} : { censusGroup: group }),
+    source,
+  };
+};
+
+/** A `k88` conv2d (3×3, stride 1, padding 1, Cin = Cout — the shapes of the two VAE decoders). */
+const k88Conv2d = (shape: {
+  readonly batch: number;
+  readonly channels: number;
+  readonly size: number;
+  readonly weight: CaseWeight;
+  readonly count: number;
+  readonly group: string;
+  readonly source: string;
+}): Conv2dCase => {
+  const { batch, channels, size, weight, count, group, source } = shape;
+  return {
+    id: `k88-conv2d-b${batch}-c${channels}-${size}x${size}-w${weight}`,
+    op: "conv2d",
+    batch,
+    channelsIn: channels,
+    channelsOut: channels,
+    height: size,
+    width: size,
+    weight,
+    censusCount: count,
+    censusGroup: group,
+    source: `${source} conv2d [${batch},${channels},${size},${size}] × [${channels},${channels},3,3]`,
+  };
+};
+
+/** The spike's square f32 linear (4,096³, the "big-f32" of its shape list; no model). */
+const K88_SQUARE_LINEAR = k88Linear({
+  m: 4096,
+  n: 4096,
+  k: 4096,
+  weight: "f32",
+  count: 0,
+  source: "square linear [4096,4096] × [4096,4096] f32 (the spike's shape list; no model)",
+});
+
+/**
+ * The cases of the evaluation set `k88` (perf-ledger K-88 — the f32 skeleton forms and the conv2d
+ * counter decode), copied from the distributions' graphs (`models/`, the nodes by input and weight
+ * shape and the weight's storage) and not read at run time:
+ *
+ * - gemma4 E2B (`karume-gemma4-qat` `e2b`, int4 at group 32) at the 768-row prefill chunk: the MLP
+ *   gate / up of the 6,144-wide and the 12,288-wide layers (30 / 40 nodes), their down (15 / 20)
+ *   and the q projection of the sliding and the full layers (28 / 7) — 140 of the chunk's 277
+ *   linears.
+ * - umT5-XXL (`karume-umt5-xxl`, int8) at 512 tokens: the feed-forward wi (48 nodes).
+ * - siglip2 so400m (`karume-siglip2`, f32) at 729 tokens: the MLP fc1 (27 nodes).
+ * - From the spike's shape list (no model — count 0): a small-M linear (M = 64, 4,096², f32), the
+ *   square 4,096³ f32 linear and its matmul counterpart.
+ * - The Wan2.2 TI2V-5B VAE decoder (`vae_decoder_next` / `vae_decoder_first` at tile 16, int8 as the
+ *   default preset stores it): the three 3×3 conv2d of a next chunk (the chunk's frames in the
+ *   batch: 2 at 32², 4 at 64², 4 at 128²) and of a first chunk (1 frame each) — the three heaviest
+ *   of each chunk's five (the other two are 1×1 at 16²).
+ * - anima's VAE decoder (`karume-anima`, f16): c192 at 256² (6 nodes) and c384 at 128² (5).
+ *
+ * `censusCount` counts the nodes in the unit its `censusGroup` names ({@link K88_CENSUS}).
+ */
+export const K88_CASES: readonly SweepCase[] = [
+  ...[
+    { n: 6144, k: 1536, count: 30, what: "MLP gate / up of the 6,144-wide layers" },
+    { n: 12288, k: 1536, count: 40, what: "MLP gate / up of the 12,288-wide layers" },
+    { n: 1536, k: 6144, count: 15, what: "MLP down of the 6,144-wide layers" },
+    { n: 1536, k: 12288, count: 20, what: "MLP down of the 12,288-wide layers" },
+    { n: 2048, k: 1536, count: 28, what: "q of the sliding layers" },
+    { n: 4096, k: 1536, count: 7, what: "q of the full layers" },
+  ].map(({ n, k, count, what }) =>
+    k88Linear({
+      m: 768,
+      n,
+      k,
+      weight: "i4",
+      groupSize: 32,
+      count,
+      group: K88_CENSUS.gemma4Prefill,
+      source: `gemma4 E2B model [1,768,${k}] × [${n},${k}] int4 g32 (${what})`,
+    }),
+  ),
+  k88Linear({
+    m: 512,
+    n: 10240,
+    k: 4096,
+    weight: "i8",
+    count: 48,
+    group: K88_CENSUS.umt5,
+    source: "umT5-XXL text_encoder [1,512,4096] × [10240,4096] int8 (feed-forward wi)",
+  }),
+  k88Linear({
+    m: 729,
+    n: 4304,
+    k: 1152,
+    weight: "f32",
+    count: 27,
+    group: K88_CENSUS.siglip2,
+    source: "siglip2 so400m vision [1,729,1152] × [4304,1152] f32 (MLP fc1)",
+  }),
+  k88Linear({
+    m: 64,
+    n: 4096,
+    k: 4096,
+    weight: "f32",
+    count: 0,
+    source: "small-M guard [64,4096] × [4096,4096] f32 (the spike's shape list; no model)",
+  }),
+  K88_SQUARE_LINEAR,
+  {
+    id: "k88-matmul-m4096-n4096-k4096",
+    op: "matmul",
+    m: 4096,
+    n: 4096,
+    k: 4096,
+    censusCount: 0,
+    mirrorOf: K88_SQUARE_LINEAR.id,
+    source: `square matmul [4096,4096] × [4096,4096], the B-side counterpart of ${K88_SQUARE_LINEAR.id} (no model)`,
+  },
+  ...[
+    { batch: 2, channels: 1024, size: 32 },
+    { batch: 4, channels: 1024, size: 64 },
+    { batch: 4, channels: 512, size: 128 },
+  ].map(({ batch, channels, size }) =>
+    k88Conv2d({
+      batch,
+      channels,
+      size,
+      weight: "i8",
+      count: 1,
+      group: K88_CENSUS.wanNext,
+      source: "Wan2.2 TI2V-5B vae_decoder_next",
+    }),
+  ),
+  ...[
+    { channels: 1024, size: 32 },
+    { channels: 1024, size: 64 },
+    { channels: 512, size: 128 },
+  ].map(({ channels, size }) =>
+    k88Conv2d({
+      batch: 1,
+      channels,
+      size,
+      weight: "i8",
+      count: 1,
+      group: K88_CENSUS.wanFirst,
+      source: "Wan2.2 TI2V-5B vae_decoder_first",
+    }),
+  ),
+  ...[
+    { channels: 192, size: 256, count: 6 },
+    { channels: 384, size: 128, count: 5 },
+  ].map(({ channels, size, count }) =>
+    k88Conv2d({
+      batch: 1,
+      channels,
+      size,
+      weight: "f16",
+      count,
+      group: K88_CENSUS.anima,
+      source: "anima vae_decoder",
+    }),
+  ),
+];
+
+/**
+ * The case table a candidate set sweeps: the evaluation sets `k85` and `k88` their own tables,
+ * every other set {@link SWEEP_CASES}. The sweep, its record's case-set version and default
+ * fingerprint, and the page's case list take it from here.
  */
 export const sweepCasesFor = (set: CandidateSet): readonly SweepCase[] =>
-  set === "k85" ? K85_TABLE : SWEEP_CASES;
+  set === "k85" ? K85_TABLE : set === "k88" ? K88_CASES : SWEEP_CASES;
 
 /**
  * Every case any set sweeps (the lookup of the measured-candidate fingerprint — a row names its case
- * by id; the ids of the two tables never meet).
+ * by id; the ids of the three tables never meet).
  */
-export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K85_TABLE];
+export const ALL_SWEEP_CASES: readonly SweepCase[] = [...SWEEP_CASES, ...K85_TABLE, ...K88_CASES];
 
 /**
  * A sweep case as an application sees it: the id `GeometrySweepOptions.cases` takes, and its op.
- * `censusCount` is set on the cases of the evaluation set `k85` only: the node count in one Wan2.2
- * TI2V-5B 33f DiT forward (0 for a guard shape of another model) — the weight of that set's forward
- * sum.
+ * `censusCount` is set on the cases of the evaluation sets only: for `k85` the node count in one
+ * Wan2.2 TI2V-5B 33f DiT forward (0 for a guard shape of another model) — the weight of that set's
+ * forward sum; for `k88` the node count in the unit `censusGroup` names (0 and no group for a
+ * shape of no model) — the weight of that unit's sum.
  */
 export type SweepCaseEntry = {
   readonly id: string;
   readonly op: SweepOp;
   readonly censusCount?: number;
+  readonly censusGroup?: string;
 };
 
 /**
  * Every case of the case table of `set` ({@link sweepCasesFor} — default: {@link SWEEP_CASES}) as
- * its id and op, in the table's order (the `k85` cases with their `censusCount`). A new array of new
- * objects on every call: the table itself stays internal (its other descriptive fields are no public
- * surface), and nothing a caller does to the result reaches the case set or the fingerprints.
+ * its id and op, in the table's order (the `k85` cases with their `censusCount`, the `k88` cases
+ * with their `censusCount` and `censusGroup`). A new array of new objects on every call: the table
+ * itself stays internal (its other descriptive fields are no public surface), and nothing a caller
+ * does to the result reaches the case set or the fingerprints.
  */
 export const sweepCaseEntries = (set: CandidateSet = DEFAULT_CANDIDATE_SET): SweepCaseEntry[] =>
   set === "k85"
     ? K85_TABLE.map(({ id, op, censusCount }) => ({ id, op, censusCount }))
-    : SWEEP_CASES.map(({ id, op }) => ({ id, op }));
+    : set === "k88"
+      ? K88_CASES.map((sweepCase) => ({
+          id: sweepCase.id,
+          op: sweepCase.op,
+          censusCount: sweepCase.censusCount,
+          ...("censusGroup" in sweepCase && sweepCase.censusGroup !== undefined
+            ? { censusGroup: sweepCase.censusGroup }
+            : {}),
+        }))
+      : SWEEP_CASES.map(({ id, op }) => ({ id, op }));
 
 /**
  * The operation count of one dispatch (multiply-add = 2). For i8a8, the number of integer
@@ -630,10 +864,16 @@ export const caseFlops = (sweepCase: SweepCase): number => {
     case "i8a8-attention":
       return 2 * sweepCase.batchHeads * sweepCase.m * sweepCase.n * sweepCase.d;
     case "conv2d":
-      // As implicit GEMM (M = Cout, N = H·W, K = Cin·9 — skipped reads of the padding are not
-      // counted)
+      // As implicit GEMM (M = Cout, N = H·W, K = Cin·9, per batch — skipped reads of the padding
+      // are not counted)
       return (
-        2 * sweepCase.channelsOut * sweepCase.height * sweepCase.width * sweepCase.channelsIn * 9
+        2 *
+        (sweepCase.batch ?? 1) *
+        sweepCase.channelsOut *
+        sweepCase.height *
+        sweepCase.width *
+        sweepCase.channelsIn *
+        9
       );
     case "i8a8-conv3d": {
       // As implicit GEMM (M = Cout, N = Tout·Hout·Wout, K = Cin·Kt·Kh·Kw — out-of-range taps are
@@ -663,7 +903,7 @@ export const caseShape = (sweepCase: SweepCase): string => {
     case "i8a8-attention":
       return `${sweepCase.stage} BH${sweepCase.batchHeads} M${sweepCase.m} N${sweepCase.n} D${sweepCase.d}`;
     case "conv2d":
-      return `Cin${sweepCase.channelsIn} Cout${sweepCase.channelsOut} ${sweepCase.height}x${sweepCase.width} 3x3`;
+      return `${sweepCase.batch === undefined ? "" : `B${sweepCase.batch} `}Cin${sweepCase.channelsIn} Cout${sweepCase.channelsOut} ${sweepCase.height}x${sweepCase.width} 3x3`;
     case "i8a8-conv3d": {
       const { dims } = sweepCase;
       const kernel = `${dims.kernelT}x${dims.kernelH}x${dims.kernelW}`;

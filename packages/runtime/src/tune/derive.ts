@@ -100,6 +100,7 @@ import {
   type CandidateSet,
   conv2dCandidate,
   EVALUATION_SETS,
+  evaluationSetLedgerId,
   gemmCandidate,
   i8a8Candidate,
   isCandidateSet,
@@ -440,13 +441,15 @@ export const parseSweepReport = (
   if (parsed.format !== REPORT_FORMAT) {
     throw new Error(`${where}: format is not ${REPORT_FORMAT} (${String(parsed.format)})`);
   }
-  // MUST: no table is derived from an evaluation set (perf-ledger K-85): its cases are outside the
-  // sweep's case set, so its verdicts would decide a field on shapes the table does not stand for
+  // MUST: no table is derived from an evaluation set (perf-ledger K-85 / K-88): its cases are
+  // outside the sweep's case set, so its verdicts would decide a field on shapes the table does not
+  // stand for
   const settings = parsed.settings;
   const recordedSet = isRecord(settings) ? settings.candidateSet : undefined;
-  if (EVALUATION_SETS.some((set) => set === recordedSet)) {
+  const evaluation = EVALUATION_SETS.find((set) => set === recordedSet);
+  if (evaluation !== undefined) {
     throw new Error(
-      `${where}: settings.candidateSet ${String(recordedSet)} is an evaluation set (perf-ledger K-85): ` +
+      `${where}: settings.candidateSet ${evaluation} is an evaluation set (perf-ledger ${evaluationSetLedgerId(evaluation)}): ` +
         "it measures cases outside the sweep's case set, and no table is derived from it",
     );
   }

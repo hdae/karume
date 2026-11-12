@@ -84,6 +84,15 @@ measurements in `docs/research/`.
   `:dec`). A geometry without them keeps its keys and WGSL byte for byte, and no embedded table carries them.
   `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept them there and
   reject any other value, the decode outside `conv2d` and either field in `attention`, naming the field.
+- `@karume/runtime/tune`: the candidate set `"k88"` of `runGeometrySweep`, an evaluation of those two fields on
+  cases of their own that `geometrySweepCases("k88")` lists with their node counts and the unit they count in
+  (`censusGroup`): the gemma4 E2B prefill linears at the 768-row chunk (int4 g32), a umT5-XXL feed-forward linear
+  (int8), a siglip2 so400m MLP linear (f32), a small-M linear, a square 4,096³ linear and matmul, and the heaviest
+  conv2d of a Wan2.2 VAE decoder next and first chunk (int8) and of the anima VAE decoder (f16). Per case it
+  measures the geometry the default profile and every registered table give that case, each without the fields,
+  with each form and, for conv2d, with the decode alone and with each form. Its record carries the case-set version
+  of those cases, and `deriveGeometryProfile` derives no table from it; the other sets, their cases and every
+  fingerprint are unchanged. A candidate's name carries its fields as the key spells them (`…:tb-un`, `…:dec`).
 
 ### Changed
 

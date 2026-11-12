@@ -15,9 +15,10 @@
  *
  * There are three candidate sets a table is derived from ({@link CandidateSet}): `quick` (the
  * default + 4–5 shapes), `quick+` (quick ∪ the geometries adopted by the registered profiles — the
- * default) and `full` (the whole grid). A fourth, `k85`, is an evaluation set
- * ({@link EVALUATION_SETS}): the vec4 skeleton of the i8a8 linear (perf-ledger K-85) on cases of its
- * own, outside the sweep's case set, so it changes neither the other sets nor any fingerprint.
+ * default) and `full` (the whole grid). Two more, `k85` and `k88`, are evaluation sets
+ * ({@link EVALUATION_SETS}): the vec4 skeleton of the i8a8 linear (perf-ledger K-85) and the f32
+ * skeleton forms with the conv2d counter decode (perf-ledger K-88), each on cases of its own,
+ * outside the sweep's case set, so they change neither the other sets nor any fingerprint.
  */
 import {
   assertGemmGeometry,
@@ -36,7 +37,13 @@ import {
   i8a8WorkgroupStorageBytes,
 } from "../kernels/i8a8-geometry.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import type { GeometryProfile } from "../kernels/geometry-profile.ts";
+import { conv2dIgemmMTile } from "../kernels/conv2d.ts";
+import {
+  conv2dProfileGeometry,
+  DEFAULT_GEOMETRY_PROFILE,
+  gemmRowsGeometry,
+  type GeometryProfile,
+} from "../kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../kernels/geometry-profiles/index.ts";
 
 /** One candidate for the f32 skeleton (linear / fused attention / conv2d's implicit GEMM). */
@@ -45,7 +52,8 @@ export type GemmCandidate = {
   /**
    * `reg{tileM}x{tileN}r{regM}x{regN}w{wgX}` for linear / fused attention, and
    * `igemm{tileM}x{tileN}:wg{wgX}x{wgY}` for conv2d (both the same spelling as the op's key
-   * fragment, without v4).
+   * fragment, without v4), followed by the geometry's skeleton form (`:tb-un` / `:tas-tb-un`) and,
+   * for conv2d, its counter decode (`:dec`) when it carries them (perf-ledger K-88).
    */
   readonly name: string;
   readonly geometry: GemmGeometry;
@@ -67,9 +75,13 @@ export type GeometryCandidate = GemmCandidate | I8a8Candidate;
 const MAX_THREADS = 256;
 const MAX_TILE = 128;
 
+/** The name part of the optional skeleton form (the key's spelling — empty without it). */
+const formPart = (geometry: GemmGeometry): string =>
+  geometry.form === undefined ? "" : `:${geometry.form}`;
+
 export const gemmCandidate = (geometry: GemmGeometry): GemmCandidate => ({
   family: "gemm",
-  name: gemmGeometryTileKeyPart(geometry),
+  name: `${gemmGeometryTileKeyPart(geometry)}${formPart(geometry)}`,
   geometry,
 });
 
@@ -81,7 +93,9 @@ export const gemmCandidate = (geometry: GemmGeometry): GemmCandidate => ({
  */
 export const conv2dCandidate = (geometry: GemmGeometry): GemmCandidate => ({
   family: "gemm",
-  name: `igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}:wg${geometry.wgX}x${geometry.wgY}`,
+  name: `igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}:wg${geometry.wgX}x${geometry.wgY}${formPart(
+    geometry,
+  )}${geometry.decode === undefined ? "" : ":dec"}`,
   geometry,
 });
 
@@ -308,13 +322,80 @@ export const k85I8a8Candidates = (
   return unique([...profiles.map((profile) => i8a8Candidate(profile.i8a8.linear)), ...grid]);
 };
 
+/** The skeleton forms of the f32 GEMM (perf-ledger K-88), in the order the `k88` set measures them. */
+const K88_FORMS = ["tb-un", "tas-tb-un"] as const;
+
+/**
+ * The geometries of a `k88` case: each base geometry (`bases` — deduplicated, in order) without
+ * the fields, then with each skeleton form, and for conv2d (`decode`) the counter decode alone and
+ * with each form.
+ */
+const k88Variants = (bases: readonly GemmGeometry[], decode: boolean): GemmGeometry[] => {
+  const seen = new Set<string>();
+  return bases
+    .filter((base) => {
+      const key = JSON.stringify(base);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .flatMap((base) => [
+      base,
+      ...K88_FORMS.map((form) => ({ ...base, form })),
+      ...(decode
+        ? [
+            { ...base, decode: "counter" as const },
+            ...K88_FORMS.map((form) => ({ ...base, form, decode: "counter" as const })),
+          ]
+        : []),
+    ]);
+};
+
+/**
+ * The f32 candidates of a `k88` linear / matmul / bmm case of `rows` rows (perf-ledger K-88): the
+ * `gemmRows` geometry the default profile and every registered table (`profiles` — the adapter's
+ * table among them) give that row count, each without the field and with each skeleton form. The
+ * sweep puts the default geometry at the front.
+ */
+export const k88GemmCandidates = (
+  rows: number,
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): GemmCandidate[] =>
+  unique(
+    k88Variants(
+      [DEFAULT_GEOMETRY_PROFILE, ...profiles].map((profile) => gemmRowsGeometry(profile, rows)),
+      false,
+    ).map(gemmCandidate),
+  );
+
+/**
+ * The conv2d candidates of a `k88` case with `channelsOut` output channels (perf-ledger K-88): the
+ * `conv2d` geometry of that m-tile class in the default profile and every registered table, each
+ * without the fields, with each skeleton form, with the counter decode alone and with the decode
+ * and each form.
+ */
+export const k88Conv2dCandidates = (
+  channelsOut: number,
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): GemmCandidate[] => {
+  const mTile = conv2dIgemmMTile(channelsOut);
+  return unique(
+    k88Variants(
+      [DEFAULT_GEOMETRY_PROFILE, ...profiles].map((profile) =>
+        conv2dProfileGeometry(profile, mTile),
+      ),
+      true,
+    ).map(conv2dCandidate),
+  );
+};
+
 /**
  * The vocabulary of candidate sets (the CLI's `--set` and the page's select — both removed in
  * 0.15 — and the JSON's `settings.candidateSet`).
  */
-export const CANDIDATE_SETS = ["quick+", "quick", "full", "k85"] as const;
+export const CANDIDATE_SETS = ["quick+", "quick", "full", "k85", "k88"] as const;
 
-/** A candidate set (`quick` / `quick+` / `full` / `k85` — {@link CANDIDATE_SETS}). */
+/** A candidate set (`quick` / `quick+` / `full` / `k85` / `k88` — {@link CANDIDATE_SETS}). */
 export type CandidateSet = (typeof CANDIDATE_SETS)[number];
 
 /**
@@ -322,7 +403,10 @@ export type CandidateSet = (typeof CANDIDATE_SETS)[number];
  * outside the case set a table is derived from. Their records carry the case-set version and the
  * default's fingerprint of their own cases, and the generator derives no table from them (derive.ts).
  */
-export const EVALUATION_SETS: readonly CandidateSet[] = ["k85"];
+export const EVALUATION_SETS: readonly CandidateSet[] = ["k85", "k88"];
+
+/** The perf-ledger row an evaluation set measures (`k85` → `K-85`). */
+export const evaluationSetLedgerId = (set: CandidateSet): string => `K-${set.replace(/^k/, "")}`;
 
 /**
  * The default when no set is given (`quick+` — measures up to the registered tables' geometries
@@ -333,10 +417,17 @@ export const DEFAULT_CANDIDATE_SET: CandidateSet = "quick+";
 export const isCandidateSet = (value: string): value is CandidateSet =>
   (CANDIDATE_SETS as readonly string[]).includes(value);
 
-/** An evaluation set has no candidates for a family its cases do not have. */
-const noCandidates = (set: CandidateSet, family: string): never => {
-  throw new Error(`Candidate set ${set} has no ${family} candidates (it measures the i8a8 linear)`);
+/**
+ * An evaluation set has no candidates for a family its cases do not have (`k88` gives its f32
+ * candidates per case — {@link k88GemmCandidates}, {@link k88Conv2dCandidates}).
+ */
+const noCandidates = (set: CandidateSet, family: string, reason: string): never => {
+  throw new Error(`Candidate set ${set} has no ${family} candidates (${reason})`);
 };
+
+const K85_ONLY = "it measures the i8a8 linear";
+const K88_PER_CASE =
+  "they depend on the case's row count or m-tile class — candidatesFor gives them per case";
 
 /** The set for the f32 skeleton (linear / matmul / bmm / fused attention). */
 export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
@@ -348,7 +439,9 @@ export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
     case "full":
       return gemmCandidates();
     case "k85":
-      return noCandidates(set, "f32 skeleton");
+      return noCandidates(set, "f32 skeleton", K85_ONLY);
+    case "k88":
+      return noCandidates(set, "f32 skeleton", K88_PER_CASE);
   }
 };
 
@@ -362,7 +455,9 @@ export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] => {
     case "full":
       return conv2dCandidates();
     case "k85":
-      return noCandidates(set, "conv2d");
+      return noCandidates(set, "conv2d", K85_ONLY);
+    case "k88":
+      return noCandidates(set, "conv2d", K88_PER_CASE);
   }
 };
 
@@ -377,5 +472,7 @@ export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] => {
       return i8a8Candidates();
     case "k85":
       return k85I8a8Candidates();
+    case "k88":
+      return noCandidates(set, "i8a8", "it measures the f32 skeleton and conv2d");
   }
 };

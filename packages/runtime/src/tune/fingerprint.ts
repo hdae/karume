@@ -439,9 +439,10 @@ type SweepCaseField = SweepCase extends infer Case
  * `batch`, attention's `stage` / `batchHeads` / `d`, conv2d's `channelsIn` / `channelsOut` /
  * `height` / `width`, conv3d's `dims` — every field of the kernel's dims) and the attrs that affect
  * the dispatch (attention's `scale` goes into params,
- * `score` into the WGSL as the storage format of S). The excluded fields are information for humans
- * (`source` = description, `censusCount` = census count, `mirrorOf` = the mirrored case) — fixing a
- * description does not make every saved table mismatch.
+ * `score` into the WGSL as the storage format of S, the weight storage `weight` / `groupSize` of
+ * the `k88` cases into the key and the WGSL). The excluded fields are information for humans
+ * (`source` = description, `censusCount` = census count, `censusGroup` = what it counts,
+ * `mirrorOf` = the mirrored case) — fixing a description does not make every saved table mismatch.
  *
  * MUST: when a field is added to a case type, decide here whether it goes in or out (`satisfies`
  * requires every field to be classified — a forgotten field is not silently left out of the
@@ -464,7 +465,10 @@ const CASE_SET_FIELDS = {
   height: true,
   width: true,
   dims: true,
+  weight: true,
+  groupSize: true,
   censusCount: false,
+  censusGroup: false,
   source: false,
   mirrorOf: false,
 } as const satisfies Record<SweepCaseField, boolean>;

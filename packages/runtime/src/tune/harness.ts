@@ -132,6 +132,7 @@ import {
   type BmmCase,
   caseFlops,
   caseShape,
+  type CaseWeight,
   type Conv2dCase,
   type Conv3dI8a8Case,
   type LinearCase,
@@ -147,6 +148,8 @@ import {
   type GeometryCandidate,
   i8a8Candidate,
   i8a8CandidatesIn,
+  k88Conv2dCandidates,
+  k88GemmCandidates,
 } from "./geometries.ts";
 import {
   type CaseSummary,
@@ -290,19 +293,62 @@ const rawWeightBytes = (payloadBytes: number): number =>
   payloadBytes + ((4 - (payloadBytes % 4)) % 4);
 
 /**
- * f32 linear (f16-stored weights) — the GEMM path of src/runtime/recipe-builders/linear.ts:342-369.
+ * The weight buffer of an f32-compute case (`n` rows of `k` elements in `weight` storage) and its
+ * scale (per channel for i8, per group for i4 — none for f32 / f16): the raw-byte classes of
+ * src/runtime/session-build.ts with the scale lengths of format/container/codecs.ts. i4 nibbles take
+ * the i8 fill (any bit pattern is a valid nibble).
+ */
+const weightResources = (
+  weight: CaseWeight,
+  n: number,
+  k: number,
+  groupSize: number | undefined,
+): ResourceSpec[] => {
+  switch (weight) {
+    case "f32":
+      return [{ name: "w", bytes: n * k * F32, fill: "f32" }];
+    case "f16":
+      return [{ name: "w", bytes: rawWeightBytes(n * k * 2), fill: "f16" }];
+    case "i8":
+      return [{ name: "w", bytes: rawWeightBytes(n * k), fill: "i8" }];
+    case "i4": {
+      if (groupSize === undefined) throw new Error("an i4 case needs its group length");
+      return [{ name: "w", bytes: rawWeightBytes(Math.ceil((n * k) / 2)), fill: "i8" }];
+    }
+  }
+};
+
+/** The scale resource of an i8 / i4 weight (bound after the output — LINEAR_SCALE_BINDING). */
+const scaleResources = (
+  weight: CaseWeight,
+  n: number,
+  k: number,
+  groupSize: number | undefined,
+): ResourceSpec[] =>
+  weight === "i8"
+    ? [{ name: "wscale", bytes: n * F32, fill: "scale" }]
+    : weight === "i4"
+      ? [{ name: "wscale", bytes: n * Math.ceil(k / (groupSize ?? 1)) * F32, fill: "scale" }]
+      : [];
+
+/**
+ * f32 linear (f16-stored weights unless the case names another storage — the `k88` cases) — the
+ * GEMM path of src/runtime/recipe-builders/linear.ts:342-369.
  */
 const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
-  const { m, n, k } = sweepCase;
+  const { m, n, k, groupSize } = sweepCase;
+  const weight = sweepCase.weight ?? "f16";
   const v4 = gemmUsesVec4(k, n);
+  const scale = scaleResources(weight, n, k, groupSize);
   return {
     resources: [
       // x[m,k] / W[n,k] / b[n] / out[m,n] (bindings 1..4 = the order of binds, linear.ts:360-364;
-      // f16 has no scale)
+      // f32 / f16 have no scale, i8 / i4 bind it at 5)
       { name: "x", bytes: m * k * F32, fill: "f32" },
-      { name: "w", bytes: rawWeightBytes(n * k * 2), fill: "f16" },
+      ...weightResources(weight, n, k, groupSize),
       { name: "bias", bytes: n * F32, fill: "f32" },
       { name: "out", bytes: m * n * F32, fill: "none" },
+      ...scale,
     ],
     prelude: [],
     output: "out",
@@ -313,10 +359,10 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
       return {
-        key: linearKey("f16", v4, "f32", m, undefined, geometry),
-        wgsl: linearWgsl("f16", v4, "f32", m, undefined, geometry),
+        key: linearKey(weight, v4, "f32", m, groupSize, geometry),
+        wgsl: linearWgsl(weight, v4, "f32", m, groupSize, geometry),
         params: linearParams(m, n, k),
-        bindings: ["x", "w", "bias", "out"],
+        bindings: ["x", "w", "bias", "out", ...scale.map(({ name }) => name)],
         writes: ["out"],
         // linear.ts:365-369
         workgroups: [
@@ -618,11 +664,16 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
   };
 };
 
-/** conv2d's implicit GEMM (f16-stored weights) — src/runtime/recipe-builders/conv.ts:381-424. */
+/**
+ * conv2d's implicit GEMM (f16-stored weights and B = 1 unless the case names others — the `k88`
+ * cases) — src/runtime/recipe-builders/conv.ts:381-424.
+ */
 const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
   const { channelsIn, channelsOut, height, width } = sweepCase;
+  const batch = sweepCase.batch ?? 1;
+  const weight = sweepCase.weight ?? "f16";
   const dims: Conv2dDims = {
-    batch: 1,
+    batch,
     channelsIn,
     channelsOut,
     heightIn: height,
@@ -644,14 +695,16 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
   const kFlat = channelsIn * 9;
   const v4 = conv2dUsesVec4(kFlat, width, 1);
   const mTile = conv2dIgemmMTile(channelsOut);
+  const scale = scaleResources(weight, channelsOut, kFlat, undefined);
   return {
     resources: [
       // x[B,Cin,H,W] / W[Cout,Cin,3,3] / b[Cout] / out[B,Cout,H,W] (bindings 1..4 =
-      // conv.ts:413-417)
-      { name: "x", bytes: channelsIn * n * F32, fill: "f32" },
-      { name: "w", bytes: rawWeightBytes(channelsOut * kFlat * 2), fill: "f16" },
+      // conv.ts:413-417; the i8 scale at CONV2D_SCALE_BINDING = 5)
+      { name: "x", bytes: batch * channelsIn * n * F32, fill: "f32" },
+      ...weightResources(weight, channelsOut, kFlat, undefined),
       { name: "bias", bytes: channelsOut * F32, fill: "f32" },
-      { name: "out", bytes: channelsOut * n * F32, fill: "none" },
+      { name: "out", bytes: batch * channelsOut * n * F32, fill: "none" },
+      ...scale,
     ],
     prelude: [],
     output: "out",
@@ -661,10 +714,10 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
       return {
-        key: conv2dIgemmKey("f16", v4, mTile, geometry),
-        wgsl: conv2dIgemmWgsl("f16", v4, mTile, geometry),
+        key: conv2dIgemmKey(weight, v4, mTile, geometry),
+        wgsl: conv2dIgemmWgsl(weight, v4, mTile, geometry),
         params: conv2dIgemmParams(dims),
-        bindings: ["x", "w", "bias", "out"],
+        bindings: ["x", "w", "bias", "out", ...scale.map(({ name }) => name)],
         writes: ["out"],
         // conv.ts:418-422
         workgroups: [
@@ -757,10 +810,12 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
     case "linear":
     case "matmul":
     case "bmm":
+      // The evaluation set k88 measures the geometries the tables give this row count
+      return set === "k88" ? k88GemmCandidates(sweepCase.m) : gemmCandidatesIn(set);
     case "attention":
       return gemmCandidatesIn(set);
     case "conv2d":
-      return conv2dCandidatesIn(set);
+      return set === "k88" ? k88Conv2dCandidates(sweepCase.channelsOut) : conv2dCandidatesIn(set);
     case "i8a8-linear":
     case "i8a8-attention":
     case "i8a8-conv3d":

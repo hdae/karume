@@ -95,9 +95,10 @@
 export { runGeometrySweep } from "./src/tune/sweep.ts";
 export type { GeometrySweepOptions, GeometrySweepProgress } from "./src/tune/sweep.ts";
 /**
- * The candidate set (`"quick"`, `"quick+"`, `"full"`, or the evaluation set `"k85"` — the vec4
- * skeleton of the i8a8 linear on cases of its own, from whose record no table is derived) and the op
- * families of a sweep.
+ * The candidate set (`"quick"`, `"quick+"`, `"full"`, or an evaluation set on cases of its own,
+ * from whose record no table is derived: `"k85"` — the vec4 skeleton of the i8a8 linear — and
+ * `"k88"` — the f32 GEMM skeleton forms and the conv2d counter decode) and the op families of a
+ * sweep.
  */
 export type { CandidateSet as GeometrySweepCandidateSet } from "./src/tune/geometries.ts";
 export type { SweepOp as GeometrySweepOp } from "./src/tune/cases.ts";
@@ -105,8 +106,10 @@ export type { SweepOp as GeometrySweepOp } from "./src/tune/cases.ts";
  * Every case of the sweep's shape table as its id and op family, in op-family order: the ids
  * `GeometrySweepOptions.cases` takes and the cases {@link sweepCaseSetId} covers. Given the
  * evaluation set `"k85"`, the cases of its own table instead, each with its `censusCount` (nodes in
- * one Wan2.2 TI2V-5B 33f DiT forward, 0 for a guard shape of another model). A new array on every
- * call.
+ * one Wan2.2 TI2V-5B 33f DiT forward, 0 for a guard shape of another model); given `"k88"`, its
+ * cases with their `censusCount` and the unit it counts in, `censusGroup` (one gemma4 E2B prefill
+ * chunk, one Wan2.2 VAE next chunk, … — absent with a count of 0 for a shape of no model). A new
+ * array on every call.
  */
 export { sweepCaseEntries as geometrySweepCases } from "./src/tune/cases.ts";
 export type { SweepCaseEntry as GeometrySweepCase } from "./src/tune/cases.ts";

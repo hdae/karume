@@ -312,3 +312,23 @@ describe("runGeometrySweep: the evaluation set k85 sweeps its own case table (op
     );
   });
 });
+
+describe("runGeometrySweep: the evaluation set k88 sweeps its own case table (options validation, before touching the GPU)", () => {
+  it("refuses a case of the sweep's table under k88, a k88 case under another set, and an op its table does not have", async () => {
+    await assertRejects(
+      () => runGeometrySweep({ candidateSet: "k88", cases: ["linear-m1024-n2048-k2048"] }),
+      Error,
+      "Case linear-m1024-n2048-k2048 is not in the shape table of candidate set k88",
+    );
+    await assertRejects(
+      () => runGeometrySweep({ cases: ["k88-matmul-m4096-n4096-k4096"] }),
+      Error,
+      "is not in the shape table of candidate set quick+",
+    );
+    await assertRejects(
+      () => runGeometrySweep({ candidateSet: "k88", ops: ["attention"] }),
+      Error,
+      "No case matches",
+    );
+  });
+});

@@ -72,6 +72,7 @@ const CANDIDATE_SET_HINTS: Readonly<Record<GeometrySweepCandidateSet, string>> =
   "quick+": "quick plus the geometries of the registered tables (the runtime's default)",
   full: "every geometry of the family — the set a table is derived from",
   k85: "the vec4 skeleton of the i8a8 linear on its own cases (perf-ledger K-85) — an evaluation, no table is derived",
+  k88: "the f32 GEMM skeleton forms and the conv2d counter decode on their own cases (perf-ledger K-88) — an evaluation, no table is derived",
 };
 
 /** The adapter as the browser reports it, read without creating a device. */

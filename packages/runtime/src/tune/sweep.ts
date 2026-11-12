@@ -80,8 +80,9 @@ export type GeometrySweepOptions = {
   /** Passed to `requestAdapter` (`powerPreference` etc. — same as `acquireGpu({ adapter })`). */
   readonly adapter?: GPURequestAdapterOptions;
   /**
-   * The candidate set (default `quick+`). The evaluation set `k85` sweeps its own case table
-   * (`geometrySweepCases("k85")`), and no table is derived from its record.
+   * The candidate set (default `quick+`). The evaluation sets `k85` and `k88` sweep their own
+   * case tables (`geometrySweepCases("k85")`, `geometrySweepCases("k88")`), and no table is
+   * derived from their records.
    */
   readonly candidateSet?: CandidateSet;
   /** The op families to sweep (default: all families). */

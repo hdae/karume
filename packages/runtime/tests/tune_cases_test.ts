@@ -323,3 +323,130 @@ describe("the case table of the evaluation set k85 (perf-ledger K-85)", () => {
     assertEquals(sweepCaseEntries("full"), sweepCaseEntries());
   });
 });
+
+describe("the case table of the evaluation set k88 (perf-ledger K-88)", () => {
+  const k88 = sweepCasesFor("k88");
+  /** One row per case: op, the dispatch shape, the weight storage, the count and its unit. */
+  const rows = k88.map((sweepCase) => {
+    switch (sweepCase.op) {
+      case "linear":
+        return [
+          "linear",
+          `${sweepCase.m}x${sweepCase.n}x${sweepCase.k}`,
+          `${sweepCase.weight ?? ""}${sweepCase.groupSize ?? ""}`,
+          sweepCase.censusCount,
+          sweepCase.censusGroup ?? "",
+        ];
+      case "matmul":
+        return ["matmul", `${sweepCase.m}x${sweepCase.n}x${sweepCase.k}`, "", 0, ""];
+      case "conv2d":
+        return [
+          "conv2d",
+          `b${sweepCase.batch ?? 1} c${sweepCase.channelsIn}>${sweepCase.channelsOut} ${sweepCase.height}x${sweepCase.width}`,
+          sweepCase.weight ?? "",
+          sweepCase.censusCount,
+          sweepCase.censusGroup ?? "",
+        ];
+      default:
+        return [sweepCase.op];
+    }
+  });
+
+  it("is the gemma4 E2B prefill, umT5, siglip2 and guard linears, the square matmul, and the Wan2.2 and anima VAE conv2d, with their storage and counts, outside every other table", () => {
+    const gemma = "one gemma4 E2B prefill chunk (M = 768)";
+    const next = "one Wan2.2 TI2V-5B VAE decoder next chunk (tile 16)";
+    const first = "one Wan2.2 TI2V-5B VAE decoder first chunk (tile 16)";
+    const anima = "one anima VAE decode (the graph's 64×64 latent)";
+    assertEquals(rows, [
+      ["linear", "768x6144x1536", "i432", 30, gemma],
+      ["linear", "768x12288x1536", "i432", 40, gemma],
+      ["linear", "768x1536x6144", "i432", 15, gemma],
+      ["linear", "768x1536x12288", "i432", 20, gemma],
+      ["linear", "768x2048x1536", "i432", 28, gemma],
+      ["linear", "768x4096x1536", "i432", 7, gemma],
+      ["linear", "512x10240x4096", "i8", 48, "one umT5-XXL encoder forward (512 tokens)"],
+      ["linear", "729x4304x1152", "f32", 27, "one siglip2 so400m vision forward (729 tokens)"],
+      ["linear", "64x4096x4096", "f32", 0, ""],
+      ["linear", "4096x4096x4096", "f32", 0, ""],
+      ["matmul", "4096x4096x4096", "", 0, ""],
+      ["conv2d", "b2 c1024>1024 32x32", "i8", 1, next],
+      ["conv2d", "b4 c1024>1024 64x64", "i8", 1, next],
+      ["conv2d", "b4 c512>512 128x128", "i8", 1, next],
+      ["conv2d", "b1 c1024>1024 32x32", "i8", 1, first],
+      ["conv2d", "b1 c1024>1024 64x64", "i8", 1, first],
+      ["conv2d", "b1 c512>512 128x128", "i8", 1, first],
+      ["conv2d", "b1 c192>192 256x256", "f16", 6, anima],
+      ["conv2d", "b1 c384>384 128x128", "f16", 5, anima],
+    ]);
+    const others = new Set([...SWEEP_CASES, ...sweepCasesFor("k85")].map(({ id }) => id));
+    for (const sweepCase of k88) {
+      assert(!others.has(sweepCase.id), `${sweepCase.id} is also a case of another table`);
+      assert(sweepCase.id.startsWith("k88-"), sweepCase.id);
+    }
+    assertEquals(new Set(k88.map(({ id }) => id)).size, k88.length);
+    // The gemma4 cases weight 140 of the prefill chunk's 277 linears
+    assertEquals(
+      k88.reduce(
+        (total, sweepCase) =>
+          total +
+          ("censusGroup" in sweepCase && sweepCase.censusGroup === gemma
+            ? sweepCase.censusCount
+            : 0),
+        0,
+      ),
+      140,
+    );
+  });
+
+  it("holds shapes the forms and the decode take: the vec4 kernels (k % 4, n % 4; conv2d's K, Wout and stride), whole i4 groups, conv2d's flops per batch", () => {
+    for (const sweepCase of k88) {
+      assert(caseFlops(sweepCase) > 0, sweepCase.id);
+      switch (sweepCase.op) {
+        case "linear":
+        case "matmul":
+          assert(gemmUsesVec4(sweepCase.k, sweepCase.n), sweepCase.id);
+          if (sweepCase.op === "linear" && sweepCase.weight === "i4") {
+            assertEquals(sweepCase.k % (sweepCase.groupSize ?? 0), 0, sweepCase.id);
+          }
+          break;
+        case "conv2d":
+          assert(conv2dUsesVec4(sweepCase.channelsIn * 9, sweepCase.width, 1), sweepCase.id);
+          assertEquals(
+            caseFlops(sweepCase),
+            2 *
+              (sweepCase.batch ?? 1) *
+              sweepCase.channelsOut *
+              sweepCase.height *
+              sweepCase.width *
+              sweepCase.channelsIn *
+              9,
+          );
+          break;
+        default:
+          assert(false, `${sweepCase.id}: an op outside the forms`);
+      }
+    }
+  });
+
+  it("the public list gives the k88 cases with their count and its unit, and the other sets' lists are unchanged", () => {
+    assertEquals(
+      sweepCaseEntries("k88"),
+      k88.map((sweepCase) => ({
+        id: sweepCase.id,
+        op: sweepCase.op,
+        censusCount: sweepCase.censusCount,
+        ...("censusGroup" in sweepCase && sweepCase.censusGroup !== undefined
+          ? { censusGroup: sweepCase.censusGroup }
+          : {}),
+      })),
+    );
+    assertEquals(
+      sweepCaseEntries("k88").filter((entry) => entry.censusGroup === undefined).length,
+      3,
+    );
+    for (const set of ["quick", "quick+", "full"] as const) {
+      assertEquals(sweepCasesFor(set), SWEEP_CASES);
+    }
+    assertEquals(sweepCaseEntries("full"), sweepCaseEntries());
+  });
+});

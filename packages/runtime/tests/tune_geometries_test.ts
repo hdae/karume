@@ -19,7 +19,12 @@ import {
 } from "../src/kernels/i8a8-geometry.ts";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 import { conv2dIgemmKey } from "../src/kernels/conv2d.ts";
-import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
+import {
+  conv2dProfileGeometry,
+  DEFAULT_GEOMETRY_PROFILE,
+  gemmRowsGeometry,
+  type GeometryProfile,
+} from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import {
   CANDIDATE_SETS,
@@ -34,6 +39,8 @@ import {
   i8a8CandidatesIn,
   EVALUATION_SETS,
   k85I8a8Candidates,
+  k88Conv2dCandidates,
+  k88GemmCandidates,
   quickConv2dCandidates,
   quickGemmCandidates,
   quickI8a8Candidates,
@@ -289,12 +296,87 @@ describe("candidate set k85 (perf-ledger K-85 — the vec4 skeleton of the i8a8 
       }
     }
     assertEquals(names(i8a8CandidatesIn("k85")), names(k85));
-    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k85"]);
-    assertEquals(EVALUATION_SETS, ["k85"]);
+    assertEquals(CANDIDATE_SETS, ["quick+", "quick", "full", "k85", "k88"]);
+    assertEquals(EVALUATION_SETS, ["k85", "k88"]);
   });
 
   it("has no candidates of the f32 skeleton or conv2d (its cases are i8a8 linears only)", () => {
     assertThrows(() => gemmCandidatesIn("k85"), Error, "has no f32 skeleton candidates");
     assertThrows(() => conv2dCandidatesIn("k85"), Error, "has no conv2d candidates");
+  });
+});
+
+describe("candidate set k88 (perf-ledger K-88 — the f32 skeleton forms and the conv2d counter decode)", () => {
+  const PROFILES = [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES];
+  const distinct = (geometries: readonly GemmGeometry[]): GemmGeometry[] =>
+    geometries.filter(
+      (geometry, index) =>
+        geometries.findIndex((other) => JSON.stringify(other) === JSON.stringify(geometry)) ===
+        index,
+    );
+
+  it("a linear / matmul case: the gemmRows geometry of the default and every registered table for its M, each without the form and with each form, the default first", () => {
+    for (const rows of [64, 512, 768, 4096]) {
+      const bases = distinct(PROFILES.map((profile) => gemmRowsGeometry(profile, rows)));
+      const candidates = k88GemmCandidates(rows);
+      assertEquals(
+        names(candidates),
+        bases.flatMap((base) => [
+          gemmName(base),
+          `${gemmName(base)}:tb-un`,
+          `${gemmName(base)}:tas-tb-un`,
+        ]),
+        `M ${rows}`,
+      );
+      assertEquals(candidates[0]?.geometry, gemmRowsGeometry(DEFAULT_GEOMETRY_PROFILE, rows));
+      for (const { name, geometry } of candidates) assertGemmGeometry(geometry, name);
+    }
+  });
+
+  it("a conv2d case: the geometry of its m-tile class in the default and every registered table, each with no field, each form, the decode alone and the decode with each form", () => {
+    for (const channels of [1024, 96]) {
+      const mTile = channels % 64 === 0 ? 64 : 32;
+      const bases = distinct(PROFILES.map((profile) => conv2dProfileGeometry(profile, mTile)));
+      const candidates = k88Conv2dCandidates(channels);
+      assertEquals(
+        names(candidates),
+        bases.flatMap((base) => {
+          const name = names([conv2dCandidate(base)])[0];
+          return [
+            name,
+            `${name}:tb-un`,
+            `${name}:tas-tb-un`,
+            `${name}:dec`,
+            `${name}:tb-un:dec`,
+            `${name}:tas-tb-un:dec`,
+          ];
+        }),
+        `Cout ${channels}`,
+      );
+      // The names are the key's spelling of the fields
+      for (const { name, geometry } of candidates) {
+        assertEquals(
+          conv2dIgemmKey("f32", true, mTile, geometry).includes(
+            name.replace(/^igemm(\w+):/, "igemm$1v4:"),
+          ),
+          true,
+          name,
+        );
+      }
+    }
+  });
+
+  it("leaves quick / quick+ / full as they were (no form, no decode), and gives no candidates outside a case", () => {
+    for (const set of ["quick", "quick+", "full"] as const) {
+      for (const { name, geometry } of [...gemmCandidatesIn(set), ...conv2dCandidatesIn(set)]) {
+        assert(!("form" in geometry) && !("decode" in geometry), `${set}: ${name}`);
+      }
+    }
+    assertThrows(() => gemmCandidatesIn("k88"), Error, "has no f32 skeleton candidates");
+    assertThrows(() => conv2dCandidatesIn("k88"), Error, "has no conv2d candidates");
+    assertThrows(() => i8a8CandidatesIn("k88"), Error, "has no i8a8 candidates");
+    // A geometry without the fields keeps its name
+    assertEquals(gemmCandidate(defaultGemmGeometry()).name, "reg128x128r8x8w16");
+    assertEquals(conv2dCandidate(gemmMTileGeometry(64)).name, "igemm64x128:wg16x8");
   });
 });

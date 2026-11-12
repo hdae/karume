@@ -815,3 +815,79 @@ describe("the skeleton form and the counter decode of an f32 geometry in the fin
     assertEquals(new Set(ids).size, ids.length);
   });
 });
+
+describe("the record keys and the dispatches of the evaluation set k88 (perf-ledger K-88)", () => {
+  it("k88 records the version and the default fingerprint of its own case table; the table-deriving sets record what they did before", () => {
+    assertMatch(candidateSetCaseSetId("k88"), /^[0-9a-f]{16}$/);
+    assertEquals(
+      candidateSetCaseSetId("k88"),
+      caseSetId(sweepCasesFor("k88"), PROFILE_GEMM_ROWS_BOUNDS),
+    );
+    for (const other of [sweepCaseSetId(), candidateSetCaseSetId("k85")]) {
+      assertNotEquals(candidateSetCaseSetId("k88"), other);
+    }
+    assertMatch(candidateSetDefaultKernelsId("k88"), /^[0-9a-f]{16}$/);
+    assertNotEquals(
+      candidateSetDefaultKernelsId("k88"),
+      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+    );
+    for (const set of ["quick", "quick+", "full"] as const) {
+      assertEquals(candidateSetCaseSetId(set), sweepCaseSetId());
+      assertEquals(
+        candidateSetDefaultKernelsId(set),
+        geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      );
+    }
+  });
+
+  it("every candidate of every k88 case builds the kernel of its storage, its batch and its fields, on the workgroups of its base geometry", () => {
+    let launches = 0;
+    for (const sweepCase of sweepCasesFor("k88")) {
+      const plan = casePlan(sweepCase, 65535, false);
+      const candidates = candidatesFor(sweepCase, "k88");
+      assertEquals(candidates[0]?.name, plan.defaultCandidate.name, sweepCase.id);
+      const byBase = new Map<string, Launch>();
+      for (const candidate of candidates) {
+        const launch = plan.launch(candidate);
+        const { geometry } = candidate;
+        assert(!("tileK" in geometry));
+        const { form, decode, ...base } = geometry;
+        const key = JSON.stringify(base);
+        const plain = byBase.get(key) ?? plan.launch(gemmCandidate(base));
+        byBase.set(key, plain);
+        assertEquals(launch.workgroups, plain.workgroups, candidate.name);
+        assertEquals(launch.key.includes(":tb-un"), form === "tb-un", candidate.name);
+        assertEquals(launch.key.includes(":tas-tb-un"), form === "tas-tb-un", candidate.name);
+        assertEquals(launch.key.endsWith(":dec"), decode === "counter", candidate.name);
+        launches += 1;
+      }
+      if (sweepCase.op === "linear" && sweepCase.weight === "i4") {
+        assertStringIncludes(plan.launch(plan.defaultCandidate).key, ":wi4g32");
+        assertEquals(plan.launch(plan.defaultCandidate).bindings.at(-1), "wscale");
+      }
+      if (sweepCase.op === "conv2d") {
+        const launch = plan.launch(plan.defaultCandidate);
+        assertEquals(launch.workgroups[2], sweepCase.batch ?? 1, sweepCase.id);
+        assertEquals(launch.key.includes(":wi8"), sweepCase.weight === "i8", sweepCase.id);
+        assertEquals(launch.bindings.includes("wscale"), sweepCase.weight === "i8", sweepCase.id);
+      }
+    }
+    assert(launches > 100, `${launches} launches`);
+  });
+
+  it("the measured-candidate fingerprint reads rows of k88 cases, and a form or the decode changes it", () => {
+    const conv2dCase = sweepCasesFor("k88").find((entry) => entry.op === "conv2d");
+    assert(conv2dCase !== undefined);
+    const base = casePlan(conv2dCase, 65535, false).defaultCandidate.geometry;
+    assert(!("tileK" in base));
+    const ids = [
+      sweepCandidateKernelsId([{ caseId: conv2dCase.id, geometryParams: base }], false),
+      sweepCandidateKernelsId(
+        [{ caseId: conv2dCase.id, geometryParams: { ...base, decode: "counter" } }],
+        false,
+      ),
+    ];
+    for (const id of ids) assertMatch(id, /^[0-9a-f]{16}$/);
+    assertNotEquals(ids[0], ids[1]);
+  });
+});

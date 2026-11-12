@@ -1751,3 +1751,13 @@ describe("the evaluation set k85 (perf-ledger K-85): no table is derived from it
     );
   });
 });
+
+describe("the evaluation set k88 (perf-ledger K-88): no table is derived from its record", () => {
+  it("rejects a record whose settings.candidateSet is k88 before reading its rows, naming the reason", () => {
+    assertThrows(
+      () => derive(record({ settings: { candidateSet: "k88", quick: false } })),
+      Error,
+      "settings.candidateSet k88 is an evaluation set (perf-ledger K-88)",
+    );
+  });
+});
