@@ -1249,8 +1249,8 @@ counter decode ([The K-88 preset](#the-k-88-preset)).
 **Serve the page from the checkout that will derive the table.** The record carries `caseSets` and
 `defaultKernels` (one value per op family of its cases) and `candidateKernels`, the fingerprints of
 the case set and of the kernels of the runtime the page was built from, and `deriveGeometryProfile`
-rejects a record whose values differ from the deriving code. Do not edit `packages/runtime` of the serving checkout until the record has
-been derived: the dev server reloads edited modules.
+rejects a record whose values differ from the deriving code. Do not edit `packages/runtime` of the
+serving checkout until the record has been derived: the dev server reloads edited modules.
 
 **The GPU.** `runGeometrySweep` acquires a dedicated device per call and destroys it before it
 returns, so the page has no `useGpu`. The run joins the app's device queue with `runOnGpuQueue`
