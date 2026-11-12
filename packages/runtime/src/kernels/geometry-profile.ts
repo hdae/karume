@@ -65,32 +65,29 @@ export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGe
  * linear / matmul / bmm), `attention` `attention.qk` / `attention.pv`, `conv2d` `conv2d.rows64` /
  * `conv2d.rows32`, `i8a8-linear` `i8a8.linear`, `i8a8-attention` `i8a8.attentionQk` /
  * `i8a8.attentionPv`, `i8a8-conv3d` `i8a8.conv3d`. The maps from sweep op and from profile field to
- * family live in `src/tune/families.ts` (kernels do not import tune).
+ * family live in `src/tune/families.ts` (kernels do not import tune). The union is derived from
+ * {@link GEOMETRY_PROFILE_FAMILIES}, so a family cannot be added to the type without also entering
+ * the list every per-family loop walks.
  */
-export type GeometryProfileFamily =
-  | "gemm"
-  | "attention"
-  | "conv2d"
-  | "i8a8-linear"
-  | "i8a8-attention"
-  | "i8a8-conv3d";
+export type GeometryProfileFamily = (typeof GEOMETRY_PROFILE_FAMILIES)[number];
 
 /**
  * Every family in the fixed order — the order of the fields they decide, the order matching checks
- * them in and the order the generator writes `provenance.families` in.
+ * them in and the order the generator writes `provenance.families` in. The source of
+ * {@link GeometryProfileFamily}.
  *
  * NOTE: `./geometry-profiles/index.ts` must not read it: this module imports that one as a value,
  * and that one builds its frozen list at evaluation, so reading this constant there would depend on
  * the import order.
  */
-export const GEOMETRY_PROFILE_FAMILIES: readonly GeometryProfileFamily[] = [
+export const GEOMETRY_PROFILE_FAMILIES = [
   "gemm",
   "attention",
   "conv2d",
   "i8a8-linear",
   "i8a8-attention",
   "i8a8-conv3d",
-];
+] as const;
 
 /**
  * The provenance of one op family of a table generated from sweeps (DECIDED: ADR 0117 decision 4 as
