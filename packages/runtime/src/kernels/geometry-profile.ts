@@ -166,6 +166,19 @@ export type GeometryProfile = {
     readonly kernels: string;
     /** Case-set version (hash of the sweep's cases and the step boundaries of gemmRows — hex). */
     readonly caseSet: string;
+    /**
+     * The attention-bench records the derivation read for {@link GeometryProfile.attentionOnline}
+     * (written whenever records were given, whether or not they adopted the field — ADR 0117
+     * addendum 2026-11-12): their paths, SHA-256 and dates joined with `", "` in the order given,
+     * and the id of the bench's shape set they covered (the `attentionBenchShapeSetId` of the
+     * runtime that derived the table — `geometryProfileMismatch` compares it).
+     */
+    readonly attentionBench?: {
+      readonly records: string;
+      readonly sha256: string;
+      readonly date: string;
+      readonly shapes: string;
+    };
   };
 };
 
@@ -390,12 +403,23 @@ const assertProvenanceShape = (value: unknown, where: string): void => {
   for (const key of ["vendor", "architecture", "device", "description"] as const) {
     stringOf(adapter[key], where, `provenance.adapter.${key}`);
   }
+  if (provenance.attentionBench !== undefined) {
+    assertAttentionBenchShape(provenance.attentionBench, where);
+  }
   if (provenance.userAgent === undefined) return;
   if (!Array.isArray(provenance.userAgent)) {
     throw new CodegenError(`${where}: provenance.userAgent is not an array`);
   }
   const agents = denseEntriesOf(provenance.userAgent, where, "provenance.userAgent");
   agents.forEach((agent, index) => stringOf(agent, where, `provenance.userAgent[${index}]`));
+};
+
+/** The shape of `provenance.attentionBench` (field types only, as {@link assertProvenanceShape}). */
+const assertAttentionBenchShape = (value: unknown, where: string): void => {
+  const bench = recordOf(value, where, "provenance.attentionBench");
+  for (const key of ["records", "sha256", "date", "shapes"] as const) {
+    stringOf(bench[key], where, `provenance.attentionBench.${key}`);
+  }
 };
 
 /**

@@ -7,7 +7,12 @@
  * user) — the same style as `sessionOptionsViolation`.
  */
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
-import { geometryProfileKernelsId, KernelsIdError, sweepCaseSetId } from "./fingerprint.ts";
+import {
+  attentionBenchShapeSetId,
+  geometryProfileKernelsId,
+  KernelsIdError,
+  sweepCaseSetId,
+} from "./fingerprint.ts";
 
 const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
 
@@ -24,6 +29,10 @@ const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as co
  *    `provenance.kernels` — the WGSL counted without comments and whitespace, ADR 0117 addendum
  *    2026-10-19).
  * 4. The case-set version (the current runtime's value vs `provenance.caseSet`).
+ * 5. When the table was derived with attention-bench records (`provenance.attentionBench`), the id
+ *    of the bench's shape set they covered (the current runtime's `attentionBenchShapeSetId` vs
+ *    `provenance.attentionBench.shapes` — ADR 0117 addendum 2026-11-12). The kernels the
+ *    `attentionOnline` field chooses between are in the fingerprint (3).
  *
  * Not compared: `candidateSet` (whether a quick+ table suffices is the application's call), `match`
  * (injection does not look at `match`), browser and driver versions (no information is available —
@@ -77,6 +86,16 @@ export const geometryProfileMismatch = (
       `Table '${profile.id}': case-set version differs (table ${provenance.caseSet} / current runtime ${caseSet}` +
       " — a runtime update changed the sweep cases or the gemmRows bucket bounds)"
     );
+  }
+  const { attentionBench } = provenance;
+  if (attentionBench !== undefined) {
+    const shapes = attentionBenchShapeSetId();
+    if (shapes !== attentionBench.shapes) {
+      return (
+        `Table '${profile.id}': the attention bench's shape set differs (table ${attentionBench.shapes} / current runtime ${shapes}` +
+        " — a runtime update changed the shapes its online attention form was measured on)"
+      );
+    }
   }
   return undefined;
 };

@@ -146,6 +146,7 @@ import {
   timeLaunchPair,
   type Timing,
 } from "./harness.ts";
+import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
 import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import type { ReportAdapter, TimingUnit } from "./report.ts";
 import { timestampUnitFor } from "./sweep.ts";
@@ -156,66 +157,9 @@ import { timestampUnitFor } from "./sweep.ts";
  */
 export const ATTENTION_BENCH_FORMAT = "karume-attention-bench/2";
 
-/**
- * One attention shape (batch 1 — `heads` is the folded `B·H` axis). `queries` is the node's full
- * query count M (it decides the production split); `rowsPerDispatch` overrides the rows one measured
- * dispatch covers (default: the first row block production would run for the route).
- */
-export type AttentionBenchShape = {
-  /** A name for the record (free text). */
-  readonly id: string;
-  readonly heads: number;
-  readonly queries: number;
-  readonly keys: number;
-  readonly depth: number;
-  /** The op's half scale (`√scale_factor`, applied to both q and k — ADR 0023 decision 3). */
-  readonly scale: number;
-  readonly rowsPerDispatch?: number;
-};
-
-/** The half scale the exporter writes for SDPA's default scale `1/√D` (`f32(D^-1/4)`). */
-const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
-
-const WAN22_HEADS = 24;
-const WAN22_DEPTH = 128;
-/** Latent tokens of Wan2.2 TI2V-5B at 1280×704: 44 × 80 / (2 × 2) patches per latent frame. */
-const WAN22_TOKENS_PER_LATENT_FRAME = 880;
-
-/**
- * Wan2.2 TI2V-5B's attention shapes (24 heads, D = 128): self-attention at 33 frames (9 latent
- * frames, N = 7,920) and 121 frames (31 latent frames, N = 27,280), and cross-attention over the 512
- * text tokens at 121 frames.
- */
-export const WAN22_ATTENTION_SHAPES: readonly AttentionBenchShape[] = [
-  {
-    id: "wan22-self-33f",
-    heads: WAN22_HEADS,
-    queries: 9 * WAN22_TOKENS_PER_LATENT_FRAME,
-    keys: 9 * WAN22_TOKENS_PER_LATENT_FRAME,
-    depth: WAN22_DEPTH,
-    scale: halfScale(WAN22_DEPTH),
-  },
-  {
-    id: "wan22-self-121f",
-    heads: WAN22_HEADS,
-    queries: 31 * WAN22_TOKENS_PER_LATENT_FRAME,
-    keys: 31 * WAN22_TOKENS_PER_LATENT_FRAME,
-    depth: WAN22_DEPTH,
-    scale: halfScale(WAN22_DEPTH),
-  },
-  {
-    id: "wan22-cross-121f",
-    heads: WAN22_HEADS,
-    queries: 31 * WAN22_TOKENS_PER_LATENT_FRAME,
-    keys: 512,
-    depth: WAN22_DEPTH,
-    scale: halfScale(WAN22_DEPTH),
-  },
-];
-
 /** Options of {@link runAttentionRouteBench} (all optional). */
 export type AttentionBenchOptions = {
-  /** The shapes (default {@link WAN22_ATTENTION_SHAPES}). */
+  /** The shapes (default {@link ATTENTION_BENCH_SHAPES} — the set the profile derivation requires). */
   readonly shapes?: readonly AttentionBenchShape[];
   /** Measurement rounds per dispatch (default 5 — the representative value is their min). */
   readonly rounds?: number;
@@ -1314,7 +1258,7 @@ export const runAttentionRouteBench = async (
   gpu: GpuContext,
   options: AttentionBenchOptions = {},
 ): Promise<AttentionBenchReport> => {
-  const shapes = options.shapes ?? WAN22_ATTENTION_SHAPES;
+  const shapes = options.shapes ?? ATTENTION_BENCH_SHAPES;
   if (shapes.length === 0) throw new Error("No shape to measure");
   shapes.forEach(checkAttentionBenchShape);
   const rounds = options.rounds ?? ROUNDS;

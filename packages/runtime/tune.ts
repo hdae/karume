@@ -123,11 +123,13 @@ export type {
 } from "./src/tune/report.ts";
 
 /**
- * Derives a geometry profile from sweep records, and serializes a profile as JSON for storage and
- * injection.
+ * Derives a geometry profile from sweep records (and, for the online attention's key-axis form,
+ * attention-bench records — `DeriveGeometryProfileOptions.attentionBench`), and serializes a profile
+ * as JSON for storage and injection.
  */
 export { deriveGeometryProfile, geometryProfileJson } from "./src/tune/derive.ts";
 export type {
+  AttentionBenchInput,
   DeriveGeometryProfileOptions,
   GeometryProfileDerivation,
   GeometrySweepInput,
@@ -162,22 +164,24 @@ export { sweepCaseSetId } from "./src/tune/fingerprint.ts";
 export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
 
 /**
- * Times the s16 and online routes of a8 fused attention at given shapes (default: Wan2.2 TI2V-5B's
- * self- and cross-attention) on the caller's device and returns the record
+ * Times the s16 and online routes of a8 fused attention at given shapes (default:
+ * {@link ATTENTION_BENCH_SHAPES}) on the caller's device and returns the record
  * (`karume-attention-bench/2`). Uses GPU timestamps when the device was acquired with
- * `gpuTiming: true`. `onlineTiled` adds a measure-first candidate (perf-ledger K-106).
+ * `gpuTiming: true`. `onlineTiled` adds the tiled key axis against the form N gives (perf-ledger
+ * K-106); such records are the second input of {@link deriveGeometryProfile}.
  */
-export {
-  ATTENTION_BENCH_FORMAT,
-  runAttentionRouteBench,
-  WAN22_ATTENTION_SHAPES,
-} from "./src/tune/attention-bench.ts";
+export { ATTENTION_BENCH_FORMAT, runAttentionRouteBench } from "./src/tune/attention-bench.ts";
+/**
+ * The bench's shapes: Wan2.2 TI2V-5B's self- and cross-attention, and the bench's default set,
+ * which attention-bench records given to {@link deriveGeometryProfile} must cover.
+ */
+export { ATTENTION_BENCH_SHAPES, WAN22_ATTENTION_SHAPES } from "./src/tune/attention-shapes.ts";
+export type { AttentionBenchShape } from "./src/tune/attention-shapes.ts";
 export type {
   AttentionBenchOptions,
   AttentionBenchProgress,
   AttentionBenchReport,
   AttentionBenchRoute,
-  AttentionBenchShape,
   AttentionBenchShapeResult,
   AttentionBenchStage,
   AttentionBenchVariants,

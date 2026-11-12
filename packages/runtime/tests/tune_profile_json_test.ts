@@ -374,6 +374,28 @@ describe("parseGeometryProfileJson: the optional key-axis form of the online att
     );
     rejects(json({ ...BASE, attentionOnline: "tiled" }), "attentionOnline is not an object");
   });
+
+  it("reads provenance.attentionBench (four strings) and rejects a missing, mistyped or unknown field in it", () => {
+    const provenance = BASE.provenance;
+    assert(provenance !== undefined);
+    const attentionBench = { records: "a.json", sha256: "aa", date: "2026-11-12", shapes: "0123" };
+    const withBench: GeometryProfile = { ...tiled, provenance: { ...provenance, attentionBench } };
+    assertEquals(parseGeometryProfileJson(geometryProfileJson(withBench)), withBench);
+    const broken = (value: unknown): string =>
+      json({ ...tiled, provenance: { ...provenance, attentionBench: value } });
+    rejects(
+      broken({ ...attentionBench, shapes: undefined }),
+      "provenance.attentionBench is missing fields shapes",
+    );
+    rejects(
+      broken({ ...attentionBench, date: 20261112 }),
+      "provenance.attentionBench.date is not a string",
+    );
+    rejects(
+      broken({ ...attentionBench, rounds: 5 }),
+      "provenance.attentionBench has unknown fields rounds",
+    );
+  });
 });
 
 describe("parseGeometryProfileJson: the optional skeleton form and counter decode of the f32 fields (perf-ledger K-88)", () => {

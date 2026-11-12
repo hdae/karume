@@ -587,6 +587,14 @@
         "kind": "variable"
       },
       {
+        "name": "ATTENTION_BENCH_SHAPES",
+        "kind": "variable"
+      },
+      {
+        "name": "AttentionBenchInput",
+        "kind": "typeAlias"
+      },
+      {
         "name": "AttentionBenchOptions",
         "kind": "typeAlias"
       },

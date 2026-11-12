@@ -72,6 +72,14 @@
  * tileM), and i8a8's linear / ①QK / ③PV / conv3d. A class with no case in the sweep gets the runtime's
  * default as is (the reason is left in the generated file's comment). A gemmRows bucket's default
  * is the geometry of the default table's bucket covering its range ({@link profileRowsSegments}).
+ *
+ * ## The second input: attention-bench records (ADR 0117 addendum 2026-11-12)
+ *
+ * The one field that is not a geometry, `attentionOnline` (the online attention's tiled Vᵀ key axis
+ * — perf-ledger K-106), is decided from attention-bench records (`runAttentionRouteBench` with
+ * `onlineTiled`, {@link deriveAttentionOnline}): adopted only when every shape of every record is
+ * identical and every shape of the bench's set gains at least `minSpeedup` per node, kernel and
+ * producer together, from each arm's minimum pass. Without records the field is absent.
  */
 import {
   defaultGemmGeometry,
@@ -82,13 +90,25 @@ import {
 import { gemmMTileGeometry } from "../kernels/gemm.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import {
+  type AttentionOnlineReduce,
+  attentionOnlineI8a8Key,
+  attentionOnlineKeyWords,
+} from "../kernels/attention-online-i8a8.ts";
+import {
   assertGeometryProfile,
   DEFAULT_GEOMETRY_PROFILE,
   type GeometryProfile,
 } from "../kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
+import {
+  attentionValueQuantization,
+  planAttentionOnlineWindows,
+} from "../runtime/recipe-builders/attention.ts";
+import { ATTENTION_BENCH_FORMAT, onlineDispatchRows } from "./attention-bench.ts";
+import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
 import {
+  attentionBenchShapeSetId,
   geometryProfileKernelsId,
   INFINITY_JSON,
   KernelsIdError,
@@ -1347,6 +1367,546 @@ export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
     ];
   });
 
+// ---------------------------------------------------------------------------
+// The second input: attention-bench records → `attentionOnline` (ADR 0117 addendum 2026-11-12)
+// ---------------------------------------------------------------------------
+
+/**
+ * One attention-bench record given to the derivation (`deriveGeometryProfile`'s `attentionBench`):
+ * the record (`karume-attention-bench/2` as `runAttentionRouteBench` returns it or `JSON.parse` of
+ * its saved text — an `unknown` boundary, {@link parseAttentionBenchReport}) and the identification
+ * that goes into the table's `provenance.attentionBench`.
+ */
+export type AttentionBenchInput = {
+  readonly report: unknown;
+  /** The record's name (a file path or the like). */
+  readonly path: string;
+  /** The SHA-256 of the record's bytes (hex — passing two records with the same value fails). */
+  readonly sha256: string;
+};
+
+/** One paired timing of a record (A = the form N gives, B = tiled), as the derivation reads it. */
+type BenchPair = {
+  readonly keys: readonly [string, string];
+  readonly reps?: number;
+  readonly rounds: readonly { readonly a: readonly number[]; readonly b: readonly number[] }[];
+  readonly error?: string;
+};
+
+/** One shape of a record, as the derivation reads it. */
+type BenchShapeObservation = {
+  readonly shape: AttentionBenchShape;
+  /** The online route's reduction form on the measured device. */
+  readonly reduce: AttentionOnlineReduce;
+  /** The rows of the measured dispatch. */
+  readonly rows: number;
+  readonly kernel: BenchPair;
+  readonly producer: BenchPair;
+  readonly identity: {
+    readonly identical: boolean;
+    readonly differingWords?: number;
+    readonly differingScaleWords?: number;
+    readonly error?: string;
+  };
+};
+
+/** One attention-bench record (checked at the `unknown` boundary). */
+export type AttentionBenchSource = {
+  readonly path: string;
+  readonly sha256: string;
+  readonly date: string;
+  readonly adapter: SweepAdapter;
+  /** The integer dot-product variant the record measured (`variants.dp4a.dot`). */
+  readonly dp4a: boolean;
+  /** The timestamp quantization step (same unit as the passes — 100 µs or 0, {@link benchQuantum}). */
+  readonly timestampQuantum: number;
+  readonly shapes: readonly BenchShapeObservation[];
+};
+
+const isNonNegativeNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+const recordAt = (value: unknown, where: string): Record<string, unknown> => {
+  if (!isRecord(value)) throw new Error(`${where} is not an object`);
+  return value;
+};
+
+const positiveIntegerAt = (record: Record<string, unknown>, key: string, where: string): number => {
+  const value = record[key];
+  if (!isPositiveInteger(value)) {
+    throw new Error(`${where}: ${key} must be a positive integer (${JSON.stringify(value)})`);
+  }
+  return value;
+};
+
+/** A pair of the record (`onlineTiled.kernel` or `quantization.tiledVt`). */
+const parseBenchPair = (value: unknown, where: string): BenchPair => {
+  const pair = recordAt(value, where);
+  const { keys } = pair;
+  if (!Array.isArray(keys) || keys.length !== 2 || !keys.every(isString)) {
+    throw new Error(`${where}: keys is not a pair of strings (${JSON.stringify(keys)})`);
+  }
+  const error = optional(pair, "error", isString, where);
+  const reps = optional(pair, "reps", isPositiveInteger, where);
+  const rounds = pair.rounds;
+  if (rounds === undefined && error !== undefined) {
+    return { keys: [keys[0], keys[1]], rounds: [], error };
+  }
+  if (!Array.isArray(rounds)) throw new Error(`${where}: rounds is not an array`);
+  return {
+    keys: [keys[0], keys[1]],
+    ...(reps === undefined ? {} : { reps }),
+    rounds: rounds.map((round, index) => {
+      const at = `${where} rounds[${index}]`;
+      const fields = recordAt(round, at);
+      const passes = (arm: "a" | "b"): readonly number[] => {
+        const values = fields[arm];
+        if (!Array.isArray(values) || !values.every(isNonNegativeNumber)) {
+          throw new Error(`${at}: ${arm} is not an array of non-negative numbers`);
+        }
+        return values;
+      };
+      return { a: passes("a"), b: passes("b") };
+    }),
+    ...(error === undefined ? {} : { error }),
+  };
+};
+
+const parseBenchShape = (value: unknown, where: string): AttentionBenchShape => {
+  const shape = recordAt(value, `${where} shape`);
+  const rowsPerDispatch = optional(shape, "rowsPerDispatch", isPositiveInteger, where);
+  const scale = shape.scale;
+  if (typeof scale !== "number" || !Number.isFinite(scale)) {
+    throw new Error(`${where}: shape.scale is not a finite number (${JSON.stringify(scale)})`);
+  }
+  return {
+    id: requireString(shape, "id", `${where} shape`),
+    heads: positiveIntegerAt(shape, "heads", `${where} shape`),
+    queries: positiveIntegerAt(shape, "queries", `${where} shape`),
+    keys: positiveIntegerAt(shape, "keys", `${where} shape`),
+    depth: positiveIntegerAt(shape, "depth", `${where} shape`),
+    scale,
+    ...(rowsPerDispatch === undefined ? {} : { rowsPerDispatch }),
+  };
+};
+
+const parseBenchShapeResult = (value: unknown, where: string): BenchShapeObservation => {
+  const result = recordAt(value, where);
+  const shape = parseBenchShape(result.shape, where);
+  const at = `${where} (${shape.id})`;
+  const online = recordAt(result.online, `${at} online`);
+  if (online.eligible !== true || (online.reduce !== "sg32" && online.reduce !== "wg")) {
+    throw new Error(
+      `${at}: the online route did not run (${JSON.stringify(online.reason ?? online.error)}) — no observation of the key axis`,
+    );
+  }
+  const tiled = recordAt(result.onlineTiled, `${at} onlineTiled`);
+  if (tiled.eligible !== true) {
+    throw new Error(
+      `${at}: the tiled key axis did not run (${JSON.stringify(tiled.reason)}) — measure again`,
+    );
+  }
+  const identity = recordAt(tiled.identity, `${at} onlineTiled.identity`);
+  if (!isBoolean(identity.identical)) {
+    throw new Error(`${at}: onlineTiled.identity.identical is not a boolean`);
+  }
+  const counted = (key: string): number | undefined => {
+    const count = identity[key];
+    if (count === undefined) return undefined;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error(
+        `${at}: onlineTiled.identity.${key} is not a count (${JSON.stringify(count)})`,
+      );
+    }
+    return count;
+  };
+  const differingWords = counted("differingWords");
+  const differingScaleWords = counted("differingScaleWords");
+  const identityError = optional(identity, "error", isString, `${at} onlineTiled.identity`);
+  const quantization = recordAt(result.quantization, `${at} quantization`);
+  return {
+    shape,
+    reduce: online.reduce,
+    rows: positiveIntegerAt(tiled, "rows", `${at} onlineTiled`),
+    kernel: parseBenchPair(tiled.kernel, `${at} onlineTiled.kernel`),
+    producer: parseBenchPair(quantization.tiledVt, `${at} quantization.tiledVt`),
+    identity: {
+      identical: identity.identical,
+      ...(differingWords === undefined ? {} : { differingWords }),
+      ...(differingScaleWords === undefined ? {} : { differingScaleWords }),
+      ...(identityError === undefined ? {} : { error: identityError }),
+    },
+  };
+};
+
+/**
+ * The timestamp quantization step of a record: Chrome's 100 µs when the unit is ns and every pass of
+ * both pairs at every shape is a multiple of it (the reading of report.ts's `roundsLookQuantized` —
+ * the bench record carries no `quantized` flag), else 0.
+ */
+const benchQuantum = (unit: string, shapes: readonly BenchShapeObservation[]): number => {
+  if (unit !== "ns") return 0;
+  const passes = shapes.flatMap(({ kernel, producer }) =>
+    [kernel, producer].flatMap(({ rounds }) => rounds.flatMap(({ a, b }) => [...a, ...b])),
+  );
+  const total = passes.reduce((sum, pass) => sum + pass, 0);
+  return total > 0 && passes.every((pass) => pass % CHROME_TIMESTAMP_QUANTUM_NS === 0)
+    ? CHROME_TIMESTAMP_QUANTUM_NS
+    : 0;
+};
+
+/**
+ * Reads an attention-bench record (the `unknown` boundary — checks only what the derivation reads and
+ * fails loudly). A file of the playground's `/attention-bench` page holds the record under `bench`:
+ * pass that value.
+ */
+export const parseAttentionBenchReport = (
+  parsed: unknown,
+  meta: { readonly path: string; readonly sha256: string },
+): AttentionBenchSource => {
+  const where = meta.path;
+  const record = recordAt(parsed, `${where}: the JSON`);
+  if (record.format !== ATTENTION_BENCH_FORMAT) {
+    throw new Error(
+      `${where}: format is not ${ATTENTION_BENCH_FORMAT} (${JSON.stringify(record.format)}${
+        isRecord(record.bench)
+          ? " — a playground file holds the record under `bench`; pass that"
+          : ""
+      })`,
+    );
+  }
+  const timing = recordAt(record.timing, `${where} timing`);
+  // MUST: GPU timestamps only (ADR 0117 decision 3): the wall clock adds the submit-to-completion
+  // floor, which moves per pass, so a ratio of minimums cannot be bounded from the record
+  if (timing.unit !== "ns" && timing.unit !== "deno-raw-tick") {
+    throw new Error(
+      `${where}: timing.unit is ${JSON.stringify(timing.unit)} (must be ns or deno-raw-tick — a wall-clock record is not read; acquire the device with gpuTiming: true)`,
+    );
+  }
+  const settings = recordAt(record.settings, `${where} settings`);
+  if (settings.onlineTiled !== true || settings.quantization !== true) {
+    throw new Error(
+      `${where}: settings.onlineTiled and settings.quantization must both be true (the kernel pair and the producer pair)`,
+    );
+  }
+  const adapter = recordAt(record.adapter, `${where} adapter`);
+  const variants = recordAt(record.variants, `${where} variants`);
+  const dot = recordAt(variants.dp4a, `${where} variants.dp4a`).dot;
+  if (dot !== "dp4a" && dot !== "emu") {
+    throw new Error(`${where}: variants.dp4a.dot is neither dp4a nor emu (${JSON.stringify(dot)})`);
+  }
+  if (!Array.isArray(record.shapes)) throw new Error(`${where}: shapes is not an array`);
+  const shapes = record.shapes.map((entry, index) =>
+    parseBenchShapeResult(entry, `${where} shapes[${index}]`),
+  );
+  return {
+    path: meta.path,
+    sha256: meta.sha256,
+    date: requireString(record, "date", where),
+    adapter: {
+      vendor: requireString(adapter, "vendor", `${where} adapter`),
+      architecture: requireString(adapter, "architecture", `${where} adapter`),
+      device: requireString(adapter, "device", `${where} adapter`),
+      description: requireString(adapter, "description", `${where} adapter`),
+    },
+    dp4a: dot === "dp4a",
+    timestampQuantum: benchQuantum(timing.unit, shapes),
+    shapes,
+  };
+};
+
+/** One record's observation of one shape: its gain, or why it is no ratio material. */
+export type AttentionBenchObservation = {
+  readonly path: string;
+  /** (N's node + N's producer) ÷ (tiled node + tiled producer), from each arm's minimum pass. */
+  readonly gain?: number;
+  /** Why the observation is dropped from the ratio material. */
+  readonly excluded?: string;
+};
+
+/** The verdict on `attentionOnline` ({@link deriveAttentionOnline}). */
+export type AttentionOnlineVerdict = {
+  /** Per shape of the bench's set, in its order: the combined gain and every observation. */
+  readonly shapes: readonly {
+    readonly id: string;
+    /** The geometric mean of the kept observations' gains (absent: none kept). */
+    readonly gain?: number;
+    readonly observations: readonly AttentionBenchObservation[];
+  }[];
+  /** The observations that were not identical (record, shape, what differed). */
+  readonly mismatches: readonly string[];
+  readonly outcome:
+    | {
+        readonly kind: "adopted";
+        /** The geometric mean of the shapes' gains, and the smallest and largest. */
+        readonly geomean: number;
+        readonly min: number;
+        readonly max: number;
+      }
+    | { readonly kind: "default"; readonly reason: string };
+};
+
+/** The minimum positive pass of an arm over every round (undefined when none). */
+const armMinimum = (pair: BenchPair, arm: "a" | "b"): number | undefined => {
+  const kept = pair.rounds.flatMap((round) => round[arm]).filter((pass) => pass > 0);
+  return kept.length === 0 ? undefined : Math.min(...kept);
+};
+
+/** Whether two shapes are the same measurement (every field — the shape set's id hashes them all). */
+const sameBenchShape = (left: AttentionBenchShape, right: AttentionBenchShape): boolean =>
+  left.id === right.id &&
+  left.heads === right.heads &&
+  left.queries === right.queries &&
+  left.keys === right.keys &&
+  left.depth === right.depth &&
+  left.scale === right.scale &&
+  left.rowsPerDispatch === right.rowsPerDispatch;
+
+/**
+ * The record checks of one observation against the current runtime (fail loudly — measure again):
+ * the shape is one of the bench's set, the pairs measured the current runtime's kernels and
+ * producers for the record's dp4a variant and the online route's reduction form, and the measured
+ * rows are the first window production runs.
+ */
+const assertCurrentObservation = (
+  source: AttentionBenchSource,
+  observation: BenchShapeObservation,
+): void => {
+  const { shape } = observation;
+  const where = `${source.path} (${shape.id})`;
+  const current = ATTENTION_BENCH_SHAPES.find((entry) => entry.id === shape.id);
+  if (current === undefined) {
+    throw new Error(
+      `${where}: the shape is not in the bench's shape set (${ATTENTION_BENCH_SHAPES.map(({ id }) => id).join(", ")})`,
+    );
+  }
+  if (!sameBenchShape(current, shape)) {
+    throw new Error(
+      `${where}: the shape's dimensions ${JSON.stringify(shape)} differ from the bench's ${JSON.stringify(current)} — measure again with the current runtime`,
+    );
+  }
+  const { heads, queries, keys, depth } = shape;
+  const own = attentionOnlineKeyWords(keys);
+  const expected = {
+    kernel: [
+      attentionOnlineI8a8Key(source.dp4a, depth, observation.reduce, "bhsd", own),
+      attentionOnlineI8a8Key(source.dp4a, depth, observation.reduce, "bhsd", "tiled"),
+    ],
+    producer: [
+      attentionValueQuantization(heads * depth, keys, own).key,
+      attentionValueQuantization(heads * depth, keys, "tiled").key,
+    ],
+  } as const;
+  for (const pair of ["kernel", "producer"] as const) {
+    const [a, b] = observation[pair].keys;
+    if (a !== expected[pair][0] || b !== expected[pair][1]) {
+      throw new Error(
+        `${where}: the ${pair} pair measured ${a} / ${b}, not the current runtime's ${expected[pair][0]} / ${expected[pair][1]} — measure again with the current runtime`,
+      );
+    }
+  }
+  const windows = planAttentionOnlineWindows(queries, { batch: heads, cols: keys, depth });
+  const rows = onlineDispatchRows(windows[0].rows, queries);
+  if (observation.rows !== rows) {
+    throw new Error(
+      `${where}: the measured dispatch covers ${observation.rows} rows, not the ${rows} of the first window production runs`,
+    );
+  }
+};
+
+/** Why an observation is not identical (undefined when it is). */
+const identityMismatch = (observation: BenchShapeObservation): string | undefined => {
+  const { identity } = observation;
+  if (identity.error !== undefined) return `the identity block failed (${identity.error})`;
+  if (identity.identical && identity.differingWords === 0 && identity.differingScaleWords === 0) {
+    return undefined;
+  }
+  return `${identity.differingWords ?? "?"} differing O words, ${identity.differingScaleWords ?? "?"} differing scale words`;
+};
+
+/**
+ * The gain of one observation, or why it is no ratio material: a failed pair, a pass without a
+ * positive minimum, or a rounding-error bound above {@link ROUNDING_ERROR_LIMIT} on either pair
+ * (E = q ÷ min(A) + q ÷ min(B) — ADR 0117 decision 3).
+ */
+const observationGain = (
+  source: AttentionBenchSource,
+  observation: BenchShapeObservation,
+): AttentionBenchObservation => {
+  const { path } = source;
+  const minima: number[] = [];
+  for (const pair of ["kernel", "producer"] as const) {
+    const timing = observation[pair];
+    if (timing.error !== undefined)
+      return { path, excluded: `the ${pair} pair failed (${timing.error})` };
+    const a = armMinimum(timing, "a");
+    const b = armMinimum(timing, "b");
+    if (a === undefined || b === undefined || timing.reps === undefined) {
+      return { path, excluded: `the ${pair} pair has no positive pass` };
+    }
+    const bound = source.timestampQuantum / a + source.timestampQuantum / b;
+    if (bound > ROUNDING_ERROR_LIMIT) {
+      return {
+        path,
+        excluded: `rounding-error bound E ${formatPercent(bound)} of the ${pair} pair (> ${LIMIT_LABEL})`,
+      };
+    }
+    minima.push(a / timing.reps, b / timing.reps);
+  }
+  const [kernelA, kernelB, producerA, producerB] = minima;
+  // The node runs the kernel over every query row; the measured dispatch is the first window
+  const scale = observation.shape.queries / observation.rows;
+  return { path, gain: (kernelA * scale + producerA) / (kernelB * scale + producerB) };
+};
+
+/**
+ * The verdict on `attentionOnline` from attention-bench records (a pure function — the rule of the
+ * module doc, ADR 0117 addendum 2026-11-12): adopted (the tiled key axis) only when every shape of
+ * every record is identical, every shape of `ATTENTION_BENCH_SHAPES` has ratio material, and every
+ * shape's gain (the geometric mean over the records that measured it) is at least `minSpeedup`.
+ *
+ * MUST: records are refused, not skipped, when they cannot stand for the current runtime on this
+ * adapter: another adapter than the sweeps' (`adapter`), a record given twice, a shape outside the
+ * bench's set or with other dimensions, other kernels or producers than the current runtime builds,
+ * another measured window, or a set the records do not cover together.
+ */
+export const deriveAttentionOnline = (
+  sources: readonly AttentionBenchSource[],
+  adapter: SweepAdapter,
+  minSpeedup: number,
+): AttentionOnlineVerdict => {
+  if (sources.length === 0) throw new Error("No attention-bench records");
+  const seen = new Map<string, string>();
+  for (const source of sources) {
+    const twin = seen.get(source.sha256);
+    if (twin !== undefined) {
+      throw new Error(
+        `The same attention-bench record is passed twice (${twin} and ${source.path})`,
+      );
+    }
+    seen.set(source.sha256, source.path);
+    // MUST: the field is a per-adapter answer like the geometries (the RTX 3080 Ti adopts, the RTX
+    // 5070 Ti does not — perf-ledger K-106)
+    for (const field of ["vendor", "architecture", "device", "description"] as const) {
+      if (source.adapter[field] !== adapter[field]) {
+        throw new Error(
+          `${source.path}: adapter ${field} ${JSON.stringify(source.adapter[field])} differs from the sweep records' ${JSON.stringify(adapter[field])}`,
+        );
+      }
+    }
+    const ids = new Set<string>();
+    for (const observation of source.shapes) {
+      if (ids.has(observation.shape.id)) {
+        throw new Error(`${source.path}: shape ${observation.shape.id} appears twice`);
+      }
+      ids.add(observation.shape.id);
+      assertCurrentObservation(source, observation);
+    }
+  }
+  const measured = new Set(sources.flatMap(({ shapes }) => shapes.map(({ shape }) => shape.id)));
+  const missing = ATTENTION_BENCH_SHAPES.filter(({ id }) => !measured.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `The attention-bench records do not cover the bench's shape set: ${missing.map(({ id }) => id).join(", ")} not measured`,
+    );
+  }
+  const mismatches = sources.flatMap((source) =>
+    source.shapes.flatMap((observation) => {
+      const mismatch = identityMismatch(observation);
+      return mismatch === undefined
+        ? []
+        : [`${source.path} (${observation.shape.id}): ${mismatch}`];
+    }),
+  );
+  const shapes = ATTENTION_BENCH_SHAPES.map(({ id }) => {
+    const observations = sources.flatMap((source) =>
+      source.shapes
+        .filter((observation) => observation.shape.id === id)
+        .map((observation) => observationGain(source, observation)),
+    );
+    const gains = observations.flatMap(({ gain }) => (gain === undefined ? [] : [gain]));
+    return {
+      id,
+      ...(gains.length === 0 ? {} : { gain: geometricMean(gains) }),
+      observations,
+    };
+  });
+  return { shapes, mismatches, outcome: attentionOnlineOutcome(shapes, mismatches, minSpeedup) };
+};
+
+/** The outcome of {@link deriveAttentionOnline} from its per-shape gains and its mismatches. */
+const attentionOnlineOutcome = (
+  shapes: AttentionOnlineVerdict["shapes"],
+  mismatches: readonly string[],
+  minSpeedup: number,
+): AttentionOnlineVerdict["outcome"] => {
+  if (mismatches.length > 0) {
+    return { kind: "default", reason: `not identical in ${mismatches.length} observation(s)` };
+  }
+  const bare = shapes.find((shape) => shape.gain === undefined);
+  if (bare !== undefined) {
+    return {
+      kind: "default",
+      reason: `${bare.id}: every observation was dropped from the ratio material`,
+    };
+  }
+  const gains = shapes.map(({ gain }) => gain ?? 0);
+  const worst = shapes.reduce((low, shape) => ((shape.gain ?? 0) < (low.gain ?? 0) ? shape : low));
+  if ((worst.gain ?? 0) < minSpeedup) {
+    const [value, bar] = formatRatioPair(worst.gain ?? 0, minSpeedup);
+    return { kind: "default", reason: `${worst.id}: ${value} < ${bar}` };
+  }
+  return {
+    kind: "adopted",
+    geomean: geometricMean(gains),
+    min: Math.min(...gains),
+    max: Math.max(...gains),
+  };
+};
+
+/** The verdict lines of `attentionOnline` (after the geometry fields' — {@link verdictLines}). */
+export const attentionOnlineVerdictLines = (verdict: AttentionOnlineVerdict): string[] => {
+  const records = new Set(
+    verdict.shapes.flatMap(({ observations }) => observations.map(({ path }) => path)),
+  ).size;
+  const head = `attentionOnline (the online attention's Vᵀ key axis, kernel + producer per node, ${verdict.shapes.length} shapes, ${records} records)`;
+  const { outcome } = verdict;
+  return [
+    outcome.kind === "adopted"
+      ? `- ${head}: adopted tiled ${formatRatio(outcome.geomean)} (${formatRatio(outcome.min)}–${formatRatio(outcome.max)})`
+      : `- ${head}: keeps the form N gives (${outcome.reason})`,
+    ...verdict.mismatches.map((mismatch) => `  - not identical: ${mismatch}`),
+    ...verdict.shapes.map(
+      ({ id, gain, observations }) =>
+        `  - ${id}: ${gain === undefined ? "no ratio material" : formatRatio(gain)} (${observations
+          .map(({ path, gain: observed, excluded }) =>
+            observed === undefined
+              ? `${path} dropped: ${excluded ?? "?"}`
+              : `${path} ${formatRatio(observed)}`,
+          )
+          .join("; ")})`,
+    ),
+  ];
+};
+
+/** The bench records and their verdict, as {@link buildGeometryProfile} writes them. */
+export type AttentionBenchDerivation = {
+  readonly sources: readonly AttentionBenchSource[];
+  readonly verdict: AttentionOnlineVerdict;
+};
+
+/** Reads the attention-bench inputs and derives their verdict (the second input of the derivation). */
+const deriveAttentionBench = (
+  inputs: readonly AttentionBenchInput[],
+  adapter: SweepAdapter,
+  minSpeedup: number,
+): AttentionBenchDerivation => {
+  const sources = inputs.map(({ report, path, sha256 }) =>
+    parseAttentionBenchReport(report, { path, sha256 }),
+  );
+  return { sources, verdict: deriveAttentionOnline(sources, adapter, minSpeedup) };
+};
+
 /** A table built from sweeps ({@link buildGeometryProfile} — always carries `provenance`). */
 export type GeneratedProfile = GeometryProfile & {
   readonly provenance: NonNullable<GeometryProfile["provenance"]>;
@@ -1381,11 +1941,17 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * has checked that every record agrees), and the kernel fingerprint and the case-set version are
  * derived with the current runtime (matching, `geometryProfileMismatch`, re-derives them with the
  * same functions).
+ * With attention-bench records (`attention` — ADR 0117 addendum 2026-11-12), the table carries
+ * `attentionOnline: { keyWords: "tiled" }` exactly when their verdict adopted it, and
+ * `provenance.attentionBench` (the records' paths / sha256 / dates joined with `", "` and the id of the
+ * bench's shape set) whatever the verdict. The kernel fingerprint is derived after the field is set,
+ * so a table that chose it fingerprints the online attention's kernels too.
  */
 export const buildGeometryProfile = (
   spec: { readonly id: string } & ProfileTarget,
   sources: readonly SweepSource[],
   verdicts: readonly SlotVerdict[],
+  attention?: AttentionBenchDerivation,
 ): GeneratedProfile => {
   // MUST: the last rule covers every row count (the same condition as the runtime's check — fail
   // early at generation). profileRowsSegments checks the trailing Infinity and the refinement of
@@ -1422,6 +1988,9 @@ export const buildGeometryProfile = (
       attentionPv: i8a8Slot(verdicts, "i8a8.attentionPv"),
       conv3d: i8a8Slot(verdicts, "i8a8.conv3d"),
     },
+    ...(attention?.verdict.outcome.kind === "adopted"
+      ? { attentionOnline: { keyWords: "tiled" } }
+      : {}),
   };
   const { vendor, architecture, device, description } = sources[0].adapter;
   const userAgent = distinctUserAgents(sources);
@@ -1436,6 +2005,16 @@ export const buildGeometryProfile = (
       adapter: { vendor, architecture, device, description },
       kernels: generatedKernelsId(table),
       caseSet: sweepCaseSetId(),
+      ...(attention === undefined
+        ? {}
+        : {
+            attentionBench: {
+              records: attention.sources.map((source) => source.path).join(", "),
+              sha256: attention.sources.map((source) => source.sha256).join(", "),
+              date: attention.sources.map((source) => source.date).join(", "),
+              shapes: attentionBenchShapeSetId(),
+            },
+          }),
     },
   };
   assertGeneratedProfile(generated);
@@ -1528,9 +2107,17 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
   readonly id: string;
   /**
    * The adoption threshold for the ratio to the default (default {@link DEFAULT_MIN_SPEEDUP}, at
-   * least 1 — the CLI's `--min-speedup`, removed in 0.15).
+   * least 1 — the CLI's `--min-speedup`, removed in 0.15). The `attentionOnline` field uses the
+   * same threshold for its per-node gain.
    */
   readonly minSpeedup?: number;
+  /**
+   * The second input (ADR 0117 addendum 2026-11-12): attention-bench records
+   * (`runAttentionRouteBench` with `onlineTiled` and `quantization`, GPU timestamps) of the
+   * same adapter as the sweeps, which together cover `ATTENTION_BENCH_SHAPES`. They decide
+   * `attentionOnline` ({@link deriveAttentionOnline}); omitted, the table has no such field.
+   */
+  readonly attentionBench?: readonly AttentionBenchInput[];
 };
 
 /** The return value of {@link deriveGeometryProfile} (the table and the verdict lines). */
@@ -1568,11 +2155,19 @@ export const deriveGeometryProfile = (
   const sources = reports.map(({ report, path, sha256 }) =>
     parseSweepReport(report, { path, sha256 }),
   );
-  const spec = { ...options, minSpeedup };
+  const { attentionBench, ...target } = options;
+  const spec = { ...target, minSpeedup };
   const verdicts = deriveProfile(sources, spec);
+  const attention =
+    attentionBench === undefined
+      ? undefined
+      : deriveAttentionBench(attentionBench, sources[0].adapter, minSpeedup);
   return {
-    profile: buildGeometryProfile(spec, sources, verdicts),
-    verdicts: verdictLines(verdicts),
+    profile: buildGeometryProfile(spec, sources, verdicts, attention),
+    verdicts: [
+      ...verdictLines(verdicts),
+      ...(attention === undefined ? [] : attentionOnlineVerdictLines(attention.verdict)),
+    ],
   };
 };
 

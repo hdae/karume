@@ -217,7 +217,7 @@ const readProvenance = (value: unknown, path: string): Provenance => {
     value,
     path,
     ["sweep", "sha256", "date", "candidateSet", "adapter", "kernels", "caseSet"],
-    ["userAgent"],
+    ["userAgent", "attentionBench"],
   );
   const adapterPath = child(path, "adapter");
   const adapter = readRecord(fields.adapter, adapterPath, [
@@ -242,6 +242,25 @@ const readProvenance = (value: unknown, path: string): Provenance => {
     },
     kernels: readString(fields.kernels, child(path, "kernels")),
     caseSet: readString(fields.caseSet, child(path, "caseSet")),
+    ...(fields.attentionBench === undefined
+      ? {}
+      : {
+          attentionBench: readAttentionBench(fields.attentionBench, child(path, "attentionBench")),
+        }),
+  };
+};
+
+/** `provenance.attentionBench` (four strings — ADR 0117 addendum 2026-11-12). */
+const readAttentionBench = (
+  value: unknown,
+  path: string,
+): NonNullable<Provenance["attentionBench"]> => {
+  const fields = readRecord(value, path, ["records", "sha256", "date", "shapes"]);
+  return {
+    records: readString(fields.records, child(path, "records")),
+    sha256: readString(fields.sha256, child(path, "sha256")),
+    date: readString(fields.date, child(path, "date")),
+    shapes: readString(fields.shapes, child(path, "shapes")),
   };
 };
 

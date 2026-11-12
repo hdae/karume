@@ -26,6 +26,16 @@
  * effects, ADR 0117 decision 1).
  */
 import { CodegenError, DispatchLimitError } from "../codegen/errors.ts";
+import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
+import {
+  ATTENTION_ONLINE_REDUCES,
+  ATTENTION_ONLINE_ROWS,
+  type AttentionOnlineKeyWords,
+  attentionOnlineI8a8Key,
+  attentionOnlineI8a8Params,
+  attentionOnlineI8a8Wgsl,
+  attentionOnlineKeyWords,
+} from "../kernels/attention-online-i8a8.ts";
 import { conv2dIgemmMTile } from "../kernels/conv2d.ts";
 import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
@@ -50,6 +60,11 @@ import {
   i8a8Candidate,
 } from "./geometries.ts";
 import { type CasePlan, casePlan } from "./harness.ts";
+import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
+import {
+  attentionValueQuantization,
+  planAttentionOnlineWindows,
+} from "../runtime/recipe-builders/attention.ts";
 
 /** The upper / lower 32 bits of the FNV-1a 64-bit offset basis (0xcbf29ce484222325). */
 const FNV_OFFSET_HIGH = 0xcbf29ce4;
@@ -266,6 +281,74 @@ export const wgslTokenText = (wgsl: string): string => {
 const launchLine = (launch: ReturnType<CasePlan["launch"]>): string =>
   JSON.stringify([launch.key, [...launch.params], wgslTokenText(launch.wgsl), launch.workgroups]);
 
+/** The JSON line of one launch built outside the case plan (the same fields as {@link launchLine}). */
+const rawLaunchLine = (
+  key: string,
+  params: ArrayLike<number>,
+  wgsl: string,
+  workgroups: readonly [number, number, number],
+): string => JSON.stringify([key, Array.from(params), wgslTokenText(wgsl), workgroups]);
+
+/**
+ * The online attention's lines of the kernel fingerprint, for a table carrying
+ * `attentionOnline` only (ADR 0117 addendum 2026-11-12): per shape of the bench's set, for the form
+ * N gives and the tiled form, the Vᵀ producer and the kernel of the first window in each dp4a
+ * variant × reduction form (the layout the bench times, `bhsd`) — the kernels the field chooses
+ * between, so a runtime that changes either moves the fingerprint of a table that chose.
+ * MUST: built with the production generator calls (`attentionValueQuantization`, the windows of
+ * `planAttentionOnlineWindows`) the bench and the derivation's key check use.
+ */
+const attentionOnlineLines = (shapes: readonly AttentionBenchShape[]): string[] => {
+  const lines: string[] = [];
+  for (const { id, heads, queries, keys, depth, scale } of shapes) {
+    const where = `Attention bench shape ${id}`;
+    const windows = planAttentionOnlineWindows(queries, { batch: heads, cols: keys, depth });
+    const forms: readonly AttentionOnlineKeyWords[] = [attentionOnlineKeyWords(keys), "tiled"];
+    for (const keyWords of forms) {
+      const producer = naming(
+        () => `${where}, the ${keyWords} Vᵀ producer`,
+        () => attentionValueQuantization(heads * depth, keys, keyWords),
+      );
+      lines.push(
+        rawLaunchLine(producer.key, producer.params, producer.wgsl, [
+          gridStrideWorkgroups(
+            heads * depth,
+            producer.geometry.rowsPerGroup,
+            FINGERPRINT_WORKGROUP_LIMIT,
+          ),
+          1,
+          1,
+        ]),
+      );
+      for (const dp4a of [false, true]) {
+        for (const reduce of ATTENTION_ONLINE_REDUCES) {
+          const line = naming(
+            () => `${where}, the ${keyWords} kernel (${reduce}, dp4a ${String(dp4a)})`,
+            () =>
+              rawLaunchLine(
+                attentionOnlineI8a8Key(dp4a, depth, reduce, "bhsd", keyWords),
+                attentionOnlineI8a8Params(queries, keys, 0, scale, keyWords),
+                attentionOnlineI8a8Wgsl(dp4a, depth, reduce, "bhsd", keyWords),
+                [
+                  tiledWorkgroups(
+                    windows[0].rows,
+                    ATTENTION_ONLINE_ROWS,
+                    FINGERPRINT_WORKGROUP_LIMIT,
+                    where,
+                  ),
+                  tiledWorkgroups(heads, 1, FINGERPRINT_WORKGROUP_LIMIT, where),
+                  1,
+                ],
+              ),
+          );
+          lines.push(line);
+        }
+      }
+    }
+  }
+  return lines;
+};
+
 /**
  * The body of the kernel fingerprint ({@link geometryProfileKernelsId} — a form into which the
  * cases and the case plan can be injected).
@@ -279,6 +362,9 @@ const launchLine = (launch: ReturnType<CasePlan["launch"]>): string =>
  * MUST: dispatches are built with the same case plan as the sweep — the kernels measured by the
  * sweep and the kernels the fingerprint points to are never built by separate paths. `id`, `match`
  * and `provenance` are not read (only the table's geometries affect the fingerprint).
+ * A table carrying `attentionOnline` appends the online attention's lines after the cases
+ * ({@link attentionOnlineLines} over `ATTENTION_BENCH_SHAPES`); a table without it hashes exactly
+ * the lines it hashed before the field, so its fingerprint does not move.
  *
  * A dispatch that cannot be built (a codegen check, the dispatch-count limit) throws a
  * {@link KernelsIdError} that names the case, the field and the geometry.
@@ -314,6 +400,9 @@ export const profileKernelsId = (
         lines.push(launchLine(launch));
       }
     }
+  }
+  if (profile.attentionOnline !== undefined) {
+    lines.push(...attentionOnlineLines(ATTENTION_BENCH_SHAPES));
   }
   return fnv1a64Hex(lines.join("\n"));
 };
@@ -513,6 +602,15 @@ export const caseSetId = (cases: readonly SweepCase[], bounds: readonly number[]
  */
 export const sweepCaseSetId = (set?: CandidateSet): string =>
   set === undefined ? caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS) : candidateSetCaseSetId(set);
+
+/**
+ * The id of the attention bench's shape set (`provenance.attentionBench.shapes` — ADR 0117
+ * addendum 2026-11-12): the hash (16 hex digits) of the canonical JSON of `ATTENTION_BENCH_SHAPES`
+ * (every field — id, heads, queries, keys, depth and scale decide what was measured). Records given
+ * to the derivation must cover this set, and matching compares a table's value with it.
+ */
+export const attentionBenchShapeSetId = (): string =>
+  fnv1a64Hex(canonicalJson(ATTENTION_BENCH_SHAPES));
 
 /**
  * The case-set version a sweep of `set` records (`caseSet`): {@link sweepCaseSetId} for the
