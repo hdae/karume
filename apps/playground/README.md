@@ -44,7 +44,10 @@ the runtime's node GPU tests ([the kernel-check page](#the-kernel-check-page)). 
 import it, and nothing here imports runtime internals directly. The session A/B page imports
 `@karume/candidate-rules`, another private workspace package: candidate fusion rules written against
 `@karume/runtime/kernel` alone, which the page passes to the gemma pipeline or to a MOSS-Image DiT
-Session to measure them ([the session A/B page](#the-session-ab-page)).
+Session to measure them ([the session A/B page](#the-session-ab-page)). The `/moss-image`, `/wan22`
+and `/anima` pages import it too, through `src/lib/experimental-rule.ts`: their **Experimental fusion
+rule** control (off by default) passes one candidate through the pipeline's experimental
+`fusionRules`.
 
 ## Run
 
@@ -215,6 +218,16 @@ and per component the runs, weight memory, submit count, build cost and the atte
 last run (`attention_online` for the online route, `attention_qk` / `attention_stats` /
 `attention_pv` for the materialized one).
 
+**Experimental fusion rule.** Off by default. On, the pipeline opens with the candidate rule
+`candidate/vae_rms_silu_g8` of `@karume/candidate-rules` (`src/lib/experimental-rule.ts`), passed
+through the pipeline's experimental `fusionRules` to the DiT and the VAE graphs (umT5 gets none). A
+Session takes its rules at construction, so switching it opens the pipeline again. The rule is
+bit-identical to the unfused plan where it was checked: only the times should move. The status, the
+result and the record (`experimentalFusionRule`) name the rule that ran. On Metal (an Apple platform
+in the user agent, or an adapter of the `metal` architecture family — WebGPU does not expose the
+backend) the control is disabled with its reason: the rule's rounding barrier is measured not to
+hold there.
+
 ### The record (`format: "karume-playground-wan22/2"`)
 
 The JSON keeps the full detail; the page shows only the summary above.
@@ -224,6 +237,7 @@ The JSON keeps the full detail; the page shows only the summary above.
 | `format` | `karume-playground-wan22/2` (records without it are the first version) |
 | `device` | enabled `features` and `wgslLanguageFeatures` (sorted), `subgroupLanesLinear`, `gpuTimingEnabled`, and `limits` (`maxComputeWorkgroupStorageSize`, `maxStorageBufferBindingSize`, `maxBufferSize`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `experimentalFusionRule` | the experimental fusion rule the pipeline was opened with (`candidate/...`), or `null` when the control was off |
 | `scenario` | the id of the scenario the run's settings equal (its pipeline's preset, text encoder and source, and the form's request), or `custom`; records without it predate the scenarios |
 | `timeline.denoiseStepSeconds` | seconds of every denoise step in order; the first is measured from the transformer stage start, so it also holds the Session creation and the weight upload |
 | `timeline.vaeTileSeconds` | seconds of every VAE tile in order; the first holds the VAE Sessions' creation |
@@ -316,6 +330,16 @@ again.
 The result card shows the image (**Download PNG** — lossless, from the same RGBA bytes the sha256
 covers) and a summary of the record.
 
+**Experimental fusion rule.** Off by default. On, the pipeline opens with the candidate rule
+`candidate/vae_rms_silu_g8` of `@karume/candidate-rules` (`src/lib/experimental-rule.ts`), passed
+through the pipeline's experimental `fusionRules` to the DiT and the VAE decoder (the text stages
+get none). A Session takes its rules at construction, so switching it opens the pipeline again. The
+rule is bit-identical to the unfused plan where it was checked: only the times should move. The
+status, the result and the record (`experimentalFusionRule`) name the rule that ran. On Metal (an
+Apple platform in the user agent, or an adapter of the `metal` architecture family — WebGPU does not
+expose the backend) the control is disabled with its reason: the rule's rounding barrier is measured
+not to hold there.
+
 ### The record (`format: "karume-playground-anima/1"`)
 
 | Field | What |
@@ -325,6 +349,7 @@ covers) and a summary of the record.
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
 | `model` | `name`, `isDefault` (the mount's `defaultModel`) |
 | `preset` | `quant`, `label`, `isDefault` |
+| `experimentalFusionRule` | the experimental fusion rule the pipeline was opened with (`candidate/...`), or `null` when the control was off |
 | `request` | exactly the fields sent to `generate` (`prompt`, `seed`, `residency`, plus the fields the form set: `negativePrompt`, `guidanceScale`, `steps`, `resolution`, `sampler`) |
 | `effective` | the values the run used once the manifest's defaults filled the rest: `steps`, `guidanceScale`, `resolution` (`WxH`), `sampler`, `negativePrompt` (`null` when not used) |
 | `livePreview` | whether the preview was computed (it runs on the main thread between steps) |
@@ -401,6 +426,13 @@ generates (the page is left, the GPU is acquired again) drops its image when `ge
 The result card shows the image (`imageToRgba` into a canvas; **Download PNG** — lossless, from the
 same RGBA bytes the sha256 covers) and a summary of the record.
 
+**Experimental fusion rule.** Off by default. On, the pipeline opens with the candidate rule
+`candidate/ew_chain` of `@karume/candidate-rules` (`src/lib/experimental-rule.ts`), passed through
+the pipeline's experimental `fusionRules` to `dit_text`, the DiT pair and the VAE decoder (the text
+encoder gets none). A Session takes its rules at construction, so switching it opens the pipeline
+again. The rule is bit-identical to the unfused plan where it was checked: only the times should
+move. The status, the result and the record (`experimentalFusionRule`) name the rule that ran.
+
 ### The record (`format: "karume-playground-moss-image/1"`)
 
 | Field | What |
@@ -410,6 +442,7 @@ same RGBA bytes the sha256 covers) and a summary of the record.
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
 | `model` | `name`, `isDefault` (the manifest's `defaultModel`) |
 | `preset` | `quant`, `label`, `isDefault` |
+| `experimentalFusionRule` | the experimental fusion rule the pipeline was opened with (`candidate/...`), or `null` when the control was off |
 | `request` | exactly the fields sent to `generate` (`prompt`, `seed`, plus the fields the form set: `negativePrompt`, `width`, `height`, `steps`, `guidance`, `shift`) |
 | `effective` | the values the run used once the manifest's defaults filled the rest: `width`, `height`, `steps`, `guidance`, `shift`, `negativePrompt` (`null` when not used) |
 | `pipeline` | `reused` (an earlier run's pipeline ran this one) and `openSeconds` (`null` when reused) |

@@ -45,3 +45,7 @@ Who imports it (every importer; keep this list complete when one is added):
   Gemma 4 target passes `candidate/gelu_mul`, its MOSS-Image DiT target `candidate/ew_chain`, its two VAE
   targets `candidate/vae_rms_silu_g8` / `_g4`), and `apps/playground/tests/session-ab_arm_test.ts`,
   `session-ab_moss_test.ts` and `session-ab_vae_test.ts`, the tests of its arms.
+- `apps/playground/src/lib/experimental-rule.ts` — the **Experimental fusion rule** control of the `/moss-image`
+  (`candidate/ew_chain`), `/wan22` and `/anima` (`candidate/vae_rms_silu_g8`) pages, which passes the rule
+  through the pipeline's experimental `fusionRules`, and `apps/playground/tests/experimental_rule_test.ts`, its
+  test.

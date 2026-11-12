@@ -90,6 +90,8 @@ export type MossForm = {
   /** Empty = the manifest's default. */
   readonly shift: string;
   readonly seed: string;
+  /** The experimental fusion rule (`EW_CHAIN_EXPERIMENT` — off by default). */
+  readonly experimentalRule: boolean;
 };
 
 export const initialForm = (prompt: string): MossForm => ({
@@ -102,6 +104,7 @@ export const initialForm = (prompt: string): MossForm => ({
   guidance: "",
   shift: "",
   seed: "42",
+  experimentalRule: false,
 });
 
 /** The request the form decides: the prompt form with a seed (no latents, overflow refused). */

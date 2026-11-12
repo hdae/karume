@@ -150,6 +150,8 @@ export type AnimaForm = {
   readonly sampler: "" | SamplerType;
   readonly seed: string;
   readonly residency: Residency;
+  /** The experimental fusion rule (`VAE_RMS_SILU_EXPERIMENT` — off by default). */
+  readonly experimentalRule: boolean;
 };
 
 export const initialForm = (prompt: string): AnimaForm => ({
@@ -163,6 +165,7 @@ export const initialForm = (prompt: string): AnimaForm => ({
   sampler: "",
   seed: "42",
   residency: "per-stage",
+  experimentalRule: false,
 });
 
 /** The request parts the form decides (the page adds `onEvent`). */

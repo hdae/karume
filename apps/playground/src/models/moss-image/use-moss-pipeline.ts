@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
 import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
+import { EW_CHAIN_EXPERIMENT, experimentalRuleOptions } from "@/lib/experimental-rule";
 
 import { MOSS_MOUNT } from "./settings";
 
@@ -29,6 +30,11 @@ export type PipelineSpec = {
   readonly source: PipelineSource;
   readonly model: string;
   readonly quant: string;
+  /**
+   * The experimental rule the pipeline opens with (`experimentalRuleInUse`); `undefined` = none.
+   * A Session takes its rules at construction, so a different rule is a different pipeline.
+   */
+  readonly fusionRule: string | undefined;
 };
 
 /** What the status card shows of the held pipeline. */
@@ -36,6 +42,7 @@ export type HeldPipelineInfo = {
   readonly source: PipelineSource["kind"];
   readonly model: string;
   readonly quant: string;
+  readonly fusionRule: string | undefined;
   readonly openSeconds: number;
 };
 
@@ -49,7 +56,8 @@ const sameSpec = (left: PipelineSpec, right: Partial<PipelineSpec>): boolean =>
   left.gpu === right.gpu &&
   left.source === right.source &&
   left.model === right.model &&
-  left.quant === right.quant;
+  left.quant === right.quant &&
+  left.fusionRule === right.fusionRule;
 
 export type OpenedPipeline = {
   readonly pipeline: Pipeline;
@@ -108,14 +116,14 @@ export const useMossPipeline = (
   }, [disposeQueued]);
 
   // Drop the held pipeline once the selection moves away from it.
-  const { gpu, source, model, quant } = selection;
+  const { gpu, source, model, quant, fusionRule } = selection;
   useEffect(() => {
-    selectionRef.current = { gpu, source, model, quant };
+    selectionRef.current = { gpu, source, model, quant, fusionRule };
     const current = heldRef.current;
     if (current !== undefined && !sameSpec(current.spec, selectionRef.current)) {
       void release();
     }
-  }, [gpu, source, model, quant, release]);
+  }, [gpu, source, model, quant, fusionRule, release]);
   // Leaving the page disposes it.
   useEffect(() => {
     mountedRef.current = true;
@@ -145,6 +153,7 @@ export const useMossPipeline = (
         quant: spec.quant,
         signal,
         onProgress,
+        ...experimentalRuleOptions(EW_CHAIN_EXPERIMENT, spec.fusionRule),
       });
       // A cancel (or leaving the page) that lands as opening finishes: drop the pipeline rather
       // than keep one nobody will release.
@@ -165,6 +174,7 @@ export const useMossPipeline = (
         source: spec.source.kind,
         model: spec.model,
         quant: spec.quant,
+        fusionRule: spec.fusionRule,
         openSeconds: openMilliseconds / 1000,
       };
       heldRef.current = { spec, pipeline, info };

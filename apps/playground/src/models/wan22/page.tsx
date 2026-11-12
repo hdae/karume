@@ -11,6 +11,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
+import { ExperimentalRuleSwitch } from "@/components/experimental-rule-switch";
 import { Field } from "@/components/field";
 import { FramePlayer } from "@/components/frame-player";
 import { KeyValueTable } from "@/components/key-value-table";
@@ -34,6 +35,12 @@ import { useTimestampQuery } from "@/hooks/use-timestamp-query";
 import { distributionSource, type PipelineSource } from "@/lib/distributions";
 import { downloadBlob, fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
+import {
+  experimentalRuleInUse,
+  experimentalRuleLabel,
+  runsOnMetal,
+  VAE_RMS_SILU_EXPERIMENT,
+} from "@/lib/experimental-rule";
 import { type CacheInventory, queryCacheInventory } from "@/lib/hub-cache";
 import {
   adapterText,
@@ -152,6 +159,11 @@ type WanRecord = {
   /** `cached` = the HF-compatible route through the hub's CacheStorage; `direct` = plain fetch. */
   readonly source: { readonly kind: "direct" } | ({ readonly kind: "cached" } & HubRepoRef);
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
+  /**
+   * The experimental fusion rule the pipeline was opened with (`fusionRules`), or `null` when none
+   * ran: the stage seconds and the wall time are those of that plan.
+   */
+  readonly experimentalFusionRule: string | null;
   /** The scenario the run's settings equal, or `custom`. */
   readonly scenario: ScenarioId | "custom";
   readonly textEncoder: TextEncoderPath;
@@ -208,6 +220,11 @@ export const Wan22Page = () => {
   const timestampQuery = useTimestampQuery();
   const { state: gpuState, lease, reacquire, track } = useGpu(gpuTiming ? TIMED_GPU : UNTIMED_GPU);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
+  // Not a form field either: the scenarios leave it alone (a scenario runs with the rule on or off),
+  // and the record names the rule that ran. Changing it rebuilds the pipeline.
+  const [experimentalRule, setExperimentalRule] = useState(false);
+  const metal = runsOnMetal(navigator.userAgent, gpu?.adapterInfo.architecture ?? "");
+  const fusionRule = experimentalRuleInUse(VAE_RMS_SILU_EXPERIMENT, experimentalRule, metal);
 
   // The manifest (once the dev server says the distribution is there).
   const [manifest, setManifest] = useState<ManifestState>({ kind: "loading" });
@@ -276,6 +293,7 @@ export const Wan22Page = () => {
     source: pipelineSource,
     quant: summary === undefined || form.quant === "" ? undefined : form.quant,
     textEncoder: form.textEncoder,
+    fusionRule,
     textEncoderRepo: summary?.textEncoderRepo,
     umt5Directory: umt5,
     diagnostics: diagnosticsRef,
@@ -463,6 +481,7 @@ export const Wan22Page = () => {
           label: preset?.label ?? pipeline.quant,
           isDefault: pipeline.quant === manifest.summary.defaultQuant,
         },
+        experimentalFusionRule: pipeline.fusionRule ?? null,
         scenario,
         textEncoder: pipeline.textEncoder,
         prompt: parts.prompt,
@@ -560,10 +579,12 @@ export const Wan22Page = () => {
     readonly source: PipelineSource;
     readonly quant: string;
     readonly textEncoder: TextEncoderPath;
+    readonly fusionRule: string | undefined;
   }): boolean =>
     built.source === pipelineSource &&
     built.quant === form.quant &&
-    built.textEncoder === form.textEncoder;
+    built.textEncoder === form.textEncoder &&
+    built.fusionRule === fusionRule;
   const pendingFailed =
     scenarioRun.kind === "waiting" && pipeline.kind === "error" && builtForForm(pipeline);
   const pendingStarts =
@@ -838,6 +859,16 @@ export const Wan22Page = () => {
                 disabled={disabled}
               />
             </Field>
+            <div className="sm:col-span-2">
+              <ExperimentalRuleSwitch
+                id="wan22-experimental-rule"
+                rule={VAE_RMS_SILU_EXPERIMENT}
+                checked={experimentalRule}
+                metal={metal}
+                onCheckedChange={setExperimentalRule}
+                disabled={disabled}
+              />
+            </div>
             <div className="flex flex-col gap-4 sm:col-span-2">
               {form.textEncoder === "precomputed" ? (
                 <Field
@@ -920,7 +951,7 @@ export const Wan22Page = () => {
                 [
                   "Pipeline",
                   pipeline.kind === "ready"
-                    ? `${pipeline.quant} · ${pipeline.textEncoder} · ${pipeline.source.kind} (${pipeline.loadSeconds.toFixed(1)} s to open)`
+                    ? `${pipeline.quant} · ${pipeline.textEncoder} · ${pipeline.source.kind} · rule ${experimentalRuleLabel(pipeline.fusionRule)} (${pipeline.loadSeconds.toFixed(1)} s to open)`
                     : pipeline.kind === "loading"
                       ? pipeline.detail
                       : pipeline.kind,
@@ -1010,7 +1041,8 @@ export const Wan22Page = () => {
             <CardTitle>Result</CardTitle>
             <CardDescription>
               {result.record.width}×{result.record.height} · {result.record.frames} frames ·{" "}
-              {result.record.output.fps} fps · {result.record.wallSeconds} s
+              {result.record.output.fps} fps · {result.record.wallSeconds} s · experimental rule:{" "}
+              {experimentalRuleLabel(result.record.experimentalFusionRule)}
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -1135,6 +1167,7 @@ const RecordTable = ({ record }: { record: WanRecord }) => (
           : "direct",
       ],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
+      ["Experimental rule", experimentalRuleLabel(record.experimentalFusionRule)],
       [
         "Scenario",
         record.device.gpuTimingEnabled ? `${record.scenario} · GPU timing on` : record.scenario,

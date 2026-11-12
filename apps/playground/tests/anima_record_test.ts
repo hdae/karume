@@ -248,3 +248,17 @@ describe("buildsOfThisRun", () => {
     expect(buildsOfThisRun(record)).toEqual([transformerRecord.build, vaeRecord.build]);
   });
 });
+
+describe("assembleRecord: the experimental fusion rule", () => {
+  it("names the rule the run's pipeline was opened with", () => {
+    const record = assembleRecord(observation({ fusionRule: "candidate/vae_rms_silu_g8" }));
+    expect(record.experimentalFusionRule).toBe("candidate/vae_rms_silu_g8");
+  });
+
+  it("is null when no rule ran (left out or undefined)", () => {
+    expect(assembleRecord(observation()).experimentalFusionRule).toBeNull();
+    expect(
+      assembleRecord(observation({ fusionRule: undefined })).experimentalFusionRule,
+    ).toBeNull();
+  });
+});

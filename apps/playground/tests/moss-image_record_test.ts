@@ -136,3 +136,17 @@ describe("assembleRecord", () => {
     expect(JSON.parse(JSON.stringify(record))).toEqual(record);
   });
 });
+
+describe("assembleRecord: the experimental fusion rule", () => {
+  it("names the rule the run's pipeline was opened with", () => {
+    const record = assembleRecord(observation({ fusionRule: "candidate/ew_chain" }));
+    expect(record.experimentalFusionRule).toBe("candidate/ew_chain");
+  });
+
+  it("is null when no rule ran (left out or undefined)", () => {
+    expect(assembleRecord(observation()).experimentalFusionRule).toBeNull();
+    expect(
+      assembleRecord(observation({ fusionRule: undefined })).experimentalFusionRule,
+    ).toBeNull();
+  });
+});
