@@ -10,7 +10,8 @@
   decision 5 (2026-10-16); the Consequences' deferral of "drop a8 from the default quant on Metal" is
   taken up by [0128](0128-default-preset-original-weights.md) decision 5 (accepted 2026-10-29), which
   settles it. Re-graded 2026-10-18: decision 4's regeneration command and `--check`
-  to SHOULD.
+  to SHOULD. Decisions 1 and 6's single `i8a8.linear` geometry for every row count by addendum
+  decision 14 (2026-11-12).
 - Date: 2026-09-27
 - Related: [0022](0022-gemm-register-blocking.md) (GEMM skeleton; decision 3's MUST "the reduction
   order is a numerical contract"; the addendum's MUSTs "no run-time autotuning" and "a change of the
@@ -92,7 +93,7 @@ export type GeometryProfile = {
   readonly attention: { readonly qk: GemmGeometry; readonly pv: GemmGeometry };
   readonly conv2d: { readonly rows64: GemmGeometry; readonly rows32: GemmGeometry };
   readonly i8a8: {
-    readonly linear: I8a8Geometry;
+    readonly linear: readonly I8a8RowsRule[]; // addendum decision 14 (2026-11-12)
     readonly attentionQk: I8a8Geometry;
     readonly attentionPv: I8a8Geometry;
     readonly conv3d: I8a8Geometry; // addendum decision 11 (2026-10-26)
@@ -218,7 +219,7 @@ are byte for byte what they were before this ADR; the unchanged codegen snapshot
 | linear / matmul / bmm (row-count buckets) | `gemmRows`                       |
 | fused attention f32 ①QK / ③PV (ADR 0023)  | `attention.qk / pv`              |
 | conv2d implicit GEMM (ADR 0024)           | `conv2d`                         |
-| i8a8 linear / fused attention ①QK / ③PV   | `i8a8`                           |
+| i8a8 linear / fused attention ①QK / ③PV   | `i8a8` (the linear by row-count buckets since addendum decision 14) |
 | conv3d w8a8 implicit GEMM (ADR 0133)      | `i8a8.conv3d` (added 2026-10-26) |
 
 Measured coverage:
@@ -226,7 +227,9 @@ Measured coverage:
 - `gemmRows` is decided by linear / matmul / bmm cases (addendum decision 1; ADR 0116 decision 4);
   all three ops read the same table (only the B-side fill differs).
 - The three `i8a8` fields of linear and attention are decided from M ≥ 1024 measurements only and
-  apply to every row count (the default does not split by row count either).
+  apply to every row count (the default does not split by row count either). (Updated 2026-11-12:
+  `i8a8.linear` is split by row count and swept on Wan2.2 and Irodori shapes too — addendum
+  decision 14.)
 - `i8a8.conv3d` is one geometry for every conv3d shape, decided from the Wan2.2 VAE decoder's
   heavy shapes at tile 16 and tile 32 plus two edge guards (addendum decision 11).
 
@@ -611,6 +614,8 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   it; `SWEEP_CASES`, the other sets and every saved table's matching keys are unchanged. Every sweep
   record now names the embedded table a Session on that adapter selects (`geometryProfile`), the
   "this adapter's table" a `k85` summary compares against (the Playground's K-85 preset).
+  (Updated 2026-11-12: the set is retired — its cases joined `SWEEP_CASES` and its grid the i8a8
+  linear's `full`, addendum decision 14.)
 - **What stays for a table entry.** `i8a8.linear` is one geometry for every M (decision 6), and the
   recorded small-M losers (Irodori M = 185 / M = 1, ×0.90–0.93) read the same field, so an entry
   waits for the row-count buckets of `i8a8.linear` (the second slice of K-85; ADR
@@ -696,3 +701,79 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   14.4 / 14.8 / 12.0 (×1.13 / ×1.10 / ×1.35); the anima VAE's 11 conv2d 40.8 ms → 34.8 / 36.7 / 29.9
   (×1.17 / ×1.11 / ×1.36); the siglip2 so400m fc1 ×1.32; the umT5 feed-forward wi (r4×4) ×1.00 and
   the M = 64 guard (r1×4) ×1.02. The per-case ratios are in perf-ledger K-88.
+
+### Addendum decision 14: `i8a8.linear` by row-count buckets 256 / 512 / ∞, swept on the Wan2.2 and Irodori shapes (perf-ledger K-85; 2026-11-12)
+
+The maintainer decided this design on 2026-11-12 (K-85's second slice).
+
+- **Why.** `i8a8.linear` was one geometry for every row count, decided from six anima shapes at M 1,024 / 4,096
+  (decision 6), while Wan2.2's DiT runs the field at M 7,920 / 512 / 1 and Irodori's default preset `i8-a8` at
+  M 185. In the K-85 evaluation the per-case best skeleton beat the table geometry most at the small-M shapes (M 1
+  ×1.840 / ×2.400 and the Irodori guard ×1.664 / ×1.869 on the RTX 3080 Ti / RTX 5070 Ti — perf-ledger K-85, which
+  marks them as what row-count buckets would take), and one field held one geometry for all of them.
+- **The field** (amends decisions 1 and 6). `GeometryProfile.i8a8.linear` is `readonly I8a8RowsRule[]`
+  (`{ maxRows, geometry: I8a8Geometry }`), the form and rule order of `gemmRows`: the first rule with
+  `rows <= maxRows` applies, `maxRows` strictly ascending, the last `Infinity`. The runtime's guard accepts any
+  rule count and checks the order with the very check `gemmRows` uses (one function for both fields). One selector
+  reads it, `i8a8LinearGeometry(profile, rows)`. The default profile holds one rule, `defaultI8a8Geometry("linear")`
+  up to Infinity, so a machine without a matching table builds the keys and WGSL it built before.
+- **Breaking, no reader for the old shape.** `assertGeometryProfile` (and with it `acquireGpu({ geometryProfile })`),
+  the limit check, the frozen copies of the embedded tables, `geometryProfileJson` and `parseGeometryProfileJson`
+  take the rules array; a stored table with a single geometry there fails (`i8a8.linear is not an array`). The type
+  `I8a8RowsRule` joins the public surface.
+- **The builder and the w4a8 fallback.** The recipe builder selects the rule by the linear's M. With i4 resident
+  weights whose group length is not a multiple of the selected rule's K tile, it uses `defaultI8a8Geometry("linear")`
+  instead, whose K tile 16 divides every i4 group length (a power of two of at least 16): the w4a8 kernel refuses a K
+  tile that crosses a group boundary (`assertI8a8GroupGeometry`), and a profile field applies to i8 and i4 weights
+  alike, so without the fallback a K64 rule would make w4a8 at group 32 unbuildable. MUST: that one geometry, taken
+  once, feeds the key, the WGSL, the dispatch grid and `linearI8a8UsesVecFill`; the sweep's case plan (its default
+  row) and the fingerprint select by the case's M through the same selector. The vec4 fill stays i8-only, so no i4
+  key carries `:fill16`. The sweep's i8a8 linear cases are i8; the fallback never applies there.
+- **The bounds.** `I8A8_LINEAR_ROWS_BOUNDS = [256, 512, ∞]` (`src/tune/cases.ts`) is the `i8a8-linear` family's
+  bounds: it enters that family's case-set version and no other (`familyBounds` — ADR
+  [0117](0117-app-geometry-tuning.md) addendum 2026-11-12, per op family). 512 keeps the Wan2.2 cross-attention k / v
+  at M 512 apart from the M 7,920 shapes, and 256 the small-M shapes (M 1, Irodori's M 185) apart from M 512. The
+  generator writes exactly these three rules for every table; a bucket with no case in the records keeps the default
+  geometry (the existing rule for a class without a case). Its slots are named by range like the `gemmRows` ones
+  (`i8a8.linear ≤ 256`, `i8a8.linear 257〜512`, `i8a8.linear > 512`) and checked by the same bucket checker. Every
+  bound but the last is the M of a sweep case (ADR [0116](0116-geometry-profile-row-buckets.md) decision 1's rule that
+  a bucket's upper end is measured — `tune_cases_test.ts`).
+- **The cases.** The five Wan2.2 TI2V-5B DiT shapes at 33 frames (M 7,920 × 3, M 512 and M 1, with their node counts
+  per forward 180 / 30 / 30 / 61 / 2 — 303 of its 310 linears), the Irodori v4-small guard (M 185, N 1,280, K 1,280)
+  and the same shape at M 256 (the upper end of the bucket ≤ 256) join the six anima cases: 13 `i8a8-linear` cases
+  with the ordinary ids (`i8a8-linear-m7920-n3072-k3072`, …); the two Irodori shapes count 0. The evaluation set
+  `k85` of decision 12 is retired with everything that existed only for it (its case table, its candidate list as a
+  set, the Playground's K-85 preset and summary, the opt-in Node runner and their tests): its cases would otherwise
+  live twice under two ids. `k88` stays.
+- **The candidates.** `full` gives `i8a8-linear` a grid of its own: the 48-geometry i8a8 grid, then the skeleton grid
+  of the retired `k85` (regM 8 / 12 / 16, regN 4 / 8, wgX 8 / 16, wgY 4 / 8 / 16, K tile 16 / 32 / 64, each without
+  and with the skeleton), deduplicated and within the 16,384 B of workgroup storage every device provides (the
+  automatic selection path does not run the limit check) — 230 geometries, 103 with the skeleton and 62 with K tile
+  64. `i8a8-attention` and `i8a8-conv3d` keep the 48; `quick` and `quick+` keep their logic (`quick+` adds every
+  rule of each registered table's `i8a8.linear`). The generator reads `skeleton: "vec4"` in a row's
+  `geometryParams` (any other value fails the record) and counts it in a geometry's identity, so a skeleton row is a
+  candidate like any other.
+- **The embedded tables, in the interim.** The family's cases and bounds changed, so each table's `i8a8-linear` entry
+  was regenerated with `deriveGeometryProfile` (no `base`) from the table's own source records, read through a script
+  that lifted them in memory to the current record format (the current runtime's `caseSets` / `defaultKernels` for
+  the families of their rows; the rows untouched). The script checked before writing that every field and provenance
+  entry of the other five families is byte-identical and that `i8a8.linear` is three rules: the default geometry for
+  ≤ 256 and 257〜512 (the records hold i8a8 linear cases at M 1,024 / 4,096 only) and the geometry the field held
+  for > 512. That rests on the rows having been measured on the same kernels: the `candidateKernels` of the
+  `nvidia-ampere` and `nvidia-blackwell` records re-derive equal with the current runtime; the `apple-metal-3`
+  records predate the field, so for them it rests on the table's own fingerprint of the family re-deriving equal
+  before the cases changed. **Until a sweep of the family is registered, the small-M buckets of all three tables run
+  the default geometry**: a speed change for the small-M i8a8 linears (Irodori's M = 185, for one); outputs do not
+  change (the i8a8 geometries are bit-identical by contract — decision 1, addendum decision 12).
+- **Not in this decision.** A `full` sweep of `i8a8-linear` alone on each GPU, derived with the adapter's table as
+  `base`, and the sha256 re-checks of decision 8 on the families whose default presets reach the i8a8 linear. On a
+  GPU that heats within one case, the sweep is taken in chunks (ADR [0117](0117-app-geometry-tuning.md) addendum
+  2026-11-12, "the `geometries` sweep option").
+- **Checks.** `geometry_profile_test.ts` (the selector at M = bound and bound + 1, the guard naming `i8a8.linear`,
+  the builder's geometry with the fallback and never `:fill16` for i4); `gpu_geometry_profile_test.ts` (a Session at
+  M = 256 / 257 runs each rule's key; w4a8 at group 32 under a K64 rule runs the default geometry and at group 64 the
+  K64 rule without `:fill16`, each with the default profile's words; one i8a8 linear case per rule of every embedded
+  table); `tune_cases_test.ts` (the bounds measured, the 13 cases); `tune_profile_test.ts` (a bucket's rows decide that
+  bucket alone; a skeleton row is read and adopted); `tune_fingerprint_test.ts` (the bounds enter the i8a8-linear
+  family's case-set version only); `tune_geometries_test.ts` (the grid); `tune_mismatch_test.ts` (every embedded table
+  against its own adapter).

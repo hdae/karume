@@ -218,3 +218,13 @@ Of the 12 linear-only buckets (4 × 3 machines), the simulation predicted 9 adop
 matmul / bmm cases only 3 remained, and the three borderline adoptions (M5 ≤ 16 ×1.065, M2 129–256
 ×1.054, RTX 17–32 ×1.072) all returned to the default — the motivation of decision 4 in practice.
 Buckets that already had all three ops matched the simulation. Details: research K-70 §15, `c358832b`.
+
+## Addendum (2026-11-12) — `i8a8.linear` has row-count buckets of its own
+
+ADR [0115](0115-geometry-profiles.md) addendum decision 14 splits the i8a8 linear's field by the row count M with
+bounds of its own, `I8A8_LINEAR_ROWS_BOUNDS = [256, 512, ∞]`, and takes this ADR's rules for them: the rule form and
+order of `gemmRows` (one guard checks both), every bound but the last a measured case (decision 1 — M 256 joined
+the sweep for it), the generator writing the fixed set for every table (decision 2), a bucket without a case keeping
+the default (here the default profile's one rule, so any bounds refine it — decision 3), verdict lines named by range
+(decision 6) and one real-GPU case per rule (decision 7). The bounds enter the `i8a8-linear` family's case-set
+version only.

@@ -827,7 +827,8 @@ filed 2026-10-27 after the ruling of 2026-10-26).
 
   The row-count bucket bounds (`PROFILE_GEMM_ROWS_BOUNDS`) enter the `gemm` family's case-set version only. The hashed
   form has a bounds entry per family (absent for the other five), so another family can get bounds without a change
-  of format.
+  of format. (Updated 2026-11-12: `i8a8-linear` has bounds of its own, `I8A8_LINEAR_ROWS_BOUNDS` — ADR
+  [0115](0115-geometry-profiles.md) addendum decision 14.)
 - **Provenance** (amends decision 4): `adapter` (unchanged) and `families`, one entry per family with `sweep`,
   `sha256`, `date`, `candidateSet` and `userAgent` restricted to the records that have a row of the family, `kernels`
   (the fingerprint over the family's cases only) and `caseSet` (the version over the family's cases and bounds). A
@@ -896,3 +897,23 @@ filed 2026-10-27 after the ruling of 2026-10-26).
   and `geometry_profile_test.ts` (the shape).
 - **Not in this addendum**: a `base` input on the playground's `/geometry-sweep` page, and a structured answer to
   "which families are stale" (the message names the first one).
+
+## Addendum (2026-11-12) — the `geometries` sweep option (amends decisions 2 and 8)
+
+- **What.** `runGeometrySweep({ geometries })`: the candidate geometries to measure, by the name a record's rows carry
+  (`geometry`, e.g. `tile64x64r8x4w16x8k64s`), in the order given. The default geometry's row is measured as always,
+  first. Omitted (or an empty list, as for `cases`), every candidate of the set is measured, as before. A name that
+  is not a candidate of every chosen case, or a name given twice, throws before the GPU is touched; the check and the
+  sweep take the candidates through one function (`selectedCandidates` in `src/tune/harness.ts`).
+- **Why.** A machine that heats within one case measures that case in chunks with a cool-down between calls. The
+  i8a8 linear's `full` grid holds 230 geometries per case (ADR [0115](0115-geometry-profiles.md) addendum decision
+  14), and in the K-85 evaluation on the RTX 3080 Ti every case but the guard drifted ×1.14–1.21 over its run
+  (perf-ledger K-85), outside the 0.9–1.1 range in which the derivation keeps a case's ratios (ADR 0115 addendum
+  decision 8).
+- **The record** (amends decision 8): the option is recorded in `settings.geometries` (absent when omitted). A record
+  taken with it is an ordinary derivation input: the generator does not read the field, each row stands for itself,
+  and a candidate the record did not measure is "not measured" there, as with narrowed `cases` — the chunks of one
+  case, given together, are the case's observations.
+- **Checks.** `tune_entry_test.ts` (the refusals before the GPU; on a real GPU the default row first, then the named
+  geometries in the order given, `settings.geometries` recorded and the record derived); `tune_geometries_test.ts`
+  (`selectedCandidates`).

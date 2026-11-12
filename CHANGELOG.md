@@ -94,14 +94,13 @@ measurements in `docs/research/`.
   geometry without the field keeps its keys and WGSL byte for byte, and no embedded table carries it.
   `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson` of `@karume/runtime/tune` accept it and
   reject any other value naming the field.
-- `@karume/runtime/tune`: the candidate set `"k85"` of `runGeometrySweep`, an evaluation of that skeleton on the
-  i8a8 linear: the registered tables' `i8a8.linear` geometries and a grid of 204 geometries (regM 8 / 12 / 16, regN 4
-  / 8, the existing workgroup shapes, K tile 16 / 32 / 64, each with and without the skeleton, within 16,384 B of
-  workgroup storage) on cases of its own — the Wan2.2 TI2V-5B DiT linears at 33 frames and a small-M guard — that
-  `geometrySweepCases("k85")` lists with their node counts in one Wan2.2 DiT forward. Its record carries the case-set
-  version of those cases, and `deriveGeometryProfile` derives no table from it; the other sets, their cases and
-  every fingerprint are unchanged. Every sweep record now names the embedded table a Session on that adapter selects
+- `@karume/runtime/tune`: every sweep record names the embedded table a Session on that adapter selects
   (`geometryProfile`).
+- `@karume/runtime/tune`: `GeometrySweepOptions.geometries` measures only the named candidate geometries (the names
+  a record's rows carry), in the order given, so one case can be swept in chunks with a cool-down between calls; the
+  default geometry's row is measured as always. A name that is not a candidate of every chosen case, or a name given
+  twice, throws before the GPU is touched. The record keeps it in `settings.geometries`; `deriveGeometryProfile`
+  reads such a record like any other (ADR 0117 addendum of 2026-11-12, the `geometries` sweep option).
 - `@karume/runtime`: `GemmGeometry.form` and `GemmGeometry.decode`, optional fields of the f32 GEMM geometries of a
   geometry profile (perf-ledger K-88). `form` (`"tb-un"` / `"tas-tb-un"`, in the row-count buckets and in `conv2d`)
   is the form of the GEMM skeleton in the vec4 f32-compute kernels of linear / matmul / bmm / conv2d: a thread's
@@ -123,7 +122,7 @@ measurements in `docs/research/`.
   fingerprint are unchanged. A candidate's name carries its fields as the key spells them (`…:tb-un`, `…:dec`).
 - `@karume/runtime/tune`: `sweepCaseSetIds` (the per-family successor of `sweepCaseSetId` — **Breaking**) takes an
   optional candidate set and then returns the case-set versions a sweep of that set records (the same values as
-  without it for `quick` / `quick+` / `full`, an evaluation set's own table's for `k85` / `k88`).
+  without it for `quick` / `quick+` / `full`, the evaluation set's own table's for `k88`).
 - `@karume/runtime/tune`: `runAttentionRouteBench` takes `onlineTiled` (default false), a measure-first candidate
   for the online int8 attention (perf-ledger K-106): the kernel reading Vᵀ in its own key order, timed against
   `online` in the same rounds (A B B A per round, the median of the per-round ratios), its producer timed beside
@@ -167,6 +166,17 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/runtime/tune`: the sweep's `i8a8-linear` cases gain the five Wan2.2 TI2V-5B DiT linear shapes at 33
+  frames, an Irodori v4-small small-M guard (M 185) and the same shape at M 256 (13 cases, with the ordinary
+  `i8a8-linear-m…` ids), and the `full` set gives that family a grid of its own: the 48 geometries of the other i8a8
+  families, then the vec4 skeleton grid (regM 8 / 12 / 16, regN 4 / 8, K tile 16 / 32 / 64, each without and with the
+  skeleton) within 16,384 B of workgroup storage — 230 geometries. `deriveGeometryProfile` reads the skeleton in a
+  row's `geometryParams` and can adopt it (ADR 0115 addendum decision 14).
+- `@karume/runtime`: the embedded tables `nvidia-ampere`, `nvidia-blackwell` and `apple-metal-3` hold
+  `i8a8.linear` as three row-count rules, regenerated from their own sweep records: rows > 512 keep each table's
+  geometry, and rows ≤ 512 run the default geometry until a sweep of the family is registered. That is a speed
+  change for the small-M i8a8 linears (Irodori's M = 185, for one); outputs are unchanged, the i8a8 geometries
+  being bit-identical. Every other field of the tables is unchanged.
 - `@karume/runtime/tune`: `runAttentionRouteBench` measures `ATTENTION_BENCH_SHAPES` by default (MOSS-Image's
   1024² attention added to Wan2.2's three shapes). Its `online` row times the online kernel in the key-axis form the
   route takes on the device and reports it (`keyWords`); with `onlineTiled`, the pair's first arm and the
@@ -203,6 +213,14 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/runtime` and `@karume/runtime/tune`: `GeometryProfile.i8a8.linear` is `readonly I8a8RowsRule[]`
+  (`{ maxRows, geometry }`, the rule form and order of `gemmRows`), selecting the i8a8 linear's geometry by its row
+  count; the type `I8a8RowsRule` is exported. `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson`
+  refuse a table that holds a single geometry there. Generated tables hold the three buckets ≤ 256 / 257–512 / > 512.
+  For i4 resident weights whose group length is not a multiple of the selected rule's K tile, the w4a8 linear runs the
+  default geometry. The `i8a8-linear` family's cases and bounds changed, so a saved table's `i8a8-linear` entry
+  mismatches and that family's records are refused: sweep that family again and derive with the stored table as
+  `base` (ADR 0115 addendum decision 14).
 - `@karume/runtime` and `@karume/runtime/tune`: a geometry profile's provenance and matching keys are per op family
   (`gemm` — linear / matmul / bmm —, `attention`, `conv2d`, `i8a8-linear`, `i8a8-attention`, `i8a8-conv3d`).
   `provenance` holds `adapter` and `families`, one entry per family its records have rows of (`sweep`, `sha256`,
