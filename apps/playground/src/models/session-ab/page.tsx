@@ -15,9 +15,10 @@
  *   seeded feeds whose output words the runner compares (u32, NaN by class); the hits and the
  *   dispatches are the runner's, which every run of a `sessionArm` reports.
  * - **Wan2.2 VAE next chunk** and **anima VAE decode**: the `vae_decoder_next` chunk graph of Wan2.2
- *   or the `vae_decoder` tile graph of anima at the chosen preset, opened the same way, and three
- *   `sessionArm`s over it — `base` with the options the pipeline gives its VAE, `g8` and `g4` with
- *   the same plus `candidate/vae_rms_silu_g8` / `_g4` — each visit opening and closing its Session.
+ *   or the `vae_decoder` tile graph of anima at the chosen preset, opened the same way, and two
+ *   `sessionArm`s over it — `base` with the options the pipeline gives its VAE besides its fusion
+ *   rule, `rule` with the same plus `models/vae_rms_silu` of `@karume/models` (the rule the two
+ *   pipelines pass by default) — each visit opening and closing its Session.
  *   Every timed run is one forward on seeded feeds (the Wan chunk graph's caches included) and reads
  *   every output back; the runner compares every output's words and keeps the counts.
  *
@@ -28,6 +29,7 @@
 import { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "@karume/candidate-rules";
 import { chatPrompt } from "@karume/models/gemma";
 import { EW_CHAIN_RULE, EW_CHAIN_RULE_NAME } from "@karume/models/moss";
+import { VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionOptions } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb, sessionArm } from "@karume/runtime/tune";
 import { memo, useMemo, useState } from "react";
@@ -159,8 +161,8 @@ type SessionAbTarget = "gemma4-decode" | "moss-dit-forward" | SessionAbVaeTarget
 const TARGET_CHOICES: readonly Choice<SessionAbTarget>[] = [
   { value: "gemma4-decode", label: "Gemma 4 decode (candidate/gelu_mul)" },
   { value: "moss-dit-forward", label: "MOSS-Image DiT forward (models/ew_chain)" },
-  { value: "wan22-vae-next", label: "Wan2.2 VAE next chunk (candidate/vae_rms_silu_g8 / _g4)" },
-  { value: "anima-vae-decode", label: "anima VAE decode (candidate/vae_rms_silu_g8 / _g4)" },
+  { value: "wan22-vae-next", label: "Wan2.2 VAE next chunk (models/vae_rms_silu)" },
+  { value: "anima-vae-decode", label: "anima VAE decode (models/vae_rms_silu)" },
 ];
 
 const MIB = 2 ** 20;
@@ -825,10 +827,10 @@ export const SessionAbPage = () => {
                 <CardDescription>
                   Every arm builds its Sessions from the{" "}
                   <code>{VAE_AB_TARGETS[vaeTarget].component}</code> component of this preset,
-                  fetched and opened once, with the options its pipeline gives the VAE. The arms{" "}
-                  <code>g8</code> and <code>g4</code> add the candidate rule{" "}
-                  <code>candidate/vae_rms_silu_g8</code> / <code>_g4</code> (
-                  <code>@karume/candidate-rules</code>) through{" "}
+                  fetched and opened once, with the options its pipeline gives the VAE besides its
+                  fusion rule. The arm <code>rule</code> adds the rule{" "}
+                  <code>{VAE_RMS_SILU_RULE_NAME}</code> (<code>@karume/models</code>, which the Wan
+                  and anima pipelines pass by default) through{" "}
                   <code>SessionOptions.fusionRules</code>; <code>base</code> passes none. Not on
                   Metal: the rules&apos; rounding barrier is measured not to hold there.
                 </CardDescription>
@@ -973,7 +975,7 @@ export const SessionAbPage = () => {
                     ? `A timed run is one DiT forward at the sequence of a 1024 × 1024 request (${MOSS_DIT_WORK.imageTokens} image tokens + ${MOSS_DIT_WORK.textTokens} text tokens) on fixed feeds drawn from seed ${MOSS_DIT_WORK.seed}; its output words (u32, NaN by class) are what the runner compares.`
                     : `A timed run is one greedy generation (seed 0) of the chosen token count from one fixed prompt in a sequence of capacity ${SESSION_AB_CAPACITY}; its token ids are what the runner compares.`}{" "}
                 One untimed warm-up round, then every round visits the arms forward and in reverse
-                {vae ? " (base, g8, g4, g4, g8, base)." : " (base, rule, rule, base)."}
+                (base, rule, rule, base).
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">

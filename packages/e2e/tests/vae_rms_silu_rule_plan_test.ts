@@ -1,7 +1,8 @@
 /**
- * The candidate rule `candidate/vae_rms_silu_g8` / `_g4` (`@karume/candidate-rules`,
- * packages/candidate-rules/src/vae-rms-silu.ts — the VAE's channel RMS norm and the SiLU after it
- * in one dispatch) as the fusion pass plans it, on small synthetic graphs (no GPU, no model asset —
+ * The rule `models/vae_rms_silu` (`@karume/models/wan` and `/anima`,
+ * packages/models/src/vae/vae-rms-silu.ts — the VAE's channel RMS norm and the SiLU after it in one
+ * dispatch, which the Wan and anima pipelines pass by default to their VAE decoder Sessions) as the
+ * fusion pass plans it, on small synthetic graphs (no GPU, no model asset —
  * the core lane): planned through the path a Session takes (`planDistributionFusions` with
  * `fusionRules`, `./helpers/fusion-counts.ts`), so what is checked is the plan a Session given the
  * rule would run. It pins the chains the rule takes (the Wan layout `[C, T, H, W]` over axis 0, the
@@ -22,7 +23,7 @@ import { describe, it } from "vite-plus/test";
 import { assertEquals, assertNotEquals } from "@std/assert";
 import type { ExecStep } from "../../runtime/src/runtime/fusion-rule.ts";
 import { mergeGraph } from "../../runtime/tests/helpers/merged-graph.ts";
-import { vaeRmsSiluRule, vaeRmsSiluRuleName, type VaeRmsSiluGroups } from "@karume/candidate-rules";
+import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import { type DistributionFusionPlan, planDistributionFusions } from "./helpers/fusion-counts.ts";
 import {
   type NormGraph,
@@ -32,7 +33,7 @@ import {
   normDeclaration,
 } from "./helpers/norm-chain.ts";
 
-const G8 = vaeRmsSiluRuleName(8);
+const NAME = VAE_RMS_SILU_RULE_NAME;
 
 /** A Wan decoder block: `[C, T, H, W]` reduced over the channels on axis 0, gamma `[C, 1, 1, 1]`. */
 const WAN: NormLayout = { x: [96, 2, 3, 5], axis: 0, gamma: [96, 1, 1, 1] };
@@ -44,25 +45,20 @@ const MID: NormLayout = { x: [1, 1024, 2, 3], axis: 1, gamma: [1024, 1, 1] };
 /** The f32 bits of the exported floor 1e-12. */
 const FLOOR_BITS = 0x2b8cbccc;
 
-/** The plan of `graph` with the rule of `groups` given, or (`"plain"`) without any rule. */
-const planOf = (graph: NormGraph, groups: VaeRmsSiluGroups | "plain" = 8): DistributionFusionPlan =>
+/** The plan of `graph` with the rule given, or (`"plain"`) without any rule. */
+const planOf = (graph: NormGraph, mode: "rule" | "plain" = "rule"): DistributionFusionPlan =>
   planDistributionFusions(
     mergeGraph(normDeclaration(graph)),
     graph.inputs,
-    groups === "plain" ? {} : { fusionRules: [vaeRmsSiluRule(groups)] },
+    mode === "plain" ? {} : { fusionRules: [VAE_RMS_SILU_RULE] },
   );
 
 type FusedStepOf = Extract<ExecStep, { readonly kind: "fused" }>;
 
 /** The rule's one step of a plan (fails when it has none or several). */
-const onlyStep = (
-  planned: DistributionFusionPlan,
-  where: string,
-  groups: VaeRmsSiluGroups = 8,
-): FusedStepOf => {
-  const name = vaeRmsSiluRuleName(groups);
+const onlyStep = (planned: DistributionFusionPlan, where: string): FusedStepOf => {
   const steps = planned.plan.steps.flatMap((step) =>
-    step.kind === "fused" && step.rule === name ? [step] : [],
+    step.kind === "fused" && step.rule === NAME ? [step] : [],
   );
   assertEquals(steps.length, 1, `${where}: the rule's steps`);
   return steps[0];
@@ -72,10 +68,10 @@ const onlyStep = (
 const assertDeclined = (graph: NormGraph, where: string): void => {
   const fused = planOf(graph);
   const plain = planOf(graph, "plain");
-  assertEquals(fused.plan.counts[G8], 0, `${where}: hits`);
+  assertEquals(fused.plan.counts[NAME], 0, `${where}: hits`);
   assertEquals(
     fused.plan.counts,
-    { ...plain.plan.counts, [G8]: 0 },
+    { ...plain.plan.counts, [NAME]: 0 },
     `${where}: the other counters`,
   );
   assertEquals(fused.plan.steps.length, plain.plan.steps.length, `${where}: steps`);
@@ -98,7 +94,7 @@ const followed = (
   outputs: readonly string[],
 ): NormGraph => ({ ...graph, nodes: [...graph.nodes, ...extra], outputs });
 
-describe("candidate/vae_rms_silu: the chains it takes", () => {
+describe("models/vae_rms_silu: the chains it takes", () => {
   it("takes the Wan layout with the SiLU as one step of 10 nodes binding x, scale and gamma, and leaves silu at 0", () => {
     const planned = planOf(normChain(WAN, "silu"));
     const step = onlyStep(planned, "wan");
@@ -106,7 +102,7 @@ describe("candidate/vae_rms_silu: the chains it takes", () => {
       [step.nodeCount, step.binds, step.outputName, step.outputShape],
       [10, ["x", "scale", "gamma"], "y", WAN.x],
     );
-    assertEquals([planned.plan.counts[G8], planned.plan.counts.silu], [1, 0]);
+    assertEquals([planned.plan.counts[NAME], planned.plan.counts.silu], [1, 0]);
     assertEquals(planned.plan.steps.length, 1, "the whole graph is the rule's step");
     // Without the rule the built-in silu takes the tail.
     assertEquals(planOf(normChain(WAN, "silu"), "plain").plan.counts.silu, 1);
@@ -143,14 +139,14 @@ describe("candidate/vae_rms_silu: the chains it takes", () => {
       const planned = planOf(graph);
       const step = onlyStep(planned, where);
       assertEquals([step.nodeCount, step.outputName], [8, "m2"], where);
-      assertEquals(step.dispatches[0].key, "ext:candidate:vae_rms_silu:v1:g8:none:f32:wg256:xor");
+      assertEquals(step.dispatches[0].key, "ext:models:vae_rms_silu:v1:g8:none:f32:wg256:xor");
       // The pair the rule leaves goes to the built-in silu when it is the exact form.
       assertEquals(planned.plan.counts.silu, silus, `${where}: silu`);
     }
   });
 });
 
-describe("candidate/vae_rms_silu: the chains it declines, one per pinned slot", () => {
+describe("models/vae_rms_silu: the chains it declines, one per pinned slot", () => {
   const silu = normChain(WAN, "silu");
 
   it("the div's operands swapped", () => {
@@ -278,33 +274,21 @@ describe("candidate/vae_rms_silu: the chains it declines, one per pinned slot", 
   });
 });
 
-describe("candidate/vae_rms_silu: keys, WGSL, params and workgroups", () => {
-  it("gives one (groups, tail) one key and byte-identical WGSL whatever the layout and shapes, and every other pair another", () => {
-    const dispatchOf = (layout: NormLayout, tail: "silu" | "none", groups: VaeRmsSiluGroups) =>
-      onlyStep(planOf(normChain(layout, tail), groups), "key", groups).dispatches[0];
-    const wan = dispatchOf(WAN, "silu", 8);
-    const anima = dispatchOf(ANIMA, "silu", 8);
-    assertEquals(wan.key, "ext:candidate:vae_rms_silu:v1:g8:silu:f32:wg256:xor");
+describe("models/vae_rms_silu: keys, WGSL, params and workgroups", () => {
+  it("gives one tail one key and byte-identical WGSL whatever the layout and shapes, and the other tail another", () => {
+    const dispatchOf = (layout: NormLayout, tail: "silu" | "none") =>
+      onlyStep(planOf(normChain(layout, tail)), "key").dispatches[0];
+    const wan = dispatchOf(WAN, "silu");
+    const anima = dispatchOf(ANIMA, "silu");
+    assertEquals(wan.key, "ext:models:vae_rms_silu:v1:g8:silu:f32:wg256:xor");
     assertEquals(anima.key, wan.key);
     assertEquals(anima.wgsl(), wan.wgsl());
     assertNotEquals([...anima.params], [...wan.params]);
-    const others = [
-      dispatchOf(WAN, "none", 8),
-      dispatchOf(WAN, "silu", 4),
-      dispatchOf(WAN, "none", 4),
-    ];
-    assertEquals(
-      others.map(({ key }) => key),
-      [
-        "ext:candidate:vae_rms_silu:v1:g8:none:f32:wg256:xor",
-        "ext:candidate:vae_rms_silu:v1:g4:silu:f32:wg256:xor",
-        "ext:candidate:vae_rms_silu:v1:g4:none:f32:wg256:xor",
-      ],
-    );
-    const texts = new Set([wan, ...others].map((dispatch) => dispatch.wgsl()));
-    assertEquals(texts.size, 4, "four pairs, four texts");
+    const none = dispatchOf(WAN, "none");
+    assertEquals(none.key, "ext:models:vae_rms_silu:v1:g8:none:f32:wg256:xor");
+    assertNotEquals(none.wgsl(), wan.wgsl(), "two tails, two texts");
     // The same text from a second plan (no state between plans).
-    assertEquals(dispatchOf(MID, "none", 4).wgsl(), others[2].wgsl());
+    assertEquals(dispatchOf(MID, "none").wgsl(), none.wgsl());
   });
 
   it("writes the params P, C, the floor's bits and a zero mask, and the floor from the clamp's attribute", () => {
@@ -327,36 +311,28 @@ describe("candidate/vae_rms_silu: keys, WGSL, params and workgroups", () => {
     assertEquals([other.key, other.wgsl()], [base.key, base.wgsl()]);
   });
 
-  it("declares one grid-stride workgroup of 256 per tile of 32 (g8) or 64 (g4) pixels", () => {
+  it("declares one grid-stride workgroup of 256 per tile of 32 pixels", () => {
+    const perTile = 32;
     for (const [x, pixels] of [
       [[96, 2, 3, 5], 30],
       [[96, 1, 10, 10], 100],
       [[96, 2, 16, 16], 512],
     ] as const) {
       const layout: NormLayout = { x, axis: 0, gamma: [96, 1, 1, 1] };
-      for (const [groups, perTile] of [
-        [8, 32],
-        [4, 64],
-      ] as const) {
-        const [dispatch] = onlyStep(
-          planOf(normChain(layout, "silu"), groups),
-          "wg",
-          groups,
-        ).dispatches;
-        assertEquals(
-          dispatch.workgroups,
-          { kind: "gridStride", items: Math.ceil(pixels / perTile) * 256, size: 256 },
-          `P ${pixels} g${groups}`,
-        );
-        const text = dispatch.wgsl();
-        assertEquals(text.includes("@compute @workgroup_size(256)"), true, "workgroup size");
-        assertEquals(text.includes(`const PIX: u32 = ${perTile}u;`), true, "pixels per tile");
-        assertEquals(
-          text.includes(`var<workgroup> nodes: array<f32, ${perTile * 33}>;`),
-          true,
-          "the stride-32 node rows",
-        );
-      }
+      const [dispatch] = onlyStep(planOf(normChain(layout, "silu")), "wg").dispatches;
+      assertEquals(
+        dispatch.workgroups,
+        { kind: "gridStride", items: Math.ceil(pixels / perTile) * 256, size: 256 },
+        `P ${pixels}`,
+      );
+      const text = dispatch.wgsl();
+      assertEquals(text.includes("@compute @workgroup_size(256)"), true, "workgroup size");
+      assertEquals(text.includes(`const PIX: u32 = ${perTile}u;`), true, "pixels per tile");
+      assertEquals(
+        text.includes(`var<workgroup> nodes: array<f32, ${perTile * 33}>;`),
+        true,
+        "the stride-32 node rows",
+      );
     }
   });
 });

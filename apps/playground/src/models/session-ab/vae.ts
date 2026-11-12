@@ -5,9 +5,10 @@
  * Wan2.2 `vae_decoder_next` chunk graph (tile 16: the latent frame and its 32 caches in, four frames
  * and the 32 updated caches out) or the anima `vae_decoder` tile graph (latents `[1, 16, 64, 64]` →
  * a 512² tile; a 1024² image decodes 9 of them) — on fixed feeds. The arms are `sessionArm`s of
- * `@karume/runtime/tune` over one prepared model — `base` with the pipeline's options, `g8` and
- * `g4` with the same plus the candidate rule `candidate/vae_rms_silu_g8` / `_g4` — and every output
- * is read back, so the A/B's identity is u32 identity of every output word (NaN by class). The counts
+ * `@karume/runtime/tune` over one prepared model — `base` with the options the pipeline gives its
+ * VAE besides its fusion rule, `rule` with the same plus that rule `models/vae_rms_silu` (the plan
+ * the pipeline runs) — and every output is read back, so the A/B's identity is u32 identity of every
+ * output word (NaN by class). The counts
  * (the rules' hits, the dispatches) are the runner's: a `sessionArm` reports them for every run.
  *
  * NOTE: the feeds (between the twin markers) have a twin in
@@ -17,8 +18,8 @@
  * (tests/session-ab_vae_test.ts compares them).
  */
 
-import { vaeRmsSiluRule, vaeRmsSiluRuleName } from "@karume/candidate-rules";
 import type { Manifest, SessionSpec } from "@karume/hub";
+import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionOptions, Tensor } from "@karume/runtime";
 
 import type { MountName } from "@/mounts";
@@ -95,11 +96,9 @@ export const VAE_AB_MOUNTS = {
 export const isVaeTarget = (target: string): target is SessionAbVaeTarget =>
   Object.hasOwn(VAE_AB_TARGETS, target);
 
-/** The rule an arm names (`candidate/vae_rms_silu_g8` or `_g4`). */
+/** The rule an arm names (`models/vae_rms_silu`, the one the Wan and anima pipelines pass). */
 const vaeRuleNamed = (name: string) => {
-  for (const groups of [8, 4] as const) {
-    if (name === vaeRmsSiluRuleName(groups)) return vaeRmsSiluRule(groups);
-  }
+  if (name === VAE_RMS_SILU_RULE_NAME) return VAE_RMS_SILU_RULE;
   throw new Error(`No VAE rule named ${name}`);
 };
 
@@ -107,8 +106,8 @@ const vaeRuleNamed = (name: string) => {
 export type VaeSessionOptions = Pick<SessionOptions, "convCompute">;
 
 /**
- * The VAE Session's options as the target's pipeline derives them from the preset's `session`:
- * Wan's VAE takes the conv knob alone (`wanVaeSessionOptions` of
+ * The VAE Session's options as the target's pipeline derives them from the preset's `session`,
+ * besides the fusion rule it adds (the `rule` arm adds it here): Wan's VAE takes the conv knob alone (`wanVaeSessionOptions` of
  * packages/models/src/wan/tile-decode.ts — ADR 0133 decision 6) and anima's VAE stage none of it
  * (`withStage` of packages/models/src/anima/pipeline.ts). A copy of that rule: neither function is
  * on the public surface the playground reads.
@@ -170,7 +169,7 @@ export type SessionAbVaeRequest = SessionAbVaeModel &
 /**
  * The request of a run on a VAE target: the model, the settings this target reads (the token count
  * and the count probe are the Gemma target's, and every visit opens and closes its arm's Session
- * whatever the form says), the options the pipeline gives the VAE and the three arms.
+ * whatever the form says), the options the pipeline gives the VAE besides its rule, and the two arms.
  */
 export const sessionAbVaeRequest = (
   target: SessionAbVaeTarget,
@@ -189,8 +188,7 @@ export const sessionAbVaeRequest = (
   sessionOptions: vaeSessionOptions(target, model.session),
   arms: [
     { name: "base", fusionRules: [] },
-    { name: "g8", fusionRules: [vaeRmsSiluRuleName(8)] },
-    { name: "g4", fusionRules: [vaeRmsSiluRuleName(4)] },
+    { name: "rule", fusionRules: [VAE_RMS_SILU_RULE_NAME] },
   ],
 });
 

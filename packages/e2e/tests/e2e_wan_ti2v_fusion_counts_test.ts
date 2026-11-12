@@ -2,8 +2,9 @@
  * Fusion hit counts of the Wan2.2 TI2V-5B distribution graphs (no GPU — `planFusions` on part 0
  * only; the shared planning side and the rationale live in `helpers/fusion-counts.ts`).
  *
- * The last case pins the hits of the candidate rules `candidate/vae_rms_silu_g8` / `_g4`, which
- * no preset passes (`@karume/candidate-rules`).
+ * The first case plans without any external rule (the built-in rules' hits); the last case pins the
+ * hits of `models/vae_rms_silu` (`@karume/models/wan`), which the pipeline passes by default to the
+ * VAE decoder chunk graphs' Sessions.
  *
  * MUST: the asset is `models/karume-wan2.2/` (untracked local asset); where it is missing the case
  * SKIPs explicitly with a reason (ADR 0005).
@@ -12,7 +13,7 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { vaeRmsSiluRuleName } from "@karume/candidate-rules";
+import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
@@ -159,23 +160,27 @@ test.skipIf(!WAN22_AVAILABLE)(
 );
 
 /**
- * The candidate rules `candidate/vae_rms_silu_g8` / `_g4` (`@karume/candidate-rules`, the channel
- * RMS norm and the SiLU after it in one dispatch), which no preset passes, planned on every VAE
- * graph on 2026-11-11, per tail of the rule's key (the two rules plan alike):
+ * The rule `models/vae_rms_silu` (the channel RMS norm and the SiLU after it in one dispatch) planned
+ * on every VAE graph, per tail of the rule's key, against the same options with the rule disabled
+ * by name (counted 2026-11-11 as the candidate `candidate/vae_rms_silu_g8`):
  *
- * - **the decoder chunk graphs** (first / next, both seats): **29** norms with the SiLU (every
- *   resnet norm and the head's) and **1** without it (the mid-block attention's norm,
- *   `[1, 1024, 16, 16]` over axis 1, which a conv2d reads). The built-in silu's 29 go to the rule
- *   (silu 29 → 0), upsample2x keeps its 3, and the steps fall by 29 × 8 + 7 = 239 (the ten nodes of
- *   a site were nine steps, the silu pair being one): 437 → 198 on first, 447 → 208 on next.
- * - **the tile-32 pair** (`_32`): **0**. Every weight of those graphs is borrowed from the
- *   16-latent pair (`shared`), and the runtime does not bind a borrowed weight to an external rule
- *   (ADR 0148), so the windows are declined and silu keeps its 29.
- * - **the encoder** (I2V): pre **18** and post **3**, all with the SiLU (silu → 0); attn **0** — its
- *   norm reduces the last axis of `[S, 640]`, whose leading axis is not 1.
+ * - **the decoder chunk graphs** (first / next, both seats), through the VAE decoder's rule list (the
+ *   pipeline's default for their Sessions): **29** norms with the SiLU (every resnet norm and the
+ *   head's) and **1** without it (the mid-block attention's norm, `[1, 1024, 16, 16]` over axis 1,
+ *   which a conv2d reads). The built-in silu's 29 go to the rule (silu 29 → 0), upsample2x keeps
+ *   its 3, and the steps fall by 29 × 8 + 7 = 239 (the ten nodes of a site were nine steps, the silu
+ *   pair being one): 437 → 198 on first, 447 → 208 on next.
+ * - **the tile-32 pair** (`_32`), through the same list (the pipeline gives it to the borrowers
+ *   too): **0**. Every weight of those graphs is borrowed from the 16-latent pair (`shared`), and
+ *   the runtime does not bind a borrowed weight to an external rule (ADR 0148), so the windows are
+ *   declined and silu keeps its 29.
+ * - **the encoder** (I2V), which the pipeline does not give the rule by default — planned with the
+ *   rule given as the experimental `fusionRules` would give it: pre **18** and post **3**, all with
+ *   the SiLU (silu → 0); attn **0** — its norm reduces the last axis of `[S, 640]`, whose leading
+ *   axis is not 1.
  */
 test.skipIf(!WAN22_AVAILABLE)(
-  "the candidate rules candidate/vae_rms_silu_g8 / _g4 take 29 + 1 norms of each 16-latent decoder chunk graph, 18 / 3 of the encoder and none of the tile-32 pair, and move only silu",
+  "models/vae_rms_silu takes 29 + 1 norms of each 16-latent decoder chunk graph by default and none of the tile-32 pair, 18 / 3 of the encoder when given, and moves only silu",
   async () => {
     const vae: readonly (readonly [
       component: string,
@@ -194,27 +199,29 @@ test.skipIf(!WAN22_AVAILABLE)(
     for (const [component, seats, tails, steps] of vae) {
       for (const seat of seats) {
         const graph = await readWan22Graph(component, seat);
-        for (const groups of [8, 4] as const) {
-          const label = `${component}/${seat} g${groups}`;
-          const planned = vaeRmsSiluPlans(graph, solvedShapes(graph, 64), groups);
-          assertEquals(planned.tails, tails, `${label}: hits per tail`);
-          const hits = (tails.silu ?? 0) + (tails.none ?? 0);
-          const { counts } = planned.plain.plan;
-          assertEquals(
-            planned.fused.plan.counts,
-            {
-              ...counts,
-              silu: counts.silu - (tails.silu ?? 0),
-              [vaeRmsSiluRuleName(groups)]: hits,
-            },
-            `${label}: the counters`,
-          );
-          assertEquals(
-            [planned.plain.plan.steps.length, planned.fused.plan.steps.length],
-            [...steps],
-            `${label}: steps`,
-          );
-        }
+        const label = `${component}/${seat}`;
+        // The decoder graphs plan with the pipeline's default list; the encoder with the rule given.
+        const planned = component.startsWith("vae_decoder")
+          ? vaeRmsSiluPlans(graph, solvedShapes(graph, 64))
+          : vaeRmsSiluPlans(graph, solvedShapes(graph, 64), [VAE_RMS_SILU_RULE]);
+        assertEquals(planned.tails, tails, `${label}: hits per tail`);
+        const hits = (tails.silu ?? 0) + (tails.none ?? 0);
+        const { counts } = planned.plain.plan;
+        assertEquals(counts[VAE_RMS_SILU_RULE_NAME], 0, `${label}: the plain side`);
+        assertEquals(
+          planned.fused.plan.counts,
+          {
+            ...counts,
+            silu: counts.silu - (tails.silu ?? 0),
+            [VAE_RMS_SILU_RULE_NAME]: hits,
+          },
+          `${label}: the counters`,
+        );
+        assertEquals(
+          [planned.plain.plan.steps.length, planned.fused.plan.steps.length],
+          [...steps],
+          `${label}: steps`,
+        );
       }
     }
   },

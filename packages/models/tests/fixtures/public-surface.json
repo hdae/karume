@@ -169,6 +169,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "VAE_RMS_SILU_RULE",
+        "kind": "variable"
+      },
+      {
+        "name": "VAE_RMS_SILU_RULE_NAME",
+        "kind": "variable"
+      },
+      {
         "name": "approximatePreview",
         "kind": "function"
       },
@@ -1093,6 +1101,14 @@
       {
         "name": "Ti2vPipeline",
         "kind": "class"
+      },
+      {
+        "name": "VAE_RMS_SILU_RULE",
+        "kind": "variable"
+      },
+      {
+        "name": "VAE_RMS_SILU_RULE_NAME",
+        "kind": "variable"
       },
       {
         "name": "frameToRgba",

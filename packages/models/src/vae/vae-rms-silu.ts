@@ -1,8 +1,10 @@
 /**
- * A candidate fusion rule for the video / image VAE's channel RMS norm, with the SiLU that follows
- * it, in one dispatch (perf-ledger V-10). Written against `@karume/runtime/kernel` alone
- * (packages/models/tests/external_fusion_rule_test.ts pins that import list). A candidate, not an
- * adopted rule: no pipeline passes it by default.
+ * A fusion rule for the video / image VAE's channel RMS norm, with the SiLU that follows it, in one
+ * dispatch (`models/vae_rms_silu`, perf-ledger V-10). Written the way a package outside the runtime
+ * writes a rule, against `@karume/runtime/kernel` alone
+ * (packages/models/tests/external_fusion_rule_test.ts pins that import list). Adopted on
+ * 2026-11-12: the Wan (2.1 and 2.2) and anima pipelines pass it by default to the Sessions of their
+ * VAE decoder graphs (`./fusion-rules.ts`); no other Session gets it by default.
  *
  * The chain it takes is what the exporter lowers the norm to, node for node:
  *
@@ -17,7 +19,7 @@
  * - The channel sum is the axis reduce's tree: 256 leaves per pixel (leaf `slot` folds the squares
  *   of channels `slot, slot + 256, …` from 0.0 in ascending order), then the balanced pairwise tree
  *   over the leaves by halving strides 128, 64, … 1. One workgroup of 256 invocations takes
- *   `256 / groups` pixels; each invocation builds `32 / groups` of a pixel's 32 stride-32 nodes
+ *   `256 / 8` = 32 pixels; each invocation builds `32 / 8` = 4 of a pixel's 32 stride-32 nodes
  *   (levels 128, 64, 32), and one invocation per pixel finishes levels 16 … 1.
  *   MUST: this mirrors packages/runtime/src/codegen/reduce.ts. The entry exports no text for a
  *   reduction, so the tree here is a copy; the rule's own u32 check is its only evidence.
@@ -26,12 +28,16 @@
  * - Each value the unfused plan stores before a later arithmetic node reads it passes the rounding
  *   barrier `bitcast(bitcast(v) ^ params.mask)` with a mask that is 0 at run time, so the compiler
  *   cannot contract across it. The staged barrier of the entry (`stagedLoopWgsl`) is an elementwise
- *   loop and does not fit a reduction leaf. MUST: the XOR form is measured to hold on Vulkan and
- *   D3D12 (NVIDIA) and measured **not** to hold on Metal (docs/known-issues.md) — this rule is not
- *   to be passed there.
+ *   loop and does not fit a reduction leaf. That the barrier holds is measured behaviour, not a WGSL
+ *   guarantee: the XOR form is measured to hold on Vulkan and D3D12 on NVIDIA (this rule's u32
+ *   check, and its D3D12 runs in perf-ledger V-10). On Metal the same form was measured not to act
+ *   as a barrier in other kernels (docs/known-issues.md), and this rule has not been run there. It
+ *   runs on Metal all the same (a backend difference is recorded, not gated — ADR 0148 addendum of
+ *   2026-11-12); where the barrier does not hold, its output can differ from the unfused plan by the
+ *   rounding of a contracted multiply-add.
  *
- * `groups` is the one geometry choice (8 = 32 pixels per workgroup, 4 = 64); it is in the rule's
- * name and key, so two arms of an A/B can carry the two values.
+ * The geometry is fixed: 8 channel groups of a workgroup, 32 pixels per workgroup (`g8` in the key).
+ * The 4-group form (64 pixels) measured within the noise floor of it and went away with the adoption.
  */
 
 import {
@@ -39,20 +45,17 @@ import {
   defineRule,
   elementwiseValueWgsl,
   type FusionMatch,
-  type FusionRule,
   type NodePlan,
   sameShape,
 } from "@karume/runtime/kernel";
 
-/** The channel groups of one workgroup: `256 / groups` pixels per workgroup. */
-export type VaeRmsSiluGroups = 4 | 8;
-
-/** The rule's name for a geometry, and its counter in `lastRunFusions`. */
-export const vaeRmsSiluRuleName = <Groups extends VaeRmsSiluGroups>(
-  groups: Groups,
-): `candidate/vae_rms_silu_g${Groups}` => `candidate/vae_rms_silu_g${groups}`;
+/** The rule's name, and its counter in `lastRunFusions`. */
+export const VAE_RMS_SILU_RULE_NAME = "models/vae_rms_silu";
 
 const WORKGROUP_SIZE = 256;
+/** The channel groups of one workgroup: `WORKGROUP_SIZE / GROUPS` = 32 pixels per workgroup. */
+const GROUPS = 8;
+const PIXELS_PER_WORKGROUP = WORKGROUP_SIZE / GROUPS;
 /** The leaves of the axis reduce's tree, and the nodes left after its levels 128, 64 and 32. */
 const LEAVES = 256;
 const STRIDE_32_NODES = 32;
@@ -72,16 +75,15 @@ type VaeRmsSiluMatch = FusionMatch & {
   readonly tail: Tail;
 };
 
-/** MUST: the geometry and the tail stay in the key (both change the WGSL); under `ext:candidate:`. */
-const key = (groups: VaeRmsSiluGroups, tail: Tail): string =>
-  `ext:candidate:vae_rms_silu:v1:g${groups}:${tail}:f32:wg${WORKGROUP_SIZE}:xor`;
+/** MUST: the geometry and the tail stay in the key (both change the WGSL); under `ext:models:`. */
+const key = (tail: Tail): string =>
+  `ext:models:vae_rms_silu:v1:g${GROUPS}:${tail}:f32:wg${WORKGROUP_SIZE}:xor`;
 
 /** The rounding barrier: `value` as a rounded f32 the compiler cannot fold into its reader. */
 const rounded = (value: string): string => `bitcast<f32>(bitcast<u32>(${value}) ^ m)`;
 
-const wgsl = (groups: VaeRmsSiluGroups, tail: Tail): string => {
-  const pixels = WORKGROUP_SIZE / groups;
-  const nodesPerGroup = STRIDE_32_NODES / groups;
+const wgsl = (tail: Tail): string => {
+  const nodesPerGroup = STRIDE_32_NODES / GROUPS;
   const square = elementwiseValueWgsl("mul", ["xv", "xv"]);
   const root = elementwiseValueWgsl("sqrt", ["s[0]"]);
   const clamped = elementwiseValueWgsl("clamp_min", ["r"], ["floor"]);
@@ -104,7 +106,7 @@ const wgsl = (groups: VaeRmsSiluGroups, tail: Tail): string => {
           `        out[c * P + t] = ${gated.value};`,
         ]
       : [`        out[c * P + t] = ${weighted.value};`];
-  return `// karume candidate rule candidate/vae_rms_silu: channel RMS norm${tail === "silu" ? " + SiLU" : ""}, ${groups} channel groups x ${pixels} pixels per workgroup
+  return `// karume rule models/vae_rms_silu: channel RMS norm${tail === "silu" ? " + SiLU" : ""}, ${GROUPS} channel groups x ${PIXELS_PER_WORKGROUP} pixels per workgroup
 struct Params { pixels: u32, channels: u32, floor_bits: u32, mask: u32 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -114,10 +116,10 @@ struct Params { pixels: u32, channels: u32, floor_bits: u32, mask: u32 }
 
 ${helpers.join("\n\n")}
 
-const PIX: u32 = ${pixels}u;
+const PIX: u32 = ${PIXELS_PER_WORKGROUP}u;
 // One row of ${STRIDE_32_NODES} stride-32 nodes per pixel, padded to ${STRIDE_32_NODES + 1} words.
-var<workgroup> nodes: array<f32, ${pixels * (STRIDE_32_NODES + 1)}>;
-var<workgroup> norms: array<f32, ${pixels}>;
+var<workgroup> nodes: array<f32, ${PIXELS_PER_WORKGROUP * (STRIDE_32_NODES + 1)}>;
+var<workgroup> norms: array<f32, ${PIXELS_PER_WORKGROUP}>;
 
 // Leaf \`slot\` of pixel \`t\`: the squares of channels slot, slot + ${LEAVES}, … folded from 0.0.
 fn leaf(slot: u32, t: u32, valid: bool, C: u32, P: u32, m: u32) -> f32 {
@@ -173,7 +175,7 @@ fn main(
     let n = norms[lane];
     let sc = scale[0u];
     if (valid) {
-      for (var c = g; c < C; c = c + ${groups}u) {
+      for (var c = g; c < C; c = c + ${GROUPS}u) {
         let xv = x[c * P + t];
         let dv = ${rounded(divided.value)};
         let m1 = ${rounded(scaled.value)};
@@ -301,42 +303,41 @@ const match = (nodes: readonly NodePlan[], index: number): VaeRmsSiluMatch | und
 };
 
 /**
- * The rule for one geometry. `groups` = the channel groups of a workgroup (8 → 32 pixels per
- * workgroup, 4 → 64).
+ * The rule (class E). The module-scope call is marked pure for the barrel's tree-shaking: a call a
+ * bundler cannot prove pure would keep the module's import of `@karume/runtime/kernel` in every
+ * bundle of `@karume/models`.
  */
-export const vaeRmsSiluRule = <Groups extends VaeRmsSiluGroups>(
-  groups: Groups,
-): FusionRule<`candidate/vae_rms_silu_g${Groups}`> => {
-  const pixelsPerWorkgroup = WORKGROUP_SIZE / groups;
-  return defineRule<VaeRmsSiluMatch, `candidate/vae_rms_silu_g${Groups}`>({
-    name: vaeRmsSiluRuleName(groups),
-    heads: ["mul"],
-    contract: "E",
-    internals: "stayInChain",
-    match,
-    build: (matched) => {
-      const product = matched.chain[matched.chain.length - 1].outputs[0];
-      const floorBits = new Uint32Array(new Float32Array([matched.floor]).buffer)[0];
-      return {
-        binds: [matched.x, matched.scale, matched.gamma],
-        outputName: product.name,
-        outputShape: product.shape,
-        temps: [],
-        dispatches: [
-          {
-            key: key(groups, matched.tail),
-            wgsl: () => wgsl(groups, matched.tail),
-            // The mask is 0: the XOR changes no bit, it only stands between two operations.
-            params: new Uint32Array([matched.pixels, matched.channels, floorBits, 0]),
-            workgroups: {
-              kind: "gridStride",
-              // One workgroup per tile of pixels; the tile loop covers what the device limit cuts.
-              items: Math.ceil(matched.pixels / pixelsPerWorkgroup) * WORKGROUP_SIZE,
-              size: WORKGROUP_SIZE,
-            },
+export const VAE_RMS_SILU_RULE = /* @__PURE__ */ defineRule<
+  VaeRmsSiluMatch,
+  typeof VAE_RMS_SILU_RULE_NAME
+>({
+  name: VAE_RMS_SILU_RULE_NAME,
+  heads: ["mul"],
+  contract: "E",
+  internals: "stayInChain",
+  match,
+  build: (matched) => {
+    const product = matched.chain[matched.chain.length - 1].outputs[0];
+    const floorBits = new Uint32Array(new Float32Array([matched.floor]).buffer)[0];
+    return {
+      binds: [matched.x, matched.scale, matched.gamma],
+      outputName: product.name,
+      outputShape: product.shape,
+      temps: [],
+      dispatches: [
+        {
+          key: key(matched.tail),
+          wgsl: () => wgsl(matched.tail),
+          // The mask is 0: the XOR changes no bit, it only stands between two operations.
+          params: new Uint32Array([matched.pixels, matched.channels, floorBits, 0]),
+          workgroups: {
+            kind: "gridStride",
+            // One workgroup per tile of pixels; the tile loop covers what the device limit cuts.
+            items: Math.ceil(matched.pixels / PIXELS_PER_WORKGROUP) * WORKGROUP_SIZE,
+            size: WORKGROUP_SIZE,
           },
-        ],
-      };
-    },
-  });
-};
+        },
+      ],
+    };
+  },
+});

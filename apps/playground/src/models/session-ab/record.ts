@@ -288,10 +288,13 @@ export const buildSessionAbMossPageRecord = (input: {
  */
 export const SESSION_AB_VAE_PAGE_FORMAT = "karume-playground-session-ab-vae/1";
 
-/** A rule an arm of a VAE target passed; its dispatch keys all start with the prefix. */
+/**
+ * A rule an arm of a VAE target passed (the Wan and anima pipelines' own, from `@karume/models`);
+ * its dispatch keys all start with the prefix.
+ */
 export type SessionAbVaeRule = {
   readonly name: string;
-  readonly package: "@karume/candidate-rules";
+  readonly package: "@karume/models";
   readonly keyPrefix: string;
 };
 
@@ -361,7 +364,7 @@ export const buildSessionAbVaePageRecord = (input: {
     container: input.container,
     rules: names.map((name) => ({
       name,
-      package: "@karume/candidate-rules",
+      package: "@karume/models",
       keyPrefix: ruleKeyPrefix(name),
     })),
     record,

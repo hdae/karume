@@ -1,30 +1,33 @@
 /**
- * The session A/B of `@karume/runtime/tune` on the VAE graphs the candidate rules
- * `candidate/vae_rms_silu_g8` / `_g4` target (opt-in: `KARUME_SESSION_AB=<dir>`), two targets:
+ * The session A/B of `@karume/runtime/tune` on the VAE graphs of the rule `models/vae_rms_silu`
+ * (`@karume/models/wan`, which the Wan and anima pipelines pass by default to their VAE decoder
+ * Sessions — opt-in: `KARUME_SESSION_AB=<dir>`), two targets:
  *
  * - **Wan2.2 VAE next chunk**: one forward of the `vae_decoder_next` chunk graph (tile 16: the
  *   latent frame `[48, 1, 16, 16]` and its 32 caches in, four frames and the 32 updated caches out)
  *   from the Wan2.2 distribution mirror at its default preset, with the Session options the
- *   pipeline gives the VAE there (`wanVaeSessionOptions` over the preset's resolved `session` — the
- *   conv knob alone, `convCompute: "a8"` on `i8-a8-attn8-online-conv8`, over the int8 weights).
+ *   pipeline gives the VAE there besides the rule (`wanVaeSessionOptions` over the preset's resolved
+ *   `session` — the conv knob alone, `convCompute: "a8"` on `i8-a8-attn8-online-conv8`, over the
+ *   int8 weights).
  * - **anima VAE decode**: one forward of the `vae_decoder` tile graph (latents `[1, 16, 64, 64]` →
  *   a 512² tile) from the anima mirror at its default preset, with the options the pipeline gives
- *   the VAE (`{}` — the VAE takes none of the quant's session, `anima/pipeline.ts`). The graph's
- *   input is the tile's fixed shape, so a 1024² image is not one forward: its decode runs this
- *   forward 9 times (3 tiles per axis), each the same work as the one timed here.
+ *   the VAE besides the rule (`{}` — the VAE takes none of the quant's session,
+ *   `anima/pipeline.ts`). The graph's input is the tile's fixed shape, so a 1024² image is not one
+ *   forward: its decode runs this forward 9 times (3 tiles per axis), each the same work as the one
+ *   timed here.
  *
- * Three arms over one prepared model per target, built with `sessionArm`: `base` (the pipeline's
- * options), `g8` and `g4` (the same plus the rule of that geometry). A run is one forward on fixed
- * seeded feeds — every input, the caches included, uniform in [−1, 1) — and reads back every
- * output, so the A/B's identity is u32 identity (NaN by class) of every output of every run of every
- * arm against the base's first run. The timed span is `Session.run`, which writes the feeds and
+ * Two arms over one prepared model per target, built with `sessionArm`: `base` (those options, the
+ * plan without the rule) and `rule` (the same plus the rule — the plan the pipeline runs). A run is
+ * one forward on fixed seeded feeds — every input, the caches included, uniform in [−1, 1) — and
+ * reads back every output, so the A/B's identity is u32 identity (NaN by class) of every output of
+ * every run of both arms against the base's first run. The timed span is `Session.run`, which writes the feeds and
  * reads every output back: on the Wan chunk graph that is about 0.9 GiB over the bus per run
  * (the caches both ways), the same in every arm. Every visit opens and closes its Session
  * (`openPerVisit`), so two VAE Sessions never live together.
  *
- * It asserts that identity, the rule's 30 hits per forward in its arm and none in the others (the
+ * It asserts that identity, the rule's 30 hits per forward in its arm and none in the base (the
  * counts of the family fusion-count tests), that the built-in silu's 29 hits are the base's and the
- * rule arms' are 0, and that each rule arm's dispatches are the base's less the dispatches folded
+ * rule arm's are 0, and that the rule arm's dispatches are the base's less the dispatches folded
  * (29 × 7 + 6 = 209: a site with the SiLU ran eight dispatches — the square, the sum, sqrt,
  * clamp_min, div, two muls and silu; the reshape is an alias — and the one without ran seven);
  * never a verdict on times: the verdicts and their numbers go to the record and the log. The counts
@@ -60,7 +63,7 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { judgeSessionAb, runSessionAb, sessionArm } from "@karume/runtime/tune";
-import { vaeRmsSiluRule, vaeRmsSiluRuleName } from "@karume/candidate-rules";
+import { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import { resolveSessionOptions } from "../../models/src/session/options.ts";
 import { WAN_SESSION_POLICY } from "../../models/src/wan/family.ts";
 import { wanVaeSessionOptions } from "../../models/src/wan/tile-decode.ts";
@@ -202,7 +205,7 @@ const bytesOf = (tensors: Iterable<{ readonly shape: readonly (number | string)[
     0,
   );
 
-/** One target's A/B: open, run the three arms, write the record, assert identity and counts. */
+/** One target's A/B: open, run the two arms, write the record, assert identity and counts. */
 const runTarget = async (
   target: Target,
   gpu: GpuContext,
@@ -217,8 +220,7 @@ const runTarget = async (
   if (backend === "metal") throw new Error("the rules' XOR barrier does not hold on Metal");
   const arms = [
     { name: "base", options },
-    { name: "g8", options: { ...options, fusionRules: [vaeRmsSiluRule(8)] } },
-    { name: "g4", options: { ...options, fusionRules: [vaeRmsSiluRule(4)] } },
+    { name: "rule", options: { ...options, fusionRules: [VAE_RMS_SILU_RULE] } },
   ].map((arm) => sessionArm({ ...arm, prepared, gpu, feeds }));
   const record = await runSessionAb({
     arms,
@@ -250,8 +252,7 @@ const runTarget = async (
           minGain: 0.01,
           arms: [
             { name: "base", fusionRules: [] },
-            { name: "g8", fusionRules: [vaeRmsSiluRuleName(8)] },
-            { name: "g4", fusionRules: [vaeRmsSiluRuleName(4)] },
+            { name: "rule", fusionRules: [VAE_RMS_SILU_RULE_NAME] },
           ],
           // What the timed span moves over the bus besides the forward (every feed in, every output out).
           feedBytes: bytesOf(prepared.graph.inputs),
@@ -271,7 +272,7 @@ const runTarget = async (
   console.log(`[session-ab] record: ${file}`);
   for (const arm of record.arms) {
     console.log(
-      `[session-ab] ${target} ${arm.name}: hits g8 ${arm.fusions?.[vaeRmsSiluRuleName(8)] ?? 0} / g4 ${arm.fusions?.[vaeRmsSiluRuleName(4)] ?? 0}, silu ${arm.fusions?.silu}, dispatches ${arm.dispatches}, times ${JSON.stringify(arm.timesMs)}`,
+      `[session-ab] ${target} ${arm.name}: hits ${arm.fusions?.[VAE_RMS_SILU_RULE_NAME] ?? 0}, silu ${arm.fusions?.silu}, dispatches ${arm.dispatches}, times ${JSON.stringify(arm.timesMs)}`,
     );
   }
   for (const judgement of judgements) {
@@ -280,42 +281,38 @@ const runTarget = async (
     );
   }
 
-  const [base, g8, g4] = record.arms;
+  const [base, rule] = record.arms;
   assertEquals(
     record.arms.map((arm) => arm.identity.worst.failures),
-    [0, 0, 0],
+    [0, 0],
     "every output word of every run equals the base's first",
   );
   assertEquals(
-    record.arms.map((arm) => [
-      arm.fusions?.[vaeRmsSiluRuleName(8)] ?? 0,
-      arm.fusions?.[vaeRmsSiluRuleName(4)] ?? 0,
-      arm.fusions?.silu,
-    ]),
+    record.arms.map((arm) => [arm.fusions?.[VAE_RMS_SILU_RULE_NAME] ?? 0, arm.fusions?.silu]),
     [
-      [0, 0, SILU_HITS],
-      [RULE_HITS, 0, 0],
-      [0, RULE_HITS, 0],
+      [0, SILU_HITS],
+      [RULE_HITS, 0],
     ],
-    "the rules' hits (g8, g4) and silu's per forward, per arm",
+    "the rule's hits and silu's per forward, per arm",
   );
   assertEquals(
-    [g8, g4].map((arm) => (base.dispatches ?? 0) - (arm.dispatches ?? 0)),
-    [FOLDED_DISPATCHES, FOLDED_DISPATCHES],
-    "each rule arm's dispatches are the base's less the dispatches folded",
+    (base.dispatches ?? 0) - (rule.dispatches ?? 0),
+    FOLDED_DISPATCHES,
+    "the rule arm's dispatches are the base's less the dispatches folded",
   );
 };
 
 describe.skipIf(suiteSkip !== undefined)(
-  "the session A/B of candidate/vae_rms_silu_g8 / _g4 on the VAE graphs (opt-in)",
+  "the session A/B of models/vae_rms_silu on the VAE graphs (opt-in)",
   () => {
     it.skipIf(wanSkip !== undefined)(
-      "Wan2.2 VAE next chunk: both rules keep every output word and take the 30 norms of a forward",
+      "Wan2.2 VAE next chunk: the rule keeps every output word and takes the 30 norms of a forward",
       async () => {
         const target = "wan22-vae-next";
         const { component } = VAE_AB_TARGETS[target];
         const opened = await openDefault(WAN22_MIRROR, component);
-        // The VAE's options as the pipeline derives them from the preset (tile-decode.ts).
+        // The VAE's options as the pipeline derives them from the preset (tile-decode.ts), without
+        // the rule the pipeline adds.
         const options = wanVaeSessionOptions(
           resolveSessionOptions(
             WAN_SESSION_POLICY,
@@ -347,12 +344,13 @@ describe.skipIf(suiteSkip !== undefined)(
     );
 
     it.skipIf(animaSkip !== undefined)(
-      "anima VAE decode: both rules keep every output word and take the 30 norms of a tile forward",
+      "anima VAE decode: the rule keeps every output word and takes the 30 norms of a tile forward",
       async () => {
         const target = "anima-vae-decode";
         const { component } = VAE_AB_TARGETS[target];
         const opened = await openDefault(ANIMA_MIRROR, component);
-        // The pipeline gives the VAE stage no option of the quant's session (anima/pipeline.ts).
+        // The pipeline gives the VAE stage no option of the quant's session besides the rule
+        // (anima/pipeline.ts).
         const options: SessionOptions = {};
         const gpu = await acquireTestGpu();
         try {

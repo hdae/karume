@@ -1,9 +1,9 @@
 /**
  * The video / image VAE's channel RMS norm as the exporter lowers it — `mul(x, x) → sum{dim} → sqrt
  * → clamp_min{min} → reshape → div(x, ·) → mul(·, scale) → mul(·, gamma)`, optionally followed by
- * the SiLU `sigmoid → mul(m2, ·)` — as a small synthetic IR graph: the window of the candidate rule
- * `candidate/vae_rms_silu_g8` / `_g4` (packages/candidate-rules/src/vae-rms-silu.ts). Shared by the
- * rule's planning test (vae_rms_silu_rule_plan_test.ts) and its GPU check against the unfused plan
+ * the SiLU `sigmoid → mul(m2, ·)` — as a small synthetic IR graph: the window of the rule
+ * `models/vae_rms_silu` (packages/models/src/vae/vae-rms-silu.ts). Shared by the rule's planning
+ * test (vae_rms_silu_rule_plan_test.ts) and its GPU check against the unfused plan
  * (e2e_vae_rms_silu_rule_test.ts). `scale` and `gamma` are f32 initializers, as in the exported
  * graphs. Pure; no side effects.
  */

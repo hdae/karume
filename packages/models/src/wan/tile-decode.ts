@@ -5,7 +5,8 @@
  *
  * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
  * time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one VAE stage.
- * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10).
+ * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10). Every Session of the stage plans with
+ * the VAE decoder's fusion rules (`../vae/fusion-rules.ts` — `models/vae_rms_silu` first).
  * Per-generation values (accepted set, de-normalization statistics, unpatchify factor) are received
  * as arguments from the generation descriptor (`./descriptor.ts`). The latent and exit channel
  * counts, the tile edge and the graph's input / output spatial ratio are read from the graph
@@ -30,6 +31,7 @@ import type {
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { type PipelineFusionRules, withFusionRules } from "../session/fusion-rules.ts";
+import { vaeDecoderFusionRules } from "../vae/fusion-rules.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import type { GenerateEvent, RunComponent } from "./pipeline.ts";
 import type { PlanLayout, WanGenerationKnobs } from "./plan.ts";
@@ -311,9 +313,10 @@ type WanVaeDecodeState = {
   /** The 32-latent pair (undefined when the preset has none — a plan never asks for it then). */
   readonly vaeTile32?: WanVaeTile32;
   /**
-   * Experimental (the pipeline's `fusionRules`): passed unchanged to every Session of the stage
+   * Experimental (the pipeline's `fusionRules`): the caller's rules. Every Session of the stage
    * (the 32-latent borrowers too, where the runtime binds no borrowed weight to an external rule's
-   * step); absent = no rule.
+   * step) plans with the VAE decoder's rule list (`../vae/fusion-rules.ts` — `models/vae_rms_silu`,
+   * then these in order); absent = that rule alone.
    */
   readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
@@ -456,7 +459,7 @@ export const decodeWanVaeStage = async (
     // anima's `withStage` for everything but conv3d).
     const vaeOptions = withFusionRules(
       wanVaeSessionOptions(state.sessionOptions),
-      state.fusionRules,
+      vaeDecoderFusionRules(state.fusionRules),
     );
     if (tile32 === undefined) {
       first = await state.vaeFirst.createSession(state.gpu, vaeOptions);

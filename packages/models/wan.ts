@@ -10,7 +10,8 @@
  * (`generate` — Wan2.2 also from a conditioning image: {@link Ti2vGenerateRequest}) / subscribe
  * to generation progress (`onEvent` — {@link GenerateEvent}) / abort (the `signal` of
  * construction and generation) / turn frames into pixels ({@link frameToRgba}) / release
- * (`dispose`).
+ * (`dispose`) / build Sessions of the VAE decoder graphs with their fusion rule
+ * ({@link VAE_RMS_SILU_RULE}, experimental).
  *
  * There are two text encoder paths (ADR 0119 decision 7): the default `"gpu"` runs umT5 (i8, by
  * cross-repository reference to umT5's distribution repository) on the GPU and accepts any prompt;
@@ -97,6 +98,21 @@ export type { Prompt, PromptRole } from "./src/wan/text-embeds.ts";
  * to rewrite it.
  */
 export { frameToRgba } from "./src/wan/frames.ts";
+
+/**
+ * **Experimental**: the fusion rule `models/vae_rms_silu` ({@link VAE_RMS_SILU_RULE_NAME} — the
+ * VAE's channel RMS norm and the SiLU after it in one dispatch, u32-identical to the unfused plan),
+ * which both classes ({@link Pipeline}, {@link Ti2vPipeline}) pass by default to the Sessions of
+ * their VAE decoder chunk graphs (not the DiT's, umT5's or the VAE encoder's). Wan and anima share
+ * it (the same norm in both VAEs; `@karume/models/anima` exports the same rule). Exported for code
+ * that builds its own Sessions from the family's components — to pass it as
+ * `SessionOptions.fusionRules`, or to compare a Session with and without it; its name is its
+ * counter in `lastRunFusions`. Built with `defineRule` of `@karume/runtime/kernel` (ADR 0148), so
+ * it may change in a minor version while the packages are 0.x. Not for
+ * `PipelineOptions.fusionRules`: the pipeline already passes it to those Sessions, and a rule given
+ * twice is refused.
+ */
+export { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "./src/vae/vae-rms-silu.ts";
 
 /**
  * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it

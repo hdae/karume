@@ -44,8 +44,8 @@ import {
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import type { Session, SessionOptions } from "@karume/runtime";
-import { vaeRmsSiluRule } from "@karume/candidate-rules";
-import { SAMPLER_TYPES } from "../anima.ts";
+import { GELU_MUL_RULE } from "@karume/candidate-rules";
+import { SAMPLER_TYPES, VAE_RMS_SILU_RULE } from "../anima.ts";
 import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
   animaStageSessionOptions,
@@ -741,15 +741,36 @@ test("latentSnapshot: copies the latent at the time it was bound (the copy does 
   assertEquals(copy.shape, [1, 2, 1, 1]);
 });
 
-// --- fusionRules (experimental — a measurement opt-in, passed through, not interpreted) ----------
+// --- fusionRules (the VAE decoder's rule by default; the experimental option passed through) --------
 
-test("animaStageSessionOptions: the VAE alone gets the caller's array itself; the text stages get none, with or without rules", () => {
-  const fusionRules = [vaeRmsSiluRule(8)];
-  assertStrictEquals(animaStageSessionOptions("vae_decoder", fusionRules).fusionRules, fusionRules);
+/** `actual` holds exactly the rule objects of `expected`, in order. */
+const assertSameRules = (
+  actual: SessionOptions["fusionRules"],
+  expected: NonNullable<SessionOptions["fusionRules"]>,
+  label: string,
+): void => {
+  assertEquals(actual?.length, expected.length, `${label}: the rule count`);
+  expected.forEach((rule, index) =>
+    assertStrictEquals(actual?.[index], rule, `${label}: rule ${index}`),
+  );
+};
+
+test("animaStageSessionOptions: the VAE gets models/vae_rms_silu, then the caller's rules in order; the text stages get none, with or without rules", () => {
+  const fusionRules = [GELU_MUL_RULE];
+  assertSameRules(
+    animaStageSessionOptions("vae_decoder", fusionRules).fusionRules,
+    [VAE_RMS_SILU_RULE, GELU_MUL_RULE],
+    "with rules",
+  );
+  assertSameRules(
+    animaStageSessionOptions("vae_decoder", undefined).fusionRules,
+    [VAE_RMS_SILU_RULE],
+    "without rules",
+  );
+  // The VAE's options hold the rule list and nothing else (the VAE takes none of the quant's knobs).
+  assertEquals(Object.keys(animaStageSessionOptions("vae_decoder", undefined)), ["fusionRules"]);
   for (const component of ["text_encoder", "text_conditioner"] as const) {
     assertEquals(animaStageSessionOptions(component, fusionRules), {}, component);
-  }
-  for (const component of ["text_encoder", "text_conditioner", "vae_decoder"] as const) {
     assertEquals(animaStageSessionOptions(component, undefined), {}, component);
   }
 });
@@ -802,7 +823,7 @@ const stageSessionOptions = async (
 };
 
 test("fromAssets fusionRules: the DiT Session gets the caller's array itself; the text stages' Sessions do not", async () => {
-  const fusionRules = [vaeRmsSiluRule(8)];
+  const fusionRules = [GELU_MUL_RULE];
   const created = await stageSessionOptions({ fusionRules });
   assertEquals(created.length, 3);
   const [textEncoder, textConditioner, transformer] = created;
@@ -812,7 +833,7 @@ test("fromAssets fusionRules: the DiT Session gets the caller's array itself; th
 });
 
 test("fromAssets without fusionRules: no Session has the field, and the rest is what the run with rules passed", async () => {
-  const ruled = await stageSessionOptions({ fusionRules: [vaeRmsSiluRule(8)] });
+  const ruled = await stageSessionOptions({ fusionRules: [GELU_MUL_RULE] });
   const plain = await stageSessionOptions({});
   for (const { options } of plain) assertEquals(Object.hasOwn(options, "fusionRules"), false);
   assertEquals(

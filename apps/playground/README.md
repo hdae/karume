@@ -43,9 +43,10 @@ and the runtime tests' dispatch harness — so that the page runs the same check
 the runtime's node GPU tests ([the kernel-check page](#the-kernel-check-page)). No other page may
 import it, and nothing here imports runtime internals directly. The session A/B page imports
 `@karume/candidate-rules`, another private workspace package: candidate fusion rules written against
-`@karume/runtime/kernel` alone, which the page passes to the gemma pipeline or to a VAE Session to
-measure them ([the session A/B page](#the-session-ab-page)); its MOSS-Image DiT target passes the
-adopted rule `models/ew_chain` of `@karume/models/moss` instead.
+`@karume/runtime/kernel` alone, which the page passes to the gemma pipeline to measure them
+([the session A/B page](#the-session-ab-page)); its MOSS-Image DiT and VAE targets pass the adopted
+rules `models/ew_chain` of `@karume/models/moss` and `models/vae_rms_silu` of `@karume/models/wan`
+instead.
 
 ## Run
 
@@ -216,6 +217,11 @@ and per component the runs, weight memory, submit count, build cost and the atte
 last run (`attention_online` for the online route, `attention_qk` / `attention_stats` /
 `attention_pv` for the materialized one).
 
+**Fusion rule.** The pipeline passes its rule `models/vae_rms_silu` (`@karume/models/wan`,
+u32-identical to the unfused plan) by default to the VAE decoder chunk graphs, so the page has no
+switch for it. The session A/B page's Wan2.2 VAE target compares a chunk forward with and without
+it.
+
 ### The record (`format: "karume-playground-wan22/3"`)
 
 The JSON keeps the full detail; the page shows only the summary above.
@@ -316,6 +322,10 @@ again.
 
 The result card shows the image (**Download PNG** — lossless, from the same RGBA bytes the sha256
 covers) and a summary of the record.
+
+**Fusion rule.** The pipeline passes its rule `models/vae_rms_silu` (`@karume/models/anima`,
+u32-identical to the unfused plan) by default to the VAE decoder, so the page has no switch for it.
+The session A/B page's anima VAE target compares a tile forward with and without it.
 
 ### The record (`format: "karume-playground-anima/2"`)
 
@@ -1577,28 +1587,28 @@ the counts — and the `judgements`.
 
 ### The VAE targets
 
-**Wan2.2 VAE next chunk** and **anima VAE decode** measure the candidate rules
-`candidate/vae_rms_silu_g8` and `_g4` (the VAE's channel RMS norm and the SiLU after it in one
-dispatch; two geometries, 32 or 64 pixels per workgroup).
+**Wan2.2 VAE next chunk** and **anima VAE decode** measure the rule `models/vae_rms_silu` of
+`@karume/models` (the VAE's channel RMS norm and the SiLU after it in one dispatch, 32 pixels per
+workgroup), which the Wan and anima pipelines pass by default to their VAE decoder Sessions.
 
 **The model.** The `vae_decoder_next` chunk graph of the `wan22` mount (tile 16) or the
 `vae_decoder` tile graph of the `anima` mount, at the chosen preset of the manifest's
 `defaultModel`, fetched and opened once per press of Run as the MOSS-Image target does. Every arm's
-Session gets the options the pipeline gives its VAE there: on Wan2.2 the preset's conv knob alone
-(`convCompute: "a8"` on the default `i8-a8-attn8-online-conv8`), on anima none (the VAE stage takes
-none of the quant's session).
+Session gets the options the pipeline gives its VAE there besides the rule: on Wan2.2 the preset's
+conv knob alone (`convCompute: "a8"` on the default `i8-a8-attn8-online-conv8`), on anima none (the
+VAE stage takes none of the quant's session).
 
-**The arms.** `sessionArm`s: `base` with those options, `g8` and `g4` with the same plus the rule
-of that geometry; the runner visits base, g8, g4, g4, g8, base per round, and **Open and close per
-visit is always on**. A **timed run** is one forward on fixed feeds — every input uniform in
+**The arms.** `sessionArm`s: `base` with those options (the plan without the rule), `rule` with the
+same plus the rule (the plan the pipeline runs); the runner visits base, rule, rule, base per round,
+and **Open and close per visit is always on**. A **timed run** is one forward on fixed feeds — every input uniform in
 [−1, 1) from the seeded generator (mulberry32, seed `0x5eed`), input by input in the graph's order:
 on Wan2.2 the latent frame `[48, 1, 16, 16]` and every one of its 32 caches, on anima the latents
 `[1, 16, 64, 64]` of one 512² tile (a 1024² image decodes 9 such tiles) — the same feeds as the
 opt-in Node A/B `packages/e2e/tests/e2e_vae_session_ab_test.ts` (a twin the playground's tests
 compare). Every output is read back and compared (u32, NaN by class): on the Wan2.2 chunk graph
 that is the four frames and the 32 updated caches, so the timed span moves about 0.9 GiB over the
-bus per run, the same in every arm. The hits column shows each arm's own rule's counter (the base
-reads g8's, 0); the counts come from the runner's record, and the Tokens and Probe fields do not
+bus per run, the same in every arm. The hits column shows the rule's counter (0 in the base); the
+counts come from the runner's record, and the Tokens and Probe fields do not
 apply. The page refuses the `metal` backend for these targets: the rules' XOR rounding barrier is
 measured not to hold on Metal.
 
@@ -1606,8 +1616,8 @@ measured not to hold on Metal.
 `session-ab-vae-<target>_<UTC timestamp>.json` with `recordEnvironment`, `versions`, the
 `request` (`target`, the mount, model, preset, its declared `session`, the component's
 `storage`, the `sessionOptions` every arm got, the component, rounds, minimum gain, backend, the
-seed and the three arms with the rules they passed), `distribution`, `source`, `container`,
-`rules` (name, package and `keyPrefix` of each), the runtime's `record` unchanged and the
+seed and the two arms with the rules they passed), `distribution`, `source`, `container`,
+`rules` (name, package — `@karume/models` — and `keyPrefix` of each), the runtime's `record` unchanged and the
 `judgements`.
 
 ## Develop

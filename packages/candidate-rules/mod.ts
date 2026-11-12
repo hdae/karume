@@ -5,4 +5,3 @@
  */
 
 export { GELU_MUL_RULE, GELU_MUL_RULE_NAME } from "./src/gelu-mul.ts";
-export { type VaeRmsSiluGroups, vaeRmsSiluRule, vaeRmsSiluRuleName } from "./src/vae-rms-silu.ts";

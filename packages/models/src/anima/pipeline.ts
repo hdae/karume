@@ -8,7 +8,8 @@
  * 3. Run the `transformer` (S-form DiT) for N steps, with CFG mixing + the update on the host (the
  *    update rule is the request's `sampler`, defaulting to the manifest's
  *    `pipelineConfig.scheduler.type` — Euler / DPM++ 2M)
- * 4. Denormalise the latent per channel → run `vae_decoder` **always tiled**
+ * 4. Denormalise the latent per channel → run `vae_decoder` **always tiled** (its Session plans with
+ *    the VAE decoder's fusion rule `models/vae_rms_silu` — `../vae/fusion-rules.ts`)
  * 5. Convert to RGBA and return (PNG encoding is `encodePng` — shared, pipeline-independent)
  *
  * ## MUST: by default graphs are opened and closed one at a time (ADR 0016 / 0112)
@@ -124,6 +125,7 @@ import {
   withFusionRules,
 } from "../session/fusion-rules.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
+import { vaeDecoderFusionRules } from "../vae/fusion-rules.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
@@ -451,17 +453,22 @@ export type PipelineOptions = {
   readonly residency?: Residency;
   /**
    * **Experimental**: fusion rules written outside the runtime (`defineRule` of
-   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
-   * the image graphs: the DiT (`transformer`, resident or per stage) and the VAE decoder. The text
-   * stages (`text_encoder`, `text_conditioner`) do not get them. Absent = no rule: the Sessions
-   * are built as without the option.
+   * `@karume/runtime/kernel`), passed as `SessionOptions.fusionRules` to the Sessions of the image
+   * graphs: the DiT (`transformer`, resident or per stage — the caller's array unchanged) and the
+   * VAE decoder. The text stages (`text_encoder`, `text_conditioner`) do not get them. The VAE
+   * decoder's Session always plans with the rule `models/vae_rms_silu` (`VAE_RMS_SILU_RULE` —
+   * u32-identical to the unfused plan, on by default with no option to turn it off); the rules given
+   * here follow it, in their order. Giving `models/vae_rms_silu` here again is refused as a rule
+   * given twice by the VAE decoder's Session. Absent = no rule on the DiT, the family's rule alone on
+   * the VAE decoder.
    *
    * It exists to measure a candidate rule on a whole generation (with and without the rule); it may
    * change or go away in a minor version. Passing a rule is the opt-in, and the rule's author owns
    * the evidence for its numbers (ADR 0148): the runtime does not check them. The VAE stage's
    * memory estimate (the pre-emptive eviction before the VAE stage, with a resident DiT) plans the
-   * VAE with the same rules (with the device's `maxComputeWorkgroupsPerDimension`, which a rule's
-   * matcher may read). A value the runtime refuses fails when the first such Session is built.
+   * VAE with the same rule list (with the device's `maxComputeWorkgroupsPerDimension`, which a
+   * rule's matcher may read). A value the runtime refuses fails when the first such Session is
+   * built.
    *
    * DECIDED: docs/decisions/0148-external-fusion-rules.md
    */
@@ -621,10 +628,11 @@ const textStagesNeed = (
 
 /**
  * Bytes vae_decoder needs on top of the resident DiT, used by the measurement before the VAE stage
- * (after the DiT stage) (static shape — no bindings).
+ * (after the DiT stage) (static shape — no bindings), planned with the VAE decoder's rule list (the
+ * list its Session gets — {@link animaStageSessionOptions}).
  */
 const vaeStageNeed = (state: AnimaState): number =>
-  stageNeed(state, state.vaeDecoder, {}, state.fusionRules);
+  stageNeed(state, state.vaeDecoder, {}, vaeDecoderFusionRules(state.fusionRules));
 
 /**
  * Decides the negative prompt actually passed to the uncond side (the entry of
@@ -859,15 +867,17 @@ const withSession = async <T>(
 
 /**
  * The Session options of a stage other than the DiT: none of the quant's knobs (the text stages /
- * VAE run as the quant declares — f32); the VAE alone takes the experimental `fusionRules`
- * ({@link PipelineOptions.fusionRules}), the text stages never.
+ * VAE run as the quant declares — f32); the VAE alone plans with the VAE decoder's rule list
+ * (`models/vae_rms_silu`, then the experimental `fusionRules` — {@link PipelineOptions.fusionRules}),
+ * the text stages with none.
  *
  * NOTE: `export` is for the host test (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const animaStageSessionOptions = (
   component: Exclude<RunComponent, "transformer">,
   fusionRules: PipelineFusionRules,
-): SessionOptions => (component === "vae_decoder" ? withFusionRules({}, fusionRules) : {});
+): SessionOptions =>
+  component === "vae_decoder" ? withFusionRules({}, vaeDecoderFusionRules(fusionRules)) : {};
 
 /**
  * Binds the component name for the observation hook
@@ -898,8 +908,9 @@ type AnimaState = {
   /** Effective residency when a generate does not override it in the request (checked). */
   readonly residency: Residency;
   /**
-   * Experimental ({@link PipelineOptions.fusionRules}): the DiT's and the VAE's Sessions (and the
-   * VAE's estimate) get them; the text stages' do not. Absent = no rule anywhere.
+   * Experimental ({@link PipelineOptions.fusionRules}): the DiT's Session gets them; the VAE's
+   * Session and estimate get them after `models/vae_rms_silu`; the text stages' get none. Absent =
+   * no rule on the DiT, the family's rule alone on the VAE.
    */
   readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
@@ -1352,8 +1363,7 @@ export class Pipeline {
      * Runs one stage other than the DiT (`stage` events wrap Session construction and release — if
      * the stage fails midway, `end` is not emitted). An OOM while a resident DiT exists evicts it
      * and re-runs the stage once (`TransformerResidency.runStage`). The text stages / VAE do not
-     * take the quant's session; the VAE alone takes the experimental `fusionRules`
-     * ({@link animaStageSessionOptions}).
+     * take the quant's session; the VAE alone takes its rule list ({@link animaStageSessionOptions}).
      */
     const withStage = async <T>(
       component: Exclude<RunComponent, "transformer">,

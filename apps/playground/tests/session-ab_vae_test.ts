@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 
-import { vaeRmsSiluRuleName } from "@karume/candidate-rules";
 import { parseManifest } from "@karume/hub";
+import { VAE_RMS_SILU_RULE_NAME } from "@karume/models/wan";
 import type { SessionAbArmRecord, SessionAbRecord } from "@karume/runtime/tune";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -27,8 +27,7 @@ import { recordedCounts } from "../src/models/session-ab/view.ts";
 
 import { abRecord, steady } from "./helpers/session-ab-records.ts";
 
-const G8 = vaeRmsSiluRuleName(8);
-const G4 = vaeRmsSiluRuleName(4);
+const RULE = VAE_RMS_SILU_RULE_NAME;
 
 /** A Wan chunk graph's inputs at small widths (the real latent is [48, 1, 16, 16]). */
 const CHUNK_INPUTS: readonly VaeInput[] = [
@@ -126,7 +125,7 @@ const ENVIRONMENT: RecordEnvironment = {
   },
 };
 
-/** A three-arm runner record whose arms carry the counts a `sessionArm` reports. */
+/** A two-arm runner record whose arms carry the counts a `sessionArm` reports. */
 const countedRecord = (): SessionAbRecord => {
   const record = abRecord({ base: steady(584), rule: steady(564) });
   const [base, rule] = record.arms;
@@ -138,11 +137,7 @@ const countedRecord = (): SessionAbRecord => {
   ): SessionAbArmRecord => ({ ...template, name, fusions, dispatches });
   return {
     ...record,
-    arms: [
-      arm(base, "base", { silu: 29 }, 457),
-      arm(rule, "g8", { silu: 0, [G8]: 30 }, 248),
-      arm(rule, "g4", { silu: 0, [G4]: 30 }, 248),
-    ],
+    arms: [arm(base, "base", { silu: 29 }, 457), arm(rule, "rule", { silu: 0, [RULE]: 30 }, 248)],
   };
 };
 
@@ -251,7 +246,7 @@ describe("the session A/B page's VAE targets", () => {
       );
     });
 
-    it("names the three arms, the options every arm gets and the seed, and opens per visit whatever the form says", () => {
+    it("names the two arms, the options every arm gets and the seed, and opens per visit whatever the form says", () => {
       const request = sessionAbVaeRequest(
         "wan22-vae-next",
         CONV8,
@@ -270,8 +265,7 @@ describe("the session A/B page's VAE targets", () => {
         sessionOptions: { convCompute: "a8" },
         arms: [
           { name: "base", fusionRules: [] },
-          { name: "g8", fusionRules: [G8] },
-          { name: "g4", fusionRules: [G4] },
+          { name: "rule", fusionRules: [RULE] },
         ],
       });
       const anima = sessionAbVaeRequest(
@@ -288,21 +282,16 @@ describe("the session A/B page's VAE targets", () => {
 
     it("gives each arm the request's options and the rule it names, the base none", () => {
       const arms = vaeArmOptions(sessionAbVaeRequest("wan22-vae-next", CONV8, settings()));
-      expect(arms.map(({ name }) => name)).toEqual(["base", "g8", "g4"]);
+      expect(arms.map(({ name }) => name)).toEqual(["base", "rule"]);
       expect(arms[0].options).toEqual({ convCompute: "a8" });
-      for (const [index, rule] of [
-        [1, G8],
-        [2, G4],
-      ] as const) {
-        const { options } = arms[index];
-        expect(options.convCompute).toBe("a8");
-        expect(options.fusionRules?.map(({ name }) => name)).toEqual([rule]);
-      }
+      const { options } = arms[1];
+      expect(options.convCompute).toBe("a8");
+      expect(options.fusionRules?.map(({ name }) => name)).toEqual([RULE]);
     });
 
     it("reads each arm's hits from its own rule, and the base's from the first rule", () => {
       const request = sessionAbVaeRequest("wan22-vae-next", CONV8, settings());
-      expect(["base", "g8", "g4"].map((arm) => vaeRowRule(request, arm))).toEqual([G8, G8, G4]);
+      expect(["base", "rule"].map((arm) => vaeRowRule(request, arm))).toEqual([RULE, RULE]);
     });
 
     it("refuses the metal backend: the rules' rounding barrier does not hold there", () => {
@@ -314,15 +303,14 @@ describe("the session A/B page's VAE targets", () => {
   });
 
   describe("the record", () => {
-    it("is an envelope of its own around the runtime's record, with the container and both rules", () => {
+    it("is an envelope of its own around the runtime's record, with the container and the rule", () => {
       const record = countedRecord();
       const page = pageRecordOf(record);
       expect(page.format).toBe(SESSION_AB_VAE_PAGE_FORMAT);
       expect([page.page, page.target]).toEqual(["session-ab", "wan22-vae-next"]);
       expect(page.container).toEqual({ component: "vae_decoder_next", part0Sha256: hex("c") });
       expect(page.rules).toEqual([
-        { name: G8, package: "@karume/candidate-rules", keyPrefix: "ext:candidate:" },
-        { name: G4, package: "@karume/candidate-rules", keyPrefix: "ext:candidate:" },
+        { name: RULE, package: "@karume/models", keyPrefix: "ext:models:" },
       ]);
       expect(page.record).toBe(record);
       expect(JSON.parse(JSON.stringify(page))).toEqual(page);
@@ -330,7 +318,7 @@ describe("the session A/B page's VAE targets", () => {
         page.record.arms.map(
           (arm) => recordedCounts(arm)?.fusions[vaeRowRule(page.request, arm.name)] ?? 0,
         ),
-      ).toEqual([0, 30, 30]);
+      ).toEqual([0, 30]);
     });
 
     it("refuses a runtime record of other arms or rounds, or whose arms reported no counts", () => {
@@ -339,10 +327,10 @@ describe("the session A/B page's VAE targets", () => {
       expect(() => pageRecordOf({ ...record, arms: [...record.arms].reverse() })).toThrow(
         "is not the request's",
       );
-      const [base, g8, g4] = record.arms;
-      const uncounted = { name: g4.name, timesMs: g4.timesMs, identity: g4.identity };
-      expect(() => pageRecordOf({ ...record, arms: [base, g8, uncounted] })).toThrow(
-        "arm(s) g4 reported no counts",
+      const [base, rule] = record.arms;
+      const uncounted = { name: rule.name, timesMs: rule.timesMs, identity: rule.identity };
+      expect(() => pageRecordOf({ ...record, arms: [base, uncounted] })).toThrow(
+        "arm(s) rule reported no counts",
       );
     });
   });

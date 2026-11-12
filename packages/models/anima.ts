@@ -6,7 +6,8 @@
  * {@link Pipeline.fromAssets}) / generate (`generate`) / subscribe to generation progress
  * (`onEvent` — {@link GenerateEvent}) / **approximate a preview from an intermediate latent**
  * ({@link approximatePreview}) / release (`dispose`) / handle the spelling of resolutions
- * ({@link parseResolution} / {@link formatResolution}).
+ * ({@link parseResolution} / {@link formatResolution}) / build Sessions of the VAE decoder graph
+ * with its fusion rule ({@link VAE_RMS_SILU_RULE}, experimental).
  *
  * MUST: every module is free of side effects (no execution at import, no global mutable state —
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
@@ -108,6 +109,20 @@ export { latentStats, denormalizeLatents } from "./src/anima/latents.ts";
  */
 export { formatResolution, parseResolution } from "./src/anima/resolution.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
+
+/**
+ * **Experimental**: the fusion rule `models/vae_rms_silu` ({@link VAE_RMS_SILU_RULE_NAME} — the
+ * VAE's channel RMS norm and the SiLU after it in one dispatch, u32-identical to the unfused plan),
+ * which {@link Pipeline} passes by default to the Session of its VAE decoder (not the DiT's or the
+ * text stages'). Wan and anima share it (the same norm in both VAEs; `@karume/models/wan` exports
+ * the same rule). Exported for code that builds its own Sessions from the family's components — to
+ * pass it as `SessionOptions.fusionRules`, or to compare a Session with and without it; its name
+ * is its counter in `lastRunFusions`. Built with `defineRule` of `@karume/runtime/kernel` (ADR
+ * 0148), so it may change in a minor version while the packages are 0.x. Not for
+ * `PipelineOptions.fusionRules`: the pipeline already passes it to that Session, and a rule given
+ * twice is refused.
+ */
+export { VAE_RMS_SILU_RULE, VAE_RMS_SILU_RULE_NAME } from "./src/vae/vae-rms-silu.ts";
 
 /**
  * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it

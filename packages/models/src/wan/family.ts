@@ -364,8 +364,9 @@ export type WanState = {
   readonly textEmbeds: WanTextEmbeds;
   readonly text: WanTextStage;
   /**
-   * Experimental ({@link PipelineOptions.fusionRules}): the DiT, VAE decoder and VAE encoder
-   * Sessions get them; umT5's does not. Absent = no rule anywhere.
+   * Experimental ({@link PipelineOptions.fusionRules}): the DiT and VAE encoder Sessions get them;
+   * the VAE decoder Sessions get them after `models/vae_rms_silu`; umT5's gets none. Absent = no
+   * rule on the DiT and the encoder, the family's rule alone on the decoder.
    */
   readonly fusionRules?: PipelineFusionRules;
   readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;

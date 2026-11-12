@@ -374,11 +374,16 @@ export type PipelineOptions = {
   readonly signal?: AbortSignal;
   /**
    * **Experimental**: fusion rules written outside the runtime (`defineRule` of
-   * `@karume/runtime/kernel`), passed unchanged as `SessionOptions.fusionRules` to the Sessions of
-   * the video graphs: the DiT (`transformer`), the VAE decoder chunk graphs (the 16-latent pair, and
-   * with `vaeTile` 32 its lenders and the 32-latent borrowers) and, for Wan2.2's I2V, the three VAE
-   * encoder graphs. umT5's Session does not get them. Absent = no rule: the Sessions are built as
-   * without the option. Both classes (`Pipeline` for Wan2.1, `Ti2vPipeline` for Wan2.2) take it.
+   * `@karume/runtime/kernel`), passed as `SessionOptions.fusionRules` to the Sessions of the video
+   * graphs: the DiT (`transformer`) and, for Wan2.2's I2V, the three VAE encoder graphs (the
+   * caller's array unchanged), and the VAE decoder chunk graphs (the 16-latent pair, and with
+   * `vaeTile` 32 its lenders and the 32-latent borrowers). umT5's Session does not get them. The VAE
+   * decoder chunk graphs' Sessions always plan with the rule `models/vae_rms_silu`
+   * (`VAE_RMS_SILU_RULE` — u32-identical to the unfused plan, on by default with no option to turn
+   * it off); the rules given here follow it, in their order. Giving `models/vae_rms_silu` here again
+   * is refused as a rule given twice by the decoder's Sessions. Absent = no rule on the DiT and the
+   * encoder, the family's rule alone on the decoder. Both classes (`Pipeline` for Wan2.1,
+   * `Ti2vPipeline` for Wan2.2) take it.
    *
    * It exists to measure a candidate rule on a whole generation (with and without the rule); it may
    * change or go away in a minor version. Passing a rule is the opt-in, and the rule's author owns
