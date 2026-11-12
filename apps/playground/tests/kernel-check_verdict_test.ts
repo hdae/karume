@@ -250,6 +250,7 @@ describe("overallVerdict", () => {
         "state-bidirectional": passed,
         "expert-linear": passed,
         "fusion-twins": passed,
+        "attention-online-tiled": passed,
       }),
     ).toBe("pass");
     expect(overallVerdict({})).toBe("none");
@@ -268,6 +269,7 @@ describe("overallVerdict", () => {
       "state-bidirectional",
       "expert-linear",
       "fusion-twins",
+      "attention-online-tiled",
     ]);
   });
 
@@ -285,6 +287,7 @@ describe("overallVerdict", () => {
         "state-bidirectional": passed,
         "expert-linear": passed,
         "fusion-twins": passed,
+        "attention-online-tiled": passed,
       }),
     ).toBe("incomplete");
   });
@@ -354,6 +357,7 @@ describe("a part the device cannot run (notRun)", () => {
         "state-bidirectional": passed,
         "expert-linear": passed,
         "fusion-twins": { kind: "done", seconds: 1, report },
+        "attention-online-tiled": passed,
       }),
     ).toBe("incomplete");
   });
@@ -372,6 +376,7 @@ describe("withoutOutcomes", () => {
     "state-bidirectional": passed,
     "expert-linear": passed,
     "fusion-twins": passed,
+    "attention-online-tiled": passed,
   };
 
   it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
@@ -395,6 +400,7 @@ describe("withoutOutcomes", () => {
       "state-bidirectional": passed,
       "expert-linear": passed,
       "fusion-twins": passed,
+      "attention-online-tiled": passed,
     });
   });
 });

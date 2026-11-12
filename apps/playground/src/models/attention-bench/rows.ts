@@ -105,3 +105,69 @@ export const benchTableRows = (results: readonly AttentionBenchShapeResult[]): B
       },
     ];
   });
+
+/**
+ * One row of the candidate's table (perf-ledger K-106, the tiled key axis): its ratios to `online`
+ * at one shape, the paired per-dispatch times, the producer pair and the identity flag.
+ */
+export type CandidateTableRow = {
+  readonly key: string;
+  readonly shape: string;
+  /** Time tiled ÷ online, the kernel alone (the median of the per-round ratios; below 1 = tiled faster). */
+  readonly kernelRatio?: number;
+  /** Kernel + producer per node, tiled ÷ today (needs the quantization line). */
+  readonly withProducerRatio?: number;
+  /** ms per dispatch of online and of the candidate (the paired minimums). */
+  readonly onlineMs?: number;
+  readonly tiledMs?: number;
+  /** "today 0.512 · tiled 0.640 (×1.250)" — the producer pair of the quantization line. */
+  readonly producer?: string;
+  /** Paired rounds that gave a ratio (a round with a clamped pass gives none). */
+  readonly rounds?: number;
+  /** Both producers on the same Vᵀ, both kernels on their outputs: O identical word for word. */
+  readonly identical?: boolean;
+  /** Why the candidate did not run, a failure, or the first differing word. */
+  readonly note?: string;
+};
+
+/** A ratio as `×0.951`. */
+export const formatRatio = (value: number | undefined): string =>
+  value === undefined ? "—" : `×${value.toFixed(3)}`;
+
+/** The candidate's rows, one per shape that carries it, in record order. */
+export const candidateRows = (results: readonly AttentionBenchShapeResult[]): CandidateTableRow[] =>
+  results.flatMap((result): CandidateTableRow[] => {
+    const tiled = result.onlineTiled;
+    if (tiled === undefined) return [];
+    const base = { key: `${result.shape.id}:onlineTiled`, shape: result.shape.id } as const;
+    if (!tiled.eligible) return [{ ...base, note: `not run: ${tiled.reason}` }];
+    const { kernel, identity } = tiled;
+    const pair = result.quantization?.tiledVt;
+    const notes = [
+      kernel.error === undefined ? undefined : `kernel: ${kernel.error}`,
+      pair?.error === undefined ? undefined : `producer: ${pair.error}`,
+      identity.error === undefined ? undefined : `identity: ${identity.error}`,
+      identity.first === undefined
+        ? undefined
+        : `first differing O word ${formatCount(identity.first.index)}: 0x${identity.first.a.toString(16)} vs 0x${identity.first.b.toString(16)}`,
+    ].filter((note) => note !== undefined);
+    return [
+      {
+        ...base,
+        ...(result.tiledVsOnline === undefined ? {} : { kernelRatio: result.tiledVsOnline }),
+        ...(result.tiledVsOnlineWithProducer === undefined
+          ? {}
+          : { withProducerRatio: result.tiledVsOnlineWithProducer }),
+        ...(kernel.aMsPerDispatch === undefined ? {} : { onlineMs: kernel.aMsPerDispatch }),
+        ...(kernel.bMsPerDispatch === undefined ? {} : { tiledMs: kernel.bMsPerDispatch }),
+        ...(pair === undefined || pair.error !== undefined
+          ? {}
+          : {
+              producer: `today ${formatMs(pair.aMsPerDispatch)} · tiled ${formatMs(pair.bMsPerDispatch)} (${formatRatio(pair.ratio)})`,
+            }),
+        rounds: (kernel.rounds ?? []).filter((round) => round.ratio !== undefined).length,
+        identical: identity.identical,
+        ...(notes.length === 0 ? {} : { note: notes.join(" · ") }),
+      },
+    ];
+  });

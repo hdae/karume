@@ -4,6 +4,8 @@
  */
 
 import {
+  ATTENTION_ONLINE_TILED_CASES,
+  checkAttentionOnlineTiled,
   checkExpertLinear,
   checkFusionTwins,
   checkGemvSubgroup,
@@ -163,6 +165,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
     run: async (gpu, options) => ({
       parts: await checkFusionTwins(gpu, options),
       expectedCases: FUSION_TWIN_CASES,
+    }),
+  },
+  {
+    id: "attention-online-tiled",
+    title: "Online attention: tiled Vᵀ key axis (candidate)",
+    summary:
+      "A measure-first candidate (perf-ledger K-106), not a production route: the tiled quantize_rows against the host permutation of today's Vᵀ producer bytes (18 cases: N below a key tile and not a multiple of 4 / 16 / 64, zero and ±max rows, scale bits, nothing written past the rows), and the online kernel reading the tiled Vᵀ against today's kernel, every O word identical (28 cases per reduction form: 7 shapes × both output layouts × dp4a and emulated). The kernel parts need WGSL packed_4x8_integer_dot_product, the sg32 part a device whose online attention takes the sg32 form; elsewhere they read as not run.",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: await checkAttentionOnlineTiled(gpu, options),
+      expectedCases: ATTENTION_ONLINE_TILED_CASES,
     }),
   },
 ];

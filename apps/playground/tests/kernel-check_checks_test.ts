@@ -1,4 +1,5 @@
 import {
+  ATTENTION_ONLINE_TILED_CASES,
   FUSION_TWIN_CASES,
   GEMV_INTEGER_CASES,
   GEMV_PLANES_CASES,
@@ -69,5 +70,16 @@ describe("the kernel-check page's checks", () => {
       "fusion-gelu-mul-static-quantize",
       "fusion-linear-static-quantize",
     ]);
+  });
+
+  it("runs the tiled key-axis candidate on any device, the producer part and one kernel part per reduction form", () => {
+    const check = KERNEL_CHECKS.find(({ id }) => id === "attention-online-tiled");
+    expect(check?.title).toBe("Online attention: tiled Vᵀ key axis (candidate)");
+    expect(check?.needsSubgroups).toBe(false);
+    expect(ATTENTION_ONLINE_TILED_CASES).toEqual({
+      "attention-online-tiled-producer": 18,
+      "attention-online-tiled-wg": 28,
+      "attention-online-tiled-sg32": 28,
+    });
   });
 });

@@ -2,7 +2,8 @@
  * The attention route bench: times the two a8 attention routes (S stored in f16 over three
  * dispatches, and the online int8 kernel) at Wan2.2's shapes with the production kernels on this
  * browser's GPU, and saves the record. The routes are timed on their own, apart from a generation,
- * so this page acquires its own GPU with timestamps.
+ * so this page acquires its own GPU with timestamps. Optionally it also times a measure-first
+ * candidate against the online kernel (the tiled key axis, perf-ledger K-106).
  */
 
 import type { AcquireGpuOptions } from "@karume/runtime";
@@ -41,10 +42,17 @@ import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { adapterText, type DeviceFacts, summarizeAdapter } from "@/lib/record";
 
-import { benchTableRows, formatCount, formatMs, shapeLabel } from "./rows";
+import {
+  benchTableRows,
+  candidateRows,
+  formatCount,
+  formatMs,
+  formatRatio,
+  shapeLabel,
+} from "./rows";
 
 /** The version of the saved record; bump it when a field changes meaning or goes away. */
-const RECORD_FORMAT = "karume-playground-attention-bench/1";
+const RECORD_FORMAT = "karume-playground-attention-bench/2";
 
 /**
  * Module constants (useGpu needs stable options): subgroups when the adapter has them (the online
@@ -70,8 +78,10 @@ type AttentionBenchRecord = {
     readonly rowsPerDispatch: number | "production";
     readonly rounds: number;
     readonly quantization: boolean;
+    /** The candidate `onlineTiled` (perf-ledger K-106) was timed. */
+    readonly onlineTiled: boolean;
   };
-  /** The runtime's record (`karume-attention-bench/1`). */
+  /** The runtime's record (`karume-attention-bench/2`). */
   readonly bench: AttentionBenchReport;
 };
 
@@ -92,6 +102,7 @@ type Form = {
   readonly rows: string;
   readonly rounds: string;
   readonly quantization: boolean;
+  readonly onlineTiled: boolean;
 };
 
 const INITIAL_FORM: Form = {
@@ -99,6 +110,7 @@ const INITIAL_FORM: Form = {
   rows: "",
   rounds: "5",
   quantization: true,
+  onlineTiled: false,
 };
 
 const SHAPE_HINTS: Readonly<Record<string, string>> = {
@@ -205,6 +217,7 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
           shapes,
           rounds,
           quantization: form.quantization,
+          onlineTiled: form.onlineTiled,
           signal: controller.signal,
           onProgress: (progress) =>
             setRun((current) =>
@@ -225,6 +238,7 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
           rowsPerDispatch: rowsOverride ?? "production",
           rounds,
           quantization: form.quantization,
+          onlineTiled: form.onlineTiled,
         },
         bench,
       });
@@ -327,6 +341,17 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
               />
               Also time the shared quantization (q, k, Vᵀ — once per node, outside the route totals)
             </Label>
+            <Label className="flex items-center gap-2 font-normal sm:col-span-2">
+              <Checkbox
+                id="bench-online-tiled"
+                checked={form.onlineTiled}
+                onCheckedChange={(checked) => setForm({ ...form, onlineTiled: checked })}
+                disabled={running}
+              />
+              Also time the candidate: the online kernel reading Vᵀ in its own key order (tiled,
+              perf-ledger K-106), in the same rounds as online, with its producer and an identity
+              check
+            </Label>
             <div className="flex gap-3 sm:col-span-2">
               <Button id="bench-run" onClick={() => void start()} disabled={!canRun}>
                 Run
@@ -416,6 +441,24 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
           </CardContent>
         </Card>
       )}
+
+      {results.some((result) => result.onlineTiled !== undefined) ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Candidate: tiled key axis (K-106)</CardTitle>
+            <CardDescription>
+              Time ratios tiled ÷ online (below 1 = the candidate faster): the kernel alone is the
+              median of the per-round ratios, each round timing A B B A; kernel + producer adds each
+              side's Vᵀ producer per node (needs the quantization line). The adoption line is a
+              kernel gain of ×1.05 on the RTX 5070 Ti, a ratio of at most ×0.952. Identical = both
+              producers on the same Vᵀ and both kernels on their outputs gave the same O words.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <CandidateTable results={results} />
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 };
@@ -445,6 +488,50 @@ const VariantFacts = ({ report }: { report: AttentionBenchReport }) => {
     />
   );
 };
+
+const CandidateTable = ({ results }: { results: readonly AttentionBenchShapeResult[] }) => (
+  <Table>
+    <TableHeader>
+      <TableRow>
+        <TableHead>Shape</TableHead>
+        <TableHead className="text-right">tiled ÷ online (kernel)</TableHead>
+        <TableHead className="text-right">tiled ÷ online (kernel + producer)</TableHead>
+        <TableHead className="text-right">online ms</TableHead>
+        <TableHead className="text-right">tiled ms</TableHead>
+        <TableHead>Producer ms / dispatch</TableHead>
+        <TableHead className="text-right">Rounds</TableHead>
+        <TableHead>Identical</TableHead>
+      </TableRow>
+    </TableHeader>
+    <TableBody>
+      {candidateRows(results).map((row) => (
+        <TableRow key={row.key}>
+          <TableCell className="font-mono text-xs">{row.shape}</TableCell>
+          <TableCell className="text-right font-mono text-xs">
+            {formatRatio(row.kernelRatio)}
+          </TableCell>
+          <TableCell className="text-right font-mono text-xs">
+            {formatRatio(row.withProducerRatio)}
+          </TableCell>
+          <TableCell className="text-right font-mono text-xs">{formatMs(row.onlineMs)}</TableCell>
+          <TableCell className="text-right font-mono text-xs">{formatMs(row.tiledMs)}</TableCell>
+          <TableCell className="text-xs">{row.producer ?? ""}</TableCell>
+          <TableCell className="text-right font-mono text-xs">{row.rounds ?? ""}</TableCell>
+          <TableCell className="text-xs whitespace-normal">
+            {row.identical === undefined ? (
+              ""
+            ) : row.identical ? (
+              <Badge variant="secondary">identical</Badge>
+            ) : (
+              <Badge variant="destructive">differs</Badge>
+            )}
+            {row.note === undefined ? null : <div className="text-destructive">{row.note}</div>}
+          </TableCell>
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
+);
 
 const ResultTable = ({ results }: { results: readonly AttentionBenchShapeResult[] }) => (
   <Table>

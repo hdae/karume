@@ -21,7 +21,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Benchmarks | Expert transfer bench — the fence and router-readback round trips and the upload of Gemma 4 26B A4B experts (staging ring or `writeBuffer`) | `/expert-transfer` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
 | Benchmarks | Session A/B — the wall-clock A/B of a Gemma 4 decode, a MOSS-Image DiT forward or a Wan2.2 / anima VAE forward with and without a candidate fusion rule (`runSessionAb`, `judgeSessionAb`): identity, hits, dispatches, per-round times and the verdict | `/session-ab` | built; not yet checked in a browser (the MOSS-Image and VAE targets neither) |
-| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the rms_norm prefetch form, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block, the expert linear and the built-in fusions against their unfused plans, word for word on the browser's backend | `/kernel-check` | done |
+| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the rms_norm prefetch form, the K-55 / K-91 states-attention rewrites, the integer and byte-plane GEMVs, the f16 full state slots, the f16 attention scores, the bidirectional block, the expert linear, the built-in fusions against their unfused plans and the tiled key axis candidate of the online attention, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1067,7 +1067,10 @@ keys, binding order, row blocks and variants production would use on this device
   and summed;
 - **online** — the online int8 kernel (`attention_online`, ADR 0132), one dispatch;
 - **quantization** (optional) — the four dispatches both routes share (q and k per token, the
-  permute to Vᵀ and its quantization), once per node and outside the route totals.
+  permute to Vᵀ and its quantization), once per node and outside the route totals;
+- **the candidate** (opt-in, perf-ledger K-106) — not a production route: the online kernel reading
+  Vᵀ in its own key order (the tiled key axis), timed against **online** in the same rounds, with
+  its producer and an identity check.
 
 The page probes the adapter first and acquires its GPU with `subgroups: "available"` and, when the
 adapter lists `timestamp-query`, `gpuTiming: true`. Without timestamp-query it says so and the
@@ -1081,6 +1084,7 @@ pass is about 80 ms, so that rounding stays below 0.2%.
 | Rows per dispatch | Empty (default) = the first row block production would dispatch: for s16 the first block of the even split under the device's `maxStorageBufferBindingSize`, for online the first window of its work budget. A number overrides both (capped at the shape's query count; the online kernel rounds up to whole 64-row workgroups). |
 | Rounds | Measurement rounds per dispatch (default 5); the min is kept. |
 | Quantization | Also time the shared quantization dispatches (default on). |
+| Candidate (tiled) | Also time the tiled key axis candidate (default off): at each shape the online kernel and the candidate on the same window in the same rounds, each round running A B B A (online, tiled, tiled, online — a drift within the round cancels); with the quantization line, today's Vᵀ producer and the tiled one the same way; and the identity check (both producers on the same f32 Vᵀ, both kernels on their outputs, every O word and scale word compared). |
 | Run / Cancel | Run the bench; Cancel stops before the next dispatch (the record keeps the finished shapes). |
 
 The result table has one row per shape and route: rows per dispatch, the production split, ms per
@@ -1092,10 +1096,19 @@ production would not run on this device or shape shows the reason instead. The s
 device facts: geometry profile, the dp4a variant (and the canary's verdict), the subgroup features
 and the linear lane mapping, and the limits.
 
+With the candidate, a second table has one row per shape: **tiled ÷ online** for the kernel alone
+(the median of the per-round time ratios; below 1 = the candidate faster) and for kernel + producer
+per node (each side's node estimate plus its Vᵀ producer, from the paired minimums — needs the
+quantization line), the paired ms per dispatch of both kernels, the producer pair, the rounds that
+gave a ratio, and **identical** / **differs** (with the first differing O word). The adoption line is
+a kernel gain of ×1.05 on the RTX 5070 Ti, a ratio of at most ×0.952.
+
 **Download record (JSON)** saves `attention-bench_<UTC timestamp>.json` (`format:
-"karume-playground-attention-bench/1"`): the adapter, the device facts (as on the Wan2.2 page), the
-settings, and under `bench` the runtime's record (`karume-attention-bench/1`) with every stage's
-key, workgroups, reps, raw rounds and wall-clock rounds. **Copy record** copies the same JSON.
+"karume-playground-attention-bench/2"`): the adapter, the device facts (as on the Wan2.2 page), the
+settings (with `onlineTiled`), and under `bench` the runtime's record (`karume-attention-bench/2`)
+with every stage's key, workgroups, reps, raw rounds and wall-clock rounds, and with the candidate
+every paired round (both passes of each arm and the round's ratio) and the identity block. **Copy
+record** copies the same JSON.
 
 Absolute times compare only on one machine; across machines, compare the ratios.
 
@@ -1400,10 +1413,11 @@ tests, not a copy.
 | f16 attention scores (S) | `gpu_score_f16_store_test.ts` | The store of `attentionScoreStorage: "f16"` writes what host rounding writes (2 cases). It goes through `pack2x16float`, whose rounding WGSL leaves open: PASS means every word matches one rounding, to nearest or toward zero, and the `rounding` requirement names which. FAIL means anything else, a mix of the two included. | nothing optional |
 | Bidirectional block (Gemma 4 12B images) | `gpu_state_bidirectional_test.ts` | The sliding ①ₜ with `GenerationRun.bidirectionalRows` (ADR 0144) writes every S word of the same kernel run with every score kept plus a host mirror of the predicate (33 cases: 12B's sliding shape and a small window, P = 0 / 17 / 1000 / 5000, four row layouts, plus one image chunk). The node test also runs predicate mutants that must mismatch; the page does not run them. | nothing optional |
 | Expert linear (Gemma 4 26B A4B) | `gpu_expert_linear_test.ts` | `expert_linear` with f16 steps (ADR 0145) writes, for every pick, the words of `linear`'s sequential i4 GEMV on that expert with the steps widened to f32 (48 cases: gate_up and down × 3 tokens × 8 picks with repeated ids); every output starts as a NaN pattern, so an unwritten word mismatches too. | nothing optional |
+| Online attention: tiled Vᵀ key axis (candidate) | `gpu_attention_online_tiled_test.ts` | A measure-first candidate (perf-ledger K-106), not a production route. The tiled `quantize_rows` writes the host permutation of today's Vᵀ producer bytes word for word, the scales bit for bit and nothing past its rows (18 cases: N = 5 / 40 / 65 / 200 / 203 / 512 / 4,106 / 7,920 / 27,280 — below a key tile, not a multiple of 4 / 16 / 64 — with zero and ±max rows, on the production grid and on one workgroup); the online kernel reading the tiled Vᵀ writes today's O words (28 cases per reduction form: the four-point check's 7 shapes × both output layouts × dp4a and emulated). The node test also shows both comparisons can fail (a wrong word index in the producer, a wrong lane in the kernel's load); the page does not run them. | the kernel parts: WGSL `packed_4x8_integer_dot_product`; the sg32 part: a device whose online attention takes the sg32 form. Elsewhere that part reads as not run |
 | Fusion rules: fused vs unfused | the twin-graph tests of the fusion rules (`gpu_gated_residual_fusion_test.ts`, `gpu_silu_fusion_test.ts`, `gpu_adaln_fusion_test.ts`, `gpu_rope_fusion_test.ts`, `gpu_upsample2x_fusion_test.ts`, `gpu_rms_norm_rope_fusion_test.ts`, `gpu_linear_prologue_fusion_test.ts`, `gpu_attention_permute_fusion_test.ts`, `gpu_row_block_attention_test.ts`, `gpu_rms_norm_add_fusion_test.ts`, `gpu_gelu_mul_static_quantize_fusion_test.ts`, `gpu_linear_static_quantize_session_test.ts`) | Each built-in fusion's output equals the same values run node by node — a plain Session with an interposed zero-dispatch reshape, without the opt-in, or without the forced row blocks — word for word, with NaN by class or by payload as each case declares, and the fusion counter shows the expected hits on the fused side and 0 on the plain side, plus the dispatches where the test pins them (ADR 0147 decision 9, layer 1; 377 cases in 13 parts, one per rule: gated residual 9, SiLU 3, adaLN 11, RoPE 23, upsample x2 1, rmsNormRope 8, linear prologue 20, attention permutes 5 + 4 online sg32, row-block attention 15, RMS→add 200, gelu→mul→SRQ 54, linear→SRQ 24). The node tests also keep what is no twin on the given device (census, counterexamples, capped-limit grid-stride runs, the online wg routes); the page does not run those. | the linear prologue part: WGSL `packed_4x8_integer_dot_product`; the online sg32 part: a device whose online attention takes the sg32 form (subgroups and a linear lane mapping). Elsewhere that part reads as not run |
 
 The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
-next to a check runs that check; **Run all** runs the ten in order; Cancel stops before the next
+next to a check runs that check; **Run all** runs the twelve in order; Cancel stops before the next
 case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
 earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
 linear lane mapping.
@@ -1412,7 +1426,7 @@ Each check gets a verdict:
 
 - **PASS** — every part ran the number of cases its check exports (`GEMV_SUBGROUP_CASES`,
   `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`, `GEMV_PLANES_CASES`, `STATE_KV16_CASES`, `SCORE_F16_CASES`,
-  `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`, `FUSION_TWIN_CASES`; the counts in the table above) and the
+  `STATE_BIDIRECTIONAL_CASES`, `EXPERT_LINEAR_CASES`, `FUSION_TWIN_CASES`, `ATTENTION_ONLINE_TILED_CASES`; the counts in the table above) and the
   states-attention check its `STATE_ATTENTION_MUTANTS` mutants and matrix rows, every criterion of
   every case has 0 failing words, every requirement is met, every mutant mismatched on its case and
   every mutant matrix row passed;
@@ -1424,13 +1438,13 @@ Each check gets a verdict:
   `subgroups` / `subgroup-size-control` / WGSL `subgroup_id`). This is not a pass: the page's
   overall verdict is then **INCOMPLETE** at best;
 - **INCOMPLETE** — the check ran and nothing failed, but the device lacked what one of its parts
-  needs (the fusion check's linear prologue or online sg32 part); the part table shows that part as
+  needs (the fusion check's linear prologue or online sg32 part, the tiled candidate's sg32 part); the part table shows that part as
   "not run here" with the reason. Not a pass either: the overall verdict is **INCOMPLETE** at best;
 - **ERROR** — the harness itself failed: a WebGPU error caught by the validation, out-of-memory or
   internal error scope every case runs under, an uncaptured WebGPU error, a lost device, or a
   mutation anchor that no longer matches the generated WGSL; the error is shown in full.
 
-The overall verdict covers all eleven checks: a check that was not run counts like one that is not
+The overall verdict covers all twelve checks: a check that was not run counts like one that is not
 available, so running one check alone gives **INCOMPLETE** at best (the result card lists the
 checks not run). The release check is a **Run all**.
 

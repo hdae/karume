@@ -4,8 +4,10 @@ import { describe, test } from "vite-plus/test";
 
 import {
   benchTableRows,
+  candidateRows,
   formatCount,
   formatMs,
+  formatRatio,
   shapeLabel,
 } from "../src/models/attention-bench/rows.ts";
 
@@ -123,5 +125,102 @@ describe("attention bench table rows", () => {
       [formatMs(12.345), formatMs(0.01234), formatMs(undefined)],
       ["12.35", "0.0123", "—"],
     );
+  });
+});
+
+const pairedRound = (a: number, b: number, ratio?: number) => ({
+  a: [a, a] as const,
+  b: [b, b] as const,
+  wallA: [a, a] as const,
+  wallB: [b, b] as const,
+  clamped: ratio === undefined ? 1 : 0,
+  ...(ratio === undefined ? {} : { ratio }),
+});
+
+const TILED = {
+  ...RESULT,
+  onlineTiled: {
+    eligible: true,
+    rows: 6528,
+    kernel: {
+      stages: ["online", "onlineTiled"],
+      keys: ["online:key", "online:key:ktile"],
+      workgroups: [
+        [102, 24, 1],
+        [102, 24, 1],
+      ],
+      reps: 2,
+      rounds: [pairedRound(60, 57, 0.95), pairedRound(61, 0), pairedRound(62, 58.9, 0.95)],
+      aMsPerDispatch: 60,
+      bMsPerDispatch: 57,
+      ratio: 0.95,
+    },
+    onlineNodeMs: 250.7,
+    tiledNodeMs: 238.2,
+    identity: { identical: true, words: 83804160, differingWords: 0, differingScaleWords: 0 },
+  },
+  tiledVsOnline: 0.95,
+  tiledVsOnlineWithProducer: 0.957,
+  quantization: {
+    ...RESULT.quantization,
+    tiledVt: {
+      stages: ["quantize_vt", "quantize_vt_tiled"],
+      keys: ["quantize_vt:key", "quantize_vt:key:tile64"],
+      workgroups: [
+        [3072, 1, 1],
+        [3072, 1, 1],
+      ],
+      reps: 4,
+      aMsPerDispatch: 0.4,
+      bMsPerDispatch: 0.5,
+      ratio: 1.25,
+    },
+  },
+} satisfies AttentionBenchShapeResult;
+
+describe("the candidate's table (tiled key axis)", () => {
+  test("one row per shape that carries the candidate, with both ratios, the producer pair and the identity", () => {
+    const rows = candidateRows([RESULT, TILED]);
+    assertEquals(rows.length, 1);
+    const [row] = rows;
+    assertEquals(row.shape, "wan22-self-121f");
+    assertEquals([row.kernelRatio, row.withProducerRatio], [0.95, 0.957]);
+    assertEquals([row.onlineMs, row.tiledMs], [60, 57]);
+    assertEquals(row.producer, "today 0.400 · tiled 0.500 (×1.250)");
+    // The round with a clamped pass gives no ratio
+    assertEquals(row.rounds, 2);
+    assertEquals(row.identical, true);
+    assertEquals(row.note, undefined);
+  });
+
+  test("a shape where the candidate did not run shows why", () => {
+    const [row] = candidateRows([
+      { ...RESULT, onlineTiled: { eligible: false, reason: "the online route does not run here" } },
+    ]);
+    assertEquals(row.note, "not run: the online route does not run here");
+    assertEquals(row.identical, undefined);
+  });
+
+  test("a differing identity names the first differing O word", () => {
+    const [row] = candidateRows([
+      {
+        ...TILED,
+        onlineTiled: {
+          ...TILED.onlineTiled,
+          identity: {
+            identical: false,
+            words: 10,
+            differingWords: 1,
+            first: { index: 1234, a: 0x3f800000, b: 0x3f800001 },
+          },
+        },
+      },
+    ]);
+    assertEquals(row.identical, false);
+    assertEquals(row.note, "first differing O word 1,234: 0x3f800000 vs 0x3f800001");
+  });
+
+  test("ratios read as ×0.951", () => {
+    assertEquals([formatRatio(0.95123), formatRatio(undefined)], ["×0.951", "—"]);
   });
 });
