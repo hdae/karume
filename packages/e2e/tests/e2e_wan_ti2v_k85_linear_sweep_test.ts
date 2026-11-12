@@ -224,7 +224,7 @@ describe.skipIf(skipReason !== undefined)("the K-85 linear sweep on this machine
       caseIds: cases.map(({ id }) => id),
       rounds: ROUNDS,
       idleSeconds: IDLE_SECONDS,
-      caseSet: first.caseSet,
+      caseSets: first.caseSets,
       table: { id: tableId, geometry: table },
       forward: {
         what: "one Wan2.2 TI2V-5B 33f DiT forward (each case's censusCount × its ms per dispatch)",

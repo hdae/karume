@@ -22,18 +22,15 @@ import {
 const PLAN = { plannedCaseIds: [CASE_A, CASE_B], cancelledBetweenCases: false };
 
 /**
- * What the derivation reads from the saved file. `defaultKernels` is left out: it is the runtime's
- * fingerprint of its default table, which the public surface does not give (records without the
- * field are not matched on it), while `caseSet` and `candidateKernels` stay and are matched.
+ * What the derivation reads from the saved file: the record as it is (its `caseSets`,
+ * `defaultKernels` and `candidateKernels` are matched).
  */
-const derive = (report: GeometrySweepReport) => {
-  const { defaultKernels: _unmatched, ...saved } = report;
-  return deriveGeometryProfile([{ report: saved, path: "merged.json", sha256: "sha" }], {
+const derive = (report: GeometrySweepReport) =>
+  deriveGeometryProfile([{ report, path: "merged.json", sha256: "sha" }], {
     id: "nvidia-blackwell",
     vendor: "nvidia",
     architecture: "blackwell",
   });
-};
 
 describe("mergeSweepReports", () => {
   describe("when every planned case has its record", () => {
@@ -64,8 +61,37 @@ describe("mergeSweepReports", () => {
     });
 
     it("stays in the sweep record's format (no envelope)", () => {
-      expect(merged.format).toBe("karume-geometry-sweep/2");
+      expect(merged.format).toBe("karume-geometry-sweep/3");
       expect(Object.keys(merged).sort()).toEqual(Object.keys(first).sort());
+    });
+  });
+
+  describe("when the per-case records hold different op families", () => {
+    it("takes the union of their caseSets and defaultKernels (each holds its own case's family)", () => {
+      const first = perCase(CASE_A);
+      const other = perCase(CASE_B);
+      const second = {
+        ...other,
+        caseSets: { ...other.caseSets, conv2d: "conv2d-case-set" },
+        defaultKernels: { conv2d: "conv2d-default" },
+      };
+      const merged = mergeSweepReports([first, second], PLAN);
+      expect(merged.caseSets).toEqual({
+        "i8a8-conv3d": first.caseSets["i8a8-conv3d"],
+        conv2d: "conv2d-case-set",
+      });
+      expect(merged.defaultKernels).toEqual({
+        "i8a8-conv3d": first.defaultKernels["i8a8-conv3d"],
+        conv2d: "conv2d-default",
+      });
+    });
+
+    it("throws when two records give one family different values (not one sweep)", () => {
+      const other = perCase(CASE_B);
+      const stale = { ...other, caseSets: { "i8a8-conv3d": "0000000000000000" } };
+      expect(() => mergeSweepReports([perCase(CASE_A), stale], PLAN)).toThrow(
+        /Record 1 differs from record 0 in caseSets\.i8a8-conv3d/,
+      );
     });
   });
 

@@ -121,9 +121,9 @@ measurements in `docs/research/`.
   with each form and, for conv2d, with the decode alone and with each form. Its record carries the case-set version
   of those cases, and `deriveGeometryProfile` derives no table from it; the other sets, their cases and every
   fingerprint are unchanged. A candidate's name carries its fields as the key spells them (`…:tb-un`, `…:dec`).
-- `@karume/runtime/tune`: `sweepCaseSetId` takes an optional candidate set and then returns the case-set version a
-  sweep of that set records (the same value as without it for `quick` / `quick+` / `full`, an evaluation set's own
-  table's for `k85` / `k88`).
+- `@karume/runtime/tune`: `sweepCaseSetIds` (the per-family successor of `sweepCaseSetId` — **Breaking**) takes an
+  optional candidate set and then returns the case-set versions a sweep of that set records (the same values as
+  without it for `quick` / `quick+` / `full`, an evaluation set's own table's for `k85` / `k88`).
 - `@karume/runtime/tune`: `runAttentionRouteBench` takes `onlineTiled` (default false), a measure-first candidate
   for the online int8 attention (perf-ledger K-106): the kernel reading Vᵀ in its own key order, timed against
   `online` in the same rounds (A B B A per round, the median of the per-round ratios), its producer timed beside
@@ -147,13 +147,23 @@ measurements in `docs/research/`.
   at least `minSpeedup` per node, kernel and producer together, from each arm's minimum pass, records of one shape
   combined by geometric mean. Records measured with the wall clock, on another adapter than the sweeps, on other
   kernels or shapes than the current runtime's, or that do not cover the set together are refused. The table gets
-  `provenance.attentionBench` (the records and the shape set's id) whenever records are given, and a table carrying
-  the field fingerprints the online attention's kernels too; `geometryProfileMismatch` compares the shape set's id,
-  and `parseGeometryProfileJson` reads both fields. Without records nothing changes, and the built-in tables'
-  fingerprints do not move (ADR 0117 addendum of 2026-11-12).
+  `provenance.attentionBench` (the records and the shape set's id) whenever records are given, with the online
+  attention's kernel fingerprint (`kernels`) exactly when the field is adopted; `geometryProfileMismatch` compares
+  both (a table carrying the field without them mismatches), and `parseGeometryProfileJson` reads both fields.
+  Without records nothing changes (ADR 0117 addenda of 2026-11-12).
 - `@karume/runtime/tune`: `ATTENTION_BENCH_SHAPES`, the attention bench's default shapes and the set the
   derivation requires: Wan2.2 TI2V-5B's three attention shapes and MOSS-Image's attention at 1024²
   (`moss-image-1024`: 24 heads, D = 128, S = 4,159).
+- `@karume/runtime/tune`: `DeriveGeometryProfileOptions.base`, an existing table of the same adapter whose op
+  families the new records do not cover are carried over: its fields and provenance entry of such a family verbatim,
+  once the entry's keys are checked against the current runtime (a stale entry throws, naming the family), and,
+  without attention-bench records, its `attentionOnline` with its attention-bench block. With a base, the records must
+  cover every family they have rows of completely, and a family the base has no entry for must be the default there.
+  A carried field gets one verdict line naming the base table and its sweeps. A runtime change that touches one
+  family then needs a sweep of that family only (ADR 0117 addendum of 2026-11-12, per op family).
+- `@karume/runtime/tune`: `sweepDefaultKernelsIds`, the default table's kernel fingerprints per op family that a
+  sweep record carries as its ratio baseline (optionally of a candidate set), and the type `GeometryProfileFamilyIds`
+  of both per-family maps; `@karume/runtime`: the types `GeometryProfileFamily` and `GeometryProfileFamilyProvenance`.
 
 ### Changed
 
@@ -193,6 +203,18 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/runtime` and `@karume/runtime/tune`: a geometry profile's provenance and matching keys are per op family
+  (`gemm` — linear / matmul / bmm —, `attention`, `conv2d`, `i8a8-linear`, `i8a8-attention`, `i8a8-conv3d`).
+  `provenance` holds `adapter` and `families`, one entry per family its records have rows of (`sweep`, `sha256`,
+  `date`, `candidateSet` and `userAgent` of those records, `kernels` and `caseSet` over that family's cases); the single
+  fields are gone, `parseGeometryProfileJson` refuses them and `assertGeometryProfile` requires `families`. The sweep
+  record is `karume-geometry-sweep/3`: `caseSets` and `defaultKernels` hold one value per family of the planned
+  cases, and `deriveGeometryProfile` reads `/3` only and refuses a record without both keys of every family it has
+  rows of. `sweepCaseSetId` is replaced by `sweepCaseSetIds`. `geometryProfileMismatch` compares family by family and
+  names the family; a family without an entry must be the default. Saved tables and `/2` records need one new sweep;
+  after it, a change to one family's kernels or cases invalidates that family's entries only, and a sweep of it
+  derived with the stored table as `base` restores the table. The built-in tables are converted with every value
+  unchanged (ADR 0117 addendum of 2026-11-12, per op family).
 - `@karume/runtime`: `attentionDeviceFacts` takes a `GpuContext`, since it reads the device's geometry profile;
   a plain object with the features, WGSL language features, lane mapping and limits no longer type-checks.
 - `@karume/runtime`: `FusionCounts` gains optional keys for the rules of `SessionOptions.fusionRules`

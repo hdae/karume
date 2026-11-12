@@ -23,11 +23,12 @@ import {
   verdictLines,
 } from "../src/tune/derive.ts";
 import { timestampUnitFor } from "../src/tune/sweep.ts";
-import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+import { sweepCaseEntries } from "../src/tune/cases.ts";
+import { familiesOf } from "../src/tune/families.ts";
 import {
-  geometryProfileKernelsId,
+  candidateSetCaseSetIds,
+  candidateSetDefaultKernelsIds,
   sweepCandidateKernelsId,
-  sweepCaseSetId,
 } from "../src/tune/fingerprint.ts";
 import { A, B, BIG, caseRows, linearCase, report } from "./helpers/sweep-records.ts";
 
@@ -36,17 +37,24 @@ const timestampQuery = adapter !== null && adapter.features.has("timestamp-query
 
 /**
  * The checks of the fields added to the record (ADR 0117 decision 8) that do not depend on what was
- * swept: the start time is ISO 8601 and not after the end (`date`); the case-set version and the
- * kernel fingerprint of the default table are the current runtime's values; the fingerprint of the
- * measured candidates equals the value re-derived from the record's rows with the generator's own
- * function (a writer-reader round trip); the wall-clock time of each case is finite and
- * non-negative.
+ * swept: the start time is ISO 8601 and not after the end (`date`); the case-set versions and the
+ * kernel fingerprints of the default table are the current runtime's values for exactly the op
+ * families of the planned cases (ADR 0117 addendum 2026-11-12); the fingerprint of the measured
+ * candidates equals the value re-derived from the record's rows with the generator's own function (a
+ * writer-reader round trip); the wall-clock time of each case is finite and non-negative.
  */
 const assertRecordFields = (swept: GeometrySweepReport): void => {
   assertEquals(new Date(swept.startedAt).toISOString(), swept.startedAt);
   assert(swept.startedAt <= swept.date, `startedAt ${swept.startedAt} > date ${swept.date}`);
-  assertEquals(swept.caseSet, sweepCaseSetId());
-  assertEquals(swept.defaultKernels, geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE));
+  const { candidateSet, ops, cases } = swept.settings;
+  const planned = familiesOf(
+    sweepCaseEntries(candidateSet).filter(
+      ({ id, op }) => ops.includes(op) && (cases === undefined || cases.includes(id)),
+    ),
+  );
+  assertEquals(swept.caseSets, candidateSetCaseSetIds(candidateSet, planned));
+  assertEquals(swept.defaultKernels, candidateSetDefaultKernelsIds(candidateSet, planned));
+  assertEquals(Object.keys(swept.caseSets), [...planned]);
   assertEquals(swept.candidateKernels, sweepCandidateKernelsId(swept.rows, swept.dp4a));
   for (const summary of swept.cases) {
     assert(
@@ -80,7 +88,7 @@ describe("deriveGeometryProfile", () => {
     assertEquals(profile, buildGeometryProfile(options, sources, internal));
     assertEquals(verdicts, verdictLines(internal));
     assertEquals(profile.gemmRows.at(-1)?.geometry, A);
-    assertEquals(profile.provenance?.sweep, "a.json");
+    assertEquals(profile.provenance?.families.gemm?.sweep, "a.json");
   });
 
   it("minSpeedup defaults to ×1.05 (a ×1.04 win is not adopted), and values below 1 or non-finite throw", () => {
@@ -182,7 +190,7 @@ describe("runGeometrySweep: real GPU", () => {
         signal: AbortSignal.abort(),
         onProgress: (progress) => kinds.push(progress.kind),
       });
-      assertEquals(swept.format, "karume-geometry-sweep/2");
+      assertEquals(swept.format, "karume-geometry-sweep/3");
       assertEquals(kinds, ["started"]);
       assertEquals(swept.aborted, true);
       assertRecordFields(swept);

@@ -10,7 +10,8 @@ import {
   type GeometrySweepRow,
   geometrySweepCases,
   sweepCandidateKernelsId,
-  sweepCaseSetId,
+  sweepCaseSetIds,
+  sweepDefaultKernelsIds,
 } from "@karume/runtime/tune";
 
 export const CONV3D = geometrySweepCases()
@@ -45,6 +46,16 @@ export const row = (caseId: string, isDefault: boolean, extra: Partial<GeometryS
     ...extra,
   }) satisfies GeometrySweepRow;
 
+/**
+ * One family's value of a per-family key (the per-case records hold the family of their conv3d case
+ * only — what `runGeometrySweep({ cases: [caseId] })` writes).
+ */
+const conv3dOnly = (ids: GeometrySweepReport["caseSets"]): GeometrySweepReport["caseSets"] => {
+  const id = ids["i8a8-conv3d"];
+  if (id === undefined) throw new Error("the full set has no i8a8-conv3d case");
+  return { "i8a8-conv3d": id };
+};
+
 export type PerCaseOptions = {
   readonly date?: string;
   readonly rows?: readonly GeometrySweepRow[];
@@ -62,12 +73,12 @@ export type PerCaseOptions = {
 export const perCase = (caseId: string, options: PerCaseOptions = {}): GeometrySweepReport => {
   const rows = options.rows ?? [row(caseId, true), row(caseId, false)];
   return {
-    format: "karume-geometry-sweep/2",
+    format: "karume-geometry-sweep/3",
     date: options.date ?? "2026-10-28T10:05:00.000Z",
     startedAt: "2026-10-28T10:00:00.000Z",
     aborted: options.aborted ?? false,
-    caseSet: sweepCaseSetId(),
-    defaultKernels: "default-kernels",
+    caseSets: conv3dOnly(sweepCaseSetIds("full")),
+    defaultKernels: conv3dOnly(sweepDefaultKernelsIds("full")),
     candidateKernels: options.candidateKernels ?? sweepCandidateKernelsId(rows, true),
     userAgent: "Chrome/155 test",
     adapter: options.adapter ?? ADAPTER,

@@ -746,6 +746,10 @@
  *   - tile64x64r8x4w16x8k32: geometric mean ×1.235 (below the adopted ×1.346)
  *   - tile64x64r8x8w8x8k16: i8a8-conv3d-cin512-cout256-k333-in6x256x256: ×0.977 < ×1.050
  *   - tile64x64r8x8w8x8k32: i8a8-conv3d-cin256-cout256-k333-in6x256x256: ×0.974 < ×1.050
+ *
+ * Provenance converted on 2026-11-12 to one entry per op family (ADR 0117 addendum 2026-11-12), no field
+ * value changed: both records have rows of every family, so every family's entry names both, and its
+ * `kernels` / `caseSet` are the current runtime's keys over the family's cases.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -776,22 +780,91 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
     conv3d: { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 },
   },
   provenance: {
-    sweep:
-      "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
-    sha256:
-      "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
-    date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
-    candidateSet: "full, full",
-    userAgent: [
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
-    ],
     adapter: {
       vendor: "nvidia",
       architecture: "blackwell",
       device: "0x2c05",
       description: "NVIDIA GeForce RTX 5070 Ti",
     },
-    kernels: "a66eee7b4154c872",
-    caseSet: "0c9e4c7b7202eb2a",
+    families: {
+      gemm: {
+        sweep:
+          "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
+        sha256:
+          "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
+        date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
+        candidateSet: "full, full",
+        userAgent: [
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+        ],
+        kernels: "6ac8d4833a01b2c5",
+        caseSet: "e6ddd45226ab2155",
+      },
+      attention: {
+        sweep:
+          "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
+        sha256:
+          "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
+        date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
+        candidateSet: "full, full",
+        userAgent: [
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+        ],
+        kernels: "c3f4a946ccbf1df9",
+        caseSet: "9ee211cf69674928",
+      },
+      conv2d: {
+        sweep:
+          "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
+        sha256:
+          "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
+        date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
+        candidateSet: "full, full",
+        userAgent: [
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+        ],
+        kernels: "f7e574d8925c82ea",
+        caseSet: "02186e45558e4151",
+      },
+      "i8a8-linear": {
+        sweep:
+          "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
+        sha256:
+          "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
+        date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
+        candidateSet: "full, full",
+        userAgent: [
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+        ],
+        kernels: "367e5aabd38c4e49",
+        caseSet: "71a785d66fcf3512",
+      },
+      "i8a8-attention": {
+        sweep:
+          "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
+        sha256:
+          "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
+        date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
+        candidateSet: "full, full",
+        userAgent: [
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+        ],
+        kernels: "0d3e6b59734db2c9",
+        caseSet: "8ab1a86b13087640",
+      },
+      "i8a8-conv3d": {
+        sweep:
+          "outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-28T20-44-29.json, outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_full_2026-10-30T20-12-41.json",
+        sha256:
+          "39d203a76278ddafd386e451445ff739acc765837f5429cc9c33b8157df020e4, 5778eb62ad937e6850f62a4cae93c7d1ab8dcea59f0e9a42198fbd2fd06b257e",
+        date: "2026-10-28T20:44:29.316Z, 2026-10-30T20:12:41.839Z",
+        candidateSet: "full, full",
+        userAgent: [
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+        ],
+        kernels: "c91b3368411e71d9",
+        caseSet: "27ce9da45b359b14",
+      },
+    },
   },
 };

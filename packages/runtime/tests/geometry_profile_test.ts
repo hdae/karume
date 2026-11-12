@@ -1606,24 +1606,49 @@ describe("assertGeometryProfile is a type predicate narrowing unknown to a table
       [
         "a provenance field missing",
         { ...OPT_IN, provenance: {} },
-        "provenance.sweep is not a string (missing)",
+        "provenance.adapter is not an object",
       ],
       [
-        "provenance.userAgent is a string",
+        "provenance.families missing",
+        {
+          ...OPT_IN,
+          provenance: { adapter: { vendor: "", architecture: "", device: "", description: "" } },
+        },
+        "provenance.families is not an object",
+      ],
+      [
+        "a family's provenance field missing",
         {
           ...OPT_IN,
           provenance: {
-            sweep: "s",
-            sha256: "h",
-            date: "d",
-            candidateSet: "quick",
-            kernels: "k",
-            caseSet: "c",
             adapter: { vendor: "", architecture: "", device: "", description: "" },
-            userAgent: "Deno/2",
+            families: {
+              gemm: { sweep: "s", sha256: "h", date: "d", candidateSet: "quick", caseSet: "c" },
+            },
           },
         },
-        "provenance.userAgent is not an array",
+        "provenance.families.gemm.kernels is not a string (missing)",
+      ],
+      [
+        "a family's userAgent is a string",
+        {
+          ...OPT_IN,
+          provenance: {
+            adapter: { vendor: "", architecture: "", device: "", description: "" },
+            families: {
+              conv2d: {
+                sweep: "s",
+                sha256: "h",
+                date: "d",
+                candidateSet: "quick",
+                kernels: "k",
+                caseSet: "c",
+                userAgent: "Deno/2",
+              },
+            },
+          },
+        },
+        "provenance.families.conv2d.userAgent is not an array",
       ],
     ];
     for (const [name, value, message] of cases) {
@@ -1631,7 +1656,7 @@ describe("assertGeometryProfile is a type predicate narrowing unknown to a table
     }
   });
 
-  it("holes of a sparse array (head, middle and tail of gemmRows and provenance.userAgent) name the index with CodegenError instead of TypeError", () => {
+  it("holes of a sparse array (head, middle and tail of gemmRows and a family's userAgent) name the index with CodegenError instead of TypeError", () => {
     /**
      * A sparse array of `length` with only the indices of `entries` filled (the shape a JS caller
      * builds with `new Array(n)`).
@@ -1642,15 +1667,19 @@ describe("assertGeometryProfile is a type predicate narrowing unknown to a table
       return array;
     };
     const [r64, r512, rest] = DEFAULT_GEOMETRY_PROFILE.gemmRows;
-    const provenance = {
+    const entry = {
       sweep: "s",
       sha256: "h",
       date: "d",
       candidateSet: "quick",
       kernels: "k",
       caseSet: "c",
-      adapter: { vendor: "", architecture: "", device: "", description: "" },
     };
+    const adapter = { vendor: "", architecture: "", device: "", description: "" };
+    const withAgents = (userAgent: unknown[]) => ({
+      adapter,
+      families: { gemm: { ...entry, userAgent } },
+    });
     const cases: readonly (readonly [string, unknown, string])[] = [
       [
         "gemmRows is new Array(1)",
@@ -1674,13 +1703,13 @@ describe("assertGeometryProfile is a type predicate narrowing unknown to a table
       ],
       [
         "userAgent is new Array(1)",
-        { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(1, {}) } },
-        "provenance.userAgent[0] is missing",
+        { ...OPT_IN, provenance: withAgents(sparse(1, {})) },
+        "provenance.families.gemm.userAgent[0] is missing",
       ],
       [
         "hole in the middle of userAgent",
-        { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(3, { 0: "a", 2: "b" }) } },
-        "provenance.userAgent[1] is missing",
+        { ...OPT_IN, provenance: withAgents(sparse(3, { 0: "a", 2: "b" })) },
+        "provenance.families.gemm.userAgent[1] is missing",
       ],
     ];
     for (const [name, value, message] of cases) {

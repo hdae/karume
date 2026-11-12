@@ -1,5 +1,5 @@
 /**
- * The shape of the sweep record (`karume-geometry-sweep/2`) and the pure functions that compare
+ * The shape of the sweep record (`karume-geometry-sweep/3`) and the pure functions that compare
  * rows with the default geometry.
  *
  * Only the sweep entry point `runGeometrySweep` (`sweep.ts`) assembles the record, so the Deno CLI
@@ -11,14 +11,17 @@
 import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import type { SweepOp } from "./cases.ts";
+import type { GeometryProfileFamilyIds } from "./families.ts";
 import type { CandidateSet } from "./geometries.ts";
 
 /**
  * The record format. /2 = /1 with `nsPerDispatch` renamed to the unit-neutral `perDispatch`, plus
  * the per-case `cases[]` (re-measurement of the default geometry) and the idle-run and wall-clock
- * notes in `settings`.
+ * notes in `settings`. /3 = /2 with the single `caseSet` and `defaultKernels` replaced by one value
+ * per op family, `caseSets` and `defaultKernels` (ADR 0117 addendum 2026-11-12); the generator reads
+ * /3 only.
  */
-export const REPORT_FORMAT = "karume-geometry-sweep/2";
+export const REPORT_FORMAT = "karume-geometry-sweep/3";
 
 /**
  * When the ratio of the default geometry's re-measurement (re-measurement ÷ first) is outside this
@@ -143,7 +146,7 @@ export type ReportAdapter = {
 };
 
 /**
- * The sweep record (`karume-geometry-sweep/2` — the input of the generator `derive.ts`, the shape
+ * The sweep record (`karume-geometry-sweep/3` — the input of the generator `derive.ts`, the shape
  * written as JSON).
  */
 export type Report = {
@@ -165,18 +168,21 @@ export type Report = {
    */
   readonly aborted: boolean;
   /**
-   * The version of the measured case set (`sweepCaseSetId()` — ADR 0117 decisions 4 / 8). The
-   * generator rejects a record whose value differs from the current runtime's. JSON from before
-   * this field lacks it (then it is not matched).
+   * The case-set version of each op family of the planned cases (ADR 0117 decisions 4 / 8, per
+   * family since its addendum 2026-11-12), hashed over the candidate set's own case table restricted
+   * to the family (`sweepCaseSetIds(<candidate set>)` for those families). For every family the
+   * record has a row of, the generator requires the entry and rejects a record whose value differs
+   * from the current runtime's.
    */
-  readonly caseSet: string;
+  readonly caseSets: GeometryProfileFamilyIds;
   /**
    * The kernel fingerprint of the default table used as the ratio baseline
-   * (`DEFAULT_GEOMETRY_PROFILE`, ADR 0117 decisions 4 / 8). The generator rejects a record whose
-   * value differs from the current runtime's (no table is built from a record with a different
-   * baseline). JSON from before this field lacks it.
+   * (`DEFAULT_GEOMETRY_PROFILE`, ADR 0117 decisions 4 / 8), per op family of the planned cases over
+   * the same case table (`sweepDefaultKernelsIds(<candidate set>)` for those families). For every
+   * family the record has a row of, the generator requires the entry and rejects a record whose value
+   * differs from the current runtime's (no table is built from a record with a different baseline).
    */
-  readonly defaultKernels: string;
+  readonly defaultKernels: GeometryProfileFamilyIds;
   /**
    * The kernel fingerprint of the measured candidates (ADR 0117 decision 8 — fingerprint.ts's
    * `sweepCandidateKernelsId`: the kernels that the (case, geometry) of the non-failed rows build

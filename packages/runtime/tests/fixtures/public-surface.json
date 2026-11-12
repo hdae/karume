@@ -171,6 +171,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeometryProfileFamily",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometryProfileFamilyProvenance",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GpuContext",
         "kind": "class"
       },
@@ -635,6 +643,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeometryProfileFamilyIds",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeometryProfileParseError",
         "kind": "class"
       },
@@ -819,7 +831,11 @@
         "kind": "function"
       },
       {
-        "name": "sweepCaseSetId",
+        "name": "sweepCaseSetIds",
+        "kind": "function"
+      },
+      {
+        "name": "sweepDefaultKernelsIds",
         "kind": "function"
       },
       {

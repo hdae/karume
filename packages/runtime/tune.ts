@@ -20,18 +20,23 @@
  *   adopted for a field only if, in every case of that field, its output matched the default
  *   geometry's output bit for bit and it was at least ×1.05 faster. The evidence is limited to the
  *   sweep's cases on that device; outputs of an in-app profile are not covered by the repository's
- *   end-to-end reference hashes.
+ *   end-to-end reference hashes. The fields fall into six op families (`gemm` — the row-count
+ *   buckets of linear / matmul / bmm —, `attention`, `conv2d`, `i8a8-linear`, `i8a8-attention`,
+ *   `i8a8-conv3d`), and the profile's provenance and matching keys are kept per family: given an
+ *   existing profile as `base`, the families the new records do not cover are carried over from it
+ *   unchanged, so sweeping one family does not require sweeping the others again.
  * - {@link geometryProfileJson} serializes a profile for storage (`Infinity` is written as `1e999`,
  *   which `JSON.parse` reads back as `Infinity`); {@link parseGeometryProfileJson} reads it back,
  *   rejecting unknown fields at every level and anything the injection gate would reject, with a
  *   {@link GeometryProfileParseError} that names the field.
  * - {@link geometryProfileMismatch} tells whether a stored profile may be used with this adapter
- *   and this runtime: it compares the four adapter fields the profile was swept on, the kernel
- *   fingerprint (derived again from the profile by this runtime) and the case-set id
- *   ({@link sweepCaseSetId}), and returns the first mismatch as a message. On a mismatch, run with
- *   the default table (or another one) and sweep again. It cannot detect a browser or driver
- *   update, and Chrome without developer flags reports an empty `device` and `description`, so an
- *   Apple M2 and an M5 look the same to it.
+ *   and this runtime: it compares the four adapter fields the profile was swept on and, per op
+ *   family, the kernel fingerprint (derived again from the profile by this runtime) and the case-set
+ *   id ({@link sweepCaseSetIds}) — a family the profile has no provenance for must be the default —
+ *   and returns the first mismatch as a message, naming the family. On a mismatch, run with the
+ *   default table (or another one) and sweep again (that family is enough, derived with the stored
+ *   profile as `base`). It cannot detect a browser or driver update, and Chrome without developer
+ *   flags reports an empty `device` and `description`, so an Apple M2 and an M5 look the same to it.
  *
  * To apply a stored profile, pass a callback as `acquireGpu({ geometryProfile })`: the runtime calls
  * it once, after it has obtained the adapter and before it creates the device, with that adapter's
@@ -51,10 +56,10 @@
  * which profile each run used (outputs reproduce only under the same profile). Doing "start with the
  * default table, sweep in the background, re-acquire with the new table" automatically amounts to
  * auto-tuning at the application level; the runtime still keeps a profile fixed for a device's
- * lifetime and measures nothing on the `acquireGpu` / `Session` path. A profile's
- * `provenance.userAgent` lists the browsers (or `Deno/<version>`) its sweeps ran under, one string
- * per distinct browser; it is not part of the match, so an application can compare it with the
- * current `navigator.userAgent` and suggest a new sweep after a browser update.
+ * lifetime and measures nothing on the `acquireGpu` / `Session` path. Each op family entry of a
+ * profile's provenance has a `userAgent` that lists the browsers (or `Deno/<version>`) its sweeps ran
+ * under, one string per distinct browser; it is not part of the match, so an application can compare
+ * it with the current `navigator.userAgent` and suggest a new sweep after a browser update.
  *
  * {@link runAttentionRouteBench} is a separate diagnostic, not part of the profile flow: it times
  * the two a8 routes of fused attention (S stored in f16 over three dispatches, and the online
@@ -90,7 +95,7 @@
 
 /**
  * Sweeps the tile geometries on a dedicated device and returns the sweep record
- * (`karume-geometry-sweep/2`). Uses GPU timestamps when the adapter lists `timestamp-query`.
+ * (`karume-geometry-sweep/3`). Uses GPU timestamps when the adapter lists `timestamp-query`.
  */
 export { runGeometrySweep } from "./src/tune/sweep.ts";
 export type { GeometrySweepOptions, GeometrySweepProgress } from "./src/tune/sweep.ts";
@@ -104,7 +109,7 @@ export type { CandidateSet as GeometrySweepCandidateSet } from "./src/tune/geome
 export type { SweepOp as GeometrySweepOp } from "./src/tune/cases.ts";
 /**
  * Every case of the sweep's shape table as its id and op family, in op-family order: the ids
- * `GeometrySweepOptions.cases` takes and the cases {@link sweepCaseSetId} covers. Given the
+ * `GeometrySweepOptions.cases` takes and the cases {@link sweepCaseSetIds} covers. Given the
  * evaluation set `"k85"`, the cases of its own table instead, each with its `censusCount` (nodes in
  * one Wan2.2 TI2V-5B 33f DiT forward, 0 for a guard shape of another model); given `"k88"`, its
  * cases with their `censusCount` and the unit it counts in, `censusGroup` (one gemma4 E2B prefill
@@ -149,17 +154,24 @@ export { GeometryProfileParseError, parseGeometryProfileJson } from "./src/tune/
 export { geometryProfileMismatch } from "./src/tune/mismatch.ts";
 
 /**
- * The id of the sweep's case set (`provenance.caseSet`), derived from this runtime without a GPU as
- * a 16-digit hexadecimal string.
+ * The ids of the sweep's case set per op family (`provenance.families[family].caseSet`, and the
+ * sweep record's `caseSets`), and the fingerprints of the default table per op family (the record's
+ * `defaultKernels`), derived from this runtime without a GPU as 16-digit hexadecimal strings. Given
+ * a candidate set, the values a sweep of every case of that set records (an evaluation set's own
+ * cases). A record holds the entries of the families it planned cases of, and
+ * {@link deriveGeometryProfile} requires them for every family it has rows of.
  */
-export { sweepCaseSetId } from "./src/tune/fingerprint.ts";
+export { sweepCaseSetIds, sweepDefaultKernelsIds } from "./src/tune/fingerprint.ts";
+export type { GeometryProfileFamilyIds } from "./src/tune/families.ts";
 
 /**
  * The kernel fingerprint of the candidates a sweep record measured (the record's
  * `candidateKernels`), derived from its rows and its `dp4a` without a GPU. An application that
  * merges the records of several `runGeometrySweep` calls (one per case, with idle time between
  * them) recomputes it over the merged rows: each record fingerprints only its own rows, and
- * {@link deriveGeometryProfile} rejects a record whose value differs from the one it derives.
+ * {@link deriveGeometryProfile} rejects a record whose value differs from the one it derives. Such
+ * an application also takes the union of the records' `caseSets` and `defaultKernels`: each record
+ * holds the entries of the op families of its own cases.
  */
 export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
 

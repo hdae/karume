@@ -158,9 +158,15 @@ export type {
  * `geometryProfileMismatch` of `@karume/runtime/tune` and returns it (`undefined` means automatic
  * selection).
  * The default table and the selection function are not exported as values (they are internal
- * codegen vocabulary; tools import them from `src/`).
+ * codegen vocabulary; tools import them from `src/`). A generated table's `provenance` holds one
+ * `GeometryProfileFamilyProvenance` per op family (`GeometryProfileFamily`) its sweeps measured.
  */
-export type { GemmRowsRule, GeometryProfile } from "./src/kernels/geometry-profile.ts";
+export type {
+  GemmRowsRule,
+  GeometryProfile,
+  GeometryProfileFamily,
+  GeometryProfileFamilyProvenance,
+} from "./src/kernels/geometry-profile.ts";
 export { BUILTIN_GEOMETRY_PROFILES } from "./src/kernels/geometry-profiles/index.ts";
 export type { GemmGeometry } from "./src/kernels/gemm-geometry.ts";
 export type { I8a8Geometry } from "./src/kernels/i8a8-geometry.ts";

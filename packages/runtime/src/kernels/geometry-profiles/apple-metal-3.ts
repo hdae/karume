@@ -723,7 +723,13 @@
  * Re-derived on 2026-10-26 from the same records with `deriveGeometryProfile` when the profile gained
  * `i8a8.conv3d` (ADR 0115 addendum 2026-10-26; the scripts are kept, untracked, in
  * `outputs/diag/wave-b-2026-10-26/v5/`). Every other field is unchanged; `i8a8.conv3d` keeps the default
- * because no record has a conv3d case, and `provenance.kernels` / `caseSet` are the current runtime's.
+ * because no record has a conv3d case, and the provenance's kernel fingerprint and case-set version were
+ * the current runtime's.
+ *
+ * Provenance converted on 2026-11-12 to one entry per op family (ADR 0117 addendum 2026-11-12), no field
+ * value changed: each family's entry names the records above that have a row of the family, and its
+ * `kernels` / `caseSet` are the current runtime's keys over the family's cases. `i8a8-conv3d` has no entry
+ * (no record has a conv3d case; its field is the default).
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -754,23 +760,83 @@ export const APPLE_METAL_3: GeometryProfile = {
     conv3d: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
   },
   provenance: {
-    sweep:
-      "outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T13-08-11.329Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json, outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json",
-    sha256:
-      "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a, 38d97dac5f04a7e80fb6591ab437da7dd2b3cee66b0d03e40cd1475c0f398550, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
-    date: "2026-09-27T16:28:00.787Z, 2026-09-27T18:31:46.471Z, 2026-09-29T13:08:11.329Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
-    candidateSet: "quick, full, full, full, full",
-    userAgent: [
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
-    ],
     adapter: {
       vendor: "apple",
       architecture: "metal-3",
       device: "0x0000",
       description: "Apple M2",
     },
-    kernels: "da4542673a039990",
-    caseSet: "0c9e4c7b7202eb2a",
+    families: {
+      gemm: {
+        sweep:
+          "outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T13-08-11.329Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json, outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json",
+        sha256:
+          "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a, 38d97dac5f04a7e80fb6591ab437da7dd2b3cee66b0d03e40cd1475c0f398550, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
+        date: "2026-09-27T16:28:00.787Z, 2026-09-27T18:31:46.471Z, 2026-09-29T13:08:11.329Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
+        candidateSet: "quick, full, full, full, full",
+        userAgent: [
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        ],
+        kernels: "fbc7d11de06482c4",
+        caseSet: "e6ddd45226ab2155",
+      },
+      attention: {
+        sweep:
+          "outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json, outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json",
+        sha256:
+          "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
+        date: "2026-09-27T16:28:00.787Z, 2026-09-27T18:31:46.471Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
+        candidateSet: "quick, full, full, full",
+        userAgent: [
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        ],
+        kernels: "7c23ff15792d67ec",
+        caseSet: "9ee211cf69674928",
+      },
+      conv2d: {
+        sweep:
+          "outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json, outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json",
+        sha256:
+          "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
+        date: "2026-09-27T16:28:00.787Z, 2026-09-27T18:31:46.471Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
+        candidateSet: "quick, full, full, full",
+        userAgent: [
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        ],
+        kernels: "1e1bddcc0638175e",
+        caseSet: "02186e45558e4151",
+      },
+      "i8a8-linear": {
+        sweep:
+          "outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json, outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json",
+        sha256:
+          "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
+        date: "2026-09-27T16:28:00.787Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
+        candidateSet: "quick, full, full",
+        userAgent: [
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        ],
+        kernels: "27dd52274a7ceadf",
+        caseSet: "71a785d66fcf3512",
+      },
+      "i8a8-attention": {
+        sweep:
+          "outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json, outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json, outputs/bench-browser/geometry-sweep-browser-2026-10-01T12-28-47.052Z.json",
+        sha256:
+          "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
+        date: "2026-09-27T16:28:00.787Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
+        candidateSet: "quick, full, full",
+        userAgent: [
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        ],
+        kernels: "5544095375968b39",
+        caseSet: "8ab1a86b13087640",
+      },
+    },
   },
 };

@@ -13,8 +13,11 @@ import { CodegenError } from "../codegen/errors.ts";
 import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
 import {
   assertGeometryProfile,
+  GEOMETRY_PROFILE_FAMILIES,
   type GemmRowsRule,
   type GeometryProfile,
+  type GeometryProfileFamily,
+  type GeometryProfileFamilyProvenance,
 } from "../kernels/geometry-profile.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 
@@ -76,7 +79,7 @@ const readString = (value: unknown, path: string): string =>
   typeof value === "string" ? value : fail(path, `is not a string (${show(value)})`);
 
 /**
- * `provenance.userAgent` (an array of strings — order of appearance; deduplication is the writer's
+ * A family entry's `userAgent` (an array of strings — order of appearance; deduplication is the writer's
  * job). An empty array is a form the writer never writes, so it is rejected.
  */
 const readUserAgents = (value: unknown, path: string): string[] => {
@@ -211,14 +214,7 @@ const readAttentionOnline = (
 };
 
 const readProvenance = (value: unknown, path: string): Provenance => {
-  // userAgent is an optional reference field (not used for matching — ADR 0117 addendum
-  // 2026-10-02). Unknown fields are still rejected
-  const fields = readRecord(
-    value,
-    path,
-    ["sweep", "sha256", "date", "candidateSet", "adapter", "kernels", "caseSet"],
-    ["userAgent", "attentionBench"],
-  );
+  const fields = readRecord(value, path, ["adapter", "families"], ["attentionBench"]);
   const adapterPath = child(path, "adapter");
   const adapter = readRecord(fields.adapter, adapterPath, [
     "vendor",
@@ -227,21 +223,13 @@ const readProvenance = (value: unknown, path: string): Provenance => {
     "description",
   ]);
   return {
-    sweep: readString(fields.sweep, child(path, "sweep")),
-    sha256: readString(fields.sha256, child(path, "sha256")),
-    date: readString(fields.date, child(path, "date")),
-    candidateSet: readString(fields.candidateSet, child(path, "candidateSet")),
-    ...(fields.userAgent === undefined
-      ? {}
-      : { userAgent: readUserAgents(fields.userAgent, child(path, "userAgent")) }),
     adapter: {
       vendor: readString(adapter.vendor, child(adapterPath, "vendor")),
       architecture: readString(adapter.architecture, child(adapterPath, "architecture")),
       device: readString(adapter.device, child(adapterPath, "device")),
       description: readString(adapter.description, child(adapterPath, "description")),
     },
-    kernels: readString(fields.kernels, child(path, "kernels")),
-    caseSet: readString(fields.caseSet, child(path, "caseSet")),
+    families: readFamilies(fields.families, child(path, "families")),
     ...(fields.attentionBench === undefined
       ? {}
       : {
@@ -250,17 +238,61 @@ const readProvenance = (value: unknown, path: string): Provenance => {
   };
 };
 
-/** `provenance.attentionBench` (four strings — ADR 0117 addendum 2026-11-12). */
+/**
+ * `provenance.families` (one entry per op family that has one — ADR 0117 addendum 2026-11-12; a key
+ * that is not a family is an unknown field).
+ */
+const readFamilies = (value: unknown, path: string): Provenance["families"] => {
+  const fields = readRecord(value, path, [], GEOMETRY_PROFILE_FAMILIES);
+  const families: { [Family in GeometryProfileFamily]?: GeometryProfileFamilyProvenance } = {};
+  for (const family of GEOMETRY_PROFILE_FAMILIES) {
+    if (fields[family] !== undefined) {
+      families[family] = readFamilyProvenance(fields[family], child(path, family));
+    }
+  }
+  return families;
+};
+
+/** One family's provenance (six strings and the optional `userAgent`). */
+const readFamilyProvenance = (value: unknown, path: string): GeometryProfileFamilyProvenance => {
+  // userAgent is an optional reference field (not used for matching — ADR 0117 addendum
+  // 2026-10-02). Unknown fields are still rejected
+  const fields = readRecord(
+    value,
+    path,
+    ["sweep", "sha256", "date", "candidateSet", "kernels", "caseSet"],
+    ["userAgent"],
+  );
+  return {
+    sweep: readString(fields.sweep, child(path, "sweep")),
+    sha256: readString(fields.sha256, child(path, "sha256")),
+    date: readString(fields.date, child(path, "date")),
+    candidateSet: readString(fields.candidateSet, child(path, "candidateSet")),
+    ...(fields.userAgent === undefined
+      ? {}
+      : { userAgent: readUserAgents(fields.userAgent, child(path, "userAgent")) }),
+    kernels: readString(fields.kernels, child(path, "kernels")),
+    caseSet: readString(fields.caseSet, child(path, "caseSet")),
+  };
+};
+
+/**
+ * `provenance.attentionBench` (four strings and the optional `kernels` — ADR 0117 addenda
+ * 2026-11-12).
+ */
 const readAttentionBench = (
   value: unknown,
   path: string,
 ): NonNullable<Provenance["attentionBench"]> => {
-  const fields = readRecord(value, path, ["records", "sha256", "date", "shapes"]);
+  const fields = readRecord(value, path, ["records", "sha256", "date", "shapes"], ["kernels"]);
   return {
     records: readString(fields.records, child(path, "records")),
     sha256: readString(fields.sha256, child(path, "sha256")),
     date: readString(fields.date, child(path, "date")),
     shapes: readString(fields.shapes, child(path, "shapes")),
+    ...(fields.kernels === undefined
+      ? {}
+      : { kernels: readString(fields.kernels, child(path, "kernels")) }),
   };
 };
 

@@ -1,9 +1,14 @@
 /**
  * The two matching keys, among those that decide whether a saved table may be applied, that are
  * derived from the runtime (DECIDED: ADR 0117 decision 4) — the **kernel fingerprint**
- * ({@link geometryProfileKernelsId}) and the **case-set version** ({@link sweepCaseSetId}).
+ * ({@link geometryProfileKernelsIds}) and the **case-set version** ({@link sweepCaseSetIds}) — one
+ * value **per op family** (`GeometryProfileFamily`, src/tune/families.ts — ADR 0117 addendum
+ * 2026-11-12), each taken over that family's sweep cases only, so adding one family's cases moves
+ * only that family's keys. The online attention's key-axis form (`attentionOnline`) is decided from
+ * attention-bench records, not sweep cases; its kernels have a key of their own
+ * ({@link attentionBenchKernelsId}).
  *
- * Both are synchronous pure functions that read neither the GPU nor the clock, and the same runtime
+ * All are synchronous pure functions that read neither the GPU nor the clock, and the same runtime
  * always gives the same value (codegen determinism — same key → byte-identical WGSL). The runtime's
  * version string is not used because the runtime has no version constant, a version would discard
  * tables even on releases that do not touch the GEMM kernels, and on unreleased checkouts it stays
@@ -11,11 +16,11 @@
  * to or the default kernels change.
  *
  * The matching keys on the sweep record's side (ADR 0117 decision 8) are derived in the same style:
- * `defaultKernels` for the ratio baseline ({@link geometryProfileKernelsId} applied to the default
- * table) and `candidateKernels` for the measured candidates ({@link sweepCandidateKernelsId}).
+ * `defaultKernels` for the ratio baseline (the per-family fingerprint of the default table) and
+ * `candidateKernels` for the measured candidates ({@link sweepCandidateKernelsId}).
  * `defaultKernels` protects only the ratio baseline; the speed and output match of an adopted
- * candidate come from the candidate's own kernels — a record without the field guarantees only the
- * default baseline.
+ * candidate come from the candidate's own kernels — a record without `candidateKernels` guarantees
+ * only the default baseline.
  *
  * The hash is FNV-1a 64 bit ({@link fnv1a64Hex}). It is synchronous to keep the pure matching
  * function and the injection entry point's callback (ADR 0117 decision 6) synchronous
@@ -44,14 +49,16 @@ import {
   DEFAULT_GEOMETRY_PROFILE,
   gemmRowsGeometry,
   type GeometryProfile,
+  type GeometryProfileFamily,
 } from "../kernels/geometry-profile.ts";
+import { ALL_SWEEP_CASES, SWEEP_CASES, type SweepCase, sweepCasesFor } from "./cases.ts";
 import {
-  ALL_SWEEP_CASES,
-  PROFILE_GEMM_ROWS_BOUNDS,
-  SWEEP_CASES,
-  type SweepCase,
-  sweepCasesFor,
-} from "./cases.ts";
+  familiesOf,
+  familyBounds,
+  familyEntries,
+  type GeometryProfileFamilyIds,
+  sweepOpFamily,
+} from "./families.ts";
 import {
   type CandidateSet,
   conv2dCandidate,
@@ -290,11 +297,11 @@ const rawLaunchLine = (
 ): string => JSON.stringify([key, Array.from(params), wgslTokenText(wgsl), workgroups]);
 
 /**
- * The online attention's lines of the kernel fingerprint, for a table carrying
- * `attentionOnline` only (ADR 0117 addendum 2026-11-12): per shape of the bench's set, for the form
- * N gives and the tiled form, the Vᵀ producer and the kernel of the first window in each dp4a
- * variant × reduction form (the layout the bench times, `bhsd`) — the kernels the field chooses
- * between, so a runtime that changes either moves the fingerprint of a table that chose.
+ * The lines of the online attention's kernel fingerprint ({@link attentionBenchKernelsId} — ADR 0117
+ * addendum 2026-11-12): per shape of the bench's set, for the form N gives and the tiled form, the
+ * Vᵀ producer and the kernel of the first window in each dp4a variant × reduction form (the layout
+ * the bench times, `bhsd`) — the kernels the field `attentionOnline` chooses between, so a runtime
+ * that changes either moves the key of a table that chose.
  * MUST: built with the production generator calls (`attentionValueQuantization`, the windows of
  * `planAttentionOnlineWindows`) the bench and the derivation's key check use.
  */
@@ -350,8 +357,8 @@ const attentionOnlineLines = (shapes: readonly AttentionBenchShape[]): string[] 
 };
 
 /**
- * The body of the kernel fingerprint ({@link geometryProfileKernelsId} — a form into which the
- * cases and the case plan can be injected).
+ * The body of the kernel fingerprint over the cases given (one family's cases for the per-family
+ * keys — {@link profileKernelsIds}; a form into which the cases and the case plan can be injected).
  *
  * For each case (in the order of `cases`) × dp4a variant (false → true), builds the dispatches of
  * the table's geometry and of the default geometry (the case plan's `defaultCandidate` = the
@@ -360,11 +367,9 @@ const attentionOnlineLines = (shapes: readonly AttentionBenchShape[]): string[] 
  * and hashes the lines joined with newlines (JSON contains no newline, so the join is unambiguous).
  *
  * MUST: dispatches are built with the same case plan as the sweep — the kernels measured by the
- * sweep and the kernels the fingerprint points to are never built by separate paths. `id`, `match`
- * and `provenance` are not read (only the table's geometries affect the fingerprint).
- * A table carrying `attentionOnline` appends the online attention's lines after the cases
- * ({@link attentionOnlineLines} over `ATTENTION_BENCH_SHAPES`); a table without it hashes exactly
- * the lines it hashed before the field, so its fingerprint does not move.
+ * sweep and the kernels the fingerprint points to are never built by separate paths. `id`, `match`,
+ * `attentionOnline` and `provenance` are not read (only the geometries of the cases' fields affect
+ * the fingerprint — the online attention's kernels have their own key, {@link attentionBenchKernelsId}).
  *
  * A dispatch that cannot be built (a codegen check, the dispatch-count limit) throws a
  * {@link KernelsIdError} that names the case, the field and the geometry.
@@ -401,26 +406,57 @@ export const profileKernelsId = (
       }
     }
   }
-  if (profile.attentionOnline !== undefined) {
-    lines.push(...attentionOnlineLines(ATTENTION_BENCH_SHAPES));
-  }
   return fnv1a64Hex(lines.join("\n"));
 };
 
 /**
- * The table's kernel fingerprint (`provenance.kernels` — ADR 0117 decision 4): the hash (16 hex
- * digits) of the kernels that the table's geometry and the default geometry build for the shapes of
- * every sweep case. Reads neither the GPU nor the clock.
- *
- * The value changes when a GEMM kernel (key, params, WGSL tokens, dispatch count) or the default
- * geometry changes. Changes outside key, params, WGSL and workgroups (the order of recipe bindings
- * and the like) and changes to the WGSL's comments and whitespace do not show in the fingerprint —
- * the runtime's own checks (codegen snapshots, GPU tests with the default geometry) cover the
- * former, and the latter change no kernel. A table with a broken geometry (it fails a codegen check,
- * or the dispatch count exceeds 65535) throws {@link KernelsIdError}.
+ * The kernel fingerprint per op family over `cases` ({@link profileKernelsId} over each family's
+ * cases, for every family that has a case in `cases` — in the fixed family order).
  */
-export const geometryProfileKernelsId = (profile: GeometryProfile): string =>
-  profileKernelsId(profile, SWEEP_CASES, casePlan);
+export const profileKernelsIds = (
+  profile: GeometryProfile,
+  cases: readonly SweepCase[],
+  planner: CasePlanner,
+): GeometryProfileFamilyIds => {
+  const ids: { [Family in GeometryProfileFamily]?: string } = {};
+  for (const family of familiesOf(cases)) {
+    ids[family] = profileKernelsId(profile, familyEntries(cases, family), planner);
+  }
+  return ids;
+};
+
+/**
+ * The table's kernel fingerprint of one op family (`provenance.families[family].kernels` — ADR 0117
+ * decision 4, per family since its addendum 2026-11-12): the hash (16 hex digits) of the kernels
+ * that the table's geometry and the default geometry build for the shapes of the family's sweep
+ * cases. Reads neither the GPU nor the clock, and only the family's own fields.
+ *
+ * The value changes when a GEMM kernel (key, params, WGSL tokens, dispatch count) of the family or
+ * its default geometry changes. Changes outside key, params, WGSL and workgroups (the order of
+ * recipe bindings and the like) and changes to the WGSL's comments and whitespace do not show in the
+ * fingerprint — the runtime's own checks (codegen snapshots, GPU tests with the default geometry)
+ * cover the former, and the latter change no kernel. A table with a broken geometry in the family (it
+ * fails a codegen check, or the dispatch count exceeds 65535) throws {@link KernelsIdError}.
+ */
+export const familyKernelsId = (profile: GeometryProfile, family: GeometryProfileFamily): string =>
+  profileKernelsId(profile, familyEntries(SWEEP_CASES, family), casePlan);
+
+/**
+ * The table's kernel fingerprints of every op family ({@link familyKernelsId} for each — every family
+ * has cases in `SWEEP_CASES`).
+ */
+export const geometryProfileKernelsIds = (profile: GeometryProfile): GeometryProfileFamilyIds =>
+  profileKernelsIds(profile, SWEEP_CASES, casePlan);
+
+/**
+ * The fingerprint of the online attention's kernels (`provenance.attentionBench.kernels` — ADR 0117
+ * addendum 2026-11-12): the hash (16 hex digits) of {@link attentionOnlineLines} over
+ * `ATTENTION_BENCH_SHAPES`, the kernels and Vᵀ producers `attentionOnline` chooses between. It does
+ * not depend on any table; a table carrying the field records it, and matching compares it. A
+ * dispatch that cannot be built throws {@link KernelsIdError}.
+ */
+export const attentionBenchKernelsId = (): string =>
+  fnv1a64Hex(attentionOnlineLines(ATTENTION_BENCH_SHAPES).join("\n"));
 
 /**
  * The fields of a sweep record row that the measured-candidate fingerprint
@@ -505,7 +541,7 @@ export const candidateKernelsId = (
  * clock. The writer records it at the end of the sweep, and the generator re-derives it with the
  * current runtime and rejects the record on a difference — no table is built from old measurements
  * (speed ratios, output match) on a runtime where only the candidates' WGSL changed (the table's
- * `provenance.kernels` is derived with the current runtime at generation, so matching could not
+ * family fingerprints are derived with the current runtime at generation, so matching could not
  * detect it either).
  */
 export const sweepCandidateKernelsId = (rows: readonly MeasuredRow[], dp4a: boolean): string =>
@@ -582,26 +618,60 @@ const caseSetFields = (sweepCase: SweepCase): Record<string, unknown> =>
   );
 
 /**
- * The body of the case-set version ({@link sweepCaseSetId} — a form into which the cases and the
- * boundaries can be injected).
+ * The body of the case-set version over the cases given (one family's cases and that family's
+ * bounds for the per-family keys — {@link caseSetIds}; a form into which the cases and the bounds
+ * can be injected). Absent bounds leave the entry out of the hashed JSON.
  */
-export const caseSetId = (cases: readonly SweepCase[], bounds: readonly number[]): string =>
+export const caseSetId = (cases: readonly SweepCase[], bounds?: readonly number[]): string =>
   fnv1a64Hex(canonicalJson({ cases: cases.map(caseSetFields), bounds }));
 
 /**
- * The case-set version (`provenance.caseSet` — ADR 0117 decision 4): the hash (16 hex digits) of
- * the canonical JSON of the dispatch-deciding fields ({@link CASE_SET_FIELDS}) of the sweep cases
- * (`SWEEP_CASES`) and the gemmRows bucket boundaries (`PROFILE_GEMM_ROWS_BOUNDS`). Given a
- * candidate set, the version a sweep of that set records ({@link candidateSetCaseSetId} — the same
- * value for the table-deriving sets, its own table's for an evaluation set).
- *
- * No hand-bumped version number (no way to add a case and forget the bump). When cases are added,
- * removed or reordered, or a dispatch-deciding field or a boundary changes, the value changes and
- * saved tables mismatch at matching (re-sweep). Changes only to informational fields such as
- * descriptions do not change it.
+ * The case-set version per op family over `cases`: for every family that has a case in `cases`
+ * (in the fixed family order), {@link caseSetId} over the family's cases and its bounds
+ * (`familyBounds` — the row-count bucket bounds for `gemm` only).
  */
-export const sweepCaseSetId = (set?: CandidateSet): string =>
-  set === undefined ? caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS) : candidateSetCaseSetId(set);
+export const caseSetIds = (cases: readonly SweepCase[]): GeometryProfileFamilyIds => {
+  const ids: { [Family in GeometryProfileFamily]?: string } = {};
+  for (const family of familiesOf(cases)) {
+    ids[family] = caseSetId(familyEntries(cases, family), familyBounds(family));
+  }
+  return ids;
+};
+
+/**
+ * The case-set version of one op family (`provenance.families[family].caseSet`): {@link caseSetId}
+ * over the family's cases of `SWEEP_CASES` and the family's bounds.
+ */
+export const familyCaseSetId = (family: GeometryProfileFamily): string =>
+  caseSetId(familyEntries(SWEEP_CASES, family), familyBounds(family));
+
+/**
+ * The case-set versions (`provenance.families[family].caseSet` — ADR 0117 decision 4, per op family
+ * since its addendum 2026-11-12): per family, the hash (16 hex digits) of the canonical JSON of the
+ * dispatch-deciding fields ({@link CASE_SET_FIELDS}) of the family's sweep cases (`SWEEP_CASES`)
+ * and, for `gemm`, the gemmRows bucket boundaries (`PROFILE_GEMM_ROWS_BOUNDS`). Given a candidate
+ * set, the versions a sweep of every case of that set records ({@link candidateSetCaseSetIds} — the
+ * same values for the table-deriving sets, the families of its own table for an evaluation set).
+ *
+ * No hand-bumped version number (no way to add a case and forget the bump). When a family's cases
+ * are added, removed or reordered, or a dispatch-deciding field or a bound of the family changes,
+ * that family's value changes and the saved tables' entries of that family mismatch at matching
+ * (re-sweep of that family). Changes only to informational fields such as descriptions do not change
+ * it.
+ */
+export const sweepCaseSetIds = (set?: CandidateSet): GeometryProfileFamilyIds =>
+  set === undefined ? caseSetIds(SWEEP_CASES) : candidateSetCaseSetIds(set);
+
+/**
+ * The kernel fingerprints of the default table a sweep of every case of `set` records as its ratio
+ * baseline (`defaultKernels` — ADR 0117 decision 8, per op family since its addendum 2026-11-12): per
+ * family of the set's case table, the default table's fingerprint over the family's cases
+ * ({@link candidateSetDefaultKernelsIds}; without `set`, over `SWEEP_CASES`).
+ */
+export const sweepDefaultKernelsIds = (set?: CandidateSet): GeometryProfileFamilyIds =>
+  set === undefined
+    ? geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE)
+    : candidateSetDefaultKernelsIds(set);
 
 /**
  * The id of the attention bench's shape set (`provenance.attentionBench.shapes` — ADR 0117
@@ -613,17 +683,39 @@ export const attentionBenchShapeSetId = (): string =>
   fnv1a64Hex(canonicalJson(ATTENTION_BENCH_SHAPES));
 
 /**
- * The case-set version a sweep of `set` records (`caseSet`): {@link sweepCaseSetId} for the
- * table-deriving sets, and the same hash over its own case table for an evaluation set
- * (`sweepCasesFor` in cases.ts), so that its record never claims the sweep's case set.
+ * The case table of `set` (`sweepCasesFor` in cases.ts) restricted to the families of `families`
+ * (the whole table when absent).
  */
-export const candidateSetCaseSetId = (set: CandidateSet): string =>
-  caseSetId(sweepCasesFor(set), PROFILE_GEMM_ROWS_BOUNDS);
+const setCases = (
+  set: CandidateSet,
+  families: readonly GeometryProfileFamily[] | undefined,
+): readonly SweepCase[] => {
+  const cases = sweepCasesFor(set);
+  return families === undefined
+    ? cases
+    : cases.filter((sweepCase) => families.includes(sweepOpFamily(sweepCase.op)));
+};
 
 /**
- * The fingerprint of the ratio baseline a sweep of `set` records (`defaultKernels`): the default
- * table over the case table of `set` ({@link geometryProfileKernelsId} of the default table for the
- * table-deriving sets).
+ * The case-set versions a sweep of `set` records (`caseSets`) for the families of `families`
+ * (default: every family of the set's case table) that the set's case table has: each hashed over
+ * the set's own case table restricted to the family — {@link sweepCaseSetIds} for the
+ * table-deriving sets, and an evaluation set's own cases otherwise, so that its record never claims
+ * the sweep's case set.
  */
-export const candidateSetDefaultKernelsId = (set: CandidateSet): string =>
-  profileKernelsId(DEFAULT_GEOMETRY_PROFILE, sweepCasesFor(set), casePlan);
+export const candidateSetCaseSetIds = (
+  set: CandidateSet,
+  families?: readonly GeometryProfileFamily[],
+): GeometryProfileFamilyIds => caseSetIds(setCases(set, families));
+
+/**
+ * The fingerprints of the ratio baseline a sweep of `set` records (`defaultKernels`) for the
+ * families of `families` (default: every family of the set's case table) that the set's case table
+ * has: the default table over the set's case table restricted to each family
+ * ({@link sweepDefaultKernelsIds} for the table-deriving sets).
+ */
+export const candidateSetDefaultKernelsIds = (
+  set: CandidateSet,
+  families?: readonly GeometryProfileFamily[],
+): GeometryProfileFamilyIds =>
+  profileKernelsIds(DEFAULT_GEOMETRY_PROFILE, setCases(set, families), casePlan);

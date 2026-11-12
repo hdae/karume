@@ -29,9 +29,11 @@ import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
  * NOTE: it does not live in geometry-profile.ts because of a cycle: that module imports this list as a
  * value (the default argument of selection) — with an import order that evaluates this module first,
  * that module's `const` is not yet initialised and access throws. Every geometry is a flat object of
- * numbers only, so a one-level copy is already deep. `provenance` nests one level in `adapter`,
- * `userAgent` (an array of strings) and `attentionBench`, and `attentionOnline` is one flat object,
- * so those are copied and frozen too.
+ * numbers only, so a one-level copy is already deep. `provenance` nests `adapter`, `families` (one
+ * entry per op family, each with its `userAgent` — an array of strings) and `attentionBench`, and
+ * `attentionOnline` is one flat object, so those are copied and frozen too. The families are walked
+ * by the entries the table has (not by `GEOMETRY_PROFILE_FAMILIES`, which this module must not read
+ * at evaluation — see that constant).
  */
 const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
   const geometry = <T extends GemmGeometry | I8a8Geometry>(value: T): T =>
@@ -65,14 +67,23 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
       ? {}
       : {
           provenance: Object.freeze({
-            ...profile.provenance,
-            ...(profile.provenance.userAgent === undefined
-              ? {}
-              : { userAgent: Object.freeze([...profile.provenance.userAgent]) }),
+            adapter: Object.freeze({ ...profile.provenance.adapter }),
+            families: Object.freeze(
+              Object.fromEntries(
+                Object.entries(profile.provenance.families).map(([family, entry]) => [
+                  family,
+                  Object.freeze({
+                    ...entry,
+                    ...(entry.userAgent === undefined
+                      ? {}
+                      : { userAgent: Object.freeze([...entry.userAgent]) }),
+                  }),
+                ]),
+              ),
+            ),
             ...(profile.provenance.attentionBench === undefined
               ? {}
               : { attentionBench: Object.freeze({ ...profile.provenance.attentionBench }) }),
-            adapter: Object.freeze({ ...profile.provenance.adapter }),
           }),
         }),
   });

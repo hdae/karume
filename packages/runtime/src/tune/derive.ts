@@ -1,6 +1,6 @@
 /**
  * Pure functions that derive one adapter's **geometry profile** (`GeometryProfile` in the runtime's
- * `src/kernels/geometry-profile.ts`) from sweep records (`karume-geometry-sweep/2` — `report.ts`)
+ * `src/kernels/geometry-profile.ts`) from sweep records (`karume-geometry-sweep/3` — `report.ts`)
  * (perf-ledger K-71). Independent of Deno's API — {@link deriveGeometryProfile} of the public
  * surface `@karume/runtime/tune` (user applications), the CLI (`main.ts profile` of
  * `tools/geometry-sweep`) and the browser page (the profile tab of `tools/gpu-lab`) — both tools
@@ -59,11 +59,13 @@
  * ({@link roundingBound}). A case whose default row's e exceeds it has every observation dropped.
  * Dropped observations stay in the verdict lines with their E.
  *
- * The record's matching keys (ADR 0117 decision 8): if a record carries `caseSet` (the case-set
- * version), `defaultKernels` (the kernel fingerprint of the default table) and `candidateKernels`
- * (the kernel fingerprint of the measured candidates), a record that differs from the current
- * runtime's values is rejected (old records without the fields are accepted as before). `aborted`,
- * `startedAt` and `cases[].elapsedMs` are not read.
+ * The record's matching keys (ADR 0117 decision 8, per op family since its addendum 2026-11-12):
+ * for every op family the record has a row of, `caseSets[family]` (the family's case-set version)
+ * and `defaultKernels[family]` (the default table's kernel fingerprint over the family's cases) must
+ * be present and equal the current runtime's; a missing or differing key rejects the record. If the
+ * record carries `candidateKernels` (the kernel fingerprint of the measured candidates), a value
+ * that differs from the current runtime's is rejected. `aborted`, `startedAt` and
+ * `cases[].elapsedMs` are not read.
  *
  * Class boundaries: linear / matmul / bmm by buckets of the row count M (the boundaries are
  * `PROFILE_GEMM_ROWS_BOUNDS` of the sweep's shape table = ≤ 16 / 17–32 / 33–64 / 65–128 / 129–256 /
@@ -80,6 +82,15 @@
  * `onlineTiled`, {@link deriveAttentionOnline}): adopted only when every shape of every record is
  * identical and every shape of the bench's set gains at least `minSpeedup` per node, kernel and
  * producer together, from each arm's minimum pass. Without records the field is absent.
+ *
+ * ## Carrying families over from an existing table (`base` — ADR 0117 addendum 2026-11-12)
+ *
+ * An op family is **covered** when some record has a row of one of its cases. A covered family is
+ * derived from the records as above. With `base`, a family the records do not cover takes `base`'s
+ * fields of that family and its provenance entry verbatim, after its `kernels` and `caseSet` are
+ * checked against the current runtime ({@link carryOver}); the attention-bench block and
+ * `attentionOnline` likewise when no attention-bench records are given. Without `base` (or for a
+ * family `base` has no entry for), an uncovered family keeps the default and gets no entry.
  */
 import {
   defaultGemmGeometry,
@@ -97,7 +108,10 @@ import {
 import {
   assertGeometryProfile,
   DEFAULT_GEOMETRY_PROFILE,
+  GEOMETRY_PROFILE_FAMILIES,
   type GeometryProfile,
+  type GeometryProfileFamily,
+  type GeometryProfileFamilyProvenance,
 } from "../kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import {
@@ -106,14 +120,16 @@ import {
 } from "../runtime/recipe-builders/attention.ts";
 import { ATTENTION_BENCH_FORMAT, onlineDispatchRows } from "./attention-bench.ts";
 import { ATTENTION_BENCH_SHAPES, type AttentionBenchShape } from "./attention-shapes.ts";
-import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
+import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS, type SweepOp } from "./cases.ts";
+import { familiesOf, familyEntries, profileSlotFamily } from "./families.ts";
 import {
+  attentionBenchKernelsId,
   attentionBenchShapeSetId,
-  geometryProfileKernelsId,
+  familyCaseSetId,
+  familyKernelsId,
   INFINITY_JSON,
   KernelsIdError,
   sweepCandidateKernelsId,
-  sweepCaseSetId,
 } from "./fingerprint.ts";
 import {
   CANDIDATE_SETS,
@@ -223,8 +239,8 @@ export type SweepSource = {
   readonly candidateSet: CandidateSet;
   /**
    * The browser that ran the sweep (the record's `userAgent` turned into a string by
-   * {@link userAgentText} — material for the table's `provenance.userAgent`). undefined for records
-   * without the field.
+   * {@link userAgentText} — material for the `userAgent` of the table's family entries). undefined
+   * for records without the field.
    */
   readonly userAgent?: string;
   /**
@@ -390,7 +406,7 @@ const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
 };
 
 /**
- * The string of the record's `userAgent` (the spelling of the table's `provenance.userAgent`). A
+ * The string of the record's `userAgent` (the spelling of a family entry's `userAgent`). A
  * browser record keeps the `navigator.userAgent` string as is; a record of the Deno CLI (removed in
  * 0.15) (`{ deno: <version> }`) becomes `Deno/<version>` — the same spelling as Deno's
  * `navigator.userAgent`, so that an application can compare it with its current
@@ -408,29 +424,68 @@ const userAgentText = (value: unknown, where: string): string | undefined => {
 };
 
 /**
- * Compares a matching key written into the record (`caseSet` / `defaultKernels`) with the current
- * runtime's value (ADR 0117 decision 8). Records without the field (from before it) are not
- * matched. The current value is derived only when the field is present (the fingerprint takes about
- * 13 ms).
+ * Compares the record's `candidateKernels` with the current runtime's value (ADR 0117 decision 8).
+ * A record without the field is not matched on it. The current value is derived only when the field
+ * is present.
  */
-const assertRecordedKey = (
+const assertRecordedCandidateKernels = (
   record: Record<string, unknown>,
-  key: "caseSet" | "defaultKernels" | "candidateKernels",
   current: () => string,
-  meaning: string,
   where: string,
 ): void => {
-  const recorded = record[key];
+  const recorded = record.candidateKernels;
   if (recorded === undefined) return;
   if (typeof recorded !== "string") {
-    throw new Error(`${where}: ${key} is not a string (${JSON.stringify(recorded)})`);
+    throw new Error(`${where}: candidateKernels is not a string (${JSON.stringify(recorded)})`);
   }
   const now = current();
   if (recorded !== now) {
     throw new Error(
-      `${where}: ${key} ${recorded} differs from the current runtime's ${now} (the record's ${meaning} differs from the current runtime, so no table is built` +
+      `${where}: candidateKernels ${recorded} differs from the current runtime's ${now} (the record's kernels of the measured candidates differ from the current runtime, so no table is built` +
         " from it — sweep again with the current runtime)",
     );
+  }
+};
+
+/**
+ * Compares a per-family matching key of the record (`caseSets` / `defaultKernels` — ADR 0117
+ * decision 8, per op family since its addendum 2026-11-12) with the current runtime's value, for
+ * every family the record has a row of. A missing key throws: the record cannot be matched for that
+ * family (only a `/3` writer writes the keys, and it writes one per family it planned). Families
+ * without rows are not read. The current value is derived only for the families checked.
+ */
+const assertRecordedFamilyKeys = (
+  record: Record<string, unknown>,
+  key: "caseSets" | "defaultKernels",
+  families: readonly GeometryProfileFamily[],
+  current: (family: GeometryProfileFamily) => string,
+  meaning: string,
+  where: string,
+): void => {
+  if (families.length === 0) return;
+  const recorded = record[key];
+  if (!isRecord(recorded)) {
+    throw new Error(
+      `${where}: ${key} is not an object (${JSON.stringify(recorded)} — the record has rows of ${families.join(", ")} and cannot be matched against the current runtime; sweep again with the current runtime)`,
+    );
+  }
+  for (const family of families) {
+    const value = recorded[family];
+    if (value === undefined) {
+      throw new Error(
+        `${where}: ${key}.${family} is missing (the record has rows of family ${family} but no ${meaning} for it, so it cannot be matched against the current runtime — sweep this family again with the current runtime)`,
+      );
+    }
+    if (typeof value !== "string") {
+      throw new Error(`${where}: ${key}.${family} is not a string (${JSON.stringify(value)})`);
+    }
+    const now = current(family);
+    if (value !== now) {
+      throw new Error(
+        `${where}: ${key}.${family} ${value} differs from the current runtime's ${now} (the record's ${meaning} of family ${family} differs from the current runtime, so no table is built` +
+          " from it — sweep this family again with the current runtime)",
+      );
+    }
   }
 };
 
@@ -509,18 +564,6 @@ export const parseSweepReport = (
       `${where}: gpuTiming.quantized is true but the unit is ${unit} (quantization is judged only for ns)`,
     );
   }
-  // MUST: only records whose ratio baseline (the default table's kernels) and case set equal the
-  // current runtime's are accepted (ADR 0117 decision 8 — the same reason as checking the default
-  // row (ADR 0115 decision 4): with a different baseline, "faster than the default" does not hold
-  // on the current runtime)
-  assertRecordedKey(parsed, "caseSet", sweepCaseSetId, "case set", where);
-  assertRecordedKey(
-    parsed,
-    "defaultKernels",
-    () => geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
-    "kernels of the default table used as the ratio baseline",
-    where,
-  );
   const userAgent = userAgentText(parsed.userAgent, where);
   // The default re-measurements (cases[]) are read by the material check — a record without them
   // would mean "no case has a re-measurement", so fail instead of silently dropping every case
@@ -539,16 +582,29 @@ export const parseSweepReport = (
   }
   if (!Array.isArray(parsed.rows)) throw new Error(`${where}: rows is not an array`);
   const rows = parsed.rows.map((row, index) => parseRow(row, `${where} rows[${index}]`));
+  // MUST: only records whose ratio baseline (the default table's kernels) and case set equal the
+  // current runtime's, for every op family the record has a row of, are accepted (ADR 0117 decision
+  // 8, per family since its addendum 2026-11-12 — the same reason as checking the default row (ADR
+  // 0115 decision 4): with a different baseline, "faster than the default" does not hold on the
+  // current runtime)
+  const families = familiesOf(rows);
+  assertRecordedFamilyKeys(parsed, "caseSets", families, familyCaseSetId, "case set", where);
+  assertRecordedFamilyKeys(
+    parsed,
+    "defaultKernels",
+    families,
+    (family) => familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family),
+    "kernels of the default table used as the ratio baseline",
+    where,
+  );
   // MUST: only records whose measured candidates' kernels equal the current runtime's are accepted
   // (ADR 0117 decision 8) — defaultKernels protects only the ratio baseline, and the speed and
   // output match of an adopted candidate come from the candidate's own kernels. The current value
   // is derived from the record's rows (sweepCandidateKernelsId in fingerprint.ts — the same single
   // function as the writer)
-  assertRecordedKey(
+  assertRecordedCandidateKernels(
     parsed,
-    "candidateKernels",
     () => sweepCandidateKernelsId(rows, recordedDp4a(parsed, where)),
-    "kernels of the measured candidates",
     where,
   );
   const defaults = new Map<string, number>();
@@ -1912,6 +1968,187 @@ export type GeneratedProfile = GeometryProfile & {
   readonly provenance: NonNullable<GeometryProfile["provenance"]>;
 };
 
+/** The attention-bench block of a table's provenance. */
+type AttentionBenchProvenance = NonNullable<GeneratedProfile["provenance"]["attentionBench"]>;
+
+/**
+ * What a derivation carries over from an existing table (`DeriveGeometryProfileOptions.base`,
+ * checked by {@link carryOver} — ADR 0117 addendum 2026-11-12): the families the records do not
+ * cover whose provenance entry in the base is current, with that entry, and the base's
+ * attention-bench block when no attention-bench records are given (its `attentionOnline` goes with
+ * it).
+ */
+export type CarryOver = {
+  readonly base: GeneratedProfile;
+  readonly families: readonly {
+    readonly family: GeometryProfileFamily;
+    readonly entry: GeometryProfileFamilyProvenance;
+  }[];
+  readonly attentionBench?: AttentionBenchProvenance;
+};
+
+/** The fields of `family` in `table` replaced by `base`'s, verbatim. */
+const withBaseFields = (
+  table: GeometryProfile,
+  base: GeometryProfile,
+  family: GeometryProfileFamily,
+): GeometryProfile => {
+  switch (family) {
+    case "gemm":
+      return { ...table, gemmRows: base.gemmRows };
+    case "attention":
+      return { ...table, attention: base.attention };
+    case "conv2d":
+      return { ...table, conv2d: base.conv2d };
+    case "i8a8-linear":
+      return { ...table, i8a8: { ...table.i8a8, linear: base.i8a8.linear } };
+    case "i8a8-attention":
+      return {
+        ...table,
+        i8a8: {
+          ...table.i8a8,
+          attentionQk: base.i8a8.attentionQk,
+          attentionPv: base.i8a8.attentionPv,
+        },
+      };
+    case "i8a8-conv3d":
+      return { ...table, i8a8: { ...table.i8a8, conv3d: base.i8a8.conv3d } };
+  }
+};
+
+/**
+ * The checks of `base` against the records and the current runtime, and what it carries over
+ * ({@link CarryOver} — ADR 0117 addendum 2026-11-12). Every refusal throws (fail loudly):
+ *
+ * - `base` has `provenance`, and its adapter equals the records' four fields.
+ * - Every family the records cover has every case of the current case set in the records: carrying
+ *   over promises that nothing else moves, so a half-swept family must not silently put its unswept
+ *   fields back to the default.
+ * - Per family the records do not cover: with an entry, its `kernels` and `caseSet` equal the
+ *   current runtime's for `base`'s fields (a stale entry: sweep this family again) — the family is
+ *   carried; without an entry, `base`'s fields of the family build the default table's kernels (a
+ *   table edited by hand otherwise) — the family keeps the default.
+ * - Without attention-bench records: `base`'s block is carried after its `shapes` (and `kernels`,
+ *   when present) are checked against the current runtime (stale: measure the attention bench
+ *   again); a `base` carrying `attentionOnline` without the block or without its `kernels` is
+ *   refused.
+ */
+const carryOver = (
+  base: GeometryProfile,
+  sources: readonly SweepSource[],
+  benchGiven: boolean,
+): CarryOver => {
+  const where = `Base table '${base.id}'`;
+  const { provenance } = base;
+  if (provenance === undefined) {
+    throw new Error(
+      `${where} has no provenance (nothing to carry over — a base is a table derived from sweeps)`,
+    );
+  }
+  const adapter = sources[0].adapter;
+  for (const field of ["vendor", "architecture", "device", "description"] as const) {
+    if (provenance.adapter[field] !== adapter[field]) {
+      throw new Error(
+        `${where}: adapter ${field} ${JSON.stringify(provenance.adapter[field])} differs from the sweep records' ${JSON.stringify(adapter[field])} (a table is carried over only onto records of the same adapter)`,
+      );
+    }
+  }
+  const rows = sources.flatMap((source) => source.rows);
+  const covered = familiesOf(rows);
+  const swept = new Set(rows.map((row) => row.caseId));
+  for (const family of covered) {
+    const missing = familyEntries(SWEEP_CASES, family).filter(({ id }) => !swept.has(id));
+    if (missing.length > 0) {
+      throw new Error(
+        `The records cover family ${family} only in part (no row of ${missing.map(({ id }) => id).join(", ")}): with a base, a covered family is derived from every case of its current case set, ` +
+          "or its unswept fields would silently go back to the default — sweep the missing cases",
+      );
+    }
+  }
+  const families: CarryOver["families"][number][] = [];
+  for (const family of GEOMETRY_PROFILE_FAMILIES) {
+    if (covered.includes(family)) continue;
+    const at = `${where}, family ${family}`;
+    let kernels: string;
+    try {
+      kernels = familyKernelsId(base, family);
+    } catch (cause) {
+      if (cause instanceof KernelsIdError) {
+        throw new Error(
+          `${at}: its geometry cannot build the kernels of the sweep shapes (${cause.message}) — sweep this family again`,
+          { cause },
+        );
+      }
+      throw cause;
+    }
+    const entry = provenance.families[family];
+    if (entry === undefined) {
+      const defaults = familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family);
+      if (kernels !== defaults) {
+        throw new Error(
+          `${where} has no provenance for family ${family} but its fields are not the default (fingerprint ${kernels} / the default table's ${defaults} — a table edited by hand; sweep this family)`,
+        );
+      }
+      continue;
+    }
+    if (entry.kernels !== kernels) {
+      throw new Error(
+        `${at} is stale: its kernel fingerprint ${entry.kernels} differs from the current runtime's ${kernels} — sweep this family again`,
+      );
+    }
+    const caseSet = familyCaseSetId(family);
+    if (entry.caseSet !== caseSet) {
+      throw new Error(
+        `${at} is stale: its case-set version ${entry.caseSet} differs from the current runtime's ${caseSet} — sweep this family again`,
+      );
+    }
+    families.push({ family, entry });
+  }
+  const generated = { ...base, provenance };
+  if (benchGiven) return { base: generated, families };
+  const attentionBench = carriedAttentionBench(generated);
+  return attentionBench === undefined
+    ? { base: generated, families }
+    : { base: generated, families, attentionBench };
+};
+
+/**
+ * The attention-bench block `base` carries over when no attention-bench records are given (checked
+ * against the current runtime — {@link carryOver}); undefined when `base` has none.
+ */
+const carriedAttentionBench = (base: GeneratedProfile): AttentionBenchProvenance | undefined => {
+  const where = `Base table '${base.id}'`;
+  const block = base.provenance.attentionBench;
+  if (block === undefined) {
+    if (base.attentionOnline !== undefined) {
+      throw new Error(
+        `${where} carries attentionOnline but no provenance.attentionBench (nothing to check the form against) — measure the attention bench again`,
+      );
+    }
+    return undefined;
+  }
+  if (base.attentionOnline !== undefined && block.kernels === undefined) {
+    throw new Error(
+      `${where} carries attentionOnline but its provenance.attentionBench has no kernels — measure the attention bench again`,
+    );
+  }
+  const shapes = attentionBenchShapeSetId();
+  if (block.shapes !== shapes) {
+    throw new Error(
+      `${where}: the attention bench's shape set ${block.shapes} differs from the current runtime's ${shapes} — measure the attention bench again`,
+    );
+  }
+  if (block.kernels !== undefined) {
+    const kernels = attentionBenchKernelsId();
+    if (block.kernels !== kernels) {
+      throw new Error(
+        `${where}: the online attention's kernel fingerprint ${block.kernels} differs from the current runtime's ${kernels} — measure the attention bench again`,
+      );
+    }
+  }
+  return block;
+};
+
 const slotGeometry = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): Geometry => {
   const verdict = verdicts.find((entry) => entry.slot === slot);
   if (verdict === undefined) throw new Error(`${slot} has no verdict`);
@@ -1935,31 +2172,36 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * generated TS registered in the repository (`tools/geometry-sweep/render.ts`, removed in 0.15) and
  * for the values injected into `acquireGpu({ geometryProfile })`).
  *
- * MUST: only this function writes `provenance` (ADR 0117 decision 4). The sweeps' paths / sha256 /
- * dates / candidate sets are joined with `", "` in the order given, userAgent is a deduplicated
- * array ({@link distinctUserAgents}), adapter is the four fields as they are ({@link deriveProfile}
- * has checked that every record agrees), and the kernel fingerprint and the case-set version are
- * derived with the current runtime (matching, `geometryProfileMismatch`, re-derives them with the
- * same functions).
+ * MUST: only this function writes `provenance` (ADR 0117 decision 4, per op family since its
+ * addendum 2026-11-12). Per family the records cover (some record has a row of it), the entry joins
+ * the paths / sha256 / dates / candidate sets of **the records with a row of the family** with
+ * `", "` in the order given, its userAgent is their deduplicated array ({@link distinctUserAgents}),
+ * and its kernel fingerprint and case-set version are derived with the current runtime over the
+ * family's cases (matching, `geometryProfileMismatch`, re-derives them with the same functions). A
+ * family carried over (`carry` — {@link carryOver}) takes the base's fields and entry verbatim. Any
+ * other family gets no entry, and its fields must build the default table's kernels (they are the
+ * default by the verdicts — a failure here means the verdicts were not the derivation's). adapter
+ * is the four fields as they are ({@link deriveProfile} has checked that every record agrees).
  * With attention-bench records (`attention` — ADR 0117 addendum 2026-11-12), the table carries
  * `attentionOnline: { keyWords: "tiled" }` exactly when their verdict adopted it, and
- * `provenance.attentionBench` (the records' paths / sha256 / dates joined with `", "` and the id of the
- * bench's shape set) whatever the verdict. The kernel fingerprint is derived after the field is set,
- * so a table that chose it fingerprints the online attention's kernels too.
+ * `provenance.attentionBench` (the records' paths / sha256 / dates joined with `", "`, the id of the
+ * bench's shape set, and the online attention's kernel fingerprint exactly when the field is
+ * adopted) whatever the verdict. Without them, a carried block brings the base's `attentionOnline`
+ * (if any) with it.
  */
 export const buildGeometryProfile = (
   spec: { readonly id: string } & ProfileTarget,
   sources: readonly SweepSource[],
   verdicts: readonly SlotVerdict[],
   attention?: AttentionBenchDerivation,
+  carry?: CarryOver,
 ): GeneratedProfile => {
   // MUST: the last rule covers every row count (the same condition as the runtime's check — fail
   // early at generation). profileRowsSegments checks the trailing Infinity and the refinement of
   // the default
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
   if (sources.length === 0) throw new Error("No sweep records (provenance cannot be written)");
-  const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
-  const table: GeometryProfile = {
+  const derived: GeometryProfile = {
     id: spec.id,
     ...(spec.optIn === true
       ? {}
@@ -1988,37 +2230,90 @@ export const buildGeometryProfile = (
       attentionPv: i8a8Slot(verdicts, "i8a8.attentionPv"),
       conv3d: i8a8Slot(verdicts, "i8a8.conv3d"),
     },
-    ...(attention?.verdict.outcome.kind === "adopted"
-      ? { attentionOnline: { keyWords: "tiled" } }
-      : {}),
   };
+  const fields =
+    carry === undefined
+      ? derived
+      : carry.families.reduce(
+          (table, { family }) => withBaseFields(table, carry.base, family),
+          derived,
+        );
+  const adopted = attention?.verdict.outcome.kind === "adopted";
+  const attentionOnline =
+    attention === undefined
+      ? carry?.attentionBench === undefined
+        ? undefined
+        : carry.base.attentionOnline
+      : adopted
+        ? ({ keyWords: "tiled" } as const)
+        : undefined;
+  const table: GeometryProfile = {
+    ...fields,
+    ...(attentionOnline === undefined ? {} : { attentionOnline }),
+  };
+  const attentionBench: AttentionBenchProvenance | undefined =
+    attention === undefined
+      ? carry?.attentionBench
+      : {
+          records: attention.sources.map((source) => source.path).join(", "),
+          sha256: attention.sources.map((source) => source.sha256).join(", "),
+          date: attention.sources.map((source) => source.date).join(", "),
+          shapes: attentionBenchShapeSetId(),
+          ...(adopted ? { kernels: generatedAttentionKernelsId(table) } : {}),
+        };
   const { vendor, architecture, device, description } = sources[0].adapter;
-  const userAgent = distinctUserAgents(sources);
   const generated: GeneratedProfile = {
     ...table,
     provenance: {
-      sweep: joined((source) => source.path),
-      sha256: joined((source) => source.sha256),
-      date: joined((source) => source.date),
-      candidateSet: joined((source) => source.candidateSet),
-      ...(userAgent === undefined ? {} : { userAgent }),
       adapter: { vendor, architecture, device, description },
-      kernels: generatedKernelsId(table),
-      caseSet: sweepCaseSetId(),
-      ...(attention === undefined
-        ? {}
-        : {
-            attentionBench: {
-              records: attention.sources.map((source) => source.path).join(", "),
-              sha256: attention.sources.map((source) => source.sha256).join(", "),
-              date: attention.sources.map((source) => source.date).join(", "),
-              shapes: attentionBenchShapeSetId(),
-            },
-          }),
+      families: generatedFamilies(table, sources, carry),
+      ...(attentionBench === undefined ? {} : { attentionBench }),
     },
   };
   assertGeneratedProfile(generated);
   return generated;
+};
+
+/**
+ * The generated table's `provenance.families` ({@link buildGeometryProfile}): per family in the
+ * fixed order, an entry from the records with a row of it, the carried entry, or none (then the
+ * family's fields must build the default table's kernels).
+ */
+const generatedFamilies = (
+  table: GeometryProfile,
+  sources: readonly SweepSource[],
+  carry: CarryOver | undefined,
+): GeneratedProfile["provenance"]["families"] => {
+  const families: { [Family in GeometryProfileFamily]?: GeometryProfileFamilyProvenance } = {};
+  for (const family of GEOMETRY_PROFILE_FAMILIES) {
+    const kernels = generatedKernelsId(table, family);
+    const swept = sources.filter((source) => familyEntries(source.rows, family).length > 0);
+    if (swept.length > 0) {
+      const joined = (pick: (source: SweepSource) => string): string => swept.map(pick).join(", ");
+      const userAgent = distinctUserAgents(swept);
+      families[family] = {
+        sweep: joined((source) => source.path),
+        sha256: joined((source) => source.sha256),
+        date: joined((source) => source.date),
+        candidateSet: joined((source) => source.candidateSet),
+        ...(userAgent === undefined ? {} : { userAgent }),
+        kernels,
+        caseSet: familyCaseSetId(family),
+      };
+      continue;
+    }
+    const carried = carry?.families.find((entry) => entry.family === family);
+    if (carried !== undefined) {
+      families[family] = carried.entry;
+      continue;
+    }
+    if (kernels !== familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family)) {
+      throw new Error(
+        `Generated table '${table.id}': family ${family} has no row in the records and nothing carried over, but its fields are not the default (no provenance could stand for them)`,
+      );
+    }
+  }
+  return families;
 };
 
 /**
@@ -2045,12 +2340,12 @@ const assertGeneratedProfile = (profile: GeneratedProfile): void => {
 };
 
 /**
- * The table's `provenance.userAgent` (ADR 0117 addendum 2026-10-02): the records' `userAgent` as an
+ * A family entry's `userAgent` (ADR 0117 addendum 2026-10-02): the records' `userAgent` as an
  * array deduplicated in order of appearance (one element if they are all the same — directly
  * comparable with the current browser). It is not joined with `", "` like the other fields because
  * a browser's userAgent itself contains `", "` (`(KHTML, like Gecko)`), and joined values could not
  * be split again. If any record lacks `userAgent`, nothing is written (a browser of only some
- * records is not kept as the value of the whole table).
+ * records is not kept as the value of the whole entry).
  */
 const distinctUserAgents = (sources: readonly SweepSource[]): string[] | undefined => {
   const agents: string[] = [];
@@ -2062,19 +2357,34 @@ const distinctUserAgents = (sources: readonly SweepSource[]): string[] | undefin
 };
 
 /**
- * The kernel fingerprint of the generated table. When the table's geometry cannot build the kernels
- * of the sweep shapes (a codegen check, the dispatch-count limit — the fingerprint builds with the
- * 65535 every device guarantees, so a geometry that passed the sweep on a device with a larger
- * limit can still fail), throws naming the reason (case, field, geometry) instead of building the
- * table — no table that would always mismatch at matching gets stored.
+ * The kernel fingerprint of one family of the generated table. When the table's geometry cannot
+ * build the kernels of the family's sweep shapes (a codegen check, the dispatch-count limit — the
+ * fingerprint builds with the 65535 every device guarantees, so a geometry that passed the sweep on
+ * a device with a larger limit can still fail), throws naming the reason (case, field, geometry)
+ * instead of building the table — no table that would always mismatch at matching gets stored.
  */
-const generatedKernelsId = (table: GeometryProfile): string => {
+const generatedKernelsId = (table: GeometryProfile, family: GeometryProfileFamily): string => {
   try {
-    return geometryProfileKernelsId(table);
+    return familyKernelsId(table, family);
   } catch (cause) {
     if (cause instanceof KernelsIdError) {
       throw new Error(
-        `Cannot derive provenance.kernels (the kernel fingerprint) of generated table '${table.id}' — ${cause.message}`,
+        `Cannot derive provenance.families.${family}.kernels (the kernel fingerprint) of generated table '${table.id}' — ${cause.message}`,
+        { cause },
+      );
+    }
+    throw cause;
+  }
+};
+
+/** The online attention's kernel fingerprint of a generated table that adopted the field (as {@link generatedKernelsId}). */
+const generatedAttentionKernelsId = (table: GeometryProfile): string => {
+  try {
+    return attentionBenchKernelsId();
+  } catch (cause) {
+    if (cause instanceof KernelsIdError) {
+      throw new Error(
+        `Cannot derive provenance.attentionBench.kernels (the online attention's kernel fingerprint) of generated table '${table.id}' — ${cause.message}`,
         { cause },
       );
     }
@@ -2090,18 +2400,21 @@ const generatedKernelsId = (table: GeometryProfile): string => {
  */
 export type GeometrySweepInput = {
   readonly report: unknown;
-  /** The record's name (a file path or the like — goes into `provenance.sweep`). */
+  /**
+   * The record's name (a file path or the like — goes into `provenance.families[family].sweep` of
+   * every family it has a row of).
+   */
   readonly path: string;
   /**
-   * The SHA-256 of the record's bytes (hex — goes into `provenance.sha256`. Passing two records
-   * with the same value fails).
+   * The SHA-256 of the record's bytes (hex — goes into `provenance.families[family].sha256`.
+   * Passing two records with the same value fails).
    */
   readonly sha256: string;
 };
 
 /**
  * Options of {@link deriveGeometryProfile} (the table's id, the adapter the table applies to, the
- * adoption threshold).
+ * adoption threshold, the attention-bench records and the table to carry families over from).
  */
 export type DeriveGeometryProfileOptions = ProfileTarget & {
   readonly id: string;
@@ -2115,9 +2428,21 @@ export type DeriveGeometryProfileOptions = ProfileTarget & {
    * The second input (ADR 0117 addendum 2026-11-12): attention-bench records
    * (`runAttentionRouteBench` with `onlineTiled` and `quantization`, GPU timestamps) of the
    * same adapter as the sweeps, which together cover `ATTENTION_BENCH_SHAPES`. They decide
-   * `attentionOnline` ({@link deriveAttentionOnline}); omitted, the table has no such field.
+   * `attentionOnline` ({@link deriveAttentionOnline}); omitted, the table has no such field (unless
+   * `base` carries it over).
    */
   readonly attentionBench?: readonly AttentionBenchInput[];
+  /**
+   * An existing table of the same adapter (ADR 0117 addendum 2026-11-12) whose op families the
+   * records do not cover are carried over: its fields of such a family and its provenance entry are
+   * copied verbatim once the entry's `kernels` and `caseSet` are checked against the current runtime
+   * (a stale entry throws — sweep that family again), and, without `attentionBench`, its
+   * `attentionOnline` and attention-bench block likewise (stale: measure the attention bench again).
+   * The records must cover every family they have a row of completely (every case of its current
+   * case set). `base` needs `provenance` with the records' adapter. `id` and `match` still come from
+   * these options.
+   */
+  readonly base?: GeometryProfile;
 };
 
 /** The return value of {@link deriveGeometryProfile} (the table and the verdict lines). */
@@ -2130,17 +2455,44 @@ export type GeometryProfileDerivation = {
   /**
    * Per-field verdicts, rejected geometries and why, and the cases dropped from the ratio material
    * ({@link verdictLines} — the same lines as the header comment of the repository's generated
-   * files and the CLI's standard output (the CLI was removed in 0.15)).
+   * files and the CLI's standard output (the CLI was removed in 0.15)); a field carried over from
+   * `base` gets one line naming the base table and its sweeps instead.
    */
   readonly verdicts: readonly string[];
 };
+
+/**
+ * The verdict lines of a derivation: {@link verdictLines} per field, except one line per field of a
+ * family carried over from the base, naming the base table and the sweeps of its entry.
+ */
+const derivationVerdictLines = (
+  verdicts: readonly SlotVerdict[],
+  carry: CarryOver | undefined,
+): string[] =>
+  verdicts.flatMap((verdict) => {
+    const family = profileSlotFamily(verdict.slot);
+    const carried = carry?.families.find((entry) => entry.family === family);
+    return carry === undefined || carried === undefined
+      ? verdictLines([verdict])
+      : [
+          `- ${verdict.slot} (${verdict.scope}): carried over from table '${carry.base.id}' (family ${family}, sweeps ${carried.entry.sweep})`,
+        ];
+  });
+
+/** The verdict line of `attentionOnline` carried over from the base with its attention-bench block. */
+const carriedAttentionLine = (base: GeometryProfile, block: AttentionBenchProvenance): string =>
+  `- attentionOnline (the online attention's Vᵀ key axis): carried over from table '${base.id}' (${
+    base.attentionOnline === undefined ? "the form N gives" : "tiled"
+  }; attention-bench records ${block.records})`;
 
 /**
  * Builds a table from one or more sweep records (the generator of the public surface
  * `@karume/runtime/tune` — ADR 0117 decision 2). The rules are {@link deriveProfile} (ADR 0115
  * decision 4, ADR 0116, ADR 0117 decision 3) and the table's values come from the single
  * {@link buildGeometryProfile}, so they equal the tables the CLI and the GPU lab (both removed in
- * 0.15) built. Input that fails a check throws with the reason (fail loudly).
+ * 0.15) built. With `base`, the families the records do not cover are carried over from it
+ * ({@link carryOver} — ADR 0117 addendum 2026-11-12). Input that fails a check throws with the reason
+ * (fail loudly).
  */
 export const deriveGeometryProfile = (
   reports: readonly GeometrySweepInput[],
@@ -2155,18 +2507,25 @@ export const deriveGeometryProfile = (
   const sources = reports.map(({ report, path, sha256 }) =>
     parseSweepReport(report, { path, sha256 }),
   );
-  const { attentionBench, ...target } = options;
+  const { attentionBench, base, ...target } = options;
   const spec = { ...target, minSpeedup };
   const verdicts = deriveProfile(sources, spec);
+  const carry =
+    base === undefined ? undefined : carryOver(base, sources, attentionBench !== undefined);
   const attention =
     attentionBench === undefined
       ? undefined
       : deriveAttentionBench(attentionBench, sources[0].adapter, minSpeedup);
+  const carriedBench = carry?.attentionBench;
   return {
-    profile: buildGeometryProfile(spec, sources, verdicts, attention),
+    profile: buildGeometryProfile(spec, sources, verdicts, attention, carry),
     verdicts: [
-      ...verdictLines(verdicts),
-      ...(attention === undefined ? [] : attentionOnlineVerdictLines(attention.verdict)),
+      ...derivationVerdictLines(verdicts, carry),
+      ...(attention !== undefined
+        ? attentionOnlineVerdictLines(attention.verdict)
+        : carry === undefined || carriedBench === undefined
+          ? []
+          : [carriedAttentionLine(carry.base, carriedBench)]),
     ],
   };
 };

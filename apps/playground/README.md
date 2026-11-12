@@ -1238,7 +1238,7 @@ This page measures the GEMM tile geometries on the browser's GPU and writes the 
 profile is derived from. It is the successor of the sweep tab of the removed `tools/gpu-lab`. It
 calls `runGeometrySweep` of `@karume/runtime/tune` **once per case**, idles between cases (cooling:
 one case takes minutes, and heat moves the default geometry's re-measurement, which the derivation
-checks), and merges the per-case records into **one sweep record** (`karume-geometry-sweep/2`, the
+checks), and merges the per-case records into **one sweep record** (`karume-geometry-sweep/3`, the
 format `deriveGeometryProfile` reads, with no playground envelope). Its first job is perf-ledger
 V-15: the conv3d-only sweep on the RTX 5070 Ti, from which the derivation chooses `i8a8.conv3d` of
 the `nvidia-blackwell` table. Its second is perf-ledger K-85: the evaluation set `k85` of the vec4
@@ -1246,10 +1246,10 @@ skeleton of the i8a8 linear on the Wan2.2 DiT linears ([The K-85 preset](#the-k-
 third is perf-ledger K-88: the evaluation set `k88` of the f32 GEMM skeleton forms and the conv2d
 counter decode ([The K-88 preset](#the-k-88-preset)).
 
-**Serve the page from the checkout that will derive the table.** The record carries `caseSet`,
-`defaultKernels` and `candidateKernels`, the fingerprints of the case set and of the kernels of the
-runtime the page was built from, and `deriveGeometryProfile` rejects a record whose values differ
-from the deriving code. Do not edit `packages/runtime` of the serving checkout until the record has
+**Serve the page from the checkout that will derive the table.** The record carries `caseSets` and
+`defaultKernels` (one value per op family of its cases) and `candidateKernels`, the fingerprints of
+the case set and of the kernels of the runtime the page was built from, and `deriveGeometryProfile`
+rejects a record whose values differ from the deriving code. Do not edit `packages/runtime` of the serving checkout until the record has
 been derived: the dev server reloads edited modules.
 
 **The GPU.** `runGeometrySweep` acquires a dedicated device per call and destroys it before it
@@ -1274,8 +1274,8 @@ instead:
 
 The status card shows the adapter as the browser reports it (read without creating a device), whether
 it lists `timestamp-query` (without it the sweep falls back to the wall clock, and the derivation
-rejects a wall-clock record), cross-origin isolation, the case set id the chosen candidate set's records carry
-(`sweepCaseSetId(<candidate set>)` — an evaluation set's own) and, once the first case has started, dp4a and the timing unit. While running it shows the elapsed
+rejects a wall-clock record), cross-origin isolation, the case set ids per op family the chosen candidate set's records carry
+(`sweepCaseSetIds(<candidate set>)` — an evaluation set's own) and, once the first case has started, dp4a and the timing unit. While running it shows the elapsed
 seconds, the cases done, and the current case with its row count and the sweep's status line (the
 geometry measured now), or the seconds left of the idle wait. A device loss stops the run after
 that case.
@@ -1298,18 +1298,21 @@ merges the per-case records into one record in the shape one call over the plann
 | `startedAt`, `date` | the first case's start, the last case's end |
 | `settings.cases` | every planned case (also the ones a cancel left out) |
 | `candidateKernels` | recomputed over the merged rows with `sweepCandidateKernelsId` (each per-case record fingerprints only its own rows) |
+| `caseSets`, `defaultKernels` | the union of the per-case records' (each holds the op family of its own case); two records that give one family different values fail the merge |
 | `aborted` | Cancel stopped a case midway or the run between cases (a run stopped by a device loss or an error has fewer cases than planned and `aborted: false`) |
 | `gpuTiming.quantized` | true when any case's rounds looked quantized: the larger rounding bound, never the smaller. One call judges all the rows together (true only when every round looks quantized); the runtime does not export that judgement, and taking the larger bound only drops more observations from the ratio data |
 | `deviceLost` | the first loss, or `null` |
-| everything else | the per-case records' own values, which must agree (format, case set, default kernels, browser, adapter, dp4a, timing, the other settings) — the merge fails loudly otherwise |
+| everything else | the per-case records' own values, which must agree (format, browser, adapter, dp4a, timing, the other settings) — the merge fails loudly otherwise |
 
 The result card shows the file name, the sha256 of the bytes saved and a summary, then runs
 `deriveGeometryProfile` on those very bytes and shows its verdicts and the derived table
 (`geometryProfileJson`). The table is named `<vendor>-<architecture>` and matches the adapter's
 vendor and architecture (an adapter without a vendor gets an injection-only table). It is derived
-from this record alone: the repository's derivation adds the adapter's earlier records, so only the
-fields this record has cases for (for V-15, `i8a8.conv3d`) say what that derivation will choose. A
-record the derivation rejects shows the reason instead.
+from this record alone, with no base table (the page has no `base` input): the op families this
+record has no case of come out at the default with no provenance entry, so only the fields this record
+has cases for (for V-15, `i8a8.conv3d`) say what a derivation with the adapter's table as `base` will
+choose — that derivation carries the other families over from the table. A record the derivation
+rejects shows the reason instead.
 
 ### The K-85 preset
 

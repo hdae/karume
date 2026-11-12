@@ -25,7 +25,12 @@ import { describe, it } from "vite-plus/test";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
 import { SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
 import { deriveProfile, parseSweepReport } from "../src/tune/derive.ts";
-import { sweepCandidateKernelsId } from "../src/tune/fingerprint.ts";
+import { familiesOf } from "../src/tune/families.ts";
+import {
+  candidateSetCaseSetIds,
+  candidateSetDefaultKernelsIds,
+  sweepCandidateKernelsId,
+} from "../src/tune/fingerprint.ts";
 import {
   casePlan,
   createSweepContext,
@@ -270,6 +275,8 @@ const recordOf = (
 ): Record<string, unknown> => ({
   format: REPORT_FORMAT,
   date: "2026-10-02T00:00:00.000Z",
+  caseSets: candidateSetCaseSetIds(SETTINGS.candidateSet, familiesOf(rows)),
+  defaultKernels: candidateSetDefaultKernelsIds(SETTINGS.candidateSet, familiesOf(rows)),
   adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
   candidateKernels: sweepCandidateKernelsId(rows, dp4a),
   dp4a,

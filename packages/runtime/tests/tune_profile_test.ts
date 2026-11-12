@@ -9,11 +9,13 @@
 // tools/geometry-sweep/profile_test.ts were removed in 0.15 (ADR 0127 decision 5).
 //
 // Also pinned here: (3) the injected table built by buildGeometryProfile (its fields, match,
-// provenance, the kernels fingerprint it cannot derive, description and opt-in tables), and (4) the
-// record-field gates of deriveGeometryProfile (ADR 0117 decision 8: caseSet / defaultKernels /
-// candidateKernels; provenance.userAgent from the records, ADR 0117 addendum 2026-10-02; the
-// injection gate on the returned table). The JSON round trip of a table is pinned by
-// tune_profile_json_test.ts and the matching by tune_mismatch_test.ts.
+// provenance per op family, the kernels fingerprint it cannot derive, description and opt-in
+// tables), and (4) the record-field gates of deriveGeometryProfile (ADR 0117 decision 8, per op
+// family since its addendum 2026-11-12: caseSets / defaultKernels / candidateKernels; a family
+// entry's userAgent from the records, ADR 0117 addendum 2026-10-02; the injection gate on the
+// returned table). The JSON round trip of a table is pinned by tune_profile_json_test.ts, the
+// matching by tune_mismatch_test.ts and the carry-over from a base table by
+// tune_profile_base_test.ts.
 
 import {
   assert,
@@ -23,7 +25,12 @@ import {
   assertThrows,
 } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { deriveGeometryProfile, type GeometrySweepInput, sweepCaseSetId } from "../tune.ts";
+import {
+  deriveGeometryProfile,
+  type GeometrySweepInput,
+  sweepCaseSetIds,
+  sweepDefaultKernelsIds,
+} from "../tune.ts";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 import {
   assertGeometryProfile,
@@ -51,7 +58,7 @@ import {
 import {
   candidateKernelsId,
   type CasePlanner,
-  geometryProfileKernelsId,
+  familyKernelsId,
   KernelsIdError,
   sweepCandidateKernelsId,
 } from "../src/tune/fingerprint.ts";
@@ -1433,24 +1440,34 @@ describe("buildGeometryProfile", () => {
     assertEquals(profile.i8a8, DEFAULT_GEOMETRY_PROFILE.i8a8);
   });
 
-  it("match and provenance follow the spec and the order of the sweeps; the adapter keeps its 4 fields as is; the fingerprint and the case-set version are the current runtime's values (without architecture, match has vendor only)", () => {
+  it("match and provenance follow the spec and the order of the sweeps; the adapter keeps its 4 fields as is; the family the records have rows of gets the fingerprint and the case-set version of the current runtime, the others no entry (without architecture, match has vendor only)", () => {
     const verdicts = deriveProfile(SOURCES, SPEC);
     const profile = buildGeometryProfile(SPEC, SOURCES, verdicts);
     assertEquals(profile.id, "test-gpu");
     assertEquals(profile.match, { vendor: "apple", architecture: "metal-3" });
     const { provenance: _provenance, ...table } = profile;
+    const caseSet = sweepCaseSetIds().gemm;
+    assert(caseSet !== undefined);
+    // The records hold one linear case: the gemm family alone has an entry
     assertEquals(profile.provenance, {
-      sweep: "a.json, b.json",
-      sha256: "sha-a, sha-b",
-      date: "2026-09-29T00:00:00.000Z, 2026-09-29T00:00:00.000Z",
-      candidateSet: "full, full",
       adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
-      kernels: geometryProfileKernelsId(table),
-      caseSet: sweepCaseSetId(),
+      families: {
+        gemm: {
+          sweep: "a.json, b.json",
+          sha256: "sha-a, sha-b",
+          date: "2026-09-29T00:00:00.000Z, 2026-09-29T00:00:00.000Z",
+          candidateSet: "full, full",
+          kernels: familyKernelsId(table, "gemm"),
+          caseSet,
+        },
+      },
     });
     // The fingerprint is derived from the table's geometries (it differs from the default table's —
     // the adopted geometries are in it)
-    assert(profile.provenance.kernels !== geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE));
+    assert(
+      profile.provenance.families.gemm?.kernels !==
+        familyKernelsId(DEFAULT_GEOMETRY_PROFILE, "gemm"),
+    );
     const { architecture: _, ...vendorOnly } = SPEC;
     assertEquals(buildGeometryProfile(vendorOnly, SOURCES, verdicts).match, { vendor: "apple" });
   });
@@ -1469,7 +1486,7 @@ describe("buildGeometryProfile: a table whose fingerprint cannot be derived", ()
     const error = assertThrows(() => buildGeometryProfile(SPEC, SOURCES, verdicts), Error);
     assertInstanceOf(error.cause, KernelsIdError);
     for (const part of [
-      "Cannot derive provenance.kernels (the kernel fingerprint) of generated table 'test-gpu'",
+      "Cannot derive provenance.families.conv2d.kernels (the kernel fingerprint) of generated table 'test-gpu'",
       "conv2d-c96-512x512",
       "conv2d.rows32",
       JSON.stringify(narrow),
@@ -1545,46 +1562,88 @@ const RECORD_OPTIONS = { id: "test-gpu", vendor: "apple", architecture: "metal-3
 const derive = (...records: readonly Record<string, unknown>[]) =>
   deriveGeometryProfile(inputs(...records), RECORD_OPTIONS);
 
-describe("the record's matching keys caseSet / defaultKernels (ADR 0117 decision 8)", () => {
+describe("the record's matching keys caseSets / defaultKernels (ADR 0117 decision 8, per op family since its addendum 2026-11-12)", () => {
   const current = {
-    caseSet: sweepCaseSetId(),
-    defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+    caseSets: sweepCaseSetIds(),
+    defaultKernels: sweepDefaultKernelsIds(),
   };
 
-  it("accepts a record with the current runtime's values, giving the same table as a record without the fields (a record from before them)", () => {
+  it("accepts a record with the current runtime's values", () => {
     const withKeys = derive(record(current));
-    const without = derive(record());
-    assertEquals(withKeys.profile, without.profile);
-    assertEquals(withKeys.verdicts, without.verdicts);
     assertEquals(withKeys.profile.gemmRows.at(-1)?.geometry, A);
   });
 
-  for (const key of ["caseSet", "defaultKernels"] as const) {
-    it(`stops, naming both the record's value and the current value, when ${key} differs from the current runtime's value`, () => {
+  for (const key of ["caseSets", "defaultKernels"] as const) {
+    it(`stops, naming the family, the record's value and the current value, when ${key} of a family it has rows of differs from the current runtime's value`, () => {
       const stale = "0123456789abcdef";
       const error = assertThrows(
-        () => derive(record({ ...current, [key]: stale })),
+        () => derive(record({ ...current, [key]: { ...current[key], gemm: stale } })),
         Error,
-        `sweep-0.json: ${key} ${stale} differs from the current runtime's ${current[key]}`,
+        `sweep-0.json: ${key}.gemm ${stale} differs from the current runtime's ${current[key].gemm ?? ""}`,
       );
-      assertStringIncludes(error.message, "sweep again");
+      assertStringIncludes(error.message, "sweep this family again");
     });
 
-    it(`stops when ${key} is not a string (the matching is not skipped silently)`, () => {
+    it(`stops when ${key} or a family's entry of it is not of its type (the matching is not skipped silently)`, () => {
       assertThrows(
-        () => derive(record({ ...current, [key]: 1 })),
+        () => derive(record({ ...current, [key]: { ...current[key], gemm: 1 } })),
         Error,
-        `sweep-0.json: ${key} is not a string (1)`,
+        `sweep-0.json: ${key}.gemm is not a string (1)`,
+      );
+      assertThrows(
+        () => derive(record({ ...current, [key]: current[key].gemm })),
+        Error,
+        `sweep-0.json: ${key} is not an object`,
+      );
+    });
+
+    it(`refuses a record without ${key} of a family it has rows of, naming the family, and does not read the entries of families without rows`, () => {
+      const { gemm: _gemm, ...others } = current[key];
+      const error = assertThrows(
+        () => derive(record({ ...current, [key]: others })),
+        Error,
+        `sweep-0.json: ${key}.gemm is missing`,
+      );
+      assertStringIncludes(error.message, "sweep this family again");
+      assertThrows(
+        () => derive(record({ ...current, [key]: undefined })),
+        Error,
+        `sweep-0.json: ${key} is not an object`,
+      );
+      // The record has rows of gemm only: the other families' entries are neither required nor
+      // matched
+      const gemmOnly = { gemm: current[key].gemm };
+      assertEquals(
+        derive(record({ ...current, [key]: gemmOnly })).profile,
+        derive(record(current)).profile,
+      );
+      assertEquals(
+        derive(record({ ...current, [key]: { ...current[key], conv2d: "stale" } })).profile,
+        derive(record(current)).profile,
       );
     });
   }
 
   it("stops, naming the record, even when only the second record differs", () => {
     assertThrows(
-      () => derive(record(current), record({ ...current, caseSet: "ffffffffffffffff" })),
+      () =>
+        derive(
+          record(current),
+          record({ ...current, caseSets: { ...current.caseSets, gemm: "ffffffffffffffff" } }),
+        ),
       Error,
-      "sweep-1.json: caseSet ffffffffffffffff",
+      "sweep-1.json: caseSets.gemm ffffffffffffffff",
     );
+  });
+
+  it("reads format karume-geometry-sweep/3 only (a /2 record with the single caseSet is refused)", () => {
+    const older = {
+      ...record(),
+      format: "karume-geometry-sweep/2",
+      caseSet: current.caseSets.gemm,
+      caseSets: undefined,
+    };
+    assertThrows(() => derive(older), Error, "sweep-0.json: format is not karume-geometry-sweep/3");
   });
 
   it("aborted, startedAt and cases[].elapsedMs do not affect the generator's verdicts", () => {
@@ -1603,17 +1662,19 @@ describe("the record's matching keys caseSet / defaultKernels (ADR 0117 decision
   });
 });
 
-describe("the table's provenance.userAgent (ADR 0117 addendum 2026-10-02)", () => {
+describe("a family entry's userAgent (ADR 0117 addendum 2026-10-02 — provenance.families.gemm.userAgent of the linear records)", () => {
   it("copies the record's userAgent string as is into a one-element array", () => {
-    assertEquals(derive(record({ userAgent: CHROME_154 })).profile.provenance?.userAgent, [
-      CHROME_154,
-    ]);
+    assertEquals(
+      derive(record({ userAgent: CHROME_154 })).profile.provenance?.families.gemm?.userAgent,
+      [CHROME_154],
+    );
   });
 
   it("turns a Deno CLI record ({ deno }) into Deno/<version>, the same spelling as Deno's navigator.userAgent", () => {
-    assertEquals(derive(record({ userAgent: { deno: "2.9.6" } })).profile.provenance?.userAgent, [
-      "Deno/2.9.6",
-    ]);
+    assertEquals(
+      derive(record({ userAgent: { deno: "2.9.6" } })).profile.provenance?.families.gemm?.userAgent,
+      ["Deno/2.9.6"],
+    );
   });
 
   it("writes a single element when every record has the same value (directly comparable with the current browser)", () => {
@@ -1621,7 +1682,7 @@ describe("the table's provenance.userAgent (ADR 0117 addendum 2026-10-02)", () =
       record({ userAgent: CHROME_154 }),
       record({ userAgent: CHROME_154 }),
     );
-    assertEquals(profile.provenance?.userAgent, [CHROME_154]);
+    assertEquals(profile.provenance?.families.gemm?.userAgent, [CHROME_154]);
   });
 
   it("when records differ, lists the values in order of appearance without duplicates (a value containing ', ' stays a separate element)", () => {
@@ -1631,12 +1692,18 @@ describe("the table's provenance.userAgent (ADR 0117 addendum 2026-10-02)", () =
       record({ userAgent: CHROME_153 }),
       record({ userAgent: { deno: "2.9.6" } }),
     );
-    assertEquals(profile.provenance?.userAgent, [CHROME_153, CHROME_154, "Deno/2.9.6"]);
+    assertEquals(profile.provenance?.families.gemm?.userAgent, [
+      CHROME_153,
+      CHROME_154,
+      "Deno/2.9.6",
+    ]);
   });
 
   it("writes no field at all when a record without userAgent is mixed in (the browser of some records does not become the table's value)", () => {
     const { profile } = derive(record({ userAgent: CHROME_154 }), record());
-    assertEquals(profile.provenance !== undefined && "userAgent" in profile.provenance, false);
+    const gemm = profile.provenance?.families.gemm;
+    assert(gemm !== undefined, "the gemm family has no entry");
+    assertEquals("userAgent" in gemm, false);
   });
 
   it("stops, naming the record, on a userAgent that is neither a string nor { deno: string }", () => {
@@ -1699,7 +1766,7 @@ describe("the record's matching key candidateKernels (the kernels of the measure
       () =>
         derive(
           measuredRecord({
-            defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+            defaultKernels: sweepDefaultKernelsIds(),
             candidateKernels: stale,
           }),
         ),

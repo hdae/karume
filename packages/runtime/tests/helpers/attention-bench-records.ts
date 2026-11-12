@@ -18,7 +18,7 @@ import {
   type AttentionBenchShape,
 } from "../../src/tune/attention-shapes.ts";
 import { gemmCandidate } from "../../src/tune/geometries.ts";
-import { DEFAULT, FAST } from "./sweep-records.ts";
+import { DEFAULT, FAST, recordKeys } from "./sweep-records.ts";
 import { REPORT_FORMAT } from "../../src/tune/report.ts";
 
 /** The adapter of the sweep fixtures (sweep-records.ts `sweep`), which the bench records must share. */
@@ -220,6 +220,7 @@ export const benchRecord = (
 export const sweepRecord = (): Record<string, unknown> => ({
   format: REPORT_FORMAT,
   date: "2026-09-29T00:00:00.000Z",
+  ...recordKeys(),
   adapter: BENCH_ADAPTER,
   settings: { candidateSet: "full" },
   gpuTiming: { feature: true, unit: "ns", quantized: false },

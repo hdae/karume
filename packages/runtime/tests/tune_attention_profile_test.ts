@@ -6,16 +6,13 @@
 // What this pins: ① the rule — identical on every shape of every record and ×1.05 on every shape,
 // the gain being kernel + producer per node from each arm's minimum pass, records combined per shape
 // by geometric mean; ② what is written — the field only when adopted, `provenance.attentionBench`
-// whenever records are given, a kernel fingerprint that covers the field; ③ the refusals — a record
-// that cannot stand for the current runtime on this adapter throws instead of being skipped.
+// whenever records are given, its `kernels` (the online attention's kernel fingerprint) exactly when
+// the field is adopted, no family fingerprint moved by the field; ③ the refusals — a record that
+// cannot stand for the current runtime on this adapter throws instead of being skipped; ④ matching —
+// a table carrying the field needs the block with a current `kernels` (ADR 0117 addendum 2026-11-12,
+// per op family).
 
-import {
-  assert,
-  assertEquals,
-  assertNotEquals,
-  assertStringIncludes,
-  assertThrows,
-} from "@std/assert";
+import { assert, assertEquals, assertMatch, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
   deriveGeometryProfile,
@@ -25,7 +22,11 @@ import {
 } from "../tune.ts";
 import type { GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { ATTENTION_BENCH_SHAPES } from "../src/tune/attention-shapes.ts";
-import { attentionBenchShapeSetId, geometryProfileKernelsId } from "../src/tune/fingerprint.ts";
+import {
+  attentionBenchKernelsId,
+  attentionBenchShapeSetId,
+  geometryProfileKernelsIds,
+} from "../src/tune/fingerprint.ts";
 import {
   BENCH_ADAPTER,
   benchRecord,
@@ -71,6 +72,7 @@ describe("deriveGeometryProfile: attention-bench records decide attentionOnline"
       sha256: "sha-run1.json, sha-run2.json",
       date: "2026-11-12T00:00:00.000Z, 2026-11-12T01:00:00.000Z",
       shapes: attentionBenchShapeSetId(),
+      kernels: attentionBenchKernelsId(),
     });
     const [head] = attentionLines(verdicts);
     assertStringIncludes(head, `${ATTENTION_BENCH_SHAPES.length} shapes, 2 records`);
@@ -81,14 +83,27 @@ describe("deriveGeometryProfile: attention-bench records decide attentionOnline"
     assertEquals(profile.i8a8, without.i8a8);
   });
 
-  it("fingerprints the online attention's kernels in a table that chose the field, and the table matches the current runtime", () => {
+  it("fingerprints the online attention's kernels in provenance.attentionBench.kernels of a table that chose the field, moves no family fingerprint, and the table matches the current runtime", () => {
     const { profile } = derive([bench("run1.json")]);
     const without = deriveGeometryProfile(SWEEPS, TARGET).profile;
-    assertEquals(profile.provenance?.kernels, geometryProfileKernelsId(profile));
-    assertNotEquals(profile.provenance?.kernels, without.provenance?.kernels);
-    // The field alone moves the fingerprint (id and provenance are not read)
+    assertEquals(profile.provenance?.attentionBench?.kernels, attentionBenchKernelsId());
+    assertMatch(attentionBenchKernelsId(), /^[0-9a-f]{16}$/);
+    // The family fingerprints do not contain the field's kernels (the field is not a family)
+    assertEquals(profile.provenance?.families, without.provenance?.families);
     const { attentionOnline: _chosen, ...stripped } = profile;
-    assertEquals(geometryProfileKernelsId(stripped), without.provenance?.kernels);
+    assertEquals(geometryProfileKernelsIds(stripped), geometryProfileKernelsIds(profile));
+    assertEquals(geometryProfileMismatch(profile, BENCH_ADAPTER), undefined);
+  });
+
+  it("writes no attentionBench.kernels when the field is not adopted (the key is present exactly when the table carries attentionOnline)", () => {
+    const short = bench("short.json", {
+      timings: { [SECOND.id]: { kernel: { a: 104_000_000, b: 100_000_000 } } },
+    });
+    const { profile } = derive([short]);
+    assertEquals(profile.attentionOnline, undefined);
+    const block = profile.provenance?.attentionBench;
+    assert(block !== undefined, "the bench is recorded whatever the verdict");
+    assertEquals("kernels" in block, false);
     assertEquals(geometryProfileMismatch(profile, BENCH_ADAPTER), undefined);
   });
 
@@ -265,6 +280,44 @@ describe("a table derived with attention-bench records through storage and match
     const { profile } = derive([bench("run1.json")]);
     const parsed = parseGeometryProfileJson(geometryProfileJson(profile));
     assertEquals(parsed, profile);
+  });
+
+  it("mismatches a table carrying attentionOnline without the block, without its kernels, or with kernels other than the current runtime's", () => {
+    const { profile } = derive([bench("run1.json")]);
+    const provenance = profile.provenance;
+    assert(provenance?.attentionBench !== undefined);
+    const { attentionBench, ...withoutBlock } = provenance;
+    assertStringIncludes(
+      geometryProfileMismatch({ ...profile, provenance: withoutBlock }, BENCH_ADAPTER) ?? "",
+      "it carries attentionOnline but no provenance.attentionBench",
+    );
+    const { kernels: _kernels, ...withoutKernels } = attentionBench;
+    assertStringIncludes(
+      geometryProfileMismatch(
+        { ...profile, provenance: { ...provenance, attentionBench: withoutKernels } },
+        BENCH_ADAPTER,
+      ) ?? "",
+      "provenance.attentionBench has no kernels",
+    );
+    const stale: GeometryProfile = {
+      ...profile,
+      provenance: {
+        ...provenance,
+        attentionBench: { ...attentionBench, kernels: "0000000000000000" },
+      },
+    };
+    const message = geometryProfileMismatch(stale, BENCH_ADAPTER) ?? "";
+    assertStringIncludes(
+      message,
+      "the online attention's kernel fingerprint differs (table 0000000000000000",
+    );
+    assertStringIncludes(message, `current runtime ${attentionBenchKernelsId()}`);
+    // A table without the field and without the block hashes nothing for it and matches
+    const { attentionOnline: _field, ...plain } = profile;
+    assertEquals(
+      geometryProfileMismatch({ ...plain, provenance: withoutBlock }, BENCH_ADAPTER),
+      undefined,
+    );
   });
 
   it("mismatches when its bench shape set is not the current runtime's", () => {

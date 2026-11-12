@@ -18,7 +18,7 @@ import {
   type GeometrySweepTimingUnit,
   geometryProfileJson,
   geometrySweepCases,
-  sweepCaseSetId,
+  sweepCaseSetIds,
 } from "@karume/runtime/tune";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -192,9 +192,15 @@ export const GeometrySweepPage = () => {
   const queue = useGpuQueue();
   const [form, setForm] = useState<SweepForm>(() => initialForm(geometrySweepCases()));
   // The case table of the form's candidate set (the evaluation sets k85 / k88 have their own), and
-  // the case-set version a sweep of that set records
+  // the case-set version per op family a sweep of that set records
   const cases = useMemo(() => geometrySweepCases(form.candidateSet), [form.candidateSet]);
-  const caseSetId = useMemo(() => sweepCaseSetId(form.candidateSet), [form.candidateSet]);
+  const caseSetIds = useMemo(
+    () =>
+      Object.entries(sweepCaseSetIds(form.candidateSet))
+        .map(([family, id]) => `${family} ${id ?? ""}`)
+        .join(", "),
+    [form.candidateSet],
+  );
   const ops = sweepOps(cases);
   const [probe, setProbe] = useState<AdapterProbe>({ kind: "probing" });
   const [run, setRun] = useState<RunState>({ kind: "idle" });
@@ -331,7 +337,7 @@ export const GeometrySweepPage = () => {
         <AlertTitle>Serve this page from the checkout that will derive the table</AlertTitle>
         <AlertDescription>
           The record carries the case set and the kernel fingerprints of the runtime this page was
-          built from (caseSet, defaultKernels, candidateKernels), and deriveGeometryProfile rejects
+          built from (caseSets, defaultKernels, candidateKernels), and deriveGeometryProfile rejects
           a record whose values differ from the deriving code. Do not edit packages/runtime of the
           serving checkout until the record has been derived: the dev server reloads edited modules.
           Keep this tab in front and nothing else on the GPU while it runs.
@@ -535,7 +541,7 @@ export const GeometrySweepPage = () => {
                   probe.kind === "ready" ? (probe.timestamps ? "listed" : "not listed") : "—",
                 ],
                 ["Cross-origin isolated", String(globalThis.crossOriginIsolated)],
-                ["Case set id", caseSetId],
+                ["Case set ids", caseSetIds],
                 ...(live?.dp4a === undefined
                   ? []
                   : ([

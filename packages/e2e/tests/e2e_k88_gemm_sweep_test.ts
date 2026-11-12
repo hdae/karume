@@ -264,7 +264,7 @@ describe.skipIf(skipReason !== undefined)("the K-88 GEMM sweep on this machine (
       caseIds: cases.map(({ id }) => id),
       rounds: ROUNDS,
       idleSeconds: IDLE_SECONDS,
-      caseSet: first.caseSet,
+      caseSets: first.caseSets,
       table: { id: tableId },
       ratios: "table time ÷ variant time of the same geometry (> 1: the variant is faster)",
       sums,

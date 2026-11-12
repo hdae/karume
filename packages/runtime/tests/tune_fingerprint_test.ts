@@ -1,19 +1,21 @@
-// The matching keys of a saved table (src/tune/fingerprint.ts — ADR 0117 decision 4): the kernel
-// fingerprint (geometryProfileKernelsId) and the case-set version (sweepCaseSetId). The public
-// function (sweepCaseSetId) comes from the public surface (../tune.ts); the fingerprint, which is not
-// public (geometryProfileMismatch derives it internally — ADR 0117 decision 2), and the injectable
-// bodies and tool functions come from src. No GPU.
+// The matching keys of a saved table (src/tune/fingerprint.ts — ADR 0117 decision 4, per op family
+// since its addendum 2026-11-12): the kernel fingerprints (geometryProfileKernelsIds) and the
+// case-set versions (sweepCaseSetIds). The public function (sweepCaseSetIds) comes from the public
+// surface (../tune.ts); the fingerprint, which is not public (geometryProfileMismatch derives it
+// internally — ADR 0117 decision 2), and the injectable bodies and tool functions come from src. No
+// GPU.
 //
-// Pinned: (1) the hash is FNV-1a 64 bit itself; (2) the fingerprint moves with each of the table's
+// Pinned: (1) the hash is FNV-1a 64 bit itself; (2) the fingerprints move with each of the table's
 // 15 fields, the default geometry, both dp4a variants and a dispatch's params and workgroups, and not
 // with id / match / provenance or the WGSL's comments and whitespace (ADR 0117 addendum 2026-10-19);
 // (3) a dispatch that cannot be built throws naming the case, the field and the geometry; (4) the
-// embedded tables' provenance equals the current runtime's values (a change to a GEMM kernel or to
-// the cases re-bakes the tables); (5) the case-set version moves with added or removed cases, the
-// dispatch-deciding fields and the bounds, and not with informational fields or key order; (6) a
-// record's `candidateKernels` (the fingerprint of the measured candidates) moves on a runtime that
-// changed only a candidate's WGSL (`defaultKernels` does not), skips failed rows and builds with the
-// record's dp4a variant.
+// embedded tables' provenance equals the current runtime's values per family (a change to a GEMM
+// kernel or to a family's cases re-bakes that family's entries); (5) the case-set version moves with
+// added or removed cases, the dispatch-deciding fields and the bounds, and not with informational
+// fields or key order; (6) a record's `candidateKernels` (the fingerprint of the measured
+// candidates) moves on a runtime that changed only a candidate's WGSL (`defaultKernels` does not),
+// skips failed rows and builds with the record's dp4a variant; (7) each family's keys move with that
+// family's fields, kernels, cases and bounds only.
 
 import {
   assert,
@@ -25,7 +27,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-import { sweepCaseSetId } from "../tune.ts";
+import { sweepCaseSetIds } from "../tune.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
@@ -38,19 +40,27 @@ import {
 } from "../src/tune/cases.ts";
 import {
   candidateKernelsId,
-  candidateSetCaseSetId,
-  candidateSetDefaultKernelsId,
+  candidateSetCaseSetIds,
+  candidateSetDefaultKernelsIds,
   canonicalJson,
   type CasePlanner,
   caseSetId,
+  caseSetIds,
+  familyCaseSetId,
+  familyKernelsId,
   fnv1a64Hex,
-  geometryProfileKernelsId,
+  geometryProfileKernelsIds,
   KernelsIdError,
   type MeasuredRow,
   profileKernelsId,
+  profileKernelsIds,
   sweepCandidateKernelsId,
   wgslTokenText,
 } from "../src/tune/fingerprint.ts";
+import {
+  GEOMETRY_PROFILE_FAMILIES,
+  type GeometryProfileFamily,
+} from "../src/kernels/geometry-profile.ts";
 import {
   conv2dCandidate,
   gemmCandidate,
@@ -162,45 +172,50 @@ const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, Geometr
   return variants;
 };
 
-describe("geometryProfileKernelsId: the kernel fingerprint", () => {
-  it("gives the same value (16 hex digits) for the same table, independent of copies and field order", () => {
-    const value = geometryProfileKernelsId(APPLE_METAL_3);
-    assertMatch(value, /^[0-9a-f]{16}$/);
-    assertEquals(geometryProfileKernelsId(APPLE_METAL_3), value);
-    assertEquals(geometryProfileKernelsId(structuredClone(APPLE_METAL_3)), value);
+describe("geometryProfileKernelsIds: the kernel fingerprints per op family", () => {
+  it("gives the same values (16 hex digits, one per family) for the same table, independent of copies and field order", () => {
+    const value = geometryProfileKernelsIds(APPLE_METAL_3);
+    assertEquals(Object.keys(value), [...GEOMETRY_PROFILE_FAMILIES]);
+    for (const id of Object.values(value)) assertMatch(id, /^[0-9a-f]{16}$/);
+    assertEquals(geometryProfileKernelsIds(APPLE_METAL_3), value);
+    assertEquals(geometryProfileKernelsIds(structuredClone(APPLE_METAL_3)), value);
     const { i8a8, conv2d, attention, gemmRows, id } = APPLE_METAL_3;
-    assertEquals(geometryProfileKernelsId({ i8a8, conv2d, attention, gemmRows, id }), value);
+    assertEquals(geometryProfileKernelsIds({ i8a8, conv2d, attention, gemmRows, id }), value);
   });
 
   it("id, match and provenance do not affect the fingerprint (only the table's geometry does)", () => {
-    const value = geometryProfileKernelsId(APPLE_METAL_3);
+    const value = geometryProfileKernelsIds(APPLE_METAL_3);
     const { match: _match, provenance: _provenance, ...bare } = APPLE_METAL_3;
-    assertEquals(geometryProfileKernelsId({ ...bare, id: "other" }), value);
+    assertEquals(geometryProfileKernelsIds({ ...bare, id: "other" }), value);
     assertEquals(
-      geometryProfileKernelsId({
+      geometryProfileKernelsIds({
         ...APPLE_METAL_3,
         match: { vendor: "intel" },
         provenance: {
-          sweep: "x.json",
-          sha256: "0",
-          date: "2000-01-01",
-          candidateSet: "quick",
           adapter: { vendor: "x", architecture: "y", device: "z", description: "w" },
-          kernels: "0000000000000000",
-          caseSet: "0000000000000000",
+          families: {
+            gemm: {
+              sweep: "x.json",
+              sha256: "0",
+              date: "2000-01-01",
+              candidateSet: "quick",
+              kernels: "0000000000000000",
+              caseSet: "0000000000000000",
+            },
+          },
         },
       }),
       value,
     );
   });
 
-  it("changing any one of the table's 15 fields changes the value, and the 15 values differ from each other", () => {
-    const base = geometryProfileKernelsId(APPLE_METAL_3);
+  it("changing any one of the table's 15 fields changes the values, and the 15 values differ from each other", () => {
+    const base = canonicalJson(geometryProfileKernelsIds(APPLE_METAL_3));
     const variants = singleFieldVariants(APPLE_METAL_3);
     assertEquals(variants.size, 15);
     const values = new Set([base]);
     for (const [field, profile] of variants) {
-      const value = geometryProfileKernelsId(profile);
+      const value = canonicalJson(geometryProfileKernelsIds(profile));
       assertNotEquals(value, base, field);
       values.add(value);
     }
@@ -208,11 +223,13 @@ describe("geometryProfileKernelsId: the kernel fingerprint", () => {
   });
 
   it("a table with different gemmRows segment boundaries (the default's 3 segments) is also derivable, assigning geometries to cases with the runtime's selection function", () => {
-    const value = geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE);
-    assertMatch(value, /^[0-9a-f]{16}$/);
-    // The default table is not the hash of an empty input (both the table's and the default's
-    // kernels are counted)
-    assertNotEquals(value, fnv1a64Hex(""));
+    const value = geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE);
+    for (const id of Object.values(value)) {
+      assertMatch(id, /^[0-9a-f]{16}$/);
+      // The default table is not the hash of an empty input (both the table's and the default's
+      // kernels are counted)
+      assertNotEquals(id, fnv1a64Hex(""));
+    }
     // The 3-segment default table and a table refining the same geometries into 7 segments assign
     // the same geometry to every case, so they have the same fingerprint
     const refined: GeometryProfile = {
@@ -225,12 +242,15 @@ describe("geometryProfileKernelsId: the kernel fingerprint", () => {
         ).geometry,
       })),
     };
-    assertEquals(geometryProfileKernelsId(refined), value);
+    assertEquals(geometryProfileKernelsIds(refined), value);
   });
 
   it("changes when the default geometry (the case plan's defaultCandidate) changes — the kernels the ratios are based on are in the fingerprint too", () => {
     const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
-    assertEquals(base, geometryProfileKernelsId(APPLE_METAL_3));
+    assertEquals(
+      profileKernelsIds(APPLE_METAL_3, SWEEP_CASES, casePlan),
+      geometryProfileKernelsIds(APPLE_METAL_3),
+    );
     // A case plan with the default geometry of one case replaced by another candidate (mimics a
     // runtime whose default geometry changed)
     const target = SWEEP_CASES.find((sweepCase) => sweepCase.op === "linear");
@@ -374,7 +394,7 @@ describe("geometryProfileKernelsId: the kernel fingerprint", () => {
       id: "narrow",
       conv2d: { ...APPLE_METAL_3.conv2d, rows32: { regM: 1, regN: 4, wgX: 1, wgY: 16 } },
     };
-    const error = assertThrows(() => geometryProfileKernelsId(narrow), KernelsIdError);
+    const error = assertThrows(() => geometryProfileKernelsIds(narrow), KernelsIdError);
     assertInstanceOf(error.cause, DispatchLimitError);
     for (const part of [
       "conv2d-c96-512x512",
@@ -388,7 +408,7 @@ describe("geometryProfileKernelsId: the kernel fingerprint", () => {
   });
 
   it("reads neither the GPU nor the clock (the same value in an environment where navigator.gpu, performance.now and Date.now throw)", () => {
-    const expected = geometryProfileKernelsId(APPLE_METAL_3);
+    const expected = geometryProfileKernelsIds(APPLE_METAL_3);
     const forbidden = (what: string) => (): never => {
       throw new Error(`read ${what}`);
     };
@@ -402,7 +422,7 @@ describe("geometryProfileKernelsId: the kernel fingerprint", () => {
     performance.now = forbidden("performance.now");
     Date.now = forbidden("Date.now");
     try {
-      assertEquals(geometryProfileKernelsId(APPLE_METAL_3), expected);
+      assertEquals(geometryProfileKernelsIds(APPLE_METAL_3), expected);
     } finally {
       Reflect.deleteProperty(navigator, "gpu");
       performance.now = originalNow;
@@ -458,8 +478,8 @@ describe("candidateKernelsId: the kernel fingerprint of the measured candidates 
     // The fingerprint of the ratios' basis does not see this change (if records were matched on
     // defaultKernels alone, stale measurements of the candidates would pass)
     assertEquals(
-      profileKernelsId(DEFAULT_GEOMETRY_PROFILE, SWEEP_CASES, candidatesOnly),
-      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      profileKernelsIds(DEFAULT_GEOMETRY_PROFILE, SWEEP_CASES, candidatesOnly),
+      geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE),
     );
     assertNotEquals(
       candidateKernelsId(ROWS, false, SWEEP_CASES, candidatesOnly),
@@ -514,41 +534,59 @@ describe("candidateKernelsId: the kernel fingerprint of the measured candidates 
 
 describe("the provenance of the built-in tables matches the current runtime's values", () => {
   // On failure: a GEMM kernel (key, params, WGSL tokens, dispatch count — comments and whitespace do
-  // not count), the default geometry, the sweep cases or the gemmRows bounds changed. Re-derive every
-  // embedded table with the current runtime (ADR 0117 decision 4: the regeneration makes the machine
-  // say that the kernels changed, and the per-profile GPU test gpu_geometry_profile_test.ts re-checks
-  // output identity on the new kernels). A record without caseSet / defaultKernels (the 2026-09/10
-  // Chrome records of nvidia-blackwell and apple-metal-3) is still accepted, so those tables re-derive
-  // with unchanged values. A record that carries them (nvidia-ampere's) is rejected once they move:
-  // that table needs a new sweep, which can re-pick other fields (the 2026-10-26 conv3d re-sweep also
-  // moved i8a8.attentionQk — docs/research/2026-10-26-conv3d-geometry-sweep.md §4).
+  // not count), the default geometry, a family's sweep cases or the gemmRows bounds changed.
+  // Re-derive the family's entry of every embedded table with the current runtime (ADR 0117 decision
+  // 4: the regeneration makes the machine say that the kernels changed, and the per-profile GPU test
+  // gpu_geometry_profile_test.ts re-checks output identity on the new kernels). Records are read
+  // only in format karume-geometry-sweep/3 with the per-family keys (ADR 0117 addendum 2026-11-12),
+  // so a family whose keys moved needs a new sweep of that family, which can re-pick its fields; the
+  // other families are carried over from the table (deriveGeometryProfile's `base`).
   for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-    it(`${profile.id}: provenance.kernels = the current runtime's fingerprint, provenance.caseSet = the current case-set version`, () => {
+    it(`${profile.id}: every family's entry carries the current runtime's fingerprint and case-set version, and a family without one is the default`, () => {
       const provenance = profile.provenance;
       assert(
         provenance !== undefined,
         `${profile.id}: built-in tables are generated from a sweep (provenance is required)`,
       );
-      assertEquals(
-        provenance.kernels,
-        geometryProfileKernelsId(profile),
-        `${profile.id}: the kernel fingerprint differs from the current runtime's — regenerate with the command in the header comment`,
-      );
-      assertEquals(
-        provenance.caseSet,
-        sweepCaseSetId(),
-        `${profile.id}: the case-set version differs from the current runtime's — regenerate with the command in the header comment`,
-      );
+      for (const family of GEOMETRY_PROFILE_FAMILIES) {
+        const entry = provenance.families[family];
+        if (entry === undefined) {
+          assertEquals(
+            familyKernelsId(profile, family),
+            familyKernelsId(DEFAULT_GEOMETRY_PROFILE, family),
+            `${profile.id}: family ${family} has no entry but its fields are not the default`,
+          );
+          continue;
+        }
+        assertEquals(
+          entry.kernels,
+          familyKernelsId(profile, family),
+          `${profile.id}: the kernel fingerprint of family ${family} differs from the current runtime's — re-derive the family`,
+        );
+        assertEquals(
+          entry.caseSet,
+          familyCaseSetId(family),
+          `${profile.id}: the case-set version of family ${family} differs from the current runtime's — re-derive the family`,
+        );
+      }
     });
   }
 });
 
-describe("sweepCaseSetId: the case-set version", () => {
-  it("is deterministic (16 hex digits), a value derived from the current cases and boundaries", () => {
-    const value = sweepCaseSetId();
-    assertMatch(value, /^[0-9a-f]{16}$/);
-    assertEquals(sweepCaseSetId(), value);
-    assertEquals(caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS), value);
+describe("sweepCaseSetIds: the case-set versions per op family", () => {
+  it("is deterministic (16 hex digits, one per family), values derived from the current cases and boundaries", () => {
+    const value = sweepCaseSetIds();
+    assertEquals(Object.keys(value), [...GEOMETRY_PROFILE_FAMILIES]);
+    for (const id of Object.values(value)) assertMatch(id, /^[0-9a-f]{16}$/);
+    assertEquals(sweepCaseSetIds(), value);
+    assertEquals(caseSetIds(SWEEP_CASES), value);
+    assertEquals(
+      value.gemm,
+      caseSetId(
+        SWEEP_CASES.filter(({ op }) => op === "linear" || op === "matmul" || op === "bmm"),
+        PROFILE_GEMM_ROWS_BOUNDS,
+      ),
+    );
   });
 
   it("changes when a case is added, a dispatch-deciding field (shape, op, attr) changes or a boundary changes", () => {
@@ -662,10 +700,10 @@ describe("the vec4 skeleton of an i8a8 geometry in the fingerprint and the sweep
       i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, linear: word },
     };
     const withSkeleton = { ...withWord, i8a8: { ...withWord.i8a8, linear: skeleton } };
-    assertNotEquals(geometryProfileKernelsId(withSkeleton), geometryProfileKernelsId(withWord));
+    assertNotEquals(geometryProfileKernelsIds(withSkeleton), geometryProfileKernelsIds(withWord));
     assertNotEquals(
-      geometryProfileKernelsId(withWord),
-      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      geometryProfileKernelsIds(withWord),
+      geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE),
     );
   });
 
@@ -701,26 +739,26 @@ describe("the vec4 skeleton of an i8a8 geometry in the fingerprint and the sweep
 });
 
 describe("the record keys of the evaluation set k85 (perf-ledger K-85)", () => {
-  it("the table-deriving sets record the same case-set version and default fingerprint as before", () => {
+  it("the table-deriving sets record the same case-set versions and default fingerprints as the sweep's table", () => {
     for (const set of ["quick", "quick+", "full"] as const) {
-      assertEquals(candidateSetCaseSetId(set), sweepCaseSetId());
+      assertEquals(candidateSetCaseSetIds(set), sweepCaseSetIds());
       assertEquals(
-        candidateSetDefaultKernelsId(set),
-        geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+        candidateSetDefaultKernelsIds(set),
+        geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE),
       );
     }
   });
 
   it("k85 records the version and the default fingerprint of its own case table, never the sweep's", () => {
-    assertMatch(candidateSetCaseSetId("k85"), /^[0-9a-f]{16}$/);
-    assertNotEquals(candidateSetCaseSetId("k85"), sweepCaseSetId());
-    assertEquals(
-      candidateSetCaseSetId("k85"),
-      caseSetId(sweepCasesFor("k85"), PROFILE_GEMM_ROWS_BOUNDS),
-    );
+    const k85 = candidateSetCaseSetIds("k85");
+    // Its table holds i8a8-linear cases only
+    assertEquals(Object.keys(k85), ["i8a8-linear"]);
+    assertMatch(k85["i8a8-linear"] ?? "", /^[0-9a-f]{16}$/);
+    assertNotEquals(k85["i8a8-linear"], sweepCaseSetIds()["i8a8-linear"]);
+    assertEquals(k85, caseSetIds(sweepCasesFor("k85")));
     assertNotEquals(
-      candidateSetDefaultKernelsId("k85"),
-      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      candidateSetDefaultKernelsIds("k85")["i8a8-linear"],
+      geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE)["i8a8-linear"],
     );
   });
 
@@ -763,16 +801,16 @@ describe("the skeleton form and the counter decode of an f32 geometry in the fin
 
   it("a table carrying a form or the decode fingerprints differently from the same table without it, and every variant differently from the others", () => {
     const ids = [
-      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
-      geometryProfileKernelsId(withRows("tb-un")),
-      geometryProfileKernelsId(withRows("tas-tb-un")),
-      geometryProfileKernelsId(withConv({ decode: "counter" })),
-      geometryProfileKernelsId(withConv({ form: "tb-un" })),
-      geometryProfileKernelsId(withConv({ form: "tb-un", decode: "counter" })),
-    ];
+      DEFAULT_GEOMETRY_PROFILE,
+      withRows("tb-un"),
+      withRows("tas-tb-un"),
+      withConv({ decode: "counter" }),
+      withConv({ form: "tb-un" }),
+      withConv({ form: "tb-un", decode: "counter" }),
+    ].map((profile) => canonicalJson(geometryProfileKernelsIds(profile)));
     assertEquals(new Set(ids).size, ids.length);
     // A table without the fields keeps its fingerprint (the same object shape gives the same id)
-    assertEquals(geometryProfileKernelsId(withRows(undefined)), ids[0]);
+    assertEquals(canonicalJson(geometryProfileKernelsIds(withRows(undefined))), ids[0]);
   });
 
   it("the sweep builds a form / decode candidate with the kernel a Session takes, and the same geometry without the fields as before", () => {
@@ -817,26 +855,25 @@ describe("the skeleton form and the counter decode of an f32 geometry in the fin
 });
 
 describe("the record keys and the dispatches of the evaluation set k88 (perf-ledger K-88)", () => {
-  it("k88 records the version and the default fingerprint of its own case table; the table-deriving sets record what they did before", () => {
-    assertMatch(candidateSetCaseSetId("k88"), /^[0-9a-f]{16}$/);
-    assertEquals(
-      candidateSetCaseSetId("k88"),
-      caseSetId(sweepCasesFor("k88"), PROFILE_GEMM_ROWS_BOUNDS),
-    );
-    for (const other of [sweepCaseSetId(), candidateSetCaseSetId("k85")]) {
-      assertNotEquals(candidateSetCaseSetId("k88"), other);
+  it("k88 records the version and the default fingerprint of its own case table; the table-deriving sets record the sweep table's", () => {
+    const k88 = candidateSetCaseSetIds("k88");
+    assertEquals(k88, caseSetIds(sweepCasesFor("k88")));
+    const sweep = sweepCaseSetIds();
+    const k85 = candidateSetCaseSetIds("k85");
+    const defaults = geometryProfileKernelsIds(DEFAULT_GEOMETRY_PROFILE);
+    const k88Defaults = candidateSetDefaultKernelsIds("k88");
+    assertEquals(Object.keys(k88Defaults), Object.keys(k88));
+    for (const family of GEOMETRY_PROFILE_FAMILIES) {
+      const id = k88[family];
+      if (id === undefined) continue;
+      assertMatch(id, /^[0-9a-f]{16}$/);
+      for (const other of [sweep[family], k85[family]]) assertNotEquals(id, other, family);
+      assertMatch(k88Defaults[family] ?? "", /^[0-9a-f]{16}$/);
+      assertNotEquals(k88Defaults[family], defaults[family], family);
     }
-    assertMatch(candidateSetDefaultKernelsId("k88"), /^[0-9a-f]{16}$/);
-    assertNotEquals(
-      candidateSetDefaultKernelsId("k88"),
-      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
-    );
     for (const set of ["quick", "quick+", "full"] as const) {
-      assertEquals(candidateSetCaseSetId(set), sweepCaseSetId());
-      assertEquals(
-        candidateSetDefaultKernelsId(set),
-        geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
-      );
+      assertEquals(candidateSetCaseSetIds(set), sweepCaseSetIds());
+      assertEquals(candidateSetDefaultKernelsIds(set), defaults);
     }
   });
 
@@ -892,12 +929,107 @@ describe("the record keys and the dispatches of the evaluation set k88 (perf-led
   });
 });
 
-describe("sweepCaseSetId with a candidate set (the case-set version a sweep of that set records)", () => {
+describe("sweepCaseSetIds with a candidate set (the case-set versions a sweep of that set records)", () => {
   it("is the sweep's own for the table-deriving sets and an evaluation set's own table's for k85 / k88", () => {
     for (const set of ["quick", "quick+", "full", "k85", "k88"] as const) {
-      assertEquals(sweepCaseSetId(set), candidateSetCaseSetId(set), set);
+      assertEquals(sweepCaseSetIds(set), candidateSetCaseSetIds(set), set);
     }
-    assertEquals(sweepCaseSetId("quick+"), sweepCaseSetId());
-    assertNotEquals(sweepCaseSetId("k88"), sweepCaseSetId());
+    assertEquals(sweepCaseSetIds("quick+"), sweepCaseSetIds());
+    assertNotEquals(sweepCaseSetIds("k88"), sweepCaseSetIds());
+  });
+});
+
+describe("the matching keys are taken per op family (ADR 0117 addendum 2026-11-12)", () => {
+  /** The family each field of singleFieldVariants belongs to (written by hand — the oracle). */
+  const FIELD_FAMILIES: Readonly<Record<string, GeometryProfileFamily>> = {
+    "attention.qk": "attention",
+    "attention.pv": "attention",
+    "conv2d.rows64": "conv2d",
+    "conv2d.rows32": "conv2d",
+    "i8a8.linear": "i8a8-linear",
+    "i8a8.attentionQk": "i8a8-attention",
+    "i8a8.attentionPv": "i8a8-attention",
+    "i8a8.conv3d": "i8a8-conv3d",
+  };
+  const familyOfField = (field: string): GeometryProfileFamily => {
+    if (field.startsWith("gemmRows[")) return "gemm";
+    const family = FIELD_FAMILIES[field];
+    if (family === undefined) throw new Error(`no family for ${field}`);
+    return family;
+  };
+  /** The ops of each family (written by hand — the oracle). */
+  const FAMILY_OPS: Readonly<Record<GeometryProfileFamily, readonly SweepCase["op"][]>> = {
+    gemm: ["linear", "matmul", "bmm"],
+    attention: ["attention"],
+    conv2d: ["conv2d"],
+    "i8a8-linear": ["i8a8-linear"],
+    "i8a8-attention": ["i8a8-attention"],
+    "i8a8-conv3d": ["i8a8-conv3d"],
+  };
+  const casesOf = (family: GeometryProfileFamily): SweepCase[] =>
+    SWEEP_CASES.filter(({ op }) => FAMILY_OPS[family].includes(op));
+
+  it("changing one field of a table moves only its own family's fingerprint", () => {
+    const base = geometryProfileKernelsIds(APPLE_METAL_3);
+    for (const [field, profile] of singleFieldVariants(APPLE_METAL_3)) {
+      const moved = geometryProfileKernelsIds(profile);
+      for (const family of GEOMETRY_PROFILE_FAMILIES) {
+        if (family === familyOfField(field)) {
+          assertNotEquals(moved[family], base[family], `${field}: ${family}`);
+        } else {
+          assertEquals(moved[family], base[family], `${field}: ${family}`);
+        }
+      }
+    }
+  });
+
+  it("a runtime whose kernels of one family changed moves only that family's fingerprint", () => {
+    const base = profileKernelsIds(APPLE_METAL_3, SWEEP_CASES, casePlan);
+    for (const changed of GEOMETRY_PROFILE_FAMILIES) {
+      const planner: CasePlanner = (sweepCase, limit, dp4a) => {
+        const plan = casePlan(sweepCase, limit, dp4a);
+        if (!FAMILY_OPS[changed].includes(sweepCase.op)) return plan;
+        return {
+          ...plan,
+          launch: (candidate) => {
+            const launch = plan.launch(candidate);
+            return { ...launch, wgsl: `${launch.wgsl}\nfn changed() {}` };
+          },
+        };
+      };
+      const moved = profileKernelsIds(APPLE_METAL_3, SWEEP_CASES, planner);
+      for (const family of GEOMETRY_PROFILE_FAMILIES) {
+        if (family === changed) assertNotEquals(moved[family], base[family], family);
+        else assertEquals(moved[family], base[family], `${changed} changed: ${family}`);
+      }
+    }
+  });
+
+  it("adding a case of one family moves only that family's case-set version", () => {
+    const base = caseSetIds(SWEEP_CASES);
+    for (const added of GEOMETRY_PROFILE_FAMILIES) {
+      const [first] = casesOf(added);
+      assert(first !== undefined, added);
+      const moved = caseSetIds([...SWEEP_CASES, { ...first, id: `${first.id}-copy` }]);
+      for (const family of GEOMETRY_PROFILE_FAMILIES) {
+        if (family === added) assertNotEquals(moved[family], base[family], family);
+        else assertEquals(moved[family], base[family], `${added} added: ${family}`);
+      }
+    }
+  });
+
+  it("the row-count bucket bounds enter the gemm family's case-set version only", () => {
+    const ids = sweepCaseSetIds();
+    assertEquals(ids.gemm, caseSetId(casesOf("gemm"), PROFILE_GEMM_ROWS_BOUNDS));
+    assertNotEquals(
+      ids.gemm,
+      caseSetId(casesOf("gemm"), [16, 32, 64, 512, Number.POSITIVE_INFINITY]),
+    );
+    for (const family of GEOMETRY_PROFILE_FAMILIES.filter((entry) => entry !== "gemm")) {
+      // Hashed without bounds, so a change of the bounds cannot move it
+      assertEquals(ids[family], caseSetId(casesOf(family)), family);
+      assertNotEquals(ids[family], caseSetId(casesOf(family), PROFILE_GEMM_ROWS_BOUNDS), family);
+      assertEquals(familyCaseSetId(family), ids[family], family);
+    }
   });
 });

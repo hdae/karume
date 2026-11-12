@@ -157,6 +157,10 @@
  *   - tile64x32r4x4w8x16k16: i8a8-conv3d-cin1024-cout1024-k333-in4x64x64: ×0.821 < ×1.050
  *   - tile64x64r4x4w16x16k16: geometric mean ×1.238 (below the adopted ×1.339)
  *   - tile64x64r4x8w8x16k16: i8a8-conv3d-cin512-cout256-k333-in6x256x256: ×1.002 < ×1.050
+ *
+ * Provenance converted on 2026-11-12 to one entry per op family (ADR 0117 addendum 2026-11-12), no field
+ * value changed: both records have rows of every family, so every family's entry names both, and its
+ * `kernels` / `caseSet` are the current runtime's keys over the family's cases.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -187,20 +191,79 @@ export const NVIDIA_AMPERE: GeometryProfile = {
     conv3d: { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 },
   },
   provenance: {
-    sweep:
-      "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
-    sha256:
-      "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
-    date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
-    candidateSet: "quick+, quick+",
-    userAgent: ["Node.js/24"],
     adapter: {
       vendor: "nvidia",
       architecture: "ampere",
       device: "nvidia-geforce-rtx-3080-ti",
       description: "NVIDIA: 615.78.08 615.78.8.0",
     },
-    kernels: "c1b6cb7ea2ede6d2",
-    caseSet: "0c9e4c7b7202eb2a",
+    families: {
+      gemm: {
+        sweep:
+          "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
+        sha256:
+          "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
+        date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
+        candidateSet: "quick+, quick+",
+        userAgent: ["Node.js/24"],
+        kernels: "ca7e78e7f763ea6a",
+        caseSet: "e6ddd45226ab2155",
+      },
+      attention: {
+        sweep:
+          "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
+        sha256:
+          "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
+        date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
+        candidateSet: "quick+, quick+",
+        userAgent: ["Node.js/24"],
+        kernels: "427da13d86d8f3f7",
+        caseSet: "9ee211cf69674928",
+      },
+      conv2d: {
+        sweep:
+          "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
+        sha256:
+          "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
+        date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
+        candidateSet: "quick+, quick+",
+        userAgent: ["Node.js/24"],
+        kernels: "e6004bc50ba66635",
+        caseSet: "02186e45558e4151",
+      },
+      "i8a8-linear": {
+        sweep:
+          "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
+        sha256:
+          "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
+        date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
+        candidateSet: "quick+, quick+",
+        userAgent: ["Node.js/24"],
+        kernels: "872761eb7f3fe5fb",
+        caseSet: "71a785d66fcf3512",
+      },
+      "i8a8-attention": {
+        sweep:
+          "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
+        sha256:
+          "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
+        date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
+        candidateSet: "quick+, quick+",
+        userAgent: ["Node.js/24"],
+        kernels: "d5b184a653a1b381",
+        caseSet: "8ab1a86b13087640",
+      },
+      "i8a8-conv3d": {
+        sweep:
+          "outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run1-2026-10-26T19-31-37.851Z.json, outputs/diag/wave-b-2026-10-26/v5/geometry-sweep-node-percase-run2-2026-10-26T20-20-58.449Z.json",
+        sha256:
+          "aa978a9021e1cc0aea4f123727e36a039cec161bb55d0c715d7e3e80189f763f, d265e379dc2d7ca5c7036a59d8f2d55b9351465937d743a59574a1ad642c65d8",
+        date: "2026-10-26T19:31:37.851Z, 2026-10-26T20:20:58.449Z",
+        candidateSet: "quick+, quick+",
+        userAgent: ["Node.js/24"],
+        kernels: "c91b3368411e71d9",
+        caseSet: "27ce9da45b359b14",
+      },
+    },
   },
 };

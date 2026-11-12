@@ -1,11 +1,12 @@
 /**
  * The geometry sweep page's record: the per-case records of `runGeometrySweep` (one call per case,
  * idle time between them) merged into one sweep record that `deriveGeometryProfile` reads as it is
- * (`karume-geometry-sweep/2` — no playground envelope), its text and file name, the table target
+ * (`karume-geometry-sweep/3` — no playground envelope), its text and file name, the table target
  * the page derives with, and the per-case summary the page shows. Pure.
  */
 
 import {
+  type GeometryProfileFamilyIds,
   type GeometryProfileTarget,
   type GeometrySweepAdapter,
   type GeometrySweepCaseSummary,
@@ -16,13 +17,15 @@ import {
 
 import { fileStamp } from "@/lib/download";
 
-/** The fields every per-case record of one sweep shares (anything else is a different sweep). */
+/**
+ * The fields every per-case record of one sweep shares (anything else is a different sweep). The
+ * per-family keys `caseSets` / `defaultKernels` are not among them: each per-case record holds the
+ * op family of its own case only ({@link unionFamilyKeys}).
+ */
 const sharedFields = (report: GeometrySweepReport) => {
   const { cases: _cases, ...settings } = report.settings;
   return {
     format: report.format,
-    caseSet: report.caseSet,
-    defaultKernels: report.defaultKernels,
     userAgent: report.userAgent,
     adapter: report.adapter,
     dp4a: report.dp4a,
@@ -43,6 +46,34 @@ const caseOf = (report: GeometrySweepReport, index: number): string => {
   return ids[0];
 };
 
+/**
+ * The union of the per-case records' per-family keys (`caseSets` or `defaultKernels` — one entry
+ * per op family the record has a case of). Throws when two records give one family different values
+ * (records of different runtimes or candidate sets, not one sweep).
+ */
+const unionFamilyKeys = (
+  reports: readonly GeometrySweepReport[],
+  key: "caseSets" | "defaultKernels",
+): GeometryProfileFamilyIds => {
+  const seen = new Map<string, { readonly id: string; readonly index: number }>();
+  reports.forEach((report, index) => {
+    for (const [family, id] of Object.entries(report[key])) {
+      if (id === undefined) continue;
+      const earlier = seen.get(family);
+      if (earlier !== undefined && earlier.id !== id) {
+        throw new Error(
+          `Record ${index} differs from record ${earlier.index} in ${key}.${family} (${id} / ${earlier.id})`,
+        );
+      }
+      seen.set(family, { id, index });
+    }
+  });
+  return reports.reduce<GeometryProfileFamilyIds>(
+    (merged, report) => ({ ...merged, ...report[key] }),
+    {},
+  );
+};
+
 export type MergeOptions = {
   /** Every case the sweep was planned to run, in order (`settings.cases` of the merged record). */
   readonly plannedCaseIds: readonly string[];
@@ -54,7 +85,8 @@ export type MergeOptions = {
  * Merges the per-case records into one record in the shape one `runGeometrySweep` call over the
  * planned cases writes: rows and cases in run order, `startedAt` of the first and `date` of the
  * last, `settings.cases` = the planned cases, `candidateKernels` recomputed over the merged rows
- * (each record fingerprints only its own rows, and the derivation re-derives it from all the rows).
+ * (each record fingerprints only its own rows, and the derivation re-derives it from all the rows),
+ * `caseSets` and `defaultKernels` the union of the records' (each holds its own case's op family).
  *
  * - `aborted`: Cancel stopped a case midway or the sweep between cases (a sweep stopped by a device
  *   loss or an error has `aborted: false` and fewer cases than planned, as `aborted` means a cancel).
@@ -65,9 +97,9 @@ export type MergeOptions = {
  *   observations leave the ratio data).
  * - `deviceLost`: the first loss.
  *
- * Throws when the records do not belong to one sweep (format, case set, default kernels, browser,
- * adapter, dp4a, timing, settings other than `cases`), when a record is not per-case, or when a
- * case is unplanned or comes twice.
+ * Throws when the records do not belong to one sweep (format, a family's case set or default kernels,
+ * browser, adapter, dp4a, timing, settings other than `cases`), when a record is not per-case, or
+ * when a case is unplanned or comes twice.
  */
 export const mergeSweepReports = (
   reports: readonly GeometrySweepReport[],
@@ -81,7 +113,7 @@ export const mergeSweepReports = (
   reports.forEach((report, index) => {
     if (JSON.stringify(sharedFields(report)) !== shared) {
       throw new Error(
-        `Record ${index} differs from record 0 in its format, case set, default kernels, browser, adapter, dp4a, timing or settings`,
+        `Record ${index} differs from record 0 in its format, browser, adapter, dp4a, timing or settings`,
       );
     }
     const caseId = caseOf(report, index);
@@ -94,6 +126,8 @@ export const mergeSweepReports = (
   const rows = reports.flatMap((report) => report.rows);
   return {
     ...first,
+    caseSets: unionFamilyKeys(reports, "caseSets"),
+    defaultKernels: unionFamilyKeys(reports, "defaultKernels"),
     date: last.date,
     startedAt: first.startedAt,
     aborted: options.cancelledBetweenCases || reports.some((report) => report.aborted),

@@ -46,6 +46,25 @@ const rejects = (text: string, ...parts: readonly string[]): GeometryProfilePars
  */
 const json = (value: unknown): string => infinityJson(value);
 
+/** BASE with its gemm family's provenance entry replaced by `entry` (a value of any shape). */
+const withGemmEntry = (entry: unknown): unknown => {
+  const provenance = BASE.provenance;
+  assert(provenance !== undefined);
+  return {
+    ...BASE,
+    provenance: { ...provenance, families: { ...provenance.families, gemm: entry } },
+  };
+};
+
+/** BASE's gemm family entry (every built-in table has one). */
+const gemmEntry = (): NonNullable<
+  NonNullable<GeometryProfile["provenance"]>["families"]["gemm"]
+> => {
+  const entry = BASE.provenance?.families.gemm;
+  assert(entry !== undefined);
+  return entry;
+};
+
 describe("parseGeometryProfileJson: round trip with geometryProfileJson", () => {
   const optIn = buildGeometryProfile(
     { id: "opt-in", optIn: true },
@@ -124,6 +143,15 @@ describe("parseGeometryProfileJson: unknown fields are rejected at every level",
       },
       "subgroupMinSize",
     ],
+    [
+      "provenance.families",
+      {
+        ...BASE,
+        provenance: { ...provenance, families: { ...provenance.families, gemv: gemmEntry() } },
+      },
+      "gemv",
+    ],
+    ["provenance.families.gemm", withGemmEntry({ ...gemmEntry(), rounds: 5 }), "rounds"],
   ];
   for (const [path, value, key] of cases) {
     it(`${path}: unknown field ${key}`, () => {
@@ -135,11 +163,24 @@ describe("parseGeometryProfileJson: unknown fields are rejected at every level",
     });
   }
 
-  it("rejects a provenance of the earlier form (adapter as a joined string, no fingerprint or case-set version) as missing fields (no migration)", () => {
-    const { candidateSet: _c, kernels: _k, caseSet: _s, ...older } = provenance;
+  it("rejects a provenance of an earlier form (the single keys before the op families, an adapter as a joined string) instead of reading it (no migration)", () => {
+    // The form before 2026-11-12: one sweep / kernels / caseSet for the whole table
+    const single = {
+      sweep: gemmEntry().sweep,
+      sha256: gemmEntry().sha256,
+      date: gemmEntry().date,
+      candidateSet: gemmEntry().candidateSet,
+      adapter: provenance.adapter,
+      kernels: gemmEntry().kernels,
+      caseSet: gemmEntry().caseSet,
+    };
     rejects(
-      json({ ...BASE, provenance: { ...older, adapter: "apple / metal-3 / Apple M2" } }),
-      "provenance is missing fields candidateSet, kernels, caseSet",
+      json({ ...BASE, provenance: single }),
+      "provenance has unknown fields sweep, sha256, date, candidateSet, kernels, caseSet",
+    );
+    rejects(
+      json({ ...BASE, provenance: { adapter: provenance.adapter } }),
+      "provenance is missing fields families",
     );
     rejects(
       json({ ...BASE, provenance: { ...provenance, adapter: "apple / metal-3 / Apple M2" } }),
@@ -175,29 +216,39 @@ describe("parseGeometryProfileJson: type errors and missing fields", () => {
       "gemmRows[0].maxRows is not a number",
     ],
     [
-      "provenance.kernels is a number",
-      { ...BASE, provenance: { ...provenance, kernels: 1 } },
-      "provenance.kernels is not a string",
+      "a family's kernels is a number",
+      withGemmEntry({ ...gemmEntry(), kernels: 1 }),
+      "provenance.families.gemm.kernels is not a string",
     ],
     [
-      "provenance.userAgent is still { deno } (not turned into a string)",
-      { ...BASE, provenance: { ...provenance, userAgent: { deno: "2.9.6" } } },
-      'provenance.userAgent is not an array ({"deno":"2.9.6"})',
+      "a family's caseSet is missing",
+      withGemmEntry({ ...gemmEntry(), caseSet: undefined }),
+      "provenance.families.gemm is missing fields caseSet",
     ],
     [
-      "provenance.userAgent is a joined string (not an array)",
-      { ...BASE, provenance: { ...provenance, userAgent: "Chrome/153, Chrome/154" } },
-      'provenance.userAgent is not an array ("Chrome/153, Chrome/154")',
+      "provenance.families is not an object",
+      { ...BASE, provenance: { ...provenance, families: [] } },
+      "provenance.families is not an object",
     ],
     [
-      "an element of provenance.userAgent is not a string",
-      { ...BASE, provenance: { ...provenance, userAgent: ["Chrome/154", { deno: "2.9.6" }] } },
-      'provenance.userAgent[1] is not a string ({"deno":"2.9.6"})',
+      "a family's userAgent is still { deno } (not turned into a string)",
+      withGemmEntry({ ...gemmEntry(), userAgent: { deno: "2.9.6" } }),
+      'provenance.families.gemm.userAgent is not an array ({"deno":"2.9.6"})',
     ],
     [
-      "provenance.userAgent is an empty array",
-      { ...BASE, provenance: { ...provenance, userAgent: [] } },
-      "provenance.userAgent is an empty array",
+      "a family's userAgent is a joined string (not an array)",
+      withGemmEntry({ ...gemmEntry(), userAgent: "Chrome/153, Chrome/154" }),
+      'provenance.families.gemm.userAgent is not an array ("Chrome/153, Chrome/154")',
+    ],
+    [
+      "an element of a family's userAgent is not a string",
+      withGemmEntry({ ...gemmEntry(), userAgent: ["Chrome/154", { deno: "2.9.6" }] }),
+      'provenance.families.gemm.userAgent[1] is not a string ({"deno":"2.9.6"})',
+    ],
+    [
+      "a family's userAgent is an empty array",
+      withGemmEntry({ ...gemmEntry(), userAgent: [] }),
+      "provenance.families.gemm.userAgent is an empty array",
     ],
     [
       "provenance.adapter.device is null",
@@ -375,12 +426,17 @@ describe("parseGeometryProfileJson: the optional key-axis form of the online att
     rejects(json({ ...BASE, attentionOnline: "tiled" }), "attentionOnline is not an object");
   });
 
-  it("reads provenance.attentionBench (four strings) and rejects a missing, mistyped or unknown field in it", () => {
+  it("reads provenance.attentionBench (four strings and the optional kernels) and rejects a missing, mistyped or unknown field in it", () => {
     const provenance = BASE.provenance;
     assert(provenance !== undefined);
     const attentionBench = { records: "a.json", sha256: "aa", date: "2026-11-12", shapes: "0123" };
     const withBench: GeometryProfile = { ...tiled, provenance: { ...provenance, attentionBench } };
     assertEquals(parseGeometryProfileJson(geometryProfileJson(withBench)), withBench);
+    const withKernels: GeometryProfile = {
+      ...tiled,
+      provenance: { ...provenance, attentionBench: { ...attentionBench, kernels: "4567" } },
+    };
+    assertEquals(parseGeometryProfileJson(geometryProfileJson(withKernels)), withKernels);
     const broken = (value: unknown): string =>
       json({ ...tiled, provenance: { ...provenance, attentionBench: value } });
     rejects(
@@ -394,6 +450,10 @@ describe("parseGeometryProfileJson: the optional key-axis form of the online att
     rejects(
       broken({ ...attentionBench, rounds: 5 }),
       "provenance.attentionBench has unknown fields rounds",
+    );
+    rejects(
+      broken({ ...attentionBench, kernels: 4567 }),
+      "provenance.attentionBench.kernels is not a string",
     );
   });
 });

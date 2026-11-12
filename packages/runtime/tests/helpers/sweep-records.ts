@@ -1,5 +1,7 @@
-// Synthetic fixture of sweep records (`karume-geometry-sweep/2`) — shared by the tests of the
-// generator (src/tune/derive.ts).
+// Synthetic fixture of sweep records (`karume-geometry-sweep/3`) — shared by the tests of the
+// generator (src/tune/derive.ts). Every record carries the per-family matching keys a writer records
+// for every case of the sweep's table (`recordKeys` — the generator requires them for every family a
+// record has rows of).
 //
 // The runtime's generator tests (tune_profile_test.ts, tune_profile_test.ts) and the tests of the
 // tool's output rendering and CLI (tools/geometry-sweep/profile_test.ts, render_test.ts — tools may
@@ -11,7 +13,29 @@ import type { I8a8Geometry } from "../../src/kernels/i8a8-geometry.ts";
 import type { SweepOp } from "../../src/tune/cases.ts";
 import { gemmCandidate } from "../../src/tune/geometries.ts";
 import { parseSweepReport, type SlotVerdict, type SweepSource } from "../../src/tune/derive.ts";
+import type { GeometryProfileFamilyIds } from "../../src/tune/families.ts";
+import { sweepCaseSetIds, sweepDefaultKernelsIds } from "../../src/tune/fingerprint.ts";
 import { REPORT_FORMAT } from "../../src/tune/report.ts";
+
+let currentKeys:
+  | {
+      readonly caseSets: GeometryProfileFamilyIds;
+      readonly defaultKernels: GeometryProfileFamilyIds;
+    }
+  | undefined;
+
+/**
+ * The current runtime's `caseSets` and `defaultKernels` of every family (what `runGeometrySweep`
+ * writes for a sweep of every case — derived once, the default fingerprint runs the codegen of every
+ * case).
+ */
+export const recordKeys = (): {
+  readonly caseSets: GeometryProfileFamilyIds;
+  readonly defaultKernels: GeometryProfileFamilyIds;
+} => {
+  currentKeys ??= { caseSets: sweepCaseSetIds(), defaultKernels: sweepDefaultKernelsIds() };
+  return currentKeys;
+};
 
 // --- Records of the rule-extraction tests (tune_profile_test.ts): cases and candidates as rows ---
 
@@ -124,6 +148,7 @@ export const report = (
 ): Record<string, unknown> => ({
   format: REPORT_FORMAT,
   date: "2026-09-27T00:00:00.000Z",
+  ...recordKeys(),
   adapter,
   settings: { candidateSet: "full" },
   gpuTiming: { feature: true, unit: "ns", quantized: false },
@@ -171,6 +196,7 @@ export const sweep = (name: string, sha256: string): SweepSource =>
     {
       format: REPORT_FORMAT,
       date: "2026-09-29T00:00:00.000Z",
+      ...recordKeys(),
       adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
       settings: { candidateSet: "full" },
       gpuTiming: { feature: true, unit: "ns", quantized: false },

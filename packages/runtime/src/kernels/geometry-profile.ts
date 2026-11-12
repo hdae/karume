@@ -59,6 +59,80 @@ import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
 export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGeometry };
 
 /**
+ * The op families of the geometry sweep: the unit a table's evidence stands on, and the unit its
+ * matching keys are taken per (DECIDED: ADR 0117 addendum 2026-11-12, "per op family"). Each family
+ * owns the profile fields its sweep cases decide — `gemm` the row-count buckets `gemmRows` (sweep ops
+ * linear / matmul / bmm), `attention` `attention.qk` / `attention.pv`, `conv2d` `conv2d.rows64` /
+ * `conv2d.rows32`, `i8a8-linear` `i8a8.linear`, `i8a8-attention` `i8a8.attentionQk` /
+ * `i8a8.attentionPv`, `i8a8-conv3d` `i8a8.conv3d`. The maps from sweep op and from profile field to
+ * family live in `src/tune/families.ts` (kernels do not import tune).
+ */
+export type GeometryProfileFamily =
+  | "gemm"
+  | "attention"
+  | "conv2d"
+  | "i8a8-linear"
+  | "i8a8-attention"
+  | "i8a8-conv3d";
+
+/**
+ * Every family in the fixed order — the order of the fields they decide, the order matching checks
+ * them in and the order the generator writes `provenance.families` in.
+ *
+ * NOTE: `./geometry-profiles/index.ts` must not read it: this module imports that one as a value,
+ * and that one builds its frozen list at evaluation, so reading this constant there would depend on
+ * the import order.
+ */
+export const GEOMETRY_PROFILE_FAMILIES: readonly GeometryProfileFamily[] = [
+  "gemm",
+  "attention",
+  "conv2d",
+  "i8a8-linear",
+  "i8a8-attention",
+  "i8a8-conv3d",
+];
+
+/**
+ * The provenance of one op family of a table generated from sweeps (DECIDED: ADR 0117 decision 4 as
+ * amended by its addendum 2026-11-12): the sweep records that have a row of the family, and the two
+ * matching keys taken over the family's cases only.
+ */
+export type GeometryProfileFamilyProvenance = {
+  /**
+   * Paths of the sweep records that have a row of this family (joined with `", "` in the order
+   * given to the generator).
+   */
+  readonly sweep: string;
+  /** SHA-256 (hex) of the bytes of the same records. */
+  readonly sha256: string;
+  /** Dates of the same sweeps. */
+  readonly date: string;
+  /** Candidate sets of the same sweeps (`quick` / `quick+` / `full`). */
+  readonly candidateSet: string;
+  /**
+   * The browsers that ran the same sweeps (the records' `userAgent` — records from the Deno CLI
+   * carry `Deno/<version>`), deduplicated in order of appearance (one element when all are the
+   * same). They are not joined because a browser's userAgent itself contains `", "`
+   * (`(KHTML, like Gecko)`) and joined values could not be split apart. A reference field not used
+   * for matching (`geometryProfileMismatch`); material for an application to compare with the
+   * current browser and suggest a re-sweep (DECIDED: ADR 0117 addendum 2026-10-02).
+   * Not written when a record without `userAgent` is among the same records (an empty array is not
+   * written either).
+   */
+  readonly userAgent?: readonly string[];
+  /**
+   * Kernel fingerprint over this family's sweep cases (hash of the kernels the table and the
+   * default geometry build on those shapes, the WGSL counted without comments and whitespace — hex).
+   */
+  readonly kernels: string;
+  /**
+   * Case-set version of this family (hash of its sweep cases and, for `gemm`, the row-count bucket
+   * bounds — hex).
+   */
+  readonly caseSet: string;
+};
+
+/**
  * A GEMM geometry profile = a static table of tile geometries per op × bucket (DECIDED: ADR 0115).
  * The embedded tables (`./geometry-profiles/`) are chosen by the adapter's (vendor, architecture,
  * description), and users can inject, with `acquireGpu({ geometryProfile })`, a table made from
@@ -124,31 +198,12 @@ export type GeometryProfile = {
   readonly attentionOnline?: { readonly keyWords: "tiled" };
   /**
    * Provenance and matching material held only by profiles generated from a sweep (DECIDED: ADR 0117
-   * decision 4). Only the generator (`deriveGeometryProfile` of `@karume/runtime/tune`) writes it,
-   * and `geometryProfileMismatch` of `./tune` does the matching. The runtime (`assertGeometryProfile`,
-   * the injection entry point of `acquireGpu`) checks only the shape (the field types) and does not
-   * use it for matching.
+   * decision 4, per op family since its addendum 2026-11-12). Only the generator
+   * (`deriveGeometryProfile` of `@karume/runtime/tune`) writes it, and `geometryProfileMismatch` of
+   * `./tune` does the matching. The runtime (`assertGeometryProfile`, the injection entry point of
+   * `acquireGpu`) checks only the shape (the field types) and does not use it for matching.
    */
   readonly provenance?: {
-    /** Paths of the sweep records (joined with `", "` in the order given to the generator). */
-    readonly sweep: string;
-    /** SHA-256 (hex) of the bytes of the same records. */
-    readonly sha256: string;
-    /** Dates of the same sweeps. */
-    readonly date: string;
-    /** Candidate sets of the same sweeps (`quick` / `quick+` / `full`). */
-    readonly candidateSet: string;
-    /**
-     * The browsers that ran the same sweeps (the records' `userAgent` — records from the Deno CLI
-     * carry `Deno/<version>`), deduplicated in order of appearance (one element when all are the
-     * same). They are not joined because a browser's userAgent itself contains `", "`
-     * (`(KHTML, like Gecko)`) and joined values could not be split apart. A reference field not used
-     * for matching (`geometryProfileMismatch`); material for an application to compare with the
-     * current browser and suggest a re-sweep (DECIDED: ADR 0117 addendum 2026-10-02).
-     * Not written when a record without `userAgent` is among the inputs (an empty array is not
-     * written either).
-     */
-    readonly userAgent?: readonly string[];
     /**
      * The swept adapter (the 4 fields of `GPUAdapterInfo` — an empty string stays a value;
      * identical across all records).
@@ -160,24 +215,28 @@ export type GeometryProfile = {
       readonly description: string;
     };
     /**
-     * Kernel fingerprint (hash of the kernels the table and the default geometry build on the
-     * sweep's shapes, the WGSL counted without comments and whitespace — hex).
+     * Per op family ({@link GeometryProfileFamily}), the records and matching keys of that family.
+     * A family that no record has a case of has no entry: its fields are the default (matching
+     * checks that they are).
      */
-    readonly kernels: string;
-    /** Case-set version (hash of the sweep's cases and the step boundaries of gemmRows — hex). */
-    readonly caseSet: string;
+    readonly families: {
+      readonly [Family in GeometryProfileFamily]?: GeometryProfileFamilyProvenance;
+    };
     /**
      * The attention-bench records the derivation read for {@link GeometryProfile.attentionOnline}
      * (written whenever records were given, whether or not they adopted the field — ADR 0117
      * addendum 2026-11-12): their paths, SHA-256 and dates joined with `", "` in the order given,
-     * and the id of the bench's shape set they covered (the `attentionBenchShapeSetId` of the
-     * runtime that derived the table — `geometryProfileMismatch` compares it).
+     * the id of the bench's shape set they covered (the `attentionBenchShapeSetId` of the runtime
+     * that derived the table — `geometryProfileMismatch` compares it) and, exactly when the table
+     * carries `attentionOnline`, the fingerprint of the online attention's kernels the field chooses
+     * between (`kernels` — compared by matching as well).
      */
     readonly attentionBench?: {
       readonly records: string;
       readonly sha256: string;
       readonly date: string;
       readonly shapes: string;
+      readonly kernels?: string;
     };
   };
 };
@@ -396,22 +455,33 @@ const i8a8GeometryOf = (value: unknown, where: string, path: string): I8a8Geomet
  */
 const assertProvenanceShape = (value: unknown, where: string): void => {
   const provenance = recordOf(value, where, "provenance");
-  for (const key of ["sweep", "sha256", "date", "candidateSet", "kernels", "caseSet"] as const) {
-    stringOf(provenance[key], where, `provenance.${key}`);
-  }
   const adapter = recordOf(provenance.adapter, where, "provenance.adapter");
   for (const key of ["vendor", "architecture", "device", "description"] as const) {
     stringOf(adapter[key], where, `provenance.adapter.${key}`);
   }
+  const families = recordOf(provenance.families, where, "provenance.families");
+  for (const family of GEOMETRY_PROFILE_FAMILIES) {
+    if (families[family] !== undefined) {
+      assertFamilyProvenanceShape(families[family], where, `provenance.families.${family}`);
+    }
+  }
   if (provenance.attentionBench !== undefined) {
     assertAttentionBenchShape(provenance.attentionBench, where);
   }
-  if (provenance.userAgent === undefined) return;
-  if (!Array.isArray(provenance.userAgent)) {
-    throw new CodegenError(`${where}: provenance.userAgent is not an array`);
+};
+
+/** The shape of one family's provenance (field types only, as {@link assertProvenanceShape}). */
+const assertFamilyProvenanceShape = (value: unknown, where: string, path: string): void => {
+  const entry = recordOf(value, where, path);
+  for (const key of ["sweep", "sha256", "date", "candidateSet", "kernels", "caseSet"] as const) {
+    stringOf(entry[key], where, `${path}.${key}`);
   }
-  const agents = denseEntriesOf(provenance.userAgent, where, "provenance.userAgent");
-  agents.forEach((agent, index) => stringOf(agent, where, `provenance.userAgent[${index}]`));
+  if (entry.userAgent === undefined) return;
+  if (!Array.isArray(entry.userAgent)) {
+    throw new CodegenError(`${where}: ${path}.userAgent is not an array`);
+  }
+  const agents = denseEntriesOf(entry.userAgent, where, `${path}.userAgent`);
+  agents.forEach((agent, index) => stringOf(agent, where, `${path}.userAgent[${index}]`));
 };
 
 /** The shape of `provenance.attentionBench` (field types only, as {@link assertProvenanceShape}). */
@@ -420,6 +490,7 @@ const assertAttentionBenchShape = (value: unknown, where: string): void => {
   for (const key of ["records", "sha256", "date", "shapes"] as const) {
     stringOf(bench[key], where, `provenance.attentionBench.${key}`);
   }
+  optionalStringOf(bench.kernels, where, "provenance.attentionBench.kernels");
 };
 
 /**

@@ -22,9 +22,10 @@ import {
   DEFAULT_CANDIDATE_SET,
   isCandidateSet,
 } from "./geometries.ts";
+import { familiesOf } from "./families.ts";
 import {
-  candidateSetCaseSetId,
-  candidateSetDefaultKernelsId,
+  candidateSetCaseSetIds,
+  candidateSetDefaultKernelsIds,
   sweepCandidateKernelsId,
 } from "./fingerprint.ts";
 import { createSweepContext, destroySweepContext, runSweep, SWEEP_MAX_REPS } from "./harness.ts";
@@ -174,7 +175,7 @@ export const timestampUnitFor = (userAgent: string): "ns" | "deno-raw-tick" =>
 
 /**
  * Acquires a dedicated device, sweeps the cases, and returns the record
- * (`karume-geometry-sweep/2`). The device is discarded when done (also on abort or failure).
+ * (`karume-geometry-sweep/3`). The device is discarded when done (also on abort or failure).
  * Per-row failures (allocation, compilation, device lost) are kept as rows of the record and the
  * sweep continues; option errors and environments where no device can be acquired throw before
  * touching the GPU / at the acquisition step.
@@ -255,14 +256,15 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
       date: new Date().toISOString(),
       startedAt,
       aborted,
-      // Write the ratio baseline, the kernels of the measured candidates and the case-set version
+      // Write the ratio baseline, the kernels of the measured candidates and the case-set versions
       // into the record (the generator matches them against the current runtime — ADR 0117 decision
       // 8). All are pure functions that read no GPU, with a negligible cost next to the sweep (the
-      // default fingerprint takes about 13 ms; the candidate fingerprint stays under 1 second even
-      // for every row of full). The case-set version and the baseline are those of the set's own
-      // case table (the same values as before for the table-deriving sets)
-      caseSet: candidateSetCaseSetId(plan.candidateSet),
-      defaultKernels: candidateSetDefaultKernelsId(plan.candidateSet),
+      // default fingerprint over every case takes about 13 ms; the candidate fingerprint stays under
+      // 1 second even for every row of full). The case-set versions and the baseline are one value
+      // per op family of the planned cases, each over the set's own case table restricted to the
+      // family (ADR 0117 addendum 2026-11-12), so an evaluation set never claims the sweep's
+      caseSets: candidateSetCaseSetIds(plan.candidateSet, familiesOf(plan.cases)),
+      defaultKernels: candidateSetDefaultKernelsIds(plan.candidateSet, familiesOf(plan.cases)),
       // The embedded table a Session on this adapter selects (no table is injected here) — what a
       // record is read against as "this adapter's table"
       geometryProfile: selectGeometryProfile(info).id,
