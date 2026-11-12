@@ -174,9 +174,17 @@ measurements in `docs/research/`.
   row's `geometryParams` and can adopt it (ADR 0115 addendum decision 14).
 - `@karume/runtime`: the embedded tables `nvidia-ampere`, `nvidia-blackwell` and `apple-metal-3` hold
   `i8a8.linear` as three row-count rules, regenerated from their own sweep records: rows > 512 keep each table's
-  geometry, and rows ≤ 512 run the default geometry until a sweep of the family is registered. That is a speed
-  change for the small-M i8a8 linears (Irodori's M = 185, for one); outputs are unchanged, the i8a8 geometries
-  being bit-identical. Every other field of the tables is unchanged.
+  geometry, and rows ≤ 512 run the default geometry until a sweep of the family is registered. On the two NVIDIA
+  GPUs that is a measured slowdown for the small-M i8a8 linears (Irodori's M = 185, for one): in the K-85 evaluation
+  records the geometry the table held was faster than the default per dispatch — on the RTX 5070 Ti
+  (`nvidia-blackwell`, `tile128x64r8x4w16x16k16`; record
+  `outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_k85_2026-11-12T02-04-54.json`) ×1.338 at M 185,
+  ×1.117 at M 1 and ×1.122 at M 512 (default re-measurement drift ×1.000 / ×1.013 / ×1.011), on the RTX 3080 Ti
+  (`nvidia-ampere`, `tile64x64r8x4w16x8k16`; records `outputs/diag/k85-linear-2026-11-11/geometry-sweep_k85_*.json`)
+  ×2.013, ×1.991 and ×1.412 (drift ×1.089 / ×1.194 / ×1.171 — the last two outside the 0.9–1.1 range the derivation
+  accepts, as for five of that run's six cases, so these are evaluation figures). No such record exists for the Apple
+  M2 (`apple-metal-3`). Outputs are unchanged, the i8a8 geometries being bit-identical. Every other field of the
+  tables is unchanged.
 - `@karume/runtime/tune`: `runAttentionRouteBench` measures `ATTENTION_BENCH_SHAPES` by default (MOSS-Image's
   1024² attention added to Wan2.2's three shapes). Its `online` row times the online kernel in the key-axis form the
   route takes on the device and reports it (`keyWords`); with `onlineTiled`, the pair's first arm and the

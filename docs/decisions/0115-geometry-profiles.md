@@ -763,8 +763,20 @@ The maintainer decided this design on 2026-11-12 (K-85's second slice).
   `nvidia-ampere` and `nvidia-blackwell` records re-derive equal with the current runtime; the `apple-metal-3`
   records predate the field, so for them it rests on the table's own fingerprint of the family re-deriving equal
   before the cases changed. **Until a sweep of the family is registered, the small-M buckets of all three tables run
-  the default geometry**: a speed change for the small-M i8a8 linears (Irodori's M = 185, for one); outputs do not
-  change (the i8a8 geometries are bit-identical by contract — decision 1, addendum decision 12).
+  the default geometry.** On the two NVIDIA GPUs that is a measured slowdown for the small-M i8a8 linears (Irodori's
+  M = 185, for one): in the K-85 evaluation records (untracked) the geometry the table held ran faster than the
+  default per dispatch (each row's `speedupVsDefault`), with each case's default re-measurement drift
+  (`cases[].defaultRepeat.driftRatio`) beside it:
+
+  | GPU (table, the geometry it held) | Record | M 185 | M 1 | M 512 |
+  | --- | --- | --- | --- | --- |
+  | RTX 5070 Ti (`nvidia-blackwell`, `tile128x64r8x4w16x16k16`) | `outputs/bench-browser/geometry-sweep_nvidia-geforce-rtx-5070-ti_k85_2026-11-12T02-04-54.json` | ×1.338 (drift ×1.000) | ×1.117 (×1.013) | ×1.122 (×1.011) |
+  | RTX 3080 Ti (`nvidia-ampere`, `tile64x64r8x4w16x8k16`) | `outputs/diag/k85-linear-2026-11-11/geometry-sweep_k85_*.json` (one per case) | ×2.013 (drift ×1.089) | ×1.991 (×1.194) | ×1.412 (×1.171) |
+
+  The RTX 3080 Ti drifts at M 1 and M 512 are outside the 0.9–1.1 range of addendum decision 8 (five of that run's
+  six cases drifted outside it, all but the M 185 guard), so those figures are an evaluation, not adoption evidence. No such record exists
+  for the Apple M2 (`apple-metal-3`): the effect there is not measured. Outputs do not change (the i8a8 geometries
+  are bit-identical by contract — decision 1, addendum decision 12).
 - **Not in this decision.** A `full` sweep of `i8a8-linear` alone on each GPU, derived with the adapter's table as
   `base`, and the sha256 re-checks of decision 8 on the families whose default presets reach the i8a8 linear. On a
   GPU that heats within one case, the sweep is taken in chunks (ADR [0117](0117-app-geometry-tuning.md) addendum

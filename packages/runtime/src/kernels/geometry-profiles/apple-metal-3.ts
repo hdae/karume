@@ -743,7 +743,8 @@
  * and the default's on the family's cases), which re-derived equal with the current runtime before
  * the cases changed — the other measured candidates' kernels have no recorded key.
  * The records hold i8a8 linear cases at M = 1024 / 4096 only, so the buckets ≤ 256 and 257〜512 keep the
- * default geometry — a speed change for the small-M i8a8 linears (Irodori's M = 185, for one) until a sweep
+ * default geometry — a speed difference not measured on this adapter (no K-85 evaluation record exists for the
+ * Apple M2) for the small-M i8a8 linears (Irodori's M = 185, for one) until a sweep
  * of the family is registered; outputs do not change (the geometries are bit-identical by contract). The
  * bucket > 512 keeps the geometry the field held. Every other field and provenance entry is unchanged;
  * the `i8a8-linear` entry has the current `kernels` / `caseSet`.

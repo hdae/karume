@@ -172,7 +172,8 @@
  * That rests on the rows having been measured on the same kernels: each record's `candidateKernels`
  * re-derives equal with the current runtime.
  * The records hold i8a8 linear cases at M = 1024 / 4096 only, so the buckets ≤ 256 and 257〜512 keep the
- * default geometry — a speed change for the small-M i8a8 linears (Irodori's M = 185, for one) until a sweep
+ * default geometry — slower for the small-M i8a8 linears (Irodori's M = 185, for one; per the K-85 evaluation
+ * records named in ADR 0115 addendum decision 14) until a sweep
  * of the family is registered; outputs do not change (the geometries are bit-identical by contract). The
  * bucket > 512 keeps the geometry the field held. Every other field and provenance entry is unchanged;
  * the `i8a8-linear` entry has the current `kernels` / `caseSet`.
