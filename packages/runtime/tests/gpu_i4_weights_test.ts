@@ -29,6 +29,7 @@ import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { i4EligibleInitializers } from "../src/runtime/plan.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
+import { linearI8a8Geometry } from "../src/runtime/recipe-builders/linear.ts";
 import { quantizeRowsTieMargin, referenceLinearW4a8 } from "../src/reference/i8a8.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
 import { deviceGeometryProfile } from "./helpers/geometry.ts";
@@ -1156,7 +1157,13 @@ test.skipIf(!GPU_AVAILABLE)(
         const keys = requireCensus(diagnostics.lastRunPipelines, "w4a8").map((row) => row.key);
         assertEquals(
           keys.includes(
-            linearI8a8Key(linearI8a8UsesVec4(n), true, profile.i8a8.linear, "i4", groupSize),
+            linearI8a8Key(
+              linearI8a8UsesVec4(n),
+              true,
+              linearI8a8Geometry(profile, m, "i4", groupSize),
+              "i4",
+              groupSize,
+            ),
           ),
           true,
           `keys that ran: ${keys.join(" / ")}`,

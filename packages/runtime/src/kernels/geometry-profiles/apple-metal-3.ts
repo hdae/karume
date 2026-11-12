@@ -730,6 +730,9 @@
  * value changed: each family's entry names the records above that have a row of the family, and its
  * `kernels` / `caseSet` are the current runtime's keys over the family's cases. `i8a8-conv3d` has no entry
  * (no record has a conv3d case; its field is the default).
+ *
+ * Converted on 2026-11-12 to the row-count rules of `i8a8.linear` (ADR 0115 addendum decision 14), no
+ * value changed: the field holds one rule up to Infinity with the geometry it held.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -754,7 +757,12 @@ export const APPLE_METAL_3: GeometryProfile = {
     rows32: { regM: 8, regN: 4, wgX: 16, wgY: 16 },
   },
   i8a8: {
-    linear: { regM: 4, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
+    linear: [
+      {
+        maxRows: Number.POSITIVE_INFINITY,
+        geometry: { regM: 4, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
+      },
+    ],
     attentionQk: { regM: 4, regN: 8, wgX: 8, wgY: 8, tileK: 16 },
     attentionPv: { regM: 4, regN: 8, wgX: 16, wgY: 4, tileK: 16 },
     conv3d: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 },

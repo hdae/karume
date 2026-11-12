@@ -21,13 +21,33 @@ import {
   parseGeometryProfileJson,
 } from "../tune.ts";
 import { CodegenError } from "../src/codegen/errors.ts";
-import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
+import {
+  DEFAULT_GEOMETRY_PROFILE,
+  type GeometryProfile,
+  type I8a8RowsRule,
+} from "../src/kernels/geometry-profile.ts";
+import type { I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
 import { buildGeometryProfile, deriveProfile, infinityJson } from "../src/tune/derive.ts";
 import { SOURCES, SPEC } from "./helpers/sweep-records.ts";
 
 const BASE = APPLE_METAL_3;
+
+/** The geometry of BASE's last `i8a8.linear` rule (the one up to Infinity). */
+const LINEAR_LAST = BASE.i8a8.linear[BASE.i8a8.linear.length - 1].geometry;
+
+/** BASE's `i8a8.linear` with its last rule's geometry replaced by `geometry`. */
+const withLinearGeometry = (geometry: I8a8Geometry): readonly I8a8RowsRule[] =>
+  BASE.i8a8.linear.map((rule, at, rules) =>
+    at === rules.length - 1 ? { ...rule, geometry } : rule,
+  );
+
+/** The same with a value of any shape (a broken geometry). */
+const brokenLinear = (geometry: unknown): readonly unknown[] =>
+  BASE.i8a8.linear.map((rule, at, rules) =>
+    at === rules.length - 1 ? { ...rule, geometry } : rule,
+  );
 
 /**
  * Asserts that parsing rejects with a GeometryProfileParseError whose message contains every one of
@@ -130,6 +150,17 @@ describe("parseGeometryProfileJson: unknown fields are rejected at every level",
     ],
     ["i8a8", { ...BASE, i8a8: { ...BASE.i8a8, w4a8: BASE.i8a8.linear } }, "w4a8"],
     [
+      "i8a8.linear[0]",
+      {
+        ...BASE,
+        i8a8: {
+          ...BASE.i8a8,
+          linear: BASE.i8a8.linear.map((rule, at) => (at === 0 ? { ...rule, rows: 1 } : rule)),
+        },
+      },
+      "rows",
+    ],
+    [
       "i8a8.attentionPv",
       { ...BASE, i8a8: { ...BASE.i8a8, attentionPv: { ...BASE.i8a8.attentionPv, groupSize: 32 } } },
       "groupSize",
@@ -204,8 +235,29 @@ describe("parseGeometryProfileJson: type errors and missing fields", () => {
     ],
     [
       "a geometry field is a string",
-      { ...BASE, i8a8: { ...BASE.i8a8, linear: { ...BASE.i8a8.linear, tileK: "16" } } },
-      'i8a8.linear.tileK is not an integer ("16")',
+      {
+        ...BASE,
+        i8a8: { ...BASE.i8a8, linear: brokenLinear({ ...LINEAR_LAST, tileK: "16" }) },
+      },
+      `i8a8.linear[${BASE.i8a8.linear.length - 1}].geometry.tileK is not an integer ("16")`,
+    ],
+    [
+      "i8a8.linear as one geometry (the shape before its row-count rules)",
+      { ...BASE, i8a8: { ...BASE.i8a8, linear: LINEAR_LAST } },
+      "i8a8.linear is not an array",
+    ],
+    [
+      "the trailing maxRows of i8a8.linear is null (a lost Infinity)",
+      {
+        ...BASE,
+        i8a8: {
+          ...BASE.i8a8,
+          linear: BASE.i8a8.linear.map((rule, at, rules) =>
+            at === rules.length - 1 ? { ...rule, maxRows: null } : rule,
+          ),
+        },
+      },
+      `i8a8.linear[${BASE.i8a8.linear.length - 1}].maxRows is null (a lost Infinity`,
     ],
     [
       "a non-trailing maxRows is a string",
@@ -354,29 +406,59 @@ describe("parseGeometryProfileJson: finally runs the runtime's injection check (
 describe("parseGeometryProfileJson: the optional vec4 skeleton of an i8a8 geometry (perf-ledger K-85)", () => {
   const skeleton = { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 64, skeleton: "vec4" as const };
 
-  it("a table with the skeleton in i8a8.linear comes back with it, and a table without it comes back without the field", () => {
-    const profile: GeometryProfile = { ...BASE, i8a8: { ...BASE.i8a8, linear: skeleton } };
+  it("a table with the skeleton in an i8a8.linear rule comes back with it, and a table without it comes back without the field", () => {
+    const profile: GeometryProfile = {
+      ...BASE,
+      i8a8: { ...BASE.i8a8, linear: withLinearGeometry(skeleton) },
+    };
     const parsed = parseGeometryProfileJson(geometryProfileJson(profile));
     assertEquals(parsed, profile);
-    assertEquals(parsed.i8a8.linear.skeleton, "vec4");
+    assertEquals(parsed.i8a8.linear.at(-1)?.geometry.skeleton, "vec4");
+    for (const rule of parseGeometryProfileJson(geometryProfileJson(BASE)).i8a8.linear) {
+      assertEquals("skeleton" in rule.geometry, false);
+    }
+  });
+
+  it("a table whose i8a8.linear has several rules comes back with every rule, the trailing Infinity included", () => {
+    const profile: GeometryProfile = {
+      ...BASE,
+      i8a8: {
+        ...BASE.i8a8,
+        linear: [
+          { maxRows: 256, geometry: skeleton },
+          { maxRows: 512, geometry: { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 32 } },
+          { maxRows: Number.POSITIVE_INFINITY, geometry: LINEAR_LAST },
+        ],
+      },
+    };
+    const text = geometryProfileJson(profile);
+    assertStringIncludes(text, '"maxRows": 1e999');
+    const parsed = parseGeometryProfileJson(text);
+    assertEquals(parsed, profile);
     assertEquals(
-      "skeleton" in parseGeometryProfileJson(geometryProfileJson(BASE)).i8a8.linear,
-      false,
+      parsed.i8a8.linear.map(({ maxRows }) => maxRows),
+      [256, 512, Number.POSITIVE_INFINITY],
     );
   });
 
   it("rejects a skeleton value other than vec4 naming the field, and still rejects an unknown field next to it", () => {
     rejects(
-      json({ ...BASE, i8a8: { ...BASE.i8a8, linear: { ...skeleton, skeleton: "vec8" } } }),
-      'i8a8.linear.skeleton is not "vec4" ("vec8")',
+      json({
+        ...BASE,
+        i8a8: { ...BASE.i8a8, linear: brokenLinear({ ...skeleton, skeleton: "vec8" }) },
+      }),
+      `i8a8.linear[${BASE.i8a8.linear.length - 1}].geometry.skeleton is not "vec4" ("vec8")`,
     );
     rejects(
       json({ ...BASE, i8a8: { ...BASE.i8a8, conv3d: { ...skeleton, skeleton: true } } }),
       'i8a8.conv3d.skeleton is not "vec4" (true)',
     );
     rejects(
-      json({ ...BASE, i8a8: { ...BASE.i8a8, linear: { ...skeleton, unroll: true } } }),
-      "i8a8.linear has unknown fields unroll",
+      json({
+        ...BASE,
+        i8a8: { ...BASE.i8a8, linear: brokenLinear({ ...skeleton, unroll: true }) },
+      }),
+      `i8a8.linear[${BASE.i8a8.linear.length - 1}].geometry has unknown fields unroll`,
     );
     // An f32 skeleton geometry has no such field
     rejects(
@@ -394,10 +476,17 @@ describe("parseGeometryProfileJson: the optional vec4 skeleton of an i8a8 geomet
         ...BASE,
         i8a8: {
           ...BASE.i8a8,
-          linear: { regM: 4, regN: 4, wgX: 8, wgY: 12, tileK: 24, skeleton: "vec4" },
+          linear: brokenLinear({
+            regM: 4,
+            regN: 4,
+            wgX: 8,
+            wgY: 12,
+            tileK: 24,
+            skeleton: "vec4",
+          }),
         },
       }),
-      "i8a8.linear: the vec4 skeleton needs tileK to be a multiple of 16 (24)",
+      `i8a8.linear[${BASE.i8a8.linear.length - 1}]: the vec4 skeleton needs tileK to be a multiple of 16 (24)`,
     );
     assertInstanceOf(error.cause, CodegenError);
   });

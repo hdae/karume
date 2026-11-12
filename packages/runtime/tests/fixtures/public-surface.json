@@ -223,6 +223,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "I8a8RowsRule",
+        "kind": "typeAlias"
+      },
+      {
         "name": "IrDeclaration",
         "kind": "typeAlias"
       },

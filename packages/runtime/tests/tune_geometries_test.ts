@@ -163,7 +163,7 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
       includesAll(
         names(quickPlusI8a8Candidates()),
         [
-          i8a8Candidate(profile.i8a8.linear).name,
+          ...profile.i8a8.linear.map((rule) => i8a8Candidate(rule.geometry).name),
           i8a8Candidate(profile.i8a8.attentionQk).name,
           i8a8Candidate(profile.i8a8.attentionPv).name,
           i8a8Candidate(profile.i8a8.conv3d).name,
@@ -173,25 +173,35 @@ describe("candidate set quick+ (quick ∪ the geometries adopted by the register
     }
   });
 
-  it("i8a8 quick+ adds each of the four i8a8 fields of a profile it is given (distinct, all outside quick)", () => {
-    // Four distinct geometries from the full grid that quick does not hold, one per field — so a
-    // field missing from quick+ cannot be hidden by quick or by another field carrying the same value.
+  it("i8a8 quick+ adds every i8a8.linear rule and each of the other three i8a8 fields of a profile it is given (distinct, all outside quick)", () => {
+    // Five distinct geometries from the full grid that quick does not hold, one per rule or field —
+    // so a rule or field missing from quick+ cannot be hidden by quick or by another carrying the
+    // same value.
     const quick = new Set(names(quickI8a8Candidates()));
     const outside = i8a8Candidates().filter(({ name }) => !quick.has(name));
-    assert(outside.length >= 4, "the full grid holds at least four geometries outside quick");
-    const [linear, attentionQk, attentionPv, conv3d] = outside;
+    assert(outside.length >= 5, "the full grid holds at least five geometries outside quick");
+    const [smallLinear, linear, attentionQk, attentionPv, conv3d] = outside;
     const profile: GeometryProfile = {
       ...DEFAULT_GEOMETRY_PROFILE,
       id: "synthetic-i8a8",
       i8a8: {
-        linear: linear.geometry,
+        linear: [
+          { maxRows: 256, geometry: smallLinear.geometry },
+          { maxRows: Number.POSITIVE_INFINITY, geometry: linear.geometry },
+        ],
         attentionQk: attentionQk.geometry,
         attentionPv: attentionPv.geometry,
         conv3d: conv3d.geometry,
       },
     };
     const listed = new Set(names(quickPlusI8a8Candidates([profile])));
-    for (const [field, candidate] of Object.entries({ linear, attentionQk, attentionPv, conv3d })) {
+    for (const [field, candidate] of Object.entries({
+      "linear[0]": smallLinear,
+      "linear[1]": linear,
+      attentionQk,
+      attentionPv,
+      conv3d,
+    })) {
       assert(
         listed.has(candidate.name),
         `i8a8.${field} (${candidate.name}) is missing from quick+`,
@@ -236,7 +246,9 @@ describe("candidate set k85 (perf-ledger K-85 — the vec4 skeleton of the i8a8 
   it("is the registered tables' i8a8.linear and the grid regM 8 / 12 / 16 × regN 4 / 8 × wgX 8 / 16 × wgY 4 / 8 / 16 × tileK 16 / 32 / 64, with and without the skeleton, within the checks and 16,384 B", () => {
     assertEquals(
       names(k85.slice(0, BUILTIN_GEOMETRY_PROFILES.length)),
-      BUILTIN_GEOMETRY_PROFILES.map((profile) => i8a8GeometryKeyPart(profile.i8a8.linear, false)),
+      BUILTIN_GEOMETRY_PROFILES.flatMap((profile) =>
+        profile.i8a8.linear.map((rule) => i8a8GeometryKeyPart(rule.geometry, false)),
+      ),
     );
     assertEquals(new Set(names(k85)).size, k85.length);
     assertEquals(k85.length, 207);

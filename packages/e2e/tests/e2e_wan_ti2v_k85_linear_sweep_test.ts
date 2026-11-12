@@ -144,8 +144,14 @@ describe.skipIf(skipReason !== undefined)("the K-85 linear sweep on this machine
     // This adapter's table (the embedded table a Session selects); the default table is the sweep's
     // default row
     const defaultParams = first.rows.find((row) => row.isDefault)?.geometryParams;
+    // One geometry per table (the set's cases span every row count; the tables hold one rule)
+    const rules = BUILTIN_GEOMETRY_PROFILES.find((profile) => profile.id === tableId)?.i8a8.linear;
+    assert(
+      rules === undefined || rules.length === 1,
+      `table ${tableId} has several i8a8.linear rules`,
+    );
     const table: I8a8Geometry | undefined =
-      BUILTIN_GEOMETRY_PROFILES.find((profile) => profile.id === tableId)?.i8a8.linear ??
+      rules?.[0]?.geometry ??
       (defaultParams !== undefined && isI8a8(defaultParams) ? defaultParams : undefined);
     assert(table !== undefined, `no i8a8 geometry for the table ${tableId}`);
 

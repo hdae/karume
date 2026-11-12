@@ -2270,7 +2270,7 @@ export const buildGeometryProfile = (
       rows32: gemmSlot(verdicts, "conv2d.rows32"),
     },
     i8a8: {
-      linear: i8a8Slot(verdicts, "i8a8.linear"),
+      linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: i8a8Slot(verdicts, "i8a8.linear") }],
       attentionQk: i8a8Slot(verdicts, "i8a8.attentionQk"),
       attentionPv: i8a8Slot(verdicts, "i8a8.attentionPv"),
       conv3d: i8a8Slot(verdicts, "i8a8.conv3d"),
@@ -2595,9 +2595,10 @@ const INFINITY_MARK = "\u0000karume-infinity\u0000";
  * The JSON of a table for injection (the result of `JSON.parse` can be passed to
  * `acquireGpu({ geometryProfile })` as is).
  *
- * The trailing `maxRows` of `gemmRows` (Infinity) has no JSON value, so it is written as `1e999` —
- * `JSON.parse` reads an out-of-range number as Infinity. Plain `JSON.stringify` turns Infinity into
- * null, and a table with null fails the runtime's check (the last rule is Infinity).
+ * The trailing `maxRows` of `gemmRows` and `i8a8.linear` (Infinity) has no JSON value, so it is
+ * written as `1e999` — `JSON.parse` reads an out-of-range number as Infinity. Plain
+ * `JSON.stringify` turns Infinity into null, and a table with null fails the runtime's check (the
+ * last rule is Infinity).
  */
 export const geometryProfileJson = (profile: GeometryProfile): string => infinityJson(profile);
 

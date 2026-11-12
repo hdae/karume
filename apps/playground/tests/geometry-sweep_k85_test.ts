@@ -79,7 +79,10 @@ const PROFILES = [
   {
     ...BUILTIN_GEOMETRY_PROFILES[0],
     id: "test-table",
-    i8a8: { ...BUILTIN_GEOMETRY_PROFILES[0].i8a8, linear: TABLE },
+    i8a8: {
+      ...BUILTIN_GEOMETRY_PROFILES[0].i8a8,
+      linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: TABLE }],
+    },
   },
 ];
 

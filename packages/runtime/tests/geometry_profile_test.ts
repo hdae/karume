@@ -53,6 +53,7 @@ import {
   DEFAULT_GEOMETRY_PROFILE,
   gemmRowsGeometry,
   type GeometryProfile,
+  i8a8LinearGeometry,
   selectGeometryProfile,
   type WorkgroupLimits,
 } from "../src/kernels/geometry-profile.ts";
@@ -90,7 +91,12 @@ import {
   attentionQkWgsl,
 } from "../src/kernels/attention.ts";
 import { conv2dIgemmKey, conv2dIgemmWgsl } from "../src/kernels/conv2d.ts";
-import { linearI8a8Key, linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
+import {
+  linearI8a8Key,
+  linearI8a8UsesVecFill,
+  linearI8a8Wgsl,
+} from "../src/kernels/linear-i8a8.ts";
+import { linearI8a8Geometry } from "../src/runtime/recipe-builders/linear.ts";
 import { conv3dI8a8Key, conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import {
   attentionPvI8a8Key,
@@ -484,7 +490,7 @@ describe("DEFAULT_GEOMETRY_PROFILE has the same values as the existing selection
       rows32: gemmMTileGeometry(32),
     });
     assertEquals(DEFAULT_GEOMETRY_PROFILE.i8a8, {
-      linear: defaultI8a8Geometry("linear"),
+      linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: defaultI8a8Geometry("linear") }],
       attentionQk: defaultI8a8Geometry("attention_qk"),
       attentionPv: defaultI8a8Geometry("attention_pv"),
       conv3d: defaultI8a8Geometry("conv3d"),
@@ -728,17 +734,22 @@ describe("passing the default profile's geometry explicitly keeps keys and WGSL 
   });
 
   it("i8a8 linear / fused attention ①QK / ③PV", () => {
-    const { linear, attentionQk, attentionPv } = profile.i8a8;
+    const { attentionQk, attentionPv } = profile.i8a8;
     for (const [v4, dp4a] of [
       [true, true],
       [false, false],
     ] as const) {
-      assertEquals(linearI8a8Key(v4, dp4a, linear), linearI8a8Key(v4, dp4a));
-      assertEquals(linearI8a8Wgsl(v4, dp4a, linear), linearI8a8Wgsl(v4, dp4a));
-      assertEquals(
-        linearI8a8Key(v4, dp4a, linear, "i4", 32),
-        linearI8a8Key(v4, dp4a, undefined, "i4", 32),
-      );
+      // The i8a8 linear is selected by M: every representative M gives the default's key and WGSL
+      for (const rows of BUCKET_ROWS) {
+        const linear = i8a8LinearGeometry(profile, rows);
+        assertEquals(linearI8a8Key(v4, dp4a, linear), linearI8a8Key(v4, dp4a), `M=${rows}`);
+        assertEquals(linearI8a8Wgsl(v4, dp4a, linear), linearI8a8Wgsl(v4, dp4a), `M=${rows}`);
+        assertEquals(
+          linearI8a8Key(v4, dp4a, linear, "i4", 32),
+          linearI8a8Key(v4, dp4a, undefined, "i4", 32),
+          `M=${rows}`,
+        );
+      }
       // f16 storage of S (s16) is v4-path only (the generation check rejects it)
       for (const score of v4 ? (["f32", "f16"] as const) : (["f32"] as const)) {
         assertEquals(
@@ -1045,6 +1056,143 @@ describe("gemmRowsGeometry", () => {
   });
 });
 
+describe("i8a8LinearGeometry (the row-count rules of i8a8.linear — ADR 0115 addendum decision 14)", () => {
+  const rules = (...entries: (readonly [number, I8a8Geometry])[]): GeometryProfile =>
+    profileOf(
+      "i8a8-rules",
+      { vendor: "test" },
+      {
+        i8a8: {
+          ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+          linear: entries.map(([maxRows, geometry]) => ({ maxRows, geometry })),
+        },
+      },
+    );
+  const small: I8a8Geometry = { regM: 4, regN: 8, wgX: 16, wgY: 8, tileK: 64, skeleton: "vec4" };
+  const medium: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 };
+  const large = defaultI8a8Geometry("linear");
+
+  it("exactly maxRows takes that rule, 1 past takes the next rule (the final Infinity matches up to the top of u32)", () => {
+    const profile = rules([256, small], [512, medium], [Number.POSITIVE_INFINITY, large]);
+    const expected: readonly (readonly [number, I8a8Geometry])[] = [
+      [0, small],
+      [1, small],
+      [256, small],
+      [257, medium],
+      [512, medium],
+      [513, large],
+      [0xffff_ffff, large],
+    ];
+    for (const [rows, geometry] of expected) {
+      assertEquals(i8a8LinearGeometry(profile, rows), geometry, `M=${rows}`);
+    }
+  });
+
+  it("the default profile gives the default geometry at every row count", () => {
+    for (const rows of [0, ...BUCKET_ROWS, 0xffff_ffff]) {
+      assertEquals(i8a8LinearGeometry(DEFAULT_GEOMETRY_PROFILE, rows), large, `M=${rows}`);
+    }
+  });
+
+  it("rules not strictly ascending, a last rule that is not Infinity, and an empty list fail loudly both at selection and at lookup, naming i8a8.linear", () => {
+    const adapter = { vendor: "test", architecture: "" };
+    const broken: readonly (readonly [string, GeometryProfile, string])[] = [
+      [
+        "descending",
+        rules([512, small], [256, medium], [Number.POSITIVE_INFINITY, large]),
+        "maxRows of i8a8.linear is not strictly increasing",
+      ],
+      [
+        "equal values",
+        rules([256, small], [256, medium], [Number.POSITIVE_INFINITY, large]),
+        "maxRows of i8a8.linear is not strictly increasing",
+      ],
+      [
+        "finite last rule",
+        rules([256, small], [512, medium]),
+        "the last maxRows of i8a8.linear must be Infinity",
+      ],
+      ["empty", rules(), "i8a8.linear is empty"],
+    ];
+    for (const [name, profile, message] of broken) {
+      assertThrows(() => i8a8LinearGeometry(profile, 1), CodegenError, message, name);
+      assertThrows(() => selectGeometryProfile(adapter, [profile]), CodegenError, message, name);
+    }
+  });
+
+  it("the row count fails loudly on anything but a non-negative u32 integer", () => {
+    for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assertThrows(() => i8a8LinearGeometry(DEFAULT_GEOMETRY_PROFILE, rows), CodegenError);
+    }
+  });
+});
+
+describe("linearI8a8Geometry: the builder's i8a8 linear geometry — the rule for M and the w4a8 group fallback (ADR 0115 addendum decision 14)", () => {
+  const k64: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 64, skeleton: "vec4" };
+  const k16: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 };
+  const profile = profileOf(
+    "w4a8-rules",
+    { vendor: "test" },
+    {
+      i8a8: {
+        ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+        linear: [
+          { maxRows: 256, geometry: k64 },
+          { maxRows: Number.POSITIVE_INFINITY, geometry: k16 },
+        ],
+      },
+    },
+  );
+  const k = 64;
+  const GROUPS = [16, 32, 64, 128, 256] as const;
+
+  it("i8 weights take the rule for M as it is (M = 256 the K64 rule with the vec4 fill, M = 257 the next rule)", () => {
+    assertEquals(linearI8a8Geometry(profile, 256, "i8", undefined), k64);
+    assertEquals(linearI8a8Geometry(profile, 257, "i8", undefined), k16);
+    assertEquals(linearI8a8UsesVecFill(k64, "i8", k), true);
+  });
+
+  it("w4a8 at group 32 under the K64 rule builds with the default geometry (the K64 rule itself is refused at generation)", () => {
+    assertThrows(
+      () => linearI8a8Wgsl(true, true, k64, "i4", 32),
+      CodegenError,
+      "group_size 32 is not a multiple of the K tile 64",
+    );
+    const geometry = linearI8a8Geometry(profile, 256, "i4", 32);
+    assertEquals(geometry, defaultI8a8Geometry("linear"));
+    const vecFill = linearI8a8UsesVecFill(geometry, "i4", k);
+    const key = linearI8a8Key(true, true, geometry, "i4", 32, vecFill);
+    assertEquals(key, linearI8a8Key(true, true, undefined, "i4", 32));
+    assert(linearI8a8Wgsl(true, true, geometry, "i4", 32, vecFill).includes("@compute"));
+  });
+
+  it("w4a8 keeps the rule when the group length is a multiple of its K tile (group 64 and up under K64, every group under K16)", () => {
+    for (const groupSize of [64, 128, 256]) {
+      assertEquals(linearI8a8Geometry(profile, 256, "i4", groupSize), k64, `g${groupSize}`);
+    }
+    for (const groupSize of GROUPS) {
+      assertEquals(linearI8a8Geometry(profile, 257, "i4", groupSize), k16, `g${groupSize}`);
+    }
+  });
+
+  it(":fill16 is never produced for i4 weights, whatever the rule and the group (and is refused when asked for)", () => {
+    for (const rows of [256, 257]) {
+      for (const groupSize of GROUPS) {
+        const geometry = linearI8a8Geometry(profile, rows, "i4", groupSize);
+        const vecFill = linearI8a8UsesVecFill(geometry, "i4", k);
+        assertEquals(vecFill, false, `M=${rows} g${groupSize}`);
+        const key = linearI8a8Key(true, true, geometry, "i4", groupSize, vecFill);
+        assert(!key.includes(":fill16"), key);
+      }
+    }
+    assertThrows(
+      () => linearI8a8Key(true, true, k64, "i4", 64, true),
+      CodegenError,
+      "the vec4 fill needs a geometry with the vec4 skeleton and i8 weights",
+    );
+  });
+});
+
 describe("conv2dProfileGeometry and the geometry check", () => {
   it("m-tile classes 64 / 32 look up rows64 / rows32, and anything else fails loudly", () => {
     const profile = profileOf(
@@ -1201,7 +1349,12 @@ describe("the geometry profile injection point of acquireGpu", () => {
           {
             i8a8: {
               ...DEFAULT_GEOMETRY_PROFILE.i8a8,
-              linear: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+              linear: [
+                {
+                  maxRows: Number.POSITIVE_INFINITY,
+                  geometry: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+                },
+              ],
             },
           },
         ),
@@ -1600,8 +1753,30 @@ describe("assertGeometryProfile is a type predicate narrowing unknown to a table
       ],
       [
         "tileK of i8a8 missing",
-        { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, linear: M64N64 } },
-        "i8a8.linear: geometry tileK must be a positive integer (undefined)",
+        {
+          ...OPT_IN,
+          i8a8: {
+            ...OPT_IN.i8a8,
+            linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: M64N64 }],
+          },
+        },
+        "i8a8.linear[0].geometry: geometry tileK must be a positive integer (undefined)",
+      ],
+      [
+        "i8a8.linear as one geometry (the shape before its row-count rules)",
+        {
+          ...OPT_IN,
+          i8a8: { ...OPT_IN.i8a8, linear: defaultI8a8Geometry("linear") },
+        },
+        "i8a8.linear is not an array",
+      ],
+      [
+        "an i8a8.linear rule without maxRows",
+        {
+          ...OPT_IN,
+          i8a8: { ...OPT_IN.i8a8, linear: [{ geometry: defaultI8a8Geometry("linear") }] },
+        },
+        "maxRows of i8a8.linear[0] is not a number",
       ],
       [
         "a provenance field missing",
@@ -1814,7 +1989,10 @@ const gemmGeometriesOf = (profile: GeometryProfile): GemmGeometry[] => [
 const SAMPLE_PROFILES = [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES];
 const SAMPLE_GEMM = [...SAMPLE_PROFILES.flatMap(gemmGeometriesOf), THREADS_512, STORAGE_20K];
 const SAMPLE_I8A8 = [
-  ...SAMPLE_PROFILES.flatMap((profile) => Object.values(profile.i8a8)),
+  ...SAMPLE_PROFILES.flatMap(({ i8a8: { linear, ...fields } }) => [
+    ...linear.map((rule) => rule.geometry),
+    ...Object.values(fields),
+  ]),
   I8A8_STORAGE_32K,
   I8A8_TINY,
 ];
@@ -2100,10 +2278,20 @@ describe("the optional vec4 skeleton of the i8a8 fields (perf-ledger K-85)", () 
   it("a table with the skeleton in an i8a8 field passes the check and the limit check under WebGPU's default limits", () => {
     const profile: unknown = {
       ...OPT_IN,
-      i8a8: { ...OPT_IN.i8a8, linear: skeleton, conv3d: { ...skeleton, tileK: 64 } },
+      i8a8: {
+        ...OPT_IN.i8a8,
+        linear: [
+          { maxRows: 256, geometry: skeleton },
+          { maxRows: Number.POSITIVE_INFINITY, geometry: { ...skeleton, tileK: 64 } },
+        ],
+        conv3d: { ...skeleton, tileK: 64 },
+      },
     };
     assertGeometryProfile(profile);
-    assertEquals(profile.i8a8.linear.skeleton, "vec4");
+    assertEquals(
+      profile.i8a8.linear.map(({ geometry }) => geometry.skeleton),
+      ["vec4", "vec4"],
+    );
     assertGeometryProfileWithinLimits(profile, WEBGPU_DEFAULT_LIMITS);
   });
 
@@ -2116,8 +2304,14 @@ describe("the optional vec4 skeleton of the i8a8 fields (perf-ledger K-85)", () 
       ],
       [
         "a non-string value",
-        { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, linear: { ...skeleton, skeleton: 4 } } },
-        'i8a8.linear: geometry skeleton must be "vec4" or absent (4)',
+        {
+          ...OPT_IN,
+          i8a8: {
+            ...OPT_IN.i8a8,
+            linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: { ...skeleton, skeleton: 4 } }],
+          },
+        },
+        'i8a8.linear[0].geometry: geometry skeleton must be "vec4" or absent (4)',
       ],
       [
         "tileK 24",
@@ -2125,10 +2319,15 @@ describe("the optional vec4 skeleton of the i8a8 fields (perf-ledger K-85)", () 
           ...OPT_IN,
           i8a8: {
             ...OPT_IN.i8a8,
-            linear: { regM: 4, regN: 4, wgX: 8, wgY: 12, tileK: 24, skeleton: "vec4" },
+            linear: [
+              {
+                maxRows: Number.POSITIVE_INFINITY,
+                geometry: { regM: 4, regN: 4, wgX: 8, wgY: 12, tileK: 24, skeleton: "vec4" },
+              },
+            ],
           },
         },
-        "i8a8.linear: the vec4 skeleton needs tileK to be a multiple of 16 (24)",
+        "i8a8.linear[0]: the vec4 skeleton needs tileK to be a multiple of 16 (24)",
       ],
     ];
     for (const [name, value, message] of cases) {

@@ -45,25 +45,32 @@ import {
   gemmRowsGeometry,
   type GemmRowsRule,
   type GeometryProfile,
+  i8a8LinearGeometry,
+  type I8a8RowsRule,
   selectGeometryProfile,
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
 import { attentionPvI8a8Wgsl, attentionQkI8a8Wgsl } from "../src/kernels/attention-i8a8.ts";
-import { dp4aAvailable } from "../src/kernels/linear-i8a8.ts";
+import { dp4aAvailable, linearI8a8Key } from "../src/kernels/linear-i8a8.ts";
 import {
   type GemmGeometry,
   gemmGeometryTileKeyPart,
   gemmTileM,
   gemmTileN,
 } from "../src/kernels/gemm-geometry.ts";
-import { i8a8GeometryKeyPart } from "../src/kernels/i8a8-geometry.ts";
+import {
+  defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8GeometryKeyPart,
+} from "../src/kernels/i8a8-geometry.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { I8A8_DOT, type SessionOptions } from "../src/runtime/session-types.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { quantizeI4 } from "./helpers/i4.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import {
   f32Bytes,
@@ -115,12 +122,12 @@ const linearCase = (m: number): ProfileCase => {
 };
 
 /**
- * The representative M of each `gemmRows` rule (DECIDED: ADR 0116 decision 7). A finite rule uses
- * its upper end (= `maxRows` — the upper end of a bucket is a point measured by the sweep); the
- * last (Infinity) rule uses the previous boundary + 512. Derived from the table, so the cases
- * follow the number of rules when the bucket count changes.
+ * The representative M of each row-count rule of `gemmRows` or `i8a8.linear` (DECIDED: ADR 0116
+ * decision 7). A finite rule uses its upper end (= `maxRows` — the upper end of a bucket is a point
+ * measured by the sweep); the last (Infinity) rule uses the previous boundary + 512. Derived from
+ * the table, so the cases follow the number of rules when the bucket count changes.
  */
-const representativeRows = (rules: readonly GemmRowsRule[]): readonly number[] =>
+const representativeRows = (rules: readonly { readonly maxRows: number }[]): readonly number[] =>
   rules.map((rule, index) =>
     rule.maxRows === Number.POSITIVE_INFINITY
       ? (rules[index - 1]?.maxRows ?? 0) + 512
@@ -233,16 +240,50 @@ const attentionCase = (compute: "f32" | "a8"): ProfileCase => {
 };
 
 /**
- * A linear with i8 resident weights (the form that goes to the i8a8 path with `linearCompute:
- * "a8"`).
+ * The resident form of an a8 linear's weights: i8 per channel (w8a8) or i4 at a group length
+ * (w4a8).
  */
-const linearI8a8Case = (): ProfileCase => {
-  const [m, k, n] = [300, 64, 96];
+type A8Weights =
+  | { readonly storage: "i8" }
+  | { readonly storage: "i4"; readonly groupSize: number };
+
+/** The encoding of an a8 linear's `[n, k]` weights in the given resident form. */
+const a8WeightEncoding = (n: number, k: number, weights: A8Weights) => {
   const weight = fill([n, k], (i) => WEIGHT(i) * (1 + (Math.floor(i / k) % 7) * 0.25));
-  const quantized = quantizeI8(weight.data, [n, k], 0);
+  if (weights.storage === "i8") {
+    const quantized = quantizeI8(weight.data, [n, k], 0);
+    return {
+      bytes: quantized.bytes,
+      encoding: {
+        codec: "int8-sym",
+        groupSize: perChannelGroupSize(k),
+        scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+      },
+    } as const;
+  }
+  const quantized = quantizeI4(weight.data, [n, k], weights.groupSize);
+  return {
+    bytes: quantized.bytes,
+    encoding: {
+      codec: "int4-sym-g",
+      groupSize: weights.groupSize,
+      scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+    },
+  } as const;
+};
+
+/**
+ * A linear of `m` rows with i8 resident weights (default — the form that goes to the i8a8 path
+ * with `linearCompute: "a8"`) or i4 ones (the w4a8 path). k = 64 (whole vec4s, so a skeleton
+ * geometry with i8 weights takes the vec4 fill) and n = 96 (the v4 store). The expected key part
+ * is the profile's `i8a8.linear` rule for `m`.
+ */
+const linearI8a8Case = (m: number, weights: A8Weights = { storage: "i8" }): ProfileCase => {
+  const [k, n] = [64, 96];
+  const { bytes, encoding } = a8WeightEncoding(n, k, weights);
   const bias = fill([n], BIAS);
   return {
-    name: "linear i8a8",
+    name: `linear i8a8 M=${m} ${weights.storage === "i8" ? "i8" : `i4 g${weights.groupSize}`}`,
     model: () =>
       openModelBytes(
         {
@@ -267,28 +308,38 @@ const linearI8a8Case = (): ProfileCase => {
             bytes: f32Bytes(bias.data),
             encoding: { codec: "f32" },
           },
-          {
-            graph: GRAPH_NAME,
-            initializer: "w",
-            bytes: quantized.bytes,
-            encoding: {
-              codec: "int8-sym",
-              groupSize: perChannelGroupSize(k),
-              scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
-            },
-          },
+          { graph: GRAPH_NAME, initializer: "w", bytes, encoding },
         ],
       ),
     inputs: { x0: fill([m, k], SIGNED) },
     options: { linearCompute: "a8", [I8A8_DOT]: "emu" },
     expected: (profile) => [
       {
-        prefix: "linear:v4:i8a8:",
-        parts: [i8a8GeometryKeyPart(profile.i8a8.linear, false)],
+        prefix: weights.storage === "i8" ? "linear:v4:i8a8:" : "linear:v5:i8a8:",
+        parts: [i8a8GeometryKeyPart(i8a8LinearGeometry(profile, m), false)],
       },
     ],
   };
 };
+
+/**
+ * One i8 linear case per `i8a8.linear` rule of the table (the representative M of
+ * {@link representativeRows}), expecting **that rule's geometry** (not looked up again — an M that
+ * fell into a neighbouring rule turns red through the key, as {@link gemmRowsCases}).
+ */
+const i8a8LinearCases = (rules: readonly I8a8RowsRule[]): readonly ProfileCase[] =>
+  representativeRows(rules).map((m, index) => {
+    const { maxRows, geometry } = rules[index];
+    const range =
+      maxRows === Number.POSITIVE_INFINITY ? `> ${rules[index - 1]?.maxRows ?? 0}` : `≤ ${maxRows}`;
+    return {
+      ...linearI8a8Case(m),
+      name: `linear i8a8 M=${m} (i8a8.linear ${range})`,
+      expected: () => [
+        { prefix: "linear:v4:i8a8:", parts: [i8a8GeometryKeyPart(geometry, false)] },
+      ],
+    };
+  });
 
 /**
  * conv3d w8a8 (`convCompute: "a8"` with an i8-resident weight — ADR 0133): the GEMM runs the profile's
@@ -363,8 +414,8 @@ const conv3dI8a8Case = (): ProfileCase => {
 };
 
 /**
- * Cases other than the linear row-count buckets (the per-profile check builds its linears from the
- * table's rules — `gemmRowsCases`).
+ * Cases other than the row-count buckets of the linear and the i8a8 linear (the per-profile check
+ * builds those from the table's rules — `gemmRowsCases`, `i8a8LinearCases`).
  */
 const OTHER_CASES: readonly ProfileCase[] = [
   {
@@ -405,7 +456,6 @@ const OTHER_CASES: readonly ProfileCase[] = [
   // (`conv2dIgemmMTile`)
   conv2dCase(96, "rows32"),
   conv2dCase(128, "rows64"),
-  linearI8a8Case(),
   conv3dI8a8Case(),
 ];
 
@@ -414,6 +464,9 @@ const CASES: readonly ProfileCase[] = [
   linearCase(40),
   linearCase(300),
   linearCase(1024),
+  // The i8a8 linear at a small and a large M (the embedded tables' small buckets hold the default)
+  linearI8a8Case(300),
+  linearI8a8Case(1024),
   ...OTHER_CASES,
 ];
 
@@ -568,7 +621,13 @@ describe.skipIf(!GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0)(
                 );
           const rowCases = gemmRowsCases(profile.gemmRows);
           assertEquals(rowCases.length, profile.gemmRows.length, "missed some gemmRows rules");
-          for (const testCase of [...rowCases, ...OTHER_CASES]) {
+          const i8a8Cases = i8a8LinearCases(profile.i8a8.linear);
+          assertEquals(
+            i8a8Cases.length,
+            profile.i8a8.linear.length,
+            "missed some i8a8.linear rules",
+          );
+          for (const testCase of [...rowCases, ...i8a8Cases, ...OTHER_CASES]) {
             await assertRunsWithProfile(baseline, subject, profile, testCase);
           }
         } finally {
@@ -615,7 +674,7 @@ describe.skipIf(!GPU_AVAILABLE)("geometry profile injected with acquireGpu (real
         "the callback's adapterInfo is a different object from the GpuContext's",
       );
       const baseline = contextAs(plain, "", "", "");
-      for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
+      for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case(1024)]) {
         await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
       }
       const run = await runCase(automatic, linearCase(40));
@@ -641,7 +700,7 @@ describe.skipIf(!GPU_AVAILABLE)("geometry profile injected with acquireGpu (real
         NVIDIA_BLACKWELL,
       );
       assertEquals(selectGeometryProfile(subject.adapterInfo).id, APPLE_METAL_3.id);
-      for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
+      for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case(1024)]) {
         await assertRunsWithProfile(baseline, subject, NVIDIA_BLACKWELL, testCase);
       }
     } finally {
@@ -717,7 +776,12 @@ describe.skipIf(!GPU_AVAILABLE)(
         id: "k85-skeleton",
         i8a8: {
           ...DEFAULT_GEOMETRY_PROFILE.i8a8,
-          linear: { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 32, skeleton: "vec4" },
+          linear: [
+            {
+              maxRows: Number.POSITIVE_INFINITY,
+              geometry: { regM: 16, regN: 4, wgX: 16, wgY: 8, tileK: 32, skeleton: "vec4" },
+            },
+          ],
         },
       };
       const plain = await acquireGpu();
@@ -725,7 +789,7 @@ describe.skipIf(!GPU_AVAILABLE)(
       try {
         // k = 64 (whole vec4s) and n = 96 (the v4 store): the vec4 fill of the skeleton runs
         const testCase: ProfileCase = {
-          ...linearI8a8Case(),
+          ...linearI8a8Case(300),
           expected: () => [
             {
               prefix: "linear:v4:i8a8:",
@@ -734,6 +798,101 @@ describe.skipIf(!GPU_AVAILABLE)(
           ],
         };
         await assertRunsWithProfile(contextAs(plain, "", "", ""), injected, skeleton, testCase);
+      } finally {
+        injected.destroy();
+        plain.destroy();
+      }
+    });
+  },
+);
+
+describe.skipIf(!GPU_AVAILABLE)(
+  "the row-count rules of i8a8.linear and the w4a8 group fallback (ADR 0115 addendum decision 14, real GPU)",
+  () => {
+    // A K64 skeleton rule up to M = 256 and a K16 geometry above, neither the default
+    const small: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 64, skeleton: "vec4" };
+    const large: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 };
+    const { match: _match, ...rest } = DEFAULT_GEOMETRY_PROFILE;
+    const rules: GeometryProfile = {
+      ...rest,
+      id: "i8a8-rules",
+      i8a8: {
+        ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+        linear: [
+          { maxRows: 256, geometry: small },
+          { maxRows: Number.POSITIVE_INFINITY, geometry: large },
+        ],
+      },
+    };
+    const keyPart = (geometry: I8a8Geometry): string => i8a8GeometryKeyPart(geometry, true);
+    // The v4 store, the emulated dot product (the dp4a canary's verdict stays out of the keys)
+    const expectedKey = (
+      geometry: I8a8Geometry,
+      weights: A8Weights,
+      vecFill: boolean,
+    ): ExpectedKey => ({
+      prefix: linearI8a8Key(
+        true,
+        false,
+        geometry,
+        weights.storage,
+        weights.storage === "i4" ? weights.groupSize : undefined,
+        vecFill,
+      ),
+      parts: [],
+    });
+
+    it("an i8 linear at M = 256 runs the rule ≤ 256 (the skeleton's :fill16), at M = 257 the next rule, each with the default profile's words", async () => {
+      const plain = await acquireGpu();
+      const injected = await acquireGpu({ geometryProfile: rules });
+      try {
+        const baseline = contextAs(plain, "", "", "");
+        const cases: readonly ProfileCase[] = [
+          { ...linearI8a8Case(256), expected: () => [expectedKey(small, { storage: "i8" }, true)] },
+          {
+            ...linearI8a8Case(257),
+            expected: () => [expectedKey(large, { storage: "i8" }, false)],
+          },
+        ];
+        for (const testCase of cases) {
+          await assertRunsWithProfile(baseline, injected, rules, testCase);
+        }
+        assert(
+          keyPart(small) !== keyPart(large) &&
+            keyPart(small) !== keyPart(defaultI8a8Geometry("linear")),
+          "the two rules' geometries do not tell the buckets apart",
+        );
+      } finally {
+        injected.destroy();
+        plain.destroy();
+      }
+    });
+
+    it("w4a8 at group 32 under the K64 rule runs the default geometry, and at group 64 the K64 rule without :fill16, each with the default profile's words", async () => {
+      const plain = await acquireGpu();
+      const injected = await acquireGpu({ geometryProfile: rules });
+      try {
+        const baseline = contextAs(plain, "", "", "");
+        const group32 = { storage: "i4", groupSize: 32 } as const;
+        const group64 = { storage: "i4", groupSize: 64 } as const;
+        const cases: readonly ProfileCase[] = [
+          {
+            ...linearI8a8Case(256, group32),
+            expected: () => [expectedKey(defaultI8a8Geometry("linear"), group32, false)],
+          },
+          {
+            ...linearI8a8Case(256, group64),
+            expected: () => [expectedKey(small, group64, false)],
+          },
+        ];
+        for (const testCase of cases) {
+          await assertRunsWithProfile(baseline, injected, rules, testCase);
+          const run = await runCase(injected, testCase);
+          assert(
+            run.keys.every((key) => !key.includes(":fill16")),
+            `${testCase.name}: an i4 linear ran a vec4-fill key (${run.keys.join(" / ")})`,
+          );
+        }
       } finally {
         injected.destroy();
         plain.destroy();

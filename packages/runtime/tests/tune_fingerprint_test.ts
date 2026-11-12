@@ -72,7 +72,7 @@ import {
   quickI8a8Candidates,
 } from "../src/tune/geometries.ts";
 import type { GemmGeometry } from "../src/kernels/gemm-geometry.ts";
-import type { I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
+import { defaultI8a8Geometry, type I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import { linearI8a8Key, linearI8a8UsesVec4, linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
 import { candidatesFor, type CasePlan, casePlan } from "../src/tune/harness.ts";
 
@@ -153,9 +153,16 @@ const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, Geometr
     ...base,
     conv2d: { ...conv, rows32: another(conv.rows32, conv2d) },
   });
-  variants.set("i8a8.linear", {
-    ...base,
-    i8a8: { ...integer, linear: another(integer.linear, i8a8) },
+  integer.linear.forEach((rule, index) => {
+    variants.set(`i8a8.linear[${index}]`, {
+      ...base,
+      i8a8: {
+        ...integer,
+        linear: integer.linear.map((entry, at) =>
+          at === index ? { ...entry, geometry: another(rule.geometry, i8a8) } : entry,
+        ),
+      },
+    });
   });
   variants.set("i8a8.attentionQk", {
     ...base,
@@ -691,15 +698,18 @@ describe("canonicalJson", () => {
 });
 
 describe("the vec4 skeleton of an i8a8 geometry in the fingerprint and the sweep's dispatch (perf-ledger K-85)", () => {
-  const word: I8a8Geometry = { ...DEFAULT_GEOMETRY_PROFILE.i8a8.linear, tileK: 32 };
+  const word: I8a8Geometry = { ...defaultI8a8Geometry("linear"), tileK: 32 };
   const skeleton: I8a8Geometry = { ...word, skeleton: "vec4" };
+  const everyRow = (geometry: I8a8Geometry): GeometryProfile["i8a8"]["linear"] => [
+    { maxRows: Number.POSITIVE_INFINITY, geometry },
+  ];
 
   it("a table whose i8a8.linear carries the skeleton fingerprints differently from the same geometry without it", () => {
     const withWord = {
       ...DEFAULT_GEOMETRY_PROFILE,
-      i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, linear: word },
+      i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, linear: everyRow(word) },
     };
-    const withSkeleton = { ...withWord, i8a8: { ...withWord.i8a8, linear: skeleton } };
+    const withSkeleton = { ...withWord, i8a8: { ...withWord.i8a8, linear: everyRow(skeleton) } };
     assertNotEquals(geometryProfileKernelsIds(withSkeleton), geometryProfileKernelsIds(withWord));
     assertNotEquals(
       geometryProfileKernelsIds(withWord),
@@ -946,13 +956,13 @@ describe("the matching keys are taken per op family (ADR 0117 addendum 2026-11-1
     "attention.pv": "attention",
     "conv2d.rows64": "conv2d",
     "conv2d.rows32": "conv2d",
-    "i8a8.linear": "i8a8-linear",
     "i8a8.attentionQk": "i8a8-attention",
     "i8a8.attentionPv": "i8a8-attention",
     "i8a8.conv3d": "i8a8-conv3d",
   };
   const familyOfField = (field: string): GeometryProfileFamily => {
     if (field.startsWith("gemmRows[")) return "gemm";
+    if (field.startsWith("i8a8.linear[")) return "i8a8-linear";
     const family = FIELD_FAMILIES[field];
     if (family === undefined) throw new Error(`no family for ${field}`);
     return family;

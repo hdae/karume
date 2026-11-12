@@ -20,9 +20,10 @@
  * means a different key, and the device-lifetime pipeline cache cannot mix them up.
  *
  * The scope (the paths that read the profile) is only the row-count buckets of matmul / bmm /
- * linear, ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, the i8a8 linear / fused
- * attention ①QK / ③PV, and the w8a8 implicit GEMM of conv3d (one geometry for every conv3d shape —
- * ADR 0115 addendum 2026-10-26). The row-count bucket table is shared by the 3 paths matmul / bmm /
+ * linear, ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, the i8a8 linear (row-count
+ * buckets of its own — ADR 0115 addendum decision 14) / fused attention ①QK / ③PV, and the w8a8
+ * implicit GEMM of conv3d (one geometry for every conv3d shape — ADR 0115 addendum 2026-10-26). The
+ * `gemmRows` bucket table is shared by the 3 paths matmul / bmm /
  * linear (the same GEMM skeleton — the same meaning of geometry and the same K reduction order; only
  * the B-side fill differs). The sweep has cases for all 3 paths, and the generator adopts only
  * geometries that are faster on all of them (the `profile` command of tools/geometry-sweep (removed
@@ -57,6 +58,14 @@ import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
  * row count hits some rule).
  */
 export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGeometry };
+
+/**
+ * One row-count bucket rule of the i8a8 linear (`i8a8.linear` — ADR 0115 addendum decision 14): the
+ * same form and the same rule order as {@link GemmRowsRule} — the first rule with `rows <= maxRows`
+ * is used ({@link i8a8LinearGeometry}), strictly ascending `maxRows`, the last
+ * `Number.POSITIVE_INFINITY`.
+ */
+export type I8a8RowsRule = { readonly maxRows: number; readonly geometry: I8a8Geometry };
 
 /**
  * The op families of the geometry sweep: the unit a table's evidence stands on, and the unit its
@@ -172,7 +181,12 @@ export type GeometryProfile = {
    */
   readonly conv2d: { readonly rows64: GemmGeometry; readonly rows32: GemmGeometry };
   readonly i8a8: {
-    readonly linear: I8a8Geometry;
+    /**
+     * The i8a8 linear (w8a8 / w4a8 — `linearCompute: "a8"`) by buckets of the row count M (ADR 0115
+     * addendum decision 14). The default holds one rule; a generated table holds one rule per bucket
+     * of the generator's bounds.
+     */
+    readonly linear: readonly I8a8RowsRule[];
     readonly attentionQk: I8a8Geometry;
     readonly attentionPv: I8a8Geometry;
     /**
@@ -257,7 +271,7 @@ export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
     rows32: gemmMTileGeometry(GEMM_MTILE_SMALL),
   },
   i8a8: {
-    linear: defaultI8a8Geometry("linear"),
+    linear: [{ maxRows: Number.POSITIVE_INFINITY, geometry: defaultI8a8Geometry("linear") }],
     attentionQk: defaultI8a8Geometry("attention_qk"),
     attentionPv: defaultI8a8Geometry("attention_pv"),
     conv3d: defaultI8a8Geometry("conv3d"),
@@ -265,36 +279,60 @@ export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
 };
 
 /**
- * Guard on the row-count bucket rules. **Rules not in ascending order leave later rules dead, and
- * rules whose last entry is not Infinity leave no rule for large M** — both silently turn the
- * selection into something else, so fail loudly.
+ * Guard on the row-count bucket rules of one field (`field` — `gemmRows` or `i8a8.linear`, the one
+ * rule-order check both share; `assertGeometry` checks each rule's geometry). **Rules not in
+ * ascending order leave later rules dead, and rules whose last entry is not Infinity leave no rule
+ * for large M** — both silently turn the selection into something else, so fail loudly.
  */
-const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): void => {
+const assertRowsRules = <Geometry>(
+  rules: readonly { readonly maxRows: number; readonly geometry: Geometry }[],
+  field: string,
+  where: string,
+  assertGeometry: (geometry: Geometry, where: string) => void,
+): void => {
+  // A table read with JSON.parse and a cast can hold the field in another shape (a single
+  // geometry); fail with the guard's error rather than a TypeError
+  if (!Array.isArray(rules)) throw new CodegenError(`${where}: ${field} is not an array`);
   if (rules.length === 0) {
-    throw new CodegenError(`${where}: gemmRows is empty (no geometry matches any row count)`);
+    throw new CodegenError(`${where}: ${field} is empty (no geometry matches any row count)`);
   }
   rules.forEach((rule, index) => {
     const last = index === rules.length - 1;
     if (last) {
       if (rule.maxRows !== Number.POSITIVE_INFINITY) {
         throw new CodegenError(
-          `${where}: the last maxRows of gemmRows must be Infinity (${rule.maxRows} — no rule covers a larger M)`,
+          `${where}: the last maxRows of ${field} must be Infinity (${rule.maxRows} — no rule covers a larger M)`,
         );
       }
     } else {
-      assertU32Params(`${where}: gemmRows[${index}]`, { maxRows: rule.maxRows });
+      assertU32Params(`${where}: ${field}[${index}]`, { maxRows: rule.maxRows });
       const next = rules[index + 1].maxRows;
       if (!(rule.maxRows < next)) {
         throw new CodegenError(
-          `${where}: maxRows of gemmRows is not strictly increasing ([${index}] ${rule.maxRows} → [${
+          `${where}: maxRows of ${field} is not strictly increasing ([${index}] ${rule.maxRows} → [${
             index + 1
           }] ${next} — no row count is left for the later rule)`,
         );
       }
     }
-    assertGemmGeometry(rule.geometry, `${where}: gemmRows[${index}]`);
+    assertGeometry(rule.geometry, `${where}: ${field}[${index}]`);
   });
 };
+
+const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): void =>
+  assertRowsRules(rules, "gemmRows", where, assertGemmGeometry);
+
+const assertI8a8LinearRules = (rules: readonly I8a8RowsRule[], where: string): void =>
+  assertRowsRules(rules, "i8a8.linear", where, assertI8a8Geometry);
+
+/**
+ * The rule of a checked list that covers `rows` (the first with `rows <= maxRows` — a checked list
+ * ends in Infinity, so a u32 row count always hits one).
+ */
+const ruleFor = <Rule extends { readonly maxRows: number }>(
+  rules: readonly Rule[],
+  rows: number,
+): Rule => rules.find((rule) => rows <= rule.maxRows) ?? rules[rules.length - 1];
 
 /**
  * Guard that a value is an object whose fields can be read (rejects arrays, null and primitives
@@ -445,6 +483,30 @@ const i8a8GeometryOf = (value: unknown, where: string, path: string): I8a8Geomet
 };
 
 /**
+ * The row-count rules of one field (`gemmRows` / `i8a8.linear`) read from an unknown value: an
+ * array without holes of `{ maxRows: number, geometry }` (`geometryOf` reads each geometry at its
+ * path). The order and the trailing Infinity are {@link assertRowsRules}' job.
+ */
+const rulesOf = <Geometry>(
+  value: unknown,
+  where: string,
+  field: string,
+  geometryOf: (value: unknown, path: string) => Geometry,
+): { readonly maxRows: number; readonly geometry: Geometry }[] => {
+  if (!Array.isArray(value)) throw new CodegenError(`${where}: ${field} is not an array`);
+  return denseEntriesOf(value, where, field).map((entry, index) => {
+    const rule = recordOf(entry, where, `${field}[${index}]`);
+    if (typeof rule.maxRows !== "number") {
+      throw new CodegenError(`${where}: maxRows of ${field}[${index}] is not a number`);
+    }
+    return {
+      maxRows: rule.maxRows,
+      geometry: geometryOf(rule.geometry, `${field}[${index}].geometry`),
+    };
+  });
+};
+
+/**
  * The shape of `provenance` (field types only). Matching its content is the job of
  * `geometryProfileMismatch` in `@karume/runtime/tune`, and the runtime does not read it — it is
  * checked here because a value that passes the guard is typed as {@link GeometryProfile}, so a value
@@ -556,20 +618,11 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
       );
     }
   }
-  if (!Array.isArray(fields.gemmRows)) {
-    throw new CodegenError(`${where}: gemmRows is not an array`);
-  }
-  const rows = denseEntriesOf(fields.gemmRows, where, "gemmRows");
   assertGemmRowsRules(
-    rows.map((entry, index): GemmRowsRule => {
-      const rule = recordOf(entry, where, `gemmRows[${index}]`);
-      if (typeof rule.maxRows !== "number") {
-        throw new CodegenError(`${where}: maxRows of gemmRows[${index}] is not a number`);
-      }
-      const path = `gemmRows[${index}].geometry`;
-      const geometry = gemmGeometryOf(rule.geometry, where, path);
+    rulesOf(fields.gemmRows, where, "gemmRows", (value, path) => {
+      const geometry = gemmGeometryOf(value, where, path);
       assertGemmFieldsIn(geometry, where, path, { form: true, decode: false });
-      return { maxRows: rule.maxRows, geometry };
+      return geometry;
     }),
     where,
   );
@@ -586,8 +639,11 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
     assertGemmGeometry(geometry, `${where}: ${name}`);
   }
   const i8a8 = recordOf(fields.i8a8, where, "i8a8");
+  assertI8a8LinearRules(
+    rulesOf(i8a8.linear, where, "i8a8.linear", (value, path) => i8a8GeometryOf(value, where, path)),
+    where,
+  );
   for (const [name, geometry] of [
-    ["i8a8.linear", i8a8.linear],
     ["i8a8.attentionQk", i8a8.attentionQk],
     ["i8a8.attentionPv", i8a8.attentionPv],
     ["i8a8.conv3d", i8a8.conv3d],
@@ -682,7 +738,7 @@ export const assertGeometryProfileWithinLimits = (
   gemm("attention.pv", profile.attention.pv);
   gemm("conv2d.rows64", profile.conv2d.rows64);
   gemm("conv2d.rows32", profile.conv2d.rows32);
-  i8a8("i8a8.linear", profile.i8a8.linear);
+  profile.i8a8.linear.forEach((rule, index) => i8a8(`i8a8.linear[${index}]`, rule.geometry));
   i8a8("i8a8.attentionQk", profile.i8a8.attentionQk);
   i8a8("i8a8.attentionPv", profile.i8a8.attentionPv);
   i8a8("i8a8.conv3d", profile.i8a8.conv3d);
@@ -795,9 +851,22 @@ export const selectGeometryProfile = (
 export const gemmRowsGeometry = (profile: GeometryProfile, rows: number): GemmGeometry => {
   assertU32Params("Geometry selection", { "row count M": rows });
   assertGemmRowsRules(profile.gemmRows, `Geometry profile '${profile.id}'`);
-  const rules = profile.gemmRows;
-  // Rules that passed the guard end with Infinity, so a u32 row count always hits one of them.
-  return (rules.find((rule) => rows <= rule.maxRows) ?? rules[rules.length - 1]).geometry;
+  return ruleFor(profile.gemmRows, rows).geometry;
+};
+
+/**
+ * Looks up the i8a8 linear's geometry from the row count M (`i8a8.linear` — ADR 0115 addendum
+ * decision 14), by the same rule order as {@link gemmRowsGeometry}.
+ *
+ * MUST: one call per linear, and its return value (after the w4a8 fallback of
+ * src/runtime/recipe-builders/linear.ts) feeds the key, the WGSL, the dispatch and
+ * `linearI8a8UsesVecFill` alike — the sweep's case plan and the fingerprint select by the case's M
+ * through this same function.
+ */
+export const i8a8LinearGeometry = (profile: GeometryProfile, rows: number): I8a8Geometry => {
+  assertU32Params("Geometry selection", { "row count M": rows });
+  assertI8a8LinearRules(profile.i8a8.linear, `Geometry profile '${profile.id}'`);
+  return ruleFor(profile.i8a8.linear, rows).geometry;
 };
 
 /**

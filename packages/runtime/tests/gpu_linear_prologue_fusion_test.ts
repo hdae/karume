@@ -26,6 +26,7 @@ import {
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
+import { i8a8LinearGeometry } from "../src/kernels/geometry-profile.ts";
 import {
   quantizeRowsGeometry,
   quantizeRowsKey,
@@ -80,7 +81,11 @@ test.skipIf(!GPU_AVAILABLE)(
           try {
             await fused.run({ x });
             await primitive.run({ x });
-            const gemm = linearI8a8Key(linearI8a8UsesVec4(n), dot === "dp4a", profile.i8a8.linear);
+            const gemm = linearI8a8Key(
+              linearI8a8UsesVec4(n),
+              dot === "dp4a",
+              i8a8LinearGeometry(profile, rows),
+            );
             assertEquals(
               requireCensus(fused.diagnostics().lastRunPipelines, label)
                 .map((row) => row.key)

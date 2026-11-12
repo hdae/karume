@@ -981,7 +981,8 @@ describe("deriveProfile: consistency with the runtime's default profile", () => 
       "attention.pv": profile.attention.pv,
       "conv2d.rows64": profile.conv2d.rows64,
       "conv2d.rows32": profile.conv2d.rows32,
-      "i8a8.linear": profile.i8a8.linear,
+      // The default table holds one i8a8.linear rule
+      "i8a8.linear": profile.i8a8.linear[0].geometry,
       "i8a8.attentionQk": profile.i8a8.attentionQk,
       "i8a8.attentionPv": profile.i8a8.attentionPv,
       "i8a8.conv3d": profile.i8a8.conv3d,
@@ -1417,7 +1418,7 @@ describe("buildGeometryProfile", () => {
       ["attention.pv", profile.attention.pv],
       ["conv2d.rows64", profile.conv2d.rows64],
       ["conv2d.rows32", profile.conv2d.rows32],
-      ["i8a8.linear", profile.i8a8.linear],
+      ["i8a8.linear", profile.i8a8.linear[0].geometry],
       ["i8a8.attentionQk", profile.i8a8.attentionQk],
       ["i8a8.attentionPv", profile.i8a8.attentionPv],
       ["i8a8.conv3d", profile.i8a8.conv3d],

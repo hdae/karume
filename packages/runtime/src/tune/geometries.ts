@@ -262,8 +262,9 @@ export const quickPlusConv2dCandidates = (): GemmCandidate[] =>
   ]);
 
 /**
- * The i8a8 set of `quick+` = quick ∪ the four `i8a8` fields of the registered profiles
- * (`profiles` — the embedded tables unless a test passes its own list).
+ * The i8a8 set of `quick+` = quick ∪ the `i8a8` fields of the registered profiles (every rule of
+ * `i8a8.linear`, then ①QK, ③PV and conv3d — `profiles` is the embedded tables unless a test passes
+ * its own list).
  */
 export const quickPlusI8a8Candidates = (
   profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
@@ -271,7 +272,7 @@ export const quickPlusI8a8Candidates = (
   unique([
     ...quickI8a8Candidates(),
     ...profiles.flatMap((profile) => [
-      i8a8Candidate(profile.i8a8.linear),
+      ...profile.i8a8.linear.map((rule) => i8a8Candidate(rule.geometry)),
       i8a8Candidate(profile.i8a8.attentionQk),
       i8a8Candidate(profile.i8a8.attentionPv),
       i8a8Candidate(profile.i8a8.conv3d),
@@ -287,7 +288,7 @@ const DEFAULT_WORKGROUP_STORAGE = 16384;
 
 /**
  * The i8a8 set of `k85` (perf-ledger K-85 — the vec4 skeleton of the i8a8 linear): the
- * `i8a8.linear` geometry of every registered profile (`profiles` — the table an adapter runs today,
+ * geometry of every `i8a8.linear` rule of every registered profile (`profiles` — the table an adapter runs today,
  * measured in the same record) and the grid regM ∈ {8, 12, 16} × regN ∈ {4, 8} × wgX ∈ {8, 16} ×
  * wgY ∈ {4, 8, 16} × tileK ∈ {16, 32, 64}, each without and then with the skeleton, filtered by the
  * runtime's check and {@link DEFAULT_WORKGROUP_STORAGE}. The sweep puts the default geometry at the
@@ -319,7 +320,12 @@ export const k85I8a8Candidates = (
       }
     }
   }
-  return unique([...profiles.map((profile) => i8a8Candidate(profile.i8a8.linear)), ...grid]);
+  return unique([
+    ...profiles.flatMap((profile) =>
+      profile.i8a8.linear.map((rule) => i8a8Candidate(rule.geometry)),
+    ),
+    ...grid,
+  ]);
 };
 
 /** The skeleton forms of the f32 GEMM (perf-ledger K-88), in the order the `k88` set measures them. */

@@ -18,6 +18,7 @@ import {
   type GeometryProfile,
   type GeometryProfileFamily,
   type GeometryProfileFamilyProvenance,
+  type I8a8RowsRule,
 } from "../kernels/geometry-profile.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 
@@ -167,11 +168,15 @@ const readMatch = (value: unknown, path: string): Match => {
 };
 
 /**
- * `gemmRows`. The trailing `maxRows` is Infinity (`1e999` in JSON — `JSON.parse` reads it as
- * Infinity). The range and ascending order of the other entries are {@link assertGeometryProfile}'s
- * job.
+ * The row-count rules of `gemmRows` or `i8a8.linear` (`readGeometry` reads each rule's geometry).
+ * The trailing `maxRows` is Infinity (`1e999` in JSON — `JSON.parse` reads it as Infinity). The
+ * range and ascending order of the other entries are {@link assertGeometryProfile}'s job.
  */
-const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
+const readRowsRules = <Geometry>(
+  value: unknown,
+  path: string,
+  readGeometry: (value: unknown, path: string) => Geometry,
+): { readonly maxRows: number; readonly geometry: Geometry }[] => {
   if (!Array.isArray(value)) return fail(path, `is not an array (${show(value)})`);
   const rules: readonly unknown[] = value;
   return rules.map((entry, index) => {
@@ -195,12 +200,17 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
         `is not Infinity (${maxRows} — the last rule is 1e999, which covers every row count)`,
       );
     }
-    return {
-      maxRows,
-      geometry: readGemmGeometry(fields.geometry, child(where, "geometry"), ["form"]),
-    };
+    return { maxRows, geometry: readGeometry(fields.geometry, child(where, "geometry")) };
   });
 };
+
+/** `gemmRows` (the f32 GEMM geometries may carry the skeleton form). */
+const readGemmRows = (value: unknown, path: string): GemmRowsRule[] =>
+  readRowsRules(value, path, (geometry, at) => readGemmGeometry(geometry, at, ["form"]));
+
+/** `i8a8.linear` (ADR 0115 addendum decision 14). */
+const readI8a8Linear = (value: unknown, path: string): I8a8RowsRule[] =>
+  readRowsRules(value, path, readI8a8Geometry);
 
 /** `attentionOnline` (`{ keyWords: "tiled" }` — the only form a table chooses). */
 const readAttentionOnline = (
@@ -303,8 +313,9 @@ const readAttentionBench = (
  *
  * Checks: it parses as JSON; the types of all fields (the `id` and `provenance` fields are strings,
  * geometries have integer fields only); unknown fields are rejected at every level; the trailing
- * `maxRows` of `gemmRows` is Infinity (the restoration of `1e999` — a trailing `null` is named as
- * a lost Infinity); finally `assertGeometryProfile`, the same check the runtime runs at injection.
+ * `maxRows` of `gemmRows` and of `i8a8.linear` is Infinity (the restoration of `1e999` — a trailing
+ * `null` is named as a lost Infinity); finally `assertGeometryProfile`, the same check the runtime
+ * runs at injection.
  */
 export const parseGeometryProfileJson = (text: string): GeometryProfile => {
   let parsed: unknown;
@@ -340,7 +351,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
       rows32: readGemmGeometry(conv2d.rows32, "conv2d.rows32", ["form", "decode"]),
     },
     i8a8: {
-      linear: readI8a8Geometry(i8a8.linear, "i8a8.linear"),
+      linear: readI8a8Linear(i8a8.linear, "i8a8.linear"),
       attentionQk: readI8a8Geometry(i8a8.attentionQk, "i8a8.attentionQk"),
       attentionPv: readI8a8Geometry(i8a8.attentionPv, "i8a8.attentionPv"),
       conv3d: readI8a8Geometry(i8a8.conv3d, "i8a8.conv3d"),

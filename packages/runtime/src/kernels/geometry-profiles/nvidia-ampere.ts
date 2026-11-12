@@ -161,6 +161,9 @@
  * Provenance converted on 2026-11-12 to one entry per op family (ADR 0117 addendum 2026-11-12), no field
  * value changed: both records have rows of every family, so every family's entry names both, and its
  * `kernels` / `caseSet` are the current runtime's keys over the family's cases.
+ *
+ * Converted on 2026-11-12 to the row-count rules of `i8a8.linear` (ADR 0115 addendum decision 14), no
+ * value changed: the field holds one rule up to Infinity with the geometry it held.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -185,7 +188,12 @@ export const NVIDIA_AMPERE: GeometryProfile = {
     rows32: { regM: 8, regN: 8, wgX: 16, wgY: 4 },
   },
   i8a8: {
-    linear: { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 },
+    linear: [
+      {
+        maxRows: Number.POSITIVE_INFINITY,
+        geometry: { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 },
+      },
+    ],
     attentionQk: { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 },
     attentionPv: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 16 },
     conv3d: { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 },

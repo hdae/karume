@@ -166,6 +166,7 @@ export type {
   GeometryProfile,
   GeometryProfileFamily,
   GeometryProfileFamilyProvenance,
+  I8a8RowsRule,
 } from "./src/kernels/geometry-profile.ts";
 export { BUILTIN_GEOMETRY_PROFILES } from "./src/kernels/geometry-profiles/index.ts";
 export type { GemmGeometry } from "./src/kernels/gemm-geometry.ts";

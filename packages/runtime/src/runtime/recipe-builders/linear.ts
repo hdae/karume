@@ -81,9 +81,18 @@ import {
 } from "../linear-route.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
-import { i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
+import {
+  defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8TileM,
+  i8a8TileN,
+} from "../../kernels/i8a8-geometry.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
-import { gemmRowsGeometry } from "../../kernels/geometry-profile.ts";
+import {
+  gemmRowsGeometry,
+  type GeometryProfile,
+  i8a8LinearGeometry,
+} from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../../kernels/matmul.ts";
 import { numel } from "../../ops.ts";
@@ -687,6 +696,31 @@ const quantizeStep = (
 };
 
 /**
+ * The geometry of the i8a8 path's GEMM (②) for a linear of `m` rows: the profile's `i8a8.linear`
+ * rule for `m` (`i8a8LinearGeometry`), or — for i4 resident weights whose group length is not a
+ * multiple of that rule's K tile — the default geometry `defaultI8a8Geometry("linear")`, whose K
+ * tile 16 divides every i4 group length (a power of two of at least 16). The w4a8 kernel refuses a
+ * K tile that crosses a group boundary (`assertI8a8GroupGeometry`), and a profile field applies to
+ * i8 and i4 weights alike, so a K64 rule would otherwise make w4a8 at group 32 unbuildable (ADR 0115
+ * addendum decision 14).
+ *
+ * MUST: called once per linear, and the one value it returns feeds the key, the WGSL, the dispatch
+ * grid and `linearI8a8UsesVecFill` — a second lookup could disagree with the first and build a grid
+ * that does not match the WGSL.
+ */
+export const linearI8a8Geometry = (
+  profile: GeometryProfile,
+  m: number,
+  weightStorage: WeightStorage,
+  groupSize: number | undefined,
+): I8a8Geometry => {
+  const selected = i8a8LinearGeometry(profile, m);
+  return weightStorage === "i4" && groupSize !== undefined && groupSize % selected.tileK !== 0
+    ? defaultI8a8Geometry("linear")
+    : selected;
+};
+
+/**
  * linear's **w8a8 / w4a8 variant** (opt-in — {@link SessionOptions.linearCompute}).
  * **One node = two dispatches** (the same "one node in several dispatches" treatment as fused
  * attention):
@@ -759,11 +793,12 @@ const buildLinearI8a8 = async (
     workgroups: [gridStrideWorkgroups(m, quantize.rowsPerGroup, limit), 1, 1],
   });
 
-  // ② The integer dot-product GEMM. The tile geometry is the per-op field of the adapter's profile
-  // (src/kernels/geometry-profile.ts) — it is part of the key, so "same key → byte-identical WGSL"
-  // holds.
+  // ② The integer dot-product GEMM. The tile geometry is the adapter's profile's `i8a8.linear` rule
+  // for m (src/kernels/geometry-profile.ts), with the w4a8 group fallback — taken once and passed
+  // unchanged to key, WGSL, dispatch and the fill form; it is part of the key, so "same key →
+  // byte-identical WGSL" holds.
   const v4 = linearI8a8UsesVec4(n);
-  const geometry = face.state.geometryProfile.i8a8.linear;
+  const geometry = linearI8a8Geometry(face.state.geometryProfile, m, weightStorage, groupSize);
   const dp4a = face.state.linearI8a8Dot === "dp4a";
   // MUST: look up both key and wgsl with **the actual resident form** (`weightStorage`). Fixing it
   // to i8 would hand out i4's group scales as per-channel scales, a silent wrong value (the numeric

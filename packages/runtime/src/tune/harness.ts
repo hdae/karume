@@ -79,6 +79,7 @@ import {
   i8a8TileM,
   i8a8TileN,
 } from "../kernels/i8a8-geometry.ts";
+import { DEFAULT_GEOMETRY_PROFILE, i8a8LinearGeometry } from "../kernels/geometry-profile.ts";
 import { linearKey, linearParams, linearWgsl } from "../kernels/linear.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../kernels/matmul.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
@@ -476,9 +477,12 @@ const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): Ca
     ],
     prelude: [],
     output: "out",
-    // The sweep's default = the default profile's i8a8 linear geometry (the ratio baseline)
-    defaultCandidate: i8a8Candidate(defaultI8a8Geometry("linear")),
+    // The sweep's default = the default profile's i8a8 linear rule for the case's M (the ratio
+    // baseline — selected by the same function as the builder, `i8a8LinearGeometry`)
+    defaultCandidate: i8a8Candidate(i8a8LinearGeometry(DEFAULT_GEOMETRY_PROFILE, m)),
     launch: (candidate) => {
+      // One geometry for the fill form, the key, the WGSL and the grid (i8 weights: the builder's
+      // w4a8 group fallback never applies)
       const geometry = i8a8Of(candidate, sweepCase.id);
       // The fill form of the vec4 skeleton, decided as linear.ts decides it (a geometry without the
       // skeleton: the word fill, so its key and WGSL do not move)

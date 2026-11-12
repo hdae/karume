@@ -109,7 +109,16 @@ export const k85TableGeometry = (
   profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
 ): I8a8Geometry | undefined => {
   const named = profiles.find((profile) => profile.id === report.geometryProfile);
-  if (named !== undefined) return named.i8a8.linear;
+  if (named !== undefined) {
+    // One geometry per table: the summary has no row count to pick a rule by
+    const [rule, ...rest] = named.i8a8.linear;
+    if (rule === undefined || rest.length > 0) {
+      throw new Error(
+        `Table '${named.id}' has ${named.i8a8.linear.length} i8a8.linear rules (the K-85 summary reads one)`,
+      );
+    }
+    return rule.geometry;
+  }
   const params = report.rows.find((row) => row.isDefault)?.geometryParams;
   return params !== undefined && isI8a8(params) ? params : undefined;
 };

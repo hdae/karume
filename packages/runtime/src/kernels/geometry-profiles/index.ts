@@ -55,7 +55,11 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
       rows32: geometry(profile.conv2d.rows32),
     }),
     i8a8: Object.freeze({
-      linear: geometry(profile.i8a8.linear),
+      linear: Object.freeze(
+        profile.i8a8.linear.map((rule) =>
+          Object.freeze({ maxRows: rule.maxRows, geometry: geometry(rule.geometry) }),
+        ),
+      ),
       attentionQk: geometry(profile.i8a8.attentionQk),
       attentionPv: geometry(profile.i8a8.attentionPv),
       conv3d: geometry(profile.i8a8.conv3d),
