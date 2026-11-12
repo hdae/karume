@@ -9,9 +9,9 @@
   (2026-10-01); the `tools/gpu-lab` tool of addendum 7 by [0127](0127-node-dawn-toolchain.md)
   decision 5 (2026-10-16); the Consequences' deferral of "drop a8 from the default quant on Metal" is
   taken up by [0128](0128-default-preset-original-weights.md) decision 5 (accepted 2026-10-29), which
-  settles it. Re-graded 2026-10-18: decision 4's regeneration command and `--check`
-  to SHOULD. Decisions 1 and 6's single `i8a8.linear` geometry for every row count by addendum
-  decision 14 (2026-11-12).
+  settles it; decisions 1 and 6's single `i8a8.linear` geometry for every row count by addendum
+  decision 14 (2026-11-12). Re-graded 2026-10-18: decision 4's regeneration command and `--check`
+  to SHOULD.
 - Date: 2026-09-27
 - Related: [0022](0022-gemm-register-blocking.md) (GEMM skeleton; decision 3's MUST "the reduction
   order is a numerical contract"; the addendum's MUSTs "no run-time autotuning" and "a change of the
@@ -621,7 +621,9 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   waits for the row-count buckets of `i8a8.linear` (the second slice of K-85; ADR
   [0116](0116-geometry-profile-row-buckets.md)). A K64 geometry in `i8a8.linear` would be refused
   at generation for w4a8 at group 32 (`groupSize % tileK`); no default preset runs w4a8 on the a8
-  path, but that resolution belongs to the same slice. The vec4 fills of ①QK / ③PV and conv3d, and
+  path, but that resolution belongs to the same slice. (Updated 2026-11-12: `i8a8.linear` is row-count rules,
+  and w4a8 whose group length the rule's K tile does not divide runs the default geometry — addendum decision 14.)
+  The vec4 fills of ①QK / ③PV and conv3d, and
   the table derivation on both GPUs (a Chrome sweep on the RTX 5070 Ti, a Node sweep on the RTX
   3080 Ti, then the sha256 re-checks of decision 8), are not done.
 - **Measured on the development GPU (2026-11-11, an evaluation, not adoption evidence).** The k85 set
