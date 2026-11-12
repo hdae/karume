@@ -226,9 +226,10 @@ measurements in `docs/research/`.
   count; the type `I8a8RowsRule` is exported. `acquireGpu({ geometryProfile })` and `parseGeometryProfileJson`
   refuse a table that holds a single geometry there. Generated tables hold the three buckets ≤ 256 / 257–512 / > 512.
   For i4 resident weights whose group length is not a multiple of the selected rule's K tile, the w4a8 linear runs the
-  default geometry. The `i8a8-linear` family's cases and bounds changed, so a saved table's `i8a8-linear` entry
-  mismatches and that family's records are refused: sweep that family again and derive with the stored table as
-  `base` (ADR 0115 addendum decision 14).
+  default geometry. A table saved before this change holds a single geometry there and cannot be read back
+  (`parseGeometryProfileJson` refuses the old shape, with no reader for it): sweep again. From then on, a change to
+  one family's cases (as the `i8a8-linear` family's cases and bounds changed here) is restored by a sweep of that
+  family derived with the stored table as `base` (ADR 0115 addendum decision 14).
 - `@karume/runtime` and `@karume/runtime/tune`: a geometry profile's provenance and matching keys are per op family
   (`gemm` — linear / matmul / bmm —, `attention`, `conv2d`, `i8a8-linear`, `i8a8-attention`, `i8a8-conv3d`).
   `provenance` holds `adapter` and `families`, one entry per family its records have rows of (`sweep`, `sha256`,
